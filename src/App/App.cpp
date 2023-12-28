@@ -70,10 +70,7 @@ void App::updateUI()
 
 	ImGui::Begin("ft_vox");
 
-	ImGui::Text("Hello, world!");
-	if (ImGui::Button("Button")) {
-		std::cout << "Button pressed" << std::endl;
-	}
+	ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
 
 	ImGui::End();
 }
