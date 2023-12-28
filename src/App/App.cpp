@@ -10,7 +10,7 @@ App::App()
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-	this->window = glfwCreateWindow(1920, 1080, "ft_vox", nullptr, nullptr);
+	this->window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "ft_vox", nullptr, nullptr);
 	if (!this->window) {
 		glfwTerminate();
 		throw std::runtime_error("Failed to create GLFW window");
@@ -28,6 +28,8 @@ App::App()
 	ImGui_ImplOpenGL3_Init("#version 420");
 	ImGui::StyleColorsDark();
 
+	this->shader = new Shader(VERTEX_PATH, FRAGMENT_PATH);
+
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
 	std::cout << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
@@ -38,6 +40,8 @@ App::App()
 
 App::~App()
 {
+	delete this->shader;
+
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
 	ImGui::DestroyContext();
@@ -53,6 +57,8 @@ void App::run()
 
 		glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+		this->shader->use();
 
 		ImGui::Render();
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
