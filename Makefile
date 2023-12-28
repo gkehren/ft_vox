@@ -1,7 +1,7 @@
 
 # ------------------
 CXX = g++
-CXXFLAGS = -std=c++11 -Wall -Wextra -Werror
+CXXFLAGS = -std=c++11
 LDFLAGS = -lGL -lglfw
 # ==================
 
