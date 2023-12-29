@@ -7,8 +7,9 @@ Engine::Engine()
 	}
 
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
 	this->window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "ft_vox", nullptr, nullptr);
 	if (!this->window) {
@@ -17,7 +18,9 @@ Engine::Engine()
 	}
 
 	glfwMakeContextCurrent(this->window);
+	glfwSwapInterval(1); // Enable vsync
 	glfwSetWindowUserPointer(this->window, &this->camera);
+	glfwSetInputMode(this->window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 	glfwSetCursorPosCallback(this->window, mouse_callback);
 
 	if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
@@ -27,7 +30,7 @@ Engine::Engine()
 
 	ImGui::CreateContext();
 	ImGui_ImplGlfw_InitForOpenGL(this->window, true);
-	ImGui_ImplOpenGL3_Init("#version 420");
+	ImGui_ImplOpenGL3_Init("#version 410");
 	ImGui::StyleColorsDark();
 
 	this->shader = new Shader(VERTEX_PATH, FRAGMENT_PATH);

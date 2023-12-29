@@ -19,8 +19,8 @@
 
 #define WINDOW_WIDTH	1920
 #define WINDOW_HEIGHT	1080
-#define VERTEX_PATH		"/home/gkehren/ft_vox/ressources/vertex.glsl"
-#define FRAGMENT_PATH	"/home/gkehren/ft_vox/ressources/fragment.glsl"
+#define VERTEX_PATH		"/Users/gkehren/Documents/ft_vox/ressources/vertex.glsl"
+#define FRAGMENT_PATH	"/Users/gkehren/Documents/ft_vox/ressources/fragment.glsl"
 
 class Engine {
 	public:

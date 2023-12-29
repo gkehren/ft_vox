@@ -2,13 +2,13 @@
 # ------------------
 CXX = g++
 CXXFLAGS = -std=c++11
-LDFLAGS = -lGL -lglfw
+LDFLAGS = -framework OpenGL -lglfw -L/opt/homebrew/lib
 # ==================
 
 # ----- Paths -----
 SRCDIR = src
 OBJDIR = obj
-INCDIR = -I src
+INCDIR = -I src -I /opt/homebrew/include
 # ==================
 
 # ----- Colors -----
