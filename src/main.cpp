@@ -1,10 +1,10 @@
-#include "./App/App.hpp"
+#include <Engine/Engine.hpp>
 
 int main(void)
 {
 	try {
-		App app;
-		app.run();
+		Engine engine;
+		engine.run();
 	} catch (const std::exception& e) {
 		std::cerr << e.what() << std::endl;
 		return EXIT_FAILURE;

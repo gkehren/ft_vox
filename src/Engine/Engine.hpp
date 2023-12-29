@@ -10,24 +10,37 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <Shader/Shader.hpp>
+#include <Voxel/Voxel.hpp>
+#include <Renderer/Renderer.hpp>
+#include <Camera/Camera.hpp>
 
 #define WINDOW_WIDTH	1920
 #define WINDOW_HEIGHT	1080
 #define VERTEX_PATH		"/home/gkehren/ft_vox/ressources/vertex.glsl"
 #define FRAGMENT_PATH	"/home/gkehren/ft_vox/ressources/fragment.glsl"
 
-class App {
+class Engine {
 	public:
-		App();
-		~App();
+		Engine();
+		~Engine();
 		void run();
 
 	private:
 		GLFWwindow*	window;
 
+		float deltaTime;
+		float lastFrame;
+
 		Shader*		shader;
+		Renderer*	renderer;
+		Camera		camera;
+
+		std::vector<Voxel>	voxels;
 
 		void updateUI();
 };
+
+void	mouse_callback(GLFWwindow* window, double xpos, double ypos);

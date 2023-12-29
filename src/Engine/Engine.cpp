@@ -1,6 +1,6 @@
-#include "App.hpp"
+#include "Engine.hpp"
 
-App::App()
+Engine::Engine()
 {
 	if (!glfwInit()) {
 		throw std::runtime_error("Failed to initialize GLFW");
@@ -17,6 +17,8 @@ App::App()
 	}
 
 	glfwMakeContextCurrent(this->window);
+	glfwSetWindowUserPointer(this->window, &this->camera);
+	glfwSetCursorPosCallback(this->window, mouse_callback);
 
 	if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
 		glfwTerminate();
@@ -29,6 +31,10 @@ App::App()
 	ImGui::StyleColorsDark();
 
 	this->shader = new Shader(VERTEX_PATH, FRAGMENT_PATH);
+	this->renderer = new Renderer();
+	this->camera.setWindow(this->window);
+
+	glEnable(GL_DEPTH_TEST);
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -38,7 +44,7 @@ App::App()
 	std::cout << "ImGui version: " << IMGUI_VERSION << std::endl;
 }
 
-App::~App()
+Engine::~Engine()
 {
 	delete this->shader;
 
@@ -50,15 +56,29 @@ App::~App()
 	glfwTerminate();
 }
 
-void App::run()
+void Engine::run()
 {
-	while (!glfwWindowShouldClose(this->window) && !glfwGetKey(this->window, GLFW_KEY_ESCAPE)) {
+	this->voxels.push_back(Voxel(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f)));
+
+	while (!glfwWindowShouldClose(this->window)) {
 		this->updateUI();
+
+		float currentFrame = glfwGetTime();
+		this->deltaTime = currentFrame - lastFrame;
+		this->lastFrame = currentFrame;
+		this->camera.processKeyboard(deltaTime);
 
 		glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 		this->shader->use();
+
+		this->shader->setMat4("view", this->camera.getViewMatrix());
+		this->shader->setMat4("projection", this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT));
+
+		for (const Voxel& voxel : this->voxels) {
+			this->renderer->draw(voxel, *this->shader);
+		}
 
 		ImGui::Render();
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -68,7 +88,7 @@ void App::run()
 	}
 }
 
-void App::updateUI()
+void Engine::updateUI()
 {
 	ImGui_ImplOpenGL3_NewFrame();
 	ImGui_ImplGlfw_NewFrame();

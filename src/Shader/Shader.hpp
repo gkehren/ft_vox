@@ -3,6 +3,8 @@
 #include <glad/glad.h>
 #include <string>
 #include <fstream>
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 class Shader {
 	public:
@@ -11,6 +13,7 @@ class Shader {
 		void use() const;
 
 		GLuint	getId() const;
+		void	setMat4(const std::string &name, const glm::mat4 &mat) const;
 
 	private:
 		GLuint	id;
