@@ -47,6 +47,7 @@ Engine::Engine()
 Engine::~Engine()
 {
 	delete this->shader;
+	delete this->renderer;
 
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
