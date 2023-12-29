@@ -22,6 +22,7 @@ Engine::Engine()
 	glfwSetWindowUserPointer(this->window, &this->camera);
 	glfwSetInputMode(this->window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 	glfwSetCursorPosCallback(this->window, mouse_callback);
+	glfwSetKeyCallback(this->window, key_callback);
 
 	if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
 		glfwTerminate();
@@ -38,6 +39,9 @@ Engine::Engine()
 	this->camera.setWindow(this->window);
 
 	glEnable(GL_DEPTH_TEST);
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glFrontFace(GL_CCW);
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -60,16 +64,23 @@ Engine::~Engine()
 	glfwTerminate();
 }
 
-void Engine::run()
+void	Engine::run()
 {
-	this->voxels.push_back(Voxel(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f)));
+	this->width = 1;
+	this->height = 1;
+	this->depth = 1;
+
+	this->voxels.push_back(Voxel(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(1.0f)));
+	this->modelMatrices.push_back(this->voxels[0].getModelMatrix());
+
+	float fps = 0.0f;
 
 	while (!glfwWindowShouldClose(this->window)) {
-		this->updateUI();
-
 		float currentFrame = glfwGetTime();
 		this->deltaTime = currentFrame - lastFrame;
 		this->lastFrame = currentFrame;
+
+		this->updateUI();
 		this->camera.processKeyboard(deltaTime);
 
 		glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
@@ -80,9 +91,8 @@ void Engine::run()
 		this->shader->setMat4("view", this->camera.getViewMatrix());
 		this->shader->setMat4("projection", this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT));
 
-		for (const Voxel& voxel : this->voxels) {
-			this->renderer->draw(voxel, *this->shader);
-		}
+		this->cullVoxels();
+		this->renderer->draw(this->modelMatrices, *this->shader);
 
 		ImGui::Render();
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -92,7 +102,7 @@ void Engine::run()
 	}
 }
 
-void Engine::updateUI()
+void	Engine::updateUI()
 {
 	ImGui_ImplOpenGL3_NewFrame();
 	ImGui_ImplGlfw_NewFrame();
@@ -102,5 +112,63 @@ void Engine::updateUI()
 
 	ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
 
+	ImGui::InputInt("Width", &this->width);
+	ImGui::InputInt("Height", &this->height);
+	ImGui::InputInt("Depth", &this->depth);
+
+	if (ImGui::Button("Generate")) {
+		this->voxels.clear();
+		this->modelMatrices.clear();
+		for (int x = 0; x < this->width; x++) {
+			for (int y = 0; y < this->height; y++) {
+				for (int z = 0; z < this->depth; z++) {
+					this->voxels.push_back(Voxel(glm::vec3(x, y, z), glm::vec3(1.0f)));
+				}
+			}
+		}
+
+		VoxelSet voxelsSet(this->voxels.begin(), this->voxels.end());
+		this->voxels.erase(std::remove_if(this->voxels.begin(), this->voxels.end(), [&voxelsSet](const Voxel& voxel) {
+			return voxel.isSurrounded(voxelsSet);
+		}), this->voxels.end());
+	}
+
 	ImGui::End();
 }
+
+void	Engine::cullVoxels()
+{
+	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT) * this->camera.getViewMatrix();
+	std::array<glm::vec4, 6>	frustumPlanes;
+
+	frustumPlanes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0); // Gauche
+	frustumPlanes[1] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 0); // Droite
+	frustumPlanes[2] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 1); // Bas
+	frustumPlanes[3] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 1); // Haut
+	frustumPlanes[4] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 2); // Proche
+	frustumPlanes[5] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 2); // Lointain
+
+	for (auto& plane : frustumPlanes) {
+		plane /= glm::length(glm::vec3(plane));
+	}
+
+	this->modelMatrices.clear();
+	for (const auto& voxel : this->voxels) {
+		glm::vec3 center = voxel.getPosition();
+		float radius = voxel.getSize() / 2.0f;
+
+		bool inside = true;
+		for (const auto& plane : frustumPlanes) {
+			float distance = glm::dot(glm::vec3(plane), center) + plane.w;
+			if (distance < -radius) {
+				inside = false;
+				break;
+			}
+		}
+
+		if (inside) {
+			modelMatrices.push_back(voxel.getModelMatrix());
+		}
+	}
+}
+

@@ -6,6 +6,8 @@
 #include <imgui/ImGuiFileDialog.h>
 #include <imgui/imgui_impl_glfw.h>
 #include <imgui/imgui_impl_opengl3.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_access.hpp>
 
 #include <iostream>
 #include <stdexcept>
@@ -29,18 +31,24 @@ class Engine {
 		void run();
 
 	private:
-		GLFWwindow*	window;
+		GLFWwindow*				window;
 
-		float deltaTime;
-		float lastFrame;
+		float					deltaTime;
+		float					lastFrame;
 
-		Shader*		shader;
-		Renderer*	renderer;
-		Camera		camera;
+		Shader*					shader;
+		Renderer*				renderer;
+		Camera					camera;
+		std::vector<Voxel>		voxels;
+		std::vector<glm::mat4>	modelMatrices;
 
-		std::vector<Voxel>	voxels;
+		int						width;
+		int						height;
+		int						depth;
 
-		void updateUI();
+		void	updateUI();
+		void	cullVoxels();
 };
 
 void	mouse_callback(GLFWwindow* window, double xpos, double ypos);
+void	key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);

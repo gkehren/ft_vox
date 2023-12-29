@@ -15,10 +15,11 @@ class Renderer {
 		Renderer();
 		~Renderer();
 
-		void draw(const Voxel& voxel, const Shader& shader) const;
+		void draw(const std::vector<glm::mat4>& modelMatrices, const Shader& shader) const;
 
 	private:
 		GLuint	VAO;
 		GLuint	VBO;
 		GLuint	EBO;
+		GLuint	instanceVBO;
 };

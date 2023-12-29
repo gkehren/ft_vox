@@ -1,7 +1,7 @@
 
 # ------------------
 CXX = g++
-CXXFLAGS = -std=c++11
+CXXFLAGS = -std=c++17
 LDFLAGS = -framework OpenGL -lglfw -L/opt/homebrew/lib
 # ==================
 
