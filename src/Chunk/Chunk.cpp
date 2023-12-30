@@ -31,3 +31,8 @@ const glm::vec3&	Chunk::getPosition() const
 {
 	return (this->position);
 }
+
+const std::vector<Voxel>&	Chunk::getVoxels() const
+{
+	return (this->voxels);
+}

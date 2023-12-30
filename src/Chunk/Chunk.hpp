@@ -16,6 +16,7 @@ class	Chunk {
 		std::vector<glm::mat4>	getModelMatrices() const;
 
 		const glm::vec3&	getPosition() const;
+		const std::vector<Voxel>&	getVoxels() const;
 
 	private:
 		glm::vec3				position;

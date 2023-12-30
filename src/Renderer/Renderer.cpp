@@ -23,6 +23,12 @@ static unsigned int indices[] = {
 	3, 2, 6, 6, 7, 3
 };
 
+static unsigned int indicesBoundingbox[] = {
+		0, 1, 1, 2, 2, 3, 3, 0,
+		4, 5, 5, 6, 6, 7, 7, 4,
+		0, 4, 1, 5, 2, 6, 3, 7
+};
+
 Renderer::Renderer()
 {
 	glGenVertexArrays(1, &this->VAO);
@@ -137,12 +143,6 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const C
 		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f, position.z - 0.5f + CHUNK_SIZE,
 		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f + CHUNK_SIZE,
 		position.x - 0.5f, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f + CHUNK_SIZE
-	};
-
-	unsigned int indicesBoundingbox[] = {
-		0, 1, 1, 2, 2, 3, 3, 0,
-		4, 5, 5, 6, 6, 7, 7, 4,
-		0, 4, 1, 5, 2, 6, 3, 7
 	};
 
 	glBindVertexArray(this->boundingBoxVAO);
