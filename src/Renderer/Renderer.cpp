@@ -62,7 +62,7 @@ Renderer::~Renderer() {
 	glDeleteBuffers(1, &this->instanceVBO);
 }
 
-void Renderer::draw(const std::vector<glm::mat4>& modelMatrices, const Shader& shader) const {
+void	Renderer::draw(const std::vector<glm::mat4>& modelMatrices, const Shader& shader) const {
 	glBindBuffer(GL_ARRAY_BUFFER, this->instanceVBO);
 	glBufferData(GL_ARRAY_BUFFER, modelMatrices.size() * sizeof(glm::mat4), &modelMatrices[0], GL_STATIC_DRAW);
 

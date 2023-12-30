@@ -66,14 +66,21 @@ Engine::~Engine()
 
 void	Engine::run()
 {
-	this->width = 1;
+	this->frustumDistance = 160.0f;
+	this->width = 160;
 	this->height = 1;
-	this->depth = 1;
+	this->depth = 160;
 
-	this->voxels.push_back(Voxel(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(1.0f)));
-	this->modelMatrices.push_back(this->voxels[0].getModelMatrix());
-
-	float fps = 0.0f;
+	this->voxels.clear();
+	this->modelMatrices.clear();
+	for (int x = 0; x < this->width; x++) {
+		for (int y = 0; y < this->height; y++) {
+			for (int z = 0; z < this->depth; z++) {
+				this->voxels.push_back(Voxel(glm::vec3(x, y, z), glm::vec3(1.0f)));
+				this->modelMatrices.push_back(this->voxels.back().getModelMatrix());
+			}
+		}
+	}
 
 	while (!glfwWindowShouldClose(this->window)) {
 		float currentFrame = glfwGetTime();
@@ -89,7 +96,7 @@ void	Engine::run()
 		this->shader->use();
 
 		this->shader->setMat4("view", this->camera.getViewMatrix());
-		this->shader->setMat4("projection", this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT));
+		this->shader->setMat4("projection", this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT, this->frustumDistance));
 
 		this->cullVoxels();
 		this->renderer->draw(this->modelMatrices, *this->shader);
@@ -111,6 +118,10 @@ void	Engine::updateUI()
 	ImGui::Begin("ft_vox");
 
 	ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+	ImGui::Text("Cube count: %lu", this->modelMatrices.size());
+	ImGui::Text("Camera position: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
+	ImGui::Text("Camera speed: %.1f", this->camera.getMovementSpeed());
+	ImGui::InputFloat("Frustum distance", &this->frustumDistance);
 
 	ImGui::InputInt("Width", &this->width);
 	ImGui::InputInt("Height", &this->height);
@@ -123,22 +134,24 @@ void	Engine::updateUI()
 			for (int y = 0; y < this->height; y++) {
 				for (int z = 0; z < this->depth; z++) {
 					this->voxels.push_back(Voxel(glm::vec3(x, y, z), glm::vec3(1.0f)));
+					this->modelMatrices.push_back(this->voxels.back().getModelMatrix());
 				}
 			}
 		}
 
-		VoxelSet voxelsSet(this->voxels.begin(), this->voxels.end());
-		this->voxels.erase(std::remove_if(this->voxels.begin(), this->voxels.end(), [&voxelsSet](const Voxel& voxel) {
-			return voxel.isSurrounded(voxelsSet);
-		}), this->voxels.end());
+		//VoxelSet voxelsSet(this->voxels.begin(), this->voxels.end());
+		//this->voxels.erase(std::remove_if(this->voxels.begin(), this->voxels.end(), [&voxelsSet](const Voxel& voxel) {
+		//	return voxel.isSurrounded(voxelsSet);
+		//}), this->voxels.end());
 	}
 
 	ImGui::End();
 }
 
+// Frustum culling
 void	Engine::cullVoxels()
 {
-	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT) * this->camera.getViewMatrix();
+	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT, this->frustumDistance) * this->camera.getViewMatrix();
 	std::array<glm::vec4, 6>	frustumPlanes;
 
 	frustumPlanes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0); // Gauche
@@ -167,7 +180,7 @@ void	Engine::cullVoxels()
 		}
 
 		if (inside) {
-			modelMatrices.push_back(voxel.getModelMatrix());
+			this->modelMatrices.push_back(voxel.getModelMatrix());
 		}
 	}
 }

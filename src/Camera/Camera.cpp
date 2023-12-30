@@ -15,9 +15,19 @@ glm::mat4	Camera::getViewMatrix() const
 	return glm::lookAt(position, position + front, up);
 }
 
-glm::mat4	Camera::getProjectionMatrix(float screenWidth, float screenHeight) const
+glm::mat4	Camera::getProjectionMatrix(float screenWidth, float screenHeight, float farPlane) const
 {
-	return glm::perspective(glm::radians(45.0f), screenWidth / screenHeight, 0.1f, 100.0f);
+	return glm::perspective(glm::radians(45.0f), screenWidth / screenHeight, 0.1f, farPlane);
+}
+
+glm::vec3	Camera::getPosition() const
+{
+	return this->position;
+}
+
+float	Camera::getMovementSpeed() const
+{
+	return this->movementSpeed;
 }
 
 void	Camera::processKeyboard(float deltaTime)
@@ -39,6 +49,13 @@ void	Camera::processKeyboard(float deltaTime)
 		position += up * velocity;
 	if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
 		position -= up * velocity;
+	if (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS)
+	{
+		if (this->movementSpeed == 2.5f)
+			this->movementSpeed *= 20.0f;
+		else
+			this->movementSpeed = 2.5f;
+	}
 }
 
 void	Camera::updateCameraVectors()

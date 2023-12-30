@@ -15,7 +15,7 @@ class Renderer {
 		Renderer();
 		~Renderer();
 
-		void draw(const std::vector<glm::mat4>& modelMatrices, const Shader& shader) const;
+		void	draw(const std::vector<glm::mat4>& modelMatrices, const Shader& shader) const;
 
 	private:
 		GLuint	VAO;

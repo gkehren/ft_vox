@@ -46,6 +46,8 @@ class Engine {
 		int						height;
 		int						depth;
 
+		float					frustumDistance;
+
 		void	updateUI();
 		void	cullVoxels();
 };
