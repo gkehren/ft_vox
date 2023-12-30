@@ -6,16 +6,20 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
-#include <Voxel/Voxel.hpp>
+#include <Chunk/Chunk.hpp>
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
+
+#include <iostream>
 
 class Renderer {
 	public:
 		Renderer();
 		~Renderer();
 
-		void	draw(const std::vector<glm::mat4>& modelMatrices, const Shader& shader) const;
+		void	draw(const std::vector<Chunk>& chunks, const Shader& shader, const Camera& camera) const;
+		void	draw(const Chunk& chunk, const Shader& shader, const Camera& camera) const;
+		void	drawBoundingBox(const Chunk& chunk, const Shader& shader, const Camera& camera) const;
 
 	private:
 		GLuint	VAO;

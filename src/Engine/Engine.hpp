@@ -13,9 +13,10 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 #include <Shader/Shader.hpp>
-#include <Voxel/Voxel.hpp>
+#include <Chunk/Chunk.hpp>
 #include <Renderer/Renderer.hpp>
 #include <Camera/Camera.hpp>
 
@@ -37,10 +38,10 @@ class Engine {
 		float					lastFrame;
 
 		Shader*					shader;
+		Shader*					boundingBoxShader;
 		Renderer*				renderer;
 		Camera					camera;
-		std::vector<Voxel>		voxels;
-		std::vector<glm::mat4>	modelMatrices;
+		std::vector<Chunk>		chunks;
 
 		int						width;
 		int						height;
@@ -49,7 +50,14 @@ class Engine {
 		float					frustumDistance;
 
 		void	updateUI();
-		void	cullVoxels();
+		int		visibleChunksCount;
+
+		// Chunk management
+		void	generateChunks();
+
+		void	cullChunks();
+		void	frustumCulling(std::vector<Chunk>& visibleChunks);
+		void	occlusionCulling(std::vector<Chunk>& chunks);
 };
 
 void	mouse_callback(GLFWwindow* window, double xpos, double ypos);
