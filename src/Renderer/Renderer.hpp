@@ -26,4 +26,8 @@ class Renderer {
 		GLuint	VBO;
 		GLuint	EBO;
 		GLuint	instanceVBO;
+
+		GLuint	boundingBoxVAO;
+		GLuint	boundingBoxVBO;
+		GLuint	boundingBoxEBO;
 };

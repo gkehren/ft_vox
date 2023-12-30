@@ -147,9 +147,12 @@ void	Engine::generateChunks()
 void	Engine::cullChunks()
 {
 	this->visibleChunksCount = 0;
-	std::vector<Chunk> visibleChunks;
-	this->frustumCulling(visibleChunks);
-	this->occlusionCulling(visibleChunks);
+	std::sort(this->chunks.begin(), this->chunks.end(), [this](const Chunk& a, const Chunk& b) {
+		float distA = glm::distance(this->camera.getPosition(), a.getPosition());
+		float distB = glm::distance(this->camera.getPosition(), b.getPosition());
+		return distA < distB;
+	});
+	this->occlusionCulling();
 }
 
 void	Engine::frustumCulling(std::vector<Chunk>& visibleChunks)
@@ -187,9 +190,9 @@ void	Engine::frustumCulling(std::vector<Chunk>& visibleChunks)
 	}
 }
 
-void	Engine::occlusionCulling(std::vector<Chunk>& chunks)
+void	Engine::occlusionCulling()
 {
-	for (auto& chunk : chunks) {
+	for (auto& chunk : this->chunks) {
 		GLuint query;
 		glGenQueries(1, &query);
 
@@ -207,8 +210,8 @@ void	Engine::occlusionCulling(std::vector<Chunk>& chunks)
 		glGetQueryObjectuiv(query, GL_QUERY_RESULT, &samples);
 
 		if (samples > 0) {
-			this->visibleChunksCount++;
 			this->renderer->draw(chunk, *this->shader, this->camera);
+			this->visibleChunksCount++;
 		}
 
 		glDeleteQueries(1, &query);

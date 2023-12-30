@@ -57,7 +57,7 @@ class Engine {
 
 		void	cullChunks();
 		void	frustumCulling(std::vector<Chunk>& visibleChunks);
-		void	occlusionCulling(std::vector<Chunk>& chunks);
+		void	occlusionCulling();
 };
 
 void	mouse_callback(GLFWwindow* window, double xpos, double ypos);

@@ -26,9 +26,12 @@ static unsigned int indices[] = {
 Renderer::Renderer()
 {
 	glGenVertexArrays(1, &this->VAO);
+	glGenVertexArrays(1, &this->boundingBoxVAO);
 	glGenBuffers(1, &this->VBO);
 	glGenBuffers(1, &this->EBO);
 	glGenBuffers(1, &this->instanceVBO);
+	glGenBuffers(1, &this->boundingBoxVBO);
+	glGenBuffers(1, &this->boundingBoxEBO);
 
 	glBindVertexArray(this->VAO);
 
@@ -53,14 +56,27 @@ Renderer::Renderer()
 		glVertexAttribDivisor(2 + i, 1);
 	}
 	glBindVertexArray(0);
+
+	// Bounding box
+	glBindVertexArray(this->boundingBoxVAO);
+	glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
+
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
+
+	glBindVertexArray(0);
 }
 
 Renderer::~Renderer()
 {
 	glDeleteVertexArrays(1, &this->VAO);
+	glDeleteVertexArrays(1, &this->boundingBoxVAO);
 	glDeleteBuffers(1, &this->VBO);
 	glDeleteBuffers(1, &this->EBO);
 	glDeleteBuffers(1, &this->instanceVBO);
+	glDeleteBuffers(1, &this->boundingBoxVBO);
+	glDeleteBuffers(1, &this->boundingBoxEBO);
 }
 
 void	Renderer::draw(const std::vector<Chunk>& chunks, const Shader& shader, const Camera& camera) const
@@ -83,8 +99,6 @@ void	Renderer::draw(const std::vector<Chunk>& chunks, const Shader& shader, cons
 	glBindVertexArray(this->VAO);
 	glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, modelMatrices.size());
 	glBindVertexArray(0);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glUseProgram(0);
 }
 
 void	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& camera) const
@@ -102,18 +116,10 @@ void	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& came
 	glBindVertexArray(this->VAO);
 	glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, modelMatrices.size());
 	glBindVertexArray(0);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glUseProgram(0);
 }
 
 void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const Camera& camera) const
 {
-	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-	glDepthMask(GL_FALSE);
-	glBindVertexArray(0);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-	glUseProgram(0);
 	shader.use();
 
 	shader.setMat4("view", camera.getViewMatrix());
@@ -121,65 +127,32 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const C
 
 	glm::vec3 position = chunk.getPosition();
 
-	// Les 8 sommets du cube
 	float verticesBoundingbox[] = {
-		position.x, position.y, position.z,
-		position.x + CHUNK_SIZE, position.y, position.z,
-		position.x + CHUNK_SIZE, position.y + CHUNK_SIZE, position.z,
-		position.x, position.y + CHUNK_SIZE, position.z,
+		position.x - 0.5f, position.y - 0.5f, position.z - 0.5f,
+		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f, position.z - 0.5f,
+		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f,
+		position.x - 0.5f, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f,
 
-		position.x, position.y, position.z + CHUNK_SIZE,
-		position.x + CHUNK_SIZE, position.y, position.z + CHUNK_SIZE,
-		position.x + CHUNK_SIZE, position.y + CHUNK_SIZE, position.z + CHUNK_SIZE,
-		position.x, position.y + CHUNK_SIZE, position.z + CHUNK_SIZE
+		position.x - 0.5f, position.y - 0.5f, position.z - 0.5f + CHUNK_SIZE,
+		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f, position.z - 0.5f + CHUNK_SIZE,
+		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f + CHUNK_SIZE,
+		position.x - 0.5f, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f + CHUNK_SIZE
 	};
 
-	for (int i = 0; i < 24; i++) {
-		verticesBoundingbox[i] -= 0.5f;
-	}
-
-	// Les 12 arêtes du cube, chaque arête est un segment de ligne entre deux sommets
 	unsigned int indicesBoundingbox[] = {
-		0, 1,
-		1, 2,
-		2, 3,
-		3, 0,
-
-		4, 5,
-		5, 6,
-		6, 7,
-		7, 4,
-
-		0, 4,
-		1, 5,
-		2, 6,
-		3, 7
+		0, 1, 1, 2, 2, 3, 3, 0,
+		4, 5, 5, 6, 6, 7, 7, 4,
+		0, 4, 1, 5, 2, 6, 3, 7
 	};
 
-	GLuint vaoBoundingbox, vboBoundingbox, eboBoundingbox;
-	glGenVertexArrays(1, &vaoBoundingbox);
-	glGenBuffers(1, &vboBoundingbox);
-	glGenBuffers(1, &eboBoundingbox);
+	glBindVertexArray(this->boundingBoxVAO);
 
-	glBindVertexArray(vaoBoundingbox);
+	glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(verticesBoundingbox), verticesBoundingbox, GL_DYNAMIC_DRAW);
 
-	glBindBuffer(GL_ARRAY_BUFFER, vboBoundingbox);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(verticesBoundingbox), verticesBoundingbox, GL_STATIC_DRAW);
-
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, eboBoundingbox);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indicesBoundingbox), indicesBoundingbox, GL_STATIC_DRAW);
-
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indicesBoundingbox), indicesBoundingbox, GL_DYNAMIC_DRAW);
 
 	glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, 0);
-
-	glDeleteVertexArrays(1, &vaoBoundingbox);
-	glDeleteBuffers(1, &vboBoundingbox);
-	glDeleteBuffers(1, &eboBoundingbox);
-
 	glBindVertexArray(0);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-	glUseProgram(0);
 }
