@@ -69,15 +69,12 @@ Engine::~Engine()
 void	Engine::run()
 {
 	this->frustumDistance = 160.0f;
-	this->width = 1;
-	this->height = 1;
-	this->depth = 1;
+	this->chunkX = 1;
+	this->chunkY = 1;
 
-	for (int x = 0; x < this->width; x++) {
-		for (int y = 0; y < this->height; y++) {
-			for (int z = 0; z < this->depth; z++) {
-				this->chunks.push_back(Chunk(glm::vec3(x * Chunk::WIDTH, y * Chunk::HEIGHT - (Chunk::HEIGHT / 2), z * Chunk::DEPTH)));
-			}
+	for (int x = 0; x < this->chunkX; x++) {
+		for (int z = 0; z < this->chunkY; z++) {
+			this->chunks.push_back(Chunk(glm::vec3(x * Chunk::WIDTH, 0 - (Chunk::HEIGHT / 2), z * Chunk::DEPTH)));
 		}
 	}
 	this->generateChunks();
@@ -113,22 +110,19 @@ void	Engine::updateUI()
 
 	ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
 	ImGui::Text("Chunk count: %d (%lu)", this->visibleChunksCount, this->chunks.size());
-	ImGui::Text("Voxel count: %d (%lu)",  this->visibleChunksCount * Chunk::WIDTH * Chunk::HEIGHT * Chunk::DEPTH, this->chunks.size() * Chunk::WIDTH * Chunk::HEIGHT * Chunk::DEPTH);
+	ImGui::Text("Voxel count: %d (%lu)",  this->visibleVoxelsCount, this->chunks.size() * Chunk::WIDTH * Chunk::HEIGHT * Chunk::DEPTH);
 	ImGui::Text("Camera position: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
 	ImGui::Text("Camera speed: %.1f", this->camera.getMovementSpeed());
 	ImGui::InputFloat("Frustum distance", &this->frustumDistance);
 
-	ImGui::InputInt("Width", &this->width);
-	ImGui::InputInt("Height", &this->height);
-	ImGui::InputInt("Depth", &this->depth);
+	ImGui::InputInt("X", &this->chunkX);
+	ImGui::InputInt("Z", &this->chunkY);
 
 	if (ImGui::Button("Generate")) {
 		this->chunks.clear();
-		for (int x = 0; x < this->width; x++) {
-			for (int y = 0; y < this->height; y++) {
-				for (int z = 0; z < this->depth; z++) {
-					this->chunks.push_back(Chunk(glm::vec3(x * Chunk::WIDTH, y * Chunk::HEIGHT, z * Chunk::DEPTH)));
-				}
+		for (int x = 0; x < this->chunkX; x++) {
+			for (int z = 0; z < this->chunkY; z++) {
+				this->chunks.push_back(Chunk(glm::vec3(x * Chunk::WIDTH, 0 - (Chunk::HEIGHT / 2), z * Chunk::DEPTH)));
 			}
 		}
 		this->generateChunks();
@@ -147,21 +141,20 @@ void	Engine::generateChunks()
 void	Engine::cullChunks()
 {
 	this->visibleChunksCount = 0;
+	this->visibleVoxelsCount = 0;
 
-	// SORTING CHUNKS FOR OCCLUSION CULLING
-	//std::sort(this->chunks.begin(), this->chunks.end(), [this](const Chunk& a, const Chunk& b) {
+	std::vector<Chunk>	visibleChunks;
+	this->frustumCulling(visibleChunks);
+	for (auto& chunk : visibleChunks) {
+		this->renderer->draw(chunk, *this->shader, this->camera);
+		this->visibleVoxelsCount += Chunk::WIDTH * Chunk::HEIGHT * Chunk::DEPTH;
+	}
+	//std::sort(visibleChunks.begin(), visibleChunks.end(), [this](const Chunk& a, const Chunk& b) {
 	//	float distA = glm::distance(this->camera.getPosition(), a.getPosition());
 	//	float distB = glm::distance(this->camera.getPosition(), b.getPosition());
 	//	return distA < distB;
 	//});
-	//this->occlusionCulling();
-
-	std::vector<Chunk>	visibleChunks;
-	this->frustumCulling(visibleChunks);
-	this->visibleChunksCount = visibleChunks.size();
-	for (auto& chunk : visibleChunks) {
-		this->renderer->draw(chunk, *this->shader, this->camera);
-	}
+	//this->occlusionCulling(visibleChunks);
 }
 
 void	Engine::frustumCulling(std::vector<Chunk>& visibleChunks)
@@ -182,7 +175,7 @@ void	Engine::frustumCulling(std::vector<Chunk>& visibleChunks)
 
 	for (const auto& chunk : this->chunks) {
 		glm::vec3 center = chunk.getPosition() + glm::vec3(Chunk::WIDTH, Chunk::HEIGHT, Chunk::DEPTH) / 2.0f;
-        float radius = chunk.getRadius();
+		float radius = chunk.getRadius();
 
 		bool inside = true;
 		for (const auto& plane : frustumPlanes) {
@@ -195,34 +188,37 @@ void	Engine::frustumCulling(std::vector<Chunk>& visibleChunks)
 
 		if (inside) {
 			visibleChunks.push_back(chunk);
+			this->visibleChunksCount++;
 		}
 	}
 }
 
-void	Engine::occlusionCulling()
+void	Engine::occlusionCulling(std::vector<Chunk>& visibleChunks)
 {
-	for (auto& chunk : this->chunks) {
-		GLuint query;
-		glGenQueries(1, &query);
+	for (auto& chunk : visibleChunks) {
+		for (auto& voxel : chunk.getVoxelsSorted(this->camera.getPosition())) {
+			GLuint query;
+			glGenQueries(1, &query);
 
-		glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-		glDepthMask(GL_FALSE);
+			glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+			glDepthMask(GL_FALSE);
 
-		glBeginQuery(GL_SAMPLES_PASSED, query);
-		this->renderer->drawBoundingBox(chunk, *this->boundingBoxShader, this->camera);
-		glEndQuery(GL_SAMPLES_PASSED);
+			glBeginQuery(GL_SAMPLES_PASSED, query);
+			this->renderer->drawBoundingBox(voxel, *this->boundingBoxShader, this->camera);
+			glEndQuery(GL_SAMPLES_PASSED);
 
-		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-		glDepthMask(GL_TRUE);
+			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+			glDepthMask(GL_TRUE);
 
-		GLuint samples;
-		glGetQueryObjectuiv(query, GL_QUERY_RESULT, &samples);
+			GLuint samples;
+			glGetQueryObjectuiv(query, GL_QUERY_RESULT, &samples);
 
-		if (samples > 0) {
-			this->renderer->draw(chunk, *this->shader, this->camera);
-			this->visibleChunksCount++;
+			if (samples > 0) {
+				this->renderer->draw(voxel, *this->shader, this->camera);
+				this->visibleVoxelsCount++;
+			}
+
+			glDeleteQueries(1, &query);
 		}
-
-		glDeleteQueries(1, &query);
 	}
 }

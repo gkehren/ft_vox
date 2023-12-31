@@ -124,6 +124,21 @@ void	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& came
 	glBindVertexArray(0);
 }
 
+void	Renderer::draw(const Voxel& voxel, const Shader& shader, const Camera& camera) const
+{
+	glm::mat4 modelMatrix = voxel.getModelMatrix();
+
+	shader.use();
+
+	shader.setMat4("view", camera.getViewMatrix());
+	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
+	shader.setMat4("model", modelMatrix);
+
+	glBindVertexArray(this->VAO);
+	glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+	glBindVertexArray(0);
+}
+
 void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const Camera& camera) const
 {
 	shader.use();
@@ -143,6 +158,41 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const C
 		position.x - 0.5f + Chunk::WIDTH, position.y - 0.5f, position.z - 0.5f + Chunk::DEPTH,
 		position.x - 0.5f + Chunk::WIDTH, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f + Chunk::DEPTH,
 		position.x - 0.5f, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f + Chunk::DEPTH
+	};
+
+	glBindVertexArray(this->boundingBoxVAO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(verticesBoundingbox), verticesBoundingbox, GL_DYNAMIC_DRAW);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indicesBoundingbox), indicesBoundingbox, GL_DYNAMIC_DRAW);
+
+	glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, 0);
+	glBindVertexArray(0);
+}
+
+void	Renderer::drawBoundingBox(const Voxel& voxel, const Shader& shader, const Camera& camera) const
+{
+	shader.use();
+
+	shader.setMat4("view", camera.getViewMatrix());
+	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
+
+	glm::vec3 position = voxel.getPosition();
+
+	float voxelSize = voxel.getSize();
+
+	float verticesBoundingbox[] = {
+		position.x - 0.5f * voxelSize, position.y - 0.5f * voxelSize, position.z - 0.5f * voxelSize,
+		position.x + 0.5f * voxelSize, position.y - 0.5f * voxelSize, position.z - 0.5f * voxelSize,
+		position.x + 0.5f * voxelSize, position.y + 0.5f * voxelSize, position.z - 0.5f * voxelSize,
+		position.x - 0.5f * voxelSize, position.y + 0.5f * voxelSize, position.z - 0.5f * voxelSize,
+
+		position.x - 0.5f * voxelSize, position.y - 0.5f * voxelSize, position.z + 0.5f * voxelSize,
+		position.x + 0.5f * voxelSize, position.y - 0.5f * voxelSize, position.z + 0.5f * voxelSize,
+		position.x + 0.5f * voxelSize, position.y + 0.5f * voxelSize, position.z + 0.5f * voxelSize,
+		position.x - 0.5f * voxelSize, position.y + 0.5f * voxelSize, position.z + 0.5f * voxelSize
 	};
 
 	glBindVertexArray(this->boundingBoxVAO);

@@ -43,21 +43,21 @@ class Engine {
 		Camera					camera;
 		std::vector<Chunk>		chunks;
 
-		int						width;
-		int						height;
-		int						depth;
+		int						chunkX;
+		int						chunkY;
 
 		float					frustumDistance;
 
 		void	updateUI();
 		int		visibleChunksCount;
+		int		visibleVoxelsCount;
 
 		// Chunk management
 		void	generateChunks();
 
 		void	cullChunks();
 		void	frustumCulling(std::vector<Chunk>& visibleChunks);
-		void	occlusionCulling();
+		void	occlusionCulling(std::vector<Chunk>& visibleChunks);
 };
 
 void	mouse_callback(GLFWwindow* window, double xpos, double ypos);
