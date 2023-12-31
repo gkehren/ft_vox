@@ -135,14 +135,14 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const C
 
 	float verticesBoundingbox[] = {
 		position.x - 0.5f, position.y - 0.5f, position.z - 0.5f,
-		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f, position.z - 0.5f,
-		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f,
-		position.x - 0.5f, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f,
+		position.x - 0.5f + Chunk::WIDTH, position.y - 0.5f, position.z - 0.5f,
+		position.x - 0.5f + Chunk::WIDTH, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f,
+		position.x - 0.5f, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f,
 
-		position.x - 0.5f, position.y - 0.5f, position.z - 0.5f + CHUNK_SIZE,
-		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f, position.z - 0.5f + CHUNK_SIZE,
-		position.x - 0.5f + CHUNK_SIZE, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f + CHUNK_SIZE,
-		position.x - 0.5f, position.y - 0.5f + CHUNK_SIZE, position.z - 0.5f + CHUNK_SIZE
+		position.x - 0.5f, position.y - 0.5f, position.z - 0.5f + Chunk::DEPTH,
+		position.x - 0.5f + Chunk::WIDTH, position.y - 0.5f, position.z - 0.5f + Chunk::DEPTH,
+		position.x - 0.5f + Chunk::WIDTH, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f + Chunk::DEPTH,
+		position.x - 0.5f, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f + Chunk::DEPTH
 	};
 
 	glBindVertexArray(this->boundingBoxVAO);

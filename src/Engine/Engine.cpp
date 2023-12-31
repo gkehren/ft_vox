@@ -35,7 +35,7 @@ Engine::Engine()
 	ImGui::StyleColorsDark();
 
 	this->shader = new Shader(VERTEX_PATH, FRAGMENT_PATH);
-	this->boundingBoxShader = new Shader("/Users/gkehren/Documents/ft_vox/ressources/boundingBoxVertex.glsl", "/Users/gkehren/Documents/ft_vox/ressources/boundingBoxFragment.glsl");
+	this->boundingBoxShader = new Shader("/home/gkehren/Documents/ft_vox/ressources/boundingBoxVertex.glsl", "/home/gkehren/Documents/ft_vox/ressources/boundingBoxFragment.glsl");
 	this->renderer = new Renderer();
 	this->camera.setWindow(this->window);
 
@@ -69,14 +69,14 @@ Engine::~Engine()
 void	Engine::run()
 {
 	this->frustumDistance = 160.0f;
-	this->width = 4;
+	this->width = 1;
 	this->height = 1;
-	this->depth = 4;
+	this->depth = 1;
 
 	for (int x = 0; x < this->width; x++) {
 		for (int y = 0; y < this->height; y++) {
 			for (int z = 0; z < this->depth; z++) {
-				this->chunks.push_back(Chunk(glm::ivec3(x * CHUNK_SIZE, y * CHUNK_SIZE, z * CHUNK_SIZE)));
+				this->chunks.push_back(Chunk(glm::vec3(x * Chunk::WIDTH, y * Chunk::HEIGHT - (Chunk::HEIGHT / 2), z * Chunk::DEPTH)));
 			}
 		}
 	}
@@ -113,7 +113,7 @@ void	Engine::updateUI()
 
 	ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
 	ImGui::Text("Chunk count: %d (%lu)", this->visibleChunksCount, this->chunks.size());
-	ImGui::Text("Voxel count: %d (%lu)",  this->visibleChunksCount * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, this->chunks.size() * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
+	ImGui::Text("Voxel count: %d (%lu)",  this->visibleChunksCount * Chunk::WIDTH * Chunk::HEIGHT * Chunk::DEPTH, this->chunks.size() * Chunk::WIDTH * Chunk::HEIGHT * Chunk::DEPTH);
 	ImGui::Text("Camera position: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
 	ImGui::Text("Camera speed: %.1f", this->camera.getMovementSpeed());
 	ImGui::InputFloat("Frustum distance", &this->frustumDistance);
@@ -127,7 +127,7 @@ void	Engine::updateUI()
 		for (int x = 0; x < this->width; x++) {
 			for (int y = 0; y < this->height; y++) {
 				for (int z = 0; z < this->depth; z++) {
-					this->chunks.push_back(Chunk(glm::ivec3(x * CHUNK_SIZE, y * CHUNK_SIZE, z * CHUNK_SIZE)));
+					this->chunks.push_back(Chunk(glm::vec3(x * Chunk::WIDTH, y * Chunk::HEIGHT, z * Chunk::DEPTH)));
 				}
 			}
 		}
@@ -173,7 +173,7 @@ void	Engine::frustumCulling(std::vector<Chunk>& visibleChunks)
 
 	for (const auto& chunk : this->chunks) {
 		glm::vec3 center = chunk.getPosition();
-		float radius = glm::length(glm::vec3(CHUNK_SIZE / 2.0f));
+		float radius = glm::length(glm::vec3(Chunk::HEIGHT / 2.0f));
 
 		bool inside = true;
 		for (const auto& plane : frustumPlanes) {
