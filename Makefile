@@ -2,13 +2,20 @@
 # ------------------
 CXX = g++
 CXXFLAGS = -std=c++17
-LDFLAGS = -lGL -lglfw -L/opt/homebrew/lib
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+    LDFLAGS = -lGL -lglfw
+	INCDIR = -I src
+endif
+ifeq ($(UNAME_S),Darwin)    # Darwin is for MacOS
+    LDFLAGS = -framework OpenGL -lglfw -L/opt/homebrew/lib
+	INCDIR = -I src -I /opt/homebrew/include
+endif
 # ==================
 
 # ----- Paths -----
 SRCDIR = src
 OBJDIR = obj
-INCDIR = -I src
 # ==================
 
 # ----- Colors -----

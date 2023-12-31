@@ -34,8 +34,9 @@ Engine::Engine()
 	ImGui_ImplOpenGL3_Init("#version 410");
 	ImGui::StyleColorsDark();
 
-	this->shader = new Shader(VERTEX_PATH, FRAGMENT_PATH);
-	this->boundingBoxShader = new Shader("/home/gkehren/Documents/ft_vox/ressources/boundingBoxVertex.glsl", "/home/gkehren/Documents/ft_vox/ressources/boundingBoxFragment.glsl");
+	std::string path = BASE_PATH;
+	this->shader = new Shader((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
+	this->boundingBoxShader = new Shader((path + "boundingBoxVertex.glsl").c_str(), (path + "boundingBoxFragment.glsl").c_str());
 	this->renderer = new Renderer();
 	this->camera.setWindow(this->window);
 
