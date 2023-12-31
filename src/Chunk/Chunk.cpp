@@ -16,6 +16,9 @@ void	Chunk::generate()
 			}
 		}
 	}
+	glm::vec3 halfSize(WIDTH / 2.0f, HEIGHT / 2.0f, DEPTH / 2.0f);
+	float diagonal = glm::length(halfSize);
+	radius = diagonal * 0.5f;
 }
 
 std::vector<glm::mat4>	Chunk::getModelMatrices() const
@@ -35,4 +38,9 @@ const glm::vec3&	Chunk::getPosition() const
 const std::vector<Voxel>&	Chunk::getVoxels() const
 {
 	return (this->voxels);
+}
+
+float	Chunk::getRadius() const
+{
+	return (this->radius);
 }

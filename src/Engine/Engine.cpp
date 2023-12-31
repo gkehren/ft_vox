@@ -147,12 +147,21 @@ void	Engine::generateChunks()
 void	Engine::cullChunks()
 {
 	this->visibleChunksCount = 0;
-	std::sort(this->chunks.begin(), this->chunks.end(), [this](const Chunk& a, const Chunk& b) {
-		float distA = glm::distance(this->camera.getPosition(), a.getPosition());
-		float distB = glm::distance(this->camera.getPosition(), b.getPosition());
-		return distA < distB;
-	});
-	this->occlusionCulling();
+
+	// SORTING CHUNKS FOR OCCLUSION CULLING
+	//std::sort(this->chunks.begin(), this->chunks.end(), [this](const Chunk& a, const Chunk& b) {
+	//	float distA = glm::distance(this->camera.getPosition(), a.getPosition());
+	//	float distB = glm::distance(this->camera.getPosition(), b.getPosition());
+	//	return distA < distB;
+	//});
+	//this->occlusionCulling();
+
+	std::vector<Chunk>	visibleChunks;
+	this->frustumCulling(visibleChunks);
+	this->visibleChunksCount = visibleChunks.size();
+	for (auto& chunk : visibleChunks) {
+		this->renderer->draw(chunk, *this->shader, this->camera);
+	}
 }
 
 void	Engine::frustumCulling(std::vector<Chunk>& visibleChunks)
@@ -172,8 +181,8 @@ void	Engine::frustumCulling(std::vector<Chunk>& visibleChunks)
 	}
 
 	for (const auto& chunk : this->chunks) {
-		glm::vec3 center = chunk.getPosition();
-		float radius = glm::length(glm::vec3(Chunk::HEIGHT / 2.0f));
+		glm::vec3 center = chunk.getPosition() + glm::vec3(Chunk::WIDTH, Chunk::HEIGHT, Chunk::DEPTH) / 2.0f;
+        float radius = chunk.getRadius();
 
 		bool inside = true;
 		for (const auto& plane : frustumPlanes) {

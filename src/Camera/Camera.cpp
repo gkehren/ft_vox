@@ -17,7 +17,7 @@ glm::mat4	Camera::getViewMatrix() const
 
 glm::mat4	Camera::getProjectionMatrix(float screenWidth, float screenHeight, float farPlane) const
 {
-	return glm::perspective(glm::radians(45.0f), screenWidth / screenHeight, 0.1f, farPlane);
+	return glm::perspective(glm::radians(80.0f), screenWidth / screenHeight, 0.1f, farPlane);
 }
 
 glm::vec3	Camera::getPosition() const
@@ -46,9 +46,9 @@ void	Camera::processKeyboard(float deltaTime)
 	if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
 		position += right * velocity;
 	if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
-		position += up * velocity;
+		position += worldUp * velocity;
 	if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
-		position -= up * velocity;
+		position -= worldUp * velocity;
 	if (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS)
 	{
 		if (this->movementSpeed == 2.5f)
@@ -61,8 +61,8 @@ void	Camera::processKeyboard(float deltaTime)
 void	Camera::updateCameraVectors()
 {
 	front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
-    front.y = sin(glm::radians(pitch));
-    front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+	front.y = sin(glm::radians(pitch));
+	front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
 	front = glm::normalize(front);
 
 	right = glm::normalize(glm::cross(front, worldUp));
