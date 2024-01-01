@@ -5,6 +5,8 @@ Chunk::Chunk(const glm::vec3& pos) : position(pos)
 	glm::vec3 halfSize(WIDTH / 2.0f, HEIGHT / 2.0f, DEPTH / 2.0f);
 	float diagonal = glm::length(halfSize);
 	radius = diagonal * 0.5f;
+
+	this->generate();
 }
 
 Chunk::~Chunk()
@@ -13,11 +15,9 @@ Chunk::~Chunk()
 void	Chunk::generate()
 {
 	for (int x = 0; x < WIDTH; x++) {
-		for (int y = 0; y < HEIGHT; y++) {
-			for (int z = 0; z < DEPTH; z++) {
-				TextureType randomTexture = static_cast<TextureType>(std::rand() % TEXTURE_COUNT);
-				this->voxels.push_back(Voxel(glm::vec3(x, y, z) + position, randomTexture));
-			}
+		for (int z = 0; z < DEPTH; z++) {
+			//TextureType randomTexture = static_cast<TextureType>(std::rand() % TEXTURE_COUNT);
+			this->voxels.push_back(Voxel(glm::vec3(x, 0, z) + position, TEXTURE_COBBLESTONE));
 		}
 	}
 }

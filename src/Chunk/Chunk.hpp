@@ -12,9 +12,9 @@
 
 class	Chunk {
 	public:
-		static const int WIDTH = 16;
-		static const int HEIGHT = 1; // 256
-		static const int DEPTH = 16;
+		static constexpr float WIDTH = 16.0f;
+		static constexpr float HEIGHT = 16.0f; // 256
+		static constexpr float DEPTH = 16.0f;
 
 		Chunk(const glm::vec3& position);
 		~Chunk();

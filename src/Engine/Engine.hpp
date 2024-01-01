@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <algorithm>
 
 #include <Shader/Shader.hpp>
@@ -20,6 +21,12 @@
 #include <Renderer/Renderer.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
+
+struct ChunkHasher {
+	std::size_t operator()(const glm::ivec3& k) const {
+		return ((k.x ^ (k.y << 4)) ^ (k.z << 8));
+	}
+};
 
 class Engine {
 	public:
@@ -37,10 +44,9 @@ class Engine {
 		Shader*					boundingBoxShader;
 		Renderer*				renderer;
 		Camera					camera;
-		std::vector<Chunk>		chunks;
 
 		int						chunkX;
-		int						chunkY;
+		int						chunkZ;
 
 		float					frustumDistance;
 
@@ -49,11 +55,14 @@ class Engine {
 		int		visibleVoxelsCount;
 
 		// Chunk management
+		int					chunkRadius;
+		std::vector<Chunk>	chunks;
+		std::unordered_set<glm::ivec3, ChunkHasher>	chunkPositions;
 		void	generateChunks();
 
 		void	render();
-		void	frustumCulling(std::vector<Chunk>& visibleChunks);
-		void	occlusionCulling(std::vector<Chunk>& visibleChunks);
+		void	frustumCulling();
+		void	chunkManagement();
 };
 
 void	mouse_callback(GLFWwindow* window, double xpos, double ypos);

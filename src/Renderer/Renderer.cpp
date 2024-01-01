@@ -60,11 +60,10 @@ static unsigned int indices[] = {
 	20, 21, 22, 22, 23, 20
 };
 
-// may need to fix this (check if it's working)
 static unsigned int indicesBoundingbox[] = {
-		0, 1, 1, 2, 2, 3, 3, 0,
-		4, 5, 5, 6, 6, 7, 7, 4,
-		0, 4, 1, 5, 2, 6, 3, 7
+	0, 1, 1, 2, 2, 3, 3, 0,
+	4, 5, 5, 6, 6, 7, 7, 4,
+	0, 4, 1, 5, 2, 6, 3, 7
 };
 
 static GLuint loadTexture(const char* path)
@@ -92,6 +91,7 @@ static GLuint loadTexture(const char* path)
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, 0.4f);
 
 		stbi_image_free(data);
 	}
@@ -172,46 +172,6 @@ void	Renderer::draw(const Voxel& voxel, const Shader& shader, const Camera& came
 	glBindVertexArray(0);
 	glUseProgram(0);
 }
-
-void	Renderer::draw(const std::vector<Chunk>& chunks, const Shader& shader, const Camera& camera) const
-{
-	//std::vector<glm::mat4>	modelMatrices;
-
-	//for (const Chunk& chunk : chunks) {
-	//	const std::vector<glm::mat4>& chunkModelMatrices = chunk.getModelMatrices();
-	//	modelMatrices.insert(modelMatrices.end(), chunkModelMatrices.begin(), chunkModelMatrices.end());
-	//}
-
-	//shader.use();
-
-	//shader.setMat4("view", camera.getViewMatrix());
-	//shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
-
-	//glBindBuffer(GL_ARRAY_BUFFER, this->instanceVBO);
-	//glBufferData(GL_ARRAY_BUFFER, modelMatrices.size() * sizeof(glm::mat4), &modelMatrices[0], GL_STATIC_DRAW);
-
-	//glBindVertexArray(this->VAO);
-	//glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, modelMatrices.size());
-	//glBindVertexArray(0);
-}
-
-void	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& camera) const
-{
-//	std::vector<glm::mat4>	modelMatrices = chunk.getModelMatrices();
-
-//	shader.use();
-
-//	shader.setMat4("view", camera.getViewMatrix());
-//	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
-
-//	glBindBuffer(GL_ARRAY_BUFFER, this->instanceVBO);
-//	glBufferData(GL_ARRAY_BUFFER, modelMatrices.size() * sizeof(glm::mat4), &modelMatrices[0], GL_STATIC_DRAW);
-
-//	glBindVertexArray(this->VAO);
-//	glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, modelMatrices.size());
-//	glBindVertexArray(0);
-}
-
 
 void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const Camera& camera) const
 {
