@@ -25,13 +25,11 @@ class Renderer {
 	private:
 		GLuint	VAO;
 		GLuint	VBO;
-		GLuint	VBOTexCoords;
 		GLuint	EBO;
 
 		GLuint	boundingBoxVAO;
 		GLuint	boundingBoxVBO;
 		GLuint	boundingBoxEBO;
 
-		// Texture
 		GLuint	texture[TEXTURE_COUNT];
 };

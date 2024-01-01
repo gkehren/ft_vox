@@ -3,58 +3,64 @@
 #include <stb_image/stb_image.h>
 
 static float vertices[] = {
-	// positions         // texture coords
-   -0.5f, -0.5f,  0.5f,
-	0.5f, -0.5f,  0.5f,
-	0.5f,  0.5f,  0.5f,
-   -0.5f,  0.5f,  0.5f,
-   -0.5f, -0.5f, -0.5f,
-	0.5f, -0.5f, -0.5f,
-	0.5f,  0.5f, -0.5f,
-   -0.5f,  0.5f, -0.5f
+	// Front
+	-0.5f, -0.5f,  0.5f, 0.0f, 0.0f,
+	 0.5f, -0.5f,  0.5f, 1.0f, 0.0f,
+	 0.5f,  0.5f,  0.5f, 1.0f, 1.0f,
+	-0.5f,  0.5f,  0.5f, 0.0f, 1.0f,
+
+	// Back
+	0.5f, -0.5f, -0.5f, 0.0f, 0.0f,
+   -0.5f, -0.5f, -0.5f, 1.0f, 0.0f,
+   -0.5f,  0.5f, -0.5f, 1.0f, 1.0f,
+	0.5f,  0.5f, -0.5f, 0.0f, 1.0f,
+
+	// Left
+   -0.5f, -0.5f, -0.5f, 0.0f, 0.0f,
+   -0.5f, -0.5f,  0.5f, 1.0f, 0.0f,
+   -0.5f,  0.5f,  0.5f, 1.0f, 1.0f,
+   -0.5f,  0.5f, -0.5f, 0.0f, 1.0f,
+
+	// Right
+	0.5f, -0.5f,  0.5f, 0.0f, 0.0f,
+	0.5f, -0.5f, -0.5f, 1.0f, 0.0f,
+	0.5f,  0.5f, -0.5f, 1.0f, 1.0f,
+	0.5f,  0.5f,  0.5f, 0.0f, 1.0f,
+
+	// Top
+   -0.5f,  0.5f,  0.5f, 0.0f, 0.0f,
+	0.5f,  0.5f,  0.5f, 1.0f, 0.0f,
+	0.5f,  0.5f, -0.5f, 1.0f, 1.0f,
+   -0.5f,  0.5f, -0.5f, 0.0f, 1.0f,
+
+	// Bottom
+   -0.5f, -0.5f, -0.5f, 0.0f, 0.0f,
+	0.5f, -0.5f, -0.5f, 1.0f, 0.0f,
+	0.5f, -0.5f,  0.5f, 1.0f, 1.0f,
+   -0.5f, -0.5f,  0.5f, 0.0f, 1.0f,
 };
 
 static unsigned int indices[] = {
+	// Front
 	0, 1, 2, 2, 3, 0,
-	1, 5, 6, 6, 2, 1,
-	7, 6, 5, 5, 4, 7,
-	4, 0, 3, 3, 7, 4,
-	4, 5, 1, 1, 0, 4,
-	3, 2, 6, 6, 7, 3
+
+	// Back
+	4, 5, 6, 6, 7, 4,
+
+	// Left
+	8, 9, 10, 10, 11, 8,
+
+	// Right
+	12, 13, 14, 14, 15, 12,
+
+	// Top
+	16, 17, 18, 18, 19, 16,
+
+	// Bottom
+	20, 21, 22, 22, 23, 20
 };
 
-static float texCoords[] = {
-	0.0f, 0.0f,
-    1.0f, 0.0f,
-    1.0f, 1.0f,
-    0.0f, 1.0f,
-
-    0.0f, 0.0f,
-    1.0f, 0.0f,
-    1.0f, 1.0f,
-    0.0f, 1.0f,
-
-    0.0f, 0.0f,
-    1.0f, 0.0f,
-    1.0f, 1.0f,
-    0.0f, 1.0f,
-
-    0.0f, 0.0f,
-    1.0f, 0.0f,
-    1.0f, 1.0f,
-    0.0f, 1.0f,
-
-    0.0f, 0.0f,
-    1.0f, 0.0f,
-    1.0f, 1.0f,
-    0.0f, 1.0f,
-
-    0.0f, 0.0f,
-    1.0f, 0.0f,
-    1.0f, 1.0f,
-    0.0f, 1.0f
-};
-
+// may need to fix this (check if it's working)
 static unsigned int indicesBoundingbox[] = {
 		0, 1, 1, 2, 2, 3, 3, 0,
 		4, 5, 5, 6, 6, 7, 7, 4,
@@ -84,7 +90,7 @@ static GLuint loadTexture(const char* path)
 
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
 		stbi_image_free(data);
@@ -103,18 +109,12 @@ Renderer::Renderer()
 	glGenVertexArrays(1, &this->VAO);
 	glBindVertexArray(this->VAO);
 
-	// Position attribute
 	glGenBuffers(1, &this->VBO);
 	glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
 	glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
 	glEnableVertexAttribArray(0);
-
-	// TexCoord attribute
-	glGenBuffers(1, &this->VBOTexCoords);
-	glBindBuffer(GL_ARRAY_BUFFER, this->VBOTexCoords);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(texCoords), texCoords, GL_STATIC_DRAW);
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
 	glEnableVertexAttribArray(1);
 
 	glGenBuffers(1, &this->EBO);
@@ -124,17 +124,17 @@ Renderer::Renderer()
 	glBindVertexArray(0);
 
 	// Bounding box
-	//glGenVertexArrays(1, &this->boundingBoxVAO);
-	//glGenBuffers(1, &this->boundingBoxVBO);
-	//glGenBuffers(1, &this->boundingBoxEBO);
-	//glBindVertexArray(this->boundingBoxVAO);
-	//glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
-	//glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
+	glGenVertexArrays(1, &this->boundingBoxVAO);
+	glGenBuffers(1, &this->boundingBoxVBO);
+	glGenBuffers(1, &this->boundingBoxEBO);
+	glBindVertexArray(this->boundingBoxVAO);
+	glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
 
-	//glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-	//glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
 
-	//glBindVertexArray(0);
+	glBindVertexArray(0);
 
 	// Textures
 	std::string path = BASE_PATH;
@@ -149,12 +149,10 @@ Renderer::~Renderer()
 	glDeleteTextures(TEXTURE_COUNT, this->texture);
 	glDeleteVertexArrays(1, &this->VAO);
 	glDeleteBuffers(1, &this->VBO);
-	glDeleteBuffers(1, &this->VBOTexCoords);
 	glDeleteBuffers(1, &this->EBO);
-	//glDeleteBuffers(1, &this->instanceVBO);
-	//glDeleteVertexArrays(1, &this->boundingBoxVAO);
-	//glDeleteBuffers(1, &this->boundingBoxVBO);
-	//glDeleteBuffers(1, &this->boundingBoxEBO);
+	glDeleteVertexArrays(1, &this->boundingBoxVAO);
+	glDeleteBuffers(1, &this->boundingBoxVBO);
+	glDeleteBuffers(1, &this->boundingBoxEBO);
 }
 
 void	Renderer::draw(const Voxel& voxel, const Shader& shader, const Camera& camera) const

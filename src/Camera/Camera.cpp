@@ -38,9 +38,9 @@ void	Camera::processKeyboard(float deltaTime)
 	float velocity = movementSpeed * deltaTime;
 
 	if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-		position += front * velocity;
+		position += glm::normalize(glm::vec3(front.x, 0.0f, front.z)) * velocity;
 	if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-		position -= front * velocity;
+		position -= glm::normalize(glm::vec3(front.x, 0.0f, front.z)) * velocity;
 	if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
 		position -= right * velocity;
 	if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
