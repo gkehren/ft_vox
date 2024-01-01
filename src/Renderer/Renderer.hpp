@@ -9,8 +9,7 @@
 #include <Chunk/Chunk.hpp>
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
-
-#include <iostream>
+#include <utils.hpp>
 
 class Renderer {
 	public:
@@ -26,10 +25,13 @@ class Renderer {
 	private:
 		GLuint	VAO;
 		GLuint	VBO;
+		GLuint	VBOTexCoords;
 		GLuint	EBO;
-		GLuint	instanceVBO;
 
 		GLuint	boundingBoxVAO;
 		GLuint	boundingBoxVBO;
 		GLuint	boundingBoxEBO;
+
+		// Texture
+		GLuint	texture[TEXTURE_COUNT];
 };

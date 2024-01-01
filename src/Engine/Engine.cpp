@@ -40,6 +40,9 @@ Engine::Engine()
 	this->renderer = new Renderer();
 	this->camera.setWindow(this->window);
 
+	glActiveTexture(GL_TEXTURE0);
+	this->shader->setInt("textureSampler", 0);
+
 	glEnable(GL_DEPTH_TEST);
 	glEnable(GL_CULL_FACE);
 	glCullFace(GL_BACK);
@@ -91,7 +94,7 @@ void	Engine::run()
 		glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-		this->cullChunks();
+		this->render();
 
 		ImGui::Render();
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -139,17 +142,21 @@ void	Engine::generateChunks()
 	}
 }
 
-void	Engine::cullChunks()
+void	Engine::render()
 {
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
 
-	std::vector<Chunk>	visibleChunks;
-	this->frustumCulling(visibleChunks);
-	for (auto& chunk : visibleChunks) {
-		this->renderer->draw(chunk, *this->shader, this->camera);
-		this->visibleVoxelsCount += Chunk::WIDTH * Chunk::HEIGHT * Chunk::DEPTH;
+	for (auto& chunk : this->chunks) {
+		for (auto& voxel : chunk.getVoxels()) {
+			this->renderer->draw(voxel, *this->shader, this->camera);
+			this->visibleVoxelsCount++;
+		}
+		this->visibleChunksCount++;
 	}
+
+	//std::vector<Chunk>	visibleChunks;
+	//this->frustumCulling(visibleChunks);
 	//std::sort(visibleChunks.begin(), visibleChunks.end(), [this](const Chunk& a, const Chunk& b) {
 	//	float distA = glm::distance(this->camera.getPosition(), a.getPosition());
 	//	float distB = glm::distance(this->camera.getPosition(), b.getPosition());

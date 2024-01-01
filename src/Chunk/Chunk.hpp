@@ -5,12 +5,12 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-#include <iostream>
+#include <utils.hpp>
 
 class	Chunk {
 	public:
 		static const int WIDTH = 16;
-		static const int HEIGHT = 256; // 256
+		static const int HEIGHT = 1; // 256
 		static const int DEPTH = 16;
 
 		Chunk(const glm::vec3& position);

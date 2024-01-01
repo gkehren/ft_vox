@@ -19,16 +19,7 @@
 #include <Chunk/Chunk.hpp>
 #include <Renderer/Renderer.hpp>
 #include <Camera/Camera.hpp>
-
-#define WINDOW_WIDTH	1920
-#define WINDOW_HEIGHT	1080
-
-#ifdef __linux__	// linux
-#define BASE_PATH		"/home/gkehren/Documents/ft_vox/ressources/"
-#elif __APPLE__	// Mac
-#define BASE_PATH		"/Users/gkehren/Documents/ft_vox/ressources/"
-#endif
-
+#include <utils.hpp>
 
 class Engine {
 	public:
@@ -60,7 +51,7 @@ class Engine {
 		// Chunk management
 		void	generateChunks();
 
-		void	cullChunks();
+		void	render();
 		void	frustumCulling(std::vector<Chunk>& visibleChunks);
 		void	occlusionCulling(std::vector<Chunk>& visibleChunks);
 };

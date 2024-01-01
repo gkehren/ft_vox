@@ -1,29 +1,27 @@
 #pragma once
 
+#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <algorithm>
-#include <unordered_set>
-#include <functional>
+#include <string>
 
 class Voxel {
 	public:
 		Voxel();
-		Voxel(glm::vec3 position, glm::vec3 color);
+		Voxel(glm::vec3 position, short type);
 		~Voxel();
 
 		glm::mat4	getModelMatrix() const;
 		glm::vec3	getPosition() const;
-		glm::vec3	getColor() const;
 		float		getSize() const;
+		short		getType() const;
 		bool		isVisible() const;
 
 		void		setPosition(glm::vec3 position);
-		void		setColor(glm::vec3 color);
 		void		setVisible(bool visible);
 
 	private:
 		glm::vec3	position;
-		glm::vec3	color;
+		short		type;
 		bool		visible;
 };
