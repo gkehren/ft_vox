@@ -1,12 +1,12 @@
 #include "Chunk.hpp"
 
-Chunk::Chunk(const glm::vec3& pos) : position(pos)
+Chunk::Chunk(const glm::vec3& pos) : position(pos), position2D(glm::ivec2(pos.x, pos.z))
 {
 	glm::vec3 halfSize(WIDTH / 2.0f, HEIGHT / 2.0f, DEPTH / 2.0f);
 	float diagonal = glm::length(halfSize);
 	radius = diagonal * 0.5f;
 
-	this->generate();
+	//this->generate();
 }
 
 Chunk::~Chunk()
@@ -14,6 +14,8 @@ Chunk::~Chunk()
 
 void	Chunk::generate()
 {
+	if (!this->voxels.empty())
+		return;
 	for (int x = 0; x < WIDTH; x++) {
 		for (int z = 0; z < DEPTH; z++) {
 			//TextureType randomTexture = static_cast<TextureType>(std::rand() % TEXTURE_COUNT);
@@ -34,6 +36,11 @@ std::vector<glm::mat4>	Chunk::getModelMatrices() const
 const glm::vec3&	Chunk::getPosition() const
 {
 	return (this->position);
+}
+
+const glm::ivec2&	Chunk::getPosition2D() const
+{
+	return (this->position2D);
 }
 
 std::vector<Voxel>&	Chunk::getVoxels()

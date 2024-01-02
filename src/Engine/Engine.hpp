@@ -23,8 +23,8 @@
 #include <utils.hpp>
 
 struct ChunkHasher {
-	std::size_t operator()(const glm::ivec3& k) const {
-		return ((k.x ^ (k.y << 4)) ^ (k.z << 8));
+	std::size_t operator()(const glm::ivec2& k) const {
+		return ((k.x ^ (k.y << 4)));
 	}
 };
 
@@ -55,9 +55,9 @@ class Engine {
 		int		visibleVoxelsCount;
 
 		// Chunk management
-		int					chunkRadius;
+		int					renderDistance;
 		std::vector<Chunk>	chunks;
-		std::unordered_set<glm::ivec3, ChunkHasher>	chunkPositions;
+		std::unordered_set<glm::ivec2, ChunkHasher>	chunkPositions;
 		void	generateChunks();
 
 		void	render();

@@ -73,9 +73,9 @@ Engine::~Engine()
 void	Engine::run()
 {
 	this->frustumDistance = 160.0f;
-	this->chunkRadius = 2;
-	this->chunkX = 10;
-	this->chunkZ = 10;
+	this->renderDistance = 128;
+	this->chunkX = 4;
+	this->chunkZ = 4;
 	this->generateChunks();
 
 	while (!glfwWindowShouldClose(this->window)) {
@@ -108,11 +108,11 @@ void	Engine::updateUI()
 	ImGui::Begin("ft_vox");
 
 	ImGui::Text("FPS: %.1f (%.1f ms)", ImGui::GetIO().Framerate, this->deltaTime * 1000.0f);
-	ImGui::Text("Chunk count: %d (%lu)", this->visibleChunksCount, this->chunkPositions.size());
-	ImGui::Text("Voxel count: %d (%.1f)",  this->visibleVoxelsCount, this->chunks.size() * Chunk::WIDTH * 1 * Chunk::DEPTH);
-	ImGui::Text("Camera position: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
-	ImGui::Text("Camera speed: %.1f", this->camera.getMovementSpeed());
-	ImGui::InputInt("Chunk radius", &this->chunkRadius);
+	ImGui::Text("Visible chunks: %d (%ld)", this->visibleChunksCount, this->chunks.size());
+	ImGui::Text("Voxel count: %d (%ld)",  this->visibleVoxelsCount, this->chunks.size() * Chunk::WIDTH * 1 * Chunk::DEPTH);
+	ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
+	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
+	ImGui::InputInt("Render distance", &this->renderDistance);
 
 	ImGui::InputInt("Chunk X", &this->chunkX);
 	ImGui::InputInt("Chunk Z", &this->chunkZ);
@@ -126,20 +126,13 @@ void	Engine::updateUI()
 
 void	Engine::generateChunks()
 {
-	// FINAL CODE
-	//for (int x = 0; x < WORLD_SIZE; x++) {
-	//	for (int y = 0; y < WORLD_HEIGHT; y++) {
-	//		for (int z = 0; z < WORLD_SIZE; z++) {
-	//			chunkPositions.insert(glm::ivec3(x, y, z));
-	//		}
-	//	}
-	//}
-
-	// TEST CODE
+	this->chunks.clear();
+	this->chunkPositions.clear();
 	for (int x = 0; x < chunkX; x++) {
 		for (int y = 0; y < WORLD_HEIGHT; y++) {
 			for (int z = 0; z < chunkZ; z++) {
-				chunkPositions.insert(glm::ivec3(x, y, z));
+				this->chunkPositions.insert(glm::ivec2(x, z));
+				this->chunks.push_back(Chunk(glm::vec3(x * Chunk::WIDTH, y * Chunk::HEIGHT, z * Chunk::DEPTH)));
 			}
 		}
 	}
@@ -152,30 +145,51 @@ void	Engine::render()
 
 	this->chunkManagement();
 
-	for (auto& chunk : this->chunks) {
-		for (auto& voxel : chunk.getVoxels()) {
-			this->renderer->draw(voxel, *this->shader, this->camera);
-			this->visibleVoxelsCount++;
-		}
-		this->renderer->drawBoundingBox(chunk, *this->boundingBoxShader, this->camera);
-		this->visibleChunksCount++;
-	}
+	//for (auto& chunk : this->chunks) {
+	//	for (auto& voxel : chunk.getVoxels()) {
+	//		this->renderer->draw(voxel, *this->shader, this->camera);
+	//		this->visibleVoxelsCount++;
+	//	}
+	//	//this->renderer->drawBoundingBox(chunk, *this->boundingBoxShader, this->camera);
+	//	this->visibleChunksCount++;
+	//}
 
-	//this->frustumCulling();
+	this->frustumCulling();
 }
 
 void	Engine::chunkManagement()
 {
-	glm::ivec3	cameraGridPos = glm::ivec3(this->camera.getPosition() / Chunk::WIDTH);
+	glm::vec3 cameraPos = this->camera.getPosition();
+	glm::ivec2 cameraPos2D = glm::ivec2(cameraPos.x, cameraPos.z);
+	glm::ivec2 cameraChunkPos2D = glm::ivec2(cameraPos.x / Chunk::FWIDTH, cameraPos.z / Chunk::FDEPTH);
+	int chunkRadius = (this->renderDistance / Chunk::WIDTH) - 1;
+	int squaredRenderDistance = this->renderDistance * this->renderDistance;
+	int squaredChunkRadius = chunkRadius * chunkRadius;
 
-	this->chunks.clear();
+
+	for (auto it = this->chunks.begin(); it != this->chunks.end();) {
+		glm::ivec2 chunkPos2D = it->getPosition2D();
+		glm::vec3 chunkPos = glm::vec3(chunkPos2D.x, 0, chunkPos2D.y);
+		glm::vec2 diff = cameraPos2D - chunkPos2D;
+
+		if (glm::dot(diff, diff) > squaredRenderDistance) {
+			this->chunkPositions.erase(chunkPos2D / Chunk::WIDTH);
+			std::swap(*it, this->chunks.back());
+			this->chunks.pop_back();
+		} else {
+			it++;
+		}
+	}
+
+	this->chunks.reserve(chunkRadius * chunkRadius);
 	for (int x = -chunkRadius; x <= chunkRadius; x++) {
-		for (int y = -chunkRadius; y <= chunkRadius; y++) {
-			for (int z = -chunkRadius; z <= chunkRadius; z++) {
-				glm::ivec3 gridPos = cameraGridPos + glm::ivec3(x, y, z);
-				if (chunkPositions.count(gridPos)) {
-					this->chunks.push_back(Chunk(glm::vec3(gridPos) * Chunk::WIDTH));
-				}
+		for (int z = -chunkRadius; z <= chunkRadius; z++) {
+			glm::ivec2 chunkPos2D = cameraChunkPos2D + glm::ivec2(x, z);
+			glm::vec2 diff = chunkPos2D - cameraChunkPos2D;
+
+			if (glm::dot(diff, diff) <= squaredChunkRadius && this->chunkPositions.find(chunkPos2D) == this->chunkPositions.end()) {
+				this->chunkPositions.insert(chunkPos2D);
+				this->chunks.push_back(Chunk(glm::vec3(chunkPos2D.x * Chunk::WIDTH, 0, chunkPos2D.y * Chunk::DEPTH)));
 			}
 		}
 	}
@@ -211,6 +225,7 @@ void	Engine::frustumCulling()
 		}
 
 		if (inside) {
+			chunk.generate();
 			for (const auto& voxel : chunk.getVoxels()) {
 				this->renderer->draw(voxel, *this->shader, this->camera);
 				this->visibleVoxelsCount++;

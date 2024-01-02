@@ -3,7 +3,7 @@
 Voxel::Voxel()
 {}
 
-Voxel::Voxel(glm::vec3 position, short t) : position(position), type(t), visible(false)
+Voxel::Voxel(glm::vec3 position, short t) : position(position), type(t)
 {}
 
 Voxel::~Voxel()
@@ -32,17 +32,7 @@ float Voxel::getSize() const
 	return 1.0f;
 }
 
-bool	Voxel::isVisible() const
-{
-	return this->visible;
-}
-
 void	Voxel::setPosition(glm::vec3 position)
 {
 	this->position = position;
-}
-
-void	Voxel::setVisible(bool v)
-{
-	this->visible = v;
 }
