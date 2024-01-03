@@ -9,7 +9,9 @@ Engine::Engine()
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+	#ifdef __APPLE__
+		glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+	#endif
 
 	this->window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "ft_vox", nullptr, nullptr);
 	if (!this->window) {
@@ -34,7 +36,7 @@ Engine::Engine()
 	ImGui_ImplOpenGL3_Init("#version 410");
 	ImGui::StyleColorsDark();
 
-	std::string path = BASE_PATH;
+	std::string path = RES_PATH + std::string("shaders/");
 	this->shader = new Shader((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
 	this->boundingBoxShader = new Shader((path + "boundingBoxVertex.glsl").c_str(), (path + "boundingBoxFragment.glsl").c_str());
 	this->renderer = new Renderer();
@@ -47,6 +49,10 @@ Engine::Engine()
 	glEnable(GL_CULL_FACE);
 	glCullFace(GL_BACK);
 	glFrontFace(GL_CCW);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	textRenderer = new TextRenderer(RES_PATH + std::string("fonts/FiraCode.ttf"), glm::ortho(0.0f, static_cast<float>(WINDOW_WIDTH), 0.0f, static_cast<float>(WINDOW_HEIGHT)));
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -61,6 +67,7 @@ Engine::~Engine()
 	delete this->shader;
 	delete this->boundingBoxShader;
 	delete this->renderer;
+	delete this->textRenderer;
 
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
@@ -82,8 +89,15 @@ void	Engine::run()
 		float currentFrame = glfwGetTime();
 		this->deltaTime = currentFrame - lastFrame;
 		this->lastFrame = currentFrame;
+		this->frameCount++;
+		this->lastTime += this->deltaTime;
 
-		this->updateUI();
+		if (this->lastTime >= 1.0f) {
+			this->fps = this->frameCount / this->lastTime;
+			this->frameCount = 0;
+			this->lastTime = 0;
+		}
+
 		this->camera.processKeyboard(deltaTime);
 
 		glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
@@ -91,6 +105,8 @@ void	Engine::run()
 
 		this->render();
 
+		//this->textRenderer->renderText("FPS: " + std::to_string(this->fps), 25.0f, 25.0f, 1.0f, glm::vec3(1.0f, 1.0f, 1.0f));
+		this->updateUI();
 		ImGui::Render();
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 

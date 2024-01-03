@@ -9,9 +9,9 @@
 #define WORLD_HEIGHT	1
 
 #ifdef __linux__	// linux
-#define BASE_PATH		"/home/gkehren/Documents/ft_vox/ressources/"
+#define RES_PATH		"/home/gkehren/Documents/ft_vox/ressources/"
 #elif __APPLE__		// Mac
-#define BASE_PATH		"/Users/gkehren/Documents/ft_vox/ressources/"
+#define RES_PATH		"/Users/gkehren/Documents/ft_vox/ressources/"
 #endif
 
 enum TextureType {

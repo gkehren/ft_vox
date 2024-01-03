@@ -82,11 +82,11 @@ Renderer::Renderer()
 	glBindVertexArray(0);
 
 	// Textures
-	std::string path = BASE_PATH;
-	this->texture[TEXTURE_GRASS] = loadTexture((path + "textures/grass.jpg").c_str());
-	this->texture[TEXTURE_DIRT] = loadTexture((path + "textures/dirt.jpg").c_str());
-	this->texture[TEXTURE_STONE] = loadTexture((path + "textures/stone.jpg").c_str());
-	this->texture[TEXTURE_COBBLESTONE] = loadTexture((path + "textures/cobblestone.jpg").c_str());
+	std::string path = RES_PATH + std::string("textures/");
+	this->texture[TEXTURE_GRASS] = loadTexture((path + "grass.jpg").c_str());
+	this->texture[TEXTURE_DIRT] = loadTexture((path + "dirt.jpg").c_str());
+	this->texture[TEXTURE_STONE] = loadTexture((path + "stone.jpg").c_str());
+	this->texture[TEXTURE_COBBLESTONE] = loadTexture((path + "cobblestone.jpg").c_str());
 }
 
 Renderer::~Renderer()

@@ -20,6 +20,7 @@
 #include <Chunk/Chunk.hpp>
 #include <Renderer/Renderer.hpp>
 #include <Camera/Camera.hpp>
+#include <Renderer/TextRenderer.hpp>
 #include <utils.hpp>
 
 struct ChunkHasher {
@@ -39,10 +40,14 @@ class Engine {
 
 		float					deltaTime;
 		float					lastFrame;
+		float					frameCount;
+		float					lastTime;
+		float					fps;
 
 		Shader*					shader;
 		Shader*					boundingBoxShader;
 		Renderer*				renderer;
+		TextRenderer*			textRenderer;
 		Camera					camera;
 
 		int						chunkX;
