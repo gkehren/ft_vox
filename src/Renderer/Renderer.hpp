@@ -16,7 +16,6 @@ class Renderer {
 		Renderer();
 		~Renderer();
 
-		void	draw(const std::vector<Chunk>& chunks, const Shader& shader, const Camera& camera) const;
 		void	draw(const Chunk& chunk, const Shader& shader, const Camera& camera) const;
 		void	draw(const Voxel& voxel, const Shader& shader, const Camera& camera) const;
 		void	drawBoundingBox(const Chunk& chunk, const Shader& shader, const Camera& camera) const;
@@ -26,6 +25,7 @@ class Renderer {
 		GLuint	VAO;
 		GLuint	VBO;
 		GLuint	EBO;
+		GLuint	instanceVBO;
 
 		GLuint	boundingBoxVAO;
 		GLuint	boundingBoxVBO;

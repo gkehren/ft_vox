@@ -73,7 +73,7 @@ Engine::~Engine()
 void	Engine::run()
 {
 	this->frustumDistance = 160.0f;
-	this->renderDistance = 128;
+	this->renderDistance = 160;
 	this->chunkX = 4;
 	this->chunkZ = 4;
 	this->generateChunks();
@@ -144,16 +144,6 @@ void	Engine::render()
 	this->visibleVoxelsCount = 0;
 
 	this->chunkManagement();
-
-	//for (auto& chunk : this->chunks) {
-	//	for (auto& voxel : chunk.getVoxels()) {
-	//		this->renderer->draw(voxel, *this->shader, this->camera);
-	//		this->visibleVoxelsCount++;
-	//	}
-	//	//this->renderer->drawBoundingBox(chunk, *this->boundingBoxShader, this->camera);
-	//	this->visibleChunksCount++;
-	//}
-
 	this->frustumCulling();
 }
 
@@ -226,41 +216,9 @@ void	Engine::frustumCulling()
 
 		if (inside) {
 			chunk.generate();
-			for (const auto& voxel : chunk.getVoxels()) {
-				this->renderer->draw(voxel, *this->shader, this->camera);
-				this->visibleVoxelsCount++;
-			}
+			this->renderer->draw(chunk, *this->shader, this->camera);
 			this->visibleChunksCount++;
+			this->visibleVoxelsCount += chunk.getVoxels().size();
 		}
 	}
 }
-
-//void	Engine::occlusionCulling(std::vector<Chunk>& visibleChunks)
-//{
-//	for (auto& chunk : visibleChunks) {
-//		for (auto& voxel : chunk.getVoxelsSorted(this->camera.getPosition())) {
-//			GLuint query;
-//			glGenQueries(1, &query);
-
-//			glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-//			glDepthMask(GL_FALSE);
-
-//			glBeginQuery(GL_SAMPLES_PASSED, query);
-//			this->renderer->drawBoundingBox(voxel, *this->boundingBoxShader, this->camera);
-//			glEndQuery(GL_SAMPLES_PASSED);
-
-//			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-//			glDepthMask(GL_TRUE);
-
-//			GLuint samples;
-//			glGetQueryObjectuiv(query, GL_QUERY_RESULT, &samples);
-
-//			if (samples > 0) {
-//				this->renderer->draw(voxel, *this->shader, this->camera);
-//				this->visibleVoxelsCount++;
-//			}
-
-//			glDeleteQueries(1, &query);
-//		}
-//	}
-//}

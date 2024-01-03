@@ -11,6 +11,9 @@ class Voxel {
 		Voxel(glm::vec3 position, short type);
 		~Voxel();
 
+		bool		isVisible() const;
+		void		setVisible(bool visible);
+
 		glm::mat4	getModelMatrix() const;
 		glm::vec3	getPosition() const;
 		float		getSize() const;
@@ -21,4 +24,5 @@ class Voxel {
 	private:
 		glm::vec3	position;
 		short		type;
+		bool		visible;
 };

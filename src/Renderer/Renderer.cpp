@@ -2,70 +2,6 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image/stb_image.h>
 
-static float vertices[] = {
-	// Front
-	-0.5f, -0.5f,  0.5f, 0.0f, 0.0f,
-	 0.5f, -0.5f,  0.5f, 1.0f, 0.0f,
-	 0.5f,  0.5f,  0.5f, 1.0f, 1.0f,
-	-0.5f,  0.5f,  0.5f, 0.0f, 1.0f,
-
-	// Back
-	0.5f, -0.5f, -0.5f, 0.0f, 0.0f,
-   -0.5f, -0.5f, -0.5f, 1.0f, 0.0f,
-   -0.5f,  0.5f, -0.5f, 1.0f, 1.0f,
-	0.5f,  0.5f, -0.5f, 0.0f, 1.0f,
-
-	// Left
-   -0.5f, -0.5f, -0.5f, 0.0f, 0.0f,
-   -0.5f, -0.5f,  0.5f, 1.0f, 0.0f,
-   -0.5f,  0.5f,  0.5f, 1.0f, 1.0f,
-   -0.5f,  0.5f, -0.5f, 0.0f, 1.0f,
-
-	// Right
-	0.5f, -0.5f,  0.5f, 0.0f, 0.0f,
-	0.5f, -0.5f, -0.5f, 1.0f, 0.0f,
-	0.5f,  0.5f, -0.5f, 1.0f, 1.0f,
-	0.5f,  0.5f,  0.5f, 0.0f, 1.0f,
-
-	// Top
-   -0.5f,  0.5f,  0.5f, 0.0f, 0.0f,
-	0.5f,  0.5f,  0.5f, 1.0f, 0.0f,
-	0.5f,  0.5f, -0.5f, 1.0f, 1.0f,
-   -0.5f,  0.5f, -0.5f, 0.0f, 1.0f,
-
-	// Bottom
-   -0.5f, -0.5f, -0.5f, 0.0f, 0.0f,
-	0.5f, -0.5f, -0.5f, 1.0f, 0.0f,
-	0.5f, -0.5f,  0.5f, 1.0f, 1.0f,
-   -0.5f, -0.5f,  0.5f, 0.0f, 1.0f,
-};
-
-static unsigned int indices[] = {
-	// Front
-	0, 1, 2, 2, 3, 0,
-
-	// Back
-	4, 5, 6, 6, 7, 4,
-
-	// Left
-	8, 9, 10, 10, 11, 8,
-
-	// Right
-	12, 13, 14, 14, 15, 12,
-
-	// Top
-	16, 17, 18, 18, 19, 16,
-
-	// Bottom
-	20, 21, 22, 22, 23, 20
-};
-
-static unsigned int indicesBoundingbox[] = {
-	0, 1, 1, 2, 2, 3, 3, 0,
-	4, 5, 5, 6, 6, 7, 7, 4,
-	0, 4, 1, 5, 2, 6, 3, 7
-};
-
 static GLuint loadTexture(const char* path)
 {
 	GLuint textureID;
@@ -106,6 +42,7 @@ static GLuint loadTexture(const char* path)
 
 Renderer::Renderer()
 {
+	// Instancing
 	glGenVertexArrays(1, &this->VAO);
 	glBindVertexArray(this->VAO);
 
@@ -120,6 +57,14 @@ Renderer::Renderer()
 	glGenBuffers(1, &this->EBO);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->EBO);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+	glGenBuffers(1, &this->instanceVBO);
+	glBindBuffer(GL_ARRAY_BUFFER, this->instanceVBO);
+	for (unsigned int i = 0; i < 4; i++) {
+		glEnableVertexAttribArray(2 + i);
+		glVertexAttribPointer(2 + i, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * i));
+		glVertexAttribDivisor(2 + i, 1);
+	}
 
 	glBindVertexArray(0);
 
@@ -150,27 +95,35 @@ Renderer::~Renderer()
 	glDeleteVertexArrays(1, &this->VAO);
 	glDeleteBuffers(1, &this->VBO);
 	glDeleteBuffers(1, &this->EBO);
+	glDeleteBuffers(1, &this->instanceVBO);
 	glDeleteVertexArrays(1, &this->boundingBoxVAO);
 	glDeleteBuffers(1, &this->boundingBoxVBO);
 	glDeleteBuffers(1, &this->boundingBoxEBO);
 }
 
-void	Renderer::draw(const Voxel& voxel, const Shader& shader, const Camera& camera) const
+void	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& camera) const
 {
-	short type = voxel.getType();
-	glBindTexture(GL_TEXTURE_2D, this->texture[type]);
-
 	shader.use();
 
 	shader.setMat4("view", camera.getViewMatrix());
 	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
-	shader.setMat4("model", voxel.getModelMatrix());
 	shader.setInt("textureSampler", 0);
 
+	glBindTexture(GL_TEXTURE_2D, this->texture[TEXTURE_COBBLESTONE]);
+	glBindBuffer(GL_ARRAY_BUFFER, this->instanceVBO);
+	glBufferData(GL_ARRAY_BUFFER, chunk.getVoxels().size() * sizeof(glm::mat4), NULL, GL_STATIC_DRAW);
+
+	glm::mat4* modelMatrices = (glm::mat4*)glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+	for (unsigned int i = 0; i < chunk.getVoxels().size(); i++) {
+		glm::mat4 model = glm::mat4(1.0f);
+		model = glm::translate(model, chunk.getVoxels()[i].getPosition());
+		modelMatrices[i] = model;
+	}
+	glUnmapBuffer(GL_ARRAY_BUFFER);
+
 	glBindVertexArray(this->VAO);
-	glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+	glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, chunk.getVoxels().size());
 	glBindVertexArray(0);
-	glUseProgram(0);
 }
 
 void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const Camera& camera) const

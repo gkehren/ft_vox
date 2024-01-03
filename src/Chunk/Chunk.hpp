@@ -27,6 +27,7 @@ class	Chunk {
 		std::vector<glm::mat4>		getModelMatrices() const;
 		const glm::vec3&			getPosition() const;
 		const glm::ivec2&			getPosition2D() const;
+		const std::vector<Voxel>&	getVoxels() const;
 		std::vector<Voxel>&			getVoxels();
 		std::vector<Voxel>&			getVoxelsSorted(const glm::vec3& position);
 		float						getRadius() const;

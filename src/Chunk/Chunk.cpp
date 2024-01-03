@@ -43,6 +43,11 @@ const glm::ivec2&	Chunk::getPosition2D() const
 	return (this->position2D);
 }
 
+const std::vector<Voxel>&	Chunk::getVoxels() const
+{
+	return (this->voxels);
+}
+
 std::vector<Voxel>&	Chunk::getVoxels()
 {
 	return (this->voxels);
