@@ -8,8 +8,8 @@ ifeq ($(UNAME_S),Linux)
 	INCDIR = -I src -I/usr/include/freetype2
 endif
 ifeq ($(UNAME_S),Darwin)    # Darwin is for MacOS
-    LDFLAGS = -framework OpenGL -lglfw -L/opt/homebrew/lib
-	INCDIR = -I src -I /opt/homebrew/include
+    LDFLAGS = -framework OpenGL -lglfw -lfreetype -L/opt/homebrew/lib
+	INCDIR = -I src -I /opt/homebrew/include/
 endif
 # ==================
 

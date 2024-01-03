@@ -111,7 +111,7 @@ void	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& came
 
 	glBindTexture(GL_TEXTURE_2D, this->texture[TEXTURE_COBBLESTONE]);
 	glBindBuffer(GL_ARRAY_BUFFER, this->instanceVBO);
-	glBufferData(GL_ARRAY_BUFFER, chunk.getVoxels().size() * sizeof(glm::mat4), NULL, GL_STATIC_DRAW);
+	glBufferData(GL_ARRAY_BUFFER, chunk.getVoxels().size() * sizeof(glm::mat4), NULL, GL_DYNAMIC_DRAW);
 
 	glm::mat4* modelMatrices = (glm::mat4*)glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
 	for (unsigned int i = 0; i < chunk.getVoxels().size(); i++) {
