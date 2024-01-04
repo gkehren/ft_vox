@@ -101,7 +101,7 @@ Renderer::~Renderer()
 	glDeleteBuffers(1, &this->boundingBoxEBO);
 }
 
-void	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& camera) const
+int	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& camera) const
 {
 	shader.use();
 
@@ -109,21 +109,24 @@ void	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& came
 	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
 	shader.setInt("textureSampler", 0);
 
+	std::vector<Voxel> visibleVoxels = chunk.getVoxels();
 	glBindTexture(GL_TEXTURE_2D, this->texture[TEXTURE_COBBLESTONE]);
 	glBindBuffer(GL_ARRAY_BUFFER, this->instanceVBO);
-	glBufferData(GL_ARRAY_BUFFER, chunk.getVoxels().size() * sizeof(glm::mat4), NULL, GL_DYNAMIC_DRAW);
+	glBufferData(GL_ARRAY_BUFFER, visibleVoxels.size() * sizeof(glm::mat4), NULL, GL_DYNAMIC_DRAW);
 
 	glm::mat4* modelMatrices = (glm::mat4*)glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
-	for (unsigned int i = 0; i < chunk.getVoxels().size(); i++) {
+	for (unsigned int i = 0; i < visibleVoxels.size(); i++) {
 		glm::mat4 model = glm::mat4(1.0f);
-		model = glm::translate(model, chunk.getVoxels()[i].getPosition());
+		model = glm::translate(model, visibleVoxels[i].getPosition());
 		modelMatrices[i] = model;
 	}
 	glUnmapBuffer(GL_ARRAY_BUFFER);
 
 	glBindVertexArray(this->VAO);
-	glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, chunk.getVoxels().size());
+	glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, visibleVoxels.size());
 	glBindVertexArray(0);
+
+	return (visibleVoxels.size());
 }
 
 void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const Camera& camera) const

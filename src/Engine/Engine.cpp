@@ -161,6 +161,13 @@ void	Engine::render()
 
 	this->chunkManagement();
 	this->frustumCulling();
+
+	for (auto& chunk : this->chunks) {
+		if (chunk.isVisible() == true) {
+			this->visibleVoxelsCount += this->renderer->draw(chunk, *this->shader, this->camera);
+			this->visibleChunksCount++;
+		}
+	}
 }
 
 void	Engine::chunkManagement()
@@ -232,9 +239,9 @@ void	Engine::frustumCulling()
 
 		if (inside) {
 			chunk.generate();
-			this->renderer->draw(chunk, *this->shader, this->camera);
-			this->visibleChunksCount++;
-			this->visibleVoxelsCount += chunk.getVoxels().size();
+			chunk.setVisible(true);
+		} else {
+			chunk.setVisible(false);
 		}
 	}
 }

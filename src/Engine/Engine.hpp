@@ -64,11 +64,6 @@ class Engine {
 		int		renderDistance;
 		std::unordered_set<glm::ivec2, ChunkHasher>	chunkPositions;
 		std::vector<Chunk>	chunks;
-		//std::vector<Chunk>	chunkLoadList;
-		//std::vector<Chunk>	chunkRenderList;
-		//std::vector<Chunk>	chunkUnloadList;
-		//std::vector<Chunk>	chunkVisibilityList;
-		//std::vector<Chunk>	chunkSetupList;
 
 		void	render();
 		void	frustumCulling();
