@@ -42,6 +42,9 @@ static GLuint loadTexture(const char* path)
 
 Renderer::Renderer()
 {
+	std::string path = RES_PATH;
+	this->boundingBoxShader = new Shader((path + "shaders/boundingBoxVertex.glsl").c_str(), (path + "shaders/boundingBoxFragment.glsl").c_str());
+
 	// Instancing
 	glGenVertexArrays(1, &this->VAO);
 	glBindVertexArray(this->VAO);
@@ -82,15 +85,15 @@ Renderer::Renderer()
 	glBindVertexArray(0);
 
 	// Textures
-	std::string path = RES_PATH + std::string("textures/");
-	this->texture[TEXTURE_GRASS] = loadTexture((path + "grass.jpg").c_str());
-	this->texture[TEXTURE_DIRT] = loadTexture((path + "dirt.jpg").c_str());
-	this->texture[TEXTURE_STONE] = loadTexture((path + "stone.jpg").c_str());
-	this->texture[TEXTURE_COBBLESTONE] = loadTexture((path + "cobblestone.jpg").c_str());
+	this->texture[TEXTURE_GRASS] = loadTexture((path + "textures/grass.jpg").c_str());
+	this->texture[TEXTURE_DIRT] = loadTexture((path + "textures/dirt.jpg").c_str());
+	this->texture[TEXTURE_STONE] = loadTexture((path + "textures/stone.jpg").c_str());
+	this->texture[TEXTURE_COBBLESTONE] = loadTexture((path + "textures/cobblestone.jpg").c_str());
 }
 
 Renderer::~Renderer()
 {
+	delete this->boundingBoxShader;
 	glDeleteTextures(TEXTURE_COUNT, this->texture);
 	glDeleteVertexArrays(1, &this->VAO);
 	glDeleteBuffers(1, &this->VBO);
@@ -101,40 +104,12 @@ Renderer::~Renderer()
 	glDeleteBuffers(1, &this->boundingBoxEBO);
 }
 
-int	Renderer::draw(const Chunk& chunk, const Shader& shader, const Camera& camera) const
+void	Renderer::drawBoundingBox(const Chunk& chunk, const Camera& camera) const
 {
-	shader.use();
+	boundingBoxShader->use();
 
-	shader.setMat4("view", camera.getViewMatrix());
-	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
-	shader.setInt("textureSampler", 0);
-
-	std::vector<Voxel> visibleVoxels = chunk.getVoxels();
-	glBindTexture(GL_TEXTURE_2D, this->texture[TEXTURE_COBBLESTONE]);
-	glBindBuffer(GL_ARRAY_BUFFER, this->instanceVBO);
-	glBufferData(GL_ARRAY_BUFFER, visibleVoxels.size() * sizeof(glm::mat4), NULL, GL_DYNAMIC_DRAW);
-
-	glm::mat4* modelMatrices = (glm::mat4*)glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
-	for (unsigned int i = 0; i < visibleVoxels.size(); i++) {
-		glm::mat4 model = glm::mat4(1.0f);
-		model = glm::translate(model, visibleVoxels[i].getPosition());
-		modelMatrices[i] = model;
-	}
-	glUnmapBuffer(GL_ARRAY_BUFFER);
-
-	glBindVertexArray(this->VAO);
-	glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, visibleVoxels.size());
-	glBindVertexArray(0);
-
-	return (visibleVoxels.size());
-}
-
-void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const Camera& camera) const
-{
-	shader.use();
-
-	shader.setMat4("view", camera.getViewMatrix());
-	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
+	boundingBoxShader->setMat4("view", camera.getViewMatrix());
+	boundingBoxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
 
 	glm::vec3 position = chunk.getPosition();
 
@@ -162,12 +137,42 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Shader& shader, const C
 	glBindVertexArray(0);
 }
 
-void	Renderer::drawBoundingBox(const Voxel& voxel, const Shader& shader, const Camera& camera) const
+int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 {
+	this->occlusionCulling(chunk, camera);
+
 	shader.use();
 
 	shader.setMat4("view", camera.getViewMatrix());
 	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
+	shader.setInt("textureSampler", 0);
+
+	std::vector<Voxel> visibleVoxels = chunk.getVisibleVoxels();
+	glBindTexture(GL_TEXTURE_2D, this->texture[TEXTURE_COBBLESTONE]);
+	glBindBuffer(GL_ARRAY_BUFFER, this->instanceVBO);
+	glBufferData(GL_ARRAY_BUFFER, visibleVoxels.size() * sizeof(glm::mat4), NULL, GL_DYNAMIC_DRAW);
+
+	glm::mat4* modelMatrices = (glm::mat4*)glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+	for (unsigned int i = 0; i < visibleVoxels.size(); i++) {
+		glm::mat4 model = glm::mat4(1.0f);
+		model = glm::translate(model, visibleVoxels[i].getPosition());
+		modelMatrices[i] = model;
+	}
+	glUnmapBuffer(GL_ARRAY_BUFFER);
+
+	glBindVertexArray(this->VAO);
+	glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0, visibleVoxels.size());
+	glBindVertexArray(0);
+
+	return (visibleVoxels.size());
+}
+
+void	Renderer::drawBoundingBox(const Voxel& voxel, const Camera& camera) const
+{
+	boundingBoxShader->use();
+
+	boundingBoxShader->setMat4("view", camera.getViewMatrix());
+	boundingBoxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
 
 	glm::vec3 position = voxel.getPosition();
 
@@ -195,4 +200,79 @@ void	Renderer::drawBoundingBox(const Voxel& voxel, const Shader& shader, const C
 
 	glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, 0);
 	glBindVertexArray(0);
+}
+
+void	Renderer::occlusionCulling(Chunk& chunk, const Camera& camera)
+{
+	const int blockSize = 4;
+
+	for (int x = 0; x < Chunk::WIDTH; x += blockSize) {
+		for (int y = 0; y < Chunk::HEIGHT; y += blockSize) {
+			for (int z = 0; z < Chunk::DEPTH; z += blockSize) {
+				if (isBlockOccluded(chunk, x, y, z, blockSize, camera)) {
+					for (int dx = 0; dx < blockSize; ++dx) {
+						for (int dy = 0; dy < blockSize; ++dy) {
+							for (int dz = 0; dz < blockSize; ++dz) {
+								chunk.getVoxel(x + dx, y + dy, z + dz).setVisible(false);
+							}
+						}
+					}
+				} else {
+					for (int dx = 0; dx < blockSize; ++dx) {
+						for (int dy = 0; dy < blockSize; ++dy) {
+							for (int dz = 0; dz < blockSize; ++dz) {
+								chunk.getVoxel(x + dx, y + dy, z + dz).setVisible(true);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+bool	Renderer::isBlockOccluded(Chunk& chunk, int x, int y, int z, int blockSize, const Camera& camera)
+{
+	glm::vec3 cameraPos = camera.getPosition();
+	int nearX = (cameraPos.x < x) ? x : x + blockSize - 1;
+	int nearY = (cameraPos.y < y) ? y : y + blockSize - 1;
+	int nearZ = (cameraPos.z < z) ? z : z + blockSize - 1;
+	int farX = (cameraPos.x < x) ? x + blockSize - 1 : x;
+	int farY = (cameraPos.y < y) ? y + blockSize - 1 : y;
+	int farZ = (cameraPos.z < z) ? z + blockSize - 1 : z;
+
+	return isVoxelOccluded(chunk.getVoxel(nearX, nearY, nearZ), camera) &&
+		isVoxelOccluded(chunk.getVoxel(farX, farY, farZ), camera);
+}
+
+bool	Renderer::isVoxelOccluded(const Voxel& voxel, const Camera& camera)
+{
+	GLuint query;
+
+	if (queries.find(&voxel) == queries.end()) {
+		glGenQueries(1, &query);
+		queries[&voxel] = query;
+	} else {
+		query = queries[&voxel];
+	}
+
+	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+	glDepthMask(GL_FALSE);
+
+	glBeginQuery(GL_SAMPLES_PASSED, query);
+	this->drawBoundingBox(voxel, camera);
+	glEndQuery(GL_SAMPLES_PASSED);
+
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glDepthMask(GL_TRUE);
+
+	GLuint sample;
+	glGetQueryObjectuiv(query, GL_QUERY_RESULT_NO_WAIT, &sample);
+	samples[&voxel] = sample;
+
+	if (samples.find(&voxel) != samples.end()) {
+		return (samples[&voxel] == 0);
+	} else {
+		return false;
+	}
 }

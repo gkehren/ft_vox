@@ -38,7 +38,6 @@ Engine::Engine()
 
 	std::string path = RES_PATH + std::string("shaders/");
 	this->shader = new Shader((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
-	this->boundingBoxShader = new Shader((path + "boundingBoxVertex.glsl").c_str(), (path + "boundingBoxFragment.glsl").c_str());
 	this->renderer = new Renderer();
 	this->camera.setWindow(this->window);
 
@@ -65,7 +64,6 @@ Engine::Engine()
 Engine::~Engine()
 {
 	delete this->shader;
-	delete this->boundingBoxShader;
 	delete this->renderer;
 	delete this->textRenderer;
 
@@ -125,7 +123,7 @@ void	Engine::updateUI()
 
 	ImGui::Text("FPS: %.1f (%.1f ms)", ImGui::GetIO().Framerate, this->deltaTime * 1000.0f);
 	ImGui::Text("Visible chunks: %d (%ld)", this->visibleChunksCount, this->chunks.size());
-	ImGui::Text("Voxel count: %d (%ld)",  this->visibleVoxelsCount, this->chunks.size() * Chunk::WIDTH * 1 * Chunk::DEPTH);
+	ImGui::Text("Voxel count: %d (%ld)",  this->visibleVoxelsCount, this->chunks.size() * Chunk::WIDTH * Chunk::HEIGHT * Chunk::DEPTH);
 	ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
 	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
 	ImGui::InputInt("Render distance", &this->renderDistance);
