@@ -9,7 +9,7 @@ ifeq ($(UNAME_S),Linux)
 endif
 ifeq ($(UNAME_S),Darwin)    # Darwin is for MacOS
     LDFLAGS = -framework OpenGL -lglfw -lfreetype -L/opt/homebrew/lib
-	INCDIR = -I src -I /opt/homebrew/include/
+	INCDIR = -I src -I /opt/homebrew/include/ -I /opt/homebrew/include/freetype2
 endif
 # ==================
 
