@@ -33,3 +33,5 @@
 
 .vscode
 imgui.ini
+
+*.nsys-rep

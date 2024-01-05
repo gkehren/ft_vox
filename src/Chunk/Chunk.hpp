@@ -29,9 +29,10 @@ class	Chunk {
 		const glm::vec3&			getPosition() const;
 		const glm::ivec2&			getPosition2D() const;
 
+		Voxel&						getVoxel(int x, int y, int z);
 		const std::vector<Voxel>&	getVoxels() const;
-		const std::vector<Voxel>	getVisibleVoxels(const Camera& camera) const;
-		std::vector<Voxel>&			getVoxelsSorted(const glm::vec3& position);
+		const std::vector<Voxel>&	getVoxelsSorted(const glm::vec3& position);
+		const std::vector<Voxel>	getVisibleVoxels() const;
 		float						getRadius() const;
 
 		bool						isVisible() const;
@@ -42,9 +43,5 @@ class	Chunk {
 		glm::ivec2				position2D;
 		std::vector<Voxel>		voxels;
 		float					radius;
-
 		bool					visible;
-
-		bool					isVoxelVisible(const Camera& camera, const Voxel& voxel) const;
-		bool					isRayIntersectingVoxel(const glm::vec3& rayOrigin, const glm::vec3& rayDirection, const glm::vec3& voxelPosition) const;
 };

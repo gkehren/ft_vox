@@ -4,10 +4,23 @@ Voxel::Voxel()
 {}
 
 Voxel::Voxel(glm::vec3 position, short t) : position(position), type(t)
-{}
+{
+	// WARNING IF NOTHING IS DISPLAYED, put this->visible = true;
+	this->visible = false;
+}
 
 Voxel::~Voxel()
 {}
+
+bool	Voxel::isVisible() const
+{
+	return this->visible;
+}
+
+void	Voxel::setVisible(bool visible)
+{
+	this->visible = visible;
+}
 
 glm::mat4	Voxel::getModelMatrix() const
 {
