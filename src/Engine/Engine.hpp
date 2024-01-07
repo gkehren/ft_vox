@@ -49,17 +49,16 @@ class Engine {
 		TextRenderer*			textRenderer;
 		Camera					camera;
 
-		int						chunkX;
-		int						chunkZ;
-
 		void	updateUI();
+		bool	wireframeMode;
+		bool	chunkBorders;
 		int		visibleChunksCount;
 		int		visibleVoxelsCount;
 
 		// Chunk management
-		void	generateChunks();
-		int		renderDistance;
+		int					renderDistance;
 		std::vector<Chunk>	chunks;
+		std::unordered_set<glm::ivec2, ChunkHasher>	chunkPositions;
 
 		void	render();
 		void	frustumCulling();

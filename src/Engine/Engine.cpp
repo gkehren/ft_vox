@@ -38,7 +38,8 @@ Engine::Engine()
 
 	std::string path = RES_PATH + std::string("shaders/");
 	this->shader = new Shader((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
-	this->renderer = new Renderer();
+	this->renderDistance = 160;
+	this->renderer = new Renderer(WINDOW_WIDTH, WINDOW_HEIGHT, this->renderDistance);
 	this->camera.setWindow(this->window);
 
 	glActiveTexture(GL_TEXTURE0);
@@ -52,6 +53,9 @@ Engine::Engine()
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	textRenderer = new TextRenderer(RES_PATH + std::string("fonts/FiraCode.ttf"), glm::ortho(0.0f, static_cast<float>(WINDOW_WIDTH), 0.0f, static_cast<float>(WINDOW_HEIGHT)));
+
+	this->wireframeMode = false;
+	this->chunkBorders = false;
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -77,9 +81,6 @@ Engine::~Engine()
 
 void	Engine::run()
 {
-	this->renderDistance = 160;
-	this->chunkX = 4;
-	this->chunkZ = 4;
 	this->chunks.push_back(Chunk(glm::vec3(0, 0, 0)));
 
 	while (!glfwWindowShouldClose(this->window)) {
@@ -123,30 +124,18 @@ void	Engine::updateUI()
 	ImGui::Text("Voxel count: %d (%ld)",  this->visibleVoxelsCount, this->chunks.size() * Chunk::SIZE * Chunk::HEIGHT * Chunk::SIZE);
 	ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
 	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
-	ImGui::InputInt("Render distance", &this->renderDistance);
 
-	ImGui::InputInt("Chunk X", &this->chunkX);
-	ImGui::InputInt("Chunk Z", &this->chunkZ);
-
-	if (ImGui::Button("Regenerate chunks")) {
-		this->generateChunks();
+	ImGui::Checkbox("Wireframe", &this->wireframeMode);
+	if (this->wireframeMode) {
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+	} else {
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	}
+	ImGui::Checkbox("Chunk borders", &this->chunkBorders);
 
 	ImGui::End();
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-}
-
-void	Engine::generateChunks()
-{
-	this->chunks.clear();
-	for (int x = 0; x < chunkX; x++) {
-		for (int y = 0; y < 1; y++) {
-			for (int z = 0; z < chunkZ; z++) {
-				this->chunks.push_back(Chunk(glm::vec3(x * Chunk::SIZE, y * Chunk::HEIGHT, z * Chunk::SIZE)));
-			}
-		}
-	}
 }
 
 void	Engine::render()
@@ -154,86 +143,90 @@ void	Engine::render()
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
 
-	//this->chunkManagement();
-	//this->frustumCulling();
+	this->chunkManagement();
+	this->frustumCulling();
 
 	for (auto& chunk : this->chunks) {
-		this->renderer->drawBoundingBox(chunk, this->camera);
-		this->renderer->draw(chunk, *this->shader, this->camera);
+		if (chunk.isVisible()) {
+			this->visibleVoxelsCount += this->renderer->draw(chunk, *this->shader, this->camera);
+			this->visibleChunksCount++;
+			if (chunkBorders)
+				this->renderer->drawBoundingBox(chunk, this->camera);
+		}
 	}
 }
 
 void	Engine::chunkManagement()
 {
-	//glm::vec3 cameraPos = this->camera.getPosition();
-	//glm::ivec2 cameraPos2D = glm::ivec2(cameraPos.x, cameraPos.z);
-	//glm::ivec2 cameraChunkPos2D = glm::ivec2(cameraPos.x / Chunk::FWIDTH, cameraPos.z / Chunk::FDEPTH);
-	//int chunkRadius = (this->renderDistance / Chunk::WIDTH) - 1;
-	//int squaredRenderDistance = this->renderDistance * this->renderDistance;
-	//int squaredChunkRadius = chunkRadius * chunkRadius;
+	glm::vec3 cameraPos = this->camera.getPosition();
+	glm::ivec2 cameraPos2D = glm::ivec2(cameraPos.x, cameraPos.z);
+	glm::ivec2 cameraChunkPos2D = glm::ivec2(cameraPos.x / Chunk::SIZE, cameraPos.z / Chunk::SIZE);
+	int chunkRadius = (this->renderDistance / Chunk::SIZE) - 1;
+	int squaredRenderDistance = this->renderDistance * this->renderDistance;
+	int squaredChunkRadius = chunkRadius * chunkRadius;
 
 
-	//for (auto it = this->chunks.begin(); it != this->chunks.end();) {
-	//	glm::ivec2 chunkPos2D = it->getPosition2D();
-	//	glm::vec3 chunkPos = glm::vec3(chunkPos2D.x, 0, chunkPos2D.y);
-	//	glm::vec2 diff = cameraPos2D - chunkPos2D;
+	for (auto it = this->chunks.begin(); it != this->chunks.end();) {
+		glm::ivec2 chunkPos2D = glm::ivec2(it->getPosition().x, it->getPosition().z);
+		glm::vec3 chunkPos = glm::vec3(chunkPos2D.x, 0, chunkPos2D.y);
+		glm::vec2 diff = cameraPos2D - chunkPos2D;
 
-	//	if (glm::dot(diff, diff) > squaredRenderDistance) {
-	//		this->chunkPositions.erase(chunkPos2D / Chunk::WIDTH);
-	//		std::swap(*it, this->chunks.back());
-	//		this->chunks.pop_back();
-	//	} else {
-	//		it++;
-	//	}
-	//}
+		if (glm::dot(diff, diff) > squaredRenderDistance) {
+			this->chunkPositions.erase(chunkPos2D / Chunk::SIZE);
+			std::swap(*it, this->chunks.back());
+			this->chunks.pop_back();
+		} else {
+			it++;
+		}
+	}
 
-	//this->chunks.reserve(chunkRadius * chunkRadius);
-	//for (int x = -chunkRadius; x <= chunkRadius; x++) {
-	//	for (int z = -chunkRadius; z <= chunkRadius; z++) {
-	//		glm::ivec2 chunkPos2D = cameraChunkPos2D + glm::ivec2(x, z);
-	//		glm::vec2 diff = chunkPos2D - cameraChunkPos2D;
+	this->chunks.reserve(chunkRadius * chunkRadius);
+	for (int x = -chunkRadius; x <= chunkRadius; x++) {
+		for (int z = -chunkRadius; z <= chunkRadius; z++) {
+			glm::ivec2 chunkPos2D = cameraChunkPos2D + glm::ivec2(x, z);
+			glm::vec2 diff = chunkPos2D - cameraChunkPos2D;
 
-	//		if (glm::dot(diff, diff) <= squaredChunkRadius && this->chunkPositions.find(chunkPos2D) == this->chunkPositions.end()) {
-	//			this->chunkPositions.insert(chunkPos2D);
-	//			this->chunks.push_back(Chunk(glm::vec3(chunkPos2D.x * Chunk::WIDTH, 0, chunkPos2D.y * Chunk::DEPTH)));
-	//		}
-	//	}
-	//}
+			if (glm::dot(diff, diff) <= squaredChunkRadius && this->chunkPositions.find(chunkPos2D) == this->chunkPositions.end()) {
+				this->chunkPositions.insert(chunkPos2D);
+				this->chunks.push_back(Chunk(glm::vec3(chunkPos2D.x * Chunk::SIZE, 0, chunkPos2D.y * Chunk::SIZE)));
+			}
+		}
+	}
 }
 
 void	Engine::frustumCulling()
 {
-	//glm::mat4	clipMatrix = this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT, this->renderDistance) * this->camera.getViewMatrix();
-	//std::array<glm::vec4, 6>	frustumPlanes;
+	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT, this->renderDistance) * this->camera.getViewMatrix();
+	std::array<glm::vec4, 6>	frustumPlanes;
 
-	//frustumPlanes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0); // Gauche
-	//frustumPlanes[1] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 0); // Droite
-	//frustumPlanes[2] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 1); // Bas
-	//frustumPlanes[3] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 1); // Haut
-	//frustumPlanes[4] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 2); // Proche
-	//frustumPlanes[5] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 2); // Lointain
+	frustumPlanes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0); // Gauche
+	frustumPlanes[1] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 0); // Droite
+	frustumPlanes[2] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 1); // Bas
+	frustumPlanes[3] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 1); // Haut
+	frustumPlanes[4] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 2); // Proche
+	frustumPlanes[5] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 2); // Lointain
 
-	//for (auto& plane : frustumPlanes) {
-	//	plane /= glm::length(glm::vec3(plane));
-	//}
+	for (auto& plane : frustumPlanes) {
+		plane /= glm::length(glm::vec3(plane));
+	}
 
-	//for (auto& chunk : this->chunks) {
-	//	glm::vec3 center = chunk.getPosition() + glm::vec3(Chunk::WIDTH, Chunk::HEIGHT, Chunk::DEPTH) / 2.0f;
-	//	float radius = chunk.getRadius();
+	for (auto& chunk : this->chunks) {
+		glm::vec3 center = chunk.getPosition() + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE) / 2.0f;
+		float radius = Chunk::RADIUS;
 
-	//	bool inside = true;
-	//	for (const auto& plane : frustumPlanes) {
-	//		float distance = glm::dot(glm::vec3(plane), center) + plane.w;
-	//		if (distance < -radius) {
-	//			inside = false;
-	//			break;
-	//		}
-	//	}
+		bool inside = true;
+		for (const auto& plane : frustumPlanes) {
+			float distance = glm::dot(glm::vec3(plane), center) + plane.w;
+			if (distance < -radius) {
+				inside = false;
+				break;
+			}
+		}
 
-	//	if (inside) {
-	//		chunk.setVisible(true);
-	//	} else {
-	//		chunk.setVisible(false);
-	//	}
-	//}
+		if (inside) {
+			chunk.setVisible(true);
+		} else {
+			chunk.setVisible(false);
+		}
+	}
 }

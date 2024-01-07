@@ -14,11 +14,13 @@
 
 class Renderer {
 	public:
-		Renderer();
+		Renderer(float screenWidth, float screenHeight, float renderDistance);
 		~Renderer();
+		void	setParameters(float screenWidth, float screenHeight, float renderDistance);
 
 		int		draw(Chunk& chunk, const Shader& shader, const Camera& camera);
 		void	drawBoundingBox(const Chunk& chunk, const Camera& camera) const;
+
 
 	private:
 		Shader*	boundingBoxShader;
@@ -29,4 +31,8 @@ class Renderer {
 		GLuint	VAO;
 		GLuint	VBO;
 		GLuint	texture[TEXTURE_COUNT];
+
+		float	screenWidth;
+		float	screenHeight;
+		float	renderDistance;
 };

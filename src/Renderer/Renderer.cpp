@@ -40,7 +40,7 @@ static GLuint loadTexture(const char* path)
 	return textureID;
 }
 
-Renderer::Renderer()
+Renderer::Renderer(float screenWidth, float screenHeight, float renderDistance) : screenWidth(screenWidth), screenHeight(screenHeight), renderDistance(renderDistance)
 {
 	std::string path = RES_PATH;
 	this->boundingBoxShader = new Shader((path + "shaders/boundingBoxVertex.glsl").c_str(), (path + "shaders/boundingBoxFragment.glsl").c_str());
@@ -94,6 +94,13 @@ Renderer::~Renderer()
 	glDeleteBuffers(1, &this->boundingBoxVBO);
 }
 
+void	Renderer::setParameters(float screenWidth, float screenHeight, float renderDistance)
+{
+	this->screenWidth = screenWidth;
+	this->screenHeight = screenHeight;
+	this->renderDistance = renderDistance;
+}
+
 void	Renderer::drawBoundingBox(const Chunk& chunk, const Camera& camera) const
 {
 	boundingBoxShader->use();
@@ -142,12 +149,11 @@ int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 
 	std::vector<float> data = chunk.getData();
 	glBindVertexArray(this->VAO);
-
 	glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
 	glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), &data[0], GL_STATIC_DRAW);
 	glDrawArrays(GL_TRIANGLES, 0, data.size() / 8);
 
 	glBindVertexArray(0);
 
-	return 0;
+	return (data.size() / 8);
 }

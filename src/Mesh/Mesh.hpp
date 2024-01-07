@@ -16,13 +16,14 @@ class	Mesh
 		void	addTexture(const glm::vec2& texture);
 		void	setType(TextureType type);
 
-		const std::vector<float>		getData() const;
+		const std::vector<float>&		getData();
 		const std::vector<glm::vec3>&	getVertices() const;
 		const std::vector<glm::vec3>&	getNormals() const;
 		const std::vector<glm::vec2>&	getTextures() const;
 		const TextureType&				getType() const;
 
 	private:
+		std::vector<float>		data;
 		std::vector<glm::vec3>	vertices;
 		std::vector<glm::vec3>	normals;
 		std::vector<glm::vec2>	textures;

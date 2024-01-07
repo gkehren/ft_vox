@@ -18,17 +18,21 @@ class Chunk
 	public:
 		static const int SIZE = 16;
 		static const int HEIGHT = 16;
+		static constexpr float RADIUS = 16.0f;
 
 		Chunk(const glm::vec3& position);
 		~Chunk();
 
 		const glm::vec3&				getPosition() const;
-		const std::vector<float>		getData() const;
+		const std::vector<float>&		getData();
+		bool							isVisible() const;
+		void							setVisible(bool visible);
 
 		void	generateMesh();
 
 	private:
 		glm::vec3	position;
+		bool		visible;
 
 		std::vector<std::vector<std::vector<Voxel>>>	voxels;
 		Mesh											mesh;

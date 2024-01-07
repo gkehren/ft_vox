@@ -1,6 +1,6 @@
 #include "Mesh.hpp"
 
-Mesh::Mesh() : type(TEXTURE_AIR)
+Mesh::Mesh() : type(TEXTURE_AIR), data()
 {}
 
 Mesh::~Mesh()
@@ -26,21 +26,22 @@ void	Mesh::setType(TextureType type)
 	this->type = type;
 }
 
-const std::vector<float>	Mesh::getData() const
+const std::vector<float>&	Mesh::getData()
 {
-	std::vector<float>	data;
-
-	for (size_t i = 0; i < this->vertices.size(); i++) {
-		data.push_back(this->vertices[i].x);
-		data.push_back(this->vertices[i].y);
-		data.push_back(this->vertices[i].z);
-		data.push_back(this->normals[i].x);
-		data.push_back(this->normals[i].y);
-		data.push_back(this->normals[i].z);
-		data.push_back(this->textures[i].x);
-		data.push_back(this->textures[i].y);
+	if (this->data.empty()) {
+		for (size_t i = 0; i < this->vertices.size(); i++) {
+			this->data.push_back(this->vertices[i].x);
+			this->data.push_back(this->vertices[i].y);
+			this->data.push_back(this->vertices[i].z);
+			this->data.push_back(this->normals[i].x);
+			this->data.push_back(this->normals[i].y);
+			this->data.push_back(this->normals[i].z);
+			this->data.push_back(this->textures[i].x);
+			this->data.push_back(this->textures[i].y);
+		}
 	}
-	return (data);
+
+	return (this->data);
 }
 
 const std::vector<glm::vec3>&	Mesh::getVertices() const

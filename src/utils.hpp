@@ -1,6 +1,8 @@
 #pragma once
 
 #include <iostream>
+#include <vector>
+#include <tuple>
 
 #define WINDOW_WIDTH	1920
 #define WINDOW_HEIGHT	1080
@@ -12,12 +14,12 @@
 #endif
 
 enum TextureType {
-	TEXTURE_AIR,
 	TEXTURE_GRASS,
 	TEXTURE_DIRT,
 	TEXTURE_STONE,
 	TEXTURE_COBBLESTONE,
-	TEXTURE_COUNT // Keep last
+	TEXTURE_COUNT, // Keep last
+	TEXTURE_AIR // Keep after count beacuse AIR is not a texture
 };
 
 enum Face {
@@ -27,6 +29,15 @@ enum Face {
 	BOTTOM,
 	FRONT,
 	BACK
+};
+
+const static std::vector<std::tuple<int, int, int, Face>> directions {
+	{-1, 0, 0, Face::LEFT},
+	{1, 0, 0, Face::RIGHT},
+	{0, -1, 0, Face::BOTTOM},
+	{0, 1, 0, Face::TOP},
+	{0, 0, -1, Face::BACK},
+	{0, 0, 1, Face::FRONT}
 };
 
 //// FRONT FACE
