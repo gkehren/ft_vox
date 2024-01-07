@@ -25,9 +25,13 @@ class Chunk
 		const glm::vec3&				getPosition() const;
 		const std::vector<float>		getData() const;
 
+		void	generateMesh();
+
 	private:
 		glm::vec3	position;
 
 		std::vector<std::vector<std::vector<Voxel>>>	voxels;
 		Mesh											mesh;
+
+		void	addVoxelToMesh(Voxel& voxel, int x, int y, int z);
 };

@@ -2,6 +2,7 @@
 
 #include <glm/glm.hpp>
 #include <utils.hpp>
+#include <Mesh/Mesh.hpp>
 
 class Voxel
 {
@@ -12,6 +13,8 @@ class Voxel
 		const glm::vec3&	getPosition() const;
 		const TextureType&	getType() const;
 		void				setType(const TextureType& type);
+
+		void	addFaceToMesh(Mesh& mesh, Face face);
 
 	private:
 		glm::vec3	position;

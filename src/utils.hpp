@@ -20,64 +20,134 @@ enum TextureType {
 	TEXTURE_COUNT // Keep last
 };
 
-//const float vertices[] = {
-//	// x, y, z, u, v
-//	// Front
-//	-0.5f, -0.5f,  0.5f, 0.0f, 0.0f,
-//	 0.5f, -0.5f,  0.5f, 1.0f, 0.0f,
-//	 0.5f,  0.5f,  0.5f, 1.0f, 1.0f,
-//	-0.5f,  0.5f,  0.5f, 0.0f, 1.0f,
+enum Face {
+	LEFT,
+	RIGHT,
+	TOP,
+	BOTTOM,
+	FRONT,
+	BACK
+};
 
-//	// Back
-//	0.5f, -0.5f, -0.5f, 0.0f, 0.0f,
-//   -0.5f, -0.5f, -0.5f, 1.0f, 0.0f,
-//   -0.5f,  0.5f, -0.5f, 1.0f, 1.0f,
-//	0.5f,  0.5f, -0.5f, 0.0f, 1.0f,
+//// FRONT FACE
+//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
 
-//	// Left
-//   -0.5f, -0.5f, -0.5f, 0.0f, 0.0f,
-//   -0.5f, -0.5f,  0.5f, 1.0f, 0.0f,
-//   -0.5f,  0.5f,  0.5f, 1.0f, 1.0f,
-//   -0.5f,  0.5f, -0.5f, 0.0f, 1.0f,
+//// BACK FACE
+//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
 
-//	// Right
-//	0.5f, -0.5f,  0.5f, 0.0f, 0.0f,
-//	0.5f, -0.5f, -0.5f, 1.0f, 0.0f,
-//	0.5f,  0.5f, -0.5f, 1.0f, 1.0f,
-//	0.5f,  0.5f,  0.5f, 0.0f, 1.0f,
+//// LEFT FACE
+//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
+//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
 
-//	// Top
-//   -0.5f,  0.5f,  0.5f, 0.0f, 0.0f,
-//	0.5f,  0.5f,  0.5f, 1.0f, 0.0f,
-//	0.5f,  0.5f, -0.5f, 1.0f, 1.0f,
-//   -0.5f,  0.5f, -0.5f, 0.0f, 1.0f,
+//// RIGHT FACE
+//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
+//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
 
-//	// Bottom
-//   -0.5f, -0.5f, -0.5f, 0.0f, 0.0f,
-//	0.5f, -0.5f, -0.5f, 1.0f, 0.0f,
-//	0.5f, -0.5f,  0.5f, 1.0f, 1.0f,
-//   -0.5f, -0.5f,  0.5f, 0.0f, 1.0f,
-//};
+//// TOP FACE
+//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
+//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
 
-//const unsigned int indices[] = {
-//	// Front
-//	0, 1, 2, 2, 3, 0,
-
-//	// Back
-//	4, 5, 6, 6, 7, 4,
-
-//	// Left
-//	8, 9, 10, 10, 11, 8,
-
-//	// Right
-//	12, 13, 14, 14, 15, 12,
-
-//	// Top
-//	16, 17, 18, 18, 19, 16,
-
-//	// Bottom
-//	20, 21, 22, 22, 23, 20
-//};
+//// BOTTOM FACE
+//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
+//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
 
 const unsigned int indicesBoundingbox[] = {
 	0, 1, 1, 2, 2, 3, 3, 0,
