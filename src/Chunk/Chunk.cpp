@@ -1,92 +1,153 @@
 #include "Chunk.hpp"
 
-Chunk::Chunk(const glm::vec3& pos) : position(pos), position2D(glm::ivec2(pos.x, pos.z)), visible(false)
+Chunk::Chunk(const glm::vec3& position) : position(position)
 {
-	glm::vec3 halfSize(WIDTH / 2.0f, HEIGHT / 2.0f, DEPTH / 2.0f);
-	float diagonal = glm::length(halfSize);
-	radius = diagonal * 0.5f;
+	this->voxels.resize(Chunk::SIZE);
+	for (int x = 0; x < Chunk::SIZE; x++) {
+		this->voxels[x].resize(Chunk::HEIGHT);
+		for (int y = 0; y < Chunk::HEIGHT; y++) {
+			for (int z = 0; z < Chunk::SIZE; z++) {
+				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z) + this->position));
+			}
+		}
+	}
 
-	//this->generate();
+	// DEBUG
+	// FILL MESH WITH DATA TO CREATE A CUBE AT 0, 0, 0
+	this->voxels[0][0][0].setType(TEXTURE_GRASS);
+
+	// FRONT FACE
+	this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+
+	// BACK FACE
+	this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+
+	// LEFT FACE
+	this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
+	this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+
+	// RIGHT FACE
+	this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
+	this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+
+	// TOP FACE
+	this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
+	this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+
+	// BOTTOM FACE
+	this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
+	this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
+	this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
+	this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+	this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+	this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+	this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+
+	this->mesh.setType(TEXTURE_GRASS);
 }
 
 Chunk::~Chunk()
 {}
-
-void	Chunk::generate()
-{
-	if (!this->voxels.empty())
-		return;
-	for (int x = 0; x < WIDTH; x++) {
-		for (int y = 0; y < HEIGHT; y++) {
-			for (int z = 0; z < DEPTH; z++) {
-				//TextureType randomTexture = static_cast<TextureType>(std::rand() % TEXTURE_COUNT);
-				this->voxels.push_back(Voxel(glm::vec3(x, y, z) + position, TEXTURE_COBBLESTONE));
-			}
-		}
-	}
-}
-
-std::vector<glm::mat4>	Chunk::getModelMatrices() const
-{
-	std::vector<glm::mat4>	modelMatrices;
-	for (const Voxel& voxel : this->voxels) {
-		modelMatrices.push_back(voxel.getModelMatrix());
-	}
-	return (modelMatrices);
-}
 
 const glm::vec3&	Chunk::getPosition() const
 {
 	return (this->position);
 }
 
-const glm::ivec2&	Chunk::getPosition2D() const
+const std::vector<float>	Chunk::getData() const
 {
-	return (this->position2D);
-}
-
-Voxel&	Chunk::getVoxel(int x, int y, int z)
-{
-	return (this->voxels[x * WIDTH * HEIGHT + y * HEIGHT + z]);
-}
-
-const std::vector<Voxel>&	Chunk::getVoxels() const
-{
-	return (this->voxels);
-}
-
-const std::vector<Voxel>&	Chunk::getVoxelsSorted(const glm::vec3& position)
-{
-	std::sort(this->voxels.begin(), this->voxels.end(), [position](const Voxel& a, const Voxel& b) {
-		float distA = glm::distance(position, a.getPosition());
-		float distB = glm::distance(position, b.getPosition());
-		return distA < distB;
-	});
-	return (this->voxels);
-}
-
-const std::vector<Voxel>	Chunk::getVisibleVoxels() const
-{
-	std::vector<Voxel>	visibleVoxels;
-	for (auto& voxel : this->voxels) {
-		if (voxel.isVisible()) {
-			visibleVoxels.push_back(voxel);
-		}
-	}
-	return (visibleVoxels);
-}
-
-float	Chunk::getRadius() const
-{
-	return (this->radius);
-}
-
-bool	Chunk::isVisible() const
-{
-	return (this->visible);
-}
-
-void	Chunk::setVisible(bool visible)
-{
-	this->visible = visible;
+	return mesh.getData();
 }

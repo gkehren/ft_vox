@@ -16,8 +16,8 @@
 #include <unordered_set>
 #include <algorithm>
 
-#include <Shader/Shader.hpp>
 #include <Chunk/Chunk.hpp>
+#include <Shader/Shader.hpp>
 #include <Renderer/Renderer.hpp>
 #include <Camera/Camera.hpp>
 #include <Renderer/TextRenderer.hpp>
@@ -45,15 +45,12 @@ class Engine {
 		float					fps;
 
 		Shader*					shader;
-		Shader*					boundingBoxShader;
 		Renderer*				renderer;
 		TextRenderer*			textRenderer;
 		Camera					camera;
 
 		int						chunkX;
 		int						chunkZ;
-
-		float					frustumDistance;
 
 		void	updateUI();
 		int		visibleChunksCount;
@@ -62,7 +59,6 @@ class Engine {
 		// Chunk management
 		void	generateChunks();
 		int		renderDistance;
-		std::unordered_set<glm::ivec2, ChunkHasher>	chunkPositions;
 		std::vector<Chunk>	chunks;
 
 		void	render();
