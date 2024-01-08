@@ -58,6 +58,7 @@ Engine::Engine()
 	this->chunkBorders = false;
 
 	// generate random seed
+	srand(time(NULL));
 	unsigned int seed = rand();
 	this->perlin = new siv::PerlinNoise(seed);
 
