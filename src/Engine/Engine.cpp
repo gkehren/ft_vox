@@ -57,12 +57,17 @@ Engine::Engine()
 	this->wireframeMode = false;
 	this->chunkBorders = false;
 
+	// generate random seed
+	unsigned int seed = rand();
+	this->perlin = new siv::PerlinNoise(seed);
+
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
 	std::cout << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
 	std::cout << "Vendor: " << glGetString(GL_VENDOR) << std::endl;
 	std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
 	std::cout << "ImGui version: " << IMGUI_VERSION << std::endl;
+	std::cout << "Perlin seed: " << seed << std::endl;
 }
 
 Engine::~Engine()
@@ -81,8 +86,6 @@ Engine::~Engine()
 
 void	Engine::run()
 {
-	this->chunks.push_back(Chunk(glm::vec3(0, 0, 0)));
-
 	while (!glfwWindowShouldClose(this->window)) {
 		float currentFrame = glfwGetTime();
 		this->deltaTime = currentFrame - lastFrame;
@@ -188,7 +191,7 @@ void	Engine::chunkManagement()
 
 			if (glm::dot(diff, diff) <= squaredChunkRadius && this->chunkPositions.find(chunkPos2D) == this->chunkPositions.end()) {
 				this->chunkPositions.insert(chunkPos2D);
-				this->chunks.push_back(Chunk(glm::vec3(chunkPos2D.x * Chunk::SIZE, 0, chunkPos2D.y * Chunk::SIZE)));
+				this->chunks.push_back(Chunk(glm::vec3(chunkPos2D.x * Chunk::SIZE, 0, chunkPos2D.y * Chunk::SIZE), this->perlin));
 			}
 		}
 	}

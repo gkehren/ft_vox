@@ -1,28 +1,37 @@
 #include "Chunk.hpp"
 
-Chunk::Chunk(const glm::vec3& position) : position(position)
+Chunk::Chunk(const glm::vec3& position, siv::PerlinNoise* perlin) : position(position)
 {
 	this->voxels.resize(Chunk::SIZE);
 	for (int x = 0; x < Chunk::SIZE; x++) {
 		this->voxels[x].resize(Chunk::HEIGHT);
 		for (int y = 0; y < Chunk::HEIGHT; y++) {
 			for (int z = 0; z < Chunk::SIZE; z++) {
-				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z)));
+				double noise = perlin->noise3D_01((x + position.x) / Chunk::RADIUS, (y + position.y) / Chunk::RADIUS, (z + position.z) / Chunk::RADIUS);
+				if (noise > 0.5) {
+					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_GRASS));
+				} else if (noise > 0.4) {
+					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_DIRT));
+				} else if (noise > 0.3) {
+					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_STONE));
+				} else {
+					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
+				}
 			}
 		}
 	}
 
 	// DEBUG
 	// FILL MESH WITH DATA TO CREATE A CUBE AT 0, 0, 0
-	for (int x = 0; x < Chunk::SIZE; x++) {
-		for (int y = 0; y < 3; y++) {
-			for (int z = 0; z < Chunk::SIZE; z++) {
-				// generate random texture Type
-				TextureType type = static_cast<TextureType>(rand() % TEXTURE_COUNT);
-				this->voxels[x][y][z].setType(type);
-			}
-		}
-	}
+	//for (int x = 0; x < Chunk::SIZE; x++) {
+	//	for (int y = 0; y < 3; y++) {
+	//		for (int z = 0; z < Chunk::SIZE; z++) {
+	//			// generate random texture Type
+	//			TextureType type = static_cast<TextureType>(rand() % TEXTURE_COUNT);
+	//			this->voxels[x][y][z].setType(type);
+	//		}
+	//	}
+	//}
 	this->generateMesh();
 }
 

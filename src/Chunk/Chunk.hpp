@@ -6,6 +6,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <array>
+#include <PerlinNoise/PerlinNoise.hpp>
 
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
@@ -20,7 +21,7 @@ class Chunk
 		static const int HEIGHT = 16;
 		static constexpr float RADIUS = 16.0f;
 
-		Chunk(const glm::vec3& position);
+		Chunk(const glm::vec3& position, siv::PerlinNoise* perlin);
 		~Chunk();
 
 		const glm::vec3&				getPosition() const;

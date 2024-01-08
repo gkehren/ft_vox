@@ -8,6 +8,7 @@
 #include <imgui/imgui_impl_opengl3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_access.hpp>
+#include <PerlinNoise/PerlinNoise.hpp>
 
 #include <iostream>
 #include <stdexcept>
@@ -54,6 +55,8 @@ class Engine {
 		bool	chunkBorders;
 		int		visibleChunksCount;
 		int		visibleVoxelsCount;
+
+		siv::PerlinNoise*		perlin;
 
 		// Chunk management
 		int					renderDistance;
