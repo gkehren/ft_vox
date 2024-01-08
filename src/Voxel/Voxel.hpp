@@ -14,7 +14,7 @@ class Voxel
 		const TextureType&	getType() const;
 		void				setType(const TextureType& type);
 
-		void	addFaceToMesh(Mesh& mesh, Face face);
+		void	addFaceToMesh(Mesh& mesh, Face face, TextureType type);
 
 	private:
 		glm::vec3	position;

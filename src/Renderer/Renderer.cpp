@@ -25,8 +25,8 @@ static GLuint loadTexture(const char* path)
 
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, 0.4f);
 
 		stbi_image_free(data);
@@ -79,17 +79,19 @@ Renderer::Renderer(float screenWidth, float screenHeight, float renderDistance) 
 
 	glBindVertexArray(0);
 
-// Textures
-	this->texture[TEXTURE_GRASS] = loadTexture((path + "textures/grass.jpg").c_str());
-	this->texture[TEXTURE_DIRT] = loadTexture((path + "textures/dirt.jpg").c_str());
-	this->texture[TEXTURE_STONE] = loadTexture((path + "textures/stone.jpg").c_str());
-	this->texture[TEXTURE_COBBLESTONE] = loadTexture((path + "textures/cobblestone.jpg").c_str());
+	// Textures
+	this->textureAtlas = loadTexture((path + "textures/terrain.png").c_str());
+	//this->texture[TEXTURE_GRASS] = loadTexture((path + "textures/grass.jpg").c_str());
+	//this->texture[TEXTURE_DIRT] = loadTexture((path + "textures/dirt.jpg").c_str());
+	//this->texture[TEXTURE_STONE] = loadTexture((path + "textures/stone.jpg").c_str());
+	//this->texture[TEXTURE_COBBLESTONE] = loadTexture((path + "textures/cobblestone.jpg").c_str());
 }
 
 Renderer::~Renderer()
 {
 	delete this->boundingBoxShader;
-	glDeleteTextures(TEXTURE_COUNT, this->texture);
+	glDeleteTextures(1, &this->textureAtlas);
+	//glDeleteTextures(TEXTURE_COUNT, this->texture);
 	glDeleteVertexArrays(1, &this->boundingBoxVAO);
 	glDeleteBuffers(1, &this->boundingBoxVBO);
 }
@@ -145,7 +147,7 @@ int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 	model = glm::translate(model, chunk.getPosition());
 	shader.setMat4("model", model);
 
-	glBindTexture(GL_TEXTURE_2D, this->texture[TEXTURE_STONE]);
+	glBindTexture(GL_TEXTURE_2D, this->textureAtlas);
 
 	std::vector<float> data = chunk.getData();
 	glBindVertexArray(this->VAO);

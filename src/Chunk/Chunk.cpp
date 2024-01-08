@@ -17,7 +17,9 @@ Chunk::Chunk(const glm::vec3& position) : position(position)
 	for (int x = 0; x < Chunk::SIZE; x++) {
 		for (int y = 0; y < 3; y++) {
 			for (int z = 0; z < Chunk::SIZE; z++) {
-				this->voxels[x][y][z].setType(TEXTURE_GRASS);
+				// generate random texture Type
+				TextureType type = static_cast<TextureType>(rand() % TEXTURE_COUNT);
+				this->voxels[x][y][z].setType(type);
 			}
 		}
 	}
@@ -75,6 +77,6 @@ void	Chunk::addVoxelToMesh(Voxel& voxel, int x, int y, int z)
 
 		bool isAirOrOutside = !isInside || this->voxels[nx][ny][nz].getType() == TEXTURE_AIR;
 
-		if (isAirOrOutside) voxel.addFaceToMesh(mesh, face);
+		if (isAirOrOutside) voxel.addFaceToMesh(mesh, face, voxel.getType());
 	}
 }

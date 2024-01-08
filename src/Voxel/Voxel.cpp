@@ -21,9 +21,12 @@ void	Voxel::setType(const TextureType& type)
 	this->type = type;
 }
 
-void	Voxel::addFaceToMesh(Mesh& mesh, Face face)
+void	Voxel::addFaceToMesh(Mesh& mesh, Face face, TextureType type)
 {
 	glm::vec3	normal;
+	float		textureSize = 32.0f / 512.0f;
+	float		textureX = static_cast<float>(type % 16) * textureSize;
+	float		textureY = static_cast<float>(type / 16) * textureSize;
 
 	switch (face)
 	{
@@ -35,12 +38,12 @@ void	Voxel::addFaceToMesh(Mesh& mesh, Face face)
 			mesh.addVertex(this->position + glm::vec3(-0.5f, -0.5f, 0.5f));
 			mesh.addVertex(this->position + glm::vec3(0.5f, 0.5f, 0.5f));
 			mesh.addVertex(this->position + glm::vec3(-0.5f, 0.5f, 0.5f));
-			mesh.addTexture(glm::vec2(0.0f, 0.0f));
-			mesh.addTexture(glm::vec2(1.0f, 0.0f));
-			mesh.addTexture(glm::vec2(1.0f, 1.0f));
-			mesh.addTexture(glm::vec2(0.0f, 0.0f));
-			mesh.addTexture(glm::vec2(1.0f, 1.0f));
-			mesh.addTexture(glm::vec2(0.0f, 1.0f));
+			mesh.addTexture(glm::vec2(textureX, textureY));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX, textureY));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
 			break;
 		case Face::BACK:
 			normal = glm::vec3(0.0f, 0.0f, -1.0f);
@@ -50,12 +53,12 @@ void	Voxel::addFaceToMesh(Mesh& mesh, Face face)
 			mesh.addVertex(this->position + glm::vec3(0.5f, -0.5f, -0.5f));
 			mesh.addVertex(this->position + glm::vec3(-0.5f, 0.5f, -0.5f));
 			mesh.addVertex(this->position + glm::vec3(0.5f, 0.5f, -0.5f));
-			mesh.addTexture(glm::vec2(1.0f, 0.0f));
-			mesh.addTexture(glm::vec2(0.0f, 0.0f));
-			mesh.addTexture(glm::vec2(0.0f, 1.0f));
-			mesh.addTexture(glm::vec2(1.0f, 0.0f));
-			mesh.addTexture(glm::vec2(0.0f, 1.0f));
-			mesh.addTexture(glm::vec2(1.0f, 1.0f));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+			mesh.addTexture(glm::vec2(textureX, textureY));
+			mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+			mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
 			break;
 		case Face::LEFT:
 			normal = glm::vec3(-1.0f, 0.0f, 0.0f);
@@ -65,12 +68,12 @@ void	Voxel::addFaceToMesh(Mesh& mesh, Face face)
 			mesh.addVertex(this->position + glm::vec3(-0.5f, -0.5f, -0.5f));
 			mesh.addVertex(this->position + glm::vec3(-0.5f, 0.5f, 0.5f));
 			mesh.addVertex(this->position + glm::vec3(-0.5f, 0.5f, -0.5f));
-			mesh.addTexture(glm::vec2(0.0f, 0.0f));
-			mesh.addTexture(glm::vec2(1.0f, 0.0f));
-			mesh.addTexture(glm::vec2(1.0f, 1.0f));
-			mesh.addTexture(glm::vec2(0.0f, 0.0f));
-			mesh.addTexture(glm::vec2(1.0f, 1.0f));
-			mesh.addTexture(glm::vec2(0.0f, 1.0f));
+			mesh.addTexture(glm::vec2(textureX, textureY));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX, textureY));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
 			break;
 		case Face::RIGHT:
 			normal = glm::vec3(1.0f, 0.0f, 0.0f);
@@ -80,12 +83,12 @@ void	Voxel::addFaceToMesh(Mesh& mesh, Face face)
 			mesh.addVertex(this->position + glm::vec3(0.5f, -0.5f, 0.5f));
 			mesh.addVertex(this->position + glm::vec3(0.5f, 0.5f, -0.5f));
 			mesh.addVertex(this->position + glm::vec3(0.5f, 0.5f, 0.5f));
-			mesh.addTexture(glm::vec2(1.0f, 0.0f));
-			mesh.addTexture(glm::vec2(0.0f, 0.0f));
-			mesh.addTexture(glm::vec2(0.0f, 1.0f));
-			mesh.addTexture(glm::vec2(1.0f, 0.0f));
-			mesh.addTexture(glm::vec2(0.0f, 1.0f));
-			mesh.addTexture(glm::vec2(1.0f, 1.0f));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+			mesh.addTexture(glm::vec2(textureX, textureY));
+			mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+			mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
 			break;
 		case Face::TOP:
 			normal = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -95,12 +98,12 @@ void	Voxel::addFaceToMesh(Mesh& mesh, Face face)
 			mesh.addVertex(this->position + glm::vec3(-0.5f, 0.5f, 0.5f));
 			mesh.addVertex(this->position + glm::vec3(0.5f, 0.5f, -0.5f));
 			mesh.addVertex(this->position + glm::vec3(-0.5f, 0.5f, -0.5f));
-			mesh.addTexture(glm::vec2(0.0f, 1.0f));
-			mesh.addTexture(glm::vec2(1.0f, 1.0f));
-			mesh.addTexture(glm::vec2(1.0f, 0.0f));
-			mesh.addTexture(glm::vec2(0.0f, 1.0f));
-			mesh.addTexture(glm::vec2(1.0f, 0.0f));
-			mesh.addTexture(glm::vec2(0.0f, 0.0f));
+			mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+			mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+			mesh.addTexture(glm::vec2(textureX, textureY));
 			break;
 		case Face::BOTTOM:
 			normal = glm::vec3(0.0f, -1.0f, 0.0f);
@@ -110,12 +113,12 @@ void	Voxel::addFaceToMesh(Mesh& mesh, Face face)
 			mesh.addVertex(this->position + glm::vec3(-0.5f, -0.5f, -0.5f));
 			mesh.addVertex(this->position + glm::vec3(0.5f, -0.5f, 0.5f));
 			mesh.addVertex(this->position + glm::vec3(-0.5f, -0.5f, 0.5f));
-			mesh.addTexture(glm::vec2(0.0f, 0.0f));
-			mesh.addTexture(glm::vec2(1.0f, 0.0f));
-			mesh.addTexture(glm::vec2(1.0f, 1.0f));
-			mesh.addTexture(glm::vec2(0.0f, 0.0f));
-			mesh.addTexture(glm::vec2(1.0f, 1.0f));
-			mesh.addTexture(glm::vec2(0.0f, 1.0f));
+			mesh.addTexture(glm::vec2(textureX, textureY));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX, textureY));
+			mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
+			mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
 			break;
 	}
 	mesh.addNormal(normal);

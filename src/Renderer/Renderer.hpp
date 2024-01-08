@@ -30,7 +30,8 @@ class Renderer {
 
 		GLuint	VAO;
 		GLuint	VBO;
-		GLuint	texture[TEXTURE_COUNT];
+		//GLuint	texture[TEXTURE_COUNT];
+		GLuint	textureAtlas;
 
 		float	screenWidth;
 		float	screenHeight;
