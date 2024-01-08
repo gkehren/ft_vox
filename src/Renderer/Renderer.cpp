@@ -81,17 +81,12 @@ Renderer::Renderer(float screenWidth, float screenHeight, float renderDistance) 
 
 	// Textures
 	this->textureAtlas = loadTexture((path + "textures/terrain.png").c_str());
-	//this->texture[TEXTURE_GRASS] = loadTexture((path + "textures/grass.jpg").c_str());
-	//this->texture[TEXTURE_DIRT] = loadTexture((path + "textures/dirt.jpg").c_str());
-	//this->texture[TEXTURE_STONE] = loadTexture((path + "textures/stone.jpg").c_str());
-	//this->texture[TEXTURE_COBBLESTONE] = loadTexture((path + "textures/cobblestone.jpg").c_str());
 }
 
 Renderer::~Renderer()
 {
 	delete this->boundingBoxShader;
 	glDeleteTextures(1, &this->textureAtlas);
-	//glDeleteTextures(TEXTURE_COUNT, this->texture);
 	glDeleteVertexArrays(1, &this->boundingBoxVAO);
 	glDeleteBuffers(1, &this->boundingBoxVBO);
 }
