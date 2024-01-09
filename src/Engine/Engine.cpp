@@ -225,7 +225,8 @@ void	Engine::frustumCulling()
 
 	for (auto& chunk : this->chunks) {
 		glm::vec3 center = chunk.getPosition() + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE) / 2.0f;
-		float radius = Chunk::RADIUS;
+		glm::vec3 corner = chunk.getPosition() + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE);
+		float radius = glm::length(corner - center);;
 
 		bool inside = true;
 		for (const auto& plane : frustumPlanes) {
