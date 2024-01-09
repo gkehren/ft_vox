@@ -29,6 +29,7 @@ class Chunk
 		bool							isVisible() const;
 		void							setVisible(bool visible);
 
+		void	generateVoxel(siv::PerlinNoise* perlin);
 		void	generateMesh();
 
 	private:

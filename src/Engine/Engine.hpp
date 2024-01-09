@@ -55,13 +55,14 @@ class Engine {
 		bool	chunkBorders;
 		int		visibleChunksCount;
 		int		visibleVoxelsCount;
+		int		chunkLoadedMax;
 
 		siv::PerlinNoise*		perlin;
 
 		// Chunk management
 		int					renderDistance;
-		std::vector<Chunk>	chunks;
 		std::unordered_set<glm::ivec2, ChunkHasher>	chunkPositions;
+		std::vector<Chunk>	chunks;
 
 		void	render();
 		void	frustumCulling();

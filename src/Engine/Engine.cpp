@@ -56,6 +56,9 @@ Engine::Engine()
 
 	this->wireframeMode = false;
 	this->chunkBorders = false;
+	this->visibleChunksCount = 0;
+	this->visibleVoxelsCount = 0;
+	this->chunkLoadedMax = 10;
 
 	// generate random seed
 	srand(time(NULL));
@@ -124,8 +127,8 @@ void	Engine::updateUI()
 	ImGui::Begin("ft_vox");
 
 	ImGui::Text("FPS: %.1f (%.1f ms)", ImGui::GetIO().Framerate, this->deltaTime * 1000.0f);
-	ImGui::Text("Visible chunks: %d (%ld)", this->visibleChunksCount, this->chunks.size());
-	ImGui::Text("Voxel count: %d (%ld)",  this->visibleVoxelsCount, this->chunks.size() * Chunk::SIZE * Chunk::HEIGHT * Chunk::SIZE);
+	ImGui::Text("Visible chunks: %d", this->visibleChunksCount);
+	ImGui::Text("Voxel count: %d",  this->visibleVoxelsCount);
 	ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
 	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
 
@@ -136,6 +139,8 @@ void	Engine::updateUI()
 		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	}
 	ImGui::Checkbox("Chunk borders", &this->chunkBorders);
+	ImGui::InputInt("Render distance", &this->renderDistance);
+	ImGui::InputInt("Chunk loaded max", &this->chunkLoadedMax);
 
 	ImGui::End();
 	ImGui::Render();
@@ -168,7 +173,7 @@ void	Engine::chunkManagement()
 	int chunkRadius = (this->renderDistance / Chunk::SIZE) - 1;
 	int squaredRenderDistance = this->renderDistance * this->renderDistance;
 	int squaredChunkRadius = chunkRadius * chunkRadius;
-
+	int	chunksLoadedThisFrame = 0;
 
 	for (auto it = this->chunks.begin(); it != this->chunks.end();) {
 		glm::ivec2 chunkPos2D = glm::ivec2(it->getPosition().x, it->getPosition().z);
@@ -193,6 +198,10 @@ void	Engine::chunkManagement()
 			if (glm::dot(diff, diff) <= squaredChunkRadius && this->chunkPositions.find(chunkPos2D) == this->chunkPositions.end()) {
 				this->chunkPositions.insert(chunkPos2D);
 				this->chunks.push_back(Chunk(glm::vec3(chunkPos2D.x * Chunk::SIZE, 0, chunkPos2D.y * Chunk::SIZE), this->perlin));
+				chunksLoadedThisFrame++;
+				if (chunksLoadedThisFrame >= this->chunkLoadedMax) {
+					return;
+				}
 			}
 		}
 	}

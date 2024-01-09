@@ -1,6 +1,67 @@
 #include "Chunk.hpp"
 
-Chunk::Chunk(const glm::vec3& position, siv::PerlinNoise* perlin) : position(position)
+Chunk::Chunk(const glm::vec3& position, siv::PerlinNoise* perlin) : position(position), visible(false)
+{
+	generateVoxel(perlin);
+	generateMesh();
+}
+
+Chunk::~Chunk()
+{}
+
+const glm::vec3&	Chunk::getPosition() const
+{
+	return (this->position);
+}
+
+const std::vector<float>&	Chunk::getData()
+{
+	return mesh.getData();
+}
+
+bool	Chunk::isVisible() const
+{
+	return (this->visible);
+}
+
+void	Chunk::setVisible(bool visible)
+{
+	this->visible = visible;
+}
+
+void	Chunk::generateMesh()
+{
+	for (int x = 0; x < Chunk::SIZE; x++) {
+		for (int y = 0; y < Chunk::HEIGHT; y++) {
+			for (int z = 0; z < Chunk::SIZE; z++) {
+				if (this->voxels[x][y][z].getType() != TEXTURE_AIR) {
+					this->addVoxelToMesh(this->voxels[x][y][z], x, y, z);
+				}
+			}
+		}
+	}
+}
+
+void	Chunk::addVoxelToMesh(Voxel& voxel, int x, int y, int z)
+{
+	for (auto& dir : directions) {
+		int dx, dy, dz;
+		Face face;
+		std::tie(dx, dy, dz, face) = dir;
+
+		int nx = x + dx;
+		int ny = y + dy;
+		int nz = z + dz;
+
+		bool isInside = nx >= 0 && nx < Chunk::SIZE && ny >= 0 && ny < Chunk::HEIGHT && nz >= 0 && nz < Chunk::SIZE;
+
+		bool isAirOrOutside = !isInside || this->voxels[nx][ny][nz].getType() == TEXTURE_AIR;
+
+		if (isAirOrOutside) voxel.addFaceToMesh(mesh, face, voxel.getType());
+	}
+}
+
+void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 {
 	this->voxels.resize(Chunk::SIZE);
 
@@ -59,60 +120,4 @@ Chunk::Chunk(const glm::vec3& position, siv::PerlinNoise* perlin) : position(pos
 	//		}
 	//	}
 	//}
-	this->generateMesh();
-}
-
-Chunk::~Chunk()
-{}
-
-const glm::vec3&	Chunk::getPosition() const
-{
-	return (this->position);
-}
-
-const std::vector<float>&	Chunk::getData()
-{
-	return mesh.getData();
-}
-
-bool	Chunk::isVisible() const
-{
-	return (this->visible);
-}
-
-void	Chunk::setVisible(bool visible)
-{
-	this->visible = visible;
-}
-
-void	Chunk::generateMesh()
-{
-	for (int x = 0; x < Chunk::SIZE; x++) {
-		for (int y = 0; y < Chunk::HEIGHT; y++) {
-			for (int z = 0; z < Chunk::SIZE; z++) {
-				if (this->voxels[x][y][z].getType() != TEXTURE_AIR) {
-					this->addVoxelToMesh(this->voxels[x][y][z], x, y, z);
-				}
-			}
-		}
-	}
-}
-
-void	Chunk::addVoxelToMesh(Voxel& voxel, int x, int y, int z)
-{
-	for (auto& dir : directions) {
-		int dx, dy, dz;
-		Face face;
-		std::tie(dx, dy, dz, face) = dir;
-
-		int nx = x + dx;
-		int ny = y + dy;
-		int nz = z + dz;
-
-		bool isInside = nx >= 0 && nx < Chunk::SIZE && ny >= 0 && ny < Chunk::HEIGHT && nz >= 0 && nz < Chunk::SIZE;
-
-		bool isAirOrOutside = !isInside || this->voxels[nx][ny][nz].getType() == TEXTURE_AIR;
-
-		if (isAirOrOutside) voxel.addFaceToMesh(mesh, face, voxel.getType());
-	}
 }
