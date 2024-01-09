@@ -58,7 +58,7 @@ Engine::Engine()
 	this->chunkBorders = false;
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
-	this->chunkLoadedMax = 10;
+	this->chunkLoadedMax = 5;
 
 	// generate random seed
 	srand(time(NULL));
