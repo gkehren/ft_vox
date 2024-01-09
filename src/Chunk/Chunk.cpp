@@ -3,23 +3,50 @@
 Chunk::Chunk(const glm::vec3& position, siv::PerlinNoise* perlin) : position(position)
 {
 	this->voxels.resize(Chunk::SIZE);
+
 	for (int x = 0; x < Chunk::SIZE; x++) {
 		this->voxels[x].resize(Chunk::HEIGHT);
-		for (int y = 0; y < Chunk::HEIGHT; y++) {
-			for (int z = 0; z < Chunk::SIZE; z++) {
-				double noise = perlin->noise3D_01((x + position.x) / Chunk::RADIUS, (y + position.y) / Chunk::RADIUS, (z + position.z) / Chunk::RADIUS);
-				if (noise > 0.5) {
+		for (int z = 0; z < Chunk::SIZE; z++) {
+			// Use Perlin noise to determine the surface height at this point
+			int surfaceHeight = static_cast<int>(perlin->noise2D_01((x + position.x) / Chunk::RADIUS, (z + position.z) / Chunk::RADIUS) * Chunk::HEIGHT);
+
+			for (int y = 0; y < Chunk::HEIGHT; y++) {
+				if (y < surfaceHeight) {
+					// This voxel is below the surface, so fill it with dirt or stone
+					if (y > surfaceHeight - 5) {
+						this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_DIRT));
+					} else {
+						this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_STONE));
+					}
+				} else if (y == surfaceHeight) {
+					// This voxel is at the surface, so fill it with grass
 					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_GRASS));
-				} else if (noise > 0.4) {
-					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_DIRT));
-				} else if (noise > 0.3) {
-					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_STONE));
 				} else {
+					// This voxel is above the surface, so fill it with air
 					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
 				}
 			}
 		}
 	}
+
+	// GOOD FOR CAVE GENERATION (TWEEK THE VALUES FOR BETTER RESULTS)
+	//for (int x = 0; x < Chunk::SIZE; x++) {
+	//	this->voxels[x].resize(Chunk::HEIGHT);
+	//	for (int y = 0; y < Chunk::HEIGHT; y++) {
+	//		for (int z = 0; z < Chunk::SIZE; z++) {
+	//			double noise = perlin->noise3D_01((x + position.x) / Chunk::RADIUS, (y + position.y) / Chunk::RADIUS, (z + position.z) / Chunk::RADIUS);
+	//			if (noise > 0.5) {
+	//				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_GRASS));
+	//			} else if (noise > 0.4) {
+	//				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_DIRT));
+	//			} else if (noise > 0.3) {
+	//				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_STONE));
+	//			} else {
+	//				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
+	//			}
+	//		}
+	//	}
+	//}
 
 	// DEBUG
 	// FILL MESH WITH DATA TO CREATE A CUBE AT 0, 0, 0
