@@ -34,7 +34,8 @@ class Engine {
 	public:
 		Engine();
 		~Engine();
-		void run();
+		void	run();
+		void	perlinNoise(unsigned int seed);
 
 	private:
 		GLFWwindow*				window;

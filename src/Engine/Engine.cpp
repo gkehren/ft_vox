@@ -60,18 +60,12 @@ Engine::Engine()
 	this->visibleVoxelsCount = 0;
 	this->chunkLoadedMax = 5;
 
-	// generate random seed
-	srand(time(NULL));
-	unsigned int seed = rand();
-	this->perlin = new siv::PerlinNoise(seed);
-
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
 	std::cout << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
 	std::cout << "Vendor: " << glGetString(GL_VENDOR) << std::endl;
 	std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
 	std::cout << "ImGui version: " << IMGUI_VERSION << std::endl;
-	std::cout << "Perlin seed: " << seed << std::endl;
 }
 
 Engine::~Engine()
@@ -79,6 +73,7 @@ Engine::~Engine()
 	delete this->shader;
 	delete this->renderer;
 	delete this->textRenderer;
+	delete this->perlin;
 
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
@@ -86,6 +81,18 @@ Engine::~Engine()
 
 	glfwDestroyWindow(this->window);
 	glfwTerminate();
+}
+
+void	Engine::perlinNoise(unsigned int seed)
+{
+	if (seed <= 0) {
+		srand(time(NULL));
+		seed = rand();
+		this->perlin = new siv::PerlinNoise(seed);
+	} else {
+		this->perlin = new siv::PerlinNoise(seed);
+	}
+	std::cout << "Perlin seed: " << seed << std::endl;
 }
 
 void	Engine::run()
