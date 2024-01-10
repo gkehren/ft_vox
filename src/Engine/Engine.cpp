@@ -155,8 +155,23 @@ void	Engine::render()
 	this->chunkManagement();
 	this->frustumCulling();
 
+	int chunkCount = 0;
 	for (auto& chunk : this->chunks) {
-		if (chunk.isVisible()) {
+		if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED) {
+			chunk.generateVoxel(this->perlin);
+			chunkCount++;
+		}
+		if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED) {
+			chunk.generateMesh();
+			chunkCount++;
+		}
+		if (chunkCount >= this->chunkLoadedMax) {
+			break;
+		}
+	}
+
+	for (auto& chunk : this->chunks) {
+		if (chunk.isVisible() && chunk.getState() == ChunkState::MESHED) {
 			this->visibleVoxelsCount += this->renderer->draw(chunk, *this->shader, this->camera);
 			this->visibleChunksCount++;
 			if (chunkBorders)

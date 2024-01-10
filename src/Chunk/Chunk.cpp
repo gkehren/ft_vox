@@ -1,10 +1,7 @@
 #include "Chunk.hpp"
 
-Chunk::Chunk(const glm::vec3& position, siv::PerlinNoise* perlin) : position(position), visible(false)
-{
-	generateVoxel(perlin);
-	generateMesh();
-}
+Chunk::Chunk(const glm::vec3& position, siv::PerlinNoise* perlin) : position(position), visible(false), state(ChunkState::UNLOADED)
+{}
 
 Chunk::~Chunk()
 {}
@@ -29,8 +26,20 @@ void	Chunk::setVisible(bool visible)
 	this->visible = visible;
 }
 
+void	Chunk::setState(ChunkState state)
+{
+	this->state = state;
+}
+
+ChunkState	Chunk::getState() const
+{
+	return (this->state);
+}
+
 void	Chunk::generateMesh()
 {
+	if (state != ChunkState::GENERATED) return;
+
 	for (int x = 0; x < Chunk::SIZE; x++) {
 		for (int y = 0; y < Chunk::HEIGHT; y++) {
 			for (int z = 0; z < Chunk::SIZE; z++) {
@@ -40,6 +49,7 @@ void	Chunk::generateMesh()
 			}
 		}
 	}
+	state = ChunkState::MESHED;
 }
 
 void	Chunk::addVoxelToMesh(Voxel& voxel, int x, int y, int z)
@@ -64,8 +74,9 @@ void	Chunk::addVoxelToMesh(Voxel& voxel, int x, int y, int z)
 
 void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 {
-	this->voxels.resize(Chunk::SIZE);
+	if (state != ChunkState::UNLOADED) return;
 
+	this->voxels.resize(Chunk::SIZE);
 	for (int x = 0; x < Chunk::SIZE; x++) {
 		this->voxels[x].resize(Chunk::HEIGHT);
 		for (int z = 0; z < Chunk::SIZE; z++) {
@@ -100,6 +111,7 @@ void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 			}
 		}
 	}
+	state = ChunkState::GENERATED;
 
 	// GOOD FOR CAVE GENERATION (TWEEK THE VALUES FOR BETTER RESULTS)
 	//for (int x = 0; x < Chunk::SIZE; x++) {

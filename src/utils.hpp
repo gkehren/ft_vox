@@ -38,6 +38,13 @@ enum Face {
 	BACK
 };
 
+enum ChunkState {
+	UNLOADED,
+	GENERATED,
+	MESHED,
+	LOADED
+};
+
 const static std::vector<std::tuple<int, int, int, Face>> directions {
 	{-1, 0, 0, Face::LEFT},
 	{1, 0, 0, Face::RIGHT},

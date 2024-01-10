@@ -28,6 +28,8 @@ class Chunk
 		const std::vector<float>&		getData();
 		bool							isVisible() const;
 		void							setVisible(bool visible);
+		void							setState(ChunkState state);
+		ChunkState						getState() const;
 
 		void	generateVoxel(siv::PerlinNoise* perlin);
 		void	generateMesh();
@@ -35,6 +37,7 @@ class Chunk
 	private:
 		glm::vec3	position;
 		bool		visible;
+		ChunkState	state;
 
 		std::vector<std::vector<std::vector<Voxel>>>	voxels;
 		Mesh											mesh;
