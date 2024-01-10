@@ -69,7 +69,7 @@ void	Chunk::addVoxelToMesh(const std::vector<Chunk>& chunks, Voxel& voxel, int x
 			if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) {
 				voxel.addFaceToMesh(mesh, face, voxel.getType());
 			}
-		} else {
+		} else { // TODO: Still some empty face to fill
 			int worldX = this->getPosition().x + nx;
 			int worldY = this->getPosition().y + ny;
 			int worldZ = this->getPosition().z + nz;
