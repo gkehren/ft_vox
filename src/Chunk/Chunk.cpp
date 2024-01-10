@@ -36,7 +36,7 @@ ChunkState	Chunk::getState() const
 	return (this->state);
 }
 
-void	Chunk::generateMesh()
+void	Chunk::generateMesh(const std::vector<Chunk>& chunks)
 {
 	if (state != ChunkState::GENERATED) return;
 
@@ -44,7 +44,7 @@ void	Chunk::generateMesh()
 		for (int y = 0; y < Chunk::HEIGHT; y++) {
 			for (int z = 0; z < Chunk::SIZE; z++) {
 				if (this->voxels[x][y][z].getType() != TEXTURE_AIR) {
-					this->addVoxelToMesh(this->voxels[x][y][z], x, y, z);
+					this->addVoxelToMesh(chunks, this->voxels[x][y][z], x, y, z);
 				}
 			}
 		}
@@ -52,7 +52,7 @@ void	Chunk::generateMesh()
 	state = ChunkState::MESHED;
 }
 
-void	Chunk::addVoxelToMesh(Voxel& voxel, int x, int y, int z)
+void	Chunk::addVoxelToMesh(const std::vector<Chunk>& chunks, Voxel& voxel, int x, int y, int z)
 {
 	for (auto& dir : directions) {
 		int dx, dy, dz;
@@ -64,12 +64,44 @@ void	Chunk::addVoxelToMesh(Voxel& voxel, int x, int y, int z)
 		int nz = z + dz;
 
 		bool isInside = nx >= 0 && nx < Chunk::SIZE && ny >= 0 && ny < Chunk::HEIGHT && nz >= 0 && nz < Chunk::SIZE;
-		if (!isInside) continue;
 
-		//bool isAirOrOutside = !isInside || this->voxels[nx][ny][nz].getType() == TEXTURE_AIR;
+		if (isInside) {
+			if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) {
+				voxel.addFaceToMesh(mesh, face, voxel.getType());
+			}
+		} else {
+			int worldX = this->getPosition().x + nx;
+			int worldY = this->getPosition().y + ny;
+			int worldZ = this->getPosition().z + nz;
 
-		if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) voxel.addFaceToMesh(mesh, face, voxel.getType());
+			for (const auto& chunk : chunks) {
+				if (chunk.getState() == ChunkState::MESHED) {
+					if (chunk.contains(worldX, worldY, worldZ)) {
+						int localX = worldX - chunk.getPosition().x;
+						int localY = worldY - chunk.getPosition().y;
+						int localZ = worldZ - chunk.getPosition().z;
+
+						if (chunk.getVoxel(localX, localY, localZ).getType() == TEXTURE_AIR) {
+							voxel.addFaceToMesh(mesh, face, voxel.getType());
+						}
+						break;
+					}
+				}
+			}
+		}
 	}
+}
+
+bool	Chunk::contains(int x, int y, int z) const
+{
+	return (x >= position.x && x < position.x + Chunk::SIZE &&
+			y >= position.y && y < position.y + Chunk::HEIGHT &&
+			z >= position.z && z < position.z + Chunk::SIZE);
+}
+
+const Voxel&	Chunk::getVoxel(int x, int y, int z) const
+{
+	return (this->voxels[x][y][z]);
 }
 
 void	Chunk::generateVoxel(siv::PerlinNoise* perlin)

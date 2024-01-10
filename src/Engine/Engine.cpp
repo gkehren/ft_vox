@@ -169,7 +169,7 @@ void	Engine::render()
 			chunkCount++;
 		}
 		if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED) {
-			chunk.generateMesh();
+			chunk.generateMesh(this->chunks);
 			chunkCount++;
 		}
 		if (chunkCount >= this->chunkLoadedMax) {
