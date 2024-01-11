@@ -111,8 +111,8 @@ void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 			for (int y = 0; y < Chunk::HEIGHT; y++) {
 				if (y < surfaceHeight) {
 					// This voxel is below the surface, so fill it with dirt or stone
-					if (y > surfaceHeight - 5) {
-						this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_DIRT));
+					if (y > surfaceHeight - 3) {
+						this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_DIRT, true));
 					} else {
 						this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_STONE));
 					}
