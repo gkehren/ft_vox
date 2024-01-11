@@ -185,13 +185,10 @@ void	Renderer::loadSkybox()
 	for (GLuint i = 0; i < 6; i++) {
 		int width, height, nrChannels;
 		unsigned char *data = stbi_load((path + skyboxFaces[i]).c_str(), &width, &height, &nrChannels, 0);
-		if (data)
-		{
+		if (data) {
 			glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
 			stbi_image_free(data);
-		}
-		else
-		{
+		} else {
 			std::cout << "Failed to load texture" << std::endl;
 		}
 	}
@@ -207,11 +204,12 @@ void	Renderer::drawSkybox(const Camera& camera) const
 {
 	glDepthFunc(GL_LEQUAL);
 	this->skyboxShader->use();
+	this->skyboxShader->setInt("skybox", 1);
 	this->skyboxShader->setMat4("view", glm::mat4(glm::mat3(camera.getViewMatrix())));
 	this->skyboxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
 
 	glBindVertexArray(this->skyboxVAO);
-	glActiveTexture(GL_TEXTURE0);
+	glActiveTexture(GL_TEXTURE1);
 	glBindTexture(GL_TEXTURE_CUBE_MAP, this->skyboxTexture);
 	glDrawArrays(GL_TRIANGLES, 0, 36);
 	glBindVertexArray(0);

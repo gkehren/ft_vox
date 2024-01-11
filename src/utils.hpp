@@ -55,12 +55,12 @@ const static std::vector<std::tuple<int, int, int, Face>> directions {
 };
 
 const static std::vector<std::string> skyboxFaces {
-	"skybox/right.png",
-	"skybox/left.png",
-	"skybox/top.png",
-	"skybox/bottom.png",
-	"skybox/front.png",
-	"skybox/back.png"
+	"skybox/right.jpg",
+	"skybox/left.jpg",
+	"skybox/top.jpg",
+	"skybox/bottom.jpg",
+	"skybox/front.jpg",
+	"skybox/back.jpg"
 };
 
 const static float skyboxVertices[] = {
