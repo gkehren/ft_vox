@@ -1,6 +1,6 @@
 #include "Voxel.hpp"
 
-Voxel::Voxel(glm::vec3 position, TextureType type) : position(position), type(type)
+Voxel::Voxel(glm::vec3 position, TextureType type, bool highest) : position(position), type(type), highest(highest)
 {}
 
 Voxel::~Voxel()
@@ -19,6 +19,16 @@ const TextureType&	Voxel::getType() const
 void	Voxel::setType(const TextureType& type)
 {
 	this->type = type;
+}
+
+void	Voxel::setHighest(bool highest)
+{
+	this->highest = highest;
+}
+
+bool	Voxel::isHighest() const
+{
+	return (this->highest);
 }
 
 void	Voxel::addFaceToMesh(Mesh& mesh, Face face, TextureType type)

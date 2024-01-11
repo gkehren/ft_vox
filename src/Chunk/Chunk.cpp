@@ -69,25 +69,8 @@ void	Chunk::addVoxelToMesh(const std::vector<Chunk>& chunks, Voxel& voxel, int x
 			if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) {
 				voxel.addFaceToMesh(mesh, face, voxel.getType());
 			}
-		} else { // TODO: Still some empty face to fill
-			int worldX = this->getPosition().x + nx;
-			int worldY = this->getPosition().y + ny;
-			int worldZ = this->getPosition().z + nz;
-
-			for (const auto& chunk : chunks) {
-				if (chunk.getState() == ChunkState::MESHED) {
-					if (chunk.contains(worldX, worldY, worldZ)) {
-						int localX = worldX - chunk.getPosition().x;
-						int localY = worldY - chunk.getPosition().y;
-						int localZ = worldZ - chunk.getPosition().z;
-
-						if (chunk.getVoxel(localX, localY, localZ).getType() == TEXTURE_AIR) {
-							voxel.addFaceToMesh(mesh, face, voxel.getType());
-						}
-						break;
-					}
-				}
-			}
+		} else if (voxel.isHighest()) {
+			voxel.addFaceToMesh(mesh, face, voxel.getType());
 		}
 	}
 }
@@ -135,7 +118,7 @@ void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 					}
 				} else if (y == surfaceHeight) {
 					// This voxel is at the surface, so fill it with grass
-					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_GRASS));
+					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_GRASS, true));
 				} else {
 					// This voxel is above the surface, so fill it with air
 					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
@@ -166,13 +149,17 @@ void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 
 	// DEBUG
 	// FILL MESH WITH DATA TO CREATE A CUBE AT 0, 0, 0
+	//this->voxels.resize(Chunk::SIZE);
 	//for (int x = 0; x < Chunk::SIZE; x++) {
-	//	for (int y = 0; y < 3; y++) {
+	//	this->voxels[x].resize(Chunk::HEIGHT);
+	//	for (int y = 0; y < Chunk::HEIGHT; y++) {
 	//		for (int z = 0; z < Chunk::SIZE; z++) {
-	//			// generate random texture Type
-	//			TextureType type = static_cast<TextureType>(rand() % TEXTURE_COUNT);
-	//			this->voxels[x][y][z].setType(type);
+	//			this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
 	//		}
 	//	}
 	//}
+
+	//this->voxels[0][0][0] = Voxel(glm::vec3(0, 0, 0), TEXTURE_GRASS);
+	//this->voxels[0][0][1] = Voxel(glm::vec3(0, 0, 1), TEXTURE_GRASS);
+	//this->voxels[0][1][0] = Voxel(glm::vec3(0, 1, 0), TEXTURE_GRASS);
 }
