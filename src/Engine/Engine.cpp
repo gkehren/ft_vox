@@ -116,6 +116,7 @@ void	Engine::run()
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 		this->render();
+		this->renderer->drawSkybox(this->camera);
 
 		this->textRenderer->renderText("FPS: " + std::to_string(this->fps), 10.0f, WINDOW_HEIGHT - 40.0f, 0.5f, glm::vec3(1.0f, 1.0f, 1.0f));
 		this->updateUI();

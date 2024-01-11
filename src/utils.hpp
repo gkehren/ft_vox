@@ -54,127 +54,60 @@ const static std::vector<std::tuple<int, int, int, Face>> directions {
 	{0, 0, 1, Face::FRONT}
 };
 
-//// FRONT FACE
-//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+const static std::vector<std::string> skyboxFaces {
+	"skybox/right.png",
+	"skybox/left.png",
+	"skybox/top.png",
+	"skybox/bottom.png",
+	"skybox/front.png",
+	"skybox/back.png"
+};
 
-//// BACK FACE
-//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 0.0f, -1.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+const static float skyboxVertices[] = {
+	-1.0f,  1.0f, -1.0f,
+	-1.0f, -1.0f, -1.0f,
+	 1.0f, -1.0f, -1.0f,
+	 1.0f, -1.0f, -1.0f,
+	 1.0f,  1.0f, -1.0f,
+	-1.0f,  1.0f, -1.0f,
 
-//// LEFT FACE
-//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
-//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(-1.0f, 0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+	-1.0f, -1.0f,  1.0f,
+	-1.0f, -1.0f, -1.0f,
+	-1.0f,  1.0f, -1.0f,
+	-1.0f,  1.0f, -1.0f,
+	-1.0f,  1.0f,  1.0f,
+	-1.0f, -1.0f,  1.0f,
 
-//// RIGHT FACE
-//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
-//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(1.0f, 0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
+	 1.0f, -1.0f, -1.0f,
+	 1.0f, -1.0f,  1.0f,
+	 1.0f,  1.0f,  1.0f,
+	 1.0f,  1.0f,  1.0f,
+	 1.0f,  1.0f, -1.0f,
+	 1.0f, -1.0f, -1.0f,
 
-//// TOP FACE
-//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, 0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, 0.5f, -0.5f));
-//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, 1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
+	-1.0f, -1.0f,  1.0f,
+	-1.0f,  1.0f,  1.0f,
+	 1.0f,  1.0f,  1.0f,
+	 1.0f,  1.0f,  1.0f,
+	 1.0f, -1.0f,  1.0f,
+	-1.0f, -1.0f,  1.0f,
 
-//// BOTTOM FACE
-//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, -0.5f));
-//this->mesh.addVertex(glm::vec3(0.5f, -0.5f, 0.5f));
-//this->mesh.addVertex(glm::vec3(-0.5f, -0.5f, 0.5f));
-//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
-//this->mesh.addNormal(glm::vec3(0.0f, -1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 0.0f));
-//this->mesh.addTexture(glm::vec2(1.0f, 1.0f));
-//this->mesh.addTexture(glm::vec2(0.0f, 1.0f));
+	-1.0f,  1.0f, -1.0f,
+	 1.0f,  1.0f, -1.0f,
+	 1.0f,  1.0f,  1.0f,
+	 1.0f,  1.0f,  1.0f,
+	-1.0f,  1.0f,  1.0f,
+	-1.0f,  1.0f, -1.0f,
 
-const unsigned int indicesBoundingbox[] = {
+	-1.0f, -1.0f, -1.0f,
+	-1.0f, -1.0f,  1.0f,
+	 1.0f, -1.0f, -1.0f,
+	 1.0f, -1.0f, -1.0f,
+	-1.0f, -1.0f,  1.0f,
+	 1.0f, -1.0f,  1.0f
+};
+
+const static unsigned int indicesBoundingbox[] = {
 	0, 1, 1, 2, 2, 3, 3, 0,
 	4, 5, 5, 6, 6, 7, 7, 4,
 	0, 4, 1, 5, 2, 6, 3, 7

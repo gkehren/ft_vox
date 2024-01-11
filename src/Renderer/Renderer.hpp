@@ -20,6 +20,7 @@ class Renderer {
 
 		int		draw(Chunk& chunk, const Shader& shader, const Camera& camera);
 		void	drawBoundingBox(const Chunk& chunk, const Camera& camera) const;
+		void	drawSkybox(const Camera& camera) const;
 
 
 	private:
@@ -30,10 +31,16 @@ class Renderer {
 
 		GLuint	VAO;
 		GLuint	VBO;
-		//GLuint	texture[TEXTURE_COUNT];
 		GLuint	textureAtlas;
+
+		Shader*	skyboxShader;
+		GLuint	skyboxVAO;
+		GLuint	skyboxVBO;
+		GLuint	skyboxTexture;
 
 		float	screenWidth;
 		float	screenHeight;
 		float	renderDistance;
+
+		void	loadSkybox();
 };
