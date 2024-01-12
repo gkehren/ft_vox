@@ -21,6 +21,12 @@ void	Voxel::setType(const TextureType& type)
 	this->type = type;
 }
 
+void	Voxel::setType(const TextureType& type, bool highest)
+{
+	this->type = type;
+	this->highest = highest;
+}
+
 void	Voxel::setHighest(bool highest)
 {
 	this->highest = highest;

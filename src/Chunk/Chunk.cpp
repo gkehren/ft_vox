@@ -1,7 +1,17 @@
 #include "Chunk.hpp"
 
 Chunk::Chunk(const glm::vec3& position, siv::PerlinNoise* perlin) : position(position), visible(false), state(ChunkState::UNLOADED)
-{}
+{
+	this->voxels.resize(Chunk::SIZE);
+	for (int x = 0; x < Chunk::SIZE; x++) {
+		this->voxels[x].resize(Chunk::HEIGHT);
+		for (int y = 0; y < Chunk::HEIGHT; y++) {
+			for (int z = 0; z < Chunk::SIZE; z++) {
+				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
+			}
+		}
+	}
+}
 
 Chunk::~Chunk()
 {}
@@ -69,7 +79,7 @@ void	Chunk::addVoxelToMesh(const std::vector<Chunk>& chunks, Voxel& voxel, int x
 			if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) {
 				voxel.addFaceToMesh(mesh, face, voxel.getType());
 			}
-		} else if (voxel.isHighest()) {
+		} else if (voxel.isHighest()) { // Still issue in caves where the highest voxel is not the surface, need to check voxel in the neighboring chunk
 			voxel.addFaceToMesh(mesh, face, voxel.getType());
 		}
 	}
@@ -109,43 +119,30 @@ void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 			}
 
 			for (int y = 0; y < Chunk::HEIGHT; y++) {
+				double caveNoise = perlin->noise3D_01((x + position.x) / Chunk::SIZE, (y + position.y) / Chunk::SIZE, (z + position.z) / Chunk::SIZE);
 				if (y < surfaceHeight) {
-					// This voxel is below the surface, so fill it with dirt or stone
-					if (y > surfaceHeight - 3) {
-						this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_DIRT, true));
+					if (caveNoise > 0.25) {
+						this->voxels[x][y][z].setType(TextureType::TEXTURE_STONE);
 					} else {
-						this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_STONE));
+						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
 					}
 				} else if (y == surfaceHeight) {
-					// This voxel is at the surface, so fill it with grass
-					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_GRASS, true));
+					// Check if there is a cave just below this voxel
+					if (caveNoise <= 0.2) {
+						// This voxel is at the surface and there is a cave below, so fill it with air to make the cave accessible
+						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
+					} else {
+						// This voxel is at the surface, so fill it with grass
+						this->voxels[x][y][z].setType(TextureType::TEXTURE_GRASS, true);
+					}
 				} else {
 					// This voxel is above the surface, so fill it with air
-					this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
+					this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
 				}
 			}
 		}
 	}
 	state = ChunkState::GENERATED;
-
-	// GOOD FOR CAVE GENERATION (TWEEK THE VALUES FOR BETTER RESULTS)
-	//for (int x = 0; x < Chunk::SIZE; x++) {
-	//	this->voxels[x].resize(Chunk::HEIGHT);
-	//	for (int y = 0; y < Chunk::HEIGHT; y++) {
-	//		for (int z = 0; z < Chunk::SIZE; z++) {
-	//			double noise = perlin->noise3D_01((x + position.x) / Chunk::RADIUS, (y + position.y) / Chunk::RADIUS, (z + position.z) / Chunk::RADIUS);
-	//			if (noise > 0.5) {
-	//				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_GRASS));
-	//			} else if (noise > 0.4) {
-	//				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_DIRT));
-	//			} else if (noise > 0.3) {
-	//				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_STONE));
-	//			} else {
-	//				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
-	//			}
-	//		}
-	//	}
-	//}
 
 	// DEBUG
 	// FILL MESH WITH DATA TO CREATE A CUBE AT 0, 0, 0

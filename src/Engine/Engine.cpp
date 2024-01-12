@@ -58,7 +58,7 @@ Engine::Engine()
 	this->chunkBorders = false;
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
-	this->chunkLoadedMax = 5;
+	this->chunkLoadedMax = 1;
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;

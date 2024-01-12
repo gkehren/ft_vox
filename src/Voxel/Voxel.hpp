@@ -13,6 +13,7 @@ class Voxel
 		const glm::vec3&	getPosition() const;
 		const TextureType&	getType() const;
 		void				setType(const TextureType& type);
+		void				setType(const TextureType& type, bool highest);
 		void				setHighest(bool highest);
 		bool				isHighest() const;
 
