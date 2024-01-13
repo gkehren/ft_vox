@@ -101,6 +101,30 @@ const Voxel&	Chunk::getVoxel(int x, int y, int z) const
 	return (this->voxels[x][y][z]);
 }
 
+bool	Chunk::deleteVoxel(int x, int y, int z)
+{
+	// X, Y, Z are world coordinates, need to convert them to chunk coordinates
+	// Check if the voxel is in this chunk
+	if (!this->contains(x, y, z)) return false;
+
+	// Convert world coordinates to chunk coordinates
+	x -= position.x;
+	y -= position.y;
+	z -= position.z;
+
+	// Essayer de trouver le voxel qui n'est pas de l'air le plus proche dans un rayon de 5 blocs
+	if (this->voxels[x][y][z].getType() == TEXTURE_AIR) return false;
+
+	// Delete the voxel
+	this->voxels[x][y][z].setType(TEXTURE_AIR);
+
+	// Update the mesh
+	mesh.clear();
+	this->state = ChunkState::GENERATED;
+	generateMesh(std::vector<Chunk>());
+	return true;
+}
+
 void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin) {
 	for (int x = startX; x < endX; x++) {
 		for (int z = startZ; z < endZ; z++) {

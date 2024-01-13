@@ -49,8 +49,7 @@ void	Camera::processKeyboard(float deltaTime)
 		position += worldUp * velocity;
 	if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
 		position -= worldUp * velocity;
-	if (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS)
-	{
+	if (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS) {
 		if (this->movementSpeed == 2.5f)
 			this->movementSpeed *= 20.0f;
 		else

@@ -26,6 +26,14 @@ void	Mesh::setType(TextureType type)
 	this->type = type;
 }
 
+void	Mesh::clear()
+{
+	this->data.clear();
+	this->vertices.clear();
+	this->normals.clear();
+	this->textures.clear();
+}
+
 const std::vector<float>&	Mesh::getData()
 {
 	if (this->data.empty()) {

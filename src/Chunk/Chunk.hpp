@@ -36,6 +36,7 @@ class Chunk
 		ChunkState						getState() const;
 		bool							contains(int x, int y, int z) const;
 		const Voxel&					getVoxel(int x, int y, int z) const;
+		bool							deleteVoxel(int x, int y, int z);
 
 		void	generateVoxel(siv::PerlinNoise* perlin);
 		void	generateMesh(const std::vector<Chunk>& chunks);

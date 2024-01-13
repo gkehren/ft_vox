@@ -113,6 +113,14 @@ void	Engine::run()
 
 		this->camera.processKeyboard(deltaTime);
 
+		if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+			for (auto& chunk : this->chunks) {
+				if (chunk.deleteVoxel(this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z)) {
+					break;
+				}
+			}
+		}
+
 		glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
