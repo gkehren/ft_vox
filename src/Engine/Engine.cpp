@@ -115,7 +115,14 @@ void	Engine::run()
 
 		if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
 			for (auto& chunk : this->chunks) {
-				if (chunk.deleteVoxel(this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z)) {
+				if (chunk.deleteVoxel(this->camera.getPosition(), this->camera.getFront())) {
+					break;
+				}
+			}
+		}
+		if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
+			for (auto& chunk : this->chunks) {
+				if (chunk.placeVoxel(this->camera.getPosition(), this->camera.getFront())) {
 					break;
 				}
 			}

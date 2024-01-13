@@ -101,18 +101,21 @@ const Voxel&	Chunk::getVoxel(int x, int y, int z) const
 	return (this->voxels[x][y][z]);
 }
 
-bool	Chunk::deleteVoxel(int x, int y, int z)
+bool	Chunk::deleteVoxel(glm::vec3 position, glm::vec3 front)
 {
 	// X, Y, Z are world coordinates, need to convert them to chunk coordinates
 	// Check if the voxel is in this chunk
+	glm::vec3 target = position + front * 0.5f;
+	int x = floor(target.x);
+	int y = floor(target.y);
+	int z = floor(target.z);
 	if (!this->contains(x, y, z)) return false;
 
 	// Convert world coordinates to chunk coordinates
-	x -= position.x;
-	y -= position.y;
-	z -= position.z;
+	x = floor(x - this->position.x);
+	y = floor(y - this->position.y);
+	z = floor(z - this->position.z);
 
-	// Essayer de trouver le voxel qui n'est pas de l'air le plus proche dans un rayon de 5 blocs
 	if (this->voxels[x][y][z].getType() == TEXTURE_AIR) return false;
 
 	// Delete the voxel
@@ -121,7 +124,32 @@ bool	Chunk::deleteVoxel(int x, int y, int z)
 	// Update the mesh
 	mesh.clear();
 	this->state = ChunkState::GENERATED;
-	generateMesh(std::vector<Chunk>());
+	return true;
+}
+
+bool	Chunk::placeVoxel(glm::vec3 position, glm::vec3 front)
+{
+	// X, Y, Z are world coordinates, need to convert them to chunk coordinates
+	// Check if the voxel is in this chunk
+	glm::vec3 target = position + front * 0.5f;
+	int x = floor(target.x);
+	int y = floor(target.y);
+	int z = floor(target.z);
+	if (!this->contains(x, y, z)) return false;
+
+	// Convert world coordinates to chunk coordinates
+	x = floor(x - this->position.x);
+	y = floor(y - this->position.y);
+	z = floor(z - this->position.z);
+
+	if (this->voxels[x][y][z].getType() != TEXTURE_AIR) return false;
+
+	// Delete the voxel
+	this->voxels[x][y][z].setType(TEXTURE_PLANK);
+
+	// Update the mesh
+	mesh.clear();
+	this->state = ChunkState::GENERATED;
 	return true;
 }
 

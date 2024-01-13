@@ -14,6 +14,7 @@ class Camera {
 		glm::mat4	getViewMatrix() const;
 		glm::mat4	getProjectionMatrix(float screenWidth, float screenHeight, float farPlane) const;
 		glm::vec3	getPosition() const;
+		glm::vec3	getFront() const;
 		float		getMovementSpeed() const;
 
 		void		processKeyboard(float deltaTime);

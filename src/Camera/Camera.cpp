@@ -25,6 +25,11 @@ glm::vec3	Camera::getPosition() const
 	return this->position;
 }
 
+glm::vec3	Camera::getFront() const
+{
+	return this->front;
+}
+
 float	Camera::getMovementSpeed() const
 {
 	return this->movementSpeed;
