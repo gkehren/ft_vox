@@ -58,7 +58,7 @@ Engine::Engine()
 	this->chunkBorders = false;
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
-	this->chunkLoadedMax = 5;
+	this->chunkLoadedMax = 1;
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -172,26 +172,29 @@ void	Engine::render()
 	//elapsed = end - start;
 	//std::cout << "Frustum culling: " << elapsed.count() << "s" << std::endl;
 
-	auto processChunks = [&](std::atomic<int>& index) {
+	auto processChunks = [&](std::atomic<int>& index, std::atomic<int>& chunkLoaded) {
 		while (true) {
 			int i = index++;
-			if (i >= this->chunks.size()) break;
+			if (i >= this->chunks.size() || chunkLoaded >= this->chunkLoadedMax) break;
 
 			Chunk& chunk = this->chunks[i];
 			if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED) {
 				chunk.generateVoxel(this->perlin);
+				chunkLoaded++;
 			}
 			if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED) {
 				chunk.generateMesh(this->chunks);
+				chunkLoaded++;
 			}
 		}
 	};
 
 	std::atomic<int> chunkIndex(0);
+	std::atomic<int> chunkLoaded(0);
 
 	//start = std::chrono::high_resolution_clock::now();
 	for (auto& thread : threads) {
-		thread = std::thread(processChunks, std::ref(chunkIndex));
+		thread = std::thread(processChunks, std::ref(chunkIndex), std::ref(chunkLoaded));
 	}
 
 	for (auto& thread : threads) {
@@ -225,6 +228,8 @@ void	Engine::chunkManagement()
 	int squaredChunkRadius = chunkRadius * chunkRadius;
 	int	chunksLoadedThisFrame = 0;
 
+	//auto start = std::chrono::high_resolution_clock::now();
+	//int chunkSizeBefore = this->chunks.size();
 	for (auto it = this->chunks.begin(); it != this->chunks.end();) {
 		glm::ivec2 chunkPos2D = glm::ivec2(it->getPosition().x, it->getPosition().z);
 		glm::vec3 chunkPos = glm::vec3(chunkPos2D.x, 0, chunkPos2D.y);
@@ -234,11 +239,21 @@ void	Engine::chunkManagement()
 			this->chunkPositions.erase(chunkPos2D / Chunk::SIZE);
 			std::swap(*it, this->chunks.back());
 			this->chunks.pop_back();
+			chunksLoadedThisFrame++;
+			if (chunksLoadedThisFrame >= this->chunkLoadedMax) {
+				break;
+			}
 		} else {
 			it++;
 		}
 	}
+	//auto end = std::chrono::high_resolution_clock::now();
+	//std::chrono::duration<double> elapsed = end - start;
+	//std::cout << "Chunk erasing: " << elapsed.count() << "s (" << chunkSizeBefore - this->chunks.size() << " chunks)" << std::endl;
 
+	chunksLoadedThisFrame = 0;
+	//int chunkSizeAfter = this->chunks.size();
+	//auto start2 = std::chrono::high_resolution_clock::now();
 	for (int x = -chunkRadius; x <= chunkRadius; x++) {
 		for (int z = -chunkRadius; z <= chunkRadius; z++) {
 			glm::ivec2 chunkPos2D = cameraChunkPos2D + glm::ivec2(x, z);
@@ -249,11 +264,15 @@ void	Engine::chunkManagement()
 				this->chunks.push_back(Chunk(glm::vec3(chunkPos2D.x * Chunk::SIZE, 0, chunkPos2D.y * Chunk::SIZE), this->perlin));
 				chunksLoadedThisFrame++;
 				if (chunksLoadedThisFrame >= this->chunkLoadedMax) {
-					return;
+					break;
 				}
 			}
 		}
 	}
+	//auto end2 = std::chrono::high_resolution_clock::now();
+	//std::chrono::duration<double> elapsed2 = end2 - start2;
+	//std::cout << "Chunk loading: " << elapsed2.count() << "s (" << this->chunks.size() - chunkSizeAfter << " chunks)" << std::endl;
+	//std::cout << "Chunk Management: " << elapsed.count() + elapsed2.count() << "s" << std::endl;
 }
 
 void	Engine::frustumCulling()

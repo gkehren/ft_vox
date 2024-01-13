@@ -115,52 +115,52 @@ const static unsigned int indicesBoundingbox[] = {
 };
 
 static const std::map<Face, std::pair<glm::vec3, std::vector<glm::vec3>>> faceData = {
-    {Face::FRONT, {glm::vec3(0.0f, 0.0f, 1.0f), {
-        glm::vec3(-0.5f, -0.5f, 0.5f),
-        glm::vec3(0.5f, -0.5f, 0.5f),
-        glm::vec3(0.5f, 0.5f, 0.5f),
-        glm::vec3(-0.5f, -0.5f, 0.5f),
-        glm::vec3(0.5f, 0.5f, 0.5f),
-        glm::vec3(-0.5f, 0.5f, 0.5f)
-    }}},
-    {Face::BACK, {glm::vec3(0.0f, 0.0f, -1.0f), {
-        glm::vec3(0.5f, -0.5f, -0.5f),
-        glm::vec3(-0.5f, -0.5f, -0.5f),
-        glm::vec3(-0.5f, 0.5f, -0.5f),
-        glm::vec3(0.5f, -0.5f, -0.5f),
-        glm::vec3(-0.5f, 0.5f, -0.5f),
-        glm::vec3(0.5f, 0.5f, -0.5f)
-    }}},
-    {Face::LEFT, {glm::vec3(-1.0f, 0.0f, 0.0f), {
-        glm::vec3(-0.5f, -0.5f, -0.5f),
-        glm::vec3(-0.5f, -0.5f, 0.5f),
-        glm::vec3(-0.5f, 0.5f, 0.5f),
-        glm::vec3(-0.5f, -0.5f, -0.5f),
-        glm::vec3(-0.5f, 0.5f, 0.5f),
-        glm::vec3(-0.5f, 0.5f, -0.5f)
-    }}},
-    {Face::RIGHT, {glm::vec3(1.0f, 0.0f, 0.0f), {
-        glm::vec3(0.5f, -0.5f, 0.5f),
-        glm::vec3(0.5f, -0.5f, -0.5f),
-        glm::vec3(0.5f, 0.5f, -0.5f),
-        glm::vec3(0.5f, -0.5f, 0.5f),
-        glm::vec3(0.5f, 0.5f, -0.5f),
-        glm::vec3(0.5f, 0.5f, 0.5f)
-    }}},
-    {Face::TOP, {glm::vec3(0.0f, 1.0f, 0.0f), {
-        glm::vec3(-0.5f, 0.5f, 0.5f),
-        glm::vec3(0.5f, 0.5f, 0.5f),
-        glm::vec3(0.5f, 0.5f, -0.5f),
-        glm::vec3(-0.5f, 0.5f, 0.5f),
-        glm::vec3(0.5f, 0.5f, -0.5f),
-        glm::vec3(-0.5f, 0.5f, -0.5f)
-    }}},
-    {Face::BOTTOM, {glm::vec3(0.0f, -1.0f, 0.0f), {
-        glm::vec3(-0.5f, -0.5f, -0.5f),
-        glm::vec3(0.5f, -0.5f, -0.5f),
-        glm::vec3(0.5f, -0.5f, 0.5f),
-        glm::vec3(-0.5f, -0.5f, -0.5f),
-        glm::vec3(0.5f, -0.5f, 0.5f),
-        glm::vec3(-0.5f, -0.5f, 0.5f)
-    }}}
+	{Face::FRONT, {glm::vec3(0.0f, 0.0f, 1.0f), {
+		glm::vec3(-0.5f, -0.5f, 0.5f),
+		glm::vec3(0.5f, -0.5f, 0.5f),
+		glm::vec3(0.5f, 0.5f, 0.5f),
+		glm::vec3(-0.5f, -0.5f, 0.5f),
+		glm::vec3(0.5f, 0.5f, 0.5f),
+		glm::vec3(-0.5f, 0.5f, 0.5f)
+	}}},
+	{Face::BACK, {glm::vec3(0.0f, 0.0f, -1.0f), {
+		glm::vec3(0.5f, -0.5f, -0.5f),
+		glm::vec3(-0.5f, -0.5f, -0.5f),
+		glm::vec3(-0.5f, 0.5f, -0.5f),
+		glm::vec3(0.5f, -0.5f, -0.5f),
+		glm::vec3(-0.5f, 0.5f, -0.5f),
+		glm::vec3(0.5f, 0.5f, -0.5f)
+	}}},
+	{Face::LEFT, {glm::vec3(-1.0f, 0.0f, 0.0f), {
+		glm::vec3(-0.5f, -0.5f, -0.5f),
+		glm::vec3(-0.5f, -0.5f, 0.5f),
+		glm::vec3(-0.5f, 0.5f, 0.5f),
+		glm::vec3(-0.5f, -0.5f, -0.5f),
+		glm::vec3(-0.5f, 0.5f, 0.5f),
+		glm::vec3(-0.5f, 0.5f, -0.5f)
+	}}},
+	{Face::RIGHT, {glm::vec3(1.0f, 0.0f, 0.0f), {
+		glm::vec3(0.5f, -0.5f, 0.5f),
+		glm::vec3(0.5f, -0.5f, -0.5f),
+		glm::vec3(0.5f, 0.5f, -0.5f),
+		glm::vec3(0.5f, -0.5f, 0.5f),
+		glm::vec3(0.5f, 0.5f, -0.5f),
+		glm::vec3(0.5f, 0.5f, 0.5f)
+	}}},
+	{Face::TOP, {glm::vec3(0.0f, 1.0f, 0.0f), {
+		glm::vec3(-0.5f, 0.5f, 0.5f),
+		glm::vec3(0.5f, 0.5f, 0.5f),
+		glm::vec3(0.5f, 0.5f, -0.5f),
+		glm::vec3(-0.5f, 0.5f, 0.5f),
+		glm::vec3(0.5f, 0.5f, -0.5f),
+		glm::vec3(-0.5f, 0.5f, -0.5f)
+	}}},
+	{Face::BOTTOM, {glm::vec3(0.0f, -1.0f, 0.0f), {
+		glm::vec3(-0.5f, -0.5f, -0.5f),
+		glm::vec3(0.5f, -0.5f, -0.5f),
+		glm::vec3(0.5f, -0.5f, 0.5f),
+		glm::vec3(-0.5f, -0.5f, -0.5f),
+		glm::vec3(0.5f, -0.5f, 0.5f),
+		glm::vec3(-0.5f, -0.5f, 0.5f)
+	}}}
 };
