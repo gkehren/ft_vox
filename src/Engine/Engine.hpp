@@ -17,6 +17,11 @@
 #include <unordered_set>
 #include <algorithm>
 
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <chrono>
+
 #include <Chunk/Chunk.hpp>
 #include <Shader/Shader.hpp>
 #include <Renderer/Renderer.hpp>
@@ -50,6 +55,8 @@ class Engine {
 		Renderer*				renderer;
 		TextRenderer*			textRenderer;
 		Camera					camera;
+
+		std::vector<std::thread>		threads;
 
 		void	updateUI();
 		bool	wireframeMode;

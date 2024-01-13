@@ -50,6 +50,7 @@ void	Chunk::generateMesh(const std::vector<Chunk>& chunks)
 {
 	if (state != ChunkState::GENERATED) return;
 
+	//auto start = std::chrono::high_resolution_clock::now();
 	for (int x = 0; x < Chunk::SIZE; x++) {
 		for (int y = 0; y < Chunk::HEIGHT; y++) {
 			for (int z = 0; z < Chunk::SIZE; z++) {
@@ -59,6 +60,9 @@ void	Chunk::generateMesh(const std::vector<Chunk>& chunks)
 			}
 		}
 	}
+	//auto end = std::chrono::high_resolution_clock::now();
+	//std::chrono::duration<double> elapsed = end - start;
+	//std::cout << "Chunk mesh generation: " << elapsed.count() << "s" << std::endl;
 	state = ChunkState::MESHED;
 }
 
@@ -97,14 +101,9 @@ const Voxel&	Chunk::getVoxel(int x, int y, int z) const
 	return (this->voxels[x][y][z]);
 }
 
-void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
-{
-	if (state != ChunkState::UNLOADED) return;
-
-	this->voxels.resize(Chunk::SIZE);
-	for (int x = 0; x < Chunk::SIZE; x++) {
-		this->voxels[x].resize(Chunk::HEIGHT);
-		for (int z = 0; z < Chunk::SIZE; z++) {
+void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin) {
+	for (int x = startX; x < endX; x++) {
+		for (int z = startZ; z < endZ; z++) {
 			// Generate Perlin noise values at different scales
 			float noise1 = perlin->noise2D_01((position.x + x) / 200.0f, (position.z + z) / 200.0f) * 1.5f;
 			float noise2 = perlin->noise2D_01((position.x + x) / 50.0f, (position.z + z) / 50.0f) * 0.5f;
@@ -142,6 +141,32 @@ void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 			}
 		}
 	}
+}
+
+void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
+{
+	if (state != ChunkState::UNLOADED) return;
+
+	//auto start = std::chrono::high_resolution_clock::now();
+
+	const int numThreads = 4;
+	const int chunkWidth = Chunk::SIZE / numThreads;
+
+	std::vector<std::thread> threads;
+
+	for (int i = 0; i < numThreads; i++) {
+		int startX = i * chunkWidth;
+		int endX = (i + 1) * chunkWidth;
+		threads.emplace_back(&Chunk::generateChunk, this, startX, endX, 0, 16, perlin);
+	}
+
+	for (auto& thread : threads) {
+		thread.join();
+	}
+
+	//auto end = std::chrono::high_resolution_clock::now();
+	//std::chrono::duration<double> elapsed = end - start;
+	//std::cout << "Chunk generation: " << elapsed.count() << "s" << std::endl;
 	state = ChunkState::GENERATED;
 
 	// DEBUG

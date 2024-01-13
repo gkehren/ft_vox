@@ -6,7 +6,11 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <array>
+#include <thread>
+#include <mutex>
 #include <PerlinNoise/PerlinNoise.hpp>
+
+#include <chrono>
 
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
@@ -45,4 +49,5 @@ class Chunk
 		Mesh											mesh;
 
 		void	addVoxelToMesh(const std::vector<Chunk>& chunks, Voxel& voxel, int x, int y, int z);
+		void	generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);
 };

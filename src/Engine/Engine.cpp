@@ -20,7 +20,7 @@ Engine::Engine()
 	}
 
 	glfwMakeContextCurrent(this->window);
-	glfwSwapInterval(0); // Enable vsync
+	glfwSwapInterval(0); // vsync
 	glfwSetWindowUserPointer(this->window, &this->camera);
 	glfwSetInputMode(this->window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 	glfwSetCursorPosCallback(this->window, mouse_callback);
@@ -58,7 +58,7 @@ Engine::Engine()
 	this->chunkBorders = false;
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
-	this->chunkLoadedMax = 1;
+	this->chunkLoadedMax = 5;
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -97,6 +97,7 @@ void	Engine::perlinNoise(unsigned int seed)
 
 void	Engine::run()
 {
+	this->threads.resize(4);
 	while (!glfwWindowShouldClose(this->window)) {
 		float currentFrame = glfwGetTime();
 		this->deltaTime = currentFrame - lastFrame;
@@ -160,24 +161,47 @@ void	Engine::render()
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
 
+	//auto start = std::chrono::high_resolution_clock::now();
 	this->chunkManagement();
+	//auto end = std::chrono::high_resolution_clock::now();
+	//std::chrono::duration<double> elapsed = end - start;
+	//std::cout << "Chunk management: " << elapsed.count() << "s" << std::endl;
+	//start = std::chrono::high_resolution_clock::now();
 	this->frustumCulling();
+	//end = std::chrono::high_resolution_clock::now();
+	//elapsed = end - start;
+	//std::cout << "Frustum culling: " << elapsed.count() << "s" << std::endl;
 
-	int chunkCount = 0;
-	for (auto& chunk : this->chunks) {
-		if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED) {
-			chunk.generateVoxel(this->perlin);
-			chunkCount++;
+	auto processChunks = [&](std::atomic<int>& index) {
+		while (true) {
+			int i = index++;
+			if (i >= this->chunks.size()) break;
+
+			Chunk& chunk = this->chunks[i];
+			if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED) {
+				chunk.generateVoxel(this->perlin);
+			}
+			if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED) {
+				chunk.generateMesh(this->chunks);
+			}
 		}
-		if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED) {
-			chunk.generateMesh(this->chunks);
-			chunkCount++;
-		}
-		if (chunkCount >= this->chunkLoadedMax) {
-			break;
-		}
+	};
+
+	std::atomic<int> chunkIndex(0);
+
+	//start = std::chrono::high_resolution_clock::now();
+	for (auto& thread : threads) {
+		thread = std::thread(processChunks, std::ref(chunkIndex));
 	}
 
+	for (auto& thread : threads) {
+		thread.join();
+	}
+	//end = std::chrono::high_resolution_clock::now();
+	//elapsed = end - start;
+	//std::cout << "Chunk generation: " << elapsed.count() << "s" << std::endl;
+
+	//start = std::chrono::high_resolution_clock::now();
 	for (auto& chunk : this->chunks) {
 		if (chunk.isVisible() && chunk.getState() == ChunkState::MESHED) {
 			this->visibleVoxelsCount += this->renderer->draw(chunk, *this->shader, this->camera);
@@ -186,6 +210,9 @@ void	Engine::render()
 				this->renderer->drawBoundingBox(chunk, this->camera);
 		}
 	}
+	//end = std::chrono::high_resolution_clock::now();
+	//elapsed = end - start;
+	//std::cout << "Chunk rendering: " << elapsed.count() << "s" << std::endl;
 }
 
 void	Engine::chunkManagement()
@@ -212,7 +239,6 @@ void	Engine::chunkManagement()
 		}
 	}
 
-	this->chunks.reserve(chunkRadius * chunkRadius);
 	for (int x = -chunkRadius; x <= chunkRadius; x++) {
 		for (int z = -chunkRadius; z <= chunkRadius; z++) {
 			glm::ivec2 chunkPos2D = cameraChunkPos2D + glm::ivec2(x, z);

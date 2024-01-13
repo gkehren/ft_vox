@@ -3,6 +3,7 @@
 #include <iostream>
 #include <vector>
 #include <tuple>
+#include <map>
 
 #define WINDOW_WIDTH	1920
 #define WINDOW_HEIGHT	1080
@@ -111,4 +112,55 @@ const static unsigned int indicesBoundingbox[] = {
 	0, 1, 1, 2, 2, 3, 3, 0,
 	4, 5, 5, 6, 6, 7, 7, 4,
 	0, 4, 1, 5, 2, 6, 3, 7
+};
+
+static const std::map<Face, std::pair<glm::vec3, std::vector<glm::vec3>>> faceData = {
+    {Face::FRONT, {glm::vec3(0.0f, 0.0f, 1.0f), {
+        glm::vec3(-0.5f, -0.5f, 0.5f),
+        glm::vec3(0.5f, -0.5f, 0.5f),
+        glm::vec3(0.5f, 0.5f, 0.5f),
+        glm::vec3(-0.5f, -0.5f, 0.5f),
+        glm::vec3(0.5f, 0.5f, 0.5f),
+        glm::vec3(-0.5f, 0.5f, 0.5f)
+    }}},
+    {Face::BACK, {glm::vec3(0.0f, 0.0f, -1.0f), {
+        glm::vec3(0.5f, -0.5f, -0.5f),
+        glm::vec3(-0.5f, -0.5f, -0.5f),
+        glm::vec3(-0.5f, 0.5f, -0.5f),
+        glm::vec3(0.5f, -0.5f, -0.5f),
+        glm::vec3(-0.5f, 0.5f, -0.5f),
+        glm::vec3(0.5f, 0.5f, -0.5f)
+    }}},
+    {Face::LEFT, {glm::vec3(-1.0f, 0.0f, 0.0f), {
+        glm::vec3(-0.5f, -0.5f, -0.5f),
+        glm::vec3(-0.5f, -0.5f, 0.5f),
+        glm::vec3(-0.5f, 0.5f, 0.5f),
+        glm::vec3(-0.5f, -0.5f, -0.5f),
+        glm::vec3(-0.5f, 0.5f, 0.5f),
+        glm::vec3(-0.5f, 0.5f, -0.5f)
+    }}},
+    {Face::RIGHT, {glm::vec3(1.0f, 0.0f, 0.0f), {
+        glm::vec3(0.5f, -0.5f, 0.5f),
+        glm::vec3(0.5f, -0.5f, -0.5f),
+        glm::vec3(0.5f, 0.5f, -0.5f),
+        glm::vec3(0.5f, -0.5f, 0.5f),
+        glm::vec3(0.5f, 0.5f, -0.5f),
+        glm::vec3(0.5f, 0.5f, 0.5f)
+    }}},
+    {Face::TOP, {glm::vec3(0.0f, 1.0f, 0.0f), {
+        glm::vec3(-0.5f, 0.5f, 0.5f),
+        glm::vec3(0.5f, 0.5f, 0.5f),
+        glm::vec3(0.5f, 0.5f, -0.5f),
+        glm::vec3(-0.5f, 0.5f, 0.5f),
+        glm::vec3(0.5f, 0.5f, -0.5f),
+        glm::vec3(-0.5f, 0.5f, -0.5f)
+    }}},
+    {Face::BOTTOM, {glm::vec3(0.0f, -1.0f, 0.0f), {
+        glm::vec3(-0.5f, -0.5f, -0.5f),
+        glm::vec3(0.5f, -0.5f, -0.5f),
+        glm::vec3(0.5f, -0.5f, 0.5f),
+        glm::vec3(-0.5f, -0.5f, -0.5f),
+        glm::vec3(0.5f, -0.5f, 0.5f),
+        glm::vec3(-0.5f, -0.5f, 0.5f)
+    }}}
 };
