@@ -187,8 +187,12 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 						this->voxels[x][y][z].setType(TextureType::TEXTURE_GRASS, true);
 					}
 				} else {
-					// This voxel is above the surface, so fill it with air
-					this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
+					if (surfaceHeight <= 1 && y == 0) {
+						this->voxels[x][y][z].setType(TextureType::TEXTURE_DIRT); // MAYBE CHANGE TO WATER
+					} else {
+						// This voxel is above the surface, so fill it with air
+						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
+					}
 				}
 			}
 		}
