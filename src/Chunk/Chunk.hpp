@@ -7,7 +7,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <array>
 #include <thread>
-#include <mutex>
+#include <unordered_map>
 #include <PerlinNoise/PerlinNoise.hpp>
 
 #include <chrono>
@@ -25,7 +25,7 @@ class Chunk
 		static const int HEIGHT = 128;
 		static constexpr float RADIUS = 16.0f;
 
-		Chunk(const glm::vec3& position, siv::PerlinNoise* perlin);
+		Chunk(const glm::vec3& position);
 		~Chunk();
 
 		const glm::vec3&				getPosition() const;
@@ -40,7 +40,7 @@ class Chunk
 		bool							placeVoxel(glm::vec3 position, glm::vec3 front);
 
 		void	generateVoxel(siv::PerlinNoise* perlin);
-		void	generateMesh(const std::vector<Chunk>& chunks);
+		void	generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks);
 
 	private:
 		glm::vec3	position;
@@ -50,6 +50,6 @@ class Chunk
 		std::vector<std::vector<std::vector<Voxel>>>	voxels;
 		Mesh											mesh;
 
-		void	addVoxelToMesh(const std::vector<Chunk>& chunks, Voxel& voxel, int x, int y, int z);
+		void	addVoxelToMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z);
 		void	generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);
 };

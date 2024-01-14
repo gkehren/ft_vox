@@ -8,7 +8,7 @@
 #define WINDOW_WIDTH	1920
 #define WINDOW_HEIGHT	1080
 
-#define WORLD_SIZE		4096 //16384
+#define WORLD_SIZE		16384
 #define WORLD_HEIGHT	256
 
 #ifdef __linux__	// linux
@@ -16,6 +16,15 @@
 #elif __APPLE__		// Mac
 #define RES_PATH		"/Users/gkehren/Documents/ft_vox/ressources/"
 #endif
+
+struct ivec3_hash {
+	std::size_t operator()(const glm::ivec3& vec) const {
+		std::size_t h1 = std::hash<int>()(vec.x);
+		std::size_t h2 = std::hash<int>()(vec.y);
+		std::size_t h3 = std::hash<int>()(vec.z);
+		return h1 ^ (h2 << 1) ^ (h3 << 2);
+	}
+};
 
 enum TextureType {
 	TEXTURE_DEFAULT,

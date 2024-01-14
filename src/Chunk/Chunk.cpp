@@ -1,6 +1,6 @@
 #include "Chunk.hpp"
 
-Chunk::Chunk(const glm::vec3& position, siv::PerlinNoise* perlin) : position(position), visible(false), state(ChunkState::UNLOADED)
+Chunk::Chunk(const glm::vec3& position) : position(position), visible(false), state(ChunkState::UNLOADED)
 {
 	this->voxels.resize(Chunk::SIZE);
 	for (int x = 0; x < Chunk::SIZE; x++) {
@@ -46,11 +46,10 @@ ChunkState	Chunk::getState() const
 	return (this->state);
 }
 
-void	Chunk::generateMesh(const std::vector<Chunk>& chunks)
+void	Chunk::generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks)
 {
 	if (state != ChunkState::GENERATED) return;
 
-	//auto start = std::chrono::high_resolution_clock::now();
 	for (int x = 0; x < Chunk::SIZE; x++) {
 		for (int y = 0; y < Chunk::HEIGHT; y++) {
 			for (int z = 0; z < Chunk::SIZE; z++) {
@@ -60,14 +59,12 @@ void	Chunk::generateMesh(const std::vector<Chunk>& chunks)
 			}
 		}
 	}
-	//auto end = std::chrono::high_resolution_clock::now();
-	//std::chrono::duration<double> elapsed = end - start;
-	//std::cout << "Chunk mesh generation: " << elapsed.count() << "s" << std::endl;
 	state = ChunkState::MESHED;
 }
 
-void	Chunk::addVoxelToMesh(const std::vector<Chunk>& chunks, Voxel& voxel, int x, int y, int z)
+void	Chunk::addVoxelToMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z)
 {
+	TextureType voxelType = voxel.getType();
 	for (auto& dir : directions) {
 		int dx, dy, dz;
 		Face face;
@@ -81,10 +78,27 @@ void	Chunk::addVoxelToMesh(const std::vector<Chunk>& chunks, Voxel& voxel, int x
 
 		if (isInside) {
 			if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) {
-				voxel.addFaceToMesh(mesh, face, voxel.getType());
+				voxel.addFaceToMesh(mesh, face, voxelType);
 			}
-		} else if (voxel.isHighest()) { // Still issue in caves where the highest voxel is not the surface, need to check voxel in the neighboring chunk
-			voxel.addFaceToMesh(mesh, face, voxel.getType());
+		} else {
+			if (voxel.isHighest()) {
+				voxel.addFaceToMesh(mesh, face, voxelType);
+			} else {
+				glm::ivec3 adjacentChunkPos = glm::ivec3(this->position) + glm::ivec3(dx, dy, dz) * Chunk::SIZE;
+				adjacentChunkPos.x = floor(adjacentChunkPos.x / Chunk::SIZE);
+				adjacentChunkPos.y = floor(adjacentChunkPos.y / Chunk::HEIGHT);
+				adjacentChunkPos.z = floor(adjacentChunkPos.z / Chunk::SIZE);
+				auto adjacentChunk = chunks.find(adjacentChunkPos);
+				if (adjacentChunk != chunks.end()) {
+					if (adjacentChunk->second.state == ChunkState::UNLOADED) continue;
+					int adjacentX = (nx + Chunk::SIZE) % Chunk::SIZE;
+					int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
+					int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
+					if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ).getType() == TEXTURE_AIR) {
+						voxel.addFaceToMesh(mesh, face, voxelType);
+					}
+				}
+			}
 		}
 	}
 }
@@ -188,7 +202,7 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 					}
 				} else {
 					if (surfaceHeight <= 1 && y == 0) {
-						this->voxels[x][y][z].setType(TextureType::TEXTURE_DIRT); // MAYBE CHANGE TO WATER
+						this->voxels[x][y][z].setType(TextureType::TEXTURE_GRASS); // MAYBE CHANGE TO WATER
 					} else {
 						// This voxel is above the surface, so fill it with air
 						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
@@ -202,8 +216,6 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 {
 	if (state != ChunkState::UNLOADED) return;
-
-	//auto start = std::chrono::high_resolution_clock::now();
 
 	const int numThreads = 4;
 	const int chunkWidth = Chunk::SIZE / numThreads;
@@ -220,9 +232,6 @@ void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 		thread.join();
 	}
 
-	//auto end = std::chrono::high_resolution_clock::now();
-	//std::chrono::duration<double> elapsed = end - start;
-	//std::cout << "Chunk generation: " << elapsed.count() << "s" << std::endl;
 	state = ChunkState::GENERATED;
 
 	// DEBUG

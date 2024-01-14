@@ -29,11 +29,6 @@
 #include <Renderer/TextRenderer.hpp>
 #include <utils.hpp>
 
-struct ChunkHasher {
-	std::size_t operator()(const glm::ivec2& k) const {
-		return ((k.x ^ (k.y << 4)));
-	}
-};
 
 class Engine {
 	public:
@@ -69,8 +64,7 @@ class Engine {
 
 		// Chunk management
 		int					renderDistance;
-		std::unordered_set<glm::ivec2, ChunkHasher>	chunkPositions;
-		std::vector<Chunk>	chunks;
+		std::unordered_map<glm::ivec3, Chunk, ivec3_hash>	chunks;
 
 		void	render();
 		void	frustumCulling();

@@ -115,14 +115,14 @@ void	Engine::run()
 
 		if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
 			for (auto& chunk : this->chunks) {
-				if (chunk.deleteVoxel(this->camera.getPosition(), this->camera.getFront())) {
+				if (chunk.second.deleteVoxel(this->camera.getPosition(), this->camera.getFront())) {
 					break;
 				}
 			}
 		}
 		if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
 			for (auto& chunk : this->chunks) {
-				if (chunk.placeVoxel(this->camera.getPosition(), this->camera.getFront())) {
+				if (chunk.second.placeVoxel(this->camera.getPosition(), this->camera.getFront())) {
 					break;
 				}
 			}
@@ -176,84 +176,56 @@ void	Engine::render()
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
 
-	//auto start = std::chrono::high_resolution_clock::now();
 	this->chunkManagement();
-	//auto end = std::chrono::high_resolution_clock::now();
-	//std::chrono::duration<double> elapsed = end - start;
-	//std::cout << "Chunk management: " << elapsed.count() << "s" << std::endl;
-	//start = std::chrono::high_resolution_clock::now();
 	this->frustumCulling();
-	//end = std::chrono::high_resolution_clock::now();
-	//elapsed = end - start;
-	//std::cout << "Frustum culling: " << elapsed.count() << "s" << std::endl;
 
-	auto processChunks = [&](std::atomic<int>& index, std::atomic<int>& chunkLoaded) {
-		while (true) {
-			int i = index++;
-			if (i >= this->chunks.size() || chunkLoaded >= this->chunkLoadedMax) break;
-
-			Chunk& chunk = this->chunks[i];
-			if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED) {
-				chunk.generateVoxel(this->perlin);
-				chunkLoaded++;
-			}
-			if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED) {
-				chunk.generateMesh(this->chunks);
-				chunkLoaded++;
-			}
-		}
-	};
-
-	std::atomic<int> chunkIndex(0);
-	std::atomic<int> chunkLoaded(0);
-
-	//start = std::chrono::high_resolution_clock::now();
-	for (auto& thread : threads) {
-		thread = std::thread(processChunks, std::ref(chunkIndex), std::ref(chunkLoaded));
-	}
-
-	for (auto& thread : threads) {
-		thread.join();
-	}
-	//end = std::chrono::high_resolution_clock::now();
-	//elapsed = end - start;
-	//std::cout << "Chunk generation: " << elapsed.count() << "s" << std::endl;
-
-	//start = std::chrono::high_resolution_clock::now();
+	int chunkLoaded = 0;
 	for (auto& chunk : this->chunks) {
-		if (chunk.isVisible() && chunk.getState() == ChunkState::MESHED) {
-			this->visibleVoxelsCount += this->renderer->draw(chunk, *this->shader, this->camera);
+		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::UNLOADED) {
+			chunk.second.generateVoxel(this->perlin);
+			chunkLoaded++;
+		}
+		if (chunkLoaded > this->chunkLoadedMax) {
+			break;
+		}
+	}
+
+	for (auto& chunk : this->chunks) {
+		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::GENERATED) {
+			chunk.second.generateMesh(this->chunks);
+			chunkLoaded++;
+		}
+		if (chunkLoaded >= this->chunkLoadedMax) {
+			break;
+		}
+	}
+
+	for (auto& chunk : this->chunks) {
+		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::MESHED) {
+			this->visibleVoxelsCount += this->renderer->draw(chunk.second, *this->shader, this->camera);
 			this->visibleChunksCount++;
 			if (chunkBorders)
-				this->renderer->drawBoundingBox(chunk, this->camera);
+				this->renderer->drawBoundingBox(chunk.second, this->camera);
 		}
 	}
-	//end = std::chrono::high_resolution_clock::now();
-	//elapsed = end - start;
-	//std::cout << "Chunk rendering: " << elapsed.count() << "s" << std::endl;
 }
 
 void	Engine::chunkManagement()
 {
 	glm::vec3 cameraPos = this->camera.getPosition();
-	glm::ivec2 cameraPos2D = glm::ivec2(cameraPos.x, cameraPos.z);
+	glm::ivec3 cameraChunkPos3D = glm::ivec3(cameraPos.x / Chunk::SIZE, cameraPos.y / Chunk::HEIGHT, cameraPos.z / Chunk::SIZE);
 	glm::ivec2 cameraChunkPos2D = glm::ivec2(cameraPos.x / Chunk::SIZE, cameraPos.z / Chunk::SIZE);
 	int chunkRadius = (this->renderDistance / Chunk::SIZE) - 1;
 	int squaredRenderDistance = this->renderDistance * this->renderDistance;
 	int squaredChunkRadius = chunkRadius * chunkRadius;
 	int	chunksLoadedThisFrame = 0;
 
-	//auto start = std::chrono::high_resolution_clock::now();
-	//int chunkSizeBefore = this->chunks.size();
 	for (auto it = this->chunks.begin(); it != this->chunks.end();) {
-		glm::ivec2 chunkPos2D = glm::ivec2(it->getPosition().x, it->getPosition().z);
-		glm::vec3 chunkPos = glm::vec3(chunkPos2D.x, 0, chunkPos2D.y);
-		glm::vec2 diff = cameraPos2D - chunkPos2D;
+		glm::ivec3 chunkPos3D = it->first;
+		glm::vec2 diff = glm::ivec2(chunkPos3D.x, chunkPos3D.z) - cameraChunkPos2D;
 
 		if (glm::dot(diff, diff) > squaredRenderDistance) {
-			this->chunkPositions.erase(chunkPos2D / Chunk::SIZE);
-			std::swap(*it, this->chunks.back());
-			this->chunks.pop_back();
+			it = this->chunks.erase(it);
 			chunksLoadedThisFrame++;
 			if (chunksLoadedThisFrame >= this->chunkLoadedMax) {
 				break;
@@ -262,21 +234,17 @@ void	Engine::chunkManagement()
 			it++;
 		}
 	}
-	//auto end = std::chrono::high_resolution_clock::now();
-	//std::chrono::duration<double> elapsed = end - start;
-	//std::cout << "Chunk erasing: " << elapsed.count() << "s (" << chunkSizeBefore - this->chunks.size() << " chunks)" << std::endl;
+
 
 	chunksLoadedThisFrame = 0;
-	//int chunkSizeAfter = this->chunks.size();
-	//auto start2 = std::chrono::high_resolution_clock::now();
 	for (int x = -chunkRadius; x <= chunkRadius; x++) {
 		for (int z = -chunkRadius; z <= chunkRadius; z++) {
 			glm::ivec2 chunkPos2D = cameraChunkPos2D + glm::ivec2(x, z);
+			glm::ivec3 chunkPos3D = glm::ivec3(chunkPos2D.x, 0, chunkPos2D.y);
 			glm::vec2 diff = chunkPos2D - cameraChunkPos2D;
 
-			if (glm::dot(diff, diff) <= squaredChunkRadius && this->chunkPositions.find(chunkPos2D) == this->chunkPositions.end()) {
-				this->chunkPositions.insert(chunkPos2D);
-				this->chunks.push_back(Chunk(glm::vec3(chunkPos2D.x * Chunk::SIZE, 0, chunkPos2D.y * Chunk::SIZE), this->perlin));
+			if (glm::dot(diff, diff) <= squaredChunkRadius && this->chunks.find(chunkPos3D) == this->chunks.end()) {
+				this->chunks.insert(std::make_pair(chunkPos3D, Chunk(glm::vec3(chunkPos2D.x * Chunk::SIZE, 0, chunkPos2D.y * Chunk::SIZE))));
 				chunksLoadedThisFrame++;
 				if (chunksLoadedThisFrame >= this->chunkLoadedMax) {
 					break;
@@ -284,10 +252,6 @@ void	Engine::chunkManagement()
 			}
 		}
 	}
-	//auto end2 = std::chrono::high_resolution_clock::now();
-	//std::chrono::duration<double> elapsed2 = end2 - start2;
-	//std::cout << "Chunk loading: " << elapsed2.count() << "s (" << this->chunks.size() - chunkSizeAfter << " chunks)" << std::endl;
-	//std::cout << "Chunk Management: " << elapsed.count() + elapsed2.count() << "s" << std::endl;
 }
 
 void	Engine::frustumCulling()
@@ -307,8 +271,8 @@ void	Engine::frustumCulling()
 	}
 
 	for (auto& chunk : this->chunks) {
-		glm::vec3 center = chunk.getPosition() + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE) / 2.0f;
-		glm::vec3 corner = chunk.getPosition() + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE);
+		glm::vec3 center = chunk.second.getPosition() + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE) / 2.0f;
+		glm::vec3 corner = chunk.second.getPosition() + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE);
 		float radius = glm::length(corner - center);;
 
 		bool inside = true;
@@ -321,9 +285,9 @@ void	Engine::frustumCulling()
 		}
 
 		if (inside) {
-			chunk.setVisible(true);
+			chunk.second.setVisible(true);
 		} else {
-			chunk.setVisible(false);
+			chunk.second.setVisible(false);
 		}
 	}
 }
