@@ -212,43 +212,31 @@ void	Engine::render()
 
 void	Engine::chunkManagement()
 {
-	glm::vec3 cameraPos = this->camera.getPosition();
-	glm::ivec3 cameraChunkPos3D = glm::ivec3(cameraPos.x / Chunk::SIZE, cameraPos.y / Chunk::HEIGHT, cameraPos.z / Chunk::SIZE);
-	glm::ivec2 cameraChunkPos2D = glm::ivec2(cameraPos.x / Chunk::SIZE, cameraPos.z / Chunk::SIZE);
-	int chunkRadius = (this->renderDistance / Chunk::SIZE) - 1;
-	int squaredRenderDistance = this->renderDistance * this->renderDistance;
-	int squaredChunkRadius = chunkRadius * chunkRadius;
-	int	chunksLoadedThisFrame = 0;
+	glm::ivec3 cameraChunkPos = glm::ivec3(this->camera.getPosition().x / Chunk::SIZE, this->camera.getPosition().y / Chunk::HEIGHT, this->camera.getPosition().z / Chunk::SIZE);
+	int chunkRenderDistance = (this->renderDistance / Chunk::SIZE) - 1;
 
 	for (auto it = this->chunks.begin(); it != this->chunks.end();) {
-		glm::ivec3 chunkPos3D = it->first;
-		glm::vec2 diff = glm::ivec2(chunkPos3D.x, chunkPos3D.z) - cameraChunkPos2D;
+		glm::ivec3 chunkPos = it->first;
+		glm::vec3 diff = glm::vec3(chunkPos - cameraChunkPos);
 
-		if (glm::dot(diff, diff) > squaredRenderDistance) {
+		if (glm::length(diff) > chunkRenderDistance * 1.5f) {
 			it = this->chunks.erase(it);
-			chunksLoadedThisFrame++;
-			if (chunksLoadedThisFrame >= this->chunkLoadedMax) {
-				break;
-			}
 		} else {
 			it++;
 		}
 	}
 
-
-	chunksLoadedThisFrame = 0;
-	for (int x = -chunkRadius; x <= chunkRadius; x++) {
-		for (int z = -chunkRadius; z <= chunkRadius; z++) {
-			glm::ivec2 chunkPos2D = cameraChunkPos2D + glm::ivec2(x, z);
-			glm::ivec3 chunkPos3D = glm::ivec3(chunkPos2D.x, 0, chunkPos2D.y);
-			glm::vec2 diff = chunkPos2D - cameraChunkPos2D;
-
-			if (glm::dot(diff, diff) <= squaredChunkRadius && this->chunks.find(chunkPos3D) == this->chunks.end()) {
-				this->chunks.insert(std::make_pair(chunkPos3D, Chunk(glm::vec3(chunkPos2D.x * Chunk::SIZE, 0, chunkPos2D.y * Chunk::SIZE))));
-				chunksLoadedThisFrame++;
-				if (chunksLoadedThisFrame >= this->chunkLoadedMax) {
-					break;
-				}
+	for (int x = -chunkRenderDistance; x <= chunkRenderDistance; x++) {
+		for (int z = -chunkRenderDistance; z <= chunkRenderDistance; z++) {
+			glm::ivec3 chunkPos = glm::ivec3(cameraChunkPos.x + x, 0, cameraChunkPos.z + z);
+			glm::ivec3 chunkPos2 = glm::ivec3(cameraChunkPos.x + x, 1, cameraChunkPos.z + z);
+			glm::ivec3 chunkPos3 = glm::ivec3(cameraChunkPos.x + x, 2, cameraChunkPos.z + z);
+			glm::ivec3 chunkPos4 = glm::ivec3(cameraChunkPos.x + x, 3, cameraChunkPos.z + z);
+			if (this->chunks.find(chunkPos) == this->chunks.end() && glm::length(glm::vec3(chunkPos - cameraChunkPos)) <= chunkRenderDistance) {
+				this->chunks.insert(std::make_pair(chunkPos, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, 0, chunkPos.z * Chunk::SIZE))));
+				this->chunks.insert(std::make_pair(chunkPos2, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, Chunk::HEIGHT, chunkPos.z * Chunk::SIZE), ChunkState::MESHED)));
+				this->chunks.insert(std::make_pair(chunkPos3, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, Chunk::HEIGHT * 2, chunkPos.z * Chunk::SIZE), ChunkState::MESHED)));
+				this->chunks.insert(std::make_pair(chunkPos4, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, Chunk::HEIGHT * 3, chunkPos.z * Chunk::SIZE), ChunkState::MESHED)));
 			}
 		}
 	}
@@ -271,8 +259,9 @@ void	Engine::frustumCulling()
 	}
 
 	for (auto& chunk : this->chunks) {
-		glm::vec3 center = chunk.second.getPosition() + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE) / 2.0f;
-		glm::vec3 corner = chunk.second.getPosition() + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE);
+		glm::vec3 chunkPosition = chunk.second.getPosition();
+		glm::vec3 corner = chunkPosition + glm::vec3(Chunk::SIZE, Chunk::HEIGHT, Chunk::SIZE);
+		glm::vec3 center = chunkPosition + glm::vec3(Chunk::SIZE / 2.0f, Chunk::HEIGHT / 2.0f, Chunk::SIZE / 2.0f);
 		float radius = glm::length(corner - center);;
 
 		bool inside = true;

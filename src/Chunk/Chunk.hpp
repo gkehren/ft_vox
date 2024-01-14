@@ -22,10 +22,11 @@ class Chunk
 {
 	public:
 		static const int SIZE = 16;
-		static const int HEIGHT = 128;
+		static const int HEIGHT = 64;
 		static constexpr float RADIUS = 16.0f;
 
 		Chunk(const glm::vec3& position);
+		Chunk(const glm::vec3& position, ChunkState state);
 		~Chunk();
 
 		const glm::vec3&				getPosition() const;

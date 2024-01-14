@@ -13,6 +13,19 @@ Chunk::Chunk(const glm::vec3& position) : position(position), visible(false), st
 	}
 }
 
+Chunk::Chunk(const glm::vec3& position, ChunkState state) : position(position), visible(false), state(state)
+{
+	this->voxels.resize(Chunk::SIZE);
+	for (int x = 0; x < Chunk::SIZE; x++) {
+		this->voxels[x].resize(Chunk::HEIGHT);
+		for (int y = 0; y < Chunk::HEIGHT; y++) {
+			for (int z = 0; z < Chunk::SIZE; z++) {
+				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
+			}
+		}
+	}
+}
+
 Chunk::~Chunk()
 {}
 
@@ -177,7 +190,7 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 			float mountainNoise = perlin->noise2D_01((position.x + x) / 1000.0f, (position.z + z) / 1000.0f); // New noise layer for mountains
 
 			// Combine the Perlin noise values to determine the surface height at this point
-			int surfaceHeight = static_cast<int>((noise1 + noise2 + noise3) * Chunk::HEIGHT / 2) - 32;
+			int surfaceHeight = static_cast<int>((noise1 + noise2 + noise3) * Chunk::HEIGHT / 2);
 
 			if (mountainNoise > 0.8f) { // This threshold determines how much of the terrain will be mountains
 				surfaceHeight += static_cast<int>(mountainNoise * 64);
