@@ -25,8 +25,7 @@ class Chunk
 		static const int HEIGHT = 64;
 		static constexpr float RADIUS = 16.0f;
 
-		Chunk(const glm::vec3& position);
-		Chunk(const glm::vec3& position, ChunkState state);
+		Chunk(const glm::vec3& position, ChunkState state = ChunkState::UNLOADED);
 		~Chunk();
 
 		const glm::vec3&				getPosition() const;
@@ -36,6 +35,7 @@ class Chunk
 		void							setState(ChunkState state);
 		ChunkState						getState() const;
 		bool							contains(int x, int y, int z) const;
+		bool							containesUpper(int x, int y, int z) const;
 		const Voxel&					getVoxel(int x, int y, int z) const;
 		bool							deleteVoxel(glm::vec3 position, glm::vec3 front);
 		bool							placeVoxel(glm::vec3 position, glm::vec3 front);
@@ -48,8 +48,9 @@ class Chunk
 		bool		visible;
 		ChunkState	state;
 
-		std::vector<std::vector<std::vector<Voxel>>>	voxels;
-		Mesh											mesh;
+		std::vector<std::vector<std::vector<Voxel>>>		voxels;
+		std::unordered_map<glm::ivec3, Voxel, ivec3_hash>	voxelsUpper;
+		Mesh												mesh;
 
 		void	addVoxelToMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z);
 		void	generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);

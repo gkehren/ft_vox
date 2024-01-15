@@ -1,18 +1,5 @@
 #include "Chunk.hpp"
 
-Chunk::Chunk(const glm::vec3& position) : position(position), visible(false), state(ChunkState::UNLOADED)
-{
-	this->voxels.resize(Chunk::SIZE);
-	for (int x = 0; x < Chunk::SIZE; x++) {
-		this->voxels[x].resize(Chunk::HEIGHT);
-		for (int y = 0; y < Chunk::HEIGHT; y++) {
-			for (int z = 0; z < Chunk::SIZE; z++) {
-				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
-			}
-		}
-	}
-}
-
 Chunk::Chunk(const glm::vec3& position, ChunkState state) : position(position), visible(false), state(state)
 {
 	this->voxels.resize(Chunk::SIZE);
@@ -72,6 +59,17 @@ void	Chunk::generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>
 			}
 		}
 	}
+
+	for (auto& voxel : this->voxelsUpper) {
+		if (voxel.second.getType() != TEXTURE_AIR) {
+			voxel.second.addFaceToMesh(mesh, Face::TOP, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, Face::BOTTOM, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, Face::LEFT, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, Face::RIGHT, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, Face::FRONT, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, Face::BACK, voxel.second.getType());
+		}
+	}
 	state = ChunkState::MESHED;
 }
 
@@ -123,6 +121,13 @@ bool	Chunk::contains(int x, int y, int z) const
 			z >= position.z && z < position.z + Chunk::SIZE);
 }
 
+bool	Chunk::containesUpper(int x, int y, int z) const
+{
+	return (x >= position.x && x < position.x + Chunk::SIZE &&
+			y >= position.y + Chunk::HEIGHT && y < position.y + Chunk::HEIGHT * 4 &&
+			z >= position.z && z < position.z + Chunk::SIZE);
+}
+
 const Voxel&	Chunk::getVoxel(int x, int y, int z) const
 {
 	return (this->voxels[x][y][z]);
@@ -130,54 +135,62 @@ const Voxel&	Chunk::getVoxel(int x, int y, int z) const
 
 bool	Chunk::deleteVoxel(glm::vec3 position, glm::vec3 front)
 {
-	// X, Y, Z are world coordinates, need to convert them to chunk coordinates
-	// Check if the voxel is in this chunk
 	glm::vec3 target = position + front * 0.5f;
 	int x = floor(target.x);
 	int y = floor(target.y);
 	int z = floor(target.z);
-	if (!this->contains(x, y, z)) return false;
 
-	// Convert world coordinates to chunk coordinates
-	x = floor(x - this->position.x);
-	y = floor(y - this->position.y);
-	z = floor(z - this->position.z);
+	if (this->contains(x, y, z)) {
+		x = floor(x - this->position.x);
+		y = floor(y - this->position.y);
+		z = floor(z - this->position.z);
+		if (this->voxels[x][y][z].getType() == TEXTURE_AIR) return false;
+		this->voxels[x][y][z].setType(TEXTURE_AIR);
+		mesh.clear();
+		this->state = ChunkState::GENERATED;
+		return true;
+	} else if (this->containesUpper(x, y, z)) {
+		x = floor(x - this->position.x);
+		y = floor(y - this->position.y);
+		z = floor(z - this->position.z);
+		if (this->voxelsUpper.find(glm::ivec3(x, y, z)) == this->voxelsUpper.end()) return false;
+		this->voxelsUpper.erase(glm::ivec3(x, y, z));
+		mesh.clear();
+		this->state = ChunkState::GENERATED;
+		return true;
+	}
 
-	if (this->voxels[x][y][z].getType() == TEXTURE_AIR) return false;
-
-	// Delete the voxel
-	this->voxels[x][y][z].setType(TEXTURE_AIR);
-
-	// Update the mesh
-	mesh.clear();
-	this->state = ChunkState::GENERATED;
-	return true;
+	return false;
 }
 
 bool	Chunk::placeVoxel(glm::vec3 position, glm::vec3 front)
 {
-	// X, Y, Z are world coordinates, need to convert them to chunk coordinates
-	// Check if the voxel is in this chunk
 	glm::vec3 target = position + front * 0.5f;
 	int x = floor(target.x);
 	int y = floor(target.y);
 	int z = floor(target.z);
-	if (!this->contains(x, y, z)) return false;
 
-	// Convert world coordinates to chunk coordinates
-	x = floor(x - this->position.x);
-	y = floor(y - this->position.y);
-	z = floor(z - this->position.z);
+	if (this->contains(x, y, z)) {
+		x = floor(x - this->position.x);
+		y = floor(y - this->position.y);
+		z = floor(z - this->position.z);
+		if (this->voxels[x][y][z].getType() != TEXTURE_AIR) return false;
+		this->voxels[x][y][z].setType(TEXTURE_PLANK);
+		mesh.clear();
+		this->state = ChunkState::GENERATED;
+		return true;
+	} else if (this->containesUpper(x, y, z)) {
+		x = floor(x - this->position.x);
+		y = floor(y - this->position.y);
+		z = floor(z - this->position.z);
+		if (this->voxelsUpper.find(glm::ivec3(x, y, z)) != this->voxelsUpper.end()) return false;
+		this->voxelsUpper.insert(std::make_pair(glm::ivec3(x, y, z), Voxel(glm::vec3(x, y, z), TEXTURE_PLANK, true)));
+		mesh.clear();
+		this->state = ChunkState::GENERATED;
+		return true;
+	}
 
-	if (this->voxels[x][y][z].getType() != TEXTURE_AIR) return false;
-
-	// Delete the voxel
-	this->voxels[x][y][z].setType(TEXTURE_PLANK);
-
-	// Update the mesh
-	mesh.clear();
-	this->state = ChunkState::GENERATED;
-	return true;
+	return false;
 }
 
 void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin) {

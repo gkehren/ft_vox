@@ -229,14 +229,8 @@ void	Engine::chunkManagement()
 	for (int x = -chunkRenderDistance; x <= chunkRenderDistance; x++) {
 		for (int z = -chunkRenderDistance; z <= chunkRenderDistance; z++) {
 			glm::ivec3 chunkPos = glm::ivec3(cameraChunkPos.x + x, 0, cameraChunkPos.z + z);
-			glm::ivec3 chunkPos2 = glm::ivec3(cameraChunkPos.x + x, 1, cameraChunkPos.z + z);
-			glm::ivec3 chunkPos3 = glm::ivec3(cameraChunkPos.x + x, 2, cameraChunkPos.z + z);
-			glm::ivec3 chunkPos4 = glm::ivec3(cameraChunkPos.x + x, 3, cameraChunkPos.z + z);
 			if (this->chunks.find(chunkPos) == this->chunks.end() && glm::length(glm::vec3(chunkPos - cameraChunkPos)) <= chunkRenderDistance) {
 				this->chunks.insert(std::make_pair(chunkPos, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, 0, chunkPos.z * Chunk::SIZE))));
-				this->chunks.insert(std::make_pair(chunkPos2, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, Chunk::HEIGHT, chunkPos.z * Chunk::SIZE), ChunkState::MESHED)));
-				this->chunks.insert(std::make_pair(chunkPos3, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, Chunk::HEIGHT * 2, chunkPos.z * Chunk::SIZE), ChunkState::MESHED)));
-				this->chunks.insert(std::make_pair(chunkPos4, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, Chunk::HEIGHT * 3, chunkPos.z * Chunk::SIZE), ChunkState::MESHED)));
 			}
 		}
 	}
