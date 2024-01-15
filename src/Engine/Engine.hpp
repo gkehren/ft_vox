@@ -17,11 +17,6 @@
 #include <unordered_set>
 #include <algorithm>
 
-#include <thread>
-#include <mutex>
-#include <atomic>
-#include <chrono>
-
 #include <Chunk/Chunk.hpp>
 #include <Shader/Shader.hpp>
 #include <Renderer/Renderer.hpp>
@@ -51,7 +46,6 @@ class Engine {
 		TextRenderer*			textRenderer;
 		Camera					camera;
 
-		std::vector<std::thread>		threads;
 
 		void	updateUI();
 		bool	wireframeMode;
@@ -60,10 +54,9 @@ class Engine {
 		int		visibleVoxelsCount;
 		int		chunkLoadedMax;
 
-		siv::PerlinNoise*		perlin;
-
-		// Chunk management
-		int					renderDistance;
+		int			renderDistance;
+		TextureType	selectedTexture;
+		siv::PerlinNoise*	perlin;
 		std::unordered_map<glm::ivec3, Chunk, ivec3_hash>	chunks;
 
 		void	render();

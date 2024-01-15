@@ -59,6 +59,7 @@ Engine::Engine()
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
 	this->chunkLoadedMax = 1;
+	this->selectedTexture = TEXTURE_PLANK;
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -97,7 +98,8 @@ void	Engine::perlinNoise(unsigned int seed)
 
 void	Engine::run()
 {
-	this->threads.resize(4);
+	bool keyTPressed = false;
+
 	while (!glfwWindowShouldClose(this->window)) {
 		float currentFrame = glfwGetTime();
 		this->deltaTime = currentFrame - lastFrame;
@@ -113,6 +115,15 @@ void	Engine::run()
 
 		this->camera.processKeyboard(deltaTime);
 
+		if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS) {
+			if (!keyTPressed) {
+				selectedTexture = static_cast<TextureType>((selectedTexture + 1) % TEXTURE_COUNT);
+				keyTPressed = true;
+			}
+		} else {
+			keyTPressed = false;
+		}
+
 		if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
 			for (auto& chunk : this->chunks) {
 				if (chunk.second.deleteVoxel(this->camera.getPosition(), this->camera.getFront())) {
@@ -122,7 +133,7 @@ void	Engine::run()
 		}
 		if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
 			for (auto& chunk : this->chunks) {
-				if (chunk.second.placeVoxel(this->camera.getPosition(), this->camera.getFront())) {
+				if (chunk.second.placeVoxel(this->camera.getPosition(), this->camera.getFront(), selectedTexture)) {
 					break;
 				}
 			}
@@ -155,6 +166,7 @@ void	Engine::updateUI()
 	ImGui::Text("Voxel count: %d",  this->visibleVoxelsCount);
 	ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
 	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
+	ImGui::Text("Selected texture: %s (%d)", textureTypeString.at(this->selectedTexture).c_str(), this->selectedTexture);
 
 	ImGui::Checkbox("Wireframe", &this->wireframeMode);
 	if (this->wireframeMode) {

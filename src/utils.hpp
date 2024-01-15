@@ -39,6 +39,17 @@ enum TextureType {
 	TEXTURE_AIR // Keep after count beacuse AIR is not a texture
 };
 
+static const std::map<TextureType, std::string> textureTypeString = {
+	{TEXTURE_DEFAULT, "DEFAULT"},
+	{TEXTURE_STONE, "Stone"},
+	{TEXTURE_DIRT, "Dirt"},
+	{TEXTURE_GRASS, "Grass"},
+	{TEXTURE_PLANK, "Plank"},
+	{TEXTURE_SLAB, "Slab"},
+	{TEXTURE_SMOOTH_STONE, "Smooth stone"},
+	{TEXTURE_BRICK, "Brick"},
+};
+
 enum Face {
 	LEFT,
 	RIGHT,

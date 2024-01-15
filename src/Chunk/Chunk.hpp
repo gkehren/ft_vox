@@ -38,7 +38,7 @@ class Chunk
 		bool							containesUpper(int x, int y, int z) const;
 		const Voxel&					getVoxel(int x, int y, int z) const;
 		bool							deleteVoxel(glm::vec3 position, glm::vec3 front);
-		bool							placeVoxel(glm::vec3 position, glm::vec3 front);
+		bool							placeVoxel(glm::vec3 position, glm::vec3 front, TextureType type);
 
 		void	generateVoxel(siv::PerlinNoise* perlin);
 		void	generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks);

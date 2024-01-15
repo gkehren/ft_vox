@@ -163,7 +163,7 @@ bool	Chunk::deleteVoxel(glm::vec3 position, glm::vec3 front)
 	return false;
 }
 
-bool	Chunk::placeVoxel(glm::vec3 position, glm::vec3 front)
+bool	Chunk::placeVoxel(glm::vec3 position, glm::vec3 front, TextureType type)
 {
 	glm::vec3 target = position + front * 0.5f;
 	int x = floor(target.x);
@@ -175,7 +175,7 @@ bool	Chunk::placeVoxel(glm::vec3 position, glm::vec3 front)
 		y = floor(y - this->position.y);
 		z = floor(z - this->position.z);
 		if (this->voxels[x][y][z].getType() != TEXTURE_AIR) return false;
-		this->voxels[x][y][z].setType(TEXTURE_PLANK);
+		this->voxels[x][y][z].setType(type);
 		mesh.clear();
 		this->state = ChunkState::GENERATED;
 		return true;
@@ -184,7 +184,7 @@ bool	Chunk::placeVoxel(glm::vec3 position, glm::vec3 front)
 		y = floor(y - this->position.y);
 		z = floor(z - this->position.z);
 		if (this->voxelsUpper.find(glm::ivec3(x, y, z)) != this->voxelsUpper.end()) return false;
-		this->voxelsUpper.insert(std::make_pair(glm::ivec3(x, y, z), Voxel(glm::vec3(x, y, z), TEXTURE_PLANK, true)));
+		this->voxelsUpper.insert(std::make_pair(glm::ivec3(x, y, z), Voxel(glm::vec3(x, y, z), type, true)));
 		mesh.clear();
 		this->state = ChunkState::GENERATED;
 		return true;
