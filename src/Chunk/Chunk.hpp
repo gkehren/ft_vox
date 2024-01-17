@@ -41,7 +41,7 @@ class Chunk
 		bool							placeVoxel(glm::vec3 position, glm::vec3 front, TextureType type);
 
 		void	generateVoxel(siv::PerlinNoise* perlin);
-		void	generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks);
+		void	generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, siv::PerlinNoise* perlin);
 
 	private:
 		glm::vec3	position;
@@ -52,6 +52,6 @@ class Chunk
 		std::unordered_map<glm::ivec3, Voxel, ivec3_hash>	voxelsUpper;
 		Mesh												mesh;
 
-		void	addVoxelToMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z);
+		void	addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z, siv::PerlinNoise* perlin);
 		void	generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);
 };

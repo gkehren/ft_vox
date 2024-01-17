@@ -40,6 +40,7 @@ class Engine {
 		float					frameCount;
 		float					lastTime;
 		float					fps;
+		bool					paused;
 
 		Shader*					shader;
 		Renderer*				renderer;
@@ -47,6 +48,7 @@ class Engine {
 		Camera					camera;
 
 
+		void	handleInput(bool& keyTPressed);
 		void	updateUI();
 		bool	wireframeMode;
 		bool	chunkBorders;
@@ -54,7 +56,8 @@ class Engine {
 		int		visibleVoxelsCount;
 		int		chunkLoadedMax;
 
-		int			renderDistance;
+		int			minRenderDistance;
+		int			maxRenderDistance;
 		TextureType	selectedTexture;
 		siv::PerlinNoise*	perlin;
 		std::unordered_map<glm::ivec3, Chunk, ivec3_hash>	chunks;

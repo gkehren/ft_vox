@@ -38,8 +38,9 @@ Engine::Engine()
 
 	std::string path = RES_PATH + std::string("shaders/");
 	this->shader = new Shader((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
-	this->renderDistance = 160;
-	this->renderer = new Renderer(WINDOW_WIDTH, WINDOW_HEIGHT, this->renderDistance);
+	this->minRenderDistance = 160;
+	this->maxRenderDistance = 320;
+	this->renderer = new Renderer(WINDOW_WIDTH, WINDOW_HEIGHT, this->maxRenderDistance);
 	this->camera.setWindow(this->window);
 
 	glActiveTexture(GL_TEXTURE0);
@@ -60,6 +61,7 @@ Engine::Engine()
 	this->visibleVoxelsCount = 0;
 	this->chunkLoadedMax = 1;
 	this->selectedTexture = TEXTURE_PLANK;
+	this->paused = false;
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -114,30 +116,7 @@ void	Engine::run()
 		}
 
 		this->camera.processKeyboard(deltaTime);
-
-		if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS) {
-			if (!keyTPressed) {
-				selectedTexture = static_cast<TextureType>((selectedTexture + 1) % TEXTURE_COUNT);
-				keyTPressed = true;
-			}
-		} else {
-			keyTPressed = false;
-		}
-
-		if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-			for (auto& chunk : this->chunks) {
-				if (chunk.second.deleteVoxel(this->camera.getPosition(), this->camera.getFront())) {
-					break;
-				}
-			}
-		}
-		if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
-			for (auto& chunk : this->chunks) {
-				if (chunk.second.placeVoxel(this->camera.getPosition(), this->camera.getFront(), selectedTexture)) {
-					break;
-				}
-			}
-		}
+		this->handleInput(keyTPressed);
 
 		glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -164,6 +143,7 @@ void	Engine::updateUI()
 	ImGui::Text("FPS: %.1f (%.1f ms)", ImGui::GetIO().Framerate, this->deltaTime * 1000.0f);
 	ImGui::Text("Visible chunks: %d", this->visibleChunksCount);
 	ImGui::Text("Voxel count: %d",  this->visibleVoxelsCount);
+	ImGui::Text("Render distance: %d | %d", this->minRenderDistance, this->maxRenderDistance);
 	ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
 	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
 	ImGui::Text("Selected texture: %s (%d)", textureTypeString.at(this->selectedTexture).c_str(), this->selectedTexture);
@@ -175,8 +155,8 @@ void	Engine::updateUI()
 		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	}
 	ImGui::Checkbox("Chunk borders", &this->chunkBorders);
-	ImGui::InputInt("Render distance", &this->renderDistance);
 	ImGui::InputInt("Chunk loaded max", &this->chunkLoadedMax);
+	ImGui::Checkbox("Pause", &this->paused);
 
 	ImGui::End();
 	ImGui::Render();
@@ -188,8 +168,10 @@ void	Engine::render()
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
 
-	this->chunkManagement();
-	this->frustumCulling();
+	if (!this->paused) {
+		this->chunkManagement();
+		this->frustumCulling();
+	}
 
 	int chunkLoaded = 0;
 	for (auto& chunk : this->chunks) {
@@ -201,10 +183,9 @@ void	Engine::render()
 			break;
 		}
 	}
-
 	for (auto& chunk : this->chunks) {
 		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::GENERATED) {
-			chunk.second.generateMesh(this->chunks);
+			chunk.second.generateMesh(this->chunks, perlin);
 			chunkLoaded++;
 		}
 		if (chunkLoaded >= this->chunkLoadedMax) {
@@ -225,24 +206,27 @@ void	Engine::render()
 void	Engine::chunkManagement()
 {
 	glm::ivec3 cameraChunkPos = glm::ivec3(this->camera.getPosition().x / Chunk::SIZE, this->camera.getPosition().y / Chunk::HEIGHT, this->camera.getPosition().z / Chunk::SIZE);
-	int chunkRenderDistance = (this->renderDistance / Chunk::SIZE) - 1;
+	int minChunkRenderDistance = (this->minRenderDistance / Chunk::SIZE) - 1;
+	int maxChunkRenderDistance = (this->maxRenderDistance / Chunk::SIZE);
 
-	for (auto it = this->chunks.begin(); it != this->chunks.end();) {
-		glm::ivec3 chunkPos = it->first;
-		glm::vec3 diff = glm::vec3(chunkPos - cameraChunkPos);
+	if (static_cast<int>(this->frameCount) % 5 == 0) {
+		for (auto it = this->chunks.begin(); it != this->chunks.end();) {
+			glm::ivec3 chunkPos = it->first;
+			glm::vec3 diff = glm::vec3(chunkPos - cameraChunkPos);
 
-		if (glm::length(diff) > chunkRenderDistance * 1.5f) {
-			it = this->chunks.erase(it);
-		} else {
-			it++;
+			if (glm::length(diff) > maxChunkRenderDistance) {
+				it = this->chunks.erase(it);
+			} else {
+				it++;
+			}
 		}
-	}
-
-	for (int x = -chunkRenderDistance; x <= chunkRenderDistance; x++) {
-		for (int z = -chunkRenderDistance; z <= chunkRenderDistance; z++) {
-			glm::ivec3 chunkPos = glm::ivec3(cameraChunkPos.x + x, 0, cameraChunkPos.z + z);
-			if (this->chunks.find(chunkPos) == this->chunks.end() && glm::length(glm::vec3(chunkPos - cameraChunkPos)) <= chunkRenderDistance) {
-				this->chunks.insert(std::make_pair(chunkPos, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, 0, chunkPos.z * Chunk::SIZE))));
+	} else {
+		for (int x = -minChunkRenderDistance; x <= minChunkRenderDistance; x++) {
+			for (int z = -minChunkRenderDistance; z <= minChunkRenderDistance; z++) {
+				glm::ivec3 chunkPos = glm::ivec3(cameraChunkPos.x + x, 0, cameraChunkPos.z + z);
+				if (this->chunks.find(chunkPos) == this->chunks.end() && glm::length(glm::vec3(chunkPos - cameraChunkPos)) <= minChunkRenderDistance) {
+					this->chunks.insert(std::make_pair(chunkPos, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, 0, chunkPos.z * Chunk::SIZE))));
+				}
 			}
 		}
 	}
@@ -250,7 +234,7 @@ void	Engine::chunkManagement()
 
 void	Engine::frustumCulling()
 {
-	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT, this->renderDistance) * this->camera.getViewMatrix();
+	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT, this->maxRenderDistance) * this->camera.getViewMatrix();
 	std::array<glm::vec4, 6>	frustumPlanes;
 
 	frustumPlanes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0); // Left
@@ -283,6 +267,33 @@ void	Engine::frustumCulling()
 			chunk.second.setVisible(true);
 		} else {
 			chunk.second.setVisible(false);
+		}
+	}
+}
+
+void	Engine::handleInput(bool& keyTPressed)
+{
+	if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS) {
+		if (!keyTPressed) {
+			selectedTexture = static_cast<TextureType>((selectedTexture + 1) % TEXTURE_COUNT);
+			keyTPressed = true;
+		}
+	} else {
+		keyTPressed = false;
+	}
+
+	if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+		for (auto& chunk : this->chunks) {
+			if (chunk.second.deleteVoxel(this->camera.getPosition(), this->camera.getFront())) {
+				break;
+			}
+		}
+	}
+	if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
+		for (auto& chunk : this->chunks) {
+			if (chunk.second.placeVoxel(this->camera.getPosition(), this->camera.getFront(), selectedTexture)) {
+				break;
+			}
 		}
 	}
 }

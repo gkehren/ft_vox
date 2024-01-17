@@ -46,7 +46,7 @@ ChunkState	Chunk::getState() const
 	return (this->state);
 }
 
-void	Chunk::generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks)
+void	Chunk::generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, siv::PerlinNoise* perlin)
 {
 	if (state != ChunkState::GENERATED) return;
 
@@ -54,7 +54,7 @@ void	Chunk::generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>
 		for (int y = 0; y < Chunk::HEIGHT; y++) {
 			for (int z = 0; z < Chunk::SIZE; z++) {
 				if (this->voxels[x][y][z].getType() != TEXTURE_AIR) {
-					this->addVoxelToMesh(chunks, this->voxels[x][y][z], x, y, z);
+					this->addVoxelToMesh(chunks, this->voxels[x][y][z], x, y, z, perlin);
 				}
 			}
 		}
@@ -70,10 +70,11 @@ void	Chunk::generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>
 			voxel.second.addFaceToMesh(mesh, Face::BACK, voxel.second.getType());
 		}
 	}
+
 	state = ChunkState::MESHED;
 }
 
-void	Chunk::addVoxelToMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z)
+void	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z, siv::PerlinNoise* perlin)
 {
 	TextureType voxelType = voxel.getType();
 	for (auto& dir : directions) {
@@ -97,16 +98,25 @@ void	Chunk::addVoxelToMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_has
 			} else {
 				glm::ivec3 adjacentChunkPos = glm::ivec3(this->position) + glm::ivec3(dx, dy, dz) * Chunk::SIZE;
 				adjacentChunkPos.x = floor(adjacentChunkPos.x / Chunk::SIZE);
-				adjacentChunkPos.y = floor(adjacentChunkPos.y / Chunk::HEIGHT);
+				adjacentChunkPos.y = 0;
 				adjacentChunkPos.z = floor(adjacentChunkPos.z / Chunk::SIZE);
 				auto adjacentChunk = chunks.find(adjacentChunkPos);
 				if (adjacentChunk != chunks.end()) {
-					if (adjacentChunk->second.state == ChunkState::UNLOADED) continue;
-					int adjacentX = (nx + Chunk::SIZE) % Chunk::SIZE;
-					int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
-					int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
-					if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ).getType() == TEXTURE_AIR) {
-						voxel.addFaceToMesh(mesh, face, voxelType);
+					if (adjacentChunk->second.state == ChunkState::GENERATED) {
+						int adjacentX = (nx + Chunk::SIZE) % Chunk::SIZE;
+						int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
+						int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
+						if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ).getType() == TEXTURE_AIR) {
+							voxel.addFaceToMesh(mesh, face, TEXTURE_STONE);
+						}
+					} else {
+						adjacentChunk->second.generateVoxel(perlin);
+						int adjacentX = (nx + Chunk::SIZE) % Chunk::SIZE;
+						int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
+						int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
+						if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ).getType() == TEXTURE_AIR) {
+							voxel.addFaceToMesh(mesh, face, TEXTURE_STONE);
+						}
 					}
 				}
 			}

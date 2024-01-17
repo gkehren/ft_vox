@@ -111,7 +111,7 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Camera& camera) const
 	boundingBoxShader->use();
 
 	boundingBoxShader->setMat4("view", camera.getViewMatrix());
-	boundingBoxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
+	boundingBoxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
 
 	glm::vec3 position = chunk.getPosition();
 
@@ -144,7 +144,7 @@ int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 	shader.use();
 
 	shader.setMat4("view", camera.getViewMatrix());
-	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
+	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
 	shader.setInt("textureSampler", 0);
 	shader.setVec3("lightPos", camera.getPosition());
 	glm::mat4 model = glm::mat4(1.0f);
@@ -206,7 +206,7 @@ void	Renderer::drawSkybox(const Camera& camera) const
 	this->skyboxShader->use();
 	this->skyboxShader->setInt("skybox", 1);
 	this->skyboxShader->setMat4("view", glm::mat4(glm::mat3(camera.getViewMatrix())));
-	this->skyboxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 160));
+	this->skyboxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
 
 	glBindVertexArray(this->skyboxVAO);
 	glActiveTexture(GL_TEXTURE1);
