@@ -211,15 +211,21 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 			float noise2 = perlin->noise2D_01((position.x + x) / 50.0f, (position.z + z) / 50.0f) * 0.5f;
 			float noise3 = perlin->noise2D_01((position.x + x) / 25.0f, (position.z + z) / 25.0f) * 0.2f;
 			float mountainNoise = perlin->noise2D_01((position.x + x) / 1000.0f, (position.z + z) / 1000.0f); // New noise layer for mountains
-			float biomeNoise = perlin->noise2D_01((position.x + x) / 100.0f, (position.z + z) / 100.0f); // New noise layer for biomes
+			float biomeNoise = perlin->noise2D_01((position.x + x) / 250.0f, (position.z + z) / 250.0f); // New noise layer for biomes
 
 			TextureType biomeType;
-			if (biomeNoise < 0.33f) {
-				biomeType = TEXTURE_GRASS;
-			} else if (biomeNoise < 0.66f) {
+			if (biomeNoise < 0.2f) {
 				biomeType = TEXTURE_SAND;
-			} else {
+			} else if (biomeNoise < 0.5f) {
+				biomeType = TEXTURE_GRASS;
+			} else if (biomeNoise < 0.7f) {
 				biomeType = TEXTURE_SNOW;
+			} else if (biomeNoise < 0.8f) {
+				biomeType = TEXTURE_NETHER;
+			} else if (biomeNoise < 0.9f) {
+				biomeType = TEXTURE_SOUL;
+			} else {
+				biomeType = TEXTURE_DIRT;
 			}
 
 			// Combine the Perlin noise values to determine the surface height at this point

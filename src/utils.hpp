@@ -37,6 +37,8 @@ enum TextureType {
 	TEXTURE_BRICK,
 	TEXTURE_SAND,
 	TEXTURE_SNOW,
+	TEXTURE_NETHER,
+	TEXTURE_SOUL,
 	TEXTURE_COUNT, // Keep last
 	TEXTURE_AIR // Keep after count beacuse AIR is not a texture
 };
@@ -50,6 +52,10 @@ static const std::map<TextureType, std::string> textureTypeString = {
 	{TEXTURE_SLAB, "Slab"},
 	{TEXTURE_SMOOTH_STONE, "Smooth stone"},
 	{TEXTURE_BRICK, "Brick"},
+	{TEXTURE_SAND, "Sand"},
+	{TEXTURE_SNOW, "Snow"},
+	{TEXTURE_NETHER, "Netherrack"},
+	{TEXTURE_SOUL, "Soul sand"},
 };
 
 enum Face {
