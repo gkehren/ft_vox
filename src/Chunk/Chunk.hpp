@@ -52,6 +52,6 @@ class Chunk
 		std::unordered_map<glm::ivec3, Voxel, ivec3_hash>	voxelsUpper;
 		Mesh												mesh;
 
-		void	addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z, siv::PerlinNoise* perlin);
-		void	generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);
+		void			addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z, siv::PerlinNoise* perlin);
+		void			generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);
 };

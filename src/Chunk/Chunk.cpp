@@ -211,6 +211,16 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 			float noise2 = perlin->noise2D_01((position.x + x) / 50.0f, (position.z + z) / 50.0f) * 0.5f;
 			float noise3 = perlin->noise2D_01((position.x + x) / 25.0f, (position.z + z) / 25.0f) * 0.2f;
 			float mountainNoise = perlin->noise2D_01((position.x + x) / 1000.0f, (position.z + z) / 1000.0f); // New noise layer for mountains
+			float biomeNoise = perlin->noise2D_01((position.x + x) / 100.0f, (position.z + z) / 100.0f); // New noise layer for biomes
+
+			TextureType biomeType;
+			if (biomeNoise < 0.33f) {
+				biomeType = TEXTURE_GRASS;
+			} else if (biomeNoise < 0.66f) {
+				biomeType = TEXTURE_SAND;
+			} else {
+				biomeType = TEXTURE_SNOW;
+			}
 
 			// Combine the Perlin noise values to determine the surface height at this point
 			int surfaceHeight = static_cast<int>((noise1 + noise2 + noise3) * Chunk::HEIGHT / 2);
@@ -234,11 +244,11 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
 					} else {
 						// This voxel is at the surface, so fill it with grass
-						this->voxels[x][y][z].setType(TextureType::TEXTURE_GRASS, true);
+						this->voxels[x][y][z].setType(biomeType, true);
 					}
 				} else {
 					if (surfaceHeight <= 1 && y == 0) {
-						this->voxels[x][y][z].setType(TextureType::TEXTURE_GRASS); // MAYBE CHANGE TO WATER
+						this->voxels[x][y][z].setType(biomeType); // MAYBE CHANGE TO WATER
 					} else {
 						// This voxel is above the surface, so fill it with air
 						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);

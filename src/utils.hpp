@@ -35,6 +35,8 @@ enum TextureType {
 	TEXTURE_SLAB,
 	TEXTURE_SMOOTH_STONE,
 	TEXTURE_BRICK,
+	TEXTURE_SAND,
+	TEXTURE_SNOW,
 	TEXTURE_COUNT, // Keep last
 	TEXTURE_AIR // Keep after count beacuse AIR is not a texture
 };
