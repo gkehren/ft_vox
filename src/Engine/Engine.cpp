@@ -89,8 +89,10 @@ Engine::~Engine()
 void	Engine::perlinNoise(unsigned int seed)
 {
 	if (seed <= 0) {
-		srand(time(NULL));
-		seed = rand();
+		std::random_device rd;
+		std::mt19937 gen(rd());
+		std::uniform_int_distribution<> dis(100000, 999999);
+		seed = dis(gen);
 		this->perlin = new siv::PerlinNoise(seed);
 	} else {
 		this->perlin = new siv::PerlinNoise(seed);

@@ -16,6 +16,7 @@
 #include <vector>
 #include <unordered_set>
 #include <algorithm>
+#include <random>
 
 #include <Chunk/Chunk.hpp>
 #include <Shader/Shader.hpp>
