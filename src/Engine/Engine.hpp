@@ -35,6 +35,10 @@ class Engine {
 
 	private:
 		GLFWwindow*				window;
+		int						windowWidth;
+		int						windowHeight;
+		GLFWmonitor*			monitor;
+		const GLFWvidmode*		mode;
 
 		float					deltaTime;
 		float					lastFrame;

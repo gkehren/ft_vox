@@ -1,5 +1,7 @@
 #include "Engine.hpp"
 
+#define FULLSCREEN 1 // 0 = fullscreen, 1 = windowed, 2 = borderless
+
 Engine::Engine()
 {
 	if (!glfwInit()) {
@@ -13,7 +15,19 @@ Engine::Engine()
 		glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 	#endif
 
-	this->window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "ft_vox", nullptr, nullptr);
+	this->monitor = glfwGetPrimaryMonitor();
+	this->mode = glfwGetVideoMode(this->monitor);
+	this->windowWidth = this->mode->width;
+	this->windowHeight = this->mode->height;
+	if (FULLSCREEN == 1) {
+		this->windowWidth = 1920;
+		this->windowHeight = 1080;
+		this->window = glfwCreateWindow(windowWidth, windowHeight, "ft_vox", nullptr, nullptr);
+	} else if (FULLSCREEN == 2) {
+		this->window = glfwCreateWindow(windowWidth, windowHeight, "ft_vox", nullptr, nullptr);
+	} else {
+		this->window = glfwCreateWindow(windowWidth, windowHeight, "ft_vox", this->monitor, nullptr);
+	}
 	if (!this->window) {
 		glfwTerminate();
 		throw std::runtime_error("Failed to create GLFW window");
@@ -40,7 +54,7 @@ Engine::Engine()
 	this->shader = new Shader((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
 	this->minRenderDistance = 160;
 	this->maxRenderDistance = 320;
-	this->renderer = new Renderer(WINDOW_WIDTH, WINDOW_HEIGHT, this->maxRenderDistance);
+	this->renderer = new Renderer(windowWidth, windowHeight, this->maxRenderDistance);
 	this->camera.setWindow(this->window);
 
 	glActiveTexture(GL_TEXTURE0);
@@ -53,7 +67,7 @@ Engine::Engine()
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-	textRenderer = new TextRenderer(RES_PATH + std::string("fonts/FiraCode.ttf"), glm::ortho(0.0f, static_cast<float>(WINDOW_WIDTH), 0.0f, static_cast<float>(WINDOW_HEIGHT)));
+	textRenderer = new TextRenderer(RES_PATH + std::string("fonts/FiraCode.ttf"), glm::ortho(0.0f, static_cast<float>(windowWidth), 0.0f, static_cast<float>(windowHeight)));
 
 	this->wireframeMode = false;
 	this->chunkBorders = false;
@@ -126,7 +140,7 @@ void	Engine::run()
 		this->render();
 		this->renderer->drawSkybox(this->camera);
 
-		this->textRenderer->renderText("FPS: " + std::to_string(this->fps), 10.0f, WINDOW_HEIGHT - 40.0f, 0.5f, glm::vec3(1.0f, 1.0f, 1.0f));
+		this->textRenderer->renderText("FPS: " + std::to_string(this->fps), 10.0f, windowHeight - 40.0f, 0.5f, glm::vec3(1.0f, 1.0f, 1.0f));
 		this->updateUI();
 
 		glfwSwapBuffers(this->window);
@@ -159,6 +173,8 @@ void	Engine::updateUI()
 	ImGui::Checkbox("Chunk borders", &this->chunkBorders);
 	ImGui::InputInt("Chunk loaded max", &this->chunkLoadedMax);
 	ImGui::Checkbox("Pause", &this->paused);
+
+	ImGui::Text("Screen size: %d x %d", this->windowWidth, this->windowHeight);
 
 	ImGui::End();
 	ImGui::Render();
@@ -236,7 +252,7 @@ void	Engine::chunkManagement()
 
 void	Engine::frustumCulling()
 {
-	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(WINDOW_WIDTH, WINDOW_HEIGHT, this->maxRenderDistance) * this->camera.getViewMatrix();
+	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(windowWidth, windowHeight, this->maxRenderDistance) * this->camera.getViewMatrix();
 	std::array<glm::vec4, 6>	frustumPlanes;
 
 	frustumPlanes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0); // Left

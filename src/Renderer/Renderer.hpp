@@ -14,9 +14,9 @@
 
 class Renderer {
 	public:
-		Renderer(float screenWidth, float screenHeight, float renderDistance);
+		Renderer(int screenWidth, int screenHeight, float renderDistance);
 		~Renderer();
-		void	setParameters(float screenWidth, float screenHeight, float renderDistance);
+		void	setScreenSize(int screenWidth, int screenHeight);
 
 		int		draw(Chunk& chunk, const Shader& shader, const Camera& camera);
 		void	drawBoundingBox(const Chunk& chunk, const Camera& camera) const;

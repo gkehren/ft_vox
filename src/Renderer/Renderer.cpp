@@ -40,7 +40,7 @@ static GLuint loadTexture(const char* path)
 	return textureID;
 }
 
-Renderer::Renderer(float screenWidth, float screenHeight, float renderDistance) : screenWidth(screenWidth), screenHeight(screenHeight), renderDistance(renderDistance)
+Renderer::Renderer(int screenWidth, int screenHeight, float renderDistance) : screenWidth(screenWidth), screenHeight(screenHeight), renderDistance(renderDistance)
 {
 	std::string path = RES_PATH;
 	this->boundingBoxShader = new Shader((path + "shaders/boundingBoxVertex.glsl").c_str(), (path + "shaders/boundingBoxFragment.glsl").c_str());
@@ -99,7 +99,7 @@ Renderer::~Renderer()
 	glDeleteBuffers(1, &this->boundingBoxVBO);
 }
 
-void	Renderer::setParameters(float screenWidth, float screenHeight, float renderDistance)
+void	Renderer::setScreenSize(int screenWidth, int screenHeight)
 {
 	this->screenWidth = screenWidth;
 	this->screenHeight = screenHeight;

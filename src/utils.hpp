@@ -5,17 +5,10 @@
 #include <tuple>
 #include <map>
 
-#define WINDOW_WIDTH	1920
-#define WINDOW_HEIGHT	1080
-
 #define WORLD_SIZE		16384
 #define WORLD_HEIGHT	256
 
-#ifdef __linux__	// linux
-#define RES_PATH		"/home/gkehren/Documents/ft_vox/ressources/"
-#elif __APPLE__		// Mac
-#define RES_PATH		"/Users/gkehren/Documents/ft_vox/ressources/"
-#endif
+#define RES_PATH		"./ressources/"
 
 struct ivec3_hash {
 	std::size_t operator()(const glm::ivec3& vec) const {
