@@ -238,7 +238,9 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 			for (int y = 0; y < Chunk::HEIGHT; y++) {
 				double caveNoise = perlin->noise3D_01((x + position.x) / Chunk::SIZE, (y + position.y) / Chunk::SIZE, (z + position.z) / Chunk::SIZE);
 				if (y < surfaceHeight) {
-					if (caveNoise > 0.25) {
+					if (y == 0) {
+						this->voxels[x][y][z].setType(TextureType::TEXTURE_STONE);
+					} else if (caveNoise > 0.25) {
 						this->voxels[x][y][z].setType(TextureType::TEXTURE_STONE);
 					} else {
 						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
