@@ -201,6 +201,18 @@ void	Engine::render()
 			break;
 		}
 	}
+
+	int chunkLoaded2 = 0;
+	for (auto& chunk : this->chunks) {
+		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::REMESHED) {
+			chunk.second.generateMesh(this->chunks, this->perlin);
+			chunkLoaded2++;
+		}
+		if (chunkLoaded2 > 4) {
+			break;
+		}
+	}
+
 	for (auto& chunk : this->chunks) {
 		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::GENERATED) {
 			chunk.second.generateMesh(this->chunks, perlin);
@@ -212,7 +224,7 @@ void	Engine::render()
 	}
 
 	for (auto& chunk : this->chunks) {
-		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::MESHED) {
+		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::MESHED || chunk.second.getState() == ChunkState::REMESHED) {
 			this->visibleVoxelsCount += this->renderer->draw(chunk.second, *this->shader, this->camera);
 			this->visibleChunksCount++;
 			if (chunkBorders)

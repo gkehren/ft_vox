@@ -63,6 +63,7 @@ enum Face {
 enum ChunkState {
 	UNLOADED,
 	GENERATED,
+	REMESHED,
 	MESHED
 };
 

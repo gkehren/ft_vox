@@ -48,13 +48,19 @@ ChunkState	Chunk::getState() const
 
 void	Chunk::generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, siv::PerlinNoise* perlin)
 {
-	if (state != ChunkState::GENERATED) return;
+	if (state == ChunkState::REMESHED) {
+		if (adjacentChunksGenerated(chunks) == false) return;
+		mesh.clear();
+	} else if (state != ChunkState::GENERATED) return;
+
+	bool complete = true;
 
 	for (int x = 0; x < Chunk::SIZE; x++) {
 		for (int y = 0; y < Chunk::HEIGHT; y++) {
 			for (int z = 0; z < Chunk::SIZE; z++) {
 				if (this->voxels[x][y][z].getType() != TEXTURE_AIR) {
-					this->addVoxelToMesh(chunks, this->voxels[x][y][z], x, y, z, perlin);
+					bool result = this->addVoxelToMesh(chunks, this->voxels[x][y][z], x, y, z, perlin);
+					if (complete) complete = result;
 				}
 			}
 		}
@@ -70,13 +76,18 @@ void	Chunk::generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chun
 			voxel.second.addFaceToMesh(mesh, Face::BACK, voxel.second.getType());
 		}
 	}
-
-	state = ChunkState::MESHED;
+	if (complete) {
+		state = ChunkState::MESHED;
+	} else {
+		state = ChunkState::REMESHED;
+	}
 }
 
-void	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z, siv::PerlinNoise* perlin)
+bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z, siv::PerlinNoise* perlin)
 {
 	TextureType voxelType = voxel.getType();
+	bool complete = true;
+
 	for (auto& dir : directions) {
 		int dx, dy, dz;
 		Face face;
@@ -118,10 +129,30 @@ void	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& ch
 							voxel.addFaceToMesh(mesh, face, voxelType);
 						}
 					}
+				} else {
+					complete = false;
 				}
 			}
 		}
 	}
+	return complete;
+}
+
+bool	Chunk::adjacentChunksGenerated(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks) const
+{
+	for (auto& dir : directions) {
+		int dx, dy, dz;
+		std::tie(dx, dy, dz, std::ignore) = dir;
+
+		glm::ivec3 adjacentChunkPos = glm::ivec3(this->position) + glm::ivec3(dx, dy, dz) * Chunk::SIZE;
+		adjacentChunkPos.x = floor(adjacentChunkPos.x / Chunk::SIZE);
+		adjacentChunkPos.y = 0;
+		adjacentChunkPos.z = floor(adjacentChunkPos.z / Chunk::SIZE);
+		auto adjacentChunk = chunks.find(adjacentChunkPos);
+		if (adjacentChunk == chunks.end()) return false;
+		if (adjacentChunk->second.state == ChunkState::UNLOADED) return false;
+	}
+	return true;
 }
 
 bool	Chunk::contains(int x, int y, int z) const
