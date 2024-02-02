@@ -1,7 +1,7 @@
 #include "Camera.hpp"
 
 Camera::Camera(glm::vec3 position, glm::vec3 up, float yaw, float pitch, GLFWwindow* window)
-	: position(position), worldUp(up), yaw(yaw), pitch(pitch), movementSpeed(2.5f), mouseSensitivity(0.1f), window(window)
+	: window(window), position(position), worldUp(up), yaw(yaw), pitch(pitch), movementSpeed(2.5f), mouseSensitivity(0.1f)
 {
 	updateCameraVectors();
 }
