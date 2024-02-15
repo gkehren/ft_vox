@@ -4,12 +4,12 @@ CXX = g++
 CXXFLAGS = -std=c++17 -O3 -march=native
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
-    LDFLAGS = -lGL -lglfw -lfreetype
-	INCDIR = -I src -I/usr/include/freetype2
+    LDFLAGS = -lGL -lglfw -lfreetype -L lib
+	INCDIR = -I src -I/usr/include/freetype2 -I lib
 endif
 ifeq ($(UNAME_S),Darwin)    # Darwin is for MacOS
-    LDFLAGS = -framework OpenGL -lglfw -lfreetype -L/opt/homebrew/lib
-	INCDIR = -I src -I /opt/homebrew/include/ -I /opt/homebrew/include/freetype2
+    LDFLAGS = -framework OpenGL -lglfw -lfreetype -L/opt/homebrew/lib -L lib
+	INCDIR = -I src -I /opt/homebrew/include/ -I /opt/homebrew/include/freetype2 -I lib
 endif
 # ==================
 
