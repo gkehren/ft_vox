@@ -51,8 +51,17 @@ ${OBJDIR}/%.o: ${SRCDIR}/%.cpp
 %.cpp:
 	@echo ${RED}"Missing file : $@" ${EOC}
 
+install:
+	@echo ${CYAN} " - Installing dependencies" $(PURPLE)
+	@chmod +x install_dep.sh
+	@sh install_dep.sh
+	@echo $(GREEN) " - OK" $(EOC)
+
 clean:
 	@rm -rf ${OBJDIR}
+
+cleanlib:
+	@rm -rf lib
 
 fclean:	clean
 	@rm -f ${TARGET}
@@ -60,4 +69,4 @@ fclean:	clean
 re:	fclean
 	@${MAKE} all
 
-.PHONY:	all clean fclean re
+.PHONY:	all clean fclean re install cleanlib
