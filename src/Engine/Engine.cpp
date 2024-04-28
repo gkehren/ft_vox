@@ -56,6 +56,7 @@ Engine::Engine()
 	this->maxRenderDistance = 320;
 	this->renderer = new Renderer(windowWidth, windowHeight, this->maxRenderDistance);
 	this->camera.setWindow(this->window);
+	this->playerChunkPos = glm::ivec2(-1, -1);
 
 	glActiveTexture(GL_TEXTURE0);
 	this->shader->setInt("textureSampler", 0);
@@ -187,7 +188,11 @@ void	Engine::render()
 	this->visibleVoxelsCount = 0;
 
 	if (!this->paused) {
-		this->chunkManagement();
+		glm::ivec2 newPlayerChunkPos = glm::ivec2(std::floor(this->camera.getPosition().x / Chunk::SIZE), std::floor(this->camera.getPosition().z / Chunk::SIZE));
+		if (newPlayerChunkPos != this->playerChunkPos) {
+			this->playerChunkPos = newPlayerChunkPos;
+			this->chunkManagement();
+		}
 		this->frustumCulling();
 	}
 
@@ -235,7 +240,7 @@ void	Engine::render()
 
 void	Engine::chunkManagement()
 {
-	glm::ivec3 cameraChunkPos = glm::ivec3(this->camera.getPosition().x / Chunk::SIZE, this->camera.getPosition().y / Chunk::HEIGHT, this->camera.getPosition().z / Chunk::SIZE);
+	glm::ivec3 cameraChunkPos = glm::ivec3(this->playerChunkPos.x, 0, this->playerChunkPos.y);
 	int minChunkRenderDistance = (this->minRenderDistance / Chunk::SIZE) - 1;
 	int maxChunkRenderDistance = (this->maxRenderDistance / Chunk::SIZE);
 

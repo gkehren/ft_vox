@@ -52,6 +52,7 @@ class Engine {
 		TextRenderer*			textRenderer;
 		Camera					camera;
 
+		glm::ivec2				playerChunkPos;
 
 		void	handleInput(bool& keyTPressed);
 		void	updateUI();
