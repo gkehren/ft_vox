@@ -57,7 +57,6 @@ class Engine {
 		std::mutex				mutex;
 		glm::ivec2				playerChunkPos;
 
-
 		void	handleInput(bool& keyTPressed);
 		void	updateUI();
 		bool	wireframeMode;
