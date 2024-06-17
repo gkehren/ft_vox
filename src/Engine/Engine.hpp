@@ -24,6 +24,7 @@
 #include <Camera/Camera.hpp>
 #include <Renderer/TextRenderer.hpp>
 #include <utils.hpp>
+#include <Engine/ThreadPool.hpp>
 
 
 class Engine {
@@ -46,12 +47,15 @@ class Engine {
 		float					lastTime;
 		float					fps;
 		bool					paused;
+		bool					perfMode;
 
 		Shader*					shader;
 		Renderer*				renderer;
 		TextRenderer*			textRenderer;
 		Camera					camera;
-
+		ThreadPool*				threadPool;
+		std::mutex				mutex;
+		glm::ivec2				playerChunkPos;
 
 		void	handleInput(bool& keyTPressed);
 		void	updateUI();
@@ -66,6 +70,7 @@ class Engine {
 		TextureType	selectedTexture;
 		siv::PerlinNoise*	perlin;
 		std::unordered_map<glm::ivec3, Chunk, ivec3_hash>	chunks;
+		std::vector<glm::ivec3>								chunksToCreate;
 
 		void	render();
 		void	frustumCulling();

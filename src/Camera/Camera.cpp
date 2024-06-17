@@ -60,6 +60,19 @@ void	Camera::processKeyboard(float deltaTime)
 		else
 			this->movementSpeed = 2.5f;
 	}
+
+	if (position.x >= SHRT_MAX)
+		position.x = SHRT_MAX;
+	if (position.x <= SHRT_MIN)
+		position.x = SHRT_MIN;
+	if (position.z >= SHRT_MAX)
+		position.z = SHRT_MAX;
+	if (position.z <= SHRT_MIN)
+		position.z = SHRT_MIN;
+	if (position.y >= SHRT_MAX)
+		position.y = SHRT_MAX;
+	if (position.y <= SHRT_MIN)
+		position.y = SHRT_MIN;
 }
 
 void	Camera::updateCameraVectors()

@@ -56,6 +56,7 @@ Engine::Engine()
 	this->maxRenderDistance = 320;
 	this->renderer = new Renderer(windowWidth, windowHeight, this->maxRenderDistance);
 	this->camera.setWindow(this->window);
+	this->playerChunkPos = glm::ivec2(-1, -1);
 
 	glActiveTexture(GL_TEXTURE0);
 	this->shader->setInt("textureSampler", 0);
@@ -76,6 +77,9 @@ Engine::Engine()
 	this->chunkLoadedMax = 1;
 	this->selectedTexture = TEXTURE_PLANK;
 	this->paused = false;
+	this->perfMode = false;
+
+	this->threadPool = new ThreadPool(std::thread::hardware_concurrency());
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -83,6 +87,7 @@ Engine::Engine()
 	std::cout << "Vendor: " << glGetString(GL_VENDOR) << std::endl;
 	std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
 	std::cout << "ImGui version: " << IMGUI_VERSION << std::endl;
+	std::cout << "Threads: " << std::thread::hardware_concurrency() << std::endl;
 }
 
 Engine::~Engine()
@@ -161,6 +166,7 @@ void	Engine::updateUI()
 	ImGui::Text("Voxel count: %d",  this->visibleVoxelsCount);
 	ImGui::Text("Render distance: %d | %d", this->minRenderDistance, this->maxRenderDistance);
 	ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
+	ImGui::Text("Player chunk: (%d, %d)", this->playerChunkPos.x, this->playerChunkPos.y);
 	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
 	ImGui::Text("Selected texture: %s (%d)", textureTypeString.at(this->selectedTexture).c_str(), this->selectedTexture);
 
@@ -173,6 +179,7 @@ void	Engine::updateUI()
 	ImGui::Checkbox("Chunk borders", &this->chunkBorders);
 	ImGui::InputInt("Chunk loaded max", &this->chunkLoadedMax);
 	ImGui::Checkbox("Pause", &this->paused);
+	ImGui::Checkbox("Performance mode", &this->perfMode);
 
 	ImGui::Text("Screen size: %d x %d", this->windowWidth, this->windowHeight);
 
@@ -187,19 +194,29 @@ void	Engine::render()
 	this->visibleVoxelsCount = 0;
 
 	if (!this->paused) {
-		this->chunkManagement();
+		glm::ivec2 newPlayerChunkPos = glm::ivec2(std::floor(this->camera.getPosition().x / Chunk::SIZE), std::floor(this->camera.getPosition().z / Chunk::SIZE));
+		if (newPlayerChunkPos != this->playerChunkPos) {
+			this->playerChunkPos = newPlayerChunkPos;
+			this->chunkManagement();
+		}
 		this->frustumCulling();
 	}
 
-	int chunkLoaded = 0;
+	for (const auto& pos : this->chunksToCreate) {
+		threadPool->enqueue([&, pos]() {
+			Chunk chunk(glm::vec3(pos.x * Chunk::SIZE, 0, pos.z * Chunk::SIZE));
+			std::lock_guard<std::mutex> lock(mutex);
+			this->chunks.insert(std::make_pair(pos, std::move(chunk)));
+		});
+	}
+	this->chunksToCreate.clear();
+
 	for (auto& chunk : this->chunks) {
-		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::UNLOADED) {
-			chunk.second.generateVoxel(this->perlin);
-			chunkLoaded++;
-		}
-		if (chunkLoaded > this->chunkLoadedMax) {
-			break;
-		}
+		threadPool->enqueue([this, &chunk]() {
+			if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::UNLOADED) {
+				chunk.second.generateVoxel(this->perlin);
+			}
+		});
 	}
 
 	int chunkLoaded2 = 0;
@@ -213,6 +230,7 @@ void	Engine::render()
 		}
 	}
 
+	int chunkLoaded = 0;
 	for (auto& chunk : this->chunks) {
 		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::GENERATED) {
 			chunk.second.generateMesh(this->chunks, perlin);
@@ -235,11 +253,16 @@ void	Engine::render()
 
 void	Engine::chunkManagement()
 {
-	glm::ivec3 cameraChunkPos = glm::ivec3(this->camera.getPosition().x / Chunk::SIZE, this->camera.getPosition().y / Chunk::HEIGHT, this->camera.getPosition().z / Chunk::SIZE);
+	glm::ivec3 cameraChunkPos = glm::ivec3(this->playerChunkPos.x, 0, this->playerChunkPos.y);
 	int minChunkRenderDistance = (this->minRenderDistance / Chunk::SIZE) - 1;
-	int maxChunkRenderDistance = (this->maxRenderDistance / Chunk::SIZE);
+	int maxChunkRenderDistance;
+	if (perfMode) {
+		maxChunkRenderDistance = minChunkRenderDistance;
+	} else {
+		maxChunkRenderDistance = (this->maxRenderDistance / Chunk::SIZE);
+	}
 
-	if (static_cast<int>(this->frameCount) % 5 == 0) {
+	if (static_cast<int>(this->frameCount) % 2 == 0) {
 		for (auto it = this->chunks.begin(); it != this->chunks.end();) {
 			glm::ivec3 chunkPos = it->first;
 			glm::vec3 diff = glm::vec3(chunkPos - cameraChunkPos);
@@ -255,7 +278,7 @@ void	Engine::chunkManagement()
 			for (int z = -minChunkRenderDistance; z <= minChunkRenderDistance; z++) {
 				glm::ivec3 chunkPos = glm::ivec3(cameraChunkPos.x + x, 0, cameraChunkPos.z + z);
 				if (this->chunks.find(chunkPos) == this->chunks.end() && glm::length(glm::vec3(chunkPos - cameraChunkPos)) <= minChunkRenderDistance) {
-					this->chunks.insert(std::make_pair(chunkPos, Chunk(glm::vec3(chunkPos.x * Chunk::SIZE, 0, chunkPos.z * Chunk::SIZE))));
+					this->chunksToCreate.push_back(chunkPos);
 				}
 			}
 		}
