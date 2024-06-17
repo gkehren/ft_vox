@@ -99,6 +99,16 @@ bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& ch
 
 		bool isInside = nx >= 0 && nx < Chunk::SIZE && ny >= 0 && ny < Chunk::HEIGHT && nz >= 0 && nz < Chunk::SIZE;
 
+		if (face == Face::BOTTOM && y == 0) {
+			voxel.addFaceToMesh(mesh, face, voxelType);
+			continue;
+		}
+
+		if (face == Face::TOP && y == Chunk::HEIGHT - 1) {
+			voxel.addFaceToMesh(mesh, face, voxelType);
+			continue;
+		}
+
 		if (isInside) {
 			if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) {
 				voxel.addFaceToMesh(mesh, face, voxelType);
