@@ -26,6 +26,13 @@ void	Mesh::setType(TextureType type)
 	this->type = type;
 }
 
+void	Mesh::reserve(size_t vertices, size_t textures, size_t normals)
+{
+	this->vertices.reserve(vertices);
+	this->textures.reserve(textures);
+	this->normals.reserve(normals);
+}
+
 void	Mesh::clear()
 {
 	this->data.clear();
@@ -37,6 +44,8 @@ void	Mesh::clear()
 const std::vector<float>&	Mesh::getData()
 {
 	if (this->data.empty()) {
+		this->data.reserve(this->vertices.size() * 8);
+
 		for (size_t i = 0; i < this->vertices.size(); i++) {
 			this->data.push_back(this->vertices[i].x);
 			this->data.push_back(this->vertices[i].y);

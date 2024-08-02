@@ -15,6 +15,7 @@ class	Mesh
 		void	addNormal(const glm::vec3& normal);
 		void	addTexture(const glm::vec2& texture);
 		void	setType(TextureType type);
+		void	reserve(size_t vertices, size_t textures, size_t normals);
 		void	clear();
 
 		const std::vector<float>&		getData();
