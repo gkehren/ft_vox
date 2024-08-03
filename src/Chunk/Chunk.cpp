@@ -76,11 +76,8 @@ void	Chunk::generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chun
 			voxel.second.addFaceToMesh(mesh, Face::BACK, voxel.second.getType());
 		}
 	}
-	if (complete) {
-		state = ChunkState::MESHED;
-	} else {
-		state = ChunkState::REMESHED;
-	}
+
+	state = complete ? ChunkState::MESHED : ChunkState::REMESHED;
 }
 
 bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z, siv::PerlinNoise* perlin)
@@ -97,9 +94,7 @@ bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& ch
 		int ny = y + dy;
 		int nz = z + dz;
 
-		bool isInside = nx >= 0 && nx < Chunk::SIZE && ny >= 0 && ny < Chunk::HEIGHT && nz >= 0 && nz < Chunk::SIZE;
-
-		if (isInside) {
+		if (nx >= 0 && nx < Chunk::SIZE && ny >= 0 && ny < Chunk::HEIGHT && nz >= 0 && nz < Chunk::SIZE) {
 			if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) {
 				voxel.addFaceToMesh(mesh, face, voxelType);
 			}
@@ -149,8 +144,7 @@ bool	Chunk::adjacentChunksGenerated(std::unordered_map<glm::ivec3, Chunk, ivec3_
 		adjacentChunkPos.y = 0;
 		adjacentChunkPos.z = floor(adjacentChunkPos.z / Chunk::SIZE);
 		auto adjacentChunk = chunks.find(adjacentChunkPos);
-		if (adjacentChunk == chunks.end()) return false;
-		if (adjacentChunk->second.state == ChunkState::UNLOADED) return false;
+		if (adjacentChunk == chunks.end() || adjacentChunk->second.state == ChunkState::UNLOADED) return false;
 	}
 	return true;
 }
@@ -269,9 +263,7 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 			for (int y = 0; y < Chunk::HEIGHT; y++) {
 				double caveNoise = perlin->noise3D_01((x + position.x) / Chunk::SIZE, (y + position.y) / Chunk::SIZE, (z + position.z) / Chunk::SIZE);
 				if (y < surfaceHeight) {
-					if (y == 0) {
-						this->voxels[x][y][z].setType(TextureType::TEXTURE_STONE);
-					} else if (caveNoise > 0.25) {
+					if (y == 0 || caveNoise > 0.25) {
 						this->voxels[x][y][z].setType(TextureType::TEXTURE_STONE);
 					} else {
 						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
@@ -310,7 +302,7 @@ void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 	for (int i = 0; i < numThreads; i++) {
 		int startX = i * chunkWidth;
 		int endX = (i + 1) * chunkWidth;
-		threads.emplace_back(&Chunk::generateChunk, this, startX, endX, 0, 16, perlin);
+		threads.emplace_back(&Chunk::generateChunk, this, startX, endX, 0, 32, perlin);
 	}
 
 	for (auto& thread : threads) {
