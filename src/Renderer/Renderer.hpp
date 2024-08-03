@@ -41,6 +41,7 @@ class Renderer {
 		float	screenWidth;
 		float	screenHeight;
 		float	renderDistance;
+		size_t	currentVBOSize;
 
 		void	loadSkybox();
 };

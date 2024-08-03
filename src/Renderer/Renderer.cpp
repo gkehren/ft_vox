@@ -153,12 +153,16 @@ int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 
 	glBindTexture(GL_TEXTURE_2D, this->textureAtlas);
 
-	std::vector<float> data = chunk.getData();
+	const std::vector<float>& data = chunk.getData();
 	glBindVertexArray(this->VAO);
 	glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
-	glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), &data[0], GL_STATIC_DRAW);
-	glDrawArrays(GL_TRIANGLES, 0, data.size() / 8);
 
+	if (data.size() * sizeof(float) != this->currentVBOSize)
+	{
+		glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STATIC_DRAW);
+		this->currentVBOSize = data.size() * sizeof(float);
+	}
+	glDrawArrays(GL_TRIANGLES, 0, data.size() / 8);
 	glBindVertexArray(0);
 
 	return (data.size() / 8);
