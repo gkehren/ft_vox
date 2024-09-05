@@ -42,10 +42,11 @@ void	Voxel::addFaceToMesh(Mesh& mesh, Face face, TextureType type)
 	glm::vec3	normal;
 	std::vector<glm::vec3>	vertices;
 	std::tie(normal, vertices) = faceData.at(face);
-	float		textureSize = 32.0f / 512.0f;
+	static const float		textureSize = 32.0f / 512.0f;
 	float		textureX = static_cast<float>(type % 16) * textureSize;
 	float		textureY = static_cast<float>(type / 16) * textureSize;
 
+	mesh.reserve(vertices.size(), 6, 6);
 	for (const auto& vertex : vertices) {
 		mesh.addVertex(this->position + vertex);
 	}
