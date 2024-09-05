@@ -251,7 +251,7 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 			float noise1 = perlin->noise2D_01((position.x + x) / 200.0f, (position.z + z) / 200.0f) * 1.5f;
 			float noise2 = perlin->noise2D_01((position.x + x) / 50.0f, (position.z + z) / 50.0f) * 0.5f;
 			float noise3 = perlin->noise2D_01((position.x + x) / 25.0f, (position.z + z) / 25.0f) * 0.2f;
-			float mountainNoise = perlin->noise2D_01((position.x + x) / 1000.0f, (position.z + z) / 1000.0f); // New noise layer for mountains
+			float mountainNoise = perlin->noise2D_01((position.x + x) / 500.0f, (position.z + z) / 500.0f); // New noise layer for mountains
 			float biomeNoise = perlin->noise2D_01((position.x + x) / 250.0f, (position.z + z) / 250.0f); // New noise layer for biomes
 
 			TextureType biomeType;
@@ -270,10 +270,25 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 			}
 
 			// Combine the Perlin noise values to determine the surface height at this point
-			int surfaceHeight = static_cast<int>((noise1 + noise2 + noise3) * Chunk::HEIGHT / 2);
+			int baseHeight = static_cast<int>((noise1 + noise2 + noise3) * Chunk::HEIGHT / 2);
 
-			if (mountainNoise > 0.8f) { // This threshold determines how much of the terrain will be mountains
-				surfaceHeight += static_cast<int>(mountainNoise * 64);
+			// Adjust height for mountains
+			int mountainHeight = static_cast<int>(mountainNoise * 128); // Increased impact for higher mountains
+
+			// Determine if this point is in a mountain region
+			bool isMountain = mountainNoise > 0.6f; // Threshold for mountain regions
+
+			// Interpolate between baseHeight and mountainHeight for smoother transitions at the borders
+			float interpolationFactor = 0.0f;
+			if (isMountain) {
+				interpolationFactor = (mountainNoise - 0.6f) / 0.4f; // Normalize to range [0, 1]
+				interpolationFactor = interpolationFactor * interpolationFactor; // Squaring to smooth the transition
+			}
+			int surfaceHeight = static_cast<int>(baseHeight * (1.0f - interpolationFactor) + mountainHeight * interpolationFactor);
+
+			// Ensure plains are flatter by reducing noise influence
+			if (biomeType == TEXTURE_GRASS && !isMountain) {
+				surfaceHeight = baseHeight;
 			}
 
 			for (int y = 0; y < Chunk::HEIGHT; y++) {
