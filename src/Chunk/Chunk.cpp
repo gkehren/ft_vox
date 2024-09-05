@@ -215,6 +215,9 @@ bool	Chunk::placeVoxel(glm::vec3 position, glm::vec3 front, TextureType type)
 	int y = floor(target.y);
 	int z = floor(target.z);
 
+	if (y > 255)
+		return false;
+
 	if (this->contains(x, y, z)) {
 		x = floor(x - this->position.x);
 		y = floor(y - this->position.y);
@@ -333,6 +336,7 @@ void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
 	for (auto& thread : threads) {
 		thread.join();
 	}
+
 
 	state = ChunkState::GENERATED;
 
