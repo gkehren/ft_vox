@@ -17,7 +17,7 @@ class Voxel
 		void				setHighest(bool highest);
 		bool				isHighest() const;
 
-		void	addFaceToMesh(Mesh& mesh, Face face, TextureType type);
+		void	addFaceToMesh(Mesh& mesh, const glm::vec3& chunkPos, Face face, TextureType type);
 
 	private:
 		glm::vec3	position;

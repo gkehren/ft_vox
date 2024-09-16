@@ -37,7 +37,7 @@ bool	Voxel::isHighest() const
 	return (this->highest);
 }
 
-void	Voxel::addFaceToMesh(Mesh& mesh, Face face, TextureType type)
+void	Voxel::addFaceToMesh(Mesh& mesh, const glm::vec3& chunkPos, Face face, TextureType type)
 {
 	glm::vec3	normal;
 	std::vector<glm::vec3>	vertices;
@@ -48,7 +48,7 @@ void	Voxel::addFaceToMesh(Mesh& mesh, Face face, TextureType type)
 
 	mesh.reserve(vertices.size(), 6, 6);
 	for (const auto& vertex : vertices) {
-		mesh.addVertex(this->position + vertex);
+		mesh.addVertex(chunkPos + this->position + vertex);
 	}
 
 	mesh.addTexture(glm::vec2(textureX, textureY));

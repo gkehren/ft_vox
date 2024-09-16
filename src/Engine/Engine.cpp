@@ -52,7 +52,7 @@ Engine::Engine()
 
 	std::string path = RES_PATH + std::string("shaders/");
 	this->shader = new Shader((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
-	this->minRenderDistance = 160;
+	this->minRenderDistance = 224;
 	this->maxRenderDistance = 320;
 	this->renderer = new Renderer(windowWidth, windowHeight, this->maxRenderDistance);
 	this->camera.setWindow(this->window);
@@ -74,7 +74,7 @@ Engine::Engine()
 	this->chunkBorders = false;
 	this->visibleChunksCount = 0;
 	this->visibleVoxelsCount = 0;
-	this->chunkLoadedMax = 1;
+	this->chunkLoadedMax = 5;
 	this->selectedTexture = TEXTURE_PLANK;
 	this->paused = false;
 	this->perfMode = false;

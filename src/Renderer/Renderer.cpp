@@ -147,9 +147,6 @@ int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
 	shader.setInt("textureSampler", 0);
 	shader.setVec3("lightPos", camera.getPosition());
-	glm::mat4 model = glm::mat4(1.0f);
-	model = glm::translate(model, chunk.getPosition());
-	shader.setMat4("model", model);
 
 	glBindTexture(GL_TEXTURE_2D, this->textureAtlas);
 

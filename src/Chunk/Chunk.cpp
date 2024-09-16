@@ -68,12 +68,12 @@ void	Chunk::generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chun
 
 	for (auto& voxel : this->voxelsUpper) {
 		if (voxel.second.getType() != TEXTURE_AIR) {
-			voxel.second.addFaceToMesh(mesh, Face::TOP, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, Face::BOTTOM, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, Face::LEFT, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, Face::RIGHT, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, Face::FRONT, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, Face::BACK, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, this->position, Face::TOP, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, this->position, Face::BOTTOM, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, this->position, Face::LEFT, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, this->position, Face::RIGHT, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, this->position, Face::FRONT, voxel.second.getType());
+			voxel.second.addFaceToMesh(mesh, this->position, Face::BACK, voxel.second.getType());
 		}
 	}
 
@@ -95,22 +95,22 @@ bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& ch
 		int nz = z + dz;
 
 		if (face == Face::BOTTOM && y == 0) {
-			voxel.addFaceToMesh(mesh, face, voxelType);
+			voxel.addFaceToMesh(mesh, this->position, face, voxelType);
 			continue;
 		}
 
 		if (face == Face::TOP && y == Chunk::HEIGHT - 1) {
-			voxel.addFaceToMesh(mesh, face, voxelType);
+			voxel.addFaceToMesh(mesh, this->position, face, voxelType);
 			continue;
 		}
 
 		if (nx >= 0 && nx < Chunk::SIZE && ny >= 0 && ny < Chunk::HEIGHT && nz >= 0 && nz < Chunk::SIZE) {
 			if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) {
-				voxel.addFaceToMesh(mesh, face, voxelType);
+				voxel.addFaceToMesh(mesh, this->position, face, voxelType);
 			}
 		} else {
 			if (voxel.isHighest()) {
-				voxel.addFaceToMesh(mesh, face, voxelType);
+				voxel.addFaceToMesh(mesh, this->position, face, voxelType);
 			} else {
 				glm::ivec3 adjacentChunkPos = glm::ivec3(this->position) + glm::ivec3(dx, dy, dz) * Chunk::SIZE;
 				adjacentChunkPos.x = floor(adjacentChunkPos.x / Chunk::SIZE);
@@ -123,7 +123,7 @@ bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& ch
 						int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
 						int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
 						if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ).getType() == TEXTURE_AIR) {
-							voxel.addFaceToMesh(mesh, face, voxelType);
+							voxel.addFaceToMesh(mesh, this->position, face, voxelType);
 						}
 					} else {
 						adjacentChunk->second.generateVoxel(perlin);
@@ -131,7 +131,7 @@ bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& ch
 						int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
 						int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
 						if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ).getType() == TEXTURE_AIR) {
-							voxel.addFaceToMesh(mesh, face, voxelType);
+							voxel.addFaceToMesh(mesh, this->position, face, voxelType);
 						}
 					}
 				} else {
