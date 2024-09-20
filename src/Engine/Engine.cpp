@@ -47,7 +47,7 @@ Engine::Engine()
 
 	ImGui::CreateContext();
 	ImGui_ImplGlfw_InitForOpenGL(this->window, true);
-	ImGui_ImplOpenGL3_Init("#version 410");
+	ImGui_ImplOpenGL3_Init("#version 460");
 	ImGui::StyleColorsDark();
 
 	std::string path = RES_PATH + std::string("shaders/");
