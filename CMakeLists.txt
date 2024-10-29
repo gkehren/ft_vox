@@ -1,0 +1,44 @@
+cmake_minimum_required(VERSION 3.11)
+
+project(ft_vox)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
+
+# add source files
+file(GLOB_RECURSE SOURCES src/*.cpp src/*.c)
+
+# add include directories
+include_directories(src/)
+
+find_package(OpenGL REQUIRED)
+find_package(glfw3 3.3 REQUIRED)
+
+# FetchContent pour GLM
+include(FetchContent)
+FetchContent_Declare(
+  glm
+  GIT_REPOSITORY https://github.com/g-truc/glm.git
+  GIT_TAG bf71a834948186f4097caa076cd2663c69a10e1e
+)
+FetchContent_MakeAvailable(glm)
+
+# FetchContent pour FreeType2
+FetchContent_Declare(
+  freetype2
+  GIT_REPOSITORY https://github.com/aseprite/freetype2
+  GIT_TAG VER-2-10-0
+)
+FetchContent_MakeAvailable(freetype2)
+
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /DNDEBUG")
+set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /DNDEBUG")
+
+add_executable(${PROJECT_NAME} ${SOURCES})
+
+target_link_libraries(${PROJECT_NAME} OpenGL::GL glfw glm freetype)
+
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_SOURCE_DIR}/ressources $<TARGET_FILE_DIR:${PROJECT_NAME}>/ressources
+)
