@@ -143,26 +143,35 @@ int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 {
 	shader.use();
 
-	shader.setMat4("view", camera.getViewMatrix());
-	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
+	const auto& viewMatrix = camera.getViewMatrix();
+	const auto& projectionMatrix = camera.getProjectionMatrix(1920, 1080, 320);
+
+	shader.setMat4("view", viewMatrix);
+	shader.setMat4("projection", projectionMatrix);
 	shader.setInt("textureSampler", 0);
 	shader.setVec3("lightPos", camera.getPosition());
 
 	glBindTexture(GL_TEXTURE_2D, this->textureAtlas);
 
-	const std::vector<float>& data = chunk.getData();
+	const auto& data = chunk.getData();
+	if (data.empty())
+		return (0);
+
 	glBindVertexArray(this->VAO);
-	glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
-
-	if (data.size() * sizeof(float) != this->currentVBOSize)
-	{
-		glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STATIC_DRAW);
+	if (data.size() * sizeof(float) != this->currentVBOSize) {
+		glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
+		glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
 		this->currentVBOSize = data.size() * sizeof(float);
+	} else {
+		glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
+		glBufferSubData(GL_ARRAY_BUFFER, 0, data.size() * sizeof(float), data.data());
 	}
-	glDrawArrays(GL_TRIANGLES, 0, data.size() / 8);
-	glBindVertexArray(0);
 
-	return (data.size() / 8);
+	const size_t vertexCount = data.size() / 8;
+	glDrawArrays(GL_TRIANGLES, 0, vertexCount);
+
+	glBindVertexArray(0);
+	return (vertexCount);
 }
 
 void	Renderer::loadSkybox()

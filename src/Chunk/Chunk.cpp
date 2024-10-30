@@ -100,28 +100,6 @@ bool	Chunk::placeVoxel(const glm::vec3& position, const glm::vec3& front, Textur
 	return true;
 }
 
-void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
-{
-	if (state != ChunkState::UNLOADED) return;
-
-	const int numThreads = 4;
-	const int chunkWidth = Chunk::SIZE / numThreads;
-	std::vector<std::thread> threads;
-
-	for (int i = 0; i < numThreads; i++) {
-		int startX = i * chunkWidth;
-		int endX = (i + 1) * chunkWidth;
-		threads.emplace_back(&Chunk::generateChunk, this, startX, endX, 0, Chunk::SIZE, perlin);
-	}
-
-	for (auto& thread : threads) {
-		thread.join();
-	}
-
-	octree.optimize();
-	state = ChunkState::GENERATED;
-}
-
 void	Chunk::generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, siv::PerlinNoise* perlin)
 {
 	if (state == ChunkState::REMESHED) {
@@ -214,25 +192,32 @@ bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& ch
 
 void	Chunk::addFaceToMesh(const glm::vec3& pos, Face face, TextureType type)
 {
-	glm::vec3	normal;
-	std::vector<glm::vec3>	vertices;
-	std::tie(normal, vertices) = faceData.at(face);
+	static const float textureSize = 32.0f / 512.0f;
+	const auto& [normal, vertices] = faceData.at(face);
 
-	static const float		textureSize = 32.0f / 512.0f;
-	float		textureX = static_cast<float>(type % 16) * textureSize;
-	float		textureY = static_cast<float>(type / 16) * textureSize;
+	const float textureX = static_cast<float>(type % 16) * textureSize;
+	const float textureY = static_cast<float>(type / 16) * textureSize;
+	const float textureXEnd = textureX + textureSize;
+	const float textureYEnd = textureY + textureSize;
 
-	mesh.reserve(vertices.size(), 6, 6);
+	mesh.reserve(4, 6, 6);
+	const glm::vec3 worldPos = position + pos;
 	for (const auto& vertex : vertices) {
-		mesh.addVertex(position + pos + vertex);
+		mesh.addVertex(worldPos + vertex);
 	}
 
-	mesh.addTexture(glm::vec2(textureX, textureY));
-	mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
-	mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
-	mesh.addTexture(glm::vec2(textureX, textureY));
-	mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
-	mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
+	const std::array<glm::vec2, 6> texCoords = {
+		glm::vec2(textureX, textureY),
+		glm::vec2(textureXEnd, textureY),
+		glm::vec2(textureXEnd, textureYEnd),
+		glm::vec2(textureX, textureY),
+		glm::vec2(textureXEnd, textureYEnd),
+		glm::vec2(textureX, textureYEnd)
+	};
+
+	for (const auto& texCoord : texCoords) {
+		mesh.addTexture(texCoord);
+	}
 
 	for (int i = 0; i < 6; i++) {
 		mesh.addNormal(normal);
@@ -255,79 +240,149 @@ bool	Chunk::adjacentChunksGenerated(const std::unordered_map<glm::ivec3, Chunk, 
 	return true;
 }
 
-void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin) {
+void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
+{
+	if (state != ChunkState::UNLOADED) return;
+
+	const int numThreads = 4;
+	const int chunkWidth = Chunk::SIZE / numThreads;
+	std::vector<std::thread> threads;
+
+	for (int i = 0; i < numThreads; i++) {
+		int startX = i * chunkWidth;
+		int endX = (i + 1) * chunkWidth;
+		threads.emplace_back(&Chunk::generateChunk, this, startX, endX, 0, Chunk::SIZE, perlin);
+	}
+
+	for (auto& thread : threads) {
+		thread.join();
+	}
+
+	octree.optimize();
+	state = ChunkState::GENERATED;
+}
+
+void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin)
+{
+	std::vector<ChunkColumn> columns((endX - startX) * (endZ - startZ));
+
 	for (int x = startX; x < endX; x++) {
 		for (int z = startZ; z < endZ; z++) {
-			// Generate Perlin noise values at different scales
-			float noise1 = perlin->noise2D_01((position.x + x) / 200.0f, (position.z + z) / 200.0f) * 1.5f;
-			float noise2 = perlin->noise2D_01((position.x + x) / 50.0f, (position.z + z) / 50.0f) * 0.5f;
-			float noise3 = perlin->noise2D_01((position.x + x) / 25.0f, (position.z + z) / 25.0f) * 0.2f;
-			float mountainNoise = perlin->noise2D_01((position.x + x) / 500.0f, (position.z + z) / 500.0f); // New noise layer for mountains
-			float biomeNoise = perlin->noise2D_01((position.x + x) / 250.0f, (position.z + z) / 250.0f); // New noise layer for biomes
+			int index = (x - startX) * (endZ - startZ) + (z - startZ);
+			ChunkColumn& column = columns[index];
 
-			TextureType biomeType;
-			if (biomeNoise < 0.2f) {
-				biomeType = TEXTURE_SAND;
-			} else if (biomeNoise < 0.5f) {
-				biomeType = TEXTURE_GRASS;
-			} else if (biomeNoise < 0.7f) {
-				biomeType = TEXTURE_SNOW;
-			} else if (biomeNoise < 0.8f) {
-				biomeType = TEXTURE_NETHER;
-			} else if (biomeNoise < 0.9f) {
-				biomeType = TEXTURE_SOUL;
+			float worldX = position.x + x;
+			float worldZ = position.z + z;
+
+			float baseNoise = perlin->noise2D_01(worldX / 200.0f, worldZ / 200.0f);
+			float detailNoise = perlin->noise2D_01(worldX / 50.0f, worldZ / 50.0f);
+			float mountainNoise = perlin->noise2D_01(worldX / 500.0f, worldZ / 500.0f);
+			float biomeNoise = perlin->noise2D_01(worldX / 250.0f, worldZ / 250.0f);
+
+			column.biomeType = getBiomeType(biomeNoise);
+
+			int baseHeight = static_cast<int>((baseNoise * 1.5f + detailNoise * 0.5f) * Chunk::HEIGHT / 2);
+			column.isMountain = mountainNoise > 0.6f;
+
+			if (column.isMountain) {
+				float factor = ((mountainNoise - 0.6f) / 0.4f);
+				factor *= factor;
+				int mountainHeight = static_cast<int>(mountainNoise * 128);
+				column.surfaceHeight = static_cast<int>(baseHeight * (1.0f - factor) + mountainHeight * factor);
 			} else {
-				biomeType = TEXTURE_DIRT;
+				column.surfaceHeight = column.biomeType == TEXTURE_GRASS ? baseHeight : static_cast<int>(baseHeight * 0.8f + baseHeight * 0.2f * detailNoise);
 			}
+		}
+	}
 
-			// Combine the Perlin noise values to determine the surface height at this point
-			int baseHeight = static_cast<int>((noise1 + noise2 + noise3) * Chunk::HEIGHT / 2);
-
-			// Adjust height for mountains
-			int mountainHeight = static_cast<int>(mountainNoise * 128); // Increased impact for higher mountains
-
-			// Determine if this point is in a mountain region
-			bool isMountain = mountainNoise > 0.6f; // Threshold for mountain regions
-
-			// Interpolate between baseHeight and mountainHeight for smoother transitions at the borders
-			float interpolationFactor = 0.0f;
-			if (isMountain) {
-				interpolationFactor = (mountainNoise - 0.6f) / 0.4f; // Normalize to range [0, 1]
-				interpolationFactor = interpolationFactor * interpolationFactor; // Squaring to smooth the transition
+	const int octantSize = 8;
+	for (int ox = startX; ox < endX; ox += octantSize) {
+		for (int oy = 0; oy < Chunk::HEIGHT; oy += octantSize) {
+			for (int oz = startZ; oz < endZ; oz += octantSize) {
+				generateOctant(ox, oy, oz,
+							 std::min(ox + octantSize, endX),
+							 std::min(oy + octantSize, Chunk::HEIGHT),
+							 std::min(oz + octantSize, endZ),
+							 columns, perlin);
 			}
-			int surfaceHeight = static_cast<int>(baseHeight * (1.0f - interpolationFactor) + mountainHeight * interpolationFactor);
+		}
+	}
+}
 
-			// Ensure plains are flatter by reducing noise influence
-			if (biomeType == TEXTURE_GRASS && !isMountain) {
-				surfaceHeight = baseHeight;
+TextureType	Chunk::getBiomeType(float biomeNoise)
+{
+	if (biomeNoise < 0.2f) return TEXTURE_SAND;
+	if (biomeNoise < 0.5f) return TEXTURE_GRASS;
+	if (biomeNoise < 0.7f) return TEXTURE_SNOW;
+	if (biomeNoise < 0.8f) return TEXTURE_NETHER;
+	if (biomeNoise < 0.9f) return TEXTURE_SOUL;
+	return TEXTURE_DIRT;
+}
+
+void	Chunk::generateOctant(int startX, int startY, int startZ, int endX, int endY, int endZ, const std::vector<ChunkColumn>& columns, siv::PerlinNoise* perlin)
+{
+	bool canBeSolid = true;
+	bool canBeAir = true;
+	TextureType commonType = TEXTURE_AIR;
+
+	for (int x = startX; x < endX && (canBeSolid || canBeAir); x++) {
+		for (int z = startZ; z < endZ && (canBeSolid || canBeAir); z++) {
+			int columnIndex = (x - startX) * (endZ - startZ) + (z - startZ);
+			const ChunkColumn& column = columns[columnIndex];
+
+			for (int y = startY; y < endY && (canBeSolid || canBeAir); y++) {
+				TextureType currentType = determineVoxelType(x, y, z, column, perlin);
+
+				if (x == startX && y == startY && z == startZ) {
+					commonType = currentType;
+				} else if (currentType != commonType) {
+					canBeSolid = false;
+					if (currentType != TEXTURE_AIR) canBeAir = false;
+				}
 			}
+		}
+	}
 
-			for (int y = 0; y < Chunk::HEIGHT; y++) {
-				double caveNoise = perlin->noise3D_01((x + position.x) / Chunk::SIZE, (y + position.y) / Chunk::SIZE, (z + position.z) / Chunk::SIZE);
-				if (y < surfaceHeight) {
-					if (y == 0 || caveNoise > 0.25) {
-						octree.setVoxel(glm::vec3(x, y, z), TEXTURE_STONE);
-					} else {
-						octree.setVoxel(glm::vec3(x, y, z), TEXTURE_AIR);
-					}
-				} else if (y == surfaceHeight) {
-					// Check if there is a cave just below this voxel
-					if (caveNoise <= 0.2) {
-						// This voxel is at the surface and there is a cave below, so fill it with air to make the cave accessible
-						octree.setVoxel(glm::vec3(x, y, z), TEXTURE_AIR);
-					} else {
-						// This voxel is at the surface, so fill it with grass
-						octree.setVoxel(glm::vec3(x, y, z), biomeType);
-					}
-				} else {
-					if (surfaceHeight <= 1 && y == 0) {
-						octree.setVoxel(glm::vec3(x, y, z), biomeType); // MAYBE CHANGE TO WATER
-					} else {
-						// This voxel is above the surface, so fill it with air
-						octree.setVoxel(glm::vec3(x, y, z), TEXTURE_AIR);
+	if (canBeSolid || canBeAir) {
+		glm::vec3 octantPos(startX, startY, startZ);
+		octree.setVoxel(octantPos, commonType);
+	} else {
+		// Sinon, on définit chaque voxel individuellement
+		for (int x = startX; x < endX; x++) {
+			for (int z = startZ; z < endZ; z++) {
+				int columnIndex = (x - startX) * (endZ - startZ) + (z - startZ);
+				const ChunkColumn& column = columns[columnIndex];
+
+				for (int y = startY; y < endY; y++) {
+					TextureType type = determineVoxelType(x, y, z, column, perlin);
+					if (type != TEXTURE_AIR) {
+						octree.setVoxel(glm::vec3(x, y, z), type);
 					}
 				}
 			}
 		}
 	}
+}
+
+TextureType	Chunk::determineVoxelType(int x, int y, int z, const ChunkColumn& column, siv::PerlinNoise* perlin)
+{
+	if (y > column.surfaceHeight) {
+		return TEXTURE_AIR;
+	}
+
+	if (y == column.surfaceHeight) {
+		double caveNoise = perlin->noise3D_01((x + position.x) / SIZE,
+											(y + position.y) / SIZE,
+											(z + position.z) / SIZE);
+		return caveNoise <= 0.2 ? TEXTURE_AIR : column.biomeType;
+	}
+
+	if (y < column.surfaceHeight) {
+		double caveNoise = perlin->noise3D_01((x + position.x) / SIZE,
+											(y + position.y) / SIZE,
+											(z + position.z) / SIZE);
+		return (y == 0 || caveNoise > 0.25) ? TEXTURE_STONE : TEXTURE_AIR;
+	}
+
+	return TEXTURE_AIR;
 }

@@ -286,11 +286,13 @@ bool	Engine::isChunkInRange(const glm::ivec3& chunkPos, float distance) const
 void	Engine::processChunkQueue()
 {
 	std::lock_guard<std::mutex> lock(chunkMutex);
-	while (!chunkGenerationQueue.empty() && chunks.size() < static_cast<size_t>(renderSettings.chunkLoadedMax * 4)) {
+	int chunkCount = 0;
+	while (!chunkGenerationQueue.empty() && chunkCount < renderSettings.chunkLoadedMax) {
 		const auto pos = chunkGenerationQueue.front();
 		chunkGenerationQueue.pop();
 
 		chunks.emplace(pos, Chunk(glm::vec3(pos.x * Chunk::SIZE, 0.0f, pos.z * Chunk::SIZE)));
+		chunkCount++;
 	}
 }
 

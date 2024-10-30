@@ -30,4 +30,5 @@ class	Mesh
 		std::vector<glm::vec3>	normals;
 		std::vector<glm::vec2>	textures;
 		TextureType				type;
+		bool					isDirty{true};
 };

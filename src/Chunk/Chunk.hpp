@@ -52,6 +52,17 @@ class Chunk
 		Octree	octree;
 		Mesh	mesh;
 
+		struct ChunkColumn
+		{
+			int surfaceHeight;
+			TextureType biomeType;
+			bool isMountain;
+		};
+
+		TextureType getBiomeType(float biomeNoise);
+		void generateOctant(int startX, int startY, int startZ, int endX, int endY, int endZ, const std::vector<ChunkColumn>& columns, siv::PerlinNoise* perlin);
+		TextureType determineVoxelType(int x, int y, int z, const ChunkColumn& column, siv::PerlinNoise* perlin);
+
 		bool			addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, const glm::vec3& pos, TextureType type, siv::PerlinNoise* perlin);
 		void			addFaceToMesh(const glm::vec3& pos, Face face, TextureType type);
 		void			generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);
