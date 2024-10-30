@@ -17,6 +17,11 @@
 #include <unordered_set>
 #include <algorithm>
 #include <random>
+#include <future>
+#include <ranges>
+#include <memory>
+#include <queue>
+#include <mutex>
 
 #include <Chunk/Chunk.hpp>
 #include <Shader/Shader.hpp>
@@ -46,35 +51,45 @@ class Engine {
 		float					frameCount;
 		float					lastTime;
 		float					fps;
-		bool					paused;
-		bool					perfMode;
 
-		Shader*					shader;
-		Renderer*				renderer;
-		TextRenderer*			textRenderer;
-		Camera					camera;
-		ThreadPool*				threadPool;
-		std::mutex				mutex;
-		glm::ivec2				playerChunkPos;
+		std::unique_ptr<Shader>				shader;
+		std::unique_ptr<Renderer>			renderer;
+		std::unique_ptr<TextRenderer>		textRenderer;
+		std::unique_ptr<ThreadPool>			threadPool;
+		std::unique_ptr<siv::PerlinNoise>	perlin;
+		Camera								camera;
+		glm::ivec2							playerChunkPos;
+
+		static constexpr int DEFAULT_CHUNK_LOADED_MAX = 5;
+		static constexpr float FPS_UPDATE_INTERVAL = 1.0f;
+
+		struct RenderSettings {
+			bool	wireframeMode{false};
+			bool	chunkBorders{false};
+			bool	paused{false};
+			bool	perfMode{false};
+			int		visibleChunksCount{0};
+			int		visibleVoxelsCount{0};
+			int		chunkLoadedMax{DEFAULT_CHUNK_LOADED_MAX};
+			int		minRenderDistance{224};
+			int		maxRenderDistance{320};
+		} renderSettings;
 
 		void	handleInput(bool& keyTPressed);
 		void	updateUI();
-		bool	wireframeMode;
-		bool	chunkBorders;
-		int		visibleChunksCount;
-		int		visibleVoxelsCount;
-		int		chunkLoadedMax;
 
-		int			minRenderDistance;
-		int			maxRenderDistance;
 		TextureType	selectedTexture;
-		siv::PerlinNoise*	perlin;
 		std::unordered_map<glm::ivec3, Chunk, ivec3_hash>	chunks;
-		std::vector<glm::ivec3>								chunksToCreate;
+		std::queue<glm::ivec3>								chunkGenerationQueue;
+		std::mutex											mutex;
+		mutable std::mutex									chunkMutex;
+
+		void	updateChunks();
+		void	processChunkQueue();
+		bool	isChunkInRange(const glm::ivec3& chunkPos, float distance) const;
 
 		void	render();
 		void	frustumCulling();
-		void	chunkManagement();
 };
 
 void	mouse_callback(GLFWwindow* window, double xpos, double ypos);

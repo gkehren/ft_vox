@@ -1,24 +1,35 @@
 #include "Chunk.hpp"
 
-Chunk::Chunk(const glm::vec3& position, ChunkState state) : position(position), visible(false), state(state)
-{
-	this->voxels.resize(Chunk::SIZE);
-	for (int x = 0; x < Chunk::SIZE; x++) {
-		this->voxels[x].resize(Chunk::HEIGHT);
-		for (int y = 0; y < Chunk::HEIGHT; y++) {
-			for (int z = 0; z < Chunk::SIZE; z++) {
-				this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
-			}
-		}
-	}
-}
-
-Chunk::~Chunk()
+Chunk::Chunk(const glm::vec3& position, ChunkState state)
+	: position(position)
+	, visible(false)
+	, state(state)
+	, octree(position, Chunk::SIZE)
 {}
+
+Chunk::Chunk(Chunk&& other) noexcept
+	: position(std::move(other.position))
+	, visible(other.visible)
+	, state(other.state)
+	, octree(std::move(other.octree))
+	, mesh(std::move(other.mesh))
+{}
+
+Chunk& Chunk::operator=(Chunk&& other) noexcept
+{
+	if (this != &other) {
+		position = std::move(other.position);
+		visible = other.visible;
+		state = other.state;
+		octree = std::move(other.octree);
+		mesh = std::move(other.mesh);
+	}
+	return *this;
+}
 
 const glm::vec3&	Chunk::getPosition() const
 {
-	return (this->position);
+	return position;
 }
 
 const std::vector<float>&	Chunk::getData()
@@ -28,7 +39,7 @@ const std::vector<float>&	Chunk::getData()
 
 bool	Chunk::isVisible() const
 {
-	return (this->visible);
+	return visible;
 }
 
 void	Chunk::setVisible(bool visible)
@@ -43,13 +54,78 @@ void	Chunk::setState(ChunkState state)
 
 ChunkState	Chunk::getState() const
 {
-	return (this->state);
+	return state;
+}
+
+TextureType	Chunk::getVoxel(int x, int y, int z) const
+{
+	return octree.getVoxel(glm::vec3(x, y, z));
+}
+
+bool	Chunk::deleteVoxel(const glm::vec3& position, const glm::vec3& front)
+{
+	glm::vec3 target = position + front * 0.5f;
+	int x = floor(target.x - this->position.x);
+	int y = floor(target.y - this->position.y);
+	int z = floor(target.z - this->position.z);
+
+	if (x < 0 || x >= Chunk::SIZE || y < 0 || y >= Chunk::HEIGHT || z < 0 || z >= Chunk::SIZE)
+		return false;
+
+	if (octree.getVoxel(glm::vec3(x, y, z)) == TEXTURE_AIR)
+		return false;
+
+	octree.setVoxel(glm::vec3(x, y, z), TEXTURE_AIR);
+	mesh.clear();
+	state = ChunkState::GENERATED;
+	return true;
+}
+
+bool	Chunk::placeVoxel(const glm::vec3& position, const glm::vec3& front, TextureType type)
+{
+	glm::vec3 target = position + front * 0.5f;
+	int x = floor(target.x - this->position.x);
+	int y = floor(target.y - this->position.y);
+	int z = floor(target.z - this->position.z);
+
+	if (x < 0 || x >= Chunk::SIZE || y < 0 || y >= Chunk::HEIGHT || z < 0 || z >= Chunk::SIZE)
+		return false;
+
+	if (octree.getVoxel(glm::vec3(x, y, z)) != TEXTURE_AIR)
+		return false;
+
+	octree.setVoxel(glm::vec3(x, y, z), type);
+	mesh.clear();
+	state = ChunkState::GENERATED;
+	return true;
+}
+
+void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
+{
+	if (state != ChunkState::UNLOADED) return;
+
+	const int numThreads = 4;
+	const int chunkWidth = Chunk::SIZE / numThreads;
+	std::vector<std::thread> threads;
+
+	for (int i = 0; i < numThreads; i++) {
+		int startX = i * chunkWidth;
+		int endX = (i + 1) * chunkWidth;
+		threads.emplace_back(&Chunk::generateChunk, this, startX, endX, 0, Chunk::SIZE, perlin);
+	}
+
+	for (auto& thread : threads) {
+		thread.join();
+	}
+
+	octree.optimize();
+	state = ChunkState::GENERATED;
 }
 
 void	Chunk::generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, siv::PerlinNoise* perlin)
 {
 	if (state == ChunkState::REMESHED) {
-		if (adjacentChunksGenerated(chunks) == false) return;
+		if (!adjacentChunksGenerated(chunks)) return;
 		mesh.clear();
 	} else if (state != ChunkState::GENERATED) return;
 
@@ -58,32 +134,24 @@ void	Chunk::generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chun
 	for (int x = 0; x < Chunk::SIZE; x++) {
 		for (int y = 0; y < Chunk::HEIGHT; y++) {
 			for (int z = 0; z < Chunk::SIZE; z++) {
-				if (this->voxels[x][y][z].getType() != TEXTURE_AIR) {
-					bool result = this->addVoxelToMesh(chunks, this->voxels[x][y][z], x, y, z, perlin);
+				TextureType type = octree.getVoxel(glm::vec3(x, y, z));
+				if (type != TEXTURE_AIR) {
+					bool result = addVoxelToMesh(chunks, glm::vec3(x, y, z), type, perlin);
 					if (complete) complete = result;
 				}
 			}
 		}
 	}
 
-	for (auto& voxel : this->voxelsUpper) {
-		if (voxel.second.getType() != TEXTURE_AIR) {
-			voxel.second.addFaceToMesh(mesh, this->position, Face::TOP, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, this->position, Face::BOTTOM, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, this->position, Face::LEFT, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, this->position, Face::RIGHT, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, this->position, Face::FRONT, voxel.second.getType());
-			voxel.second.addFaceToMesh(mesh, this->position, Face::BACK, voxel.second.getType());
-		}
-	}
-
 	state = complete ? ChunkState::MESHED : ChunkState::REMESHED;
 }
 
-bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, Voxel& voxel, int x, int y, int z, siv::PerlinNoise* perlin)
+bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, const glm::vec3& pos, TextureType type, siv::PerlinNoise* perlin)
 {
-	TextureType voxelType = voxel.getType();
 	bool complete = true;
+	int x = static_cast<int>(pos.x);
+	int y = static_cast<int>(pos.y);
+	int z = static_cast<int>(pos.z);
 
 	for (auto& dir : directions) {
 		int dx, dy, dz;
@@ -95,55 +163,83 @@ bool	Chunk::addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& ch
 		int nz = z + dz;
 
 		if (face == Face::BOTTOM && y == 0) {
-			voxel.addFaceToMesh(mesh, this->position, face, voxelType);
+			addFaceToMesh(pos, face, type);
 			continue;
 		}
 
 		if (face == Face::TOP && y == Chunk::HEIGHT - 1) {
-			voxel.addFaceToMesh(mesh, this->position, face, voxelType);
+			addFaceToMesh(pos, face, type);
 			continue;
 		}
 
+		// Check in the current chunk
 		if (nx >= 0 && nx < Chunk::SIZE && ny >= 0 && ny < Chunk::HEIGHT && nz >= 0 && nz < Chunk::SIZE) {
-			if (this->voxels[nx][ny][nz].getType() == TEXTURE_AIR) {
-				voxel.addFaceToMesh(mesh, this->position, face, voxelType);
+			if (octree.getVoxel(glm::vec3(nx, ny, nz)) == TEXTURE_AIR) {
+				addFaceToMesh(pos, face, type);
 			}
 		} else {
-			if (voxel.isHighest()) {
-				voxel.addFaceToMesh(mesh, this->position, face, voxelType);
-			} else {
-				glm::ivec3 adjacentChunkPos = glm::ivec3(this->position) + glm::ivec3(dx, dy, dz) * Chunk::SIZE;
-				adjacentChunkPos.x = floor(adjacentChunkPos.x / Chunk::SIZE);
-				adjacentChunkPos.y = 0;
-				adjacentChunkPos.z = floor(adjacentChunkPos.z / Chunk::SIZE);
-				auto adjacentChunk = chunks.find(adjacentChunkPos);
-				if (adjacentChunk != chunks.end()) {
-					if (adjacentChunk->second.state == ChunkState::GENERATED) {
-						int adjacentX = (nx + Chunk::SIZE) % Chunk::SIZE;
-						int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
-						int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
-						if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ).getType() == TEXTURE_AIR) {
-							voxel.addFaceToMesh(mesh, this->position, face, voxelType);
-						}
-					} else {
-						adjacentChunk->second.generateVoxel(perlin);
-						int adjacentX = (nx + Chunk::SIZE) % Chunk::SIZE;
-						int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
-						int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
-						if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ).getType() == TEXTURE_AIR) {
-							voxel.addFaceToMesh(mesh, this->position, face, voxelType);
-						}
+			// Check in the adjacent chunks
+			glm::ivec3 adjacentChunkPos = glm::ivec3(this->position) + glm::ivec3(dx, dy, dz) * Chunk::SIZE;
+			adjacentChunkPos.x = floor(adjacentChunkPos.x / Chunk::SIZE);
+			adjacentChunkPos.y = 0;
+			adjacentChunkPos.z = floor(adjacentChunkPos.z / Chunk::SIZE);
+
+			auto adjacentChunk = chunks.find(adjacentChunkPos);
+			if (adjacentChunk != chunks.end()) {
+				if (adjacentChunk->second.state == ChunkState::GENERATED) {
+					int adjacentX = (nx + Chunk::SIZE) % Chunk::SIZE;
+					int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
+					int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
+
+					if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ) == TEXTURE_AIR) {
+						addFaceToMesh(pos, face, type);
 					}
 				} else {
-					complete = false;
+					adjacentChunk->second.generateVoxel(perlin);
+					int adjacentX = (nx + Chunk::SIZE) % Chunk::SIZE;
+					int adjacentY = (ny + Chunk::HEIGHT) % Chunk::HEIGHT;
+					int adjacentZ = (nz + Chunk::SIZE) % Chunk::SIZE;
+
+					if (adjacentChunk->second.getVoxel(adjacentX, adjacentY, adjacentZ) == TEXTURE_AIR) {
+						addFaceToMesh(pos, face, type);
+					}
 				}
+			} else {
+				complete = false;
 			}
 		}
 	}
 	return complete;
 }
 
-bool	Chunk::adjacentChunksGenerated(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks) const
+void	Chunk::addFaceToMesh(const glm::vec3& pos, Face face, TextureType type)
+{
+	glm::vec3	normal;
+	std::vector<glm::vec3>	vertices;
+	std::tie(normal, vertices) = faceData.at(face);
+
+	static const float		textureSize = 32.0f / 512.0f;
+	float		textureX = static_cast<float>(type % 16) * textureSize;
+	float		textureY = static_cast<float>(type / 16) * textureSize;
+
+	mesh.reserve(vertices.size(), 6, 6);
+	for (const auto& vertex : vertices) {
+		mesh.addVertex(position + pos + vertex);
+	}
+
+	mesh.addTexture(glm::vec2(textureX, textureY));
+	mesh.addTexture(glm::vec2(textureX + textureSize, textureY));
+	mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
+	mesh.addTexture(glm::vec2(textureX, textureY));
+	mesh.addTexture(glm::vec2(textureX + textureSize, textureY + textureSize));
+	mesh.addTexture(glm::vec2(textureX, textureY + textureSize));
+
+	for (int i = 0; i < 6; i++) {
+		mesh.addNormal(normal);
+	}
+}
+
+bool	Chunk::adjacentChunksGenerated(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks) const
 {
 	for (auto& dir : directions) {
 		int dx, dy, dz;
@@ -157,88 +253,6 @@ bool	Chunk::adjacentChunksGenerated(std::unordered_map<glm::ivec3, Chunk, ivec3_
 		if (adjacentChunk == chunks.end() || adjacentChunk->second.state == ChunkState::UNLOADED) return false;
 	}
 	return true;
-}
-
-bool	Chunk::contains(int x, int y, int z) const
-{
-	return (x >= position.x && x < position.x + Chunk::SIZE &&
-			y >= position.y && y < position.y + Chunk::HEIGHT &&
-			z >= position.z && z < position.z + Chunk::SIZE);
-}
-
-bool	Chunk::containesUpper(int x, int y, int z) const
-{
-	return (x >= position.x && x < position.x + Chunk::SIZE &&
-			y >= position.y + Chunk::HEIGHT && y < position.y + Chunk::HEIGHT * 4 &&
-			z >= position.z && z < position.z + Chunk::SIZE);
-}
-
-const Voxel&	Chunk::getVoxel(int x, int y, int z) const
-{
-	return (this->voxels[x][y][z]);
-}
-
-bool	Chunk::deleteVoxel(glm::vec3 position, glm::vec3 front)
-{
-	glm::vec3 target = position + front * 0.5f;
-	int x = floor(target.x);
-	int y = floor(target.y);
-	int z = floor(target.z);
-
-	if (this->contains(x, y, z)) {
-		x = floor(x - this->position.x);
-		y = floor(y - this->position.y);
-		z = floor(z - this->position.z);
-		if (this->voxels[x][y][z].getType() == TEXTURE_AIR) return false;
-		this->voxels[x][y][z].setType(TEXTURE_AIR);
-		mesh.clear();
-		this->state = ChunkState::GENERATED;
-		return true;
-	} else if (this->containesUpper(x, y, z)) {
-		x = floor(x - this->position.x);
-		y = floor(y - this->position.y);
-		z = floor(z - this->position.z);
-		if (this->voxelsUpper.find(glm::ivec3(x, y, z)) == this->voxelsUpper.end()) return false;
-		this->voxelsUpper.erase(glm::ivec3(x, y, z));
-		mesh.clear();
-		this->state = ChunkState::GENERATED;
-		return true;
-	}
-
-	return false;
-}
-
-bool	Chunk::placeVoxel(glm::vec3 position, glm::vec3 front, TextureType type)
-{
-	glm::vec3 target = position + front * 0.5f;
-	int x = floor(target.x);
-	int y = floor(target.y);
-	int z = floor(target.z);
-
-	if (y > 255)
-		return false;
-
-	if (this->contains(x, y, z)) {
-		x = floor(x - this->position.x);
-		y = floor(y - this->position.y);
-		z = floor(z - this->position.z);
-		if (this->voxels[x][y][z].getType() != TEXTURE_AIR) return false;
-		this->voxels[x][y][z].setType(type);
-		mesh.clear();
-		this->state = ChunkState::GENERATED;
-		return true;
-	} else if (this->containesUpper(x, y, z)) {
-		x = floor(x - this->position.x);
-		y = floor(y - this->position.y);
-		z = floor(z - this->position.z);
-		if (this->voxelsUpper.find(glm::ivec3(x, y, z)) != this->voxelsUpper.end()) return false;
-		this->voxelsUpper.insert(std::make_pair(glm::ivec3(x, y, z), Voxel(glm::vec3(x, y, z), type, true)));
-		mesh.clear();
-		this->state = ChunkState::GENERATED;
-		return true;
-	}
-
-	return false;
 }
 
 void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin) {
@@ -292,67 +306,28 @@ void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::Perli
 				double caveNoise = perlin->noise3D_01((x + position.x) / Chunk::SIZE, (y + position.y) / Chunk::SIZE, (z + position.z) / Chunk::SIZE);
 				if (y < surfaceHeight) {
 					if (y == 0 || caveNoise > 0.25) {
-						this->voxels[x][y][z].setType(TextureType::TEXTURE_STONE);
+						octree.setVoxel(glm::vec3(x, y, z), TEXTURE_STONE);
 					} else {
-						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
+						octree.setVoxel(glm::vec3(x, y, z), TEXTURE_AIR);
 					}
 				} else if (y == surfaceHeight) {
 					// Check if there is a cave just below this voxel
 					if (caveNoise <= 0.2) {
 						// This voxel is at the surface and there is a cave below, so fill it with air to make the cave accessible
-						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
+						octree.setVoxel(glm::vec3(x, y, z), TEXTURE_AIR);
 					} else {
 						// This voxel is at the surface, so fill it with grass
-						this->voxels[x][y][z].setType(biomeType, true);
+						octree.setVoxel(glm::vec3(x, y, z), biomeType);
 					}
 				} else {
 					if (surfaceHeight <= 1 && y == 0) {
-						this->voxels[x][y][z].setType(biomeType); // MAYBE CHANGE TO WATER
+						octree.setVoxel(glm::vec3(x, y, z), biomeType); // MAYBE CHANGE TO WATER
 					} else {
 						// This voxel is above the surface, so fill it with air
-						this->voxels[x][y][z].setType(TextureType::TEXTURE_AIR);
+						octree.setVoxel(glm::vec3(x, y, z), TEXTURE_AIR);
 					}
 				}
 			}
 		}
 	}
-}
-
-void	Chunk::generateVoxel(siv::PerlinNoise* perlin)
-{
-	if (state != ChunkState::UNLOADED) return;
-
-	const int numThreads = 4;
-	const int chunkWidth = Chunk::SIZE / numThreads;
-
-	std::vector<std::thread> threads;
-
-	for (int i = 0; i < numThreads; i++) {
-		int startX = i * chunkWidth;
-		int endX = (i + 1) * chunkWidth;
-		threads.emplace_back(&Chunk::generateChunk, this, startX, endX, 0, 32, perlin);
-	}
-
-	for (auto& thread : threads) {
-		thread.join();
-	}
-
-
-	state = ChunkState::GENERATED;
-
-	// DEBUG
-	// FILL MESH WITH DATA TO CREATE A CUBE AT 0, 0, 0
-	//this->voxels.resize(Chunk::SIZE);
-	//for (int x = 0; x < Chunk::SIZE; x++) {
-	//	this->voxels[x].resize(Chunk::HEIGHT);
-	//	for (int y = 0; y < Chunk::HEIGHT; y++) {
-	//		for (int z = 0; z < Chunk::SIZE; z++) {
-	//			this->voxels[x][y].push_back(Voxel(glm::vec3(x, y, z), TEXTURE_AIR));
-	//		}
-	//	}
-	//}
-
-	//this->voxels[0][0][0] = Voxel(glm::vec3(0, 0, 0), TEXTURE_GRASS);
-	//this->voxels[0][0][1] = Voxel(glm::vec3(0, 0, 1), TEXTURE_GRASS);
-	//this->voxels[0][1][0] = Voxel(glm::vec3(0, 1, 0), TEXTURE_GRASS);
 }

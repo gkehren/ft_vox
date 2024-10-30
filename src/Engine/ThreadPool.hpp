@@ -2,79 +2,59 @@
 #include <queue>
 #include <thread>
 #include <mutex>
+#include <future>
 #include <condition_variable>
 #include <functional>
 
 class ThreadPool
 {
 	public:
-		ThreadPool(size_t numThreads) {
-			start(numThreads);
-		}
-
-		~ThreadPool() {
-			stop();
-		}
-
-		template<class T>
-		void enqueue(T task) {
-			{
-				std::unique_lock<std::mutex> lock(mEventMutex);
-				mTasks.emplace(std::make_shared<Task<T>>(std::move(task)));
-			}
-			mEventVar.notify_one();
-		}
-
-	private:
-		struct TaskBase {
-			virtual ~TaskBase() {}
-			virtual void execute() = 0;
-		};
-
-		template<class T>
-		struct Task : TaskBase {
-			Task(T func) : mFunc(std::move(func)) {}
-			void execute() override { mFunc(); }
-
-			T mFunc;
-		};
-
-		void start(size_t numThreads) {
-			for (auto i = 0u; i < numThreads; ++i) {
-				mThreads.emplace_back([=] {
-					while (true) {
-						std::shared_ptr<TaskBase> task = nullptr;
+		ThreadPool(size_t numThreads) : stop(false) {
+			for (size_t i = 0; i < numThreads; ++i) {
+				workers.emplace_back([this] {
+					for (;;) {
+						std::function<void()> task;
 						{
-							std::unique_lock<std::mutex> lock(mEventMutex);
-							mEventVar.wait(lock, [=] { return mStopped || !mTasks.empty(); });
-
-							if (mStopped && mTasks.empty())
-								break;
-
-							task = std::move(mTasks.front());
-							mTasks.pop();
+							std::unique_lock<std::mutex> lock(queueMutex);
+							condition.wait(lock, [this] { return stop || !tasks.empty(); });
+							if (stop && tasks.empty())
+								return;
+							task = std::move(tasks.front());
+							tasks.pop();
 						}
 
-						task->execute();
+						task();
 					}
 				});
 			}
 		}
 
-		void stop() noexcept {
+		~ThreadPool() {
 			{
-				std::unique_lock<std::mutex> lock(mEventMutex);
-				mStopped = true;
+				std::unique_lock<std::mutex> lock(queueMutex);
+				stop = true;
 			}
-			mEventVar.notify_all();
-
-			for (auto& thread : mThreads)
-				thread.join();
+			condition.notify_all();
+			for (std::thread& worker : workers)
+				worker.join();
 		}
 
-		std::vector<std::thread> mThreads;
-		std::queue<std::shared_ptr<TaskBase>> mTasks;
-		std::mutex mEventMutex;
-		std::condition_variable mEventVar;
-		bool mStopped = false;
+		template<class F>
+		auto enqueue(F&& f) -> std::future<void> {
+			auto task = std::make_shared<std::packaged_task<void()>>(std::forward<F>(f));
+			std::future<void> res = task->get_future();
+			{
+				std::unique_lock<std::mutex> lock(queueMutex);
+				tasks.emplace([task]() { (*task)(); });
+			}
+			condition.notify_one();
+			return res;
+		}
+
+	private:
+		std::vector<std::thread> workers;
+		std::queue<std::function<void()>> tasks;
+		std::mutex queueMutex;
+		std::condition_variable condition;
+		bool stop;
 };

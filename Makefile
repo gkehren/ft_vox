@@ -1,7 +1,7 @@
 
 # ------------------
 CXX = g++
-CXXFLAGS = -std=c++17 -O3 -Ofast -march=native
+CXXFLAGS = -std=c++20 -O3 -Ofast -march=native
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
     LDFLAGS = -lGL -lglfw -lfreetype -L lib
