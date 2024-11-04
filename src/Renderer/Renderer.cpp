@@ -153,7 +153,7 @@ int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 
 	glBindTexture(GL_TEXTURE_2D, this->textureAtlas);
 
-	const auto& data = chunk.getData();
+	const auto& data = chunk.getMeshData();
 	if (data.empty())
 		return (0);
 

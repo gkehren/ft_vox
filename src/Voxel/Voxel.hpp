@@ -1,20 +1,16 @@
 #pragma once
 
-#include <glm/glm.hpp>
+#include <cstdint>
 #include <utils.hpp>
-#include <Mesh/Mesh.hpp>
 
 class Voxel
 {
 	public:
-		Voxel(glm::vec3 position, TextureType type = TEXTURE_AIR);
-		~Voxel();
+		Voxel(TextureType type = TEXTURE_AIR) : type(type) {}
 
-		const glm::vec3&	getPosition() const;
-		const TextureType&	getType() const;
-		void				setType(const TextureType& type);
+		TextureType getType() const { return type; }
+		void setType(TextureType newType) { type = newType; }
 
 	private:
-		glm::vec3	position;
 		TextureType	type;
 };

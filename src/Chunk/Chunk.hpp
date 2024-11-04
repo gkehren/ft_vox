@@ -14,15 +14,14 @@
 
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
-#include <Octree/Octree.hpp>
-#include <Mesh/Mesh.hpp>
+#include <Octree/SVO.hpp>
 #include <utils.hpp>
 
 class Chunk
 {
 	public:
-		static const int SIZE = 16;
-		static const int HEIGHT = 256;
+		static constexpr int SIZE = 16;
+		static constexpr int HEIGHT = 256;
 		static constexpr float RADIUS = 16.0f;
 
 		Chunk(const glm::vec3& position, ChunkState state = ChunkState::UNLOADED);
@@ -31,26 +30,25 @@ class Chunk
 		~Chunk() = default;
 
 		const glm::vec3&				getPosition() const;
-		const std::vector<float>&		getData();
+		const std::vector<float>&		getMeshData();
 		bool							isVisible() const;
 		void							setVisible(bool visible);
 		void							setState(ChunkState state);
 		ChunkState						getState() const;
 
-		TextureType						getVoxel(int x, int y, int z) const;
 		bool							deleteVoxel(const glm::vec3& position, const glm::vec3& front);
 		bool							placeVoxel(const glm::vec3& position, const glm::vec3& front, TextureType type);
 
-		void	generateVoxel(siv::PerlinNoise* perlin);
-		void	generateMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, siv::PerlinNoise* perlin);
+		void	generateVoxels(siv::PerlinNoise* perlin);
 
 	private:
 		glm::vec3	position;
 		bool		visible;
 		ChunkState	state;
 
-		Octree	octree;
-		Mesh	mesh;
+		std::unique_ptr<SVO>	svo;
+		std::vector<float>		cachedMesh;
+		bool					meshNeedsUpdate;
 
 		struct ChunkColumn
 		{
@@ -59,12 +57,9 @@ class Chunk
 			bool isMountain;
 		};
 
+		void generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);
 		TextureType getBiomeType(float biomeNoise);
 		void generateOctant(int startX, int startY, int startZ, int endX, int endY, int endZ, const std::vector<ChunkColumn>& columns, siv::PerlinNoise* perlin);
 		TextureType determineVoxelType(int x, int y, int z, const ChunkColumn& column, siv::PerlinNoise* perlin);
-
-		bool			addVoxelToMesh(std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks, const glm::vec3& pos, TextureType type, siv::PerlinNoise* perlin);
-		void			addFaceToMesh(const glm::vec3& pos, Face face, TextureType type);
-		void			generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);
-		bool			adjacentChunksGenerated(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks) const;
+		void	generateMesh();
 };

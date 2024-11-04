@@ -188,59 +188,49 @@ void	Engine::render()
 	renderSettings.visibleChunksCount = 0;
 	renderSettings.visibleVoxelsCount = 0;
 
-	if (!renderSettings.paused) {
-		const glm::ivec2 newPlayerChunkPos{
-			static_cast<int>(std::floor(camera.getPosition().x / Chunk::SIZE)),
-			static_cast<int>(std::floor(camera.getPosition().z / Chunk::SIZE))
-		};
-
-		if (newPlayerChunkPos != playerChunkPos) {
-			playerChunkPos = newPlayerChunkPos;
-			updateChunks();
-		}
-		frustumCulling();
+	// for debug just create a single chunk at 0,0,0
+	if (chunks.empty()) {
+		chunks.emplace(glm::ivec3(0, 0, 0), Chunk(glm::vec3(0.0f, 0.0f, 0.0f)));
+		chunks.begin()->second.generateVoxels(perlin.get());
+		chunks.begin()->second.setVisible(true);
+		chunks.begin()->second.setState(ChunkState::MESHED);
 	}
 
-	processChunkQueue();
+	//if (!renderSettings.paused) {
+	//	const glm::ivec2 newPlayerChunkPos{
+	//		static_cast<int>(std::floor(camera.getPosition().x / Chunk::SIZE)),
+	//		static_cast<int>(std::floor(camera.getPosition().z / Chunk::SIZE))
+	//	};
 
-	// async chunk generation
-	{
-		std::vector<std::future<void>> futures;
-		for (auto& chunk : chunks) {
-			if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::UNLOADED) {
-				auto perlinPtr = perlin.get();
-				futures.push_back(threadPool->enqueue([&chunk, perlinPtr]() {
-					chunk.second.generateVoxel(perlinPtr);
-				}));
-			}
-		}
+	//	if (newPlayerChunkPos != playerChunkPos) {
+	//		playerChunkPos = newPlayerChunkPos;
+	//		updateChunks();
+	//	}
+	//	frustumCulling();
+	//}
 
-		for (auto& future : futures) {
-			future.wait();
-		}
-	}
+	//processChunkQueue();
 
-	// optimize chunk mesh
-	int meshGenCount = 0;
-	for (auto& chunk : chunks) {
-		if (!chunk.second.isVisible() || meshGenCount >= renderSettings.chunkLoadedMax) {
-			continue;
-		}
+	//// async chunk generation
+	//{
+	//	std::vector<std::future<void>> futures;
+	//	for (auto& chunk : chunks) {
+	//		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::UNLOADED) {
+	//			auto perlinPtr = perlin.get();
+	//			futures.push_back(threadPool->enqueue([&chunk, perlinPtr]() {
+	//				chunk.second.generateVoxels(perlinPtr);
+	//			}));
+	//		}
+	//	}
 
-		if (chunk.second.getState() == ChunkState::GENERATED ||
-			chunk.second.getState() == ChunkState::REMESHED) {
-			chunk.second.generateMesh(chunks, perlin.get());
-			meshGenCount++;
-		}
-	}
+	//	for (auto& future : futures) {
+	//		future.wait();
+	//	}
+	//}
 
 	// Render of visible chunks
 	for (auto& chunk : chunks) {
-		if (!chunk.second.isVisible() ||
-			(chunk.second.getState() != ChunkState::MESHED &&
-				chunk.second.getState() != ChunkState::REMESHED)) {
-			continue;
-		}
+		if (!chunk.second.isVisible() || chunk.second.getState() == ChunkState::UNLOADED) continue;
 
 		renderSettings.visibleVoxelsCount += renderer->draw(chunk.second, *shader, camera);
 		renderSettings.visibleChunksCount++;

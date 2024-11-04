@@ -4,6 +4,7 @@
 #include <vector>
 #include <tuple>
 #include <map>
+#include <glm/glm.hpp>
 
 #define WORLD_SIZE		16384
 #define WORLD_HEIGHT	256
@@ -49,12 +50,12 @@ static const std::map<TextureType, std::string> textureTypeString = {
 };
 
 enum Face {
+	FRONT,
+	BACK,
 	LEFT,
 	RIGHT,
 	TOP,
-	BOTTOM,
-	FRONT,
-	BACK
+	BOTTOM
 };
 
 enum ChunkState {
