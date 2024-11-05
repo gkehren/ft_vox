@@ -189,44 +189,44 @@ void	Engine::render()
 	renderSettings.visibleVoxelsCount = 0;
 
 	// for debug just create a single chunk at 0,0,0
-	if (chunks.empty()) {
-		chunks.emplace(glm::ivec3(0, 0, 0), Chunk(glm::vec3(0.0f, 0.0f, 0.0f)));
-		chunks.begin()->second.generateVoxels(perlin.get());
-		chunks.begin()->second.setVisible(true);
-		chunks.begin()->second.setState(ChunkState::MESHED);
+	//if (chunks.empty()) {
+	//	chunks.emplace(glm::ivec3(0, 0, 0), Chunk(glm::vec3(0.0f, 0.0f, 0.0f)));
+	//	chunks.begin()->second.generateVoxels(perlin.get());
+	//	chunks.begin()->second.setVisible(true);
+	//	chunks.begin()->second.setState(ChunkState::MESHED);
+	//}
+
+	if (!renderSettings.paused) {
+		const glm::ivec2 newPlayerChunkPos{
+			static_cast<int>(std::floor(camera.getPosition().x / Chunk::SIZE)),
+			static_cast<int>(std::floor(camera.getPosition().z / Chunk::SIZE))
+		};
+
+		if (newPlayerChunkPos != playerChunkPos) {
+			playerChunkPos = newPlayerChunkPos;
+			updateChunks();
+		}
+		frustumCulling();
 	}
 
-	//if (!renderSettings.paused) {
-	//	const glm::ivec2 newPlayerChunkPos{
-	//		static_cast<int>(std::floor(camera.getPosition().x / Chunk::SIZE)),
-	//		static_cast<int>(std::floor(camera.getPosition().z / Chunk::SIZE))
-	//	};
+	processChunkQueue();
 
-	//	if (newPlayerChunkPos != playerChunkPos) {
-	//		playerChunkPos = newPlayerChunkPos;
-	//		updateChunks();
-	//	}
-	//	frustumCulling();
-	//}
+	// async chunk generation
+	{
+		std::vector<std::future<void>> futures;
+		for (auto& chunk : chunks) {
+			if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::UNLOADED) {
+				auto perlinPtr = perlin.get();
+				futures.push_back(threadPool->enqueue([&chunk, perlinPtr]() {
+					chunk.second.generateVoxels(perlinPtr);
+				}));
+			}
+		}
 
-	//processChunkQueue();
-
-	//// async chunk generation
-	//{
-	//	std::vector<std::future<void>> futures;
-	//	for (auto& chunk : chunks) {
-	//		if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::UNLOADED) {
-	//			auto perlinPtr = perlin.get();
-	//			futures.push_back(threadPool->enqueue([&chunk, perlinPtr]() {
-	//				chunk.second.generateVoxels(perlinPtr);
-	//			}));
-	//		}
-	//	}
-
-	//	for (auto& future : futures) {
-	//		future.wait();
-	//	}
-	//}
+		for (auto& future : futures) {
+			future.wait();
+		}
+	}
 
 	// Render of visible chunks
 	for (auto& chunk : chunks) {
@@ -337,16 +337,18 @@ void	Engine::handleInput(bool& keyTPressed)
 	}
 
 	if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-		for (auto& chunk : this->chunks) {
-			if (chunk.second.deleteVoxel(this->camera.getPosition(), this->camera.getFront())) {
-				break;
+		auto chunk = this->chunks.find(glm::ivec3(this->playerChunkPos.x, 0, this->playerChunkPos.y));
+		if (chunk != this->chunks.end()) {
+			if (chunk->second.deleteVoxel(this->camera.getPosition(), this->camera.getFront())) {
+				return;
 			}
 		}
 	}
 	if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
-		for (auto& chunk : this->chunks) {
-			if (chunk.second.placeVoxel(this->camera.getPosition(), this->camera.getFront(), selectedTexture)) {
-				break;
+		auto chunk = this->chunks.find(glm::ivec3(this->playerChunkPos.x, 0, this->playerChunkPos.y));
+		if (chunk != this->chunks.end()) {
+			if (chunk->second.placeVoxel(this->camera.getPosition(), this->camera.getFront(), selectedTexture)) {
+				return;
 			}
 		}
 	}

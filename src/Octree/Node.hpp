@@ -12,7 +12,6 @@ class Node
 		bool isLeaf = false;
 		TextureType voxelType = TEXTURE_AIR;
 		std::array<std::shared_ptr<Node>, 8> children;
-		//std::optional<std::array<std::shared_ptr<Node>, 8>> children;
 
 		Node() = default;
 

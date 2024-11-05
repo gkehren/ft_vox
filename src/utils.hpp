@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <vector>
+#include <array>
 #include <tuple>
 #include <map>
 #include <glm/glm.hpp>
@@ -133,53 +134,35 @@ const static unsigned int indicesBoundingbox[] = {
 	0, 4, 1, 5, 2, 6, 3, 7
 };
 
-static const std::map<Face, std::pair<glm::vec3, std::vector<glm::vec3>>> faceData = {
-	{Face::FRONT, {glm::vec3(0.0f, 0.0f, 1.0f), {
-		glm::vec3(-0.5f, -0.5f, 0.5f),
-		glm::vec3(0.5f, -0.5f, 0.5f),
-		glm::vec3(0.5f, 0.5f, 0.5f),
-		glm::vec3(-0.5f, -0.5f, 0.5f),
-		glm::vec3(0.5f, 0.5f, 0.5f),
-		glm::vec3(-0.5f, 0.5f, 0.5f)
-	}}},
-	{Face::BACK, {glm::vec3(0.0f, 0.0f, -1.0f), {
-		glm::vec3(0.5f, -0.5f, -0.5f),
-		glm::vec3(-0.5f, -0.5f, -0.5f),
-		glm::vec3(-0.5f, 0.5f, -0.5f),
-		glm::vec3(0.5f, -0.5f, -0.5f),
-		glm::vec3(-0.5f, 0.5f, -0.5f),
-		glm::vec3(0.5f, 0.5f, -0.5f)
-	}}},
-	{Face::LEFT, {glm::vec3(-1.0f, 0.0f, 0.0f), {
-		glm::vec3(-0.5f, -0.5f, -0.5f),
-		glm::vec3(-0.5f, -0.5f, 0.5f),
-		glm::vec3(-0.5f, 0.5f, 0.5f),
-		glm::vec3(-0.5f, -0.5f, -0.5f),
-		glm::vec3(-0.5f, 0.5f, 0.5f),
-		glm::vec3(-0.5f, 0.5f, -0.5f)
-	}}},
-	{Face::RIGHT, {glm::vec3(1.0f, 0.0f, 0.0f), {
-		glm::vec3(0.5f, -0.5f, 0.5f),
-		glm::vec3(0.5f, -0.5f, -0.5f),
-		glm::vec3(0.5f, 0.5f, -0.5f),
-		glm::vec3(0.5f, -0.5f, 0.5f),
-		glm::vec3(0.5f, 0.5f, -0.5f),
-		glm::vec3(0.5f, 0.5f, 0.5f)
-	}}},
-	{Face::TOP, {glm::vec3(0.0f, 1.0f, 0.0f), {
-		glm::vec3(-0.5f, 0.5f, 0.5f),
-		glm::vec3(0.5f, 0.5f, 0.5f),
-		glm::vec3(0.5f, 0.5f, -0.5f),
-		glm::vec3(-0.5f, 0.5f, 0.5f),
-		glm::vec3(0.5f, 0.5f, -0.5f),
-		glm::vec3(-0.5f, 0.5f, -0.5f)
-	}}},
-	{Face::BOTTOM, {glm::vec3(0.0f, -1.0f, 0.0f), {
-		glm::vec3(-0.5f, -0.5f, -0.5f),
-		glm::vec3(0.5f, -0.5f, -0.5f),
-		glm::vec3(0.5f, -0.5f, 0.5f),
-		glm::vec3(-0.5f, -0.5f, -0.5f),
-		glm::vec3(0.5f, -0.5f, 0.5f),
-		glm::vec3(-0.5f, -0.5f, 0.5f)
-	}}}
-};
+const static std::array<std::array<int, 3>, 6> faceOffsets = { {
+	{1, 0, 0}, {-1, 0, 0},  // Right, Left
+	{0, 1, 0}, {0, -1, 0},  // Top, Bottom
+	{0, 0, 1}, {0, 0, -1}   // Front, Back
+} };
+
+const static std::array<std::array<std::array<float, 3>, 6>, 6> faceVertices = { {
+	// Left face (-X)
+	{{{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 1.0f},
+	{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}}},
+	// Right face (+X)
+	{{{1.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f},
+	{1.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 1.0f, 1.0f}}},
+	// Top face (+Y)
+	{{{0.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 0.0f},
+	{0.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}}},
+	// Bottom face (-Y)
+	{{{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 1.0f},
+	{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 1.0f}}},
+	// Front face (+Z)
+	{{{0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f},
+	{0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 1.0f}}},
+	// Back face (-Z)
+	{{{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+	{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f, 0.0f}}}
+} };
+
+const static std::array<std::array<float, 3>, 6> faceNormals = { {
+	{-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f},   // Left, Right
+	{0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},   // Top, Bottom
+	{0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f}    // Front, Back
+} };

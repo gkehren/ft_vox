@@ -83,103 +83,6 @@ bool	Chunk::placeVoxel(const glm::vec3& position, const glm::vec3& front, Textur
 	return false;
 }
 
-int getChildIndex(int x, int y, int z)
-{
-	return (x << 2) | (y << 1) | z;
-}
-
-void	Chunk::generateVoxels(siv::PerlinNoise* perlin)
-{
-	if (state != ChunkState::UNLOADED) return;
-
-	// DEBUG
-	for (int x = 0; x < Chunk::SIZE; ++x) {
-		for (int z = 0; z < Chunk::SIZE; ++z) {
-			svo->addVoxel(x, 0, z, Chunk::HEIGHT, TEXTURE_STONE);
-		}
-	}
-
-	//generateChunk(0, SIZE, 0, SIZE, perlin);
-
-	state = ChunkState::GENERATED;
-}
-
-TextureType	Chunk::getBiomeType(float biomeNoise)
-{
-	if (biomeNoise < 0.2f) return TEXTURE_SAND;
-	if (biomeNoise < 0.5f) return TEXTURE_GRASS;
-	if (biomeNoise < 0.7f) return TEXTURE_SNOW;
-	if (biomeNoise < 0.8f) return TEXTURE_NETHER;
-	if (biomeNoise < 0.9f) return TEXTURE_SOUL;
-	return TEXTURE_DIRT;
-}
-
-void	Chunk::generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin)
-{
-	std::vector<ChunkColumn> columns(Chunk::SIZE * Chunk::SIZE);
-
-	for (int x = startX; x < endX; x++) {
-		for (int z = startZ; z < endZ; z++) {
-			int index = x * Chunk::SIZE + z;
-			ChunkColumn& column = columns[index];
-
-			float worldX = position.x + x;
-			float worldZ = position.z + z;
-
-			float baseNoise = perlin->noise2D_01(worldX / 200.0f, worldZ / 200.0f);
-			float detailNoise = perlin->noise2D_01(worldX / 50.0f, worldZ / 50.0f);
-			float mountainNoise = perlin->noise2D_01(worldX / 500.0f, worldZ / 500.0f);
-			float biomeNoise = perlin->noise2D_01(worldX / 250.0f, worldZ / 250.0f);
-
-			column.biomeType = getBiomeType(biomeNoise);
-
-			int baseHeight = static_cast<int>((baseNoise * 1.5f + detailNoise * 0.5f) * Chunk::HEIGHT / 2);
-			column.isMountain = mountainNoise > 0.6f;
-
-			if (column.isMountain) {
-				float factor = ((mountainNoise - 0.6f) / 0.4f);
-				factor *= factor;
-				int mountainHeight = static_cast<int>(mountainNoise * 128);
-				column.surfaceHeight = static_cast<int>(baseHeight * (1.0f - factor) + mountainHeight * factor);
-			} else {
-				column.surfaceHeight = column.biomeType == TEXTURE_GRASS ? baseHeight : static_cast<int>(baseHeight * 0.8f + baseHeight * 0.2f * detailNoise);
-			}
-		}
-	}
-
-	const int octantSize = 8;
-	for (int ox = startX; ox < endX; ox += octantSize) {
-		for (int oy = 0; oy < Chunk::HEIGHT; oy += octantSize) {
-			for (int oz = startZ; oz < endZ; oz += octantSize) {
-				generateOctant(ox, oy, oz,
-							 std::min(ox + octantSize, endX),
-							 std::min(oy + octantSize, Chunk::HEIGHT),
-							 std::min(oz + octantSize, endZ),
-							 columns, perlin);
-			}
-		}
-	}
-}
-
-void	Chunk::generateOctant(int startX, int startY, int startZ, int endX, int endY, int endZ, const std::vector<ChunkColumn>& columns, siv::PerlinNoise* perlin)
-{
-	for (int x = startX; x < endX; ++x) {
-		for (int y = startY; y < endY; ++y) {
-			for (int z = startZ; z < endZ; ++z) {
-				int columnIndex = x * SIZE + z;
-				const ChunkColumn& column = columns[columnIndex];
-				TextureType voxelType = determineVoxelType(x, y, z, column, perlin);
-				svo->addVoxel(x, y, z, Chunk::HEIGHT, voxelType);
-			}
-		}
-	}
-}
-
-TextureType	Chunk::determineVoxelType(int x, int y, int z, const ChunkColumn& column, siv::PerlinNoise* perlin)
-{
-	return (y <= column.surfaceHeight) ? column.biomeType : TEXTURE_AIR;
-}
-
 const std::vector<float>&	Chunk::getMeshData()
 {
 	if (meshNeedsUpdate) {
@@ -198,39 +101,6 @@ const std::vector<float>&	Chunk::getMeshData()
 void	Chunk::generateMesh()
 {
 	const float textureSize = 32.0f / 512.0f;
-
-	constexpr std::array<std::array<int, 3>, 6> faceOffsets = { {
-		{1, 0, 0}, {-1, 0, 0},  // Right, Left
-		{0, 1, 0}, {0, -1, 0},  // Top, Bottom
-		{0, 0, 1}, {0, 0, -1}   // Front, Back
-	} };
-
-	constexpr std::array<std::array<std::array<float, 3>, 6>, 6> faceVertices = { {
-		// Left face (-X)
-		{{{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 1.0f},
-		{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}}},
-		// Right face (+X)
-		{{{1.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f},
-		{1.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 1.0f, 1.0f}}},
-		// Top face (+Y)
-		{{{0.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 0.0f},
-		{0.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}}},
-		// Bottom face (-Y)
-		{{{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 1.0f},
-		{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 1.0f}}},
-		// Front face (+Z)
-		{{{0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f},
-		{0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 1.0f}}},
-		// Back face (-Z)
-		{{{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
-		{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f, 0.0f}}}
-	} };
-
-	constexpr std::array<std::array<float, 3>, 6> faceNormals = { {
-		{-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f},   // Left, Right
-		{0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},   // Top, Bottom
-		{0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f}    // Front, Back
-	} };
 
 	auto addFace = [&](int x, int y, int z, int face, TextureType type) {
 		float textureX = static_cast<float>(type % 16) * textureSize;
@@ -290,4 +160,100 @@ void	Chunk::generateMesh()
 	};
 
 	traverseNode(*svo->getRoot(), 0, 0, 0, Chunk::HEIGHT, traverseNode);
+}
+
+void	Chunk::generateVoxels(siv::PerlinNoise* perlin)
+{
+	if (state != ChunkState::UNLOADED) return;
+
+	// DEBUG
+	for (int x = 0; x < Chunk::SIZE; ++x) {
+		for (int z = 0; z < Chunk::SIZE; ++z) {
+			for (int y = 0; y < Chunk::HEIGHT / 3; ++y) {
+				svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_STONE);
+			}
+		}
+	}
+
+	//generateChunk(perlin);
+
+	state = ChunkState::GENERATED;
+}
+
+void	Chunk::generateChunk(siv::PerlinNoise* perlin)
+{
+	for (int x = 0; x < Chunk::SIZE; x++) {
+		for (int z = 0; z < Chunk::SIZE; z++) {
+			// Generate Perlin noise values at different scales
+			float noise1 = perlin->noise2D_01((position.x + x) / 200.0f, (position.z + z) / 200.0f) * 1.5f;
+			float noise2 = perlin->noise2D_01((position.x + x) / 50.0f, (position.z + z) / 50.0f) * 0.5f;
+			float noise3 = perlin->noise2D_01((position.x + x) / 25.0f, (position.z + z) / 25.0f) * 0.2f;
+			float mountainNoise = perlin->noise2D_01((position.x + x) / 500.0f, (position.z + z) / 500.0f); // New noise layer for mountains
+			float biomeNoise = perlin->noise2D_01((position.x + x) / 250.0f, (position.z + z) / 250.0f); // New noise layer for biomes
+
+			TextureType biomeType;
+			if (biomeNoise < 0.2f) {
+				biomeType = TEXTURE_SAND;
+			} else if (biomeNoise < 0.5f) {
+				biomeType = TEXTURE_GRASS;
+			} else if (biomeNoise < 0.7f) {
+				biomeType = TEXTURE_SNOW;
+			} else if (biomeNoise < 0.8f) {
+				biomeType = TEXTURE_NETHER;
+			} else if (biomeNoise < 0.9f) {
+				biomeType = TEXTURE_SOUL;
+			} else {
+				biomeType = TEXTURE_DIRT;
+			}
+
+			// Combine the Perlin noise values to determine the surface height at this point
+			int baseHeight = static_cast<int>((noise1 + noise2 + noise3) * Chunk::HEIGHT / 4);
+
+			// Adjust height for mountains
+			int mountainHeight = static_cast<int>(mountainNoise * 128); // Increased impact for higher mountains
+
+			// Determine if this point is in a mountain region
+			bool isMountain = mountainNoise > 0.6f; // Threshold for mountain regions
+
+			// Interpolate between baseHeight and mountainHeight for smoother transitions at the borders
+			float interpolationFactor = 0.0f;
+			if (isMountain) {
+				interpolationFactor = (mountainNoise - 0.6f) / 0.4f; // Normalize to range [0, 1]
+				interpolationFactor = interpolationFactor * interpolationFactor; // Squaring to smooth the transition
+			}
+			int surfaceHeight = static_cast<int>(baseHeight * (1.0f - interpolationFactor) + mountainHeight * interpolationFactor);
+
+			// Ensure plains are flatter by reducing noise influence
+			if (biomeType == TEXTURE_GRASS && !isMountain) {
+				surfaceHeight = baseHeight;
+			}
+
+			for (int y = 0; y < Chunk::HEIGHT; y++) {
+				double caveNoise = perlin->noise3D_01((x + position.x) / Chunk::SIZE, (y + position.y) / Chunk::SIZE, (z + position.z) / Chunk::SIZE);
+				if (y < surfaceHeight) {
+					if (y == 0 || caveNoise > 0.25) {
+						svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_STONE);
+					} else {
+						svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_AIR);
+					}
+				} else if (y == surfaceHeight) {
+					// Check if there is a cave just below this voxel
+					if (caveNoise <= 0.2) {
+						// This voxel is at the surface and there is a cave below, so fill it with air to make the cave accessible
+						svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_AIR);
+					} else {
+						// This voxel is at the surface, so fill it with grass
+						svo->addVoxel(x, y, z, Chunk::HEIGHT, biomeType);
+					}
+				} else {
+					if (surfaceHeight <= 1 && y == 0) {
+						svo->addVoxel(x, y, z, Chunk::HEIGHT, biomeType);
+					} else {
+						// This voxel is above the surface, so fill it with air
+						svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_AIR);
+					}
+				}
+			}
+		}
+	}
 }

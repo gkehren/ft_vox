@@ -14,7 +14,6 @@ class SVO
 
 		// Add a voxel at the given position (x, y, z)
 		void addVoxel(int x, int y, int z, int depth, TextureType type) {
-			//addVoxel(root.get(), x, y, z, depth, type);
 			Node* currentNode = root.get();
 
 			while (depth > 1) {
@@ -67,18 +66,6 @@ class SVO
 		}
 
 	private:
-		void addVoxel(Node* node, int x, int y, int z, int depth, TextureType type) {
-			if (depth == 0) {
-				node->voxelType = type;
-				node->isLeaf = true;
-				return;
-			}
-
-			int index = getChildIndex(x, y, z, depth);
-			node->createChild(index);
-			addVoxel(node->getChild(index), x, y, z, depth - 1, type);
-		}
-
 		void deleteVoxel(Node* node, int x, int y, int z, int depth) {
 			if (depth == 0) {
 				node->voxelType = TEXTURE_AIR;

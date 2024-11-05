@@ -50,16 +50,6 @@ class Chunk
 		std::vector<float>		cachedMesh;
 		bool					meshNeedsUpdate;
 
-		struct ChunkColumn
-		{
-			int surfaceHeight;
-			TextureType biomeType;
-			bool isMountain;
-		};
-
-		void generateChunk(int startX, int endX, int startZ, int endZ, siv::PerlinNoise* perlin);
-		TextureType getBiomeType(float biomeNoise);
-		void generateOctant(int startX, int startY, int startZ, int endX, int endY, int endZ, const std::vector<ChunkColumn>& columns, siv::PerlinNoise* perlin);
-		TextureType determineVoxelType(int x, int y, int z, const ChunkColumn& column, siv::PerlinNoise* perlin);
+		void	generateChunk(siv::PerlinNoise* perlin);
 		void	generateMesh();
 };
