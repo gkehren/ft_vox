@@ -75,13 +75,21 @@ class Engine {
 			int		maxRenderDistance{320};
 		} renderSettings;
 
+		struct RenderTiming {
+			float frustumCulling{0.0f};
+			float chunkGeneration{0.0f};
+			float meshGeneration{0.0f};
+			float chunkRendering{0.0f};
+			float uiRendering{0.0f};
+			float totalFrame{0.0f};
+		} renderTiming;
+
 		void	handleInput(bool& keyTPressed);
 		void	updateUI();
 
 		TextureType	selectedTexture;
 		std::unordered_map<glm::ivec3, Chunk, ivec3_hash>	chunks;
 		std::queue<glm::ivec3>								chunkGenerationQueue;
-		std::mutex											mutex;
 		mutable std::mutex									chunkMutex;
 
 		void	updateChunks();

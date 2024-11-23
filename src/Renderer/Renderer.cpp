@@ -43,20 +43,8 @@ static GLuint loadTexture(const char* path)
 Renderer::Renderer(int screenWidth, int screenHeight, float renderDistance) : screenWidth(screenWidth), screenHeight(screenHeight), renderDistance(renderDistance)
 {
 	std::string path = RES_PATH;
-	this->boundingBoxShader = new Shader((path + "shaders/boundingBoxVertex.glsl").c_str(), (path + "shaders/boundingBoxFragment.glsl").c_str());
 
-	// Bounding box
-	glGenVertexArrays(1, &this->boundingBoxVAO);
-	glGenBuffers(1, &this->boundingBoxVBO);
-	glGenBuffers(1, &this->boundingBoxEBO);
-	glBindVertexArray(this->boundingBoxVAO);
-	glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
-
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-	glEnableVertexAttribArray(0);
-
-	glBindVertexArray(0);
+	this->initBoundingBox();
 
 	glGenVertexArrays(1, &this->VAO);
 	glGenBuffers(1, &this->VBO);
@@ -87,8 +75,6 @@ Renderer::Renderer(int screenWidth, int screenHeight, float renderDistance) : sc
 
 Renderer::~Renderer()
 {
-	delete this->boundingBoxShader;
-	delete this->skyboxShader;
 	glDeleteVertexArrays(1, &this->skyboxVAO);
 	glDeleteBuffers(1, &this->skyboxVBO);
 	glDeleteTextures(1, &this->skyboxTexture);
@@ -97,6 +83,25 @@ Renderer::~Renderer()
 	glDeleteTextures(1, &this->textureAtlas);
 	glDeleteVertexArrays(1, &this->boundingBoxVAO);
 	glDeleteBuffers(1, &this->boundingBoxVBO);
+}
+
+void	Renderer::initBoundingBox()
+{
+	std::string path = RES_PATH;
+	this->boundingBoxShader = std::make_unique<Shader>((path + "shaders/boundingBoxVertex.glsl").c_str(), (path + "shaders/boundingBoxFragment.glsl").c_str());
+
+	// Bounding box
+	glGenVertexArrays(1, &this->boundingBoxVAO);
+	glGenBuffers(1, &this->boundingBoxVBO);
+	glGenBuffers(1, &this->boundingBoxEBO);
+	glBindVertexArray(this->boundingBoxVAO);
+	glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
+
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
+
+	glBindVertexArray(0);
 }
 
 void	Renderer::setScreenSize(int screenWidth, int screenHeight)
@@ -116,15 +121,15 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Camera& camera) const
 	glm::vec3 position = chunk.getPosition();
 
 	float verticesBoundingbox[] = {
-		position.x - 0.5f, position.y - 0.5f, position.z - 0.5f,
-		position.x - 0.5f + Chunk::SIZE, position.y - 0.5f, position.z - 0.5f,
-		position.x - 0.5f + Chunk::SIZE, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f,
-		position.x - 0.5f, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f,
+		position.x - 1.0f, position.y - 1.0f, position.z - 1.0f,
+		position.x - 1.0f + Chunk::SIZE, position.y - 1.0f, position.z - 1.0f,
+		position.x - 1.0f + Chunk::SIZE, position.y - 1.0f + Chunk::HEIGHT, position.z - 1.0f,
+		position.x - 1.0f, position.y - 1.0f + Chunk::HEIGHT, position.z - 1.0f,
 
-		position.x - 0.5f, position.y - 0.5f, position.z - 0.5f + Chunk::SIZE,
-		position.x - 0.5f + Chunk::SIZE, position.y - 0.5f, position.z - 0.5f + Chunk::SIZE,
-		position.x - 0.5f + Chunk::SIZE, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f + Chunk::SIZE,
-		position.x - 0.5f, position.y - 0.5f + Chunk::HEIGHT, position.z - 0.5f + Chunk::SIZE
+		position.x - 1.0f, position.y - 1.0f, position.z - 1.0f + Chunk::SIZE,
+		position.x - 1.0f + Chunk::SIZE, position.y - 1.0f, position.z - 1.0f + Chunk::SIZE,
+		position.x - 1.0f + Chunk::SIZE, position.y - 1.0f + Chunk::HEIGHT, position.z - 1.0f + Chunk::SIZE,
+		position.x - 1.0f, position.y - 1.0f + Chunk::HEIGHT, position.z - 1.0f + Chunk::SIZE
 	};
 
 	glBindVertexArray(this->boundingBoxVAO);
@@ -158,14 +163,24 @@ int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 		return (0);
 
 	glBindVertexArray(this->VAO);
-	if (data.size() * sizeof(float) != this->currentVBOSize) {
-		glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
-		glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
-		this->currentVBOSize = data.size() * sizeof(float);
-	} else {
-		glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
-		glBufferSubData(GL_ARRAY_BUFFER, 0, data.size() * sizeof(float), data.data());
+	if (chunk.VBO == 0 || chunk.VBONeedsUpdate)
+	{
+		glGenBuffers(1, &chunk.VBO);
+		glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
+		glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STATIC_DRAW);
+		chunk.VBONeedsUpdate = false;
 	}
+	else
+	{
+		glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
+	}
+
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
 
 	const size_t vertexCount = data.size() / 8;
 	glDrawArrays(GL_TRIANGLES, 0, vertexCount);
@@ -177,8 +192,7 @@ int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
 void	Renderer::loadSkybox()
 {
 	std::string path = RES_PATH;
-	// Skybox
-	this->skyboxShader = new Shader((path + "shaders/skyboxVertex.glsl").c_str(), (path + "shaders/skyboxFragment.glsl").c_str());
+	this->skyboxShader = std::make_unique<Shader>((path + "shaders/skyboxVertex.glsl").c_str(), (path + "shaders/skyboxFragment.glsl").c_str());
 
 	glGenVertexArrays(1, &this->skyboxVAO);
 	glGenBuffers(1, &this->skyboxVBO);

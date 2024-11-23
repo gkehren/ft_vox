@@ -11,23 +11,24 @@ uniform vec3 viewPos;
 
 void main()
 {
-    // Ambient
-    float ambientStrength = 0.1;
-    vec3 ambient = ambientStrength * vec3(1.0, 1.0, 1.0);
+    vec3 color = texture(textureSampler, TexCoord).rgb;
 
-    // Diffuse
     vec3 norm = normalize(Normal);
     vec3 lightDir = normalize(lightPos - FragPos);
-    float diff = max(dot(norm, lightDir), 0.0);
-    vec3 diffuse = diff * vec3(1.0, 1.0, 1.0);
 
-    // Specular
-    float specularStrength = 0.5;
+    // Éclairage ambiant
+    vec3 ambient = 0.1 * color;
+
+    // Éclairage diffus
+    float diff = max(dot(norm, lightDir), 0.0);
+    vec3 diffuse = diff * color;
+
+    // Éclairage spéculaire
     vec3 viewDir = normalize(viewPos - FragPos);
     vec3 reflectDir = reflect(-lightDir, norm);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32);
-    vec3 specular = specularStrength * spec * vec3(1.0, 1.0, 1.0);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 16.0); // Réduire l'exposant pour des performances
+    vec3 specular = 0.5 * spec * vec3(1.0);
 
-    vec3 result = (ambient + diffuse + specular) * vec3(texture(textureSampler, TexCoord));
+    vec3 result = ambient + diffuse + specular;
     FragColor = vec4(result, 1.0);
 }

@@ -24,16 +24,17 @@ class Renderer {
 
 
 	private:
-		Shader*	boundingBoxShader;
+		std::unique_ptr<Shader>	boundingBoxShader;
 		GLuint	boundingBoxVAO;
 		GLuint	boundingBoxVBO;
 		GLuint	boundingBoxEBO;
+		void	initBoundingBox();
 
 		GLuint	VAO;
 		GLuint	VBO;
 		GLuint	textureAtlas;
 
-		Shader*	skyboxShader;
+		std::unique_ptr<Shader>	skyboxShader;
 		GLuint	skyboxVAO;
 		GLuint	skyboxVBO;
 		GLuint	skyboxTexture;

@@ -4,16 +4,20 @@ Chunk::Chunk(const glm::vec3& position, ChunkState state)
 	: position(position)
 	, visible(false)
 	, state(state)
-	, svo(std::make_unique<SVO>())
+	, voxels(SIZE * SIZE * HEIGHT)
+	, visibleFacesMask(SIZE * SIZE * HEIGHT / 32)
 	, meshNeedsUpdate(true)
+	, VBO(0)
 {}
 
 Chunk::Chunk(Chunk&& other) noexcept
 	: position(std::move(other.position))
 	, visible(other.visible)
 	, state(other.state)
-	, svo(std::move(other.svo))
+	, voxels(std::move(other.voxels))
+	, visibleFacesMask(std::move(other.visibleFacesMask))
 	, meshNeedsUpdate(true)
+	, VBO(0)
 {}
 
 Chunk& Chunk::operator=(Chunk&& other) noexcept
@@ -22,8 +26,10 @@ Chunk& Chunk::operator=(Chunk&& other) noexcept
 		position = std::move(other.position);
 		visible = other.visible;
 		state = other.state;
-		svo = std::move(other.svo);
+		voxels = std::move(other.voxels);
+		visibleFacesMask = std::move(other.visibleFacesMask);
 		meshNeedsUpdate = other.meshNeedsUpdate;
+		VBO = 0;
 	}
 	return *this;
 }
@@ -45,6 +51,9 @@ void	Chunk::setVisible(bool visible)
 
 void	Chunk::setState(ChunkState state)
 {
+	if (state == ChunkState::GENERATED || state == ChunkState::UNLOADED) {
+		meshNeedsUpdate = true;
+	}
 	this->state = state;
 }
 
@@ -53,16 +62,69 @@ ChunkState	Chunk::getState() const
 	return state;
 }
 
+bool	Chunk::getMeshNeedsUpdate() const
+{
+	return meshNeedsUpdate;
+}
+
+Voxel&	Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z)
+{
+	return voxels[getIndex(x, y, z)];
+}
+
+const Voxel&	Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
+{
+	return voxels[getIndex(x, y, z)];
+}
+
+void	Chunk::setVoxel(uint32_t x, uint32_t y, uint32_t z, TextureType type)
+{
+	auto& voxel = getVoxel(x, y, z);
+	voxel.type = static_cast<uint8_t>(type);
+	voxel.active = type != TEXTURE_AIR;
+	updateVisibilityMask(x, y, z);
+}
+
+void Chunk::updateVisibilityMask(uint32_t x, uint32_t y, uint32_t z)
+{
+	const size_t idx = getIndex(x, y, z);
+	const size_t maskIdx = idx / 32;
+	const uint32_t bitPos = idx % 32;
+
+	if (isVoxelVisible(x, y, z)) {
+		visibleFacesMask[maskIdx] |= (1u << bitPos);
+	} else {
+		visibleFacesMask[maskIdx] &= ~(1u << bitPos);
+	}
+}
+
+bool Chunk::isVoxelVisible(uint32_t x, uint32_t y, uint32_t z)
+{
+	const auto& voxel = getVoxel(x, y, z);
+	if (!voxel.active) return false;
+
+	// Check neighbors
+	if (x > 0 && !getVoxel(x - 1, y, z).active) return true;
+	if (x < SIZE - 1 && !getVoxel(x + 1, y, z).active) return true;
+	if (y > 0 && !getVoxel(x, y - 1, z).active) return true;
+	if (y < HEIGHT - 1 && !getVoxel(x, y + 1, z).active) return true;
+	if (z > 0 && !getVoxel(x, y, z - 1).active) return true;
+	if (z < SIZE - 1 && !getVoxel(x, y, z + 1).active) return true;
+
+	return false;
+}
+
 bool	Chunk::deleteVoxel(const glm::vec3& position, const glm::vec3& front)
 {
 	glm::vec3 target = position + front * 0.5f;
-	int x = static_cast<int>(target.x - this->position.x);
-	int y = static_cast<int>(target.y - this->position.y);
-	int z = static_cast<int>(target.z - this->position.z);
+	uint32_t x = static_cast<uint32_t>(target.x - this->position.x);
+	uint32_t y = static_cast<uint32_t>(target.y - this->position.y);
+	uint32_t z = static_cast<uint32_t>(target.z - this->position.z);
 
-	if (svo->getVoxel(x, y, z, Chunk::HEIGHT) != TEXTURE_AIR) {
-		svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_AIR);
+	if (getVoxel(x, y, z).active) {
+		setVoxel(x, y, z, TEXTURE_AIR);
 		meshNeedsUpdate = true;
+		state = ChunkState::GENERATED;
 		return true;
 	}
 	return false;
@@ -71,13 +133,14 @@ bool	Chunk::deleteVoxel(const glm::vec3& position, const glm::vec3& front)
 bool	Chunk::placeVoxel(const glm::vec3& position, const glm::vec3& front, TextureType type)
 {
 	glm::vec3 target = position + front * 0.5f;
-	int x = static_cast<int>(target.x - this->position.x);
-	int y = static_cast<int>(target.y - this->position.y);
-	int z = static_cast<int>(target.z - this->position.z);
+	uint32_t x = static_cast<uint32_t>(target.x - this->position.x);
+	uint32_t y = static_cast<uint32_t>(target.y - this->position.y);
+	uint32_t z = static_cast<uint32_t>(target.z - this->position.z);
 
-	if (svo->getVoxel(x, y, z, Chunk::HEIGHT) == TEXTURE_AIR) {
-		svo->addVoxel(x, y, z, Chunk::HEIGHT, type);
+	if (!getVoxel(x, y, z).active) {
+		setVoxel(x, y, z, type);
 		meshNeedsUpdate = true;
+		state = ChunkState::GENERATED;
 		return true;
 	}
 	return false;
@@ -86,80 +149,19 @@ bool	Chunk::placeVoxel(const glm::vec3& position, const glm::vec3& front, Textur
 const std::vector<float>&	Chunk::getMeshData()
 {
 	if (meshNeedsUpdate) {
-		cachedMesh.clear();
-		generateMesh();
-		if (cachedMesh.empty()) {
-			std::cout << "Warning: Mesh data is empty!" << std::endl;
-		}
+		//cachedMesh.clear();
+		state = ChunkState::GENERATED;
+		//generateMesh();
+		//if (cachedMesh.empty()) {
+		//	std::cout << "Warning: Mesh data is empty!" << std::endl;
+		//}
 
 		meshNeedsUpdate = false;
+		VBONeedsUpdate = true;
+		return cachedMesh;
 	}
 	state = ChunkState::MESHED;
 	return cachedMesh;
-}
-
-void	Chunk::generateMesh()
-{
-	const float textureSize = 32.0f / 512.0f;
-
-	auto addFace = [&](int x, int y, int z, int face, TextureType type) {
-		float textureX = static_cast<float>(type % 16) * textureSize;
-		float textureY = static_cast<float>(type / 16) * textureSize;
-
-		const std::array<std::array<float, 2>, 6> texCoords = {{
-			{textureX, textureY + textureSize},             // Bottom-left
-			{textureX + textureSize, textureY + textureSize}, // Bottom-right
-			{textureX + textureSize, textureY},             // Top-right
-			{textureX, textureY + textureSize},             // Bottom-left
-			{textureX + textureSize, textureY},             // Top-right
-			{textureX, textureY}                            // Top-left
-		}};
-
-		for (int i = 0; i < 6; ++i) {
-			const auto& vertex = faceVertices[face][i];
-			// Position
-			cachedMesh.push_back(x + vertex[0] + position.x);
-			cachedMesh.push_back(y + vertex[1] + position.y);
-			cachedMesh.push_back(z + vertex[2] + position.z);
-
-			// Normal
-			cachedMesh.insert(cachedMesh.end(), faceNormals[face].begin(), faceNormals[face].end());
-
-			// Texture coordinates
-			cachedMesh.push_back(texCoords[i][0]);
-			cachedMesh.push_back(texCoords[i][1]);
-		}
-	};
-
-	auto traverseNode = [&](const Node& node, int x, int y, int z, int size, auto& recurse) -> void {
-		if (node.isLeaf && node.voxelType != TEXTURE_AIR) {
-			for (int face = 0; face < 6; ++face) {
-				int nx = x + faceOffsets[face][0] * size;
-				int ny = y + faceOffsets[face][1] * size;
-				int nz = z + faceOffsets[face][2] * size;
-
-				if (svo->getVoxel(nx, ny, nz, Chunk::HEIGHT) == TEXTURE_AIR) {
-					addFace(x, y, z, face, node.voxelType);
-				}
-			}
-			return;
-		}
-
-		if (size <= 1) return;
-
-		int half = size / 2;
-		for (int i = 0; i < 8; ++i) {
-			const Node* child = node.getChild(i);
-			if (!child) continue;
-
-			int dx = (i & 4) ? half : 0;
-			int dy = (i & 2) ? half : 0;
-			int dz = (i & 1) ? half : 0;
-			recurse(*child, x + dx, y + dy, z + dz, half, recurse);
-		}
-	};
-
-	traverseNode(*svo->getRoot(), 0, 0, 0, Chunk::HEIGHT, traverseNode);
 }
 
 void	Chunk::generateVoxels(siv::PerlinNoise* perlin)
@@ -167,16 +169,13 @@ void	Chunk::generateVoxels(siv::PerlinNoise* perlin)
 	if (state != ChunkState::UNLOADED) return;
 
 	// DEBUG
-	for (int x = 0; x < Chunk::SIZE; ++x) {
-		for (int z = 0; z < Chunk::SIZE; ++z) {
-			for (int y = 0; y < Chunk::HEIGHT / 3; ++y) {
-				svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_STONE);
-			}
-		}
-	}
+	//for (uint32_t x = 0; x < Chunk::SIZE; ++x) {
+	//	for (uint32_t z = 0; z < Chunk::SIZE; ++z) {
+	//		setVoxel(x, 0, z, TEXTURE_GRASS);
+	//	}
+	//}
 
-	//generateChunk(perlin);
-
+	generateChunk(perlin);
 	state = ChunkState::GENERATED;
 }
 
@@ -232,28 +231,170 @@ void	Chunk::generateChunk(siv::PerlinNoise* perlin)
 				double caveNoise = perlin->noise3D_01((x + position.x) / Chunk::SIZE, (y + position.y) / Chunk::SIZE, (z + position.z) / Chunk::SIZE);
 				if (y < surfaceHeight) {
 					if (y == 0 || caveNoise > 0.25) {
-						svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_STONE);
+						setVoxel(x, y, z, TEXTURE_STONE);
 					} else {
-						svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_AIR);
+						setVoxel(x, y, z, TEXTURE_AIR);
 					}
 				} else if (y == surfaceHeight) {
 					// Check if there is a cave just below this voxel
 					if (caveNoise <= 0.2) {
 						// This voxel is at the surface and there is a cave below, so fill it with air to make the cave accessible
-						svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_AIR);
+						setVoxel(x, y, z, TEXTURE_AIR);
 					} else {
 						// This voxel is at the surface, so fill it with grass
-						svo->addVoxel(x, y, z, Chunk::HEIGHT, biomeType);
+						setVoxel(x, y, z, biomeType);
 					}
 				} else {
 					if (surfaceHeight <= 1 && y == 0) {
-						svo->addVoxel(x, y, z, Chunk::HEIGHT, biomeType);
+						setVoxel(x, y, z, biomeType);
 					} else {
 						// This voxel is above the surface, so fill it with air
-						svo->addVoxel(x, y, z, Chunk::HEIGHT, TEXTURE_AIR);
+						setVoxel(x, y, z, TEXTURE_AIR);
 					}
 				}
 			}
 		}
 	}
+}
+
+void Chunk::generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks)
+{
+	cachedMesh.clear();
+
+	// Directional offsets for neighbor voxels
+	static const glm::ivec3 directions[6] = {
+		{  0,  1,  0 }, // Up
+		{  0, -1,  0 }, // Down
+		{  0,  0,  1 }, // Front
+		{  0,  0, -1 }, // Back
+		{ -1,  0,  0 }, // Left
+		{  1,  0,  0 }  // Right
+	};
+
+	// Predefined face vertices for a cube
+	static const float faceVertices[6][12] = {
+		{ 0,1,0, 1,1,0, 1,1,1, 0,1,1 }, // Up
+		{ 0,0,0, 0,0,1, 1,0,1, 1,0,0 }, // Down
+		{ 0,0,1, 1,0,1, 1,1,1, 0,1,1 }, // Front
+		{ 0,0,0, 0,1,0, 1,1,0, 1,0,0 }, // Back
+		{ 0,0,0, 0,0,1, 0,1,1, 0,1,0 }, // Left
+		{ 1,0,0, 1,1,0, 1,1,1, 1,0,1 }  // Right
+	};
+
+	// Normals for each face
+	static const float normals[6][3] = {
+		{  0,  1,  0 }, // Up
+		{  0, -1,  0 }, // Down
+		{  0,  0,  1 }, // Front
+		{  0,  0, -1 }, // Back
+		{ -1,  0,  0 }, // Left
+		{  1,  0,  0 }  // Right
+	};
+
+	// Texture coordinates for a face
+	static const float texCoords[4][2] = {
+		{ 0.0f, 0.0f },
+		{ 1.0f, 0.0f },
+		{ 1.0f, 1.0f },
+		{ 0.0f, 1.0f }
+	};
+
+	const float TEXTURE_ATLAS_SIZE = 512.0f;
+	const float TEXTURE_SIZE = 32.0f / TEXTURE_ATLAS_SIZE;
+
+	glm::ivec3 chunkPos = glm::ivec3(position) / SIZE;
+
+	static const int indices[6][6] = {
+		{ 0, 3, 2, 0, 2, 1 }, // Up
+		{ 0, 3, 2, 0, 2, 1 }, // Down
+		{ 0, 1, 2, 0, 2, 3 }, // Front
+		{ 0, 1, 2, 0, 2, 3 }, // Back
+		{ 0, 1, 2, 0, 2, 3 }, // Left
+		{ 0, 1, 2, 0, 2, 3 }  // Right
+	};
+
+	for (int x = 0; x < SIZE; ++x) {
+		for (int y = 0; y < HEIGHT; ++y) {
+			for (int z = 0; z < SIZE; ++z) {
+				Voxel& voxel = getVoxel(x, y, z);
+				if (!voxel.active) continue;
+
+				for (int face = 0; face < 6; ++face) {
+					glm::ivec3 neighborPos = glm::ivec3{ x, y, z } + directions[face];
+					Voxel* neighborVoxel = nullptr;
+
+					// Check within current chunk
+					if (neighborPos.x >= 0 && neighborPos.x < SIZE &&
+						neighborPos.y >= 0 && neighborPos.y < HEIGHT &&
+						neighborPos.z >= 0 && neighborPos.z < SIZE) {
+						neighborVoxel = &getVoxel(
+							neighborPos.x, neighborPos.y, neighborPos.z);
+					} else {
+						// Determine neighbor chunk position
+						glm::ivec3 neighborChunkPos = chunkPos;
+						glm::ivec3 localPos = neighborPos;
+
+						if (neighborPos.x < 0) {
+							neighborChunkPos.x -= 1;
+							localPos.x += SIZE;
+						} else if (neighborPos.x >= SIZE) {
+							neighborChunkPos.x += 1;
+							localPos.x -= SIZE;
+						}
+						if (neighborPos.y < 0 || neighborPos.y >= HEIGHT) {
+							continue; // Outside vertical bounds
+						}
+						if (neighborPos.z < 0) {
+							neighborChunkPos.z -= 1;
+							localPos.z += SIZE;
+						} else if (neighborPos.z >= SIZE) {
+							neighborChunkPos.z += 1;
+							localPos.z -= SIZE;
+						}
+
+						auto it = chunks.find(neighborChunkPos);
+						if (it != chunks.end() && it->second.getState() >= ChunkState::GENERATED) {
+							neighborVoxel = const_cast<Voxel*>(
+								&it->second.getVoxel(
+									localPos.x, localPos.y, localPos.z));
+						} else {
+							Voxel solidVoxel;
+							solidVoxel.active = true;
+							neighborVoxel = &solidVoxel;
+						}
+					}
+
+					if (!neighborVoxel || !neighborVoxel->active) {
+						// Add face to mesh
+						for (int i = 0; i < 6; ++i) {
+							int vert = indices[face][i];
+
+							float vx = x + faceVertices[face][vert * 3 + 0];
+							float vy = y + faceVertices[face][vert * 3 + 1];
+							float vz = z + faceVertices[face][vert * 3 + 2];
+
+							cachedMesh.push_back(vx + position.x);
+							cachedMesh.push_back(vy + position.y);
+							cachedMesh.push_back(vz + position.z);
+
+							cachedMesh.push_back(normals[face][0]);
+							cachedMesh.push_back(normals[face][1]);
+							cachedMesh.push_back(normals[face][2]);
+
+							int texIndex = voxel.type;
+							float u = (texIndex % (int)(TEXTURE_ATLAS_SIZE / 32)) * TEXTURE_SIZE;
+							float v = (texIndex / (int)(TEXTURE_ATLAS_SIZE / 32)) * TEXTURE_SIZE;
+
+							cachedMesh.push_back(u + texCoords[vert][0] * TEXTURE_SIZE);
+							cachedMesh.push_back(v + texCoords[vert][1] * TEXTURE_SIZE);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	meshNeedsUpdate = false;
+	VBONeedsUpdate = true;
+	state = ChunkState::MESHED;
 }

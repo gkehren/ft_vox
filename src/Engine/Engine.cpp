@@ -178,13 +178,47 @@ void	Engine::updateUI()
 
 	ImGui::Text("Screen size: %d x %d", this->windowWidth, this->windowHeight);
 
+	ImGui::Separator();
+
+	if (ImGui::CollapsingHeader("Performance")) {
+		if (ImGui::BeginTable("Performance", 2, ImGuiTableFlags_Borders)) {
+			ImGui::TableSetupColumn("Operation");
+			ImGui::TableSetupColumn("Time (ms)");
+			ImGui::TableHeadersRow();
+
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); ImGui::Text("Frustum culling");
+			ImGui::TableNextColumn(); ImGui::Text("%.2f", renderTiming.frustumCulling);
+
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); ImGui::Text("Chunk generation");
+			ImGui::TableNextColumn(); ImGui::Text("%.2f", renderTiming.chunkGeneration);
+
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); ImGui::Text("Mesh generation");
+			ImGui::TableNextColumn(); ImGui::Text("%.2f", renderTiming.meshGeneration);
+
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); ImGui::Text("Chunk rendering");
+			ImGui::TableNextColumn(); ImGui::Text("%.2f", renderTiming.chunkRendering);
+
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); ImGui::Text("Total frame");
+			ImGui::TableNextColumn(); ImGui::Text("%.2f", renderTiming.totalFrame);
+
+			ImGui::EndTable();
+		}
+	}
+
 	ImGui::End();
+
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
 void	Engine::render()
 {
+	auto startFrame = std::chrono::high_resolution_clock::now();
 	renderSettings.visibleChunksCount = 0;
 	renderSettings.visibleVoxelsCount = 0;
 
@@ -192,10 +226,12 @@ void	Engine::render()
 	//if (chunks.empty()) {
 	//	chunks.emplace(glm::ivec3(0, 0, 0), Chunk(glm::vec3(0.0f, 0.0f, 0.0f)));
 	//	chunks.begin()->second.generateVoxels(perlin.get());
+	//	chunks.begin()->second.generateMesh(chunks);
 	//	chunks.begin()->second.setVisible(true);
 	//	chunks.begin()->second.setState(ChunkState::MESHED);
 	//}
 
+	auto start = std::chrono::high_resolution_clock::now();
 	if (!renderSettings.paused) {
 		const glm::ivec2 newPlayerChunkPos{
 			static_cast<int>(std::floor(camera.getPosition().x / Chunk::SIZE)),
@@ -208,10 +244,13 @@ void	Engine::render()
 		}
 		frustumCulling();
 	}
+	auto end = std::chrono::high_resolution_clock::now();
+	renderTiming.frustumCulling = std::chrono::duration<float, std::milli>(end - start).count();
 
 	processChunkQueue();
 
 	// async chunk generation
+	start = std::chrono::high_resolution_clock::now();
 	{
 		std::vector<std::future<void>> futures;
 		for (auto& chunk : chunks) {
@@ -227,8 +266,30 @@ void	Engine::render()
 			future.wait();
 		}
 	}
+	end = std::chrono::high_resolution_clock::now();
+	renderTiming.chunkGeneration = std::chrono::duration<float, std::milli>(end - start).count();
+
+	// async mesh generation
+	start = std::chrono::high_resolution_clock::now();
+	{
+		std::vector<std::future<void>> futures;
+		for (auto& chunk : chunks) {
+			if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::GENERATED) {
+				futures.push_back(threadPool->enqueue([&chunk, this]() {
+					chunk.second.generateMesh(this->chunks);
+				}));
+			}
+		}
+
+		for (auto& future : futures) {
+			future.wait();
+		}
+	}
+	end = std::chrono::high_resolution_clock::now();
+	renderTiming.meshGeneration = std::chrono::duration<float, std::milli>(end - start).count();
 
 	// Render of visible chunks
+	start = std::chrono::high_resolution_clock::now();
 	for (auto& chunk : chunks) {
 		if (!chunk.second.isVisible() || chunk.second.getState() == ChunkState::UNLOADED) continue;
 
@@ -239,6 +300,8 @@ void	Engine::render()
 			renderer->drawBoundingBox(chunk.second, camera);
 		}
 	}
+	end = std::chrono::high_resolution_clock::now();
+	renderTiming.chunkRendering = std::chrono::duration<float, std::milli>(end - start).count();
 }
 
 void	Engine::updateChunks()
