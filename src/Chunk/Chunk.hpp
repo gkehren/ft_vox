@@ -17,11 +17,6 @@
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
 
-struct Voxel {
-	uint8_t type : 4; // 16 types (2^4 = 16)
-	uint8_t active : 1; // Is solid/air
-};
-
 class Chunk
 {
 	public:
@@ -47,15 +42,13 @@ class Chunk
 
 		Voxel&							getVoxel(uint32_t x, uint32_t y, uint32_t z);
 		const Voxel&					getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
-		void							setVoxel(uint32_t x, uint32_t y, uint32_t z, TextureType type);
-		void							updateVisibilityMask(uint32_t x, uint32_t y, uint32_t z);
-		bool							isVoxelVisible(uint32_t x, uint32_t y, uint32_t z);
+		void							setVoxel(int x, int y, int z, TextureType type);
 
 		bool							deleteVoxel(const glm::vec3& position, const glm::vec3& front);
 		bool							placeVoxel(const glm::vec3& position, const glm::vec3& front, TextureType type);
 
 		void	generateVoxels(siv::PerlinNoise* perlin);
-		void	generateMesh(const std::unordered_map<glm::ivec3, Chunk, ivec3_hash>& chunks);
+		void	generateMesh();
 
 	private:
 		glm::vec3	position;
@@ -64,8 +57,10 @@ class Chunk
 
 		// Stockage linéaire 3D des voxels
 		std::vector<Voxel> voxels;
-		// Cache des faces visibles pour accélérer le mesh generation
-		std::vector<uint32_t> visibleFacesMask;
+
+		// neighbours voxels
+		std::vector<Voxel> neighbours;
+		Voxel& getNeighbourVoxel(int x, int y, int z);
 
 		inline size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const {
 			return x + SIZE * (z + SIZE * y);

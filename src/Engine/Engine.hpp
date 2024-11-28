@@ -61,7 +61,6 @@ class Engine {
 		glm::ivec2							playerChunkPos;
 
 		static constexpr int DEFAULT_CHUNK_LOADED_MAX = 5;
-		static constexpr float FPS_UPDATE_INTERVAL = 1.0f;
 
 		struct RenderSettings {
 			bool	wireframeMode{false};

@@ -34,7 +34,7 @@ Engine::Engine()
 	}
 
 	glfwMakeContextCurrent(this->window);
-	glfwSwapInterval(0); // vsync
+	glfwSwapInterval(1); // vsync
 	glfwSetWindowUserPointer(this->window, &this->camera);
 	glfwSetInputMode(this->window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 	glfwSetCursorPosCallback(this->window, mouse_callback);
@@ -74,7 +74,7 @@ Engine::Engine()
 	this->renderSettings.chunkBorders = false;
 	this->renderSettings.visibleChunksCount = 0;
 	this->renderSettings.visibleVoxelsCount = 0;
-	this->renderSettings.chunkLoadedMax = 5;
+	this->renderSettings.chunkLoadedMax = 1;
 	this->selectedTexture = TEXTURE_PLANK;
 	this->renderSettings.paused = false;
 	this->renderSettings.perfMode = false;
@@ -275,8 +275,8 @@ void	Engine::render()
 		std::vector<std::future<void>> futures;
 		for (auto& chunk : chunks) {
 			if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::GENERATED) {
-				futures.push_back(threadPool->enqueue([&chunk, this]() {
-					chunk.second.generateMesh(this->chunks);
+				futures.push_back(threadPool->enqueue([&chunk]() {
+					chunk.second.generateMesh();
 				}));
 			}
 		}
@@ -344,7 +344,8 @@ void	Engine::processChunkQueue()
 		const auto pos = chunkGenerationQueue.front();
 		chunkGenerationQueue.pop();
 
-		chunks.emplace(pos, Chunk(glm::vec3(pos.x * Chunk::SIZE, 0.0f, pos.z * Chunk::SIZE)));
+		Chunk chunk(glm::vec3(pos.x * Chunk::SIZE, 0.0f, pos.z * Chunk::SIZE));
+		chunks.emplace(pos, std::move(chunk));
 		chunkCount++;
 	}
 }

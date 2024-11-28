@@ -18,6 +18,11 @@ struct ivec3_hash {
 	}
 };
 
+struct Voxel {
+	uint8_t type : 4; // 16 types (2^4 = 16)
+	uint8_t active : 1; // Is solid/air
+};
+
 enum TextureType {
 	TEXTURE_DEFAULT,
 	TEXTURE_STONE,
@@ -62,7 +67,6 @@ enum Face {
 enum ChunkState {
 	UNLOADED,
 	GENERATED,
-	REMESHED,
 	MESHED
 };
 
