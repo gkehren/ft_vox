@@ -6,10 +6,10 @@ Chunk::Chunk(const glm::vec3& position, ChunkState state)
 	, state(state)
 	, voxels(SIZE * SIZE * HEIGHT)
 	, neighbours(SIZE * HEIGHT * 4)
-	, meshNeedsUpdate(true)
-	, cachedMesh()
+	, VAO(0)
 	, VBO(0)
-	, VBONeedsUpdate(true)
+	, EBO(0)
+	, meshNeedsUpdate(true)
 {}
 
 Chunk::Chunk(Chunk&& other) noexcept
@@ -18,10 +18,10 @@ Chunk::Chunk(Chunk&& other) noexcept
 	, state(other.state)
 	, voxels(std::move(other.voxels))
 	, neighbours(std::move(other.neighbours))
-	, meshNeedsUpdate(other.meshNeedsUpdate)
-	, cachedMesh(std::move(other.cachedMesh))
+	, VAO(other.VAO)
 	, VBO(other.VBO)
-	, VBONeedsUpdate(other.VBONeedsUpdate)
+	, EBO(other.EBO)
+	, meshNeedsUpdate(other.meshNeedsUpdate)
 {}
 
 Chunk& Chunk::operator=(Chunk&& other) noexcept
@@ -32,12 +32,25 @@ Chunk& Chunk::operator=(Chunk&& other) noexcept
 		state = other.state;
 		voxels = std::move(other.voxels);
 		neighbours = std::move(other.neighbours);
-		meshNeedsUpdate = other.meshNeedsUpdate;
-		cachedMesh = std::move(other.cachedMesh);
+		VAO = other.VAO;
 		VBO = other.VBO;
-		VBONeedsUpdate = other.VBONeedsUpdate;
+		EBO = other.EBO;
+		meshNeedsUpdate = other.meshNeedsUpdate;
 	}
 	return *this;
+}
+
+Chunk::~Chunk()
+{
+	if (VAO != 0) {
+		glDeleteVertexArrays(1, &VAO);
+	}
+	if (VBO != 0) {
+		glDeleteBuffers(1, &VBO);
+	}
+	if (EBO != 0) {
+		glDeleteBuffers(1, &EBO);
+	}
 }
 
 const glm::vec3&	Chunk::getPosition() const
@@ -66,11 +79,6 @@ void	Chunk::setState(ChunkState state)
 ChunkState	Chunk::getState() const
 {
 	return state;
-}
-
-bool	Chunk::getMeshNeedsUpdate() const
-{
-	return meshNeedsUpdate;
 }
 
 Voxel&	Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z)
@@ -153,24 +161,6 @@ bool	Chunk::placeVoxel(const glm::vec3& position, const glm::vec3& front, Textur
 		return true;
 	}
 	return false;
-}
-
-const std::vector<float>&	Chunk::getMeshData()
-{
-	if (meshNeedsUpdate) {
-		//cachedMesh.clear();
-		state = ChunkState::GENERATED;
-		//generateMesh();
-		//if (cachedMesh.empty()) {
-		//	std::cout << "Warning: Mesh data is empty!" << std::endl;
-		//}
-
-		meshNeedsUpdate = false;
-		VBONeedsUpdate = true;
-		return cachedMesh;
-	}
-	state = ChunkState::MESHED;
-	return cachedMesh;
 }
 
 void	Chunk::generateVoxels(siv::PerlinNoise* perlin)
@@ -271,58 +261,12 @@ void	Chunk::generateChunk(siv::PerlinNoise* perlin)
 
 void Chunk::generateMesh()
 {
-	cachedMesh.clear();
-	cachedMesh.reserve(SIZE * SIZE * HEIGHT);
+	vertices.clear();
+	indices.clear();
 
-	// Directional offsets for neighbor voxels
-	static const glm::ivec3 directions[6] = {
-		{  0,  1,  0 }, // Up
-		{  0, -1,  0 }, // Down
-		{  0,  0,  1 }, // Front
-		{  0,  0, -1 }, // Back
-		{ -1,  0,  0 }, // Left
-		{  1,  0,  0 }  // Right
-	};
+	std::unordered_map<Vertex, uint32_t, VertexHasher> vertexMap;
+	uint32_t indexCounter = 0;
 
-	// Predefined face vertices for a cube
-	static const float faceVertices[6][12] = {
-		{ 0,1,0, 1,1,0, 1,1,1, 0,1,1 }, // Up
-		{ 0,0,0, 0,0,1, 1,0,1, 1,0,0 }, // Down
-		{ 0,0,1, 1,0,1, 1,1,1, 0,1,1 }, // Front
-		{ 0,0,0, 0,1,0, 1,1,0, 1,0,0 }, // Back
-		{ 0,0,0, 0,0,1, 0,1,1, 0,1,0 }, // Left
-		{ 1,0,0, 1,1,0, 1,1,1, 1,0,1 }  // Right
-	};
-
-	// Normals for each face
-	static const float normals[6][3] = {
-		{  0,  1,  0 }, // Up
-		{  0, -1,  0 }, // Down
-		{  0,  0,  1 }, // Front
-		{  0,  0, -1 }, // Back
-		{ -1,  0,  0 }, // Left
-		{  1,  0,  0 }  // Right
-	};
-
-	// Texture coordinates for a face
-	static const float texCoords[4][2] = {
-		{ 0.0f, 0.0f },
-		{ 1.0f, 0.0f },
-		{ 1.0f, 1.0f },
-		{ 0.0f, 1.0f }
-	};
-
-	const float TEXTURE_ATLAS_SIZE = 512.0f;
-	const float TEXTURE_SIZE = 32.0f / TEXTURE_ATLAS_SIZE;
-
-	static const int indices[6][6] = {
-		{ 0, 3, 2, 0, 2, 1 }, // Up
-		{ 0, 3, 2, 0, 2, 1 }, // Down
-		{ 0, 1, 2, 0, 2, 3 }, // Front
-		{ 0, 1, 2, 0, 2, 3 }, // Back
-		{ 0, 1, 2, 0, 2, 3 }, // Left
-		{ 0, 1, 2, 0, 2, 3 }  // Right
-	};
 
 	for (int x = 0; x < SIZE; ++x) {
 		for (int y = 0; y < HEIGHT; ++y) {
@@ -350,36 +294,117 @@ void Chunk::generateMesh()
 					}
 
 					if (isFaceVisible) {
-						// Add face to mesh
-						for (int i = 0; i < 6; ++i) {
-							int vert = indices[face][i];
+						uint32_t faceVertexIndices[4]; // Stocker les indices des sommets de la face
+						for (int i = 0; i < 4; ++i) {
+							Vertex vertex;
+							vertex.position = position + glm::vec3(x, y, z) + faceVertexOffsets[face][i];
+							vertex.normal = faceNormals[face];
 
-							float vx = x + faceVertices[face][vert * 3 + 0];
-							float vy = y + faceVertices[face][vert * 3 + 1];
-							float vz = z + faceVertices[face][vert * 3 + 2];
-
-							cachedMesh.push_back(vx + position.x);
-							cachedMesh.push_back(vy + position.y);
-							cachedMesh.push_back(vz + position.z);
-
-							cachedMesh.push_back(normals[face][0]);
-							cachedMesh.push_back(normals[face][1]);
-							cachedMesh.push_back(normals[face][2]);
-
+							// Calcul des coordonnées de texture
 							int texIndex = voxel.type;
 							float u = (texIndex % (int)(TEXTURE_ATLAS_SIZE / 32)) * TEXTURE_SIZE;
 							float v = (texIndex / (int)(TEXTURE_ATLAS_SIZE / 32)) * TEXTURE_SIZE;
+							vertex.texCoord = glm::vec2(
+								u + texCoords[i].x * TEXTURE_SIZE,
+								v + texCoords[i].y * TEXTURE_SIZE
+							);
 
-							cachedMesh.push_back(u + texCoords[vert][0] * TEXTURE_SIZE);
-							cachedMesh.push_back(v + texCoords[vert][1] * TEXTURE_SIZE);
+							// Vérifiez si le sommet existe déjà
+							auto it = vertexMap.find(vertex);
+							uint32_t vertexIndex;
+							if (it != vertexMap.end()) {
+								// Utilisez l'indice existant
+								vertexIndex = it->second;
+							} else {
+								// Ajoutez le nouveau sommet
+								vertices.push_back(vertex);
+								vertexIndex = indexCounter;
+								vertexMap[vertex] = indexCounter;
+								indexCounter++;
+							}
+							faceVertexIndices[i] = vertexIndex; // Stockez l'indice du sommet
 						}
+
+						indices.push_back(faceVertexIndices[0]);
+						indices.push_back(faceVertexIndices[1]);
+						indices.push_back(faceVertexIndices[2]);
+
+						indices.push_back(faceVertexIndices[0]);
+						indices.push_back(faceVertexIndices[2]);
+						indices.push_back(faceVertexIndices[3]);
 					}
 				}
 			}
 		}
 	}
 
-	meshNeedsUpdate = false;
-	VBONeedsUpdate = true;
+	meshNeedsUpdate = true;
 	state = ChunkState::MESHED;
+}
+
+void Chunk::uploadMeshToGPU()
+{
+	// Générer les buffers si nécessaire
+	if (VAO == 0) {
+		glGenVertexArrays(1, &VAO);
+	}
+	if (VBO == 0) {
+		glGenBuffers(1, &VBO);
+	}
+	if (EBO == 0) {
+		glGenBuffers(1, &EBO);
+	}
+
+	glBindVertexArray(VAO);
+
+	// Charger les données de sommets
+	glBindBuffer(GL_ARRAY_BUFFER, VBO);
+	glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
+
+	// Charger les indices
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t), indices.data(), GL_STATIC_DRAW);
+
+	// Configurer les attributs de sommets
+
+	// Position (location = 0)
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
+
+	// Normale (location = 1)
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
+
+	// Coordonnées de texture (location = 2)
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord));
+
+	glBindVertexArray(0);
+
+	meshNeedsUpdate = false;
+}
+
+uint32_t Chunk::draw(const Shader& shader, const Camera& camera, GLuint textureAtlas)
+{
+	if (meshNeedsUpdate) {
+		uploadMeshToGPU();
+	}
+
+	shader.use();
+
+	const auto& viewMatrix = camera.getViewMatrix();
+	const auto& projectionMatrix = camera.getProjectionMatrix(1920, 1080, 320);
+
+	shader.setMat4("view", viewMatrix);
+	shader.setMat4("projection", projectionMatrix);
+	shader.setInt("textureSampler", 0);
+	shader.setVec3("lightPos", camera.getPosition());
+
+	glBindTexture(GL_TEXTURE_2D, textureAtlas);
+
+	glBindVertexArray(VAO);
+	glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_SHORT, 0);
+	glBindVertexArray(0);
+
+	return indices.size();
 }

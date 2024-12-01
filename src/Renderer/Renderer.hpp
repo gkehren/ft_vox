@@ -18,7 +18,8 @@ class Renderer {
 		~Renderer();
 		void	setScreenSize(int screenWidth, int screenHeight);
 
-		int		draw(Chunk& chunk, const Shader& shader, const Camera& camera);
+		GLuint	getTextureAtlas() const { return textureAtlas; }
+
 		void	drawBoundingBox(const Chunk& chunk, const Camera& camera) const;
 		void	drawSkybox(const Camera& camera) const;
 
@@ -30,8 +31,6 @@ class Renderer {
 		GLuint	boundingBoxEBO;
 		void	initBoundingBox();
 
-		GLuint	VAO;
-		GLuint	VBO;
 		GLuint	textureAtlas;
 
 		std::unique_ptr<Shader>	skyboxShader;

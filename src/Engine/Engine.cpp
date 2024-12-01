@@ -293,7 +293,7 @@ void	Engine::render()
 	for (auto& chunk : chunks) {
 		if (!chunk.second.isVisible() || chunk.second.getState() == ChunkState::UNLOADED) continue;
 
-		renderSettings.visibleVoxelsCount += renderer->draw(chunk.second, *shader, camera);
+		renderSettings.visibleVoxelsCount += chunk.second.draw(*shader, camera, renderer->getTextureAtlas());
 		renderSettings.visibleChunksCount++;
 
 		if (renderSettings.chunkBorders) {

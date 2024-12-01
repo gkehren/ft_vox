@@ -46,27 +46,6 @@ Renderer::Renderer(int screenWidth, int screenHeight, float renderDistance) : sc
 
 	this->initBoundingBox();
 
-	glGenVertexArrays(1, &this->VAO);
-	glGenBuffers(1, &this->VBO);
-
-	glBindVertexArray(this->VAO);
-	glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
-
-	// X, Y, Z, NX, NY, NZ, U, V
-	// Position
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-	glEnableVertexAttribArray(0);
-
-	// Normal
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-	glEnableVertexAttribArray(1);
-
-	// Texture
-	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
-	glEnableVertexAttribArray(2);
-
-	glBindVertexArray(0);
-
 	// Textures
 	this->textureAtlas = loadTexture((path + "textures/terrain.png").c_str());
 
@@ -78,8 +57,6 @@ Renderer::~Renderer()
 	glDeleteVertexArrays(1, &this->skyboxVAO);
 	glDeleteBuffers(1, &this->skyboxVBO);
 	glDeleteTextures(1, &this->skyboxTexture);
-	glDeleteVertexArrays(1, &this->VAO);
-	glDeleteBuffers(1, &this->VBO);
 	glDeleteTextures(1, &this->textureAtlas);
 	glDeleteVertexArrays(1, &this->boundingBoxVAO);
 	glDeleteBuffers(1, &this->boundingBoxVBO);
@@ -142,51 +119,6 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Camera& camera) const
 
 	glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, 0);
 	glBindVertexArray(0);
-}
-
-int	Renderer::draw(Chunk& chunk, const Shader& shader, const Camera& camera)
-{
-	shader.use();
-
-	const auto& viewMatrix = camera.getViewMatrix();
-	const auto& projectionMatrix = camera.getProjectionMatrix(1920, 1080, 320);
-
-	shader.setMat4("view", viewMatrix);
-	shader.setMat4("projection", projectionMatrix);
-	shader.setInt("textureSampler", 0);
-	shader.setVec3("lightPos", camera.getPosition());
-
-	glBindTexture(GL_TEXTURE_2D, this->textureAtlas);
-
-	const auto& data = chunk.getMeshData();
-	if (data.empty())
-		return (0);
-
-	glBindVertexArray(this->VAO);
-	if (chunk.VBO == 0 || chunk.VBONeedsUpdate)
-	{
-		glGenBuffers(1, &chunk.VBO);
-		glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
-		glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STATIC_DRAW);
-		chunk.VBONeedsUpdate = false;
-	}
-	else
-	{
-		glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
-	}
-
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-	glEnableVertexAttribArray(2);
-	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
-
-	const size_t vertexCount = data.size() / 8;
-	glDrawArrays(GL_TRIANGLES, 0, vertexCount);
-
-	glBindVertexArray(0);
-	return (vertexCount);
 }
 
 void	Renderer::loadSkybox()

@@ -24,22 +24,16 @@ class Chunk
 		static constexpr int HEIGHT = 256;
 		static constexpr float RADIUS = 16.0f;
 
-		GLuint	VBO;
-		bool	VBONeedsUpdate;
-
 		Chunk(const glm::vec3& position, ChunkState state = ChunkState::UNLOADED);
 		Chunk(Chunk&& other) noexcept;
 		Chunk& operator=(Chunk&& other) noexcept;
-		~Chunk() = default;
+		~Chunk();
 
 		const glm::vec3&				getPosition() const;
-		const std::vector<float>&		getMeshData();
 		bool							isVisible() const;
 		void							setVisible(bool visible);
 		void							setState(ChunkState state);
 		ChunkState						getState() const;
-		bool							getMeshNeedsUpdate() const;
-
 		Voxel&							getVoxel(uint32_t x, uint32_t y, uint32_t z);
 		const Voxel&					getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
 		void							setVoxel(int x, int y, int z, TextureType type);
@@ -47,8 +41,9 @@ class Chunk
 		bool							deleteVoxel(const glm::vec3& position, const glm::vec3& front);
 		bool							placeVoxel(const glm::vec3& position, const glm::vec3& front, TextureType type);
 
-		void	generateVoxels(siv::PerlinNoise* perlin);
-		void	generateMesh();
+		uint32_t	draw(const Shader& shader, const Camera& camera, GLuint textureAtlas);
+		void		generateVoxels(siv::PerlinNoise* perlin);
+		void		generateMesh();
 
 	private:
 		glm::vec3	position;
@@ -66,8 +61,15 @@ class Chunk
 			return x + SIZE * (z + SIZE * y);
 		}
 
-		std::vector<float>		cachedMesh;
+		GLuint	VAO;
+		GLuint	VBO;
+		GLuint	EBO;
+
+		//std::vector<float>		cachedMesh;
+		std::vector<Vertex>		vertices;
+		std::vector<uint16_t>	indices;
 		bool					meshNeedsUpdate;
+		void					uploadMeshToGPU();
 
 		void	generateChunk(siv::PerlinNoise* perlin);
 };
