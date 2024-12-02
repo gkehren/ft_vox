@@ -4,8 +4,6 @@ Chunk::Chunk(const glm::vec3& position, ChunkState state)
 	: position(position)
 	, visible(false)
 	, state(state)
-	, voxels(SIZE * SIZE * HEIGHT)
-	, neighbours(SIZE * HEIGHT * 4)
 	, VAO(0)
 	, VBO(0)
 	, EBO(0)
@@ -17,7 +15,6 @@ Chunk::Chunk(Chunk&& other) noexcept
 	, visible(other.visible)
 	, state(other.state)
 	, voxels(std::move(other.voxels))
-	, neighbours(std::move(other.neighbours))
 	, VAO(other.VAO)
 	, VBO(other.VBO)
 	, EBO(other.EBO)
@@ -31,7 +28,6 @@ Chunk& Chunk::operator=(Chunk&& other) noexcept
 		visible = other.visible;
 		state = other.state;
 		voxels = std::move(other.voxels);
-		neighbours = std::move(other.neighbours);
 		VAO = other.VAO;
 		VBO = other.VBO;
 		EBO = other.EBO;
@@ -91,43 +87,39 @@ const Voxel&	Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
 	return voxels[getIndex(x, y, z)];
 }
 
-Voxel& Chunk::getNeighbourVoxel(int x, int y, int z)
+size_t	Chunk::getNeighbourIndex(int x, int y, int z) const
 {
-	// std::vector<Voxel> neighbours; 3D linear storage of the voxels in direction of the neighbors
-	// neighbours.reserve(SIZE * HEIGHT * 4); // 4 neighbors in 2D plane (left, right, front, back) for each height level (y) in the chunk
-	const int directionSize = SIZE * HEIGHT; // 16 * 256 = 4096
 	if (x < 0) {
-		// Left neighbor
-		int idx = y * SIZE + z; // Index within the left neighbor
-		return neighbours[idx];
+		return y * SIZE + z;
 	} else if (x >= SIZE) {
-		// Right neighbor
-		int idx = directionSize + y * SIZE + z; // Offset by directionSize (4096)
-		return neighbours[idx];
+		return SIZE * HEIGHT + y * SIZE + z;
 	} else if (z < 0) {
-		// Front neighbor
-		int idx = 2 * directionSize + y * SIZE + x; // Offset by 2 * directionSize
-		return neighbours[idx];
+		return 2 * SIZE * HEIGHT + y * SIZE + x;
 	} else if (z >= SIZE) {
-		// Back neighbor
-		int idx = 3 * directionSize + y * SIZE + x; // Offset by 3 * directionSize
-		return neighbours[idx];
+		return 3 * SIZE * HEIGHT + y * SIZE + x;
 	} else {
-		std::cout << "Warning: getNeighbourVoxel called with invalid coordinates!" << std::endl;
-		return getVoxel(x, y, z);
+		std::cout << "Warning: getNeighbourIndex called with invalid coordinates!" << std::endl;
+		return 0;
 	}
 }
 
 void	Chunk::setVoxel(int x, int y, int z, TextureType type)
 {
 	if (x < 0 || x >= SIZE || y < 0 || y >= HEIGHT || z < 0 || z >= SIZE) {
-		Voxel& neighbour = getNeighbourVoxel(x, y, z);
-		neighbour.type = static_cast<uint8_t>(type);
-		neighbour.active = type != TEXTURE_AIR;
+		size_t index = getNeighbourIndex(x, y, z);
+		if (type != TEXTURE_AIR) {
+			neighboursActiveMap.set(index);
+		} else {
+			neighboursActiveMap.reset(index);
+		}
 	} else {
-		Voxel& voxel = getVoxel(x, y, z);
-		voxel.type = static_cast<uint8_t>(type);
-		voxel.active = type != TEXTURE_AIR;
+		size_t index = getIndex(x, y, z);
+		voxels[index].type = static_cast<uint8_t>(type);
+		if (type != TEXTURE_AIR) {
+			activeVoxels.set(index);
+		} else {
+			activeVoxels.reset(index);
+		}
 	}
 }
 
@@ -138,7 +130,7 @@ bool	Chunk::deleteVoxel(const glm::vec3& position, const glm::vec3& front)
 	uint32_t y = static_cast<uint32_t>(target.y - this->position.y);
 	uint32_t z = static_cast<uint32_t>(target.z - this->position.z);
 
-	if (getVoxel(x, y, z).active) {
+	if (isVoxelActive(x, y, z)) {
 		setVoxel(x, y, z, TEXTURE_AIR);
 		meshNeedsUpdate = true;
 		state = ChunkState::GENERATED;
@@ -154,13 +146,24 @@ bool	Chunk::placeVoxel(const glm::vec3& position, const glm::vec3& front, Textur
 	uint32_t y = static_cast<uint32_t>(target.y - this->position.y);
 	uint32_t z = static_cast<uint32_t>(target.z - this->position.z);
 
-	if (!getVoxel(x, y, z).active) {
+	if (!isVoxelActive(x, y, z)) {
 		setVoxel(x, y, z, type);
 		meshNeedsUpdate = true;
 		state = ChunkState::GENERATED;
 		return true;
 	}
 	return false;
+}
+
+bool	Chunk::isVoxelActive(int x, int y, int z) const
+{
+	if (x < 0 || x >= SIZE || y < 0 || y >= HEIGHT || z < 0 || z >= SIZE) {
+		size_t index = getNeighbourIndex(x, y, z);
+		return neighboursActiveMap.test(index);
+	} else {
+		size_t index = getIndex(x, y, z);
+		return activeVoxels.test(index);
+	}
 }
 
 void	Chunk::generateVoxels(siv::PerlinNoise* perlin)
@@ -186,11 +189,13 @@ void	Chunk::generateChunk(siv::PerlinNoise* perlin)
 				continue;
 			}
 			// Generate Perlin noise values at different scales
-			float noise1 = perlin->noise2D_01((position.x + x) / 200.0f, (position.z + z) / 200.0f) * 1.5f;
-			float noise2 = perlin->noise2D_01((position.x + x) / 50.0f, (position.z + z) / 50.0f) * 0.5f;
-			float noise3 = perlin->noise2D_01((position.x + x) / 25.0f, (position.z + z) / 25.0f) * 0.2f;
-			float mountainNoise = perlin->noise2D_01((position.x + x) / 500.0f, (position.z + z) / 500.0f); // New noise layer for mountains
-			float biomeNoise = perlin->noise2D_01((position.x + x) / 250.0f, (position.z + z) / 250.0f); // New noise layer for biomes
+			int absX = x + position.x;
+			int absZ = z + position.z;
+			float noise1 = perlin->noise2D_01((absX) / 200.0f, (absZ) / 200.0f) * 1.5f;
+			float noise2 = perlin->noise2D_01((absX) / 50.0f, (absZ) / 50.0f) * 0.5f;
+			float noise3 = perlin->noise2D_01((absX) / 25.0f, (absZ) / 25.0f) * 0.2f;
+			float mountainNoise = perlin->noise2D_01((absX) / 500.0f, (absZ) / 500.0f); // New noise layer for mountains
+			float biomeNoise = perlin->noise2D_01((absX) / 250.0f, (absZ) / 250.0f); // New noise layer for biomes
 
 			TextureType biomeType;
 			if (biomeNoise < 0.2f) {
@@ -208,7 +213,8 @@ void	Chunk::generateChunk(siv::PerlinNoise* perlin)
 			}
 
 			// Combine the Perlin noise values to determine the surface height at this point
-			int baseHeight = static_cast<int>((noise1 + noise2 + noise3) * Chunk::HEIGHT / 4);
+			//int baseHeight = static_cast<int>((noise1 + noise2 + noise3) * Chunk::HEIGHT / 4);
+			int baseHeight = static_cast<int>((noise1 + noise2 + noise3) * 64);
 
 			// Adjust height for mountains
 			int mountainHeight = static_cast<int>(mountainNoise * 128); // Increased impact for higher mountains
@@ -267,12 +273,10 @@ void Chunk::generateMesh()
 	std::unordered_map<Vertex, uint32_t, VertexHasher> vertexMap;
 	uint32_t indexCounter = 0;
 
-
 	for (int x = 0; x < SIZE; ++x) {
 		for (int y = 0; y < HEIGHT; ++y) {
 			for (int z = 0; z < SIZE; ++z) {
-				Voxel& voxel = getVoxel(x, y, z);
-				if (!voxel.active) continue;
+				if (!isVoxelActive(x, y, z)) continue;
 
 				for (int face = 0; face < 6; ++face) {
 					glm::ivec3 neighborPos = glm::ivec3{ x, y, z } + directions[face];
@@ -282,12 +286,10 @@ void Chunk::generateMesh()
 					if (neighborPos.x >= 0 && neighborPos.x < SIZE &&
 						neighborPos.y >= 0 && neighborPos.y < HEIGHT &&
 						neighborPos.z >= 0 && neighborPos.z < SIZE) {
-						Voxel& neighborVoxel = getVoxel(neighborPos.x, neighborPos.y, neighborPos.z);
-						isFaceVisible = !neighborVoxel.active;
+						isFaceVisible = !isVoxelActive(neighborPos.x, neighborPos.y, neighborPos.z);
 					} else {
 						if (neighborPos.y >= 0 && neighborPos.y < HEIGHT) {
-							Voxel& neighborVoxel = getNeighbourVoxel(neighborPos.x, neighborPos.y, neighborPos.z);
-							isFaceVisible = !neighborVoxel.active;
+							isFaceVisible = !isVoxelActive(neighborPos.x, neighborPos.y, neighborPos.z);
 						} else {
 							isFaceVisible = true;
 						}
@@ -301,7 +303,7 @@ void Chunk::generateMesh()
 							vertex.normal = faceNormals[face];
 
 							// Calcul des coordonnées de texture
-							int texIndex = voxel.type;
+							int texIndex = getVoxel(x, y, z).type;
 							float u = (texIndex % (int)(TEXTURE_ATLAS_SIZE / 32)) * TEXTURE_SIZE;
 							float v = (texIndex / (int)(TEXTURE_ATLAS_SIZE / 32)) * TEXTURE_SIZE;
 							vertex.texCoord = glm::vec2(

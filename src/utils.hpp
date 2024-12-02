@@ -20,7 +20,6 @@ struct ivec3_hash {
 
 struct Voxel {
 	uint8_t type : 4; // 16 types (2^4 = 16)
-	uint8_t active : 1; // Is solid/air
 };
 
 struct Vertex {

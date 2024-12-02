@@ -85,7 +85,6 @@ void	Renderer::setScreenSize(int screenWidth, int screenHeight)
 {
 	this->screenWidth = screenWidth;
 	this->screenHeight = screenHeight;
-	this->renderDistance = renderDistance;
 }
 
 void	Renderer::drawBoundingBox(const Chunk& chunk, const Camera& camera) const

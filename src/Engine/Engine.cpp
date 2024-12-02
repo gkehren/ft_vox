@@ -52,8 +52,8 @@ Engine::Engine()
 
 	std::string path = RES_PATH + std::string("shaders/");
 	this->shader = std::make_unique<Shader>((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
-	this->renderSettings.minRenderDistance = 224;
-	this->renderSettings.maxRenderDistance = 320;
+	this->renderSettings.minRenderDistance = 320; // 224
+	this->renderSettings.maxRenderDistance = 320; // 320
 	this->renderer = std::make_unique<Renderer>(windowWidth, windowHeight, this->renderSettings.maxRenderDistance);
 	this->camera.setWindow(this->window);
 	this->playerChunkPos = glm::ivec2(-1, -1);
@@ -74,12 +74,13 @@ Engine::Engine()
 	this->renderSettings.chunkBorders = false;
 	this->renderSettings.visibleChunksCount = 0;
 	this->renderSettings.visibleVoxelsCount = 0;
-	this->renderSettings.chunkLoadedMax = 1;
+	this->renderSettings.chunkLoadedMax = 3;
 	this->selectedTexture = TEXTURE_PLANK;
 	this->renderSettings.paused = false;
 	this->renderSettings.perfMode = false;
 
-	this->threadPool = std::make_unique<ThreadPool>(std::thread::hardware_concurrency());
+	uint32_t threadCount = std::thread::hardware_concurrency() / 2;
+	this->threadPool = std::make_unique<ThreadPool>(threadCount);
 
 	std::cout << "GLFW version: " << glfwGetVersionString() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -87,7 +88,7 @@ Engine::Engine()
 	std::cout << "Vendor: " << glGetString(GL_VENDOR) << std::endl;
 	std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
 	std::cout << "ImGui version: " << IMGUI_VERSION << std::endl;
-	std::cout << "Threads: " << std::thread::hardware_concurrency() << std::endl;
+	std::cout << "Threads: " << threadCount << std::endl;
 }
 
 Engine::~Engine()
@@ -260,6 +261,11 @@ void	Engine::render()
 					chunk.second.generateVoxels(perlinPtr);
 				}));
 			}
+			//else if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::GENERATED) {
+			//	futures.push_back(threadPool->enqueue([&chunk]() {
+			//		chunk.second.generateMesh();
+			//	}));
+			//}
 		}
 
 		for (auto& future : futures) {

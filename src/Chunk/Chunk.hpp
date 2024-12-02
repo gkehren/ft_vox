@@ -6,6 +6,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <array>
+#include <bitset>
 #include <thread>
 #include <mutex>
 #include <unordered_map>
@@ -51,11 +52,14 @@ class Chunk
 		ChunkState	state;
 
 		// Stockage linéaire 3D des voxels
-		std::vector<Voxel> voxels;
+		std::array<Voxel, SIZE * HEIGHT * SIZE>	voxels;
+		std::bitset<SIZE * HEIGHT * SIZE>		activeVoxels;
+		bool isVoxelActive(int x, int y, int z) const;
 
 		// neighbours voxels
-		std::vector<Voxel> neighbours;
+		std::bitset<SIZE * HEIGHT * 4>			neighboursActiveMap;
 		Voxel& getNeighbourVoxel(int x, int y, int z);
+		size_t getNeighbourIndex(int x, int y, int z) const;
 
 		inline size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const {
 			return x + SIZE * (z + SIZE * y);
@@ -65,7 +69,6 @@ class Chunk
 		GLuint	VBO;
 		GLuint	EBO;
 
-		//std::vector<float>		cachedMesh;
 		std::vector<Vertex>		vertices;
 		std::vector<uint16_t>	indices;
 		bool					meshNeedsUpdate;
