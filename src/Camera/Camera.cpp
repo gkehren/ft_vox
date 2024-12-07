@@ -35,12 +35,12 @@ float	Camera::getMovementSpeed() const
 	return this->movementSpeed;
 }
 
-void	Camera::processKeyboard(float deltaTime)
+void	Camera::processKeyboard(double deltaTime)
 {
 	if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
 		glfwSetWindowShouldClose(window, true);
 
-	float velocity = movementSpeed * deltaTime;
+	float velocity = movementSpeed * static_cast<float>(deltaTime);
 
 	if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
 		position += glm::normalize(glm::vec3(front.x, 0.0f, front.z)) * velocity;

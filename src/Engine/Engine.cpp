@@ -111,7 +111,7 @@ void	Engine::run()
 	bool keyTPressed = false;
 
 	while (!glfwWindowShouldClose(this->window)) {
-		float currentFrame = glfwGetTime();
+		double currentFrame = glfwGetTime();
 		this->deltaTime = currentFrame - lastFrame;
 		this->lastFrame = currentFrame;
 		this->frameCount++;
@@ -338,18 +338,16 @@ void	Engine::processChunkQueue()
 	std::lock_guard<std::mutex> lock(chunkMutex);
 	int chunkCount = 0;
 	while (!chunkGenerationQueue.empty() && chunkCount < renderSettings.chunkLoadedMax) {
-		const auto pos = chunkGenerationQueue.front();
+		const glm::ivec3 pos = chunkGenerationQueue.front();
 		chunkGenerationQueue.pop();
-
-		Chunk chunk(glm::vec3(pos.x * Chunk::SIZE, 0.0f, pos.z * Chunk::SIZE));
-		chunks.emplace(pos, std::move(chunk));
+		chunks.emplace(pos, std::move(Chunk(glm::vec3(pos.x * Chunk::SIZE, 0.0f, pos.z * Chunk::SIZE))));
 		chunkCount++;
 	}
 }
 
 void	Engine::frustumCulling()
 {
-	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(windowWidth, windowHeight, renderSettings.maxRenderDistance) * this->camera.getViewMatrix();
+	glm::mat4	clipMatrix = this->camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), static_cast<float>(renderSettings.maxRenderDistance)) * this->camera.getViewMatrix();
 	std::array<glm::vec4, 6>	frustumPlanes;
 
 	frustumPlanes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0); // Left
@@ -386,10 +384,10 @@ void	Engine::frustumCulling()
 	}
 }
 
-bool	Engine::isVoxelActive(int x, int y, int z) const
+bool	Engine::isVoxelActive(float x, float y, float z) const
 {
-	int chunkX = static_cast<int>(std::floor(static_cast<float>(x) / Chunk::SIZE));
-	int chunkZ = static_cast<int>(std::floor(static_cast<float>(z) / Chunk::SIZE));
+	int chunkX = static_cast<int>(std::floor(x / Chunk::SIZE));
+	int chunkZ = static_cast<int>(std::floor(z / Chunk::SIZE));
 	auto chunkIt = chunks.find(glm::ivec3(chunkX, 0, chunkZ));
 	if (chunkIt != chunks.end()) {
 		return chunkIt->second.isVoxelActiveGlobalPos(x, y, z);
@@ -454,9 +452,9 @@ void	Engine::handleInput(bool& keyTPressed)
 
 	if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
 		glm::vec3 hitPos, prevPos;
-		if (raycast(camera.getPosition(), camera.getFront(), renderSettings.raycastDistance, hitPos, prevPos)) {
-			int chunkX = static_cast<int>(std::floor(static_cast<float>(hitPos.x) / Chunk::SIZE));
-			int chunkZ = static_cast<int>(std::floor(static_cast<float>(hitPos.z) / Chunk::SIZE));
+		if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(renderSettings.raycastDistance), hitPos, prevPos)) {
+			int chunkX = static_cast<int>(std::floor(hitPos.x / Chunk::SIZE));
+			int chunkZ = static_cast<int>(std::floor(hitPos.z / Chunk::SIZE));
 			auto chunkIt = chunks.find(glm::ivec3(chunkX, 0, chunkZ));
 			if (chunkIt != chunks.end()) {
 				if (chunkIt->second.deleteVoxel(hitPos)) {
@@ -467,9 +465,9 @@ void	Engine::handleInput(bool& keyTPressed)
 	}
 	if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
 		glm::vec3 hitPos, prevPos;
-		if (raycast(camera.getPosition(), camera.getFront(), renderSettings.raycastDistance, hitPos, prevPos)) {
-			int chunkX = static_cast<int>(std::floor(static_cast<float>(prevPos.x) / Chunk::SIZE));
-			int chunkZ = static_cast<int>(std::floor(static_cast<float>(prevPos.z) / Chunk::SIZE));
+		if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(renderSettings.raycastDistance), hitPos, prevPos)) {
+			int chunkX = static_cast<int>(std::floor(prevPos.x / Chunk::SIZE));
+			int chunkZ = static_cast<int>(std::floor(prevPos.z / Chunk::SIZE));
 			auto chunkIt = chunks.find(glm::ivec3(chunkX, 0, chunkZ));
 			if (chunkIt != chunks.end()) {
 				if (chunkIt->second.placeVoxel(prevPos, selectedTexture)) {

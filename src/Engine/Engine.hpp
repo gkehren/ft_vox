@@ -46,11 +46,11 @@ class Engine {
 		GLFWmonitor*			monitor;
 		const GLFWvidmode*		mode;
 
-		float					deltaTime;
-		float					lastFrame;
-		float					frameCount;
-		float					lastTime;
-		float					fps;
+		double					deltaTime;
+		double					lastFrame;
+		double					frameCount;
+		double					lastTime;
+		double					fps;
 
 		std::unique_ptr<Shader>				shader;
 		std::unique_ptr<Renderer>			renderer;
@@ -97,7 +97,7 @@ class Engine {
 		void	render();
 		void	frustumCulling();
 
-		bool	isVoxelActive(int x, int y, int z) const;
+		bool	isVoxelActive(float x, float y, float z) const;
 		bool	raycast(const glm::vec3& origin, const glm::vec3& direction, float maxDistance, glm::vec3& hitPosition, glm::vec3& previousPosition);
 };
 

@@ -17,7 +17,7 @@ class Camera {
 		glm::vec3	getFront() const;
 		float		getMovementSpeed() const;
 
-		void		processKeyboard(float deltaTime);
+		void		processKeyboard(double deltaTime);
 		void		processMouseMovement(float xoffset, float yoffset, GLboolean constrainPitch = true);
 
 	private:
