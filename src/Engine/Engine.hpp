@@ -60,18 +60,17 @@ class Engine {
 		Camera								camera;
 		glm::ivec2							playerChunkPos;
 
-		static constexpr int DEFAULT_CHUNK_LOADED_MAX = 5;
 
 		struct RenderSettings {
 			bool	wireframeMode{false};
 			bool	chunkBorders{false};
 			bool	paused{false};
-			bool	perfMode{false};
 			int		visibleChunksCount{0};
 			int		visibleVoxelsCount{0};
-			int		chunkLoadedMax{DEFAULT_CHUNK_LOADED_MAX};
-			int		minRenderDistance{224};
+			int		chunkLoadedMax{5};
+			int		minRenderDistance{320};
 			int		maxRenderDistance{320};
+			int		raycastDistance{8};
 		} renderSettings;
 
 		struct RenderTiming {
@@ -97,6 +96,9 @@ class Engine {
 
 		void	render();
 		void	frustumCulling();
+
+		bool	isVoxelActive(int x, int y, int z) const;
+		bool	raycast(const glm::vec3& origin, const glm::vec3& direction, float maxDistance, glm::vec3& hitPosition, glm::vec3& previousPosition);
 };
 
 void	mouse_callback(GLFWwindow* window, double xpos, double ypos);

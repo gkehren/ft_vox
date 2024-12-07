@@ -54,6 +54,10 @@ const glm::vec3&	Chunk::getPosition() const
 	return position;
 }
 
+size_t Chunk::getIndex(uint32_t x, uint32_t y, uint32_t z) const {
+	return x + SIZE * (z + SIZE * y);
+}
+
 bool	Chunk::isVisible() const
 {
 	return visible;
@@ -123,12 +127,13 @@ void	Chunk::setVoxel(int x, int y, int z, TextureType type)
 	}
 }
 
-bool	Chunk::deleteVoxel(const glm::vec3& position, const glm::vec3& front)
+bool	Chunk::deleteVoxel(const glm::vec3& position)
 {
-	glm::vec3 target = position + front * 0.5f;
-	uint32_t x = static_cast<uint32_t>(target.x - this->position.x);
-	uint32_t y = static_cast<uint32_t>(target.y - this->position.y);
-	uint32_t z = static_cast<uint32_t>(target.z - this->position.z);
+	int x = static_cast<int>(position.x - this->position.x);
+	int y = static_cast<int>(position.y - this->position.y);
+	int z = static_cast<int>(position.z - this->position.z);
+	if (x < 0) x += SIZE;
+	if (z < 0) z += SIZE;
 
 	if (isVoxelActive(x, y, z)) {
 		setVoxel(x, y, z, TEXTURE_AIR);
@@ -139,12 +144,13 @@ bool	Chunk::deleteVoxel(const glm::vec3& position, const glm::vec3& front)
 	return false;
 }
 
-bool	Chunk::placeVoxel(const glm::vec3& position, const glm::vec3& front, TextureType type)
+bool	Chunk::placeVoxel(const glm::vec3& position, TextureType type)
 {
-	glm::vec3 target = position + front * 0.5f;
-	uint32_t x = static_cast<uint32_t>(target.x - this->position.x);
-	uint32_t y = static_cast<uint32_t>(target.y - this->position.y);
-	uint32_t z = static_cast<uint32_t>(target.z - this->position.z);
+	int x = static_cast<int>(position.x - this->position.x);
+	int y = static_cast<int>(position.y - this->position.y);
+	int z = static_cast<int>(position.z - this->position.z);
+	if (x < 0) x += SIZE;
+	if (z < 0) z += SIZE;
 
 	if (!isVoxelActive(x, y, z)) {
 		setVoxel(x, y, z, type);
@@ -164,6 +170,15 @@ bool	Chunk::isVoxelActive(int x, int y, int z) const
 		size_t index = getIndex(x, y, z);
 		return activeVoxels.test(index);
 	}
+}
+
+bool	Chunk::isVoxelActiveGlobalPos(int x, int y, int z) const
+{
+	int localX = x - static_cast<int>(position.x);
+	int localY = y - static_cast<int>(position.y);
+	int localZ = z - static_cast<int>(position.z);
+
+	return isVoxelActive(localX, localY, localZ);
 }
 
 void	Chunk::generateVoxels(siv::PerlinNoise* perlin)
@@ -255,9 +270,6 @@ void	Chunk::generateChunk(siv::PerlinNoise* perlin)
 				} else {
 					if (surfaceHeight <= 1 && y == 0) {
 						setVoxel(x, y, z, biomeType);
-					} else {
-						// This voxel is above the surface, so fill it with air
-						setVoxel(x, y, z, TEXTURE_AIR);
 					}
 				}
 			}

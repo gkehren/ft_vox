@@ -2,7 +2,7 @@
 
 #define FULLSCREEN 1 // 0 = fullscreen, 1 = windowed, 2 = borderless
 
-Engine::Engine()
+Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f), lastTime(0.0f)
 {
 	if (!glfwInit()) {
 		throw std::runtime_error("Failed to initialize GLFW");
@@ -52,8 +52,6 @@ Engine::Engine()
 
 	std::string path = RES_PATH + std::string("shaders/");
 	this->shader = std::make_unique<Shader>((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
-	this->renderSettings.minRenderDistance = 320; // 224
-	this->renderSettings.maxRenderDistance = 320; // 320
 	this->renderer = std::make_unique<Renderer>(windowWidth, windowHeight, this->renderSettings.maxRenderDistance);
 	this->camera.setWindow(this->window);
 	this->playerChunkPos = glm::ivec2(-1, -1);
@@ -70,14 +68,7 @@ Engine::Engine()
 
 	this->textRenderer = std::make_unique<TextRenderer>(RES_PATH + std::string("fonts/FiraCode.ttf"), glm::ortho(0.0f, static_cast<float>(windowWidth), 0.0f, static_cast<float>(windowHeight)));
 
-	this->renderSettings.wireframeMode = false;
-	this->renderSettings.chunkBorders = false;
-	this->renderSettings.visibleChunksCount = 0;
-	this->renderSettings.visibleVoxelsCount = 0;
-	this->renderSettings.chunkLoadedMax = 3;
 	this->selectedTexture = TEXTURE_PLANK;
-	this->renderSettings.paused = false;
-	this->renderSettings.perfMode = false;
 
 	uint32_t threadCount = std::thread::hardware_concurrency() / 2;
 	this->threadPool = std::make_unique<ThreadPool>(threadCount);
@@ -165,6 +156,7 @@ void	Engine::updateUI()
 	ImGui::Text("Player chunk: (%d, %d)", this->playerChunkPos.x, this->playerChunkPos.y);
 	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
 	ImGui::Text("Selected texture: %s (%d)", textureTypeString.at(this->selectedTexture).c_str(), this->selectedTexture);
+	ImGui::InputInt("Raycast distance", &this->renderSettings.raycastDistance);
 
 	ImGui::Checkbox("Wireframe", &this->renderSettings.wireframeMode);
 	if (this->renderSettings.wireframeMode) {
@@ -175,7 +167,6 @@ void	Engine::updateUI()
 	ImGui::Checkbox("Chunk borders", &this->renderSettings.chunkBorders);
 	ImGui::InputInt("Chunk loaded max", &this->renderSettings.chunkLoadedMax);
 	ImGui::Checkbox("Pause", &this->renderSettings.paused);
-	ImGui::Checkbox("Performance mode", &this->renderSettings.perfMode);
 
 	ImGui::Text("Screen size: %d x %d", this->windowWidth, this->windowHeight);
 
@@ -314,7 +305,7 @@ void	Engine::updateChunks()
 {
 	const glm::ivec3 cameraChunkPos{playerChunkPos.x, 0, playerChunkPos.y};
 	const float minDistance = static_cast<float>(renderSettings.minRenderDistance) / Chunk::SIZE - 1.0f;
-	const float maxDistance = renderSettings.perfMode ? minDistance : static_cast<float>(renderSettings.maxRenderDistance) / Chunk::SIZE;
+	const float maxDistance = static_cast<float>(renderSettings.maxRenderDistance) / Chunk::SIZE;
 
 	// Clean up far chunks
 	{
@@ -395,6 +386,61 @@ void	Engine::frustumCulling()
 	}
 }
 
+bool	Engine::isVoxelActive(int x, int y, int z) const
+{
+	int chunkX = static_cast<int>(std::floor(static_cast<float>(x) / Chunk::SIZE));
+	int chunkZ = static_cast<int>(std::floor(static_cast<float>(z) / Chunk::SIZE));
+	auto chunkIt = chunks.find(glm::ivec3(chunkX, 0, chunkZ));
+	if (chunkIt != chunks.end()) {
+		return chunkIt->second.isVoxelActiveGlobalPos(x, y, z);
+	}
+	return false;
+}
+
+bool	Engine::raycast(const glm::vec3& origin, const glm::vec3& direction, float maxDistance, glm::vec3& hitPosition, glm::vec3& previousPosition)
+{
+	glm::vec3 pos = origin;
+	glm::vec3 dir = glm::normalize(direction);
+	float distance = 0.0f;
+
+	glm::vec3 voxelPos = glm::floor(pos);
+	glm::vec3 deltaDist = glm::abs(glm::vec3(1.0f) / dir);
+	glm::vec3 step = glm::sign(dir);
+
+	glm::vec3 sideDist = (voxelPos + glm::max(step, glm::vec3(0.0f)) - pos) * deltaDist;
+
+	while (distance < maxDistance) {
+		if (isVoxelActive(voxelPos.x, voxelPos.y, voxelPos.z)) {
+			hitPosition = voxelPos;
+			return true;
+		}
+
+		previousPosition = voxelPos;
+
+		if (sideDist.x < sideDist.y) {
+			if (sideDist.x < sideDist.z) {
+				sideDist.x += deltaDist.x;
+				voxelPos.x += step.x;
+			} else {
+				sideDist.z += deltaDist.z;
+				voxelPos.z += step.z;
+			}
+		} else {
+			if (sideDist.y < sideDist.z) {
+				sideDist.y += deltaDist.y;
+				voxelPos.y += step.y;
+			} else {
+				sideDist.z += deltaDist.z;
+				voxelPos.z += step.z;
+			}
+		}
+
+		distance = glm::length(glm::vec3(voxelPos) - origin);
+	}
+
+	return false;
+}
+
 void	Engine::handleInput(bool& keyTPressed)
 {
 	if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS) {
@@ -407,18 +453,28 @@ void	Engine::handleInput(bool& keyTPressed)
 	}
 
 	if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-		auto chunk = this->chunks.find(glm::ivec3(this->playerChunkPos.x, 0, this->playerChunkPos.y));
-		if (chunk != this->chunks.end()) {
-			if (chunk->second.deleteVoxel(this->camera.getPosition(), this->camera.getFront())) {
-				return;
+		glm::vec3 hitPos, prevPos;
+		if (raycast(camera.getPosition(), camera.getFront(), renderSettings.raycastDistance, hitPos, prevPos)) {
+			int chunkX = static_cast<int>(std::floor(static_cast<float>(hitPos.x) / Chunk::SIZE));
+			int chunkZ = static_cast<int>(std::floor(static_cast<float>(hitPos.z) / Chunk::SIZE));
+			auto chunkIt = chunks.find(glm::ivec3(chunkX, 0, chunkZ));
+			if (chunkIt != chunks.end()) {
+				if (chunkIt->second.deleteVoxel(hitPos)) {
+					return;
+				}
 			}
 		}
 	}
 	if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
-		auto chunk = this->chunks.find(glm::ivec3(this->playerChunkPos.x, 0, this->playerChunkPos.y));
-		if (chunk != this->chunks.end()) {
-			if (chunk->second.placeVoxel(this->camera.getPosition(), this->camera.getFront(), selectedTexture)) {
-				return;
+		glm::vec3 hitPos, prevPos;
+		if (raycast(camera.getPosition(), camera.getFront(), renderSettings.raycastDistance, hitPos, prevPos)) {
+			int chunkX = static_cast<int>(std::floor(static_cast<float>(prevPos.x) / Chunk::SIZE));
+			int chunkZ = static_cast<int>(std::floor(static_cast<float>(prevPos.z) / Chunk::SIZE));
+			auto chunkIt = chunks.find(glm::ivec3(chunkX, 0, chunkZ));
+			if (chunkIt != chunks.end()) {
+				if (chunkIt->second.placeVoxel(prevPos, selectedTexture)) {
+					return;
+				}
 			}
 		}
 	}

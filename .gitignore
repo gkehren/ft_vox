@@ -39,3 +39,4 @@ imgui.ini
 build
 lib
 out/
+CMakeSettings.json
