@@ -2,7 +2,7 @@
 
 #define FULLSCREEN 1 // 0 = fullscreen, 1 = windowed, 2 = borderless
 
-Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f), lastTime(0.0f)
+Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f), lastTime(0.0f), seed(0)
 {
 	if (!glfwInit()) {
 		throw std::runtime_error("Failed to initialize GLFW");
@@ -103,6 +103,7 @@ void	Engine::perlinNoise(unsigned int seed)
 	} else {
 		this->perlin = std::make_unique<siv::PerlinNoise>(seed);
 	}
+	this->seed = seed;
 	std::cout << "Perlin seed: " << seed << std::endl;
 }
 
@@ -203,6 +204,8 @@ void	Engine::updateUI()
 	}
 
 	ImGui::End();
+
+	handleServerControls();
 
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -476,4 +479,45 @@ void	Engine::handleInput(bool& keyTPressed)
 			}
 		}
 	}
+}
+
+void	Engine::handleServerControls()
+{
+	ImGui::Begin("Multiplayer");
+
+	// Server controls
+	if (ImGui::CollapsingHeader("Server Controls"))
+	{
+		if (server && server->isRunning()) {
+			if (ImGui::Button("Stop server")) {
+				server->stop();
+			}
+			ImGui::Text("Server is running...");
+			ImGui::Text("Clients connected: %zu", server->getClientCount());
+		} else {
+			if (ImGui::Button("Start Server")) {
+				server = std::make_unique<Server>(25565, seed); // port
+				server->start();
+			}
+		}
+	}
+
+	// Client controls
+	if (ImGui::CollapsingHeader("Client Controls"))
+	{
+		ImGui::InputText("Server IP", ipInputBuffer, IM_ARRAYSIZE(ipInputBuffer));
+		if (client && client->isConnected()) {
+			if (ImGui::Button("Disconnect")) {
+				client->disconnect();
+			}
+			ImGui::Text("Connected to server at %s", ipInputBuffer);
+		} else {
+			if (ImGui::Button("Connect")) {
+				client = std::make_unique<Client>();
+				client->connect(ipInputBuffer, 25565); // ip, port
+			}
+		}
+	}
+
+	ImGui::End();
 }

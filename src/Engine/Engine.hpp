@@ -30,6 +30,8 @@
 #include <Renderer/TextRenderer.hpp>
 #include <utils.hpp>
 #include <Engine/ThreadPool.hpp>
+#include <Network/Server.hpp>
+#include <Network/Client.hpp>
 
 
 class Engine {
@@ -57,9 +59,12 @@ class Engine {
 		std::unique_ptr<TextRenderer>		textRenderer;
 		std::unique_ptr<ThreadPool>			threadPool;
 		std::unique_ptr<siv::PerlinNoise>	perlin;
+		std::unique_ptr<Server>				server;
+		std::unique_ptr<Client>				client;
+
 		Camera								camera;
 		glm::ivec2							playerChunkPos;
-
+		uint32_t							seed;	// Perlin noise seed
 
 		struct RenderSettings {
 			bool	wireframeMode{false};
@@ -99,6 +104,10 @@ class Engine {
 
 		bool	isVoxelActive(float x, float y, float z) const;
 		bool	raycast(const glm::vec3& origin, const glm::vec3& direction, float maxDistance, glm::vec3& hitPosition, glm::vec3& previousPosition);
+
+		// Network
+		char ipInputBuffer[128] = "127.0.0.1";
+		void	handleServerControls();
 };
 
 void	mouse_callback(GLFWwindow* window, double xpos, double ypos);
