@@ -49,12 +49,12 @@ void Client::readSeed()
 				uint32_t seedNetworkOrder;
 				std::memcpy(&seedNetworkOrder, buffer->data(), sizeof(uint32_t));
 				worldSeed = ntohl(seedNetworkOrder);
-				std::cout << "Seed reçue : " << worldSeed << std::endl;
-				// Continuer la communication si nécessaire
+				std::cout << "Seed received : " << worldSeed << std::endl;
+				// Continue with the rest of the client-server communication
 			}
 			else
 			{
-				std::cerr << "Erreur de lecture de la seed : " << ec.message() << std::endl;
+				std::cerr << "Failed to read seed: " << ec.message() << std::endl;
 				connected = false;
 				disconnect();
 			}

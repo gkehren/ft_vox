@@ -515,8 +515,17 @@ void	Engine::handleServerControls()
 			if (ImGui::Button("Connect")) {
 				client = std::make_unique<Client>();
 				client->connect(ipInputBuffer, 25565); // ip, port
+				this->seed = 0;
 			}
 		}
+	}
+
+	if (this->seed == 0 && client->getWorldSeed() != 0) {
+		this->seed = client->getWorldSeed();
+		perlinNoise(this->seed);
+		// clear chunks
+		chunks.clear();
+		chunkGenerationQueue = std::queue<glm::ivec3>();
 	}
 
 	ImGui::End();

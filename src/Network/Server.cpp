@@ -82,6 +82,7 @@ void Server::handleClient(std::shared_ptr<boost::asio::ip::tcp::socket> client)
 			else
 			{
 				// Handle success
+				std::cout << "Seed sent to client: " << worldSeed << std::endl;
 			}
 		});
 
