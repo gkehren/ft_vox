@@ -1,7 +1,7 @@
 #include "Server.hpp"
 
 Server::Server(unsigned short port, uint32_t worldSeed)
-	: acceptor(ioContext, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port)),
+	: socket(ioContext, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), port)),
 		running(false),
 		worldSeed(worldSeed)
 {}
@@ -22,7 +22,7 @@ void Server::stop()
 {
 	if (!running) return;
 	running = false;
-	acceptor.close();
+	socket.close();
 	ioContext.stop();
 	if (serverThread.joinable())
 		serverThread.join();
@@ -35,77 +35,80 @@ bool Server::isRunning() const
 
 size_t Server::getClientCount()
 {
-	std::lock_guard<std::mutex> lock(clientMutex);
-	return clients.size();
+	return 0;
 }
 
 void Server::run()
 {
-	doAccept();
+	receive();
 	ioContext.run();
 }
 
-void Server::doAccept()
+void Server::receive()
 {
-	auto socket = std::make_shared<boost::asio::ip::tcp::socket>(ioContext);
-	acceptor.async_accept(*socket,
-		[this, socket](boost::system::error_code ec)
+	auto senderEndpoint = std::make_shared<boost::asio::ip::udp::endpoint>();
+	socket.async_receive_from(
+		boost::asio::buffer(recvBuffer), *senderEndpoint,
+		[this, senderEndpoint](const boost::system::error_code& error, std::size_t bytesTransferred)
 		{
-			if (!ec && running)
-			{
-				{
-					std::lock_guard<std::mutex> lock(clientMutex);
-					clients.push_back(socket);
-				}
-				handleClient(socket);
-			}
+			handleReceive(*senderEndpoint, error, bytesTransferred);
 			if (running)
-				doAccept();
-		});
+				receive();
+		}
+	);
 }
 
-void Server::handleClient(std::shared_ptr<boost::asio::ip::tcp::socket> client)
+void Server::handleReceive(const boost::asio::ip::udp::endpoint& senderEndpoint, const boost::system::error_code& error, std::size_t bytesTransferred)
 {
-	std::cout << "New client connected: " << client->remote_endpoint() << std::endl;
-
-	uint32_t seedNetworkOrder = htonl(worldSeed);
-	auto buffer = std::make_shared<std::vector<char>>(reinterpret_cast<char*>(&seedNetworkOrder),
-														reinterpret_cast<char*>(&seedNetworkOrder) + sizeof(seedNetworkOrder));
-	boost::asio::async_write(*client, boost::asio::buffer(*buffer),
-		[this, client, buffer](boost::system::error_code ec, std::size_t)
-		{
-			if (ec)
-			{
-				// Handle error
-				disconnectClient(client);
-			}
-			else
-			{
-				// Handle success
-				std::cout << "Seed sent to client: " << worldSeed << std::endl;
-			}
-		});
-
-	auto readBuffer = std::make_shared<std::vector<char>>(1024);
-	client->async_read_some(boost::asio::buffer(*readBuffer),
-		[this, client, readBuffer](boost::system::error_code ec, std::size_t length)
-		{
-			if (ec)
-			{
-				// Handle error
-				disconnectClient(client);
-			}
-			else
-			{
-				// Handle success
-			}
-		});
+	if (!error && bytesTransferred > 0)
+	{
+		std::vector<uint8_t> data(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
+		handleMessage(senderEndpoint, data);
+	}
 }
 
-void Server::disconnectClient(std::shared_ptr<boost::asio::ip::tcp::socket> client)
+void Server::handleMessage(const boost::asio::ip::udp::endpoint& senderEndpoint, const std::vector<uint8_t>& data)
 {
-	std::cout << "Client disconnected: " << client->remote_endpoint() << std::endl;
-	std::lock_guard<std::mutex> lock(clientMutex);
-	clients.erase(std::remove(clients.begin(), clients.end(), client), clients.end());
-	client->close();
+	if (data.size() < sizeof(uint8_t) + sizeof(uint32_t))
+		return;
+
+	Message message;
+	size_t offset = 0;
+
+	message.type = data[offset++];
+	std::memcpy(&message.sequenceNumber, &data[offset], sizeof(uint32_t));
+	offset += sizeof(uint32_t);
+
+	message.payload.insert(message.payload.end(), data.begin() + offset, data.end());
+
+	if (message.type == MessageType::REQUEST_SEED)
+	{
+		// Send the world seed to the client
+		Message seedMessage;
+		seedMessage.type = MessageType::SEND_SEED;
+		seedMessage.sequenceNumber = message.sequenceNumber;
+		uint32_t seedNetworkOrder = htonl(worldSeed);
+		seedMessage.payload.resize(sizeof(uint32_t));
+		std::memcpy(seedMessage.payload.data(), &seedNetworkOrder, sizeof(uint32_t));
+
+		sendMessage(senderEndpoint, seedMessage);
+	}
+}
+
+void Server::sendMessage(const boost::asio::ip::udp::endpoint& endpoint, const Message& message)
+{
+	std::vector<uint8_t> data;
+	data.push_back(message.type);
+	uint32_t seqNetOrder = htonl(message.sequenceNumber);
+	data.insert(data.end(), reinterpret_cast<uint8_t*>(&seqNetOrder), reinterpret_cast<uint8_t*>(&seqNetOrder) + sizeof(uint32_t));
+	data.insert(data.end(), message.payload.begin(), message.payload.end());
+
+	socket.async_send_to(boost::asio::buffer(data), endpoint,
+		[](const boost::system::error_code& error, std::size_t /*bytesTransferred*/)
+		{
+			if (error)
+				std::cerr << "Failed to send message: " << error.message() << std::endl;
+			std::cout << "Message sent" << std::endl;
+		}
+	);
 }

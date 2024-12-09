@@ -2,10 +2,12 @@
 
 #include <thread>
 #include <atomic>
-#include <vector>
+#include <unordered_map>
 #include <mutex>
 #include <boost/asio.hpp>
 #include <iostream>
+
+#include "common.hpp"
 
 class Server
 {
@@ -21,16 +23,19 @@ class Server
 
 	private:
 		void run();
-		void doAccept();
-		void handleClient(std::shared_ptr<boost::asio::ip::tcp::socket> client);
-		void disconnectClient(std::shared_ptr<boost::asio::ip::tcp::socket> client);
+		void receive();
+		void handleReceive(const boost::asio::ip::udp::endpoint& senderEndpoint, const boost::system::error_code& error, std::size_t bytesTransferred);
+
+		void handleMessage(const boost::asio::ip::udp::endpoint& senderEndpoint, const std::vector<uint8_t>& data);
+		void sendMessage(const boost::asio::ip::udp::endpoint& endpoint, const Message& message);
 
 		std::thread serverThread;
 		std::atomic<bool> running;
-		std::mutex clientMutex;
 
 		boost::asio::io_context ioContext;
-		boost::asio::ip::tcp::acceptor acceptor;
-		std::vector<std::shared_ptr<boost::asio::ip::tcp::socket>> clients;
+		boost::asio::ip::udp::socket socket;
+
 		uint32_t worldSeed;
+
+		std::array<uint8_t, 1024> recvBuffer;
 };

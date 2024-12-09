@@ -526,6 +526,7 @@ void	Engine::handleServerControls()
 		// clear chunks
 		chunks.clear();
 		chunkGenerationQueue = std::queue<glm::ivec3>();
+		playerChunkPos = glm::ivec2(42, -42);
 	}
 
 	ImGui::End();
