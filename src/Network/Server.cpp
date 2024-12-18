@@ -3,7 +3,8 @@
 Server::Server(unsigned short port, uint32_t worldSeed)
 	: socket(ioContext, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), port)),
 		running(false),
-		worldSeed(worldSeed)
+		worldSeed(worldSeed),
+		nextPlayerId(1)
 {}
 
 Server::~Server()
@@ -35,7 +36,8 @@ bool Server::isRunning() const
 
 size_t Server::getClientCount()
 {
-	return 0;
+	std::lock_guard<std::mutex> lock(playerMutex);
+	return playerPositions.size();
 }
 
 void Server::run()
@@ -92,6 +94,45 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint& senderEndpoint,
 		std::memcpy(seedMessage.payload.data(), &seedNetworkOrder, sizeof(uint32_t));
 
 		sendMessage(senderEndpoint, seedMessage);
+
+		uint32_t playerId = nextPlayerId++;
+		Message authMessage;
+		authMessage.type = MessageType::AUTHENTICATION;
+		authMessage.sequenceNumber = message.sequenceNumber;
+		uint32_t playerIdNetworkOrder = htonl(playerId);
+		authMessage.payload.resize(sizeof(uint32_t));
+		std::memcpy(authMessage.payload.data(), &playerIdNetworkOrder, sizeof(uint32_t));
+
+		sendMessage(senderEndpoint, authMessage);
+
+		{
+			std::lock_guard<std::mutex> lock(playerMutex);
+			playerEndpoints[playerId] = senderEndpoint;
+		}
+	}
+	else if (message.type == MessageType::PLAYER_POSITION)
+	{
+		if (message.payload.size() < sizeof(PlayerPosition))
+			return;
+
+		PlayerPosition position;
+		std::memcpy(&position, message.payload.data(), sizeof(PlayerPosition));
+
+		{
+			std::lock_guard<std::mutex> lock(playerMutex);
+			playerPositions[position.playerId] = position;
+			playerEndpoints[position.playerId] = senderEndpoint;
+		}
+
+		broadcastPlayerPosition();
+	}
+	else if (message.type == MessageType::ACK)
+	{
+		uint32_t playerId;
+		std::memcpy(&playerId, message.payload.data(), sizeof(uint32_t));
+		playerId = ntohl(playerId);
+
+		std::cout << "Player " << playerId << " authenticated successfully." << std::endl;
 	}
 }
 
@@ -108,7 +149,26 @@ void Server::sendMessage(const boost::asio::ip::udp::endpoint& endpoint, const M
 		{
 			if (error)
 				std::cerr << "Failed to send message: " << error.message() << std::endl;
-			std::cout << "Message sent" << std::endl;
 		}
 	);
+}
+
+void Server::broadcastPlayerPosition()
+{
+	std::lock_guard<std::mutex> lock(playerMutex);
+
+	for (const auto& [playerId, position] : playerPositions)
+	{
+		Message message;
+		message.type = MessageType::PLAYER_POSITION;
+		message.sequenceNumber = message.sequenceNumber;
+		message.payload.resize(sizeof(PlayerPosition));
+		std::memcpy(message.payload.data(), &position, sizeof(PlayerPosition));
+
+		for (const auto& [id, endpoint] : playerEndpoints)
+		{
+			if (id != playerId)
+				sendMessage(endpoint, message);
+		}
+	}
 }

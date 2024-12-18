@@ -19,6 +19,7 @@ class Client
 		bool isConnected() const;
 
 		uint32_t getWorldSeed() const;
+		void sendPlayerPosition(float x, float y, float z);
 
 	private:
 		void run();
@@ -29,6 +30,7 @@ class Client
 		void handleMessage(const std::vector<uint8_t>& data);
 
 		void requestSeed();
+		void sendAck(uint32_t playerId);
 
 		std::thread clientThread;
 		std::atomic<bool> connected;
@@ -44,4 +46,10 @@ class Client
 		uint32_t sequenceNumber;
 
 		std::array<uint8_t, 1024> recvBuffer;
+
+		uint32_t playerId;
+
+	public: // public temporarily for ImGui
+		std::unordered_map<uint32_t, PlayerPosition> playerPositions;
+		std::mutex playerMutex;
 };

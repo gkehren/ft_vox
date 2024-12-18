@@ -217,6 +217,14 @@ void	Engine::render()
 	renderSettings.visibleChunksCount = 0;
 	renderSettings.visibleVoxelsCount = 0;
 
+	if (client && client->isConnected()) {
+		client->sendPlayerPosition(camera.getPosition().x, camera.getPosition().y, camera.getPosition().z);
+		std::lock_guard<std::mutex> lock(client->playerMutex);
+		for (const auto& [playerId, position] : client->playerPositions) {
+			renderer->drawPlayer(camera, glm::vec3(position.x, position.y, position.z));
+		}
+	}
+
 	// for debug just create a single chunk at 0,0,0
 	//if (chunks.empty()) {
 	//	chunks.emplace(glm::ivec3(0, 0, 0), Chunk(glm::vec3(0.0f, 0.0f, 0.0f)));
@@ -516,6 +524,16 @@ void	Engine::handleServerControls()
 				client = std::make_unique<Client>();
 				client->connect(ipInputBuffer, 25565); // ip, port
 				this->seed = 0;
+			}
+		}
+	}
+
+	// Display all the player positions
+	if (client && client->isConnected()) {
+		if (ImGui::CollapsingHeader("Player Positions")) {
+			std::lock_guard<std::mutex> lock(client->playerMutex);
+			for (const auto& [playerId, position] : client->playerPositions) {
+				ImGui::Text("Player %d: (%.1f, %.1f, %.1f)", playerId, position.x, position.y, position.z);
 			}
 		}
 	}

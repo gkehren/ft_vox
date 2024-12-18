@@ -28,6 +28,7 @@ class Server
 
 		void handleMessage(const boost::asio::ip::udp::endpoint& senderEndpoint, const std::vector<uint8_t>& data);
 		void sendMessage(const boost::asio::ip::udp::endpoint& endpoint, const Message& message);
+		void broadcastPlayerPosition();
 
 		std::thread serverThread;
 		std::atomic<bool> running;
@@ -38,4 +39,10 @@ class Server
 		uint32_t worldSeed;
 
 		std::array<uint8_t, 1024> recvBuffer;
+
+		std::unordered_map<uint32_t, PlayerPosition> playerPositions;
+		std::unordered_map<uint32_t, boost::asio::ip::udp::endpoint> playerEndpoints;
+		std::mutex playerMutex;
+
+		uint32_t nextPlayerId;
 };

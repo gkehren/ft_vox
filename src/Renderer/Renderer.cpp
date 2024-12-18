@@ -45,6 +45,7 @@ Renderer::Renderer(int screenWidth, int screenHeight, float renderDistance) : sc
 	std::string path = RES_PATH;
 
 	this->initBoundingBox();
+	this->initPlayer();
 
 	// Textures
 	this->textureAtlas = loadTexture((path + "textures/terrain.png").c_str());
@@ -60,6 +61,10 @@ Renderer::~Renderer()
 	glDeleteTextures(1, &this->textureAtlas);
 	glDeleteVertexArrays(1, &this->boundingBoxVAO);
 	glDeleteBuffers(1, &this->boundingBoxVBO);
+	glDeleteBuffers(1, &this->boundingBoxEBO);
+	glDeleteVertexArrays(1, &this->playerVAO);
+	glDeleteBuffers(1, &this->playerVBO);
+	glDeleteBuffers(1, &this->playerEBO);
 }
 
 void	Renderer::initBoundingBox()
@@ -77,6 +82,52 @@ void	Renderer::initBoundingBox()
 
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 	glEnableVertexAttribArray(0);
+
+	glBindVertexArray(0);
+}
+
+void	Renderer::initPlayer()
+{
+	std::string path = RES_PATH;
+	this->playerShader = std::make_unique<Shader>((path + "shaders/playerVertex.glsl").c_str(), (path + "shaders/playerFragment.glsl").c_str());
+
+	float playerVertices[] = {
+		// Positions        // Couleurs
+		-0.5f, -0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
+		 0.5f, -0.5f, -0.5f,  0.0f, 1.0f, 0.0f,
+		 0.5f,  0.5f, -0.5f,  0.0f, 0.0f, 1.0f,
+		-0.5f,  0.5f, -0.5f,  1.0f, 1.0f, 0.0f,
+		-0.5f, -0.5f,  0.5f,  1.0f, 0.0f, 1.0f,
+		 0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
+		 0.5f,  0.5f,  0.5f,  1.0f, 1.0f, 1.0f,
+		-0.5f,  0.5f,  0.5f,  0.0f, 0.0f, 0.0f
+	};
+
+	unsigned int playerIndices[] = {
+		0, 3, 1, 1, 3, 2, // Front face
+		4, 5, 7, 5, 6, 7, // Back face
+		0, 1, 5, 0, 5, 4, // Bottom face
+		3, 7, 2, 2, 7, 6, // Top face
+		0, 7, 3, 0, 4, 7, // Left face
+		1, 2, 6, 1, 6, 5  // Right face
+	};
+
+	// Player
+	glGenVertexArrays(1, &this->playerVAO);
+	glGenBuffers(1, &this->playerVBO);
+	glGenBuffers(1, &this->playerEBO);
+
+	glBindVertexArray(this->playerVAO);
+	glBindBuffer(GL_ARRAY_BUFFER, this->playerVBO);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(playerVertices), playerVertices, GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->playerEBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(playerIndices), playerIndices, GL_STATIC_DRAW);
+
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+	glEnableVertexAttribArray(1);
 
 	glBindVertexArray(0);
 }
@@ -169,4 +220,20 @@ void	Renderer::drawSkybox(const Camera& camera) const
 	glDrawArrays(GL_TRIANGLES, 0, 36);
 	glBindVertexArray(0);
 	glDepthFunc(GL_LESS);
+}
+
+void Renderer::drawPlayer(const Camera& camera, const glm::vec3& position) const
+{
+	playerShader->use();
+
+	glm::mat4 model = glm::mat4(1.0f);
+	model = glm::translate(model, position);
+	//model = glm::scale(model, glm::vec3(0.1f));
+	playerShader->setMat4("model", model);
+	playerShader->setMat4("view", camera.getViewMatrix());
+	playerShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
+
+	glBindVertexArray(this->playerVAO);
+	glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+	glBindVertexArray(0);
 }

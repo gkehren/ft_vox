@@ -1,7 +1,7 @@
 #include "Client.hpp"
 
 Client::Client()
-	: socket(ioContext), connected(false), worldSeed(0), sequenceNumber(0)
+	: socket(ioContext), connected(false), worldSeed(0), sequenceNumber(0), playerId(0)
 {}
 
 Client::~Client()
@@ -55,13 +55,13 @@ void Client::requestSeed()
 
 	receive();
 
-	std::unique_lock<std::mutex> lock(seedMutex);
-	if (!seedCondVar.wait_for(lock, std::chrono::seconds(5), [this]() { return worldSeed != 0; })) {
-		// if we didn't receive the seed in 5 seconds, disconnect
-		std::cerr << "Failed to receive seed from server" << std::endl;
-		if (connected)
-			disconnect();
-	}
+	//std::unique_lock<std::mutex> lock(seedMutex);
+	//if (!seedCondVar.wait_for(lock, std::chrono::seconds(5), [this]() { return worldSeed != 0; })) {
+	//	// if we didn't receive the seed in 5 seconds, disconnect
+	//	std::cerr << "Failed to receive seed from server" << std::endl;
+	//	if (connected)
+	//		disconnect();
+	//}
 }
 
 void Client::sendMessage(const Message& message)
@@ -125,12 +125,63 @@ void Client::handleMessage(const std::vector<uint8_t>& data)
 		worldSeed = ntohl(seedNetworkOrder);
 		std::cout << "Seed received: " << worldSeed << std::endl;
 
-		std::unique_lock<std::mutex> lock(seedMutex);
-		seedCondVar.notify_one();
+		//{
+		//	std::unique_lock<std::mutex> lock(seedMutex);
+		//	seedCondVar.notify_one();
+		//}
 	}
+	else if (message.type == MessageType::PLAYER_POSITION)
+	{
+		if (message.payload.size() < sizeof(PlayerPosition))
+			return;
+
+		PlayerPosition position;
+		std::memcpy(&position, message.payload.data(), sizeof(PlayerPosition));
+
+		{
+			std::lock_guard<std::mutex> lock(playerMutex);
+			playerPositions[position.playerId] = position;
+		}
+	}
+	else if (message.type == MessageType::AUTHENTICATION)
+	{
+		std::memcpy(&playerId, message.payload.data(), sizeof(uint32_t));
+		playerId = ntohl(playerId);
+		std::cout << "Authenticated with player ID: " << playerId << std::endl;
+		sendAck(playerId);
+	}
+}
+
+void Client::sendAck(uint32_t playerId)
+{
+	Message message;
+	message.type = MessageType::ACK;
+	message.sequenceNumber = sequenceNumber++;
+	uint32_t playerIdNetworkOrder = htonl(playerId);
+	message.payload.resize(sizeof(uint32_t));
+	std::memcpy(message.payload.data(), &playerIdNetworkOrder, sizeof(uint32_t));
+
+	sendMessage(message);
 }
 
 uint32_t Client::getWorldSeed() const
 {
 	return worldSeed.load();
+}
+
+void Client::sendPlayerPosition(float x, float y, float z)
+{
+	PlayerPosition position;
+	position.playerId = playerId; // Assign a unique ID for each player
+	position.x = x;
+	position.y = y;
+	position.z = z;
+
+	Message message;
+	message.type = MessageType::PLAYER_POSITION;
+	message.sequenceNumber = message.sequenceNumber++;
+	message.payload.resize(sizeof(PlayerPosition));
+	std::memcpy(message.payload.data(), &position, sizeof(PlayerPosition));
+
+	sendMessage(message);
 }

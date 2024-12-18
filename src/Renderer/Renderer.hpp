@@ -22,7 +22,7 @@ class Renderer {
 
 		void	drawBoundingBox(const Chunk& chunk, const Camera& camera) const;
 		void	drawSkybox(const Camera& camera) const;
-
+		void	drawPlayer(const Camera& camera, const glm::vec3& position) const;
 
 	private:
 		std::unique_ptr<Shader>	boundingBoxShader;
@@ -37,6 +37,12 @@ class Renderer {
 		GLuint	skyboxVAO;
 		GLuint	skyboxVBO;
 		GLuint	skyboxTexture;
+
+		std::unique_ptr<Shader> playerShader;
+		GLuint playerVAO;
+		GLuint playerVBO;
+		GLuint playerEBO;
+		void initPlayer();
 
 		float	screenWidth;
 		float	screenHeight;
