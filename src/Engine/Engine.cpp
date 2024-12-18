@@ -221,7 +221,7 @@ void	Engine::render()
 		client->sendPlayerPosition(camera.getPosition().x, camera.getPosition().y, camera.getPosition().z);
 		std::lock_guard<std::mutex> lock(client->playerMutex);
 		for (const auto& [playerId, position] : client->playerPositions) {
-			renderer->drawPlayer(camera, glm::vec3(position.x, position.y, position.z));
+			renderer->drawPlayer(camera, glm::vec3(position.x, position.y, position.z), playerId);
 		}
 	}
 
@@ -533,7 +533,8 @@ void	Engine::handleServerControls()
 		if (ImGui::CollapsingHeader("Player Positions")) {
 			std::lock_guard<std::mutex> lock(client->playerMutex);
 			for (const auto& [playerId, position] : client->playerPositions) {
-				ImGui::Text("Player %d: (%.1f, %.1f, %.1f)", playerId, position.x, position.y, position.z);
+				glm::vec3 color = renderer->computeColorFromPlayerId(playerId);
+				ImGui::TextColored(ImVec4(color.x, color.y, color.z, 1.0f), "Player %d: (%.1f, %.1f, %.1f)", playerId, position.x, position.y, position.z);
 			}
 		}
 	}

@@ -222,7 +222,7 @@ void	Renderer::drawSkybox(const Camera& camera) const
 	glDepthFunc(GL_LESS);
 }
 
-void Renderer::drawPlayer(const Camera& camera, const glm::vec3& position) const
+void Renderer::drawPlayer(const Camera& camera, const glm::vec3& position, uint32_t playerId) const
 {
 	playerShader->use();
 
@@ -233,7 +233,40 @@ void Renderer::drawPlayer(const Camera& camera, const glm::vec3& position) const
 	playerShader->setMat4("view", camera.getViewMatrix());
 	playerShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
 
+	glm::vec3 color = computeColorFromPlayerId(playerId);
+	playerShader->setVec3("playerColor", color);
+
 	glBindVertexArray(this->playerVAO);
 	glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
 	glBindVertexArray(0);
+}
+
+glm::vec3	Renderer::computeColorFromPlayerId(uint32_t playerId) const
+{
+	// Utilisez le playerId pour générer une couleur unique
+	float hue = std::fmod(static_cast<float>(playerId) * 0.61803398875f, 1.0f); // Conjugaison du nombre d'or
+	return hsvToRgb(hue, 0.5f, 0.95f);
+}
+
+glm::vec3	Renderer::hsvToRgb(float h, float s, float v) const
+{
+	float r, g, b;
+
+	int i = int(h * 6.0f);
+	float f = h * 6.0f - i;
+	float p = v * (1.0f - s);
+	float q = v * (1.0f - f * s);
+	float t = v * (1.0f - (1.0f - f) * s);
+
+	switch (i % 6)
+	{
+	case 0: r = v; g = t; b = p; break;
+	case 1: r = q; g = v; b = p; break;
+	case 2: r = p; g = v; b = t; break;
+	case 3: r = p; g = q; b = v; break;
+	case 4: r = t; g = p; b = v; break;
+	case 5: r = v; g = p; b = q; break;
+	}
+
+	return glm::vec3(r, g, b);
 }
