@@ -2,10 +2,11 @@
 
 Server::Server(unsigned short port, uint32_t worldSeed)
 	: socket(ioContext, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), port)),
-		running(false),
-		worldSeed(worldSeed),
-		nextPlayerId(1)
-{}
+	  running(false),
+	  worldSeed(worldSeed),
+	  nextPlayerId(1)
+{
+}
 
 Server::~Server()
 {
@@ -14,14 +15,16 @@ Server::~Server()
 
 void Server::start()
 {
-	if (running) return;
+	if (running)
+		return;
 	running = true;
 	serverThread = std::thread(&Server::run, this);
 }
 
 void Server::stop()
 {
-	if (!running) return;
+	if (!running)
+		return;
 	running = false;
 	socket.close();
 	ioContext.stop();
@@ -51,16 +54,15 @@ void Server::receive()
 	auto senderEndpoint = std::make_shared<boost::asio::ip::udp::endpoint>();
 	socket.async_receive_from(
 		boost::asio::buffer(recvBuffer), *senderEndpoint,
-		[this, senderEndpoint](const boost::system::error_code& error, std::size_t bytesTransferred)
+		[this, senderEndpoint](const boost::system::error_code &error, std::size_t bytesTransferred)
 		{
 			handleReceive(*senderEndpoint, error, bytesTransferred);
 			if (running)
 				receive();
-		}
-	);
+		});
 }
 
-void Server::handleReceive(const boost::asio::ip::udp::endpoint& senderEndpoint, const boost::system::error_code& error, std::size_t bytesTransferred)
+void Server::handleReceive(const boost::asio::ip::udp::endpoint &senderEndpoint, const boost::system::error_code &error, std::size_t bytesTransferred)
 {
 	if (!error && bytesTransferred > 0)
 	{
@@ -69,7 +71,7 @@ void Server::handleReceive(const boost::asio::ip::udp::endpoint& senderEndpoint,
 	}
 }
 
-void Server::handleMessage(const boost::asio::ip::udp::endpoint& senderEndpoint, const std::vector<uint8_t>& data)
+void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint, const std::vector<uint8_t> &data)
 {
 	if (data.size() < sizeof(uint8_t) + sizeof(uint32_t))
 		return;
@@ -136,28 +138,27 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint& senderEndpoint,
 	}
 }
 
-void Server::sendMessage(const boost::asio::ip::udp::endpoint& endpoint, const Message& message)
+void Server::sendMessage(const boost::asio::ip::udp::endpoint &endpoint, const Message &message)
 {
 	std::vector<uint8_t> data;
 	data.push_back(message.type);
 	uint32_t seqNetOrder = htonl(message.sequenceNumber);
-	data.insert(data.end(), reinterpret_cast<uint8_t*>(&seqNetOrder), reinterpret_cast<uint8_t*>(&seqNetOrder) + sizeof(uint32_t));
+	data.insert(data.end(), reinterpret_cast<uint8_t *>(&seqNetOrder), reinterpret_cast<uint8_t *>(&seqNetOrder) + sizeof(uint32_t));
 	data.insert(data.end(), message.payload.begin(), message.payload.end());
 
 	socket.async_send_to(boost::asio::buffer(data), endpoint,
-		[](const boost::system::error_code& error, std::size_t /*bytesTransferred*/)
-		{
-			if (error)
-				std::cerr << "Failed to send message: " << error.message() << std::endl;
-		}
-	);
+						 [](const boost::system::error_code &error, std::size_t /*bytesTransferred*/)
+						 {
+							 if (error)
+								 std::cerr << "Failed to send message: " << error.message() << std::endl;
+						 });
 }
 
 void Server::broadcastPlayerPosition()
 {
 	std::lock_guard<std::mutex> lock(playerMutex);
 
-	for (const auto& [playerId, position] : playerPositions)
+	for (const auto &[playerId, position] : playerPositions)
 	{
 		Message message;
 		message.type = MessageType::PLAYER_POSITION;
@@ -165,7 +166,7 @@ void Server::broadcastPlayerPosition()
 		message.payload.resize(sizeof(PlayerPosition));
 		std::memcpy(message.payload.data(), &position, sizeof(PlayerPosition));
 
-		for (const auto& [id, endpoint] : playerEndpoints)
+		for (const auto &[id, endpoint] : playerEndpoints)
 		{
 			if (id != playerId)
 				sendMessage(endpoint, message);

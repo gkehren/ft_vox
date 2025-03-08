@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.11)
+cmake_minimum_required(VERSION 3.16)
 
 project(ft_vox)
 
@@ -12,10 +12,10 @@ file(GLOB_RECURSE SOURCES src/*.cpp src/*.c)
 include_directories(src/)
 
 find_package(OpenGL REQUIRED)
-find_package(glfw3 3.3 REQUIRED)
-find_package(Boost 1.85.0 REQUIRED COMPONENTS asio)
+find_package(SDL3 REQUIRED)
+find_package(Boost REQUIRED COMPONENTS asio)
 
-# FetchContent pour GLM
+# FetchContent for GLM
 include(FetchContent)
 FetchContent_Declare(
   glm
@@ -24,13 +24,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
-# FetchContent pour FreeType2
+# FetchContent for FreeType2
 FetchContent_Declare(
   freetype2
   GIT_REPOSITORY https://github.com/aseprite/freetype2
   GIT_TAG VER-2-10-0
 )
 FetchContent_MakeAvailable(freetype2)
+
 
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL")
@@ -39,7 +40,8 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL")
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 
-target_link_libraries(${PROJECT_NAME} OpenGL::GL glfw glm freetype)
+target_include_directories(${PROJECT_NAME} PRIVATE ${SDL3_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} OpenGL::GL glm freetype Boost::asio ${SDL3_LIBRARIES})
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

@@ -2,13 +2,13 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image/stb_image.h>
 
-static GLuint loadTexture(const char* path)
+static GLuint loadTexture(const char *path)
 {
 	GLuint textureID;
 	glGenTextures(1, &textureID);
 
 	int width, height, nrComponents;
-	unsigned char* data = stbi_load(path, &width, &height, &nrComponents, 0);
+	unsigned char *data = stbi_load(path, &width, &height, &nrComponents, 0);
 	if (data)
 	{
 		GLenum format;
@@ -67,7 +67,7 @@ Renderer::~Renderer()
 	glDeleteBuffers(1, &this->playerEBO);
 }
 
-void	Renderer::initBoundingBox()
+void Renderer::initBoundingBox()
 {
 	std::string path = RES_PATH;
 	this->boundingBoxShader = std::make_unique<Shader>((path + "shaders/boundingBoxVertex.glsl").c_str(), (path + "shaders/boundingBoxFragment.glsl").c_str());
@@ -80,28 +80,27 @@ void	Renderer::initBoundingBox()
 	glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
 
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
 	glEnableVertexAttribArray(0);
 
 	glBindVertexArray(0);
 }
 
-void	Renderer::initPlayer()
+void Renderer::initPlayer()
 {
 	std::string path = RES_PATH;
 	this->playerShader = std::make_unique<Shader>((path + "shaders/playerVertex.glsl").c_str(), (path + "shaders/playerFragment.glsl").c_str());
 
 	float playerVertices[] = {
 		// Positions        // Couleurs
-		-0.5f, -0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
-		 0.5f, -0.5f, -0.5f,  0.0f, 1.0f, 0.0f,
-		 0.5f,  0.5f, -0.5f,  0.0f, 0.0f, 1.0f,
-		-0.5f,  0.5f, -0.5f,  1.0f, 1.0f, 0.0f,
-		-0.5f, -0.5f,  0.5f,  1.0f, 0.0f, 1.0f,
-		 0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
-		 0.5f,  0.5f,  0.5f,  1.0f, 1.0f, 1.0f,
-		-0.5f,  0.5f,  0.5f,  0.0f, 0.0f, 0.0f
-	};
+		-0.5f, -0.5f, -0.5f, 1.0f, 0.0f, 0.0f,
+		0.5f, -0.5f, -0.5f, 0.0f, 1.0f, 0.0f,
+		0.5f, 0.5f, -0.5f, 0.0f, 0.0f, 1.0f,
+		-0.5f, 0.5f, -0.5f, 1.0f, 1.0f, 0.0f,
+		-0.5f, -0.5f, 0.5f, 1.0f, 0.0f, 1.0f,
+		0.5f, -0.5f, 0.5f, 0.0f, 1.0f, 1.0f,
+		0.5f, 0.5f, 0.5f, 1.0f, 1.0f, 1.0f,
+		-0.5f, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f};
 
 	unsigned int playerIndices[] = {
 		0, 3, 1, 1, 3, 2, // Front face
@@ -124,21 +123,21 @@ void	Renderer::initPlayer()
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->playerEBO);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(playerIndices), playerIndices, GL_STATIC_DRAW);
 
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)0);
 	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)(3 * sizeof(float)));
 	glEnableVertexAttribArray(1);
 
 	glBindVertexArray(0);
 }
 
-void	Renderer::setScreenSize(int screenWidth, int screenHeight)
+void Renderer::setScreenSize(int screenWidth, int screenHeight)
 {
 	this->screenWidth = screenWidth;
 	this->screenHeight = screenHeight;
 }
 
-void	Renderer::drawBoundingBox(const Chunk& chunk, const Camera& camera) const
+void Renderer::drawBoundingBox(const Chunk &chunk, const Camera &camera) const
 {
 	boundingBoxShader->use();
 
@@ -156,8 +155,7 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Camera& camera) const
 		position.x - 1.0f, position.y - 1.0f, position.z - 1.0f + Chunk::SIZE,
 		position.x - 1.0f + Chunk::SIZE, position.y - 1.0f, position.z - 1.0f + Chunk::SIZE,
 		position.x - 1.0f + Chunk::SIZE, position.y - 1.0f + Chunk::HEIGHT, position.z - 1.0f + Chunk::SIZE,
-		position.x - 1.0f, position.y - 1.0f + Chunk::HEIGHT, position.z - 1.0f + Chunk::SIZE
-	};
+		position.x - 1.0f, position.y - 1.0f + Chunk::HEIGHT, position.z - 1.0f + Chunk::SIZE};
 
 	glBindVertexArray(this->boundingBoxVAO);
 
@@ -171,7 +169,7 @@ void	Renderer::drawBoundingBox(const Chunk& chunk, const Camera& camera) const
 	glBindVertexArray(0);
 }
 
-void	Renderer::loadSkybox()
+void Renderer::loadSkybox()
 {
 	std::string path = RES_PATH;
 	this->skyboxShader = std::make_unique<Shader>((path + "shaders/skyboxVertex.glsl").c_str(), (path + "shaders/skyboxFragment.glsl").c_str());
@@ -181,20 +179,24 @@ void	Renderer::loadSkybox()
 	glBindVertexArray(this->skyboxVAO);
 	glBindBuffer(GL_ARRAY_BUFFER, this->skyboxVBO);
 	glBufferData(GL_ARRAY_BUFFER, sizeof(skyboxVertices), &skyboxVertices, GL_STATIC_DRAW);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
 	glEnableVertexAttribArray(0);
 	glBindVertexArray(0);
 
 	glGenTextures(1, &this->skyboxTexture);
 	glBindTexture(GL_TEXTURE_CUBE_MAP, this->skyboxTexture);
 
-	for (GLuint i = 0; i < 6; i++) {
+	for (GLuint i = 0; i < 6; i++)
+	{
 		int width, height, nrChannels;
 		unsigned char *data = stbi_load((path + skyboxFaces[i]).c_str(), &width, &height, &nrChannels, 0);
-		if (data) {
+		if (data)
+		{
 			glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
 			stbi_image_free(data);
-		} else {
+		}
+		else
+		{
 			std::cout << "Failed to load texture" << std::endl;
 		}
 	}
@@ -206,7 +208,7 @@ void	Renderer::loadSkybox()
 	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 }
 
-void	Renderer::drawSkybox(const Camera& camera) const
+void Renderer::drawSkybox(const Camera &camera) const
 {
 	glDepthFunc(GL_LEQUAL);
 	this->skyboxShader->use();
@@ -222,13 +224,13 @@ void	Renderer::drawSkybox(const Camera& camera) const
 	glDepthFunc(GL_LESS);
 }
 
-void Renderer::drawPlayer(const Camera& camera, const glm::vec3& position, uint32_t playerId) const
+void Renderer::drawPlayer(const Camera &camera, const glm::vec3 &position, uint32_t playerId) const
 {
 	playerShader->use();
 
 	glm::mat4 model = glm::mat4(1.0f);
 	model = glm::translate(model, position);
-	//model = glm::scale(model, glm::vec3(0.1f));
+	// model = glm::scale(model, glm::vec3(0.1f));
 	playerShader->setMat4("model", model);
 	playerShader->setMat4("view", camera.getViewMatrix());
 	playerShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
@@ -241,14 +243,14 @@ void Renderer::drawPlayer(const Camera& camera, const glm::vec3& position, uint3
 	glBindVertexArray(0);
 }
 
-glm::vec3	Renderer::computeColorFromPlayerId(uint32_t playerId) const
+glm::vec3 Renderer::computeColorFromPlayerId(uint32_t playerId) const
 {
 	// Utilisez le playerId pour générer une couleur unique
 	float hue = std::fmod(static_cast<float>(playerId) * 0.61803398875f, 1.0f); // Conjugaison du nombre d'or
 	return hsvToRgb(hue, 0.5f, 0.95f);
 }
 
-glm::vec3	Renderer::hsvToRgb(float h, float s, float v) const
+glm::vec3 Renderer::hsvToRgb(float h, float s, float v) const
 {
 	float r, g, b;
 
@@ -260,12 +262,36 @@ glm::vec3	Renderer::hsvToRgb(float h, float s, float v) const
 
 	switch (i % 6)
 	{
-	case 0: r = v; g = t; b = p; break;
-	case 1: r = q; g = v; b = p; break;
-	case 2: r = p; g = v; b = t; break;
-	case 3: r = p; g = q; b = v; break;
-	case 4: r = t; g = p; b = v; break;
-	case 5: r = v; g = p; b = q; break;
+	case 0:
+		r = v;
+		g = t;
+		b = p;
+		break;
+	case 1:
+		r = q;
+		g = v;
+		b = p;
+		break;
+	case 2:
+		r = p;
+		g = v;
+		b = t;
+		break;
+	case 3:
+		r = p;
+		g = q;
+		b = v;
+		break;
+	case 4:
+		r = t;
+		g = p;
+		b = v;
+		break;
+	case 5:
+		r = v;
+		g = p;
+		b = q;
+		break;
 	}
 
 	return glm::vec3(r, g, b);
