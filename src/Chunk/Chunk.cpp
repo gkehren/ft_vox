@@ -468,7 +468,7 @@ void Chunk::uploadMeshToGPU()
 	meshNeedsUpdate = false;
 }
 
-uint32_t Chunk::draw(const Shader &shader, const Camera &camera, GLuint textureAtlas)
+uint32_t Chunk::draw(const Shader &shader, const Camera &camera, GLuint textureAtlas, const ShaderParameters &params)
 {
 	if (meshNeedsUpdate)
 	{
@@ -480,7 +480,26 @@ uint32_t Chunk::draw(const Shader &shader, const Camera &camera, GLuint textureA
 	shader.setMat4("view", camera.getViewMatrix());
 	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
 	shader.setInt("textureSampler", 0);
-	shader.setVec3("lightPos", camera.getPosition());
+
+	glm::vec3 sunDirection = glm::normalize(glm::vec3(0.8, 1.0, 0.6));
+	glm::vec3 sunPosition = camera.getPosition() + params.sunDirection * 2000.0f;
+
+	shader.setVec3("lightPos", sunPosition);
+	shader.setVec3("viewPos", camera.getPosition());
+
+	// Paramètres du fog
+	shader.setFloat("fogStart", params.fogStart);
+	shader.setFloat("fogEnd", params.fogEnd);
+	shader.setVec3("fogColor", params.fogColor);
+	shader.setFloat("fogDensity", params.fogDensity);
+
+	// Paramètres visuels optionnels
+	shader.setFloat("ambientStrength", params.ambientStrength);
+	shader.setFloat("diffuseIntensity", params.diffuseIntensity);
+	shader.setFloat("lightLevels", params.lightLevels);
+	shader.setFloat("saturationLevel", params.saturationLevel);
+	shader.setFloat("colorBoost", params.colorBoost);
+	shader.setFloat("gamma", params.gamma);
 
 	glBindTexture(GL_TEXTURE_2D, textureAtlas);
 

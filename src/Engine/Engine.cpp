@@ -257,6 +257,7 @@ void Engine::updateUI()
 	ImGui::End();
 
 	handleServerControls();
+	handleShaderOptions();
 
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -361,7 +362,7 @@ void Engine::render()
 		if (!chunk.second.isVisible() || chunk.second.getState() == ChunkState::UNLOADED)
 			continue;
 
-		renderSettings.visibleVoxelsCount += chunk.second.draw(*shader, camera, renderer->getTextureAtlas());
+		renderSettings.visibleVoxelsCount += chunk.second.draw(*shader, camera, renderer->getTextureAtlas(), shaderParams);
 		renderSettings.visibleChunksCount++;
 
 		if (renderSettings.chunkBorders)
@@ -700,6 +701,61 @@ void Engine::handleServerControls()
 		chunks.clear();
 		chunkGenerationQueue = std::queue<glm::ivec3>();
 		playerChunkPos = glm::ivec2(42, -42);
+	}
+
+	ImGui::End();
+}
+
+void Engine::handleShaderOptions()
+{
+	ImGui::Begin("Graphics Settings");
+
+	// Interface pour les paramètres du fog
+	if (ImGui::CollapsingHeader("Fog Settings"))
+	{
+		ImGui::SliderFloat("Fog Start", &shaderParams.fogStart, 0.0f, 200.0f);
+		ImGui::SliderFloat("Fog End", &shaderParams.fogEnd, shaderParams.fogStart + 10.0f, 300.0f);
+		float fogColorArray[3] = {
+			shaderParams.fogColor.r,
+			shaderParams.fogColor.g,
+			shaderParams.fogColor.b};
+		if (ImGui::ColorEdit3("Fog Color", fogColorArray))
+		{
+			shaderParams.fogColor = glm::vec3(fogColorArray[0], fogColorArray[1], fogColorArray[2]);
+		}
+		ImGui::SliderFloat("Fog Density", &shaderParams.fogDensity, 0.1f, 2.0f);
+	}
+
+	// Interface pour les paramètres d'éclairage
+	if (ImGui::CollapsingHeader("Lighting Settings"))
+	{
+		ImGui::SliderFloat("Ambient Strength", &shaderParams.ambientStrength, 0.0f, 1.0f);
+		ImGui::SliderFloat("Diffuse Intensity", &shaderParams.diffuseIntensity, 0.0f, 1.0f);
+		ImGui::SliderFloat("Light Levels", &shaderParams.lightLevels, 1.0f, 10.0f);
+
+		float sunDir[3] = {
+			shaderParams.sunDirection.x,
+			shaderParams.sunDirection.y,
+			shaderParams.sunDirection.z};
+		if (ImGui::SliderFloat3("Sun Direction", sunDir, -1.0f, 1.0f))
+		{
+			// Normaliser la direction
+			shaderParams.sunDirection = glm::normalize(glm::vec3(sunDir[0], sunDir[1], sunDir[2]));
+		}
+	}
+
+	// Interface pour les paramètres visuels
+	if (ImGui::CollapsingHeader("Visual Settings"))
+	{
+		ImGui::SliderFloat("Saturation Level", &shaderParams.saturationLevel, 0.5f, 2.0f);
+		ImGui::SliderFloat("Color Boost", &shaderParams.colorBoost, 0.5f, 2.0f);
+		ImGui::SliderFloat("Gamma", &shaderParams.gamma, 1.0f, 3.0f);
+	}
+
+	// Bouton pour réinitialiser tous les paramètres
+	if (ImGui::Button("Reset All Settings"))
+	{
+		shaderParams = ShaderParameters(); // Réinitialise avec les valeurs par défaut
 	}
 
 	ImGui::End();

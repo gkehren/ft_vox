@@ -91,6 +91,9 @@ private:
 		float totalFrame{0.0f};
 	} renderTiming;
 
+	ShaderParameters shaderParams;
+	void handleShaderOptions();
+
 	void handleEvents(bool &keyTPressed);
 	void updateUI();
 
