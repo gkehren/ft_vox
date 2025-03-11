@@ -16,6 +16,9 @@
 
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
+#include <Biome/Biome.hpp>
+#include <Biome/BiomeManager.hpp>
+#include <Biome/NoiseGenerator.hpp>
 #include <utils.hpp>
 
 class Chunk
@@ -45,7 +48,7 @@ public:
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
 
 	uint32_t draw(const Shader &shader, const Camera &camera, GLuint textureAtlas, const ShaderParameters &params);
-	void generateVoxels(siv::PerlinNoise *perlin);
+	void generateVoxels(NoiseGenerator *noise);
 	void generateMesh();
 
 private:
@@ -73,5 +76,6 @@ private:
 	bool meshNeedsUpdate;
 	void uploadMeshToGPU();
 
-	void generateChunk(siv::PerlinNoise *perlin);
+	void generateChunk(NoiseGenerator *noise);
+	TextureType determineBlendedBlockType(int x, int y, int z, int surfaceHeight, const std::vector<BiomeInfluence> &biomeInfluences, NoiseGenerator &noise) const;
 };

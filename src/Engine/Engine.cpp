@@ -97,6 +97,8 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 	uint32_t threadCount = std::thread::hardware_concurrency() / 2;
 	this->threadPool = std::make_unique<ThreadPool>(threadCount);
 
+	this->generateBiomeMapTexture();
+
 	std::cout << "SDL version: " << SDL_GetVersion() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
 	std::cout << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
@@ -125,11 +127,11 @@ void Engine::perlinNoise(unsigned int seed)
 		std::mt19937 gen(rd());
 		std::uniform_int_distribution<> dis(100000, 999999);
 		seed = dis(gen);
-		this->perlin = std::make_unique<siv::PerlinNoise>(seed);
+		this->noise = std::make_unique<NoiseGenerator>(seed);
 	}
 	else
 	{
-		this->perlin = std::make_unique<siv::PerlinNoise>(seed);
+		this->noise = std::make_unique<NoiseGenerator>(seed);
 	}
 	this->seed = seed;
 	std::cout << "Perlin seed: " << seed << std::endl;
@@ -191,6 +193,7 @@ void Engine::updateUI()
 	ImGui::Text("Render distance: %d | %d", this->renderSettings.minRenderDistance, this->renderSettings.maxRenderDistance);
 	ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
 	ImGui::Text("Player chunk: (%d, %d)", this->playerChunkPos.x, this->playerChunkPos.y);
+	ImGui::Text("Current biome: %s", getCurrentBiomeName().c_str());
 	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
 	ImGui::Text("Selected texture: %s (%d)", textureTypeString.at(this->selectedTexture).c_str(), this->selectedTexture);
 	ImGui::InputInt("Raycast distance", &this->renderSettings.raycastDistance);
@@ -256,6 +259,49 @@ void Engine::updateUI()
 
 	ImGui::End();
 
+	ImGui::Begin("Biome Map");
+
+	// Update the biome map texture periodically
+	static float updateTimer = 0.0f;
+	updateTimer += deltaTime;
+	if (updateTimer > 1.0f)
+	{ // Update once per second
+		updateBiomeMapTexture();
+		updateTimer = 0.0f;
+	}
+
+	// Display the biome map texture
+	if (biomeMapTexture != 0)
+	{
+		ImGui::Text("Map centered at player position");
+		ImGui::Image((ImTextureID)(biomeMapTexture), ImVec2(biomeMapSize, biomeMapSize));
+
+		// Add a legend for biome colors
+		ImGui::Separator();
+		ImGui::Text("Biome Legend:");
+		ImGui::ColorButton("##plains", ImVec4(0.39f, 0.86f, 0.39f, 1.0f), 0, ImVec2(20, 20));
+		ImGui::SameLine();
+		ImGui::Text("Plains");
+
+		ImGui::ColorButton("##desert", ImVec4(0.94f, 0.86f, 0.47f, 1.0f), 0, ImVec2(20, 20));
+		ImGui::SameLine();
+		ImGui::Text("Desert");
+
+		ImGui::ColorButton("##mountains", ImVec4(0.47f, 0.47f, 0.47f, 1.0f), 0, ImVec2(20, 20));
+		ImGui::SameLine();
+		ImGui::Text("Mountains");
+
+		ImGui::ColorButton("##snowycaps", ImVec4(0.94f, 0.94f, 0.94f, 1.0f), 0, ImVec2(20, 20));
+		ImGui::SameLine();
+		ImGui::Text("Snowy Caps");
+
+		ImGui::ColorButton("##swamp", ImVec4(0.31f, 0.39f, 0.23f, 1.0f), 0, ImVec2(20, 20));
+		ImGui::SameLine();
+		ImGui::Text("Swamp");
+	}
+
+	ImGui::End();
+
 	handleServerControls();
 	handleShaderOptions();
 
@@ -315,9 +361,9 @@ void Engine::render()
 		{
 			if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::UNLOADED)
 			{
-				auto perlinPtr = perlin.get();
-				futures.push_back(threadPool->enqueue([&chunk, perlinPtr]()
-													  { chunk.second.generateVoxels(perlinPtr); }));
+				auto noisePtr = noise.get();
+				futures.push_back(threadPool->enqueue([&chunk, noisePtr]()
+													  { chunk.second.generateVoxels(noisePtr); }));
 			}
 			// else if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::GENERATED) {
 			//	futures.push_back(threadPool->enqueue([&chunk]() {
@@ -759,4 +805,204 @@ void Engine::handleShaderOptions()
 	}
 
 	ImGui::End();
+}
+
+void Engine::generateBiomeMapTexture()
+{
+	// Initialize biome map data (RGBA format)
+	biomeMapData.resize(biomeMapSize * biomeMapSize * 4);
+
+	// Generate OpenGL texture if it doesn't exist
+	if (biomeMapTexture == 0)
+	{
+		glGenTextures(1, &biomeMapTexture);
+		glBindTexture(GL_TEXTURE_2D, biomeMapTexture);
+
+		// Set texture parameters
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+		// Initialize with empty data
+		glTexImage2D(
+			GL_TEXTURE_2D, 0, GL_RGBA,
+			biomeMapSize, biomeMapSize, 0,
+			GL_RGBA, GL_UNSIGNED_BYTE, biomeMapData.data());
+	}
+
+	updateBiomeMapTexture();
+}
+
+void Engine::updateBiomeMapTexture()
+{
+	if (!noise)
+		return;
+
+	static BiomeManager biomeManager;
+
+	// Center the map around the player
+	int centerX = static_cast<int>(camera.getPosition().x);
+	int centerZ = static_cast<int>(camera.getPosition().z);
+
+	// Scale factor (how many world units per pixel) - smaller for more detail
+	int scale = 4; // Reduced from 8 to 4 for higher resolution
+
+	// For each pixel in the map
+	for (int y = 0; y < biomeMapSize; y++)
+	{
+		for (int x = 0; x < biomeMapSize; x++)
+		{
+			// Convert map coordinates to world coordinates
+			int worldX = centerX + (x - biomeMapSize / 2) * scale;
+			int worldZ = centerZ + (y - biomeMapSize / 2) * scale;
+
+			// Get biome influences at this position
+			auto biomeInfluences = biomeManager.getBiomeInfluences(worldX, worldZ, *noise);
+
+			// If there's significant blending, draw as mixed color
+			// Otherwise use pure color for the dominant biome
+			unsigned char r = 0, g = 0, b = 0;
+
+			// Check if one biome is strongly dominant
+			bool isDominant = biomeInfluences[0].weight > 0.75f;
+
+			if (isDominant)
+			{
+				// Use pure color for dominant biome areas
+				const std::string &biomeName = biomeInfluences[0].biome->getName();
+
+				if (biomeName == "Plains")
+				{
+					r = 100;
+					g = 220;
+					b = 100;
+				}
+				else if (biomeName == "Desert")
+				{
+					r = 240;
+					g = 220;
+					b = 120;
+				}
+				else if (biomeName == "Mountains")
+				{
+					r = 120;
+					g = 120;
+					b = 120;
+				}
+				else if (biomeName == "SnowyCaps")
+				{
+					r = 240;
+					g = 240;
+					b = 240;
+				}
+				else if (biomeName == "Savanna")
+				{
+					r = 200;
+					g = 180;
+					b = 100;
+				}
+				else if (biomeName == "Swamp")
+				{
+					r = 80;
+					g = 100;
+					b = 60;
+				}
+			}
+			else
+			{
+				// For transition areas, blend the colors
+				for (const auto &influence : biomeInfluences)
+				{
+					const std::string &blendName = influence.biome->getName();
+					unsigned char br = 0, bg = 0, bb = 0;
+
+					if (blendName == "Plains")
+					{
+						br = 100;
+						bg = 220;
+						bb = 100;
+					}
+					else if (blendName == "Desert")
+					{
+						br = 240;
+						bg = 220;
+						bb = 120;
+					}
+					else if (blendName == "Mountains")
+					{
+						br = 120;
+						bg = 120;
+						bb = 120;
+					}
+					else if (blendName == "SnowyCaps")
+					{
+						br = 240;
+						bg = 240;
+						bb = 240;
+					}
+					else if (blendName == "Savanna")
+					{
+						br = 200;
+						bg = 180;
+						bb = 100;
+					}
+					else if (blendName == "Swamp")
+					{
+						br = 80;
+						bg = 100;
+						bb = 60;
+					}
+
+					// Apply influence weighting
+					r += static_cast<unsigned char>(br * influence.weight);
+					g += static_cast<unsigned char>(bg * influence.weight);
+					b += static_cast<unsigned char>(bb * influence.weight);
+				}
+			}
+
+			// Calculate index in the texture data array
+			size_t index = (y * biomeMapSize + x) * 4;
+			biomeMapData[index] = r;	   // R
+			biomeMapData[index + 1] = g;   // G
+			biomeMapData[index + 2] = b;   // B
+			biomeMapData[index + 3] = 255; // Alpha
+
+			// Mark player position with a red dot
+			if (x == biomeMapSize / 2 && y == biomeMapSize / 2)
+			{
+				biomeMapData[index] = 255;	 // R
+				biomeMapData[index + 1] = 0; // G
+				biomeMapData[index + 2] = 0; // B
+			}
+		}
+	}
+
+	// Upload the updated texture data to GPU
+	glBindTexture(GL_TEXTURE_2D, biomeMapTexture);
+	glTexSubImage2D(
+		GL_TEXTURE_2D, 0, 0, 0,
+		biomeMapSize, biomeMapSize,
+		GL_RGBA, GL_UNSIGNED_BYTE, biomeMapData.data());
+}
+
+std::string Engine::getCurrentBiomeName() const
+{
+	if (!noise)
+		return "Unknown";
+
+	static BiomeManager biomeManager;
+
+	// Get the player's current position
+	int worldX = static_cast<int>(camera.getPosition().x);
+	int worldZ = static_cast<int>(camera.getPosition().z);
+
+	// Get biome influences at player position
+	auto biomeInfluences = biomeManager.getBiomeInfluences(worldX, worldZ, *noise);
+
+	if (biomeInfluences.empty())
+		return "Unknown";
+
+	// Return dominant biome name
+	return biomeInfluences[0].biome->getName();
 }
