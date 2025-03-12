@@ -2,6 +2,7 @@
 
 #include <string>
 #include <utils.hpp>
+#include <memory>
 
 class NoiseGenerator;
 
