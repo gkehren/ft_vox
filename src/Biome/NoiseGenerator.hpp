@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../PerlinNoise/PerlinNoise.hpp"
+#include <memory>
 
 class NoiseGenerator
 {

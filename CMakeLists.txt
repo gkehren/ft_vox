@@ -13,7 +13,7 @@ include_directories(src/)
 
 find_package(OpenGL REQUIRED)
 find_package(SDL3 REQUIRED)
-find_package(Boost REQUIRED COMPONENTS asio)
+find_package(Boost REQUIRED)
 
 # FetchContent for GLM
 include(FetchContent)
@@ -33,15 +33,15 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(freetype2)
 
 
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL")
-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL")
-#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_RELEASE} -O3 -Ofast -march=native")
-#set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS_RELEASE} -O3 -Ofast -march=native")
+#set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL")
+#set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_RELEASE} -O3 -Ofast -march=native")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS_RELEASE} -O3 -Ofast -march=native")
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${SDL3_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} OpenGL::GL glm freetype Boost::asio ${SDL3_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} OpenGL::GL glm freetype ${Boost_LIBRARIES} ${SDL3_LIBRARIES})
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
