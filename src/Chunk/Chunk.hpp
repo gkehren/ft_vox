@@ -77,5 +77,4 @@ private:
 	void uploadMeshToGPU();
 
 	void generateChunk(NoiseGenerator *noise);
-	TextureType determineBlendedBlockType(int x, int y, int z, int surfaceHeight, const std::vector<BiomeInfluence> &biomeInfluences, NoiseGenerator &noise) const;
 };

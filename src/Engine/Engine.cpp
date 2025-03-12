@@ -298,6 +298,14 @@ void Engine::updateUI()
 		ImGui::ColorButton("##swamp", ImVec4(0.31f, 0.39f, 0.23f, 1.0f), 0, ImVec2(20, 20));
 		ImGui::SameLine();
 		ImGui::Text("Swamp");
+
+		ImGui::ColorButton("##hills", ImVec4(0.86f, 0.86f, 0.47f, 1.0f), 0, ImVec2(20, 20));
+		ImGui::SameLine();
+		ImGui::Text("Hills");
+
+		ImGui::ColorButton("##valley", ImVec4(0.47f, 0.86f, 0.86f, 1.0f), 0, ImVec2(20, 20));
+		ImGui::SameLine();
+		ImGui::Text("Valley");
 	}
 
 	ImGui::End();
@@ -908,6 +916,18 @@ void Engine::updateBiomeMapTexture()
 					g = 100;
 					b = 60;
 				}
+				else if (biomeName == "Hills")
+				{
+					r = 220;
+					g = 220;
+					b = 100;
+				}
+				else if (biomeName == "Valley")
+				{
+					r = 100;
+					g = 220;
+					b = 220;
+				}
 			}
 			else
 			{
@@ -952,6 +972,18 @@ void Engine::updateBiomeMapTexture()
 						br = 80;
 						bg = 100;
 						bb = 60;
+					}
+					else if (blendName == "Hills")
+					{
+						br = 220;
+						bg = 220;
+						bb = 100;
+					}
+					else if (blendName == "Valley")
+					{
+						br = 100;
+						bg = 220;
+						bb = 220;
 					}
 
 					// Apply influence weighting

@@ -228,231 +228,65 @@ void Chunk::generateChunk(NoiseGenerator *noise)
 		for (int z = -1; z <= Chunk::SIZE; z++)
 		{
 			if ((x == -1 || x == Chunk::SIZE) && (z == -1 || z == Chunk::SIZE))
-			{
 				continue;
-			}
 
 			// Get absolute world coordinates
 			int worldX = static_cast<int>(position.x) + x;
 			int worldZ = static_cast<int>(position.z) + z;
 
-			// Get biome influences for this position
-			std::vector<BiomeInfluence> biomeInfluences = biomeManager.getBiomeInfluences(worldX, worldZ, *noise);
-			const Biome *biome = biomeManager.getBiomeAt(worldX, worldZ, *noise);
+			// Minecraft typically uses a primary biome with minimal blending
+			const Biome *primaryBiome = biomeManager.getBiomeAt(worldX, worldZ, *noise);
 
-			// Get individual heights from each biome
-			std::vector<int> biomeHeights;
-			float totalWeight = 0.0f;
+			// Get a small amount of influence from nearby biomes for height transitions
+			std::vector<BiomeInfluence> biomeInfluences =
+				biomeManager.getBiomeInfluences(worldX, worldZ, *noise);
 
-			for (const auto &influence : biomeInfluences)
+			// Calculate height - primarily from the main biome
+			int surfaceHeight = primaryBiome->generateHeight(worldX, worldZ, *noise);
+
+			// Only blend height at boundaries for smoother transitions
+			if (biomeInfluences.size() > 1 && biomeInfluences[1].weight > 0.3f)
 			{
-				biomeHeights.push_back(influence.biome->generateHeight(worldX, worldZ, *noise));
+				int secondHeight = biomeInfluences[1].biome->generateHeight(worldX, worldZ, *noise);
+				surfaceHeight = static_cast<int>(
+					surfaceHeight * (1.0f - biomeInfluences[1].weight * 0.5f) +
+					secondHeight * (biomeInfluences[1].weight * 0.5f));
 			}
 
-			// Calculate blended height - with enhanced smoothing between drastically different heights
-			float blendedHeight = 0.0f;
-
-			// Check if mountains are involved - they need special handling
-			bool hasMountainBiome = false;
-			bool hasSwampBiome = false;
-			float mountainWeight = 0.0f;
-			float swampWeight = 0.0f;
-
-			for (size_t i = 0; i < biomeInfluences.size(); i++)
-			{
-				const auto &influence = biomeInfluences[i];
-				if (influence.biome->getName() == "Mountains")
-				{
-					hasMountainBiome = true;
-					mountainWeight = influence.weight;
-				}
-				if (influence.biome->getName() == "Swamp")
-				{
-					hasSwampBiome = true;
-					swampWeight = influence.weight;
-				}
-			}
-
-			// Special handling for extreme differences between biomes
-			if (hasMountainBiome)
-			{
-				// Apply a sigmoid-like function to make mountains rise more naturally
-				// from other biomes - steeper at the center of mountain biome, gentler at edges
-				float adjustedMountainWeight = mountainWeight * mountainWeight * (3.0f - 2.0f * mountainWeight);
-
-				for (size_t i = 0; i < biomeInfluences.size(); i++)
-				{
-					float weight = biomeInfluences[i].weight;
-
-					if (biomeInfluences[i].biome->getName() == "Mountains")
-					{
-						// Use adjusted weight for mountains
-						blendedHeight += biomeHeights[i] * adjustedMountainWeight;
-					}
-					else
-					{
-						// Other biomes are weighted down in proportion to mountain influence
-						float adjustedWeight = weight * (1.0f - adjustedMountainWeight);
-						blendedHeight += biomeHeights[i] * adjustedWeight;
-					}
-				}
-			}
-			else if (hasSwampBiome)
-			{
-				// Swamps should maintain their flatness even in transitions
-				// Use a stronger influence of the swamp's height where its weight is significant
-				float adjustedSwampWeight = swampWeight * swampWeight * (3.0f - 2.0f * swampWeight);
-				if (adjustedSwampWeight > 0.3f)
-				{
-					// Strengthen swamp flatness where it's the dominant biome
-					for (size_t i = 0; i < biomeInfluences.size(); i++)
-					{
-						float weight = biomeInfluences[i].weight;
-
-						if (biomeInfluences[i].biome->getName() == "Swamp")
-						{
-							// Use adjusted weight for swamp
-							blendedHeight += biomeHeights[i] * adjustedSwampWeight;
-						}
-						else
-						{
-							// Other biomes are weighted down in proportion to swamp influence
-							float adjustedWeight = weight * (1.0f - adjustedSwampWeight);
-							blendedHeight += biomeHeights[i] * adjustedWeight;
-						}
-					}
-				}
-				else
-				{
-					// Normal blending for minimal swamp influence
-					for (size_t i = 0; i < biomeInfluences.size(); i++)
-					{
-						blendedHeight += biomeHeights[i] * biomeInfluences[i].weight;
-					}
-				}
-			}
-			else
-			{
-				// Standard weighted average for normal biome transitions
-				for (size_t i = 0; i < biomeInfluences.size(); i++)
-				{
-					blendedHeight += biomeHeights[i] * biomeInfluences[i].weight;
-				}
-			}
-
-			// Get final integer height
-			int surfaceHeight = static_cast<int>(blendedHeight);
-
+			// Generate column of blocks
 			for (int y = 0; y < Chunk::HEIGHT; y++)
 			{
 				double caveNoise = noise->caveNoise(worldX, y + position.y, worldZ);
-				bool shouldBeCave = false;
 
-				for (const auto &influence : biomeInfluences)
+				if (y > surfaceHeight)
 				{
-					if (influence.biome->shouldBeCave(worldX, y, worldZ, caveNoise))
-					{
-						shouldBeCave = true;
-						break;
-					}
-				}
-
-				if (y < surfaceHeight)
-				{
-					if (shouldBeCave)
-						setVoxel(x, y, z, TEXTURE_AIR);
-					else
-					{
-						TextureType blockType = determineBlendedBlockType(worldX, y, worldZ, surfaceHeight, biomeInfluences, *noise);
-						setVoxel(x, y, z, blockType);
-					}
+					// Air above surface
+					setVoxel(x, y, z, TEXTURE_AIR);
 				}
 				else if (y == surfaceHeight)
 				{
-					if (caveNoise <= 0.2)
-						setVoxel(x, y, z, TEXTURE_AIR); // Cave opening
+					// Surface block (with possible cave opening)
+					if (caveNoise < 0.1) // Rare cave openings
+						setVoxel(x, y, z, TEXTURE_AIR);
 					else
-						setVoxel(x, y, z, biomeInfluences[0].biome->getProperties().surfaceBlock);
+						setVoxel(x, y, z, primaryBiome->getProperties().surfaceBlock);
 				}
 				else
 				{
-					setVoxel(x, y, z, TEXTURE_AIR);
-
-					if (surfaceHeight <= 1 && y == 0)
-						setVoxel(x, y, z, biome->getProperties().surfaceBlock);
+					// Check for caves
+					if (primaryBiome->shouldBeCave(worldX, y, worldZ, caveNoise))
+						setVoxel(x, y, z, TEXTURE_AIR);
+					else
+					{
+						// Underground blocks
+						TextureType blockType = primaryBiome->getBlockAt(
+							worldX, y, worldZ, surfaceHeight, *noise);
+						setVoxel(x, y, z, blockType);
+					}
 				}
 			}
 		}
 	}
-}
-
-TextureType Chunk::determineBlendedBlockType(
-	int x, int y, int z, int surfaceHeight,
-	const std::vector<BiomeInfluence> &biomeInfluences,
-	NoiseGenerator &noise) const
-{
-	// For deep underground, use the dominant biome's block
-	if (y < surfaceHeight - 8)
-	{ // Deeper underground
-		return biomeInfluences[0].biome->getBlockAt(x, y, z, surfaceHeight, noise);
-	}
-
-	// For transition layers near the surface (8 blocks from surface)
-	// Calculate a blend factor based on depth from surface
-	float depthFactor = (surfaceHeight - y) / 8.0f;
-	depthFactor = std::clamp(depthFactor, 0.0f, 1.0f);
-
-	// The closer to the surface, the more we care about the transition
-	float transitionStrength = 1.0f - depthFactor;
-
-	// Use a noise function to create a natural pattern for block type selection
-	float blockSelectNoise = noise.noise3D(x, y, z, 8.0f);
-
-	// Create a weighted randomness factor that considers multiple biomes
-	// but favors the primary one closer to the surface
-	float cumulativeWeight = 0.0f;
-
-	// Adjust weights based on depth
-	std::vector<float> adjustedWeights;
-	float totalAdjusted = 0.0f;
-
-	for (const auto &influence : biomeInfluences)
-	{
-		// Strengthen the dominant biome influence as we go deeper
-		float adjustedWeight = influence.weight;
-
-		// Apply depth-based adjustment
-		if (influence.biome == biomeInfluences[0].biome)
-		{ // Dominant biome
-			adjustedWeight = influence.weight * (1.0f + depthFactor);
-		}
-		else
-		{
-			adjustedWeight = influence.weight * (1.0f - depthFactor * 0.5f);
-		}
-
-		adjustedWeights.push_back(adjustedWeight);
-		totalAdjusted += adjustedWeight;
-	}
-
-	// Normalize the adjusted weights
-	for (auto &weight : adjustedWeights)
-	{
-		weight /= totalAdjusted;
-	}
-
-	// Select biome based on adjusted weights
-	for (size_t i = 0; i < biomeInfluences.size(); i++)
-	{
-		cumulativeWeight += adjustedWeights[i];
-		if (blockSelectNoise <= cumulativeWeight)
-		{
-			return biomeInfluences[i].biome->getBlockAt(x, y, z, surfaceHeight, noise);
-		}
-	}
-
-	// Default fallback
-	return biomeInfluences[0].biome->getBlockAt(x, y, z, surfaceHeight, noise);
 }
 
 void Chunk::generateMesh()

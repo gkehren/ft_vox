@@ -6,10 +6,10 @@
 class NoiseGenerator
 {
 private:
-	std::unique_ptr<siv::PerlinNoise> perlin;
 	uint32_t seed;
 
 public:
+	std::unique_ptr<siv::PerlinNoise> perlin;
 	NoiseGenerator(uint32_t seed) : seed(seed)
 	{
 		perlin = std::make_unique<siv::PerlinNoise>(seed);
@@ -34,31 +34,59 @@ public:
 
 	float mountainNoise(float x, float z) const
 	{
-		return noise2D(x, z, 500.0f);
+		// Large scale base variation
+		float base = noise2D(x, z, 320.0f);
+
+		float detail = perlin->octave2D_01(x / 120.0f, z / 120.0f, 3, 0.7) * 0.4f;
+
+		float combined = std::clamp(base + detail, 0.0f, 1.0f);
+		return std::pow(combined, 1.3f); // Exponential to enhance peaks
+	}
+
+	// Valley noise - creates erosion patterns
+	float valleyNoise(float x, float z) const
+	{
+		return perlin->octave2D_01(x / 120.0f, z / 120.0f, 4, 0.5);
 	}
 
 	float terrainBaseNoise(float x, float z) const
 	{
-		return noise2D(x, z, 200.0f) * 1.5f +
-			   noise2D(x, z, 50.0f) * 0.5f +
-			   noise2D(x, z, 25.0f) * 0.2f;
+		// Use octaves with different scales for more Minecraft-like terrain
+		float continentNoise = noise2D(x, z, 400.0f); // Larger scale for continent shapes
+
+		// Use octave noise for more natural terrain patterns
+		float mediumNoise = perlin->octave2D_01(x / 120.0f, z / 120.0f, 4, 0.5) * 0.7f;
+
+		// Small detail noise
+		float detailNoise = perlin->octave2D_01(x / 40.0f, z / 40.0f, 3, 0.6) * 0.3f;
+
+		return (continentNoise * 0.6f + mediumNoise + detailNoise);
 	}
 
 	float caveNoise(float x, float y, float z) const
 	{
-		return noise3D(x, y, z, 24.0f); // Adjust scale for better caves
+		// Vertical stretching - makes caves more horizontal
+		float stretchedY = y / 1.8f;
+
+		// Main cave noise
+		float base = noise3D(x, stretchedY, z, 42.0f);
+
+		// Add details for interesting cave features
+		float detail = noise3D(x, stretchedY, z, 15.0f) * 0.3f;
+
+		return base + detail;
 	}
 
 	float temperatureNoise(int x, int z) const
 	{
 		// Create a base temperature that changes gradually across the world
-		float base = noise2D(x, z, 1200.0f);
+		float base = noise2D(x, z, 600.0f);
 
 		// Add medium-scale variations
-		float medium = noise2D(x, z, 400.0f) * 0.15f;
+		float medium = noise2D(x, z, 250.0f) * 0.25f;
 
 		// Add some smaller details for more interesting patterns
-		float detail = noise2D(x, z, 150.0f) * 0.07f;
+		float detail = noise2D(x, z, 80.0f) * 0.12f;
 
 		return std::clamp(base + medium + detail, 0.0f, 1.0f);
 	}
@@ -70,13 +98,13 @@ public:
 		z -= 1000.0f;
 
 		// Create a base humidity that changes gradually
-		float base = noise2D(x, z, 1000.0f);
+		float base = noise2D(x, z, 500.0f);
 
 		// Add medium-scale variations
-		float medium = noise2D(x, z, 350.0f) * 0.2f;
+		float medium = noise2D(x, z, 180.0f) * 0.3f;
 
 		// Add smaller details
-		float detail = noise2D(x, z, 120.0f) * 0.08f;
+		float detail = noise2D(x, z, 60.0f) * 0.15f;
 
 		return std::clamp(base + medium + detail, 0.0f, 1.0f);
 	}
