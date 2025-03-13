@@ -171,16 +171,15 @@ std::vector<BiomeInfluence> BiomeManager::getBiomeInfluences(int x, int z, Noise
 	float humidity = noise.humidityNoise(x, z);
 
 	// Add some variation to create more natural boundaries
-	float boundaryNoise = noise.noise2D(x, z, 60.0f) * 0.08f; // Stronger noise, smaller scale
-	temperature += boundaryNoise;
-	humidity += boundaryNoise * 0.7f;
+	float boundaryNoise = noise.biomeBoundaryNoise(x, z);
+	temperature += boundaryNoise * 0.1f;
+	humidity += boundaryNoise * 0.1f;
 
 	// Clamp values to valid range
 	temperature = std::clamp(temperature, 0.0f, 1.0f);
 	humidity = std::clamp(humidity, 0.0f, 1.0f);
 
-	// Fewer biomes for sharper transitions
-	const int MAX_BIOMES_TO_BLEND = 2;
+	const int MAX_BIOMES_TO_BLEND = 4;
 
 	std::vector<BiomeInfluence> influences;
 	std::vector<std::pair<float, const Biome *>> distanceToBiome;
@@ -202,8 +201,7 @@ std::vector<BiomeInfluence> BiomeManager::getBiomeInfluences(int x, int z, Noise
 	int biomesToConsider = std::min(MAX_BIOMES_TO_BLEND, static_cast<int>(distanceToBiome.size()));
 	float totalWeight = 0.0f;
 
-	// MODIFIED: Even sharper transitions
-	const float EXPONENT = 12.0f; // Increased from 8.0f
+	const float EXPONENT = 1.5f; // Decreased for smoother blending
 
 	for (int i = 0; i < biomesToConsider; i++)
 	{

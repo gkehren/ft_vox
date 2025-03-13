@@ -51,15 +51,9 @@ public:
 
 	float terrainBaseNoise(float x, float z) const
 	{
-		// Use octaves with different scales for more Minecraft-like terrain
-		float continentNoise = noise2D(x, z, 400.0f); // Larger scale for continent shapes
-
-		// Use octave noise for more natural terrain patterns
-		float mediumNoise = perlin->octave2D_01(x / 120.0f, z / 120.0f, 4, 0.5) * 0.7f;
-
-		// Small detail noise
-		float detailNoise = perlin->octave2D_01(x / 40.0f, z / 40.0f, 3, 0.6) * 0.3f;
-
+		float continentNoise = noise2D(x, z, 400.0f);
+		float mediumNoise = perlin->octave2D_01(x / 120.0f, z / 120.0f, 4, 0.5) * 0.3f;
+		float detailNoise = perlin->octave2D_01(x / 40.0f, z / 40.0f, 3, 0.6) * 0.1f;
 		return (continentNoise * 0.6f + mediumNoise + detailNoise);
 	}
 
@@ -107,5 +101,14 @@ public:
 		float detail = noise2D(x, z, 60.0f) * 0.15f;
 
 		return std::clamp(base + medium + detail, 0.0f, 1.0f);
+	}
+
+	float biomeBoundaryNoise(float x, float z) const
+	{
+		// Large scale noise for smooth biome transitions
+		float largeScale = noise2D(x, z, 120.0f) * 0.5f;
+		// Medium scale noise for varied boundary shapes
+		float mediumScale = noise2D(x, z, 60.0f) * 0.3f;
+		return largeScale + mediumScale;
 	}
 };

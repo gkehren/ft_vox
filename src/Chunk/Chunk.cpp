@@ -245,12 +245,19 @@ void Chunk::generateChunk(NoiseGenerator *noise)
 			int surfaceHeight = primaryBiome->generateHeight(worldX, worldZ, *noise);
 
 			// Only blend height at boundaries for smoother transitions
-			if (biomeInfluences.size() > 1 && biomeInfluences[1].weight > 0.3f)
+			if (biomeInfluences.size() > 1)
 			{
-				int secondHeight = biomeInfluences[1].biome->generateHeight(worldX, worldZ, *noise);
-				surfaceHeight = static_cast<int>(
-					surfaceHeight * (1.0f - biomeInfluences[1].weight * 0.5f) +
-					secondHeight * (biomeInfluences[1].weight * 0.5f));
+				// Start with primary biome height
+				float blendedHeight = surfaceHeight * biomeInfluences[0].weight;
+
+				// Add weighted heights from other biomes
+				for (size_t i = 1; i < biomeInfluences.size(); i++)
+				{
+					int otherHeight = biomeInfluences[i].biome->generateHeight(worldX, worldZ, *noise);
+					blendedHeight += otherHeight * biomeInfluences[i].weight;
+				}
+
+				surfaceHeight = static_cast<int>(blendedHeight);
 			}
 
 			// Generate column of blocks
@@ -441,7 +448,6 @@ uint32_t Chunk::draw(const Shader &shader, const Camera &camera, GLuint textureA
 	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
 	shader.setInt("textureSampler", 0);
 
-	glm::vec3 sunDirection = glm::normalize(glm::vec3(0.8, 1.0, 0.6));
 	glm::vec3 sunPosition = camera.getPosition() + params.sunDirection * 2000.0f;
 
 	shader.setVec3("lightPos", sunPosition);

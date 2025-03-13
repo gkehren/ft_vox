@@ -1,6 +1,13 @@
 #include "Biome.hpp"
 #include "NoiseGenerator.hpp"
 
+static float smootherStep(float edge0, float edge1, float x)
+{
+	x = (x - edge0) / (edge1 - edge0);
+	x = std::clamp(x, 0.0f, 1.0f);
+	return x * x * (3 - 2 * x);
+}
+
 int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 {
 	// Base terrain is the sea level
@@ -8,12 +15,14 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 
 	// Get base terrain noise
 	float baseNoise = noise.terrainBaseNoise(x, z);
+	baseNoise = smootherStep(0.0f, 1.0f, baseNoise);
 
 	// Special handling for different biome types
 	if (properties.name == "Mountains")
 	{
 		// Mountains need dramatic terrain
 		float mountainNoise = noise.mountainNoise(x, z);
+		mountainNoise = smootherStep(0.0f, 1.0f, mountainNoise);
 
 		// Create steeper mountains with clear peaks
 		if (mountainNoise > 0.5f)
@@ -27,7 +36,7 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 			int mountainHeight = static_cast<int>(factor * properties.heightVariation);
 
 			// Add some ridges and variation to mountain tops
-			float ridgeNoise = noise.noise2D(x, z, 30.0f) * 15.0f;
+			float ridgeNoise = noise.noise2D(x, z, 30.0f) * 10.0f;
 
 			return baseHeight + mountainHeight + static_cast<int>(ridgeNoise);
 		}
@@ -41,12 +50,13 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 	{
 		// Similar to mountains but with even more dramatic peaks
 		float snowPeakNoise = noise.mountainNoise(x, z);
+		snowPeakNoise = smootherStep(0.0f, 1.0f, snowPeakNoise);
 
 		if (snowPeakNoise > 0.6f)
 		{
 			// Exponential curve for dramatic snowy peaks
 			float factor = (snowPeakNoise - 0.6f) / 0.4f;
-			factor = factor * factor * factor; // Cubic for sharper peaks
+			factor = std::pow(factor, 1.2f); // Higher power for more dramatic peaks
 			int peakHeight = static_cast<int>(factor * properties.heightVariation * 1.3f);
 			return baseHeight + peakHeight;
 		}
@@ -60,6 +70,7 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 	{
 		// Hills have moderate variation with some valleys
 		float hillFactor = noise.noise2D(x, z, 70.0f);
+		hillFactor = smootherStep(0.0f, 1.0f, hillFactor);
 
 		// Create occasional valleys with sharper transitions
 		float valleyFactor = noise.valleyNoise(x, z);
@@ -67,7 +78,7 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 		{
 			// Create a valley
 			float depth = (0.25f - valleyFactor) / 0.25f;
-			return baseHeight - static_cast<int>(depth * 15.0f);
+			return baseHeight - static_cast<int>(depth * 10.0f);
 		}
 
 		return baseHeight + static_cast<int>(hillFactor * properties.heightVariation);
@@ -75,7 +86,9 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 	else if (properties.name == "Plains" || properties.name == "Forest")
 	{
 		float plainNoise = noise.noise2D(x, z, 120.0f);
+		plainNoise = smootherStep(0.0f, 1.0f, plainNoise);
 		float detailNoise = noise.noise2D(x, z, 20.0f) * 2.5f;
+		detailNoise = smootherStep(0.0f, 1.0f, detailNoise);
 
 		return baseHeight + static_cast<int>(plainNoise * 4.0f + detailNoise);
 	}
@@ -83,9 +96,11 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 	{
 		// Gentle dunes with occasional flat areas
 		float duneNoise = noise.noise2D(x, z, 50.0f);
+		duneNoise = smootherStep(0.0f, 1.0f, duneNoise);
 
 		// Add occasional mesas (desert plateaus)
 		float mesaNoise = noise.noise2D(x, z, 180.0f);
+		mesaNoise = smootherStep(0.0f, 1.0f, mesaNoise);
 		if (mesaNoise > 0.75f)
 		{
 			float mesaHeight = (mesaNoise - 0.75f) / 0.25f;
@@ -98,6 +113,7 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 	{
 		// Create dramatic valleys with ridges
 		float valleyNoise = noise.valleyNoise(x, z);
+		valleyNoise = smootherStep(0.0f, 1.0f, valleyNoise);
 
 		// Sharper ridges along valley edges
 		if (valleyNoise > 0.65f)
@@ -122,6 +138,7 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 	{
 		// Very flat, slightly below sea level, with occasional deep pools
 		float swampNoise = noise.noise2D(x, z, 60.0f);
+		swampNoise = smootherStep(0.0f, 1.0f, swampNoise);
 
 		// Create occasional deeper pools in swamps
 		if (swampNoise < 0.25f)
@@ -134,7 +151,7 @@ int Biome::generateHeight(int x, int z, NoiseGenerator &noise) const
 	}
 
 	// Default terrain generation with more variation
-	return baseHeight + static_cast<int>(baseNoise * properties.heightVariation);
+	return baseHeight + static_cast<int>(baseNoise * properties.heightVariation * 0.5f);
 }
 
 TextureType Biome::getBlockAt(int x, int y, int z, int surfaceHeight, NoiseGenerator &noise) const
