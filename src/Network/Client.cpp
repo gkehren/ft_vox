@@ -15,7 +15,7 @@ void Client::connect(const std::string &host, unsigned short port)
 	if (connected)
 		return;
 	connected = true;
-	serverEndpoint = boost::asio::ip::udp::endpoint(boost::asio::ip::address::from_string(host), port);
+	serverEndpoint = boost::asio::ip::udp::endpoint(boost::asio::ip::make_address(host), port);
 	socket.open(boost::asio::ip::udp::v4());
 	clientThread = std::thread(&Client::run, this);
 }

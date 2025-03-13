@@ -33,10 +33,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(freetype2)
 
 
-#set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL")
-#set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_RELEASE} -O3 -Ofast -march=native")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS_RELEASE} -O3 -Ofast -march=native")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -Ofast -march=native")
+set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -Ofast -march=native")
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 
