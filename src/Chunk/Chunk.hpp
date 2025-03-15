@@ -16,9 +16,7 @@
 
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
-#include <Biome/Biome.hpp>
 #include <Biome/BiomeManager.hpp>
-#include <Biome/NoiseGenerator.hpp>
 #include <utils.hpp>
 
 class Chunk
@@ -48,7 +46,7 @@ public:
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
 
 	uint32_t draw(const Shader &shader, const Camera &camera, GLuint textureAtlas, const ShaderParameters &params);
-	void generateVoxels(NoiseGenerator *noise);
+	void generateVoxels(siv::PerlinNoise *noise);
 	void generateMesh();
 
 private:
@@ -76,5 +74,7 @@ private:
 	bool meshNeedsUpdate;
 	void uploadMeshToGPU();
 
-	void generateChunk(NoiseGenerator *noise);
+	void generateChunk(siv::PerlinNoise *noise);
+	void generateTerrainColumn(int x, int z, int terrainHeight, float biomeNoise, siv::PerlinNoise *noise);
+	void generateFeatures(int x, int z, int terrainHeight, int worldX, int worldZ, float biomeNoise, siv::PerlinNoise *noise);
 };

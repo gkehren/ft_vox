@@ -203,7 +203,7 @@ bool Chunk::isVoxelActiveGlobalPos(int x, int y, int z) const
 	return isVoxelActive(localX, localY, localZ);
 }
 
-void Chunk::generateVoxels(NoiseGenerator *noise)
+void Chunk::generateVoxels(siv::PerlinNoise *noise)
 {
 	if (state != ChunkState::UNLOADED)
 		return;
@@ -219,9 +219,10 @@ void Chunk::generateVoxels(NoiseGenerator *noise)
 	state = ChunkState::GENERATED;
 }
 
-void Chunk::generateChunk(NoiseGenerator *noise)
+void Chunk::generateChunk(siv::PerlinNoise *noise)
 {
-	static BiomeManager biomeManager;
+	static BiomeManager biomeManager; // Static to avoid recreation
+	const float blendRange = 0.05f;
 
 	for (int x = -1; x <= Chunk::SIZE; x++)
 	{
@@ -234,63 +235,123 @@ void Chunk::generateChunk(NoiseGenerator *noise)
 			int worldX = static_cast<int>(position.x) + x;
 			int worldZ = static_cast<int>(position.z) + z;
 
-			// Minecraft typically uses a primary biome with minimal blending
-			const Biome *primaryBiome = biomeManager.getBiomeAt(worldX, worldZ, *noise);
+			float biomeNoise = noise->noise2D_01(
+				static_cast<float>(worldX) / 256.0f,
+				static_cast<float>(worldZ) / 256.0f);
 
-			// Get a small amount of influence from nearby biomes for height transitions
-			std::vector<BiomeInfluence> biomeInfluences =
-				biomeManager.getBiomeInfluences(worldX, worldZ, *noise);
+			// Calculate heights for each biome
+			float desertHeight = biomeManager.getTerrainHeightAt(worldX, worldZ, BIOME_DESERT, noise);
+			float forestHeight = biomeManager.getTerrainHeightAt(worldX, worldZ, BIOME_FOREST, noise);
+			float plainHeight = biomeManager.getTerrainHeightAt(worldX, worldZ, BIOME_PLAIN, noise);
+			float mountainHeight = biomeManager.getTerrainHeightAt(worldX, worldZ, BIOME_MOUNTAIN, noise);
 
-			// Calculate height - primarily from the main biome
-			int surfaceHeight = primaryBiome->generateHeight(worldX, worldZ, *noise);
-
-			// Only blend height at boundaries for smoother transitions
-			if (biomeInfluences.size() > 1)
+			// Blend heights based on biome transitions
+			float combinedHeight;
+			if (biomeNoise < 0.35f - blendRange)
 			{
-				// Start with primary biome height
-				float blendedHeight = surfaceHeight * biomeInfluences[0].weight;
-
-				// Add weighted heights from other biomes
-				for (size_t i = 1; i < biomeInfluences.size(); i++)
-				{
-					int otherHeight = biomeInfluences[i].biome->generateHeight(worldX, worldZ, *noise);
-					blendedHeight += otherHeight * biomeInfluences[i].weight;
-				}
-
-				surfaceHeight = static_cast<int>(blendedHeight);
+				combinedHeight = desertHeight; // pure desert
+			}
+			else if (biomeNoise < 0.35f + blendRange)
+			{
+				combinedHeight = biomeManager.blendBiomes(biomeNoise, desertHeight, forestHeight, 0.35f, blendRange);
+			}
+			else if (biomeNoise < 0.5f - blendRange)
+			{
+				combinedHeight = forestHeight; // pure forest
+			}
+			else if (biomeNoise < 0.5f + blendRange)
+			{
+				combinedHeight = biomeManager.blendBiomes(biomeNoise, forestHeight, plainHeight, 0.5f, blendRange);
+			}
+			else if (biomeNoise < 0.65f - blendRange)
+			{
+				combinedHeight = plainHeight; // pure plain
+			}
+			else if (biomeNoise < 0.65f + blendRange)
+			{
+				combinedHeight = biomeManager.blendBiomes(biomeNoise, plainHeight, mountainHeight, 0.65f, blendRange);
+			}
+			else
+			{
+				combinedHeight = mountainHeight; // pure mountain
 			}
 
-			// Generate column of blocks
-			for (int y = 0; y < Chunk::HEIGHT; y++)
-			{
-				double caveNoise = noise->caveNoise(worldX, y + position.y, worldZ);
+			int terrainHeight = static_cast<int>(combinedHeight);
 
-				if (y > surfaceHeight)
-				{
-					// Air above surface
-					setVoxel(x, y, z, TEXTURE_AIR);
-				}
-				else if (y == surfaceHeight)
-				{
-					// Surface block (with possible cave opening)
-					if (caveNoise < 0.1) // Rare cave openings
-						setVoxel(x, y, z, TEXTURE_AIR);
-					else
-						setVoxel(x, y, z, primaryBiome->getProperties().surfaceBlock);
-				}
+			// Generate terrain column
+			generateTerrainColumn(x, z, terrainHeight, biomeNoise, noise);
+
+			// Generate features
+			generateFeatures(x, z, terrainHeight, worldX, worldZ, biomeNoise, noise);
+		}
+	}
+}
+
+void Chunk::generateTerrainColumn(int x, int z, int terrainHeight, float biomeNoise, siv::PerlinNoise *noise)
+{
+	for (int y = 0; y < Chunk::HEIGHT; y++)
+	{
+		if (y < terrainHeight)
+		{
+			if (y >= terrainHeight - 1)
+			{
+				// Surface block
+				if (biomeNoise < 0.35f)
+					setVoxel(x, y, z, TEXTURE_SAND);
+				else if (biomeNoise < 0.5f)
+					setVoxel(x, y, z, TEXTURE_DIRT);
+				else if (biomeNoise < 0.65f)
+					setVoxel(x, y, z, TEXTURE_GRASS);
 				else
-				{
-					// Check for caves
-					if (primaryBiome->shouldBeCave(worldX, y, worldZ, caveNoise))
-						setVoxel(x, y, z, TEXTURE_AIR);
-					else
-					{
-						// Underground blocks
-						TextureType blockType = primaryBiome->getBlockAt(
-							worldX, y, worldZ, surfaceHeight, *noise);
-						setVoxel(x, y, z, blockType);
-					}
-				}
+					setVoxel(x, y, z, TEXTURE_STONE);
+			}
+			else if (y >= terrainHeight - 3)
+			{
+				setVoxel(x, y, z, TEXTURE_DIRT);
+			}
+			else
+			{
+				setVoxel(x, y, z, TEXTURE_STONE);
+			}
+		}
+		else
+		{
+			setVoxel(x, y, z, TEXTURE_AIR);
+		}
+	}
+}
+
+void Chunk::generateFeatures(int x, int z, int terrainHeight, int worldX, int worldZ, float biomeNoise, siv::PerlinNoise *noise)
+{
+	for (int y = 0; y < Chunk::HEIGHT; y++)
+	{
+		if (y >= terrainHeight || y == 0)
+			continue;
+
+		// Generate caves
+		float caveNoise = noise->octave3D_01(
+			static_cast<float>(worldX) / 32.0f,
+			static_cast<float>(y) / 32.0f,
+			static_cast<float>(worldZ) / 32.0f,
+			3, 0.5f);
+
+		if (caveNoise < 0.25f)
+		{
+			setVoxel(x, y, z, TEXTURE_AIR);
+			continue; // Skip mineral generation if we've carved out a cave
+		}
+
+		// Generate minerals
+		if (y < terrainHeight - 5)
+		{
+			float mineralNoise = noise->octave3D_01(
+				static_cast<float>(worldX) / 20.0f,
+				static_cast<float>(y) / 20.0f,
+				static_cast<float>(worldZ) / 20.0f,
+				2, 0.5f);
+			if (mineralNoise > 0.85f)
+			{
+				setVoxel(x, y, z, TEXTURE_BRICK);
 			}
 		}
 	}

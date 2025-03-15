@@ -236,3 +236,43 @@ struct ShaderParameters
 	float colorBoost = 1.0f;
 	float gamma = 1.8f;
 };
+
+struct BiomeParameters
+{
+	// General biome properties
+	float baseHeight;
+	float heightVariation;
+
+	// Surface properties
+	TextureType surfaceBlock;
+	TextureType subSurfaceBlock;
+	int subSurfaceDepth;
+
+	// Noise parameters
+	float noiseScale;
+	int octaves;
+	float persistence;
+
+	// Mountain-specific parameters
+	float mountainNoiseScale;
+	int mountainOctaves;
+	float mountainPersistence;
+	float mountainDetailScale;
+	float mountainDetailInfluence;
+	float peakNoiseScale;
+	float peakThreshold;
+	float peakMultiplier;
+
+	// Feature generation
+	float caveDensity;
+	float mineralDensity;
+};
+
+enum BiomeType
+{
+	BIOME_DESERT,
+	BIOME_FOREST,
+	BIOME_PLAIN,
+	BIOME_MOUNTAIN,
+	BIOME_COUNT
+};

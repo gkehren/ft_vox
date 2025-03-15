@@ -32,7 +32,6 @@
 #include <Engine/ThreadPool.hpp>
 #include <Network/Server.hpp>
 #include <Network/Client.hpp>
-#include <Biome/NoiseGenerator.hpp>
 
 class Engine
 {
@@ -61,7 +60,7 @@ private:
 	std::unique_ptr<Renderer> renderer;
 	std::unique_ptr<TextRenderer> textRenderer;
 	std::unique_ptr<ThreadPool> threadPool;
-	std::unique_ptr<NoiseGenerator> noise;
+	std::unique_ptr<siv::PerlinNoise> noise;
 	std::unique_ptr<Server> server;
 	std::unique_ptr<Client> client;
 
@@ -117,14 +116,6 @@ private:
 	// Network
 	char ipInputBuffer[128] = "127.0.0.1";
 	void handleServerControls();
-
-	GLuint biomeMapTexture = 0;
-	const int biomeMapSize = 256;
-	std::vector<unsigned char> biomeMapData;
-
-	void generateBiomeMapTexture();
-	void updateBiomeMapTexture();
-	std::string getCurrentBiomeName() const;
 };
 
 // void	mouse_callback(SDL_Window* window, double xpos, double ypos);
