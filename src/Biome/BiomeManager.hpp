@@ -7,6 +7,7 @@ class BiomeManager
 {
 public:
 	BiomeManager();
+	~BiomeManager() = default;
 
 	// Get biome type at world coordinates
 	BiomeType getBiomeTypeAt(int worldX, int worldY, siv::PerlinNoise *noise);

@@ -191,7 +191,7 @@ void Engine::updateUI()
 	ImGui::Text("Render distance: %d | %d", this->renderSettings.minRenderDistance, this->renderSettings.maxRenderDistance);
 	ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", this->camera.getPosition().x, this->camera.getPosition().y, this->camera.getPosition().z);
 	ImGui::Text("Player chunk: (%d, %d)", this->playerChunkPos.x, this->playerChunkPos.y);
-	//ImGui::Text("Current biome: %s", getCurrentBiomeName().c_str());
+	ImGui::Text("Current biome: %s", getCurrentBiomeName().c_str());
 	ImGui::Text("Speed: %.1f", this->camera.getMovementSpeed());
 	ImGui::Text("Selected texture: %s (%d)", textureTypeString.at(this->selectedTexture).c_str(), this->selectedTexture);
 	ImGui::InputInt("Raycast distance", &this->renderSettings.raycastDistance);
@@ -259,6 +259,7 @@ void Engine::updateUI()
 
 	handleServerControls();
 	handleShaderOptions();
+	renderBiomeMap();
 
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -757,6 +758,191 @@ void Engine::handleShaderOptions()
 	if (ImGui::Button("Reset All Settings"))
 	{
 		shaderParams = ShaderParameters(); // Réinitialise avec les valeurs par défaut
+	}
+
+	ImGui::End();
+}
+
+std::string Engine::getCurrentBiomeName() const
+{
+	static BiomeManager biomeManager;
+
+	switch (biomeManager.getBiomeTypeAt(camera.getPosition().x, camera.getPosition().z, noise.get()))
+	{
+	case BiomeType::BIOME_PLAIN:
+		return "Plains";
+	case BiomeType::BIOME_FOREST:
+		return "Forest";
+	case BiomeType::BIOME_DESERT:
+		return "Desert";
+	case BiomeType::BIOME_MOUNTAIN:
+		return "Mountain";
+	default:
+		return "Unknown";
+	}
+}
+
+void Engine::updateBiomeMap()
+{
+	static BiomeManager biomeManager;
+
+	if (!biomeMap.needsUpdate)
+		return;
+
+	// Initialize or resize pixel data if needed
+	if (biomeMap.pixelData.empty() || biomeMap.pixelData.size() != biomeMap.mapSize * biomeMap.mapSize * 4)
+	{
+		biomeMap.pixelData.resize(biomeMap.mapSize * biomeMap.mapSize * 4);
+	}
+
+	// Calculate the world bounds of the map based on zoom and center
+	float worldWidth = biomeMap.mapSize / biomeMap.zoom;
+	float worldHeight = biomeMap.mapSize / biomeMap.zoom;
+	float worldLeft = biomeMap.center.x - worldWidth / 2;
+	float worldTop = biomeMap.center.y - worldHeight / 2;
+
+	// Generate map data
+	for (int y = 0; y < biomeMap.mapSize; y++)
+	{
+		for (int x = 0; x < biomeMap.mapSize; x++)
+		{
+			// Convert pixel coordinates to world coordinates
+			float worldX = worldLeft + (x / static_cast<float>(biomeMap.mapSize)) * worldWidth;
+			float worldZ = worldTop + (y / static_cast<float>(biomeMap.mapSize)) * worldHeight;
+
+			// Get the biome type at this world position
+			BiomeType biome = biomeManager.getBiomeTypeAt(worldX, worldZ, noise.get());
+
+			// Set color based on biome type
+			unsigned char r, g, b, a = 255;
+			switch (biome)
+			{
+			case BIOME_DESERT:
+				r = 237;
+				g = 201;
+				b = 175; // Tan/sand color
+				break;
+			case BIOME_FOREST:
+				r = 34;
+				g = 139;
+				b = 34; // Forest green
+				break;
+			case BIOME_PLAIN:
+				r = 124;
+				g = 252;
+				b = 0; // Lawn green
+				break;
+			case BIOME_MOUNTAIN:
+				r = 139;
+				g = 137;
+				b = 137; // Gray
+				break;
+			default:
+				r = 255;
+				g = 0;
+				b = 255; // Magenta for unknown
+			}
+
+			// Set the pixel color in the texture data
+			int pixelIndex = (y * biomeMap.mapSize + x) * 4;
+			biomeMap.pixelData[pixelIndex] = r;
+			biomeMap.pixelData[pixelIndex + 1] = g;
+			biomeMap.pixelData[pixelIndex + 2] = b;
+			biomeMap.pixelData[pixelIndex + 3] = a;
+		}
+	}
+
+	// Generate texture if it doesn't exist
+	if (biomeMap.textureID == 0)
+	{
+		glGenTextures(1, &biomeMap.textureID);
+		glBindTexture(GL_TEXTURE_2D, biomeMap.textureID);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	}
+
+	// Upload texture data
+	glBindTexture(GL_TEXTURE_2D, biomeMap.textureID);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, biomeMap.mapSize, biomeMap.mapSize,
+				 0, GL_RGBA, GL_UNSIGNED_BYTE, biomeMap.pixelData.data());
+
+	biomeMap.needsUpdate = false;
+}
+
+void Engine::renderBiomeMap()
+{
+	ImGui::Begin("Biome Map");
+
+	double currentTime = SDL_GetTicks() / 1000.0;
+
+	if (biomeMap.autoFollowPlayer && (currentTime - biomeMap.lastUpdateTime) >= 1.0)
+	{
+		biomeMap.center = glm::vec2(camera.getPosition().x, camera.getPosition().z);
+		biomeMap.needsUpdate = true;
+		biomeMap.lastUpdateTime = currentTime;
+	}
+
+	if (ImGui::Checkbox("Auto-center on Player", &biomeMap.autoFollowPlayer))
+	{
+		biomeMap.needsUpdate = true;
+	}
+
+	// Display controls for the map
+	if (ImGui::SliderFloat("Zoom", &biomeMap.zoom, 0.1f, 5.0f))
+	{
+		biomeMap.needsUpdate = true;
+	}
+
+	// Display current player position on map
+	float playerMapX = (camera.getPosition().x - biomeMap.center.x) * biomeMap.zoom + biomeMap.mapSize / 2;
+	float playerMapZ = (camera.getPosition().z - biomeMap.center.y) * biomeMap.zoom + biomeMap.mapSize / 2;
+
+	if (!biomeMap.autoFollowPlayer)
+	{
+		// Button to center map on player
+		if (ImGui::Button("Center on Player"))
+		{
+			biomeMap.center = glm::vec2(camera.getPosition().x, camera.getPosition().z);
+			biomeMap.needsUpdate = true;
+		}
+
+		ImGui::SameLine();
+	}
+
+	// Map size adjustment
+	if (ImGui::SliderInt("Map Size", &biomeMap.mapSize, 128, 1024))
+	{
+		biomeMap.needsUpdate = true;
+	}
+
+	ImGui::Text("Current Biome: %s", getCurrentBiomeName().c_str());
+	ImGui::Text("Player Position: (%.1f, %.1f)", camera.getPosition().x, camera.getPosition().z);
+
+	// Update map if needed
+	updateBiomeMap();
+
+	// Calculate map display size to maintain aspect ratio
+	ImVec2 mapSize(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().x);
+
+	ImVec2 imageStartPos = ImGui::GetCursorScreenPos();
+
+	// Display the map texture
+	ImGui::Image((ImTextureID)(intptr_t)biomeMap.textureID, mapSize);
+
+	if (playerMapX >= 0 && playerMapX < biomeMap.mapSize && playerMapZ >= 0 && playerMapZ < biomeMap.mapSize)
+	{
+		ImDrawList *drawList = ImGui::GetWindowDrawList();
+
+		// Scale the map coordinates to screen coordinates
+		float scaleRatio = mapSize.x / biomeMap.mapSize;
+		ImVec2 playerScreenPos(
+			imageStartPos.x + playerMapX * scaleRatio,
+			imageStartPos.y + playerMapZ * scaleRatio);
+
+		// Also draw a small dot at the exact player position for precision
+		drawList->AddCircleFilled(playerScreenPos, 3.0f, IM_COL32(255, 255, 255, 255));
 	}
 
 	ImGui::End();

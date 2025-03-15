@@ -32,6 +32,7 @@
 #include <Engine/ThreadPool.hpp>
 #include <Network/Server.hpp>
 #include <Network/Client.hpp>
+#include <Biome/BiomeManager.hpp>
 
 class Engine
 {
@@ -116,7 +117,21 @@ private:
 	// Network
 	char ipInputBuffer[128] = "127.0.0.1";
 	void handleServerControls();
-};
 
-// void	mouse_callback(SDL_Window* window, double xpos, double ypos);
-// void	key_callback(SDL_Window* window, int key, int scancode, int action, int mods);
+	struct BiomeMapSettings
+	{
+		GLuint textureID{0};				  // OpenGL texture ID for the biome map
+		int mapSize{512};					  // Size of the biome map texture (square)
+		float zoom{0.5f};					  // Zoom level (1.0 = default view)
+		glm::vec2 center{0.0f, 0.0f};		  // Center position of the map view
+		bool needsUpdate{true};				  // Flag to indicate if the map needs updating
+		std::vector<unsigned char> pixelData; // Raw pixel data for the texture
+		bool autoFollowPlayer{true};		  // Flag to auto-center the map on the player
+		double lastUpdateTime{0.0};			  // Last time the map was updated
+	} biomeMap;
+
+	void updateBiomeMap();
+	void renderBiomeMap();
+
+	std::string getCurrentBiomeName() const;
+};
