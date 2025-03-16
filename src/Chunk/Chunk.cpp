@@ -441,7 +441,22 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 						neighborPos.y >= 0 && neighborPos.y < HEIGHT &&
 						neighborPos.z >= 0 && neighborPos.z < SIZE)
 					{
-						isFaceVisible = !isVoxelActive(neighborPos.x, neighborPos.y, neighborPos.z);
+						if (isVoxelActive(neighborPos.x, neighborPos.y, neighborPos.z))
+						{
+							TextureType neighborType = static_cast<TextureType>(getVoxel(neighborPos.x, neighborPos.y, neighborPos.z).type);
+							if (TextureManager::isTransparent(neighborType))
+							{
+								isFaceVisible = true;
+							}
+							else
+							{
+								isFaceVisible = false;
+							}
+						}
+						else
+						{
+							isFaceVisible = true;
+						}
 					}
 					else
 					{

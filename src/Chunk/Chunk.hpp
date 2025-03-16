@@ -14,6 +14,7 @@
 
 #include <chrono>
 
+#include <Renderer/TextureManager.hpp>
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
 #include <Biome/BiomeManager.hpp>

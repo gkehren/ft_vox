@@ -17,6 +17,11 @@ public:
 	bool hasTransparency(TextureType type) const;
 	bool hasBiomeColoring(TextureType type) const;
 
+	static bool isTransparent(TextureType type)
+	{
+		return type == TextureType::GLASS || type == TextureType::OAK_LEAVES;
+	}
+
 private:
 	GLuint textureArray;
 	std::vector<TextureInfo> textures;
