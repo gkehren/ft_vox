@@ -8,8 +8,8 @@ BiomeManager::BiomeManager()
 	biomeParams[BIOME_DESERT] = {
 		/* baseHeight */ 64.0f,
 		/* heightVariation */ 15.0f,
-		/* surfaceBlock */ TEXTURE_SAND,
-		/* subSurfaceBlock */ TEXTURE_SAND,
+		/* surfaceBlock */ SAND,
+		/* subSurfaceBlock */ SAND,
 		/* subSurfaceDepth */ 3,
 		/* noiseScale */ 160.0f,
 		/* octaves */ 3,
@@ -21,8 +21,8 @@ BiomeManager::BiomeManager()
 	biomeParams[BIOME_FOREST] = {
 		/* baseHeight */ 64.0f,
 		/* heightVariation */ 40.0f,
-		/* surfaceBlock */ TEXTURE_DIRT,
-		/* subSurfaceBlock */ TEXTURE_DIRT,
+		/* surfaceBlock */ DIRT,
+		/* subSurfaceBlock */ DIRT,
 		/* subSurfaceDepth */ 3,
 		/* noiseScale */ 128.0f,
 		/* octaves */ 3,
@@ -34,8 +34,8 @@ BiomeManager::BiomeManager()
 	biomeParams[BIOME_PLAIN] = {
 		/* baseHeight */ 64.0f,
 		/* heightVariation */ 80.0f,
-		/* surfaceBlock */ TEXTURE_GRASS,
-		/* subSurfaceBlock */ TEXTURE_DIRT,
+		/* surfaceBlock */ GRASS_TOP,
+		/* subSurfaceBlock */ DIRT,
 		/* subSurfaceDepth */ 3,
 		/* noiseScale */ 128.0f,
 		/* octaves */ 3,
@@ -47,8 +47,8 @@ BiomeManager::BiomeManager()
 	biomeParams[BIOME_MOUNTAIN] = {
 		/* baseHeight */ 64.0f,
 		/* heightVariation */ 80.0f,
-		/* surfaceBlock */ TEXTURE_STONE,
-		/* subSurfaceBlock */ TEXTURE_STONE,
+		/* surfaceBlock */ STONE,
+		/* subSurfaceBlock */ STONE,
 		/* subSurfaceDepth */ 3,
 		/* noiseScale */ 128.0f,
 		/* octaves */ 4,

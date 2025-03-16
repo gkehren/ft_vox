@@ -1,11 +1,14 @@
 #version 460 core
 out vec4 FragColor;
 
-in vec3 Normal;
 in vec3 FragPos;
+in vec3 Normal;
 in vec2 TexCoord;
+in float TextureIndex;
+in float UseBiomeColor;
+in vec3 BiomeColor;
 
-uniform sampler2D textureSampler;
+uniform sampler2DArray textureArray;
 uniform vec3 lightPos;
 uniform vec3 viewPos;
 
@@ -25,15 +28,35 @@ uniform float gamma = 1.8;
 
 void main()
 {
-    // Récupération de la couleur de la texture
-    vec4 texColor = texture(textureSampler, TexCoord);
-    if(texColor.a < 0.1) discard; // Optional: transparency handling
+    // Récupération de la couleur de la texture depuis le texture array
+    vec4 texColor = texture(textureArray, vec3(TexCoord, TextureIndex));
 
-    // Augmenter la saturation des couleurs de la texture
+    // Réduire le seuil alpha pour permettre aux textures partiellement transparentes de s'afficher
+    // Ne pas rejeter les fragments complètement transparents pour les types spécifiques
+    if (texColor.a < 0.01) discard;
+
     vec3 color = texColor.rgb;
-    float luminance = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
-    vec3 saturatedColor = mix(vec3(luminance), color, saturationLevel);
-    color = saturatedColor;
+
+    // Apply biome coloring to grayscale parts of textures
+    if (UseBiomeColor > 0.5) {
+        // Calcul de la luminance (niveau de gris)
+        float luminance = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
+
+        // Déterminer si le pixel est gris (R≈G≈B)
+        // Méthode améliorée pour détecter les parties grises
+        float maxChannel = max(max(texColor.r, texColor.g), texColor.b);
+        float minChannel = min(min(texColor.r, texColor.g), texColor.b);
+        float colorfulnessRatio = (maxChannel - minChannel) / max(0.001, maxChannel);
+
+        // Plus le ratio est bas, plus la couleur est "grise"
+        float grayscaleFactor = 1.0 - min(colorfulnessRatio * 4.0, 1.0);
+
+        // Mélanger la texture originale avec la couleur du biome
+        // appliquée uniquement aux parties grises
+        vec3 coloredPart = luminance * BiomeColor * 1.5; // Intensifier légèrement
+        vec3 biomeColored = mix(texColor.rgb, coloredPart, grayscaleFactor * 0.8);
+        color = biomeColored;
+    }
 
     vec3 norm = normalize(Normal);
 

@@ -2,54 +2,49 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image/stb_image.h>
 
-static GLuint loadTexture(const char *path)
+// static GLuint loadTexture(const char *path)
+//{
+//	GLuint textureID;
+//	glGenTextures(1, &textureID);
+
+//	int width, height, nrComponents;
+//	unsigned char *data = stbi_load(path, &width, &height, &nrComponents, 0);
+//	if (data)
+//	{
+//		GLenum format;
+//		if (nrComponents == 1)
+//			format = GL_RED;
+//		else if (nrComponents == 3)
+//			format = GL_RGB;
+//		else if (nrComponents == 4)
+//			format = GL_RGBA;
+
+//		glBindTexture(GL_TEXTURE_2D, textureID);
+//		glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+//		glGenerateMipmap(GL_TEXTURE_2D);
+
+//		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+//		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+//		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+//		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+//		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, 0.4f);
+
+//		stbi_image_free(data);
+//	}
+//	else
+//	{
+//		std::cout << "Texture failed to load at path: " << path << std::endl;
+//		stbi_image_free(data);
+//	}
+
+//	return textureID;
+//}
+
+Renderer::Renderer()
 {
-	GLuint textureID;
-	glGenTextures(1, &textureID);
-
-	int width, height, nrComponents;
-	unsigned char *data = stbi_load(path, &width, &height, &nrComponents, 0);
-	if (data)
-	{
-		GLenum format;
-		if (nrComponents == 1)
-			format = GL_RED;
-		else if (nrComponents == 3)
-			format = GL_RGB;
-		else if (nrComponents == 4)
-			format = GL_RGBA;
-
-		glBindTexture(GL_TEXTURE_2D, textureID);
-		glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
-		glGenerateMipmap(GL_TEXTURE_2D);
-
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, 0.4f);
-
-		stbi_image_free(data);
-	}
-	else
-	{
-		std::cout << "Texture failed to load at path: " << path << std::endl;
-		stbi_image_free(data);
-	}
-
-	return textureID;
-}
-
-Renderer::Renderer(int screenWidth, int screenHeight, float renderDistance) : screenWidth(screenWidth), screenHeight(screenHeight), renderDistance(renderDistance)
-{
-	std::string path = RES_PATH;
-
+	this->textureManager.initialize();
 	this->initBoundingBox();
 	this->initPlayer();
-
-	// Textures
-	this->textureAtlas = loadTexture((path + "textures/terrain.png").c_str());
-
 	this->loadSkybox();
 }
 
@@ -58,7 +53,6 @@ Renderer::~Renderer()
 	glDeleteVertexArrays(1, &this->skyboxVAO);
 	glDeleteBuffers(1, &this->skyboxVBO);
 	glDeleteTextures(1, &this->skyboxTexture);
-	glDeleteTextures(1, &this->textureAtlas);
 	glDeleteVertexArrays(1, &this->boundingBoxVAO);
 	glDeleteBuffers(1, &this->boundingBoxVBO);
 	glDeleteBuffers(1, &this->boundingBoxEBO);
@@ -129,12 +123,6 @@ void Renderer::initPlayer()
 	glEnableVertexAttribArray(1);
 
 	glBindVertexArray(0);
-}
-
-void Renderer::setScreenSize(int screenWidth, int screenHeight)
-{
-	this->screenWidth = screenWidth;
-	this->screenHeight = screenHeight;
 }
 
 void Renderer::drawBoundingBox(const Chunk &chunk, const Camera &camera) const

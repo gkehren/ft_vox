@@ -116,7 +116,7 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
 	if (x < 0 || x >= SIZE || y < 0 || y >= HEIGHT || z < 0 || z >= SIZE)
 	{
 		size_t index = getNeighbourIndex(x, y, z);
-		if (type != TEXTURE_AIR)
+		if (type != AIR)
 		{
 			neighboursActiveMap.set(index);
 		}
@@ -129,7 +129,7 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
 	{
 		size_t index = getIndex(x, y, z);
 		voxels[index].type = static_cast<uint8_t>(type);
-		if (type != TEXTURE_AIR)
+		if (type != AIR)
 		{
 			activeVoxels.set(index);
 		}
@@ -152,7 +152,7 @@ bool Chunk::deleteVoxel(const glm::vec3 &position)
 
 	if (isVoxelActive(x, y, z))
 	{
-		setVoxel(x, y, z, TEXTURE_AIR);
+		setVoxel(x, y, z, AIR);
 		meshNeedsUpdate = true;
 		state = ChunkState::GENERATED;
 		return true;
@@ -289,34 +289,30 @@ void Chunk::generateChunk(siv::PerlinNoise *noise)
 
 void Chunk::generateTerrainColumn(int x, int z, int terrainHeight, float biomeNoise, siv::PerlinNoise *noise)
 {
+	static BiomeManager biomeManager;
+
+	const BiomeParameters &biomeParams = biomeManager.getBiomeParameters(biomeManager.getBiomeTypeAt(position.x + x, position.z + z, noise));
+
 	for (int y = 0; y < Chunk::HEIGHT; y++)
 	{
 		if (y < terrainHeight)
 		{
 			if (y >= terrainHeight - 1)
 			{
-				// Surface block
-				if (biomeNoise < 0.35f)
-					setVoxel(x, y, z, TEXTURE_SAND);
-				else if (biomeNoise < 0.5f)
-					setVoxel(x, y, z, TEXTURE_DIRT);
-				else if (biomeNoise < 0.65f)
-					setVoxel(x, y, z, TEXTURE_GRASS);
-				else
-					setVoxel(x, y, z, TEXTURE_STONE);
+				setVoxel(x, y, z, biomeParams.surfaceBlock);
 			}
 			else if (y >= terrainHeight - 3)
 			{
-				setVoxel(x, y, z, TEXTURE_DIRT);
+				setVoxel(x, y, z, biomeParams.subSurfaceBlock);
 			}
 			else
 			{
-				setVoxel(x, y, z, TEXTURE_STONE);
+				setVoxel(x, y, z, STONE);
 			}
 		}
 		else
 		{
-			setVoxel(x, y, z, TEXTURE_AIR);
+			setVoxel(x, y, z, AIR);
 		}
 	}
 }
@@ -337,7 +333,7 @@ void Chunk::generateFeatures(int x, int z, int terrainHeight, int worldX, int wo
 
 		if (caveNoise < 0.25f)
 		{
-			setVoxel(x, y, z, TEXTURE_AIR);
+			setVoxel(x, y, z, AIR);
 			continue; // Skip mineral generation if we've carved out a cave
 		}
 
@@ -351,14 +347,16 @@ void Chunk::generateFeatures(int x, int z, int terrainHeight, int worldX, int wo
 				2, 0.5f);
 			if (mineralNoise > 0.85f)
 			{
-				setVoxel(x, y, z, TEXTURE_BRICK);
+				setVoxel(x, y, z, COAL_ORE);
 			}
 		}
 	}
 }
 
-void Chunk::generateMesh()
+void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 {
+	static BiomeManager BiomeManager;
+
 	vertices.clear();
 	indices.clear();
 
@@ -374,12 +372,71 @@ void Chunk::generateMesh()
 				if (!isVoxelActive(x, y, z))
 					continue;
 
+				TextureType blockType = static_cast<TextureType>(getVoxel(x, y, z).type);
+				bool isTransparent = false;
+				bool needsBiomeColoring = (blockType == GRASS_TOP || blockType == GRASS_SIDE || blockType == OAK_LEAVES);
+
+				// Determine biome color based on position
+				glm::vec3 biomeColor(0.0f);
+				if (needsBiomeColoring)
+				{
+					BiomeType biome = BiomeManager.getBiomeTypeAt(position.x + x, position.z + z, noise);
+
+					switch (biome)
+					{
+					case BIOME_DESERT:
+						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
+							biomeColor = glm::vec3(0.76f, 0.70f, 0.48f); // Herbe jaune sèche
+						else if (blockType == OAK_LEAVES)
+							biomeColor = glm::vec3(0.5f, 0.45f, 0.2f); // Feuilles plus sèches
+						break;
+
+					case BIOME_FOREST:
+						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
+							biomeColor = glm::vec3(0.3f, 0.65f, 0.2f); // Vert forêt
+						else if (blockType == OAK_LEAVES)
+							biomeColor = glm::vec3(0.2f, 0.6f, 0.1f); // Vert feuillage
+						break;
+
+					case BIOME_PLAIN:
+						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
+							biomeColor = glm::vec3(0.4f, 0.7f, 0.3f); // Vert clair
+						else if (blockType == OAK_LEAVES)
+							biomeColor = glm::vec3(0.3f, 0.65f, 0.2f); // Vert moyen
+						break;
+
+					case BIOME_MOUNTAIN:
+						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
+							biomeColor = glm::vec3(0.35f, 0.55f, 0.25f); // Vert plus foncé/bleuté
+						else if (blockType == OAK_LEAVES)
+							biomeColor = glm::vec3(0.25f, 0.5f, 0.15f); // Vert foncé
+						break;
+
+					default:
+						// Couleur par défaut
+						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
+							biomeColor = glm::vec3(0.4f, 0.7f, 0.3f);
+						else if (blockType == OAK_LEAVES)
+							biomeColor = glm::vec3(0.3f, 0.6f, 0.2f);
+					}
+
+					// Ajouter une légère variation aléatoire pour plus de diversité
+					float variation = noise->noise2D_01(
+										  position.x + x * 0.1f,
+										  position.z + z * 0.1f) *
+										  0.1f -
+									  0.05f;
+
+					biomeColor.r = glm::clamp(biomeColor.r + variation, 0.0f, 1.0f);
+					biomeColor.g = glm::clamp(biomeColor.g + variation, 0.0f, 1.0f);
+					biomeColor.b = glm::clamp(biomeColor.b + variation, 0.0f, 1.0f);
+				}
+
 				for (int face = 0; face < 6; ++face)
 				{
 					glm::ivec3 neighborPos = glm::ivec3{x, y, z} + directions[face];
 					bool isFaceVisible = false;
 
-					// Check within current chunk
 					if (neighborPos.x >= 0 && neighborPos.x < SIZE &&
 						neighborPos.y >= 0 && neighborPos.y < HEIGHT &&
 						neighborPos.z >= 0 && neighborPos.z < SIZE)
@@ -400,38 +457,51 @@ void Chunk::generateMesh()
 
 					if (isFaceVisible)
 					{
-						uint32_t faceVertexIndices[4]; // Stocker les indices des sommets de la face
+						// Adjust texture based on face orientation (top, side, bottom)
+						float textureIndex = blockType;
+
+						// Special case for grass blocks (different textures for top/sides/bottom)
+						if (blockType == GRASS_SIDE)
+						{
+							if (face == UP)
+								textureIndex = GRASS_TOP;
+							else if (face == DOWN)
+								textureIndex = DIRT;
+							else
+								textureIndex = GRASS_SIDE;
+						}
+						// Special case for logs (different texture for top/bottom vs sides)
+						else if (blockType == OAK_LOG)
+						{
+							if (face == UP || face == DOWN)
+								textureIndex = OAK_LOG_TOP;
+						}
+
+						uint32_t faceVertexIndices[4];
 						for (int i = 0; i < 4; ++i)
 						{
 							Vertex vertex;
 							vertex.position = position + glm::vec3(x, y, z) + faceVertexOffsets[face][i];
 							vertex.normal = faceNormals[face];
+							vertex.texCoord = texCoords[i];
+							vertex.textureIndex = textureIndex;
+							vertex.useBiomeColor = needsBiomeColoring ? 1.0f : 0.0f;
+							vertex.biomeColor = biomeColor;
 
-							// Calcul des coordonnées de texture
-							int texIndex = getVoxel(x, y, z).type;
-							float u = (texIndex % (int)(TEXTURE_ATLAS_SIZE / 32)) * TEXTURE_SIZE;
-							float v = (texIndex / (int)(TEXTURE_ATLAS_SIZE / 32)) * TEXTURE_SIZE;
-							vertex.texCoord = glm::vec2(
-								u + texCoords[i].x * TEXTURE_SIZE,
-								v + texCoords[i].y * TEXTURE_SIZE);
-
-							// Vérifiez si le sommet existe déjà
 							auto it = vertexMap.find(vertex);
 							uint32_t vertexIndex;
 							if (it != vertexMap.end())
 							{
-								// Utilisez l'indice existant
 								vertexIndex = it->second;
 							}
 							else
 							{
-								// Ajoutez le nouveau sommet
 								vertices.push_back(vertex);
 								vertexIndex = indexCounter;
 								vertexMap[vertex] = indexCounter;
 								indexCounter++;
 							}
-							faceVertexIndices[i] = vertexIndex; // Stockez l'indice du sommet
+							faceVertexIndices[i] = vertexIndex;
 						}
 
 						indices.push_back(faceVertexIndices[0]);
@@ -491,26 +561,40 @@ void Chunk::uploadMeshToGPU()
 	glEnableVertexAttribArray(2);
 	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, texCoord));
 
+	// Index de texture (location = 3)
+	glEnableVertexAttribArray(3);
+	glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, textureIndex));
+
+	// Flag de coloration biome (location = 4)
+	glEnableVertexAttribArray(4);
+	glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, useBiomeColor));
+
+	// Couleur du biome (location = 5)
+	glEnableVertexAttribArray(5);
+	glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, biomeColor));
+
 	glBindVertexArray(0);
 
 	meshNeedsUpdate = false;
 }
 
-uint32_t Chunk::draw(const Shader &shader, const Camera &camera, GLuint textureAtlas, const ShaderParameters &params)
+uint32_t Chunk::draw(const Shader &shader, const Camera &camera, GLuint textureArray, const ShaderParameters &params)
 {
 	if (meshNeedsUpdate)
-	{
 		uploadMeshToGPU();
-	}
+
+	if (indices.empty())
+		return 0;
 
 	shader.use();
 
+	glm::vec3 localPos = glm::vec3(position.x / SIZE, position.y, position.z / SIZE);
+	shader.setMat4("model", glm::translate(glm::mat4(1.0f), localPos));
 	shader.setMat4("view", camera.getViewMatrix());
 	shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
-	shader.setInt("textureSampler", 0);
+	shader.setInt("textureArray", 0);
 
 	glm::vec3 sunPosition = camera.getPosition() + params.sunDirection * 2000.0f;
-
 	shader.setVec3("lightPos", sunPosition);
 	shader.setVec3("viewPos", camera.getPosition());
 
@@ -528,7 +612,8 @@ uint32_t Chunk::draw(const Shader &shader, const Camera &camera, GLuint textureA
 	shader.setFloat("colorBoost", params.colorBoost);
 	shader.setFloat("gamma", params.gamma);
 
-	glBindTexture(GL_TEXTURE_2D, textureAtlas);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, textureArray);
 
 	glBindVertexArray(VAO);
 	glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_SHORT, 0);

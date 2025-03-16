@@ -1,6 +1,6 @@
 #include "Mesh.hpp"
 
-Mesh::Mesh() : type(TEXTURE_AIR), data()
+Mesh::Mesh() : type(AIR), data()
 {
 }
 

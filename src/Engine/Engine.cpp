@@ -76,7 +76,7 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 
 	std::string path = RES_PATH + std::string("shaders/");
 	this->shader = std::make_unique<Shader>((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
-	this->renderer = std::make_unique<Renderer>(windowWidth, windowHeight, this->renderSettings.maxRenderDistance);
+	this->renderer = std::make_unique<Renderer>();
 	this->camera.setWindow(this->window);
 	this->playerChunkPos = glm::ivec2(-1, -1);
 
@@ -92,7 +92,7 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 
 	this->textRenderer = std::make_unique<TextRenderer>(RES_PATH + std::string("fonts/FiraCode.ttf"), glm::ortho(0.0f, static_cast<float>(windowWidth), 0.0f, static_cast<float>(windowHeight)));
 
-	this->selectedTexture = TEXTURE_PLANK;
+	this->selectedTexture = OAK_LEAVES;
 
 	uint32_t threadCount = std::thread::hardware_concurrency() / 2;
 	this->threadPool = std::make_unique<ThreadPool>(threadCount);
@@ -344,8 +344,10 @@ void Engine::render()
 		{
 			if (chunk.second.isVisible() && chunk.second.getState() == ChunkState::GENERATED)
 			{
-				futures.push_back(threadPool->enqueue([&chunk]()
-													  { chunk.second.generateMesh(); }));
+				glm::vec3 playerPos = camera.getPosition();
+				auto noisePtr = noise.get();
+				futures.push_back(threadPool->enqueue([&chunk, playerPos, noisePtr]()
+													  { chunk.second.generateMesh(playerPos, noisePtr); }));
 			}
 		}
 
@@ -364,7 +366,7 @@ void Engine::render()
 		if (!chunk.second.isVisible() || chunk.second.getState() == ChunkState::UNLOADED)
 			continue;
 
-		renderSettings.visibleVoxelsCount += chunk.second.draw(*shader, camera, renderer->getTextureAtlas(), shaderParams);
+		renderSettings.visibleVoxelsCount += chunk.second.draw(*shader, camera, renderer->getTextureArray(), shaderParams);
 		renderSettings.visibleChunksCount++;
 
 		if (renderSettings.chunkBorders)
@@ -554,7 +556,7 @@ void Engine::handleEvents(bool &keyTPressed)
 			{
 				if (!keyTPressed)
 				{
-					selectedTexture = static_cast<TextureType>((selectedTexture + 1) % TEXTURE_COUNT);
+					selectedTexture = static_cast<TextureType>((selectedTexture + 1) % COUNT);
 					keyTPressed = true;
 				}
 			}

@@ -45,9 +45,9 @@ public:
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
 
-	uint32_t draw(const Shader &shader, const Camera &camera, GLuint textureAtlas, const ShaderParameters &params);
+	uint32_t draw(const Shader &shader, const Camera &camera, GLuint textureArray, const ShaderParameters &params);
 	void generateVoxels(siv::PerlinNoise *noise);
-	void generateMesh();
+	void generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise);
 
 private:
 	glm::vec3 position;
