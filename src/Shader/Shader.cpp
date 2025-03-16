@@ -1,6 +1,6 @@
 #include "Shader.hpp"
 
-Shader::Shader(const char* vertexPath, const char* fragmentPath)
+Shader::Shader(const char *vertexPath, const char *fragmentPath)
 {
 	std::string vertexSource = this->getShaderSource(vertexPath);
 	std::string fragmentSource = this->getShaderSource(fragmentPath);
@@ -22,22 +22,24 @@ void Shader::use() const
 	glUseProgram(this->id);
 }
 
-GLuint	Shader::getId() const
+GLuint Shader::getId() const
 {
 	return this->id;
 }
 
-std::string	Shader::getShaderSource(const char* path) const
+std::string Shader::getShaderSource(const char *path) const
 {
-	std::ifstream	shaderFile(path);
-	std::string		shaderSource;
-	std::string		line;
+	std::ifstream shaderFile(path);
+	std::string shaderSource;
+	std::string line;
 
-	if (!shaderFile.is_open()) {
+	if (!shaderFile.is_open())
+	{
 		throw std::runtime_error("Failed to open shader file");
 	}
 
-	while (std::getline(shaderFile, line)) {
+	while (std::getline(shaderFile, line))
+	{
 		shaderSource += line + "\n";
 	}
 
@@ -45,17 +47,18 @@ std::string	Shader::getShaderSource(const char* path) const
 	return shaderSource;
 }
 
-GLuint	Shader::compileShader(GLenum shaderType, const char* source) const
+GLuint Shader::compileShader(GLenum shaderType, const char *source) const
 {
-	GLuint	shader = glCreateShader(shaderType);
+	GLuint shader = glCreateShader(shaderType);
 
 	glShaderSource(shader, 1, &source, nullptr);
 	glCompileShader(shader);
 
-	GLint	success;
+	GLint success;
 	glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-	if (!success) {
-		GLchar	infoLog[512];
+	if (!success)
+	{
+		GLchar infoLog[512];
 		glGetShaderInfoLog(shader, 512, nullptr, infoLog);
 		throw std::runtime_error(infoLog);
 	}
@@ -63,18 +66,19 @@ GLuint	Shader::compileShader(GLenum shaderType, const char* source) const
 	return shader;
 }
 
-GLuint	Shader::linkProgram(GLuint vertexShader, GLuint fragmentShader) const
+GLuint Shader::linkProgram(GLuint vertexShader, GLuint fragmentShader) const
 {
-	GLuint	program = glCreateProgram();
+	GLuint program = glCreateProgram();
 
 	glAttachShader(program, vertexShader);
 	glAttachShader(program, fragmentShader);
 	glLinkProgram(program);
 
-	GLint	success;
+	GLint success;
 	glGetProgramiv(program, GL_LINK_STATUS, &success);
-	if (!success) {
-		GLchar	infoLog[512];
+	if (!success)
+	{
+		GLchar infoLog[512];
 		glGetProgramInfoLog(program, 512, nullptr, infoLog);
 		throw std::runtime_error(infoLog);
 	}

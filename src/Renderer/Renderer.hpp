@@ -7,49 +7,45 @@
 #include <GLFW/glfw3.h>
 #include <map>
 
+#include "TextureManager.hpp"
 #include <Chunk/Chunk.hpp>
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
 
-class Renderer {
-	public:
-		Renderer(int screenWidth, int screenHeight, float renderDistance);
-		~Renderer();
-		void	setScreenSize(int screenWidth, int screenHeight);
+class Renderer
+{
+public:
+	Renderer();
+	~Renderer();
 
-		GLuint	getTextureAtlas() const { return textureAtlas; }
-		glm::vec3	computeColorFromPlayerId(uint32_t playerId) const;
+	glm::vec3 computeColorFromPlayerId(uint32_t playerId) const;
+	void drawBoundingBox(const Chunk &chunk, const Camera &camera) const;
+	void drawSkybox(const Camera &camera) const;
+	void drawPlayer(const Camera &camera, const glm::vec3 &position, uint32_t playerId) const;
 
-		void	drawBoundingBox(const Chunk& chunk, const Camera& camera) const;
-		void	drawSkybox(const Camera& camera) const;
-		void	drawPlayer(const Camera& camera, const glm::vec3& position, uint32_t playerId) const;
+	GLuint getTextureArray() const { return textureManager.getTextureArray(); }
 
-	private:
-		std::unique_ptr<Shader>	boundingBoxShader;
-		GLuint	boundingBoxVAO;
-		GLuint	boundingBoxVBO;
-		GLuint	boundingBoxEBO;
-		void	initBoundingBox();
+private:
+	TextureManager textureManager;
 
-		GLuint	textureAtlas;
+	std::unique_ptr<Shader> boundingBoxShader;
+	GLuint boundingBoxVAO;
+	GLuint boundingBoxVBO;
+	GLuint boundingBoxEBO;
+	void initBoundingBox();
 
-		std::unique_ptr<Shader>	skyboxShader;
-		GLuint	skyboxVAO;
-		GLuint	skyboxVBO;
-		GLuint	skyboxTexture;
+	std::unique_ptr<Shader> skyboxShader;
+	GLuint skyboxVAO;
+	GLuint skyboxVBO;
+	GLuint skyboxTexture;
 
-		std::unique_ptr<Shader> playerShader;
-		GLuint playerVAO;
-		GLuint playerVBO;
-		GLuint playerEBO;
-		void initPlayer();
+	std::unique_ptr<Shader> playerShader;
+	GLuint playerVAO;
+	GLuint playerVBO;
+	GLuint playerEBO;
+	void initPlayer();
 
-		float	screenWidth;
-		float	screenHeight;
-		float	renderDistance;
-		size_t	currentVBOSize;
-
-		void	loadSkybox();
-		glm::vec3	hsvToRgb(float h, float s, float v) const;
+	void loadSkybox();
+	glm::vec3 hsvToRgb(float h, float s, float v) const;
 };

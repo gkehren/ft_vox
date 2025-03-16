@@ -6,13 +6,13 @@ TextRenderer::TextRenderer(const std::string &fontPath, const glm::mat4 &proj)
 	if (FT_Init_FreeType(&ft))
 	{
 		throw std::runtime_error("ERROR::FREETYPE: Could not init FreeType Library");
-		return ;
+		return;
 	}
 
 	if (FT_New_Face(ft, fontPath.c_str(), 0, &face))
 	{
 		throw std::runtime_error("ERROR::FREETYPE: Failed to load font");
-		return ;
+		return;
 	}
 
 	loadCharacters();
@@ -34,17 +34,20 @@ TextRenderer::TextRenderer(const std::string &fontPath, const glm::mat4 &proj)
 }
 
 TextRenderer::~TextRenderer()
-{}
+{
+}
 
-void	TextRenderer::loadCharacters()
+void TextRenderer::loadCharacters()
 {
 	FT_Set_Pixel_Sizes(face, 0, 48);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
-	for (unsigned char c = 0; c < 128; c++) {
-		if (FT_Load_Char(face, c, FT_LOAD_RENDER)) {
+	for (unsigned char c = 0; c < 128; c++)
+	{
+		if (FT_Load_Char(face, c, FT_LOAD_RENDER))
+		{
 			throw std::runtime_error("ERROR::FREETYTPE: Failed to load Glyph");
-			continue ;
+			continue;
 		}
 
 		unsigned int texture;
@@ -59,8 +62,7 @@ void	TextRenderer::loadCharacters()
 			0,
 			GL_RED,
 			GL_UNSIGNED_BYTE,
-			face->glyph->bitmap.buffer
-		);
+			face->glyph->bitmap.buffer);
 
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -71,8 +73,7 @@ void	TextRenderer::loadCharacters()
 			texture,
 			glm::ivec2(face->glyph->bitmap.width, face->glyph->bitmap.rows),
 			glm::ivec2(face->glyph->bitmap_left, face->glyph->bitmap_top),
-			static_cast<unsigned int>(face->glyph->advance.x)
-		};
+			static_cast<unsigned int>(face->glyph->advance.x)};
 
 		characters.insert(std::pair<char, Character>(c, character));
 	}
@@ -82,7 +83,7 @@ void	TextRenderer::loadCharacters()
 	FT_Done_FreeType(ft);
 }
 
-void	TextRenderer::renderText(std::string text, float x, float y, float scale, glm::vec3 color)
+void TextRenderer::renderText(std::string text, float x, float y, float scale, glm::vec3 color)
 {
 	shader->use();
 	shader->setVec3("textColor", color);
@@ -90,7 +91,8 @@ void	TextRenderer::renderText(std::string text, float x, float y, float scale, g
 	glBindVertexArray(VAO);
 
 	std::string::const_iterator c;
-	for (c = text.begin(); c != text.end(); c++) {
+	for (c = text.begin(); c != text.end(); c++)
+	{
 		Character ch = characters[*c];
 
 		float xpos = x + ch.bearing.x * scale;
@@ -100,14 +102,13 @@ void	TextRenderer::renderText(std::string text, float x, float y, float scale, g
 		float h = ch.size.y * scale;
 
 		float vertices[6][4] = {
-			{ xpos,		ypos + h,	0.0f, 0.0f },
-			{ xpos,		ypos,		0.0f, 1.0f },
-			{ xpos + w,	ypos,		1.0f, 1.0f },
+			{xpos, ypos + h, 0.0f, 0.0f},
+			{xpos, ypos, 0.0f, 1.0f},
+			{xpos + w, ypos, 1.0f, 1.0f},
 
-			{ xpos,		ypos + h,	0.0f, 0.0f },
-			{ xpos + w,	ypos,		1.0f, 1.0f },
-			{ xpos + w,	ypos + h,	1.0f, 0.0f }
-		};
+			{xpos, ypos + h, 0.0f, 0.0f},
+			{xpos + w, ypos, 1.0f, 1.0f},
+			{xpos + w, ypos + h, 1.0f, 0.0f}};
 
 		glBindTexture(GL_TEXTURE_2D, ch.textureID);
 		glBindBuffer(GL_ARRAY_BUFFER, VBO);
