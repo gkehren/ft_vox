@@ -78,4 +78,5 @@ private:
 	void generateChunk(siv::PerlinNoise *noise);
 	void generateTerrainColumn(int x, int z, int terrainHeight, float biomeNoise, siv::PerlinNoise *noise);
 	void generateFeatures(int x, int z, int terrainHeight, int worldX, int worldZ, float biomeNoise, siv::PerlinNoise *noise);
+	void generateTree(int x, int z, int terrainHeight);
 };

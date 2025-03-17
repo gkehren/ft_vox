@@ -21,7 +21,7 @@ BiomeManager::BiomeManager()
 	biomeParams[BIOME_FOREST] = {
 		/* baseHeight */ 64.0f,
 		/* heightVariation */ 40.0f,
-		/* surfaceBlock */ DIRT,
+		/* surfaceBlock */ GRASS_TOP,
 		/* subSurfaceBlock */ DIRT,
 		/* subSurfaceDepth */ 3,
 		/* noiseScale */ 128.0f,
