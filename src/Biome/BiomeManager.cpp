@@ -14,6 +14,7 @@ BiomeManager::BiomeManager()
 		/* noiseScale */ 160.0f,
 		/* octaves */ 3,
 		/* persistence */ 0.4f,
+		/* waterColor */ {0.5f, 0.5f, 0.2f},
 		// Mountain params not used for desert
 	};
 
@@ -27,6 +28,7 @@ BiomeManager::BiomeManager()
 		/* noiseScale */ 128.0f,
 		/* octaves */ 3,
 		/* persistence */ 0.5f,
+		/* waterColor */ {0.2f, 0.4f, 0.8f},
 		// Mountain params not used for forest
 	};
 
@@ -40,6 +42,7 @@ BiomeManager::BiomeManager()
 		/* noiseScale */ 128.0f,
 		/* octaves */ 3,
 		/* persistence */ 0.5f,
+		/* waterColor */ {0.1f, 0.3f, 0.7f},
 		// Mountain params not used for plains
 	};
 
@@ -53,6 +56,7 @@ BiomeManager::BiomeManager()
 		/* noiseScale */ 128.0f,
 		/* octaves */ 4,
 		/* persistence */ 0.5f,
+		/* waterColor */ {0.05f, 0.1f, 0.5f},
 		/* mountainNoiseScale */ 128.0f,
 		/* mountainOctaves */ 4,
 		/* mountainPersistence */ 0.5f,

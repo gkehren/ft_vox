@@ -313,6 +313,10 @@ void Chunk::generateTerrainColumn(int x, int z, int terrainHeight, float biomeNo
 				setVoxel(x, y, z, STONE);
 			}
 		}
+		// else if (y <= Chunk::WATER_LEVEL)
+		//{
+		//	setVoxel(x, y, z, WATER);
+		// }
 		else
 		{
 			setVoxel(x, y, z, AIR);
@@ -507,13 +511,14 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 
 				TextureType blockType = static_cast<TextureType>(getVoxel(x, y, z).type);
 				bool isTransparent = false;
-				bool needsBiomeColoring = (blockType == GRASS_TOP || blockType == GRASS_SIDE || blockType == OAK_LEAVES);
+				bool needsBiomeColoring = (blockType == GRASS_TOP || blockType == GRASS_SIDE || blockType == OAK_LEAVES || blockType == WATER);
 
 				// Determine biome color based on position
 				glm::vec3 biomeColor(0.0f);
 				if (needsBiomeColoring)
 				{
 					BiomeType biome = BiomeManager.getBiomeTypeAt(position.x + x, position.z + z, noise);
+					const BiomeParameters &biomeParams = BiomeManager.getBiomeParameters(biome);
 
 					switch (biome)
 					{
@@ -522,6 +527,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.76f, 0.70f, 0.48f); // Herbe jaune sèche
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.5f, 0.45f, 0.2f); // Feuilles plus sèches
+						else if (blockType == WATER)
+							biomeColor = biomeParams.waterColor;
 						break;
 
 					case BIOME_FOREST:
@@ -529,6 +536,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.3f, 0.65f, 0.2f); // Vert forêt
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.2f, 0.6f, 0.1f); // Vert feuillage
+						else if (blockType == WATER)
+							biomeColor = biomeParams.waterColor;
 						break;
 
 					case BIOME_PLAIN:
@@ -536,6 +545,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.4f, 0.7f, 0.3f); // Vert clair
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.3f, 0.65f, 0.2f); // Vert moyen
+						else if (blockType == WATER)
+							biomeColor = biomeParams.waterColor;
 						break;
 
 					case BIOME_MOUNTAIN:
@@ -543,6 +554,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.35f, 0.55f, 0.25f); // Vert plus foncé/bleuté
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.25f, 0.5f, 0.15f); // Vert foncé
+						else if (blockType == WATER)
+							biomeColor = biomeParams.waterColor;
 						break;
 
 					default:
@@ -551,6 +564,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.4f, 0.7f, 0.3f);
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.3f, 0.6f, 0.2f);
+						else if (blockType == WATER)
+							biomeColor = glm::vec3(0.0f, 0.5f, 1.0f);
 					}
 
 					// Ajouter une légère variation aléatoire pour plus de diversité

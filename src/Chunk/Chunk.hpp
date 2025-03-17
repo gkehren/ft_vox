@@ -26,6 +26,7 @@ public:
 	static constexpr int SIZE = 16;
 	static constexpr int HEIGHT = 256;
 	static constexpr float RADIUS = 16.0f;
+	static constexpr int WATER_LEVEL = 58;
 
 	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED);
 	Chunk(Chunk &&other) noexcept;
