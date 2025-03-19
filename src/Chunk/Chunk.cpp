@@ -116,7 +116,7 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
 	if (x < 0 || x >= SIZE || y < 0 || y >= HEIGHT || z < 0 || z >= SIZE)
 	{
 		size_t index = getNeighbourIndex(x, y, z);
-		if (type != AIR)
+		if (type != AIR && type != OAK_LEAVES && type != GLASS)
 		{
 			neighboursActiveMap.set(index);
 		}
@@ -291,7 +291,10 @@ void Chunk::generateTerrainColumn(int x, int z, int terrainHeight, float biomeNo
 {
 	static BiomeManager biomeManager;
 
-	const BiomeParameters &biomeParams = biomeManager.getBiomeParameters(biomeManager.getBiomeTypeAt(position.x + x, position.z + z, noise));
+	int worldX = static_cast<int>(position.x) + x;
+	int worldZ = static_cast<int>(position.z) + z;
+	BiomeType biomeType = biomeManager.getBiomeTypeAt(worldX, worldZ, noise);
+	const BiomeParameters &biomeParams = biomeManager.getBiomeParameters(biomeType);
 
 	for (int y = 0; y < Chunk::HEIGHT; y++)
 	{
@@ -310,9 +313,22 @@ void Chunk::generateTerrainColumn(int x, int z, int terrainHeight, float biomeNo
 				setVoxel(x, y, z, STONE);
 			}
 		}
+		else if (y <= Chunk::WATER_LEVEL)
+		{
+			setVoxel(x, y, z, WATER);
+		}
 		else
 		{
 			setVoxel(x, y, z, AIR);
+		}
+	}
+
+	if (biomeType == BIOME_FOREST)
+	{
+		float treeNoise = noise->noise2D_01(worldX * 1.5f, worldZ * 1.5f);
+		if (treeNoise > 0.75f)
+		{
+			generateTree(x, z, terrainHeight);
 		}
 	}
 }
@@ -337,17 +353,138 @@ void Chunk::generateFeatures(int x, int z, int terrainHeight, int worldX, int wo
 			continue; // Skip mineral generation if we've carved out a cave
 		}
 
-		// Generate minerals
+		// Generate minerals based on depth
 		if (y < terrainHeight - 5)
 		{
-			float mineralNoise = noise->octave3D_01(
-				static_cast<float>(worldX) / 20.0f,
-				static_cast<float>(y) / 20.0f,
-				static_cast<float>(worldZ) / 20.0f,
-				2, 0.5f);
-			if (mineralNoise > 0.85f)
+			float veinNoise = noise->noise3D_01(
+				static_cast<float>(worldX) / 8.0f,
+				static_cast<float>(y) / 8.0f,
+				static_cast<float>(worldZ) / 8.0f);
+
+			float oreTypeNoise = noise->noise3D_01(
+				static_cast<float>(worldX) / 24.0f,
+				static_cast<float>(y) / 24.0f,
+				static_cast<float>(worldZ) / 24.0f);
+
+			if (veinNoise > 0.8f)
 			{
-				setVoxel(x, y, z, COAL_ORE);
+				if (y < 16)
+				{
+					if (oreTypeNoise < 0.2f)
+						setVoxel(x, y, z, DIAMOND_ORE);
+					else if (oreTypeNoise < 0.4f)
+						setVoxel(x, y, z, GOLD_ORE);
+					else if (oreTypeNoise < 0.6f)
+						setVoxel(x, y, z, REDSTONE_ORE);
+					else if (oreTypeNoise < 0.8f)
+						setVoxel(x, y, z, LAPIS_ORE);
+					else
+						setVoxel(x, y, z, IRON_ORE);
+				}
+				else if (y < 30)
+				{
+					if (oreTypeNoise < 0.1f)
+						setVoxel(x, y, z, DIAMOND_ORE);
+					else if (oreTypeNoise < 0.3f)
+						setVoxel(x, y, z, GOLD_ORE);
+					else if (oreTypeNoise < 0.5f)
+						setVoxel(x, y, z, REDSTONE_ORE);
+					else if (oreTypeNoise < 0.65f)
+						setVoxel(x, y, z, LAPIS_ORE);
+					else if (oreTypeNoise < 0.85f)
+						setVoxel(x, y, z, IRON_ORE);
+					else
+						setVoxel(x, y, z, COAL_ORE);
+				}
+				else if (y < 50)
+				{
+					if (oreTypeNoise < 0.05f)
+						setVoxel(x, y, z, EMERALD_ORE);
+
+					else if (oreTypeNoise < 0.25f)
+						setVoxel(x, y, z, GOLD_ORE);
+
+					else if (oreTypeNoise < 0.35f)
+						setVoxel(x, y, z, REDSTONE_ORE);
+
+					else if (oreTypeNoise < 0.45f)
+						setVoxel(x, y, z, LAPIS_ORE);
+
+					else if (oreTypeNoise < 0.7f)
+						setVoxel(x, y, z, IRON_ORE);
+
+					else if (oreTypeNoise < 0.85f)
+						setVoxel(x, y, z, COPPER_ORE);
+
+					else
+						setVoxel(x, y, z, COAL_ORE);
+				}
+				else
+				{
+					if (oreTypeNoise < 0.1f)
+						setVoxel(x, y, z, EMERALD_ORE);
+
+					else if (oreTypeNoise < 0.25f)
+						setVoxel(x, y, z, COPPER_ORE);
+
+					else if (oreTypeNoise < 0.45f)
+						setVoxel(x, y, z, IRON_ORE);
+
+					else
+						setVoxel(x, y, z, COAL_ORE);
+				}
+			}
+		}
+	}
+}
+
+void Chunk::generateTree(int x, int z, int terrainHeight)
+{
+	// Only place trees that have their trunk at least 3 blocks from the edge
+	if (x < 3 || x >= SIZE - 3 || z < 3 || z >= SIZE - 3)
+	{
+		return; // Skip trees too close to the edge
+	}
+
+	// Tree height: random between 4 and 6 blocks
+	int treeHeight = 4 + rand() % 3;
+
+	// Generate the trunk
+	for (int y = terrainHeight; y < terrainHeight + treeHeight; y++)
+	{
+		if (y < HEIGHT)
+		{
+			setVoxel(x, y, z, OAK_LOG);
+		}
+	}
+
+	// Generate leaves - roughly a spherical/balloon shape
+	int leafStartY = terrainHeight + treeHeight - 3; // Start leaves 3 blocks from the top
+
+	// Generate leaves in a roughly spherical pattern
+	for (int offsetY = 0; offsetY <= 3; offsetY++)
+	{
+		int radius = (offsetY == 0 || offsetY == 3) ? 1 : 2; // Smaller radius at bottom and top
+
+		for (int offsetX = -radius; offsetX <= radius; offsetX++)
+		{
+			for (int offsetZ = -radius; offsetZ <= radius; offsetZ++)
+			{
+				// Skip corners for a more rounded look on the bigger layers
+				if (radius == 2 && abs(offsetX) == 2 && abs(offsetZ) == 2)
+				{
+					continue;
+				}
+
+				int leafX = x + offsetX;
+				int leafY = leafStartY + offsetY;
+				int leafZ = z + offsetZ;
+
+				// Only place leaves that are inside this chunk
+				if (leafX >= 0 && leafX < SIZE && leafY >= 0 && leafY < HEIGHT && leafZ >= 0 && leafZ < SIZE)
+				{
+					setVoxel(leafX, leafY, leafZ, OAK_LEAVES);
+				}
 			}
 		}
 	}
@@ -374,13 +511,14 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 
 				TextureType blockType = static_cast<TextureType>(getVoxel(x, y, z).type);
 				bool isTransparent = false;
-				bool needsBiomeColoring = (blockType == GRASS_TOP || blockType == GRASS_SIDE || blockType == OAK_LEAVES);
+				bool needsBiomeColoring = (blockType == GRASS_TOP || blockType == GRASS_SIDE || blockType == OAK_LEAVES || blockType == WATER);
 
 				// Determine biome color based on position
 				glm::vec3 biomeColor(0.0f);
 				if (needsBiomeColoring)
 				{
 					BiomeType biome = BiomeManager.getBiomeTypeAt(position.x + x, position.z + z, noise);
+					const BiomeParameters &biomeParams = BiomeManager.getBiomeParameters(biome);
 
 					switch (biome)
 					{
@@ -389,6 +527,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.76f, 0.70f, 0.48f); // Herbe jaune sèche
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.5f, 0.45f, 0.2f); // Feuilles plus sèches
+						else if (blockType == WATER)
+							biomeColor = biomeParams.waterColor;
 						break;
 
 					case BIOME_FOREST:
@@ -396,6 +536,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.3f, 0.65f, 0.2f); // Vert forêt
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.2f, 0.6f, 0.1f); // Vert feuillage
+						else if (blockType == WATER)
+							biomeColor = biomeParams.waterColor;
 						break;
 
 					case BIOME_PLAIN:
@@ -403,6 +545,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.4f, 0.7f, 0.3f); // Vert clair
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.3f, 0.65f, 0.2f); // Vert moyen
+						else if (blockType == WATER)
+							biomeColor = biomeParams.waterColor;
 						break;
 
 					case BIOME_MOUNTAIN:
@@ -410,6 +554,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.35f, 0.55f, 0.25f); // Vert plus foncé/bleuté
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.25f, 0.5f, 0.15f); // Vert foncé
+						else if (blockType == WATER)
+							biomeColor = biomeParams.waterColor;
 						break;
 
 					default:
@@ -418,6 +564,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							biomeColor = glm::vec3(0.4f, 0.7f, 0.3f);
 						else if (blockType == OAK_LEAVES)
 							biomeColor = glm::vec3(0.3f, 0.6f, 0.2f);
+						else if (blockType == WATER)
+							biomeColor = glm::vec3(0.0f, 0.5f, 1.0f);
 					}
 
 					// Ajouter une légère variation aléatoire pour plus de diversité
@@ -444,7 +592,11 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 						if (isVoxelActive(neighborPos.x, neighborPos.y, neighborPos.z))
 						{
 							TextureType neighborType = static_cast<TextureType>(getVoxel(neighborPos.x, neighborPos.y, neighborPos.z).type);
-							if (TextureManager::isTransparent(neighborType))
+							if (blockType == neighborType)
+							{
+								isFaceVisible = false;
+							}
+							else if (TextureManager::isTransparent(neighborType))
 							{
 								isFaceVisible = true;
 							}

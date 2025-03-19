@@ -19,11 +19,13 @@ public:
 
 	static bool isTransparent(TextureType type)
 	{
-		return type == TextureType::GLASS || type == TextureType::OAK_LEAVES;
+		return type == TextureType::GLASS || type == TextureType::OAK_LEAVES ||
+			   type == TextureType::WATER;
 	}
 
 private:
 	GLuint textureArray;
 	std::vector<TextureInfo> textures;
 	void loadTexture(const std::string &path, TextureType type, bool hasTransparency, bool hasBiomeColoring);
+	void loadWaterTexture(const std::string &path, TextureType type, bool hasTransparency, bool hasBiomeColoring);
 };

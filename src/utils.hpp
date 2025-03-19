@@ -108,6 +108,7 @@ enum TextureType
 	IRON_ORE,
 	LAPIS_ORE,
 	REDSTONE_ORE,
+	WATER,
 	COUNT, // Keep last
 	AIR	   // Keep after count beacuse AIR is not a texture
 };
@@ -137,6 +138,7 @@ static const std::map<TextureType, std::string> textureTypeString = {
 	{IRON_ORE, "Iron Ore"},
 	{LAPIS_ORE, "Lapis Ore"},
 	{REDSTONE_ORE, "Redstone Ore"},
+	{WATER, "Water"},
 };
 
 enum ChunkState
@@ -293,6 +295,7 @@ struct BiomeParameters
 	float noiseScale;
 	int octaves;
 	float persistence;
+	glm::vec3 waterColor;
 
 	// Mountain-specific parameters
 	float mountainNoiseScale;
@@ -303,10 +306,6 @@ struct BiomeParameters
 	float peakNoiseScale;
 	float peakThreshold;
 	float peakMultiplier;
-
-	// Feature generation
-	float caveDensity;
-	float mineralDensity;
 };
 
 enum BiomeType

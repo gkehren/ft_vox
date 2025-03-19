@@ -57,6 +57,7 @@ void TextureManager::initialize()
 	loadTexture(path + "textures/iron_ore.png", TextureType::IRON_ORE, false, false);
 	loadTexture(path + "textures/lapis_ore.png", TextureType::LAPIS_ORE, false, false);
 	loadTexture(path + "textures/redstone_ore.png", TextureType::REDSTONE_ORE, false, false);
+	loadWaterTexture(path + "textures/water_still.png", TextureType::WATER, true, true);
 
 	glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
 
@@ -87,6 +88,50 @@ void TextureManager::loadTexture(const std::string &path, TextureType type, bool
 	else
 	{
 		std::cout << "Failed to load texture: " << path << std::endl;
+	}
+}
+
+void TextureManager::loadWaterTexture(const std::string &path, TextureType type, bool hasTransparency, bool hasBiomeColoring)
+{
+	int width, height, channels;
+	unsigned char *data = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+
+	if (data)
+	{
+		// Store the texture info
+		textures[static_cast<int>(type)].hasTransparency = hasTransparency;
+		textures[static_cast<int>(type)].hasBiomeColoring = hasBiomeColoring;
+
+		// For now, we'll just use the first 64x64 frame of the water texture
+		// Later, we could implement animation by cycling through frames
+
+		// Allocate memory for the first frame
+		unsigned char *frameData = new unsigned char[64 * 64 * 4];
+
+		// Copy only the first 64x64 frame
+		for (int y = 0; y < 64; y++)
+		{
+			for (int x = 0; x < 64; x++)
+			{
+				for (int c = 0; c < 4; c++)
+				{
+					frameData[(y * 64 + x) * 4 + c] = data[(y * width + x) * 4 + c];
+				}
+			}
+		}
+
+		// Upload just the first frame
+		glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, static_cast<int>(type),
+						64, 64, 1, GL_RGBA, GL_UNSIGNED_BYTE, frameData);
+
+		delete[] frameData;
+		stbi_image_free(data);
+
+		std::cout << "Water texture loaded successfully" << std::endl;
+	}
+	else
+	{
+		std::cout << "Failed to load water texture: " << path << std::endl;
 	}
 }
 
