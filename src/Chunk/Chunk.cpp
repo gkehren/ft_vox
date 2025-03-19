@@ -313,10 +313,10 @@ void Chunk::generateTerrainColumn(int x, int z, int terrainHeight, float biomeNo
 				setVoxel(x, y, z, STONE);
 			}
 		}
-		// else if (y <= Chunk::WATER_LEVEL)
-		//{
-		//	setVoxel(x, y, z, WATER);
-		// }
+		else if (y <= Chunk::WATER_LEVEL)
+		{
+			setVoxel(x, y, z, WATER);
+		}
 		else
 		{
 			setVoxel(x, y, z, AIR);
@@ -592,7 +592,11 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 						if (isVoxelActive(neighborPos.x, neighborPos.y, neighborPos.z))
 						{
 							TextureType neighborType = static_cast<TextureType>(getVoxel(neighborPos.x, neighborPos.y, neighborPos.z).type);
-							if (TextureManager::isTransparent(neighborType))
+							if (blockType == neighborType)
+							{
+								isFaceVisible = false;
+							}
+							else if (TextureManager::isTransparent(neighborType))
 							{
 								isFaceVisible = true;
 							}
