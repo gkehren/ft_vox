@@ -76,7 +76,7 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 
 	std::string path = RES_PATH + std::string("shaders/");
 	this->shader = std::make_unique<Shader>((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
-	this->renderer = std::make_unique<Renderer>();
+	this->renderer = std::make_unique<Renderer>(windowWidth, windowHeight, renderSettings.maxRenderDistance);
 	this->camera.setWindow(this->window);
 	this->playerChunkPos = glm::ivec2(-1, -1);
 
@@ -330,7 +330,7 @@ void Engine::render()
 
 		for (auto &future : futures)
 		{
-			future.wait();
+			future.get();
 		}
 	}
 	end = std::chrono::high_resolution_clock::now();
@@ -366,7 +366,7 @@ void Engine::render()
 		if (!chunk.second.isVisible() || chunk.second.getState() == ChunkState::UNLOADED)
 			continue;
 
-		renderSettings.visibleVoxelsCount += chunk.second.draw(*shader, camera, renderer->getTextureArray(), shaderParams);
+		renderSettings.visibleVoxelsCount += chunk.second.draw(*shader, camera, renderer->getTextureAtlas(), shaderParams);
 		renderSettings.visibleChunksCount++;
 
 		if (renderSettings.chunkBorders)
@@ -376,6 +376,14 @@ void Engine::render()
 	}
 	end = std::chrono::high_resolution_clock::now();
 	renderTiming.chunkRendering = std::chrono::duration<float, std::milli>(end - start).count();
+
+	// Update and draw voxel highlights
+	updateVoxelHighlights();
+	drawVoxelHighlight(destructionHighlight);
+	drawVoxelHighlight(placementHighlight);
+
+	auto endFrame = std::chrono::high_resolution_clock::now();
+	renderTiming.totalFrame = std::chrono::duration<float, std::milli>(endFrame - startFrame).count();
 }
 
 void Engine::updateChunks()
@@ -948,4 +956,38 @@ void Engine::renderBiomeMap()
 	}
 
 	ImGui::End();
+}
+
+void Engine::updateVoxelHighlights()
+{
+	// Reset highlight state
+	destructionHighlight.active = false;
+	placementHighlight.active = false;
+
+	// Only perform raycasts when mouse is captured
+	if (!isMousecaptured)
+		return;
+
+	// Perform raycast to find target voxels
+	glm::vec3 hitPosition, prevPosition;
+	if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(renderSettings.raycastDistance), hitPosition, prevPosition))
+	{
+		// We found a voxel we can destroy
+		destructionHighlight.active = true;
+		destructionHighlight.position = hitPosition;
+		destructionHighlight.color = glm::vec3(0.9f, 0.2f, 0.2f); // Red
+
+		// We have a place to put a new voxel (the position before the hit)
+		placementHighlight.active = true;
+		placementHighlight.position = prevPosition;
+		placementHighlight.color = glm::vec3(0.2f, 0.9f, 0.2f); // Green
+	}
+}
+
+void Engine::drawVoxelHighlight(const VoxelHighlight &highlight)
+{
+	if (highlight.active)
+	{
+		renderer->drawVoxelHighlight(highlight.position, highlight.color, camera);
+	}
 }

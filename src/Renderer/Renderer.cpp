@@ -40,7 +40,7 @@
 //	return textureID;
 //}
 
-Renderer::Renderer()
+Renderer::Renderer(int screenWidth, int screenHeight, float renderDistance) : screenWidth(screenWidth), screenHeight(screenHeight), renderDistance(renderDistance)
 {
 	this->textureManager.initialize();
 	this->initBoundingBox();
@@ -283,4 +283,54 @@ glm::vec3 Renderer::hsvToRgb(float h, float s, float v) const
 	}
 
 	return glm::vec3(r, g, b);
+}
+
+void Renderer::drawVoxelHighlight(const glm::vec3 &position, const glm::vec3 &color, const Camera &camera) const
+{
+	boundingBoxShader->use();
+
+	boundingBoxShader->setMat4("view", camera.getViewMatrix());
+	boundingBoxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
+	boundingBoxShader->setVec3("color", color); // Set highlight color
+
+	// Create a 1x1x1 box at the voxel position
+	float vertices[] = {
+		position.x, position.y, position.z,				  // 0
+		position.x + 1.0f, position.y, position.z,		  // 1
+		position.x + 1.0f, position.y + 1.0f, position.z, // 2
+		position.x, position.y + 1.0f, position.z,		  // 3
+
+		position.x, position.y, position.z + 1.0f,				 // 4
+		position.x + 1.0f, position.y, position.z + 1.0f,		 // 5
+		position.x + 1.0f, position.y + 1.0f, position.z + 1.0f, // 6
+		position.x, position.y + 1.0f, position.z + 1.0f		 // 7
+	};
+
+	// Indices for box edges (12 lines)
+	unsigned int indices[] = {
+		0, 1, 1, 2, 2, 3, 3, 0, // Front face
+		4, 5, 5, 6, 6, 7, 7, 4, // Back face
+		0, 4, 1, 5, 2, 6, 3, 7	// Connecting edges
+	};
+
+	glBindVertexArray(boundingBoxVAO);
+
+	glBindBuffer(GL_ARRAY_BUFFER, boundingBoxVBO);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, boundingBoxEBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+	// Enable line width (if supported)
+	GLfloat lineWidth;
+	glGetFloatv(GL_LINE_WIDTH, &lineWidth);
+	glLineWidth(2.0f); // Make highlight lines thicker
+
+	// Draw the box
+	glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, 0);
+
+	// Restore line width
+	glLineWidth(lineWidth);
+
+	glBindVertexArray(0);
 }
