@@ -130,6 +130,17 @@ private:
 		double lastUpdateTime{0.0};			  // Last time the map was updated
 	} biomeMap;
 
+	// Voxel selection highlight
+	struct VoxelHighlight
+	{
+		bool active{false};
+		glm::vec3 position{0.0f};
+		glm::vec3 color{0.8f, 0.2f, 0.2f}; // Red for destruction
+	} destructionHighlight, placementHighlight;
+
+	void updateVoxelHighlights();
+	void drawVoxelHighlight(const VoxelHighlight &highlight);
+
 	void updateBiomeMap();
 	void renderBiomeMap();
 
