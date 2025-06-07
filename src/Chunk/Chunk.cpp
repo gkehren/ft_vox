@@ -1,4 +1,7 @@
 #include "Chunk.hpp"
+#include <vector>			// Required for std::vector
+#include <algorithm>		// Required for std::fill
+#include <glm/gtx/hash.hpp> // For glm::vec3 hashing if not already included by VertexHasher
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state)
 	: position(position), visible(false), state(state), VAO(0), VBO(0), EBO(0), meshNeedsUpdate(true)
@@ -470,6 +473,7 @@ void Chunk::generateTree(int x, int z, int terrainHeight)
 		{
 			for (int offsetZ = -radius; offsetZ <= radius; offsetZ++)
 			{
+
 				// Skip corners for a more rounded look on the bigger layers
 				if (radius == 2 && abs(offsetX) == 2 && abs(offsetZ) == 2)
 				{
@@ -492,199 +496,325 @@ void Chunk::generateTree(int x, int z, int terrainHeight)
 
 void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 {
-	static BiomeManager BiomeManager;
+	static BiomeManager biomeManager; // Keep static as in original
 
 	vertices.clear();
 	indices.clear();
-
+	// Assuming VertexHasher is defined for Vertex struct
 	std::unordered_map<Vertex, uint32_t, VertexHasher> vertexMap;
+	vertexMap.clear();
 	uint32_t indexCounter = 0;
 
-	for (int x = 0; x < SIZE; ++x)
+	// Helper to get voxel type, handling out-of-bounds as AIR
+	auto getVoxelTypeSafe = [&](int vx, int vy, int vz) -> TextureType
 	{
-		for (int y = 0; y < HEIGHT; ++y)
+		if (vx < 0 || vx >= SIZE || vy < 0 || vy >= HEIGHT || vz < 0 || vz >= SIZE)
 		{
-			for (int z = 0; z < SIZE; ++z)
+			return AIR;
+		}
+		return static_cast<TextureType>(getVoxel(vx, vy, vz).type);
+	};
+
+	const int dims[] = {SIZE, HEIGHT, SIZE};
+
+	// Iterate over dimensions (X, Y, Z)
+	for (int d = 0; d < 3; ++d)
+	{
+		int u = (d + 1) % 3; // First axis in the plane of the face
+		int v = (d + 2) % 3; // Second axis in the plane of the face
+
+		glm::ivec3 x = {0, 0, 0}; // Current voxel coordinate during slice iteration
+		glm::ivec3 q = {0, 0, 0}; // Normal direction for the face (points from x to x+q)
+		q[d] = 1;
+
+		// Mask for the current slice to mark processed parts of quads
+		std::vector<bool> mask(dims[u] * dims[v]);
+
+		// Iterate over each slice of the chunk along dimension 'd'
+		// x[d] ranges from -1 (representing boundary before chunk) to dims[d]-1 (last voxel layer)
+		// A face exists between slice x[d] and slice x[d]+1
+		for (x[d] = -1; x[d] < dims[d]; ++x[d])
+		{
+			std::fill(mask.begin(), mask.end(), false); // Reset mask for each slice
+
+			// Iterate over the plane (u, v)
+			for (x[u] = 0; x[u] < dims[u]; ++x[u])
 			{
-				if (!isVoxelActive(x, y, z))
-					continue;
-
-				TextureType blockType = static_cast<TextureType>(getVoxel(x, y, z).type);
-				bool isTransparent = false;
-				bool needsBiomeColoring = (blockType == GRASS_TOP || blockType == GRASS_SIDE || blockType == OAK_LEAVES || blockType == WATER);
-
-				// Determine biome color based on position
-				glm::vec3 biomeColor(0.0f);
-				if (needsBiomeColoring)
+				for (x[v] = 0; x[v] < dims[v]; ++x[v])
 				{
-					BiomeType biome = BiomeManager.getBiomeTypeAt(position.x + x, position.z + z, noise);
-					const BiomeParameters &biomeParams = BiomeManager.getBiomeParameters(biome);
 
-					switch (biome)
+					if (mask[x[u] * dims[v] + x[v]])
 					{
-					case BIOME_DESERT:
-						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
-							biomeColor = glm::vec3(0.76f, 0.70f, 0.48f); // Herbe jaune sèche
-						else if (blockType == OAK_LEAVES)
-							biomeColor = glm::vec3(0.5f, 0.45f, 0.2f); // Feuilles plus sèches
-						else if (blockType == WATER)
-							biomeColor = biomeParams.waterColor;
-						break;
-
-					case BIOME_FOREST:
-						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
-							biomeColor = glm::vec3(0.3f, 0.65f, 0.2f); // Vert forêt
-						else if (blockType == OAK_LEAVES)
-							biomeColor = glm::vec3(0.2f, 0.6f, 0.1f); // Vert feuillage
-						else if (blockType == WATER)
-							biomeColor = biomeParams.waterColor;
-						break;
-
-					case BIOME_PLAIN:
-						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
-							biomeColor = glm::vec3(0.4f, 0.7f, 0.3f); // Vert clair
-						else if (blockType == OAK_LEAVES)
-							biomeColor = glm::vec3(0.3f, 0.65f, 0.2f); // Vert moyen
-						else if (blockType == WATER)
-							biomeColor = biomeParams.waterColor;
-						break;
-
-					case BIOME_MOUNTAIN:
-						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
-							biomeColor = glm::vec3(0.35f, 0.55f, 0.25f); // Vert plus foncé/bleuté
-						else if (blockType == OAK_LEAVES)
-							biomeColor = glm::vec3(0.25f, 0.5f, 0.15f); // Vert foncé
-						else if (blockType == WATER)
-							biomeColor = biomeParams.waterColor;
-						break;
-
-					default:
-						// Couleur par défaut
-						if (blockType == GRASS_TOP || blockType == GRASS_SIDE)
-							biomeColor = glm::vec3(0.4f, 0.7f, 0.3f);
-						else if (blockType == OAK_LEAVES)
-							biomeColor = glm::vec3(0.3f, 0.6f, 0.2f);
-						else if (blockType == WATER)
-							biomeColor = glm::vec3(0.0f, 0.5f, 1.0f);
+						continue; // Already processed this part of the slice
 					}
 
-					// Ajouter une légère variation aléatoire pour plus de diversité
-					float variation = noise->noise2D_01(
-										  position.x + x * 0.1f,
-										  position.z + z * 0.1f) *
-										  0.1f -
-									  0.05f;
+					// Get types of voxels on either side of the potential face
+					// Voxel at x is on one side, voxel at x+q is on the other.
+					TextureType type1 = (x[d] < 0) ? AIR : getVoxelTypeSafe(x[0], x[1], x[2]);								   // Voxel in "current" slice part
+					TextureType type2 = (x[d] >= dims[d] - 1) ? AIR : getVoxelTypeSafe(x[0] + q[0], x[1] + q[1], x[2] + q[2]); // Voxel in "next" slice part
 
-					biomeColor.r = glm::clamp(biomeColor.r + variation, 0.0f, 1.0f);
-					biomeColor.g = glm::clamp(biomeColor.g + variation, 0.0f, 1.0f);
-					biomeColor.b = glm::clamp(biomeColor.b + variation, 0.0f, 1.0f);
-				}
+					TextureType quad_type = AIR;
+					glm::ivec3 quad_normal_dir = {0, 0, 0};
+					glm::ivec3 quad_origin_voxel_coord = {0, 0, 0}; // Min corner of the voxel this quad's face belongs to
 
-				for (int face = 0; face < 6; ++face)
-				{
-					glm::ivec3 neighborPos = glm::ivec3{x, y, z} + directions[face];
-					bool isFaceVisible = false;
-
-					if (neighborPos.x >= 0 && neighborPos.x < SIZE &&
-						neighborPos.y >= 0 && neighborPos.y < HEIGHT &&
-						neighborPos.z >= 0 && neighborPos.z < SIZE)
+					if (type1 != AIR && (type2 == AIR || (TextureManager::isTransparent(type2) && type1 != type2)))
 					{
-						if (isVoxelActive(neighborPos.x, neighborPos.y, neighborPos.z))
-						{
-							TextureType neighborType = static_cast<TextureType>(getVoxel(neighborPos.x, neighborPos.y, neighborPos.z).type);
-							if (blockType == neighborType)
-							{
-								isFaceVisible = false;
-							}
-							else if (TextureManager::isTransparent(neighborType))
-							{
-								isFaceVisible = true;
-							}
-							else
-							{
-								isFaceVisible = false;
-							}
-						}
-						else
-						{
-							isFaceVisible = true;
-						}
+						// Face belongs to type1, pointing towards type2
+						quad_type = type1;
+						quad_normal_dir = q;
+						quad_origin_voxel_coord = x;
+					}
+					else if (type2 != AIR && (type1 == AIR || (TextureManager::isTransparent(type1) && type1 != type2)))
+					{
+						// Face belongs to type2, pointing towards type1
+						quad_type = type2;
+						quad_normal_dir = {-q[0], -q[1], -q[2]};
+						quad_origin_voxel_coord = x + q;
 					}
 					else
 					{
-						if (neighborPos.y >= 0 && neighborPos.y < HEIGHT)
-						{
-							isFaceVisible = !isVoxelActive(neighborPos.x, neighborPos.y, neighborPos.z);
+						continue; // No visible face here, or types are the same opaque.
+					}
+
+					if (quad_type == AIR)
+						continue;
+
+					// Calculate width (w) of the quad along dimension u
+					int w;
+					for (w = 1; x[u] + w < dims[u]; ++w)
+					{
+						if (mask[(x[u] + w) * dims[v] + x[v]])
+							break;
+
+						glm::ivec3 next_pos_u_slice = x;
+						next_pos_u_slice[u] += w; // Next voxel in u-direction in current slice part
+
+						TextureType check_type1 = (x[d] < 0) ? AIR : getVoxelTypeSafe(next_pos_u_slice[0], next_pos_u_slice[1], next_pos_u_slice[2]);
+						TextureType check_type2 = (x[d] >= dims[d] - 1) ? AIR : getVoxelTypeSafe(next_pos_u_slice[0] + q[0], next_pos_u_slice[1] + q[1], next_pos_u_slice[2] + q[2]);
+
+						if (quad_normal_dir == q)
+						{ // Face is for a block like type1
+							if (check_type1 != quad_type || !(check_type2 == AIR || (TextureManager::isTransparent(check_type2) && check_type1 != check_type2)))
+								break;
 						}
 						else
-						{
-							isFaceVisible = true;
+						{ // Face is for a block like type2
+							if (check_type2 != quad_type || !(check_type1 == AIR || (TextureManager::isTransparent(check_type1) && check_type2 != check_type1)))
+								break;
 						}
 					}
 
-					if (isFaceVisible)
+					// Calculate height (h) of the quad along dimension v
+					int h;
+					bool h_break = false;
+					for (h = 1; x[v] + h < dims[v]; ++h)
 					{
-						// Adjust texture based on face orientation (top, side, bottom)
-						float textureIndex = blockType;
-
-						// Special case for grass blocks (different textures for top/sides/bottom)
-						if (blockType == GRASS_SIDE)
-						{
-							if (face == UP)
-								textureIndex = GRASS_TOP;
-							else if (face == DOWN)
-								textureIndex = DIRT;
-							else
-								textureIndex = GRASS_SIDE;
-						}
-						// Special case for logs (different texture for top/bottom vs sides)
-						else if (blockType == OAK_LOG)
-						{
-							if (face == UP || face == DOWN)
-								textureIndex = OAK_LOG_TOP;
-						}
-
-						uint32_t faceVertexIndices[4];
-						for (int i = 0; i < 4; ++i)
-						{
-							Vertex vertex;
-							vertex.position = position + glm::vec3(x, y, z) + faceVertexOffsets[face][i];
-							vertex.normal = faceNormals[face];
-							vertex.texCoord = texCoords[i];
-							vertex.textureIndex = textureIndex;
-							vertex.useBiomeColor = needsBiomeColoring ? 1.0f : 0.0f;
-							vertex.biomeColor = biomeColor;
-
-							auto it = vertexMap.find(vertex);
-							uint32_t vertexIndex;
-							if (it != vertexMap.end())
+						for (int k = 0; k < w; ++k)
+						{ // Check all cells in the current row of width w
+							if (mask[(x[u] + k) * dims[v] + (x[v] + h)])
 							{
-								vertexIndex = it->second;
+								h_break = true;
+								break;
+							}
+
+							glm::ivec3 next_pos_v_slice = x;
+							next_pos_v_slice[u] += k;
+							next_pos_v_slice[v] += h;
+
+							TextureType check_type1 = (x[d] < 0) ? AIR : getVoxelTypeSafe(next_pos_v_slice[0], next_pos_v_slice[1], next_pos_v_slice[2]);
+							TextureType check_type2 = (x[d] >= dims[d] - 1) ? AIR : getVoxelTypeSafe(next_pos_v_slice[0] + q[0], next_pos_v_slice[1] + q[1], next_pos_v_slice[2] + q[2]);
+
+							if (quad_normal_dir == q)
+							{
+								if (check_type1 != quad_type || !(check_type2 == AIR || (TextureManager::isTransparent(check_type2) && check_type1 != check_type2)))
+								{
+									h_break = true;
+									break;
+								}
 							}
 							else
 							{
-								vertices.push_back(vertex);
-								vertexIndex = indexCounter;
-								vertexMap[vertex] = indexCounter;
-								indexCounter++;
+								if (check_type2 != quad_type || !(check_type1 == AIR || (TextureManager::isTransparent(check_type1) && check_type2 != check_type1)))
+								{
+									h_break = true;
+									break;
+								}
 							}
-							faceVertexIndices[i] = vertexIndex;
 						}
+						if (h_break)
+							break;
+					}
 
-						indices.push_back(faceVertexIndices[0]);
-						indices.push_back(faceVertexIndices[1]);
-						indices.push_back(faceVertexIndices[2]);
+					// Add quad to mesh
+					glm::vec3 s_coord_float; // Min corner of the quad in local chunk grid space
+					s_coord_float[d] = static_cast<float>(x[d] + 1.0f); // Corrected: Face is always at x[d]+1
+					s_coord_float[u] = static_cast<float>(x[u]);
+					s_coord_float[v] = static_cast<float>(x[v]);
 
-						indices.push_back(faceVertexIndices[0]);
-						indices.push_back(faceVertexIndices[2]);
-						indices.push_back(faceVertexIndices[3]);
+					glm::vec3 quad_width_vec = {0,0,0}; quad_width_vec[u] = static_cast<float>(w);
+					glm::vec3 quad_height_vec = {0,0,0}; quad_height_vec[v] = static_cast<float>(h);
+
+					glm::vec3 v0_local = s_coord_float;
+					glm::vec3 v1_local = s_coord_float + quad_width_vec;
+					glm::vec3 v2_local = s_coord_float + quad_width_vec + quad_height_vec;
+					glm::vec3 v3_local = s_coord_float + quad_height_vec;
+
+					// Texture coordinates for tiling
+					glm::vec2 tc[4];
+					float tex_w = static_cast<float>(w);
+					float tex_h = static_cast<float>(h);
+
+					tc[0] = {0.0f, 0.0f};
+					tc[1] = {tex_w, 0.0f};
+					tc[2] = {tex_w, tex_h};
+					tc[3] = {0.0f, tex_h};
+
+					bool needsBiomeColoring = (quad_type == GRASS_TOP || quad_type == GRASS_SIDE || quad_type == OAK_LEAVES || quad_type == WATER);
+					glm::vec3 biomeColorVal(0.0f);
+					if (needsBiomeColoring)
+					{
+						// Use the quad_origin_voxel_coord for biome lookup (center of it)
+						BiomeType biome = biomeManager.getBiomeTypeAt(
+							this->position.x + quad_origin_voxel_coord[0] + 0.5f,
+							this->position.z + quad_origin_voxel_coord[2] + 0.5f,
+							noise);
+						const BiomeParameters &biomeParams = biomeManager.getBiomeParameters(biome);
+
+						switch (biome)
+						{
+						case BIOME_DESERT:
+							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
+								biomeColorVal = glm::vec3(0.76f, 0.70f, 0.48f);
+							else if (quad_type == OAK_LEAVES)
+								biomeColorVal = glm::vec3(0.5f, 0.45f, 0.2f);
+							else if (quad_type == WATER)
+								biomeColorVal = biomeParams.waterColor;
+							break;
+						case BIOME_FOREST:
+							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
+								biomeColorVal = glm::vec3(0.3f, 0.65f, 0.2f);
+							else if (quad_type == OAK_LEAVES)
+								biomeColorVal = glm::vec3(0.2f, 0.6f, 0.1f);
+							else if (quad_type == WATER)
+								biomeColorVal = biomeParams.waterColor;
+							break;
+						case BIOME_PLAIN:
+							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
+								biomeColorVal = glm::vec3(0.4f, 0.7f, 0.3f);
+							else if (quad_type == OAK_LEAVES)
+								biomeColorVal = glm::vec3(0.3f, 0.65f, 0.2f);
+							else if (quad_type == WATER)
+								biomeColorVal = biomeParams.waterColor;
+							break;
+						case BIOME_MOUNTAIN:
+							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
+								biomeColorVal = glm::vec3(0.35f, 0.55f, 0.25f);
+							else if (quad_type == OAK_LEAVES)
+								biomeColorVal = glm::vec3(0.25f, 0.5f, 0.15f);
+							else if (quad_type == WATER)
+								biomeColorVal = biomeParams.waterColor;
+							break;
+						default:
+							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
+								biomeColorVal = glm::vec3(0.4f, 0.7f, 0.3f);
+							else if (quad_type == OAK_LEAVES)
+								biomeColorVal = glm::vec3(0.3f, 0.6f, 0.2f);
+							else if (quad_type == WATER)
+								biomeColorVal = glm::vec3(0.0f, 0.5f, 1.0f); // Default water
+						}
+						// Variation from original code
+						float variation = noise->noise2D_01(
+											  this->position.x + quad_origin_voxel_coord[0] * 0.1f,
+											  this->position.z + quad_origin_voxel_coord[2] * 0.1f) *
+											  0.1f -
+										  0.05f;
+						biomeColorVal.r = glm::clamp(biomeColorVal.r + variation, 0.0f, 1.0f);
+						biomeColorVal.g = glm::clamp(biomeColorVal.g + variation, 0.0f, 1.0f);
+						biomeColorVal.b = glm::clamp(biomeColorVal.b + variation, 0.0f, 1.0f);
+					}
+
+					float texture_idx_val = static_cast<float>(quad_type);
+					if (quad_type == GRASS_SIDE)
+					{
+						if (quad_normal_dir.y > 0.9f)
+							texture_idx_val = static_cast<float>(GRASS_TOP);
+						else if (quad_normal_dir.y < -0.9f)
+							texture_idx_val = static_cast<float>(DIRT);
+						// else remains GRASS_SIDE
+					}
+					else if (quad_type == OAK_LOG)
+					{
+						if (std::abs(quad_normal_dir.y) > 0.9f)
+							texture_idx_val = static_cast<float>(OAK_LOG_TOP);
+						// else remains OAK_LOG
+					}
+
+					uint32_t vert_indices[4];
+					glm::vec3 quad_vertices_world[4] = {
+						this->position + v0_local,
+						this->position + v1_local,
+						this->position + v2_local,
+						this->position + v3_local};
+
+					glm::vec3 normal_vec3 = glm::normalize(glm::vec3(quad_normal_dir));
+
+					for (int i = 0; i < 4; ++i)
+					{
+						Vertex vert;
+						vert.position = quad_vertices_world[i];
+						vert.normal = normal_vec3;
+						vert.texCoord = tc[i];
+						vert.textureIndex = texture_idx_val;
+						vert.useBiomeColor = needsBiomeColoring ? 1.0f : 0.0f;
+						vert.biomeColor = biomeColorVal;
+
+						auto it = vertexMap.find(vert);
+						if (it != vertexMap.end())
+						{
+							vert_indices[i] = it->second;
+						}
+						else
+						{
+							vertices.push_back(vert);
+							vert_indices[i] = indexCounter;
+							vertexMap[vert] = indexCounter++;
+						}
+					}
+
+					// Winding order based on normal direction along the main axis 'd'
+					if (quad_normal_dir[d] > 0)
+					{
+						indices.push_back(vert_indices[0]);
+						indices.push_back(vert_indices[1]);
+						indices.push_back(vert_indices[2]);
+						indices.push_back(vert_indices[0]);
+						indices.push_back(vert_indices[2]);
+						indices.push_back(vert_indices[3]);
+					}
+					else
+					{
+						indices.push_back(vert_indices[0]);
+						indices.push_back(vert_indices[2]);
+						indices.push_back(vert_indices[1]);
+						indices.push_back(vert_indices[0]);
+						indices.push_back(vert_indices[3]);
+						indices.push_back(vert_indices[2]);
+					}
+
+					// Mark processed cells in the mask
+					for (int iw = 0; iw < w; ++iw)
+					{
+						for (int ih = 0; ih < h; ++ih)
+						{
+							mask[(x[u] + iw) * dims[v] + (x[v] + ih)] = true;
+						}
 					}
 				}
 			}
 		}
 	}
 
-	meshNeedsUpdate = true;
+	meshNeedsUpdate = true; // Flag for GPU upload
 	state = ChunkState::MESHED;
 }
 
