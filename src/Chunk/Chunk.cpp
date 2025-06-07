@@ -9,10 +9,10 @@ Chunk::Chunk(const glm::vec3 &position, ChunkState state)
 }
 
 Chunk::Chunk(Chunk &&other) noexcept
-	: position(std::move(other.position)), visible(other.visible), state(other.state), voxels(std::move(other.voxels)), VAO(other.VAO), VBO(other.VBO), EBO(other.EBO), meshNeedsUpdate(other.meshNeedsUpdate)
+	: position(std::move(other.position)), visible(other.visible), state(other.state), voxels(std::move(other.voxels)), VAO(other.VAO), VBO(other.VBO), EBO(other.EBO), meshNeedsUpdate(other.meshNeedsUpdate),
+	  activeVoxels(std::move(other.activeVoxels)), neighborShellVoxels(std::move(other.neighborShellVoxels)), vertices(std::move(other.vertices)), indices(std::move(other.indices))
 {
 }
-
 Chunk &Chunk::operator=(Chunk &&other) noexcept
 {
 	if (this != &other)
@@ -21,6 +21,10 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
 		visible = other.visible;
 		state = other.state;
 		voxels = std::move(other.voxels);
+		activeVoxels = std::move(other.activeVoxels);
+		neighborShellVoxels = std::move(other.neighborShellVoxels);
+		vertices = std::move(other.vertices);
+		indices = std::move(other.indices);
 		VAO = other.VAO;
 		VBO = other.VBO;
 		EBO = other.EBO;
@@ -89,6 +93,7 @@ const Voxel &Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
 	return voxels[getIndex(x, y, z)];
 }
 
+/*
 size_t Chunk::getNeighbourIndex(int x, int y, int z) const
 {
 	if (x < 0)
@@ -113,22 +118,15 @@ size_t Chunk::getNeighbourIndex(int x, int y, int z) const
 		return 0;
 	}
 }
+*/
 
 void Chunk::setVoxel(int x, int y, int z, TextureType type)
 {
-	if (x < 0 || x >= SIZE || y < 0 || y >= HEIGHT || z < 0 || z >= SIZE)
-	{
-		size_t index = getNeighbourIndex(x, y, z);
-		if (type != AIR && type != OAK_LEAVES && type != GLASS)
-		{
-			neighboursActiveMap.set(index);
-		}
-		else
-		{
-			neighboursActiveMap.reset(index);
-		}
-	}
-	else
+	// The logic for neighboursActiveMap has been removed as per the new approach.
+	// Boundary voxels are now handled by the extended voxel generation in generateChunk
+	// and accessed via neighborShellVoxels during meshing if they fall outside the -1 to SIZE range.
+
+	if (x >= 0 && x < SIZE && y >= 0 && y < HEIGHT && z >= 0 && z < SIZE)
 	{
 		size_t index = getIndex(x, y, z);
 		voxels[index].type = static_cast<uint8_t>(type);
@@ -141,6 +139,21 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
 			activeVoxels.reset(index);
 		}
 	}
+	else if ((x == -1 || x == SIZE || z == -1 || z == SIZE) && (y >= 0 && y < HEIGHT))
+	{
+		// This is a voxel on the 1-thick border, store it in neighborShellVoxels
+		// The coordinates are kept local to the chunk's frame of reference (e.g., -1, y, z)
+		if (type != AIR)
+		{
+			neighborShellVoxels[glm::ivec3(x, y, z)] = type;
+		}
+		else
+		{
+			neighborShellVoxels.erase(glm::ivec3(x, y, z));
+		}
+	}
+	// else: Voxel is outside the -1 to SIZE boundary, ignore for now or handle as error.
+	// This case should ideally not be hit by generateTerrainColumn if loops are correct.
 }
 
 bool Chunk::deleteVoxel(const glm::vec3 &position)
@@ -185,16 +198,16 @@ bool Chunk::placeVoxel(const glm::vec3 &position, TextureType type)
 
 bool Chunk::isVoxelActive(int x, int y, int z) const
 {
-	if (x < 0 || x >= SIZE || y < 0 || y >= HEIGHT || z < 0 || z >= SIZE)
-	{
-		size_t index = getNeighbourIndex(x, y, z);
-		return neighboursActiveMap.test(index);
-	}
-	else
+	if (x >= 0 && x < SIZE && y >= 0 && y < HEIGHT && z >= 0 && z < SIZE)
 	{
 		size_t index = getIndex(x, y, z);
 		return activeVoxels.test(index);
 	}
+	else if ((x == -1 || x == SIZE || z == -1 || z == SIZE) && (y >= 0 && y < HEIGHT))
+	{
+		return neighborShellVoxels.count(glm::ivec3(x, y, z)) > 0;
+	}
+	return false; // Outside known boundaries
 }
 
 bool Chunk::isVoxelActiveGlobalPos(int x, int y, int z) const
@@ -211,14 +224,13 @@ void Chunk::generateVoxels(siv::PerlinNoise *noise)
 	if (state != ChunkState::UNLOADED)
 		return;
 
-	// DEBUG
-	// for (uint32_t x = 0; x < Chunk::SIZE; ++x) {
-	//	for (uint32_t z = 0; z < Chunk::SIZE; ++z) {
-	//		setVoxel(x, 0, z, TEXTURE_GRASS);
-	//	}
-	//}
+	neighborShellVoxels.clear(); // Clear previous neighbor data
+	generateChunk(noise);		 // This generates the main chunk voxels AND the 1-voxel border
 
-	generateChunk(noise);
+	// The explicit generation of neighborShellVoxels here is removed,
+	// as generateChunk (via generateTerrainColumn and setVoxel)
+	// now populates neighborShellVoxels for the -1 and SIZE border voxels.
+
 	state = ChunkState::GENERATED;
 }
 
@@ -227,16 +239,23 @@ void Chunk::generateChunk(siv::PerlinNoise *noise)
 	static BiomeManager biomeManager; // Static to avoid recreation
 	const float blendRange = 0.05f;
 
-	for (int x = -1; x <= Chunk::SIZE; x++)
+	// Loop from -1 to SIZE (inclusive) for x and z to generate the 1-voxel thick border
+	// around the main chunk area (0 to SIZE-1).
+	for (int x_local = -1; x_local <= SIZE; x_local++)
 	{
-		for (int z = -1; z <= Chunk::SIZE; z++)
+		for (int z_local = -1; z_local <= SIZE; z_local++)
 		{
-			if ((x == -1 || x == Chunk::SIZE) && (z == -1 || z == Chunk::SIZE))
+			// Skip corners of the -1 to SIZE extended area, as they are not direct face neighbors.
+			// We only need face-adjacent voxels for meshing continuity.
+			if ((x_local == -1 && z_local == -1) || (x_local == -1 && z_local == SIZE) ||
+				(x_local == SIZE && z_local == -1) || (x_local == SIZE && z_local == SIZE))
+			{
 				continue;
+			}
 
 			// Get absolute world coordinates
-			int worldX = static_cast<int>(position.x) + x;
-			int worldZ = static_cast<int>(position.z) + z;
+			int worldX = static_cast<int>(position.x) + x_local;
+			int worldZ = static_cast<int>(position.z) + z_local;
 
 			float biomeNoise = noise->noise2D_01(
 				static_cast<float>(worldX) / 256.0f,
@@ -281,11 +300,14 @@ void Chunk::generateChunk(siv::PerlinNoise *noise)
 
 			int terrainHeight = static_cast<int>(combinedHeight);
 
-			// Generate terrain column
-			generateTerrainColumn(x, z, terrainHeight, biomeNoise, noise);
+			// Generate terrain column - this will use setVoxel, which now handles border voxels
+			generateTerrainColumn(x_local, z_local, terrainHeight, biomeNoise, noise);
 
-			// Generate features
-			generateFeatures(x, z, terrainHeight, worldX, worldZ, biomeNoise, noise);
+			// Generate features - only for the main chunk body (0 to SIZE-1)
+			if (x_local >= 0 && x_local < SIZE && z_local >= 0 && z_local < SIZE)
+			{
+				generateFeatures(x_local, z_local, terrainHeight, worldX, worldZ, biomeNoise, noise);
+			}
 		}
 	}
 }
@@ -515,6 +537,23 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 		return static_cast<TextureType>(getVoxel(vx, vy, vz).type);
 	};
 
+	// New helper for greedy meshing that checks local voxels and the precomputed neighbor shell
+	auto getVoxelDataForMeshing = [&](int lx, int ly, int lz) -> TextureType
+	{
+		if (lx >= 0 && lx < SIZE && ly >= 0 && ly < HEIGHT && lz >= 0 && lz < SIZE)
+		{
+			return static_cast<TextureType>(getVoxel(lx, ly, lz).type);
+		}
+		// Check the neighbor shell for out-of-bounds coordinates relevant to meshing.
+		// These are coordinates like -1, y, z or SIZE, y, z or x, y, -1 or x, y, SIZE.
+		auto it = neighborShellVoxels.find(glm::ivec3(lx, ly, lz));
+		if (it != neighborShellVoxels.end())
+		{
+			return it->second;
+		}
+		return AIR; // Default to AIR if not in chunk and not in precomputed shell
+	};
+
 	const int dims[] = {SIZE, HEIGHT, SIZE};
 
 	// Iterate over dimensions (X, Y, Z)
@@ -550,8 +589,9 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 
 					// Get types of voxels on either side of the potential face
 					// Voxel at x is on one side, voxel at x+q is on the other.
-					TextureType type1 = (x[d] < 0) ? AIR : getVoxelTypeSafe(x[0], x[1], x[2]);								   // Voxel in "current" slice part
-					TextureType type2 = (x[d] >= dims[d] - 1) ? AIR : getVoxelTypeSafe(x[0] + q[0], x[1] + q[1], x[2] + q[2]); // Voxel in "next" slice part
+					// Use the new helper function that checks the neighbor shell
+					TextureType type1 = getVoxelDataForMeshing(x[0], x[1], x[2]);
+					TextureType type2 = getVoxelDataForMeshing(x[0] + q[0], x[1] + q[1], x[2] + q[2]);
 
 					TextureType quad_type = AIR;
 					glm::ivec3 quad_normal_dir = {0, 0, 0};
@@ -589,8 +629,9 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 						glm::ivec3 next_pos_u_slice = x;
 						next_pos_u_slice[u] += w; // Next voxel in u-direction in current slice part
 
-						TextureType check_type1 = (x[d] < 0) ? AIR : getVoxelTypeSafe(next_pos_u_slice[0], next_pos_u_slice[1], next_pos_u_slice[2]);
-						TextureType check_type2 = (x[d] >= dims[d] - 1) ? AIR : getVoxelTypeSafe(next_pos_u_slice[0] + q[0], next_pos_u_slice[1] + q[1], next_pos_u_slice[2] + q[2]);
+						// Use the new helper function
+						TextureType check_type1 = getVoxelDataForMeshing(next_pos_u_slice[0], next_pos_u_slice[1], next_pos_u_slice[2]);
+						TextureType check_type2 = getVoxelDataForMeshing(next_pos_u_slice[0] + q[0], next_pos_u_slice[1] + q[1], next_pos_u_slice[2] + q[2]);
 
 						if (quad_normal_dir == q)
 						{ // Face is for a block like type1
@@ -621,8 +662,9 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							next_pos_v_slice[u] += k;
 							next_pos_v_slice[v] += h;
 
-							TextureType check_type1 = (x[d] < 0) ? AIR : getVoxelTypeSafe(next_pos_v_slice[0], next_pos_v_slice[1], next_pos_v_slice[2]);
-							TextureType check_type2 = (x[d] >= dims[d] - 1) ? AIR : getVoxelTypeSafe(next_pos_v_slice[0] + q[0], next_pos_v_slice[1] + q[1], next_pos_v_slice[2] + q[2]);
+							// Use the new helper function
+							TextureType check_type1 = getVoxelDataForMeshing(next_pos_v_slice[0], next_pos_v_slice[1], next_pos_v_slice[2]);
+							TextureType check_type2 = getVoxelDataForMeshing(next_pos_v_slice[0] + q[0], next_pos_v_slice[1] + q[1], next_pos_v_slice[2] + q[2]);
 
 							if (quad_normal_dir == q)
 							{
@@ -646,13 +688,15 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 					}
 
 					// Add quad to mesh
-					glm::vec3 s_coord_float; // Min corner of the quad in local chunk grid space
+					glm::vec3 s_coord_float;							// Min corner of the quad in local chunk grid space
 					s_coord_float[d] = static_cast<float>(x[d] + 1.0f); // Corrected: Face is always at x[d]+1
 					s_coord_float[u] = static_cast<float>(x[u]);
 					s_coord_float[v] = static_cast<float>(x[v]);
 
-					glm::vec3 quad_width_vec = {0,0,0}; quad_width_vec[u] = static_cast<float>(w);
-					glm::vec3 quad_height_vec = {0,0,0}; quad_height_vec[v] = static_cast<float>(h);
+					glm::vec3 quad_width_vec = {0, 0, 0};
+					quad_width_vec[u] = static_cast<float>(w);
+					glm::vec3 quad_height_vec = {0, 0, 0};
+					quad_height_vec[v] = static_cast<float>(h);
 
 					glm::vec3 v0_local = s_coord_float;
 					glm::vec3 v1_local = s_coord_float + quad_width_vec;

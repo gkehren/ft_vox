@@ -11,6 +11,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <PerlinNoise/PerlinNoise.hpp>
+#include <glm/gtx/hash.hpp> // For glm::ivec3 hashing
 
 #include <chrono>
 
@@ -19,6 +20,17 @@
 #include <Camera/Camera.hpp>
 #include <Biome/BiomeManager.hpp>
 #include <utils.hpp>
+
+struct IVec3Hash
+{
+	std::size_t operator()(const glm::ivec3 &v) const
+	{
+		std::size_t h1 = std::hash<int>()(v.x);
+		std::size_t h2 = std::hash<int>()(v.y);
+		std::size_t h3 = std::hash<int>()(v.z);
+		return h1 ^ (h2 << 1) ^ (h3 << 2);
+	}
+};
 
 class Chunk
 {
@@ -56,28 +68,29 @@ private:
 	bool visible;
 	ChunkState state;
 
-	// Stockage linéaire 3D des voxels
-	std::array<Voxel, SIZE * HEIGHT * SIZE> voxels;
-	std::bitset<SIZE * HEIGHT * SIZE> activeVoxels;
-
-	// neighbours voxels
-	std::bitset<SIZE * HEIGHT * 4> neighboursActiveMap;
-	Voxel &getNeighbourVoxel(int x, int y, int z);
-	size_t getNeighbourIndex(int x, int y, int z) const;
-
-	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
-
 	GLuint VAO;
 	GLuint VBO;
 	GLuint EBO;
 
 	std::vector<Vertex> vertices;
 	std::vector<uint16_t> indices;
+	std::array<Voxel, SIZE * HEIGHT * SIZE> voxels;
+	std::bitset<SIZE * HEIGHT * SIZE> activeVoxels;
+
+	std::unordered_map<glm::ivec3, TextureType, IVec3Hash> neighborShellVoxels;
+
 	bool meshNeedsUpdate;
 	void uploadMeshToGPU();
 
+	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
 	void generateChunk(siv::PerlinNoise *noise);
 	void generateTerrainColumn(int x, int z, int terrainHeight, float biomeNoise, siv::PerlinNoise *noise);
 	void generateFeatures(int x, int z, int terrainHeight, int worldX, int worldZ, float biomeNoise, siv::PerlinNoise *noise);
 	void generateTree(int x, int z, int terrainHeight);
+
+	TextureType getGreedyMeshingVoxelData(const glm::ivec3 &local_coord) const;
+
+public:
+	// For debug purposes
+	void setVoxelDebug(int x, int y, int z, const Voxel &voxel);
 };
