@@ -1,4 +1,6 @@
 #include "Chunk.hpp"
+#include <FastNoise/FastNoiseLite.h>
+#include <utils.hpp>
 #include <vector>
 #include <algorithm>
 #include <glm/gtx/hash.hpp>
@@ -192,289 +194,283 @@ bool Chunk::isVoxelActiveGlobalPos(int x, int y, int z) const
 	return isVoxelActive(localX, localY, localZ);
 }
 
-void Chunk::generateVoxels(siv::PerlinNoise *noise)
+void Chunk::generateVoxels(FastNoiseLite *noiseGenerator, const BiomeParameters &biome, unsigned int seed)
 {
 	if (state != ChunkState::UNLOADED)
 		return;
 
-	neighborShellVoxels.clear(); // Clear previous neighbor data
-	generateChunk(noise);		 // This generates the main chunk voxels AND the 1-voxel border
+	neighborShellVoxels.clear();
+	generateChunk(noiseGenerator, biome, seed);
+
+	//  for testing purposes, set 3 layers of stone
+	// for (int x = -1; x <= SIZE; ++x)
+	//{
+	//	for (int z = -1; z <= SIZE; ++z)
+	//	{
+	//		for (int y = 0; y < HEIGHT; ++y)
+	//		{
+	//			TextureType type = TextureType::AIR;
+	//			if (y < 3) // Set the first 3 layers to stone
+	//			{
+	//				type = TextureType::STONE;
+	//			}
+	//			setVoxel(x, y, z, type);
+	//		}
+	//	}
+	//}
 
 	state = ChunkState::GENERATED;
 }
 
-void Chunk::generateChunk(siv::PerlinNoise *noise)
+void Chunk::generateChunk(FastNoiseLite *noiseGenerator, const BiomeParameters &biome, unsigned int seed)
 {
-	static BiomeManager biomeManager; // Static to avoid recreation
-	const float blendRange = 0.05f;
+	const int genSizeX = SIZE + 2; // Grid size including 1-voxel border on each side for x
+	const int genSizeZ = SIZE + 2; // Grid size including 1-voxel border on each side for z
+	// Enhanced terrain generation using FastNoiseLite with multiple noise layers
+	float continentalFreq = 0.002f; // Very large scale continental features
+	float mountainFreq = 0.008f;	// Mountain ranges and valleys
+	float ridgeFreq = 0.02f;		// Sharp ridges and cliff faces
+	float hillFreq = 0.035f;		// Rolling hills
+	float detailFreq = 0.12f;		// Fine surface details
+	float caveFreq = 0.025f;		// 3D cave generation
+	float plateauFreq = 0.005f;		// Plateau formations
+	float erosionFreq = 0.08f;		// Erosion patterns
 
-	// Loop from -1 to SIZE (inclusive) for x and z to generate the 1-voxel thick border
-	// around the main chunk area (0 to SIZE-1).
+	// Calculate world coordinates for the noise generation
+	int startX_world_int = static_cast<int>(std::floor(this->position.x - 1.0f));
+	int startZ_world_int = static_cast<int>(std::floor(this->position.z - 1.0f));
+	// FastNoiseLite doesn't have GenUniformGrid methods, so we generate noise point by point
 	for (int x_local = -1; x_local <= SIZE; x_local++)
 	{
 		for (int z_local = -1; z_local <= SIZE; z_local++)
 		{
-			// Skip corners of the -1 to SIZE extended area, as they are not direct face neighbors.
-			// We only need face-adjacent voxels for meshing continuity.
-			if ((x_local == -1 && z_local == -1) || (x_local == -1 && z_local == SIZE) ||
-				(x_local == SIZE && z_local == -1) || (x_local == SIZE && z_local == SIZE))
-			{
-				continue;
+			// Calculate world coordinates for this voxel column
+			float worldX = startX_world_int + x_local + 1;
+			float worldZ = startZ_world_int + z_local + 1; // Generate multiple layers of noise for highly varied, realistic terrain
+			// Continental noise - massive scale features (continents, ocean basins)
+			float continentalNoise = noiseGenerator->GetNoise(worldX * continentalFreq, worldZ * continentalFreq);
+
+			// Mountain noise - creates dramatic mountain ranges and deep valleys
+			float mountainNoise = noiseGenerator->GetNoise(worldX * mountainFreq, worldZ * mountainFreq);
+
+			// Ridge noise - creates sharp cliff faces and ridgelines
+			float ridgeNoise = noiseGenerator->GetNoise(worldX * ridgeFreq, worldZ * ridgeFreq);
+			ridgeNoise = 1.0f - std::abs(ridgeNoise); // Invert for ridge effect
+			ridgeNoise = ridgeNoise * ridgeNoise;	  // Sharpen ridges
+
+			// Hill noise - rolling hills and gentle slopes
+			float hillNoise = noiseGenerator->GetNoise(worldX * hillFreq, worldZ * hillFreq);
+
+			// Detail noise - fine surface variations and local features
+			float detailNoise = noiseGenerator->GetNoise(worldX * detailFreq, worldZ * detailFreq);
+
+			// Plateau noise - creates flat-topped mesa formations
+			float plateauNoise = noiseGenerator->GetNoise(worldX * plateauFreq, worldZ * plateauFreq);
+			plateauNoise = std::floor(plateauNoise * 6.0f) / 6.0f; // Quantize for flat plateaus
+
+			// Erosion noise - creates weathering and carved features
+			float erosionNoise = noiseGenerator->GetNoise(worldX * erosionFreq, worldZ * erosionFreq);
+			erosionNoise = std::abs(erosionNoise); // Always positive erosion
+
+			// Advanced terrain synthesis
+			// Base continental elevation: creates large-scale elevation changes
+			float continentalHeight = 70.0f + continentalNoise * 35.0f; // 35-105 blocks
+
+			// Mountain layer: dramatic vertical features
+			float mountainAmplitude = std::max(0.0f, mountainNoise + 0.3f);	   // Bias toward positive
+			float mountainHeight = mountainNoise * mountainAmplitude * 120.0f; // Up to 120 blocks high
+
+			// Ridge enhancement: creates dramatic cliff faces and knife-edge ridges
+			float ridgeHeight = ridgeNoise * 60.0f * mountainAmplitude; // Scale with mountain presence
+
+			// Hill undulation: smooth rolling terrain
+			float hillHeight = hillNoise * 25.0f;
+
+			// Plateau formation: creates mesas and flat-topped features
+			float plateauHeight = plateauNoise * 40.0f;
+
+			// Surface details: fine-scale variations
+			float surfaceDetail = detailNoise * 8.0f;
+
+			// Erosion effects: carves valleys and reduces extreme heights
+			float erosionFactor = 1.0f - (erosionNoise * 0.3f);
+
+			// Combine all layers with sophisticated weighting
+			float rawHeight = continentalHeight + mountainHeight + ridgeHeight + hillHeight + plateauHeight + surfaceDetail;
+
+			// Apply erosion (reduces extreme heights, creates valleys)
+			rawHeight *= erosionFactor;
+
+			// Biome-specific modifications for even more variety
+			float biomeModifier = 1.0f;
+			if (biome.heightVariation > 60.0f)
+			{ // Mountain biomes
+				// Amplify vertical features, add more ridge influence
+				rawHeight += ridgeHeight * 0.5f;
+				biomeModifier = 1.3f;
 			}
-
-			// Get absolute world coordinates
-			int worldX = static_cast<int>(position.x) + x_local;
-			int worldZ = static_cast<int>(position.z) + z_local;
-
-			// Use a smaller scale for biome regions to create more gradual transitions
-			float biomeNoiseValue = noise->noise2D_01(
-				static_cast<float>(worldX) / 128.0f, // Reduced scale for smoother biome transitions
-				static_cast<float>(worldZ) / 128.0f);
-
-			// Get biome type with blending
-			BiomeType biomeType = biomeManager.getBiomeTypeAt(worldX, worldZ, noise);
-
-			// Get terrain height with blending
-			float terrainHeightFloat = biomeManager.getTerrainHeightAt(worldX, worldZ, biomeType, noise);
-
-			// Add some noise to the terrain height for more natural variation
-			float heightNoise = noise->noise2D_01(
-				static_cast<float>(worldX) / 32.0f,
-				static_cast<float>(worldZ) / 32.0f) * 2.0f - 1.0f;
-			terrainHeightFloat += heightNoise;
-
-			int terrainHeight = static_cast<int>(std::round(terrainHeightFloat));
-
-			// Generate the actual column of voxels
-			generateTerrainColumn(x_local, z_local, terrainHeight, biomeNoiseValue, noise);
-		}
-	}
-}
-
-void Chunk::generateTerrainColumn(int x, int z, int terrainHeight, float biomeNoise, siv::PerlinNoise *noise)
-{
-	static BiomeManager biomeManager;
-
-	int worldX = static_cast<int>(position.x) + x;
-	int worldZ = static_cast<int>(position.z) + z;
-	BiomeType biomeType = biomeManager.getBiomeTypeAt(worldX, worldZ, noise);
-	const BiomeParameters &biomeParams = biomeManager.getBiomeParameters(biomeType);
-
-	for (int y = 0; y < Chunk::HEIGHT; y++)
-	{
-		if (y < terrainHeight)
-		{
-			if (y >= terrainHeight - 1)
-			{
-				setVoxel(x, y, z, biomeParams.surfaceBlock);
-			}
-			else if (y >= terrainHeight - 3)
-			{
-				setVoxel(x, y, z, biomeParams.subSurfaceBlock);
+			else if (biome.heightVariation > 30.0f)
+			{ // Hilly biomes
+				// Enhance rolling terrain, moderate plateaus
+				rawHeight += hillHeight * 0.3f + plateauHeight * 0.4f;
+				biomeModifier = 1.1f;
 			}
 			else
-			{
-				setVoxel(x, y, z, STONE);
+			{ // Flatter biomes
+				// Reduce extreme variations, emphasize plateaus
+				rawHeight = rawHeight * 0.7f + plateauHeight * 0.5f;
+				biomeModifier = 0.9f;
 			}
-		}
-		else if (y <= Chunk::WATER_LEVEL)
-		{
-			setVoxel(x, y, z, WATER);
-		}
-		else
-		{
-			setVoxel(x, y, z, AIR);
-		}
-	}
 
-	if (biomeType == BIOME_FOREST)
-	{
-		float treeNoise = noise->noise2D_01(worldX * 1.5f, worldZ * 1.5f);
-		if (treeNoise > 0.75f)
-		{
-			generateTree(x, z, terrainHeight);
-		}
-	}
-}
+			// Final height calculation with biome scaling
+			float totalHeight = biome.baseHeight + (rawHeight - 70.0f) * (biome.heightVariation / 50.0f) * biomeModifier; // Clamp and convert to ground level
+			int groundLevel = static_cast<int>(totalHeight);
+			groundLevel = std::max(8, std::min(groundLevel, HEIGHT - 8)); // Wider range, more dramatic terrain
 
-void Chunk::generateFeatures(int x, int z, int terrainHeight, int worldX, int worldZ, float biomeNoise, siv::PerlinNoise *noise)
-{
-	for (int y = 0; y < Chunk::HEIGHT; y++)
-	{
-		if (y >= terrainHeight || y == 0)
-			continue;
-
-		// Generate caves
-		float caveNoise = noise->octave3D_01(
-			static_cast<float>(worldX) / 32.0f,
-			static_cast<float>(y) / 32.0f,
-			static_cast<float>(worldZ) / 32.0f,
-			3, 0.5f);
-
-		if (caveNoise < 0.25f)
-		{
-			setVoxel(x, y, z, AIR);
-			continue; // Skip mineral generation if we've carved out a cave
-		}
-
-		// Generate minerals based on depth
-		if (y < terrainHeight - 5)
-		{
-			float veinNoise = noise->noise3D_01(
-				static_cast<float>(worldX) / 8.0f,
-				static_cast<float>(y) / 8.0f,
-				static_cast<float>(worldZ) / 8.0f);
-
-			float oreTypeNoise = noise->noise3D_01(
-				static_cast<float>(worldX) / 24.0f,
-				static_cast<float>(y) / 24.0f,
-				static_cast<float>(worldZ) / 24.0f);
-
-			if (veinNoise > 0.8f)
+			for (int y_local = 0; y_local < HEIGHT; ++y_local)
 			{
-				if (y < 16)
+				TextureType voxelType = TextureType::AIR; // Advanced 3D cave system with multiple scales and features
+				float largeCaveNoise = noiseGenerator->GetNoise(worldX * caveFreq * 0.6f,
+																static_cast<float>(y_local) * caveFreq * 0.4f,
+																worldZ * caveFreq * 0.6f);
+				float mediumCaveNoise = noiseGenerator->GetNoise(worldX * caveFreq * 1.2f,
+																 static_cast<float>(y_local) * caveFreq * 0.8f,
+																 worldZ * caveFreq * 1.2f);
+				float smallCaveNoise = noiseGenerator->GetNoise(worldX * caveFreq * 2.0f,
+																static_cast<float>(y_local) * caveFreq * 1.5f,
+																worldZ * caveFreq * 2.0f);
+
+				// Vertical cave channels (create vertical shafts)
+				float verticalCaveNoise = noiseGenerator->GetNoise(worldX * caveFreq * 0.8f,
+																   worldZ * caveFreq * 0.8f);
+
+				// Combine cave noises for complex, varied cave systems
+				float combinedCaveNoise = (largeCaveNoise * 0.6f + mediumCaveNoise * 0.3f + smallCaveNoise * 0.1f);
+
+				// Dynamic cave threshold based on depth and terrain type
+				float caveThreshold = 0.15f + (static_cast<float>(y_local) / HEIGHT) * 0.4f; // Larger caves at depth
+
+				// Vertical shafts condition
+				bool isVerticalShaft = (std::abs(verticalCaveNoise) > 0.7f) && (y_local < groundLevel - 10) && (y_local > 20);
+
+				// Main cave conditions - create varied cave systems
+				bool isCave = ((std::abs(combinedCaveNoise) > caveThreshold) || isVerticalShaft) &&
+							  (y_local < groundLevel - 6) &&
+							  (y_local > 12); // Avoid surface and very deep areas
+				if (!isCave)				  // Only place blocks if not in a cave
 				{
-					if (oreTypeNoise < 0.2f)
-						setVoxel(x, y, z, DIAMOND_ORE);
-					else if (oreTypeNoise < 0.4f)
-						setVoxel(x, y, z, GOLD_ORE);
-					else if (oreTypeNoise < 0.6f)
-						setVoxel(x, y, z, REDSTONE_ORE);
-					else if (oreTypeNoise < 0.8f)
-						setVoxel(x, y, z, LAPIS_ORE);
-					else
-						setVoxel(x, y, z, IRON_ORE);
-				}
-				else if (y < 30)
-				{
-					if (oreTypeNoise < 0.1f)
-						setVoxel(x, y, z, DIAMOND_ORE);
-					else if (oreTypeNoise < 0.3f)
-						setVoxel(x, y, z, GOLD_ORE);
-					else if (oreTypeNoise < 0.5f)
-						setVoxel(x, y, z, REDSTONE_ORE);
-					else if (oreTypeNoise < 0.65f)
-						setVoxel(x, y, z, LAPIS_ORE);
-					else if (oreTypeNoise < 0.85f)
-						setVoxel(x, y, z, IRON_ORE);
-					else
-						setVoxel(x, y, z, COAL_ORE);
-				}
-				else if (y < 50)
-				{
-					if (oreTypeNoise < 0.05f)
-						setVoxel(x, y, z, EMERALD_ORE);
+					// Enhanced underground layer system
+					if (y_local < groundLevel - biome.subSurfaceDepth - 12)
+					{
+						// Deep underground - bedrock and mineral-rich stone layers
+						if (y_local < 4)
+						{
+							voxelType = TextureType::BEDROCK; // Unbreakable bedrock layer
+						}
+						else
+						{
+							// Deep stone with rich ore deposits
+							voxelType = TextureType::STONE;
 
-					else if (oreTypeNoise < 0.25f)
-						setVoxel(x, y, z, GOLD_ORE);
+							// Advanced ore generation with multiple noise layers
+							float primaryOreNoise = noiseGenerator->GetNoise(worldX * 0.07f, static_cast<float>(y_local) * 0.07f, worldZ * 0.07f);
+							float secondaryOreNoise = noiseGenerator->GetNoise(worldX * 0.13f, static_cast<float>(y_local) * 0.13f, worldZ * 0.13f);
+							float rareOreNoise = noiseGenerator->GetNoise(worldX * 0.05f, static_cast<float>(y_local) * 0.05f, worldZ * 0.05f);
 
-					else if (oreTypeNoise < 0.35f)
-						setVoxel(x, y, z, REDSTONE_ORE);
+							// Combine ore noises for varied distribution
+							float combinedOreNoise = (primaryOreNoise + secondaryOreNoise * 0.6f + rareOreNoise * 0.4f) / 2.0f;
 
-					else if (oreTypeNoise < 0.45f)
-						setVoxel(x, y, z, LAPIS_ORE);
+							// Depth-based ore distribution with realistic rarity
+							if (y_local < 16) // Deep layers - precious ores
+							{
+								if (combinedOreNoise > 0.75f && rareOreNoise > 0.7f)
+									voxelType = TextureType::DIAMOND_ORE;
+								else if (combinedOreNoise > 0.65f && rareOreNoise > 0.6f)
+									voxelType = TextureType::EMERALD_ORE;
+								else if (combinedOreNoise > 0.6f)
+									voxelType = TextureType::LAPIS_ORE;
+								else if (primaryOreNoise > 0.55f)
+									voxelType = TextureType::GOLD_ORE;
+							}
+							else if (y_local < 32) // Mid-deep layers
+							{
+								if (combinedOreNoise > 0.7f && rareOreNoise > 0.65f)
+									voxelType = TextureType::GOLD_ORE;
+								else if (combinedOreNoise > 0.6f)
+									voxelType = TextureType::REDSTONE_ORE;
+								else if (primaryOreNoise > 0.5f)
+									voxelType = TextureType::IRON_ORE;
+								else if (secondaryOreNoise > 0.55f)
+									voxelType = TextureType::LAPIS_ORE;
+							}
+							else if (y_local < 64) // Mid layers
+							{
+								if (primaryOreNoise > 0.55f)
+									voxelType = TextureType::IRON_ORE;
+								else if (secondaryOreNoise > 0.5f)
+									voxelType = TextureType::COPPER_ORE;
+								else if (combinedOreNoise > 0.6f)
+									voxelType = TextureType::COAL_ORE;
+							}
+							else // Upper stone layers
+							{
+								if (primaryOreNoise > 0.6f)
+									voxelType = TextureType::COAL_ORE;
+								else if (secondaryOreNoise > 0.65f)
+									voxelType = TextureType::COPPER_ORE;
+							}
+						}
+					}
+					else if (y_local < groundLevel - biome.subSurfaceDepth)
+					{
+						// Transitional subsurface layer with occasional ores
+						voxelType = biome.subSurfaceBlock;
 
-					else if (oreTypeNoise < 0.7f)
-						setVoxel(x, y, z, IRON_ORE);
-
-					else if (oreTypeNoise < 0.85f)
-						setVoxel(x, y, z, COPPER_ORE);
-
-					else
-						setVoxel(x, y, z, COAL_ORE);
-				}
-				else
-				{
-					if (oreTypeNoise < 0.1f)
-						setVoxel(x, y, z, EMERALD_ORE);
-
-					else if (oreTypeNoise < 0.25f)
-						setVoxel(x, y, z, COPPER_ORE);
-
-					else if (oreTypeNoise < 0.45f)
-						setVoxel(x, y, z, IRON_ORE);
-
-					else
-						setVoxel(x, y, z, COAL_ORE);
-				}
-			}
-		}
-	}
-}
-
-void Chunk::generateTree(int x, int z, int terrainHeight)
-{
-	// Only place trees that have their trunk at least 3 blocks from the edge
-	if (x < 3 || x >= SIZE - 3 || z < 3 || z >= SIZE - 3)
-	{
-		return; // Skip trees too close to the edge
-	}
-
-	// Tree height: random between 4 and 6 blocks
-	int treeHeight = 4 + rand() % 3;
-
-	// Generate the trunk
-	for (int y = terrainHeight; y < terrainHeight + treeHeight; y++)
-	{
-		if (y < HEIGHT)
-		{
-			setVoxel(x, y, z, OAK_LOG);
-		}
-	}
-
-	// Generate leaves - roughly a spherical/balloon shape
-	int leafStartY = terrainHeight + treeHeight - 3; // Start leaves 3 blocks from the top
-
-	// Generate leaves in a roughly spherical pattern
-	for (int offsetY = 0; offsetY <= 3; offsetY++)
-	{
-		int radius = (offsetY == 0 || offsetY == 3) ? 1 : 2; // Smaller radius at bottom and top
-
-		for (int offsetX = -radius; offsetX <= radius; offsetX++)
-		{
-			for (int offsetZ = -radius; offsetZ <= radius; offsetZ++)
-			{
-
-				// Skip corners for a more rounded look on the bigger layers
-				if (radius == 2 && abs(offsetX) == 2 && abs(offsetZ) == 2)
-				{
-					continue;
+						// Sparse ore deposits in subsurface layers
+						float surfaceOreNoise = noiseGenerator->GetNoise(worldX * 0.08f, static_cast<float>(y_local) * 0.08f, worldZ * 0.08f);
+						if (surfaceOreNoise > 0.75f)
+						{
+							if (y_local < 40)
+								voxelType = TextureType::IRON_ORE;
+							else
+								voxelType = TextureType::COAL_ORE;
+						}
+					}
+					else if (y_local < groundLevel)
+					{
+						// Subsurface layer (dirt, sand, etc.)
+						voxelType = biome.subSurfaceBlock;
+					}
+					else if (y_local == groundLevel)
+					{
+						// Surface layer (grass, sand, etc.)
+						voxelType = biome.surfaceBlock;
+					}
+					else if (y_local <= WATER_LEVEL)
+					{
+						// Water level
+						voxelType = TextureType::WATER;
+					}
+					// else remains AIR
 				}
 
-				int leafX = x + offsetX;
-				int leafY = leafStartY + offsetY;
-				int leafZ = z + offsetZ;
-
-				// Only place leaves that are inside this chunk
-				if (leafX >= 0 && leafX < SIZE && leafY >= 0 && leafY < HEIGHT && leafZ >= 0 && leafZ < SIZE)
-				{
-					setVoxel(leafX, leafY, leafZ, OAK_LEAVES);
-				}
+				setVoxel(x_local, y_local, z_local, voxelType);
 			}
 		}
 	}
+
+	state = ChunkState::GENERATED;
+	meshNeedsUpdate = true;
 }
 
-void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
+void Chunk::generateMesh(FastNoiseLite *noiseGenerator)
 {
-	static BiomeManager biomeManager; // Keep static as in original
-
 	vertices.clear();
 	indices.clear();
 	// Assuming VertexHasher is defined for Vertex struct
 	std::unordered_map<Vertex, uint32_t, VertexHasher> vertexMap;
 	vertexMap.clear();
 	uint32_t indexCounter = 0;
-
-	// Helper to get voxel type, handling out-of-bounds as AIR
-	auto getVoxelTypeSafe = [&](int vx, int vy, int vz) -> TextureType
-	{
-		if (vx < 0 || vx >= SIZE || vy < 0 || vy >= HEIGHT || vz < 0 || vz >= SIZE)
-		{
-			return AIR;
-		}
-		return static_cast<TextureType>(getVoxel(vx, vy, vz).type);
-	};
 
 	// New helper for greedy meshing that checks local voxels and the precomputed neighbor shell
 	auto getVoxelDataForMeshing = [&](int lx, int ly, int lz) -> TextureType
@@ -566,7 +562,7 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 							break;
 
 						glm::ivec3 next_pos_u_slice = x;
-						next_pos_u_slice[u] += w; // Next voxel in u-direction in current slice part
+						next_pos_u_slice[u] += w; // Next voxel in u-direction in current slice
 
 						// Use the new helper function
 						TextureType check_type1 = getVoxelDataForMeshing(next_pos_u_slice[0], next_pos_u_slice[1], next_pos_u_slice[2]);
@@ -654,67 +650,8 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 
 					bool needsBiomeColoring = (quad_type == GRASS_TOP || quad_type == GRASS_SIDE || quad_type == OAK_LEAVES || quad_type == WATER);
 					glm::vec3 biomeColorVal(0.0f);
-					if (needsBiomeColoring)
-					{
-						// Use the quad_origin_voxel_coord for biome lookup (center of it)
-						BiomeType biome = biomeManager.getBiomeTypeAt(
-							this->position.x + quad_origin_voxel_coord[0] + 0.5f,
-							this->position.z + quad_origin_voxel_coord[2] + 0.5f,
-							noise);
-						const BiomeParameters &biomeParams = biomeManager.getBiomeParameters(biome);
-
-						switch (biome)
-						{
-						case BIOME_DESERT:
-							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
-								biomeColorVal = glm::vec3(0.76f, 0.70f, 0.48f);
-							else if (quad_type == OAK_LEAVES)
-								biomeColorVal = glm::vec3(0.5f, 0.45f, 0.2f);
-							else if (quad_type == WATER)
-								biomeColorVal = biomeParams.waterColor;
-							break;
-						case BIOME_FOREST:
-							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
-								biomeColorVal = glm::vec3(0.3f, 0.65f, 0.2f);
-							else if (quad_type == OAK_LEAVES)
-								biomeColorVal = glm::vec3(0.2f, 0.6f, 0.1f);
-							else if (quad_type == WATER)
-								biomeColorVal = biomeParams.waterColor;
-							break;
-						case BIOME_PLAIN:
-							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
-								biomeColorVal = glm::vec3(0.4f, 0.7f, 0.3f);
-							else if (quad_type == OAK_LEAVES)
-								biomeColorVal = glm::vec3(0.3f, 0.65f, 0.2f);
-							else if (quad_type == WATER)
-								biomeColorVal = biomeParams.waterColor;
-							break;
-						case BIOME_MOUNTAIN:
-							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
-								biomeColorVal = glm::vec3(0.35f, 0.55f, 0.25f);
-							else if (quad_type == OAK_LEAVES)
-								biomeColorVal = glm::vec3(0.25f, 0.5f, 0.15f);
-							else if (quad_type == WATER)
-								biomeColorVal = biomeParams.waterColor;
-							break;
-						default:
-							if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
-								biomeColorVal = glm::vec3(0.4f, 0.7f, 0.3f);
-							else if (quad_type == OAK_LEAVES)
-								biomeColorVal = glm::vec3(0.3f, 0.6f, 0.2f);
-							else if (quad_type == WATER)
-								biomeColorVal = glm::vec3(0.0f, 0.5f, 1.0f); // Default water
-						}
-						// Variation from original code
-						float variation = noise->noise2D_01(
-											  this->position.x + quad_origin_voxel_coord[0] * 0.1f,
-											  this->position.z + quad_origin_voxel_coord[2] * 0.1f) *
-											  0.1f -
-										  0.05f;
-						biomeColorVal.r = glm::clamp(biomeColorVal.r + variation, 0.0f, 1.0f);
-						biomeColorVal.g = glm::clamp(biomeColorVal.g + variation, 0.0f, 1.0f);
-						biomeColorVal.b = glm::clamp(biomeColorVal.b + variation, 0.0f, 1.0f);
-					}
+					// TODO: Implement biome coloring logic later
+					// For now, we will just use a default color for these types
 
 					float texture_idx_val = static_cast<float>(quad_type);
 					if (quad_type == GRASS_SIDE)
@@ -803,7 +740,6 @@ void Chunk::generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise)
 
 void Chunk::uploadMeshToGPU()
 {
-	// Générer les buffers si nécessaire
 	if (VAO == 0)
 	{
 		glGenVertexArrays(1, &VAO);

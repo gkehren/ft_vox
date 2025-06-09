@@ -12,15 +12,14 @@
 #include <thread>
 #include <mutex>
 #include <unordered_map>
-#include <PerlinNoise/PerlinNoise.hpp>
-#include <glm/gtx/hash.hpp> // For glm::ivec3 hashing
+#include <glm/gtx/hash.hpp>
 
 #include <chrono>
 
+#include <FastNoise/FastNoiseLite.h>
 #include <Renderer/TextureManager.hpp>
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
-#include <Biome/BiomeManager.hpp>
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
 
@@ -61,10 +60,10 @@ public:
 
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
-
 	uint32_t draw(const Shader &shader, const Camera &camera, GLuint textureArray, const ShaderParameters &params);
-	void generateVoxels(siv::PerlinNoise *noise);
-	void generateMesh(glm::vec3 playerPos, siv::PerlinNoise *noise);
+	void generateVoxels(FastNoiseLite *noiseGenerator, const BiomeParameters &biome, unsigned int seed);
+	void generateMesh(FastNoiseLite *noiseGenerator);
+	void generateChunk(FastNoiseLite *noiseGenerator, const BiomeParameters &biome, unsigned int seed);
 
 private:
 	glm::vec3 position;
@@ -86,8 +85,4 @@ private:
 	void uploadMeshToGPU();
 
 	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
-	void generateChunk(siv::PerlinNoise *noise);
-	void generateTerrainColumn(int x, int z, int terrainHeight, float biomeNoise, siv::PerlinNoise *noise);
-	void generateFeatures(int x, int z, int terrainHeight, int worldX, int worldZ, float biomeNoise, siv::PerlinNoise *noise);
-	void generateTree(int x, int z, int terrainHeight);
 };

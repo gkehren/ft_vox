@@ -4,7 +4,7 @@
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_access.hpp>
-#include <PerlinNoise/PerlinNoise.hpp>
+#include <FastNoise/FastNoiseLite.h>
 
 #include <iostream>
 #include <stdexcept>
@@ -28,10 +28,9 @@
 #include <Engine/ThreadPool.hpp>
 #include <Network/Server.hpp>
 #include <Network/Client.hpp>
-#include <Biome/BiomeManager.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Engine/UIManager.hpp>
-#include <Engine/ChunkManager.hpp> // Include ChunkManager
+#include <Engine/ChunkManager.hpp>
 
 class Engine
 {
@@ -39,23 +38,20 @@ public:
 	Engine();
 	~Engine();
 	void run();
-	void perlinNoise(unsigned int seed);
+	void initializeNoiseGenerator(unsigned int seed); // Renamed
 
-	// Getters for UIManager and other components
 	Camera &getCamera() { return camera; }
 	const Camera &getCamera() const { return camera; }
 	double getDeltaTime() const { return deltaTime; }
-	// const glm::ivec2 &getPlayerChunkPos() const { return playerChunkPos; } // playerChunkPos is now managed internally by Engine, UIManager can get it if needed via a new getter
-	const glm::ivec2 &getPlayerChunkPos() const { return playerChunkPos; } // Keep for UIManager for now, or UIManager can get from Engine
-	siv::PerlinNoise *getNoise() const { return noise.get(); }
-	BiomeManager *getBiomeManager() const { return biomeManager.get(); }
+	const glm::ivec2 &getPlayerChunkPos() const { return playerChunkPos; }
+	FastNoiseLite *getNoise() const { return noise.get(); } // FastNoiseLite compatible
 	Server *getServer() const { return server.get(); }
 	Client *getClient() const { return client.get(); }
 	RenderTiming &getRenderTiming();
 	TextureType getSelectedTexture() const { return selectedTexture; }
 	UIManager *getUIManager() const { return uiManager.get(); }
-	Shader *getShader() const { return shader.get(); }		 // Getter for shader
-	Renderer *getRenderer() const { return renderer.get(); } // Getter for renderer
+	Shader *getShader() const { return shader.get(); }
+	Renderer *getRenderer() const { return renderer.get(); }
 
 	void setWireframeMode(bool enabled);
 
@@ -84,32 +80,21 @@ private:
 	std::unique_ptr<Renderer> renderer;
 	std::unique_ptr<TextRenderer> textRenderer;
 	std::unique_ptr<ThreadPool> threadPool;
-	std::unique_ptr<siv::PerlinNoise> noise;
+	std::unique_ptr<FastNoiseLite> noise; // Changed to FastNoiseLite
 	std::unique_ptr<Server> server;
 	std::unique_ptr<Client> client;
-	std::unique_ptr<BiomeManager> biomeManager;
 	std::unique_ptr<UIManager> uiManager;
-	std::unique_ptr<ChunkManager> chunkManager; // Added ChunkManager
+	std::unique_ptr<ChunkManager> chunkManager;
 
 	Camera camera;
 	glm::ivec2 playerChunkPos;
 	uint32_t seed; // Perlin noise seed
 
 	TextureType selectedTexture;
-	// std::unordered_map<glm::ivec3, Chunk, ivec3_hash> chunks; // Moved to ChunkManager
-	// std::queue<glm::ivec3> chunkGenerationQueue; // Moved to ChunkManager
-	// mutable std::mutex chunkMutex; // Moved to ChunkManager
 
 	void handleEvents(bool &keyTPressed);
-
-	// void updateChunks(); // Logic moved to ChunkManager
-	// void processChunkQueue(); // Logic moved to ChunkManager
-	void updateWorldState(); // New method to call ChunkManager updates
-
-	void renderScene(); // Renamed from render to renderScene to avoid conflict with UIManager::render
-	// void frustumCulling(); // Logic moved to ChunkManager
-
-	bool isVoxelActive(float x, float y, float z) const; // Will use ChunkManager
+	void updateWorldState();
+	void renderScene();
 	bool raycast(const glm::vec3 &origin, const glm::vec3 &direction, float maxDistance, glm::vec3 &hitPosition, glm::vec3 &previousPosition);
 
 	// Voxel selection highlight

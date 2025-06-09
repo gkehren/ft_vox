@@ -126,8 +126,6 @@ void TextureManager::loadWaterTexture(const std::string &path, TextureType type,
 
 		delete[] frameData;
 		stbi_image_free(data);
-
-		std::cout << "Water texture loaded successfully" << std::endl;
 	}
 	else
 	{

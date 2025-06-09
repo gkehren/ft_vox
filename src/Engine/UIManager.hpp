@@ -13,7 +13,6 @@
 #include <Shader/Shader.hpp>
 #include <Network/Server.hpp>
 #include <Network/Client.hpp>
-#include <Biome/BiomeManager.hpp>
 #include <utils.hpp>
 
 // Forward declarations
@@ -43,8 +42,7 @@ public:
 
 	// UI specific state & methods
 	void handleServerControls();
-	void handleShaderOptions();
-	void handleShaderParametersWindow(); // Added declaration
+	void handleShaderParametersWindow();
 	void renderBiomeMap();
 	void updateBiomeMap();
 
@@ -76,6 +74,4 @@ private:
 	char ipInputBuffer[128] = "127.0.0.1";
 
 	BiomeMapSettings biomeMap;
-
-	std::string getCurrentBiomeName() const; // Needs access to BiomeManager or similar from Engine
 };

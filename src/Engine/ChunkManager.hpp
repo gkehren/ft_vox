@@ -11,7 +11,7 @@
 #include <Chunk/Chunk.hpp>
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
-#include <PerlinNoise/PerlinNoise.hpp>
+#include <FastNoise/FastNoiseLite.h>
 
 // Forward declarations
 class Camera;
@@ -23,14 +23,14 @@ class ThreadPool;
 class ChunkManager
 {
 public:
-	ChunkManager(siv::PerlinNoise *noise, ThreadPool *threadPool, RenderTiming &renderTiming);
+	ChunkManager(FastNoiseLite *noise_node, ThreadPool *threadPool, RenderTiming &renderTiming);
 	~ChunkManager();
 
 	void updatePlayerPosition(const glm::ivec2 &newPlayerChunkPos, const Camera &camera, const RenderSettings &settings);
 	void processChunkLoading(const RenderSettings &settings);
 	void performFrustumCulling(const Camera &camera, int windowWidth, int windowHeight, const RenderSettings &settings);
 
-	void generatePendingVoxels(const RenderSettings &settings);
+	void generatePendingVoxels(const RenderSettings &settings, unsigned int seed);
 	void meshPendingChunks(const Camera &camera, const RenderSettings &settings);
 
 	void drawVisibleChunks(Shader &shader, const Camera &camera, const GLuint &textureAtlas, const ShaderParameters &shaderParams, Renderer *renderer, RenderSettings &renderSettings);
@@ -44,16 +44,15 @@ public:
 	const std::unordered_map<glm::ivec3, Chunk, ivec3_hash> &getAllChunks() const;
 
 private:
-	void addChunkToGenerationQueue(const glm::ivec3 &chunkPos);
 	void unloadOutOfRangeChunks(const Camera &camera, const RenderSettings &settings);
 	void loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera, const RenderSettings &settings);
 
 	std::unordered_map<glm::ivec3, Chunk, ivec3_hash> chunks;
-	std::queue<glm::ivec3> chunkLoadQueue; // For chunks that need to be created
+	std::queue<glm::ivec3> chunkLoadQueue;
 
 	mutable std::mutex chunkMutex;
 
-	siv::PerlinNoise *p_noise;	  // External, owned by Engine
-	ThreadPool *p_threadPool;	  // External, owned by Engine
-	RenderTiming &m_renderTiming; // Reference to Engine's RenderTiming
+	FastNoiseLite *m_noise_node;
+	ThreadPool *p_threadPool;
+	RenderTiming &m_renderTiming;
 };

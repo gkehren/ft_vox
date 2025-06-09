@@ -60,7 +60,7 @@ void UIManager::update()
 		ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", camPos.x, camPos.y, camPos.z);
 		const auto &playerChunkPos = engine->getPlayerChunkPos();
 		ImGui::Text("Player chunk: (%d, %d)", playerChunkPos.x, playerChunkPos.y);
-		ImGui::Text("Current biome: %s", getCurrentBiomeName().c_str());
+		// ImGui::Text("Current biome: %s", getCurrentBiomeName().c_str());
 		ImGui::Text("Speed: %.1f", engine->getCamera().getMovementSpeed());
 	}
 	ImGui::Text("Selected texture: %s (%d)", textureTypeString.at(selectedTexture).c_str(), static_cast<int>(selectedTexture));
@@ -123,7 +123,6 @@ void UIManager::update()
 	ImGui::End(); // End "ft_vox" window
 
 	handleServerControls();
-	handleShaderOptions();
 	handleShaderParametersWindow(); // Added call
 	renderBiomeMap();				// This also calls updateBiomeMap if needed
 }
@@ -190,17 +189,6 @@ void UIManager::handleServerControls()
 	ImGui::End();
 }
 
-void UIManager::handleShaderOptions()
-{
-	// Placeholder for shader options UI
-	// This would interact with shaderParams
-	// Example:
-	// ImGui::Begin("Shader Options");
-	// ImGui::Checkbox("Enable Advanced Shading", &shaderParams.useAdvancedShading);
-	// ImGui::SliderFloat("Example Param", &shaderParams.exampleShaderParam, 0.0f, 1.0f);
-	// ImGui::End();
-}
-
 void UIManager::handleShaderParametersWindow()
 {
 	ImGui::Begin("Shader Parameters");
@@ -234,93 +222,7 @@ void UIManager::handleShaderParametersWindow()
 
 void UIManager::updateBiomeMap()
 {
-	if (!engine || !engine->getNoise() || !engine->getBiomeManager())
-		return;
-
-	double currentTime = SDL_GetTicks() / 1000.0;
-	if (!biomeMap.needsUpdate && (currentTime - biomeMap.lastUpdateTime < 0.1)) // Update 10 times per second max
-	{
-		return;
-	}
-
-	if (biomeMap.autoFollowPlayer)
-	{
-		const auto &playerPos = engine->getCamera().getPosition();
-		biomeMap.center = glm::vec2(playerPos.x, playerPos.z);
-	}
-
-	const int mapSize = biomeMap.mapSize;
-	if (biomeMap.pixelData.size() != static_cast<size_t>(mapSize * mapSize * 3))
-	{
-		biomeMap.pixelData.resize(mapSize * mapSize * 3);
-	}
-
-	siv::PerlinNoise *perlin = engine->getNoise();
-	const BiomeManager *biomeManager = engine->getBiomeManager();
-
-	for (int y = 0; y < mapSize; ++y)
-	{
-		for (int x = 0; x < mapSize; ++x)
-		{
-			// Calculate world coordinates for this map pixel
-			float worldX = biomeMap.center.x + (x - mapSize / 2.0f) / biomeMap.zoom;
-			float worldZ = biomeMap.center.y + (y - mapSize / 2.0f) / biomeMap.zoom;
-
-			BiomeType biome = biomeManager->getBiomeTypeAt(worldX, worldZ, perlin);
-
-			// Set color based on biome type
-			unsigned char r, g, b = 255;
-			switch (biome)
-			{
-			case BIOME_DESERT:
-				r = 237;
-				g = 201;
-				b = 175; // Tan/sand color
-				break;
-			case BIOME_FOREST:
-				r = 34;
-				g = 139;
-				b = 34; // Forest green
-				break;
-			case BIOME_PLAIN:
-				r = 124;
-				g = 252;
-				b = 0; // Lawn green
-				break;
-			case BIOME_MOUNTAIN:
-				r = 139;
-				g = 137;
-				b = 137; // Gray
-				break;
-			default:
-				r = 255;
-				g = 0;
-				b = 255; // Magenta for unknown
-			}
-
-			int index = (y * mapSize + x) * 3;
-			biomeMap.pixelData[index] = r;
-			biomeMap.pixelData[index + 1] = g;
-			biomeMap.pixelData[index + 2] = b;
-		}
-	}
-
-	if (biomeMap.textureID == 0)
-	{
-		glGenTextures(1, &biomeMap.textureID);
-		glBindTexture(GL_TEXTURE_2D, biomeMap.textureID);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	}
-
-	glBindTexture(GL_TEXTURE_2D, biomeMap.textureID);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, mapSize, mapSize, 0, GL_RGB, GL_UNSIGNED_BYTE, biomeMap.pixelData.data());
-	glBindTexture(GL_TEXTURE_2D, 0);
-
-	biomeMap.needsUpdate = false;
-	biomeMap.lastUpdateTime = currentTime;
+	// TODO: Implement biome map update logic
 }
 
 void UIManager::renderBiomeMap()
@@ -340,28 +242,4 @@ void UIManager::renderBiomeMap()
 	}
 	ImGui::Text("Center: (%.1f, %.1f)", biomeMap.center.x, biomeMap.center.y);
 	ImGui::End();
-}
-
-std::string UIManager::getCurrentBiomeName() const
-{
-	if (engine && engine->getBiomeManager() && engine->getNoise())
-	{
-		const auto &pos = engine->getCamera().getPosition();
-		siv::PerlinNoise *perlin = engine->getNoise();
-		const BiomeManager &biomeManager = *engine->getBiomeManager();
-		switch (biomeManager.getBiomeTypeAt(pos.x, pos.z, perlin))
-		{
-		case BiomeType::BIOME_PLAIN:
-			return "Plains";
-		case BiomeType::BIOME_FOREST:
-			return "Forest";
-		case BiomeType::BIOME_DESERT:
-			return "Desert";
-		case BiomeType::BIOME_MOUNTAIN:
-			return "Mountain";
-		default:
-			return "Unknown";
-		}
-	}
-	return "Unknown";
 }

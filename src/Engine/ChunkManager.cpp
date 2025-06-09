@@ -1,17 +1,17 @@
 #include "ChunkManager.hpp"
 #include <Camera/Camera.hpp>
 #include <Shader/Shader.hpp>
-#include <Renderer/Renderer.hpp> // For Renderer and TextureAtlas
+#include <Renderer/Renderer.hpp>
 #include <Engine/ThreadPool.hpp>
-#include <PerlinNoise/PerlinNoise.hpp>
-#include <glm/gtc/matrix_access.hpp> // For glm::row
+#include <FastNoise/FastNoiseLite.h>
+#include <glm/gtc/matrix_access.hpp>
 
-#include <iostream> // For debug messages, consider a logger
-#include <chrono>	// For timing
+#include <iostream>
+#include <chrono>
 #include <queue>
 
-ChunkManager::ChunkManager(siv::PerlinNoise *noise, ThreadPool *threadPool, RenderTiming &renderTiming)
-	: p_noise(noise), p_threadPool(threadPool), m_renderTiming(renderTiming)
+ChunkManager::ChunkManager(FastNoiseLite *noise_node, ThreadPool *threadPool, RenderTiming &renderTiming)
+	: m_noise_node(noise_node), p_threadPool(threadPool), m_renderTiming(renderTiming)
 {
 }
 
@@ -81,9 +81,9 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 	m_renderTiming.frustumCulling = std::chrono::duration<float, std::milli>(end - start).count();
 }
 
-void ChunkManager::generatePendingVoxels(const RenderSettings &settings)
+void ChunkManager::generatePendingVoxels(const RenderSettings &settings, unsigned int seed)
 {
-	if (!p_threadPool || !p_noise)
+	if (!m_noise_node)
 		return;
 	auto start = std::chrono::high_resolution_clock::now();
 
@@ -92,20 +92,24 @@ void ChunkManager::generatePendingVoxels(const RenderSettings &settings)
 		std::lock_guard<std::mutex> lock(chunkMutex);
 
 		// Trier les chunks par distance au joueur pour une génération plus cohérente
-		struct ChunkGenInfo {
-			Chunk* chunk;
+		struct ChunkGenInfo
+		{
+			Chunk *chunk;
 			float distance;
 
-			bool operator<(const ChunkGenInfo& other) const {
+			bool operator<(const ChunkGenInfo &other) const
+			{
 				return distance > other.distance;
 			}
 		};
 
 		std::priority_queue<ChunkGenInfo> genQueue;
 
-		for (auto &chunkPair : chunks) {
+		for (auto &chunkPair : chunks)
+		{
 			Chunk &chunk = chunkPair.second;
-			if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED) {
+			if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED)
+			{
 				glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(Chunk::SIZE / 2.0f);
 				float distance = glm::distance(
 					glm::vec2(chunkCenter.x, chunkCenter.z),
@@ -114,19 +118,74 @@ void ChunkManager::generatePendingVoxels(const RenderSettings &settings)
 				genQueue.push({&chunk, distance});
 			}
 		}
-
 		// Générer les chunks par ordre de priorité
-		while (!genQueue.empty()) {
-			Chunk* chunk = genQueue.top().chunk;
-			siv::PerlinNoise *noisePtr = p_noise;
-			futures.push_back(p_threadPool->enqueue([chunk, noisePtr]() {
-				chunk->generateVoxels(noisePtr);
-			}));
+		while (!genQueue.empty())
+		{
+			Chunk *chunk = genQueue.top().chunk;
+			FastNoiseLite *noiseNodePtr = m_noise_node;
+
+			// Enhanced biome parameters for more interesting terrain
+			BiomeParameters terrainBiome;
+
+			// Create varied terrain based on chunk position
+			glm::vec3 chunkPos = chunk->getPosition();
+			float chunkX = chunkPos.x / Chunk::SIZE;
+			float chunkZ = chunkPos.z / Chunk::SIZE;
+
+			// Use simple noise to determine biome characteristics
+			// This creates natural variation across the world
+			float biomeNoise = static_cast<float>(sin(chunkX * 0.1) * cos(chunkZ * 0.1));
+			float elevationNoise = static_cast<float>(sin(chunkX * 0.05) * sin(chunkZ * 0.05));
+			if (biomeNoise > 0.3f)
+			{
+				// Mountain biome - dramatic elevation, high variation
+				terrainBiome.baseHeight = 80.0f + elevationNoise * 25.0f;
+				terrainBiome.heightVariation = 50.0f; // Increased for more dramatic mountains
+				terrainBiome.surfaceBlock = TextureType::STONE;
+				terrainBiome.subSurfaceBlock = TextureType::STONE;
+				terrainBiome.subSurfaceDepth = 2;
+			}
+			else if (biomeNoise > 0.0f)
+			{
+				// Plains biome - medium elevation, gentle variation
+				terrainBiome.baseHeight = 65.0f + elevationNoise * 12.0f;
+				terrainBiome.heightVariation = 20.0f; // Moderate variation for rolling hills
+				terrainBiome.surfaceBlock = TextureType::GRASS_TOP;
+				terrainBiome.subSurfaceBlock = TextureType::DIRT;
+				terrainBiome.subSurfaceDepth = 3;
+			}
+			else if (biomeNoise > -0.3f)
+			{
+				// Forest biome - varied elevation with trees (eventually)
+				terrainBiome.baseHeight = 68.0f + elevationNoise * 15.0f;
+				terrainBiome.heightVariation = 25.0f; // More variation than plains
+				terrainBiome.surfaceBlock = TextureType::GRASS_TOP;
+				terrainBiome.subSurfaceBlock = TextureType::DIRT;
+				terrainBiome.subSurfaceDepth = 4;
+			}
+			else
+			{
+				// Desert biome - lower, flatter terrain
+				terrainBiome.baseHeight = 62.0f + elevationNoise * 8.0f;
+				terrainBiome.heightVariation = 15.0f; // Less dramatic variation
+				terrainBiome.surfaceBlock = TextureType::SAND;
+				terrainBiome.subSurfaceBlock = TextureType::SAND;
+				terrainBiome.subSurfaceDepth = 5;
+			}
+
+			// Common properties
+			terrainBiome.noiseScale = 0.05f;
+			terrainBiome.octaves = 4;
+			terrainBiome.persistence = 0.5f;
+			terrainBiome.waterColor = glm::vec3(0.2f, 0.5f, 0.8f);
+			futures.push_back(p_threadPool->enqueue([chunk, noiseNodePtr, terrainBiome, seed]()
+													{ chunk->generateVoxels(noiseNodePtr, terrainBiome, seed); }));
 			genQueue.pop();
 		}
 	}
 
-	for (auto &future : futures) {
+	for (auto &future : futures)
+	{
 		future.get();
 	}
 
@@ -136,7 +195,7 @@ void ChunkManager::generatePendingVoxels(const RenderSettings &settings)
 
 void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings &settings)
 {
-	if (!p_threadPool || !p_noise)
+	if (!p_threadPool || !m_noise_node)
 		return;
 	auto start = std::chrono::high_resolution_clock::now();
 
@@ -145,42 +204,43 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		std::lock_guard<std::mutex> lock(chunkMutex);
 
 		// Trier les chunks par distance au joueur pour un maillage plus cohérent
-		struct ChunkMeshInfo {
-			Chunk* chunk;
+		struct ChunkMeshInfo
+		{
+			Chunk *chunk;
 			float distance;
 
-			bool operator<(const ChunkMeshInfo& other) const {
+			bool operator<(const ChunkMeshInfo &other) const
+			{
 				return distance > other.distance;
 			}
 		};
 
 		std::priority_queue<ChunkMeshInfo> meshQueue;
 
-		for (auto &chunkPair : chunks) {
+		for (auto &chunkPair : chunks)
+		{
 			Chunk &chunk = chunkPair.second;
-			if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED) {
+			if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED)
+			{
 				glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(Chunk::SIZE / 2.0f);
 				float distance = glm::distance(
 					glm::vec2(chunkCenter.x, chunkCenter.z),
-					glm::vec2(camera.getPosition().x, camera.getPosition().z)
-				);
+					glm::vec2(camera.getPosition().x, camera.getPosition().z));
 				meshQueue.push({&chunk, distance});
 			}
-		}
-
-		// Mailler les chunks par ordre de priorité
-		while (!meshQueue.empty()) {
-			Chunk* chunk = meshQueue.top().chunk;
-			glm::vec3 playerPos = camera.getPosition();
-			siv::PerlinNoise *noisePtr = p_noise;
-			futures.push_back(p_threadPool->enqueue([chunk, playerPos, noisePtr]() {
-				chunk->generateMesh(playerPos, noisePtr);
-			}));
+		} // Mailler les chunks par ordre de priorité
+		while (!meshQueue.empty())
+		{
+			Chunk *chunk = meshQueue.top().chunk;
+			FastNoiseLite *noiseNodePtr = m_noise_node;
+			futures.push_back(p_threadPool->enqueue([chunk, noiseNodePtr]()
+													{ chunk->generateMesh(noiseNodePtr); }));
 			meshQueue.pop();
 		}
 	}
 
-	for (auto &future : futures) {
+	for (auto &future : futures)
+	{
 		future.wait();
 	}
 
@@ -363,17 +423,20 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 {
 	std::lock_guard<std::mutex> lock(chunkMutex);
 	auto it = chunks.begin();
-	while (it != chunks.end()) {
-		const auto& chunk = it->second;
+	while (it != chunks.end())
+	{
+		const auto &chunk = it->second;
 		glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(Chunk::SIZE / 2.0f);
 		float distToPlayer = glm::distance(
 			glm::vec2(camera.getPosition().x, camera.getPosition().z),
-			glm::vec2(chunkCenter.x, chunkCenter.z)
-		);
+			glm::vec2(chunkCenter.x, chunkCenter.z));
 		// Unload if significantly outside maxRenderDistance (e.g., 1.5x or 2x)
-		if (distToPlayer > static_cast<float>(settings.maxRenderDistance) * 1.5f) {
+		if (distToPlayer > static_cast<float>(settings.maxRenderDistance) * 1.5f)
+		{
 			it = chunks.erase(it);
-		} else {
+		}
+		else
+		{
 			++it;
 		}
 	}
@@ -384,11 +447,13 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 	const int radius = static_cast<int>(std::ceil(static_cast<float>(settings.maxRenderDistance) / Chunk::SIZE));
 
 	// Utiliser une priorité basée sur la distance pour charger les chunks
-	struct ChunkLoadInfo {
+	struct ChunkLoadInfo
+	{
 		glm::ivec3 pos;
 		float distance;
 
-		bool operator<(const ChunkLoadInfo& other) const {
+		bool operator<(const ChunkLoadInfo &other) const
+		{
 			return distance > other.distance; // Priorité aux chunks plus proches
 		}
 	};
@@ -396,21 +461,22 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 	std::priority_queue<ChunkLoadInfo> priorityQueue;
 
 	// Calculer la priorité pour chaque chunk potentiel
-	for (int x = -radius; x <= radius; x++) {
-		for (int z = -radius; z <= radius; z++) {
+	for (int x = -radius; x <= radius; x++)
+	{
+		for (int z = -radius; z <= radius; z++)
+		{
 			glm::ivec3 chunkPos = cameraChunkPos + glm::ivec3(x, 0, z);
 			glm::vec3 chunkCenterWorld = glm::vec3(
 				chunkPos.x * Chunk::SIZE + Chunk::SIZE / 2.0f,
 				0,
-				chunkPos.z * Chunk::SIZE + Chunk::SIZE / 2.0f
-			);
+				chunkPos.z * Chunk::SIZE + Chunk::SIZE / 2.0f);
 
 			float distToPlayer = glm::distance(
 				glm::vec2(camera.getPosition().x, camera.getPosition().z),
-				glm::vec2(chunkCenterWorld.x, chunkCenterWorld.z)
-			);
+				glm::vec2(chunkCenterWorld.x, chunkCenterWorld.z));
 
-			if (distToPlayer <= static_cast<float>(settings.maxRenderDistance)) {
+			if (distToPlayer <= static_cast<float>(settings.maxRenderDistance))
+			{
 				priorityQueue.push({chunkPos, distToPlayer});
 			}
 		}
@@ -418,9 +484,11 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 
 	// Charger les chunks par ordre de priorité
 	std::lock_guard<std::mutex> lock(chunkMutex);
-	while (!priorityQueue.empty()) {
-		const auto& info = priorityQueue.top();
-		if (chunks.find(info.pos) == chunks.end()) {
+	while (!priorityQueue.empty())
+	{
+		const auto &info = priorityQueue.top();
+		if (chunks.find(info.pos) == chunks.end())
+		{
 			chunkLoadQueue.push(info.pos);
 		}
 		priorityQueue.pop();
