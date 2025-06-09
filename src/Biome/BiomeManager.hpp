@@ -10,7 +10,7 @@ public:
 	~BiomeManager() = default;
 
 	// Get biome type at world coordinates
-	BiomeType getBiomeTypeAt(int worldX, int worldY, siv::PerlinNoise *noise);
+	BiomeType getBiomeTypeAt(int worldX, int worldY, siv::PerlinNoise *noise) const;
 
 	// Get Biome parameters
 	const BiomeParameters &getBiomeParameters(BiomeType biomeType) const;
@@ -22,8 +22,7 @@ public:
 	float blendBiomes(float biomeNoise, float value1, float value2, float threshold, float blendRange);
 
 private:
-	std::unordered_map<BiomeType, BiomeParameters>
-		biomeParams;
+	std::unordered_map<BiomeType, BiomeParameters> biomeParams;
 
 	// Height generation for each biome type
 	float generateDesertHeight(int worldX, int worldY, siv::PerlinNoise *noise);

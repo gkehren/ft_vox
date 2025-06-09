@@ -19,7 +19,7 @@ public:
 	void stop();
 	bool isRunning() const;
 
-	size_t getClientCount();
+	size_t getClientCount() const;
 
 private:
 	void run();

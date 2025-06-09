@@ -37,9 +37,8 @@ bool Server::isRunning() const
 	return running;
 }
 
-size_t Server::getClientCount()
+size_t Server::getClientCount() const
 {
-	std::lock_guard<std::mutex> lock(playerMutex);
 	return playerPositions.size();
 }
 

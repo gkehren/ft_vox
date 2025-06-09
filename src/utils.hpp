@@ -260,26 +260,6 @@ static const glm::vec2 texCoords[4] = {
 	{1.0f, 1.0f},
 	{0.0f, 1.0f}};
 
-struct ShaderParameters
-{
-	// Fog
-	float fogStart = 160.0f;
-	float fogEnd = 300.0f;
-	float fogDensity = 0.8f;
-	glm::vec3 fogColor = {0.75f, 0.85f, 1.0f};
-
-	// Lighting
-	glm::vec3 sunDirection = glm::normalize(glm::vec3(0.8, 1.0, 0.6));
-	float ambientStrength = 0.2f;
-	float diffuseIntensity = 0.7f;
-	float lightLevels = 5.0f;
-
-	// visual
-	float saturationLevel = 1.2f;
-	float colorBoost = 1.0f;
-	float gamma = 1.8f;
-};
-
 struct BiomeParameters
 {
 	// General biome properties

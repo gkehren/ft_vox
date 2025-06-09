@@ -171,6 +171,11 @@ uint32_t Client::getWorldSeed() const
 	return worldSeed.load();
 }
 
+uint32_t Client::getPlayerId() const
+{
+	return playerId;
+}
+
 void Client::sendPlayerPosition(float x, float y, float z)
 {
 	PlayerPosition position;

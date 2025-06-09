@@ -1,5 +1,7 @@
 #pragma once
 
+#define GLM_ENABLE_EXPERIMENTAL
+
 #include <vector>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
@@ -20,6 +22,7 @@
 #include <Camera/Camera.hpp>
 #include <Biome/BiomeManager.hpp>
 #include <utils.hpp>
+#include <Engine/EngineDefs.hpp>
 
 struct IVec3Hash
 {
@@ -87,10 +90,4 @@ private:
 	void generateTerrainColumn(int x, int z, int terrainHeight, float biomeNoise, siv::PerlinNoise *noise);
 	void generateFeatures(int x, int z, int terrainHeight, int worldX, int worldZ, float biomeNoise, siv::PerlinNoise *noise);
 	void generateTree(int x, int z, int terrainHeight);
-
-	TextureType getGreedyMeshingVoxelData(const glm::ivec3 &local_coord) const;
-
-public:
-	// For debug purposes
-	void setVoxelDebug(int x, int y, int z, const Voxel &voxel);
 };

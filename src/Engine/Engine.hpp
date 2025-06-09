@@ -2,10 +2,6 @@
 
 #include <glad/glad.h>
 #include <SDL3/SDL.h>
-#include <imgui/imgui.h>
-#include <imgui/ImGuiFileDialog.h>
-#include <imgui/imgui_impl_sdl3.h>
-#include <imgui/imgui_impl_opengl3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_access.hpp>
 #include <PerlinNoise/PerlinNoise.hpp>
@@ -33,6 +29,9 @@
 #include <Network/Server.hpp>
 #include <Network/Client.hpp>
 #include <Biome/BiomeManager.hpp>
+#include <Engine/EngineDefs.hpp>
+#include <Engine/UIManager.hpp>
+#include <Engine/ChunkManager.hpp> // Include ChunkManager
 
 class Engine
 {
@@ -42,8 +41,32 @@ public:
 	void run();
 	void perlinNoise(unsigned int seed);
 
+	// Getters for UIManager and other components
+	Camera &getCamera() { return camera; }
+	const Camera &getCamera() const { return camera; }
+	double getDeltaTime() const { return deltaTime; }
+	// const glm::ivec2 &getPlayerChunkPos() const { return playerChunkPos; } // playerChunkPos is now managed internally by Engine, UIManager can get it if needed via a new getter
+	const glm::ivec2 &getPlayerChunkPos() const { return playerChunkPos; } // Keep for UIManager for now, or UIManager can get from Engine
+	siv::PerlinNoise *getNoise() const { return noise.get(); }
+	BiomeManager *getBiomeManager() const { return biomeManager.get(); }
+	Server *getServer() const { return server.get(); }
+	Client *getClient() const { return client.get(); }
+	RenderTiming &getRenderTiming();
+	TextureType getSelectedTexture() const { return selectedTexture; }
+	UIManager *getUIManager() const { return uiManager.get(); }
+	Shader *getShader() const { return shader.get(); }		 // Getter for shader
+	Renderer *getRenderer() const { return renderer.get(); } // Getter for renderer
+
+	void setWireframeMode(bool enabled);
+
+	void startServer();
+	void stopServer();
+	void connectToServer(const std::string &ip);
+	void disconnectClient();
+
 private:
 	SDL_Window *window;
+	SDL_GLContext glContext;
 	int windowWidth;
 	int windowHeight;
 	SDL_DisplayMode *mode;
@@ -64,71 +87,30 @@ private:
 	std::unique_ptr<siv::PerlinNoise> noise;
 	std::unique_ptr<Server> server;
 	std::unique_ptr<Client> client;
+	std::unique_ptr<BiomeManager> biomeManager;
+	std::unique_ptr<UIManager> uiManager;
+	std::unique_ptr<ChunkManager> chunkManager; // Added ChunkManager
 
 	Camera camera;
 	glm::ivec2 playerChunkPos;
 	uint32_t seed; // Perlin noise seed
 
-	struct RenderSettings
-	{
-		bool wireframeMode{false};
-		bool chunkBorders{false};
-		bool paused{false};
-		int visibleChunksCount{0};
-		int visibleVoxelsCount{0};
-		int chunkLoadedMax{5};
-		int minRenderDistance{320};
-		int maxRenderDistance{320};
-		int raycastDistance{8};
-	} renderSettings;
-
-	struct RenderTiming
-	{
-		float frustumCulling{0.0f};
-		float chunkGeneration{0.0f};
-		float meshGeneration{0.0f};
-		float chunkRendering{0.0f};
-		float uiRendering{0.0f};
-		float totalFrame{0.0f};
-	} renderTiming;
-
-	ShaderParameters shaderParams;
-	void handleShaderOptions();
+	TextureType selectedTexture;
+	// std::unordered_map<glm::ivec3, Chunk, ivec3_hash> chunks; // Moved to ChunkManager
+	// std::queue<glm::ivec3> chunkGenerationQueue; // Moved to ChunkManager
+	// mutable std::mutex chunkMutex; // Moved to ChunkManager
 
 	void handleEvents(bool &keyTPressed);
-	void updateUI();
 
-	TextureType selectedTexture;
-	std::unordered_map<glm::ivec3, Chunk, ivec3_hash> chunks;
-	std::queue<glm::ivec3> chunkGenerationQueue;
-	mutable std::mutex chunkMutex;
-	GLuint voxelBuffer;
+	// void updateChunks(); // Logic moved to ChunkManager
+	// void processChunkQueue(); // Logic moved to ChunkManager
+	void updateWorldState(); // New method to call ChunkManager updates
 
-	void updateChunks();
-	void processChunkQueue();
-	bool isChunkInRange(const glm::ivec3 &chunkPos, float distance) const;
+	void renderScene(); // Renamed from render to renderScene to avoid conflict with UIManager::render
+	// void frustumCulling(); // Logic moved to ChunkManager
 
-	void render();
-	void frustumCulling();
-
-	bool isVoxelActive(float x, float y, float z) const;
+	bool isVoxelActive(float x, float y, float z) const; // Will use ChunkManager
 	bool raycast(const glm::vec3 &origin, const glm::vec3 &direction, float maxDistance, glm::vec3 &hitPosition, glm::vec3 &previousPosition);
-
-	// Network
-	char ipInputBuffer[128] = "127.0.0.1";
-	void handleServerControls();
-
-	struct BiomeMapSettings
-	{
-		GLuint textureID{0};				  // OpenGL texture ID for the biome map
-		int mapSize{512};					  // Size of the biome map texture (square)
-		float zoom{0.5f};					  // Zoom level (1.0 = default view)
-		glm::vec2 center{0.0f, 0.0f};		  // Center position of the map view
-		bool needsUpdate{true};				  // Flag to indicate if the map needs updating
-		std::vector<unsigned char> pixelData; // Raw pixel data for the texture
-		bool autoFollowPlayer{true};		  // Flag to auto-center the map on the player
-		double lastUpdateTime{0.0};			  // Last time the map was updated
-	} biomeMap;
 
 	// Voxel selection highlight
 	struct VoxelHighlight
@@ -140,9 +122,4 @@ private:
 
 	void updateVoxelHighlights();
 	void drawVoxelHighlight(const VoxelHighlight &highlight);
-
-	void updateBiomeMap();
-	void renderBiomeMap();
-
-	std::string getCurrentBiomeName() const;
 };

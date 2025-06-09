@@ -1,7 +1,7 @@
 #include "Chunk.hpp"
-#include <vector>			// Required for std::vector
-#include <algorithm>		// Required for std::fill
-#include <glm/gtx/hash.hpp> // For glm::vec3 hashing if not already included by VertexHasher
+#include <vector>
+#include <algorithm>
+#include <glm/gtx/hash.hpp>
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state)
 	: position(position), visible(false), state(state), VAO(0), VBO(0), EBO(0), meshNeedsUpdate(true)
@@ -92,33 +92,6 @@ const Voxel &Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
 {
 	return voxels[getIndex(x, y, z)];
 }
-
-/*
-size_t Chunk::getNeighbourIndex(int x, int y, int z) const
-{
-	if (x < 0)
-	{
-		return y * SIZE + z;
-	}
-	else if (x >= SIZE)
-	{
-		return SIZE * HEIGHT + y * SIZE + z;
-	}
-	else if (z < 0)
-	{
-		return 2 * SIZE * HEIGHT + y * SIZE + x;
-	}
-	else if (z >= SIZE)
-	{
-		return 3 * SIZE * HEIGHT + y * SIZE + x;
-	}
-	else
-	{
-		std::cout << "Warning: getNeighbourIndex called with invalid coordinates!" << std::endl;
-		return 0;
-	}
-}
-*/
 
 void Chunk::setVoxel(int x, int y, int z, TextureType type)
 {
@@ -227,10 +200,6 @@ void Chunk::generateVoxels(siv::PerlinNoise *noise)
 	neighborShellVoxels.clear(); // Clear previous neighbor data
 	generateChunk(noise);		 // This generates the main chunk voxels AND the 1-voxel border
 
-	// The explicit generation of neighborShellVoxels here is removed,
-	// as generateChunk (via generateTerrainColumn and setVoxel)
-	// now populates neighborShellVoxels for the -1 and SIZE border voxels.
-
 	state = ChunkState::GENERATED;
 }
 
@@ -257,57 +226,27 @@ void Chunk::generateChunk(siv::PerlinNoise *noise)
 			int worldX = static_cast<int>(position.x) + x_local;
 			int worldZ = static_cast<int>(position.z) + z_local;
 
-			float biomeNoise = noise->noise2D_01(
-				static_cast<float>(worldX) / 256.0f,
-				static_cast<float>(worldZ) / 256.0f);
+			// Use a smaller scale for biome regions to create more gradual transitions
+			float biomeNoiseValue = noise->noise2D_01(
+				static_cast<float>(worldX) / 128.0f, // Reduced scale for smoother biome transitions
+				static_cast<float>(worldZ) / 128.0f);
 
-			// Calculate heights for each biome
-			float desertHeight = biomeManager.getTerrainHeightAt(worldX, worldZ, BIOME_DESERT, noise);
-			float forestHeight = biomeManager.getTerrainHeightAt(worldX, worldZ, BIOME_FOREST, noise);
-			float plainHeight = biomeManager.getTerrainHeightAt(worldX, worldZ, BIOME_PLAIN, noise);
-			float mountainHeight = biomeManager.getTerrainHeightAt(worldX, worldZ, BIOME_MOUNTAIN, noise);
+			// Get biome type with blending
+			BiomeType biomeType = biomeManager.getBiomeTypeAt(worldX, worldZ, noise);
 
-			// Blend heights based on biome transitions
-			float combinedHeight;
-			if (biomeNoise < 0.35f - blendRange)
-			{
-				combinedHeight = desertHeight; // pure desert
-			}
-			else if (biomeNoise < 0.35f + blendRange)
-			{
-				combinedHeight = biomeManager.blendBiomes(biomeNoise, desertHeight, forestHeight, 0.35f, blendRange);
-			}
-			else if (biomeNoise < 0.5f - blendRange)
-			{
-				combinedHeight = forestHeight; // pure forest
-			}
-			else if (biomeNoise < 0.5f + blendRange)
-			{
-				combinedHeight = biomeManager.blendBiomes(biomeNoise, forestHeight, plainHeight, 0.5f, blendRange);
-			}
-			else if (biomeNoise < 0.65f - blendRange)
-			{
-				combinedHeight = plainHeight; // pure plain
-			}
-			else if (biomeNoise < 0.65f + blendRange)
-			{
-				combinedHeight = biomeManager.blendBiomes(biomeNoise, plainHeight, mountainHeight, 0.65f, blendRange);
-			}
-			else
-			{
-				combinedHeight = mountainHeight; // pure mountain
-			}
+			// Get terrain height with blending
+			float terrainHeightFloat = biomeManager.getTerrainHeightAt(worldX, worldZ, biomeType, noise);
 
-			int terrainHeight = static_cast<int>(combinedHeight);
+			// Add some noise to the terrain height for more natural variation
+			float heightNoise = noise->noise2D_01(
+				static_cast<float>(worldX) / 32.0f,
+				static_cast<float>(worldZ) / 32.0f) * 2.0f - 1.0f;
+			terrainHeightFloat += heightNoise;
 
-			// Generate terrain column - this will use setVoxel, which now handles border voxels
-			generateTerrainColumn(x_local, z_local, terrainHeight, biomeNoise, noise);
+			int terrainHeight = static_cast<int>(std::round(terrainHeightFloat));
 
-			// Generate features - only for the main chunk body (0 to SIZE-1)
-			if (x_local >= 0 && x_local < SIZE && z_local >= 0 && z_local < SIZE)
-			{
-				generateFeatures(x_local, z_local, terrainHeight, worldX, worldZ, biomeNoise, noise);
-			}
+			// Generate the actual column of voxels
+			generateTerrainColumn(x_local, z_local, terrainHeight, biomeNoiseValue, noise);
 		}
 	}
 }

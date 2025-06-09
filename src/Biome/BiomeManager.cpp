@@ -68,20 +68,37 @@ BiomeManager::BiomeManager()
 	};
 }
 
-BiomeType BiomeManager::getBiomeTypeAt(int worldX, int worldY, siv::PerlinNoise *noise)
+BiomeType BiomeManager::getBiomeTypeAt(int worldX, int worldY, siv::PerlinNoise *noise) const
 {
-	float biomeNoise = noise->noise2D_01(
-		static_cast<float>(worldX) / 256.0f,
-		static_cast<float>(worldY) / 256.0f);
+	// Utilisation de plusieurs couches de bruit pour une meilleure distribution des biomes
+	float temperature = noise->octave2D_01(
+		static_cast<float>(worldX) / 1000.0f,  // Échelle plus grande pour les zones climatiques
+		static_cast<float>(worldY) / 1000.0f,
+		4,
+		0.5f
+	);
 
-	if (biomeNoise < 0.35f)
-		return BIOME_DESERT;
-	else if (biomeNoise < 0.5f)
-		return BIOME_FOREST;
-	else if (biomeNoise < 0.65f)
-		return BIOME_PLAIN;
-	else
-		return BIOME_MOUNTAIN;
+	float humidity = noise->octave2D_01(
+		static_cast<float>(worldX) / 800.0f,   // Échelle différente pour éviter la corrélation
+		static_cast<float>(worldY) / 800.0f,
+		4,
+		0.5f
+	);
+
+	// Détermination du biome basée sur la température et l'humidité
+	if (temperature < 0.3f) {
+		// Zones froides
+		if (humidity < 0.3f) return BIOME_DESERT;  // Désert froid
+		else return BIOME_MOUNTAIN;               // Montagnes enneigées
+	} else if (temperature < 0.6f) {
+		// Zones tempérées
+		if (humidity < 0.3f) return BIOME_PLAIN;  // Plaines
+		else return BIOME_FOREST;                 // Forêt
+	} else {
+		// Zones chaudes
+		if (humidity < 0.3f) return BIOME_DESERT; // Désert chaud
+		else return BIOME_FOREST;                 // Forêt tropicale
+	}
 }
 
 const BiomeParameters &BiomeManager::getBiomeParameters(BiomeType type) const
@@ -91,89 +108,209 @@ const BiomeParameters &BiomeManager::getBiomeParameters(BiomeType type) const
 
 float BiomeManager::getTerrainHeightAt(int worldX, int worldZ, BiomeType biomeType, siv::PerlinNoise *noise)
 {
-	switch (biomeType)
-	{
-	case BIOME_DESERT:
-		return generateDesertHeight(worldX, worldZ, noise);
-	case BIOME_FOREST:
-		return generateForestHeight(worldX, worldZ, noise);
-	case BIOME_PLAIN:
-		return generatePlainHeight(worldX, worldZ, noise);
-	case BIOME_MOUNTAIN:
-		return generateMountainHeight(worldX, worldZ, noise);
-	default:
-		return biomeParams.at(BIOME_PLAIN).baseHeight; // Default fallback
+	const BiomeParameters &params = biomeParams.at(biomeType);
+
+	// Bruit de base pour la structure générale du terrain
+	float baseNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 200.0f,
+		static_cast<float>(worldZ) / 200.0f,
+		4,
+		0.5f
+	);
+
+	// Bruit de détail pour les petites variations
+	float detailNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 50.0f,
+		static_cast<float>(worldZ) / 50.0f,
+		2,
+		0.5f
+	);
+
+	// Bruit de rugosité pour les variations locales
+	float roughnessNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 25.0f,
+		static_cast<float>(worldZ) / 25.0f,
+		2,
+		0.5f
+	);
+
+	// Combinaison des bruits avec des poids différents selon le biome
+	float combinedNoise;
+	switch (biomeType) {
+		case BIOME_DESERT:
+			// Terrain plus plat avec quelques dunes
+			combinedNoise = baseNoise * 0.7f + detailNoise * 0.2f + roughnessNoise * 0.1f;
+			break;
+		case BIOME_FOREST:
+			// Terrain varié avec des collines
+			combinedNoise = baseNoise * 0.6f + detailNoise * 0.3f + roughnessNoise * 0.1f;
+			break;
+		case BIOME_PLAIN:
+			// Terrain relativement plat avec de légères variations
+			combinedNoise = baseNoise * 0.8f + detailNoise * 0.15f + roughnessNoise * 0.05f;
+			break;
+		case BIOME_MOUNTAIN:
+		{
+			// Terrain très accidenté avec des pics
+			combinedNoise = baseNoise * 0.5f + detailNoise * 0.3f + roughnessNoise * 0.2f;
+			// Ajout de pics montagneux
+			float mountainNoise = noise->octave2D_01(
+				static_cast<float>(worldX) / 300.0f,
+				static_cast<float>(worldZ) / 300.0f,
+				3,
+				0.6f
+			);
+			if (mountainNoise > 0.7f) {
+				combinedNoise += (mountainNoise - 0.7f) * 2.0f;
+			}
+			break;
+		}
+		default:
+			combinedNoise = baseNoise;
 	}
+
+	// Application de la hauteur de base et de la variation
+	float height = params.baseHeight + (combinedNoise - 0.5f) * params.heightVariation;
+
+	// Ajout de plateaux pour certains biomes
+	if (biomeType == BIOME_MOUNTAIN || biomeType == BIOME_FOREST) {
+		float plateauNoise = noise->octave2D_01(
+			static_cast<float>(worldX) / 400.0f,
+			static_cast<float>(worldZ) / 400.0f,
+			2,
+			0.5f
+		);
+		if (plateauNoise > 0.6f) {
+			height = std::max(height, params.baseHeight + 20.0f);
+		}
+	}
+
+	return height;
 }
 
 float BiomeManager::generateDesertHeight(int worldX, int worldZ, siv::PerlinNoise *noise)
 {
 	const BiomeParameters &params = biomeParams.at(BIOME_DESERT);
 
-	float noiseValue = noise->noise2D_01(
-		static_cast<float>(worldX) / params.noiseScale,
-		static_cast<float>(worldZ) / params.noiseScale);
+	// Bruit de base pour les dunes
+	float duneNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 100.0f,
+		static_cast<float>(worldZ) / 100.0f,
+		3,
+		0.5f
+	);
 
-	return params.baseHeight + (noiseValue - 0.5f) * params.heightVariation;
+	// Bruit de détail pour les petites variations
+	float detailNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 30.0f,
+		static_cast<float>(worldZ) / 30.0f,
+		2,
+		0.5f
+	);
+
+	// Combinaison des bruits pour créer des dunes
+	float combinedNoise = duneNoise * 0.7f + detailNoise * 0.3f;
+
+	return params.baseHeight + (combinedNoise - 0.5f) * params.heightVariation;
 }
 
 float BiomeManager::generateForestHeight(int worldX, int worldZ, siv::PerlinNoise *noise)
 {
 	const BiomeParameters &params = biomeParams.at(BIOME_FOREST);
 
-	float noiseValue = noise->noise2D_01(
-		static_cast<float>(worldX) / params.noiseScale,
-		static_cast<float>(worldZ) / params.noiseScale);
+	// Bruit de base pour les collines
+	float hillNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 150.0f,
+		static_cast<float>(worldZ) / 150.0f,
+		4,
+		0.5f
+	);
 
-	return params.baseHeight + (noiseValue - 0.5f) * params.heightVariation;
+	// Bruit de détail pour les variations locales
+	float detailNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 40.0f,
+		static_cast<float>(worldZ) / 40.0f,
+		2,
+		0.5f
+	);
+
+	// Combinaison des bruits
+	float combinedNoise = hillNoise * 0.6f + detailNoise * 0.4f;
+
+	return params.baseHeight + (combinedNoise - 0.5f) * params.heightVariation;
 }
 
 float BiomeManager::generatePlainHeight(int worldX, int worldZ, siv::PerlinNoise *noise)
 {
 	const BiomeParameters &params = biomeParams.at(BIOME_PLAIN);
 
-	float noiseValue = noise->noise2D_01(
-		static_cast<float>(worldX) / params.noiseScale,
-		static_cast<float>(worldZ) / params.noiseScale);
+	// Bruit de base pour le terrain général
+	float baseNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 200.0f,
+		static_cast<float>(worldZ) / 200.0f,
+		3,
+		0.5f
+	);
 
-	return params.baseHeight + (noiseValue - 0.5f) * params.heightVariation;
+	// Bruit de détail pour les légères variations
+	float detailNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 50.0f,
+		static_cast<float>(worldZ) / 50.0f,
+		2,
+		0.5f
+	);
+
+	// Combinaison des bruits pour un terrain relativement plat
+	float combinedNoise = baseNoise * 0.8f + detailNoise * 0.2f;
+
+	return params.baseHeight + (combinedNoise - 0.5f) * params.heightVariation;
 }
 
 float BiomeManager::generateMountainHeight(int worldX, int worldZ, siv::PerlinNoise *noise)
 {
 	const BiomeParameters &params = biomeParams.at(BIOME_MOUNTAIN);
 
-	// Base mountain terrain
-	float mountainNoiseValue = noise->octave2D_01(
-		static_cast<float>(worldX) / params.mountainNoiseScale,
-		static_cast<float>(worldZ) / params.mountainNoiseScale,
-		params.mountainOctaves, params.mountainPersistence);
+	// Bruit de base pour la structure des montagnes
+	float mountainNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 300.0f,
+		static_cast<float>(worldZ) / 300.0f,
+		4,
+		0.6f
+	);
 
-	// Detailed variations
-	float mountainDetail = noise->octave2D_01(
-		static_cast<float>(worldX) / params.mountainDetailScale,
-		static_cast<float>(worldZ) / params.mountainDetailScale,
-		3, 0.4f);
+	// Bruit de détail pour les variations locales
+	float detailNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 100.0f,
+		static_cast<float>(worldZ) / 100.0f,
+		3,
+		0.5f
+	);
 
-	// Peaks (larger scale, fewer occurrences)
+	// Bruit de rugosité pour les pics
+	float roughnessNoise = noise->octave2D_01(
+		static_cast<float>(worldX) / 50.0f,
+		static_cast<float>(worldZ) / 50.0f,
+		2,
+		0.5f
+	);
+
+	// Combinaison des bruits
+	float combinedNoise = mountainNoise * 0.5f + detailNoise * 0.3f + roughnessNoise * 0.2f;
+
+	// Ajout de pics montagneux
 	float peakNoise = noise->octave2D_01(
-		static_cast<float>(worldX) / params.peakNoiseScale,
-		static_cast<float>(worldZ) / params.peakNoiseScale,
-		2, 0.7f);
+		static_cast<float>(worldX) / 400.0f,
+		static_cast<float>(worldZ) / 400.0f,
+		2,
+		0.7f
+	);
 
-	// Combine base and detail
-	float mountainBase = mountainNoiseValue * (1.0f - params.mountainDetailInfluence) +
-						 mountainDetail * params.mountainDetailInfluence;
+	float peakInfluence = 0.0f;
+	if (peakNoise > 0.7f) {
+		peakInfluence = (peakNoise - 0.7f) * 3.0f;
+	}
 
-	// Apply peak influence
-	float peakValue = (peakNoise > params.peakThreshold) ? std::pow((peakNoise - params.peakThreshold) / (1.0f - params.peakThreshold), 2.0f) : 0.0f;
-	float peakInfluence = std::pow(mountainBase, 2.0f) * peakValue * 0.75f;
-
-	// Combine everything
-	float mountainCombined = mountainBase + peakInfluence;
-
-	return params.baseHeight + (mountainCombined - 0.5f) * params.heightVariation +
-		   peakInfluence * params.peakMultiplier;
+	return params.baseHeight + (combinedNoise - 0.5f) * params.heightVariation + peakInfluence * params.peakMultiplier;
 }
 
 float BiomeManager::blendBiomes(float biomeNoise, float value1, float value2, float threshold, float blendRange)

@@ -19,6 +19,7 @@ public:
 	bool isConnected() const;
 
 	uint32_t getWorldSeed() const;
+	uint32_t getPlayerId() const;
 	void sendPlayerPosition(float x, float y, float z);
 
 private:
