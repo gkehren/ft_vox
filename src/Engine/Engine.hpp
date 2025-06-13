@@ -30,7 +30,8 @@
 #include <Network/Client.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Engine/UIManager.hpp>
-#include <Engine/ChunkManager.hpp>
+#include <Chunk/ChunkManager.hpp>
+#include <Chunk/TerrainGenerator.hpp>
 
 class Engine
 {
@@ -38,13 +39,12 @@ public:
 	Engine();
 	~Engine();
 	void run();
-	void initializeNoiseGenerator(unsigned int seed); // Renamed
+	void initializeNoiseGenerator(int seed);
 
 	Camera &getCamera() { return camera; }
 	const Camera &getCamera() const { return camera; }
 	double getDeltaTime() const { return deltaTime; }
 	const glm::ivec2 &getPlayerChunkPos() const { return playerChunkPos; }
-	FastNoiseLite *getNoise() const { return noise.get(); } // FastNoiseLite compatible
 	Server *getServer() const { return server.get(); }
 	Client *getClient() const { return client.get(); }
 	RenderTiming &getRenderTiming();
@@ -80,15 +80,15 @@ private:
 	std::unique_ptr<Renderer> renderer;
 	std::unique_ptr<TextRenderer> textRenderer;
 	std::unique_ptr<ThreadPool> threadPool;
-	std::unique_ptr<FastNoiseLite> noise; // Changed to FastNoiseLite
 	std::unique_ptr<Server> server;
 	std::unique_ptr<Client> client;
 	std::unique_ptr<UIManager> uiManager;
 	std::unique_ptr<ChunkManager> chunkManager;
+	std::unique_ptr<TerrainGenerator> terrainGenerator;
 
 	Camera camera;
 	glm::ivec2 playerChunkPos;
-	uint32_t seed; // Perlin noise seed
+	int seed;
 
 	TextureType selectedTexture;
 

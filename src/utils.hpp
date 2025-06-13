@@ -73,6 +73,20 @@ struct VertexHasher
 	}
 };
 
+static constexpr int CHUNK_SIZE = 16;										// Size of a chunk in voxels
+static constexpr int CHUNK_HEIGHT = 256;									// Height of a chunk in voxels
+static constexpr int CHUNK_VOLUME = CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE; // Total number of voxels in a chunk
+static constexpr int CHUNK_RADIUS = 16;										// Radius of a chunk in world units
+
+enum BiomeType
+{
+	DESERT,
+	FOREST,
+	PLAINS,
+	MOUNTAINS,
+	SNOWY
+};
+
 struct TextureInfo
 {
 	unsigned int id;
@@ -286,13 +300,4 @@ struct BiomeParameters
 	float peakNoiseScale;
 	float peakThreshold;
 	float peakMultiplier;
-};
-
-enum BiomeType
-{
-	BIOME_DESERT,
-	BIOME_FOREST,
-	BIOME_PLAIN,
-	BIOME_MOUNTAIN,
-	BIOME_COUNT
 };

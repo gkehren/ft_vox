@@ -11,7 +11,7 @@
 #include <Chunk/Chunk.hpp>
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
-#include <FastNoise/FastNoiseLite.h>
+#include <Chunk/TerrainGenerator.hpp>
 
 // Forward declarations
 class Camera;
@@ -23,7 +23,7 @@ class ThreadPool;
 class ChunkManager
 {
 public:
-	ChunkManager(FastNoiseLite *noise_node, ThreadPool *threadPool, RenderTiming &renderTiming);
+	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, RenderTiming &renderTiming);
 	~ChunkManager();
 
 	void updatePlayerPosition(const glm::ivec2 &newPlayerChunkPos, const Camera &camera, const RenderSettings &settings);
@@ -52,7 +52,7 @@ private:
 
 	mutable std::mutex chunkMutex;
 
-	FastNoiseLite *m_noise_node;
+	TerrainGenerator *m_terrainGenerator;
 	ThreadPool *p_threadPool;
 	RenderTiming &m_renderTiming;
 };

@@ -97,7 +97,7 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 
 	initializeNoiseGenerator(0);
 
-	this->chunkManager = std::make_unique<ChunkManager>(noise.get(), threadPool.get(), uiManager->getRenderTiming());
+	this->chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(), uiManager->getRenderTiming());
 
 	std::cout << "SDL version: " << SDL_GetVersion() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -115,7 +115,7 @@ Engine::~Engine()
 	SDL_Quit();
 }
 
-void Engine::initializeNoiseGenerator(unsigned int seed_val)
+void Engine::initializeNoiseGenerator(int seed_val)
 {
 	// Set the seed - generate random if not provided
 	if (seed_val <= 0)
@@ -129,36 +129,9 @@ void Engine::initializeNoiseGenerator(unsigned int seed_val)
 	{
 		this->seed = seed_val;
 	}
-	// Create enhanced terrain generation using FastNoiseLite
-	// FastNoiseLite uses direct instantiation
-	this->noise = std::make_unique<FastNoiseLite>();
-
-	// Configure the generator for fractal noise
-	this->noise->SetNoiseType(FastNoiseLite::NoiseType_Perlin);
-	this->noise->SetFractalType(FastNoiseLite::FractalType_FBm);
-	this->noise->SetFractalOctaves(5);			   // More octaves for detailed terrain
-	this->noise->SetFractalLacunarity(2.1f);	   // Frequency scaling
-	this->noise->SetFractalGain(0.45f);			   // Amplitude scaling
-	this->noise->SetFractalWeightedStrength(0.2f); // Weighted strength for variation
-	this->noise->SetSeed(this->seed);			   // Set the seed for consistent generation
-	// Fallback if noise creation fails (though this is less likely with FastNoiseLite)
-	if (!this->noise)
-	{
-		std::cerr << "Failed to create FastNoiseLite generator! Creating basic fallback." << std::endl;
-
-		// Simple fallback
-		this->noise = std::make_unique<FastNoiseLite>();
-		this->noise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-		this->noise->SetSeed(this->seed);
-
-		if (!this->noise)
-		{
-			std::cerr << "All noise generators failed!" << std::endl;
-		}
-	}
+	this->terrainGenerator = std::make_unique<TerrainGenerator>(this->seed);
 
 	std::cout << "Terrain generation initialized with seed: " << this->seed << std::endl;
-	std::cout << "Noise type: FastNoiseLite Perlin Fractal (5 octaves)" << std::endl;
 }
 
 void Engine::run()
@@ -220,8 +193,8 @@ void Engine::updateWorldState()
 	if (!currentRenderSettings.paused)
 	{
 		const glm::ivec2 newPlayerChunkPos{
-			static_cast<int>(std::floor(camera.getPosition().x / Chunk::SIZE)),
-			static_cast<int>(std::floor(camera.getPosition().z / Chunk::SIZE))};
+			static_cast<int>(std::floor(camera.getPosition().x / CHUNK_SIZE)),
+			static_cast<int>(std::floor(camera.getPosition().z / CHUNK_SIZE))};
 
 		if (newPlayerChunkPos != playerChunkPos)
 		{
@@ -550,7 +523,7 @@ bool Engine::raycast(const glm::vec3 &origin, const glm::vec3 &direction, float 
 			distanceTraveled = sideDist.z - deltaDist.z;
 		}
 
-		if (currentVoxel.y < 0 || currentVoxel.y >= Chunk::HEIGHT)
+		if (currentVoxel.y < 0 || currentVoxel.y >= CHUNK_HEIGHT)
 			continue;
 
 		if (chunkManager && chunkManager->isVoxelActive(glm::vec3(currentVoxel))) // Check chunkManager pointer

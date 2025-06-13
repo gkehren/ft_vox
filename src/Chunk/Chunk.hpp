@@ -17,6 +17,7 @@
 #include <chrono>
 
 #include <FastNoise/FastNoiseLite.h>
+#include <Chunk/TerrainGenerator.hpp>
 #include <Renderer/TextureManager.hpp>
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
@@ -37,11 +38,6 @@ struct IVec3Hash
 class Chunk
 {
 public:
-	static constexpr int SIZE = 16;
-	static constexpr int HEIGHT = 256;
-	static constexpr float RADIUS = 16.0f;
-	static constexpr int WATER_LEVEL = 58;
-
 	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED);
 	Chunk(Chunk &&other) noexcept;
 	Chunk &operator=(Chunk &&other) noexcept;
@@ -55,15 +51,13 @@ public:
 	Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z);
 	const Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
 	bool isVoxelActive(int x, int y, int z) const;
-	bool isVoxelActiveGlobalPos(int x, int y, int z) const;
 	void setVoxel(int x, int y, int z, TextureType type);
 
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
 	uint32_t draw(const Shader &shader, const Camera &camera, GLuint textureArray, const ShaderParameters &params);
-	void generateVoxels(FastNoiseLite *noiseGenerator, const BiomeParameters &biome, unsigned int seed);
-	void generateMesh(FastNoiseLite *noiseGenerator);
-	void generateChunk(FastNoiseLite *noiseGenerator, const BiomeParameters &biome, unsigned int seed);
+	void generateTerrain(TerrainGenerator &generator);
+	void generateMesh();
 
 private:
 	glm::vec3 position;
@@ -76,8 +70,8 @@ private:
 
 	std::vector<Vertex> vertices;
 	std::vector<uint16_t> indices;
-	std::array<Voxel, SIZE * HEIGHT * SIZE> voxels;
-	std::bitset<SIZE * HEIGHT * SIZE> activeVoxels;
+	std::array<Voxel, CHUNK_VOLUME> voxels;
+	std::bitset<CHUNK_VOLUME> activeVoxels;
 
 	std::unordered_map<glm::ivec3, TextureType, IVec3Hash> neighborShellVoxels;
 
