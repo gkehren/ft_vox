@@ -42,30 +42,18 @@ void TerrainGenerator::setupNoiseGenerators()
 	heightFBm->SetOctaveCount(4);
 	heightFBm->SetLacunarity(2.5f);
 
+	auto heightCellularDistance = FastNoise::New<FastNoise::CellularDistance>();
+	heightCellularDistance->SetJitterModifier(heightFBm);
+	heightCellularDistance->SetDistanceFunction(FastNoise::DistanceFunction::EuclideanSquared);
+	heightCellularDistance->SetDistanceIndex0(0);
+	heightCellularDistance->SetDistanceIndex1(2);
+	heightCellularDistance->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0Mul1);
+
 	auto heightScale = FastNoise::New<FastNoise::DomainScale>();
-	heightScale->SetSource(heightFBm);
-	heightScale->SetScale(0.66f);
+	heightScale->SetSource(heightCellularDistance);
+	heightScale->SetScale(0.8f);
 
-	auto heightPosition = FastNoise::New<FastNoise::PositionOutput>();
-	heightPosition->Set<FastNoise::Dim::Y>(3.0f);
-
-	auto heightAdd = FastNoise::New<FastNoise::Add>();
-	heightAdd->SetLHS(heightScale);
-	heightAdd->SetRHS(heightPosition);
-
-	auto heightDomainWarp = FastNoise::New<FastNoise::DomainWarpGradient>();
-	heightDomainWarp->SetSource(heightAdd);
-	heightDomainWarp->SetWarpAmplitude(0.2f);
-	heightDomainWarp->SetWarpFrequency(2.0f);
-
-	auto heightDomainWarpFractalProgressive = FastNoise::New<FastNoise::DomainWarpFractalProgressive>();
-	heightDomainWarpFractalProgressive->SetSource(heightDomainWarp);
-	heightDomainWarpFractalProgressive->SetGain(0.7f);
-	heightDomainWarpFractalProgressive->SetWeightedStrength(0.5f);
-	heightDomainWarpFractalProgressive->SetOctaveCount(2);
-	heightDomainWarpFractalProgressive->SetLacunarity(2.0f);
-
-	m_heightNoise = heightDomainWarpFractalProgressive;
+	m_heightNoise = heightScale;
 
 	// Biome noise - Simple Perlin for smooth biome transitions
 	auto biomeBase = FastNoise::New<FastNoise::Perlin>();
@@ -130,7 +118,7 @@ std::vector<int> TerrainGenerator::generateHeightMap(int chunkX, int chunkZ)
 	std::vector<int> heightMap(CHUNK_SIZE * CHUNK_SIZE);
 	std::vector<float> noiseOutput(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
 
-	m_heightNoise->GenUniformGrid3D(noiseOutput.data(), chunkX, 0, chunkZ, CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE, 0.005f, m_seed);
+	m_heightNoise->GenUniformGrid2D(noiseOutput.data(), chunkX, chunkZ, CHUNK_SIZE, CHUNK_SIZE, 0.005f, m_seed);
 
 	// Convert noise values to height
 	for (int i = 0; i < CHUNK_SIZE * CHUNK_SIZE; ++i)

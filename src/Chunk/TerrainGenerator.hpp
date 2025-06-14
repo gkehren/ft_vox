@@ -25,7 +25,7 @@ public:
 
 private:
 	// Noise generators
-	FastNoise::SmartNode<FastNoise::DomainWarpFractalProgressive> m_heightNoise;
+	FastNoise::SmartNode<FastNoise::DomainScale> m_heightNoise;
 	FastNoise::SmartNode<FastNoise::DomainScale> m_biomeNoise;
 	FastNoise::SmartNode<FastNoise::DomainScale> m_temperatureNoise;
 	FastNoise::SmartNode<FastNoise::DomainScale> m_humidityNoise;
