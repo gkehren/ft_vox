@@ -33,37 +33,39 @@ std::array<Voxel, CHUNK_VOLUME> TerrainGenerator::generateChunk(int chunkX, int 
 
 void TerrainGenerator::setupNoiseGenerators()
 {
-	// Height map noise - Complex FBm with ridged noise for mountains
-	auto heightBase = FastNoise::New<FastNoise::Simplex>();
+	auto heightBase = FastNoise::New<FastNoise::OpenSimplex2>();
 
 	auto heightFBm = FastNoise::New<FastNoise::FractalFBm>();
 	heightFBm->SetSource(heightBase);
-	heightFBm->SetOctaveCount(6);
-	heightFBm->SetLacunarity(2.0f);
-	heightFBm->SetGain(0.5f);
-	heightFBm->SetWeightedStrength(0.0f);
+	heightFBm->SetGain(0.65f);
+	heightFBm->SetWeightedStrength(0.5f);
+	heightFBm->SetOctaveCount(4);
+	heightFBm->SetLacunarity(2.5f);
 
-	// Add ridged noise for mountain peaks
-	auto ridgedBase = FastNoise::New<FastNoise::Simplex>();
+	auto heightScale = FastNoise::New<FastNoise::DomainScale>();
+	heightScale->SetSource(heightFBm);
+	heightScale->SetScale(0.66f);
 
-	auto ridgedNoise = FastNoise::New<FastNoise::FractalRidged>();
-	ridgedNoise->SetSource(ridgedBase);
-	ridgedNoise->SetOctaveCount(4);
-	ridgedNoise->SetLacunarity(2.0f);
-	ridgedNoise->SetGain(0.6f);
-	// Combine FBm and Ridged for varied terrain - scale ridged noise down
-	auto ridgedScale = FastNoise::New<FastNoise::DomainScale>();
-	ridgedScale->SetSource(ridgedNoise);
-	ridgedScale->SetScale(0.5f); // Scale ridged noise to be less dominant
+	auto heightPosition = FastNoise::New<FastNoise::PositionOutput>();
+	heightPosition->Set<FastNoise::Dim::Y>(3.0f);
 
 	auto heightAdd = FastNoise::New<FastNoise::Add>();
-	heightAdd->SetLHS(heightFBm);
-	heightAdd->SetRHS(ridgedScale);
-	auto heightScale = FastNoise::New<FastNoise::DomainScale>();
-	heightScale->SetSource(heightAdd);
-	heightScale->SetScale(0.005f); // Increase frequency for more variation
+	heightAdd->SetLHS(heightScale);
+	heightAdd->SetRHS(heightPosition);
 
-	m_heightNoise = heightScale;
+	auto heightDomainWarp = FastNoise::New<FastNoise::DomainWarpGradient>();
+	heightDomainWarp->SetSource(heightAdd);
+	heightDomainWarp->SetWarpAmplitude(0.2f);
+	heightDomainWarp->SetWarpFrequency(2.0f);
+
+	auto heightDomainWarpFractalProgressive = FastNoise::New<FastNoise::DomainWarpFractalProgressive>();
+	heightDomainWarpFractalProgressive->SetSource(heightDomainWarp);
+	heightDomainWarpFractalProgressive->SetGain(0.7f);
+	heightDomainWarpFractalProgressive->SetWeightedStrength(0.5f);
+	heightDomainWarpFractalProgressive->SetOctaveCount(2);
+	heightDomainWarpFractalProgressive->SetLacunarity(2.0f);
+
+	m_heightNoise = heightDomainWarpFractalProgressive;
 
 	// Biome noise - Simple Perlin for smooth biome transitions
 	auto biomeBase = FastNoise::New<FastNoise::Perlin>();
@@ -126,20 +128,9 @@ void TerrainGenerator::setupNoiseGenerators()
 std::vector<int> TerrainGenerator::generateHeightMap(int chunkX, int chunkZ)
 {
 	std::vector<int> heightMap(CHUNK_SIZE * CHUNK_SIZE);
-	std::vector<float> noiseOutput(CHUNK_SIZE * CHUNK_SIZE);
+	std::vector<float> noiseOutput(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
 
-	// Prepare coordinates arrays for batch processing
-	// int index = 0;
-	// for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
-	//{
-	//	for (int localX = 0; localX < CHUNK_SIZE; ++localX)
-	//	{
-	//		m_xCoords[index] = static_cast<float>(chunkX + localX);
-	//		m_yCoords[index] = static_cast<float>(chunkZ + localZ);
-	//		++index;
-	//	}
-	//}	// Generate height values in batch
-	m_heightNoise->GenUniformGrid2D(noiseOutput.data(), chunkX, chunkZ, CHUNK_SIZE, CHUNK_SIZE, 0.005f, m_seed);
+	m_heightNoise->GenUniformGrid3D(noiseOutput.data(), chunkX, 0, chunkZ, CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE, 0.005f, m_seed);
 
 	// Convert noise values to height
 	for (int i = 0; i < CHUNK_SIZE * CHUNK_SIZE; ++i)
