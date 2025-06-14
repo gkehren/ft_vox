@@ -32,6 +32,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(freetype2)
 
+# FetchContent for FastNoise2
+FetchContent_Declare(
+  FastNoise2
+  GIT_REPOSITORY https://github.com/Auburn/FastNoise2.git
+  GIT_TAG v0.10.0-alpha
+)
+FetchContent_MakeAvailable(FastNoise2)
+
 
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -Ofast -march=native")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -Ofast -march=native")
@@ -39,7 +47,7 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -Ofast -march=native")
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${SDL3_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} OpenGL::GL glm freetype ${Boost_LIBRARIES} ${SDL3_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} OpenGL::GL glm freetype FastNoise2 ${Boost_LIBRARIES} ${SDL3_LIBRARIES})
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

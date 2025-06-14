@@ -117,15 +117,16 @@ void ChunkManager::generatePendingVoxels(const RenderSettings &settings, unsigne
 				);
 				genQueue.push({&chunk, distance});
 			}
-		}
-		// Générer les chunks par ordre de priorité
+		} // Générer les chunks par ordre de priorité
 		while (!genQueue.empty())
 		{
 			Chunk *chunk = genQueue.top().chunk;
-			TerrainGenerator *terrainGenPtr = m_terrainGenerator;
+			int seed = m_terrainGenerator->getSeed(); // We'll need to add this method
 
-			futures.push_back(p_threadPool->enqueue([chunk, terrainGenPtr]()
-													{ chunk->generateTerrain(*terrainGenPtr); }));
+			futures.push_back(p_threadPool->enqueue([chunk, seed]()
+													{
+														TerrainGenerator localGenerator(seed);
+														chunk->generateTerrain(localGenerator); }));
 			genQueue.pop();
 		}
 	}

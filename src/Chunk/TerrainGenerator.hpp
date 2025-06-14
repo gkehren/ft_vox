@@ -1,6 +1,6 @@
 #pragma once
 
-#include <FastNoise/FastNoiseLite.h>
+#include <FastNoise/FastNoise.h>
 #include <array>
 #include <random>
 #include <algorithm>
@@ -20,15 +20,17 @@ public:
 	explicit TerrainGenerator(int seed = 1337);
 	std::array<Voxel, CHUNK_VOLUME> generateChunk(int chunkX, int chunkZ);
 
+	// Getter for seed to enable thread-safe generation
+	int getSeed() const { return m_seed; }
+
 private:
 	// Noise generators
-	FastNoiseLite m_heightNoise;
-	FastNoiseLite m_biomeNoise;
-	FastNoiseLite m_mountainNoise;
-	FastNoiseLite m_caveNoise;
-	FastNoiseLite m_oreNoise;
-	FastNoiseLite m_temperatureNoise;
-	FastNoiseLite m_humidityNoise;
+	FastNoise::SmartNode<FastNoise::DomainScale> m_heightNoise;
+	FastNoise::SmartNode<FastNoise::DomainScale> m_biomeNoise;
+	FastNoise::SmartNode<FastNoise::DomainScale> m_temperatureNoise;
+	FastNoise::SmartNode<FastNoise::DomainScale> m_humidityNoise;
+	FastNoise::SmartNode<FastNoise::DomainScale> m_caveNoise;
+	FastNoise::SmartNode<FastNoise::DomainScale> m_oreNoise;
 
 	// Generation parameters
 	float m_heightScale;
@@ -38,8 +40,10 @@ private:
 
 	// Helper functions
 	void setupNoiseGenerators();
-	void generateColumn(std::array<Voxel, CHUNK_VOLUME> &voxels, int localX, int localZ, int worldX, int worldZ);
-	BiomeType getBiome(int worldX, int worldZ);
+	std::vector<int> generateHeightMap(int chunkX, int chunkZ);
+	std::vector<BiomeType> generateBiomeMap(int chunkX, int chunkZ);
+	BiomeType getBiomeFromValues(float temperature, float humidity, float elevation);
+	void generateColumn(std::array<Voxel, CHUNK_VOLUME> &voxels, int localX, int localZ, int worldX, int worldZ, int terrainHeight, BiomeType biome);
 	TextureType getTerrainBlockType(int y, int surfaceHeight, BiomeType biome, int worldX, int worldZ);
 	TextureType generateOre(int worldX, int y, int worldZ);
 	bool isCave(int worldX, int y, int worldZ);

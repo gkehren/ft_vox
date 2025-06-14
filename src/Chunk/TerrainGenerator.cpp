@@ -1,8 +1,7 @@
 #include <Chunk/TerrainGenerator.hpp>
-#include <mutex>
 
 TerrainGenerator::TerrainGenerator(int seed)
-	: m_heightScale(30.0f), m_mountainScale(50.0f), m_baseHeight(SEA_LEVEL), m_seed(seed)
+	: m_heightScale(50.0f), m_mountainScale(50.0f), m_baseHeight(SEA_LEVEL), m_seed(seed)
 {
 	setupNoiseGenerators();
 }
@@ -12,6 +11,10 @@ std::array<Voxel, CHUNK_VOLUME> TerrainGenerator::generateChunk(int chunkX, int 
 	std::array<Voxel, CHUNK_VOLUME> voxels;
 	voxels.fill({TextureType::AIR});
 
+	// Pre-generate height map for the entire chunk using batch processing
+	std::vector<int> heightMap = generateHeightMap(chunkX, chunkZ);
+	std::vector<BiomeType> biomeMap = generateBiomeMap(chunkX, chunkZ);
+
 	// Generate terrain for each column in the chunk
 	for (int localX = 0; localX < CHUNK_SIZE; ++localX)
 	{
@@ -19,8 +22,9 @@ std::array<Voxel, CHUNK_VOLUME> TerrainGenerator::generateChunk(int chunkX, int 
 		{
 			int worldX = chunkX + localX;
 			int worldZ = chunkZ + localZ;
+			int columnIndex = localZ * CHUNK_SIZE + localX;
 
-			generateColumn(voxels, localX, localZ, worldX, worldZ);
+			generateColumn(voxels, localX, localZ, worldX, worldZ, heightMap[columnIndex], biomeMap[columnIndex]);
 		}
 	}
 
@@ -29,102 +33,168 @@ std::array<Voxel, CHUNK_VOLUME> TerrainGenerator::generateChunk(int chunkX, int 
 
 void TerrainGenerator::setupNoiseGenerators()
 {
-	std::cout << "Setting up noise generators with seed: " << m_seed << std::endl;
-	// Height map noise
-	m_heightNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	m_heightNoise.SetSeed(m_seed);
-	m_heightNoise.SetFrequency(0.02f); // Increased frequency significantly
-	m_heightNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
-	m_heightNoise.SetFractalOctaves(4);
-	m_heightNoise.SetFractalLacunarity(2.0f);
-	m_heightNoise.SetFractalGain(0.5f);
+	// Height map noise - Complex FBm with ridged noise for mountains
+	auto heightBase = FastNoise::New<FastNoise::Simplex>();
 
-	// Mountain noise
-	m_mountainNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	m_mountainNoise.SetSeed(m_seed + 500);
-	m_mountainNoise.SetFrequency(0.01f); // Increased frequency
+	auto heightFBm = FastNoise::New<FastNoise::FractalFBm>();
+	heightFBm->SetSource(heightBase);
+	heightFBm->SetOctaveCount(6);
+	heightFBm->SetLacunarity(2.0f);
+	heightFBm->SetGain(0.5f);
+	heightFBm->SetWeightedStrength(0.0f);
 
-	// Biome noise
-	m_biomeNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	m_biomeNoise.SetSeed(m_seed + 1000);
-	m_biomeNoise.SetFrequency(0.005f); // Increased frequency
+	// Add ridged noise for mountain peaks
+	auto ridgedBase = FastNoise::New<FastNoise::Simplex>();
+
+	auto ridgedNoise = FastNoise::New<FastNoise::FractalRidged>();
+	ridgedNoise->SetSource(ridgedBase);
+	ridgedNoise->SetOctaveCount(4);
+	ridgedNoise->SetLacunarity(2.0f);
+	ridgedNoise->SetGain(0.6f);
+	// Combine FBm and Ridged for varied terrain - scale ridged noise down
+	auto ridgedScale = FastNoise::New<FastNoise::DomainScale>();
+	ridgedScale->SetSource(ridgedNoise);
+	ridgedScale->SetScale(0.5f); // Scale ridged noise to be less dominant
+
+	auto heightAdd = FastNoise::New<FastNoise::Add>();
+	heightAdd->SetLHS(heightFBm);
+	heightAdd->SetRHS(ridgedScale);
+	auto heightScale = FastNoise::New<FastNoise::DomainScale>();
+	heightScale->SetSource(heightAdd);
+	heightScale->SetScale(0.005f); // Increase frequency for more variation
+
+	m_heightNoise = heightScale;
+
+	// Biome noise - Simple Perlin for smooth biome transitions
+	auto biomeBase = FastNoise::New<FastNoise::Perlin>();
+
+	auto biomeScale = FastNoise::New<FastNoise::DomainScale>();
+	biomeScale->SetSource(biomeBase);
+	biomeScale->SetScale(0.005f);
+
+	m_biomeNoise = biomeScale;
 
 	// Temperature noise
-	m_temperatureNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	m_temperatureNoise.SetSeed(m_seed + 2000);
-	m_temperatureNoise.SetFrequency(0.008f); // Increased frequency
+	auto tempBase = FastNoise::New<FastNoise::Simplex>();
+
+	auto tempScale = FastNoise::New<FastNoise::DomainScale>();
+	tempScale->SetSource(tempBase);
+	tempScale->SetScale(0.008f);
+
+	m_temperatureNoise = tempScale;
 
 	// Humidity noise
-	m_humidityNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	m_humidityNoise.SetSeed(m_seed + 3000);
-	m_humidityNoise.SetFrequency(0.007f); // Increased frequency
+	auto humidBase = FastNoise::New<FastNoise::Simplex>();
 
-	// Cave noise
-	m_caveNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	m_caveNoise.SetSeed(m_seed + 4000);
-	m_caveNoise.SetFrequency(0.04f);
-	m_caveNoise.SetFractalType(FastNoiseLite::FractalType_Ridged);
-	m_caveNoise.SetFractalOctaves(2);
+	auto humidScale = FastNoise::New<FastNoise::DomainScale>();
+	humidScale->SetSource(humidBase);
+	humidScale->SetScale(0.007f);
 
-	// Ore noise
-	m_oreNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	m_oreNoise.SetSeed(m_seed + 5000);
-	m_oreNoise.SetFrequency(0.08f);
-	// Test noise generation
-	float testNoise = m_heightNoise.GetNoise(100.0f, 100.0f);
-	std::cout << "Test noise value at (100,100): " << testNoise << std::endl;
+	m_humidityNoise = humidScale;
+
+	// Cave noise - 3D ridged fractal for interesting cave systems
+	auto caveBase = FastNoise::New<FastNoise::OpenSimplex2>();
+
+	auto caveFractal = FastNoise::New<FastNoise::FractalRidged>();
+	caveFractal->SetSource(caveBase);
+	caveFractal->SetOctaveCount(3);
+	caveFractal->SetLacunarity(2.0f);
+	caveFractal->SetGain(0.5f);
+
+	auto caveScale = FastNoise::New<FastNoise::DomainScale>();
+	caveScale->SetSource(caveFractal);
+	caveScale->SetScale(0.02f);
+
+	m_caveNoise = caveScale;
+
+	// Ore noise - High frequency for ore pockets
+	auto oreBase = FastNoise::New<FastNoise::Value>();
+
+	auto oreFractal = FastNoise::New<FastNoise::FractalFBm>();
+	oreFractal->SetSource(oreBase);
+	oreFractal->SetOctaveCount(2);
+	oreFractal->SetLacunarity(2.5f);
+	oreFractal->SetGain(0.4f);
+
+	auto oreScale = FastNoise::New<FastNoise::DomainScale>();
+	oreScale->SetSource(oreFractal);
+	oreScale->SetScale(0.05f);
+
+	m_oreNoise = oreScale;
 }
 
-void TerrainGenerator::generateColumn(std::array<Voxel, CHUNK_VOLUME> &voxels, int localX, int localZ, int worldX, int worldZ)
+std::vector<int> TerrainGenerator::generateHeightMap(int chunkX, int chunkZ)
 {
-	// Add offset to avoid potential issues around coordinate 0
-	float noiseX = static_cast<float>(worldX + 10000);
-	float noiseZ = static_cast<float>(worldZ + 10000);
+	std::vector<int> heightMap(CHUNK_SIZE * CHUNK_SIZE);
+	std::vector<float> noiseOutput(CHUNK_SIZE * CHUNK_SIZE);
 
-	// Calculate height using multiple noise layers
-	float heightValue = m_heightNoise.GetNoise(noiseX, noiseZ);
+	// Prepare coordinates arrays for batch processing
+	// int index = 0;
+	// for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
+	//{
+	//	for (int localX = 0; localX < CHUNK_SIZE; ++localX)
+	//	{
+	//		m_xCoords[index] = static_cast<float>(chunkX + localX);
+	//		m_yCoords[index] = static_cast<float>(chunkZ + localZ);
+	//		++index;
+	//	}
+	//}	// Generate height values in batch
+	m_heightNoise->GenUniformGrid2D(noiseOutput.data(), chunkX, chunkZ, CHUNK_SIZE, CHUNK_SIZE, 0.005f, m_seed);
 
-	// Normalize heightValue to a reasonable range (FastNoiseLite returns values between -1 and 1)
-	heightValue = std::max(-1.0f, std::min(1.0f, heightValue));
-
-	// Add mountain peaks with proper normalization
-	float mountainValue = m_mountainNoise.GetNoise(noiseX, noiseZ);
-	mountainValue = std::max(-1.0f, std::min(1.0f, mountainValue));
-
-	// Base terrain height (oscillates around sea level)
-	int terrainHeight = static_cast<int>(m_baseHeight + heightValue * 20.0f); // Base variation of ±20 blocks
-
-	// Add mountain modifier only if mountain value is high (much higher threshold)
-	if (mountainValue > 0.7f)
+	// Convert noise values to height
+	for (int i = 0; i < CHUNK_SIZE * CHUNK_SIZE; ++i)
 	{
-		float mountainBonus = (mountainValue - 0.7f) / 0.3f;	  // Normalize to 0-1
-		terrainHeight += static_cast<int>(mountainBonus * 30.0f); // Add up to 30 blocks for mountains
-	}
-	// Clamp terrain height to reasonable bounds
-	terrainHeight = std::max(10, std::min(terrainHeight, 100)); // Lower max height
-	// Determine biome
-	BiomeType biome = getBiome(worldX, worldZ);
-	// Debug output for the first few chunks (remove this later)
-	static int debugCounter = 0;
-	if (debugCounter < 5)
-	{
-		// Test various coordinates to understand the pattern
-		float testNoise1 = m_heightNoise.GetNoise(noiseX, noiseZ);
-		float testNoise2 = m_heightNoise.GetNoise(100.0f, 100.0f);
-		float testNoise3 = m_heightNoise.GetNoise(0.0f, 0.0f);
-
-		std::cout << "=== DEBUG #" << debugCounter << " ===" << std::endl;
-		std::cout << "World coords: (" << worldX << "," << worldZ << ")" << std::endl;
-		std::cout << "Noise coords: (" << noiseX << "," << noiseZ << ")" << std::endl;
-		std::cout << "Noise at offset coords: " << testNoise1 << std::endl;
-		std::cout << "Noise at (100,100): " << testNoise2 << std::endl;
-		std::cout << "Noise at (0,0): " << testNoise3 << std::endl;
-		std::cout << "Final values: heightValue=" << heightValue << ", mountainValue=" << mountainValue << std::endl;
-		std::cout << "Result: terrainHeight=" << terrainHeight << ", biome=" << biome << std::endl;
-		std::cout << "========================" << std::endl;
-		debugCounter++;
+		int terrainHeight = static_cast<int>(m_baseHeight + noiseOutput[i] * m_heightScale);
+		heightMap[i] = std::max(1, std::min(terrainHeight, CHUNK_HEIGHT - 1)); // Clamp height to valid range
 	}
 
+	return heightMap;
+}
+
+std::vector<BiomeType> TerrainGenerator::generateBiomeMap(int chunkX, int chunkZ)
+{
+	std::vector<BiomeType> biomeMap(CHUNK_SIZE * CHUNK_SIZE);
+	std::vector<float> tempOutput(CHUNK_SIZE * CHUNK_SIZE);
+	std::vector<float> humidOutput(CHUNK_SIZE * CHUNK_SIZE);
+	std::vector<float> elevationOutput(CHUNK_SIZE * CHUNK_SIZE);
+
+	// Generate temperature, humidity, and elevation maps
+	m_temperatureNoise->GenUniformGrid2D(tempOutput.data(), chunkX, chunkZ, CHUNK_SIZE, CHUNK_SIZE, 0.008f, m_seed + 2000);
+
+	m_humidityNoise->GenUniformGrid2D(humidOutput.data(), chunkX, chunkZ, CHUNK_SIZE, CHUNK_SIZE, 0.007f, m_seed + 3000);
+
+	m_biomeNoise->GenUniformGrid2D(elevationOutput.data(), chunkX, chunkZ, CHUNK_SIZE, CHUNK_SIZE, 0.005f, m_seed + 1000);
+
+	// Determine biomes
+	for (int i = 0; i < CHUNK_SIZE * CHUNK_SIZE; ++i)
+	{
+		float temperature = tempOutput[i];
+		float humidity = humidOutput[i];
+		float elevation = elevationOutput[i];
+
+		biomeMap[i] = getBiomeFromValues(temperature, humidity, elevation);
+	}
+
+	return biomeMap;
+}
+
+BiomeType TerrainGenerator::getBiomeFromValues(float temperature, float humidity, float elevation)
+{
+	// Determine biome based on temperature, humidity, and elevation
+	if (elevation > 0.4f)
+		return temperature < -0.2f ? BiomeType::SNOWY : BiomeType::MOUNTAINS;
+	else if (temperature < -0.3f)
+		return BiomeType::SNOWY;
+	else if (temperature > 0.3f && humidity < -0.2f)
+		return BiomeType::DESERT;
+	else if (humidity > 0.2f && temperature > -0.1f)
+		return BiomeType::FOREST;
+	else
+		return BiomeType::PLAINS;
+}
+
+void TerrainGenerator::generateColumn(std::array<Voxel, CHUNK_VOLUME> &voxels, int localX, int localZ, int worldX, int worldZ, int terrainHeight, BiomeType biome)
+{
 	// Generate the column
 	for (int y = 0; y < CHUNK_HEIGHT; ++y)
 	{
@@ -159,44 +229,6 @@ void TerrainGenerator::generateColumn(std::array<Voxel, CHUNK_VOLUME> &voxels, i
 	if (terrainHeight > SEA_LEVEL)
 	{
 		generateVegetation(voxels, localX, localZ, worldX, worldZ, terrainHeight, biome);
-	}
-}
-
-BiomeType TerrainGenerator::getBiome(int worldX, int worldZ)
-{
-	// Use same offset as in generateColumn
-	float noiseX = static_cast<float>(worldX + 10000);
-	float noiseZ = static_cast<float>(worldZ + 10000);
-
-	float temperature = m_temperatureNoise.GetNoise(noiseX, noiseZ);
-	float humidity = m_humidityNoise.GetNoise(noiseX, noiseZ);
-	float elevation = m_biomeNoise.GetNoise(noiseX, noiseZ);
-
-	temperature = std::max(-1.0f, std::min(1.0f, temperature));
-	humidity = std::max(-1.0f, std::min(1.0f, humidity));
-	elevation = std::max(-1.0f, std::min(1.0f, elevation));
-
-	// Debug: Add some variation to ensure biomes are being calculated differently
-	// Determine biome based on temperature, humidity, and elevation
-	if (elevation > 0.5f) // Higher threshold for mountains
-	{
-		return temperature < -0.3f ? BiomeType::SNOWY : BiomeType::MOUNTAINS;
-	}
-	else if (temperature < -0.3f) // Adjusted threshold
-	{
-		return BiomeType::SNOWY;
-	}
-	else if (temperature > 0.3f && humidity < -0.2f) // Adjusted thresholds
-	{
-		return BiomeType::DESERT;
-	}
-	else if (humidity > 0.2f && temperature > -0.1f) // Adjusted thresholds
-	{
-		return BiomeType::FOREST;
-	}
-	else
-	{
-		return BiomeType::PLAINS;
 	}
 }
 
@@ -253,8 +285,14 @@ TextureType TerrainGenerator::getTerrainBlockType(int y, int surfaceHeight, Biom
 
 TextureType TerrainGenerator::generateOre(int worldX, int y, int worldZ)
 {
-	// Use same offset for consistency
-	float oreValue = m_oreNoise.GetNoise(static_cast<float>(worldX + 10000), static_cast<float>(y), static_cast<float>(worldZ + 10000));
+	// Use 3D coordinates for ore generation
+	std::vector<float> oreCoordsX = {static_cast<float>(worldX)};
+	std::vector<float> oreCoordsY = {static_cast<float>(y)};
+	std::vector<float> oreCoordsZ = {static_cast<float>(worldZ)};
+	std::vector<float> oreResult(1);
+
+	m_oreNoise->GenPositionArray3D(oreResult.data(), 1, oreCoordsX.data(), oreCoordsY.data(), oreCoordsZ.data(), 0.0f, 0.0f, 0.0f, m_seed + 5000);
+	float oreValue = oreResult[0];
 
 	// Different ores at different depths with different rarities
 	if (oreValue > 0.85f)
@@ -301,9 +339,13 @@ bool TerrainGenerator::isCave(int worldX, int y, int worldZ)
 	if (y <= BEDROCK_LEVEL + 5 || y >= CHUNK_HEIGHT - 10)
 		return false;
 
-	// Use same offset for consistency
-	float caveValue = m_caveNoise.GetNoise(static_cast<float>(worldX + 10000), static_cast<float>(y), static_cast<float>(worldZ + 10000));
-	return caveValue > 0.3f; // Lower threshold for more caves
+	std::vector<float> caveCoordsX = {static_cast<float>(worldX)};
+	std::vector<float> caveCoordsY = {static_cast<float>(y)};
+	std::vector<float> caveCoordsZ = {static_cast<float>(worldZ)};
+	std::vector<float> caveResult(1);
+
+	m_caveNoise->GenPositionArray3D(caveResult.data(), 1, caveCoordsX.data(), caveCoordsY.data(), caveCoordsZ.data(), 0.0f, 0.0f, 0.0f, m_seed + 4000);
+	return caveResult[0] > 0.6f; // Cave threshold
 }
 
 void TerrainGenerator::generateVegetation(std::array<Voxel, CHUNK_VOLUME> &voxels, int localX, int localZ,
