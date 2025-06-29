@@ -9,7 +9,7 @@ in float UseBiomeColor;
 in vec3 BiomeColor;
 
 uniform sampler2DArray textureArray;
-uniform vec3 lightPos;
+uniform vec3 sunDirection;
 uniform vec3 viewPos;
 
 // Paramètres du fog
@@ -61,7 +61,7 @@ void main()
     vec3 norm = normalize(Normal);
 
     // Direction de la lumière
-    vec3 lightDir = normalize(lightPos - FragPos);
+    vec3 lightDir = normalize(sunDirection);
 
     // Éclairage ambient
     vec3 ambient = ambientStrength * color;
