@@ -11,9 +11,10 @@ ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
 	ChunkData chunkData;
 	chunkData.voxels.fill({TextureType::AIR});
 
-	// Pre-generate height map for the entire chunk using batch processing
-	std::vector<int> heightMap = generateHeightMap(chunkX, chunkZ);
+	// Pre-generate biome map for the entire chunk
 	std::vector<BiomeType> biomeMap = generateBiomeMap(chunkX, chunkZ);
+	// Then generate height map using the biome map
+	std::vector<int> heightMap = generateHeightMap(chunkX, chunkZ, biomeMap);
 
 	// Generate terrain for each column in the chunk
 	for (int localX = 0; localX < CHUNK_SIZE; ++localX)
@@ -63,7 +64,7 @@ void TerrainGenerator::setupNoiseGenerators()
 
 	auto biomeScale = FastNoise::New<FastNoise::DomainScale>();
 	biomeScale->SetSource(biomeBase);
-	biomeScale->SetScale(0.005f);
+	biomeScale->SetScale(0.06f); // Increased from 0.005f for more biome variety
 
 	m_biomeNoise = biomeScale;
 
@@ -72,7 +73,7 @@ void TerrainGenerator::setupNoiseGenerators()
 
 	auto tempScale = FastNoise::New<FastNoise::DomainScale>();
 	tempScale->SetSource(tempBase);
-	tempScale->SetScale(0.008f);
+	tempScale->SetScale(0.096f); // Increased from 0.008f
 
 	m_temperatureNoise = tempScale;
 
@@ -81,7 +82,7 @@ void TerrainGenerator::setupNoiseGenerators()
 
 	auto humidScale = FastNoise::New<FastNoise::DomainScale>();
 	humidScale->SetSource(humidBase);
-	humidScale->SetScale(0.007f);
+	humidScale->SetScale(0.084f); // Increased from 0.007f
 
 	m_humidityNoise = humidScale;
 
@@ -114,19 +115,42 @@ void TerrainGenerator::setupNoiseGenerators()
 	oreScale->SetScale(0.05f);
 
 	m_oreNoise = oreScale;
+
+	// Mountain noise - for creating dramatic peaks and valleys
+	auto mountainBase = FastNoise::New<FastNoise::OpenSimplex2>();
+	auto mountainFractal = FastNoise::New<FastNoise::FractalFBm>();
+	mountainFractal->SetSource(mountainBase);
+	mountainFractal->SetOctaveCount(6);
+	mountainFractal->SetLacunarity(3.0f);
+	mountainFractal->SetGain(0.5f);
+	mountainFractal->SetWeightedStrength(0.6f);
+
+	m_mountainNoise = mountainFractal;
 }
 
-std::vector<int> TerrainGenerator::generateHeightMap(int chunkX, int chunkZ)
+std::vector<int> TerrainGenerator::generateHeightMap(int chunkX, int chunkZ, const std::vector<BiomeType> &biomeMap)
 {
 	std::vector<int> heightMap(CHUNK_SIZE * CHUNK_SIZE);
-	std::vector<float> noiseOutput(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
+	std::vector<float> noiseOutput(CHUNK_SIZE * CHUNK_SIZE);
+	std::vector<float> mountainNoiseOutput(CHUNK_SIZE * CHUNK_SIZE);
 
-	m_heightNoise->GenUniformGrid2D(noiseOutput.data(), chunkX, chunkZ, CHUNK_SIZE, CHUNK_SIZE, 0.005f, m_seed);
+	m_heightNoise->GenUniformGrid2D(noiseOutput.data(), static_cast<float>(chunkX), static_cast<float>(chunkZ), CHUNK_SIZE, CHUNK_SIZE, 0.005f, m_seed);
+
+	// Generate mountain noise only if there's a mountain biome in the chunk
+	if (std::any_of(biomeMap.begin(), biomeMap.end(), [](BiomeType b)
+					{ return b == BiomeType::MOUNTAINS; }))
+	{
+		m_mountainNoise->GenUniformGrid2D(mountainNoiseOutput.data(), static_cast<float>(chunkX), static_cast<float>(chunkZ), CHUNK_SIZE, CHUNK_SIZE, 0.004f, m_seed + 6000);
+	}
 
 	// Convert noise values to height
 	for (int i = 0; i < CHUNK_SIZE * CHUNK_SIZE; ++i)
 	{
 		int terrainHeight = static_cast<int>(m_baseHeight + noiseOutput[i] * m_heightScale);
+		if (biomeMap[i] == BiomeType::MOUNTAINS)
+		{
+			terrainHeight += static_cast<int>(mountainNoiseOutput[i] * m_mountainScale);
+		}
 		heightMap[i] = std::max(1, std::min(terrainHeight, CHUNK_HEIGHT - 1)); // Clamp height to valid range
 	}
 
@@ -160,7 +184,7 @@ std::vector<BiomeType> TerrainGenerator::generateBiomeMap(int chunkX, int chunkZ
 	return biomeMap;
 }
 
-BiomeType TerrainGenerator::getBiomeFromValues(float temperature, float humidity, float elevation)
+BiomeType TerrainGenerator::getBiomeFromValues(float temperature, float humidity, float elevation) const
 {
 	// Determine biome based on temperature, humidity, and elevation
 	if (elevation > 0.4f)
@@ -242,7 +266,12 @@ TextureType TerrainGenerator::getTerrainBlockType(int y, int surfaceHeight, Biom
 		case BiomeType::PLAINS:
 			return TextureType::GRASS_TOP;
 		case BiomeType::MOUNTAINS:
-			return y > 120 ? TextureType::STONE : TextureType::GRASS_TOP;
+			if (y > 150)
+				return TextureType::SNOW;
+			else if (y > 110)
+				return TextureType::STONE;
+			else
+				return TextureType::GRASS_TOP;
 		}
 	}
 	else if (depthFromSurface <= 3)
@@ -258,7 +287,10 @@ TextureType TerrainGenerator::getTerrainBlockType(int y, int surfaceHeight, Biom
 		case BiomeType::PLAINS:
 			return depthFromSurface <= 3 ? TextureType::DIRT : TextureType::STONE;
 		case BiomeType::MOUNTAINS:
-			return depthFromSurface <= 2 && y <= 120 ? TextureType::DIRT : TextureType::STONE;
+			if (y > 110)
+				return TextureType::STONE;
+			else
+				return depthFromSurface <= 3 ? TextureType::DIRT : TextureType::STONE;
 		}
 	}
 

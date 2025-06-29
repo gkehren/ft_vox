@@ -68,7 +68,7 @@ void Camera::processKeyboard(double deltaTime, const bool *keys)
 	{
 		if (this->movementSpeed == 2.5f)
 		{
-			this->movementSpeed *= 20.0f;
+			this->movementSpeed *= 50.0f;
 		}
 		else
 		{

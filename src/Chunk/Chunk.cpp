@@ -513,6 +513,8 @@ glm::vec3 Chunk::getBiomeColor(BiomeType biome, TextureType textureType) const
 			return glm::vec3(0.9f, 0.8f, 0.5f); // Sandy yellow
 		case BiomeType::SNOWY:
 			return glm::vec3(1.0f, 1.0f, 1.0f); // White
+		case BiomeType::MOUNTAINS:
+			return glm::vec3(0.6f, 0.6f, 0.6f); // Gray for rocky terrain
 		default:
 			return glm::vec3(1.0f);
 		}
@@ -527,6 +529,8 @@ glm::vec3 Chunk::getBiomeColor(BiomeType biome, TextureType textureType) const
 			return glm::vec3(0.6f, 0.7f, 0.3f); // Olive green
 		case BiomeType::SNOWY:
 			return glm::vec3(0.8f, 0.9f, 0.8f); // Light, almost white green
+		case BiomeType::MOUNTAINS:
+			return glm::vec3(0.5f, 0.5f, 0.5f); // Slightly darker gray for leaves in mountains
 		default:
 			return glm::vec3(1.0f);
 		}
@@ -541,6 +545,8 @@ glm::vec3 Chunk::getBiomeColor(BiomeType biome, TextureType textureType) const
 			return glm::vec3(0.4f, 0.6f, 0.8f); // Lighter blue
 		case BiomeType::SNOWY:
 			return glm::vec3(0.6f, 0.8f, 1.0f); // Icy blue
+		case BiomeType::MOUNTAINS:
+			return glm::vec3(0.5f, 0.6f, 0.7f); // Cool blue-gray for mountain water
 		default:
 			return glm::vec3(1.0f);
 		}

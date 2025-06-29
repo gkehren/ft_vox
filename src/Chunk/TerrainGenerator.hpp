@@ -37,6 +37,7 @@ private:
 	FastNoise::SmartNode<FastNoise::DomainScale> m_humidityNoise;
 	FastNoise::SmartNode<FastNoise::DomainScale> m_caveNoise;
 	FastNoise::SmartNode<FastNoise::DomainScale> m_oreNoise;
+	FastNoise::SmartNode<FastNoise::FractalFBm> m_mountainNoise;
 
 	// Generation parameters
 	float m_heightScale;
@@ -46,9 +47,9 @@ private:
 
 	// Helper functions
 	void setupNoiseGenerators();
-	std::vector<int> generateHeightMap(int chunkX, int chunkZ);
+	std::vector<int> generateHeightMap(int chunkX, int chunkZ, const std::vector<BiomeType> &biomeMap);
 	std::vector<BiomeType> generateBiomeMap(int chunkX, int chunkZ);
-	BiomeType getBiomeFromValues(float temperature, float humidity, float elevation);
+	BiomeType getBiomeFromValues(float temperature, float humidity, float elevation) const;
 	void generateColumn(std::array<Voxel, CHUNK_VOLUME> &voxels, int localX, int localZ, int worldX, int worldZ, int terrainHeight, BiomeType biome);
 	TextureType getTerrainBlockType(int y, int surfaceHeight, BiomeType biome, int worldX, int worldZ);
 	TextureType generateOre(int worldX, int y, int worldZ);
