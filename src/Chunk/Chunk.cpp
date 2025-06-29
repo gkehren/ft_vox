@@ -125,6 +125,16 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
 	}
 }
 
+void Chunk::setVoxels(const std::array<Voxel, CHUNK_VOLUME> &voxels)
+{
+	this->voxels = voxels;
+}
+
+void Chunk::setBiomeMap(const std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> &biomes)
+{
+	this->biomeMap = biomes;
+}
+
 bool Chunk::deleteVoxel(const glm::vec3 &position)
 {
 	int x = static_cast<int>(position.x - this->position.x);
@@ -186,8 +196,9 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
 
 	neighborShellVoxels.clear();
 
-	auto terrainData = generator.generateChunk(position.x, position.z);
-	voxels = std::move(terrainData);
+	auto chunkData = generator.generateChunk(position.x, position.z);
+	setVoxels(chunkData.voxels);
+	setBiomeMap(chunkData.biomeMap);
 
 	// Update bitset for active voxels
 	activeVoxels.reset(); // Clear all bits first
@@ -389,9 +400,18 @@ void Chunk::generateMesh()
 					tc[3] = {0.0f, tex_h};
 
 					bool needsBiomeColoring = (quad_type == GRASS_TOP || quad_type == GRASS_SIDE || quad_type == OAK_LEAVES || quad_type == WATER);
-					glm::vec3 biomeColorVal(0.0f);
-					// TODO: Implement biome coloring logic later
-					// For now, we will just use a default color for these types
+					glm::vec3 biomeColorVal(1.0f); // Default to white
+
+					if (needsBiomeColoring)
+					{
+						int biomeX = quad_origin_voxel_coord.x;
+						int biomeZ = quad_origin_voxel_coord.z;
+						if (biomeX >= 0 && biomeX < CHUNK_SIZE && biomeZ >= 0 && biomeZ < CHUNK_SIZE)
+						{
+							BiomeType biome = biomeMap[biomeZ * CHUNK_SIZE + biomeX];
+							biomeColorVal = getBiomeColor(biome, quad_type);
+						}
+					}
 
 					float texture_idx_val = static_cast<float>(quad_type);
 					if (quad_type == GRASS_SIDE)
@@ -476,6 +496,57 @@ void Chunk::generateMesh()
 
 	meshNeedsUpdate = true; // Flag for GPU upload
 	state = ChunkState::MESHED;
+}
+
+glm::vec3 Chunk::getBiomeColor(BiomeType biome, TextureType textureType) const
+{
+	switch (textureType)
+	{
+	case TextureType::GRASS_TOP:
+		switch (biome)
+		{
+		case BiomeType::PLAINS:
+			return glm::vec3(0.5f, 0.8f, 0.3f); // Light green
+		case BiomeType::FOREST:
+			return glm::vec3(0.3f, 0.6f, 0.2f); // Dark green
+		case BiomeType::DESERT:
+			return glm::vec3(0.9f, 0.8f, 0.5f); // Sandy yellow
+		case BiomeType::SNOWY:
+			return glm::vec3(1.0f, 1.0f, 1.0f); // White
+		default:
+			return glm::vec3(1.0f);
+		}
+	case TextureType::OAK_LEAVES:
+		switch (biome)
+		{
+		case BiomeType::PLAINS:
+			return glm::vec3(0.4f, 0.7f, 0.2f); // Standard green
+		case BiomeType::FOREST:
+			return glm::vec3(0.2f, 0.5f, 0.1f); // Darker green
+		case BiomeType::DESERT:
+			return glm::vec3(0.6f, 0.7f, 0.3f); // Olive green
+		case BiomeType::SNOWY:
+			return glm::vec3(0.8f, 0.9f, 0.8f); // Light, almost white green
+		default:
+			return glm::vec3(1.0f);
+		}
+	case TextureType::WATER:
+		switch (biome)
+		{
+		case BiomeType::PLAINS:
+			return glm::vec3(0.3f, 0.5f, 0.9f); // Standard blue
+		case BiomeType::FOREST:
+			return glm::vec3(0.2f, 0.4f, 0.7f); // Darker blue
+		case BiomeType::DESERT:
+			return glm::vec3(0.4f, 0.6f, 0.8f); // Lighter blue
+		case BiomeType::SNOWY:
+			return glm::vec3(0.6f, 0.8f, 1.0f); // Icy blue
+		default:
+			return glm::vec3(1.0f);
+		}
+	default:
+		return glm::vec3(1.0f); // Default color for other block types
+	}
 }
 
 void Chunk::uploadMeshToGPU()

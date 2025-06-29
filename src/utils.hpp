@@ -218,62 +218,6 @@ const static unsigned int indicesBoundingbox[] = {
 	4, 5, 5, 6, 6, 7, 7, 4,
 	0, 4, 1, 5, 2, 6, 3, 7};
 
-enum FaceDirection
-{
-	UP = 0,
-	DOWN = 1,
-	FRONT = 2,
-	BACK = 3,
-	LEFT = 4,
-	RIGHT = 5
-};
-
-static const glm::ivec3 directions[6] = {
-	{0, 1, 0},	// UP
-	{0, -1, 0}, // DOWN
-	{0, 0, 1},	// FRONT
-	{0, 0, -1}, // BACK
-	{-1, 0, 0}, // LEFT
-	{1, 0, 0}	// RIGHT
-};
-
-// Offsets pour les sommets de chaque face, ordonnés en CCW
-static const glm::vec3 faceVertexOffsets[6][4] = {
-	// UP face
-	{{0, 1, 1}, {1, 1, 1}, {1, 1, 0}, {0, 1, 0}},
-
-	// DOWN face
-	{{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}},
-
-	// FRONT face
-	{{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}},
-
-	// BACK face
-	{{0, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 0}},
-
-	// LEFT face
-	{{0, 0, 0}, {0, 0, 1}, {0, 1, 1}, {0, 1, 0}},
-
-	// RIGHT face
-	{{1, 0, 0}, {1, 1, 0}, {1, 1, 1}, {1, 0, 1}}};
-
-// Normales pour chaque face
-static const glm::vec3 faceNormals[6] = {
-	{0, 1, 0},	// UP
-	{0, -1, 0}, // DOWN
-	{0, 0, 1},	// FRONT
-	{0, 0, -1}, // BACK
-	{-1, 0, 0}, // LEFT
-	{1, 0, 0}	// RIGHT
-};
-
-// Coordonnées de texture pour une face
-static const glm::vec2 texCoords[4] = {
-	{0.0f, 0.0f},
-	{1.0f, 0.0f},
-	{1.0f, 1.0f},
-	{0.0f, 1.0f}};
-
 struct BiomeParameters
 {
 	// General biome properties

@@ -6,10 +6,10 @@ TerrainGenerator::TerrainGenerator(int seed)
 	setupNoiseGenerators();
 }
 
-std::array<Voxel, CHUNK_VOLUME> TerrainGenerator::generateChunk(int chunkX, int chunkZ)
+ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
 {
-	std::array<Voxel, CHUNK_VOLUME> voxels;
-	voxels.fill({TextureType::AIR});
+	ChunkData chunkData;
+	chunkData.voxels.fill({TextureType::AIR});
 
 	// Pre-generate height map for the entire chunk using batch processing
 	std::vector<int> heightMap = generateHeightMap(chunkX, chunkZ);
@@ -24,11 +24,14 @@ std::array<Voxel, CHUNK_VOLUME> TerrainGenerator::generateChunk(int chunkX, int 
 			int worldZ = chunkZ + localZ;
 			int columnIndex = localZ * CHUNK_SIZE + localX;
 
-			generateColumn(voxels, localX, localZ, worldX, worldZ, heightMap[columnIndex], biomeMap[columnIndex]);
+			generateColumn(chunkData.voxels, localX, localZ, worldX, worldZ, heightMap[columnIndex], biomeMap[columnIndex]);
 		}
 	}
 
-	return voxels;
+	// Convert std::vector to std::array for biomeMap
+	std::copy(biomeMap.begin(), biomeMap.end(), chunkData.biomeMap.begin());
+
+	return chunkData;
 }
 
 void TerrainGenerator::setupNoiseGenerators()

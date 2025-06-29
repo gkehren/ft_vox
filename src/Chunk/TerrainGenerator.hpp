@@ -8,6 +8,12 @@
 
 #include <utils.hpp>
 
+struct ChunkData
+{
+	std::array<Voxel, CHUNK_VOLUME> voxels;
+	std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomeMap;
+};
+
 class TerrainGenerator
 {
 public:
@@ -18,7 +24,7 @@ public:
 	static constexpr int MIN_TREE_HEIGHT = 4;
 
 	explicit TerrainGenerator(int seed = 1337);
-	std::array<Voxel, CHUNK_VOLUME> generateChunk(int chunkX, int chunkZ);
+	ChunkData generateChunk(int chunkX, int chunkZ);
 
 	// Getter for seed to enable thread-safe generation
 	int getSeed() const { return m_seed; }
