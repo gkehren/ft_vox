@@ -12,11 +12,14 @@
 
 #define RES_PATH "./ressources/"
 
-struct ivec3_hash
+struct IVec3Hash
 {
-	std::size_t operator()(const glm::ivec3 &k) const
+	std::size_t operator()(const glm::ivec3 &v) const
 	{
-		return std::hash<int>()(k.x) ^ std::hash<int>()(k.y) ^ std::hash<int>()(k.z);
+		std::size_t h1 = std::hash<int>()(v.x);
+		std::size_t h2 = std::hash<int>()(v.y);
+		std::size_t h3 = std::hash<int>()(v.z);
+		return h1 ^ (h2 << 1) ^ (h3 << 2);
 	}
 };
 

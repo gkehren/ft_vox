@@ -200,6 +200,8 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
 	setVoxels(chunkData.voxels);
 	setBiomeMap(chunkData.biomeMap);
 
+	neighborShellVoxels = chunkData.borderVoxels;
+
 	// Update bitset for active voxels
 	activeVoxels.reset(); // Clear all bits first
 	for (int i = 0; i < CHUNK_VOLUME; ++i)
@@ -514,7 +516,7 @@ glm::vec3 Chunk::getBiomeColor(BiomeType biome, TextureType textureType) const
 		case BiomeType::SNOWY:
 			return glm::vec3(1.0f, 1.0f, 1.0f); // White
 		case BiomeType::MOUNTAINS:
-			return glm::vec3(0.6f, 0.6f, 0.6f); // Gray for rocky terrain
+			return glm::vec3(0.2f, 0.5f, 0.1f); // Dark green for mountains
 		default:
 			return glm::vec3(1.0f);
 		}
@@ -530,7 +532,7 @@ glm::vec3 Chunk::getBiomeColor(BiomeType biome, TextureType textureType) const
 		case BiomeType::SNOWY:
 			return glm::vec3(0.8f, 0.9f, 0.8f); // Light, almost white green
 		case BiomeType::MOUNTAINS:
-			return glm::vec3(0.5f, 0.5f, 0.5f); // Slightly darker gray for leaves in mountains
+			return glm::vec3(0.2f, 0.5f, 0.1f); // Dark green for leaves in mountains
 		default:
 			return glm::vec3(1.0f);
 		}
@@ -546,7 +548,7 @@ glm::vec3 Chunk::getBiomeColor(BiomeType biome, TextureType textureType) const
 		case BiomeType::SNOWY:
 			return glm::vec3(0.6f, 0.8f, 1.0f); // Icy blue
 		case BiomeType::MOUNTAINS:
-			return glm::vec3(0.5f, 0.6f, 0.7f); // Cool blue-gray for mountain water
+			return glm::vec3(0.1f, 0.2f, 0.5f); // Deep blue for mountain water
 		default:
 			return glm::vec3(1.0f);
 		}

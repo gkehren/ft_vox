@@ -360,7 +360,7 @@ const Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos) const
 	return nullptr;
 }
 
-const std::unordered_map<glm::ivec3, Chunk, ivec3_hash> &ChunkManager::getAllChunks() const
+const std::unordered_map<glm::ivec3, Chunk, IVec3Hash> &ChunkManager::getAllChunks() const
 {
 	return chunks; // Caller must handle synchronization if iterating and modifying elsewhere
 }

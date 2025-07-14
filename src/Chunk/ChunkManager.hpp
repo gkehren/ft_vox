@@ -41,13 +41,13 @@ public:
 	Chunk *getChunk(const glm::ivec3 &chunkPos);
 	const Chunk *getChunk(const glm::ivec3 &chunkPos) const;
 
-	const std::unordered_map<glm::ivec3, Chunk, ivec3_hash> &getAllChunks() const;
+	const std::unordered_map<glm::ivec3, Chunk, IVec3Hash> &getAllChunks() const;
 
 private:
 	void unloadOutOfRangeChunks(const Camera &camera, const RenderSettings &settings);
 	void loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera, const RenderSettings &settings);
 
-	std::unordered_map<glm::ivec3, Chunk, ivec3_hash> chunks;
+	std::unordered_map<glm::ivec3, Chunk, IVec3Hash> chunks;
 	std::queue<glm::ivec3> chunkLoadQueue;
 
 	mutable std::mutex chunkMutex;
