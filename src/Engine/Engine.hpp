@@ -4,7 +4,6 @@
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_access.hpp>
-#include <FastNoise/FastNoiseLite.h>
 
 #include <iostream>
 #include <stdexcept>

@@ -16,7 +16,6 @@
 
 #include <chrono>
 
-#include <FastNoise/FastNoiseLite.h>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Renderer/TextureManager.hpp>
 #include <Shader/Shader.hpp>

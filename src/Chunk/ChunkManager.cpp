@@ -3,7 +3,6 @@
 #include <Shader/Shader.hpp>
 #include <Renderer/Renderer.hpp>
 #include <Engine/ThreadPool.hpp>
-#include <FastNoise/FastNoiseLite.h>
 #include <glm/gtc/matrix_access.hpp>
 
 #include <iostream>

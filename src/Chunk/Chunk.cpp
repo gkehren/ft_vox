@@ -1,5 +1,4 @@
 #include "Chunk.hpp"
-#include <FastNoise/FastNoiseLite.h>
 #include <utils.hpp>
 #include <vector>
 #include <algorithm>
