@@ -38,7 +38,7 @@ public:
 	ChunkState getState() const;
 
 	void setVoxels(const std::array<Voxel, CHUNK_VOLUME> &voxels);
-	void setBiomeMap(const std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> &biomes);
+
 
 	Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z);
 	const Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
@@ -65,11 +65,11 @@ private:
 	std::array<Voxel, CHUNK_VOLUME> voxels;
 	std::bitset<CHUNK_VOLUME> activeVoxels;
 	std::unordered_map<glm::ivec3, TextureType, IVec3Hash> neighborShellVoxels;
-	std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomeMap;
+
 
 	bool meshNeedsUpdate;
 	void uploadMeshToGPU();
 
-	glm::vec3 getBiomeColor(BiomeType biome, TextureType textureType) const;
+
 	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
 };
