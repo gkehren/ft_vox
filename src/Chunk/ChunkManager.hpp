@@ -50,6 +50,7 @@ private:
 	void loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera, const RenderSettings &settings);
 
 	std::unordered_map<glm::ivec3, Chunk, IVec3Hash> chunks;
+	std::vector<Chunk *> activeChunks;
 	std::queue<glm::ivec3> chunkLoadQueue;
 
 	std::vector<std::pair<std::future<void>, Chunk *>> pendingGenerationTasks;

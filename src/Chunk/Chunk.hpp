@@ -64,7 +64,7 @@ private:
 	std::vector<uint16_t> indices;
 	std::vector<Voxel> voxels;
 	std::bitset<CHUNK_VOLUME> activeVoxels;
-	std::unordered_map<glm::ivec3, TextureType, IVec3Hash> neighborShellVoxels;
+	std::vector<uint8_t> neighborShellVoxels; // Flat array for 1-thick shell (18x(H+2)x18)
 
 
 	bool meshNeedsUpdate;

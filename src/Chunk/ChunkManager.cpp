@@ -35,7 +35,11 @@ void ChunkManager::processChunkLoading(const RenderSettings &settings)
 
 		if (chunks.find(chunkPos) == chunks.end())
 		{
-			chunks.emplace(chunkPos, Chunk(glm::vec3(chunkPos.x * CHUNK_SIZE, 0.0f, chunkPos.z * CHUNK_SIZE)));
+			auto [it, inserted] = chunks.emplace(chunkPos, Chunk(glm::vec3(chunkPos.x * CHUNK_SIZE, 0.0f, chunkPos.z * CHUNK_SIZE)));
+			if (inserted)
+			{
+				activeChunks.push_back(&it->second);
+			}
 		}
 		chunkCount++;
 	}
@@ -60,10 +64,9 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 	}
 
 	std::lock_guard<std::mutex> lock(chunkMutex);
-	for (auto &chunkPair : chunks)
+	for (Chunk *chunk : activeChunks)
 	{
-		Chunk &chunk = chunkPair.second;
-		glm::vec3 center = chunk.getPosition() + glm::vec3(CHUNK_SIZE / 2.0f, CHUNK_HEIGHT / 2.0f, CHUNK_SIZE / 2.0f);
+		glm::vec3 center = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f, CHUNK_HEIGHT / 2.0f, CHUNK_SIZE / 2.0f);
 		float radius = glm::length(glm::vec3(CHUNK_SIZE / 2.0f, CHUNK_HEIGHT / 2.0f, CHUNK_SIZE / 2.0f)); // AABB radius
 		bool isVisible = true;
 		for (const auto &plane : frustumPlanes)
@@ -74,7 +77,7 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 				break;
 			}
 		}
-		chunk.setVisible(isVisible);
+		chunk->setVisible(isVisible);
 	}
 	auto end = std::chrono::high_resolution_clock::now();
 	m_renderTiming.frustumCulling = std::chrono::duration<float, std::milli>(end - start).count();
@@ -101,17 +104,16 @@ void ChunkManager::generatePendingVoxels(const RenderSettings &settings, unsigne
 
 	std::priority_queue<ChunkGenInfo> genQueue;
 
-	for (auto &chunkPair : chunks)
+	for (Chunk *chunk : activeChunks)
 	{
-		Chunk &chunk = chunkPair.second;
-		if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED && chunksInTransit.find(&chunk) == chunksInTransit.end())
+		if (chunk->isVisible() && chunk->getState() == ChunkState::UNLOADED && chunksInTransit.find(chunk) == chunksInTransit.end())
 		{
-			glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+			glm::vec3 chunkCenter = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 			float distance = glm::distance(
 				glm::vec2(chunkCenter.x, chunkCenter.z),
 				glm::vec2(0, 0) // Position du joueur (0,0) comme référence
 			);
-			genQueue.push({&chunk, distance});
+			genQueue.push({chunk, distance});
 		}
 	} // Générer les chunks par ordre de priorité
 	while (!genQueue.empty())
@@ -150,16 +152,15 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 
 	std::priority_queue<ChunkMeshInfo> meshQueue;
 
-	for (auto &chunkPair : chunks)
+	for (Chunk *chunk : activeChunks)
 	{
-		Chunk &chunk = chunkPair.second;
-		if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED && chunksInTransit.find(&chunk) == chunksInTransit.end())
+		if (chunk->isVisible() && chunk->getState() == ChunkState::GENERATED && chunksInTransit.find(chunk) == chunksInTransit.end())
 		{
-			glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+			glm::vec3 chunkCenter = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 			float distance = glm::distance(
 				glm::vec2(chunkCenter.x, chunkCenter.z),
 				glm::vec2(camera.getPosition().x, camera.getPosition().z));
-			meshQueue.push({&chunk, distance});
+			meshQueue.push({chunk, distance});
 		}
 	} // Mailler les chunks par ordre de priorité
 	while (!meshQueue.empty())
@@ -180,18 +181,17 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	renderSettings.visibleChunksCount = 0; // Reset here as this is the drawing phase
 	renderSettings.visibleVoxelsCount = 0;
 
-	for (auto &chunkPair : chunks)
+	for (Chunk *chunk : activeChunks)
 	{
-		Chunk &chunk = chunkPair.second;
-		if (!chunk.isVisible() || chunk.getState() < ChunkState::MESHED) // Only draw if mesh is ready
+		if (!chunk->isVisible() || chunk->getState() < ChunkState::MESHED) // Only draw if mesh is ready
 			continue;
 
-		renderSettings.visibleVoxelsCount += chunk.draw(shader, camera, textureAtlas, shaderParams);
+		renderSettings.visibleVoxelsCount += chunk->draw(shader, camera, textureAtlas, shaderParams);
 		renderSettings.visibleChunksCount++;
 
 		if (renderSettings.chunkBorders && renderer)
 		{
-			renderer->drawBoundingBox(chunk, camera);
+			renderer->drawBoundingBox(*chunk, camera);
 		}
 	}
 	auto end = std::chrono::high_resolution_clock::now();
@@ -361,6 +361,7 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 			// Do not unload chunks that are currently being processed
 			if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
 			{
+				activeChunks.erase(std::remove(activeChunks.begin(), activeChunks.end(), chunkPtr), activeChunks.end());
 				it = chunks.erase(it);
 			}
 			else

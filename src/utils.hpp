@@ -31,27 +31,22 @@ struct Voxel
 struct Vertex
 {
 	glm::vec3 position;
-	glm::vec3 normal;
+	uint32_t packedData; // 0-2: normal, 3-10: textureIndex, 11: useBiomeColor
 	glm::vec2 texCoord;
-	float textureIndex;
-	float useBiomeColor;
-	glm::vec3 biomeColor;
+	uint32_t packedBiomeColor; // RGBA8
 
 	bool operator==(const Vertex &other) const
 	{
 		return position == other.position &&
-			   normal == other.normal &&
+			   packedData == other.packedData &&
 			   texCoord == other.texCoord &&
-			   textureIndex == other.textureIndex &&
-			   useBiomeColor == other.useBiomeColor &&
-			   biomeColor == other.biomeColor;
+			   packedBiomeColor == other.packedBiomeColor;
 	}
 };
 
-inline void hash_combine(std::size_t &seed, float v)
+inline void hash_combine(std::size_t &seed, uint32_t v)
 {
-	std::hash<float> hasher;
-	seed ^= hasher(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+	seed ^= std::hash<uint32_t>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
 }
 
 struct VertexHasher
@@ -59,19 +54,13 @@ struct VertexHasher
 	std::size_t operator()(const Vertex &vertex) const
 	{
 		size_t seed = 0;
-		hash_combine(seed, vertex.position.x);
-		hash_combine(seed, vertex.position.y);
-		hash_combine(seed, vertex.position.z);
-		hash_combine(seed, vertex.normal.x);
-		hash_combine(seed, vertex.normal.y);
-		hash_combine(seed, vertex.normal.z);
-		hash_combine(seed, vertex.texCoord.x);
-		hash_combine(seed, vertex.texCoord.y);
-		hash_combine(seed, vertex.textureIndex);
-		hash_combine(seed, vertex.useBiomeColor);
-		hash_combine(seed, vertex.biomeColor.x);
-		hash_combine(seed, vertex.biomeColor.y);
-		hash_combine(seed, vertex.biomeColor.z);
+		hash_combine(seed, *(uint32_t *)&vertex.position.x);
+		hash_combine(seed, *(uint32_t *)&vertex.position.y);
+		hash_combine(seed, *(uint32_t *)&vertex.position.z);
+		hash_combine(seed, vertex.packedData);
+		hash_combine(seed, *(uint32_t *)&vertex.texCoord.x);
+		hash_combine(seed, *(uint32_t *)&vertex.texCoord.y);
+		hash_combine(seed, vertex.packedBiomeColor);
 		return seed;
 	}
 };

@@ -531,6 +531,8 @@ ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
 {
   ChunkData chunkData;
   chunkData.voxels.assign(CHUNK_VOLUME, {TextureType::AIR});
+  chunkData.borderVoxels.assign(18 * (CHUNK_HEIGHT + 2) * 18,
+                                static_cast<uint8_t>(AIR));
 
   // Generate the main chunk data
   generateChunkBatch(chunkData, chunkX, chunkZ);
@@ -1466,6 +1468,14 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
     return false;
   };
 
+  auto setBorderVoxel = [&](int lx, int ly, int lz, TextureType type) {
+    if (lx >= -1 && lx <= CHUNK_SIZE && ly >= -1 && ly <= CHUNK_HEIGHT &&
+        lz >= -1 && lz <= CHUNK_SIZE) {
+      size_t index = (ly + 1) * 18 * 18 + (lz + 1) * 18 + (lx + 1);
+      chunkData.borderVoxels[index] = static_cast<uint8_t>(type);
+    }
+  };
+
   // North border (Z = -1)
   for (int x = 0; x < CHUNK_SIZE; ++x)
   {
@@ -1487,7 +1497,7 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
 
       if (voxelType != TextureType::AIR)
       {
-        chunkData.borderVoxels[glm::ivec3(x, y, -borderSize)] = voxelType;
+        setBorderVoxel(x, y, -borderSize, voxelType);
       }
     }
   }
@@ -1513,7 +1523,7 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
 
       if (voxelType != TextureType::AIR)
       {
-        chunkData.borderVoxels[glm::ivec3(x, y, CHUNK_SIZE)] = voxelType;
+        setBorderVoxel(x, y, CHUNK_SIZE, voxelType);
       }
     }
   }
@@ -1539,7 +1549,7 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
 
       if (voxelType != TextureType::AIR)
       {
-        chunkData.borderVoxels[glm::ivec3(-borderSize, y, z)] = voxelType;
+        setBorderVoxel(-borderSize, y, z, voxelType);
       }
     }
   }
@@ -1565,7 +1575,7 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
 
       if (voxelType != TextureType::AIR)
       {
-        chunkData.borderVoxels[glm::ivec3(CHUNK_SIZE, y, z)] = voxelType;
+        setBorderVoxel(CHUNK_SIZE, y, z, voxelType);
       }
     }
   }

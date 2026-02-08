@@ -21,8 +21,8 @@ struct ChunkData
 {
   std::vector<Voxel> voxels;
 
-  // Border voxels from neighboring chunks for mesh optimization
-  std::unordered_map<glm::ivec3, TextureType, IVec3Hash> borderVoxels;
+  // Border voxels from neighboring chunks (1-thick shell: 18x(H+2)x18)
+  std::vector<uint8_t> borderVoxels;
 
   // Trees to be placed (may extend into neighboring chunks)
   std::vector<TreePlacement> trees;

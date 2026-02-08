@@ -7,7 +7,10 @@
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state)
     : position(position), visible(false), state(state), VAO(0), VBO(0), EBO(0),
-      voxels(CHUNK_VOLUME), meshNeedsUpdate(true) {}
+      voxels(CHUNK_VOLUME),
+      neighborShellVoxels(18 * (CHUNK_HEIGHT + 2) * 18,
+                          static_cast<uint8_t>(AIR)),
+      meshNeedsUpdate(true) {}
 
 Chunk::Chunk(Chunk &&other) noexcept
     : position(std::move(other.position)), visible(other.visible),
@@ -83,16 +86,12 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type) {
     } else {
       activeVoxels.reset(index);
     }
-  } else if ((x == -1 || x == CHUNK_SIZE || z == -1 || z == CHUNK_SIZE) &&
-             (y >= 0 && y < CHUNK_HEIGHT)) {
+  } else if (x >= -1 && x <= CHUNK_SIZE && y >= -1 && y <= CHUNK_HEIGHT &&
+             z >= -1 && z <= CHUNK_SIZE) {
     // This is a voxel on the 1-thick border, store it in neighborShellVoxels
-    // The coordinates are kept local to the chunk's frame of reference (e.g.,
-    // -1, y, z)
-    if (type != AIR) {
-      neighborShellVoxels[glm::ivec3(x, y, z)] = type;
-    } else {
-      neighborShellVoxels.erase(glm::ivec3(x, y, z));
-    }
+    size_t shellIndex =
+        (y + 1) * 18 * 18 + (z + 1) * 18 + (x + 1);
+    neighborShellVoxels[shellIndex] = static_cast<uint8_t>(type);
   }
 }
 
@@ -141,9 +140,11 @@ bool Chunk::isVoxelActive(int x, int y, int z) const {
       z < CHUNK_SIZE) {
     size_t index = getIndex(x, y, z);
     return activeVoxels.test(index);
-  } else if ((x == -1 || x == CHUNK_SIZE || z == -1 || z == CHUNK_SIZE) &&
-             (y >= 0 && y < CHUNK_HEIGHT)) {
-    return neighborShellVoxels.count(glm::ivec3(x, y, z)) > 0;
+  } else if (x >= -1 && x <= CHUNK_SIZE && y >= -1 && y <= CHUNK_HEIGHT &&
+             z >= -1 && z <= CHUNK_SIZE) {
+    size_t shellIndex =
+        (y + 1) * 18 * 18 + (z + 1) * 18 + (x + 1);
+    return neighborShellVoxels[shellIndex] != static_cast<uint8_t>(AIR);
   }
   return false; // Outside known boundaries
 }
@@ -152,7 +153,8 @@ void Chunk::generateTerrain(TerrainGenerator &generator) {
   if (state != ChunkState::UNLOADED)
     return;
 
-  neighborShellVoxels.clear();
+  std::fill(neighborShellVoxels.begin(), neighborShellVoxels.end(),
+            static_cast<uint8_t>(AIR));
 
   // Ensure we use integer coordinates aligned with world grid
   int genX = static_cast<int>(std::round(position.x));
@@ -192,11 +194,11 @@ void Chunk::generateMesh() {
       return static_cast<TextureType>(getVoxel(lx, ly, lz).type);
     }
     // Check the neighbor shell for out-of-bounds coordinates relevant to
-    // meshing. These are coordinates like -1, y, z or SIZE, y, z or x, y, -1 or
-    // x, y, SIZE.
-    auto it = neighborShellVoxels.find(glm::ivec3(lx, ly, lz));
-    if (it != neighborShellVoxels.end()) {
-      return it->second;
+    // meshing.
+    if (lx >= -1 && lx <= CHUNK_SIZE && ly >= -1 && ly <= CHUNK_HEIGHT &&
+        lz >= -1 && lz <= CHUNK_SIZE) {
+      size_t shellIndex = (ly + 1) * 18 * 18 + (lz + 1) * 18 + (lx + 1);
+      return static_cast<TextureType>(neighborShellVoxels[shellIndex]);
     }
     return AIR; // Default to AIR if not in chunk and not in precomputed shell
   };
@@ -403,16 +405,32 @@ void Chunk::generateMesh() {
               this->position + v0_local, this->position + v1_local,
               this->position + v2_local, this->position + v3_local};
 
-          glm::vec3 normal_vec3 = glm::normalize(glm::vec3(quad_normal_dir));
+          int normalIdx = 0;
+          if (quad_normal_dir.x > 0) normalIdx = 0;
+          else if (quad_normal_dir.x < 0) normalIdx = 1;
+          else if (quad_normal_dir.y > 0) normalIdx = 2;
+          else if (quad_normal_dir.y < 0) normalIdx = 3;
+          else if (quad_normal_dir.z > 0) normalIdx = 4;
+          else if (quad_normal_dir.z < 0) normalIdx = 5;
+
+          uint32_t packedData = (normalIdx & 0x7) | 
+                                ((static_cast<uint32_t>(texture_idx_val) & 0xFF) << 3) | 
+                                (needsBiomeColoring ? (1 << 11) : 0);
+          
+          uint32_t packedColor = 0;
+          if (needsBiomeColoring) {
+              uint32_t r = static_cast<uint32_t>(biomeColorVal.r * 255.0f);
+              uint32_t g = static_cast<uint32_t>(biomeColorVal.g * 255.0f);
+              uint32_t b = static_cast<uint32_t>(biomeColorVal.b * 255.0f);
+              packedColor = r | (g << 8) | (b << 16) | (255u << 24);
+          }
 
           for (int i = 0; i < 4; ++i) {
             Vertex vert;
             vert.position = quad_vertices_world[i];
-            vert.normal = normal_vec3;
+            vert.packedData = packedData;
             vert.texCoord = tc[i];
-            vert.textureIndex = texture_idx_val;
-            vert.useBiomeColor = needsBiomeColoring ? 1.0f : 0.0f;
-            vert.biomeColor = biomeColorVal;
+            vert.packedBiomeColor = packedColor;
 
             auto it = vertexMap.find(vert);
             if (it != vertexMap.end()) {
@@ -486,30 +504,20 @@ void Chunk::uploadMeshToGPU() {
   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                         (void *)offsetof(Vertex, position));
 
-  // Normale (location = 1)
+  // Packed Data (location = 1)
   glEnableVertexAttribArray(1);
-  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                        (void *)offsetof(Vertex, normal));
+  glVertexAttribIPointer(1, 1, GL_UNSIGNED_INT, sizeof(Vertex),
+                         (void *)offsetof(Vertex, packedData));
 
   // Coordonnées de texture (location = 2)
   glEnableVertexAttribArray(2);
   glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                         (void *)offsetof(Vertex, texCoord));
 
-  // Index de texture (location = 3)
+  // Packed Biome Color (location = 3)
   glEnableVertexAttribArray(3);
-  glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                        (void *)offsetof(Vertex, textureIndex));
-
-  // Flag de coloration biome (location = 4)
-  glEnableVertexAttribArray(4);
-  glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                        (void *)offsetof(Vertex, useBiomeColor));
-
-  // Couleur du biome (location = 5)
-  glEnableVertexAttribArray(5);
-  glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                        (void *)offsetof(Vertex, biomeColor));
+  glVertexAttribIPointer(3, 1, GL_UNSIGNED_INT, sizeof(Vertex),
+                         (void *)offsetof(Vertex, packedBiomeColor));
 
   glBindVertexArray(0);
 
