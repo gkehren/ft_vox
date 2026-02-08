@@ -32,10 +32,10 @@ public:
 	void processFinishedJobs();
 	void performFrustumCulling(const Camera &camera, int windowWidth, int windowHeight, const RenderSettings &settings);
 
-	void generatePendingVoxels(const RenderSettings &settings, unsigned int seed);
+	void generatePendingVoxels(const Camera &camera, const RenderSettings &settings, unsigned int seed);
 	void meshPendingChunks(const Camera &camera, const RenderSettings &settings);
 
-	void drawVisibleChunks(Shader &shader, const Camera &camera, const GLuint &textureAtlas, const ShaderParameters &shaderParams, Renderer *renderer, RenderSettings &renderSettings);
+	void drawVisibleChunks(Shader &shader, const Camera &camera, const GLuint &textureAtlas, const ShaderParameters &shaderParams, Renderer *renderer, RenderSettings &renderSettings, int windowWidth, int windowHeight);
 
 	bool deleteVoxel(const glm::vec3 &worldPos);
 	bool placeVoxel(const glm::vec3 &worldPos, TextureType type);

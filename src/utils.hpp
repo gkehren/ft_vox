@@ -54,12 +54,19 @@ struct VertexHasher
 	std::size_t operator()(const Vertex &vertex) const
 	{
 		size_t seed = 0;
-		hash_combine(seed, *(uint32_t *)&vertex.position.x);
-		hash_combine(seed, *(uint32_t *)&vertex.position.y);
-		hash_combine(seed, *(uint32_t *)&vertex.position.z);
+		uint32_t px, py, pz, tx, ty;
+		std::memcpy(&px, &vertex.position.x, 4);
+		std::memcpy(&py, &vertex.position.y, 4);
+		std::memcpy(&pz, &vertex.position.z, 4);
+		std::memcpy(&tx, &vertex.texCoord.x, 4);
+		std::memcpy(&ty, &vertex.texCoord.y, 4);
+
+		hash_combine(seed, px);
+		hash_combine(seed, py);
+		hash_combine(seed, pz);
 		hash_combine(seed, vertex.packedData);
-		hash_combine(seed, *(uint32_t *)&vertex.texCoord.x);
-		hash_combine(seed, *(uint32_t *)&vertex.texCoord.y);
+		hash_combine(seed, tx);
+		hash_combine(seed, ty);
 		hash_combine(seed, vertex.packedBiomeColor);
 		return seed;
 	}

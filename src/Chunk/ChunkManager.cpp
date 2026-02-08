@@ -83,7 +83,7 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 	m_renderTiming.frustumCulling = std::chrono::duration<float, std::milli>(end - start).count();
 }
 
-void ChunkManager::generatePendingVoxels(const RenderSettings &settings, unsigned int seed)
+void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, unsigned int seed)
 {
 	if (!m_terrainGenerator)
 		return;
@@ -111,7 +111,7 @@ void ChunkManager::generatePendingVoxels(const RenderSettings &settings, unsigne
 			glm::vec3 chunkCenter = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 			float distance = glm::distance(
 				glm::vec2(chunkCenter.x, chunkCenter.z),
-				glm::vec2(0, 0) // Position du joueur (0,0) comme référence
+				glm::vec2(camera.getPosition().x, camera.getPosition().z)
 			);
 			genQueue.push({chunk, distance});
 		}
@@ -119,12 +119,12 @@ void ChunkManager::generatePendingVoxels(const RenderSettings &settings, unsigne
 	while (!genQueue.empty())
 	{
 		Chunk *chunk = genQueue.top().chunk;
-		int seed = m_terrainGenerator->getSeed(); // We'll need to add this method
+		int currentSeed = m_terrainGenerator->getSeed();
 
 		chunksInTransit.insert(chunk);
-		auto future = p_threadPool->enqueue([chunk, seed]()
+		auto future = p_threadPool->enqueue([chunk, currentSeed]()
 											{
-												TerrainGenerator localGenerator(seed);
+												TerrainGenerator& localGenerator = TerrainGenerator::getThreadLocal(currentSeed);
 												chunk->generateTerrain(localGenerator); });
 		pendingGenerationTasks.push_back({std::move(future), chunk});
 		genQueue.pop();
@@ -174,12 +174,15 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	}
 }
 
-void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const GLuint &textureAtlas, const ShaderParameters &shaderParams, Renderer *renderer, RenderSettings &renderSettings)
+void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const GLuint &textureAtlas, const ShaderParameters &shaderParams, Renderer *renderer, RenderSettings &renderSettings, int windowWidth, int windowHeight)
 {
 	auto start = std::chrono::high_resolution_clock::now();
 	std::lock_guard<std::mutex> lock(chunkMutex);
 	renderSettings.visibleChunksCount = 0; // Reset here as this is the drawing phase
 	renderSettings.visibleVoxelsCount = 0;
+
+	shader.use();
+	shader.setMat4("projection", camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), static_cast<float>(renderSettings.maxRenderDistance)));
 
 	for (Chunk *chunk : activeChunks)
 	{

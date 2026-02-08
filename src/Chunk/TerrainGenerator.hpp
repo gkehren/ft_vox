@@ -59,9 +59,13 @@ public:
   static constexpr int RIVER_LEVEL = SEA_LEVEL - 2;
   static constexpr int BEACH_START = SEA_LEVEL - 3;
   static constexpr int BEACH_END = SEA_LEVEL + 3;
+  static constexpr float NOISE_OFFSET = 1000000.0f;
 
   explicit TerrainGenerator(int seed = 1337);
   ChunkData generateChunk(int chunkX, int chunkZ);
+
+  // Getter for thread-local generator to avoid redundant node graph setup
+  static TerrainGenerator& getThreadLocal(int seed);
 
   // Getter for seed to enable thread-safe generation
   int getSeed() const { return m_seed; }
@@ -166,8 +170,7 @@ private:
   // Column generation
   void generateColumn(std::array<Voxel, CHUNK_VOLUME> &voxels, int localX,
                       int localZ, int terrainHeight);
-  TextureType getVoxelTypeAt(int worldY, int terrainHeight, BiomeType biome,
-                             bool isRiver = false) const;
+  TextureType getVoxelTypeAt(int worldY, int terrainHeight, BiomeType biome) const;
 
   // =============================================
   // UTILITY FUNCTIONS

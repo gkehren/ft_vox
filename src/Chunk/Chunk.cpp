@@ -4,6 +4,17 @@
 #include <utils.hpp>
 #include <vector>
 
+struct MeshWorkspace {
+  std::vector<uint8_t> mask;
+  std::unordered_map<Vertex, uint32_t, VertexHasher> vertexMap;
+
+  MeshWorkspace() {
+    mask.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
+    vertexMap.reserve(4096);
+  }
+};
+
+static thread_local MeshWorkspace s_meshWorkspace;
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state)
     : position(position), visible(false), state(state), VAO(0), VBO(0), EBO(0),
@@ -18,9 +29,17 @@ Chunk::Chunk(Chunk &&other) noexcept
       VBO(other.VBO), EBO(other.EBO), meshNeedsUpdate(other.meshNeedsUpdate),
       activeVoxels(std::move(other.activeVoxels)),
       neighborShellVoxels(std::move(other.neighborShellVoxels)),
-      vertices(std::move(other.vertices)), indices(std::move(other.indices)) {}
+      vertices(std::move(other.vertices)), indices(std::move(other.indices)) {
+  other.VAO = 0;
+  other.VBO = 0;
+  other.EBO = 0;
+}
 Chunk &Chunk::operator=(Chunk &&other) noexcept {
   if (this != &other) {
+    if (VAO != 0) glDeleteVertexArrays(1, &VAO);
+    if (VBO != 0) glDeleteBuffers(1, &VBO);
+    if (EBO != 0) glDeleteBuffers(1, &EBO);
+
     position = std::move(other.position);
     visible = other.visible;
     state = other.state;
@@ -33,6 +52,10 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept {
     VBO = other.VBO;
     EBO = other.EBO;
     meshNeedsUpdate = other.meshNeedsUpdate;
+
+    other.VAO = 0;
+    other.VBO = 0;
+    other.EBO = 0;
   }
   return *this;
 }
@@ -181,9 +204,9 @@ void Chunk::generateTerrain(TerrainGenerator &generator) {
 void Chunk::generateMesh() {
   vertices.clear();
   indices.clear();
-  // Assuming VertexHasher is defined for Vertex struct
-  std::unordered_map<Vertex, uint32_t, VertexHasher> vertexMap;
-  vertexMap.clear();
+
+  auto &workspace = s_meshWorkspace;
+  workspace.vertexMap.clear();
   uint32_t indexCounter = 0;
 
   // New helper for greedy meshing that checks local voxels and the precomputed
@@ -215,20 +238,22 @@ void Chunk::generateMesh() {
                     0}; // Normal direction for the face (points from x to x+q)
     q[d] = 1;
 
-    // Mask for the current slice to mark processed parts of quads
-    std::vector<bool> mask(dims[u] * dims[v]);
+    // Ensure mask is large enough for the current slice
+    if (workspace.mask.size() < static_cast<size_t>(dims[u] * dims[v])) {
+      workspace.mask.resize(dims[u] * dims[v]);
+    }
 
     // Iterate over each slice of the chunk along dimension 'd'
     // x[d] ranges from -1 (representing boundary before chunk) to dims[d]-1
     // (last voxel layer) A face exists between slice x[d] and slice x[d]+1
     for (x[d] = -1; x[d] < dims[d]; ++x[d]) {
-      std::fill(mask.begin(), mask.end(), false); // Reset mask for each slice
+      std::fill(workspace.mask.begin(), workspace.mask.begin() + (dims[u] * dims[v]), 0); // Reset mask for each slice
 
       // Iterate over the plane (u, v)
       for (x[u] = 0; x[u] < dims[u]; ++x[u]) {
         for (x[v] = 0; x[v] < dims[v]; ++x[v]) {
 
-          if (mask[x[u] * dims[v] + x[v]]) {
+          if (workspace.mask[x[u] * dims[v] + x[v]]) {
             continue; // Already processed this part of the slice
           }
 
@@ -268,7 +293,7 @@ void Chunk::generateMesh() {
           // Calculate width (w) of the quad along dimension u
           int w;
           for (w = 1; x[u] + w < dims[u]; ++w) {
-            if (mask[(x[u] + w) * dims[v] + x[v]])
+            if (workspace.mask[(x[u] + w) * dims[v] + x[v]])
               break;
 
             glm::ivec3 next_pos_u_slice = x;
@@ -303,7 +328,7 @@ void Chunk::generateMesh() {
           for (h = 1; x[v] + h < dims[v]; ++h) {
             for (int k = 0; k < w;
                  ++k) { // Check all cells in the current row of width w
-              if (mask[(x[u] + k) * dims[v] + (x[v] + h)]) {
+              if (workspace.mask[(x[u] + k) * dims[v] + (x[v] + h)]) {
                 h_break = true;
                 break;
               }
@@ -432,13 +457,13 @@ void Chunk::generateMesh() {
             vert.texCoord = tc[i];
             vert.packedBiomeColor = packedColor;
 
-            auto it = vertexMap.find(vert);
-            if (it != vertexMap.end()) {
+            auto it = workspace.vertexMap.find(vert);
+            if (it != workspace.vertexMap.end()) {
               vert_indices[i] = it->second;
             } else {
               vertices.push_back(vert);
               vert_indices[i] = indexCounter;
-              vertexMap[vert] = indexCounter++;
+              workspace.vertexMap[vert] = indexCounter++;
             }
           }
 
@@ -462,7 +487,7 @@ void Chunk::generateMesh() {
           // Mark processed cells in the mask
           for (int iw = 0; iw < w; ++iw) {
             for (int ih = 0; ih < h; ++ih) {
-              mask[(x[u] + iw) * dims[v] + (x[v] + ih)] = true;
+              workspace.mask[(x[u] + iw) * dims[v] + (x[v] + ih)] = 1;
             }
           }
         }
@@ -534,11 +559,8 @@ uint32_t Chunk::draw(const Shader &shader, const Camera &camera,
 
   shader.use();
 
-  glm::vec3 localPos =
-      glm::vec3(position.x / CHUNK_SIZE, position.y, position.z / CHUNK_SIZE);
-  shader.setMat4("model", glm::translate(glm::mat4(1.0f), localPos));
+  shader.setMat4("model", glm::mat4(1.0f));
   shader.setMat4("view", camera.getViewMatrix());
-  shader.setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
   shader.setInt("textureArray", 0);
 
   glm::vec3 sunPosition = camera.getPosition() + params.sunDirection * 2000.0f;

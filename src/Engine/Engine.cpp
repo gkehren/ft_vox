@@ -208,7 +208,7 @@ void Engine::updateWorldState()
 	// Pass currentRenderSettings by const reference
 	chunkManager->processChunkLoading(currentRenderSettings);
 	chunkManager->processFinishedJobs();
-	chunkManager->generatePendingVoxels(currentRenderSettings, seed);
+	chunkManager->generatePendingVoxels(camera, currentRenderSettings, seed);
 	chunkManager->meshPendingChunks(camera, currentRenderSettings);
 }
 
@@ -245,7 +245,7 @@ void Engine::renderScene() // Renamed from render
 	if (renderer && shader && renderer->getTextureAtlas() && chunkManager)
 	{
 		// Pass currentRenderSettings by non-const reference if drawVisibleChunks updates it
-		chunkManager->drawVisibleChunks(*shader, camera, renderer->getTextureAtlas(), uiManager->getShaderParams(), renderer.get(), currentRenderSettings);
+		chunkManager->drawVisibleChunks(*shader, camera, renderer->getTextureAtlas(), uiManager->getShaderParams(), renderer.get(), currentRenderSettings, windowWidth, windowHeight);
 	}
 
 	updateVoxelHighlights();
@@ -269,20 +269,19 @@ void Engine::handleEvents(bool &keyTPressed)
 		case SDL_EVENT_QUIT:
 			this->running = false;
 			break;
-		// case SDL_EVENT_WINDOW_RESIZED:
-		//	windowWidth = event.window.data1;
-		//	windowHeight = event.window.data2;
-		//	glViewport(0, 0, windowWidth, windowHeight);
-		//	if (renderer)
-		//	{
-		//		renderer->updateProjectionMatrix(windowWidth, windowHeight);
-		//	}
-		//	if (textRenderer)
-		//	{
-		//		textRenderer->setProjection(glm::ortho(0.0f, static_cast<float>(windowWidth), 0.0f, static_cast<float>(windowHeight)));
-		//	}
-		//	// camera.updateProjectionMatrix(windowWidth, windowHeight); // If camera stores its own proj matrix directly
-		//	break;
+		case SDL_EVENT_WINDOW_RESIZED:
+			windowWidth = event.window.data1;
+			windowHeight = event.window.data2;
+			glViewport(0, 0, windowWidth, windowHeight);
+			if (renderer)
+			{
+				renderer->setScreenSize(windowWidth, windowHeight);
+			}
+			if (textRenderer)
+			{
+				textRenderer->setProjection(glm::ortho(0.0f, static_cast<float>(windowWidth), 0.0f, static_cast<float>(windowHeight)));
+			}
+			break;
 		case SDL_EVENT_KEY_DOWN:
 			if (event.key.scancode == SDL_SCANCODE_T)
 			{

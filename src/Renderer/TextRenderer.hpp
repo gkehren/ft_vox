@@ -24,6 +24,7 @@ public:
 	~TextRenderer();
 
 	void renderText(std::string text, float x, float y, float scale, glm::vec3 color);
+	void setProjection(const glm::mat4 &proj);
 
 private:
 	FT_Library ft;

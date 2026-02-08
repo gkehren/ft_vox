@@ -120,3 +120,10 @@ void TextRenderer::renderText(std::string text, float x, float y, float scale, g
 	glBindVertexArray(0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 }
+
+void TextRenderer::setProjection(const glm::mat4 &proj)
+{
+	projection = proj;
+	shader->use();
+	shader->setMat4("projection", projection);
+}

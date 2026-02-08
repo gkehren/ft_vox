@@ -61,18 +61,46 @@ Renderer::~Renderer()
 	glDeleteBuffers(1, &this->playerEBO);
 }
 
+void Renderer::setScreenSize(int screenWidth, int screenHeight)
+{
+	this->screenWidth = static_cast<float>(screenWidth);
+	this->screenHeight = static_cast<float>(screenHeight);
+}
+
 void Renderer::initBoundingBox()
 {
 	std::string path = RES_PATH;
 	this->boundingBoxShader = std::make_unique<Shader>((path + "shaders/boundingBoxVertex.glsl").c_str(), (path + "shaders/boundingBoxFragment.glsl").c_str());
 
-	// Bounding box
+	// Unit cube for bounding boxes and highlights
+	float unitCubeVertices[] = {
+		0.0f, 0.0f, 0.0f, // 0
+		1.0f, 0.0f, 0.0f, // 1
+		1.0f, 1.0f, 0.0f, // 2
+		0.0f, 1.0f, 0.0f, // 3
+		0.0f, 0.0f, 1.0f, // 4
+		1.0f, 0.0f, 1.0f, // 5
+		1.0f, 1.0f, 1.0f, // 6
+		0.0f, 1.0f, 1.0f  // 7
+	};
+
+	unsigned int unitCubeIndices[] = {
+		0, 1, 1, 2, 2, 3, 3, 0, // Bottom
+		4, 5, 5, 6, 6, 7, 7, 4, // Top
+		0, 4, 1, 5, 2, 6, 3, 7	// Sides
+	};
+
 	glGenVertexArrays(1, &this->boundingBoxVAO);
 	glGenBuffers(1, &this->boundingBoxVBO);
 	glGenBuffers(1, &this->boundingBoxEBO);
+
 	glBindVertexArray(this->boundingBoxVAO);
+
 	glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(unitCubeVertices), unitCubeVertices, GL_STATIC_DRAW);
+
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(unitCubeIndices), unitCubeIndices, GL_STATIC_DRAW);
 
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
 	glEnableVertexAttribArray(0);
@@ -130,29 +158,15 @@ void Renderer::drawBoundingBox(const Chunk &chunk, const Camera &camera) const
 	boundingBoxShader->use();
 
 	boundingBoxShader->setMat4("view", camera.getViewMatrix());
-	boundingBoxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
+	boundingBoxShader->setMat4("projection", camera.getProjectionMatrix(screenWidth, screenHeight, renderDistance));
 
-	glm::vec3 position = chunk.getPosition();
-
-	float verticesBoundingbox[] = {
-		position.x - 1.0f, position.y - 1.0f, position.z - 1.0f,
-		position.x - 1.0f + CHUNK_SIZE, position.y - 1.0f, position.z - 1.0f,
-		position.x - 1.0f + CHUNK_SIZE, position.y - 1.0f + CHUNK_HEIGHT, position.z - 1.0f,
-		position.x - 1.0f, position.y - 1.0f + CHUNK_HEIGHT, position.z - 1.0f,
-
-		position.x - 1.0f, position.y - 1.0f, position.z - 1.0f + CHUNK_SIZE,
-		position.x - 1.0f + CHUNK_SIZE, position.y - 1.0f, position.z - 1.0f + CHUNK_SIZE,
-		position.x - 1.0f + CHUNK_SIZE, position.y - 1.0f + CHUNK_HEIGHT, position.z - 1.0f + CHUNK_SIZE,
-		position.x - 1.0f, position.y - 1.0f + CHUNK_HEIGHT, position.z - 1.0f + CHUNK_SIZE};
+	glm::mat4 model = glm::mat4(1.0f);
+	model = glm::translate(model, chunk.getPosition());
+	model = glm::scale(model, glm::vec3(CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE));
+	boundingBoxShader->setMat4("model", model);
+	boundingBoxShader->setVec3("color", glm::vec3(1.0f, 0.0f, 0.0f)); // Red for chunk borders
 
 	glBindVertexArray(this->boundingBoxVAO);
-
-	glBindBuffer(GL_ARRAY_BUFFER, this->boundingBoxVBO);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(verticesBoundingbox), verticesBoundingbox, GL_STATIC_DRAW);
-
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->boundingBoxEBO);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indicesBoundingbox), indicesBoundingbox, GL_STATIC_DRAW);
-
 	glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, 0);
 	glBindVertexArray(0);
 }
@@ -202,7 +216,7 @@ void Renderer::drawSkybox(const Camera &camera) const
 	this->skyboxShader->use();
 	this->skyboxShader->setInt("skybox", 1);
 	this->skyboxShader->setMat4("view", glm::mat4(glm::mat3(camera.getViewMatrix())));
-	this->skyboxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
+	this->skyboxShader->setMat4("projection", camera.getProjectionMatrix(screenWidth, screenHeight, renderDistance));
 
 	glBindVertexArray(this->skyboxVAO);
 	glActiveTexture(GL_TEXTURE1);
@@ -221,7 +235,7 @@ void Renderer::drawPlayer(const Camera &camera, const glm::vec3 &position, uint3
 	// model = glm::scale(model, glm::vec3(0.1f));
 	playerShader->setMat4("model", model);
 	playerShader->setMat4("view", camera.getViewMatrix());
-	playerShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
+	playerShader->setMat4("projection", camera.getProjectionMatrix(screenWidth, screenHeight, renderDistance));
 
 	glm::vec3 color = computeColorFromPlayerId(playerId);
 	playerShader->setVec3("playerColor", color);
@@ -290,36 +304,14 @@ void Renderer::drawVoxelHighlight(const glm::vec3 &position, const glm::vec3 &co
 	boundingBoxShader->use();
 
 	boundingBoxShader->setMat4("view", camera.getViewMatrix());
-	boundingBoxShader->setMat4("projection", camera.getProjectionMatrix(1920, 1080, 320));
+	boundingBoxShader->setMat4("projection", camera.getProjectionMatrix(screenWidth, screenHeight, renderDistance));
+	
+	glm::mat4 model = glm::mat4(1.0f);
+	model = glm::translate(model, position);
+	boundingBoxShader->setMat4("model", model);
 	boundingBoxShader->setVec3("color", color); // Set highlight color
 
-	// Create a 1x1x1 box at the voxel position
-	float vertices[] = {
-		position.x, position.y, position.z,				  // 0
-		position.x + 1.0f, position.y, position.z,		  // 1
-		position.x + 1.0f, position.y + 1.0f, position.z, // 2
-		position.x, position.y + 1.0f, position.z,		  // 3
-
-		position.x, position.y, position.z + 1.0f,				 // 4
-		position.x + 1.0f, position.y, position.z + 1.0f,		 // 5
-		position.x + 1.0f, position.y + 1.0f, position.z + 1.0f, // 6
-		position.x, position.y + 1.0f, position.z + 1.0f		 // 7
-	};
-
-	// Indices for box edges (12 lines)
-	unsigned int indices[] = {
-		0, 1, 1, 2, 2, 3, 3, 0, // Front face
-		4, 5, 5, 6, 6, 7, 7, 4, // Back face
-		0, 4, 1, 5, 2, 6, 3, 7	// Connecting edges
-	};
-
 	glBindVertexArray(boundingBoxVAO);
-
-	glBindBuffer(GL_ARRAY_BUFFER, boundingBoxVBO);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, boundingBoxEBO);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
 
 	// Enable line width (if supported)
 	GLfloat lineWidth;
