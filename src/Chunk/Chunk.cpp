@@ -154,9 +154,9 @@ void Chunk::generateTerrain(TerrainGenerator &generator) {
 
   neighborShellVoxels.clear();
 
-  // Ensure coordinates are floored correctly (handling negative numbers)
-  int genX = static_cast<int>(std::floor(position.x));
-  int genZ = static_cast<int>(std::floor(position.z));
+  // Ensure we use integer coordinates aligned with world grid
+  int genX = static_cast<int>(std::round(position.x));
+  int genZ = static_cast<int>(std::round(position.z));
 
   auto chunkData = generator.generateChunk(genX, genZ);
   setVoxels(chunkData.voxels);

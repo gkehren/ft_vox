@@ -81,13 +81,36 @@ static constexpr int CHUNK_HEIGHT = 256;									// Height of a chunk in voxels
 static constexpr int CHUNK_VOLUME = CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE; // Total number of voxels in a chunk
 static constexpr int CHUNK_RADIUS = 16;										// Radius of a chunk in world units
 
+// Biome types based on temperature and humidity
 enum BiomeType
 {
-	DESERT,
-	FOREST,
-	PLAINS,
-	MOUNTAINS,
-	SNOWY
+	// Cold biomes
+	BIOME_FROZEN_OCEAN, // Very cold, any humidity, below sea level
+	BIOME_SNOWY_TUNDRA, // Very cold, low humidity
+	BIOME_SNOWY_TAIGA,	// Cold, medium humidity (snowy forest)
+	BIOME_ICE_SPIKES,	// Very cold, high humidity
+
+	// Temperate biomes
+	BIOME_OCEAN,		// Any temp, below sea level
+	BIOME_BEACH,		// Coastal areas
+	BIOME_PLAINS,		// Moderate temp, low humidity
+	BIOME_FOREST,		// Moderate temp, medium humidity
+	BIOME_BIRCH_FOREST, // Moderate temp, medium-high humidity
+	BIOME_DARK_FOREST,	// Moderate temp, high humidity
+	BIOME_SWAMP,		// Moderate temp, very high humidity
+	BIOME_RIVER,		// River biome
+
+	// Hot biomes
+	BIOME_DESERT,	// Hot, very low humidity
+	BIOME_SAVANNA,	// Hot, low humidity
+	BIOME_JUNGLE,	// Hot, high humidity
+	BIOME_BADLANDS, // Hot, medium humidity (mesa)
+
+	// Elevation-based biomes
+	BIOME_MOUNTAINS,	   // High elevation
+	BIOME_SNOWY_MOUNTAINS, // Very high elevation
+
+	BIOME_COUNT
 };
 
 struct TextureInfo
