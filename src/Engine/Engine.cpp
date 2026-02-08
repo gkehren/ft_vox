@@ -207,6 +207,7 @@ void Engine::updateWorldState()
 	}
 	// Pass currentRenderSettings by const reference
 	chunkManager->processChunkLoading(currentRenderSettings);
+	chunkManager->processFinishedJobs();
 	chunkManager->generatePendingVoxels(currentRenderSettings, seed);
 	chunkManager->meshPendingChunks(camera, currentRenderSettings);
 }

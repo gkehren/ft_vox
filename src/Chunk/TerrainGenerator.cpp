@@ -530,7 +530,7 @@ static thread_local GenBuffers s_genBuffers;
 ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
 {
   ChunkData chunkData;
-  chunkData.voxels.fill({TextureType::AIR});
+  chunkData.voxels.assign(CHUNK_VOLUME, {TextureType::AIR});
 
   // Generate the main chunk data
   generateChunkBatch(chunkData, chunkX, chunkZ);

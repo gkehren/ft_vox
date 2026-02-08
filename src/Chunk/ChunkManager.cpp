@@ -84,113 +84,93 @@ void ChunkManager::generatePendingVoxels(const RenderSettings &settings, unsigne
 {
 	if (!m_terrainGenerator)
 		return;
-	auto start = std::chrono::high_resolution_clock::now();
 
-	std::vector<std::future<void>> futures;
+	std::lock_guard<std::mutex> lock(chunkMutex);
+
+	// Trier les chunks par distance au joueur pour une génération plus cohérente
+	struct ChunkGenInfo
 	{
-		std::lock_guard<std::mutex> lock(chunkMutex);
+		Chunk *chunk;
+		float distance;
 
-		// Trier les chunks par distance au joueur pour une génération plus cohérente
-		struct ChunkGenInfo
+		bool operator<(const ChunkGenInfo &other) const
 		{
-			Chunk *chunk;
-			float distance;
-
-			bool operator<(const ChunkGenInfo &other) const
-			{
-				return distance > other.distance;
-			}
-		};
-
-		std::priority_queue<ChunkGenInfo> genQueue;
-
-		for (auto &chunkPair : chunks)
-		{
-			Chunk &chunk = chunkPair.second;
-			if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED)
-			{
-				glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
-				float distance = glm::distance(
-					glm::vec2(chunkCenter.x, chunkCenter.z),
-					glm::vec2(0, 0) // Position du joueur (0,0) comme référence
-				);
-				genQueue.push({&chunk, distance});
-			}
-		} // Générer les chunks par ordre de priorité
-		while (!genQueue.empty())
-		{
-			Chunk *chunk = genQueue.top().chunk;
-			int seed = m_terrainGenerator->getSeed(); // We'll need to add this method
-
-			futures.push_back(p_threadPool->enqueue([chunk, seed]()
-													{
-														TerrainGenerator localGenerator(seed);
-														chunk->generateTerrain(localGenerator); }));
-			genQueue.pop();
+			return distance > other.distance;
 		}
-	}
+	};
 
-	for (auto &future : futures)
+	std::priority_queue<ChunkGenInfo> genQueue;
+
+	for (auto &chunkPair : chunks)
 	{
-		future.get();
-	}
+		Chunk &chunk = chunkPair.second;
+		if (chunk.isVisible() && chunk.getState() == ChunkState::UNLOADED && chunksInTransit.find(&chunk) == chunksInTransit.end())
+		{
+			glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+			float distance = glm::distance(
+				glm::vec2(chunkCenter.x, chunkCenter.z),
+				glm::vec2(0, 0) // Position du joueur (0,0) comme référence
+			);
+			genQueue.push({&chunk, distance});
+		}
+	} // Générer les chunks par ordre de priorité
+	while (!genQueue.empty())
+	{
+		Chunk *chunk = genQueue.top().chunk;
+		int seed = m_terrainGenerator->getSeed(); // We'll need to add this method
 
-	auto end = std::chrono::high_resolution_clock::now();
-	m_renderTiming.chunkGeneration = std::chrono::duration<float, std::milli>(end - start).count();
+		chunksInTransit.insert(chunk);
+		auto future = p_threadPool->enqueue([chunk, seed]()
+											{
+												TerrainGenerator localGenerator(seed);
+												chunk->generateTerrain(localGenerator); });
+		pendingGenerationTasks.push_back({std::move(future), chunk});
+		genQueue.pop();
+	}
 }
 
 void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings &settings)
 {
 	if (!p_threadPool)
 		return;
-	auto start = std::chrono::high_resolution_clock::now();
 
-	std::vector<std::future<void>> futures;
+	std::lock_guard<std::mutex> lock(chunkMutex);
+
+	// Trier les chunks par distance au joueur pour un maillage plus cohérent
+	struct ChunkMeshInfo
 	{
-		std::lock_guard<std::mutex> lock(chunkMutex);
+		Chunk *chunk;
+		float distance;
 
-		// Trier les chunks par distance au joueur pour un maillage plus cohérent
-		struct ChunkMeshInfo
+		bool operator<(const ChunkMeshInfo &other) const
 		{
-			Chunk *chunk;
-			float distance;
-
-			bool operator<(const ChunkMeshInfo &other) const
-			{
-				return distance > other.distance;
-			}
-		};
-
-		std::priority_queue<ChunkMeshInfo> meshQueue;
-
-		for (auto &chunkPair : chunks)
-		{
-			Chunk &chunk = chunkPair.second;
-			if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED)
-			{
-				glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
-				float distance = glm::distance(
-					glm::vec2(chunkCenter.x, chunkCenter.z),
-					glm::vec2(camera.getPosition().x, camera.getPosition().z));
-				meshQueue.push({&chunk, distance});
-			}
-		} // Mailler les chunks par ordre de priorité
-		while (!meshQueue.empty())
-		{
-			Chunk *chunk = meshQueue.top().chunk;
-			futures.push_back(p_threadPool->enqueue([chunk]()
-													{ chunk->generateMesh(); }));
-			meshQueue.pop();
+			return distance > other.distance;
 		}
-	}
+	};
 
-	for (auto &future : futures)
+	std::priority_queue<ChunkMeshInfo> meshQueue;
+
+	for (auto &chunkPair : chunks)
 	{
-		future.wait();
+		Chunk &chunk = chunkPair.second;
+		if (chunk.isVisible() && chunk.getState() == ChunkState::GENERATED && chunksInTransit.find(&chunk) == chunksInTransit.end())
+		{
+			glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+			float distance = glm::distance(
+				glm::vec2(chunkCenter.x, chunkCenter.z),
+				glm::vec2(camera.getPosition().x, camera.getPosition().z));
+			meshQueue.push({&chunk, distance});
+		}
+	} // Mailler les chunks par ordre de priorité
+	while (!meshQueue.empty())
+	{
+		Chunk *chunk = meshQueue.top().chunk;
+		chunksInTransit.insert(chunk);
+		auto future = p_threadPool->enqueue([chunk]()
+											{ chunk->generateMesh(); });
+		pendingMeshingTasks.push_back({std::move(future), chunk});
+		meshQueue.pop();
 	}
-
-	auto end = std::chrono::high_resolution_clock::now();
-	m_renderTiming.meshGeneration = std::chrono::duration<float, std::milli>(end - start).count();
 }
 
 void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const GLuint &textureAtlas, const ShaderParameters &shaderParams, Renderer *renderer, RenderSettings &renderSettings)
@@ -370,15 +350,23 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 	auto it = chunks.begin();
 	while (it != chunks.end())
 	{
-		const auto &chunk = it->second;
-		glm::vec3 chunkCenter = chunk.getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+		Chunk *chunkPtr = &it->second;
+		glm::vec3 chunkCenter = chunkPtr->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 		float distToPlayer = glm::distance(
 			glm::vec2(camera.getPosition().x, camera.getPosition().z),
 			glm::vec2(chunkCenter.x, chunkCenter.z));
 		// Unload if significantly outside maxRenderDistance (e.g., 1.5x or 2x)
 		if (distToPlayer > static_cast<float>(settings.maxRenderDistance) * 1.5f)
 		{
-			it = chunks.erase(it);
+			// Do not unload chunks that are currently being processed
+			if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
+			{
+				it = chunks.erase(it);
+			}
+			else
+			{
+				++it;
+			}
 		}
 		else
 		{
@@ -437,5 +425,42 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 			chunkLoadQueue.push(info.pos);
 		}
 		priorityQueue.pop();
+	}
+}
+
+void ChunkManager::processFinishedJobs()
+{
+	std::lock_guard<std::mutex> lock(chunkMutex);
+
+	// Check generation tasks
+	auto genIt = pendingGenerationTasks.begin();
+	while (genIt != pendingGenerationTasks.end())
+	{
+		if (genIt->first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+		{
+			genIt->first.get(); // Propagate exceptions if any
+			chunksInTransit.erase(genIt->second);
+			genIt = pendingGenerationTasks.erase(genIt);
+		}
+		else
+		{
+			++genIt;
+		}
+	}
+
+	// Check meshing tasks
+	auto meshIt = pendingMeshingTasks.begin();
+	while (meshIt != pendingMeshingTasks.end())
+	{
+		if (meshIt->first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+		{
+			meshIt->first.get();
+			chunksInTransit.erase(meshIt->second);
+			meshIt = pendingMeshingTasks.erase(meshIt);
+		}
+		else
+		{
+			++meshIt;
+		}
 	}
 }

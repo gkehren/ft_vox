@@ -19,7 +19,7 @@ struct TreePlacement
 
 struct ChunkData
 {
-  std::array<Voxel, CHUNK_VOLUME> voxels;
+  std::vector<Voxel> voxels;
 
   // Border voxels from neighboring chunks for mesh optimization
   std::unordered_map<glm::ivec3, TextureType, IVec3Hash> borderVoxels;

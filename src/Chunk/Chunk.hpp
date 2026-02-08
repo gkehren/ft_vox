@@ -37,7 +37,7 @@ public:
 	void setState(ChunkState state);
 	ChunkState getState() const;
 
-	void setVoxels(const std::array<Voxel, CHUNK_VOLUME> &voxels);
+	void setVoxels(const std::vector<Voxel> &voxels);
 
 
 	Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z);
@@ -62,7 +62,7 @@ private:
 
 	std::vector<Vertex> vertices;
 	std::vector<uint16_t> indices;
-	std::array<Voxel, CHUNK_VOLUME> voxels;
+	std::vector<Voxel> voxels;
 	std::bitset<CHUNK_VOLUME> activeVoxels;
 	std::unordered_map<glm::ivec3, TextureType, IVec3Hash> neighborShellVoxels;
 

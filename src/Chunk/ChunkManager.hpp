@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <unordered_set>
 #include <queue>
 #include <mutex>
 #include <vector>
@@ -28,6 +29,7 @@ public:
 
 	void updatePlayerPosition(const glm::ivec2 &newPlayerChunkPos, const Camera &camera, const RenderSettings &settings);
 	void processChunkLoading(const RenderSettings &settings);
+	void processFinishedJobs();
 	void performFrustumCulling(const Camera &camera, int windowWidth, int windowHeight, const RenderSettings &settings);
 
 	void generatePendingVoxels(const RenderSettings &settings, unsigned int seed);
@@ -49,6 +51,10 @@ private:
 
 	std::unordered_map<glm::ivec3, Chunk, IVec3Hash> chunks;
 	std::queue<glm::ivec3> chunkLoadQueue;
+
+	std::vector<std::pair<std::future<void>, Chunk *>> pendingGenerationTasks;
+	std::vector<std::pair<std::future<void>, Chunk *>> pendingMeshingTasks;
+	std::unordered_set<Chunk *> chunksInTransit;
 
 	mutable std::mutex chunkMutex;
 

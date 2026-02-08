@@ -7,7 +7,7 @@
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state)
     : position(position), visible(false), state(state), VAO(0), VBO(0), EBO(0),
-      meshNeedsUpdate(true) {}
+      voxels(CHUNK_VOLUME), meshNeedsUpdate(true) {}
 
 Chunk::Chunk(Chunk &&other) noexcept
     : position(std::move(other.position)), visible(other.visible),
@@ -96,7 +96,7 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type) {
   }
 }
 
-void Chunk::setVoxels(const std::array<Voxel, CHUNK_VOLUME> &voxels) {
+void Chunk::setVoxels(const std::vector<Voxel> &voxels) {
   this->voxels = voxels;
 }
 
