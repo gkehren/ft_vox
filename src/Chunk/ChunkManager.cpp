@@ -111,8 +111,7 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 			glm::vec3 chunkCenter = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 			float distance = glm::distance(
 				glm::vec2(chunkCenter.x, chunkCenter.z),
-				glm::vec2(camera.getPosition().x, camera.getPosition().z)
-			);
+				glm::vec2(camera.getPosition().x, camera.getPosition().z));
 			genQueue.push({chunk, distance});
 		}
 	} // Générer les chunks par ordre de priorité
@@ -182,7 +181,7 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	renderSettings.visibleVoxelsCount = 0;
 
 	shader.use();
-	shader.setMat4("projection", camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), static_cast<float>(renderSettings.maxRenderDistance)));
+	shader.setMat4("projection", camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), 3000.0f));
 
 	for (Chunk *chunk : activeChunks)
 	{

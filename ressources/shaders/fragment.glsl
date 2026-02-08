@@ -14,7 +14,7 @@ uniform vec3 viewPos;
 
 // Paramètres du fog
 uniform float fogStart = 160.0;
-uniform float fogEnd = 300.0;
+uniform float fogEnd = 480.0;
 uniform vec3 fogColor = vec3(0.75, 0.85, 1.0);
 uniform float fogDensity = 0.8;
 

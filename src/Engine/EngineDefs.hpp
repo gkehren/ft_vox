@@ -7,7 +7,7 @@ struct ShaderParameters
 {
 	// Fog
 	float fogStart = 160.0f;
-	float fogEnd = 300.0f;
+	float fogEnd = 480.0f;
 	float fogDensity = 0.8f;
 	glm::vec3 fogColor = {0.75f, 0.85f, 1.0f};
 
@@ -32,7 +32,7 @@ struct RenderSettings
 	int visibleVoxelsCount{0};	// Output, updated by rendering logic
 	int chunkLoadedMax{5};		// Max load radius in chunks from player
 	int minRenderDistance{320}; // Min view distance, potentially in blocks or units
-	int maxRenderDistance{320}; // Max view distance
+	int maxRenderDistance{480}; // Max view distance
 	int raycastDistance{8};
 };
 
