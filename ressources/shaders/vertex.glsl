@@ -10,6 +10,7 @@ out vec2 TexCoord;
 out float TextureIndex;
 out float UseBiomeColor;
 out vec3 BiomeColor;
+out float AO;
 
 uniform mat4 model;
 uniform mat4 view;
@@ -37,6 +38,9 @@ void main()
     
     // Unpack biome flag
     UseBiomeColor = float((aPackedData >> 11) & 0x1u);
+
+    // Unpack AO
+    AO = float((aPackedData >> 12) & 0x3u) / 3.0;
     
     // Unpack biome color
     float r = float(aPackedBiomeColor & 0xFFu) / 255.0;

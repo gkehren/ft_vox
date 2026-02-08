@@ -31,7 +31,7 @@ struct Voxel
 struct Vertex
 {
 	glm::vec3 position;
-	uint32_t packedData; // 0-2: normal, 3-10: textureIndex, 11: useBiomeColor
+	uint32_t packedData; // 0-2: normal, 3-10: textureIndex, 11: useBiomeColor, 12-13: AO
 	glm::vec2 texCoord;
 	uint32_t packedBiomeColor; // RGBA8
 

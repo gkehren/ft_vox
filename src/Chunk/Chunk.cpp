@@ -450,10 +450,44 @@ void Chunk::generateMesh() {
               packedColor = r | (g << 8) | (b << 16) | (255u << 24);
           }
 
+          auto calculateAO = [&](const glm::vec3& localPos, int cornerIdx) -> uint32_t {
+              int pd = (int)std::round(localPos[d]);
+              int pu = (int)std::round(localPos[u]);
+              int pv = (int)std::round(localPos[v]);
+
+              int layerD = (quad_normal_dir[d] > 0) ? pd : pd - 1;
+
+              auto isSolid = [&](int du, int dv) {
+                  return !TextureManager::isTransparent(getVoxelDataForMeshing(
+                      (d==0 ? layerD : (u==0 ? pu+du : pv+du)),
+                      (d==1 ? layerD : (u==1 ? pu+du : pv+du)),
+                      (d==2 ? layerD : (u==2 ? pu+du : pv+du))
+                  ));
+              };
+
+              bool q1 = isSolid(0, 0);
+              bool q2 = isSolid(-1, 0);
+              bool q3 = isSolid(-1, -1);
+              bool q4 = isSolid(0, -1);
+
+              bool s1, s2, c;
+              if (cornerIdx == 0) { s1=q2; s2=q4; c=q3; } 
+              else if (cornerIdx == 1) { s1=q1; s2=q3; c=q4; } 
+              else if (cornerIdx == 2) { s1=q2; s2=q4; c=q1; } 
+              else { s1=q1; s2=q3; c=q2; } 
+
+              if (s1 && s2) return 0;
+              return 3 - (s1 + s2 + c);
+          };
+
           for (int i = 0; i < 4; ++i) {
             Vertex vert;
             vert.position = quad_vertices_world[i];
-            vert.packedData = packedData;
+            
+            glm::vec3 localPos = vert.position - this->position;
+            uint32_t ao = calculateAO(localPos, i);
+
+            vert.packedData = packedData | (ao << 12);
             vert.texCoord = tc[i];
             vert.packedBiomeColor = packedColor;
 
