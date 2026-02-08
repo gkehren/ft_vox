@@ -13,263 +13,262 @@ static std::once_flag s_biomeConfigsOnceFlag;
 
 void TerrainGenerator::initBiomeConfigs()
 {
-  if (s_biomeConfigsInitialized)
-    return;
+  std::call_once(s_biomeConfigsOnceFlag, []() {
+    // BIOME_FROZEN_OCEAN
+    s_biomeConfigs[BIOME_FROZEN_OCEAN] = {
+        TextureType::SNOW,           // surface
+        TextureType::GRAVEL,         // subsurface
+        TextureType::GRAVEL,         // underwater
+        3,                           // subsurface depth
+        0.0f,                        // tree density
+        0.0f,                        // vegetation density
+        glm::vec3(0.5f, 0.7f, 0.5f), // grass color
+        glm::vec3(0.4f, 0.6f, 0.4f), // foliage color
+        true,                        // has snow
+        false,                       // has cacti
+        false                        // has rivers
+    };
 
-  // BIOME_FROZEN_OCEAN
-  s_biomeConfigs[BIOME_FROZEN_OCEAN] = {
-      TextureType::SNOW,           // surface
-      TextureType::GRAVEL,         // subsurface
-      TextureType::GRAVEL,         // underwater
-      3,                           // subsurface depth
-      0.0f,                        // tree density
-      0.0f,                        // vegetation density
-      glm::vec3(0.5f, 0.7f, 0.5f), // grass color
-      glm::vec3(0.4f, 0.6f, 0.4f), // foliage color
-      true,                        // has snow
-      false,                       // has cacti
-      false                        // has rivers
-  };
+    // BIOME_SNOWY_TUNDRA
+    s_biomeConfigs[BIOME_SNOWY_TUNDRA] = {
+        TextureType::SNOW,
+        TextureType::DIRT,
+        TextureType::GRAVEL,
+        3,
+        0.02f, // sparse trees
+        0.05f,
+        glm::vec3(0.5f, 0.7f, 0.5f),
+        glm::vec3(0.4f, 0.6f, 0.4f),
+        true,
+        false,
+        true};
 
-  // BIOME_SNOWY_TUNDRA
-  s_biomeConfigs[BIOME_SNOWY_TUNDRA] = {
-      TextureType::SNOW,
-      TextureType::DIRT,
-      TextureType::GRAVEL,
-      3,
-      0.02f, // sparse trees
-      0.05f,
-      glm::vec3(0.5f, 0.7f, 0.5f),
-      glm::vec3(0.4f, 0.6f, 0.4f),
-      true,
-      false,
-      true};
+    // BIOME_SNOWY_TAIGA
+    s_biomeConfigs[BIOME_SNOWY_TAIGA] = {
+        TextureType::SNOW,
+        TextureType::DIRT,
+        TextureType::GRAVEL,
+        3,
+        0.15f, // medium tree density
+        0.1f,
+        glm::vec3(0.5f, 0.7f, 0.5f),
+        glm::vec3(0.4f, 0.6f, 0.4f),
+        true,
+        false,
+        true};
 
-  // BIOME_SNOWY_TAIGA
-  s_biomeConfigs[BIOME_SNOWY_TAIGA] = {
-      TextureType::SNOW,
-      TextureType::DIRT,
-      TextureType::GRAVEL,
-      3,
-      0.15f, // medium tree density
-      0.1f,
-      glm::vec3(0.5f, 0.7f, 0.5f),
-      glm::vec3(0.4f, 0.6f, 0.4f),
-      true,
-      false,
-      true};
+    // BIOME_ICE_SPIKES
+    s_biomeConfigs[BIOME_ICE_SPIKES] = {
+        TextureType::SNOW,
+        TextureType::SNOW,
+        TextureType::GRAVEL,
+        5,
+        0.0f,
+        0.0f,
+        glm::vec3(0.5f, 0.7f, 0.5f),
+        glm::vec3(0.4f, 0.6f, 0.4f),
+        true,
+        false,
+        false};
 
-  // BIOME_ICE_SPIKES
-  s_biomeConfigs[BIOME_ICE_SPIKES] = {
-      TextureType::SNOW,
-      TextureType::SNOW,
-      TextureType::GRAVEL,
-      5,
-      0.0f,
-      0.0f,
-      glm::vec3(0.5f, 0.7f, 0.5f),
-      glm::vec3(0.4f, 0.6f, 0.4f),
-      true,
-      false,
-      false};
+    // BIOME_OCEAN
+    s_biomeConfigs[BIOME_OCEAN] = {
+        TextureType::GRAVEL,
+        TextureType::GRAVEL,
+        TextureType::SAND,
+        4,
+        0.0f,
+        0.0f,
+        glm::vec3(0.4f, 0.65f, 0.4f),
+        glm::vec3(0.3f, 0.55f, 0.3f),
+        false,
+        false,
+        false};
 
-  // BIOME_OCEAN
-  s_biomeConfigs[BIOME_OCEAN] = {
-      TextureType::GRAVEL,
-      TextureType::GRAVEL,
-      TextureType::SAND,
-      4,
-      0.0f,
-      0.0f,
-      glm::vec3(0.4f, 0.65f, 0.4f),
-      glm::vec3(0.3f, 0.55f, 0.3f),
-      false,
-      false,
-      false};
+    // BIOME_BEACH
+    s_biomeConfigs[BIOME_BEACH] = {
+        TextureType::SAND,
+        TextureType::SAND,
+        TextureType::SAND,
+        5,
+        0.0f,
+        0.0f,
+        glm::vec3(0.55f, 0.7f, 0.4f),
+        glm::vec3(0.45f, 0.6f, 0.3f),
+        false,
+        false,
+        false};
 
-  // BIOME_BEACH
-  s_biomeConfigs[BIOME_BEACH] = {
-      TextureType::SAND,
-      TextureType::SAND,
-      TextureType::SAND,
-      5,
-      0.0f,
-      0.0f,
-      glm::vec3(0.55f, 0.7f, 0.4f),
-      glm::vec3(0.45f, 0.6f, 0.3f),
-      false,
-      false,
-      false};
+    // BIOME_PLAINS
+    s_biomeConfigs[BIOME_PLAINS] = {
+        TextureType::GRASS_TOP,
+        TextureType::DIRT,
+        TextureType::SAND,
+        3,
+        0.01f, // very sparse trees
+        0.3f,  // flowers/grass
+        glm::vec3(0.55f, 0.75f, 0.35f),
+        glm::vec3(0.4f, 0.65f, 0.25f),
+        false,
+        false,
+        true};
 
-  // BIOME_PLAINS
-  s_biomeConfigs[BIOME_PLAINS] = {
-      TextureType::GRASS_TOP,
-      TextureType::DIRT,
-      TextureType::SAND,
-      3,
-      0.01f, // very sparse trees
-      0.3f,  // flowers/grass
-      glm::vec3(0.55f, 0.75f, 0.35f),
-      glm::vec3(0.4f, 0.65f, 0.25f),
-      false,
-      false,
-      true};
+    // BIOME_FOREST
+    s_biomeConfigs[BIOME_FOREST] = {
+        TextureType::GRASS_TOP,
+        TextureType::DIRT,
+        TextureType::GRAVEL,
+        3,
+        0.25f, // dense trees
+        0.4f,
+        glm::vec3(0.4f, 0.7f, 0.3f),
+        glm::vec3(0.3f, 0.6f, 0.2f),
+        false,
+        false,
+        true};
 
-  // BIOME_FOREST
-  s_biomeConfigs[BIOME_FOREST] = {
-      TextureType::GRASS_TOP,
-      TextureType::DIRT,
-      TextureType::GRAVEL,
-      3,
-      0.25f, // dense trees
-      0.4f,
-      glm::vec3(0.4f, 0.7f, 0.3f),
-      glm::vec3(0.3f, 0.6f, 0.2f),
-      false,
-      false,
-      true};
+    // BIOME_BIRCH_FOREST
+    s_biomeConfigs[BIOME_BIRCH_FOREST] = {
+        TextureType::GRASS_TOP,
+        TextureType::DIRT,
+        TextureType::GRAVEL,
+        3,
+        0.22f,
+        0.35f,
+        glm::vec3(0.5f, 0.75f, 0.4f),
+        glm::vec3(0.45f, 0.7f, 0.35f),
+        false,
+        false,
+        true};
 
-  // BIOME_BIRCH_FOREST
-  s_biomeConfigs[BIOME_BIRCH_FOREST] = {
-      TextureType::GRASS_TOP,
-      TextureType::DIRT,
-      TextureType::GRAVEL,
-      3,
-      0.22f,
-      0.35f,
-      glm::vec3(0.5f, 0.75f, 0.4f),
-      glm::vec3(0.45f, 0.7f, 0.35f),
-      false,
-      false,
-      true};
+    // BIOME_DARK_FOREST
+    s_biomeConfigs[BIOME_DARK_FOREST] = {
+        TextureType::GRASS_TOP,
+        TextureType::DIRT,
+        TextureType::DIRT,
+        4,
+        0.4f, // very dense
+        0.5f,
+        glm::vec3(0.3f, 0.55f, 0.25f),
+        glm::vec3(0.25f, 0.45f, 0.2f),
+        false,
+        false,
+        true};
 
-  // BIOME_DARK_FOREST
-  s_biomeConfigs[BIOME_DARK_FOREST] = {
-      TextureType::GRASS_TOP,
-      TextureType::DIRT,
-      TextureType::DIRT,
-      4,
-      0.4f, // very dense
-      0.5f,
-      glm::vec3(0.3f, 0.55f, 0.25f),
-      glm::vec3(0.25f, 0.45f, 0.2f),
-      false,
-      false,
-      true};
+    // BIOME_SWAMP
+    s_biomeConfigs[BIOME_SWAMP] = {
+        TextureType::GRASS_TOP,
+        TextureType::DIRT,
+        TextureType::DIRT,
+        4,
+        0.12f,
+        0.6f,
+        glm::vec3(0.35f, 0.5f, 0.3f),
+        glm::vec3(0.3f, 0.45f, 0.25f),
+        false,
+        false,
+        true};
 
-  // BIOME_SWAMP
-  s_biomeConfigs[BIOME_SWAMP] = {
-      TextureType::GRASS_TOP,
-      TextureType::DIRT,
-      TextureType::DIRT,
-      4,
-      0.12f,
-      0.6f,
-      glm::vec3(0.35f, 0.5f, 0.3f),
-      glm::vec3(0.3f, 0.45f, 0.25f),
-      false,
-      false,
-      true};
+    // BIOME_RIVER
+    s_biomeConfigs[BIOME_RIVER] = {
+        TextureType::SAND,
+        TextureType::SAND,
+        TextureType::GRAVEL,
+        2,
+        0.0f,
+        0.0f,
+        glm::vec3(0.4f, 0.65f, 0.35f),
+        glm::vec3(0.35f, 0.55f, 0.3f),
+        false,
+        false,
+        false};
 
-  // BIOME_RIVER
-  s_biomeConfigs[BIOME_RIVER] = {
-      TextureType::SAND,
-      TextureType::SAND,
-      TextureType::GRAVEL,
-      2,
-      0.0f,
-      0.0f,
-      glm::vec3(0.4f, 0.65f, 0.35f),
-      glm::vec3(0.35f, 0.55f, 0.3f),
-      false,
-      false,
-      false};
+    // BIOME_DESERT
+    s_biomeConfigs[BIOME_DESERT] = {
+        TextureType::SAND,
+        TextureType::SAND,
+        TextureType::SAND,
+        8,
+        0.0f,
+        0.02f, // cacti
+        glm::vec3(0.7f, 0.7f, 0.4f),
+        glm::vec3(0.6f, 0.6f, 0.3f),
+        false,
+        true,
+        false};
 
-  // BIOME_DESERT
-  s_biomeConfigs[BIOME_DESERT] = {
-      TextureType::SAND,
-      TextureType::SAND,
-      TextureType::SAND,
-      8,
-      0.0f,
-      0.02f, // cacti
-      glm::vec3(0.7f, 0.7f, 0.4f),
-      glm::vec3(0.6f, 0.6f, 0.3f),
-      false,
-      true,
-      false};
+    // BIOME_SAVANNA
+    s_biomeConfigs[BIOME_SAVANNA] = {
+        TextureType::GRASS_TOP,
+        TextureType::DIRT,
+        TextureType::SAND,
+        3,
+        0.05f, // acacia-like sparse trees
+        0.2f,
+        glm::vec3(0.7f, 0.75f, 0.35f),
+        glm::vec3(0.6f, 0.65f, 0.25f),
+        false,
+        false,
+        false};
 
-  // BIOME_SAVANNA
-  s_biomeConfigs[BIOME_SAVANNA] = {
-      TextureType::GRASS_TOP,
-      TextureType::DIRT,
-      TextureType::SAND,
-      3,
-      0.05f, // acacia-like sparse trees
-      0.2f,
-      glm::vec3(0.7f, 0.75f, 0.35f),
-      glm::vec3(0.6f, 0.65f, 0.25f),
-      false,
-      false,
-      false};
+    // BIOME_JUNGLE
+    s_biomeConfigs[BIOME_JUNGLE] = {
+        TextureType::GRASS_TOP,
+        TextureType::DIRT,
+        TextureType::DIRT,
+        3,
+        0.45f, // very dense jungle
+        0.7f,
+        glm::vec3(0.3f, 0.8f, 0.2f),
+        glm::vec3(0.25f, 0.7f, 0.15f),
+        false,
+        false,
+        true};
 
-  // BIOME_JUNGLE
-  s_biomeConfigs[BIOME_JUNGLE] = {
-      TextureType::GRASS_TOP,
-      TextureType::DIRT,
-      TextureType::DIRT,
-      3,
-      0.45f, // very dense jungle
-      0.7f,
-      glm::vec3(0.3f, 0.8f, 0.2f),
-      glm::vec3(0.25f, 0.7f, 0.15f),
-      false,
-      false,
-      true};
+    // BIOME_BADLANDS
+    s_biomeConfigs[BIOME_BADLANDS] = {
+        TextureType::SAND, // orange terracotta would be better
+        TextureType::SAND,
+        TextureType::SAND,
+        6,
+        0.0f,
+        0.01f,
+        glm::vec3(0.8f, 0.6f, 0.4f),
+        glm::vec3(0.7f, 0.5f, 0.3f),
+        false,
+        true,
+        false};
 
-  // BIOME_BADLANDS
-  s_biomeConfigs[BIOME_BADLANDS] = {
-      TextureType::SAND, // orange terracotta would be better
-      TextureType::SAND,
-      TextureType::SAND,
-      6,
-      0.0f,
-      0.01f,
-      glm::vec3(0.8f, 0.6f, 0.4f),
-      glm::vec3(0.7f, 0.5f, 0.3f),
-      false,
-      true,
-      false};
+    // BIOME_MOUNTAINS
+    s_biomeConfigs[BIOME_MOUNTAINS] = {
+        TextureType::GRASS_TOP,
+        TextureType::STONE,
+        TextureType::GRAVEL,
+        2,
+        0.08f,
+        0.1f,
+        glm::vec3(0.45f, 0.65f, 0.35f),
+        glm::vec3(0.4f, 0.55f, 0.3f),
+        false,
+        false,
+        true};
 
-  // BIOME_MOUNTAINS
-  s_biomeConfigs[BIOME_MOUNTAINS] = {
-      TextureType::GRASS_TOP,
-      TextureType::STONE,
-      TextureType::GRAVEL,
-      2,
-      0.08f,
-      0.1f,
-      glm::vec3(0.45f, 0.65f, 0.35f),
-      glm::vec3(0.4f, 0.55f, 0.3f),
-      false,
-      false,
-      true};
+    // BIOME_SNOWY_MOUNTAINS
+    s_biomeConfigs[BIOME_SNOWY_MOUNTAINS] = {
+        TextureType::SNOW,
+        TextureType::STONE,
+        TextureType::GRAVEL,
+        2,
+        0.02f,
+        0.02f,
+        glm::vec3(0.5f, 0.7f, 0.5f),
+        glm::vec3(0.4f, 0.6f, 0.4f),
+        true,
+        false,
+        false};
 
-  // BIOME_SNOWY_MOUNTAINS
-  s_biomeConfigs[BIOME_SNOWY_MOUNTAINS] = {
-      TextureType::SNOW,
-      TextureType::STONE,
-      TextureType::GRAVEL,
-      2,
-      0.02f,
-      0.02f,
-      glm::vec3(0.5f, 0.7f, 0.5f),
-      glm::vec3(0.4f, 0.6f, 0.4f),
-      true,
-      false,
-      false};
-
-  s_biomeConfigsInitialized = true;
+    s_biomeConfigsInitialized = true;
+  });
 }
 
 const BiomeConfig &TerrainGenerator::getBiomeConfig(BiomeType biome)
@@ -314,52 +313,53 @@ void TerrainGenerator::setupTerrainNoise()
   continentalFractal->SetOctaveCount(5);
   continentalFractal->SetLacunarity(2.0f);
   continentalFractal->SetGain(0.45f);
+  continentalFractal->SetWeightedStrength(0.0f);
 
-    auto continentalScale = FastNoise::New<FastNoise::DomainScale>();
-    continentalScale->SetSource(continentalFractal);
-    continentalScale->SetScale(0.002f); // Increased from 0.0008f
-    m_continentalNoise = continentalScale;
-  
-    // Erosion noise - Controls terrain smoothness
-    auto erosionBase = FastNoise::New<FastNoise::Perlin>();
-    auto erosionFractal = FastNoise::New<FastNoise::FractalFBm>();
-    erosionFractal->SetSource(erosionBase);
-    erosionFractal->SetOctaveCount(4);
-    erosionFractal->SetLacunarity(2.0f);
-    erosionFractal->SetGain(0.5f);
-  
-    auto erosionScale = FastNoise::New<FastNoise::DomainScale>();
-    erosionScale->SetSource(erosionFractal);
-    erosionScale->SetScale(0.004f); // Increased from 0.002f
-    m_erosionNoise = erosionScale;
-  
-    // Peaks and Valleys noise - Local height variation
-    auto pvBase = FastNoise::New<FastNoise::OpenSimplex2>();
-    auto pvFractal = FastNoise::New<FastNoise::FractalFBm>();
-    pvFractal->SetSource(pvBase);
-    pvFractal->SetOctaveCount(6);
-    pvFractal->SetLacunarity(2.0f);
-    pvFractal->SetGain(0.5f);
-  
-    auto pvScale = FastNoise::New<FastNoise::DomainScale>();
-    pvScale->SetSource(pvFractal);
-    pvScale->SetScale(0.01f); // Increased from 0.006f
-    m_peaksValleysNoise = pvScale;
-  
-    // Ridge noise - For sharp mountain peaks
-    auto ridgeBase = FastNoise::New<FastNoise::OpenSimplex2>();
-    auto ridgeFractal = FastNoise::New<FastNoise::FractalRidged>();
-    ridgeFractal->SetSource(ridgeBase);
-    ridgeFractal->SetOctaveCount(3);
-    ridgeFractal->SetLacunarity(2.0f);
-    ridgeFractal->SetGain(0.5f);
-  
-    auto ridgeScale = FastNoise::New<FastNoise::DomainScale>();
-    ridgeScale->SetSource(ridgeFractal);
-    ridgeScale->SetScale(0.004f); // Increased from 0.002f
-    m_ridgeNoise = ridgeScale;
-  }
-  
+  // Set frequency directly on the fractal node
+  auto continentalScale = FastNoise::New<FastNoise::DomainScale>();
+  continentalScale->SetSource(continentalFractal);
+  continentalScale->SetScale(0.002f); 
+  m_continentalNoise = continentalScale;
+
+  // Erosion noise - Controls terrain smoothness
+  auto erosionBase = FastNoise::New<FastNoise::Perlin>();
+  auto erosionFractal = FastNoise::New<FastNoise::FractalFBm>();
+  erosionFractal->SetSource(erosionBase);
+  erosionFractal->SetOctaveCount(4);
+  erosionFractal->SetLacunarity(2.0f);
+  erosionFractal->SetGain(0.5f);
+
+  auto erosionScale = FastNoise::New<FastNoise::DomainScale>();
+  erosionScale->SetSource(erosionFractal);
+  erosionScale->SetScale(0.004f); 
+  m_erosionNoise = erosionScale;
+
+  // Peaks and Valleys noise - Local height variation
+  auto pvBase = FastNoise::New<FastNoise::OpenSimplex2>();
+  auto pvFractal = FastNoise::New<FastNoise::FractalFBm>();
+  pvFractal->SetSource(pvBase);
+  pvFractal->SetOctaveCount(6);
+  pvFractal->SetLacunarity(2.0f);
+  pvFractal->SetGain(0.5f);
+
+  auto pvScale = FastNoise::New<FastNoise::DomainScale>();
+  pvScale->SetSource(pvFractal);
+  pvScale->SetScale(0.01f); 
+  m_peaksValleysNoise = pvScale;
+
+  // Ridge noise - For sharp mountain peaks
+  auto ridgeBase = FastNoise::New<FastNoise::OpenSimplex2>();
+  auto ridgeFractal = FastNoise::New<FastNoise::FractalRidged>();
+  ridgeFractal->SetSource(ridgeBase);
+  ridgeFractal->SetOctaveCount(3);
+  ridgeFractal->SetLacunarity(2.0f);
+  ridgeFractal->SetGain(0.5f);
+
+  auto ridgeScale = FastNoise::New<FastNoise::DomainScale>();
+  ridgeScale->SetSource(ridgeFractal);
+  ridgeScale->SetScale(0.004f); 
+  m_ridgeNoise = ridgeScale;
+}  
   void TerrainGenerator::setupBiomeNoise()
   {
     // Temperature noise - Varies from cold (north) to hot (south) with local variation
@@ -503,6 +503,27 @@ void TerrainGenerator::setupOres()
 }
 
 // =============================================
+// THREAD-LOCAL STORAGE FOR OPTIMIZATION
+// =============================================
+
+struct GenBuffers
+{
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> continental;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> erosion;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> peaksValleys;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> ridge;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> temperature;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> humidity;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> weirdness;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> river;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> riverMask;
+  std::array<float, CHUNK_VOLUME> cave;
+  std::array<float, CHUNK_VOLUME> ravine;
+};
+
+static thread_local GenBuffers s_genBuffers;
+
+// =============================================
 // CHUNK GENERATION
 // =============================================
 
@@ -529,63 +550,63 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   constexpr int totalPoints = CHUNK_SIZE * CHUNK_SIZE;
   constexpr int totalVoxels = CHUNK_VOLUME;
 
-  // Allocate noise output buffers
-  std::vector<float> continentalResults(totalPoints);
-  std::vector<float> erosionResults(totalPoints);
-  std::vector<float> peaksValleysResults(totalPoints);
-  std::vector<float> ridgeResults(totalPoints);
+  // Use thread-local scratch buffers to avoid heap allocations
+  float *continentalResults = s_genBuffers.continental.data();
+  float *erosionResults = s_genBuffers.erosion.data();
+  float *peaksValleysResults = s_genBuffers.peaksValleys.data();
+  float *ridgeResults = s_genBuffers.ridge.data();
 
   // Biome noise buffers
-  std::vector<float> temperatureResults(totalPoints);
-  std::vector<float> humidityResults(totalPoints);
-  std::vector<float> weirdnessResults(totalPoints);
+  float *temperatureResults = s_genBuffers.temperature.data();
+  float *humidityResults = s_genBuffers.humidity.data();
+  float *weirdnessResults = s_genBuffers.weirdness.data();
 
   // River noise buffers
-  std::vector<float> riverResults(totalPoints);
-  std::vector<float> riverMaskResults(totalPoints);
+  float *riverResults = s_genBuffers.river.data();
+  float *riverMaskResults = s_genBuffers.riverMask.data();
 
   // 3D Noise buffers
-  std::vector<float> caveResults(totalVoxels);
-  std::vector<float> ravineResults(totalVoxels);
+  float *caveResults = s_genBuffers.cave.data();
+  float *ravineResults = s_genBuffers.ravine.data();
 
   // Generate terrain noise
-  m_continentalNoise->GenUniformGrid2D(continentalResults.data(), chunkX,
+  m_continentalNoise->GenUniformGrid2D(continentalResults, chunkX,
                                        chunkZ, CHUNK_SIZE, CHUNK_SIZE, 1.0f,
                                        m_seed);
 
-  m_erosionNoise->GenUniformGrid2D(erosionResults.data(), chunkX, chunkZ,
+  m_erosionNoise->GenUniformGrid2D(erosionResults, chunkX, chunkZ,
                                    CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 1000);
 
-  m_peaksValleysNoise->GenUniformGrid2D(peaksValleysResults.data(), chunkX,
+  m_peaksValleysNoise->GenUniformGrid2D(peaksValleysResults, chunkX,
                                         chunkZ, CHUNK_SIZE, CHUNK_SIZE, 1.0f,
                                         m_seed + 2000);
 
-  m_ridgeNoise->GenUniformGrid2D(ridgeResults.data(), chunkX, chunkZ,
+  m_ridgeNoise->GenUniformGrid2D(ridgeResults, chunkX, chunkZ,
                                  CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 3000);
 
   // Generate biome noise
-  m_temperatureNoise->GenUniformGrid2D(temperatureResults.data(), chunkX, chunkZ,
+  m_temperatureNoise->GenUniformGrid2D(temperatureResults, chunkX, chunkZ,
                                        CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 6000);
 
-  m_humidityNoise->GenUniformGrid2D(humidityResults.data(), chunkX, chunkZ,
+  m_humidityNoise->GenUniformGrid2D(humidityResults, chunkX, chunkZ,
                                     CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 7000);
 
-  m_weirdnessNoise->GenUniformGrid2D(weirdnessResults.data(), chunkX, chunkZ,
+  m_weirdnessNoise->GenUniformGrid2D(weirdnessResults, chunkX, chunkZ,
                                      CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 8000);
 
   // Generate river noise
-  m_riverNoise->GenUniformGrid2D(riverResults.data(), chunkX, chunkZ,
+  m_riverNoise->GenUniformGrid2D(riverResults, chunkX, chunkZ,
                                  CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 9000);
 
-  m_riverMaskNoise->GenUniformGrid2D(riverMaskResults.data(), chunkX, chunkZ,
+  m_riverMaskNoise->GenUniformGrid2D(riverMaskResults, chunkX, chunkZ,
                                      CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 9500);
 
   // Generate 3D noise for caves and ravines
-  m_caveNoise->GenUniformGrid3D(caveResults.data(), chunkX, 0, chunkZ,
+  m_caveNoise->GenUniformGrid3D(caveResults, chunkX, 0, chunkZ,
                                 CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE, 1.0f,
                                 m_seed + 4000);
 
-  m_ravineNoise->GenUniformGrid3D(ravineResults.data(), chunkX, 0, chunkZ,
+  m_ravineNoise->GenUniformGrid3D(ravineResults, chunkX, 0, chunkZ,
                                   CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE, 1.0f,
                                   m_seed + 5000);
 
