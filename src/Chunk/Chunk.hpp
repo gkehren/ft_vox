@@ -48,6 +48,7 @@ public:
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
 	uint32_t draw(const Shader &shader, const Camera &camera, GLuint textureArray, const ShaderParameters &params);
+	void drawShadow(const Shader &shader) const;
 	void generateTerrain(TerrainGenerator &generator);
 	void generateMesh();
 

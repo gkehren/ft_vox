@@ -17,6 +17,11 @@ struct ShaderParameters
 	float diffuseIntensity = 0.7f;
 	float lightLevels = 5.0f;
 
+	// Day/Night cycle
+	bool dayCycleEnabled = true;
+	float dayTime = 0.25f; // 0.0 to 1.0 (0.25 is sunrise, 0.5 is noon, 0.75 is sunset, 0.0/1.0 is midnight)
+	float dayCycleSpeed = 0.002f;
+
 	// visual
 	float saturationLevel = 1.2f;
 	float colorBoost = 1.0f;

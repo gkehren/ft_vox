@@ -1,51 +1,16 @@
 #include "Renderer.hpp"
+#include <Chunk/ChunkManager.hpp>
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image/stb_image.h>
-
-// static GLuint loadTexture(const char *path)
-//{
-//	GLuint textureID;
-//	glGenTextures(1, &textureID);
-
-//	int width, height, nrComponents;
-//	unsigned char *data = stbi_load(path, &width, &height, &nrComponents, 0);
-//	if (data)
-//	{
-//		GLenum format;
-//		if (nrComponents == 1)
-//			format = GL_RED;
-//		else if (nrComponents == 3)
-//			format = GL_RGB;
-//		else if (nrComponents == 4)
-//			format = GL_RGBA;
-
-//		glBindTexture(GL_TEXTURE_2D, textureID);
-//		glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
-//		glGenerateMipmap(GL_TEXTURE_2D);
-
-//		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-//		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-//		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-//		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-//		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, 0.4f);
-
-//		stbi_image_free(data);
-//	}
-//	else
-//	{
-//		std::cout << "Texture failed to load at path: " << path << std::endl;
-//		stbi_image_free(data);
-//	}
-
-//	return textureID;
-//}
 
 Renderer::Renderer(int screenWidth, int screenHeight, float renderDistance) : screenWidth(screenWidth), screenHeight(screenHeight), renderDistance(renderDistance)
 {
 	this->textureManager.initialize();
+	this->textureAtlas = this->textureManager.getTextureArray(); // Initialize textureAtlas
 	this->initBoundingBox();
 	this->initPlayer();
 	this->loadSkybox();
+	this->initShadowMap();
 }
 
 Renderer::~Renderer()
@@ -59,7 +24,68 @@ Renderer::~Renderer()
 	glDeleteVertexArrays(1, &this->playerVAO);
 	glDeleteBuffers(1, &this->playerVBO);
 	glDeleteBuffers(1, &this->playerEBO);
+	glDeleteFramebuffers(1, &this->shadowMapFBO);
+	glDeleteTextures(1, &this->shadowMapTexture);
 }
+
+void Renderer::initShadowMap()
+{
+	glGenFramebuffers(1, &shadowMapFBO);
+	glGenTextures(1, &shadowMapTexture);
+	glBindTexture(GL_TEXTURE_2D, shadowMapTexture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	float borderColor[] = {1.0, 1.0, 1.0, 1.0};
+	glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowMapTexture, 0);
+	glDrawBuffer(GL_NONE);
+	glReadBuffer(GL_NONE);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	std::string path = RES_PATH;
+	shadowShader = std::make_unique<Shader>((path + "shaders/shadowVertex.glsl").c_str(), (path + "shaders/shadowFragment.glsl").c_str());
+}
+
+void Renderer::renderShadowMap(const Camera &camera, const glm::vec3 &lightDir, const ChunkManager &chunkManager)
+{
+	// Save current state
+	GLint viewport[4];
+	glGetIntegerv(GL_VIEWPORT, viewport);
+	GLint cullFace;
+	glGetIntegerv(GL_CULL_FACE_MODE, &cullFace);
+
+	glEnable(GL_DEPTH_TEST);
+	glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
+	glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFBO);
+	glClear(GL_DEPTH_BUFFER_BIT);
+
+	shadowShader->use();
+
+	float near_plane = 1.0f, far_plane = 1000.0f;
+	float boxSize = 512.0f; // Increased coverage area
+	glm::mat4 lightProjection = glm::ortho(-boxSize, boxSize, -boxSize, boxSize, near_plane, far_plane);
+
+	// lightDir points TOWARDS the sun. So lightPos is in that direction.
+	glm::vec3 lightPos = camera.getPosition() + glm::normalize(lightDir) * 500.0f;
+	glm::mat4 lightView = glm::lookAt(lightPos, camera.getPosition(), glm::vec3(0.0, 1.0, 0.0));
+
+	lightSpaceMatrix = lightProjection * lightView;
+	shadowShader->setMat4("lightSpaceMatrix", lightSpaceMatrix);
+
+	glCullFace(GL_FRONT); // Avoid Peter Panning
+	chunkManager.drawShadows(*shadowShader);
+
+	// Restore state
+	glCullFace(cullFace);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+}
+
 
 void Renderer::setScreenSize(int screenWidth, int screenHeight)
 {
@@ -223,6 +249,7 @@ void Renderer::drawSkybox(const Camera &camera) const
 	glBindTexture(GL_TEXTURE_CUBE_MAP, this->skyboxTexture);
 	glDrawArrays(GL_TRIANGLES, 0, 36);
 	glBindVertexArray(0);
+	glActiveTexture(GL_TEXTURE0);
 	glDepthFunc(GL_LESS);
 }
 

@@ -624,3 +624,13 @@ uint32_t Chunk::draw(const Shader &shader, const Camera &camera,
 
   return indices.size();
 }
+
+void Chunk::drawShadow(const Shader &shader) const {
+  if (indices.empty() || meshNeedsUpdate)
+    return;
+
+  shader.setMat4("model", glm::mat4(1.0f));
+  glBindVertexArray(VAO);
+  glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_SHORT, 0);
+  glBindVertexArray(0);
+}

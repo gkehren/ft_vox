@@ -203,8 +203,15 @@ void UIManager::handleShaderParametersWindow()
 
 	if (ImGui::CollapsingHeader("Lighting"))
 	{
-		ImGui::SliderFloat3("Sun Direction", (float *)&shaderParams.sunDirection, -1.0f, 1.0f);
-		shaderParams.sunDirection = glm::normalize(shaderParams.sunDirection); // Normalize after edit
+		ImGui::Checkbox("Day/Night Cycle", &shaderParams.dayCycleEnabled);
+		ImGui::SliderFloat("Day Time", &shaderParams.dayTime, 0.0f, 1.0f, "%.3f");
+		ImGui::SliderFloat("Cycle Speed", &shaderParams.dayCycleSpeed, 0.0f, 0.05f, "%.5f");
+		
+		if (!shaderParams.dayCycleEnabled)
+		{
+			ImGui::SliderFloat3("Sun Direction", (float *)&shaderParams.sunDirection, -1.0f, 1.0f);
+			shaderParams.sunDirection = glm::normalize(shaderParams.sunDirection); // Normalize after edit
+		}
 		ImGui::SliderFloat("Ambient Strength", &shaderParams.ambientStrength, 0.0f, 1.0f);
 		ImGui::SliderFloat("Diffuse Intensity", &shaderParams.diffuseIntensity, 0.0f, 1.0f);
 		ImGui::SliderFloat("Light Levels", &shaderParams.lightLevels, 1.0f, 16.0f);

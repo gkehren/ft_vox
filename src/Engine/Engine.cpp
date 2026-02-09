@@ -169,6 +169,14 @@ void Engine::run()
 		// Start ImGui frame
 		uiManager->update(); // This calls ImGui::NewFrame and prepares UI data
 
+		// Ensure OpenGL states are correct for the frame
+		glEnable(GL_DEPTH_TEST);
+		glDepthFunc(GL_LESS);
+		glEnable(GL_CULL_FACE);
+		glCullFace(GL_BACK);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
 		// Rendering
 		glClearColor(uiManager->getShaderParams().fogColor.x, uiManager->getShaderParams().fogColor.y, uiManager->getShaderParams().fogColor.z, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -189,6 +197,47 @@ void Engine::run()
 void Engine::updateWorldState()
 {
 	RenderSettings &currentRenderSettings = uiManager->getRenderSettings();
+	ShaderParameters &params = uiManager->getShaderParams();
+
+	// Update Day/Night cycle
+	if (params.dayCycleEnabled)
+	{
+		params.dayTime += static_cast<float>(deltaTime) * params.dayCycleSpeed;
+		if (params.dayTime > 1.0f) params.dayTime -= 1.0f;
+
+		// Calculate sun direction based on time
+		// 0.25 is sunrise (+X), 0.5 is noon (+Y), 0.75 is sunset (-X), 0.0 is midnight (-Y)
+		float angle = params.dayTime * 2.0f * 3.14159f;
+		params.sunDirection = glm::normalize(glm::vec3(cos(angle), sin(angle), 0.2f));
+
+		// Interpolate fog color and lighting based on sun height (sin(angle))
+		float sunHeight = sin(angle); // -1.0 to 1.0
+		
+		// Colors for different times
+		glm::vec3 dayFog = glm::vec3(0.75f, 0.85f, 1.0f);
+		glm::vec3 sunsetFog = glm::vec3(1.0f, 0.4f, 0.2f);
+		glm::vec3 nightFog = glm::vec3(0.02f, 0.02f, 0.05f);
+
+		if (sunHeight > 0.2f) { // Day
+			params.fogColor = dayFog;
+			params.ambientStrength = 0.2f;
+			params.diffuseIntensity = 0.7f;
+		} else if (sunHeight > -0.2f) { // Sunrise/Sunset transition
+			float t = (sunHeight + 0.2f) / 0.4f; // 0 to 1
+			if (cos(angle) > 0) { // Sunrise
+				params.fogColor = glm::mix(sunsetFog, dayFog, t);
+			} else { // Sunset
+				params.fogColor = glm::mix(sunsetFog, dayFog, t);
+			}
+			params.ambientStrength = glm::mix(0.1f, 0.2f, t);
+			params.diffuseIntensity = glm::mix(0.1f, 0.7f, t);
+		} else { // Night
+			float t = (sunHeight + 1.0f) / 0.8f; // 0 to 1
+			params.fogColor = glm::mix(nightFog, sunsetFog, t);
+			params.ambientStrength = 0.15f; // Increased from 0.05
+			params.diffuseIntensity = 0.0f;
+		}
+	}
 
 	if (!currentRenderSettings.paused)
 	{
@@ -217,6 +266,11 @@ void Engine::renderScene() // Renamed from render
 	auto startFrame = std::chrono::high_resolution_clock::now(); // Keep for total frame timing if needed outside ChunkManager
 	RenderSettings &currentRenderSettings = uiManager->getRenderSettings();
 
+	if (renderer && chunkManager)
+	{
+		renderer->renderShadowMap(camera, uiManager->getShaderParams().sunDirection, *chunkManager);
+	}
+
 	if (client && client->isConnected())
 	{
 		client->sendPlayerPosition(camera.getPosition().x, camera.getPosition().y, camera.getPosition().z);
@@ -230,6 +284,7 @@ void Engine::renderScene() // Renamed from render
 
 	// Shader parameters update before drawing chunks
 	shader->use();
+
 	shader->setFloat("fogStart", uiManager->getShaderParams().fogStart);
 	shader->setFloat("fogEnd", uiManager->getShaderParams().fogEnd);
 	shader->setFloat("fogDensity", uiManager->getShaderParams().fogDensity);
@@ -244,8 +299,18 @@ void Engine::renderScene() // Renamed from render
 
 	if (renderer && shader && renderer->getTextureAtlas() && chunkManager)
 	{
+		// Shadow map binding
+		shader->setMat4("lightSpaceMatrix", renderer->getLightSpaceMatrix());
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, renderer->getShadowMapTexture());
+		glActiveTexture(GL_TEXTURE0); // Return to default for texture atlas binding
+
 		// Pass currentRenderSettings by non-const reference if drawVisibleChunks updates it
 		chunkManager->drawVisibleChunks(*shader, camera, renderer->getTextureAtlas(), uiManager->getShaderParams(), renderer.get(), currentRenderSettings, windowWidth, windowHeight);
+		
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glActiveTexture(GL_TEXTURE0);
 	}
 
 	updateVoxelHighlights();

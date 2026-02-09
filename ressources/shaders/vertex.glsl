@@ -11,10 +11,12 @@ out float TextureIndex;
 out float UseBiomeColor;
 out vec3 BiomeColor;
 out float AO;
+out vec4 FragPosLightSpace;
 
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
+uniform mat4 lightSpaceMatrix;
 
 const vec3 NORMALS[6] = vec3[](
     vec3(1.0, 0.0, 0.0),  // 0: +X
@@ -50,5 +52,6 @@ void main()
 
     TexCoord = aTexCoord;
 
+    FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
     gl_Position = projection * view * vec4(FragPos, 1.0);
 }

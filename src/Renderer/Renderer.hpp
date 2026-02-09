@@ -27,6 +27,11 @@ public:
 	void drawSkybox(const Camera &camera) const;
 	void drawPlayer(const Camera &camera, const glm::vec3 &position, uint32_t playerId) const;
 
+	// Shadow mapping
+	void renderShadowMap(const Camera &camera, const glm::vec3 &lightDir, const class ChunkManager &chunkManager);
+	GLuint getShadowMapTexture() const { return shadowMapTexture; }
+	glm::mat4 getLightSpaceMatrix() const { return lightSpaceMatrix; }
+
 private:
 	TextureManager textureManager;
 	std::unique_ptr<Shader> boundingBoxShader;
@@ -47,6 +52,15 @@ private:
 	GLuint playerVBO;
 	GLuint playerEBO;
 	void initPlayer();
+
+	// Shadow mapping members
+	std::unique_ptr<Shader> shadowShader;
+	GLuint shadowMapFBO;
+	GLuint shadowMapTexture;
+	glm::mat4 lightSpaceMatrix;
+	const unsigned int SHADOW_WIDTH = 4096;
+	const unsigned int SHADOW_HEIGHT = 4096;
+	void initShadowMap();
 
 	float screenWidth;
 	float screenHeight;

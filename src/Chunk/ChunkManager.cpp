@@ -200,6 +200,17 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	m_renderTiming.chunkRendering = std::chrono::duration<float, std::milli>(end - start).count();
 }
 
+void ChunkManager::drawShadows(const Shader &shader) const
+{
+	std::lock_guard<std::mutex> lock(chunkMutex);
+	for (Chunk *chunk : activeChunks)
+	{
+		if (!chunk->isVisible() || chunk->getState() < ChunkState::MESHED)
+			continue;
+		chunk->drawShadow(shader);
+	}
+}
+
 bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
 {
 	int chunkX = static_cast<int>(std::floor(worldPos.x / CHUNK_SIZE));
