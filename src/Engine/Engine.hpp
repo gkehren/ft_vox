@@ -1,7 +1,8 @@
 #pragma once
 
-#include <glad/glad.h>
+#include <utils.hpp>
 #include <SDL3/SDL.h>
+#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_access.hpp>
 

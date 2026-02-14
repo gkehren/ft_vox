@@ -47,10 +47,12 @@ public:
 
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
-	uint32_t draw(const Shader &shader, const Camera &camera, GLuint textureArray, const ShaderParameters &params);
+	uint32_t draw();
+	uint32_t drawWater();
 	void drawShadow(const Shader &shader) const;
 	void generateTerrain(TerrainGenerator &generator);
 	void generateMesh();
+	bool hasWaterMesh() const { return waterIndexCount > 0; }
 
 private:
 	glm::vec3 position;
@@ -61,12 +63,22 @@ private:
 	GLuint VBO;
 	GLuint EBO;
 
+	// Separate water mesh for transparency pass
+	GLuint waterVAO;
+	GLuint waterVBO;
+	GLuint waterEBO;
+
 	std::vector<Vertex> vertices;
 	std::vector<uint16_t> indices;
+	std::vector<Vertex> waterVertices;
+	std::vector<uint16_t> waterIndices;
 	std::vector<Voxel> voxels;
 	std::bitset<CHUNK_VOLUME> activeVoxels;
 	std::vector<uint8_t> neighborShellVoxels; // Flat array for 1-thick shell (18x(H+2)x18)
 
+
+	uint32_t opaqueIndexCount;
+	uint32_t waterIndexCount;
 
 	bool meshNeedsUpdate;
 	void uploadMeshToGPU();

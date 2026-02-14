@@ -5,12 +5,14 @@ in vec2 TexCoord;
 
 uniform sampler2D hdrBuffer;
 uniform sampler2D bloomBuffer;
+uniform sampler2D godRaysBuffer;
 
 uniform float exposure    = 1.0;
 uniform float bloomIntensity = 0.3;
 uniform float gamma       = 2.2;
 uniform bool  bloomEnabled = true;
 uniform bool  fxaaEnabled  = true;
+uniform bool  godRaysEnabled = true;
 uniform int   toneMapper   = 0; // 0 = ACES, 1 = Reinhard
 
 // ---------- Tone mapping operators ----------
@@ -39,6 +41,7 @@ vec3 applyFXAA(sampler2D tex, vec2 uv)
 
     // Sample luminances around center
     float lumC  = dot(texture(tex, uv).rgb, vec3(0.299, 0.587, 0.114));
+
     float lumN  = dot(texture(tex, uv + vec2( 0.0,  texelSize.y)).rgb, vec3(0.299, 0.587, 0.114));
     float lumS  = dot(texture(tex, uv + vec2( 0.0, -texelSize.y)).rgb, vec3(0.299, 0.587, 0.114));
     float lumE  = dot(texture(tex, uv + vec2( texelSize.x,  0.0)).rgb, vec3(0.299, 0.587, 0.114));
@@ -97,6 +100,8 @@ void main()
 {
     vec3 hdrColor;
 
+    // FXAA on the HDR buffer — all neighbor samples come from the
+    // same source for consistent luminance contrast detection
     if (fxaaEnabled)
         hdrColor = applyFXAA(hdrBuffer, TexCoord);
     else
@@ -107,6 +112,13 @@ void main()
     {
         vec3 bloom = texture(bloomBuffer, TexCoord).rgb;
         hdrColor += bloom * bloomIntensity;
+    }
+
+    // Add god rays
+    if (godRaysEnabled)
+    {
+        vec3 godRays = texture(godRaysBuffer, TexCoord).rgb;
+        hdrColor += godRays;
     }
 
     // Exposure

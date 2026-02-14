@@ -60,6 +60,14 @@ struct PostProcessSettings
 	float exposure{1.0f};
 	int toneMapper{0}; // 0 = ACES, 1 = Reinhard
 	float gamma{2.2f};
+
+	// God rays (volumetric light scattering)
+	bool godRaysEnabled{true};
+	float godRaysDensity{1.0f};
+	float godRaysWeight{0.01f};
+	float godRaysDecay{0.97f};
+	float godRaysExposure{0.3f};
+
 };
 
 struct VoxelHighlight

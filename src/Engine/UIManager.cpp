@@ -237,6 +237,16 @@ void UIManager::handleShaderParametersWindow()
 		ImGui::SliderFloat("PP Gamma", &postProcessSettings.gamma, 0.5f, 4.0f);
 		const char *toneMappers[] = {"ACES Filmic", "Reinhard"};
 		ImGui::Combo("Tone Mapper", &postProcessSettings.toneMapper, toneMappers, IM_ARRAYSIZE(toneMappers));
+
+		ImGui::Separator();
+		ImGui::Checkbox("God Rays", &postProcessSettings.godRaysEnabled);
+		if (postProcessSettings.godRaysEnabled)
+		{
+			ImGui::SliderFloat("GR Density", &postProcessSettings.godRaysDensity, 0.1f, 3.0f);
+			ImGui::SliderFloat("GR Weight", &postProcessSettings.godRaysWeight, 0.001f, 0.05f, "%.4f");
+			ImGui::SliderFloat("GR Decay", &postProcessSettings.godRaysDecay, 0.9f, 1.0f, "%.3f");
+			ImGui::SliderFloat("GR Exposure", &postProcessSettings.godRaysExposure, 0.0f, 1.0f);
+		}
 	}
 
 	ImGui::End();

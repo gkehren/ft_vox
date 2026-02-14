@@ -5,6 +5,7 @@
 PostProcessing::PostProcessing(int width, int height)
 	: viewportWidth(width), viewportHeight(height),
 	  hdrFBO(0), hdrColorTexture(0), hdrDepthRBO(0),
+	  godRaysFBO(0), godRaysTexture(0),
 	  quadVAO(0), quadVBO(0)
 {
 	bloomFBO[0] = bloomFBO[1] = 0;
@@ -20,6 +21,9 @@ PostProcessing::PostProcessing(int width, int height)
 	bloomBlurShader = std::make_unique<Shader>(
 		(path + "postProcessVertex.glsl").c_str(),
 		(path + "bloomBlur.glsl").c_str());
+	godRaysShader = std::make_unique<Shader>(
+		(path + "postProcessVertex.glsl").c_str(),
+		(path + "godRays.glsl").c_str());
 	compositeShader = std::make_unique<Shader>(
 		(path + "postProcessVertex.glsl").c_str(),
 		(path + "postProcessFragment.glsl").c_str());
@@ -93,10 +97,8 @@ void PostProcessing::initFBOs()
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	// ---- Bloom ping-pong framebuffers (half resolution) ----
-	int bloomW = viewportWidth / 2;
-	int bloomH = viewportHeight / 2;
-	if (bloomW < 1) bloomW = 1;
-	if (bloomH < 1) bloomH = 1;
+	int halfW = std::max(1, viewportWidth / 2);
+	int halfH = std::max(1, viewportHeight / 2);
 
 	for (int i = 0; i < 2; ++i)
 	{
@@ -105,7 +107,7 @@ void PostProcessing::initFBOs()
 
 		glBindFramebuffer(GL_FRAMEBUFFER, bloomFBO[i]);
 		glBindTexture(GL_TEXTURE_2D, bloomTexture[i]);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, bloomW, bloomH, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, halfW, halfH, 0, GL_RGBA, GL_FLOAT, nullptr);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -115,6 +117,22 @@ void PostProcessing::initFBOs()
 		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
 			std::cerr << "[PostProcessing] Bloom FBO " << i << " is not complete!" << std::endl;
 	}
+
+	// ---- God rays FBO (half resolution, R11F_G11F_B10F) ----
+	glGenFramebuffers(1, &godRaysFBO);
+	glGenTextures(1, &godRaysTexture);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, godRaysFBO);
+	glBindTexture(GL_TEXTURE_2D, godRaysTexture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R11F_G11F_B10F, halfW, halfH, 0, GL_RGB, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, godRaysTexture, 0);
+
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		std::cerr << "[PostProcessing] God Rays FBO is not complete!" << std::endl;
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -127,6 +145,9 @@ void PostProcessing::deleteFBOs()
 
 	glDeleteFramebuffers(2, bloomFBO);
 	glDeleteTextures(2, bloomTexture);
+
+	glDeleteFramebuffers(1, &godRaysFBO);
+	glDeleteTextures(1, &godRaysTexture);
 }
 
 void PostProcessing::resize(int width, int height)
@@ -156,19 +177,24 @@ void PostProcessing::beginScene()
 {
 	glBindFramebuffer(GL_FRAMEBUFFER, hdrFBO);
 	glViewport(0, 0, viewportWidth, viewportHeight);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
-void PostProcessing::endSceneAndRender(const PostProcessSettings &settings)
+void PostProcessing::endSceneAndRender(const PostProcessSettings &settings, const glm::vec2 &sunScreenPos)
 {
 	int bloomW = viewportWidth / 2;
 	int bloomH = viewportHeight / 2;
 	if (bloomW < 1) bloomW = 1;
 	if (bloomH < 1) bloomH = 1;
 
-	// Save and disable depth/culling for screen-space passes
+	int grW = viewportWidth / 2;
+	int grH = viewportHeight / 2;
+	if (grW < 1) grW = 1;
+	if (grH < 1) grH = 1;
+
+	// Save and disable depth/culling/blending for screen-space passes
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_CULL_FACE);
+	glDisable(GL_BLEND);
 
 	// ---------- 1. Bloom Extract ----------
 	if (settings.bloomEnabled)
@@ -202,7 +228,28 @@ void PostProcessing::endSceneAndRender(const PostProcessSettings &settings)
 		}
 	}
 
-	// ---------- 3. Composite (HDR + Bloom -> LDR, tone map, FXAA) ----------
+	// ---------- 3. God Rays ----------
+	// Always clear to avoid stale VRAM data when toggling the effect
+	glBindFramebuffer(GL_FRAMEBUFFER, godRaysFBO);
+	glViewport(0, 0, grW, grH);
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	if (settings.godRaysEnabled)
+	{
+		godRaysShader->use();
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, hdrColorTexture);
+		godRaysShader->setInt("hdrBuffer", 0);
+		godRaysShader->setVec2("sunScreenPos", sunScreenPos);
+		godRaysShader->setFloat("density", settings.godRaysDensity);
+		godRaysShader->setFloat("weight", settings.godRaysWeight);
+		godRaysShader->setFloat("decay", settings.godRaysDecay);
+		godRaysShader->setFloat("godRaysExposure", settings.godRaysExposure);
+
+		renderQuad();
+	}
+
+	// ---------- 4. Composite (HDR + Bloom + God Rays -> LDR, tone map, FXAA) ----------
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glViewport(0, 0, viewportWidth, viewportHeight);
 	glClear(GL_COLOR_BUFFER_BIT);
@@ -219,12 +266,21 @@ void PostProcessing::endSceneAndRender(const PostProcessSettings &settings)
 	glBindTexture(GL_TEXTURE_2D, bloomTexture[0]);
 	compositeShader->setInt("bloomBuffer", 1);
 
+	// God rays on unit 2 — only bind when enabled
+	if (settings.godRaysEnabled)
+	{
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, godRaysTexture);
+		compositeShader->setInt("godRaysBuffer", 2);
+	}
+
 	compositeShader->setFloat("exposure", settings.exposure);
 	compositeShader->setFloat("bloomIntensity", settings.bloomIntensity);
 	compositeShader->setFloat("gamma", settings.gamma);
 	compositeShader->setInt("bloomEnabled", settings.bloomEnabled ? 1 : 0);
 	compositeShader->setInt("fxaaEnabled", settings.fxaaEnabled ? 1 : 0);
 	compositeShader->setInt("toneMapper", settings.toneMapper);
+	compositeShader->setInt("godRaysEnabled", settings.godRaysEnabled ? 1 : 0);
 
 	renderQuad();
 
@@ -232,4 +288,5 @@ void PostProcessing::endSceneAndRender(const PostProcessSettings &settings)
 	glActiveTexture(GL_TEXTURE0);
 	glEnable(GL_DEPTH_TEST);
 	glEnable(GL_CULL_FACE);
+	glEnable(GL_BLEND);
 }

@@ -7,6 +7,11 @@
 #include <map>
 #include <glm/glm.hpp>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #define WORLD_SIZE 16384
 #define WORLD_HEIGHT 256
 

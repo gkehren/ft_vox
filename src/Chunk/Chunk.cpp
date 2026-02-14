@@ -18,6 +18,8 @@ static thread_local MeshWorkspace s_meshWorkspace;
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state)
     : position(position), visible(false), state(state), VAO(0), VBO(0), EBO(0),
+      waterVAO(0), waterVBO(0), waterEBO(0),
+      opaqueIndexCount(0), waterIndexCount(0),
       voxels(CHUNK_VOLUME),
       neighborShellVoxels(18 * (CHUNK_HEIGHT + 2) * 18,
                           static_cast<uint8_t>(AIR)),
@@ -26,19 +28,31 @@ Chunk::Chunk(const glm::vec3 &position, ChunkState state)
 Chunk::Chunk(Chunk &&other) noexcept
     : position(std::move(other.position)), visible(other.visible),
       state(other.state), voxels(std::move(other.voxels)), VAO(other.VAO),
-      VBO(other.VBO), EBO(other.EBO), meshNeedsUpdate(other.meshNeedsUpdate),
+      VBO(other.VBO), EBO(other.EBO),
+      waterVAO(other.waterVAO), waterVBO(other.waterVBO), waterEBO(other.waterEBO),
+      opaqueIndexCount(other.opaqueIndexCount), waterIndexCount(other.waterIndexCount),
+      meshNeedsUpdate(other.meshNeedsUpdate),
       activeVoxels(std::move(other.activeVoxels)),
       neighborShellVoxels(std::move(other.neighborShellVoxels)),
-      vertices(std::move(other.vertices)), indices(std::move(other.indices)) {
+      vertices(std::move(other.vertices)), indices(std::move(other.indices)),
+      waterVertices(std::move(other.waterVertices)), waterIndices(std::move(other.waterIndices)) {
   other.VAO = 0;
   other.VBO = 0;
   other.EBO = 0;
+  other.waterVAO = 0;
+  other.waterVBO = 0;
+  other.waterEBO = 0;
+  other.opaqueIndexCount = 0;
+  other.waterIndexCount = 0;
 }
 Chunk &Chunk::operator=(Chunk &&other) noexcept {
   if (this != &other) {
     if (VAO != 0) glDeleteVertexArrays(1, &VAO);
     if (VBO != 0) glDeleteBuffers(1, &VBO);
     if (EBO != 0) glDeleteBuffers(1, &EBO);
+    if (waterVAO != 0) glDeleteVertexArrays(1, &waterVAO);
+    if (waterVBO != 0) glDeleteBuffers(1, &waterVBO);
+    if (waterEBO != 0) glDeleteBuffers(1, &waterEBO);
 
     position = std::move(other.position);
     visible = other.visible;
@@ -48,14 +62,24 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept {
     neighborShellVoxels = std::move(other.neighborShellVoxels);
     vertices = std::move(other.vertices);
     indices = std::move(other.indices);
+    waterVertices = std::move(other.waterVertices);
+    waterIndices = std::move(other.waterIndices);
     VAO = other.VAO;
     VBO = other.VBO;
     EBO = other.EBO;
+    waterVAO = other.waterVAO;
+    waterVBO = other.waterVBO;
+    waterEBO = other.waterEBO;
+    opaqueIndexCount = other.opaqueIndexCount;
+    waterIndexCount = other.waterIndexCount;
     meshNeedsUpdate = other.meshNeedsUpdate;
 
     other.VAO = 0;
     other.VBO = 0;
     other.EBO = 0;
+    other.waterVAO = 0;
+    other.waterVBO = 0;
+    other.waterEBO = 0;
   }
   return *this;
 }
@@ -69,6 +93,15 @@ Chunk::~Chunk() {
   }
   if (EBO != 0) {
     glDeleteBuffers(1, &EBO);
+  }
+  if (waterVAO != 0) {
+    glDeleteVertexArrays(1, &waterVAO);
+  }
+  if (waterVBO != 0) {
+    glDeleteBuffers(1, &waterVBO);
+  }
+  if (waterEBO != 0) {
+    glDeleteBuffers(1, &waterEBO);
   }
 }
 
@@ -204,10 +237,13 @@ void Chunk::generateTerrain(TerrainGenerator &generator) {
 void Chunk::generateMesh() {
   vertices.clear();
   indices.clear();
+  waterVertices.clear();
+  waterIndices.clear();
 
   auto &workspace = s_meshWorkspace;
   workspace.vertexMap.clear();
   uint32_t indexCounter = 0;
+  uint32_t waterIndexCounter = 0;
 
   // New helper for greedy meshing that checks local voxels and the precomputed
   // neighbor shell
@@ -386,14 +422,31 @@ void Chunk::generateMesh() {
           glm::vec3 v3_local = s_coord_float + quad_height_vec;
 
           // Texture coordinates for tiling
+          // The greedy mesher uses u=(d+1)%3, v=(d+2)%3.
+          // We need consistent texture orientation regardless of face:
+          //   d=0 (±X faces): u=Y, v=Z → swap so tex_u=Z(h), tex_v=Y(w)
+          //   d=1 (±Y faces): u=Z, v=X → swap so tex_u=X(h), tex_v=Z(w)
+          //   d=2 (±Z faces): u=X, v=Y → already correct
           glm::vec2 tc[4];
           float tex_w = static_cast<float>(w);
           float tex_h = static_cast<float>(h);
 
-          tc[0] = {0.0f, 0.0f};
-          tc[1] = {tex_w, 0.0f};
-          tc[2] = {tex_w, tex_h};
-          tc[3] = {0.0f, tex_h};
+          bool swapUV = (d == 0 || d == 1);
+          float tc_u = swapUV ? tex_h : tex_w;
+          float tc_v = swapUV ? tex_w : tex_h;
+
+          if (swapUV) {
+            // After swap: vertex 0→(0,0), 1→(0,tc_v), 2→(tc_u,tc_v), 3→(tc_u,0)
+            tc[0] = {0.0f, 0.0f};
+            tc[1] = {0.0f, tc_v};
+            tc[2] = {tc_u, tc_v};
+            tc[3] = {tc_u, 0.0f};
+          } else {
+            tc[0] = {0.0f, 0.0f};
+            tc[1] = {tc_u, 0.0f};
+            tc[2] = {tc_u, tc_v};
+            tc[3] = {0.0f, tc_v};
+          }
 
           // Use default colors for blocks that need coloring (grass, leaves,
           // water)
@@ -480,6 +533,12 @@ void Chunk::generateMesh() {
               return 3 - (s1 + s2 + c);
           };
 
+          // Determine which mesh buffer this quad goes to
+          bool isWater = (quad_type == WATER);
+          auto &targetVertices = isWater ? waterVertices : vertices;
+          auto &targetIndices = isWater ? waterIndices : indices;
+          auto &targetIndexCounter = isWater ? waterIndexCounter : indexCounter;
+
           for (int i = 0; i < 4; ++i) {
             Vertex vert;
             vert.position = quad_vertices_world[i];
@@ -491,31 +550,38 @@ void Chunk::generateMesh() {
             vert.texCoord = tc[i];
             vert.packedBiomeColor = packedColor;
 
-            auto it = workspace.vertexMap.find(vert);
-            if (it != workspace.vertexMap.end()) {
-              vert_indices[i] = it->second;
+            // For water, don't deduplicate with the opaque vertex map
+            // Just add directly to keep it simple and avoid cross-buffer refs
+            if (isWater) {
+              targetVertices.push_back(vert);
+              vert_indices[i] = targetIndexCounter++;
             } else {
-              vertices.push_back(vert);
-              vert_indices[i] = indexCounter;
-              workspace.vertexMap[vert] = indexCounter++;
+              auto it = workspace.vertexMap.find(vert);
+              if (it != workspace.vertexMap.end()) {
+                vert_indices[i] = it->second;
+              } else {
+                targetVertices.push_back(vert);
+                vert_indices[i] = targetIndexCounter;
+                workspace.vertexMap[vert] = targetIndexCounter++;
+              }
             }
           }
 
           // Winding order based on normal direction along the main axis 'd'
           if (quad_normal_dir[d] > 0) {
-            indices.push_back(vert_indices[0]);
-            indices.push_back(vert_indices[1]);
-            indices.push_back(vert_indices[2]);
-            indices.push_back(vert_indices[0]);
-            indices.push_back(vert_indices[2]);
-            indices.push_back(vert_indices[3]);
+            targetIndices.push_back(vert_indices[0]);
+            targetIndices.push_back(vert_indices[1]);
+            targetIndices.push_back(vert_indices[2]);
+            targetIndices.push_back(vert_indices[0]);
+            targetIndices.push_back(vert_indices[2]);
+            targetIndices.push_back(vert_indices[3]);
           } else {
-            indices.push_back(vert_indices[0]);
-            indices.push_back(vert_indices[2]);
-            indices.push_back(vert_indices[1]);
-            indices.push_back(vert_indices[0]);
-            indices.push_back(vert_indices[3]);
-            indices.push_back(vert_indices[2]);
+            targetIndices.push_back(vert_indices[0]);
+            targetIndices.push_back(vert_indices[2]);
+            targetIndices.push_back(vert_indices[1]);
+            targetIndices.push_back(vert_indices[0]);
+            targetIndices.push_back(vert_indices[3]);
+            targetIndices.push_back(vert_indices[2]);
           }
 
           // Mark processed cells in the mask
@@ -533,96 +599,101 @@ void Chunk::generateMesh() {
   state = ChunkState::MESHED;
 }
 
-void Chunk::uploadMeshToGPU() {
-  if (VAO == 0) {
-    glGenVertexArrays(1, &VAO);
-  }
-  if (VBO == 0) {
-    glGenBuffers(1, &VBO);
-  }
-  if (EBO == 0) {
-    glGenBuffers(1, &EBO);
-  }
-
-  glBindVertexArray(VAO);
-
-  // Charger les données de sommets
-  glBindBuffer(GL_ARRAY_BUFFER, VBO);
-  glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex),
-               vertices.data(), GL_STATIC_DRAW);
-
-  // Charger les indices
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t),
-               indices.data(), GL_STATIC_DRAW);
-
-  // Configurer les attributs de sommets
-
+// P5: Shared vertex attribute layout — avoids copy-paste divergence
+static void configureVertexAttributes() {
   // Position (location = 0)
   glEnableVertexAttribArray(0);
   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                         (void *)offsetof(Vertex, position));
-
   // Packed Data (location = 1)
   glEnableVertexAttribArray(1);
   glVertexAttribIPointer(1, 1, GL_UNSIGNED_INT, sizeof(Vertex),
                          (void *)offsetof(Vertex, packedData));
-
-  // Coordonnées de texture (location = 2)
+  // Texture coordinates (location = 2)
   glEnableVertexAttribArray(2);
   glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                         (void *)offsetof(Vertex, texCoord));
-
   // Packed Biome Color (location = 3)
   glEnableVertexAttribArray(3);
   glVertexAttribIPointer(3, 1, GL_UNSIGNED_INT, sizeof(Vertex),
                          (void *)offsetof(Vertex, packedBiomeColor));
+}
 
+void Chunk::uploadMeshToGPU() {
+  // --- Opaque mesh ---
+  if (VAO == 0) glGenVertexArrays(1, &VAO);
+  if (VBO == 0) glGenBuffers(1, &VBO);
+  if (EBO == 0) glGenBuffers(1, &EBO);
+
+  opaqueIndexCount = static_cast<uint32_t>(indices.size());
+
+  glBindVertexArray(VAO);
+  glBindBuffer(GL_ARRAY_BUFFER, VBO);
+  glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex),
+               vertices.data(), GL_STATIC_DRAW);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t),
+               indices.data(), GL_STATIC_DRAW);
+  configureVertexAttributes();
   glBindVertexArray(0);
+
+  // P2: Free CPU-side data after GPU upload
+  vertices = {};
+  indices = {};
+
+  // --- Water mesh ---
+  waterIndexCount = static_cast<uint32_t>(waterIndices.size());
+
+  if (waterIndexCount > 0) {
+    if (waterVAO == 0) glGenVertexArrays(1, &waterVAO);
+    if (waterVBO == 0) glGenBuffers(1, &waterVBO);
+    if (waterEBO == 0) glGenBuffers(1, &waterEBO);
+
+    glBindVertexArray(waterVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, waterVBO);
+    glBufferData(GL_ARRAY_BUFFER, waterVertices.size() * sizeof(Vertex),
+                 waterVertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, waterEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, waterIndices.size() * sizeof(uint16_t),
+                 waterIndices.data(), GL_STATIC_DRAW);
+    configureVertexAttributes();
+    glBindVertexArray(0);
+  }
+
+  // P2: Free CPU-side water data after GPU upload
+  waterVertices = {};
+  waterIndices = {};
 
   meshNeedsUpdate = false;
 }
 
-uint32_t Chunk::draw(const Shader &shader, const Camera &camera,
-                     GLuint textureArray, const ShaderParameters &params) {
+// P1: draw() is now minimal — all shared uniforms set once in drawVisibleChunks
+uint32_t Chunk::draw() {
   if (meshNeedsUpdate)
     uploadMeshToGPU();
 
-  if (indices.empty())
+  if (opaqueIndexCount == 0)
     return 0;
 
-  shader.use();
-
-  shader.setMat4("model", glm::mat4(1.0f));
-  shader.setMat4("view", camera.getViewMatrix());
-  shader.setInt("textureArray", 0);
-
-  glm::vec3 sunPosition = camera.getPosition() + params.sunDirection * 2000.0f;
-  shader.setVec3("lightPos", sunPosition);
-  shader.setVec3("viewPos", camera.getPosition());
-
-  // Paramètres du fog
-  shader.setFloat("fogStart", params.fogStart);
-  shader.setFloat("fogEnd", params.fogEnd);
-  shader.setVec3("fogColor", params.fogColor);
-  shader.setFloat("fogDensity", params.fogDensity);
-
-  // Paramètres visuels optionnels
-  shader.setFloat("ambientStrength", params.ambientStrength);
-  shader.setFloat("diffuseIntensity", params.diffuseIntensity);
-  shader.setFloat("lightLevels", params.lightLevels);
-  shader.setFloat("saturationLevel", params.saturationLevel);
-  shader.setFloat("colorBoost", params.colorBoost);
-  shader.setFloat("gamma", params.gamma);
-
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D_ARRAY, textureArray);
-
   glBindVertexArray(VAO);
-  glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_SHORT, 0);
+  glDrawElements(GL_TRIANGLES, opaqueIndexCount, GL_UNSIGNED_SHORT, 0);
   glBindVertexArray(0);
 
-  return indices.size();
+  return opaqueIndexCount;
+}
+
+uint32_t Chunk::drawWater() {
+  if (meshNeedsUpdate)
+    uploadMeshToGPU();
+
+  if (waterIndexCount == 0)
+    return 0;
+
+  glBindVertexArray(waterVAO);
+  glDrawElements(GL_TRIANGLES, waterIndexCount, GL_UNSIGNED_SHORT, 0);
+  glBindVertexArray(0);
+
+  return waterIndexCount;
 }
 
 void Chunk::drawShadow(const Shader &shader) const {

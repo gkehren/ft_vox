@@ -1,8 +1,9 @@
 #pragma once
 
+#include <Engine/EngineDefs.hpp>
+#include <glm/glm.hpp>
 #include <glad/glad.h>
 #include <Shader/Shader.hpp>
-#include <Engine/EngineDefs.hpp>
 #include <memory>
 
 class PostProcessing
@@ -18,7 +19,8 @@ public:
 	void beginScene();
 
 	// Run all post-processing passes and present to the default framebuffer
-	void endSceneAndRender(const PostProcessSettings &settings);
+	// sunScreenPos: sun position in normalized screen coords [0,1], used for god rays
+	void endSceneAndRender(const PostProcessSettings &settings, const glm::vec2 &sunScreenPos);
 
 private:
 	int viewportWidth;
@@ -33,6 +35,10 @@ private:
 	GLuint bloomFBO[2];
 	GLuint bloomTexture[2];
 
+	// God rays: half-resolution FBO
+	GLuint godRaysFBO;
+	GLuint godRaysTexture;
+
 	// Fullscreen quad geometry
 	GLuint quadVAO;
 	GLuint quadVBO;
@@ -40,6 +46,7 @@ private:
 	// Shaders
 	std::unique_ptr<Shader> bloomExtractShader;
 	std::unique_ptr<Shader> bloomBlurShader;
+	std::unique_ptr<Shader> godRaysShader;
 	std::unique_ptr<Shader> compositeShader;
 
 	void initQuad();

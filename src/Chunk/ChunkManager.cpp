@@ -3,11 +3,13 @@
 #include <Shader/Shader.hpp>
 #include <Renderer/Renderer.hpp>
 #include <Engine/ThreadPool.hpp>
+#include <Chunk/ChunkManager.hpp>
 #include <glm/gtc/matrix_access.hpp>
 
 #include <iostream>
-#include <chrono>
-#include <queue>
+#include <algorithm>
+#include <cmath>
+#include <execution>
 
 ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, RenderTiming &renderTiming)
 	: m_terrainGenerator(terrainGenerator), p_threadPool(threadPool), m_renderTiming(renderTiming)
@@ -177,18 +179,41 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 {
 	auto start = std::chrono::high_resolution_clock::now();
 	std::lock_guard<std::mutex> lock(chunkMutex);
-	renderSettings.visibleChunksCount = 0; // Reset here as this is the drawing phase
+	renderSettings.visibleChunksCount = 0;
 	renderSettings.visibleVoxelsCount = 0;
 
+	// --- Set all frame-constant uniforms once ---
 	shader.use();
 	shader.setMat4("projection", camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), 3000.0f));
+	shader.setMat4("model", glm::mat4(1.0f));
+	shader.setMat4("view", camera.getViewMatrix());
+	shader.setInt("textureArray", 0);
 
+	glm::vec3 sunPosition = camera.getPosition() + shaderParams.sunDirection * 2000.0f;
+	shader.setVec3("lightPos", sunPosition);
+	shader.setVec3("viewPos", camera.getPosition());
+
+	shader.setFloat("fogStart", shaderParams.fogStart);
+	shader.setFloat("fogEnd", shaderParams.fogEnd);
+	shader.setVec3("fogColor", shaderParams.fogColor);
+	shader.setFloat("fogDensity", shaderParams.fogDensity);
+
+	shader.setFloat("ambientStrength", shaderParams.ambientStrength);
+	shader.setFloat("diffuseIntensity", shaderParams.diffuseIntensity);
+	shader.setFloat("lightLevels", shaderParams.lightLevels);
+	shader.setFloat("saturationLevel", shaderParams.saturationLevel);
+	shader.setFloat("colorBoost", shaderParams.colorBoost);
+
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, textureAtlas);
+
+	// --- Opaque pass ---
 	for (Chunk *chunk : activeChunks)
 	{
-		if (!chunk->isVisible() || chunk->getState() < ChunkState::MESHED) // Only draw if mesh is ready
+		if (!chunk->isVisible() || chunk->getState() < ChunkState::MESHED)
 			continue;
 
-		renderSettings.visibleVoxelsCount += chunk->draw(shader, camera, textureAtlas, shaderParams);
+		renderSettings.visibleVoxelsCount += chunk->draw();
 		renderSettings.visibleChunksCount++;
 
 		if (renderSettings.chunkBorders && renderer)
@@ -196,6 +221,43 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 			renderer->drawBoundingBox(*chunk, camera);
 		}
 	}
+
+	// --- Water transparency sub-pass (same lock scope) ---
+	// V2: Sort water-bearing chunks back-to-front for correct blending
+	std::vector<Chunk *> waterChunks;
+	waterChunks.reserve(renderSettings.visibleChunksCount); // Heuristic reserve
+
+	for (Chunk *chunk : activeChunks)
+	{
+		if (chunk->isVisible() && chunk->getState() >= ChunkState::MESHED && chunk->hasWaterMesh())
+		{
+			waterChunks.push_back(chunk);
+		}
+	}
+
+	// Sort back-to-front
+	glm::vec3 camPos = camera.getPosition();
+	std::sort(waterChunks.begin(), waterChunks.end(), [&camPos](Chunk *a, Chunk *b) {
+		glm::vec3 centerA = a->getPosition() + glm::vec3(CHUNK_SIZE / 2);
+		glm::vec3 centerB = b->getPosition() + glm::vec3(CHUNK_SIZE / 2);
+		float distA = glm::dot(centerA - camPos, centerA - camPos);
+		float distB = glm::dot(centerB - camPos, centerB - camPos);
+		return distA > distB; // Furthest first
+	});
+
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_CULL_FACE); // V1: Allow seeing water from below
+
+	for (Chunk *chunk : waterChunks)
+	{
+		chunk->drawWater();
+	}
+
+	glDepthMask(GL_TRUE);
+	glDisable(GL_BLEND);
+
 	auto end = std::chrono::high_resolution_clock::now();
 	m_renderTiming.chunkRendering = std::chrono::duration<float, std::milli>(end - start).count();
 }

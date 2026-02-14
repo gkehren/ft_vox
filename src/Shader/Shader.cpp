@@ -99,6 +99,11 @@ void Shader::setVec3(const std::string &name, const glm::vec3 &vec) const
 	glUniform3fv(glGetUniformLocation(this->id, name.c_str()), 1, glm::value_ptr(vec));
 }
 
+void Shader::setVec2(const std::string &name, const glm::vec2 &vec) const
+{
+	glUniform2fv(glGetUniformLocation(this->id, name.c_str()), 1, glm::value_ptr(vec));
+}
+
 void Shader::setInt(const std::string &name, int value) const
 {
 	glUniform1i(glGetUniformLocation(this->id, name.c_str()), value);

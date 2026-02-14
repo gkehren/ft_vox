@@ -25,7 +25,6 @@ uniform float ambientStrength = 0.2;
 uniform float diffuseIntensity = 0.7;
 uniform float lightLevels = 5.0;
 uniform float colorBoost = 1.0;
-uniform float gamma = 1.8;
 
 float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir)
 {

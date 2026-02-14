@@ -193,10 +193,31 @@ void Engine::run()
 			renderer->drawSkybox(this->camera); // Draw skybox after 3D scene
 		}
 
-		// Post-processing: HDR -> LDR with bloom, tone mapping, FXAA
+		// Post-processing: HDR -> LDR with bloom, tone mapping, FXAA, god rays
 		if (postProcessing)
 		{
-			postProcessing->endSceneAndRender(uiManager->getPostProcessSettings());
+			// Compute sun's screen position for god rays
+			glm::vec3 sunWorldPos = camera.getPosition() + uiManager->getShaderParams().sunDirection * 2000.0f;
+			glm::mat4 proj = camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), 3000.0f);
+			glm::mat4 view = camera.getViewMatrix();
+			glm::vec4 sunClip = proj * view * glm::vec4(sunWorldPos, 1.0f);
+			glm::vec2 sunScreen(0.5f, 0.5f); // Default: center of screen
+			if (sunClip.w > 0.0f)
+			{
+				glm::vec3 sunNDC = glm::vec3(sunClip) / sunClip.w;
+				sunScreen = glm::vec2(sunNDC.x * 0.5f + 0.5f, sunNDC.y * 0.5f + 0.5f);
+			}
+			else
+			{
+				// V3: Handle sun behind camera - clamp to Safe off-screen position
+				// pushing it far off-screen in the direction of the sun
+				// But locally clamping is safer to avoid precision issues in shader
+				sunScreen = glm::vec2(-1000.0f, -1000.0f); // Effectively disable by being too far
+			}
+			// V3: Clamp to avoid extreme values that break the radial blur
+			sunScreen = glm::clamp(sunScreen, glm::vec2(-0.5f), glm::vec2(1.5f));
+
+			postProcessing->endSceneAndRender(uiManager->getPostProcessSettings(), sunScreen);
 		}
 
 		uiManager->render(); // Render ImGui UI on top
@@ -306,7 +327,7 @@ void Engine::renderScene() // Renamed from render
 	shader->setFloat("lightLevels", uiManager->getShaderParams().lightLevels);
 	shader->setFloat("saturationLevel", uiManager->getShaderParams().saturationLevel);
 	shader->setFloat("colorBoost", uiManager->getShaderParams().colorBoost);
-	shader->setFloat("gamma", uiManager->getShaderParams().gamma);
+
 
 	if (renderer && shader && renderer->getTextureAtlas() && chunkManager)
 	{
@@ -318,7 +339,7 @@ void Engine::renderScene() // Renamed from render
 
 		// Pass currentRenderSettings by non-const reference if drawVisibleChunks updates it
 		chunkManager->drawVisibleChunks(*shader, camera, renderer->getTextureAtlas(), uiManager->getShaderParams(), renderer.get(), currentRenderSettings, windowWidth, windowHeight);
-		
+
 		glActiveTexture(GL_TEXTURE2);
 		glBindTexture(GL_TEXTURE_2D, 0);
 		glActiveTexture(GL_TEXTURE0);
