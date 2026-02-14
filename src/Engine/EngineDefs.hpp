@@ -51,6 +51,17 @@ struct RenderTiming
 	float totalFrame{0.0f};
 };
 
+struct PostProcessSettings
+{
+	bool bloomEnabled{true};
+	float bloomThreshold{1.0f};
+	float bloomIntensity{0.3f};
+	bool fxaaEnabled{true};
+	float exposure{1.0f};
+	int toneMapper{0}; // 0 = ACES, 1 = Reinhard
+	float gamma{2.2f};
+};
+
 struct VoxelHighlight
 {
 	bool active{false};

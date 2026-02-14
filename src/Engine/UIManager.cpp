@@ -224,6 +224,21 @@ void UIManager::handleShaderParametersWindow()
 		ImGui::SliderFloat("Gamma", &shaderParams.gamma, 0.1f, 3.0f);
 	}
 
+	if (ImGui::CollapsingHeader("Post Processing"))
+	{
+		ImGui::Checkbox("Bloom", &postProcessSettings.bloomEnabled);
+		if (postProcessSettings.bloomEnabled)
+		{
+			ImGui::SliderFloat("Bloom Threshold", &postProcessSettings.bloomThreshold, 0.0f, 5.0f);
+			ImGui::SliderFloat("Bloom Intensity", &postProcessSettings.bloomIntensity, 0.0f, 2.0f);
+		}
+		ImGui::Checkbox("FXAA", &postProcessSettings.fxaaEnabled);
+		ImGui::SliderFloat("Exposure", &postProcessSettings.exposure, 0.1f, 5.0f);
+		ImGui::SliderFloat("PP Gamma", &postProcessSettings.gamma, 0.5f, 4.0f);
+		const char *toneMappers[] = {"ACES Filmic", "Reinhard"};
+		ImGui::Combo("Tone Mapper", &postProcessSettings.toneMapper, toneMappers, IM_ARRAYSIZE(toneMappers));
+	}
+
 	ImGui::End();
 }
 

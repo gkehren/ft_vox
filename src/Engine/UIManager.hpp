@@ -52,6 +52,8 @@ public:
 	const RenderTiming &getRenderTiming() const { return renderTiming; }
 	ShaderParameters &getShaderParams() { return shaderParams; }
 	const ShaderParameters &getShaderParams() const { return shaderParams; }
+	PostProcessSettings &getPostProcessSettings() { return postProcessSettings; }
+	const PostProcessSettings &getPostProcessSettings() const { return postProcessSettings; }
 
 	TextureType &getSelectedTexture() { return selectedTexture; }
 	const TextureType &getSelectedTexture() const { return selectedTexture; }
@@ -68,6 +70,7 @@ private:
 	RenderSettings renderSettings;
 	RenderTiming renderTiming;
 	ShaderParameters shaderParams;
+	PostProcessSettings postProcessSettings;
 	TextureType selectedTexture; // Assuming TextureType is an enum or similar
 
 	// Network related UI

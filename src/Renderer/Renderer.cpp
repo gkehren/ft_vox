@@ -58,6 +58,8 @@ void Renderer::renderShadowMap(const Camera &camera, const glm::vec3 &lightDir, 
 	glGetIntegerv(GL_VIEWPORT, viewport);
 	GLint cullFace;
 	glGetIntegerv(GL_CULL_FACE_MODE, &cullFace);
+	GLint previousFBO;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFBO);
 
 	glEnable(GL_DEPTH_TEST);
 	glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
@@ -82,7 +84,7 @@ void Renderer::renderShadowMap(const Camera &camera, const glm::vec3 &lightDir, 
 
 	// Restore state
 	glCullFace(cullFace);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, previousFBO);
 	glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
 }
 

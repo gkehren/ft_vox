@@ -122,12 +122,6 @@ void main()
     // Color boost
     result *= colorBoost;
 
-    // Prevent saturation
-    result = min(result, vec3(1.0));
-
-    // Gamma correction
-    result = pow(result, vec3(1.0/gamma));
-
     // Exponential squared fog
     float dist = length(FragPos - viewPos);
     float fogFactor = exp(-pow(dist * fogDensity * 0.003, 2.0));

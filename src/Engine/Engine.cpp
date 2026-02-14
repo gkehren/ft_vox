@@ -74,6 +74,7 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 	this->shader = std::make_unique<Shader>((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
 	// Access render settings from UIManager for Renderer initialization
 	this->renderer = std::make_unique<Renderer>(windowWidth, windowHeight, uiManager->getRenderSettings().maxRenderDistance);
+	this->postProcessing = std::make_unique<PostProcessing>(windowWidth, windowHeight);
 	this->camera.setWindow(this->window);
 	this->playerChunkPos = glm::ivec2(-1, -1);
 
@@ -177,15 +178,25 @@ void Engine::run()
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-		// Rendering
-		glClearColor(uiManager->getShaderParams().fogColor.x, uiManager->getShaderParams().fogColor.y, uiManager->getShaderParams().fogColor.z, 1.0f);
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		// Rendering — render scene into HDR FBO
+		if (postProcessing)
+		{
+			postProcessing->beginScene();
+			glClearColor(uiManager->getShaderParams().fogColor.x, uiManager->getShaderParams().fogColor.y, uiManager->getShaderParams().fogColor.z, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		}
 
 		renderScene(); // Render the 3D game world
 
 		if (renderer) // Ensure renderer is valid
 		{
 			renderer->drawSkybox(this->camera); // Draw skybox after 3D scene
+		}
+
+		// Post-processing: HDR -> LDR with bloom, tone mapping, FXAA
+		if (postProcessing)
+		{
+			postProcessing->endSceneAndRender(uiManager->getPostProcessSettings());
 		}
 
 		uiManager->render(); // Render ImGui UI on top
@@ -341,6 +352,10 @@ void Engine::handleEvents(bool &keyTPressed)
 			if (renderer)
 			{
 				renderer->setScreenSize(windowWidth, windowHeight);
+			}
+			if (postProcessing)
+			{
+				postProcessing->resize(windowWidth, windowHeight);
 			}
 			if (textRenderer)
 			{

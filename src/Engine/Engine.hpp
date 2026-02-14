@@ -21,6 +21,7 @@
 #include <Chunk/Chunk.hpp>
 #include <Shader/Shader.hpp>
 #include <Renderer/Renderer.hpp>
+#include <Renderer/PostProcessing.hpp>
 #include <Camera/Camera.hpp>
 #include <Renderer/TextRenderer.hpp>
 #include <utils.hpp>
@@ -83,6 +84,7 @@ private:
 	std::unique_ptr<Client> client;
 	std::unique_ptr<UIManager> uiManager;
 	std::unique_ptr<ChunkManager> chunkManager;
+	std::unique_ptr<PostProcessing> postProcessing;
 	std::unique_ptr<TerrainGenerator> terrainGenerator;
 
 	Camera camera;
