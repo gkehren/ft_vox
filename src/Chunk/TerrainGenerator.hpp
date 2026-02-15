@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 #include <unordered_map>
 #include <random>
+#include <memory>
 
 #include <utils.hpp>
 
@@ -65,7 +66,7 @@ public:
   ChunkData generateChunk(int chunkX, int chunkZ);
 
   // Getter for thread-local generator to avoid redundant node graph setup
-  static TerrainGenerator& getThreadLocal(int seed);
+  static TerrainGenerator &getThreadLocal(int seed);
 
   // Getter for seed to enable thread-safe generation
   int getSeed() const { return m_seed; }

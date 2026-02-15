@@ -29,13 +29,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
-# FetchContent for FreeType2
-FetchContent_Declare(
-  freetype2
-  GIT_REPOSITORY https://github.com/aseprite/freetype2
-  GIT_TAG VER-2-10-0
-)
-FetchContent_MakeAvailable(freetype2)
+find_package(Freetype REQUIRED)
 
 # FetchContent for FastNoise2
 FetchContent_Declare(
@@ -52,7 +46,7 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -Ofast -march=native")
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${SDL3_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} OpenGL::GL glm freetype FastNoise2 ${Boost_LIBRARIES} ${SDL3_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} OpenGL::GL glm Freetype::Freetype FastNoise2 ${Boost_LIBRARIES} ${SDL3_LIBRARIES})
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

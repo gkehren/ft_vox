@@ -98,7 +98,6 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 
 	initializeNoiseGenerator(0);
 
-	this->chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(), uiManager->getRenderTiming());
 
 	std::cout << "SDL version: " << SDL_GetVersion() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -111,6 +110,8 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 
 Engine::~Engine()
 {
+	threadPool.reset();
+	chunkManager.reset();
 	SDL_GL_DestroyContext(glContext);
 	SDL_DestroyWindow(this->window);
 	SDL_Quit();
@@ -130,7 +131,11 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	{
 		this->seed = seed_val;
 	}
+
+	uint32_t threadCount = std::thread::hardware_concurrency() / 2;
+	this->threadPool = std::make_unique<ThreadPool>(threadCount > 0 ? threadCount : 1);
 	this->terrainGenerator = std::make_unique<TerrainGenerator>(this->seed);
+	this->chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(), uiManager->getRenderTiming());
 
 	std::cout << "Terrain generation initialized with seed: " << this->seed << std::endl;
 }
@@ -244,7 +249,7 @@ void Engine::updateWorldState()
 
 		// Interpolate fog color and lighting based on sun height (sin(angle))
 		float sunHeight = sin(angle); // -1.0 to 1.0
-		
+
 		// Colors for different times
 		glm::vec3 dayFog = glm::vec3(0.75f, 0.85f, 1.0f);
 		glm::vec3 sunsetFog = glm::vec3(1.0f, 0.4f, 0.2f);
