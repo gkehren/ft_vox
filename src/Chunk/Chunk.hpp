@@ -76,6 +76,9 @@ private:
 	std::bitset<CHUNK_VOLUME> activeVoxels;
 	std::vector<uint8_t> neighborShellVoxels; // Flat array for 1-thick shell (18x(H+2)x18)
 
+	// Precomputed packed RGBA biome colors per column (from terrain generation)
+	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeGrassColors{};
+	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeFoliageColors{};
 
 	uint32_t opaqueIndexCount;
 	uint32_t waterIndexCount;

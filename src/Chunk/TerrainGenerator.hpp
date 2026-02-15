@@ -20,6 +20,10 @@ struct ChunkData
 
   // Height map for quick access
   std::array<int, CHUNK_SIZE * CHUNK_SIZE> heightMap;
+
+  // Precomputed packed RGBA biome colors per column (for mesh generation)
+  std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> grassColors;
+  std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> foliageColors;
 };
 
 // Biome properties for terrain generation
@@ -63,6 +67,15 @@ public:
 
   // Get biome configuration
   static const BiomeConfig &getBiomeConfig(BiomeType biome);
+
+  // Pack a float RGB color into a uint32_t RGBA (alpha = 255)
+  static inline uint32_t packColor(const glm::vec3 &c)
+  {
+    uint32_t r = static_cast<uint32_t>(c.r * 255.0f);
+    uint32_t g = static_cast<uint32_t>(c.g * 255.0f);
+    uint32_t b = static_cast<uint32_t>(c.b * 255.0f);
+    return r | (g << 8) | (b << 16) | (255u << 24);
+  }
 
 private:
   // =============================================

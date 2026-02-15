@@ -34,6 +34,8 @@ Chunk::Chunk(Chunk &&other) noexcept
       meshNeedsUpdate(other.meshNeedsUpdate),
       activeVoxels(std::move(other.activeVoxels)),
       neighborShellVoxels(std::move(other.neighborShellVoxels)),
+      biomeGrassColors(other.biomeGrassColors),
+      biomeFoliageColors(other.biomeFoliageColors),
       vertices(std::move(other.vertices)), indices(std::move(other.indices)),
       waterVertices(std::move(other.waterVertices)), waterIndices(std::move(other.waterIndices)) {
   other.VAO = 0;
@@ -60,6 +62,8 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept {
     voxels = std::move(other.voxels);
     activeVoxels = std::move(other.activeVoxels);
     neighborShellVoxels = std::move(other.neighborShellVoxels);
+    biomeGrassColors = other.biomeGrassColors;
+    biomeFoliageColors = other.biomeFoliageColors;
     vertices = std::move(other.vertices);
     indices = std::move(other.indices);
     waterVertices = std::move(other.waterVertices);
@@ -220,6 +224,8 @@ void Chunk::generateTerrain(TerrainGenerator &generator) {
   setVoxels(chunkData.voxels);
 
   neighborShellVoxels = chunkData.borderVoxels;
+  biomeGrassColors = chunkData.grassColors;
+  biomeFoliageColors = chunkData.foliageColors;
 
   // Update bitset for active voxels
   activeVoxels.reset(); // Clear all bits first
@@ -326,6 +332,31 @@ void Chunk::generateMesh() {
           if (quad_type == AIR)
             continue;
 
+          // Check if this block type needs biome color — used to prevent
+          // greedy merging across biome color boundaries
+          bool isBiomeColoredType =
+              (quad_type == GRASS_TOP || quad_type == GRASS_SIDE ||
+               quad_type == OAK_LEAVES);
+
+          // Precompute the origin quad's biome color for merge comparisons
+          // (water uses a constant color, so it never splits)
+          uint32_t originBiomeColor = 0;
+          if (isBiomeColoredType) {
+            int originColIdx = quad_origin_voxel_coord[2] * CHUNK_SIZE
+                             + quad_origin_voxel_coord[0];
+            originBiomeColor = (quad_type == OAK_LEAVES)
+                ? biomeFoliageColors[originColIdx]
+                : biomeGrassColors[originColIdx];
+          }
+
+          // Helper: get the packed biome color for a candidate voxel coordinate
+          auto getCandidateBiomeColor = [&](const glm::ivec3 &coord) -> uint32_t {
+            int colIdx = coord[2] * CHUNK_SIZE + coord[0];
+            return (quad_type == OAK_LEAVES)
+                ? biomeFoliageColors[colIdx]
+                : biomeGrassColors[colIdx];
+          };
+
           // Calculate width (w) of the quad along dimension u
           int w;
           for (w = 1; x[u] + w < dims[u]; ++w) {
@@ -354,6 +385,14 @@ void Chunk::generateMesh() {
                   !(check_type1 == AIR ||
                     (TextureManager::isTransparent(check_type1) &&
                      check_type2 != check_type1)))
+                break;
+            }
+
+            // Prevent merging across biome color boundaries
+            if (isBiomeColoredType) {
+              glm::ivec3 candidateVoxel = (quad_normal_dir == q)
+                  ? next_pos_u_slice : next_pos_u_slice + q;
+              if (getCandidateBiomeColor(candidateVoxel) != originBiomeColor)
                 break;
             }
           }
@@ -394,6 +433,16 @@ void Chunk::generateMesh() {
                     !(check_type1 == AIR ||
                       (TextureManager::isTransparent(check_type1) &&
                        check_type2 != check_type1))) {
+                  h_break = true;
+                  break;
+                }
+              }
+
+              // Prevent merging across biome color boundaries
+              if (isBiomeColoredType) {
+                glm::ivec3 candidateVoxel = (quad_normal_dir == q)
+                    ? next_pos_v_slice : next_pos_v_slice + q;
+                if (getCandidateBiomeColor(candidateVoxel) != originBiomeColor) {
                   h_break = true;
                   break;
                 }
@@ -448,22 +497,10 @@ void Chunk::generateMesh() {
             tc[3] = {0.0f, tc_v};
           }
 
-          // Use default colors for blocks that need coloring (grass, leaves,
-          // water)
+          // Determine if this block type needs biome-specific coloring
           bool needsBiomeColoring =
               (quad_type == GRASS_TOP || quad_type == GRASS_SIDE ||
                quad_type == OAK_LEAVES || quad_type == WATER);
-          glm::vec3 biomeColorVal(1.0f); // Default to white
-
-          if (needsBiomeColoring) {
-            // Default colors without biome variation
-            if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
-              biomeColorVal = glm::vec3(0.4f, 0.7f, 0.3f); // Standard green
-            else if (quad_type == OAK_LEAVES)
-              biomeColorVal = glm::vec3(0.3f, 0.65f, 0.2f); // Leaf green
-            else if (quad_type == WATER)
-              biomeColorVal = glm::vec3(0.3f, 0.5f, 0.9f); // Blue water
-          }
 
           float texture_idx_val = static_cast<float>(quad_type);
           if (quad_type == GRASS_SIDE) {
@@ -495,12 +532,17 @@ void Chunk::generateMesh() {
                                 ((static_cast<uint32_t>(texture_idx_val) & 0xFF) << 3) | 
                                 (needsBiomeColoring ? (1 << 11) : 0);
           
+          // Look up precomputed biome color from per-column arrays
+          static constexpr uint32_t WATER_COLOR = 0xFF'E6804D; // RGBA for (0.3, 0.5, 0.9)
           uint32_t packedColor = 0;
           if (needsBiomeColoring) {
-              uint32_t r = static_cast<uint32_t>(biomeColorVal.r * 255.0f);
-              uint32_t g = static_cast<uint32_t>(biomeColorVal.g * 255.0f);
-              uint32_t b = static_cast<uint32_t>(biomeColorVal.b * 255.0f);
-              packedColor = r | (g << 8) | (b << 16) | (255u << 24);
+              int colIdx = quad_origin_voxel_coord[2] * CHUNK_SIZE + quad_origin_voxel_coord[0];
+              if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
+                  packedColor = biomeGrassColors[colIdx];
+              else if (quad_type == OAK_LEAVES)
+                  packedColor = biomeFoliageColors[colIdx];
+              else if (quad_type == WATER)
+                  packedColor = WATER_COLOR;
           }
 
           auto calculateAO = [&](const glm::vec3& localPos, int cornerIdx) -> uint32_t {

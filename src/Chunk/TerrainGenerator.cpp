@@ -613,6 +613,11 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
 
     chunkData.biomes[i] = biome;
     chunkData.heightMap[i] = height;
+
+    // Precompute packed biome colors for mesh generation
+    const BiomeConfig &cfg = getBiomeConfig(biome);
+    chunkData.grassColors[i] = packColor(cfg.grassColor);
+    chunkData.foliageColors[i] = packColor(cfg.foliageColor);
   }
 
   // Pass 2: Generate voxel columns
