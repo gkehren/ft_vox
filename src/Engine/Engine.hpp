@@ -53,6 +53,7 @@ public:
 	UIManager *getUIManager() const { return uiManager.get(); }
 	Shader *getShader() const { return shader.get(); }
 	Renderer *getRenderer() const { return renderer.get(); }
+	TerrainGenerator *getTerrainGenerator() const { return terrainGenerator.get(); }
 
 	void setWireframeMode(bool enabled);
 

@@ -115,6 +115,27 @@ enum BiomeType
 	BIOME_COUNT
 };
 
+static const char *const biomeTypeString[BIOME_COUNT] = {
+	"Frozen Ocean",     // BIOME_FROZEN_OCEAN
+	"Snowy Tundra",     // BIOME_SNOWY_TUNDRA
+	"Snowy Taiga",      // BIOME_SNOWY_TAIGA
+	"Ice Spikes",       // BIOME_ICE_SPIKES
+	"Ocean",            // BIOME_OCEAN
+	"Beach",            // BIOME_BEACH
+	"Plains",           // BIOME_PLAINS
+	"Forest",           // BIOME_FOREST
+	"Birch Forest",     // BIOME_BIRCH_FOREST
+	"Dark Forest",      // BIOME_DARK_FOREST
+	"Swamp",            // BIOME_SWAMP
+	"River",            // BIOME_RIVER
+	"Desert",           // BIOME_DESERT
+	"Savanna",          // BIOME_SAVANNA
+	"Jungle",           // BIOME_JUNGLE
+	"Badlands",         // BIOME_BADLANDS
+	"Mountains",        // BIOME_MOUNTAINS
+	"Snowy Mountains",  // BIOME_SNOWY_MOUNTAINS
+};
+
 struct TextureInfo
 {
 	unsigned int id;

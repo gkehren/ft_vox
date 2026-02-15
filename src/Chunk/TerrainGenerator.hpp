@@ -4,7 +4,6 @@
 #include <array>
 #include <glm/glm.hpp>
 #include <unordered_map>
-#include <random>
 #include <memory>
 
 #include <utils.hpp>
@@ -47,7 +46,8 @@ public:
   static constexpr int BEDROCK_LEVEL = 5;
   static constexpr int BEACH_START = SEA_LEVEL - 3;
   static constexpr int BEACH_END = SEA_LEVEL + 3;
-  static constexpr float NOISE_OFFSET = 1000000.0f;
+  // Offset added to all noise coordinates to avoid symmetry artifacts near the origin.
+  static constexpr float NOISE_OFFSET = 10000.0f;
 
   explicit TerrainGenerator(int seed = 1337);
   ChunkData generateChunk(int chunkX, int chunkZ);
@@ -86,7 +86,6 @@ private:
 
   // Vegetation noise
   FastNoise::SmartNode<FastNoise::Generator> m_treeNoise;
-  FastNoise::SmartNode<FastNoise::Generator> m_vegetationNoise;
 
   // Ore generation
   struct OreDef
@@ -139,10 +138,9 @@ private:
   void placeTree(ChunkData &chunkData, int localX, int localZ, int baseY, BiomeType biome);
   void placeOakTree(ChunkData &chunkData, int localX, int localZ, int baseY);
   void placeBirchTree(ChunkData &chunkData, int localX, int localZ, int baseY);
-  void placeSprucetree(ChunkData &chunkData, int localX, int localZ, int baseY);
+  void placeSpruceTree(ChunkData &chunkData, int localX, int localZ, int baseY);
   void placeJungleTree(ChunkData &chunkData, int localX, int localZ, int baseY);
   void placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY);
-  void placeDeadBush(ChunkData &chunkData, int localX, int localZ, int baseY);
 
   // Voxel type determination
   TextureType getVoxelTypeAt(int worldY, int terrainHeight, BiomeType biome) const;

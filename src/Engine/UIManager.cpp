@@ -1,6 +1,7 @@
 #include "UIManager.hpp"
 #include "Engine.hpp"
 #include <SDL3/SDL.h>
+#include <cmath>
 
 UIManager::UIManager(Engine *engineInstance, SDL_Window *window, int &windowWidth, int &windowHeight)
 	: engine(engineInstance), sdlWindow(window), winWidth(windowWidth), winHeight(windowHeight)
@@ -60,7 +61,12 @@ void UIManager::update()
 		ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", camPos.x, camPos.y, camPos.z);
 		const auto &playerChunkPos = engine->getPlayerChunkPos();
 		ImGui::Text("Player chunk: (%d, %d)", playerChunkPos.x, playerChunkPos.y);
-		// ImGui::Text("Current biome: %s", getCurrentBiomeName().c_str());
+		if (auto *gen = engine->getTerrainGenerator()) {
+			BiomeType biome = gen->getBiomeAt(
+				static_cast<int>(std::floor(camPos.x)),
+				static_cast<int>(std::floor(camPos.z)));
+			ImGui::Text("Biome: %s", biomeTypeString[biome]);
+		}
 		ImGui::Text("Speed: %.1f", engine->getCamera().getMovementSpeed());
 	}
 	ImGui::Text("Selected texture: %s (%d)", textureTypeString.at(selectedTexture).c_str(), static_cast<int>(selectedTexture));
