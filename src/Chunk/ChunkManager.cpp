@@ -286,34 +286,46 @@ bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
 		bool modified = it->second.deleteVoxel(worldPos);
 		if (modified)
 		{
-			// Mark neighbors for remeshing if the deleted voxel was on a border
-			// This is a simplified version. A more robust solution would check specific faces.
 			const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
+			const int localY = static_cast<int>(std::floor(worldPos.y));
 			const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
 
+			// Update the neighbor's shell voxels so its mesh reflects the change
 			if (localX == 0)
 			{
 				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(-1, 0, 0));
 				if (neighbor)
+				{
+					neighbor->setVoxel(CHUNK_SIZE, localY, localZ, AIR);
 					neighbor->setState(ChunkState::GENERATED);
+				}
 			}
 			if (localX == CHUNK_SIZE - 1)
 			{
 				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(1, 0, 0));
 				if (neighbor)
+				{
+					neighbor->setVoxel(-1, localY, localZ, AIR);
 					neighbor->setState(ChunkState::GENERATED);
+				}
 			}
 			if (localZ == 0)
 			{
 				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(0, 0, -1));
 				if (neighbor)
+				{
+					neighbor->setVoxel(localX, localY, CHUNK_SIZE, AIR);
 					neighbor->setState(ChunkState::GENERATED);
+				}
 			}
 			if (localZ == CHUNK_SIZE - 1)
 			{
 				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(0, 0, 1));
 				if (neighbor)
+				{
+					neighbor->setVoxel(localX, localY, -1, AIR);
 					neighbor->setState(ChunkState::GENERATED);
+				}
 			}
 		}
 		return modified;
@@ -334,33 +346,46 @@ bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 		bool modified = it->second.placeVoxel(worldPos, type);
 		if (modified)
 		{
-			// Mark neighbors for remeshing
 			const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
+			const int localY = static_cast<int>(std::floor(worldPos.y));
 			const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
 
+			// Update the neighbor's shell voxels so its mesh reflects the change
 			if (localX == 0)
 			{
 				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(-1, 0, 0));
 				if (neighbor)
+				{
+					neighbor->setVoxel(CHUNK_SIZE, localY, localZ, type);
 					neighbor->setState(ChunkState::GENERATED);
+				}
 			}
 			if (localX == CHUNK_SIZE - 1)
 			{
 				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(1, 0, 0));
 				if (neighbor)
+				{
+					neighbor->setVoxel(-1, localY, localZ, type);
 					neighbor->setState(ChunkState::GENERATED);
+				}
 			}
 			if (localZ == 0)
 			{
 				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(0, 0, -1));
 				if (neighbor)
+				{
+					neighbor->setVoxel(localX, localY, CHUNK_SIZE, type);
 					neighbor->setState(ChunkState::GENERATED);
+				}
 			}
 			if (localZ == CHUNK_SIZE - 1)
 			{
 				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(0, 0, 1));
 				if (neighbor)
+				{
+					neighbor->setVoxel(localX, localY, -1, type);
 					neighbor->setState(ChunkState::GENERATED);
+				}
 			}
 		}
 		return modified;

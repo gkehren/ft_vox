@@ -311,20 +311,31 @@ void Chunk::generateMesh() {
           glm::ivec3 quad_origin_voxel_coord = {
               0, 0, 0}; // Min corner of the voxel this quad's face belongs to
 
-          if (type1 != AIR &&
+          // Only generate faces for voxels that are inside this chunk.
+          // Border/shell voxels are used solely for occlusion checks — the
+          // neighboring chunk is responsible for rendering its own faces.
+          bool type1InChunk = (x[0] >= 0 && x[0] < CHUNK_SIZE &&
+                               x[1] >= 0 && x[1] < CHUNK_HEIGHT &&
+                               x[2] >= 0 && x[2] < CHUNK_SIZE);
+          glm::ivec3 xq = x + q;
+          bool type2InChunk = (xq[0] >= 0 && xq[0] < CHUNK_SIZE &&
+                               xq[1] >= 0 && xq[1] < CHUNK_HEIGHT &&
+                               xq[2] >= 0 && xq[2] < CHUNK_SIZE);
+
+          if (type1 != AIR && type1InChunk &&
               (type2 == AIR ||
                (TextureManager::isTransparent(type2) && type1 != type2))) {
             // Face belongs to type1, pointing towards type2
             quad_type = type1;
             quad_normal_dir = q;
             quad_origin_voxel_coord = x;
-          } else if (type2 != AIR &&
+          } else if (type2 != AIR && type2InChunk &&
                      (type1 == AIR || (TextureManager::isTransparent(type1) &&
                                        type1 != type2))) {
             // Face belongs to type2, pointing towards type1
             quad_type = type2;
             quad_normal_dir = {-q[0], -q[1], -q[2]};
-            quad_origin_voxel_coord = x + q;
+            quad_origin_voxel_coord = xq;
           } else {
             continue; // No visible face here, or types are the same opaque.
           }
