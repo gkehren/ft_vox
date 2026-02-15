@@ -31,7 +31,7 @@ struct IVec3Hash
 
 struct Voxel
 {
-	uint8_t type : 6; // 16 types (2^4 = 16)
+	uint8_t type; // Supports up to 256 block types (0-255)
 };
 
 struct Vertex
@@ -155,6 +155,9 @@ enum TextureType
 	AIR	   // Keep after count beacuse AIR is not a texture
 };
 
+// Ensure TextureType fits in Voxel::type (uint8_t)
+static_assert(static_cast<int>(AIR) <= 255, "TextureType values exceed uint8_t range for Voxel::type");
+
 static const std::map<TextureType, std::string> textureTypeString = {
 	{BEDROCK, "Bedrock"},
 	{BRICKS, "Bricks"},
@@ -245,31 +248,3 @@ const static unsigned int indicesBoundingbox[] = {
 	0, 1, 1, 2, 2, 3, 3, 0,
 	4, 5, 5, 6, 6, 7, 7, 4,
 	0, 4, 1, 5, 2, 6, 3, 7};
-
-struct BiomeParameters
-{
-	// General biome properties
-	float baseHeight;
-	float heightVariation;
-
-	// Surface properties
-	TextureType surfaceBlock;
-	TextureType subSurfaceBlock;
-	int subSurfaceDepth;
-
-	// Noise parameters
-	float noiseScale;
-	int octaves;
-	float persistence;
-	glm::vec3 waterColor;
-
-	// Mountain-specific parameters
-	float mountainNoiseScale;
-	int mountainOctaves;
-	float mountainPersistence;
-	float mountainDetailScale;
-	float mountainDetailInfluence;
-	float peakNoiseScale;
-	float peakThreshold;
-	float peakMultiplier;
-};

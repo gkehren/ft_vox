@@ -9,24 +9,12 @@
 
 #include <utils.hpp>
 
-// Structure definition for a tree to be placed
-struct TreePlacement
-{
-  int localX;
-  int localZ;
-  int baseY;
-  BiomeType biome;
-};
-
 struct ChunkData
 {
   std::vector<Voxel> voxels;
 
   // Border voxels from neighboring chunks (1-thick shell: 18x(H+2)x18)
   std::vector<uint8_t> borderVoxels;
-
-  // Trees to be placed (may extend into neighboring chunks)
-  std::vector<TreePlacement> trees;
 
   // Biome data for the chunk (per column)
   std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomes;
@@ -57,7 +45,6 @@ public:
   // Terrain generation constants
   static constexpr int SEA_LEVEL = 64;
   static constexpr int BEDROCK_LEVEL = 5;
-  static constexpr int RIVER_LEVEL = SEA_LEVEL - 2;
   static constexpr int BEACH_START = SEA_LEVEL - 3;
   static constexpr int BEACH_END = SEA_LEVEL + 3;
   static constexpr float NOISE_OFFSET = 1000000.0f;
@@ -93,10 +80,6 @@ private:
   FastNoise::SmartNode<FastNoise::Generator> m_humidityNoise;
   FastNoise::SmartNode<FastNoise::Generator> m_weirdnessNoise; // For rare biomes
 
-  // River noise
-  FastNoise::SmartNode<FastNoise::Generator> m_riverNoise;
-  FastNoise::SmartNode<FastNoise::Generator> m_riverMaskNoise;
-
   // Cave and structure noise
   FastNoise::SmartNode<FastNoise::Generator> m_caveNoise;
   FastNoise::SmartNode<FastNoise::Generator> m_ravineNoise;
@@ -125,15 +108,12 @@ private:
   static std::array<BiomeConfig, BIOME_COUNT> s_biomeConfigs;
   static bool s_biomeConfigsInitialized;
   static void initBiomeConfigs();
-  static void initBiomeConfigsInternal();
-
   // =============================================
   // SETUP METHODS
   // =============================================
   void setupNoiseGenerators();
   void setupTerrainNoise();
   void setupBiomeNoise();
-  void setupRiverNoise();
   void setupCaveNoise();
   void setupVegetationNoise();
   void setupOres();
@@ -148,15 +128,11 @@ private:
 
   // Height calculation
   int calculateHeight(float continental, float erosion, float peaksValleys,
-                      float ridge, BiomeType biome) const;
+                      float ridge) const;
 
   // Biome determination
   BiomeType determineBiome(float temperature, float humidity, float weirdness,
                            float continental, int height) const;
-
-  // River generation
-  bool isRiver(float riverNoise, float riverMask, int height) const;
-  void carveRiver(ChunkData &chunkData, int localX, int localZ, int terrainHeight);
 
   // Vegetation generation
   void generateVegetation(ChunkData &chunkData, int chunkX, int chunkZ);
@@ -168,9 +144,7 @@ private:
   void placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY);
   void placeDeadBush(ChunkData &chunkData, int localX, int localZ, int baseY);
 
-  // Column generation
-  void generateColumn(std::array<Voxel, CHUNK_VOLUME> &voxels, int localX,
-                      int localZ, int terrainHeight);
+  // Voxel type determination
   TextureType getVoxelTypeAt(int worldY, int terrainHeight, BiomeType biome) const;
 
   // =============================================

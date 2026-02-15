@@ -298,7 +298,6 @@ void TerrainGenerator::setupNoiseGenerators()
 {
   setupTerrainNoise();
   setupBiomeNoise();
-  setupRiverNoise();
   setupCaveNoise();
   setupVegetationNoise();
   setupOres();
@@ -401,34 +400,6 @@ void TerrainGenerator::setupTerrainNoise()
     weirdScale->SetScale(0.003f); // Increased from 0.001f
     m_weirdnessNoise = weirdScale;
   }
-void TerrainGenerator::setupRiverNoise()
-{
-  // River path noise - Uses ridged noise for natural river paths
-  auto riverBase = FastNoise::New<FastNoise::OpenSimplex2>();
-  auto riverFractal = FastNoise::New<FastNoise::FractalRidged>();
-  riverFractal->SetSource(riverBase);
-  riverFractal->SetOctaveCount(2);
-  riverFractal->SetLacunarity(2.0f);
-  riverFractal->SetGain(0.5f);
-
-  auto riverScale = FastNoise::New<FastNoise::DomainScale>();
-  riverScale->SetSource(riverFractal);
-  riverScale->SetScale(0.003f); // Creates winding river patterns
-  m_riverNoise = riverScale;
-
-  // River mask - Determines where rivers can form
-  auto maskBase = FastNoise::New<FastNoise::OpenSimplex2>();
-  auto maskFractal = FastNoise::New<FastNoise::FractalFBm>();
-  maskFractal->SetSource(maskBase);
-  maskFractal->SetOctaveCount(2);
-  maskFractal->SetLacunarity(2.0f);
-  maskFractal->SetGain(0.5f);
-
-  auto maskScale = FastNoise::New<FastNoise::DomainScale>();
-  maskScale->SetSource(maskFractal);
-  maskScale->SetScale(0.001f);
-  m_riverMaskNoise = maskScale;
-}
 
 void TerrainGenerator::setupCaveNoise()
 {
@@ -515,8 +486,6 @@ struct GenBuffers
   std::array<float, CHUNK_SIZE * CHUNK_SIZE> temperature;
   std::array<float, CHUNK_SIZE * CHUNK_SIZE> humidity;
   std::array<float, CHUNK_SIZE * CHUNK_SIZE> weirdness;
-  std::array<float, CHUNK_SIZE * CHUNK_SIZE> river;
-  std::array<float, CHUNK_SIZE * CHUNK_SIZE> riverMask;
   std::array<float, CHUNK_VOLUME> cave;
   std::array<float, CHUNK_VOLUME> ravine;
   
@@ -623,17 +592,14 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
     float humidity = std::clamp(humidityResults[i], -1.0f, 1.0f);
     float weirdness = std::clamp(weirdnessResults[i], -1.0f, 1.0f);
 
-    int prelimHeight = calculateHeight(continental, erosionResults[i],
-                                       peaksValleysResults[i], ridgeResults[i],
-                                       BIOME_PLAINS);
+    int height = calculateHeight(continental, erosionResults[i],
+                                 peaksValleysResults[i], ridgeResults[i]);
 
     BiomeType biome = determineBiome(temperature, humidity, weirdness,
-                                     continental, prelimHeight);
+                                     continental, height);
 
     chunkData.biomes[i] = biome;
-    chunkData.heightMap[i] = calculateHeight(continental, erosionResults[i],
-                                             peaksValleysResults[i], ridgeResults[i],
-                                             biome);
+    chunkData.heightMap[i] = height;
   }
 
   // Pass 2: Generate voxel columns
@@ -774,7 +740,7 @@ BiomeType TerrainGenerator::getBiomeAt(int worldX, int worldZ) const
   float pv = m_peaksValleysNoise->GenSingle2D(x, z, m_seed + 2000);
   float ridge = m_ridgeNoise->GenSingle2D(x, z, m_seed + 3000);
 
-  int height = calculateHeight(cont, erosion, pv, ridge, BIOME_PLAINS);
+  int height = calculateHeight(cont, erosion, pv, ridge);
   return determineBiome(temp, humid, weird, cont, height);
 }
 
@@ -783,8 +749,7 @@ BiomeType TerrainGenerator::getBiomeAt(int worldX, int worldZ) const
 // =============================================
 
 int TerrainGenerator::calculateHeight(float continental, float erosion,
-                                      float peaksValleys, float ridge,
-                                      BiomeType biome) const
+                                      float peaksValleys, float ridge) const
 {
   continental = std::clamp(continental, -1.0f, 1.0f);
   erosion = std::clamp(erosion, -1.0f, 1.0f);
@@ -817,20 +782,6 @@ int TerrainGenerator::calculateHeight(float continental, float erosion,
                           mountainWeight * mountainHeight;
 
   return std::clamp(static_cast<int>(std::round(static_cast<float>(SEA_LEVEL) + heightVariation)), 1, CHUNK_HEIGHT - 32);
-}
-
-// =============================================
-// RIVER GENERATION (DISABLED)
-// =============================================
-
-bool TerrainGenerator::isRiver(float riverNoise, float riverMask, int height) const
-{
-  return false;
-}
-
-void TerrainGenerator::carveRiver(ChunkData &chunkData, int localX, int localZ,
-                                  int terrainHeight)
-{
 }
 
 // =============================================
@@ -1036,9 +987,9 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
     float temp = m_temperatureNoise->GenSingle2D(x, z, m_seed + 6000);
     float humid = m_humidityNoise->GenSingle2D(x, z, m_seed + 7000);
     float weird = m_weirdnessNoise->GenSingle2D(x, z, m_seed + 8000);
-    int pHeight = calculateHeight(cont, erosion, pv, ridge, BIOME_PLAINS);
-    BiomeType biome = determineBiome(temp, humid, weird, cont, pHeight);
-    return {calculateHeight(cont, erosion, pv, ridge, biome), biome};
+    int height = calculateHeight(cont, erosion, pv, ridge);
+    BiomeType biome = determineBiome(temp, humid, weird, cont, height);
+    return {height, biome};
   };
 
   auto isCaveOrRavine = [this](int worldX, int worldY, int worldZ) -> bool {
