@@ -461,10 +461,10 @@ void Engine::updateVoxelHighlights()
 	if (hit)
 	{
 		destructionHighlight.active = true;
-		destructionHighlight.position = glm::floor(hitPosition) + glm::vec3(0.5f); // Center of the voxel
+		destructionHighlight.position = glm::floor(hitPosition); // Center of the voxel
 
 		placementHighlight.active = true;
-		placementHighlight.position = glm::floor(previousPosition) + glm::vec3(0.5f);
+		placementHighlight.position = glm::floor(previousPosition);
 		placementHighlight.color = glm::vec3(0.2f, 0.8f, 0.2f); // Green for placement
 	}
 	else
