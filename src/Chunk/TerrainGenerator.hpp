@@ -141,6 +141,8 @@ private:
   // Height calculation
   int calculateHeight(float continental, float erosion, float peaksValleys,
                       float ridge) const;
+  float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge) const;
+  void applyErosion(float* heightMap, int size) const;
 
   // Biome determination
   BiomeType determineBiome(float temperature, float humidity, float weirdness,
@@ -156,7 +158,7 @@ private:
   void placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY);
 
   // Voxel type determination
-  TextureType getVoxelTypeAt(int worldY, int terrainHeight, BiomeType biome) const;
+  TextureType getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight, BiomeType biome, float temperature) const;
 
   // =============================================
   // UTILITY FUNCTIONS
