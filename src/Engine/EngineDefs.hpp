@@ -39,6 +39,7 @@ struct RenderSettings
 	int minRenderDistance{320}; // Min view distance, potentially in blocks or units
 	int maxRenderDistance{480}; // Max view distance
 	int raycastDistance{8};
+	bool vsyncEnabled{false};
 };
 
 struct RenderTiming

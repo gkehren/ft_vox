@@ -56,6 +56,7 @@ public:
 	TerrainGenerator *getTerrainGenerator() const { return terrainGenerator.get(); }
 
 	void setWireframeMode(bool enabled);
+	void setVSync(bool enabled);
 
 	void startServer();
 	void stopServer();

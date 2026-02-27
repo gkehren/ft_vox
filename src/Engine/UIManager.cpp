@@ -76,6 +76,10 @@ void UIManager::update()
 	{
 		engine->setWireframeMode(renderSettings.wireframeMode); // Notify engine
 	}
+	if (ImGui::Checkbox("VSync", &renderSettings.vsyncEnabled))
+	{
+		engine->setVSync(renderSettings.vsyncEnabled); // Update SDL interval on toggle
+	}
 	ImGui::Checkbox("Chunk borders", &renderSettings.chunkBorders);
 	ImGui::InputInt("Chunk loaded max", &renderSettings.chunkLoadedMax);
 	ImGui::Checkbox("Pause", &renderSettings.paused);
@@ -212,7 +216,7 @@ void UIManager::handleShaderParametersWindow()
 		ImGui::Checkbox("Day/Night Cycle", &shaderParams.dayCycleEnabled);
 		ImGui::SliderFloat("Day Time", &shaderParams.dayTime, 0.0f, 1.0f, "%.3f");
 		ImGui::SliderFloat("Cycle Speed", &shaderParams.dayCycleSpeed, 0.0f, 0.05f, "%.5f");
-		
+
 		if (!shaderParams.dayCycleEnabled)
 		{
 			ImGui::SliderFloat3("Sun Direction", (float *)&shaderParams.sunDirection, -1.0f, 1.0f);

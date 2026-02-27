@@ -55,7 +55,6 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 	}
 
 	SDL_GL_MakeCurrent(this->window, glContext);
-	SDL_GL_SetSwapInterval(0); // vsync
 	SDL_ShowWindow(window);
 
 	if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)))
@@ -97,7 +96,7 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 	this->threadPool = std::make_unique<ThreadPool>(threadCount > 0 ? threadCount : 1);
 
 	initializeNoiseGenerator(0);
-
+	setVSync(uiManager->getRenderSettings().vsyncEnabled);
 
 	std::cout << "SDL version: " << SDL_GetVersion() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
@@ -501,6 +500,15 @@ void Engine::setWireframeMode(bool enabled)
 	{
 		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	}
+}
+
+void Engine::setVSync(bool enabled)
+{
+	if (uiManager)
+	{
+		uiManager->getRenderSettings().vsyncEnabled = enabled;
+	}
+	SDL_GL_SetSwapInterval(enabled ? 1 : 0);
 }
 
 void Engine::startServer()
