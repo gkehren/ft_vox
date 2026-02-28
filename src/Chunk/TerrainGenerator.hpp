@@ -99,6 +99,7 @@ private:
 
   // Vegetation noise
   FastNoise::SmartNode<FastNoise::Generator> m_treeNoise;
+  FastNoise::SmartNode<FastNoise::Generator> m_forestDensityNoise; // Large-scale forest cluster noise
 
   // Ore generation
   struct OreDef
@@ -142,7 +143,7 @@ private:
   int calculateHeight(float continental, float erosion, float peaksValleys,
                       float ridge) const;
   float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge) const;
-  void applyErosion(float* heightMap, int size) const;
+  void applyErosion(float *heightMap, int size) const;
 
   // Biome determination
   BiomeType determineBiome(float temperature, float humidity, float weirdness,
@@ -150,12 +151,24 @@ private:
 
   // Vegetation generation
   void generateVegetation(ChunkData &chunkData, int chunkX, int chunkZ);
-  void placeTree(ChunkData &chunkData, int localX, int localZ, int baseY, BiomeType biome);
-  void placeOakTree(ChunkData &chunkData, int localX, int localZ, int baseY);
-  void placeBirchTree(ChunkData &chunkData, int localX, int localZ, int baseY);
-  void placeSpruceTree(ChunkData &chunkData, int localX, int localZ, int baseY);
-  void placeJungleTree(ChunkData &chunkData, int localX, int localZ, int baseY);
-  void placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY);
+  void placeTree(ChunkData &chunkData, int localX, int localZ, int baseY, BiomeType biome, int worldX, int worldZ);
+  void placeOakTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeBirchTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeSpruceTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeJungleTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+
+  // Per-tree deterministic RNG from world position
+  static inline uint32_t treeHash(int worldX, int worldZ, int seed)
+  {
+    uint32_t h = (static_cast<uint32_t>(worldX) * 374761393u +
+                  static_cast<uint32_t>(worldZ) * 668265263u) ^
+                 static_cast<uint32_t>(seed);
+    h ^= h >> 16;
+    h *= 0x45d9f3bu;
+    h ^= h >> 16;
+    return h;
+  }
 
   // Voxel type determination
   TextureType getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight, BiomeType biome, float temperature) const;

@@ -38,7 +38,7 @@ struct RenderSettings
 	int minRenderDistance{320}; // Min view distance, potentially in blocks or units
 	int maxRenderDistance{480}; // Max view distance
 	int raycastDistance{8};
-	bool vsyncEnabled{false};
+	bool vsyncEnabled{true};
 
 	// Per-second chunk pipeline throughput — frame-rate-independent budgets.
 	// These control how many operations are dispatched per second regardless
