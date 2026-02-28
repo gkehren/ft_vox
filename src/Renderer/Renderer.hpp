@@ -18,6 +18,7 @@ public:
 	Renderer(int screenWidth, int screenHeight, float renderDistance);
 	~Renderer();
 	void setScreenSize(int screenWidth, int screenHeight);
+	void setRenderDistance(float distance) { renderDistance = distance; }
 
 	GLuint getTextureAtlas() const { return textureAtlas; }
 	glm::vec3 computeColorFromPlayerId(uint32_t playerId) const;

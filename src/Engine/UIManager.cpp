@@ -55,7 +55,18 @@ void UIManager::update()
 	ImGui::Text("FPS: %.1f (%.1f ms)", ImGui::GetIO().Framerate, engine->getDeltaTime() * 1000.0f);
 	ImGui::Text("Visible chunks: %d", renderSettings.visibleChunksCount);
 	ImGui::Text("Voxel count: %d", renderSettings.visibleVoxelsCount);
-	ImGui::Text("Render distance: %d | %d", renderSettings.minRenderDistance, renderSettings.maxRenderDistance);
+	ImGui::SetNextItemWidth(180);
+	if (ImGui::SliderInt("Min render dist", &renderSettings.minRenderDistance, 32, renderSettings.maxRenderDistance))
+	{
+		renderSettings.minRenderDistance = std::min(renderSettings.minRenderDistance, renderSettings.maxRenderDistance);
+	}
+	ImGui::SetNextItemWidth(180);
+	if (ImGui::SliderInt("Max render dist", &renderSettings.maxRenderDistance, renderSettings.minRenderDistance, 4096))
+	{
+		renderSettings.maxRenderDistance = std::max(renderSettings.maxRenderDistance, renderSettings.minRenderDistance);
+		if (engine && engine->getRenderer())
+			engine->getRenderer()->setRenderDistance(static_cast<float>(renderSettings.maxRenderDistance));
+	}
 	if (engine)
 	{
 		const auto &camPos = engine->getCamera().getPosition();
