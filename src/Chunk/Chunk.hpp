@@ -8,6 +8,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <array>
+#include <atomic>
 #include <bitset>
 #include <thread>
 #include <mutex>
@@ -39,7 +40,6 @@ public:
 
 	void setVoxels(const std::vector<Voxel> &voxels);
 
-
 	Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z);
 	const Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
 	bool isVoxelActive(int x, int y, int z) const;
@@ -52,12 +52,20 @@ public:
 	void drawShadow(const Shader &shader) const;
 	void generateTerrain(TerrainGenerator &generator);
 	void generateMesh();
+	void generateLODMesh(); // K: simplified column-top mesh for distant chunks
 	bool hasWaterMesh() const { return waterIndexCount > 0; }
+	bool isLODMesh() const { return m_isLODMesh; }
+	bool needsGPUUpload() const { return meshNeedsUpdate.load(); }
+	void uploadToGPU();
+	bool isShellEmpty() const { return neighborShellVoxels.empty(); }
+	void freeShellVoxels();
+	void rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
+								   const Chunk *south, const Chunk *north);
 
 private:
 	glm::vec3 position;
 	bool visible;
-	ChunkState state;
+	std::atomic<ChunkState> state;
 
 	GLuint VAO;
 	GLuint VBO;
@@ -69,9 +77,9 @@ private:
 	GLuint waterEBO;
 
 	std::vector<Vertex> vertices;
-	std::vector<uint16_t> indices;
+	std::vector<uint32_t> indices; // J: upgraded from uint16_t to eliminate silent overflow
 	std::vector<Vertex> waterVertices;
-	std::vector<uint16_t> waterIndices;
+	std::vector<uint32_t> waterIndices;
 	std::vector<Voxel> voxels;
 	std::bitset<CHUNK_VOLUME> activeVoxels;
 	std::vector<uint8_t> neighborShellVoxels; // Flat array for 1-thick shell (18x(H+2)x18)
@@ -83,9 +91,8 @@ private:
 	uint32_t opaqueIndexCount;
 	uint32_t waterIndexCount;
 
-	bool meshNeedsUpdate;
-	void uploadMeshToGPU();
-
+	std::atomic<bool> meshNeedsUpdate;
+	bool m_isLODMesh{false}; // K: true when this chunk carries the simplified LOD mesh
 
 	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
 };

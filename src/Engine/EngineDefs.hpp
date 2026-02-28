@@ -35,11 +35,19 @@ struct RenderSettings
 	bool paused{false};
 	int visibleChunksCount{0};	// Output, updated by rendering logic
 	int visibleVoxelsCount{0};	// Output, updated by rendering logic
-	int chunkLoadedMax{5};		// Max load radius in chunks from player
 	int minRenderDistance{320}; // Min view distance, potentially in blocks or units
 	int maxRenderDistance{480}; // Max view distance
 	int raycastDistance{8};
 	bool vsyncEnabled{false};
+
+	// Per-second chunk pipeline throughput — frame-rate-independent budgets.
+	// These control how many operations are dispatched per second regardless
+	// of VSync or uncapped FPS. Increase to load faster; decrease to reduce
+	// per-frame CPU spikes on slower machines.
+	int loadPerSec{5000};	// chunk allocations from queue / sec
+	int genPerSec{5000};	// terrain-gen job dispatches / sec
+	int meshPerSec{5000};	// mesh job dispatches / sec
+	int uploadPerSec{5000}; // GPU glBufferData uploads / sec (main-thread stall)
 };
 
 struct RenderTiming
@@ -68,7 +76,6 @@ struct PostProcessSettings
 	float godRaysWeight{0.01f};
 	float godRaysDecay{0.97f};
 	float godRaysExposure{0.3f};
-
 };
 
 struct VoxelHighlight

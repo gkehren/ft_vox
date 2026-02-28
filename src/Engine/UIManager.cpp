@@ -1,6 +1,7 @@
 #include "UIManager.hpp"
 #include "Engine.hpp"
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <cmath>
 
 UIManager::UIManager(Engine *engineInstance, SDL_Window *window, int &windowWidth, int &windowHeight)
@@ -61,7 +62,8 @@ void UIManager::update()
 		ImGui::Text("X/Y/Z: (%.1f, %.1f, %.1f)", camPos.x, camPos.y, camPos.z);
 		const auto &playerChunkPos = engine->getPlayerChunkPos();
 		ImGui::Text("Player chunk: (%d, %d)", playerChunkPos.x, playerChunkPos.y);
-		if (auto *gen = engine->getTerrainGenerator()) {
+		if (auto *gen = engine->getTerrainGenerator())
+		{
 			BiomeType biome = gen->getBiomeAt(
 				static_cast<int>(std::floor(camPos.x)),
 				static_cast<int>(std::floor(camPos.z)));
@@ -81,8 +83,22 @@ void UIManager::update()
 		engine->setVSync(renderSettings.vsyncEnabled); // Update SDL interval on toggle
 	}
 	ImGui::Checkbox("Chunk borders", &renderSettings.chunkBorders);
-	ImGui::InputInt("Chunk loaded max", &renderSettings.chunkLoadedMax);
 	ImGui::Checkbox("Pause", &renderSettings.paused);
+
+	ImGui::Separator();
+	ImGui::Text("Chunk pipeline (per second)");
+	ImGui::SetNextItemWidth(120);
+	ImGui::InputInt("Load/s", &renderSettings.loadPerSec);
+	ImGui::SetNextItemWidth(120);
+	ImGui::InputInt("Gen/s", &renderSettings.genPerSec);
+	ImGui::SetNextItemWidth(120);
+	ImGui::InputInt("Mesh/s", &renderSettings.meshPerSec);
+	ImGui::SetNextItemWidth(120);
+	ImGui::InputInt("Upload/s", &renderSettings.uploadPerSec);
+	renderSettings.loadPerSec = std::max(1, renderSettings.loadPerSec);
+	renderSettings.genPerSec = std::max(1, renderSettings.genPerSec);
+	renderSettings.meshPerSec = std::max(1, renderSettings.meshPerSec);
+	renderSettings.uploadPerSec = std::max(1, renderSettings.uploadPerSec);
 
 	ImGui::Text("Screen size: %d x %d", winWidth, winHeight);
 

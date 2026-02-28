@@ -239,7 +239,8 @@ void Engine::updateWorldState()
 	if (params.dayCycleEnabled)
 	{
 		params.dayTime += static_cast<float>(deltaTime) * params.dayCycleSpeed;
-		if (params.dayTime > 1.0f) params.dayTime -= 1.0f;
+		if (params.dayTime > 1.0f)
+			params.dayTime -= 1.0f;
 
 		// Calculate sun direction based on time
 		// 0.25 is sunrise (+X), 0.5 is noon (+Y), 0.75 is sunset (-X), 0.0 is midnight (-Y)
@@ -254,20 +255,28 @@ void Engine::updateWorldState()
 		glm::vec3 sunsetFog = glm::vec3(1.0f, 0.4f, 0.2f);
 		glm::vec3 nightFog = glm::vec3(0.02f, 0.02f, 0.05f);
 
-		if (sunHeight > 0.2f) { // Day
+		if (sunHeight > 0.2f)
+		{ // Day
 			params.fogColor = dayFog;
 			params.ambientStrength = 0.2f;
 			params.diffuseIntensity = 0.7f;
-		} else if (sunHeight > -0.2f) { // Sunrise/Sunset transition
+		}
+		else if (sunHeight > -0.2f)
+		{										 // Sunrise/Sunset transition
 			float t = (sunHeight + 0.2f) / 0.4f; // 0 to 1
-			if (cos(angle) > 0) { // Sunrise
+			if (cos(angle) > 0)
+			{ // Sunrise
 				params.fogColor = glm::mix(sunsetFog, dayFog, t);
-			} else { // Sunset
+			}
+			else
+			{ // Sunset
 				params.fogColor = glm::mix(sunsetFog, dayFog, t);
 			}
 			params.ambientStrength = glm::mix(0.1f, 0.2f, t);
 			params.diffuseIntensity = glm::mix(0.1f, 0.7f, t);
-		} else { // Night
+		}
+		else
+		{										 // Night
 			float t = (sunHeight + 1.0f) / 0.8f; // 0 to 1
 			params.fogColor = glm::mix(nightFog, sunsetFog, t);
 			params.ambientStrength = 0.15f; // Increased from 0.05
@@ -291,10 +300,37 @@ void Engine::updateWorldState()
 		chunkManager->performFrustumCulling(camera, windowWidth, windowHeight, currentRenderSettings);
 	}
 	// Pass currentRenderSettings by const reference
-	chunkManager->processChunkLoading(currentRenderSettings);
+	// Frame-rate-independent chunk budgets: compute per-second rates scaled by
+	// deltaTime so generation speed is identical at any FPS or VSync setting.
+	// Generation/meshing dispatch is cheap (thread pool does the real work), so
+	// allow a generous per-second ceiling; GPU upload stays modest because it
+	// stalls the driver on the main thread.
+	const float dt = static_cast<float>(deltaTime);
+
+	// Token-bucket accumulators: add fractional tokens each frame and drain whole
+	// tokens as the per-frame budget. This guarantees a steady per-second dispatch
+	// rate that is completely independent of FPS or VSync state.
+	// Cap the accumulator to 2 seconds worth of work so a single lag spike cannot
+	// trigger a huge catch-up burst.
+	auto drainBucket = [](float &accum, int perSec, float dt) -> int
+	{
+		accum += static_cast<float>(perSec) * dt;
+		accum = std::min(accum, static_cast<float>(perSec) * 2.f); // max 2s backlog
+		int budget = static_cast<int>(accum);
+		accum -= static_cast<float>(budget);
+		return std::max(budget, 0);
+	};
+
+	const int loadBudget = drainBucket(m_loadAccum, currentRenderSettings.loadPerSec, dt);
+	const int genBudget = drainBucket(m_genAccum, currentRenderSettings.genPerSec, dt);
+	const int meshBudget = drainBucket(m_meshAccum, currentRenderSettings.meshPerSec, dt);
+	const int uploadBudget = drainBucket(m_uploadAccum, currentRenderSettings.uploadPerSec, dt);
+
+	chunkManager->processChunkLoading(currentRenderSettings, loadBudget);
 	chunkManager->processFinishedJobs();
-	chunkManager->generatePendingVoxels(camera, currentRenderSettings, seed);
-	chunkManager->meshPendingChunks(camera, currentRenderSettings);
+	chunkManager->generatePendingVoxels(camera, currentRenderSettings, seed, genBudget);
+	chunkManager->meshPendingChunks(camera, currentRenderSettings, meshBudget);
+	chunkManager->uploadPendingMeshes(uploadBudget);
 }
 
 void Engine::renderScene() // Renamed from render
@@ -331,7 +367,6 @@ void Engine::renderScene() // Renamed from render
 	shader->setFloat("lightLevels", uiManager->getShaderParams().lightLevels);
 	shader->setFloat("saturationLevel", uiManager->getShaderParams().saturationLevel);
 	shader->setFloat("colorBoost", uiManager->getShaderParams().colorBoost);
-
 
 	if (renderer && shader && renderer->getTextureAtlas() && chunkManager)
 	{

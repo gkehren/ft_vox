@@ -96,6 +96,14 @@ private:
 
 	TextureType selectedTexture;
 
+	// Token-bucket accumulators for frame-rate-independent chunk pipeline budgets.
+	// Each accumulator collects fractional work units across frames so the total
+	// throughput matches the configured per-second rate regardless of FPS.
+	float m_loadAccum{0.f};
+	float m_genAccum{0.f};
+	float m_meshAccum{0.f};
+	float m_uploadAccum{0.f};
+
 	void handleEvents(bool &keyTPressed);
 	void updateWorldState();
 	void renderScene();

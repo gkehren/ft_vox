@@ -26,11 +26,11 @@ void ChunkManager::updatePlayerPosition(const glm::ivec2 &newPlayerChunkPos, con
 	loadChunksAroundPlayer(glm::ivec3(newPlayerChunkPos.x, 0, newPlayerChunkPos.y), camera, settings);
 }
 
-void ChunkManager::processChunkLoading(const RenderSettings &settings)
+void ChunkManager::processChunkLoading(const RenderSettings &settings, int budget)
 {
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 	int chunkCount = 0;
-	while (!chunkLoadQueue.empty() && chunkCount < settings.chunkLoadedMax)
+	while (!chunkLoadQueue.empty() && chunkCount < budget)
 	{
 		glm::ivec3 chunkPos = chunkLoadQueue.front();
 		chunkLoadQueue.pop();
@@ -40,7 +40,7 @@ void ChunkManager::processChunkLoading(const RenderSettings &settings)
 			auto [it, inserted] = chunks.emplace(chunkPos, Chunk(glm::vec3(chunkPos.x * CHUNK_SIZE, 0.0f, chunkPos.z * CHUNK_SIZE)));
 			if (inserted)
 			{
-				activeChunks.push_back(&it->second);
+				activeChunks.insert(&it->second);
 			}
 		}
 		chunkCount++;
@@ -65,15 +65,24 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 		plane = plane / glm::length(glm::vec3(plane));
 	}
 
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::shared_lock<std::shared_mutex> lock(chunkMutex);
 	for (Chunk *chunk : activeChunks)
 	{
-		glm::vec3 center = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f, CHUNK_HEIGHT / 2.0f, CHUNK_SIZE / 2.0f);
-		float radius = glm::length(glm::vec3(CHUNK_SIZE / 2.0f, CHUNK_HEIGHT / 2.0f, CHUNK_SIZE / 2.0f)); // AABB radius
+		// F: Proper AABB–frustum test via the positive-vertex method.
+		// For each plane, find the AABB corner that maximises the dot product with the
+		// plane normal (the "positive vertex"). If that corner is still outside the plane
+		// the entire AABB is outside → cull. This is exact for axis-aligned boxes and
+		// eliminates the over-conservative sphere used before (radius ~128 for a 16×256×16 chunk).
+		glm::vec3 aabbMin = chunk->getPosition();
+		glm::vec3 aabbMax = aabbMin + glm::vec3(CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE);
 		bool isVisible = true;
 		for (const auto &plane : frustumPlanes)
 		{
-			if (glm::dot(glm::vec4(center, 1.0f), plane) < -radius)
+			glm::vec3 pv(
+				plane.x >= 0.0f ? aabbMax.x : aabbMin.x,
+				plane.y >= 0.0f ? aabbMax.y : aabbMin.y,
+				plane.z >= 0.0f ? aabbMax.z : aabbMin.z);
+			if (glm::dot(glm::vec3(plane), pv) + plane.w < 0.0f)
 			{
 				isVisible = false;
 				break;
@@ -85,12 +94,12 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 	m_renderTiming.frustumCulling = std::chrono::duration<float, std::milli>(end - start).count();
 }
 
-void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, unsigned int seed)
+void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, unsigned int seed, int budget)
 {
 	if (!m_terrainGenerator)
 		return;
 
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 
 	// Trier les chunks par distance au joueur pour une génération plus cohérente
 	struct ChunkGenInfo
@@ -117,7 +126,8 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 			genQueue.push({chunk, distance});
 		}
 	} // Générer les chunks par ordre de priorité
-	while (!genQueue.empty())
+	int genDispatched = 0;
+	while (!genQueue.empty() && genDispatched < budget)
 	{
 		Chunk *chunk = genQueue.top().chunk;
 		int currentSeed = m_terrainGenerator->getSeed();
@@ -129,15 +139,16 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 												chunk->generateTerrain(localGenerator); });
 		pendingGenerationTasks.push_back({std::move(future), chunk});
 		genQueue.pop();
+		++genDispatched;
 	}
 }
 
-void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings &settings)
+void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings &settings, int budget)
 {
 	if (!p_threadPool)
 		return;
 
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 
 	// Trier les chunks par distance au joueur pour un maillage plus cohérent
 	struct ChunkMeshInfo
@@ -164,21 +175,58 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			meshQueue.push({chunk, distance});
 		}
 	} // Mailler les chunks par ordre de priorité
-	while (!meshQueue.empty())
+
+	// K: Upgrade any LOD-meshed chunks that have since come within normal range.
+	// Resetting to GENERATED lets them fall into the dispatch loop below with a
+	// full-quality generateMesh() pass.
+	const float lodThreshold = static_cast<float>(settings.minRenderDistance) * 2.0f;
+	for (Chunk *chunk : activeChunks)
+	{
+		if (chunk->isLODMesh() && chunk->getState() == ChunkState::MESHED &&
+			chunksInTransit.find(chunk) == chunksInTransit.end())
+		{
+			glm::vec3 cc = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+			float dist = glm::distance(
+				glm::vec2(cc.x, cc.z),
+				glm::vec2(camera.getPosition().x, camera.getPosition().z));
+			if (dist < lodThreshold)
+				chunk->setState(ChunkState::GENERATED); // Force full re-mesh
+		}
+	}
+
+	int meshDispatched = 0;
+	while (!meshQueue.empty() && meshDispatched < budget)
 	{
 		Chunk *chunk = meshQueue.top().chunk;
+		float chunkDist = meshQueue.top().distance; // K: distance already computed
+		glm::vec3 wp = chunk->getPosition();
+		glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
+					  static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
 		chunksInTransit.insert(chunk);
-		auto future = p_threadPool->enqueue([chunk]()
-											{ chunk->generateMesh(); });
-		pendingMeshingTasks.push_back({std::move(future), chunk});
+		if (chunkDist > lodThreshold)
+		{
+			// K: Distant chunk — simplified column-top mesh, no shell needed
+			auto future = p_threadPool->enqueue([chunk]()
+												{ chunk->generateLODMesh(); });
+			pendingMeshingTasks.push_back({std::move(future), chunk});
+		}
+		else
+		{
+			// E: Ensure neighbor shell data is available before the off-thread mesh task runs
+			ensureShellPopulated(chunk, ci);
+			auto future = p_threadPool->enqueue([chunk]()
+												{ chunk->generateMesh(); });
+			pendingMeshingTasks.push_back({std::move(future), chunk});
+		}
 		meshQueue.pop();
+		++meshDispatched;
 	}
 }
 
 void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const GLuint &textureAtlas, const ShaderParameters &shaderParams, Renderer *renderer, RenderSettings &renderSettings, int windowWidth, int windowHeight)
 {
 	auto start = std::chrono::high_resolution_clock::now();
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::shared_lock<std::shared_mutex> lock(chunkMutex);
 	renderSettings.visibleChunksCount = 0;
 	renderSettings.visibleVoxelsCount = 0;
 
@@ -193,16 +241,8 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	shader.setVec3("lightPos", sunPosition);
 	shader.setVec3("viewPos", camera.getPosition());
 
-	shader.setFloat("fogStart", shaderParams.fogStart);
-	shader.setFloat("fogEnd", shaderParams.fogEnd);
-	shader.setVec3("fogColor", shaderParams.fogColor);
-	shader.setFloat("fogDensity", shaderParams.fogDensity);
-
-	shader.setFloat("ambientStrength", shaderParams.ambientStrength);
-	shader.setFloat("diffuseIntensity", shaderParams.diffuseIntensity);
-	shader.setFloat("lightLevels", shaderParams.lightLevels);
-	shader.setFloat("saturationLevel", shaderParams.saturationLevel);
-	shader.setFloat("colorBoost", shaderParams.colorBoost);
+	// M: fog/lighting uniforms are already set by Engine::renderScene() before this
+	// call — removing the duplicate setFloat/setVec3 calls here.
 
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D_ARRAY, textureAtlas);
@@ -222,37 +262,36 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 		}
 	}
 
-	// --- Water transparency sub-pass (same lock scope) ---
-	// V2: Sort water-bearing chunks back-to-front for correct blending
-	std::vector<Chunk *> waterChunks;
-	waterChunks.reserve(renderSettings.visibleChunksCount); // Heuristic reserve
-
-	for (Chunk *chunk : activeChunks)
-	{
-		if (chunk->isVisible() && chunk->getState() >= ChunkState::MESHED && chunk->hasWaterMesh())
-		{
-			waterChunks.push_back(chunk);
-		}
-	}
-
-	// Sort back-to-front
+	// --- Water transparency sub-pass ---
+	// H: Rebuild sorted water list only when camera moved > CHUNK_SIZE/2 from last sort.
 	glm::vec3 camPos = camera.getPosition();
-	std::sort(waterChunks.begin(), waterChunks.end(), [&camPos](Chunk *a, Chunk *b) {
-		glm::vec3 centerA = a->getPosition() + glm::vec3(CHUNK_SIZE / 2);
-		glm::vec3 centerB = b->getPosition() + glm::vec3(CHUNK_SIZE / 2);
-		float distA = glm::dot(centerA - camPos, centerA - camPos);
-		float distB = glm::dot(centerB - camPos, centerB - camPos);
-		return distA > distB; // Furthest first
-	});
+	constexpr float kResortThreshSq = (CHUNK_SIZE / 2.0f) * (CHUNK_SIZE / 2.0f);
+	float camMovedSq = glm::dot(camPos - m_lastWaterSortCamPos, camPos - m_lastWaterSortCamPos);
+	if (camMovedSq > kResortThreshSq || m_cachedWaterChunks.empty())
+	{
+		m_cachedWaterChunks.clear();
+		for (Chunk *chunk : activeChunks)
+		{
+			if (chunk->isVisible() && chunk->getState() >= ChunkState::MESHED && chunk->hasWaterMesh())
+				m_cachedWaterChunks.push_back(chunk);
+		}
+		std::sort(m_cachedWaterChunks.begin(), m_cachedWaterChunks.end(), [&camPos](Chunk *a, Chunk *b)
+				  {
+					  glm::vec3 centerA = a->getPosition() + glm::vec3(CHUNK_SIZE / 2);
+					  glm::vec3 centerB = b->getPosition() + glm::vec3(CHUNK_SIZE / 2);
+					  return glm::dot(centerA - camPos, centerA - camPos) > glm::dot(centerB - camPos, centerB - camPos); });
+		m_lastWaterSortCamPos = camPos;
+	}
 
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glDepthMask(GL_FALSE);
 	glDisable(GL_CULL_FACE); // V1: Allow seeing water from below
 
-	for (Chunk *chunk : waterChunks)
+	for (Chunk *chunk : m_cachedWaterChunks)
 	{
-		chunk->drawWater();
+		if (chunk->isVisible() && chunk->getState() >= ChunkState::MESHED)
+			chunk->drawWater();
 	}
 
 	glDepthMask(GL_TRUE);
@@ -264,7 +303,7 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 
 void ChunkManager::drawShadows(const Shader &shader) const
 {
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::shared_lock<std::shared_mutex> lock(chunkMutex);
 	for (Chunk *chunk : activeChunks)
 	{
 		if (!chunk->isVisible() || chunk->getState() < ChunkState::MESHED)
@@ -273,13 +312,40 @@ void ChunkManager::drawShadows(const Shader &shader) const
 	}
 }
 
+void ChunkManager::uploadPendingMeshes(int budget)
+{
+	std::shared_lock<std::shared_mutex> lock(chunkMutex);
+	int uploaded = 0;
+	for (Chunk *chunk : activeChunks)
+	{
+		if (uploaded >= budget)
+			break;
+		if (chunk->getState() == ChunkState::MESHED && chunk->needsGPUUpload() && chunksInTransit.find(chunk) == chunksInTransit.end())
+		{
+			chunk->uploadToGPU();
+			++uploaded;
+		}
+	}
+}
+
+void ChunkManager::ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx)
+{
+	if (!chunk->isShellEmpty())
+		return;
+	chunk->rebuildShellFromNeighbors(
+		getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),
+		getChunk(chunkIdx + glm::ivec3(+1, 0, 0)),
+		getChunk(chunkIdx + glm::ivec3(0, 0, -1)),
+		getChunk(chunkIdx + glm::ivec3(0, 0, +1)));
+}
+
 bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
 {
 	int chunkX = static_cast<int>(std::floor(worldPos.x / CHUNK_SIZE));
 	int chunkZ = static_cast<int>(std::floor(worldPos.z / CHUNK_SIZE));
 	glm::ivec3 chunkPos(chunkX, 0, chunkZ);
 
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 	auto it = chunks.find(chunkPos);
 	if (it != chunks.end())
 	{
@@ -293,36 +359,44 @@ bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
 			// Update the neighbor's shell voxels so its mesh reflects the change
 			if (localX == 0)
 			{
-				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(-1, 0, 0));
+				glm::ivec3 nPos = chunkPos + glm::ivec3(-1, 0, 0);
+				Chunk *neighbor = getChunk(nPos);
 				if (neighbor)
 				{
+					ensureShellPopulated(neighbor, nPos);
 					neighbor->setVoxel(CHUNK_SIZE, localY, localZ, AIR);
 					neighbor->setState(ChunkState::GENERATED);
 				}
 			}
 			if (localX == CHUNK_SIZE - 1)
 			{
-				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(1, 0, 0));
+				glm::ivec3 nPos = chunkPos + glm::ivec3(1, 0, 0);
+				Chunk *neighbor = getChunk(nPos);
 				if (neighbor)
 				{
+					ensureShellPopulated(neighbor, nPos);
 					neighbor->setVoxel(-1, localY, localZ, AIR);
 					neighbor->setState(ChunkState::GENERATED);
 				}
 			}
 			if (localZ == 0)
 			{
-				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(0, 0, -1));
+				glm::ivec3 nPos = chunkPos + glm::ivec3(0, 0, -1);
+				Chunk *neighbor = getChunk(nPos);
 				if (neighbor)
 				{
+					ensureShellPopulated(neighbor, nPos);
 					neighbor->setVoxel(localX, localY, CHUNK_SIZE, AIR);
 					neighbor->setState(ChunkState::GENERATED);
 				}
 			}
 			if (localZ == CHUNK_SIZE - 1)
 			{
-				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(0, 0, 1));
+				glm::ivec3 nPos = chunkPos + glm::ivec3(0, 0, 1);
+				Chunk *neighbor = getChunk(nPos);
 				if (neighbor)
 				{
+					ensureShellPopulated(neighbor, nPos);
 					neighbor->setVoxel(localX, localY, -1, AIR);
 					neighbor->setState(ChunkState::GENERATED);
 				}
@@ -339,7 +413,7 @@ bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 	int chunkZ = static_cast<int>(std::floor(worldPos.z / CHUNK_SIZE));
 	glm::ivec3 chunkPos(chunkX, 0, chunkZ);
 
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 	auto it = chunks.find(chunkPos);
 	if (it != chunks.end())
 	{
@@ -353,36 +427,44 @@ bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 			// Update the neighbor's shell voxels so its mesh reflects the change
 			if (localX == 0)
 			{
-				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(-1, 0, 0));
+				glm::ivec3 nPos = chunkPos + glm::ivec3(-1, 0, 0);
+				Chunk *neighbor = getChunk(nPos);
 				if (neighbor)
 				{
+					ensureShellPopulated(neighbor, nPos);
 					neighbor->setVoxel(CHUNK_SIZE, localY, localZ, type);
 					neighbor->setState(ChunkState::GENERATED);
 				}
 			}
 			if (localX == CHUNK_SIZE - 1)
 			{
-				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(1, 0, 0));
+				glm::ivec3 nPos = chunkPos + glm::ivec3(1, 0, 0);
+				Chunk *neighbor = getChunk(nPos);
 				if (neighbor)
 				{
+					ensureShellPopulated(neighbor, nPos);
 					neighbor->setVoxel(-1, localY, localZ, type);
 					neighbor->setState(ChunkState::GENERATED);
 				}
 			}
 			if (localZ == 0)
 			{
-				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(0, 0, -1));
+				glm::ivec3 nPos = chunkPos + glm::ivec3(0, 0, -1);
+				Chunk *neighbor = getChunk(nPos);
 				if (neighbor)
 				{
+					ensureShellPopulated(neighbor, nPos);
 					neighbor->setVoxel(localX, localY, CHUNK_SIZE, type);
 					neighbor->setState(ChunkState::GENERATED);
 				}
 			}
 			if (localZ == CHUNK_SIZE - 1)
 			{
-				Chunk *neighbor = getChunk(chunkPos + glm::ivec3(0, 0, 1));
+				glm::ivec3 nPos = chunkPos + glm::ivec3(0, 0, 1);
+				Chunk *neighbor = getChunk(nPos);
 				if (neighbor)
 				{
+					ensureShellPopulated(neighbor, nPos);
 					neighbor->setVoxel(localX, localY, -1, type);
 					neighbor->setState(ChunkState::GENERATED);
 				}
@@ -402,7 +484,7 @@ bool ChunkManager::isVoxelActive(const glm::vec3 &worldPos) const
 	int chunkZ = static_cast<int>(std::floor(worldPos.z / CHUNK_SIZE));
 	glm::ivec3 chunkPos(chunkX, 0, chunkZ);
 
-	std::lock_guard<std::mutex> lock(chunkMutex); // const method, but mutex still needed for map access
+	std::shared_lock<std::shared_mutex> lock(chunkMutex); // const method, shared read lock
 	auto it = chunks.find(chunkPos);
 	if (it != chunks.end() && it->second.getState() >= ChunkState::GENERATED) // Voxels exist once generated
 	{
@@ -430,7 +512,7 @@ Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos)
 
 const Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos) const
 {
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::shared_lock<std::shared_mutex> lock(chunkMutex);
 	auto it = chunks.find(chunkPos);
 	if (it != chunks.end())
 	{
@@ -446,7 +528,7 @@ const std::unordered_map<glm::ivec3, Chunk, IVec3Hash> &ChunkManager::getAllChun
 
 void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSettings &settings)
 {
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 	auto it = chunks.begin();
 	while (it != chunks.end())
 	{
@@ -461,8 +543,9 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 			// Do not unload chunks that are currently being processed
 			if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
 			{
-				activeChunks.erase(std::remove(activeChunks.begin(), activeChunks.end(), chunkPtr), activeChunks.end());
+				activeChunks.erase(chunkPtr);
 				it = chunks.erase(it);
+				m_cachedWaterChunks.clear(); // H: invalidate water sort cache
 			}
 			else
 			{
@@ -517,7 +600,7 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 	}
 
 	// Charger les chunks par ordre de priorité
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 	while (!priorityQueue.empty())
 	{
 		const auto &info = priorityQueue.top();
@@ -531,7 +614,7 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 
 void ChunkManager::processFinishedJobs()
 {
-	std::lock_guard<std::mutex> lock(chunkMutex);
+	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 
 	// Check generation tasks
 	auto genIt = pendingGenerationTasks.begin();
@@ -556,7 +639,13 @@ void ChunkManager::processFinishedJobs()
 		if (meshIt->first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
 		{
 			meshIt->first.get();
-			chunksInTransit.erase(meshIt->second);
+			Chunk *finishedChunk = meshIt->second;
+			chunksInTransit.erase(finishedChunk);
+			// H: A newly meshed chunk may have water geometry — invalidate the sorted
+			// cache so it appears in the next water transparency pass without waiting
+			// for the camera to move.
+			if (finishedChunk->hasWaterMesh())
+				m_cachedWaterChunks.clear();
 			meshIt = pendingMeshingTasks.erase(meshIt);
 		}
 		else
