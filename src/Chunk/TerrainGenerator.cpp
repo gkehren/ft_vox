@@ -757,54 +757,65 @@ BiomeType TerrainGenerator::determineBiome(float temperature, float humidity,
                                            float weirdness, float continental,
                                            int height) const
 {
-  float temp  = (temperature + 1.0f) * 0.5f;
-  float humid = (humidity   + 1.0f) * 0.5f;
-  float cont  = (continental + 1.0f) * 0.5f;
-  float weird = (weirdness  + 1.0f) * 0.5f;
+  float temp = (temperature + 1.0f) * 0.5f;
+  float humid = (humidity + 1.0f) * 0.5f;
+  float cont = (continental + 1.0f) * 0.5f;
+  float weird = (weirdness + 1.0f) * 0.5f;
 
   // ---- Ocean / beach (driven by height + continental factor) ----
   if (height < SEA_LEVEL - 5 && cont < 0.45f)
   {
-    if (temp < 0.30f) return BIOME_FROZEN_OCEAN;
+    if (temp < 0.30f)
+      return BIOME_FROZEN_OCEAN;
     return BIOME_OCEAN;
   }
 
   if (height >= SEA_LEVEL - 3 && height <= SEA_LEVEL + 3 && cont < 0.5f)
   {
-    if (temp < 0.30f) return BIOME_SNOWY_TUNDRA;
+    if (temp < 0.30f)
+      return BIOME_SNOWY_TUNDRA;
     return BIOME_BEACH;
   }
 
   // ---- Mountain height override ----
   if (height > 130)
   {
-    if (temp < 0.4f || height > 170) return BIOME_SNOWY_MOUNTAINS;
+    if (temp < 0.4f || height > 170)
+      return BIOME_SNOWY_MOUNTAINS;
     return BIOME_MOUNTAINS;
   }
 
   // ---- Cold zone  (temp < 0.30) — narrowed from 0.35 so it covers ~30% of world ----
   if (temp < 0.30f)
   {
-    if (weird > 0.82f) return BIOME_ICE_SPIKES;  // rare cold anomaly
-    if (humid < 0.40f) return BIOME_SNOWY_TUNDRA;
+    if (weird > 0.82f)
+      return BIOME_ICE_SPIKES; // rare cold anomaly
+    if (humid < 0.40f)
+      return BIOME_SNOWY_TUNDRA;
     return BIOME_SNOWY_TAIGA;
   }
 
   // ---- Hot zone  (temp > 0.70) — raised from 0.65 so it covers ~30% of world ----
   if (temp > 0.70f)
   {
-    if (humid < 0.28f) return BIOME_DESERT;
+    if (humid < 0.28f)
+      return BIOME_DESERT;
     // Jungle now requires high humidity (>= 0.60); savanna/badlands fill the gap below
-    if (humid < 0.60f) return (weird > 0.62f) ? BIOME_BADLANDS : BIOME_SAVANNA;
+    if (humid < 0.60f)
+      return (weird > 0.62f) ? BIOME_BADLANDS : BIOME_SAVANNA;
     return BIOME_JUNGLE;
   }
 
   // ---- Temperate zone  (0.30 – 0.70) — now covers ~40% of world ----
   // Sub-divide by humidity into plains → forest → birch → dark forest → swamp
-  if (humid < 0.28f) return BIOME_PLAINS;
-  if (humid < 0.48f) return BIOME_FOREST;
-  if (humid < 0.63f) return (weird > 0.58f) ? BIOME_BIRCH_FOREST : BIOME_FOREST;
-  if (humid < 0.80f) return BIOME_DARK_FOREST;
+  if (humid < 0.28f)
+    return BIOME_PLAINS;
+  if (humid < 0.48f)
+    return BIOME_FOREST;
+  if (humid < 0.63f)
+    return (weird > 0.58f) ? BIOME_BIRCH_FOREST : BIOME_FOREST;
+  if (humid < 0.80f)
+    return BIOME_DARK_FOREST;
   return BIOME_SWAMP;
 }
 
@@ -823,6 +834,46 @@ BiomeType TerrainGenerator::getBiomeAt(int worldX, int worldZ) const
 
   int height = calculateHeight(cont, erosion, pv, ridge);
   return determineBiome(temp, humid, weird, cont, height);
+}
+
+void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
+                                      int width, int height,
+                                      std::vector<BiomeType> &outBiomes) const
+{
+  const int count = width * height;
+  outBiomes.resize(count);
+
+  // GenUniformGrid2D samples pixel (xi, yi) at noise coordinate (xStart + xi) * frequency.
+  // We want that to equal worldX_of_pixel + NOISE_OFFSET, where
+  //   worldX_of_pixel = centerX + (xi - width/2) * step
+  // => (xStart + xi) * step == centerX + (xi - width/2) * step + NOISE_OFFSET
+  // => xStart == (centerX + NOISE_OFFSET) / step - width/2
+  // xStart must be an int (FastNoise2 API), so we round to the nearest grid cell.
+  const float invStep = 1.0f / step;
+  const int startX = static_cast<int>(std::round((centerX + NOISE_OFFSET) * invStep - width * 0.5f));
+  const int startZ = static_cast<int>(std::round((centerZ + NOISE_OFFSET) * invStep - height * 0.5f));
+
+  std::vector<float> tempBuf(count), humidBuf(count), weirdBuf(count);
+  std::vector<float> contBuf(count), erosionBuf(count), pvBuf(count), ridgeBuf(count);
+
+  // GenUniformGrid2D processes batches with SIMD — far faster than individual GenSingle2D calls.
+  m_temperatureNoise->GenUniformGrid2D(tempBuf.data(), startX, startZ, width, height, step, m_seed + 6000);
+  m_humidityNoise->GenUniformGrid2D(humidBuf.data(), startX, startZ, width, height, step, m_seed + 7000);
+  m_weirdnessNoise->GenUniformGrid2D(weirdBuf.data(), startX, startZ, width, height, step, m_seed + 8000);
+  m_continentalNoise->GenUniformGrid2D(contBuf.data(), startX, startZ, width, height, step, m_seed);
+  m_erosionNoise->GenUniformGrid2D(erosionBuf.data(), startX, startZ, width, height, step, m_seed + 1000);
+  m_peaksValleysNoise->GenUniformGrid2D(pvBuf.data(), startX, startZ, width, height, step, m_seed + 2000);
+  m_ridgeNoise->GenUniformGrid2D(ridgeBuf.data(), startX, startZ, width, height, step, m_seed + 3000);
+
+  for (int i = 0; i < count; i++)
+  {
+    const float cont = std::clamp(contBuf[i], -1.0f, 1.0f);
+    const float erosion = std::clamp(erosionBuf[i], -1.0f, 1.0f);
+    const float pv = std::clamp(pvBuf[i], -1.0f, 1.0f);
+    const float ridge = std::clamp(ridgeBuf[i], -1.0f, 1.0f);
+    const int h = calculateHeight(cont, erosion, pv, ridge);
+    outBiomes[i] = determineBiome(tempBuf[i], humidBuf[i], weirdBuf[i], cont, h);
+  }
 }
 
 // =============================================

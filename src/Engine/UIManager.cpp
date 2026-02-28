@@ -278,26 +278,198 @@ void UIManager::handleShaderParametersWindow()
 	ImGui::End();
 }
 
+// Biome map colors indexed by BiomeType
+static constexpr unsigned char biomeColors[BIOME_COUNT][3] = {
+	{100, 150, 200}, // BIOME_FROZEN_OCEAN   - icy blue
+	{220, 230, 240}, // BIOME_SNOWY_TUNDRA   - near white
+	{130, 160, 180}, // BIOME_SNOWY_TAIGA    - blue-grey
+	{160, 210, 230}, // BIOME_ICE_SPIKES     - cyan-white
+	{30, 100, 180},	 // BIOME_OCEAN          - deep blue
+	{210, 200, 150}, // BIOME_BEACH          - sandy
+	{140, 200, 90},	 // BIOME_PLAINS         - light green
+	{50, 130, 50},	 // BIOME_FOREST         - green
+	{100, 170, 80},	 // BIOME_BIRCH_FOREST   - pale green
+	{30, 80, 30},	 // BIOME_DARK_FOREST    - dark green
+	{80, 100, 60},	 // BIOME_SWAMP          - dark olive
+	{60, 130, 200},	 // BIOME_RIVER          - river blue
+	{220, 200, 100}, // BIOME_DESERT         - sand yellow
+	{190, 170, 80},	 // BIOME_SAVANNA        - golden
+	{40, 160, 40},	 // BIOME_JUNGLE         - bright green
+	{200, 100, 30},	 // BIOME_BADLANDS       - orange-red
+	{150, 150, 150}, // BIOME_MOUNTAINS      - grey
+	{220, 220, 230}, // BIOME_SNOWY_MOUNTAINS - white-grey
+};
+
 void UIManager::updateBiomeMap()
 {
-	// TODO: Implement biome map update logic
+	if (!engine)
+		return;
+	auto *gen = engine->getTerrainGenerator();
+	if (!gen)
+		return;
+
+	const auto &camPos = engine->getCamera().getPosition();
+	const glm::vec2 playerXZ(camPos.x, camPos.z);
+
+	// --- Upload completed background generation ---
+	if (m_biomeMapReady.load(std::memory_order_acquire))
+	{
+		m_biomeMapReady.store(false, std::memory_order_relaxed);
+
+		// Draw player dot on the freshly-generated buffer (main thread has latest position).
+		// Pixel (xi, yi) in the map corresponds to world:
+		//   worldX = (m_pendingGridStartX + xi) * step - NOISE_OFFSET
+		// Solving for xi given the player's world position:
+		//   xi = (playerX + NOISE_OFFSET) * zoom - m_pendingGridStartX
+		const int size = biomeMap.mapSize;
+		const float noiseOffset = TerrainGenerator::NOISE_OFFSET;
+		const int dotX = static_cast<int>(std::round((playerXZ.x + noiseOffset) * m_pendingZoom)) - m_pendingGridStartX;
+		const int dotY = static_cast<int>(std::round((playerXZ.y + noiseOffset) * m_pendingZoom)) - m_pendingGridStartZ;
+		auto paintPixel = [&](int px, int py, unsigned char r, unsigned char g, unsigned char b)
+		{
+			if (px >= 0 && px < size && py >= 0 && py < size)
+			{
+				const int idx = (py * size + px) * 3;
+				m_biomeMapPending[idx + 0] = r;
+				m_biomeMapPending[idx + 1] = g;
+				m_biomeMapPending[idx + 2] = b;
+			}
+		};
+		for (int dy = -4; dy <= 4; dy++)
+			for (int dx = -4; dx <= 4; dx++)
+				if (dx * dx + dy * dy <= 16)
+					paintPixel(dotX + dx, dotY + dy, 0, 0, 0);
+		for (int dy = -2; dy <= 2; dy++)
+			for (int dx = -2; dx <= 2; dx++)
+				if (dx * dx + dy * dy <= 4)
+					paintPixel(dotX + dx, dotY + dy, 255, 255, 255);
+
+		if (biomeMap.textureID == 0)
+		{
+			glGenTextures(1, &biomeMap.textureID);
+			glBindTexture(GL_TEXTURE_2D, biomeMap.textureID);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, size, size, 0, GL_RGB, GL_UNSIGNED_BYTE, m_biomeMapPending.data());
+		}
+		else
+		{
+			glBindTexture(GL_TEXTURE_2D, biomeMap.textureID);
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, size, size, GL_RGB, GL_UNSIGNED_BYTE, m_biomeMapPending.data());
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
+	// --- Decide whether to launch a new background generation ---
+	const double currentTime = SDL_GetTicks() / 1000.0;
+	const bool timeElapsed = (currentTime - biomeMap.lastUpdateTime) >= 1.0;
+	const bool playerMoved = (glm::length(playerXZ - biomeMap.lastPlayerPos) > 1.0f);
+
+	// Don't enqueue if a generation is still in flight
+	const bool isRunning = m_biomeMapFuture.valid() &&
+						   m_biomeMapFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+
+	if (!isRunning && (biomeMap.needsUpdate || timeElapsed || playerMoved))
+	{
+		if (biomeMap.autoFollowPlayer)
+			biomeMap.center = playerXZ;
+
+		biomeMap.lastUpdateTime = currentTime;
+		biomeMap.lastPlayerPos = playerXZ;
+		biomeMap.needsUpdate = false;
+
+		// Capture by value — the lambda runs on a separate thread
+		const glm::vec2 center = biomeMap.center;
+		const int size = biomeMap.mapSize;
+		const float step = 1.0f / biomeMap.zoom;
+
+		// Store the snapshot used by this texture so the dot is drawn consistently.
+		// Compute the same integer grid-start that getBiomeRegion will use, so the
+		// dot formula is pixel-perfect rather than relying on an approximate float.
+		const float noiseOffset = TerrainGenerator::NOISE_OFFSET;
+		m_pendingCenter = center;
+		m_pendingZoom = biomeMap.zoom;
+		const float invStep = biomeMap.zoom; // zoom == 1/step
+		m_pendingGridStartX = static_cast<int>(std::round((center.x + noiseOffset) * invStep - size * 0.5f));
+		m_pendingGridStartZ = static_cast<int>(std::round((center.y + noiseOffset) * invStep - size * 0.5f));
+
+		m_biomeMapPending.resize(size * size * 3);
+
+		m_biomeMapFuture = std::async(std::launch::async, [this, gen, center, size, step]()
+									  {
+			std::vector<BiomeType> biomes;
+			gen->getBiomeRegion(center.x, center.y, step, size, size, biomes);
+
+			for (int i = 0; i < size * size; i++)
+			{
+				m_biomeMapPending[i * 3 + 0] = biomeColors[biomes[i]][0];
+				m_biomeMapPending[i * 3 + 1] = biomeColors[biomes[i]][1];
+				m_biomeMapPending[i * 3 + 2] = biomeColors[biomes[i]][2];
+			}
+
+			m_biomeMapReady.store(true, std::memory_order_release); });
+	}
 }
 
 void UIManager::renderBiomeMap()
 {
-	updateBiomeMap(); // Ensure map is up-to-date
-
 	ImGui::Begin("Biome Map");
+
+	// Controls that may trigger a refresh
+	float prevZoom = biomeMap.zoom;
+	ImGui::SliderFloat("Zoom", &biomeMap.zoom, 0.1f, 10.0f);
+	if (biomeMap.zoom != prevZoom)
+		biomeMap.needsUpdate = true;
+
+	bool prevFollow = biomeMap.autoFollowPlayer;
+	ImGui::Checkbox("Auto-follow Player", &biomeMap.autoFollowPlayer);
+	if (biomeMap.autoFollowPlayer && !prevFollow)
+		biomeMap.needsUpdate = true;
+
+	ImGui::SameLine();
+	if (ImGui::Button("Recenter"))
+	{
+		if (engine)
+		{
+			const auto &p = engine->getCamera().getPosition();
+			biomeMap.center = {p.x, p.z};
+		}
+		biomeMap.needsUpdate = true;
+	}
+
+	updateBiomeMap();
+
 	if (biomeMap.textureID != 0)
 	{
-		ImGui::Image((ImTextureID)(intptr_t)biomeMap.textureID, ImVec2(biomeMap.mapSize, biomeMap.mapSize));
+		const float displaySize = static_cast<float>(biomeMap.mapSize);
+		ImGui::Image((ImTextureID)(intptr_t)biomeMap.textureID, ImVec2(displaySize, displaySize));
 	}
-	ImGui::SliderFloat("Zoom", &biomeMap.zoom, 0.1f, 10.0f);
-	ImGui::Checkbox("Auto-follow Player", &biomeMap.autoFollowPlayer);
-	if (ImGui::Button("Recenter Map"))
+	else
 	{
-		biomeMap.needsUpdate = true; // Force update on recenter
+		ImGui::Text("Generating biome map...");
 	}
-	ImGui::Text("Center: (%.1f, %.1f)", biomeMap.center.x, biomeMap.center.y);
+
+	ImGui::Text("Center: (%.0f, %.0f)", biomeMap.center.x, biomeMap.center.y);
+
+	// Biome legend
+	if (ImGui::CollapsingHeader("Legend"))
+	{
+		const ImVec2 swatchSize(14.0f, 14.0f);
+		for (int i = 0; i < BIOME_COUNT; i++)
+		{
+			const ImVec4 col(
+				biomeColors[i][0] / 255.0f,
+				biomeColors[i][1] / 255.0f,
+				biomeColors[i][2] / 255.0f,
+				1.0f);
+			ImGui::ColorButton(biomeTypeString[i], col,
+							   ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder, swatchSize);
+			ImGui::SameLine();
+			ImGui::TextUnformatted(biomeTypeString[i]);
+		}
+	}
+
 	ImGui::End();
 }

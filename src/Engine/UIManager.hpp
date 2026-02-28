@@ -6,6 +6,8 @@
 #include <imgui/imgui_impl_opengl3.h>
 #include <string>
 #include <vector>
+#include <future>
+#include <atomic>
 
 #include <Engine/EngineDefs.hpp>
 #include <Camera/Camera.hpp>
@@ -20,13 +22,14 @@ class Engine;
 struct BiomeMapSettings
 {
 	GLuint textureID{0};
-	int mapSize{512};
+	int mapSize{256};
 	float zoom{0.5f};
 	glm::vec2 center{0.0f, 0.0f};
 	bool needsUpdate{true};
 	std::vector<unsigned char> pixelData;
 	bool autoFollowPlayer{true};
 	double lastUpdateTime{0.0};
+	glm::vec2 lastPlayerPos{0.0f, 0.0f};
 };
 
 class UIManager
@@ -77,4 +80,13 @@ private:
 	char ipInputBuffer[128] = "127.0.0.1";
 
 	BiomeMapSettings biomeMap;
+
+	// Biome map background generation
+	std::future<void> m_biomeMapFuture;
+	std::vector<unsigned char> m_biomeMapPending; // written by background thread
+	std::atomic<bool> m_biomeMapReady{false};
+	glm::vec2 m_pendingCenter{0.0f, 0.0f}; // center used for the in-flight texture
+	float m_pendingZoom{1.0f};			   // zoom used for the in-flight texture
+	int m_pendingGridStartX{0};			   // grid-space origin X used by GenUniformGrid2D
+	int m_pendingGridStartZ{0};			   // grid-space origin Z used by GenUniformGrid2D
 };

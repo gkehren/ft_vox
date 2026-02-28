@@ -65,6 +65,12 @@ public:
   // Get biome at world position (for cross-chunk queries)
   BiomeType getBiomeAt(int worldX, int worldZ) const;
 
+  // Batch biome sampling for map visualization (uses GenUniformGrid2D for SIMD efficiency).
+  // centerX/Z are world-space coordinates, step is world units per pixel,
+  // width/height are the output dimensions. outBiomes is filled in row-major order.
+  void getBiomeRegion(float centerX, float centerZ, float step,
+                      int width, int height, std::vector<BiomeType> &outBiomes) const;
+
   // Get biome configuration
   static const BiomeConfig &getBiomeConfig(BiomeType biome);
 
