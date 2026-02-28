@@ -6,6 +6,12 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 
+enum class CameraMode
+{
+	PERSPECTIVE,
+	ISOMETRIC
+};
+
 class Camera
 {
 public:
@@ -22,6 +28,13 @@ public:
 	void processKeyboard(double deltaTime, const bool *keys);
 	void processMouseMovement(float xoffset, float yoffset, bool constrainPitch = true);
 
+	// Isometric mode
+	CameraMode getMode() const { return mode; }
+	void setMode(CameraMode newMode) { mode = newMode; }
+	void toggleMode();
+	void addIsometricZoom(float delta);
+	float getIsometricZoom() const { return isometricZoom; }
+
 private:
 	SDL_Window *window;
 	glm::vec3 position;
@@ -35,6 +48,12 @@ private:
 
 	float movementSpeed;
 	float mouseSensitivity;
+
+	// Isometric state
+	CameraMode mode{CameraMode::PERSPECTIVE};
+	float isometricZoom{64.0f};		// half-extent in world units
+	float isometricYaw{45.0f};		// fixed horizontal rotation (degrees)
+	float isometricPitch{-35.264f}; // true-isometric elevation angle (degrees)
 
 	void updateCameraVectors();
 };

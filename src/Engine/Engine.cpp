@@ -436,6 +436,21 @@ void Engine::handleEvents(bool &keyTPressed)
 				this->isMousecaptured = !this->isMousecaptured;
 				SDL_SetWindowRelativeMouseMode(this->window, this->isMousecaptured ? true : false);
 			}
+			if (event.key.scancode == SDL_SCANCODE_I)
+			{
+				camera.toggleMode();
+				// Release mouse capture when switching to isometric (no mouse-look needed)
+				if (camera.getMode() == CameraMode::ISOMETRIC)
+				{
+					isMousecaptured = false;
+					SDL_SetWindowRelativeMouseMode(this->window, false);
+				}
+				else
+				{
+					isMousecaptured = true;
+					SDL_SetWindowRelativeMouseMode(this->window, true);
+				}
+			}
 			break;
 
 		case SDL_EVENT_KEY_UP:
@@ -478,6 +493,17 @@ void Engine::handleEvents(bool &keyTPressed)
 			if (this->isMousecaptured && !ImGui::GetIO().WantCaptureMouse) // Check ImGui focus
 			{
 				this->camera.processMouseMovement(event.motion.xrel, event.motion.yrel);
+			}
+			break;
+
+		case SDL_EVENT_MOUSE_WHEEL:
+			if (!ImGui::GetIO().WantCaptureMouse)
+			{
+				if (camera.getMode() == CameraMode::ISOMETRIC)
+				{
+					// Scroll up (positive y) zooms in (smaller half-extent)
+					camera.addIsometricZoom(event.wheel.y * 4.0f);
+				}
 			}
 			break;
 
