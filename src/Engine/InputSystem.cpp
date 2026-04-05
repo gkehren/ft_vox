@@ -26,6 +26,15 @@ void InputSystem::update() {
         else if (event.type == SDL_EVENT_WINDOW_RESIZED) {
             EventBus::getInstance().publish(WindowResizeEvent(event.window.data1, event.window.data2));
         }
+        else if (event.type == SDL_EVENT_MOUSE_MOTION && !ImGui::GetIO().WantCaptureMouse) {
+            EventBus::getInstance().publish(MouseEvent(EventType::MouseMotion, (int)event.motion.x, (int)event.motion.y, (int)event.motion.xrel, (int)event.motion.yrel));
+        }
+        else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !ImGui::GetIO().WantCaptureMouse) {
+            EventBus::getInstance().publish(MouseEvent(EventType::MouseButtonPress, (int)event.button.x, (int)event.button.y, 0, 0, event.button.button));
+        }
+        else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && !ImGui::GetIO().WantCaptureMouse) {
+            EventBus::getInstance().publish(MouseEvent(EventType::MouseButtonRelease, (int)event.button.x, (int)event.button.y, 0, 0, event.button.button));
+        }
     }
 }
 

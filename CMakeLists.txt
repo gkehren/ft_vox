@@ -17,8 +17,9 @@ file(GLOB_RECURSE SOURCES src/*.cpp src/*.c)
 include_directories(src/)
 
 find_package(OpenGL REQUIRED)
-find_package(SDL3 REQUIRED)
-find_package(Boost REQUIRED)
+find_package(SDL3 CONFIG REQUIRED)
+find_package(Boost REQUIRED COMPONENTS system)
+find_package(Freetype REQUIRED)
 
 # FetchContent for GLM
 include(FetchContent)
@@ -29,8 +30,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
-find_package(Freetype REQUIRED)
-
 # FetchContent for FastNoise2
 FetchContent_Declare(
   FastNoise2
@@ -39,14 +38,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(FastNoise2)
 
-
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -Ofast -march=native")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -Ofast -march=native")
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${SDL3_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} OpenGL::GL glm Freetype::Freetype FastNoise2 ${Boost_LIBRARIES} ${SDL3_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} 
+    PRIVATE 
+    OpenGL::GL 
+    glm 
+    Freetype::Freetype 
+    FastNoise2 
+    Boost::boost
+    Boost::system
+    SDL3::SDL3
+)
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
