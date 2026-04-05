@@ -96,7 +96,7 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 
 void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, unsigned int seed, int budget)
 {
-	if (!m_terrainGenerator)
+	if (!m_terrainGenerator || !p_threadPool)
 		return;
 
 	std::lock_guard<std::shared_mutex> lock(chunkMutex);
@@ -130,16 +130,11 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	while (!genQueue.empty() && genDispatched < budget)
 	{
 		Chunk *chunk = genQueue.top().chunk;
-		float distance = genQueue.top().distance;
+				float distance = genQueue.top().distance;
 		int currentSeed = m_terrainGenerator->getSeed();
 
-		TaskPriority priority = TaskPriority::Normal;
 		const float lodThreshold = static_cast<float>(settings.minRenderDistance) * 2.0f;
-		if (distance < lodThreshold * 0.5f) {
-			priority = TaskPriority::High;
-		} else if (distance > lodThreshold) {
-			priority = TaskPriority::Low;
-		}
+		TaskPriority priority = calculateTaskPriority(distance, lodThreshold);
 
 		chunksInTransit.insert(chunk);
 		auto future = p_threadPool->enqueue(priority, [chunk, currentSeed]()
@@ -212,10 +207,11 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
 					  static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
 		chunksInTransit.insert(chunk);
+		TaskPriority priority = calculateTaskPriority(chunkDist, lodThreshold);
 		if (chunkDist > lodThreshold)
 		{
 			// K: Distant chunk — simplified column-top mesh, no shell needed
-			auto future = p_threadPool->enqueue(TaskPriority::Low, [chunk]()
+			auto future = p_threadPool->enqueue(priority, [chunk]()
 												{ chunk->generateLODMesh(); });
 			pendingMeshingTasks.push_back({std::move(future), chunk});
 		}
@@ -223,7 +219,6 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		{
 			// E: Ensure neighbor shell data is available before the off-thread mesh task runs
 			ensureShellPopulated(chunk, ci);
-			TaskPriority priority = (chunkDist < lodThreshold * 0.5f) ? TaskPriority::High : TaskPriority::Normal;
 			auto future = p_threadPool->enqueue(priority, [chunk]()
 												{ chunk->generateMesh(); });
 			pendingMeshingTasks.push_back({std::move(future), chunk});
@@ -663,4 +658,13 @@ void ChunkManager::processFinishedJobs()
 			++meshIt;
 		}
 	}
+}
+
+TaskPriority ChunkManager::calculateTaskPriority(float distance, float lodThreshold) const
+{
+	if (distance < lodThreshold * 0.5f)
+		return TaskPriority::High;
+	if (distance > lodThreshold)
+		return TaskPriority::Low;
+	return TaskPriority::Normal;
 }

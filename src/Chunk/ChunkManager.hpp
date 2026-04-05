@@ -14,6 +14,7 @@
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Chunk/TerrainGenerator.hpp>
+#include <Engine/ThreadPool.hpp>
 #include <limits>
 
 // Forward declarations
@@ -21,7 +22,6 @@ class Camera;
 class Shader;
 class TextureAtlas;
 class Renderer;
-class ThreadPool;
 
 class ChunkManager
 {
@@ -53,6 +53,7 @@ private:
 	void unloadOutOfRangeChunks(const Camera &camera, const RenderSettings &settings);
 	void loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera, const RenderSettings &settings);
 	void ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx);
+	TaskPriority calculateTaskPriority(float distance, float lodThreshold) const;
 
 	std::unordered_map<glm::ivec3, Chunk, IVec3Hash> chunks;
 	std::unordered_set<Chunk *> activeChunks;
