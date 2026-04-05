@@ -130,10 +130,19 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	while (!genQueue.empty() && genDispatched < budget)
 	{
 		Chunk *chunk = genQueue.top().chunk;
+		float distance = genQueue.top().distance;
 		int currentSeed = m_terrainGenerator->getSeed();
 
+		TaskPriority priority = TaskPriority::Normal;
+		const float lodThreshold = static_cast<float>(settings.minRenderDistance) * 2.0f;
+		if (distance < lodThreshold * 0.5f) {
+			priority = TaskPriority::High;
+		} else if (distance > lodThreshold) {
+			priority = TaskPriority::Low;
+		}
+
 		chunksInTransit.insert(chunk);
-		auto future = p_threadPool->enqueue([chunk, currentSeed]()
+		auto future = p_threadPool->enqueue(priority, [chunk, currentSeed]()
 											{
 												TerrainGenerator& localGenerator = TerrainGenerator::getThreadLocal(currentSeed);
 												chunk->generateTerrain(localGenerator); });
@@ -206,7 +215,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		if (chunkDist > lodThreshold)
 		{
 			// K: Distant chunk — simplified column-top mesh, no shell needed
-			auto future = p_threadPool->enqueue([chunk]()
+			auto future = p_threadPool->enqueue(TaskPriority::Low, [chunk]()
 												{ chunk->generateLODMesh(); });
 			pendingMeshingTasks.push_back({std::move(future), chunk});
 		}
@@ -214,7 +223,8 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		{
 			// E: Ensure neighbor shell data is available before the off-thread mesh task runs
 			ensureShellPopulated(chunk, ci);
-			auto future = p_threadPool->enqueue([chunk]()
+			TaskPriority priority = (chunkDist < lodThreshold * 0.5f) ? TaskPriority::High : TaskPriority::Normal;
+			auto future = p_threadPool->enqueue(priority, [chunk]()
 												{ chunk->generateMesh(); });
 			pendingMeshingTasks.push_back({std::move(future), chunk});
 		}
