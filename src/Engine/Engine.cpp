@@ -98,6 +98,9 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 	initializeNoiseGenerator(0);
 	setVSync(uiManager->getRenderSettings().vsyncEnabled);
 
+	this->inputSystem = std::make_unique<InputSystem>();
+	this->setupEventHandlers();
+
 	std::cout << "SDL version: " << SDL_GetVersion() << std::endl;
 	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
 	std::cout << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
@@ -141,7 +144,6 @@ void Engine::initializeNoiseGenerator(int seed_val)
 
 void Engine::run()
 {
-	bool keyTPressed = false;
 	this->running = true;
 	this->isMousecaptured = true;
 
@@ -160,7 +162,7 @@ void Engine::run()
 			lastTime = currentFrame;
 		}
 
-		handleEvents(keyTPressed);
+		inputSystem->update();
 
 		const bool *keys = SDL_GetKeyboardState(NULL);
 		if (isMousecaptured && !ImGui::GetIO().WantCaptureKeyboard) // Check ImGui focus
@@ -228,6 +230,79 @@ void Engine::run()
 
 		SDL_GL_SwapWindow(this->window);
 	}
+}
+
+void Engine::setupEventHandlers()
+{
+	EventBus::getInstance().subscribe(EventType::Quit, [this](const Event &)
+									  { this->running = false; });
+
+	EventBus::getInstance().subscribe(EventType::WindowResize, [this](const Event &e)
+									  {
+        const auto& re = static_cast<const WindowResizeEvent&>(e);
+        this->windowWidth = re.width;
+        this->windowHeight = re.height;
+        glViewport(0, 0, windowWidth, windowHeight);
+        if (renderer) renderer->setScreenSize(windowWidth, windowHeight);
+        if (postProcessing) postProcessing->resize(windowWidth, windowHeight);
+        if (textRenderer) textRenderer->setProjection(glm::ortho(0.0f, static_cast<float>(windowWidth), 0.0f, static_cast<float>(windowHeight))); });
+
+	EventBus::getInstance().subscribe(EventType::KeyPress, [this](const Event &e)
+									  {
+        const auto& ke = static_cast<const KeyEvent&>(e);
+        if (ke.key == SDLK_T) {
+            selectedTexture = static_cast<TextureType>((selectedTexture + 1) % COUNT);
+            if (uiManager) uiManager->getSelectedTexture() = selectedTexture;
+        }
+        if (ke.key == SDLK_C) {
+            this->isMousecaptured = !this->isMousecaptured;
+            this->inputSystem->setMouseCaptured(this->isMousecaptured, this->window);
+        }
+        if (ke.key == SDLK_I) {
+            camera.toggleMode();
+            if (camera.getMode() == CameraMode::ISOMETRIC) {
+                isMousecaptured = false;
+            } else {
+                isMousecaptured = true;
+            }
+            this->inputSystem->setMouseCaptured(this->isMousecaptured, this->window);
+        } });
+
+	EventBus::getInstance().subscribe(EventType::KeyRelease, [this](const Event &e)
+									  {
+        const auto& ke = static_cast<const KeyEvent&>(e);
+        if (ke.key == SDLK_ESCAPE) {
+            this->running = false;
+        } });
+
+	EventBus::getInstance().subscribe(EventType::MouseButtonPress, [this](const Event &e)
+									  {
+        const auto& me = static_cast<const MouseEvent&>(e);
+        if (me.button == SDL_BUTTON_LEFT) {
+            glm::vec3 hitPos, prevPos;
+            if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos)) {
+                if (chunkManager) chunkManager->deleteVoxel(hitPos);
+            }
+        } else if (me.button == SDL_BUTTON_RIGHT) {
+            glm::vec3 hitPos, prevPos;
+            if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos)) {
+                if (chunkManager) chunkManager->placeVoxel(prevPos, selectedTexture);
+            }
+        } });
+
+	EventBus::getInstance().subscribe(EventType::MouseMotion, [this](const Event &e)
+									  {
+        const auto& me = static_cast<const MouseEvent&>(e);
+        if (this->isMousecaptured) {
+            this->camera.processMouseMovement((float)me.dx, (float)me.dy);
+        } });
+
+	EventBus::getInstance().subscribe(EventType::MouseWheel, [this](const Event &e)
+									  {
+        const auto& me = static_cast<const MouseWheelEvent&>(e);
+        if (camera.getMode() == CameraMode::ISOMETRIC) {
+            camera.addIsometricZoom(me.y * 4.0f);
+        } });
 }
 
 void Engine::updateWorldState()
@@ -391,126 +466,6 @@ void Engine::renderScene() // Renamed from render
 	auto endFrame = std::chrono::high_resolution_clock::now();
 	// Total frame time is now more encompassing, including UI and other logic in run()
 	uiManager->getRenderTiming().totalFrame = std::chrono::duration<float, std::milli>(endFrame - startFrame).count();
-}
-
-void Engine::handleEvents(bool &keyTPressed)
-{
-	SDL_Event event;
-	while (SDL_PollEvent(&event))
-	{
-		uiManager->processEvent(&event); // Pass event to UIManager for ImGui
-
-		switch (event.type)
-		{
-		case SDL_EVENT_QUIT:
-			this->running = false;
-			break;
-		case SDL_EVENT_WINDOW_RESIZED:
-			windowWidth = event.window.data1;
-			windowHeight = event.window.data2;
-			glViewport(0, 0, windowWidth, windowHeight);
-			if (renderer)
-			{
-				renderer->setScreenSize(windowWidth, windowHeight);
-			}
-			if (postProcessing)
-			{
-				postProcessing->resize(windowWidth, windowHeight);
-			}
-			if (textRenderer)
-			{
-				textRenderer->setProjection(glm::ortho(0.0f, static_cast<float>(windowWidth), 0.0f, static_cast<float>(windowHeight)));
-			}
-			break;
-		case SDL_EVENT_KEY_DOWN:
-			if (event.key.scancode == SDL_SCANCODE_T)
-			{
-				if (!keyTPressed)
-				{
-					selectedTexture = static_cast<TextureType>((selectedTexture + 1) % COUNT);
-					keyTPressed = true;
-				}
-			}
-			if (event.key.scancode == SDL_SCANCODE_C)
-			{
-				this->isMousecaptured = !this->isMousecaptured;
-				SDL_SetWindowRelativeMouseMode(this->window, this->isMousecaptured ? true : false);
-			}
-			if (event.key.scancode == SDL_SCANCODE_I)
-			{
-				camera.toggleMode();
-				// Release mouse capture when switching to isometric (no mouse-look needed)
-				if (camera.getMode() == CameraMode::ISOMETRIC)
-				{
-					isMousecaptured = false;
-					SDL_SetWindowRelativeMouseMode(this->window, false);
-				}
-				else
-				{
-					isMousecaptured = true;
-					SDL_SetWindowRelativeMouseMode(this->window, true);
-				}
-			}
-			break;
-
-		case SDL_EVENT_KEY_UP:
-			if (event.key.scancode == SDL_SCANCODE_T)
-			{
-				keyTPressed = false;
-			}
-			if (event.key.scancode == SDL_SCANCODE_ESCAPE)
-			{
-				this->running = false;
-				break;
-			}
-			break;
-
-		case SDL_EVENT_MOUSE_BUTTON_DOWN:
-			if (!ImGui::GetIO().WantCaptureMouse) // Check ImGui focus
-			{
-				if (event.button.button == SDL_BUTTON_LEFT)
-				{
-					glm::vec3 hitPos, prevPos;
-					if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos))
-					{
-						if (chunkManager)
-							chunkManager->deleteVoxel(hitPos);
-					}
-				}
-				else if (event.button.button == SDL_BUTTON_RIGHT)
-				{
-					glm::vec3 hitPos, prevPos;
-					if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos))
-					{
-						if (chunkManager)
-							chunkManager->placeVoxel(prevPos, selectedTexture);
-					}
-				}
-			}
-			break;
-
-		case SDL_EVENT_MOUSE_MOTION:
-			if (this->isMousecaptured && !ImGui::GetIO().WantCaptureMouse) // Check ImGui focus
-			{
-				this->camera.processMouseMovement(event.motion.xrel, event.motion.yrel);
-			}
-			break;
-
-		case SDL_EVENT_MOUSE_WHEEL:
-			if (!ImGui::GetIO().WantCaptureMouse)
-			{
-				if (camera.getMode() == CameraMode::ISOMETRIC)
-				{
-					// Scroll up (positive y) zooms in (smaller half-extent)
-					camera.addIsometricZoom(event.wheel.y * 4.0f);
-				}
-			}
-			break;
-
-		default:
-			break;
-		}
-	}
 }
 
 void Engine::updateVoxelHighlights()

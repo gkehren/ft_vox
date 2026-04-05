@@ -13,6 +13,7 @@ enum class EventType {
     MouseMotion,
     MouseButtonPress,
     MouseButtonRelease,
+    MouseWheel,
     Quit
 };
 
@@ -36,6 +37,11 @@ struct MouseEvent : public Event {
     uint8_t button;
     MouseEvent(EventType t, int x, int y, int dx=0, int dy=0, uint8_t b=0) 
         : x(x), y(y), dx(dx), dy(dy), button(b) { type = t; }
+};
+
+struct MouseWheelEvent : public Event {
+    float x, y;
+    MouseWheelEvent(float x, float y) : x(x), y(y) { type = EventType::MouseWheel; }
 };
 
 struct QuitEvent : public Event {

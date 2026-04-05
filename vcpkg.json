@@ -1,0 +1,11 @@
+{
+  "name": "ft-vox",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "sdl3",
+    "boost-asio",
+    "boost-system",
+    "freetype",
+    "opengl"
+  ]
+}

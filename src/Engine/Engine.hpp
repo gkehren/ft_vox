@@ -33,6 +33,7 @@
 #include <Engine/UIManager.hpp>
 #include <Chunk/ChunkManager.hpp>
 #include <Chunk/TerrainGenerator.hpp>
+#include <Engine/InputSystem.hpp>
 
 class Engine
 {
@@ -89,6 +90,7 @@ private:
 	std::unique_ptr<ChunkManager> chunkManager;
 	std::unique_ptr<PostProcessing> postProcessing;
 	std::unique_ptr<TerrainGenerator> terrainGenerator;
+	std::unique_ptr<InputSystem> inputSystem;
 
 	Camera camera;
 	glm::ivec2 playerChunkPos;
@@ -104,7 +106,7 @@ private:
 	float m_meshAccum{0.f};
 	float m_uploadAccum{0.f};
 
-	void handleEvents(bool &keyTPressed);
+	void setupEventHandlers();
 	void updateWorldState();
 	void renderScene();
 	bool raycast(const glm::vec3 &origin, const glm::vec3 &direction, float maxDistance, glm::vec3 &hitPosition, glm::vec3 &previousPosition);

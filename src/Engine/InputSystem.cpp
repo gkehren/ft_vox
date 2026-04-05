@@ -17,7 +17,9 @@ void InputSystem::update() {
         }
         else if (event.type == SDL_EVENT_KEY_DOWN && !ImGui::GetIO().WantCaptureKeyboard) {
             keyStates[event.key.key] = true;
-            EventBus::getInstance().publish(KeyEvent(EventType::KeyPress, event.key.key));
+            if (event.key.repeat == 0) {
+                EventBus::getInstance().publish(KeyEvent(EventType::KeyPress, event.key.key));
+            }
         }
         else if (event.type == SDL_EVENT_KEY_UP && !ImGui::GetIO().WantCaptureKeyboard) {
             keyStates[event.key.key] = false;
@@ -34,6 +36,9 @@ void InputSystem::update() {
         }
         else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && !ImGui::GetIO().WantCaptureMouse) {
             EventBus::getInstance().publish(MouseEvent(EventType::MouseButtonRelease, (int)event.button.x, (int)event.button.y, 0, 0, event.button.button));
+        }
+        else if (event.type == SDL_EVENT_MOUSE_WHEEL && !ImGui::GetIO().WantCaptureMouse) {
+            EventBus::getInstance().publish(MouseWheelEvent(event.wheel.x, event.wheel.y));
         }
     }
 }
