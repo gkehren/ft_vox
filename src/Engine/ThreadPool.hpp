@@ -10,6 +10,9 @@
 #include <atomic>
 #include <memory>
 
+// Add above ThreadPool class
+enum class TaskPriority { High = 0, Normal = 1, Low = 2, Count = 3 };
+
 // L: Work-stealing thread pool.
 // Each worker owns a local deque. 'enqueue' round-robins tasks across workers.
 // Idle workers steal from the back of a neighbour's deque, which keeps
@@ -41,7 +44,7 @@ public:
 	}
 
 	template <class F>
-	auto enqueue(F &&f) -> std::future<void>
+	auto enqueue(TaskPriority priority, F &&f) -> std::future<void>
 	{
 		auto task = std::make_shared<std::packaged_task<void()>>(std::forward<F>(f));
 		std::future<void> res = task->get_future();
@@ -49,7 +52,7 @@ public:
 		size_t qi = nextQueue_.fetch_add(1, std::memory_order_relaxed) % numWorkers_;
 		{
 			std::lock_guard<std::mutex> lk(queues_[qi]->mx);
-			queues_[qi]->dq.emplace_front([task]
+			queues_[qi]->dq[static_cast<int>(priority)].emplace_front([task]
 										  { (*task)(); }); // LIFO push
 		}
 		taskCount_.fetch_add(1, std::memory_order_release);
@@ -57,10 +60,17 @@ public:
 		return res;
 	}
 
+	// Overload for backward compatibility (defaults to Normal)
+	template <class F>
+	auto enqueue(F &&f) -> std::future<void>
+	{
+		return enqueue(TaskPriority::Normal, std::forward<F>(f));
+	}
+
 private:
 	struct LocalQueue
 	{
-		std::deque<std::function<void()>> dq;
+		std::deque<std::function<void()>> dq[static_cast<int>(TaskPriority::Count)];
 		std::mutex mx;
 	};
 
@@ -71,12 +81,15 @@ private:
 		// Own queue
 		{
 			std::lock_guard<std::mutex> lk(queues_[id]->mx);
-			if (!queues_[id]->dq.empty())
+			for (int p = 0; p < static_cast<int>(TaskPriority::Count); ++p)
 			{
-				auto t = std::move(queues_[id]->dq.front());
-				queues_[id]->dq.pop_front();
-				taskCount_.fetch_sub(1, std::memory_order_relaxed);
-				return t;
+				if (!queues_[id]->dq[p].empty())
+				{
+					auto t = std::move(queues_[id]->dq[p].front());
+					queues_[id]->dq[p].pop_front();
+					taskCount_.fetch_sub(1, std::memory_order_relaxed);
+					return t;
+				}
 			}
 		}
 		// Steal from neighbours — use try_lock to skip busy victims rather than
@@ -85,12 +98,19 @@ private:
 		{
 			size_t victim = (id + j) % numWorkers_;
 			std::unique_lock<std::mutex> lk(queues_[victim]->mx, std::try_to_lock);
-			if (!lk || queues_[victim]->dq.empty())
+			if (!lk)
 				continue;
-			auto t = std::move(queues_[victim]->dq.back());
-			queues_[victim]->dq.pop_back();
-			taskCount_.fetch_sub(1, std::memory_order_relaxed);
-			return t;
+			
+			for (int p = 0; p < static_cast<int>(TaskPriority::Count); ++p)
+			{
+				if (!queues_[victim]->dq[p].empty())
+				{
+					auto t = std::move(queues_[victim]->dq[p].back());
+					queues_[victim]->dq[p].pop_back();
+					taskCount_.fetch_sub(1, std::memory_order_relaxed);
+					return t;
+				}
+			}
 		}
 		return {};
 	}
