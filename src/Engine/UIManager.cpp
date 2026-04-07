@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cmath>
+#include <Chunk/ChunkPool.hpp>
 
 UIManager::UIManager(Engine *engineInstance, SDL_Window *window, int &windowWidth, int &windowHeight)
 	: engine(engineInstance), sdlWindow(window), winWidth(windowWidth), winHeight(windowHeight)
@@ -112,6 +113,20 @@ void UIManager::update()
 	renderSettings.uploadPerSec = std::max(1, renderSettings.uploadPerSec);
 
 	ImGui::Text("Screen size: %d x %d", winWidth, winHeight);
+
+	ImGui::Separator();
+	if (engine && engine->getChunkManager() && engine->getChunkManager()->getChunkPool())
+	{
+		ChunkPool *pool = engine->getChunkManager()->getChunkPool();
+		ImGui::Text("Chunk Pool Stats:");
+		ImGui::Text("  Capacity: %zu", pool->capacity());
+		ImGui::Text("  Acquired: %zu", pool->acquiredCount());
+		ImGui::Text("  Free: %zu", pool->freeCount());
+		if (pool->overflowCount() > 0)
+			ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "  Overflow: %zu", pool->overflowCount());
+		else
+			ImGui::Text("  Overflow: %zu", pool->overflowCount());
+	}
 
 	ImGui::Separator();
 

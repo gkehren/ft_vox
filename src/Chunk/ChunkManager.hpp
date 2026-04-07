@@ -11,6 +11,7 @@
 
 #include <glm/glm.hpp>
 #include <Chunk/Chunk.hpp>
+#include <Chunk/ChunkPool.hpp>
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Chunk/TerrainGenerator.hpp>
@@ -26,7 +27,7 @@ class Renderer;
 class ChunkManager
 {
 public:
-	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, RenderTiming &renderTiming);
+	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool, RenderTiming &renderTiming);
 	~ChunkManager();
 
 	void updatePlayerPosition(const glm::ivec2 &newPlayerChunkPos, const Camera &camera, const RenderSettings &settings);
@@ -47,7 +48,10 @@ public:
 	Chunk *getChunk(const glm::ivec3 &chunkPos);
 	const Chunk *getChunk(const glm::ivec3 &chunkPos) const;
 
-	const std::unordered_map<glm::ivec3, Chunk, IVec3Hash> &getAllChunks() const;
+	const std::unordered_map<glm::ivec3, Chunk*, IVec3Hash> &getAllChunks() const;
+
+	/// Returns the ChunkPool used by this manager (for UI stats display).
+	ChunkPool *getChunkPool() const { return m_chunkPool; }
 
 private:
 	void unloadOutOfRangeChunks(const Camera &camera, const RenderSettings &settings);
@@ -55,7 +59,7 @@ private:
 	void ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx);
 	TaskPriority calculateTaskPriority(float distance, float lodThreshold) const;
 
-	std::unordered_map<glm::ivec3, Chunk, IVec3Hash> chunks;
+	std::unordered_map<glm::ivec3, Chunk*, IVec3Hash> chunks;
 	std::unordered_set<Chunk *> activeChunks;
 	std::queue<glm::ivec3> chunkLoadQueue;
 
@@ -71,5 +75,6 @@ private:
 
 	TerrainGenerator *m_terrainGenerator;
 	ThreadPool *p_threadPool;
+	ChunkPool *m_chunkPool;
 	RenderTiming &m_renderTiming;
 };

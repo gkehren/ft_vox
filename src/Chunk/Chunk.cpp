@@ -1028,3 +1028,70 @@ void Chunk::rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
         neighborShellVoxels[(y + 1) * 18 * 18 + 17 * 18 + (x + 1)] =
             north->getVoxel(x, y, 0).type;
 }
+
+void Chunk::reset(const glm::vec3 &newPosition)
+{
+  // Release GPU resources (must be called from the GL thread)
+  if (VAO != 0)
+  {
+    glDeleteVertexArrays(1, &VAO);
+    VAO = 0;
+  }
+  if (VBO != 0)
+  {
+    glDeleteBuffers(1, &VBO);
+    VBO = 0;
+  }
+  if (EBO != 0)
+  {
+    glDeleteBuffers(1, &EBO);
+    EBO = 0;
+  }
+  if (waterVAO != 0)
+  {
+    glDeleteVertexArrays(1, &waterVAO);
+    waterVAO = 0;
+  }
+  if (waterVBO != 0)
+  {
+    glDeleteBuffers(1, &waterVBO);
+    waterVBO = 0;
+  }
+  if (waterEBO != 0)
+  {
+    glDeleteBuffers(1, &waterEBO);
+    waterEBO = 0;
+  }
+
+  // Reset identity
+  position = newPosition;
+  visible = false;
+  state.store(ChunkState::UNLOADED);
+  meshNeedsUpdate.store(true);
+  m_isLODMesh = false;
+
+  // Clear buffers but retain capacity for reuse (avoid reallocation)
+  vertices.clear();
+  indices.clear();
+  waterVertices.clear();
+  waterIndices.clear();
+
+  // Reset voxels to AIR (keep vector at CHUNK_VOLUME size)
+  if (voxels.size() != CHUNK_VOLUME)
+    voxels.resize(CHUNK_VOLUME);
+  std::fill(voxels.begin(), voxels.end(), Voxel{static_cast<uint8_t>(AIR)});
+
+  activeVoxels.reset();
+
+  // Clear shell — keep capacity for reuse
+  neighborShellVoxels.clear();
+
+  // Reset biome colors
+  biomeGrassColors.fill(0);
+  biomeFoliageColors.fill(0);
+
+  // Reset draw counts
+  opaqueIndexCount = 0;
+  waterIndexCount = 0;
+}
+

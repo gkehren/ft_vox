@@ -114,6 +114,7 @@ Engine::~Engine()
 {
 	threadPool.reset();
 	chunkManager.reset();
+	chunkPool.reset(); // Release pool after chunkManager returns all chunks
 	SDL_GL_DestroyContext(glContext);
 	SDL_DestroyWindow(this->window);
 	SDL_Quit();
@@ -137,7 +138,16 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	uint32_t threadCount = std::thread::hardware_concurrency() / 2;
 	this->threadPool = std::make_unique<ThreadPool>(threadCount > 0 ? threadCount : 1);
 	this->terrainGenerator = std::make_unique<TerrainGenerator>(this->seed);
-	this->chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(), uiManager->getRenderTiming());
+
+	// Size the chunk pool based on max render distance.
+	// radius = ceil(maxDist / CHUNK_SIZE), area = (2r+1)^2, +25% margin.
+	const int renderRadius = static_cast<int>(std::ceil(
+		static_cast<float>(uiManager->getRenderSettings().maxRenderDistance) / CHUNK_SIZE));
+	const size_t estimatedChunks = static_cast<size_t>((2 * renderRadius + 1) * (2 * renderRadius + 1));
+	const size_t poolCapacity = estimatedChunks + estimatedChunks / 4; // +25% margin
+	this->chunkPool = std::make_unique<ChunkPool>(poolCapacity);
+
+	this->chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(), chunkPool.get(), uiManager->getRenderTiming());
 
 	std::cout << "Terrain generation initialized with seed: " << this->seed << std::endl;
 }

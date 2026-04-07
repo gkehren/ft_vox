@@ -11,13 +11,21 @@
 #include <cmath>
 #include <execution>
 
-ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, RenderTiming &renderTiming)
-	: m_terrainGenerator(terrainGenerator), p_threadPool(threadPool), m_renderTiming(renderTiming)
+ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool, RenderTiming &renderTiming)
+	: m_terrainGenerator(terrainGenerator), p_threadPool(threadPool), m_chunkPool(chunkPool), m_renderTiming(renderTiming)
 {
 }
 
 ChunkManager::~ChunkManager()
 {
+	// Release all chunks back to the pool
+	for (auto &[pos, chunkPtr] : chunks)
+	{
+		if (chunkPtr && m_chunkPool)
+			m_chunkPool->release(chunkPtr);
+	}
+	chunks.clear();
+	activeChunks.clear();
 }
 
 void ChunkManager::updatePlayerPosition(const glm::ivec2 &newPlayerChunkPos, const Camera &camera, const RenderSettings &settings)
@@ -37,10 +45,11 @@ void ChunkManager::processChunkLoading(const RenderSettings &settings, int budge
 
 		if (chunks.find(chunkPos) == chunks.end())
 		{
-			auto [it, inserted] = chunks.emplace(chunkPos, Chunk(glm::vec3(chunkPos.x * CHUNK_SIZE, 0.0f, chunkPos.z * CHUNK_SIZE)));
-			if (inserted)
+			Chunk *chunk = m_chunkPool->acquire(glm::vec3(chunkPos.x * CHUNK_SIZE, 0.0f, chunkPos.z * CHUNK_SIZE));
+			if (chunk)
 			{
-				activeChunks.insert(&it->second);
+				chunks[chunkPos] = chunk;
+				activeChunks.insert(chunk);
 			}
 		}
 		chunkCount++;
@@ -354,7 +363,7 @@ bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
 	auto it = chunks.find(chunkPos);
 	if (it != chunks.end())
 	{
-		bool modified = it->second.deleteVoxel(worldPos);
+	bool modified = it->second->deleteVoxel(worldPos);
 		if (modified)
 		{
 			const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
@@ -422,7 +431,7 @@ bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 	auto it = chunks.find(chunkPos);
 	if (it != chunks.end())
 	{
-		bool modified = it->second.placeVoxel(worldPos, type);
+		bool modified = it->second->placeVoxel(worldPos, type);
 		if (modified)
 		{
 			const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
@@ -491,13 +500,13 @@ bool ChunkManager::isVoxelActive(const glm::vec3 &worldPos) const
 
 	std::shared_lock<std::shared_mutex> lock(chunkMutex); // const method, shared read lock
 	auto it = chunks.find(chunkPos);
-	if (it != chunks.end() && it->second.getState() >= ChunkState::GENERATED) // Voxels exist once generated
+	if (it != chunks.end() && it->second->getState() >= ChunkState::GENERATED) // Voxels exist once generated
 	{
 		// Convert world coordinates to local voxel coordinates
 		int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
 		int localY = static_cast<int>(std::floor(worldPos.y));
 		int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
-		return it->second.getVoxel(localX, localY, localZ).type != AIR;
+		return it->second->getVoxel(localX, localY, localZ).type != AIR;
 	}
 	return false; // Chunk not found or not generated
 }
@@ -510,7 +519,7 @@ Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos)
 	auto it = chunks.find(chunkPos);
 	if (it != chunks.end())
 	{
-		return &it->second;
+		return it->second;
 	}
 	return nullptr;
 }
@@ -521,14 +530,14 @@ const Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos) const
 	auto it = chunks.find(chunkPos);
 	if (it != chunks.end())
 	{
-		return &it->second;
+		return it->second;
 	}
 	return nullptr;
 }
 
-const std::unordered_map<glm::ivec3, Chunk, IVec3Hash> &ChunkManager::getAllChunks() const
+const std::unordered_map<glm::ivec3, Chunk*, IVec3Hash> &ChunkManager::getAllChunks() const
 {
-	return chunks; // Caller must handle synchronization if iterating and modifying elsewhere
+	return chunks;
 }
 
 void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSettings &settings)
@@ -537,7 +546,7 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 	auto it = chunks.begin();
 	while (it != chunks.end())
 	{
-		Chunk *chunkPtr = &it->second;
+		Chunk *chunkPtr = it->second;
 		glm::vec3 chunkCenter = chunkPtr->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 		float distToPlayer = glm::distance(
 			glm::vec2(camera.getPosition().x, camera.getPosition().z),
@@ -549,6 +558,7 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 			if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
 			{
 				activeChunks.erase(chunkPtr);
+				m_chunkPool->release(chunkPtr);
 				it = chunks.erase(it);
 				m_cachedWaterChunks.clear(); // H: invalidate water sort cache
 			}

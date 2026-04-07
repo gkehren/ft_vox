@@ -62,6 +62,11 @@ public:
 	void rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
 								   const Chunk *south, const Chunk *north);
 
+	/// Reinitialize this chunk for reuse by the ChunkPool.
+	/// Releases GPU resources, clears internal buffers (capacity retained),
+	/// and resets all state to UNLOADED.
+	void reset(const glm::vec3 &newPosition);
+
 private:
 	glm::vec3 position;
 	bool visible;

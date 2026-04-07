@@ -32,6 +32,7 @@
 #include <Engine/EngineDefs.hpp>
 #include <Engine/UIManager.hpp>
 #include <Chunk/ChunkManager.hpp>
+#include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Engine/InputSystem.hpp>
 
@@ -55,6 +56,7 @@ public:
 	Shader *getShader() const { return shader.get(); }
 	Renderer *getRenderer() const { return renderer.get(); }
 	TerrainGenerator *getTerrainGenerator() const { return terrainGenerator.get(); }
+	ChunkManager *getChunkManager() const { return chunkManager.get(); }
 
 	void setWireframeMode(bool enabled);
 	void setVSync(bool enabled);
@@ -88,6 +90,7 @@ private:
 	std::unique_ptr<Client> client;
 	std::unique_ptr<UIManager> uiManager;
 	std::unique_ptr<ChunkManager> chunkManager;
+	std::unique_ptr<ChunkPool> chunkPool;
 	std::unique_ptr<PostProcessing> postProcessing;
 	std::unique_ptr<TerrainGenerator> terrainGenerator;
 	std::unique_ptr<InputSystem> inputSystem;
