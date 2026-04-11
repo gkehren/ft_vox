@@ -21,8 +21,8 @@ struct MeshWorkspace
 static thread_local MeshWorkspace s_meshWorkspace;
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state)
-    : position(position), visible(false), state(state), VAO(0),
-      waterVAO(0),
+    : position(position), visible(false), state(state), VAO(0), VBO(0), EBO(0),
+      waterVAO(0), waterVBO(0), waterEBO(0),
       opaqueIndexCount(0), waterIndexCount(0),
       voxels(CHUNK_VOLUME),
       neighborShellVoxels(18 * (CHUNK_HEIGHT + 2) * 18,
@@ -32,9 +32,8 @@ Chunk::Chunk(const glm::vec3 &position, ChunkState state)
 Chunk::Chunk(Chunk &&other) noexcept
     : position(std::move(other.position)), visible(other.visible),
       state(other.state.load()), voxels(std::move(other.voxels)), VAO(other.VAO),
-      VBO(std::move(other.VBO)), EBO(std::move(other.EBO)),
-      waterVAO(other.waterVAO), waterVBO(std::move(other.waterVBO)), waterEBO(std::move(other.waterEBO)),
-      syncFence(other.syncFence),
+      VBO(other.VBO), EBO(other.EBO),
+      waterVAO(other.waterVAO), waterVBO(other.waterVBO), waterEBO(other.waterEBO),
       opaqueIndexCount(other.opaqueIndexCount), waterIndexCount(other.waterIndexCount),
       meshNeedsUpdate(other.meshNeedsUpdate.load()),
       activeVoxels(std::move(other.activeVoxels)),
@@ -46,8 +45,11 @@ Chunk::Chunk(Chunk &&other) noexcept
       m_isLODMesh(other.m_isLODMesh)
 {
   other.VAO = 0;
+  other.VBO = 0;
+  other.EBO = 0;
   other.waterVAO = 0;
-  other.syncFence = nullptr;
+  other.waterVBO = 0;
+  other.waterEBO = 0;
   other.opaqueIndexCount = 0;
   other.waterIndexCount = 0;
 }
@@ -57,10 +59,16 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
   {
     if (VAO != 0)
       glDeleteVertexArrays(1, &VAO);
+    if (VBO != 0)
+      glDeleteBuffers(1, &VBO);
+    if (EBO != 0)
+      glDeleteBuffers(1, &EBO);
     if (waterVAO != 0)
       glDeleteVertexArrays(1, &waterVAO);
-    if (syncFence)
-      glDeleteSync(syncFence);
+    if (waterVBO != 0)
+      glDeleteBuffers(1, &waterVBO);
+    if (waterEBO != 0)
+      glDeleteBuffers(1, &waterEBO);
 
     position = std::move(other.position);
     visible = other.visible;
@@ -75,20 +83,22 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     waterVertices = std::move(other.waterVertices);
     waterIndices = std::move(other.waterIndices);
     VAO = other.VAO;
-    VBO = std::move(other.VBO);
-    EBO = std::move(other.EBO);
+    VBO = other.VBO;
+    EBO = other.EBO;
     waterVAO = other.waterVAO;
-    waterVBO = std::move(other.waterVBO);
-    waterEBO = std::move(other.waterEBO);
-    syncFence = other.syncFence;
+    waterVBO = other.waterVBO;
+    waterEBO = other.waterEBO;
     opaqueIndexCount = other.opaqueIndexCount;
     waterIndexCount = other.waterIndexCount;
     meshNeedsUpdate.store(other.meshNeedsUpdate.load());
     m_isLODMesh = other.m_isLODMesh;
 
     other.VAO = 0;
+    other.VBO = 0;
+    other.EBO = 0;
     other.waterVAO = 0;
-    other.syncFence = nullptr;
+    other.waterVBO = 0;
+    other.waterEBO = 0;
   }
   return *this;
 }
@@ -99,13 +109,25 @@ Chunk::~Chunk()
   {
     glDeleteVertexArrays(1, &VAO);
   }
+  if (VBO != 0)
+  {
+    glDeleteBuffers(1, &VBO);
+  }
+  if (EBO != 0)
+  {
+    glDeleteBuffers(1, &EBO);
+  }
   if (waterVAO != 0)
   {
     glDeleteVertexArrays(1, &waterVAO);
   }
-  if (syncFence)
+  if (waterVBO != 0)
   {
-    glDeleteSync(syncFence);
+    glDeleteBuffers(1, &waterVBO);
+  }
+  if (waterEBO != 0)
+  {
+    glDeleteBuffers(1, &waterEBO);
   }
 }
 
@@ -874,70 +896,59 @@ static void configureVertexAttributes()
 
 void Chunk::uploadToGPU()
 {
-  if (syncFence) {
-      GLenum waitReturn;
-      do {
-          waitReturn = glClientWaitSync(syncFence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000); // 1 sec
-      } while (waitReturn == GL_TIMEOUT_EXPIRED);
-      
-      if (waitReturn == GL_WAIT_FAILED) {
-          std::cerr << "Error: GPU sync failed, aborting upload" << std::endl;
-          return;
-      }
-      
-      glDeleteSync(syncFence);
-      syncFence = nullptr;
-  }
-
   // --- Opaque mesh ---
+  if (VAO == 0)
+    glGenVertexArrays(1, &VAO);
+  if (VBO == 0)
+    glGenBuffers(1, &VBO);
+  if (EBO == 0)
+    glGenBuffers(1, &EBO);
+
   opaqueIndexCount = static_cast<uint32_t>(indices.size());
-  if (opaqueIndexCount > 0)
-  {
-      if (!VBO) VBO = std::make_unique<PersistentBuffer>(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex));
-      else VBO->resize(vertices.size() * sizeof(Vertex));
 
-      if (!EBO) EBO = std::make_unique<PersistentBuffer>(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint32_t));
-      else EBO->resize(indices.size() * sizeof(uint32_t));
+  glBindVertexArray(VAO);
+  glBindBuffer(GL_ARRAY_BUFFER, VBO);
+  glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex),
+               vertices.data(), GL_STATIC_DRAW);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint32_t),
+               indices.data(), GL_STATIC_DRAW);
+  configureVertexAttributes();
+  glBindVertexArray(0);
 
-      // Copy directly to mapped pointers
-      std::memcpy(VBO->getMappedPtr(), vertices.data(), vertices.size() * sizeof(Vertex));
-      std::memcpy(EBO->getMappedPtr(), indices.data(), indices.size() * sizeof(uint32_t));
-
-      if (VAO == 0) glGenVertexArrays(1, &VAO);
-      glBindVertexArray(VAO);
-      glBindBuffer(GL_ARRAY_BUFFER, VBO->getID());
-      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO->getID());
-      configureVertexAttributes();
-      glBindVertexArray(0);
-  }
-
+  // P2: Free CPU-side data after GPU upload
   vertices = {};
   indices = {};
 
   // --- Water mesh ---
   waterIndexCount = static_cast<uint32_t>(waterIndices.size());
+
   if (waterIndexCount > 0)
   {
-      if (!waterVBO) waterVBO = std::make_unique<PersistentBuffer>(GL_ARRAY_BUFFER, waterVertices.size() * sizeof(Vertex));
-      else waterVBO->resize(waterVertices.size() * sizeof(Vertex));
+    if (waterVAO == 0)
+      glGenVertexArrays(1, &waterVAO);
+    if (waterVBO == 0)
+      glGenBuffers(1, &waterVBO);
+    if (waterEBO == 0)
+      glGenBuffers(1, &waterEBO);
 
-      if (!waterEBO) waterEBO = std::make_unique<PersistentBuffer>(GL_ELEMENT_ARRAY_BUFFER, waterIndices.size() * sizeof(uint32_t));
-      else waterEBO->resize(waterIndices.size() * sizeof(uint32_t));
-
-      std::memcpy(waterVBO->getMappedPtr(), waterVertices.data(), waterVertices.size() * sizeof(Vertex));
-      std::memcpy(waterEBO->getMappedPtr(), waterIndices.data(), waterIndices.size() * sizeof(uint32_t));
-
-      if (waterVAO == 0) glGenVertexArrays(1, &waterVAO);
-      glBindVertexArray(waterVAO);
-      glBindBuffer(GL_ARRAY_BUFFER, waterVBO->getID());
-      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, waterEBO->getID());
-      configureVertexAttributes();
-      glBindVertexArray(0);
+    glBindVertexArray(waterVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, waterVBO);
+    glBufferData(GL_ARRAY_BUFFER, waterVertices.size() * sizeof(Vertex),
+                 waterVertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, waterEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, waterIndices.size() * sizeof(uint32_t),
+                 waterIndices.data(), GL_STATIC_DRAW);
+    configureVertexAttributes();
+    glBindVertexArray(0);
   }
 
+  // P2: Free CPU-side water data after GPU upload
   waterVertices = {};
   waterIndices = {};
 
+  // E: Release neighbor shell memory — only needed during meshing.
+  // Lazily reconstructed by ChunkManager before any subsequent remesh.
   freeShellVoxels();
   meshNeedsUpdate = false;
 }
@@ -952,9 +963,6 @@ uint32_t Chunk::draw()
   glDrawElements(GL_TRIANGLES, opaqueIndexCount, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
 
-  if (syncFence) glDeleteSync(syncFence);
-  syncFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-
   return opaqueIndexCount;
 }
 
@@ -966,9 +974,6 @@ uint32_t Chunk::drawWater()
   glBindVertexArray(waterVAO);
   glDrawElements(GL_TRIANGLES, waterIndexCount, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
-
-  if (syncFence) glDeleteSync(syncFence);
-  syncFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 
   return waterIndexCount;
 }
@@ -1032,21 +1037,31 @@ void Chunk::reset(const glm::vec3 &newPosition)
     glDeleteVertexArrays(1, &VAO);
     VAO = 0;
   }
+  if (VBO != 0)
+  {
+    glDeleteBuffers(1, &VBO);
+    VBO = 0;
+  }
+  if (EBO != 0)
+  {
+    glDeleteBuffers(1, &EBO);
+    EBO = 0;
+  }
   if (waterVAO != 0)
   {
     glDeleteVertexArrays(1, &waterVAO);
     waterVAO = 0;
   }
-  if (syncFence)
+  if (waterVBO != 0)
   {
-    glDeleteSync(syncFence);
-    syncFence = nullptr;
+    glDeleteBuffers(1, &waterVBO);
+    waterVBO = 0;
   }
-
-  VBO.reset();
-  EBO.reset();
-  waterVBO.reset();
-  waterEBO.reset();
+  if (waterEBO != 0)
+  {
+    glDeleteBuffers(1, &waterEBO);
+    waterEBO = 0;
+  }
 
   // Reset identity
   position = newPosition;
