@@ -19,6 +19,7 @@
 
 #include <Chunk/TerrainGenerator.hpp>
 #include <Renderer/TextureManager.hpp>
+#include <Renderer/PersistentBuffer.hpp>
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
@@ -73,13 +74,15 @@ private:
 	std::atomic<ChunkState> state;
 
 	GLuint VAO;
-	GLuint VBO;
-	GLuint EBO;
+	std::unique_ptr<PersistentBuffer> VBO;
+	std::unique_ptr<PersistentBuffer> EBO;
 
 	// Separate water mesh for transparency pass
 	GLuint waterVAO;
-	GLuint waterVBO;
-	GLuint waterEBO;
+	std::unique_ptr<PersistentBuffer> waterVBO;
+	std::unique_ptr<PersistentBuffer> waterEBO;
+
+	GLsync syncFence{nullptr};
 
 	std::vector<Vertex> vertices;
 	std::vector<uint32_t> indices; // J: upgraded from uint16_t to eliminate silent overflow
