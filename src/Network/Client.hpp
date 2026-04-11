@@ -33,7 +33,6 @@ private:
 	void requestSeed();
 	void sendAck(uint32_t playerId);
 
-	std::thread clientThread;
 	std::atomic<bool> connected;
 
 	boost::asio::io_context ioContext;
@@ -53,4 +52,7 @@ private:
 public: // public temporarily for ImGui
 	std::unordered_map<uint32_t, PlayerPosition> playerPositions;
 	std::mutex playerMutex;
+
+private:
+	std::jthread clientThread;
 };

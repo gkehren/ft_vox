@@ -39,8 +39,6 @@ public:
 			stop_.store(true);
 		}
 		cv_.notify_all();
-		for (auto &w : workers_)
-			w.join();
 	}
 
 	template <class F>
@@ -140,7 +138,7 @@ private:
 	std::atomic<size_t> nextQueue_;
 	std::atomic<size_t> taskCount_;
 	std::vector<std::unique_ptr<LocalQueue>> queues_;
-	std::vector<std::thread> workers_;
 	std::mutex sleepMux_;
 	std::condition_variable cv_;
+	std::vector<std::jthread> workers_;
 };

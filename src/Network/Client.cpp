@@ -17,7 +17,7 @@ void Client::connect(const std::string &host, unsigned short port)
 	connected = true;
 	serverEndpoint = boost::asio::ip::udp::endpoint(boost::asio::ip::make_address(host), port);
 	socket.open(boost::asio::ip::udp::v4());
-	clientThread = std::thread(&Client::run, this);
+	clientThread = std::jthread(&Client::run, this);
 }
 
 void Client::stop()
@@ -32,9 +32,6 @@ void Client::stop()
 void Client::disconnect()
 {
 	stop();
-
-	if (clientThread.joinable() && clientThread.get_id() != std::this_thread::get_id())
-		clientThread.join();
 }
 
 bool Client::isConnected() const

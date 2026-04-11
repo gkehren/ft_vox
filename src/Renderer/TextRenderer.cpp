@@ -18,7 +18,7 @@ TextRenderer::TextRenderer(const std::string &fontPath, const glm::mat4 &proj)
 	loadCharacters();
 
 	std::string path = RES_PATH + std::string("shaders/");
-	shader = new Shader((path + "textVertex.glsl").c_str(), (path + "textFragment.glsl").c_str());
+	shader = std::make_unique<Shader>((path + "textVertex.glsl").c_str(), (path + "textFragment.glsl").c_str());
 	shader->use();
 	shader->setMat4("projection", projection);
 

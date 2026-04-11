@@ -5,6 +5,7 @@
 #include <glad/glad.h>
 #include <string>
 #include <map>
+#include <memory>
 #include <glm/glm.hpp>
 #include <Shader/Shader.hpp>
 #include <utils.hpp>
@@ -29,7 +30,7 @@ public:
 private:
 	FT_Library ft;
 	FT_Face face;
-	Shader *shader;
+	std::unique_ptr<Shader> shader;
 	GLuint VAO;
 	GLuint VBO;
 	glm::mat4 projection;
