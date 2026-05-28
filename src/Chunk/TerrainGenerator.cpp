@@ -945,7 +945,12 @@ float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
   float beachHeight = BEACH_BASE_HEIGHT + peaksValleys * BEACH_VARIATION * erosionFactor;
   float plainsHeight = PLAINS_BASE_HEIGHT + peaksValleys * PLAINS_VARIATION * (0.5f + erosionFactor * 0.5f);
   float hillsHeight = HILLS_BASE_HEIGHT + peaksValleys * HILLS_VARIATION * (0.6f + erosionFactor * 0.4f);
-  float mountainHeight = MOUNTAIN_BASE_HEIGHT + peaksValleys * MOUNTAIN_VARIATION + (ridge > RIDGE_PEAK_THRESHOLD ? std::pow((ridge - RIDGE_PEAK_THRESHOLD) / (1.0f - RIDGE_PEAK_THRESHOLD), RIDGE_PEAK_EXPONENT) * RIDGE_PEAK_AMPLITUDE : 0.0f);
+
+  float mountainHeight = MOUNTAIN_BASE_HEIGHT + peaksValleys * MOUNTAIN_VARIATION;
+  if (ridge > RIDGE_PEAK_THRESHOLD) {
+    float val = (ridge - RIDGE_PEAK_THRESHOLD) / (1.0f - RIDGE_PEAK_THRESHOLD);
+    mountainHeight += (val * val) * RIDGE_PEAK_AMPLITUDE; // RIDGE_PEAK_EXPONENT is 2.0f
+  }
 
   float heightVariation = oceanWeight * oceanHeight + beachWeight * beachHeight +
                           plainsWeight * plainsHeight + hillsWeight * hillsHeight +
