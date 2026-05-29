@@ -295,6 +295,7 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 			renderer->drawBoundingBox(*chunk, camera);
 		}
 	}
+	glBindVertexArray(0);
 
 	// --- Water transparency sub-pass ---
 	// H: Rebuild sorted water list only when camera moved > CHUNK_SIZE/2 from last sort.
@@ -326,6 +327,7 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 		if (chunk->isVisible() && chunk->getState() >= ChunkState::MESHED)
 			chunk->drawWater();
 	}
+	glBindVertexArray(0);
 
 	glDepthMask(GL_TRUE);
 	glDisable(GL_BLEND);
@@ -361,6 +363,7 @@ void ChunkManager::drawShadows(const Shader &shader, const glm::vec3 &cameraPos)
 
 		chunk->drawShadow();
 	}
+	glBindVertexArray(0);
 }
 
 void ChunkManager::uploadPendingMeshes(int budget)

@@ -961,7 +961,6 @@ uint32_t Chunk::draw()
 
   glBindVertexArray(VAO);
   glDrawElements(GL_TRIANGLES, opaqueIndexCount, GL_UNSIGNED_INT, 0);
-  glBindVertexArray(0);
 
   return opaqueIndexCount;
 }
@@ -973,7 +972,6 @@ uint32_t Chunk::drawWater()
 
   glBindVertexArray(waterVAO);
   glDrawElements(GL_TRIANGLES, waterIndexCount, GL_UNSIGNED_INT, 0);
-  glBindVertexArray(0);
 
   return waterIndexCount;
 }
@@ -985,7 +983,6 @@ void Chunk::drawShadow() const
 
   glBindVertexArray(VAO);
   glDrawElements(GL_TRIANGLES, opaqueIndexCount, GL_UNSIGNED_INT, 0);
-  glBindVertexArray(0);
 }
 
 void Chunk::freeShellVoxels()
