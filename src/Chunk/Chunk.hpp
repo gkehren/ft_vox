@@ -49,7 +49,7 @@ public:
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
 	uint32_t draw();
 	uint32_t drawWater();
-	void drawShadow(const Shader &shader) const;
+	void drawShadow() const;
 	void generateTerrain(TerrainGenerator &generator);
 	void generateMesh();
 	void generateLODMesh(); // K: simplified column-top mesh for distant chunks

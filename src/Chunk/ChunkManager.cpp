@@ -318,11 +318,14 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 void ChunkManager::drawShadows(const Shader &shader) const
 {
 	std::shared_lock<std::shared_mutex> lock(chunkMutex);
+	shader.use();
+	// Set model matrix once for all chunks to avoid redundant per-chunk API overhead
+	shader.setMat4("model", glm::mat4(1.0f));
 	for (Chunk *chunk : activeChunks)
 	{
 		if (!chunk->isVisible() || chunk->getState() < ChunkState::MESHED)
 			continue;
-		chunk->drawShadow(shader);
+		chunk->drawShadow();
 	}
 }
 

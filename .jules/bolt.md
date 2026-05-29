@@ -1,0 +1,3 @@
+## 2024-05-29 - Avoid per-chunk redundant uniform updates
+**Learning:** During the shadow pass, setting a uniform matrix to the identity matrix `glm::mat4(1.0f)` for *every single chunk* inside the rendering loop caused thousands of redundant `glUniformMatrix4fv` and `glGetUniformLocation` calls. These calls have a significant CPU overhead due to string hashing and driver communication.
+**Action:** Always verify if a uniform is genuinely changing per-object in a rendering loop. If it is constant (like an identity model matrix for chunks in world space), set it once before the loop to drastically reduce API overhead.
