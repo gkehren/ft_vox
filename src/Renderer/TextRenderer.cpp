@@ -35,6 +35,12 @@ TextRenderer::TextRenderer(const std::string &fontPath, const glm::mat4 &proj)
 
 TextRenderer::~TextRenderer()
 {
+	for (const auto &entry : characters)
+	{
+		glDeleteTextures(1, &entry.second.textureID);
+	}
+	glDeleteVertexArrays(1, &VAO);
+	glDeleteBuffers(1, &VBO);
 }
 
 void TextRenderer::loadCharacters()

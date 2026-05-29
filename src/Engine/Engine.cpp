@@ -115,6 +115,11 @@ Engine::~Engine()
 	threadPool.reset();
 	chunkManager.reset();
 	chunkPool.reset(); // Release pool after chunkManager returns all chunks
+	renderer.reset();
+	postProcessing.reset();
+	textRenderer.reset();
+	uiManager.reset();
+	shader.reset();
 	SDL_GL_DestroyContext(glContext);
 	SDL_DestroyWindow(this->window);
 	SDL_Quit();
@@ -214,7 +219,8 @@ void Engine::run()
 		{
 			// Compute sun's screen position for god rays
 			glm::vec3 sunWorldPos = camera.getPosition() + uiManager->getShaderParams().sunDirection * 2000.0f;
-			glm::mat4 proj = camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), 3000.0f);
+			const float sceneFarPlane = static_cast<float>(uiManager->getRenderSettings().maxRenderDistance);
+			glm::mat4 proj = camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), sceneFarPlane);
 			glm::mat4 view = camera.getViewMatrix();
 			glm::vec4 sunClip = proj * view * glm::vec4(sunWorldPos, 1.0f);
 			glm::vec2 sunScreen(0.5f, 0.5f); // Default: center of screen

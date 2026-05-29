@@ -13,8 +13,6 @@ Shader::Shader(const char *vertexPath, const char *fragmentPath)
 Shader::~Shader()
 {
 	glDeleteProgram(this->id);
-	glDeleteShader(this->vertexShader);
-	glDeleteShader(this->fragmentShader);
 }
 
 void Shader::use() const
@@ -60,6 +58,7 @@ GLuint Shader::compileShader(GLenum shaderType, const char *source) const
 	{
 		GLchar infoLog[512];
 		glGetShaderInfoLog(shader, 512, nullptr, infoLog);
+		glDeleteShader(shader);
 		throw std::runtime_error(infoLog);
 	}
 
@@ -80,6 +79,9 @@ GLuint Shader::linkProgram(GLuint vertexShader, GLuint fragmentShader) const
 	{
 		GLchar infoLog[512];
 		glGetProgramInfoLog(program, 512, nullptr, infoLog);
+		glDeleteShader(vertexShader);
+		glDeleteShader(fragmentShader);
+		glDeleteProgram(program);
 		throw std::runtime_error(infoLog);
 	}
 

@@ -139,7 +139,7 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	while (!genQueue.empty() && genDispatched < budget)
 	{
 		Chunk *chunk = genQueue.top().chunk;
-				float distanceSq = genQueue.top().distance;
+		float distanceSq = genQueue.top().distance;
 		int currentSeed = m_terrainGenerator->getSeed();
 
 		const float lodThreshold = static_cast<float>(settings.minRenderDistance) * 2.0f;
@@ -248,7 +248,7 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 
 	// --- Set all frame-constant uniforms once ---
 	shader.use();
-	shader.setMat4("projection", camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), 3000.0f));
+	shader.setMat4("projection", camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), static_cast<float>(renderSettings.maxRenderDistance)));
 	shader.setMat4("model", glm::mat4(1.0f));
 	shader.setMat4("view", camera.getViewMatrix());
 	shader.setInt("textureArray", 0);
@@ -368,7 +368,7 @@ bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
 	auto it = chunks.find(chunkPos);
 	if (it != chunks.end())
 	{
-	bool modified = it->second->deleteVoxel(worldPos);
+		bool modified = it->second->deleteVoxel(worldPos);
 		if (modified)
 		{
 			const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
@@ -540,7 +540,7 @@ const Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos) const
 	return nullptr;
 }
 
-const std::unordered_map<glm::ivec3, Chunk*, IVec3Hash> &ChunkManager::getAllChunks() const
+const std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> &ChunkManager::getAllChunks() const
 {
 	return chunks;
 }
