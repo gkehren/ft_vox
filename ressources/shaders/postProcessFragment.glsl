@@ -35,17 +35,29 @@ vec3 reinhard(vec3 x)
 
 // ---------- FXAA (quality preset 12) ----------
 
+float getLDRLuminance(sampler2D tex, vec2 uv)
+{
+    vec3 hdrColor = texture(tex, uv).rgb;
+    vec3 mapped = hdrColor * exposure;
+    if (toneMapper == 0)
+        mapped = acesFilm(mapped);
+    else
+        mapped = reinhard(mapped);
+    mapped = pow(mapped, vec3(1.0 / gamma));
+    return dot(mapped, vec3(0.299, 0.587, 0.114));
+}
+
 vec3 applyFXAA(sampler2D tex, vec2 uv)
 {
     vec2 texelSize = 1.0 / textureSize(tex, 0);
 
-    // Sample luminances around center
-    float lumC  = dot(texture(tex, uv).rgb, vec3(0.299, 0.587, 0.114));
+    // Sample LDR luminances around center
+    float lumC  = getLDRLuminance(tex, uv);
 
-    float lumN  = dot(texture(tex, uv + vec2( 0.0,  texelSize.y)).rgb, vec3(0.299, 0.587, 0.114));
-    float lumS  = dot(texture(tex, uv + vec2( 0.0, -texelSize.y)).rgb, vec3(0.299, 0.587, 0.114));
-    float lumE  = dot(texture(tex, uv + vec2( texelSize.x,  0.0)).rgb, vec3(0.299, 0.587, 0.114));
-    float lumW  = dot(texture(tex, uv + vec2(-texelSize.x,  0.0)).rgb, vec3(0.299, 0.587, 0.114));
+    float lumN  = getLDRLuminance(tex, uv + vec2( 0.0,  texelSize.y));
+    float lumS  = getLDRLuminance(tex, uv + vec2( 0.0, -texelSize.y));
+    float lumE  = getLDRLuminance(tex, uv + vec2( texelSize.x,  0.0));
+    float lumW  = getLDRLuminance(tex, uv + vec2(-texelSize.x,  0.0));
 
     float lumMin = min(lumC, min(min(lumN, lumS), min(lumE, lumW)));
     float lumMax = max(lumC, max(max(lumN, lumS), max(lumE, lumW)));
@@ -55,10 +67,10 @@ vec3 applyFXAA(sampler2D tex, vec2 uv)
     if (lumRange < max(0.0312, lumMax * 0.125))
         return texture(tex, uv).rgb;
 
-    float lumNW = dot(texture(tex, uv + vec2(-texelSize.x,  texelSize.y)).rgb, vec3(0.299, 0.587, 0.114));
-    float lumNE = dot(texture(tex, uv + vec2( texelSize.x,  texelSize.y)).rgb, vec3(0.299, 0.587, 0.114));
-    float lumSW = dot(texture(tex, uv + vec2(-texelSize.x, -texelSize.y)).rgb, vec3(0.299, 0.587, 0.114));
-    float lumSE = dot(texture(tex, uv + vec2( texelSize.x, -texelSize.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float lumNW = getLDRLuminance(tex, uv + vec2(-texelSize.x,  texelSize.y));
+    float lumNE = getLDRLuminance(tex, uv + vec2( texelSize.x,  texelSize.y));
+    float lumSW = getLDRLuminance(tex, uv + vec2(-texelSize.x, -texelSize.y));
+    float lumSE = getLDRLuminance(tex, uv + vec2( texelSize.x, -texelSize.y));
 
     // Compute edge direction
     float edgeH = abs(-2.0 * lumW + lumNW + lumSW) +
