@@ -129,21 +129,22 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 		if (chunk->isVisible() && chunk->getState() == ChunkState::UNLOADED && chunksInTransit.find(chunk) == chunksInTransit.end())
 		{
 			glm::vec3 chunkCenter = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
-			float distance = glm::distance(
-				glm::vec2(chunkCenter.x, chunkCenter.z),
-				glm::vec2(camera.getPosition().x, camera.getPosition().z));
-			genQueue.push({chunk, distance});
+			float dx = chunkCenter.x - camera.getPosition().x;
+			float dz = chunkCenter.z - camera.getPosition().z;
+			float distanceSq = dx * dx + dz * dz;
+			genQueue.push({chunk, distanceSq});
 		}
 	} // Générer les chunks par ordre de priorité
 	int genDispatched = 0;
 	while (!genQueue.empty() && genDispatched < budget)
 	{
 		Chunk *chunk = genQueue.top().chunk;
-				float distance = genQueue.top().distance;
+				float distanceSq = genQueue.top().distance;
 		int currentSeed = m_terrainGenerator->getSeed();
 
 		const float lodThreshold = static_cast<float>(settings.minRenderDistance) * 2.0f;
-		TaskPriority priority = calculateTaskPriority(distance, lodThreshold);
+		const float lodThresholdSq = lodThreshold * lodThreshold;
+		TaskPriority priority = calculateTaskPriority(distanceSq, lodThresholdSq);
 
 		chunksInTransit.insert(chunk);
 		auto future = p_threadPool->enqueue(priority, [chunk, currentSeed]()
@@ -182,10 +183,10 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		if (chunk->isVisible() && chunk->getState() == ChunkState::GENERATED && chunksInTransit.find(chunk) == chunksInTransit.end())
 		{
 			glm::vec3 chunkCenter = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
-			float distance = glm::distance(
-				glm::vec2(chunkCenter.x, chunkCenter.z),
-				glm::vec2(camera.getPosition().x, camera.getPosition().z));
-			meshQueue.push({chunk, distance});
+			float dx = chunkCenter.x - camera.getPosition().x;
+			float dz = chunkCenter.z - camera.getPosition().z;
+			float distanceSq = dx * dx + dz * dz;
+			meshQueue.push({chunk, distanceSq});
 		}
 	} // Mailler les chunks par ordre de priorité
 
@@ -193,16 +194,17 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	// Resetting to GENERATED lets them fall into the dispatch loop below with a
 	// full-quality generateMesh() pass.
 	const float lodThreshold = static_cast<float>(settings.minRenderDistance) * 2.0f;
+	const float lodThresholdSq = lodThreshold * lodThreshold;
 	for (Chunk *chunk : activeChunks)
 	{
 		if (chunk->isLODMesh() && chunk->getState() == ChunkState::MESHED &&
 			chunksInTransit.find(chunk) == chunksInTransit.end())
 		{
 			glm::vec3 cc = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
-			float dist = glm::distance(
-				glm::vec2(cc.x, cc.z),
-				glm::vec2(camera.getPosition().x, camera.getPosition().z));
-			if (dist < lodThreshold)
+			float dx = cc.x - camera.getPosition().x;
+			float dz = cc.z - camera.getPosition().z;
+			float distSq = dx * dx + dz * dz;
+			if (distSq < lodThresholdSq)
 				chunk->setState(ChunkState::GENERATED); // Force full re-mesh
 		}
 	}
@@ -211,13 +213,13 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	while (!meshQueue.empty() && meshDispatched < budget)
 	{
 		Chunk *chunk = meshQueue.top().chunk;
-		float chunkDist = meshQueue.top().distance; // K: distance already computed
+		float chunkDistSq = meshQueue.top().distance; // K: distance already computed
 		glm::vec3 wp = chunk->getPosition();
 		glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
 					  static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
 		chunksInTransit.insert(chunk);
-		TaskPriority priority = calculateTaskPriority(chunkDist, lodThreshold);
-		if (chunkDist > lodThreshold)
+		TaskPriority priority = calculateTaskPriority(chunkDistSq, lodThresholdSq);
+		if (chunkDistSq > lodThresholdSq)
 		{
 			// K: Distant chunk — simplified column-top mesh, no shell needed
 			auto future = p_threadPool->enqueue(priority, [chunk]()
@@ -318,11 +320,14 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 void ChunkManager::drawShadows(const Shader &shader) const
 {
 	std::shared_lock<std::shared_mutex> lock(chunkMutex);
+	shader.use();
+	// Set model matrix once for all chunks to avoid redundant per-chunk API overhead
+	shader.setMat4("model", glm::mat4(1.0f));
 	for (Chunk *chunk : activeChunks)
 	{
 		if (!chunk->isVisible() || chunk->getState() < ChunkState::MESHED)
 			continue;
-		chunk->drawShadow(shader);
+		chunk->drawShadow();
 	}
 }
 
@@ -544,15 +549,18 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 {
 	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 	auto it = chunks.begin();
+	const float unloadDist = static_cast<float>(settings.maxRenderDistance) * 1.5f;
+	const float unloadDistSq = unloadDist * unloadDist;
+
 	while (it != chunks.end())
 	{
 		Chunk *chunkPtr = it->second;
 		glm::vec3 chunkCenter = chunkPtr->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
-		float distToPlayer = glm::distance(
-			glm::vec2(camera.getPosition().x, camera.getPosition().z),
-			glm::vec2(chunkCenter.x, chunkCenter.z));
+		float dx = camera.getPosition().x - chunkCenter.x;
+		float dz = camera.getPosition().z - chunkCenter.z;
+		float distToPlayerSq = dx * dx + dz * dz;
 		// Unload if significantly outside maxRenderDistance (e.g., 1.5x or 2x)
-		if (distToPlayer > static_cast<float>(settings.maxRenderDistance) * 1.5f)
+		if (distToPlayerSq > unloadDistSq)
 		{
 			// Do not unload chunks that are currently being processed
 			if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
@@ -593,6 +601,7 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 	std::priority_queue<ChunkLoadInfo> priorityQueue;
 
 	// Calculer la priorité pour chaque chunk potentiel
+	const float maxDistSq = static_cast<float>(settings.maxRenderDistance) * static_cast<float>(settings.maxRenderDistance);
 	for (int x = -radius; x <= radius; x++)
 	{
 		for (int z = -radius; z <= radius; z++)
@@ -603,13 +612,13 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 				0,
 				chunkPos.z * CHUNK_SIZE + CHUNK_SIZE / 2.0f);
 
-			float distToPlayer = glm::distance(
-				glm::vec2(camera.getPosition().x, camera.getPosition().z),
-				glm::vec2(chunkCenterWorld.x, chunkCenterWorld.z));
+			float dx = camera.getPosition().x - chunkCenterWorld.x;
+			float dz = camera.getPosition().z - chunkCenterWorld.z;
+			float distToPlayerSq = dx * dx + dz * dz;
 
-			if (distToPlayer <= static_cast<float>(settings.maxRenderDistance))
+			if (distToPlayerSq <= maxDistSq)
 			{
-				priorityQueue.push({chunkPos, distToPlayer});
+				priorityQueue.push({chunkPos, distToPlayerSq});
 			}
 		}
 	}
@@ -670,11 +679,11 @@ void ChunkManager::processFinishedJobs()
 	}
 }
 
-TaskPriority ChunkManager::calculateTaskPriority(float distance, float lodThreshold) const
+TaskPriority ChunkManager::calculateTaskPriority(float distanceSq, float lodThresholdSq) const
 {
-	if (distance < lodThreshold * 0.5f)
+	if (distanceSq < lodThresholdSq * 0.25f) // (0.5f)^2
 		return TaskPriority::High;
-	if (distance > lodThreshold)
+	if (distanceSq > lodThresholdSq)
 		return TaskPriority::Low;
 	return TaskPriority::Normal;
 }

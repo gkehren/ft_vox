@@ -165,8 +165,8 @@ const Voxel &Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
 
 void Chunk::setVoxel(int x, int y, int z, TextureType type)
 {
-  if (x >= 0 && x < CHUNK_SIZE && y >= 0 && y < CHUNK_HEIGHT && z >= 0 &&
-      z < CHUNK_SIZE)
+  if (static_cast<uint32_t>(x) < CHUNK_SIZE && static_cast<uint32_t>(y) < CHUNK_HEIGHT &&
+      static_cast<uint32_t>(z) < CHUNK_SIZE)
   {
     size_t index = getIndex(x, y, z);
     voxels[index].type = static_cast<uint8_t>(type);
@@ -238,8 +238,8 @@ bool Chunk::placeVoxel(const glm::vec3 &position, TextureType type)
 
 bool Chunk::isVoxelActive(int x, int y, int z) const
 {
-  if (x >= 0 && x < CHUNK_SIZE && y >= 0 && y < CHUNK_HEIGHT && z >= 0 &&
-      z < CHUNK_SIZE)
+  if (static_cast<uint32_t>(x) < CHUNK_SIZE && static_cast<uint32_t>(y) < CHUNK_HEIGHT &&
+      static_cast<uint32_t>(z) < CHUNK_SIZE)
   {
     size_t index = getIndex(x, y, z);
     return activeVoxels.test(index);
@@ -306,8 +306,8 @@ void Chunk::generateMesh()
   // neighbor shell
   auto getVoxelDataForMeshing = [&](int lx, int ly, int lz) -> TextureType
   {
-    if (lx >= 0 && lx < CHUNK_SIZE && ly >= 0 && ly < CHUNK_HEIGHT && lz >= 0 &&
-        lz < CHUNK_SIZE)
+    if (static_cast<uint32_t>(lx) < CHUNK_SIZE && static_cast<uint32_t>(ly) < CHUNK_HEIGHT &&
+        static_cast<uint32_t>(lz) < CHUNK_SIZE)
     {
       return static_cast<TextureType>(getVoxel(lx, ly, lz).type);
     }
@@ -978,12 +978,11 @@ uint32_t Chunk::drawWater()
   return waterIndexCount;
 }
 
-void Chunk::drawShadow(const Shader &shader) const
+void Chunk::drawShadow() const
 {
   if (opaqueIndexCount == 0 || meshNeedsUpdate.load())
     return;
 
-  shader.setMat4("model", glm::mat4(1.0f));
   glBindVertexArray(VAO);
   glDrawElements(GL_TRIANGLES, opaqueIndexCount, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
