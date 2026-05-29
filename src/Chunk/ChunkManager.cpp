@@ -264,11 +264,29 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	glBindTexture(GL_TEXTURE_2D_ARRAY, textureAtlas);
 
 	// --- Opaque pass ---
+	std::vector<Chunk*> visibleOpaqueChunks;
+	visibleOpaqueChunks.reserve(activeChunks.size());
 	for (Chunk *chunk : activeChunks)
 	{
-		if (!chunk->isVisible() || chunk->getState() < ChunkState::MESHED)
-			continue;
+		if (chunk->isVisible() && chunk->getState() >= ChunkState::MESHED)
+		{
+			visibleOpaqueChunks.push_back(chunk);
+		}
+	}
 
+	// Tri front-to-back (plus proche au plus lointain)
+	glm::vec3 camPos = camera.getPosition();
+	std::sort(visibleOpaqueChunks.begin(), visibleOpaqueChunks.end(), [&camPos](Chunk *a, Chunk *b)
+			  {
+				  glm::vec3 centerA = a->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+				  glm::vec3 centerB = b->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+				  float distSqA = glm::dot(centerA - camPos, centerA - camPos);
+				  float distSqB = glm::dot(centerB - camPos, centerB - camPos);
+				  return distSqA < distSqB;
+			  });
+
+	for (Chunk *chunk : visibleOpaqueChunks)
+	{
 		renderSettings.visibleVoxelsCount += chunk->draw();
 		renderSettings.visibleChunksCount++;
 
@@ -280,7 +298,6 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 
 	// --- Water transparency sub-pass ---
 	// H: Rebuild sorted water list only when camera moved > CHUNK_SIZE/2 from last sort.
-	glm::vec3 camPos = camera.getPosition();
 	constexpr float kResortThreshSq = (CHUNK_SIZE / 2.0f) * (CHUNK_SIZE / 2.0f);
 	float camMovedSq = glm::dot(camPos - m_lastWaterSortCamPos, camPos - m_lastWaterSortCamPos);
 	if (camMovedSq > kResortThreshSq || m_cachedWaterChunks.empty())
