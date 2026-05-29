@@ -681,7 +681,8 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
       int colIndex = getColumnIndex(localX, localZ);
       int terrainHeight = chunkData.heightMap[colIndex];
       BiomeType biome = chunkData.biomes[colIndex];
-      float temperature = std::clamp(temperatureResults[colIndex], -1.0f, 1.0f);
+      int extIndex = (localZ + 2) * EXTENDED_SIZE + (localX + 2);
+      float temperature = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
 
       for (int y = 0; y < CHUNK_HEIGHT; ++y)
       {
@@ -1144,6 +1145,13 @@ void TerrainGenerator::placeOakTree(ChunkData &chunkData, int localX, int localZ
   int trunkHeight = 4 + static_cast<int>(h & 3);       // 4–7 blocks
   bool wideCanopy = ((h >> 2) & 7) == 0;               // ~12%: radius-3 canopy
   int extraTopLayers = static_cast<int>((h >> 5) & 1); // 0 or 1 extra cap layer
+  int canopyMargin = wideCanopy ? 3 : 2;
+
+  if (localX < canopyMargin || localX >= CHUNK_SIZE - canopyMargin ||
+      localZ < canopyMargin || localZ >= CHUNK_SIZE - canopyMargin)
+  {
+    return;
+  }
 
   for (int y = 0; y < trunkHeight; ++y)
     setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
@@ -1183,6 +1191,11 @@ void TerrainGenerator::placeBirchTree(ChunkData &chunkData, int localX, int loca
   int trunkHeight = 5 + static_cast<int>(h & 3);       // 5–8 blocks (birches are tall and slender)
   int extraTopLayers = static_cast<int>((h >> 2) & 1); // 0 or 1 extra cap layer
 
+  if (localX < 2 || localX >= CHUNK_SIZE - 2 || localZ < 2 || localZ >= CHUNK_SIZE - 2)
+  {
+    return;
+  }
+
   for (int y = 0; y < trunkHeight; ++y)
     setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
 
@@ -1219,6 +1232,14 @@ void TerrainGenerator::placeSpruceTree(ChunkData &chunkData, int localX, int loc
   int trunkHeight = 6 + static_cast<int>(h % 7); // 6–12 blocks
   bool fatVariant = ((h >> 3) % 5) == 0;         // 20%: each layer is one block wider
   bool bareBottom = ((h >> 6) & 3) != 0;         // 75%: lower trunk is exposed (no bottom leaves)
+  int maxLayer = bareBottom ? trunkHeight - 3 : trunkHeight - 1;
+  int canopyMargin = (maxLayer / 2) + (fatVariant ? 1 : 0);
+
+  if (localX < canopyMargin || localX >= CHUNK_SIZE - canopyMargin ||
+      localZ < canopyMargin || localZ >= CHUNK_SIZE - canopyMargin)
+  {
+    return;
+  }
 
   for (int y = 0; y < trunkHeight; ++y)
     setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
@@ -1227,7 +1248,6 @@ void TerrainGenerator::placeSpruceTree(ChunkData &chunkData, int localX, int loc
   setVoxelSafe(chunkData, localX, baseY + trunkHeight, localZ, TextureType::OAK_LEAVES);
 
   // Stepped cone: every-other layer, working down from apex
-  int maxLayer = bareBottom ? trunkHeight - 3 : trunkHeight - 1;
   for (int layer = 0; layer <= maxLayer; ++layer)
   {
     if (layer % 2 != 0)
@@ -1261,6 +1281,12 @@ void TerrainGenerator::placeJungleTree(ChunkData &chunkData, int localX, int loc
   int trunkHeight = 8 + static_cast<int>(h % 9);         // 8–16 blocks — large variation
   int canopyRadius = 3 + static_cast<int>((h >> 4) & 1); // 3 or 4
   bool hasPropRoots = ((h >> 5) & 3) != 0;               // 75%: extra root-logs close to base
+
+  if (localX < canopyRadius || localX >= CHUNK_SIZE - canopyRadius ||
+      localZ < canopyRadius || localZ >= CHUNK_SIZE - canopyRadius)
+  {
+    return;
+  }
 
   for (int y = 0; y < trunkHeight; ++y)
     setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
@@ -1309,6 +1335,10 @@ void TerrainGenerator::placeCactus(ChunkData &chunkData, int localX, int localZ,
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 500);
   int height = 1 + static_cast<int>(h & 3); // 1–4 blocks (more natural variation than old 1–3)
+
+  if (localX <= 0 || localX >= CHUNK_SIZE - 1 || localZ <= 0 || localZ >= CHUNK_SIZE - 1)
+    return;
+
   for (int y = 0; y < height; ++y)
   {
     bool canPlace = true;
