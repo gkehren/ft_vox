@@ -978,12 +978,11 @@ uint32_t Chunk::drawWater()
   return waterIndexCount;
 }
 
-void Chunk::drawShadow(const Shader &shader) const
+void Chunk::drawShadow() const
 {
   if (opaqueIndexCount == 0 || meshNeedsUpdate.load())
     return;
 
-  shader.setMat4("model", glm::mat4(1.0f));
   glBindVertexArray(VAO);
   glDrawElements(GL_TRIANGLES, opaqueIndexCount, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
