@@ -30,11 +30,17 @@ float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir)
 {
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
+
+    // Renvoyer 0.0 immédiatement si en dehors de la boîte de projection - économise 9 requêtes de texture !
+    if(projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0)
+        return 0.0;
+
     float currentDepth = projCoords.z;
     float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.0005);
 
     float shadow = 0.0;
-    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
+    // Taille fixe du shadow map à 4096 (évite textureSize() en fragment shader)
+    const float texelSize = 1.0 / 4096.0;
     for(int x = -1; x <= 1; ++x)
     {
         for(int y = -1; y <= 1; ++y)
@@ -43,13 +49,7 @@ float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir)
             shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
         }
     }
-    shadow /= 9.0;
-
-    // If we're outside the shadow map's ortho box, don't shadow (or use simpler logic)
-    if(projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0)
-        shadow = 0.0;
-
-    return shadow;
+    return shadow / 9.0;
 }
 
 void main()
