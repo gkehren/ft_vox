@@ -905,7 +905,6 @@ static constexpr float MOUNTAIN_VARIATION = 35.0f;
 
 // Ridge-driven peak parameters
 static constexpr float RIDGE_PEAK_THRESHOLD = 0.2f;  // Ridge value above which peaks form
-static constexpr float RIDGE_PEAK_EXPONENT = 2.0f;   // Controls peak sharpness
 static constexpr float RIDGE_PEAK_AMPLITUDE = 95.0f; // Max extra height from ridge peaks
 
 // Height clamping
@@ -949,7 +948,7 @@ float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
   float mountainHeight = MOUNTAIN_BASE_HEIGHT + peaksValleys * MOUNTAIN_VARIATION;
   if (ridge > RIDGE_PEAK_THRESHOLD) {
     float val = (ridge - RIDGE_PEAK_THRESHOLD) / (1.0f - RIDGE_PEAK_THRESHOLD);
-    mountainHeight += (val * val) * RIDGE_PEAK_AMPLITUDE; // RIDGE_PEAK_EXPONENT is 2.0f
+    mountainHeight += (val * val) * RIDGE_PEAK_AMPLITUDE;
   }
 
   float heightVariation = oceanWeight * oceanHeight + beachWeight * beachHeight +
