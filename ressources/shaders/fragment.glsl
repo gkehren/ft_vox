@@ -119,8 +119,11 @@ void main()
         topLight = 0.05;
     }
 
+    // Scale topLight by diffuseIntensity to fade it out at night
+    float dayLightFactor = clamp(diffuseIntensity / 0.7, 0.0, 1.0);
+
     // Combined result
-    vec3 result = ambient + (1.0 - shadow) * (diffuse + topLight * color);
+    vec3 result = ambient + (1.0 - shadow) * (diffuse + topLight * color * dayLightFactor);
 
     // Color boost
     result *= colorBoost;

@@ -24,7 +24,7 @@ public:
 
 	void drawBoundingBox(const Chunk &chunk, const Camera &camera) const;
 	void drawVoxelHighlight(const glm::vec3 &position, const glm::vec3 &color, const Camera &camera) const;
-	void drawSkybox(const Camera &camera) const;
+	void drawSkybox(const Camera &camera, const glm::vec3 &sunDir, float dayTime, float time, const glm::vec3 &fogColor) const;
 	void drawPlayer(const Camera &camera, const glm::vec3 &position, uint32_t playerId) const;
 
 	// Shadow mapping

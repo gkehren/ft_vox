@@ -211,7 +211,7 @@ void Engine::run()
 
 		if (renderer) // Ensure renderer is valid
 		{
-			renderer->drawSkybox(this->camera); // Draw skybox after 3D scene
+			renderer->drawSkybox(this->camera, uiManager->getShaderParams().sunDirection, uiManager->getShaderParams().dayTime, static_cast<float>(currentFrame), uiManager->getShaderParams().fogColor);
 		}
 
 		// Post-processing: HDR -> LDR with bloom, tone mapping, FXAA, god rays
@@ -346,31 +346,23 @@ void Engine::updateWorldState()
 		glm::vec3 sunsetFog = glm::vec3(1.0f, 0.4f, 0.2f);
 		glm::vec3 nightFog = glm::vec3(0.02f, 0.02f, 0.05f);
 
-		if (sunHeight > 0.2f)
+		if (sunHeight > 0.15f)
 		{ // Day
 			params.fogColor = dayFog;
 			params.ambientStrength = 0.2f;
 			params.diffuseIntensity = 0.7f;
 		}
-		else if (sunHeight > -0.2f)
+		else if (sunHeight > -0.15f)
 		{										 // Sunrise/Sunset transition
-			float t = (sunHeight + 0.2f) / 0.4f; // 0 to 1
-			if (cos(angle) > 0)
-			{ // Sunrise
-				params.fogColor = glm::mix(sunsetFog, dayFog, t);
-			}
-			else
-			{ // Sunset
-				params.fogColor = glm::mix(sunsetFog, dayFog, t);
-			}
-			params.ambientStrength = glm::mix(0.1f, 0.2f, t);
-			params.diffuseIntensity = glm::mix(0.1f, 0.7f, t);
+			float t = (sunHeight + 0.15f) / 0.3f; // 0 to 1
+			params.fogColor = glm::mix(sunsetFog, dayFog, t);
+			params.ambientStrength = glm::mix(0.02f, 0.2f, t);
+			params.diffuseIntensity = glm::mix(0.0f, 0.7f, t);
 		}
 		else
 		{										 // Night
-			float t = (sunHeight + 1.0f) / 0.8f; // 0 to 1
-			params.fogColor = glm::mix(nightFog, sunsetFog, t);
-			params.ambientStrength = 0.15f; // Increased from 0.05
+			params.fogColor = nightFog;
+			params.ambientStrength = 0.02f; // Darker night
 			params.diffuseIntensity = 0.0f;
 		}
 	}
