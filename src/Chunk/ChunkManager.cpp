@@ -36,23 +36,52 @@ void ChunkManager::updatePlayerPosition(const glm::ivec2 &newPlayerChunkPos, con
 
 void ChunkManager::processChunkLoading(const RenderSettings &settings, int budget)
 {
-	std::lock_guard<std::shared_mutex> lock(chunkMutex);
-	int chunkCount = 0;
-	while (!chunkLoadQueue.empty() && chunkCount < budget)
+	std::vector<glm::ivec3> toLoad;
 	{
-		glm::ivec3 chunkPos = chunkLoadQueue.front();
-		chunkLoadQueue.pop();
-
-		if (chunks.find(chunkPos) == chunks.end())
+		std::lock_guard<std::shared_mutex> lock(chunkMutex);
+		int chunkCount = 0;
+		while (!chunkLoadQueue.empty() && chunkCount < budget)
 		{
-			Chunk *chunk = m_chunkPool->acquire(glm::vec3(chunkPos.x * CHUNK_SIZE, 0.0f, chunkPos.z * CHUNK_SIZE));
-			if (chunk)
+			toLoad.push_back(chunkLoadQueue.front());
+			chunkLoadQueue.pop();
+			chunkCount++;
+		}
+	}
+
+	if (toLoad.empty()) return;
+
+	// Acquire chunks from pool (thread-safe, does not need chunkMutex)
+	std::vector<std::pair<glm::ivec3, Chunk*>> acquiredChunks;
+	for (const auto& chunkPos : toLoad)
+	{
+		Chunk *chunk = m_chunkPool->acquire(glm::vec3(chunkPos.x * CHUNK_SIZE, 0.0f, chunkPos.z * CHUNK_SIZE));
+		if (chunk)
+		{
+			acquiredChunks.push_back({chunkPos, chunk});
+		}
+	}
+
+	if (acquiredChunks.empty()) return;
+
+	// Insert into map and active set
+	{
+		std::lock_guard<std::shared_mutex> lock(chunkMutex);
+		for (const auto& pair : acquiredChunks)
+		{
+			const glm::ivec3& chunkPos = pair.first;
+			Chunk* chunk = pair.second;
+			
+			if (chunks.find(chunkPos) == chunks.end())
 			{
 				chunks[chunkPos] = chunk;
 				activeChunks.insert(chunk);
 			}
+			else
+			{
+				// In rare case it was already loaded somehow, release it
+				m_chunkPool->release(chunk);
+			}
 		}
-		chunkCount++;
 	}
 }
 
@@ -60,6 +89,22 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 {
 	auto start = std::chrono::high_resolution_clock::now();
 	glm::mat4 clipMatrix = camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), static_cast<float>(settings.maxRenderDistance)) * camera.getViewMatrix();
+	
+	// Compute Frustum AABB in world space for fast broad-phase culling
+	glm::mat4 invClip = glm::inverse(clipMatrix);
+	glm::vec3 fMin(std::numeric_limits<float>::max());
+	glm::vec3 fMax(std::numeric_limits<float>::lowest());
+	for (int x = -1; x <= 1; x += 2) {
+		for (int y = -1; y <= 1; y += 2) {
+			for (int z = -1; z <= 1; z += 2) {
+				glm::vec4 pt = invClip * glm::vec4(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), 1.0f);
+				glm::vec3 wpt = glm::vec3(pt) / pt.w;
+				fMin = glm::min(fMin, wpt);
+				fMax = glm::max(fMax, wpt);
+			}
+		}
+	}
+
 	std::array<glm::vec4, 6> frustumPlanes;
 
 	frustumPlanes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0); // Left
@@ -77,13 +122,18 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 	std::shared_lock<std::shared_mutex> lock(chunkMutex);
 	for (Chunk *chunk : activeChunks)
 	{
-		// F: Proper AABB–frustum test via the positive-vertex method.
-		// For each plane, find the AABB corner that maximises the dot product with the
-		// plane normal (the "positive vertex"). If that corner is still outside the plane
-		// the entire AABB is outside → cull. This is exact for axis-aligned boxes and
-		// eliminates the over-conservative sphere used before (radius ~128 for a 16×256×16 chunk).
 		glm::vec3 aabbMin = chunk->getPosition();
 		glm::vec3 aabbMax = aabbMin + glm::vec3(CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE);
+
+		// Broad-phase: Frustum AABB test
+		if (aabbMax.x < fMin.x || aabbMin.x > fMax.x || 
+			aabbMax.y < fMin.y || aabbMin.y > fMax.y || 
+			aabbMax.z < fMin.z || aabbMin.z > fMax.z)
+		{
+			chunk->setVisible(false);
+			continue;
+		}
+
 		bool isVisible = true;
 		for (const auto &plane : frustumPlanes)
 		{
@@ -582,37 +632,55 @@ const std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> &ChunkManager::getAllCh
 
 void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSettings &settings)
 {
-	std::lock_guard<std::shared_mutex> lock(chunkMutex);
-	auto it = chunks.begin();
 	const float unloadDist = static_cast<float>(settings.maxRenderDistance) * 1.5f;
 	const float unloadDistSq = unloadDist * unloadDist;
 
-	while (it != chunks.end())
+	std::vector<glm::ivec3> chunksToUnload;
+
+	// Phase 1: Identify chunks to unload (using a shared lock, since we only read)
 	{
-		Chunk *chunkPtr = it->second;
-		glm::vec3 chunkCenter = chunkPtr->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
-		float dx = camera.getPosition().x - chunkCenter.x;
-		float dz = camera.getPosition().z - chunkCenter.z;
-		float distToPlayerSq = dx * dx + dz * dz;
-		// Unload if significantly outside maxRenderDistance (e.g., 1.5x or 2x)
-		if (distToPlayerSq > unloadDistSq)
+		std::shared_lock<std::shared_mutex> lock(chunkMutex);
+		for (const auto& pair : chunks)
 		{
-			// Do not unload chunks that are currently being processed
-			if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
+			const glm::ivec3& pos = pair.first;
+			Chunk* chunkPtr = pair.second;
+			
+			glm::vec3 chunkCenter = chunkPtr->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+			float dx = camera.getPosition().x - chunkCenter.x;
+			float dz = camera.getPosition().z - chunkCenter.z;
+			float distToPlayerSq = dx * dx + dz * dz;
+
+			// Unload if significantly outside maxRenderDistance (e.g., 1.5x)
+			if (distToPlayerSq > unloadDistSq)
 			{
-				activeChunks.erase(chunkPtr);
-				m_chunkPool->release(chunkPtr);
-				it = chunks.erase(it);
-				m_cachedWaterChunks.clear(); // H: invalidate water sort cache
-			}
-			else
-			{
-				++it;
+				// Do not unload chunks that are currently being processed
+				if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
+				{
+					chunksToUnload.push_back(pos);
+				}
 			}
 		}
-		else
+	}
+
+	// Phase 2: Actually remove them (using an exclusive lock)
+	if (!chunksToUnload.empty())
+	{
+		std::lock_guard<std::shared_mutex> lock(chunkMutex);
+		for (const auto& pos : chunksToUnload)
 		{
-			++it;
+			auto it = chunks.find(pos);
+			if (it != chunks.end())
+			{
+				Chunk* chunkPtr = it->second;
+				// Re-check in_transit just in case state changed
+				if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
+				{
+					activeChunks.erase(chunkPtr);
+					m_chunkPool->release(chunkPtr);
+					chunks.erase(it);
+					m_cachedWaterChunks.clear(); // H: invalidate water sort cache
+				}
+			}
 		}
 	}
 }
