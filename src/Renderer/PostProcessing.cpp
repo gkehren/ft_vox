@@ -215,6 +215,7 @@ void PostProcessing::endSceneAndRender(const PostProcessSettings &settings, cons
 		int blurIterations = 10; // 5 H+V passes
 		bloomBlurShader->use();
 		bloomBlurShader->setInt("image", 0);
+		bloomBlurShader->setVec2("texelSize", glm::vec2(1.0f / bloomW, 1.0f / bloomH));
 
 		for (int i = 0; i < blurIterations; ++i)
 		{
@@ -281,6 +282,7 @@ void PostProcessing::endSceneAndRender(const PostProcessSettings &settings, cons
 	compositeShader->setInt("fxaaEnabled", settings.fxaaEnabled ? 1 : 0);
 	compositeShader->setInt("toneMapper", settings.toneMapper);
 	compositeShader->setInt("godRaysEnabled", settings.godRaysEnabled ? 1 : 0);
+	compositeShader->setVec2("texelSize", glm::vec2(1.0f / viewportWidth, 1.0f / viewportHeight));
 
 	renderQuad();
 

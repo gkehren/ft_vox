@@ -31,10 +31,7 @@ void main()
     {
         sampleUV -= deltaUV;
 
-        // Clamp to valid UV range to avoid sampling outside the screen
-        vec2 clampedUV = clamp(sampleUV, vec2(0.001), vec2(0.999));
-
-        vec3 sampleColor = texture(hdrBuffer, clampedUV).rgb;
+        vec3 sampleColor = texture(hdrBuffer, sampleUV).rgb;
 
         // Extract bright parts for light shafts (threshold)
         float brightness = dot(sampleColor, LUMINANCE_WEIGHTS);

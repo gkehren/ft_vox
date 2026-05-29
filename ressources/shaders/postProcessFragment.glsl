@@ -14,6 +14,7 @@ uniform bool  bloomEnabled = true;
 uniform bool  fxaaEnabled  = true;
 uniform bool  godRaysEnabled = true;
 uniform int   toneMapper   = 0; // 0 = ACES, 1 = Reinhard
+uniform vec2  texelSize;
 
 // ---------- Tone mapping operators ----------
 
@@ -49,8 +50,6 @@ float getLDRLuminance(sampler2D tex, vec2 uv)
 
 vec3 applyFXAA(sampler2D tex, vec2 uv)
 {
-    vec2 texelSize = 1.0 / textureSize(tex, 0);
-
     // Sample LDR luminances around center
     float lumC  = getLDRLuminance(tex, uv);
 
