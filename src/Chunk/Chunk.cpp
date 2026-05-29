@@ -1030,37 +1030,10 @@ void Chunk::rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
 
 void Chunk::reset(const glm::vec3 &newPosition)
 {
-  // Release GPU resources (must be called from the GL thread)
-  if (VAO != 0)
-  {
-    glDeleteVertexArrays(1, &VAO);
-    VAO = 0;
-  }
-  if (VBO != 0)
-  {
-    glDeleteBuffers(1, &VBO);
-    VBO = 0;
-  }
-  if (EBO != 0)
-  {
-    glDeleteBuffers(1, &EBO);
-    EBO = 0;
-  }
-  if (waterVAO != 0)
-  {
-    glDeleteVertexArrays(1, &waterVAO);
-    waterVAO = 0;
-  }
-  if (waterVBO != 0)
-  {
-    glDeleteBuffers(1, &waterVBO);
-    waterVBO = 0;
-  }
-  if (waterEBO != 0)
-  {
-    glDeleteBuffers(1, &waterEBO);
-    waterEBO = 0;
-  }
+  // Conserver les ressources GPU (VAO, VBO, EBO) pour réutilisation.
+  // Réinitialiser simplement les compteurs de dessin pour ne pas afficher le chunk tant qu'il n'est pas remaillé.
+  opaqueIndexCount = 0;
+  waterIndexCount = 0;
 
   // Reset identity
   position = newPosition;
@@ -1088,9 +1061,5 @@ void Chunk::reset(const glm::vec3 &newPosition)
   // Reset biome colors
   biomeGrassColors.fill(0);
   biomeFoliageColors.fill(0);
-
-  // Reset draw counts
-  opaqueIndexCount = 0;
-  waterIndexCount = 0;
 }
 
