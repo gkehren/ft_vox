@@ -39,7 +39,7 @@ public:
 	void meshPendingChunks(const Camera &camera, const RenderSettings &settings, int budget);
 
 	void drawVisibleChunks(Shader &shader, const Camera &camera, const GLuint &textureAtlas, const ShaderParameters &shaderParams, Renderer *renderer, RenderSettings &renderSettings, int windowWidth, int windowHeight);
-	void drawShadows(const Shader &shader) const;
+	void drawShadows(const Shader &shader, const glm::vec3 &cameraPos) const;
 	void uploadPendingMeshes(int budget);
 
 	bool deleteVoxel(const glm::vec3 &worldPos);

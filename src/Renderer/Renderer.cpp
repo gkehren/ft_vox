@@ -80,7 +80,7 @@ void Renderer::renderShadowMap(const Camera &camera, const glm::vec3 &lightDir, 
 	shadowShader->setMat4("lightSpaceMatrix", lightSpaceMatrix);
 
 	glCullFace(GL_FRONT); // Avoid Peter Panning
-	chunkManager.drawShadows(*shadowShader);
+	chunkManager.drawShadows(*shadowShader, camera.getPosition());
 
 	// Restore state
 	glCullFace(cullFace);

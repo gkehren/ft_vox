@@ -334,16 +334,31 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	m_renderTiming.chunkRendering = std::chrono::duration<float, std::milli>(end - start).count();
 }
 
-void ChunkManager::drawShadows(const Shader &shader) const
+void ChunkManager::drawShadows(const Shader &shader, const glm::vec3 &cameraPos) const
 {
 	std::shared_lock<std::shared_mutex> lock(chunkMutex);
 	shader.use();
 	// Set model matrix once for all chunks to avoid redundant per-chunk API overhead
 	shader.setMat4("model", glm::mat4(1.0f));
+
+	// Rayon de couverture de la shadow map (512.0f) + marge pour la diagonale du chunk (~250.0f)
+	constexpr float kShadowCullDistanceSq = (512.0f + 250.0f) * (512.0f + 250.0f);
+
 	for (Chunk *chunk : activeChunks)
 	{
-		if (!chunk->isVisible() || chunk->getState() < ChunkState::MESHED)
+		if (chunk->getState() < ChunkState::MESHED)
 			continue;
+
+		// Culling de distance pour couvrir la boîte de projection d'ombres centrée sur la caméra
+		glm::vec3 chunkCenter = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+		float dx = chunkCenter.x - cameraPos.x;
+		float dy = chunkCenter.y - cameraPos.y;
+		float dz = chunkCenter.z - cameraPos.z;
+		float distSq = dx * dx + dy * dy + dz * dz;
+
+		if (distSq > kShadowCullDistanceSq)
+			continue;
+
 		chunk->drawShadow();
 	}
 }
