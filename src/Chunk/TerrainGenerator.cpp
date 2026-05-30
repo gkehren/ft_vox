@@ -754,7 +754,7 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
               }
             }
         } else {
-            type = (y <= SEA_LEVEL) ? TextureType::WATER : TextureType::AIR;
+            type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, density);
         }
 
         if (type != TextureType::AIR && type != TextureType::WATER) {
@@ -832,9 +832,9 @@ BiomeType TerrainGenerator::determineBiome(float temperature, float humidity,
 
   // Rivers only form in valleys that dip below sea level
   // We use a dynamic width based on weirdness to vary from small streams to large rivers
-  float dynamicWidth = 0.05f + 0.06f * weird; 
+  float dynamicWidth = 0.05f + 0.06f * weird;
   float waterWidth = dynamicWidth * 0.4f; // The water is only at the deepest center of the valley
-  
+
   if (std::abs(riverVal) < waterWidth) {
       if (height <= SEA_LEVEL + 1) {
           // If we are already in the ocean, we just return OCEAN to blend better
@@ -1023,11 +1023,11 @@ float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
       float valleyShape = 1.0f - valleyDist;
       valleyShape = smoothstep(0.0f, 1.0f, valleyShape);
       
-      // We subtract up to 28 blocks of height. 
+      // We subtract up to 28 blocks of height.
       // This will pull mountains down to form passes, and plains below sea level to form rivers.
       float carveAmount = valleyShape * 28.0f;
       float newHeight = heightVariation - carveAmount;
-      
+
       // Prevent rivers from digging impossibly deep holes in plains
       // But allow them to dig normally if the terrain was already deep (e.g. ocean).
       float minRiverBottom = -4.0f;
@@ -1036,7 +1036,7 @@ float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
           float overshoot = minRiverBottom - newHeight;
           newHeight = minRiverBottom - overshoot * 0.1f;
       }
-      
+
       heightVariation = newHeight;
   }
 
@@ -1149,7 +1149,8 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
       TextureType surfaceType = static_cast<TextureType>(chunkData.voxels[surfaceIndex].type);
 
       if (surfaceType != TextureType::GRASS_TOP && surfaceType != TextureType::DIRT &&
-          surfaceType != TextureType::SAND && surfaceType != TextureType::SNOW)
+          surfaceType != TextureType::SAND && surfaceType != TextureType::SNOW &&
+          surfaceType != TextureType::BRICKS)
         continue;
 
       uint32_t hash = treeHash(worldX, worldZ, m_seed);
@@ -1157,7 +1158,9 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
       {
         placeTree(chunkData, localX, localZ, terrainHeight + 1, biome, worldX, worldZ);
       }
-      else if (config.hasCacti && biome == BIOME_DESERT && surfaceType == TextureType::SAND)
+      else if (config.hasCacti &&
+               ((biome == BIOME_DESERT && surfaceType == TextureType::SAND) ||
+                (biome == BIOME_BADLANDS && surfaceType == TextureType::BRICKS)))
       {
         uint32_t cHash = treeHash(worldX, worldZ, m_seed + 1);
         if (static_cast<float>(cHash & 0xFFFF) / 65535.0f < 0.015f)
@@ -1634,7 +1637,7 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
               }
             }
         } else {
-            type = (y <= SEA_LEVEL) ? TextureType::WATER : TextureType::AIR;
+            type = getVoxelTypeAt(chunkX + lx, y, chunkZ + lz, height, biome, temperature, density);
         }
 
         if (type != TextureType::AIR)
