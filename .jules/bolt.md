@@ -4,3 +4,6 @@
 ## 2024-05-18 - Avoid std::pow for simple integer powers and glm::distance for simple priority sorting
 **Learning:** Math functions like `std::pow` with a constant exponent `2.0f` and `glm::distance` are unnecessarily expensive in tight loops, particularly terrain generation and chunk meshing tasks.
 **Action:** Replace `std::pow(..., 2.0f)` with a simple `val * val` multiplication, and use squared distances avoiding `std::sqrt` for thresholds and simple distance-based priorities.
+## 2024-05-30 - Cache OpenGL uniform locations in Shader wrapper
+**Learning:** Calling `glGetUniformLocation` repeatedly inside the render loop for setting uniforms involves expensive string hashing and OpenGL driver lookups. Profiling reveals this is a common bottleneck in custom OpenGL engines.
+**Action:** Always wrap `glGetUniformLocation` and cache the returned `GLint` using an `std::unordered_map` (or similar) keyed by the uniform string name, particularly for wrapper classes like `Shader`. This reduces CPU overhead significantly during rendering.

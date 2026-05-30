@@ -4,6 +4,7 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -31,4 +32,7 @@ private:
 	std::string getShaderSource(const char *path) const;
 	GLuint compileShader(GLenum shaderType, const char *source) const;
 	GLuint linkProgram(GLuint vertexShader, GLuint fragmentShader) const;
+
+	GLint getUniformLocation(const std::string &name) const;
+	mutable std::unordered_map<std::string, GLint> uniformLocationCache;
 };
