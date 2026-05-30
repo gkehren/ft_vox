@@ -158,7 +158,7 @@ void TerrainGenerator::initBiomeConfigs()
 
     // BIOME_SWAMP
     s_biomeConfigs[BIOME_SWAMP] = {
-        TextureType::GRASS_TOP,
+        TextureType::DIRT, // Mud surface
         TextureType::DIRT,
         TextureType::DIRT,
         4,
@@ -228,8 +228,8 @@ void TerrainGenerator::initBiomeConfigs()
 
     // BIOME_BADLANDS
     s_biomeConfigs[BIOME_BADLANDS] = {
-        TextureType::SAND, // orange terracotta would be better
-        TextureType::SAND,
+        TextureType::BRICKS, // Red canyon look
+        TextureType::BRICKS,
         TextureType::SAND,
         6,
         0.0f,
@@ -242,7 +242,7 @@ void TerrainGenerator::initBiomeConfigs()
 
     // BIOME_MOUNTAINS
     s_biomeConfigs[BIOME_MOUNTAINS] = {
-        TextureType::GRASS_TOP,
+        TextureType::STONE, // Rocky surface
         TextureType::STONE,
         TextureType::GRAVEL,
         2,
@@ -358,6 +358,17 @@ void TerrainGenerator::setupTerrainNoise()
   ridgeScale->SetSource(ridgeFractal);
   ridgeScale->SetScale(0.004f);
   m_ridgeNoise = ridgeScale;
+
+  auto surface3DBase = FastNoise::New<FastNoise::OpenSimplex2>();
+  auto surface3DFractal = FastNoise::New<FastNoise::FractalFBm>();
+  surface3DFractal->SetSource(surface3DBase);
+  surface3DFractal->SetOctaveCount(2);
+  surface3DFractal->SetLacunarity(2.0f);
+  surface3DFractal->SetGain(0.5f);
+  auto surface3DScale = FastNoise::New<FastNoise::DomainScale>();
+  surface3DScale->SetSource(surface3DFractal);
+  surface3DScale->SetScale(0.015f);
+  m_surface3DNoise = surface3DScale;
 }
 
 void TerrainGenerator::setupBiomeNoise()
@@ -400,6 +411,15 @@ void TerrainGenerator::setupBiomeNoise()
   weirdScale->SetSource(weirdFractal);
   weirdScale->SetScale(0.0015f); // Reduced from 0.003 → larger weirdness patches
   m_weirdnessNoise = weirdScale;
+
+  auto riverBase = FastNoise::New<FastNoise::OpenSimplex2>();
+  auto riverFractal = FastNoise::New<FastNoise::FractalFBm>();
+  riverFractal->SetSource(riverBase);
+  riverFractal->SetOctaveCount(2);
+  auto riverScale = FastNoise::New<FastNoise::DomainScale>();
+  riverScale->SetSource(riverFractal);
+  riverScale->SetScale(0.003f);
+  m_riverNoise = riverScale;
 }
 
 void TerrainGenerator::setupCaveNoise()
@@ -465,24 +485,21 @@ void TerrainGenerator::setupVegetationNoise()
 void TerrainGenerator::setupOres()
 {
   // Coal: Common, large veins
-  m_ores.push_back({TextureType::COAL_ORE, 0, 128, 0.1f, 0.65f, 10000});
+  m_ores.push_back({TextureType::COAL_ORE, 0, 128, 17, 20, 10000});
   // Iron: Common, medium veins
-  m_ores.push_back({TextureType::IRON_ORE, 0, 64, 0.12f, 0.75f, 11000});
+  m_ores.push_back({TextureType::IRON_ORE, 0, 64, 9, 20, 11000});
   // Copper: Medium rarity
-  m_ores.push_back({TextureType::COPPER_ORE, 0, 96, 0.11f, 0.75f, 12000});
+  m_ores.push_back({TextureType::COPPER_ORE, 0, 96, 10, 16, 12000});
   // Gold: Rare, deep
-  m_ores.push_back({TextureType::GOLD_ORE, 0, 32, 0.15f, 0.85f, 13000});
+  m_ores.push_back({TextureType::GOLD_ORE, 0, 32, 9, 4, 13000});
   // Lapis: Rare, deep
-  m_ores.push_back({TextureType::LAPIS_ORE, 0, 32, 0.15f, 0.85f, 14000});
+  m_ores.push_back({TextureType::LAPIS_ORE, 0, 32, 7, 2, 14000});
   // Redstone: Common deep
-  m_ores.push_back({TextureType::REDSTONE_ORE, 0, 16, 0.15f, 0.8f, 15000});
+  m_ores.push_back({TextureType::REDSTONE_ORE, 0, 16, 8, 8, 15000});
   // Diamond: Very rare
-  m_ores.push_back({TextureType::DIAMOND_ORE, 1, 16, 0.18f, 0.9f, 16000});
+  m_ores.push_back({TextureType::DIAMOND_ORE, 1, 16, 8, 2, 16000});
   // Emerald: Very rare
-  m_ores.push_back({TextureType::EMERALD_ORE, 4, 32, 0.18f, 0.93f, 17000});
-
-  // Ore noise generator
-  m_oreNoise = FastNoise::New<FastNoise::OpenSimplex2>();
+  m_ores.push_back({TextureType::EMERALD_ORE, 4, 32, 3, 2, 17000});
 }
 
 // =============================================
@@ -502,6 +519,7 @@ struct GenBuffers
   std::array<float, 20 * 20> temperature;
   std::array<float, 20 * 20> humidity;
   std::array<float, 20 * 20> weirdness;
+  std::array<float, 20 * 20> river;
 
   // Extended heightmap for erosion (20x20)
   std::array<float, 20 * 20> extendedHeightMap;
@@ -513,9 +531,7 @@ struct GenBuffers
   // 3D noise is still generated for the core chunk + borders (not strictly 20x20, we can keep it 16x16 or 18x18 as needed)
   std::array<float, CHUNK_VOLUME> cave;
   std::array<float, CHUNK_VOLUME> ravine;
-
-  // Reusable buffer for ore generation (avoids per-ore heap allocation)
-  std::array<float, CHUNK_VOLUME> oreNoise;
+  std::array<float, CHUNK_VOLUME> surface3D;
 
   // Border generation buffers (per-strip: CHUNK_SIZE columns)
   // 2D noise buffers for height/biome determination (7 noise types x CHUNK_SIZE)
@@ -526,9 +542,11 @@ struct GenBuffers
   std::array<float, CHUNK_SIZE> borderTemp;
   std::array<float, CHUNK_SIZE> borderHumid;
   std::array<float, CHUNK_SIZE> borderWeird;
+  std::array<float, CHUNK_SIZE> borderRiver;
   // 3D noise buffers for cave/ravine per strip (CHUNK_SIZE x CHUNK_HEIGHT x 1)
   std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderCave;
   std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderRavine;
+  std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderSurface3D;
 
   // Persistent generator to avoid expensive setup every chunk
   std::unique_ptr<TerrainGenerator> generator;
@@ -584,10 +602,12 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   float *temperatureResults = s_genBuffers.temperature.data();
   float *humidityResults = s_genBuffers.humidity.data();
   float *weirdnessResults = s_genBuffers.weirdness.data();
+  float *riverResults = s_genBuffers.river.data();
 
   // 3D Noise buffers
   float *caveResults = s_genBuffers.cave.data();
   float *ravineResults = s_genBuffers.ravine.data();
+  float *surface3DResults = s_genBuffers.surface3D.data();
 
   float worldXf = static_cast<float>(chunkX) + NOISE_OFFSET;
   float worldZf = static_cast<float>(chunkZ) + NOISE_OFFSET;
@@ -620,6 +640,8 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
 
   m_weirdnessNoise->GenUniformGrid2D(weirdnessResults, extendedWorldXf, extendedWorldZf,
                                      EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 8000);
+  m_riverNoise->GenUniformGrid2D(riverResults, extendedWorldXf, extendedWorldZf,
+                                 EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 9000);
 
   // Pre-calculate float heights for the 20x20 extended map
   float *extHeightMap = s_genBuffers.extendedHeightMap.data();
@@ -627,7 +649,7 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   {
     extHeightMap[i] = calculateHeightFloat(
         continentalResults[i], erosionResults[i],
-        peaksValleysResults[i], ridgeResults[i]);
+        peaksValleysResults[i], ridgeResults[i], riverResults[i]);
   }
 
   // Apply erosion smoothing step to the float heightmap
@@ -641,6 +663,9 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   m_ravineNoise->GenUniformGrid3D(ravineResults, worldXf, 0.0f, worldZf,
                                   CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE, 1.0f,
                                   m_seed + 5000);
+  m_surface3DNoise->GenUniformGrid3D(surface3DResults, worldXf, 0.0f, worldZf,
+                                     CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE, 1.0f,
+                                     m_seed + 6000);
 
   // Pass 1: Extract 16x16 biomes and heights from the eroded 20x20 map
   for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
@@ -657,11 +682,14 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
       float temperature = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
       float humidity = std::clamp(humidityResults[extIndex], -1.0f, 1.0f);
       float weirdness = std::clamp(weirdnessResults[extIndex], -1.0f, 1.0f);
+      float riverVal = riverResults[extIndex];
+      float erosion = std::clamp(erosionResults[extIndex], -1.0f, 1.0f);
+      float pv = std::clamp(peaksValleysResults[extIndex], -1.0f, 1.0f);
 
       int height = std::clamp(static_cast<int>(std::round(extHeightMap[extIndex])), 1, static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
 
       BiomeType biome = determineBiome(temperature, humidity, weirdness,
-                                       continental, height);
+                                       continental, erosion, pv, riverVal, height);
 
       chunkData.biomes[localIndex] = biome;
       chunkData.heightMap[localIndex] = height;
@@ -684,6 +712,10 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
       int extIndex = (localZ + 2) * EXTENDED_SIZE + (localX + 2);
       float temperature = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
 
+      // Determine if this column is mountainous (allow 3D surface perturbation)
+      bool isMountain = (biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS);
+
+      int actualMaxHeight = 0;
       for (int y = 0; y < CHUNK_HEIGHT; ++y)
       {
         int voxelIndex = getVoxelIndex(localX, y, localZ);
@@ -691,29 +723,50 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
 
         float caveVal = caveResults[noiseIndex];
         float ravineVal = ravineResults[noiseIndex];
+        float surface3DVal = surface3DResults[noiseIndex];
 
-        TextureType type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature);
+        // 3D density: base density is distance below the heightmap surface
+        float density = static_cast<float>(terrainHeight - y);
 
-        // Carve caves
-        if (type != TextureType::BEDROCK && type != TextureType::AIR && type != TextureType::WATER)
-        {
-          float heightRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
-          float caveThreshold = 0.6f + heightRatio * 0.35f;
-          float ravineThreshold = 0.8f + heightRatio * 0.15f;
-
-          if (caveVal > caveThreshold || ravineVal > ravineThreshold)
-          {
-            type = TextureType::AIR;
-          }
+        // Only perturb the surface near the heightmap boundary, and only
+        // for mountainous biomes (creates overhangs/cliffs). Plains stay flat.
+        if (isMountain && density > -8.0f && density < 12.0f) {
+           // Smooth blend: full effect at surface, fades to zero at edges
+           float distToSurface = std::abs(density);
+           float blend = std::max(0.0f, 1.0f - distToSurface / 12.0f);
+           density += surface3DVal * 8.0f * blend;
         }
 
+        TextureType type;
+        if (density >= 0.0f) {
+            // Pass density so overhangs can have grass/dirt/stone correctly
+            type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, density);
+            
+            if (type != TextureType::BEDROCK && type != TextureType::WATER)
+            {
+              float heightRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
+              float caveThreshold = 0.6f + heightRatio * 0.35f;
+              float ravineThreshold = 0.8f + heightRatio * 0.15f;
+
+              if (caveVal > caveThreshold || ravineVal > ravineThreshold)
+              {
+                type = TextureType::AIR;
+              }
+            }
+        } else {
+            type = (y <= SEA_LEVEL) ? TextureType::WATER : TextureType::AIR;
+        }
+
+        if (type != TextureType::AIR && type != TextureType::WATER) {
+            actualMaxHeight = std::max(actualMaxHeight, y);
+        }
         chunkData.voxels[voxelIndex].type = type;
       }
+      chunkData.heightMap[colIndex] = actualMaxHeight;
     }
   }
 
-  // Ore generation pass (reuses thread-local buffer to avoid heap allocations)
-  float *oreNoiseBuffer = s_genBuffers.oreNoise.data();
+  // Ore generation pass (random-walk blobs)
   for (const auto &ore : m_ores)
   {
     int minY = std::max(0, ore.minHeight);
@@ -721,34 +774,47 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
     if (minY >= maxY)
       continue;
 
-    int heightSize = maxY - minY;
+    for (int i = 0; i < ore.clustersPerChunk; ++i) {
+      uint32_t h1 = treeHash(chunkX, chunkZ, m_seed + ore.seedOffset + i);
+      int startX = h1 % CHUNK_SIZE;
+      int startZ = (h1 >> 8) % CHUNK_SIZE;
+      int startY = minY + ((h1 >> 16) % (maxY - minY));
 
-    m_oreNoise->GenUniformGrid3D(oreNoiseBuffer, worldXf, static_cast<float>(minY), worldZf,
-                                 CHUNK_SIZE, heightSize, CHUNK_SIZE, ore.scale,
-                                 m_seed + ore.seedOffset);
-
-    int noiseIdx = 0;
-    for (int z = 0; z < CHUNK_SIZE; ++z)
-    {
-      for (int y = 0; y < heightSize; ++y)
-      {
-        for (int x = 0; x < CHUNK_SIZE; ++x)
-        {
-          float noiseVal = oreNoiseBuffer[noiseIdx++];
-          int voxelIndex = getVoxelIndex(x, minY + y, z);
-
-          if (chunkData.voxels[voxelIndex].type == TextureType::STONE)
-          {
-            if (noiseVal > ore.threshold)
-            {
-              chunkData.voxels[voxelIndex].type = ore.type;
-            }
+      int x = startX, y = startY, z = startZ;
+      for (int step = 0; step < ore.clusterSize; ++step) {
+        if (x >= 0 && x < CHUNK_SIZE && y >= 0 && y < CHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE) {
+          int voxelIndex = getVoxelIndex(x, y, z);
+          if (chunkData.voxels[voxelIndex].type == TextureType::STONE) {
+            chunkData.voxels[voxelIndex].type = ore.type;
           }
         }
+        
+        uint32_t stepHash = treeHash(chunkX * CHUNK_SIZE + x, chunkZ * CHUNK_SIZE + z, m_seed + step * 7919 + y * 1337);
+        int dir = stepHash % 6;
+        if (dir == 0) x++;
+        else if (dir == 1) x--;
+        else if (dir == 2) y++;
+        else if (dir == 3) y--;
+        else if (dir == 4) z++;
+        else if (dir == 5) z--;
       }
     }
   }
 }
+
+// =============================================
+// CONTINENTAL CONSTANTS
+// =============================================
+// Continental smoothstep thresholds: define where each terrain band begins/ends
+// Each pair (lo, hi) is a transition zone in the 0..1 continental factor range.
+static constexpr float CONT_OCEAN_LO = 0.25f;  // Ocean -> Beach transition start
+static constexpr float CONT_OCEAN_HI = 0.32f;  // Ocean -> Beach transition end
+static constexpr float CONT_BEACH_LO = 0.35f;  // Beach -> Plains transition start
+static constexpr float CONT_BEACH_HI = 0.42f;  // Beach -> Plains transition end
+static constexpr float CONT_PLAINS_LO = 0.55f; // Plains -> Hills transition start
+static constexpr float CONT_PLAINS_HI = 0.65f; // Plains -> Hills transition end
+static constexpr float CONT_HILLS_LO = 0.75f;  // Hills -> Mountains transition start
+static constexpr float CONT_HILLS_HI = 0.85f;  // Hills -> Mountains transition end
 
 // =============================================
 // BIOME DETERMINATION
@@ -756,68 +822,63 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
 
 BiomeType TerrainGenerator::determineBiome(float temperature, float humidity,
                                            float weirdness, float continental,
-                                           int height) const
+                                           float erosion, float pv, float riverVal, int height) const
 {
   float temp = (temperature + 1.0f) * 0.5f;
   float humid = (humidity + 1.0f) * 0.5f;
-  float cont = (continental + 1.0f) * 0.5f;
   float weird = (weirdness + 1.0f) * 0.5f;
+  float contFactor = (continental + 1.0f) * 0.5f;
+  float erosionFactor = (erosion + 1.0f) * 0.5f;
 
-  // ---- Ocean / beach (driven by height + continental factor) ----
-  if (height < SEA_LEVEL - 5 && cont < 0.45f)
-  {
-    if (temp < 0.30f)
-      return BIOME_FROZEN_OCEAN;
-    return BIOME_OCEAN;
+  // Rivers only form in valleys that dip below sea level
+  // We use a dynamic width based on weirdness to vary from small streams to large rivers
+  float dynamicWidth = 0.05f + 0.06f * weird; 
+  float waterWidth = dynamicWidth * 0.4f; // The water is only at the deepest center of the valley
+  
+  if (std::abs(riverVal) < waterWidth) {
+      if (height <= SEA_LEVEL + 1) {
+          // If we are already in the ocean, we just return OCEAN to blend better
+          if (contFactor <= CONT_OCEAN_HI) return (temp < 0.30f) ? BIOME_FROZEN_OCEAN : BIOME_OCEAN;
+          return BIOME_RIVER;
+      }
   }
 
-  if (height >= SEA_LEVEL - 3 && height <= SEA_LEVEL + 3 && cont < 0.5f)
-  {
-    if (temp < 0.30f)
-      return BIOME_SNOWY_TUNDRA;
-    return BIOME_BEACH;
+  // 1. The Oceans
+  if (contFactor <= CONT_OCEAN_HI) {
+      if (temp < 0.30f) return BIOME_FROZEN_OCEAN;
+      return BIOME_OCEAN;
   }
 
-  // ---- Mountain height override ----
-  if (height > 130)
-  {
-    if (temp < 0.4f || height > 170)
-      return BIOME_SNOWY_MOUNTAINS;
-    return BIOME_MOUNTAINS;
+  // 2. The Coast (Beach)
+  if (contFactor <= CONT_BEACH_HI) {
+      if (temp < 0.30f) return BIOME_SNOWY_TUNDRA;
+      return BIOME_BEACH;
   }
 
-  // ---- Cold zone  (temp < 0.30) — narrowed from 0.35 so it covers ~30% of world ----
-  if (temp < 0.30f)
-  {
-    if (weird > 0.82f)
-      return BIOME_ICE_SPIKES; // rare cold anomaly
-    if (humid < 0.40f)
-      return BIOME_SNOWY_TUNDRA;
-    return BIOME_SNOWY_TAIGA;
+  // 3. The Flatlands (Plains / Deserts / Swamps)
+  if (contFactor <= CONT_PLAINS_HI) {
+      if (temp < 0.30f) return (weird > 0.8f) ? BIOME_ICE_SPIKES : BIOME_SNOWY_TUNDRA;
+      if (temp > 0.70f) return (humid < 0.30f) ? BIOME_DESERT : BIOME_SAVANNA;
+      if (humid > 0.65f) return BIOME_SWAMP;
+      return BIOME_PLAINS;
   }
 
-  // ---- Hot zone  (temp > 0.70) — raised from 0.65 so it covers ~30% of world ----
-  if (temp > 0.70f)
-  {
-    if (humid < 0.28f)
-      return BIOME_DESERT;
-    // Jungle now requires high humidity (>= 0.60); savanna/badlands fill the gap below
-    if (humid < 0.60f)
-      return (weird > 0.62f) ? BIOME_BADLANDS : BIOME_SAVANNA;
-    return BIOME_JUNGLE;
+  // 4. The Hills / Slopes
+  if (contFactor <= CONT_HILLS_HI) {
+      if (temp < 0.30f) return BIOME_SNOWY_TAIGA;
+      if (temp > 0.70f) {
+          if (humid < 0.30f) return BIOME_BADLANDS;
+          if (humid > 0.60f) return BIOME_JUNGLE;
+          return BIOME_SAVANNA;
+      }
+      if (humid < 0.30f) return BIOME_FOREST;
+      if (humid < 0.60f) return (weird > 0.6f) ? BIOME_BIRCH_FOREST : BIOME_FOREST;
+      return BIOME_DARK_FOREST;
   }
 
-  // ---- Temperate zone  (0.30 – 0.70) — now covers ~40% of world ----
-  // Sub-divide by humidity into plains → forest → birch → dark forest → swamp
-  if (humid < 0.28f)
-    return BIOME_PLAINS;
-  if (humid < 0.48f)
-    return BIOME_FOREST;
-  if (humid < 0.63f)
-    return (weird > 0.58f) ? BIOME_BIRCH_FOREST : BIOME_FOREST;
-  if (humid < 0.80f)
-    return BIOME_DARK_FOREST;
-  return BIOME_SWAMP;
+  // 5. The Mountains
+  if (temp < 0.40f) return BIOME_SNOWY_MOUNTAINS;
+  return BIOME_MOUNTAINS;
 }
 
 BiomeType TerrainGenerator::getBiomeAt(int worldX, int worldZ) const
@@ -832,9 +893,10 @@ BiomeType TerrainGenerator::getBiomeAt(int worldX, int worldZ) const
   float erosion = m_erosionNoise->GenSingle2D(x, z, m_seed + 1000);
   float pv = m_peaksValleysNoise->GenSingle2D(x, z, m_seed + 2000);
   float ridge = m_ridgeNoise->GenSingle2D(x, z, m_seed + 3000);
+  float river = m_riverNoise->GenSingle2D(x, z, m_seed + 9000);
+  int height = calculateHeight(cont, erosion, pv, ridge, river);
 
-  int height = calculateHeight(cont, erosion, pv, ridge);
-  return determineBiome(temp, humid, weird, cont, height);
+  return determineBiome(temp, humid, weird, cont, erosion, pv, river, height);
 }
 
 void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
@@ -854,7 +916,7 @@ void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
   const int startX = static_cast<int>(std::round((centerX + NOISE_OFFSET) * invStep - width * 0.5f));
   const int startZ = static_cast<int>(std::round((centerZ + NOISE_OFFSET) * invStep - height * 0.5f));
 
-  std::vector<float> tempBuf(count), humidBuf(count), weirdBuf(count);
+  std::vector<float> tempBuf(count), humidBuf(count), weirdBuf(count), riverBuf(count);
   std::vector<float> contBuf(count), erosionBuf(count), pvBuf(count), ridgeBuf(count);
 
   // GenUniformGrid2D processes batches with SIMD — far faster than individual GenSingle2D calls.
@@ -865,6 +927,7 @@ void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
   m_erosionNoise->GenUniformGrid2D(erosionBuf.data(), startX, startZ, width, height, step, m_seed + 1000);
   m_peaksValleysNoise->GenUniformGrid2D(pvBuf.data(), startX, startZ, width, height, step, m_seed + 2000);
   m_ridgeNoise->GenUniformGrid2D(ridgeBuf.data(), startX, startZ, width, height, step, m_seed + 3000);
+  m_riverNoise->GenUniformGrid2D(riverBuf.data(), startX, startZ, width, height, step, m_seed + 9000);
 
   for (int i = 0; i < count; i++)
   {
@@ -872,8 +935,9 @@ void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
     const float erosion = std::clamp(erosionBuf[i], -1.0f, 1.0f);
     const float pv = std::clamp(pvBuf[i], -1.0f, 1.0f);
     const float ridge = std::clamp(ridgeBuf[i], -1.0f, 1.0f);
-    const int h = calculateHeight(cont, erosion, pv, ridge);
-    outBiomes[i] = determineBiome(tempBuf[i], humidBuf[i], weirdBuf[i], cont, h);
+    const float river = riverBuf[i];
+    const int h = calculateHeight(cont, erosion, pv, ridge, river);
+    outBiomes[i] = determineBiome(tempBuf[i], humidBuf[i], weirdBuf[i], cont, erosion, pv, river, h);
   }
 }
 
@@ -881,28 +945,17 @@ void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
 // HEIGHT CALCULATION
 // =============================================
 
-// Continental smoothstep thresholds: define where each terrain band begins/ends
-// Each pair (lo, hi) is a transition zone in the 0..1 continental factor range.
-static constexpr float CONT_OCEAN_LO = 0.25f;  // Ocean -> Beach transition start
-static constexpr float CONT_OCEAN_HI = 0.32f;  // Ocean -> Beach transition end
-static constexpr float CONT_BEACH_LO = 0.35f;  // Beach -> Plains transition start
-static constexpr float CONT_BEACH_HI = 0.42f;  // Beach -> Plains transition end
-static constexpr float CONT_PLAINS_LO = 0.55f; // Plains -> Hills transition start
-static constexpr float CONT_PLAINS_HI = 0.65f; // Plains -> Hills transition end
-static constexpr float CONT_HILLS_LO = 0.75f;  // Hills -> Mountains transition start
-static constexpr float CONT_HILLS_HI = 0.85f;  // Hills -> Mountains transition end
-
 // Base heights (blocks above/below SEA_LEVEL) and variation amplitudes per terrain band
 static constexpr float OCEAN_BASE_HEIGHT = -20.0f;
 static constexpr float OCEAN_VARIATION = 8.0f;
-static constexpr float BEACH_BASE_HEIGHT = 3.0f;
+static constexpr float BEACH_BASE_HEIGHT = 1.0f;
 static constexpr float BEACH_VARIATION = 3.0f;
-static constexpr float PLAINS_BASE_HEIGHT = 25.0f;
-static constexpr float PLAINS_VARIATION = 25.0f;
-static constexpr float HILLS_BASE_HEIGHT = 55.0f;
-static constexpr float HILLS_VARIATION = 30.0f;
-static constexpr float MOUNTAIN_BASE_HEIGHT = 80.0f;
-static constexpr float MOUNTAIN_VARIATION = 35.0f;
+static constexpr float PLAINS_BASE_HEIGHT = 8.0f;
+static constexpr float PLAINS_VARIATION = 12.0f;
+static constexpr float HILLS_BASE_HEIGHT = 25.0f;
+static constexpr float HILLS_VARIATION = 20.0f;
+static constexpr float MOUNTAIN_BASE_HEIGHT = 65.0f;
+static constexpr float MOUNTAIN_VARIATION = 45.0f;
 
 // Ridge-driven peak parameters
 static constexpr float RIDGE_PEAK_THRESHOLD = 0.2f;  // Ridge value above which peaks form
@@ -912,7 +965,7 @@ static constexpr float RIDGE_PEAK_AMPLITUDE = 95.0f; // Max extra height from ri
 // static constexpr int   HEIGHT_CEILING_MARGIN =  32; // Moved up
 
 float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
-                                             float peaksValleys, float ridge) const
+                                             float peaksValleys, float ridge, float riverVal) const
 {
   continental = std::clamp(continental, -1.0f, 1.0f);
   erosion = std::clamp(erosion, -1.0f, 1.0f);
@@ -956,13 +1009,44 @@ float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
                           plainsWeight * plainsHeight + hillsWeight * hillsHeight +
                           mountainWeight * mountainHeight;
 
+  // River Valley carving
+  float riverFactor = std::abs(riverVal);
+  
+  // Use weirdness noise to make river width dynamic (but we only have ridge and erosion here!)
+  // Since we don't pass weirdness to calculateHeight, we'll use erosion to vary the width
+  float dynamicWidth = 0.05f + 0.06f * erosionFactor;
+  
+  // We allow carving even in the ocean, so the river smoothly enters the sea
+  if (riverFactor < dynamicWidth) {
+      float valleyDist = riverFactor / dynamicWidth; // 0 at center, 1 at edge
+      // Smooth U-shape
+      float valleyShape = 1.0f - valleyDist;
+      valleyShape = smoothstep(0.0f, 1.0f, valleyShape);
+      
+      // We subtract up to 28 blocks of height. 
+      // This will pull mountains down to form passes, and plains below sea level to form rivers.
+      float carveAmount = valleyShape * 28.0f;
+      float newHeight = heightVariation - carveAmount;
+      
+      // Prevent rivers from digging impossibly deep holes in plains
+      // But allow them to dig normally if the terrain was already deep (e.g. ocean).
+      float minRiverBottom = -4.0f;
+      if (newHeight < minRiverBottom && heightVariation > minRiverBottom) {
+          // Soft clamp to make the bottom look a bit nicer
+          float overshoot = minRiverBottom - newHeight;
+          newHeight = minRiverBottom - overshoot * 0.1f;
+      }
+      
+      heightVariation = newHeight;
+  }
+
   return static_cast<float>(SEA_LEVEL) + heightVariation;
 }
 
 int TerrainGenerator::calculateHeight(float continental, float erosion,
-                                      float peaksValleys, float ridge) const
+                                      float peaksValleys, float ridge, float riverVal) const
 {
-  float heightFloat = calculateHeightFloat(continental, erosion, peaksValleys, ridge);
+  float heightFloat = calculateHeightFloat(continental, erosion, peaksValleys, ridge, riverVal);
   return std::clamp(static_cast<int>(std::round(heightFloat)), 1, CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN);
 }
 
@@ -1367,17 +1451,22 @@ void TerrainGenerator::placeCactus(ChunkData &chunkData, int localX, int localZ,
 // =============================================
 
 TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight,
-                                             BiomeType biome, float temperature) const
+                                             BiomeType biome, float temperature, float density) const
 {
   if (worldY <= BEDROCK_LEVEL)
     return TextureType::BEDROCK;
-  const BiomeConfig &config = getBiomeConfig(biome);
-  if (worldY <= terrainHeight)
+
+  if (density == -1.0f)
+    density = static_cast<float>(terrainHeight - worldY); // Fallback for old calls without density
+
+  if (density >= 0.0f)
   {
-    int depth = terrainHeight - worldY;
-    if (depth == 0)
+    const BiomeConfig &config = getBiomeConfig(biome);
+    
+    // Surface layer
+    if (density < 1.0f)
     {
-      if (terrainHeight <= SEA_LEVEL + 2)
+      if (worldY <= SEA_LEVEL + 2 && config.surfaceBlock != TextureType::STONE)
         return config.underwaterBlock;
 
       if (biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS || config.hasSnow)
@@ -1386,7 +1475,7 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
         uint32_t hash = ((uint32_t)worldX * 374761393 + (uint32_t)worldZ * 668265263) ^ (uint32_t)m_seed;
         float dither = static_cast<float>(hash & 0xFFFF) / 65535.0f;
 
-        if (terrainHeight > snowLine + (dither - 0.5f) * 15.0f)
+        if (worldY > snowLine + (dither - 0.5f) * 15.0f)
         {
           return TextureType::SNOW;
         }
@@ -1394,15 +1483,24 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
 
       return config.surfaceBlock;
     }
-    if (depth <= config.subsurfaceDepth)
+    // Subsurface layer
+    if (density < static_cast<float>(config.subsurfaceDepth + 1))
     {
-      if (terrainHeight <= SEA_LEVEL + 2)
+      if (worldY <= SEA_LEVEL + 2 && config.subsurfaceBlock != TextureType::STONE)
         return config.underwaterBlock;
       return config.subsurfaceBlock;
     }
+    // Deep layer
     return TextureType::STONE;
   }
-  return (worldY <= SEA_LEVEL) ? TextureType::WATER : TextureType::AIR;
+
+  if (worldY <= SEA_LEVEL) {
+      if (biome == BIOME_FROZEN_OCEAN && worldY == SEA_LEVEL) {
+          return TextureType::GLASS; // Ice layer on the surface
+      }
+      return TextureType::WATER;
+  }
+  return TextureType::AIR;
 }
 
 // =============================================
@@ -1447,8 +1545,10 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
   float *bTemp = s_genBuffers.borderTemp.data();
   float *bHumid = s_genBuffers.borderHumid.data();
   float *bWeird = s_genBuffers.borderWeird.data();
+  float *bRiver = s_genBuffers.borderRiver.data();
   float *bCave = s_genBuffers.borderCave.data();
   float *bRavine = s_genBuffers.borderRavine.data();
+  float *bSurface3D = s_genBuffers.borderSurface3D.data();
 
   for (int s = 0; s < 8; ++s)
   {
@@ -1461,6 +1561,8 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
                                   strip.xSize, CHUNK_HEIGHT, strip.zSize, 1.0f, m_seed + 4000);
     m_ravineNoise->GenUniformGrid3D(bRavine, startX, 0.0f, startZ,
                                     strip.xSize, CHUNK_HEIGHT, strip.zSize, 1.0f, m_seed + 5000);
+    m_surface3DNoise->GenUniformGrid3D(bSurface3D, startX, 0.0f, startZ,
+                                       strip.xSize, CHUNK_HEIGHT, strip.zSize, 1.0f, m_seed + 6000);
 
     int numColumns = strip.xSize * strip.zSize; // CHUNK_SIZE (16) or 1 array Size
 
@@ -1477,6 +1579,9 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
     float *humidityResults = s_genBuffers.humidity.data();
     float *weirdnessResults = s_genBuffers.weirdness.data();
     float *continentalResults = s_genBuffers.continental.data();
+    float *riverResults = s_genBuffers.river.data();
+    float *erosionResults = s_genBuffers.erosion.data();
+    float *peaksValleysResults = s_genBuffers.peaksValleys.data();
     const int EXTENDED_SIZE = 20;
 
     for (int j = 0; j < numColumns; ++j)
@@ -1494,27 +1599,42 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
       float temp = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
       float humid = std::clamp(humidityResults[extIndex], -1.0f, 1.0f);
       float weird = std::clamp(weirdnessResults[extIndex], -1.0f, 1.0f);
+      float riverVal = riverResults[extIndex];
+      float erosion = std::clamp(erosionResults[extIndex], -1.0f, 1.0f);
+      float pv = std::clamp(peaksValleysResults[extIndex], -1.0f, 1.0f);
 
-      BiomeType biome = determineBiome(temp, humid, weird, cont, height);
+      BiomeType biome = determineBiome(temp, humid, weird, cont, erosion, pv, riverVal, height);
       float temperature = temp;
+
+      bool isMountain = (biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS);
 
       for (int y = 0; y < CHUNK_HEIGHT; ++y)
       {
-        TextureType type = getVoxelTypeAt(chunkX + lx, y, chunkZ + lz, height, biome, temperature);
+        int noiseX = (strip.xSize > 1) ? j : 0;
+        int noiseZ = (strip.zSize > 1) ? j : 0;
+        int noiseIdx = noiseZ * (CHUNK_HEIGHT * strip.xSize) + y * strip.xSize + noiseX;
 
-        if (type != TextureType::AIR && type != TextureType::BEDROCK && type != TextureType::WATER)
-        {
-          // 3D noise index: for a strip of xSize x CHUNK_HEIGHT x zSize,
-          // FastNoise layout is z * (CHUNK_HEIGHT * xSize) + y * xSize + x
-          int noiseX = (strip.xSize > 1) ? j : 0;
-          int noiseZ = (strip.zSize > 1) ? j : 0;
-          int noiseIdx = noiseZ * (CHUNK_HEIGHT * strip.xSize) + y * strip.xSize + noiseX;
+        float density = static_cast<float>(height - y);
+        if (isMountain && density > -8.0f && density < 12.0f) {
+           float distToSurface = std::abs(density);
+           float blend = std::max(0.0f, 1.0f - distToSurface / 12.0f);
+           density += bSurface3D[noiseIdx] * 8.0f * blend;
+        }
 
-          float hRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
-          if (bCave[noiseIdx] > 0.6f + hRatio * 0.35f || bRavine[noiseIdx] > 0.8f + hRatio * 0.15f)
-          {
-            type = TextureType::AIR;
-          }
+        TextureType type;
+        if (density >= 0.0f) {
+            type = getVoxelTypeAt(chunkX + lx, y, chunkZ + lz, height, biome, temperature, density);
+            
+            if (type != TextureType::AIR && type != TextureType::BEDROCK && type != TextureType::WATER)
+            {
+              float hRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
+              if (bCave[noiseIdx] > 0.6f + hRatio * 0.35f || bRavine[noiseIdx] > 0.8f + hRatio * 0.15f)
+              {
+                type = TextureType::AIR;
+              }
+            }
+        } else {
+            type = (y <= SEA_LEVEL) ? TextureType::WATER : TextureType::AIR;
         }
 
         if (type != TextureType::AIR)

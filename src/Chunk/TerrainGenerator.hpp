@@ -98,10 +98,12 @@ private:
   FastNoise::SmartNode<FastNoise::Generator> m_temperatureNoise;
   FastNoise::SmartNode<FastNoise::Generator> m_humidityNoise;
   FastNoise::SmartNode<FastNoise::Generator> m_weirdnessNoise; // For rare biomes
+  FastNoise::SmartNode<FastNoise::Generator> m_riverNoise;
 
   // Cave and structure noise
   FastNoise::SmartNode<FastNoise::Generator> m_caveNoise;
   FastNoise::SmartNode<FastNoise::Generator> m_ravineNoise;
+  FastNoise::SmartNode<FastNoise::Generator> m_surface3DNoise;
 
   // Vegetation noise
   FastNoise::SmartNode<FastNoise::Generator> m_treeNoise;
@@ -113,12 +115,11 @@ private:
     TextureType type;
     int minHeight;
     int maxHeight;
-    float scale;
-    float threshold;
+    int clusterSize;
+    int clustersPerChunk;
     int seedOffset;
   };
   std::vector<OreDef> m_ores;
-  FastNoise::SmartNode<FastNoise::Generator> m_oreNoise;
 
   // Generation parameters
   int m_seed;
@@ -147,13 +148,13 @@ private:
 
   // Height calculation
   int calculateHeight(float continental, float erosion, float peaksValleys,
-                      float ridge) const;
-  float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge) const;
+                      float ridge, float riverVal) const;
+  float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge, float riverVal) const;
   void applyErosion(float *heightMap, int size) const;
 
   // Biome determination
   BiomeType determineBiome(float temperature, float humidity, float weirdness,
-                           float continental, int height) const;
+                           float continental, float erosion, float pv, float riverVal, int height) const;
 
   // Vegetation generation
   void generateVegetation(ChunkData &chunkData, int chunkX, int chunkZ);
@@ -177,7 +178,7 @@ private:
   }
 
   // Voxel type determination
-  TextureType getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight, BiomeType biome, float temperature) const;
+  TextureType getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight, BiomeType biome, float temperature, float density = -1.0f) const;
 
   // =============================================
   // UTILITY FUNCTIONS
