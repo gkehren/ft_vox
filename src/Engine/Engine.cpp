@@ -211,18 +211,20 @@ void Engine::run()
 
 		if (renderer) // Ensure renderer is valid
 		{
-			renderer->drawSkybox(this->camera, uiManager->getShaderParams().sunDirection, uiManager->getShaderParams().dayTime, static_cast<float>(currentFrame), uiManager->getShaderParams().fogColor);
+			if (postProcessing)
+				postProcessing->beginSkyPass();
+			renderer->drawSkybox(this->camera, uiManager->getShaderParams(), static_cast<float>(currentFrame));
 		}
 
 		// Post-processing: HDR -> LDR with bloom, tone mapping, FXAA, god rays
 		if (postProcessing)
 		{
 			// Compute sun's screen position for god rays
-			glm::vec3 sunWorldPos = camera.getPosition() + uiManager->getShaderParams().sunDirection * 2000.0f;
 			const float sceneFarPlane = static_cast<float>(uiManager->getRenderSettings().maxRenderDistance);
 			glm::mat4 proj = camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), sceneFarPlane);
 			glm::mat4 view = camera.getViewMatrix();
-			glm::vec4 sunClip = proj * view * glm::vec4(sunWorldPos, 1.0f);
+			const glm::vec3 sunWorldPosition = uiManager->getShaderParams().sunPosition;
+			glm::vec4 sunClip = proj * view * glm::vec4(sunWorldPosition, 1.0f);
 			glm::vec2 sunScreen(0.5f, 0.5f); // Default: center of screen
 			if (sunClip.w > 0.0f)
 			{
@@ -239,7 +241,12 @@ void Engine::run()
 			// V3: Clamp to avoid extreme values that break the radial blur
 			sunScreen = glm::clamp(sunScreen, glm::vec2(-0.5f), glm::vec2(1.5f));
 
-			postProcessing->endSceneAndRender(uiManager->getPostProcessSettings(), sunScreen);
+			const glm::vec3 apparentSunDirection = glm::normalize(sunWorldPosition - camera.getPosition());
+			float sunVisibility = glm::smoothstep(-0.10f, 0.04f, apparentSunDirection.y);
+			if (sunScreen.x < 0.0f || sunScreen.x > 1.0f || sunScreen.y < 0.0f || sunScreen.y > 1.0f)
+				sunVisibility = 0.0f;
+
+			postProcessing->endSceneAndRender(uiManager->getPostProcessSettings(), sunScreen, sunVisibility, static_cast<float>(currentFrame));
 		}
 
 		uiManager->render(); // Render ImGui UI on top
@@ -333,39 +340,8 @@ void Engine::updateWorldState()
 		if (params.dayTime > 1.0f)
 			params.dayTime -= 1.0f;
 
-		// Calculate sun direction based on time
-		// 0.25 is sunrise (+X), 0.5 is noon (+Y), 0.75 is sunset (-X), 0.0 is midnight (-Y)
-		float angle = params.dayTime * 2.0f * 3.14159f;
-		params.sunDirection = glm::normalize(glm::vec3(cos(angle), sin(angle), 0.2f));
-
-		// Interpolate fog color and lighting based on sun height (sin(angle))
-		float sunHeight = sin(angle); // -1.0 to 1.0
-
-		// Colors for different times
-		glm::vec3 dayFog = glm::vec3(0.75f, 0.85f, 1.0f);
-		glm::vec3 sunsetFog = glm::vec3(1.0f, 0.4f, 0.2f);
-		glm::vec3 nightFog = glm::vec3(0.02f, 0.02f, 0.05f);
-
-		if (sunHeight > 0.15f)
-		{ // Day
-			params.fogColor = dayFog;
-			params.ambientStrength = 0.2f;
-			params.diffuseIntensity = 0.7f;
-		}
-		else if (sunHeight > -0.15f)
-		{										 // Sunrise/Sunset transition
-			float t = (sunHeight + 0.15f) / 0.3f; // 0 to 1
-			params.fogColor = glm::mix(sunsetFog, dayFog, t);
-			params.ambientStrength = glm::mix(0.02f, 0.2f, t);
-			params.diffuseIntensity = glm::mix(0.0f, 0.7f, t);
-		}
-		else
-		{										 // Night
-			params.fogColor = nightFog;
-			params.ambientStrength = 0.02f; // Darker night
-			params.diffuseIntensity = 0.0f;
-		}
 	}
+	updateAtmosphere();
 
 	if (!currentRenderSettings.paused)
 	{
@@ -416,6 +392,56 @@ void Engine::updateWorldState()
 	chunkManager->uploadPendingMeshes(uploadBudget);
 }
 
+void Engine::updateAtmosphere()
+{
+	ShaderParameters &params = uiManager->getShaderParams();
+	PostProcessSettings &postProcess = uiManager->getPostProcessSettings();
+
+	// The celestial orbit is anchored in world space. This makes the sun and
+	// moon usable as navigation landmarks instead of following the player.
+	const float angle = params.dayTime * 2.0f * 3.14159265f;
+	const glm::vec3 orbitOffset(
+		std::cos(angle) * params.celestialOrbitRadius,
+		std::sin(angle) * params.celestialOrbitRadius,
+		0.0f);
+	params.sunPosition = params.celestialOrbitCenter + orbitOffset;
+	params.moonPosition = params.celestialOrbitCenter - orbitOffset;
+	params.sunDirection = glm::normalize(orbitOffset);
+
+	const float sunHeight = params.sunDirection.y;
+	params.dayFactor = glm::smoothstep(-0.08f, 0.28f, sunHeight);
+	params.nightFactor = 1.0f - glm::smoothstep(-0.28f, 0.02f, sunHeight);
+	params.sunsetFactor = 1.0f - std::max(params.dayFactor, params.nightFactor);
+
+	const float totalFactor = params.dayFactor + params.sunsetFactor + params.nightFactor;
+	const float dayWeight = params.dayFactor / totalFactor;
+	const float sunsetWeight = params.sunsetFactor / totalFactor;
+	const float nightWeight = params.nightFactor / totalFactor;
+
+	// Moonlight takes over once the sun is below the horizon.
+	params.lightDirection = params.nightFactor > 0.5f ? -params.sunDirection : params.sunDirection;
+
+	if (params.automaticAtmosphere)
+	{
+		const glm::vec3 dayFog(0.42f, 0.57f, 0.70f);
+		const glm::vec3 sunsetFog(0.72f, 0.36f, 0.24f);
+		const glm::vec3 nightFog(0.025f, 0.045f, 0.09f);
+
+		params.fogColor = dayFog * dayWeight + sunsetFog * sunsetWeight + nightFog * nightWeight;
+		params.fogStart = 220.0f * dayWeight + 145.0f * sunsetWeight + 105.0f * nightWeight;
+		params.fogEnd = 680.0f * dayWeight + 570.0f * sunsetWeight + 460.0f * nightWeight;
+		params.fogDensity = 0.18f * dayWeight + 0.34f * sunsetWeight + 0.42f * nightWeight;
+		params.ambientStrength = 0.24f * dayWeight + 0.16f * sunsetWeight + 0.065f * nightWeight;
+		params.diffuseIntensity = 0.78f * dayWeight + 0.48f * sunsetWeight + 0.16f * nightWeight;
+	}
+
+	if (postProcess.autoExposureEnabled)
+	{
+		const float atmosphericExposure = 0.90f * dayWeight + 0.96f * sunsetWeight + 1.02f * nightWeight;
+		postProcess.exposure = atmosphericExposure * postProcess.exposureCompensation;
+	}
+}
+
 void Engine::renderScene() // Renamed from render
 {
 	auto startFrame = std::chrono::high_resolution_clock::now(); // Keep for total frame timing if needed outside ChunkManager
@@ -423,7 +449,7 @@ void Engine::renderScene() // Renamed from render
 
 	if (renderer && chunkManager)
 	{
-		renderer->renderShadowMap(camera, uiManager->getShaderParams().sunDirection, *chunkManager);
+		renderer->renderShadowMap(camera, uiManager->getShaderParams().lightDirection, *chunkManager);
 	}
 
 	if (client && client->isConnected())
@@ -444,7 +470,7 @@ void Engine::renderScene() // Renamed from render
 	shader->setFloat("fogEnd", uiManager->getShaderParams().fogEnd);
 	shader->setFloat("fogDensity", uiManager->getShaderParams().fogDensity);
 	shader->setVec3("fogColor", uiManager->getShaderParams().fogColor);
-	shader->setVec3("sunDirection", uiManager->getShaderParams().sunDirection);
+	shader->setVec3("lightDirection", uiManager->getShaderParams().lightDirection);
 	shader->setFloat("ambientStrength", uiManager->getShaderParams().ambientStrength);
 	shader->setFloat("diffuseIntensity", uiManager->getShaderParams().diffuseIntensity);
 	shader->setFloat("lightLevels", uiManager->getShaderParams().lightLevels);

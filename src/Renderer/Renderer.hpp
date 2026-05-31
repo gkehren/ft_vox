@@ -7,6 +7,7 @@
 #include <map>
 
 #include <Chunk/Chunk.hpp>
+#include <Engine/EngineDefs.hpp>
 #include <Shader/Shader.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
@@ -24,7 +25,7 @@ public:
 
 	void drawBoundingBox(const Chunk &chunk, const Camera &camera) const;
 	void drawVoxelHighlight(const glm::vec3 &position, const glm::vec3 &color, const Camera &camera) const;
-	void drawSkybox(const Camera &camera, const glm::vec3 &sunDir, float dayTime, float time, const glm::vec3 &fogColor) const;
+	void drawSkybox(const Camera &camera, const ShaderParameters &params, float time) const;
 	void drawPlayer(const Camera &camera, const glm::vec3 &position, uint32_t playerId) const;
 
 	// Shadow mapping

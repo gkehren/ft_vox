@@ -303,8 +303,6 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	shader.setMat4("view", camera.getViewMatrix());
 	shader.setInt("textureArray", 0);
 
-	glm::vec3 sunPosition = camera.getPosition() + shaderParams.sunDirection * 2000.0f;
-	shader.setVec3("lightPos", sunPosition);
 	shader.setVec3("viewPos", camera.getPosition());
 
 	// M: fog/lighting uniforms are already set by Engine::renderScene() before this

@@ -247,10 +247,19 @@ void UIManager::handleShaderParametersWindow()
 
 	if (ImGui::CollapsingHeader("Fog"))
 	{
-		ImGui::SliderFloat("Fog Start", &shaderParams.fogStart, 0.0f, 1000.0f);
-		ImGui::SliderFloat("Fog End", &shaderParams.fogEnd, 0.0f, 1000.0f);
-		ImGui::SliderFloat("Fog Density", &shaderParams.fogDensity, 0.0f, 1.0f);
-		ImGui::ColorEdit3("Fog Color", (float *)&shaderParams.fogColor);
+		ImGui::Checkbox("Automatic Atmosphere", &shaderParams.automaticAtmosphere);
+		if (shaderParams.automaticAtmosphere)
+		{
+			ImGui::Text("Fog start/end: %.0f / %.0f", shaderParams.fogStart, shaderParams.fogEnd);
+			ImGui::Text("Fog density: %.2f", shaderParams.fogDensity);
+		}
+		else
+		{
+			ImGui::SliderFloat("Fog Start", &shaderParams.fogStart, 0.0f, 1000.0f);
+			ImGui::SliderFloat("Fog End", &shaderParams.fogEnd, shaderParams.fogStart + 1.0f, 1400.0f);
+			ImGui::SliderFloat("Fog Density", &shaderParams.fogDensity, 0.0f, 1.0f);
+			ImGui::ColorEdit3("Fog Color", (float *)&shaderParams.fogColor);
+		}
 	}
 
 	if (ImGui::CollapsingHeader("Lighting"))
@@ -258,14 +267,34 @@ void UIManager::handleShaderParametersWindow()
 		ImGui::Checkbox("Day/Night Cycle", &shaderParams.dayCycleEnabled);
 		ImGui::SliderFloat("Day Time", &shaderParams.dayTime, 0.0f, 1.0f, "%.3f");
 		ImGui::SliderFloat("Cycle Speed", &shaderParams.dayCycleSpeed, 0.0f, 0.05f, "%.5f");
-
-		if (!shaderParams.dayCycleEnabled)
+		auto setTimePreset = [this](float dayTime)
 		{
-			ImGui::SliderFloat3("Sun Direction", (float *)&shaderParams.sunDirection, -1.0f, 1.0f);
-			shaderParams.sunDirection = glm::normalize(shaderParams.sunDirection); // Normalize after edit
+			shaderParams.dayCycleEnabled = false;
+			shaderParams.dayTime = dayTime;
+		};
+		if (ImGui::Button("Day"))
+			setTimePreset(0.25f);
+		ImGui::SameLine();
+		if (ImGui::Button("Sunset"))
+			setTimePreset(0.50f);
+		ImGui::SameLine();
+		if (ImGui::Button("Night"))
+			setTimePreset(0.75f);
+
+		ImGui::Text("Sun world position: %.0f / %.0f / %.0f",
+					shaderParams.sunPosition.x, shaderParams.sunPosition.y, shaderParams.sunPosition.z);
+		if (shaderParams.automaticAtmosphere)
+		{
+			ImGui::Text("Day / sunset / night: %.2f / %.2f / %.2f",
+						shaderParams.dayFactor, shaderParams.sunsetFactor, shaderParams.nightFactor);
+			ImGui::Text("Ambient / diffuse: %.2f / %.2f",
+						shaderParams.ambientStrength, shaderParams.diffuseIntensity);
 		}
-		ImGui::SliderFloat("Ambient Strength", &shaderParams.ambientStrength, 0.0f, 1.0f);
-		ImGui::SliderFloat("Diffuse Intensity", &shaderParams.diffuseIntensity, 0.0f, 1.0f);
+		else
+		{
+			ImGui::SliderFloat("Ambient Strength", &shaderParams.ambientStrength, 0.0f, 1.0f);
+			ImGui::SliderFloat("Diffuse Intensity", &shaderParams.diffuseIntensity, 0.0f, 1.0f);
+		}
 		ImGui::SliderFloat("Light Levels", &shaderParams.lightLevels, 1.0f, 16.0f);
 	}
 
@@ -273,7 +302,6 @@ void UIManager::handleShaderParametersWindow()
 	{
 		ImGui::SliderFloat("Saturation Level", &shaderParams.saturationLevel, 0.0f, 3.0f);
 		ImGui::SliderFloat("Color Boost", &shaderParams.colorBoost, 0.0f, 3.0f);
-		ImGui::SliderFloat("Gamma", &shaderParams.gamma, 0.1f, 3.0f);
 	}
 
 	if (ImGui::CollapsingHeader("Post Processing"))
@@ -285,7 +313,16 @@ void UIManager::handleShaderParametersWindow()
 			ImGui::SliderFloat("Bloom Intensity", &postProcessSettings.bloomIntensity, 0.0f, 2.0f);
 		}
 		ImGui::Checkbox("FXAA", &postProcessSettings.fxaaEnabled);
-		ImGui::SliderFloat("Exposure", &postProcessSettings.exposure, 0.1f, 5.0f);
+		ImGui::Checkbox("Auto Exposure", &postProcessSettings.autoExposureEnabled);
+		if (postProcessSettings.autoExposureEnabled)
+		{
+			ImGui::SliderFloat("Exposure Compensation", &postProcessSettings.exposureCompensation, 0.5f, 1.5f);
+			ImGui::Text("Exposure: %.2f", postProcessSettings.exposure);
+		}
+		else
+		{
+			ImGui::SliderFloat("Exposure", &postProcessSettings.exposure, 0.1f, 5.0f);
+		}
 		ImGui::SliderFloat("PP Gamma", &postProcessSettings.gamma, 0.5f, 4.0f);
 		const char *toneMappers[] = {"ACES Filmic", "Reinhard"};
 		ImGui::Combo("Tone Mapper", &postProcessSettings.toneMapper, toneMappers, IM_ARRAYSIZE(toneMappers));
@@ -298,6 +335,12 @@ void UIManager::handleShaderParametersWindow()
 			ImGui::SliderFloat("GR Weight", &postProcessSettings.godRaysWeight, 0.001f, 0.05f, "%.4f");
 			ImGui::SliderFloat("GR Decay", &postProcessSettings.godRaysDecay, 0.9f, 1.0f, "%.3f");
 			ImGui::SliderFloat("GR Exposure", &postProcessSettings.godRaysExposure, 0.0f, 1.0f);
+			ImGui::Checkbox("Dynamic GR Boost", &postProcessSettings.godRaysDynamicBoostEnabled);
+			if (postProcessSettings.godRaysDynamicBoostEnabled)
+			{
+				ImGui::SliderFloat("GR Dramatic Boost", &postProcessSettings.godRaysDramaticBoost, 1.0f, 4.0f, "%.2fx");
+				ImGui::Checkbox("GR Boost Preview", &postProcessSettings.godRaysBoostPreview);
+			}
 		}
 	}
 

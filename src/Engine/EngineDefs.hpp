@@ -6,26 +6,34 @@
 struct ShaderParameters
 {
 	// Fog
-	float fogStart = 160.0f;
-	float fogEnd = 480.0f;
-	float fogDensity = 0.8f;
-	glm::vec3 fogColor = {0.75f, 0.85f, 1.0f};
+	bool automaticAtmosphere = true;
+	float fogStart = 220.0f;
+	float fogEnd = 680.0f;
+	float fogDensity = 0.18f;
+	glm::vec3 fogColor = {0.42f, 0.57f, 0.70f};
 
 	// Lighting
-	glm::vec3 sunDirection = glm::normalize(glm::vec3(0.8, 1.0, 0.6));
-	float ambientStrength = 0.2f;
-	float diffuseIntensity = 0.7f;
+	glm::vec3 celestialOrbitCenter = {0.0f, 96.0f, 0.0f};
+	float celestialOrbitRadius = 4096.0f;
+	glm::vec3 sunPosition = {0.0f, 4192.0f, 0.0f};
+	glm::vec3 moonPosition = {0.0f, -4000.0f, 0.0f};
+	glm::vec3 sunDirection = {0.0f, 1.0f, 0.0f};
+	glm::vec3 lightDirection = sunDirection;
+	float dayFactor = 1.0f;
+	float sunsetFactor = 0.0f;
+	float nightFactor = 0.0f;
+	float ambientStrength = 0.24f;
+	float diffuseIntensity = 0.78f;
 	float lightLevels = 5.0f;
 
 	// Day/Night cycle
 	bool dayCycleEnabled = true;
-	float dayTime = 0.25f; // 0.0 to 1.0 (0.25 is sunrise, 0.5 is noon, 0.75 is sunset, 0.0/1.0 is midnight)
+	float dayTime = 0.25f; // 0.0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight
 	float dayCycleSpeed = 0.002f;
 
 	// visual
-	float saturationLevel = 1.2f;
+	float saturationLevel = 1.08f;
 	float colorBoost = 1.0f;
-	float gamma = 1.8f;
 };
 
 struct RenderSettings
@@ -63,19 +71,24 @@ struct RenderTiming
 struct PostProcessSettings
 {
 	bool bloomEnabled{true};
-	float bloomThreshold{1.0f};
-	float bloomIntensity{0.3f};
+	float bloomThreshold{1.15f};
+	float bloomIntensity{0.16f};
 	bool fxaaEnabled{true};
-	float exposure{1.0f};
+	bool autoExposureEnabled{true};
+	float exposure{0.9f};
+	float exposureCompensation{1.0f};
 	int toneMapper{0}; // 0 = ACES, 1 = Reinhard
 	float gamma{2.2f};
 
 	// God rays (volumetric light scattering)
 	bool godRaysEnabled{true};
-	float godRaysDensity{1.0f};
-	float godRaysWeight{0.01f};
-	float godRaysDecay{0.97f};
-	float godRaysExposure{0.3f};
+	float godRaysDensity{0.85f};
+	float godRaysWeight{0.022f};
+	float godRaysDecay{0.965f};
+	float godRaysExposure{0.55f};
+	bool godRaysDynamicBoostEnabled{true};
+	bool godRaysBoostPreview{false};
+	float godRaysDramaticBoost{2.4f};
 };
 
 struct VoxelHighlight

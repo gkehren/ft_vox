@@ -12,18 +12,20 @@ in vec4 FragPosLightSpace;
 
 uniform sampler2DArray textureArray;
 layout (binding = 2) uniform sampler2D shadowMap;
-uniform vec3 sunDirection;
+uniform vec3 lightDirection;
 uniform vec3 viewPos;
 
 // Fog parameters
+uniform float fogStart = 190.0;
 uniform float fogEnd = 480.0;
 uniform vec3 fogColor = vec3(0.75, 0.85, 1.0);
-uniform float fogDensity = 0.8;
+uniform float fogDensity = 0.2;
 
 // Visual parameters
 uniform float ambientStrength = 0.2;
 uniform float diffuseIntensity = 0.7;
 uniform float lightLevels = 5.0;
+uniform float saturationLevel = 1.0;
 uniform float colorBoost = 1.0;
 
 float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir)
@@ -94,7 +96,7 @@ void main()
     vec3 norm = normalize(Normal);
 
     // Light direction
-    vec3 lightDir = normalize(sunDirection);
+    vec3 lightDir = normalize(lightDirection);
 
     // Shadow
     float shadow = ShadowCalculation(FragPosLightSpace, norm, lightDir);
@@ -128,12 +130,18 @@ void main()
     // Color boost
     result *= colorBoost;
 
-    // Exponential squared fog
+    // Keep nearby colors readable while progressively separating distant planes.
     float dist = length(FragPos - viewPos);
-    float fogFactor = exp(-pow(dist * fogDensity * 0.003, 2.0));
-    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    float linearFog = smoothstep(fogStart, max(fogStart + 1.0, fogEnd), dist);
+    float densityDistance = max(0.0, dist - fogStart * 0.35);
+    float densityFog = 1.0 - exp(-pow(densityDistance * fogDensity * 0.0015, 2.0));
+    float relativeHeight = clamp((FragPos.y - viewPos.y + 48.0) / 160.0, 0.0, 1.0);
+    float heightFog = mix(1.12, 0.86, relativeHeight);
+    float fogAmount = clamp(max(linearFog, densityFog) * heightFog, 0.0, 0.92);
 
-    result = mix(fogColor, result, fogFactor);
+    float luminance = dot(result, vec3(0.299, 0.587, 0.114));
+    result = mix(vec3(luminance), result, saturationLevel);
+    result = mix(result, fogColor, fogAmount);
 
     FragColor = vec4(result, texColor.a);
 }

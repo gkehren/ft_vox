@@ -4,7 +4,7 @@
 
 PostProcessing::PostProcessing(int width, int height)
 	: viewportWidth(width), viewportHeight(height),
-	  hdrFBO(0), hdrColorTexture(0), hdrDepthRBO(0),
+	  hdrFBO(0), hdrColorTexture(0), godRaysSourceTexture(0), hdrDepthRBO(0),
 	  godRaysFBO(0), godRaysTexture(0),
 	  quadVAO(0), quadVBO(0)
 {
@@ -85,6 +85,19 @@ void PostProcessing::initFBOs()
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, hdrColorTexture, 0);
 
+	// Skybox-only source for god rays. Keeping this separate prevents bright
+	// terrain and snow from generating shafts.
+	glGenTextures(1, &godRaysSourceTexture);
+	glBindTexture(GL_TEXTURE_2D, godRaysSourceTexture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R11F_G11F_B10F, viewportWidth, viewportHeight, 0, GL_RGB, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, godRaysSourceTexture, 0);
+
+	glDrawBuffer(GL_COLOR_ATTACHMENT0);
+
 	// Depth + stencil renderbuffer
 	glGenRenderbuffers(1, &hdrDepthRBO);
 	glBindRenderbuffer(GL_RENDERBUFFER, hdrDepthRBO);
@@ -141,6 +154,7 @@ void PostProcessing::deleteFBOs()
 {
 	glDeleteFramebuffers(1, &hdrFBO);
 	glDeleteTextures(1, &hdrColorTexture);
+	glDeleteTextures(1, &godRaysSourceTexture);
 	glDeleteRenderbuffers(1, &hdrDepthRBO);
 
 	glDeleteFramebuffers(2, bloomFBO);
@@ -176,10 +190,21 @@ void PostProcessing::renderQuad()
 void PostProcessing::beginScene()
 {
 	glBindFramebuffer(GL_FRAMEBUFFER, hdrFBO);
+	const GLenum drawBuffers[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+	glDrawBuffers(2, drawBuffers);
+	const float clearColor[] = {0.0f, 0.0f, 0.0f, 0.0f};
+	glClearBufferfv(GL_COLOR, 1, clearColor);
+	glDrawBuffer(GL_COLOR_ATTACHMENT0);
 	glViewport(0, 0, viewportWidth, viewportHeight);
 }
 
-void PostProcessing::endSceneAndRender(const PostProcessSettings &settings, const glm::vec2 &sunScreenPos)
+void PostProcessing::beginSkyPass()
+{
+	const GLenum drawBuffers[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+	glDrawBuffers(2, drawBuffers);
+}
+
+void PostProcessing::endSceneAndRender(const PostProcessSettings &settings, const glm::vec2 &sunScreenPos, float sunVisibility, float time)
 {
 	int bloomW = viewportWidth / 2;
 	int bloomH = viewportHeight / 2;
@@ -239,13 +264,18 @@ void PostProcessing::endSceneAndRender(const PostProcessSettings &settings, cons
 	{
 		godRaysShader->use();
 		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, hdrColorTexture);
-		godRaysShader->setInt("hdrBuffer", 0);
+		glBindTexture(GL_TEXTURE_2D, godRaysSourceTexture);
+		godRaysShader->setInt("sourceBuffer", 0);
 		godRaysShader->setVec2("sunScreenPos", sunScreenPos);
+		godRaysShader->setFloat("sunVisibility", sunVisibility);
 		godRaysShader->setFloat("density", settings.godRaysDensity);
 		godRaysShader->setFloat("weight", settings.godRaysWeight);
 		godRaysShader->setFloat("decay", settings.godRaysDecay);
 		godRaysShader->setFloat("godRaysExposure", settings.godRaysExposure);
+		godRaysShader->setFloat("time", time);
+		godRaysShader->setInt("dynamicBoostEnabled", settings.godRaysDynamicBoostEnabled ? 1 : 0);
+		godRaysShader->setInt("boostPreview", settings.godRaysBoostPreview ? 1 : 0);
+		godRaysShader->setFloat("dramaticBoost", settings.godRaysDramaticBoost);
 
 		renderQuad();
 	}

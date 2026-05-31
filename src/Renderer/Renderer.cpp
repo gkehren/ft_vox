@@ -238,7 +238,7 @@ void Renderer::loadSkybox()
 	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 }
 
-void Renderer::drawSkybox(const Camera &camera, const glm::vec3 &sunDir, float dayTime, float time, const glm::vec3 &fogColor) const
+void Renderer::drawSkybox(const Camera &camera, const ShaderParameters &params, float time) const
 {
 	glDepthFunc(GL_LEQUAL);
 	this->skyboxShader->use();
@@ -247,10 +247,13 @@ void Renderer::drawSkybox(const Camera &camera, const glm::vec3 &sunDir, float d
 	this->skyboxShader->setMat4("projection", camera.getProjectionMatrix(screenWidth, screenHeight, renderDistance));
 
 	// Pass dynamic procedural sky uniforms
-	this->skyboxShader->setVec3("sunDir", sunDir);
-	this->skyboxShader->setFloat("dayTime", dayTime);
+	this->skyboxShader->setVec3("sunDir", glm::normalize(params.sunPosition - camera.getPosition()));
+	this->skyboxShader->setVec3("moonDir", glm::normalize(params.moonPosition - camera.getPosition()));
 	this->skyboxShader->setFloat("time", time);
-	this->skyboxShader->setVec3("fogColor", fogColor);
+	this->skyboxShader->setVec3("fogColor", params.fogColor);
+	this->skyboxShader->setFloat("dayFactor", params.dayFactor);
+	this->skyboxShader->setFloat("sunsetFactor", params.sunsetFactor);
+	this->skyboxShader->setFloat("nightFactor", params.nightFactor);
 	this->skyboxShader->setVec3("cameraPos", camera.getPosition());
 
 	glBindVertexArray(this->skyboxVAO);

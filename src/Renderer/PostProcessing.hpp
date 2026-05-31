@@ -18,9 +18,12 @@ public:
 	// Bind the HDR framebuffer — call before rendering the scene
 	void beginScene();
 
+	// Enable the celestial source attachment before rendering the skybox
+	void beginSkyPass();
+
 	// Run all post-processing passes and present to the default framebuffer
 	// sunScreenPos: sun position in normalized screen coords [0,1], used for god rays
-	void endSceneAndRender(const PostProcessSettings &settings, const glm::vec2 &sunScreenPos);
+	void endSceneAndRender(const PostProcessSettings &settings, const glm::vec2 &sunScreenPos, float sunVisibility, float time);
 
 private:
 	int viewportWidth;
@@ -29,6 +32,7 @@ private:
 	// HDR scene framebuffer
 	GLuint hdrFBO;
 	GLuint hdrColorTexture;
+	GLuint godRaysSourceTexture;
 	GLuint hdrDepthRBO;
 
 	// Bloom: two half-resolution ping-pong FBOs

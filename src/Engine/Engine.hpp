@@ -111,6 +111,7 @@ private:
 
 	void setupEventHandlers();
 	void updateWorldState();
+	void updateAtmosphere();
 	void renderScene();
 	bool raycast(const glm::vec3 &origin, const glm::vec3 &direction, float maxDistance, glm::vec3 &hitPosition, glm::vec3 &previousPosition);
 
