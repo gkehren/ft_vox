@@ -91,27 +91,40 @@ GLuint Shader::linkProgram(GLuint vertexShader, GLuint fragmentShader) const
 	return program;
 }
 
+GLint Shader::getUniformLocation(const std::string &name) const
+{
+	auto it = uniformLocationCache.find(name);
+	if (it != uniformLocationCache.end())
+	{
+		return it->second;
+	}
+
+	GLint location = glGetUniformLocation(this->id, name.c_str());
+	uniformLocationCache[name] = location;
+	return location;
+}
+
 void Shader::setMat4(const std::string &name, const glm::mat4 &mat) const
 {
-	glUniformMatrix4fv(glGetUniformLocation(this->id, name.c_str()), 1, GL_FALSE, glm::value_ptr(mat));
+	glUniformMatrix4fv(this->getUniformLocation(name), 1, GL_FALSE, glm::value_ptr(mat));
 }
 
 void Shader::setVec3(const std::string &name, const glm::vec3 &vec) const
 {
-	glUniform3fv(glGetUniformLocation(this->id, name.c_str()), 1, glm::value_ptr(vec));
+	glUniform3fv(this->getUniformLocation(name), 1, glm::value_ptr(vec));
 }
 
 void Shader::setVec2(const std::string &name, const glm::vec2 &vec) const
 {
-	glUniform2fv(glGetUniformLocation(this->id, name.c_str()), 1, glm::value_ptr(vec));
+	glUniform2fv(this->getUniformLocation(name), 1, glm::value_ptr(vec));
 }
 
 void Shader::setInt(const std::string &name, int value) const
 {
-	glUniform1i(glGetUniformLocation(this->id, name.c_str()), value);
+	glUniform1i(this->getUniformLocation(name), value);
 }
 
 void Shader::setFloat(const std::string &name, float value) const
 {
-	glUniform1f(glGetUniformLocation(this->id, name.c_str()), value);
+	glUniform1f(this->getUniformLocation(name), value);
 }
