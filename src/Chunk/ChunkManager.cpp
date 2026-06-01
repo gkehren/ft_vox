@@ -312,29 +312,29 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	glBindTexture(GL_TEXTURE_2D_ARRAY, textureAtlas);
 
 	// --- Opaque pass ---
-	std::vector<Chunk*> visibleOpaqueChunks;
-	visibleOpaqueChunks.reserve(activeChunks.size());
+	// Cache distances before sorting to reduce complexity from O(N log N) to O(N) operations.
+	std::vector<std::pair<float, Chunk*>> visibleOpaquePairs;
+	visibleOpaquePairs.reserve(activeChunks.size());
+	glm::vec3 camPos = camera.getPosition();
 	for (Chunk *chunk : activeChunks)
 	{
 		if (chunk->isVisible() && chunk->getState() >= ChunkState::MESHED)
 		{
-			visibleOpaqueChunks.push_back(chunk);
+			glm::vec3 center = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+			float distSq = glm::dot(center - camPos, center - camPos);
+			visibleOpaquePairs.push_back({distSq, chunk});
 		}
 	}
 
 	// Tri front-to-back (plus proche au plus lointain)
-	glm::vec3 camPos = camera.getPosition();
-	std::sort(visibleOpaqueChunks.begin(), visibleOpaqueChunks.end(), [&camPos](Chunk *a, Chunk *b)
+	std::sort(visibleOpaquePairs.begin(), visibleOpaquePairs.end(), [](const auto& a, const auto& b)
 			  {
-				  glm::vec3 centerA = a->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
-				  glm::vec3 centerB = b->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
-				  float distSqA = glm::dot(centerA - camPos, centerA - camPos);
-				  float distSqB = glm::dot(centerB - camPos, centerB - camPos);
-				  return distSqA < distSqB;
+				  return a.first < b.first;
 			  });
 
-	for (Chunk *chunk : visibleOpaqueChunks)
+	for (const auto& pair : visibleOpaquePairs)
 	{
+		Chunk *chunk = pair.second;
 		renderSettings.visibleVoxelsCount += chunk->draw();
 		renderSettings.visibleChunksCount++;
 
@@ -351,17 +351,28 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	float camMovedSq = glm::dot(camPos - m_lastWaterSortCamPos, camPos - m_lastWaterSortCamPos);
 	if (camMovedSq > kResortThreshSq || m_cachedWaterChunks.empty())
 	{
-		m_cachedWaterChunks.clear();
+		// Cache distances before sorting to reduce complexity from O(N log N) to O(N) operations.
+		std::vector<std::pair<float, Chunk*>> waterPairs;
 		for (Chunk *chunk : activeChunks)
 		{
 			if (chunk->isVisible() && chunk->getState() >= ChunkState::MESHED && chunk->hasWaterMesh())
-				m_cachedWaterChunks.push_back(chunk);
+			{
+				glm::vec3 center = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
+				float distSq = glm::dot(center - camPos, center - camPos);
+				waterPairs.push_back({distSq, chunk});
+			}
 		}
-		std::sort(m_cachedWaterChunks.begin(), m_cachedWaterChunks.end(), [&camPos](Chunk *a, Chunk *b)
+		std::sort(waterPairs.begin(), waterPairs.end(), [](const auto& a, const auto& b)
 				  {
-					  glm::vec3 centerA = a->getPosition() + glm::vec3(CHUNK_SIZE / 2);
-					  glm::vec3 centerB = b->getPosition() + glm::vec3(CHUNK_SIZE / 2);
-					  return glm::dot(centerA - camPos, centerA - camPos) > glm::dot(centerB - camPos, centerB - camPos); });
+					  return a.first > b.first; // back-to-front
+				  });
+
+		m_cachedWaterChunks.clear();
+		m_cachedWaterChunks.reserve(waterPairs.size());
+		for (const auto& pair : waterPairs)
+		{
+			m_cachedWaterChunks.push_back(pair.second);
+		}
 		m_lastWaterSortCamPos = camPos;
 	}
 
