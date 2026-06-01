@@ -312,7 +312,7 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	glBindTexture(GL_TEXTURE_2D_ARRAY, textureAtlas);
 
 	// --- Opaque pass ---
-	// Bolt: Cache distances before sorting to reduce complexity from O(N log N) to O(N) operations.
+	// Cache distances before sorting to reduce complexity from O(N log N) to O(N) operations.
 	std::vector<std::pair<float, Chunk*>> visibleOpaquePairs;
 	visibleOpaquePairs.reserve(activeChunks.size());
 	glm::vec3 camPos = camera.getPosition();
@@ -351,7 +351,7 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	float camMovedSq = glm::dot(camPos - m_lastWaterSortCamPos, camPos - m_lastWaterSortCamPos);
 	if (camMovedSq > kResortThreshSq || m_cachedWaterChunks.empty())
 	{
-		// Bolt: Cache distances before sorting to reduce complexity from O(N log N) to O(N) operations.
+		// Cache distances before sorting to reduce complexity from O(N log N) to O(N) operations.
 		std::vector<std::pair<float, Chunk*>> waterPairs;
 		for (Chunk *chunk : activeChunks)
 		{
