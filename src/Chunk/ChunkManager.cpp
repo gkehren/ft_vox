@@ -172,7 +172,8 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 		}
 	};
 
-	std::priority_queue<ChunkGenInfo> genQueue;
+	std::vector<ChunkGenInfo> genInfos;
+	genInfos.reserve(activeChunks.size());
 
 	for (Chunk *chunk : activeChunks)
 	{
@@ -182,9 +183,11 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 			float dx = chunkCenter.x - camera.getPosition().x;
 			float dz = chunkCenter.z - camera.getPosition().z;
 			float distanceSq = dx * dx + dz * dz;
-			genQueue.push({chunk, distanceSq});
+			genInfos.push_back({chunk, distanceSq});
 		}
 	} // Générer les chunks par ordre de priorité
+	std::priority_queue<ChunkGenInfo> genQueue(genInfos.begin(), genInfos.end());
+
 	int genDispatched = 0;
 	while (!genQueue.empty() && genDispatched < budget)
 	{
@@ -226,7 +229,8 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		}
 	};
 
-	std::priority_queue<ChunkMeshInfo> meshQueue;
+	std::vector<ChunkMeshInfo> meshInfos;
+	meshInfos.reserve(activeChunks.size());
 
 	for (Chunk *chunk : activeChunks)
 	{
@@ -236,9 +240,10 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			float dx = chunkCenter.x - camera.getPosition().x;
 			float dz = chunkCenter.z - camera.getPosition().z;
 			float distanceSq = dx * dx + dz * dz;
-			meshQueue.push({chunk, distanceSq});
+			meshInfos.push_back({chunk, distanceSq});
 		}
 	} // Mailler les chunks par ordre de priorité
+	std::priority_queue<ChunkMeshInfo> meshQueue(meshInfos.begin(), meshInfos.end());
 
 	// K: Upgrade any LOD-meshed chunks that have since come within normal range.
 	// Resetting to GENERATED lets them fall into the dispatch loop below with a
@@ -710,7 +715,8 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 		}
 	};
 
-	std::priority_queue<ChunkLoadInfo> priorityQueue;
+	std::vector<ChunkLoadInfo> loadInfos;
+	loadInfos.reserve((2 * radius + 1) * (2 * radius + 1));
 
 	// Calculer la priorité pour chaque chunk potentiel
 	const float maxDistSq = static_cast<float>(settings.maxRenderDistance) * static_cast<float>(settings.maxRenderDistance);
@@ -730,10 +736,12 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 
 			if (distToPlayerSq <= maxDistSq)
 			{
-				priorityQueue.push({chunkPos, distToPlayerSq});
+				loadInfos.push_back({chunkPos, distToPlayerSq});
 			}
 		}
 	}
+
+	std::priority_queue<ChunkLoadInfo> priorityQueue(loadInfos.begin(), loadInfos.end());
 
 	// Charger les chunks par ordre de priorité
 	std::lock_guard<std::shared_mutex> lock(chunkMutex);
@@ -753,40 +761,44 @@ void ChunkManager::processFinishedJobs()
 	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 
 	// Check generation tasks
-	auto genIt = pendingGenerationTasks.begin();
-	while (genIt != pendingGenerationTasks.end())
+	for (size_t i = 0; i < pendingGenerationTasks.size(); )
 	{
-		if (genIt->first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+		if (pendingGenerationTasks[i].first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
 		{
-			genIt->first.get(); // Propagate exceptions if any
-			chunksInTransit.erase(genIt->second);
-			genIt = pendingGenerationTasks.erase(genIt);
+			pendingGenerationTasks[i].first.get(); // Propagate exceptions if any
+			chunksInTransit.erase(pendingGenerationTasks[i].second);
+
+			// ⚡ Bolt: Fast O(1) unordered erase using swap-and-pop
+			pendingGenerationTasks[i] = std::move(pendingGenerationTasks.back());
+			pendingGenerationTasks.pop_back();
 		}
 		else
 		{
-			++genIt;
+			++i;
 		}
 	}
 
 	// Check meshing tasks
-	auto meshIt = pendingMeshingTasks.begin();
-	while (meshIt != pendingMeshingTasks.end())
+	for (size_t i = 0; i < pendingMeshingTasks.size(); )
 	{
-		if (meshIt->first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+		if (pendingMeshingTasks[i].first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
 		{
-			meshIt->first.get();
-			Chunk *finishedChunk = meshIt->second;
+			pendingMeshingTasks[i].first.get();
+			Chunk *finishedChunk = pendingMeshingTasks[i].second;
 			chunksInTransit.erase(finishedChunk);
 			// H: A newly meshed chunk may have water geometry — invalidate the sorted
 			// cache so it appears in the next water transparency pass without waiting
 			// for the camera to move.
 			if (finishedChunk->hasWaterMesh())
 				m_cachedWaterChunks.clear();
-			meshIt = pendingMeshingTasks.erase(meshIt);
+
+			// ⚡ Bolt: Fast O(1) unordered erase using swap-and-pop
+			pendingMeshingTasks[i] = std::move(pendingMeshingTasks.back());
+			pendingMeshingTasks.pop_back();
 		}
 		else
 		{
-			++meshIt;
+			++i;
 		}
 	}
 }
