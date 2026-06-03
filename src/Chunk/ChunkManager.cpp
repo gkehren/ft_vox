@@ -313,8 +313,9 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 
 	// --- Opaque pass ---
 	// Cache distances before sorting to reduce complexity from O(N log N) to O(N) operations.
-	std::vector<std::pair<float, Chunk*>> visibleOpaquePairs;
-	visibleOpaquePairs.reserve(activeChunks.size());
+	m_visibleOpaquePairs.clear();
+	m_visibleOpaquePairs.reserve(activeChunks.size());
+
 	glm::vec3 camPos = camera.getPosition();
 	for (Chunk *chunk : activeChunks)
 	{
@@ -322,17 +323,17 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 		{
 			glm::vec3 center = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 			float distSq = glm::dot(center - camPos, center - camPos);
-			visibleOpaquePairs.push_back({distSq, chunk});
+			m_visibleOpaquePairs.push_back({distSq, chunk});
 		}
 	}
 
 	// Tri front-to-back (plus proche au plus lointain)
-	std::sort(visibleOpaquePairs.begin(), visibleOpaquePairs.end(), [](const auto& a, const auto& b)
+	std::sort(m_visibleOpaquePairs.begin(), m_visibleOpaquePairs.end(), [](const auto& a, const auto& b)
 			  {
 				  return a.first < b.first;
 			  });
 
-	for (const auto& pair : visibleOpaquePairs)
+	for (const auto& pair : m_visibleOpaquePairs)
 	{
 		Chunk *chunk = pair.second;
 		renderSettings.visibleVoxelsCount += chunk->draw();
@@ -352,24 +353,24 @@ void ChunkManager::drawVisibleChunks(Shader &shader, const Camera &camera, const
 	if (camMovedSq > kResortThreshSq || m_cachedWaterChunks.empty())
 	{
 		// Cache distances before sorting to reduce complexity from O(N log N) to O(N) operations.
-		std::vector<std::pair<float, Chunk*>> waterPairs;
+		m_waterPairs.clear();
 		for (Chunk *chunk : activeChunks)
 		{
 			if (chunk->isVisible() && chunk->getState() >= ChunkState::MESHED && chunk->hasWaterMesh())
 			{
 				glm::vec3 center = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 				float distSq = glm::dot(center - camPos, center - camPos);
-				waterPairs.push_back({distSq, chunk});
+				m_waterPairs.push_back({distSq, chunk});
 			}
 		}
-		std::sort(waterPairs.begin(), waterPairs.end(), [](const auto& a, const auto& b)
+		std::sort(m_waterPairs.begin(), m_waterPairs.end(), [](const auto& a, const auto& b)
 				  {
 					  return a.first > b.first; // back-to-front
 				  });
 
 		m_cachedWaterChunks.clear();
-		m_cachedWaterChunks.reserve(waterPairs.size());
-		for (const auto& pair : waterPairs)
+		m_cachedWaterChunks.reserve(m_waterPairs.size());
+		for (const auto& pair : m_waterPairs)
 		{
 			m_cachedWaterChunks.push_back(pair.second);
 		}
