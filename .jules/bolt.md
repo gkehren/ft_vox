@@ -1,3 +1,6 @@
 ## 2024-05-24 - Sorting Optimization
 **Learning:** `std::sort` recalculates its lambda arguments dynamically. When the arguments involve complex calculations like vector math (distance computation), computing them inside the sorting loop results in redundant $O(N \log N)$ calculations instead of $O(N)$.
 **Action:** Always pre-calculate expensive metrics before sorting, often using a "Schwartzian transform" pattern (e.g., storing the metric in a `std::pair` or a custom struct alongside the object pointer) to dramatically reduce processing time.
+## 2023-10-27 - O(N log N) Priority Queue overhead
+**Learning:** `std::priority_queue` performs an O(log N) heap insertion for every single element pushed, which is extremely expensive when queueing thousands of chunk tasks per frame (e.g. for `generatePendingVoxels` and `meshPendingChunks`). Furthermore, when we only need the top K elements (due to a per-frame dispatch `budget`), sorting the entire collection is unnecessary work.
+**Action:** Replace `std::priority_queue` with `std::vector` combined with `std::partial_sort()`. This changes the algorithmic complexity from O(N log N) continuous heap inserts to O(N) batched vector insertions followed by an O(N log K) partial sort. This is drastically faster and vastly improves CPU cache locality.
