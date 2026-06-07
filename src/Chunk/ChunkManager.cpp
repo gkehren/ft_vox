@@ -165,14 +165,10 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	{
 		Chunk *chunk;
 		float distance;
-
-		bool operator<(const ChunkGenInfo &other) const
-		{
-			return distance > other.distance;
-		}
 	};
 
-	std::priority_queue<ChunkGenInfo> genQueue;
+	std::vector<ChunkGenInfo> genQueue;
+	genQueue.reserve(activeChunks.size());
 
 	for (Chunk *chunk : activeChunks)
 	{
@@ -182,28 +178,36 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 			float dx = chunkCenter.x - camera.getPosition().x;
 			float dz = chunkCenter.z - camera.getPosition().z;
 			float distanceSq = dx * dx + dz * dz;
-			genQueue.push({chunk, distanceSq});
+			genQueue.push_back({chunk, distanceSq});
 		}
-	} // Générer les chunks par ordre de priorité
-	int genDispatched = 0;
-	while (!genQueue.empty() && genDispatched < budget)
-	{
-		Chunk *chunk = genQueue.top().chunk;
-		float distanceSq = genQueue.top().distance;
-		int currentSeed = m_terrainGenerator->getSeed();
+	}
 
+	int chunksToProcess = std::min(static_cast<int>(genQueue.size()), budget);
+	if (chunksToProcess > 0)
+	{
+		std::partial_sort(genQueue.begin(), genQueue.begin() + chunksToProcess, genQueue.end(), [](const ChunkGenInfo &a, const ChunkGenInfo &b)
+		{
+			return a.distance < b.distance;
+		});
+
+		int currentSeed = m_terrainGenerator->getSeed();
 		const float lodThreshold = static_cast<float>(settings.minRenderDistance) * 2.0f;
 		const float lodThresholdSq = lodThreshold * lodThreshold;
-		TaskPriority priority = calculateTaskPriority(distanceSq, lodThresholdSq);
 
-		chunksInTransit.insert(chunk);
-		auto future = p_threadPool->enqueue(priority, [chunk, currentSeed]()
-											{
-												TerrainGenerator& localGenerator = TerrainGenerator::getThreadLocal(currentSeed);
-												chunk->generateTerrain(localGenerator); });
-		pendingGenerationTasks.push_back({std::move(future), chunk});
-		genQueue.pop();
-		++genDispatched;
+		for (int i = 0; i < chunksToProcess; ++i)
+		{
+			Chunk *chunk = genQueue[i].chunk;
+			float distanceSq = genQueue[i].distance;
+
+			TaskPriority priority = calculateTaskPriority(distanceSq, lodThresholdSq);
+
+			chunksInTransit.insert(chunk);
+			auto future = p_threadPool->enqueue(priority, [chunk, currentSeed]()
+												{
+													TerrainGenerator& localGenerator = TerrainGenerator::getThreadLocal(currentSeed);
+													chunk->generateTerrain(localGenerator); });
+			pendingGenerationTasks.push_back({std::move(future), chunk});
+		}
 	}
 }
 
@@ -219,14 +223,10 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	{
 		Chunk *chunk;
 		float distance;
-
-		bool operator<(const ChunkMeshInfo &other) const
-		{
-			return distance > other.distance;
-		}
 	};
 
-	std::priority_queue<ChunkMeshInfo> meshQueue;
+	std::vector<ChunkMeshInfo> meshQueue;
+	meshQueue.reserve(activeChunks.size());
 
 	for (Chunk *chunk : activeChunks)
 	{
@@ -236,7 +236,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			float dx = chunkCenter.x - camera.getPosition().x;
 			float dz = chunkCenter.z - camera.getPosition().z;
 			float distanceSq = dx * dx + dz * dz;
-			meshQueue.push({chunk, distanceSq});
+			meshQueue.push_back({chunk, distanceSq});
 		}
 	} // Mailler les chunks par ordre de priorité
 
@@ -259,33 +259,39 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		}
 	}
 
-	int meshDispatched = 0;
-	while (!meshQueue.empty() && meshDispatched < budget)
+	int chunksToProcess = std::min(static_cast<int>(meshQueue.size()), budget);
+	if (chunksToProcess > 0)
 	{
-		Chunk *chunk = meshQueue.top().chunk;
-		float chunkDistSq = meshQueue.top().distance; // K: distance already computed
-		glm::vec3 wp = chunk->getPosition();
-		glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
-					  static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
-		chunksInTransit.insert(chunk);
-		TaskPriority priority = calculateTaskPriority(chunkDistSq, lodThresholdSq);
-		if (chunkDistSq > lodThresholdSq)
+		std::partial_sort(meshQueue.begin(), meshQueue.begin() + chunksToProcess, meshQueue.end(), [](const ChunkMeshInfo &a, const ChunkMeshInfo &b)
 		{
-			// K: Distant chunk — simplified column-top mesh, no shell needed
-			auto future = p_threadPool->enqueue(priority, [chunk]()
-												{ chunk->generateLODMesh(); });
-			pendingMeshingTasks.push_back({std::move(future), chunk});
-		}
-		else
+			return a.distance < b.distance;
+		});
+
+		for (int i = 0; i < chunksToProcess; ++i)
 		{
-			// E: Ensure neighbor shell data is available before the off-thread mesh task runs
-			ensureShellPopulated(chunk, ci);
-			auto future = p_threadPool->enqueue(priority, [chunk]()
-												{ chunk->generateMesh(); });
-			pendingMeshingTasks.push_back({std::move(future), chunk});
+			Chunk *chunk = meshQueue[i].chunk;
+			float chunkDistSq = meshQueue[i].distance; // K: distance already computed
+			glm::vec3 wp = chunk->getPosition();
+			glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
+						  static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
+			chunksInTransit.insert(chunk);
+			TaskPriority priority = calculateTaskPriority(chunkDistSq, lodThresholdSq);
+			if (chunkDistSq > lodThresholdSq)
+			{
+				// K: Distant chunk — simplified column-top mesh, no shell needed
+				auto future = p_threadPool->enqueue(priority, [chunk]()
+													{ chunk->generateLODMesh(); });
+				pendingMeshingTasks.push_back({std::move(future), chunk});
+			}
+			else
+			{
+				// E: Ensure neighbor shell data is available before the off-thread mesh task runs
+				ensureShellPopulated(chunk, ci);
+				auto future = p_threadPool->enqueue(priority, [chunk]()
+													{ chunk->generateMesh(); });
+				pendingMeshingTasks.push_back({std::move(future), chunk});
+			}
 		}
-		meshQueue.pop();
-		++meshDispatched;
 	}
 }
 
@@ -703,14 +709,11 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 	{
 		glm::ivec3 pos;
 		float distance;
-
-		bool operator<(const ChunkLoadInfo &other) const
-		{
-			return distance > other.distance; // Priorité aux chunks plus proches
-		}
 	};
 
-	std::priority_queue<ChunkLoadInfo> priorityQueue;
+	std::vector<ChunkLoadInfo> loadQueue;
+	// Max possible chunks in radius: (2*radius + 1)^2
+	loadQueue.reserve((2 * radius + 1) * (2 * radius + 1));
 
 	// Calculer la priorité pour chaque chunk potentiel
 	const float maxDistSq = static_cast<float>(settings.maxRenderDistance) * static_cast<float>(settings.maxRenderDistance);
@@ -730,21 +733,24 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 
 			if (distToPlayerSq <= maxDistSq)
 			{
-				priorityQueue.push({chunkPos, distToPlayerSq});
+				loadQueue.push_back({chunkPos, distToPlayerSq});
 			}
 		}
 	}
 
+	std::sort(loadQueue.begin(), loadQueue.end(), [](const ChunkLoadInfo &a, const ChunkLoadInfo &b)
+	{
+		return a.distance < b.distance; // Priorité aux chunks plus proches
+	});
+
 	// Charger les chunks par ordre de priorité
 	std::lock_guard<std::shared_mutex> lock(chunkMutex);
-	while (!priorityQueue.empty())
+	for (const auto &info : loadQueue)
 	{
-		const auto &info = priorityQueue.top();
 		if (chunks.find(info.pos) == chunks.end())
 		{
 			chunkLoadQueue.push(info.pos);
 		}
-		priorityQueue.pop();
 	}
 }
 
