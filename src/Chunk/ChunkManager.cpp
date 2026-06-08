@@ -710,10 +710,11 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 		}
 	};
 
-	std::priority_queue<ChunkLoadInfo> priorityQueue;
+	std::vector<ChunkLoadInfo> loadVector;
 
 	// Calculer la priorité pour chaque chunk potentiel
 	const float maxDistSq = static_cast<float>(settings.maxRenderDistance) * static_cast<float>(settings.maxRenderDistance);
+	glm::vec3 camPos = camera.getPosition();
 	for (int x = -radius; x <= radius; x++)
 	{
 		for (int z = -radius; z <= radius; z++)
@@ -724,16 +725,18 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 				0,
 				chunkPos.z * CHUNK_SIZE + CHUNK_SIZE / 2.0f);
 
-			float dx = camera.getPosition().x - chunkCenterWorld.x;
-			float dz = camera.getPosition().z - chunkCenterWorld.z;
+			float dx = camPos.x - chunkCenterWorld.x;
+			float dz = camPos.z - chunkCenterWorld.z;
 			float distToPlayerSq = dx * dx + dz * dz;
 
 			if (distToPlayerSq <= maxDistSq)
 			{
-				priorityQueue.push({chunkPos, distToPlayerSq});
+				loadVector.push_back({chunkPos, distToPlayerSq});
 			}
 		}
 	}
+
+	std::priority_queue<ChunkLoadInfo> priorityQueue(std::less<ChunkLoadInfo>(), std::move(loadVector));
 
 	// Charger les chunks par ordre de priorité
 	std::lock_guard<std::shared_mutex> lock(chunkMutex);
