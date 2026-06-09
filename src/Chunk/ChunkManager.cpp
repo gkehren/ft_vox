@@ -760,7 +760,14 @@ void ChunkManager::processFinishedJobs()
 		{
 			genIt->first.get(); // Propagate exceptions if any
 			chunksInTransit.erase(genIt->second);
-			genIt = pendingGenerationTasks.erase(genIt);
+			// O(1) erase by swapping with the last element
+			if (std::distance(genIt, pendingGenerationTasks.end()) > 1) {
+				std::swap(*genIt, pendingGenerationTasks.back());
+				pendingGenerationTasks.pop_back();
+			} else {
+				pendingGenerationTasks.pop_back();
+				break;
+			}
 		}
 		else
 		{
@@ -782,7 +789,15 @@ void ChunkManager::processFinishedJobs()
 			// for the camera to move.
 			if (finishedChunk->hasWaterMesh())
 				m_cachedWaterChunks.clear();
-			meshIt = pendingMeshingTasks.erase(meshIt);
+
+			// O(1) erase by swapping with the last element
+			if (std::distance(meshIt, pendingMeshingTasks.end()) > 1) {
+				std::swap(*meshIt, pendingMeshingTasks.back());
+				pendingMeshingTasks.pop_back();
+			} else {
+				pendingMeshingTasks.pop_back();
+				break;
+			}
 		}
 		else
 		{
