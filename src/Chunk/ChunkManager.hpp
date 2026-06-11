@@ -73,6 +73,9 @@ private:
 	mutable glm::vec3 m_lastWaterSortCamPos{std::numeric_limits<float>::max()};
 	mutable std::vector<Chunk *> m_cachedWaterChunks;
 
+	mutable std::vector<std::pair<float, Chunk*>> m_visibleOpaquePairs;
+	mutable std::vector<std::pair<float, Chunk*>> m_waterPairs;
+
 	TerrainGenerator *m_terrainGenerator;
 	ThreadPool *p_threadPool;
 	ChunkPool *m_chunkPool;
