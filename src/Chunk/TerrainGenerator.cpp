@@ -548,6 +548,11 @@ struct GenBuffers
   std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderRavine;
   std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderSurface3D;
 
+  // Temporary buffers for erosion and vegetation
+  std::vector<float> erosionTempMap;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> treeNoise;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> forestDensity;
+
   // Persistent generator to avoid expensive setup every chunk
   std::unique_ptr<TerrainGenerator> generator;
 };
@@ -1062,7 +1067,8 @@ void TerrainGenerator::applyErosion(float *heightMap, int size) const
   const float talusAngle = 0.6f;  // Max allowed height diff between adjacent cells
   const float thermalRate = 0.5f; // Fraction of material to move
 
-  std::vector<float> tempMap(heightMap, heightMap + size * size);
+  std::vector<float> &tempMap = s_genBuffers.erosionTempMap;
+  tempMap.assign(heightMap, heightMap + size * size);
 
   for (int z = 1; z < size - 1; ++z)
   {
@@ -1108,14 +1114,14 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
   float chunkXf = static_cast<float>(chunkX) + NOISE_OFFSET;
   float chunkZf = static_cast<float>(chunkZ) + NOISE_OFFSET;
 
-  std::vector<float> treeNoiseResults(CHUNK_SIZE * CHUNK_SIZE);
-  std::vector<float> forestDensityResults(CHUNK_SIZE * CHUNK_SIZE);
+  float *treeNoiseResults = s_genBuffers.treeNoise.data();
+  float *forestDensityResults = s_genBuffers.forestDensity.data();
 
   // Local tree-placement noise: high-frequency per-column variation
-  m_treeNoise->GenUniformGrid2D(treeNoiseResults.data(), chunkXf, chunkZf,
+  m_treeNoise->GenUniformGrid2D(treeNoiseResults, chunkXf, chunkZf,
                                 CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 10000);
   // Forest-cluster noise: low-frequency, shapes large forest patches and clearings
-  m_forestDensityNoise->GenUniformGrid2D(forestDensityResults.data(), chunkXf, chunkZf,
+  m_forestDensityNoise->GenUniformGrid2D(forestDensityResults, chunkXf, chunkZf,
                                          CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 11000);
 
   for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
