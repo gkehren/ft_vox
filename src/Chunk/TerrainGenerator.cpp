@@ -916,18 +916,25 @@ void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
   const int startX = static_cast<int>(std::round((centerX + NOISE_OFFSET) * invStep - width * 0.5f));
   const int startZ = static_cast<int>(std::round((centerZ + NOISE_OFFSET) * invStep - height * 0.5f));
 
-  std::vector<float> tempBuf(count), humidBuf(count), weirdBuf(count), riverBuf(count);
-  std::vector<float> contBuf(count), erosionBuf(count), pvBuf(count), ridgeBuf(count);
+  // ⚡ Bolt: Replaced std::vector (which zero-initializes memory) with unique_ptr arrays for massive UI map generation speedup
+  std::unique_ptr<float[]> tempBuf(new float[count]);
+  std::unique_ptr<float[]> humidBuf(new float[count]);
+  std::unique_ptr<float[]> weirdBuf(new float[count]);
+  std::unique_ptr<float[]> riverBuf(new float[count]);
+  std::unique_ptr<float[]> contBuf(new float[count]);
+  std::unique_ptr<float[]> erosionBuf(new float[count]);
+  std::unique_ptr<float[]> pvBuf(new float[count]);
+  std::unique_ptr<float[]> ridgeBuf(new float[count]);
 
   // GenUniformGrid2D processes batches with SIMD — far faster than individual GenSingle2D calls.
-  m_temperatureNoise->GenUniformGrid2D(tempBuf.data(), startX, startZ, width, height, step, m_seed + 6000);
-  m_humidityNoise->GenUniformGrid2D(humidBuf.data(), startX, startZ, width, height, step, m_seed + 7000);
-  m_weirdnessNoise->GenUniformGrid2D(weirdBuf.data(), startX, startZ, width, height, step, m_seed + 8000);
-  m_continentalNoise->GenUniformGrid2D(contBuf.data(), startX, startZ, width, height, step, m_seed);
-  m_erosionNoise->GenUniformGrid2D(erosionBuf.data(), startX, startZ, width, height, step, m_seed + 1000);
-  m_peaksValleysNoise->GenUniformGrid2D(pvBuf.data(), startX, startZ, width, height, step, m_seed + 2000);
-  m_ridgeNoise->GenUniformGrid2D(ridgeBuf.data(), startX, startZ, width, height, step, m_seed + 3000);
-  m_riverNoise->GenUniformGrid2D(riverBuf.data(), startX, startZ, width, height, step, m_seed + 9000);
+  m_temperatureNoise->GenUniformGrid2D(tempBuf.get(), startX, startZ, width, height, step, m_seed + 6000);
+  m_humidityNoise->GenUniformGrid2D(humidBuf.get(), startX, startZ, width, height, step, m_seed + 7000);
+  m_weirdnessNoise->GenUniformGrid2D(weirdBuf.get(), startX, startZ, width, height, step, m_seed + 8000);
+  m_continentalNoise->GenUniformGrid2D(contBuf.get(), startX, startZ, width, height, step, m_seed);
+  m_erosionNoise->GenUniformGrid2D(erosionBuf.get(), startX, startZ, width, height, step, m_seed + 1000);
+  m_peaksValleysNoise->GenUniformGrid2D(pvBuf.get(), startX, startZ, width, height, step, m_seed + 2000);
+  m_ridgeNoise->GenUniformGrid2D(ridgeBuf.get(), startX, startZ, width, height, step, m_seed + 3000);
+  m_riverNoise->GenUniformGrid2D(riverBuf.get(), startX, startZ, width, height, step, m_seed + 9000);
 
   for (int i = 0; i < count; i++)
   {
@@ -1062,7 +1069,9 @@ void TerrainGenerator::applyErosion(float *heightMap, int size) const
   const float talusAngle = 0.6f;  // Max allowed height diff between adjacent cells
   const float thermalRate = 0.5f; // Fraction of material to move
 
-  std::vector<float> tempMap(heightMap, heightMap + size * size);
+  // ⚡ Bolt: Replaced dynamic std::vector allocation with unique_ptr array to prevent zero-initialization overhead
+  std::unique_ptr<float[]> tempMap(new float[size * size]);
+  std::copy(heightMap, heightMap + size * size, tempMap.get());
 
   for (int z = 1; z < size - 1; ++z)
   {
@@ -1108,14 +1117,15 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
   float chunkXf = static_cast<float>(chunkX) + NOISE_OFFSET;
   float chunkZf = static_cast<float>(chunkZ) + NOISE_OFFSET;
 
-  std::vector<float> treeNoiseResults(CHUNK_SIZE * CHUNK_SIZE);
-  std::vector<float> forestDensityResults(CHUNK_SIZE * CHUNK_SIZE);
+  // ⚡ Bolt: Replaced dynamic std::vector allocation with stack array
+  float treeNoiseResults[CHUNK_SIZE * CHUNK_SIZE];
+  float forestDensityResults[CHUNK_SIZE * CHUNK_SIZE];
 
   // Local tree-placement noise: high-frequency per-column variation
-  m_treeNoise->GenUniformGrid2D(treeNoiseResults.data(), chunkXf, chunkZf,
+  m_treeNoise->GenUniformGrid2D(treeNoiseResults, chunkXf, chunkZf,
                                 CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 10000);
   // Forest-cluster noise: low-frequency, shapes large forest patches and clearings
-  m_forestDensityNoise->GenUniformGrid2D(forestDensityResults.data(), chunkXf, chunkZf,
+  m_forestDensityNoise->GenUniformGrid2D(forestDensityResults, chunkXf, chunkZf,
                                          CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 11000);
 
   for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)

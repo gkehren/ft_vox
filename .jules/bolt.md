@@ -1,3 +1,6 @@
 ## 2024-05-24 - Sorting Optimization
 **Learning:** `std::sort` recalculates its lambda arguments dynamically. When the arguments involve complex calculations like vector math (distance computation), computing them inside the sorting loop results in redundant $O(N \log N)$ calculations instead of $O(N)$.
 **Action:** Always pre-calculate expensive metrics before sorting, often using a "Schwartzian transform" pattern (e.g., storing the metric in a `std::pair` or a custom struct alongside the object pointer) to dramatically reduce processing time.
+## 2024-05-24 - Zero-Initialization Overhead
+**Learning:** `std::vector<T>(count)` dynamically allocates memory but also strictly value-initializes (zero-fills) every element. When using vectors as raw buffers for procedural noise generation (e.g., FastNoise2 output) where every element is immediately overwritten anyway, this implicit zero-initialization causes a significant and unnecessary CPU overhead.
+**Action:** For uninitialized raw data buffers, either use `std::unique_ptr<T[]>(new T[count])` (which does not zero-initialize native types) or use fixed-size stack arrays for small counts to completely eliminate dynamic allocation and zero-filling overhead.
