@@ -69,6 +69,10 @@ private:
 
 	mutable std::shared_mutex chunkMutex;
 
+	// Optimization: Pre-allocated vectors for sorting to avoid per-frame allocations
+	mutable std::vector<std::pair<float, Chunk*>> m_visibleOpaquePairs;
+	mutable std::vector<std::pair<float, Chunk*>> m_waterPairs;
+
 	// H: water-sort cache — rebuilt only when camera moves > CHUNK_SIZE/2
 	mutable glm::vec3 m_lastWaterSortCamPos{std::numeric_limits<float>::max()};
 	mutable std::vector<Chunk *> m_cachedWaterChunks;
