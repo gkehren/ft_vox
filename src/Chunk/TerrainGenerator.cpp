@@ -548,6 +548,24 @@ struct GenBuffers
   std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderRavine;
   std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderSurface3D;
 
+  // Reusable buffers for vegetation generation (CHUNK_SIZE * CHUNK_SIZE = 256)
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> treeNoiseResults;
+  std::array<float, CHUNK_SIZE * CHUNK_SIZE> forestDensityResults;
+
+  // Reusable buffer for erosion calculation
+  std::array<float, 20 * 20> erosionTempMap;
+
+  // Reusable buffers for biome region generation
+  // Using 512*512 max size to accommodate the UI map which defaults to 256
+  std::vector<float> tempBuf;
+  std::vector<float> humidBuf;
+  std::vector<float> weirdBuf;
+  std::vector<float> riverBuf;
+  std::vector<float> contBuf;
+  std::vector<float> erosionBuf;
+  std::vector<float> pvBuf;
+  std::vector<float> ridgeBuf;
+
   // Persistent generator to avoid expensive setup every chunk
   std::unique_ptr<TerrainGenerator> generator;
 };
@@ -916,18 +934,36 @@ void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
   const int startX = static_cast<int>(std::round((centerX + NOISE_OFFSET) * invStep - width * 0.5f));
   const int startZ = static_cast<int>(std::round((centerZ + NOISE_OFFSET) * invStep - height * 0.5f));
 
-  std::vector<float> tempBuf(count), humidBuf(count), weirdBuf(count), riverBuf(count);
-  std::vector<float> contBuf(count), erosionBuf(count), pvBuf(count), ridgeBuf(count);
+  if (s_genBuffers.tempBuf.size() < static_cast<size_t>(count))
+  {
+    s_genBuffers.tempBuf.resize(count);
+    s_genBuffers.humidBuf.resize(count);
+    s_genBuffers.weirdBuf.resize(count);
+    s_genBuffers.riverBuf.resize(count);
+    s_genBuffers.contBuf.resize(count);
+    s_genBuffers.erosionBuf.resize(count);
+    s_genBuffers.pvBuf.resize(count);
+    s_genBuffers.ridgeBuf.resize(count);
+  }
+
+  float* tempBuf = s_genBuffers.tempBuf.data();
+  float* humidBuf = s_genBuffers.humidBuf.data();
+  float* weirdBuf = s_genBuffers.weirdBuf.data();
+  float* riverBuf = s_genBuffers.riverBuf.data();
+  float* contBuf = s_genBuffers.contBuf.data();
+  float* erosionBuf = s_genBuffers.erosionBuf.data();
+  float* pvBuf = s_genBuffers.pvBuf.data();
+  float* ridgeBuf = s_genBuffers.ridgeBuf.data();
 
   // GenUniformGrid2D processes batches with SIMD — far faster than individual GenSingle2D calls.
-  m_temperatureNoise->GenUniformGrid2D(tempBuf.data(), startX, startZ, width, height, step, m_seed + 6000);
-  m_humidityNoise->GenUniformGrid2D(humidBuf.data(), startX, startZ, width, height, step, m_seed + 7000);
-  m_weirdnessNoise->GenUniformGrid2D(weirdBuf.data(), startX, startZ, width, height, step, m_seed + 8000);
-  m_continentalNoise->GenUniformGrid2D(contBuf.data(), startX, startZ, width, height, step, m_seed);
-  m_erosionNoise->GenUniformGrid2D(erosionBuf.data(), startX, startZ, width, height, step, m_seed + 1000);
-  m_peaksValleysNoise->GenUniformGrid2D(pvBuf.data(), startX, startZ, width, height, step, m_seed + 2000);
-  m_ridgeNoise->GenUniformGrid2D(ridgeBuf.data(), startX, startZ, width, height, step, m_seed + 3000);
-  m_riverNoise->GenUniformGrid2D(riverBuf.data(), startX, startZ, width, height, step, m_seed + 9000);
+  m_temperatureNoise->GenUniformGrid2D(tempBuf, startX, startZ, width, height, step, m_seed + 6000);
+  m_humidityNoise->GenUniformGrid2D(humidBuf, startX, startZ, width, height, step, m_seed + 7000);
+  m_weirdnessNoise->GenUniformGrid2D(weirdBuf, startX, startZ, width, height, step, m_seed + 8000);
+  m_continentalNoise->GenUniformGrid2D(contBuf, startX, startZ, width, height, step, m_seed);
+  m_erosionNoise->GenUniformGrid2D(erosionBuf, startX, startZ, width, height, step, m_seed + 1000);
+  m_peaksValleysNoise->GenUniformGrid2D(pvBuf, startX, startZ, width, height, step, m_seed + 2000);
+  m_ridgeNoise->GenUniformGrid2D(ridgeBuf, startX, startZ, width, height, step, m_seed + 3000);
+  m_riverNoise->GenUniformGrid2D(riverBuf, startX, startZ, width, height, step, m_seed + 9000);
 
   for (int i = 0; i < count; i++)
   {
@@ -1062,7 +1098,18 @@ void TerrainGenerator::applyErosion(float *heightMap, int size) const
   const float talusAngle = 0.6f;  // Max allowed height diff between adjacent cells
   const float thermalRate = 0.5f; // Fraction of material to move
 
-  std::vector<float> tempMap(heightMap, heightMap + size * size);
+  float *tempMap;
+  std::vector<float> fallbackMap;
+  if (size <= 20)
+  {
+    tempMap = s_genBuffers.erosionTempMap.data();
+    std::copy(heightMap, heightMap + size * size, tempMap);
+  }
+  else
+  {
+    fallbackMap.assign(heightMap, heightMap + size * size);
+    tempMap = fallbackMap.data();
+  }
 
   for (int z = 1; z < size - 1; ++z)
   {
@@ -1108,14 +1155,14 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
   float chunkXf = static_cast<float>(chunkX) + NOISE_OFFSET;
   float chunkZf = static_cast<float>(chunkZ) + NOISE_OFFSET;
 
-  std::vector<float> treeNoiseResults(CHUNK_SIZE * CHUNK_SIZE);
-  std::vector<float> forestDensityResults(CHUNK_SIZE * CHUNK_SIZE);
+  float *treeNoiseResults = s_genBuffers.treeNoiseResults.data();
+  float *forestDensityResults = s_genBuffers.forestDensityResults.data();
 
   // Local tree-placement noise: high-frequency per-column variation
-  m_treeNoise->GenUniformGrid2D(treeNoiseResults.data(), chunkXf, chunkZf,
+  m_treeNoise->GenUniformGrid2D(treeNoiseResults, chunkXf, chunkZf,
                                 CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 10000);
   // Forest-cluster noise: low-frequency, shapes large forest patches and clearings
-  m_forestDensityNoise->GenUniformGrid2D(forestDensityResults.data(), chunkXf, chunkZf,
+  m_forestDensityNoise->GenUniformGrid2D(forestDensityResults, chunkXf, chunkZf,
                                          CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 11000);
 
   for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
