@@ -172,7 +172,8 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 		}
 	};
 
-	std::priority_queue<ChunkGenInfo> genQueue;
+	std::vector<ChunkGenInfo> genVec;
+	genVec.reserve(activeChunks.size());
 
 	for (Chunk *chunk : activeChunks)
 	{
@@ -182,9 +183,11 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 			float dx = chunkCenter.x - camera.getPosition().x;
 			float dz = chunkCenter.z - camera.getPosition().z;
 			float distanceSq = dx * dx + dz * dz;
-			genQueue.push({chunk, distanceSq});
+			genVec.push_back({chunk, distanceSq});
 		}
 	} // Générer les chunks par ordre de priorité
+
+	std::priority_queue<ChunkGenInfo> genQueue(std::less<ChunkGenInfo>(), std::move(genVec));
 	int genDispatched = 0;
 	while (!genQueue.empty() && genDispatched < budget)
 	{
@@ -226,7 +229,8 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		}
 	};
 
-	std::priority_queue<ChunkMeshInfo> meshQueue;
+	std::vector<ChunkMeshInfo> meshVec;
+	meshVec.reserve(activeChunks.size());
 
 	for (Chunk *chunk : activeChunks)
 	{
@@ -236,9 +240,11 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			float dx = chunkCenter.x - camera.getPosition().x;
 			float dz = chunkCenter.z - camera.getPosition().z;
 			float distanceSq = dx * dx + dz * dz;
-			meshQueue.push({chunk, distanceSq});
+			meshVec.push_back({chunk, distanceSq});
 		}
 	} // Mailler les chunks par ordre de priorité
+
+	std::priority_queue<ChunkMeshInfo> meshQueue(std::less<ChunkMeshInfo>(), std::move(meshVec));
 
 	// K: Upgrade any LOD-meshed chunks that have since come within normal range.
 	// Resetting to GENERATED lets them fall into the dispatch loop below with a
@@ -710,7 +716,8 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 		}
 	};
 
-	std::priority_queue<ChunkLoadInfo> priorityQueue;
+	std::vector<ChunkLoadInfo> priorityVec;
+	priorityVec.reserve((2 * radius + 1) * (2 * radius + 1));
 
 	// Calculer la priorité pour chaque chunk potentiel
 	const float maxDistSq = static_cast<float>(settings.maxRenderDistance) * static_cast<float>(settings.maxRenderDistance);
@@ -730,10 +737,12 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 
 			if (distToPlayerSq <= maxDistSq)
 			{
-				priorityQueue.push({chunkPos, distToPlayerSq});
+				priorityVec.push_back({chunkPos, distToPlayerSq});
 			}
 		}
 	}
+
+	std::priority_queue<ChunkLoadInfo> priorityQueue(std::less<ChunkLoadInfo>(), std::move(priorityVec));
 
 	// Charger les chunks par ordre de priorité
 	std::lock_guard<std::shared_mutex> lock(chunkMutex);
