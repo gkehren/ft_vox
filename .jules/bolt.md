@@ -7,3 +7,6 @@
 ## 2025-02-20 - Per-frame allocation bottleneck in Render Loop
 **Learning:** In C++ rendering loops like `ChunkManager::drawVisibleChunks`, allocating local `std::vector` instances each frame causes unnecessary dynamic memory allocation overhead.
 **Action:** Move local vectors used in hot loops to class members, call `.clear()` to maintain capacity and use them to avoid allocations.
+## 2024-06-17 - Pre-allocate std::vector in ChunkManager hot loops
+**Learning:** Frequent heap allocations for local std::vector variables in per-frame rendering hot loops (e.g., `generatePendingVoxels` and `meshPendingChunks`) are a performance bottleneck in this C++ architecture.
+**Action:** Always pre-allocate vectors as class members and clear() them instead of relying on local vector instantiations in functions called heavily on every frame.

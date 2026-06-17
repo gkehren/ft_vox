@@ -161,14 +161,9 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 
 	// Trier les chunks par distance au joueur pour une génération plus cohérente
-	struct ChunkGenInfo
-	{
-		Chunk *chunk;
-		float distance;
-	};
-
-	std::vector<ChunkGenInfo> genQueueVec;
-	genQueueVec.reserve(activeChunks.size());
+	m_genQueue.clear();
+	if (m_genQueue.capacity() < activeChunks.size())
+		m_genQueue.reserve(activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
 
 	for (Chunk *chunk : activeChunks)
@@ -179,18 +174,18 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 			float dx = chunkCenter.x - camPos.x;
 			float dz = chunkCenter.z - camPos.z;
 			float distanceSq = dx * dx + dz * dz;
-			genQueueVec.push_back({chunk, distanceSq});
+			m_genQueue.push_back({distanceSq, chunk});
 		}
 	} // Générer les chunks par ordre de priorité
 
-	const int chunksToProcess = std::min(budget, static_cast<int>(genQueueVec.size()));
+	const int chunksToProcess = std::min(budget, static_cast<int>(m_genQueue.size()));
 	if (chunksToProcess <= 0)
 		return;
 
-	std::partial_sort(genQueueVec.begin(), genQueueVec.begin() + chunksToProcess, genQueueVec.end(),
-					  [](const ChunkGenInfo &a, const ChunkGenInfo &b)
+	std::partial_sort(m_genQueue.begin(), m_genQueue.begin() + chunksToProcess, m_genQueue.end(),
+					  [](const auto &a, const auto &b)
 					  {
-						  return a.distance < b.distance;
+						  return a.first < b.first;
 					  });
 
 	const int currentSeed = m_terrainGenerator->getSeed();
@@ -198,8 +193,8 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	const float lodThresholdSq = lodThreshold * lodThreshold;
 	for (int i = 0; i < chunksToProcess; ++i)
 	{
-		Chunk *chunk = genQueueVec[i].chunk;
-		float distanceSq = genQueueVec[i].distance;
+		Chunk *chunk = m_genQueue[i].second;
+		float distanceSq = m_genQueue[i].first;
 		TaskPriority priority = calculateTaskPriority(distanceSq, lodThresholdSq);
 
 		chunksInTransit.insert(chunk);
@@ -219,14 +214,9 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	std::lock_guard<std::shared_mutex> lock(chunkMutex);
 
 	// Trier les chunks par distance au joueur pour un maillage plus cohérent
-	struct ChunkMeshInfo
-	{
-		Chunk *chunk;
-		float distance;
-	};
-
-	std::vector<ChunkMeshInfo> meshQueueVec;
-	meshQueueVec.reserve(activeChunks.size());
+	m_meshQueue.clear();
+	if (m_meshQueue.capacity() < activeChunks.size())
+		m_meshQueue.reserve(activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
 
 	for (Chunk *chunk : activeChunks)
@@ -237,7 +227,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			float dx = chunkCenter.x - camPos.x;
 			float dz = chunkCenter.z - camPos.z;
 			float distanceSq = dx * dx + dz * dz;
-			meshQueueVec.push_back({chunk, distanceSq});
+			m_meshQueue.push_back({distanceSq, chunk});
 		}
 	} // Mailler les chunks par ordre de priorité
 
@@ -260,20 +250,20 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		}
 	}
 
-	const int chunksToProcess = std::min(budget, static_cast<int>(meshQueueVec.size()));
+	const int chunksToProcess = std::min(budget, static_cast<int>(m_meshQueue.size()));
 	if (chunksToProcess <= 0)
 		return;
 
-	std::partial_sort(meshQueueVec.begin(), meshQueueVec.begin() + chunksToProcess, meshQueueVec.end(),
-					  [](const ChunkMeshInfo &a, const ChunkMeshInfo &b)
+	std::partial_sort(m_meshQueue.begin(), m_meshQueue.begin() + chunksToProcess, m_meshQueue.end(),
+					  [](const auto &a, const auto &b)
 					  {
-						  return a.distance < b.distance;
+						  return a.first < b.first;
 					  });
 
 	for (int i = 0; i < chunksToProcess; ++i)
 	{
-		Chunk *chunk = meshQueueVec[i].chunk;
-		float chunkDistSq = meshQueueVec[i].distance; // K: distance already computed
+		Chunk *chunk = m_meshQueue[i].second;
+		float chunkDistSq = m_meshQueue[i].first; // K: distance already computed
 		glm::vec3 wp = chunk->getPosition();
 		glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
 					  static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
