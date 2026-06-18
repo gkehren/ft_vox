@@ -7,3 +7,6 @@
 ## 2025-02-20 - Per-frame allocation bottleneck in Render Loop
 **Learning:** In C++ rendering loops like `ChunkManager::drawVisibleChunks`, allocating local `std::vector` instances each frame causes unnecessary dynamic memory allocation overhead.
 **Action:** Move local vectors used in hot loops to class members, call `.clear()` to maintain capacity and use them to avoid allocations.
+## 2024-05-25 - Thread-Safe Per-Frame Allocations
+**Learning:** Moving local `std::vector` allocations to class members to avoid per-frame dynamic memory overhead creates data races if the class (like `ChunkManager`) uses concurrent mechanisms (e.g., `std::shared_mutex`).
+**Action:** Use `thread_local std::vector` inside the specific update routines to retain capacity across frames while ensuring absolute thread safety without requiring extra locks.

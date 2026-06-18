@@ -36,7 +36,11 @@ void ChunkManager::updatePlayerPosition(const glm::ivec2 &newPlayerChunkPos, con
 
 void ChunkManager::processChunkLoading(const RenderSettings &settings, int budget)
 {
-	std::vector<glm::ivec3> toLoad;
+	// Performance Optimization: Use thread_local vector to prevent dynamic memory allocations
+	// per frame while maintaining thread safety in case this is called concurrently.
+	thread_local std::vector<glm::ivec3> toLoad;
+	toLoad.clear();
+
 	{
 		std::lock_guard<std::shared_mutex> lock(chunkMutex);
 		int chunkCount = 0;
@@ -51,7 +55,10 @@ void ChunkManager::processChunkLoading(const RenderSettings &settings, int budge
 	if (toLoad.empty()) return;
 
 	// Acquire chunks from pool (thread-safe, does not need chunkMutex)
-	std::vector<std::pair<glm::ivec3, Chunk*>> acquiredChunks;
+	// Performance Optimization: Use thread_local to avoid repeated allocations.
+	thread_local std::vector<std::pair<glm::ivec3, Chunk*>> acquiredChunks;
+	acquiredChunks.clear();
+
 	for (const auto& chunkPos : toLoad)
 	{
 		Chunk *chunk = m_chunkPool->acquire(glm::vec3(chunkPos.x * CHUNK_SIZE, 0.0f, chunkPos.z * CHUNK_SIZE));
@@ -167,7 +174,10 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 		float distance;
 	};
 
-	std::vector<ChunkGenInfo> genQueueVec;
+	// Performance Optimization: Use thread_local to reuse capacity and avoid per-frame allocations,
+	// while remaining thread-safe.
+	thread_local std::vector<ChunkGenInfo> genQueueVec;
+	genQueueVec.clear();
 	genQueueVec.reserve(activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
 
@@ -225,7 +235,10 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		float distance;
 	};
 
-	std::vector<ChunkMeshInfo> meshQueueVec;
+	// Performance Optimization: Use thread_local to reuse capacity and avoid per-frame allocations,
+	// while remaining thread-safe.
+	thread_local std::vector<ChunkMeshInfo> meshQueueVec;
+	meshQueueVec.clear();
 	meshQueueVec.reserve(activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
 
@@ -653,7 +666,10 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 	const float unloadDist = static_cast<float>(settings.maxRenderDistance) * 1.5f;
 	const float unloadDistSq = unloadDist * unloadDist;
 
-	std::vector<glm::ivec3> chunksToUnload;
+	// Performance Optimization: Use thread_local to reuse capacity and avoid per-frame allocations,
+	// while remaining thread-safe.
+	thread_local std::vector<glm::ivec3> chunksToUnload;
+	chunksToUnload.clear();
 
 	// Phase 1: Identify chunks to unload (using a shared lock, since we only read)
 	{
@@ -714,7 +730,10 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 		float distance;
 	};
 
-	std::vector<ChunkLoadInfo> priorityQueueVec;
+	// Performance Optimization: Use thread_local to reuse capacity and avoid per-frame allocations,
+	// while remaining thread-safe.
+	thread_local std::vector<ChunkLoadInfo> priorityQueueVec;
+	priorityQueueVec.clear();
 	priorityQueueVec.reserve((2 * radius + 1) * (2 * radius + 1));
 
 	// Calculer la priorité pour chaque chunk potentiel
