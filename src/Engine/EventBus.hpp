@@ -3,7 +3,7 @@
 #include <functional>
 #include <vector>
 #include <memory>
-#include <unordered_map>
+#include <array>
 #include <SDL3/SDL.h>
 
 enum class EventType {
@@ -14,7 +14,8 @@ enum class EventType {
     MouseButtonPress,
     MouseButtonRelease,
     MouseWheel,
-    Quit
+    Quit,
+    Count
 };
 
 struct Event {
@@ -58,17 +59,21 @@ public:
     }
 
     void subscribe(EventType type, EventHandler handler) {
-        subscribers[type].push_back(handler);
+        if (static_cast<size_t>(type) < static_cast<size_t>(EventType::Count)) {
+            subscribers[static_cast<size_t>(type)].push_back(handler);
+        }
     }
 
     void publish(const Event& event) {
-        if (subscribers.find(event.type) != subscribers.end()) {
-            for (auto& handler : subscribers[event.type]) {
+        if (static_cast<size_t>(event.type) < static_cast<size_t>(EventType::Count)) {
+            for (auto& handler : subscribers[static_cast<size_t>(event.type)]) {
                 handler(event);
             }
         }
     }
 
 private:
-    std::unordered_map<EventType, std::vector<EventHandler>> subscribers;
+    // ⚡ Bolt: Use a contiguous std::array indexed by EventType instead of std::unordered_map
+    // to eliminate hashing overhead and achieve true O(1) cache-friendly lookups in the hot path.
+    std::array<std::vector<EventHandler>, static_cast<size_t>(EventType::Count)> subscribers;
 };
