@@ -133,7 +133,7 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 		std::memcpy(&playerId, message.payload.data(), sizeof(uint32_t));
 		playerId = ntohl(playerId);
 
-		std::cout << "Player " << playerId << " authenticated successfully." << std::endl;
+		std::cout << "Player " << playerId << " authenticated successfully." << "\n";
 	}
 }
 
@@ -150,7 +150,7 @@ void Server::sendMessage(const boost::asio::ip::udp::endpoint &endpoint, const M
 						 [](const boost::system::error_code &error, std::size_t /*bytesTransferred*/)
 						 {
 							 if (error)
-								 std::cerr << "Failed to send message: " << error.message() << std::endl;
+								 std::cerr << "Failed to send message: " << error.message() << "\n";
 						 });
 }
 

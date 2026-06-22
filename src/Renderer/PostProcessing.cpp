@@ -105,7 +105,7 @@ void PostProcessing::initFBOs()
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, hdrDepthRBO);
 
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		std::cerr << "[PostProcessing] HDR FBO is not complete!" << std::endl;
+		std::cerr << "[PostProcessing] HDR FBO is not complete!" << "\n";
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -128,7 +128,7 @@ void PostProcessing::initFBOs()
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, bloomTexture[i], 0);
 
 		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-			std::cerr << "[PostProcessing] Bloom FBO " << i << " is not complete!" << std::endl;
+			std::cerr << "[PostProcessing] Bloom FBO " << i << " is not complete!" << "\n";
 	}
 
 	// ---- God rays FBO (half resolution, R11F_G11F_B10F) ----
@@ -145,7 +145,7 @@ void PostProcessing::initFBOs()
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, godRaysTexture, 0);
 
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		std::cerr << "[PostProcessing] God Rays FBO is not complete!" << std::endl;
+		std::cerr << "[PostProcessing] God Rays FBO is not complete!" << "\n";
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

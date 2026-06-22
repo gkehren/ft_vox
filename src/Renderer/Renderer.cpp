@@ -227,7 +227,7 @@ void Renderer::loadSkybox()
 		}
 		else
 		{
-			std::cout << "Failed to load texture" << std::endl;
+			std::cout << "Failed to load texture" << "\n";
 		}
 	}
 

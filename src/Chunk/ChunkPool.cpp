@@ -21,7 +21,7 @@ ChunkPool::ChunkPool(size_t capacity)
 	}
 
 	std::cout << "ChunkPool: pre-allocated " << capacity << " chunks ("
-			  << (capacity * sizeof(Chunk)) / (1024 * 1024) << " MB storage)" << std::endl;
+			  << (capacity * sizeof(Chunk)) / (1024 * 1024) << " MB storage)" << "\n";
 }
 
 ChunkPool::~ChunkPool()
@@ -47,7 +47,7 @@ Chunk *ChunkPool::acquire(const glm::vec3 &worldPosition)
 	m_overflowCount.fetch_add(1, std::memory_order_relaxed);
 	m_acquiredCount.fetch_add(1, std::memory_order_relaxed);
 	std::cerr << "ChunkPool: WARNING — pool exhausted, heap-allocating chunk (overflow #"
-			  << m_overflowCount.load(std::memory_order_relaxed) << ")" << std::endl;
+			  << m_overflowCount.load(std::memory_order_relaxed) << ")" << "\n";
 
 	Chunk *overflow = new Chunk(worldPosition);
 	return overflow;
