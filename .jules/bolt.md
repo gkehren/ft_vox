@@ -7,3 +7,6 @@
 ## 2025-02-20 - Per-frame allocation bottleneck in Render Loop
 **Learning:** In C++ rendering loops like `ChunkManager::drawVisibleChunks`, allocating local `std::vector` instances each frame causes unnecessary dynamic memory allocation overhead.
 **Action:** Move local vectors used in hot loops to class members, call `.clear()` to maintain capacity and use them to avoid allocations.
+## 2026-06-22 - [Stream Buffer Flush Optimization]
+**Learning:** [std::endl forces a buffer flush on standard streams, which can cause significant I/O performance bottlenecks if used excessively or in hot paths.]
+**Action:** [Prefer using `\n` over `std::endl` for C++ log outputs to let the stream manage its buffer efficiently.]

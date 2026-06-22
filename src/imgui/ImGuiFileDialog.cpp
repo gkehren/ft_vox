@@ -653,7 +653,7 @@ IGFD_API bool IGFD::Utils::CreateDirectoryIfNotExist(const std::string& name) {
             }
 #endif  // _IGFD_WIN_
             if (!res) {
-                std::cout << "Error creating directory " << name << std::endl;
+                std::cout << "Error creating directory " << name << "\n";
             }
         }
     }

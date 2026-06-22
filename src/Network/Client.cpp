@@ -58,7 +58,7 @@ void Client::requestSeed()
 	// std::unique_lock<std::mutex> lock(seedMutex);
 	// if (!seedCondVar.wait_for(lock, std::chrono::seconds(5), [this]() { return worldSeed != 0; })) {
 	//	// if we didn't receive the seed in 5 seconds, disconnect
-	//	std::cerr << "Failed to receive seed from server" << std::endl;
+	//	std::cerr << "Failed to receive seed from server" << "\n";
 	//	if (connected)
 	//		disconnect();
 	// }
@@ -77,7 +77,7 @@ void Client::sendMessage(const Message &message)
 						 {
 							 if (error)
 							 {
-								 std::cerr << "Error sending message: " << error.message() << std::endl;
+								 std::cerr << "Error sending message: " << error.message() << "\n";
 							 }
 						 });
 }
@@ -122,7 +122,7 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 		uint32_t seedNetworkOrder;
 		std::memcpy(&seedNetworkOrder, message.payload.data(), sizeof(uint32_t));
 		worldSeed = ntohl(seedNetworkOrder);
-		std::cout << "Seed received: " << worldSeed << std::endl;
+		std::cout << "Seed received: " << worldSeed << "\n";
 
 		//{
 		//	std::unique_lock<std::mutex> lock(seedMutex);
@@ -146,7 +146,7 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 	{
 		std::memcpy(&playerId, message.payload.data(), sizeof(uint32_t));
 		playerId = ntohl(playerId);
-		std::cout << "Authenticated with player ID: " << playerId << std::endl;
+		std::cout << "Authenticated with player ID: " << playerId << "\n";
 		sendAck(playerId);
 	}
 }

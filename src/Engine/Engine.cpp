@@ -101,13 +101,13 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 	this->inputSystem = std::make_unique<InputSystem>();
 	this->setupEventHandlers();
 
-	std::cout << "SDL version: " << SDL_GetVersion() << std::endl;
-	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
-	std::cout << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
-	std::cout << "Vendor: " << glGetString(GL_VENDOR) << std::endl;
-	std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
-	std::cout << "ImGui version: " << IMGUI_VERSION << std::endl;
-	std::cout << "Threads: " << (threadCount > 0 ? threadCount : 1) << std::endl;
+	std::cout << "SDL version: " << SDL_GetVersion() << "\n";
+	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << "\n";
+	std::cout << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << "\n";
+	std::cout << "Vendor: " << glGetString(GL_VENDOR) << "\n";
+	std::cout << "Renderer: " << glGetString(GL_RENDERER) << "\n";
+	std::cout << "ImGui version: " << IMGUI_VERSION << "\n";
+	std::cout << "Threads: " << (threadCount > 0 ? threadCount : 1) << "\n";
 }
 
 Engine::~Engine()
@@ -154,7 +154,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 
 	this->chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(), chunkPool.get(), uiManager->getRenderTiming());
 
-	std::cout << "Terrain generation initialized with seed: " << this->seed << std::endl;
+	std::cout << "Terrain generation initialized with seed: " << this->seed << "\n";
 }
 
 void Engine::run()
@@ -568,11 +568,11 @@ void Engine::startServer()
 		try
 		{
 			server = std::make_unique<Server>(25565, this->seed);
-			std::cout << "Server started." << std::endl;
+			std::cout << "Server started." << "\n";
 		}
 		catch (const std::exception &e)
 		{
-			std::cerr << "Failed to start server: " << e.what() << std::endl;
+			std::cerr << "Failed to start server: " << e.what() << "\n";
 			server.reset();
 		}
 	}
@@ -583,7 +583,7 @@ void Engine::stopServer()
 	if (server)
 	{
 		server.reset();
-		std::cout << "Server stopped." << std::endl;
+		std::cout << "Server stopped." << "\n";
 	}
 }
 
@@ -596,12 +596,12 @@ void Engine::connectToServer(const std::string &ip)
 			client = std::make_unique<Client>();
 			client->connect(ip, 25565); // Assuming default port 25565
 			this->seed = 0;
-			std::cout << "Successfully connected to server at " << ip << std::endl;
+			std::cout << "Successfully connected to server at " << ip << "\n";
 			// Seed will be received from server
 		}
 		catch (const std::exception &e)
 		{
-			std::cerr << "Failed to connect to server: " << e.what() << std::endl;
+			std::cerr << "Failed to connect to server: " << e.what() << "\n";
 			client.reset();
 		}
 	}
@@ -612,7 +612,7 @@ void Engine::disconnectClient()
 	if (client)
 	{
 		client.reset();
-		std::cout << "Disconnected from server." << std::endl;
+		std::cout << "Disconnected from server." << "\n";
 	}
 }
 

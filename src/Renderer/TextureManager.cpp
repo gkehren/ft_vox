@@ -63,7 +63,7 @@ void TextureManager::initialize()
 
 	GLenum err;
 	if ((err = glGetError()) != GL_NO_ERROR)
-		std::cerr << "OpenGL error during texture array initialization: " << err << std::endl;
+		std::cerr << "OpenGL error during texture array initialization: " << err << "\n";
 
 	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 }
@@ -87,7 +87,7 @@ void TextureManager::loadTexture(const std::string &path, TextureType type, bool
 	}
 	else
 	{
-		std::cout << "Failed to load texture: " << path << std::endl;
+		std::cout << "Failed to load texture: " << path << "\n";
 	}
 }
 
@@ -129,7 +129,7 @@ void TextureManager::loadWaterTexture(const std::string &path, TextureType type,
 	}
 	else
 	{
-		std::cout << "Failed to load water texture: " << path << std::endl;
+		std::cout << "Failed to load water texture: " << path << "\n";
 	}
 }
 

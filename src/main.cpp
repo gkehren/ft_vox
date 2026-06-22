@@ -13,7 +13,7 @@ int main(int argc, char **argv)
 	}
 	else if (argc == 2 && std::string(argv[1]) == "--help")
 	{
-		std::cout << "Usage: " << argv[0] << " [--seed <value>]" << std::endl;
+		std::cout << "Usage: " << argv[0] << " [--seed <value>]" << "\n";
 		return EXIT_SUCCESS;
 	}
 	else if (argc == 3 && std::string(argv[1]) == "--seed")
@@ -23,16 +23,16 @@ int main(int argc, char **argv)
 
 		if (*endptr != '\0' || argv[2] == endptr) // Check if conversion failed or no digits were read
 		{
-			std::cerr << "Error: Seed value '" << argv[2] << "' is not a valid integer." << std::endl;
-			std::cerr << "Usage: " << argv[0] << " [--seed <value>]" << std::endl;
+			std::cerr << "Error: Seed value '" << argv[2] << "' is not a valid integer." << "\n";
+			std::cerr << "Usage: " << argv[0] << " [--seed <value>]" << "\n";
 			return EXIT_FAILURE;
 		}
 		seed_to_use = static_cast<unsigned int>(val);
 	}
 	else
 	{
-		std::cerr << "Invalid arguments." << std::endl;
-		std::cerr << "Usage: " << argv[0] << " [--seed <value>]" << std::endl;
+		std::cerr << "Invalid arguments." << "\n";
+		std::cerr << "Usage: " << argv[0] << " [--seed <value>]" << "\n";
 		return EXIT_FAILURE;
 	}
 
@@ -44,12 +44,12 @@ int main(int argc, char **argv)
 	}
 	catch (const std::exception &e)
 	{
-		std::cerr << "Runtime error: " << e.what() << std::endl;
+		std::cerr << "Runtime error: " << e.what() << "\n";
 		return EXIT_FAILURE;
 	}
 	catch (...)
 	{
-		std::cerr << "Unknown exception occurred." << std::endl;
+		std::cerr << "Unknown exception occurred." << "\n";
 		return EXIT_FAILURE;
 	}
 
