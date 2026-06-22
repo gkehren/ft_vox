@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <array>
 #include <SDL3/SDL.h>
 
 enum class EventType {
@@ -14,7 +15,8 @@ enum class EventType {
     MouseButtonPress,
     MouseButtonRelease,
     MouseWheel,
-    Quit
+    Quit,
+    Count
 };
 
 struct Event {
@@ -58,17 +60,24 @@ public:
     }
 
     void subscribe(EventType type, EventHandler handler) {
-        subscribers[type].push_back(handler);
+        size_t index = static_cast<size_t>(type);
+        if (index < static_cast<size_t>(EventType::Count)) {
+            subscribers[index].push_back(handler);
+        }
     }
 
     void publish(const Event& event) {
-        if (subscribers.find(event.type) != subscribers.end()) {
-            for (auto& handler : subscribers[event.type]) {
+        size_t index = static_cast<size_t>(event.type);
+        if (index < static_cast<size_t>(EventType::Count)) {
+            for (auto& handler : subscribers[index]) {
                 handler(event);
             }
         }
     }
 
 private:
-    std::unordered_map<EventType, std::vector<EventHandler>> subscribers;
+    // ⚡ Bolt: Replaced std::unordered_map with a flat std::array indexed by EventType.
+    // This turns a hashing operation with potential cache misses into an O(1) contiguous
+    // array lookup, significantly improving performance on the hot path of the event bus.
+    std::array<std::vector<EventHandler>, static_cast<size_t>(EventType::Count)> subscribers;
 };
