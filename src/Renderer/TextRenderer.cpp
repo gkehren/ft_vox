@@ -89,17 +89,16 @@ void TextRenderer::loadCharacters()
 	FT_Done_FreeType(ft);
 }
 
-void TextRenderer::renderText(std::string text, float x, float y, float scale, glm::vec3 color)
+void TextRenderer::renderText(std::string_view text, float x, float y, float scale, glm::vec3 color)
 {
 	shader->use();
 	shader->setVec3("textColor", color);
 	glActiveTexture(GL_TEXTURE0);
 	glBindVertexArray(VAO);
 
-	std::string::const_iterator c;
-	for (c = text.begin(); c != text.end(); c++)
+	for (char c : text)
 	{
-		Character ch = characters[*c];
+		Character ch = characters[c];
 
 		float xpos = x + ch.bearing.x * scale;
 		float ypos = y - (ch.size.y - ch.bearing.y) * scale;

@@ -4,6 +4,7 @@
 #include FT_FREETYPE_H
 #include <glad/glad.h>
 #include <string>
+#include <string_view>
 #include <map>
 #include <memory>
 #include <glm/glm.hpp>
@@ -24,7 +25,7 @@ public:
 	TextRenderer(const std::string &fontPath, const glm::mat4 &proj);
 	~TextRenderer();
 
-	void renderText(std::string text, float x, float y, float scale, glm::vec3 color);
+	void renderText(std::string_view text, float x, float y, float scale, glm::vec3 color);
 	void setProjection(const glm::mat4 &proj);
 
 private:
