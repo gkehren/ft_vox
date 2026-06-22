@@ -10,3 +10,9 @@
 ## 2024-06-22 - [TextRenderer String Passing Optimization]
 **Learning:** Passing strings by value into hot rendering loop functions incurs significant overhead due to memory allocation and copying. Changing this to `std::string_view` (since we are on C++20) provides an immediate 8% measurable performance boost by completely eliminating these string copies while maintaining modern code cleanliness. Range-based for loops over `std::string_view` are also cleaner than `const_iterator`.
 **Action:** When inspecting functions that process read-only text, especially in hot rendering/update paths, always refactor pass-by-value `std::string` or `const std::string&` to `std::string_view` where appropriate.
+## 2026-06-22 - [Networking Memory Optimization]
+**Learning:** Network message serialization constructs temporary std::vector arrays with predictable sizes based on fixed header values and dynamic payload sizes.
+**Action:** When creating a std::vector and sequentially pushing elements, pre-calculate the total expected capacity and call `.reserve()` to prevent intermediary reallocation costs. Never commit temporary benchmark executables to the repo.
+## 2025-02-21 - Event Bus Optimization
+**Learning:** In highly accessed event systems like `EventBus::publish`, mapping an enum to a vector of handlers via `std::unordered_map` introduces hashing overhead, double lookups (`find` then `[]`), and pointer chasing that degrades performance.
+**Action:** Replace `std::unordered_map` with a flat `std::array` indexed by a `Count` element on the enum. This provides O(1) contiguous memory access, completely eliminating hashing and cache misses.
