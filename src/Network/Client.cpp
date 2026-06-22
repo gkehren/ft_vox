@@ -67,6 +67,7 @@ void Client::requestSeed()
 void Client::sendMessage(const Message &message)
 {
 	std::vector<uint8_t> data;
+	data.reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
 	data.push_back(message.type);
 	uint32_t seqNetOrder = htonl(message.sequenceNumber);
 	data.insert(data.end(), reinterpret_cast<uint8_t *>(&seqNetOrder), reinterpret_cast<uint8_t *>(&seqNetOrder) + sizeof(uint32_t));
