@@ -1,4 +1,5 @@
 #include "Engine.hpp"
+#include "Logger.hpp"
 
 #define FULLSCREEN 1 // 0 = fullscreen, 1 = windowed, 2 = borderless
 
@@ -300,18 +301,26 @@ void Engine::setupEventHandlers()
 
 	EventBus::getInstance().subscribe(EventType::MouseButtonPress, [this](const Event &e)
 									  {
-        const auto& me = static_cast<const MouseEvent&>(e);
-        if (me.button == SDL_BUTTON_LEFT) {
-            glm::vec3 hitPos, prevPos;
-            if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos)) {
-                if (chunkManager) chunkManager->deleteVoxel(hitPos);
-            }
-        } else if (me.button == SDL_BUTTON_RIGHT) {
-            glm::vec3 hitPos, prevPos;
-            if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos)) {
-                if (chunkManager) chunkManager->placeVoxel(prevPos, selectedTexture);
-            }
-        } });
+		const auto& me = static_cast<const MouseEvent&>(e);
+		if (me.button == SDL_BUTTON_LEFT) {
+			glm::vec3 hitPos, prevPos;
+			if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos)) {
+				if (chunkManager) {
+					chunkManager->deleteVoxel(hitPos);
+					if (client && client->isConnected())
+						client->sendVoxelEdit(static_cast<int32_t>(std::floor(hitPos.x)), static_cast<int32_t>(std::floor(hitPos.y)), static_cast<int32_t>(std::floor(hitPos.z)), 0);
+				}
+			}
+		} else if (me.button == SDL_BUTTON_RIGHT) {
+			glm::vec3 hitPos, prevPos;
+			if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos)) {
+				if (chunkManager) {
+					chunkManager->placeVoxel(prevPos, selectedTexture);
+					if (client && client->isConnected())
+						client->sendVoxelEdit(static_cast<int32_t>(std::floor(prevPos.x)), static_cast<int32_t>(std::floor(prevPos.y)), static_cast<int32_t>(std::floor(prevPos.z)), selectedTexture);
+				}
+			}
+		} });
 
 	EventBus::getInstance().subscribe(EventType::MouseMotion, [this](const Event &e)
 									  {
@@ -330,6 +339,29 @@ void Engine::setupEventHandlers()
 
 void Engine::updateWorldState()
 {
+	if (client && client->isConnected() && this->seed == 0 && client->getWorldSeed() != 0)
+	{
+		this->seed = client->getWorldSeed();
+		Logger::getInstance().logClient("Received seed from server, rebuilding terrain with seed " + std::to_string(this->seed) + "...");
+		terrainGenerator = std::make_unique<TerrainGenerator>(this->seed);
+		chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(), chunkPool.get(), uiManager->getRenderTiming());
+	}
+
+	if (client && client->isConnected())
+	{
+		auto edits = client->getPendingVoxelEdits();
+		for (const auto& edit : edits)
+		{
+			if (chunkManager)
+			{
+				if (edit.type == 0)
+					chunkManager->deleteVoxel(glm::vec3(edit.x, edit.y, edit.z));
+				else
+					chunkManager->placeVoxel(glm::vec3(edit.x, edit.y, edit.z), static_cast<TextureType>(edit.type));
+			}
+		}
+	}
+
 	RenderSettings &currentRenderSettings = uiManager->getRenderSettings();
 	ShaderParameters &params = uiManager->getShaderParams();
 
@@ -352,11 +384,11 @@ void Engine::updateWorldState()
 		if (newPlayerChunkPos != playerChunkPos)
 		{
 			playerChunkPos = newPlayerChunkPos;
-			// Pass currentRenderSettings by const reference
-			chunkManager->updatePlayerPosition(playerChunkPos, camera, currentRenderSettings);
+			if (chunkManager)
+				chunkManager->updatePlayerPosition(playerChunkPos, camera, currentRenderSettings);
 		}
-		// Pass currentRenderSettings by const reference
-		chunkManager->performFrustumCulling(camera, windowWidth, windowHeight, currentRenderSettings);
+		if (chunkManager)
+			chunkManager->performFrustumCulling(camera, windowWidth, windowHeight, currentRenderSettings);
 	}
 	// Pass currentRenderSettings by const reference
 	// Frame-rate-independent chunk budgets: compute per-second rates scaled by
@@ -385,11 +417,14 @@ void Engine::updateWorldState()
 	const int meshBudget = drainBucket(m_meshAccum, currentRenderSettings.meshPerSec, dt);
 	const int uploadBudget = drainBucket(m_uploadAccum, currentRenderSettings.uploadPerSec, dt);
 
-	chunkManager->processChunkLoading(currentRenderSettings, loadBudget);
-	chunkManager->processFinishedJobs();
-	chunkManager->generatePendingVoxels(camera, currentRenderSettings, seed, genBudget);
-	chunkManager->meshPendingChunks(camera, currentRenderSettings, meshBudget);
-	chunkManager->uploadPendingMeshes(uploadBudget);
+	if (chunkManager)
+	{
+		chunkManager->processChunkLoading(currentRenderSettings, loadBudget);
+		chunkManager->processFinishedJobs();
+		chunkManager->generatePendingVoxels(camera, currentRenderSettings, seed, genBudget);
+		chunkManager->meshPendingChunks(camera, currentRenderSettings, meshBudget);
+		chunkManager->uploadPendingMeshes(uploadBudget);
+	}
 }
 
 void Engine::updateAtmosphere()
@@ -452,13 +487,13 @@ void Engine::renderScene() // Renamed from render
 		renderer->renderShadowMap(camera, uiManager->getShaderParams().lightDirection, *chunkManager);
 	}
 
-	if (client && client->isConnected())
+	if (client && client->isConnected() && client->getPlayerId() != 0)
 	{
 		client->sendPlayerPosition(camera.getPosition().x, camera.getPosition().y, camera.getPosition().z);
 		std::lock_guard<std::mutex> lock(client->playerMutex);
 		for (const auto &[playerId, position] : client->playerPositions)
 		{
-			if (renderer)
+			if (playerId != client->getPlayerId() && renderer)
 				renderer->drawPlayer(camera, glm::vec3(position.x, position.y, position.z), playerId);
 		}
 	}
@@ -568,11 +603,15 @@ void Engine::startServer()
 		try
 		{
 			server = std::make_unique<Server>(25565, this->seed);
-			std::cout << "Server started." << "\n";
+			server->start();
+			Logger::getInstance().logServer("Server started.");
+			
+			// Automatically connect local client to the newly started server
+			connectToServer("127.0.0.1");
 		}
 		catch (const std::exception &e)
 		{
-			std::cerr << "Failed to start server: " << e.what() << "\n";
+			Logger::getInstance().logServer(std::string("Failed to start server: ") + e.what(), true);
 			server.reset();
 		}
 	}
@@ -583,25 +622,27 @@ void Engine::stopServer()
 	if (server)
 	{
 		server.reset();
-		std::cout << "Server stopped." << "\n";
+		Logger::getInstance().logServer("Server stopped.");
 	}
 }
 
 void Engine::connectToServer(const std::string &ip)
 {
-	if (!client && !server)
+	if (!client)
 	{
 		try
 		{
 			client = std::make_unique<Client>();
 			client->connect(ip, 25565); // Assuming default port 25565
 			this->seed = 0;
-			std::cout << "Successfully connected to server at " << ip << "\n";
+			chunkManager.reset();
+			terrainGenerator.reset();
+			Logger::getInstance().logClient("Attempting to reach server at " + ip + "...");
 			// Seed will be received from server
 		}
 		catch (const std::exception &e)
 		{
-			std::cerr << "Failed to connect to server: " << e.what() << "\n";
+			Logger::getInstance().logClient(std::string("Failed to connect to server: ") + e.what(), true);
 			client.reset();
 		}
 	}
@@ -611,8 +652,9 @@ void Engine::disconnectClient()
 {
 	if (client)
 	{
+		client->disconnect();
 		client.reset();
-		std::cout << "Disconnected from server." << "\n";
+		Logger::getInstance().logClient("Disconnected from server.");
 	}
 }
 

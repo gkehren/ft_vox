@@ -1,4 +1,6 @@
 #include "UIManager.hpp"
+#include <Network/Server.hpp>
+#include "Logger.hpp"
 #include "Engine.hpp"
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -204,8 +206,10 @@ void UIManager::handleServerControls()
 		{
 			engine->stopServer();
 		}
+		ImGui::Separator();
 	}
-	else if (engine->getClient())
+
+	if (engine->getClient())
 	{
 		if (engine->getClient()->isConnected())
 		{
@@ -225,7 +229,8 @@ void UIManager::handleServerControls()
 			}
 		}
 	}
-	else // Neither server nor client is active, but engine is valid
+
+	if (!engine->getServer() && !engine->getClient())
 	{
 		ImGui::InputText("Server IP", ipInputBuffer, sizeof(ipInputBuffer));
 		if (ImGui::Button("Connect to Server"))
@@ -238,6 +243,41 @@ void UIManager::handleServerControls()
 			engine->startServer();
 		}
 	}
+
+	ImGui::Separator();
+	ImGui::Text("Console Logs:");
+	ImGui::SameLine(ImGui::GetWindowWidth() - 150);
+	if (ImGui::Button("Copy to Clipboard"))
+	{
+		std::string allLogs;
+		std::lock_guard<std::mutex> lock(Logger::getInstance().getMutex());
+		for (const auto& log : Logger::getInstance().getLogs())
+		{
+			if (log.isServer && !engine->getServer()) continue;
+			allLogs += log.text + "\n";
+		}
+		ImGui::SetClipboardText(allLogs.c_str());
+	}
+	
+	// Embedded Console Region
+	ImGui::BeginChild("LogRegion", ImVec2(0, 150), true, ImGuiWindowFlags_HorizontalScrollbar);
+	{
+		std::lock_guard<std::mutex> lock(Logger::getInstance().getMutex());
+		for (const auto& log : Logger::getInstance().getLogs())
+		{
+			if (log.isServer && !engine->getServer()) continue; // Hide server logs if not a server
+
+			if (log.isError) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+			else if (log.isServer) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.8f, 1.0f, 1.0f));
+			else ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 1.0f, 0.8f, 1.0f));
+
+			ImGui::TextWrapped("%s", log.text.c_str());
+			ImGui::PopStyleColor();
+		}
+		if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1.0f);
+	}
+	ImGui::EndChild();
+
 	ImGui::End();
 }
 

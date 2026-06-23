@@ -1,11 +1,11 @@
 #include "Server.hpp"
+#include "../Engine/Logger.hpp"
 
 Server::Server(unsigned short port, uint32_t worldSeed)
 	: socket(ioContext, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), port)),
 	  running(false),
 	  tickTimer(ioContext),
 	  worldSeed(worldSeed),
-	  broadcastSequenceNumber(0),
 	  nextPlayerId(1)
 {
 }
@@ -152,13 +152,67 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 			auto it = playerEndpoints.find(playerId);
 			if (it == playerEndpoints.end() || it->second != senderEndpoint)
 			{
-				std::cerr << "Suspicious/unauthorized ACK packet from " << senderEndpoint 
-						  << " claiming to be player " << playerId << "\n";
+				Logger::getInstance().logServer("Suspicious/unauthorized ACK packet claiming to be player " + std::to_string(playerId), true);
 				return;
 			}
 		}
 
-		std::cout << "Player " << playerId << " authenticated successfully." << "\n";
+		Logger::getInstance().logServer("Player " + std::to_string(playerId) + " authenticated successfully.");
+	}
+	else if (message.type == MessageType::DISCONNECT)
+	{
+		ByteBuffer buf(message.payload);
+		if (!buf.hasMore(sizeof(uint32_t)))
+			return;
+
+		uint32_t playerId = buf.readUInt32();
+
+		{
+			std::lock_guard<std::mutex> lock(playerMutex);
+			auto it = playerEndpoints.find(playerId);
+			if (it == playerEndpoints.end() || it->second != senderEndpoint)
+			{
+				Logger::getInstance().logServer("Suspicious/unauthorized DISCONNECT packet claiming to be player " + std::to_string(playerId), true);
+				return;
+			}
+			
+			Logger::getInstance().logServer("Player " + std::to_string(playerId) + " disconnected.");
+			playerEndpoints.erase(playerId);
+			playerPositions.erase(playerId);
+			playerSequenceNumbers.erase(playerId);
+		}
+	}
+	else if (message.type == MessageType::VOXEL_EDIT)
+	{
+		ByteBuffer buf(message.payload);
+		if (!buf.hasMore(sizeof(uint32_t) * 4 + sizeof(uint8_t)))
+			return;
+
+		uint32_t playerId = buf.readUInt32();
+		
+		{
+			std::lock_guard<std::mutex> lock(playerMutex);
+			auto it = playerEndpoints.find(playerId);
+			if (it == playerEndpoints.end() || it->second != senderEndpoint)
+			{
+				Logger::getInstance().logServer("Suspicious/unauthorized VOXEL_EDIT packet claiming to be player " + std::to_string(playerId), true);
+				return;
+			}
+		}
+
+		Message broadcastMsg;
+		broadcastMsg.type = MessageType::VOXEL_EDIT;
+		broadcastMsg.payload = message.payload; // Contains playerId, x, y, z, type
+
+		std::lock_guard<std::mutex> lock(playerMutex);
+		for (const auto &[id, endpoint] : playerEndpoints)
+		{
+			if (id != playerId)
+			{
+				broadcastMsg.sequenceNumber = playerSequenceNumbers[id]++;
+				sendMessage(endpoint, broadcastMsg);
+			}
+		}
 	}
 }
 
@@ -215,11 +269,11 @@ void Server::broadcastWorldState()
 
 	Message message;
 	message.type = MessageType::WORLD_STATE;
-	message.sequenceNumber = broadcastSequenceNumber++;
 	message.payload = std::move(buf.getBytes());
 
 	for (const auto &[id, endpoint] : playerEndpoints)
 	{
+		message.sequenceNumber = playerSequenceNumbers[id]++;
 		sendMessage(endpoint, message);
 	}
 }

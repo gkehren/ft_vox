@@ -48,6 +48,6 @@ private:
 	std::unordered_map<uint32_t, boost::asio::ip::udp::endpoint> playerEndpoints;
 	std::mutex playerMutex;
 
-	std::atomic<uint32_t> broadcastSequenceNumber;
+	std::unordered_map<uint32_t, uint32_t> playerSequenceNumbers;
 	uint32_t nextPlayerId;
 };

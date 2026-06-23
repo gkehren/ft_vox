@@ -1,4 +1,6 @@
 #include "Client.hpp"
+#include "../Engine/Logger.hpp"
+#include <unordered_set>
 
 Client::Client()
 	: socket(ioContext), connected(false), worldSeed(0), sequenceNumber(0), playerId(0)
@@ -31,6 +33,22 @@ void Client::stop()
 
 void Client::disconnect()
 {
+	if (connected && playerId != 0)
+	{
+		Message message;
+		message.type = MessageType::DISCONNECT;
+		message.sequenceNumber = sequenceNumber++;
+		ByteBuffer buf;
+		buf.writeUInt32(playerId);
+		message.payload = std::move(buf.getBytes());
+		
+		ByteBuffer outBuf;
+		outBuf.writeUInt8(message.type);
+		outBuf.writeUInt32(message.sequenceNumber);
+		outBuf.getBytes().insert(outBuf.getBytes().end(), message.payload.begin(), message.payload.end());
+		boost::system::error_code ec;
+		socket.send_to(boost::asio::buffer(outBuf.getBytes()), serverEndpoint, 0, ec);
+	}
 	stop();
 }
 
@@ -154,6 +172,7 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 		if (!buf.hasMore(numPlayers * (sizeof(uint32_t) + 3 * sizeof(float))))
 			return;
 
+		std::unordered_set<uint32_t> currentPlayers;
 		std::lock_guard<std::mutex> lock(playerMutex);
 		for (uint32_t i = 0; i < numPlayers; ++i)
 		{
@@ -163,7 +182,37 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 			position.y = buf.readFloat();
 			position.z = buf.readFloat();
 			playerPositions[position.playerId] = position;
+			currentPlayers.insert(position.playerId);
 		}
+
+		for (auto it = playerPositions.begin(); it != playerPositions.end(); )
+		{
+			if (currentPlayers.find(it->first) == currentPlayers.end() && it->first != playerId)
+			{
+				Logger::getInstance().logClient("Player " + std::to_string(it->first) + " disconnected.");
+				it = playerPositions.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+	}
+	else if (message.type == MessageType::VOXEL_EDIT)
+	{
+		ByteBuffer buf(message.payload);
+		if (!buf.hasMore(sizeof(uint32_t) * 4 + sizeof(uint8_t)))
+			return;
+			
+		VoxelEditEvent edit;
+		edit.playerId = buf.readUInt32();
+		edit.x = static_cast<int32_t>(buf.readUInt32());
+		edit.y = static_cast<int32_t>(buf.readUInt32());
+		edit.z = static_cast<int32_t>(buf.readUInt32());
+		edit.type = buf.readUInt8();
+
+		std::lock_guard<std::mutex> lock(voxelEditMutex);
+		pendingVoxelEdits.push_back(edit);
 	}
 	else if (message.type == MessageType::AUTHENTICATION)
 	{
@@ -171,7 +220,7 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 		if (!buf.hasMore(sizeof(uint32_t)))
 			return;
 		playerId = buf.readUInt32();
-		std::cout << "Authenticated with player ID: " << playerId << "\n";
+		Logger::getInstance().logClient("Authenticated with player ID: " + std::to_string(playerId));
 		sendAck(playerId);
 	}
 }
@@ -213,4 +262,32 @@ void Client::sendPlayerPosition(float x, float y, float z)
 	message.payload = std::move(buf.getBytes());
 
 	sendMessage(message);
+}
+
+void Client::sendVoxelEdit(int32_t x, int32_t y, int32_t z, uint8_t type)
+{
+	if (!connected || playerId == 0)
+		return;
+
+	Message message;
+	message.type = MessageType::VOXEL_EDIT;
+	message.sequenceNumber = sequenceNumber++;
+	
+	ByteBuffer buf;
+	buf.writeUInt32(playerId);
+	buf.writeUInt32(static_cast<uint32_t>(x));
+	buf.writeUInt32(static_cast<uint32_t>(y));
+	buf.writeUInt32(static_cast<uint32_t>(z));
+	buf.writeUInt8(type);
+	
+	message.payload = std::move(buf.getBytes());
+	sendMessage(message);
+}
+
+std::vector<VoxelEditEvent> Client::getPendingVoxelEdits()
+{
+	std::lock_guard<std::mutex> lock(voxelEditMutex);
+	std::vector<VoxelEditEvent> edits = std::move(pendingVoxelEdits);
+	pendingVoxelEdits.clear();
+	return edits;
 }

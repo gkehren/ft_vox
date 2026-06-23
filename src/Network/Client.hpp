@@ -8,6 +8,12 @@
 
 #include "common.hpp"
 
+struct VoxelEditEvent {
+	uint32_t playerId;
+	int32_t x, y, z;
+	uint8_t type;
+};
+
 class Client
 {
 public:
@@ -21,6 +27,8 @@ public:
 	uint32_t getWorldSeed() const;
 	uint32_t getPlayerId() const;
 	void sendPlayerPosition(float x, float y, float z);
+	void sendVoxelEdit(int32_t x, int32_t y, int32_t z, uint8_t type);
+	std::vector<VoxelEditEvent> getPendingVoxelEdits();
 
 private:
 	void run();
@@ -57,5 +65,8 @@ public: // public temporarily for ImGui and testing
 	std::atomic<uint32_t> lastWorldStateSequenceNumber{0};
 
 private:
+	std::vector<VoxelEditEvent> pendingVoxelEdits;
+	std::mutex voxelEditMutex;
+
 	std::jthread clientThread;
 };

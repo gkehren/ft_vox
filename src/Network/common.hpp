@@ -11,7 +11,9 @@ enum MessageType : uint8_t
 	PLAYER_POSITION = 3,
 	AUTHENTICATION = 4,
 	ACK = 5,
-	WORLD_STATE = 6
+	WORLD_STATE = 6,
+	DISCONNECT = 7,
+	VOXEL_EDIT = 8
 };
 
 struct Message
