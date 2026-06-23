@@ -51,6 +51,22 @@ cmake -B build -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.
 cmake --build build
 ```
 
+### Testing
+
+The project uses CMake's integrated `CTest` framework. Tests are defined in the `tests/` directory.
+
+#### Windows
+```powershell
+cd build
+ctest -C Release --output-on-failure
+```
+
+#### Linux/macOS
+```bash
+cd build
+ctest --output-on-failure
+```
+
 ### Key Conventions
 - **Voxel Data**: Stored as a flat array of `uint8_t` types in each `Chunk`.
 - **World Constants**: Defined in `src/utils.hpp` (e.g., `CHUNK_SIZE`, `WORLD_HEIGHT`).
