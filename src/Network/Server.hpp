@@ -39,6 +39,7 @@ private:
 	uint32_t worldSeed;
 
 	std::array<uint8_t, 1024> recvBuffer;
+	boost::asio::ip::udp::endpoint senderEndpoint;
 
 	std::unordered_map<uint32_t, PlayerPosition> playerPositions;
 	std::unordered_map<uint32_t, boost::asio::ip::udp::endpoint> playerEndpoints;

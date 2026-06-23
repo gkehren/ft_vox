@@ -50,12 +50,12 @@ void Server::run()
 
 void Server::receive()
 {
-	auto senderEndpoint = std::make_shared<boost::asio::ip::udp::endpoint>();
 	socket.async_receive_from(
-		boost::asio::buffer(recvBuffer), *senderEndpoint,
-		[this, senderEndpoint](const boost::system::error_code &error, std::size_t bytesTransferred)
+		boost::asio::buffer(recvBuffer), senderEndpoint,
+		[this](const boost::system::error_code &error, std::size_t bytesTransferred)
 		{
-			handleReceive(*senderEndpoint, error, bytesTransferred);
+			boost::asio::ip::udp::endpoint senderCopy = senderEndpoint;
+			handleReceive(senderCopy, error, bytesTransferred);
 			if (running)
 				receive();
 		});
