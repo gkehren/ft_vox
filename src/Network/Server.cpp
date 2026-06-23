@@ -121,17 +121,37 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 
 		{
 			std::lock_guard<std::mutex> lock(playerMutex);
+			auto it = playerEndpoints.find(position.playerId);
+			if (it == playerEndpoints.end() || it->second != senderEndpoint)
+			{
+				std::cerr << "Suspicious/unauthorized PLAYER_POSITION packet from " << senderEndpoint 
+						  << " claiming to be player " << position.playerId << "\n";
+				return;
+			}
 			playerPositions[position.playerId] = position;
-			playerEndpoints[position.playerId] = senderEndpoint;
 		}
 
 		broadcastPlayerPosition();
 	}
 	else if (message.type == MessageType::ACK)
 	{
+		if (message.payload.size() < sizeof(uint32_t))
+			return;
+
 		uint32_t playerId;
 		std::memcpy(&playerId, message.payload.data(), sizeof(uint32_t));
 		playerId = ntohl(playerId);
+
+		{
+			std::lock_guard<std::mutex> lock(playerMutex);
+			auto it = playerEndpoints.find(playerId);
+			if (it == playerEndpoints.end() || it->second != senderEndpoint)
+			{
+				std::cerr << "Suspicious/unauthorized ACK packet from " << senderEndpoint 
+						  << " claiming to be player " << playerId << "\n";
+				return;
+			}
+		}
 
 		std::cout << "Player " << playerId << " authenticated successfully." << "\n";
 	}
