@@ -139,15 +139,15 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 
 void Server::sendMessage(const boost::asio::ip::udp::endpoint &endpoint, const Message &message)
 {
-	std::vector<uint8_t> data;
-	data.reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
-	data.push_back(message.type);
+	auto data = std::make_shared<std::vector<uint8_t>>();
+	data->reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
+	data->push_back(message.type);
 	uint32_t seqNetOrder = htonl(message.sequenceNumber);
-	data.insert(data.end(), reinterpret_cast<uint8_t *>(&seqNetOrder), reinterpret_cast<uint8_t *>(&seqNetOrder) + sizeof(uint32_t));
-	data.insert(data.end(), message.payload.begin(), message.payload.end());
+	data->insert(data->end(), reinterpret_cast<const uint8_t *>(&seqNetOrder), reinterpret_cast<const uint8_t *>(&seqNetOrder) + sizeof(uint32_t));
+	data->insert(data->end(), message.payload.begin(), message.payload.end());
 
-	socket.async_send_to(boost::asio::buffer(data), endpoint,
-						 [](const boost::system::error_code &error, std::size_t /*bytesTransferred*/)
+	socket.async_send_to(boost::asio::buffer(*data), endpoint,
+						 [data](const boost::system::error_code &error, std::size_t /*bytesTransferred*/)
 						 {
 							 if (error)
 								 std::cerr << "Failed to send message: " << error.message() << "\n";
