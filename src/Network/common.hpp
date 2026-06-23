@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <vector>
+#include "ByteBuffer.hpp"
 
 enum MessageType : uint8_t
 {

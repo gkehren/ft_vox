@@ -72,37 +72,37 @@ void Server::handleReceive(const boost::asio::ip::udp::endpoint &senderEndpoint,
 
 void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint, const std::vector<uint8_t> &data)
 {
-	if (data.size() < sizeof(uint8_t) + sizeof(uint32_t))
+	ByteBuffer mainBuf(data);
+	if (!mainBuf.hasMore(sizeof(uint8_t) + sizeof(uint32_t)))
 		return;
 
 	Message message;
-	size_t offset = 0;
+	message.type = mainBuf.readUInt8();
+	message.sequenceNumber = mainBuf.readUInt32();
 
-	message.type = data[offset++];
-	std::memcpy(&message.sequenceNumber, &data[offset], sizeof(uint32_t));
-	offset += sizeof(uint32_t);
-
-	message.payload.insert(message.payload.end(), data.begin() + offset, data.end());
+	message.payload.insert(message.payload.end(), data.begin() + mainBuf.getReadOffset(), data.end());
 
 	if (message.type == MessageType::REQUEST_SEED)
 	{
 		// Send the world seed to the client
+		ByteBuffer seedBuf;
+		seedBuf.writeUInt32(worldSeed);
+
 		Message seedMessage;
 		seedMessage.type = MessageType::SEND_SEED;
 		seedMessage.sequenceNumber = message.sequenceNumber;
-		uint32_t seedNetworkOrder = htonl(worldSeed);
-		seedMessage.payload.resize(sizeof(uint32_t));
-		std::memcpy(seedMessage.payload.data(), &seedNetworkOrder, sizeof(uint32_t));
+		seedMessage.payload = std::move(seedBuf.getBytes());
 
 		sendMessage(senderEndpoint, seedMessage);
 
 		uint32_t playerId = nextPlayerId++;
+		ByteBuffer authBuf;
+		authBuf.writeUInt32(playerId);
+
 		Message authMessage;
 		authMessage.type = MessageType::AUTHENTICATION;
 		authMessage.sequenceNumber = message.sequenceNumber;
-		uint32_t playerIdNetworkOrder = htonl(playerId);
-		authMessage.payload.resize(sizeof(uint32_t));
-		std::memcpy(authMessage.payload.data(), &playerIdNetworkOrder, sizeof(uint32_t));
+		authMessage.payload = std::move(authBuf.getBytes());
 
 		sendMessage(senderEndpoint, authMessage);
 
@@ -113,11 +113,15 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 	}
 	else if (message.type == MessageType::PLAYER_POSITION)
 	{
-		if (message.payload.size() < sizeof(PlayerPosition))
+		ByteBuffer buf(message.payload);
+		if (!buf.hasMore(sizeof(uint32_t) + 3 * sizeof(float)))
 			return;
 
 		PlayerPosition position;
-		std::memcpy(&position, message.payload.data(), sizeof(PlayerPosition));
+		position.playerId = buf.readUInt32();
+		position.x = buf.readFloat();
+		position.y = buf.readFloat();
+		position.z = buf.readFloat();
 
 		{
 			std::lock_guard<std::mutex> lock(playerMutex);
@@ -135,12 +139,11 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 	}
 	else if (message.type == MessageType::ACK)
 	{
-		if (message.payload.size() < sizeof(uint32_t))
+		ByteBuffer buf(message.payload);
+		if (!buf.hasMore(sizeof(uint32_t)))
 			return;
 
-		uint32_t playerId;
-		std::memcpy(&playerId, message.payload.data(), sizeof(uint32_t));
-		playerId = ntohl(playerId);
+		uint32_t playerId = buf.readUInt32();
 
 		{
 			std::lock_guard<std::mutex> lock(playerMutex);
@@ -160,11 +163,11 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 void Server::sendMessage(const boost::asio::ip::udp::endpoint &endpoint, const Message &message)
 {
 	auto data = std::make_shared<std::vector<uint8_t>>();
-	data->reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
-	data->push_back(message.type);
-	uint32_t seqNetOrder = htonl(message.sequenceNumber);
-	data->insert(data->end(), reinterpret_cast<const uint8_t *>(&seqNetOrder), reinterpret_cast<const uint8_t *>(&seqNetOrder) + sizeof(uint32_t));
-	data->insert(data->end(), message.payload.begin(), message.payload.end());
+	ByteBuffer buf;
+	buf.writeUInt8(message.type);
+	buf.writeUInt32(message.sequenceNumber);
+	buf.getBytes().insert(buf.getBytes().end(), message.payload.begin(), message.payload.end());
+	*data = std::move(buf.getBytes());
 
 	socket.async_send_to(boost::asio::buffer(*data), endpoint,
 						 [data](const boost::system::error_code &error, std::size_t /*bytesTransferred*/)
@@ -180,11 +183,16 @@ void Server::broadcastPlayerPosition()
 
 	for (const auto &[playerId, position] : playerPositions)
 	{
+		ByteBuffer buf;
+		buf.writeUInt32(position.playerId);
+		buf.writeFloat(position.x);
+		buf.writeFloat(position.y);
+		buf.writeFloat(position.z);
+
 		Message message;
 		message.type = MessageType::PLAYER_POSITION;
-		message.sequenceNumber = message.sequenceNumber;
-		message.payload.resize(sizeof(PlayerPosition));
-		std::memcpy(message.payload.data(), &position, sizeof(PlayerPosition));
+		message.sequenceNumber = 0;
+		message.payload = std::move(buf.getBytes());
 
 		for (const auto &[id, endpoint] : playerEndpoints)
 		{
