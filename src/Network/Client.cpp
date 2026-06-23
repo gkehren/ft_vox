@@ -53,8 +53,6 @@ void Client::requestSeed()
 	message.sequenceNumber = sequenceNumber++;
 	sendMessage(message);
 
-	receive();
-
 	// std::unique_lock<std::mutex> lock(seedMutex);
 	// if (!seedCondVar.wait_for(lock, std::chrono::seconds(5), [this]() { return worldSeed != 0; })) {
 	//	// if we didn't receive the seed in 5 seconds, disconnect
