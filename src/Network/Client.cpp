@@ -141,6 +141,30 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 			playerPositions[position.playerId] = position;
 		}
 	}
+	else if (message.type == MessageType::WORLD_STATE)
+	{
+		worldStatePacketCount++;
+		lastWorldStateSequenceNumber = message.sequenceNumber;
+
+		ByteBuffer buf(message.payload);
+		if (!buf.hasMore(sizeof(uint32_t)))
+			return;
+
+		uint32_t numPlayers = buf.readUInt32();
+		if (!buf.hasMore(numPlayers * (sizeof(uint32_t) + 3 * sizeof(float))))
+			return;
+
+		std::lock_guard<std::mutex> lock(playerMutex);
+		for (uint32_t i = 0; i < numPlayers; ++i)
+		{
+			PlayerPosition position;
+			position.playerId = buf.readUInt32();
+			position.x = buf.readFloat();
+			position.y = buf.readFloat();
+			position.z = buf.readFloat();
+			playerPositions[position.playerId] = position;
+		}
+	}
 	else if (message.type == MessageType::AUTHENTICATION)
 	{
 		ByteBuffer buf(message.payload);

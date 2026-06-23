@@ -24,17 +24,20 @@ public:
 private:
 	void run();
 	void receive();
+	void tick();
 	void handleReceive(const boost::asio::ip::udp::endpoint &senderEndpoint, const boost::system::error_code &error, std::size_t bytesTransferred);
 
 	void handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint, const std::vector<uint8_t> &data);
 	void sendMessage(const boost::asio::ip::udp::endpoint &endpoint, const Message &message);
 	void broadcastPlayerPosition();
+	void broadcastWorldState();
 
 	std::thread serverThread;
 	std::atomic<bool> running;
 
 	boost::asio::io_context ioContext;
 	boost::asio::ip::udp::socket socket;
+	boost::asio::steady_timer tickTimer;
 
 	uint32_t worldSeed;
 
@@ -45,5 +48,6 @@ private:
 	std::unordered_map<uint32_t, boost::asio::ip::udp::endpoint> playerEndpoints;
 	std::mutex playerMutex;
 
+	std::atomic<uint32_t> broadcastSequenceNumber;
 	uint32_t nextPlayerId;
 };

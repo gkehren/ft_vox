@@ -3,7 +3,9 @@
 Server::Server(unsigned short port, uint32_t worldSeed)
 	: socket(ioContext, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), port)),
 	  running(false),
+	  tickTimer(ioContext),
 	  worldSeed(worldSeed),
+	  broadcastSequenceNumber(0),
 	  nextPlayerId(1)
 {
 }
@@ -45,6 +47,8 @@ size_t Server::getClientCount() const
 void Server::run()
 {
 	receive();
+	tickTimer.expires_after(std::chrono::milliseconds(50));
+	tick();
 	ioContext.run();
 }
 
@@ -134,8 +138,6 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 			}
 			playerPositions[position.playerId] = position;
 		}
-
-		broadcastPlayerPosition();
 	}
 	else if (message.type == MessageType::ACK)
 	{
@@ -177,27 +179,47 @@ void Server::sendMessage(const boost::asio::ip::udp::endpoint &endpoint, const M
 						 });
 }
 
-void Server::broadcastPlayerPosition()
+void Server::tick()
+{
+	if (!running)
+		return;
+
+	broadcastWorldState();
+
+	tickTimer.expires_after(std::chrono::milliseconds(50));
+	tickTimer.async_wait([this](const boost::system::error_code &error)
+						 {
+							 if (!error)
+								 tick();
+						 });
+}
+
+void Server::broadcastWorldState()
 {
 	std::lock_guard<std::mutex> lock(playerMutex);
 
+	if (playerPositions.empty())
+		return;
+
+	ByteBuffer buf;
+	// Write the number of players in this snapshot
+	buf.writeUInt32(static_cast<uint32_t>(playerPositions.size()));
+
 	for (const auto &[playerId, position] : playerPositions)
 	{
-		ByteBuffer buf;
 		buf.writeUInt32(position.playerId);
 		buf.writeFloat(position.x);
 		buf.writeFloat(position.y);
 		buf.writeFloat(position.z);
+	}
 
-		Message message;
-		message.type = MessageType::PLAYER_POSITION;
-		message.sequenceNumber = 0;
-		message.payload = std::move(buf.getBytes());
+	Message message;
+	message.type = MessageType::WORLD_STATE;
+	message.sequenceNumber = broadcastSequenceNumber++;
+	message.payload = std::move(buf.getBytes());
 
-		for (const auto &[id, endpoint] : playerEndpoints)
-		{
-			if (id != playerId)
-				sendMessage(endpoint, message);
-		}
+	for (const auto &[id, endpoint] : playerEndpoints)
+	{
+		sendMessage(endpoint, message);
 	}
 }

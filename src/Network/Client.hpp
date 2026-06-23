@@ -49,9 +49,12 @@ private:
 
 	uint32_t playerId;
 
-public: // public temporarily for ImGui
+public: // public temporarily for ImGui and testing
 	std::unordered_map<uint32_t, PlayerPosition> playerPositions;
 	std::mutex playerMutex;
+
+	std::atomic<uint32_t> worldStatePacketCount{0};
+	std::atomic<uint32_t> lastWorldStateSequenceNumber{0};
 
 private:
 	std::jthread clientThread;

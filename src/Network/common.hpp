@@ -10,7 +10,8 @@ enum MessageType : uint8_t
 	SEND_SEED = 2,
 	PLAYER_POSITION = 3,
 	AUTHENTICATION = 4,
-	ACK = 5
+	ACK = 5,
+	WORLD_STATE = 6
 };
 
 struct Message
