@@ -66,21 +66,23 @@ void Client::requestSeed()
 
 void Client::sendMessage(const Message &message)
 {
-	auto data = std::make_shared<std::vector<uint8_t>>();
-	data->reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
-	data->push_back(message.type);
-	uint32_t seqNetOrder = htonl(message.sequenceNumber);
-	data->insert(data->end(), reinterpret_cast<const uint8_t *>(&seqNetOrder), reinterpret_cast<const uint8_t *>(&seqNetOrder) + sizeof(uint32_t));
-	data->insert(data->end(), message.payload.begin(), message.payload.end());
+	boost::asio::post(ioContext, [this, message]()
+					  {
+		auto data = std::make_shared<std::vector<uint8_t>>();
+		data->reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
+		data->push_back(message.type);
+		uint32_t seqNetOrder = htonl(message.sequenceNumber);
+		data->insert(data->end(), reinterpret_cast<const uint8_t *>(&seqNetOrder), reinterpret_cast<const uint8_t *>(&seqNetOrder) + sizeof(uint32_t));
+		data->insert(data->end(), message.payload.begin(), message.payload.end());
 
-	socket.async_send_to(boost::asio::buffer(*data), serverEndpoint,
-						 [this, data](const boost::system::error_code &error, std::size_t bytesTransferred)
-						 {
-							 if (error)
+		socket.async_send_to(boost::asio::buffer(*data), serverEndpoint,
+							 [this, data](const boost::system::error_code &error, std::size_t bytesTransferred)
 							 {
-								 std::cerr << "Error sending message: " << error.message() << "\n";
-							 }
-						 });
+								 if (error)
+								 {
+									 std::cerr << "Error sending message: " << error.message() << "\n";
+								 }
+							 }); });
 }
 
 void Client::receive()
@@ -184,7 +186,7 @@ void Client::sendPlayerPosition(float x, float y, float z)
 
 	Message message;
 	message.type = MessageType::PLAYER_POSITION;
-	message.sequenceNumber = message.sequenceNumber++;
+	message.sequenceNumber = sequenceNumber++;
 	message.payload.resize(sizeof(PlayerPosition));
 	std::memcpy(message.payload.data(), &position, sizeof(PlayerPosition));
 
