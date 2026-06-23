@@ -43,7 +43,7 @@ private:
 	std::mutex seedMutex;
 	std::condition_variable seedCondVar;
 
-	uint32_t sequenceNumber;
+	std::atomic<uint32_t> sequenceNumber;
 
 	std::array<uint8_t, 1024> recvBuffer;
 
