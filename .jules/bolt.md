@@ -19,3 +19,6 @@
 ## 2025-02-21 - Event Bus Optimization
 **Learning:** In highly accessed event systems like `EventBus::publish`, mapping an enum to a vector of handlers via `std::unordered_map` introduces hashing overhead, double lookups (`find` then `[]`), and pointer chasing that degrades performance.
 **Action:** Replace `std::unordered_map` with a flat `std::array` indexed by a `Count` element on the enum. This provides O(1) contiguous memory access, completely eliminating hashing and cache misses.
+## 2024-06-23 - ChunkManager Container Optimization
+**Learning:** In a highly dynamic system like `ChunkManager`, tracking active chunks with `std::unordered_set` incurs significant hashing overhead, individual heap allocations per node, and poor cache locality during iteration (which happens multiple times per frame).
+**Action:** Replace `std::unordered_set<Chunk*>` with `std::vector<Chunk*>` for `activeChunks` when the primary operations are iteration and additions, and use (1)$ swap-and-pop for removals. This improves cache locality and iteration speed significantly.
