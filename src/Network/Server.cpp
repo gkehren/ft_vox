@@ -90,6 +90,7 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 	{
 		// Send the world seed to the client
 		ByteBuffer seedBuf;
+		seedBuf.reserve(sizeof(uint32_t));
 		seedBuf.writeUInt32(worldSeed);
 
 		Message seedMessage;
@@ -101,6 +102,7 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 
 		uint32_t playerId = nextPlayerId++;
 		ByteBuffer authBuf;
+		authBuf.reserve(sizeof(uint32_t));
 		authBuf.writeUInt32(playerId);
 
 		Message authMessage;
@@ -220,6 +222,7 @@ void Server::sendMessage(const boost::asio::ip::udp::endpoint &endpoint, const M
 {
 	auto data = std::make_shared<std::vector<uint8_t>>();
 	ByteBuffer buf;
+	buf.reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
 	buf.writeUInt8(message.type);
 	buf.writeUInt32(message.sequenceNumber);
 	buf.getBytes().insert(buf.getBytes().end(), message.payload.begin(), message.payload.end());
@@ -256,6 +259,7 @@ void Server::broadcastWorldState()
 		return;
 
 	ByteBuffer buf;
+	buf.reserve(sizeof(uint32_t) + playerPositions.size() * (sizeof(uint32_t) + 3 * sizeof(float)));
 	// Write the number of players in this snapshot
 	buf.writeUInt32(static_cast<uint32_t>(playerPositions.size()));
 

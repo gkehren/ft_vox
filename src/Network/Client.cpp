@@ -39,10 +39,12 @@ void Client::disconnect()
 		message.type = MessageType::DISCONNECT;
 		message.sequenceNumber = sequenceNumber++;
 		ByteBuffer buf;
+		buf.reserve(sizeof(uint32_t));
 		buf.writeUInt32(playerId);
 		message.payload = std::move(buf.getBytes());
 		
 		ByteBuffer outBuf;
+		outBuf.reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
 		outBuf.writeUInt8(message.type);
 		outBuf.writeUInt32(message.sequenceNumber);
 		outBuf.getBytes().insert(outBuf.getBytes().end(), message.payload.begin(), message.payload.end());
@@ -86,6 +88,7 @@ void Client::sendMessage(const Message &message)
 					  {
 		auto data = std::make_shared<std::vector<uint8_t>>();
 		ByteBuffer buf;
+		buf.reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
 		buf.writeUInt8(message.type);
 		buf.writeUInt32(message.sequenceNumber);
 		buf.getBytes().insert(buf.getBytes().end(), message.payload.begin(), message.payload.end());
@@ -228,6 +231,7 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 void Client::sendAck(uint32_t playerId)
 {
 	ByteBuffer buf;
+	buf.reserve(sizeof(uint32_t));
 	buf.writeUInt32(playerId);
 
 	Message message;
@@ -251,6 +255,7 @@ uint32_t Client::getPlayerId() const
 void Client::sendPlayerPosition(float x, float y, float z)
 {
 	ByteBuffer buf;
+	buf.reserve(sizeof(uint32_t) + 3 * sizeof(float));
 	buf.writeUInt32(playerId);
 	buf.writeFloat(x);
 	buf.writeFloat(y);
@@ -274,6 +279,7 @@ void Client::sendVoxelEdit(int32_t x, int32_t y, int32_t z, uint8_t type)
 	message.sequenceNumber = sequenceNumber++;
 	
 	ByteBuffer buf;
+	buf.reserve(sizeof(uint32_t) * 4 + sizeof(uint8_t));
 	buf.writeUInt32(playerId);
 	buf.writeUInt32(static_cast<uint32_t>(x));
 	buf.writeUInt32(static_cast<uint32_t>(y));
