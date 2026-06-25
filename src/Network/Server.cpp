@@ -220,6 +220,11 @@ void Server::sendMessage(const boost::asio::ip::udp::endpoint &endpoint, const M
 {
 	auto data = std::make_shared<std::vector<uint8_t>>();
 	ByteBuffer buf;
+
+	// ⚡ Bolt: Pre-allocate buffer capacity to avoid intermediate dynamic allocations
+	// during message serialization, drastically reducing overhead on the network thread.
+	buf.reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
+
 	buf.writeUInt8(message.type);
 	buf.writeUInt32(message.sequenceNumber);
 	buf.getBytes().insert(buf.getBytes().end(), message.payload.begin(), message.payload.end());

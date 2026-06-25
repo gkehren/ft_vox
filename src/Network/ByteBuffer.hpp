@@ -16,6 +16,8 @@ public:
 	const std::vector<uint8_t> &getBytes() const { return buffer; }
 	std::vector<uint8_t> &getBytes() { return buffer; }
 
+	void reserve(size_t capacity) { buffer.reserve(capacity); }
+
 	// Write primitives
 	void writeUInt8(uint8_t value)
 	{
