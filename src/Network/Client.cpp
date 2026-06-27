@@ -86,6 +86,7 @@ void Client::sendMessage(const Message &message)
 					  {
 		auto data = std::make_shared<std::vector<uint8_t>>();
 		ByteBuffer buf;
+		buf.reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
 		buf.writeUInt8(message.type);
 		buf.writeUInt32(message.sequenceNumber);
 		buf.getBytes().insert(buf.getBytes().end(), message.payload.begin(), message.payload.end());
