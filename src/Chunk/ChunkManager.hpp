@@ -60,7 +60,7 @@ private:
 	TaskPriority calculateTaskPriority(float distance, float lodThreshold) const;
 
 	std::unordered_map<glm::ivec3, Chunk*, IVec3Hash> chunks;
-	std::unordered_set<Chunk *> activeChunks;
+	std::vector<Chunk *> activeChunks; // ⚡ Bolt: Replaced std::unordered_set with std::vector for faster iteration
 	std::queue<glm::ivec3> chunkLoadQueue;
 
 	std::vector<std::pair<std::future<void>, Chunk *>> pendingGenerationTasks;
