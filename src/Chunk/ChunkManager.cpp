@@ -76,7 +76,7 @@ void ChunkManager::processChunkLoading(const RenderSettings &settings, int budge
 			if (chunks.find(chunkPos) == chunks.end())
 			{
 				chunks[chunkPos] = chunk;
-				activeChunks.insert(chunk);
+				activeChunks.push_back(chunk);
 			}
 			else
 			{
@@ -698,7 +698,12 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 				// Re-check in_transit just in case state changed
 				if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
 				{
-					activeChunks.erase(chunkPtr);
+					// ⚡ Bolt: O(1) swap-and-pop removal to maintain contiguous vector layout
+					auto activeIt = std::find(activeChunks.begin(), activeChunks.end(), chunkPtr);
+					if (activeIt != activeChunks.end()) {
+						*activeIt = activeChunks.back();
+						activeChunks.pop_back();
+					}
 					m_chunkPool->release(chunkPtr);
 					chunks.erase(it);
 					m_cachedWaterChunks.clear(); // H: invalidate water sort cache
