@@ -22,3 +22,6 @@
 ## 2024-06-23 - ChunkManager Container Optimization
 **Learning:** In a highly dynamic system like `ChunkManager`, tracking active chunks with `std::unordered_set` incurs significant hashing overhead, individual heap allocations per node, and poor cache locality during iteration (which happens multiple times per frame).
 **Action:** Replace `std::unordered_set<Chunk*>` with `std::vector<Chunk*>` for `activeChunks` when the primary operations are iteration and additions, and use (1)$ swap-and-pop for removals. This improves cache locality and iteration speed significantly.
+## 2026-06-30 - Shader Uniform Lookup Optimization
+**Learning:** Mapping a string literal or `std::string_view` to a cache (like `std::unordered_map<std::string, GLint>`) forces an implicit `std::string` allocation per lookup, which is disastrous in hot loops like rendering.
+**Action:** Use a transparent hash functor (`is_transparent = void`) and `std::equal_to<>` with `std::unordered_map` (C++20 heterogeneous lookup) to allow lookups by `std::string_view` directly, completely avoiding allocations on cache hits. Only construct a `std::string` upon cache miss to pass to the C API.
