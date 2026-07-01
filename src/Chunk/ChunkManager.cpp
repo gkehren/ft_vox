@@ -176,7 +176,7 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 
 	for (Chunk *chunk : activeChunks)
 	{
-		if (chunk->isVisible() && chunk->getState() == ChunkState::UNLOADED && chunksInTransit.find(chunk) == chunksInTransit.end())
+		if (chunk->isVisible() && chunk->getState() == ChunkState::UNLOADED && !chunk->isInTransit())
 		{
 			glm::vec3 chunkCenter = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 			float dx = chunkCenter.x - camPos.x;
@@ -205,7 +205,7 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 		float distanceSq = genQueueVec[i].distance;
 		TaskPriority priority = calculateTaskPriority(distanceSq, lodThresholdSq);
 
-		chunksInTransit.insert(chunk);
+		chunk->setInTransit(true);
 		auto future = p_threadPool->enqueue(priority, [chunk, currentSeed]()
 											{
 												TerrainGenerator& localGenerator = TerrainGenerator::getThreadLocal(currentSeed);
@@ -235,7 +235,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 
 	for (Chunk *chunk : activeChunks)
 	{
-		if (chunk->isVisible() && chunk->getState() == ChunkState::GENERATED && chunksInTransit.find(chunk) == chunksInTransit.end())
+		if (chunk->isVisible() && chunk->getState() == ChunkState::GENERATED && !chunk->isInTransit())
 		{
 			glm::vec3 chunkCenter = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 			float dx = chunkCenter.x - camPos.x;
@@ -253,7 +253,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	for (Chunk *chunk : activeChunks)
 	{
 		if (chunk->isLODMesh() && chunk->getState() == ChunkState::MESHED &&
-			chunksInTransit.find(chunk) == chunksInTransit.end())
+			!chunk->isInTransit())
 		{
 			glm::vec3 cc = chunk->getPosition() + glm::vec3(CHUNK_SIZE / 2.0f);
 			float dx = cc.x - camPos.x;
@@ -281,7 +281,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		glm::vec3 wp = chunk->getPosition();
 		glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
 					  static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
-		chunksInTransit.insert(chunk);
+		chunk->setInTransit(true);
 		TaskPriority priority = calculateTaskPriority(chunkDistSq, lodThresholdSq);
 		if (chunkDistSq > lodThresholdSq)
 		{
@@ -446,7 +446,7 @@ void ChunkManager::uploadPendingMeshes(int budget)
 	{
 		if (uploaded >= budget)
 			break;
-		if (chunk->getState() == ChunkState::MESHED && chunk->needsGPUUpload() && chunksInTransit.find(chunk) == chunksInTransit.end())
+		if (chunk->getState() == ChunkState::MESHED && chunk->needsGPUUpload() && !chunk->isInTransit())
 		{
 			chunk->uploadToGPU();
 			++uploaded;
@@ -677,7 +677,7 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 			if (distToPlayerSq > unloadDistSq)
 			{
 				// Do not unload chunks that are currently being processed
-				if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
+				if (!chunkPtr->isInTransit())
 				{
 					chunksToUnload.push_back(pos);
 				}
@@ -696,7 +696,7 @@ void ChunkManager::unloadOutOfRangeChunks(const Camera &camera, const RenderSett
 			{
 				Chunk* chunkPtr = it->second;
 				// Re-check in_transit just in case state changed
-				if (chunksInTransit.find(chunkPtr) == chunksInTransit.end())
+				if (!chunkPtr->isInTransit())
 				{
 					auto activeIt = std::find(activeChunks.begin(), activeChunks.end(), chunkPtr);
 					if (activeIt != activeChunks.end())
@@ -787,7 +787,7 @@ void ChunkManager::processFinishedJobs()
 		if (pendingGenerationTasks[i].first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
 		{
 			pendingGenerationTasks[i].first.get(); // Propagate exceptions if any
-			chunksInTransit.erase(pendingGenerationTasks[i].second);
+			pendingGenerationTasks[i].second->setInTransit(false);
 			pendingGenerationTasks[i] = std::move(pendingGenerationTasks.back());
 			pendingGenerationTasks.pop_back();
 		}
@@ -804,7 +804,7 @@ void ChunkManager::processFinishedJobs()
 		{
 			pendingMeshingTasks[i].first.get();
 			Chunk *finishedChunk = pendingMeshingTasks[i].second;
-			chunksInTransit.erase(finishedChunk);
+			finishedChunk->setInTransit(false);
 			// H: A newly meshed chunk may have water geometry — invalidate the sorted
 			// cache so it appears in the next water transparency pass without waiting
 			// for the camera to move.

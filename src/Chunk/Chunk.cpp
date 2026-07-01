@@ -1038,6 +1038,7 @@ void Chunk::reset(const glm::vec3 &newPosition)
   state.store(ChunkState::UNLOADED);
   meshNeedsUpdate.store(true);
   m_isLODMesh = false;
+  m_inTransit.store(false);
 
   // Clear buffers but retain capacity for reuse (avoid reallocation)
   vertices.clear();
