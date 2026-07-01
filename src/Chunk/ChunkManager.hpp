@@ -1,7 +1,6 @@
 #pragma once
 
 #include <unordered_map>
-#include <unordered_set>
 #include <queue>
 #include <mutex>
 #include <shared_mutex>
@@ -65,7 +64,6 @@ private:
 
 	std::vector<std::pair<std::future<void>, Chunk *>> pendingGenerationTasks;
 	std::vector<std::pair<std::future<void>, Chunk *>> pendingMeshingTasks;
-	std::unordered_set<Chunk *> chunksInTransit;
 
 	mutable std::shared_mutex chunkMutex;
 

@@ -25,3 +25,6 @@
 ## 2026-06-30 - Shader Uniform Lookup Optimization
 **Learning:** Mapping a string literal or `std::string_view` to a cache (like `std::unordered_map<std::string, GLint>`) forces an implicit `std::string` allocation per lookup, which is disastrous in hot loops like rendering.
 **Action:** Use a transparent hash functor (`is_transparent = void`) and `std::equal_to<>` with `std::unordered_map` (C++20 heterogeneous lookup) to allow lookups by `std::string_view` directly, completely avoiding allocations on cache hits. Only construct a `std::string` upon cache miss to pass to the C API.
+## 2024-05-19 - [Avoid unordered_set for Object State Tracking]
+**Learning:** Maintaining an external `std::unordered_set<Chunk*>` to track which chunks are currently in transit introduces unnecessary $O(1)$ node-based hashing overhead and cache misses, especially when checked repeatedly inside hot game loops (like frustum culling or chunk meshing).
+**Action:** When tracking simple binary state for an object (like "is in transit" or "is processing"), embed an `std::atomic<bool>` flag directly into the object class itself rather than tracking it externally in a hash map. This converts a hash map lookup into a simple inline boolean check, significantly improving cache locality.

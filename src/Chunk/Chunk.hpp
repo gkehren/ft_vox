@@ -56,6 +56,8 @@ public:
 	bool hasWaterMesh() const { return waterIndexCount > 0; }
 	bool isLODMesh() const { return m_isLODMesh; }
 	bool needsGPUUpload() const { return meshNeedsUpdate.load(); }
+	bool isInTransit() const { return m_inTransit.load(); }
+	void setInTransit(bool val) { m_inTransit.store(val); }
 	void uploadToGPU();
 	bool isShellEmpty() const { return neighborShellVoxels.empty(); }
 	void freeShellVoxels();
@@ -98,6 +100,11 @@ private:
 
 	std::atomic<bool> meshNeedsUpdate;
 	bool m_isLODMesh{false}; // K: true when this chunk carries the simplified LOD mesh
+
+	// Bolt: Moving the transit state directly to the Chunk via an atomic flag eliminates
+	// the need for an external std::unordered_set<Chunk*> in ChunkManager. This prevents
+	// costly node-based hash map lookups and cache misses in hot loops when iterating over activeChunks.
+	std::atomic<bool> m_inTransit{false};
 
 	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
 };
