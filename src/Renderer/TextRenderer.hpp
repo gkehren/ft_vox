@@ -5,7 +5,7 @@
 #include <glad/glad.h>
 #include <string>
 #include <string_view>
-#include <map>
+#include <array>
 #include <memory>
 #include <glm/glm.hpp>
 #include <Shader/Shader.hpp>
@@ -35,7 +35,7 @@ private:
 	GLuint VAO;
 	GLuint VBO;
 	glm::mat4 projection;
-	std::map<char, Character> characters;
+	std::array<Character, 128> characters;
 
 	void loadCharacters();
 };

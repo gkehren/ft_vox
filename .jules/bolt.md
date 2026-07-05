@@ -28,3 +28,6 @@
 ## 2024-05-19 - [Avoid unordered_set for Object State Tracking]
 **Learning:** Maintaining an external `std::unordered_set<Chunk*>` to track which chunks are currently in transit introduces unnecessary $O(1)$ node-based hashing overhead and cache misses, especially when checked repeatedly inside hot game loops (like frustum culling or chunk meshing).
 **Action:** When tracking simple binary state for an object (like "is in transit" or "is processing"), embed an `std::atomic<bool>` flag directly into the object class itself rather than tracking it externally in a hash map. This converts a hash map lookup into a simple inline boolean check, significantly improving cache locality.
+## 2024-06-25 - [TextRenderer String Lookup Optimization]
+**Learning:** `std::map<char, Character>` was being used in `TextRenderer` to map ASCII character glyphs during the render hot loop. This causes an O(log N) lookup overhead per character rendered.
+**Action:** Replace `std::map` with `std::array<Character, 128>` for bounded, integer-castable keys (like ASCII 0-127) when accessed repeatedly in rendering loops to guarantee O(1) contiguous memory access and massive performance gains.
