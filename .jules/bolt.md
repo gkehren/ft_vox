@@ -31,3 +31,9 @@
 ## 2024-07-06 - Always Verify Full Method Text Before Edits
 **Learning:** Output from tools like `cat` might get truncated if a file is long. Assuming method implementation details based on incomplete output leads to bad plans.
 **Action:** Use `read_file` or `grep -A 50` on specific methods to ensure the full implementation is viewed before proposing exact edits.
+## 2024-05-24 - Precalculate AABB Optimal Test Corners for Frustum Culling
+**Learning:** In broad-phase frustum culling against AABBs, evaluating `aabbMin` vs `aabbMax` for each plane inside the active chunks loop introduces branch mispredictions and redundant calculations since the frustum planes are constant per-frame.
+**Action:** Always precalculate the optimal testing corner (the plane offset vector) for each of the 6 frustum planes *outside* the chunk iteration loop. Combine this with precalculated normals and plane offsets (`w`), so the inner loop simply adds the precalculated offset to `aabbMin` and evaluates the dot product without branching.
+## 2024-05-24 - Network Packet Hot Loop Optimization
+**Learning:** Using `std::unordered_set` dynamically inside frequent network packet handlers (like `Client::handleMessage`) causes node-based heap allocations for every packet processed, leading to unnecessary garbage and potential stutters.
+**Action:** For bounded and small collections derived from network packets, use `std::vector` with `reserve()`, sort the vector, and use `std::binary_search()`. This leverages contiguous memory and avoids node allocations entirely.
