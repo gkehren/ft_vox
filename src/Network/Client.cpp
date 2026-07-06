@@ -1,6 +1,7 @@
 #include "Client.hpp"
 #include "../Engine/Logger.hpp"
-#include <unordered_set>
+#include <vector>
+#include <algorithm>
 
 Client::Client()
 	: socket(ioContext), connected(false), worldSeed(0), sequenceNumber(0), playerId(0)
@@ -175,7 +176,11 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 		if (!buf.hasMore(numPlayers * (sizeof(uint32_t) + 3 * sizeof(float))))
 			return;
 
-		std::unordered_set<uint32_t> currentPlayers;
+		// ⚡ Bolt: Replace std::unordered_set with std::vector + std::sort + std::binary_search
+		// to avoid node allocations and improve cache locality on every network tick.
+		std::vector<uint32_t> currentPlayers;
+		currentPlayers.reserve(numPlayers);
+
 		std::lock_guard<std::mutex> lock(playerMutex);
 		for (uint32_t i = 0; i < numPlayers; ++i)
 		{
@@ -185,12 +190,14 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 			position.y = buf.readFloat();
 			position.z = buf.readFloat();
 			playerPositions[position.playerId] = position;
-			currentPlayers.insert(position.playerId);
+			currentPlayers.push_back(position.playerId);
 		}
+
+		std::sort(currentPlayers.begin(), currentPlayers.end());
 
 		for (auto it = playerPositions.begin(); it != playerPositions.end(); )
 		{
-			if (currentPlayers.find(it->first) == currentPlayers.end() && it->first != playerId)
+			if (!std::binary_search(currentPlayers.begin(), currentPlayers.end(), it->first) && it->first != playerId)
 			{
 				Logger::getInstance().logClient("Player " + std::to_string(it->first) + " disconnected.");
 				it = playerPositions.erase(it);
