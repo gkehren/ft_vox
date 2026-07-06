@@ -28,6 +28,9 @@
 ## 2024-05-19 - [Avoid unordered_set for Object State Tracking]
 **Learning:** Maintaining an external `std::unordered_set<Chunk*>` to track which chunks are currently in transit introduces unnecessary $O(1)$ node-based hashing overhead and cache misses, especially when checked repeatedly inside hot game loops (like frustum culling or chunk meshing).
 **Action:** When tracking simple binary state for an object (like "is in transit" or "is processing"), embed an `std::atomic<bool>` flag directly into the object class itself rather than tracking it externally in a hash map. This converts a hash map lookup into a simple inline boolean check, significantly improving cache locality.
+## 2024-07-06 - Always Verify Full Method Text Before Edits
+**Learning:** Output from tools like `cat` might get truncated if a file is long. Assuming method implementation details based on incomplete output leads to bad plans.
+**Action:** Use `read_file` or `grep -A 50` on specific methods to ensure the full implementation is viewed before proposing exact edits.
 ## 2024-05-24 - Precalculate AABB Optimal Test Corners for Frustum Culling
 **Learning:** In broad-phase frustum culling against AABBs, evaluating `aabbMin` vs `aabbMax` for each plane inside the active chunks loop introduces branch mispredictions and redundant calculations since the frustum planes are constant per-frame.
 **Action:** Always precalculate the optimal testing corner (the plane offset vector) for each of the 6 frustum planes *outside* the chunk iteration loop. Combine this with precalculated normals and plane offsets (`w`), so the inner loop simply adds the precalculated offset to `aabbMin` and evaluates the dot product without branching.

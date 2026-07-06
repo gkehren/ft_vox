@@ -5,7 +5,7 @@
 #include <glad/glad.h>
 #include <string>
 #include <string_view>
-#include <map>
+#include <array>
 #include <memory>
 #include <glm/glm.hpp>
 #include <Shader/Shader.hpp>
@@ -13,10 +13,10 @@
 
 struct Character
 {
-	unsigned int textureID;
-	glm::ivec2 size;
-	glm::ivec2 bearing;
-	unsigned int advance;
+	unsigned int textureID{0};
+	glm::ivec2 size{0, 0};
+	glm::ivec2 bearing{0, 0};
+	unsigned int advance{0};
 };
 
 class TextRenderer
@@ -35,7 +35,8 @@ private:
 	GLuint VAO;
 	GLuint VBO;
 	glm::mat4 projection;
-	std::map<char, Character> characters;
+	// ⚡ Bolt: Replaced std::map with std::array for O(1) contiguous memory access in hot paths.
+	std::array<Character, 128> characters;
 
 	void loadCharacters();
 };

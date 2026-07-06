@@ -35,9 +35,10 @@ TextRenderer::TextRenderer(const std::string &fontPath, const glm::mat4 &proj)
 
 TextRenderer::~TextRenderer()
 {
-	for (const auto &entry : characters)
+	for (const auto &character : characters)
 	{
-		glDeleteTextures(1, &entry.second.textureID);
+		if (character.textureID != 0)
+			glDeleteTextures(1, &character.textureID);
 	}
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
@@ -81,7 +82,7 @@ void TextRenderer::loadCharacters()
 			glm::ivec2(face->glyph->bitmap_left, face->glyph->bitmap_top),
 			static_cast<unsigned int>(face->glyph->advance.x)};
 
-		characters.insert(std::pair<char, Character>(c, character));
+		characters[c] = character;
 	}
 
 	glBindTexture(GL_TEXTURE_2D, 0);
@@ -98,7 +99,10 @@ void TextRenderer::renderText(std::string_view text, float x, float y, float sca
 
 	for (char c : text)
 	{
-		Character ch = characters[c];
+		if (static_cast<unsigned char>(c) >= 128)
+			continue;
+
+		Character ch = characters[static_cast<unsigned char>(c)];
 
 		float xpos = x + ch.bearing.x * scale;
 		float ypos = y - (ch.size.y - ch.bearing.y) * scale;
