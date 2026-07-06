@@ -116,9 +116,25 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 	frustumPlanes[4] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 2); // Near
 	frustumPlanes[5] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 2); // Far
 
-	for (auto &plane : frustumPlanes)
+	// ⚡ Bolt: Precalculate the normal, constant offset (w), and optimal testing corner
+	// for each frustum plane outside the loop to avoid branch mispredictions and
+	// redundant calculations during inner-loop broad-phase culling.
+	std::array<glm::vec3, 6> planeNormals;
+	std::array<float, 6> planeW;
+	std::array<glm::vec3, 6> planeOffsets;
+
+	for (int i = 0; i < 6; i++)
 	{
-		plane = plane / glm::length(glm::vec3(plane));
+		float len = glm::length(glm::vec3(frustumPlanes[i]));
+		frustumPlanes[i] /= len;
+
+		planeNormals[i] = glm::vec3(frustumPlanes[i]);
+		planeW[i] = frustumPlanes[i].w;
+		planeOffsets[i] = glm::vec3(
+			planeNormals[i].x >= 0.0f ? CHUNK_SIZE : 0.0f,
+			planeNormals[i].y >= 0.0f ? CHUNK_HEIGHT : 0.0f,
+			planeNormals[i].z >= 0.0f ? CHUNK_SIZE : 0.0f
+		);
 	}
 
 	std::shared_lock<std::shared_mutex> lock(chunkMutex);
@@ -137,13 +153,10 @@ void ChunkManager::performFrustumCulling(const Camera &camera, int windowWidth, 
 		}
 
 		bool isVisible = true;
-		for (const auto &plane : frustumPlanes)
+		for (int i = 0; i < 6; i++)
 		{
-			glm::vec3 pv(
-				plane.x >= 0.0f ? aabbMax.x : aabbMin.x,
-				plane.y >= 0.0f ? aabbMax.y : aabbMin.y,
-				plane.z >= 0.0f ? aabbMax.z : aabbMin.z);
-			if (glm::dot(glm::vec3(plane), pv) + plane.w < 0.0f)
+			glm::vec3 pv = aabbMin + planeOffsets[i];
+			if (glm::dot(planeNormals[i], pv) + planeW[i] < 0.0f)
 			{
 				isVisible = false;
 				break;

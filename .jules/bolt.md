@@ -28,6 +28,9 @@
 ## 2024-05-19 - [Avoid unordered_set for Object State Tracking]
 **Learning:** Maintaining an external `std::unordered_set<Chunk*>` to track which chunks are currently in transit introduces unnecessary $O(1)$ node-based hashing overhead and cache misses, especially when checked repeatedly inside hot game loops (like frustum culling or chunk meshing).
 **Action:** When tracking simple binary state for an object (like "is in transit" or "is processing"), embed an `std::atomic<bool>` flag directly into the object class itself rather than tracking it externally in a hash map. This converts a hash map lookup into a simple inline boolean check, significantly improving cache locality.
+## 2024-05-24 - Precalculate AABB Optimal Test Corners for Frustum Culling
+**Learning:** In broad-phase frustum culling against AABBs, evaluating `aabbMin` vs `aabbMax` for each plane inside the active chunks loop introduces branch mispredictions and redundant calculations since the frustum planes are constant per-frame.
+**Action:** Always precalculate the optimal testing corner (the plane offset vector) for each of the 6 frustum planes *outside* the chunk iteration loop. Combine this with precalculated normals and plane offsets (`w`), so the inner loop simply adds the precalculated offset to `aabbMin` and evaluates the dot product without branching.
 ## 2024-05-24 - Network Packet Hot Loop Optimization
 **Learning:** Using `std::unordered_set` dynamically inside frequent network packet handlers (like `Client::handleMessage`) causes node-based heap allocations for every packet processed, leading to unnecessary garbage and potential stutters.
 **Action:** For bounded and small collections derived from network packets, use `std::vector` with `reserve()`, sort the vector, and use `std::binary_search()`. This leverages contiguous memory and avoids node allocations entirely.
