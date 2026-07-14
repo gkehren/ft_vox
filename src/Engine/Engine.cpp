@@ -158,10 +158,12 @@ Engine::Engine()
 
 	const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
 	threadPool = std::make_unique<ThreadPool>(hw);
-	chunkPool = std::make_unique<ChunkPool>(1600);
 
 	renderSettings.minRenderDistance = 128;
 	renderSettings.maxRenderDistance = 256;
+	// Pool sized for unload disk (1.5× view) + headroom; grows later via ensureCapacity.
+	chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
+
 	renderSettings.loadPerSec = 120;
 	renderSettings.genPerSec = 80;
 	renderSettings.meshPerSec = 60;
@@ -313,6 +315,11 @@ void Engine::tickStreaming(double dt)
 		uploadBudgetThisFrame = 0;
 		return;
 	}
+
+	// Grow pool when the view-distance slider (or other settings) outgrows the free list.
+	// Cheap no-op when already large enough; pointer-stable so loaded chunks stay valid.
+	if (chunkPool)
+		chunkPool->ensureCapacity(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 
 	const double frameDt = std::min(dt, 0.05);
 	const auto streamT0 = std::chrono::steady_clock::now();

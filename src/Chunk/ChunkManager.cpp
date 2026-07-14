@@ -77,6 +77,12 @@ void ChunkManager::processChunkLoading(int budget)
 	if (budget <= 0 || !m_chunkPool)
 		return;
 
+	// Back-pressure: never pull more candidates than free pool slots.
+	const size_t freeSlots = m_chunkPool->freeCount();
+	if (freeSlots == 0)
+		return;
+	budget = std::min(budget, static_cast<int>(freeSlots));
+
 	std::vector<glm::ivec3> toLoad;
 	{
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
@@ -97,6 +103,7 @@ void ChunkManager::processChunkLoading(int budget)
 		return;
 
 	std::vector<std::pair<glm::ivec3, Chunk *>> acquired;
+	std::vector<glm::ivec3> rejected;
 	acquired.reserve(toLoad.size());
 	for (const auto &chunkPos : toLoad)
 	{
@@ -105,6 +112,8 @@ void ChunkManager::processChunkLoading(int budget)
 			static_cast<float>(chunkPos.z * CHUNK_SIZE)));
 		if (chunk)
 			acquired.emplace_back(chunkPos, chunk);
+		else
+			rejected.push_back(chunkPos); // free list raced empty — re-queue below
 	}
 
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
@@ -121,6 +130,17 @@ void ChunkManager::processChunkLoading(int budget)
 		{
 			m_chunkPool->release(pair.second);
 		}
+	}
+
+	// Put rejected loads back (nearest-first will re-sort next tick).
+	for (const glm::ivec3 &pos : rejected)
+	{
+		if (m_chunks.find(pos) != m_chunks.end())
+			continue;
+		if (m_enqueuedLoads.count(pos) != 0)
+			continue;
+		m_loadQueue.push_back({pos, 0.f});
+		m_enqueuedLoads.insert(pos);
 	}
 }
 
@@ -748,6 +768,11 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 	if (!m_terrainGenerator || !m_chunkPool || !allocator)
 		return;
 
+	// Square footprint (2r+1)^2 plus a little margin for safety.
+	const size_t bootstrapNeed =
+		static_cast<size_t>(2 * radiusChunks + 1) * static_cast<size_t>(2 * radiusChunks + 1) + 16;
+	m_chunkPool->ensureCapacity(bootstrapNeed);
+
 	const glm::ivec3 camChunk = worldToChunkCoord(center);
 	std::vector<std::pair<glm::ivec3, Chunk *>> created;
 
@@ -765,7 +790,15 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 				static_cast<float>(pos.x * CHUNK_SIZE), 0.f,
 				static_cast<float>(pos.z * CHUNK_SIZE)));
 			if (!chunk)
-				continue;
+			{
+				// Grow once more and retry (should be rare if ensureCapacity above is correct).
+				m_chunkPool->ensureCapacity(m_chunkPool->capacity() + 64);
+				chunk = m_chunkPool->acquire(glm::vec3(
+					static_cast<float>(pos.x * CHUNK_SIZE), 0.f,
+					static_cast<float>(pos.z * CHUNK_SIZE)));
+				if (!chunk)
+					continue;
+			}
 			chunk->generateTerrain(*m_terrainGenerator);
 			created.emplace_back(pos, chunk);
 		}
