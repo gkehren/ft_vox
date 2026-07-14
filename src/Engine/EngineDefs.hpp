@@ -5,12 +5,12 @@
 
 struct ShaderParameters
 {
-	// Fog
+	// Fog — softer / farther so terrain chroma is not washed out
 	bool automaticAtmosphere = true;
-	float fogStart = 220.0f;
-	float fogEnd = 680.0f;
-	float fogDensity = 0.18f;
-	glm::vec3 fogColor = {0.42f, 0.57f, 0.70f};
+	float fogStart = 260.0f;
+	float fogEnd = 780.0f;
+	float fogDensity = 0.12f;
+	glm::vec3 fogColor = {0.55f, 0.72f, 0.92f};
 
 	// Lighting
 	glm::vec3 celestialOrbitCenter = {0.0f, 96.0f, 0.0f};
@@ -22,8 +22,8 @@ struct ShaderParameters
 	float dayFactor = 1.0f;
 	float sunsetFactor = 0.0f;
 	float nightFactor = 0.0f;
-	float ambientStrength = 0.24f;
-	float diffuseIntensity = 0.78f;
+	float ambientStrength = 0.26f;
+	float diffuseIntensity = 0.85f;
 	float lightLevels = 5.0f;
 
 	// Day/Night cycle
@@ -31,10 +31,21 @@ struct ShaderParameters
 	float dayTime = 0.25f; // 0.0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight
 	float dayCycleSpeed = 0.002f;
 
-	// visual
-	float saturationLevel = 1.08f;
-	float colorBoost = 1.0f;
+	// visual — saturation & boost are packed into FrameUBO (see packFrameLightVisual)
+	// Kept moderate: boost was previously dead (always 1.0); slight lift only.
+	float saturationLevel = 1.06f;
+	float colorBoost = 1.04f;
+	float contrastLevel = 1.02f;
 };
+
+/// Packs light + visual knobs for FrameUBO std140 (matches terrain/sky shaders).
+/// lightParams  = (ambient, diffuse, lightLevels, colorBoost)
+/// visualParams = (saturation, contrast, colorBoost, unused)
+inline void packFrameLightVisual(const ShaderParameters &p, glm::vec4 &lightParams, glm::vec4 &visualParams)
+{
+	lightParams = glm::vec4(p.ambientStrength, p.diffuseIntensity, p.lightLevels, p.colorBoost);
+	visualParams = glm::vec4(p.saturationLevel, p.contrastLevel, p.colorBoost, 0.0f);
+}
 
 struct RenderSettings
 {
@@ -43,19 +54,17 @@ struct RenderSettings
 	bool paused{false};
 	int visibleChunksCount{0};	// Output, updated by rendering logic
 	int visibleVoxelsCount{0};	// Output, updated by rendering logic
-	int minRenderDistance{320}; // Min view distance, potentially in blocks or units
-	int maxRenderDistance{480}; // Max view distance
+	int minRenderDistance{128}; // Within this range: full mesh (blocks)
+	int maxRenderDistance{256}; // Streaming / unload radius (blocks)
 	int raycastDistance{8};
 	bool vsyncEnabled{true};
 
 	// Per-second chunk pipeline throughput — frame-rate-independent budgets.
-	// These control how many operations are dispatched per second regardless
-	// of VSync or uncapped FPS. Increase to load faster; decrease to reduce
-	// per-frame CPU spikes on slower machines.
-	int loadPerSec{5000};	// chunk allocations from queue / sec
-	int genPerSec{5000};	// terrain-gen job dispatches / sec
-	int meshPerSec{5000};	// mesh job dispatches / sec
-	int uploadPerSec{5000}; // GPU glBufferData uploads / sec (main-thread stall)
+	// Increase to load faster; decrease to reduce per-frame CPU/GPU spikes.
+	int loadPerSec{120};   // chunk allocations from queue / sec
+	int genPerSec{80};	   // terrain-gen job dispatches / sec
+	int meshPerSec{60};	   // mesh job dispatches / sec
+	int uploadPerSec{40};  // GPU mesh uploads / sec (may idle device)
 };
 
 struct RenderTiming
@@ -71,14 +80,17 @@ struct RenderTiming
 struct PostProcessSettings
 {
 	bool bloomEnabled{true};
-	float bloomThreshold{1.15f};
+	float bloomThreshold{1.10f};
 	float bloomIntensity{0.16f};
 	bool fxaaEnabled{true};
 	bool autoExposureEnabled{true};
-	float exposure{0.9f};
+	float exposure{0.98f};
 	float exposureCompensation{1.0f};
 	int toneMapper{0}; // 0 = ACES, 1 = Reinhard
 	float gamma{2.2f};
+	// Mild post punch only (1.0 = neutral)
+	float postSaturation{1.03f};
+	float postContrast{1.02f};
 
 	// God rays (volumetric light scattering)
 	bool godRaysEnabled{true};
@@ -88,7 +100,7 @@ struct PostProcessSettings
 	float godRaysExposure{0.55f};
 	bool godRaysDynamicBoostEnabled{true};
 	bool godRaysBoostPreview{false};
-	float godRaysDramaticBoost{2.4f};
+	float godRaysDramaticBoost{2.2f};
 };
 
 struct VoxelHighlight
