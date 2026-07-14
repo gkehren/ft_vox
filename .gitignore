@@ -34,9 +34,15 @@
 .vscode
 .vs
 imgui.ini
+.DS_Store
+*.bak
+*~
 
 *.nsys-rep
 build
+build-vk
+build-*/
 lib
 out/
 CMakeSettings.json
+.cache/

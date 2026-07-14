@@ -1,19 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Optional helper for macOS Homebrew graphics stack (vcpkg handles C++ deps).
+set -euo pipefail
 
-mkdir -p lib
-cd lib
+if ! command -v brew >/dev/null 2>&1; then
+  echo "Homebrew not found. Install from https://brew.sh or use vcpkg only."
+  exit 1
+fi
 
-git clone https://github.com/g-truc/glm.git glm_sources
+echo "Installing MoltenVK + Vulkan loader + validation layers..."
+brew install molten-vk vulkan-loader vulkan-validationlayers
 
-cd glm_sources
+ICD="/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
+LAYER_DIR="/opt/homebrew/opt/vulkan-validationlayers/share/vulkan/explicit_layer.d"
 
-mkdir -p build
-cmake -DGLM_BUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -B build .
-cmake --build build -- all
-
-cd ..
-cp -r glm_sources/glm .
-cp -r glm_sources/build/glm/libglm.a .
-rm -rf glm_sources
-
-echo "GLM installed successfully"
+echo ""
+echo "Add to your shell profile (~/.zshrc):"
+echo "  export VK_ICD_FILENAMES=${ICD}"
+echo "  export VK_LAYER_PATH=${LAYER_DIR}"
+echo ""
+echo "Optional: FT_VOX_VALIDATION=1 forces validation in Release builds."
+echo "Done."

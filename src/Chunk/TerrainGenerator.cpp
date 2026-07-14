@@ -15,258 +15,96 @@ void TerrainGenerator::initBiomeConfigs()
 {
   std::call_once(s_biomeConfigsOnceFlag, []()
                  {
-    // BIOME_FROZEN_OCEAN
+    // Distinct biomes without neon chroma (moderate grass/foliage tints)
     s_biomeConfigs[BIOME_FROZEN_OCEAN] = {
-        TextureType::SNOW,           // surface
-        TextureType::GRAVEL,         // subsurface
-        TextureType::GRAVEL,         // underwater
-        3,                           // subsurface depth
-        0.0f,                        // tree density
-        0.0f,                        // vegetation density
-        glm::vec3(0.5f, 0.7f, 0.5f), // grass color
-        glm::vec3(0.4f, 0.6f, 0.4f), // foliage color
-        true,                        // has snow
-        false,                       // has cacti
-        false                        // has rivers
-    };
+        TextureType::SNOW, TextureType::GRAVEL, TextureType::GRAVEL, 3, 0.0f, 0.0f,
+        glm::vec3(0.50f, 0.68f, 0.62f), glm::vec3(0.38f, 0.55f, 0.52f),
+        true, false, false};
 
-    // BIOME_SNOWY_TUNDRA
     s_biomeConfigs[BIOME_SNOWY_TUNDRA] = {
-        TextureType::SNOW,
-        TextureType::DIRT,
-        TextureType::GRAVEL,
-        3,
-        0.02f, // sparse trees
-        0.05f,
-        glm::vec3(0.5f, 0.7f, 0.5f),
-        glm::vec3(0.4f, 0.6f, 0.4f),
-        true,
-        false,
-        true};
+        TextureType::SNOW, TextureType::DIRT, TextureType::GRAVEL, 3, 0.02f, 0.05f,
+        glm::vec3(0.48f, 0.66f, 0.50f), glm::vec3(0.36f, 0.52f, 0.42f),
+        true, false, true};
 
-    // BIOME_SNOWY_TAIGA
     s_biomeConfigs[BIOME_SNOWY_TAIGA] = {
-        TextureType::SNOW,
-        TextureType::DIRT,
-        TextureType::GRAVEL,
-        3,
-        0.15f, // medium tree density
-        0.1f,
-        glm::vec3(0.5f, 0.7f, 0.5f),
-        glm::vec3(0.4f, 0.6f, 0.4f),
-        true,
-        false,
-        true};
+        TextureType::SNOW, TextureType::DIRT, TextureType::GRAVEL, 3, 0.15f, 0.1f,
+        glm::vec3(0.35f, 0.55f, 0.45f), glm::vec3(0.28f, 0.48f, 0.40f),
+        true, false, true};
 
-    // BIOME_ICE_SPIKES
     s_biomeConfigs[BIOME_ICE_SPIKES] = {
-        TextureType::SNOW,
-        TextureType::SNOW,
-        TextureType::GRAVEL,
-        5,
-        0.0f,
-        0.0f,
-        glm::vec3(0.5f, 0.7f, 0.5f),
-        glm::vec3(0.4f, 0.6f, 0.4f),
-        true,
-        false,
-        false};
+        TextureType::SNOW, TextureType::SNOW, TextureType::GRAVEL, 5, 0.0f, 0.0f,
+        glm::vec3(0.55f, 0.70f, 0.72f), glm::vec3(0.42f, 0.58f, 0.62f),
+        true, false, false};
 
-    // BIOME_OCEAN
     s_biomeConfigs[BIOME_OCEAN] = {
-        TextureType::GRAVEL,
-        TextureType::GRAVEL,
-        TextureType::SAND,
-        4,
-        0.0f,
-        0.0f,
-        glm::vec3(0.4f, 0.65f, 0.4f),
-        glm::vec3(0.3f, 0.55f, 0.3f),
-        false,
-        false,
-        false};
+        TextureType::GRAVEL, TextureType::GRAVEL, TextureType::SAND, 4, 0.0f, 0.0f,
+        glm::vec3(0.35f, 0.58f, 0.48f), glm::vec3(0.28f, 0.50f, 0.42f),
+        false, false, false};
 
-    // BIOME_BEACH
     s_biomeConfigs[BIOME_BEACH] = {
-        TextureType::SAND,
-        TextureType::SAND,
-        TextureType::SAND,
-        5,
-        0.0f,
-        0.0f,
-        glm::vec3(0.55f, 0.7f, 0.4f),
-        glm::vec3(0.45f, 0.6f, 0.3f),
-        false,
-        false,
-        false};
+        TextureType::SAND, TextureType::SAND, TextureType::SAND, 5, 0.0f, 0.0f,
+        glm::vec3(0.62f, 0.72f, 0.42f), glm::vec3(0.50f, 0.62f, 0.32f),
+        false, false, false};
 
-    // BIOME_PLAINS
     s_biomeConfigs[BIOME_PLAINS] = {
-        TextureType::GRASS_TOP,
-        TextureType::DIRT,
-        TextureType::SAND,
-        3,
-        0.01f, // very sparse trees
-        0.3f,  // flowers/grass
-        glm::vec3(0.55f, 0.75f, 0.35f),
-        glm::vec3(0.4f, 0.65f, 0.25f),
-        false,
-        false,
-        true};
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::SAND, 3, 0.01f, 0.3f,
+        glm::vec3(0.48f, 0.78f, 0.32f), glm::vec3(0.38f, 0.68f, 0.26f),
+        false, false, true};
 
-    // BIOME_FOREST
     s_biomeConfigs[BIOME_FOREST] = {
-        TextureType::GRASS_TOP,
-        TextureType::DIRT,
-        TextureType::GRAVEL,
-        3,
-        0.25f, // dense trees
-        0.4f,
-        glm::vec3(0.4f, 0.7f, 0.3f),
-        glm::vec3(0.3f, 0.6f, 0.2f),
-        false,
-        false,
-        true};
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::GRAVEL, 3, 0.25f, 0.4f,
+        glm::vec3(0.30f, 0.65f, 0.24f), glm::vec3(0.24f, 0.55f, 0.20f),
+        false, false, true};
 
-    // BIOME_BIRCH_FOREST
     s_biomeConfigs[BIOME_BIRCH_FOREST] = {
-        TextureType::GRASS_TOP,
-        TextureType::DIRT,
-        TextureType::GRAVEL,
-        3,
-        0.22f,
-        0.35f,
-        glm::vec3(0.5f, 0.75f, 0.4f),
-        glm::vec3(0.45f, 0.7f, 0.35f),
-        false,
-        false,
-        true};
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::GRAVEL, 3, 0.22f, 0.35f,
+        glm::vec3(0.48f, 0.76f, 0.36f), glm::vec3(0.42f, 0.68f, 0.32f),
+        false, false, true};
 
-    // BIOME_DARK_FOREST
     s_biomeConfigs[BIOME_DARK_FOREST] = {
-        TextureType::GRASS_TOP,
-        TextureType::DIRT,
-        TextureType::DIRT,
-        4,
-        0.4f, // very dense
-        0.5f,
-        glm::vec3(0.3f, 0.55f, 0.25f),
-        glm::vec3(0.25f, 0.45f, 0.2f),
-        false,
-        false,
-        true};
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::DIRT, 4, 0.4f, 0.5f,
+        glm::vec3(0.22f, 0.48f, 0.22f), glm::vec3(0.18f, 0.40f, 0.18f),
+        false, false, true};
 
-    // BIOME_SWAMP
     s_biomeConfigs[BIOME_SWAMP] = {
-        TextureType::DIRT, // Mud surface
-        TextureType::DIRT,
-        TextureType::DIRT,
-        4,
-        0.12f,
-        0.6f,
-        glm::vec3(0.35f, 0.5f, 0.3f),
-        glm::vec3(0.3f, 0.45f, 0.25f),
-        false,
-        false,
-        true};
+        TextureType::DIRT, TextureType::DIRT, TextureType::DIRT, 4, 0.12f, 0.6f,
+        glm::vec3(0.38f, 0.50f, 0.28f), glm::vec3(0.32f, 0.44f, 0.24f),
+        false, false, true};
 
-    // BIOME_RIVER
     s_biomeConfigs[BIOME_RIVER] = {
-        TextureType::SAND,
-        TextureType::SAND,
-        TextureType::GRAVEL,
-        2,
-        0.0f,
-        0.0f,
-        glm::vec3(0.4f, 0.65f, 0.35f),
-        glm::vec3(0.35f, 0.55f, 0.3f),
-        false,
-        false,
-        false};
+        TextureType::SAND, TextureType::SAND, TextureType::GRAVEL, 2, 0.0f, 0.0f,
+        glm::vec3(0.38f, 0.62f, 0.36f), glm::vec3(0.32f, 0.54f, 0.30f),
+        false, false, false};
 
-    // BIOME_DESERT
     s_biomeConfigs[BIOME_DESERT] = {
-        TextureType::SAND,
-        TextureType::SAND,
-        TextureType::SAND,
-        8,
-        0.0f,
-        0.02f, // cacti
-        glm::vec3(0.7f, 0.7f, 0.4f),
-        glm::vec3(0.6f, 0.6f, 0.3f),
-        false,
-        true,
-        false};
+        TextureType::SAND, TextureType::SAND, TextureType::SAND, 8, 0.0f, 0.02f,
+        glm::vec3(0.78f, 0.70f, 0.38f), glm::vec3(0.65f, 0.58f, 0.28f),
+        false, true, false};
 
-    // BIOME_SAVANNA
     s_biomeConfigs[BIOME_SAVANNA] = {
-        TextureType::GRASS_TOP,
-        TextureType::DIRT,
-        TextureType::SAND,
-        3,
-        0.05f, // acacia-like sparse trees
-        0.2f,
-        glm::vec3(0.7f, 0.75f, 0.35f),
-        glm::vec3(0.6f, 0.65f, 0.25f),
-        false,
-        false,
-        false};
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::SAND, 3, 0.05f, 0.2f,
+        glm::vec3(0.72f, 0.70f, 0.32f), glm::vec3(0.60f, 0.58f, 0.26f),
+        false, false, false};
 
-    // BIOME_JUNGLE
     s_biomeConfigs[BIOME_JUNGLE] = {
-        TextureType::GRASS_TOP,
-        TextureType::DIRT,
-        TextureType::DIRT,
-        3,
-        0.45f, // very dense jungle
-        0.7f,
-        glm::vec3(0.3f, 0.8f, 0.2f),
-        glm::vec3(0.25f, 0.7f, 0.15f),
-        false,
-        false,
-        true};
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::DIRT, 3, 0.45f, 0.7f,
+        glm::vec3(0.22f, 0.72f, 0.22f), glm::vec3(0.16f, 0.62f, 0.18f),
+        false, false, true};
 
-    // BIOME_BADLANDS
     s_biomeConfigs[BIOME_BADLANDS] = {
-        TextureType::BRICKS, // Red canyon look
-        TextureType::BRICKS,
-        TextureType::SAND,
-        6,
-        0.0f,
-        0.01f,
-        glm::vec3(0.8f, 0.6f, 0.4f),
-        glm::vec3(0.7f, 0.5f, 0.3f),
-        false,
-        true,
-        false};
+        TextureType::BRICKS, TextureType::BRICKS, TextureType::SAND, 6, 0.0f, 0.01f,
+        glm::vec3(0.78f, 0.48f, 0.28f), glm::vec3(0.68f, 0.40f, 0.22f),
+        false, true, false};
 
-    // BIOME_MOUNTAINS
     s_biomeConfigs[BIOME_MOUNTAINS] = {
-        TextureType::STONE, // Rocky surface
-        TextureType::STONE,
-        TextureType::GRAVEL,
-        2,
-        0.08f,
-        0.1f,
-        glm::vec3(0.45f, 0.65f, 0.35f),
-        glm::vec3(0.4f, 0.55f, 0.3f),
-        false,
-        false,
-        true};
+        TextureType::STONE, TextureType::STONE, TextureType::GRAVEL, 2, 0.08f, 0.1f,
+        glm::vec3(0.40f, 0.62f, 0.34f), glm::vec3(0.34f, 0.52f, 0.28f),
+        false, false, true};
 
-    // BIOME_SNOWY_MOUNTAINS
     s_biomeConfigs[BIOME_SNOWY_MOUNTAINS] = {
-        TextureType::SNOW,
-        TextureType::STONE,
-        TextureType::GRAVEL,
-        2,
-        0.02f,
-        0.02f,
-        glm::vec3(0.5f, 0.7f, 0.5f),
-        glm::vec3(0.4f, 0.6f, 0.4f),
-        true,
-        false,
-        false};
+        TextureType::SNOW, TextureType::STONE, TextureType::GRAVEL, 2, 0.02f, 0.02f,
+        glm::vec3(0.50f, 0.66f, 0.55f), glm::vec3(0.40f, 0.55f, 0.48f),
+        true, false, false};
 
     s_biomeConfigsInitialized = true; });
 }

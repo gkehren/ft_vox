@@ -1,4 +1,7 @@
 #include "Chunk.hpp"
+#include <Vulkan/VkUpload.hpp>
+#include <Vulkan/VkCommands.hpp>
+#include <stdexcept>
 #include <algorithm>
 #include <glm/gtx/hash.hpp>
 #include <utils.hpp>
@@ -21,8 +24,7 @@ struct MeshWorkspace
 static thread_local MeshWorkspace s_meshWorkspace;
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state)
-    : position(position), visible(false), state(state), VAO(0), VBO(0), EBO(0),
-      waterVAO(0), waterVBO(0), waterEBO(0),
+    : position(position), visible(false), state(state),
       opaqueIndexCount(0), waterIndexCount(0),
       voxels(CHUNK_VOLUME),
       neighborShellVoxels(18 * (CHUNK_HEIGHT + 2) * 18,
@@ -31,9 +33,12 @@ Chunk::Chunk(const glm::vec3 &position, ChunkState state)
 
 Chunk::Chunk(Chunk &&other) noexcept
     : position(std::move(other.position)), visible(other.visible),
-      state(other.state.load()), voxels(std::move(other.voxels)), VAO(other.VAO),
-      VBO(other.VBO), EBO(other.EBO),
-      waterVAO(other.waterVAO), waterVBO(other.waterVBO), waterEBO(other.waterEBO),
+      state(other.state.load()), voxels(std::move(other.voxels)),
+      m_allocator(other.m_allocator),
+      vertexBuffer(other.vertexBuffer),
+      indexBuffer(other.indexBuffer),
+      waterVertexBuffer(other.waterVertexBuffer),
+      waterIndexBuffer(other.waterIndexBuffer),
       opaqueIndexCount(other.opaqueIndexCount), waterIndexCount(other.waterIndexCount),
       meshNeedsUpdate(other.meshNeedsUpdate.load()),
       activeVoxels(std::move(other.activeVoxels)),
@@ -44,12 +49,11 @@ Chunk::Chunk(Chunk &&other) noexcept
       waterVertices(std::move(other.waterVertices)), waterIndices(std::move(other.waterIndices)),
       m_isLODMesh(other.m_isLODMesh)
 {
-  other.VAO = 0;
-  other.VBO = 0;
-  other.EBO = 0;
-  other.waterVAO = 0;
-  other.waterVBO = 0;
-  other.waterEBO = 0;
+  other.m_allocator = VK_NULL_HANDLE;
+  other.vertexBuffer = {};
+  other.indexBuffer = {};
+  other.waterVertexBuffer = {};
+  other.waterIndexBuffer = {};
   other.opaqueIndexCount = 0;
   other.waterIndexCount = 0;
 }
@@ -57,18 +61,7 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
 {
   if (this != &other)
   {
-    if (VAO != 0)
-      glDeleteVertexArrays(1, &VAO);
-    if (VBO != 0)
-      glDeleteBuffers(1, &VBO);
-    if (EBO != 0)
-      glDeleteBuffers(1, &EBO);
-    if (waterVAO != 0)
-      glDeleteVertexArrays(1, &waterVAO);
-    if (waterVBO != 0)
-      glDeleteBuffers(1, &waterVBO);
-    if (waterEBO != 0)
-      glDeleteBuffers(1, &waterEBO);
+    releaseGPU();
 
     position = std::move(other.position);
     visible = other.visible;
@@ -82,53 +75,31 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     indices = std::move(other.indices);
     waterVertices = std::move(other.waterVertices);
     waterIndices = std::move(other.waterIndices);
-    VAO = other.VAO;
-    VBO = other.VBO;
-    EBO = other.EBO;
-    waterVAO = other.waterVAO;
-    waterVBO = other.waterVBO;
-    waterEBO = other.waterEBO;
+    m_allocator = other.m_allocator;
+    vertexBuffer = other.vertexBuffer;
+    indexBuffer = other.indexBuffer;
+    waterVertexBuffer = other.waterVertexBuffer;
+    waterIndexBuffer = other.waterIndexBuffer;
     opaqueIndexCount = other.opaqueIndexCount;
     waterIndexCount = other.waterIndexCount;
     meshNeedsUpdate.store(other.meshNeedsUpdate.load());
     m_isLODMesh = other.m_isLODMesh;
+    m_inTransit.store(other.m_inTransit.load());
 
-    other.VAO = 0;
-    other.VBO = 0;
-    other.EBO = 0;
-    other.waterVAO = 0;
-    other.waterVBO = 0;
-    other.waterEBO = 0;
+    other.m_allocator = VK_NULL_HANDLE;
+    other.vertexBuffer = {};
+    other.indexBuffer = {};
+    other.waterVertexBuffer = {};
+    other.waterIndexBuffer = {};
+    other.opaqueIndexCount = 0;
+    other.waterIndexCount = 0;
   }
   return *this;
 }
 
 Chunk::~Chunk()
 {
-  if (VAO != 0)
-  {
-    glDeleteVertexArrays(1, &VAO);
-  }
-  if (VBO != 0)
-  {
-    glDeleteBuffers(1, &VBO);
-  }
-  if (EBO != 0)
-  {
-    glDeleteBuffers(1, &EBO);
-  }
-  if (waterVAO != 0)
-  {
-    glDeleteVertexArrays(1, &waterVAO);
-  }
-  if (waterVBO != 0)
-  {
-    glDeleteBuffers(1, &waterVBO);
-  }
-  if (waterEBO != 0)
-  {
-    glDeleteBuffers(1, &waterEBO);
-  }
+  releaseGPU();
 }
 
 const glm::vec3 &Chunk::getPosition() const { return position; }
@@ -873,116 +844,102 @@ void Chunk::generateLODMesh()
   state = ChunkState::MESHED;
 }
 
-// P5: Shared vertex attribute layout — avoids copy-paste divergence
-static void configureVertexAttributes()
+void Chunk::releaseGPU()
 {
-  // Position (location = 0)
-  glEnableVertexAttribArray(0);
-  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                        (void *)offsetof(Vertex, position));
-  // Packed Data (location = 1)
-  glEnableVertexAttribArray(1);
-  glVertexAttribIPointer(1, 1, GL_UNSIGNED_INT, sizeof(Vertex),
-                         (void *)offsetof(Vertex, packedData));
-  // Texture coordinates (location = 2)
-  glEnableVertexAttribArray(2);
-  glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                        (void *)offsetof(Vertex, texCoord));
-  // Packed Biome Color (location = 3)
-  glEnableVertexAttribArray(3);
-  glVertexAttribIPointer(3, 1, GL_UNSIGNED_INT, sizeof(Vertex),
-                         (void *)offsetof(Vertex, packedBiomeColor));
+  if (m_allocator == VK_NULL_HANDLE)
+    return;
+  destroyBuffer(m_allocator, vertexBuffer);
+  destroyBuffer(m_allocator, indexBuffer);
+  destroyBuffer(m_allocator, waterVertexBuffer);
+  destroyBuffer(m_allocator, waterIndexBuffer);
+  m_allocator = VK_NULL_HANDLE;
+  opaqueIndexCount = 0;
+  waterIndexCount = 0;
 }
 
-void Chunk::uploadToGPU()
+void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
 {
-  // --- Opaque mesh ---
-  if (VAO == 0)
-    glGenVertexArrays(1, &VAO);
-  if (VBO == 0)
-    glGenBuffers(1, &VBO);
-  if (EBO == 0)
-    glGenBuffers(1, &EBO);
+  if (allocator == VK_NULL_HANDLE)
+    throw std::runtime_error("Chunk::uploadToGPU: null allocator");
+
+  // Re-upload: free previous GPU buffers first (caller should not be drawing this chunk).
+  if (m_allocator != VK_NULL_HANDLE)
+    releaseGPU();
+  m_allocator = allocator;
 
   opaqueIndexCount = static_cast<uint32_t>(indices.size());
+  if (!vertices.empty() && opaqueIndexCount > 0)
+  {
+    const VkDeviceSize vSize = vertices.size() * sizeof(Vertex);
+    const VkDeviceSize iSize = indices.size() * sizeof(uint32_t);
+    vertexBuffer = createBuffer(allocator, vSize,
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    indexBuffer = createBuffer(allocator, iSize,
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    uploadBuffer(allocator, imm, vertexBuffer, vertices.data(), vSize);
+    uploadBuffer(allocator, imm, indexBuffer, indices.data(), iSize);
+  }
 
-  glBindVertexArray(VAO);
-  glBindBuffer(GL_ARRAY_BUFFER, VBO);
-  glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex),
-               vertices.data(), GL_STATIC_DRAW);
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint32_t),
-               indices.data(), GL_STATIC_DRAW);
-  configureVertexAttributes();
-  glBindVertexArray(0);
-
-  // P2: Free CPU-side data after GPU upload
   vertices = {};
   indices = {};
 
-  // --- Water mesh ---
   waterIndexCount = static_cast<uint32_t>(waterIndices.size());
-
-  if (waterIndexCount > 0)
+  if (!waterVertices.empty() && waterIndexCount > 0)
   {
-    if (waterVAO == 0)
-      glGenVertexArrays(1, &waterVAO);
-    if (waterVBO == 0)
-      glGenBuffers(1, &waterVBO);
-    if (waterEBO == 0)
-      glGenBuffers(1, &waterEBO);
-
-    glBindVertexArray(waterVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, waterVBO);
-    glBufferData(GL_ARRAY_BUFFER, waterVertices.size() * sizeof(Vertex),
-                 waterVertices.data(), GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, waterEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, waterIndices.size() * sizeof(uint32_t),
-                 waterIndices.data(), GL_STATIC_DRAW);
-    configureVertexAttributes();
-    glBindVertexArray(0);
+    const VkDeviceSize vSize = waterVertices.size() * sizeof(Vertex);
+    const VkDeviceSize iSize = waterIndices.size() * sizeof(uint32_t);
+    waterVertexBuffer = createBuffer(allocator, vSize,
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    waterIndexBuffer = createBuffer(allocator, iSize,
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    uploadBuffer(allocator, imm, waterVertexBuffer, waterVertices.data(), vSize);
+    uploadBuffer(allocator, imm, waterIndexBuffer, waterIndices.data(), iSize);
   }
 
-  // P2: Free CPU-side water data after GPU upload
   waterVertices = {};
   waterIndices = {};
 
-  // E: Release neighbor shell memory — only needed during meshing.
-  // Lazily reconstructed by ChunkManager before any subsequent remesh.
   freeShellVoxels();
   meshNeedsUpdate = false;
 }
 
-// P1: draw() is now minimal — all shared uniforms set once in drawVisibleChunks
-uint32_t Chunk::draw()
+uint32_t Chunk::draw(VkCommandBuffer cmd)
 {
-  if (opaqueIndexCount == 0)
+  if (opaqueIndexCount == 0 || vertexBuffer.buffer == VK_NULL_HANDLE)
     return 0;
 
-  glBindVertexArray(VAO);
-  glDrawElements(GL_TRIANGLES, opaqueIndexCount, GL_UNSIGNED_INT, 0);
-
+  VkDeviceSize offset = 0;
+  vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer.buffer, &offset);
+  vkCmdBindIndexBuffer(cmd, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(cmd, opaqueIndexCount, 1, 0, 0, 0);
   return opaqueIndexCount;
 }
 
-uint32_t Chunk::drawWater()
+uint32_t Chunk::drawWater(VkCommandBuffer cmd)
 {
-  if (waterIndexCount == 0)
+  if (waterIndexCount == 0 || waterVertexBuffer.buffer == VK_NULL_HANDLE)
     return 0;
 
-  glBindVertexArray(waterVAO);
-  glDrawElements(GL_TRIANGLES, waterIndexCount, GL_UNSIGNED_INT, 0);
-
+  VkDeviceSize offset = 0;
+  vkCmdBindVertexBuffers(cmd, 0, 1, &waterVertexBuffer.buffer, &offset);
+  vkCmdBindIndexBuffer(cmd, waterIndexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(cmd, waterIndexCount, 1, 0, 0, 0);
   return waterIndexCount;
 }
 
-void Chunk::drawShadow() const
+void Chunk::drawShadow(VkCommandBuffer cmd) const
 {
-  if (opaqueIndexCount == 0 || meshNeedsUpdate.load())
+  if (opaqueIndexCount == 0 || meshNeedsUpdate.load() || vertexBuffer.buffer == VK_NULL_HANDLE)
     return;
 
-  glBindVertexArray(VAO);
-  glDrawElements(GL_TRIANGLES, opaqueIndexCount, GL_UNSIGNED_INT, 0);
+  VkDeviceSize offset = 0;
+  vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer.buffer, &offset);
+  vkCmdBindIndexBuffer(cmd, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(cmd, opaqueIndexCount, 1, 0, 0, 0);
 }
 
 void Chunk::freeShellVoxels()
@@ -1027,8 +984,8 @@ void Chunk::rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
 
 void Chunk::reset(const glm::vec3 &newPosition)
 {
-  // Conserver les ressources GPU (VAO, VBO, EBO) pour réutilisation.
-  // Réinitialiser simplement les compteurs de dessin pour ne pas afficher le chunk tant qu'il n'est pas remaillé.
+  // Drop GPU meshes — next upload recreates VMA buffers.
+  releaseGPU();
   opaqueIndexCount = 0;
   waterIndexCount = 0;
 

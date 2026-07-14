@@ -1,16 +1,16 @@
 #pragma once
 
+#ifndef GLM_ENABLE_EXPERIMENTAL
 #define GLM_ENABLE_EXPERIMENTAL
+#endif
 
 #include <vector>
-#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <array>
 #include <atomic>
 #include <bitset>
-#include <thread>
 #include <mutex>
 #include <unordered_map>
 #include <glm/gtx/hash.hpp>
@@ -18,11 +18,15 @@
 #include <chrono>
 
 #include <Chunk/TerrainGenerator.hpp>
-#include <Renderer/TextureManager.hpp>
-#include <Shader/Shader.hpp>
+#include <Vulkan/VkBuffer.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
+
+// TextureManager only for static isTransparent — no GL dependency in mesh gen.
+#include <Renderer/TextureManager.hpp>
+
+class ImmediateCommands;
 
 class Chunk
 {
@@ -47,63 +51,61 @@ public:
 
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
-	uint32_t draw();
-	uint32_t drawWater();
-	void drawShadow() const;
+
+	/// Bind opaque mesh and draw indexed into cmd. Returns index count.
+	uint32_t draw(VkCommandBuffer cmd);
+	uint32_t drawWater(VkCommandBuffer cmd);
+	void drawShadow(VkCommandBuffer cmd) const;
+
 	void generateTerrain(TerrainGenerator &generator);
 	void generateMesh();
-	void generateLODMesh(); // K: simplified column-top mesh for distant chunks
+	void generateLODMesh();
 	bool hasWaterMesh() const { return waterIndexCount > 0; }
 	bool isLODMesh() const { return m_isLODMesh; }
 	bool needsGPUUpload() const { return meshNeedsUpdate.load(); }
 	bool isInTransit() const { return m_inTransit.load(); }
 	void setInTransit(bool val) { m_inTransit.store(val); }
-	void uploadToGPU();
+
+	/// Upload CPU mesh to GPU via VMA staging. Safe to call again after remesh.
+	void uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm);
+	void releaseGPU();
+
 	bool isShellEmpty() const { return neighborShellVoxels.empty(); }
 	void freeShellVoxels();
 	void rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
 								   const Chunk *south, const Chunk *north);
 
-	/// Reinitialize this chunk for reuse by the ChunkPool.
-	/// Releases GPU resources, clears internal buffers (capacity retained),
-	/// and resets all state to UNLOADED.
 	void reset(const glm::vec3 &newPosition);
+
+	uint32_t getOpaqueIndexCount() const { return opaqueIndexCount; }
 
 private:
 	glm::vec3 position;
 	bool visible;
 	std::atomic<ChunkState> state;
 
-	GLuint VAO;
-	GLuint VBO;
-	GLuint EBO;
-
-	// Separate water mesh for transparency pass
-	GLuint waterVAO;
-	GLuint waterVBO;
-	GLuint waterEBO;
+	VmaAllocator m_allocator{VK_NULL_HANDLE};
+	AllocatedBuffer vertexBuffer{};
+	AllocatedBuffer indexBuffer{};
+	AllocatedBuffer waterVertexBuffer{};
+	AllocatedBuffer waterIndexBuffer{};
 
 	std::vector<Vertex> vertices;
-	std::vector<uint32_t> indices; // J: upgraded from uint16_t to eliminate silent overflow
+	std::vector<uint32_t> indices;
 	std::vector<Vertex> waterVertices;
 	std::vector<uint32_t> waterIndices;
 	std::vector<Voxel> voxels;
 	std::bitset<CHUNK_VOLUME> activeVoxels;
-	std::vector<uint8_t> neighborShellVoxels; // Flat array for 1-thick shell (18x(H+2)x18)
+	std::vector<uint8_t> neighborShellVoxels;
 
-	// Precomputed packed RGBA biome colors per column (from terrain generation)
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeGrassColors{};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeFoliageColors{};
 
-	uint32_t opaqueIndexCount;
-	uint32_t waterIndexCount;
+	uint32_t opaqueIndexCount{0};
+	uint32_t waterIndexCount{0};
 
 	std::atomic<bool> meshNeedsUpdate;
-	bool m_isLODMesh{false}; // K: true when this chunk carries the simplified LOD mesh
-
-	// Bolt: Moving the transit state directly to the Chunk via an atomic flag eliminates
-	// the need for an external std::unordered_set<Chunk*> in ChunkManager. This prevents
-	// costly node-based hash map lookups and cache misses in hot loops when iterating over activeChunks.
+	bool m_isLODMesh{false};
 	std::atomic<bool> m_inTransit{false};
 
 	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
