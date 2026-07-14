@@ -100,6 +100,8 @@ set(FT_VOX_VULKAN_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkUpload.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkShader.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkResourceSmoke.cpp
+    ${CMAKE_SOURCE_DIR}/src/Vulkan/StagingRing.cpp
+    ${CMAKE_SOURCE_DIR}/src/Vulkan/GpuResourceRetire.cpp
 )
 
 set(FT_VOX_IMGUI_SOURCES

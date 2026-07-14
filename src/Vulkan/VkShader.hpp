@@ -6,6 +6,9 @@
 #include <string>
 #include <vector>
 
+/// Resolve a compiled shader path (tries CWD, build-vk/, and SDL base path).
+std::string resolveSpvPath(const char *fileName);
+
 /// Load SPIR-V words from a file (must be multiple of 4 bytes).
 std::vector<uint32_t> readSpirvFile(const std::string &path);
 

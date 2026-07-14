@@ -62,8 +62,50 @@ Engine::Engine()
 	if (!SDL_Init(SDL_INIT_VIDEO))
 		throw std::runtime_error(std::string("Failed to initialize SDL: ") + SDL_GetError());
 
-	if (!SDL_Vulkan_LoadLibrary(nullptr))
-		throw std::runtime_error(std::string("Failed to load Vulkan library: ") + SDL_GetError());
+	// macOS: Homebrew's libvulkan is not on the default dyld search path, so
+	// SDL_Vulkan_LoadLibrary(nullptr) often fails with "Failed to load Vulkan
+	// Portability library" even when vulkaninfo works. Try well-known paths first.
+	{
+		const char *explicitPath = std::getenv("FT_VOX_VULKAN_LIB");
+		bool loaded = false;
+		if (explicitPath && explicitPath[0] != '\0')
+		{
+			loaded = SDL_Vulkan_LoadLibrary(explicitPath);
+			if (!loaded)
+				std::cerr << "FT_VOX_VULKAN_LIB failed (" << explicitPath << "): " << SDL_GetError() << "\n";
+		}
+#if defined(__APPLE__)
+		static const char *kMacCandidates[] = {
+			"/opt/homebrew/lib/libvulkan.1.dylib", // Apple Silicon Homebrew
+			"/opt/homebrew/lib/libvulkan.dylib",
+			"/usr/local/lib/libvulkan.1.dylib", // Intel Homebrew
+			"/usr/local/lib/libvulkan.dylib",
+			// Prefer the loader (not bare MoltenVK) so VK_ICD_FILENAMES works.
+		};
+		if (!loaded)
+		{
+			for (const char *path : kMacCandidates)
+			{
+				if (SDL_Vulkan_LoadLibrary(path))
+				{
+					std::cout << "Vulkan library: " << path << "\n";
+					loaded = true;
+					break;
+				}
+			}
+		}
+#endif
+		if (!loaded)
+			loaded = SDL_Vulkan_LoadLibrary(nullptr);
+		if (!loaded)
+		{
+			throw std::runtime_error(
+				std::string("Failed to load Vulkan library: ") + SDL_GetError() +
+				"\n  On macOS install MoltenVK + loader and set:\n"
+				"    export VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json\n"
+				"  Optional: export FT_VOX_VULKAN_LIB=/opt/homebrew/lib/libvulkan.1.dylib");
+		}
+	}
 
 	windowWidth = 1920;
 	windowHeight = 1080;
@@ -100,6 +142,9 @@ Engine::Engine()
 	immediate = std::make_unique<ImmediateCommands>();
 	immediate->init(*vkContext);
 
+	stagingRing.init(vkContext->getAllocator(), TerrainRenderer::kMaxFramesInFlight);
+	resourceRetire.init(vkContext->getAllocator(), TerrainRenderer::kMaxFramesInFlight);
+
 	terrain = std::make_unique<TerrainRenderer>();
 	terrain->init(*vkContext, *swapchain, *immediate);
 
@@ -118,7 +163,8 @@ Engine::Engine()
 	renderSettings.loadPerSec = 120;
 	renderSettings.genPerSec = 80;
 	renderSettings.meshPerSec = 60;
-	renderSettings.uploadPerSec = 40;
+	renderSettings.uploadPerSec = 100;
+	renderSettings.shadowDistance = 160.f;
 	renderSettings.raycastDistance = 8;
 
 	camera.setWindow(window);
@@ -140,6 +186,10 @@ Engine::~Engine()
 {
 	if (vkContext)
 		vkContext->waitIdle();
+
+	resourceRetire.flush();
+	resourceRetire.shutdown();
+	stagingRing.shutdown();
 
 	gameUi.reset();
 	chunkManager.reset();
@@ -163,12 +213,6 @@ Engine::~Engine()
 	SDL_Quit();
 }
 
-void Engine::waitGpuIdle()
-{
-	if (vkContext)
-		vkContext->waitIdle();
-}
-
 void Engine::initializeNoiseGenerator(int seed_val)
 {
 	if (seed_val <= 0)
@@ -188,8 +232,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 												  chunkPool.get(), renderTiming);
 
 	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
-									  vkContext->getAllocator(), *immediate,
-									  [this]() { waitGpuIdle(); });
+									  vkContext->getAllocator(), *immediate);
 
 	{
 		const glm::vec3 pos = camera.getPosition();
@@ -262,30 +305,32 @@ void Engine::tickStreaming(double dt)
 		return;
 	if (paused)
 	{
+		chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
 		chunkManager->collectDrawList(drawList);
+		chunkManager->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
+		uploadBudgetThisFrame = 0;
 		return;
 	}
 
 	const double frameDt = std::min(dt, 0.05);
 
 	chunkManager->processFinishedJobs();
-	chunkManager->processDeferredReleases([this]() { waitGpuIdle(); });
+	chunkManager->processDeferredReleases(resourceRetire);
 	chunkManager->updateStreaming(camera, renderSettings);
 
 	static double genAccum = 0.0, meshAccum = 0.0, uploadAccum = 0.0;
 	const int loadBudget = budgetFromRate(renderSettings.loadPerSec, frameDt, streamAccum);
 	const int genBudget = budgetFromRate(renderSettings.genPerSec, frameDt, genAccum);
 	const int meshBudget = budgetFromRate(renderSettings.meshPerSec, frameDt, meshAccum);
-	const int uploadBudget = budgetFromRate(renderSettings.uploadPerSec, frameDt, uploadAccum);
+	uploadBudgetThisFrame = std::max(budgetFromRate(renderSettings.uploadPerSec, frameDt, uploadAccum), 1);
 
 	chunkManager->processChunkLoading(std::max(loadBudget, 1));
 	chunkManager->generatePendingVoxels(camera, renderSettings, std::max(genBudget, 1));
 	chunkManager->meshPendingChunks(camera, renderSettings, std::max(meshBudget, 1));
-	chunkManager->uploadPendingMeshes(vkContext->getAllocator(), *immediate,
-									  std::max(uploadBudget, 1),
-									  [this]() { waitGpuIdle(); });
+	// GPU uploads are recorded inside recordFrame (after acquire) — no waitIdle.
 	chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
 	chunkManager->collectDrawList(drawList);
+	chunkManager->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
 
 	static size_t lastLoggedChunks = 0;
 	static double lastLogTime = 0.0;
@@ -295,6 +340,7 @@ void Engine::tickStreaming(double dt)
 	{
 		std::cout << "[stream] chunks=" << n
 				  << " draw=" << drawList.size()
+				  << " shadow=" << shadowList.size()
 				  << " q="
 				  << chunkManager->pendingLoadCount() << "/"
 				  << chunkManager->pendingGenJobs() << "/"
@@ -568,6 +614,10 @@ void Engine::run()
 			continue;
 		}
 
+		// Frame slot is free (fence waited): recycle retired GPU buffers + reset staging slice.
+		resourceRetire.beginFrame(frameNumber);
+		stagingRing.beginFrame(frameIndex);
+
 		if (imgui)
 		{
 			imgui->beginFrame();
@@ -579,15 +629,36 @@ void Engine::run()
 		terrain->updateFrameUBO(frameIndex, camera,
 								static_cast<float>(pixelW), static_cast<float>(pixelH), farPlane,
 								static_cast<float>(currentFrame), shaderParams);
-		terrain->recordFrame(frameIndex, imageIndex, *swapchain, drawList, clearColor,
-							 [&](VkCommandBuffer cmd) {
-								 if (imgui)
-									 imgui->recordDraw(cmd);
-							 });
+
+		const int uploadBudget = uploadBudgetThisFrame;
+		terrain->recordFrame(
+			frameIndex, imageIndex, *swapchain, drawList, shadowList, clearColor,
+			[&](VkCommandBuffer cmd) {
+				if (!chunkManager || uploadBudget <= 0 || paused)
+					return;
+				const int n = chunkManager->uploadPendingMeshes(
+					vkContext->getAllocator(), stagingRing, cmd, resourceRetire, camera, uploadBudget);
+				if (n <= 0)
+					return;
+				// Make staged mesh data visible to vertex/index fetch in later passes.
+				VkMemoryBarrier barrier{};
+				barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+				barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				barrier.dstAccessMask =
+					VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
+				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+									 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &barrier, 0, nullptr,
+									 0, nullptr);
+			},
+			[&](VkCommandBuffer cmd) {
+				if (imgui)
+					imgui->recordDraw(cmd);
+			});
 
 		if (!terrain->submitPresent(*swapchain, imageIndex, frameIndex))
 			framebufferResized = true;
 
 		frameIndex = (frameIndex + 1) % TerrainRenderer::kMaxFramesInFlight;
+		++frameNumber;
 	}
 }

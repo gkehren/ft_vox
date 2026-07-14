@@ -251,8 +251,34 @@ void VkContext::createInstance(SDL_Window *window)
 		createInfo.pNext = &debugCreateInfo;
 	}
 
-	if (vkCreateInstance(&createInfo, nullptr, &m_instance) != VK_SUCCESS)
-		throw std::runtime_error("Failed to create Vulkan instance");
+	const VkResult instResult = vkCreateInstance(&createInfo, nullptr, &m_instance);
+	if (instResult != VK_SUCCESS)
+	{
+		std::string msg = "Failed to create Vulkan instance (VkResult=" + std::to_string(static_cast<int>(instResult)) + ")";
+		if (instResult == VK_ERROR_INCOMPATIBLE_DRIVER)
+		{
+			msg += "\n  Incompatible driver — on macOS ensure portability enum is enabled and "
+				   "VK_ICD_FILENAMES points at MoltenVK_icd.json";
+		}
+		else if (instResult == VK_ERROR_EXTENSION_NOT_PRESENT)
+		{
+			msg += "\n  A requested instance extension is missing. Extensions:";
+			for (const char *e : extensions)
+				msg += std::string("\n    - ") + e;
+		}
+		else if (instResult == VK_ERROR_LAYER_NOT_PRESENT)
+		{
+			msg += "\n  Validation layer missing. Set FT_VOX_VALIDATION=0 or install layers:\n"
+				   "    brew install vulkan-validationlayers\n"
+				   "    export VK_LAYER_PATH=/opt/homebrew/opt/vulkan-validationlayers/share/vulkan/explicit_layer.d";
+		}
+		else if (instResult == VK_ERROR_INITIALIZATION_FAILED)
+		{
+			msg += "\n  Loader init failed — check VK_ICD_FILENAMES (MoltenVK ICD) and that libvulkan "
+				   "was loaded (not a broken dylib).";
+		}
+		throw std::runtime_error(msg);
+	}
 }
 
 void VkContext::setupDebugMessenger()
