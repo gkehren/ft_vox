@@ -4,8 +4,15 @@ add_executable(test_network
     ${CMAKE_SOURCE_DIR}/src/Network/Client.cpp
 )
 
-target_link_libraries(test_network PRIVATE Boost::boost Boost::system)
+target_link_libraries(test_network PRIVATE
+    Boost::boost
+    Boost::system
+    Threads::Threads
+)
 target_include_directories(test_network PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_network PRIVATE ${CMAKE_DL_LIBS})
+endif()
 add_test(NAME NetworkIntegrationTest COMMAND test_network)
 
 # ---------------------------------------------------------------------------
@@ -30,13 +37,20 @@ target_compile_definitions(test_vulkan_resources PRIVATE
 
 if(APPLE)
     target_compile_definitions(test_vulkan_resources PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_vulkan_resources PRIVATE VK_USE_PLATFORM_WIN32_KHR)
 endif()
 
 target_link_libraries(test_vulkan_resources PRIVATE
     SDL3::SDL3
     volk::volk
     GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
 )
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_vulkan_resources PRIVATE ${CMAKE_DL_LIBS})
+endif()
 
 if(APPLE)
     target_link_libraries(test_vulkan_resources PRIVATE
@@ -92,6 +106,7 @@ target_compile_definitions(test_visual_look PRIVATE
 target_link_libraries(test_visual_look PRIVATE
     glm
     FastNoise2
+    Threads::Threads
 )
 
 add_test(NAME VisualLookDefaults COMMAND test_visual_look)
@@ -116,6 +131,7 @@ target_compile_definitions(test_stream_opt PRIVATE
 target_link_libraries(test_stream_opt PRIVATE
     glm
     FastNoise2
+    Threads::Threads
 )
 
 add_test(NAME StreamOptHelpers COMMAND test_stream_opt)

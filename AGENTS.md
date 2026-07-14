@@ -32,16 +32,25 @@
 - **Terrain Generation**: FastNoise2
 - **Networking**: Boost.Asio
 - **UI**: ImGui (vendored SDL3 + Vulkan backends; dynamic rendering)
-- **Build System**: CMake (3.16+) + vcpkg
+- **Build System**: CMake (3.16+) with platform-aware deps (`cmake/Dependencies.cmake`)
+  - **Linux:** distro packages (apt/dnf/pacman) by default; vcpkg optional (`USE_VCPKG=1`)
+  - **Windows:** vcpkg almost everything (`vcpkg.json`, `build.ps1`)
+  - **macOS:** Homebrew Vulkan stack; vcpkg if `VCPKG_ROOT` present, else system
+  - **FetchContent:** GLM, FastNoise2, and (if needed) zeux/volk + VMA; optional SDL3 via `FT_VOX_FETCH_SDL3`
 
-### vcpkg packages
-`sdl3[vulkan]`, `boost-asio`, `boost-system`, `vulkan-headers`, `vulkan-loader`, `volk`, `vulkan-memory-allocator`, `glslang`
+### Packages
+
+| Source | Packages |
+|--------|----------|
+| vcpkg (`vcpkg.json`) | `sdl3[vulkan]`, `boost-asio`, `boost-system`, `vulkan-headers`, `vulkan-loader`, `volk`, `vulkan-memory-allocator`, `glslang` |
+| Linux apt (example) | `libsdl3-dev`, `libboost-system-dev`, `libvulkan-dev`, `glslang-tools` |
+| macOS brew | `sdl3`, `boost`, `molten-vk`, `vulkan-loader`, `glslang` |
 
 **Removed (cleanup):** OpenGL stack (GLAD, legacy GLSL, `Renderer`/`Shader`/`UIManager`/`TextRenderer`/`PostProcessing`), unused ImGui extras (OpenGL/SDLGPU backends, FileDialog, demo, stdlib helper), unused `InputSystem`/`EventBus`, FreeType vcpkg dep. Network module kept for `test_network` only (not yet re-wired into Engine UI).
 
 ### macOS (MoltenVK)
 ```bash
-brew install molten-vk vulkan-loader
+./install_dep.sh   # or: brew install molten-vk vulkan-loader
 export VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
 ```
 
@@ -59,27 +68,36 @@ Layers are **not** linked into the game binary; the Vulkan loader discovers them
 
 ### Building the Project
 
-vcpkg toolchain (this machine): `/Users/gkehren/vcpkg/scripts/buildsystems/vcpkg.cmake`
-
-#### Windows (Visual Studio)
-```powershell
-cmake -B build -DCMAKE_TOOLCHAIN_FILE=D:\Projects\vcpkg\scripts\buildsystems\vcpkg.cmake
-cmake --build build --config Release
+#### Linux (prefer system packages)
+```bash
+./install_dep.sh
+make                          # FT_VOX_DEP_MODE=system
+# fallback if SDL3 missing:
+make USE_VCPKG=1 VCPKG_ROOT=$HOME/vcpkg
 ```
 
-#### Linux/macOS
+#### macOS
 ```bash
-cmake -B build-vk -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release
-cmake --build build-vk
+./install_dep.sh
+make                          # uses ~/vcpkg toolchain if present
 export VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
 ./build-vk/ft_vox
+```
+
+#### Windows (vcpkg)
+```powershell
+.\build.ps1
+# or:
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+cmake --build build --config Release
 ```
 
 ### Testing
 
 ```bash
-cd build-vk
-ctest --output-on-failure
+make test
+# or
+cd build-vk && ctest --output-on-failure
 ```
 
 ### Key Conventions

@@ -1,43 +1,28 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(ft_vox)
+project(ft_vox LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
+# MSVC: correct __cplusplus + avoid Windows min/max macros
 if(MSVC)
-    add_compile_options(/Zc:__cplusplus)
-    add_compile_options(/DNOMINMAX)
+    add_compile_options(/Zc:__cplusplus /permissive- /DNOMINMAX)
 endif()
 
-find_package(SDL3 CONFIG REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system)
-find_package(Vulkan REQUIRED)
-find_package(volk CONFIG REQUIRED)
-find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+# Export compile_commands for IDEs/clangd (Unix generators)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-include(FetchContent)
-set(GLM_BUILD_LIBRARY OFF CACHE BOOL "Build GLM library" FORCE)
-FetchContent_Declare(
-  glm
-  GIT_REPOSITORY https://github.com/g-truc/glm.git
-  GIT_TAG 1.0.0
-)
-FetchContent_MakeAvailable(glm)
-
-FetchContent_Declare(
-  FastNoise2
-  GIT_REPOSITORY https://github.com/Auburn/FastNoise2.git
-  GIT_TAG v0.10.0-alpha
-)
-FetchContent_MakeAvailable(FastNoise2)
+# ---------------------------------------------------------------------------
+# Dependencies (system packages / vcpkg / FetchContent)
+# ---------------------------------------------------------------------------
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+include(Dependencies)
 
 # ---------------------------------------------------------------------------
 # SPIR-V compile
 # ---------------------------------------------------------------------------
-find_program(GLSLANG_VALIDATOR glslangValidator HINTS ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE})
-find_program(GLSLC glslc HINTS ${Vulkan_GLSLC_EXECUTABLE})
-
 set(FT_VOX_SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/ressources/shaders/vulkan)
 set(FT_VOX_SPV_OUT_DIR ${CMAKE_BINARY_DIR}/ressources/shaders/spv)
 file(MAKE_DIRECTORY ${FT_VOX_SPV_OUT_DIR})
@@ -54,7 +39,7 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )
-    elseif(GLSLANG_VALIDATOR)
+    else()
         add_custom_command(
             OUTPUT ${SPV_PATH}
             COMMAND ${GLSLANG_VALIDATOR} -V -S ${STAGE} ${GLSL_PATH} -o ${SPV_PATH}
@@ -62,8 +47,6 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )
-    else()
-        message(FATAL_ERROR "Neither glslc nor glslangValidator found")
     endif()
     list(APPEND FT_VOX_SPV_FILES ${SPV_PATH})
     set(FT_VOX_SPV_FILES ${FT_VOX_SPV_FILES} PARENT_SCOPE)
@@ -148,10 +131,14 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 
 if(APPLE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+elseif(UNIX)
+    # Wayland/X11 surface creation goes through SDL; no extra platform define required.
 endif()
 
-target_link_libraries(${PROJECT_NAME}
-    PRIVATE
+# Common link set used by main binary and Vulkan tests
+set(FT_VOX_COMMON_LIBS
     SDL3::SDL3
     glm
     FastNoise2
@@ -159,7 +146,15 @@ target_link_libraries(${PROJECT_NAME}
     Boost::system
     volk::volk
     GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
 )
+
+target_link_libraries(${PROJECT_NAME} PRIVATE ${FT_VOX_COMMON_LIBS})
+
+# Linux: libdl for dynamic loader helpers; Vulkan loader when not using pure volk bootstrap
+if(UNIX AND NOT APPLE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
+endif()
 
 if(APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -171,9 +166,15 @@ if(APPLE)
     )
 endif()
 
-target_compile_options(${PROJECT_NAME} PRIVATE
-    $<$<CONFIG:Release>:-O3 -march=native>
-)
+# Release optimisations (multi-config safe; avoid -march=native on Apple for portability)
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/O2>)
+else()
+    target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:-O3>)
+    if(NOT APPLE)
+        target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:-march=native>)
+    endif()
+endif()
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
