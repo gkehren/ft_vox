@@ -102,6 +102,31 @@ inline int remainingCountBudget(int requested, double elapsedMs, double maxStrea
 	return requested;
 }
 
+/// Steady-state + headroom ChunkPool size for a view distance.
+/// Matches ChunkManager unload radius = unloadFactor * maxRenderDistance.
+inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
+										float unloadFactor = 1.5f,
+										float margin = 1.15f)
+{
+	constexpr size_t kMin = 64;
+	constexpr size_t kMax = 16384;
+	const int maxRd = maxRenderDistanceBlocks < 16 ? 16 : maxRenderDistanceBlocks;
+	const float uf = unloadFactor < 1.f ? 1.f : unloadFactor;
+	const float mg = margin < 1.f ? 1.f : margin;
+	const float unloadBlocks = static_cast<float>(maxRd) * uf;
+	const float radiusChunks = unloadBlocks / static_cast<float>(CHUNK_SIZE) + 1.f;
+	const double area =
+		3.14159265358979323846 * static_cast<double>(radiusChunks) * static_cast<double>(radiusChunks);
+	const size_t disk = static_cast<size_t>(std::ceil(area * static_cast<double>(mg)));
+	const size_t headroom = 96 + static_cast<size_t>(std::ceil(radiusChunks * 2.5f));
+	size_t needed = disk + headroom;
+	if (needed < kMin)
+		needed = kMin;
+	if (needed > kMax)
+		needed = kMax;
+	return needed;
+}
+
 /// Occupancy bounds for non-air voxels.
 /// index = y * (CHUNK_SIZE*CHUNK_SIZE) + z * CHUNK_SIZE + x  (matches Chunk::getIndex).
 /// Returns false if the chunk is empty (all air).

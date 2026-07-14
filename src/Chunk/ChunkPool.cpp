@@ -1,56 +1,92 @@
 #include "ChunkPool.hpp"
+
 #include <Chunk/Chunk.hpp>
+#include <utils.hpp>
+
+#include <algorithm>
 #include <iostream>
 
-ChunkPool::ChunkPool(size_t capacity)
-	: m_capacity(capacity)
+namespace
 {
-	// Pre-allocate all chunks at a dummy position; they'll be reset() on acquire.
-	m_storage.reserve(capacity);
-	m_freeList.reserve(capacity);
+constexpr size_t kMinPoolCapacity = 64;
+constexpr size_t kGrowSlabMin = 128;
+// Soft cap so a mis-set slider cannot allocate unbounded RAM in one go.
+constexpr size_t kMaxPoolCapacity = 16384;
+} // namespace
 
-	for (size_t i = 0; i < capacity; ++i)
-	{
-		m_storage.emplace_back(glm::vec3(0.0f));
-	}
-
-	// Populate free-list (all chunks start as available)
-	for (size_t i = 0; i < capacity; ++i)
-	{
-		m_freeList.push_back(&m_storage[i]);
-	}
-
-	std::cout << "ChunkPool: pre-allocated " << capacity << " chunks ("
-			  << (capacity * sizeof(Chunk)) / (1024 * 1024) << " MB storage)" << "\n";
+ChunkPool::ChunkPool(size_t initialCapacity)
+{
+	const size_t cap = std::max(initialCapacity, kMinPoolCapacity);
+	std::lock_guard<std::mutex> lock(m_mutex);
+	growUnlocked(cap);
+	std::cout << "ChunkPool: pre-allocated " << m_capacity.load(std::memory_order_relaxed) << " chunks\n";
 }
 
-ChunkPool::~ChunkPool()
+ChunkPool::~ChunkPool() = default;
+
+void ChunkPool::growUnlocked(size_t addCount)
 {
-	// m_storage destructor handles cleanup of pool-owned chunks.
-	// Any leaked overflow chunks are not tracked here — caller is responsible.
+	if (addCount == 0)
+		return;
+
+	const size_t cur = m_storage.size();
+	if (cur >= kMaxPoolCapacity)
+		return;
+
+	const size_t canAdd = std::min(addCount, kMaxPoolCapacity - cur);
+	m_storage.reserve(cur + canAdd);
+	m_freeList.reserve(m_freeList.size() + canAdd);
+	m_owned.reserve(cur + canAdd);
+
+	for (size_t i = 0; i < canAdd; ++i)
+	{
+		m_storage.push_back(std::make_unique<Chunk>(glm::vec3(0.0f)));
+		Chunk *ptr = m_storage.back().get();
+		m_freeList.push_back(ptr);
+		m_owned.insert(ptr);
+	}
+
+	m_capacity.store(m_storage.size(), std::memory_order_relaxed);
+	m_growEvents.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool ChunkPool::ensureCapacity(size_t minCapacity)
+{
+	minCapacity = std::min(std::max(minCapacity, kMinPoolCapacity), kMaxPoolCapacity);
+
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (m_storage.size() >= minCapacity)
+		return false;
+
+	const size_t need = minCapacity - m_storage.size();
+	// Grow in slabs to amortize lock + allocation cost when the slider jumps.
+	const size_t add = std::max(need, kGrowSlabMin);
+	const size_t before = m_storage.size();
+	growUnlocked(add);
+	const size_t after = m_storage.size();
+	if (after > before)
+	{
+		std::cout << "ChunkPool: grew " << before << " -> " << after
+				  << " (target >= " << minCapacity << ")\n";
+	}
+	return after > before;
 }
 
 Chunk *ChunkPool::acquire(const glm::vec3 &worldPosition)
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 
-	if (!m_freeList.empty())
+	if (m_freeList.empty())
 	{
-		Chunk *chunk = m_freeList.back();
-		m_freeList.pop_back();
-		chunk->reset(worldPosition);
-		m_acquiredCount.fetch_add(1, std::memory_order_relaxed);
-		return chunk;
+		m_rejectCount.fetch_add(1, std::memory_order_relaxed);
+		return nullptr;
 	}
 
-	// Pool exhausted — fall back to heap allocation
-	m_overflowCount.fetch_add(1, std::memory_order_relaxed);
+	Chunk *chunk = m_freeList.back();
+	m_freeList.pop_back();
+	chunk->reset(worldPosition);
 	m_acquiredCount.fetch_add(1, std::memory_order_relaxed);
-	std::cerr << "ChunkPool: WARNING — pool exhausted, heap-allocating chunk (overflow #"
-			  << m_overflowCount.load(std::memory_order_relaxed) << ")" << "\n";
-
-	Chunk *overflow = new Chunk(worldPosition);
-	return overflow;
+	return chunk;
 }
 
 void ChunkPool::release(Chunk *chunk)
@@ -58,28 +94,21 @@ void ChunkPool::release(Chunk *chunk)
 	if (!chunk)
 		return;
 
-	// Reset the chunk (releases GPU resources, clears buffers but keeps capacity)
+	// Drop GPU / CPU mesh data while not holding the pool mutex (can be heavy).
 	chunk->reset(glm::vec3(0.0f));
 
 	std::lock_guard<std::mutex> lock(m_mutex);
 
-	if (isPoolOwned(chunk))
+	if (m_owned.count(chunk) != 0)
 	{
 		m_freeList.push_back(chunk);
 	}
 	else
 	{
-		// Overflow chunk — delete it since it's not in our storage
+		// Stray pointer (legacy overflow or bug) — free to avoid leak.
 		delete chunk;
 	}
-	m_acquiredCount.fetch_sub(1, std::memory_order_relaxed);
-}
-
-bool ChunkPool::isPoolOwned(const Chunk *chunk) const
-{
-	if (m_storage.empty())
-		return false;
-	const Chunk *begin = m_storage.data();
-	const Chunk *end = begin + m_storage.size();
-	return chunk >= begin && chunk < end;
+	const size_t acq = m_acquiredCount.load(std::memory_order_relaxed);
+	if (acq > 0)
+		m_acquiredCount.fetch_sub(1, std::memory_order_relaxed);
 }

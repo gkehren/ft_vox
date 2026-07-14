@@ -205,6 +205,19 @@ static void testOceanWaterNotClippedByCaveYBound()
 	std::cout << "  ocean columns: " << oceanCols << " water/ice at SEA_LEVEL: " << oceanOk << "\n";
 }
 
+static void testPoolCapacityEstimate()
+{
+	const size_t c128 = estimateChunkPoolCapacity(128);
+	const size_t c256 = estimateChunkPoolCapacity(256);
+	const size_t c512 = estimateChunkPoolCapacity(512);
+	CHECK(c128 >= 64, "min capacity floor");
+	CHECK(c256 > c128, "higher view distance needs more pool");
+	CHECK(c512 > c256, "512 blocks needs more than 256");
+	// Unload disk ~1.5×512/16 → r≈49 → πr² > 7000 before headroom; clamp at 16384.
+	CHECK(c512 > 4000, "512-block view needs several thousand slots");
+	CHECK(c512 <= 16384, "soft cap");
+}
+
 int main()
 {
 	testLoadPriorityNearestFirst();
@@ -215,12 +228,13 @@ int main()
 	testOccupancyY();
 	testTerrainBoundedGeneration();
 	testOceanWaterNotClippedByCaveYBound();
+	testPoolCapacityEstimate();
 
 	if (g_fails != 0)
 	{
 		std::cerr << g_fails << " check(s) failed\n";
 		return 1;
 	}
-	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water\n";
+	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate\n";
 	return 0;
 }
