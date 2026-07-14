@@ -2,10 +2,12 @@
 
 #include <SDL3/SDL_vulkan.h>
 #include <utils.hpp>
+#include <Chunk/StreamHelpers.hpp>
 #include <imgui/imgui.h>
 
 #include <cstdio>
 #include <cmath>
+#include <chrono>
 #include <iostream>
 #include <stdexcept>
 #include <random>
@@ -313,6 +315,11 @@ void Engine::tickStreaming(double dt)
 	}
 
 	const double frameDt = std::min(dt, 0.05);
+	const auto streamT0 = std::chrono::steady_clock::now();
+	const auto streamElapsedMs = [&]() {
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - streamT0).count();
+	};
+	const double maxStreamMs = static_cast<double>(renderSettings.maxStreamMs);
 
 	chunkManager->processFinishedJobs();
 	chunkManager->processDeferredReleases(resourceRetire);
@@ -324,9 +331,16 @@ void Engine::tickStreaming(double dt)
 	const int meshBudget = budgetFromRate(renderSettings.meshPerSec, frameDt, meshAccum);
 	uploadBudgetThisFrame = std::max(budgetFromRate(renderSettings.uploadPerSec, frameDt, uploadAccum), 1);
 
-	chunkManager->processChunkLoading(std::max(loadBudget, 1));
-	chunkManager->generatePendingVoxels(camera, renderSettings, std::max(genBudget, 1));
-	chunkManager->meshPendingChunks(camera, renderSettings, std::max(meshBudget, 1));
+	// Count budgets capped by shared per-frame CPU time envelope.
+	const int loadN = remainingCountBudget(std::max(loadBudget, 1), streamElapsedMs(), maxStreamMs);
+	if (loadN > 0)
+		chunkManager->processChunkLoading(loadN);
+	const int genN = remainingCountBudget(std::max(genBudget, 1), streamElapsedMs(), maxStreamMs);
+	if (genN > 0)
+		chunkManager->generatePendingVoxels(camera, renderSettings, genN);
+	const int meshN = remainingCountBudget(std::max(meshBudget, 1), streamElapsedMs(), maxStreamMs);
+	if (meshN > 0)
+		chunkManager->meshPendingChunks(camera, renderSettings, meshN);
 	// GPU uploads are recorded inside recordFrame (after acquire) — no waitIdle.
 	chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
 	chunkManager->collectDrawList(drawList);

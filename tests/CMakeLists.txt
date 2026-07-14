@@ -95,3 +95,27 @@ target_link_libraries(test_visual_look PRIVATE
 )
 
 add_test(NAME VisualLookDefaults COMMAND test_visual_look)
+
+# ---------------------------------------------------------------------------
+# Phase D stream CPU helpers (load priority, occupancy, cave Y bounds)
+# ---------------------------------------------------------------------------
+add_executable(test_stream_opt
+    test_stream_opt.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+)
+
+target_include_directories(test_stream_opt PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(test_stream_opt PRIVATE
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_stream_opt PRIVATE
+    glm
+    FastNoise2
+)
+
+add_test(NAME StreamOptHelpers COMMAND test_stream_opt)

@@ -1,4 +1,5 @@
 #include "Chunk.hpp"
+#include <Chunk/StreamHelpers.hpp>
 #include <Vulkan/VkUpload.hpp>
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/StagingRing.hpp>
@@ -300,6 +301,26 @@ void Chunk::generateMesh()
 
   const int dims[] = {CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE};
 
+  // Bound meshing to occupied Y span (skip empty sky / deep-empty slabs).
+  int occMinY = 0;
+  int occMaxY = CHUNK_HEIGHT - 1;
+  {
+    // Dense type strip for the pure helper (same layout as getIndex).
+    thread_local std::vector<uint8_t> typeScratch;
+    typeScratch.resize(CHUNK_VOLUME);
+    for (size_t i = 0; i < voxels.size() && i < static_cast<size_t>(CHUNK_VOLUME); ++i)
+      typeScratch[i] = voxels[i].type;
+    if (!computeOccupancyY(typeScratch.data(), occMinY, occMaxY))
+    {
+      meshNeedsUpdate = true;
+      state = ChunkState::MESHED;
+      return;
+    }
+  }
+  // Slice range needs neighbors one cell outside solids for face detection.
+  const int ySliceMin = std::max(-1, occMinY - 1);
+  const int ySliceMax = std::min(CHUNK_HEIGHT - 1, occMaxY); // x[d] runs to dims[d]-1 inclusive via < dims
+
   // Iterate over dimensions (X, Y, Z)
   for (int d = 0; d < 3; ++d)
   {
@@ -317,17 +338,40 @@ void Chunk::generateMesh()
       workspace.mask.resize(dims[u] * dims[v]);
     }
 
+    // Slice range along d; clamp Y when d==1.
+    int dStart = -1;
+    int dEnd = dims[d]; // exclusive upper for x[d] < dEnd
+    if (d == 1)
+    {
+      dStart = ySliceMin;
+      dEnd = ySliceMax + 1;
+    }
+
     // Iterate over each slice of the chunk along dimension 'd'
     // x[d] ranges from -1 (representing boundary before chunk) to dims[d]-1
     // (last voxel layer) A face exists between slice x[d] and slice x[d]+1
-    for (x[d] = -1; x[d] < dims[d]; ++x[d])
+    for (x[d] = dStart; x[d] < dEnd; ++x[d])
     {
       std::fill(workspace.mask.begin(), workspace.mask.begin() + (dims[u] * dims[v]), 0); // Reset mask for each slice
 
-      // Iterate over the plane (u, v)
-      for (x[u] = 0; x[u] < dims[u]; ++x[u])
+      // Bound Y when it is a plane axis.
+      int uStart = 0, uEnd = dims[u];
+      int vStart = 0, vEnd = dims[v];
+      if (u == 1)
       {
-        for (x[v] = 0; x[v] < dims[v]; ++x[v])
+        uStart = std::max(0, occMinY);
+        uEnd = std::min(dims[u], occMaxY + 1);
+      }
+      if (v == 1)
+      {
+        vStart = std::max(0, occMinY);
+        vEnd = std::min(dims[v], occMaxY + 1);
+      }
+
+      // Iterate over the plane (u, v)
+      for (x[u] = uStart; x[u] < uEnd; ++x[u])
+      {
+        for (x[v] = vStart; x[v] < vEnd; ++x[v])
         {
 
           if (workspace.mask[x[u] * dims[v] + x[v]])

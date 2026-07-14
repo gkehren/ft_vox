@@ -1,5 +1,4 @@
 #include "Vulkan/VkShader.hpp"
-#include "utils.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -29,7 +28,7 @@ std::string resolveSpvPath(const char *fileName)
 	add("../ressources/shaders/spv");
 	add("./build-vk/ressources/shaders/spv");
 	add("build-vk/ressources/shaders/spv");
-	add(std::string(RES_PATH) + "shaders/spv");
+	add("./ressources/shaders/spv"); // RES_PATH default
 
 	// Directory containing the executable (where CMake copies ressources/).
 	// SDL3 caches this path — do not free it (unlike SDL2).

@@ -67,6 +67,8 @@ struct RenderSettings
 	int uploadPerSec{100}; // GPU mesh uploads / sec (async staging — no device idle)
 	// Shadow casters within this XZ radius (blocks). Caps shadow pass cost.
 	float shadowDistance{160.f};
+	/// Max CPU ms per frame for load + gen-dispatch + mesh-dispatch (0 = unlimited).
+	float maxStreamMs{4.0f};
 };
 
 struct RenderTiming
