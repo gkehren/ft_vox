@@ -74,8 +74,10 @@ void VkContext::waitIdle() const
 
 void VkContext::init(SDL_Window *window)
 {
-	if (volkInitialize() != VK_SUCCESS)
-		throw std::runtime_error("Failed to initialize volk (Vulkan loader not found)");
+	auto getProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
+	if (!getProcAddr)
+		throw std::runtime_error("Failed to get vkGetInstanceProcAddr from SDL: " + std::string(SDL_GetError()));
+	volkInitializeCustom(getProcAddr);
 
 	createInstance(window);
 	volkLoadInstance(m_instance);
