@@ -80,15 +80,18 @@ void ChunkManager::processChunkLoading(int budget)
 	std::vector<glm::ivec3> toLoad;
 	{
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		int n = 0;
-		while (!m_loadQueue.empty() && n < budget)
+		// Nearest-first: re-sort so player motion never leaves stale far loads ahead.
+		sortLoadCandidatesNearestFirst(m_loadQueue);
+		const int n = std::min(budget, static_cast<int>(m_loadQueue.size()));
+		toLoad.reserve(static_cast<size_t>(n));
+		for (int i = 0; i < n; ++i)
 		{
-			const glm::ivec3 pos = m_loadQueue.front();
-			m_loadQueue.pop();
+			const glm::ivec3 pos = m_loadQueue[static_cast<size_t>(i)].pos;
 			m_enqueuedLoads.erase(pos);
 			toLoad.push_back(pos);
-			++n;
 		}
+		if (n > 0)
+			m_loadQueue.erase(m_loadQueue.begin(), m_loadQueue.begin() + n);
 	}
 	if (toLoad.empty())
 		return;
@@ -544,19 +547,35 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 		}
 	}
 
-	std::sort(candidates.begin(), candidates.end(),
-			  [](const LoadInfo &a, const LoadInfo &b) { return a.distSq < b.distSq; });
-
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
+
+	// Drop loads that are already present or now out of range after camera motion.
+	pruneLoadCandidatesByDistance(m_loadQueue, camPos, maxDistSq);
+	m_loadQueue.erase(std::remove_if(m_loadQueue.begin(), m_loadQueue.end(),
+									 [&](const LoadCandidate &c) {
+										 if (m_chunks.find(c.pos) != m_chunks.end())
+										 {
+											 m_enqueuedLoads.erase(c.pos);
+											 return true;
+										 }
+										 return false;
+									 }),
+					  m_loadQueue.end());
+	// Rebuild enqueued set from surviving queue entries.
+	m_enqueuedLoads.clear();
+	for (const auto &c : m_loadQueue)
+		m_enqueuedLoads.insert(c.pos);
+
 	for (const auto &info : candidates)
 	{
 		if (m_chunks.find(info.pos) != m_chunks.end())
 			continue;
 		if (m_enqueuedLoads.count(info.pos) != 0)
 			continue;
-		m_loadQueue.push(info.pos);
+		m_loadQueue.push_back({info.pos, info.distSq});
 		m_enqueuedLoads.insert(info.pos);
 	}
+	sortLoadCandidatesNearestFirst(m_loadQueue);
 }
 
 void ChunkManager::ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx)

@@ -459,6 +459,7 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 	ImGui::SliderInt("Gen/s", &rs.genPerSec, 5, 200);
 	ImGui::SliderInt("Mesh/s", &rs.meshPerSec, 5, 200);
 	ImGui::SliderInt("Upload/s", &rs.uploadPerSec, 5, 200);
+	ImGui::SliderFloat("Stream ms/frame", &rs.maxStreamMs, 0.f, 16.f, "%.1f");
 	ImGui::SliderFloat("Shadow dist", &rs.shadowDistance, 64.f, 320.f, "%.0f");
 
 	ImGui::SeparatorText("Live stats");
