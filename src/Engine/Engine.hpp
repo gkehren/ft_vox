@@ -1,128 +1,94 @@
 #pragma once
 
-#include <utils.hpp>
 #include <SDL3/SDL.h>
-#include <glad/glad.h>
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_access.hpp>
 
-#include <iostream>
-#include <stdexcept>
+#include <memory>
 #include <string>
 #include <vector>
-#include <unordered_set>
-#include <algorithm>
-#include <random>
-#include <future>
-#include <ranges>
-#include <memory>
-#include <queue>
-#include <mutex>
+#include <cstdint>
+#include <thread>
 
-#include <Chunk/Chunk.hpp>
-#include <Shader/Shader.hpp>
-#include <Renderer/Renderer.hpp>
-#include <Renderer/PostProcessing.hpp>
-#include <Camera/Camera.hpp>
-#include <Renderer/TextRenderer.hpp>
-#include <utils.hpp>
+#include <Vulkan/VkContext.hpp>
+#include <Vulkan/VkSwapchain.hpp>
+#include <Vulkan/VkCommands.hpp>
+#include <Renderer/TerrainRenderer.hpp>
+#include <Renderer/OverlayRenderer.hpp>
+#include <Engine/ImGuiLayer.hpp>
+#include <Engine/GameUI.hpp>
 #include <Engine/ThreadPool.hpp>
-#include <Network/Server.hpp>
-#include <Network/Client.hpp>
 #include <Engine/EngineDefs.hpp>
-#include <Engine/UIManager.hpp>
-#include <Chunk/ChunkManager.hpp>
+#include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkPool.hpp>
+#include <Chunk/ChunkManager.hpp>
 #include <Chunk/TerrainGenerator.hpp>
-#include <Engine/InputSystem.hpp>
+#include <Camera/Camera.hpp>
+#include <utils.hpp>
 
+/// Vulkan engine: streaming procedural world, post, overlays, ImGui.
 class Engine
 {
 public:
 	Engine();
 	~Engine();
+
 	void run();
 	void initializeNoiseGenerator(int seed);
-
-	Camera &getCamera() { return camera; }
-	const Camera &getCamera() const { return camera; }
-	double getDeltaTime() const { return deltaTime; }
-	const glm::ivec2 &getPlayerChunkPos() const { return playerChunkPos; }
-	Server *getServer() const { return server.get(); }
-	Client *getClient() const { return client.get(); }
-	RenderTiming &getRenderTiming();
-	TextureType getSelectedTexture() const { return selectedTexture; }
-	UIManager *getUIManager() const { return uiManager.get(); }
-	Shader *getShader() const { return shader.get(); }
-	Renderer *getRenderer() const { return renderer.get(); }
-	TerrainGenerator *getTerrainGenerator() const { return terrainGenerator.get(); }
-	ChunkManager *getChunkManager() const { return chunkManager.get(); }
-
-	void setWireframeMode(bool enabled);
 	void setVSync(bool enabled);
 
-	void startServer();
-	void stopServer();
-	void connectToServer(const std::string &ip);
-	void disconnectClient();
-
 private:
-	SDL_Window *window;
-	SDL_GLContext glContext;
-	int windowWidth;
-	int windowHeight;
-	SDL_DisplayMode *mode;
+	void handleEvents();
+	void onResize(int width, int height);
+	void tickStreaming(double dt);
+	void tickDayCycle(double dt);
+	void processInput(double dt);
+	void updateHighlight();
+	bool raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious);
+	void waitGpuIdle();
+	void drawUi();
 
-	bool running;
-	double deltaTime;
-	double lastFrame;
-	double frameCount;
-	double lastTime;
-	double fps;
+	SDL_Window *window{nullptr};
+	int windowWidth{1920};
+	int windowHeight{1080};
 
-	bool isMousecaptured;
+	bool running{false};
+	bool mouseCaptured{true};
+	bool framebufferResized{false};
+	bool showChunkBorders{false};
+	bool showDemoPlayers{true};
+	bool paused{false};
 
-	std::unique_ptr<Shader> shader;
-	std::unique_ptr<Renderer> renderer;
-	std::unique_ptr<TextRenderer> textRenderer;
-	std::unique_ptr<ThreadPool> threadPool;
-	std::unique_ptr<Server> server;
-	std::unique_ptr<Client> client;
-	std::unique_ptr<UIManager> uiManager;
-	std::unique_ptr<ChunkManager> chunkManager;
-	std::unique_ptr<ChunkPool> chunkPool;
-	std::unique_ptr<PostProcessing> postProcessing;
+	double deltaTime{0.0};
+	double lastFrame{0.0};
+	double frameCount{0.0};
+	double lastTime{0.0};
+	double fps{0.0};
+
+	double streamAccum{0.0};
+
+	int seed{0};
+	TextureType selectedTexture{STONE};
+
+	static constexpr int kBootstrapRadius = 2;
+
+	RenderSettings renderSettings{};
+	RenderTiming renderTiming{};
+	ShaderParameters shaderParams{};
+
+	std::unique_ptr<VkContext> vkContext;
+	std::unique_ptr<VkSwapchain> swapchain;
+	std::unique_ptr<ImmediateCommands> immediate;
+	std::unique_ptr<TerrainRenderer> terrain;
+	std::unique_ptr<ImGuiLayer> imgui;
+	std::unique_ptr<GameUI> gameUi;
 	std::unique_ptr<TerrainGenerator> terrainGenerator;
-	std::unique_ptr<InputSystem> inputSystem;
+	std::unique_ptr<ThreadPool> threadPool;
+	std::unique_ptr<ChunkPool> chunkPool;
+	std::unique_ptr<ChunkManager> chunkManager;
 
+	std::vector<Chunk *> drawList;
 	Camera camera;
-	glm::ivec2 playerChunkPos;
-	int seed;
+	uint32_t frameIndex{0};
 
-	TextureType selectedTexture;
-
-	// Token-bucket accumulators for frame-rate-independent chunk pipeline budgets.
-	// Each accumulator collects fractional work units across frames so the total
-	// throughput matches the configured per-second rate regardless of FPS.
-	float m_loadAccum{0.f};
-	float m_genAccum{0.f};
-	float m_meshAccum{0.f};
-	float m_uploadAccum{0.f};
-
-	void setupEventHandlers();
-	void updateWorldState();
-	void updateAtmosphere();
-	void renderScene();
-	bool raycast(const glm::vec3 &origin, const glm::vec3 &direction, float maxDistance, glm::vec3 &hitPosition, glm::vec3 &previousPosition);
-
-	// Voxel selection highlight
-	struct VoxelHighlight
-	{
-		bool active{false};
-		glm::vec3 position{0.0f};
-		glm::vec3 color{0.8f, 0.2f, 0.2f}; // Red for destruction
-	} destructionHighlight, placementHighlight;
-
-	void updateVoxelHighlights();
-	void drawVoxelHighlight(const VoxelHighlight &highlight);
+	OverlayHighlight highlight{};
+	std::vector<OverlayPlayer> demoPlayers;
 };

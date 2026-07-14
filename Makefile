@@ -1,72 +1,40 @@
+# Thin wrapper around CMake + vcpkg. Prefer calling cmake directly.
 
-# ------------------
-CXX = g++
-CXXFLAGS = -std=c++20 -O3 -Ofast -march=native
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Linux)
-    LDFLAGS = -lGL -lglfw -lfreetype -L lib
-	INCDIR = -I src -I/usr/include/freetype2 -I lib
-endif
-ifeq ($(UNAME_S),Darwin)    # Darwin is for MacOS
-    LDFLAGS = -framework OpenGL -lglfw -lfreetype -L/opt/homebrew/lib -L lib
-	INCDIR = -I src -I /opt/homebrew/include/ -I /opt/homebrew/include/freetype2 -I lib
-endif
-# ==================
+VCPKG_ROOT ?= $(HOME)/vcpkg
+TOOLCHAIN  ?= $(VCPKG_ROOT)/scripts/buildsystems/vcpkg.cmake
+BUILD_DIR  ?= build-vk
+BUILD_TYPE ?= Release
+JOBS       ?= $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
-# ----- Paths -----
-SRCDIR = src
-OBJDIR = obj
-# ==================
+.PHONY: all configure build clean fclean re test run help
 
-# ----- Colors -----
-BLACK:="\033[1;30m"
-RED:="\033[1;31m"
-GREEN:="\033[1;32m"
-CYAN:="\033[1;35m"
-PURPLE:="\033[1;36m"
-WHITE:="\033[1;37m"
-EOC:="\033[0;0m"
-# ==================
+all: build
 
-# ------ Auto ------
-SRC = $(wildcard $(SRCDIR)/**/*.cpp $(SRCDIR)/*.cpp)
-OBJ = $(patsubst $(SRCDIR)/%.cpp, $(OBJDIR)/%.o, $(SRC))
-GLAD_SRC = $(SRCDIR)/glad/glad.c
-# ==================
+help:
+	@echo "Targets: configure build test run clean fclean re"
+	@echo "  BUILD_DIR=$(BUILD_DIR)  BUILD_TYPE=$(BUILD_TYPE)"
+	@echo "  TOOLCHAIN=$(TOOLCHAIN)"
 
-TARGET = ft_vox
+configure:
+	cmake -B $(BUILD_DIR) \
+		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
 
-all: ${TARGET}
+build: configure
+	cmake --build $(BUILD_DIR) -j$(JOBS)
 
-${TARGET}: ${OBJ}
-	@echo ${CYAN} " - Compiling $@" $(RED)
-	@${CXX} -o $@ $^ ${GLAD_SRC} ${LDFLAGS} ${INCDIR}
-	@echo $(GREEN) " - OK" $(EOC)
+test: build
+	cd $(BUILD_DIR) && ctest --output-on-failure
 
-${OBJDIR}/%.o: ${SRCDIR}/%.cpp
-	@mkdir -p $(@D)
-	@echo ${PURPLE} " - Compiling $< into $@" ${EOC}
-	@${CXX} ${CXXFLAGS} ${INCDIR} -c -o $@ $<
-
-%.cpp:
-	@echo ${RED}"Missing file : $@" ${EOC}
-
-install:
-	@echo ${CYAN} " - Installing dependencies" $(PURPLE)
-	@chmod +x install_dep.sh
-	@sh install_dep.sh
-	@echo $(GREEN) " - OK" $(EOC)
+run: build
+	@# macOS MoltenVK ICD (no-op if path missing)
+	@export VK_ICD_FILENAMES="$${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}"; \
+		./$(BUILD_DIR)/ft_vox $(ARGS)
 
 clean:
-	@rm -rf ${OBJDIR}
+	@rm -rf $(BUILD_DIR)/CMakeFiles $(BUILD_DIR)/ft_vox 2>/dev/null || true
 
-cleanlib:
-	@rm -rf lib
+fclean:
+	@rm -rf $(BUILD_DIR)
 
-fclean:	clean
-	@rm -f ${TARGET}
-
-re:	fclean
-	@${MAKE} all
-
-.PHONY:	all clean fclean re install cleanlib
+re: fclean build

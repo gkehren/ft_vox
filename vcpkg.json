@@ -1,11 +1,17 @@
 {
   "name": "ft-vox",
-  "version-string": "0.1.0",
+  "version-string": "0.2.0",
   "dependencies": [
-    "sdl3",
+    {
+      "name": "sdl3",
+      "features": ["vulkan"]
+    },
     "boost-asio",
     "boost-system",
-    "freetype",
-    "opengl"
+    "vulkan-headers",
+    "vulkan-loader",
+    "volk",
+    "vulkan-memory-allocator",
+    "glslang"
   ]
 }

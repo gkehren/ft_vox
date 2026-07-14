@@ -22,8 +22,14 @@ public:
 	glm::mat4 getViewMatrix() const;
 	glm::mat4 getProjectionMatrix(float screenWidth, float screenHeight, float farPlane) const;
 	glm::vec3 getPosition() const;
+	void setPosition(const glm::vec3 &pos) { position = pos; }
 	glm::vec3 getFront() const;
+	float getYaw() const { return yaw; }
+	float getPitch() const { return pitch; }
 	float getMovementSpeed() const;
+	void setMovementSpeed(float speed) { movementSpeed = std::max(0.1f, speed); }
+	float getMouseSensitivity() const { return mouseSensitivity; }
+	void setMouseSensitivity(float s) { mouseSensitivity = std::max(0.01f, s); }
 
 	void processKeyboard(double deltaTime, const bool *keys);
 	void processMouseMovement(float xoffset, float yoffset, bool constrainPitch = true);
@@ -33,6 +39,7 @@ public:
 	void setMode(CameraMode newMode) { mode = newMode; }
 	void toggleMode();
 	void addIsometricZoom(float delta);
+	void setIsometricZoom(float z) { isometricZoom = std::clamp(z, 8.0f, 512.0f); }
 	float getIsometricZoom() const { return isometricZoom; }
 
 private:

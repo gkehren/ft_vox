@@ -1,37 +1,81 @@
-#include "Engine.hpp"
-#include "Logger.hpp"
+#include "Engine/Engine.hpp"
 
-#define FULLSCREEN 1 // 0 = fullscreen, 1 = windowed, 2 = borderless
+#include <SDL3/SDL_vulkan.h>
+#include <utils.hpp>
+#include <imgui/imgui.h>
 
-Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f), lastTime(0.0f), seed(0)
+#include <cstdio>
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+#include <random>
+#include <algorithm>
+
+#define FULLSCREEN 1
+
+namespace
 {
-	if (!SDL_Init(SDL_INIT_VIDEO))
+int budgetFromRate(int perSec, double dt, double &accum)
+{
+	accum += static_cast<double>(perSec) * dt;
+	int n = static_cast<int>(accum);
+	if (n > 0)
+		accum -= static_cast<double>(n);
+	return std::clamp(n, 0, 64);
+}
+
+void updateAtmosphereFromDayTime(ShaderParameters &sp)
+{
+	const float dayTime = sp.dayTime;
+	const float sunAngle = dayTime * 6.2831853f - 1.5707963f;
+	const glm::vec3 sunDir =
+		glm::normalize(glm::vec3(std::cos(sunAngle), std::sin(sunAngle) * 0.85f + 0.15f, 0.35f));
+	sp.sunDirection = sunDir;
+	sp.lightDirection = sunDir.y > 0.05f ? sunDir : -sunDir;
+
+	sp.dayFactor = glm::smoothstep(-0.05f, 0.25f, sunDir.y);
+	sp.nightFactor = glm::smoothstep(0.05f, -0.15f, sunDir.y);
+	sp.sunsetFactor = glm::clamp(1.0f - std::abs(sunDir.y) * 3.0f, 0.0f, 1.0f) * (1.0f - sp.nightFactor);
+
+	if (sp.automaticAtmosphere)
 	{
-		throw std::runtime_error("Failed to initialize SDL");
+		// Vivid day fog (sky blue) → warm sunset → deep night (not grey).
+		const glm::vec3 dayFog(0.52f, 0.74f, 0.98f);
+		const glm::vec3 sunsetFog(0.95f, 0.48f, 0.28f);
+		const glm::vec3 nightFog(0.04f, 0.06f, 0.14f);
+		sp.fogColor = dayFog * sp.dayFactor + sunsetFog * sp.sunsetFactor + nightFog * sp.nightFactor;
+		// Keep ambient high enough that grass stays green in shade
+		sp.ambientStrength = 0.22f + 0.14f * sp.dayFactor + 0.06f * sp.sunsetFactor;
+		sp.diffuseIntensity = 0.55f + 0.45f * sp.dayFactor + 0.12f * sp.sunsetFactor;
+		sp.fogDensity = 0.08f + 0.12f * sp.nightFactor;
 	}
 
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-#if defined(__APPLE__)
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
-#endif
+	// Approximate sun world position for debug display.
+	sp.sunPosition = sp.celestialOrbitCenter + sunDir * sp.celestialOrbitRadius;
+	sp.moonPosition = sp.celestialOrbitCenter - sunDir * sp.celestialOrbitRadius;
+}
+} // namespace
 
-	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+Engine::Engine()
+	: camera(glm::vec3(0.0f, 90.0f, 0.0f))
+{
+	if (!SDL_Init(SDL_INIT_VIDEO))
+		throw std::runtime_error(std::string("Failed to initialize SDL: ") + SDL_GetError());
 
-	this->windowWidth = 1920;
-	this->windowHeight = 1080;
+	if (!SDL_Vulkan_LoadLibrary(nullptr))
+		throw std::runtime_error(std::string("Failed to load Vulkan library: ") + SDL_GetError());
 
-	Uint32 windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN;
+	windowWidth = 1920;
+	windowHeight = 1080;
+
+	Uint32 windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
 	if (FULLSCREEN == 0)
 	{
-		const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(0);
+		const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
 		if (mode)
 		{
-			this->windowWidth = mode->w;
-			this->windowHeight = mode->h;
+			windowWidth = mode->w;
+			windowHeight = mode->h;
 			windowFlags |= SDL_WINDOW_FULLSCREEN;
 		}
 	}
@@ -40,703 +84,510 @@ Engine::Engine() : deltaTime(0.0f), fps(0.0f), lastFrame(0.0f), frameCount(0.0f)
 		windowFlags |= SDL_WINDOW_BORDERLESS;
 	}
 
-	this->window = SDL_CreateWindow("ft_vox", this->windowWidth, this->windowHeight, windowFlags);
-	if (!this->window)
-	{
-		throw std::runtime_error("Failed to create SDL window");
-	}
-	SDL_SetWindowPosition(this->window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+	window = SDL_CreateWindow("ft_vox (Vulkan)", windowWidth, windowHeight, windowFlags);
+	if (!window)
+		throw std::runtime_error(std::string("Failed to create SDL window: ") + SDL_GetError());
 
-	glContext = SDL_GL_CreateContext(this->window); // Store glContext
-	if (!glContext)
-	{
-		SDL_DestroyWindow(this->window);
-		SDL_Quit();
-		throw std::runtime_error("Failed to create OpenGL context");
-	}
+	SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 
-	SDL_GL_MakeCurrent(this->window, glContext);
+	vkContext = std::make_unique<VkContext>();
+	vkContext->init(window);
+
+	swapchain = std::make_unique<VkSwapchain>();
+	swapchain->init(*vkContext, static_cast<uint32_t>(windowWidth), static_cast<uint32_t>(windowHeight),
+					renderSettings.vsyncEnabled);
+
+	immediate = std::make_unique<ImmediateCommands>();
+	immediate->init(*vkContext);
+
+	terrain = std::make_unique<TerrainRenderer>();
+	terrain->init(*vkContext, *swapchain, *immediate);
+
+	imgui = std::make_unique<ImGuiLayer>();
+	imgui->init(window, *vkContext, *swapchain, *immediate);
+
+	gameUi = std::make_unique<GameUI>();
+	gameUi->init(*vkContext, *immediate);
+
+	const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
+	threadPool = std::make_unique<ThreadPool>(hw);
+	chunkPool = std::make_unique<ChunkPool>(1600);
+
+	renderSettings.minRenderDistance = 128;
+	renderSettings.maxRenderDistance = 256;
+	renderSettings.loadPerSec = 120;
+	renderSettings.genPerSec = 80;
+	renderSettings.meshPerSec = 60;
+	renderSettings.uploadPerSec = 40;
+	renderSettings.raycastDistance = 8;
+
+	camera.setWindow(window);
+	camera.setMovementSpeed(20.f);
+	SDL_SetWindowRelativeMouseMode(window, true);
+
+	updateAtmosphereFromDayTime(shaderParams);
+
 	SDL_ShowWindow(window);
 
-	if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)))
-	{
-		SDL_GL_DestroyContext(glContext);
-		SDL_DestroyWindow(this->window);
-		SDL_Quit();
-		throw std::runtime_error("Failed to initialize GLAD");
-	}
-
-	// Initialize UIManager
-	uiManager = std::make_unique<UIManager>(this, window, windowWidth, windowHeight);
-	uiManager->init(glContext); // Pass GL context to UIManager for ImGui init
-
-	std::string path = RES_PATH + std::string("shaders/");
-	this->shader = std::make_unique<Shader>((path + "vertex.glsl").c_str(), (path + "fragment.glsl").c_str());
-	// Access render settings from UIManager for Renderer initialization
-	this->renderer = std::make_unique<Renderer>(windowWidth, windowHeight, uiManager->getRenderSettings().maxRenderDistance);
-	this->postProcessing = std::make_unique<PostProcessing>(windowWidth, windowHeight);
-	this->camera.setWindow(this->window);
-	this->playerChunkPos = glm::ivec2(-1, -1);
-
-	glActiveTexture(GL_TEXTURE0);
-	this->shader->setInt("textureSampler", 0);
-
-	glEnable(GL_DEPTH_TEST);
-	glEnable(GL_CULL_FACE);
-	glCullFace(GL_BACK);
-	glFrontFace(GL_CCW);
-	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-	this->textRenderer = std::make_unique<TextRenderer>(RES_PATH + std::string("fonts/FiraCode.ttf"), glm::ortho(0.0f, static_cast<float>(windowWidth), 0.0f, static_cast<float>(windowHeight)));
-
-	this->selectedTexture = OAK_LEAVES;				   // Default selected texture
-	uiManager->getSelectedTexture() = selectedTexture; // Sync with UIManager
-
-	uint32_t threadCount = std::thread::hardware_concurrency() / 2;
-	this->threadPool = std::make_unique<ThreadPool>(threadCount > 0 ? threadCount : 1);
-
-	initializeNoiseGenerator(0);
-	setVSync(uiManager->getRenderSettings().vsyncEnabled);
-
-	this->inputSystem = std::make_unique<InputSystem>();
-	this->setupEventHandlers();
-
 	std::cout << "SDL version: " << SDL_GetVersion() << "\n";
-	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << "\n";
-	std::cout << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << "\n";
-	std::cout << "Vendor: " << glGetString(GL_VENDOR) << "\n";
-	std::cout << "Renderer: " << glGetString(GL_RENDERER) << "\n";
-	std::cout << "ImGui version: " << IMGUI_VERSION << "\n";
-	std::cout << "Threads: " << (threadCount > 0 ? threadCount : 1) << "\n";
+	std::cout << "ft_vox: Vulkan — streaming procedural world\n";
+	std::cout << "  WASD fly · mouse look · LMB/RMB edit · T block · B borders\n";
+	std::cout << "  C free mouse · F1–F5 panels · F10 VSync · Esc quit\n";
+	std::cout << "  ThreadPool workers: " << hw << "\n";
 }
 
 Engine::~Engine()
 {
-	threadPool.reset();
+	if (vkContext)
+		vkContext->waitIdle();
+
+	gameUi.reset();
 	chunkManager.reset();
-	chunkPool.reset(); // Release pool after chunkManager returns all chunks
-	renderer.reset();
-	postProcessing.reset();
-	textRenderer.reset();
-	uiManager.reset();
-	shader.reset();
-	SDL_GL_DestroyContext(glContext);
-	SDL_DestroyWindow(this->window);
+	chunkPool.reset();
+	threadPool.reset();
+	terrainGenerator.reset();
+
+	imgui.reset();
+	terrain.reset();
+	immediate.reset();
+	swapchain.reset();
+	vkContext.reset();
+
+	if (window)
+	{
+		SDL_DestroyWindow(window);
+		window = nullptr;
+	}
+
+	SDL_Vulkan_UnloadLibrary();
 	SDL_Quit();
+}
+
+void Engine::waitGpuIdle()
+{
+	if (vkContext)
+		vkContext->waitIdle();
 }
 
 void Engine::initializeNoiseGenerator(int seed_val)
 {
-	// Set the seed - generate random if not provided
 	if (seed_val <= 0)
 	{
 		std::random_device rd;
 		std::mt19937 gen(rd());
 		std::uniform_int_distribution<> dis(100000, 999999);
-		this->seed = dis(gen);
+		seed = dis(gen);
 	}
 	else
 	{
-		this->seed = seed_val;
+		seed = seed_val;
 	}
 
-	uint32_t threadCount = std::thread::hardware_concurrency() / 2;
-	this->threadPool = std::make_unique<ThreadPool>(threadCount > 0 ? threadCount : 1);
-	this->terrainGenerator = std::make_unique<TerrainGenerator>(this->seed);
+	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
+	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
+												  chunkPool.get(), renderTiming);
 
-	// Size the chunk pool based on max render distance.
-	// radius = ceil(maxDist / CHUNK_SIZE), area = (2r+1)^2, +25% margin.
-	const int renderRadius = static_cast<int>(std::ceil(
-		static_cast<float>(uiManager->getRenderSettings().maxRenderDistance) / CHUNK_SIZE));
-	const size_t estimatedChunks = static_cast<size_t>((2 * renderRadius + 1) * (2 * renderRadius + 1));
-	const size_t poolCapacity = estimatedChunks + estimatedChunks / 4; // +25% margin
-	this->chunkPool = std::make_unique<ChunkPool>(poolCapacity);
+	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
+									  vkContext->getAllocator(), *immediate,
+									  [this]() { waitGpuIdle(); });
 
-	this->chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(), chunkPool.get(), uiManager->getRenderTiming());
+	{
+		const glm::vec3 pos = camera.getPosition();
+		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
+		{
+			if (chunkManager->isVoxelActive(glm::vec3(pos.x, static_cast<float>(y), pos.z)))
+			{
+				camera.setPosition(glm::vec3(pos.x, static_cast<float>(y + 3), pos.z));
+				break;
+			}
+		}
+	}
 
-	std::cout << "Terrain generation initialized with seed: " << this->seed << "\n";
+	demoPlayers = {
+		{{4.f, 80.f, 4.f}, 1},
+		{{-6.f, 78.f, 8.f}, 2},
+		{{10.f, 82.f, -3.f}, 3},
+	};
+	for (auto &p : demoPlayers)
+	{
+		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
+		{
+			if (chunkManager->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
+			{
+				p.position.y = static_cast<float>(y + 1);
+				break;
+			}
+		}
+	}
+	if (showDemoPlayers && terrain)
+		terrain->overlays().setPlayers(demoPlayers);
+
+	std::cout << "World seed: " << seed
+			  << " chunks=" << chunkManager->chunkCount()
+			  << " view=" << renderSettings.maxRenderDistance << "\n";
+}
+
+void Engine::setVSync(bool enabled)
+{
+	renderSettings.vsyncEnabled = enabled;
+	if (swapchain)
+		swapchain->setVSync(enabled);
+}
+
+void Engine::onResize(int width, int height)
+{
+	if (width <= 0 || height <= 0)
+		return;
+	windowWidth = width;
+	windowHeight = height;
+	framebufferResized = true;
+}
+
+void Engine::tickDayCycle(double dt)
+{
+	if (paused)
+		return;
+	if (shaderParams.dayCycleEnabled)
+	{
+		shaderParams.dayTime = std::fmod(shaderParams.dayTime + static_cast<float>(dt) * shaderParams.dayCycleSpeed, 1.0f);
+		if (shaderParams.dayTime < 0.f)
+			shaderParams.dayTime += 1.f;
+	}
+	updateAtmosphereFromDayTime(shaderParams);
+}
+
+void Engine::tickStreaming(double dt)
+{
+	if (!chunkManager)
+		return;
+	if (paused)
+	{
+		chunkManager->collectDrawList(drawList);
+		return;
+	}
+
+	const double frameDt = std::min(dt, 0.05);
+
+	chunkManager->processFinishedJobs();
+	chunkManager->processDeferredReleases([this]() { waitGpuIdle(); });
+	chunkManager->updateStreaming(camera, renderSettings);
+
+	static double genAccum = 0.0, meshAccum = 0.0, uploadAccum = 0.0;
+	const int loadBudget = budgetFromRate(renderSettings.loadPerSec, frameDt, streamAccum);
+	const int genBudget = budgetFromRate(renderSettings.genPerSec, frameDt, genAccum);
+	const int meshBudget = budgetFromRate(renderSettings.meshPerSec, frameDt, meshAccum);
+	const int uploadBudget = budgetFromRate(renderSettings.uploadPerSec, frameDt, uploadAccum);
+
+	chunkManager->processChunkLoading(std::max(loadBudget, 1));
+	chunkManager->generatePendingVoxels(camera, renderSettings, std::max(genBudget, 1));
+	chunkManager->meshPendingChunks(camera, renderSettings, std::max(meshBudget, 1));
+	chunkManager->uploadPendingMeshes(vkContext->getAllocator(), *immediate,
+									  std::max(uploadBudget, 1),
+									  [this]() { waitGpuIdle(); });
+	chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
+	chunkManager->collectDrawList(drawList);
+
+	static size_t lastLoggedChunks = 0;
+	static double lastLogTime = 0.0;
+	const double now = SDL_GetTicks() / 1000.0;
+	const size_t n = chunkManager->chunkCount();
+	if (n != lastLoggedChunks && now - lastLogTime > 1.0)
+	{
+		std::cout << "[stream] chunks=" << n
+				  << " draw=" << drawList.size()
+				  << " q="
+				  << chunkManager->pendingLoadCount() << "/"
+				  << chunkManager->pendingGenJobs() << "/"
+				  << chunkManager->pendingMeshJobs() << "\n";
+		lastLoggedChunks = n;
+		lastLogTime = now;
+	}
+}
+
+bool Engine::raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious)
+{
+	if (!chunkManager)
+		return false;
+
+	const glm::vec3 origin = camera.getPosition();
+	const glm::vec3 dir = glm::normalize(camera.getFront());
+	const float maxDist = static_cast<float>(renderSettings.raycastDistance);
+	const float step = 0.05f;
+
+	glm::vec3 prev = origin;
+	for (float t = 0.f; t <= maxDist; t += step)
+	{
+		const glm::vec3 p = origin + dir * t;
+		const glm::vec3 block(std::floor(p.x), std::floor(p.y), std::floor(p.z));
+
+		if (chunkManager->isVoxelActive(block))
+		{
+			outBlock = block;
+			outPrevious = glm::vec3(std::floor(prev.x), std::floor(prev.y), std::floor(prev.z));
+			if (outPrevious == outBlock)
+				outPrevious = block - glm::vec3(dir.x > 0 ? 1.f : (dir.x < 0 ? -1.f : 0.f),
+												dir.y > 0 ? 1.f : (dir.y < 0 ? -1.f : 0.f),
+												dir.z > 0 ? 1.f : (dir.z < 0 ? -1.f : 0.f));
+			return true;
+		}
+		prev = p;
+	}
+	return false;
+}
+
+void Engine::updateHighlight()
+{
+	glm::vec3 block, prev;
+	if (raycastVoxel(block, prev))
+	{
+		highlight.active = true;
+		highlight.position = block;
+		highlight.color = {1.f, 0.25f, 0.15f};
+	}
+	else
+	{
+		highlight.active = false;
+	}
+	if (terrain)
+		terrain->overlays().setHighlight(highlight);
+}
+
+void Engine::handleEvents()
+{
+	SDL_Event event;
+	while (SDL_PollEvent(&event))
+	{
+		if (imgui)
+			imgui->processEvent(event);
+
+		switch (event.type)
+		{
+		case SDL_EVENT_QUIT:
+			running = false;
+			break;
+		case SDL_EVENT_WINDOW_RESIZED:
+		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+			onResize(event.window.data1, event.window.data2);
+			break;
+		case SDL_EVENT_KEY_DOWN:
+		{
+			const SDL_Keycode key = event.key.key;
+
+			// Function / panel shortcuts work even when ImGui wants keyboard.
+			if (gameUi)
+			{
+				GameUIFrame dummy{};
+				dummy.render = &renderSettings;
+				dummy.paused = &paused;
+				dummy.setVSync = [this](bool v) { setVSync(v); };
+				if (gameUi->handleShortcut(static_cast<int>(key), dummy))
+					break;
+			}
+
+			if (key == SDLK_ESCAPE)
+			{
+				running = false;
+				break;
+			}
+			if (key == SDLK_C)
+			{
+				mouseCaptured = !mouseCaptured;
+				SDL_SetWindowRelativeMouseMode(window, mouseCaptured);
+				break;
+			}
+			if (key == SDLK_B)
+			{
+				showChunkBorders = !showChunkBorders;
+				if (terrain)
+					terrain->overlays().setShowChunkBorders(showChunkBorders);
+				break;
+			}
+			if (key == SDLK_T && !(imgui && imgui->wantCaptureKeyboard()))
+			{
+				int next = static_cast<int>(selectedTexture) + 1;
+				if (next >= static_cast<int>(COUNT))
+					next = 0;
+				// Skip AIR
+				if (static_cast<TextureType>(next) == AIR)
+					next = 1;
+				selectedTexture = static_cast<TextureType>(next);
+				break;
+			}
+			break;
+		}
+		case SDL_EVENT_MOUSE_MOTION:
+			if (mouseCaptured && !(imgui && imgui->wantCaptureMouse()))
+			{
+				camera.processMouseMovement(static_cast<float>(event.motion.xrel),
+											static_cast<float>(event.motion.yrel));
+			}
+			break;
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+			if (imgui && imgui->wantCaptureMouse())
+				break;
+			if (!mouseCaptured || !chunkManager || paused)
+				break;
+			{
+				glm::vec3 block, prev;
+				if (!raycastVoxel(block, prev))
+					break;
+				if (event.button.button == SDL_BUTTON_LEFT)
+					chunkManager->deleteVoxel(block);
+				else if (event.button.button == SDL_BUTTON_RIGHT)
+					chunkManager->placeVoxel(prev, selectedTexture);
+			}
+			break;
+		case SDL_EVENT_MOUSE_WHEEL:
+			if (camera.getMode() == CameraMode::ISOMETRIC &&
+				!(imgui && imgui->wantCaptureMouse()))
+			{
+				camera.addIsometricZoom(static_cast<float>(event.wheel.y) * 4.f);
+			}
+			break;
+		default:
+			break;
+		}
+	}
+}
+
+void Engine::processInput(double dt)
+{
+	if (paused)
+		return;
+	if (imgui && imgui->wantCaptureKeyboard())
+		return;
+	const bool *keys = SDL_GetKeyboardState(nullptr);
+	camera.processKeyboard(dt, keys);
+}
+
+void Engine::drawUi()
+{
+	if (!imgui || !gameUi)
+		return;
+
+	const bool prevCapture = mouseCaptured;
+
+	GameUIFrame f{};
+	f.camera = &camera;
+	f.chunks = chunkManager.get();
+	f.pool = chunkPool.get();
+	f.generator = terrainGenerator.get();
+	f.terrain = terrain.get();
+	f.vk = vkContext.get();
+	f.imm = immediate.get();
+	f.shader = &shaderParams;
+	f.render = &renderSettings;
+	f.timing = &renderTiming;
+	f.selectedTexture = &selectedTexture;
+	f.highlight = &highlight;
+	f.mouseCaptured = &mouseCaptured;
+	f.showChunkBorders = &showChunkBorders;
+	f.showDemoPlayers = &showDemoPlayers;
+	f.paused = &paused;
+	f.seed = seed;
+	f.fps = static_cast<float>(fps > 0.0 ? fps : ImGui::GetIO().Framerate);
+	f.frameMs = static_cast<float>(deltaTime * 1000.0);
+	f.drawCount = drawList.size();
+	f.windowW = windowWidth;
+	f.windowH = windowHeight;
+	if (vkContext)
+	{
+		f.deviceName = vkContext->getDeviceProperties().deviceName;
+		f.vkApiVersion = vkContext->getDeviceProperties().apiVersion;
+		f.validation = vkContext->isValidationEnabled();
+	}
+	f.setVSync = [this](bool v) { setVSync(v); };
+
+	gameUi->draw(f);
+
+	if (mouseCaptured != prevCapture)
+		SDL_SetWindowRelativeMouseMode(window, mouseCaptured);
+	if (terrain)
+		terrain->overlays().setShowChunkBorders(showChunkBorders);
+
+	if (terrain)
+		terrain->overlays().setPlayers(showDemoPlayers ? demoPlayers : std::vector<OverlayPlayer>{});
 }
 
 void Engine::run()
 {
-	this->running = true;
-	this->isMousecaptured = true;
+	running = true;
+	lastFrame = SDL_GetTicks() / 1000.0;
+	lastTime = lastFrame;
 
-	while (this->running)
+	const VkClearColorValue clearColor = {{0.38f, 0.58f, 0.92f, 1.0f}};
+
+	while (running)
 	{
-		double currentFrame = SDL_GetTicks() / 1000.0;
-		this->deltaTime = currentFrame - this->lastFrame;
-		this->lastFrame = currentFrame;
+		const double currentFrame = SDL_GetTicks() / 1000.0;
+		deltaTime = currentFrame - lastFrame;
+		lastFrame = currentFrame;
 
-		// FPS calculation
 		frameCount++;
 		if (currentFrame - lastTime >= 1.0)
 		{
 			fps = frameCount;
 			frameCount = 0;
 			lastTime = currentFrame;
+			char title[192];
+			std::snprintf(title, sizeof(title),
+						  "ft_vox — %.0f FPS | chunks %zu | draw %zu | seed %d%s",
+						  fps,
+						  chunkManager ? chunkManager->chunkCount() : 0,
+						  drawList.size(), seed,
+						  paused ? " [PAUSED]" : "");
+			SDL_SetWindowTitle(window, title);
 		}
 
-		inputSystem->update();
-
-		const bool *keys = SDL_GetKeyboardState(NULL);
-		if (isMousecaptured && !ImGui::GetIO().WantCaptureKeyboard) // Check ImGui focus
-		{
-			this->camera.processKeyboard(deltaTime, keys);
-		}
-
-		// Update game state (including chunk management)
-		updateWorldState();
-
-		// Start ImGui frame
-		uiManager->update(); // This calls ImGui::NewFrame and prepares UI data
-
-		// Ensure OpenGL states are correct for the frame
-		glEnable(GL_DEPTH_TEST);
-		glDepthFunc(GL_LESS);
-		glEnable(GL_CULL_FACE);
-		glCullFace(GL_BACK);
-		glEnable(GL_BLEND);
-		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-		// Rendering — render scene into HDR FBO
-		if (postProcessing)
-		{
-			postProcessing->beginScene();
-			glClearColor(uiManager->getShaderParams().fogColor.x, uiManager->getShaderParams().fogColor.y, uiManager->getShaderParams().fogColor.z, 1.0f);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-		}
-
-		renderScene(); // Render the 3D game world
-
-		if (renderer) // Ensure renderer is valid
-		{
-			if (postProcessing)
-				postProcessing->beginSkyPass();
-			renderer->drawSkybox(this->camera, uiManager->getShaderParams(), static_cast<float>(currentFrame));
-		}
-
-		// Post-processing: HDR -> LDR with bloom, tone mapping, FXAA, god rays
-		if (postProcessing)
-		{
-			// Compute sun's screen position for god rays
-			const float sceneFarPlane = static_cast<float>(uiManager->getRenderSettings().maxRenderDistance);
-			glm::mat4 proj = camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight), sceneFarPlane);
-			glm::mat4 view = camera.getViewMatrix();
-			const glm::vec3 sunWorldPosition = uiManager->getShaderParams().sunPosition;
-			glm::vec4 sunClip = proj * view * glm::vec4(sunWorldPosition, 1.0f);
-			glm::vec2 sunScreen(0.5f, 0.5f); // Default: center of screen
-			if (sunClip.w > 0.0f)
-			{
-				glm::vec3 sunNDC = glm::vec3(sunClip) / sunClip.w;
-				sunScreen = glm::vec2(sunNDC.x * 0.5f + 0.5f, sunNDC.y * 0.5f + 0.5f);
-			}
-			else
-			{
-				// V3: Handle sun behind camera - clamp to Safe off-screen position
-				// pushing it far off-screen in the direction of the sun
-				// But locally clamping is safer to avoid precision issues in shader
-				sunScreen = glm::vec2(-1000.0f, -1000.0f); // Effectively disable by being too far
-			}
-			// V3: Clamp to avoid extreme values that break the radial blur
-			sunScreen = glm::clamp(sunScreen, glm::vec2(-0.5f), glm::vec2(1.5f));
-
-			const glm::vec3 apparentSunDirection = glm::normalize(sunWorldPosition - camera.getPosition());
-			float sunVisibility = glm::smoothstep(-0.10f, 0.04f, apparentSunDirection.y);
-			if (sunScreen.x < 0.0f || sunScreen.x > 1.0f || sunScreen.y < 0.0f || sunScreen.y > 1.0f)
-				sunVisibility = 0.0f;
-
-			postProcessing->endSceneAndRender(uiManager->getPostProcessSettings(), sunScreen, sunVisibility, static_cast<float>(currentFrame));
-		}
-
-		uiManager->render(); // Render ImGui UI on top
-
-		SDL_GL_SwapWindow(this->window);
-	}
-}
-
-void Engine::setupEventHandlers()
-{
-	EventBus::getInstance().subscribe(EventType::Quit, [this](const Event &)
-									  { this->running = false; });
-
-	EventBus::getInstance().subscribe(EventType::WindowResize, [this](const Event &e)
-									  {
-        const auto& re = static_cast<const WindowResizeEvent&>(e);
-        this->windowWidth = re.width;
-        this->windowHeight = re.height;
-        glViewport(0, 0, windowWidth, windowHeight);
-        if (renderer) renderer->setScreenSize(windowWidth, windowHeight);
-        if (postProcessing) postProcessing->resize(windowWidth, windowHeight);
-        if (textRenderer) textRenderer->setProjection(glm::ortho(0.0f, static_cast<float>(windowWidth), 0.0f, static_cast<float>(windowHeight))); });
-
-	EventBus::getInstance().subscribe(EventType::KeyPress, [this](const Event &e)
-									  {
-        const auto& ke = static_cast<const KeyEvent&>(e);
-        if (ke.key == SDLK_T) {
-            selectedTexture = static_cast<TextureType>((selectedTexture + 1) % COUNT);
-            if (uiManager) uiManager->getSelectedTexture() = selectedTexture;
-        }
-        if (ke.key == SDLK_C) {
-            this->isMousecaptured = !this->isMousecaptured;
-            this->inputSystem->setMouseCaptured(this->isMousecaptured, this->window);
-        }
-        if (ke.key == SDLK_I) {
-            camera.toggleMode();
-            if (camera.getMode() == CameraMode::ISOMETRIC) {
-                isMousecaptured = false;
-            } else {
-                isMousecaptured = true;
-            }
-            this->inputSystem->setMouseCaptured(this->isMousecaptured, this->window);
-        } });
-
-	EventBus::getInstance().subscribe(EventType::KeyRelease, [this](const Event &e)
-									  {
-        const auto& ke = static_cast<const KeyEvent&>(e);
-        if (ke.key == SDLK_ESCAPE) {
-            this->running = false;
-        } });
-
-	EventBus::getInstance().subscribe(EventType::MouseButtonPress, [this](const Event &e)
-									  {
-		const auto& me = static_cast<const MouseEvent&>(e);
-		if (me.button == SDL_BUTTON_LEFT) {
-			glm::vec3 hitPos, prevPos;
-			if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos)) {
-				if (chunkManager) {
-					chunkManager->deleteVoxel(hitPos);
-					if (client && client->isConnected())
-						client->sendVoxelEdit(static_cast<int32_t>(std::floor(hitPos.x)), static_cast<int32_t>(std::floor(hitPos.y)), static_cast<int32_t>(std::floor(hitPos.z)), 0);
-				}
-			}
-		} else if (me.button == SDL_BUTTON_RIGHT) {
-			glm::vec3 hitPos, prevPos;
-			if (raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPos, prevPos)) {
-				if (chunkManager) {
-					chunkManager->placeVoxel(prevPos, selectedTexture);
-					if (client && client->isConnected())
-						client->sendVoxelEdit(static_cast<int32_t>(std::floor(prevPos.x)), static_cast<int32_t>(std::floor(prevPos.y)), static_cast<int32_t>(std::floor(prevPos.z)), selectedTexture);
-				}
-			}
-		} });
-
-	EventBus::getInstance().subscribe(EventType::MouseMotion, [this](const Event &e)
-									  {
-        const auto& me = static_cast<const MouseEvent&>(e);
-        if (this->isMousecaptured) {
-            this->camera.processMouseMovement((float)me.dx, (float)me.dy);
-        } });
-
-	EventBus::getInstance().subscribe(EventType::MouseWheel, [this](const Event &e)
-									  {
-        const auto& me = static_cast<const MouseWheelEvent&>(e);
-        if (camera.getMode() == CameraMode::ISOMETRIC) {
-            camera.addIsometricZoom(me.y * 4.0f);
-        } });
-}
-
-void Engine::updateWorldState()
-{
-	if (client && client->isConnected() && this->seed == 0 && client->getWorldSeed() != 0)
-	{
-		this->seed = client->getWorldSeed();
-		Logger::getInstance().logClient("Received seed from server, rebuilding terrain with seed " + std::to_string(this->seed) + "...");
-		terrainGenerator = std::make_unique<TerrainGenerator>(this->seed);
-		chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(), chunkPool.get(), uiManager->getRenderTiming());
-	}
-
-	if (client && client->isConnected())
-	{
-		auto edits = client->getPendingVoxelEdits();
-		for (const auto& edit : edits)
-		{
-			if (chunkManager)
-			{
-				if (edit.type == 0)
-					chunkManager->deleteVoxel(glm::vec3(edit.x, edit.y, edit.z));
-				else
-					chunkManager->placeVoxel(glm::vec3(edit.x, edit.y, edit.z), static_cast<TextureType>(edit.type));
-			}
-		}
-	}
-
-	RenderSettings &currentRenderSettings = uiManager->getRenderSettings();
-	ShaderParameters &params = uiManager->getShaderParams();
-
-	// Update Day/Night cycle
-	if (params.dayCycleEnabled)
-	{
-		params.dayTime += static_cast<float>(deltaTime) * params.dayCycleSpeed;
-		if (params.dayTime > 1.0f)
-			params.dayTime -= 1.0f;
-
-	}
-	updateAtmosphere();
-
-	if (!currentRenderSettings.paused)
-	{
-		const glm::ivec2 newPlayerChunkPos{
-			static_cast<int>(std::floor(camera.getPosition().x / CHUNK_SIZE)),
-			static_cast<int>(std::floor(camera.getPosition().z / CHUNK_SIZE))};
-
-		if (newPlayerChunkPos != playerChunkPos)
-		{
-			playerChunkPos = newPlayerChunkPos;
-			if (chunkManager)
-				chunkManager->updatePlayerPosition(playerChunkPos, camera, currentRenderSettings);
-		}
-		if (chunkManager)
-			chunkManager->performFrustumCulling(camera, windowWidth, windowHeight, currentRenderSettings);
-	}
-	// Pass currentRenderSettings by const reference
-	// Frame-rate-independent chunk budgets: compute per-second rates scaled by
-	// deltaTime so generation speed is identical at any FPS or VSync setting.
-	// Generation/meshing dispatch is cheap (thread pool does the real work), so
-	// allow a generous per-second ceiling; GPU upload stays modest because it
-	// stalls the driver on the main thread.
-	const float dt = static_cast<float>(deltaTime);
-
-	// Token-bucket accumulators: add fractional tokens each frame and drain whole
-	// tokens as the per-frame budget. This guarantees a steady per-second dispatch
-	// rate that is completely independent of FPS or VSync state.
-	// Cap the accumulator to 2 seconds worth of work so a single lag spike cannot
-	// trigger a huge catch-up burst.
-	auto drainBucket = [](float &accum, int perSec, float dt) -> int
-	{
-		accum += static_cast<float>(perSec) * dt;
-		accum = std::min(accum, static_cast<float>(perSec) * 2.f); // max 2s backlog
-		int budget = static_cast<int>(accum);
-		accum -= static_cast<float>(budget);
-		return std::max(budget, 0);
-	};
-
-	const int loadBudget = drainBucket(m_loadAccum, currentRenderSettings.loadPerSec, dt);
-	const int genBudget = drainBucket(m_genAccum, currentRenderSettings.genPerSec, dt);
-	const int meshBudget = drainBucket(m_meshAccum, currentRenderSettings.meshPerSec, dt);
-	const int uploadBudget = drainBucket(m_uploadAccum, currentRenderSettings.uploadPerSec, dt);
-
-	if (chunkManager)
-	{
-		chunkManager->processChunkLoading(currentRenderSettings, loadBudget);
-		chunkManager->processFinishedJobs();
-		chunkManager->generatePendingVoxels(camera, currentRenderSettings, seed, genBudget);
-		chunkManager->meshPendingChunks(camera, currentRenderSettings, meshBudget);
-		chunkManager->uploadPendingMeshes(uploadBudget);
-	}
-}
-
-void Engine::updateAtmosphere()
-{
-	ShaderParameters &params = uiManager->getShaderParams();
-	PostProcessSettings &postProcess = uiManager->getPostProcessSettings();
-
-	// The celestial orbit is anchored in world space. This makes the sun and
-	// moon usable as navigation landmarks instead of following the player.
-	const float angle = params.dayTime * 2.0f * 3.14159265f;
-	const glm::vec3 orbitOffset(
-		std::cos(angle) * params.celestialOrbitRadius,
-		std::sin(angle) * params.celestialOrbitRadius,
-		0.0f);
-	params.sunPosition = params.celestialOrbitCenter + orbitOffset;
-	params.moonPosition = params.celestialOrbitCenter - orbitOffset;
-	params.sunDirection = glm::normalize(orbitOffset);
-
-	const float sunHeight = params.sunDirection.y;
-	params.dayFactor = glm::smoothstep(-0.08f, 0.28f, sunHeight);
-	params.nightFactor = 1.0f - glm::smoothstep(-0.28f, 0.02f, sunHeight);
-	params.sunsetFactor = 1.0f - std::max(params.dayFactor, params.nightFactor);
-
-	const float totalFactor = params.dayFactor + params.sunsetFactor + params.nightFactor;
-	const float dayWeight = params.dayFactor / totalFactor;
-	const float sunsetWeight = params.sunsetFactor / totalFactor;
-	const float nightWeight = params.nightFactor / totalFactor;
-
-	// Moonlight takes over once the sun is below the horizon.
-	params.lightDirection = params.nightFactor > 0.5f ? -params.sunDirection : params.sunDirection;
-
-	if (params.automaticAtmosphere)
-	{
-		const glm::vec3 dayFog(0.42f, 0.57f, 0.70f);
-		const glm::vec3 sunsetFog(0.72f, 0.36f, 0.24f);
-		const glm::vec3 nightFog(0.025f, 0.045f, 0.09f);
-
-		params.fogColor = dayFog * dayWeight + sunsetFog * sunsetWeight + nightFog * nightWeight;
-		params.fogStart = 220.0f * dayWeight + 145.0f * sunsetWeight + 105.0f * nightWeight;
-		params.fogEnd = 680.0f * dayWeight + 570.0f * sunsetWeight + 460.0f * nightWeight;
-		params.fogDensity = 0.18f * dayWeight + 0.34f * sunsetWeight + 0.42f * nightWeight;
-		params.ambientStrength = 0.24f * dayWeight + 0.16f * sunsetWeight + 0.065f * nightWeight;
-		params.diffuseIntensity = 0.78f * dayWeight + 0.48f * sunsetWeight + 0.16f * nightWeight;
-	}
-
-	if (postProcess.autoExposureEnabled)
-	{
-		const float atmosphericExposure = 0.90f * dayWeight + 0.96f * sunsetWeight + 1.02f * nightWeight;
-		postProcess.exposure = atmosphericExposure * postProcess.exposureCompensation;
-	}
-}
-
-void Engine::renderScene() // Renamed from render
-{
-	auto startFrame = std::chrono::high_resolution_clock::now(); // Keep for total frame timing if needed outside ChunkManager
-	RenderSettings &currentRenderSettings = uiManager->getRenderSettings();
-
-	if (renderer && chunkManager)
-	{
-		renderer->renderShadowMap(camera, uiManager->getShaderParams().lightDirection, *chunkManager);
-	}
-
-	if (client && client->isConnected() && client->getPlayerId() != 0)
-	{
-		client->sendPlayerPosition(camera.getPosition().x, camera.getPosition().y, camera.getPosition().z);
-		std::lock_guard<std::mutex> lock(client->playerMutex);
-		for (const auto &[playerId, position] : client->playerPositions)
-		{
-			if (playerId != client->getPlayerId() && renderer)
-				renderer->drawPlayer(camera, glm::vec3(position.x, position.y, position.z), playerId);
-		}
-	}
-
-	// Shader parameters update before drawing chunks
-	shader->use();
-
-	shader->setFloat("fogStart", uiManager->getShaderParams().fogStart);
-	shader->setFloat("fogEnd", uiManager->getShaderParams().fogEnd);
-	shader->setFloat("fogDensity", uiManager->getShaderParams().fogDensity);
-	shader->setVec3("fogColor", uiManager->getShaderParams().fogColor);
-	shader->setVec3("lightDirection", uiManager->getShaderParams().lightDirection);
-	shader->setFloat("ambientStrength", uiManager->getShaderParams().ambientStrength);
-	shader->setFloat("diffuseIntensity", uiManager->getShaderParams().diffuseIntensity);
-	shader->setFloat("lightLevels", uiManager->getShaderParams().lightLevels);
-	shader->setFloat("saturationLevel", uiManager->getShaderParams().saturationLevel);
-	shader->setFloat("colorBoost", uiManager->getShaderParams().colorBoost);
-
-	if (renderer && shader && renderer->getTextureAtlas() && chunkManager)
-	{
-		// Shadow map binding
-		shader->setMat4("lightSpaceMatrix", renderer->getLightSpaceMatrix());
-		glActiveTexture(GL_TEXTURE2);
-		glBindTexture(GL_TEXTURE_2D, renderer->getShadowMapTexture());
-		glActiveTexture(GL_TEXTURE0); // Return to default for texture atlas binding
-
-		// Pass currentRenderSettings by non-const reference if drawVisibleChunks updates it
-		chunkManager->drawVisibleChunks(*shader, camera, renderer->getTextureAtlas(), uiManager->getShaderParams(), renderer.get(), currentRenderSettings, windowWidth, windowHeight);
-
-		glActiveTexture(GL_TEXTURE2);
-		glBindTexture(GL_TEXTURE_2D, 0);
-		glActiveTexture(GL_TEXTURE0);
-	}
-
-	updateVoxelHighlights();
-	drawVoxelHighlight(destructionHighlight);
-	drawVoxelHighlight(placementHighlight);
-
-	auto endFrame = std::chrono::high_resolution_clock::now();
-	// Total frame time is now more encompassing, including UI and other logic in run()
-	uiManager->getRenderTiming().totalFrame = std::chrono::duration<float, std::milli>(endFrame - startFrame).count();
-}
-
-void Engine::updateVoxelHighlights()
-{
-	glm::vec3 hitPosition, previousPosition;
-	bool hit = raycast(camera.getPosition(), camera.getFront(), static_cast<float>(uiManager->getRenderSettings().raycastDistance), hitPosition, previousPosition);
-
-	if (hit)
-	{
-		destructionHighlight.active = true;
-		destructionHighlight.position = glm::floor(hitPosition); // Center of the voxel
-
-		placementHighlight.active = true;
-		placementHighlight.position = glm::floor(previousPosition);
-		placementHighlight.color = glm::vec3(0.2f, 0.8f, 0.2f); // Green for placement
-	}
-	else
-	{
-		destructionHighlight.active = false;
-		placementHighlight.active = false;
-	}
-}
-
-void Engine::drawVoxelHighlight(const VoxelHighlight &highlight)
-{
-	if (highlight.active && renderer)
-	{
-		renderer->drawVoxelHighlight(highlight.position, highlight.color, camera);
-	}
-}
-
-RenderTiming &Engine::getRenderTiming()
-{
-	return uiManager->getRenderTiming();
-}
-
-void Engine::setWireframeMode(bool enabled)
-{
-	if (uiManager)
-	{
-		uiManager->getRenderSettings().wireframeMode = enabled;
-	}
-	if (enabled)
-	{
-		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-	}
-	else
-	{
-		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-	}
-}
-
-void Engine::setVSync(bool enabled)
-{
-	if (uiManager)
-	{
-		uiManager->getRenderSettings().vsyncEnabled = enabled;
-	}
-	SDL_GL_SetSwapInterval(enabled ? 1 : 0);
-}
-
-void Engine::startServer()
-{
-	if (!server && !client)
-	{
-		try
-		{
-			server = std::make_unique<Server>(25565, this->seed);
-			server->start();
-			Logger::getInstance().logServer("Server started.");
-			
-			// Automatically connect local client to the newly started server
-			connectToServer("127.0.0.1");
-		}
-		catch (const std::exception &e)
-		{
-			Logger::getInstance().logServer(std::string("Failed to start server: ") + e.what(), true);
-			server.reset();
-		}
-	}
-}
-
-void Engine::stopServer()
-{
-	if (server)
-	{
-		server.reset();
-		Logger::getInstance().logServer("Server stopped.");
-	}
-}
-
-void Engine::connectToServer(const std::string &ip)
-{
-	if (!client)
-	{
-		try
-		{
-			client = std::make_unique<Client>();
-			client->connect(ip, 25565); // Assuming default port 25565
-			this->seed = 0;
-			chunkManager.reset();
-			terrainGenerator.reset();
-			Logger::getInstance().logClient("Attempting to reach server at " + ip + "...");
-			// Seed will be received from server
-		}
-		catch (const std::exception &e)
-		{
-			Logger::getInstance().logClient(std::string("Failed to connect to server: ") + e.what(), true);
-			client.reset();
-		}
-	}
-}
-
-void Engine::disconnectClient()
-{
-	if (client)
-	{
-		client->disconnect();
-		client.reset();
-		Logger::getInstance().logClient("Disconnected from server.");
-	}
-}
-
-bool Engine::raycast(const glm::vec3 &origin, const glm::vec3 &direction, float maxDistance, glm::vec3 &hitPosition, glm::vec3 &previousPosition)
-{
-	glm::vec3 pos = origin;
-	glm::vec3 dir = glm::normalize(direction);
-	float distanceTraveled = 0.0f;
-
-	// Handle cases where direction components are zero to avoid division by zero in deltaDist
-	// Initialize deltaDist with a large value if a direction component is zero.
-	glm::vec3 deltaDist = glm::vec3(std::numeric_limits<float>::max());
-	if (std::abs(dir.x) > 1e-6f)
-		deltaDist.x = std::abs(1.0f / dir.x);
-	if (std::abs(dir.y) > 1e-6f)
-		deltaDist.y = std::abs(1.0f / dir.y);
-	if (std::abs(dir.z) > 1e-6f)
-		deltaDist.z = std::abs(1.0f / dir.z);
-
-	glm::ivec3 currentVoxel = glm::floor(pos);
-	glm::vec3 step = glm::sign(dir);
-	glm::vec3 sideDist;
-
-	sideDist.x = (step.x > 0) ? (currentVoxel.x + 1 - pos.x) * deltaDist.x : (pos.x - currentVoxel.x) * deltaDist.x;
-	sideDist.y = (step.y > 0) ? (currentVoxel.y + 1 - pos.y) * deltaDist.y : (pos.y - currentVoxel.y) * deltaDist.y;
-	sideDist.z = (step.z > 0) ? (currentVoxel.z + 1 - pos.z) * deltaDist.z : (pos.z - currentVoxel.z) * deltaDist.z;
-
-	while (distanceTraveled < maxDistance)
-	{
-		previousPosition = glm::vec3(currentVoxel);
-
-		int advanceAxis = 0;
-		if (sideDist.x < sideDist.y)
-		{
-			if (sideDist.x < sideDist.z)
-			{
-				advanceAxis = 0; // X is smallest
-			}
-			else
-			{
-				advanceAxis = 2; // Z is smallest
-			}
-		}
-		else
-		{ // sideDist.y <= sideDist.x
-			if (sideDist.y < sideDist.z)
-			{
-				advanceAxis = 1; // Y is smallest
-			}
-			else
-			{
-				advanceAxis = 2; // Z is smallest
-			}
-		}
-
-		if (advanceAxis == 0)
-		{
-			sideDist.x += deltaDist.x;
-			currentVoxel.x += static_cast<int>(step.x);
-			distanceTraveled = sideDist.x - deltaDist.x; // Approximate distance
-		}
-		else if (advanceAxis == 1)
-		{
-			sideDist.y += deltaDist.y;
-			currentVoxel.y += static_cast<int>(step.y);
-			distanceTraveled = sideDist.y - deltaDist.y;
-		}
-		else
-		{
-			sideDist.z += deltaDist.z;
-			currentVoxel.z += static_cast<int>(step.z);
-			distanceTraveled = sideDist.z - deltaDist.z;
-		}
-
-		if (currentVoxel.y < 0 || currentVoxel.y >= CHUNK_HEIGHT)
+		handleEvents();
+		processInput(deltaTime);
+		tickDayCycle(deltaTime);
+		tickStreaming(deltaTime);
+		updateHighlight();
+
+		int pixelW = 0, pixelH = 0;
+		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
+		if (pixelW == 0 || pixelH == 0)
 			continue;
 
-		if (chunkManager && chunkManager->isVoxelActive(glm::vec3(currentVoxel))) // Check chunkManager pointer
+		if (framebufferResized ||
+			static_cast<uint32_t>(pixelW) != swapchain->getExtent().width ||
+			static_cast<uint32_t>(pixelH) != swapchain->getExtent().height)
 		{
-			hitPosition = glm::vec3(currentVoxel);
-			return true;
+			swapchain->recreate(static_cast<uint32_t>(pixelW), static_cast<uint32_t>(pixelH));
+			terrain->onSwapchainRecreate(*swapchain);
+			windowWidth = pixelW;
+			windowHeight = pixelH;
+			framebufferResized = false;
 		}
+
+		uint32_t imageIndex = 0;
+		if (!terrain->beginAcquire(*swapchain, imageIndex, frameIndex))
+		{
+			framebufferResized = true;
+			continue;
+		}
+
+		if (imgui)
+		{
+			imgui->beginFrame();
+			drawUi();
+			imgui->endFrame();
+		}
+
+		const float farPlane = static_cast<float>(renderSettings.maxRenderDistance) * 1.25f;
+		terrain->updateFrameUBO(frameIndex, camera,
+								static_cast<float>(pixelW), static_cast<float>(pixelH), farPlane,
+								static_cast<float>(currentFrame), shaderParams);
+		terrain->recordFrame(frameIndex, imageIndex, *swapchain, drawList, clearColor,
+							 [&](VkCommandBuffer cmd) {
+								 if (imgui)
+									 imgui->recordDraw(cmd);
+							 });
+
+		if (!terrain->submitPresent(*swapchain, imageIndex, frameIndex))
+			framebufferResized = true;
+
+		frameIndex = (frameIndex + 1) % TerrainRenderer::kMaxFramesInFlight;
 	}
-	return false;
 }
