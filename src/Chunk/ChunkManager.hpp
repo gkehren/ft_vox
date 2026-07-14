@@ -2,7 +2,6 @@
 
 #include <unordered_map>
 #include <unordered_set>
-#include <queue>
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
@@ -15,6 +14,7 @@
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
+#include <Chunk/StreamHelpers.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Engine/ThreadPool.hpp>
 #include <utils.hpp>
@@ -92,7 +92,8 @@ private:
 
 	std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> m_chunks;
 	std::vector<Chunk *> m_activeChunks;
-	std::queue<glm::ivec3> m_loadQueue;
+	/// Distance-prioritized load queue (not FIFO — re-sorted / pruned each stream tick).
+	std::vector<LoadCandidate> m_loadQueue;
 	std::unordered_set<glm::ivec3, IVec3Hash> m_enqueuedLoads;
 
 	std::vector<std::pair<std::future<void>, Chunk *>> m_pendingGenerationTasks;

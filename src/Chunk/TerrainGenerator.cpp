@@ -1,4 +1,5 @@
 #include <Chunk/TerrainGenerator.hpp>
+#include <Chunk/StreamHelpers.hpp>
 #include <algorithm>
 #include <cmath>
 #include <mutex>
@@ -511,19 +512,9 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   // Apply erosion smoothing step to the float heightmap
   applyErosion(extHeightMap, EXTENDED_SIZE);
 
-  // Generate 3D noise for caves and ravines (only needs 16x16 chunk area)
-  m_caveNoise->GenUniformGrid3D(caveResults, worldXf, 0.0f, worldZf,
-                                CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE, 1.0f,
-                                m_seed + 4000);
-
-  m_ravineNoise->GenUniformGrid3D(ravineResults, worldXf, 0.0f, worldZf,
-                                  CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE, 1.0f,
-                                  m_seed + 5000);
-  m_surface3DNoise->GenUniformGrid3D(surface3DResults, worldXf, 0.0f, worldZf,
-                                     CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE, 1.0f,
-                                     m_seed + 6000);
-
   // Pass 1: Extract 16x16 biomes and heights from the eroded 20x20 map
+  // (must precede 3D noise so we can bound cave sampling to surface+margin)
+  int maxSurfaceHeight = 1;
   for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
   {
     for (int localX = 0; localX < CHUNK_SIZE; ++localX)
@@ -549,6 +540,7 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
 
       chunkData.biomes[localIndex] = biome;
       chunkData.heightMap[localIndex] = height;
+      maxSurfaceHeight = std::max(maxSurfaceHeight, height);
 
       // Precompute packed biome colors for mesh generation
       const BiomeConfig &cfg = getBiomeConfig(biome);
@@ -556,6 +548,24 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
       chunkData.foliageColors[localIndex] = packColor(cfg.foliageColor);
     }
   }
+
+  // 3D cave/surface noise only up to surface+margin (not full 256).
+  // Chunk-wide maxSurfaceHeight drives both noise and fill ends (see computeChunkYFillBounds).
+  const ChunkYFillBounds yBounds =
+	  computeChunkYFillBounds(maxSurfaceHeight, SEA_LEVEL, 16, CHUNK_HEIGHT);
+  const int caveYMin = yBounds.yMin;
+  const int caveYSize = yBounds.ySize;
+  const int yNoiseEnd = yBounds.yNoiseEnd;
+  const int yFillEnd = yBounds.yFillEnd;
+  m_caveNoise->GenUniformGrid3D(caveResults, worldXf, static_cast<float>(caveYMin), worldZf,
+                                CHUNK_SIZE, caveYSize, CHUNK_SIZE, 1.0f,
+                                m_seed + 4000);
+  m_ravineNoise->GenUniformGrid3D(ravineResults, worldXf, static_cast<float>(caveYMin), worldZf,
+                                  CHUNK_SIZE, caveYSize, CHUNK_SIZE, 1.0f,
+                                  m_seed + 5000);
+  m_surface3DNoise->GenUniformGrid3D(surface3DResults, worldXf, static_cast<float>(caveYMin), worldZf,
+                                     CHUNK_SIZE, caveYSize, CHUNK_SIZE, 1.0f,
+                                     m_seed + 6000);
 
   // Pass 2: Generate voxel columns
   for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
@@ -572,21 +582,29 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
       bool isMountain = (biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS);
 
       int actualMaxHeight = 0;
-      for (int y = 0; y < CHUNK_HEIGHT; ++y)
+      for (int y = caveYMin; y < yFillEnd; ++y)
       {
         int voxelIndex = getVoxelIndex(localX, y, localZ);
-        int noiseIndex = (localZ * CHUNK_HEIGHT * CHUNK_SIZE) + (y * CHUNK_SIZE) + localX;
+        const bool inNoiseBand = (y >= caveYMin && y < yNoiseEnd);
 
-        float caveVal = caveResults[noiseIndex];
-        float ravineVal = ravineResults[noiseIndex];
-        float surface3DVal = surface3DResults[noiseIndex];
+        float caveVal = 0.f;
+        float ravineVal = 0.f;
+        float surface3DVal = 0.f;
+        if (inNoiseBand)
+        {
+          int localY = y - caveYMin;
+          int noiseIndex = (localZ * caveYSize * CHUNK_SIZE) + (localY * CHUNK_SIZE) + localX;
+          caveVal = caveResults[noiseIndex];
+          ravineVal = ravineResults[noiseIndex];
+          surface3DVal = surface3DResults[noiseIndex];
+        }
 
         // 3D density: base density is distance below the heightmap surface
         float density = static_cast<float>(terrainHeight - y);
 
         // Only perturb the surface near the heightmap boundary, and only
         // for mountainous biomes (creates overhangs/cliffs). Plains stay flat.
-        if (isMountain && density > -8.0f && density < 12.0f) {
+        if (inNoiseBand && isMountain && density > -8.0f && density < 12.0f) {
            // Smooth blend: full effect at surface, fades to zero at edges
            float distToSurface = std::abs(density);
            float blend = std::max(0.0f, 1.0f - distToSurface / 12.0f);
@@ -598,7 +616,7 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
             // Pass density so overhangs can have grass/dirt/stone correctly
             type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, density);
             
-            if (type != TextureType::BEDROCK && type != TextureType::WATER)
+            if (inNoiseBand && type != TextureType::BEDROCK && type != TextureType::WATER)
             {
               float heightRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
               float caveThreshold = 0.6f + heightRatio * 0.35f;
@@ -1444,14 +1462,6 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
     float startX = static_cast<float>(chunkX + strip.lxStart) + NOISE_OFFSET;
     float startZ = static_cast<float>(chunkZ + strip.lzStart) + NOISE_OFFSET;
 
-    // Batch 3D noise for cave/ravine across the full strip volume
-    m_caveNoise->GenUniformGrid3D(bCave, startX, 0.0f, startZ,
-                                  strip.xSize, CHUNK_HEIGHT, strip.zSize, 1.0f, m_seed + 4000);
-    m_ravineNoise->GenUniformGrid3D(bRavine, startX, 0.0f, startZ,
-                                    strip.xSize, CHUNK_HEIGHT, strip.zSize, 1.0f, m_seed + 5000);
-    m_surface3DNoise->GenUniformGrid3D(bSurface3D, startX, 0.0f, startZ,
-                                       strip.xSize, CHUNK_HEIGHT, strip.zSize, 1.0f, m_seed + 6000);
-
     int numColumns = strip.xSize * strip.zSize; // CHUNK_SIZE (16) or 1 array Size
 
     // We already generated the 20x20 extended heightmap/noises during `generateChunkBatch`
@@ -1471,6 +1481,31 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
     float *erosionResults = s_genBuffers.erosion.data();
     float *peaksValleysResults = s_genBuffers.peaksValleys.data();
     const int EXTENDED_SIZE = 20;
+
+    // Bound strip 3D noise to max surface height on this strip (reuse 20x20 heights).
+    int stripMaxH = 1;
+    for (int j = 0; j < numColumns; ++j)
+    {
+      int lx = strip.lxStart + (strip.xSize > 1 ? j : 0);
+      int lz = strip.lzStart + (strip.zSize > 1 ? j : 0);
+      int extIndex = (lz + 2) * EXTENDED_SIZE + (lx + 2);
+      int height = std::clamp(static_cast<int>(std::round(extHeightMap[extIndex])), 1,
+                              static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
+      stripMaxH = std::max(stripMaxH, height);
+    }
+    const ChunkYFillBounds borderBounds =
+		computeChunkYFillBounds(stripMaxH, SEA_LEVEL, 16, CHUNK_HEIGHT);
+    const int borderYMin = borderBounds.yMin;
+    const int borderYSize = borderBounds.ySize;
+    const int borderNoiseEnd = borderBounds.yNoiseEnd;
+    const int borderFillEnd = borderBounds.yFillEnd;
+
+    m_caveNoise->GenUniformGrid3D(bCave, startX, static_cast<float>(borderYMin), startZ,
+                                  strip.xSize, borderYSize, strip.zSize, 1.0f, m_seed + 4000);
+    m_ravineNoise->GenUniformGrid3D(bRavine, startX, static_cast<float>(borderYMin), startZ,
+                                    strip.xSize, borderYSize, strip.zSize, 1.0f, m_seed + 5000);
+    m_surface3DNoise->GenUniformGrid3D(bSurface3D, startX, static_cast<float>(borderYMin), startZ,
+                                       strip.xSize, borderYSize, strip.zSize, 1.0f, m_seed + 6000);
 
     for (int j = 0; j < numColumns; ++j)
     {
@@ -1496,14 +1531,16 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
 
       bool isMountain = (biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS);
 
-      for (int y = 0; y < CHUNK_HEIGHT; ++y)
+      for (int y = borderYMin; y < borderFillEnd; ++y)
       {
+        const bool inNoiseBand = (y >= borderYMin && y < borderNoiseEnd);
         int noiseX = (strip.xSize > 1) ? j : 0;
         int noiseZ = (strip.zSize > 1) ? j : 0;
-        int noiseIdx = noiseZ * (CHUNK_HEIGHT * strip.xSize) + y * strip.xSize + noiseX;
+        int localY = y - borderYMin;
+        int noiseIdx = noiseZ * (borderYSize * strip.xSize) + localY * strip.xSize + noiseX;
 
         float density = static_cast<float>(height - y);
-        if (isMountain && density > -8.0f && density < 12.0f) {
+        if (inNoiseBand && isMountain && density > -8.0f && density < 12.0f) {
            float distToSurface = std::abs(density);
            float blend = std::max(0.0f, 1.0f - distToSurface / 12.0f);
            density += bSurface3D[noiseIdx] * 8.0f * blend;
@@ -1513,7 +1550,7 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
         if (density >= 0.0f) {
             type = getVoxelTypeAt(chunkX + lx, y, chunkZ + lz, height, biome, temperature, density);
             
-            if (type != TextureType::AIR && type != TextureType::BEDROCK && type != TextureType::WATER)
+            if (inNoiseBand && type != TextureType::AIR && type != TextureType::BEDROCK && type != TextureType::WATER)
             {
               float hRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
               if (bCave[noiseIdx] > 0.6f + hRatio * 0.35f || bRavine[noiseIdx] > 0.8f + hRatio * 0.15f)
