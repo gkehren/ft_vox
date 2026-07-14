@@ -64,7 +64,9 @@ struct RenderSettings
 	int loadPerSec{120};   // chunk allocations from queue / sec
 	int genPerSec{80};	   // terrain-gen job dispatches / sec
 	int meshPerSec{60};	   // mesh job dispatches / sec
-	int uploadPerSec{40};  // GPU mesh uploads / sec (may idle device)
+	int uploadPerSec{100}; // GPU mesh uploads / sec (async staging — no device idle)
+	// Shadow casters within this XZ radius (blocks). Caps shadow pass cost.
+	float shadowDistance{160.f};
 };
 
 struct RenderTiming
@@ -82,6 +84,8 @@ struct PostProcessSettings
 	bool bloomEnabled{true};
 	float bloomThreshold{1.10f};
 	float bloomIntensity{0.16f};
+	/// Horizontal+vertical pairs (3 ≈ former 5 quality, ~40% fewer fullscreen blurs).
+	int bloomBlurIterations{3};
 	bool fxaaEnabled{true};
 	bool autoExposureEnabled{true};
 	float exposure{0.98f};

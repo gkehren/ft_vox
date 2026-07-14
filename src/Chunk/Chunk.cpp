@@ -1,8 +1,11 @@
 #include "Chunk.hpp"
 #include <Vulkan/VkUpload.hpp>
 #include <Vulkan/VkCommands.hpp>
+#include <Vulkan/StagingRing.hpp>
+#include <Vulkan/GpuResourceRetire.hpp>
 #include <stdexcept>
 #include <algorithm>
+#include <cstring>
 #include <glm/gtx/hash.hpp>
 #include <utils.hpp>
 #include <vector>
@@ -862,7 +865,7 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
   if (allocator == VK_NULL_HANDLE)
     throw std::runtime_error("Chunk::uploadToGPU: null allocator");
 
-  // Re-upload: free previous GPU buffers first (caller should not be drawing this chunk).
+  // Bootstrap path: immediate destroy is OK (caller waited idle or nothing draws yet).
   if (m_allocator != VK_NULL_HANDLE)
     releaseGPU();
   m_allocator = allocator;
@@ -882,8 +885,8 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
     uploadBuffer(allocator, imm, indexBuffer, indices.data(), iSize);
   }
 
-  vertices = {};
-  indices = {};
+  vertices.clear();
+  indices.clear();
 
   waterIndexCount = static_cast<uint32_t>(waterIndices.size());
   if (!waterVertices.empty() && waterIndexCount > 0)
@@ -900,11 +903,139 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
     uploadBuffer(allocator, imm, waterIndexBuffer, waterIndices.data(), iSize);
   }
 
-  waterVertices = {};
-  waterIndices = {};
+  waterVertices.clear();
+  waterIndices.clear();
 
   freeShellVoxels();
   meshNeedsUpdate = false;
+}
+
+bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+                             GpuResourceRetire &retire)
+{
+  if (allocator == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE || !staging.isValid())
+    return false;
+
+  m_allocator = allocator;
+
+  const uint32_t newOpaqueCount = static_cast<uint32_t>(indices.size());
+  const uint32_t newWaterCount = static_cast<uint32_t>(waterIndices.size());
+
+  AllocatedBuffer newV{}, newI{}, newWV{}, newWI{};
+  std::vector<VkBufferCopy> copies;
+  copies.reserve(4);
+  struct CopyJob
+  {
+    VkBuffer dst;
+    VkDeviceSize srcOffset;
+    VkDeviceSize size;
+  };
+  std::vector<CopyJob> jobs;
+  jobs.reserve(4);
+
+  auto stageInto = [&](const void *data, VkDeviceSize size, AllocatedBuffer &dstBuf,
+                       VkBufferUsageFlags usage) -> bool {
+    if (!data || size == 0)
+      return true;
+    dstBuf = createBuffer(allocator, size,
+                          VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    VkDeviceSize off = 0;
+    void *ptr = nullptr;
+    if (!staging.alloc(size, off, ptr))
+    {
+      destroyBuffer(allocator, dstBuf);
+      return false;
+    }
+    std::memcpy(ptr, data, static_cast<size_t>(size));
+    jobs.push_back({dstBuf.buffer, off, size});
+    return true;
+  };
+
+  const bool needOpaque = !vertices.empty() && newOpaqueCount > 0;
+  const bool needWater = !waterVertices.empty() && newWaterCount > 0;
+
+  if (needOpaque)
+  {
+    const VkDeviceSize vSize = vertices.size() * sizeof(Vertex);
+    const VkDeviceSize iSize = indices.size() * sizeof(uint32_t);
+    if (!stageInto(vertices.data(), vSize, newV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
+        !stageInto(indices.data(), iSize, newI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+    {
+      destroyBuffer(allocator, newV);
+      destroyBuffer(allocator, newI);
+      return false;
+    }
+  }
+
+  if (needWater)
+  {
+    const VkDeviceSize vSize = waterVertices.size() * sizeof(Vertex);
+    const VkDeviceSize iSize = waterIndices.size() * sizeof(uint32_t);
+    if (!stageInto(waterVertices.data(), vSize, newWV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
+        !stageInto(waterIndices.data(), iSize, newWI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+    {
+      destroyBuffer(allocator, newV);
+      destroyBuffer(allocator, newI);
+      destroyBuffer(allocator, newWV);
+      destroyBuffer(allocator, newWI);
+      return false;
+    }
+  }
+
+  for (const auto &j : jobs)
+  {
+    VkBufferCopy copy{};
+    copy.srcOffset = j.srcOffset;
+    copy.dstOffset = 0;
+    copy.size = j.size;
+    vkCmdCopyBuffer(cmd, staging.buffer(), j.dst, 1, &copy);
+  }
+
+  // Retire previous GPU meshes (still referenced by in-flight frames).
+  if (vertexBuffer.buffer != VK_NULL_HANDLE)
+    retire.retireBuffer(vertexBuffer);
+  if (indexBuffer.buffer != VK_NULL_HANDLE)
+    retire.retireBuffer(indexBuffer);
+  if (waterVertexBuffer.buffer != VK_NULL_HANDLE)
+    retire.retireBuffer(waterVertexBuffer);
+  if (waterIndexBuffer.buffer != VK_NULL_HANDLE)
+    retire.retireBuffer(waterIndexBuffer);
+
+  vertexBuffer = newV;
+  indexBuffer = newI;
+  waterVertexBuffer = newWV;
+  waterIndexBuffer = newWI;
+  opaqueIndexCount = needOpaque ? newOpaqueCount : 0;
+  waterIndexCount = needWater ? newWaterCount : 0;
+
+  vertices.clear();
+  indices.clear();
+  waterVertices.clear();
+  waterIndices.clear();
+
+  freeShellVoxels();
+  meshNeedsUpdate = false;
+  return true;
+}
+
+void Chunk::releaseGPUDeferred(GpuResourceRetire &retire)
+{
+  if (vertexBuffer.buffer != VK_NULL_HANDLE)
+    retire.retireBuffer(vertexBuffer);
+  if (indexBuffer.buffer != VK_NULL_HANDLE)
+    retire.retireBuffer(indexBuffer);
+  if (waterVertexBuffer.buffer != VK_NULL_HANDLE)
+    retire.retireBuffer(waterVertexBuffer);
+  if (waterIndexBuffer.buffer != VK_NULL_HANDLE)
+    retire.retireBuffer(waterIndexBuffer);
+  vertexBuffer = {};
+  indexBuffer = {};
+  waterVertexBuffer = {};
+  waterIndexBuffer = {};
+  m_allocator = VK_NULL_HANDLE;
+  opaqueIndexCount = 0;
+  waterIndexCount = 0;
 }
 
 uint32_t Chunk::draw(VkCommandBuffer cmd)
@@ -944,8 +1075,8 @@ void Chunk::drawShadow(VkCommandBuffer cmd) const
 
 void Chunk::freeShellVoxels()
 {
+  // Keep capacity for remesh/edit — avoid realloc thrash.
   neighborShellVoxels.clear();
-  neighborShellVoxels.shrink_to_fit();
 }
 
 void Chunk::rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,

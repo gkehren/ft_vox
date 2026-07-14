@@ -9,7 +9,7 @@ layout(push_constant) uniform PC {
     vec4 p2; // x=dramaticBoost, y=dynamicBoost, z=boostPreview, w=unused
 } pc;
 
-#define NUM_SAMPLES 64
+#define NUM_SAMPLES 32
 
 void main()
 {

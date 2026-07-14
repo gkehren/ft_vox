@@ -11,6 +11,8 @@
 #include <Vulkan/VkContext.hpp>
 #include <Vulkan/VkSwapchain.hpp>
 #include <Vulkan/VkCommands.hpp>
+#include <Vulkan/StagingRing.hpp>
+#include <Vulkan/GpuResourceRetire.hpp>
 #include <Renderer/TerrainRenderer.hpp>
 #include <Renderer/OverlayRenderer.hpp>
 #include <Engine/ImGuiLayer.hpp>
@@ -43,7 +45,6 @@ private:
 	void processInput(double dt);
 	void updateHighlight();
 	bool raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious);
-	void waitGpuIdle();
 	void drawUi();
 
 	SDL_Window *window{nullptr};
@@ -85,7 +86,13 @@ private:
 	std::unique_ptr<ChunkPool> chunkPool;
 	std::unique_ptr<ChunkManager> chunkManager;
 
+	StagingRing stagingRing;
+	GpuResourceRetire resourceRetire;
+	uint64_t frameNumber{0};
+
 	std::vector<Chunk *> drawList;
+	std::vector<Chunk *> shadowList;
+	int uploadBudgetThisFrame{0};
 	Camera camera;
 	uint32_t frameIndex{0};
 

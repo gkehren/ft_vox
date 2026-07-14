@@ -11,18 +11,7 @@
 
 namespace
 {
-std::string spvPath(const char *name)
-{
-	const char *prefixes[] = {"./ressources/shaders/spv/", "ressources/shaders/spv/", "../ressources/shaders/spv/"};
-	for (const char *p : prefixes)
-	{
-		std::string path = std::string(p) + name;
-		std::ifstream f(path, std::ios::binary);
-		if (f)
-			return path;
-	}
-	return std::string(RES_PATH) + "shaders/spv/" + name;
-}
+std::string spvPath(const char *name) { return resolveSpvPath(name); }
 
 struct PushPC
 {
