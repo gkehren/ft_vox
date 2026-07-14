@@ -21,6 +21,8 @@
 
 class Camera;
 class ImmediateCommands;
+class StagingRing;
+class GpuResourceRetire;
 
 /// Streams chunks around the player: load → async terrain → async mesh → main-thread GPU upload.
 class ChunkManager
@@ -42,22 +44,26 @@ public:
 	/// Dispatch async meshing for GENERATED chunks (neighbor shell filled on main thread).
 	void meshPendingChunks(const Camera &camera, const RenderSettings &settings, int budget);
 
-	/// Main-thread GPU upload for meshed chunks. waitGpu must idle the device before buffer destroy.
-	void uploadPendingMeshes(VmaAllocator allocator, ImmediateCommands &imm, int budget,
-							 const std::function<void()> &waitGpu);
+	/// Record mesh uploads into cmd (staging ring). No device idle. Distance-prioritized.
+	/// Returns number of chunks uploaded this call.
+	int uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+							GpuResourceRetire &retire, const Camera &camera, int budget);
 
-	/// After frames-in-flight delay, release unloaded chunks back to the pool.
-	void processDeferredReleases(const std::function<void()> &waitGpu);
+	/// After frames-in-flight delay, retire GPU buffers and return chunks to the pool.
+	void processDeferredReleases(GpuResourceRetire &retire);
 
 	/// Join finished worker jobs and clear in-transit flags.
 	void processFinishedJobs();
 
-	/// Distance + frustum visibility flags (affects optional draw filtering).
+	/// Pure frustum visibility (used by collectDrawList).
 	void updateVisibility(const Camera &camera, int windowWidth, int windowHeight,
 						  const RenderSettings &settings);
 
-	/// Draw list: GPU-ready chunks (not pending upload).
+	/// Draw list: GPU-ready + frustum-visible chunks.
 	void collectDrawList(std::vector<Chunk *> &out) const;
+
+	/// Shadow casters: GPU-ready chunks within shadowRadius (blocks, XZ).
+	void collectShadowList(std::vector<Chunk *> &out, const Camera &camera, float shadowRadius) const;
 
 	bool deleteVoxel(const glm::vec3 &worldPos);
 	bool placeVoxel(const glm::vec3 &worldPos, TextureType type);
@@ -74,7 +80,7 @@ public:
 
 	/// Synchronous bootstrap near spawn so the first frame has terrain.
 	void generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
-							 ImmediateCommands &imm, const std::function<void()> &waitGpu);
+							 ImmediateCommands &imm);
 
 private:
 	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);

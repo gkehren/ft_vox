@@ -56,11 +56,15 @@ public:
 	void updateFrameUBO(uint32_t frameIndex, const Camera &camera, float aspectW, float aspectH, float farPlane,
 						float time, const ShaderParameters &params);
 
+	/// preRecord runs immediately after beginCommandBuffer (mesh staging copies + barrier).
+	/// shadowChunks may be a tighter subset of chunks for the shadow pass.
 	void recordFrame(uint32_t frameIndex,
 					 uint32_t imageIndex,
 					 VkSwapchain &swapchain,
 					 const std::vector<Chunk *> &chunks,
+					 const std::vector<Chunk *> &shadowChunks,
 					 const VkClearColorValue &clearColor,
+					 const std::function<void(VkCommandBuffer)> &preRecord = {},
 					 const std::function<void(VkCommandBuffer)> &imguiDraw = {});
 
 	PostProcessSettings &postSettings() { return m_postSettings; }

@@ -14,22 +14,7 @@
 
 namespace
 {
-std::string spvPath(const char *name)
-{
-	const char *prefixes[] = {
-		"./ressources/shaders/spv/",
-		"ressources/shaders/spv/",
-		"../ressources/shaders/spv/",
-	};
-	for (const char *p : prefixes)
-	{
-		std::string path = std::string(p) + name;
-		std::ifstream f(path, std::ios::binary);
-		if (f)
-			return path;
-	}
-	return std::string(RES_PATH) + "shaders/spv/" + name;
-}
+std::string spvPath(const char *name) { return resolveSpvPath(name); }
 
 auto beginRenderingFn()
 {
@@ -640,7 +625,9 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 								  uint32_t imageIndex,
 								  VkSwapchain &swapchain,
 								  const std::vector<Chunk *> &chunks,
+								  const std::vector<Chunk *> &shadowChunks,
 								  const VkClearColorValue &clearColor,
+								  const std::function<void(VkCommandBuffer)> &preRecord,
 								  const std::function<void(VkCommandBuffer)> &imguiDraw)
 {
 	auto &f = m_frames[frameIndex];
@@ -653,6 +640,10 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 	VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 	if (vkBeginCommandBuffer(f.cmd, &beginInfo) != VK_SUCCESS)
 		throw std::runtime_error("Failed to begin terrain command buffer");
+
+	// Mesh staging copies (same queue, before any vertex use).
+	if (preRecord)
+		preRecord(f.cmd);
 
 	std::array<VkDescriptorSet, 2> sets = {f.descriptorSet0, m_set1};
 
@@ -697,7 +688,7 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 		vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0,
 								static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
 
-		for (Chunk *chunk : chunks)
+		for (Chunk *chunk : shadowChunks)
 		{
 			if (chunk)
 				chunk->drawShadow(f.cmd);

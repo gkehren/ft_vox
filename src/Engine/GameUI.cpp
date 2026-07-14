@@ -400,6 +400,7 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		{
 			ImGui::SliderFloat("Bloom threshold", &pp.bloomThreshold, 0.f, 5.f);
 			ImGui::SliderFloat("Bloom intensity", &pp.bloomIntensity, 0.f, 2.f);
+			ImGui::SliderInt("Bloom blur iters", &pp.bloomBlurIterations, 1, 5);
 		}
 		ImGui::Checkbox("FXAA", &pp.fxaaEnabled);
 		ImGui::SliderFloat("Exposure", &pp.exposure, 0.1f, 5.f);
@@ -457,7 +458,8 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 	ImGui::SliderInt("Load/s", &rs.loadPerSec, 10, 500);
 	ImGui::SliderInt("Gen/s", &rs.genPerSec, 5, 200);
 	ImGui::SliderInt("Mesh/s", &rs.meshPerSec, 5, 200);
-	ImGui::SliderInt("Upload/s", &rs.uploadPerSec, 5, 120);
+	ImGui::SliderInt("Upload/s", &rs.uploadPerSec, 5, 200);
+	ImGui::SliderFloat("Shadow dist", &rs.shadowDistance, 64.f, 320.f, "%.0f");
 
 	ImGui::SeparatorText("Live stats");
 	ImGui::Text("Loaded chunks: %zu", frame.chunks->chunkCount());

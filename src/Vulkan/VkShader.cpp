@@ -1,7 +1,50 @@
 #include "Vulkan/VkShader.hpp"
+#include "utils.hpp"
+
+#include <SDL3/SDL.h>
 
 #include <fstream>
 #include <stdexcept>
+#include <vector>
+
+std::string resolveSpvPath(const char *fileName)
+{
+	if (!fileName || fileName[0] == '\0')
+		return {};
+
+	std::vector<std::string> candidates;
+	candidates.reserve(12);
+
+	const auto add = [&](const std::string &dir) {
+		if (dir.empty())
+			return;
+		std::string base = dir;
+		if (base.back() != '/' && base.back() != '\\')
+			base.push_back('/');
+		candidates.push_back(base + fileName);
+	};
+
+	add("./ressources/shaders/spv");
+	add("ressources/shaders/spv");
+	add("../ressources/shaders/spv");
+	add("./build-vk/ressources/shaders/spv");
+	add("build-vk/ressources/shaders/spv");
+	add(std::string(RES_PATH) + "shaders/spv");
+
+	// Directory containing the executable (where CMake copies ressources/).
+	// SDL3 caches this path — do not free it (unlike SDL2).
+	if (const char *base = SDL_GetBasePath())
+		add(std::string(base) + "ressources/shaders/spv");
+
+	for (const std::string &path : candidates)
+	{
+		std::ifstream f(path, std::ios::binary);
+		if (f)
+			return path;
+	}
+	// Last resort: first candidate for a clear error message.
+	return candidates.empty() ? std::string(fileName) : candidates.front();
+}
 
 std::vector<uint32_t> readSpirvFile(const std::string &path)
 {

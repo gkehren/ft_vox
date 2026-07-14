@@ -27,6 +27,8 @@
 #include <Renderer/TextureManager.hpp>
 
 class ImmediateCommands;
+class StagingRing;
+class GpuResourceRetire;
 
 class Chunk
 {
@@ -66,9 +68,18 @@ public:
 	bool isInTransit() const { return m_inTransit.load(); }
 	void setInTransit(bool val) { m_inTransit.store(val); }
 
-	/// Upload CPU mesh to GPU via VMA staging. Safe to call again after remesh.
+	/// Synchronous upload (bootstrap / tests). Prefer uploadToGPUAsync on the hot path.
 	void uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm);
+
+	/// Record buffer copies into cmd using the staging ring; retires previous GPU buffers.
+	/// Returns false if staging is full (CPU mesh kept; try again next frame).
+	bool uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+						  GpuResourceRetire &retire);
+
+	/// Immediate destroy (shutdown / destructor only — not while frames may reference buffers).
 	void releaseGPU();
+	/// Hand buffers to the retire queue; safe during streaming unload/remesh.
+	void releaseGPUDeferred(GpuResourceRetire &retire);
 
 	bool isShellEmpty() const { return neighborShellVoxels.empty(); }
 	void freeShellVoxels();

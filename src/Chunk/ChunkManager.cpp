@@ -2,6 +2,8 @@
 
 #include <Camera/Camera.hpp>
 #include <Vulkan/VkCommands.hpp>
+#include <Vulkan/StagingRing.hpp>
+#include <Vulkan/GpuResourceRetire.hpp>
 
 #include <glm/gtc/matrix_access.hpp>
 
@@ -13,7 +15,7 @@
 
 namespace
 {
-constexpr int kDeferredReleaseFrames = 3; // > frames-in-flight
+constexpr int kDeferredReleaseFrames = 3; // >= frames-in-flight
 }
 
 ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool,
@@ -162,15 +164,9 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 				break;
 			}
 		}
-		// Keep near chunks "visible" for streaming even if slightly outside frustum.
-		const glm::vec3 center = aabbMin + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
-		const float dx = center.x - camera.getPosition().x;
-		const float dz = center.z - camera.getPosition().z;
-		const float nearKeep = static_cast<float>(settings.minRenderDistance);
-		if (dx * dx + dz * dz < nearKeep * nearKeep)
-			visible = true;
 		chunk->setVisible(visible);
 	}
+	(void)settings;
 
 	const auto t1 = std::chrono::high_resolution_clock::now();
 	m_renderTiming.frustumCulling =
@@ -310,36 +306,58 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		std::chrono::duration<float, std::milli>(t1 - t0).count();
 }
 
-void ChunkManager::uploadPendingMeshes(VmaAllocator allocator, ImmediateCommands &imm, int budget,
-									   const std::function<void()> &waitGpu)
+int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+									  GpuResourceRetire &retire, const Camera &camera, int budget)
 {
-	if (!allocator || budget <= 0)
-		return;
+	if (!allocator || budget <= 0 || cmd == VK_NULL_HANDLE || !staging.isValid())
+		return 0;
 
-	std::vector<Chunk *> toUpload;
+	struct Item
+	{
+		Chunk *chunk;
+		float distSq;
+	};
+	std::vector<Item> queue;
 	{
 		std::shared_lock<std::shared_mutex> lock(m_mutex);
+		queue.reserve(m_activeChunks.size());
+		const glm::vec3 camPos = camera.getPosition();
 		for (Chunk *chunk : m_activeChunks)
 		{
-			if (static_cast<int>(toUpload.size()) >= budget)
-				break;
+			if (!chunk)
+				continue;
 			if (chunk->getState() == ChunkState::MESHED && chunk->needsGPUUpload() && !chunk->isInTransit())
-				toUpload.push_back(chunk);
+			{
+				const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
+				const float dx = c.x - camPos.x;
+				const float dz = c.z - camPos.z;
+				queue.push_back({chunk, dx * dx + dz * dz});
+			}
 		}
 	}
 
-	if (toUpload.empty())
-		return;
+	if (queue.empty())
+		return 0;
 
-	// Destroying/replacing GPU buffers is only safe after previous frames finish.
-	if (waitGpu)
-		waitGpu();
+	const int n = std::min(budget, static_cast<int>(queue.size()));
+	std::partial_sort(queue.begin(), queue.begin() + n, queue.end(),
+					  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
 
-	for (Chunk *chunk : toUpload)
-		chunk->uploadToGPU(allocator, imm);
+	const auto t0 = std::chrono::high_resolution_clock::now();
+	int uploaded = 0;
+	for (int i = 0; i < n; ++i)
+	{
+		if (!queue[i].chunk->uploadToGPUAsync(allocator, staging, cmd, retire))
+			break; // staging full — remaining wait next frame
+		++uploaded;
+	}
+	const auto t1 = std::chrono::high_resolution_clock::now();
+	m_renderTiming.chunkRendering =
+		std::chrono::duration<float, std::milli>(t1 - t0).count(); // reuse slot for upload ms
+	return uploaded;
 }
 
-void ChunkManager::processDeferredReleases(const std::function<void()> &waitGpu)
+void ChunkManager::processDeferredReleases(GpuResourceRetire &retire)
 {
 	if (m_deferredRelease.empty())
 	{
@@ -351,12 +369,13 @@ void ChunkManager::processDeferredReleases(const std::function<void()> &waitGpu)
 	if (m_deferredReleaseAge < kDeferredReleaseFrames)
 		return;
 
-	if (waitGpu)
-		waitGpu();
-
+	// No device idle: hand GPU buffers to the retire queue, then recycle CPU chunk.
 	for (Chunk *c : m_deferredRelease)
 	{
-		if (c && m_chunkPool)
+		if (!c)
+			continue;
+		c->releaseGPUDeferred(retire);
+		if (m_chunkPool)
 			m_chunkPool->release(c);
 	}
 	m_deferredRelease.clear();
@@ -410,6 +429,31 @@ void ChunkManager::collectDrawList(std::vector<Chunk *> &out) const
 		// Keep drawing the last GPU mesh while a remesh/upload is pending so
 		// break/place doesn't make the chunk pop out of existence.
 		if (chunk->getOpaqueIndexCount() == 0 && !chunk->hasWaterMesh())
+			continue;
+		if (!chunk->isVisible())
+			continue;
+		out.push_back(chunk);
+	}
+}
+
+void ChunkManager::collectShadowList(std::vector<Chunk *> &out, const Camera &camera,
+									 float shadowRadius) const
+{
+	out.clear();
+	const float r2 = shadowRadius * shadowRadius;
+	const glm::vec3 cam = camera.getPosition();
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	out.reserve(m_activeChunks.size() / 2 + 8);
+	for (Chunk *chunk : m_activeChunks)
+	{
+		if (!chunk)
+			continue;
+		if (chunk->getOpaqueIndexCount() == 0)
+			continue;
+		const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
+		const float dx = c.x - cam.x;
+		const float dz = c.z - cam.z;
+		if (dx * dx + dz * dz > r2)
 			continue;
 		out.push_back(chunk);
 	}
@@ -680,7 +724,7 @@ size_t ChunkManager::pendingMeshJobs() const
 }
 
 void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
-									   ImmediateCommands &imm, const std::function<void()> &waitGpu)
+									   ImmediateCommands &imm)
 {
 	if (!m_terrainGenerator || !m_chunkPool || !allocator)
 		return;
@@ -724,8 +768,7 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 	for (const auto &p : created)
 		p.second->generateMesh();
 
-	if (waitGpu)
-		waitGpu();
+	// One-time sync upload before the first frame (nothing in flight yet).
 	for (const auto &p : created)
 		p.second->uploadToGPU(allocator, imm);
 
