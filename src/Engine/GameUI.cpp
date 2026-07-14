@@ -448,11 +448,17 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 
 	auto &rs = *frame.render;
 	ImGui::SeparatorText("Distance");
+	const int prevMaxRd = rs.maxRenderDistance;
 	ImGui::SliderInt("View distance (blocks)", &rs.maxRenderDistance, 64, 512);
 	if (rs.minRenderDistance > rs.maxRenderDistance)
 		rs.minRenderDistance = rs.maxRenderDistance;
 	ImGui::SliderInt("Full-mesh near range", &rs.minRenderDistance, 32, rs.maxRenderDistance);
 	ImGui::TextDisabled("Unload at ~1.5× view distance");
+
+	const size_t poolNeed = estimateChunkPoolCapacity(rs.maxRenderDistance);
+	if (frame.pool && rs.maxRenderDistance != prevMaxRd)
+		frame.pool->ensureCapacity(poolNeed);
+	ImGui::TextDisabled("Pool need for this view: ~%zu chunks", poolNeed);
 
 	ImGui::SeparatorText("Pipeline budgets (ops / sec)");
 	ImGui::SliderInt("Load/s", &rs.loadPerSec, 10, 500);
@@ -475,11 +481,14 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 		ImGui::SeparatorText("Chunk pool");
 		ImGui::Text("Capacity %zu  |  free %zu  |  acquired %zu",
 					frame.pool->capacity(), frame.pool->freeCount(), frame.pool->acquiredCount());
-		if (frame.pool->overflowCount() > 0)
-			ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f), "Overflow allocations: %zu",
-							   frame.pool->overflowCount());
-		else
-			ImGui::Text("Overflow: 0");
+		ImGui::Text("Need ~%zu for view %d  |  grows: %zu",
+					poolNeed, rs.maxRenderDistance, frame.pool->growEvents());
+		if (frame.pool->freeCount() == 0)
+			ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f),
+							   "Pool full — load back-pressure active");
+		if (frame.pool->rejectCount() > 0)
+			ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f), "Acquire rejects: %zu",
+							   frame.pool->rejectCount());
 	}
 
 	if (frame.timing)
