@@ -34,7 +34,6 @@ endif()
 
 target_link_libraries(test_vulkan_resources PRIVATE
     SDL3::SDL3
-    Vulkan::Vulkan
     volk::volk
     GPUOpen::VulkanMemoryAllocator
 )
@@ -64,8 +63,12 @@ add_custom_command(TARGET test_vulkan_resources POST_BUILD
 )
 
 add_test(NAME VulkanResourceSmoke COMMAND test_vulkan_resources)
+if(APPLE)
+    set_tests_properties(VulkanResourceSmoke PROPERTIES
+        ENVIRONMENT "VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
+    )
+endif()
 set_tests_properties(VulkanResourceSmoke PROPERTIES
-    ENVIRONMENT "VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
     WORKING_DIRECTORY $<TARGET_FILE_DIR:test_vulkan_resources>
 )
 

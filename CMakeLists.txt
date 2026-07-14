@@ -155,7 +155,6 @@ target_link_libraries(${PROJECT_NAME}
     FastNoise2
     Boost::boost
     Boost::system
-    Vulkan::Vulkan
     volk::volk
     GPUOpen::VulkanMemoryAllocator
 )
