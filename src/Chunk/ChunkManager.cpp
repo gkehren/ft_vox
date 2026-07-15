@@ -1,6 +1,7 @@
 #include "ChunkManager.hpp"
 
 #include <Camera/Camera.hpp>
+#include <Engine/Profiler.hpp>
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/StagingRing.hpp>
 #include <Vulkan/GpuResourceRetire.hpp>
@@ -18,10 +19,8 @@ namespace
 constexpr int kDeferredReleaseFrames = 3; // >= frames-in-flight
 }
 
-ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool,
-						   RenderTiming &renderTiming)
-	: m_terrainGenerator(terrainGenerator), m_threadPool(threadPool), m_chunkPool(chunkPool),
-	  m_renderTiming(renderTiming)
+ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool)
+	: m_terrainGenerator(terrainGenerator), m_threadPool(threadPool), m_chunkPool(chunkPool)
 {
 }
 
@@ -147,7 +146,7 @@ void ChunkManager::processChunkLoading(int budget)
 void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int windowHeight,
 									const RenderSettings &settings)
 {
-	const auto t0 = std::chrono::high_resolution_clock::now();
+	// Timed by Engine PROFILE_SCOPE("Visibility") — keep body lean.
 
 	const glm::mat4 clipMatrix =
 		camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight),
@@ -190,10 +189,6 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 		chunk->setVisible(visible);
 	}
 	(void)settings;
-
-	const auto t1 = std::chrono::high_resolution_clock::now();
-	m_renderTiming.frustumCulling =
-		std::chrono::duration<float, std::milli>(t1 - t0).count();
 }
 
 void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, int budget)
@@ -234,21 +229,22 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	const float lodThresh = static_cast<float>(settings.minRenderDistance) * 2.f;
 	const float lodThreshSq = lodThresh * lodThresh;
 
-	const auto t0 = std::chrono::high_resolution_clock::now();
 	for (int i = 0; i < n; ++i)
 	{
 		Chunk *chunk = queue[i].chunk;
 		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThreshSq);
 		chunk->setInTransit(true);
 		auto future = m_threadPool->enqueue(prio, [chunk, seed]() {
+			const auto t0 = std::chrono::steady_clock::now();
 			TerrainGenerator &localGen = TerrainGenerator::getThreadLocal(seed);
 			chunk->generateTerrain(localGen);
+			const float ms = std::chrono::duration<float, std::milli>(
+								 std::chrono::steady_clock::now() - t0)
+								 .count();
+			GetProfiler().addWorkerSample("TerrainGen", ms);
 		});
 		m_pendingGenerationTasks.emplace_back(std::move(future), chunk);
 	}
-	const auto t1 = std::chrono::high_resolution_clock::now();
-	m_renderTiming.chunkGeneration =
-		std::chrono::duration<float, std::milli>(t1 - t0).count();
 }
 
 void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings &settings, int budget)
@@ -301,7 +297,6 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	std::partial_sort(queue.begin(), queue.begin() + n, queue.end(),
 					  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
 
-	const auto t0 = std::chrono::high_resolution_clock::now();
 	for (int i = 0; i < n; ++i)
 	{
 		Chunk *chunk = queue[i].chunk;
@@ -314,19 +309,30 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 
 		if (distSq > lodThreshSq)
 		{
-			auto future = m_threadPool->enqueue(prio, [chunk]() { chunk->generateLODMesh(); });
+			auto future = m_threadPool->enqueue(prio, [chunk]() {
+				const auto t0 = std::chrono::steady_clock::now();
+				chunk->generateLODMesh();
+				const float ms = std::chrono::duration<float, std::milli>(
+									 std::chrono::steady_clock::now() - t0)
+									 .count();
+				GetProfiler().addWorkerSample("MeshLOD", ms);
+			});
 			m_pendingMeshingTasks.emplace_back(std::move(future), chunk);
 		}
 		else
 		{
 			ensureShellPopulated(chunk, ci);
-			auto future = m_threadPool->enqueue(prio, [chunk]() { chunk->generateMesh(); });
+			auto future = m_threadPool->enqueue(prio, [chunk]() {
+				const auto t0 = std::chrono::steady_clock::now();
+				chunk->generateMesh();
+				const float ms = std::chrono::duration<float, std::milli>(
+									 std::chrono::steady_clock::now() - t0)
+									 .count();
+				GetProfiler().addWorkerSample("MeshBuild", ms);
+			});
 			m_pendingMeshingTasks.emplace_back(std::move(future), chunk);
 		}
 	}
-	const auto t1 = std::chrono::high_resolution_clock::now();
-	m_renderTiming.meshGeneration =
-		std::chrono::duration<float, std::milli>(t1 - t0).count();
 }
 
 int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
@@ -366,7 +372,6 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 	std::partial_sort(queue.begin(), queue.begin() + n, queue.end(),
 					  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
 
-	const auto t0 = std::chrono::high_resolution_clock::now();
 	int uploaded = 0;
 	for (int i = 0; i < n; ++i)
 	{
@@ -374,9 +379,6 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 			break; // staging full — remaining wait next frame
 		++uploaded;
 	}
-	const auto t1 = std::chrono::high_resolution_clock::now();
-	m_renderTiming.chunkRendering =
-		std::chrono::duration<float, std::milli>(t1 - t0).count(); // reuse slot for upload ms
 	return uploaded;
 }
 
