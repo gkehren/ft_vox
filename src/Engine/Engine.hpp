@@ -19,6 +19,7 @@
 #include <Engine/GameUI.hpp>
 #include <Engine/ThreadPool.hpp>
 #include <Engine/EngineDefs.hpp>
+#include <Engine/Benchmark.hpp>
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/ChunkManager.hpp>
@@ -37,6 +38,12 @@ public:
 	void initializeNoiseGenerator(int seed);
 	void setVSync(bool enabled);
 
+	Benchmark &benchmark() { return m_benchmark; }
+	const Benchmark &benchmark() const { return m_benchmark; }
+
+	/// Recreate terrain for seed (device idle). Used by benchmark and tools.
+	void reloadWorld(int newSeed);
+
 private:
 	void handleEvents();
 	void onResize(int width, int height);
@@ -46,6 +53,9 @@ private:
 	void updateHighlight();
 	bool raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious);
 	void drawUi();
+	void tickBenchmark(double dt);
+	void sampleBenchmarkFrame();
+	void placeCameraOnSurface();
 
 	SDL_Window *window{nullptr};
 	int windowWidth{1920};
@@ -98,4 +108,6 @@ private:
 
 	OverlayHighlight highlight{};
 	std::vector<OverlayPlayer> demoPlayers;
+
+	Benchmark m_benchmark{};
 };

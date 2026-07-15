@@ -28,8 +28,7 @@ class GpuResourceRetire;
 class ChunkManager
 {
 public:
-	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool,
-				 RenderTiming &renderTiming);
+	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool);
 	~ChunkManager();
 
 	/// Enqueue loads / mark far chunks for unload based on camera position.
@@ -104,7 +103,6 @@ private:
 	TerrainGenerator *m_terrainGenerator{nullptr};
 	ThreadPool *m_threadPool{nullptr};
 	ChunkPool *m_chunkPool{nullptr};
-	RenderTiming &m_renderTiming;
 
 	std::vector<Chunk *> m_deferredRelease;
 	int m_deferredReleaseAge{0};

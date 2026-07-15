@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Engine/EngineDefs.hpp>
+#include <Engine/Benchmark.hpp>
 #include <Camera/Camera.hpp>
 #include <Chunk/ChunkManager.hpp>
 #include <Chunk/ChunkPool.hpp>
@@ -51,6 +52,8 @@ struct GameUIFrame
 	bool validation{false};
 
 	std::function<void(bool)> setVSync;
+
+	Benchmark *benchmark{nullptr};
 };
 
 /// Multi-panel ImGui HUD for the Vulkan engine.
@@ -76,6 +79,7 @@ public:
 	bool showStreaming() const { return m_showStreaming; }
 	bool showWorld() const { return m_showWorld; }
 	bool showHelp() const { return m_showHelp; }
+	bool showProfiler() const { return m_showProfiler; }
 
 	void setShowHud(bool v) { m_showHud = v; }
 
@@ -84,6 +88,8 @@ private:
 	void drawHud(GameUIFrame &frame);
 	void drawGraphics(GameUIFrame &frame);
 	void drawStreaming(GameUIFrame &frame);
+	void drawProfiler(GameUIFrame &frame);
+	void drawBenchmarkReport(GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp();
 	void drawOverlayHints(GameUIFrame &frame);
@@ -95,6 +101,7 @@ private:
 	bool m_showHud{true};
 	bool m_showGraphics{false};
 	bool m_showStreaming{false};
+	bool m_showProfiler{false};
 	bool m_showWorld{false};
 	bool m_showHelp{false};
 	bool m_showOverlayHints{true};

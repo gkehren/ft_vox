@@ -71,13 +71,18 @@ struct RenderSettings
 	float maxStreamMs{4.0f};
 };
 
+/// Legacy flat timings filled from the hierarchical Profiler each frame.
+/// Prefer GetProfiler() / F7 panel for new UI. Field meanings (main-thread ms):
+/// frustumCulling = Visibility, chunkGeneration = GenDispatch,
+/// meshGeneration = MeshDispatch, chunkRendering = MeshUpload,
+/// uiRendering = ImGui, totalFrame = full frame.
 struct RenderTiming
 {
 	float frustumCulling{0.0f};
-	float chunkGeneration{0.0f}; // Voxel data generation
+	float chunkGeneration{0.0f};
 	float meshGeneration{0.0f};
 	float chunkRendering{0.0f};
-	float uiRendering{0.0f}; // For ImGui rendering pass
+	float uiRendering{0.0f};
 	float totalFrame{0.0f};
 };
 

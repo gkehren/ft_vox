@@ -70,6 +70,34 @@ ft_vox_compile_shader(frag overlay.frag.glsl overlay.frag.spv)
 add_custom_target(ft_vox_shaders ALL DEPENDS ${FT_VOX_SPV_FILES})
 
 # ---------------------------------------------------------------------------
+# Build-time git revision (regenerated every build)
+# ---------------------------------------------------------------------------
+set(FT_VOX_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
+set(FT_VOX_BUILD_INFO_INC ${FT_VOX_GENERATED_DIR}/BuildInfo.inc)
+file(MAKE_DIRECTORY ${FT_VOX_GENERATED_DIR})
+# Seed so the first configure can still compile before the custom command runs.
+if(NOT EXISTS ${FT_VOX_BUILD_INFO_INC})
+    file(WRITE ${FT_VOX_BUILD_INFO_INC}
+"// Placeholder until first build generates real values.
+#pragma once
+#define FT_VOX_GIT_HASH \"unknown\"
+#define FT_VOX_GIT_BRANCH \"unknown\"
+#define FT_VOX_GIT_DIRTY 0
+#define FT_VOX_GIT_DESCRIBE \"unknown\"
+#define FT_VOX_BUILD_UTC \"unknown\"
+")
+endif()
+add_custom_target(ft_vox_build_info ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DFT_VOX_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DFT_VOX_BUILD_INFO_OUT=${FT_VOX_BUILD_INFO_INC}
+        -P ${CMAKE_SOURCE_DIR}/cmake/GenerateBuildInfo.cmake
+    BYPRODUCTS ${FT_VOX_BUILD_INFO_INC}
+    COMMENT "Generating BuildInfo.inc (git revision)"
+    VERBATIM
+)
+
+# ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
 set(FT_VOX_VULKAN_SOURCES
@@ -101,6 +129,9 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/Engine.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/ImGuiLayer.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUI.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Benchmark.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/BuildInfo.cpp
     ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
@@ -115,11 +146,17 @@ set(FT_VOX_SOURCES
 )
 
 add_executable(${PROJECT_NAME} ${FT_VOX_SOURCES})
-add_dependencies(${PROJECT_NAME} ft_vox_shaders)
+add_dependencies(${PROJECT_NAME} ft_vox_shaders ft_vox_build_info)
+# Rebuild BuildInfo.cpp when the generated revision header changes.
+set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/src/Engine/BuildInfo.cpp
+    PROPERTIES OBJECT_DEPENDS ${FT_VOX_BUILD_INFO_INC}
+)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/imgui
+    ${FT_VOX_GENERATED_DIR}
     ${Vulkan_INCLUDE_DIRS}
 )
 
