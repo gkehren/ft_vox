@@ -47,6 +47,13 @@ glm::vec3 Camera::getPosition() const
 	return this->position;
 }
 
+void Camera::setYawPitch(float newYaw, float newPitch)
+{
+	yaw = newYaw;
+	pitch = std::clamp(newPitch, -89.0f, 89.0f);
+	updateCameraVectors();
+}
+
 glm::vec3 Camera::getFront() const
 {
 	return this->front;

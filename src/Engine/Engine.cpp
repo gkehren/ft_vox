@@ -3,11 +3,14 @@
 #include <SDL3/SDL_vulkan.h>
 #include <utils.hpp>
 #include <Chunk/StreamHelpers.hpp>
+#include <Engine/Profiler.hpp>
+#include <Engine/Benchmark.hpp>
 #include <imgui/imgui.h>
 
 #include <cstdio>
 #include <cmath>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <random>
@@ -182,7 +185,7 @@ Engine::Engine()
 	std::cout << "SDL version: " << SDL_GetVersion() << "\n";
 	std::cout << "ft_vox: Vulkan — streaming procedural world\n";
 	std::cout << "  WASD fly · mouse look · LMB/RMB edit · T block · B borders\n";
-	std::cout << "  C free mouse · F1–F5 panels · F10 VSync · Esc quit\n";
+	std::cout << "  C free mouse · F1–F7 panels · F10 VSync · Esc quit\n";
 	std::cout << "  ThreadPool workers: " << hw << "\n";
 }
 
@@ -233,22 +236,11 @@ void Engine::initializeNoiseGenerator(int seed_val)
 
 	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
 	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
-												  chunkPool.get(), renderTiming);
+												  chunkPool.get());
 
 	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
 									  vkContext->getAllocator(), *immediate);
-
-	{
-		const glm::vec3 pos = camera.getPosition();
-		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
-		{
-			if (chunkManager->isVoxelActive(glm::vec3(pos.x, static_cast<float>(y), pos.z)))
-			{
-				camera.setPosition(glm::vec3(pos.x, static_cast<float>(y + 3), pos.z));
-				break;
-			}
-		}
-	}
+	placeCameraOnSurface();
 
 	demoPlayers = {
 		{{4.f, 80.f, 4.f}, 1},
@@ -281,6 +273,71 @@ void Engine::setVSync(bool enabled)
 		swapchain->setVSync(enabled);
 }
 
+void Engine::placeCameraOnSurface()
+{
+	const glm::vec3 pos = camera.getPosition();
+	for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
+	{
+		if (chunkManager &&
+			chunkManager->isVoxelActive(glm::vec3(pos.x, static_cast<float>(y), pos.z)))
+		{
+			camera.setPosition(glm::vec3(pos.x, static_cast<float>(y + 3), pos.z));
+			return;
+		}
+	}
+	camera.setPosition(glm::vec3(pos.x, 100.f, pos.z));
+}
+
+void Engine::reloadWorld(int newSeed)
+{
+	if (!vkContext || !threadPool || !chunkPool || !immediate)
+		return;
+
+	seed = newSeed > 0 ? newSeed : 42;
+	drawList.clear();
+	shadowList.clear();
+
+	vkContext->waitIdle();
+	resourceRetire.flush();
+	chunkManager.reset();
+	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
+	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
+												  chunkPool.get());
+
+	camera.setMode(CameraMode::PERSPECTIVE);
+	camera.setPosition(glm::vec3(0.f, 100.f, 0.f));
+	camera.setMovementSpeed(20.f);
+
+	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
+									  vkContext->getAllocator(), *immediate);
+	placeCameraOnSurface();
+
+	demoPlayers = {
+		{{4.f, 80.f, 4.f}, 1},
+		{{-6.f, 78.f, 8.f}, 2},
+		{{10.f, 82.f, -3.f}, 3},
+	};
+	for (auto &p : demoPlayers)
+	{
+		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
+		{
+			if (chunkManager->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
+			{
+				p.position.y = static_cast<float>(y + 1);
+				break;
+			}
+		}
+	}
+	if (showDemoPlayers && terrain)
+		terrain->overlays().setPlayers(demoPlayers);
+
+	GetProfiler().clearHistory();
+	GetProfiler().setEnabled(true);
+
+	std::cout << "[bench] World reloaded seed=" << seed
+			  << " chunks=" << chunkManager->chunkCount() << "\n";
+}
+
 void Engine::onResize(int width, int height)
 {
 	if (width <= 0 || height <= 0)
@@ -305,13 +362,20 @@ void Engine::tickDayCycle(double dt)
 
 void Engine::tickStreaming(double dt)
 {
+	PROFILE_SCOPE("Streaming");
 	if (!chunkManager)
 		return;
 	if (paused)
 	{
-		chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
-		chunkManager->collectDrawList(drawList);
-		chunkManager->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
+		{
+			PROFILE_SCOPE("Visibility");
+			chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
+		}
+		{
+			PROFILE_SCOPE("CollectLists");
+			chunkManager->collectDrawList(drawList);
+			chunkManager->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
+		}
 		uploadBudgetThisFrame = 0;
 		return;
 	}
@@ -328,9 +392,18 @@ void Engine::tickStreaming(double dt)
 	};
 	const double maxStreamMs = static_cast<double>(renderSettings.maxStreamMs);
 
-	chunkManager->processFinishedJobs();
-	chunkManager->processDeferredReleases(resourceRetire);
-	chunkManager->updateStreaming(camera, renderSettings);
+	{
+		PROFILE_SCOPE("FinishedJobs");
+		chunkManager->processFinishedJobs();
+	}
+	{
+		PROFILE_SCOPE("DeferredRelease");
+		chunkManager->processDeferredReleases(resourceRetire);
+	}
+	{
+		PROFILE_SCOPE("UpdateStreaming");
+		chunkManager->updateStreaming(camera, renderSettings);
+	}
 
 	static double genAccum = 0.0, meshAccum = 0.0, uploadAccum = 0.0;
 	const int loadBudget = budgetFromRate(renderSettings.loadPerSec, frameDt, streamAccum);
@@ -341,17 +414,32 @@ void Engine::tickStreaming(double dt)
 	// Count budgets capped by shared per-frame CPU time envelope.
 	const int loadN = remainingCountBudget(std::max(loadBudget, 1), streamElapsedMs(), maxStreamMs);
 	if (loadN > 0)
+	{
+		PROFILE_SCOPE("Load");
 		chunkManager->processChunkLoading(loadN);
+	}
 	const int genN = remainingCountBudget(std::max(genBudget, 1), streamElapsedMs(), maxStreamMs);
 	if (genN > 0)
+	{
+		PROFILE_SCOPE("GenDispatch");
 		chunkManager->generatePendingVoxels(camera, renderSettings, genN);
+	}
 	const int meshN = remainingCountBudget(std::max(meshBudget, 1), streamElapsedMs(), maxStreamMs);
 	if (meshN > 0)
+	{
+		PROFILE_SCOPE("MeshDispatch");
 		chunkManager->meshPendingChunks(camera, renderSettings, meshN);
+	}
 	// GPU uploads are recorded inside recordFrame (after acquire) — no waitIdle.
-	chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
-	chunkManager->collectDrawList(drawList);
-	chunkManager->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
+	{
+		PROFILE_SCOPE("Visibility");
+		chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
+	}
+	{
+		PROFILE_SCOPE("CollectLists");
+		chunkManager->collectDrawList(drawList);
+		chunkManager->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
+	}
 
 	static size_t lastLoggedChunks = 0;
 	static double lastLogTime = 0.0;
@@ -483,6 +571,8 @@ void Engine::handleEvents()
 			break;
 		}
 		case SDL_EVENT_MOUSE_MOTION:
+			if (m_benchmark.locksInput())
+				break;
 			if (mouseCaptured && !(imgui && imgui->wantCaptureMouse()))
 			{
 				camera.processMouseMovement(static_cast<float>(event.motion.xrel),
@@ -491,6 +581,8 @@ void Engine::handleEvents()
 			break;
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
 			if (imgui && imgui->wantCaptureMouse())
+				break;
+			if (m_benchmark.locksInput())
 				break;
 			if (!mouseCaptured || !chunkManager || paused)
 				break;
@@ -519,12 +611,92 @@ void Engine::handleEvents()
 
 void Engine::processInput(double dt)
 {
+	if (m_benchmark.locksInput())
+		return;
 	if (paused)
 		return;
 	if (imgui && imgui->wantCaptureKeyboard())
 		return;
 	const bool *keys = SDL_GetKeyboardState(nullptr);
 	camera.processKeyboard(dt, keys);
+}
+
+void Engine::tickBenchmark(double dt)
+{
+	if (m_benchmark.phase() == BenchmarkPhase::Reloading)
+	{
+		const BenchmarkConfig &cfg = m_benchmark.config();
+		if (cfg.forceVsyncOff)
+		{
+			m_benchmark.markForceVsync(renderSettings.vsyncEnabled);
+			if (renderSettings.vsyncEnabled)
+				setVSync(false);
+		}
+		m_benchmark.setSettingsSnapshot(
+			renderSettings.maxRenderDistance, windowWidth, windowHeight,
+			renderSettings.vsyncEnabled,
+			vkContext ? vkContext->getDeviceProperties().deviceName : nullptr);
+
+		reloadWorld(cfg.seed);
+		m_benchmark.onWorldReady(camera.getPosition());
+		// Place camera on first path point
+		m_benchmark.tick(0.0, camera);
+		return;
+	}
+
+	if (m_benchmark.phase() == BenchmarkPhase::Warmup ||
+		m_benchmark.phase() == BenchmarkPhase::Running)
+	{
+		m_benchmark.tick(dt, camera);
+	}
+
+	// Restore VSync after done/cancel if we forced it off
+	if (!m_benchmark.isActive() && m_benchmark.needsVsyncRestore())
+	{
+		setVSync(m_benchmark.prevVsync());
+		m_benchmark.clearVsyncRestore();
+	}
+}
+
+void Engine::sampleBenchmarkFrame()
+{
+	if (m_benchmark.phase() != BenchmarkPhase::Running)
+		return;
+
+	Profiler &prof = GetProfiler();
+	uint64_t tJobs = 0, mJobs = 0, lJobs = 0;
+	float tMs = 0.f, mMs = 0.f, lMs = 0.f;
+	const int wc = prof.workerSnapshotCount();
+	const WorkerSnapshot *ws = prof.workerSnapshots();
+	for (int i = 0; i < wc; ++i)
+	{
+		if (!ws[i].name)
+			continue;
+		if (std::strcmp(ws[i].name, "TerrainGen") == 0)
+		{
+			tJobs = ws[i].count;
+			tMs = ws[i].totalMs;
+		}
+		else if (std::strcmp(ws[i].name, "MeshBuild") == 0)
+		{
+			mJobs = ws[i].count;
+			mMs = ws[i].totalMs;
+		}
+		else if (std::strcmp(ws[i].name, "MeshLOD") == 0)
+		{
+			lJobs = ws[i].count;
+			lMs = ws[i].totalMs;
+		}
+	}
+
+	m_benchmark.sampleFrame(
+		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),
+		prof.lastScopeMs("Record"), prof.lastScopeMs("ImGui"), prof.lastScopeMs("Present"),
+		prof.lastScopeMs("Visibility"), prof.lastScopeMs("MeshUpload"),
+		chunkManager ? chunkManager->chunkCount() : 0, drawList.size(),
+		chunkManager ? chunkManager->pendingLoadCount() : 0,
+		chunkManager ? chunkManager->pendingGenJobs() : 0,
+		chunkManager ? chunkManager->pendingMeshJobs() : 0, tJobs, tMs, mJobs, mMs, lJobs, lMs);
 }
 
 void Engine::drawUi()
@@ -557,6 +729,7 @@ void Engine::drawUi()
 	f.drawCount = drawList.size();
 	f.windowW = windowWidth;
 	f.windowH = windowHeight;
+	f.benchmark = &m_benchmark;
 	if (vkContext)
 	{
 		f.deviceName = vkContext->getDeviceProperties().deviceName;
@@ -586,6 +759,8 @@ void Engine::run()
 
 	while (running)
 	{
+		GetProfiler().beginFrame();
+
 		const double currentFrame = SDL_GetTicks() / 1000.0;
 		deltaTime = currentFrame - lastFrame;
 		lastFrame = currentFrame;
@@ -597,30 +772,56 @@ void Engine::run()
 			frameCount = 0;
 			lastTime = currentFrame;
 			char title[192];
+			char benchTag[48]{};
+			if (m_benchmark.isActive())
+			{
+				std::snprintf(benchTag, sizeof(benchTag), " [BENCH %.0fs]",
+							  m_benchmark.remainingMeasureSec());
+			}
 			std::snprintf(title, sizeof(title),
-						  "ft_vox — %.0f FPS | chunks %zu | draw %zu | seed %d%s",
+						  "ft_vox — %.0f FPS | chunks %zu | draw %zu | seed %d%s%s",
 						  fps,
 						  chunkManager ? chunkManager->chunkCount() : 0,
 						  drawList.size(), seed,
-						  paused ? " [PAUSED]" : "");
+						  paused ? " [PAUSED]" : "", benchTag);
 			SDL_SetWindowTitle(window, title);
 		}
 
-		handleEvents();
-		processInput(deltaTime);
-		tickDayCycle(deltaTime);
+		{
+			PROFILE_SCOPE("Events");
+			handleEvents();
+		}
+		{
+			PROFILE_SCOPE("Benchmark");
+			tickBenchmark(deltaTime);
+		}
+		{
+			PROFILE_SCOPE("Input");
+			processInput(deltaTime);
+		}
+		{
+			PROFILE_SCOPE("DayCycle");
+			tickDayCycle(deltaTime);
+		}
 		tickStreaming(deltaTime);
-		updateHighlight();
+		{
+			PROFILE_SCOPE("Highlight");
+			updateHighlight();
+		}
 
 		int pixelW = 0, pixelH = 0;
 		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
 		if (pixelW == 0 || pixelH == 0)
+		{
+			GetProfiler().endFrame();
 			continue;
+		}
 
 		if (framebufferResized ||
 			static_cast<uint32_t>(pixelW) != swapchain->getExtent().width ||
 			static_cast<uint32_t>(pixelH) != swapchain->getExtent().height)
 		{
+			PROFILE_SCOPE("Resize");
 			swapchain->recreate(static_cast<uint32_t>(pixelW), static_cast<uint32_t>(pixelH));
 			terrain->onSwapchainRecreate(*swapchain);
 			windowWidth = pixelW;
@@ -629,10 +830,14 @@ void Engine::run()
 		}
 
 		uint32_t imageIndex = 0;
-		if (!terrain->beginAcquire(*swapchain, imageIndex, frameIndex))
 		{
-			framebufferResized = true;
-			continue;
+			PROFILE_SCOPE("Acquire");
+			if (!terrain->beginAcquire(*swapchain, imageIndex, frameIndex))
+			{
+				framebufferResized = true;
+				GetProfiler().endFrame();
+				continue;
+			}
 		}
 
 		// Frame slot is free (fence waited): recycle retired GPU buffers + reset staging slice.
@@ -641,45 +846,68 @@ void Engine::run()
 
 		if (imgui)
 		{
+			PROFILE_SCOPE("ImGui");
 			imgui->beginFrame();
 			drawUi();
 			imgui->endFrame();
 		}
 
-		const float farPlane = static_cast<float>(renderSettings.maxRenderDistance) * 1.25f;
-		terrain->updateFrameUBO(frameIndex, camera,
-								static_cast<float>(pixelW), static_cast<float>(pixelH), farPlane,
-								static_cast<float>(currentFrame), shaderParams);
+		{
+			PROFILE_SCOPE("UpdateUBO");
+			const float farPlane = static_cast<float>(renderSettings.maxRenderDistance) * 1.25f;
+			terrain->updateFrameUBO(frameIndex, camera,
+									static_cast<float>(pixelW), static_cast<float>(pixelH), farPlane,
+									static_cast<float>(currentFrame), shaderParams);
+		}
 
 		const int uploadBudget = uploadBudgetThisFrame;
-		terrain->recordFrame(
-			frameIndex, imageIndex, *swapchain, drawList, shadowList, clearColor,
-			[&](VkCommandBuffer cmd) {
-				if (!chunkManager || uploadBudget <= 0 || paused)
-					return;
-				const int n = chunkManager->uploadPendingMeshes(
-					vkContext->getAllocator(), stagingRing, cmd, resourceRetire, camera, uploadBudget);
-				if (n <= 0)
-					return;
-				// Make staged mesh data visible to vertex/index fetch in later passes.
-				VkMemoryBarrier barrier{};
-				barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-				barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-				barrier.dstAccessMask =
-					VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
-				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-									 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &barrier, 0, nullptr,
-									 0, nullptr);
-			},
-			[&](VkCommandBuffer cmd) {
-				if (imgui)
-					imgui->recordDraw(cmd);
-			});
+		{
+			PROFILE_SCOPE("Record");
+			terrain->recordFrame(
+				frameIndex, imageIndex, *swapchain, drawList, shadowList, clearColor,
+				[&](VkCommandBuffer cmd) {
+					PROFILE_SCOPE("MeshUpload");
+					if (!chunkManager || uploadBudget <= 0 || paused)
+						return;
+					const int n = chunkManager->uploadPendingMeshes(
+						vkContext->getAllocator(), stagingRing, cmd, resourceRetire, camera, uploadBudget);
+					if (n <= 0)
+						return;
+					// Make staged mesh data visible to vertex/index fetch in later passes.
+					VkMemoryBarrier barrier{};
+					barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+					barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+					barrier.dstAccessMask =
+						VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
+					vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+										 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &barrier, 0, nullptr,
+										 0, nullptr);
+				},
+				[&](VkCommandBuffer cmd) {
+					if (imgui)
+						imgui->recordDraw(cmd);
+				});
+		}
 
-		if (!terrain->submitPresent(*swapchain, imageIndex, frameIndex))
-			framebufferResized = true;
+		{
+			PROFILE_SCOPE("Present");
+			if (!terrain->submitPresent(*swapchain, imageIndex, frameIndex))
+				framebufferResized = true;
+		}
 
 		frameIndex = (frameIndex + 1) % TerrainRenderer::kMaxFramesInFlight;
 		++frameNumber;
+
+		GetProfiler().endFrame();
+
+		// Sync legacy RenderTiming from the frame we just closed (Streaming panel).
+		renderTiming.frustumCulling = GetProfiler().lastScopeMs("Visibility");
+		renderTiming.chunkGeneration = GetProfiler().lastScopeMs("GenDispatch");
+		renderTiming.meshGeneration = GetProfiler().lastScopeMs("MeshDispatch");
+		renderTiming.chunkRendering = GetProfiler().lastScopeMs("MeshUpload");
+		renderTiming.uiRendering = GetProfiler().lastScopeMs("ImGui");
+		renderTiming.totalFrame = GetProfiler().lastFrameMs();
+
+		sampleBenchmarkFrame();
 	}
 }

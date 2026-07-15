@@ -1,4 +1,5 @@
 #include "Renderer/TerrainRenderer.hpp"
+#include "Engine/Profiler.hpp"
 #include "Vulkan/VkShader.hpp"
 #include "Vulkan/VkUpload.hpp"
 
@@ -642,6 +643,7 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 		throw std::runtime_error("Failed to begin terrain command buffer");
 
 	// Mesh staging copies (same queue, before any vertex use).
+	// Engine wraps preRecord with PROFILE_SCOPE("MeshUpload").
 	if (preRecord)
 		preRecord(f.cmd);
 
@@ -649,6 +651,7 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 
 	// ========== Shadow pass ==========
 	{
+		PROFILE_SCOPE("Shadow");
 		VkImageMemoryBarrier toDepth{};
 		toDepth.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		toDepth.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -709,6 +712,7 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 
 	// ========== HDR scene pass (opaque + water) ==========
 	{
+		PROFILE_SCOPE("Scene");
 		VkImageMemoryBarrier toColor{};
 		toColor.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		toColor.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -816,30 +820,37 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 	}
 
 	// ========== Sky MRT (HDR + god-ray source) ==========
-	m_post.recordSky(f.cmd, f.descriptorSet0, extent);
-
-	// ========== Post: bloom / god rays / composite → swapchain ==========
-	const auto *ubo = static_cast<const FrameUBO *>(f.uboMapped);
-	glm::vec4 sunClip = ubo->projection * ubo->view * glm::vec4(m_lastCamPos + glm::vec3(ubo->sunDir) * 500.f, 1.f);
-	glm::vec2 sunScreen(0.5f, 0.5f);
-	float sunVisibility = 0.f;
-	if (sunClip.w > 0.f)
 	{
-		glm::vec3 ndc = glm::vec3(sunClip) / sunClip.w;
-		// Account for negative viewport Y flip in main pass (screen Y is flipped vs NDC)
-		// Same UV space as the fullscreen post pass (no extra Y flip).
-		sunScreen = glm::vec2(ndc.x * 0.5f + 0.5f, ndc.y * 0.5f + 0.5f);
-		sunVisibility = glm::smoothstep(-0.10f, 0.04f, ubo->sunDir.y);
-		if (sunScreen.x < 0.f || sunScreen.x > 1.f || sunScreen.y < 0.f || sunScreen.y > 1.f)
-			sunVisibility = 0.f;
+		PROFILE_SCOPE("Sky");
+		m_post.recordSky(f.cmd, f.descriptorSet0, extent);
 	}
 
-	m_post.recordPost(f.cmd, swapchain.getImages()[imageIndex], swapchain.getImageViews()[imageIndex],
-					  extent, f.descriptorSet0, m_postSettings, sunScreen, sunVisibility, m_time);
+	// ========== Post: bloom / god rays / composite → swapchain ==========
+	{
+		PROFILE_SCOPE("Post");
+		const auto *ubo = static_cast<const FrameUBO *>(f.uboMapped);
+		glm::vec4 sunClip = ubo->projection * ubo->view * glm::vec4(m_lastCamPos + glm::vec3(ubo->sunDir) * 500.f, 1.f);
+		glm::vec2 sunScreen(0.5f, 0.5f);
+		float sunVisibility = 0.f;
+		if (sunClip.w > 0.f)
+		{
+			glm::vec3 ndc = glm::vec3(sunClip) / sunClip.w;
+			// Account for negative viewport Y flip in main pass (screen Y is flipped vs NDC)
+			// Same UV space as the fullscreen post pass (no extra Y flip).
+			sunScreen = glm::vec2(ndc.x * 0.5f + 0.5f, ndc.y * 0.5f + 0.5f);
+			sunVisibility = glm::smoothstep(-0.10f, 0.04f, ubo->sunDir.y);
+			if (sunScreen.x < 0.f || sunScreen.x > 1.f || sunScreen.y < 0.f || sunScreen.y > 1.f)
+				sunVisibility = 0.f;
+		}
+
+		m_post.recordPost(f.cmd, swapchain.getImages()[imageIndex], swapchain.getImageViews()[imageIndex],
+						  extent, f.descriptorSet0, m_postSettings, sunScreen, sunVisibility, m_time);
+	}
 
 	// ========== ImGui on swapchain (load) ==========
 	if (imguiDraw)
 	{
+		PROFILE_SCOPE("ImGuiDraw");
 		VkRenderingAttachmentInfo colorAtt{};
 		colorAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
 		colorAtt.imageView = swapchain.getImageViews()[imageIndex];

@@ -23,6 +23,8 @@ public:
 	glm::mat4 getProjectionMatrix(float screenWidth, float screenHeight, float farPlane) const;
 	glm::vec3 getPosition() const;
 	void setPosition(const glm::vec3 &pos) { position = pos; }
+	/// Set look orientation (degrees). Pitch clamped to ±89.
+	void setYawPitch(float newYaw, float newPitch);
 	glm::vec3 getFront() const;
 	float getYaw() const { return yaw; }
 	float getPitch() const { return pitch; }

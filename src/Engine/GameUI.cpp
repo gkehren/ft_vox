@@ -1,5 +1,6 @@
 #include "Engine/GameUI.hpp"
 
+#include <Engine/Profiler.hpp>
 #include <imgui/imgui.h>
 #include <imgui/imgui_impl_vulkan.h>
 #include <SDL3/SDL.h>
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <string>
 #include <array>
+#include <vector>
 
 namespace
 {
@@ -110,6 +112,9 @@ bool GameUI::handleShortcut(int sdlKeycode, GameUIFrame &frame)
 	case SDLK_F6:
 		m_showOverlayHints = !m_showOverlayHints;
 		return true;
+	case SDLK_F7:
+		m_showProfiler = !m_showProfiler;
+		return true;
 	case SDLK_F10:
 		if (frame.render && frame.setVSync)
 		{
@@ -140,10 +145,16 @@ void GameUI::draw(GameUIFrame &frame)
 		drawGraphics(frame);
 	if (m_showStreaming)
 		drawStreaming(frame);
+	if (m_showProfiler)
+		drawProfiler(frame);
 	if (m_showWorld)
 		drawWorld(frame);
 	if (m_showHelp)
 		drawHelp();
+
+	// Report can stay open even if Profiler panel is closed.
+	if (frame.benchmark && frame.benchmark->showReport() && frame.benchmark->report().valid)
+		drawBenchmarkReport(frame);
 
 	if (m_showOverlayHints && frame.mouseCaptured && *frame.mouseCaptured)
 		drawOverlayHints(frame);
@@ -158,6 +169,7 @@ void GameUI::drawMenuBar(GameUIFrame &frame)
 			ImGui::MenuItem("HUD (F1)", "F1", &m_showHud);
 			ImGui::MenuItem("Graphics (F2)", "F2", &m_showGraphics);
 			ImGui::MenuItem("Streaming (F3)", "F3", &m_showStreaming);
+			ImGui::MenuItem("Profiler (F7)", "F7", &m_showProfiler);
 			ImGui::MenuItem("World / Biome (F4)", "F4", &m_showWorld);
 			ImGui::MenuItem("Help / Keys (F5)", "F5", &m_showHelp);
 			ImGui::MenuItem("On-screen hints (F6)", "F6", &m_showOverlayHints);
@@ -491,9 +503,9 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 							   frame.pool->rejectCount());
 	}
 
-	if (frame.timing)
 	{
 		ImGui::SeparatorText("CPU timings (ms)");
+		Profiler &prof = GetProfiler();
 		if (ImGui::BeginTable("perf", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 		{
 			ImGui::TableSetupColumn("Stage");
@@ -506,12 +518,17 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 				ImGui::TableNextColumn();
 				ImGui::Text("%.2f", v);
 			};
-			row("Frustum", frame.timing->frustumCulling);
-			row("Generation dispatch", frame.timing->chunkGeneration);
-			row("Mesh dispatch", frame.timing->meshGeneration);
-			row("Frame total (approx)", frame.frameMs);
+			row("Visibility", prof.lastScopeMs("Visibility"));
+			row("Gen dispatch", prof.lastScopeMs("GenDispatch"));
+			row("Mesh dispatch", prof.lastScopeMs("MeshDispatch"));
+			row("Mesh upload", prof.lastScopeMs("MeshUpload"));
+			row("Streaming", prof.lastScopeMs("Streaming"));
+			row("Acquire (fence)", prof.lastScopeMs("Acquire"));
+			row("Record", prof.lastScopeMs("Record"));
+			row("Frame total", prof.lastFrameMs() > 0.f ? prof.lastFrameMs() : frame.frameMs);
 			ImGui::EndTable();
 		}
+		ImGui::TextDisabled("Full hierarchy + graph: Profiler (F7)");
 	}
 
 	if (frame.deviceName)
@@ -523,6 +540,394 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 					VK_VERSION_MINOR(frame.vkApiVersion),
 					frame.validation ? "on" : "off");
 	}
+
+	ImGui::End();
+}
+
+void GameUI::drawProfiler(GameUIFrame &frame)
+{
+	ImGui::SetNextWindowSize(ImVec2(480, 560), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Profiler", &m_showProfiler))
+	{
+		ImGui::End();
+		return;
+	}
+
+	Profiler &prof = GetProfiler();
+
+	bool capturing = prof.enabled();
+	if (ImGui::Checkbox("Capture", &capturing))
+		prof.setEnabled(capturing);
+	ImGui::SameLine();
+	if (ImGui::Button("Clear history"))
+		prof.clearHistory();
+	ImGui::SameLine();
+	ImGui::TextDisabled("CPU scopes · previous frame");
+
+	const float frameMs = prof.lastFrameMs() > 0.f ? prof.lastFrameMs() : frame.frameMs;
+	const float avgMs = prof.avgFrameMs() > 0.f ? prof.avgFrameMs() : frameMs;
+	const float fpsEst = prof.fpsEstimate() > 0.f ? prof.fpsEstimate() : frame.fps;
+	const float p1 = prof.onePercentLowMs();
+
+	ImGui::SeparatorText("Frame");
+	ImGui::Text("%.1f FPS  |  %.2f ms  |  avg %.2f ms", fpsEst, frameMs, avgMs);
+	if (p1 > 0.f)
+		ImGui::Text("1%% low (slow frames): %.2f ms  (~%.0f FPS)", p1, p1 > 1e-4f ? 1000.f / p1 : 0.f);
+
+	// Frame-time history graph (chronological order)
+	{
+		const int n = prof.historyCount();
+		std::vector<float> ordered;
+		ordered.reserve(static_cast<size_t>(n > 0 ? n : 1));
+		if (n > 0)
+		{
+			const float *hist = prof.frameHistory();
+			const int write = prof.historyWriteIndex();
+			const int start = (n < Profiler::kHistorySize) ? 0 : write;
+			for (int i = 0; i < n; ++i)
+				ordered.push_back(hist[(start + i) % Profiler::kHistorySize]);
+		}
+		else
+		{
+			ordered.push_back(frameMs);
+		}
+
+		float maxY = 16.7f;
+		for (float v : ordered)
+			maxY = std::max(maxY, v * 1.1f);
+		maxY = std::max(maxY, 33.3f);
+
+		ImGui::PlotLines("##ft", ordered.data(), static_cast<int>(ordered.size()), 0,
+						 nullptr, 0.f, maxY, ImVec2(-1.f, 80.f));
+		// Budget guides
+		ImGui::TextDisabled("Graph scale 0–%.0f ms  (16.7 = 60 FPS, 33.3 = 30 FPS)", maxY);
+	}
+
+	// Hierarchy
+	ImGui::SeparatorText("Hierarchy (last frame)");
+	const float denom = frameMs > 1e-4f ? frameMs : 1.f;
+	if (ImGui::BeginTable("scopes", 4,
+						  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
+						  ImVec2(0.f, 220.f)))
+	{
+		ImGui::TableSetupColumn("Scope", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 56.f);
+		ImGui::TableSetupColumn("%", ImGuiTableColumnFlags_WidthFixed, 48.f);
+		ImGui::TableSetupColumn("bar", ImGuiTableColumnFlags_WidthFixed, 100.f);
+		ImGui::TableHeadersRow();
+
+		const int count = prof.lastEntryCount();
+		const ProfileEntry *entries = prof.lastEntries();
+		for (int i = 0; i < count; ++i)
+		{
+			const ProfileEntry &e = entries[i];
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			// Indent by depth
+			if (e.depth > 0)
+			{
+				ImGui::Dummy(ImVec2(static_cast<float>(e.depth) * 12.f, 0.f));
+				ImGui::SameLine(0.f, 0.f);
+			}
+			ImGui::TextUnformatted(e.name ? e.name : "?");
+
+			ImGui::TableNextColumn();
+			const float ms = e.durationMs;
+			ImVec4 col(0.55f, 0.9f, 0.55f, 1.f);
+			if (ms >= 8.f)
+				col = ImVec4(1.f, 0.4f, 0.35f, 1.f);
+			else if (ms >= 2.f)
+				col = ImVec4(1.f, 0.85f, 0.35f, 1.f);
+			ImGui::TextColored(col, "%.2f", ms);
+
+			ImGui::TableNextColumn();
+			const float pct = 100.f * ms / denom;
+			ImGui::Text("%.0f", pct);
+
+			ImGui::TableNextColumn();
+			const float frac = std::clamp(ms / denom, 0.f, 1.f);
+			ImGui::ProgressBar(frac, ImVec2(-1.f, 0.f), "");
+		}
+		if (count == 0)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::TextDisabled("No samples yet — wait a frame or enable Capture");
+		}
+		ImGui::EndTable();
+	}
+
+	// Worker jobs
+	ImGui::SeparatorText("Worker CPU (thread pool)");
+	ImGui::TextDisabled("Totals can exceed frame time (parallel workers).");
+	const int wc = prof.workerSnapshotCount();
+	if (wc == 0)
+	{
+		ImGui::TextDisabled("No worker samples this frame");
+	}
+	else if (ImGui::BeginTable("workers", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+	{
+		ImGui::TableSetupColumn("Job");
+		ImGui::TableSetupColumn("count");
+		ImGui::TableSetupColumn("avg ms");
+		ImGui::TableSetupColumn("total ms");
+		ImGui::TableHeadersRow();
+		const WorkerSnapshot *ws = prof.workerSnapshots();
+		for (int i = 0; i < wc; ++i)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(ws[i].name ? ws[i].name : "?");
+			ImGui::TableNextColumn();
+			ImGui::Text("%llu", static_cast<unsigned long long>(ws[i].count));
+			ImGui::TableNextColumn();
+			ImGui::Text("%.2f", ws[i].avgMs);
+			ImGui::TableNextColumn();
+			ImGui::Text("%.2f", ws[i].totalMs);
+		}
+		ImGui::EndTable();
+	}
+
+	// Pipeline snapshot
+	ImGui::SeparatorText("Pipeline snapshot");
+	if (frame.chunks)
+	{
+		ImGui::Text("Chunks %zu  |  draw %zu  |  q load/gen/mesh %zu / %zu / %zu",
+					frame.chunks->chunkCount(), frame.drawCount,
+					frame.chunks->pendingLoadCount(), frame.chunks->pendingGenJobs(),
+					frame.chunks->pendingMeshJobs());
+	}
+	if (frame.pool)
+	{
+		ImGui::Text("Pool free %zu / %zu  |  acquired %zu",
+					frame.pool->freeCount(), frame.pool->capacity(), frame.pool->acquiredCount());
+	}
+	ImGui::Text("Shadow list: use Streaming panel for budgets");
+
+	// Spikes
+	const int sc = prof.spikeCount();
+	if (sc > 0)
+	{
+		ImGui::SeparatorText("Spikes (>20 ms)");
+		const SpikeRecord *sp = prof.spikes();
+		for (int i = sc - 1; i >= 0; --i)
+		{
+			ImGui::Text("%.1f ms  top: %s (%.1f ms)", sp[i].frameMs,
+						sp[i].topScope ? sp[i].topScope : "?", sp[i].topMs);
+		}
+	}
+
+	// -------- Benchmark --------
+	if (frame.benchmark)
+	{
+		Benchmark &bench = *frame.benchmark;
+		BenchmarkConfig &cfg = bench.config();
+		ImGui::SeparatorText("Benchmark");
+		ImGui::TextDisabled("Reload seed, orbit path, scored report.");
+
+		const bool active = bench.isActive();
+		ImGui::BeginDisabled(active);
+		ImGui::InputInt("Seed", &cfg.seed);
+		if (cfg.seed <= 0)
+			cfg.seed = 42;
+		ImGui::SliderFloat("Duration (s)", &cfg.durationSec, 10.f, 180.f, "%.0f");
+		ImGui::SliderFloat("Warmup (s)", &cfg.warmupSec, 0.f, 15.f, "%.1f");
+		ImGui::SliderFloat("Orbit radius", &cfg.pathRadius, 64.f, 320.f, "%.0f");
+		ImGui::SliderInt("Orbits", &cfg.pathOrbits, 1, 6);
+		ImGui::Checkbox("Force VSync off", &cfg.forceVsyncOff);
+		ImGui::TextUnformatted("Path: Orbit (look at spawn)");
+		ImGui::EndDisabled();
+
+		if (!active)
+		{
+			if (ImGui::Button("Start benchmark", ImVec2(-1.f, 0.f)))
+				bench.requestStart();
+		}
+		else
+		{
+			const char *phaseStr = "…";
+			switch (bench.phase())
+			{
+			case BenchmarkPhase::Reloading:
+				phaseStr = "Reloading world…";
+				break;
+			case BenchmarkPhase::Warmup:
+				phaseStr = "Warmup (streaming fill)";
+				break;
+			case BenchmarkPhase::Running:
+				phaseStr = "Measuring";
+				break;
+			default:
+				break;
+			}
+			ImGui::Text("%s", phaseStr);
+			ImGui::ProgressBar(bench.totalProgress(), ImVec2(-1.f, 0.f));
+			ImGui::Text("Elapsed %.1fs  |  remain measure %.1fs  |  FPS ~%.0f",
+						bench.elapsedSec(), bench.remainingMeasureSec(), frame.fps);
+			if (ImGui::Button("Cancel", ImVec2(-1.f, 0.f)))
+				bench.cancel();
+		}
+
+		if (bench.report().valid && !active)
+		{
+			if (ImGui::Button("Show last report"))
+				bench.setShowReport(true);
+			ImGui::SameLine();
+			const BenchmarkReport &r = bench.report();
+			ImGui::Text("Last score: %d (%c)", r.score, r.grade);
+		}
+	}
+
+	ImGui::End();
+}
+
+void GameUI::drawBenchmarkReport(GameUIFrame &frame)
+{
+	if (!frame.benchmark)
+		return;
+	Benchmark &bench = *frame.benchmark;
+	const BenchmarkReport &r = bench.report();
+	bool open = true;
+	ImGui::SetNextWindowSize(ImVec2(440, 520), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Benchmark Report", &open))
+	{
+		ImGui::End();
+		if (!open)
+			bench.setShowReport(false);
+		return;
+	}
+	if (!open)
+	{
+		bench.setShowReport(false);
+		ImGui::End();
+		return;
+	}
+
+	ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.3f, 1.f), "SCORE  %d  /  10000", r.score);
+	ImGui::SameLine();
+	ImGui::Text("  Grade %c", r.grade);
+	ImGui::Text("Seed %d  |  %.0fs measure (+%.0fs warmup)  |  %d frames", r.seed, r.durationSec,
+				r.warmupSec, r.frames);
+
+	ImGui::SeparatorText("Frame times");
+	if (ImGui::BeginTable("bm_ft", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+	{
+		auto row = [](const char *k, const char *fmt, auto... args) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(k);
+			ImGui::TableNextColumn();
+			ImGui::Text(fmt, args...);
+		};
+		row("Avg FPS", "%.1f", r.avgFps);
+		row("1%% low FPS", "%.1f", r.onePercentLowFps);
+		row("Avg / min / max ms", "%.2f / %.2f / %.2f", r.avgMs, r.minMs, r.maxMs);
+		row("p50 / p95 / p99 ms", "%.2f / %.2f / %.2f", r.p50Ms, r.p95Ms, r.p99Ms);
+		row("Frames >16.7 ms", "%d", r.framesOver16ms);
+		row("Frames >33.3 ms", "%d", r.framesOver33ms);
+		ImGui::EndTable();
+	}
+
+	ImGui::SeparatorText("CPU scopes (avg ms)");
+	if (ImGui::BeginTable("bm_sc", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+	{
+		auto row = [](const char *k, float v) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(k);
+			ImGui::TableNextColumn();
+			ImGui::Text("%.2f", v);
+		};
+		row("Streaming", r.avgStreaming);
+		row("Visibility", r.avgVisibility);
+		row("Acquire", r.avgAcquire);
+		row("Record", r.avgRecord);
+		row("MeshUpload", r.avgMeshUpload);
+		row("ImGui", r.avgImGui);
+		row("Present", r.avgPresent);
+		ImGui::EndTable();
+	}
+
+	ImGui::SeparatorText("Worker jobs");
+	if (ImGui::BeginTable("bm_wk", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+	{
+		ImGui::TableSetupColumn("Job");
+		ImGui::TableSetupColumn("count");
+		ImGui::TableSetupColumn("avg ms");
+		ImGui::TableSetupColumn("total ms");
+		ImGui::TableHeadersRow();
+		auto wrow = [](const char *n, uint64_t c, float a, float t) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(n);
+			ImGui::TableNextColumn();
+			ImGui::Text("%llu", static_cast<unsigned long long>(c));
+			ImGui::TableNextColumn();
+			ImGui::Text("%.2f", a);
+			ImGui::TableNextColumn();
+			ImGui::Text("%.2f", t);
+		};
+		wrow("TerrainGen", r.terrainGenJobs, r.terrainGenAvgMs, r.terrainGenTotalMs);
+		wrow("MeshBuild", r.meshBuildJobs, r.meshBuildAvgMs, r.meshBuildTotalMs);
+		wrow("MeshLOD", r.meshLodJobs, r.meshLodAvgMs, r.meshLodTotalMs);
+		ImGui::EndTable();
+	}
+
+	ImGui::SeparatorText("Build / revision");
+	ImGui::Text("Revision: %s%s", r.revisionLabel.c_str(), r.gitDirty ? "  (dirty)" : "");
+	ImGui::Text("Branch: %s", r.gitBranch.c_str());
+	ImGui::TextWrapped("Describe: %s", r.gitDescribe.c_str());
+	ImGui::Text("Built (UTC): %s", r.buildUtc.c_str());
+
+	ImGui::SeparatorText("Peaks & settings");
+	ImGui::Text("Chunks %zu  |  draw %zu  |  queues %zu / %zu / %zu", r.peakChunks, r.peakDraw,
+				r.peakPendingLoad, r.peakPendingGen, r.peakPendingMesh);
+	ImGui::Text("View %d  |  %dx%d  |  VSync %s", r.viewDistance, r.windowW, r.windowH,
+				r.vsync ? "on" : "off");
+	if (!r.deviceName.empty())
+		ImGui::TextWrapped("%s", r.deviceName.c_str());
+
+	ImGui::Separator();
+	ImGui::TextWrapped(
+		"Score: 45%% avgFPS@60 + 15%% headroom + 30%% 1%%low@60 + 10%% stability; "
+		"up to -15%% for frames >33ms. Higher is better.");
+
+	if (ImGui::Button("Copy summary"))
+	{
+		const std::string text = bench.formatReportText();
+		ImGui::SetClipboardText(text.c_str());
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Save summary"))
+	{
+		const std::string path = bench.saveReportToFile("benchmarks");
+		if (path.empty())
+			ImGui::OpenPopup("bench_save_fail");
+		else
+			ImGui::OpenPopup("bench_save_ok");
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		bench.setShowReport(false);
+
+	if (ImGui::BeginPopup("bench_save_ok"))
+	{
+		ImGui::Text("Saved:");
+		ImGui::TextWrapped("%s", bench.lastSavedPath().c_str());
+		if (ImGui::Button("OK"))
+			ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+	if (ImGui::BeginPopup("bench_save_fail"))
+	{
+		ImGui::TextWrapped("Failed to write benchmarks/… (check cwd permissions).");
+		if (ImGui::Button("OK"))
+			ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+
+	if (!bench.lastSavedPath().empty())
+		ImGui::TextDisabled("Last save: %s", bench.lastSavedPath().c_str());
 
 	ImGui::End();
 }
@@ -625,6 +1030,7 @@ void GameUI::drawHelp()
 		helpRow("F4", "World / biome map");
 		helpRow("F5", "This help");
 		helpRow("F6", "On-screen hints");
+		helpRow("F7", "CPU profiler + benchmark");
 		helpRow("F10", "Toggle VSync");
 		helpRow("X (iso)", "Speed boost (isometric)");
 
@@ -652,7 +1058,7 @@ void GameUI::drawOverlayHints(GameUIFrame &frame)
 	if (ImGui::Begin("##hints", nullptr, flags))
 	{
 		const char *block = frame.selectedTexture ? textureName(*frame.selectedTexture) : "?";
-		ImGui::Text("C free mouse · F1–F5 panels · T block (%s) · LMB/RMB edit · B borders", block);
+		ImGui::Text("C free mouse · F1–F7 panels · T block (%s) · LMB/RMB edit · B borders", block);
 	}
 	ImGui::End();
 }
