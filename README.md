@@ -149,17 +149,29 @@ sudo apt install vulkan-validationlayers
 | B | Toggle chunk borders |
 | Esc | Release mouse (ImGui) |
 
+## Documentation
+
+| Doc | Contents |
+|-----|----------|
+| [`docs/vulkan-graphics.md`](docs/vulkan-graphics.md) | Vulkan setup, frame graph, passes, shaders, lighting/post |
+| [`docs/engine-architecture.md`](docs/engine-architecture.md) | Engine loop, settings/UI, chunks, streaming, terrain gen |
+| [`Agents.md`](Agents.md) | Short contributor-oriented project map |
+
 ## Project layout
 
 ```
 cmake/
   Dependencies.cmake   # multi-platform package resolution
+docs/
+  vulkan-graphics.md   # graphics architecture (authoritative)
+  engine-architecture.md
+  benchmarks/          # profiler dump artifacts
 src/
   Vulkan/              # Instance, device, swapchain, VMA, frames, shaders
-  Renderer/            # Terrain, shadows, water, post stack, overlays
-  Engine/              # Main loop, ImGui layer, input
-  Chunk/               # Voxels, meshing, terrain generation
-  Network/             # UDP client/server
+  Renderer/            # WorldRenderer, Shadow/Opaque/Water/Sky, PostStack, overlays
+  Engine/              # Main loop, ImGui layer, input, profiler
+  Chunk/               # Voxels, meshing, streaming, terrain generation
+  Network/             # UDP client/server (not wired into Engine UI)
   Camera/
 ressources/
   shaders/vulkan/      # GLSL sources (compiled to SPIR-V at build time)
