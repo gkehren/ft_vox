@@ -1,4 +1,6 @@
 #include "Renderer/PostStack.hpp"
+#include "Renderer/Lighting.hpp"
+#include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/VkShader.hpp"
 #include "Vulkan/VkUpload.hpp"
 #include "utils.hpp"
@@ -459,42 +461,14 @@ void PostStack::resize(uint32_t width, uint32_t height, VkFormat swapchainFormat
 	createTargets(width, height);
 }
 
-void PostStack::transitionColor(VkCommandBuffer cmd, VkImage image, VkImageLayout oldL, VkImageLayout newL,
-								VkAccessFlags srcA, VkAccessFlags dstA,
-								VkPipelineStageFlags srcS, VkPipelineStageFlags dstS)
-{
-	VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-	b.oldLayout = oldL;
-	b.newLayout = newL;
-	b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	b.image = image;
-	b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-	b.srcAccessMask = srcA;
-	b.dstAccessMask = dstA;
-	vkCmdPipelineBarrier(cmd, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
-}
 
-void PostStack::transitionDepth(VkCommandBuffer cmd, VkImage image, VkImageLayout oldL, VkImageLayout newL,
-								VkAccessFlags srcA, VkAccessFlags dstA,
-								VkPipelineStageFlags srcS, VkPipelineStageFlags dstS)
-{
-	VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-	b.oldLayout = oldL;
-	b.newLayout = newL;
-	b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	b.image = image;
-	b.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-	b.srcAccessMask = srcA;
-	b.dstAccessMask = dstA;
-	vkCmdPipelineBarrier(cmd, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
-}
 
 void PostStack::recordSky(VkCommandBuffer cmd, VkDescriptorSet frameSet0, VkExtent2D extent)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
 
-	transitionColor(cmd, m_godSource.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+	vkbar::cmdTransitionColor(cmd, m_godSource.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 					0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 					VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
@@ -557,13 +531,13 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 	const VkExtent2D half{hw, hh};
 
 	// HDR + god source + depth → shader read
-	transitionColor(cmd, m_hdr.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	vkbar::cmdTransitionColor(cmd, m_hdr.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-	transitionColor(cmd, m_godSource.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	vkbar::cmdTransitionColor(cmd, m_godSource.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-	transitionDepth(cmd, m_sceneDepth.image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	vkbar::cmdTransitionDepth(cmd, m_sceneDepth.image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 					VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 					VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
@@ -595,54 +569,31 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 		endRendering(cmd);
 	};
 
-	// --- SSAO half-res ---
+	// --- SSAO half-res (skip entirely when disabled — composite treats ao=1 via flag) ---
 	if (settings.ssaoEnabled)
 	{
-		transitionColor(cmd, m_ssao.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		vkbar::cmdTransitionColor(cmd, m_ssao.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 		SsaoPC spc{};
 		spc.p0 = glm::vec4(1.f / static_cast<float>(extent.width), 1.f / static_cast<float>(extent.height),
 						   settings.ssaoRadius, settings.ssaoBias);
-		// Mild intensity path (game default ~0.40; hard cap 0.85 in shader/helpers)
 		spc.p1 = glm::vec4(std::min(settings.ssaoIntensity, 0.85f), 0.1f, 1000.f, 0.f);
 		spc.invProj = glm::inverse(projection);
 		fsDraw(m_ssaoPipe, m_ssaoLayout, m_setSsao, m_ssao.view, half, &spc, sizeof(spc));
-		transitionColor(cmd, m_ssao.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-	}
-	else
-	{
-		transitionColor(cmd, m_ssao.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-		VkClearColorValue white{{1, 1, 1, 1}};
-		VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-		ca.imageView = m_ssao.view;
-		ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		ca.clearValue.color = white;
-		VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-		ri.renderArea = {{0, 0}, half};
-		ri.layerCount = 1;
-		ri.colorAttachmentCount = 1;
-		ri.pColorAttachments = &ca;
-		beginRendering(cmd, &ri);
-		endRendering(cmd);
-		transitionColor(cmd, m_ssao.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		vkbar::cmdTransitionColor(cmd, m_ssao.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	}
 
-	// Bloom
+	// Bloom (skip when disabled)
 	if (settings.bloomEnabled)
 	{
-		transitionColor(cmd, m_bloom[0].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		vkbar::cmdTransitionColor(cmd, m_bloom[0].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 		ExtractPC epc{};
 		epc.bloomThreshold = settings.bloomThreshold;
 		fsDraw(m_extractPipe, m_postLayout1, m_setExtract, m_bloom[0].view, half, &epc, sizeof(epc));
-		transitionColor(cmd, m_bloom[0].image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		vkbar::cmdTransitionColor(cmd, m_bloom[0].image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
@@ -653,46 +604,26 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 			for (int horizontal = 1; horizontal >= 0; --horizontal)
 			{
 				const int writeIdx = 1 - readIdx;
-				transitionColor(cmd, m_bloom[writeIdx].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				vkbar::cmdTransitionColor(cmd, m_bloom[writeIdx].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 								0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 				BlurPC bpc{};
 				bpc.data = glm::vec4(1.f / static_cast<float>(hw), 1.f / static_cast<float>(hh),
 									 horizontal ? 1.f : 0.f, 0.f);
 				fsDraw(m_blurPipe, m_postLayout1, m_setBlur[readIdx], m_bloom[writeIdx].view, half, &bpc, sizeof(bpc));
-				transitionColor(cmd, m_bloom[writeIdx].image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				vkbar::cmdTransitionColor(cmd, m_bloom[writeIdx].image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 								VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 								VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 				readIdx = writeIdx;
 			}
 		}
 	}
-	else
-	{
-		transitionColor(cmd, m_bloom[0].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-		VkClearColorValue black{{0, 0, 0, 0}};
-		VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-		ca.imageView = m_bloom[0].view;
-		ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		ca.clearValue.color = black;
-		VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-		ri.renderArea = {{0, 0}, half};
-		ri.layerCount = 1;
-		ri.colorAttachmentCount = 1;
-		ri.pColorAttachments = &ca;
-		beginRendering(cmd, &ri);
-		endRendering(cmd);
-		transitionColor(cmd, m_bloom[0].image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-	}
 
-	// Depth-aware god rays
-	if (settings.godRaysEnabled && sunVisibility > 0.001f)
+	// Depth-aware god rays — composite samples only when this pass actually ran
+	// (lighting::godRaysPassActive; never sample UNDEFINED/stale m_godRays at night).
+	const bool godRaysProduced = lighting::godRaysPassActive(settings.godRaysEnabled, sunVisibility);
+	if (godRaysProduced)
 	{
-		transitionColor(cmd, m_godRays.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		vkbar::cmdTransitionColor(cmd, m_godRays.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 		GodPC gpc{};
 		gpc.p0 = glm::vec4(sunScreen.x, sunScreen.y, settings.godRaysDensity, settings.godRaysWeight);
@@ -702,42 +633,20 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 						   settings.godRaysBoostPreview ? 1.f : 0.f,
 						   settings.godRaysDepthOcclusion ? 1.f : 0.f);
 		fsDraw(m_godRaysPipe, m_godLayout, m_setGodRays, m_godRays.view, half, &gpc, sizeof(gpc));
-		transitionColor(cmd, m_godRays.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-	}
-	else
-	{
-		transitionColor(cmd, m_godRays.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-		VkClearColorValue black{{0, 0, 0, 0}};
-		VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-		ca.imageView = m_godRays.view;
-		ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		ca.clearValue.color = black;
-		VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-		ri.renderArea = {{0, 0}, half};
-		ri.layerCount = 1;
-		ri.colorAttachmentCount = 1;
-		ri.pColorAttachments = &ca;
-		beginRendering(cmd, &ri);
-		endRendering(cmd);
-		transitionColor(cmd, m_godRays.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		vkbar::cmdTransitionColor(cmd, m_godRays.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	}
 
 	// Composite
-	transitionColor(cmd, swapchainImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+	vkbar::cmdTransitionColor(cmd, swapchainImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 					0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 	CompPC cpc{};
 	cpc.p0 = glm::vec4(settings.exposure, settings.bloomIntensity, settings.gamma,
 					   static_cast<float>(settings.toneMapper));
 	cpc.p1 = glm::vec4(settings.bloomEnabled ? 1.f : 0.f,
 					   settings.fxaaEnabled ? 1.f : 0.f,
-					   settings.godRaysEnabled ? 1.f : 0.f,
+					   godRaysProduced ? 1.f : 0.f,
 					   settings.postSaturation);
 	cpc.p2 = glm::vec4(1.f / static_cast<float>(extent.width),
 					   1.f / static_cast<float>(extent.height),

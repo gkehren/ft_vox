@@ -7,7 +7,7 @@
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Renderer/OverlayRenderer.hpp>
-#include <Renderer/TerrainRenderer.hpp>
+#include <Renderer/WorldRenderer.hpp>
 #include <Vulkan/VkContext.hpp>
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/VkImage.hpp>
@@ -26,7 +26,7 @@ struct GameUIFrame
 	ChunkManager *chunks{nullptr};
 	ChunkPool *pool{nullptr};
 	TerrainGenerator *generator{nullptr};
-	TerrainRenderer *terrain{nullptr};
+	WorldRenderer *worldRenderer{nullptr};
 	VkContext *vk{nullptr};
 	ImmediateCommands *imm{nullptr};
 

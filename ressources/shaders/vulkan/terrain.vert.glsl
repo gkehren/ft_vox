@@ -5,7 +5,7 @@ layout(location = 1) in uint aPackedData;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in uint aPackedBiomeColor;
 
-// Must match TerrainRenderer::FrameUBO (std140)
+// Must match src/Renderer/FrameUBO.hpp (std140, sizeof 528)
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4 view;
     mat4 projection;
@@ -23,13 +23,14 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 skyParams;       // time, day, sunset, night
     vec4 cascadeSplits;   // xyz split ends, w = count
     vec4 moonAmbient;     // rgb + strength
-    vec4 tier1Params;     // x=blockLightScale, y=emissiveScale, z=fogBaseY, w=underwater
+    vec4 lightingParams;     // x=blockLightScale, y=emissiveScale, z=fogBaseY, w=underwater
     vec4 waterParams;     // x=wave, y=refraction, z=specular, w=foam
-    vec4 postParams0;
-    vec4 postParams1;
-    vec4 postParams2;
-    vec4 postParams3;
 } frame;
+
+// Must match materials::MaterialTableUBO — x=wind, y=emissive, z=ice, w=flags
+layout(set = 0, binding = 1) uniform MaterialTable {
+    vec4 mats[256];
+} materialTable;
 
 layout(location = 0) out vec3 vFragPos;
 layout(location = 1) out vec3 vNormal;
@@ -51,23 +52,19 @@ const vec3 NORMALS[6] = vec3[](
     vec3(0.0, 0.0, -1.0)
 );
 
-// TextureType enum (utils.hpp) — wind ONLY on true foliage, never solid ground.
-const uint TEX_OAK_LEAVES = 8u;
-// (Do not wind GRASS_TOP/SIDE: solid grass cubes make the ground look like it sways.)
-
-// Subtle leaf canopy sway. Keep in sync with shadow.vert.
+// Foliage wind from material table (FoliageWind flag bit 0). Keep in sync with shadow.vert.
 vec3 applyFoliageWind(vec3 pos, uint texIdx, float time)
 {
-    // Strict whitelist: oak leaves only
-    if (texIdx != TEX_OAK_LEAVES)
+    vec4 m = materialTable.mats[texIdx];
+    float wind = m.x;
+    uint flags = uint(m.w + 0.5);
+    if ((flags & 1u) == 0u || wind < 1e-4)
         return pos;
 
-    const float wind = 0.14;
     float h = fract(sin(dot(pos.xz, vec2(12.9898, 78.233))) * 43758.5453);
     float phase = pos.x * 0.65 + pos.z * 0.55 + h * 6.2831853;
     float s = sin(time * 1.7 + phase) * 0.65 + sin(time * 2.35 + phase * 1.3) * 0.35;
     float c = cos(time * 1.4 + phase * 0.9);
-    // Slightly more sway higher in the world (tree canopy)
     float heightBoost = 0.70 + 0.30 * clamp((pos.y - 60.0) / 40.0, 0.0, 1.0);
     pos.x += s * wind * heightBoost;
     pos.z += c * wind * 0.55 * heightBoost;

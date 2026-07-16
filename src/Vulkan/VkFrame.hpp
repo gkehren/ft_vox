@@ -8,7 +8,7 @@
 #include <vector>
 
 /// Per-frame-in-flight resources: command pool/buffer, WSI sync.
-/// PR1 uses binary semaphores for acquire/present (WSI requirement).
+/// Single game-path owner for acquire / submit / present (no second copy in WorldRenderer).
 class VkFrameContext
 {
 public:
@@ -23,15 +23,22 @@ public:
 	void init(VkContext &context);
 	void shutdown();
 
-	/// Begin a frame: wait on in-flight fence, acquire swapchain image.
+	/// Wait on in-flight fence, acquire swapchain image, reset command buffer.
 	/// Returns false if the swapchain is out of date (caller should recreate).
 	bool beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex);
 
-	/// Clear the acquired swapchain image to `clearColor` and present.
-	/// Returns false if present reports out-of-date / suboptimal (recreate).
+	/// Submit the current frame's command buffer and present.
+	/// Returns false if present reports out-of-date / suboptimal.
+	bool submitAndPresent(VkSwapchain &swapchain, uint32_t imageIndex);
+
+	/// Legacy clear-only path (tests / smoke). Prefer record + submitAndPresent for the game.
 	bool endFrameClearAndPresent(VkSwapchain &swapchain, uint32_t imageIndex, const VkClearColorValue &clearColor);
 
+	uint32_t frameIndex() const { return m_currentFrame; }
 	uint32_t currentFrameIndex() const { return m_currentFrame; }
+	VkCommandBuffer commandBuffer() const { return m_frames[m_currentFrame].commandBuffer; }
+	/// Advance FIF index after a successful present (called by submitAndPresent).
+	void advanceFrame() { m_currentFrame = (m_currentFrame + 1) % kMaxFramesInFlight; }
 
 private:
 	struct FrameData
@@ -48,7 +55,6 @@ private:
 
 	VkContext *m_context{nullptr};
 	std::array<FrameData, kMaxFramesInFlight> m_frames{};
-	/// Per-swapchain-image fence to avoid writing an image still being presented.
 	std::vector<VkFence> m_imagesInFlight;
 	uint32_t m_currentFrame{0};
 };

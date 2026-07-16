@@ -14,15 +14,17 @@ layout(push_constant) uniform PC {
     float pad2;
 } pc;
 
-// Must match terrain.vert — oak leaves only (TextureType::OAK_LEAVES = 8)
+// Shadow has no material UBO; match materials::infoFor(OAK_LEAVES) wind policy.
+// OAK_LEAVES TextureType ordinal + wind strength from MaterialTable.hpp
 const uint TEX_OAK_LEAVES = 8u;
+const float kLeafWind = 0.14;
 
 vec3 applyFoliageWind(vec3 pos, uint texIdx, float time)
 {
     if (texIdx != TEX_OAK_LEAVES)
         return pos;
 
-    const float wind = 0.14;
+    const float wind = kLeafWind;
     float h = fract(sin(dot(pos.xz, vec2(12.9898, 78.233))) * 43758.5453);
     float phase = pos.x * 0.65 + pos.z * 0.55 + h * 6.2831853;
     float s = sin(time * 1.7 + phase) * 0.65 + sin(time * 2.35 + phase * 1.3) * 0.35;

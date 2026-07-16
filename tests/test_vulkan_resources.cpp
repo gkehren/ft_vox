@@ -1,10 +1,11 @@
 // Device smoke test for PR2 Vulkan resource helpers (VMA buffers/images + SPIR-V).
-// Requires a working ICD (MoltenVK on macOS).
+// Requires a working ICD (MoltenVK on macOS). Uses the same loader probe as Engine.
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
 #include <Vulkan/VkContext.hpp>
+#include <Vulkan/VkLoadLibrary.hpp>
 #include <Vulkan/VkResourceSmoke.hpp>
 
 #include <cstdio>
@@ -43,9 +44,11 @@ int main()
 		return EXIT_FAILURE;
 	}
 
-	if (!SDL_Vulkan_LoadLibrary(nullptr))
+	// Shipped helper — same load order as Engine (FT_VOX_VULKAN_LIB / Homebrew / default).
+	if (!loadVulkanLibrary(&std::cout))
 	{
-		std::cerr << "FAIL: SDL_Vulkan_LoadLibrary: " << SDL_GetError() << "\n";
+		std::cerr << "FAIL: SDL_Vulkan_LoadLibrary: " << SDL_GetError() << "\n"
+				  << vulkanLibraryLoadHint() << "\n";
 		SDL_Quit();
 		return EXIT_FAILURE;
 	}

@@ -112,26 +112,26 @@ target_link_libraries(test_visual_look PRIVATE
 add_test(NAME VisualLookDefaults COMMAND test_visual_look)
 
 # ---------------------------------------------------------------------------
-# Tier 1 graphics pure helpers (cascade / fog / moon / emissive / block light)
+# Render helpers (cascades / fog / lighting / post clamps)
 # ---------------------------------------------------------------------------
-add_executable(test_tier1_graphics
-    test_tier1_graphics.cpp
+add_executable(test_render_helpers
+    test_render_helpers.cpp
 )
 
-target_include_directories(test_tier1_graphics PRIVATE
+target_include_directories(test_render_helpers PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
-target_compile_definitions(test_tier1_graphics PRIVATE
+target_compile_definitions(test_render_helpers PRIVATE
     GLM_FORCE_DEPTH_ZERO_TO_ONE
     GLM_ENABLE_EXPERIMENTAL
 )
 
-target_link_libraries(test_tier1_graphics PRIVATE
+target_link_libraries(test_render_helpers PRIVATE
     glm
 )
 
-add_test(NAME Tier1GraphicsHelpers COMMAND test_tier1_graphics)
+add_test(NAME RenderHelpers COMMAND test_render_helpers)
 
 # ---------------------------------------------------------------------------
 # Phase D stream CPU helpers (load priority, occupancy, cave Y bounds)
