@@ -33,7 +33,7 @@ class Engine
 {
 public:
 	/// @param resourcePackRoot Minecraft pack root (`assets/minecraft/textures/block/…`).
-	///   Empty uses bundled textures, or FT_VOX_RESOURCE_PACK if set.
+	///   Empty uses bundled `ressources/textures/`. Caller (main) resolves CLI/env.
 	explicit Engine(std::string resourcePackRoot = {});
 	~Engine();
 
@@ -46,6 +46,22 @@ public:
 
 	/// Recreate terrain for seed (device idle). Used by benchmark and tools.
 	void reloadWorld(int newSeed);
+
+	/// Result of applying a pack (atlas is still usable when pack is invalid — bundled used).
+	struct ResourcePackApplyResult
+	{
+		bool atlasOk{false};	 ///< GPU atlas ready
+		bool isError{false};	 ///< invalid pack or hard failure
+		bool isWarning{false};	 ///< incomplete pack
+		std::string message;	 ///< UI / console facing status
+		int packHits{0};
+		int packMisses{0};
+	};
+
+	/// Hot-reload block atlas from Minecraft pack root (empty = bundled textures).
+	/// Invalid packs still load bundled textures and report isError + message.
+	ResourcePackApplyResult applyResourcePack(const std::string &resourcePackRoot);
+	const std::string &resourcePackRoot() const { return m_resourcePackRoot; }
 
 private:
 	void handleEvents();

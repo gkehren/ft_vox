@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL_vulkan.h>
 #include <Vulkan/VkLoadLibrary.hpp>
+#include <Renderer/MinecraftTextures.hpp>
 #include <utils.hpp>
 #include <Chunk/StreamHelpers.hpp>
 #include <Engine/Profiler.hpp>
@@ -241,6 +242,66 @@ void Engine::setVSync(bool enabled)
 	renderSettings.vsyncEnabled = enabled;
 	if (swapchain)
 		swapchain->setVSync(enabled);
+}
+
+Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &resourcePackRoot)
+{
+	ResourcePackApplyResult out{};
+	if (!vkContext || !worldRenderer || !immediate)
+	{
+		out.message = "Renderer not ready.";
+		out.isError = true;
+		return out;
+	}
+
+	const std::string path = trimTrailingSlashes(resourcePackRoot);
+	try
+	{
+		vkContext->waitIdle();
+		const TextureAtlasLoadReport report = worldRenderer->reloadResourcePack(path);
+		out.atlasOk = true;
+		out.packHits = report.packHits;
+		out.packMisses = report.packMisses;
+
+		if (path.empty())
+		{
+			m_resourcePackRoot.clear();
+			out.message = "Loaded bundled textures.";
+			return out;
+		}
+
+		if (report.packInvalid())
+		{
+			// Fully invalid: use bundled assets and clear active pack so UI matches reality.
+			m_resourcePackRoot.clear();
+			out.isError = true;
+			out.message =
+				"Invalid resource pack: no block textures found under "
+				"assets/minecraft/textures/block/. Using bundled textures.";
+			return out;
+		}
+
+		m_resourcePackRoot = path;
+		if (report.packIncomplete())
+		{
+			out.isWarning = true;
+			out.message = "Resource pack incomplete: " + std::to_string(report.packMisses) + " of " +
+						  std::to_string(report.requiredLayers) +
+						  " block textures missing. Bundled used for those faces.";
+			return out;
+		}
+
+		out.message = "Loaded resource pack.";
+		return out;
+	}
+	catch (const std::exception &e)
+	{
+		std::cerr << "applyResourcePack failed: " << e.what() << "\n";
+		out.isError = true;
+		out.message = std::string("Failed to load resource pack: ") + e.what() +
+					  " Previous atlas kept.";
+		return out;
+	}
 }
 
 void Engine::placeCameraOnSurface()
@@ -707,6 +768,11 @@ void Engine::drawUi()
 		f.validation = vkContext->isValidationEnabled();
 	}
 	f.setVSync = [this](bool v) { setVSync(v); };
+	f.resourcePackRoot = &m_resourcePackRoot;
+	f.applyResourcePack = [this](const std::string &path) -> GameUIFrame::ResourcePackUiResult {
+		const ResourcePackApplyResult r = applyResourcePack(path);
+		return {r.atlasOk, r.isError, r.isWarning, r.message};
+	};
 
 	gameUi->draw(f);
 

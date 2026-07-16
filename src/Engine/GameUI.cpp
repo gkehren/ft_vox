@@ -158,6 +158,9 @@ void GameUI::draw(GameUIFrame &frame)
 
 	if (m_showOverlayHints && frame.mouseCaptured && *frame.mouseCaptured)
 		drawOverlayHints(frame);
+
+	// File dialog can outlive the Graphics panel; always process while open.
+	displayResourcePackFileDialog(m_resourcePackUi, m_showGraphics);
 }
 
 void GameUI::drawMenuBar(GameUIFrame &frame)
@@ -361,6 +364,8 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		}
 		ImGui::TextDisabled("Packs SSAO / bloom / god rays / grain. Manual sliders below still work.");
 	}
+
+	drawResourcePackSection(frame, m_resourcePackUi, m_showGraphics);
 
 	if (ImGui::CollapsingHeader("Atmosphere / Fog", ImGuiTreeNodeFlags_DefaultOpen))
 	{

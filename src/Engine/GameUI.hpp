@@ -18,6 +18,7 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
+#include <string>
 
 /// Frame snapshot for ImGui panels (pointers owned by Engine).
 struct GameUIFrame
@@ -53,8 +54,23 @@ struct GameUIFrame
 
 	std::function<void(bool)> setVSync;
 
+	/// Active pack root (empty = bundled). Owned by Engine.
+	const std::string *resourcePackRoot{nullptr};
+
+	/// Result of Apply / Use bundled (atlas may still load from bundled on invalid pack).
+	struct ResourcePackUiResult
+	{
+		bool atlasOk{false};
+		bool isError{false};
+		bool isWarning{false};
+		std::string message;
+	};
+	std::function<ResourcePackUiResult(const std::string &)> applyResourcePack;
+
 	Benchmark *benchmark{nullptr};
 };
+
+#include <Engine/GameUIResourcePack.hpp>
 
 /// Multi-panel ImGui HUD for the Vulkan engine.
 /// Restores prior OpenGL UI features (adapted), with cleaner layout + shortcuts.
@@ -130,4 +146,6 @@ private:
 	VkDescriptorSet m_mapDesc{VK_NULL_HANDLE};
 	int m_mapImageSize{0};
 	bool m_mapHasTexture{false};
+
+	ResourcePackUiState m_resourcePackUi{};
 };

@@ -110,3 +110,16 @@ inline void blockTextureFrameSize(int imageW, int imageH, int &frameW, int &fram
 	frameW = imageW;
 	frameH = imageH;
 }
+
+/// Result of resolving pack vs bundled block textures (CPU side).
+struct TextureAtlasLoadReport
+{
+	int requiredLayers{0}; ///< TextureType::COUNT
+	int packHits{0};	   ///< layers taken from the pack
+	int packMisses{0};	   ///< layers that fell back to bundled
+	bool packRequested{false};
+
+	bool packInvalid() const { return packRequested && packHits == 0; }
+	bool packIncomplete() const { return packRequested && packHits > 0 && packMisses > 0; }
+	bool packComplete() const { return !packRequested || packMisses == 0; }
+};
