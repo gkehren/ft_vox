@@ -1,6 +1,7 @@
 #include "Chunk.hpp"
 #include <Chunk/StreamHelpers.hpp>
-#include <Renderer/Tier1Graphics.hpp>
+#include <Renderer/ShadowCascades.hpp>
+#include <Renderer/Lighting.hpp>
 #include <Renderer/TextureManager.hpp>
 #include <Vulkan/VkUpload.hpp>
 #include <Vulkan/VkCommands.hpp>
@@ -364,7 +365,7 @@ void Chunk::generateMesh()
       for (int y = 0; y < CHUNK_HEIGHT; ++y)
         for (int x = 0; x < CHUNK_SIZE; ++x)
         {
-          const uint8_t em = tier1::blockLightEmission(getVoxel(x, y, z).type);
+          const uint8_t em = lighting::blockLightEmission(getVoxel(x, y, z).type);
           if (em == 0)
             continue;
           // Light lives in air cells around the emitter
@@ -912,10 +913,10 @@ void Chunk::generateMesh()
             if (solid.x >= 0 && solid.x < CHUNK_SIZE && solid.y >= 0 && solid.y < CHUNK_HEIGHT &&
                 solid.z >= 0 && solid.z < CHUNK_SIZE)
             {
-              faceBlock = std::max(faceBlock, tier1::blockLightEmission(getVoxel(solid.x, solid.y, solid.z).type));
+              faceBlock = std::max(faceBlock, lighting::blockLightEmission(getVoxel(solid.x, solid.y, solid.z).type));
             }
           }
-          const uint32_t lightBits = tier1::packLightBits(faceSky, faceBlock);
+          const uint32_t lightBits = lighting::packLightBits(faceSky, faceBlock);
 
           for (int i = 0; i < 4; ++i)
           {
@@ -1033,7 +1034,7 @@ void Chunk::generateLODMesh()
                             ((static_cast<uint32_t>(texType) & 0xFFu) << 3) |
                             (needsBiomeColoring ? (1u << 11) : 0u) |
                             (3u << 12) |
-                            tier1::packLightBits(15, 0);
+                            lighting::packLightBits(15, 0);
 
       // Top face vertices in world space; axis mapping: d=1(Y), u=2(Z), v=0(X)
       float fy = float(topY + 1);

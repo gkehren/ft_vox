@@ -1,6 +1,7 @@
 #include "Engine/Engine.hpp"
 
 #include <SDL3/SDL_vulkan.h>
+#include <Vulkan/VkLoadLibrary.hpp>
 #include <utils.hpp>
 #include <Chunk/StreamHelpers.hpp>
 #include <Engine/Profiler.hpp>
@@ -69,49 +70,11 @@ Engine::Engine()
 	if (!SDL_Init(SDL_INIT_VIDEO))
 		throw std::runtime_error(std::string("Failed to initialize SDL: ") + SDL_GetError());
 
-	// macOS: Homebrew's libvulkan is not on the default dyld search path, so
-	// SDL_Vulkan_LoadLibrary(nullptr) often fails with "Failed to load Vulkan
-	// Portability library" even when vulkaninfo works. Try well-known paths first.
+	// Shared loader probe (VkLoadLibrary.hpp) — same path used by test_vulkan_resources.
+	if (!loadVulkanLibrary(&std::cout))
 	{
-		const char *explicitPath = std::getenv("FT_VOX_VULKAN_LIB");
-		bool loaded = false;
-		if (explicitPath && explicitPath[0] != '\0')
-		{
-			loaded = SDL_Vulkan_LoadLibrary(explicitPath);
-			if (!loaded)
-				std::cerr << "FT_VOX_VULKAN_LIB failed (" << explicitPath << "): " << SDL_GetError() << "\n";
-		}
-#if defined(__APPLE__)
-		static const char *kMacCandidates[] = {
-			"/opt/homebrew/lib/libvulkan.1.dylib", // Apple Silicon Homebrew
-			"/opt/homebrew/lib/libvulkan.dylib",
-			"/usr/local/lib/libvulkan.1.dylib", // Intel Homebrew
-			"/usr/local/lib/libvulkan.dylib",
-			// Prefer the loader (not bare MoltenVK) so VK_ICD_FILENAMES works.
-		};
-		if (!loaded)
-		{
-			for (const char *path : kMacCandidates)
-			{
-				if (SDL_Vulkan_LoadLibrary(path))
-				{
-					std::cout << "Vulkan library: " << path << "\n";
-					loaded = true;
-					break;
-				}
-			}
-		}
-#endif
-		if (!loaded)
-			loaded = SDL_Vulkan_LoadLibrary(nullptr);
-		if (!loaded)
-		{
-			throw std::runtime_error(
-				std::string("Failed to load Vulkan library: ") + SDL_GetError() +
-				"\n  On macOS install MoltenVK + loader and set:\n"
-				"    export VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json\n"
-				"  Optional: export FT_VOX_VULKAN_LIB=/opt/homebrew/lib/libvulkan.1.dylib");
-		}
+		throw std::runtime_error(std::string("Failed to load Vulkan library: ") + SDL_GetError() + "\n" +
+								 vulkanLibraryLoadHint());
 	}
 
 	windowWidth = 1920;
@@ -149,11 +112,14 @@ Engine::Engine()
 	immediate = std::make_unique<ImmediateCommands>();
 	immediate->init(*vkContext);
 
-	stagingRing.init(vkContext->getAllocator(), TerrainRenderer::kMaxFramesInFlight);
-	resourceRetire.init(vkContext->getAllocator(), TerrainRenderer::kMaxFramesInFlight);
+	stagingRing.init(vkContext->getAllocator(), VkFrameContext::kMaxFramesInFlight);
+	resourceRetire.init(vkContext->getAllocator(), VkFrameContext::kMaxFramesInFlight);
 
-	terrain = std::make_unique<TerrainRenderer>();
-	terrain->init(*vkContext, *swapchain, *immediate);
+	frameCtx = std::make_unique<VkFrameContext>();
+	frameCtx->init(*vkContext);
+
+	worldRenderer = std::make_unique<WorldRenderer>();
+	worldRenderer->init(*vkContext, *swapchain, *immediate);
 
 	imgui = std::make_unique<ImGuiLayer>();
 	imgui->init(window, *vkContext, *swapchain, *immediate);
@@ -207,7 +173,8 @@ Engine::~Engine()
 	terrainGenerator.reset();
 
 	imgui.reset();
-	terrain.reset();
+	worldRenderer.reset();
+	frameCtx.reset();
 	immediate.reset();
 	swapchain.reset();
 	vkContext.reset();
@@ -260,8 +227,8 @@ void Engine::initializeNoiseGenerator(int seed_val)
 			}
 		}
 	}
-	if (showDemoPlayers && terrain)
-		terrain->overlays().setPlayers(demoPlayers);
+	if (showDemoPlayers && worldRenderer)
+		worldRenderer->overlays().setPlayers(demoPlayers);
 
 	std::cout << "World seed: " << seed
 			  << " chunks=" << chunkManager->chunkCount()
@@ -330,8 +297,8 @@ void Engine::reloadWorld(int newSeed)
 			}
 		}
 	}
-	if (showDemoPlayers && terrain)
-		terrain->overlays().setPlayers(demoPlayers);
+	if (showDemoPlayers && worldRenderer)
+		worldRenderer->overlays().setPlayers(demoPlayers);
 
 	GetProfiler().clearHistory();
 	GetProfiler().setEnabled(true);
@@ -505,8 +472,8 @@ void Engine::updateHighlight()
 	{
 		highlight.active = false;
 	}
-	if (terrain)
-		terrain->overlays().setHighlight(highlight);
+	if (worldRenderer)
+		worldRenderer->overlays().setHighlight(highlight);
 }
 
 void Engine::handleEvents()
@@ -555,8 +522,8 @@ void Engine::handleEvents()
 			if (key == SDLK_B)
 			{
 				showChunkBorders = !showChunkBorders;
-				if (terrain)
-					terrain->overlays().setShowChunkBorders(showChunkBorders);
+				if (worldRenderer)
+					worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
 				break;
 			}
 			if (key == SDLK_T && !(imgui && imgui->wantCaptureKeyboard()))
@@ -713,7 +680,7 @@ void Engine::drawUi()
 	f.chunks = chunkManager.get();
 	f.pool = chunkPool.get();
 	f.generator = terrainGenerator.get();
-	f.terrain = terrain.get();
+	f.worldRenderer = worldRenderer.get();
 	f.vk = vkContext.get();
 	f.imm = immediate.get();
 	f.shader = &shaderParams;
@@ -744,11 +711,11 @@ void Engine::drawUi()
 
 	if (mouseCaptured != prevCapture)
 		SDL_SetWindowRelativeMouseMode(window, mouseCaptured);
-	if (terrain)
-		terrain->overlays().setShowChunkBorders(showChunkBorders);
+	if (worldRenderer)
+		worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
 
-	if (terrain)
-		terrain->overlays().setPlayers(showDemoPlayers ? demoPlayers : std::vector<OverlayPlayer>{});
+	if (worldRenderer)
+		worldRenderer->overlays().setPlayers(showDemoPlayers ? demoPlayers : std::vector<OverlayPlayer>{});
 }
 
 void Engine::run()
@@ -825,7 +792,7 @@ void Engine::run()
 		{
 			PROFILE_SCOPE("Resize");
 			swapchain->recreate(static_cast<uint32_t>(pixelW), static_cast<uint32_t>(pixelH));
-			terrain->onSwapchainRecreate(*swapchain);
+			worldRenderer->onSwapchainRecreate(*swapchain);
 			windowWidth = pixelW;
 			windowHeight = pixelH;
 			framebufferResized = false;
@@ -834,7 +801,7 @@ void Engine::run()
 		uint32_t imageIndex = 0;
 		{
 			PROFILE_SCOPE("Acquire");
-			if (!terrain->beginAcquire(*swapchain, imageIndex, frameIndex))
+			if (!frameCtx->beginFrame(*swapchain, imageIndex))
 			{
 				framebufferResized = true;
 				GetProfiler().endFrame();
@@ -842,6 +809,7 @@ void Engine::run()
 			}
 		}
 
+		const uint32_t frameIndex = frameCtx->frameIndex();
 		// Frame slot is free (fence waited): recycle retired GPU buffers + reset staging slice.
 		resourceRetire.beginFrame(frameNumber);
 		stagingRing.beginFrame(frameIndex);
@@ -873,8 +841,8 @@ void Engine::run()
 						underwater = (static_cast<TextureType>(ch->getVoxel(lx, ly, lz).type) == WATER);
 				}
 			}
-			terrain->postSettings().underwater = underwater;
-			terrain->updateFrameUBO(frameIndex, camera,
+			worldRenderer->postSettings().underwater = underwater;
+			worldRenderer->updateFrameUBO(frameIndex, camera,
 									static_cast<float>(pixelW), static_cast<float>(pixelH), farPlane,
 									static_cast<float>(currentFrame), shaderParams,
 									renderSettings.shadowCascadeFar, underwater);
@@ -883,8 +851,8 @@ void Engine::run()
 		const int uploadBudget = uploadBudgetThisFrame;
 		{
 			PROFILE_SCOPE("Record");
-			terrain->recordFrame(
-				frameIndex, imageIndex, *swapchain, drawList, shadowList, clearColor,
+			worldRenderer->recordFrame(
+				frameCtx->commandBuffer(), frameIndex, imageIndex, *swapchain, drawList, shadowList, clearColor,
 				[&](VkCommandBuffer cmd) {
 					PROFILE_SCOPE("MeshUpload");
 					if (!chunkManager || uploadBudget <= 0 || paused)
@@ -911,11 +879,10 @@ void Engine::run()
 
 		{
 			PROFILE_SCOPE("Present");
-			if (!terrain->submitPresent(*swapchain, imageIndex, frameIndex))
+			if (!frameCtx->submitAndPresent(*swapchain, imageIndex))
 				framebufferResized = true;
 		}
 
-		frameIndex = (frameIndex + 1) % TerrainRenderer::kMaxFramesInFlight;
 		++frameNumber;
 
 		GetProfiler().endFrame();

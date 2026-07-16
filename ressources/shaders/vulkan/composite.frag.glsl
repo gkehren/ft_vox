@@ -103,11 +103,11 @@ void main()
 
     if (ssaoEnabled)
     {
-        // Cap intensity (matches tier1::clampSsaoIntensity) — avoids milky full-frame veil
+        // Cap intensity (matches lighting::clampSsaoIntensity) — avoids milky full-frame veil
         float ao = texture(ssaoBuffer, vUV).r;
         float intens = clamp(ssaoIntensity, 0.0, 0.85);
         ao = mix(1.0, ao, intens);
-        // Never crush outdoor slopes / dark caves below a soft floor
+        // Never crush outdoor slopes / dark caves below a soft floor (lighting::kSsaoAoFloor)
         ao = max(ao, 0.62);
         hdrColor *= ao;
     }

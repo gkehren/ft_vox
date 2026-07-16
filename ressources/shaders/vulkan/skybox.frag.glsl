@@ -21,12 +21,8 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 skyParams;
     vec4 cascadeSplits;
     vec4 moonAmbient;
-    vec4 tier1Params;
+    vec4 lightingParams;
     vec4 waterParams;
-    vec4 postParams0;
-    vec4 postParams1;
-    vec4 postParams2;
-    vec4 postParams3;
 } frame;
 
 #define sunDir frame.sunDir.xyz

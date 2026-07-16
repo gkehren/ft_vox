@@ -56,13 +56,6 @@ private:
 	void createSkyGeometry(ImmediateCommands &imm);
 	void createSamplers();
 
-	void transitionColor(VkCommandBuffer cmd, VkImage image, VkImageLayout oldL, VkImageLayout newL,
-						 VkAccessFlags srcA, VkAccessFlags dstA,
-						 VkPipelineStageFlags srcS, VkPipelineStageFlags dstS);
-	void transitionDepth(VkCommandBuffer cmd, VkImage image, VkImageLayout oldL, VkImageLayout newL,
-						 VkAccessFlags srcA, VkAccessFlags dstA,
-						 VkPipelineStageFlags srcS, VkPipelineStageFlags dstS);
-
 	VkContext *m_context{nullptr};
 	VkDescriptorSetLayout m_frameSetLayout{VK_NULL_HANDLE};
 

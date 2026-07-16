@@ -10,10 +10,11 @@
 
 #include <Vulkan/VkContext.hpp>
 #include <Vulkan/VkSwapchain.hpp>
+#include <Vulkan/VkFrame.hpp>
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/StagingRing.hpp>
 #include <Vulkan/GpuResourceRetire.hpp>
-#include <Renderer/TerrainRenderer.hpp>
+#include <Renderer/WorldRenderer.hpp>
 #include <Renderer/OverlayRenderer.hpp>
 #include <Engine/ImGuiLayer.hpp>
 #include <Engine/GameUI.hpp>
@@ -87,8 +88,9 @@ private:
 
 	std::unique_ptr<VkContext> vkContext;
 	std::unique_ptr<VkSwapchain> swapchain;
+	std::unique_ptr<VkFrameContext> frameCtx;
 	std::unique_ptr<ImmediateCommands> immediate;
-	std::unique_ptr<TerrainRenderer> terrain;
+	std::unique_ptr<WorldRenderer> worldRenderer;
 	std::unique_ptr<ImGuiLayer> imgui;
 	std::unique_ptr<GameUI> gameUi;
 	std::unique_ptr<TerrainGenerator> terrainGenerator;
@@ -104,7 +106,6 @@ private:
 	std::vector<Chunk *> shadowList;
 	int uploadBudgetThisFrame{0};
 	Camera camera;
-	uint32_t frameIndex{0};
 
 	OverlayHighlight highlight{};
 	std::vector<OverlayPlayer> demoPlayers;

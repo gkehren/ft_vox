@@ -18,7 +18,7 @@
 - **Chunk Management (`src/Chunk/`)**: 16×256×16 voxels, greedy meshing, VMA GPU upload, terrain gen
   - **`ChunkManager`**: distance streaming (load → async gen → async mesh → main-thread upload), unload + pool recycle
   - **`ChunkPool`** + **`ThreadPool`**: preallocated chunks and work-stealing workers
-- **Rendering (`src/Renderer/`)**: `TerrainRenderer` (opaque + shadow + water + sky), `PostStack`, `OverlayRenderer`, `TextureManager`
+- **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator (shadow/opaque/water + sky/post), `PostStack`, `OverlayRenderer`, `TextureManager`
 
 ### Networking (`src/Network/`)
 - **Client/Server**: Boost.Asio UDP for player position and world state (not yet re-wired into Vulkan Engine UI).

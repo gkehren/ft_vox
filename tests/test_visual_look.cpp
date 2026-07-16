@@ -30,7 +30,7 @@ int main()
 {
 	bool ok = true;
 
-	// --- Real packing path used by TerrainRenderer::updateFrameUBO ---
+	// --- Real packing path used by WorldRenderer::updateFrameUBO ---
 	ShaderParameters sp{}; // shipped defaults
 	glm::vec4 lightParams{};
 	glm::vec4 visualParams{};
@@ -73,6 +73,49 @@ int main()
 	if (pp.postContrast < 1.0f || pp.postContrast > 1.08f)
 		ok = fail("default postContrast out of balanced range [1.0, 1.08]");
 
+	// --- Quality presets (shipped applyPreset; Low lighter than High/Cinematic) ---
+	{
+		PostProcessSettings low{}, med{}, high{}, cine{};
+		// Dirty knobs then re-apply to prove applicator overwrites
+		low.ssaoIntensity = 9.f;
+		low.bloomBlurIterations = 99;
+		low.applyPreset(GraphicsQualityPreset::Low);
+		med.applyPreset(GraphicsQualityPreset::Medium);
+		high.applyPreset(GraphicsQualityPreset::High);
+		cine.applyPreset(GraphicsQualityPreset::Cinematic);
+
+		if (low.qualityPreset != GraphicsQualityPreset::Low)
+			ok = fail("applyPreset(Low) must set qualityPreset");
+		if (med.qualityPreset != GraphicsQualityPreset::Medium)
+			ok = fail("applyPreset(Medium) must set qualityPreset");
+		if (low.ssaoEnabled)
+			ok = fail("Low preset should disable SSAO");
+		if (!med.ssaoEnabled || !high.ssaoEnabled || !cine.ssaoEnabled)
+			ok = fail("Medium/High/Cinematic should enable SSAO");
+		if (!(low.ssaoIntensity < med.ssaoIntensity && med.ssaoIntensity < high.ssaoIntensity &&
+			  high.ssaoIntensity < cine.ssaoIntensity))
+			ok = fail("SSAO intensity must increase Low < Medium < High < Cinematic");
+		if (!(low.bloomBlurIterations < med.bloomBlurIterations &&
+			  med.bloomBlurIterations < high.bloomBlurIterations &&
+			  high.bloomBlurIterations <= cine.bloomBlurIterations))
+			ok = fail("bloom blur budget must not decrease with higher presets");
+		if (!(low.bloomIntensity < med.bloomIntensity && med.bloomIntensity < high.bloomIntensity))
+			ok = fail("bloom intensity should rise Low < Medium < High");
+		if (low.godRaysEnabled)
+			ok = fail("Low preset should disable god rays");
+		if (!high.godRaysEnabled || !cine.godRaysEnabled)
+			ok = fail("High/Cinematic should enable god rays");
+		if (!(cine.filmGrain > med.filmGrain && cine.vignette > med.vignette))
+			ok = fail("Cinematic should push film grain and vignette above Medium");
+		// Underwater runtime state preserved
+		PostProcessSettings uw{};
+		uw.underwater = true;
+		uw.underwaterStrength = 1.25f;
+		uw.applyPreset(GraphicsQualityPreset::Low);
+		if (!uw.underwater || std::abs(uw.underwaterStrength - 1.25f) > 1e-5f)
+			ok = fail("applyPreset must preserve underwater state");
+	}
+
 	// --- Biome palette: readable chroma, not neon ---
 	const BiomeType vividBiomes[] = {
 		BIOME_PLAINS, BIOME_FOREST, BIOME_JUNGLE, BIOME_SAVANNA, BIOME_DESERT, BIOME_BADLANDS};
@@ -110,6 +153,6 @@ int main()
 		std::cerr << "test_visual_look: FAILED\n";
 		return EXIT_FAILURE;
 	}
-	std::cout << "test_visual_look: OK (packing + defaults + biome chroma)\n";
+	std::cout << "test_visual_look: OK (packing + defaults + quality presets + biome chroma)\n";
 	return EXIT_SUCCESS;
 }

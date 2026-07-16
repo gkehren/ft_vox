@@ -79,20 +79,14 @@ bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
 
 	vkWaitForFences(device, 1, &frame.inFlight, VK_TRUE, UINT64_MAX);
 
-	VkResult result = vkAcquireNextImageKHR(
-		device,
-		swapchain.getSwapchain(),
-		UINT64_MAX,
-		frame.imageAvailable,
-		VK_NULL_HANDLE,
-		&outImageIndex);
+	VkResult result = vkAcquireNextImageKHR(device, swapchain.getSwapchain(), UINT64_MAX, frame.imageAvailable,
+											VK_NULL_HANDLE, &outImageIndex);
 
 	if (result == VK_ERROR_OUT_OF_DATE_KHR)
 		return false;
 	if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
 		throw std::runtime_error("Failed to acquire swapchain image");
 
-	// Ensure we do not start writing an image that is still in flight
 	if (m_imagesInFlight.size() != swapchain.getImageCount())
 		m_imagesInFlight.assign(swapchain.getImageCount(), VK_NULL_HANDLE);
 
@@ -105,6 +99,43 @@ bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
 	return true;
 }
 
+bool VkFrameContext::submitAndPresent(VkSwapchain &swapchain, uint32_t imageIndex)
+{
+	FrameData &frame = m_frames[m_currentFrame];
+
+	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	VkSubmitInfo submit{};
+	submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submit.waitSemaphoreCount = 1;
+	submit.pWaitSemaphores = &frame.imageAvailable;
+	submit.pWaitDstStageMask = &waitStage;
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers = &frame.commandBuffer;
+	submit.signalSemaphoreCount = 1;
+	submit.pSignalSemaphores = &frame.renderFinished;
+
+	if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submit, frame.inFlight) != VK_SUCCESS)
+		throw std::runtime_error("Failed to submit frame command buffer");
+
+	VkPresentInfoKHR present{};
+	present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	present.waitSemaphoreCount = 1;
+	present.pWaitSemaphores = &frame.renderFinished;
+	VkSwapchainKHR sc = swapchain.getSwapchain();
+	present.swapchainCount = 1;
+	present.pSwapchains = &sc;
+	present.pImageIndices = &imageIndex;
+
+	VkResult result = vkQueuePresentKHR(m_context->getPresentQueue(), &present);
+	advanceFrame();
+
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+		return false;
+	if (result != VK_SUCCESS)
+		throw std::runtime_error("Failed to present");
+	return true;
+}
+
 void VkFrameContext::recordClearCommands(VkCommandBuffer cmd, VkSwapchain &swapchain, uint32_t imageIndex,
 										 const VkClearColorValue &clearColor)
 {
@@ -114,9 +145,7 @@ void VkFrameContext::recordClearCommands(VkCommandBuffer cmd, VkSwapchain &swapc
 		throw std::runtime_error("Failed to begin command buffer");
 
 	VkImage image = swapchain.getImages()[imageIndex];
-	const VkExtent2D extent = swapchain.getExtent();
 
-	// Undefined → transfer dst
 	VkImageMemoryBarrier toTransfer{};
 	toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	toTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -124,48 +153,25 @@ void VkFrameContext::recordClearCommands(VkCommandBuffer cmd, VkSwapchain &swapc
 	toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	toTransfer.image = image;
-	toTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	toTransfer.subresourceRange.baseMipLevel = 0;
-	toTransfer.subresourceRange.levelCount = 1;
-	toTransfer.subresourceRange.baseArrayLayer = 0;
-	toTransfer.subresourceRange.layerCount = 1;
+	toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 	toTransfer.srcAccessMask = 0;
 	toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-		VK_PIPELINE_STAGE_TRANSFER_BIT,
-		0,
-		0, nullptr,
-		0, nullptr,
-		1, &toTransfer);
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+						 nullptr, 1, &toTransfer);
 
-	VkImageSubresourceRange range{};
-	range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	range.baseMipLevel = 0;
-	range.levelCount = 1;
-	range.baseArrayLayer = 0;
-	range.layerCount = 1;
+	VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 	vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearColor, 1, &range);
 
-	// Transfer dst → present
 	VkImageMemoryBarrier toPresent = toTransfer;
 	toPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	toPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 	toPresent.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	toPresent.dstAccessMask = 0;
 
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_TRANSFER_BIT,
-		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-		0,
-		0, nullptr,
-		0, nullptr,
-		1, &toPresent);
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0,
+						 nullptr, 1, &toPresent);
 
-	(void)extent;
 	if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
 		throw std::runtime_error("Failed to end command buffer");
 }
@@ -200,8 +206,7 @@ bool VkFrameContext::endFrameClearAndPresent(VkSwapchain &swapchain, uint32_t im
 	presentInfo.pImageIndices = &imageIndex;
 
 	VkResult result = vkQueuePresentKHR(m_context->getPresentQueue(), &presentInfo);
-
-	m_currentFrame = (m_currentFrame + 1) % kMaxFramesInFlight;
+	advanceFrame();
 
 	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
 		return false;
