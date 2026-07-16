@@ -118,6 +118,16 @@ set(FT_VOX_VULKAN_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Vulkan/GpuResourceRetire.cpp
 )
 
+set(FT_VOX_RENDERER_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/Renderer/TextureManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/WorldRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/PostStack.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/OverlayRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/ShadowPass.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/OpaquePass.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/WaterPass.cpp
+)
+
 set(FT_VOX_IMGUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/imgui/imgui_draw.cpp
@@ -140,10 +150,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
-    ${CMAKE_SOURCE_DIR}/src/Renderer/TextureManager.cpp
-    ${CMAKE_SOURCE_DIR}/src/Renderer/TerrainRenderer.cpp
-    ${CMAKE_SOURCE_DIR}/src/Renderer/PostStack.cpp
-    ${CMAKE_SOURCE_DIR}/src/Renderer/OverlayRenderer.cpp
+    ${FT_VOX_RENDERER_SOURCES}
     ${FT_VOX_IMGUI_SOURCES}
     ${FT_VOX_VULKAN_SOURCES}
 )

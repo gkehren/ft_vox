@@ -103,6 +103,15 @@ struct RenderTiming
 	float totalFrame{0.0f};
 };
 
+/// Named graphics quality packs (existing post knobs only — no new effects).
+enum class GraphicsQualityPreset
+{
+	Low = 0,
+	Medium = 1,
+	High = 2,
+	Cinematic = 3,
+};
+
 struct PostProcessSettings
 {
 	bool bloomEnabled{true};
@@ -145,7 +154,120 @@ struct PostProcessSettings
 	// Underwater look (set by engine when camera is submerged)
 	bool underwater{false};
 	float underwaterStrength{1.0f};
+
+	/// Last preset applied via applyPreset (UI combo). Manual tweaks do not clear this.
+	GraphicsQualityPreset qualityPreset{GraphicsQualityPreset::Medium};
+
+	/// Apply a named quality pack. Does not change underwater (runtime state).
+	void applyPreset(GraphicsQualityPreset preset);
 };
+
+/// Apply Low / Medium / High / Cinematic packs onto existing post knobs only.
+inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
+{
+	qualityPreset = preset;
+	// Preserve runtime submersion state
+	const bool wasUnderwater = underwater;
+	const float underStr = underwaterStrength;
+
+	// Shared grade defaults (Medium baseline)
+	exposure = 0.94f;
+	exposureCompensation = 1.0f;
+	toneMapper = 0;
+	gamma = 2.2f;
+	postSaturation = 1.02f;
+	postContrast = 1.03f;
+	fxaaEnabled = true;
+	autoExposureEnabled = true;
+	godRaysBoostPreview = false;
+	godRaysDepthOcclusion = true;
+	ssaoBias = 0.035f;
+
+	switch (preset)
+	{
+	case GraphicsQualityPreset::Low:
+		bloomEnabled = true;
+		bloomThreshold = 1.65f;
+		bloomIntensity = 0.06f;
+		bloomBlurIterations = 1;
+		ssaoEnabled = false;
+		ssaoRadius = 0.30f;
+		ssaoIntensity = 0.25f;
+		godRaysEnabled = false;
+		godRaysDensity = 0.70f;
+		godRaysWeight = 0.015f;
+		godRaysDecay = 0.97f;
+		godRaysExposure = 0.40f;
+		godRaysDynamicBoostEnabled = false;
+		godRaysDramaticBoost = 1.5f;
+		filmGrain = 0.012f;
+		vignette = 0.12f;
+		break;
+	case GraphicsQualityPreset::Medium:
+		// Match constructor defaults (current balanced path)
+		bloomEnabled = true;
+		bloomThreshold = 1.45f;
+		bloomIntensity = 0.12f;
+		bloomBlurIterations = 3;
+		ssaoEnabled = true;
+		ssaoRadius = 0.40f;
+		ssaoIntensity = 0.40f;
+		godRaysEnabled = true;
+		godRaysDensity = 0.85f;
+		godRaysWeight = 0.022f;
+		godRaysDecay = 0.965f;
+		godRaysExposure = 0.55f;
+		godRaysDynamicBoostEnabled = true;
+		godRaysDramaticBoost = 2.2f;
+		filmGrain = 0.028f;
+		vignette = 0.22f;
+		break;
+	case GraphicsQualityPreset::High:
+		bloomEnabled = true;
+		bloomThreshold = 1.30f;
+		bloomIntensity = 0.16f;
+		bloomBlurIterations = 4;
+		ssaoEnabled = true;
+		ssaoRadius = 0.48f;
+		ssaoIntensity = 0.55f;
+		godRaysEnabled = true;
+		godRaysDensity = 0.95f;
+		godRaysWeight = 0.028f;
+		godRaysDecay = 0.960f;
+		godRaysExposure = 0.62f;
+		godRaysDynamicBoostEnabled = true;
+		godRaysDramaticBoost = 2.6f;
+		filmGrain = 0.032f;
+		vignette = 0.28f;
+		postSaturation = 1.04f;
+		postContrast = 1.04f;
+		break;
+	case GraphicsQualityPreset::Cinematic:
+		bloomEnabled = true;
+		bloomThreshold = 1.20f;
+		bloomIntensity = 0.20f;
+		bloomBlurIterations = 5;
+		ssaoEnabled = true;
+		ssaoRadius = 0.55f;
+		ssaoIntensity = 0.70f;
+		godRaysEnabled = true;
+		godRaysDensity = 1.05f;
+		godRaysWeight = 0.032f;
+		godRaysDecay = 0.955f;
+		godRaysExposure = 0.70f;
+		godRaysDynamicBoostEnabled = true;
+		godRaysDramaticBoost = 3.0f;
+		filmGrain = 0.045f;
+		vignette = 0.38f;
+		postSaturation = 1.06f;
+		postContrast = 1.06f;
+		exposure = 0.92f;
+		break;
+	}
+
+	underwater = wasUnderwater;
+	underwaterStrength = underStr;
+}
 
 struct VoxelHighlight
 {

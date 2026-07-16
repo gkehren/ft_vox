@@ -28,13 +28,14 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 skyParams;
     vec4 cascadeSplits;
     vec4 moonAmbient;
-    vec4 tier1Params;
+    vec4 lightingParams;
     vec4 waterParams;
-    vec4 postParams0;
-    vec4 postParams1;
-    vec4 postParams2;
-    vec4 postParams3;
 } frame;
+
+// x=wind, y=emissive, z=iceSpec, w=flags — materials::MaterialTableUBO
+layout(set = 0, binding = 1) uniform MaterialTable {
+    vec4 mats[256];
+} materialTable;
 
 layout(set = 1, binding = 0) uniform sampler2DArray textureArray;
 layout(set = 1, binding = 1) uniform sampler2DArray shadowMap;
@@ -48,16 +49,10 @@ const vec2 POISSON[12] = vec2[](
     vec2( 0.896,  0.412), vec2(-0.322, -0.932), vec2(-0.792, -0.598)
 );
 
-float emissiveForIndex(float texIdx)
+vec4 materialFor(float texIdx)
 {
-    // Matches TextureType enum in utils.hpp
-    int t = int(texIdx + 0.5);
-    if (t == 23) return 0.90; // REDSTONE_ORE
-    if (t == 22) return 0.45; // LAPIS_ORE
-    if (t == 18) return 0.25; // DIAMOND_ORE
-    if (t == 19) return 0.20; // EMERALD_ORE
-    if (t == 20) return 0.12; // GOLD_ORE
-    return 0.0;
+    uint t = uint(texIdx + 0.5);
+    return materialTable.mats[t];
 }
 
 mat4 cascadeMatrix(int c)
@@ -170,11 +165,11 @@ void main()
     float dayFactor = frame.skyParams.y;
     float nightFactor = frame.skyParams.w;
     float sunsetFactor = frame.skyParams.z;
-    float blockLightScale = frame.tier1Params.x;
-    float emissiveScale = frame.tier1Params.y;
-    float fogBaseY = frame.tier1Params.z;
+    float blockLightScale = frame.lightingParams.x;
+    float emissiveScale = frame.lightingParams.y;
+    float fogBaseY = frame.lightingParams.z;
 
-    // Must match tier1::localLightScale — raised cave floor + smooth light curve.
+    // Must match lighting::localLightScale (raised cave floor + smooth light curve).
     float skyL = vSkyLight * clamp(dayFactor + 0.15 * (1.0 - nightFactor), 0.0, 1.0);
     float blkL = vBlockLight * blockLightScale;
     float combined = clamp(max(skyL, blkL), 0.0, 1.0);
@@ -230,17 +225,18 @@ void main()
     caveFill *= mix(0.85, 1.15, clamp(0.5 + 0.5 * norm.y + topLight, 0.0, 1.0));
     result += caveFill;
 
-    float em = emissiveForIndex(vTextureIndex) * emissiveScale;
+    vec4 mat = materialFor(vTextureIndex);
+    float em = mat.y * emissiveScale;
     result += color * em * (1.2 + vBlockLight);
 
-    // Ice/snow specular sparkle (no dedicated ICE block — SNOW is closest)
-    if (abs(vTextureIndex - 13.0) < 0.5)
+    // Ice/snow specular from material table (IceSpec flag bit 2)
+    if ((uint(mat.w + 0.5) & 4u) != 0u && mat.z > 0.0)
     {
         vec3 V = normalize(frame.viewPos.xyz - vFragPos);
         vec3 H = normalize(lightDir + V);
         float iceSpec = pow(max(dot(norm, H), 0.0), 96.0)
                       * dayLightFactor * (1.0 - shadow * 0.85) * sunReach;
-        result += vec3(0.82, 0.92, 1.05) * iceSpec * 0.62;
+        result += vec3(0.82, 0.92, 1.05) * iceSpec * mat.z;
     }
 
     // Soften contrast in unlit caves so blacks aren't crushed to pure #000

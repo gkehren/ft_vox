@@ -341,7 +341,7 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		return;
 	}
 
-	if (!frame.shader || !frame.terrain)
+	if (!frame.shader || !frame.worldRenderer)
 	{
 		ImGui::TextDisabled("Renderer not ready.");
 		ImGui::End();
@@ -349,7 +349,18 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 	}
 
 	auto &sp = *frame.shader;
-	auto &pp = frame.terrain->postSettings();
+	auto &pp = frame.worldRenderer->postSettings();
+
+	if (ImGui::CollapsingHeader("Quality preset", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		const char *presetNames[] = {"Low", "Medium", "High", "Cinematic"};
+		int presetIdx = static_cast<int>(pp.qualityPreset);
+		if (ImGui::Combo("Graphics quality", &presetIdx, presetNames, IM_ARRAYSIZE(presetNames)))
+		{
+			pp.applyPreset(static_cast<GraphicsQualityPreset>(presetIdx));
+		}
+		ImGui::TextDisabled("Packs SSAO / bloom / god rays / grain. Manual sliders below still work.");
+	}
 
 	if (ImGui::CollapsingHeader("Atmosphere / Fog", ImGuiTreeNodeFlags_DefaultOpen))
 	{
