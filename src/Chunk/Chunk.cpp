@@ -1,5 +1,7 @@
 #include "Chunk.hpp"
 #include <Chunk/StreamHelpers.hpp>
+#include <Renderer/Tier1Graphics.hpp>
+#include <Renderer/TextureManager.hpp>
 #include <Vulkan/VkUpload.hpp>
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/StagingRing.hpp>
@@ -276,6 +278,109 @@ void Chunk::generateMesh()
   auto &workspace = s_meshWorkspace;
   uint32_t indexCounter = 0;
   uint32_t waterIndexCounter = 0;
+
+  // Coarse Minecraft-style light field (sky + block) for Tier 1 shading.
+  // Stored as high-nibble sky / low-nibble block in a flat array matching getIndex.
+  thread_local std::vector<uint8_t> skyLight;
+  thread_local std::vector<uint8_t> blockLight;
+  skyLight.assign(static_cast<size_t>(CHUNK_VOLUME), 0);
+  blockLight.assign(static_cast<size_t>(CHUNK_VOLUME), 0);
+  {
+    auto idxOf = [](int x, int y, int z) -> size_t {
+      return static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
+    };
+    auto isAirLike = [&](int x, int y, int z) -> bool {
+      if (x < 0 || x >= CHUNK_SIZE || y < 0 || y >= CHUNK_HEIGHT || z < 0 || z >= CHUNK_SIZE)
+        return true;
+      const auto t = static_cast<TextureType>(getVoxel(x, y, z).type);
+      return t == AIR || t == WATER || t == GLASS || t == OAK_LEAVES;
+    };
+
+    // Sky light: per column, cast down until solid
+    for (int z = 0; z < CHUNK_SIZE; ++z)
+    {
+      for (int x = 0; x < CHUNK_SIZE; ++x)
+      {
+        uint8_t light = 15;
+        for (int y = CHUNK_HEIGHT - 1; y >= 0; --y)
+        {
+          if (!isAirLike(x, y, z))
+          {
+            light = 0;
+            continue;
+          }
+          skyLight[idxOf(x, y, z)] = light;
+          if (light > 0 && y > 0 && !isAirLike(x, y - 1, z))
+            ; // keep
+          else if (light > 0)
+            light = static_cast<uint8_t>(light > 0 ? light : 0);
+        }
+      }
+    }
+
+    // Seed block light from emissive solids into neighboring air
+    std::vector<glm::ivec3> queue;
+    queue.reserve(256);
+    for (int z = 0; z < CHUNK_SIZE; ++z)
+      for (int y = 0; y < CHUNK_HEIGHT; ++y)
+        for (int x = 0; x < CHUNK_SIZE; ++x)
+        {
+          const uint8_t em = tier1::blockLightEmission(getVoxel(x, y, z).type);
+          if (em == 0)
+            continue;
+          // Light lives in air cells around the emitter
+          const int dirs[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+          for (auto &d : dirs)
+          {
+            const int nx = x + d[0], ny = y + d[1], nz = z + d[2];
+            if (nx < 0 || nx >= CHUNK_SIZE || ny < 0 || ny >= CHUNK_HEIGHT || nz < 0 || nz >= CHUNK_SIZE)
+              continue;
+            if (!isAirLike(nx, ny, nz) && static_cast<TextureType>(getVoxel(nx, ny, nz).type) != AIR)
+            {
+              // still light the solid face later via adjacent air — also seed the solid cell
+            }
+            const size_t i = idxOf(nx, ny, nz);
+            if (blockLight[i] < em)
+            {
+              blockLight[i] = em;
+              queue.emplace_back(nx, ny, nz);
+            }
+          }
+          // Also seed emitter cell for face sampling
+          const size_t ei = idxOf(x, y, z);
+          if (blockLight[ei] < em)
+          {
+            blockLight[ei] = em;
+            queue.emplace_back(x, y, z);
+          }
+        }
+
+    // Propagate block light (coarse BFS, attenuation 1 per step)
+    size_t head = 0;
+    const int dirs[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    while (head < queue.size())
+    {
+      const glm::ivec3 p = queue[head++];
+      const uint8_t cur = blockLight[idxOf(p.x, p.y, p.z)];
+      if (cur <= 1)
+        continue;
+      const uint8_t next = static_cast<uint8_t>(cur - 1);
+      for (auto &d : dirs)
+      {
+        const int nx = p.x + d[0], ny = p.y + d[1], nz = p.z + d[2];
+        if (nx < 0 || nx >= CHUNK_SIZE || ny < 0 || ny >= CHUNK_HEIGHT || nz < 0 || nz >= CHUNK_SIZE)
+          continue;
+        // Propagate through air-like; allow into solids so faces pick up light
+        const size_t i = idxOf(nx, ny, nz);
+        if (blockLight[i] < next)
+        {
+          blockLight[i] = next;
+          if (isAirLike(nx, ny, nz))
+            queue.emplace_back(nx, ny, nz);
+        }
+      }
+    }
+  }
 
   // New helper for greedy meshing that checks local voxels and the precomputed
   // neighbor shell
@@ -729,6 +834,50 @@ void Chunk::generateMesh()
           auto &targetIndices = isWater ? waterIndices : indices;
           auto &targetIndexCounter = isWater ? waterIndexCounter : indexCounter;
 
+          // Sample light from air cell in front of the face (Minecraft-style)
+          uint8_t faceSky = 15;
+          uint8_t faceBlock = 0;
+          {
+            glm::ivec3 solid = quad_origin_voxel_coord;
+            // Face sits between solid and air along normal
+            glm::ivec3 airCell = solid;
+            if (quad_normal_dir.x > 0)
+              airCell.x += 1;
+            else if (quad_normal_dir.x < 0)
+              ; // solid already on + side; air is solid
+            else if (quad_normal_dir.y > 0)
+              airCell.y += 1;
+            else if (quad_normal_dir.y < 0)
+              ;
+            else if (quad_normal_dir.z > 0)
+              airCell.z += 1;
+
+            // Prefer the open side of the face
+            glm::ivec3 sample = solid;
+            sample.x += static_cast<int>(quad_normal_dir.x);
+            sample.y += static_cast<int>(quad_normal_dir.y);
+            sample.z += static_cast<int>(quad_normal_dir.z);
+            if (sample.x >= 0 && sample.x < CHUNK_SIZE && sample.y >= 0 && sample.y < CHUNK_HEIGHT &&
+                sample.z >= 0 && sample.z < CHUNK_SIZE)
+            {
+              const size_t li = static_cast<size_t>(sample.x + CHUNK_SIZE * (sample.y + CHUNK_HEIGHT * sample.z));
+              faceSky = skyLight[li];
+              faceBlock = blockLight[li];
+            }
+            else
+            {
+              faceSky = 12;
+              faceBlock = 0;
+            }
+            // Emissive solid itself glows
+            if (solid.x >= 0 && solid.x < CHUNK_SIZE && solid.y >= 0 && solid.y < CHUNK_HEIGHT &&
+                solid.z >= 0 && solid.z < CHUNK_SIZE)
+            {
+              faceBlock = std::max(faceBlock, tier1::blockLightEmission(getVoxel(solid.x, solid.y, solid.z).type));
+            }
+          }
+          const uint32_t lightBits = tier1::packLightBits(faceSky, faceBlock);
+
           for (int i = 0; i < 4; ++i)
           {
             Vertex vert;
@@ -737,7 +886,7 @@ void Chunk::generateMesh()
             glm::vec3 localPos = vert.position - this->position;
             uint32_t ao = calculateAO(localPos, i);
 
-            vert.packedData = packedData | (ao << 12);
+            vert.packedData = packedData | (ao << 12) | lightBits;
             vert.texCoord = tc[i];
             vert.packedBiomeColor = packedColor;
 
@@ -840,10 +989,12 @@ void Chunk::generateLODMesh()
       }
 
       // normalIdx=2 (+Y), ao=3 (no occlusion — skip expensive AO for LOD)
+      // Full sky light for distant LOD columns (block light 0)
       uint32_t packedData = (2u & 0x7u) |
                             ((static_cast<uint32_t>(texType) & 0xFFu) << 3) |
                             (needsBiomeColoring ? (1u << 11) : 0u) |
-                            (3u << 12);
+                            (3u << 12) |
+                            tier1::packLightBits(15, 0);
 
       // Top face vertices in world space; axis mapping: d=1(Y), u=2(Z), v=0(X)
       float fy = float(topY + 1);

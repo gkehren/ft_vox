@@ -7,7 +7,9 @@ layout(location = 0) in vec3 TexCoords;
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4 view;
     mat4 projection;
-    mat4 lightSpaceMatrix;
+    mat4 cascadeMatrix0;
+    mat4 cascadeMatrix1;
+    mat4 cascadeMatrix2;
     vec4 viewPos;
     vec4 lightDirection;
     vec4 fogColor;
@@ -17,6 +19,10 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 sunDir;
     vec4 moonDir;
     vec4 skyParams;
+    vec4 cascadeSplits;
+    vec4 moonAmbient;
+    vec4 tier1Params;
+    vec4 waterParams;
     vec4 postParams0;
     vec4 postParams1;
     vec4 postParams2;
@@ -81,17 +87,17 @@ void main()
     float sunset = sunsetFactor / factorTotal;
     float night = nightFactor / factorTotal;
 
-    // 2. Zenith / horizon — deeper blue day, vivid sunset, not milky grey
-    vec3 dayZenith = vec3(0.10, 0.32, 0.78);
+    // 2. Zenith / horizon — richer day blue (was washing toward white with pale fog)
+    vec3 dayZenith = vec3(0.08, 0.28, 0.72);
     vec3 sunsetZenith = vec3(0.18, 0.08, 0.28);
     vec3 nightZenith = vec3(0.006, 0.012, 0.04);
     vec3 zenithColor = dayZenith * day + sunsetZenith * sunset + nightZenith * night;
 
-    vec3 dayHorizon = vec3(0.55, 0.78, 0.98);
+    vec3 dayHorizon = vec3(0.42, 0.68, 0.95);
     vec3 sunsetHorizon = vec3(1.0, 0.45, 0.18);
     vec3 nightHorizon = vec3(0.03, 0.05, 0.12);
     vec3 horizonColor = dayHorizon * day + sunsetHorizon * sunset + nightHorizon * night;
-    horizonColor = mix(horizonColor, fogColor, 0.22);
+    horizonColor = mix(horizonColor, fogColor, 0.12);
 
     // 3. Sky gradient (interpolate horizon to zenith)
     float grad = pow(1.0 - h, 2.8);

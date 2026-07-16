@@ -45,17 +45,17 @@ int main()
 	if (std::abs(visualParams.z - sp.colorBoost) > 1e-5f)
 		ok = fail("colorBoost should also be mirrored in visualParams.z");
 
-	// Balanced defaults: not grey-wash, not neon
-	if (sp.colorBoost < 1.0f || sp.colorBoost > 1.12f)
-		ok = fail("default colorBoost out of balanced range [1.0, 1.12]");
-	if (sp.saturationLevel < 1.0f || sp.saturationLevel > 1.15f)
-		ok = fail("default saturationLevel out of balanced range [1.0, 1.15]");
+	// Mid-path defaults: readable chroma, not washed-out or neon
+	if (sp.colorBoost < 1.0f || sp.colorBoost > 1.08f)
+		ok = fail("default colorBoost out of balanced range [1.0, 1.08]");
+	if (sp.saturationLevel < 1.0f || sp.saturationLevel > 1.10f)
+		ok = fail("default saturationLevel out of balanced range [1.0, 1.10]");
 	if (sp.contrastLevel < 1.0f || sp.contrastLevel > 1.08f)
 		ok = fail("default contrastLevel out of balanced range [1.0, 1.08]");
-	if (sp.ambientStrength < 0.2f)
-		ok = fail("ambient too dark/muddy for daytime look");
-	if (sp.diffuseIntensity < 0.75f)
-		ok = fail("diffuse too weak");
+	if (sp.ambientStrength < 0.18f || sp.ambientStrength > 0.28f)
+		ok = fail("ambient out of outdoor-balanced range [0.18, 0.28]");
+	if (sp.diffuseIntensity < 0.75f || sp.diffuseIntensity > 0.98f)
+		ok = fail("diffuse out of outdoor-balanced range [0.75, 0.98]");
 
 	// Mutate and re-pack to prove knobs are not hard-coded in packer
 	sp.colorBoost = 1.55f;
@@ -66,10 +66,10 @@ int main()
 		ok = fail("packFrameLightVisual does not pass through mutated knobs");
 
 	PostProcessSettings pp{};
-	if (pp.exposure < 0.9f || pp.exposure > 1.15f)
-		ok = fail("default post exposure out of balanced range");
-	if (pp.postSaturation < 1.0f || pp.postSaturation > 1.10f)
-		ok = fail("default postSaturation out of balanced range [1.0, 1.10]");
+	if (pp.exposure < 0.88f || pp.exposure > 1.05f)
+		ok = fail("default post exposure out of balanced range [0.88, 1.05]");
+	if (pp.postSaturation < 0.98f || pp.postSaturation > 1.08f)
+		ok = fail("default postSaturation out of balanced range [0.98, 1.08]");
 	if (pp.postContrast < 1.0f || pp.postContrast > 1.08f)
 		ok = fail("default postContrast out of balanced range [1.0, 1.08]");
 

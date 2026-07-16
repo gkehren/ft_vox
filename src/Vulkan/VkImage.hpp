@@ -29,6 +29,21 @@ AllocatedImage createImage2D(VmaAllocator allocator,
 							 VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
 							 VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);
 
+/// 2D array image (e.g. cascaded shadow maps). View type is 2D_ARRAY when arrayLayers > 1.
+AllocatedImage createImage2DArray(VmaAllocator allocator,
+								  VkDevice device,
+								  uint32_t width,
+								  uint32_t height,
+								  uint32_t arrayLayers,
+								  VkFormat format,
+								  VkImageUsageFlags usage,
+								  VmaMemoryUsage memoryUsage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+								  VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);
+
+/// Create a single-layer view into an existing array image (for cascade depth attachments).
+VkImageView createImageView2DLayer(VkDevice device, VkImage image, VkFormat format,
+								   VkImageAspectFlags aspect, uint32_t layer);
+
 void destroyImage(VmaAllocator allocator, VkDevice device, AllocatedImage &image);
 
 /// Transition image layout with a pipeline barrier (recorded into cmd).

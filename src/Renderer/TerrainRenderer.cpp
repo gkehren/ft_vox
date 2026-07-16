@@ -9,7 +9,6 @@
 #include <array>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -64,17 +63,36 @@ void TerrainRenderer::shutdown()
 	m_overlays.shutdown();
 	m_post.shutdown();
 
+	if (m_pipelineLayout != VK_NULL_HANDLE)
+		vkDestroyPipelineLayout(m_context->getDevice(), m_pipelineLayout, nullptr);
+	if (m_shadowPipelineLayout != VK_NULL_HANDLE)
+		vkDestroyPipelineLayout(m_context->getDevice(), m_shadowPipelineLayout, nullptr);
+	if (m_waterPipelineLayout != VK_NULL_HANDLE)
+		vkDestroyPipelineLayout(m_context->getDevice(), m_waterPipelineLayout, nullptr);
+	m_pipelineLayout = m_shadowPipelineLayout = m_waterPipelineLayout = VK_NULL_HANDLE;
+
 	if (m_descriptorPool != VK_NULL_HANDLE)
 		vkDestroyDescriptorPool(m_context->getDevice(), m_descriptorPool, nullptr);
 	if (m_setLayout0 != VK_NULL_HANDLE)
 		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_setLayout0, nullptr);
 	if (m_setLayout1 != VK_NULL_HANDLE)
 		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_setLayout1, nullptr);
+	if (m_setLayout2 != VK_NULL_HANDLE)
+		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_setLayout2, nullptr);
 
 	m_descriptorPool = VK_NULL_HANDLE;
-	m_setLayout0 = VK_NULL_HANDLE;
-	m_setLayout1 = VK_NULL_HANDLE;
-	m_set1 = VK_NULL_HANDLE;
+	m_setLayout0 = m_setLayout1 = m_setLayout2 = VK_NULL_HANDLE;
+	m_set1 = m_set2Water = VK_NULL_HANDLE;
+
+	if (m_sceneSampler != VK_NULL_HANDLE)
+	{
+		vkDestroySampler(m_context->getDevice(), m_sceneSampler, nullptr);
+		m_sceneSampler = VK_NULL_HANDLE;
+	}
+	if (m_sceneHistory.image != VK_NULL_HANDLE)
+		destroyImage(m_context->getAllocator(), m_context->getDevice(), m_sceneHistory);
+	if (m_depthHistory.image != VK_NULL_HANDLE)
+		destroyImage(m_context->getAllocator(), m_context->getDevice(), m_depthHistory);
 
 	destroyShadowResources();
 	m_textures.shutdown();
@@ -92,13 +110,35 @@ void TerrainRenderer::init(VkContext &context, VkSwapchain &swapchain, Immediate
 	createShadowResources();
 	createDescriptors();
 	const auto extent = swapchain.getExtent();
+
+	// Scene history for water refraction + depth history for shore foam
+	m_sceneHistory = createImage2D(
+		m_context->getAllocator(), m_context->getDevice(),
+		extent.width, extent.height, VK_FORMAT_R16G16B16A16_SFLOAT,
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+	m_depthHistory = createImage2D(
+		m_context->getAllocator(), m_context->getDevice(),
+		extent.width, extent.height, m_depthFormat,
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+	{
+		VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+		si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+		si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		if (vkCreateSampler(m_context->getDevice(), &si, nullptr, &m_sceneSampler) != VK_SUCCESS)
+			throw std::runtime_error("scene sampler failed");
+	}
+
 	m_post.init(context, imm, m_setLayout0, swapchain.getImageFormat(), extent.width, extent.height);
 	m_overlays.init(context, imm, m_setLayout0, m_post.hdrFormat(), m_post.depthFormat());
 	createPipelines(swapchain);
 	createFrameResources();
 	writeSet1Descriptors();
+	writeWaterSceneDescriptors();
 
-	std::cout << "TerrainRenderer ready (shadows + water + sky + post + overlays)\n";
+	std::cout << "TerrainRenderer ready (CSM + water refraction + SSAO + sky + post)\n";
 }
 
 void TerrainRenderer::onSwapchainRecreate(VkSwapchain &swapchain)
@@ -106,6 +146,21 @@ void TerrainRenderer::onSwapchainRecreate(VkSwapchain &swapchain)
 	m_context->waitIdle();
 	const auto extent = swapchain.getExtent();
 	m_post.resize(extent.width, extent.height, swapchain.getImageFormat());
+	if (m_sceneHistory.image != VK_NULL_HANDLE)
+		destroyImage(m_context->getAllocator(), m_context->getDevice(), m_sceneHistory);
+	if (m_depthHistory.image != VK_NULL_HANDLE)
+		destroyImage(m_context->getAllocator(), m_context->getDevice(), m_depthHistory);
+	m_sceneHistory = createImage2D(
+		m_context->getAllocator(), m_context->getDevice(),
+		extent.width, extent.height, VK_FORMAT_R16G16B16A16_SFLOAT,
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+	m_depthHistory = createImage2D(
+		m_context->getAllocator(), m_context->getDevice(),
+		extent.width, extent.height, m_depthFormat,
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+	writeWaterSceneDescriptors();
 	destroyPipelines();
 	createPipelines(swapchain);
 	m_overlays.recreatePipelines(m_post.hdrFormat(), m_post.depthFormat());
@@ -113,20 +168,27 @@ void TerrainRenderer::onSwapchainRecreate(VkSwapchain &swapchain)
 
 void TerrainRenderer::createShadowResources()
 {
-	m_shadowMap = createImage2D(
+	m_shadowMap = createImage2DArray(
 		m_context->getAllocator(), m_context->getDevice(),
-		kShadowMapSize, kShadowMapSize, m_depthFormat,
+		kShadowMapSize, kShadowMapSize, static_cast<uint32_t>(kCascadeCount), m_depthFormat,
 		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-		VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+		VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+	for (int i = 0; i < kCascadeCount; ++i)
+	{
+		m_shadowLayerViews[i] = createImageView2DLayer(
+			m_context->getDevice(), m_shadowMap.image, m_depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT,
+			static_cast<uint32_t>(i));
+	}
 
 	VkSamplerCreateInfo samplerInfo{};
 	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	samplerInfo.magFilter = VK_FILTER_NEAREST;
-	samplerInfo.minFilter = VK_FILTER_NEAREST;
+	samplerInfo.magFilter = VK_FILTER_LINEAR;
+	samplerInfo.minFilter = VK_FILTER_LINEAR;
 	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; // outside = lit
+	samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
 	samplerInfo.unnormalizedCoordinates = VK_FALSE;
 	samplerInfo.compareEnable = VK_FALSE;
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -138,6 +200,14 @@ void TerrainRenderer::destroyShadowResources()
 {
 	if (!m_context)
 		return;
+	for (auto &v : m_shadowLayerViews)
+	{
+		if (v != VK_NULL_HANDLE)
+		{
+			vkDestroyImageView(m_context->getDevice(), v, nullptr);
+			v = VK_NULL_HANDLE;
+		}
+	}
 	if (m_shadowSampler != VK_NULL_HANDLE)
 	{
 		vkDestroySampler(m_context->getDevice(), m_shadowSampler, nullptr);
@@ -179,17 +249,23 @@ void TerrainRenderer::createDescriptors()
 	if (vkCreateDescriptorSetLayout(m_context->getDevice(), &layout1, nullptr, &m_setLayout1) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create set layout 1");
 
+	std::array<VkDescriptorSetLayoutBinding, 2> set2Bindings = set1Bindings;
+	VkDescriptorSetLayoutCreateInfo layout2 = layout1;
+	layout2.pBindings = set2Bindings.data();
+	if (vkCreateDescriptorSetLayout(m_context->getDevice(), &layout2, nullptr, &m_setLayout2) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create set layout 2");
+
 	std::array<VkDescriptorPoolSize, 2> poolSizes{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	poolSizes[0].descriptorCount = kMaxFramesInFlight;
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSizes[1].descriptorCount = 2; // atlas + shadow
+	poolSizes[1].descriptorCount = 8;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
 	poolInfo.pPoolSizes = poolSizes.data();
-	poolInfo.maxSets = kMaxFramesInFlight + 1;
+	poolInfo.maxSets = kMaxFramesInFlight + 4;
 	if (vkCreateDescriptorPool(m_context->getDevice(), &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create descriptor pool");
 
@@ -201,13 +277,44 @@ void TerrainRenderer::createDescriptors()
 	if (vkAllocateDescriptorSets(m_context->getDevice(), &alloc1, &m_set1) != VK_SUCCESS)
 		throw std::runtime_error("Failed to allocate descriptor set 1");
 
-	std::array<VkDescriptorSetLayout, 2> setLayouts = {m_setLayout0, m_setLayout1};
-	VkPipelineLayoutCreateInfo layoutInfo{};
-	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	layoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
-	layoutInfo.pSetLayouts = setLayouts.data();
-	if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS)
-		throw std::runtime_error("Failed to create pipeline layout");
+	VkDescriptorSetAllocateInfo alloc2 = alloc1;
+	alloc2.pSetLayouts = &m_setLayout2;
+	if (vkAllocateDescriptorSets(m_context->getDevice(), &alloc2, &m_set2Water) != VK_SUCCESS)
+		throw std::runtime_error("Failed to allocate water descriptor set");
+
+	// Opaque layout: set0 + set1
+	{
+		std::array<VkDescriptorSetLayout, 2> setLayouts = {m_setLayout0, m_setLayout1};
+		VkPipelineLayoutCreateInfo layoutInfo{};
+		layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		layoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
+		layoutInfo.pSetLayouts = setLayouts.data();
+		if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS)
+			throw std::runtime_error("Failed to create pipeline layout");
+	}
+	// Shadow: push constant mat4
+	{
+		VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4)};
+		VkPipelineLayoutCreateInfo layoutInfo{};
+		layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		layoutInfo.pushConstantRangeCount = 1;
+		layoutInfo.pPushConstantRanges = &pcr;
+		if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &m_shadowPipelineLayout) != VK_SUCCESS)
+			throw std::runtime_error("Failed to create shadow pipeline layout");
+	}
+	// Water: set0 + set1 + set2, push invScreenSize for gl_FragCoord UV
+	{
+		std::array<VkDescriptorSetLayout, 3> setLayouts = {m_setLayout0, m_setLayout1, m_setLayout2};
+		VkPushConstantRange pcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float) * 4};
+		VkPipelineLayoutCreateInfo layoutInfo{};
+		layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		layoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
+		layoutInfo.pSetLayouts = setLayouts.data();
+		layoutInfo.pushConstantRangeCount = 1;
+		layoutInfo.pPushConstantRanges = &pcr;
+		if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &m_waterPipelineLayout) != VK_SUCCESS)
+			throw std::runtime_error("Failed to create water pipeline layout");
+	}
 }
 
 void TerrainRenderer::writeSet1Descriptors()
@@ -240,38 +347,61 @@ void TerrainRenderer::writeSet1Descriptors()
 	vkUpdateDescriptorSets(m_context->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
+void TerrainRenderer::writeWaterSceneDescriptors()
+{
+	if (m_set2Water == VK_NULL_HANDLE || m_sceneHistory.view == VK_NULL_HANDLE)
+		return;
+
+	VkDescriptorImageInfo colorInfo{};
+	colorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	colorInfo.imageView = m_sceneHistory.view;
+	colorInfo.sampler = m_sceneSampler;
+
+	// Depth history copy (real depth) — live depth is the attachment during water pass.
+	VkDescriptorImageInfo depthInfo{};
+	depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	depthInfo.imageView = m_depthHistory.view != VK_NULL_HANDLE ? m_depthHistory.view : m_sceneHistory.view;
+	depthInfo.sampler = m_sceneSampler;
+
+	std::array<VkWriteDescriptorSet, 2> writes{};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].dstSet = m_set2Water;
+	writes[0].dstBinding = 0;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	writes[0].descriptorCount = 1;
+	writes[0].pImageInfo = &colorInfo;
+
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].dstSet = m_set2Water;
+	writes[1].dstBinding = 1;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	writes[1].descriptorCount = 1;
+	writes[1].pImageInfo = &depthInfo;
+
+	vkUpdateDescriptorSets(m_context->getDevice(), 2, writes.data(), 0, nullptr);
+}
+
 void TerrainRenderer::destroyPipelines()
 {
 	if (!m_context)
 		return;
-	if (m_opaquePipeline != VK_NULL_HANDLE)
-		vkDestroyPipeline(m_context->getDevice(), m_opaquePipeline, nullptr);
-	if (m_waterPipeline != VK_NULL_HANDLE)
-		vkDestroyPipeline(m_context->getDevice(), m_waterPipeline, nullptr);
-	if (m_shadowPipeline != VK_NULL_HANDLE)
-		vkDestroyPipeline(m_context->getDevice(), m_shadowPipeline, nullptr);
-	if (m_pipelineLayout != VK_NULL_HANDLE)
-		vkDestroyPipelineLayout(m_context->getDevice(), m_pipelineLayout, nullptr);
-	m_opaquePipeline = m_waterPipeline = m_shadowPipeline = VK_NULL_HANDLE;
-	m_pipelineLayout = VK_NULL_HANDLE;
+	auto dPipe = [&](VkPipeline &p) {
+		if (p)
+			vkDestroyPipeline(m_context->getDevice(), p, nullptr);
+		p = VK_NULL_HANDLE;
+	};
+	dPipe(m_opaquePipeline);
+	dPipe(m_waterPipeline);
+	dPipe(m_shadowPipeline);
+	// Keep layouts alive across swapchain recreate (owned by createDescriptors)
 }
 
-void TerrainRenderer::createPipelines(VkSwapchain &swapchain)
+void TerrainRenderer::createPipelines(VkSwapchain & /*swapchain*/)
 {
-	// Recreate layout if destroyed with pipelines
-	if (m_pipelineLayout == VK_NULL_HANDLE)
-	{
-		std::array<VkDescriptorSetLayout, 2> setLayouts = {m_setLayout0, m_setLayout1};
-		VkPipelineLayoutCreateInfo layoutInfo{};
-		layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		layoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
-		layoutInfo.pSetLayouts = setLayouts.data();
-		if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS)
-			throw std::runtime_error("Failed to create pipeline layout");
-	}
-
 	VkShaderModule terrainVert = loadShaderModule(m_context->getDevice(), spvPath("terrain.vert.spv"));
 	VkShaderModule terrainFrag = loadShaderModule(m_context->getDevice(), spvPath("terrain.frag.spv"));
+	VkShaderModule waterVert = loadShaderModule(m_context->getDevice(), spvPath("water.vert.spv"));
+	VkShaderModule waterFrag = loadShaderModule(m_context->getDevice(), spvPath("water.frag.spv"));
 	VkShaderModule shadowVert = loadShaderModule(m_context->getDevice(), spvPath("shadow.vert.spv"));
 	VkShaderModule shadowFrag = loadShaderModule(m_context->getDevice(), spvPath("shadow.frag.spv"));
 
@@ -298,7 +428,7 @@ void TerrainRenderer::createPipelines(VkSwapchain &swapchain)
 	dynamic.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
 	dynamic.pDynamicStates = dynamicStates.data();
 
-	// --- Opaque pipeline ---
+	// --- Opaque ---
 	{
 		VkPipelineShaderStageCreateInfo stages[2]{};
 		stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
@@ -320,9 +450,7 @@ void TerrainRenderer::createPipelines(VkSwapchain &swapchain)
 		depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
 
 		VkPipelineColorBlendAttachmentState blendAtt{};
-		blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-								  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-		blendAtt.blendEnable = VK_FALSE;
+		blendAtt.colorWriteMask = 0xF;
 
 		VkPipelineColorBlendStateCreateInfo blend{};
 		blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -354,13 +482,13 @@ void TerrainRenderer::createPipelines(VkSwapchain &swapchain)
 			throw std::runtime_error("Failed to create opaque pipeline");
 	}
 
-	// --- Water pipeline (alpha blend, no depth write, no cull) ---
+	// --- Water ---
 	{
 		VkPipelineShaderStageCreateInfo stages[2]{};
 		stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
-					 VK_SHADER_STAGE_VERTEX_BIT, terrainVert, "main", nullptr};
+					 VK_SHADER_STAGE_VERTEX_BIT, waterVert, "main", nullptr};
 		stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
-					 VK_SHADER_STAGE_FRAGMENT_BIT, terrainFrag, "main", nullptr};
+					 VK_SHADER_STAGE_FRAGMENT_BIT, waterFrag, "main", nullptr};
 
 		VkPipelineRasterizationStateCreateInfo raster{};
 		raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
@@ -376,8 +504,7 @@ void TerrainRenderer::createPipelines(VkSwapchain &swapchain)
 		depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
 
 		VkPipelineColorBlendAttachmentState blendAtt{};
-		blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-								  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+		blendAtt.colorWriteMask = 0xF;
 		blendAtt.blendEnable = VK_TRUE;
 		blendAtt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
 		blendAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -411,12 +538,12 @@ void TerrainRenderer::createPipelines(VkSwapchain &swapchain)
 		info.pDepthStencilState = &depthStencil;
 		info.pColorBlendState = &blend;
 		info.pDynamicState = &dynamic;
-		info.layout = m_pipelineLayout;
+		info.layout = m_waterPipelineLayout;
 		if (vkCreateGraphicsPipelines(m_context->getDevice(), VK_NULL_HANDLE, 1, &info, nullptr, &m_waterPipeline) != VK_SUCCESS)
 			throw std::runtime_error("Failed to create water pipeline");
 	}
 
-	// --- Shadow pipeline (depth only, front cull for peter-panning) ---
+	// --- Shadow (depth only, push constant matrix) ---
 	{
 		VkPipelineShaderStageCreateInfo stages[2]{};
 		stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
@@ -427,12 +554,13 @@ void TerrainRenderer::createPipelines(VkSwapchain &swapchain)
 		VkPipelineRasterizationStateCreateInfo raster{};
 		raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 		raster.polygonMode = VK_POLYGON_MODE_FILL;
-		raster.cullMode = VK_CULL_MODE_FRONT_BIT; // reduce shadow acne (same as old GL)
+		raster.cullMode = VK_CULL_MODE_FRONT_BIT;
 		raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 		raster.lineWidth = 1.0f;
 		raster.depthBiasEnable = VK_TRUE;
-		raster.depthBiasConstantFactor = 1.25f;
-		raster.depthBiasSlopeFactor = 1.75f;
+		// Stronger slope-scale bias for coplanar voxel faces (reduces acne without peter-panning as badly as huge constant bias)
+		raster.depthBiasConstantFactor = 1.75f;
+		raster.depthBiasSlopeFactor = 2.5f;
 
 		VkPipelineDepthStencilStateCreateInfo depthStencil{};
 		depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -462,15 +590,13 @@ void TerrainRenderer::createPipelines(VkSwapchain &swapchain)
 		info.pDepthStencilState = &depthStencil;
 		info.pColorBlendState = &blend;
 		info.pDynamicState = &dynamic;
-		info.layout = m_pipelineLayout;
+		info.layout = m_shadowPipelineLayout;
 		if (vkCreateGraphicsPipelines(m_context->getDevice(), VK_NULL_HANDLE, 1, &info, nullptr, &m_shadowPipeline) != VK_SUCCESS)
 			throw std::runtime_error("Failed to create shadow pipeline");
 	}
 
-	destroyShaderModule(m_context->getDevice(), terrainVert);
-	destroyShaderModule(m_context->getDevice(), terrainFrag);
-	destroyShaderModule(m_context->getDevice(), shadowVert);
-	destroyShaderModule(m_context->getDevice(), shadowFrag);
+	for (auto m : {terrainVert, terrainFrag, waterVert, waterFrag, shadowVert, shadowFrag})
+		destroyShaderModule(m_context->getDevice(), m);
 }
 
 void TerrainRenderer::createFrameResources()
@@ -556,18 +682,9 @@ void TerrainRenderer::destroyFrameResources()
 	m_imagesInFlight.clear();
 }
 
-glm::mat4 TerrainRenderer::computeLightSpaceMatrix(const glm::vec3 &cameraPos, const glm::vec3 &lightDir)
-{
-	const glm::vec3 dir = glm::normalize(lightDir);
-	const glm::vec3 lightPos = cameraPos + dir * 500.0f;
-	const glm::mat4 lightView = glm::lookAt(lightPos, cameraPos, glm::vec3(0.0f, 1.0f, 0.0f));
-	// Ortho matches old OpenGL shadow volume; depth 0..1 via GLM_FORCE_DEPTH_ZERO_TO_ONE
-	const glm::mat4 lightProj = glm::ortho(-512.0f, 512.0f, -512.0f, 512.0f, 1.0f, 1000.0f);
-	return lightProj * lightView;
-}
-
-void TerrainRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, float aspectW, float aspectH, float farPlane,
-									 float time, const ShaderParameters &params)
+void TerrainRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, float aspectW, float aspectH,
+									 float farPlane, float time, const ShaderParameters &params,
+									 float shadowCascadeFar, bool underwater)
 {
 	m_time = time;
 	m_lastCamPos = camera.getPosition();
@@ -582,19 +699,36 @@ void TerrainRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, 
 	const float night = params.nightFactor;
 	const float sunset = params.sunsetFactor;
 
+	const float nearPlane = 0.1f;
+	const float cascadeFar = std::max(shadowCascadeFar, 64.f);
+	const float aspect = (aspectH > 1e-5f) ? (aspectW / aspectH) : (16.f / 9.f);
+	glm::vec4 splits{};
+	// Frustum-slice CSM using real camera basis (not camera-centered spheres)
+	tier1::buildCascadeUBOFromFront(camera.getPosition(), camera.getFront(), glm::vec3(0.f, 1.f, 0.f),
+									m_lightDir, nearPlane, cascadeFar, aspect, tier1::kDefaultFovYDegrees,
+									m_cascadeMatrices, splits, nullptr);
+
 	FrameUBO ubo{};
 	ubo.view = camera.getViewMatrix();
 	ubo.projection = camera.getProjectionMatrix(aspectW, aspectH, farPlane);
-	ubo.lightSpaceMatrix = computeLightSpaceMatrix(camera.getPosition(), m_lightDir);
+	ubo.cascadeMatrix0 = m_cascadeMatrices[0];
+	ubo.cascadeMatrix1 = m_cascadeMatrices[1];
+	ubo.cascadeMatrix2 = m_cascadeMatrices[2];
 	ubo.viewPos = glm::vec4(camera.getPosition(), 1.0f);
 	ubo.lightDirection = glm::vec4(m_lightDir, 0.0f);
 	ubo.fogColor = glm::vec4(params.fogColor, 1.0f);
-	ubo.fogParams = glm::vec4(params.fogStart, params.fogEnd, params.fogDensity, 0.0f);
-	// colorBoost in lightParams.w + visualParams.z; saturation/contrast in visualParams
+	ubo.fogParams = glm::vec4(params.fogStart, params.fogEnd, params.fogDensity, params.fogHeightFalloff);
 	packFrameLightVisual(params, ubo.lightParams, ubo.visualParams);
 	ubo.sunDir = glm::vec4(sunDir, 0.0f);
 	ubo.moonDir = glm::vec4(moonDir, 0.0f);
 	ubo.skyParams = glm::vec4(time, day, sunset, night);
+	ubo.cascadeSplits = splits;
+	// Cool base color in rgb; strength in w (shader multiplies by nightFactor * w)
+	ubo.moonAmbient = glm::vec4(0.22f, 0.30f, 0.48f, params.moonAmbientStrength);
+	ubo.tier1Params = glm::vec4(params.blockLightScale, params.emissiveScale, params.fogBaseY,
+								underwater ? 1.0f : 0.0f);
+	ubo.waterParams = glm::vec4(params.waterWaveStrength, params.waterRefraction,
+								params.waterSpecular, params.waterFoamStrength);
 
 	std::memcpy(m_frames[frameIndex].uboMapped, &ubo, sizeof(FrameUBO));
 }
@@ -642,14 +776,12 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 	if (vkBeginCommandBuffer(f.cmd, &beginInfo) != VK_SUCCESS)
 		throw std::runtime_error("Failed to begin terrain command buffer");
 
-	// Mesh staging copies (same queue, before any vertex use).
-	// Engine wraps preRecord with PROFILE_SCOPE("MeshUpload").
 	if (preRecord)
 		preRecord(f.cmd);
 
 	std::array<VkDescriptorSet, 2> sets = {f.descriptorSet0, m_set1};
 
-	// ========== Shadow pass ==========
+	// ========== Cascaded shadow passes ==========
 	{
 		PROFILE_SCOPE("Shadow");
 		VkImageMemoryBarrier toDepth{};
@@ -659,58 +791,61 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 		toDepth.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		toDepth.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		toDepth.image = m_shadowMap.image;
-		toDepth.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+		toDepth.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, static_cast<uint32_t>(kCascadeCount)};
 		toDepth.srcAccessMask = 0;
 		toDepth.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 		vkCmdPipelineBarrier(f.cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 							 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
 							 0, 0, nullptr, 0, nullptr, 1, &toDepth);
 
-		VkRenderingAttachmentInfo depthAtt{};
-		depthAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-		depthAtt.imageView = m_shadowMap.view;
-		depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-		depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		depthAtt.clearValue.depthStencil = {1.0f, 0};
-
-		VkRenderingInfo shadowInfo{};
-		shadowInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-		shadowInfo.renderArea = {{0, 0}, {kShadowMapSize, kShadowMapSize}};
-		shadowInfo.layerCount = 1;
-		shadowInfo.pDepthAttachment = &depthAtt;
-
-		beginRendering(f.cmd, &shadowInfo);
-
-		VkViewport vp{0.f, 0.f, static_cast<float>(kShadowMapSize), static_cast<float>(kShadowMapSize), 0.f, 1.f};
-		VkRect2D scissor{{0, 0}, {kShadowMapSize, kShadowMapSize}};
-		vkCmdSetViewport(f.cmd, 0, 1, &vp);
-		vkCmdSetScissor(f.cmd, 0, 1, &scissor);
-
-		vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
-		vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0,
-								static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
-
-		for (Chunk *chunk : shadowChunks)
+		for (int c = 0; c < kCascadeCount; ++c)
 		{
-			if (chunk)
-				chunk->drawShadow(f.cmd);
+			VkRenderingAttachmentInfo depthAtt{};
+			depthAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+			depthAtt.imageView = m_shadowLayerViews[c];
+			depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+			depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+			depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			depthAtt.clearValue.depthStencil = {1.0f, 0};
+
+			VkRenderingInfo shadowInfo{};
+			shadowInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+			shadowInfo.renderArea = {{0, 0}, {kShadowMapSize, kShadowMapSize}};
+			shadowInfo.layerCount = 1;
+			shadowInfo.pDepthAttachment = &depthAtt;
+
+			beginRendering(f.cmd, &shadowInfo);
+
+			VkViewport vp{0.f, 0.f, static_cast<float>(kShadowMapSize), static_cast<float>(kShadowMapSize), 0.f, 1.f};
+			VkRect2D scissor{{0, 0}, {kShadowMapSize, kShadowMapSize}};
+			vkCmdSetViewport(f.cmd, 0, 1, &vp);
+			vkCmdSetScissor(f.cmd, 0, 1, &scissor);
+
+			vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
+			vkCmdPushConstants(f.cmd, m_shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+							   sizeof(glm::mat4), &m_cascadeMatrices[c]);
+
+			for (Chunk *chunk : shadowChunks)
+			{
+				if (chunk)
+					chunk->drawShadow(f.cmd);
+			}
+
+			endRendering(f.cmd);
 		}
 
-		endRendering(f.cmd);
-
-		// Depth attachment → shader read
 		VkImageMemoryBarrier toSample = toDepth;
 		toSample.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 		toSample.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		toSample.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 		toSample.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		toSample.subresourceRange.layerCount = static_cast<uint32_t>(kCascadeCount);
 		vkCmdPipelineBarrier(f.cmd, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 							 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 							 0, 0, nullptr, 0, nullptr, 1, &toSample);
 	}
 
-	// ========== HDR scene pass (opaque + water) ==========
+	// ========== Opaque HDR scene ==========
 	{
 		PROFILE_SCOPE("Scene");
 		VkImageMemoryBarrier toColor{};
@@ -786,46 +921,198 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 				chunk->draw(f.cmd);
 		}
 
-		{
-			struct WaterEntry
-			{
-				Chunk *chunk;
-				float dist2;
-			};
-			std::vector<WaterEntry> waterChunks;
-			waterChunks.reserve(chunks.size());
-			const auto *ubo = static_cast<const FrameUBO *>(f.uboMapped);
-			const glm::vec3 camPos = glm::vec3(ubo->viewPos);
-			for (Chunk *chunk : chunks)
-			{
-				if (chunk && chunk->hasWaterMesh())
-				{
-					const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
-					const glm::vec3 d = c - camPos;
-					waterChunks.push_back({chunk, glm::dot(d, d)});
-				}
-			}
-			std::sort(waterChunks.begin(), waterChunks.end(),
-					  [](const WaterEntry &a, const WaterEntry &b) { return a.dist2 > b.dist2; });
-
-			vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_waterPipeline);
-			for (const auto &e : waterChunks)
-				e.chunk->drawWater(f.cmd);
-		}
-
-		// Overlays (chunk borders, voxel highlight, players) into HDR before sky/post
 		m_overlays.record(f.cmd, f.descriptorSet0, chunks);
+		endRendering(f.cmd);
+	}
+
+	// ========== Copy opaque HDR + depth → history for water ==========
+	{
+		VkImageMemoryBarrier barriers[4]{};
+		// HDR → transfer src
+		barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barriers[0].oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		barriers[0].srcQueueFamilyIndex = barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barriers[0].image = m_post.hdrColor().image;
+		barriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		barriers[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+		// scene history → transfer dst
+		barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		barriers[1].srcQueueFamilyIndex = barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barriers[1].image = m_sceneHistory.image;
+		barriers[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		barriers[1].srcAccessMask = 0;
+		barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+		// live depth → transfer src
+		barriers[2].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barriers[2].oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		barriers[2].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		barriers[2].srcQueueFamilyIndex = barriers[2].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barriers[2].image = m_post.sceneDepth().image;
+		barriers[2].subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+		barriers[2].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		barriers[2].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+		// depth history → transfer dst
+		barriers[3].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barriers[3].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		barriers[3].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		barriers[3].srcQueueFamilyIndex = barriers[3].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barriers[3].image = m_depthHistory.image;
+		barriers[3].subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+		barriers[3].srcAccessMask = 0;
+		barriers[3].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+		vkCmdPipelineBarrier(f.cmd,
+							 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+							 VK_PIPELINE_STAGE_TRANSFER_BIT,
+							 0, 0, nullptr, 0, nullptr, 4, barriers);
+
+		VkImageCopy colorCopy{};
+		colorCopy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+		colorCopy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+		colorCopy.extent = {extent.width, extent.height, 1};
+		vkCmdCopyImage(f.cmd, m_post.hdrColor().image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					   m_sceneHistory.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &colorCopy);
+
+		VkImageCopy depthCopy{};
+		depthCopy.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+		depthCopy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+		depthCopy.extent = {extent.width, extent.height, 1};
+		vkCmdCopyImage(f.cmd, m_post.sceneDepth().image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					   m_depthHistory.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &depthCopy);
+
+		// History → shader read; HDR → color attachment; live depth → attachment for water depth test
+		VkImageMemoryBarrier after[4]{};
+		after[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		after[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		after[0].srcQueueFamilyIndex = after[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		after[0].image = m_sceneHistory.image;
+		after[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		after[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		after[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+		after[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		after[1].srcQueueFamilyIndex = after[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		after[1].image = m_depthHistory.image;
+		after[1].subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+		after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+		after[2].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		after[2].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		after[2].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		after[2].srcQueueFamilyIndex = after[2].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		after[2].image = m_post.hdrColor().image;
+		after[2].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		after[2].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		after[2].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+
+		after[3].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		after[3].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		after[3].newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		after[3].srcQueueFamilyIndex = after[3].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		after[3].image = m_post.sceneDepth().image;
+		after[3].subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+		after[3].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		after[3].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+		vkCmdPipelineBarrier(f.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+							 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+								 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+							 0, 0, nullptr, 0, nullptr, 4, after);
+	}
+
+	// ========== Water pass (samples history color + depth history; depth-tests on live depth) ==========
+	{
+		VkRenderingAttachmentInfo colorAtt{};
+		colorAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+		colorAtt.imageView = m_post.hdrColor().view;
+		colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+		VkRenderingAttachmentInfo depthAtt{};
+		depthAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+		depthAtt.imageView = m_post.sceneDepth().view;
+		depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+		VkRenderingInfo renderingInfo{};
+		renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+		renderingInfo.renderArea = {{0, 0}, extent};
+		renderingInfo.layerCount = 1;
+		renderingInfo.colorAttachmentCount = 1;
+		renderingInfo.pColorAttachments = &colorAtt;
+		renderingInfo.pDepthAttachment = &depthAtt;
+
+		beginRendering(f.cmd, &renderingInfo);
+
+		VkViewport viewport{};
+		viewport.x = 0.0f;
+		viewport.y = static_cast<float>(extent.height);
+		viewport.width = static_cast<float>(extent.width);
+		viewport.height = -static_cast<float>(extent.height);
+		viewport.minDepth = 0.0f;
+		viewport.maxDepth = 1.0f;
+		vkCmdSetViewport(f.cmd, 0, 1, &viewport);
+		VkRect2D scissor{{0, 0}, extent};
+		vkCmdSetScissor(f.cmd, 0, 1, &scissor);
+
+		std::array<VkDescriptorSet, 3> waterSets = {f.descriptorSet0, m_set1, m_set2Water};
+		vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_waterPipelineLayout, 0,
+								static_cast<uint32_t>(waterSets.size()), waterSets.data(), 0, nullptr);
+		vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_waterPipeline);
+		// invScreenSize for gl_FragCoord UV (framebuffer space matches history images)
+		const float invScreen[4] = {
+			1.f / static_cast<float>(std::max(1u, extent.width)),
+			1.f / static_cast<float>(std::max(1u, extent.height)),
+			0.f, 0.f};
+		vkCmdPushConstants(f.cmd, m_waterPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+						   sizeof(invScreen), invScreen);
+
+		struct WaterEntry
+		{
+			Chunk *chunk;
+			float dist2;
+		};
+		std::vector<WaterEntry> waterChunks;
+		waterChunks.reserve(chunks.size());
+		const auto *ubo = static_cast<const FrameUBO *>(f.uboMapped);
+		const glm::vec3 camPos = glm::vec3(ubo->viewPos);
+		for (Chunk *chunk : chunks)
+		{
+			if (chunk && chunk->hasWaterMesh())
+			{
+				const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
+				const glm::vec3 d = c - camPos;
+				waterChunks.push_back({chunk, glm::dot(d, d)});
+			}
+		}
+		std::sort(waterChunks.begin(), waterChunks.end(),
+				  [](const WaterEntry &a, const WaterEntry &b) { return a.dist2 > b.dist2; });
+		for (const auto &e : waterChunks)
+			e.chunk->drawWater(f.cmd);
 
 		endRendering(f.cmd);
 	}
 
-	// ========== Sky MRT (HDR + god-ray source) ==========
+	// ========== Sky MRT ==========
 	{
 		PROFILE_SCOPE("Sky");
 		m_post.recordSky(f.cmd, f.descriptorSet0, extent);
 	}
 
-	// ========== Post: bloom / god rays / composite → swapchain ==========
+	// ========== Post: SSAO / bloom / god rays / composite ==========
 	{
 		PROFILE_SCOPE("Post");
 		const auto *ubo = static_cast<const FrameUBO *>(f.uboMapped);
@@ -835,19 +1122,19 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 		if (sunClip.w > 0.f)
 		{
 			glm::vec3 ndc = glm::vec3(sunClip) / sunClip.w;
-			// Account for negative viewport Y flip in main pass (screen Y is flipped vs NDC)
-			// Same UV space as the fullscreen post pass (no extra Y flip).
 			sunScreen = glm::vec2(ndc.x * 0.5f + 0.5f, ndc.y * 0.5f + 0.5f);
 			sunVisibility = glm::smoothstep(-0.10f, 0.04f, ubo->sunDir.y);
 			if (sunScreen.x < 0.f || sunScreen.x > 1.f || sunScreen.y < 0.f || sunScreen.y > 1.f)
 				sunVisibility = 0.f;
 		}
 
+		const bool underwater = ubo->tier1Params.w > 0.5f;
+		m_postSettings.underwater = underwater;
 		m_post.recordPost(f.cmd, swapchain.getImages()[imageIndex], swapchain.getImageViews()[imageIndex],
-						  extent, f.descriptorSet0, m_postSettings, sunScreen, sunVisibility, m_time);
+						  extent, f.descriptorSet0, m_postSettings, sunScreen, sunVisibility, m_time,
+						  ubo->projection);
 	}
 
-	// ========== ImGui on swapchain (load) ==========
 	if (imguiDraw)
 	{
 		PROFILE_SCOPE("ImGuiDraw");
@@ -873,7 +1160,6 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 		endRendering(f.cmd);
 	}
 
-	// Swapchain → present
 	VkImageMemoryBarrier toPresent{};
 	toPresent.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	toPresent.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -895,32 +1181,30 @@ bool TerrainRenderer::submitPresent(VkSwapchain &swapchain, uint32_t imageIndex,
 {
 	auto &f = m_frames[frameIndex];
 
-	// Wait for color output AND shadow sampling readiness is handled in-cmd.
-	// Still wait at COLOR_ATTACHMENT for WSI acquire semaphore.
 	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = &f.imageAvailable;
-	submitInfo.pWaitDstStageMask = &waitStage;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &f.cmd;
-	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &f.renderFinished;
+	VkSubmitInfo submit{};
+	submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submit.waitSemaphoreCount = 1;
+	submit.pWaitSemaphores = &f.imageAvailable;
+	submit.pWaitDstStageMask = &waitStage;
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers = &f.cmd;
+	submit.signalSemaphoreCount = 1;
+	submit.pSignalSemaphores = &f.renderFinished;
 
-	if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submitInfo, f.inFlight) != VK_SUCCESS)
-		throw std::runtime_error("Failed to submit terrain frame");
+	if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submit, f.inFlight) != VK_SUCCESS)
+		throw std::runtime_error("Failed to submit terrain command buffer");
 
-	VkPresentInfoKHR presentInfo{};
-	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = &f.renderFinished;
+	VkPresentInfoKHR present{};
+	present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	present.waitSemaphoreCount = 1;
+	present.pWaitSemaphores = &f.renderFinished;
 	VkSwapchainKHR sc = swapchain.getSwapchain();
-	presentInfo.swapchainCount = 1;
-	presentInfo.pSwapchains = &sc;
-	presentInfo.pImageIndices = &imageIndex;
+	present.swapchainCount = 1;
+	present.pSwapchains = &sc;
+	present.pImageIndices = &imageIndex;
 
-	VkResult result = vkQueuePresentKHR(m_context->getPresentQueue(), &presentInfo);
+	VkResult result = vkQueuePresentKHR(m_context->getPresentQueue(), &present);
 	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
 		return false;
 	if (result != VK_SUCCESS)

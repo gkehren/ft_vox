@@ -4,20 +4,26 @@ layout(location = 0) in vec3 aPos;
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4 view;
     mat4 projection;
-    mat4 lightSpaceMatrix;
+    mat4 cascadeMatrix0;
+    mat4 cascadeMatrix1;
+    mat4 cascadeMatrix2;
     vec4 viewPos;
     vec4 lightDirection;
     vec4 fogColor;
     vec4 fogParams;
     vec4 lightParams;
     vec4 visualParams;
-    vec4 sunDir;      // xyz + pad
-    vec4 moonDir;     // xyz + pad
-    vec4 skyParams;   // x=time, y=day, z=sunset, w=night
-    vec4 postParams0; // exposure, bloomIntensity, gamma, bloomThreshold
-    vec4 postParams1; // sunScreen.xy, sunVisibility, flags (bit packed as float bits)
-    vec4 postParams2; // godRays density, weight, decay, exposure
-    vec4 postParams3; // dramaticBoost, toneMapper, bloomOn, fxaaOn (as floats)
+    vec4 sunDir;
+    vec4 moonDir;
+    vec4 skyParams;
+    vec4 cascadeSplits;
+    vec4 moonAmbient;
+    vec4 tier1Params;
+    vec4 waterParams;
+    vec4 postParams0;
+    vec4 postParams1;
+    vec4 postParams2;
+    vec4 postParams3;
 } frame;
 
 layout(location = 0) out vec3 vTexCoords;
