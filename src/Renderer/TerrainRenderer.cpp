@@ -292,9 +292,10 @@ void TerrainRenderer::createDescriptors()
 		if (vkCreatePipelineLayout(m_context->getDevice(), &layoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS)
 			throw std::runtime_error("Failed to create pipeline layout");
 	}
-	// Shadow: push constant mat4
+	// Shadow: push constant mat4 lightSpace + float time (foliage wind match)
 	{
-		VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4)};
+		// std140-ish layout: mat4 (64) + float time + pad to 16 → 80 bytes
+		VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 80};
 		VkPipelineLayoutCreateInfo layoutInfo{};
 		layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 		layoutInfo.pushConstantRangeCount = 1;
@@ -822,8 +823,19 @@ void TerrainRenderer::recordFrame(uint32_t frameIndex,
 			vkCmdSetScissor(f.cmd, 0, 1, &scissor);
 
 			vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
+			struct ShadowPC
+			{
+				glm::mat4 lightSpace;
+				float time;
+				float pad0 = 0.f;
+				float pad1 = 0.f;
+				float pad2 = 0.f;
+			} shadowPc{};
+			shadowPc.lightSpace = m_cascadeMatrices[c];
+			shadowPc.time = m_time;
+			static_assert(sizeof(ShadowPC) == 80, "ShadowPC must match shadow.vert push constants");
 			vkCmdPushConstants(f.cmd, m_shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-							   sizeof(glm::mat4), &m_cascadeMatrices[c]);
+							   sizeof(ShadowPC), &shadowPc);
 
 			for (Chunk *chunk : shadowChunks)
 			{

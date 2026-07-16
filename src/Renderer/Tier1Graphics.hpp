@@ -380,13 +380,19 @@ inline float combinedLightFactor(uint8_t skyLight, uint8_t blockLight, float day
 	return std::max(sky, blk);
 }
 
-/// Final local-light scale in terrain.frag — no zero→full-light fallback.
+/// Cave ambient floor when sky+block light are 0 (must match terrain.frag kCaveFloor).
+inline constexpr float kCaveLightFloor = 0.22f;
+
+/// Final local-light scale in terrain.frag — raised cave floor + smoothstep light curve.
+/// No zero→full-light fallback (that washed outdoor canyons).
 inline float localLightScale(float skyLight01, float blockLight01, float blockLightScale = 1.0f)
 {
 	const float skyL = std::clamp(skyLight01, 0.0f, 1.0f);
 	const float blkL = std::clamp(blockLight01, 0.0f, 1.0f) * std::max(blockLightScale, 0.0f);
 	const float local = std::clamp(std::max(skyL, blkL), 0.0f, 1.0f);
-	return 0.12f + (1.0f - 0.12f) * local;
+	// Hermite smoothstep so mid light levels pop; floor stays dark-but-readable
+	const float curve = local * local * (3.0f - 2.0f * local);
+	return kCaveLightFloor + (1.0f - kCaveLightFloor) * curve;
 }
 
 } // namespace tier1
