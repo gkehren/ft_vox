@@ -11,7 +11,7 @@
 #include <volk.h>
 #include <functional>
 
-/// HDR targets + sky MRT + bloom / god rays / composite (PR5).
+/// HDR targets + sky MRT + SSAO / bloom / god rays / composite (Tier 1).
 class PostStack
 {
 public:
@@ -33,9 +33,7 @@ public:
 	VkPipelineLayout skyLayout() const { return m_skyLayout; }
 	VkBuffer skyVBO() const { return m_skyVBO.buffer; }
 
-	/// Fullscreen post chain: HDR → bloom → god rays → composite to swapchain color attachment.
-	/// Caller must have transitioned swapchain image to COLOR_ATTACHMENT.
-	/// After this, swapchain is still COLOR_ATTACHMENT (for ImGui).
+	/// Fullscreen post: SSAO → bloom → depth-aware god rays → composite.
 	void recordPost(VkCommandBuffer cmd,
 					VkImage swapchainImage,
 					VkImageView swapchainView,
@@ -44,7 +42,8 @@ public:
 					const PostProcessSettings &settings,
 					const glm::vec2 &sunScreen,
 					float sunVisibility,
-					float time);
+					float time,
+					const glm::mat4 &projection);
 
 	void recordSky(VkCommandBuffer cmd, VkDescriptorSet frameSet0, VkExtent2D extent);
 
@@ -57,13 +56,10 @@ private:
 	void createSkyGeometry(ImmediateCommands &imm);
 	void createSamplers();
 
-	void beginColorPass(VkCommandBuffer cmd, VkImageView colorView, VkExtent2D extent,
-						VkAttachmentLoadOp loadOp, const VkClearColorValue *clear,
-						bool negativeYViewport);
-	void endColorPass(VkCommandBuffer cmd);
-	void blitFullscreen(VkCommandBuffer cmd, VkPipeline pipeline, VkPipelineLayout layout,
-						VkDescriptorSet set, VkExtent2D extent, const void *push, uint32_t pushSize);
 	void transitionColor(VkCommandBuffer cmd, VkImage image, VkImageLayout oldL, VkImageLayout newL,
+						 VkAccessFlags srcA, VkAccessFlags dstA,
+						 VkPipelineStageFlags srcS, VkPipelineStageFlags dstS);
+	void transitionDepth(VkCommandBuffer cmd, VkImage image, VkImageLayout oldL, VkImageLayout newL,
 						 VkAccessFlags srcA, VkAccessFlags dstA,
 						 VkPipelineStageFlags srcS, VkPipelineStageFlags dstS);
 
@@ -79,27 +75,34 @@ private:
 	AllocatedImage m_sceneDepth{};
 	AllocatedImage m_bloom[2]{};
 	AllocatedImage m_godRays{};
+	AllocatedImage m_ssao{};
 
 	VkSampler m_linearSampler{VK_NULL_HANDLE};
+	VkSampler m_nearestSampler{VK_NULL_HANDLE};
 
 	AllocatedBuffer m_quadVBO{};
 	AllocatedBuffer m_skyVBO{};
 
-	VkDescriptorSetLayout m_postSetLayout{VK_NULL_HANDLE}; // single combined sampler
+	VkDescriptorSetLayout m_postSetLayout{VK_NULL_HANDLE};	 // single combined sampler
+	VkDescriptorSetLayout m_godSetLayout{VK_NULL_HANDLE};	 // source + depth
 	VkDescriptorSetLayout m_compositeSetLayout{VK_NULL_HANDLE};
 	VkDescriptorPool m_postPool{VK_NULL_HANDLE};
 	VkDescriptorSet m_setExtract{VK_NULL_HANDLE};
 	VkDescriptorSet m_setBlur[2]{};
 	VkDescriptorSet m_setGodRays{VK_NULL_HANDLE};
+	VkDescriptorSet m_setSsao{VK_NULL_HANDLE};
 	VkDescriptorSet m_setComposite{VK_NULL_HANDLE};
 
-	VkPipelineLayout m_postLayout1{VK_NULL_HANDLE}; // one texture + push
+	VkPipelineLayout m_postLayout1{VK_NULL_HANDLE};
+	VkPipelineLayout m_godLayout{VK_NULL_HANDLE};
+	VkPipelineLayout m_ssaoLayout{VK_NULL_HANDLE};
 	VkPipelineLayout m_compositeLayout{VK_NULL_HANDLE};
 	VkPipelineLayout m_skyLayout{VK_NULL_HANDLE};
 
 	VkPipeline m_extractPipe{VK_NULL_HANDLE};
 	VkPipeline m_blurPipe{VK_NULL_HANDLE};
 	VkPipeline m_godRaysPipe{VK_NULL_HANDLE};
+	VkPipeline m_ssaoPipe{VK_NULL_HANDLE};
 	VkPipeline m_compositePipe{VK_NULL_HANDLE};
 	VkPipeline m_skyPipeline{VK_NULL_HANDLE};
 

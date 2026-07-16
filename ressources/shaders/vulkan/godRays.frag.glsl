@@ -2,11 +2,12 @@
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0) uniform sampler2D sourceBuffer;
-// All floats — avoids int/float packing mismatch with C++
+layout(set = 0, binding = 1) uniform sampler2D depthBuffer;
+
 layout(push_constant) uniform PC {
     vec4 p0; // xy=sunScreen, z=density, w=weight
     vec4 p1; // x=decay, y=exposure, z=sunVisibility, w=time
-    vec4 p2; // x=dramaticBoost, y=dynamicBoost, z=boostPreview, w=unused
+    vec4 p2; // x=dramaticBoost, y=dynamicBoost, z=boostPreview, w=depthOcclusion
 } pc;
 
 #define NUM_SAMPLES 32
@@ -29,6 +30,7 @@ void main()
     float dramaticBoost = pc.p2.x;
     bool dynamicBoostEnabled = pc.p2.y > 0.5;
     bool boostPreview = pc.p2.z > 0.5;
+    bool depthOcclusion = pc.p2.w > 0.5;
 
     vec2 radialOffset = vUV - sunScreenPos;
     float radialDistance = length(radialOffset);
@@ -53,6 +55,18 @@ void main()
         sampleUV -= deltaUV;
         if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0)
             continue;
+
+        // Depth-aware: geometry occludes shaft samples (not sky-MRT-only)
+        if (depthOcclusion)
+        {
+            float d = texture(depthBuffer, sampleUV).r;
+            if (d < 0.999)
+            {
+                illumination *= decay;
+                continue;
+            }
+        }
+
         vec3 sampleColor = texture(sourceBuffer, sampleUV).rgb;
         float progress = float(i + 1) / float(NUM_SAMPLES);
         float sourceBias = mix(0.35, 1.0, progress);
