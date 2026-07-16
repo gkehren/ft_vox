@@ -382,6 +382,41 @@ int main()
 			ok = fail("strip 64x2048 first frame must be 64x64");
 	}
 
+	// Pack load report classification (shipped TextureAtlasLoadReport)
+	{
+		TextureAtlasLoadReport none{};
+		if (none.packInvalid() || none.packIncomplete())
+			ok = fail("empty report must not be invalid/incomplete");
+		if (!none.packComplete())
+			ok = fail("empty report (no pack requested) is complete");
+
+		TextureAtlasLoadReport invalid{};
+		invalid.packRequested = true;
+		invalid.requiredLayers = 25;
+		invalid.packHits = 0;
+		invalid.packMisses = 25;
+		if (!invalid.packInvalid())
+			ok = fail("zero hits with pack requested must be packInvalid");
+		if (invalid.packIncomplete())
+			ok = fail("fully missing pack is invalid, not incomplete");
+
+		TextureAtlasLoadReport partial{};
+		partial.packRequested = true;
+		partial.requiredLayers = 25;
+		partial.packHits = 20;
+		partial.packMisses = 5;
+		if (!partial.packIncomplete() || partial.packInvalid() || partial.packComplete())
+			ok = fail("partial hits must be packIncomplete only");
+
+		TextureAtlasLoadReport full{};
+		full.packRequested = true;
+		full.requiredLayers = 25;
+		full.packHits = 25;
+		full.packMisses = 0;
+		if (!full.packComplete() || full.packInvalid() || full.packIncomplete())
+			ok = fail("full pack must be packComplete only");
+	}
+
 	// Generated FrameUBO GLSL must list C++ field names (build artifact or source mirror)
 	{
 		namespace fs = std::filesystem;

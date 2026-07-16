@@ -160,6 +160,7 @@ True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`
   1. `{pack_root}/assets/minecraft/textures/block/<name>.png` when pack is non-empty and file exists
   2. Else `{RES_PATH}textures/<name>.png` (warns if pack was set and file was missing)
 - Pack root resolved at process entry: CLI `--resource-pack` wins over env `FT_VOX_RESOURCE_PACK`, then passed into `Engine` / `WorldRenderer` / `TextureManager`.
+- **In-game:** Graphics panel → Resource pack (`GameUIResourcePack.*`) — path field, **Browse…** (ImGuiFileDialog), **Apply pack** / **Use bundled** → `Engine::applyResourcePack` (sole pack-path owner) → device idle → `WorldRenderer::reloadResourcePack` → failure-atomic `TextureManager::initialize` (build temps, then swap) + rewrite set1. Dialog: vendored `src/ImGuiFileDialog/`.
 - Animated strips (e.g. `water_still.png`): first frame only (`width × width` view of the strip buffer, no intermediate copy).
 
 ---

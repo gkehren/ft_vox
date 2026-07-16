@@ -256,6 +256,16 @@ void WorldRenderer::destroyPipelines()
 	m_shadow.destroyPipeline();
 }
 
+TextureAtlasLoadReport WorldRenderer::reloadResourcePack(const std::string &resourcePackRoot)
+{
+	if (!m_context || !m_imm)
+		throw std::runtime_error("WorldRenderer::reloadResourcePack before init");
+	// Failure-atomic: TextureManager keeps the previous atlas if rebuild throws.
+	const TextureAtlasLoadReport report = m_textures.initialize(*m_context, *m_imm, resourcePackRoot);
+	writeSet1Descriptors();
+	return report;
+}
+
 void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm,
 						 const std::string &resourcePackRoot)
 {
