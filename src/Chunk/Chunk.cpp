@@ -3,6 +3,7 @@
 #include <Renderer/ShadowCascades.hpp>
 #include <Renderer/Lighting.hpp>
 #include <Renderer/TextureManager.hpp>
+#include <Renderer/MinecraftTextures.hpp>
 #include <Vulkan/VkUpload.hpp>
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/StagingRing.hpp>
@@ -294,7 +295,7 @@ void Chunk::generateMesh()
       if (x < 0 || x >= CHUNK_SIZE || y < 0 || y >= CHUNK_HEIGHT || z < 0 || z >= CHUNK_SIZE)
         return true;
       const auto t = static_cast<TextureType>(getVoxel(x, y, z).type);
-      return t == AIR || t == WATER || t == GLASS || t == OAK_LEAVES;
+      return blockTransmitsSkyLight(t);
     };
 
     // Sky light: per column, cast down until solid (open sky = 15)
@@ -573,28 +574,25 @@ void Chunk::generateMesh()
           if (quad_type == AIR)
             continue;
 
-          // Check if this block type needs biome color — used to prevent
-          // greedy merging across biome color boundaries
-          bool isBiomeColoredType =
+          // Biome-tint types must not greedy-merge across color boundaries
+          // (water uses a constant color, so it never splits on color).
+          const bool isBiomeColoredType =
               (quad_type == GRASS_TOP || quad_type == GRASS_SIDE ||
-               quad_type == OAK_LEAVES);
+               blockIsFoliage(quad_type));
 
-          // Precompute the origin quad's biome color for merge comparisons
-          // (water uses a constant color, so it never splits)
           uint32_t originBiomeColor = 0;
           if (isBiomeColoredType)
           {
             int originColIdx = quad_origin_voxel_coord[2] * CHUNK_SIZE + quad_origin_voxel_coord[0];
-            originBiomeColor = (quad_type == OAK_LEAVES)
+            originBiomeColor = blockIsFoliage(quad_type)
                                    ? biomeFoliageColors[originColIdx]
                                    : biomeGrassColors[originColIdx];
           }
 
-          // Helper: get the packed biome color for a candidate voxel coordinate
           auto getCandidateBiomeColor = [&](const glm::ivec3 &coord) -> uint32_t
           {
             int colIdx = coord[2] * CHUNK_SIZE + coord[0];
-            return (quad_type == OAK_LEAVES)
+            return blockIsFoliage(quad_type)
                        ? biomeFoliageColors[colIdx]
                        : biomeGrassColors[colIdx];
           };
@@ -759,26 +757,13 @@ void Chunk::generateMesh()
             tc[3] = {0.0f, tc_v};
           }
 
-          // Determine if this block type needs biome-specific coloring
-          bool needsBiomeColoring =
+          // Biome tint: grass, all leaf types, water
+          const bool needsBiomeColoring =
               (quad_type == GRASS_TOP || quad_type == GRASS_SIDE ||
-               quad_type == OAK_LEAVES || quad_type == WATER);
+               blockIsFoliage(quad_type) || quad_type == WATER);
 
-          float texture_idx_val = static_cast<float>(quad_type);
-          if (quad_type == GRASS_SIDE)
-          {
-            if (quad_normal_dir.y > 0.9f)
-              texture_idx_val = static_cast<float>(GRASS_TOP);
-            else if (quad_normal_dir.y < -0.9f)
-              texture_idx_val = static_cast<float>(DIRT);
-            // else remains GRASS_SIDE
-          }
-          else if (quad_type == OAK_LOG)
-          {
-            if (std::abs(quad_normal_dir.y) > 0.9f)
-              texture_idx_val = static_cast<float>(OAK_LOG_TOP);
-            // else remains OAK_LOG
-          }
+          const TextureType faceTex = blockFaceTexture(quad_type, quad_normal_dir.y);
+          const float texture_idx_val = static_cast<float>(faceTex);
 
           uint32_t vert_indices[4];
           glm::vec3 quad_vertices_world[4] = {
@@ -810,7 +795,7 @@ void Chunk::generateMesh()
             int colIdx = quad_origin_voxel_coord[2] * CHUNK_SIZE + quad_origin_voxel_coord[0];
             if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
               packedColor = biomeGrassColors[colIdx];
-            else if (quad_type == OAK_LEAVES)
+            else if (blockIsFoliage(quad_type))
               packedColor = biomeFoliageColors[colIdx];
             else if (quad_type == WATER)
               packedColor = WATER_COLOR;
@@ -1008,21 +993,17 @@ void Chunk::generateLODMesh()
       bool isWater = (topType == WATER);
 
       // Remap block type to its top-face texture
-      TextureType texType = topType;
-      if (topType == GRASS_SIDE || topType == GRASS_TOP)
-        texType = GRASS_TOP;
-      else if (topType == OAK_LOG)
-        texType = OAK_LOG_TOP;
+      const TextureType texType = blockTopFace(topType);
 
-      bool needsBiomeColoring = (topType == GRASS_TOP || topType == GRASS_SIDE ||
-                                 topType == OAK_LEAVES || topType == WATER);
+      const bool needsBiomeColoring = (topType == GRASS_TOP || topType == GRASS_SIDE ||
+                                       blockIsFoliage(topType) || topType == WATER);
       int colIdx = cz * CHUNK_SIZE + cx;
       uint32_t packedColor = 0;
       if (needsBiomeColoring)
       {
         if (topType == GRASS_TOP || topType == GRASS_SIDE)
           packedColor = biomeGrassColors[colIdx];
-        else if (topType == OAK_LEAVES)
+        else if (blockIsFoliage(topType))
           packedColor = biomeFoliageColors[colIdx];
         else
           packedColor = WATER_COLOR;

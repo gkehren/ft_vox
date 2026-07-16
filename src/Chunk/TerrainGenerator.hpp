@@ -163,7 +163,10 @@ private:
   void placeBirchTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeSpruceTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeJungleTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeAcaciaTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeDarkOakTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeIceSpike(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
 
   // Per-tree deterministic RNG from world position
   static inline uint32_t treeHash(int worldX, int worldZ, int seed)

@@ -153,15 +153,18 @@ True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`
 
 ### TextureManager (`Renderer/TextureManager.*`)
 
-- Block **texture array** (`sampler2DArray`) for all solid/water materials.
-- **Single layer table** `kBlockLayers` in `Renderer/MinecraftTextures.hpp`: basename + transparency per `TextureType`. Meshing `TextureManager::isTransparent` and atlas load both use it.
+- Block **texture array** (`sampler2DArray`) for all solid/water materials (~70 layers: core blocks + wood species, climate surfaces, ice, deepslate, etc.).
+- **Single layer table** `kBlockLayers` in `Renderer/MinecraftTextures.hpp`: Minecraft basename + **bundled fallback** PNG + transparency per `TextureType`. Meshing `TextureManager::isTransparent` and atlas load both use it. Face remap / foliage / ice helpers live here too (`blockTopFace`, `blockIsFoliage`, …).
 - Each PNG is decoded **once**; layer size = max frame edge; nearest-neighbor into the atlas.
 - Path resolve (explicit pack root only — no getenv in texture code):
   1. `{pack_root}/assets/minecraft/textures/block/<name>.png` when pack is non-empty and file exists
-  2. Else `{RES_PATH}textures/<name>.png` (warns if pack was set and file was missing)
+  2. Else `{RES_PATH}textures/<name>.png` when that file exists
+  3. Else `{RES_PATH}textures/<bundledFallback>.png` (always one of the shipped core textures)
+  - Pack miss (step 1 fails while pack set) is reported; incomplete packs still load via 2/3.
 - Pack root resolved at process entry: CLI `--resource-pack` wins over env `FT_VOX_RESOURCE_PACK`, then passed into `Engine` / `WorldRenderer` / `TextureManager`.
 - **In-game:** Graphics panel → Resource pack (`GameUIResourcePack.*`) — path field, **Browse…** (ImGuiFileDialog), **Apply pack** / **Use bundled** → `Engine::applyResourcePack` (sole pack-path owner) → device idle → `WorldRenderer::reloadResourcePack` → failure-atomic `TextureManager::initialize` (build temps, then swap) + rewrite set1. Dialog: vendored `src/ImGuiFileDialog/`.
 - Animated strips (e.g. `water_still.png`): first frame only (`width × width` view of the strip buffer, no intermediate copy).
+- **World gen** uses the expanded palette (birch/spruce/jungle/acacia/dark oak trees, cactus, ice, red sand/terracotta badlands, deepslate below Y≈16, stone variants). Without a pack, new blocks share oak/sand/stone fallbacks but remain distinct voxel IDs.
 
 ---
 
