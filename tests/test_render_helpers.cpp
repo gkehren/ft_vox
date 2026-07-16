@@ -311,8 +311,9 @@ int main()
 				ok = fail(std::string("blockLayerFile missing for type ") + std::to_string(i));
 		}
 		if (!blockLayerIsTransparent(GLASS) || !blockLayerIsTransparent(OAK_LEAVES) ||
-			!blockLayerIsTransparent(WATER))
-			ok = fail("glass/leaves/water must be transparent in kBlockLayers");
+			!blockLayerIsTransparent(WATER) || !blockLayerIsTransparent(ICE) ||
+			!blockLayerIsTransparent(BIRCH_LEAVES))
+			ok = fail("glass/leaves/water/ice must be transparent in kBlockLayers");
 		if (blockLayerIsTransparent(STONE) || blockLayerIsTransparent(DIRT) || blockLayerIsTransparent(BEDROCK))
 			ok = fail("stone/dirt/bedrock must not be transparent");
 		// TextureManager::isTransparent is an alias of blockLayerIsTransparent (header-only).
@@ -322,6 +323,45 @@ int main()
 			ok = fail("WATER basename must be water_still.png");
 		if (std::string(blockLayerFile(GRASS_TOP)) != "grass_block_top.png")
 			ok = fail("GRASS_TOP basename must be grass_block_top.png");
+		if (std::string(blockLayerFile(BIRCH_LEAVES)) != "birch_leaves.png")
+			ok = fail("BIRCH_LEAVES basename must be birch_leaves.png");
+		if (std::string(blockLayerBundledFallback(BIRCH_LEAVES)) != "oak_leaves.png")
+			ok = fail("BIRCH_LEAVES bundled fallback must be oak_leaves.png");
+		if (std::string(blockLayerBundledFallback(ICE)) != "glass.png")
+			ok = fail("ICE bundled fallback must be glass.png");
+		if (!blockIsFoliage(OAK_LEAVES) || !blockIsFoliage(SPRUCE_LEAVES) ||
+			!blockIsFoliage(BIRCH_LEAVES) || !blockIsFoliage(JUNGLE_LEAVES) ||
+			!blockIsFoliage(ACACIA_LEAVES) || !blockIsFoliage(DARK_OAK_LEAVES) ||
+			blockIsFoliage(STONE))
+			ok = fail("blockIsFoliage leaf classification wrong");
+		if (!blockIsIce(ICE) || !blockIsIce(PACKED_ICE) || blockIsIce(SNOW))
+			ok = fail("blockIsIce classification wrong");
+		if (blockTopFace(OAK_LOG) != OAK_LOG_TOP || blockTopFace(BIRCH_LOG) != BIRCH_LOG_TOP ||
+			blockTopFace(CACTUS) != CACTUS_TOP || blockTopFace(DEEPSLATE) != DEEPSLATE_TOP)
+			ok = fail("blockTopFace remaps wrong");
+		if (blockBottomFace(GRASS_SIDE) != DIRT)
+			ok = fail("GRASS_SIDE bottom must be DIRT");
+		// Shared terrain/mesh policy predicates
+		if (!blockIsPlantableSurface(GRASS_TOP) || !blockIsPlantableSurface(RED_SAND) ||
+			!blockIsPlantableSurface(PACKED_ICE) || !blockIsPlantableSurface(MUD) ||
+			blockIsPlantableSurface(STONE) || blockIsPlantableSurface(WATER))
+			ok = fail("blockIsPlantableSurface classification wrong");
+		if (!blockIsOreHost(STONE) || !blockIsOreHost(DEEPSLATE) || !blockIsOreHost(ANDESITE) ||
+			blockIsOreHost(DIRT) || blockIsOreHost(COAL_ORE))
+			ok = fail("blockIsOreHost classification wrong");
+		if (!blockIsCactusGround(SAND) || !blockIsCactusGround(RED_SAND) ||
+			!blockIsCactusGround(ORANGE_TERRACOTTA) || blockIsCactusGround(GRASS_TOP))
+			ok = fail("blockIsCactusGround classification wrong");
+		if (!blockTransmitsSkyLight(AIR) || !blockTransmitsSkyLight(WATER) ||
+			!blockTransmitsSkyLight(GLASS) || !blockTransmitsSkyLight(ICE) ||
+			!blockTransmitsSkyLight(BIRCH_LEAVES) || !blockTransmitsSkyLight(BLUE_ICE) ||
+			blockTransmitsSkyLight(STONE) || blockTransmitsSkyLight(PACKED_ICE))
+			ok = fail("blockTransmitsSkyLight must match transparent layers + AIR");
+		// Stable ordinals for pre-expansion types
+		if (static_cast<int>(WATER) != 24)
+			ok = fail("WATER ordinal must remain 24 (append-only expansion)");
+		if (static_cast<int>(BIRCH_LOG) != 25)
+			ok = fail("BIRCH_LOG must be first appended type (25)");
 	}
 
 	// Path resolve + animation frame size (shipped helpers, no Vulkan)
@@ -342,12 +382,23 @@ int main()
 		if (missingPack.find("textures/stone.png") == std::string::npos)
 			ok = fail("missing pack must fall back to bundled stone.png");
 
+		// New type without bundled primary → fallback PNG
+		fellBack = false;
+		const std::string birchFb =
+			resolveBlockTexturePath("", BIRCH_LEAVES, &fellBack);
+		if (fellBack)
+			ok = fail("empty pack must not set fellBack for type resolve");
+		if (birchFb.find("oak_leaves.png") == std::string::npos)
+			ok = fail("BIRCH_LEAVES without pack must resolve to oak_leaves fallback");
+
 		// Real default pack when present (optional fixture under docs/)
 		namespace fs = std::filesystem;
 		const char *packCandidates[] = {
+			"docs/default-resource-pack",
+			"../docs/default-resource-pack",
+			"../../docs/default-resource-pack",
 			"docs/default-ressource-pack",
 			"../docs/default-ressource-pack",
-			"../../docs/default-ressource-pack",
 		};
 		for (const char *pack : packCandidates)
 		{
@@ -364,6 +415,15 @@ int main()
 			const std::string water = resolveBlockTexturePath(pack, "water_still.png", &fellBack);
 			if (fellBack || water.find("water_still.png") == std::string::npos)
 				ok = fail("docs pack water_still.png must resolve from pack");
+			// Expanded types from pack
+			fellBack = true;
+			const std::string birch = resolveBlockTexturePath(pack, BIRCH_LEAVES, &fellBack);
+			if (fellBack || birch.find("birch_leaves.png") == std::string::npos)
+				ok = fail("docs pack birch_leaves.png must resolve from pack");
+			fellBack = true;
+			const std::string ice = resolveBlockTexturePath(pack, ICE, &fellBack);
+			if (fellBack || ice.find("ice.png") == std::string::npos)
+				ok = fail("docs pack ice.png must resolve from pack");
 			break;
 		}
 

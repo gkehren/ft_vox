@@ -92,6 +92,7 @@ set_tests_properties(VulkanResourceSmoke PROPERTIES
 add_executable(test_visual_look
     test_visual_look.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
 )
 
 target_include_directories(test_visual_look PRIVATE
@@ -139,6 +140,7 @@ add_test(NAME RenderHelpers COMMAND test_render_helpers)
 add_executable(test_stream_opt
     test_stream_opt.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
 )
 
 target_include_directories(test_stream_opt PRIVATE

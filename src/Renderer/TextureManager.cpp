@@ -61,7 +61,7 @@ CpuAtlasBuild buildCpuAtlas(const std::string &packRoot, std::vector<uint8_t> &a
 			continue;
 
 		bool fellBack = false;
-		const std::string path = resolveBlockTexturePath(packRoot, name, &fellBack);
+		const std::string path = resolveBlockTexturePath(packRoot, type, &fellBack);
 		if (fellBack)
 		{
 			++built.report.packMisses;
