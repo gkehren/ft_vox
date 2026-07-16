@@ -64,8 +64,9 @@ void updateAtmosphereFromDayTime(ShaderParameters &sp)
 }
 } // namespace
 
-Engine::Engine()
+Engine::Engine(std::string resourcePackRoot)
 	: camera(glm::vec3(0.0f, 90.0f, 0.0f))
+	, m_resourcePackRoot(std::move(resourcePackRoot))
 {
 	if (!SDL_Init(SDL_INIT_VIDEO))
 		throw std::runtime_error(std::string("Failed to initialize SDL: ") + SDL_GetError());
@@ -119,7 +120,7 @@ Engine::Engine()
 	frameCtx->init(*vkContext);
 
 	worldRenderer = std::make_unique<WorldRenderer>();
-	worldRenderer->init(*vkContext, *swapchain, *immediate);
+	worldRenderer->init(*vkContext, *swapchain, *immediate, m_resourcePackRoot);
 
 	imgui = std::make_unique<ImGuiLayer>();
 	imgui->init(window, *vkContext, *swapchain, *immediate);

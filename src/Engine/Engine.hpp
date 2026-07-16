@@ -32,7 +32,9 @@
 class Engine
 {
 public:
-	Engine();
+	/// @param resourcePackRoot Minecraft pack root (`assets/minecraft/textures/block/…`).
+	///   Empty uses bundled textures, or FT_VOX_RESOURCE_PACK if set.
+	explicit Engine(std::string resourcePackRoot = {});
 	~Engine();
 
 	void run();
@@ -78,6 +80,7 @@ private:
 	double streamAccum{0.0};
 
 	int seed{0};
+	std::string m_resourcePackRoot;
 	TextureType selectedTexture{STONE};
 
 	static constexpr int kBootstrapRadius = 2;

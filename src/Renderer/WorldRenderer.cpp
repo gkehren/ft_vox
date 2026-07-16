@@ -256,13 +256,14 @@ void WorldRenderer::destroyPipelines()
 	m_shadow.destroyPipeline();
 }
 
-void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm)
+void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm,
+						 const std::string &resourcePackRoot)
 {
 	m_context = &context;
 	m_imm = &imm;
 	m_lightDir = glm::normalize(glm::vec3(0.4f, 1.0f, 0.2f));
 
-	m_textures.initialize(context, imm);
+	m_textures.initialize(context, imm, resourcePackRoot);
 	m_shadow.init(context);
 	m_opaque.init(context);
 	createDescriptors();
