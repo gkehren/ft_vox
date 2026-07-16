@@ -6,26 +6,7 @@ layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in uint aPackedBiomeColor;
 
 // Must match src/Renderer/FrameUBO.hpp (std140, sizeof 528)
-layout(set = 0, binding = 0) uniform FrameUBO {
-    mat4 view;
-    mat4 projection;
-    mat4 cascadeMatrix0;
-    mat4 cascadeMatrix1;
-    mat4 cascadeMatrix2;
-    vec4 viewPos;
-    vec4 lightDirection;
-    vec4 fogColor;
-    vec4 fogParams;       // start, end, density, heightFalloff
-    vec4 lightParams;
-    vec4 visualParams;
-    vec4 sunDir;
-    vec4 moonDir;
-    vec4 skyParams;       // time, day, sunset, night
-    vec4 cascadeSplits;   // xyz split ends, w = count
-    vec4 moonAmbient;     // rgb + strength
-    vec4 lightingParams;     // x=blockLightScale, y=emissiveScale, z=fogBaseY, w=underwater
-    vec4 waterParams;     // x=wave, y=refraction, z=specular, w=foam
-} frame;
+#include "frame_ubo.inc.glsl"
 
 // Must match materials::MaterialTableUBO — x=wind, y=emissive, z=ice, w=flags
 layout(set = 0, binding = 1) uniform MaterialTable {

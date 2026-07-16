@@ -5,26 +5,7 @@ layout(location = 1) in uint aPackedData;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in uint aPackedBiomeColor;
 
-layout(set = 0, binding = 0) uniform FrameUBO {
-    mat4 view;
-    mat4 projection;
-    mat4 cascadeMatrix0;
-    mat4 cascadeMatrix1;
-    mat4 cascadeMatrix2;
-    vec4 viewPos;
-    vec4 lightDirection;
-    vec4 fogColor;
-    vec4 fogParams;
-    vec4 lightParams;
-    vec4 visualParams;
-    vec4 sunDir;
-    vec4 moonDir;
-    vec4 skyParams;
-    vec4 cascadeSplits;
-    vec4 moonAmbient;
-    vec4 lightingParams;
-    vec4 waterParams;
-} frame;
+#include "frame_ubo.inc.glsl"
 
 layout(location = 0) out vec3 vFragPos;
 layout(location = 1) out vec3 vNormal;

@@ -4,7 +4,8 @@
 #include <cstdint>
 
 /// Single std140 FrameUBO contract shared by C++ and GLSL (terrain/water/sky/overlay).
-/// Keep field order identical to ressources/shaders/vulkan/frame_ubo.glsl.
+/// GLSL layout is AUTO-GENERATED from this struct by cmake/GenerateFrameUboGlsl.cmake
+/// → frame_ubo.inc.glsl (included by shaders). Do not hand-edit the generated file.
 struct FrameUBO
 {
 	glm::mat4 view;

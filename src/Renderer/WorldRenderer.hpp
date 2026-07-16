@@ -14,6 +14,7 @@
 #include "Renderer/ShadowPass.hpp"
 #include "Renderer/OpaquePass.hpp"
 #include "Renderer/WaterPass.hpp"
+#include "Renderer/SkyPass.hpp"
 #include "Camera/Camera.hpp"
 #include "Chunk/Chunk.hpp"
 #include "Engine/EngineDefs.hpp"
@@ -79,6 +80,7 @@ private:
 	ShadowPass m_shadow;
 	OpaquePass m_opaque;
 	WaterPass m_water;
+	SkyPass m_sky;
 
 	VkDescriptorSetLayout m_setLayout0{VK_NULL_HANDLE};
 	VkDescriptorSetLayout m_setLayout1{VK_NULL_HANDLE};
