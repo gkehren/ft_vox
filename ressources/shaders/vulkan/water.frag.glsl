@@ -78,7 +78,6 @@ void main()
     // Shore foam: real depth history vs water fragment depth (shallow = more foam)
     float foam = 0.0;
     float depthDelta = abs(opaqueDepth - waterDepth);
-    // Large delta = deep water under; tiny delta = shore / shallow
     foam = (1.0 - smoothstep(0.0, 0.025, depthDelta)) * foamStr * 0.85;
     foam = max(foam, (1.0 - abs(N.y)) * 0.18 * foamStr);
     float shoreNoise = sin(vFragPos.x * 2.1 + time * 0.3) * sin(vFragPos.z * 1.7 - time * 0.2);
@@ -96,15 +95,20 @@ void main()
     float F0 = 0.06;
     float fresnel = F0 + (1.0 - F0) * pow(1.0 - max(dot(N, V), 0.0), 5.0);
 
-    float spec = pow(max(dot(N, H), 0.0), 160.0) * specularStr * dayFactor;
+    // Stronger sun specular (tight highlight) + broader cool ice-like glint
+    float NdotH = max(dot(N, H), 0.0);
+    float sunSpec = pow(NdotH, 220.0) * specularStr * (0.55 + 0.85 * dayFactor) * 1.45;
+    float iceSpec = pow(NdotH, 48.0) * specularStr * 0.38;
     vec3 sunColor = mix(vec3(1.0, 0.95, 0.82), vec3(1.0, 0.55, 0.22), sunsetFactor);
+    vec3 iceTint = mix(vec3(0.72, 0.88, 1.05), sunColor * 0.85, dayFactor * 0.55);
 
     // Prefer water color over pale scene/fog samples
     vec3 refracted = mix(waterAlbedo * 1.15, scene * waterAlbedo, 0.28);
     refracted = mix(refracted, waterAlbedo, 0.35);
 
     vec3 color = mix(refracted, waterAlbedo * 1.12 + frame.fogColor.rgb * 0.06, fresnel * 0.50);
-    color += sunColor * spec * 1.15;
+    color += sunColor * sunSpec;
+    color += iceTint * iceSpec * (0.65 + 0.35 * nightFactor);
     color = mix(color, vec3(0.88, 0.93, 0.96), foam * 0.65);
 
     float dist = length(vFragPos - frame.viewPos.xyz);

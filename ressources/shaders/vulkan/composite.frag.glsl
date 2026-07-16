@@ -12,6 +12,7 @@ layout(push_constant) uniform PC {
     vec4 p1; // x=bloomOn, y=fxaaOn, z=godRaysOn, w=postSaturation
     vec4 p2; // xy=texelSize, z=postContrast, w=ssaoOn
     vec4 p3; // x=ssaoIntensity, y=underwater, z=underwaterStrength, w=time
+    vec4 p4; // x=filmGrain, y=vignette, z=unused, w=unused
 } pc;
 
 vec3 acesFilm(vec3 x)
@@ -74,6 +75,13 @@ vec3 applyFXAA(vec2 uv)
     return texture(hdrBuffer, blendUV).rgb;
 }
 
+// Cheap animated film grain
+float filmNoise(vec2 uv, float time)
+{
+    vec2 p = uv * vec2(1280.0, 720.0) + vec2(time * 37.0, time * 19.0);
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
 void main()
 {
     float exposure = pc.p0.x;
@@ -88,6 +96,8 @@ void main()
     bool underwater = pc.p3.y > 0.5;
     float underwaterStrength = pc.p3.z;
     float time = pc.p3.w;
+    float grainStrength = max(pc.p4.x, 0.0);
+    float vignetteStrength = clamp(pc.p4.y, 0.0, 1.0);
 
     vec3 hdrColor = fxaaEnabled ? applyFXAA(vUV) : texture(hdrBuffer, vUV).rgb;
 
@@ -97,8 +107,8 @@ void main()
         float ao = texture(ssaoBuffer, vUV).r;
         float intens = clamp(ssaoIntensity, 0.0, 0.85);
         ao = mix(1.0, ao, intens);
-        // Never crush outdoor slopes below a soft floor
-        ao = max(ao, 0.55);
+        // Never crush outdoor slopes / dark caves below a soft floor
+        ao = max(ao, 0.62);
         hdrColor *= ao;
     }
 
@@ -120,7 +130,15 @@ void main()
         mapped = mix(vec3(lum), mapped, postSat);
     }
 
-    // Underwater look: teal grade, slight blur-like soft + vignette
+    // Global vignette (subtle edge darkening)
+    if (vignetteStrength > 0.001)
+    {
+        float d = length(vUV - vec2(0.5));
+        float vig = smoothstep(0.92, 0.28, d);
+        mapped *= mix(1.0, vig, vignetteStrength);
+    }
+
+    // Underwater look: teal grade, slight blur-like soft + extra vignette
     if (underwater)
     {
         float s = clamp(underwaterStrength, 0.0, 1.5);
@@ -132,6 +150,13 @@ void main()
         // Caustic shimmer
         float c = 0.5 + 0.5 * sin(vUV.x * 40.0 + time * 2.0) * sin(vUV.y * 35.0 - time * 1.5);
         mapped += vec3(0.0, 0.04, 0.05) * c * s;
+    }
+
+    // Film grain (after grade so it stays visible)
+    if (grainStrength > 0.0005)
+    {
+        float n = filmNoise(vUV, time);
+        mapped += (n - 0.5) * grainStrength;
     }
 
     outColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);

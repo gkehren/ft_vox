@@ -239,15 +239,15 @@ Iris/OptiFine packs are **not drop-in** on a custom engine; reimplement the *loo
 
 ## Quick wins (mostly shader-only)
 
-| Change | Where |
-|--------|--------|
-| Sunset-tinted ambient / cool shadow tint | `terrain.frag` |
-| Stronger specular on water/ice | water fragment |
-| Subtle wind on leaves/tall grass | `terrain.vert` |
-| Underwater color grade when camera in water | `composite.frag` |
-| Film grain + vignette | `composite.frag` |
-| Sharper bloom threshold for lava/sun only | `bloomExtract.frag.glsl` |
-| Better sky aerial perspective on terrain fog | fog term in terrain |
+| Change | Where | Status |
+|--------|--------|--------|
+| Sunset-tinted ambient / cool shadow tint | `terrain.frag` | Done |
+| Stronger specular on water/ice | water fragment (+ snow sparkle in terrain) | Done |
+| Subtle wind on leaves/tall grass | `terrain.vert` (+ `shadow.vert` match) | Done |
+| Underwater color grade when camera in water | `composite.frag` | Done |
+| Film grain + vignette | `composite.frag` (`PostProcessSettings`) | Done |
+| Sharper bloom threshold for lava/sun only | `bloomExtract.frag.glsl` | Done |
+| Better sky aerial perspective on terrain fog | fog term in terrain | Done |
 
 ---
 

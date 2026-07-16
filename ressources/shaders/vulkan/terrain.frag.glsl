@@ -68,14 +68,12 @@ mat4 cascadeMatrix(int c)
 }
 
 // Soft sample one cascade; out-of-bounds UV taps are discarded (unshadowed), not garbage.
-// Matches tier1::shadowDepthBias.
 float sampleCascadeShadow(vec3 fragPos, vec3 normal, vec3 lightDir, int cascade)
 {
     vec4 fragPosLS = cascadeMatrix(cascade) * vec4(fragPos, 1.0);
     vec3 projCoords = fragPosLS.xyz / max(fragPosLS.w, 1e-6);
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
 
-    // Outside cascade map → unshadowed (not black)
     if (projCoords.z < 0.0 || projCoords.z > 1.0 ||
         projCoords.x < 0.0 || projCoords.x > 1.0 ||
         projCoords.y < 0.0 || projCoords.y > 1.0)
@@ -83,9 +81,7 @@ float sampleCascadeShadow(vec3 fragPos, vec3 normal, vec3 lightDir, int cascade)
 
     float currentDepth = projCoords.z;
     float nDotL = max(dot(normal, lightDir), 0.0);
-    // Voxel-friendly bias (was too low → banded acne / false black regions)
     float bias = max(0.012 * (1.0 - nDotL), 0.0035);
-    // Slightly larger filter on far cascades
     float radius = (1.5 + float(cascade) * 1.0) / 1024.0;
 
     float shadow = 0.0;
@@ -93,7 +89,6 @@ float sampleCascadeShadow(vec3 fragPos, vec3 normal, vec3 lightDir, int cascade)
     for (int i = 0; i < 12; ++i)
     {
         vec2 uv = projCoords.xy + POISSON[i] * radius * 2.5;
-        // Discard OOB taps — do not sample border as inverted shadow
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
             continue;
         float pcfDepth = texture(shadowMap, vec3(uv, float(cascade))).r;
@@ -107,8 +102,6 @@ float sampleCascadeShadow(vec3 fragPos, vec3 normal, vec3 lightDir, int cascade)
 
 float ShadowCalculation(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
 {
-    // Select primary cascade + soft blend into next near split boundaries
-    // (avoids hard cascade cuts that read as black bands on slopes)
     float s0 = frame.cascadeSplits.x;
     float s1 = frame.cascadeSplits.y;
     float s2 = frame.cascadeSplits.z;
@@ -128,7 +121,6 @@ float ShadowCalculation(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDept
 
     float shadow = sampleCascadeShadow(fragPos, normal, lightDir, cascade);
 
-    // Blend toward next cascade near the far edge of this split
     if (cascade < 2) {
         float gap = max(splitEnd - splitStart, 1.0);
         float band = gap * 0.12;
@@ -182,20 +174,33 @@ void main()
     float emissiveScale = frame.tier1Params.y;
     float fogBaseY = frame.tier1Params.z;
 
-    float shadow = ShadowCalculation(vFragPos, norm, lightDir, vViewDepth);
-
-    // Must match tier1::localLightScale (no zero→full-light fallback: caves stay dark).
+    // Must match tier1::localLightScale — raised cave floor + smooth light curve.
     float skyL = vSkyLight * clamp(dayFactor + 0.15 * (1.0 - nightFactor), 0.0, 1.0);
     float blkL = vBlockLight * blockLightScale;
-    float localLight = mix(0.12, 1.0, clamp(max(skyL, blkL), 0.0, 1.0));
+    float combined = clamp(max(skyL, blkL), 0.0, 1.0);
+    // Hermite curve: mid light levels more readable; floor stays dark-but-shaped
+    float lightCurve = combined * combined * (3.0 - 2.0 * combined);
+    const float kCaveFloor = 0.22;
+    float localLight = mix(kCaveFloor, 1.0, lightCurve);
 
-    vec3 lightTint = mix(vec3(1.0, 0.98, 0.94), vec3(1.0), 0.55);
+    // Sun CSM only where sky light reaches (caves: no directional shadow crush)
+    float sunShadow = ShadowCalculation(vFragPos, norm, lightDir, vViewDepth);
+    float sunReach = smoothstep(0.05, 0.45, skyL);
+    float shadow = sunShadow * sunReach;
+
+    // Daylight warm, stronger sunset amber ambient
+    vec3 lightTint = mix(vec3(1.0, 0.98, 0.94), vec3(1.12, 0.78, 0.48), sunsetFactor * 0.72);
+    lightTint = mix(lightTint, vec3(0.75, 0.82, 1.05), nightFactor * 0.35);
+
     vec3 moonFill = frame.moonAmbient.rgb * frame.moonAmbient.w * nightFactor;
     vec3 ambient = (ambientStrength * max(dayFactor, 0.2) + length(moonFill) * 0.85) * color
                  + moonFill * color;
+    // Sunset-tinted ambient fill (warm bounce under golden hour)
+    ambient *= mix(vec3(1.0), vec3(1.18, 0.88, 0.62), sunsetFactor * 0.50);
 
     float diff = max(dot(norm, lightDir), 0.0) * diffuseIntensity;
     diff = floor(diff * lightLevels + 0.001) / lightLevels;
+    // Higher unshadowed floor underground (sunReach=0 → shadowTerm=1, full ambient path)
     float shadowTerm = mix(0.28, 1.0, 1.0 - shadow);
     float dayLightFactor = clamp(diffuseIntensity / 0.75, 0.0, 1.0)
                          * clamp(dayFactor + sunsetFactor * 0.5, 0.05, 1.0);
@@ -208,16 +213,42 @@ void main()
     else if (abs(norm.x) > 0.9) topLight = 0.06;
 
     vec3 result = ambient + shadowTerm * (diffuse + topLight * color * dayLightFactor * lightTint);
+
+    // Cool shadow tint — outdoor umbra only (gated by sunReach)
+    float shadowAmt = clamp(shadow, 0.0, 1.0);
+    vec3 coolShadow = mix(vec3(0.78, 0.86, 1.05), vec3(0.55, 0.62, 0.95), nightFactor * 0.4);
+    result = mix(result, result * coolShadow,
+                 shadowAmt * sunReach * (0.38 * dayFactor + 0.18 * sunsetFactor + 0.22));
+
     result *= colorBoost;
     result *= localLight;
+
+    // Soft cave fill (not multiplied by localLight floor) — cool slate so shapes stay readable
+    float caveAmt = 1.0 - combined;
+    vec3 caveFill = color * vec3(0.065, 0.072, 0.090) * caveAmt;
+    // Slight face bias so walls/ceilings separate without looking lit
+    caveFill *= mix(0.85, 1.15, clamp(0.5 + 0.5 * norm.y + topLight, 0.0, 1.0));
+    result += caveFill;
 
     float em = emissiveForIndex(vTextureIndex) * emissiveScale;
     result += color * em * (1.2 + vBlockLight);
 
-    result = (result - vec3(0.5)) * contrastLevel + vec3(0.5);
+    // Ice/snow specular sparkle (no dedicated ICE block — SNOW is closest)
+    if (abs(vTextureIndex - 13.0) < 0.5)
+    {
+        vec3 V = normalize(frame.viewPos.xyz - vFragPos);
+        vec3 H = normalize(lightDir + V);
+        float iceSpec = pow(max(dot(norm, H), 0.0), 96.0)
+                      * dayLightFactor * (1.0 - shadow * 0.85) * sunReach;
+        result += vec3(0.82, 0.92, 1.05) * iceSpec * 0.62;
+    }
+
+    // Soften contrast in unlit caves so blacks aren't crushed to pure #000
+    float contrastEff = mix(mix(1.0, contrastLevel, 0.35), contrastLevel, combined);
+    result = (result - vec3(0.5)) * contrastEff + vec3(0.5);
     result = max(result, vec3(0.0));
 
-    // Fog — matches tier1::terrainFogAmount (lower density scale + cap for outdoor chroma)
+    // Fog + aerial perspective (distance desat toward sky-tinted haze)
     float fogStart = frame.fogParams.x;
     float fogEnd = frame.fogParams.y;
     float fogDensity = frame.fogParams.z;
@@ -226,18 +257,29 @@ void main()
     float linearFog = smoothstep(fogStart, max(fogStart + 1.0, fogEnd), dist);
     float avgY = 0.5 * (vFragPos.y + frame.viewPos.y);
     float heightTerm = exp(-heightFalloff * max(0.0, avgY - fogBaseY));
-    // density scale 0.0009 (was 0.0018); cap 0.55 (was 0.82) — midground keeps color
     float densityFog = 1.0 - exp(-max(0.0, dist - fogStart * 0.25) * fogDensity * 0.0009 * heightTerm);
     float fogAmount = clamp(max(linearFog, densityFog), 0.0, 0.55);
 
-    vec3 sunTint = mix(frame.fogColor.rgb, vec3(1.0, 0.72, 0.42), sunsetFactor * 0.55);
-    vec3 fogCol = mix(sunTint, vec3(0.08, 0.10, 0.18), nightFactor);
+    // Sky aerial color: cool blue day → warm sunset → deep night
+    vec3 dayAerial = vec3(0.48, 0.70, 0.98);
+    vec3 sunsetAerial = vec3(0.95, 0.55, 0.32);
+    vec3 nightAerial = vec3(0.06, 0.08, 0.16);
+    vec3 aerialSky = mix(dayAerial, sunsetAerial, sunsetFactor);
+    aerialSky = mix(aerialSky, nightAerial, nightFactor);
+    // Blend engine fogColor with aerial sky for horizon-matched haze
+    vec3 fogCol = mix(frame.fogColor.rgb, aerialSky, 0.55);
+    fogCol = mix(fogCol, vec3(1.0, 0.72, 0.42), sunsetFactor * 0.25);
 
     float lum = dot(result, vec3(0.299, 0.587, 0.114));
     result = mix(vec3(lum), result, saturationLevel);
-    // Retain more lit color in fog mix so forests don't go pastel
-    vec3 fogMix = mix(fogCol, result * 0.45 + fogCol * 0.55, 0.18);
-    result = mix(result, fogMix, fogAmount);
+
+    // Aerial perspective: desaturate + lift toward sky with distance (not pure wash)
+    float aerial = fogAmount;
+    float desat = mix(1.0, 0.62, aerial);
+    vec3 aerialLit = mix(vec3(lum), result, desat);
+    // Retain a bit of surface color so midground stays readable
+    vec3 fogMix = mix(fogCol, aerialLit * 0.40 + fogCol * 0.60, 0.22);
+    result = mix(aerialLit, fogMix, aerial);
 
     outColor = vec4(result, texColor.a);
 }

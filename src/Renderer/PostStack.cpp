@@ -44,6 +44,7 @@ struct CompPC
 	glm::vec4 p1;
 	glm::vec4 p2;
 	glm::vec4 p3;
+	glm::vec4 p4; // x=filmGrain, y=vignette
 };
 } // namespace
 
@@ -746,5 +747,6 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 					   settings.underwater ? 1.f : 0.f,
 					   settings.underwaterStrength,
 					   time);
+	cpc.p4 = glm::vec4(settings.filmGrain, settings.vignette, 0.f, 0.f);
 	fsDraw(m_compositePipe, m_compositeLayout, m_setComposite, swapchainView, extent, &cpc, sizeof(cpc));
 }
