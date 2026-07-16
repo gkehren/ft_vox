@@ -44,15 +44,17 @@ void updateAtmosphereFromDayTime(ShaderParameters &sp)
 
 	if (sp.automaticAtmosphere)
 	{
-		// Vivid day fog (sky blue) → warm sunset → deep night (not grey).
-		const glm::vec3 dayFog(0.52f, 0.74f, 0.98f);
+		// Day fog: deeper blue (less milky white) → warm sunset → night
+		const glm::vec3 dayFog(0.42f, 0.66f, 0.95f);
 		const glm::vec3 sunsetFog(0.95f, 0.48f, 0.28f);
 		const glm::vec3 nightFog(0.04f, 0.06f, 0.14f);
 		sp.fogColor = dayFog * sp.dayFactor + sunsetFog * sp.sunsetFactor + nightFog * sp.nightFactor;
-		// Keep ambient high enough that grass stays green in shade
-		sp.ambientStrength = 0.22f + 0.14f * sp.dayFactor + 0.06f * sp.sunsetFactor;
-		sp.diffuseIntensity = 0.55f + 0.45f * sp.dayFactor + 0.12f * sp.sunsetFactor;
-		sp.fogDensity = 0.08f + 0.12f * sp.nightFactor;
+		// Shape-readable light without wash-out or neon
+		sp.ambientStrength = 0.18f + 0.08f * sp.dayFactor + 0.04f * sp.sunsetFactor;
+		sp.diffuseIntensity = 0.64f + 0.30f * sp.dayFactor + 0.10f * sp.sunsetFactor;
+		sp.fogDensity = 0.045f + 0.06f * sp.nightFactor;
+		sp.fogStart = 300.0f;
+		sp.fogEnd = 880.0f;
 	}
 
 	// Approximate sun world position for debug display.
@@ -855,9 +857,27 @@ void Engine::run()
 		{
 			PROFILE_SCOPE("UpdateUBO");
 			const float farPlane = static_cast<float>(renderSettings.maxRenderDistance) * 1.25f;
+			// Underwater: camera inside a water voxel (coarse sample via chunk manager)
+			bool underwater = false;
+			if (chunkManager)
+			{
+				const glm::vec3 eye = camera.getPosition();
+				if (Chunk *ch = chunkManager->getChunkAtWorldPos(eye))
+				{
+					const int chunkX = static_cast<int>(std::floor(eye.x / static_cast<float>(CHUNK_SIZE)));
+					const int chunkZ = static_cast<int>(std::floor(eye.z / static_cast<float>(CHUNK_SIZE)));
+					const int lx = static_cast<int>(std::floor(eye.x)) - chunkX * CHUNK_SIZE;
+					const int ly = static_cast<int>(std::floor(eye.y));
+					const int lz = static_cast<int>(std::floor(eye.z)) - chunkZ * CHUNK_SIZE;
+					if (lx >= 0 && lx < CHUNK_SIZE && ly >= 0 && ly < CHUNK_HEIGHT && lz >= 0 && lz < CHUNK_SIZE)
+						underwater = (static_cast<TextureType>(ch->getVoxel(lx, ly, lz).type) == WATER);
+				}
+			}
+			terrain->postSettings().underwater = underwater;
 			terrain->updateFrameUBO(frameIndex, camera,
 									static_cast<float>(pixelW), static_cast<float>(pixelH), farPlane,
-									static_cast<float>(currentFrame), shaderParams);
+									static_cast<float>(currentFrame), shaderParams,
+									renderSettings.shadowCascadeFar, underwater);
 		}
 
 		const int uploadBudget = uploadBudgetThisFrame;

@@ -367,6 +367,8 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			ImGui::SliderFloat("Fog density", &sp.fogDensity, 0.f, 1.f);
 			ImGui::ColorEdit3("Fog color", &sp.fogColor.x);
 		}
+		ImGui::SliderFloat("Height falloff", &sp.fogHeightFalloff, 0.f, 0.05f, "%.4f");
+		ImGui::SliderFloat("Fog base Y", &sp.fogBaseY, 0.f, 200.f);
 	}
 
 	if (ImGui::CollapsingHeader("Lighting / Day cycle", ImGuiTreeNodeFlags_DefaultOpen))
@@ -396,6 +398,25 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		ImGui::SliderFloat("Ambient", &sp.ambientStrength, 0.f, 1.f);
 		ImGui::SliderFloat("Diffuse", &sp.diffuseIntensity, 0.f, 1.5f);
 		ImGui::SliderFloat("Light levels", &sp.lightLevels, 1.f, 16.f);
+		ImGui::SliderFloat("Moon ambient", &sp.moonAmbientStrength, 0.f, 1.5f);
+		ImGui::SliderFloat("Block light scale", &sp.blockLightScale, 0.f, 2.f);
+		ImGui::SliderFloat("Emissive scale", &sp.emissiveScale, 0.f, 3.f);
+	}
+
+	if (ImGui::CollapsingHeader("Water (Tier 1)", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		ImGui::SliderFloat("Wave strength", &sp.waterWaveStrength, 0.f, 0.5f);
+		ImGui::SliderFloat("Refraction", &sp.waterRefraction, 0.f, 0.12f);
+		ImGui::SliderFloat("Specular", &sp.waterSpecular, 0.f, 3.f);
+		ImGui::SliderFloat("Foam", &sp.waterFoamStrength, 0.f, 2.f);
+		ImGui::Text("Underwater: %s", pp.underwater ? "yes" : "no");
+		ImGui::SliderFloat("Underwater strength", &pp.underwaterStrength, 0.f, 1.5f);
+	}
+
+	if (ImGui::CollapsingHeader("Shadows (CSM)"))
+	{
+		if (frame.render)
+			ImGui::SliderFloat("Cascade far", &frame.render->shadowCascadeFar, 64.f, 512.f);
 	}
 
 	if (ImGui::CollapsingHeader("Visual"))
@@ -423,6 +444,15 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		ImGui::Combo("Tone mapper", &pp.toneMapper, toneMappers, IM_ARRAYSIZE(toneMappers));
 
 		ImGui::Separator();
+		ImGui::Checkbox("SSAO", &pp.ssaoEnabled);
+		if (pp.ssaoEnabled)
+		{
+			ImGui::SliderFloat("SSAO radius", &pp.ssaoRadius, 0.1f, 2.f);
+			ImGui::SliderFloat("SSAO bias", &pp.ssaoBias, 0.001f, 0.1f, "%.4f");
+			ImGui::SliderFloat("SSAO intensity", &pp.ssaoIntensity, 0.f, 2.f);
+		}
+
+		ImGui::Separator();
 		ImGui::Checkbox("God rays", &pp.godRaysEnabled);
 		if (pp.godRaysEnabled)
 		{
@@ -430,6 +460,7 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			ImGui::SliderFloat("Weight", &pp.godRaysWeight, 0.001f, 0.05f, "%.4f");
 			ImGui::SliderFloat("Decay", &pp.godRaysDecay, 0.9f, 1.f, "%.3f");
 			ImGui::SliderFloat("GR exposure", &pp.godRaysExposure, 0.f, 1.f);
+			ImGui::Checkbox("Depth occlusion", &pp.godRaysDepthOcclusion);
 			ImGui::Checkbox("Dynamic boost", &pp.godRaysDynamicBoostEnabled);
 			if (pp.godRaysDynamicBoostEnabled)
 			{

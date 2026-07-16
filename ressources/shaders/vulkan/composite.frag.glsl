@@ -5,12 +5,13 @@ layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0) uniform sampler2D hdrBuffer;
 layout(set = 0, binding = 1) uniform sampler2D bloomBuffer;
 layout(set = 0, binding = 2) uniform sampler2D godRaysBuffer;
+layout(set = 0, binding = 3) uniform sampler2D ssaoBuffer;
 
-// std430-friendly push constants (matches C++ CompPC exactly)
 layout(push_constant) uniform PC {
     vec4 p0; // x=exposure, y=bloomIntensity, z=gamma, w=toneMapper
     vec4 p1; // x=bloomOn, y=fxaaOn, z=godRaysOn, w=postSaturation
-    vec4 p2; // xy=texelSize, z=postContrast
+    vec4 p2; // xy=texelSize, z=postContrast, w=ssaoOn
+    vec4 p3; // x=ssaoIntensity, y=underwater, z=underwaterStrength, w=time
 } pc;
 
 vec3 acesFilm(vec3 x)
@@ -82,8 +83,25 @@ void main()
     bool bloomEnabled = pc.p1.x > 0.5;
     bool fxaaEnabled = pc.p1.y > 0.5;
     bool godRaysEnabled = pc.p1.z > 0.5;
+    bool ssaoEnabled = pc.p2.w > 0.5;
+    float ssaoIntensity = pc.p3.x;
+    bool underwater = pc.p3.y > 0.5;
+    float underwaterStrength = pc.p3.z;
+    float time = pc.p3.w;
 
     vec3 hdrColor = fxaaEnabled ? applyFXAA(vUV) : texture(hdrBuffer, vUV).rgb;
+
+    if (ssaoEnabled)
+    {
+        // Cap intensity (matches tier1::clampSsaoIntensity) — avoids milky full-frame veil
+        float ao = texture(ssaoBuffer, vUV).r;
+        float intens = clamp(ssaoIntensity, 0.0, 0.85);
+        ao = mix(1.0, ao, intens);
+        // Never crush outdoor slopes below a soft floor
+        ao = max(ao, 0.55);
+        hdrColor *= ao;
+    }
+
     if (bloomEnabled)
         hdrColor += texture(bloomBuffer, vUV).rgb * bloomIntensity;
     if (godRaysEnabled)
@@ -93,7 +111,6 @@ void main()
     mapped = toneMapper == 0 ? acesFilm(mapped) : reinhard(mapped);
     mapped = pow(mapped, vec3(1.0 / gamma));
 
-    // Optional mild post contrast / saturation (defaults near 1.0 = neutral)
     float postContrast = max(pc.p2.z, 0.01);
     float postSat = max(pc.p1.w, 0.0);
     if (abs(postContrast - 1.0) > 0.001)
@@ -101,6 +118,20 @@ void main()
     if (abs(postSat - 1.0) > 0.001) {
         float lum = dot(max(mapped, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
         mapped = mix(vec3(lum), mapped, postSat);
+    }
+
+    // Underwater look: teal grade, slight blur-like soft + vignette
+    if (underwater)
+    {
+        float s = clamp(underwaterStrength, 0.0, 1.5);
+        vec3 underTint = vec3(0.15, 0.45, 0.55);
+        mapped = mix(mapped, mapped * underTint * 1.4, 0.55 * s);
+        mapped.r *= mix(1.0, 0.65, s);
+        float vig = smoothstep(0.95, 0.25, length(vUV - 0.5));
+        mapped *= mix(1.0, vig, 0.35 * s);
+        // Caustic shimmer
+        float c = 0.5 + 0.5 * sin(vUV.x * 40.0 + time * 2.0) * sin(vUV.y * 35.0 - time * 1.5);
+        mapped += vec3(0.0, 0.04, 0.05) * c * s;
     }
 
     outColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);

@@ -5,11 +5,14 @@
 
 struct ShaderParameters
 {
-	// Fog — softer / farther so terrain chroma is not washed out
+	// Fog — farther / thinner so midground keeps chroma (milky wash fix)
 	bool automaticAtmosphere = true;
-	float fogStart = 260.0f;
-	float fogEnd = 780.0f;
-	float fogDensity = 0.12f;
+	float fogStart = 320.0f;
+	float fogEnd = 900.0f;
+	float fogDensity = 0.06f;
+	/// Height fog falloff (higher = fog thins faster above fogBaseY).
+	float fogHeightFalloff = 0.018f;
+	float fogBaseY = 64.0f;
 	glm::vec3 fogColor = {0.55f, 0.72f, 0.92f};
 
 	// Lighting
@@ -22,20 +25,32 @@ struct ShaderParameters
 	float dayFactor = 1.0f;
 	float sunsetFactor = 0.0f;
 	float nightFactor = 0.0f;
-	float ambientStrength = 0.26f;
-	float diffuseIntensity = 0.85f;
+	// Outdoor lighting — mid path (not milky, not neon, not washed-out beige)
+	float ambientStrength = 0.22f;
+	float diffuseIntensity = 0.88f;
 	float lightLevels = 5.0f;
+	/// Cool moon fill at night (scales with nightFactor).
+	float moonAmbientStrength = 0.55f;
+	/// Scales mesh block-light contribution in terrain shader.
+	float blockLightScale = 1.0f;
+	/// Scales emissive block HDR contribution.
+	float emissiveScale = 1.0f;
 
 	// Day/Night cycle
 	bool dayCycleEnabled = true;
 	float dayTime = 0.25f; // 0.0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight
 	float dayCycleSpeed = 0.002f;
 
-	// visual — saturation & boost are packed into FrameUBO (see packFrameLightVisual)
-	// Kept moderate: boost was previously dead (always 1.0); slight lift only.
-	float saturationLevel = 1.06f;
-	float colorBoost = 1.04f;
-	float contrastLevel = 1.02f;
+	// visual — gentle punch for readable sand/grass/water chroma
+	float saturationLevel = 1.04f;
+	float colorBoost = 1.03f;
+	float contrastLevel = 1.04f;
+
+	// Water (Tier 1) — mild defaults (strong refraction caused mirrored/grid artifacts)
+	float waterWaveStrength = 0.08f;
+	float waterRefraction = 0.012f;
+	float waterSpecular = 0.95f;
+	float waterFoamStrength = 0.55f;
 };
 
 /// Packs light + visual knobs for FrameUBO std140 (matches terrain/sky shaders).
@@ -67,6 +82,8 @@ struct RenderSettings
 	int uploadPerSec{100}; // GPU mesh uploads / sec (async staging — no device idle)
 	// Shadow casters within this XZ radius (blocks). Caps shadow pass cost.
 	float shadowDistance{160.f};
+	/// Cascade far plane used for CSM split distances (view-space).
+	float shadowCascadeFar{280.f};
 	/// Max CPU ms per frame for load + gen-dispatch + mesh-dispatch (0 = unlimited).
 	float maxStreamMs{4.0f};
 };
@@ -89,21 +106,21 @@ struct RenderTiming
 struct PostProcessSettings
 {
 	bool bloomEnabled{true};
-	float bloomThreshold{1.10f};
-	float bloomIntensity{0.16f};
+	float bloomThreshold{1.15f};
+	float bloomIntensity{0.12f};
 	/// Horizontal+vertical pairs (3 ≈ former 5 quality, ~40% fewer fullscreen blurs).
 	int bloomBlurIterations{3};
 	bool fxaaEnabled{true};
 	bool autoExposureEnabled{true};
-	float exposure{0.98f};
+	float exposure{0.94f};
 	float exposureCompensation{1.0f};
 	int toneMapper{0}; // 0 = ACES, 1 = Reinhard
 	float gamma{2.2f};
-	// Mild post punch only (1.0 = neutral)
-	float postSaturation{1.03f};
-	float postContrast{1.02f};
+	// Gentle post grade — natural chroma without neon
+	float postSaturation{1.02f};
+	float postContrast{1.03f};
 
-	// God rays (volumetric light scattering)
+	// God rays (volumetric light scattering) — depth-aware when depthOcclusion enabled
 	bool godRaysEnabled{true};
 	float godRaysDensity{0.85f};
 	float godRaysWeight{0.022f};
@@ -112,6 +129,18 @@ struct PostProcessSettings
 	bool godRaysDynamicBoostEnabled{true};
 	bool godRaysBoostPreview{false};
 	float godRaysDramaticBoost{2.2f};
+	/// Occlude shafts by scene depth (geometry blocks light shafts).
+	bool godRaysDepthOcclusion{true};
+
+	// SSAO (half-res) — mild defaults; full intensity caused milky outdoor veil
+	bool ssaoEnabled{true};
+	float ssaoRadius{0.40f};
+	float ssaoBias{0.035f};
+	float ssaoIntensity{0.40f};
+
+	// Underwater look (set by engine when camera is submerged)
+	bool underwater{false};
+	float underwaterStrength{1.0f};
 };
 
 struct VoxelHighlight

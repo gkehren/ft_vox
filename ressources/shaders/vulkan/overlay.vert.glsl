@@ -4,7 +4,9 @@ layout(location = 0) in vec3 aPos;
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4 view;
     mat4 projection;
-    mat4 lightSpaceMatrix;
+    mat4 cascadeMatrix0;
+    mat4 cascadeMatrix1;
+    mat4 cascadeMatrix2;
     vec4 viewPos;
     vec4 lightDirection;
     vec4 fogColor;
@@ -14,6 +16,10 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 sunDir;
     vec4 moonDir;
     vec4 skyParams;
+    vec4 cascadeSplits;
+    vec4 moonAmbient;
+    vec4 tier1Params;
+    vec4 waterParams;
     vec4 postParams0;
     vec4 postParams1;
     vec4 postParams2;

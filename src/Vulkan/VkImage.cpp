@@ -64,6 +64,85 @@ AllocatedImage createImage2D(VmaAllocator allocator,
 	return out;
 }
 
+AllocatedImage createImage2DArray(VmaAllocator allocator,
+								  VkDevice device,
+								  uint32_t width,
+								  uint32_t height,
+								  uint32_t arrayLayers,
+								  VkFormat format,
+								  VkImageUsageFlags usage,
+								  VmaMemoryUsage memoryUsage,
+								  VkImageAspectFlags aspect)
+{
+	if (allocator == VK_NULL_HANDLE || width == 0 || height == 0 || arrayLayers == 0)
+		throw std::runtime_error("createImage2DArray: invalid arguments");
+
+	VkImageCreateInfo imageInfo{};
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.extent = {width, height, 1};
+	imageInfo.mipLevels = 1;
+	imageInfo.arrayLayers = arrayLayers;
+	imageInfo.format = format;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	imageInfo.usage = usage;
+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	VmaAllocationCreateInfo allocInfo{};
+	allocInfo.usage = memoryUsage;
+
+	AllocatedImage out{};
+	out.format = format;
+	out.width = width;
+	out.height = height;
+	out.mipLevels = 1;
+	out.arrayLayers = arrayLayers;
+
+	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &out.image, &out.allocation, nullptr) != VK_SUCCESS)
+		throw std::runtime_error("vmaCreateImage (array) failed");
+
+	VkImageViewCreateInfo viewInfo{};
+	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	viewInfo.image = out.image;
+	viewInfo.viewType = arrayLayers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+	viewInfo.format = format;
+	viewInfo.subresourceRange.aspectMask = aspect;
+	viewInfo.subresourceRange.baseMipLevel = 0;
+	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.baseArrayLayer = 0;
+	viewInfo.subresourceRange.layerCount = arrayLayers;
+
+	if (vkCreateImageView(device, &viewInfo, nullptr, &out.view) != VK_SUCCESS)
+	{
+		vmaDestroyImage(allocator, out.image, out.allocation);
+		throw std::runtime_error("vkCreateImageView (array) failed");
+	}
+
+	return out;
+}
+
+VkImageView createImageView2DLayer(VkDevice device, VkImage image, VkFormat format,
+								   VkImageAspectFlags aspect, uint32_t layer)
+{
+	VkImageViewCreateInfo viewInfo{};
+	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	viewInfo.image = image;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	viewInfo.format = format;
+	viewInfo.subresourceRange.aspectMask = aspect;
+	viewInfo.subresourceRange.baseMipLevel = 0;
+	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.baseArrayLayer = layer;
+	viewInfo.subresourceRange.layerCount = 1;
+
+	VkImageView view = VK_NULL_HANDLE;
+	if (vkCreateImageView(device, &viewInfo, nullptr, &view) != VK_SUCCESS)
+		throw std::runtime_error("createImageView2DLayer failed");
+	return view;
+}
+
 void destroyImage(VmaAllocator allocator, VkDevice device, AllocatedImage &image)
 {
 	if (device != VK_NULL_HANDLE && image.view != VK_NULL_HANDLE)

@@ -8,6 +8,7 @@
 #include "Renderer/TextureManager.hpp"
 #include "Renderer/PostStack.hpp"
 #include "Renderer/OverlayRenderer.hpp"
+#include "Renderer/Tier1Graphics.hpp"
 #include "Camera/Camera.hpp"
 #include "Chunk/Chunk.hpp"
 #include "Engine/EngineDefs.hpp"
@@ -18,29 +19,36 @@
 #include <functional>
 #include <array>
 
-/// Terrain + shadows + water + sky + post (PR5).
+/// Terrain + CSM shadows + water + sky + SSAO/post (Tier 1).
 class TerrainRenderer
 {
 public:
 	static constexpr uint32_t kMaxFramesInFlight = 2;
-	static constexpr uint32_t kShadowMapSize = 2048;
+	static constexpr uint32_t kShadowMapSize = 1024;
+	static constexpr int kCascadeCount = tier1::kCascadeCount;
 
 	// Must match GLSL FrameUBO (std140)
 	struct FrameUBO
 	{
 		glm::mat4 view;
 		glm::mat4 projection;
-		glm::mat4 lightSpaceMatrix;
+		glm::mat4 cascadeMatrix0;
+		glm::mat4 cascadeMatrix1;
+		glm::mat4 cascadeMatrix2;
 		glm::vec4 viewPos;
 		glm::vec4 lightDirection;
 		glm::vec4 fogColor;
-		glm::vec4 fogParams;
+		glm::vec4 fogParams;	  // start, end, density, heightFalloff
 		glm::vec4 lightParams;
 		glm::vec4 visualParams;
 		glm::vec4 sunDir;
 		glm::vec4 moonDir;
-		glm::vec4 skyParams;	 // time, day, sunset, night
-		glm::vec4 postParams0; // unused by terrain
+		glm::vec4 skyParams;	  // time, day, sunset, night
+		glm::vec4 cascadeSplits;  // xyz ends, w = count
+		glm::vec4 moonAmbient;	  // rgb + strength
+		glm::vec4 tier1Params;	  // blockLightScale, emissiveScale, fogBaseY, underwater
+		glm::vec4 waterParams;	  // wave, refraction, specular, foam
+		glm::vec4 postParams0;
 		glm::vec4 postParams1;
 		glm::vec4 postParams2;
 		glm::vec4 postParams3;
@@ -54,7 +62,8 @@ public:
 	void onSwapchainRecreate(VkSwapchain &swapchain);
 
 	void updateFrameUBO(uint32_t frameIndex, const Camera &camera, float aspectW, float aspectH, float farPlane,
-						float time, const ShaderParameters &params);
+						float time, const ShaderParameters &params,
+						float shadowCascadeFar = 280.f, bool underwater = false);
 
 	/// preRecord runs immediately after beginCommandBuffer (mesh staging copies + barrier).
 	/// shadowChunks may be a tighter subset of chunks for the shadow pass.
@@ -96,8 +105,8 @@ private:
 	void createFrameResources();
 	void destroyFrameResources();
 	void writeSet1Descriptors();
-
-	static glm::mat4 computeLightSpaceMatrix(const glm::vec3 &cameraPos, const glm::vec3 &lightDir);
+	void createWaterSceneSet();
+	void writeWaterSceneDescriptors();
 
 	VkContext *m_context{nullptr};
 	TextureManager m_textures;
@@ -108,7 +117,10 @@ private:
 
 	VkDescriptorSetLayout m_setLayout0{VK_NULL_HANDLE};
 	VkDescriptorSetLayout m_setLayout1{VK_NULL_HANDLE};
+	VkDescriptorSetLayout m_setLayout2{VK_NULL_HANDLE}; // water: scene color + depth
 	VkPipelineLayout m_pipelineLayout{VK_NULL_HANDLE};
+	VkPipelineLayout m_shadowPipelineLayout{VK_NULL_HANDLE};
+	VkPipelineLayout m_waterPipelineLayout{VK_NULL_HANDLE};
 
 	VkPipeline m_opaquePipeline{VK_NULL_HANDLE};
 	VkPipeline m_waterPipeline{VK_NULL_HANDLE};
@@ -116,11 +128,18 @@ private:
 
 	VkDescriptorPool m_descriptorPool{VK_NULL_HANDLE};
 	VkDescriptorSet m_set1{VK_NULL_HANDLE};
+	VkDescriptorSet m_set2Water{VK_NULL_HANDLE};
 
 	VkFormat m_depthFormat{VK_FORMAT_D32_SFLOAT};
 
-	AllocatedImage m_shadowMap{};
+	AllocatedImage m_shadowMap{}; // 2D array, kCascadeCount layers
+	std::array<VkImageView, kCascadeCount> m_shadowLayerViews{};
 	VkSampler m_shadowSampler{VK_NULL_HANDLE};
+
+	// Opaque scene history for water refraction (+ depth history for foam)
+	AllocatedImage m_sceneHistory{};
+	AllocatedImage m_depthHistory{};
+	VkSampler m_sceneSampler{VK_NULL_HANDLE};
 
 	std::array<FrameData, kMaxFramesInFlight> m_frames{};
 	std::vector<VkFence> m_imagesInFlight;
@@ -128,4 +147,5 @@ private:
 	glm::vec3 m_lightDir{0.4f, 1.0f, 0.2f};
 	float m_time{0.f};
 	glm::vec3 m_lastCamPos{0.f};
+	std::array<glm::mat4, kCascadeCount> m_cascadeMatrices{};
 };
