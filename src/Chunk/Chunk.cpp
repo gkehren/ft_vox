@@ -296,7 +296,7 @@ void Chunk::generateMesh()
       return t == AIR || t == WATER || t == GLASS || t == OAK_LEAVES;
     };
 
-    // Sky light: per column, cast down until solid
+    // Sky light: per column, cast down until solid (open sky = 15)
     for (int z = 0; z < CHUNK_SIZE; ++z)
     {
       for (int x = 0; x < CHUNK_SIZE; ++x)
@@ -310,10 +310,49 @@ void Chunk::generateMesh()
             continue;
           }
           skyLight[idxOf(x, y, z)] = light;
+          // Full sky light continues down open air; solid roof zeros it above
           if (light > 0 && y > 0 && !isAirLike(x, y - 1, z))
-            ; // keep
+            ; // keep full until blocked
           else if (light > 0)
             light = static_cast<uint8_t>(light > 0 ? light : 0);
+        }
+      }
+    }
+
+    // Horizontal sky flood into caves/overhangs (Minecraft-style −1 per step).
+    // Vertical cast alone leaves cavern mouths pitch-black one block in.
+    {
+      std::vector<glm::ivec3> skyQ;
+      skyQ.reserve(512);
+      for (int z = 0; z < CHUNK_SIZE; ++z)
+        for (int y = 0; y < CHUNK_HEIGHT; ++y)
+          for (int x = 0; x < CHUNK_SIZE; ++x)
+          {
+            if (skyLight[idxOf(x, y, z)] > 0 && isAirLike(x, y, z))
+              skyQ.emplace_back(x, y, z);
+          }
+      size_t skyHead = 0;
+      const int skyDirs[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+      while (skyHead < skyQ.size())
+      {
+        const glm::ivec3 p = skyQ[skyHead++];
+        const uint8_t cur = skyLight[idxOf(p.x, p.y, p.z)];
+        if (cur <= 1)
+          continue;
+        const uint8_t next = static_cast<uint8_t>(cur - 1);
+        for (auto &d : skyDirs)
+        {
+          const int nx = p.x + d[0], ny = p.y + d[1], nz = p.z + d[2];
+          if (nx < 0 || nx >= CHUNK_SIZE || ny < 0 || ny >= CHUNK_HEIGHT || nz < 0 || nz >= CHUNK_SIZE)
+            continue;
+          const size_t i = idxOf(nx, ny, nz);
+          if (skyLight[i] < next)
+          {
+            skyLight[i] = next;
+            // Propagate through air; also write into solids so face sampling sees light
+            if (isAirLike(nx, ny, nz))
+              skyQ.emplace_back(nx, ny, nz);
+          }
         }
       }
     }

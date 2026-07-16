@@ -186,10 +186,17 @@ int main()
 
 		const float caveScale = tier1::localLightScale(0.0f, 0.0f);
 		const float torchScale = tier1::localLightScale(0.0f, 14.0f / 15.0f);
-		if (std::abs(caveScale - 0.12f) > 1e-5f)
-			ok = fail("localLightScale(0,0) must be floor 0.12");
-		if (!(torchScale > caveScale + 0.5f))
+		if (std::abs(caveScale - tier1::kCaveLightFloor) > 1e-5f)
+			ok = fail("localLightScale(0,0) must match kCaveLightFloor");
+		if (!(caveScale > 0.15f && caveScale < 0.35f))
+			ok = fail("cave light floor should be readable (~0.22) not crushed/washed");
+		if (!(torchScale > caveScale + 0.4f))
 			ok = fail("torch block light must brighten vs unlit cave");
+		// Smoothstep curve: at 0.75 input, output > linear interpolation
+		const float at75 = tier1::localLightScale(0.75f, 0.0f);
+		const float linear75 = tier1::kCaveLightFloor + (1.f - tier1::kCaveLightFloor) * 0.75f;
+		if (!(at75 > linear75 + 0.01f))
+			ok = fail("localLightScale should use smoothstep curve (> linear at 0.75)");
 	}
 
 	// Settings defaults + outdoor look (fog / SSAO mildness)
@@ -226,9 +233,11 @@ int main()
 			ok = fail("far fog must respect kTerrainFogAmountCap");
 		if (!(farFog >= midFog))
 			ok = fail("far fog should be ≥ mid fog");
-		// localLightScale cave darkness preserved
-		if (std::abs(tier1::localLightScale(0.f, 0.f) - 0.12f) > 1e-5f)
-			ok = fail("localLightScale cave floor must remain 0.12");
+		// localLightScale cave floor readable but still dark vs outdoor full light
+		if (std::abs(tier1::localLightScale(0.f, 0.f) - tier1::kCaveLightFloor) > 1e-5f)
+			ok = fail("localLightScale cave floor must match kCaveLightFloor");
+		if (!(tier1::localLightScale(1.f, 0.f) > 0.98f))
+			ok = fail("full sky light should approach 1.0");
 	}
 
 	if (!ok)

@@ -49,7 +49,7 @@ struct ShaderParameters
 	// Water (Tier 1) — mild defaults (strong refraction caused mirrored/grid artifacts)
 	float waterWaveStrength = 0.08f;
 	float waterRefraction = 0.012f;
-	float waterSpecular = 0.95f;
+	float waterSpecular = 1.15f;
 	float waterFoamStrength = 0.55f;
 };
 
@@ -106,7 +106,8 @@ struct RenderTiming
 struct PostProcessSettings
 {
 	bool bloomEnabled{true};
-	float bloomThreshold{1.15f};
+	/// Higher default: bloomExtract soft-knee keeps sun/emissive peaks, not soft midtones.
+	float bloomThreshold{1.45f};
 	float bloomIntensity{0.12f};
 	/// Horizontal+vertical pairs (3 ≈ former 5 quality, ~40% fewer fullscreen blurs).
 	int bloomBlurIterations{3};
@@ -119,6 +120,9 @@ struct PostProcessSettings
 	// Gentle post grade — natural chroma without neon
 	float postSaturation{1.02f};
 	float postContrast{1.03f};
+	// Quick-win style: film grain + vignette (composite.frag)
+	float filmGrain{0.028f};
+	float vignette{0.22f};
 
 	// God rays (volumetric light scattering) — depth-aware when depthOcclusion enabled
 	bool godRaysEnabled{true};

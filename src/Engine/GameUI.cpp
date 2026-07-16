@@ -440,6 +440,8 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		ImGui::SliderFloat("Gamma", &pp.gamma, 0.5f, 4.f);
 		ImGui::SliderFloat("Post saturation", &pp.postSaturation, 0.5f, 2.f);
 		ImGui::SliderFloat("Post contrast", &pp.postContrast, 0.5f, 1.8f);
+		ImGui::SliderFloat("Film grain", &pp.filmGrain, 0.f, 0.12f, "%.3f");
+		ImGui::SliderFloat("Vignette", &pp.vignette, 0.f, 1.f);
 		const char *toneMappers[] = {"ACES Filmic", "Reinhard"};
 		ImGui::Combo("Tone mapper", &pp.toneMapper, toneMappers, IM_ARRAYSIZE(toneMappers));
 
