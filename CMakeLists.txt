@@ -163,6 +163,7 @@ set(FT_VOX_IMGUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/imgui/imgui_widgets.cpp
     ${CMAKE_SOURCE_DIR}/src/imgui/imgui_impl_sdl3.cpp
     ${CMAKE_SOURCE_DIR}/src/imgui/imgui_impl_vulkan.cpp
+    ${CMAKE_SOURCE_DIR}/src/ImGuiFileDialog/ImGuiFileDialog.cpp
 )
 
 set(FT_VOX_SOURCES
@@ -170,6 +171,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/Engine.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/ImGuiLayer.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUI.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/GameUIResourcePack.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Benchmark.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/BuildInfo.cpp
@@ -194,6 +196,7 @@ set_source_files_properties(
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/imgui
+    ${CMAKE_SOURCE_DIR}/src/ImGuiFileDialog
     ${FT_VOX_GENERATED_DIR}
     ${Vulkan_INCLUDE_DIRS}
 )

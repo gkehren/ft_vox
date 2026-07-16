@@ -41,6 +41,13 @@ public:
 	void shutdown();
 	void onSwapchainRecreate(VkSwapchain &swapchain);
 
+	/// Rebuild block texture array from pack root (empty = bundled). Caller must device-idle first.
+	/// Does not store pack path — Engine owns the authoritative path.
+	/// Returns pack hit/miss stats (atlas still valid when pack is invalid — bundled used).
+	TextureAtlasLoadReport reloadResourcePack(const std::string &resourcePackRoot);
+	uint32_t textureLayerSize() const { return m_textures.layerSize(); }
+	const TextureAtlasLoadReport &lastTextureLoadReport() const { return m_textures.lastLoadReport(); }
+
 	void updateFrameUBO(uint32_t frameIndex, const Camera &camera, float aspectW, float aspectH, float farPlane,
 						float time, const ShaderParameters &params, float shadowCascadeFar = 280.f,
 						bool underwater = false);
