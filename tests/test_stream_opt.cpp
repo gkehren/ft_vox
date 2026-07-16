@@ -218,6 +218,56 @@ static void testPoolCapacityEstimate()
 	CHECK(c512 <= 16384, "soft cap");
 }
 
+/// Ice spikes use treeDensity=0 and hasCacti=false; generateVegetation must still run
+/// placeIceSpike (not skip the whole biome on the density gate).
+/// Pinned: seed=1337, chunk world origin (512, -1248) has ice-spike columns + spikes.
+static void testIceSpikeVegetationReachable()
+{
+	constexpr int kSeed = 1337;
+	constexpr int kOriginX = 512;
+	constexpr int kOriginZ = -1248;
+
+	const BiomeConfig &cfg = TerrainGenerator::getBiomeConfig(BIOME_ICE_SPIKES);
+	CHECK(cfg.treeDensity == 0.0f, "ice spikes config treeDensity is 0 (regression: density gate)");
+	CHECK(!cfg.hasCacti, "ice spikes config hasCacti is false (regression: density gate)");
+
+	TerrainGenerator gen(kSeed);
+	int iceCols = 0;
+	for (int z = 0; z < CHUNK_SIZE; ++z)
+		for (int x = 0; x < CHUNK_SIZE; ++x)
+			if (gen.getBiomeAt(kOriginX + x, kOriginZ + z) == BIOME_ICE_SPIKES)
+				++iceCols;
+	CHECK(iceCols > 0, "pinned chunk has BIOME_ICE_SPIKES columns");
+
+	ChunkData data = gen.generateChunk(kOriginX, kOriginZ);
+	int spikeBlocks = 0;
+	int iceBiomeColsInChunk = 0;
+	for (int z = 0; z < CHUNK_SIZE; ++z)
+	{
+		for (int x = 0; x < CHUNK_SIZE; ++x)
+		{
+			const size_t col = static_cast<size_t>(z * CHUNK_SIZE + x);
+			if (data.biomes[col] != BIOME_ICE_SPIKES)
+				continue;
+			++iceBiomeColsInChunk;
+			const int h = data.heightMap[col];
+			for (int y = h + 1; y < CHUNK_HEIGHT && y <= h + 30; ++y)
+			{
+				const size_t idx =
+					static_cast<size_t>(y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x);
+				const uint8_t t = data.voxels[idx].type;
+				if (t == static_cast<uint8_t>(PACKED_ICE) || t == static_cast<uint8_t>(BLUE_ICE))
+					++spikeBlocks;
+			}
+		}
+	}
+	CHECK(iceBiomeColsInChunk > 0, "generated chunk records ice-spike biomes");
+	CHECK(spikeBlocks > 0,
+		  "placeIceSpike must deposit PACKED_ICE/BLUE_ICE above surface (unreachable if density gate skips ice spikes)");
+	std::cout << "  ice-spike columns: " << iceBiomeColsInChunk << " spike blocks above surface: "
+			  << spikeBlocks << "\n";
+}
+
 int main()
 {
 	testLoadPriorityNearestFirst();
@@ -229,12 +279,13 @@ int main()
 	testTerrainBoundedGeneration();
 	testOceanWaterNotClippedByCaveYBound();
 	testPoolCapacityEstimate();
+	testIceSpikeVegetationReachable();
 
 	if (g_fails != 0)
 	{
 		std::cerr << g_fails << " check(s) failed\n";
 		return 1;
 	}
-	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate\n";
+	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate + ice spikes\n";
 	return 0;
 }

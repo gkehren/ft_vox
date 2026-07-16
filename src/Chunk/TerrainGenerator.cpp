@@ -1,5 +1,6 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Chunk/StreamHelpers.hpp>
+#include <Renderer/MinecraftTextures.hpp>
 #include <algorithm>
 #include <cmath>
 #include <mutex>
@@ -33,7 +34,7 @@ void TerrainGenerator::initBiomeConfigs()
         true, false, true};
 
     s_biomeConfigs[BIOME_ICE_SPIKES] = {
-        TextureType::SNOW, TextureType::SNOW, TextureType::GRAVEL, 5, 0.0f, 0.0f,
+        TextureType::SNOW, TextureType::PACKED_ICE, TextureType::GRAVEL, 5, 0.0f, 0.0f,
         glm::vec3(0.55f, 0.70f, 0.72f), glm::vec3(0.42f, 0.58f, 0.62f),
         true, false, false};
 
@@ -68,22 +69,22 @@ void TerrainGenerator::initBiomeConfigs()
         false, false, true};
 
     s_biomeConfigs[BIOME_SWAMP] = {
-        TextureType::DIRT, TextureType::DIRT, TextureType::DIRT, 4, 0.12f, 0.6f,
+        TextureType::MUD, TextureType::DIRT, TextureType::CLAY, 4, 0.12f, 0.6f,
         glm::vec3(0.38f, 0.50f, 0.28f), glm::vec3(0.32f, 0.44f, 0.24f),
         false, false, true};
 
     s_biomeConfigs[BIOME_RIVER] = {
-        TextureType::SAND, TextureType::SAND, TextureType::GRAVEL, 2, 0.0f, 0.0f,
+        TextureType::SAND, TextureType::CLAY, TextureType::GRAVEL, 2, 0.0f, 0.0f,
         glm::vec3(0.38f, 0.62f, 0.36f), glm::vec3(0.32f, 0.54f, 0.30f),
         false, false, false};
 
     s_biomeConfigs[BIOME_DESERT] = {
-        TextureType::SAND, TextureType::SAND, TextureType::SAND, 8, 0.0f, 0.02f,
+        TextureType::SAND, TextureType::SANDSTONE, TextureType::SAND, 8, 0.0f, 0.02f,
         glm::vec3(0.78f, 0.70f, 0.38f), glm::vec3(0.65f, 0.58f, 0.28f),
         false, true, false};
 
     s_biomeConfigs[BIOME_SAVANNA] = {
-        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::SAND, 3, 0.05f, 0.2f,
+        TextureType::GRASS_TOP, TextureType::COARSE_DIRT, TextureType::SAND, 3, 0.08f, 0.2f,
         glm::vec3(0.72f, 0.70f, 0.32f), glm::vec3(0.60f, 0.58f, 0.26f),
         false, false, false};
 
@@ -93,7 +94,7 @@ void TerrainGenerator::initBiomeConfigs()
         false, false, true};
 
     s_biomeConfigs[BIOME_BADLANDS] = {
-        TextureType::BRICKS, TextureType::BRICKS, TextureType::SAND, 6, 0.0f, 0.01f,
+        TextureType::RED_SAND, TextureType::TERRACOTTA, TextureType::RED_SAND, 8, 0.0f, 0.01f,
         glm::vec3(0.78f, 0.48f, 0.28f), glm::vec3(0.68f, 0.40f, 0.22f),
         false, true, false};
 
@@ -658,7 +659,8 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
       for (int step = 0; step < ore.clusterSize; ++step) {
         if (x >= 0 && x < CHUNK_SIZE && y >= 0 && y < CHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE) {
           int voxelIndex = getVoxelIndex(x, y, z);
-          if (chunkData.voxels[voxelIndex].type == TextureType::STONE) {
+          const auto host = static_cast<TextureType>(chunkData.voxels[voxelIndex].type);
+          if (blockIsOreHost(host)) {
             chunkData.voxels[voxelIndex].type = ore.type;
           }
         }
@@ -1033,7 +1035,10 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
         continue;
 
       const BiomeConfig &config = getBiomeConfig(biome);
-      if (config.treeDensity == 0.0f && !config.hasCacti)
+      // Ice spikes place structure with treeDensity=0 / hasCacti=false — do not skip them here.
+      const bool wantsVegetation =
+          config.treeDensity > 0.0f || config.hasCacti || biome == BIOME_ICE_SPIKES;
+      if (!wantsVegetation)
         continue;
 
       int worldX = chunkX + localX;
@@ -1051,19 +1056,24 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
       int surfaceIndex = getVoxelIndex(localX, terrainHeight, localZ);
       TextureType surfaceType = static_cast<TextureType>(chunkData.voxels[surfaceIndex].type);
 
-      if (surfaceType != TextureType::GRASS_TOP && surfaceType != TextureType::DIRT &&
-          surfaceType != TextureType::SAND && surfaceType != TextureType::SNOW &&
-          surfaceType != TextureType::BRICKS)
+      if (!blockIsPlantableSurface(surfaceType))
         continue;
 
       uint32_t hash = treeHash(worldX, worldZ, m_seed);
+
+      // Ice spikes: tall packed-ice columns (independent of tree density)
+      if (biome == BIOME_ICE_SPIKES)
+      {
+        if (static_cast<float>(hash & 0xFFFF) / 65535.0f < 0.04f)
+          placeIceSpike(chunkData, localX, localZ, terrainHeight + 1, worldX, worldZ);
+        continue;
+      }
+
       if (static_cast<float>(hash & 0xFFFF) / 65535.0f < treeProbability)
       {
         placeTree(chunkData, localX, localZ, terrainHeight + 1, biome, worldX, worldZ);
       }
-      else if (config.hasCacti &&
-               ((biome == BIOME_DESERT && surfaceType == TextureType::SAND) ||
-                (biome == BIOME_BADLANDS && surfaceType == TextureType::BRICKS)))
+      else if (config.hasCacti && blockIsCactusGround(surfaceType))
       {
         uint32_t cHash = treeHash(worldX, worldZ, m_seed + 1);
         if (static_cast<float>(cHash & 0xFFFF) / 65535.0f < 0.015f)
@@ -1075,286 +1085,88 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
   }
 }
 
-void TerrainGenerator::placeTree(ChunkData &chunkData, int localX, int localZ,
-                                 int baseY, BiomeType biome, int worldX, int worldZ)
-{
-  // Mix tree types within biomes for variety
-  uint32_t h = treeHash(worldX, worldZ, m_seed + 200);
-  switch (biome)
-  {
-  case BIOME_SNOWY_TAIGA:
-  case BIOME_ICE_SPIKES:
-    placeSpruceTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    break;
-  case BIOME_MOUNTAINS:
-    // 70% spruce, 30% oak
-    if ((h % 10) < 7)
-      placeSpruceTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    else
-      placeOakTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    break;
-  case BIOME_BIRCH_FOREST:
-    // 80% birch, 20% oak
-    if ((h % 5) < 4)
-      placeBirchTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    else
-      placeOakTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    break;
-  case BIOME_DARK_FOREST:
-    // 60% oak, 30% spruce, 10% birch — creates a gloomy mixed canopy
-    {
-      uint32_t r = h % 10;
-      if (r < 6)
-        placeOakTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-      else if (r < 9)
-        placeSpruceTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-      else
-        placeBirchTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    }
-    break;
-  case BIOME_FOREST:
-    // 70% oak, 30% birch
-    if ((h % 10) < 7)
-      placeOakTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    else
-      placeBirchTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    break;
-  case BIOME_JUNGLE:
-    placeJungleTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    break;
-  default:
-    placeOakTree(chunkData, localX, localZ, baseY, worldX, worldZ);
-    break;
-  }
-}
-
-void TerrainGenerator::placeOakTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
-{
-  uint32_t h = treeHash(worldX, worldZ, m_seed + 100);
-
-  int trunkHeight = 4 + static_cast<int>(h & 3);       // 4–7 blocks
-  bool wideCanopy = ((h >> 2) & 7) == 0;               // ~12%: radius-3 canopy
-  int extraTopLayers = static_cast<int>((h >> 5) & 1); // 0 or 1 extra cap layer
-  int canopyMargin = wideCanopy ? 3 : 2;
-
-  if (localX < canopyMargin || localX >= CHUNK_SIZE - canopyMargin ||
-      localZ < canopyMargin || localZ >= CHUNK_SIZE - canopyMargin)
-  {
-    return;
-  }
-
-  for (int y = 0; y < trunkHeight; ++y)
-    setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
-
-  int topY = baseY + trunkHeight;
-  int crownRadius = wideCanopy ? 3 : 2;
-  // Bottom layers: crownRadius wide, corners trimmed
-  // Top cap layers: radius 1
-  int leafBottom = topY - 2;
-  int leafCapBase = topY + 1;
-  int leafTop = topY + 1 + extraTopLayers;
-
-  for (int ly = leafBottom; ly <= leafTop; ++ly)
-  {
-    int radius = (ly >= leafCapBase) ? 1 : crownRadius;
-    for (int dx = -radius; dx <= radius; ++dx)
-    {
-      for (int dz = -radius; dz <= radius; ++dz)
-      {
-        // Trim corners on wide layers for a rounder silhouette
-        if (radius >= 2 && std::abs(dx) == radius && std::abs(dz) == radius)
-          continue;
-        // Leave trunk column intact
-        if (dx == 0 && dz == 0 && ly < topY)
-          continue;
-        setVoxelSafe(chunkData, localX + dx, ly, localZ + dz, TextureType::OAK_LEAVES);
-      }
-    }
-  }
-}
-
-// TODO: Replace OAK_LOG/OAK_LEAVES with BIRCH_LOG/BIRCH_LEAVES when texture assets are available
-void TerrainGenerator::placeBirchTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
-{
-  uint32_t h = treeHash(worldX, worldZ, m_seed + 150);
-
-  int trunkHeight = 5 + static_cast<int>(h & 3);       // 5–8 blocks (birches are tall and slender)
-  int extraTopLayers = static_cast<int>((h >> 2) & 1); // 0 or 1 extra cap layer
-
-  if (localX < 2 || localX >= CHUNK_SIZE - 2 || localZ < 2 || localZ >= CHUNK_SIZE - 2)
-  {
-    return;
-  }
-
-  for (int y = 0; y < trunkHeight; ++y)
-    setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
-
-  int topY = baseY + trunkHeight;
-  // Birch crown: slender (radius 2 min, radius 1 cap), no wide variant
-  int leafBottom = topY - 3;
-  int leafCapBase = topY + 1;
-  int leafTop = topY + 1 + extraTopLayers;
-
-  for (int ly = leafBottom; ly <= leafTop; ++ly)
-  {
-    int radius = (ly >= leafCapBase) ? 1 : 2;
-    for (int dx = -radius; dx <= radius; ++dx)
-    {
-      for (int dz = -radius; dz <= radius; ++dz)
-      {
-        // Birches have tighter corners — skip all outer diagonal cells on radius-2 layers,
-        // except the second layer from bottom which keeps its full square
-        if (radius == 2 && std::abs(dx) == 2 && std::abs(dz) == 2 && ly != leafBottom + 1)
-          continue;
-        if (dx == 0 && dz == 0 && ly < topY)
-          continue;
-        setVoxelSafe(chunkData, localX + dx, ly, localZ + dz, TextureType::OAK_LEAVES);
-      }
-    }
-  }
-}
-
-// TODO: Replace OAK_LOG/OAK_LEAVES with SPRUCE_LOG/SPRUCE_LEAVES when texture assets are available
-void TerrainGenerator::placeSpruceTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
-{
-  uint32_t h = treeHash(worldX, worldZ, m_seed + 300);
-
-  int trunkHeight = 6 + static_cast<int>(h % 7); // 6–12 blocks
-  bool fatVariant = ((h >> 3) % 5) == 0;         // 20%: each layer is one block wider
-  bool bareBottom = ((h >> 6) & 3) != 0;         // 75%: lower trunk is exposed (no bottom leaves)
-  int maxLayer = bareBottom ? trunkHeight - 3 : trunkHeight - 1;
-  int canopyMargin = (maxLayer / 2) + (fatVariant ? 1 : 0);
-
-  if (localX < canopyMargin || localX >= CHUNK_SIZE - canopyMargin ||
-      localZ < canopyMargin || localZ >= CHUNK_SIZE - canopyMargin)
-  {
-    return;
-  }
-
-  for (int y = 0; y < trunkHeight; ++y)
-    setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
-
-  // Apex leaf block
-  setVoxelSafe(chunkData, localX, baseY + trunkHeight, localZ, TextureType::OAK_LEAVES);
-
-  // Stepped cone: every-other layer, working down from apex
-  for (int layer = 0; layer <= maxLayer; ++layer)
-  {
-    if (layer % 2 != 0)
-      continue; // stepped — only even layers get leaves
-
-    int ly = baseY + trunkHeight - 1 - layer;
-    int radius = layer / 2;
-    if (fatVariant && layer > 0)
-      ++radius; // fat variant: bump radius on non-apex layers
-
-    for (int dx = -radius; dx <= radius; ++dx)
-    {
-      for (int dz = -radius; dz <= radius; ++dz)
-      {
-        if (dx == 0 && dz == 0)
-          continue; // trunk stays as log
-        // Use a loose diamond shape at larger radii for a softer silhouette
-        if (radius >= 3 && std::abs(dx) + std::abs(dz) > radius + 1)
-          continue;
-        setVoxelSafe(chunkData, localX + dx, ly, localZ + dz, TextureType::OAK_LEAVES);
-      }
-    }
-  }
-}
-
-// TODO: Replace OAK_LOG/OAK_LEAVES with JUNGLE_LOG/JUNGLE_LEAVES when texture assets are available
-void TerrainGenerator::placeJungleTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
-{
-  uint32_t h = treeHash(worldX, worldZ, m_seed + 400);
-
-  int trunkHeight = 8 + static_cast<int>(h % 9);         // 8–16 blocks — large variation
-  int canopyRadius = 3 + static_cast<int>((h >> 4) & 1); // 3 or 4
-  bool hasPropRoots = ((h >> 5) & 3) != 0;               // 75%: extra root-logs close to base
-
-  if (localX < canopyRadius || localX >= CHUNK_SIZE - canopyRadius ||
-      localZ < canopyRadius || localZ >= CHUNK_SIZE - canopyRadius)
-  {
-    return;
-  }
-
-  for (int y = 0; y < trunkHeight; ++y)
-    setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
-
-  // Prop roots: 2-block-tall extra logs at the 4 diagonal corners of the base
-  if (hasPropRoots)
-  {
-    const int offsets[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-    int rootHeight = 2 + static_cast<int>((h >> 7) & 1); // 2 or 3
-    for (auto &off : offsets)
-    {
-      for (int ry = 0; ry < rootHeight; ++ry)
-        setVoxelSafe(chunkData, localX + off[0], baseY + ry, localZ + off[1], TextureType::OAK_LOG);
-    }
-  }
-
-  // Spherical-ish canopy centred slightly below apex so it isn't too top-heavy
-  int topY = baseY + trunkHeight;
-  int canopyCentreY = topY - 1;
-
-  for (int ly = canopyCentreY - canopyRadius + 1; ly <= canopyCentreY + 2; ++ly)
-  {
-    float dy = static_cast<float>(ly - canopyCentreY);
-    // Oblate ellipsoid: compress vertically so the canopy is wide and flat
-    float rSq = static_cast<float>(canopyRadius * canopyRadius) - dy * dy * 2.0f;
-    if (rSq < 0.0f)
-      continue;
-    int layerRadius = static_cast<int>(std::sqrt(rSq));
-
-    for (int dx = -layerRadius; dx <= layerRadius; ++dx)
-    {
-      for (int dz = -layerRadius; dz <= layerRadius; ++dz)
-      {
-        if (dx * dx + dz * dz > layerRadius * layerRadius + 1)
-          continue;
-        if (dx == 0 && dz == 0 && ly < topY)
-          continue;
-        setVoxelSafe(chunkData, localX + dx, ly, localZ + dz, TextureType::OAK_LEAVES);
-      }
-    }
-  }
-}
-
-// TODO: Replace OAK_LOG with CACTUS block type when texture asset is available
-void TerrainGenerator::placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
-{
-  uint32_t h = treeHash(worldX, worldZ, m_seed + 500);
-  int height = 1 + static_cast<int>(h & 3); // 1–4 blocks (more natural variation than old 1–3)
-
-  if (localX <= 0 || localX >= CHUNK_SIZE - 1 || localZ <= 0 || localZ >= CHUNK_SIZE - 1)
-    return;
-
-  for (int y = 0; y < height; ++y)
-  {
-    bool canPlace = true;
-    for (int dx = -1; dx <= 1 && canPlace; ++dx)
-    {
-      for (int dz = -1; dz <= 1 && canPlace; ++dz)
-      {
-        if (dx == 0 && dz == 0)
-          continue;
-        int nx = localX + dx, nz = localZ + dz;
-        if (nx >= 0 && nx < CHUNK_SIZE && nz >= 0 && nz < CHUNK_SIZE)
-        {
-          int checkIndex = getVoxelIndex(nx, baseY + y, nz);
-          if (chunkData.voxels[checkIndex].type != TextureType::AIR && chunkData.voxels[checkIndex].type != TextureType::SAND)
-            canPlace = false;
-        }
-      }
-    }
-    if (canPlace)
-      setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
-  }
-}
+// vegetation placers extracted to TerrainVegetation.cpp
 
 // =============================================
 // VOXEL TYPE DETERMINATION
 // =============================================
+
+namespace
+{
+
+TextureType deepStoneAt(int worldY, uint32_t cellHash)
+{
+  if (worldY < 16)
+    return TextureType::DEEPSLATE;
+  if (worldY < 24)
+  {
+    const uint32_t r = cellHash % 5;
+    if (r < 2)
+      return TextureType::TUFF;
+    if (r < 4)
+      return TextureType::DEEPSLATE;
+    return TextureType::STONE;
+  }
+  const uint32_t r = cellHash % 100;
+  if (r < 2)
+    return TextureType::GRANITE;
+  if (r < 4)
+    return TextureType::DIORITE;
+  if (r < 6)
+    return TextureType::ANDESITE;
+  return TextureType::STONE;
+}
+
+TextureType badlandsBandAt(int worldY, uint32_t colHash)
+{
+  static constexpr TextureType kBands[] = {
+      TextureType::TERRACOTTA,        TextureType::ORANGE_TERRACOTTA, TextureType::YELLOW_TERRACOTTA,
+      TextureType::RED_TERRACOTTA,    TextureType::BROWN_TERRACOTTA,  TextureType::WHITE_TERRACOTTA,
+      TextureType::RED_SANDSTONE,     TextureType::TERRACOTTA,
+  };
+  const int idx = static_cast<int>((static_cast<uint32_t>(worldY) + (colHash & 7u)) % 8u);
+  return kBands[idx];
+}
+
+/// Biome surface patches: rare alternates, otherwise BiomeConfig::surfaceBlock.
+TextureType surfaceBlockForBiome(BiomeType biome, uint32_t colHash, const BiomeConfig &config,
+                                 int worldY)
+{
+  switch (biome)
+  {
+  case BIOME_SNOWY_TAIGA:
+    if ((colHash % 7u) == 0u)
+      return TextureType::PODZOL;
+    break;
+  case BIOME_SAVANNA:
+    if ((colHash % 5u) == 0u)
+      return TextureType::COARSE_DIRT;
+    break;
+  case BIOME_SWAMP:
+    if ((colHash % 5u) == 0u)
+      return TextureType::MOSS_BLOCK;
+    if ((colHash % 4u) == 0u)
+      return TextureType::CLAY;
+    break; // config.surfaceBlock is MUD
+  case BIOME_JUNGLE:
+    if ((colHash % 11u) == 0u)
+      return TextureType::MOSS_BLOCK;
+    break;
+  case BIOME_BADLANDS:
+    if ((colHash % 4u) == 0u)
+      return badlandsBandAt(worldY, colHash);
+    break; // config.surfaceBlock is RED_SAND
+  case BIOME_RIVER:
+    if ((colHash % 3u) == 0u)
+      return TextureType::CLAY;
+    break;
+  default:
+    break;
+  }
+  return config.surfaceBlock;
+}
+
+} // namespace
 
 TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight,
                                              BiomeType biome, float temperature, float density) const
@@ -1363,13 +1175,17 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
     return TextureType::BEDROCK;
 
   if (density == -1.0f)
-    density = static_cast<float>(terrainHeight - worldY); // Fallback for old calls without density
+    density = static_cast<float>(terrainHeight - worldY);
+
+  const uint32_t colHash =
+      (static_cast<uint32_t>(worldX) * 374761393u + static_cast<uint32_t>(worldZ) * 668265263u) ^
+      static_cast<uint32_t>(m_seed);
+  const uint32_t cellHash = colHash ^ (static_cast<uint32_t>(worldY) * 2654435761u);
 
   if (density >= 0.0f)
   {
     const BiomeConfig &config = getBiomeConfig(biome);
-    
-    // Surface layer
+
     if (density < 1.0f)
     {
       if (worldY <= SEA_LEVEL + 2 && config.surfaceBlock != TextureType::STONE)
@@ -1377,34 +1193,36 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
 
       if (biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS || config.hasSnow)
       {
-        float snowLine = 160.0f + temperature * 10.0f;
-        uint32_t hash = ((uint32_t)worldX * 374761393 + (uint32_t)worldZ * 668265263) ^ (uint32_t)m_seed;
-        float dither = static_cast<float>(hash & 0xFFFF) / 65535.0f;
-
+        const float snowLine = 160.0f + temperature * 10.0f;
+        const float dither = static_cast<float>(colHash & 0xFFFF) / 65535.0f;
         if (worldY > snowLine + (dither - 0.5f) * 15.0f)
-        {
           return TextureType::SNOW;
-        }
       }
 
-      return config.surfaceBlock;
+      return surfaceBlockForBiome(biome, colHash, config, worldY);
     }
-    // Subsurface layer
+
     if (density < static_cast<float>(config.subsurfaceDepth + 1))
     {
       if (worldY <= SEA_LEVEL + 2 && config.subsurfaceBlock != TextureType::STONE)
         return config.underwaterBlock;
+      // Badlands: banded cliffs; other biomes use BiomeConfig::subsurfaceBlock
+      // (desert sandstone, etc. already set on the config).
+      if (biome == BIOME_BADLANDS)
+        return badlandsBandAt(worldY, colHash);
       return config.subsurfaceBlock;
     }
-    // Deep layer
-    return TextureType::STONE;
+
+    if (biome == BIOME_BADLANDS && density < static_cast<float>(config.subsurfaceDepth + 12))
+      return badlandsBandAt(worldY, colHash);
+    return deepStoneAt(worldY, cellHash);
   }
 
-  if (worldY <= SEA_LEVEL) {
-      if (biome == BIOME_FROZEN_OCEAN && worldY == SEA_LEVEL) {
-          return TextureType::GLASS; // Ice layer on the surface
-      }
-      return TextureType::WATER;
+  if (worldY <= SEA_LEVEL)
+  {
+    if (biome == BIOME_FROZEN_OCEAN && worldY == SEA_LEVEL)
+      return TextureType::ICE;
+    return TextureType::WATER;
   }
   return TextureType::AIR;
 }

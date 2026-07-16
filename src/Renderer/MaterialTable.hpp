@@ -2,6 +2,7 @@
 
 #include "utils.hpp"
 #include "Renderer/Lighting.hpp"
+#include "Renderer/MinecraftTextures.hpp"
 
 #include <glm/glm.hpp>
 #include <array>
@@ -30,15 +31,20 @@ struct MaterialInfo
 inline MaterialInfo infoFor(TextureType t)
 {
 	MaterialInfo m{};
-	if (t == OAK_LEAVES)
+	if (blockIsFoliage(t))
 	{
 		m.flags |= FoliageWind;
 		m.windStrength = 0.14f;
 	}
-	if (t == SNOW)
+	else if (t == MOSS_BLOCK)
+	{
+		m.flags |= FoliageWind;
+		m.windStrength = 0.06f;
+	}
+	if (t == SNOW || blockIsIce(t))
 	{
 		m.flags |= IceSpec;
-		m.iceSpec = 0.62f;
+		m.iceSpec = (t == SNOW) ? 0.62f : (t == PACKED_ICE ? 0.72f : 0.85f);
 	}
 	const float em = lighting::emissiveIntensityForBlock(static_cast<uint8_t>(t));
 	if (em > 0.f)
