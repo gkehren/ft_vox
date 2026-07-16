@@ -6,6 +6,7 @@
 #include <Renderer/FrameUBO.hpp>
 #include <Renderer/MaterialTable.hpp>
 #include <Renderer/PostDefaults.hpp>
+#include <Renderer/MinecraftTextures.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <fstream>
 #include <filesystem>
@@ -299,6 +300,88 @@ int main()
 			ok = fail("postCompositeSources(settings) must map flags correctly");
 	}
 
+	// Block layer table: single source for basenames + transparency (shipped kBlockLayers)
+	{
+		if (sizeof(kBlockLayers) / sizeof(kBlockLayers[0]) != static_cast<size_t>(TextureType::COUNT))
+			ok = fail("kBlockLayers size must equal TextureType::COUNT");
+		for (int i = 0; i < static_cast<int>(TextureType::COUNT); ++i)
+		{
+			const char *file = blockLayerFile(static_cast<TextureType>(i));
+			if (!file || file[0] == '\0')
+				ok = fail(std::string("blockLayerFile missing for type ") + std::to_string(i));
+		}
+		if (!blockLayerIsTransparent(GLASS) || !blockLayerIsTransparent(OAK_LEAVES) ||
+			!blockLayerIsTransparent(WATER))
+			ok = fail("glass/leaves/water must be transparent in kBlockLayers");
+		if (blockLayerIsTransparent(STONE) || blockLayerIsTransparent(DIRT) || blockLayerIsTransparent(BEDROCK))
+			ok = fail("stone/dirt/bedrock must not be transparent");
+		// TextureManager::isTransparent is an alias of blockLayerIsTransparent (header-only).
+		if (std::string(blockLayerFile(STONE)) != "stone.png")
+			ok = fail("STONE basename must be stone.png");
+		if (std::string(blockLayerFile(WATER)) != "water_still.png")
+			ok = fail("WATER basename must be water_still.png");
+		if (std::string(blockLayerFile(GRASS_TOP)) != "grass_block_top.png")
+			ok = fail("GRASS_TOP basename must be grass_block_top.png");
+	}
+
+	// Path resolve + animation frame size (shipped helpers, no Vulkan)
+	{
+		bool fellBack = false;
+		const std::string bundled = resolveBlockTexturePath("", "stone.png", &fellBack);
+		if (fellBack)
+			ok = fail("empty pack root must not set fellBackFromPack");
+		if (bundled.find("textures/stone.png") == std::string::npos)
+			ok = fail("bundled path must end under textures/stone.png");
+
+		// Non-existent pack → every required file falls back with flag
+		fellBack = false;
+		const std::string missingPack =
+			resolveBlockTexturePath("/nonexistent/pack/root", "stone.png", &fellBack);
+		if (!fellBack)
+			ok = fail("missing pack file must set fellBackFromPack");
+		if (missingPack.find("textures/stone.png") == std::string::npos)
+			ok = fail("missing pack must fall back to bundled stone.png");
+
+		// Real default pack when present (optional fixture under docs/)
+		namespace fs = std::filesystem;
+		const char *packCandidates[] = {
+			"docs/default-ressource-pack",
+			"../docs/default-ressource-pack",
+			"../../docs/default-ressource-pack",
+		};
+		for (const char *pack : packCandidates)
+		{
+			if (!fs::is_directory(pack))
+				continue;
+			fellBack = true;
+			const std::string fromPack = resolveBlockTexturePath(pack, "stone.png", &fellBack);
+			if (fellBack)
+				ok = fail("docs default pack stone.png must resolve without fallback");
+			if (fromPack.find("assets/minecraft/textures/block/stone.png") == std::string::npos)
+				ok = fail("pack path must include assets/minecraft/textures/block/stone.png");
+			// water_still present
+			fellBack = true;
+			const std::string water = resolveBlockTexturePath(pack, "water_still.png", &fellBack);
+			if (fellBack || water.find("water_still.png") == std::string::npos)
+				ok = fail("docs pack water_still.png must resolve from pack");
+			break;
+		}
+
+		int fw = 0, fh = 0;
+		blockTextureFrameSize(16, 512, fw, fh);
+		if (fw != 16 || fh != 16)
+			ok = fail("water strip 16x512 first frame must be 16x16");
+		blockTextureFrameSize(16, 16, fw, fh);
+		if (fw != 16 || fh != 16)
+			ok = fail("square 16x16 frame size must stay 16x16");
+		blockTextureFrameSize(64, 64, fw, fh);
+		if (fw != 64 || fh != 64)
+			ok = fail("square 64x64 frame size must stay 64x64");
+		blockTextureFrameSize(64, 2048, fw, fh);
+		if (fw != 64 || fh != 64)
+			ok = fail("strip 64x2048 first frame must be 64x64");
+	}
+
 	// Generated FrameUBO GLSL must list C++ field names (build artifact or source mirror)
 	{
 		namespace fs = std::filesystem;
@@ -342,6 +425,6 @@ int main()
 		std::cerr << "test_render_helpers: FAILED\n";
 		return EXIT_FAILURE;
 	}
-	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + FrameUBO)\n";
+	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + block textures + FrameUBO)\n";
 	return EXIT_SUCCESS;
 }

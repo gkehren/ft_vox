@@ -23,6 +23,7 @@
 #include <vector>
 #include <functional>
 #include <array>
+#include <string>
 
 /// Thin world-frame orchestrator: sequences Shadow → Opaque → Water → Sky → Post.
 class WorldRenderer
@@ -34,7 +35,9 @@ public:
 	WorldRenderer() = default;
 	~WorldRenderer();
 
-	void init(VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm);
+	/// @param resourcePackRoot Optional Minecraft pack root (see TextureManager).
+	void init(VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm,
+			  const std::string &resourcePackRoot = {});
 	void shutdown();
 	void onSwapchainRecreate(VkSwapchain &swapchain);
 
