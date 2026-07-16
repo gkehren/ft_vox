@@ -45,6 +45,7 @@ void WorldRenderer::shutdown()
 	m_context->waitIdle();
 	destroyPipelines();
 	destroyFrameUbos();
+	m_sky.shutdown();
 	m_water.shutdown();
 	m_opaque.shutdown();
 	m_shadow.shutdown();
@@ -279,12 +280,13 @@ void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCo
 	const auto extent = swapchain.getExtent();
 	m_water.init(context, imm, extent.width, extent.height, VK_FORMAT_D32_SFLOAT);
 	m_post.init(context, imm, m_setLayout0, swapchain.getImageFormat(), extent.width, extent.height);
+	m_sky.init(context, imm, m_setLayout0, m_post.hdrFormat(), m_post.depthFormat());
 	m_overlays.init(context, imm, m_setLayout0, m_post.hdrFormat(), m_post.depthFormat());
 	createPipelines();
 	createFrameUbos();
 	writeSet1Descriptors();
 	m_water.writeSceneDescriptors(m_set2Water, m_water.sceneSampler());
-	std::cout << "WorldRenderer ready (orchestrator + Shadow/Opaque/Water + post)\n";
+	std::cout << "WorldRenderer ready (Shadow/Opaque/Water/Sky + post)\n";
 }
 
 void WorldRenderer::onSwapchainRecreate(VkSwapchain &swapchain)
@@ -294,6 +296,7 @@ void WorldRenderer::onSwapchainRecreate(VkSwapchain &swapchain)
 	m_post.resize(extent.width, extent.height, swapchain.getImageFormat());
 	m_water.resize(extent.width, extent.height, m_post.depthFormat());
 	m_water.writeSceneDescriptors(m_set2Water, m_water.sceneSampler());
+	m_sky.recreatePipeline(m_post.hdrFormat(), m_post.depthFormat());
 	destroyPipelines();
 	createPipelines();
 	m_overlays.recreatePipelines(m_post.hdrFormat(), m_post.depthFormat());
@@ -380,7 +383,7 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 	}
 	{
 		PROFILE_SCOPE("Sky");
-		m_post.recordSky(cmd, set0, extent);
+		m_sky.record(cmd, set0, extent, m_post.hdrColor(), m_post.godSource(), m_post.sceneDepth());
 	}
 	{
 		PROFILE_SCOPE("Post");

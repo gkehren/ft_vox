@@ -5,7 +5,10 @@
 #include <Renderer/Lighting.hpp>
 #include <Renderer/FrameUBO.hpp>
 #include <Renderer/MaterialTable.hpp>
+#include <Renderer/PostDefaults.hpp>
 #include <Engine/EngineDefs.hpp>
+#include <fstream>
+#include <filesystem>
 #include <utils.hpp>
 
 #include <cmath>
@@ -275,6 +278,63 @@ int main()
 		const auto gpu = materials::buildGpuTable();
 		if (gpu.entries[static_cast<size_t>(OAK_LEAVES)].x <= 0.f)
 			ok = fail("GPU material table must carry leaf wind in .x");
+	}
+
+	// Post 1×1 default selection policy (shipped postCompositeSources)
+	{
+		const auto allOff = postCompositeSources(false, false, false);
+		if (!allOff.bloomUseDefault || !allOff.ssaoUseDefault || !allOff.godRaysUseDefault)
+			ok = fail("all effects off must select all defaults");
+		const auto allOn = postCompositeSources(true, true, true);
+		if (allOn.bloomUseDefault || allOn.ssaoUseDefault || allOn.godRaysUseDefault)
+			ok = fail("all effects on must sample real targets");
+		const auto nightRays = postCompositeSources(true, true, false);
+		if (!nightRays.godRaysUseDefault || nightRays.bloomUseDefault)
+			ok = fail("god rays not produced → default black; bloom still real when enabled");
+		PostProcessSettings pp{};
+		pp.bloomEnabled = false;
+		pp.ssaoEnabled = true;
+		const auto fromSettings = postCompositeSources(pp, true);
+		if (!fromSettings.bloomUseDefault || fromSettings.ssaoUseDefault || fromSettings.godRaysUseDefault)
+			ok = fail("postCompositeSources(settings) must map flags correctly");
+	}
+
+	// Generated FrameUBO GLSL must list C++ field names (build artifact or source mirror)
+	{
+		namespace fs = std::filesystem;
+		const char *candidates[] = {
+			"ressources/shaders/vulkan/frame_ubo.inc.glsl",
+			"../ressources/shaders/vulkan/frame_ubo.inc.glsl",
+			"../../ressources/shaders/vulkan/frame_ubo.inc.glsl",
+			"generated/shaders/frame_ubo.inc.glsl",
+			"../generated/shaders/frame_ubo.inc.glsl",
+		};
+		std::string glsl;
+		for (const char *c : candidates)
+		{
+			std::ifstream in(c);
+			if (in)
+			{
+				glsl.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+				break;
+			}
+		}
+		if (glsl.empty())
+			ok = fail("generated frame_ubo.inc.glsl not found (run cmake build first)");
+		else
+		{
+			if (glsl.find("AUTO-GENERATED") == std::string::npos)
+				ok = fail("frame_ubo.inc.glsl must be marked AUTO-GENERATED");
+			// Spot-check fields from FrameUBO.hpp
+			for (const char *field : {"mat4 view", "mat4 projection", "vec4 lightingParams", "vec4 waterParams",
+									  "vec4 cascadeSplits", "vec4 moonAmbient"})
+			{
+				if (glsl.find(field) == std::string::npos)
+					ok = fail(std::string("generated FrameUBO GLSL missing field: ") + field);
+			}
+			if (glsl.find("postParams") != std::string::npos)
+				ok = fail("generated FrameUBO must not contain dead postParams");
+		}
 	}
 
 	if (!ok)

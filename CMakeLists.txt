@@ -21,12 +21,32 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(Dependencies)
 
 # ---------------------------------------------------------------------------
-# SPIR-V compile
+# SPIR-V compile (+ auto-generated FrameUBO GLSL from C++ contract)
 # ---------------------------------------------------------------------------
 set(FT_VOX_SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/ressources/shaders/vulkan)
 set(FT_VOX_SPV_OUT_DIR ${CMAKE_BINARY_DIR}/ressources/shaders/spv)
+set(FT_VOX_GENERATED_SHADER_DIR ${CMAKE_BINARY_DIR}/generated/shaders)
 file(MAKE_DIRECTORY ${FT_VOX_SPV_OUT_DIR})
+file(MAKE_DIRECTORY ${FT_VOX_GENERATED_SHADER_DIR})
 set(FT_VOX_SPV_FILES "")
+
+set(FT_VOX_FRAME_UBO_HPP ${CMAKE_SOURCE_DIR}/src/Renderer/FrameUBO.hpp)
+set(FT_VOX_FRAME_UBO_GLSL ${FT_VOX_GENERATED_SHADER_DIR}/frame_ubo.inc.glsl)
+# Also mirror into source tree for tooling/IDEs that don't use the build include path
+set(FT_VOX_FRAME_UBO_GLSL_SRC ${FT_VOX_SHADER_SRC_DIR}/frame_ubo.inc.glsl)
+
+add_custom_command(
+    OUTPUT ${FT_VOX_FRAME_UBO_GLSL} ${FT_VOX_FRAME_UBO_GLSL_SRC}
+    COMMAND ${CMAKE_COMMAND}
+        -DFT_VOX_FRAME_UBO_HPP=${FT_VOX_FRAME_UBO_HPP}
+        -DFT_VOX_FRAME_UBO_GLSL_OUT=${FT_VOX_FRAME_UBO_GLSL}
+        -P ${CMAKE_SOURCE_DIR}/cmake/GenerateFrameUboGlsl.cmake
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FT_VOX_FRAME_UBO_GLSL} ${FT_VOX_FRAME_UBO_GLSL_SRC}
+    DEPENDS ${FT_VOX_FRAME_UBO_HPP} ${CMAKE_SOURCE_DIR}/cmake/GenerateFrameUboGlsl.cmake
+    COMMENT "Generate frame_ubo.inc.glsl from FrameUBO.hpp"
+    VERBATIM
+)
+add_custom_target(ft_vox_frame_ubo_glsl DEPENDS ${FT_VOX_FRAME_UBO_GLSL})
 
 function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
     set(GLSL_PATH ${FT_VOX_SHADER_SRC_DIR}/${GLSL_NAME})
@@ -34,16 +54,22 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
     if(GLSLC)
         add_custom_command(
             OUTPUT ${SPV_PATH}
-            COMMAND ${GLSLC} -fshader-stage=${STAGE} ${GLSL_PATH} -o ${SPV_PATH}
-            DEPENDS ${GLSL_PATH}
+            COMMAND ${GLSLC} -fshader-stage=${STAGE}
+                -I${FT_VOX_GENERATED_SHADER_DIR}
+                -I${FT_VOX_SHADER_SRC_DIR}
+                ${GLSL_PATH} -o ${SPV_PATH}
+            DEPENDS ${GLSL_PATH} ${FT_VOX_FRAME_UBO_GLSL}
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )
     else()
         add_custom_command(
             OUTPUT ${SPV_PATH}
-            COMMAND ${GLSLANG_VALIDATOR} -V -S ${STAGE} ${GLSL_PATH} -o ${SPV_PATH}
-            DEPENDS ${GLSL_PATH}
+            COMMAND ${GLSLANG_VALIDATOR} -V -S ${STAGE}
+                -I${FT_VOX_GENERATED_SHADER_DIR}
+                -I${FT_VOX_SHADER_SRC_DIR}
+                ${GLSL_PATH} -o ${SPV_PATH}
+            DEPENDS ${GLSL_PATH} ${FT_VOX_FRAME_UBO_GLSL}
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )
@@ -70,7 +96,8 @@ ft_vox_compile_shader(frag ssao.frag.glsl ssao.frag.spv)
 ft_vox_compile_shader(frag composite.frag.glsl composite.frag.spv)
 ft_vox_compile_shader(vert overlay.vert.glsl overlay.vert.spv)
 ft_vox_compile_shader(frag overlay.frag.glsl overlay.frag.spv)
-add_custom_target(ft_vox_shaders ALL DEPENDS ${FT_VOX_SPV_FILES})
+add_custom_target(ft_vox_shaders ALL DEPENDS ${FT_VOX_SPV_FILES} ft_vox_frame_ubo_glsl)
+add_dependencies(ft_vox_shaders ft_vox_frame_ubo_glsl)
 
 # ---------------------------------------------------------------------------
 # Build-time git revision (regenerated every build)
@@ -126,6 +153,7 @@ set(FT_VOX_RENDERER_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Renderer/ShadowPass.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/OpaquePass.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/WaterPass.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/SkyPass.cpp
 )
 
 set(FT_VOX_IMGUI_SOURCES

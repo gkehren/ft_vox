@@ -1,4 +1,5 @@
 #include "Renderer/PostStack.hpp"
+#include "Renderer/PostDefaults.hpp"
 #include "Renderer/Lighting.hpp"
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/VkShader.hpp"
@@ -73,8 +74,7 @@ void PostStack::shutdown()
 		vkDestroySampler(m_context->getDevice(), m_nearestSampler, nullptr);
 	if (m_quadVBO.buffer)
 		destroyBuffer(m_context->getAllocator(), m_quadVBO);
-	if (m_skyVBO.buffer)
-		destroyBuffer(m_context->getAllocator(), m_skyVBO);
+	destroyDefaultImages();
 	m_postPool = VK_NULL_HANDLE;
 	m_postSetLayout = m_godSetLayout = m_compositeSetLayout = VK_NULL_HANDLE;
 	m_linearSampler = m_nearestSampler = VK_NULL_HANDLE;
@@ -108,21 +108,6 @@ void PostStack::createFullscreenQuad(ImmediateCommands &imm)
 	uploadBuffer(m_context->getAllocator(), imm, m_quadVBO, verts, sizeof(verts));
 }
 
-void PostStack::createSkyGeometry(ImmediateCommands &imm)
-{
-	float v[] = {
-		-1, -1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, -1, 1, -1, -1, -1, -1,
-		-1, -1, 1, 1, -1, 1, 1, 1, 1, 1, 1, 1, -1, 1, 1, -1, -1, 1,
-		-1, 1, -1, 1, 1, -1, 1, 1, 1, 1, 1, 1, -1, 1, 1, -1, 1, -1,
-		-1, -1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, -1, -1, 1, -1, -1, -1,
-		1, -1, -1, 1, 1, -1, 1, 1, 1, 1, 1, 1, 1, -1, 1, 1, -1, -1,
-		-1, -1, -1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, -1, 1, -1, -1, -1,
-	};
-	m_skyVBO = createBuffer(m_context->getAllocator(), sizeof(v),
-							VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-							VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-	uploadBuffer(m_context->getAllocator(), imm, m_skyVBO, v, sizeof(v));
-}
 
 void PostStack::createTargets(uint32_t w, uint32_t h)
 {
@@ -181,26 +166,10 @@ void PostStack::createTargets(uint32_t w, uint32_t h)
 		vkUpdateDescriptorSets(m_context->getDevice(), 2, ws.data(), 0, nullptr);
 	}
 
-	{
-		VkDescriptorImageInfo imgs[4] = {
-			{m_linearSampler, m_hdr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-			{m_linearSampler, m_bloom[0].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-			{m_linearSampler, m_godRays.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-			{m_linearSampler, m_ssao.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-		};
-		std::array<VkWriteDescriptorSet, 4> ws{};
-		for (int i = 0; i < 4; ++i)
-		{
-			ws[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			ws[i].dstSet = m_setComposite;
-			ws[i].dstBinding = static_cast<uint32_t>(i);
-			ws[i].descriptorCount = 1;
-			ws[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			ws[i].pImageInfo = &imgs[i];
-		}
-		vkUpdateDescriptorSets(m_context->getDevice(), 4, ws.data(), 0, nullptr);
-	}
+	// Composite starts on defaults until first recordPost with real effect targets.
+	writeCompositeDescriptors(postCompositeSources(false, false, false));
 }
+
 
 void PostStack::destroyTargets()
 {
@@ -275,10 +244,6 @@ void PostStack::createPipelines(VkFormat swapchainFormat)
 
 		pl.pSetLayouts = &m_compositeSetLayout;
 		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_compositeLayout);
-
-		pl.pSetLayouts = &m_frameSetLayout;
-		pl.pushConstantRangeCount = 0;
-		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_skyLayout);
 	}
 
 	auto load = [&](const char *n) { return loadShaderModule(m_context->getDevice(), spvPath(n)); };
@@ -288,8 +253,6 @@ void PostStack::createPipelines(VkFormat swapchainFormat)
 	VkShaderModule godF = load("godRays.frag.spv");
 	VkShaderModule ssaoF = load("ssao.frag.spv");
 	VkShaderModule compF = load("composite.frag.spv");
-	VkShaderModule skyV = load("skybox.vert.spv");
-	VkShaderModule skyF = load("skybox.frag.spv");
 
 	VkVertexInputBindingDescription bind{0, 4 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
 	std::array<VkVertexInputAttributeDescription, 2> attrs = {{
@@ -357,54 +320,8 @@ void PostStack::createPipelines(VkFormat swapchainFormat)
 	makeFS(ssaoF, m_ssaoLayout, ssaoFmt, m_ssaoPipe);
 	makeFS(compF, m_compositeLayout, swapchainFormat, m_compositePipe);
 
-	{
-		VkVertexInputBindingDescription sb{0, sizeof(float) * 3, VK_VERTEX_INPUT_RATE_VERTEX};
-		VkVertexInputAttributeDescription sa{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
-		VkPipelineVertexInputStateCreateInfo svi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-		svi.vertexBindingDescriptionCount = 1;
-		svi.pVertexBindingDescriptions = &sb;
-		svi.vertexAttributeDescriptionCount = 1;
-		svi.pVertexAttributeDescriptions = &sa;
 
-		VkPipelineDepthStencilStateCreateInfo sds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-		sds.depthTestEnable = VK_TRUE;
-		sds.depthWriteEnable = VK_FALSE;
-		sds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-
-		VkPipelineColorBlendAttachmentState sba[2]{};
-		sba[0].colorWriteMask = sba[1].colorWriteMask = 0xF;
-		VkPipelineColorBlendStateCreateInfo scb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-		scb.attachmentCount = 2;
-		scb.pAttachments = sba;
-
-		VkPipelineShaderStageCreateInfo stages[2] = {
-			{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, skyV, "main", nullptr},
-			{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, skyF, "main", nullptr},
-		};
-		std::array<VkFormat, 2> cols = {m_hdrFormat, m_hdrFormat};
-		VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-		ri.colorAttachmentCount = 2;
-		ri.pColorAttachmentFormats = cols.data();
-		ri.depthAttachmentFormat = m_depthFormat;
-
-		VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-		gi.pNext = &ri;
-		gi.stageCount = 2;
-		gi.pStages = stages;
-		gi.pVertexInputState = &svi;
-		gi.pInputAssemblyState = &ia;
-		gi.pViewportState = &vp;
-		gi.pRasterizationState = &rs;
-		gi.pMultisampleState = &ms;
-		gi.pDepthStencilState = &sds;
-		gi.pColorBlendState = &scb;
-		gi.pDynamicState = &dyn;
-		gi.layout = m_skyLayout;
-		if (vkCreateGraphicsPipelines(m_context->getDevice(), VK_NULL_HANDLE, 1, &gi, nullptr, &m_skyPipeline) != VK_SUCCESS)
-			throw std::runtime_error("sky pipeline failed");
-	}
-
-	for (auto m : {fsVert, extractF, blurF, godF, ssaoF, compF, skyV, skyF})
+	for (auto m : {fsVert, extractF, blurF, godF, ssaoF, compF})
 		destroyShaderModule(m_context->getDevice(), m);
 }
 
@@ -422,7 +339,6 @@ void PostStack::destroyPipelines()
 	d(m_godRaysPipe);
 	d(m_ssaoPipe);
 	d(m_compositePipe);
-	d(m_skyPipeline);
 	auto dl = [&](VkPipelineLayout &l) {
 		if (l)
 			vkDestroyPipelineLayout(m_context->getDevice(), l, nullptr);
@@ -432,7 +348,6 @@ void PostStack::destroyPipelines()
 	dl(m_godLayout);
 	dl(m_ssaoLayout);
 	dl(m_compositeLayout);
-	dl(m_skyLayout);
 }
 
 void PostStack::init(VkContext &context, ImmediateCommands &imm, VkDescriptorSetLayout frameSetLayout,
@@ -442,7 +357,7 @@ void PostStack::init(VkContext &context, ImmediateCommands &imm, VkDescriptorSet
 	m_frameSetLayout = frameSetLayout;
 	createSamplers();
 	createFullscreenQuad(imm);
-	createSkyGeometry(imm);
+	createDefaultImages(imm);
 	createPipelines(swapchainFormat);
 	createTargets(width, height);
 }
@@ -463,61 +378,80 @@ void PostStack::resize(uint32_t width, uint32_t height, VkFormat swapchainFormat
 
 
 
-void PostStack::recordSky(VkCommandBuffer cmd, VkDescriptorSet frameSet0, VkExtent2D extent)
+
+
+void PostStack::destroyDefaultImages()
 {
-	const auto beginRendering = beginR();
-	const auto endRendering = endR();
-
-	vkbar::cmdTransitionColor(cmd, m_godSource.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-					0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-					VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-
-	// Depth may still be attachment from water pass
-	// Ensure HDR is color attachment
-	// (caller left HDR as color attachment after water)
-
-	VkRenderingAttachmentInfo cols[2]{};
-	cols[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-	cols[0].imageView = m_hdr.view;
-	cols[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	cols[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-	cols[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-	cols[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-	cols[1].imageView = m_godSource.view;
-	cols[1].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	cols[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	cols[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	cols[1].clearValue.color = {{0, 0, 0, 0}};
-
-	VkRenderingAttachmentInfo depth{};
-	depth.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-	depth.imageView = m_sceneDepth.view;
-	depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-	depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-	depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-	VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-	ri.renderArea = {{0, 0}, extent};
-	ri.layerCount = 1;
-	ri.colorAttachmentCount = 2;
-	ri.pColorAttachments = cols;
-	ri.pDepthAttachment = &depth;
-	beginRendering(cmd, &ri);
-
-	VkViewport viewport{0, (float)extent.height, (float)extent.width, -(float)extent.height, 0, 1};
-	VkRect2D scissor{{0, 0}, extent};
-	vkCmdSetViewport(cmd, 0, 1, &viewport);
-	vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipeline);
-	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyLayout, 0, 1, &frameSet0, 0, nullptr);
-	VkDeviceSize off = 0;
-	vkCmdBindVertexBuffers(cmd, 0, 1, &m_skyVBO.buffer, &off);
-	vkCmdDraw(cmd, 36, 1, 0, 0);
-
-	endRendering(cmd);
+	if (!m_context)
+		return;
+	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_defaultBlack);
+	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_defaultWhiteR8);
 }
+
+void PostStack::createDefaultImages(ImmediateCommands &imm)
+{
+	destroyDefaultImages();
+	// 1×1 black HDR
+	m_defaultBlack = createImage2D(m_context->getAllocator(), m_context->getDevice(), 1, 1, m_hdrFormat,
+								   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+								   VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+	// 1×1 white R8 (SSAO = 1)
+	m_defaultWhiteR8 = createImage2D(m_context->getAllocator(), m_context->getDevice(), 1, 1, VK_FORMAT_R8_UNORM,
+									 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+									 VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+
+	// Clear via transfer (portable for R16F HDR and R8).
+	imm.submitAndWait([&](VkCommandBuffer cmd) {
+		vkbar::cmdTransitionColor(cmd, m_defaultBlack.image, VK_IMAGE_LAYOUT_UNDEFINED,
+								  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+								  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+		vkbar::cmdTransitionColor(cmd, m_defaultWhiteR8.image, VK_IMAGE_LAYOUT_UNDEFINED,
+								  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+								  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+		VkClearColorValue black{{0.f, 0.f, 0.f, 0.f}};
+		VkClearColorValue white{{1.f, 1.f, 1.f, 1.f}};
+		VkImageSubresourceRange r{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		vkCmdClearColorImage(cmd, m_defaultBlack.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &r);
+		vkCmdClearColorImage(cmd, m_defaultWhiteR8.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &white, 1, &r);
+		vkbar::cmdTransitionColor(cmd, m_defaultBlack.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+								  VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+								  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+		vkbar::cmdTransitionColor(cmd, m_defaultWhiteR8.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+								  VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+								  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+	});
+	m_lastCompositeSrc = {true, true, true}; // force rewrite
+}
+
+void PostStack::writeCompositeDescriptors(const PostCompositeSources &src)
+{
+	if (!m_context || m_setComposite == VK_NULL_HANDLE)
+		return;
+	VkImageView bloomView = src.bloomUseDefault ? m_defaultBlack.view : m_bloom[0].view;
+	VkImageView godView = src.godRaysUseDefault ? m_defaultBlack.view : m_godRays.view;
+	VkImageView ssaoView = src.ssaoUseDefault ? m_defaultWhiteR8.view : m_ssao.view;
+	VkDescriptorImageInfo imgs[4] = {
+		{m_linearSampler, m_hdr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+		{m_linearSampler, bloomView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+		{m_linearSampler, godView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+		{m_linearSampler, ssaoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+	};
+	std::array<VkWriteDescriptorSet, 4> ws{};
+	for (int i = 0; i < 4; ++i)
+	{
+		ws[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		ws[i].dstSet = m_setComposite;
+		ws[i].dstBinding = static_cast<uint32_t>(i);
+		ws[i].descriptorCount = 1;
+		ws[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		ws[i].pImageInfo = &imgs[i];
+	}
+	vkUpdateDescriptorSets(m_context->getDevice(), 4, ws.data(), 0, nullptr);
+	m_lastCompositeSrc = src;
+}
+
 
 void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageView swapchainView,
 						   VkExtent2D extent, VkDescriptorSet /*frameSet0*/,
@@ -637,6 +571,9 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	}
+
+	// Composite — bind 1×1 defaults for skipped effects (no clear of half-res targets)
+	writeCompositeDescriptors(postCompositeSources(settings, godRaysProduced));
 
 	// Composite
 	vkbar::cmdTransitionColor(cmd, swapchainImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
