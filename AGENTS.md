@@ -4,6 +4,11 @@
 
 **Graphics:** **Vulkan 1.2+** (MoltenVK on macOS). OpenGL/GLAD path removed (PR7).
 
+**Architecture docs (authoritative):**
+
+- [`docs/vulkan-graphics.md`](docs/vulkan-graphics.md) — Vulkan device path, pass graph, shaders, post
+- [`docs/engine-architecture.md`](docs/engine-architecture.md) — Engine loop, chunks, streaming, terrain gen
+
 ## Architecture Overview
 
 ### Core Engine
@@ -14,11 +19,13 @@
   - `VkAllocator` / `VkBuffer` / `VkImage` / `VkUpload` / `VkCommands`: GPU resources + staging
   - `VkShader`: SPIR-V file load → `VkShaderModule`
   - `VkSwapchain`: surface formats, present modes, resize
-  - `VkFrameContext`: frames-in-flight, command buffers, WSI sync
+  - `VkFrameContext`: frames-in-flight, command buffers, WSI sync (sole acquire/submit/present owner)
+  - `ImageBarrier` / `GraphicsPipelineBuilder`: shared helpers
 - **Chunk Management (`src/Chunk/`)**: 16×256×16 voxels, greedy meshing, VMA GPU upload, terrain gen
   - **`ChunkManager`**: distance streaming (load → async gen → async mesh → main-thread upload), unload + pool recycle
   - **`ChunkPool`** + **`ThreadPool`**: preallocated chunks and work-stealing workers
-- **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator (shadow/opaque/water + sky/post), `PostStack`, `OverlayRenderer`, `TextureManager`
+  - **`TerrainGenerator`**: FastNoise2 biomes / height / caves
+- **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator — **ShadowPass → OpaquePass → WaterPass → SkyPass → PostStack** (+ `OverlayRenderer`, `TextureManager`, `FrameUBO`, `MaterialTable`, `Lighting`, `ShadowCascades`)
 
 ### Networking (`src/Network/`)
 - **Client/Server**: Boost.Asio UDP for player position and world state (not yet re-wired into Vulkan Engine UI).
