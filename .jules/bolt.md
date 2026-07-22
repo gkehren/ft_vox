@@ -37,3 +37,6 @@
 ## 2024-05-24 - Network Packet Hot Loop Optimization
 **Learning:** Using `std::unordered_set` dynamically inside frequent network packet handlers (like `Client::handleMessage`) causes node-based heap allocations for every packet processed, leading to unnecessary garbage and potential stutters.
 **Action:** For bounded and small collections derived from network packets, use `std::vector` with `reserve()`, sort the vector, and use `std::binary_search()`. This leverages contiguous memory and avoids node allocations entirely.
+## 2026-06-30 - SDL Keyboard Polling Optimization
+**Learning:** Manually tracking keyboard states using `std::unordered_map<SDL_Keycode, bool>` via `SDL_EVENT_KEY_DOWN`/`UP` events introduces unnecessary node allocations, hashing, and cache misses during the hot event loop.
+**Action:** When continuous keyboard state polling is needed (e.g., for player movement), use the native SDL API `SDL_GetKeyboardState(NULL)` which returns a flat contiguous array, granting $O(1)$ instantaneous access with zero allocation overhead.
