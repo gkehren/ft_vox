@@ -534,10 +534,20 @@ void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSetti
 void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
 										  const RenderSettings &settings)
 {
+	// Scan radius covers the view-direction front extension (bias stretches the
+	// loaded region ahead up to ~1/sqrt(1-bias) × maxRenderDistance).
+	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
+	const float reachBlocks =
+		static_cast<float>(settings.maxRenderDistance) / std::sqrt(1.0f - frontBias);
 	const int radius =
-		static_cast<int>(std::ceil(static_cast<float>(settings.maxRenderDistance) / static_cast<float>(CHUNK_SIZE)));
+		static_cast<int>(std::ceil(reachBlocks / static_cast<float>(CHUNK_SIZE)));
 	const float maxDistSq = static_cast<float>(settings.maxRenderDistance) * static_cast<float>(settings.maxRenderDistance);
 	const glm::vec3 camPos = camera.getPosition();
+	const glm::vec3 camFront = camera.getFront();
+	glm::vec2 camForwardXZ(camFront.x, camFront.z);
+	if (glm::dot(camForwardXZ, camForwardXZ) < 1e-6f)
+		camForwardXZ = glm::vec2(0.f, 1.f);
+	camForwardXZ = glm::normalize(camForwardXZ);
 
 	struct LoadInfo
 	{
@@ -560,9 +570,7 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 				const glm::vec3 center(
 					chunkPos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
 					chunkPos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
-				const float dx = camPos.x - center.x;
-				const float dz = camPos.z - center.z;
-				const float distSq = dx * dx + dz * dz;
+				const float distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
 				if (distSq <= maxDistSq)
 					candidates.push_back({chunkPos, distSq});
 			}
@@ -572,7 +580,7 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
 
 	// Drop loads that are already present or now out of range after camera motion.
-	pruneLoadCandidatesByDistance(m_loadQueue, camPos, maxDistSq);
+	pruneLoadCandidatesByDistance(m_loadQueue, camPos, maxDistSq, camForwardXZ, frontBias);
 	m_loadQueue.erase(std::remove_if(m_loadQueue.begin(), m_loadQueue.end(),
 									 [&](const LoadCandidate &c) {
 										 if (m_chunks.find(c.pos) != m_chunks.end())

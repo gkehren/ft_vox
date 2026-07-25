@@ -118,13 +118,13 @@ Push constants carry cascade index / shadow time for the shadow path where neede
 - Dynamic rendering into **HDR** (`R16G16B16A16_SFLOAT`) and **D32** depth owned by `PostStack`.
 - Draws opaque chunk meshes (`Chunk::draw`).
 - Then calls **`OverlayRenderer::record`** on the same command buffer before ending the rendering scope (block highlight, chunk borders, demo players).
-- Shaders: `terrain.vert` / `terrain.frag` — diffuse, face bias, sky/block light, CSM + PCF, cave fill, height/distance fog, material wind/emissive/ice.
+- Shaders: `terrain.vert` / `terrain.frag` — diffuse, face bias, sky/block light, CSM + PCF (sun **and** moon), cave fill, scotopic night grade, height/distance fog, material wind/emissive/ice.
 
 ### WaterPass (`Renderer/WaterPass.*`)
 
 - Copies previous opaque HDR/depth into **history** images for refraction.
 - Transparent water mesh (`Chunk::drawWater`).
-- Shaders: `water.vert` / `water.frag` — waves, Fresnel, specular, foam, history refraction.
+- Shaders: `water.vert` / `water.frag` — vertex wave displacement + fragment-level procedural wave normals (3-octave value noise, top-face masked), Fresnel F0=0.02, **analytic sky reflection** (gradient identical to `skybox.frag` per phase: day blue / sunset orange / night near-black), **Beer-Lambert depth absorption** (linearized history depth vs view depth → teal body, red dies first), sun/moon glitter (pow 700 + sheen) on wave normals, shore foam from real water column + whitecaps, history refraction, near-opaque alpha (refraction composited in-color).
 
 ### SkyPass (`Renderer/SkyPass.*`)
 
@@ -252,10 +252,11 @@ What the pipeline implements **now** (not a roadmap):
 |---------|----------------------|
 | Greedy-meshed terrain | CPU mesh; opaque + water streams |
 | Texture array + biome tint + vertex AO | Mesh packing in `Chunk` / `Vertex` |
-| Directional CSM + PCF | 3 cascades, cool outdoor shadow tint when sun reaches surface |
+| Directional CSM + PCF | 3 cascades, cool outdoor shadow tint; **moonlight shadows at night** (raw sky-light gate) |
+| Cinematic night model | Directional blue moonlight + dark ambient + scotopic desaturation (`terrain.frag`), near-black sky |
 | Sky / block light on vertices | Column sky cast + flood; block light BFS; cave fill floor in FS |
-| Water waves, refraction, specular, foam | WaterPass + history |
-| Procedural sky, sun/moon, stars, clouds | SkyPass |
+| Water: wave normals, sky reflection, depth absorption, glitter, foam | WaterPass + history; analytic per-phase sky reflection; Beer-Lambert teal body |
+| Procedural sky, sun/moon, stars, clouds | SkyPass — cratered HDR moon, two-layer tinted stars, moon silver lining on night clouds |
 | Height + distance fog, aerial-style haze | `terrain.frag` + `lighting` helpers |
 | SSAO, bloom, depth-aware god rays | PostStack half-res where applicable |
 | ACES/Reinhard, exposure, FXAA, grain, vignette | `composite.frag` |

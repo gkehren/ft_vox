@@ -514,6 +514,10 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 	if (rs.minRenderDistance > rs.maxRenderDistance)
 		rs.minRenderDistance = rs.maxRenderDistance;
 	ImGui::SliderInt("Full-mesh near range", &rs.minRenderDistance, 32, rs.maxRenderDistance);
+	ImGui::SliderFloat("Front load bias", &rs.streamFrontBias, 0.f, 0.6f, "%.2f");
+	ImGui::TextDisabled("Ahead reach ~ ×%.2f, behind ~ ×%.2f",
+						1.0f / std::sqrt(1.0f - glm::clamp(rs.streamFrontBias, 0.f, 0.9f)),
+						1.0f / std::sqrt(1.0f + glm::clamp(rs.streamFrontBias, 0.f, 0.9f)));
 	ImGui::TextDisabled("Unload at ~1.5× view distance");
 
 	const size_t poolNeed = estimateChunkPoolCapacity(rs.maxRenderDistance);
@@ -522,10 +526,10 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 	ImGui::TextDisabled("Pool need for this view: ~%zu chunks", poolNeed);
 
 	ImGui::SeparatorText("Pipeline budgets (ops / sec)");
-	ImGui::SliderInt("Load/s", &rs.loadPerSec, 10, 500);
-	ImGui::SliderInt("Gen/s", &rs.genPerSec, 5, 200);
-	ImGui::SliderInt("Mesh/s", &rs.meshPerSec, 5, 200);
-	ImGui::SliderInt("Upload/s", &rs.uploadPerSec, 5, 200);
+	ImGui::SliderInt("Load/s", &rs.loadPerSec, 10, 600);
+	ImGui::SliderInt("Gen/s", &rs.genPerSec, 5, 400);
+	ImGui::SliderInt("Mesh/s", &rs.meshPerSec, 5, 300);
+	ImGui::SliderInt("Upload/s", &rs.uploadPerSec, 5, 400);
 	ImGui::SliderFloat("Stream ms/frame", &rs.maxStreamMs, 0.f, 16.f, "%.1f");
 	ImGui::SliderFloat("Shadow dist", &rs.shadowDistance, 64.f, 320.f, "%.0f");
 

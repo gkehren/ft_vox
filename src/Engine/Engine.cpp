@@ -46,17 +46,19 @@ void updateAtmosphereFromDayTime(ShaderParameters &sp)
 
 	if (sp.automaticAtmosphere)
 	{
-		// Day fog: deeper blue (less milky white) → warm sunset → night
-		const glm::vec3 dayFog(0.42f, 0.66f, 0.95f);
-		const glm::vec3 sunsetFog(0.95f, 0.48f, 0.28f);
-		const glm::vec3 nightFog(0.04f, 0.06f, 0.14f);
+		// Day fog: deep blue → warm sunset → near-black cinematic night
+		const glm::vec3 dayFog(0.38f, 0.60f, 0.90f);
+		const glm::vec3 sunsetFog(0.85f, 0.40f, 0.22f);
+		const glm::vec3 nightFog(0.005f, 0.008f, 0.020f);
 		sp.fogColor = dayFog * sp.dayFactor + sunsetFog * sp.sunsetFactor + nightFog * sp.nightFactor;
-		// Shape-readable light without wash-out or neon
-		sp.ambientStrength = 0.18f + 0.08f * sp.dayFactor + 0.04f * sp.sunsetFactor;
-		sp.diffuseIntensity = 0.64f + 0.30f * sp.dayFactor + 0.10f * sp.sunsetFactor;
-		sp.fogDensity = 0.045f + 0.06f * sp.nightFactor;
-		sp.fogStart = 300.0f;
-		sp.fogEnd = 880.0f;
+		// Lowered levels: ambient+diffuse+topLight used to sum >1.3x albedo and pushed
+		// everything into the ACES shoulder (chalky desaturated look). Target ~0.75x.
+		sp.ambientStrength = 0.13f + 0.05f * sp.dayFactor + 0.03f * sp.sunsetFactor;
+		sp.diffuseIntensity = 0.55f + 0.25f * sp.dayFactor + 0.10f * sp.sunsetFactor;
+		// Slightly denser, closer fog at night for mood (driven by dark nightFog)
+		sp.fogDensity = 0.045f + 0.03f * sp.nightFactor;
+		sp.fogStart = 300.0f - 80.0f * sp.nightFactor;
+		sp.fogEnd = 880.0f - 180.0f * sp.nightFactor;
 	}
 
 	// Approximate sun world position for debug display.
@@ -132,15 +134,16 @@ Engine::Engine(std::string resourcePackRoot)
 	const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
 	threadPool = std::make_unique<ThreadPool>(hw);
 
-	renderSettings.minRenderDistance = 128;
-	renderSettings.maxRenderDistance = 256;
+	renderSettings.minRenderDistance = 160;
+	renderSettings.maxRenderDistance = 384;
+	renderSettings.streamFrontBias = 0.30f;
 	// Pool sized for unload disk (1.5× view) + headroom; grows later via ensureCapacity.
 	chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 
-	renderSettings.loadPerSec = 120;
-	renderSettings.genPerSec = 80;
-	renderSettings.meshPerSec = 60;
-	renderSettings.uploadPerSec = 100;
+	renderSettings.loadPerSec = 260;
+	renderSettings.genPerSec = 180;
+	renderSettings.meshPerSec = 140;
+	renderSettings.uploadPerSec = 220;
 	renderSettings.shadowDistance = 160.f;
 	renderSettings.raycastDistance = 8;
 
