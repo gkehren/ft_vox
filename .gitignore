@@ -46,3 +46,5 @@ lib
 out/
 CMakeSettings.json
 .cache/
+
+docs/default-resource-pack

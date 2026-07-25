@@ -87,7 +87,7 @@ Bootstrap: `generateInitialArea` fills a small radius around spawn synchronously
 | Struct / enum | Purpose |
 |---------------|---------|
 | `ShaderParameters` | Fog, sun/moon, ambient/diffuse, day cycle, water knobs, outdoor grade |
-| `RenderSettings` | Render distance (min/max blocks), stream rates (`load/gen/mesh/upload` per sec), shadow distance / cascade far, `maxStreamMs`, wireframe/borders/vsync |
+| `RenderSettings` | Render distance (min/max blocks), `streamFrontBias`, stream rates (`load/gen/mesh/upload` per sec), shadow distance / cascade far, `maxStreamMs`, wireframe/borders/vsync |
 | `PostProcessSettings` | Bloom, SSAO, god rays, exposure/tonemap, FXAA, grain, vignette, underwater, **quality preset** |
 | `GraphicsQualityPreset` | Low / Medium / High / Cinematic — `applyPreset` only remaps existing post knobs |
 | `RenderTiming` | Legacy flat timings filled from hierarchical profiler |
@@ -191,8 +191,9 @@ GPU mesh upload is **not** in `tickStreaming`. It runs later inside `WorldRender
 
 ### Distance model
 
-- **`minRenderDistance`** (blocks) — near band: full mesh  
-- **`maxRenderDistance`** (blocks) — stream/unload radius; far band may use **LOD mesh**  
+- **`minRenderDistance`** (blocks, default 160) — near band: full mesh  
+- **`maxRenderDistance`** (blocks, default 384) — stream/unload radius; far band may use **LOD mesh**  
+- **`streamFrontBias`** (default 0.30) — view-direction load bias: chunks ahead of the camera count as closer (load first, reach ~×1.19 ahead / ~×0.87 behind); stays inside the 1.5× unload radius (no thrash). See `biasedLoadDistSq` in `StreamHelpers.hpp`
 - Load queue is **distance-prioritized** (not pure FIFO); pruned each stream tick (`StreamHelpers.hpp` helpers: `LoadCandidate`, radius math, shell indexing)
 
 ### Draw lists

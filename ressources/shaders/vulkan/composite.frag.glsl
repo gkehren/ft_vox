@@ -152,11 +152,13 @@ void main()
         mapped += vec3(0.0, 0.04, 0.05) * c * s;
     }
 
-    // Film grain (after grade so it stays visible)
+    // Film grain (after grade so it stays visible), weighted by luminance:
+    // near-black areas (night sky) stay clean instead of turning into grey noise
     if (grainStrength > 0.0005)
     {
         float n = filmNoise(vUV, time);
-        mapped += (n - 0.5) * grainStrength;
+        float glum = dot(mapped, vec3(0.299, 0.587, 0.114));
+        mapped += (n - 0.5) * grainStrength * (0.20 + 0.80 * smoothstep(0.05, 0.35, glum));
     }
 
     outColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
