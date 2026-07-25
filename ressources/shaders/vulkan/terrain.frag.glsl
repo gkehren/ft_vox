@@ -151,7 +151,7 @@ void main()
     float fogBaseY = frame.lightingParams.z;
 
     // Must match lighting::localLightScale (raised cave floor + smooth light curve).
-    float skyL = vSkyLight * clamp(dayFactor + 0.15 * (1.0 - nightFactor), 0.0, 1.0);
+    float skyL = vSkyLight * clamp(dayFactor + 0.12 * (1.0 - nightFactor), 0.0, 1.0);
     float blkL = vBlockLight * blockLightScale;
     float combined = clamp(max(skyL, blkL), 0.0, 1.0);
     // Hermite curve: mid light levels more readable; floor stays dark-but-shaped
@@ -159,17 +159,19 @@ void main()
     const float kCaveFloor = 0.22;
     float localLight = mix(kCaveFloor, 1.0, lightCurve);
 
-    // Sun CSM only where sky light reaches (caves: no directional shadow crush)
+    // CSM wherever raw sky light reaches — active for the moon at night too
+    // (caves keep shadowTerm=1, full ambient path). Matches lighting::sunShadowWeight.
     float sunShadow = ShadowCalculation(vFragPos, norm, lightDir, vViewDepth);
-    float sunReach = smoothstep(0.05, 0.45, skyL);
+    float sunReach = smoothstep(0.05, 0.45, vSkyLight);
     float shadow = sunShadow * sunReach;
 
-    // Daylight warm, stronger sunset amber ambient
-    vec3 lightTint = mix(vec3(1.0, 0.98, 0.94), vec3(1.12, 0.78, 0.48), sunsetFactor * 0.72);
-    lightTint = mix(lightTint, vec3(0.75, 0.82, 1.05), nightFactor * 0.35);
+    // Golden day light → amber sunset → cool blue moonlight
+    vec3 lightTint = mix(vec3(1.06, 0.98, 0.88), vec3(1.12, 0.78, 0.48), sunsetFactor * 0.72);
+    lightTint = mix(lightTint, vec3(0.55, 0.68, 1.0), nightFactor);
 
+    // Ambient: warm sky fill by day, near-dark cool fill at night (cinematic night)
     vec3 moonFill = frame.moonAmbient.rgb * frame.moonAmbient.w * nightFactor;
-    vec3 ambient = (ambientStrength * max(dayFactor, 0.2) + length(moonFill) * 0.85) * color
+    vec3 ambient = (ambientStrength * (dayFactor + 0.6 * sunsetFactor) + 0.05 * nightFactor) * color
                  + moonFill * color;
     // Sunset-tinted ambient fill (warm bounce under golden hour)
     ambient *= mix(vec3(1.0), vec3(1.18, 0.88, 0.62), sunsetFactor * 0.50);
@@ -177,14 +179,15 @@ void main()
     float diff = max(dot(norm, lightDir), 0.0) * diffuseIntensity;
     diff = floor(diff * lightLevels + 0.001) / lightLevels;
     // Higher unshadowed floor underground (sunReach=0 → shadowTerm=1, full ambient path)
-    float shadowTerm = mix(0.28, 1.0, 1.0 - shadow);
+    float shadowTerm = mix(0.22, 1.0, 1.0 - shadow);
+    // Phase exposure: full sun by day, dimmed golden hour, soft directional moonlight
     float dayLightFactor = clamp(diffuseIntensity / 0.75, 0.0, 1.0)
-                         * clamp(dayFactor + sunsetFactor * 0.5, 0.05, 1.0);
+                         * clamp(dayFactor + sunsetFactor * 0.5 + nightFactor * 0.20, 0.05, 1.0);
 
     vec3 diffuse = diff * color * lightTint * dayLightFactor;
 
     float topLight = 0.0;
-    if (norm.y > 0.9) topLight = 0.28;
+    if (norm.y > 0.9) topLight = 0.16;
     else if (norm.y < -0.9) topLight = -0.08;
     else if (abs(norm.x) > 0.9) topLight = 0.06;
 
@@ -204,6 +207,8 @@ void main()
     vec3 caveFill = color * vec3(0.065, 0.072, 0.090) * caveAmt;
     // Slight face bias so walls/ceilings separate without looking lit
     caveFill *= mix(0.85, 1.15, clamp(0.5 + 0.5 * norm.y + topLight, 0.0, 1.0));
+    // Dimmer fill outdoors at night (keeps caves readable but nights dark)
+    caveFill *= mix(1.0, 0.55, nightFactor);
     result += caveFill;
 
     vec4 mat = materialFor(vTextureIndex);
@@ -225,6 +230,10 @@ void main()
     result = (result - vec3(0.5)) * contrastEff + vec3(0.5);
     result = max(result, vec3(0.0));
 
+    // Scotopic night vision: desaturate toward a cool blue-grey (cinematic night)
+    float nightLum = dot(result, vec3(0.299, 0.587, 0.114));
+    result = mix(result, vec3(nightLum) * vec3(0.62, 0.74, 1.05), nightFactor * 0.55);
+
     // Fog + aerial perspective (distance desat toward sky-tinted haze)
     float fogStart = frame.fogParams.x;
     float fogEnd = frame.fogParams.y;
@@ -235,12 +244,13 @@ void main()
     float avgY = 0.5 * (vFragPos.y + frame.viewPos.y);
     float heightTerm = exp(-heightFalloff * max(0.0, avgY - fogBaseY));
     float densityFog = 1.0 - exp(-max(0.0, dist - fogStart * 0.25) * fogDensity * 0.0009 * heightTerm);
-    float fogAmount = clamp(max(linearFog, densityFog), 0.0, 0.55);
+    // Cap must match lighting::kTerrainFogAmountCap
+    float fogAmount = clamp(max(linearFog, densityFog), 0.0, 0.45);
 
-    // Sky aerial color: cool blue day → warm sunset → deep night
-    vec3 dayAerial = vec3(0.48, 0.70, 0.98);
+    // Sky aerial color: cool blue day → warm sunset → near-black night
+    vec3 dayAerial = vec3(0.40, 0.60, 0.90);
     vec3 sunsetAerial = vec3(0.95, 0.55, 0.32);
-    vec3 nightAerial = vec3(0.06, 0.08, 0.16);
+    vec3 nightAerial = vec3(0.006, 0.010, 0.024);
     vec3 aerialSky = mix(dayAerial, sunsetAerial, sunsetFactor);
     aerialSky = mix(aerialSky, nightAerial, nightFactor);
     // Blend engine fogColor with aerial sky for horizon-matched haze
@@ -252,7 +262,7 @@ void main()
 
     // Aerial perspective: desaturate + lift toward sky with distance (not pure wash)
     float aerial = fogAmount;
-    float desat = mix(1.0, 0.62, aerial);
+    float desat = mix(1.0, 0.72, aerial);
     vec3 aerialLit = mix(vec3(lum), result, desat);
     // Retain a bit of surface color so midground stays readable
     vec3 fogMix = mix(fogCol, aerialLit * 0.40 + fogCol * 0.60, 0.22);

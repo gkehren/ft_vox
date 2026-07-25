@@ -30,8 +30,8 @@ inline float exponentialHeightFogFactor(float distance, float worldY, float came
 
 /// Density-scale used in terrain.frag for the exp height fog term (was 0.0018 = too milky).
 inline constexpr float kTerrainFogDensityScale = 0.0009f;
-/// Max fog mix toward fog color (was 0.82).
-inline constexpr float kTerrainFogAmountCap = 0.55f;
+/// Max fog mix toward fog color (was 0.82 → 0.55; lowered again for midground chroma).
+inline constexpr float kTerrainFogAmountCap = 0.45f;
 /// Mild SSAO intensity ceiling used by composite clamp (game default is lower still).
 inline constexpr float kSsaoIntensityMax = 0.85f;
 inline constexpr float kSsaoIntensityDefault = 0.40f;
@@ -140,6 +140,7 @@ inline float localLightScale(float skyLight01, float blockLight01, float blockLi
 }
 
 /// Weight for directional CSM: 0 deep caves, 1 open sky (matches terrain.frag sunReach).
+/// Input is RAW sky light (not day-scaled) so moonlight shadows work at night.
 inline float sunShadowWeight(float skyLight01)
 {
 	const float s = std::clamp(skyLight01, 0.0f, 1.0f);

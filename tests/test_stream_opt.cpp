@@ -45,6 +45,36 @@ static void testPruneFarLoads()
 	CHECK(c[0].pos.x == 0, "near load kept");
 }
 
+static void testFrontBiasedLoadDistance()
+{
+	const glm::vec3 cam(0.f, 0.f, 0.f);
+	const glm::vec2 fwd(1.f, 0.f); // looking +X
+	const float bias = 0.30f;
+
+	// Front chunk counts as closer, behind chunk as farther, side unchanged.
+	const float front = biasedLoadDistSq(cam, glm::vec3(100.f, 0.f, 0.f), fwd, bias);
+	const float behind = biasedLoadDistSq(cam, glm::vec3(-100.f, 0.f, 0.f), fwd, bias);
+	const float side = biasedLoadDistSq(cam, glm::vec3(0.f, 0.f, 100.f), fwd, bias);
+	CHECK(front < 100.f * 100.f, "front chunk biased closer");
+	CHECK(behind > 100.f * 100.f, "behind chunk biased farther");
+	CHECK(std::abs(side - 100.f * 100.f) < 1.f, "side chunk ~unbiased");
+
+	// Ahead reach extension: a chunk beyond maxRd in front can stay inside the
+	// biased budget while the same distance behind is pruned.
+	std::vector<LoadCandidate> c = {
+		{{6, 0, 0}, 0.f},	// center ~104 ahead  → 104² × 0.7 < 100²  (kept)
+		{{-6, 0, 0}, 0.f},	// center ~88 behind  →  88² × 1.3 > 100²  (pruned)
+	};
+	const float maxDistSq = 100.f * 100.f;
+	pruneLoadCandidatesByDistance(c, cam, maxDistSq, fwd, bias);
+	CHECK(c.size() == 1, "biased prune keeps only front chunk");
+	CHECK(!c.empty() && c[0].pos.x == 6, "front chunk survives biased prune");
+
+	// Zero bias reproduces the plain radial behavior (back-compat).
+	const float plain = biasedLoadDistSq(cam, glm::vec3(100.f, 0.f, 0.f), fwd, 0.f);
+	CHECK(std::abs(plain - 100.f * 100.f) < 1.f, "zero bias = plain distance");
+}
+
 static void testCaveYRangeBounds()
 {
 	int yMin = -1, ySize = -1;
@@ -272,6 +302,7 @@ int main()
 {
 	testLoadPriorityNearestFirst();
 	testPruneFarLoads();
+	testFrontBiasedLoadDistance();
 	testCaveYRangeBounds();
 	testChunkYFillBoundsCoversSeaLevel();
 	testRemainingBudget();

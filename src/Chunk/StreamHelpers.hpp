@@ -24,18 +24,37 @@ inline void sortLoadCandidatesNearestFirst(std::vector<LoadCandidate> &candidate
 			  [](const LoadCandidate &a, const LoadCandidate &b) { return a.distSq < b.distSq; });
 }
 
-/// Drop candidates beyond maxDistSq (recomputed against camPos).
+/// View-direction biased squared distance for load selection: chunks in front of
+/// the camera count as closer (load sooner and farther out), chunks behind count
+/// as farther. frontBias in [0,1): ahead reach ~ dist / sqrt(1-bias), behind
+/// ~ dist / sqrt(1+bias). camForwardXZ must be normalized (or zero = no bias).
+inline float biasedLoadDistSq(const glm::vec3 &camPos, const glm::vec3 &chunkCenter,
+							  const glm::vec2 &camForwardXZ, float frontBias)
+{
+	const float dx = chunkCenter.x - camPos.x;
+	const float dz = chunkCenter.z - camPos.z;
+	const float distSq = dx * dx + dz * dz;
+	const float bias = glm::clamp(frontBias, 0.f, 0.9f);
+	if (bias <= 0.f || distSq < 1e-6f)
+		return distSq;
+	const float invLen = 1.0f / std::sqrt(distSq);
+	const float facing = (dx * invLen) * camForwardXZ.x + (dz * invLen) * camForwardXZ.y;
+	return distSq * (1.0f - bias * glm::clamp(facing, -1.f, 1.f));
+}
+
+/// Drop candidates beyond maxDistSq (recomputed against camPos, with optional
+/// view-direction bias — see biasedLoadDistSq).
 inline void pruneLoadCandidatesByDistance(std::vector<LoadCandidate> &candidates,
-										  const glm::vec3 &camPos, float maxDistSq)
+										  const glm::vec3 &camPos, float maxDistSq,
+										  const glm::vec2 &camForwardXZ = glm::vec2(0.f),
+										  float frontBias = 0.f)
 {
 	candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
 									[&](const LoadCandidate &c) {
 										const glm::vec3 center(
 											c.pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
 											c.pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
-										const float dx = camPos.x - center.x;
-										const float dz = camPos.z - center.z;
-										return (dx * dx + dz * dz) > maxDistSq;
+										return biasedLoadDistSq(camPos, center, camForwardXZ, frontBias) > maxDistSq;
 									}),
 					 candidates.end());
 	// Refresh distSq after prune (camera may have moved).
@@ -44,9 +63,7 @@ inline void pruneLoadCandidatesByDistance(std::vector<LoadCandidate> &candidates
 		const glm::vec3 center(
 			c.pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
 			c.pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
-		const float dx = camPos.x - center.x;
-		const float dz = camPos.z - center.z;
-		c.distSq = dx * dx + dz * dz;
+		c.distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
 	}
 }
 

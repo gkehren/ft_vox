@@ -29,8 +29,9 @@ struct ShaderParameters
 	float ambientStrength = 0.22f;
 	float diffuseIntensity = 0.88f;
 	float lightLevels = 5.0f;
-	/// Cool moon fill at night (scales with nightFactor).
-	float moonAmbientStrength = 0.55f;
+	/// Cool moon fill at night (scales with nightFactor). Subtle: the directional
+	/// moonlight term in terrain.frag does the shaping, this is only a flat fill.
+	float moonAmbientStrength = 0.22f;
 	/// Scales mesh block-light contribution in terrain shader.
 	float blockLightScale = 1.0f;
 	/// Scales emissive block HDR contribution.
@@ -42,9 +43,9 @@ struct ShaderParameters
 	float dayCycleSpeed = 0.002f;
 
 	// visual — gentle punch for readable sand/grass/water chroma
-	float saturationLevel = 1.04f;
+	float saturationLevel = 1.08f;
 	float colorBoost = 1.03f;
-	float contrastLevel = 1.04f;
+	float contrastLevel = 1.06f;
 
 	// Water (Tier 1) — mild defaults (strong refraction caused mirrored/grid artifacts)
 	float waterWaveStrength = 0.08f;
@@ -69,23 +70,30 @@ struct RenderSettings
 	bool paused{false};
 	int visibleChunksCount{0};	// Output, updated by rendering logic
 	int visibleVoxelsCount{0};	// Output, updated by rendering logic
-	int minRenderDistance{128}; // Within this range: full mesh (blocks)
-	int maxRenderDistance{256}; // Streaming / unload radius (blocks)
+	int minRenderDistance{160}; // Within this range: full mesh (blocks)
+	int maxRenderDistance{384}; // Streaming / unload radius (blocks)
 	int raycastDistance{8};
 	bool vsyncEnabled{true};
 
+	// View-direction load bias in [0,1): chunks ahead of the camera count as
+	// closer — they load first and up to ~1/sqrt(1-bias) farther out (bias 0.3
+	// → ~x1.19 ahead, ~x0.87 behind). Keeps the loaded region inside the
+	// 1.5x unload radius (no thrash) while favoring what the player sees.
+	float streamFrontBias{0.30f};
+
 	// Per-second chunk pipeline throughput — frame-rate-independent budgets.
 	// Increase to load faster; decrease to reduce per-frame CPU/GPU spikes.
-	int loadPerSec{120};   // chunk allocations from queue / sec
-	int genPerSec{80};	   // terrain-gen job dispatches / sec
-	int meshPerSec{60};	   // mesh job dispatches / sec
-	int uploadPerSec{100}; // GPU mesh uploads / sec (async staging — no device idle)
+	// Scaled for the larger default view distance (chunk count ~ r^2).
+	int loadPerSec{260};   // chunk allocations from queue / sec
+	int genPerSec{180};	   // terrain-gen job dispatches / sec
+	int meshPerSec{140};   // mesh job dispatches / sec
+	int uploadPerSec{220}; // GPU mesh uploads / sec (async staging — no device idle)
 	// Shadow casters within this XZ radius (blocks). Caps shadow pass cost.
 	float shadowDistance{160.f};
 	/// Cascade far plane used for CSM split distances (view-space).
 	float shadowCascadeFar{280.f};
 	/// Max CPU ms per frame for load + gen-dispatch + mesh-dispatch (0 = unlimited).
-	float maxStreamMs{4.0f};
+	float maxStreamMs{5.0f};
 };
 
 /// Legacy flat timings filled from the hierarchical Profiler each frame.
@@ -244,12 +252,12 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		break;
 	case GraphicsQualityPreset::Cinematic:
 		bloomEnabled = true;
-		bloomThreshold = 1.20f;
+		bloomThreshold = 1.35f; // sun/emissive peaks only — no midtone wash
 		bloomIntensity = 0.20f;
 		bloomBlurIterations = 5;
 		ssaoEnabled = true;
 		ssaoRadius = 0.55f;
-		ssaoIntensity = 0.70f;
+		ssaoIntensity = 0.62f;
 		godRaysEnabled = true;
 		godRaysDensity = 1.05f;
 		godRaysWeight = 0.032f;
@@ -257,11 +265,11 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		godRaysExposure = 0.70f;
 		godRaysDynamicBoostEnabled = true;
 		godRaysDramaticBoost = 3.0f;
-		filmGrain = 0.045f;
+		filmGrain = 0.036f;
 		vignette = 0.38f;
-		postSaturation = 1.06f;
-		postContrast = 1.06f;
-		exposure = 0.92f;
+		postSaturation = 1.10f; // counter ACES highlight desaturation
+		postContrast = 1.08f;
+		exposure = 0.90f;
 		break;
 	}
 
