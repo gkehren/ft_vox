@@ -16,13 +16,11 @@ void InputSystem::update() {
             EventBus::getInstance().publish(QuitEvent());
         }
         else if (event.type == SDL_EVENT_KEY_DOWN && !ImGui::GetIO().WantCaptureKeyboard) {
-            keyStates[event.key.key] = true;
             if (event.key.repeat == 0) {
                 EventBus::getInstance().publish(KeyEvent(EventType::KeyPress, event.key.key));
             }
         }
         else if (event.type == SDL_EVENT_KEY_UP && !ImGui::GetIO().WantCaptureKeyboard) {
-            keyStates[event.key.key] = false;
             EventBus::getInstance().publish(KeyEvent(EventType::KeyRelease, event.key.key));
         }
         else if (event.type == SDL_EVENT_WINDOW_RESIZED) {
@@ -44,8 +42,16 @@ void InputSystem::update() {
 }
 
 bool InputSystem::isKeyPressed(SDL_Keycode key) const {
-    auto it = keyStates.find(key);
-    return it != keyStates.end() ? it->second : false;
+    int numkeys;
+    const bool* keys = SDL_GetKeyboardState(&numkeys);
+    SDL_Scancode scancode = SDL_GetScancodeFromKey(key, nullptr);
+    if (ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard) {
+        return false;
+    }
+    if (scancode >= 0 && scancode < numkeys) {
+        return keys[scancode];
+    }
+    return false;
 }
 
 void InputSystem::setMouseCaptured(bool captured, SDL_Window* window) {

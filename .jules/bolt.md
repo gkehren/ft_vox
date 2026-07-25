@@ -37,3 +37,6 @@
 ## 2024-05-24 - Network Packet Hot Loop Optimization
 **Learning:** Using `std::unordered_set` dynamically inside frequent network packet handlers (like `Client::handleMessage`) causes node-based heap allocations for every packet processed, leading to unnecessary garbage and potential stutters.
 **Action:** For bounded and small collections derived from network packets, use `std::vector` with `reserve()`, sort the vector, and use `std::binary_search()`. This leverages contiguous memory and avoids node allocations entirely.
+## 2024-05-24 - Input Polling Optimization and ImGui Capture
+**Learning:** Replaced `std::unordered_map` for key states with `SDL_GetKeyboardState` for `O(1)` contiguous array lookup without allocations. However, doing this bypassed the event loop's check for `ImGui::GetIO().WantCaptureKeyboard`, causing a functional regression where typing in UI triggered game inputs.
+**Action:** When migrating from event-based state tracking to direct polling, explicitly re-implement UI capture guards like `if (ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard) return false;` to prevent input bleed.
