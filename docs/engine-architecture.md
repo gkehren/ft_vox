@@ -191,8 +191,8 @@ GPU mesh upload is **not** in `tickStreaming`. It runs later inside `WorldRender
 
 ### Distance model
 
-- **`minRenderDistance`** (blocks, default 160) — near band: full mesh  
-- **`maxRenderDistance`** (blocks, default 384) — stream/unload radius; far band may use **LOD mesh**  
+- **`minRenderDistance`** (blocks, default 192) — near band: full mesh  
+- **`maxRenderDistance`** (blocks, default 512) — stream/unload radius; far band may use **LOD mesh**  
 - **`streamFrontBias`** (default 0.30) — view-direction load bias: chunks ahead of the camera count as closer (load first, reach ~×1.19 ahead / ~×0.87 behind); stays inside the 1.5× unload radius (no thrash). See `biasedLoadDistSq` in `StreamHelpers.hpp`
 - Load queue is **distance-prioritized** (not pure FIFO); pruned each stream tick (`StreamHelpers.hpp` helpers: `LoadCandidate`, radius math, shell indexing)
 

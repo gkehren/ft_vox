@@ -510,7 +510,7 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 	auto &rs = *frame.render;
 	ImGui::SeparatorText("Distance");
 	const int prevMaxRd = rs.maxRenderDistance;
-	ImGui::SliderInt("View distance (blocks)", &rs.maxRenderDistance, 64, 512);
+	ImGui::SliderInt("View distance (blocks)", &rs.maxRenderDistance, 64, 640);
 	if (rs.minRenderDistance > rs.maxRenderDistance)
 		rs.minRenderDistance = rs.maxRenderDistance;
 	ImGui::SliderInt("Full-mesh near range", &rs.minRenderDistance, 32, rs.maxRenderDistance);
@@ -526,10 +526,10 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 	ImGui::TextDisabled("Pool need for this view: ~%zu chunks", poolNeed);
 
 	ImGui::SeparatorText("Pipeline budgets (ops / sec)");
-	ImGui::SliderInt("Load/s", &rs.loadPerSec, 10, 600);
-	ImGui::SliderInt("Gen/s", &rs.genPerSec, 5, 400);
-	ImGui::SliderInt("Mesh/s", &rs.meshPerSec, 5, 300);
-	ImGui::SliderInt("Upload/s", &rs.uploadPerSec, 5, 400);
+	ImGui::SliderInt("Load/s", &rs.loadPerSec, 10, 1000);
+	ImGui::SliderInt("Gen/s", &rs.genPerSec, 5, 800);
+	ImGui::SliderInt("Mesh/s", &rs.meshPerSec, 5, 600);
+	ImGui::SliderInt("Upload/s", &rs.uploadPerSec, 5, 800);
 	ImGui::SliderFloat("Stream ms/frame", &rs.maxStreamMs, 0.f, 16.f, "%.1f");
 	ImGui::SliderFloat("Shadow dist", &rs.shadowDistance, 64.f, 320.f, "%.0f");
 
