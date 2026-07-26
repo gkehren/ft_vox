@@ -70,8 +70,8 @@ struct RenderSettings
 	bool paused{false};
 	int visibleChunksCount{0};	// Output, updated by rendering logic
 	int visibleVoxelsCount{0};	// Output, updated by rendering logic
-	int minRenderDistance{160}; // Within this range: full mesh (blocks)
-	int maxRenderDistance{384}; // Streaming / unload radius (blocks)
+	int minRenderDistance{192}; // Within this range: full mesh (blocks)
+	int maxRenderDistance{512}; // Streaming / unload radius (blocks)
 	int raycastDistance{8};
 	bool vsyncEnabled{true};
 
@@ -84,16 +84,18 @@ struct RenderSettings
 	// Per-second chunk pipeline throughput — frame-rate-independent budgets.
 	// Increase to load faster; decrease to reduce per-frame CPU/GPU spikes.
 	// Scaled for the larger default view distance (chunk count ~ r^2).
-	int loadPerSec{260};   // chunk allocations from queue / sec
-	int genPerSec{180};	   // terrain-gen job dispatches / sec
-	int meshPerSec{140};   // mesh job dispatches / sec
-	int uploadPerSec{220}; // GPU mesh uploads / sec (async staging — no device idle)
+	// Gen/mesh run async on the ThreadPool, so high dispatch budgets mainly
+	// cost main-thread dispatch time (capped by maxStreamMs).
+	int loadPerSec{640};   // chunk allocations from queue / sec
+	int genPerSec{480};	   // terrain-gen job dispatches / sec
+	int meshPerSec{360};   // mesh job dispatches / sec
+	int uploadPerSec{520}; // GPU mesh uploads / sec (async staging — no device idle)
 	// Shadow casters within this XZ radius (blocks). Caps shadow pass cost.
 	float shadowDistance{160.f};
 	/// Cascade far plane used for CSM split distances (view-space).
 	float shadowCascadeFar{280.f};
 	/// Max CPU ms per frame for load + gen-dispatch + mesh-dispatch (0 = unlimited).
-	float maxStreamMs{5.0f};
+	float maxStreamMs{6.0f};
 };
 
 /// Legacy flat timings filled from the hierarchical Profiler each frame.

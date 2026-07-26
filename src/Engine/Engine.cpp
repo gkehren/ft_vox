@@ -134,16 +134,16 @@ Engine::Engine(std::string resourcePackRoot)
 	const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
 	threadPool = std::make_unique<ThreadPool>(hw);
 
-	renderSettings.minRenderDistance = 160;
-	renderSettings.maxRenderDistance = 384;
+	renderSettings.minRenderDistance = 192;
+	renderSettings.maxRenderDistance = 512;
 	renderSettings.streamFrontBias = 0.30f;
 	// Pool sized for unload disk (1.5× view) + headroom; grows later via ensureCapacity.
 	chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 
-	renderSettings.loadPerSec = 260;
-	renderSettings.genPerSec = 180;
-	renderSettings.meshPerSec = 140;
-	renderSettings.uploadPerSec = 220;
+	renderSettings.loadPerSec = 640;
+	renderSettings.genPerSec = 480;
+	renderSettings.meshPerSec = 360;
+	renderSettings.uploadPerSec = 520;
 	renderSettings.shadowDistance = 160.f;
 	renderSettings.raycastDistance = 8;
 
