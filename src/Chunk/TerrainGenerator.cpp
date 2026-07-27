@@ -17,96 +17,197 @@ void TerrainGenerator::initBiomeConfigs()
 {
   std::call_once(s_biomeConfigsOnceFlag, []()
                  {
-    // Distinct biomes without neon chroma (moderate grass/foliage tints)
+    // Distinct biomes without neon chroma (moderate grass/foliage tints).
+    // Fields: surface, subsurface, underwater, subsurfaceDepth,
+    //         treeDensity, bushDensity, rockDensity, fallenLogDensity,
+    //         grassColor, foliageColor, hasSnow, hasCacti
     s_biomeConfigs[BIOME_FROZEN_OCEAN] = {
-        TextureType::SNOW, TextureType::GRAVEL, TextureType::GRAVEL, 3, 0.0f, 0.0f,
+        TextureType::SNOW, TextureType::GRAVEL, TextureType::GRAVEL, 3,
+        0.0f, 0.0f, 0.0f, 0.0f,
         glm::vec3(0.50f, 0.68f, 0.62f), glm::vec3(0.38f, 0.55f, 0.52f),
-        true, false, false};
+        true, false, 0.0f};
 
     s_biomeConfigs[BIOME_SNOWY_TUNDRA] = {
-        TextureType::SNOW, TextureType::DIRT, TextureType::GRAVEL, 3, 0.02f, 0.05f,
+        TextureType::SNOW, TextureType::DIRT, TextureType::GRAVEL, 3,
+        0.02f, 0.005f, 0.02f, 0.0f,
         glm::vec3(0.48f, 0.66f, 0.50f), glm::vec3(0.36f, 0.52f, 0.42f),
-        true, false, true};
+        true, false, 0.0f};
 
     s_biomeConfigs[BIOME_SNOWY_TAIGA] = {
-        TextureType::SNOW, TextureType::DIRT, TextureType::GRAVEL, 3, 0.15f, 0.1f,
+        TextureType::SNOW, TextureType::DIRT, TextureType::GRAVEL, 3,
+        0.15f, 0.03f, 0.015f, 0.01f,
         glm::vec3(0.35f, 0.55f, 0.45f), glm::vec3(0.28f, 0.48f, 0.40f),
-        true, false, true};
+        true, false, 0.5f};
 
     s_biomeConfigs[BIOME_ICE_SPIKES] = {
-        TextureType::SNOW, TextureType::PACKED_ICE, TextureType::GRAVEL, 5, 0.0f, 0.0f,
+        TextureType::SNOW, TextureType::PACKED_ICE, TextureType::GRAVEL, 5,
+        0.0f, 0.0f, 0.005f, 0.0f,
         glm::vec3(0.55f, 0.70f, 0.72f), glm::vec3(0.42f, 0.58f, 0.62f),
-        true, false, false};
+        true, false, 2.0f};
 
     s_biomeConfigs[BIOME_OCEAN] = {
-        TextureType::GRAVEL, TextureType::GRAVEL, TextureType::SAND, 4, 0.0f, 0.0f,
+        TextureType::GRAVEL, TextureType::GRAVEL, TextureType::SAND, 4,
+        0.0f, 0.0f, 0.0f, 0.0f,
         glm::vec3(0.35f, 0.58f, 0.48f), glm::vec3(0.28f, 0.50f, 0.42f),
-        false, false, false};
+        false, false, 0.0f};
 
     s_biomeConfigs[BIOME_BEACH] = {
-        TextureType::SAND, TextureType::SAND, TextureType::SAND, 5, 0.0f, 0.0f,
+        TextureType::SAND, TextureType::SAND, TextureType::SAND, 5,
+        0.0f, 0.0f, 0.0f, 0.0f,
         glm::vec3(0.62f, 0.72f, 0.42f), glm::vec3(0.50f, 0.62f, 0.32f),
-        false, false, false};
+        false, false, 0.0f};
 
     s_biomeConfigs[BIOME_PLAINS] = {
-        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::SAND, 3, 0.01f, 0.3f,
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::SAND, 3,
+        0.01f, 0.02f, 0.004f, 0.0f,
         glm::vec3(0.48f, 0.78f, 0.32f), glm::vec3(0.38f, 0.68f, 0.26f),
-        false, false, true};
+        false, false, 0.0f};
 
     s_biomeConfigs[BIOME_FOREST] = {
-        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::GRAVEL, 3, 0.25f, 0.4f,
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::GRAVEL, 3,
+        0.25f, 0.05f, 0.008f, 0.01f,
         glm::vec3(0.30f, 0.65f, 0.24f), glm::vec3(0.24f, 0.55f, 0.20f),
-        false, false, true};
+        false, false, 0.0f};
 
     s_biomeConfigs[BIOME_BIRCH_FOREST] = {
-        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::GRAVEL, 3, 0.22f, 0.35f,
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::GRAVEL, 3,
+        0.22f, 0.05f, 0.008f, 0.01f,
         glm::vec3(0.48f, 0.76f, 0.36f), glm::vec3(0.42f, 0.68f, 0.32f),
-        false, false, true};
+        false, false, 0.0f};
 
     s_biomeConfigs[BIOME_DARK_FOREST] = {
-        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::DIRT, 4, 0.4f, 0.5f,
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::DIRT, 4,
+        0.4f, 0.06f, 0.01f, 0.02f,
         glm::vec3(0.22f, 0.48f, 0.22f), glm::vec3(0.18f, 0.40f, 0.18f),
-        false, false, true};
+        false, false, 0.0f};
 
     s_biomeConfigs[BIOME_SWAMP] = {
-        TextureType::MUD, TextureType::DIRT, TextureType::CLAY, 4, 0.12f, 0.6f,
+        TextureType::MUD, TextureType::DIRT, TextureType::CLAY, 4,
+        0.12f, 0.06f, 0.01f, 0.015f,
         glm::vec3(0.38f, 0.50f, 0.28f), glm::vec3(0.32f, 0.44f, 0.24f),
-        false, false, true};
+        false, false, 1.0f};
 
     s_biomeConfigs[BIOME_RIVER] = {
-        TextureType::SAND, TextureType::CLAY, TextureType::GRAVEL, 2, 0.0f, 0.0f,
+        TextureType::SAND, TextureType::CLAY, TextureType::GRAVEL, 2,
+        0.0f, 0.0f, 0.0f, 0.0f,
         glm::vec3(0.38f, 0.62f, 0.36f), glm::vec3(0.32f, 0.54f, 0.30f),
-        false, false, false};
+        false, false, 0.0f};
 
     s_biomeConfigs[BIOME_DESERT] = {
-        TextureType::SAND, TextureType::SANDSTONE, TextureType::SAND, 8, 0.0f, 0.02f,
+        TextureType::SAND, TextureType::SANDSTONE, TextureType::SAND, 8,
+        0.0f, 0.0f, 0.006f, 0.0f,
         glm::vec3(0.78f, 0.70f, 0.38f), glm::vec3(0.65f, 0.58f, 0.28f),
-        false, true, false};
+        false, true, 0.0f};
 
     s_biomeConfigs[BIOME_SAVANNA] = {
-        TextureType::GRASS_TOP, TextureType::COARSE_DIRT, TextureType::SAND, 3, 0.08f, 0.2f,
+        TextureType::GRASS_TOP, TextureType::COARSE_DIRT, TextureType::SAND, 3,
+        0.08f, 0.015f, 0.008f, 0.004f,
         glm::vec3(0.72f, 0.70f, 0.32f), glm::vec3(0.60f, 0.58f, 0.26f),
-        false, false, false};
+        false, false, 1.5f};
 
     s_biomeConfigs[BIOME_JUNGLE] = {
-        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::DIRT, 3, 0.45f, 0.7f,
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::DIRT, 3,
+        0.45f, 0.08f, 0.005f, 0.01f,
         glm::vec3(0.22f, 0.72f, 0.22f), glm::vec3(0.16f, 0.62f, 0.18f),
-        false, false, true};
+        false, false, 3.0f};
 
     s_biomeConfigs[BIOME_BADLANDS] = {
-        TextureType::RED_SAND, TextureType::TERRACOTTA, TextureType::RED_SAND, 8, 0.0f, 0.01f,
+        TextureType::RED_SAND, TextureType::TERRACOTTA, TextureType::RED_SAND, 8,
+        0.0f, 0.0f, 0.01f, 0.0f,
         glm::vec3(0.78f, 0.48f, 0.28f), glm::vec3(0.68f, 0.40f, 0.22f),
-        false, true, false};
+        false, true, 5.0f};
 
     s_biomeConfigs[BIOME_MOUNTAINS] = {
-        TextureType::STONE, TextureType::STONE, TextureType::GRAVEL, 2, 0.08f, 0.1f,
+        TextureType::STONE, TextureType::STONE, TextureType::GRAVEL, 2,
+        0.08f, 0.01f, 0.03f, 0.004f,
         glm::vec3(0.40f, 0.62f, 0.34f), glm::vec3(0.34f, 0.52f, 0.28f),
-        false, false, true};
+        false, false, 8.0f};
 
     s_biomeConfigs[BIOME_SNOWY_MOUNTAINS] = {
-        TextureType::SNOW, TextureType::STONE, TextureType::GRAVEL, 2, 0.02f, 0.02f,
+        TextureType::SNOW, TextureType::STONE, TextureType::GRAVEL, 2,
+        0.02f, 0.005f, 0.03f, 0.0f,
         glm::vec3(0.50f, 0.66f, 0.55f), glm::vec3(0.40f, 0.55f, 0.48f),
-        true, false, false};
+        true, false, 8.0f};
+
+    // Phase 3 configs initially reuse existing blocks. Dedicated blocks and
+    // placers are added incrementally in 3B/3C without changing biome ordinals.
+    s_biomeConfigs[BIOME_FLOWER_MEADOW] = {
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::SAND, 3,
+        0.005f, 0.10f, 0.002f, 0.0f,
+        glm::vec3(0.56f, 0.82f, 0.34f), glm::vec3(0.46f, 0.72f, 0.30f),
+        false, false, 0.0f};
+
+    s_biomeConfigs[BIOME_CHERRY_GROVE] = {
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::GRAVEL, 3,
+        0.18f, 0.06f, 0.004f, 0.008f,
+        glm::vec3(0.50f, 0.74f, 0.38f), glm::vec3(0.86f, 0.48f, 0.62f),
+        false, false, 0.5f};
+
+    s_biomeConfigs[BIOME_AUTUMN_FOREST] = {
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::GRAVEL, 4,
+        0.30f, 0.06f, 0.01f, 0.02f,
+        glm::vec3(0.48f, 0.62f, 0.26f), glm::vec3(0.78f, 0.36f, 0.18f),
+        false, false, 0.5f};
+
+    s_biomeConfigs[BIOME_REDWOOD_FOREST] = {
+        TextureType::PODZOL, TextureType::DIRT, TextureType::GRAVEL, 4,
+        0.16f, 0.04f, 0.02f, 0.015f,
+        glm::vec3(0.30f, 0.48f, 0.24f), glm::vec3(0.20f, 0.42f, 0.22f),
+        false, false, 1.0f};
+
+    s_biomeConfigs[BIOME_MANGROVE_SWAMP] = {
+        TextureType::MUD, TextureType::CLAY, TextureType::CLAY, 5,
+        0.18f, 0.08f, 0.004f, 0.01f,
+        glm::vec3(0.32f, 0.46f, 0.24f), glm::vec3(0.24f, 0.40f, 0.20f),
+        false, false, 1.0f};
+
+    s_biomeConfigs[BIOME_BAMBOO_JUNGLE] = {
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::DIRT, 3,
+        0.30f, 0.08f, 0.004f, 0.006f,
+        glm::vec3(0.30f, 0.78f, 0.24f), glm::vec3(0.20f, 0.66f, 0.18f),
+        false, false, 2.5f};
+
+    s_biomeConfigs[BIOME_MOOR] = {
+        TextureType::COARSE_DIRT, TextureType::DIRT, TextureType::GRAVEL, 3,
+        0.015f, 0.015f, 0.04f, 0.004f,
+        glm::vec3(0.46f, 0.48f, 0.26f), glm::vec3(0.34f, 0.40f, 0.24f),
+        false, false, 1.5f};
+
+    s_biomeConfigs[BIOME_GLACIER] = {
+        TextureType::PACKED_ICE, TextureType::BLUE_ICE, TextureType::PACKED_ICE, 6,
+        0.0f, 0.0f, 0.002f, 0.0f,
+        glm::vec3(0.58f, 0.74f, 0.78f), glm::vec3(0.48f, 0.66f, 0.72f),
+        true, false, 1.0f};
+
+    s_biomeConfigs[BIOME_FROZEN_RIVER] = {
+        TextureType::GRAVEL, TextureType::CLAY, TextureType::GRAVEL, 2,
+        0.0f, 0.0f, 0.0f, 0.0f,
+        glm::vec3(0.56f, 0.70f, 0.64f), glm::vec3(0.44f, 0.60f, 0.56f),
+        true, false, 0.0f};
+
+    s_biomeConfigs[BIOME_VOLCANIC] = {
+        TextureType::BASALT, TextureType::BLACKSTONE, TextureType::GRAVEL, 5,
+        0.0f, 0.0f, 0.05f, 0.0f,
+        glm::vec3(0.32f, 0.28f, 0.25f), glm::vec3(0.38f, 0.24f, 0.18f),
+        false, false, 6.0f};
+
+    s_biomeConfigs[BIOME_OASIS] = {
+        TextureType::GRASS_TOP, TextureType::DIRT, TextureType::SAND, 4,
+        0.12f, 0.08f, 0.002f, 0.002f,
+        glm::vec3(0.40f, 0.76f, 0.30f), glm::vec3(0.28f, 0.66f, 0.24f),
+        false, false, 0.0f};
+
+    s_biomeConfigs[BIOME_MUSHROOM_FIELDS] = {
+        TextureType::MOSS_BLOCK, TextureType::DIRT, TextureType::CLAY, 4,
+        0.04f, 0.10f, 0.006f, 0.01f,
+        glm::vec3(0.52f, 0.42f, 0.58f), glm::vec3(0.64f, 0.36f, 0.58f),
+        false, false, 1.0f};
+
+    s_biomeConfigs[BIOME_CORAL_REEF] = {
+        TextureType::SAND, TextureType::SAND, TextureType::GRAVEL, 5,
+        0.0f, 0.0f, 0.0f, 0.0f,
+        glm::vec3(0.30f, 0.68f, 0.54f), glm::vec3(0.24f, 0.60f, 0.48f),
+        false, false, 0.0f};
 
     s_biomeConfigsInitialized = true; });
 }
@@ -145,7 +246,8 @@ void TerrainGenerator::setupNoiseGenerators()
 
 void TerrainGenerator::setupTerrainNoise()
 {
-  // Continental noise - Large scale continent shapes
+  // Continental noise - Large scale continent shapes, domain-warped for
+  // organic, jagged coastlines (gradient warp in the source domain).
   auto continentalBase = FastNoise::New<FastNoise::OpenSimplex2>();
   auto continentalFractal = FastNoise::New<FastNoise::FractalFBm>();
   continentalFractal->SetSource(continentalBase);
@@ -154,9 +256,14 @@ void TerrainGenerator::setupTerrainNoise()
   continentalFractal->SetGain(0.45f);
   continentalFractal->SetWeightedStrength(0.0f);
 
-  // Set frequency directly on the fractal node
+  auto continentalWarp = FastNoise::New<FastNoise::DomainWarpGradient>();
+  continentalWarp->SetSource(continentalFractal);
+  continentalWarp->SetWarpAmplitude(0.15f);
+  continentalWarp->SetWarpFrequency(0.5f);
+
+  // Set frequency directly on the warp node
   auto continentalScale = FastNoise::New<FastNoise::DomainScale>();
-  continentalScale->SetSource(continentalFractal);
+  continentalScale->SetSource(continentalWarp);
   continentalScale->SetScale(0.002f);
   m_continentalNoise = continentalScale;
 
@@ -173,7 +280,8 @@ void TerrainGenerator::setupTerrainNoise()
   erosionScale->SetScale(0.004f);
   m_erosionNoise = erosionScale;
 
-  // Peaks and Valleys noise - Local height variation
+  // Peaks and Valleys noise - Local height variation, warped so hills and
+  // mountain ranges fold instead of blobbing.
   auto pvBase = FastNoise::New<FastNoise::OpenSimplex2>();
   auto pvFractal = FastNoise::New<FastNoise::FractalFBm>();
   pvFractal->SetSource(pvBase);
@@ -181,21 +289,31 @@ void TerrainGenerator::setupTerrainNoise()
   pvFractal->SetLacunarity(2.0f);
   pvFractal->SetGain(0.5f);
 
+  auto pvWarp = FastNoise::New<FastNoise::DomainWarpGradient>();
+  pvWarp->SetSource(pvFractal);
+  pvWarp->SetWarpAmplitude(0.4f);
+  pvWarp->SetWarpFrequency(0.5f);
+
   auto pvScale = FastNoise::New<FastNoise::DomainScale>();
-  pvScale->SetSource(pvFractal);
+  pvScale->SetSource(pvWarp);
   pvScale->SetScale(0.01f);
   m_peaksValleysNoise = pvScale;
 
-  // Ridge noise - For sharp mountain peaks
+  // Ridge noise - Sharp mountain peaks, warped into curved ranges
   auto ridgeBase = FastNoise::New<FastNoise::OpenSimplex2>();
   auto ridgeFractal = FastNoise::New<FastNoise::FractalRidged>();
   ridgeFractal->SetSource(ridgeBase);
-  ridgeFractal->SetOctaveCount(3);
+  ridgeFractal->SetOctaveCount(4);
   ridgeFractal->SetLacunarity(2.0f);
   ridgeFractal->SetGain(0.5f);
 
+  auto ridgeWarp = FastNoise::New<FastNoise::DomainWarpGradient>();
+  ridgeWarp->SetSource(ridgeFractal);
+  ridgeWarp->SetWarpAmplitude(0.3f);
+  ridgeWarp->SetWarpFrequency(0.5f);
+
   auto ridgeScale = FastNoise::New<FastNoise::DomainScale>();
-  ridgeScale->SetSource(ridgeFractal);
+  ridgeScale->SetSource(ridgeWarp);
   ridgeScale->SetScale(0.004f);
   m_ridgeNoise = ridgeScale;
 
@@ -347,53 +465,59 @@ void TerrainGenerator::setupOres()
 // =============================================
 
 // Height clamping
-static constexpr int HEIGHT_CEILING_MARGIN = 32; // Reserved space above max terrain
+static constexpr int HEIGHT_CEILING_MARGIN = 16; // Reserved space above max terrain
+
+// Extended sampling window: core chunk sits at [6,21] inside a 28x28 grid.
+// The 6-wide halo serves two purposes:
+//  - thermal erosion is deterministic for cells [2,25] (their four neighbors
+//    [1,26] are all processed by the erosion loop, and give-decisions only
+//    read sampled values [0,27]) — covers core, border strips, and the
+//    vegetation candidate ring;
+//  - vegetation canopies reaching up to MAX_TREE_RADIUS=4 into this chunk
+//    from neighbor chunks can be evaluated from identical data.
+static constexpr int EXT_SIZE = 28;
+static constexpr int EXT_CORE_OFFSET = 6;
 
 struct GenBuffers
 {
-  // Base noise buffers (20x20 to support erosion over chunk boundaries)
-  std::array<float, 20 * 20> continental;
-  std::array<float, 20 * 20> erosion;
-  std::array<float, 20 * 20> peaksValleys;
-  std::array<float, 20 * 20> ridge;
-  std::array<float, 20 * 20> temperature;
-  std::array<float, 20 * 20> humidity;
-  std::array<float, 20 * 20> weirdness;
-  std::array<float, 20 * 20> river;
+  // Base noise buffers (28x28 to support deterministic erosion over chunk boundaries)
+  std::array<float, EXT_SIZE * EXT_SIZE> continental;
+  std::array<float, EXT_SIZE * EXT_SIZE> erosion;
+  std::array<float, EXT_SIZE * EXT_SIZE> peaksValleys;
+  std::array<float, EXT_SIZE * EXT_SIZE> ridge;
+  std::array<float, EXT_SIZE * EXT_SIZE> temperature;
+  std::array<float, EXT_SIZE * EXT_SIZE> humidity;
+  std::array<float, EXT_SIZE * EXT_SIZE> weirdness;
+  std::array<float, EXT_SIZE * EXT_SIZE> river;
 
-  // Extended heightmap for erosion (20x20)
-  std::array<float, 20 * 20> extendedHeightMap;
+  // Extended heightmap for erosion (28x28)
+  std::array<float, EXT_SIZE * EXT_SIZE> extendedHeightMap;
 
-  // Extra space for thermal/hydraulic erosion particle simulation
-  std::array<float, 20 * 20> waterMap;
-  std::array<float, 20 * 20> sedimentMap;
+  // Per-column derived data over the extended window (heights are post-erosion,
+  // pre-cave). Biome colors feed the 5x5 smoothing blur for the core chunk.
+  std::array<BiomeType, EXT_SIZE * EXT_SIZE> extBiomes;
+  std::array<int, EXT_SIZE * EXT_SIZE> extHeights;
+  std::array<uint32_t, EXT_SIZE * EXT_SIZE> extGrassColors;
+  std::array<uint32_t, EXT_SIZE * EXT_SIZE> extFoliageColors;
 
-  // 3D noise is still generated for the core chunk + borders (not strictly 20x20, we can keep it 16x16 or 18x18 as needed)
+  // 3D noise is generated separately for the 16x16 core and one-column border strips.
   std::array<float, CHUNK_VOLUME> cave;
   std::array<float, CHUNK_VOLUME> ravine;
   std::array<float, CHUNK_VOLUME> surface3D;
 
   // Border generation buffers (per-strip: CHUNK_SIZE columns)
-  // 2D noise buffers for height/biome determination (7 noise types x CHUNK_SIZE)
-  std::array<float, CHUNK_SIZE> borderCont;
-  std::array<float, CHUNK_SIZE> borderErosion;
-  std::array<float, CHUNK_SIZE> borderPV;
-  std::array<float, CHUNK_SIZE> borderRidge;
-  std::array<float, CHUNK_SIZE> borderTemp;
-  std::array<float, CHUNK_SIZE> borderHumid;
-  std::array<float, CHUNK_SIZE> borderWeird;
-  std::array<float, CHUNK_SIZE> borderRiver;
   // 3D noise buffers for cave/ravine per strip (CHUNK_SIZE x CHUNK_HEIGHT x 1)
   std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderCave;
   std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderRavine;
   std::array<float, CHUNK_SIZE * CHUNK_HEIGHT> borderSurface3D;
 
-  // Reusable buffers for vegetation generation (CHUNK_SIZE * CHUNK_SIZE = 256)
-  std::array<float, CHUNK_SIZE * CHUNK_SIZE> treeNoiseResults;
-  std::array<float, CHUNK_SIZE * CHUNK_SIZE> forestDensityResults;
+  // Reusable buffers for vegetation generation (extended window, covers the
+  // cross-chunk candidate ring)
+  std::array<float, EXT_SIZE * EXT_SIZE> treeNoiseResults;
+  std::array<float, EXT_SIZE * EXT_SIZE> forestDensityResults;
 
   // Reusable buffer for erosion calculation
-  std::array<float, 20 * 20> erosionTempMap;
+  std::array<float, EXT_SIZE * EXT_SIZE> erosionTempMap;
 
   // Reusable buffers for biome region generation
   // Using 512*512 max size to accommodate the UI map which defaults to 256
@@ -411,6 +535,23 @@ struct GenBuffers
 };
 
 static thread_local GenBuffers s_genBuffers;
+
+namespace
+{
+
+/// Max absolute height delta to the 4 von Neumann neighbors on the extended
+/// height grid. Used for rock exposure on steep slopes.
+inline float columnSlopeAt(const int *heights, int size, int idx)
+{
+  const float h = static_cast<float>(heights[idx]);
+  float s = std::abs(h - static_cast<float>(heights[idx - 1]));
+  s = std::max(s, std::abs(h - static_cast<float>(heights[idx + 1])));
+  s = std::max(s, std::abs(h - static_cast<float>(heights[idx - size])));
+  s = std::max(s, std::abs(h - static_cast<float>(heights[idx + size])));
+  return s;
+}
+
+} // namespace
 
 TerrainGenerator &TerrainGenerator::getThreadLocal(int seed)
 {
@@ -470,10 +611,10 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   float worldXf = static_cast<float>(chunkX) + NOISE_OFFSET;
   float worldZf = static_cast<float>(chunkZ) + NOISE_OFFSET;
 
-  // Generate terrain noise for 20x20 extended area (offset by -2 from chunk origin)
-  float extendedWorldXf = worldXf - 2.0f;
-  float extendedWorldZf = worldZf - 2.0f;
-  const int EXTENDED_SIZE = 20;
+  // Generate terrain noise for the 28x28 extended area.
+  float extendedWorldXf = worldXf - static_cast<float>(EXT_CORE_OFFSET);
+  float extendedWorldZf = worldZf - static_cast<float>(EXT_CORE_OFFSET);
+  const int EXTENDED_SIZE = EXT_SIZE;
 
   m_continentalNoise->GenUniformGrid2D(continentalResults, extendedWorldXf,
                                        extendedWorldZf, EXTENDED_SIZE, EXTENDED_SIZE, 1.0f,
@@ -501,30 +642,30 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   m_riverNoise->GenUniformGrid2D(riverResults, extendedWorldXf, extendedWorldZf,
                                  EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 9000);
 
-  // Pre-calculate float heights for the 20x20 extended map
+  // Pre-calculate float heights for the extended map.
   float *extHeightMap = s_genBuffers.extendedHeightMap.data();
   for (int i = 0; i < EXTENDED_SIZE * EXTENDED_SIZE; ++i)
   {
     extHeightMap[i] = calculateHeightFloat(
         continentalResults[i], erosionResults[i],
-        peaksValleysResults[i], ridgeResults[i], riverResults[i]);
+        peaksValleysResults[i], ridgeResults[i], riverResults[i], weirdnessResults[i]);
   }
 
   // Apply erosion smoothing step to the float heightmap
   applyErosion(extHeightMap, EXTENDED_SIZE);
 
-  // Pass 1: Extract 16x16 biomes and heights from the eroded 20x20 map
-  // (must precede 3D noise so we can bound cave sampling to surface+margin)
-  int maxSurfaceHeight = 1;
-  for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
+  // Pass 1a: biomes, heights and raw biome colors over the whole extended
+  // window (must precede 3D noise so we can bound cave sampling to
+  // surface+margin). Border strips and the vegetation ring reuse this data.
+  BiomeType *extBiomes = s_genBuffers.extBiomes.data();
+  int *extHeights = s_genBuffers.extHeights.data();
+  uint32_t *extGrass = s_genBuffers.extGrassColors.data();
+  uint32_t *extFoliage = s_genBuffers.extFoliageColors.data();
+  for (int extZ = 0; extZ < EXTENDED_SIZE; ++extZ)
   {
-    for (int localX = 0; localX < CHUNK_SIZE; ++localX)
+    for (int extX = 0; extX < EXTENDED_SIZE; ++extX)
     {
-      // The core chunk is at offset x=2, z=2 inside the 20x20 extended buffer
-      int extZ = localZ + 2;
-      int extX = localX + 2;
       int extIndex = extZ * EXTENDED_SIZE + extX;
-      int localIndex = localZ * CHUNK_SIZE + localX;
 
       float continental = std::clamp(continentalResults[extIndex], -1.0f, 1.0f);
       float temperature = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
@@ -539,14 +680,109 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
       BiomeType biome = determineBiome(temperature, humidity, weirdness,
                                        continental, erosion, pv, riverVal, height);
 
-      chunkData.biomes[localIndex] = biome;
-      chunkData.heightMap[localIndex] = height;
-      maxSurfaceHeight = std::max(maxSurfaceHeight, height);
+      // Oasis patches use the strongest weirdness values as a shallow pond
+      // core. The outer oasis ring remains dry and hosts palms/ground cover.
+      if (biome == BIOME_OASIS)
+      {
+        const float weirdFactor = (weirdness + 1.0f) * 0.5f;
+        if (weirdFactor > 0.82f)
+          height = SEA_LEVEL - 2;
+      }
 
-      // Precompute packed biome colors for mesh generation
+      // Keep the navigable river channel at a stable two-block water depth.
+      // Valley carving still shapes the banks; this post-erosion override
+      // prevents thermal erosion from making the riverbed uneven.
+      if (biome == BIOME_RIVER || biome == BIOME_FROZEN_RIVER)
+      {
+        height = SEA_LEVEL - 2;
+      }
+
+      // Erosion-modulated terraces. Badlands always retain a strong mesa
+      // profile, while low-erosion cold highlands get broader, softer
+      // plateaus. The biome was selected from the unterraced height and
+      // thermal erosion has already run, so the resulting treads stay crisp.
+      if (biome == BIOME_BADLANDS)
+      {
+        constexpr float STEP = 7.0f;
+        float t = (extHeightMap[extIndex] - static_cast<float>(SEA_LEVEL)) / STEP;
+        float tread = std::floor(t);
+        float frac = t - tread;
+        float terraced = static_cast<float>(SEA_LEVEL) +
+                         (tread + smoothstep(0.65f, 1.0f, frac)) * STEP;
+        const float erosionFactor = (erosion + 1.0f) * 0.5f;
+        const float terraceStrength = 0.65f + 0.35f * (1.0f - erosionFactor);
+        const float blended = std::lerp(extHeightMap[extIndex], terraced, terraceStrength);
+        height = std::clamp(static_cast<int>(std::round(blended)), 1,
+                            static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
+      }
+      else if (biome == BIOME_SNOWY_TAIGA || biome == BIOME_SNOWY_MOUNTAINS ||
+               biome == BIOME_GLACIER)
+      {
+        const float erosionFactor = (erosion + 1.0f) * 0.5f;
+        const float terraceStrength =
+            0.55f * smoothstep(0.60f, 0.15f, erosionFactor);
+        if (terraceStrength > 0.0f)
+        {
+          constexpr float STEP = 10.0f;
+          float t = (extHeightMap[extIndex] - static_cast<float>(SEA_LEVEL)) / STEP;
+          float tread = std::floor(t);
+          float frac = t - tread;
+          float terraced = static_cast<float>(SEA_LEVEL) +
+                           (tread + smoothstep(0.72f, 1.0f, frac)) * STEP;
+          const float blended = std::lerp(extHeightMap[extIndex], terraced, terraceStrength);
+          height = std::clamp(static_cast<int>(std::round(blended)), 1,
+                              static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
+        }
+      }
+
+      extBiomes[extIndex] = biome;
+      extHeights[extIndex] = height;
+
       const BiomeConfig &cfg = getBiomeConfig(biome);
-      chunkData.grassColors[localIndex] = packColor(cfg.grassColor);
-      chunkData.foliageColors[localIndex] = packColor(cfg.foliageColor);
+      extGrass[extIndex] = packColor(cfg.grassColor);
+      extFoliage[extIndex] = packColor(cfg.foliageColor);
+    }
+  }
+
+  // Pass 1b: extract the 16x16 core. Biome grass/foliage colors are smoothed
+  // with a 5x5 box blur over the extended window (deterministic across chunk
+  // borders — the halo comes from the same shared noise).
+  int maxSurfaceHeight = 1;
+  for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
+  {
+    for (int localX = 0; localX < CHUNK_SIZE; ++localX)
+    {
+      int extZ = localZ + EXT_CORE_OFFSET;
+      int extX = localX + EXT_CORE_OFFSET;
+      int extIndex = extZ * EXTENDED_SIZE + extX;
+      int localIndex = localZ * CHUNK_SIZE + localX;
+
+      chunkData.biomes[localIndex] = extBiomes[extIndex];
+      chunkData.heightMap[localIndex] = extHeights[extIndex];
+      maxSurfaceHeight = std::max(maxSurfaceHeight, extHeights[extIndex]);
+
+      uint32_t rSumG = 0, gSumG = 0, bSumG = 0;
+      uint32_t rSumF = 0, gSumF = 0, bSumF = 0;
+      for (int dz = -2; dz <= 2; ++dz)
+      {
+        for (int dx = -2; dx <= 2; ++dx)
+        {
+          int nIdx = (extZ + dz) * EXTENDED_SIZE + (extX + dx);
+          uint32_t g = extGrass[nIdx];
+          uint32_t f = extFoliage[nIdx];
+          rSumG += g & 0xFFu;
+          gSumG += (g >> 8) & 0xFFu;
+          bSumG += (g >> 16) & 0xFFu;
+          rSumF += f & 0xFFu;
+          gSumF += (f >> 8) & 0xFFu;
+          bSumF += (f >> 16) & 0xFFu;
+        }
+      }
+      constexpr uint32_t N = 25;
+      chunkData.grassColors[localIndex] =
+          (rSumG / N) | ((gSumG / N) << 8) | ((bSumG / N) << 16) | (255u << 24);
+      chunkData.foliageColors[localIndex] =
+          (rSumF / N) | ((gSumF / N) << 8) | ((bSumF / N) << 16) | (255u << 24);
     }
   }
 
@@ -576,11 +812,14 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
       int colIndex = getColumnIndex(localX, localZ);
       int terrainHeight = chunkData.heightMap[colIndex];
       BiomeType biome = chunkData.biomes[colIndex];
-      int extIndex = (localZ + 2) * EXTENDED_SIZE + (localX + 2);
+      int extIndex = (localZ + EXT_CORE_OFFSET) * EXTENDED_SIZE + (localX + EXT_CORE_OFFSET);
       float temperature = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
 
-      // Determine if this column is mountainous (allow 3D surface perturbation)
-      bool isMountain = (biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS);
+      // Max absolute height delta to the 4 neighbors (rock exposure on cliffs)
+      float columnSlope = columnSlopeAt(extHeights, EXTENDED_SIZE, extIndex);
+
+      // 3D surface perturbation amplitude (overhangs/cliffs) for this biome
+      const float perturbAmp = getBiomeConfig(biome).surfacePerturbAmp;
 
       int actualMaxHeight = 0;
       for (int y = caveYMin; y < yFillEnd; ++y)
@@ -603,20 +842,21 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
         // 3D density: base density is distance below the heightmap surface
         float density = static_cast<float>(terrainHeight - y);
 
-        // Only perturb the surface near the heightmap boundary, and only
-        // for mountainous biomes (creates overhangs/cliffs). Plains stay flat.
-        if (inNoiseBand && isMountain && density > -8.0f && density < 12.0f) {
+        // Perturb the surface near the heightmap boundary with a per-biome
+        // amplitude (mountains: cliffs/overhangs; badlands: hoodoos; flat
+        // biomes use 0 and stay pure heightmap).
+        if (inNoiseBand && perturbAmp > 0.0f && density > -8.0f && density < 12.0f) {
            // Smooth blend: full effect at surface, fades to zero at edges
            float distToSurface = std::abs(density);
            float blend = std::max(0.0f, 1.0f - distToSurface / 12.0f);
-           density += surface3DVal * 8.0f * blend;
+           density += surface3DVal * perturbAmp * blend;
         }
 
         TextureType type;
         if (density >= 0.0f) {
             // Pass density so overhangs can have grass/dirt/stone correctly
-            type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, density);
-            
+            type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, columnSlope, density);
+
             if (inNoiseBand && type != TextureType::BEDROCK && type != TextureType::WATER)
             {
               float heightRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
@@ -629,7 +869,7 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
               }
             }
         } else {
-            type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, density);
+            type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, columnSlope, density);
         }
 
         if (type != TextureType::AIR && type != TextureType::WATER) {
@@ -690,7 +930,96 @@ static constexpr float CONT_BEACH_HI = 0.42f;  // Beach -> Plains transition end
 static constexpr float CONT_PLAINS_LO = 0.55f; // Plains -> Hills transition start
 static constexpr float CONT_PLAINS_HI = 0.65f; // Plains -> Hills transition end
 static constexpr float CONT_HILLS_LO = 0.75f;  // Hills -> Mountains transition start
-static constexpr float CONT_HILLS_HI = 0.85f;  // Hills -> Mountains transition end
+static constexpr float CONT_HILLS_HI = 0.82f;  // Hills -> Mountains transition end
+
+namespace
+{
+
+enum class TerrainBand : uint8_t
+{
+  Ocean,
+  Coast,
+  Flatlands,
+  Hills,
+  Mountains
+};
+
+enum class ClimateBand : size_t
+{
+  Cold,
+  Temperate,
+  Hot,
+  Count
+};
+
+enum class MoistureBand : size_t
+{
+  Arid,
+  Moderate,
+  Humid,
+  Wet,
+  Count
+};
+
+constexpr size_t CLIMATE_COUNT = static_cast<size_t>(ClimateBand::Count);
+constexpr size_t MOISTURE_COUNT = static_cast<size_t>(MoistureBand::Count);
+using ClimateBiomeMatrix =
+    std::array<std::array<BiomeType, MOISTURE_COUNT>, CLIMATE_COUNT>;
+
+constexpr ClimateBiomeMatrix FLATLAND_BIOMES = {{
+    {{BIOME_SNOWY_TUNDRA, BIOME_SNOWY_TUNDRA, BIOME_SNOWY_TUNDRA,
+      BIOME_SNOWY_TUNDRA}},
+    {{BIOME_PLAINS, BIOME_PLAINS, BIOME_PLAINS, BIOME_SWAMP}},
+    {{BIOME_DESERT, BIOME_SAVANNA, BIOME_SAVANNA, BIOME_SAVANNA}},
+}};
+
+constexpr ClimateBiomeMatrix HILL_BIOMES = {{
+    {{BIOME_SNOWY_TAIGA, BIOME_SNOWY_TAIGA, BIOME_SNOWY_TAIGA,
+      BIOME_SNOWY_TAIGA}},
+    {{BIOME_FOREST, BIOME_FOREST, BIOME_DARK_FOREST, BIOME_DARK_FOREST}},
+    {{BIOME_BADLANDS, BIOME_SAVANNA, BIOME_JUNGLE, BIOME_JUNGLE}},
+}};
+
+TerrainBand terrainBandFor(float continental)
+{
+  if (continental <= CONT_OCEAN_HI)
+    return TerrainBand::Ocean;
+  if (continental <= CONT_BEACH_HI)
+    return TerrainBand::Coast;
+  if (continental <= CONT_PLAINS_HI)
+    return TerrainBand::Flatlands;
+  if (continental <= CONT_HILLS_HI)
+    return TerrainBand::Hills;
+  return TerrainBand::Mountains;
+}
+
+ClimateBand climateBandFor(float temperature)
+{
+  if (temperature < 0.30f)
+    return ClimateBand::Cold;
+  if (temperature > 0.70f)
+    return ClimateBand::Hot;
+  return ClimateBand::Temperate;
+}
+
+MoistureBand moistureBandFor(float humidity)
+{
+  if (humidity < 0.30f)
+    return MoistureBand::Arid;
+  if (humidity < 0.60f)
+    return MoistureBand::Moderate;
+  if (humidity < 0.65f)
+    return MoistureBand::Humid;
+  return MoistureBand::Wet;
+}
+
+BiomeType matrixBiome(const ClimateBiomeMatrix &matrix, ClimateBand climate,
+                      MoistureBand moisture)
+{
+  return matrix[static_cast<size_t>(climate)][static_cast<size_t>(moisture)];
+}
+
+} // namespace
 
 // =============================================
 // BIOME DETERMINATION
@@ -700,60 +1029,135 @@ BiomeType TerrainGenerator::determineBiome(float temperature, float humidity,
                                            float weirdness, float continental,
                                            float erosion, float pv, float riverVal, int height) const
 {
-  float temp = (temperature + 1.0f) * 0.5f;
-  float humid = (humidity + 1.0f) * 0.5f;
-  float weird = (weirdness + 1.0f) * 0.5f;
-  float contFactor = (continental + 1.0f) * 0.5f;
-  float erosionFactor = (erosion + 1.0f) * 0.5f;
+  const float temp = std::clamp((temperature + 1.0f) * 0.5f, 0.0f, 1.0f);
+  const float humid = std::clamp((humidity + 1.0f) * 0.5f, 0.0f, 1.0f);
+  const float weird = std::clamp((weirdness + 1.0f) * 0.5f, 0.0f, 1.0f);
+  const float contFactor = std::clamp((continental + 1.0f) * 0.5f, 0.0f, 1.0f);
+  const float erosionFactor = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
+  const float reliefFactor = std::abs(std::clamp(pv, -1.0f, 1.0f));
 
-  // Rivers only form in valleys that dip below sea level
-  // We use a dynamic width based on weirdness to vary from small streams to large rivers
-  float dynamicWidth = 0.05f + 0.06f * weird;
-  float waterWidth = dynamicWidth * 0.4f; // The water is only at the deepest center of the valley
+  const TerrainBand terrainBand = terrainBandFor(contFactor);
+  const ClimateBand climateBand = climateBandFor(temp);
+  const MoistureBand moistureBand = moistureBandFor(humid);
 
-  if (std::abs(riverVal) < waterWidth) {
-      if (height <= SEA_LEVEL + 1) {
-          // If we are already in the ocean, we just return OCEAN to blend better
-          if (contFactor <= CONT_OCEAN_HI) return (temp < 0.30f) ? BIOME_FROZEN_OCEAN : BIOME_OCEAN;
-          return BIOME_RIVER;
+  // Weirdness remains the primary rare-variant driver. Erosion and local
+  // relief only perturb it slightly so the multi-noise refactor preserves the
+  // established biome distribution and pinned feature locations.
+  const float variantScore = std::clamp(
+      weird + (0.5f - erosionFactor) * 0.06f +
+          (reliefFactor - 0.5f) * 0.04f,
+      0.0f, 1.0f);
+
+  // Rivers only form in carved valleys that reach the water band. The width
+  // formula is shared with calculateHeightFloat().
+  const float dynamicWidth = 0.05f + 0.06f * weird;
+  const float waterWidth = dynamicWidth * 0.4f;
+
+  if (std::abs(riverVal) < waterWidth && height <= SEA_LEVEL + 1)
+  {
+    if (terrainBand == TerrainBand::Ocean)
+      return climateBand == ClimateBand::Cold ? BIOME_FROZEN_OCEAN : BIOME_OCEAN;
+    return temp < 0.32f ? BIOME_FROZEN_RIVER : BIOME_RIVER;
+  }
+
+  switch (terrainBand)
+  {
+  case TerrainBand::Ocean:
+    if (climateBand == ClimateBand::Cold)
+      return BIOME_FROZEN_OCEAN;
+    if (climateBand == ClimateBand::Hot && contFactor > CONT_OCEAN_LO &&
+        humid > 0.55f && variantScore > 0.58f)
+      return BIOME_CORAL_REEF;
+    return BIOME_OCEAN;
+  case TerrainBand::Coast:
+    if (climateBand == ClimateBand::Cold)
+    {
+      if (erosionFactor < 0.35f && reliefFactor > 0.45f)
+        return BIOME_GLACIER;
+      return BIOME_SNOWY_TUNDRA;
+    }
+    return BIOME_BEACH;
+  case TerrainBand::Flatlands:
+    // Preserve the established ice-spike pin exactly; other Phase 3 rare
+    // variants use the multi-noise score below.
+    if (climateBand == ClimateBand::Cold && weird > 0.80f)
+      return BIOME_ICE_SPIKES;
+    if (climateBand == ClimateBand::Temperate)
+    {
+      if (moistureBand == MoistureBand::Wet)
+      {
+        if (weird > 0.84f)
+          return BIOME_MUSHROOM_FIELDS;
+        if (temp > 0.52f && erosionFactor < 0.55f)
+          return BIOME_MANGROVE_SWAMP;
+        return BIOME_SWAMP;
       }
-  }
-
-  // 1. The Oceans
-  if (contFactor <= CONT_OCEAN_HI) {
-      if (temp < 0.30f) return BIOME_FROZEN_OCEAN;
-      return BIOME_OCEAN;
-  }
-
-  // 2. The Coast (Beach)
-  if (contFactor <= CONT_BEACH_HI) {
-      if (temp < 0.30f) return BIOME_SNOWY_TUNDRA;
-      return BIOME_BEACH;
-  }
-
-  // 3. The Flatlands (Plains / Deserts / Swamps)
-  if (contFactor <= CONT_PLAINS_HI) {
-      if (temp < 0.30f) return (weird > 0.8f) ? BIOME_ICE_SPIKES : BIOME_SNOWY_TUNDRA;
-      if (temp > 0.70f) return (humid < 0.30f) ? BIOME_DESERT : BIOME_SAVANNA;
-      if (humid > 0.65f) return BIOME_SWAMP;
+      if (moistureBand == MoistureBand::Arid)
+      {
+        if (erosionFactor > 0.55f || variantScore > 0.55f)
+          return BIOME_MOOR;
+        return BIOME_PLAINS;
+      }
+      if (variantScore > 0.62f)
+        return BIOME_FLOWER_MEADOW;
       return BIOME_PLAINS;
-  }
-
-  // 4. The Hills / Slopes
-  if (contFactor <= CONT_HILLS_HI) {
-      if (temp < 0.30f) return BIOME_SNOWY_TAIGA;
-      if (temp > 0.70f) {
-          if (humid < 0.30f) return BIOME_BADLANDS;
-          if (humid > 0.60f) return BIOME_JUNGLE;
-          return BIOME_SAVANNA;
+    }
+    if (climateBand == ClimateBand::Hot && humid < 0.37f)
+    {
+      if (weird > 0.72f && erosionFactor < 0.55f)
+        return BIOME_OASIS;
+      return BIOME_DESERT;
+    }
+    return matrixBiome(FLATLAND_BIOMES, climateBand, moistureBand);
+  case TerrainBand::Hills:
+    if (climateBand == ClimateBand::Cold)
+    {
+      if (erosionFactor < 0.40f && reliefFactor > 0.45f)
+        return BIOME_GLACIER;
+      return BIOME_SNOWY_TAIGA;
+    }
+    if (climateBand == ClimateBand::Temperate)
+    {
+      if (moistureBand == MoistureBand::Wet ||
+          moistureBand == MoistureBand::Humid)
+      {
+        if (weird > 0.84f)
+          return BIOME_MUSHROOM_FIELDS;
+        if (erosionFactor < 0.48f)
+          return BIOME_REDWOOD_FOREST;
+        return BIOME_DARK_FOREST;
       }
-      if (humid < 0.30f) return BIOME_FOREST;
-      if (humid < 0.60f) return (weird > 0.6f) ? BIOME_BIRCH_FOREST : BIOME_FOREST;
-      return BIOME_DARK_FOREST;
+      if (moistureBand == MoistureBand::Arid)
+        return weird > 0.50f ? BIOME_AUTUMN_FOREST : BIOME_FOREST;
+      if (weird > 0.72f)
+        return BIOME_CHERRY_GROVE;
+      if (variantScore > 0.60f)
+        return BIOME_BIRCH_FOREST;
+      if (erosionFactor > 0.70f)
+        return BIOME_AUTUMN_FOREST;
+      return BIOME_FOREST;
+    }
+    if (climateBand == ClimateBand::Hot)
+    {
+      if (humid < 0.44f)
+        return BIOME_BADLANDS;
+      if (humid > 0.50f)
+        return weird > 0.52f ? BIOME_BAMBOO_JUNGLE : BIOME_JUNGLE;
+      return BIOME_SAVANNA;
+    }
+    return matrixBiome(HILL_BIOMES, climateBand, moistureBand);
+  case TerrainBand::Mountains:
+    if (temp < 0.30f && erosionFactor < 0.40f)
+      return BIOME_GLACIER;
+    if (temp < 0.40f)
+      return BIOME_SNOWY_MOUNTAINS;
+    if (climateBand == ClimateBand::Hot && weird > 0.68f &&
+        erosionFactor < 0.55f)
+      return BIOME_VOLCANIC;
+    return BIOME_MOUNTAINS;
   }
 
-  // 5. The Mountains
-  if (temp < 0.40f) return BIOME_SNOWY_MOUNTAINS;
+  // Defensive fallback for compilers that do not prove the enum exhaustive.
   return BIOME_MOUNTAINS;
 }
 
@@ -770,7 +1174,7 @@ BiomeType TerrainGenerator::getBiomeAt(int worldX, int worldZ) const
   float pv = m_peaksValleysNoise->GenSingle2D(x, z, m_seed + 2000);
   float ridge = m_ridgeNoise->GenSingle2D(x, z, m_seed + 3000);
   float river = m_riverNoise->GenSingle2D(x, z, m_seed + 9000);
-  int height = calculateHeight(cont, erosion, pv, ridge, river);
+  int height = calculateHeight(cont, erosion, pv, ridge, river, weird);
 
   return determineBiome(temp, humid, weird, cont, erosion, pv, river, height);
 }
@@ -830,7 +1234,7 @@ void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
     const float pv = std::clamp(pvBuf[i], -1.0f, 1.0f);
     const float ridge = std::clamp(ridgeBuf[i], -1.0f, 1.0f);
     const float river = riverBuf[i];
-    const int h = calculateHeight(cont, erosion, pv, ridge, river);
+    const int h = calculateHeight(cont, erosion, pv, ridge, river, weirdBuf[i]);
     outBiomes[i] = determineBiome(tempBuf[i], humidBuf[i], weirdBuf[i], cont, erosion, pv, river, h);
   }
 }
@@ -848,26 +1252,32 @@ static constexpr float PLAINS_BASE_HEIGHT = 8.0f;
 static constexpr float PLAINS_VARIATION = 12.0f;
 static constexpr float HILLS_BASE_HEIGHT = 25.0f;
 static constexpr float HILLS_VARIATION = 20.0f;
-static constexpr float MOUNTAIN_BASE_HEIGHT = 65.0f;
-static constexpr float MOUNTAIN_VARIATION = 45.0f;
+static constexpr float MOUNTAIN_BASE_HEIGHT = 60.0f;
+static constexpr float MOUNTAIN_VARIATION = 50.0f;
 
 // Ridge-driven peak parameters
-static constexpr float RIDGE_PEAK_THRESHOLD = 0.2f;  // Ridge value above which peaks form
-static constexpr float RIDGE_PEAK_AMPLITUDE = 95.0f; // Max extra height from ridge peaks
+static constexpr float RIDGE_PEAK_THRESHOLD = 0.2f;   // Ridge value above which peaks form
+static constexpr float RIDGE_PEAK_AMPLITUDE = 125.0f; // Max extra height from ridge peaks
+
+// Rock exposure: post-erosion neighbor height delta above which vegetated
+// surfaces turn to bare stone/gravel (cliff faces).
+static constexpr float ROCKY_SLOPE_THRESHOLD = 2.0f;
 
 // Height clamping
 // static constexpr int   HEIGHT_CEILING_MARGIN =  32; // Moved up
 
 float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
-                                             float peaksValleys, float ridge, float riverVal) const
+                                             float peaksValleys, float ridge, float riverVal, float weirdness) const
 {
   continental = std::clamp(continental, -1.0f, 1.0f);
   erosion = std::clamp(erosion, -1.0f, 1.0f);
   peaksValleys = std::clamp(peaksValleys, -1.0f, 1.0f);
   ridge = std::clamp(ridge, -1.0f, 1.0f);
+  weirdness = std::clamp(weirdness, -1.0f, 1.0f);
 
   float continentalFactor = (continental + 1.0f) * 0.5f;
   float erosionFactor = (erosion + 1.0f) * 0.5f;
+  float weirdFactor = (weirdness + 1.0f) * 0.5f;
 
   // Compute blending weights for each terrain band using smoothstep transitions
   float oceanWeight = 1.0f - smoothstep(CONT_OCEAN_LO, CONT_OCEAN_HI, continentalFactor);
@@ -896,7 +1306,8 @@ float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
   float mountainHeight = MOUNTAIN_BASE_HEIGHT + peaksValleys * MOUNTAIN_VARIATION;
   if (ridge > RIDGE_PEAK_THRESHOLD) {
     float val = (ridge - RIDGE_PEAK_THRESHOLD) / (1.0f - RIDGE_PEAK_THRESHOLD);
-    mountainHeight += (val * val) * RIDGE_PEAK_AMPLITUDE;
+    // Cubic falloff: broad massifs with sharp, narrow summit ridges
+    mountainHeight += (val * val * val) * RIDGE_PEAK_AMPLITUDE;
   }
 
   float heightVariation = oceanWeight * oceanHeight + beachWeight * beachHeight +
@@ -905,10 +1316,10 @@ float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
 
   // River Valley carving
   float riverFactor = std::abs(riverVal);
-  
-  // Use weirdness noise to make river width dynamic (but we only have ridge and erosion here!)
-  // Since we don't pass weirdness to calculateHeight, we'll use erosion to vary the width
-  float dynamicWidth = 0.05f + 0.06f * erosionFactor;
+
+  // Weirdness drives the dynamic river width so the carved valley stays aligned
+  // with the RIVER biome band detected in determineBiome (same formula there).
+  float dynamicWidth = 0.05f + 0.06f * weirdFactor;
   
   // We allow carving even in the ocean, so the river smoothly enters the sea
   if (riverFactor < dynamicWidth) {
@@ -917,19 +1328,16 @@ float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
       float valleyShape = 1.0f - valleyDist;
       valleyShape = smoothstep(0.0f, 1.0f, valleyShape);
       
-      // We subtract up to 28 blocks of height.
+      // We subtract up to 32 blocks of height.
       // This will pull mountains down to form passes, and plains below sea level to form rivers.
-      float carveAmount = valleyShape * 28.0f;
+      float carveAmount = valleyShape * 32.0f;
       float newHeight = heightVariation - carveAmount;
 
-      // Prevent rivers from digging impossibly deep holes in plains
-      // But allow them to dig normally if the terrain was already deep (e.g. ocean).
-      float minRiverBottom = -4.0f;
-      if (newHeight < minRiverBottom && heightVariation > minRiverBottom) {
-          // Soft clamp to make the bottom look a bit nicer
-          float overshoot = minRiverBottom - newHeight;
-          newHeight = minRiverBottom - overshoot * 0.1f;
-      }
+      // Do not cut land below the target two-block riverbed. The exact flat
+      // channel is applied after thermal erosion once BIOME_RIVER is known.
+      constexpr float RIVERBED_HEIGHT = -2.0f;
+      if (heightVariation > RIVERBED_HEIGHT)
+        newHeight = std::max(newHeight, RIVERBED_HEIGHT);
 
       heightVariation = newHeight;
   }
@@ -938,9 +1346,9 @@ float TerrainGenerator::calculateHeightFloat(float continental, float erosion,
 }
 
 int TerrainGenerator::calculateHeight(float continental, float erosion,
-                                      float peaksValleys, float ridge, float riverVal) const
+                                      float peaksValleys, float ridge, float riverVal, float weirdness) const
 {
-  float heightFloat = calculateHeightFloat(continental, erosion, peaksValleys, ridge, riverVal);
+  float heightFloat = calculateHeightFloat(continental, erosion, peaksValleys, ridge, riverVal, weirdness);
   return std::clamp(static_cast<int>(std::round(heightFloat)), 1, CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN);
 }
 
@@ -950,15 +1358,17 @@ void TerrainGenerator::applyErosion(float *heightMap, int size) const
     return;
 
   // 1. Single Thermal Erosion pass (smooths overly steep slopes deterministically)
-  // We only run 1 iteration because our extended heightmap (overlap=2)
-  // can only safely supply deterministic neighborhood data for 1 convolution pass
-  // without creating mismatches at chunk boundaries.
+  // We only run 1 iteration on the 28x28 extended heightmap. Cells [2,25]
+  // are fully deterministic across chunk windows because all four neighbors
+  // [1,26] are processed and their give-decisions only read sampled values
+  // [0,27]. (The old 20x20 window left the +/-1 border columns
+  // underdetermined because outer-ring cells never gave material.)
   const float talusAngle = 0.6f;  // Max allowed height diff between adjacent cells
   const float thermalRate = 0.5f; // Fraction of material to move
 
   float *tempMap;
   std::vector<float> fallbackMap;
-  if (size <= 20)
+  if (size <= EXT_SIZE)
   {
     tempMap = s_genBuffers.erosionTempMap.data();
     std::copy(heightMap, heightMap + size * size, tempMap);
@@ -1008,6 +1418,95 @@ void TerrainGenerator::applyErosion(float *heightMap, int size) const
 // VEGETATION GENERATION
 // =============================================
 
+namespace
+{
+
+/// Species helpers mirroring the placeTree switch — used for bushes / fallen logs.
+inline TextureType leafTypeForBiome(BiomeType biome, uint32_t h)
+{
+  switch (biome)
+  {
+  case BIOME_SNOWY_TAIGA:
+  case BIOME_REDWOOD_FOREST:
+    return TextureType::SPRUCE_LEAVES;
+  case BIOME_MOUNTAINS:
+    return ((h % 10) < 7) ? TextureType::SPRUCE_LEAVES : TextureType::OAK_LEAVES;
+  case BIOME_BIRCH_FOREST:
+    return ((h % 5) < 4) ? TextureType::BIRCH_LEAVES : TextureType::OAK_LEAVES;
+  case BIOME_CHERRY_GROVE:
+    return TextureType::CHERRY_LEAVES;
+  case BIOME_DARK_FOREST:
+  case BIOME_AUTUMN_FOREST:
+  {
+    const uint32_t r = h % 20;
+    if (r < 12)
+      return TextureType::DARK_OAK_LEAVES;
+    if (r < 17)
+      return TextureType::SPRUCE_LEAVES;
+    return TextureType::BIRCH_LEAVES;
+  }
+  case BIOME_JUNGLE:
+  case BIOME_BAMBOO_JUNGLE:
+    return TextureType::JUNGLE_LEAVES;
+  case BIOME_MANGROVE_SWAMP:
+    return TextureType::MANGROVE_LEAVES;
+  case BIOME_SAVANNA:
+  case BIOME_OASIS:
+    return TextureType::ACACIA_LEAVES;
+  case BIOME_MOOR:
+    return (h & 1u) == 0u ? TextureType::SPRUCE_LEAVES
+                          : TextureType::OAK_LEAVES;
+  case BIOME_MUSHROOM_FIELDS:
+    return (h & 1u) == 0u ? TextureType::RED_MUSHROOM_BLOCK
+                          : TextureType::BROWN_MUSHROOM_BLOCK;
+  default:
+    return TextureType::OAK_LEAVES;
+  }
+}
+
+inline TextureType logTypeForBiome(BiomeType biome, uint32_t h)
+{
+  switch (biome)
+  {
+  case BIOME_SNOWY_TAIGA:
+  case BIOME_REDWOOD_FOREST:
+    return TextureType::SPRUCE_LOG;
+  case BIOME_MOUNTAINS:
+    return ((h % 10) < 7) ? TextureType::SPRUCE_LOG : TextureType::OAK_LOG;
+  case BIOME_BIRCH_FOREST:
+    return ((h % 5) < 4) ? TextureType::BIRCH_LOG : TextureType::OAK_LOG;
+  case BIOME_CHERRY_GROVE:
+    return TextureType::CHERRY_LOG;
+  case BIOME_DARK_FOREST:
+  case BIOME_AUTUMN_FOREST:
+  {
+    const uint32_t r = h % 20;
+    if (r < 12)
+      return TextureType::DARK_OAK_LOG;
+    if (r < 17)
+      return TextureType::SPRUCE_LOG;
+    return TextureType::BIRCH_LOG;
+  }
+  case BIOME_JUNGLE:
+    return TextureType::JUNGLE_LOG;
+  case BIOME_MANGROVE_SWAMP:
+    return TextureType::MANGROVE_LOG;
+  case BIOME_BAMBOO_JUNGLE:
+    return TextureType::BAMBOO_BLOCK;
+  case BIOME_SAVANNA:
+  case BIOME_OASIS:
+    return TextureType::ACACIA_LOG;
+  case BIOME_MOOR:
+    return (h & 1u) == 0u ? TextureType::SPRUCE_LOG : TextureType::OAK_LOG;
+  case BIOME_MUSHROOM_FIELDS:
+    return TextureType::MUSHROOM_STEM;
+  default:
+    return TextureType::OAK_LOG;
+  }
+}
+
+} // namespace
+
 void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int chunkZ)
 {
   float chunkXf = static_cast<float>(chunkX) + NOISE_OFFSET;
@@ -1015,70 +1514,207 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
 
   float *treeNoiseResults = s_genBuffers.treeNoiseResults.data();
   float *forestDensityResults = s_genBuffers.forestDensityResults.data();
+  const int *extHeights = s_genBuffers.extHeights.data();
+  const BiomeType *extBiomes = s_genBuffers.extBiomes.data();
+  const float *temperatureResults = s_genBuffers.temperature.data();
 
-  // Local tree-placement noise: high-frequency per-column variation
-  m_treeNoise->GenUniformGrid2D(treeNoiseResults, chunkXf, chunkZf,
-                                CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 10000);
-  // Forest-cluster noise: low-frequency, shapes large forest patches and clearings
-  m_forestDensityNoise->GenUniformGrid2D(forestDensityResults, chunkXf, chunkZf,
-                                         CHUNK_SIZE, CHUNK_SIZE, 1.0f, m_seed + 11000);
+  // Vegetation noise over the extended window (covers the cross-chunk ring).
+  const float extXf = chunkXf - static_cast<float>(EXT_CORE_OFFSET);
+  const float extZf = chunkZf - static_cast<float>(EXT_CORE_OFFSET);
+  m_treeNoise->GenUniformGrid2D(treeNoiseResults, extXf, extZf,
+                                EXT_SIZE, EXT_SIZE, 1.0f, m_seed + 10000);
+  m_forestDensityNoise->GenUniformGrid2D(forestDensityResults, extXf, extZf,
+                                         EXT_SIZE, EXT_SIZE, 1.0f, m_seed + 11000);
 
-  for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
+  auto extIndexAt = [](int lx, int lz) {
+    return (lz + EXT_CORE_OFFSET) * EXT_SIZE + (lx + EXT_CORE_OFFSET);
+  };
+  auto setIfAir = [&](int lx, int y, int lz, TextureType t) {
+    if (lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE || y < 0 || y >= CHUNK_HEIGHT)
+      return;
+    int idx = getVoxelIndex(lx, y, lz);
+    if (chunkData.voxels[idx].type == static_cast<uint8_t>(AIR))
+      chunkData.voxels[idx].type = t;
+  };
+  auto setIfWater = [&](int lx, int y, int lz, TextureType t) {
+    if (lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE ||
+        y < 0 || y >= CHUNK_HEIGHT)
+      return;
+    int idx = getVoxelIndex(lx, y, lz);
+    if (chunkData.voxels[idx].type == static_cast<uint8_t>(WATER))
+      chunkData.voxels[idx].type = t;
+  };
+
+  // Candidates are evaluated in a ring of MAX_TREE_RADIUS around the core so
+  // canopies/features rooted in neighbor chunks get their in-chunk voxels
+  // placed identically by every overlapping chunk. All inputs come from the
+  // extended window (post-erosion, pre-cave heights/biomes) and world-position
+  // hashes -> fully deterministic. Cave carve-outs under a candidate are not
+  // visible here, so a tree may rarely hover above a ravine opening.
+  for (int localZ = -MAX_TREE_RADIUS; localZ < CHUNK_SIZE + MAX_TREE_RADIUS; ++localZ)
   {
-    for (int localX = 0; localX < CHUNK_SIZE; ++localX)
+    for (int localX = -MAX_TREE_RADIUS; localX < CHUNK_SIZE + MAX_TREE_RADIUS; ++localX)
     {
-      int colIndex = getColumnIndex(localX, localZ);
-      BiomeType biome = chunkData.biomes[colIndex];
-      int terrainHeight = chunkData.heightMap[colIndex];
+      const int extIndex = extIndexAt(localX, localZ);
+      const int terrainHeight = extHeights[extIndex];
+      const BiomeType biome = extBiomes[extIndex];
+      const int worldX = chunkX + localX;
+      const int worldZ = chunkZ + localZ;
+
+      // Warm shallow oceans receive deterministic coral heads. Candidate
+      // evaluation uses the same cross-chunk ring as trees so one-block arms
+      // remain complete at chunk boundaries.
+      if (biome == BIOME_CORAL_REEF)
+      {
+        const uint32_t coralHash = treeHash(worldX, worldZ, m_seed + 1200);
+        const float coralRoll =
+            static_cast<float>(coralHash & 0xFFFFu) / 65535.0f;
+        if (terrainHeight < SEA_LEVEL - 1 && coralRoll < 0.035f)
+        {
+          static constexpr TextureType kCorals[] = {
+              TextureType::TUBE_CORAL_BLOCK, TextureType::BRAIN_CORAL_BLOCK,
+              TextureType::BUBBLE_CORAL_BLOCK, TextureType::FIRE_CORAL_BLOCK,
+              TextureType::HORN_CORAL_BLOCK,
+          };
+          const TextureType coral =
+              kCorals[(coralHash >> 16) % std::size(kCorals)];
+          const int height = 1 + static_cast<int>((coralHash >> 20) % 3u);
+          for (int y = 1; y <= height; ++y)
+            setIfWater(localX, terrainHeight + y, localZ, coral);
+          if (((coralHash >> 24) & 1u) != 0u)
+          {
+            setIfWater(localX + 1, terrainHeight + 1, localZ, coral);
+            setIfWater(localX - 1, terrainHeight + 1, localZ, coral);
+            setIfWater(localX, terrainHeight + 1, localZ + 1, coral);
+            setIfWater(localX, terrainHeight + 1, localZ - 1, coral);
+          }
+        }
+        continue;
+      }
 
       if (terrainHeight <= SEA_LEVEL || terrainHeight > 200)
         continue;
 
       const BiomeConfig &config = getBiomeConfig(biome);
-      // Ice spikes place structure with treeDensity=0 / hasCacti=false — do not skip them here.
       const bool wantsVegetation =
-          config.treeDensity > 0.0f || config.hasCacti || biome == BIOME_ICE_SPIKES;
+          config.treeDensity > 0.0f || config.hasCacti || biome == BIOME_ICE_SPIKES ||
+          config.bushDensity > 0.0f || config.rockDensity > 0.0f ||
+          config.fallenLogDensity > 0.0f;
       if (!wantsVegetation)
         continue;
 
-      int worldX = chunkX + localX;
-      int worldZ = chunkZ + localZ;
-
       // Forest-cluster factor [0,1]: low values = clearing, high values = dense forest.
-      float forestFactor = (forestDensityResults[colIndex] + 1.0f) * 0.5f;
+      float forestFactor = (forestDensityResults[extIndex] + 1.0f) * 0.5f;
       // Local variation factor [0,1]: finer variation within the forest patch.
-      float localFactor = (treeNoiseResults[colIndex] + 1.0f) * 0.5f;
+      float localFactor = (treeNoiseResults[extIndex] + 1.0f) * 0.5f;
 
       // Combined probability: biome density modulated by both noise layers.
-      // When forestFactor is low (clearings), treeProbability drops near zero.
       float treeProbability = config.treeDensity * forestFactor * localFactor;
 
-      int surfaceIndex = getVoxelIndex(localX, terrainHeight, localZ);
-      TextureType surfaceType = static_cast<TextureType>(chunkData.voxels[surfaceIndex].type);
+      // Surface block at that column: getVoxelTypeAt is pure, so the value
+      // matches what the terrain pass computed (same in every chunk).
+      const float temperature = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
+      const float columnSlope = columnSlopeAt(extHeights, EXT_SIZE, extIndex);
+      const TextureType surfaceType =
+          getVoxelTypeAt(worldX, terrainHeight, worldZ, terrainHeight, biome,
+                         temperature, columnSlope, 0.0f);
 
       if (!blockIsPlantableSurface(surfaceType))
         continue;
 
-      uint32_t hash = treeHash(worldX, worldZ, m_seed);
+      const uint32_t hash = treeHash(worldX, worldZ, m_seed);
+      const float roll = static_cast<float>(hash & 0xFFFF) / 65535.0f;
 
       // Ice spikes: tall packed-ice columns (independent of tree density)
       if (biome == BIOME_ICE_SPIKES)
       {
-        if (static_cast<float>(hash & 0xFFFF) / 65535.0f < 0.04f)
+        if (roll < 0.04f)
           placeIceSpike(chunkData, localX, localZ, terrainHeight + 1, worldX, worldZ);
         continue;
       }
 
-      if (static_cast<float>(hash & 0xFFFF) / 65535.0f < treeProbability)
+      if (roll < treeProbability)
       {
         placeTree(chunkData, localX, localZ, terrainHeight + 1, biome, worldX, worldZ);
+        continue;
       }
-      else if (config.hasCacti && blockIsCactusGround(surfaceType))
+
+      if (config.hasCacti && blockIsCactusGround(surfaceType))
       {
         uint32_t cHash = treeHash(worldX, worldZ, m_seed + 1);
         if (static_cast<float>(cHash & 0xFFFF) / 65535.0f < 0.015f)
         {
           placeCactus(chunkData, localX, localZ, terrainHeight + 1, worldX, worldZ);
+          continue;
+        }
+      }
+
+      // ---- Ground cover -------------------------------------------------
+      // Bushes (species-tinted leaves, 1-2 high)
+      if (config.bushDensity > 0.0f)
+      {
+        const uint32_t bHash = treeHash(worldX, worldZ, m_seed + 800);
+        if (static_cast<float>(bHash & 0xFFFF) / 65535.0f < config.bushDensity)
+        {
+          const TextureType leaf = leafTypeForBiome(biome, bHash);
+          setIfAir(localX, terrainHeight + 1, localZ, leaf);
+          if (((bHash >> 16) & 3) == 0)
+            setIfAir(localX, terrainHeight + 2, localZ, leaf);
+        }
+      }
+
+      // Boulder clusters (cobble / mossy cobble in wet biomes)
+      if (config.rockDensity > 0.0f)
+      {
+        const uint32_t rHash = treeHash(worldX, worldZ, m_seed + 700);
+        if (static_cast<float>(rHash & 0xFFFF) / 65535.0f < config.rockDensity)
+        {
+          const bool mossy = biome == BIOME_SWAMP || biome == BIOME_JUNGLE ||
+                             biome == BIOME_DARK_FOREST || biome == BIOME_SNOWY_TAIGA ||
+                             biome == BIOME_SNOWY_TUNDRA ||
+                             biome == BIOME_REDWOOD_FOREST ||
+                             biome == BIOME_MANGROVE_SWAMP ||
+                             biome == BIOME_BAMBOO_JUNGLE ||
+                             biome == BIOME_MUSHROOM_FIELDS;
+          const TextureType rockType = mossy ? TextureType::MOSSY_COBBLESTONE
+                                             : TextureType::COBBLESTONE;
+          static const int kDirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+          const int extra = static_cast<int>((rHash >> 16) % 3); // 0-2 neighbors
+          setIfAir(localX, terrainHeight + 1, localZ, rockType);
+          for (int k = 0; k < extra; ++k)
+          {
+            const int dir = static_cast<int>((rHash >> (20 + k * 2)) & 3u);
+            const int nx = localX + kDirs[dir][0];
+            const int nz = localZ + kDirs[dir][1];
+            const int nh = extHeights[extIndexAt(nx, nz)];
+            if (nh > SEA_LEVEL && nh <= 200)
+              setIfAir(nx, nh + 1, nz, rockType);
+          }
+        }
+      }
+
+      // Fallen logs (2-4 long, cardinal direction, follows terrain steps).
+      // Reach is 3, so candidates are only evaluated within 3 of the core —
+      // their whole length stays inside the extended window.
+      if (config.fallenLogDensity > 0.0f &&
+          localX >= -3 && localX <= CHUNK_SIZE + 2 &&
+          localZ >= -3 && localZ <= CHUNK_SIZE + 2)
+      {
+        const uint32_t lHash = treeHash(worldX, worldZ, m_seed + 900);
+        if (static_cast<float>(lHash & 0xFFFF) / 65535.0f < config.fallenLogDensity)
+        {
+          const TextureType log = logTypeForBiome(biome, lHash);
+          static const int kDirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+          const int len = 2 + static_cast<int>((lHash >> 16) % 3); // 2-4
+          const int dir = static_cast<int>((lHash >> 20) & 3u);
+          for (int k = 0; k < len; ++k)
+          {
+            const int lx = localX + kDirs[dir][0] * k;
+            const int lz = localZ + kDirs[dir][1] * k;
+            const int h = extHeights[extIndexAt(lx, lz)];
+            if (h > SEA_LEVEL && h <= 200)
+              setIfAir(lx, h + 1, lz, log);
+          }
         }
       }
     }
@@ -1135,6 +1771,7 @@ TextureType surfaceBlockForBiome(BiomeType biome, uint32_t colHash, const BiomeC
   switch (biome)
   {
   case BIOME_SNOWY_TAIGA:
+  case BIOME_REDWOOD_FOREST:
     if ((colHash % 7u) == 0u)
       return TextureType::PODZOL;
     break;
@@ -1143,13 +1780,39 @@ TextureType surfaceBlockForBiome(BiomeType biome, uint32_t colHash, const BiomeC
       return TextureType::COARSE_DIRT;
     break;
   case BIOME_SWAMP:
+  case BIOME_MANGROVE_SWAMP:
     if ((colHash % 5u) == 0u)
       return TextureType::MOSS_BLOCK;
     if ((colHash % 4u) == 0u)
       return TextureType::CLAY;
     break; // config.surfaceBlock is MUD
   case BIOME_JUNGLE:
+  case BIOME_BAMBOO_JUNGLE:
     if ((colHash % 11u) == 0u)
+      return TextureType::MOSS_BLOCK;
+    break;
+  case BIOME_AUTUMN_FOREST:
+    if ((colHash % 6u) == 0u)
+      return TextureType::PODZOL;
+    if ((colHash % 5u) == 0u)
+      return TextureType::COARSE_DIRT;
+    break;
+  case BIOME_MOOR:
+    if ((colHash % 4u) == 0u)
+      return TextureType::GRAVEL;
+    break;
+  case BIOME_GLACIER:
+    if ((colHash % 9u) == 0u)
+      return TextureType::BLUE_ICE;
+    break;
+  case BIOME_VOLCANIC:
+    if ((colHash % 19u) == 0u)
+      return TextureType::MAGMA;
+    if ((colHash % 5u) == 0u)
+      return TextureType::BLACKSTONE;
+    break;
+  case BIOME_OASIS:
+    if ((colHash % 7u) == 0u)
       return TextureType::MOSS_BLOCK;
     break;
   case BIOME_BADLANDS:
@@ -1157,8 +1820,11 @@ TextureType surfaceBlockForBiome(BiomeType biome, uint32_t colHash, const BiomeC
       return badlandsBandAt(worldY, colHash);
     break; // config.surfaceBlock is RED_SAND
   case BIOME_RIVER:
+  case BIOME_FROZEN_RIVER:
     if ((colHash % 3u) == 0u)
       return TextureType::CLAY;
+    if (((colHash >> 3) % 3u) == 0u)
+      return TextureType::GRAVEL; // gravel banks
     break;
   default:
     break;
@@ -1169,7 +1835,7 @@ TextureType surfaceBlockForBiome(BiomeType biome, uint32_t colHash, const BiomeC
 } // namespace
 
 TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight,
-                                             BiomeType biome, float temperature, float density) const
+                                             BiomeType biome, float temperature, float slope, float density) const
 {
   if (worldY <= BEDROCK_LEVEL)
     return TextureType::BEDROCK;
@@ -1191,12 +1857,20 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
       if (worldY <= SEA_LEVEL + 2 && config.surfaceBlock != TextureType::STONE)
         return config.underwaterBlock;
 
-      if (biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS || config.hasSnow)
+      // Global snow line: any land biome caps in snow at altitude (dithered edge).
+      const float snowLine = 160.0f + temperature * 10.0f;
+      const float dither = static_cast<float>(colHash & 0xFFFF) / 65535.0f;
+      if (worldY > snowLine + (dither - 0.5f) * 15.0f)
+        return TextureType::SNOW;
+
+      // Rock exposure on steep vegetated slopes (cliffs, scree).
+      if (slope > ROCKY_SLOPE_THRESHOLD &&
+          (config.surfaceBlock == TextureType::GRASS_TOP ||
+           config.surfaceBlock == TextureType::DIRT ||
+           config.surfaceBlock == TextureType::MUD ||
+           config.surfaceBlock == TextureType::SNOW))
       {
-        const float snowLine = 160.0f + temperature * 10.0f;
-        const float dither = static_cast<float>(colHash & 0xFFFF) / 65535.0f;
-        if (worldY > snowLine + (dither - 0.5f) * 15.0f)
-          return TextureType::SNOW;
+        return ((colHash >> 8) % 4 == 0) ? TextureType::GRAVEL : TextureType::STONE;
       }
 
       return surfaceBlockForBiome(biome, colHash, config, worldY);
@@ -1206,6 +1880,13 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
     {
       if (worldY <= SEA_LEVEL + 2 && config.subsurfaceBlock != TextureType::STONE)
         return config.underwaterBlock;
+      // Bare rock under exposed cliff faces (matches the surface override).
+      if (slope > ROCKY_SLOPE_THRESHOLD &&
+          (config.surfaceBlock == TextureType::GRASS_TOP ||
+           config.surfaceBlock == TextureType::DIRT ||
+           config.surfaceBlock == TextureType::MUD ||
+           config.surfaceBlock == TextureType::SNOW))
+        return TextureType::STONE;
       // Badlands: banded cliffs; other biomes use BiomeConfig::subsurfaceBlock
       // (desert sandstone, etc. already set on the config).
       if (biome == BIOME_BADLANDS)
@@ -1220,7 +1901,12 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
 
   if (worldY <= SEA_LEVEL)
   {
-    if (biome == BIOME_FROZEN_OCEAN && worldY == SEA_LEVEL)
+    if ((biome == BIOME_FROZEN_OCEAN || biome == BIOME_FROZEN_RIVER) &&
+        worldY == SEA_LEVEL)
+      return TextureType::ICE;
+    // Frozen rivers: ice crust on the water surface in cold climates
+    // (temperature raw < -0.4 matches the cold band in determineBiome).
+    if (biome == BIOME_RIVER && temperature < -0.4f && worldY == SEA_LEVEL)
       return TextureType::ICE;
     return TextureType::WATER;
   }
@@ -1262,14 +1948,6 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
       {CHUNK_SIZE, CHUNK_SIZE, 1, 1}  // NE corner
   };
 
-  float *bCont = s_genBuffers.borderCont.data();
-  float *bErosion = s_genBuffers.borderErosion.data();
-  float *bPV = s_genBuffers.borderPV.data();
-  float *bRidge = s_genBuffers.borderRidge.data();
-  float *bTemp = s_genBuffers.borderTemp.data();
-  float *bHumid = s_genBuffers.borderHumid.data();
-  float *bWeird = s_genBuffers.borderWeird.data();
-  float *bRiver = s_genBuffers.borderRiver.data();
   float *bCave = s_genBuffers.borderCave.data();
   float *bRavine = s_genBuffers.borderRavine.data();
   float *bSurface3D = s_genBuffers.borderSurface3D.data();
@@ -1282,34 +1960,21 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
 
     int numColumns = strip.xSize * strip.zSize; // CHUNK_SIZE (16) or 1 array Size
 
-    // We already generated the 20x20 extended heightmap/noises during `generateChunkBatch`
-    // The core chunk is at (x=2..17, z=2..17).
-    // The borders are at:
-    // South: lx=0..15, lz=-1 => extX=2..17, extZ=1
-    // North: lx=0..15, lz=16 => extX=2..17, extZ=18
-    // West:  lx=-1, lz=0..15 => extX=1,     extZ=2..17
-    // East:  lx=16, lz=0..15 => extX=18,    extZ=2..17
-
-    float *extHeightMap = s_genBuffers.extendedHeightMap.data();
+    // Reuse the extended-window biomes/heights computed during `generateChunkBatch`.
+    // The core chunk is at (x=6..21, z=6..21); border strips read the halo.
+    int *extHeights = s_genBuffers.extHeights.data();
+    BiomeType *extBiomes = s_genBuffers.extBiomes.data();
     float *temperatureResults = s_genBuffers.temperature.data();
-    float *humidityResults = s_genBuffers.humidity.data();
-    float *weirdnessResults = s_genBuffers.weirdness.data();
-    float *continentalResults = s_genBuffers.continental.data();
-    float *riverResults = s_genBuffers.river.data();
-    float *erosionResults = s_genBuffers.erosion.data();
-    float *peaksValleysResults = s_genBuffers.peaksValleys.data();
-    const int EXTENDED_SIZE = 20;
+    const int EXTENDED_SIZE = EXT_SIZE;
 
-    // Bound strip 3D noise to max surface height on this strip (reuse 20x20 heights).
+    // Bound strip 3D noise to max surface height on this strip (reuse ext heights).
     int stripMaxH = 1;
     for (int j = 0; j < numColumns; ++j)
     {
       int lx = strip.lxStart + (strip.xSize > 1 ? j : 0);
       int lz = strip.lzStart + (strip.zSize > 1 ? j : 0);
-      int extIndex = (lz + 2) * EXTENDED_SIZE + (lx + 2);
-      int height = std::clamp(static_cast<int>(std::round(extHeightMap[extIndex])), 1,
-                              static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
-      stripMaxH = std::max(stripMaxH, height);
+      int extIndex = (lz + EXT_CORE_OFFSET) * EXTENDED_SIZE + (lx + EXT_CORE_OFFSET);
+      stripMaxH = std::max(stripMaxH, extHeights[extIndex]);
     }
     const ChunkYFillBounds borderBounds =
 		computeChunkYFillBounds(stripMaxH, SEA_LEVEL, 16, CHUNK_HEIGHT);
@@ -1330,24 +1995,15 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
       int lx = strip.lxStart + (strip.xSize > 1 ? j : 0);
       int lz = strip.lzStart + (strip.zSize > 1 ? j : 0);
 
-      int extX = lx + 2;
-      int extZ = lz + 2;
+      int extX = lx + EXT_CORE_OFFSET;
+      int extZ = lz + EXT_CORE_OFFSET;
       int extIndex = extZ * EXTENDED_SIZE + extX;
 
-      int height = std::clamp(static_cast<int>(std::round(extHeightMap[extIndex])), 1, static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
-
-      float cont = std::clamp(continentalResults[extIndex], -1.0f, 1.0f);
-      float temp = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
-      float humid = std::clamp(humidityResults[extIndex], -1.0f, 1.0f);
-      float weird = std::clamp(weirdnessResults[extIndex], -1.0f, 1.0f);
-      float riverVal = riverResults[extIndex];
-      float erosion = std::clamp(erosionResults[extIndex], -1.0f, 1.0f);
-      float pv = std::clamp(peaksValleysResults[extIndex], -1.0f, 1.0f);
-
-      BiomeType biome = determineBiome(temp, humid, weird, cont, erosion, pv, riverVal, height);
-      float temperature = temp;
-
-      bool isMountain = (biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS);
+      int height = extHeights[extIndex];
+      BiomeType biome = extBiomes[extIndex];
+      float temperature = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
+      float columnSlope = columnSlopeAt(extHeights, EXTENDED_SIZE, extIndex);
+      const float perturbAmp = getBiomeConfig(biome).surfacePerturbAmp;
 
       for (int y = borderYMin; y < borderFillEnd; ++y)
       {
@@ -1358,16 +2014,16 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
         int noiseIdx = noiseZ * (borderYSize * strip.xSize) + localY * strip.xSize + noiseX;
 
         float density = static_cast<float>(height - y);
-        if (inNoiseBand && isMountain && density > -8.0f && density < 12.0f) {
+        if (inNoiseBand && perturbAmp > 0.0f && density > -8.0f && density < 12.0f) {
            float distToSurface = std::abs(density);
            float blend = std::max(0.0f, 1.0f - distToSurface / 12.0f);
-           density += bSurface3D[noiseIdx] * 8.0f * blend;
+           density += bSurface3D[noiseIdx] * perturbAmp * blend;
         }
 
         TextureType type;
         if (density >= 0.0f) {
-            type = getVoxelTypeAt(chunkX + lx, y, chunkZ + lz, height, biome, temperature, density);
-            
+            type = getVoxelTypeAt(chunkX + lx, y, chunkZ + lz, height, biome, temperature, columnSlope, density);
+
             if (inNoiseBand && type != TextureType::AIR && type != TextureType::BEDROCK && type != TextureType::WATER)
             {
               float hRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
@@ -1377,7 +2033,7 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
               }
             }
         } else {
-            type = getVoxelTypeAt(chunkX + lx, y, chunkZ + lz, height, biome, temperature, density);
+            type = getVoxelTypeAt(chunkX + lx, y, chunkZ + lz, height, biome, temperature, columnSlope, density);
         }
 
         if (type != TextureType::AIR)
@@ -1391,9 +2047,4 @@ float TerrainGenerator::smoothstep(float edge0, float edge1, float x) const
 {
   float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
   return t * t * (3.0f - 2.0f * t);
-}
-
-float TerrainGenerator::lerp(float a, float b, float t) const
-{
-  return a + t * (b - a);
 }

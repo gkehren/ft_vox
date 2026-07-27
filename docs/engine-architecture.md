@@ -221,9 +221,15 @@ File: `src/Chunk/TerrainGenerator.hpp` / `TerrainGenerator.cpp`.
 
 ### Stack
 
-- **FastNoise2** node graphs (height, temperature, humidity, caves, rivers as configured)  
+- **FastNoise2** node graphs (domain-warped continental, peaks/valleys and
+  ridge fields; temperature, humidity, caves and rivers)
 - Seeded; **thread-local** generators via `getThreadLocal(seed)` for worker safety  
 - `NOISE_OFFSET` avoids origin symmetry artifacts  
+- A 28x28 extended window keeps thermal erosion, biome tint smoothing,
+  border shells, and cross-chunk vegetation deterministic around the 16x16 core.
+- Terrain shaping includes erosion-driven badlands/cold plateaus, per-biome
+  3D surface perturbation, sharp mountain ridges, and flat two-block-deep
+  river channels with cold-climate ice.
 
 ### Output (`ChunkData`)
 
@@ -237,14 +243,49 @@ File: `src/Chunk/TerrainGenerator.hpp` / `TerrainGenerator.cpp`.
 
 ### Biomes
 
-`BiomeConfig` per `BiomeType`: surface/subsurface/underwater blocks, tree/vegetation density, colors, snow/cacti/rivers flags.
+`BiomeConfig` per `BiomeType`: surface/subsurface/underwater blocks, tree and
+ground-cover densities, grass/foliage colors, snow/cacti flags, and 3D surface
+perturbation amplitude.
 
-Notable constants: `SEA_LEVEL = 64`, `BEDROCK_LEVEL`, beach band around sea level.
+Biome selection is a multi-noise pipeline:
+
+1. Continentality selects ocean, coast, flatland, hill, or mountain terrain.
+2. A temperature × humidity matrix selects the primary climate biome.
+3. Weirdness, erosion, and local relief select structured variants and rare
+   biomes without changing chunk-order determinism.
+4. River noise overrides land where the carved channel reaches sea level.
+
+The 31 biomes include the original climate set plus flower meadows, cherry
+groves, autumn and redwood forests, mangrove swamps, bamboo jungles, moors,
+glaciers, frozen rivers, volcanic terrain, oases, mushroom fields, and coral
+reefs. Their map colors are indexed by `BiomeType` in `GameUI.cpp`; the World
+panel displays the complete legend in a scrollable child.
+
+Phase 3 feature placers are world-coordinate deterministic and evaluated from
+the cross-chunk halo. They include cherry trees, 2×2 redwoods, mangroves,
+bamboo, palms, giant mushrooms, coral heads, and volcanic surface patches.
+
+Notable constants: `SEA_LEVEL = 64`, `BEDROCK_LEVEL`, and
+`MAX_TREE_RADIUS = 4`.
+
+### Terrain block textures
+
+`TextureType` is append-only. Every value before `COUNT` has a matching
+`kBlockLayers` entry in `MinecraftTextures.hpp`. Phase 3 bundles the required
+Minecraft-compliant textures for cherry and mangrove wood, bamboo, mushroom
+blocks, basalt, blackstone, magma, and five coral blocks under
+`ressources/textures/`; an external compliant resource pack may override them
+through `assets/minecraft/textures/block/`.
+
+Magma is emissive and participates in propagated block lighting. Cherry and
+mangrove leaves use the shared transparent foliage/wind material policy.
 
 ### Queries
 
 - `getBiomeAt(worldX, worldZ)`  
 - `getBiomeRegion(...)` — batch grid for World map UI (SIMD-friendly uniform grid sampling)  
+- `test_terrain --histogram [size] [step] [seed]` — manual biome calibration
+- `test_terrain --height-histogram [chunk-grid-size]` — height/performance calibration
 
 Generation is **horizontal infinite** in practice (chunk X/Z); vertical extent is fixed chunk height.
 

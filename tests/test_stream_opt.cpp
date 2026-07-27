@@ -164,16 +164,17 @@ static void testChunkYFillBoundsCoversSeaLevel()
 /// Regression against clipping ocean fill to yNoiseEnd.
 ///
 /// TerrainGenerator uses **chunk-wide** maxSurfaceHeight for computeChunkYFillBounds.
-/// Pin seed=99991, cx=32, cz=25: chunk maxSolid≈47 so yNoiseEnd=64 (exclusive loop
-/// max y=63). SEA_LEVEL=64 is only filled when yFillEnd = computeColumnFillEnd(...).
+/// Pin seed=99991, bx=-512, bz=-336 (re-pinned after the Phase 2 terrain rework):
+/// chunk maxSolid=46 so yNoiseEnd=63 (<= SEA_LEVEL). SEA_LEVEL=64 is only filled
+/// when yFillEnd = computeColumnFillEnd(...) extends past yNoiseEnd.
 /// Setting yFillEnd = yNoiseEnd alone leaves AIR at y=64 → this test fails.
 static void testOceanWaterNotClippedByCaveYBound()
 {
 	const int sea = TerrainGenerator::SEA_LEVEL;
 	const int margin = 16;
 	constexpr int kSeed = 99991;
-	constexpr int kCx = 32;
-	constexpr int kCz = 25;
+	constexpr int kCx = -512;
+	constexpr int kCz = -336;
 
 	TerrainGenerator gen(kSeed);
 	ChunkData data = gen.generateChunk(kCx, kCz);
