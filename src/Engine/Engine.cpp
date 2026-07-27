@@ -669,6 +669,9 @@ void Engine::tickBenchmark(double dt)
 		m_benchmark.setSettingsSnapshot(
 			renderSettings.maxRenderDistance, windowWidth, windowHeight,
 			renderSettings.vsyncEnabled,
+			swapchain
+				? VkSwapchain::presentModeName(swapchain->getPresentMode())
+				: nullptr,
 			vkContext ? vkContext->getDeviceProperties().deviceName : nullptr);
 
 		reloadWorld(cfg.seed);
@@ -764,6 +767,9 @@ void Engine::drawUi()
 	f.windowW = windowWidth;
 	f.windowH = windowHeight;
 	f.benchmark = &m_benchmark;
+	if (swapchain)
+		f.presentModeName =
+			VkSwapchain::presentModeName(swapchain->getPresentMode());
 	if (vkContext)
 	{
 		f.deviceName = vkContext->getDeviceProperties().deviceName;
@@ -966,5 +972,16 @@ void Engine::run()
 		renderTiming.totalFrame = GetProfiler().lastFrameMs();
 
 		sampleBenchmarkFrame();
+
+		if (m_exitAfterBenchmark &&
+			m_benchmark.phase() == BenchmarkPhase::Done)
+		{
+			std::cout << '\n' << m_benchmark.formatReportText();
+			const std::string path =
+				m_benchmark.saveReportToFile("docs/benchmarks");
+			if (!path.empty())
+				std::cout << "Benchmark saved: " << path << '\n';
+			running = false;
+		}
 	}
 }

@@ -46,15 +46,19 @@ private:
 		VkCommandPool commandPool{VK_NULL_HANDLE};
 		VkCommandBuffer commandBuffer{VK_NULL_HANDLE};
 		VkSemaphore imageAvailable{VK_NULL_HANDLE};
-		VkSemaphore renderFinished{VK_NULL_HANDLE};
 		VkFence inFlight{VK_NULL_HANDLE};
 	};
 
+	void ensureSwapchainImageSync(uint32_t imageCount);
 	void recordClearCommands(VkCommandBuffer cmd, VkSwapchain &swapchain, uint32_t imageIndex,
 							 const VkClearColorValue &clearColor);
 
 	VkContext *m_context{nullptr};
 	std::array<FrameData, kMaxFramesInFlight> m_frames{};
 	std::vector<VkFence> m_imagesInFlight;
+	// Presentation completion is associated with a swapchain image, not a
+	// frame slot. Indexing render-finished semaphores by image prevents reuse
+	// before the presentation engine has consumed the previous signal.
+	std::vector<VkSemaphore> m_renderFinishedByImage;
 	uint32_t m_currentFrame{0};
 };

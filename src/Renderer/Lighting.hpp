@@ -89,6 +89,8 @@ inline float emissiveIntensityForBlock(uint8_t blockType)
 		return 0.12f;
 	case MAGMA:
 		return 0.85f;
+	case LAVA:
+		return 1.0f;
 	default:
 		return 0.0f;
 	}

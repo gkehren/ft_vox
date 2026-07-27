@@ -57,12 +57,15 @@ void Benchmark::onWorldReady(const glm::vec3 &surfaceCenter)
 		m_phase = BenchmarkPhase::Running;
 }
 
-void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync, const char *device)
+void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
+									const char *presentMode,
+									const char *device)
 {
 	m_viewDistance = viewDist;
 	m_windowW = w;
 	m_windowH = h;
 	m_vsync = vsync;
+	m_presentMode = presentMode ? presentMode : "";
 	m_deviceName = device ? device : "";
 }
 
@@ -286,6 +289,7 @@ void Benchmark::finalize()
 	r.windowW = m_windowW;
 	r.windowH = m_windowH;
 	r.vsync = m_vsync;
+	r.presentMode = m_presentMode;
 	r.deviceName = m_deviceName;
 
 	r.gitHash = BuildInfo::gitHash();
@@ -321,7 +325,8 @@ std::string Benchmark::formatReportText() const
 	  << "s  Measured: " << r.measuredSec << "s  Frames: " << r.frames << "\n";
 	o << "Device: " << r.deviceName << "\n";
 	o << "Viewport: " << r.windowW << "x" << r.windowH << "  ViewDist: " << r.viewDistance
-	  << "  VSync: " << (r.vsync ? "on" : "off") << "\n\n";
+	  << "  VSync: " << (r.vsync ? "on" : "off")
+	  << "  PresentMode: " << r.presentMode << "\n\n";
 	o << "Frame times (ms)\n";
 	o << "  avg " << r.avgMs << "  min " << r.minMs << "  max " << r.maxMs << "\n";
 	o << "  p50 " << r.p50Ms << "  p95 " << r.p95Ms << "  p99 " << r.p99Ms << "\n";

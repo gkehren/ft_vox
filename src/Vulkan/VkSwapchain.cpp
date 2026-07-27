@@ -1,6 +1,7 @@
 #include "Vulkan/VkSwapchain.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 
@@ -60,6 +61,12 @@ void VkSwapchain::setVSync(bool enabled)
 {
 	if (m_vsync == enabled || !m_context)
 		return;
+
+	// Validate the strict target before destroying the working swapchain.
+	const auto support =
+		querySupport(m_context->getPhysicalDevice(), m_context->getSurface());
+	selectPresentMode(support.presentModes, enabled);
+
 	m_vsync = enabled;
 	recreate(m_extent.width, m_extent.height);
 }
@@ -92,22 +99,40 @@ VkSurfaceFormatKHR VkSwapchain::chooseSurfaceFormat(const std::vector<VkSurfaceF
 	return formats.front();
 }
 
-VkPresentModeKHR VkSwapchain::choosePresentMode(const std::vector<VkPresentModeKHR> &modes) const
+VkPresentModeKHR VkSwapchain::selectPresentMode(
+	const std::vector<VkPresentModeKHR> &modes, bool vsync)
 {
-	if (!m_vsync)
+	const VkPresentModeKHR required =
+		vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
+	if (std::find(modes.begin(), modes.end(), required) != modes.end())
+		return required;
+
+	if (!vsync)
 	{
-		for (auto mode : modes)
-		{
-			if (mode == VK_PRESENT_MODE_MAILBOX_KHR)
-				return mode;
-		}
-		for (auto mode : modes)
-		{
-			if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR)
-				return mode;
-		}
+		throw std::runtime_error(
+			"VSync off requires VK_PRESENT_MODE_IMMEDIATE_KHR, but the "
+			"surface does not expose it; refusing a synchronized fallback");
 	}
-	return VK_PRESENT_MODE_FIFO_KHR; // Always available; vsync on
+	throw std::runtime_error(
+		"VSync on requires VK_PRESENT_MODE_FIFO_KHR, but the surface does not "
+		"expose the Vulkan-mandated FIFO mode");
+}
+
+const char *VkSwapchain::presentModeName(VkPresentModeKHR mode)
+{
+	switch (mode)
+	{
+	case VK_PRESENT_MODE_IMMEDIATE_KHR:
+		return "IMMEDIATE";
+	case VK_PRESENT_MODE_MAILBOX_KHR:
+		return "MAILBOX";
+	case VK_PRESENT_MODE_FIFO_KHR:
+		return "FIFO";
+	case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+		return "FIFO_RELAXED";
+	default:
+		return "UNKNOWN";
+	}
 }
 
 VkExtent2D VkSwapchain::chooseExtent(const VkSurfaceCapabilitiesKHR &caps, uint32_t width, uint32_t height) const
@@ -128,7 +153,8 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 		throw std::runtime_error("Swapchain support incomplete");
 
 	VkSurfaceFormatKHR surfaceFormat = chooseSurfaceFormat(support.formats);
-	VkPresentModeKHR presentMode = choosePresentMode(support.presentModes);
+	VkPresentModeKHR presentMode =
+		selectPresentMode(support.presentModes, m_vsync);
 	VkExtent2D extent = chooseExtent(support.capabilities, width, height);
 
 	uint32_t imageCount = support.capabilities.minImageCount + 1;
@@ -175,6 +201,11 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 
 	m_imageFormat = surfaceFormat.format;
 	m_extent = extent;
+	m_presentMode = presentMode;
+
+	std::cout << "Swapchain present mode: " << presentModeName(m_presentMode)
+			  << " (VSync " << (m_vsync ? "on" : "off")
+			  << (m_vsync ? ")" : ", uncapped)") << '\n';
 }
 
 void VkSwapchain::createImageViews()

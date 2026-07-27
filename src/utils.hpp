@@ -278,12 +278,30 @@ enum TextureType
 	BUBBLE_CORAL_BLOCK,
 	FIRE_CORAL_BLOCK,
 	HORN_CORAL_BLOCK,
+	// Phase 4 underground blocks (append-only)
+	LAVA,
+	DEEPSLATE_COAL_ORE,
+	DEEPSLATE_COPPER_ORE,
+	DEEPSLATE_DIAMOND_ORE,
+	DEEPSLATE_EMERALD_ORE,
+	DEEPSLATE_GOLD_ORE,
+	DEEPSLATE_IRON_ORE,
+	DEEPSLATE_LAPIS_ORE,
+	DEEPSLATE_REDSTONE_ORE,
+	DRIPSTONE_BLOCK,
+	// Phase 5 aquatic blocks (append-only)
+	KELP,
+	KELP_TOP,
 	COUNT, // Keep last
 	AIR	   // Keep after count beacuse AIR is not a texture
 };
 
 static_assert(CHERRY_LOG == MOSSY_COBBLESTONE + 1,
 			  "Phase 3 TextureType entries must stay append-only");
+static_assert(LAVA == HORN_CORAL_BLOCK + 1,
+			  "Phase 4 TextureType entries must stay append-only");
+static_assert(KELP == DRIPSTONE_BLOCK + 1,
+			  "Phase 5 TextureType entries must stay append-only");
 // Ensure TextureType fits in Voxel::type (uint8_t)
 static_assert(static_cast<int>(AIR) <= 255, "TextureType values exceed uint8_t range for Voxel::type");
 
@@ -377,6 +395,18 @@ static const std::map<TextureType, std::string> textureTypeString = {
 	{BUBBLE_CORAL_BLOCK, "Bubble Coral Block"},
 	{FIRE_CORAL_BLOCK, "Fire Coral Block"},
 	{HORN_CORAL_BLOCK, "Horn Coral Block"},
+	{LAVA, "Lava"},
+	{DEEPSLATE_COAL_ORE, "Deepslate Coal Ore"},
+	{DEEPSLATE_COPPER_ORE, "Deepslate Copper Ore"},
+	{DEEPSLATE_DIAMOND_ORE, "Deepslate Diamond Ore"},
+	{DEEPSLATE_EMERALD_ORE, "Deepslate Emerald Ore"},
+	{DEEPSLATE_GOLD_ORE, "Deepslate Gold Ore"},
+	{DEEPSLATE_IRON_ORE, "Deepslate Iron Ore"},
+	{DEEPSLATE_LAPIS_ORE, "Deepslate Lapis Ore"},
+	{DEEPSLATE_REDSTONE_ORE, "Deepslate Redstone Ore"},
+	{DRIPSTONE_BLOCK, "Dripstone Block"},
+	{KELP, "Kelp"},
+	{KELP_TOP, "Kelp Top"},
 };
 
 enum ChunkState

@@ -166,8 +166,11 @@ void PostStack::createTargets(uint32_t w, uint32_t h)
 		vkUpdateDescriptorSets(m_context->getDevice(), 2, ws.data(), 0, nullptr);
 	}
 
-	// Composite starts on defaults until first recordPost with real effect targets.
-	writeCompositeDescriptors(postCompositeSources(false, false, false));
+	// Every frame-in-flight owns its composite set, so descriptor writes occur
+	// only after that frame's fence has been waited.
+	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+		writeCompositeDescriptors(postCompositeSources(false, false, false),
+								  frame);
 }
 
 
@@ -228,7 +231,8 @@ void PostStack::createPipelines(VkFormat swapchainFormat)
 		alloc(m_postSetLayout, m_setBlur[1]);
 		alloc(m_postSetLayout, m_setSsao);
 		alloc(m_godSetLayout, m_setGodRays);
-		alloc(m_compositeSetLayout, m_setComposite);
+		for (VkDescriptorSet &set : m_setComposite)
+			alloc(m_compositeSetLayout, set);
 
 		VkPushConstantRange pcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128};
 		VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -422,12 +426,15 @@ void PostStack::createDefaultImages(ImmediateCommands &imm)
 								  VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 								  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	});
-	m_lastCompositeSrc = {true, true, true}; // force rewrite
+	for (PostCompositeSources &sources : m_lastCompositeSrc)
+		sources = {true, true, true}; // force rewrite per frame
 }
 
-void PostStack::writeCompositeDescriptors(const PostCompositeSources &src)
+void PostStack::writeCompositeDescriptors(const PostCompositeSources &src,
+									 uint32_t frameIndex)
 {
-	if (!m_context || m_setComposite == VK_NULL_HANDLE)
+	if (!m_context || frameIndex >= kFramesInFlight ||
+		m_setComposite[frameIndex] == VK_NULL_HANDLE)
 		return;
 	VkImageView bloomView = src.bloomUseDefault ? m_defaultBlack.view : m_bloom[0].view;
 	VkImageView godView = src.godRaysUseDefault ? m_defaultBlack.view : m_godRays.view;
@@ -442,19 +449,20 @@ void PostStack::writeCompositeDescriptors(const PostCompositeSources &src)
 	for (int i = 0; i < 4; ++i)
 	{
 		ws[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		ws[i].dstSet = m_setComposite;
+		ws[i].dstSet = m_setComposite[frameIndex];
 		ws[i].dstBinding = static_cast<uint32_t>(i);
 		ws[i].descriptorCount = 1;
 		ws[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		ws[i].pImageInfo = &imgs[i];
 	}
 	vkUpdateDescriptorSets(m_context->getDevice(), 4, ws.data(), 0, nullptr);
-	m_lastCompositeSrc = src;
+	m_lastCompositeSrc[frameIndex] = src;
 }
 
 
 void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageView swapchainView,
-						   VkExtent2D extent, VkDescriptorSet /*frameSet0*/,
+						   VkExtent2D extent, uint32_t frameIndex,
+						   VkDescriptorSet /*frameSet0*/,
 						   const PostProcessSettings &settings, const glm::vec2 &sunScreen,
 						   float sunVisibility, float time, const glm::mat4 &projection)
 {
@@ -573,7 +581,11 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 	}
 
 	// Composite — bind 1×1 defaults for skipped effects (no clear of half-res targets)
-	writeCompositeDescriptors(postCompositeSources(settings, godRaysProduced));
+	const PostCompositeSources compositeSources =
+		postCompositeSources(settings, godRaysProduced);
+	if (frameIndex < kFramesInFlight &&
+		compositeSources != m_lastCompositeSrc[frameIndex])
+		writeCompositeDescriptors(compositeSources, frameIndex);
 
 	// Composite
 	vkbar::cmdTransitionColor(cmd, swapchainImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -594,5 +606,7 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 					   settings.underwaterStrength,
 					   time);
 	cpc.p4 = glm::vec4(settings.filmGrain, settings.vignette, 0.f, 0.f);
-	fsDraw(m_compositePipe, m_compositeLayout, m_setComposite, swapchainView, extent, &cpc, sizeof(cpc));
+	fsDraw(m_compositePipe, m_compositeLayout,
+		   m_setComposite[frameIndex % kFramesInFlight], swapchainView, extent,
+		   &cpc, sizeof(cpc));
 }

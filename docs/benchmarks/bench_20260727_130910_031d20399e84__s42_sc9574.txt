@@ -1,0 +1,30 @@
+ft_vox Benchmark Report
+=======================
+Score: 9349 / 10000  Grade: S
+Revision: 031d20399e84* (dirty tree at build)
+  git 031d20399e84  branch vulkan  describe 031d203-dirty
+  build UTC 2026-07-27T13:10:57Z
+Seed: 42  Duration: 60s  Warmup: 3s  Measured: 60.001s  Frames: 5763
+Device: Apple M1 Pro
+Viewport: 1728x1052  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 10.4044  min 5.86842  max 65.7831
+  p50 10.5275  p95 12.0167  p99 12.3053
+  avg FPS 96.1128  1% low FPS 81.2656
+  frames >16.7ms: 2  >33.3ms: 1
+
+CPU scopes (avg ms)
+  Streaming 0.59592  Visibility 0.128374
+  Acquire 8.05153  Record 0.672881  MeshUpload 0.200237
+  ImGui 0.133004  Present 0.824801
+
+Worker jobs
+  TerrainGen  n=3162  avgMs=2.06757  totalMs=6537.67
+  MeshBuild   n=2603  avgMs=1.46136  totalMs=3803.92
+  MeshLOD     n=2751  avgMs=0.0535994  totalMs=147.452
+
+Peaks: chunks=4552 draw=1734 qLoad/Gen/Mesh=1510/12/8
+
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.

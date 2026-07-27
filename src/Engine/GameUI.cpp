@@ -343,6 +343,12 @@ void GameUI::drawHud(GameUIFrame &frame)
 	{
 		if (ImGui::Checkbox("VSync [F10]", &frame.render->vsyncEnabled))
 			frame.setVSync(frame.render->vsyncEnabled);
+		if (frame.presentModeName)
+			ImGui::TextDisabled("Vulkan present mode: %s%s",
+								frame.presentModeName,
+								frame.render->vsyncEnabled
+									? ""
+									: " (no refresh pacing / no FPS cap)");
 	}
 
 	ImGui::End();
@@ -948,8 +954,9 @@ void GameUI::drawBenchmarkReport(GameUIFrame &frame)
 	ImGui::SeparatorText("Peaks & settings");
 	ImGui::Text("Chunks %zu  |  draw %zu  |  queues %zu / %zu / %zu", r.peakChunks, r.peakDraw,
 				r.peakPendingLoad, r.peakPendingGen, r.peakPendingMesh);
-	ImGui::Text("View %d  |  %dx%d  |  VSync %s", r.viewDistance, r.windowW, r.windowH,
-				r.vsync ? "on" : "off");
+	ImGui::Text("View %d  |  %dx%d  |  VSync %s  |  %s",
+				r.viewDistance, r.windowW, r.windowH,
+				r.vsync ? "on" : "off", r.presentMode.c_str());
 	if (!r.deviceName.empty())
 		ImGui::TextWrapped("%s", r.deviceName.c_str());
 
@@ -966,7 +973,7 @@ void GameUI::drawBenchmarkReport(GameUIFrame &frame)
 	ImGui::SameLine();
 	if (ImGui::Button("Save summary"))
 	{
-		const std::string path = bench.saveReportToFile("benchmarks");
+		const std::string path = bench.saveReportToFile("docs/benchmarks");
 		if (path.empty())
 			ImGui::OpenPopup("bench_save_fail");
 		else
@@ -986,7 +993,7 @@ void GameUI::drawBenchmarkReport(GameUIFrame &frame)
 	}
 	if (ImGui::BeginPopup("bench_save_fail"))
 	{
-		ImGui::TextWrapped("Failed to write benchmarks/… (check cwd permissions).");
+		ImGui::TextWrapped("Failed to write docs/benchmarks/… (check cwd permissions).");
 		if (ImGui::Button("OK"))
 			ImGui::CloseCurrentPopup();
 		ImGui::EndPopup();
@@ -1067,6 +1074,11 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		}
 	}
 	ImGui::EndChild();
+
+	ImGui::SeparatorText("Diagnostics");
+	ImGui::TextWrapped(
+		"CLI: test_terrain --world-stats / --profile. "
+		"Runtime: ft_vox --seed N --benchmark seconds.");
 
 	ImGui::End();
 }

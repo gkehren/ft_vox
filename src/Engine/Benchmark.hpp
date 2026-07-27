@@ -78,6 +78,7 @@ struct BenchmarkReport
 	int windowW{0};
 	int windowH{0};
 	bool vsync{false};
+	std::string presentMode;
 	std::string deviceName;
 
 	/// Build-time code identity (git hash, dirty flag, branch, build UTC).
@@ -201,10 +202,12 @@ private:
 	int m_viewDistance{0};
 	int m_windowW{0}, m_windowH{0};
 	bool m_vsync{false};
+	std::string m_presentMode;
 	std::string m_deviceName;
 
 public:
-	void setSettingsSnapshot(int viewDist, int w, int h, bool vsync, const char *device);
+	void setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
+							 const char *presentMode, const char *device);
 	void markForceVsync(bool prevVsync)
 	{
 		m_hadForceVsync = true;
