@@ -87,6 +87,30 @@ inline constexpr BlockLayerDesc kBlockLayers[] = {
 	{"deepslate_top.png", "stone.png", false},			 // DEEPSLATE_TOP
 	{"tuff.png", "stone.png", false},					 // TUFF
 	{"mossy_cobblestone.png", "cobblestone.png", false}, // MOSSY_COBBLESTONE
+	// Phase 3 biome blocks (bundled from the compliant default resource pack)
+	{"cherry_log.png", "cherry_log.png", false},					 // CHERRY_LOG
+	{"cherry_log_top.png", "cherry_log_top.png", false},			 // CHERRY_LOG_TOP
+	{"cherry_leaves.png", "cherry_leaves.png", true},				 // CHERRY_LEAVES
+	{"mangrove_log.png", "mangrove_log.png", false},				 // MANGROVE_LOG
+	{"mangrove_log_top.png", "mangrove_log_top.png", false},		 // MANGROVE_LOG_TOP
+	{"mangrove_roots_side.png", "mangrove_roots_side.png", true},	 // MANGROVE_ROOTS
+	{"mangrove_roots_top.png", "mangrove_roots_top.png", true},		 // MANGROVE_ROOTS_TOP
+	{"mangrove_leaves.png", "mangrove_leaves.png", true},			 // MANGROVE_LEAVES
+	{"bamboo_block.png", "bamboo_block.png", false},				 // BAMBOO_BLOCK
+	{"bamboo_block_top.png", "bamboo_block_top.png", false},		 // BAMBOO_BLOCK_TOP
+	{"bamboo_stalk.png", "bamboo_stalk.png", true},					 // BAMBOO_STALK
+	{"red_mushroom_block.png", "red_mushroom_block.png", false},	 // RED_MUSHROOM_BLOCK
+	{"brown_mushroom_block.png", "brown_mushroom_block.png", false}, // BROWN_MUSHROOM_BLOCK
+	{"mushroom_stem.png", "mushroom_stem.png", false},				 // MUSHROOM_STEM
+	{"basalt_side.png", "basalt_side.png", false},					 // BASALT
+	{"basalt_top.png", "basalt_top.png", false},					 // BASALT_TOP
+	{"blackstone.png", "blackstone.png", false},					 // BLACKSTONE
+	{"magma.png", "magma.png", false},								 // MAGMA
+	{"tube_coral_block.png", "tube_coral_block.png", false},		 // TUBE_CORAL_BLOCK
+	{"brain_coral_block.png", "brain_coral_block.png", false},		 // BRAIN_CORAL_BLOCK
+	{"bubble_coral_block.png", "bubble_coral_block.png", false},	 // BUBBLE_CORAL_BLOCK
+	{"fire_coral_block.png", "fire_coral_block.png", false},		 // FIRE_CORAL_BLOCK
+	{"horn_coral_block.png", "horn_coral_block.png", false},		 // HORN_CORAL_BLOCK
 };
 
 static_assert(sizeof(kBlockLayers) / sizeof(kBlockLayers[0]) ==
@@ -131,6 +155,8 @@ inline bool blockIsLeaves(TextureType t)
 	case JUNGLE_LEAVES:
 	case ACACIA_LEAVES:
 	case DARK_OAK_LEAVES:
+	case CHERRY_LEAVES:
+	case MANGROVE_LEAVES:
 		return true;
 	default:
 		return false;
@@ -225,6 +251,16 @@ inline TextureType blockTopFace(TextureType t)
 		return ACACIA_LOG_TOP;
 	case DARK_OAK_LOG:
 		return DARK_OAK_LOG_TOP;
+	case CHERRY_LOG:
+		return CHERRY_LOG_TOP;
+	case MANGROVE_LOG:
+		return MANGROVE_LOG_TOP;
+	case MANGROVE_ROOTS:
+		return MANGROVE_ROOTS_TOP;
+	case BAMBOO_BLOCK:
+		return BAMBOO_BLOCK_TOP;
+	case BASALT:
+		return BASALT_TOP;
 	case CACTUS:
 		return CACTUS_TOP;
 	case DEEPSLATE:
@@ -253,6 +289,16 @@ inline TextureType blockBottomFace(TextureType t)
 		return ACACIA_LOG_TOP;
 	case DARK_OAK_LOG:
 		return DARK_OAK_LOG_TOP;
+	case CHERRY_LOG:
+		return CHERRY_LOG_TOP;
+	case MANGROVE_LOG:
+		return MANGROVE_LOG_TOP;
+	case MANGROVE_ROOTS:
+		return MANGROVE_ROOTS_TOP;
+	case BAMBOO_BLOCK:
+		return BAMBOO_BLOCK_TOP;
+	case BASALT:
+		return BASALT_TOP;
 	case CACTUS:
 		return CACTUS_TOP;
 	case DEEPSLATE:

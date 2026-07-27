@@ -34,6 +34,19 @@ constexpr unsigned char kBiomeColors[BIOME_COUNT][3] = {
 	{200, 100, 30},	 // BADLANDS
 	{150, 150, 150}, // MOUNTAINS
 	{220, 220, 230}, // SNOWY_MOUNTAINS
+	{150, 215, 95},	 // FLOWER_MEADOW
+	{230, 130, 165}, // CHERRY_GROVE
+	{190, 105, 45},	 // AUTUMN_FOREST
+	{45, 85, 50},	 // REDWOOD_FOREST
+	{55, 85, 55},	 // MANGROVE_SWAMP
+	{70, 180, 65},	 // BAMBOO_JUNGLE
+	{105, 105, 70},	 // MOOR
+	{155, 210, 225}, // GLACIER
+	{125, 185, 220}, // FROZEN_RIVER
+	{70, 55, 50},	 // VOLCANIC
+	{80, 185, 85},	 // OASIS
+	{145, 90, 150},	 // MUSHROOM_FIELDS
+	{45, 175, 185},	 // CORAL_REEF
 };
 
 const char *textureName(TextureType t)
@@ -1032,21 +1045,28 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	ImGui::Text("Center: (%.0f, %.0f)", m_mapCenter.x, m_mapCenter.y);
 
 	ImGui::SeparatorText("Legend");
-	const int cols = 2;
-	if (ImGui::BeginTable("legend", cols))
+	if (ImGui::BeginChild("BiomeLegend", ImVec2(0.f, 170.f),
+						  ImGuiChildFlags_Borders))
 	{
-		for (int i = 0; i < BIOME_COUNT; ++i)
+		const int cols = 2;
+		if (ImGui::BeginTable("legend", cols,
+							  ImGuiTableFlags_SizingStretchSame))
 		{
-			ImGui::TableNextColumn();
-			const ImVec4 col(kBiomeColors[i][0] / 255.f, kBiomeColors[i][1] / 255.f,
-							kBiomeColors[i][2] / 255.f, 1.f);
-			ImGui::ColorButton(biomeTypeString[i], col, ImGuiColorEditFlags_NoTooltip,
-							   ImVec2(12, 12));
-			ImGui::SameLine();
-			ImGui::TextUnformatted(biomeTypeString[i]);
+			for (int i = 0; i < BIOME_COUNT; ++i)
+			{
+				ImGui::TableNextColumn();
+				const ImVec4 col(kBiomeColors[i][0] / 255.f,
+								kBiomeColors[i][1] / 255.f,
+								kBiomeColors[i][2] / 255.f, 1.f);
+				ImGui::ColorButton(biomeTypeString[i], col,
+								   ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
+				ImGui::SameLine();
+				ImGui::TextUnformatted(biomeTypeString[i]);
+			}
+			ImGui::EndTable();
 		}
-		ImGui::EndTable();
 	}
+	ImGui::EndChild();
 
 	ImGui::End();
 }

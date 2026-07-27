@@ -33,13 +33,17 @@ struct BiomeConfig
   TextureType subsurfaceBlock;
   TextureType underwaterBlock;
   int subsurfaceDepth;
-  float treeDensity;       // 0.0 to 1.0
-  float vegetationDensity; // 0.0 to 1.0
+  float treeDensity;      // 0.0 to 1.0
+  float bushDensity;      // 0.0 to 1.0 — leaf bushes on the surface
+  float rockDensity;      // 0.0 to 1.0 — small boulder clusters
+  float fallenLogDensity; // 0.0 to 1.0 — fallen trunks (forests)
   glm::vec3 grassColor;
   glm::vec3 foliageColor;
   bool hasSnow;
   bool hasCacti;
-  bool hasRivers;
+  // Amplitude of the 3D surface perturbation (overhangs/cliffs). 0 = flat
+  // heightmap terrain; mountains use ~8, badlands hoodoos ~5.
+  float surfacePerturbAmp;
 };
 
 class TerrainGenerator
@@ -48,8 +52,10 @@ public:
   // Terrain generation constants
   static constexpr int SEA_LEVEL = 64;
   static constexpr int BEDROCK_LEVEL = 5;
-  static constexpr int BEACH_START = SEA_LEVEL - 3;
-  static constexpr int BEACH_END = SEA_LEVEL + 3;
+  // Max horizontal reach of any vegetation feature from its trunk/center column.
+  // Vegetation candidates are evaluated in a ring of this width around each
+  // chunk so canopies from neighbor chunks are placed deterministically.
+  static constexpr int MAX_TREE_RADIUS = 4;
   // Offset added to all noise coordinates to avoid symmetry artifacts near the origin.
   static constexpr float NOISE_OFFSET = 10000.0f;
 
@@ -146,10 +152,10 @@ private:
   void generateChunkBatch(ChunkData &chunkData, int chunkX, int chunkZ);
   void generateChunkBorders(ChunkData &chunkData, int chunkX, int chunkZ);
 
-  // Height calculation
+  // Height calculation (weirdness drives river valley width, matching determineBiome)
   int calculateHeight(float continental, float erosion, float peaksValleys,
-                      float ridge, float riverVal) const;
-  float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge, float riverVal) const;
+                      float ridge, float riverVal, float weirdness) const;
+  float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge, float riverVal, float weirdness) const;
   void applyErosion(float *heightMap, int size) const;
 
   // Biome determination
@@ -165,6 +171,12 @@ private:
   void placeJungleTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeAcaciaTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeDarkOakTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeCherryTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeRedwoodTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placePalmTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeMangroveTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeBamboo(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeGiantMushroom(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeIceSpike(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
 
@@ -180,14 +192,13 @@ private:
     return h;
   }
 
-  // Voxel type determination
-  TextureType getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight, BiomeType biome, float temperature, float density = -1.0f) const;
+  // Voxel type determination (slope = max |height delta| to 4 neighbors, for rock exposure)
+  TextureType getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight, BiomeType biome, float temperature, float slope, float density = -1.0f) const;
 
   // =============================================
   // UTILITY FUNCTIONS
   // =============================================
   float smoothstep(float edge0, float edge1, float x) const;
-  float lerp(float a, float b, float t) const;
 
   inline int getVoxelIndex(int x, int y, int z) const
   {

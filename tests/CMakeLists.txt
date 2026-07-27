@@ -133,6 +133,9 @@ target_link_libraries(test_render_helpers PRIVATE
 )
 
 add_test(NAME RenderHelpers COMMAND test_render_helpers)
+set_tests_properties(RenderHelpers PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
 
 # ---------------------------------------------------------------------------
 # Phase D stream CPU helpers (load priority, occupancy, cave Y bounds)
@@ -159,3 +162,30 @@ target_link_libraries(test_stream_opt PRIVATE
 )
 
 add_test(NAME StreamOptHelpers COMMAND test_stream_opt)
+
+# ---------------------------------------------------------------------------
+# Terrain generation: determinism, border consistency, world invariants
+# (also hosts the opt-in biome histogram tool: test_terrain --histogram)
+# ---------------------------------------------------------------------------
+add_executable(test_terrain
+    test_terrain.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+)
+
+target_include_directories(test_terrain PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(test_terrain PRIVATE
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_terrain PRIVATE
+    glm
+    FastNoise2
+    Threads::Threads
+)
+
+add_test(NAME TerrainGeneration COMMAND test_terrain)

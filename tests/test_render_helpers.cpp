@@ -182,6 +182,10 @@ int main()
 			ok = fail("stone must not be emissive");
 		if (!(lighting::emissiveIntensityForBlock(static_cast<uint8_t>(REDSTONE_ORE)) > 0.5f))
 			ok = fail("redstone ore must be strongly emissive");
+		if (!(lighting::emissiveIntensityForBlock(static_cast<uint8_t>(MAGMA)) > 0.5f))
+			ok = fail("magma must be strongly emissive");
+		if (lighting::blockLightEmission(static_cast<uint8_t>(MAGMA)) < 10)
+			ok = fail("magma must emit strong propagated block light");
 		if (lighting::blockLightEmission(static_cast<uint8_t>(STONE)) != 0)
 			ok = fail("stone block light emission must be 0");
 
@@ -312,7 +316,9 @@ int main()
 		}
 		if (!blockLayerIsTransparent(GLASS) || !blockLayerIsTransparent(OAK_LEAVES) ||
 			!blockLayerIsTransparent(WATER) || !blockLayerIsTransparent(ICE) ||
-			!blockLayerIsTransparent(BIRCH_LEAVES))
+			!blockLayerIsTransparent(BIRCH_LEAVES) ||
+			!blockLayerIsTransparent(CHERRY_LEAVES) ||
+			!blockLayerIsTransparent(MANGROVE_LEAVES))
 			ok = fail("glass/leaves/water/ice must be transparent in kBlockLayers");
 		if (blockLayerIsTransparent(STONE) || blockLayerIsTransparent(DIRT) || blockLayerIsTransparent(BEDROCK))
 			ok = fail("stone/dirt/bedrock must not be transparent");
@@ -329,14 +335,37 @@ int main()
 			ok = fail("BIRCH_LEAVES bundled fallback must be oak_leaves.png");
 		if (std::string(blockLayerBundledFallback(ICE)) != "glass.png")
 			ok = fail("ICE bundled fallback must be glass.png");
+		const TextureType phase3BundledTypes[] = {
+			CHERRY_LOG, CHERRY_LOG_TOP, CHERRY_LEAVES,
+			MANGROVE_LOG, MANGROVE_LOG_TOP, MANGROVE_ROOTS,
+			MANGROVE_ROOTS_TOP, MANGROVE_LEAVES,
+			BAMBOO_BLOCK, BAMBOO_BLOCK_TOP, BAMBOO_STALK,
+			RED_MUSHROOM_BLOCK, BROWN_MUSHROOM_BLOCK, MUSHROOM_STEM,
+			BASALT, BASALT_TOP, BLACKSTONE, MAGMA,
+			TUBE_CORAL_BLOCK, BRAIN_CORAL_BLOCK, BUBBLE_CORAL_BLOCK,
+			FIRE_CORAL_BLOCK, HORN_CORAL_BLOCK,
+		};
+		for (TextureType type : phase3BundledTypes)
+		{
+			bool resolvedFromPack = true;
+			const std::string path = resolveBlockTexturePath("", type, &resolvedFromPack);
+			if (resolvedFromPack || !blockTextureFileReadable(path))
+				ok = fail(std::string("Phase 3 bundled texture missing: ") +
+						  (blockLayerFile(type) ? blockLayerFile(type) : "unknown"));
+		}
 		if (!blockIsFoliage(OAK_LEAVES) || !blockIsFoliage(SPRUCE_LEAVES) ||
 			!blockIsFoliage(BIRCH_LEAVES) || !blockIsFoliage(JUNGLE_LEAVES) ||
 			!blockIsFoliage(ACACIA_LEAVES) || !blockIsFoliage(DARK_OAK_LEAVES) ||
+			!blockIsFoliage(CHERRY_LEAVES) || !blockIsFoliage(MANGROVE_LEAVES) ||
 			blockIsFoliage(STONE))
 			ok = fail("blockIsFoliage leaf classification wrong");
 		if (!blockIsIce(ICE) || !blockIsIce(PACKED_ICE) || blockIsIce(SNOW))
 			ok = fail("blockIsIce classification wrong");
 		if (blockTopFace(OAK_LOG) != OAK_LOG_TOP || blockTopFace(BIRCH_LOG) != BIRCH_LOG_TOP ||
+			blockTopFace(CHERRY_LOG) != CHERRY_LOG_TOP ||
+			blockTopFace(MANGROVE_LOG) != MANGROVE_LOG_TOP ||
+			blockTopFace(BAMBOO_BLOCK) != BAMBOO_BLOCK_TOP ||
+			blockTopFace(BASALT) != BASALT_TOP ||
 			blockTopFace(CACTUS) != CACTUS_TOP || blockTopFace(DEEPSLATE) != DEEPSLATE_TOP)
 			ok = fail("blockTopFace remaps wrong");
 		if (blockBottomFace(GRASS_SIDE) != DIRT)

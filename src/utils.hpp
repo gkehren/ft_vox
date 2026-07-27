@@ -112,8 +112,29 @@ enum BiomeType
 	BIOME_MOUNTAINS,	   // High elevation
 	BIOME_SNOWY_MOUNTAINS, // Very high elevation
 
+	// Phase 3 biome expansion — append-only to preserve existing ordinals
+	BIOME_FLOWER_MEADOW,
+	BIOME_CHERRY_GROVE,
+	BIOME_AUTUMN_FOREST,
+	BIOME_REDWOOD_FOREST,
+	BIOME_MANGROVE_SWAMP,
+	BIOME_BAMBOO_JUNGLE,
+	BIOME_MOOR,
+	BIOME_GLACIER,
+	BIOME_FROZEN_RIVER,
+	BIOME_VOLCANIC,
+	BIOME_OASIS,
+	BIOME_MUSHROOM_FIELDS,
+	BIOME_CORAL_REEF,
+
 	BIOME_COUNT
 };
+
+static_assert(BIOME_SNOWY_MOUNTAINS == 17,
+			  "Existing BiomeType ordinals must remain stable");
+static_assert(BIOME_FLOWER_MEADOW == 18,
+			  "Phase 3 biomes must be appended after legacy biomes");
+static_assert(BIOME_COUNT <= 256, "BiomeType values exceed uint8_t-compatible range");
 
 static const char *const biomeTypeString[BIOME_COUNT] = {
 	"Frozen Ocean",     // BIOME_FROZEN_OCEAN
@@ -134,7 +155,23 @@ static const char *const biomeTypeString[BIOME_COUNT] = {
 	"Badlands",         // BIOME_BADLANDS
 	"Mountains",        // BIOME_MOUNTAINS
 	"Snowy Mountains",  // BIOME_SNOWY_MOUNTAINS
+	"Flower Meadow",    // BIOME_FLOWER_MEADOW
+	"Cherry Grove",     // BIOME_CHERRY_GROVE
+	"Autumn Forest",    // BIOME_AUTUMN_FOREST
+	"Redwood Forest",   // BIOME_REDWOOD_FOREST
+	"Mangrove Swamp",   // BIOME_MANGROVE_SWAMP
+	"Bamboo Jungle",    // BIOME_BAMBOO_JUNGLE
+	"Moor",             // BIOME_MOOR
+	"Glacier",          // BIOME_GLACIER
+	"Frozen River",     // BIOME_FROZEN_RIVER
+	"Volcanic",         // BIOME_VOLCANIC
+	"Oasis",            // BIOME_OASIS
+	"Mushroom Fields",  // BIOME_MUSHROOM_FIELDS
+	"Coral Reef",       // BIOME_CORAL_REEF
 };
+
+static_assert(sizeof(biomeTypeString) / sizeof(biomeTypeString[0]) == BIOME_COUNT,
+			  "Every BiomeType needs a display name");
 
 struct TextureInfo
 {
@@ -217,10 +254,36 @@ enum TextureType
 	DEEPSLATE_TOP,
 	TUFF,
 	MOSSY_COBBLESTONE,
+	// Phase 3 biome blocks (append-only)
+	CHERRY_LOG,
+	CHERRY_LOG_TOP,
+	CHERRY_LEAVES,
+	MANGROVE_LOG,
+	MANGROVE_LOG_TOP,
+	MANGROVE_ROOTS,
+	MANGROVE_ROOTS_TOP,
+	MANGROVE_LEAVES,
+	BAMBOO_BLOCK,
+	BAMBOO_BLOCK_TOP,
+	BAMBOO_STALK,
+	RED_MUSHROOM_BLOCK,
+	BROWN_MUSHROOM_BLOCK,
+	MUSHROOM_STEM,
+	BASALT,
+	BASALT_TOP,
+	BLACKSTONE,
+	MAGMA,
+	TUBE_CORAL_BLOCK,
+	BRAIN_CORAL_BLOCK,
+	BUBBLE_CORAL_BLOCK,
+	FIRE_CORAL_BLOCK,
+	HORN_CORAL_BLOCK,
 	COUNT, // Keep last
 	AIR	   // Keep after count beacuse AIR is not a texture
 };
 
+static_assert(CHERRY_LOG == MOSSY_COBBLESTONE + 1,
+			  "Phase 3 TextureType entries must stay append-only");
 // Ensure TextureType fits in Voxel::type (uint8_t)
 static_assert(static_cast<int>(AIR) <= 255, "TextureType values exceed uint8_t range for Voxel::type");
 
@@ -291,6 +354,29 @@ static const std::map<TextureType, std::string> textureTypeString = {
 	{DEEPSLATE_TOP, "Deepslate Top"},
 	{TUFF, "Tuff"},
 	{MOSSY_COBBLESTONE, "Mossy Cobblestone"},
+	{CHERRY_LOG, "Cherry Log"},
+	{CHERRY_LOG_TOP, "Cherry Log Top"},
+	{CHERRY_LEAVES, "Cherry Leaves"},
+	{MANGROVE_LOG, "Mangrove Log"},
+	{MANGROVE_LOG_TOP, "Mangrove Log Top"},
+	{MANGROVE_ROOTS, "Mangrove Roots"},
+	{MANGROVE_ROOTS_TOP, "Mangrove Roots Top"},
+	{MANGROVE_LEAVES, "Mangrove Leaves"},
+	{BAMBOO_BLOCK, "Bamboo Block"},
+	{BAMBOO_BLOCK_TOP, "Bamboo Block Top"},
+	{BAMBOO_STALK, "Bamboo Stalk"},
+	{RED_MUSHROOM_BLOCK, "Red Mushroom Block"},
+	{BROWN_MUSHROOM_BLOCK, "Brown Mushroom Block"},
+	{MUSHROOM_STEM, "Mushroom Stem"},
+	{BASALT, "Basalt"},
+	{BASALT_TOP, "Basalt Top"},
+	{BLACKSTONE, "Blackstone"},
+	{MAGMA, "Magma"},
+	{TUBE_CORAL_BLOCK, "Tube Coral Block"},
+	{BRAIN_CORAL_BLOCK, "Brain Coral Block"},
+	{BUBBLE_CORAL_BLOCK, "Bubble Coral Block"},
+	{FIRE_CORAL_BLOCK, "Fire Coral Block"},
+	{HORN_CORAL_BLOCK, "Horn Coral Block"},
 };
 
 enum ChunkState
