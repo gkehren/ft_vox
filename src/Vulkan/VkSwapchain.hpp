@@ -35,6 +35,14 @@ public:
 
 	void setVSync(bool enabled);
 	bool isVSync() const { return m_vsync; }
+	VkPresentModeKHR getPresentMode() const { return m_presentMode; }
+
+	/// Strict policy: FIFO when VSync is enabled, IMMEDIATE when disabled.
+	/// Disabling VSync never silently falls back to MAILBOX/FIFO because either
+	/// mode can pace presentation to the display refresh.
+	static VkPresentModeKHR selectPresentMode(
+		const std::vector<VkPresentModeKHR> &modes, bool vsync);
+	static const char *presentModeName(VkPresentModeKHR mode);
 
 	static SwapchainSupportDetails querySupport(VkPhysicalDevice device, VkSurfaceKHR surface);
 
@@ -44,7 +52,6 @@ private:
 	void cleanupSwapchain();
 
 	VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &formats) const;
-	VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR> &modes) const;
 	VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR &caps, uint32_t width, uint32_t height) const;
 
 	VkContext *m_context{nullptr};
@@ -54,4 +61,5 @@ private:
 	VkFormat m_imageFormat{VK_FORMAT_UNDEFINED};
 	VkExtent2D m_extent{};
 	bool m_vsync{true};
+	VkPresentModeKHR m_presentMode{VK_PRESENT_MODE_FIFO_KHR};
 };

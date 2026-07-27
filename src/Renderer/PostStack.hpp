@@ -36,6 +36,7 @@ public:
 					VkImage swapchainImage,
 					VkImageView swapchainView,
 					VkExtent2D extent,
+					uint32_t frameIndex,
 					VkDescriptorSet frameSet0,
 					const PostProcessSettings &settings,
 					const glm::vec2 &sunScreen,
@@ -53,7 +54,8 @@ private:
 	void createFullscreenQuad(ImmediateCommands &imm);
 	void createSamplers();
 	void writeEffectDescriptors();
-	void writeCompositeDescriptors(const PostCompositeSources &src);
+	void writeCompositeDescriptors(const PostCompositeSources &src,
+								   uint32_t frameIndex);
 
 	VkContext *m_context{nullptr};
 	VkDescriptorSetLayout m_frameSetLayout{VK_NULL_HANDLE};
@@ -86,7 +88,8 @@ private:
 	VkDescriptorSet m_setBlur[2]{};
 	VkDescriptorSet m_setGodRays{VK_NULL_HANDLE};
 	VkDescriptorSet m_setSsao{VK_NULL_HANDLE};
-	VkDescriptorSet m_setComposite{VK_NULL_HANDLE};
+	static constexpr uint32_t kFramesInFlight = 2;
+	VkDescriptorSet m_setComposite[kFramesInFlight]{};
 
 	VkPipelineLayout m_postLayout1{VK_NULL_HANDLE};
 	VkPipelineLayout m_godLayout{VK_NULL_HANDLE};
@@ -100,5 +103,6 @@ private:
 	VkPipeline m_compositePipe{VK_NULL_HANDLE};
 
 	VkFormat m_swapchainFormat{VK_FORMAT_UNDEFINED};
-	PostCompositeSources m_lastCompositeSrc{true, true, true}; // force first write
+	PostCompositeSources m_lastCompositeSrc[kFramesInFlight] = {
+		{true, true, true}, {true, true, true}}; // force first write per frame
 };

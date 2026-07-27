@@ -40,6 +40,7 @@ public:
 	void run();
 	void initializeNoiseGenerator(int seed);
 	void setVSync(bool enabled);
+	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
 	Benchmark &benchmark() { return m_benchmark; }
 	const Benchmark &benchmark() const { return m_benchmark; }
@@ -130,4 +131,5 @@ private:
 	std::vector<OverlayPlayer> demoPlayers;
 
 	Benchmark m_benchmark{};
+	bool m_exitAfterBenchmark{false};
 };

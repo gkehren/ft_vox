@@ -111,6 +111,20 @@ inline constexpr BlockLayerDesc kBlockLayers[] = {
 	{"bubble_coral_block.png", "bubble_coral_block.png", false},	 // BUBBLE_CORAL_BLOCK
 	{"fire_coral_block.png", "fire_coral_block.png", false},		 // FIRE_CORAL_BLOCK
 	{"horn_coral_block.png", "horn_coral_block.png", false},		 // HORN_CORAL_BLOCK
+	// Phase 4 underground blocks
+	{"lava_still.png", "lava_still.png", false},						 // LAVA
+	{"deepslate_coal_ore.png", "deepslate_coal_ore.png", false},		 // DEEPSLATE_COAL_ORE
+	{"deepslate_copper_ore.png", "deepslate_copper_ore.png", false},	 // DEEPSLATE_COPPER_ORE
+	{"deepslate_diamond_ore.png", "deepslate_diamond_ore.png", false}, // DEEPSLATE_DIAMOND_ORE
+	{"deepslate_emerald_ore.png", "deepslate_emerald_ore.png", false}, // DEEPSLATE_EMERALD_ORE
+	{"deepslate_gold_ore.png", "deepslate_gold_ore.png", false},		 // DEEPSLATE_GOLD_ORE
+	{"deepslate_iron_ore.png", "deepslate_iron_ore.png", false},		 // DEEPSLATE_IRON_ORE
+	{"deepslate_lapis_ore.png", "deepslate_lapis_ore.png", false},	 // DEEPSLATE_LAPIS_ORE
+	{"deepslate_redstone_ore.png", "deepslate_redstone_ore.png", false}, // DEEPSLATE_REDSTONE_ORE
+	{"dripstone_block.png", "dripstone_block.png", false},			 // DRIPSTONE_BLOCK
+	// Phase 5 aquatic blocks
+	{"kelp_plant.png", "kelp_plant.png", true}, // KELP
+	{"kelp.png", "kelp.png", true},			  // KELP_TOP
 };
 
 static_assert(sizeof(kBlockLayers) / sizeof(kBlockLayers[0]) ==

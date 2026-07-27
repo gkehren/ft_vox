@@ -105,6 +105,13 @@ cmake --build build --config Release
 make test
 # or
 cd build-vk && ctest --output-on-failure
+
+# Terrain calibration / profiling
+./build-vk/tests/test_terrain --profile 32 1337
+./build-vk/tests/test_terrain --world-stats 16 3
+
+# Automated Vulkan streaming benchmark (saves a report, then exits)
+./build-vk/ft_vox --seed 42 --benchmark 30
 ```
 
 ### Key Conventions
@@ -122,6 +129,8 @@ cd build-vk && ctest --output-on-failure
 - **Descriptors**: Never `vkUpdateDescriptorSets` mid-command-buffer; use fixed sets or push constants
 - **Threading**: `ThreadPool` for terrain gen + meshing; GPU upload / VMA destroy on main thread after `waitIdle` (or deferred unload)
 - **Streaming**: `RenderSettings::{min,max}RenderDistance` (blocks) + per-sec budgets; near range = full mesh, far = LOD mesh; `streamFrontBias` loads farther/ahead-first in view direction
+- **Terrain reference**: `docs/terrain-generation.md` is authoritative for
+  noise graphs, the biome/block catalog, extension procedures, and calibration
 
 ## Performance Considerations
 - **Greedy Meshing**: Face culling + greedy meshing to reduce vertex count

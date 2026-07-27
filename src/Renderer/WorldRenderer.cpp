@@ -412,8 +412,10 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 				sunVisibility = 0.f;
 		}
 		m_postSettings.underwater = ubo->lightingParams.w > 0.5f;
-		m_post.recordPost(cmd, swapchain.getImages()[imageIndex], swapchain.getImageViews()[imageIndex], extent,
-						  set0, m_postSettings, sunScreen, sunVisibility, m_time, ubo->projection);
+		m_post.recordPost(cmd, swapchain.getImages()[imageIndex],
+						  swapchain.getImageViews()[imageIndex], extent,
+						  frameIndex, set0, m_postSettings, sunScreen,
+						  sunVisibility, m_time, ubo->projection);
 	}
 
 	if (imguiDraw)

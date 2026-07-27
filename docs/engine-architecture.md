@@ -230,6 +230,18 @@ File: `src/Chunk/TerrainGenerator.hpp` / `TerrainGenerator.cpp`.
 - Terrain shaping includes erosion-driven badlands/cold plateaus, per-biome
   3D surface perturbation, sharp mountain ridges, and flat two-block-deep
   river channels with cold-climate ice.
+- Underground shaping combines the existing cheese and ravine fields with two
+  ridged spaghetti fields and a low-frequency cavern field. The additional
+  fields are sampled on a world-aligned half-resolution 3D grid below y=96,
+  shared by the chunk core and border shell to bound cost and prevent seams.
+- A low-frequency 2D aquifer field selects dry or water-filled cavities and a
+  stable local water table (y=20..36). Lava owns the deep table through y=11;
+  volcanic columns may contain deterministic pockets through y=24.
+- Deepslate transitions gradually below y=24. Ore start heights use uniform,
+  high-biased, mid-triangular, or deep-triangular distributions; emerald is
+  restricted to mountain columns and badlands receive extra gold candidates.
+- A deterministic post-pass adds cube-based dripstone, wet-cave moss, and
+  volcanic magma without specialized geometry.
 
 ### Output (`ChunkData`)
 
@@ -263,7 +275,10 @@ panel displays the complete legend in a scrollable child.
 
 Phase 3 feature placers are world-coordinate deterministic and evaluated from
 the cross-chunk halo. They include cherry trees, 2×2 redwoods, mangroves,
-bamboo, palms, giant mushrooms, coral heads, and volcanic surface patches.
+bamboo, palms, giant mushrooms, coral heads, temperate-ocean kelp, and volcanic
+surface patches. Ocean floors use deterministic four-block sand, gravel, and
+clay patches. Lily pads and seagrass remain deferred until flat/cross-plane
+feature geometry exists.
 
 Notable constants: `SEA_LEVEL = 64`, `BEDROCK_LEVEL`, and
 `MAX_TREE_RADIUS = 4`.
@@ -286,6 +301,9 @@ mangrove leaves use the shared transparent foliage/wind material policy.
 - `getBiomeRegion(...)` — batch grid for World map UI (SIMD-friendly uniform grid sampling)  
 - `test_terrain --histogram [size] [step] [seed]` — manual biome calibration
 - `test_terrain --height-histogram [chunk-grid-size]` — height/performance calibration
+- `test_terrain --profile [chunk-grid-size] [seed]` — per-stage terrain timings
+- `test_terrain --world-stats [sample-grid-size] [seed-count]` — combined world report
+- `ft_vox --seed N --benchmark seconds` — automated wide-orbit streaming benchmark
 
 Generation is **horizontal infinite** in practice (chunk X/Z); vertical extent is fixed chunk height.
 
@@ -333,5 +351,6 @@ Document presence only; do not assume multiplayer is live in the main binary UX.
 ## 12. Related docs
 
 - [`vulkan-graphics.md`](vulkan-graphics.md) — Vulkan device, pass graph, shaders, post  
+- [`terrain-generation.md`](terrain-generation.md) — noise graphs, biome/block catalog, extension procedures, calibration
 - Root [`README.md`](../README.md) — build and controls  
-- [`Agents.md`](../Agents.md) — short architecture map for contributors  
+- [`AGENTS.md`](../AGENTS.md) — contributor conventions and architecture map
