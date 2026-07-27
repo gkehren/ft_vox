@@ -15,6 +15,12 @@ void TerrainGenerator::placeTree(ChunkData &chunkData, int localX, int localZ,
   case BIOME_SNOWY_TAIGA:
     placeSpruceTree(chunkData, localX, localZ, baseY, worldX, worldZ);
     break;
+  case BIOME_REDWOOD_FOREST:
+    placeRedwoodTree(chunkData, localX, localZ, baseY, worldX, worldZ);
+    break;
+  case BIOME_CHERRY_GROVE:
+    placeCherryTree(chunkData, localX, localZ, baseY, worldX, worldZ);
+    break;
   case BIOME_MOUNTAINS:
     // 70% spruce, 30% oak
     if ((h % 10) < 7)
@@ -30,6 +36,7 @@ void TerrainGenerator::placeTree(ChunkData &chunkData, int localX, int localZ,
       placeOakTree(chunkData, localX, localZ, baseY, worldX, worldZ);
     break;
   case BIOME_DARK_FOREST:
+  case BIOME_AUTUMN_FOREST:
     // 60% dark oak, 25% spruce, 15% birch — gloomy mixed canopy
     {
       uint32_t r = h % 20;
@@ -51,12 +58,30 @@ void TerrainGenerator::placeTree(ChunkData &chunkData, int localX, int localZ,
   case BIOME_JUNGLE:
     placeJungleTree(chunkData, localX, localZ, baseY, worldX, worldZ);
     break;
+  case BIOME_MANGROVE_SWAMP:
+    placeMangroveTree(chunkData, localX, localZ, baseY, worldX, worldZ);
+    break;
+  case BIOME_BAMBOO_JUNGLE:
+    placeBamboo(chunkData, localX, localZ, baseY, worldX, worldZ);
+    break;
   case BIOME_SAVANNA:
     placeAcaciaTree(chunkData, localX, localZ, baseY, worldX, worldZ);
+    break;
+  case BIOME_OASIS:
+    placePalmTree(chunkData, localX, localZ, baseY, worldX, worldZ);
     break;
   case BIOME_SWAMP:
     // Swamp: oak + occasional mossy floor already from surface mud
     placeOakTree(chunkData, localX, localZ, baseY, worldX, worldZ);
+    break;
+  case BIOME_MOOR:
+    if ((h & 1u) == 0u)
+      placeSpruceTree(chunkData, localX, localZ, baseY, worldX, worldZ);
+    else
+      placeOakTree(chunkData, localX, localZ, baseY, worldX, worldZ);
+    break;
+  case BIOME_MUSHROOM_FIELDS:
+    placeGiantMushroom(chunkData, localX, localZ, baseY, worldX, worldZ);
     break;
   default:
     placeOakTree(chunkData, localX, localZ, baseY, worldX, worldZ);
@@ -71,14 +96,9 @@ void TerrainGenerator::placeOakTree(ChunkData &chunkData, int localX, int localZ
   int trunkHeight = 4 + static_cast<int>(h & 3);       // 4–7 blocks
   bool wideCanopy = ((h >> 2) & 7) == 0;               // ~12%: radius-3 canopy
   int extraTopLayers = static_cast<int>((h >> 5) & 1); // 0 or 1 extra cap layer
-  int canopyMargin = wideCanopy ? 3 : 2;
 
-  if (localX < canopyMargin || localX >= CHUNK_SIZE - canopyMargin ||
-      localZ < canopyMargin || localZ >= CHUNK_SIZE - canopyMargin)
-  {
-    return;
-  }
-
+  // No margin guard: candidates may root outside the chunk (cross-chunk
+  // canopies); setVoxelSafe clips voxels to this chunk.
   for (int y = 0; y < trunkHeight; ++y)
     setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::OAK_LOG);
 
@@ -116,11 +136,6 @@ void TerrainGenerator::placeBirchTree(ChunkData &chunkData, int localX, int loca
   int trunkHeight = 5 + static_cast<int>(h & 3);       // 5–8 blocks (birches are tall and slender)
   int extraTopLayers = static_cast<int>((h >> 2) & 1); // 0 or 1 extra cap layer
 
-  if (localX < 2 || localX >= CHUNK_SIZE - 2 || localZ < 2 || localZ >= CHUNK_SIZE - 2)
-  {
-    return;
-  }
-
   for (int y = 0; y < trunkHeight; ++y)
     setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::BIRCH_LOG);
 
@@ -157,13 +172,6 @@ void TerrainGenerator::placeSpruceTree(ChunkData &chunkData, int localX, int loc
   bool fatVariant = ((h >> 3) % 5) == 0;         // 20%: each layer is one block wider
   bool bareBottom = ((h >> 6) & 3) != 0;         // 75%: lower trunk is exposed (no bottom leaves)
   int maxLayer = bareBottom ? trunkHeight - 3 : trunkHeight - 1;
-  int canopyMargin = (maxLayer / 2) + (fatVariant ? 1 : 0);
-
-  if (localX < canopyMargin || localX >= CHUNK_SIZE - canopyMargin ||
-      localZ < canopyMargin || localZ >= CHUNK_SIZE - canopyMargin)
-  {
-    return;
-  }
 
   for (int y = 0; y < trunkHeight; ++y)
     setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::SPRUCE_LOG);
@@ -181,6 +189,10 @@ void TerrainGenerator::placeSpruceTree(ChunkData &chunkData, int localX, int loc
     int radius = layer / 2;
     if (fatVariant && layer > 0)
       ++radius; // fat variant: bump radius on non-apex layers
+    // Keep the widest layers within MAX_TREE_RADIUS so cross-chunk candidates
+    // (evaluated in a ring of that width) place complete canopies.
+    if (radius > MAX_TREE_RADIUS)
+      radius = MAX_TREE_RADIUS;
 
     for (int dx = -radius; dx <= radius; ++dx)
     {
@@ -204,12 +216,6 @@ void TerrainGenerator::placeJungleTree(ChunkData &chunkData, int localX, int loc
   int trunkHeight = 8 + static_cast<int>(h % 9);         // 8–16 blocks — large variation
   int canopyRadius = 3 + static_cast<int>((h >> 4) & 1); // 3 or 4
   bool hasPropRoots = ((h >> 5) & 3) != 0;               // 75%: extra root-logs close to base
-
-  if (localX < canopyRadius || localX >= CHUNK_SIZE - canopyRadius ||
-      localZ < canopyRadius || localZ >= CHUNK_SIZE - canopyRadius)
-  {
-    return;
-  }
 
   for (int y = 0; y < trunkHeight; ++y)
     setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::JUNGLE_LOG);
@@ -262,10 +268,6 @@ void TerrainGenerator::placeAcaciaTree(ChunkData &chunkData, int localX, int loc
   int leanZ = static_cast<int>((h >> 4) & 1) * (((h >> 5) & 1) ? 1 : -1);
   int canopyRadius = 3 + static_cast<int>((h >> 6) & 1); // 3 or 4 — flat wide top
 
-  if (localX < canopyRadius || localX >= CHUNK_SIZE - canopyRadius ||
-      localZ < canopyRadius || localZ >= CHUNK_SIZE - canopyRadius)
-    return;
-
   int tipX = localX;
   int tipZ = localZ;
   for (int y = 0; y < trunkHeight; ++y)
@@ -302,15 +304,12 @@ void TerrainGenerator::placeDarkOakTree(ChunkData &chunkData, int localX, int lo
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 480);
 
-  // Thick 2×2 trunk when there is room; otherwise single trunk
-  bool thick = (localX >= 2 && localX < CHUNK_SIZE - 3 && localZ >= 2 && localZ < CHUNK_SIZE - 3 &&
-                ((h & 3) != 0));
+  // Thick 2×2 trunk for most dark oaks. Hash-only decision (no position
+  // condition) so every chunk evaluating this candidate agrees; setVoxelSafe
+  // clips the 2x2 trunk at chunk edges.
+  bool thick = ((h & 3) != 0);
   int trunkHeight = 5 + static_cast<int>((h >> 2) & 3); // 5–8
   int canopyRadius = thick ? 4 : 3;
-
-  if (localX < canopyRadius || localX >= CHUNK_SIZE - canopyRadius ||
-      localZ < canopyRadius || localZ >= CHUNK_SIZE - canopyRadius)
-    return;
 
   for (int y = 0; y < trunkHeight; ++y)
   {
@@ -352,13 +351,197 @@ void TerrainGenerator::placeDarkOakTree(ChunkData &chunkData, int localX, int lo
   }
 }
 
+void TerrainGenerator::placeCherryTree(ChunkData &chunkData, int localX, int localZ,
+                                       int baseY, int worldX, int worldZ)
+{
+  const uint32_t h = treeHash(worldX, worldZ, m_seed + 520);
+  const int trunkHeight = 5 + static_cast<int>(h % 4); // 5-8
+  for (int y = 0; y < trunkHeight; ++y)
+    setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::CHERRY_LOG);
+
+  const int topY = baseY + trunkHeight;
+  for (int layer = -2; layer <= 2; ++layer)
+  {
+    const int radius = layer <= 0 ? 4 : 3 - layer;
+    for (int dx = -radius; dx <= radius; ++dx)
+    {
+      for (int dz = -radius; dz <= radius; ++dz)
+      {
+        if (dx * dx + dz * dz > radius * radius + 2)
+          continue;
+        if (((treeHash(worldX + dx, worldZ + dz, m_seed + 521 + layer) >> 3) & 15u) == 0u)
+          continue;
+        if (dx == 0 && dz == 0 && layer < 0)
+          continue;
+        setVoxelSafe(chunkData, localX + dx, topY + layer, localZ + dz,
+                     TextureType::CHERRY_LEAVES);
+      }
+    }
+  }
+}
+
+void TerrainGenerator::placeRedwoodTree(ChunkData &chunkData, int localX, int localZ,
+                                        int baseY, int worldX, int worldZ)
+{
+  const uint32_t h = treeHash(worldX, worldZ, m_seed + 540);
+  const int trunkHeight = 16 + static_cast<int>(h % 15); // 16-30
+
+  for (int y = 0; y < trunkHeight; ++y)
+  {
+    setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::SPRUCE_LOG);
+    setVoxelSafe(chunkData, localX + 1, baseY + y, localZ, TextureType::SPRUCE_LOG);
+    setVoxelSafe(chunkData, localX, baseY + y, localZ + 1, TextureType::SPRUCE_LOG);
+    setVoxelSafe(chunkData, localX + 1, baseY + y, localZ + 1, TextureType::SPRUCE_LOG);
+  }
+
+  const int topY = baseY + trunkHeight;
+  for (int depth = 0; depth <= 12; depth += 2)
+  {
+    const int ly = topY - depth;
+    const int radius = std::min(MAX_TREE_RADIUS, 1 + depth / 3);
+    for (int dx = 1 - radius; dx <= radius; ++dx)
+    {
+      for (int dz = 1 - radius; dz <= radius; ++dz)
+      {
+        const int distance = std::abs(dx) + std::abs(dz);
+        if (distance > radius + 2)
+          continue;
+        const bool trunkCell = (dx == 0 || dx == 1) && (dz == 0 || dz == 1);
+        if (trunkCell && ly < topY)
+          continue;
+        setVoxelSafe(chunkData, localX + dx, ly, localZ + dz,
+                     TextureType::SPRUCE_LEAVES);
+      }
+    }
+  }
+  setVoxelSafe(chunkData, localX, topY + 1, localZ, TextureType::SPRUCE_LEAVES);
+  setVoxelSafe(chunkData, localX + 1, topY + 1, localZ, TextureType::SPRUCE_LEAVES);
+}
+
+void TerrainGenerator::placePalmTree(ChunkData &chunkData, int localX, int localZ,
+                                     int baseY, int worldX, int worldZ)
+{
+  const uint32_t h = treeHash(worldX, worldZ, m_seed + 560);
+  const int trunkHeight = 7 + static_cast<int>(h % 5); // 7-11
+  static constexpr int kDirections[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+  const int *direction = kDirections[(h >> 8) & 3u];
+  int tipX = localX;
+  int tipZ = localZ;
+
+  for (int y = 0; y < trunkHeight; ++y)
+  {
+    if (y >= (trunkHeight * 2) / 3)
+    {
+      tipX = localX + direction[0];
+      tipZ = localZ + direction[1];
+    }
+    setVoxelSafe(chunkData, tipX, baseY + y, tipZ, TextureType::JUNGLE_LOG);
+  }
+
+  const int topY = baseY + trunkHeight;
+  setVoxelSafe(chunkData, tipX, topY, tipZ, TextureType::JUNGLE_LEAVES);
+  for (const auto &arm : kDirections)
+  {
+    for (int step = 1; step <= 3; ++step)
+    {
+      const int drop = step == 3 ? 1 : 0;
+      setVoxelSafe(chunkData, tipX + arm[0] * step, topY - drop,
+                   tipZ + arm[1] * step, TextureType::JUNGLE_LEAVES);
+    }
+  }
+}
+
+void TerrainGenerator::placeMangroveTree(ChunkData &chunkData, int localX, int localZ,
+                                         int baseY, int worldX, int worldZ)
+{
+  const uint32_t h = treeHash(worldX, worldZ, m_seed + 580);
+  const int trunkHeight = 6 + static_cast<int>(h % 5); // 6-10
+  static constexpr int kRoots[8][2] = {
+      {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+      {1, 1}, {-1, 1}, {1, -1}, {-1, -1},
+  };
+
+  for (int y = 0; y < trunkHeight; ++y)
+    setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::MANGROVE_LOG);
+
+  for (size_t i = 0; i < std::size(kRoots); ++i)
+  {
+    if (((h >> (i % 16)) & 1u) == 0u)
+      continue;
+    const int dx = kRoots[i][0];
+    const int dz = kRoots[i][1];
+    setVoxelSafe(chunkData, localX + dx, baseY, localZ + dz,
+                 TextureType::MANGROVE_ROOTS);
+    if (i < 4)
+      setVoxelSafe(chunkData, localX + dx * 2, baseY - 1, localZ + dz * 2,
+                   TextureType::MANGROVE_ROOTS);
+  }
+
+  const int topY = baseY + trunkHeight;
+  for (int ly = topY - 2; ly <= topY + 2; ++ly)
+  {
+    const int radius = ly == topY + 2 ? 2 : 4;
+    for (int dx = -radius; dx <= radius; ++dx)
+    {
+      for (int dz = -radius; dz <= radius; ++dz)
+      {
+        if (dx * dx + dz * dz > radius * radius + 1)
+          continue;
+        if (dx == 0 && dz == 0 && ly < topY)
+          continue;
+        setVoxelSafe(chunkData, localX + dx, ly, localZ + dz,
+                     TextureType::MANGROVE_LEAVES);
+      }
+    }
+  }
+}
+
+void TerrainGenerator::placeBamboo(ChunkData &chunkData, int localX, int localZ,
+                                   int baseY, int worldX, int worldZ)
+{
+  const uint32_t h = treeHash(worldX, worldZ, m_seed + 600);
+  const int height = 6 + static_cast<int>(h % 9); // 6-14
+  for (int y = 0; y < height; ++y)
+  {
+    const TextureType type = y + 1 == height ? TextureType::BAMBOO_BLOCK
+                                             : TextureType::BAMBOO_STALK;
+    setVoxelSafe(chunkData, localX, baseY + y, localZ, type);
+  }
+}
+
+void TerrainGenerator::placeGiantMushroom(ChunkData &chunkData, int localX,
+                                          int localZ, int baseY, int worldX,
+                                          int worldZ)
+{
+  const uint32_t h = treeHash(worldX, worldZ, m_seed + 620);
+  const int stemHeight = 5 + static_cast<int>(h % 5); // 5-9
+  const bool red = ((h >> 8) & 1u) == 0u;
+  const TextureType cap = red ? TextureType::RED_MUSHROOM_BLOCK
+                              : TextureType::BROWN_MUSHROOM_BLOCK;
+
+  for (int y = 0; y < stemHeight; ++y)
+    setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::MUSHROOM_STEM);
+
+  const int topY = baseY + stemHeight;
+  const int radius = red ? 3 : 4;
+  for (int dx = -radius; dx <= radius; ++dx)
+  {
+    for (int dz = -radius; dz <= radius; ++dz)
+    {
+      if (dx * dx + dz * dz > radius * radius + 1)
+        continue;
+      const int edge = std::max(std::abs(dx), std::abs(dz));
+      const int ly = topY - (edge == radius ? 1 : 0);
+      setVoxelSafe(chunkData, localX + dx, ly, localZ + dz, cap);
+    }
+  }
+  setVoxelSafe(chunkData, localX, topY + 1, localZ, cap);
+}
+
 void TerrainGenerator::placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 500);
   int height = 1 + static_cast<int>(h & 3); // 1–4 blocks
-
-  if (localX <= 0 || localX >= CHUNK_SIZE - 1 || localZ <= 0 || localZ >= CHUNK_SIZE - 1)
-    return;
 
   for (int y = 0; y < height; ++y)
   {
@@ -391,9 +574,6 @@ void TerrainGenerator::placeIceSpike(ChunkData &chunkData, int localX, int local
   bool thick = ((h >> 4) & 7) == 0;          // rare thicker base
   bool blueCore = ((h >> 8) & 15) == 0;      // rare blue ice core
 
-  if (localX < 1 || localX >= CHUNK_SIZE - 1 || localZ < 1 || localZ >= CHUNK_SIZE - 1)
-    return;
-
   for (int y = 0; y < height; ++y)
   {
     // Taper: full column lower third, then shrink
@@ -419,4 +599,3 @@ void TerrainGenerator::placeIceSpike(ChunkData &chunkData, int localX, int local
     }
   }
 }
-

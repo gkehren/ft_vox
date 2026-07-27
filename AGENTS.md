@@ -111,6 +111,12 @@ cd build-vk && ctest --output-on-failure
 - **Voxel Data**: Flat `uint8_t` array per `Chunk`
 - **World Constants**: `src/utils.hpp` (`CHUNK_SIZE`, `WORLD_HEIGHT`)
 - **Resources**: `ressources/`; runtime expects `RES_PATH` next to the binary
+- **Biome/block enums**: `BiomeType` and `TextureType` are append-only; keep
+  `biomeTypeString`, `GameUI::kBiomeColors`, `textureTypeString`, and
+  `kBlockLayers` aligned with their enum ordinals
+- **Resource-pack blocks**: bundled terrain textures live in
+  `ressources/textures/` and may be sourced from the compliant
+  `docs/default-resource-pack/assets/minecraft/textures/block/` fixture
 - **Vulkan**: `VK_NO_PROTOTYPES` + volk; no global OpenGL-style state
 - **Depth / Y**: `GLM_FORCE_DEPTH_ZERO_TO_ONE`; negative viewport height for OpenGL-style Y without winding flip (CCW)
 - **Descriptors**: Never `vkUpdateDescriptorSets` mid-command-buffer; use fixed sets or push constants
