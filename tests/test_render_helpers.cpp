@@ -184,6 +184,8 @@ int main()
 			ok = fail("redstone ore must be strongly emissive");
 		if (!(lighting::emissiveIntensityForBlock(static_cast<uint8_t>(MAGMA)) > 0.5f))
 			ok = fail("magma must be strongly emissive");
+		if (!(lighting::emissiveIntensityForBlock(static_cast<uint8_t>(LAVA)) > 0.9f))
+			ok = fail("lava must be strongly emissive");
 		if (lighting::blockLightEmission(static_cast<uint8_t>(MAGMA)) < 10)
 			ok = fail("magma must emit strong propagated block light");
 		if (lighting::blockLightEmission(static_cast<uint8_t>(STONE)) != 0)
@@ -308,6 +310,8 @@ int main()
 	{
 		if (sizeof(kBlockLayers) / sizeof(kBlockLayers[0]) != static_cast<size_t>(TextureType::COUNT))
 			ok = fail("kBlockLayers size must equal TextureType::COUNT");
+		if (textureTypeString.size() != static_cast<size_t>(TextureType::COUNT))
+			ok = fail("every TextureType must have a display name");
 		for (int i = 0; i < static_cast<int>(TextureType::COUNT); ++i)
 		{
 			const char *file = blockLayerFile(static_cast<TextureType>(i));
@@ -318,7 +322,9 @@ int main()
 			!blockLayerIsTransparent(WATER) || !blockLayerIsTransparent(ICE) ||
 			!blockLayerIsTransparent(BIRCH_LEAVES) ||
 			!blockLayerIsTransparent(CHERRY_LEAVES) ||
-			!blockLayerIsTransparent(MANGROVE_LEAVES))
+			!blockLayerIsTransparent(MANGROVE_LEAVES) ||
+			!blockLayerIsTransparent(KELP) ||
+			!blockLayerIsTransparent(KELP_TOP))
 			ok = fail("glass/leaves/water/ice must be transparent in kBlockLayers");
 		if (blockLayerIsTransparent(STONE) || blockLayerIsTransparent(DIRT) || blockLayerIsTransparent(BEDROCK))
 			ok = fail("stone/dirt/bedrock must not be transparent");
@@ -335,7 +341,7 @@ int main()
 			ok = fail("BIRCH_LEAVES bundled fallback must be oak_leaves.png");
 		if (std::string(blockLayerBundledFallback(ICE)) != "glass.png")
 			ok = fail("ICE bundled fallback must be glass.png");
-		const TextureType phase3BundledTypes[] = {
+		const TextureType expandedBundledTypes[] = {
 			CHERRY_LOG, CHERRY_LOG_TOP, CHERRY_LEAVES,
 			MANGROVE_LOG, MANGROVE_LOG_TOP, MANGROVE_ROOTS,
 			MANGROVE_ROOTS_TOP, MANGROVE_LEAVES,
@@ -344,13 +350,18 @@ int main()
 			BASALT, BASALT_TOP, BLACKSTONE, MAGMA,
 			TUBE_CORAL_BLOCK, BRAIN_CORAL_BLOCK, BUBBLE_CORAL_BLOCK,
 			FIRE_CORAL_BLOCK, HORN_CORAL_BLOCK,
+			LAVA, DEEPSLATE_COAL_ORE, DEEPSLATE_COPPER_ORE,
+			DEEPSLATE_DIAMOND_ORE, DEEPSLATE_EMERALD_ORE,
+			DEEPSLATE_GOLD_ORE, DEEPSLATE_IRON_ORE,
+			DEEPSLATE_LAPIS_ORE, DEEPSLATE_REDSTONE_ORE,
+			DRIPSTONE_BLOCK, KELP, KELP_TOP,
 		};
-		for (TextureType type : phase3BundledTypes)
+		for (TextureType type : expandedBundledTypes)
 		{
 			bool resolvedFromPack = true;
 			const std::string path = resolveBlockTexturePath("", type, &resolvedFromPack);
 			if (resolvedFromPack || !blockTextureFileReadable(path))
-				ok = fail(std::string("Phase 3 bundled texture missing: ") +
+				ok = fail(std::string("Expanded bundled texture missing: ") +
 						  (blockLayerFile(type) ? blockLayerFile(type) : "unknown"));
 		}
 		if (!blockIsFoliage(OAK_LEAVES) || !blockIsFoliage(SPRUCE_LEAVES) ||

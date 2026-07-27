@@ -155,7 +155,8 @@ sudo apt install vulkan-validationlayers
 |-----|----------|
 | [`docs/vulkan-graphics.md`](docs/vulkan-graphics.md) | Vulkan setup, frame graph, passes, shaders, lighting/post |
 | [`docs/engine-architecture.md`](docs/engine-architecture.md) | Engine loop, settings/UI, chunks, streaming, terrain gen |
-| [`Agents.md`](Agents.md) | Short contributor-oriented project map |
+| [`docs/terrain-generation.md`](docs/terrain-generation.md) | Noise graphs, biome/block catalog, extension and calibration procedures |
+| [`AGENTS.md`](AGENTS.md) | Contributor-oriented project map and conventions |
 
 ## Project layout
 

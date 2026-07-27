@@ -7,7 +7,9 @@
 #include <Vulkan/VkContext.hpp>
 #include <Vulkan/VkLoadLibrary.hpp>
 #include <Vulkan/VkResourceSmoke.hpp>
+#include <Vulkan/VkSwapchain.hpp>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -68,6 +70,68 @@ int main()
 	{
 		VkContext context;
 		context.init(window);
+
+		const SwapchainSupportDetails support = VkSwapchain::querySupport(
+			context.getPhysicalDevice(), context.getSurface());
+		const auto hasMode = [&](VkPresentModeKHR mode) {
+			return std::find(support.presentModes.begin(),
+							 support.presentModes.end(),
+							 mode) != support.presentModes.end();
+		};
+		if (!hasMode(VK_PRESENT_MODE_FIFO_KHR))
+			throw std::runtime_error("surface is missing mandatory FIFO mode");
+
+		const std::vector<VkPresentModeKHR> syntheticModes = {
+			VK_PRESENT_MODE_MAILBOX_KHR,
+			VK_PRESENT_MODE_FIFO_KHR,
+			VK_PRESENT_MODE_IMMEDIATE_KHR};
+		if (VkSwapchain::selectPresentMode(syntheticModes, false) !=
+			VK_PRESENT_MODE_IMMEDIATE_KHR)
+			throw std::runtime_error(
+				"VSync-off policy preferred a synchronized mode over IMMEDIATE");
+
+		bool rejectedSynchronizedFallback = false;
+		try
+		{
+			VkSwapchain::selectPresentMode(
+				{VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_KHR},
+				false);
+		}
+		catch (const std::runtime_error &)
+		{
+			rejectedSynchronizedFallback = true;
+		}
+		if (!rejectedSynchronizedFallback)
+			throw std::runtime_error(
+				"VSync-off policy accepted MAILBOX/FIFO without IMMEDIATE");
+
+		VkSwapchain swapchain;
+		swapchain.init(context, 64, 64, true);
+		if (swapchain.getPresentMode() != VK_PRESENT_MODE_FIFO_KHR)
+			throw std::runtime_error("VSync on did not select strict FIFO mode");
+
+		if (hasMode(VK_PRESENT_MODE_IMMEDIATE_KHR))
+		{
+			swapchain.setVSync(false);
+			if (swapchain.isVSync() ||
+				swapchain.getPresentMode() != VK_PRESENT_MODE_IMMEDIATE_KHR)
+				throw std::runtime_error(
+					"VSync off did not select strict IMMEDIATE mode");
+
+			swapchain.setVSync(true);
+			if (!swapchain.isVSync() ||
+				swapchain.getPresentMode() != VK_PRESENT_MODE_FIFO_KHR)
+				throw std::runtime_error(
+					"re-enabled VSync did not restore strict FIFO mode");
+			std::cout << "PASS: VSync toggle FIFO -> IMMEDIATE -> FIFO"
+					  << " (no MAILBOX/FIFO fallback while disabled)\n";
+		}
+		else
+		{
+			std::cout << "PASS: surface lacks IMMEDIATE; strict policy rejects"
+					  << " disabling VSync instead of falling back\n";
+		}
+		swapchain.shutdown();
 
 		const std::string vert = resolveSpv("smoke.vert.spv");
 		const std::string frag = resolveSpv("smoke.frag.spv");

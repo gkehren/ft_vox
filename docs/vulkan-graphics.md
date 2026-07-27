@@ -54,6 +54,21 @@ Supporting types:
 
 `WorldRenderer` does **not** own WSI sync. The `Engine` calls `VkFrameContext::beginFrame` / `submitAndPresent` and passes a reset command buffer into `WorldRenderer::recordFrame`.
 
+### Present mode and VSync contract
+
+`VkSwapchain` applies a strict two-mode policy:
+
+- VSync on selects `VK_PRESENT_MODE_FIFO_KHR`.
+- VSync off selects `VK_PRESENT_MODE_IMMEDIATE_KHR`. There is no application
+  sleep, frame limiter, `MAILBOX`, `FIFO_RELAXED`, or `FIFO` fallback.
+
+If a surface does not expose `IMMEDIATE`, disabling VSync is rejected explicitly
+instead of silently retaining refresh-paced presentation. F10 and the HUD
+checkbox recreate the swapchain immediately and display the active Vulkan mode.
+The same path is reproducible from the CLI with `--vsync on|off`; combining it
+with `--benchmark <seconds>` measures either mode without changing the requested
+setting.
+
 ---
 
 ## 3. Frame graph

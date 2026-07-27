@@ -2,6 +2,7 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 
@@ -407,6 +408,46 @@ void TerrainGenerator::setupCaveNoise()
   ravineScale->SetSource(ravineFractal);
   ravineScale->SetScale(0.005f);
   m_ravineNoise = ravineScale;
+
+  // Spaghetti caves: the same ridged graph is sampled with two independent
+  // seeds and the narrow fields are ANDed during voxel generation.
+  auto spaghettiBase = FastNoise::New<FastNoise::OpenSimplex2>();
+  auto spaghettiFractal = FastNoise::New<FastNoise::FractalRidged>();
+  spaghettiFractal->SetSource(spaghettiBase);
+  spaghettiFractal->SetOctaveCount(1);
+  spaghettiFractal->SetLacunarity(2.0f);
+  spaghettiFractal->SetGain(0.5f);
+
+  auto spaghettiScale = FastNoise::New<FastNoise::DomainScale>();
+  spaghettiScale->SetSource(spaghettiFractal);
+  spaghettiScale->SetScale(0.028f);
+  m_spaghettiNoise = spaghettiScale;
+
+  // Low-frequency field for broad rooms in the deep underground.
+  auto cavernBase = FastNoise::New<FastNoise::OpenSimplex2>();
+  auto cavernFractal = FastNoise::New<FastNoise::FractalFBm>();
+  cavernFractal->SetSource(cavernBase);
+  cavernFractal->SetOctaveCount(1);
+  cavernFractal->SetLacunarity(2.0f);
+  cavernFractal->SetGain(0.5f);
+
+  auto cavernScale = FastNoise::New<FastNoise::DomainScale>();
+  cavernScale->SetSource(cavernFractal);
+  cavernScale->SetScale(0.008f);
+  m_cavernNoise = cavernScale;
+
+  // Low-frequency 2D regions select dry caves, water aquifers, and their
+  // stable local water table. Sampling in world space avoids fluid seams.
+  auto aquiferBase = FastNoise::New<FastNoise::OpenSimplex2>();
+  auto aquiferFractal = FastNoise::New<FastNoise::FractalFBm>();
+  aquiferFractal->SetSource(aquiferBase);
+  aquiferFractal->SetOctaveCount(2);
+  aquiferFractal->SetLacunarity(2.0f);
+  aquiferFractal->SetGain(0.5f);
+  auto aquiferScale = FastNoise::New<FastNoise::DomainScale>();
+  aquiferScale->SetSource(aquiferFractal);
+  aquiferScale->SetScale(0.006f);
+  m_aquiferNoise = aquiferScale;
 }
 
 void TerrainGenerator::setupVegetationNoise()
@@ -442,22 +483,25 @@ void TerrainGenerator::setupVegetationNoise()
 
 void TerrainGenerator::setupOres()
 {
-  // Coal: Common, large veins
-  m_ores.push_back({TextureType::COAL_ORE, 0, 128, 17, 20, 10000});
-  // Iron: Common, medium veins
-  m_ores.push_back({TextureType::IRON_ORE, 0, 64, 9, 20, 11000});
-  // Copper: Medium rarity
-  m_ores.push_back({TextureType::COPPER_ORE, 0, 96, 10, 16, 12000});
-  // Gold: Rare, deep
-  m_ores.push_back({TextureType::GOLD_ORE, 0, 32, 9, 4, 13000});
-  // Lapis: Rare, deep
-  m_ores.push_back({TextureType::LAPIS_ORE, 0, 32, 7, 2, 14000});
-  // Redstone: Common deep
-  m_ores.push_back({TextureType::REDSTONE_ORE, 0, 16, 8, 8, 15000});
-  // Diamond: Very rare
-  m_ores.push_back({TextureType::DIAMOND_ORE, 1, 16, 8, 2, 16000});
-  // Emerald: Very rare
-  m_ores.push_back({TextureType::EMERALD_ORE, 4, 32, 3, 2, 17000});
+  using D = OreDistribution;
+  // type, deep variant, Y range, vein size/count, seed, distribution,
+  // mountain-only, badlands bonus.
+  m_ores.push_back({COAL_ORE, DEEPSLATE_COAL_ORE, 32, 192, 17, 18, 10000,
+                    D::High, false, 0});
+  m_ores.push_back({IRON_ORE, DEEPSLATE_IRON_ORE, 4, 144, 10, 20, 11000,
+                    D::Mid, false, 0});
+  m_ores.push_back({COPPER_ORE, DEEPSLATE_COPPER_ORE, 20, 112, 11, 15, 12000,
+                    D::Mid, false, 0});
+  m_ores.push_back({GOLD_ORE, DEEPSLATE_GOLD_ORE, 4, 48, 9, 4, 13000,
+                    D::Deep, false, 8});
+  m_ores.push_back({LAPIS_ORE, DEEPSLATE_LAPIS_ORE, 4, 56, 7, 3, 14000,
+                    D::Mid, false, 0});
+  m_ores.push_back({REDSTONE_ORE, DEEPSLATE_REDSTONE_ORE, 4, 32, 8, 8, 15000,
+                    D::Deep, false, 0});
+  m_ores.push_back({DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE, 4, 24, 8, 3, 16000,
+                    D::Deep, false, 0});
+  m_ores.push_back({EMERALD_ORE, DEEPSLATE_EMERALD_ORE, 4, 112, 4, 5, 17000,
+                    D::Uniform, true, 0});
 }
 
 // =============================================
@@ -477,6 +521,19 @@ static constexpr int HEIGHT_CEILING_MARGIN = 16; // Reserved space above max ter
 //    from neighbor chunks can be evaluated from identical data.
 static constexpr int EXT_SIZE = 28;
 static constexpr int EXT_CORE_OFFSET = 6;
+static constexpr int UNDERGROUND_NOISE_MAX_Y = 96;
+static constexpr int LARGE_CAVERN_MAX_Y = 48;
+static constexpr int UNDERGROUND_COARSE_STEP = 2;
+static constexpr int UNDERGROUND_COARSE_BORDER = 2;
+static constexpr int UNDERGROUND_COARSE_XZ =
+    (CHUNK_SIZE + 2 * UNDERGROUND_COARSE_BORDER) /
+        UNDERGROUND_COARSE_STEP +
+    1;
+static constexpr int UNDERGROUND_COARSE_Y =
+    UNDERGROUND_NOISE_MAX_Y / UNDERGROUND_COARSE_STEP + 1;
+static constexpr int UNDERGROUND_COARSE_VOLUME =
+    UNDERGROUND_COARSE_XZ * UNDERGROUND_COARSE_Y *
+    UNDERGROUND_COARSE_XZ;
 
 struct GenBuffers
 {
@@ -489,6 +546,7 @@ struct GenBuffers
   std::array<float, EXT_SIZE * EXT_SIZE> humidity;
   std::array<float, EXT_SIZE * EXT_SIZE> weirdness;
   std::array<float, EXT_SIZE * EXT_SIZE> river;
+  std::array<float, EXT_SIZE * EXT_SIZE> aquifer;
 
   // Extended heightmap for erosion (28x28)
   std::array<float, EXT_SIZE * EXT_SIZE> extendedHeightMap;
@@ -503,6 +561,11 @@ struct GenBuffers
   // 3D noise is generated separately for the 16x16 core and one-column border strips.
   std::array<float, CHUNK_VOLUME> cave;
   std::array<float, CHUNK_VOLUME> ravine;
+  // The additional underground fields use an aligned half-resolution grid.
+  // A two-block halo makes the same samples usable by core and border voxels.
+  std::array<float, UNDERGROUND_COARSE_VOLUME> spaghettiA;
+  std::array<float, UNDERGROUND_COARSE_VOLUME> spaghettiB;
+  std::array<float, UNDERGROUND_COARSE_VOLUME> cavern;
   std::array<float, CHUNK_VOLUME> surface3D;
 
   // Border generation buffers (per-strip: CHUNK_SIZE columns)
@@ -551,6 +614,84 @@ inline float columnSlopeAt(const int *heights, int size, int idx)
   return s;
 }
 
+inline bool shouldCarveCave(int worldY, int terrainHeight, float cave,
+                           float ravine, float spaghettiA, float spaghettiB,
+                           float cavern, bool hasUndergroundNoise)
+{
+  const float heightRatio =
+      std::clamp(static_cast<float>(worldY - TerrainGenerator::SEA_LEVEL) /
+                     64.0f,
+                 0.0f, 1.0f);
+  const float cheeseThreshold = 0.62f + heightRatio * 0.35f;
+  const float ravineThreshold = 0.81f + heightRatio * 0.15f;
+  if (cave > cheeseThreshold || ravine > ravineThreshold)
+    return true;
+
+  const int cover = terrainHeight - worldY;
+  if (!hasUndergroundNoise || cover < 7)
+    return false;
+
+  const float depthFactor =
+      1.0f - std::clamp(static_cast<float>(worldY) /
+                            static_cast<float>(UNDERGROUND_NOISE_MAX_Y),
+                        0.0f, 1.0f);
+  const float spaghettiThreshold = 0.76f - depthFactor * 0.06f;
+  if (spaghettiA > spaghettiThreshold && spaghettiB > spaghettiThreshold)
+    return true;
+
+  if (worldY < LARGE_CAVERN_MAX_Y && cover >= 10)
+  {
+    const float ceilingFade =
+        std::clamp(static_cast<float>(LARGE_CAVERN_MAX_Y - worldY) / 16.0f,
+                   0.0f, 1.0f);
+    const float cavernThreshold = std::lerp(0.74f, 0.60f, ceilingFade);
+    if (cavern > cavernThreshold)
+      return true;
+  }
+
+  return false;
+}
+
+inline float sampleCoarseUnderground(const float *values, int localX,
+                                     int worldY, int localZ)
+{
+  const int x = std::clamp(
+      (localX + UNDERGROUND_COARSE_BORDER) / UNDERGROUND_COARSE_STEP, 0,
+      UNDERGROUND_COARSE_XZ - 1);
+  const int y = std::clamp(worldY / UNDERGROUND_COARSE_STEP, 0,
+                           UNDERGROUND_COARSE_Y - 1);
+  const int z = std::clamp(
+      (localZ + UNDERGROUND_COARSE_BORDER) / UNDERGROUND_COARSE_STEP, 0,
+      UNDERGROUND_COARSE_XZ - 1);
+  return values[z * UNDERGROUND_COARSE_Y * UNDERGROUND_COARSE_XZ +
+                y * UNDERGROUND_COARSE_XZ + x];
+}
+
+inline bool isMountainBiome(BiomeType biome)
+{
+  return biome == BIOME_MOUNTAINS || biome == BIOME_SNOWY_MOUNTAINS ||
+         biome == BIOME_GLACIER;
+}
+
+inline TextureType caveFillAt(int worldY, int terrainHeight, BiomeType biome,
+                              float aquifer)
+{
+  // A global deep lava table creates lakes without ever overlapping water.
+  if (worldY <= 11)
+    return TextureType::LAVA;
+
+  // Volcanic columns may contain isolated, deeper-than-surface lava pockets.
+  if (biome == BIOME_VOLCANIC && worldY <= 24 && aquifer < -0.58f)
+    return TextureType::LAVA;
+
+  const int cover = terrainHeight - worldY;
+  const int localWaterLevel =
+      std::clamp(20 + static_cast<int>((aquifer + 1.0f) * 8.0f), 20, 36);
+  if (aquifer > 0.10f && cover >= 10 && worldY <= localWaterLevel)
+    return TextureType::WATER;
+  return TextureType::AIR;
+}
+
 } // namespace
 
 TerrainGenerator &TerrainGenerator::getThreadLocal(int seed)
@@ -568,6 +709,9 @@ TerrainGenerator &TerrainGenerator::getThreadLocal(int seed)
 
 ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
 {
+  using Clock = std::chrono::steady_clock;
+  const auto totalStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
   ChunkData chunkData;
   chunkData.voxels.assign(CHUNK_VOLUME, {TextureType::AIR});
   chunkData.borderVoxels.assign(18 * (CHUNK_HEIGHT + 2) * 18,
@@ -577,17 +721,55 @@ ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
   generateChunkBatch(chunkData, chunkX, chunkZ);
 
   // Generate vegetation (trees, cacti, etc.)
+  const auto vegetationStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
   generateVegetation(chunkData, chunkX, chunkZ);
+  if (m_activeProfile)
+    m_activeProfile->vegetationMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() -
+                                                  vegetationStart)
+            .count();
 
   // Generate border voxels for mesh optimization
+  const auto borderStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
   generateChunkBorders(chunkData, chunkX, chunkZ);
+  if (m_activeProfile)
+  {
+    m_activeProfile->borderMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - borderStart)
+            .count();
+    m_activeProfile->totalMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - totalStart)
+            .count();
+    ++m_activeProfile->chunks;
+  }
 
   return chunkData;
+}
+
+ChunkData TerrainGenerator::generateChunkProfiled(
+    int chunkX, int chunkZ, TerrainGenerationProfile &profile)
+{
+  TerrainGenerationProfile *previous = m_activeProfile;
+  m_activeProfile = &profile;
+  try
+  {
+    ChunkData result = generateChunk(chunkX, chunkZ);
+    m_activeProfile = previous;
+    return result;
+  }
+  catch (...)
+  {
+    m_activeProfile = previous;
+    throw;
+  }
 }
 
 void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
                                           int chunkZ)
 {
+  using Clock = std::chrono::steady_clock;
   constexpr int totalPoints = CHUNK_SIZE * CHUNK_SIZE;
   constexpr int totalVoxels = CHUNK_VOLUME;
 
@@ -602,10 +784,14 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   float *humidityResults = s_genBuffers.humidity.data();
   float *weirdnessResults = s_genBuffers.weirdness.data();
   float *riverResults = s_genBuffers.river.data();
+  float *aquiferResults = s_genBuffers.aquifer.data();
 
   // 3D Noise buffers
   float *caveResults = s_genBuffers.cave.data();
   float *ravineResults = s_genBuffers.ravine.data();
+  float *spaghettiAResults = s_genBuffers.spaghettiA.data();
+  float *spaghettiBResults = s_genBuffers.spaghettiB.data();
+  float *cavernResults = s_genBuffers.cavern.data();
   float *surface3DResults = s_genBuffers.surface3D.data();
 
   float worldXf = static_cast<float>(chunkX) + NOISE_OFFSET;
@@ -616,6 +802,8 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   float extendedWorldZf = worldZf - static_cast<float>(EXT_CORE_OFFSET);
   const int EXTENDED_SIZE = EXT_SIZE;
 
+  const auto noise2DStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
   m_continentalNoise->GenUniformGrid2D(continentalResults, extendedWorldXf,
                                        extendedWorldZf, EXTENDED_SIZE, EXTENDED_SIZE, 1.0f,
                                        m_seed);
@@ -641,6 +829,19 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
                                      EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 8000);
   m_riverNoise->GenUniformGrid2D(riverResults, extendedWorldXf, extendedWorldZf,
                                  EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 9000);
+  if (m_activeProfile)
+    m_activeProfile->noise2DMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - noise2DStart)
+            .count();
+  const auto aquiferStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
+  m_aquiferNoise->GenUniformGrid2D(aquiferResults, extendedWorldXf,
+                                   extendedWorldZf, EXTENDED_SIZE,
+                                   EXTENDED_SIZE, 1.0f, m_seed + 10000);
+  if (m_activeProfile)
+    m_activeProfile->aquiferNoiseMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - aquiferStart)
+            .count();
 
   // Pre-calculate float heights for the extended map.
   float *extHeightMap = s_genBuffers.extendedHeightMap.data();
@@ -652,7 +853,13 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   }
 
   // Apply erosion smoothing step to the float heightmap
+  const auto erosionStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
   applyErosion(extHeightMap, EXTENDED_SIZE);
+  if (m_activeProfile)
+    m_activeProfile->erosionMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - erosionStart)
+            .count();
 
   // Pass 1a: biomes, heights and raw biome colors over the whole extended
   // window (must precede 3D noise so we can bound cave sampling to
@@ -794,6 +1001,8 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   const int caveYSize = yBounds.ySize;
   const int yNoiseEnd = yBounds.yNoiseEnd;
   const int yFillEnd = yBounds.yFillEnd;
+  const auto base3DStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
   m_caveNoise->GenUniformGrid3D(caveResults, worldXf, static_cast<float>(caveYMin), worldZf,
                                 CHUNK_SIZE, caveYSize, CHUNK_SIZE, 1.0f,
                                 m_seed + 4000);
@@ -803,8 +1012,50 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   m_surface3DNoise->GenUniformGrid3D(surface3DResults, worldXf, static_cast<float>(caveYMin), worldZf,
                                      CHUNK_SIZE, caveYSize, CHUNK_SIZE, 1.0f,
                                      m_seed + 6000);
+  if (m_activeProfile)
+    m_activeProfile->base3DNoiseMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - base3DStart)
+            .count();
+  const int undergroundNoiseEnd = std::min(yNoiseEnd, UNDERGROUND_NOISE_MAX_Y);
+  if (undergroundNoiseEnd > 0)
+  {
+    // FastNoise multiplies grid indices by frequency. Dividing the aligned
+    // start coordinate by the step therefore samples exact world positions
+    // -2, 0, 2, ... and guarantees overlap between neighboring chunks.
+    const int coarseStartX =
+        (chunkX - UNDERGROUND_COARSE_BORDER) / UNDERGROUND_COARSE_STEP;
+    const int coarseStartZ =
+        (chunkZ - UNDERGROUND_COARSE_BORDER) / UNDERGROUND_COARSE_STEP;
+    const auto spaghettiStart =
+        m_activeProfile ? Clock::now() : Clock::time_point{};
+    m_spaghettiNoise->GenUniformGrid3D(
+        spaghettiAResults, coarseStartX, 0, coarseStartZ,
+        UNDERGROUND_COARSE_XZ, UNDERGROUND_COARSE_Y, UNDERGROUND_COARSE_XZ,
+        static_cast<float>(UNDERGROUND_COARSE_STEP), m_seed + 7000);
+    m_spaghettiNoise->GenUniformGrid3D(
+        spaghettiBResults, coarseStartX, 0, coarseStartZ,
+        UNDERGROUND_COARSE_XZ, UNDERGROUND_COARSE_Y, UNDERGROUND_COARSE_XZ,
+        static_cast<float>(UNDERGROUND_COARSE_STEP), m_seed + 8000);
+    if (m_activeProfile)
+      m_activeProfile->spaghettiNoiseMs +=
+          std::chrono::duration<double, std::milli>(Clock::now() -
+                                                    spaghettiStart)
+              .count();
+    const auto cavernStart =
+        m_activeProfile ? Clock::now() : Clock::time_point{};
+    m_cavernNoise->GenUniformGrid3D(
+        cavernResults, coarseStartX, 0, coarseStartZ,
+        UNDERGROUND_COARSE_XZ, UNDERGROUND_COARSE_Y, UNDERGROUND_COARSE_XZ,
+        static_cast<float>(UNDERGROUND_COARSE_STEP), m_seed + 9000);
+    if (m_activeProfile)
+      m_activeProfile->cavernNoiseMs +=
+          std::chrono::duration<double, std::milli>(Clock::now() - cavernStart)
+              .count();
+  }
 
   // Pass 2: Generate voxel columns
+  const auto voxelFillStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
   for (int localZ = 0; localZ < CHUNK_SIZE; ++localZ)
   {
     for (int localX = 0; localX < CHUNK_SIZE; ++localX)
@@ -829,6 +1080,9 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
 
         float caveVal = 0.f;
         float ravineVal = 0.f;
+        float spaghettiAVal = 0.f;
+        float spaghettiBVal = 0.f;
+        float cavernVal = 0.f;
         float surface3DVal = 0.f;
         if (inNoiseBand)
         {
@@ -837,6 +1091,17 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
           caveVal = caveResults[noiseIndex];
           ravineVal = ravineResults[noiseIndex];
           surface3DVal = surface3DResults[noiseIndex];
+        }
+        const bool hasUndergroundNoise =
+            y >= caveYMin && y < undergroundNoiseEnd;
+        if (hasUndergroundNoise)
+        {
+          spaghettiAVal =
+              sampleCoarseUnderground(spaghettiAResults, localX, y, localZ);
+          spaghettiBVal =
+              sampleCoarseUnderground(spaghettiBResults, localX, y, localZ);
+          cavernVal =
+              sampleCoarseUnderground(cavernResults, localX, y, localZ);
         }
 
         // 3D density: base density is distance below the heightmap surface
@@ -859,20 +1124,20 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
 
             if (inNoiseBand && type != TextureType::BEDROCK && type != TextureType::WATER)
             {
-              float heightRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
-              float caveThreshold = 0.6f + heightRatio * 0.35f;
-              float ravineThreshold = 0.8f + heightRatio * 0.15f;
-
-              if (caveVal > caveThreshold || ravineVal > ravineThreshold)
+              if (shouldCarveCave(y, terrainHeight, caveVal, ravineVal,
+                                  spaghettiAVal, spaghettiBVal, cavernVal,
+                                  hasUndergroundNoise))
               {
-                type = TextureType::AIR;
+                type = caveFillAt(y, terrainHeight, biome,
+                                  aquiferResults[extIndex]);
               }
             }
         } else {
             type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, columnSlope, density);
         }
 
-        if (type != TextureType::AIR && type != TextureType::WATER) {
+        if (type != TextureType::AIR && type != TextureType::WATER &&
+            type != TextureType::LAVA) {
             actualMaxHeight = std::max(actualMaxHeight, y);
         }
         chunkData.voxels[voxelIndex].type = type;
@@ -880,8 +1145,15 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
       chunkData.heightMap[colIndex] = actualMaxHeight;
     }
   }
+  if (m_activeProfile)
+    m_activeProfile->voxelFillMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() -
+                                                  voxelFillStart)
+            .count();
 
-  // Ore generation pass (random-walk blobs)
+  // Ore generation pass (depth- and biome-aware random-walk blobs).
+  const auto oreStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
   for (const auto &ore : m_ores)
   {
     int minY = std::max(0, ore.minHeight);
@@ -889,19 +1161,55 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
     if (minY >= maxY)
       continue;
 
-    for (int i = 0; i < ore.clustersPerChunk; ++i) {
+    const int candidates = ore.clustersPerChunk + ore.badlandsBonusClusters;
+    for (int i = 0; i < candidates; ++i) {
       uint32_t h1 = treeHash(chunkX, chunkZ, m_seed + ore.seedOffset + i);
+      uint32_t h2 = treeHash(chunkX, chunkZ,
+                             m_seed + ore.seedOffset + 50000 + i * 31);
       int startX = h1 % CHUNK_SIZE;
       int startZ = (h1 >> 8) % CHUNK_SIZE;
-      int startY = minY + ((h1 >> 16) % (maxY - minY));
+      const BiomeType startBiome =
+          chunkData.biomes[getColumnIndex(startX, startZ)];
+      if (ore.mountainOnly && !isMountainBiome(startBiome))
+        continue;
+      if (i >= ore.clustersPerChunk && startBiome != BIOME_BADLANDS)
+        continue;
+
+      const float u1 = static_cast<float>((h1 >> 16) & 0xffffu) / 65535.0f;
+      const float u2 = static_cast<float>(h2 & 0xffffu) / 65535.0f;
+      float normalized = u1;
+      switch (ore.distribution)
+      {
+      case OreDistribution::High:
+        normalized = 1.0f - u1 * u2;
+        break;
+      case OreDistribution::Mid:
+        normalized = (u1 + u2) * 0.5f;
+        break;
+      case OreDistribution::Deep:
+        normalized = u1 * u2;
+        break;
+      case OreDistribution::Uniform:
+        break;
+      }
+      int startY =
+          minY + std::min(maxY - minY - 1,
+                          static_cast<int>(normalized * (maxY - minY)));
 
       int x = startX, y = startY, z = startZ;
       for (int step = 0; step < ore.clusterSize; ++step) {
-        if (x >= 0 && x < CHUNK_SIZE && y >= 0 && y < CHUNK_HEIGHT && z >= 0 && z < CHUNK_SIZE) {
+        if (x >= 0 && x < CHUNK_SIZE && y >= minY && y < maxY &&
+            z >= 0 && z < CHUNK_SIZE) {
           int voxelIndex = getVoxelIndex(x, y, z);
           const auto host = static_cast<TextureType>(chunkData.voxels[voxelIndex].type);
-          if (blockIsOreHost(host)) {
-            chunkData.voxels[voxelIndex].type = ore.type;
+          const BiomeType targetBiome =
+              chunkData.biomes[getColumnIndex(x, z)];
+          if (blockIsOreHost(host) &&
+              (!ore.mountainOnly || isMountainBiome(targetBiome))) {
+            chunkData.voxels[voxelIndex].type =
+                (host == DEEPSLATE || host == TUFF)
+                    ? ore.deepType
+                    : ore.type;
           }
         }
         
@@ -909,13 +1217,91 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
         int dir = stepHash % 6;
         if (dir == 0) x++;
         else if (dir == 1) x--;
-        else if (dir == 2) y++;
-        else if (dir == 3) y--;
+        else if (dir == 2 && y + 1 < maxY) y++;
+        else if (dir == 3 && y - 1 >= minY) y--;
         else if (dir == 4) z++;
         else if (dir == 5) z--;
       }
     }
   }
+  if (m_activeProfile)
+    m_activeProfile->oreMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - oreStart)
+            .count();
+
+  // Deterministic cube-based cave decoration. Candidates depend only on
+  // world coordinates and seed, so generation order cannot affect results.
+  const auto decorationStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
+  for (int z = 0; z < CHUNK_SIZE; ++z)
+  {
+    for (int x = 0; x < CHUNK_SIZE; ++x)
+    {
+      const int column = getColumnIndex(x, z);
+      const BiomeType biome = chunkData.biomes[column];
+      const int maxY = std::min(80, chunkData.heightMap[column] - 7);
+      const int worldX = chunkX + x;
+      const int worldZ = chunkZ + z;
+      for (int y = BEDROCK_LEVEL + 2; y < maxY; ++y)
+      {
+        const int index = getVoxelIndex(x, y, z);
+        const TextureType current =
+            static_cast<TextureType>(chunkData.voxels[index].type);
+
+        if (current == AIR)
+        {
+          const TextureType above = static_cast<TextureType>(
+              chunkData.voxels[getVoxelIndex(x, y + 1, z)].type);
+          const TextureType below = static_cast<TextureType>(
+              chunkData.voxels[getVoxelIndex(x, y - 1, z)].type);
+          const uint32_t h =
+              treeHash(worldX, worldZ, m_seed + 24000 + y * 977);
+
+          if (blockIsOreHost(above) && (h & 63u) == 0u)
+          {
+            const int length = 1 + static_cast<int>((h >> 8) % 3u);
+            for (int d = 0; d < length && y - d > BEDROCK_LEVEL; ++d)
+            {
+              const int dripIndex = getVoxelIndex(x, y - d, z);
+              if (chunkData.voxels[dripIndex].type != AIR)
+                break;
+              chunkData.voxels[dripIndex].type = DRIPSTONE_BLOCK;
+            }
+          }
+          else if (blockIsOreHost(below) && ((h >> 6) & 63u) == 0u)
+          {
+            const int length = 1 + static_cast<int>((h >> 14) % 3u);
+            for (int d = 0; d < length && y + d < maxY; ++d)
+            {
+              const int dripIndex = getVoxelIndex(x, y + d, z);
+              if (chunkData.voxels[dripIndex].type != AIR)
+                break;
+              chunkData.voxels[dripIndex].type = DRIPSTONE_BLOCK;
+            }
+          }
+          else if (biome == BIOME_VOLCANIC && blockIsOreHost(below) &&
+                   ((h >> 12) & 15u) == 0u)
+          {
+            chunkData.voxels[getVoxelIndex(x, y - 1, z)].type = MAGMA;
+          }
+        }
+        else if (current == WATER)
+        {
+          const TextureType below = static_cast<TextureType>(
+              chunkData.voxels[getVoxelIndex(x, y - 1, z)].type);
+          const uint32_t h =
+              treeHash(worldX, worldZ, m_seed + 25000 + y * 991);
+          if (blockIsOreHost(below) && (h & 15u) == 0u)
+            chunkData.voxels[getVoxelIndex(x, y - 1, z)].type = MOSS_BLOCK;
+        }
+      }
+    }
+  }
+  if (m_activeProfile)
+    m_activeProfile->decorationMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() -
+                                                  decorationStart)
+            .count();
 }
 
 // =============================================
@@ -1544,13 +1930,48 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
     if (chunkData.voxels[idx].type == static_cast<uint8_t>(WATER))
       chunkData.voxels[idx].type = t;
   };
+  auto terrainSurfaceIsSolid = [&](int lx, int lz, int terrainHeight,
+                                   BiomeType biome) {
+    if (lx >= 0 && lx < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE)
+    {
+      const TextureType type = static_cast<TextureType>(
+          chunkData.voxels[getVoxelIndex(lx, terrainHeight, lz)].type);
+      return type != AIR && type != WATER && type != LAVA;
+    }
+
+    const float worldX =
+        static_cast<float>(chunkX + lx) + NOISE_OFFSET;
+    const float worldZ =
+        static_cast<float>(chunkZ + lz) + NOISE_OFFSET;
+    const float cave =
+        m_caveNoise->GenSingle3D(worldX, static_cast<float>(terrainHeight),
+                                 worldZ, m_seed + 4000);
+    const float ravine =
+        m_ravineNoise->GenSingle3D(worldX, static_cast<float>(terrainHeight),
+                                   worldZ, m_seed + 5000);
+    if (shouldCarveCave(terrainHeight, terrainHeight, cave, ravine, 0.0f,
+                        0.0f, 0.0f, false))
+      return false;
+
+    const float perturbAmp = getBiomeConfig(biome).surfacePerturbAmp;
+    if (perturbAmp > 0.0f)
+    {
+      const float surface =
+          m_surface3DNoise->GenSingle3D(
+              worldX, static_cast<float>(terrainHeight), worldZ,
+              m_seed + 6000);
+      if (surface * perturbAmp < 0.0f)
+        return false;
+    }
+    return true;
+  };
 
   // Candidates are evaluated in a ring of MAX_TREE_RADIUS around the core so
   // canopies/features rooted in neighbor chunks get their in-chunk voxels
   // placed identically by every overlapping chunk. All inputs come from the
   // extended window (post-erosion, pre-cave heights/biomes) and world-position
-  // hashes -> fully deterministic. Cave carve-outs under a candidate are not
-  // visible here, so a tree may rarely hover above a ravine opening.
+  // hashes -> fully deterministic. Core candidates inspect generated voxels;
+  // halo candidates repeat the matching surface cave/perturbation decision.
   for (int localZ = -MAX_TREE_RADIUS; localZ < CHUNK_SIZE + MAX_TREE_RADIUS; ++localZ)
   {
     for (int localX = -MAX_TREE_RADIUS; localX < CHUNK_SIZE + MAX_TREE_RADIUS; ++localX)
@@ -1560,6 +1981,29 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
       const BiomeType biome = extBiomes[extIndex];
       const int worldX = chunkX + localX;
       const int worldZ = chunkZ + localZ;
+
+      // Temperate oceans receive sparse kelp columns. Full cube collision and
+      // alpha are acceptable under water; thinner seagrass/lily-pad geometry
+      // remains deferred to a future cross-plane/flat-quad renderer.
+      if (biome == BIOME_OCEAN)
+      {
+        const uint32_t kelpHash = treeHash(worldX, worldZ, m_seed + 1300);
+        const float kelpRoll =
+            static_cast<float>(kelpHash & 0xFFFFu) / 65535.0f;
+        if (terrainHeight <= SEA_LEVEL - 4 && kelpRoll < 0.018f)
+        {
+          const int available = SEA_LEVEL - terrainHeight - 1;
+          const int height = std::min(
+              available, 2 + static_cast<int>((kelpHash >> 16) % 5u));
+          for (int y = 1; y <= height; ++y)
+          {
+            setIfWater(localX, terrainHeight + y, localZ,
+                       y == height ? TextureType::KELP_TOP
+                                   : TextureType::KELP);
+          }
+        }
+        continue;
+      }
 
       // Warm shallow oceans receive deterministic coral heads. Candidate
       // evaluation uses the same cross-chunk ring as trees so one-block arms
@@ -1635,7 +2079,9 @@ void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int 
 
       if (roll < treeProbability)
       {
-        placeTree(chunkData, localX, localZ, terrainHeight + 1, biome, worldX, worldZ);
+        if (terrainSurfaceIsSolid(localX, localZ, terrainHeight, biome))
+          placeTree(chunkData, localX, localZ, terrainHeight + 1, biome, worldX,
+                    worldZ);
         continue;
       }
 
@@ -1832,6 +2278,41 @@ TextureType surfaceBlockForBiome(BiomeType biome, uint32_t colHash, const BiomeC
   return config.surfaceBlock;
 }
 
+TextureType underwaterSurfaceBlockForBiome(BiomeType biome,
+                                           uint32_t patchHash,
+                                           const BiomeConfig &config)
+{
+  // Four-by-four world cells produce readable material patches instead of
+  // per-column salt-and-pepper noise. The hash is world-coordinate based, so
+  // a patch remains identical across chunk boundaries.
+  switch (biome)
+  {
+  case BIOME_OCEAN:
+    if (patchHash % 13u == 0u)
+      return TextureType::CLAY;
+    if (patchHash % 5u == 0u)
+      return TextureType::GRAVEL;
+    return TextureType::SAND;
+  case BIOME_FROZEN_OCEAN:
+    if (patchHash % 11u == 0u)
+      return TextureType::CLAY;
+    if (patchHash % 4u == 0u)
+      return TextureType::SAND;
+    return TextureType::GRAVEL;
+  case BIOME_CORAL_REEF:
+    if (patchHash % 9u == 0u)
+      return TextureType::CLAY;
+    if (patchHash % 3u == 0u)
+      return TextureType::SAND;
+    return TextureType::GRAVEL;
+  case BIOME_SWAMP:
+  case BIOME_MANGROVE_SWAMP:
+    return (patchHash % 3u == 0u) ? TextureType::CLAY : TextureType::MUD;
+  default:
+    return config.underwaterBlock;
+  }
+}
+
 } // namespace
 
 TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight,
@@ -1855,7 +2336,14 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
     if (density < 1.0f)
     {
       if (worldY <= SEA_LEVEL + 2 && config.surfaceBlock != TextureType::STONE)
-        return config.underwaterBlock;
+      {
+        const auto floorDiv4 = [](int value) {
+          return value >= 0 ? value / 4 : -((-value + 3) / 4);
+        };
+        const uint32_t patchHash =
+            treeHash(floorDiv4(worldX), floorDiv4(worldZ), m_seed + 26000);
+        return underwaterSurfaceBlockForBiome(biome, patchHash, config);
+      }
 
       // Global snow line: any land biome caps in snow at altitude (dithered edge).
       const float snowLine = 160.0f + temperature * 10.0f;
@@ -1989,6 +2477,8 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
                                     strip.xSize, borderYSize, strip.zSize, 1.0f, m_seed + 5000);
     m_surface3DNoise->GenUniformGrid3D(bSurface3D, startX, static_cast<float>(borderYMin), startZ,
                                        strip.xSize, borderYSize, strip.zSize, 1.0f, m_seed + 6000);
+    const int borderUndergroundEnd =
+        std::min(borderNoiseEnd, UNDERGROUND_NOISE_MAX_Y);
 
     for (int j = 0; j < numColumns; ++j)
     {
@@ -2012,6 +2502,8 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
         int noiseZ = (strip.zSize > 1) ? j : 0;
         int localY = y - borderYMin;
         int noiseIdx = noiseZ * (borderYSize * strip.xSize) + localY * strip.xSize + noiseX;
+        const bool hasUndergroundNoise =
+            y >= borderYMin && y < borderUndergroundEnd;
 
         float density = static_cast<float>(height - y);
         if (inNoiseBand && perturbAmp > 0.0f && density > -8.0f && density < 12.0f) {
@@ -2026,10 +2518,24 @@ void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
 
             if (inNoiseBand && type != TextureType::AIR && type != TextureType::BEDROCK && type != TextureType::WATER)
             {
-              float hRatio = std::clamp(static_cast<float>(y - SEA_LEVEL) / 64.0f, 0.0f, 1.0f);
-              if (bCave[noiseIdx] > 0.6f + hRatio * 0.35f || bRavine[noiseIdx] > 0.8f + hRatio * 0.15f)
+              if (shouldCarveCave(
+                      y, height, bCave[noiseIdx], bRavine[noiseIdx],
+                      hasUndergroundNoise
+                          ? sampleCoarseUnderground(
+                                s_genBuffers.spaghettiA.data(), lx, y, lz)
+                          : 0.0f,
+                      hasUndergroundNoise
+                          ? sampleCoarseUnderground(
+                                s_genBuffers.spaghettiB.data(), lx, y, lz)
+                          : 0.0f,
+                      hasUndergroundNoise
+                          ? sampleCoarseUnderground(
+                                s_genBuffers.cavern.data(), lx, y, lz)
+                          : 0.0f,
+                      hasUndergroundNoise))
               {
-                type = TextureType::AIR;
+                type = caveFillAt(y, height, biome,
+                                  s_genBuffers.aquifer[extIndex]);
               }
             }
         } else {

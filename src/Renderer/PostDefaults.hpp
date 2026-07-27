@@ -12,6 +12,8 @@ struct PostCompositeSources
 	bool godRaysUseDefault{false};
 	/// true → sample 1×1 white (ao = 1)
 	bool ssaoUseDefault{false};
+
+	bool operator==(const PostCompositeSources &) const = default;
 };
 
 /// Pure policy used by PostStack and unit tests (shipped).

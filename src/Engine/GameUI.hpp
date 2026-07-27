@@ -50,6 +50,7 @@ struct GameUIFrame
 	int windowH{0};
 	uint32_t vkApiVersion{0};
 	const char *deviceName{nullptr};
+	const char *presentModeName{nullptr};
 	bool validation{false};
 
 	std::function<void(bool)> setVSync;

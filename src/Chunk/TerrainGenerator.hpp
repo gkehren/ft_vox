@@ -26,6 +26,23 @@ struct ChunkData
   std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> foliageColors;
 };
 
+struct TerrainGenerationProfile
+{
+  double noise2DMs{0.0};
+  double aquiferNoiseMs{0.0};
+  double erosionMs{0.0};
+  double base3DNoiseMs{0.0};
+  double spaghettiNoiseMs{0.0};
+  double cavernNoiseMs{0.0};
+  double voxelFillMs{0.0};
+  double oreMs{0.0};
+  double decorationMs{0.0};
+  double vegetationMs{0.0};
+  double borderMs{0.0};
+  double totalMs{0.0};
+  uint64_t chunks{0};
+};
+
 // Biome properties for terrain generation
 struct BiomeConfig
 {
@@ -61,6 +78,8 @@ public:
 
   explicit TerrainGenerator(int seed = 1337);
   ChunkData generateChunk(int chunkX, int chunkZ);
+  ChunkData generateChunkProfiled(int chunkX, int chunkZ,
+                                  TerrainGenerationProfile &profile);
 
   // Getter for thread-local generator to avoid redundant node graph setup
   static TerrainGenerator &getThreadLocal(int seed);
@@ -109,6 +128,9 @@ private:
   // Cave and structure noise
   FastNoise::SmartNode<FastNoise::Generator> m_caveNoise;
   FastNoise::SmartNode<FastNoise::Generator> m_ravineNoise;
+  FastNoise::SmartNode<FastNoise::Generator> m_spaghettiNoise;
+  FastNoise::SmartNode<FastNoise::Generator> m_cavernNoise;
+  FastNoise::SmartNode<FastNoise::Generator> m_aquiferNoise;
   FastNoise::SmartNode<FastNoise::Generator> m_surface3DNoise;
 
   // Vegetation noise
@@ -116,19 +138,32 @@ private:
   FastNoise::SmartNode<FastNoise::Generator> m_forestDensityNoise; // Large-scale forest cluster noise
 
   // Ore generation
+  enum class OreDistribution : uint8_t
+  {
+    Uniform,
+    High,
+    Mid,
+    Deep
+  };
+
   struct OreDef
   {
     TextureType type;
+    TextureType deepType;
     int minHeight;
     int maxHeight;
     int clusterSize;
     int clustersPerChunk;
     int seedOffset;
+    OreDistribution distribution;
+    bool mountainOnly;
+    int badlandsBonusClusters;
   };
   std::vector<OreDef> m_ores;
 
   // Generation parameters
   int m_seed;
+  TerrainGenerationProfile *m_activeProfile{nullptr};
 
   // Biome configurations (static)
   static std::array<BiomeConfig, BIOME_COUNT> s_biomeConfigs;

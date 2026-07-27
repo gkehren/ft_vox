@@ -31,8 +31,8 @@ void VkFrameContext::init(VkContext &context)
 
 		VkSemaphoreCreateInfo semInfo{};
 		semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-		if (vkCreateSemaphore(device, &semInfo, nullptr, &m_frames[i].imageAvailable) != VK_SUCCESS ||
-			vkCreateSemaphore(device, &semInfo, nullptr, &m_frames[i].renderFinished) != VK_SUCCESS)
+		if (vkCreateSemaphore(device, &semInfo, nullptr,
+							  &m_frames[i].imageAvailable) != VK_SUCCESS)
 			throw std::runtime_error("Failed to create frame semaphores");
 
 		VkFenceCreateInfo fenceInfo{};
@@ -60,16 +60,43 @@ void VkFrameContext::shutdown()
 			vkDestroyFence(device, frame.inFlight, nullptr);
 		if (frame.imageAvailable != VK_NULL_HANDLE)
 			vkDestroySemaphore(device, frame.imageAvailable, nullptr);
-		if (frame.renderFinished != VK_NULL_HANDLE)
-			vkDestroySemaphore(device, frame.renderFinished, nullptr);
 		if (frame.commandPool != VK_NULL_HANDLE)
 			vkDestroyCommandPool(device, frame.commandPool, nullptr);
 		frame = {};
 	}
+	for (VkSemaphore semaphore : m_renderFinishedByImage)
+		if (semaphore != VK_NULL_HANDLE)
+			vkDestroySemaphore(device, semaphore, nullptr);
 
 	m_imagesInFlight.clear();
+	m_renderFinishedByImage.clear();
 	m_context = nullptr;
 	m_currentFrame = 0;
+}
+
+void VkFrameContext::ensureSwapchainImageSync(uint32_t imageCount)
+{
+	if (m_renderFinishedByImage.size() == imageCount)
+		return;
+
+	// A size change means swapchain recreation. Engine recreation waits the
+	// device, but waiting here keeps this owner correct for test/legacy paths.
+	m_context->waitIdle();
+	VkDevice device = m_context->getDevice();
+	for (VkSemaphore semaphore : m_renderFinishedByImage)
+		if (semaphore != VK_NULL_HANDLE)
+			vkDestroySemaphore(device, semaphore, nullptr);
+	m_renderFinishedByImage.assign(imageCount, VK_NULL_HANDLE);
+
+	VkSemaphoreCreateInfo semInfo{};
+	semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	for (VkSemaphore &semaphore : m_renderFinishedByImage)
+	{
+		if (vkCreateSemaphore(device, &semInfo, nullptr, &semaphore) !=
+			VK_SUCCESS)
+			throw std::runtime_error(
+				"Failed to create per-swapchain-image semaphore");
+	}
 }
 
 bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
@@ -89,6 +116,7 @@ bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
 
 	if (m_imagesInFlight.size() != swapchain.getImageCount())
 		m_imagesInFlight.assign(swapchain.getImageCount(), VK_NULL_HANDLE);
+	ensureSwapchainImageSync(swapchain.getImageCount());
 
 	if (m_imagesInFlight[outImageIndex] != VK_NULL_HANDLE)
 		vkWaitForFences(device, 1, &m_imagesInFlight[outImageIndex], VK_TRUE, UINT64_MAX);
@@ -102,6 +130,7 @@ bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
 bool VkFrameContext::submitAndPresent(VkSwapchain &swapchain, uint32_t imageIndex)
 {
 	FrameData &frame = m_frames[m_currentFrame];
+	VkSemaphore renderFinished = m_renderFinishedByImage.at(imageIndex);
 
 	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 	VkSubmitInfo submit{};
@@ -112,7 +141,7 @@ bool VkFrameContext::submitAndPresent(VkSwapchain &swapchain, uint32_t imageInde
 	submit.commandBufferCount = 1;
 	submit.pCommandBuffers = &frame.commandBuffer;
 	submit.signalSemaphoreCount = 1;
-	submit.pSignalSemaphores = &frame.renderFinished;
+	submit.pSignalSemaphores = &renderFinished;
 
 	if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submit, frame.inFlight) != VK_SUCCESS)
 		throw std::runtime_error("Failed to submit frame command buffer");
@@ -120,7 +149,7 @@ bool VkFrameContext::submitAndPresent(VkSwapchain &swapchain, uint32_t imageInde
 	VkPresentInfoKHR present{};
 	present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 	present.waitSemaphoreCount = 1;
-	present.pWaitSemaphores = &frame.renderFinished;
+	present.pWaitSemaphores = &renderFinished;
 	VkSwapchainKHR sc = swapchain.getSwapchain();
 	present.swapchainCount = 1;
 	present.pSwapchains = &sc;
@@ -180,6 +209,7 @@ bool VkFrameContext::endFrameClearAndPresent(VkSwapchain &swapchain, uint32_t im
 											 const VkClearColorValue &clearColor)
 {
 	FrameData &frame = m_frames[m_currentFrame];
+	VkSemaphore renderFinished = m_renderFinishedByImage.at(imageIndex);
 	recordClearCommands(frame.commandBuffer, swapchain, imageIndex, clearColor);
 
 	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -191,7 +221,7 @@ bool VkFrameContext::endFrameClearAndPresent(VkSwapchain &swapchain, uint32_t im
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &frame.commandBuffer;
 	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &frame.renderFinished;
+	submitInfo.pSignalSemaphores = &renderFinished;
 
 	if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submitInfo, frame.inFlight) != VK_SUCCESS)
 		throw std::runtime_error("Failed to submit draw command buffer");
@@ -199,7 +229,7 @@ bool VkFrameContext::endFrameClearAndPresent(VkSwapchain &swapchain, uint32_t im
 	VkPresentInfoKHR presentInfo{};
 	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = &frame.renderFinished;
+	presentInfo.pWaitSemaphores = &renderFinished;
 	VkSwapchainKHR sc = swapchain.getSwapchain();
 	presentInfo.swapchainCount = 1;
 	presentInfo.pSwapchains = &sc;
