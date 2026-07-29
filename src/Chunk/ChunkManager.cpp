@@ -167,20 +167,28 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 			p /= len;
 	}
 
+	// Precalculate the plane test offset combined with the w component.
+	// This eliminates 3 ternary branches and a vector addition per plane inside the active chunks loop.
+	std::array<float, 6> planeTestOffsets;
+	for (size_t i = 0; i < 6; ++i)
+	{
+		const glm::vec3 offset(
+			planes[i].x >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f,
+			planes[i].y >= 0.f ? static_cast<float>(CHUNK_HEIGHT) : 0.f,
+			planes[i].z >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f
+		);
+		planeTestOffsets[i] = planes[i].w + glm::dot(glm::vec3(planes[i]), offset);
+	}
+
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	for (Chunk *chunk : m_activeChunks)
 	{
 		const glm::vec3 aabbMin = chunk->getPosition();
-		const glm::vec3 aabbMax = aabbMin + glm::vec3(CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE);
 
 		bool visible = true;
-		for (const auto &plane : planes)
+		for (size_t i = 0; i < 6; ++i)
 		{
-			const glm::vec3 pv(
-				plane.x >= 0.f ? aabbMax.x : aabbMin.x,
-				plane.y >= 0.f ? aabbMax.y : aabbMin.y,
-				plane.z >= 0.f ? aabbMax.z : aabbMin.z);
-			if (glm::dot(glm::vec3(plane), pv) + plane.w < 0.f)
+			if (glm::dot(glm::vec3(planes[i]), aabbMin) + planeTestOffsets[i] < 0.f)
 			{
 				visible = false;
 				break;
