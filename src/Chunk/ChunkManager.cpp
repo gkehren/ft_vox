@@ -160,27 +160,34 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 	planes[3] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 1);
 	planes[4] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 2);
 	planes[5] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 2);
-	for (auto &p : planes)
+
+	std::array<glm::vec3, 6> planeNormals;
+	std::array<float, 6> planeOffsets;
+	for (size_t i = 0; i < 6; ++i)
 	{
+		auto &p = planes[i];
 		const float len = glm::length(glm::vec3(p));
 		if (len > 1e-6f)
 			p /= len;
+
+		planeNormals[i] = glm::vec3(p);
+		const glm::vec3 optOffset(
+			p.x >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f,
+			p.y >= 0.f ? static_cast<float>(CHUNK_HEIGHT) : 0.f,
+			p.z >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f
+		);
+		planeOffsets[i] = p.w + glm::dot(planeNormals[i], optOffset);
 	}
 
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	for (Chunk *chunk : m_activeChunks)
 	{
 		const glm::vec3 aabbMin = chunk->getPosition();
-		const glm::vec3 aabbMax = aabbMin + glm::vec3(CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE);
 
 		bool visible = true;
-		for (const auto &plane : planes)
+		for (size_t i = 0; i < 6; ++i)
 		{
-			const glm::vec3 pv(
-				plane.x >= 0.f ? aabbMax.x : aabbMin.x,
-				plane.y >= 0.f ? aabbMax.y : aabbMin.y,
-				plane.z >= 0.f ? aabbMax.z : aabbMin.z);
-			if (glm::dot(glm::vec3(plane), pv) + plane.w < 0.f)
+			if (glm::dot(planeNormals[i], aabbMin) + planeOffsets[i] < 0.f)
 			{
 				visible = false;
 				break;

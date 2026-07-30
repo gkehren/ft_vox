@@ -37,3 +37,6 @@
 ## 2024-05-24 - Network Packet Hot Loop Optimization
 **Learning:** Using `std::unordered_set` dynamically inside frequent network packet handlers (like `Client::handleMessage`) causes node-based heap allocations for every packet processed, leading to unnecessary garbage and potential stutters.
 **Action:** For bounded and small collections derived from network packets, use `std::vector` with `reserve()`, sort the vector, and use `std::binary_search()`. This leverages contiguous memory and avoids node allocations entirely.
+## 2024-05-24 - Build System Fallbacks & Experimental Targets
+**Learning:** When building this project on Linux environments lacking SDL3 packages, configuring with `cmake -B build-vk -DFT_VOX_FETCH_SDL3=ON -DFT_VOX_DEP_MODE=system` works, but experimental shader targets (`ft_vox_shaders`) may fail to compile due to missing GLSL extensions. Running `make -j4` globally will fail.
+**Action:** Instead of a global `make`, explicitly build only the required executable targets (e.g., `make -j4 ft_vox test_network test_stream_opt`) to ensure successful compilation and avoid breaking the pipeline on unneeded targets.
