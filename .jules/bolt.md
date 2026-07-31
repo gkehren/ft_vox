@@ -37,3 +37,7 @@
 ## 2024-05-24 - Network Packet Hot Loop Optimization
 **Learning:** Using `std::unordered_set` dynamically inside frequent network packet handlers (like `Client::handleMessage`) causes node-based heap allocations for every packet processed, leading to unnecessary garbage and potential stutters.
 **Action:** For bounded and small collections derived from network packets, use `std::vector` with `reserve()`, sort the vector, and use `std::binary_search()`. This leverages contiguous memory and avoids node allocations entirely.
+
+## 2024-05-18 - ChunkManager Load Queue Deduplication Pitfall
+**Learning:** In `ChunkManager`, attempting to remove `m_enqueuedLoads` (`std::unordered_set`) and deduplicate the `m_loadQueue` by calling `std::unique` immediately after sorting by *distance* fails. Identical coordinates might have the exact same distance but are not guaranteed to be adjacent in a stable sort if floating-point calculations differ minutely or symmetrically.
+**Action:** Do not deduplicate `m_loadQueue` in-place using `std::unique` after a distance sort. Either maintain the `std::unordered_set`, or re-sort by coordinates before using `std::unique`, or rely on coordinate-based binary searches if removing the set.
