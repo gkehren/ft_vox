@@ -41,3 +41,6 @@
 ## 2024-05-18 - ChunkManager Load Queue Deduplication Pitfall
 **Learning:** In `ChunkManager`, attempting to remove `m_enqueuedLoads` (`std::unordered_set`) and deduplicate the `m_loadQueue` by calling `std::unique` immediately after sorting by *distance* fails. Identical coordinates might have the exact same distance but are not guaranteed to be adjacent in a stable sort if floating-point calculations differ minutely or symmetrically.
 **Action:** Do not deduplicate `m_loadQueue` in-place using `std::unique` after a distance sort. Either maintain the `std::unordered_set`, or re-sort by coordinates before using `std::unique`, or rely on coordinate-based binary searches if removing the set.
+## 2024-05-24 - Build System Fallbacks & Experimental Targets
+**Learning:** When building this project on Linux environments lacking SDL3 packages, configuring with `cmake -B build-vk -DFT_VOX_FETCH_SDL3=ON -DFT_VOX_DEP_MODE=system` works, but experimental shader targets (`ft_vox_shaders`) may fail to compile due to missing GLSL extensions. Running `make -j4` globally will fail.
+**Action:** Instead of a global `make`, explicitly build only the required executable targets (e.g., `make -j4 ft_vox test_network test_stream_opt`) to ensure successful compilation and avoid breaking the pipeline on unneeded targets.
