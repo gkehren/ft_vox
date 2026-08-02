@@ -177,7 +177,7 @@ True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`
   3. Else `{RES_PATH}textures/<bundledFallback>.png` (always one of the shipped core textures)
   - Pack miss (step 1 fails while pack set) is reported; incomplete packs still load via 2/3.
 - Pack root resolved at process entry: CLI `--resource-pack` wins over env `FT_VOX_RESOURCE_PACK`, then passed into `Engine` / `WorldRenderer` / `TextureManager`.
-- **In-game:** Graphics panel → Resource pack (`GameUIResourcePack.*`) — path field, **Browse…** (ImGuiFileDialog), **Apply pack** / **Use bundled** → `Engine::applyResourcePack` (sole pack-path owner) → device idle → `WorldRenderer::reloadResourcePack` → failure-atomic `TextureManager::initialize` (build temps, then swap) + rewrite set1. Dialog: vendored `src/ImGuiFileDialog/`.
+- **In-game:** Graphics panel → Resource pack (`GameUIResourcePack.*`) — path field, **Browse** (ImGuiFileDialog), **Apply pack** / **Use bundled** → `Engine::applyResourcePack` (sole pack-path owner) → device idle → `WorldRenderer::reloadResourcePack` → failure-atomic `TextureManager::initialize` (build temps, then swap) + rewrite set1. Dialog: vendored `src/ImGuiFileDialog/`.
 - Animated strips (e.g. `water_still.png`): first frame only (`width × width` view of the strip buffer, no intermediate copy).
 - **World gen** uses the expanded palette (birch/spruce/jungle/acacia/dark oak trees, cactus, ice, red sand/terracotta badlands, deepslate below Y≈16, stone variants). Without a pack, new blocks share oak/sand/stone fallbacks but remain distinct voxel IDs.
 
@@ -217,12 +217,12 @@ Shaders read material by texture index instead of hardcoding “tex == 8 means l
 
 Pure helpers shared with unit tests (`tests/test_render_helpers.cpp`):
 
-- Height fog / terrain fog amount caps  
-- Moon ambient color  
-- Cave light floor / fill, sun-shadow weight by sky light  
-- SSAO intensity clamp  
-- God-ray pass active predicate (`godRaysPassActive`)  
-- Block light packing / emissive intensities  
+- Height fog / terrain fog amount caps
+- Moon ambient color
+- Cave light floor / fill, sun-shadow weight by sky light
+- SSAO intensity clamp
+- God-ray pass active predicate (`godRaysPassActive`)
+- Block light packing / emissive intensities
 
 ### Cascades (`Renderer/ShadowCascades.hpp`, `namespace shadow`)
 
@@ -303,11 +303,11 @@ export VK_LAYER_PATH=/opt/homebrew/opt/vulkan-validationlayers/share/vulkan/expl
 
 These are **not** the current baseline. Kept only as short pointers for later work:
 
-- SSR / planar reflections on water  
-- Normal maps / PBR-ish materials  
-- TAA, better volumetric fog  
-- Soft penumbra (PCSS), contact shadows  
-- Deferred or clustered lights if block-light density grows  
+- SSR / planar reflections on water
+- Normal maps / PBR-ish materials
+- TAA, better volumetric fog
+- Soft penumbra (PCSS), contact shadows
+- Deferred or clustered lights if block-light density grows
 
 Do not treat this section as “already shipped.” For historical feature discussions, prefer git history over obsolete markdown.
 
@@ -315,7 +315,7 @@ Do not treat this section as “already shipped.” For historical feature discu
 
 ## 11. Related docs
 
-- [`engine-architecture.md`](engine-architecture.md) — Engine loop, chunks, streaming, terrain generation  
-- Root [`README.md`](../README.md) — build, deps, controls  
-- [`Agents.md`](../Agents.md) — contributor-oriented project context  
-- `docs/benchmarks/` — captured profiling dumps (not architecture)  
+- [`engine-architecture.md`](engine-architecture.md) — Engine loop, chunks, streaming, terrain generation
+- Root [`README.md`](../README.md) — build, deps, controls
+- [`Agents.md`](../Agents.md) — contributor-oriented project context
+- `docs/benchmarks/` — captured profiling dumps (not architecture)

@@ -12,6 +12,7 @@
     "vulkan-loader",
     "volk",
     "vulkan-memory-allocator",
-    "glslang"
+    "glslang",
+    "miniz"
   ]
 }
