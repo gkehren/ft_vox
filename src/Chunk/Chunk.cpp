@@ -21,11 +21,14 @@ static constexpr uint32_t WATER_COLOR = 0xFF'E6804D;
 struct MeshWorkspace
 {
   std::vector<uint8_t> mask;
-  // I: vertexMap removed — greedy quads never share vertices; direct push is cheaper
+  std::vector<glm::ivec3> skyQ;
+  std::vector<glm::ivec3> blockQ;
 
   MeshWorkspace()
   {
     mask.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
+    skyQ.reserve(512);
+    blockQ.reserve(256);
   }
 };
 
@@ -324,8 +327,8 @@ void Chunk::generateMesh()
     // Horizontal sky flood into caves/overhangs (Minecraft-style −1 per step).
     // Vertical cast alone leaves cavern mouths pitch-black one block in.
     {
-      std::vector<glm::ivec3> skyQ;
-      skyQ.reserve(512);
+      auto &skyQ = workspace.skyQ;
+      skyQ.clear();
       for (int z = 0; z < CHUNK_SIZE; ++z)
         for (int y = 0; y < CHUNK_HEIGHT; ++y)
           for (int x = 0; x < CHUNK_SIZE; ++x)
@@ -360,8 +363,8 @@ void Chunk::generateMesh()
     }
 
     // Seed block light from emissive solids into neighboring air
-    std::vector<glm::ivec3> queue;
-    queue.reserve(256);
+    auto &queue = workspace.blockQ;
+    queue.clear();
     for (int z = 0; z < CHUNK_SIZE; ++z)
       for (int y = 0; y < CHUNK_HEIGHT; ++y)
         for (int x = 0; x < CHUNK_SIZE; ++x)
@@ -1343,6 +1346,7 @@ void Chunk::reset(const glm::vec3 &newPosition)
   meshNeedsUpdate.store(true);
   m_isLODMesh = false;
   m_inTransit.store(false);
+  m_activeIndex = SIZE_MAX;
 
   // Clear buffers but retain capacity for reuse (avoid reallocation)
   vertices.clear();

@@ -95,8 +95,11 @@ private:
 	std::vector<LoadCandidate> m_loadQueue;
 	std::unordered_set<glm::ivec3, IVec3Hash> m_enqueuedLoads;
 
-	std::vector<std::pair<std::future<void>, Chunk *>> m_pendingGenerationTasks;
-	std::vector<std::pair<std::future<void>, Chunk *>> m_pendingMeshingTasks;
+	mutable std::mutex m_completedJobsMutex;
+	std::vector<Chunk *> m_completedGenerationChunks;
+	std::vector<Chunk *> m_completedMeshingChunks;
+	std::atomic<size_t> m_pendingGenJobsCount{0};
+	std::atomic<size_t> m_pendingMeshJobsCount{0};
 
 	mutable std::shared_mutex m_mutex;
 
