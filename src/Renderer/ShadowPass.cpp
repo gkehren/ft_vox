@@ -3,6 +3,7 @@
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
 #include "Vulkan/VkShader.hpp"
 #include "utils.hpp"
+#include <glm/gtc/matrix_access.hpp>
 
 #include <stdexcept>
 
@@ -157,9 +158,49 @@ void ShadowPass::record(VkCommandBuffer cmd, const std::vector<Chunk *> &shadowC
 		pc.time = time;
 		vkCmdPushConstants(cmd, m_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ShadowPC), &pc);
 
+		std::array<glm::vec4, 6> planes{};
+		const glm::mat4 &mat = pc.lightSpace;
+		planes[0] = glm::row(mat, 3) + glm::row(mat, 0);
+		planes[1] = glm::row(mat, 3) - glm::row(mat, 0);
+		planes[2] = glm::row(mat, 3) + glm::row(mat, 1);
+		planes[3] = glm::row(mat, 3) - glm::row(mat, 1);
+		planes[4] = glm::row(mat, 3) + glm::row(mat, 2);
+		planes[5] = glm::row(mat, 3) - glm::row(mat, 2);
+
+		std::array<glm::vec3, 6> planeNormals;
+		std::array<float, 6> planeOffsets;
+		for (size_t i = 0; i < 6; ++i)
+		{
+			auto &p = planes[i];
+			const float len = glm::length(glm::vec3(p));
+			if (len > 1e-6f)
+				p /= len;
+
+			planeNormals[i] = glm::vec3(p);
+			const glm::vec3 optOffset(
+				p.x >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f,
+				p.y >= 0.f ? static_cast<float>(CHUNK_HEIGHT) : 0.f,
+				p.z >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f
+			);
+			planeOffsets[i] = p.w + glm::dot(planeNormals[i], optOffset);
+		}
+
 		for (Chunk *chunk : shadowChunks)
 		{
-			if (chunk)
+			if (!chunk || chunk->getOpaqueIndexCount() == 0)
+				continue;
+
+			const glm::vec3 aabbMin = chunk->getPosition();
+			bool visible = true;
+			for (size_t i = 0; i < 6; ++i)
+			{
+				if (glm::dot(planeNormals[i], aabbMin) + planeOffsets[i] < 0.f)
+				{
+					visible = false;
+					break;
+				}
+			}
+			if (visible)
 				chunk->drawShadow(cmd);
 		}
 		endRendering(cmd);
