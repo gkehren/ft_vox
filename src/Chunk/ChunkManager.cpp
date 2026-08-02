@@ -210,7 +210,8 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	};
 
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	std::vector<Item> queue;
+	thread_local std::vector<Item> queue;
+	queue.clear();
 	queue.reserve(m_activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
 
@@ -266,7 +267,8 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	};
 
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	std::vector<Item> queue;
+	thread_local std::vector<Item> queue;
+	queue.clear();
 	queue.reserve(m_activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
 
@@ -353,7 +355,8 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 		Chunk *chunk;
 		float distSq;
 	};
-	std::vector<Item> queue;
+	thread_local std::vector<Item> queue;
+	queue.clear();
 	{
 		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		queue.reserve(m_activeChunks.size());
