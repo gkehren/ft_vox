@@ -1,4 +1,5 @@
 #include "TextureManager.hpp"
+#include "ResourcePackReader.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image/stb_image.h>
@@ -50,34 +51,65 @@ CpuAtlasBuild buildCpuAtlas(const std::string &packRoot, std::vector<uint8_t> &a
 	built.report.requiredLayers = static_cast<int>(layers);
 	built.report.packRequested = !packRoot.empty();
 
+	// Default pack: ressources/default-resource-pack.zip
+	const std::string defaultZipPath = std::string(RES_PATH) + "default-resource-pack.zip";
+	ResourcePackReader defaultPack(defaultZipPath);
+
+	ResourcePackReader customPack;
+	if (!packRoot.empty())
+	{
+		customPack.open(packRoot);
+	}
+
 	std::vector<DecodedLayer> decoded(layers);
+	std::vector<uint8_t> rawPng;
 	uint32_t layerSize = 0;
 
 	for (uint32_t i = 0; i < layers; ++i)
 	{
 		const auto type = static_cast<TextureType>(i);
 		const char *name = blockLayerFile(type);
+		const char *fallback = blockLayerFallbackFile(type);
 		if (!name)
 			continue;
 
-		bool fellBack = false;
-		const std::string path = resolveBlockTexturePath(packRoot, type, &fellBack);
-		if (fellBack)
+		rawPng.clear();
+		bool fromCustom = false;
+
+		if (customPack.isValid() && customPack.readBlockTexture(name, rawPng))
 		{
-			++built.report.packMisses;
-			std::cerr << "Resource pack missing block texture '" << name
-					  << "', falling back to bundled: " << path << "\n";
-		}
-		else if (built.report.packRequested)
-		{
+			fromCustom = true;
 			++built.report.packHits;
+		}
+		else
+		{
+			if (built.report.packRequested)
+			{
+				++built.report.packMisses;
+			}
+			// Fallback to default pack
+			if (defaultPack.isValid())
+			{
+				if (!defaultPack.readBlockTexture(name, rawPng))
+				{
+					if (fallback)
+						defaultPack.readBlockTexture(fallback, rawPng);
+				}
+			}
+		}
+
+		if (rawPng.empty())
+		{
+			std::cerr << "Failed to read texture data for: " << name << "\n";
+			continue;
 		}
 
 		int w = 0, h = 0, ch = 0;
-		unsigned char *data = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+		unsigned char *data = stbi_load_from_memory(
+			rawPng.data(), static_cast<int>(rawPng.size()), &w, &h, &ch, STBI_rgb_alpha);
 		if (!data || w <= 0 || h <= 0)
 		{
-			std::cerr << "Failed to load texture: " << path << "\n";
+			std::cerr << "Failed to decode texture memory for: " << name << "\n";
 			if (data)
 				stbi_image_free(data);
 			continue;
@@ -97,13 +129,12 @@ CpuAtlasBuild buildCpuAtlas(const std::string &packRoot, std::vector<uint8_t> &a
 	if (built.report.packInvalid())
 	{
 		std::cerr << "Invalid resource pack '" << packRoot
-				  << "': no block textures found under assets/minecraft/textures/block/. "
-				  << "Using bundled textures.\n";
+				  << "': no block textures found. Falling back to default resource pack.\n";
 	}
 	else if (built.report.packIncomplete())
 	{
 		std::cerr << "Resource pack incomplete: " << built.report.packMisses << " of " << layers
-				  << " block textures missing (bundled used for those).\n";
+				  << " block textures missing (default resource pack used for those).\n";
 	}
 
 	if (layerSize == 0)

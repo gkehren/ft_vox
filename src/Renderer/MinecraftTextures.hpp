@@ -6,18 +6,18 @@
 #include <fstream>
 #include <string>
 
-/// One atlas layer: Minecraft pack basename + guaranteed bundled fallback + transparency.
+/// One atlas layer: Minecraft pack basename + fallback + transparency.
 /// Indexed by TextureType 0 .. COUNT-1. Single source for load paths and isTransparent.
 struct BlockLayerDesc
 {
-	const char *file;			 ///< Pack / preferred bundled name, e.g. "birch_leaves.png"
-	const char *bundledFallback; ///< Always exists under ressources/textures/ (may equal file)
+	const char *file;		  ///< Pack / preferred name, e.g. "birch_leaves.png"
+	const char *fallbackFile; ///< Fallback texture name in default pack, e.g. "oak_leaves.png"
 	bool transparent;
 };
 
 /// Compile-time table in TextureType order (must match enum ordinals).
 inline constexpr BlockLayerDesc kBlockLayers[] = {
-	// Existing core (bundledFallback == file)
+	// Existing core (fallbackFile == file)
 	{"bedrock.png", "bedrock.png", false},					// BEDROCK
 	{"bricks.png", "bricks.png", false},					// BRICKS
 	{"cobblestone.png", "cobblestone.png", false},			// COBBLESTONE
@@ -43,7 +43,7 @@ inline constexpr BlockLayerDesc kBlockLayers[] = {
 	{"lapis_ore.png", "lapis_ore.png", false},				// LAPIS_ORE
 	{"redstone_ore.png", "redstone_ore.png", false},		// REDSTONE_ORE
 	{"water_still.png", "water_still.png", true},			// WATER
-	// Wood / vegetation (fall back to oak / glass when no pack)
+	// Wood / vegetation (fall back to oak / glass when missing in pack)
 	{"birch_log.png", "oak_log.png", false},			 // BIRCH_LOG
 	{"birch_log_top.png", "oak_log_top.png", false},	 // BIRCH_LOG_TOP
 	{"birch_leaves.png", "oak_leaves.png", true},		 // BIRCH_LEAVES
@@ -87,7 +87,7 @@ inline constexpr BlockLayerDesc kBlockLayers[] = {
 	{"deepslate_top.png", "stone.png", false},			 // DEEPSLATE_TOP
 	{"tuff.png", "stone.png", false},					 // TUFF
 	{"mossy_cobblestone.png", "cobblestone.png", false}, // MOSSY_COBBLESTONE
-	// Phase 3 biome blocks (bundled from the compliant default resource pack)
+	// Phase 3 biome blocks
 	{"cherry_log.png", "cherry_log.png", false},					 // CHERRY_LOG
 	{"cherry_log_top.png", "cherry_log_top.png", false},			 // CHERRY_LOG_TOP
 	{"cherry_leaves.png", "cherry_leaves.png", true},				 // CHERRY_LEAVES
@@ -147,12 +147,12 @@ inline const char *blockLayerFile(TextureType t)
 	return kBlockLayers[static_cast<std::size_t>(i)].file;
 }
 
-inline const char *blockLayerBundledFallback(TextureType t)
+inline const char *blockLayerFallbackFile(TextureType t)
 {
 	const int i = static_cast<int>(t);
 	if (i < 0 || i >= static_cast<int>(TextureType::COUNT))
 		return nullptr;
-	return kBlockLayers[static_cast<std::size_t>(i)].bundledFallback;
+	return kBlockLayers[static_cast<std::size_t>(i)].fallbackFile;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,60 +337,6 @@ inline std::string trimTrailingSlashes(std::string path)
 	while (!path.empty() && (path.back() == '/' || path.back() == '\\'))
 		path.pop_back();
 	return path;
-}
-
-inline bool blockTextureFileReadable(const std::string &path)
-{
-	std::ifstream f(path, std::ios::binary);
-	return static_cast<bool>(f);
-}
-
-/// Resolve block PNG path:
-/// 1. pack/{file} when pack set and readable
-/// 2. bundled/{file} when readable
-/// 3. bundled/{bundledFallback}
-/// Sets *fellBackFromPack when pack was requested but step 1 failed.
-inline std::string resolveBlockTexturePath(const std::string &packRoot, const char *basename,
-										   bool *fellBackFromPack = nullptr,
-										   const char *bundledFallback = nullptr)
-{
-	if (fellBackFromPack)
-		*fellBackFromPack = false;
-
-	const std::string fb =
-		bundledFallback ? std::string(bundledFallback) : std::string(basename ? basename : "");
-	const std::string primary = basename ? std::string(basename) : fb;
-	const std::string bundledPrimary = std::string(RES_PATH) + "textures/" + primary;
-	const std::string bundledFb = std::string(RES_PATH) + "textures/" + fb;
-
-	if (!packRoot.empty())
-	{
-		const std::string packPath =
-			packRoot + "/assets/minecraft/textures/block/" + primary;
-		if (blockTextureFileReadable(packPath))
-			return packPath;
-		if (fellBackFromPack)
-			*fellBackFromPack = true;
-	}
-
-	if (blockTextureFileReadable(bundledPrimary))
-		return bundledPrimary;
-	return bundledFb;
-}
-
-/// Convenience: resolve by TextureType (uses kBlockLayers file + fallback).
-inline std::string resolveBlockTexturePath(const std::string &packRoot, TextureType t,
-										   bool *fellBackFromPack = nullptr)
-{
-	const int i = static_cast<int>(t);
-	if (i < 0 || i >= static_cast<int>(TextureType::COUNT))
-	{
-		if (fellBackFromPack)
-			*fellBackFromPack = false;
-		return std::string(RES_PATH) + "textures/stone.png";
-	}
-	const BlockLayerDesc &d = kBlockLayers[static_cast<std::size_t>(i)];
-	return resolveBlockTexturePath(packRoot, d.file, fellBackFromPack, d.bundledFallback);
 }
 
 /// Minecraft vertical animation strip: first frame is width×width when height >= 2*width.

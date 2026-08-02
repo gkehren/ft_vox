@@ -9,31 +9,31 @@
 
 namespace
 {
-constexpr const char *kResourcePackDlgKey = "ChooseResourcePackDir";
+	constexpr const char *kResourcePackDlgKey = "ChooseResourcePackZip";
 
-void tryApply(GameUIFrame &frame, ResourcePackUiState &state, const char *path)
-{
-	if (!frame.applyResourcePack)
+	void tryApply(GameUIFrame &frame, ResourcePackUiState &state, const char *path)
 	{
-		state.status = "Resource pack reload not available.";
-		state.statusError = true;
-		state.statusWarning = false;
-		return;
+		if (!frame.applyResourcePack)
+		{
+			state.status = "Resource pack reload not available.";
+			state.statusError = true;
+			state.statusWarning = false;
+			return;
+		}
+
+		const GameUIFrame::ResourcePackUiResult r = frame.applyResourcePack(path ? path : "");
+		state.status = r.message.empty() ? (r.atlasOk ? "Done." : "Failed.") : r.message;
+		state.statusError = r.isError;
+		state.statusWarning = r.isWarning && !r.isError;
+
+		if (frame.resourcePackRoot)
+			state.lastActiveRoot = *frame.resourcePackRoot;
+		// Keep the path the user typed when invalid so they can fix it; clear buffer only for bundled/default.
+		if (r.atlasOk && path && path[0] == '\0')
+			state.pathBuf[0] = '\0';
+		if (r.atlasOk && frame.resourcePackRoot && !r.isError)
+			std::snprintf(state.pathBuf, sizeof(state.pathBuf), "%s", frame.resourcePackRoot->c_str());
 	}
-
-	const GameUIFrame::ResourcePackUiResult r = frame.applyResourcePack(path ? path : "");
-	state.status = r.message.empty() ? (r.atlasOk ? "Done." : "Failed.") : r.message;
-	state.statusError = r.isError;
-	state.statusWarning = r.isWarning && !r.isError;
-
-	if (frame.resourcePackRoot)
-		state.lastActiveRoot = *frame.resourcePackRoot;
-	// Keep the path the user typed when invalid so they can fix it; clear buffer only for bundled.
-	if (r.atlasOk && path && path[0] == '\0')
-		state.pathBuf[0] = '\0';
-	if (r.atlasOk && frame.resourcePackRoot && !r.isError)
-		std::snprintf(state.pathBuf, sizeof(state.pathBuf), "%s", frame.resourcePackRoot->c_str());
-}
 } // namespace
 
 void drawResourcePackSection(GameUIFrame &frame, ResourcePackUiState &state, bool &showGraphics)
@@ -55,29 +55,29 @@ void drawResourcePackSection(GameUIFrame &frame, ResourcePackUiState &state, boo
 		state.lastActiveRoot = activeRoot;
 	}
 
-	const char *activeLabel = activeRoot.empty() ? "(bundled ressources/textures)" : activeRoot.c_str();
+	const char *activeLabel = activeRoot.empty() ? "ressources/default-resource-pack.zip" : activeRoot.c_str();
 	ImGui::Text("Active: %s", activeLabel);
 	if (frame.worldRenderer)
 		ImGui::Text("Atlas layer: %u×%u", frame.worldRenderer->textureLayerSize(),
 					frame.worldRenderer->textureLayerSize());
 
-	ImGui::InputText("Pack root", state.pathBuf, sizeof(state.pathBuf));
-	ImGui::SameLine();
-	if (ImGui::Button("Browse…"))
+	ImGui::InputText("Pack path (.zip)", state.pathBuf, sizeof(state.pathBuf));
+	ImGui::TextDisabled("Select a .zip Minecraft resource pack file.");
+
+	if (ImGui::Button("Browse"))
 	{
 		IGFD::FileDialogConfig config;
 		config.path = state.pathBuf[0] != '\0' ? state.pathBuf : ".";
 		config.countSelectionMax = 1;
 		config.flags = ImGuiFileDialogFlags_Modal;
-		ImGuiFileDialog::Instance()->OpenDialog(kResourcePackDlgKey, "Choose Resource Pack Folder", nullptr,
+		ImGuiFileDialog::Instance()->OpenDialog(kResourcePackDlgKey, "Choose Resource Pack (.zip)", ".zip",
 												config);
 	}
-	ImGui::TextDisabled("Folder with assets/minecraft/textures/block/*.png");
-
+	ImGui::SameLine();
 	if (ImGui::Button("Apply pack"))
 		tryApply(frame, state, state.pathBuf);
 	ImGui::SameLine();
-	if (ImGui::Button("Use bundled"))
+	if (ImGui::Button("Reset to default"))
 	{
 		state.pathBuf[0] = '\0';
 		tryApply(frame, state, "");
@@ -105,10 +105,10 @@ void displayResourcePackFileDialog(ResourcePackUiState &state, bool &showGraphic
 
 	if (ImGuiFileDialog::Instance()->IsOk())
 	{
-		const std::string dir = ImGuiFileDialog::Instance()->GetCurrentPath();
-		if (!dir.empty())
+		const std::string filePath = ImGuiFileDialog::Instance()->GetFilePathName();
+		if (!filePath.empty())
 		{
-			std::snprintf(state.pathBuf, sizeof(state.pathBuf), "%s", dir.c_str());
+			std::snprintf(state.pathBuf, sizeof(state.pathBuf), "%s", filePath.c_str());
 			state.status = "Path selected — click Apply pack to load.";
 			state.statusError = false;
 			state.statusWarning = false;

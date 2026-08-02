@@ -269,18 +269,18 @@ Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &res
 		if (path.empty())
 		{
 			m_resourcePackRoot.clear();
-			out.message = "Loaded bundled textures.";
+			out.message = "Loaded default resource pack (default-resource-pack.zip).";
 			return out;
 		}
 
 		if (report.packInvalid())
 		{
-			// Fully invalid: use bundled assets and clear active pack so UI matches reality.
+			// Fully invalid: use default assets and clear active pack so UI matches reality.
 			m_resourcePackRoot.clear();
 			out.isError = true;
 			out.message =
-				"Invalid resource pack: no block textures found under "
-				"assets/minecraft/textures/block/. Using bundled textures.";
+				"Invalid resource pack: no block textures found. "
+				"Using default resource pack.";
 			return out;
 		}
 
@@ -290,7 +290,7 @@ Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &res
 			out.isWarning = true;
 			out.message = "Resource pack incomplete: " + std::to_string(report.packMisses) + " of " +
 						  std::to_string(report.requiredLayers) +
-						  " block textures missing. Bundled used for those faces.";
+						  " block textures missing. Default resource pack used for missing textures.";
 			return out;
 		}
 
