@@ -48,3 +48,6 @@
 ## 2024-05-18 - [ChunkManager Hot-Path Thread-Local Queues]
 **Learning:** [The `ChunkManager` relies on dynamically creating `std::vector<Item>` queues inside hot path methods (`generatePendingVoxels`, `meshPendingChunks`, `uploadPendingMeshes`) which are called frequently in the main loop. These dynamic heap allocations can degrade performance. Reusing memory is complex due to `std::shared_mutex` usage and potential concurrency.]
 **Action:** [Use `thread_local std::vector<Item>` with a `queue.clear()` at the start of the method to safely reuse allocated capacity across frames without introducing data races or locking overhead in concurrent methods.]
+## 2024-05-18 - [Network Hot-Path Thread-Local Buffers]
+**Learning:** [In high-throughput network receive and message parsing loops (e.g., `handleReceive`), allocating a local `std::vector` for every incoming packet introduces significant dynamic heap allocation overhead per tick.]
+**Action:** [Use `thread_local std::vector` and call `.assign()` or `.clear()` to safely reuse capacity across consecutive async socket invocations on the same io_context thread, completely avoiding heap allocations without introducing class state size overhead.]

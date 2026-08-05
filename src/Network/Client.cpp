@@ -121,7 +121,8 @@ void Client::handleReceive(const boost::system::error_code &error, std::size_t b
 {
 	if (!error && bytesTransferred > 0)
 	{
-		std::vector<uint8_t> data(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
+		thread_local std::vector<uint8_t> data;
+		data.assign(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
 		handleMessage(data);
 	}
 }
@@ -178,7 +179,8 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 
 		// ⚡ Bolt: Replace std::unordered_set with std::vector + std::sort + std::binary_search
 		// to avoid node allocations and improve cache locality on every network tick.
-		std::vector<uint32_t> currentPlayers;
+		thread_local std::vector<uint32_t> currentPlayers;
+		currentPlayers.clear();
 		currentPlayers.reserve(numPlayers);
 
 		std::lock_guard<std::mutex> lock(playerMutex);
