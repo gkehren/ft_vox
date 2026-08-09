@@ -48,3 +48,7 @@
 ## 2024-05-18 - [ChunkManager Hot-Path Thread-Local Queues]
 **Learning:** [The `ChunkManager` relies on dynamically creating `std::vector<Item>` queues inside hot path methods (`generatePendingVoxels`, `meshPendingChunks`, `uploadPendingMeshes`) which are called frequently in the main loop. These dynamic heap allocations can degrade performance. Reusing memory is complex due to `std::shared_mutex` usage and potential concurrency.]
 **Action:** [Use `thread_local std::vector<Item>` with a `queue.clear()` at the start of the method to safely reuse allocated capacity across frames without introducing data races or locking overhead in concurrent methods.]
+
+## 2024-05-18 - Asio Receive Buffer Allocation
+**Learning:** In Boost.Asio's `async_receive_from` completion handlers within ft_vox (e.g., `Client::handleReceive` and `Server::handleReceive`), creating a local `std::vector` to hold received UDP data causes an unnecessary dynamic heap allocation per incoming packet.
+**Action:** Replace locally scoped vectors with `thread_local std::vector` and use `.assign()` or `.clear() + .insert()` to reuse heap capacity across network events while remaining entirely thread-safe within the handler context.
