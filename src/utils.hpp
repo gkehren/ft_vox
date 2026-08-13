@@ -3,6 +3,7 @@
 #include <iostream>
 #include <vector>
 #include <array>
+#include <string_view>
 #include <tuple>
 #include <map>
 #include <glm/glm.hpp>
@@ -305,109 +306,111 @@ static_assert(KELP == DRIPSTONE_BLOCK + 1,
 // Ensure TextureType fits in Voxel::type (uint8_t)
 static_assert(static_cast<int>(AIR) <= 255, "TextureType values exceed uint8_t range for Voxel::type");
 
-static const std::map<TextureType, std::string> textureTypeString = {
-	{BEDROCK, "Bedrock"},
-	{BRICKS, "Bricks"},
-	{COBBLESTONE, "Cobblestone"},
-	{DIRT, "Dirt"},
-	{GLASS, "Glass"},
-	{GRASS_TOP, "Grass Top"},
-	{GRASS_SIDE, "Grass Side"},
-	{GRAVEL, "Gravel"},
-	{OAK_LEAVES, "Oak Leaves"},
-	{OAK_LOG_TOP, "Oak Log Top"},
-	{OAK_LOG, "Oak Log"},
-	{OAK_PLANKS, "Oak Planks"},
-	{SAND, "Sand"},
-	{SNOW, "Snow"},
-	{STONE_BRICKS, "Stone Bricks"},
-	{STONE, "Stone"},
-	{COAL_ORE, "Coal Ore"},
-	{COPPER_ORE, "Copper Ore"},
-	{DIAMOND_ORE, "Diamond Ore"},
-	{EMERALD_ORE, "Emerald Ore"},
-	{GOLD_ORE, "Gold Ore"},
-	{IRON_ORE, "Iron Ore"},
-	{LAPIS_ORE, "Lapis Ore"},
-	{REDSTONE_ORE, "Redstone Ore"},
-	{WATER, "Water"},
-	{BIRCH_LOG, "Birch Log"},
-	{BIRCH_LOG_TOP, "Birch Log Top"},
-	{BIRCH_LEAVES, "Birch Leaves"},
-	{SPRUCE_LOG, "Spruce Log"},
-	{SPRUCE_LOG_TOP, "Spruce Log Top"},
-	{SPRUCE_LEAVES, "Spruce Leaves"},
-	{JUNGLE_LOG, "Jungle Log"},
-	{JUNGLE_LOG_TOP, "Jungle Log Top"},
-	{JUNGLE_LEAVES, "Jungle Leaves"},
-	{ACACIA_LOG, "Acacia Log"},
-	{ACACIA_LOG_TOP, "Acacia Log Top"},
-	{ACACIA_LEAVES, "Acacia Leaves"},
-	{DARK_OAK_LOG, "Dark Oak Log"},
-	{DARK_OAK_LOG_TOP, "Dark Oak Log Top"},
-	{DARK_OAK_LEAVES, "Dark Oak Leaves"},
-	{CACTUS, "Cactus"},
-	{CACTUS_TOP, "Cactus Top"},
-	{RED_SAND, "Red Sand"},
-	{SANDSTONE, "Sandstone"},
-	{RED_SANDSTONE, "Red Sandstone"},
-	{TERRACOTTA, "Terracotta"},
-	{ORANGE_TERRACOTTA, "Orange Terracotta"},
-	{RED_TERRACOTTA, "Red Terracotta"},
-	{YELLOW_TERRACOTTA, "Yellow Terracotta"},
-	{WHITE_TERRACOTTA, "White Terracotta"},
-	{BROWN_TERRACOTTA, "Brown Terracotta"},
-	{COARSE_DIRT, "Coarse Dirt"},
-	{PODZOL, "Podzol"},
-	{CLAY, "Clay"},
-	{MUD, "Mud"},
-	{MOSS_BLOCK, "Moss Block"},
-	{ICE, "Ice"},
-	{PACKED_ICE, "Packed Ice"},
-	{BLUE_ICE, "Blue Ice"},
-	{ANDESITE, "Andesite"},
-	{DIORITE, "Diorite"},
-	{GRANITE, "Granite"},
-	{DEEPSLATE, "Deepslate"},
-	{DEEPSLATE_TOP, "Deepslate Top"},
-	{TUFF, "Tuff"},
-	{MOSSY_COBBLESTONE, "Mossy Cobblestone"},
-	{CHERRY_LOG, "Cherry Log"},
-	{CHERRY_LOG_TOP, "Cherry Log Top"},
-	{CHERRY_LEAVES, "Cherry Leaves"},
-	{MANGROVE_LOG, "Mangrove Log"},
-	{MANGROVE_LOG_TOP, "Mangrove Log Top"},
-	{MANGROVE_ROOTS, "Mangrove Roots"},
-	{MANGROVE_ROOTS_TOP, "Mangrove Roots Top"},
-	{MANGROVE_LEAVES, "Mangrove Leaves"},
-	{BAMBOO_BLOCK, "Bamboo Block"},
-	{BAMBOO_BLOCK_TOP, "Bamboo Block Top"},
-	{BAMBOO_STALK, "Bamboo Stalk"},
-	{RED_MUSHROOM_BLOCK, "Red Mushroom Block"},
-	{BROWN_MUSHROOM_BLOCK, "Brown Mushroom Block"},
-	{MUSHROOM_STEM, "Mushroom Stem"},
-	{BASALT, "Basalt"},
-	{BASALT_TOP, "Basalt Top"},
-	{BLACKSTONE, "Blackstone"},
-	{MAGMA, "Magma"},
-	{TUBE_CORAL_BLOCK, "Tube Coral Block"},
-	{BRAIN_CORAL_BLOCK, "Brain Coral Block"},
-	{BUBBLE_CORAL_BLOCK, "Bubble Coral Block"},
-	{FIRE_CORAL_BLOCK, "Fire Coral Block"},
-	{HORN_CORAL_BLOCK, "Horn Coral Block"},
-	{LAVA, "Lava"},
-	{DEEPSLATE_COAL_ORE, "Deepslate Coal Ore"},
-	{DEEPSLATE_COPPER_ORE, "Deepslate Copper Ore"},
-	{DEEPSLATE_DIAMOND_ORE, "Deepslate Diamond Ore"},
-	{DEEPSLATE_EMERALD_ORE, "Deepslate Emerald Ore"},
-	{DEEPSLATE_GOLD_ORE, "Deepslate Gold Ore"},
-	{DEEPSLATE_IRON_ORE, "Deepslate Iron Ore"},
-	{DEEPSLATE_LAPIS_ORE, "Deepslate Lapis Ore"},
-	{DEEPSLATE_REDSTONE_ORE, "Deepslate Redstone Ore"},
-	{DRIPSTONE_BLOCK, "Dripstone Block"},
-	{KELP, "Kelp"},
-	{KELP_TOP, "Kelp Top"},
-};
+static constexpr std::array<std::string_view, COUNT> textureTypeString = []() {
+	std::array<std::string_view, COUNT> arr{};
+	arr[BEDROCK] = "Bedrock";
+	arr[BRICKS] = "Bricks";
+	arr[COBBLESTONE] = "Cobblestone";
+	arr[DIRT] = "Dirt";
+	arr[GLASS] = "Glass";
+	arr[GRASS_TOP] = "Grass Top";
+	arr[GRASS_SIDE] = "Grass Side";
+	arr[GRAVEL] = "Gravel";
+	arr[OAK_LEAVES] = "Oak Leaves";
+	arr[OAK_LOG_TOP] = "Oak Log Top";
+	arr[OAK_LOG] = "Oak Log";
+	arr[OAK_PLANKS] = "Oak Planks";
+	arr[SAND] = "Sand";
+	arr[SNOW] = "Snow";
+	arr[STONE_BRICKS] = "Stone Bricks";
+	arr[STONE] = "Stone";
+	arr[COAL_ORE] = "Coal Ore";
+	arr[COPPER_ORE] = "Copper Ore";
+	arr[DIAMOND_ORE] = "Diamond Ore";
+	arr[EMERALD_ORE] = "Emerald Ore";
+	arr[GOLD_ORE] = "Gold Ore";
+	arr[IRON_ORE] = "Iron Ore";
+	arr[LAPIS_ORE] = "Lapis Ore";
+	arr[REDSTONE_ORE] = "Redstone Ore";
+	arr[WATER] = "Water";
+	arr[BIRCH_LOG] = "Birch Log";
+	arr[BIRCH_LOG_TOP] = "Birch Log Top";
+	arr[BIRCH_LEAVES] = "Birch Leaves";
+	arr[SPRUCE_LOG] = "Spruce Log";
+	arr[SPRUCE_LOG_TOP] = "Spruce Log Top";
+	arr[SPRUCE_LEAVES] = "Spruce Leaves";
+	arr[JUNGLE_LOG] = "Jungle Log";
+	arr[JUNGLE_LOG_TOP] = "Jungle Log Top";
+	arr[JUNGLE_LEAVES] = "Jungle Leaves";
+	arr[ACACIA_LOG] = "Acacia Log";
+	arr[ACACIA_LOG_TOP] = "Acacia Log Top";
+	arr[ACACIA_LEAVES] = "Acacia Leaves";
+	arr[DARK_OAK_LOG] = "Dark Oak Log";
+	arr[DARK_OAK_LOG_TOP] = "Dark Oak Log Top";
+	arr[DARK_OAK_LEAVES] = "Dark Oak Leaves";
+	arr[CACTUS] = "Cactus";
+	arr[CACTUS_TOP] = "Cactus Top";
+	arr[RED_SAND] = "Red Sand";
+	arr[SANDSTONE] = "Sandstone";
+	arr[RED_SANDSTONE] = "Red Sandstone";
+	arr[TERRACOTTA] = "Terracotta";
+	arr[ORANGE_TERRACOTTA] = "Orange Terracotta";
+	arr[RED_TERRACOTTA] = "Red Terracotta";
+	arr[YELLOW_TERRACOTTA] = "Yellow Terracotta";
+	arr[WHITE_TERRACOTTA] = "White Terracotta";
+	arr[BROWN_TERRACOTTA] = "Brown Terracotta";
+	arr[COARSE_DIRT] = "Coarse Dirt";
+	arr[PODZOL] = "Podzol";
+	arr[CLAY] = "Clay";
+	arr[MUD] = "Mud";
+	arr[MOSS_BLOCK] = "Moss Block";
+	arr[ICE] = "Ice";
+	arr[PACKED_ICE] = "Packed Ice";
+	arr[BLUE_ICE] = "Blue Ice";
+	arr[ANDESITE] = "Andesite";
+	arr[DIORITE] = "Diorite";
+	arr[GRANITE] = "Granite";
+	arr[DEEPSLATE] = "Deepslate";
+	arr[DEEPSLATE_TOP] = "Deepslate Top";
+	arr[TUFF] = "Tuff";
+	arr[MOSSY_COBBLESTONE] = "Mossy Cobblestone";
+	arr[CHERRY_LOG] = "Cherry Log";
+	arr[CHERRY_LOG_TOP] = "Cherry Log Top";
+	arr[CHERRY_LEAVES] = "Cherry Leaves";
+	arr[MANGROVE_LOG] = "Mangrove Log";
+	arr[MANGROVE_LOG_TOP] = "Mangrove Log Top";
+	arr[MANGROVE_ROOTS] = "Mangrove Roots";
+	arr[MANGROVE_ROOTS_TOP] = "Mangrove Roots Top";
+	arr[MANGROVE_LEAVES] = "Mangrove Leaves";
+	arr[BAMBOO_BLOCK] = "Bamboo Block";
+	arr[BAMBOO_BLOCK_TOP] = "Bamboo Block Top";
+	arr[BAMBOO_STALK] = "Bamboo Stalk";
+	arr[RED_MUSHROOM_BLOCK] = "Red Mushroom Block";
+	arr[BROWN_MUSHROOM_BLOCK] = "Brown Mushroom Block";
+	arr[MUSHROOM_STEM] = "Mushroom Stem";
+	arr[BASALT] = "Basalt";
+	arr[BASALT_TOP] = "Basalt Top";
+	arr[BLACKSTONE] = "Blackstone";
+	arr[MAGMA] = "Magma";
+	arr[TUBE_CORAL_BLOCK] = "Tube Coral Block";
+	arr[BRAIN_CORAL_BLOCK] = "Brain Coral Block";
+	arr[BUBBLE_CORAL_BLOCK] = "Bubble Coral Block";
+	arr[FIRE_CORAL_BLOCK] = "Fire Coral Block";
+	arr[HORN_CORAL_BLOCK] = "Horn Coral Block";
+	arr[LAVA] = "Lava";
+	arr[DEEPSLATE_COAL_ORE] = "Deepslate Coal Ore";
+	arr[DEEPSLATE_COPPER_ORE] = "Deepslate Copper Ore";
+	arr[DEEPSLATE_DIAMOND_ORE] = "Deepslate Diamond Ore";
+	arr[DEEPSLATE_EMERALD_ORE] = "Deepslate Emerald Ore";
+	arr[DEEPSLATE_GOLD_ORE] = "Deepslate Gold Ore";
+	arr[DEEPSLATE_IRON_ORE] = "Deepslate Iron Ore";
+	arr[DEEPSLATE_LAPIS_ORE] = "Deepslate Lapis Ore";
+	arr[DEEPSLATE_REDSTONE_ORE] = "Deepslate Redstone Ore";
+	arr[DRIPSTONE_BLOCK] = "Dripstone Block";
+	arr[KELP] = "Kelp";
+	arr[KELP_TOP] = "Kelp Top";
+	return arr;
+}();
 
 enum ChunkState
 {

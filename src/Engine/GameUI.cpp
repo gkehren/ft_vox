@@ -51,8 +51,9 @@ constexpr unsigned char kBiomeColors[BIOME_COUNT][3] = {
 
 const char *textureName(TextureType t)
 {
-	auto it = textureTypeString.find(t);
-	return it != textureTypeString.end() ? it->second.c_str() : "unknown";
+	if (t >= 0 && t < COUNT && !textureTypeString[t].empty())
+		return textureTypeString[t].data();
+	return "unknown";
 }
 
 void helpRow(const char *keys, const char *action)
@@ -289,11 +290,11 @@ void GameUI::drawHud(GameUIFrame &frame)
 		static std::vector<std::pair<int, std::string>> names;
 		if (names.empty())
 		{
-			for (const auto &kv : textureTypeString)
+			for (int i = 0; i < COUNT; ++i)
 			{
-				if (kv.first == AIR || kv.first == COUNT)
+				if (i == AIR || textureTypeString[i].empty())
 					continue;
-				names.emplace_back(static_cast<int>(kv.first), kv.second);
+				names.emplace_back(i, std::string(textureTypeString[i]));
 			}
 			std::sort(names.begin(), names.end(),
 					  [](const auto &a, const auto &b) { return a.second < b.second; });
