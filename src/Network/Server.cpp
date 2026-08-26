@@ -69,7 +69,10 @@ void Server::handleReceive(const boost::asio::ip::udp::endpoint &senderEndpoint,
 {
 	if (!error && bytesTransferred > 0)
 	{
-		std::vector<uint8_t> data(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
+		// ⚡ Bolt: Use thread_local std::vector to avoid dynamic heap allocations per packet in the high-throughput network receive loop.
+		// We reuse the capacity by assigning new data.
+		thread_local std::vector<uint8_t> data;
+		data.assign(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
 		handleMessage(senderEndpoint, data);
 	}
 }
