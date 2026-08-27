@@ -121,7 +121,9 @@ void Client::handleReceive(const boost::system::error_code &error, std::size_t b
 {
 	if (!error && bytesTransferred > 0)
 	{
-		std::vector<uint8_t> data(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
+		// ⚡ Bolt: Avoid per-packet dynamic heap allocations by reusing thread_local vector capacity
+		thread_local std::vector<uint8_t> data;
+		data.assign(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
 		handleMessage(data);
 	}
 }
