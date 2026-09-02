@@ -121,7 +121,9 @@ void Client::handleReceive(const boost::system::error_code &error, std::size_t b
 {
 	if (!error && bytesTransferred > 0)
 	{
-		std::vector<uint8_t> data(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
+		// ⚡ Bolt: Replace per-packet dynamic allocation with thread_local to reuse capacity.
+		thread_local std::vector<uint8_t> data;
+		data.assign(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
 		handleMessage(data);
 	}
 }
@@ -176,9 +178,9 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 		if (!buf.hasMore(numPlayers * (sizeof(uint32_t) + 3 * sizeof(float))))
 			return;
 
-		// ⚡ Bolt: Replace std::unordered_set with std::vector + std::sort + std::binary_search
-		// to avoid node allocations and improve cache locality on every network tick.
-		std::vector<uint32_t> currentPlayers;
+		// ⚡ Bolt: Use thread_local to reuse capacity and prevent per-packet dynamic heap allocations.
+		thread_local std::vector<uint32_t> currentPlayers;
+		currentPlayers.clear();
 		currentPlayers.reserve(numPlayers);
 
 		std::lock_guard<std::mutex> lock(playerMutex);

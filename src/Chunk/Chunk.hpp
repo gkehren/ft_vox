@@ -90,6 +90,9 @@ public:
 
 	uint32_t getOpaqueIndexCount() const { return opaqueIndexCount; }
 
+	size_t getActiveIndex() const { return m_activeIndex; }
+	void setActiveIndex(size_t index) { m_activeIndex = index; }
+
 private:
 	glm::vec3 position;
 	bool visible;
@@ -120,4 +123,7 @@ private:
 	std::atomic<bool> m_inTransit{false};
 
 	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
+
+private:
+	size_t m_activeIndex{SIZE_MAX};
 };

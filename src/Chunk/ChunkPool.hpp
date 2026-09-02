@@ -5,7 +5,6 @@
 #include <memory>
 #include <cstddef>
 #include <atomic>
-#include <unordered_set>
 #include <glm/glm.hpp>
 
 class Chunk;
@@ -61,7 +60,7 @@ private:
 	/// All pool-owned chunks; unique_ptr keeps addresses stable across vector growth.
 	std::vector<std::unique_ptr<Chunk>> m_storage;
 	std::vector<Chunk *> m_freeList;
-	std::unordered_set<const Chunk *> m_owned;
+	std::vector<const Chunk *> m_owned;
 	std::mutex m_mutex;
 
 	std::atomic<size_t> m_capacity{0};

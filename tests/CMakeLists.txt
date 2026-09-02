@@ -117,6 +117,7 @@ add_test(NAME VisualLookDefaults COMMAND test_visual_look)
 # ---------------------------------------------------------------------------
 add_executable(test_render_helpers
     test_render_helpers.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp
 )
 
 target_include_directories(test_render_helpers PRIVATE
@@ -130,6 +131,7 @@ target_compile_definitions(test_render_helpers PRIVATE
 
 target_link_libraries(test_render_helpers PRIVATE
     glm
+    miniz::miniz
 )
 
 add_test(NAME RenderHelpers COMMAND test_render_helpers)

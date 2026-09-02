@@ -1,0 +1,30 @@
+ft_vox Benchmark Report
+=======================
+Score: 9913 / 10000  Grade: S
+Revision: b7a0eb79c06b* (dirty tree at build)
+  git b7a0eb79c06b  branch main  describe b7a0eb7-dirty
+  build UTC 2026-08-02T11:51:49Z
+Seed: 42  Duration: 60s  Warmup: 3s  Measured: 60.0002s  Frames: 34354
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 1.7393  min 0.4662  max 6.7831
+  p50 1.2551  p95 3.8865  p99 4.1614
+  avg FPS 574.944  1% low FPS 240.304
+  frames >16.7ms: 0  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.200899  Visibility 0.027381
+  Acquire 1.12189  Record 0.302899  MeshUpload 0.0158774
+  ImGui 0.0628566  Present 0.0413213
+
+Worker jobs
+  TerrainGen  n=1854  avgMs=1.26061  totalMs=2337.16
+  MeshBuild   n=1724  avgMs=2.31242  totalMs=3986.6
+  MeshLOD     n=2020  avgMs=0.0279099  totalMs=56.378
+
+Peaks: chunks=4552 draw=1804 qLoad/Gen/Mesh=423/3/3
+
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.

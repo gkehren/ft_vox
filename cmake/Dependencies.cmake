@@ -286,6 +286,34 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(FastNoise2)
 
 # ---------------------------------------------------------------------------
+# miniz (ZIP archive reader)
+# ---------------------------------------------------------------------------
+set(_FT_VOX_MINIZ_OK FALSE)
+find_package(miniz CONFIG QUIET)
+if(TARGET miniz::miniz OR TARGET miniz)
+    set(_FT_VOX_MINIZ_OK TRUE)
+    message(STATUS "miniz: CONFIG package")
+endif()
+
+if(NOT _FT_VOX_MINIZ_OK)
+    message(STATUS "miniz: FetchContent (richgel999/miniz)")
+    FetchContent_Declare(
+        miniz
+        GIT_REPOSITORY https://github.com/richgel999/miniz.git
+        GIT_TAG 3.0.2
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(miniz)
+    if(TARGET miniz OR TARGET miniz::miniz)
+        set(_FT_VOX_MINIZ_OK TRUE)
+    endif()
+endif()
+
+if(TARGET miniz AND NOT TARGET miniz::miniz)
+    add_library(miniz::miniz ALIAS miniz)
+endif()
+
+# ---------------------------------------------------------------------------
 # SPIR-V compilers
 # ---------------------------------------------------------------------------
 find_program(GLSLANG_VALIDATOR glslangValidator

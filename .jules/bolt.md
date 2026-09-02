@@ -37,3 +37,14 @@
 ## 2024-05-24 - Network Packet Hot Loop Optimization
 **Learning:** Using `std::unordered_set` dynamically inside frequent network packet handlers (like `Client::handleMessage`) causes node-based heap allocations for every packet processed, leading to unnecessary garbage and potential stutters.
 **Action:** For bounded and small collections derived from network packets, use `std::vector` with `reserve()`, sort the vector, and use `std::binary_search()`. This leverages contiguous memory and avoids node allocations entirely.
+
+## 2024-05-18 - ChunkManager Load Queue Deduplication Pitfall
+**Learning:** In `ChunkManager`, attempting to remove `m_enqueuedLoads` (`std::unordered_set`) and deduplicate the `m_loadQueue` by calling `std::unique` immediately after sorting by *distance* fails. Identical coordinates might have the exact same distance but are not guaranteed to be adjacent in a stable sort if floating-point calculations differ minutely or symmetrically.
+**Action:** Do not deduplicate `m_loadQueue` in-place using `std::unique` after a distance sort. Either maintain the `std::unordered_set`, or re-sort by coordinates before using `std::unique`, or rely on coordinate-based binary searches if removing the set.
+## 2024-05-24 - Build System Fallbacks & Experimental Targets
+**Learning:** When building this project on Linux environments lacking SDL3 packages, configuring with `cmake -B build-vk -DFT_VOX_FETCH_SDL3=ON -DFT_VOX_DEP_MODE=system` works, but experimental shader targets (`ft_vox_shaders`) may fail to compile due to missing GLSL extensions. Running `make -j4` globally will fail.
+**Action:** Instead of a global `make`, explicitly build only the required executable targets (e.g., `make -j4 ft_vox test_network test_stream_opt`) to ensure successful compilation and avoid breaking the pipeline on unneeded targets.
+
+## 2024-05-18 - [ChunkManager Hot-Path Thread-Local Queues]
+**Learning:** [The `ChunkManager` relies on dynamically creating `std::vector<Item>` queues inside hot path methods (`generatePendingVoxels`, `meshPendingChunks`, `uploadPendingMeshes`) which are called frequently in the main loop. These dynamic heap allocations can degrade performance. Reusing memory is complex due to `std::shared_mutex` usage and potential concurrency.]
+**Action:** [Use `thread_local std::vector<Item>` with a `queue.clear()` at the start of the method to safely reuse allocated capacity across frames without introducing data races or locking overhead in concurrent methods.]

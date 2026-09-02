@@ -43,8 +43,10 @@ void ChunkPool::growUnlocked(size_t addCount)
 		m_storage.push_back(std::make_unique<Chunk>(glm::vec3(0.0f)));
 		Chunk *ptr = m_storage.back().get();
 		m_freeList.push_back(ptr);
-		m_owned.insert(ptr);
+		m_owned.push_back(ptr);
 	}
+
+	std::sort(m_owned.begin(), m_owned.end());
 
 	m_capacity.store(m_storage.size(), std::memory_order_relaxed);
 	m_growEvents.fetch_add(1, std::memory_order_relaxed);
@@ -99,7 +101,7 @@ void ChunkPool::release(Chunk *chunk)
 
 	std::lock_guard<std::mutex> lock(m_mutex);
 
-	if (m_owned.count(chunk) != 0)
+	if (std::binary_search(m_owned.begin(), m_owned.end(), chunk))
 	{
 		m_freeList.push_back(chunk);
 	}

@@ -7,6 +7,7 @@
 #include <Renderer/MaterialTable.hpp>
 #include <Renderer/PostDefaults.hpp>
 #include <Renderer/MinecraftTextures.hpp>
+#include <Renderer/ResourcePackReader.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <fstream>
 #include <filesystem>
@@ -337,33 +338,10 @@ int main()
 			ok = fail("GRASS_TOP basename must be grass_block_top.png");
 		if (std::string(blockLayerFile(BIRCH_LEAVES)) != "birch_leaves.png")
 			ok = fail("BIRCH_LEAVES basename must be birch_leaves.png");
-		if (std::string(blockLayerBundledFallback(BIRCH_LEAVES)) != "oak_leaves.png")
-			ok = fail("BIRCH_LEAVES bundled fallback must be oak_leaves.png");
-		if (std::string(blockLayerBundledFallback(ICE)) != "glass.png")
-			ok = fail("ICE bundled fallback must be glass.png");
-		const TextureType expandedBundledTypes[] = {
-			CHERRY_LOG, CHERRY_LOG_TOP, CHERRY_LEAVES,
-			MANGROVE_LOG, MANGROVE_LOG_TOP, MANGROVE_ROOTS,
-			MANGROVE_ROOTS_TOP, MANGROVE_LEAVES,
-			BAMBOO_BLOCK, BAMBOO_BLOCK_TOP, BAMBOO_STALK,
-			RED_MUSHROOM_BLOCK, BROWN_MUSHROOM_BLOCK, MUSHROOM_STEM,
-			BASALT, BASALT_TOP, BLACKSTONE, MAGMA,
-			TUBE_CORAL_BLOCK, BRAIN_CORAL_BLOCK, BUBBLE_CORAL_BLOCK,
-			FIRE_CORAL_BLOCK, HORN_CORAL_BLOCK,
-			LAVA, DEEPSLATE_COAL_ORE, DEEPSLATE_COPPER_ORE,
-			DEEPSLATE_DIAMOND_ORE, DEEPSLATE_EMERALD_ORE,
-			DEEPSLATE_GOLD_ORE, DEEPSLATE_IRON_ORE,
-			DEEPSLATE_LAPIS_ORE, DEEPSLATE_REDSTONE_ORE,
-			DRIPSTONE_BLOCK, KELP, KELP_TOP,
-		};
-		for (TextureType type : expandedBundledTypes)
-		{
-			bool resolvedFromPack = true;
-			const std::string path = resolveBlockTexturePath("", type, &resolvedFromPack);
-			if (resolvedFromPack || !blockTextureFileReadable(path))
-				ok = fail(std::string("Expanded bundled texture missing: ") +
-						  (blockLayerFile(type) ? blockLayerFile(type) : "unknown"));
-		}
+		if (std::string(blockLayerFallbackFile(BIRCH_LEAVES)) != "oak_leaves.png")
+			ok = fail("BIRCH_LEAVES fallback file must be oak_leaves.png");
+		if (std::string(blockLayerFallbackFile(ICE)) != "glass.png")
+			ok = fail("ICE fallback file must be glass.png");
 		if (!blockIsFoliage(OAK_LEAVES) || !blockIsFoliage(SPRUCE_LEAVES) ||
 			!blockIsFoliage(BIRCH_LEAVES) || !blockIsFoliage(JUNGLE_LEAVES) ||
 			!blockIsFoliage(ACACIA_LEAVES) || !blockIsFoliage(DARK_OAK_LEAVES) ||
@@ -402,71 +380,42 @@ int main()
 			ok = fail("WATER ordinal must remain 24 (append-only expansion)");
 		if (static_cast<int>(BIRCH_LOG) != 25)
 			ok = fail("BIRCH_LOG must be first appended type (25)");
-	}
 
-	// Path resolve + animation frame size (shipped helpers, no Vulkan)
-	{
-		bool fellBack = false;
-		const std::string bundled = resolveBlockTexturePath("", "stone.png", &fellBack);
-		if (fellBack)
-			ok = fail("empty pack root must not set fellBackFromPack");
-		if (bundled.find("textures/stone.png") == std::string::npos)
-			ok = fail("bundled path must end under textures/stone.png");
-
-		// Non-existent pack → every required file falls back with flag
-		fellBack = false;
-		const std::string missingPack =
-			resolveBlockTexturePath("/nonexistent/pack/root", "stone.png", &fellBack);
-		if (!fellBack)
-			ok = fail("missing pack file must set fellBackFromPack");
-		if (missingPack.find("textures/stone.png") == std::string::npos)
-			ok = fail("missing pack must fall back to bundled stone.png");
-
-		// New type without bundled primary → fallback PNG
-		fellBack = false;
-		const std::string birchFb =
-			resolveBlockTexturePath("", BIRCH_LEAVES, &fellBack);
-		if (fellBack)
-			ok = fail("empty pack must not set fellBack for type resolve");
-		if (birchFb.find("oak_leaves.png") == std::string::npos)
-			ok = fail("BIRCH_LEAVES without pack must resolve to oak_leaves fallback");
-
-		// Real default pack when present (optional fixture under docs/)
+		// ResourcePackReader + ZIP reading (default pack)
 		namespace fs = std::filesystem;
-		const char *packCandidates[] = {
-			"docs/default-resource-pack",
-			"../docs/default-resource-pack",
-			"../../docs/default-resource-pack",
-			"docs/default-ressource-pack",
-			"../docs/default-ressource-pack",
+		const char *defaultPackCandidates[] = {
+			"ressources/default-resource-pack.zip",
+			"../ressources/default-resource-pack.zip",
+			"../../ressources/default-resource-pack.zip",
 		};
-		for (const char *pack : packCandidates)
+		std::string foundZip;
+		for (const char *candidate : defaultPackCandidates)
 		{
-			if (!fs::is_directory(pack))
-				continue;
-			fellBack = true;
-			const std::string fromPack = resolveBlockTexturePath(pack, "stone.png", &fellBack);
-			if (fellBack)
-				ok = fail("docs default pack stone.png must resolve without fallback");
-			if (fromPack.find("assets/minecraft/textures/block/stone.png") == std::string::npos)
-				ok = fail("pack path must include assets/minecraft/textures/block/stone.png");
-			// water_still present
-			fellBack = true;
-			const std::string water = resolveBlockTexturePath(pack, "water_still.png", &fellBack);
-			if (fellBack || water.find("water_still.png") == std::string::npos)
-				ok = fail("docs pack water_still.png must resolve from pack");
-			// Expanded types from pack
-			fellBack = true;
-			const std::string birch = resolveBlockTexturePath(pack, BIRCH_LEAVES, &fellBack);
-			if (fellBack || birch.find("birch_leaves.png") == std::string::npos)
-				ok = fail("docs pack birch_leaves.png must resolve from pack");
-			fellBack = true;
-			const std::string ice = resolveBlockTexturePath(pack, ICE, &fellBack);
-			if (fellBack || ice.find("ice.png") == std::string::npos)
-				ok = fail("docs pack ice.png must resolve from pack");
-			break;
+			if (fs::exists(candidate))
+			{
+				foundZip = candidate;
+				break;
+			}
 		}
 
+		if (!foundZip.empty())
+		{
+			ResourcePackReader reader(foundZip);
+			if (!reader.isValid())
+				ok = fail("ResourcePackReader failed to open default-resource-pack.zip");
+
+			std::vector<uint8_t> pngData;
+			if (!reader.readBlockTexture("stone.png", pngData) || pngData.empty())
+				ok = fail("ResourcePackReader failed to read stone.png from default-resource-pack.zip");
+
+			pngData.clear();
+			if (!reader.readBlockTexture("birch_leaves.png", pngData) || pngData.empty())
+				ok = fail("ResourcePackReader failed to read birch_leaves.png from default-resource-pack.zip");
+		}
+	}
+
+	// Animation frame size helper
+	{
 		int fw = 0, fh = 0;
 		blockTextureFrameSize(16, 512, fw, fh);
 		if (fw != 16 || fh != 16)

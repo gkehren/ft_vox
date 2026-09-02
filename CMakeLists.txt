@@ -146,6 +146,7 @@ set(FT_VOX_VULKAN_SOURCES
 )
 
 set(FT_VOX_RENDERER_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/TextureManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/WorldRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/PostStack.cpp
@@ -221,6 +222,7 @@ set(FT_VOX_COMMON_LIBS
     SDL3::SDL3
     glm
     FastNoise2
+    miniz::miniz
     Boost::boost
     Boost::system
     volk::volk

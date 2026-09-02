@@ -27,18 +27,10 @@ ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threa
 ChunkManager::~ChunkManager()
 {
 	// Best-effort drain of async work so we don't release chunks still in workers.
-	for (auto &t : m_pendingGenerationTasks)
+	while (m_pendingGenJobsCount.load() > 0 || m_pendingMeshJobsCount.load() > 0)
 	{
-		if (t.first.valid())
-			t.first.wait();
+		std::this_thread::yield();
 	}
-	for (auto &t : m_pendingMeshingTasks)
-	{
-		if (t.first.valid())
-			t.first.wait();
-	}
-	m_pendingGenerationTasks.clear();
-	m_pendingMeshingTasks.clear();
 
 	for (auto &[pos, chunkPtr] : m_chunks)
 	{
@@ -121,6 +113,7 @@ void ChunkManager::processChunkLoading(int budget)
 		if (m_chunks.find(pair.first) == m_chunks.end())
 		{
 			m_chunks[pair.first] = pair.second;
+			pair.second->setActiveIndex(m_activeChunks.size());
 			m_activeChunks.push_back(pair.second);
 			// Generate even before frustum test so the world fills around the player.
 			pair.second->setVisible(true);
@@ -160,27 +153,34 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 	planes[3] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 1);
 	planes[4] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 2);
 	planes[5] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 2);
-	for (auto &p : planes)
+
+	std::array<glm::vec3, 6> planeNormals;
+	std::array<float, 6> planeOffsets;
+	for (size_t i = 0; i < 6; ++i)
 	{
+		auto &p = planes[i];
 		const float len = glm::length(glm::vec3(p));
 		if (len > 1e-6f)
 			p /= len;
+
+		planeNormals[i] = glm::vec3(p);
+		const glm::vec3 optOffset(
+			p.x >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f,
+			p.y >= 0.f ? static_cast<float>(CHUNK_HEIGHT) : 0.f,
+			p.z >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f
+		);
+		planeOffsets[i] = p.w + glm::dot(planeNormals[i], optOffset);
 	}
 
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	for (Chunk *chunk : m_activeChunks)
 	{
 		const glm::vec3 aabbMin = chunk->getPosition();
-		const glm::vec3 aabbMax = aabbMin + glm::vec3(CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE);
 
 		bool visible = true;
-		for (const auto &plane : planes)
+		for (size_t i = 0; i < 6; ++i)
 		{
-			const glm::vec3 pv(
-				plane.x >= 0.f ? aabbMax.x : aabbMin.x,
-				plane.y >= 0.f ? aabbMax.y : aabbMin.y,
-				plane.z >= 0.f ? aabbMax.z : aabbMin.z);
-			if (glm::dot(glm::vec3(plane), pv) + plane.w < 0.f)
+			if (glm::dot(planeNormals[i], aabbMin) + planeOffsets[i] < 0.f)
 			{
 				visible = false;
 				break;
@@ -203,7 +203,8 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	};
 
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	std::vector<Item> queue;
+	thread_local std::vector<Item> queue;
+	queue.clear();
 	queue.reserve(m_activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
 
@@ -234,7 +235,8 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 		Chunk *chunk = queue[i].chunk;
 		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThreshSq);
 		chunk->setInTransit(true);
-		auto future = m_threadPool->enqueue(prio, [chunk, seed]() {
+		m_pendingGenJobsCount.fetch_add(1);
+		m_threadPool->enqueue(prio, [chunk, seed, this]() {
 			const auto t0 = std::chrono::steady_clock::now();
 			TerrainGenerator &localGen = TerrainGenerator::getThreadLocal(seed);
 			chunk->generateTerrain(localGen);
@@ -242,8 +244,13 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 								 std::chrono::steady_clock::now() - t0)
 								 .count();
 			GetProfiler().addWorkerSample("TerrainGen", ms);
+
+			{
+				std::lock_guard<std::mutex> lk(m_completedJobsMutex);
+				m_completedGenerationChunks.push_back(chunk);
+			}
+			m_pendingGenJobsCount.fetch_sub(1);
 		});
-		m_pendingGenerationTasks.emplace_back(std::move(future), chunk);
 	}
 }
 
@@ -259,7 +266,8 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	};
 
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	std::vector<Item> queue;
+	thread_local std::vector<Item> queue;
+	queue.clear();
 	queue.reserve(m_activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
 
@@ -309,28 +317,40 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 
 		if (distSq > lodThreshSq)
 		{
-			auto future = m_threadPool->enqueue(prio, [chunk]() {
+			m_pendingMeshJobsCount.fetch_add(1);
+			m_threadPool->enqueue(prio, [chunk, this]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				chunk->generateLODMesh();
 				const float ms = std::chrono::duration<float, std::milli>(
 									 std::chrono::steady_clock::now() - t0)
 									 .count();
 				GetProfiler().addWorkerSample("MeshLOD", ms);
+
+				{
+					std::lock_guard<std::mutex> lk(m_completedJobsMutex);
+					m_completedMeshingChunks.push_back(chunk);
+				}
+				m_pendingMeshJobsCount.fetch_sub(1);
 			});
-			m_pendingMeshingTasks.emplace_back(std::move(future), chunk);
 		}
 		else
 		{
 			ensureShellPopulated(chunk, ci);
-			auto future = m_threadPool->enqueue(prio, [chunk]() {
+			m_pendingMeshJobsCount.fetch_add(1);
+			m_threadPool->enqueue(prio, [chunk, this]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				chunk->generateMesh();
 				const float ms = std::chrono::duration<float, std::milli>(
 									 std::chrono::steady_clock::now() - t0)
 									 .count();
 				GetProfiler().addWorkerSample("MeshBuild", ms);
+
+				{
+					std::lock_guard<std::mutex> lk(m_completedJobsMutex);
+					m_completedMeshingChunks.push_back(chunk);
+				}
+				m_pendingMeshJobsCount.fetch_sub(1);
 			});
-			m_pendingMeshingTasks.emplace_back(std::move(future), chunk);
 		}
 	}
 }
@@ -346,7 +366,8 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 		Chunk *chunk;
 		float distSq;
 	};
-	std::vector<Item> queue;
+	thread_local std::vector<Item> queue;
+	queue.clear();
 	{
 		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		queue.reserve(m_activeChunks.size());
@@ -409,36 +430,23 @@ void ChunkManager::processDeferredReleases(GpuResourceRetire &retire)
 
 void ChunkManager::processFinishedJobs()
 {
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-
-	for (size_t i = 0; i < m_pendingGenerationTasks.size();)
+	std::vector<Chunk *> finishedGen;
+	std::vector<Chunk *> finishedMesh;
 	{
-		if (m_pendingGenerationTasks[i].first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-		{
-			m_pendingGenerationTasks[i].first.get();
-			m_pendingGenerationTasks[i].second->setInTransit(false);
-			m_pendingGenerationTasks[i] = std::move(m_pendingGenerationTasks.back());
-			m_pendingGenerationTasks.pop_back();
-		}
-		else
-		{
-			++i;
-		}
+		std::lock_guard<std::mutex> lock(m_completedJobsMutex);
+		finishedGen.swap(m_completedGenerationChunks);
+		finishedMesh.swap(m_completedMeshingChunks);
 	}
 
-	for (size_t i = 0; i < m_pendingMeshingTasks.size();)
+	for (Chunk *chunk : finishedGen)
 	{
-		if (m_pendingMeshingTasks[i].first.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-		{
-			m_pendingMeshingTasks[i].first.get();
-			m_pendingMeshingTasks[i].second->setInTransit(false);
-			m_pendingMeshingTasks[i] = std::move(m_pendingMeshingTasks.back());
-			m_pendingMeshingTasks.pop_back();
-		}
-		else
-		{
-			++i;
-		}
+		if (chunk)
+			chunk->setInTransit(false);
+	}
+	for (Chunk *chunk : finishedMesh)
+	{
+		if (chunk)
+			chunk->setInTransit(false);
 	}
 }
 
@@ -518,11 +526,14 @@ void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSetti
 		if (!chunk || chunk->isInTransit())
 			continue;
 
-		auto activeIt = std::find(m_activeChunks.begin(), m_activeChunks.end(), chunk);
-		if (activeIt != m_activeChunks.end())
+		const size_t activeIdx = chunk->getActiveIndex();
+		if (activeIdx < m_activeChunks.size() && m_activeChunks[activeIdx] == chunk)
 		{
-			*activeIt = m_activeChunks.back();
+			Chunk *lastChunk = m_activeChunks.back();
+			m_activeChunks[activeIdx] = lastChunk;
+			lastChunk->setActiveIndex(activeIdx);
 			m_activeChunks.pop_back();
+			chunk->setActiveIndex(SIZE_MAX);
 		}
 		m_chunks.erase(it);
 		m_deferredRelease.push_back(chunk);
@@ -762,14 +773,12 @@ size_t ChunkManager::pendingLoadCount() const
 
 size_t ChunkManager::pendingGenJobs() const
 {
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	return m_pendingGenerationTasks.size();
+	return m_pendingGenJobsCount.load();
 }
 
 size_t ChunkManager::pendingMeshJobs() const
 {
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	return m_pendingMeshingTasks.size();
+	return m_pendingMeshJobsCount.load();
 }
 
 void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
@@ -820,6 +829,7 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 		for (const auto &p : created)
 		{
 			m_chunks[p.first] = p.second;
+			p.second->setActiveIndex(m_activeChunks.size());
 			m_activeChunks.push_back(p.second);
 			p.second->setVisible(true);
 		}

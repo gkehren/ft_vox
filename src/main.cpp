@@ -8,13 +8,13 @@
 
 static void printUsage(const char *argv0)
 {
-	std::cout << "Usage: " << argv0 << " [--seed <value>] [--resource-pack <path>]"
+	std::cout << "Usage: " << argv0 << " [--seed <value>] [--resource-pack <path.zip>]"
 			  << " [--vsync <on|off>] [--benchmark <seconds>]\n"
 			  << "\n"
 			  << "Options:\n"
 			  << "  --seed <value>              World seed (integer)\n"
-			  << "  --resource-pack <path>      Minecraft resource pack root\n"
-			  << "                              (loads assets/minecraft/textures/block/*.png)\n"
+			  << "  --resource-pack <path>      Minecraft resource pack archive (.zip) or folder\n"
+			  << "                              (defaults to ressources/default-resource-pack.zip)\n"
 			  << "  --vsync <on|off>            FIFO when on; strict IMMEDIATE and uncapped when off\n"
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
 			  << "  --help                      Show this help\n"
@@ -29,7 +29,7 @@ static std::string resolveResourcePackRoot(const std::string &cliPack)
 		return trimTrailingSlashes(cliPack);
 	if (const char *env = std::getenv("FT_VOX_RESOURCE_PACK"))
 		return trimTrailingSlashes(env);
-	return {};
+	return std::string(RES_PATH) + "default-resource-pack.zip";
 }
 
 int main(int argc, char **argv)
