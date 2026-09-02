@@ -3,8 +3,8 @@
 #include <iostream>
 #include <vector>
 #include <array>
+#include <string_view>
 #include <tuple>
-#include <map>
 #include <glm/glm.hpp>
 #include <cstring>
 
@@ -305,109 +305,125 @@ static_assert(KELP == DRIPSTONE_BLOCK + 1,
 // Ensure TextureType fits in Voxel::type (uint8_t)
 static_assert(static_cast<int>(AIR) <= 255, "TextureType values exceed uint8_t range for Voxel::type");
 
-static const std::map<TextureType, std::string> textureTypeString = {
-	{BEDROCK, "Bedrock"},
-	{BRICKS, "Bricks"},
-	{COBBLESTONE, "Cobblestone"},
-	{DIRT, "Dirt"},
-	{GLASS, "Glass"},
-	{GRASS_TOP, "Grass Top"},
-	{GRASS_SIDE, "Grass Side"},
-	{GRAVEL, "Gravel"},
-	{OAK_LEAVES, "Oak Leaves"},
-	{OAK_LOG_TOP, "Oak Log Top"},
-	{OAK_LOG, "Oak Log"},
-	{OAK_PLANKS, "Oak Planks"},
-	{SAND, "Sand"},
-	{SNOW, "Snow"},
-	{STONE_BRICKS, "Stone Bricks"},
-	{STONE, "Stone"},
-	{COAL_ORE, "Coal Ore"},
-	{COPPER_ORE, "Copper Ore"},
-	{DIAMOND_ORE, "Diamond Ore"},
-	{EMERALD_ORE, "Emerald Ore"},
-	{GOLD_ORE, "Gold Ore"},
-	{IRON_ORE, "Iron Ore"},
-	{LAPIS_ORE, "Lapis Ore"},
-	{REDSTONE_ORE, "Redstone Ore"},
-	{WATER, "Water"},
-	{BIRCH_LOG, "Birch Log"},
-	{BIRCH_LOG_TOP, "Birch Log Top"},
-	{BIRCH_LEAVES, "Birch Leaves"},
-	{SPRUCE_LOG, "Spruce Log"},
-	{SPRUCE_LOG_TOP, "Spruce Log Top"},
-	{SPRUCE_LEAVES, "Spruce Leaves"},
-	{JUNGLE_LOG, "Jungle Log"},
-	{JUNGLE_LOG_TOP, "Jungle Log Top"},
-	{JUNGLE_LEAVES, "Jungle Leaves"},
-	{ACACIA_LOG, "Acacia Log"},
-	{ACACIA_LOG_TOP, "Acacia Log Top"},
-	{ACACIA_LEAVES, "Acacia Leaves"},
-	{DARK_OAK_LOG, "Dark Oak Log"},
-	{DARK_OAK_LOG_TOP, "Dark Oak Log Top"},
-	{DARK_OAK_LEAVES, "Dark Oak Leaves"},
-	{CACTUS, "Cactus"},
-	{CACTUS_TOP, "Cactus Top"},
-	{RED_SAND, "Red Sand"},
-	{SANDSTONE, "Sandstone"},
-	{RED_SANDSTONE, "Red Sandstone"},
-	{TERRACOTTA, "Terracotta"},
-	{ORANGE_TERRACOTTA, "Orange Terracotta"},
-	{RED_TERRACOTTA, "Red Terracotta"},
-	{YELLOW_TERRACOTTA, "Yellow Terracotta"},
-	{WHITE_TERRACOTTA, "White Terracotta"},
-	{BROWN_TERRACOTTA, "Brown Terracotta"},
-	{COARSE_DIRT, "Coarse Dirt"},
-	{PODZOL, "Podzol"},
-	{CLAY, "Clay"},
-	{MUD, "Mud"},
-	{MOSS_BLOCK, "Moss Block"},
-	{ICE, "Ice"},
-	{PACKED_ICE, "Packed Ice"},
-	{BLUE_ICE, "Blue Ice"},
-	{ANDESITE, "Andesite"},
-	{DIORITE, "Diorite"},
-	{GRANITE, "Granite"},
-	{DEEPSLATE, "Deepslate"},
-	{DEEPSLATE_TOP, "Deepslate Top"},
-	{TUFF, "Tuff"},
-	{MOSSY_COBBLESTONE, "Mossy Cobblestone"},
-	{CHERRY_LOG, "Cherry Log"},
-	{CHERRY_LOG_TOP, "Cherry Log Top"},
-	{CHERRY_LEAVES, "Cherry Leaves"},
-	{MANGROVE_LOG, "Mangrove Log"},
-	{MANGROVE_LOG_TOP, "Mangrove Log Top"},
-	{MANGROVE_ROOTS, "Mangrove Roots"},
-	{MANGROVE_ROOTS_TOP, "Mangrove Roots Top"},
-	{MANGROVE_LEAVES, "Mangrove Leaves"},
-	{BAMBOO_BLOCK, "Bamboo Block"},
-	{BAMBOO_BLOCK_TOP, "Bamboo Block Top"},
-	{BAMBOO_STALK, "Bamboo Stalk"},
-	{RED_MUSHROOM_BLOCK, "Red Mushroom Block"},
-	{BROWN_MUSHROOM_BLOCK, "Brown Mushroom Block"},
-	{MUSHROOM_STEM, "Mushroom Stem"},
-	{BASALT, "Basalt"},
-	{BASALT_TOP, "Basalt Top"},
-	{BLACKSTONE, "Blackstone"},
-	{MAGMA, "Magma"},
-	{TUBE_CORAL_BLOCK, "Tube Coral Block"},
-	{BRAIN_CORAL_BLOCK, "Brain Coral Block"},
-	{BUBBLE_CORAL_BLOCK, "Bubble Coral Block"},
-	{FIRE_CORAL_BLOCK, "Fire Coral Block"},
-	{HORN_CORAL_BLOCK, "Horn Coral Block"},
-	{LAVA, "Lava"},
-	{DEEPSLATE_COAL_ORE, "Deepslate Coal Ore"},
-	{DEEPSLATE_COPPER_ORE, "Deepslate Copper Ore"},
-	{DEEPSLATE_DIAMOND_ORE, "Deepslate Diamond Ore"},
-	{DEEPSLATE_EMERALD_ORE, "Deepslate Emerald Ore"},
-	{DEEPSLATE_GOLD_ORE, "Deepslate Gold Ore"},
-	{DEEPSLATE_IRON_ORE, "Deepslate Iron Ore"},
-	{DEEPSLATE_LAPIS_ORE, "Deepslate Lapis Ore"},
-	{DEEPSLATE_REDSTONE_ORE, "Deepslate Redstone Ore"},
-	{DRIPSTONE_BLOCK, "Dripstone Block"},
-	{KELP, "Kelp"},
-	{KELP_TOP, "Kelp Top"},
-};
+inline constexpr std::array<std::string_view, COUNT> textureTypeString = [] {
+	std::array<std::string_view, COUNT> names{};
+	names[BEDROCK] = "Bedrock";
+	names[BRICKS] = "Bricks";
+	names[COBBLESTONE] = "Cobblestone";
+	names[DIRT] = "Dirt";
+	names[GLASS] = "Glass";
+	names[GRASS_TOP] = "Grass Top";
+	names[GRASS_SIDE] = "Grass Side";
+	names[GRAVEL] = "Gravel";
+	names[OAK_LEAVES] = "Oak Leaves";
+	names[OAK_LOG_TOP] = "Oak Log Top";
+	names[OAK_LOG] = "Oak Log";
+	names[OAK_PLANKS] = "Oak Planks";
+	names[SAND] = "Sand";
+	names[SNOW] = "Snow";
+	names[STONE_BRICKS] = "Stone Bricks";
+	names[STONE] = "Stone";
+	names[COAL_ORE] = "Coal Ore";
+	names[COPPER_ORE] = "Copper Ore";
+	names[DIAMOND_ORE] = "Diamond Ore";
+	names[EMERALD_ORE] = "Emerald Ore";
+	names[GOLD_ORE] = "Gold Ore";
+	names[IRON_ORE] = "Iron Ore";
+	names[LAPIS_ORE] = "Lapis Ore";
+	names[REDSTONE_ORE] = "Redstone Ore";
+	names[WATER] = "Water";
+	names[BIRCH_LOG] = "Birch Log";
+	names[BIRCH_LOG_TOP] = "Birch Log Top";
+	names[BIRCH_LEAVES] = "Birch Leaves";
+	names[SPRUCE_LOG] = "Spruce Log";
+	names[SPRUCE_LOG_TOP] = "Spruce Log Top";
+	names[SPRUCE_LEAVES] = "Spruce Leaves";
+	names[JUNGLE_LOG] = "Jungle Log";
+	names[JUNGLE_LOG_TOP] = "Jungle Log Top";
+	names[JUNGLE_LEAVES] = "Jungle Leaves";
+	names[ACACIA_LOG] = "Acacia Log";
+	names[ACACIA_LOG_TOP] = "Acacia Log Top";
+	names[ACACIA_LEAVES] = "Acacia Leaves";
+	names[DARK_OAK_LOG] = "Dark Oak Log";
+	names[DARK_OAK_LOG_TOP] = "Dark Oak Log Top";
+	names[DARK_OAK_LEAVES] = "Dark Oak Leaves";
+	names[CACTUS] = "Cactus";
+	names[CACTUS_TOP] = "Cactus Top";
+	names[RED_SAND] = "Red Sand";
+	names[SANDSTONE] = "Sandstone";
+	names[RED_SANDSTONE] = "Red Sandstone";
+	names[TERRACOTTA] = "Terracotta";
+	names[ORANGE_TERRACOTTA] = "Orange Terracotta";
+	names[RED_TERRACOTTA] = "Red Terracotta";
+	names[YELLOW_TERRACOTTA] = "Yellow Terracotta";
+	names[WHITE_TERRACOTTA] = "White Terracotta";
+	names[BROWN_TERRACOTTA] = "Brown Terracotta";
+	names[COARSE_DIRT] = "Coarse Dirt";
+	names[PODZOL] = "Podzol";
+	names[CLAY] = "Clay";
+	names[MUD] = "Mud";
+	names[MOSS_BLOCK] = "Moss Block";
+	names[ICE] = "Ice";
+	names[PACKED_ICE] = "Packed Ice";
+	names[BLUE_ICE] = "Blue Ice";
+	names[ANDESITE] = "Andesite";
+	names[DIORITE] = "Diorite";
+	names[GRANITE] = "Granite";
+	names[DEEPSLATE] = "Deepslate";
+	names[DEEPSLATE_TOP] = "Deepslate Top";
+	names[TUFF] = "Tuff";
+	names[MOSSY_COBBLESTONE] = "Mossy Cobblestone";
+	names[CHERRY_LOG] = "Cherry Log";
+	names[CHERRY_LOG_TOP] = "Cherry Log Top";
+	names[CHERRY_LEAVES] = "Cherry Leaves";
+	names[MANGROVE_LOG] = "Mangrove Log";
+	names[MANGROVE_LOG_TOP] = "Mangrove Log Top";
+	names[MANGROVE_ROOTS] = "Mangrove Roots";
+	names[MANGROVE_ROOTS_TOP] = "Mangrove Roots Top";
+	names[MANGROVE_LEAVES] = "Mangrove Leaves";
+	names[BAMBOO_BLOCK] = "Bamboo Block";
+	names[BAMBOO_BLOCK_TOP] = "Bamboo Block Top";
+	names[BAMBOO_STALK] = "Bamboo Stalk";
+	names[RED_MUSHROOM_BLOCK] = "Red Mushroom Block";
+	names[BROWN_MUSHROOM_BLOCK] = "Brown Mushroom Block";
+	names[MUSHROOM_STEM] = "Mushroom Stem";
+	names[BASALT] = "Basalt";
+	names[BASALT_TOP] = "Basalt Top";
+	names[BLACKSTONE] = "Blackstone";
+	names[MAGMA] = "Magma";
+	names[TUBE_CORAL_BLOCK] = "Tube Coral Block";
+	names[BRAIN_CORAL_BLOCK] = "Brain Coral Block";
+	names[BUBBLE_CORAL_BLOCK] = "Bubble Coral Block";
+	names[FIRE_CORAL_BLOCK] = "Fire Coral Block";
+	names[HORN_CORAL_BLOCK] = "Horn Coral Block";
+	names[LAVA] = "Lava";
+	names[DEEPSLATE_COAL_ORE] = "Deepslate Coal Ore";
+	names[DEEPSLATE_COPPER_ORE] = "Deepslate Copper Ore";
+	names[DEEPSLATE_DIAMOND_ORE] = "Deepslate Diamond Ore";
+	names[DEEPSLATE_EMERALD_ORE] = "Deepslate Emerald Ore";
+	names[DEEPSLATE_GOLD_ORE] = "Deepslate Gold Ore";
+	names[DEEPSLATE_IRON_ORE] = "Deepslate Iron Ore";
+	names[DEEPSLATE_LAPIS_ORE] = "Deepslate Lapis Ore";
+	names[DEEPSLATE_REDSTONE_ORE] = "Deepslate Redstone Ore";
+	names[DRIPSTONE_BLOCK] = "Dripstone Block";
+	names[KELP] = "Kelp";
+	names[KELP_TOP] = "Kelp Top";
+	return names;
+}();
+
+constexpr bool allTextureTypeNamesDefined()
+{
+	for (const std::string_view name : textureTypeString)
+	{
+		if (name.empty())
+			return false;
+	}
+	return true;
+}
+
+static_assert(textureTypeString.size() == static_cast<std::size_t>(COUNT));
+static_assert(allTextureTypeNamesDefined(),
+			  "Every TextureType before COUNT must have a display name");
 
 enum ChunkState
 {

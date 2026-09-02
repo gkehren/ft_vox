@@ -311,8 +311,19 @@ int main()
 	{
 		if (sizeof(kBlockLayers) / sizeof(kBlockLayers[0]) != static_cast<size_t>(TextureType::COUNT))
 			ok = fail("kBlockLayers size must equal TextureType::COUNT");
-		if (textureTypeString.size() != static_cast<size_t>(TextureType::COUNT))
-			ok = fail("every TextureType must have a display name");
+		if (textureTypeString.size() != static_cast<std::size_t>(TextureType::COUNT))
+			ok = fail("textureTypeString must contain exactly COUNT entries");
+		for (std::size_t i = 0; i < textureTypeString.size(); ++i)
+		{
+			if (textureTypeString[i].empty())
+				ok = fail("textureTypeString[" + std::to_string(i) + "] must not be empty");
+		}
+		if (textureTypeString[BEDROCK] != "Bedrock")
+			ok = fail("BEDROCK display name mismatch");
+		if (textureTypeString[WATER] != "Water")
+			ok = fail("WATER display name mismatch");
+		if (textureTypeString[KELP_TOP] != "Kelp Top")
+			ok = fail("KELP_TOP display name mismatch");
 		for (int i = 0; i < static_cast<int>(TextureType::COUNT); ++i)
 		{
 			const char *file = blockLayerFile(static_cast<TextureType>(i));
