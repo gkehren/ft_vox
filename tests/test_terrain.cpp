@@ -1946,6 +1946,64 @@ static void testBiomeRegionExtremeGridGuard()
 	std::cout << "biome region extreme grid: absurd step handled without overflow\n";
 }
 
+static void testBiomeRegionScratchRetention()
+{
+	TerrainGenerator gen(1337);
+
+	// Retention contract: after any attempt (or explicit trim), no scratch
+	// field may retain capacity above the tiled-path bound. Assert the
+	// bound, not an exact capacity — that is allocator-independent.
+	const auto checkBounded = [](const TerrainGenerator::BiomeRegionScratch &s) {
+		for (const std::vector<float> *field :
+			 {&s.temperature, &s.humidity, &s.weirdness, &s.river,
+			  &s.continental, &s.erosion, &s.peaksValleys, &s.ridge,
+			  &s.height, &s.erosionTemp})
+			CHECK(field->capacity() <= TerrainGenerator::kMaxTileDensePoints,
+				  "retained scratch capacity must stay within the tiled bound");
+	};
+
+	// Helper contract directly: oversized fields are released, while
+	// tiled-sized contents survive for reuse.
+	{
+		TerrainGenerator::BiomeRegionScratch s;
+		s.temperature.resize(TerrainGenerator::kMaxDenseDomainPoints); // oversized
+		s.height.resize(TerrainGenerator::kMaxTileDensePoints + 1);	  // oversized by one
+		s.erosion.resize(TerrainGenerator::kMaxTileDensePoints);	  // tiled-sized
+		s.trimOversizedCapacity();
+		checkBounded(s);
+		CHECK(s.erosion.size() == TerrainGenerator::kMaxTileDensePoints,
+			  "tiled-sized contents must be preserved by the trim");
+	}
+
+	// Dense build cancelled at the final checkpoint: the call failed, yet
+	// the oversized dense capacity must still have been released.
+	{
+		TerrainGenerator::BiomeRegionScratch scratch;
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 256, 256);
+		int polls = 0;
+		std::vector<BiomeType> biomes;
+		const bool completed = gen.getBiomeRegion(grid, biomes, &scratch,
+												  [&polls] { return ++polls >= 2; });
+		CHECK(!completed, "late-cancelled dense build must report interruption");
+		CHECK(biomes.empty(), "late-cancelled dense build must publish nothing");
+		CHECK(polls == 2, "late cancellation must poll before and after the dense pass");
+		checkBounded(scratch);
+	}
+
+	// Successful dense build: same retention invariant on the success path.
+	{
+		TerrainGenerator::BiomeRegionScratch scratch;
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 256, 256);
+		std::vector<BiomeType> biomes;
+		CHECK(gen.getBiomeRegion(grid, biomes, &scratch), "dense build must complete");
+		CHECK(biomes.size() == static_cast<size_t>(256) * 256, "dense output size valid");
+		checkBounded(scratch);
+	}
+
+	std::cout << "biome region scratch retention: oversized capacity trimmed after "
+			  << "success and cancellation, tiled-sized capacity preserved\n";
+}
+
 static void testBiomeMapGridMatchesPointQueries()
 {
 	// Terrain <-> UI cross test: the biome rendered at the player's map pixel
@@ -2241,6 +2299,7 @@ int main(int argc, char **argv)
 	testBiomeRegionCancellationAndStats();
 	testBiomeRegionDeterminism();
 	testBiomeRegionDenseTiledEquivalence();
+	testBiomeRegionScratchRetention();
 	testBiomeRegionExtremeGridGuard();
 	testBiomeMapGridMatchesPointQueries();
 	testBiomeRegionMultiStepAndZoomConsistency();

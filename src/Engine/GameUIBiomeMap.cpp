@@ -66,16 +66,15 @@ BiomeMapResult generateBiomeMap(const BiomeMapRequest &req)
 
 	TerrainGenerator &gen = TerrainGenerator::getThreadLocal(req.seed);
 	std::vector<BiomeType> biomes;
-	// Scratch owned by this job (not by TerrainGenerator internals): reused
-	// across refreshes landing on the same worker, and trimmed after builds
-	// that hit the large single-pass dense path so idle pool workers never
-	// retain the ~10 MiB peak.
+	// Scratch owned by this job (not by TerrainGenerator internals):
+	// tiled-sized capacity is reused across refreshes, while oversized
+	// dense capacity is released after every attempt — successful or
+	// cancelled — by getBiomeRegion's exit guard.
 	static thread_local TerrainGenerator::BiomeRegionScratch scratch;
 	// Cancellation is checked before, during (between tiles), and after the
 	// region sampling; an interrupted build publishes nothing.
 	if (!gen.getBiomeRegion(grid, biomes, &scratch, [&] { return cancelled(); }))
 		return {};
-	scratch.trimOversizedCapacity();
 
 	// Checkpoint 3: before RGBA allocation
 	if (cancelled())

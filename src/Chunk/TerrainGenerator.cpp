@@ -595,9 +595,12 @@ static thread_local TerrainGenerator::BiomeRegionScratch s_biomeRegionScratch;
 
 void TerrainGenerator::BiomeRegionScratch::trimOversizedCapacity()
 {
-  // Keep tiled-path-sized buffers for cheap reuse; release the large
-  // single-pass dense capacity (~10 MiB at the bound) so idle threads do
-  // not retain the peak after a zoomed-in map build.
+  // Releases capacity above the tiled-path bound. getBiomeRegion() calls
+  // this on every exit through an unconditional guard — after successful
+  // AND cancelled/failed attempts — so oversized dense capacity is never
+  // retained across attempts while tiled-sized capacity survives for
+  // cheap reuse. Call it manually only when mutating a scratch outside
+  // getBiomeRegion().
   const size_t keep = kMaxTileDensePoints;
   for (std::vector<float> *field : {&temperature, &humidity, &weirdness, &river,
                                     &continental, &erosion, &peaksValleys,
@@ -1687,6 +1690,17 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
   // thread-local so region capacity never lands in the shared chunk
   // generation buffers.
   BiomeRegionScratch &bufs = scratch ? *scratch : s_biomeRegionScratch;
+
+  // Unconditional cleanup on EVERY exit — success, cancellation, early
+  // failure, or an exception propagating out — so no path can retain the
+  // ~10 MiB dense peak (this makes cancelled biome-map builds as
+  // memory-safe as successful ones). Tiled-sized capacity survives for
+  // cheap reuse.
+  struct ScratchTrimGuard
+  {
+    BiomeRegionScratch &target;
+    ~ScratchTrimGuard() { target.trimOversizedCapacity(); }
+  } trimGuard{bufs};
 
   BiomeRegionStats localStats;
   BiomeRegionStats &stats = outStats ? *outStats : localStats;

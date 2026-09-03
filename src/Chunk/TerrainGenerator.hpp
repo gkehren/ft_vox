@@ -118,10 +118,12 @@ public:
     std::vector<float> height;
     std::vector<float> erosionTemp;
 
-    // Releases capacity above the tiled-path bound. Call this after a build
-    // used the single-pass dense path (its buffers can reach ~10 MiB) so
-    // idle workers do not retain the peak; tiled-path-sized capacity is
-    // kept for cheap reuse.
+    // Releases capacity above the tiled-path bound. getBiomeRegion() runs
+    // this automatically on every exit — after successful AND
+    // cancelled/failed attempts — so oversized dense capacity is never
+    // retained across attempts while tiled-sized capacity survives for
+    // cheap reuse. Call it manually only when mutating a scratch outside
+    // getBiomeRegion().
     void trimOversizedCapacity();
   };
 
@@ -151,10 +153,13 @@ public:
   // in a fixed order so the result is deterministic and the scheduler only
   // decides when the whole call runs, not what it produces. Returns false
   // (and clears outBiomes) when the grid is invalid or `shouldCancel`
-  // returned true; partial results are never returned. `outStats` is
-  // optional. `scratch` may be null, in which case a dedicated internal
-  // thread-local scratch is used; pass a caller-owned scratch to control
-  // memory retention (see BiomeRegionScratch).
+  // returned true; partial results are never returned. On every exit —
+  // success, cancellation, failure, or exception — the scratch is trimmed
+  // to the tiled-path bound, so oversized dense capacity is never retained
+  // across attempts. `outStats` is optional. `scratch` may be null, in
+  // which case a dedicated internal thread-local scratch is used; pass a
+  // caller-owned scratch to control memory retention (see
+  // BiomeRegionScratch).
   bool getBiomeRegion(const BiomeRegionGrid &grid,
                       std::vector<BiomeType> &outBiomes,
                       BiomeRegionScratch *scratch = nullptr,
