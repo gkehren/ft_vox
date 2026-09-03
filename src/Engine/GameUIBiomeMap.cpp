@@ -4,17 +4,16 @@
 #include <cmath>
 
 void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgba,
-						   int size,
-						   glm::vec2 playerXZ,
-						   float zoom,
-						   int gridX,
-						   int gridZ)
+							const BiomeRegionGrid &grid,
+							glm::vec2 playerXZ)
 {
-	const float noiseOffset = TerrainGenerator::NOISE_OFFSET;
-	const int dotX = static_cast<int>(std::round((playerXZ.x + noiseOffset) * zoom)) - gridX;
-	const int dotY = static_cast<int>(std::round((playerXZ.y + noiseOffset) * zoom)) - gridZ;
+	// Visualization rounding only: nearest display pixel. The canonical
+	// voxel column of the player is worldToVoxelColumn(playerXZ); the marker
+	// does not redefine it.
+	const glm::ivec2 dot = grid.pixelForWorld(playerXZ);
+	const int size = grid.width;
 	auto paint = [&](int px, int py, unsigned char r, unsigned char g, unsigned char b) {
-		if (px < 0 || py < 0 || px >= size || py >= size)
+		if (px < 0 || py < 0 || px >= size || py >= grid.height)
 			return;
 		const int idx = (py * size + px) * 4;
 		if (static_cast<size_t>(idx + 3) < rgba.size())
@@ -28,11 +27,11 @@ void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgba,
 	for (int dy = -4; dy <= 4; ++dy)
 		for (int dx = -4; dx <= 4; ++dx)
 			if (dx * dx + dy * dy <= 16)
-				paint(dotX + dx, dotY + dy, 0, 0, 0);
+				paint(dot.x + dx, dot.y + dy, 0, 0, 0);
 	for (int dy = -2; dy <= 2; ++dy)
 		for (int dx = -2; dx <= 2; ++dx)
 			if (dx * dx + dy * dy <= 4)
-				paint(dotX + dx, dotY + dy, 255, 255, 255);
+				paint(dot.x + dx, dot.y + dy, 255, 255, 255);
 }
 
 BiomeMapResult generateBiomeMap(const BiomeMapRequest &req)
@@ -48,10 +47,10 @@ BiomeMapResult generateBiomeMap(const BiomeMapRequest &req)
 	if (req.size <= 0 || req.zoom <= 0.0f)
 		return {};
 
-	const float step = 1.0f / req.zoom;
-	const float noiseOffset = TerrainGenerator::NOISE_OFFSET;
-	const int gridX = static_cast<int>(std::round((req.center.x + noiseOffset) * req.zoom - req.size * 0.5f));
-	const int gridZ = static_cast<int>(std::round((req.center.y + noiseOffset) * req.zoom - req.size * 0.5f));
+	// Single canonical grid for the whole pipeline: sampling, result
+	// description, and player-marker placement all share it.
+	const BiomeRegionGrid grid =
+		makeBiomeRegionGrid(req.center.x, req.center.y, 1.0f / req.zoom, req.size, req.size);
 
 	if (req.onCheckpoint)
 		req.onCheckpoint();
@@ -62,7 +61,10 @@ BiomeMapResult generateBiomeMap(const BiomeMapRequest &req)
 
 	TerrainGenerator &gen = TerrainGenerator::getThreadLocal(req.seed);
 	std::vector<BiomeType> biomes;
-	gen.getBiomeRegion(req.center.x, req.center.y, step, req.size, req.size, biomes);
+	// Propagate cancellation into the region sampling so a long zoomed-out
+	// build is abandoned between tiles instead of running to completion.
+	if (!gen.getBiomeRegion(grid, biomes, [&] { return cancelled(); }))
+		return {};
 
 	// Checkpoint 3: before RGBA allocation
 	if (cancelled())
@@ -96,8 +98,7 @@ BiomeMapResult generateBiomeMap(const BiomeMapRequest &req)
 	res.seed = req.seed;
 	res.center = req.center;
 	res.zoom = req.zoom;
-	res.gridX = gridX;
-	res.gridZ = gridZ;
+	res.grid = grid;
 	res.size = req.size;
 	res.rgba = std::move(rgba);
 	res.valid = true;

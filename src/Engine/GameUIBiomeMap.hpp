@@ -1,8 +1,10 @@
 #pragma once
 
+#include <Chunk/BiomeRegionGrid.hpp>
 #include <utils.hpp>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -65,8 +67,10 @@ struct BiomeMapResult
 	int seed{0};
 	glm::vec2 center{0.f, 0.f};
 	float zoom{1.f};
-	int gridX{0};
-	int gridZ{0};
+	/// Canonical grid describing pixel <-> world <-> voxel-column mapping
+	/// for this map (step == 1/zoom, center == request center). The player
+	/// marker is placed through it instead of reconstructing the mapping.
+	BiomeRegionGrid grid;
 	int size{0};
 	std::vector<unsigned char> rgba;
 	bool valid{false};
@@ -93,9 +97,9 @@ inline bool isBiomeMapUploadValid(const BiomeMapUpload &upload)
 /// Check if a biome map result matches active world generation, seed, request ID,
 /// and internal invariant checks before GPU publication.
 inline bool isBiomeMapResultAcceptable(const BiomeMapResult &result,
-									  uint64_t currentWorldGenId,
-									  int currentSeed,
-									  uint64_t currentRequestId)
+										  uint64_t currentWorldGenId,
+										  int currentSeed,
+										  uint64_t currentRequestId)
 {
 	return result.valid &&
 		   result.worldGenerationId == currentWorldGenId &&
@@ -103,6 +107,9 @@ inline bool isBiomeMapResultAcceptable(const BiomeMapResult &result,
 		   result.requestId == currentRequestId &&
 		   result.size > 0 &&
 		   result.zoom > 0.0f &&
+		   result.grid.valid() &&
+		   result.grid.width == result.size &&
+		   result.grid.height == result.size &&
 		   result.rgba.size() == static_cast<size_t>(result.size) * static_cast<size_t>(result.size) * 4;
 }
 
@@ -126,13 +133,12 @@ inline bool shouldSupersedeBiomeMap(glm::vec2 player,
 	return glm::length(player - lastPlayer) > 8.0f;
 }
 
-/// Paint the player indicator dot (black outline with white center) into the RGBA buffer.
+/// Paint the player indicator dot (black outline with white center) into the
+/// RGBA buffer. The dot pixel is grid.pixelForWorld(playerXZ) (nearest display
+/// pixel); when it falls outside the grid nothing is painted.
 void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgba,
-						   int size,
-						   glm::vec2 playerXZ,
-						   float zoom,
-						   int gridX,
-						   int gridZ);
+							const BiomeRegionGrid &grid,
+							glm::vec2 playerXZ);
 
 /// Sample biomes and convert them to an RGBA pixel buffer using thread-local generator.
 /// Fully self-contained: owns its buffers and does not retain raw pointers to Engine state.

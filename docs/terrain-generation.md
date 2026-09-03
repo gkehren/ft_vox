@@ -164,10 +164,35 @@ Biome sampling is unified across the engine via a canonical erosion-aware pipeli
 3. Apply deterministic thermal erosion (`applyCanonicalErosion`) at block resolution (`step = 1.0`).
 4. Select biomes using `determineBiome` with post-erosion height and clamped parameters.
 
+- **Coordinate conventions (canonical)**: A continuous world position maps to
+  a voxel column with `floor()` — everywhere: HUD, `getBiomeAt()`,
+  `getBiomeRegion()`, the biome map, and the player marker
+  (`worldToVoxelColumn()` in `src/Chunk/BiomeRegionGrid.hpp`). Map *rendering*
+  additionally uses a separate, display-only rounding: the player marker is
+  drawn at the nearest display pixel (`round()`, via
+  `BiomeRegionGrid::pixelForWorld`). The two roundings have different roles
+  and must not be interchanged: never derive a canonical biome column from a
+  display pixel other than through `BiomeRegionGrid::columnAt()`.
 - **Point queries (`getBiomeAt(worldX, worldZ)`)**: Evaluates a 5×5 cell window (halo = 2) centered on the world column via `evaluateBiomeColumn`, running thermal erosion on the neighborhood. This guarantees bit-for-bit equivalence with chunk generation without heap allocations.
-- **Region queries (`getBiomeRegion(centerX, centerZ, step, width, height, ...)`)**: Returns canonical biome samples for every output coordinate, independently of display sampling step:
-  - For `step == 1.0` (and small dense domains): Evaluates the dense block bounding box at `step = 1.0` with halo = 2 in a single vectorized pass.
-  - For `step < 1.0` (zoom-in): Evaluates the compact dense block bounding box at `step = 1.0`. For sub-block pixels, coordinates discretize via round-to-nearest (`col = round(sampleWorldCoord)`), ensuring adjacent pixels on the same column resolve identically.
-  - For `step > 1.0` (zoom-out): Uses a memory-bounded adaptive tiled approach (tiles of up to 32×32 output pixels) or direct canonical column evaluation, guaranteeing strictly bounded scratch memory (< 1 MB) without memory explosions at wide zoom-outs.
-- **UI consistency**: HUD biome and World / Biome map use the same canonical generated-column biome definition as loaded terrain at every zoom level.
+- **Region queries (`getBiomeRegion(grid, ...)`)**: The sampling domain is described by a
+  `BiomeRegionGrid` (`src/Chunk/BiomeRegionGrid.hpp`) — the single source of truth mapping
+  pixels ↔ world positions ↔ voxel columns for the generator and the GameUI biome map.
+  Pixel `(0,0)` samples `worldAt(0,0)` (the minimum corner) and pixel `(width-1,height-1)`
+  samples `worldAt(width-1,height-1)`; for even dimensions the grid center falls between
+  the four central pixels. Columns discretize via the canonical `floor()` convention
+  (`col = floor(sampleWorldCoord)`), ensuring adjacent pixels on the same column resolve
+  identically. Erosion always runs at `step = 1.0f` — `grid.step` only selects which
+  canonical columns are sampled, never the erosion resolution. Returns `false` (with the
+  output cleared) when the grid is invalid or the optional cancellation callback fires;
+  partial results are never produced:
+  - Small dense domains (≤ 516×516 haloed block bounding box): sampled in a single
+    vectorized pass at `step = 1.0f` with halo = 2. Total scratch memory is bounded at
+    roughly 10 MiB: 266K points × ~10 float fields × 4 bytes (not per buffer).
+  - Larger domains / zoom-outs: memory-bounded tiled processing. The tile dimension is
+    derived from `grid.step` (`floor((132 - 2*halo - 1) / step) + 1`, capped at 32) so
+    every tile's haloed dense domain stays within the per-tile cap (~132² points ≈
+    68 KB per float buffer), keeping all pixels — including `zoom = 0.1` — on the
+    vectorized dense path. A direct per-column `evaluateBiomeColumn` fallback remains as
+    a safety net only. An optional cancellation callback is polled before every tile.
+- **UI consistency**: HUD biome and World / Biome map use the same canonical generated-column biome definition as loaded terrain at every zoom level. `BiomeMapResult` carries the exact `BiomeRegionGrid` it was sampled with, and the player marker is placed via `grid.pixelForWorld()`; markers outside the grid are simply not drawn.
 

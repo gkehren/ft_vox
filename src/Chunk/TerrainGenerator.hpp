@@ -2,11 +2,14 @@
 
 #include <FastNoise/FastNoise.h>
 #include <array>
+#include <functional>
 #include <glm/glm.hpp>
 #include <unordered_map>
 #include <memory>
+#include <cstdint>
 
 #include <utils.hpp>
+#include <Chunk/BiomeRegionGrid.hpp>
 
 struct ChunkData
 {
@@ -87,25 +90,43 @@ public:
   // Getter for seed to enable thread-safe generation
   int getSeed() const { return m_seed; }
 
-  // Get biome at world position (for cross-chunk queries)
+  // Get biome at world position (for cross-chunk queries). Equivalent to
+  // the biome stored in the generated chunk containing (worldX, worldZ).
   BiomeType getBiomeAt(int worldX, int worldZ) const;
 
-  // Canonical column biome evaluation primitive
-  BiomeType evaluateBiomeColumn(int worldX, int worldZ) const;
+  // Optional early-exit hook polled between region tiles; return true to
+  // cancel. May be invoked concurrently from tile worker threads, so the
+  // callable must be thread-safe (e.g. read an atomic token). Kept as a
+  // lightweight std::function so TerrainGenerator stays decoupled from any
+  // specific threading primitive.
+  using BiomeCancelCheck = std::function<bool()>;
 
-  // Helpers to map region pixels to world coordinates and discrete columns
-  static glm::vec2 computeBiomeRegionWorldCoordinate(float centerX, float centerZ, float step,
-                                                     int width, int height,
-                                                     int xi, int zi);
-  static glm::ivec2 computeBiomeRegionDiscreteColumn(float centerX, float centerZ, float step,
-                                                    int width, int height,
-                                                    int xi, int zi);
+  // Counters describing how a getBiomeRegion() call was executed.
+  struct BiomeRegionStats
+  {
+    uint64_t denseTiles{0};      // tiles processed by the vectorized dense path
+    uint64_t fallbackPixels{0};  // pixels evaluated by point-query fallback
+  };
 
-  // Batch biome sampling for map visualization (uses GenUniformGrid2D for SIMD efficiency).
-  // centerX/Z are world-space coordinates, step is world units per pixel,
-  // width/height are the output dimensions. outBiomes is filled in row-major order.
-  void getBiomeRegion(float centerX, float centerZ, float step,
-                      int width, int height, std::vector<BiomeType> &outBiomes) const;
+  // Batch biome sampling for map visualization. `grid` is the single source
+  // of truth for the pixel <-> world <-> voxel-column mapping (see
+  // BiomeRegionGrid.hpp). Output is row-major, outBiomes[grid.width * z + x].
+  // The canonical block-resolution pipeline (incl. erosion at step = 1.0f) is
+  // independent of grid.step: the grid only selects which canonical columns
+  // are sampled. Returns false (and clears outBiomes) when the grid is
+  // invalid or `shouldCancel` returned true; partial results are never
+  // returned. `outStats` is optional.
+  bool getBiomeRegion(const BiomeRegionGrid &grid,
+                      std::vector<BiomeType> &outBiomes,
+                      const BiomeCancelCheck &shouldCancel = {},
+                      BiomeRegionStats *outStats = nullptr) const;
+
+  // Convenience overload building the grid from explicit parameters.
+  bool getBiomeRegion(float centerX, float centerZ, float step,
+                      int width, int height,
+                      std::vector<BiomeType> &outBiomes,
+                      const BiomeCancelCheck &shouldCancel = {},
+                      BiomeRegionStats *outStats = nullptr) const;
 
   // Get biome configuration
   static const BiomeConfig &getBiomeConfig(BiomeType biome);
@@ -233,6 +254,10 @@ private:
   BiomeType evaluateBiomeAt(
       const TerrainColumnBuffers &buffers,
       int extIndex) const;
+
+  // Canonical column biome evaluation primitive (5x5 halo window at
+  // step = 1.0f). Private: external callers must use getBiomeAt().
+  BiomeType evaluateBiomeColumn(int worldX, int worldZ) const;
 
   // Biome determination
   BiomeType determineBiome(float temperature, float humidity, float weirdness,

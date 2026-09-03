@@ -51,6 +51,19 @@ static void test_biome_map_result_validity()
 	CHECK(res.size == size, "Result size should match requested");
 	CHECK(res.rgba.size() == static_cast<size_t>(size * size * 4), "Result RGBA size mismatch");
 
+	// The result must carry the canonical grid it was sampled with.
+	CHECK(res.grid.center == center, "Result grid center should match request center");
+	CHECK(std::fabs(res.grid.step - 1.0f / zoom) < 1e-6f, "Result grid step should be 1/zoom");
+	CHECK(res.grid.width == size && res.grid.height == size, "Result grid dimensions should match size");
+	for (int z = 0; z < size; z += 7)
+	{
+		for (int x = 0; x < size; x += 7)
+		{
+			const glm::ivec2 pixel = res.grid.pixelForWorld(res.grid.worldAt(x, z));
+			CHECK(pixel == glm::ivec2(x, z), "Result grid pixel/world round-trip");
+		}
+	}
+
 	// Verify that pixel colors correspond to known biomes and alpha is 255
 	bool hasNonZeroPixel = false;
 	bool allAlphaOpaque = true;
@@ -297,26 +310,74 @@ static void test_rapid_request_cancellation_sequence()
 static void test_player_dot_painting()
 {
 	const int size = 32;
-	std::vector<unsigned char> rgba(size * size * 4, 0);
-
 	const glm::vec2 center{0.f, 0.f};
 	const float zoom = 1.0f;
-	const float noiseOffset = TerrainGenerator::NOISE_OFFSET;
-	const int gridX = static_cast<int>(std::round((center.x + noiseOffset) * zoom - size * 0.5f));
-	const int gridZ = static_cast<int>(std::round((center.y + noiseOffset) * zoom - size * 0.5f));
+	const BiomeRegionGrid grid = makeBiomeRegionGrid(center.x, center.y, 1.0f / zoom, size, size);
 
-	paintBiomeMapPlayerDot(rgba, size, center, zoom, gridX, gridZ);
+	// Player at the grid center: the dot must land on the nearest display
+	// pixel of the player position per the canonical grid.
+	{
+		std::vector<unsigned char> rgba(size * size * 4, 0);
+		paintBiomeMapPlayerDot(rgba, grid, center);
 
-	// Center pixel of the dot should be white (255, 255, 255, 255)
-	const int dotX = static_cast<int>(std::round((center.x + noiseOffset) * zoom)) - gridX;
-	const int dotY = static_cast<int>(std::round((center.y + noiseOffset) * zoom)) - gridZ;
-	const int centerIdx = (dotY * size + dotX) * 4;
-	CHECK(rgba[centerIdx + 0] == 255 && rgba[centerIdx + 1] == 255 &&
-		  rgba[centerIdx + 2] == 255 && rgba[centerIdx + 3] == 255,
-		  "Center of player dot should be opaque white");
+		const glm::ivec2 dot = grid.pixelForWorld(center);
+		const size_t centerIdx = (static_cast<size_t>(dot.y) * size + dot.x) * 4;
+		CHECK(rgba[centerIdx + 0] == 255 && rgba[centerIdx + 1] == 255 &&
+				  rgba[centerIdx + 2] == 255 && rgba[centerIdx + 3] == 255,
+			  "Center of player dot should be opaque white");
 
-	// Check that painting doesn't crash on out-of-bounds positions
-	paintBiomeMapPlayerDot(rgba, size, {-100000.f, -100000.f}, zoom, gridX, gridZ);
+		// The black outline ring must surround the white core.
+		const size_t ringIdx = (static_cast<size_t>(dot.y - 4) * size + dot.x) * 4;
+		CHECK(rgba[ringIdx + 0] == 0 && rgba[ringIdx + 1] == 0 &&
+				  rgba[ringIdx + 2] == 0 && rgba[ringIdx + 3] == 255,
+			  "Player dot outline should be opaque black");
+	}
+
+	// Fractional player position: pixel comes from the grid, not from a
+	// locally reconstructed mapping.
+	{
+		std::vector<unsigned char> rgba(size * size * 4, 0);
+		const glm::vec2 player{-0.5f, 12.25f};
+		paintBiomeMapPlayerDot(rgba, grid, player);
+		const glm::ivec2 dot = grid.pixelForWorld(player);
+		CHECK(dot.x >= 0 && dot.y >= 0 && dot.x < size && dot.y < size,
+			  "fractional player maps inside the grid");
+		const size_t centerIdx = (static_cast<size_t>(dot.y) * size + dot.x) * 4;
+		CHECK(rgba[centerIdx + 0] == 255 && rgba[centerIdx + 1] == 255 &&
+				  rgba[centerIdx + 2] == 255 && rgba[centerIdx + 3] == 255,
+			  "Fractional player dot center should be opaque white");
+	}
+
+	// Player far outside the grid: nothing may be painted at all.
+	{
+		std::vector<unsigned char> rgba(size * size * 4, 0);
+		const std::vector<unsigned char> before = rgba;
+		paintBiomeMapPlayerDot(rgba, grid, {-100000.f, -100000.f});
+		CHECK(rgba == before, "Out-of-grid player must not paint any pixel");
+	}
+
+	// Just beyond the border (one ring would overlap the map): the ring may
+	// clip but the marker core must stay outside.
+	{
+		std::vector<unsigned char> rgba(size * size * 4, 0);
+		const glm::vec2 player = grid.worldAt(-1, -1); // one pixel outside
+		paintBiomeMapPlayerDot(rgba, grid, player);
+		const glm::ivec2 dot = grid.pixelForWorld(player);
+		CHECK(dot == glm::ivec2(-1, -1), "player one pixel outside maps to pixel -1");
+		for (int y = 0; y < size; ++y)
+			for (int x = 0; x < size; ++x)
+			{
+				const size_t idx = (static_cast<size_t>(y) * size + x) * 4;
+				if (rgba[idx + 3] == 255)
+				{
+					// Only outline pixels within 4 px of the border may paint.
+					const int dx = x - dot.x;
+					const int dy = y - dot.y;
+					CHECK(dx * dx + dy * dy <= 16,
+						  "only the clipped outline may paint near the border");
+				}
+			}
+	}
 }
 
 static void test_biome_map_upload_validation()

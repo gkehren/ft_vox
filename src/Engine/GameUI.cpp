@@ -1279,7 +1279,7 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 
 		if (isBiomeMapResultAcceptable(res, frame.worldGenerationId, frame.seed, m_mapRequestId))
 		{
-			paintBiomeMapPlayerDot(res.rgba, res.size, playerXZ, res.zoom, res.gridX, res.gridZ);
+			paintBiomeMapPlayerDot(res.rgba, res.grid, playerXZ);
 			m_mapCenter = res.center;
 			ensureBiomeTexture(res.size);
 			m_pendingUpload = BiomeMapUpload{
