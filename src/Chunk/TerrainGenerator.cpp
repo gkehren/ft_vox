@@ -582,22 +582,34 @@ struct GenBuffers
   // Reusable buffer for erosion calculation
   std::array<float, EXT_SIZE * EXT_SIZE> erosionTempMap;
 
-  // Reusable buffers for biome region generation
-  // Using 512*512 max size to accommodate the UI map which defaults to 256
-  std::vector<float> tempBuf;
-  std::vector<float> humidBuf;
-  std::vector<float> weirdBuf;
-  std::vector<float> riverBuf;
-  std::vector<float> contBuf;
-  std::vector<float> erosionBuf;
-  std::vector<float> pvBuf;
-  std::vector<float> ridgeBuf;
-
   // Persistent generator to avoid expensive setup every chunk
   std::unique_ptr<TerrainGenerator> generator;
 };
 
 static thread_local GenBuffers s_genBuffers;
+
+// Dedicated scratch for biome region queries that runs on threads which do
+// not provide their own scratch. Kept separate from GenBuffers so chunk
+// generation workers never retain region-query capacity.
+static thread_local TerrainGenerator::BiomeRegionScratch s_biomeRegionScratch;
+
+void TerrainGenerator::BiomeRegionScratch::trimOversizedCapacity()
+{
+  // Releases capacity above the tiled-path bound. getBiomeRegion() calls
+  // this on every exit through an unconditional guard — after successful
+  // AND cancelled/failed attempts — so oversized dense capacity is never
+  // retained across attempts while tiled-sized capacity survives for
+  // cheap reuse. Call it manually only when mutating a scratch outside
+  // getBiomeRegion().
+  const size_t keep = kMaxTileDensePoints;
+  for (std::vector<float> *field : {&temperature, &humidity, &weirdness, &river,
+                                    &continental, &erosion, &peaksValleys,
+                                    &ridge, &height, &erosionTemp})
+  {
+    if (field->capacity() > keep)
+      std::vector<float>().swap(*field);
+  }
+}
 
 namespace
 {
@@ -766,6 +778,101 @@ ChunkData TerrainGenerator::generateChunkProfiled(
   }
 }
 
+void TerrainGenerator::sampleTerrainColumnFields(
+    const TerrainColumnBuffers &buffers,
+    int extStartX, int extStartZ,
+    int extWidth, int extHeight,
+    float step) const
+{
+  assert(extWidth > 0);
+  assert(extHeight > 0);
+  assert(buffers.continental != nullptr);
+  assert(buffers.erosion != nullptr);
+  assert(buffers.peaksValleys != nullptr);
+  assert(buffers.ridge != nullptr);
+  assert(buffers.temperature != nullptr);
+  assert(buffers.humidity != nullptr);
+  assert(buffers.weirdness != nullptr);
+  assert(buffers.river != nullptr);
+
+  using Clock = std::chrono::steady_clock;
+  const auto noise2DStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
+
+  m_continentalNoise->GenUniformGrid2D(buffers.continental, extStartX, extStartZ,
+                                       extWidth, extHeight, step, m_seed);
+  m_erosionNoise->GenUniformGrid2D(buffers.erosion, extStartX, extStartZ,
+                                   extWidth, extHeight, step, m_seed + 1000);
+  m_peaksValleysNoise->GenUniformGrid2D(buffers.peaksValleys, extStartX, extStartZ,
+                                        extWidth, extHeight, step, m_seed + 2000);
+  m_ridgeNoise->GenUniformGrid2D(buffers.ridge, extStartX, extStartZ,
+                                 extWidth, extHeight, step, m_seed + 3000);
+  m_temperatureNoise->GenUniformGrid2D(buffers.temperature, extStartX, extStartZ,
+                                       extWidth, extHeight, step, m_seed + 6000);
+  m_humidityNoise->GenUniformGrid2D(buffers.humidity, extStartX, extStartZ,
+                                    extWidth, extHeight, step, m_seed + 7000);
+  m_weirdnessNoise->GenUniformGrid2D(buffers.weirdness, extStartX, extStartZ,
+                                     extWidth, extHeight, step, m_seed + 8000);
+  m_riverNoise->GenUniformGrid2D(buffers.river, extStartX, extStartZ,
+                                 extWidth, extHeight, step, m_seed + 9000);
+
+  if (m_activeProfile)
+    m_activeProfile->noise2DMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - noise2DStart)
+            .count();
+}
+
+void TerrainGenerator::calculateTerrainHeights(
+    const TerrainColumnBuffers &buffers,
+    int extWidth, int extHeight) const
+{
+  assert(extWidth > 0);
+  assert(extHeight > 0);
+  assert(buffers.heightMap != nullptr);
+  assert(buffers.continental != nullptr);
+  assert(buffers.erosion != nullptr);
+  assert(buffers.peaksValleys != nullptr);
+  assert(buffers.ridge != nullptr);
+  assert(buffers.river != nullptr);
+  assert(buffers.weirdness != nullptr);
+
+  const size_t totalPoints = static_cast<size_t>(extWidth) * static_cast<size_t>(extHeight);
+  for (size_t i = 0; i < totalPoints; ++i)
+  {
+    buffers.heightMap[i] = calculateHeightFloat(
+        buffers.continental[i], buffers.erosion[i],
+        buffers.peaksValleys[i], buffers.ridge[i],
+        buffers.river[i], buffers.weirdness[i]);
+  }
+}
+
+BiomeType TerrainGenerator::evaluateBiomeAt(
+    const TerrainColumnBuffers &buffers,
+    int extIndex) const
+{
+  assert(buffers.continental != nullptr);
+  assert(buffers.temperature != nullptr);
+  assert(buffers.humidity != nullptr);
+  assert(buffers.weirdness != nullptr);
+  assert(buffers.river != nullptr);
+  assert(buffers.erosion != nullptr);
+  assert(buffers.peaksValleys != nullptr);
+  assert(buffers.heightMap != nullptr);
+
+  const float continental = std::clamp(buffers.continental[extIndex], -1.0f, 1.0f);
+  const float temperature = std::clamp(buffers.temperature[extIndex], -1.0f, 1.0f);
+  const float humidity = std::clamp(buffers.humidity[extIndex], -1.0f, 1.0f);
+  const float weirdness = std::clamp(buffers.weirdness[extIndex], -1.0f, 1.0f);
+  const float riverVal = buffers.river[extIndex];
+  const float erosion = std::clamp(buffers.erosion[extIndex], -1.0f, 1.0f);
+  const float pv = std::clamp(buffers.peaksValleys[extIndex], -1.0f, 1.0f);
+
+  const int height = std::clamp(static_cast<int>(std::round(buffers.heightMap[extIndex])), 1, static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
+
+  return determineBiome(temperature, humidity, weirdness,
+                        continental, erosion, pv, riverVal, height);
+}
+
 void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
                                           int chunkZ)
 {
@@ -802,37 +909,26 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   float extendedWorldZf = worldZf - static_cast<float>(EXT_CORE_OFFSET);
   const int EXTENDED_SIZE = EXT_SIZE;
 
-  const auto noise2DStart =
-      m_activeProfile ? Clock::now() : Clock::time_point{};
-  m_continentalNoise->GenUniformGrid2D(continentalResults, extendedWorldXf,
-                                       extendedWorldZf, EXTENDED_SIZE, EXTENDED_SIZE, 1.0f,
-                                       m_seed);
+  TerrainColumnBuffers buffers{
+      .continental = continentalResults,
+      .erosion = erosionResults,
+      .peaksValleys = peaksValleysResults,
+      .ridge = ridgeResults,
+      .temperature = temperatureResults,
+      .humidity = humidityResults,
+      .weirdness = weirdnessResults,
+      .river = riverResults,
+      .heightMap = s_genBuffers.extendedHeightMap.data(),
+      .erosionTemp = s_genBuffers.erosionTempMap.data()};
 
-  m_erosionNoise->GenUniformGrid2D(erosionResults, extendedWorldXf, extendedWorldZf,
-                                   EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 1000);
+  sampleTerrainColumnFields(
+      buffers,
+      static_cast<int>(extendedWorldXf),
+      static_cast<int>(extendedWorldZf),
+      EXTENDED_SIZE, EXTENDED_SIZE, 1.0f);
+  calculateTerrainHeights(buffers, EXTENDED_SIZE, EXTENDED_SIZE);
+  applyCanonicalErosion(buffers.heightMap, EXTENDED_SIZE, EXTENDED_SIZE, buffers.erosionTemp);
 
-  m_peaksValleysNoise->GenUniformGrid2D(peaksValleysResults, extendedWorldXf,
-                                        extendedWorldZf, EXTENDED_SIZE, EXTENDED_SIZE, 1.0f,
-                                        m_seed + 2000);
-
-  m_ridgeNoise->GenUniformGrid2D(ridgeResults, extendedWorldXf, extendedWorldZf,
-                                 EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 3000);
-
-  // Generate biome noise for extended area
-  m_temperatureNoise->GenUniformGrid2D(temperatureResults, extendedWorldXf, extendedWorldZf,
-                                       EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 6000);
-
-  m_humidityNoise->GenUniformGrid2D(humidityResults, extendedWorldXf, extendedWorldZf,
-                                    EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 7000);
-
-  m_weirdnessNoise->GenUniformGrid2D(weirdnessResults, extendedWorldXf, extendedWorldZf,
-                                     EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 8000);
-  m_riverNoise->GenUniformGrid2D(riverResults, extendedWorldXf, extendedWorldZf,
-                                 EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 9000);
-  if (m_activeProfile)
-    m_activeProfile->noise2DMs +=
-        std::chrono::duration<double, std::milli>(Clock::now() - noise2DStart)
-            .count();
   const auto aquiferStart =
       m_activeProfile ? Clock::now() : Clock::time_point{};
   m_aquiferNoise->GenUniformGrid2D(aquiferResults, extendedWorldXf,
@@ -843,23 +939,7 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
         std::chrono::duration<double, std::milli>(Clock::now() - aquiferStart)
             .count();
 
-  // Pre-calculate float heights for the extended map.
   float *extHeightMap = s_genBuffers.extendedHeightMap.data();
-  for (int i = 0; i < EXTENDED_SIZE * EXTENDED_SIZE; ++i)
-  {
-    extHeightMap[i] = calculateHeightFloat(
-        continentalResults[i], erosionResults[i],
-        peaksValleysResults[i], ridgeResults[i], riverResults[i], weirdnessResults[i]);
-  }
-
-  // Apply erosion smoothing step to the float heightmap
-  const auto erosionStart =
-      m_activeProfile ? Clock::now() : Clock::time_point{};
-  applyErosion(extHeightMap, EXTENDED_SIZE);
-  if (m_activeProfile)
-    m_activeProfile->erosionMs +=
-        std::chrono::duration<double, std::milli>(Clock::now() - erosionStart)
-            .count();
 
   // Pass 1a: biomes, heights and raw biome colors over the whole extended
   // window (must precede 3D noise so we can bound cave sampling to
@@ -874,18 +954,11 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
     {
       int extIndex = extZ * EXTENDED_SIZE + extX;
 
-      float continental = std::clamp(continentalResults[extIndex], -1.0f, 1.0f);
-      float temperature = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
-      float humidity = std::clamp(humidityResults[extIndex], -1.0f, 1.0f);
       float weirdness = std::clamp(weirdnessResults[extIndex], -1.0f, 1.0f);
-      float riverVal = riverResults[extIndex];
       float erosion = std::clamp(erosionResults[extIndex], -1.0f, 1.0f);
-      float pv = std::clamp(peaksValleysResults[extIndex], -1.0f, 1.0f);
 
+      BiomeType biome = evaluateBiomeAt(buffers, extIndex);
       int height = std::clamp(static_cast<int>(std::round(extHeightMap[extIndex])), 1, static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
-
-      BiomeType biome = determineBiome(temperature, humidity, weirdness,
-                                       continental, erosion, pv, riverVal, height);
 
       // Oasis patches use the strongest weirdness values as a shallow pond
       // core. The outer oasis ring remains dry and hosts palms/ground cover.
@@ -1547,82 +1620,323 @@ BiomeType TerrainGenerator::determineBiome(float temperature, float humidity,
   return BIOME_MOUNTAINS;
 }
 
-BiomeType TerrainGenerator::getBiomeAt(int worldX, int worldZ) const
+BiomeType TerrainGenerator::evaluateBiomeColumn(int worldX, int worldZ) const
 {
-  float x = static_cast<float>(worldX) + NOISE_OFFSET;
-  float z = static_cast<float>(worldZ) + NOISE_OFFSET;
+  constexpr int HALO = 2;
+  constexpr int EXT_W = 1 + 2 * HALO;
+  constexpr int EXT_H = 1 + 2 * HALO;
+  constexpr int EXT_COUNT = EXT_W * EXT_H;
 
-  float temp = m_temperatureNoise->GenSingle2D(x, z, m_seed + 6000);
-  float humid = m_humidityNoise->GenSingle2D(x, z, m_seed + 7000);
-  float weird = m_weirdnessNoise->GenSingle2D(x, z, m_seed + 8000);
-  float cont = m_continentalNoise->GenSingle2D(x, z, m_seed);
-  float erosion = m_erosionNoise->GenSingle2D(x, z, m_seed + 1000);
-  float pv = m_peaksValleysNoise->GenSingle2D(x, z, m_seed + 2000);
-  float ridge = m_ridgeNoise->GenSingle2D(x, z, m_seed + 3000);
-  float river = m_riverNoise->GenSingle2D(x, z, m_seed + 9000);
-  int height = calculateHeight(cont, erosion, pv, ridge, river, weird);
+  std::array<float, EXT_COUNT> cont;
+  std::array<float, EXT_COUNT> erosion;
+  std::array<float, EXT_COUNT> pv;
+  std::array<float, EXT_COUNT> ridge;
+  std::array<float, EXT_COUNT> temp;
+  std::array<float, EXT_COUNT> humid;
+  std::array<float, EXT_COUNT> weird;
+  std::array<float, EXT_COUNT> river;
+  std::array<float, EXT_COUNT> heightMap;
+  std::array<float, EXT_COUNT> erosionTemp;
 
-  return determineBiome(temp, humid, weird, cont, erosion, pv, river, height);
+  TerrainColumnBuffers buffers{
+      .continental = cont.data(),
+      .erosion = erosion.data(),
+      .peaksValleys = pv.data(),
+      .ridge = ridge.data(),
+      .temperature = temp.data(),
+      .humidity = humid.data(),
+      .weirdness = weird.data(),
+      .river = river.data(),
+      .heightMap = heightMap.data(),
+      .erosionTemp = erosionTemp.data()};
+
+  const int extStartX = worldX + static_cast<int>(NOISE_OFFSET) - HALO;
+  const int extStartZ = worldZ + static_cast<int>(NOISE_OFFSET) - HALO;
+
+  sampleTerrainColumnFields(buffers, extStartX, extStartZ, EXT_W, EXT_H, 1.0f);
+  calculateTerrainHeights(buffers, EXT_W, EXT_H);
+  applyCanonicalErosion(buffers.heightMap, EXT_W, EXT_H, buffers.erosionTemp);
+
+  constexpr int centerIndex = HALO * EXT_W + HALO;
+  return evaluateBiomeAt(buffers, centerIndex);
 }
 
-void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
-                                      int width, int height,
-                                      std::vector<BiomeType> &outBiomes) const
+BiomeType TerrainGenerator::getBiomeAt(int worldX, int worldZ) const
 {
-  const int count = width * height;
-  outBiomes.resize(count);
+  return evaluateBiomeColumn(worldX, worldZ);
+}
 
-  // GenUniformGrid2D samples pixel (xi, yi) at noise coordinate (xStart + xi) * frequency.
-  // We want that to equal worldX_of_pixel + NOISE_OFFSET, where
-  //   worldX_of_pixel = centerX + (xi - width/2) * step
-  // => (xStart + xi) * step == centerX + (xi - width/2) * step + NOISE_OFFSET
-  // => xStart == (centerX + NOISE_OFFSET) / step - width/2
-  // xStart must be an int (FastNoise2 API), so we round to the nearest grid cell.
-  const float invStep = 1.0f / step;
-  const int startX = static_cast<int>(std::round((centerX + NOISE_OFFSET) * invStep - width * 0.5f));
-  const int startZ = static_cast<int>(std::round((centerZ + NOISE_OFFSET) * invStep - height * 0.5f));
+bool TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
+                                      int width, int height,
+                                      std::vector<BiomeType> &outBiomes,
+                                      const BiomeCancelCheck &shouldCancel,
+                                      BiomeRegionStats *outStats) const
+{
+  return getBiomeRegion(makeBiomeRegionGrid(centerX, centerZ, step, width, height),
+                        outBiomes, nullptr, shouldCancel, outStats);
+}
 
-  if (s_genBuffers.tempBuf.size() < static_cast<size_t>(count))
+bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
+                                      std::vector<BiomeType> &outBiomes,
+                                      BiomeRegionScratch *scratch,
+                                      const BiomeCancelCheck &shouldCancel,
+                                      BiomeRegionStats *outStats) const
+{
+  outBiomes.clear();
+  if (!grid.valid())
+    return false;
+
+  // Scratch owned by the caller when provided; otherwise a dedicated
+  // thread-local so region capacity never lands in the shared chunk
+  // generation buffers.
+  BiomeRegionScratch &bufs = scratch ? *scratch : s_biomeRegionScratch;
+
+  // Unconditional cleanup on EVERY exit — success, cancellation, early
+  // failure, or an exception propagating out — so no path can retain the
+  // ~10 MiB dense peak (this makes cancelled biome-map builds as
+  // memory-safe as successful ones). Tiled-sized capacity survives for
+  // cheap reuse.
+  struct ScratchTrimGuard
   {
-    s_genBuffers.tempBuf.resize(count);
-    s_genBuffers.humidBuf.resize(count);
-    s_genBuffers.weirdBuf.resize(count);
-    s_genBuffers.riverBuf.resize(count);
-    s_genBuffers.contBuf.resize(count);
-    s_genBuffers.erosionBuf.resize(count);
-    s_genBuffers.pvBuf.resize(count);
-    s_genBuffers.ridgeBuf.resize(count);
+    BiomeRegionScratch &target;
+    ~ScratchTrimGuard() { target.trimOversizedCapacity(); }
+  } trimGuard{bufs};
+
+  BiomeRegionStats localStats;
+  BiomeRegionStats &stats = outStats ? *outStats : localStats;
+  stats = {};
+
+  const auto checkCancelled = [&shouldCancel]() {
+    return static_cast<bool>(shouldCancel) && shouldCancel();
+  };
+
+  // Canonical voxel columns are clamped to a sane domain: extreme grid
+  // parameters (e.g. enormous step or center) would otherwise overflow the
+  // int math downstream (span differences, the + NOISE_OFFSET noise-domain
+  // translation). One billion blocks is far beyond any reachable world.
+  constexpr int64_t kColumnLimit = 1000000000;
+  const auto canonicalColumn = [&grid, kColumnLimit](int xi, int zi) {
+    const glm::ivec2 col = grid.columnAt(xi, zi);
+    return glm::ivec2(
+        static_cast<int>(std::clamp<int64_t>(col.x, -kColumnLimit, kColumnLimit)),
+        static_cast<int>(std::clamp<int64_t>(col.y, -kColumnLimit, kColumnLimit)));
+  };
+
+  // Track the largest dense domain sampled in one shot for the stats.
+  const auto updatePeak = [&stats](int64_t points) {
+    if (static_cast<int64_t>(stats.peakDensePoints) < points)
+    {
+      stats.peakDensePoints = static_cast<size_t>(points);
+      stats.peakScratchBytes =
+          stats.peakDensePoints * kBiomeRegionScratchFields * sizeof(float);
+    }
+  };
+
+  // Grow all scratch fields to hold `points` floats.
+  const auto ensureScratch = [&](int64_t points) {
+    const size_t n = static_cast<size_t>(points);
+    if (bufs.temperature.size() < n)
+    {
+      bufs.temperature.resize(n);
+      bufs.humidity.resize(n);
+      bufs.weirdness.resize(n);
+      bufs.river.resize(n);
+      bufs.continental.resize(n);
+      bufs.erosion.resize(n);
+      bufs.peaksValleys.resize(n);
+      bufs.ridge.resize(n);
+      bufs.height.resize(n);
+      bufs.erosionTemp.resize(n);
+    }
+  };
+
+  // Fill output pixels [x0..x1]x[z0..z1] from an already-sampled dense
+  // block window at canonical step = 1.0f.
+  const auto fillOutputFromDense = [&](const TerrainColumnBuffers &buffers,
+                                       int denseStartX, int denseStartZ, int denseW,
+                                       int x0, int x1, int z0, int z1) {
+    for (int zi = z0; zi <= z1; ++zi)
+    {
+      for (int xi = x0; xi <= x1; ++xi)
+      {
+        const glm::ivec2 col = canonicalColumn(xi, zi);
+        const int denseX = col.x - denseStartX;
+        const int denseZ = col.y - denseStartZ;
+        outBiomes[static_cast<size_t>(zi) * static_cast<size_t>(grid.width) +
+                  static_cast<size_t>(xi)] =
+            evaluateBiomeAt(buffers, denseZ * denseW + denseX);
+      }
+    }
+  };
+
+  const glm::ivec2 minCol = canonicalColumn(0, 0);
+  const glm::ivec2 maxCol = canonicalColumn(grid.width - 1, grid.height - 1);
+  const int64_t minWorldX = std::min<int64_t>(minCol.x, maxCol.x);
+  const int64_t maxWorldX = std::max<int64_t>(minCol.x, maxCol.x);
+  const int64_t minWorldZ = std::min<int64_t>(minCol.y, maxCol.y);
+  const int64_t maxWorldZ = std::max<int64_t>(minCol.y, maxCol.y);
+
+  // Spans in int64_t: extreme grid parameters must not overflow.
+  const int64_t spanX = maxWorldX - minWorldX + 1;
+  const int64_t spanZ = maxWorldZ - minWorldZ + 1;
+
+  constexpr int HALO = 2;
+  const int64_t denseWidth = spanX + 2 * HALO;
+  const int64_t denseHeight = spanZ + 2 * HALO;
+  const int64_t totalDensePoints = denseWidth * denseHeight;
+
+  const size_t outputCount = static_cast<size_t>(grid.width) * static_cast<size_t>(grid.height);
+
+  if (totalDensePoints <= static_cast<int64_t>(kMaxDenseDomainPoints))
+  {
+    if (checkCancelled())
+      return false;
+
+    outBiomes.resize(outputCount);
+    ensureScratch(totalDensePoints);
+
+    TerrainColumnBuffers buffers{
+        .continental = bufs.continental.data(),
+        .erosion = bufs.erosion.data(),
+        .peaksValleys = bufs.peaksValleys.data(),
+        .ridge = bufs.ridge.data(),
+        .temperature = bufs.temperature.data(),
+        .humidity = bufs.humidity.data(),
+        .weirdness = bufs.weirdness.data(),
+        .river = bufs.river.data(),
+        .heightMap = bufs.height.data(),
+        .erosionTemp = bufs.erosionTemp.data()};
+
+    const int denseStartX = static_cast<int>(minWorldX) - HALO;
+    const int denseStartZ = static_cast<int>(minWorldZ) - HALO;
+
+    sampleTerrainColumnFields(buffers,
+                              denseStartX + static_cast<int>(NOISE_OFFSET),
+                              denseStartZ + static_cast<int>(NOISE_OFFSET),
+                              static_cast<int>(denseWidth),
+                              static_cast<int>(denseHeight), 1.0f);
+    calculateTerrainHeights(buffers, static_cast<int>(denseWidth),
+                            static_cast<int>(denseHeight));
+    applyCanonicalErosion(buffers.heightMap, static_cast<int>(denseWidth),
+                          static_cast<int>(denseHeight), buffers.erosionTemp);
+
+    fillOutputFromDense(buffers, denseStartX, denseStartZ,
+                        static_cast<int>(denseWidth),
+                        0, grid.width - 1, 0, grid.height - 1);
+    ++stats.denseTiles;
+    updatePeak(totalDensePoints);
+
+    // Late cancellation: never return a fully-sampled but rejected result.
+    if (checkCancelled())
+    {
+      outBiomes.clear();
+      return false;
+    }
+    return true;
   }
 
-  float* tempBuf = s_genBuffers.tempBuf.data();
-  float* humidBuf = s_genBuffers.humidBuf.data();
-  float* weirdBuf = s_genBuffers.weirdBuf.data();
-  float* riverBuf = s_genBuffers.riverBuf.data();
-  float* contBuf = s_genBuffers.contBuf.data();
-  float* erosionBuf = s_genBuffers.erosionBuf.data();
-  float* pvBuf = s_genBuffers.pvBuf.data();
-  float* ridgeBuf = s_genBuffers.ridgeBuf.data();
+  // Bounded tiled path for large regions / zoom-outs. The tile dimension is
+  // derived from grid.step so each tile's haloed dense domain always fits in
+  // kMaxTileDensePoints even at the smallest zoom (largest step), keeping
+  // every pixel on the vectorized dense path. The point-query fallback below
+  // is a safety net, not the normal path for any zoom.
+  constexpr int kMaxTileDim = 32;
+  const float maxTileSpan = std::sqrt(static_cast<float>(kMaxTileDensePoints));
+  const float tileDimF =
+      std::floor((maxTileSpan - 1.0f - static_cast<float>(2 * HALO)) / grid.step) + 1.0f;
+  const int tileDim = std::clamp(static_cast<int>(tileDimF), 1, kMaxTileDim);
 
-  // GenUniformGrid2D processes batches with SIMD — far faster than individual GenSingle2D calls.
-  m_temperatureNoise->GenUniformGrid2D(tempBuf, startX, startZ, width, height, step, m_seed + 6000);
-  m_humidityNoise->GenUniformGrid2D(humidBuf, startX, startZ, width, height, step, m_seed + 7000);
-  m_weirdnessNoise->GenUniformGrid2D(weirdBuf, startX, startZ, width, height, step, m_seed + 8000);
-  m_continentalNoise->GenUniformGrid2D(contBuf, startX, startZ, width, height, step, m_seed);
-  m_erosionNoise->GenUniformGrid2D(erosionBuf, startX, startZ, width, height, step, m_seed + 1000);
-  m_peaksValleysNoise->GenUniformGrid2D(pvBuf, startX, startZ, width, height, step, m_seed + 2000);
-  m_ridgeNoise->GenUniformGrid2D(ridgeBuf, startX, startZ, width, height, step, m_seed + 3000);
-  m_riverNoise->GenUniformGrid2D(riverBuf, startX, startZ, width, height, step, m_seed + 9000);
+  const int tilesX = (grid.width + tileDim - 1) / tileDim;
+  const int tilesZ = (grid.height + tileDim - 1) / tileDim;
 
-  for (int i = 0; i < count; i++)
+  outBiomes.resize(outputCount);
+
+  // Tiles are processed sequentially in fixed order: the result depends only
+  // on the grid and the seed, never on scheduling. TerrainGenerator does not
+  // spawn threads and does not decide CPU policy; the caller chooses when and
+  // on which worker the whole call runs (the Engine runs the biome map as a
+  // single TaskPriority::Low job).
+  for (int tz = 0; tz < tilesZ; ++tz)
   {
-    const float cont = std::clamp(contBuf[i], -1.0f, 1.0f);
-    const float erosion = std::clamp(erosionBuf[i], -1.0f, 1.0f);
-    const float pv = std::clamp(pvBuf[i], -1.0f, 1.0f);
-    const float ridge = std::clamp(ridgeBuf[i], -1.0f, 1.0f);
-    const float river = riverBuf[i];
-    const int h = calculateHeight(cont, erosion, pv, ridge, river, weirdBuf[i]);
-    outBiomes[i] = determineBiome(tempBuf[i], humidBuf[i], weirdBuf[i], cont, erosion, pv, river, h);
+    for (int tx = 0; tx < tilesX; ++tx)
+    {
+      // Cancellation checkpoint: polled before every tile so a long
+      // zoomed-out map build can be abandoned promptly.
+      if (checkCancelled())
+      {
+        outBiomes.clear();
+        return false;
+      }
+
+      const int x0 = tx * tileDim;
+      const int z0 = tz * tileDim;
+      const int x1 = std::min(x0 + tileDim - 1, grid.width - 1);
+      const int z1 = std::min(z0 + tileDim - 1, grid.height - 1);
+
+      const glm::ivec2 tMinCol = canonicalColumn(x0, z0);
+      const glm::ivec2 tMaxCol = canonicalColumn(x1, z1);
+      const int64_t tMinX = std::min<int64_t>(tMinCol.x, tMaxCol.x);
+      const int64_t tMaxX = std::max<int64_t>(tMinCol.x, tMaxCol.x);
+      const int64_t tMinZ = std::min<int64_t>(tMinCol.y, tMaxCol.y);
+      const int64_t tMaxZ = std::max<int64_t>(tMinCol.y, tMaxCol.y);
+
+      const int64_t tDenseW = (tMaxX - tMinX + 1) + 2 * HALO;
+      const int64_t tDenseH = (tMaxZ - tMinZ + 1) + 2 * HALO;
+      const int64_t tDensePoints = tDenseW * tDenseH;
+
+      if (tDensePoints <= static_cast<int64_t>(kMaxTileDensePoints)) // guaranteed by tileDim; kept as a guard
+      {
+        ensureScratch(tDensePoints);
+
+        TerrainColumnBuffers buffers{
+            .continental = bufs.continental.data(),
+            .erosion = bufs.erosion.data(),
+            .peaksValleys = bufs.peaksValleys.data(),
+            .ridge = bufs.ridge.data(),
+            .temperature = bufs.temperature.data(),
+            .humidity = bufs.humidity.data(),
+            .weirdness = bufs.weirdness.data(),
+            .river = bufs.river.data(),
+            .heightMap = bufs.height.data(),
+            .erosionTemp = bufs.erosionTemp.data()};
+
+        const int tDenseStartX = static_cast<int>(tMinX) - HALO;
+        const int tDenseStartZ = static_cast<int>(tMinZ) - HALO;
+
+        sampleTerrainColumnFields(buffers,
+                                  tDenseStartX + static_cast<int>(NOISE_OFFSET),
+                                  tDenseStartZ + static_cast<int>(NOISE_OFFSET),
+                                  static_cast<int>(tDenseW),
+                                  static_cast<int>(tDenseH), 1.0f);
+        calculateTerrainHeights(buffers, static_cast<int>(tDenseW),
+                                static_cast<int>(tDenseH));
+        applyCanonicalErosion(buffers.heightMap, static_cast<int>(tDenseW),
+                              static_cast<int>(tDenseH), buffers.erosionTemp);
+
+        fillOutputFromDense(buffers, tDenseStartX, tDenseStartZ,
+                            static_cast<int>(tDenseW), x0, x1, z0, z1);
+        ++stats.denseTiles;
+        updatePeak(tDensePoints);
+      }
+      else
+      {
+        // Safety net only: evaluate point canonical columns directly.
+        for (int zi = z0; zi <= z1; ++zi)
+        {
+          for (int xi = x0; xi <= x1; ++xi)
+          {
+            const glm::ivec2 col = canonicalColumn(xi, zi);
+            outBiomes[static_cast<size_t>(zi) * static_cast<size_t>(grid.width) +
+                      static_cast<size_t>(xi)] = evaluateBiomeColumn(col.x, col.y);
+          }
+        }
+        stats.fallbackPixels += static_cast<uint64_t>(x1 - x0 + 1) *
+                                static_cast<uint64_t>(z1 - z0 + 1);
+      }
+    }
   }
+
+  return true;
 }
 
 // =============================================
@@ -1740,43 +2054,60 @@ int TerrainGenerator::calculateHeight(float continental, float erosion,
 
 void TerrainGenerator::applyErosion(float *heightMap, int size) const
 {
-  if (size < 2)
+  applyCanonicalErosion(heightMap, size, size, nullptr);
+}
+
+void TerrainGenerator::applyCanonicalErosion(float *heightMap, int width, int height,
+                                            float *tempBuffer) const
+{
+  if (width < 2 || height < 2)
     return;
 
+  assert(heightMap != nullptr);
+
+  using Clock = std::chrono::steady_clock;
+  const auto erosionStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
+
   // 1. Single Thermal Erosion pass (smooths overly steep slopes deterministically)
-  // We only run 1 iteration on the 28x28 extended heightmap. Cells [2,25]
-  // are fully deterministic across chunk windows because all four neighbors
-  // [1,26] are processed and their give-decisions only read sampled values
-  // [0,27]. (The old 20x20 window left the +/-1 border columns
-  // underdetermined because outer-ring cells never gave material.)
+  // Cells with at least 2 cells of halo from the border are fully deterministic
+  // across sampling windows because all four neighbors are processed and their
+  // give-decisions only read sampled values within the window.
   const float talusAngle = 0.6f;  // Max allowed height diff between adjacent cells
   const float thermalRate = 0.5f; // Fraction of material to move
+  const int totalCount = width * height;
 
-  float *tempMap;
-  std::vector<float> fallbackMap;
-  if (size <= EXT_SIZE)
+  float *tempMap = tempBuffer;
+  if (!tempMap)
   {
-    tempMap = s_genBuffers.erosionTempMap.data();
-    std::copy(heightMap, heightMap + size * size, tempMap);
-  }
-  else
-  {
-    fallbackMap.assign(heightMap, heightMap + size * size);
-    tempMap = fallbackMap.data();
-  }
-
-  for (int z = 1; z < size - 1; ++z)
-  {
-    for (int x = 1; x < size - 1; ++x)
+    if (totalCount <= EXT_SIZE * EXT_SIZE)
     {
-      int idx = z * size + x;
+      tempMap = s_genBuffers.erosionTempMap.data();
+    }
+    else
+    {
+      // Rare fallback for large-domain erosion without a caller-provided
+      // temp buffer; kept thread-local and separate from GenBuffers.
+      static thread_local std::vector<float> fallbackTemp;
+      if (fallbackTemp.size() < static_cast<size_t>(totalCount))
+        fallbackTemp.resize(static_cast<size_t>(totalCount));
+      tempMap = fallbackTemp.data();
+    }
+  }
+  std::copy(heightMap, heightMap + totalCount, tempMap);
+
+  for (int z = 1; z < height - 1; ++z)
+  {
+    for (int x = 1; x < width - 1; ++x)
+    {
+      int idx = z * width + x;
       float h = tempMap[idx];
 
       float maxDiff = 0.0f;
       int maxDiffIdx = -1;
 
       // Check 4 neighbors
-      const int neighbors[4] = {idx - 1, idx + 1, idx - size, idx + size};
+      const int neighbors[4] = {idx - 1, idx + 1, idx - width, idx + width};
       for (int i = 0; i < 4; ++i)
       {
         float diff = h - tempMap[neighbors[i]];
@@ -1795,10 +2126,14 @@ void TerrainGenerator::applyErosion(float *heightMap, int size) const
       }
     }
   }
-
+  if (m_activeProfile)
+    m_activeProfile->erosionMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - erosionStart)
+            .count();
+}
   // Hydraulic Erosion pass removed because particle simulation causes
   // boundary mismatches across asynchronously generated chunks.
-}
+
 
 // =============================================
 // VEGETATION GENERATION

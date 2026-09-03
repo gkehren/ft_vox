@@ -5,6 +5,7 @@
 #include <Renderer/MinecraftTextures.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <future>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -1412,6 +1414,863 @@ static int runWorldStats(int argc, char **argv)
 	return 0;
 }
 
+static void testBiomeQueryConsistency()
+{
+	constexpr int kTestSeeds[] = {1337, 42, 9001};
+	const std::vector<std::pair<int, int>> kStaticCoords = {
+		{0, 0},
+		{CHUNK_SIZE, 0},
+		{0, CHUNK_SIZE},
+		{CHUNK_SIZE, CHUNK_SIZE},
+		{-CHUNK_SIZE, 0},
+		{0, -CHUNK_SIZE},
+		{-CHUNK_SIZE, -CHUNK_SIZE},
+		{-160, -80},
+		{-320, 4000},
+		{128, -256}
+	};
+
+	bool sawRiver = false;
+	bool sawMountain = false;
+	bool sawCoastOrOcean = false;
+	bool sawRareOrDesert = false;
+	int totalColumnsChecked = 0;
+
+	for (int seed : kTestSeeds)
+	{
+		TerrainGenerator gen(seed);
+		std::vector<std::pair<int, int>> chunkCoords = kStaticCoords;
+
+		// Scan a grid to locate coordinates specifically hitting mountain, river, coast, and rare biomes
+		bool foundMountainCoord = false;
+		bool foundRiverCoord = false;
+		bool foundCoastCoord = false;
+		bool foundRareCoord = false;
+
+		for (int cz = -20; cz <= 20 && (!foundMountainCoord || !foundRiverCoord || !foundCoastCoord || !foundRareCoord); cz += 3)
+		{
+			for (int cx = -20; cx <= 20 && (!foundMountainCoord || !foundRiverCoord || !foundCoastCoord || !foundRareCoord); cx += 3)
+			{
+				const int wx = cx * CHUNK_SIZE;
+				const int wz = cz * CHUNK_SIZE;
+				const BiomeType b = gen.getBiomeAt(wx, wz);
+				if (!foundMountainCoord && isMountainBiomeForTest(b))
+				{
+					chunkCoords.push_back({wx, wz});
+					foundMountainCoord = true;
+				}
+				if (!foundRiverCoord && (b == BIOME_RIVER || b == BIOME_FROZEN_RIVER))
+				{
+					chunkCoords.push_back({wx, wz});
+					foundRiverCoord = true;
+				}
+				if (!foundCoastCoord && (b == BIOME_BEACH || b == BIOME_OCEAN || b == BIOME_FROZEN_OCEAN))
+				{
+					chunkCoords.push_back({wx, wz});
+					foundCoastCoord = true;
+				}
+				if (!foundRareCoord && (b == BIOME_BADLANDS || b == BIOME_OASIS || b == BIOME_MUSHROOM_FIELDS || b == BIOME_ICE_SPIKES))
+				{
+					chunkCoords.push_back({wx, wz});
+					foundRareCoord = true;
+				}
+			}
+		}
+
+		for (const auto &[chunkX, chunkZ] : chunkCoords)
+		{
+			ChunkData chunk = gen.generateChunk(chunkX, chunkZ);
+
+			// 1. Point query consistency: getBiomeAt vs chunkData.biomes
+			for (int lz = 0; lz < CHUNK_SIZE; ++lz)
+			{
+				for (int lx = 0; lx < CHUNK_SIZE; ++lx)
+				{
+					const int col = lz * CHUNK_SIZE + lx;
+					const int wx = chunkX + lx;
+					const int wz = chunkZ + lz;
+
+					const BiomeType chunkBiome = chunk.biomes[col];
+					const BiomeType pointBiome = gen.getBiomeAt(wx, wz);
+					CHECK(chunkBiome == pointBiome,
+						  "getBiomeAt must match chunk biomes exactly (seed=" << seed
+						  << " wx=" << wx << " wz=" << wz
+						  << " expected=" << biomeTypeString[chunkBiome]
+						  << " got=" << biomeTypeString[pointBiome] << ")");
+
+					if (chunkBiome == BIOME_RIVER || chunkBiome == BIOME_FROZEN_RIVER)
+						sawRiver = true;
+					if (isMountainBiomeForTest(chunkBiome))
+						sawMountain = true;
+					if (chunkBiome == BIOME_BEACH || chunkBiome == BIOME_OCEAN || chunkBiome == BIOME_FROZEN_OCEAN)
+						sawCoastOrOcean = true;
+					if (chunkBiome == BIOME_BADLANDS || chunkBiome == BIOME_OASIS || chunkBiome == BIOME_MUSHROOM_FIELDS || chunkBiome == BIOME_ICE_SPIKES)
+						sawRareOrDesert = true;
+
+					++totalColumnsChecked;
+				}
+			}
+
+			// 2. Region query consistency for single chunk: getBiomeRegion vs chunkData.biomes
+			const float centerX = static_cast<float>(chunkX) + CHUNK_SIZE * 0.5f;
+			const float centerZ = static_cast<float>(chunkZ) + CHUNK_SIZE * 0.5f;
+			std::vector<BiomeType> region;
+			gen.getBiomeRegion(centerX, centerZ, 1.0f, CHUNK_SIZE, CHUNK_SIZE, region);
+			CHECK(region.size() == static_cast<size_t>(CHUNK_SIZE * CHUNK_SIZE),
+				  "region size should match chunk columns");
+
+			for (int lz = 0; lz < CHUNK_SIZE; ++lz)
+			{
+				for (int lx = 0; lx < CHUNK_SIZE; ++lx)
+				{
+					const int col = lz * CHUNK_SIZE + lx;
+					CHECK(region[col] == chunk.biomes[col],
+						  "getBiomeRegion must match chunk biomes exactly (seed=" << seed
+						  << " chunk=(" << chunkX << "," << chunkZ << ")"
+						  << " lx=" << lx << " lz=" << lz
+						  << " expected=" << biomeTypeString[chunk.biomes[col]]
+						  << " got=" << biomeTypeString[region[col]] << ")");
+				}
+			}
+		}
+
+		// 3. Multi-chunk contiguous region query covering 3x3 chunks across chunk boundaries and negatives
+		constexpr int kGridChunks = 3;
+		constexpr int kRegionDim = kGridChunks * CHUNK_SIZE; // 48x48 blocks
+		const int originChunkX = -CHUNK_SIZE;
+		const int originChunkZ = -CHUNK_SIZE;
+		const float regionCenterX = static_cast<float>(originChunkX) + kRegionDim * 0.5f;
+		const float regionCenterZ = static_cast<float>(originChunkZ) + kRegionDim * 0.5f;
+
+		std::vector<BiomeType> largeRegion;
+		gen.getBiomeRegion(regionCenterX, regionCenterZ, 1.0f, kRegionDim, kRegionDim, largeRegion);
+		CHECK(largeRegion.size() == static_cast<size_t>(kRegionDim * kRegionDim),
+			  "largeRegion size must match 48x48");
+
+		for (int cz = 0; cz < kGridChunks; ++cz)
+		{
+			for (int cx = 0; cx < kGridChunks; ++cx)
+			{
+				const int chunkX = originChunkX + cx * CHUNK_SIZE;
+				const int chunkZ = originChunkZ + cz * CHUNK_SIZE;
+				ChunkData chunk = gen.generateChunk(chunkX, chunkZ);
+
+				for (int lz = 0; lz < CHUNK_SIZE; ++lz)
+				{
+					for (int lx = 0; lx < CHUNK_SIZE; ++lx)
+					{
+						const int chunkCol = lz * CHUNK_SIZE + lx;
+						const int regX = cx * CHUNK_SIZE + lx;
+						const int regZ = cz * CHUNK_SIZE + lz;
+						const int regCol = regZ * kRegionDim + regX;
+
+						CHECK(largeRegion[regCol] == chunk.biomes[chunkCol],
+							  "multi-chunk getBiomeRegion must match chunkData.biomes across boundaries");
+						CHECK(largeRegion[regCol] == gen.getBiomeAt(chunkX + lx, chunkZ + lz),
+							  "multi-chunk getBiomeRegion must match getBiomeAt across boundaries");
+					}
+				}
+			}
+		}
+	}
+
+	CHECK(sawRiver, "test coverage includes river biomes");
+	CHECK(sawMountain, "test coverage includes mountain biomes");
+	CHECK(sawCoastOrOcean, "test coverage includes coast or ocean biomes");
+	CHECK(sawRareOrDesert, "test coverage includes rare or badlands biomes");
+	std::cout << "biome query consistency: " << totalColumnsChecked
+			  << " columns verified identical across generateChunk, getBiomeAt, and getBiomeRegion\n";
+}
+
+// ---------------------------------------------------------------------------
+// Canonical world<->voxel-column and world<->map-pixel mapping
+// (BiomeRegionGrid). Expected values are hardcoded, never derived from the
+// helpers under test.
+// ---------------------------------------------------------------------------
+
+static void testWorldToVoxelColumnConvention()
+{
+	// Canonical convention: continuous world position -> voxel column is
+	// floor(). These cases cover exactly where floor() and round() diverge.
+	constexpr float kCases[] = {
+		123.60f, 123.00f, -0.20f, -1.00f, -15.10f,
+		-0.01f, -0.49f, -0.50f, -0.99f,
+		-15.99f, -16.00f, -16.01f,
+		0.0f, 0.99f, 15.99f,
+	};
+	constexpr int kExpected[] = {
+		123, 123, -1, -1, -16,
+		-1, -1, -1, -1,
+		-16, -16, -17,
+		0, 0, 15,
+	};
+	static_assert(std::size(kCases) == std::size(kExpected));
+
+	for (size_t i = 0; i < std::size(kCases); ++i)
+	{
+		CHECK(worldToVoxelColumn(kCases[i]) == kExpected[i],
+			  "worldToVoxelColumn X must floor (" << kCases[i] << " -> "
+			  << kExpected[i] << ")");
+		// Z applies the identical convention; verify it separately.
+		CHECK(worldToVoxelColumn(glm::vec2(kCases[i], kCases[i])).y == kExpected[i],
+			  "worldToVoxelColumn Z must floor (" << kCases[i] << " -> "
+			  << kExpected[i] << ")");
+	}
+
+	// Explicit negative-transition cross cases.
+	CHECK(worldToVoxelColumn(glm::vec2(-0.2f, -0.8f)) == glm::ivec2(-1, -1),
+		  "world -0.2/-0.8 -> column -1/-1");
+	CHECK(worldToVoxelColumn(glm::vec2(0.8f, -0.2f)) == glm::ivec2(0, -1),
+		  "world 0.8/-0.2 -> column 0/-1");
+
+	std::cout << "worldToVoxelColumn: floor convention validated on "
+			  << std::size(kCases) << " hardcoded cases per axis\n";
+}
+
+static void testBiomeRegionGridMapping()
+{
+	// --- worldAt: center (0,0), 4x4, step 1.
+	const BiomeRegionGrid g = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 4, 4);
+	CHECK(g.worldAt(0, 0) == glm::vec2(-2.0f, -2.0f), "pixel 0,0 -> world (-2,-2)");
+	CHECK(g.worldAt(2, 2) == glm::vec2(0.0f, 0.0f), "pixel 2,2 -> world (0,0)");
+	CHECK(g.worldAt(3, 3) == glm::vec2(1.0f, 1.0f), "pixel 3,3 -> world (1,1)");
+
+	// --- step = 2.
+	const BiomeRegionGrid g2 = makeBiomeRegionGrid(0.0f, 0.0f, 2.0f, 4, 4);
+	CHECK(g2.worldAt(0, 0) == glm::vec2(-4.0f, -4.0f), "step 2: pixel 0,0 -> (-4,-4)");
+	CHECK(g2.worldAt(3, 3) == glm::vec2(2.0f, 2.0f), "step 2: pixel 3,3 -> (2,2)");
+
+	// --- step = 0.5.
+	const BiomeRegionGrid g05 = makeBiomeRegionGrid(0.0f, 0.0f, 0.5f, 4, 4);
+	CHECK(g05.worldAt(0, 0) == glm::vec2(-1.0f, -1.0f), "step 0.5: pixel 0,0 -> (-1,-1)");
+	CHECK(g05.worldAt(3, 3) == glm::vec2(0.5f, 0.5f), "step 0.5: pixel 3,3 -> (0.5,0.5)");
+
+	// --- fractional center.
+	const BiomeRegionGrid gf = makeBiomeRegionGrid(123.47f, -87.23f, 1.0f, 4, 4);
+	CHECK(std::fabs(gf.worldAt(0, 0).x - 121.47f) < 1e-4f &&
+			  std::fabs(gf.worldAt(0, 0).y - (-89.23f)) < 1e-4f,
+		  "fractional center: pixel 0,0 at (121.47, -89.23)");
+
+	// --- negative center.
+	const BiomeRegionGrid gn = makeBiomeRegionGrid(-1000.0f, -2000.0f, 0.5f, 8, 8);
+	CHECK(std::fabs(gn.worldAt(7, 7).x - (-998.5f)) < 1e-3f &&
+			  std::fabs(gn.worldAt(7, 7).y - (-1998.5f)) < 1e-3f,
+		  "negative center: last pixel at (-998.5, -1998.5)");
+
+	// --- columnAt applies the canonical floor() to the pixel's world pos.
+	const BiomeRegionGrid gc = makeBiomeRegionGrid(0.2f, 0.2f, 1.0f, 4, 4);
+	// pixel worlds along x: ..., -0.8, 0.2, ...
+	CHECK(gc.columnAt(1, 1) == glm::ivec2(-1, -1), "world -0.8 -> column -1");
+	CHECK(gc.columnAt(2, 2) == glm::ivec2(0, 0), "world 0.2 -> column 0");
+	CHECK(worldToVoxelColumn(gc.worldAt(3, 1)).x == 1 &&
+			  worldToVoxelColumn(gc.worldAt(3, 1)).y == -1,
+		  "worldAt -> columnAt cross: world (1.2, -0.8) -> column (1, -1)");
+
+	// --- pixelForWorld round-trips exactly for representative centers,
+	// steps (incl. zoom 8 and zoom 0.1), and both grid parities.
+	for (float step : {1.0f, 0.5f, 2.0f, 0.125f, 10.0f})
+	{
+		for (const auto &[cx, cz] : {std::pair{0.0f, 0.0f}, std::pair{123.47f, -87.23f}})
+		{
+			const BiomeRegionGrid grid = makeBiomeRegionGrid(cx, cz, step, 32, 25);
+			for (int z = 0; z < grid.height; ++z)
+			{
+				for (int x = 0; x < grid.width; ++x)
+				{
+					const glm::ivec2 pixel = grid.pixelForWorld(grid.worldAt(x, z));
+					CHECK(pixel.x == x && pixel.y == z,
+						  "pixelForWorld(worldAt(x,z)) must round-trip (step="
+							  << step << " pixel=" << x << "," << z << ")");
+				}
+			}
+			// Image edges and one step beyond them.
+			CHECK(grid.pixelForWorld(grid.worldAt(0, 0)) == glm::ivec2(0, 0),
+				  "edge pixel 0,0 round-trips");
+			CHECK(grid.pixelForWorld(grid.worldAt(31, 24)) == glm::ivec2(31, 24),
+				  "edge pixel 31,24 round-trips");
+			CHECK(grid.pixelForWorld(grid.worldAt(0, 0) - glm::vec2(step, 0.0f)).x == -1,
+				  "one step left of the grid maps to pixel -1");
+			CHECK(grid.pixelForWorld(grid.worldAt(31, 24) + glm::vec2(step, 0.0f)).x == 32,
+				  "one step right of the grid maps to pixel width");
+		}
+	}
+
+	// Extreme world positions must not overflow the pixel computation.
+	const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 32, 32);
+	const glm::ivec2 farPixel = grid.pixelForWorld(glm::vec2(1e9f, -1e9f));
+	CHECK(farPixel.x >= grid.width && farPixel.y < 0,
+		  "extreme world positions resolve outside the grid without overflow");
+
+	std::cout << "BiomeRegionGrid: worldAt/columnAt/pixelForWorld validated\n";
+}
+
+static void testBiomeRegionCancellationAndStats()
+{
+	TerrainGenerator gen(1337);
+
+	// zoom = 0.1 (step 10) over a 256x256 UI map: the tiled path. The
+	// adaptive tile dimension must keep every pixel on the dense
+	// vectorized path (fallback is a safety net only).
+	{
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 10.0f, 256, 256);
+		TerrainGenerator::BiomeRegionStats stats;
+		std::vector<BiomeType> biomes;
+		const bool completed = gen.getBiomeRegion(grid, biomes, nullptr, {}, &stats);
+		CHECK(completed, "zoom 0.1 map sampling must complete");
+		CHECK(biomes.size() == static_cast<size_t>(256) * 256,
+			  "zoom 0.1 map output size valid");
+		CHECK(stats.denseTiles > 0, "zoom 0.1 must use dense tiles");
+		CHECK(stats.fallbackPixels == 0,
+			  "zoom 0.1 must not use the point-query fallback");
+		// Peak scratch must stay within the documented bounds: 10 float
+		// fields per dense point.
+		CHECK(stats.peakDensePoints <= TerrainGenerator::kMaxTileDensePoints,
+			  "tiled path must stay within the per-tile scratch bound");
+		CHECK(stats.peakScratchBytes ==
+				  stats.peakDensePoints * TerrainGenerator::kBiomeRegionScratchFields * sizeof(float),
+			  "peak scratch bytes must track peak dense points");
+	}
+
+	// Deterministic sequential multi-tile cancellation: the callback cancels
+	// exactly on the fourth poll (before tile 4), so exactly three tiles run.
+	{
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 10.0f, 256, 256);
+		int polls = 0;
+		std::vector<BiomeType> biomes;
+		const bool completed = gen.getBiomeRegion(grid, biomes, nullptr,
+												  [&polls] { return ++polls == 4; });
+		CHECK(!completed, "cancelled region sampling must report interruption");
+		CHECK(biomes.empty(), "cancelled region sampling must not publish partial results");
+		CHECK(polls == 4, "cancellation must fire exactly at the fourth tile checkpoint");
+	}
+
+	// A never-cancelling callback must complete identically to no callback.
+	{
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 10.0f, 64, 64);
+		std::vector<BiomeType> biomes;
+		CHECK(gen.getBiomeRegion(grid, biomes, nullptr, [] { return false; }),
+			  "never-cancelling callback must complete");
+		CHECK(biomes.size() == static_cast<size_t>(64) * 64, "output size intact");
+	}
+
+	// Single-pass domain: an immediately-true callback is honored before
+	// sampling, and nothing partial is returned.
+	{
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 64, 64);
+		std::vector<BiomeType> biomes;
+		CHECK(!gen.getBiomeRegion(grid, biomes, nullptr, [] { return true; }),
+			  "single-pass cancellation must report interruption");
+		CHECK(biomes.empty(), "single-pass cancellation must publish nothing");
+	}
+
+	// Single-pass cancellation observed only AFTER sampling (poll 1 before,
+	// poll 2 after the dense pass): the result must still be discarded —
+	// never a fully-sampled but cancelled publication.
+	{
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 64, 64);
+		int polls = 0;
+		std::vector<BiomeType> biomes;
+		const bool completed = gen.getBiomeRegion(grid, biomes, nullptr,
+												  [&polls] { return ++polls >= 2; });
+		CHECK(!completed, "post-sampling cancellation must report interruption");
+		CHECK(biomes.empty(), "post-sampling cancellation must publish nothing");
+		CHECK(polls == 2, "post-sampling cancellation must poll before and after the pass");
+	}
+
+	// Invalid grids are rejected without sampling.
+	{
+		std::vector<BiomeType> biomes(16, BIOME_PLAINS);
+		CHECK(!gen.getBiomeRegion(makeBiomeRegionGrid(0.0f, 0.0f, 0.0f, 8, 8), biomes),
+			  "zero step must be rejected");
+		CHECK(!gen.getBiomeRegion(makeBiomeRegionGrid(0.0f, 0.0f, -1.0f, 8, 8), biomes),
+			  "negative step must be rejected");
+		CHECK(!gen.getBiomeRegion(makeBiomeRegionGrid(0.0f, 0.0f, std::nanf(""), 8, 8), biomes),
+			  "NaN step must be rejected");
+		CHECK(!gen.getBiomeRegion(makeBiomeRegionGrid(std::nanf(""), 0.0f, 1.0f, 8, 8), biomes),
+			  "NaN center must be rejected");
+		CHECK(biomes.empty(), "invalid grid must clear the output buffer");
+	}
+
+	std::cout << "biome region cancellation: multi-tile and single-pass early exit, "
+			  << "post-sampling rejection, invalid-grid rejection, and dense-path stats validated\n";
+}
+
+static void testBiomeRegionDeterminism()
+{
+	// Same seed + same grid must produce identical biome buffers across
+	// repeated calls and across independent generator instances — for both
+	// the single-pass dense path and the tiled path.
+	struct Case
+	{
+		float step;
+		int size;
+	};
+	constexpr Case kCases[] = {
+		{1.0f, 96},  // span 99x99 -> single dense pass
+		{10.0f, 256}, // span 2555x2555 -> tiled path
+	};
+
+	TerrainGenerator genA(4242);
+	TerrainGenerator genB(4242); // independent instance, same seed
+
+	for (const Case &tc : kCases)
+	{
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(123.47f, -87.23f, tc.step, tc.size, tc.size);
+		std::vector<BiomeType> first, second, fromOtherGen;
+		CHECK(genA.getBiomeRegion(grid, first), "determinism sampling (call 1) must complete");
+		CHECK(genA.getBiomeRegion(grid, second), "determinism sampling (call 2) must complete");
+		CHECK(genB.getBiomeRegion(grid, fromOtherGen), "determinism sampling (other generator) must complete");
+		CHECK(first == second, "repeated calls with the same grid must be identical");
+		CHECK(first == fromOtherGen, "independent generators with the same seed must agree");
+	}
+
+	std::cout << "biome region determinism: repeated calls and independent generators agree\n";
+}
+
+static void testBiomeRegionDenseTiledEquivalence()
+{
+	// A region whose whole dense domain exceeds the single-pass cap must be
+	// bit-for-bit identical to the same columns assembled from small dense
+	// sub-queries. This protects the halo handling at tile boundaries.
+	TerrainGenerator gen(1337);
+
+	constexpr int kSize = 260;
+	constexpr float kStep = 2.0f; // span 519+halo > 516^2 cap -> tiled path
+	const BiomeRegionGrid grid = makeBiomeRegionGrid(500.0f, -500.0f, kStep, kSize, kSize);
+
+	std::vector<BiomeType> tiled;
+	CHECK(gen.getBiomeRegion(grid, tiled), "tiled sampling must complete");
+
+	constexpr int kBlock = 4; // independent partitioning, not the tile size
+	std::vector<BiomeType> reference(static_cast<size_t>(kSize) * kSize);
+	static_assert(kSize % kBlock == 0, "full blocks keep the pixel mapping exact");
+	for (int bz = 0; bz < kSize; bz += kBlock)
+	{
+		for (int bx = 0; bx < kSize; bx += kBlock)
+		{
+			// Anchor the sub-grid center on an actual pixel of the original
+			// grid: with this grid contract an even-size grid samples its
+			// center at pixel size/2, so the reconstructed pixels coincide
+			// exactly with the original ones (a half-pixel midpoint would
+			// shift every column by step/2).
+			const glm::vec2 blockCenter = grid.worldAt(bx + kBlock / 2,
+													   bz + kBlock / 2);
+			const BiomeRegionGrid blockGrid = makeBiomeRegionGrid(
+				blockCenter.x, blockCenter.y, kStep, kBlock, kBlock);
+			std::vector<BiomeType> block;
+			CHECK(gen.getBiomeRegion(blockGrid, block), "block sampling must complete");
+			for (int z = 0; z < kBlock; ++z)
+				for (int x = 0; x < kBlock; ++x)
+					reference[static_cast<size_t>(bz + z) * kSize + (bx + x)] =
+						block[static_cast<size_t>(z) * kBlock + x];
+		}
+	}
+
+	{
+		size_t mismatches = 0;
+		for (int z = 0; z < kSize && mismatches < 5; ++z)
+			for (int x = 0; x < kSize && mismatches < 5; ++x)
+			{
+				const BiomeType a = tiled[static_cast<size_t>(z) * kSize + x];
+				const BiomeType b = reference[static_cast<size_t>(z) * kSize + x];
+				if (a != b)
+				{
+					++mismatches;
+					const glm::ivec2 col = grid.columnAt(x, z);
+					std::cerr << "MISMATCH pixel=(" << x << "," << z << ") world=("
+							  << grid.worldAt(x, z).x << "," << grid.worldAt(x, z).y
+							  << ") col=(" << col.x << "," << col.y << ") tiled="
+							  << biomeTypeString[a] << " dense=" << biomeTypeString[b]
+							  << " getBiomeAt=" << biomeTypeString[gen.getBiomeAt(col.x, col.y)]
+							  << '\n';
+				}
+			}
+		CHECK(mismatches == 0, "tiled output must be bit-for-bit identical to dense sub-queries");
+	}
+	std::cout << "biome region equivalence: " << kSize << "x" << kSize
+			  << " tiled output matches dense sub-queries bit-for-bit\n";
+}
+
+static void testBiomeRegionGridParity()
+{
+	// Even size: pixel size/2 samples the center exactly.
+	const BiomeRegionGrid even = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 4, 4);
+	CHECK(even.worldAt(2, 2) == glm::vec2(0.0f, 0.0f),
+		  "even size: pixel size/2 = center");
+	CHECK(even.worldAt(0, 0) == glm::vec2(-2.0f, -2.0f) &&
+			  even.worldAt(3, 3) == glm::vec2(1.0f, 1.0f),
+		  "even size: pixels sample -2, -1, 0, 1");
+
+	// Odd size: the center falls between the two central pixels.
+	const BiomeRegionGrid odd = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 5, 5);
+	CHECK(odd.worldAt(2, 2) == glm::vec2(-0.5f, -0.5f) &&
+			  odd.worldAt(3, 3) == glm::vec2(0.5f, 0.5f),
+		  "odd size: center straddled by pixels 2 and 3");
+	bool centerSampled = false;
+	for (int z = 0; z < 5; ++z)
+		for (int x = 0; x < 5; ++x)
+			centerSampled |= (odd.worldAt(x, z) == glm::vec2(0.0f, 0.0f));
+	CHECK(!centerSampled, "odd size: no pixel samples the center exactly");
+
+	std::cout << "BiomeRegionGrid parity: even center-on-pixel / odd center-between-pixels validated\n";
+}
+
+static void testBiomeRegionExtremeGridGuard()
+{
+	// Extreme grid parameters (absurd step) must not overflow the span math
+	// or the noise-domain translation: the call completes deterministically
+	// with clamped canonical columns.
+	TerrainGenerator gen(1337);
+	constexpr float kHugeStep = 1e20f;
+	const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, kHugeStep, 8, 8);
+
+	std::vector<BiomeType> first, second;
+	CHECK(gen.getBiomeRegion(grid, first), "extreme-step grid must complete");
+	CHECK(gen.getBiomeRegion(grid, second), "extreme-step grid must repeat");
+	CHECK(first == second, "extreme-step grid must be deterministic");
+	CHECK(first.size() == static_cast<size_t>(8) * 8, "extreme-step output size valid");
+
+	// Columns clamp toward the limit: pixels left of the center floor to a
+	// huge negative world (clamped to -limit), the center pixel itself maps
+	// to world 0 (column 0), and pixels right of it clamp to +limit.
+	for (int z = 0; z < 8; ++z)
+	{
+		for (int x = 1; x < 4; ++x)
+			CHECK(first[static_cast<size_t>(z) * 8 + x] == first[static_cast<size_t>(z) * 8],
+				  "negative-clamped half resolves consistently");
+		for (int x = 6; x < 8; ++x)
+			CHECK(first[static_cast<size_t>(z) * 8 + x] == first[static_cast<size_t>(z) * 8 + 5],
+				  "positive-clamped half resolves consistently");
+	}
+
+	std::cout << "biome region extreme grid: absurd step handled without overflow\n";
+}
+
+static void testBiomeRegionScratchRetention()
+{
+	TerrainGenerator gen(1337);
+
+	// Retention contract: after any attempt (or explicit trim), no scratch
+	// field may retain capacity above the tiled-path bound. Assert the
+	// bound, not an exact capacity — that is allocator-independent.
+	const auto checkBounded = [](const TerrainGenerator::BiomeRegionScratch &s) {
+		for (const std::vector<float> *field :
+			 {&s.temperature, &s.humidity, &s.weirdness, &s.river,
+			  &s.continental, &s.erosion, &s.peaksValleys, &s.ridge,
+			  &s.height, &s.erosionTemp})
+			CHECK(field->capacity() <= TerrainGenerator::kMaxTileDensePoints,
+				  "retained scratch capacity must stay within the tiled bound");
+	};
+
+	// Helper contract directly: oversized fields are released, while
+	// tiled-sized contents survive for reuse.
+	{
+		TerrainGenerator::BiomeRegionScratch s;
+		s.temperature.resize(TerrainGenerator::kMaxDenseDomainPoints); // oversized
+		s.height.resize(TerrainGenerator::kMaxTileDensePoints + 1);	  // oversized by one
+		s.erosion.resize(TerrainGenerator::kMaxTileDensePoints);	  // tiled-sized
+		s.trimOversizedCapacity();
+		checkBounded(s);
+		CHECK(s.erosion.size() == TerrainGenerator::kMaxTileDensePoints,
+			  "tiled-sized contents must be preserved by the trim");
+	}
+
+	// Dense build cancelled at the final checkpoint: the call failed, yet
+	// the oversized dense capacity must still have been released.
+	{
+		TerrainGenerator::BiomeRegionScratch scratch;
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 256, 256);
+		int polls = 0;
+		std::vector<BiomeType> biomes;
+		const bool completed = gen.getBiomeRegion(grid, biomes, &scratch,
+												  [&polls] { return ++polls >= 2; });
+		CHECK(!completed, "late-cancelled dense build must report interruption");
+		CHECK(biomes.empty(), "late-cancelled dense build must publish nothing");
+		CHECK(polls == 2, "late cancellation must poll before and after the dense pass");
+		checkBounded(scratch);
+	}
+
+	// Successful dense build: same retention invariant on the success path.
+	{
+		TerrainGenerator::BiomeRegionScratch scratch;
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 256, 256);
+		std::vector<BiomeType> biomes;
+		CHECK(gen.getBiomeRegion(grid, biomes, &scratch), "dense build must complete");
+		CHECK(biomes.size() == static_cast<size_t>(256) * 256, "dense output size valid");
+		checkBounded(scratch);
+	}
+
+	std::cout << "biome region scratch retention: oversized capacity trimmed after "
+			  << "success and cancellation, tiled-sized capacity preserved\n";
+}
+
+static void testBiomeMapGridMatchesPointQueries()
+{
+	// Terrain <-> UI cross test: the biome rendered at the player's map pixel
+	// must equal getBiomeAt() of the player's canonical voxel column whenever
+	// the nearest display pixel actually represents that column.
+	TerrainGenerator gen(1337);
+
+	struct GridCase
+	{
+		float centerX;
+		float centerZ;
+		float zoom;
+		int size;
+	};
+	constexpr GridCase kGrids[] = {
+		{0.0f, 0.0f, 1.0f, 33},        // odd size: center falls between two pixels
+		{0.0f, 0.0f, 0.5f, 32},        // step 2
+		{123.47f, -87.23f, 2.0f, 32},  // step 0.5, fractional center
+		{123.47f, -87.23f, 8.0f, 24},  // step 0.125, fractional center
+		{-0.5f, -1.25f, 1.0f, 32},     // negative near-zero center
+		{500.0f, -500.0f, 0.25f, 32},  // step 4
+	};
+
+	constexpr glm::vec2 kPlayers[] = {
+		{0.0f, 0.0f}, {0.5f, -0.5f}, {-0.1f, 0.1f}, {-0.99f, -0.01f},
+		{123.60f, -87.20f}, {-15.10f, 44.80f}, {100.3f, 200.7f},
+		{0.0f, -0.1f}, {16.0f, -16.0f},
+	};
+
+	int checked = 0;
+	for (const auto &gc : kGrids)
+	{
+		const BiomeRegionGrid grid =
+			makeBiomeRegionGrid(gc.centerX, gc.centerZ, 1.0f / gc.zoom, gc.size, gc.size);
+		std::vector<BiomeType> region;
+		CHECK(gen.getBiomeRegion(grid, region), "grid sampling must complete");
+
+		for (const glm::vec2 &player : kPlayers)
+		{
+			const glm::ivec2 pixel = grid.pixelForWorld(player);
+			if (pixel.x < 0 || pixel.y < 0 ||
+				pixel.x >= grid.width || pixel.y >= grid.height)
+				continue; // marker outside the map is simply not drawn
+
+			const glm::ivec2 column = worldToVoxelColumn(player);
+			// The display pixel represents the player's column only when the
+			// pixel's own world position floors to the same column.
+			if (grid.columnAt(pixel.x, pixel.y) != column)
+				continue;
+
+			const BiomeType mapBiome =
+				region[static_cast<size_t>(pixel.y) * grid.width + pixel.x];
+			const BiomeType pointBiome = gen.getBiomeAt(column.x, column.y);
+			CHECK(mapBiome == pointBiome,
+				  "map pixel under the player marker must match getBiomeAt (grid="
+					  << gc.centerX << "," << gc.centerZ << " zoom=" << gc.zoom
+					  << " player=" << player.x << "," << player.y
+					  << " map=" << biomeTypeString[mapBiome]
+					  << " point=" << biomeTypeString[pointBiome] << ")");
+			++checked;
+		}
+
+		// Pixel walk: place the player exactly at each (strided) pixel's world
+		// position — a fractional position whenever center/step are fractional.
+		// The nearest display pixel then always represents the player's column,
+		// so every visited pair must agree.
+		for (int z = 0; z < grid.height; z += 5)
+		{
+			for (int x = 0; x < grid.width; x += 5)
+			{
+				const glm::vec2 player = grid.worldAt(x, z);
+				const glm::ivec2 pixel = grid.pixelForWorld(player);
+				CHECK(pixel == glm::ivec2(x, z), "player at pixel world maps back to the pixel");
+
+				const glm::ivec2 column = worldToVoxelColumn(player);
+				CHECK(grid.columnAt(x, z) == column,
+					  "pixel column equals player floor column");
+				const BiomeType mapBiome =
+					region[static_cast<size_t>(z) * grid.width + x];
+				const BiomeType pointBiome = gen.getBiomeAt(column.x, column.y);
+				CHECK(mapBiome == pointBiome,
+					  "pixel-walk map biome must match getBiomeAt (zoom="
+						  << gc.zoom << " pixel=" << x << "," << z << ")");
+				++checked;
+			}
+		}
+	}
+	CHECK(checked > 50, "cross test exercised enough pixel/column pairs");
+
+	std::cout << "terrain/UI cross: " << checked
+			  << " player pixel/column pairs agree between biome map and getBiomeAt\n";
+}
+
+static void testBiomeRegionMultiStepAndZoomConsistency()
+{
+	using Clock = std::chrono::steady_clock;
+	constexpr int kTestSeeds[] = {1337, 42};
+	constexpr float kZoomLevels[] = {0.1f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
+
+	struct TestCase
+	{
+		float centerX;
+		float centerZ;
+		int width;
+		int height;
+		const char *description;
+	};
+
+	const TestCase kCases[] = {
+		{0.0f, 0.0f, 32, 32, "origin centered"},
+		{123.47f, -87.23f, 32, 32, "fractional coordinates"},
+		{-0.5f, -1.25f, 32, 32, "near zero negative transition"},
+		{-16.0f, -15.75f, 32, 32, "chunk boundary negative transition"},
+		{500.0f, -500.0f, 48, 48, "large coordinate non-power-of-two"}
+	};
+
+	int totalPixelsVerified = 0;
+	int totalUniqueChunks = 0;
+
+	for (int seed : kTestSeeds)
+	{
+		TerrainGenerator gen(seed);
+
+		for (float zoom : kZoomLevels)
+		{
+			const float step = 1.0f / zoom;
+
+			for (const auto &tc : kCases)
+			{
+				const BiomeRegionGrid grid =
+					makeBiomeRegionGrid(tc.centerX, tc.centerZ, step, tc.width, tc.height);
+				std::vector<BiomeType> region;
+				CHECK(gen.getBiomeRegion(grid, region),
+					  "region sampling must complete (seed=" << seed << " zoom=" << zoom << ")");
+
+				CHECK(region.size() == static_cast<size_t>(tc.width * tc.height),
+					  "region size must match requested dimensions");
+
+				for (int zi = 0; zi < tc.height; ++zi)
+				{
+					for (int xi = 0; xi < tc.width; ++xi)
+					{
+						const glm::ivec2 col = grid.columnAt(xi, zi);
+						const BiomeType expectedBiome = gen.getBiomeAt(col.x, col.y);
+						const BiomeType actualBiome = region[zi * tc.width + xi];
+
+						CHECK(actualBiome == expectedBiome,
+							  "region pixel must match getBiomeAt (seed=" << seed
+							  << " zoom=" << zoom << " step=" << step
+							  << " case=" << tc.description
+							  << " pixel=(" << xi << "," << zi << ")"
+							  << " col=(" << col.x << "," << col.y << ")"
+							  << " expected=" << biomeTypeString[expectedBiome]
+							  << " got=" << biomeTypeString[actualBiome] << ")");
+
+						++totalPixelsVerified;
+					}
+				}
+
+				// If step < 1.0, verify sub-block discretization:
+				// adjacent pixels mapping to the same discrete column must have identical biomes
+				if (step < 1.0f)
+				{
+					for (int zi = 0; zi < tc.height; ++zi)
+					{
+						for (int xi = 0; xi < tc.width - 1; ++xi)
+						{
+							const glm::ivec2 colA = grid.columnAt(xi, zi);
+							const glm::ivec2 colB = grid.columnAt(xi + 1, zi);
+							if (colA == colB)
+							{
+								CHECK(region[zi * tc.width + xi] == region[zi * tc.width + (xi + 1)],
+									  "adjacent pixels on the same column must match");
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Direct chunk comparison for integer steps (step = 1.0, 2.0, 4.0).
+		// Chunks are cached so every unique chunk is generated exactly once
+		// instead of once per pixel.
+		for (float step : {1.0f, 2.0f, 4.0f})
+		{
+			constexpr int kSize = 16;
+			const int originChunkX = -16;
+			const int originChunkZ = -16;
+			const float cx = static_cast<float>(originChunkX) + kSize * step * 0.5f;
+			const float cz = static_cast<float>(originChunkZ) + kSize * step * 0.5f;
+
+			const BiomeRegionGrid grid = makeBiomeRegionGrid(cx, cz, step, kSize, kSize);
+			std::vector<BiomeType> region;
+			CHECK(gen.getBiomeRegion(grid, region), "integer-step region sampling must complete");
+
+			std::map<std::pair<int, int>, ChunkData> chunkCache;
+			auto getCachedChunk = [&](int chX, int chZ) -> const ChunkData & {
+				const auto it = chunkCache.find({chX, chZ});
+				if (it != chunkCache.end())
+					return it->second;
+				return chunkCache.emplace(std::make_pair(chX, chZ),
+										  gen.generateChunk(chX, chZ))
+					.first->second;
+			};
+
+			for (int zi = 0; zi < kSize; ++zi)
+			{
+				for (int xi = 0; xi < kSize; ++xi)
+				{
+					const glm::ivec2 col = grid.columnAt(xi, zi);
+
+					// Determine which chunk contains this column
+					const int chX = (col.x >= 0) ? (col.x / CHUNK_SIZE) * CHUNK_SIZE
+												 : ((col.x - (CHUNK_SIZE - 1)) / CHUNK_SIZE) * CHUNK_SIZE;
+					const int chZ = (col.y >= 0) ? (col.y / CHUNK_SIZE) * CHUNK_SIZE
+												 : ((col.y - (CHUNK_SIZE - 1)) / CHUNK_SIZE) * CHUNK_SIZE;
+					const int lx = col.x - chX;
+					const int lz = col.y - chZ;
+
+					const ChunkData &chunk = getCachedChunk(chX, chZ);
+					const BiomeType chunkBiome = chunk.biomes[lz * CHUNK_SIZE + lx];
+					CHECK(region[zi * kSize + xi] == chunkBiome,
+						  "region pixel for integer step must match chunk data");
+				}
+			}
+
+			totalUniqueChunks = std::max(totalUniqueChunks,
+										 static_cast<int>(chunkCache.size()));
+		}
+	}
+
+	// Performance/informational benchmark on a realistic 256x256 UI map.
+	// Not a CI wall-clock gate: printed for calibration and manual regression
+	// tracking across zoom levels (docs/terrain-generation.md).
+	{
+		TerrainGenerator gen(1337);
+		std::vector<BiomeType> fullMap;
+		constexpr int kMapDim = 256;
+		for (float zoom : {0.1f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f})
+		{
+			const float step = 1.0f / zoom;
+			const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, step, kMapDim, kMapDim);
+			TerrainGenerator::BiomeRegionStats stats;
+			const auto tStart = Clock::now();
+			const bool ok = gen.getBiomeRegion(grid, fullMap, nullptr, {}, &stats);
+			const double ms = std::chrono::duration<double, std::milli>(Clock::now() - tStart).count();
+			CHECK(ok && fullMap.size() == static_cast<size_t>(kMapDim) * kMapDim,
+				  "256x256 map output size valid");
+			std::cout << "  [UI Map Perf] zoom=" << zoom << " (step=" << step << "): "
+					  << ms << " ms (" << (kMapDim * kMapDim / (ms * 1000.0)) << " Mpixels/sec)"
+					  << " denseTiles=" << stats.denseTiles
+					  << " fallbackPixels=" << stats.fallbackPixels
+					  << " peakScratchBytes=" << stats.peakScratchBytes
+					  << " avgMsPerTile=" << (stats.denseTiles ? ms / static_cast<double>(stats.denseTiles) : ms)
+					  << '\n';
+			// Deterministic (not wall-clock) regression gate: every UI map
+			// zoom must stay on the vectorized dense tile path.
+			CHECK(stats.fallbackPixels == 0,
+				  "UI map sampling must not fall back to point queries");
+		}
+	}
+
+	std::cout << "biome region multi-step consistency: " << totalPixelsVerified
+			  << " pixels verified across all zoom levels, steps, and fractional coordinates ("
+			  << totalUniqueChunks << " unique chunks generated via cache)\n";
+}
+
 // ---------------------------------------------------------------------------
 
 int main(int argc, char **argv)
@@ -1433,6 +2292,17 @@ int main(int argc, char **argv)
 	testBorderTrunks();
 	testFlatRiverChannels();
 	testBiomeRegistry();
+	testBiomeQueryConsistency();
+	testWorldToVoxelColumnConvention();
+	testBiomeRegionGridMapping();
+	testBiomeRegionGridParity();
+	testBiomeRegionCancellationAndStats();
+	testBiomeRegionDeterminism();
+	testBiomeRegionDenseTiledEquivalence();
+	testBiomeRegionScratchRetention();
+	testBiomeRegionExtremeGridGuard();
+	testBiomeMapGridMatchesPointQueries();
+	testBiomeRegionMultiStepAndZoomConsistency();
 	testPhase3BiomePresence();
 	testPhase3FeatureBlocks();
 	testOasisPonds();

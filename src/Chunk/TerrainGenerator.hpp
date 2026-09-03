@@ -2,11 +2,14 @@
 
 #include <FastNoise/FastNoise.h>
 #include <array>
+#include <functional>
 #include <glm/glm.hpp>
 #include <unordered_map>
 #include <memory>
+#include <cstdint>
 
 #include <utils.hpp>
+#include <Chunk/BiomeRegionGrid.hpp>
 
 struct ChunkData
 {
@@ -87,14 +90,88 @@ public:
   // Getter for seed to enable thread-safe generation
   int getSeed() const { return m_seed; }
 
-  // Get biome at world position (for cross-chunk queries)
+  // Get biome at world position (for cross-chunk queries). Equivalent to
+  // the biome stored in the generated chunk containing (worldX, worldZ).
   BiomeType getBiomeAt(int worldX, int worldZ) const;
 
-  // Batch biome sampling for map visualization (uses GenUniformGrid2D for SIMD efficiency).
-  // centerX/Z are world-space coordinates, step is world units per pixel,
-  // width/height are the output dimensions. outBiomes is filled in row-major order.
-  void getBiomeRegion(float centerX, float centerZ, float step,
-                      int width, int height, std::vector<BiomeType> &outBiomes) const;
+  // Optional early-exit hook polled between region tiles; return true to
+  // cancel. Kept as a lightweight std::function so TerrainGenerator stays
+  // decoupled from any specific threading primitive. getBiomeRegion() runs
+  // its tiles sequentially on the calling thread, so no extra
+  // synchronization is required of the callable.
+  using BiomeCancelCheck = std::function<bool()>;
+
+  // Scratch working set for one getBiomeRegion() call. Owned by the caller
+  // so heavy capacity is not retained indefinitely inside TerrainGenerator's
+  // shared thread-local chunk buffers. Reuse one scratch per producer job
+  // (e.g. the biome-map worker) to avoid re-allocating between refreshes.
+  struct BiomeRegionScratch
+  {
+    std::vector<float> temperature;
+    std::vector<float> humidity;
+    std::vector<float> weirdness;
+    std::vector<float> river;
+    std::vector<float> continental;
+    std::vector<float> erosion;
+    std::vector<float> peaksValleys;
+    std::vector<float> ridge;
+    std::vector<float> height;
+    std::vector<float> erosionTemp;
+
+    // Releases capacity above the tiled-path bound. getBiomeRegion() runs
+    // this automatically on every exit — after successful AND
+    // cancelled/failed attempts — so oversized dense capacity is never
+    // retained across attempts while tiled-sized capacity survives for
+    // cheap reuse. Call it manually only when mutating a scratch outside
+    // getBiomeRegion().
+    void trimOversizedCapacity();
+  };
+
+  // Domain point-count bounds. No region buffer may exceed these without an
+  // explicit fallback path; kMaxDenseDomainPoints bounds the single-pass
+  // scratch (~10 MiB across all 10 float fields), kMaxTileDensePoints the
+  // per-tile scratch (~68 KB per field).
+  static constexpr size_t kMaxDenseDomainPoints = 516 * 516;
+  static constexpr size_t kMaxTileDensePoints = 132 * 132;
+  static constexpr size_t kBiomeRegionScratchFields = 10;
+
+  // Counters describing how a getBiomeRegion() call was executed.
+  struct BiomeRegionStats
+  {
+    uint64_t denseTiles{0};      // tiles processed by the vectorized dense path
+    uint64_t fallbackPixels{0};  // pixels evaluated by point-query fallback
+    size_t peakDensePoints{0};   // largest dense domain sampled in one shot
+    size_t peakScratchBytes{0};  // peakDensePoints * fields * sizeof(float)
+  };
+
+  // Batch biome sampling for map visualization. `grid` is the single source
+  // of truth for the pixel <-> world <-> voxel-column mapping (see
+  // BiomeRegionGrid.hpp). Output is row-major, outBiomes[grid.width * z + x].
+  // The canonical block-resolution pipeline (incl. erosion at step = 1.0f) is
+  // independent of grid.step: the grid only selects which canonical columns
+  // are sampled. Runs sequentially on the calling thread; tiles are sampled
+  // in a fixed order so the result is deterministic and the scheduler only
+  // decides when the whole call runs, not what it produces. Returns false
+  // (and clears outBiomes) when the grid is invalid or `shouldCancel`
+  // returned true; partial results are never returned. On every exit —
+  // success, cancellation, failure, or exception — the scratch is trimmed
+  // to the tiled-path bound, so oversized dense capacity is never retained
+  // across attempts. `outStats` is optional. `scratch` may be null, in
+  // which case a dedicated internal thread-local scratch is used; pass a
+  // caller-owned scratch to control memory retention (see
+  // BiomeRegionScratch).
+  bool getBiomeRegion(const BiomeRegionGrid &grid,
+                      std::vector<BiomeType> &outBiomes,
+                      BiomeRegionScratch *scratch = nullptr,
+                      const BiomeCancelCheck &shouldCancel = {},
+                      BiomeRegionStats *outStats = nullptr) const;
+
+  // Convenience overload building the grid from explicit parameters.
+  bool getBiomeRegion(float centerX, float centerZ, float step,
+                      int width, int height,
+                      std::vector<BiomeType> &outBiomes,
+                      const BiomeCancelCheck &shouldCancel = {},
+                      BiomeRegionStats *outStats = nullptr) const;
 
   // Get biome configuration
   static const BiomeConfig &getBiomeConfig(BiomeType biome);
@@ -192,6 +269,40 @@ private:
                       float ridge, float riverVal, float weirdness) const;
   float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge, float riverVal, float weirdness) const;
   void applyErosion(float *heightMap, int size) const;
+  void applyCanonicalErosion(float *heightMap, int width, int height, float *tempBuffer = nullptr) const;
+
+  // Shared canonical column pipeline stages
+  struct TerrainColumnBuffers
+  {
+    float *continental{nullptr};
+    float *erosion{nullptr};
+    float *peaksValleys{nullptr};
+    float *ridge{nullptr};
+    float *temperature{nullptr};
+    float *humidity{nullptr};
+    float *weirdness{nullptr};
+    float *river{nullptr};
+    float *heightMap{nullptr};
+    float *erosionTemp{nullptr};
+  };
+
+  void sampleTerrainColumnFields(
+      const TerrainColumnBuffers &buffers,
+      int extStartX, int extStartZ,
+      int extWidth, int extHeight,
+      float step = 1.0f) const;
+
+  void calculateTerrainHeights(
+      const TerrainColumnBuffers &buffers,
+      int extWidth, int extHeight) const;
+
+  BiomeType evaluateBiomeAt(
+      const TerrainColumnBuffers &buffers,
+      int extIndex) const;
+
+  // Canonical column biome evaluation primitive (5x5 halo window at
+  // step = 1.0f). Private: external callers must use getBiomeAt().
+  BiomeType evaluateBiomeColumn(int worldX, int worldZ) const;
 
   // Biome determination
   BiomeType determineBiome(float temperature, float humidity, float weirdness,

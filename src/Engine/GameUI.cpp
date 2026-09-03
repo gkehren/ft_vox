@@ -259,8 +259,9 @@ void GameUI::drawHud(GameUIFrame &frame)
 
 		if (frame.generator)
 		{
-			const BiomeType biome = frame.generator->getBiomeAt(
-				static_cast<int>(std::floor(p.x)), static_cast<int>(std::floor(p.z)));
+			// Single canonical world -> voxel-column convention (floor).
+			const glm::ivec2 column = worldToVoxelColumn(glm::vec2(p.x, p.z));
+			const BiomeType biome = frame.generator->getBiomeAt(column.x, column.y);
 			if (biome >= 0 && biome < BIOME_COUNT)
 				ImGui::Text("Biome: %s", biomeTypeString[biome]);
 		}
@@ -1279,7 +1280,7 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 
 		if (isBiomeMapResultAcceptable(res, frame.worldGenerationId, frame.seed, m_mapRequestId))
 		{
-			paintBiomeMapPlayerDot(res.rgba, res.size, playerXZ, res.zoom, res.gridX, res.gridZ);
+			paintBiomeMapPlayerDot(res.rgba, res.grid, playerXZ);
 			m_mapCenter = res.center;
 			ensureBiomeTexture(res.size);
 			m_pendingUpload = BiomeMapUpload{
