@@ -38,7 +38,7 @@ struct WorkerBucket
 	const char *name{nullptr};
 	mutable std::mutex mutex;
 	uint64_t count{0};
-	uint64_t totalUs{0}; // microseconds for precision under atomics
+	uint64_t totalUs{0}; // microseconds for sub-millisecond precision
 
 	WorkerBucket() = default;
 	WorkerBucket(const WorkerBucket &o)
