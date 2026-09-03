@@ -22,7 +22,13 @@ For engine loop, streaming, and world generation, see [`engine-architecture.md`]
 | Passes | Shadow → opaque (+ overlays) → water → sky → post | `Renderer/*Pass*`, `PostStack`, `OverlayRenderer` |
 | Shaders | GLSL → SPIR-V offline | `ressources/shaders/vulkan/` |
 
-**API target:** Vulkan **1.2+**, dynamic rendering preferred. On Apple, **MoltenVK** via ICD (`VK_ICD_FILENAMES`). Depth is **zero-to-one** (`GLM_FORCE_DEPTH_ZERO_TO_ONE`); viewport Y may be flipped for OpenGL-style world Y without winding flip.
+**API target:** Vulkan **1.2+**, with required dynamic rendering provided by
+`VK_KHR_dynamic_rendering` on Vulkan 1.2 or by the core API on Vulkan 1.3+.
+The selected path is based on the application API target as well as the device
+version, and its entry points are validated immediately after loading the
+device. On Apple, **MoltenVK** is selected via ICD (`VK_ICD_FILENAMES`). Depth
+is **zero-to-one** (`GLM_FORCE_DEPTH_ZERO_TO_ONE`); viewport Y may be flipped
+for OpenGL-style world Y without winding flip.
 
 **Rendering model:** Forward-style world passes into **HDR + depth** (and god-ray source), then fullscreen post to the swapchain. No deferred G-buffer.
 

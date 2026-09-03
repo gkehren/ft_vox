@@ -70,6 +70,14 @@ int main()
 	{
 		VkContext context;
 		context.init(window);
+		if (!context.hasDynamicRendering() ||
+			((!vkCmdBeginRendering && !vkCmdBeginRenderingKHR) ||
+			 (!vkCmdEndRendering && !vkCmdEndRenderingKHR)))
+		{
+			throw std::runtime_error(
+				"dynamic rendering feature or entry points unavailable");
+		}
+		std::cout << "PASS: dynamic rendering feature + entry points\n";
 
 		const SwapchainSupportDetails support = VkSwapchain::querySupport(
 			context.getPhysicalDevice(), context.getSurface());
