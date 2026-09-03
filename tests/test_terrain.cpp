@@ -1412,6 +1412,174 @@ static int runWorldStats(int argc, char **argv)
 	return 0;
 }
 
+static void testBiomeQueryConsistency()
+{
+	constexpr int kTestSeeds[] = {1337, 42, 9001};
+	const std::vector<std::pair<int, int>> kStaticCoords = {
+		{0, 0},
+		{CHUNK_SIZE, 0},
+		{0, CHUNK_SIZE},
+		{CHUNK_SIZE, CHUNK_SIZE},
+		{-CHUNK_SIZE, 0},
+		{0, -CHUNK_SIZE},
+		{-CHUNK_SIZE, -CHUNK_SIZE},
+		{-160, -80},
+		{-320, 4000},
+		{128, -256}
+	};
+
+	bool sawRiver = false;
+	bool sawMountain = false;
+	bool sawCoastOrOcean = false;
+	bool sawRareOrDesert = false;
+	int totalColumnsChecked = 0;
+
+	for (int seed : kTestSeeds)
+	{
+		TerrainGenerator gen(seed);
+		std::vector<std::pair<int, int>> chunkCoords = kStaticCoords;
+
+		// Scan a grid to locate coordinates specifically hitting mountain, river, coast, and rare biomes
+		bool foundMountainCoord = false;
+		bool foundRiverCoord = false;
+		bool foundCoastCoord = false;
+		bool foundRareCoord = false;
+
+		for (int cz = -20; cz <= 20 && (!foundMountainCoord || !foundRiverCoord || !foundCoastCoord || !foundRareCoord); cz += 3)
+		{
+			for (int cx = -20; cx <= 20 && (!foundMountainCoord || !foundRiverCoord || !foundCoastCoord || !foundRareCoord); cx += 3)
+			{
+				const int wx = cx * CHUNK_SIZE;
+				const int wz = cz * CHUNK_SIZE;
+				const BiomeType b = gen.getBiomeAt(wx, wz);
+				if (!foundMountainCoord && isMountainBiomeForTest(b))
+				{
+					chunkCoords.push_back({wx, wz});
+					foundMountainCoord = true;
+				}
+				if (!foundRiverCoord && (b == BIOME_RIVER || b == BIOME_FROZEN_RIVER))
+				{
+					chunkCoords.push_back({wx, wz});
+					foundRiverCoord = true;
+				}
+				if (!foundCoastCoord && (b == BIOME_BEACH || b == BIOME_OCEAN || b == BIOME_FROZEN_OCEAN))
+				{
+					chunkCoords.push_back({wx, wz});
+					foundCoastCoord = true;
+				}
+				if (!foundRareCoord && (b == BIOME_BADLANDS || b == BIOME_OASIS || b == BIOME_MUSHROOM_FIELDS || b == BIOME_ICE_SPIKES))
+				{
+					chunkCoords.push_back({wx, wz});
+					foundRareCoord = true;
+				}
+			}
+		}
+
+		for (const auto &[chunkX, chunkZ] : chunkCoords)
+		{
+			ChunkData chunk = gen.generateChunk(chunkX, chunkZ);
+
+			// 1. Point query consistency: getBiomeAt vs chunkData.biomes
+			for (int lz = 0; lz < CHUNK_SIZE; ++lz)
+			{
+				for (int lx = 0; lx < CHUNK_SIZE; ++lx)
+				{
+					const int col = lz * CHUNK_SIZE + lx;
+					const int wx = chunkX + lx;
+					const int wz = chunkZ + lz;
+
+					const BiomeType chunkBiome = chunk.biomes[col];
+					const BiomeType pointBiome = gen.getBiomeAt(wx, wz);
+					CHECK(chunkBiome == pointBiome,
+						  "getBiomeAt must match chunk biomes exactly (seed=" << seed
+						  << " wx=" << wx << " wz=" << wz
+						  << " expected=" << biomeTypeString[chunkBiome]
+						  << " got=" << biomeTypeString[pointBiome] << ")");
+
+					if (chunkBiome == BIOME_RIVER || chunkBiome == BIOME_FROZEN_RIVER)
+						sawRiver = true;
+					if (isMountainBiomeForTest(chunkBiome))
+						sawMountain = true;
+					if (chunkBiome == BIOME_BEACH || chunkBiome == BIOME_OCEAN || chunkBiome == BIOME_FROZEN_OCEAN)
+						sawCoastOrOcean = true;
+					if (chunkBiome == BIOME_BADLANDS || chunkBiome == BIOME_OASIS || chunkBiome == BIOME_MUSHROOM_FIELDS || chunkBiome == BIOME_ICE_SPIKES)
+						sawRareOrDesert = true;
+
+					++totalColumnsChecked;
+				}
+			}
+
+			// 2. Region query consistency for single chunk: getBiomeRegion vs chunkData.biomes
+			const float centerX = static_cast<float>(chunkX) + CHUNK_SIZE * 0.5f;
+			const float centerZ = static_cast<float>(chunkZ) + CHUNK_SIZE * 0.5f;
+			std::vector<BiomeType> region;
+			gen.getBiomeRegion(centerX, centerZ, 1.0f, CHUNK_SIZE, CHUNK_SIZE, region);
+			CHECK(region.size() == static_cast<size_t>(CHUNK_SIZE * CHUNK_SIZE),
+				  "region size should match chunk columns");
+
+			for (int lz = 0; lz < CHUNK_SIZE; ++lz)
+			{
+				for (int lx = 0; lx < CHUNK_SIZE; ++lx)
+				{
+					const int col = lz * CHUNK_SIZE + lx;
+					CHECK(region[col] == chunk.biomes[col],
+						  "getBiomeRegion must match chunk biomes exactly (seed=" << seed
+						  << " chunk=(" << chunkX << "," << chunkZ << ")"
+						  << " lx=" << lx << " lz=" << lz
+						  << " expected=" << biomeTypeString[chunk.biomes[col]]
+						  << " got=" << biomeTypeString[region[col]] << ")");
+				}
+			}
+		}
+
+		// 3. Multi-chunk contiguous region query covering 3x3 chunks across chunk boundaries and negatives
+		constexpr int kGridChunks = 3;
+		constexpr int kRegionDim = kGridChunks * CHUNK_SIZE; // 48x48 blocks
+		const int originChunkX = -CHUNK_SIZE;
+		const int originChunkZ = -CHUNK_SIZE;
+		const float regionCenterX = static_cast<float>(originChunkX) + kRegionDim * 0.5f;
+		const float regionCenterZ = static_cast<float>(originChunkZ) + kRegionDim * 0.5f;
+
+		std::vector<BiomeType> largeRegion;
+		gen.getBiomeRegion(regionCenterX, regionCenterZ, 1.0f, kRegionDim, kRegionDim, largeRegion);
+		CHECK(largeRegion.size() == static_cast<size_t>(kRegionDim * kRegionDim),
+			  "largeRegion size must match 48x48");
+
+		for (int cz = 0; cz < kGridChunks; ++cz)
+		{
+			for (int cx = 0; cx < kGridChunks; ++cx)
+			{
+				const int chunkX = originChunkX + cx * CHUNK_SIZE;
+				const int chunkZ = originChunkZ + cz * CHUNK_SIZE;
+				ChunkData chunk = gen.generateChunk(chunkX, chunkZ);
+
+				for (int lz = 0; lz < CHUNK_SIZE; ++lz)
+				{
+					for (int lx = 0; lx < CHUNK_SIZE; ++lx)
+					{
+						const int chunkCol = lz * CHUNK_SIZE + lx;
+						const int regX = cx * CHUNK_SIZE + lx;
+						const int regZ = cz * CHUNK_SIZE + lz;
+						const int regCol = regZ * kRegionDim + regX;
+
+						CHECK(largeRegion[regCol] == chunk.biomes[chunkCol],
+							  "multi-chunk getBiomeRegion must match chunkData.biomes across boundaries");
+						CHECK(largeRegion[regCol] == gen.getBiomeAt(chunkX + lx, chunkZ + lz),
+							  "multi-chunk getBiomeRegion must match getBiomeAt across boundaries");
+					}
+				}
+			}
+		}
+	}
+
+	CHECK(sawRiver, "test coverage includes river biomes");
+	CHECK(sawMountain, "test coverage includes mountain biomes");
+	CHECK(sawCoastOrOcean, "test coverage includes coast or ocean biomes");
+	CHECK(sawRareOrDesert, "test coverage includes rare or badlands biomes");
+	std::cout << "biome query consistency: " << totalColumnsChecked
+			  << " columns verified identical across generateChunk, getBiomeAt, and getBiomeRegion\n";
+}
+
 // ---------------------------------------------------------------------------
 
 int main(int argc, char **argv)
@@ -1433,6 +1601,7 @@ int main(int argc, char **argv)
 	testBorderTrunks();
 	testFlatRiverChannels();
 	testBiomeRegistry();
+	testBiomeQueryConsistency();
 	testPhase3BiomePresence();
 	testPhase3FeatureBlocks();
 	testOasisPonds();

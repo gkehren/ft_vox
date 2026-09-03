@@ -13,16 +13,21 @@ Phases 0–5. High-level engine ownership remains documented in
   fluids identically.
 - Features with horizontal reach are evaluated from the deterministic
   `MAX_TREE_RADIUS` candidate halo.
+- Biome queries (single-point `getBiomeAt` and block-resolution `getBiomeRegion`
+  with step=1.0) use the canonical erosion-aware pipeline with a halo of at least
+  2 cells, guaranteeing identical biome selection to generated chunk columns.
 - GPU upload and destruction are not part of terrain generation and remain on
   the main thread.
 
 ## Pipeline
 
-1. Batch the 2D terrain and climate graphs over a 28×28 extended window.
+1. Batch the 2D terrain and climate graphs over an extended window (halo >= 2;
+   chunks use 28×28 with halo=6 to cover the vegetation candidate ring).
 2. Calculate continuous heights and apply one deterministic thermal-erosion
-   pass.
+   pass at block resolution.
 3. Select biomes from terrain band, temperature, humidity, weirdness, erosion,
-   relief, and river values.
+   relief, and river values. (Point and block-resolution region queries share
+   this exact erosion-aware pipeline.)
 4. Produce the 16×16 core height/color data and bounded 3D noise ranges.
 5. Fill voxel columns, carve caves, and assign deterministic aquifer fluids.
 6. Place depth- and biome-aware ore veins.
@@ -147,4 +152,18 @@ be misleading as full collidable cubes.
 
 The regular `test_terrain` run additionally checks multi-thread and generation
 order determinism, chunk-border continuity, aquatic features, cave fluids,
-ore ranges, feature bounds, bedrock, and block identifiers.
+ore ranges, feature bounds, bedrock, block identifiers, and cross-API
+biome consistency.
+
+## Biome Query Invariants
+
+Biome sampling is unified across the engine via a canonical erosion-aware pipeline:
+1. Sample the 2D terrain and climate noise graphs over the requested region padded with an erosion halo (minimum 2 cells).
+2. Calculate continuous heights via `calculateHeightFloat`.
+3. Apply deterministic thermal erosion (`applyErosion`) at block resolution (`step = 1.0`).
+4. Select biomes using `determineBiome` with post-erosion height and clamped parameters.
+
+- **Point queries (`getBiomeAt(worldX, worldZ)`)**: Samples a 5×5 cell window (halo = 2) centered on the world column, running thermal erosion on the neighborhood. This guarantees bit-for-bit equivalence with chunk generation without heap allocations.
+- **Region queries (`getBiomeRegion(...)`)**: Batch-samples uniform grids with halo = 2 padding. At block resolution (`step = 1.0`), output matches `generateChunk` and `getBiomeAt` across chunk borders.
+- **UI consistency**: The HUD biome label and the World / Biome map cannot disagree with loaded chunks for matching coordinates.
+

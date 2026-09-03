@@ -592,6 +592,8 @@ struct GenBuffers
   std::vector<float> erosionBuf;
   std::vector<float> pvBuf;
   std::vector<float> ridgeBuf;
+  std::vector<float> heightBuf;
+  std::vector<float> erosionTempBuf;
 
   // Persistent generator to avoid expensive setup every chunk
   std::unique_ptr<TerrainGenerator> generator;
@@ -766,6 +768,77 @@ ChunkData TerrainGenerator::generateChunkProfiled(
   }
 }
 
+void TerrainGenerator::sampleTerrainColumnNoiseAndHeights(
+    const TerrainColumnBuffers &buffers,
+    int extStartX, int extStartZ,
+    int extWidth, int extHeight,
+    float step) const
+{
+  using Clock = std::chrono::steady_clock;
+  const auto noise2DStart =
+      m_activeProfile ? Clock::now() : Clock::time_point{};
+
+  m_continentalNoise->GenUniformGrid2D(buffers.continental, extStartX, extStartZ,
+                                       extWidth, extHeight, step, m_seed);
+  m_erosionNoise->GenUniformGrid2D(buffers.erosion, extStartX, extStartZ,
+                                   extWidth, extHeight, step, m_seed + 1000);
+  m_peaksValleysNoise->GenUniformGrid2D(buffers.peaksValleys, extStartX, extStartZ,
+                                        extWidth, extHeight, step, m_seed + 2000);
+  m_ridgeNoise->GenUniformGrid2D(buffers.ridge, extStartX, extStartZ,
+                                 extWidth, extHeight, step, m_seed + 3000);
+  m_temperatureNoise->GenUniformGrid2D(buffers.temperature, extStartX, extStartZ,
+                                       extWidth, extHeight, step, m_seed + 6000);
+  m_humidityNoise->GenUniformGrid2D(buffers.humidity, extStartX, extStartZ,
+                                    extWidth, extHeight, step, m_seed + 7000);
+  m_weirdnessNoise->GenUniformGrid2D(buffers.weirdness, extStartX, extStartZ,
+                                     extWidth, extHeight, step, m_seed + 8000);
+  m_riverNoise->GenUniformGrid2D(buffers.river, extStartX, extStartZ,
+                                 extWidth, extHeight, step, m_seed + 9000);
+
+  if (m_activeProfile)
+    m_activeProfile->noise2DMs +=
+        std::chrono::duration<double, std::milli>(Clock::now() - noise2DStart)
+            .count();
+
+  const int totalPoints = extWidth * extHeight;
+  for (int i = 0; i < totalPoints; ++i)
+  {
+    buffers.heightMap[i] = calculateHeightFloat(
+        buffers.continental[i], buffers.erosion[i],
+        buffers.peaksValleys[i], buffers.ridge[i],
+        buffers.river[i], buffers.weirdness[i]);
+  }
+
+  if (step == 1.0f)
+  {
+    const auto erosionStart =
+        m_activeProfile ? Clock::now() : Clock::time_point{};
+    applyErosion(buffers.heightMap, extWidth, extHeight, buffers.erosionTemp);
+    if (m_activeProfile)
+      m_activeProfile->erosionMs +=
+          std::chrono::duration<double, std::milli>(Clock::now() - erosionStart)
+              .count();
+  }
+}
+
+BiomeType TerrainGenerator::evaluateBiomeAt(
+    const TerrainColumnBuffers &buffers,
+    int extIndex) const
+{
+  const float continental = std::clamp(buffers.continental[extIndex], -1.0f, 1.0f);
+  const float temperature = std::clamp(buffers.temperature[extIndex], -1.0f, 1.0f);
+  const float humidity = std::clamp(buffers.humidity[extIndex], -1.0f, 1.0f);
+  const float weirdness = std::clamp(buffers.weirdness[extIndex], -1.0f, 1.0f);
+  const float riverVal = buffers.river[extIndex];
+  const float erosion = std::clamp(buffers.erosion[extIndex], -1.0f, 1.0f);
+  const float pv = std::clamp(buffers.peaksValleys[extIndex], -1.0f, 1.0f);
+
+  const int height = std::clamp(static_cast<int>(std::round(buffers.heightMap[extIndex])), 1, static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
+
+  return determineBiome(temperature, humidity, weirdness,
+                        continental, erosion, pv, riverVal, height);
+}
+
 void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
                                           int chunkZ)
 {
@@ -802,37 +875,24 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
   float extendedWorldZf = worldZf - static_cast<float>(EXT_CORE_OFFSET);
   const int EXTENDED_SIZE = EXT_SIZE;
 
-  const auto noise2DStart =
-      m_activeProfile ? Clock::now() : Clock::time_point{};
-  m_continentalNoise->GenUniformGrid2D(continentalResults, extendedWorldXf,
-                                       extendedWorldZf, EXTENDED_SIZE, EXTENDED_SIZE, 1.0f,
-                                       m_seed);
+  TerrainColumnBuffers buffers{
+      .continental = continentalResults,
+      .erosion = erosionResults,
+      .peaksValleys = peaksValleysResults,
+      .ridge = ridgeResults,
+      .temperature = temperatureResults,
+      .humidity = humidityResults,
+      .weirdness = weirdnessResults,
+      .river = riverResults,
+      .heightMap = s_genBuffers.extendedHeightMap.data(),
+      .erosionTemp = s_genBuffers.erosionTempMap.data()};
 
-  m_erosionNoise->GenUniformGrid2D(erosionResults, extendedWorldXf, extendedWorldZf,
-                                   EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 1000);
+  sampleTerrainColumnNoiseAndHeights(
+      buffers,
+      static_cast<int>(extendedWorldXf),
+      static_cast<int>(extendedWorldZf),
+      EXTENDED_SIZE, EXTENDED_SIZE, 1.0f);
 
-  m_peaksValleysNoise->GenUniformGrid2D(peaksValleysResults, extendedWorldXf,
-                                        extendedWorldZf, EXTENDED_SIZE, EXTENDED_SIZE, 1.0f,
-                                        m_seed + 2000);
-
-  m_ridgeNoise->GenUniformGrid2D(ridgeResults, extendedWorldXf, extendedWorldZf,
-                                 EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 3000);
-
-  // Generate biome noise for extended area
-  m_temperatureNoise->GenUniformGrid2D(temperatureResults, extendedWorldXf, extendedWorldZf,
-                                       EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 6000);
-
-  m_humidityNoise->GenUniformGrid2D(humidityResults, extendedWorldXf, extendedWorldZf,
-                                    EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 7000);
-
-  m_weirdnessNoise->GenUniformGrid2D(weirdnessResults, extendedWorldXf, extendedWorldZf,
-                                     EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 8000);
-  m_riverNoise->GenUniformGrid2D(riverResults, extendedWorldXf, extendedWorldZf,
-                                 EXTENDED_SIZE, EXTENDED_SIZE, 1.0f, m_seed + 9000);
-  if (m_activeProfile)
-    m_activeProfile->noise2DMs +=
-        std::chrono::duration<double, std::milli>(Clock::now() - noise2DStart)
-            .count();
   const auto aquiferStart =
       m_activeProfile ? Clock::now() : Clock::time_point{};
   m_aquiferNoise->GenUniformGrid2D(aquiferResults, extendedWorldXf,
@@ -843,23 +903,7 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
         std::chrono::duration<double, std::milli>(Clock::now() - aquiferStart)
             .count();
 
-  // Pre-calculate float heights for the extended map.
   float *extHeightMap = s_genBuffers.extendedHeightMap.data();
-  for (int i = 0; i < EXTENDED_SIZE * EXTENDED_SIZE; ++i)
-  {
-    extHeightMap[i] = calculateHeightFloat(
-        continentalResults[i], erosionResults[i],
-        peaksValleysResults[i], ridgeResults[i], riverResults[i], weirdnessResults[i]);
-  }
-
-  // Apply erosion smoothing step to the float heightmap
-  const auto erosionStart =
-      m_activeProfile ? Clock::now() : Clock::time_point{};
-  applyErosion(extHeightMap, EXTENDED_SIZE);
-  if (m_activeProfile)
-    m_activeProfile->erosionMs +=
-        std::chrono::duration<double, std::milli>(Clock::now() - erosionStart)
-            .count();
 
   // Pass 1a: biomes, heights and raw biome colors over the whole extended
   // window (must precede 3D noise so we can bound cave sampling to
@@ -874,18 +918,11 @@ void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
     {
       int extIndex = extZ * EXTENDED_SIZE + extX;
 
-      float continental = std::clamp(continentalResults[extIndex], -1.0f, 1.0f);
-      float temperature = std::clamp(temperatureResults[extIndex], -1.0f, 1.0f);
-      float humidity = std::clamp(humidityResults[extIndex], -1.0f, 1.0f);
       float weirdness = std::clamp(weirdnessResults[extIndex], -1.0f, 1.0f);
-      float riverVal = riverResults[extIndex];
       float erosion = std::clamp(erosionResults[extIndex], -1.0f, 1.0f);
-      float pv = std::clamp(peaksValleysResults[extIndex], -1.0f, 1.0f);
 
+      BiomeType biome = evaluateBiomeAt(buffers, extIndex);
       int height = std::clamp(static_cast<int>(std::round(extHeightMap[extIndex])), 1, static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
-
-      BiomeType biome = determineBiome(temperature, humidity, weirdness,
-                                       continental, erosion, pv, riverVal, height);
 
       // Oasis patches use the strongest weirdness values as a shallow pond
       // core. The outer oasis ring remains dry and hosts palms/ground cover.
@@ -1549,26 +1586,53 @@ BiomeType TerrainGenerator::determineBiome(float temperature, float humidity,
 
 BiomeType TerrainGenerator::getBiomeAt(int worldX, int worldZ) const
 {
-  float x = static_cast<float>(worldX) + NOISE_OFFSET;
-  float z = static_cast<float>(worldZ) + NOISE_OFFSET;
+  constexpr int HALO = 2;
+  constexpr int EXT_W = 1 + 2 * HALO;
+  constexpr int EXT_H = 1 + 2 * HALO;
+  constexpr int EXT_COUNT = EXT_W * EXT_H;
 
-  float temp = m_temperatureNoise->GenSingle2D(x, z, m_seed + 6000);
-  float humid = m_humidityNoise->GenSingle2D(x, z, m_seed + 7000);
-  float weird = m_weirdnessNoise->GenSingle2D(x, z, m_seed + 8000);
-  float cont = m_continentalNoise->GenSingle2D(x, z, m_seed);
-  float erosion = m_erosionNoise->GenSingle2D(x, z, m_seed + 1000);
-  float pv = m_peaksValleysNoise->GenSingle2D(x, z, m_seed + 2000);
-  float ridge = m_ridgeNoise->GenSingle2D(x, z, m_seed + 3000);
-  float river = m_riverNoise->GenSingle2D(x, z, m_seed + 9000);
-  int height = calculateHeight(cont, erosion, pv, ridge, river, weird);
+  std::array<float, EXT_COUNT> cont;
+  std::array<float, EXT_COUNT> erosion;
+  std::array<float, EXT_COUNT> pv;
+  std::array<float, EXT_COUNT> ridge;
+  std::array<float, EXT_COUNT> temp;
+  std::array<float, EXT_COUNT> humid;
+  std::array<float, EXT_COUNT> weird;
+  std::array<float, EXT_COUNT> river;
+  std::array<float, EXT_COUNT> heightMap;
+  std::array<float, EXT_COUNT> erosionTemp;
 
-  return determineBiome(temp, humid, weird, cont, erosion, pv, river, height);
+  TerrainColumnBuffers buffers{
+      .continental = cont.data(),
+      .erosion = erosion.data(),
+      .peaksValleys = pv.data(),
+      .ridge = ridge.data(),
+      .temperature = temp.data(),
+      .humidity = humid.data(),
+      .weirdness = weird.data(),
+      .river = river.data(),
+      .heightMap = heightMap.data(),
+      .erosionTemp = erosionTemp.data()};
+
+  const int extStartX = worldX + static_cast<int>(NOISE_OFFSET) - HALO;
+  const int extStartZ = worldZ + static_cast<int>(NOISE_OFFSET) - HALO;
+
+  sampleTerrainColumnNoiseAndHeights(buffers, extStartX, extStartZ, EXT_W, EXT_H, 1.0f);
+
+  constexpr int centerIndex = HALO * EXT_W + HALO;
+  return evaluateBiomeAt(buffers, centerIndex);
 }
 
 void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
                                       int width, int height,
                                       std::vector<BiomeType> &outBiomes) const
 {
+  if (width <= 0 || height <= 0)
+  {
+    outBiomes.clear();
+    return;
+  }
+
   const int count = width * height;
   outBiomes.resize(count);
 
@@ -1582,46 +1646,49 @@ void TerrainGenerator::getBiomeRegion(float centerX, float centerZ, float step,
   const int startX = static_cast<int>(std::round((centerX + NOISE_OFFSET) * invStep - width * 0.5f));
   const int startZ = static_cast<int>(std::round((centerZ + NOISE_OFFSET) * invStep - height * 0.5f));
 
-  if (s_genBuffers.tempBuf.size() < static_cast<size_t>(count))
+  constexpr int HALO = 2;
+  const int extWidth = width + 2 * HALO;
+  const int extHeight = height + 2 * HALO;
+  const int extCount = extWidth * extHeight;
+
+  if (s_genBuffers.tempBuf.size() < static_cast<size_t>(extCount))
   {
-    s_genBuffers.tempBuf.resize(count);
-    s_genBuffers.humidBuf.resize(count);
-    s_genBuffers.weirdBuf.resize(count);
-    s_genBuffers.riverBuf.resize(count);
-    s_genBuffers.contBuf.resize(count);
-    s_genBuffers.erosionBuf.resize(count);
-    s_genBuffers.pvBuf.resize(count);
-    s_genBuffers.ridgeBuf.resize(count);
+    s_genBuffers.tempBuf.resize(extCount);
+    s_genBuffers.humidBuf.resize(extCount);
+    s_genBuffers.weirdBuf.resize(extCount);
+    s_genBuffers.riverBuf.resize(extCount);
+    s_genBuffers.contBuf.resize(extCount);
+    s_genBuffers.erosionBuf.resize(extCount);
+    s_genBuffers.pvBuf.resize(extCount);
+    s_genBuffers.ridgeBuf.resize(extCount);
+    s_genBuffers.heightBuf.resize(extCount);
+    s_genBuffers.erosionTempBuf.resize(extCount);
   }
 
-  float* tempBuf = s_genBuffers.tempBuf.data();
-  float* humidBuf = s_genBuffers.humidBuf.data();
-  float* weirdBuf = s_genBuffers.weirdBuf.data();
-  float* riverBuf = s_genBuffers.riverBuf.data();
-  float* contBuf = s_genBuffers.contBuf.data();
-  float* erosionBuf = s_genBuffers.erosionBuf.data();
-  float* pvBuf = s_genBuffers.pvBuf.data();
-  float* ridgeBuf = s_genBuffers.ridgeBuf.data();
+  TerrainColumnBuffers buffers{
+      .continental = s_genBuffers.contBuf.data(),
+      .erosion = s_genBuffers.erosionBuf.data(),
+      .peaksValleys = s_genBuffers.pvBuf.data(),
+      .ridge = s_genBuffers.ridgeBuf.data(),
+      .temperature = s_genBuffers.tempBuf.data(),
+      .humidity = s_genBuffers.humidBuf.data(),
+      .weirdness = s_genBuffers.weirdBuf.data(),
+      .river = s_genBuffers.riverBuf.data(),
+      .heightMap = s_genBuffers.heightBuf.data(),
+      .erosionTemp = s_genBuffers.erosionTempBuf.data()};
 
-  // GenUniformGrid2D processes batches with SIMD — far faster than individual GenSingle2D calls.
-  m_temperatureNoise->GenUniformGrid2D(tempBuf, startX, startZ, width, height, step, m_seed + 6000);
-  m_humidityNoise->GenUniformGrid2D(humidBuf, startX, startZ, width, height, step, m_seed + 7000);
-  m_weirdnessNoise->GenUniformGrid2D(weirdBuf, startX, startZ, width, height, step, m_seed + 8000);
-  m_continentalNoise->GenUniformGrid2D(contBuf, startX, startZ, width, height, step, m_seed);
-  m_erosionNoise->GenUniformGrid2D(erosionBuf, startX, startZ, width, height, step, m_seed + 1000);
-  m_peaksValleysNoise->GenUniformGrid2D(pvBuf, startX, startZ, width, height, step, m_seed + 2000);
-  m_ridgeNoise->GenUniformGrid2D(ridgeBuf, startX, startZ, width, height, step, m_seed + 3000);
-  m_riverNoise->GenUniformGrid2D(riverBuf, startX, startZ, width, height, step, m_seed + 9000);
+  const int extStartX = startX - HALO;
+  const int extStartZ = startZ - HALO;
 
-  for (int i = 0; i < count; i++)
+  sampleTerrainColumnNoiseAndHeights(buffers, extStartX, extStartZ, extWidth, extHeight, step);
+
+  for (int z = 0; z < height; ++z)
   {
-    const float cont = std::clamp(contBuf[i], -1.0f, 1.0f);
-    const float erosion = std::clamp(erosionBuf[i], -1.0f, 1.0f);
-    const float pv = std::clamp(pvBuf[i], -1.0f, 1.0f);
-    const float ridge = std::clamp(ridgeBuf[i], -1.0f, 1.0f);
-    const float river = riverBuf[i];
-    const int h = calculateHeight(cont, erosion, pv, ridge, river, weirdBuf[i]);
-    outBiomes[i] = determineBiome(tempBuf[i], humidBuf[i], weirdBuf[i], cont, erosion, pv, river, h);
+    for (int x = 0; x < width; ++x)
+    {
+      const int extIndex = (z + HALO) * extWidth + (x + HALO);
+      outBiomes[z * width + x] = evaluateBiomeAt(buffers, extIndex);
+    }
   }
 }
 
@@ -1740,43 +1807,51 @@ int TerrainGenerator::calculateHeight(float continental, float erosion,
 
 void TerrainGenerator::applyErosion(float *heightMap, int size) const
 {
-  if (size < 2)
+  applyErosion(heightMap, size, size, nullptr);
+}
+
+void TerrainGenerator::applyErosion(float *heightMap, int width, int height,
+                                    float *tempBuffer) const
+{
+  if (width < 2 || height < 2)
     return;
 
   // 1. Single Thermal Erosion pass (smooths overly steep slopes deterministically)
-  // We only run 1 iteration on the 28x28 extended heightmap. Cells [2,25]
-  // are fully deterministic across chunk windows because all four neighbors
-  // [1,26] are processed and their give-decisions only read sampled values
-  // [0,27]. (The old 20x20 window left the +/-1 border columns
-  // underdetermined because outer-ring cells never gave material.)
+  // Cells with at least 2 cells of halo from the border are fully deterministic
+  // across sampling windows because all four neighbors are processed and their
+  // give-decisions only read sampled values within the window.
   const float talusAngle = 0.6f;  // Max allowed height diff between adjacent cells
   const float thermalRate = 0.5f; // Fraction of material to move
+  const int totalCount = width * height;
 
-  float *tempMap;
-  std::vector<float> fallbackMap;
-  if (size <= EXT_SIZE)
+  float *tempMap = tempBuffer;
+  if (!tempMap)
   {
-    tempMap = s_genBuffers.erosionTempMap.data();
-    std::copy(heightMap, heightMap + size * size, tempMap);
-  }
-  else
-  {
-    fallbackMap.assign(heightMap, heightMap + size * size);
-    tempMap = fallbackMap.data();
-  }
-
-  for (int z = 1; z < size - 1; ++z)
-  {
-    for (int x = 1; x < size - 1; ++x)
+    if (totalCount <= EXT_SIZE * EXT_SIZE)
     {
-      int idx = z * size + x;
+      tempMap = s_genBuffers.erosionTempMap.data();
+    }
+    else
+    {
+      if (s_genBuffers.erosionTempBuf.size() < static_cast<size_t>(totalCount))
+        s_genBuffers.erosionTempBuf.resize(totalCount);
+      tempMap = s_genBuffers.erosionTempBuf.data();
+    }
+  }
+  std::copy(heightMap, heightMap + totalCount, tempMap);
+
+  for (int z = 1; z < height - 1; ++z)
+  {
+    for (int x = 1; x < width - 1; ++x)
+    {
+      int idx = z * width + x;
       float h = tempMap[idx];
 
       float maxDiff = 0.0f;
       int maxDiffIdx = -1;
 
       // Check 4 neighbors
-      const int neighbors[4] = {idx - 1, idx + 1, idx - size, idx + size};
+      const int neighbors[4] = {idx - 1, idx + 1, idx - width, idx + width};
       for (int i = 0; i < 4; ++i)
       {
         float diff = h - tempMap[neighbors[i]];
@@ -1795,10 +1870,10 @@ void TerrainGenerator::applyErosion(float *heightMap, int size) const
       }
     }
   }
-
+}
   // Hydraulic Erosion pass removed because particle simulation causes
   // boundary mismatches across asynchronously generated chunks.
-}
+
 
 // =============================================
 // VEGETATION GENERATION

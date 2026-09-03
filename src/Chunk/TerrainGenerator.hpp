@@ -192,6 +192,32 @@ private:
                       float ridge, float riverVal, float weirdness) const;
   float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge, float riverVal, float weirdness) const;
   void applyErosion(float *heightMap, int size) const;
+  void applyErosion(float *heightMap, int width, int height, float *tempBuffer = nullptr) const;
+
+  // Shared erosion-aware terrain sampling pipeline
+  struct TerrainColumnBuffers
+  {
+    float *continental{nullptr};
+    float *erosion{nullptr};
+    float *peaksValleys{nullptr};
+    float *ridge{nullptr};
+    float *temperature{nullptr};
+    float *humidity{nullptr};
+    float *weirdness{nullptr};
+    float *river{nullptr};
+    float *heightMap{nullptr};
+    float *erosionTemp{nullptr};
+  };
+
+  void sampleTerrainColumnNoiseAndHeights(
+      const TerrainColumnBuffers &buffers,
+      int extStartX, int extStartZ,
+      int extWidth, int extHeight,
+      float step) const;
+
+  BiomeType evaluateBiomeAt(
+      const TerrainColumnBuffers &buffers,
+      int extIndex) const;
 
   // Biome determination
   BiomeType determineBiome(float temperature, float humidity, float weirdness,
