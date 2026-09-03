@@ -595,13 +595,14 @@ static thread_local TerrainGenerator::BiomeRegionScratch s_biomeRegionScratch;
 
 void TerrainGenerator::BiomeRegionScratch::trimOversizedCapacity()
 {
-  // Releases capacity above the tiled-path bound. getBiomeRegion() calls
-  // this on every exit through an unconditional guard — after successful
-  // AND cancelled/failed attempts — so oversized dense capacity is never
-  // retained across attempts while tiled-sized capacity survives for
-  // cheap reuse. Call it manually only when mutating a scratch outside
-  // getBiomeRegion().
-  const size_t keep = kMaxTileDensePoints;
+  // Releases per-field capacity above the scratch's retention bound (the
+  // owner-set retainedPointsCap, clamped to the dense-path absolute). The
+  // default bound keeps only tiled-path capacity; owners of a single
+  // dedicated scratch may retain dense capacity for churn-free reuse.
+  // getBiomeRegion() calls this on every exit through an unconditional
+  // guard - after successful AND cancelled/failed attempts. Call it
+  // manually only when mutating a scratch outside getBiomeRegion().
+  const size_t keep = std::min(retainedPointsCap, kMaxDenseDomainPoints);
   for (std::vector<float> *field : {&temperature, &humidity, &weirdness, &river,
                                     &continental, &erosion, &peaksValleys,
                                     &ridge, &height, &erosionTemp})
@@ -1683,24 +1684,25 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
                                       BiomeRegionStats *outStats) const
 {
   outBiomes.clear();
-  if (!grid.valid())
-    return false;
 
   // Scratch owned by the caller when provided; otherwise a dedicated
   // thread-local so region capacity never lands in the shared chunk
-  // generation buffers.
+  // generation buffers. Resolved before any early return so the retention
+  // policy below holds on absolutely every exit.
   BiomeRegionScratch &bufs = scratch ? *scratch : s_biomeRegionScratch;
 
-  // Unconditional cleanup on EVERY exit — success, cancellation, early
-  // failure, or an exception propagating out — so no path can retain the
-  // ~10 MiB dense peak (this makes cancelled biome-map builds as
-  // memory-safe as successful ones). Tiled-sized capacity survives for
-  // cheap reuse.
+  // Enforce the scratch owner's retention policy on every exit - success,
+  // cancellation, invalid request, or an exception propagating out.
+  // Generic scratches retain at most the tiled bound; dedicated owners may
+  // retain dense capacity up to kMaxDenseDomainPoints.
   struct ScratchTrimGuard
   {
     BiomeRegionScratch &target;
     ~ScratchTrimGuard() { target.trimOversizedCapacity(); }
   } trimGuard{bufs};
+
+  if (!grid.valid())
+    return false;
 
   BiomeRegionStats localStats;
   BiomeRegionStats &stats = outStats ? *outStats : localStats;

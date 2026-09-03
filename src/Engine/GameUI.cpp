@@ -1323,6 +1323,16 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 		m_mapJob.requestId = requestId;
 		m_mapJob.cancel = cancelToken;
 
+		// One scratch for the whole biome-map subsystem: dense capacity is
+		// retained across refreshes (no per-refresh reallocation churn),
+		// bounded in total by kMaxDenseDomainPoints and owned by GameUI so
+		// no pool worker keeps a private copy.
+		if (!m_mapScratch)
+		{
+			m_mapScratch = std::make_shared<TerrainGenerator::BiomeRegionScratch>();
+			m_mapScratch->retainedPointsCap = TerrainGenerator::kMaxDenseDomainPoints;
+		}
+
 		BiomeMapRequest req{
 			.requestId = requestId,
 			.worldGenerationId = frame.worldGenerationId,
@@ -1330,7 +1340,8 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 			.center = m_mapCenter,
 			.size = m_mapSize,
 			.zoom = m_mapZoom,
-			.cancelToken = cancelToken
+			.cancelToken = cancelToken,
+			.scratch = m_mapScratch
 		};
 
 		if (frame.submitBiomeMap)

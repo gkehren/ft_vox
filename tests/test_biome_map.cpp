@@ -622,6 +622,78 @@ static void test_semantic_supersession_still_cancels_slow_job()
 		  "Cancelled / superseded slow job must be rejected against new active request ID");
 }
 
+static void test_request_scratch_reuse()
+{
+	// The request-owned scratch is reused across refreshes: dense capacity
+	// is retained (bounded by the absolute dense bound, never per worker)
+	// and the second dense build does not grow it (no allocation churn),
+	// while results stay valid and acceptable.
+	auto scratch = std::make_shared<TerrainGenerator::BiomeRegionScratch>();
+	scratch->retainedPointsCap = TerrainGenerator::kMaxDenseDomainPoints;
+
+	BiomeMapRequest req{
+		.requestId = 21,
+		.worldGenerationId = 3,
+		.seed = 42,
+		.center = {0.f, 0.f},
+		.size = 256,
+		.zoom = 0.5f, // dense single-pass path (peak scratch)
+		.cancelToken = nullptr,
+		.onCheckpoint = nullptr,
+		.scratch = scratch
+	};
+
+	BiomeMapResult res1 = generateBiomeMap(req);
+	CHECK(res1.valid, "dense map build with request scratch must be valid");
+	CHECK(isBiomeMapResultAcceptable(res1, 3, 42, 21), "first result acceptable");
+	const size_t retained = scratch->temperature.capacity();
+	CHECK(retained > TerrainGenerator::kMaxTileDensePoints &&
+			  retained <= TerrainGenerator::kMaxDenseDomainPoints,
+		  "dense scratch capacity must be retained within the absolute bound");
+
+	req.requestId = 22;
+	BiomeMapResult res2 = generateBiomeMap(req);
+	CHECK(res2.valid, "second dense map build must be valid");
+	CHECK(isBiomeMapResultAcceptable(res2, 3, 42, 22), "second result acceptable");
+	CHECK(scratch->temperature.capacity() == retained,
+		  "second dense build must reuse the retained scratch without churn");
+
+	// A cancelled build through the same scratch must not disturb retention
+	// policy or leak the capacity above the cap.
+	auto token = std::make_shared<std::atomic<bool>>(true);
+	req.requestId = 23;
+	req.cancelToken = token;
+	BiomeMapResult res3 = generateBiomeMap(req);
+	CHECK(!res3.valid, "pre-cancelled build must stay invalid");
+	CHECK(scratch->temperature.capacity() == retained,
+		  "cancelled build must not grow the retained scratch");
+
+	// Zoom sweep dense -> tiled -> dense: switching zooms must not
+	// reintroduce churn — the retained dense capacity survives the tiled
+	// build untouched and is reused when returning to a dense zoom.
+	req.cancelToken = nullptr;
+
+	req.requestId = 24;
+	req.zoom = 0.5f; // dense
+	BiomeMapResult res4 = generateBiomeMap(req);
+	CHECK(res4.valid && isBiomeMapResultAcceptable(res4, 3, 42, 24), "dense build valid");
+	const size_t denseCapacity = scratch->temperature.capacity();
+
+	req.requestId = 25;
+	req.zoom = 0.1f; // tiled path
+	BiomeMapResult res5 = generateBiomeMap(req);
+	CHECK(res5.valid && isBiomeMapResultAcceptable(res5, 3, 42, 25), "tiled build valid");
+	CHECK(scratch->temperature.capacity() == denseCapacity,
+		  "tiled build must not disturb the retained dense capacity");
+
+	req.requestId = 26;
+	req.zoom = 0.5f; // dense again
+	BiomeMapResult res6 = generateBiomeMap(req);
+	CHECK(res6.valid && isBiomeMapResultAcceptable(res6, 3, 42, 26), "dense rebuild valid");
+	CHECK(scratch->temperature.capacity() == denseCapacity,
+		  "returning to dense zoom must reuse the retained capacity without churn");
+}
+
 int main()
 {
 	std::cout << "[test_biome_map] Running tests...\n";
@@ -632,6 +704,7 @@ int main()
 	test_cancellation_mid_flight();
 	test_rapid_request_cancellation_sequence();
 	test_player_dot_painting();
+	test_request_scratch_reuse();
 	test_biome_map_upload_validation();
 	test_deferred_upload_superseded_rejection();
 	test_player_movement_supersession();
