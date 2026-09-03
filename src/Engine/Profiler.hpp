@@ -22,6 +22,8 @@
 #define PROFILE_SCOPE(name) ::ProfileScope FT_VOX_CONCAT(_ftVoxProf_, __LINE__)(name)
 #define PROFILE_FUNCTION() PROFILE_SCOPE(__func__)
 
+#include <mutex>
+
 struct ProfileEntry
 {
 	const char *name{nullptr};
@@ -34,22 +36,26 @@ struct ProfileEntry
 struct WorkerBucket
 {
 	const char *name{nullptr};
-	std::atomic<uint64_t> count{0};
-	std::atomic<uint64_t> totalUs{0}; // microseconds for precision under atomics
+	mutable std::mutex mutex;
+	uint64_t count{0};
+	uint64_t totalUs{0}; // microseconds for precision under atomics
 
 	WorkerBucket() = default;
-	WorkerBucket(const WorkerBucket &o) : name(o.name)
+	WorkerBucket(const WorkerBucket &o)
 	{
-		count.store(o.count.load(std::memory_order_relaxed), std::memory_order_relaxed);
-		totalUs.store(o.totalUs.load(std::memory_order_relaxed), std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lock(o.mutex);
+		name = o.name;
+		count = o.count;
+		totalUs = o.totalUs;
 	}
 	WorkerBucket &operator=(const WorkerBucket &o)
 	{
 		if (this != &o)
 		{
+			std::scoped_lock lock(mutex, o.mutex);
 			name = o.name;
-			count.store(o.count.load(std::memory_order_relaxed), std::memory_order_relaxed);
-			totalUs.store(o.totalUs.load(std::memory_order_relaxed), std::memory_order_relaxed);
+			count = o.count;
+			totalUs = o.totalUs;
 		}
 		return *this;
 	}
@@ -59,6 +65,7 @@ struct WorkerSnapshot
 {
 	const char *name{nullptr};
 	uint64_t count{0};
+	uint64_t totalUs{0};
 	float totalMs{0.f};
 	float avgMs{0.f};
 };
@@ -80,7 +87,11 @@ public:
 	static constexpr int kSpikeLogSize = 8;
 	static constexpr float kSpikeThresholdMs = 20.f;
 
-	Profiler() = default;
+	Profiler();
+	Profiler(const Profiler &) = delete;
+	Profiler &operator=(const Profiler &) = delete;
+	Profiler(Profiler &&) = delete;
+	Profiler &operator=(Profiler &&) = delete;
 
 	void setEnabled(bool v) { m_enabled.store(v, std::memory_order_relaxed); }
 	bool enabled() const { return m_enabled.load(std::memory_order_relaxed); }
@@ -95,8 +106,11 @@ public:
 	/// Thread-safe aggregate samples from worker threads.
 	void addWorkerSample(const char *name, float ms);
 
-	/// Main-thread only: ensure a worker name slot exists before workers sample it.
+	/// Ensure a worker name slot exists before workers sample it.
 	void registerWorkerName(const char *name);
+
+	/// Frame-consistent snapshot of worker thread aggregates.
+	void snapshotWorkers();
 
 	void clearHistory();
 
@@ -136,7 +150,6 @@ private:
 	void finalizeFrame(float frameMs);
 	void updateAverages(float frameMs);
 	void recordSpike(float frameMs);
-	void snapshotWorkers();
 
 	std::atomic<bool> m_enabled{true};
 	bool m_inFrame{false};
@@ -167,9 +180,10 @@ private:
 
 	// Worker aggregates
 	std::array<WorkerBucket, kMaxWorkerBuckets> m_workers{};
-	int m_workerBucketCount{0};
+	std::atomic<int> m_workerBucketCount{0};
 	std::array<WorkerSnapshot, kMaxWorkerBuckets> m_workerSnaps{};
 	int m_workerSnapCount{0};
+	std::mutex m_workerRegisterMutex;
 
 	// Spikes (newest at end)
 	std::array<SpikeRecord, kSpikeLogSize> m_spikes{};

@@ -219,3 +219,20 @@ target_link_libraries(test_biome_map PRIVATE
 
 add_test(NAME BiomeMapGeneration COMMAND test_biome_map)
 
+# ---------------------------------------------------------------------------
+# Profiler worker consistency and stress test (Issue #79)
+# ---------------------------------------------------------------------------
+add_executable(test_profiler
+    test_profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+)
+
+target_include_directories(test_profiler PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(test_profiler PRIVATE
+    Threads::Threads
+)
+
+add_test(NAME ProfilerWorkerConsistency COMMAND test_profiler)
