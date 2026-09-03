@@ -99,6 +99,14 @@ void VkFrameContext::ensureSwapchainImageSync(uint32_t imageCount)
 	}
 }
 
+void VkFrameContext::onSwapchainRecreate(uint32_t imageCount)
+{
+	// Engine recreation has already waited for the device. Fence handles remain
+	// valid, but their association with images from the old swapchain does not.
+	m_imagesInFlight.assign(imageCount, VK_NULL_HANDLE);
+	ensureSwapchainImageSync(imageCount);
+}
+
 bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
 {
 	VkDevice device = m_context->getDevice();

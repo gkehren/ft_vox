@@ -38,6 +38,7 @@ void ImGuiLayer::init(SDL_Window *window, VkContext &context, VkSwapchain &swapc
 		return;
 
 	m_device = context.getDevice();
+	m_context = &context;
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
@@ -51,6 +52,16 @@ void ImGuiLayer::init(SDL_Window *window, VkContext &context, VkSwapchain &swapc
 
 	if (!ImGui_ImplSDL3_InitForVulkan(window))
 		throw std::runtime_error("ImGui_ImplSDL3_InitForVulkan failed");
+	m_initialized = true;
+	(void)imm;
+	initVulkanBackend(context, swapchain);
+}
+
+void ImGuiLayer::initVulkanBackend(VkContext &context, VkSwapchain &swapchain)
+{
+	const uint32_t imageCount = std::max(2u, swapchain.getImageCount());
+	const uint32_t minImageCount =
+		std::min(imageCount, std::max(2u, swapchain.getMinImageCount()));
 
 	ImGui_ImplVulkan_InitInfo initInfo{};
 	initInfo.ApiVersion = VK_API_VERSION_1_2;
@@ -61,8 +72,8 @@ void ImGuiLayer::init(SDL_Window *window, VkContext &context, VkSwapchain &swapc
 	initInfo.Queue = context.getGraphicsQueue();
 	initInfo.DescriptorPool = VK_NULL_HANDLE;
 	initInfo.DescriptorPoolSize = 64; // let backend create pool
-	initInfo.MinImageCount = 2;
-	initInfo.ImageCount = std::max(2u, swapchain.getImageCount());
+	initInfo.MinImageCount = minImageCount;
+	initInfo.ImageCount = imageCount;
 	initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 	initInfo.PipelineCache = VK_NULL_HANDLE;
 	initInfo.Subpass = 0;
@@ -84,34 +95,59 @@ void ImGuiLayer::init(SDL_Window *window, VkContext &context, VkSwapchain &swapc
 
 	if (!ImGui_ImplVulkan_Init(&initInfo))
 		throw std::runtime_error("ImGui_ImplVulkan_Init failed");
+	m_vulkanInitialized = true;
 
-	// Font upload via one-shot commands
-	imm.submitAndWait([&](VkCommandBuffer cmd) {
-		// CreateFontsTexture may queue uploads using internal helpers in some versions;
-		// 1.91.9 creates device objects that are ready after first NewFrame if DescriptorPoolSize is set.
-		(void)cmd;
-	});
 	ImGui_ImplVulkan_CreateFontsTexture();
 
 	// Destroy staging objects if the API provides it (present in 1.91.x)
 	// After create, some versions require a submit — CreateFontsTexture already uses host-visible
 	// uploads in recent backends. If not, first frame still works once font atlas is ready.
 
-	m_initialized = true;
+	m_colorFormat = swapchain.getImageFormat();
+	m_swapchainImageCount = swapchain.getImageCount();
+	m_minImageCount = swapchain.getMinImageCount();
+}
+
+bool ImGuiLayer::onSwapchainRecreate(VkSwapchain &swapchain)
+{
+	if (!m_initialized || !m_vulkanInitialized || !m_context)
+		return false;
+
+	if (m_colorFormat == swapchain.getImageFormat() &&
+		m_swapchainImageCount == swapchain.getImageCount() &&
+		m_minImageCount == swapchain.getMinImageCount())
+		return false;
+
+	// ImageCount is immutable in the backend init info, and a dynamic-rendering
+	// pipeline is tied to its color format. Reinitialize the renderer backend for
+	// either change while preserving the ImGui context and SDL platform backend.
+	ImGui_ImplVulkan_Shutdown();
+	m_vulkanInitialized = false;
+	initVulkanBackend(*m_context, swapchain);
+	return true;
 }
 
 void ImGuiLayer::shutdown()
 {
-	if (!m_initialized)
+	if (!m_initialized && !m_vulkanInitialized)
 		return;
 	if (m_device != VK_NULL_HANDLE)
 		vkDeviceWaitIdle(m_device);
 
-	ImGui_ImplVulkan_Shutdown();
-	ImGui_ImplSDL3_Shutdown();
-	ImGui::DestroyContext();
+	if (m_vulkanInitialized)
+		ImGui_ImplVulkan_Shutdown();
+	if (m_initialized)
+	{
+		ImGui_ImplSDL3_Shutdown();
+		ImGui::DestroyContext();
+	}
+	m_vulkanInitialized = false;
 	m_initialized = false;
 	m_device = VK_NULL_HANDLE;
+	m_context = nullptr;
+	m_colorFormat = VK_FORMAT_UNDEFINED;
+	m_swapchainImageCount = 0;
+	m_minImageCount = 0;
 }
 
 void ImGuiLayer::processEvent(const SDL_Event &event)

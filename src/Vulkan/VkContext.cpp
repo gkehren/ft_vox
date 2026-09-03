@@ -86,6 +86,12 @@ void VkContext::init(SDL_Window *window)
 	pickPhysicalDevice();
 	createLogicalDevice();
 	volkLoadDevice(m_device);
+	if ((!vkCmdBeginRendering && !vkCmdBeginRenderingKHR) ||
+		(!vkCmdEndRendering && !vkCmdEndRenderingKHR))
+	{
+		throw std::runtime_error(
+			"Dynamic rendering was enabled, but its Vulkan entry points could not be loaded");
+	}
 	createAllocator();
 
 	std::cout << "Vulkan device: " << m_deviceProperties.deviceName << "\n";
@@ -334,6 +340,8 @@ QueueFamilyIndices VkContext::findQueueFamilies(VkPhysicalDevice device) const
 std::vector<const char *> VkContext::getRequiredDeviceExtensions() const
 {
 	std::vector<const char *> exts = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+	if (kApiVersion < VK_API_VERSION_1_3)
+		exts.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
 #if defined(__APPLE__)
 	exts.push_back("VK_KHR_portability_subset");
 #endif
@@ -432,13 +440,17 @@ void VkContext::createLogicalDevice()
 
 	std::vector<const char *> deviceExtensions = getRequiredDeviceExtensions();
 
-	// Dynamic rendering: core 1.3 or KHR extension
+	// Dynamic rendering is core only when both the application and device use
+	// Vulkan 1.3+. A newer device version cannot promote commands for an instance
+	// created with the engine's Vulkan 1.2 API target.
 	const bool dynRenderExt = hasExt(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-	const bool dynRenderCore = m_deviceProperties.apiVersion >= VK_API_VERSION_1_3;
+	const bool dynRenderCore =
+		kApiVersion >= VK_API_VERSION_1_3 &&
+		m_deviceProperties.apiVersion >= VK_API_VERSION_1_3;
 	m_dynamicRendering = dynRenderCore || dynRenderExt;
-	if (!dynRenderCore && dynRenderExt)
-		deviceExtensions.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-
+	if (!m_dynamicRendering)
+		throw std::runtime_error(
+			"Selected Vulkan device lacks dynamic rendering (requires Vulkan 1.3 or VK_KHR_dynamic_rendering)");
 	// Timeline semaphores: core 1.2
 	m_timelineSemaphores = true;
 
@@ -477,9 +489,11 @@ void VkContext::createLogicalDevice()
 
 	if (m_dynamicRendering)
 	{
-		dynFeatures.dynamicRendering =
-			(availableDyn.dynamicRendering == VK_TRUE || dynRenderCore) ? VK_TRUE : VK_FALSE;
+		dynFeatures.dynamicRendering = availableDyn.dynamicRendering;
 		m_dynamicRendering = dynFeatures.dynamicRendering == VK_TRUE;
+		if (!m_dynamicRendering)
+			throw std::runtime_error(
+				"Selected Vulkan device exposes dynamic rendering but not its required feature");
 	}
 
 	// Only request features the device actually has

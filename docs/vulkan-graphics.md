@@ -22,7 +22,13 @@ For engine loop, streaming, and world generation, see [`engine-architecture.md`]
 | Passes | Shadow → opaque (+ overlays) → water → sky → post | `Renderer/*Pass*`, `PostStack`, `OverlayRenderer` |
 | Shaders | GLSL → SPIR-V offline | `ressources/shaders/vulkan/` |
 
-**API target:** Vulkan **1.2+**, dynamic rendering preferred. On Apple, **MoltenVK** via ICD (`VK_ICD_FILENAMES`). Depth is **zero-to-one** (`GLM_FORCE_DEPTH_ZERO_TO_ONE`); viewport Y may be flipped for OpenGL-style world Y without winding flip.
+**API target:** Vulkan **1.2+**, with required dynamic rendering provided by
+`VK_KHR_dynamic_rendering` on Vulkan 1.2 or by the core API on Vulkan 1.3+.
+The selected path is based on the application API target as well as the device
+version, and its entry points are validated immediately after loading the
+device. On Apple, **MoltenVK** is selected via ICD (`VK_ICD_FILENAMES`). Depth
+is **zero-to-one** (`GLM_FORCE_DEPTH_ZERO_TO_ONE`); viewport Y may be flipped
+for OpenGL-style world Y without winding flip.
 
 **Rendering model:** Forward-style world passes into **HDR + depth** (and god-ray source), then fullscreen post to the swapchain. No deferred G-buffer.
 
@@ -53,6 +59,12 @@ Supporting types:
 | `GpuResourceRetire` | `GpuResourceRetire.hpp` | Delay destroy until frames-in-flight have finished |
 
 `WorldRenderer` does **not** own WSI sync. The `Engine` calls `VkFrameContext::beginFrame` / `submitAndPresent` and passes a reset command buffer into `WorldRenderer::recordFrame`.
+
+Resize, VSync, and out-of-date requests are deferred to the next pre-acquire
+frame boundary. `Engine` recreates the swapchain there, resets
+`VkFrameContext`'s per-image associations, refreshes `WorldRenderer` targets,
+and notifies ImGui. No UI callback destroys WSI resources for an image already
+acquired by the current frame.
 
 ### Present mode and VSync contract
 

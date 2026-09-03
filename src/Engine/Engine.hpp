@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -67,6 +68,8 @@ public:
 private:
 	void handleEvents();
 	void onResize(int width, int height);
+	void requestSwapchainRecreate();
+	void recreateSwapchainIfNeeded(uint32_t width, uint32_t height);
 	void tickStreaming(double dt);
 	void tickDayCycle(double dt);
 	void processInput(double dt);
@@ -83,7 +86,8 @@ private:
 
 	bool running{false};
 	bool mouseCaptured{true};
-	bool framebufferResized{false};
+	bool m_swapchainRecreateRequested{false};
+	std::optional<bool> m_pendingVSync;
 	bool showChunkBorders{false};
 	bool showDemoPlayers{true};
 	bool paused{false};

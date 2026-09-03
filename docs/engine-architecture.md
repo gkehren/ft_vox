@@ -62,7 +62,7 @@ Matches `Engine.cpp` order:
    - `updateVisibility` → `collectDrawList` / `collectShadowList`  
    - Computes `uploadBudgetThisFrame` (uploads are **not** done here)  
 5. **Highlight** — raycast block under cursor (`updateHighlight`)  
-6. **Resize** if needed — swapchain + `WorldRenderer::onSwapchainRecreate`  
+6. **Deferred swapchain recreation** if needed — resize, VSync, or WSI invalidation follows one Engine-owned path that refreshes frame synchronization, `WorldRenderer`, and ImGui before acquisition
 7. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer  
 8. **Retire/staging frame slots** — `resourceRetire.beginFrame`, `stagingRing.beginFrame` (fence already waited)  
 9. **ImGui UI build** — `imgui->beginFrame` / `drawUi` / `endFrame` (CPU only; draw later)  

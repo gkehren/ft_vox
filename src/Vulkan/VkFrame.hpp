@@ -22,6 +22,8 @@ public:
 
 	void init(VkContext &context);
 	void shutdown();
+	/// Reset per-image ownership after a swapchain has been recreated.
+	void onSwapchainRecreate(uint32_t imageCount);
 
 	/// Wait on in-flight fence, acquire swapchain image, reset command buffer.
 	/// Returns false if the swapchain is out of date (caller should recreate).
