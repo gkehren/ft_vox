@@ -172,6 +172,7 @@ private:
 		if (m_mapJob.cancel)
 			m_mapJob.cancel->store(true, std::memory_order_relaxed);
 
+		m_pendingUpload = {};
 		m_mapNeedsUpdate = true;
 	}
 

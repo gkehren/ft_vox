@@ -1197,6 +1197,13 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 	if (m_pendingUpload.rgba.empty() || m_mapImage.image == VK_NULL_HANDLE)
 		return;
 
+	// Drop deferred uploads that have been superseded
+	if (m_pendingUpload.requestId != m_mapRequestId)
+	{
+		m_pendingUpload = {};
+		return;
+	}
+
 	const VkDeviceSize dataSize = m_pendingUpload.rgba.size() * sizeof(uint8_t);
 	VkDeviceSize stagingOffset = 0;
 	void *stagingPtr = nullptr;
@@ -1232,10 +1239,11 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 
 	m_mapImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	m_mapHasTexture = true;
+	m_mapLastPublishedAt = SDL_GetTicks() / 1000.0;
 	m_pendingUpload.rgba.clear();
 	m_pendingUpload.width = 0;
 	m_pendingUpload.height = 0;
-	m_pendingUpload.generation = 0;
+	m_pendingUpload.requestId = 0;
 }
 
 void GameUI::tickBiomeMap(GameUIFrame &frame)
@@ -1278,9 +1286,8 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 				.rgba = std::move(res.rgba),
 				.width = static_cast<uint32_t>(res.size),
 				.height = static_cast<uint32_t>(res.size),
-				.generation = res.requestId
+				.requestId = res.requestId
 			};
-			m_mapLastPublishedAt = now;
 		}
 		else
 		{
@@ -1290,7 +1297,7 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 		}
 	}
 
-	const bool running = m_mapJob.isRunning();
+	const bool running = m_mapJob.isRunning() || hasPendingBiomeMapUpload();
 
 	// Periodic refresh triggered ONLY when no job is currently running
 	const bool timeElapsed = (now - m_mapLastPublishedAt) >= 1.0;

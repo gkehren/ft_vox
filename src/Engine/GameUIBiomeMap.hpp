@@ -78,7 +78,7 @@ struct BiomeMapUpload
 	std::vector<uint8_t> rgba;
 	uint32_t width{0};
 	uint32_t height{0};
-	uint64_t generation{0};
+	uint64_t requestId{0};
 };
 
 /// Validate that a biome map upload request contains well-formed pixel data.
@@ -86,6 +86,7 @@ inline bool isBiomeMapUploadValid(const BiomeMapUpload &upload)
 {
 	return upload.width > 0 &&
 		   upload.height > 0 &&
+		   upload.requestId > 0 &&
 		   upload.rgba.size() == static_cast<size_t>(upload.width) * static_cast<size_t>(upload.height) * 4;
 }
 

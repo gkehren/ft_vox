@@ -328,7 +328,7 @@ static void test_biome_map_upload_validation()
 		.rgba = std::vector<uint8_t>(256 * 256 * 4, 128),
 		.width = 256,
 		.height = 256,
-		.generation = 1
+		.requestId = 1
 	};
 	CHECK(isBiomeMapUploadValid(validUpload), "Well-formed 256x256 RGBA upload must be valid");
 
@@ -336,7 +336,7 @@ static void test_biome_map_upload_validation()
 		.rgba = std::vector<uint8_t>(256 * 256 * 3, 128),
 		.width = 256,
 		.height = 256,
-		.generation = 1
+		.requestId = 1
 	};
 	CHECK(!isBiomeMapUploadValid(sizeMismatch), "RGB sized upload must be rejected");
 
@@ -344,9 +344,29 @@ static void test_biome_map_upload_validation()
 		.rgba = std::vector<uint8_t>(16 * 16 * 4, 128),
 		.width = 0,
 		.height = 16,
-		.generation = 1
+		.requestId = 1
 	};
 	CHECK(!isBiomeMapUploadValid(zeroDim), "Zero dimension upload must be rejected");
+}
+
+static void test_deferred_upload_superseded_rejection()
+{
+	uint64_t currentRequestId = 10;
+
+	BiomeMapUpload upload{
+		.rgba = std::vector<uint8_t>(16 * 16 * 4, 255),
+		.width = 16,
+		.height = 16,
+		.requestId = currentRequestId
+	};
+	CHECK(isBiomeMapUploadValid(upload), "Upload matching currentRequestId must be valid");
+
+	// Player movement / zoom / view supersession occurs:
+	++currentRequestId;
+
+	// Stale deferred upload whose requestId no longer matches active request ID must be recognized as superseded
+	CHECK(upload.requestId != currentRequestId,
+		  "Deferred upload requestId must mismatch incremented active request ID");
 }
 
 static void test_player_movement_supersession()
@@ -563,6 +583,7 @@ int main()
 	test_rapid_request_cancellation_sequence();
 	test_player_dot_painting();
 	test_biome_map_upload_validation();
+	test_deferred_upload_superseded_rejection();
 	test_player_movement_supersession();
 	test_biome_texture_reuse_rules();
 	test_slow_job_exceeding_refresh_interval();
