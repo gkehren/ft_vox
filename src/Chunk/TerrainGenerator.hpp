@@ -4,6 +4,7 @@
 #include <array>
 #include <functional>
 #include <glm/glm.hpp>
+#include <span>
 #include <unordered_map>
 #include <memory>
 #include <cstdint>
@@ -27,6 +28,26 @@ struct ChunkData
   // Precomputed packed RGBA biome colors per column (for mesh generation)
   std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> grassColors;
   std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> foliageColors;
+};
+
+// 1-thick neighbor shell around a chunk (18 x (CHUNK_HEIGHT + 2) x 18).
+constexpr size_t kBorderVoxelCount =
+    static_cast<size_t>(18) * (CHUNK_HEIGHT + 2) * 18;
+
+// Caller-owned destination storage for one chunk generation. The spans refer
+// to memory owned by the caller - pooled Chunk storage at runtime, an owning
+// ChunkData in tests/tools. generateChunkInto() fully resets every field
+// before generating, so reused storage cannot leak data between chunks.
+// View semantics: a const target still allows writing through its spans
+// (only the span members themselves are protected).
+struct ChunkGenerationTarget
+{
+  std::span<Voxel> voxels;                // size() == CHUNK_VOLUME
+  std::span<uint8_t> borderVoxels;        // size() == kBorderVoxelCount
+  std::span<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomes;
+  std::span<int, CHUNK_SIZE * CHUNK_SIZE> heightMap;
+  std::span<uint32_t, CHUNK_SIZE * CHUNK_SIZE> grassColors;
+  std::span<uint32_t, CHUNK_SIZE * CHUNK_SIZE> foliageColors;
 };
 
 struct TerrainGenerationProfile
@@ -80,7 +101,16 @@ public:
   static constexpr float NOISE_OFFSET = 10000.0f;
 
   explicit TerrainGenerator(int seed = 1337);
+  // Owning convenience wrapper (tests/tools): allocates a fresh ChunkData
+  // and generates into it. The runtime streaming hot path must use
+  // generateChunkInto() instead so pooled storage is reused directly.
   ChunkData generateChunk(int chunkX, int chunkZ);
+  // Generates a chunk directly into caller-owned reusable storage. Fully
+  // resets all destination state first (voxels, neighbor shell, biomes,
+  // height map, colors), so nothing leaks from a previously generated
+  // chunk. Equivalent output to generateChunk().
+  void generateChunkInto(int chunkX, int chunkZ,
+                         const ChunkGenerationTarget &target);
   ChunkData generateChunkProfiled(int chunkX, int chunkZ,
                                   TerrainGenerationProfile &profile);
 
@@ -277,8 +307,8 @@ private:
   // =============================================
 
   // Core terrain generation
-  void generateChunkBatch(ChunkData &chunkData, int chunkX, int chunkZ);
-  void generateChunkBorders(ChunkData &chunkData, int chunkX, int chunkZ);
+  void generateChunkBatch(const ChunkGenerationTarget &chunkData, int chunkX, int chunkZ);
+  void generateChunkBorders(const ChunkGenerationTarget &chunkData, int chunkX, int chunkZ);
 
   // Height calculation (weirdness drives river valley width, matching determineBiome)
   int calculateHeight(float continental, float erosion, float peaksValleys,
@@ -325,22 +355,22 @@ private:
                            float continental, float erosion, float pv, float riverVal, int height) const;
 
   // Vegetation generation
-  void generateVegetation(ChunkData &chunkData, int chunkX, int chunkZ);
-  void placeTree(ChunkData &chunkData, int localX, int localZ, int baseY, BiomeType biome, int worldX, int worldZ);
-  void placeOakTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeBirchTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeSpruceTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeJungleTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeAcaciaTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeDarkOakTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeCherryTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeRedwoodTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placePalmTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeMangroveTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeBamboo(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeGiantMushroom(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeIceSpike(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void generateVegetation(const ChunkGenerationTarget &chunkData, int chunkX, int chunkZ);
+  void placeTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, BiomeType biome, int worldX, int worldZ);
+  void placeOakTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeBirchTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeSpruceTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeJungleTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeAcaciaTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeDarkOakTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeCherryTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeRedwoodTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placePalmTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeMangroveTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeBamboo(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeGiantMushroom(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeCactus(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
+  void placeIceSpike(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
 
   // Per-tree deterministic RNG from world position
   static inline uint32_t treeHash(int worldX, int worldZ, int seed)
@@ -373,7 +403,7 @@ private:
   }
 
   // Safe voxel setting (bounds checking)
-  inline bool setVoxelSafe(ChunkData &chunkData, int x, int y, int z, TextureType type)
+  inline bool setVoxelSafe(const ChunkGenerationTarget &chunkData, int x, int y, int z, TextureType type)
   {
     if (x < 0 || x >= CHUNK_SIZE || z < 0 || z >= CHUNK_SIZE ||
         y < 0 || y >= CHUNK_HEIGHT)

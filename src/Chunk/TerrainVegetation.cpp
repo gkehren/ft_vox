@@ -5,7 +5,7 @@
 // Vegetation placers (trees, cactus, ice spikes) — split out of TerrainGenerator.cpp
 // so core noise/batch generation stays scannable.
 
-void TerrainGenerator::placeTree(ChunkData &chunkData, int localX, int localZ,
+void TerrainGenerator::placeTree(const ChunkGenerationTarget &chunkData, int localX, int localZ,
                                  int baseY, BiomeType biome, int worldX, int worldZ)
 {
   // Mix tree types within biomes for variety
@@ -89,7 +89,7 @@ void TerrainGenerator::placeTree(ChunkData &chunkData, int localX, int localZ,
   }
 }
 
-void TerrainGenerator::placeOakTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
+void TerrainGenerator::placeOakTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 100);
 
@@ -129,7 +129,7 @@ void TerrainGenerator::placeOakTree(ChunkData &chunkData, int localX, int localZ
   }
 }
 
-void TerrainGenerator::placeBirchTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
+void TerrainGenerator::placeBirchTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 150);
 
@@ -164,7 +164,7 @@ void TerrainGenerator::placeBirchTree(ChunkData &chunkData, int localX, int loca
   }
 }
 
-void TerrainGenerator::placeSpruceTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
+void TerrainGenerator::placeSpruceTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 300);
 
@@ -209,7 +209,7 @@ void TerrainGenerator::placeSpruceTree(ChunkData &chunkData, int localX, int loc
   }
 }
 
-void TerrainGenerator::placeJungleTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
+void TerrainGenerator::placeJungleTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 400);
 
@@ -259,7 +259,7 @@ void TerrainGenerator::placeJungleTree(ChunkData &chunkData, int localX, int loc
   }
 }
 
-void TerrainGenerator::placeAcaciaTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
+void TerrainGenerator::placeAcaciaTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 450);
 
@@ -300,7 +300,7 @@ void TerrainGenerator::placeAcaciaTree(ChunkData &chunkData, int localX, int loc
   }
 }
 
-void TerrainGenerator::placeDarkOakTree(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
+void TerrainGenerator::placeDarkOakTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 480);
 
@@ -351,7 +351,7 @@ void TerrainGenerator::placeDarkOakTree(ChunkData &chunkData, int localX, int lo
   }
 }
 
-void TerrainGenerator::placeCherryTree(ChunkData &chunkData, int localX, int localZ,
+void TerrainGenerator::placeCherryTree(const ChunkGenerationTarget &chunkData, int localX, int localZ,
                                        int baseY, int worldX, int worldZ)
 {
   const uint32_t h = treeHash(worldX, worldZ, m_seed + 520);
@@ -380,7 +380,7 @@ void TerrainGenerator::placeCherryTree(ChunkData &chunkData, int localX, int loc
   }
 }
 
-void TerrainGenerator::placeRedwoodTree(ChunkData &chunkData, int localX, int localZ,
+void TerrainGenerator::placeRedwoodTree(const ChunkGenerationTarget &chunkData, int localX, int localZ,
                                         int baseY, int worldX, int worldZ)
 {
   const uint32_t h = treeHash(worldX, worldZ, m_seed + 540);
@@ -418,7 +418,7 @@ void TerrainGenerator::placeRedwoodTree(ChunkData &chunkData, int localX, int lo
   setVoxelSafe(chunkData, localX + 1, topY + 1, localZ, TextureType::SPRUCE_LEAVES);
 }
 
-void TerrainGenerator::placePalmTree(ChunkData &chunkData, int localX, int localZ,
+void TerrainGenerator::placePalmTree(const ChunkGenerationTarget &chunkData, int localX, int localZ,
                                      int baseY, int worldX, int worldZ)
 {
   const uint32_t h = treeHash(worldX, worldZ, m_seed + 560);
@@ -451,7 +451,7 @@ void TerrainGenerator::placePalmTree(ChunkData &chunkData, int localX, int local
   }
 }
 
-void TerrainGenerator::placeMangroveTree(ChunkData &chunkData, int localX, int localZ,
+void TerrainGenerator::placeMangroveTree(const ChunkGenerationTarget &chunkData, int localX, int localZ,
                                          int baseY, int worldX, int worldZ)
 {
   const uint32_t h = treeHash(worldX, worldZ, m_seed + 580);
@@ -496,7 +496,7 @@ void TerrainGenerator::placeMangroveTree(ChunkData &chunkData, int localX, int l
   }
 }
 
-void TerrainGenerator::placeBamboo(ChunkData &chunkData, int localX, int localZ,
+void TerrainGenerator::placeBamboo(const ChunkGenerationTarget &chunkData, int localX, int localZ,
                                    int baseY, int worldX, int worldZ)
 {
   const uint32_t h = treeHash(worldX, worldZ, m_seed + 600);
@@ -509,7 +509,7 @@ void TerrainGenerator::placeBamboo(ChunkData &chunkData, int localX, int localZ,
   }
 }
 
-void TerrainGenerator::placeGiantMushroom(ChunkData &chunkData, int localX,
+void TerrainGenerator::placeGiantMushroom(const ChunkGenerationTarget &chunkData, int localX,
                                           int localZ, int baseY, int worldX,
                                           int worldZ)
 {
@@ -538,7 +538,7 @@ void TerrainGenerator::placeGiantMushroom(ChunkData &chunkData, int localX,
   setVoxelSafe(chunkData, localX, topY + 1, localZ, cap);
 }
 
-void TerrainGenerator::placeCactus(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
+void TerrainGenerator::placeCactus(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 500);
   int height = 1 + static_cast<int>(h & 3); // 1–4 blocks
@@ -567,7 +567,7 @@ void TerrainGenerator::placeCactus(ChunkData &chunkData, int localX, int localZ,
   }
 }
 
-void TerrainGenerator::placeIceSpike(ChunkData &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
+void TerrainGenerator::placeIceSpike(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {
   uint32_t h = treeHash(worldX, worldZ, m_seed + 600);
   int height = 8 + static_cast<int>(h % 18); // 8–25 tall

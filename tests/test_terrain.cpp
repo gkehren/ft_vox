@@ -364,6 +364,119 @@ static EdgeStats checkEdge(const ChunkData &owner, int shellLx, int shellLz,
 	return stats;
 }
 
+// ---------------------------------------------------------------------------
+// Generation into caller-owned storage (issue #78)
+// ---------------------------------------------------------------------------
+
+struct TargetBuffers
+{
+	std::vector<Voxel> voxels;
+	std::vector<uint8_t> shell;
+	std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomes{};
+	std::array<int, CHUNK_SIZE * CHUNK_SIZE> heightMap{};
+	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> grass{};
+	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> foliage{};
+
+	TargetBuffers() : voxels(CHUNK_VOLUME), shell(kBorderVoxelCount) {}
+
+	ChunkGenerationTarget target()
+	{
+		return ChunkGenerationTarget{
+			.voxels = voxels, .borderVoxels = shell, .biomes = biomes,
+			.heightMap = heightMap, .grassColors = grass, .foliageColors = foliage};
+	}
+
+	void poison()
+	{
+		std::fill(voxels.begin(), voxels.end(), Voxel{static_cast<uint8_t>(0xAA)});
+		std::fill(shell.begin(), shell.end(), static_cast<uint8_t>(0xFF));
+		biomes.fill(static_cast<BiomeType>(0x7F));
+		heightMap.fill(-123456);
+		grass.fill(0xDEADBEEFu);
+		foliage.fill(0xDEADBEEFu);
+	}
+};
+
+static bool chunkDataMatchesTarget(const ChunkData &reference, const TargetBuffers &buffers)
+{
+	return std::memcmp(reference.voxels.data(), buffers.voxels.data(),
+					   CHUNK_VOLUME * sizeof(Voxel)) == 0 &&
+		   std::memcmp(reference.borderVoxels.data(), buffers.shell.data(),
+					   buffers.shell.size()) == 0 &&
+		   std::memcmp(reference.biomes.data(), buffers.biomes.data(),
+					   sizeof(buffers.biomes)) == 0 &&
+		   std::memcmp(reference.heightMap.data(), buffers.heightMap.data(),
+					   sizeof(buffers.heightMap)) == 0 &&
+		   std::memcmp(reference.grassColors.data(), buffers.grass.data(),
+					   sizeof(buffers.grass)) == 0 &&
+		   std::memcmp(reference.foliageColors.data(), buffers.foliage.data(),
+					   sizeof(buffers.foliage)) == 0;
+}
+
+/// generateChunkInto (the streaming hot path) must reproduce the owning
+/// generateChunk byte-for-byte, fully reset reused storage (no data may leak
+/// from a previously generated chunk), and stay deterministic when driven
+/// concurrently from per-thread generators.
+static void testGenerateChunkIntoTarget()
+{
+	constexpr int kSeed = 777;
+	TerrainGenerator gen(kSeed);
+	const int coords[][2] = {
+		{0, 0}, {CHUNK_SIZE, -CHUNK_SIZE}, {-5 * CHUNK_SIZE, 3 * CHUNK_SIZE}, {160, -80}};
+
+	// 1) Fresh-buffer equivalence with the owning path.
+	for (const auto &coord : coords)
+	{
+		const ChunkData reference = gen.generateChunk(coord[0], coord[1]);
+		TargetBuffers buffers;
+		gen.generateChunkInto(coord[0], coord[1], buffers.target());
+		CHECK(chunkDataMatchesTarget(reference, buffers),
+			  "generateChunkInto matches owning generateChunk");
+	}
+
+	// 2) Reuse reset: poisoned storage from a previous generation must be
+	// fully overwritten - every field, every voxel.
+	TargetBuffers reused;
+	reused.poison();
+	gen.generateChunkInto(64, 96, reused.target());
+	{
+		const ChunkData reference = gen.generateChunk(64, 96);
+		CHECK(chunkDataMatchesTarget(reference, reused),
+			  "poisoned reuse leaves no leaked data");
+	}
+
+	// 3) Concurrent generation into per-thread buffers (thread-local
+	// generators) must match the sequential owning path.
+	const std::pair<int, int> threaded[] = {
+		{0, 0}, {CHUNK_SIZE, -CHUNK_SIZE}, {-160, 96}, {512, 512}};
+	std::vector<ChunkData> references;
+	references.reserve(std::size(threaded));
+	for (const auto &coord : threaded)
+		references.push_back(gen.generateChunk(coord.first, coord.second));
+
+	std::vector<std::future<bool>> futures;
+	futures.reserve(std::size(threaded));
+	for (size_t reverse = std::size(threaded); reverse-- > 0;)
+	{
+		futures.push_back(std::async(std::launch::async,
+			[&references, &threaded, reverse]() {
+				TargetBuffers local;
+				TerrainGenerator::getThreadLocal(kSeed).generateChunkInto(
+					threaded[reverse].first, threaded[reverse].second,
+					local.target());
+				return chunkDataMatchesTarget(references[reverse], local);
+			}));
+	}
+	bool concurrentOk = true;
+	for (auto &future : futures)
+		concurrentOk = future.get() && concurrentOk;
+	CHECK(concurrentOk, "concurrent generateChunkInto matches owning path");
+
+	std::cout << "generateChunkInto: byte-identical on " << std::size(coords)
+			  << " chunks, poisoned reuse fully reset, "
+			  << std::size(threaded) << " concurrent chunks match\n";
+}
+
 static void testBorderConsistency()
 {
 	constexpr int kSeed = 777;
@@ -2525,6 +2638,7 @@ int main(int argc, char **argv)
 	testDeterminismSameSeed();
 	testDifferentSeedsDiffer();
 	testConcurrentAndMultiSeedDeterminism();
+	testGenerateChunkIntoTarget();
 	testTerrainProfilingDoesNotChangeOutput();
 	testBorderConsistency();
 	testBorderTrunks();

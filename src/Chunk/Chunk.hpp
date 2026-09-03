@@ -44,8 +44,6 @@ public:
 	void setState(ChunkState state);
 	ChunkState getState() const;
 
-	void setVoxels(const std::vector<Voxel> &voxels);
-
 	Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z);
 	const Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
 	bool isVoxelActive(int x, int y, int z) const;
@@ -114,6 +112,12 @@ private:
 
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeGrassColors{};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeFoliageColors{};
+
+	// Per-column generation state, filled by generateTerrain() (biomes feed
+	// vegetation/border passes; heightMap mirrors ChunkData::heightMap).
+	// Fully reset on every generation and pool recycle.
+	std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomeTypes{};
+	std::array<int, CHUNK_SIZE * CHUNK_SIZE> heightMap{};
 
 	uint32_t opaqueIndexCount{0};
 	uint32_t waterIndexCount{0};
