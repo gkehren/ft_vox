@@ -208,6 +208,10 @@ void Engine::initializeNoiseGenerator(int seed_val)
 		seed = seed_val;
 	}
 
+	++m_worldGenerationId;
+	if (gameUi)
+		gameUi->invalidateBiomeMap();
+
 	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
 	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
 												  chunkPool.get());
@@ -333,6 +337,10 @@ void Engine::reloadWorld(int newSeed)
 		return;
 
 	seed = newSeed > 0 ? newSeed : 42;
+	++m_worldGenerationId;
+	if (gameUi)
+		gameUi->invalidateBiomeMap();
+
 	drawList.clear();
 	shadowList.clear();
 
@@ -800,6 +808,7 @@ void Engine::drawUi()
 	f.showDemoPlayers = &showDemoPlayers;
 	f.paused = &paused;
 	f.seed = seed;
+	f.worldGenerationId = m_worldGenerationId;
 	f.fps = static_cast<float>(fps > 0.0 ? fps : ImGui::GetIO().Framerate);
 	f.frameMs = static_cast<float>(deltaTime * 1000.0);
 	f.drawCount = drawList.size();
@@ -821,6 +830,17 @@ void Engine::drawUi()
 		const ResourcePackApplyResult r = applyResourcePack(path);
 		return {r.atlasOk, r.isError, r.isWarning, r.message};
 	};
+	if (threadPool)
+	{
+		f.submitBiomeMap = [this](BiomeMapRequest req) -> std::future<BiomeMapResult> {
+			auto promise = std::make_shared<std::promise<BiomeMapResult>>();
+			std::future<BiomeMapResult> fut = promise->get_future();
+			threadPool->enqueue(TaskPriority::Low, [promise, req]() mutable {
+				promise->set_value(generateBiomeMap(req));
+			});
+			return fut;
+		};
+	}
 
 	gameUi->draw(f);
 

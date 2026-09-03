@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <string>
 
+#include <Engine/GameUIBiomeMap.hpp>
+
 /// Frame snapshot for ImGui panels (pointers owned by Engine).
 struct GameUIFrame
 {
@@ -43,6 +45,7 @@ struct GameUIFrame
 	bool *paused{nullptr};
 
 	int seed{0};
+	uint64_t worldGenerationId{0};
 	float fps{0.f};
 	float frameMs{0.f};
 	size_t drawCount{0};
@@ -69,6 +72,9 @@ struct GameUIFrame
 	std::function<ResourcePackUiResult(const std::string &)> applyResourcePack;
 
 	Benchmark *benchmark{nullptr};
+
+	/// Asynchronous biome map job submission abstraction (e.g. Engine's ThreadPool with low priority).
+	std::function<std::future<BiomeMapResult>(BiomeMapRequest)> submitBiomeMap;
 };
 
 #include <Engine/GameUIResourcePack.hpp>
@@ -102,7 +108,42 @@ public:
 
 	void setShowHud(bool v) { m_showHud = v; }
 
+	/// Invalidate any active or in-flight biome map task and clear current texture.
+	/// Supersedes existing request ID and marks backing texture as inactive.
+	void invalidateBiomeMap();
+	bool isBiomeMapPending() const { return m_mapJob.isRunning(); }
+	uint64_t currentWorldGenId() const { return m_currentWorldGenId; }
+	uint64_t currentMapRequestId() const { return m_mapRequestId; }
+
 private:
+	struct BiomeMapJob
+	{
+		uint64_t requestId{0};
+		std::shared_ptr<std::atomic<bool>> cancel;
+		std::future<BiomeMapResult> future;
+
+		bool isRunning() const
+		{
+			return future.valid() &&
+				   future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+		}
+
+		bool isReady() const
+		{
+			return future.valid() &&
+				   future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+		}
+
+		void reset()
+		{
+			if (cancel)
+				cancel->store(true, std::memory_order_relaxed);
+			cancel.reset();
+			future = {};
+			requestId = 0;
+		}
+	};
+
 	void drawMenuBar(GameUIFrame &frame);
 	void drawHud(GameUIFrame &frame);
 	void drawGraphics(GameUIFrame &frame);
@@ -112,6 +153,21 @@ private:
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp();
 	void drawOverlayHints(GameUIFrame &frame);
+
+	void requestBiomeMapRefresh()
+	{
+		m_mapNeedsUpdate = true;
+	}
+
+	void supersedeBiomeMapRequest()
+	{
+		++m_mapRequestId;
+
+		if (m_mapJob.cancel)
+			m_mapJob.cancel->store(true, std::memory_order_relaxed);
+
+		m_mapNeedsUpdate = true;
+	}
 
 	void tickBiomeMap(GameUIFrame &frame);
 	void ensureBiomeTexture(int size);
@@ -131,16 +187,13 @@ private:
 	glm::vec2 m_mapCenter{0.f, 0.f};
 	bool m_mapFollow{true};
 	bool m_mapNeedsUpdate{true};
-	double m_mapLastUpdate{0.0};
+	double m_mapLastPublishedAt{0.0};
 	glm::vec2 m_mapLastPlayer{0.f, 0.f};
+	uint64_t m_currentWorldGenId{0};
+	int m_currentSeed{0};
+	uint64_t m_mapRequestId{0};
 
-	std::future<void> m_mapFuture;
-	std::vector<unsigned char> m_mapPending;
-	std::atomic<bool> m_mapReady{false};
-	glm::vec2 m_mapPendingCenter{0.f};
-	float m_mapPendingZoom{0.5f};
-	int m_mapPendingGridX{0};
-	int m_mapPendingGridZ{0};
+	BiomeMapJob m_mapJob{};
 
 	VkContext *m_vk{nullptr};
 	ImmediateCommands *m_imm{nullptr};

@@ -191,3 +191,31 @@ target_link_libraries(test_terrain PRIVATE
 )
 
 add_test(NAME TerrainGeneration COMMAND test_terrain)
+
+# ---------------------------------------------------------------------------
+# Biome map generation: lifetime safety, cancellation, stale result rejection
+# ---------------------------------------------------------------------------
+add_executable(test_biome_map
+    test_biome_map.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/GameUIBiomeMap.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+)
+
+target_include_directories(test_biome_map PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(test_biome_map PRIVATE
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_biome_map PRIVATE
+    glm
+    FastNoise2
+    Threads::Threads
+)
+
+add_test(NAME BiomeMapGeneration COMMAND test_biome_map)
+

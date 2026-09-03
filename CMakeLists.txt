@@ -173,6 +173,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/ImGuiLayer.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUI.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIResourcePack.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/GameUIBiomeMap.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Benchmark.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/BuildInfo.cpp

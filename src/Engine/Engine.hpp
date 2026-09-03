@@ -49,6 +49,9 @@ public:
 	/// Recreate terrain for seed (device idle). Used by benchmark and tools.
 	void reloadWorld(int newSeed);
 
+	/// Monotonically increasing world generation / reload version counter.
+	uint64_t worldGenerationId() const { return m_worldGenerationId; }
+
 	/// Result of applying a pack (atlas is still usable when pack is invalid — bundled used).
 	struct ResourcePackApplyResult
 	{
@@ -101,6 +104,7 @@ private:
 	double streamAccum{0.0};
 
 	int seed{0};
+	uint64_t m_worldGenerationId{1};
 	std::string m_resourcePackRoot;
 	TextureType selectedTexture{STONE};
 

@@ -14,41 +14,6 @@
 
 namespace
 {
-// Biome map colors indexed by BiomeType (from legacy UIManager).
-constexpr unsigned char kBiomeColors[BIOME_COUNT][3] = {
-	{100, 150, 200}, // FROZEN_OCEAN
-	{220, 230, 240}, // SNOWY_TUNDRA
-	{130, 160, 180}, // SNOWY_TAIGA
-	{160, 210, 230}, // ICE_SPIKES
-	{30, 100, 180},	 // OCEAN
-	{210, 200, 150}, // BEACH
-	{140, 200, 90},	 // PLAINS
-	{50, 130, 50},	 // FOREST
-	{100, 170, 80},	 // BIRCH_FOREST
-	{30, 80, 30},	 // DARK_FOREST
-	{80, 100, 60},	 // SWAMP
-	{60, 130, 200},	 // RIVER
-	{220, 200, 100}, // DESERT
-	{190, 170, 80},	 // SAVANNA
-	{40, 160, 40},	 // JUNGLE
-	{200, 100, 30},	 // BADLANDS
-	{150, 150, 150}, // MOUNTAINS
-	{220, 220, 230}, // SNOWY_MOUNTAINS
-	{150, 215, 95},	 // FLOWER_MEADOW
-	{230, 130, 165}, // CHERRY_GROVE
-	{190, 105, 45},	 // AUTUMN_FOREST
-	{45, 85, 50},	 // REDWOOD_FOREST
-	{55, 85, 55},	 // MANGROVE_SWAMP
-	{70, 180, 65},	 // BAMBOO_JUNGLE
-	{105, 105, 70},	 // MOOR
-	{155, 210, 225}, // GLACIER
-	{125, 185, 220}, // FROZEN_RIVER
-	{70, 55, 50},	 // VOLCANIC
-	{80, 185, 85},	 // OASIS
-	{145, 90, 150},	 // MUSHROOM_FIELDS
-	{45, 175, 185},	 // CORAL_REEF
-};
-
 const char *textureName(TextureType type)
 {
 	const auto index = static_cast<std::size_t>(type);
@@ -83,8 +48,13 @@ void GameUI::init(VkContext &context, ImmediateCommands &imm)
 
 void GameUI::shutdown()
 {
-	if (m_mapFuture.valid())
-		m_mapFuture.wait();
+	if (m_mapJob.cancel)
+		m_mapJob.cancel->store(true, std::memory_order_relaxed);
+
+	if (m_mapJob.future.valid())
+		m_mapJob.future.wait();
+
+	m_mapJob.reset();
 
 	if (m_vk && m_vk->getDevice() != VK_NULL_HANDLE)
 	{
@@ -108,6 +78,17 @@ void GameUI::shutdown()
 	m_imm = nullptr;
 }
 
+void GameUI::invalidateBiomeMap()
+{
+	supersedeBiomeMapRequest();
+
+	m_mapLastPublishedAt = 0.0;
+	// The backing Vulkan texture remains allocated on the GPU for reuse,
+	// but is marked inactive so the UI will not display stale world terrain.
+	// It will be updated in-place when the next valid map completes.
+	m_mapHasTexture = false;
+}
+
 void GameUI::onImGuiVulkanBackendRecreate()
 {
 	// The old descriptor belonged to the backend pool destroyed during reinit.
@@ -116,7 +97,8 @@ void GameUI::onImGuiVulkanBackendRecreate()
 	if (m_mapSampler != VK_NULL_HANDLE && m_mapImage.image != VK_NULL_HANDLE)
 		m_mapDesc = ImGui_ImplVulkan_AddTexture(
 			m_mapSampler, m_mapImage.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	m_mapHasTexture = (m_mapDesc != VK_NULL_HANDLE);
+	if (m_mapDesc == VK_NULL_HANDLE)
+		m_mapHasTexture = false;
 }
 
 bool GameUI::handleShortcut(int sdlKeycode, GameUIFrame &frame)
@@ -1039,18 +1021,18 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	if (ImGui::SliderFloat("Zoom", &m_mapZoom, 0.1f, 8.f, "%.2f"))
 	{
 		if (m_mapZoom != prevZoom)
-			m_mapNeedsUpdate = true;
+			supersedeBiomeMapRequest();
 	}
 	bool prevFollow = m_mapFollow;
 	ImGui::Checkbox("Follow player", &m_mapFollow);
 	if (m_mapFollow && !prevFollow)
-		m_mapNeedsUpdate = true;
+		supersedeBiomeMapRequest();
 
 	if (frame.camera && ImGui::Button("Center on player"))
 	{
 		const auto p = frame.camera->getPosition();
 		m_mapCenter = {p.x, p.z};
-		m_mapNeedsUpdate = true;
+		supersedeBiomeMapRequest();
 	}
 
 	if (m_mapHasTexture && m_mapDesc != VK_NULL_HANDLE)
@@ -1166,8 +1148,13 @@ void GameUI::ensureBiomeTexture(int size)
 {
 	if (!m_vk || !m_imm)
 		return;
-	if (m_mapHasTexture && m_mapImageSize == size)
+	if (canReuseBiomeTexture(m_mapImage.image != VK_NULL_HANDLE,
+							 m_mapDesc != VK_NULL_HANDLE,
+							 m_mapImageSize,
+							 size))
+	{
 		return;
+	}
 
 	m_vk->waitIdle();
 	if (m_mapDesc != VK_NULL_HANDLE)
@@ -1196,7 +1183,6 @@ void GameUI::ensureBiomeTexture(int size)
 	m_mapDesc = ImGui_ImplVulkan_AddTexture(m_mapSampler, m_mapImage.view,
 											VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	m_mapImageSize = size;
-	m_mapHasTexture = (m_mapDesc != VK_NULL_HANDLE);
 }
 
 void GameUI::uploadBiomeTexture(const std::vector<unsigned char> &rgb, int size)
@@ -1205,7 +1191,7 @@ void GameUI::uploadBiomeTexture(const std::vector<unsigned char> &rgb, int size)
 		return;
 
 	ensureBiomeTexture(size);
-	if (!m_mapHasTexture)
+	if (m_mapImage.image == VK_NULL_HANDLE || m_mapDesc == VK_NULL_HANDLE)
 		return;
 
 	// Expand RGB → RGBA for R8G8B8A8.
@@ -1224,83 +1210,95 @@ void GameUI::uploadBiomeTexture(const std::vector<unsigned char> &rgb, int size)
 
 void GameUI::tickBiomeMap(GameUIFrame &frame)
 {
-	if (!frame.generator || !frame.camera)
+	if (!frame.camera)
 		return;
 
-	const glm::vec3 cam = frame.camera->getPosition();
-	const glm::vec2 playerXZ(cam.x, cam.z);
-
-	// Upload completed async map
-	if (m_mapReady.load(std::memory_order_acquire))
+	// Invalidate if active world generation or seed changed
+	if (frame.worldGenerationId != m_currentWorldGenId || frame.seed != m_currentSeed)
 	{
-		m_mapReady.store(false, std::memory_order_relaxed);
-
-		// Paint player dot
-		const int size = m_mapSize;
-		const float noiseOffset = TerrainGenerator::NOISE_OFFSET;
-		const int dotX = static_cast<int>(std::round((playerXZ.x + noiseOffset) * m_mapPendingZoom)) -
-						 m_mapPendingGridX;
-		const int dotY = static_cast<int>(std::round((playerXZ.y + noiseOffset) * m_mapPendingZoom)) -
-						 m_mapPendingGridZ;
-		auto paint = [&](int px, int py, unsigned char r, unsigned char g, unsigned char b) {
-			if (px < 0 || py < 0 || px >= size || py >= size)
-				return;
-			const int idx = (py * size + px) * 3;
-			m_mapPending[idx + 0] = r;
-			m_mapPending[idx + 1] = g;
-			m_mapPending[idx + 2] = b;
-		};
-		for (int dy = -4; dy <= 4; ++dy)
-			for (int dx = -4; dx <= 4; ++dx)
-				if (dx * dx + dy * dy <= 16)
-					paint(dotX + dx, dotY + dy, 0, 0, 0);
-		for (int dy = -2; dy <= 2; ++dy)
-			for (int dx = -2; dx <= 2; ++dx)
-				if (dx * dx + dy * dy <= 4)
-					paint(dotX + dx, dotY + dy, 255, 255, 255);
-
-		m_mapCenter = m_mapPendingCenter;
-		uploadBiomeTexture(m_mapPending, size);
+		m_currentWorldGenId = frame.worldGenerationId;
+		m_currentSeed = frame.seed;
+		invalidateBiomeMap();
 	}
 
 	const double now = SDL_GetTicks() / 1000.0;
-	const bool timeElapsed = (now - m_mapLastUpdate) >= 1.0;
-	const bool playerMoved = glm::length(playerXZ - m_mapLastPlayer) > 8.f;
-	const bool running = m_mapFuture.valid() &&
-						 m_mapFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+	const glm::vec3 cam = frame.camera->getPosition();
+	const glm::vec2 playerXZ(cam.x, cam.z);
 
-	if (!running && (m_mapNeedsUpdate || timeElapsed || playerMoved))
+	// Detect player movement BEFORE consuming a finished result
+	const bool playerMoved = shouldSupersedeBiomeMap(playerXZ, m_mapLastPlayer, m_mapFollow);
+	if (playerMoved)
+	{
+		supersedeBiomeMapRequest();
+	}
+
+	// Check and consume completed async map BEFORE checking periodic refresh
+	if (m_mapJob.isReady())
+	{
+		BiomeMapResult res = m_mapJob.future.get();
+		m_mapJob.future = {};
+		m_mapJob.cancel.reset();
+
+		if (isBiomeMapResultAcceptable(res, frame.worldGenerationId, frame.seed, m_mapRequestId))
+		{
+			paintBiomeMapPlayerDot(res.rgb, res.size, playerXZ, res.zoom, res.gridX, res.gridZ);
+			m_mapCenter = res.center;
+			uploadBiomeTexture(res.rgb, res.size);
+			m_mapHasTexture = true;
+			m_mapLastPublishedAt = now;
+		}
+		else
+		{
+			// Late completion from older generation, seed, or superseded request:
+			// drop cleanly and request fresh update for the active view
+			m_mapNeedsUpdate = true;
+		}
+	}
+
+	const bool running = m_mapJob.isRunning();
+
+	// Periodic refresh triggered ONLY when no job is currently running
+	const bool timeElapsed = (now - m_mapLastPublishedAt) >= 1.0;
+	if (!running && timeElapsed)
+	{
+		requestBiomeMapRefresh();
+	}
+
+	if (!running && m_mapNeedsUpdate)
 	{
 		if (m_mapFollow)
 			m_mapCenter = playerXZ;
 
-		m_mapLastUpdate = now;
 		m_mapLastPlayer = playerXZ;
 		m_mapNeedsUpdate = false;
 
-		const glm::vec2 center = m_mapCenter;
-		const int size = m_mapSize;
-		const float step = 1.f / m_mapZoom;
-		const float noiseOffset = TerrainGenerator::NOISE_OFFSET;
-		m_mapPendingCenter = center;
-		m_mapPendingZoom = m_mapZoom;
-		m_mapPendingGridX = static_cast<int>(std::round((center.x + noiseOffset) * m_mapZoom - size * 0.5f));
-		m_mapPendingGridZ = static_cast<int>(std::round((center.y + noiseOffset) * m_mapZoom - size * 0.5f));
-		m_mapPending.resize(static_cast<size_t>(size * size * 3));
+		if (m_mapRequestId == 0)
+			m_mapRequestId = 1;
 
-		TerrainGenerator *gen = frame.generator;
-		m_mapFuture = std::async(std::launch::async, [this, gen, center, size, step]() {
-			std::vector<BiomeType> biomes;
-			gen->getBiomeRegion(center.x, center.y, step, size, size, biomes);
-			for (int i = 0; i < size * size; ++i)
-			{
-				const int b = static_cast<int>(biomes[i]);
-				const int bi = (b >= 0 && b < BIOME_COUNT) ? b : 0;
-				m_mapPending[i * 3 + 0] = kBiomeColors[bi][0];
-				m_mapPending[i * 3 + 1] = kBiomeColors[bi][1];
-				m_mapPending[i * 3 + 2] = kBiomeColors[bi][2];
-			}
-			m_mapReady.store(true, std::memory_order_release);
-		});
+		const uint64_t requestId = m_mapRequestId;
+		auto cancelToken = std::make_shared<std::atomic<bool>>(false);
+		m_mapJob.requestId = requestId;
+		m_mapJob.cancel = cancelToken;
+
+		BiomeMapRequest req{
+			.requestId = requestId,
+			.worldGenerationId = frame.worldGenerationId,
+			.seed = frame.seed,
+			.center = m_mapCenter,
+			.size = m_mapSize,
+			.zoom = m_mapZoom,
+			.cancelToken = cancelToken
+		};
+
+		if (frame.submitBiomeMap)
+		{
+			m_mapJob.future = frame.submitBiomeMap(req);
+		}
+		else
+		{
+			m_mapJob.future = std::async(std::launch::async, [req]() {
+				return generateBiomeMap(req);
+			});
+		}
 	}
 }
