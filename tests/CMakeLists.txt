@@ -220,6 +220,47 @@ target_link_libraries(test_biome_map PRIVATE
 add_test(NAME BiomeMapGeneration COMMAND test_biome_map)
 
 # ---------------------------------------------------------------------------
+# Chunk lifecycle (issue #78 review): move semantics + direct pooled
+# generation via Chunk::generateTerrain. Links the Vulkan buffer helpers
+# Chunk.cpp depends on; never touches a real device.
+# ---------------------------------------------------------------------------
+add_executable(test_chunk_lifecycle
+    test_chunk_lifecycle.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+)
+
+target_include_directories(test_chunk_lifecycle PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_chunk_lifecycle PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+if(APPLE)
+    target_compile_definitions(test_chunk_lifecycle PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_chunk_lifecycle PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+target_link_libraries(test_chunk_lifecycle PRIVATE
+    glm
+    FastNoise2
+    SDL3::SDL3
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
+)
+
+add_test(NAME ChunkLifecycle COMMAND test_chunk_lifecycle)
+
+# ---------------------------------------------------------------------------
 # Profiler worker consistency and stress test (Issue #79)
 # ---------------------------------------------------------------------------
 add_executable(test_profiler

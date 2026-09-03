@@ -130,4 +130,9 @@ private:
 
 private:
 	size_t m_activeIndex{SIZE_MAX};
+
+	// Testing hook (issue #78 review): lets the chunk lifecycle test verify
+	// full move semantics - including per-column generation state - without
+	// exposing that state in the public API.
+	friend struct ChunkStateProbe;
 };

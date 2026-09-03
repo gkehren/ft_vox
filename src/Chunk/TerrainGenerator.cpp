@@ -731,8 +731,8 @@ ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
   chunkData.borderVoxels.resize(kBorderVoxelCount);
 
   ChunkGenerationTarget target{
-      .voxels = chunkData.voxels,
-      .borderVoxels = chunkData.borderVoxels,
+      .voxels = std::span<Voxel, CHUNK_VOLUME>(chunkData.voxels),
+      .borderVoxels = std::span<uint8_t, kBorderVoxelCount>(chunkData.borderVoxels),
       .biomes = chunkData.biomes,
       .heightMap = chunkData.heightMap,
       .grassColors = chunkData.grassColors,
@@ -744,9 +744,6 @@ ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
 void TerrainGenerator::generateChunkInto(int chunkX, int chunkZ,
                                          const ChunkGenerationTarget &target)
 {
-  assert(target.voxels.size() == static_cast<size_t>(CHUNK_VOLUME));
-  assert(target.borderVoxels.size() == kBorderVoxelCount);
-
   using Clock = std::chrono::steady_clock;
   const auto totalStart =
       m_activeProfile ? Clock::now() : Clock::time_point{};

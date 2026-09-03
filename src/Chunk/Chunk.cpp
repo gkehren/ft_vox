@@ -56,6 +56,8 @@ Chunk::Chunk(Chunk &&other) noexcept
       neighborShellVoxels(std::move(other.neighborShellVoxels)),
       biomeGrassColors(other.biomeGrassColors),
       biomeFoliageColors(other.biomeFoliageColors),
+      biomeTypes(other.biomeTypes),
+      heightMap(other.heightMap),
       vertices(std::move(other.vertices)), indices(std::move(other.indices)),
       waterVertices(std::move(other.waterVertices)), waterIndices(std::move(other.waterIndices)),
       m_isLODMesh(other.m_isLODMesh)
@@ -82,6 +84,8 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     neighborShellVoxels = std::move(other.neighborShellVoxels);
     biomeGrassColors = other.biomeGrassColors;
     biomeFoliageColors = other.biomeFoliageColors;
+    biomeTypes = other.biomeTypes;
+    heightMap = other.heightMap;
     vertices = std::move(other.vertices);
     indices = std::move(other.indices);
     waterVertices = std::move(other.waterVertices);
@@ -249,8 +253,8 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
   neighborShellVoxels.resize(kBorderVoxelCount);
 
   ChunkGenerationTarget target{
-      .voxels = voxels,
-      .borderVoxels = neighborShellVoxels,
+      .voxels = std::span<Voxel, CHUNK_VOLUME>(voxels),
+      .borderVoxels = std::span<uint8_t, kBorderVoxelCount>(neighborShellVoxels),
       .biomes = biomeTypes,
       .heightMap = heightMap,
       .grassColors = biomeGrassColors,

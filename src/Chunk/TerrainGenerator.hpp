@@ -38,12 +38,15 @@ constexpr size_t kBorderVoxelCount =
 // to memory owned by the caller - pooled Chunk storage at runtime, an owning
 // ChunkData in tests/tools. generateChunkInto() fully resets every field
 // before generating, so reused storage cannot leak data between chunks.
-// View semantics: a const target still allows writing through its spans
-// (only the span members themselves are protected).
+// Fixed extents make a wrong-sized destination a type-level contract
+// (debug-verified at construction from sized ranges) instead of a runtime
+// check on the hot path. View semantics: a const target still allows
+// writing through its spans (only the span members themselves are
+// protected).
 struct ChunkGenerationTarget
 {
-  std::span<Voxel> voxels;                // size() == CHUNK_VOLUME
-  std::span<uint8_t> borderVoxels;        // size() == kBorderVoxelCount
+  std::span<Voxel, CHUNK_VOLUME> voxels;
+  std::span<uint8_t, kBorderVoxelCount> borderVoxels;
   std::span<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomes;
   std::span<int, CHUNK_SIZE * CHUNK_SIZE> heightMap;
   std::span<uint32_t, CHUNK_SIZE * CHUNK_SIZE> grassColors;
