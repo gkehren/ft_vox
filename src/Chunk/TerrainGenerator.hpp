@@ -126,24 +126,27 @@ public:
     std::vector<float> height;
     std::vector<float> erosionTemp;
 
-    // Per-field capacity retained across attempts (points). After every
-    // getBiomeRegion() exit, capacity() <= retainedPointsCap for all
-    // fields. The default keeps only tiled-path capacity so a generic
-    // scratch stays small no matter who owns it; a producer with a single
-    // dedicated scratch (e.g. the biome-map job) may raise it up to
+    // Per-field capacity retained across attempts (points). The contract
+    // after getBiomeRegion() returns - on success, cancellation, invalid
+    // request, or exception - is exactly:
+    //
+    //   capacity() <= min(retainedPointsCap, kMaxDenseDomainPoints)
+    //
+    // for every field. The default keeps only tiled-path capacity so a
+    // generic scratch stays small no matter who owns it; a producer with a
+    // single dedicated scratch (e.g. the biome-map job) may raise it up to
     // kMaxDenseDomainPoints to reuse dense capacity across refreshes
-    // without allocation churn - retention then stays bounded by
-    // kMaxDenseDomainPoints * kBiomeRegionScratchFields * sizeof(float)
-    // (~10.6 MiB) for that one scratch. Values above kMaxDenseDomainPoints
-    // are clamped by trimOversizedCapacity().
+    // without allocation churn - retention then stays bounded to the
+    // absolute maximum of kMaxDenseDomainPoints points per field, i.e.
+    // a logical payload of ~10 MiB for that one scratch
+    // (516^2 points x 10 fields x 4 bytes).
     size_t retainedPointsCap{kMaxTileDensePoints};
 
     // Releases per-field capacity above retainedPointsCap (clamped to
     // kMaxDenseDomainPoints). getBiomeRegion() runs this automatically on
-    // every exit - after successful AND cancelled/failed attempts - so
-    // capacity above the scratch's retention bound is never retained
-    // across attempts. Call it manually only when mutating a scratch
-    // outside getBiomeRegion().
+    // every exit - after successful AND cancelled/failed attempts - so the
+    // contract above always holds. Call it manually only when mutating a
+    // scratch outside getBiomeRegion().
     void trimOversizedCapacity();
   };
 

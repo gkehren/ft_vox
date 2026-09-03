@@ -1954,13 +1954,14 @@ static void testBiomeRegionScratchRetention()
 	// Retention contract: after any attempt (or explicit trim), no scratch
 	// field may retain capacity above the tiled-path bound. Assert the
 	// bound, not an exact capacity — that is allocator-independent.
-	const auto checkBounded = [](const TerrainGenerator::BiomeRegionScratch &s) {
+	const auto checkBounded = [](const TerrainGenerator::BiomeRegionScratch &s,
+								 size_t cap = TerrainGenerator::kMaxTileDensePoints) {
 		for (const std::vector<float> *field :
 			 {&s.temperature, &s.humidity, &s.weirdness, &s.river,
 			  &s.continental, &s.erosion, &s.peaksValleys, &s.ridge,
 			  &s.height, &s.erosionTemp})
-			CHECK(field->capacity() <= TerrainGenerator::kMaxTileDensePoints,
-				  "retained scratch capacity must stay within the tiled bound");
+			CHECK(field->capacity() <= cap,
+				  "retained scratch capacity must stay within the retention policy");
 	};
 
 	// Helper contract directly: oversized fields are released, while
@@ -2034,6 +2035,69 @@ static void testBiomeRegionScratchRetention()
 		CHECK(gen.getBiomeRegion(grid, third, &scratch), "dense build 3 must complete");
 		CHECK(scratch.temperature.capacity() <= TerrainGenerator::kMaxDenseDomainPoints,
 			  "retention cap must clamp to the absolute dense bound");
+
+		// Late cancellation under the dense cap: retention stays exactly
+		// within the policy — neither released below it nor grown past the
+		// absolute bound.
+		int polls = 0;
+		const bool cancelled = !gen.getBiomeRegion(grid, third, &scratch,
+												   [&polls] { return ++polls >= 2; });
+		CHECK(cancelled, "late-cancelled dense build must report interruption");
+		CHECK(third.empty(), "late-cancelled dense build must publish nothing");
+		checkBounded(scratch, TerrainGenerator::kMaxDenseDomainPoints);
+	}
+
+	// Policy enforced even when the cap is LOWERED and the next request is
+	// invalid: dense retained -> policy lowered -> invalid request -> the
+	// exit guard must still apply the new (lower) policy to all 10 fields.
+	{
+		TerrainGenerator::BiomeRegionScratch scratch;
+		scratch.retainedPointsCap = TerrainGenerator::kMaxDenseDomainPoints;
+		const BiomeRegionGrid denseGrid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 256, 256);
+		std::vector<BiomeType> biomes;
+		CHECK(gen.getBiomeRegion(denseGrid, biomes, &scratch),
+			  "dense build must complete");
+		CHECK(scratch.temperature.capacity() > TerrainGenerator::kMaxTileDensePoints,
+			  "dense capacity must be retained under the dense cap");
+
+		scratch.retainedPointsCap = TerrainGenerator::kMaxTileDensePoints;
+		const BiomeRegionGrid invalidGrid = makeBiomeRegionGrid(0.0f, 0.0f, 0.0f, 256, 256);
+		CHECK(!gen.getBiomeRegion(invalidGrid, biomes, &scratch),
+			  "invalid grid must be rejected");
+		checkBounded(scratch);
+	}
+
+	// Zero retention cap: after a call, no capacity is retained at all.
+	// The trim swaps with empty vectors, so the applied policy bound (0)
+	// holds exactly; asserted through the same bound-based helper.
+	{
+		TerrainGenerator::BiomeRegionScratch scratch;
+		scratch.retainedPointsCap = 0;
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 64, 64);
+		std::vector<BiomeType> biomes;
+		CHECK(gen.getBiomeRegion(grid, biomes, &scratch),
+			  "build with zero retention cap must complete");
+		checkBounded(scratch, 0);
+	}
+
+	// Growing dense sizes: capacity grows once for the larger domain, then
+	// stays reusable for smaller ones (no shrink, no churn).
+	{
+		TerrainGenerator::BiomeRegionScratch scratch;
+		scratch.retainedPointsCap = TerrainGenerator::kMaxDenseDomainPoints;
+		const BiomeRegionGrid small = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 128, 128);
+		const BiomeRegionGrid large = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 256, 256);
+		std::vector<BiomeType> biomes;
+		CHECK(gen.getBiomeRegion(small, biomes, &scratch), "small dense build must complete");
+		const size_t c1 = scratch.temperature.capacity();
+		CHECK(gen.getBiomeRegion(large, biomes, &scratch), "large dense build must complete");
+		const size_t c2 = scratch.temperature.capacity();
+		CHECK(gen.getBiomeRegion(small, biomes, &scratch), "small dense rebuild must complete");
+		const size_t c3 = scratch.temperature.capacity();
+		CHECK(c1 < c2, "capacity must grow once for the larger dense domain");
+		CHECK(c2 == c3, "capacity must stay reusable for smaller domains");
+		CHECK(c2 <= TerrainGenerator::kMaxDenseDomainPoints,
+			  "grown capacity must stay within the absolute dense bound");
 	}
 
 	std::cout << "biome region scratch retention: oversized capacity trimmed after "

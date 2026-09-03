@@ -203,9 +203,13 @@ private:
 	BiomeMapUpload m_pendingUpload{};
 	// Single process-wide region scratch for the biome-map job (never one
 	// per pool worker): its retention cap allows dense-capacity reuse so
-	// refreshes do not re-allocate the ~10 MiB dense peak, while the total
-	// retained memory stays bounded by kMaxDenseDomainPoints (~10.6 MiB).
-	// Shared ownership keeps it alive for the duration of an in-flight job.
+	// refreshes do not re-allocate the dense peak, while retention stays
+	// bounded by kMaxDenseDomainPoints per field (~10 MiB logical payload
+	// in total). The scratch holds only scratch floats - no seed- or
+	// world-dependent state - so it survives world/seed changes and is
+	// never reset on map invalidation; shared ownership releases it at
+	// GameUI destruction. Shared ownership keeps it alive for the duration
+	// of an in-flight job.
 	std::shared_ptr<TerrainGenerator::BiomeRegionScratch> m_mapScratch;
 
 	VkContext *m_vk{nullptr};

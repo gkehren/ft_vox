@@ -64,6 +64,8 @@ struct BiomeMapRequest
 	/// retainedPointsCap); when null, getBiomeRegion falls back to an
 	/// internal thread-local scratch. Shared ownership keeps the scratch
 	/// alive for the duration of the job even if the owner goes away.
+	/// Access relies on the single-flight biome-map job contract (at most
+	/// one in-flight request at a time), so no synchronization is needed.
 	std::shared_ptr<TerrainGenerator::BiomeRegionScratch> scratch;
 };
 

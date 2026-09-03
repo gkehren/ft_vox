@@ -667,6 +667,31 @@ static void test_request_scratch_reuse()
 	CHECK(!res3.valid, "pre-cancelled build must stay invalid");
 	CHECK(scratch->temperature.capacity() == retained,
 		  "cancelled build must not grow the retained scratch");
+
+	// Zoom sweep dense -> tiled -> dense: switching zooms must not
+	// reintroduce churn — the retained dense capacity survives the tiled
+	// build untouched and is reused when returning to a dense zoom.
+	req.cancelToken = nullptr;
+
+	req.requestId = 24;
+	req.zoom = 0.5f; // dense
+	BiomeMapResult res4 = generateBiomeMap(req);
+	CHECK(res4.valid && isBiomeMapResultAcceptable(res4, 3, 42, 24), "dense build valid");
+	const size_t denseCapacity = scratch->temperature.capacity();
+
+	req.requestId = 25;
+	req.zoom = 0.1f; // tiled path
+	BiomeMapResult res5 = generateBiomeMap(req);
+	CHECK(res5.valid && isBiomeMapResultAcceptable(res5, 3, 42, 25), "tiled build valid");
+	CHECK(scratch->temperature.capacity() == denseCapacity,
+		  "tiled build must not disturb the retained dense capacity");
+
+	req.requestId = 26;
+	req.zoom = 0.5f; // dense again
+	BiomeMapResult res6 = generateBiomeMap(req);
+	CHECK(res6.valid && isBiomeMapResultAcceptable(res6, 3, 42, 26), "dense rebuild valid");
+	CHECK(scratch->temperature.capacity() == denseCapacity,
+		  "returning to dense zoom must reuse the retained capacity without churn");
 }
 
 int main()

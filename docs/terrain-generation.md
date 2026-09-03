@@ -201,14 +201,16 @@ Biome sampling is unified across the engine via a canonical erosion-aware pipeli
     vectorized dense path. A direct per-column `evaluateBiomeColumn` fallback remains as
     a safety net only. An optional cancellation callback is polled before every tile.
   - Scratch is a dedicated `BiomeRegionScratch` owned by the caller (pass `nullptr` to
-    use an internal thread-local fallback whose retention is bounded to the tiled path).
-    `getBiomeRegion()` trims every field above the scratch's `retainedPointsCap` on
-    **every** exit — successful or cancelled/failed attempts alike. The default cap
-    keeps only tiled-path capacity; a producer with a single dedicated scratch may
-    raise the cap up to `kMaxDenseDomainPoints` so dense builds reuse capacity across
-    refreshes without allocation churn — retention then stays bounded (~10.6 MiB for
-    that one scratch, never per pool worker). The biome-map job owns exactly one such
-    process-wide scratch. `BiomeRegionStats` reports `denseTiles`, `fallbackPixels`,
-    `peakDensePoints`, and `peakScratchBytes` to keep the bound verifiable.
+    use an internal thread-local fallback). The retention contract after **every**
+    `getBiomeRegion()` exit — success, cancellation, invalid request, or exception — is
+    `capacity() <= min(retainedPointsCap, kMaxDenseDomainPoints)` for every field:
+    - default owner: tiled retention (`kMaxTileDensePoints` per field);
+    - dedicated biome-map owner: dense retention (one process-wide scratch with
+      `retainedPointsCap = kMaxDenseDomainPoints`, so dense builds reuse capacity
+      across refreshes without allocation churn — never one per pool worker);
+    - absolute maximum: `kMaxDenseDomainPoints` per field, a logical retained payload
+      of ~10 MiB per scratch (516² points × 10 float fields × 4 bytes).
+    `BiomeRegionStats` reports `denseTiles`, `fallbackPixels`, `peakDensePoints`, and
+    `peakScratchBytes` to keep the bound verifiable.
 - **UI consistency**: HUD biome and World / Biome map use the same canonical generated-column biome definition as loaded terrain at every zoom level. `BiomeMapResult` carries the exact `BiomeRegionGrid` it was sampled with, and the player marker is placed via `grid.pixelForWorld()`; markers outside the grid are simply not drawn.
 
