@@ -101,6 +101,14 @@ public:
   // synchronization is required of the callable.
   using BiomeCancelCheck = std::function<bool()>;
 
+  // Domain point-count bounds. No region buffer may exceed these without an
+  // explicit fallback path; kMaxDenseDomainPoints bounds the single-pass
+  // dense scratch (~10 MiB across all 10 float fields), kMaxTileDensePoints
+  // the per-tile scratch (~68 KB per field).
+  static constexpr size_t kMaxDenseDomainPoints = 516 * 516;
+  static constexpr size_t kMaxTileDensePoints = 132 * 132;
+  static constexpr size_t kBiomeRegionScratchFields = 10;
+
   // Scratch working set for one getBiomeRegion() call. Owned by the caller
   // so heavy capacity is not retained indefinitely inside TerrainGenerator's
   // shared thread-local chunk buffers. Reuse one scratch per producer job
@@ -118,22 +126,26 @@ public:
     std::vector<float> height;
     std::vector<float> erosionTemp;
 
-    // Releases capacity above the tiled-path bound. getBiomeRegion() runs
-    // this automatically on every exit — after successful AND
-    // cancelled/failed attempts — so oversized dense capacity is never
-    // retained across attempts while tiled-sized capacity survives for
-    // cheap reuse. Call it manually only when mutating a scratch outside
-    // getBiomeRegion().
+    // Per-field capacity retained across attempts (points). After every
+    // getBiomeRegion() exit, capacity() <= retainedPointsCap for all
+    // fields. The default keeps only tiled-path capacity so a generic
+    // scratch stays small no matter who owns it; a producer with a single
+    // dedicated scratch (e.g. the biome-map job) may raise it up to
+    // kMaxDenseDomainPoints to reuse dense capacity across refreshes
+    // without allocation churn - retention then stays bounded by
+    // kMaxDenseDomainPoints * kBiomeRegionScratchFields * sizeof(float)
+    // (~10.6 MiB) for that one scratch. Values above kMaxDenseDomainPoints
+    // are clamped by trimOversizedCapacity().
+    size_t retainedPointsCap{kMaxTileDensePoints};
+
+    // Releases per-field capacity above retainedPointsCap (clamped to
+    // kMaxDenseDomainPoints). getBiomeRegion() runs this automatically on
+    // every exit - after successful AND cancelled/failed attempts - so
+    // capacity above the scratch's retention bound is never retained
+    // across attempts. Call it manually only when mutating a scratch
+    // outside getBiomeRegion().
     void trimOversizedCapacity();
   };
-
-  // Domain point-count bounds. No region buffer may exceed these without an
-  // explicit fallback path; kMaxDenseDomainPoints bounds the single-pass
-  // scratch (~10 MiB across all 10 float fields), kMaxTileDensePoints the
-  // per-tile scratch (~68 KB per field).
-  static constexpr size_t kMaxDenseDomainPoints = 516 * 516;
-  static constexpr size_t kMaxTileDensePoints = 132 * 132;
-  static constexpr size_t kBiomeRegionScratchFields = 10;
 
   // Counters describing how a getBiomeRegion() call was executed.
   struct BiomeRegionStats

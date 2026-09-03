@@ -201,6 +201,12 @@ private:
 
 	BiomeMapJob m_mapJob{};
 	BiomeMapUpload m_pendingUpload{};
+	// Single process-wide region scratch for the biome-map job (never one
+	// per pool worker): its retention cap allows dense-capacity reuse so
+	// refreshes do not re-allocate the ~10 MiB dense peak, while the total
+	// retained memory stays bounded by kMaxDenseDomainPoints (~10.6 MiB).
+	// Shared ownership keeps it alive for the duration of an in-flight job.
+	std::shared_ptr<TerrainGenerator::BiomeRegionScratch> m_mapScratch;
 
 	VkContext *m_vk{nullptr};
 	ImmediateCommands *m_imm{nullptr};

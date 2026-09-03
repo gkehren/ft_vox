@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Chunk/BiomeRegionGrid.hpp>
+#include <Chunk/TerrainGenerator.hpp>
 #include <utils.hpp>
 
 #include <atomic>
@@ -58,6 +59,12 @@ struct BiomeMapRequest
 	std::shared_ptr<std::atomic<bool>> cancelToken;
 	/// Optional injectable test seam hook invoked before sampling.
 	std::function<void()> onCheckpoint;
+	/// Owner-controlled region scratch for the sampling job. When set, the
+	/// job reuses it across refreshes (retention bounded by the scratch's
+	/// retainedPointsCap); when null, getBiomeRegion falls back to an
+	/// internal thread-local scratch. Shared ownership keeps the scratch
+	/// alive for the duration of the job even if the owner goes away.
+	std::shared_ptr<TerrainGenerator::BiomeRegionScratch> scratch;
 };
 
 struct BiomeMapResult

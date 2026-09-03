@@ -201,11 +201,14 @@ Biome sampling is unified across the engine via a canonical erosion-aware pipeli
     vectorized dense path. A direct per-column `evaluateBiomeColumn` fallback remains as
     a safety net only. An optional cancellation callback is polled before every tile.
   - Scratch is a dedicated `BiomeRegionScratch` owned by the caller (pass `nullptr` to
-    use an internal thread-local fallback); `getBiomeRegion()` trims oversized dense
-    capacity on **every** exit — successful or cancelled/failed attempts alike — so only
-    the small tiled bound is ever retained across attempts, while tiled-sized capacity
-    survives for cheap reuse. The biome-map job owns one persistent scratch under this
-    policy. `BiomeRegionStats` reports `denseTiles`, `fallbackPixels`,
+    use an internal thread-local fallback whose retention is bounded to the tiled path).
+    `getBiomeRegion()` trims every field above the scratch's `retainedPointsCap` on
+    **every** exit — successful or cancelled/failed attempts alike. The default cap
+    keeps only tiled-path capacity; a producer with a single dedicated scratch may
+    raise the cap up to `kMaxDenseDomainPoints` so dense builds reuse capacity across
+    refreshes without allocation churn — retention then stays bounded (~10.6 MiB for
+    that one scratch, never per pool worker). The biome-map job owns exactly one such
+    process-wide scratch. `BiomeRegionStats` reports `denseTiles`, `fallbackPixels`,
     `peakDensePoints`, and `peakScratchBytes` to keep the bound verifiable.
 - **UI consistency**: HUD biome and World / Biome map use the same canonical generated-column biome definition as loaded terrain at every zoom level. `BiomeMapResult` carries the exact `BiomeRegionGrid` it was sampled with, and the player marker is placed via `grid.pixelForWorld()`; markers outside the grid are simply not drawn.
 

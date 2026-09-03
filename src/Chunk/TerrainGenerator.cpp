@@ -595,13 +595,14 @@ static thread_local TerrainGenerator::BiomeRegionScratch s_biomeRegionScratch;
 
 void TerrainGenerator::BiomeRegionScratch::trimOversizedCapacity()
 {
-  // Releases capacity above the tiled-path bound. getBiomeRegion() calls
-  // this on every exit through an unconditional guard — after successful
-  // AND cancelled/failed attempts — so oversized dense capacity is never
-  // retained across attempts while tiled-sized capacity survives for
-  // cheap reuse. Call it manually only when mutating a scratch outside
-  // getBiomeRegion().
-  const size_t keep = kMaxTileDensePoints;
+  // Releases per-field capacity above the scratch's retention bound (the
+  // owner-set retainedPointsCap, clamped to the dense-path absolute). The
+  // default bound keeps only tiled-path capacity; owners of a single
+  // dedicated scratch may retain dense capacity for churn-free reuse.
+  // getBiomeRegion() calls this on every exit through an unconditional
+  // guard - after successful AND cancelled/failed attempts. Call it
+  // manually only when mutating a scratch outside getBiomeRegion().
+  const size_t keep = std::min(retainedPointsCap, kMaxDenseDomainPoints);
   for (std::vector<float> *field : {&temperature, &humidity, &weirdness, &river,
                                     &continental, &erosion, &peaksValleys,
                                     &ridge, &height, &erosionTemp})

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -1973,6 +1974,14 @@ static void testBiomeRegionScratchRetention()
 		checkBounded(s);
 		CHECK(s.erosion.size() == TerrainGenerator::kMaxTileDensePoints,
 			  "tiled-sized contents must be preserved by the trim");
+
+		// A retention cap above the absolute dense bound is clamped by the
+		// trim, so even a misconfigured owner cannot exceed the bound.
+		s.retainedPointsCap = std::numeric_limits<size_t>::max();
+		s.temperature.resize(TerrainGenerator::kMaxDenseDomainPoints + 1);
+		s.trimOversizedCapacity();
+		CHECK(s.temperature.capacity() <= TerrainGenerator::kMaxDenseDomainPoints,
+			  "retention cap above the dense bound must clamp");
 	}
 
 	// Dense build cancelled at the final checkpoint: the call failed, yet
@@ -2000,8 +2009,36 @@ static void testBiomeRegionScratchRetention()
 		checkBounded(scratch);
 	}
 
+	// Owner-set retention policy: a dedicated scratch may retain dense
+	// capacity (up to the absolute bound) so successive dense builds reuse
+	// it without allocation churn.
+	{
+		TerrainGenerator::BiomeRegionScratch scratch;
+		scratch.retainedPointsCap = TerrainGenerator::kMaxDenseDomainPoints;
+		const BiomeRegionGrid grid = makeBiomeRegionGrid(0.0f, 0.0f, 1.0f, 256, 256);
+
+		std::vector<BiomeType> first, second, third;
+		CHECK(gen.getBiomeRegion(grid, first, &scratch), "dense build 1 must complete");
+		const size_t retained = scratch.temperature.capacity();
+		CHECK(retained > TerrainGenerator::kMaxTileDensePoints &&
+				  retained <= TerrainGenerator::kMaxDenseDomainPoints,
+			  "dense capacity must be retained within the absolute bound");
+
+		CHECK(gen.getBiomeRegion(grid, second, &scratch), "dense build 2 must complete");
+		CHECK(scratch.temperature.capacity() == retained,
+			  "successive dense builds must reuse the retained scratch (no churn)");
+		CHECK(first == second, "reused scratch must produce identical output");
+
+		// The cap clamps to the absolute dense bound, even for absurd values.
+		scratch.retainedPointsCap = std::numeric_limits<size_t>::max();
+		CHECK(gen.getBiomeRegion(grid, third, &scratch), "dense build 3 must complete");
+		CHECK(scratch.temperature.capacity() <= TerrainGenerator::kMaxDenseDomainPoints,
+			  "retention cap must clamp to the absolute dense bound");
+	}
+
 	std::cout << "biome region scratch retention: oversized capacity trimmed after "
-			  << "success and cancellation, tiled-sized capacity preserved\n";
+			  << "success and cancellation, tiled-sized capacity preserved, "
+			  << "owner-set dense retention churn-free and bounded\n";
 }
 
 static void testBiomeMapGridMatchesPointQueries()
