@@ -3,7 +3,7 @@
 
 #include <cmath>
 
-void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgb,
+void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgba,
 						   int size,
 						   glm::vec2 playerXZ,
 						   float zoom,
@@ -16,12 +16,13 @@ void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgb,
 	auto paint = [&](int px, int py, unsigned char r, unsigned char g, unsigned char b) {
 		if (px < 0 || py < 0 || px >= size || py >= size)
 			return;
-		const int idx = (py * size + px) * 3;
-		if (static_cast<size_t>(idx + 2) < rgb.size())
+		const int idx = (py * size + px) * 4;
+		if (static_cast<size_t>(idx + 3) < rgba.size())
 		{
-			rgb[idx + 0] = r;
-			rgb[idx + 1] = g;
-			rgb[idx + 2] = b;
+			rgba[idx + 0] = r;
+			rgba[idx + 1] = g;
+			rgba[idx + 2] = b;
+			rgba[idx + 3] = 255;
 		}
 	};
 	for (int dy = -4; dy <= 4; ++dy)
@@ -63,12 +64,12 @@ BiomeMapResult generateBiomeMap(const BiomeMapRequest &req)
 	std::vector<BiomeType> biomes;
 	gen.getBiomeRegion(req.center.x, req.center.y, step, req.size, req.size, biomes);
 
-	// Checkpoint 3: before RGB allocation
+	// Checkpoint 3: before RGBA allocation
 	if (cancelled())
 		return {};
 
 	const size_t totalPixels = static_cast<size_t>(req.size * req.size);
-	std::vector<unsigned char> rgb(totalPixels * 3);
+	std::vector<unsigned char> rgba(totalPixels * 4);
 
 	// Checkpoint 4: conversion loop with periodic check every 1024 iterations
 	constexpr size_t kCheckInterval = 1024;
@@ -79,9 +80,10 @@ BiomeMapResult generateBiomeMap(const BiomeMapRequest &req)
 
 		const int b = static_cast<int>(biomes[i]);
 		const int bi = (b >= 0 && b < BIOME_COUNT) ? b : 0;
-		rgb[i * 3 + 0] = kBiomeColors[bi][0];
-		rgb[i * 3 + 1] = kBiomeColors[bi][1];
-		rgb[i * 3 + 2] = kBiomeColors[bi][2];
+		rgba[i * 4 + 0] = kBiomeColors[bi][0];
+		rgba[i * 4 + 1] = kBiomeColors[bi][1];
+		rgba[i * 4 + 2] = kBiomeColors[bi][2];
+		rgba[i * 4 + 3] = 255;
 	}
 
 	// Checkpoint 5: before publication
@@ -97,7 +99,7 @@ BiomeMapResult generateBiomeMap(const BiomeMapRequest &req)
 	res.gridX = gridX;
 	res.gridZ = gridZ;
 	res.size = req.size;
-	res.rgb = std::move(rgb);
+	res.rgba = std::move(rgba);
 	res.valid = true;
 	return res;
 }

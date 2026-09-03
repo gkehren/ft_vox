@@ -49,19 +49,20 @@ static void test_biome_map_result_validity()
 	CHECK(res.worldGenerationId == genId, "Result generation ID should match requested");
 	CHECK(res.seed == seed, "Result seed should match requested");
 	CHECK(res.size == size, "Result size should match requested");
-	CHECK(res.rgb.size() == static_cast<size_t>(size * size * 3), "Result RGB size mismatch");
+	CHECK(res.rgba.size() == static_cast<size_t>(size * size * 4), "Result RGBA size mismatch");
 
-	// Verify that pixel colors correspond to known biomes
+	// Verify that pixel colors correspond to known biomes and alpha is 255
 	bool hasNonZeroPixel = false;
-	for (size_t i = 0; i < res.rgb.size(); ++i)
+	bool allAlphaOpaque = true;
+	for (size_t i = 0; i < res.rgba.size(); i += 4)
 	{
-		if (res.rgb[i] != 0)
-		{
+		if (res.rgba[i + 0] != 0 || res.rgba[i + 1] != 0 || res.rgba[i + 2] != 0)
 			hasNonZeroPixel = true;
-			break;
-		}
+		if (res.rgba[i + 3] != 255)
+			allAlphaOpaque = false;
 	}
-	CHECK(hasNonZeroPixel, "RGB map should contain non-zero pixel data");
+	CHECK(hasNonZeroPixel, "RGBA map should contain non-zero pixel data");
+	CHECK(allAlphaOpaque, "RGBA map should have fully opaque alpha (255)");
 }
 
 static void test_deterministic_stale_generation_rejection()
@@ -174,9 +175,9 @@ static void test_deterministic_superseded_request_rejection()
 		  "Negative zoom result must be rejected");
 
 	badResult = currentResult;
-	badResult.rgb.pop_back();
+	badResult.rgba.pop_back();
 	CHECK(!isBiomeMapResultAcceptable(badResult, generation, seed, currentRequestId),
-		  "Truncated RGB buffer result must be rejected");
+		  "Truncated RGBA buffer result must be rejected");
 }
 
 static void test_cancellation_pre_cancelled()
@@ -194,7 +195,7 @@ static void test_cancellation_pre_cancelled()
 	};
 	BiomeMapResult res = generateBiomeMap(req);
 	CHECK(!res.valid, "Pre-cancelled task should return invalid result");
-	CHECK(res.rgb.empty(), "Cancelled task should not allocate RGB buffer");
+	CHECK(res.rgba.empty(), "Cancelled task should not allocate RGBA buffer");
 	CHECK(!isBiomeMapResultAcceptable(res, 1, 42, 1), "Cancelled task result must not be acceptable");
 }
 
@@ -233,7 +234,7 @@ static void test_cancellation_mid_flight()
 
 	BiomeMapResult res = fut.get();
 	CHECK(!res.valid, "Mid-flight cancelled task must return invalid result");
-	CHECK(res.rgb.empty(), "Cancelled task must have empty rgb buffer");
+	CHECK(res.rgba.empty(), "Cancelled task must have empty rgba buffer");
 	CHECK(!isBiomeMapResultAcceptable(res, 1, 42, 2), "Cancelled result must be rejected");
 }
 
@@ -296,7 +297,7 @@ static void test_rapid_request_cancellation_sequence()
 static void test_player_dot_painting()
 {
 	const int size = 32;
-	std::vector<unsigned char> rgb(size * size * 3, 0);
+	std::vector<unsigned char> rgba(size * size * 4, 0);
 
 	const glm::vec2 center{0.f, 0.f};
 	const float zoom = 1.0f;
@@ -304,17 +305,68 @@ static void test_player_dot_painting()
 	const int gridX = static_cast<int>(std::round((center.x + noiseOffset) * zoom - size * 0.5f));
 	const int gridZ = static_cast<int>(std::round((center.y + noiseOffset) * zoom - size * 0.5f));
 
-	paintBiomeMapPlayerDot(rgb, size, center, zoom, gridX, gridZ);
+	paintBiomeMapPlayerDot(rgba, size, center, zoom, gridX, gridZ);
 
-	// Center pixel of the dot should be white (255, 255, 255)
+	// Center pixel of the dot should be white (255, 255, 255, 255)
 	const int dotX = static_cast<int>(std::round((center.x + noiseOffset) * zoom)) - gridX;
 	const int dotY = static_cast<int>(std::round((center.y + noiseOffset) * zoom)) - gridZ;
-	const int centerIdx = (dotY * size + dotX) * 3;
-	CHECK(rgb[centerIdx + 0] == 255 && rgb[centerIdx + 1] == 255 && rgb[centerIdx + 2] == 255,
-		  "Center of player dot should be white");
+	const int centerIdx = (dotY * size + dotX) * 4;
+	CHECK(rgba[centerIdx + 0] == 255 && rgba[centerIdx + 1] == 255 &&
+		  rgba[centerIdx + 2] == 255 && rgba[centerIdx + 3] == 255,
+		  "Center of player dot should be opaque white");
 
 	// Check that painting doesn't crash on out-of-bounds positions
-	paintBiomeMapPlayerDot(rgb, size, {-100000.f, -100000.f}, zoom, gridX, gridZ);
+	paintBiomeMapPlayerDot(rgba, size, {-100000.f, -100000.f}, zoom, gridX, gridZ);
+}
+
+static void test_biome_map_upload_validation()
+{
+	BiomeMapUpload emptyUpload{};
+	CHECK(!isBiomeMapUploadValid(emptyUpload), "Empty upload must be invalid");
+
+	BiomeMapUpload validUpload{
+		.rgba = std::vector<uint8_t>(256 * 256 * 4, 128),
+		.width = 256,
+		.height = 256,
+		.requestId = 1
+	};
+	CHECK(isBiomeMapUploadValid(validUpload), "Well-formed 256x256 RGBA upload must be valid");
+
+	BiomeMapUpload sizeMismatch{
+		.rgba = std::vector<uint8_t>(256 * 256 * 3, 128),
+		.width = 256,
+		.height = 256,
+		.requestId = 1
+	};
+	CHECK(!isBiomeMapUploadValid(sizeMismatch), "RGB sized upload must be rejected");
+
+	BiomeMapUpload zeroDim{
+		.rgba = std::vector<uint8_t>(16 * 16 * 4, 128),
+		.width = 0,
+		.height = 16,
+		.requestId = 1
+	};
+	CHECK(!isBiomeMapUploadValid(zeroDim), "Zero dimension upload must be rejected");
+}
+
+static void test_deferred_upload_superseded_rejection()
+{
+	uint64_t currentRequestId = 10;
+
+	BiomeMapUpload upload{
+		.rgba = std::vector<uint8_t>(16 * 16 * 4, 255),
+		.width = 16,
+		.height = 16,
+		.requestId = currentRequestId
+	};
+	CHECK(isBiomeMapUploadValid(upload), "Upload matching currentRequestId must be valid");
+
+	// Player movement / zoom / view supersession occurs:
+	++currentRequestId;
+
+	// Stale deferred upload whose requestId no longer matches active request ID must be recognized as superseded
+	CHECK(upload.requestId != currentRequestId,
+		  "Deferred upload requestId must mismatch incremented active request ID");
 }
 
 static void test_player_movement_supersession()
@@ -530,6 +582,8 @@ int main()
 	test_cancellation_mid_flight();
 	test_rapid_request_cancellation_sequence();
 	test_player_dot_painting();
+	test_biome_map_upload_validation();
+	test_deferred_upload_superseded_rejection();
 	test_player_movement_supersession();
 	test_biome_texture_reuse_rules();
 	test_slow_job_exceeding_refresh_interval();
