@@ -95,17 +95,51 @@ public:
   BiomeType getBiomeAt(int worldX, int worldZ) const;
 
   // Optional early-exit hook polled between region tiles; return true to
-  // cancel. May be invoked concurrently from tile worker threads, so the
-  // callable must be thread-safe (e.g. read an atomic token). Kept as a
-  // lightweight std::function so TerrainGenerator stays decoupled from any
-  // specific threading primitive.
+  // cancel. Kept as a lightweight std::function so TerrainGenerator stays
+  // decoupled from any specific threading primitive. getBiomeRegion() runs
+  // its tiles sequentially on the calling thread, so no extra
+  // synchronization is required of the callable.
   using BiomeCancelCheck = std::function<bool()>;
+
+  // Scratch working set for one getBiomeRegion() call. Owned by the caller
+  // so heavy capacity is not retained indefinitely inside TerrainGenerator's
+  // shared thread-local chunk buffers. Reuse one scratch per producer job
+  // (e.g. the biome-map worker) to avoid re-allocating between refreshes.
+  struct BiomeRegionScratch
+  {
+    std::vector<float> temperature;
+    std::vector<float> humidity;
+    std::vector<float> weirdness;
+    std::vector<float> river;
+    std::vector<float> continental;
+    std::vector<float> erosion;
+    std::vector<float> peaksValleys;
+    std::vector<float> ridge;
+    std::vector<float> height;
+    std::vector<float> erosionTemp;
+
+    // Releases capacity above the tiled-path bound. Call this after a build
+    // used the single-pass dense path (its buffers can reach ~10 MiB) so
+    // idle workers do not retain the peak; tiled-path-sized capacity is
+    // kept for cheap reuse.
+    void trimOversizedCapacity();
+  };
+
+  // Domain point-count bounds. No region buffer may exceed these without an
+  // explicit fallback path; kMaxDenseDomainPoints bounds the single-pass
+  // scratch (~10 MiB across all 10 float fields), kMaxTileDensePoints the
+  // per-tile scratch (~68 KB per field).
+  static constexpr size_t kMaxDenseDomainPoints = 516 * 516;
+  static constexpr size_t kMaxTileDensePoints = 132 * 132;
+  static constexpr size_t kBiomeRegionScratchFields = 10;
 
   // Counters describing how a getBiomeRegion() call was executed.
   struct BiomeRegionStats
   {
     uint64_t denseTiles{0};      // tiles processed by the vectorized dense path
     uint64_t fallbackPixels{0};  // pixels evaluated by point-query fallback
+    size_t peakDensePoints{0};   // largest dense domain sampled in one shot
+    size_t peakScratchBytes{0};  // peakDensePoints * fields * sizeof(float)
   };
 
   // Batch biome sampling for map visualization. `grid` is the single source
@@ -113,11 +147,17 @@ public:
   // BiomeRegionGrid.hpp). Output is row-major, outBiomes[grid.width * z + x].
   // The canonical block-resolution pipeline (incl. erosion at step = 1.0f) is
   // independent of grid.step: the grid only selects which canonical columns
-  // are sampled. Returns false (and clears outBiomes) when the grid is
-  // invalid or `shouldCancel` returned true; partial results are never
-  // returned. `outStats` is optional.
+  // are sampled. Runs sequentially on the calling thread; tiles are sampled
+  // in a fixed order so the result is deterministic and the scheduler only
+  // decides when the whole call runs, not what it produces. Returns false
+  // (and clears outBiomes) when the grid is invalid or `shouldCancel`
+  // returned true; partial results are never returned. `outStats` is
+  // optional. `scratch` may be null, in which case a dedicated internal
+  // thread-local scratch is used; pass a caller-owned scratch to control
+  // memory retention (see BiomeRegionScratch).
   bool getBiomeRegion(const BiomeRegionGrid &grid,
                       std::vector<BiomeType> &outBiomes,
+                      BiomeRegionScratch *scratch = nullptr,
                       const BiomeCancelCheck &shouldCancel = {},
                       BiomeRegionStats *outStats = nullptr) const;
 

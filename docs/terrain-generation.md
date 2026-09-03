@@ -178,21 +178,33 @@ Biome sampling is unified across the engine via a canonical erosion-aware pipeli
   `BiomeRegionGrid` (`src/Chunk/BiomeRegionGrid.hpp`) — the single source of truth mapping
   pixels ↔ world positions ↔ voxel columns for the generator and the GameUI biome map.
   Pixel `(0,0)` samples `worldAt(0,0)` (the minimum corner) and pixel `(width-1,height-1)`
-  samples `worldAt(width-1,height-1)`; for even dimensions the grid center falls between
-  the four central pixels. Columns discretize via the canonical `floor()` convention
+  samples `worldAt(width-1,height-1)`. The even/odd parity contract is explicit and
+  intentional: with `worldAt = center + (pixel - size*0.5) * step`, an even size puts the
+  center exactly on pixel `size/2` (width=4, center=0, step=1 → pixels sample
+  `-2, -1, 0, 1`), while an odd size straddles it between the two central pixels
+  (width=5 → `-2.5, -1.5, -0.5, 0.5, 1.5`; no pixel samples the center itself).
+  Columns discretize via the canonical `floor()` convention
   (`col = floor(sampleWorldCoord)`), ensuring adjacent pixels on the same column resolve
   identically. Erosion always runs at `step = 1.0f` — `grid.step` only selects which
-  canonical columns are sampled, never the erosion resolution. Returns `false` (with the
-  output cleared) when the grid is invalid or the optional cancellation callback fires;
-  partial results are never produced:
+  canonical columns are sampled, never the erosion resolution. The call runs sequentially
+  on the calling thread (no internal threads; the Engine schedules the whole call as one
+  `TaskPriority::Low` job) and is deterministic: tile order never influences the output.
+  Returns `false` (with the output cleared) when the grid is invalid or the optional
+  cancellation callback fires; partial results are never produced:
   - Small dense domains (≤ 516×516 haloed block bounding box): sampled in a single
-    vectorized pass at `step = 1.0f` with halo = 2. Total scratch memory is bounded at
-    roughly 10 MiB: 266K points × ~10 float fields × 4 bytes (not per buffer).
+    vectorized pass at `step = 1.0f` with halo = 2. Peak scratch is bounded at roughly
+    10 MiB: 266K points × 10 float fields × 4 bytes (not per buffer).
   - Larger domains / zoom-outs: memory-bounded tiled processing. The tile dimension is
     derived from `grid.step` (`floor((132 - 2*halo - 1) / step) + 1`, capped at 32) so
     every tile's haloed dense domain stays within the per-tile cap (~132² points ≈
     68 KB per float buffer), keeping all pixels — including `zoom = 0.1` — on the
     vectorized dense path. A direct per-column `evaluateBiomeColumn` fallback remains as
     a safety net only. An optional cancellation callback is polled before every tile.
+  - Scratch is a dedicated `BiomeRegionScratch` owned by the caller (pass `nullptr` to
+    use an internal thread-local fallback); the biome-map job owns one persistent scratch
+    and trims oversized capacity after builds that used the large dense path, so idle
+    pool workers never retain the ~10 MiB peak and per-thread retention stays near the
+    small tiled bound. `BiomeRegionStats` reports `denseTiles`, `fallbackPixels`,
+    `peakDensePoints`, and `peakScratchBytes` to keep the bound verifiable.
 - **UI consistency**: HUD biome and World / Biome map use the same canonical generated-column biome definition as loaded terrain at every zoom level. `BiomeMapResult` carries the exact `BiomeRegionGrid` it was sampled with, and the player marker is placed via `grid.pixelForWorld()`; markers outside the grid are simply not drawn.
 

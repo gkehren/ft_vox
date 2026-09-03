@@ -1,15 +1,30 @@
 #pragma once
 
 #include <cmath>
+#include <limits>
 #include <glm/glm.hpp>
 
 /// Continuous world position -> voxel column (canonical convention).
 /// This is THE single convention shared by the HUD, getBiomeAt(),
 /// getBiomeRegion(), the biome map, and the player marker: a world
-/// coordinate belongs to the voxel column at its floor().
+/// coordinate belongs to the voxel column at its floor(). Non-finite or
+/// int-unrepresentable inputs clamp to the nearest representable column
+/// (INT_MIN direction for NaN) instead of invoking UB; such positions are
+/// far outside any reachable world.
 inline int worldToVoxelColumn(float world)
 {
-	return static_cast<int>(std::floor(world));
+	if (!std::isfinite(world))
+		return std::numeric_limits<int>::min();
+	// Floor in double, then range-check: float cannot represent the int
+	// endpoints exactly, and static_cast<int>(floor(huge)) would be UB.
+	const double w = std::floor(static_cast<double>(world));
+	constexpr double kIntMin = static_cast<double>(std::numeric_limits<int>::min());
+	constexpr double kIntMax = static_cast<double>(std::numeric_limits<int>::max());
+	if (w <= kIntMin)
+		return std::numeric_limits<int>::min();
+	if (w >= kIntMax)
+		return std::numeric_limits<int>::max();
+	return static_cast<int>(w);
 }
 
 inline glm::ivec2 worldToVoxelColumn(glm::vec2 world)
@@ -23,24 +38,32 @@ inline glm::ivec2 worldToVoxelColumn(glm::vec2 world)
 /// resolve to out-of-range indices; callers must bounds-check.
 inline int worldToNearestMapPixel(float world, float center, float step, int size)
 {
-	const float fx = (world - center) / step + static_cast<float>(size) * 0.5f;
+	const double fx = (static_cast<double>(world) - static_cast<double>(center)) /
+						  static_cast<double>(step) +
+					  static_cast<double>(size) * 0.5;
 	if (!std::isfinite(fx))
-		return -2147483648;
-	if (fx >= 2147483520.0f) // 2^31-128: safely inside int range before rounding
-		return 2147483647;
-	if (fx <= -2147483520.0f)
-		return -2147483648;
-	return static_cast<int>(std::round(fx));
+		return std::numeric_limits<int>::min();
+	const double rounded = std::round(fx);
+	constexpr double kIntMin = static_cast<double>(std::numeric_limits<int>::min());
+	constexpr double kIntMax = static_cast<double>(std::numeric_limits<int>::max());
+	if (rounded <= kIntMin)
+		return std::numeric_limits<int>::min();
+	if (rounded >= kIntMax)
+		return std::numeric_limits<int>::max();
+	return static_cast<int>(rounded);
 }
 
 /// Canonical description of a biome-map sampling grid. It is the single
 /// source of truth mapping pixels <-> world positions <-> voxel columns for
 /// both TerrainGenerator::getBiomeRegion() and the GameUI biome map.
 ///
-/// Pixel (0,0) samples worldAt(0,0) (the minimum corner) and pixel
-/// (width-1,height-1) samples worldAt(width-1,height-1). For even
-/// dimensions the grid center falls between the four central pixels; for
-/// odd dimensions it lands exactly on the central pixel.
+/// With `worldAt(x) = center + (x - size * 0.5f) * step`, the parity
+/// contract is deliberately asymmetric and assumed as-is:
+/// - even size: pixel `size/2` samples exactly `center`. Example
+///   width=4, center=0, step=1 -> pixels sample -2, -1, 0, 1.
+/// - odd size: `center` falls between the two central pixels. Example
+///   width=5, center=0, step=1 -> pixels sample -2.5, -1.5, -0.5,
+///   0.5, 1.5, so no pixel samples the center itself.
 ///
 /// Lightweight and dependency-free (glm only): no FastNoise/Vulkan/ImGui.
 struct BiomeRegionGrid

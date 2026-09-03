@@ -11,6 +11,11 @@ void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgba,
 	// voxel column of the player is worldToVoxelColumn(playerXZ); the marker
 	// does not redefine it.
 	const glm::ivec2 dot = grid.pixelForWorld(playerXZ);
+	// Contract: a marker whose center falls outside the grid draws nothing —
+	// no half-clipped ring on the border, and no arithmetic on extreme
+	// pixel indices below.
+	if (dot.x < 0 || dot.y < 0 || dot.x >= grid.width || dot.y >= grid.height)
+		return;
 	const int size = grid.width;
 	auto paint = [&](int px, int py, unsigned char r, unsigned char g, unsigned char b) {
 		if (px < 0 || py < 0 || px >= size || py >= grid.height)
@@ -61,10 +66,16 @@ BiomeMapResult generateBiomeMap(const BiomeMapRequest &req)
 
 	TerrainGenerator &gen = TerrainGenerator::getThreadLocal(req.seed);
 	std::vector<BiomeType> biomes;
-	// Propagate cancellation into the region sampling so a long zoomed-out
-	// build is abandoned between tiles instead of running to completion.
-	if (!gen.getBiomeRegion(grid, biomes, [&] { return cancelled(); }))
+	// Scratch owned by this job (not by TerrainGenerator internals): reused
+	// across refreshes landing on the same worker, and trimmed after builds
+	// that hit the large single-pass dense path so idle pool workers never
+	// retain the ~10 MiB peak.
+	static thread_local TerrainGenerator::BiomeRegionScratch scratch;
+	// Cancellation is checked before, during (between tiles), and after the
+	// region sampling; an interrupted build publishes nothing.
+	if (!gen.getBiomeRegion(grid, biomes, &scratch, [&] { return cancelled(); }))
 		return {};
+	scratch.trimOversizedCapacity();
 
 	// Checkpoint 3: before RGBA allocation
 	if (cancelled())

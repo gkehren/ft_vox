@@ -142,7 +142,8 @@ void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgba,
 
 /// Sample biomes and convert them to an RGBA pixel buffer using thread-local generator.
 /// Fully self-contained: owns its buffers and does not retain raw pointers to Engine state.
-/// Best-effort cancellation prevents obsolete work from being published and skips work
-/// when cancellation is observed before/after biome sampling.
+/// Cancellation is checked before sampling, during region sampling (between
+/// tiles), and after sampling — an interrupted build returns an invalid
+/// result and never publishes partial pixel data.
 BiomeMapResult generateBiomeMap(const BiomeMapRequest &req);
 

@@ -356,27 +356,16 @@ static void test_player_dot_painting()
 		CHECK(rgba == before, "Out-of-grid player must not paint any pixel");
 	}
 
-	// Just beyond the border (one ring would overlap the map): the ring may
-	// clip but the marker core must stay outside.
+	// Just beyond the border: a marker whose center is outside the grid
+	// paints nothing — no half-clipped ring on the edge.
 	{
 		std::vector<unsigned char> rgba(size * size * 4, 0);
 		const glm::vec2 player = grid.worldAt(-1, -1); // one pixel outside
+		CHECK(grid.pixelForWorld(player) == glm::ivec2(-1, -1),
+			  "player one pixel outside maps to pixel -1");
+		const std::vector<unsigned char> before = rgba;
 		paintBiomeMapPlayerDot(rgba, grid, player);
-		const glm::ivec2 dot = grid.pixelForWorld(player);
-		CHECK(dot == glm::ivec2(-1, -1), "player one pixel outside maps to pixel -1");
-		for (int y = 0; y < size; ++y)
-			for (int x = 0; x < size; ++x)
-			{
-				const size_t idx = (static_cast<size_t>(y) * size + x) * 4;
-				if (rgba[idx + 3] == 255)
-				{
-					// Only outline pixels within 4 px of the border may paint.
-					const int dx = x - dot.x;
-					const int dy = y - dot.y;
-					CHECK(dx * dx + dy * dy <= 16,
-						  "only the clipped outline may paint near the border");
-				}
-			}
+		CHECK(rgba == before, "Out-of-grid marker center must not paint any pixel");
 	}
 }
 
