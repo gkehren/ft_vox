@@ -1,0 +1,123 @@
+#pragma once
+
+#include <utils.hpp>
+
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <future>
+#include <memory>
+#include <vector>
+#include <glm/glm.hpp>
+
+/// Biome map colors indexed by BiomeType (from legacy UIManager).
+inline constexpr unsigned char kBiomeColors[BIOME_COUNT][3] = {
+	{100, 150, 200}, // FROZEN_OCEAN
+	{220, 230, 240}, // SNOWY_TUNDRA
+	{130, 160, 180}, // SNOWY_TAIGA
+	{160, 210, 230}, // ICE_SPIKES
+	{30, 100, 180},	 // OCEAN
+	{210, 200, 150}, // BEACH
+	{140, 200, 90},	 // PLAINS
+	{50, 130, 50},	 // FOREST
+	{100, 170, 80},	 // BIRCH_FOREST
+	{30, 80, 30},	 // DARK_FOREST
+	{80, 100, 60},	 // SWAMP
+	{60, 130, 200},	 // RIVER
+	{220, 200, 100}, // DESERT
+	{190, 170, 80},	 // SAVANNA
+	{40, 160, 40},	 // JUNGLE
+	{200, 100, 30},	 // BADLANDS
+	{150, 150, 150}, // MOUNTAINS
+	{220, 220, 230}, // SNOWY_MOUNTAINS
+	{150, 215, 95},	 // FLOWER_MEADOW
+	{230, 130, 165}, // CHERRY_GROVE
+	{190, 105, 45},	 // AUTUMN_FOREST
+	{45, 85, 50},	 // REDWOOD_FOREST
+	{55, 85, 55},	 // MANGROVE_SWAMP
+	{70, 180, 65},	 // BAMBOO_JUNGLE
+	{105, 105, 70},	 // MOOR
+	{155, 210, 225}, // GLACIER
+	{125, 185, 220}, // FROZEN_RIVER
+	{70, 55, 50},	 // VOLCANIC
+	{80, 185, 85},	 // OASIS
+	{145, 90, 150},	 // MUSHROOM_FIELDS
+	{45, 175, 185},	 // CORAL_REEF
+};
+
+struct BiomeMapRequest
+{
+	uint64_t requestId{0};
+	uint64_t worldGenerationId{0};
+	int seed{0};
+	glm::vec2 center{0.f, 0.f};
+	int size{256};
+	float zoom{0.5f};
+	std::shared_ptr<std::atomic<bool>> cancelToken;
+	/// Optional injectable test seam hook invoked before sampling.
+	std::function<void()> onCheckpoint;
+};
+
+struct BiomeMapResult
+{
+	uint64_t requestId{0};
+	uint64_t worldGenerationId{0};
+	int seed{0};
+	glm::vec2 center{0.f, 0.f};
+	float zoom{1.f};
+	int gridX{0};
+	int gridZ{0};
+	int size{0};
+	std::vector<unsigned char> rgb;
+	bool valid{false};
+};
+
+/// Check if a biome map result matches active world generation, seed, request ID,
+/// and internal invariant checks before GPU publication.
+inline bool isBiomeMapResultAcceptable(const BiomeMapResult &result,
+									  uint64_t currentWorldGenId,
+									  int currentSeed,
+									  uint64_t currentRequestId)
+{
+	return result.valid &&
+		   result.worldGenerationId == currentWorldGenId &&
+		   result.seed == currentSeed &&
+		   result.requestId == currentRequestId &&
+		   result.size > 0 &&
+		   result.zoom > 0.0f &&
+		   result.rgb.size() == static_cast<size_t>(result.size) * static_cast<size_t>(result.size) * 3;
+}
+
+/// Check whether the existing GPU backing resources can be reused without destruction/recreation.
+/// Semantic content validity (m_mapHasTexture) does not affect backing resource reuse.
+inline bool canReuseBiomeTexture(bool imageExists,
+								 bool descriptorExists,
+								 int existingSize,
+								 int requestedSize)
+{
+	return imageExists && descriptorExists && (existingSize == requestedSize) && (requestedSize > 0);
+}
+
+/// Determine if player movement should trigger superseding the active biome map request.
+inline bool shouldSupersedeBiomeMap(glm::vec2 player,
+									glm::vec2 lastPlayer,
+									bool follow)
+{
+	if (!follow)
+		return false;
+	return glm::length(player - lastPlayer) > 8.0f;
+}
+
+/// Paint the player indicator dot (black outline with white center) into the RGB buffer.
+void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgb,
+						   int size,
+						   glm::vec2 playerXZ,
+						   float zoom,
+						   int gridX,
+						   int gridZ);
+
+/// Sample biomes and convert them to an RGB pixel buffer using thread-local generator.
+/// Fully self-contained: owns its buffers and does not retain raw pointers to Engine state.
+/// Best-effort cancellation prevents obsolete work from being published and skips work
+/// when cancellation is observed before/after biome sampling.
+BiomeMapResult generateBiomeMap(const BiomeMapRequest &req);
