@@ -24,16 +24,17 @@ public:
 
 	void init(VkContext &context, uint32_t width, uint32_t height, bool vsync = true);
 	void recreate(uint32_t width, uint32_t height);
+	void recreate(uint32_t width, uint32_t height, bool vsync);
 	void shutdown();
 
 	VkSwapchainKHR getSwapchain() const { return m_swapchain; }
 	VkFormat getImageFormat() const { return m_imageFormat; }
 	VkExtent2D getExtent() const { return m_extent; }
 	uint32_t getImageCount() const { return static_cast<uint32_t>(m_images.size()); }
+	uint32_t getMinImageCount() const { return m_minImageCount; }
 	const std::vector<VkImage> &getImages() const { return m_images; }
 	const std::vector<VkImageView> &getImageViews() const { return m_imageViews; }
 
-	void setVSync(bool enabled);
 	bool isVSync() const { return m_vsync; }
 	VkPresentModeKHR getPresentMode() const { return m_presentMode; }
 
@@ -60,6 +61,7 @@ private:
 	std::vector<VkImageView> m_imageViews;
 	VkFormat m_imageFormat{VK_FORMAT_UNDEFINED};
 	VkExtent2D m_extent{};
+	uint32_t m_minImageCount{0};
 	bool m_vsync{true};
 	VkPresentModeKHR m_presentMode{VK_PRESENT_MODE_FIFO_KHR};
 };

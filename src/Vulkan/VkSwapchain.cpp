@@ -49,26 +49,25 @@ void VkSwapchain::shutdown()
 
 void VkSwapchain::recreate(uint32_t width, uint32_t height)
 {
-	if (!m_context || width == 0 || height == 0)
-		return;
-	m_context->waitIdle();
-	cleanupSwapchain();
-	createSwapchain(width, height);
-	createImageViews();
+	recreate(width, height, m_vsync);
 }
 
-void VkSwapchain::setVSync(bool enabled)
+void VkSwapchain::recreate(uint32_t width, uint32_t height, bool vsync)
 {
-	if (m_vsync == enabled || !m_context)
+	if (!m_context || width == 0 || height == 0)
 		return;
 
-	// Validate the strict target before destroying the working swapchain.
+	// Reject an unavailable strict present mode before destroying the working
+	// swapchain. The Engine invokes this only at a pre-acquire frame boundary.
 	const auto support =
 		querySupport(m_context->getPhysicalDevice(), m_context->getSurface());
-	selectPresentMode(support.presentModes, enabled);
+	selectPresentMode(support.presentModes, vsync);
 
-	m_vsync = enabled;
-	recreate(m_extent.width, m_extent.height);
+	m_context->waitIdle();
+	cleanupSwapchain();
+	m_vsync = vsync;
+	createSwapchain(width, height);
+	createImageViews();
 }
 
 void VkSwapchain::cleanupSwapchain()
@@ -201,6 +200,7 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 
 	m_imageFormat = surfaceFormat.format;
 	m_extent = extent;
+	m_minImageCount = createInfo.minImageCount;
 	m_presentMode = presentMode;
 
 	std::cout << "Swapchain present mode: " << presentModeName(m_presentMode)

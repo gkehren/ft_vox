@@ -83,6 +83,8 @@ public:
 
 	void init(VkContext &context, ImmediateCommands &imm);
 	void shutdown();
+	/// Re-register UI textures after the ImGui Vulkan descriptor pool changes.
+	void onImGuiVulkanBackendRecreate();
 
 	/// Draw all panels. Call between ImGui beginFrame / endFrame.
 	void draw(GameUIFrame &frame);

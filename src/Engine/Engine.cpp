@@ -243,8 +243,13 @@ void Engine::initializeNoiseGenerator(int seed_val)
 void Engine::setVSync(bool enabled)
 {
 	renderSettings.vsyncEnabled = enabled;
-	if (swapchain)
-		swapchain->setVSync(enabled);
+	if (!swapchain || (swapchain->isVSync() == enabled && !m_pendingVSync))
+		return;
+
+	// UI is built after beginFrame() acquired an image. Defer the mode change so
+	// the old swapchain remains alive through record/submit/present.
+	m_pendingVSync = enabled;
+	requestSwapchainRecreate();
 }
 
 Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &resourcePackRoot)
@@ -378,7 +383,38 @@ void Engine::onResize(int width, int height)
 		return;
 	windowWidth = width;
 	windowHeight = height;
-	framebufferResized = true;
+	requestSwapchainRecreate();
+}
+
+void Engine::requestSwapchainRecreate()
+{
+	m_swapchainRecreateRequested = true;
+}
+
+void Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
+{
+	if (!swapchain || width == 0 || height == 0)
+		return;
+
+	const bool desiredVSync = m_pendingVSync.value_or(swapchain->isVSync());
+	const VkExtent2D extent = swapchain->getExtent();
+	if (!m_swapchainRecreateRequested && desiredVSync == swapchain->isVSync() &&
+		extent.width == width && extent.height == height)
+		return;
+
+	PROFILE_SCOPE("SwapchainRecreate");
+	// VkSwapchain::recreate waits for the device before destroying WSI state.
+	// Every swapchain consumer is refreshed before the next image acquisition.
+	swapchain->recreate(width, height, desiredVSync);
+	frameCtx->onSwapchainRecreate(swapchain->getImageCount());
+	worldRenderer->onSwapchainRecreate(*swapchain);
+	if (imgui && imgui->onSwapchainRecreate(*swapchain) && gameUi)
+		gameUi->onImGuiVulkanBackendRecreate();
+
+	windowWidth = static_cast<int>(swapchain->getExtent().width);
+	windowHeight = static_cast<int>(swapchain->getExtent().height);
+	m_pendingVSync.reset();
+	m_swapchainRecreateRequested = false;
 }
 
 void Engine::tickDayCycle(double dt)
@@ -660,12 +696,15 @@ void Engine::tickBenchmark(double dt)
 	if (m_benchmark.phase() == BenchmarkPhase::Reloading)
 	{
 		const BenchmarkConfig &cfg = m_benchmark.config();
-		if (cfg.forceVsyncOff)
+		if (cfg.forceVsyncOff && renderSettings.vsyncEnabled)
 		{
-			m_benchmark.markForceVsync(renderSettings.vsyncEnabled);
-			if (renderSettings.vsyncEnabled)
-				setVSync(false);
+			m_benchmark.markForceVsync(true);
+			setVSync(false);
 		}
+		// Let the main loop apply a requested mode at its pre-acquire boundary.
+		// The benchmark snapshot must describe the swapchain it actually measures.
+		if (m_pendingVSync)
+			return;
 		m_benchmark.setSettingsSnapshot(
 			renderSettings.maxRenderDistance, windowWidth, windowHeight,
 			renderSettings.vsyncEnabled,
@@ -862,24 +901,15 @@ void Engine::run()
 			continue;
 		}
 
-		if (framebufferResized ||
-			static_cast<uint32_t>(pixelW) != swapchain->getExtent().width ||
-			static_cast<uint32_t>(pixelH) != swapchain->getExtent().height)
-		{
-			PROFILE_SCOPE("Resize");
-			swapchain->recreate(static_cast<uint32_t>(pixelW), static_cast<uint32_t>(pixelH));
-			worldRenderer->onSwapchainRecreate(*swapchain);
-			windowWidth = pixelW;
-			windowHeight = pixelH;
-			framebufferResized = false;
-		}
+		recreateSwapchainIfNeeded(static_cast<uint32_t>(pixelW),
+								  static_cast<uint32_t>(pixelH));
 
 		uint32_t imageIndex = 0;
 		{
 			PROFILE_SCOPE("Acquire");
 			if (!frameCtx->beginFrame(*swapchain, imageIndex))
 			{
-				framebufferResized = true;
+				requestSwapchainRecreate();
 				GetProfiler().endFrame();
 				continue;
 			}
@@ -956,7 +986,7 @@ void Engine::run()
 		{
 			PROFILE_SCOPE("Present");
 			if (!frameCtx->submitAndPresent(*swapchain, imageIndex))
-				framebufferResized = true;
+				requestSwapchainRecreate();
 		}
 
 		++frameNumber;

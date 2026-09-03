@@ -112,13 +112,13 @@ int main()
 
 		if (hasMode(VK_PRESENT_MODE_IMMEDIATE_KHR))
 		{
-			swapchain.setVSync(false);
+			swapchain.recreate(64, 64, false);
 			if (swapchain.isVSync() ||
 				swapchain.getPresentMode() != VK_PRESENT_MODE_IMMEDIATE_KHR)
 				throw std::runtime_error(
 					"VSync off did not select strict IMMEDIATE mode");
 
-			swapchain.setVSync(true);
+			swapchain.recreate(64, 64, true);
 			if (!swapchain.isVSync() ||
 				swapchain.getPresentMode() != VK_PRESENT_MODE_FIFO_KHR)
 				throw std::runtime_error(

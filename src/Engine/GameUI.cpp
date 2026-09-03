@@ -108,6 +108,17 @@ void GameUI::shutdown()
 	m_imm = nullptr;
 }
 
+void GameUI::onImGuiVulkanBackendRecreate()
+{
+	// The old descriptor belonged to the backend pool destroyed during reinit.
+	// The sampled image and sampler are application-owned and remain valid.
+	m_mapDesc = VK_NULL_HANDLE;
+	if (m_mapSampler != VK_NULL_HANDLE && m_mapImage.image != VK_NULL_HANDLE)
+		m_mapDesc = ImGui_ImplVulkan_AddTexture(
+			m_mapSampler, m_mapImage.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	m_mapHasTexture = (m_mapDesc != VK_NULL_HANDLE);
+}
+
 bool GameUI::handleShortcut(int sdlKeycode, GameUIFrame &frame)
 {
 	switch (sdlKeycode)

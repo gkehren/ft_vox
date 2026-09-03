@@ -54,6 +54,12 @@ Supporting types:
 
 `WorldRenderer` does **not** own WSI sync. The `Engine` calls `VkFrameContext::beginFrame` / `submitAndPresent` and passes a reset command buffer into `WorldRenderer::recordFrame`.
 
+Resize, VSync, and out-of-date requests are deferred to the next pre-acquire
+frame boundary. `Engine` recreates the swapchain there, resets
+`VkFrameContext`'s per-image associations, refreshes `WorldRenderer` targets,
+and notifies ImGui. No UI callback destroys WSI resources for an image already
+acquired by the current frame.
+
 ### Present mode and VSync contract
 
 `VkSwapchain` applies a strict two-mode policy:
