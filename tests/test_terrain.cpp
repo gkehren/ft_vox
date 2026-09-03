@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <barrier>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -17,6 +18,7 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 static int g_fails = 0;
@@ -117,62 +119,102 @@ static bool isChunkLocalFeature(uint8_t raw)
 // Biome config initialization (issue #81)
 // ---------------------------------------------------------------------------
 
+/// Sanity net for a config read from getBiomeConfig(): a torn or partially
+/// applied initialization would surface as out-of-range fields. It is NOT a
+/// proof of race-free initialization on its own — that guarantee comes from
+/// std::call_once plus a ThreadSanitizer run (Linux CI; TSan is unavailable
+/// under MSVC).
+static bool isValidBiomeConfig(const BiomeConfig &cfg)
+{
+	return cfg.subsurfaceDepth >= 0 && cfg.subsurfaceDepth <= 16 &&
+		   cfg.treeDensity >= 0.0f && cfg.treeDensity <= 1.0f &&
+		   cfg.bushDensity >= 0.0f && cfg.bushDensity <= 1.0f &&
+		   cfg.rockDensity >= 0.0f && cfg.rockDensity <= 1.0f &&
+		   cfg.fallenLogDensity >= 0.0f && cfg.fallenLogDensity <= 1.0f &&
+		   cfg.surfacePerturbAmp >= 0.0f && cfg.surfacePerturbAmp <= 16.0f &&
+		   cfg.surfaceBlock >= TextureType::BEDROCK &&
+		   cfg.surfaceBlock < TextureType::COUNT &&
+		   cfg.subsurfaceBlock >= TextureType::BEDROCK &&
+		   cfg.subsurfaceBlock < TextureType::COUNT &&
+		   cfg.underwaterBlock >= TextureType::BEDROCK &&
+		   cfg.underwaterBlock < TextureType::COUNT &&
+		   std::isfinite(cfg.grassColor.x) && std::isfinite(cfg.grassColor.y) &&
+		   std::isfinite(cfg.grassColor.z) &&
+		   std::isfinite(cfg.foliageColor.x) && std::isfinite(cfg.foliageColor.y) &&
+		   std::isfinite(cfg.foliageColor.z);
+}
+
+/// Member-wise equality of two biome configs. Configs are built from
+/// deterministic literals, so exact float comparison is correct (no
+/// epsilon). Member-wise rather than memcmp to stay independent of any
+/// padding bytes in the struct.
+static bool sameBiomeConfig(const BiomeConfig &a, const BiomeConfig &b)
+{
+	return a.surfaceBlock == b.surfaceBlock &&
+		   a.subsurfaceBlock == b.subsurfaceBlock &&
+		   a.underwaterBlock == b.underwaterBlock &&
+		   a.subsurfaceDepth == b.subsurfaceDepth &&
+		   a.treeDensity == b.treeDensity &&
+		   a.bushDensity == b.bushDensity &&
+		   a.rockDensity == b.rockDensity &&
+		   a.fallenLogDensity == b.fallenLogDensity &&
+		   a.grassColor == b.grassColor &&
+		   a.foliageColor == b.foliageColor &&
+		   a.hasSnow == b.hasSnow &&
+		   a.hasCacti == b.hasCacti &&
+		   a.surfacePerturbAmp == b.surfacePerturbAmp;
+}
+
 /// First access to getBiomeConfig() from many threads at once must be
 /// race-free: std::call_once is the only synchronization and there is no
-/// separate initialized flag. This must run before anything else constructs
-/// a TerrainGenerator so initialization is genuinely first triggered
+/// separate initialized flag. A std::barrier releases all workers at the
+/// same logical instant (no sleep/yield timing games), and every thread's
+/// very first lookup targets the same biome so the single call_once really
+/// is contended. This must run before anything else constructs a
+/// TerrainGenerator so initialization is genuinely first triggered
 /// concurrently, not by a prior single-threaded call.
 static void testBiomeConfigConcurrentInit()
 {
 	constexpr int kThreads = 8;
 	constexpr int kSweeps = 64;
 
-	// Wave 1: concurrent first access. Every read must return a fully
-	// formed config — a torn or partially applied initialization would
-	// show up as out-of-range fields (and as a TSan report on Linux CI).
+	// Wave 1: barrier-synchronized concurrent first access.
 	std::atomic<int> invalid{0};
 	{
-		std::vector<std::future<void>> futures;
-		futures.reserve(kThreads);
+		std::barrier start{kThreads};
+		std::vector<std::thread> threads;
+		threads.reserve(kThreads);
 		for (int t = 0; t < kThreads; ++t)
 		{
-			futures.push_back(std::async(std::launch::async, [&invalid]() {
+			threads.emplace_back([&start, &invalid]() {
+				start.arrive_and_wait();
+
+				// Real concurrent first access: all threads hit the same
+				// getBiomeConfig() / std::call_once at the same instant.
+				if (!isValidBiomeConfig(
+						TerrainGenerator::getBiomeConfig(BIOME_PLAINS)))
+					++invalid;
+
 				for (int sweep = 0; sweep < kSweeps; ++sweep)
 				{
 					for (int b = 0; b < BIOME_COUNT; ++b)
 					{
-						const BiomeConfig &cfg =
-							TerrainGenerator::getBiomeConfig(static_cast<BiomeType>(b));
-						const bool fieldsOk =
-							cfg.subsurfaceDepth >= 0 && cfg.subsurfaceDepth <= 16 &&
-							cfg.treeDensity >= 0.0f && cfg.treeDensity <= 1.0f &&
-							cfg.bushDensity >= 0.0f && cfg.bushDensity <= 1.0f &&
-							cfg.rockDensity >= 0.0f && cfg.rockDensity <= 1.0f &&
-							cfg.fallenLogDensity >= 0.0f && cfg.fallenLogDensity <= 1.0f &&
-							cfg.surfacePerturbAmp >= 0.0f && cfg.surfacePerturbAmp <= 16.0f &&
-							cfg.surfaceBlock >= TextureType::BEDROCK &&
-							cfg.surfaceBlock < TextureType::COUNT &&
-							cfg.subsurfaceBlock >= TextureType::BEDROCK &&
-							cfg.subsurfaceBlock < TextureType::COUNT &&
-							cfg.underwaterBlock >= TextureType::BEDROCK &&
-							cfg.underwaterBlock < TextureType::COUNT &&
-							std::isfinite(cfg.grassColor.x) && std::isfinite(cfg.grassColor.y) &&
-							std::isfinite(cfg.grassColor.z) &&
-							std::isfinite(cfg.foliageColor.x) && std::isfinite(cfg.foliageColor.y) &&
-							std::isfinite(cfg.foliageColor.z);
-						if (!fieldsOk)
+						const BiomeConfig &cfg = TerrainGenerator::getBiomeConfig(
+							static_cast<BiomeType>(b));
+						if (!isValidBiomeConfig(cfg))
 							++invalid;
 					}
 				}
-			}));
+			});
 		}
-		for (auto &f : futures)
-			f.get();
+		for (auto &thread : threads)
+			thread.join();
 	}
 	CHECK(invalid.load() == 0, "concurrent first access returned invalid biome configs");
 
-	// Wave 2: after initialization, every thread must observe byte-identical
-	// configs for all biomes — identical and complete, as before the change.
+	// Wave 2: after initialization, every thread must observe member-wise
+	// identical configs for all biomes — identical and complete, as before
+	// the change.
 	std::vector<BiomeConfig> reference;
 	reference.reserve(BIOME_COUNT);
 	for (int b = 0; b < BIOME_COUNT; ++b)
@@ -180,28 +222,29 @@ static void testBiomeConfigConcurrentInit()
 
 	std::atomic<int> mismatches{0};
 	{
-		std::vector<std::future<void>> futures;
-		futures.reserve(kThreads);
+		std::vector<std::thread> threads;
+		threads.reserve(kThreads);
 		for (int t = 0; t < kThreads; ++t)
 		{
-			futures.push_back(std::async(std::launch::async, [&reference, &mismatches]() {
+			threads.emplace_back([&reference, &mismatches]() {
 				for (int b = 0; b < BIOME_COUNT; ++b)
 				{
-					const BiomeConfig &cfg =
-						TerrainGenerator::getBiomeConfig(static_cast<BiomeType>(b));
-					if (std::memcmp(&cfg, &reference[b], sizeof(BiomeConfig)) != 0)
+					const BiomeConfig &cfg = TerrainGenerator::getBiomeConfig(
+						static_cast<BiomeType>(b));
+					if (!sameBiomeConfig(cfg, reference[b]))
 						++mismatches;
 				}
-			}));
+			});
 		}
-		for (auto &f : futures)
-			f.get();
+		for (auto &thread : threads)
+			thread.join();
 	}
 	CHECK(mismatches.load() == 0, "biome configs differ between threads after init");
 
-	std::cout << "biome configs: " << kThreads << " threads x " << kSweeps
-			  << " concurrent first-access sweeps of all " << BIOME_COUNT
-			  << " biomes, identical across threads afterwards\n";
+	std::cout << "biome configs: " << kThreads
+			  << " barrier-synchronized threads hit the same first lookup, "
+			  << kSweeps << " sweeps of all " << BIOME_COUNT
+			  << " biomes, member-wise identical across threads afterwards\n";
 }
 
 // ---------------------------------------------------------------------------
