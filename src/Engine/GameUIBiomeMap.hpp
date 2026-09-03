@@ -68,9 +68,26 @@ struct BiomeMapResult
 	int gridX{0};
 	int gridZ{0};
 	int size{0};
-	std::vector<unsigned char> rgb;
+	std::vector<unsigned char> rgba;
 	bool valid{false};
 };
+
+/// Pending GPU upload request for streamed biome map data.
+struct BiomeMapUpload
+{
+	std::vector<uint8_t> rgba;
+	uint32_t width{0};
+	uint32_t height{0};
+	uint64_t generation{0};
+};
+
+/// Validate that a biome map upload request contains well-formed pixel data.
+inline bool isBiomeMapUploadValid(const BiomeMapUpload &upload)
+{
+	return upload.width > 0 &&
+		   upload.height > 0 &&
+		   upload.rgba.size() == static_cast<size_t>(upload.width) * static_cast<size_t>(upload.height) * 4;
+}
 
 /// Check if a biome map result matches active world generation, seed, request ID,
 /// and internal invariant checks before GPU publication.
@@ -85,7 +102,7 @@ inline bool isBiomeMapResultAcceptable(const BiomeMapResult &result,
 		   result.requestId == currentRequestId &&
 		   result.size > 0 &&
 		   result.zoom > 0.0f &&
-		   result.rgb.size() == static_cast<size_t>(result.size) * static_cast<size_t>(result.size) * 3;
+		   result.rgba.size() == static_cast<size_t>(result.size) * static_cast<size_t>(result.size) * 4;
 }
 
 /// Check whether the existing GPU backing resources can be reused without destruction/recreation.
@@ -108,16 +125,17 @@ inline bool shouldSupersedeBiomeMap(glm::vec2 player,
 	return glm::length(player - lastPlayer) > 8.0f;
 }
 
-/// Paint the player indicator dot (black outline with white center) into the RGB buffer.
-void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgb,
+/// Paint the player indicator dot (black outline with white center) into the RGBA buffer.
+void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgba,
 						   int size,
 						   glm::vec2 playerXZ,
 						   float zoom,
 						   int gridX,
 						   int gridZ);
 
-/// Sample biomes and convert them to an RGB pixel buffer using thread-local generator.
+/// Sample biomes and convert them to an RGBA pixel buffer using thread-local generator.
 /// Fully self-contained: owns its buffers and does not retain raw pointers to Engine state.
 /// Best-effort cancellation prevents obsolete work from being published and skips work
 /// when cancellation is observed before/after biome sampling.
 BiomeMapResult generateBiomeMap(const BiomeMapRequest &req);
+

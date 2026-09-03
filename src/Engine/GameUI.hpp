@@ -22,6 +22,8 @@
 
 #include <Engine/GameUIBiomeMap.hpp>
 
+class StagingRing;
+
 /// Frame snapshot for ImGui panels (pointers owned by Engine).
 struct GameUIFrame
 {
@@ -115,6 +117,10 @@ public:
 	uint64_t currentWorldGenId() const { return m_currentWorldGenId; }
 	uint64_t currentMapRequestId() const { return m_mapRequestId; }
 
+	bool hasPendingBiomeMapUpload() const { return !m_pendingUpload.rgba.empty(); }
+	const BiomeMapUpload &pendingBiomeMapUpload() const { return m_pendingUpload; }
+	void recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing);
+
 private:
 	struct BiomeMapJob
 	{
@@ -171,7 +177,6 @@ private:
 
 	void tickBiomeMap(GameUIFrame &frame);
 	void ensureBiomeTexture(int size);
-	void uploadBiomeTexture(const std::vector<unsigned char> &rgb, int size);
 
 	bool m_showHud{true};
 	bool m_showGraphics{false};
@@ -194,10 +199,12 @@ private:
 	uint64_t m_mapRequestId{0};
 
 	BiomeMapJob m_mapJob{};
+	BiomeMapUpload m_pendingUpload{};
 
 	VkContext *m_vk{nullptr};
 	ImmediateCommands *m_imm{nullptr};
 	AllocatedImage m_mapImage{};
+	VkImageLayout m_mapImageLayout{VK_IMAGE_LAYOUT_UNDEFINED};
 	VkSampler m_mapSampler{VK_NULL_HANDLE};
 	VkDescriptorSet m_mapDesc{VK_NULL_HANDLE};
 	int m_mapImageSize{0};

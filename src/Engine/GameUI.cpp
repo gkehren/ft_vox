@@ -1,6 +1,7 @@
 #include "Engine/GameUI.hpp"
 
 #include <Engine/Profiler.hpp>
+#include <Vulkan/StagingRing.hpp>
 #include <imgui/imgui.h>
 #include <imgui/imgui_impl_vulkan.h>
 #include <SDL3/SDL.h>
@@ -55,6 +56,7 @@ void GameUI::shutdown()
 		m_mapJob.future.wait();
 
 	m_mapJob.reset();
+	m_pendingUpload = {};
 
 	if (m_vk && m_vk->getDevice() != VK_NULL_HANDLE)
 	{
@@ -74,6 +76,7 @@ void GameUI::shutdown()
 	}
 	m_mapHasTexture = false;
 	m_mapImageSize = 0;
+	m_mapImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	m_vk = nullptr;
 	m_imm = nullptr;
 }
@@ -87,6 +90,7 @@ void GameUI::invalidateBiomeMap()
 	// but is marked inactive so the UI will not display stale world terrain.
 	// It will be updated in-place when the next valid map completes.
 	m_mapHasTexture = false;
+	m_pendingUpload = {};
 }
 
 void GameUI::onImGuiVulkanBackendRecreate()
@@ -1146,7 +1150,7 @@ void GameUI::drawOverlayHints(GameUIFrame &frame)
 
 void GameUI::ensureBiomeTexture(int size)
 {
-	if (!m_vk || !m_imm)
+	if (!m_vk)
 		return;
 	if (canReuseBiomeTexture(m_mapImage.image != VK_NULL_HANDLE,
 							 m_mapDesc != VK_NULL_HANDLE,
@@ -1156,7 +1160,9 @@ void GameUI::ensureBiomeTexture(int size)
 		return;
 	}
 
-	m_vk->waitIdle();
+	if (m_mapImage.image != VK_NULL_HANDLE)
+		m_vk->waitIdle();
+
 	if (m_mapDesc != VK_NULL_HANDLE)
 	{
 		ImGui_ImplVulkan_RemoveTexture(m_mapDesc);
@@ -1183,29 +1189,53 @@ void GameUI::ensureBiomeTexture(int size)
 	m_mapDesc = ImGui_ImplVulkan_AddTexture(m_mapSampler, m_mapImage.view,
 											VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	m_mapImageSize = size;
+	m_mapImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
-void GameUI::uploadBiomeTexture(const std::vector<unsigned char> &rgb, int size)
+void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing)
 {
-	if (!m_vk || !m_imm || rgb.size() < static_cast<size_t>(size * size * 3))
+	if (m_pendingUpload.rgba.empty() || m_mapImage.image == VK_NULL_HANDLE)
 		return;
 
-	ensureBiomeTexture(size);
-	if (m_mapImage.image == VK_NULL_HANDLE || m_mapDesc == VK_NULL_HANDLE)
-		return;
-
-	// Expand RGB → RGBA for R8G8B8A8.
-	std::vector<unsigned char> rgba(static_cast<size_t>(size * size * 4));
-	for (int i = 0; i < size * size; ++i)
+	const VkDeviceSize dataSize = m_pendingUpload.rgba.size() * sizeof(uint8_t);
+	VkDeviceSize stagingOffset = 0;
+	void *stagingPtr = nullptr;
+	if (!stagingRing.alloc(dataSize, stagingOffset, stagingPtr))
 	{
-		rgba[i * 4 + 0] = rgb[i * 3 + 0];
-		rgba[i * 4 + 1] = rgb[i * 3 + 1];
-		rgba[i * 4 + 2] = rgb[i * 3 + 2];
-		rgba[i * 4 + 3] = 255;
+		// Slice was full this frame; defer upload to next frame.
+		return;
 	}
 
-	uploadImage2D(m_vk->getAllocator(), *m_imm, m_mapImage, rgba.data(),
-				  rgba.size() * sizeof(unsigned char));
+	std::memcpy(stagingPtr, m_pendingUpload.rgba.data(), dataSize);
+
+	cmdTransitionImageLayout(cmd, m_mapImage.image, m_mapImageLayout,
+							 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+							 m_mapImage.mipLevels, m_mapImage.arrayLayers);
+
+	VkBufferImageCopy region{};
+	region.bufferOffset = stagingOffset;
+	region.bufferRowLength = 0;
+	region.bufferImageHeight = 0;
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.mipLevel = 0;
+	region.imageSubresource.baseArrayLayer = 0;
+	region.imageSubresource.layerCount = 1;
+	region.imageOffset = {0, 0, 0};
+	region.imageExtent = {m_pendingUpload.width, m_pendingUpload.height, 1};
+
+	vkCmdCopyBufferToImage(cmd, stagingRing.buffer(), m_mapImage.image,
+						   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+	cmdTransitionImageLayout(cmd, m_mapImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+							 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+							 m_mapImage.mipLevels, m_mapImage.arrayLayers);
+
+	m_mapImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	m_mapHasTexture = true;
+	m_pendingUpload.rgba.clear();
+	m_pendingUpload.width = 0;
+	m_pendingUpload.height = 0;
+	m_pendingUpload.generation = 0;
 }
 
 void GameUI::tickBiomeMap(GameUIFrame &frame)
@@ -1241,10 +1271,15 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 
 		if (isBiomeMapResultAcceptable(res, frame.worldGenerationId, frame.seed, m_mapRequestId))
 		{
-			paintBiomeMapPlayerDot(res.rgb, res.size, playerXZ, res.zoom, res.gridX, res.gridZ);
+			paintBiomeMapPlayerDot(res.rgba, res.size, playerXZ, res.zoom, res.gridX, res.gridZ);
 			m_mapCenter = res.center;
-			uploadBiomeTexture(res.rgb, res.size);
-			m_mapHasTexture = true;
+			ensureBiomeTexture(res.size);
+			m_pendingUpload = BiomeMapUpload{
+				.rgba = std::move(res.rgba),
+				.width = static_cast<uint32_t>(res.size),
+				.height = static_cast<uint32_t>(res.size),
+				.generation = res.requestId
+			};
 			m_mapLastPublishedAt = now;
 		}
 		else
