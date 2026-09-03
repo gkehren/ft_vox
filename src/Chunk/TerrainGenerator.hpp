@@ -90,6 +90,17 @@ public:
   // Get biome at world position (for cross-chunk queries)
   BiomeType getBiomeAt(int worldX, int worldZ) const;
 
+  // Canonical column biome evaluation primitive
+  BiomeType evaluateBiomeColumn(int worldX, int worldZ) const;
+
+  // Helpers to map region pixels to world coordinates and discrete columns
+  static glm::vec2 computeBiomeRegionWorldCoordinate(float centerX, float centerZ, float step,
+                                                     int width, int height,
+                                                     int xi, int zi);
+  static glm::ivec2 computeBiomeRegionDiscreteColumn(float centerX, float centerZ, float step,
+                                                    int width, int height,
+                                                    int xi, int zi);
+
   // Batch biome sampling for map visualization (uses GenUniformGrid2D for SIMD efficiency).
   // centerX/Z are world-space coordinates, step is world units per pixel,
   // width/height are the output dimensions. outBiomes is filled in row-major order.
@@ -192,9 +203,9 @@ private:
                       float ridge, float riverVal, float weirdness) const;
   float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge, float riverVal, float weirdness) const;
   void applyErosion(float *heightMap, int size) const;
-  void applyErosion(float *heightMap, int width, int height, float *tempBuffer = nullptr) const;
+  void applyCanonicalErosion(float *heightMap, int width, int height, float *tempBuffer = nullptr) const;
 
-  // Shared erosion-aware terrain sampling pipeline
+  // Shared canonical column pipeline stages
   struct TerrainColumnBuffers
   {
     float *continental{nullptr};
@@ -209,11 +220,15 @@ private:
     float *erosionTemp{nullptr};
   };
 
-  void sampleTerrainColumnNoiseAndHeights(
+  void sampleTerrainColumnFields(
       const TerrainColumnBuffers &buffers,
       int extStartX, int extStartZ,
       int extWidth, int extHeight,
-      float step) const;
+      float step = 1.0f) const;
+
+  void calculateTerrainHeights(
+      const TerrainColumnBuffers &buffers,
+      int extWidth, int extHeight) const;
 
   BiomeType evaluateBiomeAt(
       const TerrainColumnBuffers &buffers,

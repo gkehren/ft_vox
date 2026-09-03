@@ -13,9 +13,10 @@ Phases 0–5. High-level engine ownership remains documented in
   fluids identically.
 - Features with horizontal reach are evaluated from the deterministic
   `MAX_TREE_RADIUS` candidate halo.
-- Biome queries (single-point `getBiomeAt` and block-resolution `getBiomeRegion`
-  with step=1.0) use the canonical erosion-aware pipeline with a halo of at least
-  2 cells, guaranteeing identical biome selection to generated chunk columns.
+- Biome queries (point query `getBiomeAt` and region query `getBiomeRegion`)
+  return canonical biome samples for every output coordinate independently of
+  display sampling step, using the canonical block-resolution erosion-aware
+  pipeline with halo >= 2.
 - GPU upload and destruction are not part of terrain generation and remain on
   the main thread.
 
@@ -26,8 +27,8 @@ Phases 0–5. High-level engine ownership remains documented in
 2. Calculate continuous heights and apply one deterministic thermal-erosion
    pass at block resolution.
 3. Select biomes from terrain band, temperature, humidity, weirdness, erosion,
-   relief, and river values. (Point and block-resolution region queries share
-   this exact erosion-aware pipeline.)
+   relief, and river values. (Point and region queries share this exact
+   canonical pipeline.)
 4. Produce the 16×16 core height/color data and bounded 3D noise ranges.
 5. Fill voxel columns, carve caves, and assign deterministic aquifer fluids.
 6. Place depth- and biome-aware ore veins.
@@ -158,12 +159,15 @@ biome consistency.
 ## Biome Query Invariants
 
 Biome sampling is unified across the engine via a canonical erosion-aware pipeline:
-1. Sample the 2D terrain and climate noise graphs over the requested region padded with an erosion halo (minimum 2 cells).
+1. Sample the 2D terrain and climate noise graphs over the requested region padded with an erosion halo (minimum 2 cells) at block resolution (`erosionStep = 1.0f`).
 2. Calculate continuous heights via `calculateHeightFloat`.
-3. Apply deterministic thermal erosion (`applyErosion`) at block resolution (`step = 1.0`).
+3. Apply deterministic thermal erosion (`applyCanonicalErosion`) at block resolution (`step = 1.0`).
 4. Select biomes using `determineBiome` with post-erosion height and clamped parameters.
 
-- **Point queries (`getBiomeAt(worldX, worldZ)`)**: Samples a 5×5 cell window (halo = 2) centered on the world column, running thermal erosion on the neighborhood. This guarantees bit-for-bit equivalence with chunk generation without heap allocations.
-- **Region queries (`getBiomeRegion(...)`)**: Batch-samples uniform grids with halo = 2 padding. At block resolution (`step = 1.0`), output matches `generateChunk` and `getBiomeAt` across chunk borders.
-- **UI consistency**: The HUD biome label and the World / Biome map cannot disagree with loaded chunks for matching coordinates.
+- **Point queries (`getBiomeAt(worldX, worldZ)`)**: Evaluates a 5×5 cell window (halo = 2) centered on the world column via `evaluateBiomeColumn`, running thermal erosion on the neighborhood. This guarantees bit-for-bit equivalence with chunk generation without heap allocations.
+- **Region queries (`getBiomeRegion(centerX, centerZ, step, width, height, ...)`)**: Returns canonical biome samples for every output coordinate, independently of display sampling step:
+  - For `step == 1.0` (and small dense domains): Evaluates the dense block bounding box at `step = 1.0` with halo = 2 in a single vectorized pass.
+  - For `step < 1.0` (zoom-in): Evaluates the compact dense block bounding box at `step = 1.0`. For sub-block pixels, coordinates discretize via round-to-nearest (`col = round(sampleWorldCoord)`), ensuring adjacent pixels on the same column resolve identically.
+  - For `step > 1.0` (zoom-out): Uses a memory-bounded adaptive tiled approach (tiles of up to 32×32 output pixels) or direct canonical column evaluation, guaranteeing strictly bounded scratch memory (< 1 MB) without memory explosions at wide zoom-outs.
+- **UI consistency**: HUD biome and World / Biome map use the same canonical generated-column biome definition as loaded terrain at every zoom level.
 

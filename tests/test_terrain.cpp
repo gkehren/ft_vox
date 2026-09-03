@@ -1580,6 +1580,149 @@ static void testBiomeQueryConsistency()
 			  << " columns verified identical across generateChunk, getBiomeAt, and getBiomeRegion\n";
 }
 
+static void testBiomeRegionMultiStepAndZoomConsistency()
+{
+	using Clock = std::chrono::steady_clock;
+	constexpr int kTestSeeds[] = {1337, 42};
+	constexpr float kZoomLevels[] = {0.1f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
+
+	struct TestCase
+	{
+		float centerX;
+		float centerZ;
+		int width;
+		int height;
+		const char *description;
+	};
+
+	const TestCase kCases[] = {
+		{0.0f, 0.0f, 32, 32, "origin centered"},
+		{123.47f, -87.23f, 32, 32, "fractional coordinates"},
+		{-0.5f, -1.25f, 32, 32, "near zero negative transition"},
+		{-16.0f, -15.75f, 32, 32, "chunk boundary negative transition"},
+		{500.0f, -500.0f, 48, 48, "large coordinate non-power-of-two"}
+	};
+
+	int totalPixelsVerified = 0;
+
+	for (int seed : kTestSeeds)
+	{
+		TerrainGenerator gen(seed);
+
+		for (float zoom : kZoomLevels)
+		{
+			const float step = 1.0f / zoom;
+
+			for (const auto &tc : kCases)
+			{
+				std::vector<BiomeType> region;
+				gen.getBiomeRegion(tc.centerX, tc.centerZ, step, tc.width, tc.height, region);
+
+				CHECK(region.size() == static_cast<size_t>(tc.width * tc.height),
+					  "region size must match requested dimensions");
+
+				for (int zi = 0; zi < tc.height; ++zi)
+				{
+					for (int xi = 0; xi < tc.width; ++xi)
+					{
+						const glm::ivec2 col = TerrainGenerator::computeBiomeRegionDiscreteColumn(
+							tc.centerX, tc.centerZ, step, tc.width, tc.height, xi, zi);
+						const BiomeType expectedBiome = gen.getBiomeAt(col.x, col.y);
+						const BiomeType actualBiome = region[zi * tc.width + xi];
+
+						CHECK(actualBiome == expectedBiome,
+							  "region pixel must match getBiomeAt (seed=" << seed
+							  << " zoom=" << zoom << " step=" << step
+							  << " case=" << tc.description
+							  << " pixel=(" << xi << "," << zi << ")"
+							  << " col=(" << col.x << "," << col.y << ")"
+							  << " expected=" << biomeTypeString[expectedBiome]
+							  << " got=" << biomeTypeString[actualBiome] << ")");
+
+						++totalPixelsVerified;
+					}
+				}
+
+				// If step < 1.0, verify sub-block discretization:
+				// adjacent pixels mapping to the same discrete column must have identical biomes
+				if (step < 1.0f)
+				{
+					for (int zi = 0; zi < tc.height; ++zi)
+					{
+						for (int xi = 0; xi < tc.width - 1; ++xi)
+						{
+							const glm::ivec2 colA = TerrainGenerator::computeBiomeRegionDiscreteColumn(
+								tc.centerX, tc.centerZ, step, tc.width, tc.height, xi, zi);
+							const glm::ivec2 colB = TerrainGenerator::computeBiomeRegionDiscreteColumn(
+								tc.centerX, tc.centerZ, step, tc.width, tc.height, xi + 1, zi);
+							if (colA == colB)
+							{
+								CHECK(region[zi * tc.width + xi] == region[zi * tc.width + (xi + 1)],
+									  "adjacent pixels on the same column must match");
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Direct chunk comparison for integer steps (step = 1.0, 2.0, 4.0)
+		for (float step : {1.0f, 2.0f, 4.0f})
+		{
+			constexpr int kSize = 16;
+			const int originChunkX = -16;
+			const int originChunkZ = -16;
+			const float cx = static_cast<float>(originChunkX) + kSize * step * 0.5f;
+			const float cz = static_cast<float>(originChunkZ) + kSize * step * 0.5f;
+
+			std::vector<BiomeType> region;
+			gen.getBiomeRegion(cx, cz, step, kSize, kSize, region);
+
+			for (int zi = 0; zi < kSize; ++zi)
+			{
+				for (int xi = 0; xi < kSize; ++xi)
+				{
+					const glm::ivec2 col = TerrainGenerator::computeBiomeRegionDiscreteColumn(
+						cx, cz, step, kSize, kSize, xi, zi);
+
+					// Determine which chunk contains this column
+					const int chX = (col.x >= 0) ? (col.x / CHUNK_SIZE) * CHUNK_SIZE
+												 : ((col.x - (CHUNK_SIZE - 1)) / CHUNK_SIZE) * CHUNK_SIZE;
+					const int chZ = (col.y >= 0) ? (col.y / CHUNK_SIZE) * CHUNK_SIZE
+												 : ((col.y - (CHUNK_SIZE - 1)) / CHUNK_SIZE) * CHUNK_SIZE;
+					const int lx = col.x - chX;
+					const int lz = col.y - chZ;
+
+					ChunkData chunk = gen.generateChunk(chX, chZ);
+					const BiomeType chunkBiome = chunk.biomes[lz * CHUNK_SIZE + lx];
+					CHECK(region[zi * kSize + xi] == chunkBiome,
+						  "region pixel for integer step must match chunk data");
+				}
+			}
+		}
+	}
+
+	// Performance sanity benchmark on realistic 256x256 UI map
+	{
+		TerrainGenerator gen(1337);
+		std::vector<BiomeType> fullMap;
+		constexpr int kMapDim = 256;
+		for (float zoom : {0.1f, 0.5f, 1.0f, 2.0f, 8.0f})
+		{
+			const float step = 1.0f / zoom;
+			const auto tStart = Clock::now();
+			gen.getBiomeRegion(0.0f, 0.0f, step, kMapDim, kMapDim, fullMap);
+			const double ms = std::chrono::duration<double, std::milli>(Clock::now() - tStart).count();
+			CHECK(fullMap.size() == kMapDim * kMapDim, "256x256 map output size valid");
+			std::cout << "  [UI Map Perf] zoom=" << zoom << " (step=" << step << "): "
+					  << ms << " ms (" << (kMapDim * kMapDim / (ms * 1000.0)) << " Mpixels/sec)\n";
+		}
+	}
+
+	std::cout << "biome region multi-step consistency: " << totalPixelsVerified
+			  << " pixels verified across all zoom levels, steps, and fractional coordinates\n";
+}
+
 // ---------------------------------------------------------------------------
 
 int main(int argc, char **argv)
@@ -1602,6 +1745,7 @@ int main(int argc, char **argv)
 	testFlatRiverChannels();
 	testBiomeRegistry();
 	testBiomeQueryConsistency();
+	testBiomeRegionMultiStepAndZoomConsistency();
 	testPhase3BiomePresence();
 	testPhase3FeatureBlocks();
 	testOasisPonds();
