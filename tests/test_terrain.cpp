@@ -114,6 +114,97 @@ static bool isChunkLocalFeature(uint8_t raw)
 }
 
 // ---------------------------------------------------------------------------
+// Biome config initialization (issue #81)
+// ---------------------------------------------------------------------------
+
+/// First access to getBiomeConfig() from many threads at once must be
+/// race-free: std::call_once is the only synchronization and there is no
+/// separate initialized flag. This must run before anything else constructs
+/// a TerrainGenerator so initialization is genuinely first triggered
+/// concurrently, not by a prior single-threaded call.
+static void testBiomeConfigConcurrentInit()
+{
+	constexpr int kThreads = 8;
+	constexpr int kSweeps = 64;
+
+	// Wave 1: concurrent first access. Every read must return a fully
+	// formed config — a torn or partially applied initialization would
+	// show up as out-of-range fields (and as a TSan report on Linux CI).
+	std::atomic<int> invalid{0};
+	{
+		std::vector<std::future<void>> futures;
+		futures.reserve(kThreads);
+		for (int t = 0; t < kThreads; ++t)
+		{
+			futures.push_back(std::async(std::launch::async, [&invalid]() {
+				for (int sweep = 0; sweep < kSweeps; ++sweep)
+				{
+					for (int b = 0; b < BIOME_COUNT; ++b)
+					{
+						const BiomeConfig &cfg =
+							TerrainGenerator::getBiomeConfig(static_cast<BiomeType>(b));
+						const bool fieldsOk =
+							cfg.subsurfaceDepth >= 0 && cfg.subsurfaceDepth <= 16 &&
+							cfg.treeDensity >= 0.0f && cfg.treeDensity <= 1.0f &&
+							cfg.bushDensity >= 0.0f && cfg.bushDensity <= 1.0f &&
+							cfg.rockDensity >= 0.0f && cfg.rockDensity <= 1.0f &&
+							cfg.fallenLogDensity >= 0.0f && cfg.fallenLogDensity <= 1.0f &&
+							cfg.surfacePerturbAmp >= 0.0f && cfg.surfacePerturbAmp <= 16.0f &&
+							cfg.surfaceBlock >= TextureType::BEDROCK &&
+							cfg.surfaceBlock < TextureType::COUNT &&
+							cfg.subsurfaceBlock >= TextureType::BEDROCK &&
+							cfg.subsurfaceBlock < TextureType::COUNT &&
+							cfg.underwaterBlock >= TextureType::BEDROCK &&
+							cfg.underwaterBlock < TextureType::COUNT &&
+							std::isfinite(cfg.grassColor.x) && std::isfinite(cfg.grassColor.y) &&
+							std::isfinite(cfg.grassColor.z) &&
+							std::isfinite(cfg.foliageColor.x) && std::isfinite(cfg.foliageColor.y) &&
+							std::isfinite(cfg.foliageColor.z);
+						if (!fieldsOk)
+							++invalid;
+					}
+				}
+			}));
+		}
+		for (auto &f : futures)
+			f.get();
+	}
+	CHECK(invalid.load() == 0, "concurrent first access returned invalid biome configs");
+
+	// Wave 2: after initialization, every thread must observe byte-identical
+	// configs for all biomes — identical and complete, as before the change.
+	std::vector<BiomeConfig> reference;
+	reference.reserve(BIOME_COUNT);
+	for (int b = 0; b < BIOME_COUNT; ++b)
+		reference.push_back(TerrainGenerator::getBiomeConfig(static_cast<BiomeType>(b)));
+
+	std::atomic<int> mismatches{0};
+	{
+		std::vector<std::future<void>> futures;
+		futures.reserve(kThreads);
+		for (int t = 0; t < kThreads; ++t)
+		{
+			futures.push_back(std::async(std::launch::async, [&reference, &mismatches]() {
+				for (int b = 0; b < BIOME_COUNT; ++b)
+				{
+					const BiomeConfig &cfg =
+						TerrainGenerator::getBiomeConfig(static_cast<BiomeType>(b));
+					if (std::memcmp(&cfg, &reference[b], sizeof(BiomeConfig)) != 0)
+						++mismatches;
+				}
+			}));
+		}
+		for (auto &f : futures)
+			f.get();
+	}
+	CHECK(mismatches.load() == 0, "biome configs differ between threads after init");
+
+	std::cout << "biome configs: " << kThreads << " threads x " << kSweeps
+			  << " concurrent first-access sweeps of all " << BIOME_COUNT
+			  << " biomes, identical across threads afterwards\n";
+}
+
+// ---------------------------------------------------------------------------
 // Determinism
 // ---------------------------------------------------------------------------
 
@@ -2385,6 +2476,9 @@ int main(int argc, char **argv)
 	if (argc > 1 && std::strcmp(argv[1], "--world-stats") == 0)
 		return runWorldStats(argc, argv);
 
+	// Issue #81: must stay the first test — it exercises the concurrent
+	// FIRST access to getBiomeConfig() before any TerrainGenerator exists.
+	testBiomeConfigConcurrentInit();
 	testDeterminismSameSeed();
 	testDifferentSeedsDiffer();
 	testConcurrentAndMultiSeedDeterminism();

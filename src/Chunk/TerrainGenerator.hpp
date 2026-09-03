@@ -259,7 +259,8 @@ private:
 
   // Biome configurations (static)
   static std::array<BiomeConfig, BIOME_COUNT> s_biomeConfigs;
-  static bool s_biomeConfigsInitialized;
+  // Lazily fills s_biomeConfigs exactly once; std::call_once is the single
+  // synchronization mechanism, so this is safe to call from any thread.
   static void initBiomeConfigs();
   // =============================================
   // SETUP METHODS

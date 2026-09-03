@@ -2,6 +2,7 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -11,7 +12,6 @@
 // =============================================
 
 std::array<BiomeConfig, BIOME_COUNT> TerrainGenerator::s_biomeConfigs;
-bool TerrainGenerator::s_biomeConfigsInitialized = false;
 static std::once_flag s_biomeConfigsOnceFlag;
 
 void TerrainGenerator::initBiomeConfigs()
@@ -209,17 +209,18 @@ void TerrainGenerator::initBiomeConfigs()
         0.0f, 0.0f, 0.0f, 0.0f,
         glm::vec3(0.30f, 0.68f, 0.54f), glm::vec3(0.24f, 0.60f, 0.48f),
         false, false, 0.0f};
-
-    s_biomeConfigsInitialized = true; });
+  });
 }
 
 const BiomeConfig &TerrainGenerator::getBiomeConfig(BiomeType biome)
 {
-  if (!s_biomeConfigsInitialized)
-  {
-    initBiomeConfigs();
-  }
-  return s_biomeConfigs[biome];
+  // std::call_once is the sole synchronization for initialization: repeated
+  // calls are cheap and everything written inside the once-block is visible
+  // to every caller once it returns. A separate initialized flag here would
+  // be read and written outside that mechanism and would race.
+  initBiomeConfigs();
+  assert(static_cast<std::size_t>(biome) < BIOME_COUNT);
+  return s_biomeConfigs[static_cast<std::size_t>(biome)];
 }
 
 // =============================================
