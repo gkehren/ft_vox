@@ -2,11 +2,17 @@
 
 #include <algorithm>
 #include <cmath>
-
 namespace
 {
 Profiler g_profiler;
 } // namespace
+
+Profiler::Profiler()
+{
+	registerWorkerName("TerrainGen");
+	registerWorkerName("MeshBuild");
+	registerWorkerName("MeshLOD");
+}
 
 Profiler &GetProfiler()
 {
@@ -17,16 +23,18 @@ void Profiler::registerWorkerName(const char *name)
 {
 	if (!name)
 		return;
-	for (int i = 0; i < m_workerBucketCount; ++i)
+	std::lock_guard<std::mutex> lock(m_workerRegisterMutex);
+	const int count = m_workerBucketCount.load(std::memory_order_relaxed);
+	for (int i = 0; i < count; ++i)
 	{
 		if (m_workers[static_cast<size_t>(i)].name &&
 			std::strcmp(m_workers[static_cast<size_t>(i)].name, name) == 0)
 			return;
 	}
-	if (m_workerBucketCount >= kMaxWorkerBuckets)
+	if (count >= kMaxWorkerBuckets)
 		return;
-	m_workers[static_cast<size_t>(m_workerBucketCount)].name = name;
-	++m_workerBucketCount;
+	m_workers[static_cast<size_t>(count)].name = name;
+	m_workerBucketCount.store(count + 1, std::memory_order_release);
 }
 
 void Profiler::beginFrame()
@@ -35,16 +43,6 @@ void Profiler::beginFrame()
 	{
 		m_inFrame = false;
 		return;
-	}
-
-	// Register known worker job names once so workers never create slots.
-	static bool s_workersRegistered = false;
-	if (!s_workersRegistered)
-	{
-		registerWorkerName("TerrainGen");
-		registerWorkerName("MeshBuild");
-		registerWorkerName("MeshLOD");
-		s_workersRegistered = true;
 	}
 
 	m_frameStart = Clock::now();
@@ -115,20 +113,25 @@ void Profiler::addWorkerSample(const char *name, float ms)
 	if (!name || !enabled())
 		return;
 
-	const auto us = static_cast<uint64_t>(std::max(0.0, static_cast<double>(ms) * 1000.0));
+	if (std::isnan(ms) || ms < 0.f)
+		ms = 0.f;
+	const auto us = static_cast<uint64_t>(static_cast<double>(ms) * 1000.0);
+
 	// Pointer compare first (string literals), then strcmp. Buckets pre-registered on main thread.
-	const int n = m_workerBucketCount;
+	const int n = m_workerBucketCount.load(std::memory_order_acquire);
 	for (int i = 0; i < n; ++i)
 	{
-		const char *bn = m_workers[static_cast<size_t>(i)].name;
+		WorkerBucket &b = m_workers[static_cast<size_t>(i)];
+		const char *bn = b.name;
 		if (bn == name || (bn && std::strcmp(bn, name) == 0))
 		{
-			m_workers[static_cast<size_t>(i)].count.fetch_add(1, std::memory_order_relaxed);
-			m_workers[static_cast<size_t>(i)].totalUs.fetch_add(us, std::memory_order_relaxed);
+			std::lock_guard<std::mutex> lock(b.mutex);
+			b.count += 1;
+			b.totalUs += us;
 			return;
 		}
 	}
-	// Unknown name — drop sample (call registerWorkerName from main thread first).
+	// Unknown name — drop sample (call registerWorkerName first).
 }
 
 void Profiler::clearHistory()
@@ -160,16 +163,27 @@ float Profiler::lastScopeMs(const char *name) const
 void Profiler::snapshotWorkers()
 {
 	m_workerSnapCount = 0;
-	for (int i = 0; i < m_workerBucketCount && m_workerSnapCount < kMaxWorkerBuckets; ++i)
+	const int n = m_workerBucketCount.load(std::memory_order_acquire);
+	for (int i = 0; i < n && m_workerSnapCount < kMaxWorkerBuckets; ++i)
 	{
 		WorkerBucket &b = m_workers[static_cast<size_t>(i)];
 		if (!b.name)
 			continue;
-		const uint64_t c = b.count.exchange(0, std::memory_order_relaxed);
-		const uint64_t us = b.totalUs.exchange(0, std::memory_order_relaxed);
+
+		uint64_t c = 0;
+		uint64_t us = 0;
+		{
+			std::lock_guard<std::mutex> lock(b.mutex);
+			c = b.count;
+			us = b.totalUs;
+			b.count = 0;
+			b.totalUs = 0;
+		}
+
 		WorkerSnapshot &s = m_workerSnaps[static_cast<size_t>(m_workerSnapCount++)];
 		s.name = b.name;
 		s.count = c;
+		s.totalUs = us;
 		s.totalMs = static_cast<float>(us) / 1000.f;
 		s.avgMs = c > 0 ? s.totalMs / static_cast<float>(c) : 0.f;
 	}
