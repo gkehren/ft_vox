@@ -250,6 +250,7 @@ add_executable(test_chunk_lifecycle
     test_chunk_lifecycle.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
     ${FT_VOX_VULKAN_SOURCES}

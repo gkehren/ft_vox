@@ -18,7 +18,7 @@ and peak values. Events expose interval totals and averages per measured frame.
 
 | Fields | Meaning |
 | --- | --- |
-| `voxel.bytes` | Allocated voxel vector capacity, including every free pool chunk |
+| `voxel.bytes` | Resident voxel storage capacity owned by active, voxel-backed chunks (free pool slots carry 0) |
 | `shell.sizeBytes`, `shell.capacityBytes` | Logical shell data and retained allocation; clearing a shell does not free its capacity |
 | `cpu.{opaque,water}.{vertex,index}.*` | Each CPU mesh vector's logical size and retained capacity |
 | `cpu.mesh.capacityBytes` | Combined retained mesh capacity, with its own simultaneous peak |

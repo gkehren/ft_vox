@@ -7,6 +7,7 @@
 #include <atomic>
 #include <array>
 #include <glm/glm.hpp>
+#include <Chunk/VoxelPool.hpp>
 
 class Chunk;
 
@@ -56,10 +57,18 @@ public:
 	/// Number of successful grow operations (ensureCapacity that allocated).
 	size_t growEvents() const { return m_growEvents.load(std::memory_order_relaxed); }
 
+	size_t voxelStorageCapacity() const { return m_voxelPool.capacity(); }
+	size_t voxelStorageActive() const { return m_voxelPool.activeCount(); }
+	size_t voxelStorageFree() const { return m_voxelPool.freeCount(); }
+	VoxelPool &voxelPool() { return m_voxelPool; }
+	const VoxelPool &voxelPool() const { return m_voxelPool; }
+
 private:
 	void publishTelemetry(); // caller holds m_mutex
 	std::array<size_t, 3> m_telemetry{};
 	void growUnlocked(size_t addCount); // caller holds m_mutex
+
+	VoxelPool m_voxelPool;
 
 	/// All pool-owned chunks; unique_ptr keeps addresses stable across vector growth.
 	std::vector<std::unique_ptr<Chunk>> m_storage;

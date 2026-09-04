@@ -28,11 +28,23 @@ static int g_fails = 0;
 		}                                                                      \
 	} while (0)
 
+struct VoxelView : std::span<const Voxel>
+{
+	using std::span<const Voxel>::span;
+	size_t capacity() const { return size(); }
+};
+
 // Friend probe declared in Chunk.hpp: verifies full private state without
 // exposing per-column generation data through the public API.
 struct ChunkStateProbe
 {
-	static const std::vector<Voxel> &voxels(const Chunk &c) { return c.voxels; }
+	static bool hasStorage(const Chunk &c) { return c.hasVoxelStorage(); }
+	static VoxelView voxels(const Chunk &c)
+	{
+		if (c.m_storage)
+			return VoxelView(c.m_storage->voxels.data(), CHUNK_VOLUME);
+		return VoxelView();
+	}
 	static const std::vector<uint8_t> &shell(const Chunk &c)
 	{
 		return c.neighborShellVoxels;
@@ -73,7 +85,8 @@ struct ChunkSnapshot
 	static ChunkSnapshot capture(const Chunk &c)
 	{
 		ChunkSnapshot s;
-		s.voxels = ChunkStateProbe::voxels(c);
+		const auto v = ChunkStateProbe::voxels(c);
+		s.voxels.assign(v.begin(), v.end());
 		s.shell = ChunkStateProbe::shell(c);
 		s.grass = ChunkStateProbe::grass(c);
 		s.foliage = ChunkStateProbe::foliage(c);
@@ -85,10 +98,10 @@ struct ChunkSnapshot
 	}
 };
 
-static bool sameVoxels(const std::vector<Voxel> &a, const std::vector<Voxel> &b)
+static bool sameVoxels(std::span<const Voxel> a, std::span<const Voxel> b)
 {
 	return a.size() == b.size() &&
-		   std::memcmp(a.data(), b.data(), a.size() * sizeof(Voxel)) == 0;
+		   (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(Voxel)) == 0);
 }
 
 static bool sameState(const ChunkSnapshot &a, const ChunkSnapshot &b)
@@ -104,10 +117,10 @@ static bool sameState(const ChunkSnapshot &a, const ChunkSnapshot &b)
 /// generated into, so a storage change could desynchronize them.
 static void checkActiveCacheInSync(const Chunk &chunk, const char *label)
 {
-	const auto &voxels = ChunkStateProbe::voxels(chunk);
+	const auto voxels = ChunkStateProbe::voxels(chunk);
 	const auto &active = ChunkStateProbe::active(chunk);
-	bool inSync = voxels.size() == CHUNK_VOLUME;
-	for (size_t i = 0; inSync && i < CHUNK_VOLUME; ++i)
+	bool inSync = !ChunkStateProbe::hasStorage(chunk) ? active.none() : voxels.size() == CHUNK_VOLUME;
+	for (size_t i = 0; inSync && i < voxels.size(); ++i)
 		inSync = active[i] == (voxels[i].type != static_cast<uint8_t>(AIR));
 	CHECK(inSync, label);
 }
@@ -176,16 +189,19 @@ int main(int argc, char **argv)
         {
             Chunk a(glm::vec3(0));
             const auto allocated = registry().snapshot();
-            CHECK(allocated.current[VoxelBytes] - before.current[VoxelBytes] == CHUNK_VOLUME * sizeof(Voxel), "resident voxel allocation");
+            CHECK(allocated.current[VoxelBytes] == before.current[VoxelBytes], "unloaded chunk has no voxel allocation");
+            a.acquireVoxelStorage();
+            const auto withStorage = registry().snapshot();
+            CHECK(withStorage.current[VoxelBytes] - before.current[VoxelBytes] == CHUNK_VOLUME * sizeof(Voxel), "resident voxel allocation");
             a.freeShellVoxels();
             auto cleared = registry().snapshot();
             CHECK(cleared.current[ShellBytes] == before.current[ShellBytes], "empty shell size");
             CHECK(cleared.current[ShellCapacity] == allocated.current[ShellCapacity], "empty shell retains capacity");
             Chunk b(std::move(a));
-            CHECK(registry().snapshot().current[VoxelBytes] == allocated.current[VoxelBytes], "move preserves total vector ownership");
+            CHECK(registry().snapshot().current[VoxelBytes] == withStorage.current[VoxelBytes], "move preserves total vector ownership");
             Chunk c(glm::vec3(0));
             c = std::move(b);
-            CHECK(registry().snapshot().current[VoxelBytes] == allocated.current[VoxelBytes], "move assignment releases destination storage");
+            CHECK(registry().snapshot().current[VoxelBytes] == withStorage.current[VoxelBytes], "move assignment releases destination storage");
             c.setVoxel(1, 1, 1, STONE);
             c.generateMesh();
             const auto meshed = registry().snapshot();
@@ -193,6 +209,7 @@ int main(int argc, char **argv)
             CHECK(meshed.current[CpuMeshCapacity] >= meshed.current[OpaqueVertexBytes], "retained mesh capacity covers its data");
             c.reset(glm::vec3(0));
             const auto reset = registry().snapshot();
+            CHECK(reset.current[VoxelBytes] == before.current[VoxelBytes], "full reset returns voxel storage to pool");
             CHECK(reset.current[OpaqueVertexBytes] == before.current[OpaqueVertexBytes], "reset clears logical mesh data");
             CHECK(reset.current[CpuMeshCapacity] == meshed.current[CpuMeshCapacity], "reset retains mesh allocations");
         }
@@ -208,8 +225,10 @@ int main(int argc, char **argv)
 	// 1) generateTerrain fills complete, correct state at position A.
 	Chunk a(glm::vec3(0.0f, 0.0f, 0.0f));
 	CHECK(a.getState() == ChunkState::UNLOADED, "fresh chunk starts UNLOADED");
+	CHECK(!ChunkStateProbe::hasStorage(a), "fresh chunk starts without voxel storage");
 	a.generateTerrain(gen);
 	CHECK(a.getState() == ChunkState::GENERATED, "generation completes");
+	CHECK(ChunkStateProbe::hasStorage(a), "generated chunk has voxel storage");
 	CHECK(ChunkStateProbe::voxels(a).size() == static_cast<size_t>(CHUNK_VOLUME),
 		  "voxel storage fully sized");
 	checkActiveCacheInSync(a, "activeVoxels cache in sync after generation");
@@ -224,6 +243,8 @@ int main(int argc, char **argv)
 
 	// 2) Move-construction carries the full generation state.
 	Chunk b(std::move(a));
+	CHECK(!ChunkStateProbe::hasStorage(a), "moved-from chunk has no storage");
+	CHECK(ChunkStateProbe::hasStorage(b), "moved-to chunk has storage");
 	const ChunkSnapshot snapB = ChunkSnapshot::capture(b);
 	CHECK(sameState(snapA, snapB),
 		  "move-constructor must preserve full generation state");
@@ -232,6 +253,8 @@ int main(int argc, char **argv)
 	// 3) Move-assignment carries the full generation state.
 	Chunk c(glm::vec3(9876.0f, 0.0f, -4321.0f));
 	c = std::move(b);
+	CHECK(!ChunkStateProbe::hasStorage(b), "moved-from chunk has no storage");
+	CHECK(ChunkStateProbe::hasStorage(c), "moved-to chunk has storage");
 	const ChunkSnapshot snapC = ChunkSnapshot::capture(c);
 	CHECK(sameState(snapA, snapC),
 		  "move-assignment must preserve full generation state");
@@ -258,8 +281,9 @@ int main(int argc, char **argv)
 	CHECK(ChunkStateProbe::shell(c).capacity() == shellCapacity,
 		  "shell capacity stable across recycle");
 
-	// Full reset must still clear storage when a chunk is retired.
+	// Full reset returns storage when a chunk is retired.
 	c.reset(glm::vec3(0.0f));
+	CHECK(!ChunkStateProbe::hasStorage(c), "default reset returns storage to pool");
 	CHECK(std::all_of(ChunkStateProbe::voxels(c).begin(),
 					  ChunkStateProbe::voxels(c).end(),
 					  [](Voxel v) { return v.type == AIR; }),
@@ -268,25 +292,34 @@ int main(int argc, char **argv)
 
 	// Exercise the real pool boundary, including cancelled generation.
 	ChunkPool pool(64);
+	CHECK(pool.voxelStorageCapacity() == 0, "constructing ChunkPool allocates 0 voxel storage");
 	Chunk *pooled = pool.acquire(glm::vec3(0.0f));
 	CHECK(pooled != nullptr, "pool acquisition succeeds");
+	CHECK(!ChunkStateProbe::hasStorage(*pooled), "acquired chunk has no storage before generation");
 	if (pooled)
 	{
 		pooled->generateTerrain(gen);
+		CHECK(ChunkStateProbe::hasStorage(*pooled), "pooled chunk has storage after generation");
+		CHECK(pool.voxelStorageCapacity() == 1, "voxel storage capacity grew on demand");
+		CHECK(pool.voxelStorageActive() == 1, "1 active voxel storage");
 		pool.release(pooled);
-		CHECK(std::all_of(ChunkStateProbe::voxels(*pooled).begin(),
-						  ChunkStateProbe::voxels(*pooled).end(),
-						  [](Voxel v) { return v.type == AIR; }),
-			  "pool release fully clears retired voxels");
+		CHECK(!ChunkStateProbe::hasStorage(*pooled), "pool release returns voxel storage to pool");
+		CHECK(pool.voxelStorageActive() == 0, "0 active voxel storage after release");
+		CHECK(pool.voxelStorageFree() == 1, "released storage returned to free list");
+
 		Chunk *reused = pool.acquire(glm::vec3(-CHUNK_SIZE, 0.0f, CHUNK_SIZE));
-		CHECK(reused == pooled, "pool reuses released storage");
+		CHECK(reused == pooled, "pool reuses released chunk slot");
+		CHECK(!ChunkStateProbe::hasStorage(*reused), "reacquired chunk slot has no storage before generation");
 		reused->generateTerrain(gen);
+		CHECK(pool.voxelStorageCapacity() == 1, "generation reused pooled storage without allocating");
+		CHECK(pool.voxelStorageActive() == 1, "1 active voxel storage");
 		checkMatchesOwning(*reused, gen, -CHUNK_SIZE, CHUNK_SIZE, "pool reuse");
 		checkActiveCacheInSync(*reused, "pool reuse active cache");
 		pool.release(reused);
 		pooled = pool.acquire(glm::vec3(0.0f));
 		pool.release(pooled); // cancelled before generation
 		CHECK(pool.acquiredCount() == 0, "cancelled acquisition returns to pool");
+		CHECK(pool.voxelStorageActive() == 0, "cancelled acquisition leaves no active storage");
 	}
 
 	if (g_fails != 0)

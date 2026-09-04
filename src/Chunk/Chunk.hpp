@@ -18,6 +18,7 @@
 #include <chrono>
 
 #include <Chunk/TerrainGenerator.hpp>
+#include <Chunk/VoxelPool.hpp>
 #include <Vulkan/VkBuffer.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
@@ -33,7 +34,7 @@ class GpuResourceRetire;
 class Chunk
 {
 public:
-	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED);
+	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED, VoxelPool *voxelPool = nullptr);
 	Chunk(Chunk &&other) noexcept;
 	Chunk &operator=(Chunk &&other) noexcept;
 	~Chunk();
@@ -51,6 +52,12 @@ public:
 
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
+
+	bool hasVoxelStorage() const { return m_storage != nullptr; }
+	void acquireVoxelStorage();
+	void releaseVoxelStorage();
+	void setVoxelPool(VoxelPool *pool) { m_voxelPool = pool; }
+	VoxelPool *getVoxelPool() const { return m_voxelPool; }
 
 	/// Bind opaque mesh and draw indexed into cmd. Returns index count.
 	uint32_t draw(VkCommandBuffer cmd);
@@ -117,7 +124,9 @@ private:
 	std::vector<uint32_t> indices;
 	std::vector<Vertex> waterVertices;
 	std::vector<uint32_t> waterIndices;
-	std::vector<Voxel> voxels;
+	VoxelPool *m_voxelPool{nullptr};
+	VoxelStorage *m_storage{nullptr};
+	void ensureVoxelStorage();
 	std::bitset<CHUNK_VOLUME> activeVoxels;
 	std::vector<uint8_t> neighborShellVoxels;
 
