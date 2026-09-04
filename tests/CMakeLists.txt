@@ -220,6 +220,23 @@ target_link_libraries(test_biome_map PRIVATE
 add_test(NAME BiomeMapGeneration COMMAND test_biome_map)
 
 # ---------------------------------------------------------------------------
+# Input routing policy (issue #76): global vs gameplay shortcuts, Escape
+# ---------------------------------------------------------------------------
+add_executable(test_input_routing
+    test_input_routing.cpp
+)
+
+target_include_directories(test_input_routing PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(test_input_routing PRIVATE
+    SDL3::SDL3
+)
+
+add_test(NAME InputRouting COMMAND test_input_routing)
+
+# ---------------------------------------------------------------------------
 # Chunk lifecycle (issue #78 review): move semantics + direct pooled
 # generation via Chunk::generateTerrain. Links the Vulkan buffer helpers
 # Chunk.cpp depends on; never touches a real device.
