@@ -272,32 +272,36 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
     // from the previous content is rejected at publish time.
     m_meshRevision.fetch_add(1, std::memory_order_relaxed);
   }
-  else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE &&
-           y >= 0 && y < static_cast<int>(CHUNK_HEIGHT))
-  {
-    // Lazily re-borrow borders if they were freed after a previous GPU
-    // upload. Vertical padding (y = -1 / CHUNK_HEIGHT) is not representable
-    // in the compact storage and was never written by generation either.
-    // Lazily re-borrow border storage if it was freed after a previous GPU
-    // upload. Acquisition may throw on OOM; a failed edit write is not
-    // fatal, so ignore it (the block itself is unchanged).
-    if (!m_borders)
+    else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE &&
+             y >= 0 && y < static_cast<int>(CHUNK_HEIGHT))
     {
-      try
-      {
-        m_borders = m_borderPool->acquire();
-        // A freshly acquired pool block holds stale bytes: initialize it so
-        // every other sampled border coordinate reads AIR (issue #113).
-        m_borders->resetToAir();
-        publishCpuTelemetry();
-      }
-      catch (const std::bad_alloc &)
-      {
-        return;
-      }
+        // Lazily re-borrow borders if they were freed after a previous GPU
+        // upload. Vertical padding (y = -1 / CHUNK_HEIGHT) is not representable
+        // in the compact storage and was never written by generation either.
+        // Lazily re-borrow border storage if it was freed after a previous GPU
+        // upload. Acquisition may throw on OOM; a failed edit write is not
+        // fatal, so ignore it (the block itself is unchanged).
+        if (!m_borders)
+        {
+            try
+            {
+                m_borders = m_borderPool->acquire();
+                // A freshly acquired pool block holds stale bytes: initialize it so
+                // every other sampled border coordinate reads AIR (issue #113).
+                m_borders->resetToAir();
+                publishCpuTelemetry();
+            }
+            catch (const std::bad_alloc &)
+            {
+                return;
+            }
+        }
+        m_borders->mutableAt(x, y, z) = static_cast<uint8_t>(type);
+        // Border content invalidation too (issue #114 review): mirror
+        // writes from a neighbor's boundary edit must invalidate in-flight
+        // meshes of THIS chunk just like in-chunk edits do.
+        m_meshRevision.fetch_add(1, std::memory_order_relaxed);
     }
-    m_borders->mutableAt(x, y, z) = static_cast<uint8_t>(type);
-  }
 }
 
 bool Chunk::deleteVoxel(const glm::vec3 &position)

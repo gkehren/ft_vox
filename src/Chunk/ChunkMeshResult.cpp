@@ -105,10 +105,21 @@ void MeshResultPool::finishBuild(MeshBuildResult *result)
 		return;
 
 	std::lock_guard<std::mutex> lock(m_mutex);
-	// Only a currently-acquired block may be finished (a free-list member
-	// would double-count its payload).
-	assert(std::find(m_freeList.begin(), m_freeList.end(), result) == m_freeList.end() &&
-		   "finishBuild on a block that is not acquired");
+
+	// Same ownership validation as release(): only a block that is
+	// currently acquired by this pool may be finished. Debug makes the
+	// programming error fatal; Release refuses without corrupting the
+	// accounting.
+	const bool owned = std::binary_search(m_owned.begin(), m_owned.end(), result);
+	assert(owned && "finishBuild on foreign MeshBuildResult");
+	if (!owned)
+		return;
+	const bool alreadyFree =
+		std::find(m_freeList.begin(), m_freeList.end(), result) != m_freeList.end();
+	assert(!alreadyFree && "finishBuild on a released MeshBuildResult");
+	if (alreadyFree)
+		return;
+
 	accountFinishLocked(result);
 }
 

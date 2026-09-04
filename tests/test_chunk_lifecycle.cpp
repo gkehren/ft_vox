@@ -39,6 +39,13 @@ struct VoxelView : std::span<const Voxel>
 	size_t capacity() const { return size(); }
 };
 
+// Friend probe declared in ChunkManager.hpp: exposes the deferred-edit
+// queue size so coalescing behavior is observable without public API.
+struct ChunkManagerProbe
+{
+	static size_t pendingEdits(const ChunkManager &m) { return m.m_pendingEdits.size(); }
+};
+
 // Friend probe declared in Chunk.hpp: verifies full private state without
 // exposing per-column generation data through the public API.
 struct ChunkStateProbe
@@ -902,10 +909,11 @@ int main(int argc, char **argv)
 			  "destructor returns the attached build result to the pool");
 	}
 
-	// 13e) Deferred edits while in transit (issue #114 review items 15-17):
-	// ChunkManager::placeVoxel queues instead of racing a worker's voxel or
-	// border reads; the queued edit is applied when transit clears, bumps
-	// the mesh revision, and marks the chunk GENERATED for remesh.
+	// 13e) Deferred edit subsystem (issue #114 review, 2nd pass): edits are
+	// logical operations (target + neighbor mirrors). When the target is in
+	// transit the whole group is deferred; target and mirrors apply
+	// independently as their chunks free up; pending writes coalesce per
+	// coordinate; recycled chunks never receive a stale queued edit.
 	{
 		ChunkPool pool(16);
 		TerrainGenerator mgen(2468);
@@ -915,58 +923,271 @@ int main(int argc, char **argv)
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
 		manager.processChunkLoading(64);
-		Chunk *primary = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		Chunk *origin = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
 		Chunk *east = manager.getChunkAtWorldPos(
 			glm::vec3(static_cast<float>(CHUNK_SIZE) + 4.0f, 40.0f, 4.0f));
-		CHECK(primary != nullptr && east != nullptr,
-			  "adjacent chunks registered by the load path");
-		if (primary && east)
+		Chunk *west = manager.getChunkAtWorldPos(glm::vec3(-12.0f, 40.0f, 4.0f));
+		Chunk *south = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, -12.0f));
+		Chunk *north = manager.getChunkAtWorldPos(
+			glm::vec3(4.0f, 40.0f, static_cast<float>(CHUNK_SIZE) + 4.0f));
+		CHECK(origin != nullptr && east != nullptr && west != nullptr &&
+				  south != nullptr && north != nullptr,
+			  "primary and four neighbors registered by the load path");
+		if (origin && east && west && south && north)
 		{
-			const int topY = 40;
+			// Terrain heights vary per column: place every test voxel at
+			// the column's topmost air cell so the effective state is
+			// guaranteed AIR before each place.
+			auto airY = [origin](int lx, int lz) {
+				for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+					if (origin->getVoxel(static_cast<uint32_t>(lx),
+										 static_cast<uint32_t>(y),
+										 static_cast<uint32_t>(lz))
+											.type == static_cast<uint8_t>(AIR))
+						return y;
+				return 0;
+			};
+			const int yIn = airY(4, 4);		   // interior column
+			const int yE8 = airY(15, 8);	   // east boundary, z=8
+			const int yE10 = airY(15, 10);	   // east boundary, z=10
+			const int yN6 = airY(6, 15);	   // north boundary, x=6
+			const int yW6 = airY(0, 6);		   // west boundary, z=6
+			const int yS6 = airY(6, 0);		   // south boundary, x=6
+			const int yCorner = airY(0, 0);	   // west+south corner
+			const int yW9 = airY(0, 9);		   // west boundary, z=9
+			const int yI8 = airY(8, 8);		   // interior, successive edits
+			const int yI9 = airY(9, 9);		   // interior, recycle test
 
 			// (a) Interior edit deferred while the primary is in transit.
-			primary->setInTransit(true);
-			const uint64_t primaryRevBefore = primary->meshRevision();
-			const glm::vec3 insidePos(4.0f, static_cast<float>(topY), 4.0f);
+			origin->setInTransit(true);
+			const glm::vec3 insidePos(4.0f, static_cast<float>(yIn), 4.0f);
 			CHECK(manager.placeVoxel(insidePos, STONE),
 				  "deferred interior edit reports success");
-			CHECK(primary->getVoxel(4, topY, 4).type != static_cast<uint8_t>(STONE),
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == 1,
+				  "interior edit queues exactly one entry");
+			CHECK(origin->getVoxel(4, yIn, 4).type != static_cast<uint8_t>(STONE),
 				  "deferred edit does not write while in transit");
-			primary->setInTransit(false);
+			origin->setInTransit(false);
 			manager.processFinishedJobs();
-			CHECK(primary->getVoxel(4, topY, 4).type == static_cast<uint8_t>(STONE),
+			CHECK(origin->getVoxel(4, yIn, 4).type == static_cast<uint8_t>(STONE),
 				  "queued interior edit applied after transit clears");
-			CHECK(primary->meshRevision() == primaryRevBefore + 1,
-				  "applied edit bumps the mesh revision");
-			CHECK(primary->getState() == ChunkState::GENERATED,
+			CHECK(origin->getState() == ChunkState::GENERATED,
 				  "applied edit marks the chunk GENERATED");
-			primary->deleteVoxel(insidePos);
-			manager.processFinishedJobs();
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == 0,
+				  "queue empty after apply");
 
-			// (b) Boundary edit: the primary takes the edit directly while
-			// the in-transit east neighbor's mirror write is queued
-			// (no concurrent border write, issue #114 review item 17).
-			const glm::vec3 boundaryPos(static_cast<float>(CHUNK_SIZE - 1),
-										static_cast<float>(topY), 6.0f);
-			const uint64_t eastRevBefore = east->meshRevision();
-			east->setInTransit(true);
-			CHECK(manager.placeVoxel(boundaryPos, STONE),
-				  "boundary edit reports success");
-			CHECK(primary->getVoxel(CHUNK_SIZE - 1, topY, 6).type ==
-					  static_cast<uint8_t>(STONE),
-				  "primary edit lands immediately (not in transit)");
-			CHECK(east->sampleForMeshing(-1, topY, 6) == AIR,
-				  "mirror write does not race the in-transit neighbor");
-			east->setInTransit(false);
-			manager.processFinishedJobs();
-			CHECK(east->sampleForMeshing(-1, topY, 6) == STONE,
-				  "queued mirror write applied after transit clears");
-			// The application bumps the revision twice (shell rebuild +
-			// mirror write), so only the invalidation direction is checked.
-			CHECK(east->meshRevision() > eastRevBefore,
-				  "applied mirror write bumps the neighbor's revision");
-			CHECK(east->getState() == ChunkState::GENERATED,
-				  "neighbor marked GENERATED for remesh");
+			// (b) BLOCKER regression (item 1/11): boundary edit while the
+			// TARGET is in transit must defer the target AND still schedule
+			// the neighbor mirror - not drop it.
+			{
+				const glm::vec3 boundaryPos(static_cast<float>(CHUNK_SIZE - 1),
+											static_cast<float>(yE8), 8.0f);
+				const uint64_t originRev = origin->meshRevision();
+				const uint64_t eastRev = east->meshRevision();
+				origin->setInTransit(true);
+				CHECK(manager.placeVoxel(boundaryPos, STONE),
+					  "in-transit boundary edit reports success");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+					  "target and mirror are both queued (mirror never lost)");
+				CHECK(origin->getVoxel(CHUNK_SIZE - 1, yE8, 8).type !=
+						  static_cast<uint8_t>(STONE),
+					  "target not written while in transit");
+				CHECK(east->sampleForMeshing(-1, yE8, 8) == AIR,
+					  "mirror not written while target deferred");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(CHUNK_SIZE - 1, yE8, 8).type ==
+						  static_cast<uint8_t>(STONE),
+					  "deferred target edit applied");
+				CHECK(east->sampleForMeshing(-1, yE8, 8) == STONE,
+					  "deferred mirror applied to the neighbor");
+				CHECK(origin->meshRevision() > originRev &&
+						  east->meshRevision() > eastRev,
+					  "both chunks invalidated");
+				CHECK(origin->getState() == ChunkState::GENERATED &&
+						  east->getState() == ChunkState::GENERATED,
+					  "both chunks re-armed for remesh");
+				// Cleanup so later sections see the column as AIR.
+				CHECK(manager.deleteVoxel(boundaryPos), "blocker cleanup");
+				manager.processFinishedJobs();
+				CHECK(east->sampleForMeshing(-1, yE8, 8) == AIR,
+					  "blocker cleanup mirrored");
+			}
+
+			// (c) Boundary DELETE while the target is in transit (item 12):
+			// a previously culled face must reappear on both sides.
+			{
+				const glm::vec3 boundaryPos(static_cast<float>(CHUNK_SIZE - 1),
+											static_cast<float>(yE10), 10.0f);
+				CHECK(manager.placeVoxel(boundaryPos, STONE),
+					  "seed boundary voxel (both free)");
+				CHECK(origin->getVoxel(CHUNK_SIZE - 1, yE10, 10).type ==
+							  static_cast<uint8_t>(STONE) &&
+						  east->sampleForMeshing(-1, yE10, 10) == STONE,
+					  "seed voxel mirrored");
+				origin->setInTransit(true);
+				CHECK(manager.deleteVoxel(boundaryPos),
+					  "in-transit boundary delete reports success");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+					  "delete queues target and mirror");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(CHUNK_SIZE - 1, yE10, 10).type ==
+						  static_cast<uint8_t>(AIR),
+					  "deferred delete applied on target");
+				CHECK(east->sampleForMeshing(-1, yE10, 10) == AIR,
+					  "deferred delete applied on neighbor mirror");
+				CHECK(origin->getState() == ChunkState::GENERATED &&
+						  east->getState() == ChunkState::GENERATED,
+					  "delete re-arms remesh on both sides");
+			}
+
+			// (d) Target and neighbor BOTH in transit (item 10): each entry
+			// applies when its own chunk frees, independently.
+			{
+				const glm::vec3 boundaryPos(6.0f, static_cast<float>(yN6),
+											static_cast<float>(CHUNK_SIZE - 1));
+				const uint64_t northRev = north->meshRevision();
+				origin->setInTransit(true);
+				north->setInTransit(true);
+				CHECK(manager.placeVoxel(boundaryPos, STONE), "both-transit edit accepted");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+					  "both entries queued");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(6, yN6, CHUNK_SIZE - 1).type ==
+						  static_cast<uint8_t>(STONE),
+					  "target applied while neighbor still in transit");
+				CHECK(north->sampleForMeshing(6, yN6, -1) == AIR,
+					  "mirror waits for the neighbor");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 1,
+					  "mirror remains queued");
+				north->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(north->sampleForMeshing(6, yN6, -1) == STONE,
+					  "mirror applied when the neighbor frees");
+				CHECK(north->meshRevision() > northRev, "neighbor invalidated");
+				// Cleanup so later sections see the column as AIR.
+				CHECK(manager.deleteVoxel(boundaryPos), "both-transit cleanup");
+				manager.processFinishedJobs();
+				CHECK(north->sampleForMeshing(6, yN6, -1) == AIR,
+					  "both-transit cleanup mirrored");
+			}
+
+			// (e) All four directions: target in transit, correct mirror
+			// coordinate per neighbor (item 13).
+			{
+				struct Direction
+				{
+					glm::vec3 editPos;
+					Chunk *neighbor;
+					int mirrorX, mirrorY, mirrorZ;
+					const char *name;
+				};
+				const Direction dirs[] = {
+					{glm::vec3(0.0f, static_cast<float>(yW6), 6.0f), west,
+					 CHUNK_SIZE, yW6, 6, "west"},
+					{glm::vec3(static_cast<float>(CHUNK_SIZE - 1),
+							   static_cast<float>(yE8), 8.0f),
+					 east, -1, yE8, 8, "east"},
+					{glm::vec3(6.0f, static_cast<float>(yS6), 0.0f), south,
+					 6, yS6, CHUNK_SIZE, "south"},
+					{glm::vec3(6.0f, static_cast<float>(yN6),
+							   static_cast<float>(CHUNK_SIZE - 1)),
+					 north, 6, yN6, -1, "north"},
+				};
+				for (const Direction &d : dirs)
+				{
+					origin->setInTransit(true);
+					const uint64_t neighborRev = d.neighbor->meshRevision();
+					CHECK(manager.placeVoxel(d.editPos, BRICKS), d.name);
+					origin->setInTransit(false);
+					manager.processFinishedJobs();
+					CHECK(d.neighbor->sampleForMeshing(d.mirrorX, d.mirrorY, d.mirrorZ) == BRICKS,
+						  "mirror coordinate correct");
+					CHECK(d.neighbor->meshRevision() > neighborRev, d.name);
+					// Reset for the next direction.
+					CHECK(manager.deleteVoxel(d.editPos), "direction cleanup");
+					manager.processFinishedJobs();
+				}
+			}
+
+			// (f) Corner edit: two mirrors, no diagonal (item 14).
+			{
+				const glm::vec3 cornerPos(0.0f, static_cast<float>(yCorner), 0.0f);
+				const uint64_t westRev = west->meshRevision();
+				const uint64_t southRev = south->meshRevision();
+				origin->setInTransit(true);
+				CHECK(manager.placeVoxel(cornerPos, BRICKS), "corner edit accepted");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 3,
+					  "corner queues target plus two face mirrors");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(west->sampleForMeshing(CHUNK_SIZE, yCorner, 0) == BRICKS &&
+						  south->sampleForMeshing(0, yCorner, CHUNK_SIZE) == BRICKS,
+					  "both face mirrors applied with correct coordinates");
+				CHECK(west->meshRevision() > westRev && south->meshRevision() > southRev,
+					  "both corner neighbors invalidated");
+				CHECK(manager.deleteVoxel(cornerPos), "corner cleanup");
+				manager.processFinishedJobs();
+			}
+
+			// (g) Successive edits coalesce to the last logical state
+			// (items 15-19, 21-22).
+			{
+				// place -> delete during transit: final AIR.
+				origin->setInTransit(true);
+				const glm::vec3 p(8.0f, static_cast<float>(yI8), 8.0f);
+				CHECK(manager.placeVoxel(p, STONE), "place pending");
+				CHECK(manager.deleteVoxel(p), "delete pending");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(8, yI8, 8).type == static_cast<uint8_t>(AIR),
+					  "place then delete lands AIR");
+
+				// delete -> place during transit: final STONE.
+				origin->setInTransit(true);
+				CHECK(!manager.deleteVoxel(p), "delete of AIR is a logical no-op");
+				CHECK(manager.placeVoxel(p, STONE), "place pending");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(8, yI8, 8).type == static_cast<uint8_t>(STONE),
+					  "delete then place lands STONE");
+
+				// Boundary place -> delete -> place DIRT: one coalesced
+				// target entry + one coalesced mirror entry.
+				const glm::vec3 boundaryPos(0.0f, static_cast<float>(yW9), 9.0f);
+				origin->setInTransit(true);
+				CHECK(manager.placeVoxel(boundaryPos, STONE), "boundary place");
+				CHECK(manager.deleteVoxel(boundaryPos), "boundary delete");
+				CHECK(manager.placeVoxel(boundaryPos, DIRT), "boundary re-place");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+					  "successive boundary edits coalesce to target + mirror");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(0, yW9, 9).type == static_cast<uint8_t>(DIRT) &&
+						  west->sampleForMeshing(CHUNK_SIZE, yW9, 9) == DIRT,
+					  "coalesced final state DIRT on both sides");
+				CHECK(manager.deleteVoxel(boundaryPos), "boundary cleanup");
+				CHECK(manager.deleteVoxel(p), "interior cleanup");
+				manager.processFinishedJobs();
+			}
+
+			// (h) A queued edit never lands on a recycled incarnation
+			// (items 26-28): reset bumps the generation, the stale entry is
+			// dropped at apply time.
+			{
+				const glm::vec3 p(9.0f, static_cast<float>(yI9), 9.0f);
+				origin->setInTransit(true);
+				CHECK(manager.placeVoxel(p, STONE), "edit queued for recycle test");
+				origin->reset(origin->getPosition()); // same pointer, new incarnation
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(9, yI9, 9).type == static_cast<uint8_t>(AIR),
+					  "stale queued edit dropped after recycle");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 0,
+					  "stale entry removed from the queue");
+			}
 		}
 	}
 

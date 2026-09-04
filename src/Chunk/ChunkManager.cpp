@@ -535,6 +535,114 @@ void ChunkManager::processFinishedJobs()
 	applyPendingEdits();
 }
 
+bool ChunkManager::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y, int z,
+									   TextureType type)
+{
+	// Caller holds m_mutex exclusively.
+	auto it = m_chunks.find(chunkPos);
+	if (it == m_chunks.end())
+		return false;
+	Chunk *target = it->second;
+
+	// Logical no-op refusal against the EFFECTIVE state (storage overlaid
+	// with pending edits), so place-after-pending-delete is not wrongly
+	// refused (issue #114 review items 15-17).
+	const TextureType effective = effectiveVoxelType(target, x, y, z);
+	if (type == AIR ? effective == AIR : effective != AIR)
+		return false;
+
+	// One user interaction = one logical group: the target edit plus every
+	// neighbor mirror. If the target is in transit, its mirrors are deferred
+	// with it so the whole group lands in one apply phase (transaction
+	// semantics, issue #114 review item 6); when the target is free each
+	// piece applies immediately unless its own chunk is in transit.
+	const uint64_t editId = m_nextEditId++;
+	const bool deferAll = target->isInTransit();
+	queueOrApplyEdit(target, chunkPos, x, y, z, type, false, deferAll, editId);
+	enqueueOrApplyMirrorEdits(chunkPos, x, y, z, type, deferAll, editId);
+	return true;
+}
+
+TextureType ChunkManager::effectiveVoxelType(const Chunk *chunk, int x, int y, int z) const
+{
+	// getVoxel is read-only and answers AIR without storage, so this is
+	// safe to evaluate while the chunk is being meshed/generated.
+	TextureType effective = static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),
+																	static_cast<uint32_t>(y),
+																	static_cast<uint32_t>(z))
+														  .type);
+	for (const PendingVoxelEdit &edit : m_pendingEdits)
+	{
+		if (edit.chunk == chunk && !edit.borderNeighbor &&
+			edit.x == x && edit.y == y && edit.z == z)
+			effective = edit.type; // last pending write wins
+	}
+	return effective;
+}
+
+void ChunkManager::queueOrApplyEdit(Chunk *chunk, const glm::ivec3 &chunkPos, int x,
+									int y, int z, TextureType type, bool borderNeighbor,
+									bool forceDefer, uint64_t editId)
+{
+	if (!chunk)
+		return;
+	if (forceDefer || chunk->isInTransit())
+	{
+		queuePendingEdit({chunk, chunk->meshGeneration(), chunkPos, x, y, z,
+						  type, borderNeighbor, editId});
+		return;
+	}
+	if (borderNeighbor)
+		ensureShellPopulated(chunk, chunkPos);
+	// setVoxel bumps the mesh revision; GENERATED re-arms meshing
+	// (setState also raises meshNeedsUpdate).
+	chunk->setVoxel(x, y, z, type);
+	chunk->setState(ChunkState::GENERATED);
+}
+
+void ChunkManager::enqueueOrApplyMirrorEdits(const glm::ivec3 &chunkPos, int x, int y,
+											 int z, TextureType type, bool forceDefer,
+											 uint64_t editId)
+{
+	// Same mirror mapping as the historical dirtyNeighbor path: the
+	// neighbor on the -x side holds our x=0 column at its local
+	// CHUNK_SIZE, and so on for each face.
+	if (x == 0)
+		queueOrApplyEdit(getChunk(chunkPos + glm::ivec3(-1, 0, 0)),
+						 chunkPos + glm::ivec3(-1, 0, 0), CHUNK_SIZE, y, z,
+						 type, true, forceDefer, editId);
+	if (x == CHUNK_SIZE - 1)
+		queueOrApplyEdit(getChunk(chunkPos + glm::ivec3(1, 0, 0)),
+						 chunkPos + glm::ivec3(1, 0, 0), -1, y, z,
+						 type, true, forceDefer, editId);
+	if (z == 0)
+		queueOrApplyEdit(getChunk(chunkPos + glm::ivec3(0, 0, -1)),
+						 chunkPos + glm::ivec3(0, 0, -1), x, y, CHUNK_SIZE,
+						 type, true, forceDefer, editId);
+	if (z == CHUNK_SIZE - 1)
+		queueOrApplyEdit(getChunk(chunkPos + glm::ivec3(0, 0, 1)),
+						 chunkPos + glm::ivec3(0, 0, 1), x, y, -1,
+						 type, true, forceDefer, editId);
+}
+
+void ChunkManager::queuePendingEdit(PendingVoxelEdit edit)
+{
+	// Coalesce: the last logical write per (chunk, coordinate, kind) wins,
+	// so place->delete->place during one transit collapses into one entry.
+	for (PendingVoxelEdit &existing : m_pendingEdits)
+	{
+		if (existing.chunk == edit.chunk && !existing.borderNeighbor == !edit.borderNeighbor &&
+			existing.x == edit.x && existing.y == edit.y && existing.z == edit.z)
+		{
+			existing.type = edit.type;
+			existing.generation = edit.generation;
+			existing.editId = edit.editId;
+			return;
+		}
+	}
+	m_pendingEdits.push_back(edit);
+}
+
 bool ChunkManager::hasPendingEditsFor(const Chunk *chunk) const
 {
 	for (const PendingVoxelEdit &edit : m_pendingEdits)
@@ -545,6 +653,14 @@ bool ChunkManager::hasPendingEditsFor(const Chunk *chunk) const
 	return false;
 }
 
+void ChunkManager::erasePendingEditsFor(const Chunk *chunk)
+{
+	m_pendingEdits.erase(
+		std::remove_if(m_pendingEdits.begin(), m_pendingEdits.end(),
+					   [chunk](const PendingVoxelEdit &edit) { return edit.chunk == chunk; }),
+		m_pendingEdits.end());
+}
+
 void ChunkManager::applyPendingEdits()
 {
 	if (m_pendingEdits.empty())
@@ -553,29 +669,35 @@ void ChunkManager::applyPendingEdits()
 	std::vector<PendingVoxelEdit> remaining;
 	{
 		// ensureShellPopulated expects the exclusive lock (same contract as
-		// the direct dirtyNeighbor path).
+		// the direct edit path).
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		for (const PendingVoxelEdit &edit : m_pendingEdits)
+		// Two passes for a deterministic order: target voxel edits first,
+		// then mirror border writes (issue #114 review item 8). Target and
+		// mirrors complete independently: each entry waits only on its own
+		// chunk's transit state (item 10).
+		for (int pass = 0; pass < 2; ++pass)
 		{
-			if (!edit.chunk || edit.chunk->isInTransit())
+			const bool mirrorPass = pass == 1;
+			for (const PendingVoxelEdit &edit : m_pendingEdits)
 			{
-				remaining.push_back(edit);
-				continue;
+				if (edit.borderNeighbor != mirrorPass)
+					continue;
+				if (!edit.chunk)
+					continue; // dangling entry: drop
+				if (edit.chunk->isInTransit())
+				{
+					remaining.push_back(edit);
+					continue;
+				}
+				if (edit.chunk->meshGeneration() != edit.generation)
+					continue; // chunk recycled since queueing: stale, drop
+				// The shell rebuild inside a mirror write also bumps the
+				// revision (before setVoxel bumps it again): revision
+				// monotonicity is what matters, not exact +1 semantics.
+				queueOrApplyEdit(edit.chunk, edit.chunkPos, edit.x, edit.y,
+								 edit.z, edit.type, edit.borderNeighbor,
+								 /*forceDefer=*/false, edit.editId);
 			}
-			// Mirror writes rebuild the shell first when it is missing,
-			// exactly like the direct dirtyNeighbor path.
-			if (edit.borderNeighbor)
-			{
-				const glm::vec3 &p = edit.chunk->getPosition();
-				const glm::ivec3 ci(
-					static_cast<int>(std::round(p.x)) / CHUNK_SIZE, 0,
-					static_cast<int>(std::round(p.z)) / CHUNK_SIZE);
-				ensureShellPopulated(edit.chunk, ci);
-			}
-			// setVoxel bumps the mesh revision; GENERATED re-arms meshing
-			// (setState also raises meshNeedsUpdate).
-			edit.chunk->setVoxel(edit.x, edit.y, edit.z, edit.type);
-			edit.chunk->setState(ChunkState::GENERATED);
 		}
 	}
 	m_pendingEdits.swap(remaining);
@@ -668,6 +790,11 @@ void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSetti
 		}
 		m_chunks.erase(it);
 		m_deferredRelease.push_back(chunk);
+		// The chunk is leaving the manager: any pending edit targeting it
+		// would either dangle into the free pool or, worse, land on a
+		// recycled incarnation (the generation stamp in applyPendingEdits
+		// is the last-resort guard, this purge is the timely one).
+		erasePendingEditsFor(chunk);
 	}
 	if (!toUnload.empty())
 		m_deferredReleaseAge = 0; // reset age so new unloads wait full delay
@@ -776,58 +903,12 @@ bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
 	const int chunkX = static_cast<int>(std::floor(worldPos.x / CHUNK_SIZE));
 	const int chunkZ = static_cast<int>(std::floor(worldPos.z / CHUNK_SIZE));
 	const glm::ivec3 chunkPos(chunkX, 0, chunkZ);
-
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	auto it = m_chunks.find(chunkPos);
-	if (it == m_chunks.end())
-		return false;
-
-	Chunk *chunk = it->second;
 	const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
 	const int localY = static_cast<int>(std::floor(worldPos.y));
 	const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
 
-	if (chunk->isInTransit())
-	{
-		// A worker is reading this chunk's voxels/borders: defer the edit
-		// instead of racing it (issue #114 review). isVoxelActive is a
-		// read-only probe, so return semantics are preserved.
-		if (!chunk->isVoxelActive(localX, localY, localZ))
-			return false;
-		m_pendingEdits.push_back({chunk, localX, localY, localZ, AIR, false});
-		return true;
-	}
-
-	const bool modified = chunk->deleteVoxel(worldPos);
-	if (!modified)
-		return false;
-
-	auto dirtyNeighbor = [&](const glm::ivec3 &nPos, int sx, int sy, int sz) {
-		Chunk *neighbor = getChunk(nPos);
-		if (!neighbor)
-			return;
-		if (neighbor->isInTransit())
-		{
-			// Same race on the neighbor's border storage: queue the mirror
-			// write with its shell rebuild (issue #114 review).
-			m_pendingEdits.push_back({neighbor, sx, sy, sz, AIR, true});
-			return;
-		}
-		ensureShellPopulated(neighbor, nPos);
-		neighbor->setVoxel(sx, sy, sz, AIR);
-		neighbor->setState(ChunkState::GENERATED);
-	};
-
-	if (localX == 0)
-		dirtyNeighbor(chunkPos + glm::ivec3(-1, 0, 0), CHUNK_SIZE, localY, localZ);
-	if (localX == CHUNK_SIZE - 1)
-		dirtyNeighbor(chunkPos + glm::ivec3(1, 0, 0), -1, localY, localZ);
-	if (localZ == 0)
-		dirtyNeighbor(chunkPos + glm::ivec3(0, 0, -1), localX, localY, CHUNK_SIZE);
-	if (localZ == CHUNK_SIZE - 1)
-		dirtyNeighbor(chunkPos + glm::ivec3(0, 0, 1), localX, localY, -1);
-
-	return true;
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
+	return scheduleLogicalEdit(chunkPos, localX, localY, localZ, AIR);
 }
 
 bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
@@ -835,53 +916,12 @@ bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 	const int chunkX = static_cast<int>(std::floor(worldPos.x / CHUNK_SIZE));
 	const int chunkZ = static_cast<int>(std::floor(worldPos.z / CHUNK_SIZE));
 	const glm::ivec3 chunkPos(chunkX, 0, chunkZ);
-
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	auto it = m_chunks.find(chunkPos);
-	if (it == m_chunks.end())
-		return false;
-
-	Chunk *chunk = it->second;
 	const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
 	const int localY = static_cast<int>(std::floor(worldPos.y));
 	const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
 
-	if (chunk->isInTransit())
-	{
-		if (chunk->isVoxelActive(localX, localY, localZ))
-			return false;
-		m_pendingEdits.push_back({chunk, localX, localY, localZ, type, false});
-		return true;
-	}
-
-	const bool modified = chunk->placeVoxel(worldPos, type);
-	if (!modified)
-		return false;
-
-	auto dirtyNeighbor = [&](const glm::ivec3 &nPos, int sx, int sy, int sz) {
-		Chunk *neighbor = getChunk(nPos);
-		if (!neighbor)
-			return;
-		if (neighbor->isInTransit())
-		{
-			m_pendingEdits.push_back({neighbor, sx, sy, sz, type, true});
-			return;
-		}
-		ensureShellPopulated(neighbor, nPos);
-		neighbor->setVoxel(sx, sy, sz, type);
-		neighbor->setState(ChunkState::GENERATED);
-	};
-
-	if (localX == 0)
-		dirtyNeighbor(chunkPos + glm::ivec3(-1, 0, 0), CHUNK_SIZE, localY, localZ);
-	if (localX == CHUNK_SIZE - 1)
-		dirtyNeighbor(chunkPos + glm::ivec3(1, 0, 0), -1, localY, localZ);
-	if (localZ == 0)
-		dirtyNeighbor(chunkPos + glm::ivec3(0, 0, -1), localX, localY, CHUNK_SIZE);
-	if (localZ == CHUNK_SIZE - 1)
-		dirtyNeighbor(chunkPos + glm::ivec3(0, 0, 1), localX, localY, -1);
-
-	return true;
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
+	return scheduleLogicalEdit(chunkPos, localX, localY, localZ, type);
 }
 
 bool ChunkManager::isVoxelActive(const glm::vec3 &worldPos) const

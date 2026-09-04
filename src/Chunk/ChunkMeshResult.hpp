@@ -123,9 +123,11 @@ struct MeshResultPoolStats
 // Builder lifecycle:
 //   acquire() -> beginBuild() -> build into the vectors -> finishBuild()
 //   -> (completion queue / publish / upload) -> release()
-// finishBuild() must be called exactly once per acquire, after the last
-// vector mutation and before release(); it is what makes the payload visible
-// to stats() without racing the builder.
+// finishBuild() must be called after the last vector mutation and before
+// release(); it refreshes the accounting, so it may legitimately be called
+// again after a deliberate payload mutation (tests/tools) - production
+// builders call it exactly once per acquire. It is what makes the payload
+// visible to stats() without racing the builder.
 class MeshResultPool
 {
 public:
