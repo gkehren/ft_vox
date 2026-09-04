@@ -1,0 +1,43 @@
+ft_vox Issue #105 Benchmark: activeVoxels bitset -> compact per-section occupancy metadata
+======================================================================
+
+Protocol: seed 42, 60s measured + 15s warmup, --vsync off, RTX 4070 Ti,
+validation off, telemetry on, 1920x1080 viewDist 512. Both runs from
+clean committed trees (no local modifications).
+
+BEFORE  main 3bb2a654d77d  (docs/benchmarks/bench_20260904_222753_3bb2a654d77d__s42_sc9820.txt)
+  Score: 9820 / 10000  Grade: S
+  MeshBuild   n=14758  avgMs=2.99704
+  MeshLOD     n=12180  avgMs=0.0457204
+  mesh.skylight        totalMs=17255.7
+  mesh.blocklight      totalMs=3259.84
+  mesh.occupancy       totalMs=448.618   (typeScratch copy + full scan)
+  mesh.facesGreedyAO   totalMs=23252.1
+  mesh.LOD             totalMs=548.805
+  occupancy.bytes current=72859648 peak=72859648  (~69.5 MiB bitsets)
+  voxel.bytes     current=302710784
+  cpu.mesh.capacityBytes current=12557640
+
+AFTER   8a99a870b20b  (docs/benchmarks/bench_20260904_231042_8a99a870b20b__s42_sc9865.txt)
+  Score: 9865 / 10000  Grade: S
+  MeshBuild   n=14748  avgMs=2.92288   (-2.5%)
+  MeshLOD     n=16458  avgMs=0.00854047 (-81.3%)
+  mesh.skylight        totalMs=16004.6
+  mesh.blocklight      totalMs=3040.62
+  mesh.occupancy       totalMs=0.4735    (-99.9%, metadata read only)
+  mesh.facesGreedyAO   totalMs=24012.3   (+3.3%, run noise; maskCells ~equal)
+  mesh.LOD             totalMs=129.038   (-76.5%)
+  occupancy.bytes current=284608 peak=284608     (32 B/chunk metadata)
+  voxel.bytes     current=302776320 (unchanged)
+  cpu.mesh.capacityBytes current=11552800 (pool high-water, same scale)
+
+Deltas
+  - Persistent occupancy memory: 72,859,648 -> 284,608 B (-99.6%), i.e.
+    8 KiB -> 32 B per pooled chunk (~-69.2 MiB at ~8.9k chunks).
+  - Occupancy prepass per full mesh build: ~30.4 us -> ~0.03 us (-99.9%);
+    the 64 KiB typeScratch copy + 65,536-entry scan are gone.
+  - LOD mesh builds scan from the last occupied section: ~45.7 us ->
+    ~8.5 us per build (-81%).
+  - Full greedy MeshBuild: 2.997 -> 2.923 ms avg (-2.5%), no point-query
+    path changed (isVoxelActive reads the canonical type, O(1)).
+  - Score 9820 -> 9865 (within run-to-run noise; no regression).
