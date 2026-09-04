@@ -84,7 +84,11 @@ public:
 	void rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
 								   const Chunk *south, const Chunk *north);
 
-	void reset(const glm::vec3 &newPosition);
+	enum class ResetMode { Full, ForGeneration };
+	/// ForGeneration retains voxel contents until generateTerrain() overwrites
+	/// them. Do not read/mesh those voxels before generation completes.
+	/// Full (the default) also clears voxels, for retirement without regeneration.
+	void reset(const glm::vec3 &newPosition, ResetMode mode = ResetMode::Full);
 
 	uint32_t getOpaqueIndexCount() const { return opaqueIndexCount; }
 

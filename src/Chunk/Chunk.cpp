@@ -1336,7 +1336,7 @@ void Chunk::rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
             north->getVoxel(x, y, 0).type;
 }
 
-void Chunk::reset(const glm::vec3 &newPosition)
+void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
 {
   // Drop GPU meshes — next upload recreates VMA buffers.
   releaseGPU();
@@ -1358,10 +1358,14 @@ void Chunk::reset(const glm::vec3 &newPosition)
   waterVertices.clear();
   waterIndices.clear();
 
-  // Reset voxels to AIR (keep vector at CHUNK_VOLUME size)
-  if (voxels.size() != CHUNK_VOLUME)
-    voxels.resize(CHUNK_VOLUME);
-  std::fill(voxels.begin(), voxels.end(), Voxel{static_cast<uint8_t>(AIR)});
+  // Generation resets caller-owned storage itself. Avoid another full-buffer
+  // write on acquisition; retirement still leaves a completely empty chunk.
+  if (mode == ResetMode::Full)
+  {
+    if (voxels.size() != CHUNK_VOLUME)
+      voxels.resize(CHUNK_VOLUME);
+    std::fill(voxels.begin(), voxels.end(), Voxel{static_cast<uint8_t>(AIR)});
+  }
 
   activeVoxels.reset();
 

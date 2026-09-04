@@ -158,6 +158,10 @@ At mesh time, sky light is cast down open columns then **flooded** into caves (a
 
 - Preallocated / recycled `Chunk` objects  
 - Avoids allocator thrash when streaming  
+- Acquisition uses `Chunk::ResetMode::ForGeneration`: lifecycle, mesh, and
+  cache state is reset, but voxel clearing is deferred to `generateTerrain()`.
+  Consumers must wait for generation before reading voxel data. Release uses
+  the default full reset, including AIR fill, even if generation was cancelled.
 - Grows with view distance / pressure (see git history for pool growth fixes)  
 
 ### `ThreadPool` (`Engine/ThreadPool.hpp`)

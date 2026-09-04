@@ -86,7 +86,7 @@ Chunk *ChunkPool::acquire(const glm::vec3 &worldPosition)
 
 	Chunk *chunk = m_freeList.back();
 	m_freeList.pop_back();
-	chunk->reset(worldPosition);
+	chunk->reset(worldPosition, Chunk::ResetMode::ForGeneration);
 	m_acquiredCount.fetch_add(1, std::memory_order_relaxed);
 	return chunk;
 }
