@@ -7,6 +7,7 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
+#include <Engine/InputRouting.hpp>
 #include <imgui/imgui.h>
 
 #include <cstdio>
@@ -605,23 +606,50 @@ void Engine::handleEvents()
 		case SDL_EVENT_KEY_DOWN:
 		{
 			const SDL_Keycode key = event.key.key;
+			const bool uiCapturesKeyboard = imgui && imgui->wantCaptureKeyboard();
+			const KeyRoute keyRoute = classifyKeyRoute(static_cast<int>(key));
 
-			// Function / panel shortcuts work even when ImGui wants keyboard.
-			if (gameUi)
+			// Input routing policy (issue #76): F-key panel/VSync shortcuts
+			// are intentional globals (non-text keys); gameplay keys must
+			// not fire while ImGui owns the keyboard, or typing 'p'/'c'/'b'
+			// in a text field would pause the world, steal the cursor, or
+			// toggle overlays.
+			GameUIFrame dummy{};
+			dummy.render = &renderSettings;
+			dummy.paused = &paused;
+			dummy.setVSync = [this](bool v) { setVSync(v); };
+
+			if (keyRoute == KeyRoute::GlobalShortcut)
 			{
-				GameUIFrame dummy{};
-				dummy.render = &renderSettings;
-				dummy.paused = &paused;
-				dummy.setVSync = [this](bool v) { setVSync(v); };
-				if (gameUi->handleShortcut(static_cast<int>(key), dummy))
+				if (gameUi && gameUi->handleGlobalShortcut(static_cast<int>(key), dummy))
 					break;
 			}
 
 			if (key == SDLK_ESCAPE)
 			{
-				running = false;
+				// Escape is forwarded to ImGui first. ImGuiFileDialog
+				// handles its own Escape-to-cancel path; the engine only
+				// decides whether Escape may quit.
+				if (escapeShouldQuit(uiCapturesKeyboard,
+									 gameUi && gameUi->isFileDialogOpen()))
+					running = false;
 				break;
 			}
+
+			if (uiCapturesKeyboard)
+				break;
+
+			if (keyRoute == KeyRoute::GameplayShortcut)
+			{
+				if (gameUi->handleGameplayShortcut(static_cast<int>(key), dummy))
+					break;
+
+				// Engine-owned gameplay keys (C/B/T) fall through here:
+				// classified by the policy, executed by Engine because
+				// their state (mouseCaptured, overlays, selectedTexture)
+				// lives here.
+			}
+
 			if (key == SDLK_C)
 			{
 				mouseCaptured = !mouseCaptured;
@@ -635,7 +663,7 @@ void Engine::handleEvents()
 					worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
 				break;
 			}
-			if (key == SDLK_T && !(imgui && imgui->wantCaptureKeyboard()))
+			if (key == SDLK_T)
 			{
 				int next = static_cast<int>(selectedTexture) + 1;
 				if (next >= static_cast<int>(COUNT))

@@ -97,9 +97,20 @@ public:
 	/// Draw all panels. Call between ImGui beginFrame / endFrame.
 	void draw(GameUIFrame &frame);
 
-	/// Keyboard shortcuts that don't need ImGui capture (F-keys, etc.).
-	/// Returns true if a toggle consumed the key.
-	bool handleShortcut(int sdlKeycode, GameUIFrame &frame);
+	/// Keyboard shortcut handling, split by input-routing policy (issue #76):
+	/// - handleGlobalShortcut: intentional global non-text shortcuts
+	///   (F1-F7 panel toggles, F10 VSync) - honored even while ImGui
+	///   captures the keyboard.
+	/// - handleGameplayShortcut: gameplay state changes (P pause) - the
+	///   caller must only invoke these while ImGui does NOT capture the
+	///   keyboard, so typing in a text field stays inert.
+	/// Returns true if the key was consumed.
+	bool handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame);
+	bool handleGameplayShortcut(int sdlKeycode, GameUIFrame &frame);
+
+	/// Used by Engine to prevent application quit while the modal handles
+	/// Escape itself (ImGuiFileDialog cancels via IGFD_EXIT_KEY).
+	bool isFileDialogOpen() const;
 
 	bool showHud() const { return m_showHud; }
 	bool showGraphics() const { return m_showGraphics; }

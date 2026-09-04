@@ -79,8 +79,11 @@
 /////////////////////////////////
 
 // by ex you can quit the dialog by pressing the key excape
-// #define USE_DIALOG_EXIT_WITH_KEY
-// #define IGFD_EXIT_KEY ImGuiKey_Escape
+// Enabled for issue #76: with the modal open, Escape cancels the dialog
+// itself (unless an input/search field is being edited - then it first
+// ends the edit, per the native ImGuiFileDialog behavior).
+#define USE_DIALOG_EXIT_WITH_KEY
+#define IGFD_EXIT_KEY ImGuiKey_Escape
 
 /////////////////////////////////
 //// WIDGETS ////////////////////

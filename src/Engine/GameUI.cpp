@@ -2,6 +2,7 @@
 
 #include <Engine/Profiler.hpp>
 #include <Vulkan/StagingRing.hpp>
+#include <ImGuiFileDialog.h>
 #include <imgui/imgui.h>
 #include <imgui/imgui_impl_vulkan.h>
 #include <SDL3/SDL.h>
@@ -105,8 +106,10 @@ void GameUI::onImGuiVulkanBackendRecreate()
 		m_mapHasTexture = false;
 }
 
-bool GameUI::handleShortcut(int sdlKeycode, GameUIFrame &frame)
+bool GameUI::handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame)
 {
+	// Intentionally global (issue #76): function keys no text field can
+	// produce, so they work even while ImGui captures the keyboard.
 	switch (sdlKeycode)
 	{
 	case SDLK_F1:
@@ -137,6 +140,18 @@ bool GameUI::handleShortcut(int sdlKeycode, GameUIFrame &frame)
 			frame.setVSync(frame.render->vsyncEnabled);
 		}
 		return true;
+	default:
+		break;
+	}
+	return false;
+}
+
+bool GameUI::handleGameplayShortcut(int sdlKeycode, GameUIFrame &frame)
+{
+	// Gameplay state changes (issue #76): the caller gates these behind
+	// !wantCaptureKeyboard() so typing in an ImGui text field is inert.
+	switch (sdlKeycode)
+	{
 	case SDLK_P:
 		if (frame.paused)
 		{
@@ -148,6 +163,11 @@ bool GameUI::handleShortcut(int sdlKeycode, GameUIFrame &frame)
 		break;
 	}
 	return false;
+}
+
+bool GameUI::isFileDialogOpen() const
+{
+	return ImGuiFileDialog::Instance()->IsOpened();
 }
 
 void GameUI::draw(GameUIFrame &frame)
