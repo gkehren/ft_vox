@@ -1,0 +1,76 @@
+[Vulkan] Layer name GalaxyOverlayVkLayer does not conform to naming standard (Policy #LLP_LAYER_3)
+[Vulkan] Layer name GalaxyOverlayVkLayer_VERBOSE does not conform to naming standard (Policy #LLP_LAYER_3)
+[Vulkan] Layer name GalaxyOverlayVkLayer_DEBUG does not conform to naming standard (Policy #LLP_LAYER_3)
+Vulkan device: NVIDIA GeForce RTX 4070 Ti
+Vulkan API: 1.4.351
+  validation=yes dynamicRendering=yes timelineSemaphores=yes portabilitySubset=no
+  VMA allocator: ready
+Swapchain present mode: FIFO (VSync on)
+Resource pack: ./ressources/default-resource-pack.zip
+Texture array: 101 layers (16x16)
+WorldRenderer ready (Shadow/Opaque/Water/Sky + post)
+ChunkPool: pre-allocated 8894 chunks
+SDL version: 3004012
+ft_vox: Vulkan — streaming procedural world
+  WASD fly · mouse look · LMB/RMB edit · T block · B borders
+  C free mouse · F1–F7 panels · F10 VSync · Esc quit
+  ThreadPool workers: 16
+Bootstrap: 25 chunks around spawn
+World seed: 42 chunks=25 view=512
+[stream] chunks=26 draw=9 shadow=25 q=3350/1/0
+Swapchain present mode: IMMEDIATE (VSync off, uncapped)
+Bootstrap: 25 chunks around spawn
+[bench] World reloaded seed=42 chunks=25
+[stream] chunks=539 draw=188 shadow=78 q=2989/1/2
+[stream] chunks=501 draw=161 shadow=65 q=3015/1/2
+[stream] chunks=488 draw=146 shadow=62 q=3026/2/2
+[stream] chunks=506 draw=161 shadow=79 q=3005/1/2
+[stream] chunks=508 draw=175 shadow=78 q=3010/1/2
+
+ft_vox Benchmark Report
+=======================
+Score: 9963 / 10000  Grade: S
+Revision: b999bd881a02* (dirty tree at build)
+  git b999bd881a02  branch feat/82-gpu-timestamp-profiler  describe b999bd8-dirty
+  build UTC 2026-09-04T11:18:54Z
+Seed: 42  Duration: 5s  Warmup: 0s  Measured: 5.00198s  Frames: 2462
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 1.98191  min 0.9199  max 23.9457
+  p50 1.8797  p95 2.5778  p99 3.0985
+  avg FPS 504.565  1% low FPS 322.737
+  frames >16.7ms: 1  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.385026  Visibility 0.00428286
+  Acquire 0.085049  Record 1.34446  MeshUpload 0.0378674
+  ImGui 0.0393342  Present 0.0838615
+
+Worker jobs
+  TerrainGen  n=2645  avgMs=1.4165  totalMs=3746.63
+  MeshBuild   n=2515  avgMs=2.46271  totalMs=6193.72
+  MeshLOD     n=1  avgMs=0.027  totalMs=0.027
+
+GPU timestamp queries: available
+  samples=2461 avgMs=0.554026
+  p95Ms=0.70128 p99Ms=0.942272
+  Uploads avgMs=0.00778073
+  Shadow avgMs=0.0397814
+  Opaque avgMs=0.0759166
+  Overlays avgMs=7.3232e-05
+  Water avgMs=0.0386166
+  Sky avgMs=0.214286
+  Post avgMs=0.1723
+  ImGui avgMs=0.00513415
+  Delayed graphics-queue intervals; overlapping passes are not additive.
+Biome map: zoom=0 mode=scheduled (fixed center when enabled)
+  TerrainQueue n=2645 avgMs=0.0236635 totalMs=62.59
+  MeshQueue n=2517 avgMs=0.0200942 totalMs=50.577
+  BiomeMap n=0 avgMs=0 totalMs=0
+Peaks: chunks=546 draw=193 qLoad/Gen/Mesh=3305/10/9
+
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.
+Benchmark saved: docs/benchmarks/bench_20260904_113426_b999bd881a02__s42_sc9963.txt

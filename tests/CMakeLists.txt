@@ -77,12 +77,17 @@ add_custom_command(TARGET test_vulkan_resources POST_BUILD
 )
 
 add_test(NAME VulkanResourceSmoke COMMAND test_vulkan_resources)
+add_test(NAME VulkanValidationErrorReporting COMMAND test_vulkan_resources --validation-error-probe)
+set_tests_properties(VulkanValidationErrorReporting PROPERTIES
+    WILL_FAIL TRUE
+    SKIP_RETURN_CODE 77
+)
+set_property(TEST VulkanValidationErrorReporting APPEND PROPERTY ENVIRONMENT "FT_VOX_VALIDATION=1")
 if(APPLE)
-    set_tests_properties(VulkanResourceSmoke PROPERTIES
-        ENVIRONMENT "VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
-    )
+    set_property(TEST VulkanResourceSmoke VulkanValidationErrorReporting APPEND PROPERTY
+        ENVIRONMENT "VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json")
 endif()
-set_tests_properties(VulkanResourceSmoke PROPERTIES
+set_tests_properties(VulkanResourceSmoke VulkanValidationErrorReporting PROPERTIES
     WORKING_DIRECTORY $<TARGET_FILE_DIR:test_vulkan_resources>
 )
 

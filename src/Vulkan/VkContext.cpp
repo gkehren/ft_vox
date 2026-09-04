@@ -6,6 +6,9 @@
 #include <cstring>
 #include <array>
 #include <cstdlib>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace
 {
@@ -13,11 +16,45 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 	VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 	VkDebugUtilsMessageTypeFlagsEXT /*types*/,
 	const VkDebugUtilsMessengerCallbackDataEXT *callbackData,
-	void * /*userData*/)
+	void *userData)
 {
+	if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && userData)
+		static_cast<std::atomic<uint64_t> *>(userData)->fetch_add(1, std::memory_order_relaxed);
 	if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
 	{
 		std::cerr << "[Vulkan] " << callbackData->pMessage << "\n";
+#ifdef _WIN32
+		const char *id = callbackData->pMessageIdName;
+		const bool swapchainUsageError = id &&
+			(std::strcmp(id, "VUID-VkSwapchainCreateInfoKHR-imageFormat-01778") == 0 ||
+			 std::strcmp(id, "VUID-VkImageViewCreateInfo-usage-02275") == 0);
+		static std::atomic<bool> reportedRtss{false};
+		if (swapchainUsageError && (GetModuleHandleW(L"RTSSHooks64.dll") || GetModuleHandleW(L"RTSSHooks.dll")) &&
+			!reportedRtss.exchange(true))
+			std::cerr << "[Vulkan] RTSS hooks are loaded. They can add STORAGE usage to SRGB swapchain images "
+				"outside the Vulkan layer chain. Set Application detection level to None for this executable "
+				"in RivaTuner Statistics Server, then restart it. See docs/vulkan-validation.md.\n";
+		const char *trace = std::getenv("FT_VOX_TRACE_VALIDATION");
+		static std::atomic<bool> traced{false};
+		if (trace && std::strcmp(trace, "1") == 0 &&
+			severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && !traced.exchange(true))
+		{
+			void *frames[32]{};
+			const auto n = CaptureStackBackTrace(0, 32, frames, nullptr);
+			for (USHORT i = 0; i < n; ++i)
+			{
+				HMODULE module = nullptr;
+				char path[MAX_PATH]{};
+				if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					reinterpret_cast<LPCSTR>(frames[i]), &module))
+					GetModuleFileNameA(module, path, MAX_PATH);
+				path[MAX_PATH - 1] = '\0';
+				const char *name = std::strrchr(path, '\\');
+				std::cerr << "[Validation stack] " << (name ? name + 1 : path) << " + " <<
+					(reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(module)) << '\n';
+			}
+		}
+#endif
 	}
 	return VK_FALSE;
 }
@@ -74,6 +111,7 @@ void VkContext::waitIdle() const
 
 void VkContext::init(SDL_Window *window)
 {
+	m_validationErrors.store(0, std::memory_order_relaxed);
 	auto getProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
 	if (!getProcAddr)
 		throw std::runtime_error("Failed to get vkGetInstanceProcAddr from SDL: " + std::string(SDL_GetError()));
@@ -254,6 +292,7 @@ void VkContext::createInstance(SDL_Window *window)
 			VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
 			VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
 		debugCreateInfo.pfnUserCallback = debugCallback;
+		debugCreateInfo.pUserData = &m_validationErrors;
 		createInfo.pNext = &debugCreateInfo;
 	}
 
@@ -302,6 +341,7 @@ void VkContext::setupDebugMessenger()
 		VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
 		VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
 	createInfo.pfnUserCallback = debugCallback;
+	createInfo.pUserData = &m_validationErrors;
 
 	if (vkCreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr, &m_debugMessenger) != VK_SUCCESS)
 		throw std::runtime_error("Failed to set up Vulkan debug messenger");

@@ -4,6 +4,8 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <cstdlib>
+#include <cstring>
 
 VkSwapchain::~VkSwapchain()
 {
@@ -190,6 +192,9 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 	createInfo.presentMode = presentMode;
 	createInfo.clipped = VK_TRUE;
 	createInfo.oldSwapchain = VK_NULL_HANDLE;
+	if (const char *trace = std::getenv("FT_VOX_TRACE_VALIDATION"); trace && std::strcmp(trace, "1") == 0)
+		std::cerr << "[Vulkan] Swapchain request before dispatch: format=" << createInfo.imageFormat
+			<< " imageUsage=" << createInfo.imageUsage << " (COLOR_ATTACHMENT | TRANSFER_DST)\n";
 
 	if (vkCreateSwapchainKHR(m_context->getDevice(), &createInfo, nullptr, &m_swapchain) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create swapchain");
