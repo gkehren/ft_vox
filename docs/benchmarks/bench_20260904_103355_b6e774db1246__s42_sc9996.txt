@@ -1,0 +1,34 @@
+ft_vox Benchmark Report
+=======================
+Score: 9996 / 10000  Grade: S
+Revision: b6e774db1246* (dirty tree at build)
+  git b6e774db1246  branch fix/80-profiler-capture-reset  describe b6e774d-dirty
+  build UTC 2026-09-04T10:33:46Z
+Seed: 42  Duration: 5s  Warmup: 0s  Measured: 5.00107s  Frames: 976
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 5.01713  min 4.9539  max 16.7046
+  p50 4.9916  p95 4.9974  p99 5.1148
+  avg FPS 199.317  1% low FPS 195.511
+  frames >16.7ms: 1  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.465891  Visibility 0.00646168
+  Acquire 0.0322865  Record 0.156647  MeshUpload 0.0274875
+  ImGui 0.0634878  Present 4.28754
+
+Worker jobs
+  TerrainGen  n=2385  avgMs=1.53003  totalMs=3649.11
+  MeshBuild   n=1771  avgMs=2.87837  totalMs=5097.59
+  MeshLOD     n=0  avgMs=0  totalMs=0
+
+Biome map: zoom=0.1 mode=scheduled (fixed center when enabled)
+  TerrainQueue n=2385 avgMs=0.0279065 totalMs=66.557
+  MeshQueue n=1771 avgMs=0.0270486 totalMs=47.903
+  BiomeMap n=5 avgMs=94.7874 totalMs=473.937
+Peaks: chunks=491 draw=125 qLoad/Gen/Mesh=3304/13/8
+
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.

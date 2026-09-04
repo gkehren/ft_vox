@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <future>
+#include <algorithm>
 #include <thread>
 #include <vector>
 
@@ -18,6 +20,12 @@
 			std::abort();                                                              \
 		}                                                                              \
 	} while (0)
+
+struct ProfilerStateProbe
+{
+	static int stackDepth(const Profiler &prof) { return prof.m_stackDepth; }
+	static const ProfileEntry &entry(const Profiler &prof, int i) { return prof.m_entries[i]; }
+};
 
 namespace
 {
@@ -350,11 +358,157 @@ void test_profiler_overhead_benchmark()
 	std::cout << "  -> Passed!" << std::endl;
 }
 
+
+void check_empty_capture(const Profiler &prof)
+{
+	TEST_CHECK(prof.lastFrameMs() == 0.f);
+	TEST_CHECK(prof.lastEntryCount() == 0);
+	TEST_CHECK(prof.avgFrameMs() == 0.f);
+	TEST_CHECK(prof.fpsEstimate() == 0.f);
+	TEST_CHECK(prof.onePercentLowMs() == 0.f);
+	TEST_CHECK(prof.historyCount() == 0);
+	TEST_CHECK(prof.historyWriteIndex() == 0);
+	TEST_CHECK(prof.spikeCount() == 0);
+	TEST_CHECK(prof.workerSnapshotCount() == 0);
+	for (int i = 0; i < Profiler::kHistorySize; ++i)
+		TEST_CHECK(prof.frameHistory()[i] == 0.f);
+	for (int i = 0; i < Profiler::kMaxEntries; ++i)
+		TEST_CHECK(prof.lastEntries()[i].name == nullptr);
+	for (int i = 0; i < Profiler::kMaxWorkerBuckets; ++i)
+		TEST_CHECK(prof.workerSnapshots()[i].count == 0);
+}
+
+void test_capture_reset_idle()
+{
+	Profiler prof;
+	prof.beginFrame();
+	prof.push("old");
+	std::this_thread::sleep_for(std::chrono::milliseconds(25));
+	prof.pop();
+	prof.addWorkerSample("TerrainGen", 3.f);
+	prof.endFrame();
+	TEST_CHECK(prof.lastFrameMs() > 0.f && prof.historyCount() == 1);
+	TEST_CHECK(prof.lastEntryCount() == 1 && prof.spikeCount() == 1);
+	TEST_CHECK(prof.workerSnapshotCount() > 0);
+	prof.addWorkerSample("TerrainGen", 7.f); // pending, not yet drained
+	const auto oldEpoch = prof.captureEpoch();
+	prof.setEnabled(false);
+	prof.clearHistory();
+	check_empty_capture(prof);
+	TEST_CHECK(!prof.enabled());
+	TEST_CHECK(prof.captureEpoch() != oldEpoch);
+	TEST_CHECK(prof.lastScopeMs("old") == 0.f);
+	prof.snapshotWorkers();
+	for (int i = 0; i < prof.workerSnapshotCount(); ++i)
+		TEST_CHECK(prof.workerSnapshots()[i].count == 0);
+	prof.clearHistory(); // repeated reset while paused is safe
+	check_empty_capture(prof);
+	prof.setEnabled(true);
+	prof.addWorkerSample("TerrainGen", 2.f);
+	prof.snapshotWorkers();
+	TEST_CHECK(prof.workerSnapshots()[0].count == 1); // registration retained
+	TEST_CHECK(prof.workerSnapshots()[0].totalUs == 2000);
+}
+
+void test_capture_reset_open_frame()
+{
+	Profiler prof;
+	prof.beginFrame();
+	prof.push("before-reset-root");
+	prof.push("Clear button");
+	const auto oldEpoch = prof.captureEpoch();
+	prof.addWorkerSample("TerrainGen", 8.f, oldEpoch);
+	prof.clearHistory(); // same placement as UI/reloadWorld during an open frame
+	check_empty_capture(prof);
+	TEST_CHECK(ProfilerStateProbe::stackDepth(prof) == 2);
+	TEST_CHECK(std::strcmp(ProfilerStateProbe::entry(prof, 0).name, "before-reset-root") == 0);
+	prof.push("after-button");
+	TEST_CHECK(ProfilerStateProbe::entry(prof, 2).parent == 1);
+	TEST_CHECK(ProfilerStateProbe::stackDepth(prof) == 3);
+	prof.pop();
+	prof.pop(); // Clear button
+	prof.pop(); // root opened before clear
+	TEST_CHECK(ProfilerStateProbe::stackDepth(prof) == 0);
+	prof.addWorkerSample("TerrainGen", 9.f, oldEpoch); // late pre-reload job
+	prof.addWorkerSample("TerrainGen", 2.f, prof.captureEpoch());
+	prof.endFrame();
+	// Even with zero warmup the interrupted pre-reload frame is not measured.
+	check_empty_capture(prof);
+	prof.beginFrame();
+	prof.push("fresh-root");
+	prof.push("fresh-child");
+	prof.pop();
+	prof.pop();
+	prof.endFrame();
+	TEST_CHECK(prof.historyCount() == 1 && prof.lastEntryCount() == 2);
+	TEST_CHECK(prof.lastEntries()[0].parent == -1 && prof.lastEntries()[0].depth == 0);
+	TEST_CHECK(prof.lastEntries()[1].parent == 0 && prof.lastEntries()[1].depth == 1);
+	TEST_CHECK(std::strcmp(prof.lastEntries()[0].name, "fresh-root") == 0);
+	TEST_CHECK(prof.workerSnapshots()[0].count == 1);
+	TEST_CHECK(prof.workerSnapshots()[0].totalUs == 2000);
+}
+
+void test_capture_reset_inflight_workers()
+{
+	Profiler prof;
+	const auto oldEpoch = prof.captureEpoch();
+	std::promise<void> release;
+	auto gate = release.get_future().share();
+	std::atomic<int> ready{0};
+	std::vector<std::thread> workers;
+	for (int i = 0; i < 4; ++i)
+		workers.emplace_back([&] {
+			prof.addWorkerSample("TerrainGen", 1.f, oldEpoch);
+			ready.fetch_add(1, std::memory_order_release);
+			gate.wait();
+			prof.addWorkerSample("TerrainGen", 1.f, oldEpoch); // reject late completion
+			prof.addWorkerSample("TerrainGen", 2.5f, prof.captureEpoch());
+		});
+	while (ready.load(std::memory_order_acquire) != 4)
+		std::this_thread::yield();
+	prof.clearHistory();
+	check_empty_capture(prof);
+	release.set_value();
+	for (auto &worker : workers)
+		worker.join();
+	prof.snapshotWorkers();
+	TEST_CHECK(prof.workerSnapshots()[0].count == 4);
+	TEST_CHECK(prof.workerSnapshots()[0].totalUs == 10000);
+
+	// Race reset sweeps with both stale-epoch and fresh submissions. Every
+	// retained pair must consist solely of 2.5ms samples, never old 1ms work.
+	std::atomic<bool> stop{false};
+	workers.clear();
+	for (int i = 0; i < 4; ++i)
+		workers.emplace_back([&] {
+			while (!stop.load(std::memory_order_relaxed))
+			{
+				prof.addWorkerSample("TerrainGen", 1.f, oldEpoch);
+				prof.addWorkerSample("TerrainGen", 2.5f, prof.captureEpoch());
+			}
+		});
+	for (int i = 0; i < 1000; ++i)
+	{
+		prof.clearHistory();
+		prof.snapshotWorkers();
+		const auto &snapshot = prof.workerSnapshots()[0];
+		TEST_CHECK(snapshot.totalUs == snapshot.count * 2500);
+	}
+	stop.store(true, std::memory_order_relaxed);
+	for (auto &worker : workers)
+		worker.join();
+	prof.snapshotWorkers();
+	TEST_CHECK(prof.workerSnapshots()[0].totalUs == prof.workerSnapshots()[0].count * 2500);
+}
+
 } // namespace
 
 int main()
 {
 	std::cout << "=== Running Profiler Worker Consistency Tests ===" << std::endl;
+	test_capture_reset_idle();
+	test_capture_reset_open_frame();
+	test_capture_reset_inflight_workers();
 	test_basic_worker_snapshot();
 	test_concurrent_worker_snapshot_consistency();
 	test_concurrent_registration_and_sampling();

@@ -618,7 +618,7 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 			row("Streaming", prof.lastScopeMs("Streaming"));
 			row("Acquire (fence)", prof.lastScopeMs("Acquire"));
 			row("Record", prof.lastScopeMs("Record"));
-			row("Frame total", prof.lastFrameMs() > 0.f ? prof.lastFrameMs() : frame.frameMs);
+			row("Frame total", prof.lastFrameMs());
 			ImGui::EndTable();
 		}
 		ImGui::TextDisabled("Full hierarchy + graph: Profiler (F7)");
@@ -657,9 +657,9 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 	ImGui::SameLine();
 	ImGui::TextDisabled("CPU scopes · previous frame");
 
-	const float frameMs = prof.lastFrameMs() > 0.f ? prof.lastFrameMs() : frame.frameMs;
-	const float avgMs = prof.avgFrameMs() > 0.f ? prof.avgFrameMs() : frameMs;
-	const float fpsEst = prof.fpsEstimate() > 0.f ? prof.fpsEstimate() : frame.fps;
+	const float frameMs = prof.lastFrameMs();
+	const float avgMs = prof.avgFrameMs();
+	const float fpsEst = prof.fpsEstimate();
 	const float p1 = prof.onePercentLowMs();
 
 	ImGui::SeparatorText("Frame");
@@ -1300,7 +1300,7 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 
 		if (isBiomeMapResultAcceptable(res, frame.worldGenerationId, frame.seed, m_mapRequestId))
 		{
-			GetProfiler().addWorkerSample("BiomeMap", static_cast<float>(res.elapsedMs));
+			GetProfiler().addWorkerSample("BiomeMap", static_cast<float>(res.elapsedMs), m_mapCaptureEpoch);
 			paintBiomeMapPlayerDot(res.rgba, res.grid, playerXZ);
 			m_mapCenter = res.center;
 			ensureBiomeTexture(res.size);
@@ -1341,6 +1341,7 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 
 		const uint64_t requestId = m_mapRequestId;
 		auto cancelToken = std::make_shared<std::atomic<bool>>(false);
+		m_mapCaptureEpoch = GetProfiler().captureEpoch();
 		m_mapJob.requestId = requestId;
 		m_mapJob.cancel = cancelToken;
 

@@ -38,6 +38,7 @@ struct WorkerBucket
 	const char *name{nullptr};
 	mutable std::mutex mutex;
 	uint64_t count{0};
+	uint64_t epoch{0};
 	uint64_t totalUs{0}; // microseconds for sub-millisecond precision
 
 	WorkerBucket() = default;
@@ -45,6 +46,7 @@ struct WorkerBucket
 	{
 		std::lock_guard<std::mutex> lock(o.mutex);
 		name = o.name;
+		epoch = o.epoch;
 		count = o.count;
 		totalUs = o.totalUs;
 	}
@@ -54,6 +56,7 @@ struct WorkerBucket
 		{
 			std::scoped_lock lock(mutex, o.mutex);
 			name = o.name;
+			epoch = o.epoch;
 			count = o.count;
 			totalUs = o.totalUs;
 		}
@@ -103,15 +106,24 @@ public:
 	void push(const char *name);
 	void pop();
 
+	using CaptureEpoch = uint64_t;
+	/// Capture at job submission to reject work spanning a capture reset.
+	CaptureEpoch captureEpoch() const { return m_captureEpoch.load(std::memory_order_acquire); }
+
 	/// Thread-safe aggregate samples from worker threads.
 	void addWorkerSample(const char *name, float ms);
+	void addWorkerSample(const char *name, float ms, CaptureEpoch epoch);
 
 	/// Ensure a worker name slot exists before workers sample it.
 	void registerWorkerName(const char *name);
 
-	/// Frame-consistent snapshot of worker thread aggregates.
+	/// Capture-thread only; may run concurrently with worker submissions.
 	void snapshotWorkers();
 
+	/// Capture-thread only. Clear all published state and advance the worker
+	/// epoch, discarding pending/late old samples. Preserve registrations and
+	/// enabled state. If a frame is open, keep its stack valid but discard that
+	/// entire frame at endFrame(); collection resumes with the next full frame.
 	void clearHistory();
 
 	// --- UI accessors (read last completed frame) ---
@@ -138,6 +150,7 @@ public:
 	float lastScopeMs(const char *name) const;
 
 private:
+	friend struct ProfilerStateProbe;
 	using Clock = std::chrono::steady_clock;
 
 	float nowMs() const
@@ -153,6 +166,8 @@ private:
 
 	std::atomic<bool> m_enabled{true};
 	bool m_inFrame{false};
+	bool m_discardFrame{false};
+	std::atomic<CaptureEpoch> m_captureEpoch{0};
 
 	Clock::time_point m_frameStart{};
 

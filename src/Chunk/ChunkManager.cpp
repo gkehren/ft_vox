@@ -236,17 +236,18 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThreshSq);
 		chunk->setInTransit(true);
 		m_pendingGenJobsCount.fetch_add(1);
+		const auto captureEpoch = GetProfiler().captureEpoch();
 		const auto queuedAt = std::chrono::steady_clock::now();
-		m_threadPool->enqueue(prio, [chunk, seed, this, queuedAt]() {
+		m_threadPool->enqueue(prio, [chunk, seed, this, queuedAt, captureEpoch]() {
 			const auto t0 = std::chrono::steady_clock::now();
 			GetProfiler().addWorkerSample("TerrainQueue",
-				std::chrono::duration<float, std::milli>(t0 - queuedAt).count());
+				std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
 			TerrainGenerator &localGen = TerrainGenerator::getThreadLocal(seed);
 			chunk->generateTerrain(localGen);
 			const float ms = std::chrono::duration<float, std::milli>(
 								 std::chrono::steady_clock::now() - t0)
 								 .count();
-			GetProfiler().addWorkerSample("TerrainGen", ms);
+			GetProfiler().addWorkerSample("TerrainGen", ms, captureEpoch);
 
 			{
 				std::lock_guard<std::mutex> lk(m_completedJobsMutex);
@@ -321,16 +322,17 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		if (distSq > lodThreshSq)
 		{
 			m_pendingMeshJobsCount.fetch_add(1);
+			const auto captureEpoch = GetProfiler().captureEpoch();
 			const auto queuedAt = std::chrono::steady_clock::now();
-			m_threadPool->enqueue(prio, [chunk, this, queuedAt]() {
+			m_threadPool->enqueue(prio, [chunk, this, queuedAt, captureEpoch]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
-					std::chrono::duration<float, std::milli>(t0 - queuedAt).count());
+					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
 				chunk->generateLODMesh();
 				const float ms = std::chrono::duration<float, std::milli>(
 									 std::chrono::steady_clock::now() - t0)
 									 .count();
-				GetProfiler().addWorkerSample("MeshLOD", ms);
+				GetProfiler().addWorkerSample("MeshLOD", ms, captureEpoch);
 
 				{
 					std::lock_guard<std::mutex> lk(m_completedJobsMutex);
@@ -343,16 +345,17 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		{
 			ensureShellPopulated(chunk, ci);
 			m_pendingMeshJobsCount.fetch_add(1);
+			const auto captureEpoch = GetProfiler().captureEpoch();
 			const auto queuedAt = std::chrono::steady_clock::now();
-			m_threadPool->enqueue(prio, [chunk, this, queuedAt]() {
+			m_threadPool->enqueue(prio, [chunk, this, queuedAt, captureEpoch]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
-					std::chrono::duration<float, std::milli>(t0 - queuedAt).count());
+					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
 				chunk->generateMesh();
 				const float ms = std::chrono::duration<float, std::milli>(
 									 std::chrono::steady_clock::now() - t0)
 									 .count();
-				GetProfiler().addWorkerSample("MeshBuild", ms);
+				GetProfiler().addWorkerSample("MeshBuild", ms, captureEpoch);
 
 				{
 					std::lock_guard<std::mutex> lk(m_completedJobsMutex);
