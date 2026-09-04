@@ -22,7 +22,22 @@ ChunkPool::ChunkPool(size_t initialCapacity)
 	std::cout << "ChunkPool: pre-allocated " << m_capacity.load(std::memory_order_relaxed) << " chunks\n";
 }
 
-ChunkPool::~ChunkPool() = default;
+ChunkPool::~ChunkPool()
+{
+	auto& t = telemetry::registry();
+	t.replace(telemetry::PoolCapacity, capacity(), 0);
+	t.replace(telemetry::PoolAcquired, acquiredCount(), 0);
+	t.replace(telemetry::PoolFree, freeCount(), 0);
+}
+
+void ChunkPool::publishTelemetry()
+{
+	auto& t = telemetry::registry();
+	const std::array<size_t, 3> now{capacity(), acquiredCount(), freeCount()};
+	for (size_t i = 0; i < now.size(); ++i)
+		t.replace(static_cast<telemetry::Gauge>(telemetry::PoolCapacity + i), m_telemetry[i], now[i]);
+	m_telemetry = now;
+}
 
 void ChunkPool::growUnlocked(size_t addCount)
 {
@@ -50,6 +65,7 @@ void ChunkPool::growUnlocked(size_t addCount)
 
 	m_capacity.store(m_storage.size(), std::memory_order_relaxed);
 	m_growEvents.fetch_add(1, std::memory_order_relaxed);
+	publishTelemetry();
 }
 
 bool ChunkPool::ensureCapacity(size_t minCapacity)
@@ -81,6 +97,7 @@ Chunk *ChunkPool::acquire(const glm::vec3 &worldPosition)
 	if (m_freeList.empty())
 	{
 		m_rejectCount.fetch_add(1, std::memory_order_relaxed);
+		telemetry::registry().add(telemetry::PoolRejected);
 		return nullptr;
 	}
 
@@ -88,6 +105,7 @@ Chunk *ChunkPool::acquire(const glm::vec3 &worldPosition)
 	m_freeList.pop_back();
 	chunk->reset(worldPosition, Chunk::ResetMode::ForGeneration);
 	m_acquiredCount.fetch_add(1, std::memory_order_relaxed);
+	publishTelemetry();
 	return chunk;
 }
 
@@ -113,4 +131,5 @@ void ChunkPool::release(Chunk *chunk)
 	const size_t acq = m_acquiredCount.load(std::memory_order_relaxed);
 	if (acq > 0)
 		m_acquiredCount.fetch_sub(1, std::memory_order_relaxed);
+	publishTelemetry();
 }

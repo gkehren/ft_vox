@@ -10,6 +10,8 @@
 #include <Vulkan/VkSwapchain.hpp>
 #include <Vulkan/VkGpuProfiler.hpp>
 #include <Vulkan/VkCommands.hpp>
+#include <Vulkan/StagingRing.hpp>
+#include <Vulkan/GpuResourceRetire.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -73,6 +75,45 @@ int main(int argc, char **argv)
 	{
 		VkContext context;
 		context.init(window);
+        {
+            using namespace telemetry;
+            auto& t = registry();
+            t.beginCapture();
+            auto buffer = createBuffer(context.getAllocator(), 1024,
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+            trackMeshBuffer(buffer, GpuOpaqueVertex);
+            GpuResourceRetire retire;
+            retire.init(context.getAllocator(), 2);
+            retire.retireBuffer(buffer);
+            buffer = {};
+            auto pending = t.snapshot();
+            retire.beginFrame(1);
+            const auto early = t.snapshot();
+            retire.beginFrame(2);
+            const auto complete = t.snapshot();
+            retire.shutdown();
+            if (t.enabled && (pending.current[GpuOpaqueVertex] != 0 ||
+                pending.current[RetiredBytes] != 1024 || pending.current[RetiredBuffers] != 1 ||
+                early.current[RetiredBytes] != 1024 || complete.current[RetiredBytes] != 0 ||
+                complete.current[RetiredBuffers] != 0 || complete.events[AllocCreated] != 1 ||
+                complete.events[AllocDestroyed] != 1))
+                throw std::runtime_error("mesh retirement telemetry mismatch");
+            StagingRing staging;
+            staging.init(context.getAllocator(), 2, 8*1024*1024);
+            staging.beginFrame(0);
+            VkDeviceSize offset{}; void* ptr{};
+            const bool first = staging.alloc(1, offset, ptr);
+            const bool overflow = staging.alloc(staging.sliceCapacity(), offset, ptr);
+            const auto full = t.snapshot();
+            staging.beginFrame(1);
+            const auto next = t.snapshot();
+            staging.shutdown();
+            if (!first || overflow || (t.enabled && (full.current[StagingUsed] != StagingRing::kAlignment ||
+                full.events[StagingFailures] != 1 || next.current[StagingUsed] != 0 ||
+                next.peak[StagingUsed] != StagingRing::kAlignment)))
+                throw std::runtime_error("staging pressure telemetry mismatch");
+            std::cout << "PASS: mesh allocation/retirement and staging telemetry\n";
+        }
 		if (validationErrorProbe && !context.isValidationEnabled())
 		{
 			std::cout << "SKIP: validation error probe requires Khronos validation\n";

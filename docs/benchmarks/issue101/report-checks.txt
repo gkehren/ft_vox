@@ -1,0 +1,1 @@
+PASS: all 27 gauge peaks >= current, pool balance, GPU/CPU aggregate sums, vector size/capacity, shadow cascade sum, disabled output, identical benchmark settings

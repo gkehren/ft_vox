@@ -71,6 +71,7 @@ public:
 	Chunk *getChunk(const glm::ivec3 &chunkPos);
 	const Chunk *getChunk(const glm::ivec3 &chunkPos) const;
 
+	size_t deferredReleaseCount() const { return m_deferredRelease.size(); }
 	size_t chunkCount() const;
 	size_t pendingLoadCount() const;
 	size_t pendingGenJobs() const;

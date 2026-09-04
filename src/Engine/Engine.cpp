@@ -382,6 +382,11 @@ void Engine::reloadWorld(int newSeed)
 	GetProfiler().clearHistory();
 	GetProfiler().setEnabled(true);
 
+	telemetry::registry().set(telemetry::ActiveChunks, chunkManager->chunkCount());
+	telemetry::registry().set(telemetry::DeferredChunks, 0);
+	telemetry::registry().set(telemetry::StagingUsed, 0);
+	telemetry::registry().beginCapture();
+
 	std::cout << "[bench] World reloaded seed=" << seed
 			  << " chunks=" << chunkManager->chunkCount() << "\n";
 }
@@ -808,6 +813,9 @@ void Engine::sampleBenchmarkFrame()
 		}
 	}
 
+    auto& telemetry = telemetry::registry();
+    telemetry.set(telemetry::ActiveChunks, chunkManager ? chunkManager->chunkCount() : 0);
+    telemetry.set(telemetry::DeferredChunks, chunkManager ? chunkManager->deferredReleaseCount() : 0);
 	m_benchmark.sampleFrame(
 		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),
 		prof.lastScopeMs("Record"), prof.lastScopeMs("ImGui"), prof.lastScopeMs("Present"),

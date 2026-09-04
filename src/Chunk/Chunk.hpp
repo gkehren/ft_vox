@@ -55,7 +55,7 @@ public:
 	/// Bind opaque mesh and draw indexed into cmd. Returns index count.
 	uint32_t draw(VkCommandBuffer cmd);
 	uint32_t drawWater(VkCommandBuffer cmd);
-	void drawShadow(VkCommandBuffer cmd) const;
+	void drawShadow(VkCommandBuffer cmd, unsigned cascade = 0) const;
 
 	void generateTerrain(TerrainGenerator &generator);
 	void generateMesh();
@@ -96,6 +96,13 @@ public:
 	void setActiveIndex(size_t index) { m_activeIndex = index; }
 
 private:
+    // Published by the exclusive chunk owner at mutation boundaries.
+    std::array<uint64_t, 13> m_cpuTelemetry{};
+    void publishCpuTelemetry();
+    struct MemoryPublication {
+        Chunk& chunk;
+        ~MemoryPublication() { chunk.publishCpuTelemetry(); }
+    };
 	glm::vec3 position;
 	bool visible;
 	std::atomic<ChunkState> state;

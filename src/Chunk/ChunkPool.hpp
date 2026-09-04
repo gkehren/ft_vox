@@ -5,6 +5,7 @@
 #include <memory>
 #include <cstddef>
 #include <atomic>
+#include <array>
 #include <glm/glm.hpp>
 
 class Chunk;
@@ -56,6 +57,8 @@ public:
 	size_t growEvents() const { return m_growEvents.load(std::memory_order_relaxed); }
 
 private:
+	void publishTelemetry(); // caller holds m_mutex
+	std::array<size_t, 3> m_telemetry{};
 	void growUnlocked(size_t addCount); // caller holds m_mutex
 
 	/// All pool-owned chunks; unique_ptr keeps addresses stable across vector growth.

@@ -1,3 +1,4 @@
+#include <Engine/WorkloadTelemetry.hpp>
 #include "Chunk.hpp"
 #include <Chunk/StreamHelpers.hpp>
 #include <Renderer/ShadowCascades.hpp>
@@ -40,7 +41,7 @@ Chunk::Chunk(const glm::vec3 &position, ChunkState state)
       voxels(CHUNK_VOLUME),
       neighborShellVoxels(18 * (CHUNK_HEIGHT + 2) * 18,
                           static_cast<uint8_t>(AIR)),
-      meshNeedsUpdate(true) {}
+      meshNeedsUpdate(true) { publishCpuTelemetry(); }
 
 Chunk::Chunk(Chunk &&other) noexcept
     : position(std::move(other.position)), visible(other.visible),
@@ -62,6 +63,8 @@ Chunk::Chunk(Chunk &&other) noexcept
       waterVertices(std::move(other.waterVertices)), waterIndices(std::move(other.waterIndices)),
       m_isLODMesh(other.m_isLODMesh)
 {
+  other.publishCpuTelemetry();
+  publishCpuTelemetry();
   other.m_allocator = VK_NULL_HANDLE;
   other.vertexBuffer = {};
   other.indexBuffer = {};
@@ -101,6 +104,8 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     m_isLODMesh = other.m_isLODMesh;
     m_inTransit.store(other.m_inTransit.load());
 
+    other.publishCpuTelemetry();
+    publishCpuTelemetry();
     other.m_allocator = VK_NULL_HANDLE;
     other.vertexBuffer = {};
     other.indexBuffer = {};
@@ -114,6 +119,7 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
 
 Chunk::~Chunk()
 {
+  telemetry::registry().replaceCpu(m_cpuTelemetry, std::array<uint64_t, 13>{});
   releaseGPU();
 }
 
@@ -239,6 +245,7 @@ bool Chunk::isVoxelActive(int x, int y, int z) const
 
 void Chunk::generateTerrain(TerrainGenerator &generator)
 {
+  MemoryPublication memoryPublication{*this};
   if (state.load() != ChunkState::UNLOADED)
     return;
 
@@ -278,6 +285,8 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
 
 void Chunk::generateMesh()
 {
+  MemoryPublication memoryPublication{*this};
+  telemetry::MeshSample meshSample(telemetry::Skylight);
   m_isLODMesh = false; // K: mark as full-quality mesh
   vertices.clear();
   indices.clear();
@@ -366,6 +375,7 @@ void Chunk::generateMesh()
       }
     }
 
+    meshSample.next(telemetry::Blocklight);
     // Seed block light from emissive solids into neighboring air
     auto &queue = workspace.blockQ;
     queue.clear();
@@ -430,6 +440,7 @@ void Chunk::generateMesh()
     }
   }
 
+  meshSample.next(telemetry::Occupancy);
   // New helper for greedy meshing that checks local voxels and the precomputed
   // neighbor shell
   auto getVoxelDataForMeshing = [&](int lx, int ly, int lz) -> TextureType
@@ -470,6 +481,7 @@ void Chunk::generateMesh()
       return;
     }
   }
+  meshSample.next(telemetry::FacesGreedyAO);
   // Slice range needs neighbors one cell outside solids for face detection.
   const int ySliceMin = std::max(-1, occMinY - 1);
   const int ySliceMax = std::min(CHUNK_HEIGHT - 1, occMaxY); // x[d] runs to dims[d]-1 inclusive via < dims
@@ -505,6 +517,7 @@ void Chunk::generateMesh()
     // (last voxel layer) A face exists between slice x[d] and slice x[d]+1
     for (x[d] = dStart; x[d] < dEnd; ++x[d])
     {
+      meshSample.data.maskCells += dims[u] * dims[v];
       std::fill(workspace.mask.begin(), workspace.mask.begin() + (dims[u] * dims[v]), 0); // Reset mask for each slice
 
       // Bound Y when it is a plane axis.
@@ -917,6 +930,7 @@ void Chunk::generateMesh()
 
             glm::vec3 localPos = vert.position - this->position;
             uint32_t ao = calculateAO(localPos, i);
+            ++meshSample.data.aoVertices;
 
             vert.packedData = packedData | (ao << 12) | lightBits;
             vert.texCoord = tc[i];
@@ -960,6 +974,10 @@ void Chunk::generateMesh()
     }
   }
 
+  meshSample.data.opaqueVertices = vertices.size();
+  meshSample.data.opaqueIndices = indices.size();
+  meshSample.data.waterVertices = waterVertices.size();
+  meshSample.data.waterIndices = waterIndices.size();
   meshNeedsUpdate = true; // Flag for GPU upload
   state = ChunkState::MESHED;
 }
@@ -968,6 +986,8 @@ void Chunk::generateMesh()
 // Max 256 opaque + 256 water quads vs thousands for a full greedy mesh.
 void Chunk::generateLODMesh()
 {
+  telemetry::MeshSample meshSample(telemetry::Lod);
+  MemoryPublication memoryPublication{*this};
   m_isLODMesh = true;
   vertices.clear();
   indices.clear();
@@ -1066,6 +1086,10 @@ void Chunk::generateLODMesh()
     }
   }
 
+  meshSample.data.opaqueVertices = vertices.size();
+  meshSample.data.opaqueIndices = indices.size();
+  meshSample.data.waterVertices = waterVertices.size();
+  meshSample.data.waterIndices = waterIndices.size();
   meshNeedsUpdate = true;
   state = ChunkState::MESHED;
 }
@@ -1085,6 +1109,7 @@ void Chunk::releaseGPU()
 
 void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
 {
+  MemoryPublication memoryPublication{*this};
   if (allocator == VK_NULL_HANDLE)
     throw std::runtime_error("Chunk::uploadToGPU: null allocator");
 
@@ -1101,9 +1126,11 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
     vertexBuffer = createBuffer(allocator, vSize,
       VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
       VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    trackMeshBuffer(vertexBuffer, telemetry::GpuOpaqueVertex);
     indexBuffer = createBuffer(allocator, iSize,
       VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
       VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    trackMeshBuffer(indexBuffer, telemetry::GpuOpaqueIndex);
     uploadBuffer(allocator, imm, vertexBuffer, vertices.data(), vSize);
     uploadBuffer(allocator, imm, indexBuffer, indices.data(), iSize);
   }
@@ -1119,9 +1146,11 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
     waterVertexBuffer = createBuffer(allocator, vSize,
       VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
       VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    trackMeshBuffer(waterVertexBuffer, telemetry::GpuWaterVertex);
     waterIndexBuffer = createBuffer(allocator, iSize,
       VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
       VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    trackMeshBuffer(waterIndexBuffer, telemetry::GpuWaterIndex);
     uploadBuffer(allocator, imm, waterVertexBuffer, waterVertices.data(), vSize);
     uploadBuffer(allocator, imm, waterIndexBuffer, waterIndices.data(), iSize);
   }
@@ -1136,6 +1165,7 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
 bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
                              GpuResourceRetire &retire)
 {
+  MemoryPublication memoryPublication{*this};
   if (allocator == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE || !staging.isValid())
     return false;
 
@@ -1157,12 +1187,13 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
   jobs.reserve(4);
 
   auto stageInto = [&](const void *data, VkDeviceSize size, AllocatedBuffer &dstBuf,
-                       VkBufferUsageFlags usage) -> bool {
+                       VkBufferUsageFlags usage, telemetry::Gauge kind) -> bool {
     if (!data || size == 0)
       return true;
     dstBuf = createBuffer(allocator, size,
                           VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
                           VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    trackMeshBuffer(dstBuf, kind);
     VkDeviceSize off = 0;
     void *ptr = nullptr;
     if (!staging.alloc(size, off, ptr))
@@ -1182,11 +1213,12 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
   {
     const VkDeviceSize vSize = vertices.size() * sizeof(Vertex);
     const VkDeviceSize iSize = indices.size() * sizeof(uint32_t);
-    if (!stageInto(vertices.data(), vSize, newV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
-        !stageInto(indices.data(), iSize, newI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+    if (!stageInto(vertices.data(), vSize, newV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, telemetry::GpuOpaqueVertex) ||
+        !stageInto(indices.data(), iSize, newI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, telemetry::GpuOpaqueIndex))
     {
       destroyBuffer(allocator, newV);
       destroyBuffer(allocator, newI);
+      telemetry::registry().add(telemetry::UploadDeferred);
       return false;
     }
   }
@@ -1195,17 +1227,21 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
   {
     const VkDeviceSize vSize = waterVertices.size() * sizeof(Vertex);
     const VkDeviceSize iSize = waterIndices.size() * sizeof(uint32_t);
-    if (!stageInto(waterVertices.data(), vSize, newWV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
-        !stageInto(waterIndices.data(), iSize, newWI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+    if (!stageInto(waterVertices.data(), vSize, newWV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, telemetry::GpuWaterVertex) ||
+        !stageInto(waterIndices.data(), iSize, newWI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, telemetry::GpuWaterIndex))
     {
       destroyBuffer(allocator, newV);
       destroyBuffer(allocator, newI);
       destroyBuffer(allocator, newWV);
       destroyBuffer(allocator, newWI);
+      telemetry::registry().add(telemetry::UploadDeferred);
       return false;
     }
   }
 
+  telemetry::registry().add(telemetry::UploadChunks);
+  telemetry::registry().add(telemetry::UploadVertexBytes, newV.size + newWV.size);
+  telemetry::registry().add(telemetry::UploadIndexBytes, newI.size + newWI.size);
   for (const auto &j : jobs)
   {
     VkBufferCopy copy{};
@@ -1269,6 +1305,7 @@ uint32_t Chunk::draw(VkCommandBuffer cmd)
   VkDeviceSize offset = 0;
   vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer.buffer, &offset);
   vkCmdBindIndexBuffer(cmd, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+  telemetry::registry().add(telemetry::OpaqueDraws);
   vkCmdDrawIndexed(cmd, opaqueIndexCount, 1, 0, 0, 0);
   return opaqueIndexCount;
 }
@@ -1281,11 +1318,12 @@ uint32_t Chunk::drawWater(VkCommandBuffer cmd)
   VkDeviceSize offset = 0;
   vkCmdBindVertexBuffers(cmd, 0, 1, &waterVertexBuffer.buffer, &offset);
   vkCmdBindIndexBuffer(cmd, waterIndexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+  telemetry::registry().add(telemetry::WaterDraws);
   vkCmdDrawIndexed(cmd, waterIndexCount, 1, 0, 0, 0);
   return waterIndexCount;
 }
 
-void Chunk::drawShadow(VkCommandBuffer cmd) const
+void Chunk::drawShadow(VkCommandBuffer cmd, unsigned cascade) const
 {
   if (opaqueIndexCount == 0 || meshNeedsUpdate.load() || vertexBuffer.buffer == VK_NULL_HANDLE)
     return;
@@ -1293,11 +1331,13 @@ void Chunk::drawShadow(VkCommandBuffer cmd) const
   VkDeviceSize offset = 0;
   vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer.buffer, &offset);
   vkCmdBindIndexBuffer(cmd, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+  telemetry::registry().add(static_cast<telemetry::Event>(telemetry::Shadow0 + std::min(cascade, 2u)));
   vkCmdDrawIndexed(cmd, opaqueIndexCount, 1, 0, 0, 0);
 }
 
 void Chunk::freeShellVoxels()
 {
+  MemoryPublication memoryPublication{*this};
   // Keep capacity for remesh/edit — avoid realloc thrash.
   neighborShellVoxels.clear();
 }
@@ -1305,6 +1345,7 @@ void Chunk::freeShellVoxels()
 void Chunk::rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
                                       const Chunk *south, const Chunk *north)
 {
+  MemoryPublication memoryPublication{*this};
   neighborShellVoxels.assign(18 * (CHUNK_HEIGHT + 2) * 18, static_cast<uint8_t>(AIR));
 
   // West face  (local x = -1,  shell column x = 0):  neighbor's x = CHUNK_SIZE-1
@@ -1338,6 +1379,7 @@ void Chunk::rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
 
 void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
 {
+  MemoryPublication memoryPublication{*this};
   // Drop GPU meshes — next upload recreates VMA buffers.
   releaseGPU();
   opaqueIndexCount = 0;
@@ -1379,3 +1421,18 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
   heightMap.fill(0);
 }
 
+
+void Chunk::publishCpuTelemetry()
+{
+  if (!telemetry::registry().enabled) return;
+  const std::array<uint64_t, 13> current{
+    voxels.capacity()*sizeof(Voxel), neighborShellVoxels.size(), neighborShellVoxels.capacity(),
+    vertices.size()*sizeof(Vertex), vertices.capacity()*sizeof(Vertex),
+    indices.size()*sizeof(uint32_t), indices.capacity()*sizeof(uint32_t),
+    waterVertices.size()*sizeof(Vertex), waterVertices.capacity()*sizeof(Vertex),
+    waterIndices.size()*sizeof(uint32_t), waterIndices.capacity()*sizeof(uint32_t),
+    sizeof(biomeGrassColors)+sizeof(biomeFoliageColors)+sizeof(biomeTypes)+sizeof(heightMap), sizeof(activeVoxels)
+  };
+  telemetry::registry().replaceCpu(m_cpuTelemetry, current);
+  m_cpuTelemetry = current;
+}
