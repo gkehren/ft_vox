@@ -233,6 +233,8 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	for (int i = 0; i < n; ++i)
 	{
 		Chunk *chunk = queue[i].chunk;
+		if (!chunk->prepareVoxelStorageForGeneration())
+			continue; // Allocation failed (e.g. OOM), retry next tick
 		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThreshSq);
 		chunk->setInTransit(true);
 		m_pendingGenJobsCount.fetch_add(1);

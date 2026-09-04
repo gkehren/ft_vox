@@ -1009,13 +1009,16 @@ void Engine::run()
 				const glm::vec3 eye = camera.getPosition();
 				if (Chunk *ch = chunkManager->getChunkAtWorldPos(eye))
 				{
-					const int chunkX = static_cast<int>(std::floor(eye.x / static_cast<float>(CHUNK_SIZE)));
-					const int chunkZ = static_cast<int>(std::floor(eye.z / static_cast<float>(CHUNK_SIZE)));
-					const int lx = static_cast<int>(std::floor(eye.x)) - chunkX * CHUNK_SIZE;
-					const int ly = static_cast<int>(std::floor(eye.y));
-					const int lz = static_cast<int>(std::floor(eye.z)) - chunkZ * CHUNK_SIZE;
-					if (lx >= 0 && lx < CHUNK_SIZE && ly >= 0 && ly < CHUNK_HEIGHT && lz >= 0 && lz < CHUNK_SIZE)
-						underwater = (static_cast<TextureType>(ch->getVoxel(lx, ly, lz).type) == WATER);
+					if (ch->getState() >= ChunkState::GENERATED)
+					{
+						const int chunkX = static_cast<int>(std::floor(eye.x / static_cast<float>(CHUNK_SIZE)));
+						const int chunkZ = static_cast<int>(std::floor(eye.z / static_cast<float>(CHUNK_SIZE)));
+						const int lx = static_cast<int>(std::floor(eye.x)) - chunkX * CHUNK_SIZE;
+						const int ly = static_cast<int>(std::floor(eye.y));
+						const int lz = static_cast<int>(std::floor(eye.z)) - chunkZ * CHUNK_SIZE;
+						if (lx >= 0 && lx < CHUNK_SIZE && ly >= 0 && ly < CHUNK_HEIGHT && lz >= 0 && lz < CHUNK_SIZE)
+							underwater = (static_cast<TextureType>(ch->getVoxel(lx, ly, lz).type) == WATER);
+					}
 				}
 			}
 			worldRenderer->postSettings().underwater = underwater;

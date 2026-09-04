@@ -60,9 +60,12 @@ public:
 	static VoxelPool &defaultPool();
 
 private:
+	void publishTelemetry(size_t cap, size_t act, size_t fre);
+
 	mutable std::mutex m_mutex;
 	std::vector<std::unique_ptr<VoxelStorage>> m_storage;
 	std::vector<VoxelStorage *> m_freeList;
 	std::vector<const VoxelStorage *> m_owned;
 	std::atomic<size_t> m_activeCount{0};
+	std::array<size_t, 3> m_telemetry{};
 };

@@ -38,7 +38,7 @@ static thread_local MeshWorkspace s_meshWorkspace;
 Chunk::Chunk(const glm::vec3 &position, ChunkState state, VoxelPool *voxelPool)
     : position(position), visible(false), state(state),
       opaqueIndexCount(0), waterIndexCount(0),
-      m_voxelPool(voxelPool),
+      m_voxelPool(voxelPool ? voxelPool : &VoxelPool::defaultPool()),
       m_storage(nullptr),
       neighborShellVoxels(18 * (CHUNK_HEIGHT + 2) * 18,
                           static_cast<uint8_t>(AIR)),
@@ -67,7 +67,6 @@ Chunk::Chunk(Chunk &&other) noexcept
       m_isLODMesh(other.m_isLODMesh)
 {
   other.m_storage = nullptr;
-  other.m_voxelPool = nullptr;
   other.publishCpuTelemetry();
   publishCpuTelemetry();
   other.m_allocator = VK_NULL_HANDLE;
@@ -83,15 +82,35 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
   if (this != &other)
   {
     releaseGPU();
-    releaseVoxelStorage();
+    releaseVoxelStorageOnRetire();
 
     position = std::move(other.position);
     visible = other.visible;
     state.store(other.state.load());
-    m_voxelPool = other.m_voxelPool;
-    m_storage = other.m_storage;
-    other.m_storage = nullptr;
-    other.m_voxelPool = nullptr;
+
+    // If destination has a different pool than source, return source storage to its pool
+    // and re-acquire from destination pool. Otherwise just transfer pointer.
+    if (m_voxelPool != other.m_voxelPool)
+    {
+      if (other.m_storage)
+      {
+        VoxelStorage *otherStorage = other.m_storage;
+        other.m_storage = nullptr;
+        m_storage = m_voxelPool->acquire();
+        std::copy(otherStorage->voxels.begin(), otherStorage->voxels.end(), m_storage->voxels.begin());
+        other.m_voxelPool->release(otherStorage);
+      }
+      else
+      {
+        m_storage = nullptr;
+      }
+    }
+    else
+    {
+      m_storage = other.m_storage;
+      other.m_storage = nullptr;
+    }
+
     activeVoxels = std::move(other.activeVoxels);
     neighborShellVoxels = std::move(other.neighborShellVoxels);
     biomeGrassColors = other.biomeGrassColors;
@@ -128,36 +147,44 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
 
 Chunk::~Chunk()
 {
-  releaseVoxelStorage();
+  releaseVoxelStorageOnRetire();
   telemetry::registry().replaceCpu(m_cpuTelemetry, std::array<uint64_t, 13>{});
   releaseGPU();
 }
 
-void Chunk::acquireVoxelStorage()
+bool Chunk::prepareVoxelStorageForGeneration()
 {
   if (m_storage)
-    return;
-  VoxelPool &pool = m_voxelPool ? *m_voxelPool : VoxelPool::defaultPool();
-  m_storage = pool.acquire();
-  publishCpuTelemetry();
+    return true;
+  try
+  {
+    m_storage = m_voxelPool->acquire();
+    publishCpuTelemetry();
+    return true;
+  }
+  catch (const std::bad_alloc &)
+  {
+    return false;
+  }
 }
 
-void Chunk::releaseVoxelStorage()
+void Chunk::releaseVoxelStorageOnRetire()
 {
   if (!m_storage)
     return;
-  VoxelPool &pool = m_voxelPool ? *m_voxelPool : VoxelPool::defaultPool();
-  pool.release(m_storage);
+  VoxelStorage *st = m_storage;
   m_storage = nullptr;
+  m_voxelPool->release(st);
   publishCpuTelemetry();
 }
 
-void Chunk::ensureVoxelStorage()
+void Chunk::ensureVoxelStorageForEdit()
 {
   if (!m_storage)
   {
-    acquireVoxelStorage();
+    m_storage = m_voxelPool->acquire();
     std::fill(m_storage->voxels.begin(), m_storage->voxels.end(), Voxel{static_cast<uint8_t>(AIR)});
+    publishCpuTelemetry();
   }
 }
 
@@ -183,12 +210,6 @@ void Chunk::setState(ChunkState state)
 
 ChunkState Chunk::getState() const { return state; }
 
-Voxel &Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z)
-{
-  ensureVoxelStorage();
-  return m_storage->voxels[getIndex(x, y, z)];
-}
-
 const Voxel &Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
 {
   if (!m_storage)
@@ -207,7 +228,7 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
     size_t index = getIndex(x, y, z);
     if (type != AIR)
     {
-      ensureVoxelStorage();
+      ensureVoxelStorageForEdit();
       m_storage->voxels[index].type = static_cast<uint8_t>(type);
       activeVoxels.set(index);
     }
@@ -307,9 +328,8 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
 
   // Generate directly into this pooled chunk's reusable storage: no
   // temporary ChunkData and no CHUNK_VOLUME / border-shell copies after
-  // generation.
-  if (!m_storage)
-    acquireVoxelStorage();
+  // generation. Storage MUST have been prepared on the main thread prior to dispatch.
+  assert(m_storage != nullptr && "VoxelStorage must be prepared before generateTerrain");
   neighborShellVoxels.resize(kBorderVoxelCount);
 
   ChunkGenerationTarget target{
@@ -1468,7 +1488,7 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
   // ForGeneration retains dirty storage until generateTerrain() overwrites it.
   if (mode == ResetMode::Full)
   {
-    releaseVoxelStorage();
+    releaseVoxelStorageOnRetire();
   }
 
   activeVoxels.reset();

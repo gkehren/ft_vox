@@ -15,6 +15,8 @@
 #include <cstring>
 #include <iostream>
 #include <vector>
+#include <thread>
+#include <set>
 
 static int g_fails = 0;
 
@@ -190,7 +192,7 @@ int main(int argc, char **argv)
             Chunk a(glm::vec3(0));
             const auto allocated = registry().snapshot();
             CHECK(allocated.current[VoxelBytes] == before.current[VoxelBytes], "unloaded chunk has no voxel allocation");
-            a.acquireVoxelStorage();
+            CHECK(a.prepareVoxelStorageForGeneration(), "prepare storage succeeds");
             const auto withStorage = registry().snapshot();
             CHECK(withStorage.current[VoxelBytes] - before.current[VoxelBytes] == CHUNK_VOLUME * sizeof(Voxel), "resident voxel allocation");
             a.freeShellVoxels();
@@ -226,7 +228,12 @@ int main(int argc, char **argv)
 	Chunk a(glm::vec3(0.0f, 0.0f, 0.0f));
 	CHECK(a.getState() == ChunkState::UNLOADED, "fresh chunk starts UNLOADED");
 	CHECK(!ChunkStateProbe::hasStorage(a), "fresh chunk starts without voxel storage");
+	CHECK(a.prepareVoxelStorageForGeneration(), "prepare storage succeeds");
+	const void *storagePtrA = ChunkStateProbe::voxels(a).data();
+	CHECK(storagePtrA != nullptr, "storage pointer is non-null after prepare");
 	a.generateTerrain(gen);
+	CHECK(ChunkStateProbe::voxels(a).data() == storagePtrA,
+		  "generation preserves exact storage pointer prepared on main thread");
 	CHECK(a.getState() == ChunkState::GENERATED, "generation completes");
 	CHECK(ChunkStateProbe::hasStorage(a), "generated chunk has voxel storage");
 	CHECK(ChunkStateProbe::voxels(a).size() == static_cast<size_t>(CHUNK_VOLUME),
@@ -298,6 +305,7 @@ int main(int argc, char **argv)
 	CHECK(!ChunkStateProbe::hasStorage(*pooled), "acquired chunk has no storage before generation");
 	if (pooled)
 	{
+		CHECK(pooled->prepareVoxelStorageForGeneration(), "prepare pooled storage succeeds");
 		pooled->generateTerrain(gen);
 		CHECK(ChunkStateProbe::hasStorage(*pooled), "pooled chunk has storage after generation");
 		CHECK(pool.voxelStorageCapacity() == 1, "voxel storage capacity grew on demand");
@@ -310,6 +318,7 @@ int main(int argc, char **argv)
 		Chunk *reused = pool.acquire(glm::vec3(-CHUNK_SIZE, 0.0f, CHUNK_SIZE));
 		CHECK(reused == pooled, "pool reuses released chunk slot");
 		CHECK(!ChunkStateProbe::hasStorage(*reused), "reacquired chunk slot has no storage before generation");
+		CHECK(reused->prepareVoxelStorageForGeneration(), "prepare storage on reuse succeeds");
 		reused->generateTerrain(gen);
 		CHECK(pool.voxelStorageCapacity() == 1, "generation reused pooled storage without allocating");
 		CHECK(pool.voxelStorageActive() == 1, "1 active voxel storage");
@@ -320,6 +329,76 @@ int main(int argc, char **argv)
 		pool.release(pooled); // cancelled before generation
 		CHECK(pool.acquiredCount() == 0, "cancelled acquisition returns to pool");
 		CHECK(pool.voxelStorageActive() == 0, "cancelled acquisition leaves no active storage");
+	}
+
+	// 5) setVoxel(..., AIR) on empty chunk does not allocate storage.
+	{
+		Chunk emptyChunk(glm::vec3(0.0f));
+		CHECK(!ChunkStateProbe::hasStorage(emptyChunk), "starts without storage");
+		CHECK(emptyChunk.getVoxel(0, 0, 0).type == AIR, "read on null storage returns AIR");
+		emptyChunk.setVoxel(0, 0, 0, AIR);
+		CHECK(!ChunkStateProbe::hasStorage(emptyChunk), "setting AIR does not allocate storage");
+		emptyChunk.setVoxel(0, 0, 0, STONE);
+		CHECK(ChunkStateProbe::hasStorage(emptyChunk), "setting non-AIR allocates storage");
+		CHECK(emptyChunk.getVoxel(0, 0, 0).type == STONE, "read back stone block");
+	}
+
+	// 6) Cross-pool move-assignment safety.
+	{
+		VoxelPool poolA;
+		VoxelPool poolB;
+		Chunk chunkA(glm::vec3(10.0f, 0.0f, 0.0f), ChunkState::UNLOADED, &poolA);
+		Chunk chunkB(glm::vec3(20.0f, 0.0f, 0.0f), ChunkState::UNLOADED, &poolB);
+		CHECK(chunkA.prepareVoxelStorageForGeneration(), "prepare chunkA storage");
+		CHECK(poolA.activeCount() == 1, "poolA active count 1");
+		CHECK(poolB.activeCount() == 0, "poolB active count 0");
+
+		chunkB = std::move(chunkA);
+		CHECK(poolA.activeCount() == 0, "poolA active count 0 after cross-pool move");
+		CHECK(poolB.activeCount() == 1, "poolB active count 1 after cross-pool move");
+		CHECK(!ChunkStateProbe::hasStorage(chunkA), "chunkA lost storage");
+		CHECK(ChunkStateProbe::hasStorage(chunkB), "chunkB has storage in poolB");
+		chunkB.reset(glm::vec3(0.0f));
+		CHECK(poolB.activeCount() == 0, "poolB active count 0 after reset");
+	}
+
+	// 7) Steady-state VoxelPool recycling high-water mark.
+	{
+		VoxelPool vp;
+		for (int cycle = 0; cycle < 1000; ++cycle)
+		{
+			VoxelStorage *s = vp.acquire();
+			vp.release(s);
+		}
+		CHECK(vp.capacity() == 1, "capacity capped at 1 for single-item recycling");
+		CHECK(vp.activeCount() == 0, "active count 0");
+		CHECK(vp.freeCount() == 1, "free count 1");
+	}
+
+	// 8) Multi-threaded VoxelPool stress test.
+	{
+		VoxelPool vp;
+		constexpr int kThreads = 4;
+		constexpr int kOpsPerThread = 2500;
+		std::vector<std::thread> workers;
+		workers.reserve(kThreads);
+		for (int t = 0; t < kThreads; ++t)
+		{
+			workers.emplace_back([&vp]() {
+				for (int i = 0; i < kOpsPerThread; ++i)
+				{
+					VoxelStorage *s = vp.acquire();
+					s->voxels[0].type = static_cast<uint8_t>(STONE);
+					vp.release(s);
+				}
+			});
+		}
+		for (auto &w : workers)
+			w.join();
+
+		CHECK(vp.activeCount() == 0, "concurrent stress ends with 0 active");
+		CHECK(vp.capacity() == vp.freeCount(), "capacity matches free list count");
+		CHECK(vp.capacity() <= static_cast<size_t>(kThreads), "capacity bounded by thread count");
 	}
 
 	if (g_fails != 0)
