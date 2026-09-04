@@ -34,6 +34,7 @@ void StagingRing::init(VmaAllocator allocator, uint32_t framesInFlight, VkDevice
 
 void StagingRing::shutdown()
 {
+	telemetry::registry().set(telemetry::StagingUsed, 0);
 	if (m_allocator != VK_NULL_HANDLE && m_buffer.buffer != VK_NULL_HANDLE)
 	{
 		// Only unmap if we mapped explicitly (VMA MAPPED keeps it mapped).
@@ -56,6 +57,7 @@ void StagingRing::beginFrame(uint32_t frameIndex)
 	const uint32_t idx = m_framesInFlight > 0 ? (frameIndex % m_framesInFlight) : 0;
 	m_sliceStart = static_cast<VkDeviceSize>(idx) * m_sliceSize;
 	m_head = m_sliceStart;
+	telemetry::registry().set(telemetry::StagingUsed, 0);
 }
 
 bool StagingRing::alloc(VkDeviceSize size, VkDeviceSize &outOffset, void *&outPtr)
@@ -65,11 +67,14 @@ bool StagingRing::alloc(VkDeviceSize size, VkDeviceSize &outOffset, void *&outPt
 
 	const VkDeviceSize aligned = (size + kAlignment - 1) & ~(kAlignment - 1);
 	const VkDeviceSize sliceEnd = m_sliceStart + m_sliceSize;
-	if (m_head + aligned > sliceEnd)
+	if (m_head + aligned > sliceEnd) {
+		telemetry::registry().add(telemetry::StagingFailures);
 		return false;
+	}
 
 	outOffset = m_head;
 	outPtr = static_cast<char *>(m_mapped) + m_head;
 	m_head += aligned;
+	telemetry::registry().set(telemetry::StagingUsed, usedThisFrame());
 	return true;
 }

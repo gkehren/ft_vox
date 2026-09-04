@@ -46,6 +46,13 @@ void GpuResourceRetire::retireBuffer(AllocatedBuffer buffer)
 	e.buffer = buffer;
 	e.destroyAfterFrame = m_frame + m_delay;
 	m_pending.push_back(e);
+    if (buffer.meshKind >= 0) {
+        m_pending.back().buffer.retired = true;
+        auto& t = telemetry::registry();
+        t.replace(static_cast<telemetry::Gauge>(buffer.meshKind), buffer.size, 0);
+        t.replace(telemetry::RetiredBytes, 0, buffer.size);
+        t.replace(telemetry::RetiredBuffers, 0, 1);
+    }
 }
 
 void GpuResourceRetire::flush()

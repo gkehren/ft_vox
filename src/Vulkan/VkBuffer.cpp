@@ -33,6 +33,12 @@ void destroyBuffer(VmaAllocator allocator, AllocatedBuffer &buf)
 {
 	if (allocator != VK_NULL_HANDLE && buf.buffer != VK_NULL_HANDLE)
 	{
+        if (buf.meshKind >= 0) {
+            auto& t = telemetry::registry();
+            t.replace(buf.retired ? telemetry::RetiredBytes : static_cast<telemetry::Gauge>(buf.meshKind), buf.size, 0);
+            if (buf.retired) t.replace(telemetry::RetiredBuffers, 1, 0);
+            t.add(telemetry::AllocDestroyed);
+        }
 		vmaDestroyBuffer(allocator, buf.buffer, buf.allocation);
 	}
 	buf = {};
@@ -59,4 +65,11 @@ void writeBuffer(VmaAllocator allocator, AllocatedBuffer &buf, const void *data,
 	void *mapped = mapBuffer(allocator, buf);
 	std::memcpy(static_cast<char *>(mapped) + offset, data, static_cast<size_t>(size));
 	unmapBuffer(allocator, buf);
+}
+
+void trackMeshBuffer(AllocatedBuffer& buffer, telemetry::Gauge kind)
+{
+    buffer.meshKind = static_cast<int>(kind);
+    telemetry::registry().replace(kind, 0, buffer.size);
+    telemetry::registry().add(telemetry::AllocCreated);
 }

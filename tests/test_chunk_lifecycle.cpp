@@ -169,6 +169,37 @@ static int runResetPerf()
 
 int main(int argc, char **argv)
 {
+    // Published memory includes free pool storage and survives ownership moves.
+    if (telemetry::registry().enabled) {
+        using namespace telemetry;
+        const auto before = registry().snapshot();
+        {
+            Chunk a(glm::vec3(0));
+            const auto allocated = registry().snapshot();
+            CHECK(allocated.current[VoxelBytes] - before.current[VoxelBytes] == CHUNK_VOLUME * sizeof(Voxel), "resident voxel allocation");
+            a.freeShellVoxels();
+            auto cleared = registry().snapshot();
+            CHECK(cleared.current[ShellBytes] == before.current[ShellBytes], "empty shell size");
+            CHECK(cleared.current[ShellCapacity] == allocated.current[ShellCapacity], "empty shell retains capacity");
+            Chunk b(std::move(a));
+            CHECK(registry().snapshot().current[VoxelBytes] == allocated.current[VoxelBytes], "move preserves total vector ownership");
+            Chunk c(glm::vec3(0));
+            c = std::move(b);
+            CHECK(registry().snapshot().current[VoxelBytes] == allocated.current[VoxelBytes], "move assignment releases destination storage");
+            c.setVoxel(1, 1, 1, STONE);
+            c.generateMesh();
+            const auto meshed = registry().snapshot();
+            CHECK(meshed.current[OpaqueVertexBytes] > before.current[OpaqueVertexBytes], "mesh publication includes vertex data");
+            CHECK(meshed.current[CpuMeshCapacity] >= meshed.current[OpaqueVertexBytes], "retained mesh capacity covers its data");
+            c.reset(glm::vec3(0));
+            const auto reset = registry().snapshot();
+            CHECK(reset.current[OpaqueVertexBytes] == before.current[OpaqueVertexBytes], "reset clears logical mesh data");
+            CHECK(reset.current[CpuMeshCapacity] == meshed.current[CpuMeshCapacity], "reset retains mesh allocations");
+        }
+        const auto after = registry().snapshot();
+        for (size_t i=0; i<=OccupancyBytes; ++i)
+            CHECK(before.current[i] == after.current[i], "CPU telemetry balances after destruction");
+    }
 	if (argc > 1 && std::strcmp(argv[1], "--reset-perf") == 0)
 		return runResetPerf();
 	constexpr int kSeed = 4242;

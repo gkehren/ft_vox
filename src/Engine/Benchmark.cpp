@@ -23,6 +23,7 @@ void Benchmark::requestStart()
 {
 	if (isActive())
 		return;
+	telemetry::registry().beginCapture();
 	m_phase = BenchmarkPhase::Reloading;
 	m_elapsed = 0.f;
 	m_showReport = false;
@@ -62,7 +63,10 @@ void Benchmark::onWorldReady(const glm::vec3 &surfaceCenter)
 	m_elapsed = 0.f;
 	m_phase = BenchmarkPhase::Warmup;
 	if (m_config.warmupSec <= 0.f)
+	{
+		telemetry::registry().beginCapture();
 		m_phase = BenchmarkPhase::Running;
+	}
 }
 
 void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
@@ -108,7 +112,10 @@ void Benchmark::tick(double dt, Camera &camera)
 	applyCamera(camera, t01);
 
 	if (m_phase == BenchmarkPhase::Warmup && m_elapsed >= m_config.warmupSec)
+	{
+		telemetry::registry().beginCapture();
 		m_phase = BenchmarkPhase::Running;
+	}
 
 	if (m_phase == BenchmarkPhase::Running &&
 		m_elapsed >= m_config.warmupSec + m_config.durationSec)
@@ -263,6 +270,7 @@ char Benchmark::gradeForScore(int score)
 void Benchmark::finalize()
 {
 	BenchmarkReport r{};
+	r.workload = telemetry::registry().snapshot();
 	r.valid = true;
 	r.seed = m_config.seed;
 	r.durationSec = m_config.durationSec;
@@ -424,6 +432,24 @@ std::string Benchmark::formatReportText() const
 	o << "Peaks: chunks=" << r.peakChunks << " draw=" << r.peakDraw
 	  << " qLoad/Gen/Mesh=" << r.peakPendingLoad << "/" << r.peakPendingGen << "/"
 	  << r.peakPendingMesh << "\n\n";
+    o << "Memory / workload: " << (r.workload.enabled ? "enabled" : "disabled") << "\n";
+    if (r.workload.enabled) {
+        o << "  Ownership bytes (not process RSS); current / peak at publication boundaries\n";
+        for (size_t i=0; i<telemetry::GaugeCount; ++i)
+            o << "  " << telemetry::gaugeNames[i] << " current=" << r.workload.current[i] << " peak=" << r.workload.peak[i] << "\n";
+        for (size_t i=0; i<telemetry::EventCount; ++i)
+            o << "  " << telemetry::eventNames[i] << " total=" << r.workload.events[i]
+              << " avgPerFrame=" << (r.frames ? double(r.workload.events[i])/r.frames : 0.) << "\n";
+        uint64_t shadow = 0;
+        for (size_t i=telemetry::Shadow0; i<=telemetry::Shadow2; ++i) shadow += r.workload.events[i];
+        o << "  draws.shadow.total=" << shadow << " avgPerFrame=" << (r.frames ? double(shadow)/r.frames : 0.) << "\n";
+        for (size_t i=0; i<telemetry::StageCount; ++i)
+            o << "  mesh." << telemetry::stageNames[i] << " n=" << r.workload.stageCalls[i]
+              << " totalMs=" << double(r.workload.stageNs[i])/1e6 << "\n";
+        o << "  mesh.maskCells=" << r.workload.maskCells << " aoVertices=" << r.workload.aoVertices
+          << " opaqueVertices=" << r.workload.opaqueVertices << " opaqueIndices=" << r.workload.opaqueIndices
+          << " waterVertices=" << r.workload.waterVertices << " waterIndices=" << r.workload.waterIndices << "\n";
+    }
 	o << "Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;\n";
 	o << "       -15% max penalty for fraction of frames >33ms.\n";
 	return o.str();

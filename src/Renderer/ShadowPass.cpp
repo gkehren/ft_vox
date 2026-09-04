@@ -9,6 +9,8 @@
 
 namespace
 {
+static_assert(ShadowPass::kCascadeCount == telemetry::Shadow2 - telemetry::Shadow0 + 1,
+              "Update workload telemetry when changing the cascade count");
 auto beginR() { return vkCmdBeginRendering ? vkCmdBeginRendering : vkCmdBeginRenderingKHR; }
 auto endR() { return vkCmdEndRendering ? vkCmdEndRendering : vkCmdEndRenderingKHR; }
 } // namespace
@@ -201,7 +203,7 @@ void ShadowPass::record(VkCommandBuffer cmd, const std::vector<Chunk *> &shadowC
 				}
 			}
 			if (visible)
-				chunk->drawShadow(cmd);
+				chunk->drawShadow(cmd, static_cast<unsigned>(c));
 		}
 		endRendering(cmd);
 	}

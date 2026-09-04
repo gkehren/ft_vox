@@ -78,6 +78,9 @@ Bootstrap: `generateInitialArea` fills a small radius around spawn synchronously
 
 `reloadWorld(seed)` rebuilds terrain generation state (device idle) for tools/benchmarks.
 
+Benchmark memory ownership, mesh allocation/retirement, draw workload and worker
+stage measurements are documented in [workload-telemetry.md](workload-telemetry.md).
+
 ---
 
 ## 3. Settings and UI

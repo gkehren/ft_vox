@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Engine/WorkloadTelemetry.hpp>
 #include <Camera/Camera.hpp>
 #include <Engine/GpuProfile.hpp>
 
@@ -39,6 +40,7 @@ struct BenchmarkWorkTiming
 
 struct BenchmarkReport
 {
+	telemetry::Snapshot workload{};
 	bool valid{false};
 	bool gpuAvailable{false}, gpuPercentilesAvailable{false};
 	uint64_t gpuSamples{0};

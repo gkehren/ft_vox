@@ -2,11 +2,14 @@
 
 #include "Vulkan/VkAllocator.hpp"
 
+#include <Engine/WorkloadTelemetry.hpp>
 #include <cstddef>
 #include <cstdint>
 
 struct AllocatedBuffer
 {
+	int meshKind{-1};
+	bool retired{false};
 	VkBuffer buffer{VK_NULL_HANDLE};
 	VmaAllocation allocation{VK_NULL_HANDLE};
 	VkDeviceSize size{0};
@@ -29,3 +32,5 @@ void unmapBuffer(VmaAllocator allocator, AllocatedBuffer &buf);
 /// Write CPU bytes into a host-visible buffer (maps, memcpy, unmaps).
 void writeBuffer(VmaAllocator allocator, AllocatedBuffer &buf, const void *data, VkDeviceSize size,
 				 VkDeviceSize offset = 0);
+
+void trackMeshBuffer(AllocatedBuffer& buffer, telemetry::Gauge kind);

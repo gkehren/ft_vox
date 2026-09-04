@@ -382,6 +382,10 @@ void Engine::reloadWorld(int newSeed)
 	GetProfiler().clearHistory();
 	GetProfiler().setEnabled(true);
 
+	// Capture-local gauges (chunks.active/deferred, staging.slice.bytes) are
+	// zeroed by beginCapture() and re-published by the first measured frame.
+	telemetry::registry().beginCapture();
+
 	std::cout << "[bench] World reloaded seed=" << seed
 			  << " chunks=" << chunkManager->chunkCount() << "\n";
 }
@@ -808,6 +812,9 @@ void Engine::sampleBenchmarkFrame()
 		}
 	}
 
+    auto& telemetry = telemetry::registry();
+    telemetry.set(telemetry::ActiveChunks, chunkManager ? chunkManager->chunkCount() : 0);
+    telemetry.set(telemetry::DeferredChunks, chunkManager ? chunkManager->deferredReleaseCount() : 0);
 	m_benchmark.sampleFrame(
 		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),
 		prof.lastScopeMs("Record"), prof.lastScopeMs("ImGui"), prof.lastScopeMs("Present"),
