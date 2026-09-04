@@ -69,8 +69,15 @@ changes separate those algorithms. Full-mesh and LOD output counts are summed.
 ## Capture lifecycle
 
 World reload, benchmark request and the warmup-to-measurement transition reset
-events and worker accumulators. Ownership gauges are retained; their peaks are
-rebased to current published values. Warmup-zero starts use the same boundary.
+events and worker accumulators. Persistent ownership gauges are retained across
+capture boundaries and their peaks are rebased to the current ownership value,
+so the world built during warmup keeps reporting its real footprint.
+Capture-local gauges such as `staging.slice.bytes` and the end-of-frame
+chunk-manager samples (`chunks.active`, `chunks.deferred`) start at zero at
+every capture boundary: warmup state cannot become a measurement peak, and the
+first measured frame publishes the real sampled values. Classification lives in
+`isCaptureLocalGauge()`; a new gauge defaults to persistent ownership.
+Warmup-zero starts use the same boundary.
 Worker batches carry an epoch obtained at mesh entry; a batch from an earlier
 epoch is discarded in full even if it finishes during measurement. Memory
 ownership remains valid across epochs. Work still running when the final report

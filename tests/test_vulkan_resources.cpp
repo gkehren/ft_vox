@@ -107,11 +107,27 @@ int main(int argc, char **argv)
             const auto full = t.snapshot();
             staging.beginFrame(1);
             const auto next = t.snapshot();
+            // Warmup staging usage must not leak across the capture boundary
+            // into measurement peaks (issue #111 review): beginCapture clears
+            // the sampled staging gauge even though the ring still holds the
+            // warmup allocation, and only post-capture allocations set its
+            // peak again.
+            const bool warmAlloc = staging.alloc(1024 * 1024, offset, ptr);
+            t.beginCapture();
+            const auto stagingReset = t.snapshot();
+            staging.beginFrame(0);
+            const bool measuredAlloc = staging.alloc(4096, offset, ptr);
+            const auto stagingMeasured = t.snapshot();
             staging.shutdown();
             if (!first || overflow || (t.enabled && (full.current[StagingUsed] != StagingRing::kAlignment ||
                 full.events[StagingFailures] != 1 || next.current[StagingUsed] != 0 ||
                 next.peak[StagingUsed] != StagingRing::kAlignment)))
                 throw std::runtime_error("staging pressure telemetry mismatch");
+            if (!warmAlloc || !measuredAlloc || (t.enabled &&
+                (stagingReset.current[StagingUsed] != 0 ||
+                 stagingReset.peak[StagingUsed] != 0 ||
+                 stagingMeasured.peak[StagingUsed] != 4096)))
+                throw std::runtime_error("warmup staging high-water leaked into measurement");
             std::cout << "PASS: mesh allocation/retirement and staging telemetry\n";
         }
 		if (validationErrorProbe && !context.isValidationEnabled())

@@ -285,6 +285,8 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
 
 void Chunk::generateMesh()
 {
+  // Declare MemoryPublication first so MeshSample is destroyed first.
+  // Mesh timing must exclude telemetry ownership publication overhead.
   MemoryPublication memoryPublication{*this};
   telemetry::MeshSample meshSample(telemetry::Skylight);
   m_isLODMesh = false; // K: mark as full-quality mesh
@@ -986,8 +988,10 @@ void Chunk::generateMesh()
 // Max 256 opaque + 256 water quads vs thousands for a full greedy mesh.
 void Chunk::generateLODMesh()
 {
-  telemetry::MeshSample meshSample(telemetry::Lod);
+  // Declare MemoryPublication first so MeshSample is destroyed first.
+  // Mesh timing must exclude telemetry ownership publication overhead.
   MemoryPublication memoryPublication{*this};
+  telemetry::MeshSample meshSample(telemetry::Lod);
   m_isLODMesh = true;
   vertices.clear();
   indices.clear();

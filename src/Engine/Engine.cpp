@@ -382,9 +382,8 @@ void Engine::reloadWorld(int newSeed)
 	GetProfiler().clearHistory();
 	GetProfiler().setEnabled(true);
 
-	telemetry::registry().set(telemetry::ActiveChunks, chunkManager->chunkCount());
-	telemetry::registry().set(telemetry::DeferredChunks, 0);
-	telemetry::registry().set(telemetry::StagingUsed, 0);
+	// Capture-local gauges (chunks.active/deferred, staging.slice.bytes) are
+	// zeroed by beginCapture() and re-published by the first measured frame.
 	telemetry::registry().beginCapture();
 
 	std::cout << "[bench] World reloaded seed=" << seed

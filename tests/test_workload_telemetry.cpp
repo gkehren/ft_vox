@@ -43,6 +43,58 @@ int main() {
         r.beginCapture();
         s = r.snapshot();
         require(!s.events[AllocCreated] && !s.stageCalls[Skylight], "second capture starts empty");
-        std::cout << "PASS: telemetry concurrency, ownership, capture epochs and reset\n";
+
+        // Capture-local vs persistent gauges (issue #111 review): warmup
+        // staging high-water and end-of-frame chunk-manager samples must not
+        // leak into a new measurement window, while ownership gauges survive
+        // the boundary with their peak rebased to the carried-over value.
+        Registry w;
+        w.replace(VoxelBytes, 0, 65536);
+        w.set(StagingUsed, 1024 * 1024);
+        w.set(ActiveChunks, 4200);
+        w.set(DeferredChunks, 20);
+        w.add(AllocCreated);
+        w.add(UploadChunks);
+        w.add(StagingFailures);
+        w.add(OpaqueDraws);
+        const auto warm = w.snapshot();
+        require(warm.peak[StagingUsed] == 1024 * 1024, "warmup staging peak recorded");
+        w.beginCapture();
+        const auto reset = w.snapshot();
+        require(reset.current[VoxelBytes] == 65536 && reset.peak[VoxelBytes] == 65536,
+                "persistent ownership survives capture, peak rebased");
+        require(reset.current[StagingUsed] == 0 && reset.peak[StagingUsed] == 0,
+                "capture resets transient staging current and peak");
+        require(reset.current[ActiveChunks] == 0 && reset.peak[ActiveChunks] == 0 &&
+                reset.current[DeferredChunks] == 0 && reset.peak[DeferredChunks] == 0,
+                "capture resets sampled chunk-manager gauges");
+        require(!reset.events[AllocCreated] && !reset.events[UploadChunks] &&
+                !reset.events[StagingFailures] && !reset.events[OpaqueDraws],
+                "capture clears event categories");
+        w.set(StagingUsed, 64 * 1024);
+        w.set(ActiveChunks, 4300);
+        w.set(DeferredChunks, 7);
+        const auto measured = w.snapshot();
+        require(measured.current[StagingUsed] == 64 * 1024 &&
+                measured.peak[StagingUsed] == 64 * 1024,
+                "measured staging high-water starts from zero");
+        require(measured.peak[ActiveChunks] == 4300 && measured.peak[DeferredChunks] == 7,
+                "measured chunk peaks reflect measured frames only");
+
+        // Repeated captures (the warmup=0 path fires beginCapture several
+        // times in a row) must keep ownership intact and sampled gauges at
+        // zero.
+        w.beginCapture();
+        w.beginCapture();
+        w.beginCapture();
+        const auto repeated = w.snapshot();
+        require(repeated.current[VoxelBytes] == 65536 && repeated.peak[VoxelBytes] == 65536,
+                "repeated captures keep ownership");
+        require(repeated.current[StagingUsed] == 0 && repeated.peak[StagingUsed] == 0 &&
+                repeated.current[ActiveChunks] == 0 && repeated.current[DeferredChunks] == 0,
+                "repeated captures keep sampled gauges at zero");
+
+        std::cout << "PASS: telemetry concurrency, ownership, capture epochs, reset, "
+                     "capture-local gauges\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

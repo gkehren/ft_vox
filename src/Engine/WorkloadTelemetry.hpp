@@ -45,6 +45,23 @@ inline constexpr const char* eventNames[] = {
 };
 enum Stage : size_t { Skylight, Blocklight, Occupancy, FacesGreedyAO, Lod, StageCount };
 inline constexpr const char* stageNames[] = {"skylight", "blocklight", "occupancy", "facesGreedyAO", "LOD"};
+
+// Capture-local gauges describe transient state sampled during a capture
+// window (staging slice usage; end-of-frame chunk-manager samples). Unlike
+// ownership gauges they are NOT carried across a beginCapture() boundary:
+// a warmup high-water mark must not become a measurement peak. Gauges
+// default to persistent ownership; classify one here only if its value is
+// meaningless outside the currently running capture.
+inline constexpr bool isCaptureLocalGauge(Gauge g) {
+    switch (g) {
+    case StagingUsed:
+    case ActiveChunks:
+    case DeferredChunks:
+        return true;
+    default:
+        return false;
+    }
+}
 struct Snapshot {
     bool enabled{false};
     std::array<uint64_t, GaugeCount> current{}, peak{};
@@ -90,9 +107,17 @@ public:
     void beginCapture() {
         std::lock_guard lock(mutex);
         ++epoch;
-        auto current = data.current;
+        const auto previousCurrent = data.current;
         data = {};
-        data.current = data.peak = current;
+        // Ownership gauges describe state that still exists at the capture
+        // boundary: carry the value over and rebase the peak to it, so the
+        // world built during warmup is not under-reported. Capture-local
+        // gauges start at zero so warmup high-water marks (staging slice
+        // usage, chunk-manager frame samples) cannot leak into measurement.
+        for (size_t i = 0; i < GaugeCount; ++i) {
+            if (!isCaptureLocalGauge(static_cast<Gauge>(i)))
+                data.current[i] = data.peak[i] = previousCurrent[i];
+        }
         for (auto& e : events) e.store(0, std::memory_order_relaxed);
     }
     uint64_t captureEpoch() {
