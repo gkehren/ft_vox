@@ -55,7 +55,7 @@ void ChunkPool::growUnlocked(size_t addCount)
 
 	for (size_t i = 0; i < canAdd; ++i)
 	{
-		m_storage.push_back(std::make_unique<Chunk>(glm::vec3(0.0f), ChunkState::UNLOADED, &m_voxelPool));
+		m_storage.push_back(std::make_unique<Chunk>(glm::vec3(0.0f), ChunkState::UNLOADED, &m_voxelPool, &m_borderPool));
 		Chunk *ptr = m_storage.back().get();
 		m_freeList.push_back(ptr);
 		m_owned.push_back(ptr);

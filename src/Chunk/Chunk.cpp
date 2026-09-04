@@ -35,13 +35,14 @@ struct MeshWorkspace
 
 static thread_local MeshWorkspace s_meshWorkspace;
 
-Chunk::Chunk(const glm::vec3 &position, ChunkState state, VoxelPool *voxelPool)
+Chunk::Chunk(const glm::vec3 &position, ChunkState state, VoxelPool *voxelPool,
+             BorderPool *borderPool)
     : position(position), visible(false), state(state),
       opaqueIndexCount(0), waterIndexCount(0),
       m_voxelPool(voxelPool ? voxelPool : &VoxelPool::defaultPool()),
       m_storage(nullptr),
-      neighborShellVoxels(18 * (CHUNK_HEIGHT + 2) * 18,
-                          static_cast<uint8_t>(AIR)),
+      m_borderPool(borderPool ? borderPool : &BorderPool::defaultPool()),
+      m_borders(nullptr),
       meshNeedsUpdate(true) { publishCpuTelemetry(); }
 
 Chunk::Chunk(Chunk &&other) noexcept
@@ -57,7 +58,8 @@ Chunk::Chunk(Chunk &&other) noexcept
       m_voxelPool(other.m_voxelPool),
       m_storage(other.m_storage),
       activeVoxels(std::move(other.activeVoxels)),
-      neighborShellVoxels(std::move(other.neighborShellVoxels)),
+      m_borderPool(other.m_borderPool),
+      m_borders(other.m_borders),
       biomeGrassColors(other.biomeGrassColors),
       biomeFoliageColors(other.biomeFoliageColors),
       biomeTypes(other.biomeTypes),
@@ -67,6 +69,7 @@ Chunk::Chunk(Chunk &&other) noexcept
       m_isLODMesh(other.m_isLODMesh)
 {
   other.m_storage = nullptr;
+  other.m_borders = nullptr;
   other.publishCpuTelemetry();
   publishCpuTelemetry();
   other.m_allocator = VK_NULL_HANDLE;
@@ -99,7 +102,9 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     other.m_storage = nullptr;
 
     activeVoxels = std::move(other.activeVoxels);
-    neighborShellVoxels = std::move(other.neighborShellVoxels);
+    m_borders = other.m_borders;
+    other.m_borders = nullptr;
+    m_borderPool = other.m_borderPool;
     biomeGrassColors = other.biomeGrassColors;
     biomeFoliageColors = other.biomeFoliageColors;
     biomeTypes = other.biomeTypes;
@@ -134,6 +139,7 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
 
 Chunk::~Chunk()
 {
+  freeShellVoxels();
   releaseVoxelStorageOnRetire();
   telemetry::registry().replaceCpu(m_cpuTelemetry, std::array<uint64_t, 13>{});
   releaseGPU();
@@ -141,16 +147,29 @@ Chunk::~Chunk()
 
 bool Chunk::prepareVoxelStorageForGeneration()
 {
-  if (m_storage)
+  // Borders are borrowed on the same main-thread step (issue #103): workers
+  // stay allocation-free and generation writes into the chunk's border block.
+  if (m_storage && m_borders)
     return true;
   try
   {
-    m_storage = m_voxelPool->acquire();
-    publishCpuTelemetry();
+    if (!m_storage)
+    {
+      m_storage = m_voxelPool->acquire();
+      publishCpuTelemetry();
+    }
+    if (!m_borders)
+    {
+      m_borders = m_borderPool->acquire();
+      publishCpuTelemetry();
+    }
     return true;
   }
   catch (const std::bad_alloc &)
   {
+    // Return whatever was acquired so partially prepared state cannot leak.
+    freeShellVoxels();
+    releaseVoxelStorageOnRetire();
     return false;
   }
 }
@@ -226,15 +245,28 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
       activeVoxels.reset(index);
     }
   }
-  else if (x >= -1 && x <= CHUNK_SIZE && y >= -1 && y <= CHUNK_HEIGHT &&
-           z >= -1 && z <= CHUNK_SIZE)
+  else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE &&
+           y >= 0 && y < static_cast<int>(CHUNK_HEIGHT))
   {
-    // Lazily allocate shell if it was freed after a previous GPU upload (improvement E)
-    if (neighborShellVoxels.empty())
-      neighborShellVoxels.assign(18 * (CHUNK_HEIGHT + 2) * 18, static_cast<uint8_t>(AIR));
-    size_t shellIndex =
-        (y + 1) * 18 * 18 + (z + 1) * 18 + (x + 1);
-    neighborShellVoxels[shellIndex] = static_cast<uint8_t>(type);
+    // Lazily re-borrow borders if they were freed after a previous GPU
+    // upload. Vertical padding (y = -1 / CHUNK_HEIGHT) is not representable
+    // in the compact storage and was never written by generation either.
+    // Lazily re-borrow border storage if it was freed after a previous GPU
+    // upload. Acquisition may throw on OOM; a failed edit write is not
+    // fatal, so ignore it (the block itself is unchanged).
+    if (!m_borders)
+    {
+      try
+      {
+        m_borders = m_borderPool->acquire();
+        publishCpuTelemetry();
+      }
+      catch (const std::bad_alloc &)
+      {
+        return;
+      }
+    }
+    m_borders->mutableAt(x, y, z) = static_cast<uint8_t>(type);
   }
 }
 
@@ -281,6 +313,20 @@ bool Chunk::placeVoxel(const glm::vec3 &position, TextureType type)
   return false;
 }
 
+TextureType Chunk::sampleForMeshing(int x, int y, int z) const
+{
+  if (static_cast<uint32_t>(x) < CHUNK_SIZE && static_cast<uint32_t>(y) < CHUNK_HEIGHT &&
+      static_cast<uint32_t>(z) < CHUNK_SIZE)
+  {
+    return static_cast<TextureType>(getVoxel(x, y, z).type);
+  }
+  if (x < -1 || x > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE)
+    return AIR; // outside the padded neighborhood
+  if (!m_borders)
+    return AIR; // borders freed after upload or never built (documented default)
+  return static_cast<TextureType>(m_borders->at(x, y, z));
+}
+
 bool Chunk::isVoxelActive(int x, int y, int z) const
 {
   if (static_cast<uint32_t>(x) < CHUNK_SIZE && static_cast<uint32_t>(y) < CHUNK_HEIGHT &&
@@ -291,14 +337,9 @@ bool Chunk::isVoxelActive(int x, int y, int z) const
     size_t index = getIndex(x, y, z);
     return activeVoxels.test(index);
   }
-  else if (x >= -1 && x <= CHUNK_SIZE && y >= -1 && y <= CHUNK_HEIGHT &&
-           z >= -1 && z <= CHUNK_SIZE)
+  else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE)
   {
-    if (neighborShellVoxels.empty())
-      return false;
-    size_t shellIndex =
-        (y + 1) * 18 * 18 + (z + 1) * 18 + (x + 1);
-    return neighborShellVoxels[shellIndex] != static_cast<uint8_t>(AIR);
+    return m_borders && m_borders->at(x, y, z) != static_cast<uint8_t>(AIR);
   }
   return false; // Outside known boundaries
 }
@@ -315,13 +356,17 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
 
   // Generate directly into this pooled chunk's reusable storage: no
   // temporary ChunkData and no CHUNK_VOLUME / border-shell copies after
-  // generation. Storage MUST have been prepared on the main thread prior to dispatch.
+  // generation. Storage and border blocks MUST have been prepared on the
+  // main thread prior to dispatch (issue #103: the compact border block is
+  // borrowed by prepareVoxelStorageForGeneration()).
   assert(m_storage != nullptr && "VoxelStorage must be prepared before generateTerrain");
-  neighborShellVoxels.resize(kBorderVoxelCount);
+  assert(m_borders != nullptr && "Borders must be prepared before generateTerrain");
+  if (!m_storage || !m_borders)
+    return;
 
   ChunkGenerationTarget target{
       .voxels = std::span<Voxel, CHUNK_VOLUME>(m_storage->voxels),
-      .borderVoxels = std::span<uint8_t, kBorderVoxelCount>(neighborShellVoxels),
+      .borders = m_borders,
       .biomes = biomeTypes,
       .heightMap = heightMap,
       .grassColors = biomeGrassColors,
@@ -514,15 +559,9 @@ void Chunk::generateMesh()
     }
     // Check the neighbor shell for out-of-bounds coordinates relevant to
     // meshing.
-    if (lx >= -1 && lx <= CHUNK_SIZE && ly >= -1 && ly <= CHUNK_HEIGHT &&
-        lz >= -1 && lz <= CHUNK_SIZE)
-    {
-      if (neighborShellVoxels.empty())
-        return AIR; // shell freed after upload; treat as AIR
-      size_t shellIndex = (ly + 1) * 18 * 18 + (lz + 1) * 18 + (lx + 1);
-      return static_cast<TextureType>(neighborShellVoxels[shellIndex]);
-    }
-    return AIR; // Default to AIR if not in chunk and not in precomputed shell
+    // Layout-independent border sampling (issue #103): the mesher does not
+    // know the physical border representation.
+    return sampleForMeshing(lx, ly, lz);
   };
 
   const int dims[] = {CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE};
@@ -1408,44 +1447,64 @@ void Chunk::drawShadow(VkCommandBuffer cmd, unsigned cascade) const
 
 void Chunk::freeShellVoxels()
 {
+  if (!m_borders)
+    return;
   MemoryPublication memoryPublication{*this};
-  // Keep capacity for remesh/edit — avoid realloc thrash.
-  neighborShellVoxels.clear();
+  // True release (issue #103): border blocks live in a pool, so the block is
+  // reusable by other chunks instead of ~17 KiB staying attached here for
+  // the remainder of the pool lifetime. A later remesh re-borrows and
+  // rebuilds from neighbors (AIR where neighbors are missing).
+  ChunkNeighborBorders *b = m_borders;
+  m_borders = nullptr;
+  m_borderPool->release(b);
+  publishCpuTelemetry();
 }
 
 void Chunk::rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
                                       const Chunk *south, const Chunk *north)
 {
   MemoryPublication memoryPublication{*this};
-  neighborShellVoxels.assign(18 * (CHUNK_HEIGHT + 2) * 18, static_cast<uint8_t>(AIR));
+  if (!m_borders)
+  {
+    try
+    {
+      m_borders = m_borderPool->acquire();
+    }
+    catch (const std::bad_alloc &)
+    {
+      return; // leave borders missing: mesher samples AIR (documented default)
+    }
+    publishCpuTelemetry();
+  }
+  ChunkNeighborBorders &b = *m_borders;
+  b.resetToAir(); // faces and corners start as AIR for this rebuild
 
-  // West face  (local x = -1,  shell column x = 0):  neighbor's x = CHUNK_SIZE-1
+  // West face  (local x = -1):  neighbor's x = CHUNK_SIZE-1
   if (west)
     for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
       for (uint32_t z = 0; z < CHUNK_SIZE; ++z)
-        neighborShellVoxels[(y + 1) * 18 * 18 + (z + 1) * 18 + 0] =
-            west->getVoxel(CHUNK_SIZE - 1, y, z).type;
+        b.west[y * CHUNK_SIZE + z] = west->getVoxel(CHUNK_SIZE - 1, y, z).type;
 
-  // East face  (local x = CHUNK_SIZE, shell column x = 17): neighbor's x = 0
+  // East face  (local x = CHUNK_SIZE): neighbor's x = 0
   if (east)
     for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
       for (uint32_t z = 0; z < CHUNK_SIZE; ++z)
-        neighborShellVoxels[(y + 1) * 18 * 18 + (z + 1) * 18 + 17] =
-            east->getVoxel(0, y, z).type;
+        b.east[y * CHUNK_SIZE + z] = east->getVoxel(0, y, z).type;
 
-  // South face (local z = -1,  shell row z = 0):  neighbor's z = CHUNK_SIZE-1
+  // South face (local z = -1):  neighbor's z = CHUNK_SIZE-1
   if (south)
     for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
       for (uint32_t x = 0; x < CHUNK_SIZE; ++x)
-        neighborShellVoxels[(y + 1) * 18 * 18 + 0 * 18 + (x + 1)] =
-            south->getVoxel(x, y, CHUNK_SIZE - 1).type;
+        b.south[y * CHUNK_SIZE + x] = south->getVoxel(x, y, CHUNK_SIZE - 1).type;
 
-  // North face (local z = CHUNK_SIZE, shell row z = 17): neighbor's z = 0
+  // North face (local z = CHUNK_SIZE): neighbor's z = 0
   if (north)
     for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
       for (uint32_t x = 0; x < CHUNK_SIZE; ++x)
-        neighborShellVoxels[(y + 1) * 18 * 18 + 17 * 18 + (x + 1)] =
-            north->getVoxel(x, y, 0).type;
+        b.north[y * CHUNK_SIZE + x] = north->getVoxel(x, y, 0).type;
+
+  // Corner columns stay AIR exactly as in the previous rebuild path, which
+  // never populated the diagonal shell columns either.
 }
 
 void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
@@ -1481,7 +1540,7 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
   activeVoxels.reset();
 
   // Clear shell — keep capacity for reuse
-  neighborShellVoxels.clear();
+  freeShellVoxels();
 
   // Reset biome colors and per-column generation state
   biomeGrassColors.fill(0);
@@ -1495,7 +1554,9 @@ void Chunk::publishCpuTelemetry()
 {
   if (!telemetry::registry().enabled) return;
   const std::array<uint64_t, 13> current{
-    m_storage ? sizeof(VoxelStorage) : 0, neighborShellVoxels.size(), neighborShellVoxels.capacity(),
+    m_storage ? sizeof(VoxelStorage) : 0,
+    m_borders ? sizeof(ChunkNeighborBorders) : 0,
+    m_borders ? sizeof(ChunkNeighborBorders) : 0,
     vertices.size()*sizeof(Vertex), vertices.capacity()*sizeof(Vertex),
     indices.size()*sizeof(uint32_t), indices.capacity()*sizeof(uint32_t),
     waterVertices.size()*sizeof(Vertex), waterVertices.capacity()*sizeof(Vertex),

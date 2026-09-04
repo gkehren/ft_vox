@@ -31,8 +31,12 @@ struct ChunkData
 };
 
 // 1-thick neighbor shell around a chunk (18 x (CHUNK_HEIGHT + 2) x 18).
+// Dense layout kept only for the owning ChunkData test/tool API; the runtime
+// border contract is the compact ChunkNeighborBorders below.
 constexpr size_t kBorderVoxelCount =
     static_cast<size_t>(18) * (CHUNK_HEIGHT + 2) * 18;
+
+struct ChunkNeighborBorders;
 
 // Caller-owned destination storage for one chunk generation. The spans refer
 // to memory owned by the caller - pooled Chunk storage at runtime, an owning
@@ -46,7 +50,11 @@ constexpr size_t kBorderVoxelCount =
 struct ChunkGenerationTarget
 {
   std::span<Voxel, CHUNK_VOLUME> voxels;
-  std::span<uint8_t, kBorderVoxelCount> borderVoxels;
+  // Compact border output (issue #103): generation writes only the four
+  // horizontal neighbor faces plus the four diagonal corner columns; the
+  // vertical padding rows of the old dense shell were never written
+  // (border fill bounds start at kBedrock = 0 and stop at CHUNK_HEIGHT).
+  ChunkNeighborBorders *borders;
   std::span<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomes;
   std::span<int, CHUNK_SIZE * CHUNK_SIZE> heightMap;
   std::span<uint32_t, CHUNK_SIZE * CHUNK_SIZE> grassColors;

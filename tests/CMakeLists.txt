@@ -252,6 +252,7 @@ add_executable(test_chunk_lifecycle
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
