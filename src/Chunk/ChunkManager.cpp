@@ -233,6 +233,8 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	for (int i = 0; i < n; ++i)
 	{
 		Chunk *chunk = queue[i].chunk;
+		if (!chunk->prepareVoxelStorageForGeneration())
+			continue; // Allocation failed (e.g. OOM), retry next tick
 		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThreshSq);
 		chunk->setInTransit(true);
 		m_pendingGenJobsCount.fetch_add(1);
@@ -793,6 +795,24 @@ size_t ChunkManager::pendingMeshJobs() const
 	return m_pendingMeshJobsCount.load();
 }
 
+bool ChunkManager::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator)
+{
+	if (!chunk)
+		return false;
+	// Shared synchronous bootstrap contract (issue #112): voxel storage is
+	// prepared on the calling thread immediately before generation; workers
+	// never acquire or release voxel backing. On allocation failure the
+	// chunk is returned to the pool so the slot is not leaked.
+	if (!chunk->prepareVoxelStorageForGeneration())
+	{
+		if (m_chunkPool)
+			m_chunkPool->release(chunk);
+		return false;
+	}
+	chunk->generateTerrain(generator);
+	return true;
+}
+
 void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
 									   ImmediateCommands &imm)
 {
@@ -830,7 +850,8 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 				if (!chunk)
 					continue;
 			}
-			chunk->generateTerrain(*m_terrainGenerator);
+			if (!prepareAndGenerateChunk(chunk, *m_terrainGenerator))
+				continue;
 			created.emplace_back(pos, chunk);
 		}
 	}

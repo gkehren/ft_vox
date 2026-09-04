@@ -249,9 +249,13 @@ add_test(NAME InputRouting COMMAND test_input_routing)
 add_executable(test_chunk_lifecycle
     test_chunk_lifecycle.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
     ${FT_VOX_VULKAN_SOURCES}
 )
 
@@ -298,6 +302,31 @@ endif()
 add_test(NAME ChunkLifecycle COMMAND test_chunk_lifecycle)
 
 # ---------------------------------------------------------------------------
+# VoxelPool contract (issue #112 review): ownership, high-water reuse,
+# foreign/double release refusal, concurrency, growth events.
+# ---------------------------------------------------------------------------
+add_executable(test_voxel_pool
+    test_voxel_pool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+)
+
+target_include_directories(test_voxel_pool PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(test_voxel_pool PRIVATE
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_voxel_pool PRIVATE
+    glm
+    Threads::Threads
+)
+
+add_test(NAME VoxelPool COMMAND test_voxel_pool)
+
+# ---------------------------------------------------------------------------
 # Profiler worker consistency and stress test (Issue #79)
 # ---------------------------------------------------------------------------
 add_executable(test_profiler
@@ -328,7 +357,7 @@ add_test(NAME GpuProfile COMMAND test_gpu_profile)
 
 add_executable(test_workload_telemetry test_workload_telemetry.cpp)
 target_include_directories(test_workload_telemetry PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_workload_telemetry PRIVATE Threads::Threads)
+target_link_libraries(test_workload_telemetry PRIVATE glm Threads::Threads)
 add_test(NAME WorkloadTelemetry COMMAND test_workload_telemetry)
 set_tests_properties(WorkloadTelemetry PROPERTIES ENVIRONMENT "FT_VOX_TELEMETRY=1")
 add_test(NAME WorkloadTelemetryDisabled COMMAND test_workload_telemetry)

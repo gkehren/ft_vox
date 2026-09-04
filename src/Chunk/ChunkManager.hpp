@@ -82,6 +82,12 @@ public:
 	void generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
 							 ImmediateCommands &imm);
 
+	/// Shared synchronous generation contract (issue #112): prepares voxel
+	/// storage on the calling thread immediately before generateTerrain().
+	/// Returns false — and releases the chunk back to the pool — when the
+	/// storage allocation fails, so no slot is leaked.
+	bool prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator);
+
 private:
 	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);
 	void loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,

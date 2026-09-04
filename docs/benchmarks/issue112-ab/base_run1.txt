@@ -1,0 +1,95 @@
+ft_vox Benchmark Report
+=======================
+Score: 9795 / 10000  Grade: S
+Revision: da00e51046e9
+  git da00e51046e9  branch HEAD  describe da00e51
+  build UTC 2026-09-04T15:43:40Z
+Seed: 42  Duration: 60s  Warmup: 15s  Measured: 60.0035s  Frames: 19477
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 3.06958  min 0.6292  max 21.8707
+  p50 2.6381  p95 6.6998  p99 9.4601
+  avg FPS 325.777  1% low FPS 105.707
+  frames >16.7ms: 2  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.410713  Visibility 0.0742054
+  Acquire 2.13388  Record 0.400734  MeshUpload 0.0477853
+  ImGui 0.0447126  Present 0.0635917
+
+Worker jobs
+  TerrainGen  n=16884  avgMs=1.60686  totalMs=27130.2
+  MeshBuild   n=14759  avgMs=2.95201  totalMs=43568.7
+  MeshLOD     n=12832  avgMs=0.0406548  totalMs=521.683
+
+GPU timestamp queries: available
+  samples=19475 avgMs=2.6886
+  p95Ms=4.83738 p99Ms=5.33395
+  Uploads avgMs=0.00976816
+  Shadow avgMs=0.251103
+  Opaque avgMs=1.65581
+  Overlays avgMs=0.000205273
+  Water avgMs=0.113945
+  Sky avgMs=0.246092
+  Post avgMs=0.366685
+  ImGui avgMs=0.0448527
+  Delayed graphics-queue intervals; overlapping passes are not additive.
+Biome map: zoom=0 mode=scheduled (fixed center when enabled)
+  TerrainQueue n=16884 avgMs=0.0120796 totalMs=203.952
+  MeshQueue n=27591 avgMs=0.0114944 totalMs=317.143
+  BiomeMap n=0 avgMs=0 totalMs=0
+Peaks: chunks=4630 draw=1309 qLoad/Gen/Mesh=5/6/6
+
+Memory / workload: enabled
+  Ownership bytes (not process RSS); current / peak at publication boundaries
+  voxel.bytes current=582877184 peak=582877184
+  shell.sizeBytes current=424229400 peak=461678616
+  shell.capacityBytes current=743467248 peak=743467248
+  cpu.opaque.vertex.sizeBytes current=46144 peak=1082144
+  cpu.opaque.vertex.capacityBytes current=1032132388 peak=1032132388
+  cpu.opaque.index.sizeBytes current=9888 peak=231888
+  cpu.opaque.index.capacityBytes current=221168656 peak=221168656
+  cpu.water.vertex.sizeBytes current=39872 peak=126112
+  cpu.water.vertex.capacityBytes current=76321280 peak=76321280
+  cpu.water.index.sizeBytes current=8544 peak=27024
+  cpu.water.index.capacityBytes current=16352224 peak=16352224
+  column.bytes current=36429824 peak=36429824
+  occupancy.bytes current=72859648 peak=72859648
+  gpu.opaque.vertex.bytes current=469491344 peak=485919728
+  gpu.opaque.index.bytes current=100605288 peak=104125656
+  gpu.water.vertex.bytes current=5428976 peak=7633472
+  gpu.water.index.bytes current=1163352 peak=1635744
+  gpu.retired.bytes current=1916376 peak=5827600
+  gpu.retired.buffers current=28 peak=112
+  pool.capacity current=8894 peak=8894
+  pool.acquired current=4620 peak=4655
+  pool.free current=4274 peak=4347
+  chunks.active current=4620 peak=4630
+  chunks.deferred current=0 peak=37
+  staging.slice.bytes current=34816 peak=1079808
+  cpu.mesh.capacityBytes current=1345974548 peak=1345974548
+  gpu.live.bytes current=576688960 peak=596909576
+  mesh.allocations.created total=77796 avgPerFrame=3.99425
+  mesh.allocations.destroyed total=76766 avgPerFrame=3.94137
+  pool.rejected total=0 avgPerFrame=0
+  upload.chunks total=26263 avgPerFrame=1.34841
+  upload.vertexBytes total=2114999264 avgPerFrame=108590
+  upload.indexBytes total=453214128 avgPerFrame=23269.2
+  upload.deferred total=0 avgPerFrame=0
+  staging.failures total=0 avgPerFrame=0
+  draws.opaque total=24008606 avgPerFrame=1232.66
+  draws.water total=15295084 avgPerFrame=785.29
+  draws.shadow.0 total=2734630 avgPerFrame=140.403
+  draws.shadow.1 total=4477370 avgPerFrame=229.88
+  draws.shadow.2 total=5326178 avgPerFrame=273.46
+  draws.shadow.total=12538178 avgPerFrame=643.743
+  mesh.skylight n=14759 totalMs=15984.9
+  mesh.blocklight n=14759 totalMs=3267.82
+  mesh.occupancy n=14759 totalMs=617.578
+  mesh.facesGreedyAO n=14759 totalMs=23686.7
+  mesh.LOD n=12832 totalMs=513.706
+  mesh.maskCells=2374461696 aoVertices=63748492 opaqueVertices=73455592 opaqueIndices=110183388 waterVertices=3432868 waterIndices=5149302
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.

@@ -18,6 +18,7 @@
 #include <chrono>
 
 #include <Chunk/TerrainGenerator.hpp>
+#include <Chunk/VoxelPool.hpp>
 #include <Vulkan/VkBuffer.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
@@ -33,7 +34,7 @@ class GpuResourceRetire;
 class Chunk
 {
 public:
-	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED);
+	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED, VoxelPool *voxelPool = nullptr);
 	Chunk(Chunk &&other) noexcept;
 	Chunk &operator=(Chunk &&other) noexcept;
 	~Chunk();
@@ -44,13 +45,22 @@ public:
 	void setState(ChunkState state);
 	ChunkState getState() const;
 
-	Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z);
 	const Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
 	bool isVoxelActive(int x, int y, int z) const;
 	void setVoxel(int x, int y, int z, TextureType type);
 
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
+
+	bool hasVoxelStorage() const { return m_storage != nullptr; }
+	VoxelPool *getVoxelPool() const { return m_voxelPool; }
+
+	/// Acquire voxel storage before dispatching to generation thread.
+	/// Returns false if allocation fails (e.g. std::bad_alloc).
+	bool prepareVoxelStorageForGeneration();
+
+	/// Release voxel storage upon chunk retirement.
+	void releaseVoxelStorageOnRetire();
 
 	/// Bind opaque mesh and draw indexed into cmd. Returns index count.
 	uint32_t draw(VkCommandBuffer cmd);
@@ -85,9 +95,10 @@ public:
 								   const Chunk *south, const Chunk *north);
 
 	enum class ResetMode { Full, ForGeneration };
-	/// ForGeneration retains voxel contents until generateTerrain() overwrites
-	/// them. Do not read/mesh those voxels before generation completes.
-	/// Full (the default) also clears voxels, for retirement without regeneration.
+	/// ForGeneration retains voxel storage (if any) until generateTerrain()
+	/// overwrites it, avoiding deallocation/reallocation during pool recycling.
+	/// Do not read/mesh voxels in this chunk before generation completes.
+	/// Full (the default) releases voxel storage back to the pool, for retirement without regeneration.
 	void reset(const glm::vec3 &newPosition, ResetMode mode = ResetMode::Full);
 
 	uint32_t getOpaqueIndexCount() const { return opaqueIndexCount; }
@@ -117,7 +128,9 @@ private:
 	std::vector<uint32_t> indices;
 	std::vector<Vertex> waterVertices;
 	std::vector<uint32_t> waterIndices;
-	std::vector<Voxel> voxels;
+	VoxelPool *m_voxelPool{nullptr};
+	VoxelStorage *m_storage{nullptr};
+	void ensureVoxelStorageForEdit();
 	std::bitset<CHUNK_VOLUME> activeVoxels;
 	std::vector<uint8_t> neighborShellVoxels;
 
