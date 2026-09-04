@@ -25,12 +25,37 @@ class MeshResultPool;
 // into it, hand it to the upload stage, and the block goes back to the pool
 // once the payload is staged. Retained capacity therefore scales with
 // concurrent meshing/upload work, not with the number of pooled chunks.
+//
+// Per-vector byte counters live in MeshResultAccounting and are maintained
+// by the pool under its mutex (finishBuild / release). The pool NEVER reads
+// the vectors outside the builder's ownership window, so telemetry can be
+// sampled concurrently with running builds (issue #114 review).
+struct MeshResultAccounting
+{
+	size_t opaqueVertexSize{0};
+	size_t opaqueIndexSize{0};
+	size_t waterVertexSize{0};
+	size_t waterIndexSize{0};
+	size_t opaqueVertexCapacity{0};
+	size_t opaqueIndexCapacity{0};
+	size_t waterVertexCapacity{0};
+	size_t waterIndexCapacity{0};
+};
+
 struct MeshBuildResult
 {
 	// Identity of the build: validated against the chunk at publish time so
-	// a superseded build can never land on a recycled/new-generation chunk.
+	// a superseded build can never land on a recycled/new-generation chunk
+	// or on newer voxel/border content (issue #114 review):
+	//   generation -> physical chunk incarnation (recycle/reset ID)
+	//   revision   -> logical voxel/border content revision
+	// A result must match BOTH to be published.
 	Chunk *owner{nullptr};
 	uint64_t generation{0};
+	uint64_t revision{0};
+	// True when built by buildLODMesh(); committed to the chunk by
+	// publishMeshResult() on the main thread.
+	bool isLOD{false};
 	// Pool the block came from. Results travel worker -> completion queue ->
 	// upload, so every holder can return the block without knowing which
 	// pool instance produced it (pools travel with their blocks, same rule
@@ -38,36 +63,42 @@ struct MeshBuildResult
 	MeshResultPool *homePool{nullptr};
 
 	// No default member initializers on the vectors beyond empty construction:
-	// pool blocks are created with make_unique_for_overwrite and their
-	// capacities are (re)grown by consumers. beginBuild() drops previous
-	// content while keeping capacity - reuse across jobs is the point.
+	// pool blocks are created empty and their capacities are (re)grown by
+	// consumers. beginBuild() drops previous content while keeping capacity -
+	// reuse across jobs is the point.
 	std::vector<Vertex> opaqueVertices;
 	std::vector<uint32_t> opaqueIndices;
 	std::vector<Vertex> waterVertices;
 	std::vector<uint32_t> waterIndices;
+	// Pool-maintained byte counters (valid under the pool mutex): sizes are
+	// non-zero only between finishBuild() and release().
+	MeshResultAccounting accounted{};
 
 	// Stamp identity and drop previous content (capacities are kept).
-	void beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration);
+	// Called by the builder; must not touch `accounted` (pool-owned).
+	void beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration, uint64_t chunkRevision);
 	// Detach identity and content without freeing capacity (release path).
 	void detach();
 };
 
-// Aggregated, coherent view of a MeshResultPool (one locked walk). The
-// engine publishes the gauges from this snapshot instead of the pool
-// touching telemetry in its hot path (same pattern as VoxelPool/BorderPool).
+// Aggregated, coherent view of a MeshResultPool (O(1) copy under the mutex;
+// no walk of blocks, no read of borrowed vectors). The engine publishes the
+// gauges from this snapshot instead of the pool touching telemetry in its
+// hot path (same pattern as VoxelPool/BorderPool).
 struct MeshResultPoolStats
 {
 	size_t capacity{0};
 	size_t active{0};
 	size_t free{0};
-	// Live payload bytes across ACTIVE blocks (in-flight builds + results
-	// attached to chunks awaiting upload).
+	// Live payload bytes across finished, not-yet-released blocks (in-flight
+	// builds past finishBuild + results attached to chunks awaiting upload).
 	size_t opaqueVertexSize{0};
 	size_t opaqueIndexSize{0};
 	size_t waterVertexSize{0};
 	size_t waterIndexSize{0};
 	// Retained capacity across ALL blocks (active + free list): the
-	// high-water reuse footprint that used to sit on pooled chunks.
+	// high-water reuse footprint that used to sit on pooled chunks. Blocks
+	// mid-build are counted at their last finished capacity.
 	size_t opaqueVertexCapacity{0};
 	size_t opaqueIndexCapacity{0};
 	size_t waterVertexCapacity{0};
@@ -81,9 +112,20 @@ struct MeshResultPoolStats
 
 // Pool of pointer-stable MeshBuildResult blocks (same contract as
 // BorderPool): borrowed for a mesh build, returned after the payload is
-// staged to GPU. Thread-safe; growth beyond the free list allocates outside
-// the mutex and raises one grow event. Invalid releases are fatal asserts in
-// Debug and refused without corrupting the pool in Release.
+// staged to GPU. This is a high-water reusable pool whose capacity follows
+// the observed in-flight/backlogged working set (concurrent builds plus
+// results parked on chunks waiting for staging room) - it is not bounded by
+// a hard maximum; mesh.pool.* telemetry exposes any growth. Thread-safe;
+// growth beyond the free list allocates outside the mutex and raises one
+// grow event. Invalid releases are fatal asserts in Debug and refused
+// without corrupting the pool in Release.
+//
+// Builder lifecycle:
+//   acquire() -> beginBuild() -> build into the vectors -> finishBuild()
+//   -> (completion queue / publish / upload) -> release()
+// finishBuild() must be called exactly once per acquire, after the last
+// vector mutation and before release(); it is what makes the payload visible
+// to stats() without racing the builder.
 class MeshResultPool
 {
 public:
@@ -96,6 +138,10 @@ public:
 	MeshResultPool &operator=(MeshResultPool &&) = delete;
 
 	MeshBuildResult *acquire();
+	// Publish the finished payload sizes/capacities into the pool
+	// aggregates. Called by the builder after its last vector mutation;
+	// never touches the vectors themselves.
+	void finishBuild(MeshBuildResult *result);
 	void release(MeshBuildResult *result);
 
 	size_t capacity() const;
@@ -108,9 +154,12 @@ public:
 	static MeshResultPool &defaultPool();
 
 private:
+	void accountFinishLocked(MeshBuildResult *result); // caller holds m_mutex
+
 	mutable std::mutex m_mutex;
 	std::vector<std::unique_ptr<MeshBuildResult>> m_storage;
 	std::vector<MeshBuildResult *> m_freeList;
 	std::vector<const MeshBuildResult *> m_owned;
-	std::atomic<size_t> m_activeCount{0};
+	// O(1) aggregate snapshot, only touched under m_mutex.
+	MeshResultPoolStats m_stats{};
 };

@@ -722,9 +722,10 @@ int main(int argc, char **argv)
 			  "in-flight results stay active while attached");
 	}
 
-	// 13b) Publish/generation semantics (issue #104): superseded results are
-	// rejected, repeated remesh replaces the pending block, and unload with
-	// a pending result returns it to the pool.
+	// 13b) Publish/generation/revision semantics (issue #104, review #114):
+	// superseded results are rejected without touching chunk state, repeated
+	// remesh replaces the pending block, and unload with a pending result
+	// returns it to the pool.
 	{
 		MeshResultPool pool;
 		TerrainGenerator pgen(1234);
@@ -732,11 +733,12 @@ int main(int argc, char **argv)
 		CHECK(chunk.prepareVoxelStorageForGeneration(), "publish-semantics prepare");
 		chunk.generateTerrain(pgen);
 		const uint64_t generationAfterGen = ChunkStateProbe::meshGeneration(chunk);
+		const uint64_t revisionAfterGen = chunk.meshRevision();
 
-		// Stale publish: a result built for a different generation/owner.
+		// Stale publish: a result built for a different generation.
 		{
 			MeshBuildResult *stale = pool.acquire();
-			stale->beginBuild(&chunk, generationAfterGen + 999);
+			stale->beginBuild(&chunk, generationAfterGen + 999, revisionAfterGen);
 			stale->opaqueIndices.push_back(0);
 			const size_t freeBefore = pool.freeCount();
 			CHECK(!chunk.publishMeshResult(stale),
@@ -744,17 +746,84 @@ int main(int argc, char **argv)
 			CHECK(pool.freeCount() == freeBefore + 1,
 				  "rejected result is returned to its pool");
 			CHECK(!chunk.hasPendingMeshResult(), "rejected result is not attached");
+			CHECK(chunk.getState() != ChunkState::MESHED,
+				  "rejected publish does not mark the chunk MESHED");
+		}
+		// Same generation but OLD revision (issue #114 review item 22): an
+		// in-flight mesh built before an edit must not overwrite the newer
+		// content. This is deliberately distinct from the recycle case.
+		{
+			MeshBuildResult *old = pool.acquire();
+			old->beginBuild(&chunk, generationAfterGen, revisionAfterGen - 1);
+			old->opaqueIndices.push_back(0);
+			const size_t freeBefore = pool.freeCount();
+			CHECK(!chunk.publishMeshResult(old),
+				  "old-revision result (same generation) is rejected");
+			CHECK(pool.freeCount() == freeBefore + 1,
+				  "rejected old-revision result is returned to its pool");
+			CHECK(chunk.getState() != ChunkState::MESHED,
+				  "old-revision publish leaves the state untouched");
 		}
 		// Wrong owner is rejected the same way.
 		{
 			Chunk other(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
 			MeshBuildResult *foreign = pool.acquire();
-			foreign->beginBuild(&other, ChunkStateProbe::meshGeneration(chunk));
+			foreign->beginBuild(&other, ChunkStateProbe::meshGeneration(chunk),
+								chunk.meshRevision());
 			const size_t freeBefore = pool.freeCount();
 			CHECK(!chunk.publishMeshResult(foreign),
 				  "foreign-owner result is rejected");
 			CHECK(pool.freeCount() == freeBefore + 1,
 				  "rejected foreign result is returned to its pool");
+		}
+		// Edit invalidates the in-flight build (issue #114 review item 19):
+		// a result stamped pre-edit is rejected once the edit landed, the
+		// edit data is present, and the chunk stays GENERATED for remesh.
+		// Runs before any valid publication, so no pending result exists.
+		{
+			chunk.setState(ChunkState::GENERATED);
+			const uint64_t revBeforeEdit = chunk.meshRevision();
+			MeshBuildResult *inflight = pool.acquire();
+			inflight->beginBuild(&chunk, generationAfterGen, revBeforeEdit);
+			// ... worker is meshing here ...
+			chunk.setVoxel(3, 40, 3, STONE); // the edit lands (bumps revision)
+			CHECK(chunk.meshRevision() == revBeforeEdit + 1,
+				  "edit bumps the mesh revision");
+			CHECK(chunk.getState() == ChunkState::GENERATED,
+				  "edit leaves the chunk GENERATED");
+			pool.finishBuild(inflight);
+			const size_t freeBeforeEdit = pool.freeCount();
+			CHECK(!chunk.publishMeshResult(inflight),
+				  "pre-edit in-flight result is rejected after the edit");
+			CHECK(pool.freeCount() == freeBeforeEdit + 1,
+				  "rejected pre-edit result back in the pool");
+			CHECK(!chunk.hasPendingMeshResult(), "no pending result survives the edit");
+			CHECK(chunk.needsGPUUpload(), "edit keeps the remesh armed");
+			CHECK(chunk.getVoxel(3, 40, 3).type == static_cast<uint8_t>(STONE),
+				  "edit data present after the rejected publish");
+		}
+
+		// Matching identity publishes and is the only state commit point.
+		{
+			MeshBuildResult *good = pool.acquire();
+			good->beginBuild(&chunk, generationAfterGen, chunk.meshRevision());
+			CHECK(chunk.publishMeshResult(good), "matching identity publishes");
+			CHECK(chunk.getState() == ChunkState::MESHED,
+				  "publish commits the MESHED state");
+			CHECK(chunk.needsGPUUpload(), "publish arms meshNeedsUpdate");
+			// buildMesh/buildLODMesh must no longer mutate chunk state
+			// (issue #114 review item 12): a fresh build leaves the state
+			// and the meshNeedsUpdate flag exactly as it found them.
+			chunk.setState(ChunkState::GENERATED);
+			const bool armedBefore = chunk.needsGPUUpload();
+			MeshBuildResult *pure = pool.acquire();
+			chunk.buildMesh(*pure, generationAfterGen, chunk.meshRevision());
+			CHECK(chunk.getState() == ChunkState::GENERATED,
+				  "buildMesh does not mutate chunk state");
+			CHECK(chunk.needsGPUUpload() == armedBefore,
+				  "buildMesh does not change meshNeedsUpdate");
+			pool.finishBuild(pure);
+			pool.release(pure);
 		}
 
 		// Valid publish then repeated remesh: newest result wins, previous
@@ -773,15 +842,20 @@ int main(int argc, char **argv)
 		// Unload with a pending result: reset returns the block and bumps
 		// the generation, so the retired payload can never be re-attached.
 		const uint64_t genBeforeReset = ChunkStateProbe::meshGeneration(chunk);
+		const uint64_t revBeforeReset = chunk.meshRevision();
 		chunk.reset(glm::vec3(16.0f, 0.0f, 0.0f));
 		CHECK(!chunk.hasPendingMeshResult(), "reset releases the pending result");
 		CHECK(pool.freeCount() == pool.capacity(), "pool balanced after reset");
 		CHECK(ChunkStateProbe::meshGeneration(chunk) == genBeforeReset + 1,
 			  "reset bumps the mesh generation");
+		CHECK(chunk.meshRevision() > revBeforeReset,
+			  "reset bumps the mesh revision too");
 
-		// A publish attempt for the retired generation lands nowhere.
+		// A publish attempt for the retired incarnation lands nowhere, even
+		// if the revision value happened to match after recycling
+		// (issue #114 review item 21: both dimensions are checked).
 		MeshBuildResult *retired = pool.acquire();
-		retired->beginBuild(&chunk, genBeforeReset);
+		retired->beginBuild(&chunk, genBeforeReset, chunk.meshRevision());
 		const size_t freeBefore = pool.freeCount();
 		CHECK(!chunk.publishMeshResult(retired),
 			  "result of the retired generation is rejected after reset");
@@ -826,6 +900,74 @@ int main(int argc, char **argv)
 		}
 		CHECK(defaultPool.activeCount() == activeBefore,
 			  "destructor returns the attached build result to the pool");
+	}
+
+	// 13e) Deferred edits while in transit (issue #114 review items 15-17):
+	// ChunkManager::placeVoxel queues instead of racing a worker's voxel or
+	// border reads; the queued edit is applied when transit clears, bumps
+	// the mesh revision, and marks the chunk GENERATED for remesh.
+	{
+		ChunkPool pool(16);
+		TerrainGenerator mgen(2468);
+		ChunkManager manager(&mgen, nullptr, &pool);
+
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(64);
+		Chunk *primary = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		Chunk *east = manager.getChunkAtWorldPos(
+			glm::vec3(static_cast<float>(CHUNK_SIZE) + 4.0f, 40.0f, 4.0f));
+		CHECK(primary != nullptr && east != nullptr,
+			  "adjacent chunks registered by the load path");
+		if (primary && east)
+		{
+			const int topY = 40;
+
+			// (a) Interior edit deferred while the primary is in transit.
+			primary->setInTransit(true);
+			const uint64_t primaryRevBefore = primary->meshRevision();
+			const glm::vec3 insidePos(4.0f, static_cast<float>(topY), 4.0f);
+			CHECK(manager.placeVoxel(insidePos, STONE),
+				  "deferred interior edit reports success");
+			CHECK(primary->getVoxel(4, topY, 4).type != static_cast<uint8_t>(STONE),
+				  "deferred edit does not write while in transit");
+			primary->setInTransit(false);
+			manager.processFinishedJobs();
+			CHECK(primary->getVoxel(4, topY, 4).type == static_cast<uint8_t>(STONE),
+				  "queued interior edit applied after transit clears");
+			CHECK(primary->meshRevision() == primaryRevBefore + 1,
+				  "applied edit bumps the mesh revision");
+			CHECK(primary->getState() == ChunkState::GENERATED,
+				  "applied edit marks the chunk GENERATED");
+			primary->deleteVoxel(insidePos);
+			manager.processFinishedJobs();
+
+			// (b) Boundary edit: the primary takes the edit directly while
+			// the in-transit east neighbor's mirror write is queued
+			// (no concurrent border write, issue #114 review item 17).
+			const glm::vec3 boundaryPos(static_cast<float>(CHUNK_SIZE - 1),
+										static_cast<float>(topY), 6.0f);
+			const uint64_t eastRevBefore = east->meshRevision();
+			east->setInTransit(true);
+			CHECK(manager.placeVoxel(boundaryPos, STONE),
+				  "boundary edit reports success");
+			CHECK(primary->getVoxel(CHUNK_SIZE - 1, topY, 6).type ==
+					  static_cast<uint8_t>(STONE),
+				  "primary edit lands immediately (not in transit)");
+			CHECK(east->sampleForMeshing(-1, topY, 6) == AIR,
+				  "mirror write does not race the in-transit neighbor");
+			east->setInTransit(false);
+			manager.processFinishedJobs();
+			CHECK(east->sampleForMeshing(-1, topY, 6) == STONE,
+				  "queued mirror write applied after transit clears");
+			// The application bumps the revision twice (shell rebuild +
+			// mirror write), so only the invalidation direction is checked.
+			CHECK(east->meshRevision() > eastRevBefore,
+				  "applied mirror write bumps the neighbor's revision");
+			CHECK(east->getState() == ChunkState::GENERATED,
+				  "neighbor marked GENERATED for remesh");
+		}
 	}
 
 	// 14) Two-sided boundary edit data path (issue #113): the

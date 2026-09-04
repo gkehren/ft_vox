@@ -65,6 +65,7 @@ Chunk::Chunk(Chunk &&other) noexcept
       m_borders(other.m_borders),
       m_resultPool(other.m_resultPool),
       m_meshGeneration(other.m_meshGeneration),
+      m_meshRevision(other.m_meshRevision.load(std::memory_order_relaxed)),
       biomeGrassColors(other.biomeGrassColors),
       biomeFoliageColors(other.biomeFoliageColors),
       biomeTypes(other.biomeTypes),
@@ -125,6 +126,8 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
 
     m_resultPool = other.m_resultPool;
     m_meshGeneration = other.m_meshGeneration;
+    m_meshRevision.store(other.m_meshRevision.load(std::memory_order_relaxed),
+                         std::memory_order_relaxed);
 
     activeVoxels = std::move(other.activeVoxels);
     biomeGrassColors = other.biomeGrassColors;
@@ -265,6 +268,9 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
         m_storage->voxels[index].type = static_cast<uint8_t>(AIR);
       activeVoxels.reset(index);
     }
+    // Content invalidation (issue #114 review): any in-flight mesh built
+    // from the previous content is rejected at publish time.
+    m_meshRevision.fetch_add(1, std::memory_order_relaxed);
   }
   else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE &&
            y >= 0 && y < static_cast<int>(CHUNK_HEIGHT))
@@ -410,21 +416,24 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
 
   state = ChunkState::GENERATED;
   meshNeedsUpdate = true;
+  // Full content replacement invalidates any build result stamped with the
+  // previous revision (issue #114 review).
+  m_meshRevision.fetch_add(1, std::memory_order_relaxed);
 }
 
-void Chunk::buildMesh(MeshBuildResult &out)
+void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
   // Mesh timing must exclude pool/publication overhead: the payload lands
   // in the pooled result block, nothing on the Chunk changes ownership.
   telemetry::MeshSample meshSample(telemetry::Skylight);
-  out.beginBuild(this, m_meshGeneration);
+  out.beginBuild(this, generation, revision);
+  out.isLOD = false;
   // The mesher body is written against the historical member names; bind
   // them to the pooled build result (issue #104).
   auto &vertices = out.opaqueVertices;
   auto &indices = out.opaqueIndices;
   auto &waterVertices = out.waterVertices;
   auto &waterIndices = out.waterIndices;
-  m_isLODMesh = false; // K: mark as full-quality mesh
 
   auto &workspace = s_meshWorkspace;
   uint32_t indexCounter = 0;
@@ -610,8 +619,8 @@ void Chunk::buildMesh(MeshBuildResult &out)
     }
     if (!computeOccupancyY(typeScratch.data(), occMinY, occMaxY))
     {
-      meshNeedsUpdate = true;
-      state = ChunkState::MESHED;
+      // Empty occupancy: the result stays empty; publishMeshResult commits
+      // the (empty) mesh on the main thread.
       return;
     }
   }
@@ -1112,21 +1121,26 @@ void Chunk::buildMesh(MeshBuildResult &out)
   meshSample.data.opaqueIndices = indices.size();
   meshSample.data.waterVertices = waterVertices.size();
   meshSample.data.waterIndices = waterIndices.size();
-  meshNeedsUpdate = true; // Flag for GPU upload
-  state = ChunkState::MESHED;
 }
 
 bool Chunk::generateMesh()
 {
-  MeshBuildResult *result = m_resultPool->acquire();
+  MeshBuildResult *result = nullptr;
   try
   {
-    buildMesh(*result);
+    result = m_resultPool->acquire();
+    const uint64_t generation = m_meshGeneration;
+    const uint64_t revision = m_meshRevision.load(std::memory_order_relaxed);
+    buildMesh(*result, generation, revision);
+    m_resultPool->finishBuild(result);
   }
-  catch (...)
+  catch (const std::bad_alloc &)
   {
-    m_resultPool->release(result);
-    throw;
+    // Allocation failure: give the block back and retry later. Programming
+    // errors must propagate, so only bad_alloc is handled here.
+    if (result)
+      result->homePool->release(result);
+    return false;
   }
   // On rejection (superseded identity) the block is already back in its
   // pool and the chunk state is untouched.
@@ -1135,15 +1149,15 @@ bool Chunk::generateMesh()
 
 // K: Simplified LOD mesh — one top-face quad per non-empty XZ column.
 // Max 256 opaque + 256 water quads vs thousands for a full greedy mesh.
-void Chunk::buildLODMesh(MeshBuildResult &out)
+void Chunk::buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
   telemetry::MeshSample meshSample(telemetry::Lod);
-  out.beginBuild(this, m_meshGeneration);
+  out.beginBuild(this, generation, revision);
+  out.isLOD = true;
   auto &vertices = out.opaqueVertices;
   auto &indices = out.opaqueIndices;
   auto &waterVertices = out.waterVertices;
   auto &waterIndices = out.waterIndices;
-  m_isLODMesh = true;
 
   uint32_t indexCounter = 0;
   uint32_t waterIndexCounter = 0;
@@ -1241,21 +1255,24 @@ void Chunk::buildLODMesh(MeshBuildResult &out)
   meshSample.data.opaqueIndices = indices.size();
   meshSample.data.waterVertices = waterVertices.size();
   meshSample.data.waterIndices = waterIndices.size();
-  meshNeedsUpdate = true;
-  state = ChunkState::MESHED;
 }
 
 bool Chunk::generateLODMesh()
 {
-  MeshBuildResult *result = m_resultPool->acquire();
+  MeshBuildResult *result = nullptr;
   try
   {
-    buildLODMesh(*result);
+    result = m_resultPool->acquire();
+    const uint64_t generation = m_meshGeneration;
+    const uint64_t revision = m_meshRevision.load(std::memory_order_relaxed);
+    buildLODMesh(*result, generation, revision);
+    m_resultPool->finishBuild(result);
   }
-  catch (...)
+  catch (const std::bad_alloc &)
   {
-    m_resultPool->release(result);
-    throw;
+    if (result)
+      result->homePool->release(result);
+    return false;
   }
   return publishMeshResult(result);
 }
@@ -1264,11 +1281,14 @@ bool Chunk::publishMeshResult(MeshBuildResult *result)
 {
   if (!result)
     return false;
-  // Publish-time identity validation (issue #104): a result built by
-  // another chunk, or for a generation this chunk no longer represents
-  // (recycled / reset), must never land here. The block goes straight
-  // back to its pool.
-  if (result->owner != this || result->generation != m_meshGeneration)
+  // Publish-time identity validation (issue #104/#114): a result built by
+  // another chunk, for a retired incarnation (generation), or from older
+  // voxel/border content (revision) must never land here. The block goes
+  // straight back to its pool and NO chunk state is touched - a stale
+  // publish cannot mark the chunk MESHED or clobber a newer pending mesh.
+  if (result->owner != this ||
+      result->generation != m_meshGeneration ||
+      result->revision != m_meshRevision.load(std::memory_order_relaxed))
   {
     result->homePool->release(result);
     return false;
@@ -1278,6 +1298,11 @@ bool Chunk::publishMeshResult(MeshBuildResult *result)
   if (m_pendingResult && m_pendingResult != result)
     m_pendingResult->homePool->release(m_pendingResult);
   m_pendingResult = result;
+  // Single state commit point: the mesh becomes official here, on the main
+  // thread, only after validation succeeded.
+  m_isLODMesh = result->isLOD;
+  state = ChunkState::MESHED;
+  meshNeedsUpdate.store(true);
   return true;
 }
 
@@ -1603,6 +1628,10 @@ void Chunk::rebuildBordersFromNeighbors(const Chunk *west, const Chunk *east,
 
   // Corner columns stay AIR exactly as in the previous rebuild path, which
   // never populated the diagonal shell columns either.
+
+  // Border content changed: invalidate in-flight results stamped with the
+  // previous revision (issue #114 review).
+  m_meshRevision.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
@@ -1622,11 +1651,12 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
   m_inTransit.store(false);
   m_activeIndex = SIZE_MAX;
 
-  // A recycled chunk is a new mesh identity (issue #104): any attached
-  // build result goes back to the pool, and an in-flight build for the old
-  // incarnation is rejected at publish time.
+  // A recycled chunk is a new mesh identity (issue #104/#114): any attached
+  // build result goes back to the pool, and in-flight results for the old
+  // incarnation are rejected at publish time via both counters.
   releasePendingMeshResult();
   ++m_meshGeneration;
+  m_meshRevision.fetch_add(1, std::memory_order_relaxed);
 
   // Full reset returns voxel storage to the pool for retirement.
   // ForGeneration retains dirty storage until generateTerrain() overwrites it.

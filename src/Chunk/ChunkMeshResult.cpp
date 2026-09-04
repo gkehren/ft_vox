@@ -1,23 +1,31 @@
 #include "ChunkMeshResult.hpp"
 #include <Engine/WorkloadTelemetry.hpp>
+#include <algorithm>
 #include <cassert>
 
-void MeshBuildResult::beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration)
+void MeshBuildResult::beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration,
+								 uint64_t chunkRevision)
 {
 	owner = chunkOwner;
 	generation = chunkGeneration;
+	revision = chunkRevision;
 	opaqueVertices.clear();
 	opaqueIndices.clear();
 	waterVertices.clear();
 	waterIndices.clear();
+	// `accounted` is intentionally untouched: it belongs to the pool and is
+	// only read/written under the pool mutex (finishBuild/release).
 }
 
 void MeshBuildResult::detach()
 {
 	owner = nullptr;
 	generation = 0;
+	revision = 0;
+	isLOD = false;
 	// Drop content (sizes only - capacity stays with the pool block so the
-	// next borrower does not start from zero allocations).
+	// next borrower does not start from zero allocations). The matching
+	// size accounting is subtracted by release() under the pool mutex.
 	opaqueVertices.clear();
 	opaqueIndices.clear();
 	waterVertices.clear();
@@ -40,24 +48,68 @@ MeshBuildResult *MeshResultPool::acquire()
 		{
 			MeshBuildResult *r = m_freeList.back();
 			m_freeList.pop_back();
-			m_activeCount.fetch_add(1, std::memory_order_relaxed);
+			--m_stats.free;
+			++m_stats.active;
 			return r;
 		}
 	}
 
-	// Allocate outside the mutex. The pool owns allocation/ownership/reuse
-	// only - it does not impose logical content: the borrower stamps
-	// identity via beginBuild() and the mesher fills the vectors.
-	auto block = std::make_unique_for_overwrite<MeshBuildResult>();
+	// Allocate outside the mutex. MeshBuildResult holds vectors, so use the
+	// constructing make_unique (not make_unique_for_overwrite): the pool
+	// owns allocation/ownership/reuse only - it does not impose logical
+	// content; the borrower stamps identity via beginBuild() and the mesher
+	// fills the vectors.
+	auto block = std::make_unique<MeshBuildResult>();
 	MeshBuildResult *ptr = block.get();
 	ptr->homePool = this;
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_storage.push_back(std::move(block));
 	auto it = std::lower_bound(m_owned.begin(), m_owned.end(), ptr);
 	m_owned.insert(it, ptr);
-	m_activeCount.fetch_add(1, std::memory_order_relaxed);
+	++m_stats.capacity;
+	++m_stats.active;
 	telemetry::registry().add(telemetry::MeshPoolGrow);
 	return ptr;
+}
+
+void MeshResultPool::accountFinishLocked(MeshBuildResult *result)
+{
+	MeshResultAccounting now;
+	now.opaqueVertexSize = result->opaqueVertices.size() * sizeof(Vertex);
+	now.opaqueIndexSize = result->opaqueIndices.size() * sizeof(uint32_t);
+	now.waterVertexSize = result->waterVertices.size() * sizeof(Vertex);
+	now.waterIndexSize = result->waterIndices.size() * sizeof(uint32_t);
+	now.opaqueVertexCapacity = result->opaqueVertices.capacity() * sizeof(Vertex);
+	now.opaqueIndexCapacity = result->opaqueIndices.capacity() * sizeof(uint32_t);
+	now.waterVertexCapacity = result->waterVertices.capacity() * sizeof(Vertex);
+	now.waterIndexCapacity = result->waterIndices.capacity() * sizeof(uint32_t);
+
+	// Replace the block's previously accounted values with the fresh ones:
+	// sizes were zero since release(), capacities may have grown during this
+	// job (delta accounting without scanning anything).
+	m_stats.opaqueVertexSize += now.opaqueVertexSize - result->accounted.opaqueVertexSize;
+	m_stats.opaqueIndexSize += now.opaqueIndexSize - result->accounted.opaqueIndexSize;
+	m_stats.waterVertexSize += now.waterVertexSize - result->accounted.waterVertexSize;
+	m_stats.waterIndexSize += now.waterIndexSize - result->accounted.waterIndexSize;
+	m_stats.opaqueVertexCapacity += now.opaqueVertexCapacity - result->accounted.opaqueVertexCapacity;
+	m_stats.opaqueIndexCapacity += now.opaqueIndexCapacity - result->accounted.opaqueIndexCapacity;
+	m_stats.waterVertexCapacity += now.waterVertexCapacity - result->accounted.waterVertexCapacity;
+	m_stats.waterIndexCapacity += now.waterIndexCapacity - result->accounted.waterIndexCapacity;
+	result->accounted = now;
+}
+
+void MeshResultPool::finishBuild(MeshBuildResult *result)
+{
+	assert(result != nullptr && "Cannot finish null MeshBuildResult");
+	if (!result)
+		return;
+
+	std::lock_guard<std::mutex> lock(m_mutex);
+	// Only a currently-acquired block may be finished (a free-list member
+	// would double-count its payload).
+	assert(std::find(m_freeList.begin(), m_freeList.end(), result) == m_freeList.end() &&
+		   "finishBuild on a block that is not acquired");
+	accountFinishLocked(result);
 }
 
 void MeshResultPool::release(MeshBuildResult *result)
@@ -82,56 +134,45 @@ void MeshResultPool::release(MeshBuildResult *result)
 	if (alreadyFree)
 		return;
 
-	// Bookkeeping, not content policy: detach stale identity/payload so a
-	// released block cannot alias a live chunk and size telemetry stays
-	// accurate. Capacity is retained for the next borrower.
+	// Bookkeeping, not content policy: subtract the block's live-payload
+	// accounting (capacities stay - the free list keeps them) and detach
+	// stale identity/payload so a released block cannot alias a live chunk.
+	m_stats.opaqueVertexSize -= result->accounted.opaqueVertexSize;
+	m_stats.opaqueIndexSize -= result->accounted.opaqueIndexSize;
+	m_stats.waterVertexSize -= result->accounted.waterVertexSize;
+	m_stats.waterIndexSize -= result->accounted.waterIndexSize;
+	result->accounted.opaqueVertexSize = 0;
+	result->accounted.opaqueIndexSize = 0;
+	result->accounted.waterVertexSize = 0;
+	result->accounted.waterIndexSize = 0;
 	result->detach();
 	m_freeList.push_back(result);
-
-	const size_t active = m_activeCount.load(std::memory_order_relaxed);
-	assert(active > 0 && "MeshResultPool active count underflow");
-	if (active > 0)
-		m_activeCount.fetch_sub(1, std::memory_order_relaxed);
+	--m_stats.active;
+	++m_stats.free;
 }
 
 size_t MeshResultPool::capacity() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
-	return m_storage.size();
+	return m_stats.capacity;
 }
 
 size_t MeshResultPool::activeCount() const
 {
-	return m_activeCount.load(std::memory_order_relaxed);
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_stats.active;
 }
 
 size_t MeshResultPool::freeCount() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
-	return m_freeList.size();
+	return m_stats.free;
 }
 
 MeshResultPoolStats MeshResultPool::stats() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
-	MeshResultPoolStats s;
-	s.capacity = m_storage.size();
-	s.free = m_freeList.size();
-	s.active = s.capacity > s.free ? s.capacity - s.free : 0;
-	for (const auto &block : m_storage)
-	{
-		s.opaqueVertexCapacity += block->opaqueVertices.capacity() * sizeof(Vertex);
-		s.opaqueIndexCapacity += block->opaqueIndices.capacity() * sizeof(uint32_t);
-		s.waterVertexCapacity += block->waterVertices.capacity() * sizeof(Vertex);
-		s.waterIndexCapacity += block->waterIndices.capacity() * sizeof(uint32_t);
-		// Sizes only carry meaning while the block is lent out; released
-		// blocks were detached by release().
-		s.opaqueVertexSize += block->opaqueVertices.size() * sizeof(Vertex);
-		s.opaqueIndexSize += block->opaqueIndices.size() * sizeof(uint32_t);
-		s.waterVertexSize += block->waterVertices.size() * sizeof(Vertex);
-		s.waterIndexSize += block->waterIndices.size() * sizeof(uint32_t);
-	}
-	return s;
+	return m_stats; // O(1): no block walk, no borrowed-vector reads
 }
 
 void MeshResultPool::reserve(size_t minCapacity)
@@ -153,6 +194,8 @@ void MeshResultPool::reserve(size_t minCapacity)
 		m_storage.push_back(std::move(block));
 		m_freeList.push_back(ptr);
 		m_owned.push_back(ptr);
+		++m_stats.capacity;
+		++m_stats.free;
 	}
 	std::sort(m_owned.begin(), m_owned.end());
 }

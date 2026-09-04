@@ -34,6 +34,19 @@ struct CompletedMeshJob
 	MeshBuildResult *result{nullptr};
 };
 
+/// A voxel edit deferred because the target chunk was in transit (its
+/// storage/borders were being read by a worker). Applied on the main thread
+/// after the in-flight job completes (issue #114 review). `borderNeighbor`
+/// marks the neighbor-mirror write, which also needs the shell rebuilt
+/// first when applied (same order as the direct path).
+struct PendingVoxelEdit
+{
+	Chunk *chunk{nullptr};
+	int x{0}, y{0}, z{0};
+	TextureType type{AIR};
+	bool borderNeighbor{false};
+};
+
 /// Streams chunks around the player: load → async terrain → async mesh → main-thread GPU upload.
 class ChunkManager
 {
@@ -103,6 +116,11 @@ private:
 	void loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
 								const RenderSettings &settings);
 	void ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx);
+	/// Apply queued edits whose chunk is no longer in transit (main thread):
+	/// mirror writes rebuild the shell first, then setVoxel bumps the mesh
+	/// revision and marks the chunk GENERATED for a remesh.
+	void applyPendingEdits();
+	bool hasPendingEditsFor(const Chunk *chunk) const;
 	TaskPriority calculateTaskPriority(float distanceSq, float lodThresholdSq) const;
 	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
 
@@ -117,6 +135,10 @@ private:
 	std::vector<CompletedMeshJob> m_completedMeshJobs;
 	std::atomic<size_t> m_pendingGenJobsCount{0};
 	std::atomic<size_t> m_pendingMeshJobsCount{0};
+
+	/// Edits deferred while their target chunk was in transit (main-thread
+	/// only; user interactions are rare so a small linear queue is plenty).
+	std::vector<PendingVoxelEdit> m_pendingEdits;
 
 	mutable std::shared_mutex m_mutex;
 

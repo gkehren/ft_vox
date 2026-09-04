@@ -304,6 +304,69 @@ endif()
 add_test(NAME ChunkLifecycle COMMAND test_chunk_lifecycle)
 
 # ---------------------------------------------------------------------------
+# Mesh upload lifecycle (issue #104, review #114 items 25-28): staging-full
+# deferral keeping the exact result, retry without rebuild, partial
+# opaque/water staging rollback, old GPU mesh untouched. Uses a headless
+# Vulkan device; skips quietly when no loader/device is available.
+# ---------------------------------------------------------------------------
+add_executable(test_mesh_upload
+    test_mesh_upload.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+)
+
+target_include_directories(test_mesh_upload PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_mesh_upload PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+if(APPLE)
+    target_compile_definitions(test_mesh_upload PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_mesh_upload PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+target_link_libraries(test_mesh_upload PRIVATE
+    glm
+    FastNoise2
+    SDL3::SDL3
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
+)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_mesh_upload PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+if(APPLE)
+    target_link_libraries(test_mesh_upload PRIVATE
+        "-framework Metal"
+        "-framework Foundation"
+        "-framework QuartzCore"
+        "-framework IOKit"
+        "-framework IOSurface"
+    )
+endif()
+
+add_test(NAME MeshUploadLifecycle COMMAND test_mesh_upload)
+
+# ---------------------------------------------------------------------------
 # VoxelPool contract (issue #112 review): ownership, high-water reuse,
 # foreign/double release refusal, concurrency, growth events.
 # ---------------------------------------------------------------------------

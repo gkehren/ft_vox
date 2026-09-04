@@ -327,7 +327,12 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			m_pendingMeshJobsCount.fetch_add(1);
 			const auto captureEpoch = GetProfiler().captureEpoch();
 			const auto queuedAt = std::chrono::steady_clock::now();
-			m_threadPool->enqueue(prio, [chunk, this, queuedAt, captureEpoch]() {
+			// Identity captured at dispatch (issue #114 review): the worker
+			// must not read the counters later, and a result built from
+			// content newer than this capture is rejected at publish.
+			const uint64_t meshGeneration = chunk->meshGeneration();
+			const uint64_t meshRevision = chunk->meshRevision();
+			m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, this, queuedAt, captureEpoch]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
@@ -346,7 +351,11 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 				{
 					try
 					{
-						chunk->buildLODMesh(*result);
+						chunk->buildLODMesh(*result, meshGeneration, meshRevision);
+						// Publish sizes/capacities into the pool aggregates
+						// after the last vector mutation, outside the
+						// MeshSample timing window.
+						chunk->getMeshResultPool()->finishBuild(result);
 					}
 					catch (const std::bad_alloc &)
 					{
@@ -372,7 +381,9 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			m_pendingMeshJobsCount.fetch_add(1);
 			const auto captureEpoch = GetProfiler().captureEpoch();
 			const auto queuedAt = std::chrono::steady_clock::now();
-			m_threadPool->enqueue(prio, [chunk, this, queuedAt, captureEpoch]() {
+			const uint64_t meshGeneration = chunk->meshGeneration();
+			const uint64_t meshRevision = chunk->meshRevision();
+			m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, this, queuedAt, captureEpoch]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
@@ -389,7 +400,8 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 				{
 					try
 					{
-						chunk->buildMesh(*result);
+						chunk->buildMesh(*result, meshGeneration, meshRevision);
+						chunk->getMeshResultPool()->finishBuild(result);
 					}
 					catch (const std::bad_alloc &)
 					{
@@ -505,9 +517,12 @@ void ChunkManager::processFinishedJobs()
 		// Publish before clearing in-transit so a recycled chunk can never
 		// race this decision (issue #104): stale results are refused and
 		// returned to their pool; a null result just unsticks the chunk.
+		// A queued edit made while this job ran supersedes the result
+		// outright: the mesh was built from pre-edit content (issue #114).
+		const bool supersededByEdit = job.chunk && hasPendingEditsFor(job.chunk);
 		if (job.result)
 		{
-			if (job.chunk)
+			if (job.chunk && !supersededByEdit)
 				job.chunk->publishMeshResult(job.result);
 			else
 				job.result->homePool->release(job.result);
@@ -515,6 +530,55 @@ void ChunkManager::processFinishedJobs()
 		if (job.chunk)
 			job.chunk->setInTransit(false);
 	}
+	// Apply edits that were deferred while their chunk was in transit; they
+	// bump the mesh revision and mark the chunk GENERATED for a remesh.
+	applyPendingEdits();
+}
+
+bool ChunkManager::hasPendingEditsFor(const Chunk *chunk) const
+{
+	for (const PendingVoxelEdit &edit : m_pendingEdits)
+	{
+		if (edit.chunk == chunk)
+			return true;
+	}
+	return false;
+}
+
+void ChunkManager::applyPendingEdits()
+{
+	if (m_pendingEdits.empty())
+		return;
+
+	std::vector<PendingVoxelEdit> remaining;
+	{
+		// ensureShellPopulated expects the exclusive lock (same contract as
+		// the direct dirtyNeighbor path).
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (const PendingVoxelEdit &edit : m_pendingEdits)
+		{
+			if (!edit.chunk || edit.chunk->isInTransit())
+			{
+				remaining.push_back(edit);
+				continue;
+			}
+			// Mirror writes rebuild the shell first when it is missing,
+			// exactly like the direct dirtyNeighbor path.
+			if (edit.borderNeighbor)
+			{
+				const glm::vec3 &p = edit.chunk->getPosition();
+				const glm::ivec3 ci(
+					static_cast<int>(std::round(p.x)) / CHUNK_SIZE, 0,
+					static_cast<int>(std::round(p.z)) / CHUNK_SIZE);
+				ensureShellPopulated(edit.chunk, ci);
+			}
+			// setVoxel bumps the mesh revision; GENERATED re-arms meshing
+			// (setState also raises meshNeedsUpdate).
+			edit.chunk->setVoxel(edit.x, edit.y, edit.z, edit.type);
+			edit.chunk->setState(ChunkState::GENERATED);
+		}
+	}
+	m_pendingEdits.swap(remaining);
 }
 
 void ChunkManager::collectDrawList(std::vector<Chunk *> &out) const
@@ -718,18 +782,37 @@ bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
 	if (it == m_chunks.end())
 		return false;
 
-	const bool modified = it->second->deleteVoxel(worldPos);
-	if (!modified)
-		return false;
-
+	Chunk *chunk = it->second;
 	const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
 	const int localY = static_cast<int>(std::floor(worldPos.y));
 	const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
+
+	if (chunk->isInTransit())
+	{
+		// A worker is reading this chunk's voxels/borders: defer the edit
+		// instead of racing it (issue #114 review). isVoxelActive is a
+		// read-only probe, so return semantics are preserved.
+		if (!chunk->isVoxelActive(localX, localY, localZ))
+			return false;
+		m_pendingEdits.push_back({chunk, localX, localY, localZ, AIR, false});
+		return true;
+	}
+
+	const bool modified = chunk->deleteVoxel(worldPos);
+	if (!modified)
+		return false;
 
 	auto dirtyNeighbor = [&](const glm::ivec3 &nPos, int sx, int sy, int sz) {
 		Chunk *neighbor = getChunk(nPos);
 		if (!neighbor)
 			return;
+		if (neighbor->isInTransit())
+		{
+			// Same race on the neighbor's border storage: queue the mirror
+			// write with its shell rebuild (issue #114 review).
+			m_pendingEdits.push_back({neighbor, sx, sy, sz, AIR, true});
+			return;
+		}
 		ensureShellPopulated(neighbor, nPos);
 		neighbor->setVoxel(sx, sy, sz, AIR);
 		neighbor->setState(ChunkState::GENERATED);
@@ -758,18 +841,32 @@ bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 	if (it == m_chunks.end())
 		return false;
 
-	const bool modified = it->second->placeVoxel(worldPos, type);
-	if (!modified)
-		return false;
-
+	Chunk *chunk = it->second;
 	const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
 	const int localY = static_cast<int>(std::floor(worldPos.y));
 	const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
+
+	if (chunk->isInTransit())
+	{
+		if (chunk->isVoxelActive(localX, localY, localZ))
+			return false;
+		m_pendingEdits.push_back({chunk, localX, localY, localZ, type, false});
+		return true;
+	}
+
+	const bool modified = chunk->placeVoxel(worldPos, type);
+	if (!modified)
+		return false;
 
 	auto dirtyNeighbor = [&](const glm::ivec3 &nPos, int sx, int sy, int sz) {
 		Chunk *neighbor = getChunk(nPos);
 		if (!neighbor)
 			return;
+		if (neighbor->isInTransit())
+		{
+			m_pendingEdits.push_back({neighbor, sx, sy, sz, type, true});
+			return;
+		}
 		ensureShellPopulated(neighbor, nPos);
 		neighbor->setVoxel(sx, sy, sz, type);
 		neighbor->setState(ChunkState::GENERATED);

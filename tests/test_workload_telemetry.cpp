@@ -59,6 +59,12 @@ int main() {
         w.set(VoxelPoolCapacityBytes, 4600ull * CHUNK_VOLUME);
         w.set(VoxelPoolActive, 4200);
         w.set(VoxelPoolFree, 400);
+        // mesh.pool.* (issue #104/#114): retained capacity is persistent,
+        // active/free splits are capture-local.
+        w.set(MeshPoolCapacity, 20);
+        w.set(MeshPoolCapacityBytes, 20ull * 1024 * 1024);
+        w.set(MeshPoolActive, 15);
+        w.set(MeshPoolFree, 5);
         w.add(AllocCreated);
         w.add(UploadChunks);
         w.add(StagingFailures);
@@ -83,6 +89,12 @@ int main() {
                 "voxel pool active resets at capture boundary");
         require(reset.current[VoxelPoolFree] == 0 && reset.peak[VoxelPoolFree] == 0,
                 "voxel pool free resets at capture boundary");
+        require(reset.current[MeshPoolCapacity] == 20 && reset.peak[MeshPoolCapacity] == 20 &&
+                reset.current[MeshPoolCapacityBytes] == 20ull * 1024 * 1024,
+                "mesh pool retained capacity survives capture");
+        require(reset.current[MeshPoolActive] == 0 && reset.peak[MeshPoolActive] == 0 &&
+                reset.current[MeshPoolFree] == 0 && reset.peak[MeshPoolFree] == 0,
+                "mesh pool active/free reset at capture boundary");
         require(!reset.events[AllocCreated] && !reset.events[UploadChunks] &&
                 !reset.events[StagingFailures] && !reset.events[OpaqueDraws],
                 "capture clears event categories");
@@ -91,6 +103,8 @@ int main() {
         w.set(DeferredChunks, 7);
         w.set(VoxelPoolActive, 3500);
         w.set(VoxelPoolFree, 1100);
+        w.set(MeshPoolActive, 3);
+        w.set(MeshPoolFree, 17);
         const auto measured = w.snapshot();
         require(measured.current[StagingUsed] == 64 * 1024 &&
                 measured.peak[StagingUsed] == 64 * 1024,
@@ -101,6 +115,9 @@ int main() {
                 "active peak belongs to measured capture");
         require(measured.current[VoxelPoolFree] == 1100 && measured.peak[VoxelPoolFree] == 1100,
                 "free peak belongs to measured capture");
+        require(measured.current[MeshPoolActive] == 3 && measured.peak[MeshPoolActive] == 3 &&
+                measured.current[MeshPoolFree] == 17 && measured.peak[MeshPoolFree] == 17,
+                "measured mesh pool peaks are capture-local");
 
         // Two successive captures (benchmark -> reload -> new benchmark in
         // the same process): the previous run's peaks must not contribute to
