@@ -361,7 +361,8 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 								  VkSwapchain &swapchain, const std::vector<Chunk *> &chunks,
 								  const std::vector<Chunk *> &shadowChunks, const VkClearColorValue &clearColor,
 								  const std::function<void(VkCommandBuffer)> &preRecord,
-								  const std::function<void(VkCommandBuffer)> &imguiDraw)
+								  const std::function<void(VkCommandBuffer)> &imguiDraw,
+                                  VkGpuProfiler *gpu, uint64_t benchmarkTag)
 {
 	const VkExtent2D extent = swapchain.getExtent();
 	const auto beginRendering = beginR();
@@ -373,28 +374,37 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS)
 		throw std::runtime_error("Failed to begin terrain command buffer");
 
+	if (gpu) gpu->beginRecording(cmd, frameIndex, benchmarkTag);
+	if (gpu) gpu->beginPass(cmd, GpuPass::Upload);
 	if (preRecord)
 		preRecord(cmd);
+	if (gpu) gpu->endPass(cmd, GpuPass::Upload);
 
 	const VkDescriptorSet set0 = m_frameUbos[frameIndex].descriptorSet0;
 
 	{
 		PROFILE_SCOPE("Shadow");
+		if (gpu) gpu->beginPass(cmd, GpuPass::Shadow);
 		m_shadow.record(cmd, shadowChunks, m_cascadeMatrices, m_time);
+		if (gpu) gpu->endPass(cmd, GpuPass::Shadow);
 	}
 	{
 		PROFILE_SCOPE("Scene");
 		m_opaque.record(cmd, extent, set0, m_set1, m_pipelineLayout, m_post.hdrColor(), m_post.sceneDepth(), chunks,
-						m_overlays, clearColor);
+						m_overlays, clearColor, gpu);
 	}
 	{
 		const auto *ubo = static_cast<const FrameUBO *>(m_frameUbos[frameIndex].uboMapped);
+		if (gpu) gpu->beginPass(cmd, GpuPass::Water);
 		m_water.record(cmd, extent, set0, m_set1, m_set2Water, m_waterPipelineLayout, m_post.hdrColor(),
 					   m_post.sceneDepth(), chunks, glm::vec3(ubo->viewPos));
+		if (gpu) gpu->endPass(cmd, GpuPass::Water);
 	}
 	{
 		PROFILE_SCOPE("Sky");
+		if (gpu) gpu->beginPass(cmd, GpuPass::Sky);
 		m_sky.record(cmd, set0, extent, m_post.hdrColor(), m_post.godSource(), m_post.sceneDepth());
+		if (gpu) gpu->endPass(cmd, GpuPass::Sky);
 	}
 	{
 		PROFILE_SCOPE("Post");
@@ -412,15 +422,18 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 				sunVisibility = 0.f;
 		}
 		m_postSettings.underwater = ubo->lightingParams.w > 0.5f;
+		if (gpu) gpu->beginPass(cmd, GpuPass::Post);
 		m_post.recordPost(cmd, swapchain.getImages()[imageIndex],
 						  swapchain.getImageViews()[imageIndex], extent,
 						  frameIndex, set0, m_postSettings, sunScreen,
 						  sunVisibility, m_time, ubo->projection);
+		if (gpu) gpu->endPass(cmd, GpuPass::Post);
 	}
 
 	if (imguiDraw)
 	{
 		PROFILE_SCOPE("ImGuiDraw");
+		if (gpu) gpu->beginPass(cmd, GpuPass::ImGui);
 		VkRenderingAttachmentInfo colorAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
 		colorAtt.imageView = swapchain.getImageViews()[imageIndex];
 		colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -438,12 +451,14 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 		vkCmdSetScissor(cmd, 0, 1, &sc);
 		imguiDraw(cmd);
 		endRendering(cmd);
+		if (gpu) gpu->endPass(cmd, GpuPass::ImGui);
 	}
 
 	vkbar::cmdTransitionColor(cmd, swapchain.getImages()[imageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 							  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0,
 							  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
+	if (gpu) gpu->endRecording(cmd);
 	if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
 		throw std::runtime_error("Failed to end terrain command buffer");
 }

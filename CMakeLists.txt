@@ -134,6 +134,7 @@ set(FT_VOX_VULKAN_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkContext.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkSwapchain.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkFrame.cpp
+    ${CMAKE_SOURCE_DIR}/src/Vulkan/VkGpuProfiler.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkBuffer.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkImage.cpp

@@ -11,6 +11,7 @@ void VkFrameContext::init(VkContext &context)
 {
 	m_context = &context;
 	VkDevice device = m_context->getDevice();
+	m_gpuProfiler.init(context, kMaxFramesInFlight);
 
 	for (uint32_t i = 0; i < kMaxFramesInFlight; ++i)
 	{
@@ -52,6 +53,7 @@ void VkFrameContext::shutdown()
 	}
 
 	m_context->waitIdle();
+	m_gpuProfiler.shutdown();
 	VkDevice device = m_context->getDevice();
 
 	for (auto &frame : m_frames)
@@ -113,6 +115,7 @@ bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
 	FrameData &frame = m_frames[m_currentFrame];
 
 	vkWaitForFences(device, 1, &frame.inFlight, VK_TRUE, UINT64_MAX);
+	m_gpuProfiler.onSlotReady(m_currentFrame);
 
 	VkResult result = vkAcquireNextImageKHR(device, swapchain.getSwapchain(), UINT64_MAX, frame.imageAvailable,
 											VK_NULL_HANDLE, &outImageIndex);
@@ -154,6 +157,7 @@ bool VkFrameContext::submitAndPresent(VkSwapchain &swapchain, uint32_t imageInde
 	if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submit, frame.inFlight) != VK_SUCCESS)
 		throw std::runtime_error("Failed to submit frame command buffer");
 
+	m_gpuProfiler.markSubmitted(m_currentFrame);
 	VkPresentInfoKHR present{};
 	present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 	present.waitSemaphoreCount = 1;

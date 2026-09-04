@@ -1,0 +1,27 @@
+Test project D:/Projects/ft_vox/build
+      Start  1: NetworkIntegrationTest
+ 1/11 Test  #1: NetworkIntegrationTest ...........   Passed    1.20 sec
+      Start  2: VulkanResourceSmoke
+ 2/11 Test  #2: VulkanResourceSmoke ..............   Passed    0.79 sec
+      Start  3: VisualLookDefaults
+ 3/11 Test  #3: VisualLookDefaults ...............   Passed    0.01 sec
+      Start  4: RenderHelpers
+ 4/11 Test  #4: RenderHelpers ....................   Passed    0.02 sec
+      Start  5: StreamOptHelpers
+ 5/11 Test  #5: StreamOptHelpers .................   Passed    0.02 sec
+      Start  6: TerrainGeneration
+ 6/11 Test  #6: TerrainGeneration ................   Passed   37.87 sec
+      Start  7: BiomeMapGeneration
+ 7/11 Test  #7: BiomeMapGeneration ...............   Passed    1.07 sec
+      Start  8: InputRouting
+ 8/11 Test  #8: InputRouting .....................   Passed    0.01 sec
+      Start  9: ChunkLifecycle
+ 9/11 Test  #9: ChunkLifecycle ...................   Passed    0.05 sec
+      Start 10: ProfilerWorkerConsistency
+10/11 Test #10: ProfilerWorkerConsistency ........   Passed    0.08 sec
+      Start 11: GpuProfile
+11/11 Test #11: GpuProfile .......................   Passed    0.02 sec
+
+100% tests passed out of 11
+
+Total Test time (real) =  41.16 sec

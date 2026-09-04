@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Camera/Camera.hpp>
+#include <Engine/GpuProfile.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -39,6 +40,10 @@ struct BenchmarkWorkTiming
 struct BenchmarkReport
 {
 	bool valid{false};
+	bool gpuAvailable{false}, gpuPercentilesAvailable{false};
+	uint64_t gpuSamples{0};
+	float gpuAvgMs{0.f}, gpuP95Ms{0.f}, gpuP99Ms{0.f};
+	std::array<BenchmarkWorkTiming, kGpuPassCount> gpuPasses{};
 	std::array<BenchmarkWorkTiming, 3> backgroundWork{};
 	float biomeMapZoom{0.f};
 	bool biomeMapSequential{false};
@@ -146,6 +151,9 @@ public:
 
 	/// Queue waits and completed map latency from the frame's profiler snapshot.
 	void sampleBackgroundWork(const char *name, uint64_t count, double totalMs);
+	/// Zero outside measurement; tags exclude delayed warmup/previous-run results.
+	uint64_t gpuCaptureTag() const { return m_phase == BenchmarkPhase::Running ? m_gpuTag : 0; }
+	void sampleGpu(const GpuFrameSample &sample);
 	/// Progress 0–1 over warmup+duration total wall time for UI bar (full run).
 	float totalProgress() const;
 	/// Progress 0–1 of measurement only (warmup excluded).
@@ -199,6 +207,9 @@ public:
 
 private:
 	std::array<BenchmarkWorkTiming, 3> m_backgroundWork{};
+	uint64_t m_gpuTag{0}, m_lastGpuSerial{0};
+	std::vector<float> m_gpuFrames;
+	std::array<BenchmarkWorkTiming, kGpuPassCount> m_gpuPasses{};
 	std::vector<float> m_frameMs;
 	double m_sumStreaming{0}, m_sumAcquire{0}, m_sumRecord{0}, m_sumImGui{0}, m_sumPresent{0};
 	double m_sumVisibility{0}, m_sumMeshUpload{0};

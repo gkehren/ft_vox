@@ -309,3 +309,14 @@ target_link_libraries(test_profiler PRIVATE
 )
 
 add_test(NAME ProfilerWorkerConsistency COMMAND test_profiler)
+
+add_executable(test_gpu_profile
+    test_gpu_profile.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Benchmark.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/BuildInfo.cpp
+    ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
+)
+add_dependencies(test_gpu_profile ft_vox_build_info)
+target_include_directories(test_gpu_profile PRIVATE ${CMAKE_SOURCE_DIR}/src ${FT_VOX_GENERATED_DIR})
+target_link_libraries(test_gpu_profile PRIVATE glm SDL3::SDL3)
+add_test(NAME GpuProfile COMMAND test_gpu_profile)

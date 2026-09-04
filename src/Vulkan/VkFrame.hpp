@@ -2,6 +2,7 @@
 
 #include "Vulkan/VkContext.hpp"
 #include "Vulkan/VkSwapchain.hpp"
+#include "Vulkan/VkGpuProfiler.hpp"
 
 #include <array>
 #include <cstdint>
@@ -36,6 +37,8 @@ public:
 	/// Legacy clear-only path (tests / smoke). Prefer record + submitAndPresent for the game.
 	bool endFrameClearAndPresent(VkSwapchain &swapchain, uint32_t imageIndex, const VkClearColorValue &clearColor);
 
+	VkGpuProfiler &gpuProfiler() { return m_gpuProfiler; }
+
 	uint32_t frameIndex() const { return m_currentFrame; }
 	uint32_t currentFrameIndex() const { return m_currentFrame; }
 	VkCommandBuffer commandBuffer() const { return m_frames[m_currentFrame].commandBuffer; }
@@ -55,6 +58,7 @@ private:
 	void recordClearCommands(VkCommandBuffer cmd, VkSwapchain &swapchain, uint32_t imageIndex,
 							 const VkClearColorValue &clearColor);
 
+	VkGpuProfiler m_gpuProfiler;
 	VkContext *m_context{nullptr};
 	std::array<FrameData, kMaxFramesInFlight> m_frames{};
 	std::vector<VkFence> m_imagesInFlight;

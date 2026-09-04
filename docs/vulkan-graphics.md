@@ -327,6 +327,8 @@ Do not treat this section as “already shipped.” For historical feature discu
 
 ## 11. Related docs
 
+- [`gpu-profiling.md`](gpu-profiling.md) — GPU timestamp lifecycle, UI, benchmark metrics and validation
+
 - [`engine-architecture.md`](engine-architecture.md) — Engine loop, chunks, streaming, terrain generation  
 - Root [`README.md`](../README.md) — build, deps, controls  
 - [`Agents.md`](../Agents.md) — contributor-oriented project context  

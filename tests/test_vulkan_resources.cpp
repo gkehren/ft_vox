@@ -8,6 +8,8 @@
 #include <Vulkan/VkLoadLibrary.hpp>
 #include <Vulkan/VkResourceSmoke.hpp>
 #include <Vulkan/VkSwapchain.hpp>
+#include <Vulkan/VkGpuProfiler.hpp>
+#include <Vulkan/VkCommands.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -140,6 +142,75 @@ int main()
 					  << " disabling VSync instead of falling back\n";
 		}
 		swapchain.shutdown();
+
+		VkGpuProfiler gpu;
+		gpu.init(context, 0);
+		if (gpu.supported() || std::string(gpu.status()).find("no frame slots") == std::string::npos)
+			throw std::runtime_error("zero-slot profiler should be unavailable with a diagnostic");
+		gpu.shutdown();
+		gpu.init(context, 2);
+		uint32_t familyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(context.getPhysicalDevice(), &familyCount, nullptr);
+		std::vector<VkQueueFamilyProperties> families(familyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(context.getPhysicalDevice(), &familyCount, families.data());
+		const auto &limits = context.getDeviceProperties().limits;
+		std::cout << "GPU timestamp capability:\n  graphics family: " << context.getGraphicsQueueFamily()
+			<< "\n  valid bits: " << families.at(context.getGraphicsQueueFamily()).timestampValidBits
+			<< "\n  period: " << limits.timestampPeriod << " ns"
+			<< "\n  timestampComputeAndGraphics: " << (limits.timestampComputeAndGraphics ? "true" : "false")
+			<< "\n  selected queue supported: " << (gpu.supported() ? "yes" : "no")
+			<< "\n  status: " << gpu.status() << '\n';
+		if (gpu.supported())
+		{
+			gpu.setEnabled(true);
+			ImmediateCommands commands;
+			commands.init(context);
+			const auto record = [&](uint32_t slot) {
+				commands.submitAndWait([&](VkCommandBuffer cmd) {
+					gpu.beginRecording(cmd, slot, 42);
+					gpu.beginPass(cmd, GpuPass::Shadow);
+					gpu.endPass(cmd, GpuPass::Shadow);
+					gpu.endRecording(cmd);
+				}); // Test fence; production reuses VkFrameContext's existing fence.
+				gpu.markSubmitted(slot);
+			};
+			for (uint32_t i = 0; i < 6; ++i)
+			{
+				record(i % 2);
+				gpu.onSlotReady(i % 2);
+				if (gpu.latest().serial != i + 1 || !gpu.latest().present[2] ||
+					gpu.latest().present[3] || gpu.latest().benchmarkTag != 42)
+					throw std::runtime_error("GPU slot recycling or absent-pass availability failed");
+			}
+			record(0);
+			gpu.syncCapture(1);
+			gpu.onSlotReady(0);
+			if (gpu.latest().serial || gpu.historyCount())
+				throw std::runtime_error("old GPU capture survived reset");
+			gpu.setEnabled(false);
+			record(1);
+			gpu.onSlotReady(1);
+			if (gpu.latest().serial) throw std::runtime_error("disabled GPU profiler collected samples");
+			gpu.setEnabled(true);
+			record(0);
+			gpu.onSlotReady(0);
+			if (!gpu.latest().serial) throw std::runtime_error("GPU profiler failed to resume");
+			record(1); // Result completed but not yet consumed when capture is toggled.
+			gpu.setEnabled(false);
+			if (gpu.latest().serial || gpu.historyCount())
+				throw std::runtime_error("GPU toggle did not immediately clear displayed data");
+			gpu.setEnabled(true);
+			gpu.onSlotReady(1);
+			if (gpu.latest().serial || gpu.historyCount())
+				throw std::runtime_error("pending GPU sample survived OFF/ON");
+			record(0);
+			gpu.onSlotReady(0);
+			if (!gpu.latest().serial || gpu.historyCount() != 1)
+				throw std::runtime_error("fresh capture did not resume after OFF/ON");
+			std::cout << "PASS: GPU timestamp recycling, partial queries, reset and toggle\n";
+		}
+		else std::cout << "SKIP: GPU timestamps unsupported\n";
+		gpu.shutdown();
 
 		const std::string vert = resolveSpv("smoke.vert.spv");
 		const std::string frag = resolveSpv("smoke.frag.spv");
