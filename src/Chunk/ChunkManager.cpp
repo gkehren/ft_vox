@@ -236,8 +236,11 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThreshSq);
 		chunk->setInTransit(true);
 		m_pendingGenJobsCount.fetch_add(1);
-		m_threadPool->enqueue(prio, [chunk, seed, this]() {
+		const auto queuedAt = std::chrono::steady_clock::now();
+		m_threadPool->enqueue(prio, [chunk, seed, this, queuedAt]() {
 			const auto t0 = std::chrono::steady_clock::now();
+			GetProfiler().addWorkerSample("TerrainQueue",
+				std::chrono::duration<float, std::milli>(t0 - queuedAt).count());
 			TerrainGenerator &localGen = TerrainGenerator::getThreadLocal(seed);
 			chunk->generateTerrain(localGen);
 			const float ms = std::chrono::duration<float, std::milli>(
@@ -318,8 +321,11 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		if (distSq > lodThreshSq)
 		{
 			m_pendingMeshJobsCount.fetch_add(1);
-			m_threadPool->enqueue(prio, [chunk, this]() {
+			const auto queuedAt = std::chrono::steady_clock::now();
+			m_threadPool->enqueue(prio, [chunk, this, queuedAt]() {
 				const auto t0 = std::chrono::steady_clock::now();
+				GetProfiler().addWorkerSample("MeshQueue",
+					std::chrono::duration<float, std::milli>(t0 - queuedAt).count());
 				chunk->generateLODMesh();
 				const float ms = std::chrono::duration<float, std::milli>(
 									 std::chrono::steady_clock::now() - t0)
@@ -337,8 +343,11 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		{
 			ensureShellPopulated(chunk, ci);
 			m_pendingMeshJobsCount.fetch_add(1);
-			m_threadPool->enqueue(prio, [chunk, this]() {
+			const auto queuedAt = std::chrono::steady_clock::now();
+			m_threadPool->enqueue(prio, [chunk, this, queuedAt]() {
 				const auto t0 = std::chrono::steady_clock::now();
+				GetProfiler().addWorkerSample("MeshQueue",
+					std::chrono::duration<float, std::milli>(t0 - queuedAt).count());
 				chunk->generateMesh();
 				const float ms = std::chrono::duration<float, std::milli>(
 									 std::chrono::steady_clock::now() - t0)

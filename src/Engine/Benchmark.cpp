@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <fstream>
 #include <sstream>
+#include <cstring>
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -15,6 +16,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
+
+static constexpr const char *kBackgroundNames[] = {"TerrainQueue", "MeshQueue", "BiomeMap"};
 
 void Benchmark::requestStart()
 {
@@ -24,6 +27,7 @@ void Benchmark::requestStart()
 	m_elapsed = 0.f;
 	m_showReport = false;
 	m_report = {};
+	m_backgroundWork = {};
 	m_frameMs.clear();
 	m_sumStreaming = m_sumAcquire = m_sumRecord = m_sumImGui = m_sumPresent = 0;
 	m_sumVisibility = m_sumMeshUpload = 0;
@@ -148,6 +152,18 @@ void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcqu
 		++m_over33;
 }
 
+void Benchmark::sampleBackgroundWork(const char *name, uint64_t count, double totalMs)
+{
+	if (m_phase != BenchmarkPhase::Running)
+		return;
+	for (size_t i = 0; i < m_backgroundWork.size(); ++i)
+		if (std::strcmp(name, kBackgroundNames[i]) == 0)
+		{
+			m_backgroundWork[i].count += count;
+			m_backgroundWork[i].totalMs += totalMs;
+		}
+}
+
 float Benchmark::totalProgress() const
 {
 	const float total = m_config.warmupSec + m_config.durationSec;
@@ -267,6 +283,9 @@ void Benchmark::finalize()
 	r.avgVisibility = static_cast<float>(m_sumVisibility) * invN;
 	r.avgMeshUpload = static_cast<float>(m_sumMeshUpload) * invN;
 
+	r.backgroundWork = m_backgroundWork;
+	r.biomeMapZoom = m_config.biomeMapZoom;
+	r.biomeMapSequential = m_config.biomeMapSequential;
 	r.terrainGenJobs = m_terrainJobs;
 	r.terrainGenTotalMs = static_cast<float>(m_terrainMs);
 	r.terrainGenAvgMs = m_terrainJobs > 0 ? static_cast<float>(m_terrainMs / m_terrainJobs) : 0.f;
@@ -344,6 +363,16 @@ std::string Benchmark::formatReportText() const
 	  << "  totalMs=" << r.meshBuildTotalMs << "\n";
 	o << "  MeshLOD     n=" << r.meshLodJobs << "  avgMs=" << r.meshLodAvgMs
 	  << "  totalMs=" << r.meshLodTotalMs << "\n\n";
+	o << "Biome map: zoom=" << r.biomeMapZoom
+	  << " mode=" << (r.biomeMapSequential ? "sequential" : "scheduled")
+	  << " (fixed center when enabled)\n";
+	for (size_t i = 0; i < r.backgroundWork.size(); ++i)
+	{
+		const auto &work = r.backgroundWork[i];
+		o << "  " << kBackgroundNames[i] << " n=" << work.count
+		  << " avgMs=" << (work.count ? work.totalMs / work.count : 0.0)
+		  << " totalMs=" << work.totalMs << "\n";
+	}
 	o << "Peaks: chunks=" << r.peakChunks << " draw=" << r.peakDraw
 	  << " qLoad/Gen/Mesh=" << r.peakPendingLoad << "/" << r.peakPendingGen << "/"
 	  << r.peakPendingMesh << "\n\n";

@@ -59,7 +59,9 @@ struct BiomeMapRequest
 	std::shared_ptr<std::atomic<bool>> cancelToken;
 	/// Optional injectable test seam hook invoked before sampling.
 	std::function<void()> onCheckpoint;
-	/// Owner-controlled region scratch for the sampling job. When set, the
+	/// Owner-controlled scratch for the sequential/small-map path. Parallel
+	/// tiles never share it; each worker uses bounded thread-local scratch.
+	/// When set, the
 	/// job reuses it across refreshes (retention bounded by the scratch's
 	/// retainedPointsCap); when null, getBiomeRegion falls back to an
 	/// internal thread-local scratch. Shared ownership keeps the scratch
@@ -83,6 +85,7 @@ struct BiomeMapResult
 	int size{0};
 	std::vector<unsigned char> rgba;
 	bool valid{false};
+	double elapsedMs{0.0}; // scheduled request to completed CPU result, including queue time
 };
 
 /// Pending GPU upload request for streamed biome map data.
@@ -155,4 +158,10 @@ void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgba,
 /// tiles), and after sampling — an interrupted build returns an invalid
 /// result and never publishes partial pixel data.
 BiomeMapResult generateBiomeMap(const BiomeMapRequest &req);
+
+class ThreadPool;
+/// Engine-owned Low-priority tile scheduling. No worker waits for children.
+/// Request data lives until every tile retires; the last tile publishes.
+/// The pool must outlive submission/execution. GameUI enforces single-flight.
+std::future<BiomeMapResult> submitBiomeMap(ThreadPool &pool, BiomeMapRequest req);
 

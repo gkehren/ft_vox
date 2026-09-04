@@ -1712,6 +1712,42 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
                                       const BiomeCancelCheck &shouldCancel,
                                       BiomeRegionStats *outStats) const
 {
+  return getBiomeRegionTile(grid, {0, 0, grid.width, grid.height},
+                            outBiomes, scratch, shouldCancel, outStats);
+}
+
+std::vector<TerrainGenerator::BiomeRegionTile>
+TerrainGenerator::buildBiomeRegionPlan(const BiomeRegionGrid &grid)
+{
+  if (!grid.valid())
+    return {};
+  // Bounded canonical domains with a two-column erosion halo. Clamping in
+  // float before conversion also handles extremely small positive steps.
+  const float maxSpan = std::sqrt(static_cast<float>(kMaxTileDensePoints));
+  const float dim = std::floor((maxSpan - 5.0f) / grid.step) + 1.0f;
+  const int tileDim = static_cast<int>(std::clamp(dim, 1.0f, 32.0f));
+  std::vector<BiomeRegionTile> plan;
+  for (int z = 0; z < grid.height;)
+  {
+    const int height = std::min(tileDim, grid.height - z);
+    for (int x = 0; x < grid.width;)
+    {
+      const int width = std::min(tileDim, grid.width - x);
+      plan.push_back({x, z, width, height});
+      x += width;
+    }
+    z += height;
+  }
+  return plan;
+}
+
+bool TerrainGenerator::getBiomeRegionTile(const BiomeRegionGrid &grid,
+                                      const BiomeRegionTile &tile,
+                                      std::vector<BiomeType> &outBiomes,
+                                      BiomeRegionScratch *scratch,
+                                      const BiomeCancelCheck &shouldCancel,
+                                      BiomeRegionStats *outStats) const
+{
   outBiomes.clear();
 
   // Scratch owned by the caller when provided; otherwise a dedicated
@@ -1730,7 +1766,9 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
     ~ScratchTrimGuard() { target.trimOversizedCapacity(); }
   } trimGuard{bufs};
 
-  if (!grid.valid())
+  if (!grid.valid() || tile.x < 0 || tile.z < 0 ||
+      tile.width <= 0 || tile.height <= 0 ||
+      tile.x > grid.width - tile.width || tile.z > grid.height - tile.height)
     return false;
 
   BiomeRegionStats localStats;
@@ -1746,8 +1784,8 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
   // int math downstream (span differences, the + NOISE_OFFSET noise-domain
   // translation). One billion blocks is far beyond any reachable world.
   constexpr int64_t kColumnLimit = 1000000000;
-  const auto canonicalColumn = [&grid, kColumnLimit](int xi, int zi) {
-    const glm::ivec2 col = grid.columnAt(xi, zi);
+  const auto canonicalColumn = [&grid, &tile, kColumnLimit](int xi, int zi) {
+    const glm::ivec2 col = grid.columnAt(tile.x + xi, tile.z + zi);
     return glm::ivec2(
         static_cast<int>(std::clamp<int64_t>(col.x, -kColumnLimit, kColumnLimit)),
         static_cast<int>(std::clamp<int64_t>(col.y, -kColumnLimit, kColumnLimit)));
@@ -1793,7 +1831,7 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
         const glm::ivec2 col = canonicalColumn(xi, zi);
         const int denseX = col.x - denseStartX;
         const int denseZ = col.y - denseStartZ;
-        outBiomes[static_cast<size_t>(zi) * static_cast<size_t>(grid.width) +
+        outBiomes[static_cast<size_t>(zi) * static_cast<size_t>(tile.width) +
                   static_cast<size_t>(xi)] =
             evaluateBiomeAt(buffers, denseZ * denseW + denseX);
       }
@@ -1801,7 +1839,7 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
   };
 
   const glm::ivec2 minCol = canonicalColumn(0, 0);
-  const glm::ivec2 maxCol = canonicalColumn(grid.width - 1, grid.height - 1);
+  const glm::ivec2 maxCol = canonicalColumn(tile.width - 1, tile.height - 1);
   const int64_t minWorldX = std::min<int64_t>(minCol.x, maxCol.x);
   const int64_t maxWorldX = std::max<int64_t>(minCol.x, maxCol.x);
   const int64_t minWorldZ = std::min<int64_t>(minCol.y, maxCol.y);
@@ -1816,7 +1854,7 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
   const int64_t denseHeight = spanZ + 2 * HALO;
   const int64_t totalDensePoints = denseWidth * denseHeight;
 
-  const size_t outputCount = static_cast<size_t>(grid.width) * static_cast<size_t>(grid.height);
+  const size_t outputCount = static_cast<size_t>(tile.width) * static_cast<size_t>(tile.height);
 
   if (totalDensePoints <= static_cast<int64_t>(kMaxDenseDomainPoints))
   {
@@ -1853,7 +1891,7 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
 
     fillOutputFromDense(buffers, denseStartX, denseStartZ,
                         static_cast<int>(denseWidth),
-                        0, grid.width - 1, 0, grid.height - 1);
+                        0, tile.width - 1, 0, tile.height - 1);
     ++stats.denseTiles;
     updatePeak(totalDensePoints);
 
@@ -1875,18 +1913,18 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
   const float maxTileSpan = std::sqrt(static_cast<float>(kMaxTileDensePoints));
   const float tileDimF =
       std::floor((maxTileSpan - 1.0f - static_cast<float>(2 * HALO)) / grid.step) + 1.0f;
-  const int tileDim = std::clamp(static_cast<int>(tileDimF), 1, kMaxTileDim);
+  const int tileDim = static_cast<int>(std::clamp(tileDimF, 1.0f, static_cast<float>(kMaxTileDim)));
 
-  const int tilesX = (grid.width + tileDim - 1) / tileDim;
-  const int tilesZ = (grid.height + tileDim - 1) / tileDim;
+  const int tilesX = (tile.width + tileDim - 1) / tileDim;
+  const int tilesZ = (tile.height + tileDim - 1) / tileDim;
 
   outBiomes.resize(outputCount);
 
   // Tiles are processed sequentially in fixed order: the result depends only
   // on the grid and the seed, never on scheduling. TerrainGenerator does not
   // spawn threads and does not decide CPU policy; the caller chooses when and
-  // on which worker the whole call runs (the Engine runs the biome map as a
-  // single TaskPriority::Low job).
+  // on which worker the call runs. The Engine can schedule independent
+  // rectangles from buildBiomeRegionPlan() as TaskPriority::Low jobs.
   for (int tz = 0; tz < tilesZ; ++tz)
   {
     for (int tx = 0; tx < tilesX; ++tx)
@@ -1901,8 +1939,8 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
 
       const int x0 = tx * tileDim;
       const int z0 = tz * tileDim;
-      const int x1 = std::min(x0 + tileDim - 1, grid.width - 1);
-      const int z1 = std::min(z0 + tileDim - 1, grid.height - 1);
+      const int x1 = std::min(x0 + tileDim - 1, tile.width - 1);
+      const int z1 = std::min(z0 + tileDim - 1, tile.height - 1);
 
       const glm::ivec2 tMinCol = canonicalColumn(x0, z0);
       const glm::ivec2 tMaxCol = canonicalColumn(x1, z1);
@@ -1957,7 +1995,7 @@ bool TerrainGenerator::getBiomeRegion(const BiomeRegionGrid &grid,
           for (int xi = x0; xi <= x1; ++xi)
           {
             const glm::ivec2 col = canonicalColumn(xi, zi);
-            outBiomes[static_cast<size_t>(zi) * static_cast<size_t>(grid.width) +
+            outBiomes[static_cast<size_t>(zi) * static_cast<size_t>(tile.width) +
                       static_cast<size_t>(xi)] = evaluateBiomeColumn(col.x, col.y);
           }
         }

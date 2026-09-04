@@ -732,6 +732,8 @@ void Engine::tickBenchmark(double dt)
 	if (m_benchmark.phase() == BenchmarkPhase::Reloading)
 	{
 		const BenchmarkConfig &cfg = m_benchmark.config();
+		if (cfg.biomeMapZoom > 0.0f)
+			gameUi->configureBenchmarkMap(cfg.biomeMapZoom);
 		if (cfg.forceVsyncOff && renderSettings.vsyncEnabled)
 		{
 			m_benchmark.markForceVsync(true);
@@ -784,6 +786,7 @@ void Engine::sampleBenchmarkFrame()
 	{
 		if (!ws[i].name)
 			continue;
+		m_benchmark.sampleBackgroundWork(ws[i].name, ws[i].count, ws[i].totalMs);
 		if (std::strcmp(ws[i].name, "TerrainGen") == 0)
 		{
 			tJobs = ws[i].count;
@@ -861,12 +864,19 @@ void Engine::drawUi()
 	if (threadPool)
 	{
 		f.submitBiomeMap = [this](BiomeMapRequest req) -> std::future<BiomeMapResult> {
+			if (!m_benchmark.config().biomeMapSequential)
+				return submitBiomeMap(*threadPool, std::move(req));
+			// Benchmark control: the previous one-Low-job map path.
 			auto promise = std::make_shared<std::promise<BiomeMapResult>>();
-			std::future<BiomeMapResult> fut = promise->get_future();
-			threadPool->enqueue(TaskPriority::Low, [promise, req]() mutable {
-				promise->set_value(generateBiomeMap(req));
+			auto future = promise->get_future();
+			const auto start = std::chrono::steady_clock::now();
+			threadPool->enqueue(TaskPriority::Low, [promise, req, start] {
+				BiomeMapResult result;
+				try { result = generateBiomeMap(req); } catch (...) {}
+				result.elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+				promise->set_value(std::move(result));
 			});
-			return fut;
+			return future;
 		};
 	}
 

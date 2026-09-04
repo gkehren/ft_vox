@@ -192,6 +192,23 @@ public:
     size_t peakScratchBytes{0};  // peakDensePoints * fields * sizeof(float)
   };
 
+  struct BiomeRegionTile
+  {
+    int x{0}, z{0}, width{0}, height{0};
+  };
+  // Independent output rectangles in the ORIGINAL grid. No recentering:
+  // float rounding and canonical column selection must match the full map.
+  // Planning and sampling are sequential; scheduling belongs to the caller.
+  static std::vector<BiomeRegionTile> buildBiomeRegionPlan(const BiomeRegionGrid &grid);
+  // Tile-local row-major output (tile.width stride). Invalid/out-of-grid
+  // rectangles and cancellation clear output. Scratch retention follows the
+  // same contract as getBiomeRegion(); concurrent callers need distinct scratch.
+  bool getBiomeRegionTile(const BiomeRegionGrid &grid, const BiomeRegionTile &tile,
+                         std::vector<BiomeType> &outBiomes,
+                         BiomeRegionScratch *scratch = nullptr,
+                         const BiomeCancelCheck &shouldCancel = {},
+                         BiomeRegionStats *outStats = nullptr) const;
+
   // Batch biome sampling for map visualization. `grid` is the single source
   // of truth for the pixel <-> world <-> voxel-column mapping (see
   // BiomeRegionGrid.hpp). Output is row-major, outBiomes[grid.width * z + x].
@@ -203,8 +220,7 @@ public:
   // (and clears outBiomes) when the grid is invalid or `shouldCancel`
   // returned true; partial results are never returned. On every exit —
   // success, cancellation, failure, or exception — the scratch is trimmed
-  // to the tiled-path bound, so oversized dense capacity is never retained
-  // across attempts. `outStats` is optional. `scratch` may be null, in
+  // to its configured retention bound. `outStats` is optional. `scratch` may be null, in
   // which case a dedicated internal thread-local scratch is used; pass a
   // caller-owned scratch to control memory retention (see
   // BiomeRegionScratch).

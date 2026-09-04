@@ -1300,6 +1300,7 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 
 		if (isBiomeMapResultAcceptable(res, frame.worldGenerationId, frame.seed, m_mapRequestId))
 		{
+			GetProfiler().addWorkerSample("BiomeMap", static_cast<float>(res.elapsedMs));
 			paintBiomeMapPlayerDot(res.rgba, res.grid, playerXZ);
 			m_mapCenter = res.center;
 			ensureBiomeTexture(res.size);
@@ -1343,10 +1344,9 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 		m_mapJob.requestId = requestId;
 		m_mapJob.cancel = cancelToken;
 
-		// One scratch for the whole biome-map subsystem: dense capacity is
-		// retained across refreshes (no per-refresh reallocation churn),
-		// bounded in total by kMaxDenseDomainPoints and owned by GameUI so
-		// no pool worker keeps a private copy.
+		// Sequential/small-map scratch retains dense capacity across refreshes,
+		// bounded by kMaxDenseDomainPoints and owned by GameUI. Parallel tiles
+		// use separate thread-local scratch with only tiled-sized retention.
 		if (!m_mapScratch)
 		{
 			m_mapScratch = std::make_shared<TerrainGenerator::BiomeRegionScratch>();

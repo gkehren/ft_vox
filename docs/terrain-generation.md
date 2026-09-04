@@ -187,8 +187,10 @@ Biome sampling is unified across the engine via a canonical erosion-aware pipeli
   (`col = floor(sampleWorldCoord)`), ensuring adjacent pixels on the same column resolve
   identically. Erosion always runs at `step = 1.0f` — `grid.step` only selects which
   canonical columns are sampled, never the erosion resolution. The call runs sequentially
-  on the calling thread (no internal threads; the Engine schedules the whole call as one
-  `TaskPriority::Low` job) and is deterministic: tile order never influences the output.
+  on the calling thread (no internal threads) and is deterministic: tile order never
+  influences the output. The Engine uses `buildBiomeRegionPlan()` and
+  `getBiomeRegionTile()` to schedule independent output rectangles in the original grid.
+  Rectangles are never recentered, preserving canonical column rounding exactly.
   Returns `false` (with the output cleared) when the grid is invalid or the optional
   cancellation callback fires; partial results are never produced:
   - Small dense domains (≤ 516×516 haloed block bounding box): sampled in a single
@@ -212,5 +214,16 @@ Biome sampling is unified across the engine via a canonical erosion-aware pipeli
       of ~10 MiB per scratch (516² points × 10 float fields × 4 bytes).
     `BiomeRegionStats` reports `denseTiles`, `fallbackPixels`, `peakDensePoints`, and
     `peakScratchBytes` to keep the bound verifiable.
+- **Engine scheduling**: `submitBiomeMap()` schedules at most eight tile lanes on the
+  existing `ThreadPool`, all at `TaskPriority::Low`. Each tile queues its successor
+  separately so chunk/mesh High and Normal work is considered between tiles. The pool
+  searches all worker queues for a higher priority before selecting lower-priority work;
+  already-running tiles are not preempted. A submission sentinel and atomic remaining
+  count let the last task assemble/publish without any worker waiting for its children.
+  GameUI retains its single-flight, cancellation, and stale-result checks. A failed or
+  cancelled build drains all submitted tiles and returns no partial pixels.
+  Each visited pool worker retains at most tiled scratch (~0.7 MiB); parallel tiles
+  never write the shared UI scratch. Maps spanning at most 128 blocks remain one Low
+  job and reuse the UI scratch. No additional native threads are created.
 - **UI consistency**: HUD biome and World / Biome map use the same canonical generated-column biome definition as loaded terrain at every zoom level. `BiomeMapResult` carries the exact `BiomeRegionGrid` it was sampled with, and the player marker is placed via `grid.pixelForWorld()`; markers outside the grid are simply not drawn.
 
