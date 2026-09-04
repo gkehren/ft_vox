@@ -5,6 +5,8 @@
 #include <Renderer/MinecraftTextures.hpp>
 #include <utils.hpp>
 #include <Chunk/StreamHelpers.hpp>
+#include <Chunk/ChunkBorders.hpp>
+#include <Chunk/ChunkMeshResult.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Engine/InputRouting.hpp>
@@ -834,6 +836,27 @@ void Engine::sampleBenchmarkFrame()
         telemetry.set(telemetry::BorderPoolActive, chunkManager->getChunkPool()->borderStorageActive());
         telemetry.set(telemetry::BorderPoolFree, chunkManager->getChunkPool()->borderStorageFree());
         telemetry.set(telemetry::BorderPoolCapacityBytes, borderCap * sizeof(ChunkNeighborBorders));
+
+        // mesh.pool.* + cpu.opaque/water.*: mesh build buffers live in
+        // pooled transient results, not on chunks (issue #104). The cpu.*
+        // gauges now describe the in-flight/pending payloads while
+        // capacityBytes reflects retained pool capacity (active + free
+        // list) - the high-water reuse footprint that used to sit on every
+        // pooled chunk.
+        const auto meshStats = chunkManager->getChunkPool()->meshResultPool().stats();
+        telemetry.set(telemetry::OpaqueVertexBytes, meshStats.opaqueVertexSize);
+        telemetry.set(telemetry::OpaqueVertexCapacity, meshStats.opaqueVertexCapacity);
+        telemetry.set(telemetry::OpaqueIndexBytes, meshStats.opaqueIndexSize);
+        telemetry.set(telemetry::OpaqueIndexCapacity, meshStats.opaqueIndexCapacity);
+        telemetry.set(telemetry::WaterVertexBytes, meshStats.waterVertexSize);
+        telemetry.set(telemetry::WaterVertexCapacity, meshStats.waterVertexCapacity);
+        telemetry.set(telemetry::WaterIndexBytes, meshStats.waterIndexSize);
+        telemetry.set(telemetry::WaterIndexCapacity, meshStats.waterIndexCapacity);
+        telemetry.set(telemetry::CpuMeshCapacity, meshStats.capacityBytes());
+        telemetry.set(telemetry::MeshPoolCapacity, meshStats.capacity);
+        telemetry.set(telemetry::MeshPoolActive, meshStats.active);
+        telemetry.set(telemetry::MeshPoolFree, meshStats.free);
+        telemetry.set(telemetry::MeshPoolCapacityBytes, meshStats.capacityBytes());
     }
 	m_benchmark.sampleFrame(
 		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),

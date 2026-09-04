@@ -21,6 +21,7 @@ enum Gauge : size_t {
     ActiveChunks, DeferredChunks, StagingUsed, CpuMeshCapacity, GpuLiveBytes,
     VoxelPoolCapacity, VoxelPoolActive, VoxelPoolFree, VoxelPoolCapacityBytes,
     BorderPoolCapacity, BorderPoolActive, BorderPoolFree, BorderPoolCapacityBytes,
+    MeshPoolCapacity, MeshPoolActive, MeshPoolFree, MeshPoolCapacityBytes,
     GaugeCount
 };
 inline constexpr const char* gaugeNames[] = {
@@ -36,19 +37,21 @@ inline constexpr const char* gaugeNames[] = {
     "cpu.mesh.capacityBytes", "gpu.live.bytes",
     "voxel.pool.capacity", "voxel.pool.active", "voxel.pool.free",
     "voxel.pool.capacityBytes", "border.pool.capacity", "border.pool.active",
-    "border.pool.free", "border.pool.capacityBytes"
+    "border.pool.free", "border.pool.capacityBytes",
+    "mesh.pool.capacity", "mesh.pool.active", "mesh.pool.free",
+    "mesh.pool.capacityBytes"
 };
 enum Event : size_t {
     AllocCreated, AllocDestroyed, PoolRejected, UploadChunks, UploadVertexBytes,
     UploadIndexBytes, UploadDeferred, StagingFailures, OpaqueDraws, WaterDraws,
-    Shadow0, Shadow1, Shadow2, VoxelPoolGrow, BorderPoolGrow, EventCount
+    Shadow0, Shadow1, Shadow2, VoxelPoolGrow, BorderPoolGrow, MeshPoolGrow, EventCount
 };
 inline constexpr const char* eventNames[] = {
     "mesh.allocations.created", "mesh.allocations.destroyed", "pool.rejected",
     "upload.chunks", "upload.vertexBytes", "upload.indexBytes", "upload.deferred",
     "staging.failures", "draws.opaque", "draws.water", "draws.shadow.0",
     "draws.shadow.1", "draws.shadow.2", "voxel.pool.growEvents",
-    "border.pool.growEvents"
+    "border.pool.growEvents", "mesh.pool.growEvents"
 };
 enum Stage : size_t { Skylight, Blocklight, Occupancy, FacesGreedyAO, Lod, StageCount };
 inline constexpr const char* stageNames[] = {"skylight", "blocklight", "occupancy", "facesGreedyAO", "LOD"};
@@ -70,6 +73,8 @@ inline constexpr bool isCaptureLocalGauge(Gauge g) {
     case VoxelPoolFree:
     case BorderPoolActive:
     case BorderPoolFree:
+    case MeshPoolActive:
+    case MeshPoolFree:
         return true;
     default:
         return false;
@@ -109,9 +114,9 @@ public:
             data.current[i] = data.current[i] - before[i] + after[i];
             data.peak[i] = std::max(data.peak[i], data.current[i]);
         }
-        data.current[CpuMeshCapacity] = data.current[OpaqueVertexCapacity] + data.current[OpaqueIndexCapacity]
-            + data.current[WaterVertexCapacity] + data.current[WaterIndexCapacity];
-        data.peak[CpuMeshCapacity] = std::max(data.peak[CpuMeshCapacity], data.current[CpuMeshCapacity]);
+        // CpuMeshCapacity is NOT derived here anymore (issue #104): mesh
+        // build buffers no longer live on Chunks, so the engine publishes
+        // it (with the cpu.opaque/water.* gauges) from MeshResultPoolStats.
     }
     void add(Event e, uint64_t n = 1) {
         if (enabled) events[e].fetch_add(n, std::memory_order_relaxed);

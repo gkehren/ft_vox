@@ -31,12 +31,15 @@
 class ImmediateCommands;
 class StagingRing;
 class GpuResourceRetire;
+struct MeshBuildResult;
+class MeshResultPool;
 
 class Chunk
 {
 public:
 	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED,
-		  VoxelPool *voxelPool = nullptr, BorderPool *borderPool = nullptr);
+		  VoxelPool *voxelPool = nullptr, BorderPool *borderPool = nullptr,
+		  MeshResultPool *meshPool = nullptr);
 	Chunk(Chunk &&other) noexcept;
 	Chunk &operator=(Chunk &&other) noexcept;
 	~Chunk();
@@ -75,8 +78,38 @@ public:
 	void drawShadow(VkCommandBuffer cmd, unsigned cascade = 0) const;
 
 	void generateTerrain(TerrainGenerator &generator);
-	void generateMesh();
-	void generateLODMesh();
+
+	// Mesh building (issue #104): the CPU mesh payload no longer lives on
+	// the Chunk. Workers build into a pooled MeshBuildResult and publish it
+	// for upload; the Chunk keeps only GPU handles/counts.
+	//
+	// Worker contract (issue #114 review): buildMesh/buildLODMesh may READ
+	// Chunk generation data (voxels, borders, biome metadata, position) but
+	// must not mutate any Chunk lifecycle/render state. The completed result
+	// is committed exclusively by publishMeshResult() on the main thread.
+	// `generation`/`revision` must be captured at dispatch time on the main
+	// thread (see meshPendingChunks) and are stamped into the result.
+	void buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision);
+	void buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision);
+	// Main-thread commit of a completed build result (the ONLY place a mesh
+	// becomes official). Rejects - returning false and returning the block
+	// to its pool without touching any chunk state - when the result is
+	// superseded: built by another chunk, for a retired incarnation
+	// (generation), or for older voxel/border content (revision). On success
+	// the result is attached and m_isLODMesh/state/meshNeedsUpdate are
+	// committed from it; any previously attached result is replaced.
+	bool publishMeshResult(MeshBuildResult *result);
+	// Synchronous convenience path (bootstrap / tests): acquire a pooled
+	// block, build, finish accounting, publish. Returns false when nothing
+	// was published (allocation failure or superseded result); other
+	// exceptions propagate.
+	bool generateMesh();
+	bool generateLODMesh();
+
+	bool hasPendingMeshResult() const { return m_pendingResult != nullptr; }
+	uint64_t meshGeneration() const { return m_meshGeneration; }
+	uint64_t meshRevision() const { return m_meshRevision.load(std::memory_order_relaxed); }
+	MeshResultPool *getMeshResultPool() const { return m_resultPool; }
 	bool hasWaterMesh() const { return waterIndexCount > 0; }
 	bool isLODMesh() const { return m_isLODMesh; }
 	bool needsGPUUpload() const { return meshNeedsUpdate.load(); }
@@ -139,10 +172,6 @@ private:
 	AllocatedBuffer waterVertexBuffer{};
 	AllocatedBuffer waterIndexBuffer{};
 
-	std::vector<Vertex> vertices;
-	std::vector<uint32_t> indices;
-	std::vector<Vertex> waterVertices;
-	std::vector<uint32_t> waterIndices;
 	VoxelPool *m_voxelPool{nullptr};
 	VoxelStorage *m_storage{nullptr};
 	void ensureVoxelStorageForEdit();
@@ -151,6 +180,24 @@ private:
 	// upload (issue #103): no per-chunk border memory is retained.
 	ChunkNeighborBorders *m_borders{nullptr};
 	BorderPool *m_borderPool{nullptr};
+	// Mesh build buffers are pooled too (issue #104): m_pendingResult holds
+	// a completed CPU mesh awaiting upload, borrowed from m_resultPool.
+	// Released on upload, reset, and moves - no per-chunk mesh capacity.
+	MeshResultPool *m_resultPool{nullptr};
+	MeshBuildResult *m_pendingResult{nullptr};
+	// Identity of the meshable content (issue #114 review):
+	//   m_meshGeneration - physical chunk incarnation; bumped on reset so a
+	//     result built for a recycled chunk pointer can never publish.
+	//   m_meshRevision   - logical voxel/border content revision; bumped on
+	//     every content invalidation (generation, successful voxel/border
+	//     edit, border rebuild) so an in-flight result built from older
+	//     content is rejected at publish instead of overwriting newer data.
+	// A build result must match BOTH to be published. Mutated only on the
+	// main thread; atomic because dispatch-time captures observe it around
+	// worker tasks.
+	uint64_t m_meshGeneration{0};
+	std::atomic<uint64_t> m_meshRevision{0};
+	void releasePendingMeshResult();
 
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeGrassColors{};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeFoliageColors{};

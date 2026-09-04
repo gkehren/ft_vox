@@ -22,8 +22,9 @@ and peak values. Events expose interval totals and averages per measured frame.
 | `voxel.pool.*` | VoxelStoragePool state. **Persistent:** `capacity` and `capacityBytes` describe retained backing memory (64 KiB blocks including the free list) and survive capture boundaries. **Capture-local:** `active` and `free` are sampled during measured frames and reset at the beginning of each capture, so previous runs cannot contribute their peaks. `voxel.pool.growEvents` counts allocations beyond the free list in the interval (steady-state streaming should be near zero) |
 | `shell.sizeBytes`, `shell.capacityBytes` | Legacy names kept for #101 compatibility: the currently borrowed compact border bytes (17,408 per meshing chunk), 0 once returned after upload. The true retained metric is `border.pool.capacityBytes` |
 | `border.pool.*` | BorderPool state sampled once per measured frame. **Persistent:** `capacity`, `capacityBytes` (retained blocks including the free list). **Capture-local:** `active`, `free`. `border.pool.growEvents` counts allocations beyond the free list in the interval |
-| `cpu.{opaque,water}.{vertex,index}.*` | Each CPU mesh vector's logical size and retained capacity |
-| `cpu.mesh.capacityBytes` | Combined retained mesh capacity, with its own simultaneous peak |
+| `cpu.{opaque,water}.{vertex,index}.*` | Since #104 these describe the pooled mesh build results (issue #104), not per-chunk vectors: `sizeBytes` is the live payload of results in flight or attached to chunks awaiting upload, `capacityBytes` is retained capacity across the whole pool (active + free list). Chunks no longer own mesh build buffers. Counters are maintained by pool bookkeeping under the pool mutex (`finishBuild`/`release`), never by reading vectors a worker may be mutating |
+| `cpu.mesh.capacityBytes` | Combined retained mesh build capacity across the `MeshResultPool`, with its own simultaneous peak. Scales with concurrent meshing/upload work, not with the number of pooled chunks |
+| `mesh.pool.*` | MeshResultPool state sampled once per measured frame. **Persistent:** `capacity`, `capacityBytes` (retained build-result blocks including the free list). **Capture-local:** `active` (blocks in flight or attached pending upload), `free`. `mesh.pool.growEvents` counts allocations beyond the free list in the interval. The pool is a high-water reusable pool whose capacity follows the observed in-flight/backlogged working set - not a hard-bounded pool; these gauges expose any growth |
 | `column.bytes`, `occupancy.bytes` | Inline biome/color/height arrays and occupancy bitsets, including free chunks |
 | `pool.*` | ChunkPool state only: capacity, acquired and free chunk slots; rejected acquisitions are interval events (VoxelPool blocks are reported by `voxel.pool.*`) |
 | `chunks.active`, `chunks.deferred` | End-of-measured-frame manager counts, including the deferred chunk-release backlog |
@@ -47,12 +48,18 @@ overhead, vector control objects, worker-local scratch vectors, terrain-generato
 temporary data and container overhead in ChunkManager/ChunkPool. Fixed per-column
 and occupancy storage is reported separately from vector allocations.
 
-The exclusive chunk owner publishes vector sizes/capacities at the end of
+The exclusive chunk owner publishes voxel/border/column ownership at the end of
 construction, generation, meshing, upload, reset and shell mutation. Move and
 destruction update ownership as well. The sampler never reads vectors while a
 worker modifies them. Published peaks capture those boundaries, not transient
 vector reallocation overlap or a partially completed mesh. Already allocated
 free-pool memory remains included even when active chunk count drops.
+
+Since #104 the CPU mesh payload no longer lives on chunks: workers build into
+pooled `MeshBuildResult` blocks and the upload stage returns them. The mesh
+byte gauges are published once per measured frame from a coherent
+`MeshResultPoolStats` snapshot (live payload sizes of active blocks, retained
+capacity of every block), so a meshed-then-idle chunk retains nothing.
 
 ## Mesh stages
 
@@ -74,11 +81,12 @@ World reload, benchmark request and the warmup-to-measurement transition reset
 events and worker accumulators. Persistent ownership gauges are retained across
 capture boundaries and their peaks are rebased to the current ownership value,
 so the world built during warmup keeps reporting its real footprint.
-Capture-local gauges such as `staging.slice.bytes` and the end-of-frame
-chunk-manager samples (`chunks.active`, `chunks.deferred`) start at zero at
-every capture boundary: warmup state cannot become a measurement peak, and the
-first measured frame publishes the real sampled values. Classification lives in
-`isCaptureLocalGauge()`; a new gauge defaults to persistent ownership.
+Capture-local gauges such as `staging.slice.bytes`, the end-of-frame
+chunk-manager samples (`chunks.active`, `chunks.deferred`) and the pool
+active/free splits (`voxel.pool.*`, `border.pool.*`, `mesh.pool.*`) start at
+zero at every capture boundary: warmup state cannot become a measurement peak,
+and the first measured frame publishes the real sampled values. Classification
+lives in `isCaptureLocalGauge()`; a new gauge defaults to persistent ownership.
 Warmup-zero starts use the same boundary.
 Worker batches carry an epoch obtained at mesh entry; a batch from an earlier
 epoch is discarded in full even if it finishes during measurement. Memory

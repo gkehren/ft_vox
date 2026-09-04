@@ -183,6 +183,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp

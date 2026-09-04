@@ -6,6 +6,7 @@
 // activeVoxels cache staying in sync and no capacity churn.
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkManager.hpp>
+#include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 
@@ -36,6 +37,13 @@ struct VoxelView : std::span<const Voxel>
 {
 	using std::span<const Voxel>::span;
 	size_t capacity() const { return size(); }
+};
+
+// Friend probe declared in ChunkManager.hpp: exposes the deferred-edit
+// queue size so coalescing behavior is observable without public API.
+struct ChunkManagerProbe
+{
+	static size_t pendingEdits(const ChunkManager &m) { return m.m_pendingEdits.size(); }
 };
 
 // Friend probe declared in Chunk.hpp: verifies full private state without
@@ -72,6 +80,14 @@ struct ChunkStateProbe
 	static const std::bitset<CHUNK_VOLUME> &active(const Chunk &c)
 	{
 		return c.activeVoxels;
+	}
+	static MeshBuildResult *pendingResult(const Chunk &c)
+	{
+		return c.m_pendingResult;
+	}
+	static uint64_t meshGeneration(const Chunk &c)
+	{
+		return c.m_meshGeneration;
 	}
 };
 
@@ -241,14 +257,24 @@ int main(int argc, char **argv)
             CHECK(registry().snapshot().current[VoxelBytes] == withStorage.current[VoxelBytes], "move assignment releases destination storage");
             c.setVoxel(1, 1, 1, STONE);
             c.generateMesh();
+            MeshBuildResult *pending = ChunkStateProbe::pendingResult(c);
+            CHECK(pending != nullptr, "generateMesh attaches a pooled build result");
+            CHECK(!pending->opaqueVertices.empty(),
+                  "attached build result carries the mesh payload");
+            CHECK(ChunkStateProbe::pendingResult(c)->owner == &c,
+                  "build result names its owning chunk");
+            // cpu.opaque/water.* mesh gauges are engine-published from
+            // MeshResultPoolStats; chunks no longer publish per-chunk mesh
+            // bytes (issue #104), so no gauge moves on mesh publication.
             const auto meshed = registry().snapshot();
-            CHECK(meshed.current[OpaqueVertexBytes] > before.current[OpaqueVertexBytes], "mesh publication includes vertex data");
-            CHECK(meshed.current[CpuMeshCapacity] >= meshed.current[OpaqueVertexBytes], "retained mesh capacity covers its data");
+            (void)meshed;
+            const uint64_t generationAfterMesh = ChunkStateProbe::meshGeneration(c);
             c.reset(glm::vec3(0));
             const auto reset = registry().snapshot();
             CHECK(reset.current[VoxelBytes] == before.current[VoxelBytes], "full reset returns voxel storage to pool");
-            CHECK(reset.current[OpaqueVertexBytes] == before.current[OpaqueVertexBytes], "reset clears logical mesh data");
-            CHECK(reset.current[CpuMeshCapacity] == meshed.current[CpuMeshCapacity], "reset retains mesh allocations");
+            CHECK(ChunkStateProbe::pendingResult(c) == nullptr, "reset returns the attached build result to its pool");
+            CHECK(ChunkStateProbe::meshGeneration(c) == generationAfterMesh + 1,
+                  "reset bumps the mesh generation");
         }
         const auto after = registry().snapshot();
         for (size_t i=0; i<=OccupancyBytes; ++i)
@@ -652,29 +678,549 @@ int main(int argc, char **argv)
 	}
 
 	// 13) Mesh output equivalence and edge behavior (issue #103/#113): the
-	// compact borders cull exactly like the dense shell did.
+	// compact borders cull exactly like the dense shell did. Since #104 the
+	// payload lives in the attached build result, so the comparison is
+	// byte-for-byte on that result (the old index-count probes read the
+	// post-upload counters, which stay 0 without an allocator).
 	{
 		TerrainGenerator mgen(99);
 		Chunk withBorders(glm::vec3(0.0f));
 		CHECK(withBorders.prepareVoxelStorageForGeneration(), "mesh-equivalence prepare");
 		withBorders.generateTerrain(mgen);
 		withBorders.generateMesh();
-		const uint32_t opaqueWith = withBorders.getOpaqueIndexCount();
+		const MeshBuildResult *meshWith = ChunkStateProbe::pendingResult(withBorders);
+		CHECK(meshWith != nullptr && !meshWith->opaqueIndices.empty(),
+			  "populated-border mesh emitted geometry into the result");
+		// meshNeedsUpdate is set for the upload stage; index counters stay
+		// zero until the GPU upload swaps the device buffers.
+		CHECK(withBorders.needsGPUUpload(), "built mesh awaits upload");
+		// Snapshot the first payload: the block is released (and detached)
+		// when the re-mesh below supersedes it, so the comparison must run
+		// against copies.
+		const std::vector<Vertex> firstOpaqueVerts = meshWith->opaqueVertices;
+		const std::vector<uint32_t> firstOpaqueIdx = meshWith->opaqueIndices;
+		const std::vector<Vertex> firstWaterVerts = meshWith->waterVertices;
+		const std::vector<uint32_t> firstWaterIdx = meshWith->waterIndices;
 
 		Chunk withoutBorders(glm::vec3(0.0f));
 		CHECK(withoutBorders.prepareVoxelStorageForGeneration(), "no-border prepare");
 		withoutBorders.generateTerrain(mgen);
 		withoutBorders.releaseNeighborBorders(); // freed after upload: borders read AIR
 		withoutBorders.generateMesh();
+		const MeshBuildResult *meshWithout = ChunkStateProbe::pendingResult(withoutBorders);
+		CHECK(meshWithout != nullptr, "missing-border mesh produced a result");
 		// With no neighbor data every border-facing surface is emitted, so
 		// the missing-border mesh is the larger one.
-		CHECK(withoutBorders.getOpaqueIndexCount() >= opaqueWith,
+		CHECK(meshWithout->opaqueIndices.size() >= meshWith->opaqueIndices.size(),
 			  "missing borders produce more geometry than populated borders");
 
 		// Deterministic re-mesh with borders present.
 		withBorders.generateMesh();
-		CHECK(withBorders.getOpaqueIndexCount() == opaqueWith,
-			  "re-mesh with populated borders is deterministic");
+		const MeshBuildResult *meshWithAgain = ChunkStateProbe::pendingResult(withBorders);
+		CHECK(meshWithAgain != meshWith, "re-mesh publishes a fresh result block");
+		CHECK(meshWithAgain->opaqueVertices == firstOpaqueVerts &&
+				  meshWithAgain->opaqueIndices == firstOpaqueIdx &&
+				  meshWithAgain->waterVertices == firstWaterVerts &&
+				  meshWithAgain->waterIndices == firstWaterIdx,
+			  "re-mesh with populated borders is byte-for-byte deterministic");
+		// The superseded block was returned to the pool by the publish step;
+		// the default pool must not be growing per remesh.
+		CHECK(MeshResultPool::defaultPool().activeCount() >= 2,
+			  "in-flight results stay active while attached");
+	}
+
+	// 13b) Publish/generation/revision semantics (issue #104, review #114):
+	// superseded results are rejected without touching chunk state, repeated
+	// remesh replaces the pending block, and unload with a pending result
+	// returns it to the pool.
+	{
+		MeshResultPool pool;
+		TerrainGenerator pgen(1234);
+		Chunk chunk(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		CHECK(chunk.prepareVoxelStorageForGeneration(), "publish-semantics prepare");
+		chunk.generateTerrain(pgen);
+		const uint64_t generationAfterGen = ChunkStateProbe::meshGeneration(chunk);
+		const uint64_t revisionAfterGen = chunk.meshRevision();
+
+		// Stale publish: a result built for a different generation.
+		{
+			MeshBuildResult *stale = pool.acquire();
+			stale->beginBuild(&chunk, generationAfterGen + 999, revisionAfterGen);
+			stale->opaqueIndices.push_back(0);
+			const size_t freeBefore = pool.freeCount();
+			CHECK(!chunk.publishMeshResult(stale),
+				  "superseded generation is rejected at publish");
+			CHECK(pool.freeCount() == freeBefore + 1,
+				  "rejected result is returned to its pool");
+			CHECK(!chunk.hasPendingMeshResult(), "rejected result is not attached");
+			CHECK(chunk.getState() != ChunkState::MESHED,
+				  "rejected publish does not mark the chunk MESHED");
+		}
+		// Same generation but OLD revision (issue #114 review item 22): an
+		// in-flight mesh built before an edit must not overwrite the newer
+		// content. This is deliberately distinct from the recycle case.
+		{
+			MeshBuildResult *old = pool.acquire();
+			old->beginBuild(&chunk, generationAfterGen, revisionAfterGen - 1);
+			old->opaqueIndices.push_back(0);
+			const size_t freeBefore = pool.freeCount();
+			CHECK(!chunk.publishMeshResult(old),
+				  "old-revision result (same generation) is rejected");
+			CHECK(pool.freeCount() == freeBefore + 1,
+				  "rejected old-revision result is returned to its pool");
+			CHECK(chunk.getState() != ChunkState::MESHED,
+				  "old-revision publish leaves the state untouched");
+		}
+		// Wrong owner is rejected the same way.
+		{
+			Chunk other(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			MeshBuildResult *foreign = pool.acquire();
+			foreign->beginBuild(&other, ChunkStateProbe::meshGeneration(chunk),
+								chunk.meshRevision());
+			const size_t freeBefore = pool.freeCount();
+			CHECK(!chunk.publishMeshResult(foreign),
+				  "foreign-owner result is rejected");
+			CHECK(pool.freeCount() == freeBefore + 1,
+				  "rejected foreign result is returned to its pool");
+		}
+		// Edit invalidates the in-flight build (issue #114 review item 19):
+		// a result stamped pre-edit is rejected once the edit landed, the
+		// edit data is present, and the chunk stays GENERATED for remesh.
+		// Runs before any valid publication, so no pending result exists.
+		{
+			chunk.setState(ChunkState::GENERATED);
+			const uint64_t revBeforeEdit = chunk.meshRevision();
+			MeshBuildResult *inflight = pool.acquire();
+			inflight->beginBuild(&chunk, generationAfterGen, revBeforeEdit);
+			// ... worker is meshing here ...
+			chunk.setVoxel(3, 40, 3, STONE); // the edit lands (bumps revision)
+			CHECK(chunk.meshRevision() == revBeforeEdit + 1,
+				  "edit bumps the mesh revision");
+			CHECK(chunk.getState() == ChunkState::GENERATED,
+				  "edit leaves the chunk GENERATED");
+			pool.finishBuild(inflight);
+			const size_t freeBeforeEdit = pool.freeCount();
+			CHECK(!chunk.publishMeshResult(inflight),
+				  "pre-edit in-flight result is rejected after the edit");
+			CHECK(pool.freeCount() == freeBeforeEdit + 1,
+				  "rejected pre-edit result back in the pool");
+			CHECK(!chunk.hasPendingMeshResult(), "no pending result survives the edit");
+			CHECK(chunk.needsGPUUpload(), "edit keeps the remesh armed");
+			CHECK(chunk.getVoxel(3, 40, 3).type == static_cast<uint8_t>(STONE),
+				  "edit data present after the rejected publish");
+		}
+
+		// Matching identity publishes and is the only state commit point.
+		{
+			MeshBuildResult *good = pool.acquire();
+			good->beginBuild(&chunk, generationAfterGen, chunk.meshRevision());
+			CHECK(chunk.publishMeshResult(good), "matching identity publishes");
+			CHECK(chunk.getState() == ChunkState::MESHED,
+				  "publish commits the MESHED state");
+			CHECK(chunk.needsGPUUpload(), "publish arms meshNeedsUpdate");
+			// buildMesh/buildLODMesh must no longer mutate chunk state
+			// (issue #114 review item 12): a fresh build leaves the state
+			// and the meshNeedsUpdate flag exactly as it found them.
+			chunk.setState(ChunkState::GENERATED);
+			const bool armedBefore = chunk.needsGPUUpload();
+			MeshBuildResult *pure = pool.acquire();
+			chunk.buildMesh(*pure, generationAfterGen, chunk.meshRevision());
+			CHECK(chunk.getState() == ChunkState::GENERATED,
+				  "buildMesh does not mutate chunk state");
+			CHECK(chunk.needsGPUUpload() == armedBefore,
+				  "buildMesh does not change meshNeedsUpdate");
+			pool.finishBuild(pure);
+			pool.release(pure);
+		}
+
+		// Valid publish then repeated remesh: newest result wins, previous
+		// one returns to the pool, no leak.
+		CHECK(chunk.generateMesh(), "first publish succeeds");
+		MeshBuildResult *firstPending = ChunkStateProbe::pendingResult(chunk);
+		CHECK(firstPending != nullptr, "first result attached");
+		CHECK(pool.activeCount() == 1, "one block active while attached");
+		CHECK(chunk.generateMesh(), "repeated remesh publishes");
+		MeshBuildResult *secondPending = ChunkStateProbe::pendingResult(chunk);
+		CHECK(secondPending != nullptr && secondPending != firstPending,
+			  "repeated remesh attaches a fresh block");
+		CHECK(pool.activeCount() == 1,
+			  "superseded attached result was returned to the pool");
+
+		// Unload with a pending result: reset returns the block and bumps
+		// the generation, so the retired payload can never be re-attached.
+		const uint64_t genBeforeReset = ChunkStateProbe::meshGeneration(chunk);
+		const uint64_t revBeforeReset = chunk.meshRevision();
+		chunk.reset(glm::vec3(16.0f, 0.0f, 0.0f));
+		CHECK(!chunk.hasPendingMeshResult(), "reset releases the pending result");
+		CHECK(pool.freeCount() == pool.capacity(), "pool balanced after reset");
+		CHECK(ChunkStateProbe::meshGeneration(chunk) == genBeforeReset + 1,
+			  "reset bumps the mesh generation");
+		CHECK(chunk.meshRevision() > revBeforeReset,
+			  "reset bumps the mesh revision too");
+
+		// A publish attempt for the retired incarnation lands nowhere, even
+		// if the revision value happened to match after recycling
+		// (issue #114 review item 21: both dimensions are checked).
+		MeshBuildResult *retired = pool.acquire();
+		retired->beginBuild(&chunk, genBeforeReset, chunk.meshRevision());
+		const size_t freeBefore = pool.freeCount();
+		CHECK(!chunk.publishMeshResult(retired),
+			  "result of the retired generation is rejected after reset");
+		CHECK(pool.freeCount() == freeBefore + 1, "retired result returned to pool");
+	}
+
+	// 13c) Moves detach pending results (issue #104): neither side may keep
+	// a block whose owner names a gutted chunk; the generation itself is
+	// transferred as part of the chunk identity.
+	{
+		MeshResultPool pool;
+		TerrainGenerator pgen(4321);
+		Chunk source(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		CHECK(source.prepareVoxelStorageForGeneration(), "move-pending prepare");
+		source.generateTerrain(pgen);
+		CHECK(source.generateMesh(), "move-pending mesh");
+		CHECK(source.hasPendingMeshResult(), "pending result before move");
+		const uint64_t sourceGen = ChunkStateProbe::meshGeneration(source);
+
+		Chunk destination(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		destination = std::move(source);
+		CHECK(!destination.hasPendingMeshResult(), "move assignment leaves no pending result");
+		CHECK(!source.hasPendingMeshResult(), "moved-from chunk holds no pending result");
+		CHECK(pool.freeCount() == pool.capacity(), "pool balanced after move assignment");
+		CHECK(ChunkStateProbe::meshGeneration(destination) == sourceGen,
+			  "move transfers the mesh generation");
+	}
+
+	// 13d) Destruction with an attached result returns the block to its
+	// pool (issue #104): a dying chunk cannot leak a pooled build result.
+	{
+		MeshResultPool &defaultPool = MeshResultPool::defaultPool();
+		const size_t activeBefore = defaultPool.activeCount();
+		{
+			TerrainGenerator dgen(777);
+			Chunk doomed(glm::vec3(0.0f));
+			CHECK(doomed.prepareVoxelStorageForGeneration(), "dtor-release prepare");
+			doomed.generateTerrain(dgen);
+			CHECK(doomed.generateMesh(), "dtor-release mesh");
+			CHECK(defaultPool.activeCount() == activeBefore + 1,
+				  "attached result is active while the chunk lives");
+		}
+		CHECK(defaultPool.activeCount() == activeBefore,
+			  "destructor returns the attached build result to the pool");
+	}
+
+	// 13e) Deferred edit subsystem (issue #114 review, 2nd pass): edits are
+	// logical operations (target + neighbor mirrors). When the target is in
+	// transit the whole group is deferred; target and mirrors apply
+	// independently as their chunks free up; pending writes coalesce per
+	// coordinate; recycled chunks never receive a stale queued edit.
+	{
+		ChunkPool pool(16);
+		TerrainGenerator mgen(2468);
+		ChunkManager manager(&mgen, nullptr, &pool);
+
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(64);
+		Chunk *origin = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		Chunk *east = manager.getChunkAtWorldPos(
+			glm::vec3(static_cast<float>(CHUNK_SIZE) + 4.0f, 40.0f, 4.0f));
+		Chunk *west = manager.getChunkAtWorldPos(glm::vec3(-12.0f, 40.0f, 4.0f));
+		Chunk *south = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, -12.0f));
+		Chunk *north = manager.getChunkAtWorldPos(
+			glm::vec3(4.0f, 40.0f, static_cast<float>(CHUNK_SIZE) + 4.0f));
+		CHECK(origin != nullptr && east != nullptr && west != nullptr &&
+				  south != nullptr && north != nullptr,
+			  "primary and four neighbors registered by the load path");
+		if (origin && east && west && south && north)
+		{
+			// (0) Coordinate validation gates the whole edit pipeline
+			// (final review): out-of-range world Y - exactly what a
+			// right-click on the top face of a y = CHUNK_HEIGHT-1 voxel
+			// produces (prev.y = CHUNK_HEIGHT) - is refused before any
+			// voxel backing access, with no state change of any kind.
+			{
+				const uint64_t revisionBefore = origin->meshRevision();
+				const size_t pendingBefore = ChunkManagerProbe::pendingEdits(manager);
+				CHECK(!manager.placeVoxel(glm::vec3(4.0f, -1.0f, 4.0f), STONE),
+					  "placing below world height is refused");
+				CHECK(!manager.placeVoxel(glm::vec3(4.0f, static_cast<float>(CHUNK_HEIGHT), 4.0f), STONE),
+					  "placing above world height is refused");
+				CHECK(!manager.deleteVoxel(glm::vec3(4.0f, -1.0f, 4.0f)),
+					  "deleting below world height is refused");
+				CHECK(!manager.deleteVoxel(glm::vec3(4.0f, static_cast<float>(CHUNK_HEIGHT), 4.0f)),
+					  "deleting above world height is refused");
+				CHECK(origin->meshRevision() == revisionBefore,
+					  "invalid edits do not bump mesh revision");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == pendingBefore,
+					  "invalid edits do not queue anything");
+
+				// Off-by-one lock: the top valid voxel coordinate is usable.
+				const glm::vec3 topPos(4.0f, static_cast<float>(CHUNK_HEIGHT - 1), 4.0f);
+				CHECK(manager.placeVoxel(topPos, STONE),
+					  "top valid voxel coordinate is accepted");
+				CHECK(origin->getVoxel(4, CHUNK_HEIGHT - 1, 4).type == static_cast<uint8_t>(STONE),
+					  "top voxel written");
+				CHECK(manager.deleteVoxel(topPos),
+					  "top valid voxel can be deleted");
+				CHECK(origin->getVoxel(4, CHUNK_HEIGHT - 1, 4).type == static_cast<uint8_t>(AIR),
+					  "top voxel removed");
+			}
+			// Terrain heights vary per column: place every test voxel at
+			// the column's topmost air cell so the effective state is
+			// guaranteed AIR before each place.
+			auto airY = [origin](int lx, int lz) {
+				for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+					if (origin->getVoxel(static_cast<uint32_t>(lx),
+										 static_cast<uint32_t>(y),
+										 static_cast<uint32_t>(lz))
+											.type == static_cast<uint8_t>(AIR))
+						return y;
+				return 0;
+			};
+			const int yIn = airY(4, 4);		   // interior column
+			const int yE8 = airY(15, 8);	   // east boundary, z=8
+			const int yE10 = airY(15, 10);	   // east boundary, z=10
+			const int yN6 = airY(6, 15);	   // north boundary, x=6
+			const int yW6 = airY(0, 6);		   // west boundary, z=6
+			const int yS6 = airY(6, 0);		   // south boundary, x=6
+			const int yCorner = airY(0, 0);	   // west+south corner
+			const int yW9 = airY(0, 9);		   // west boundary, z=9
+			const int yI8 = airY(8, 8);		   // interior, successive edits
+			const int yI9 = airY(9, 9);		   // interior, recycle test
+
+			// (a) Interior edit deferred while the primary is in transit.
+			origin->setInTransit(true);
+			const glm::vec3 insidePos(4.0f, static_cast<float>(yIn), 4.0f);
+			CHECK(manager.placeVoxel(insidePos, STONE),
+				  "deferred interior edit reports success");
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == 1,
+				  "interior edit queues exactly one entry");
+			CHECK(origin->getVoxel(4, yIn, 4).type != static_cast<uint8_t>(STONE),
+				  "deferred edit does not write while in transit");
+			origin->setInTransit(false);
+			manager.processFinishedJobs();
+			CHECK(origin->getVoxel(4, yIn, 4).type == static_cast<uint8_t>(STONE),
+				  "queued interior edit applied after transit clears");
+			CHECK(origin->getState() == ChunkState::GENERATED,
+				  "applied edit marks the chunk GENERATED");
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == 0,
+				  "queue empty after apply");
+
+			// (b) BLOCKER regression (item 1/11): boundary edit while the
+			// TARGET is in transit must defer the target AND still schedule
+			// the neighbor mirror - not drop it.
+			{
+				const glm::vec3 boundaryPos(static_cast<float>(CHUNK_SIZE - 1),
+											static_cast<float>(yE8), 8.0f);
+				const uint64_t originRev = origin->meshRevision();
+				const uint64_t eastRev = east->meshRevision();
+				origin->setInTransit(true);
+				CHECK(manager.placeVoxel(boundaryPos, STONE),
+					  "in-transit boundary edit reports success");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+					  "target and mirror are both queued (mirror never lost)");
+				CHECK(origin->getVoxel(CHUNK_SIZE - 1, yE8, 8).type !=
+						  static_cast<uint8_t>(STONE),
+					  "target not written while in transit");
+				CHECK(east->sampleForMeshing(-1, yE8, 8) == AIR,
+					  "mirror not written while target deferred");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(CHUNK_SIZE - 1, yE8, 8).type ==
+						  static_cast<uint8_t>(STONE),
+					  "deferred target edit applied");
+				CHECK(east->sampleForMeshing(-1, yE8, 8) == STONE,
+					  "deferred mirror applied to the neighbor");
+				CHECK(origin->meshRevision() > originRev &&
+						  east->meshRevision() > eastRev,
+					  "both chunks invalidated");
+				CHECK(origin->getState() == ChunkState::GENERATED &&
+						  east->getState() == ChunkState::GENERATED,
+					  "both chunks re-armed for remesh");
+				// Cleanup so later sections see the column as AIR.
+				CHECK(manager.deleteVoxel(boundaryPos), "blocker cleanup");
+				manager.processFinishedJobs();
+				CHECK(east->sampleForMeshing(-1, yE8, 8) == AIR,
+					  "blocker cleanup mirrored");
+			}
+
+			// (c) Boundary DELETE while the target is in transit (item 12):
+			// a previously culled face must reappear on both sides.
+			{
+				const glm::vec3 boundaryPos(static_cast<float>(CHUNK_SIZE - 1),
+											static_cast<float>(yE10), 10.0f);
+				CHECK(manager.placeVoxel(boundaryPos, STONE),
+					  "seed boundary voxel (both free)");
+				CHECK(origin->getVoxel(CHUNK_SIZE - 1, yE10, 10).type ==
+							  static_cast<uint8_t>(STONE) &&
+						  east->sampleForMeshing(-1, yE10, 10) == STONE,
+					  "seed voxel mirrored");
+				origin->setInTransit(true);
+				CHECK(manager.deleteVoxel(boundaryPos),
+					  "in-transit boundary delete reports success");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+					  "delete queues target and mirror");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(CHUNK_SIZE - 1, yE10, 10).type ==
+						  static_cast<uint8_t>(AIR),
+					  "deferred delete applied on target");
+				CHECK(east->sampleForMeshing(-1, yE10, 10) == AIR,
+					  "deferred delete applied on neighbor mirror");
+				CHECK(origin->getState() == ChunkState::GENERATED &&
+						  east->getState() == ChunkState::GENERATED,
+					  "delete re-arms remesh on both sides");
+			}
+
+			// (d) Target and neighbor BOTH in transit (item 10): each entry
+			// applies when its own chunk frees, independently.
+			{
+				const glm::vec3 boundaryPos(6.0f, static_cast<float>(yN6),
+											static_cast<float>(CHUNK_SIZE - 1));
+				const uint64_t northRev = north->meshRevision();
+				origin->setInTransit(true);
+				north->setInTransit(true);
+				CHECK(manager.placeVoxel(boundaryPos, STONE), "both-transit edit accepted");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+					  "both entries queued");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(6, yN6, CHUNK_SIZE - 1).type ==
+						  static_cast<uint8_t>(STONE),
+					  "target applied while neighbor still in transit");
+				CHECK(north->sampleForMeshing(6, yN6, -1) == AIR,
+					  "mirror waits for the neighbor");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 1,
+					  "mirror remains queued");
+				north->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(north->sampleForMeshing(6, yN6, -1) == STONE,
+					  "mirror applied when the neighbor frees");
+				CHECK(north->meshRevision() > northRev, "neighbor invalidated");
+				// Cleanup so later sections see the column as AIR.
+				CHECK(manager.deleteVoxel(boundaryPos), "both-transit cleanup");
+				manager.processFinishedJobs();
+				CHECK(north->sampleForMeshing(6, yN6, -1) == AIR,
+					  "both-transit cleanup mirrored");
+			}
+
+			// (e) All four directions: target in transit, correct mirror
+			// coordinate per neighbor (item 13).
+			{
+				struct Direction
+				{
+					glm::vec3 editPos;
+					Chunk *neighbor;
+					int mirrorX, mirrorY, mirrorZ;
+					const char *name;
+				};
+				const Direction dirs[] = {
+					{glm::vec3(0.0f, static_cast<float>(yW6), 6.0f), west,
+					 CHUNK_SIZE, yW6, 6, "west"},
+					{glm::vec3(static_cast<float>(CHUNK_SIZE - 1),
+							   static_cast<float>(yE8), 8.0f),
+					 east, -1, yE8, 8, "east"},
+					{glm::vec3(6.0f, static_cast<float>(yS6), 0.0f), south,
+					 6, yS6, CHUNK_SIZE, "south"},
+					{glm::vec3(6.0f, static_cast<float>(yN6),
+							   static_cast<float>(CHUNK_SIZE - 1)),
+					 north, 6, yN6, -1, "north"},
+				};
+				for (const Direction &d : dirs)
+				{
+					origin->setInTransit(true);
+					const uint64_t neighborRev = d.neighbor->meshRevision();
+					CHECK(manager.placeVoxel(d.editPos, BRICKS), d.name);
+					origin->setInTransit(false);
+					manager.processFinishedJobs();
+					CHECK(d.neighbor->sampleForMeshing(d.mirrorX, d.mirrorY, d.mirrorZ) == BRICKS,
+						  "mirror coordinate correct");
+					CHECK(d.neighbor->meshRevision() > neighborRev, d.name);
+					// Reset for the next direction.
+					CHECK(manager.deleteVoxel(d.editPos), "direction cleanup");
+					manager.processFinishedJobs();
+				}
+			}
+
+			// (f) Corner edit: two mirrors, no diagonal (item 14).
+			{
+				const glm::vec3 cornerPos(0.0f, static_cast<float>(yCorner), 0.0f);
+				const uint64_t westRev = west->meshRevision();
+				const uint64_t southRev = south->meshRevision();
+				origin->setInTransit(true);
+				CHECK(manager.placeVoxel(cornerPos, BRICKS), "corner edit accepted");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 3,
+					  "corner queues target plus two face mirrors");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(west->sampleForMeshing(CHUNK_SIZE, yCorner, 0) == BRICKS &&
+						  south->sampleForMeshing(0, yCorner, CHUNK_SIZE) == BRICKS,
+					  "both face mirrors applied with correct coordinates");
+				CHECK(west->meshRevision() > westRev && south->meshRevision() > southRev,
+					  "both corner neighbors invalidated");
+				CHECK(manager.deleteVoxel(cornerPos), "corner cleanup");
+				manager.processFinishedJobs();
+			}
+
+			// (g) Successive edits coalesce to the last logical state
+			// (items 15-19, 21-22).
+			{
+				// place -> delete during transit: final AIR.
+				origin->setInTransit(true);
+				const glm::vec3 p(8.0f, static_cast<float>(yI8), 8.0f);
+				CHECK(manager.placeVoxel(p, STONE), "place pending");
+				CHECK(manager.deleteVoxel(p), "delete pending");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(8, yI8, 8).type == static_cast<uint8_t>(AIR),
+					  "place then delete lands AIR");
+
+				// delete -> place during transit: final STONE.
+				origin->setInTransit(true);
+				CHECK(!manager.deleteVoxel(p), "delete of AIR is a logical no-op");
+				CHECK(manager.placeVoxel(p, STONE), "place pending");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(8, yI8, 8).type == static_cast<uint8_t>(STONE),
+					  "delete then place lands STONE");
+
+				// Boundary place -> delete -> place DIRT: one coalesced
+				// target entry + one coalesced mirror entry.
+				const glm::vec3 boundaryPos(0.0f, static_cast<float>(yW9), 9.0f);
+				origin->setInTransit(true);
+				CHECK(manager.placeVoxel(boundaryPos, STONE), "boundary place");
+				CHECK(manager.deleteVoxel(boundaryPos), "boundary delete");
+				CHECK(manager.placeVoxel(boundaryPos, DIRT), "boundary re-place");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+					  "successive boundary edits coalesce to target + mirror");
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(0, yW9, 9).type == static_cast<uint8_t>(DIRT) &&
+						  west->sampleForMeshing(CHUNK_SIZE, yW9, 9) == DIRT,
+					  "coalesced final state DIRT on both sides");
+				CHECK(manager.deleteVoxel(boundaryPos), "boundary cleanup");
+				CHECK(manager.deleteVoxel(p), "interior cleanup");
+				manager.processFinishedJobs();
+			}
+
+			// (h) A queued edit never lands on a recycled incarnation
+			// (items 26-28): reset bumps the generation, the stale entry is
+			// dropped at apply time.
+			{
+				const glm::vec3 p(9.0f, static_cast<float>(yI9), 9.0f);
+				origin->setInTransit(true);
+				CHECK(manager.placeVoxel(p, STONE), "edit queued for recycle test");
+				origin->reset(origin->getPosition()); // same pointer, new incarnation
+				origin->setInTransit(false);
+				manager.processFinishedJobs();
+				CHECK(origin->getVoxel(9, yI9, 9).type == static_cast<uint8_t>(AIR),
+					  "stale queued edit dropped after recycle");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == 0,
+					  "stale entry removed from the queue");
+			}
+		}
 	}
 
 	// 14) Two-sided boundary edit data path (issue #113): the

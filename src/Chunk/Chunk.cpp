@@ -1,5 +1,6 @@
 #include <Engine/WorkloadTelemetry.hpp>
 #include "Chunk.hpp"
+#include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/StreamHelpers.hpp>
 #include <Renderer/ShadowCascades.hpp>
 #include <Renderer/Lighting.hpp>
@@ -36,13 +37,15 @@ struct MeshWorkspace
 static thread_local MeshWorkspace s_meshWorkspace;
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state, VoxelPool *voxelPool,
-             BorderPool *borderPool)
+             BorderPool *borderPool, MeshResultPool *meshPool)
     : position(position), visible(false), state(state),
       opaqueIndexCount(0), waterIndexCount(0),
       m_voxelPool(voxelPool ? voxelPool : &VoxelPool::defaultPool()),
       m_storage(nullptr),
       m_borderPool(borderPool ? borderPool : &BorderPool::defaultPool()),
       m_borders(nullptr),
+      m_resultPool(meshPool ? meshPool : &MeshResultPool::defaultPool()),
+      m_pendingResult(nullptr),
       meshNeedsUpdate(true) { publishCpuTelemetry(); }
 
 Chunk::Chunk(Chunk &&other) noexcept
@@ -60,12 +63,13 @@ Chunk::Chunk(Chunk &&other) noexcept
       activeVoxels(std::move(other.activeVoxels)),
       m_borderPool(other.m_borderPool),
       m_borders(other.m_borders),
+      m_resultPool(other.m_resultPool),
+      m_meshGeneration(other.m_meshGeneration),
+      m_meshRevision(other.m_meshRevision.load(std::memory_order_relaxed)),
       biomeGrassColors(other.biomeGrassColors),
       biomeFoliageColors(other.biomeFoliageColors),
       biomeTypes(other.biomeTypes),
       heightMap(other.heightMap),
-      vertices(std::move(other.vertices)), indices(std::move(other.indices)),
-      waterVertices(std::move(other.waterVertices)), waterIndices(std::move(other.waterIndices)),
       m_isLODMesh(other.m_isLODMesh)
 {
   other.m_storage = nullptr;
@@ -79,6 +83,12 @@ Chunk::Chunk(Chunk &&other) noexcept
   other.waterIndexBuffer = {};
   other.opaqueIndexCount = 0;
   other.waterIndexCount = 0;
+  // A pending build result belongs to the moved-from incarnation: release
+  // it rather than transferring (issue #104). Its owner pointer names the
+  // source chunk, and the destination identity is carried by the transfer
+  // of m_meshGeneration above - a build still in flight for that same
+  // generation remains publishable on the destination.
+  other.releasePendingMeshResult();
 }
 Chunk &Chunk::operator=(Chunk &&other) noexcept
 {
@@ -92,6 +102,8 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     // (issue #113 review).
     releaseNeighborBorders();
     releaseVoxelStorageOnRetire();
+    releasePendingMeshResult();
+    other.releasePendingMeshResult();
 
     position = std::move(other.position);
     visible = other.visible;
@@ -112,15 +124,16 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     m_borders = other.m_borders;
     other.m_borders = nullptr;
 
+    m_resultPool = other.m_resultPool;
+    m_meshGeneration = other.m_meshGeneration;
+    m_meshRevision.store(other.m_meshRevision.load(std::memory_order_relaxed),
+                         std::memory_order_relaxed);
+
     activeVoxels = std::move(other.activeVoxels);
     biomeGrassColors = other.biomeGrassColors;
     biomeFoliageColors = other.biomeFoliageColors;
     biomeTypes = other.biomeTypes;
     heightMap = other.heightMap;
-    vertices = std::move(other.vertices);
-    indices = std::move(other.indices);
-    waterVertices = std::move(other.waterVertices);
-    waterIndices = std::move(other.waterIndices);
     m_allocator = other.m_allocator;
     vertexBuffer = other.vertexBuffer;
     indexBuffer = other.indexBuffer;
@@ -147,6 +160,9 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
 
 Chunk::~Chunk()
 {
+  // Release all borrowed backing through the pools that own it, including
+  // an attached mesh build result (issue #104).
+  releasePendingMeshResult();
   releaseNeighborBorders();
   releaseVoxelStorageOnRetire();
   telemetry::registry().replaceCpu(m_cpuTelemetry, std::array<uint64_t, 13>{});
@@ -226,12 +242,17 @@ ChunkState Chunk::getState() const { return state; }
 
 const Voxel &Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
 {
-  if (!m_storage)
-  {
-    static constexpr Voxel s_air{static_cast<uint8_t>(AIR)};
-    return s_air;
-  }
-  return m_storage->voxels[getIndex(x, y, z)];
+	// Strict internal accessor (issue #114 final review): out-of-range
+	// coordinates would index past the voxel storage. Callers that can
+	// see outside the chunk must use sampleForMeshing()/isVoxelActive(),
+	// which answer AIR/false for the padded neighborhood.
+	assert(x < CHUNK_SIZE && y < CHUNK_HEIGHT && z < CHUNK_SIZE);
+	if (!m_storage)
+	{
+		static constexpr Voxel s_air{static_cast<uint8_t>(AIR)};
+		return s_air;
+	}
+	return m_storage->voxels[getIndex(x, y, z)];
 }
 
 void Chunk::setVoxel(int x, int y, int z, TextureType type)
@@ -252,33 +273,40 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
         m_storage->voxels[index].type = static_cast<uint8_t>(AIR);
       activeVoxels.reset(index);
     }
+    // Content invalidation (issue #114 review): any in-flight mesh built
+    // from the previous content is rejected at publish time.
+    m_meshRevision.fetch_add(1, std::memory_order_relaxed);
   }
-  else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE &&
-           y >= 0 && y < static_cast<int>(CHUNK_HEIGHT))
-  {
-    // Lazily re-borrow borders if they were freed after a previous GPU
-    // upload. Vertical padding (y = -1 / CHUNK_HEIGHT) is not representable
-    // in the compact storage and was never written by generation either.
-    // Lazily re-borrow border storage if it was freed after a previous GPU
-    // upload. Acquisition may throw on OOM; a failed edit write is not
-    // fatal, so ignore it (the block itself is unchanged).
-    if (!m_borders)
+    else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE &&
+             y >= 0 && y < static_cast<int>(CHUNK_HEIGHT))
     {
-      try
-      {
-        m_borders = m_borderPool->acquire();
-        // A freshly acquired pool block holds stale bytes: initialize it so
-        // every other sampled border coordinate reads AIR (issue #113).
-        m_borders->resetToAir();
-        publishCpuTelemetry();
-      }
-      catch (const std::bad_alloc &)
-      {
-        return;
-      }
+        // Lazily re-borrow borders if they were freed after a previous GPU
+        // upload. Vertical padding (y = -1 / CHUNK_HEIGHT) is not representable
+        // in the compact storage and was never written by generation either.
+        // Lazily re-borrow border storage if it was freed after a previous GPU
+        // upload. Acquisition may throw on OOM; a failed edit write is not
+        // fatal, so ignore it (the block itself is unchanged).
+        if (!m_borders)
+        {
+            try
+            {
+                m_borders = m_borderPool->acquire();
+                // A freshly acquired pool block holds stale bytes: initialize it so
+                // every other sampled border coordinate reads AIR (issue #113).
+                m_borders->resetToAir();
+                publishCpuTelemetry();
+            }
+            catch (const std::bad_alloc &)
+            {
+                return;
+            }
+        }
+        m_borders->mutableAt(x, y, z) = static_cast<uint8_t>(type);
+        // Border content invalidation too (issue #114 review): mirror
+        // writes from a neighbor's boundary edit must invalidate in-flight
+        // meshes of THIS chunk just like in-chunk edits do.
+        m_meshRevision.fetch_add(1, std::memory_order_relaxed);
     }
-    m_borders->mutableAt(x, y, z) = static_cast<uint8_t>(type);
-  }
 }
 
 bool Chunk::deleteVoxel(const glm::vec3 &position)
@@ -397,19 +425,24 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
 
   state = ChunkState::GENERATED;
   meshNeedsUpdate = true;
+  // Full content replacement invalidates any build result stamped with the
+  // previous revision (issue #114 review).
+  m_meshRevision.fetch_add(1, std::memory_order_relaxed);
 }
 
-void Chunk::generateMesh()
+void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
-  // Declare MemoryPublication first so MeshSample is destroyed first.
-  // Mesh timing must exclude telemetry ownership publication overhead.
-  MemoryPublication memoryPublication{*this};
+  // Mesh timing must exclude pool/publication overhead: the payload lands
+  // in the pooled result block, nothing on the Chunk changes ownership.
   telemetry::MeshSample meshSample(telemetry::Skylight);
-  m_isLODMesh = false; // K: mark as full-quality mesh
-  vertices.clear();
-  indices.clear();
-  waterVertices.clear();
-  waterIndices.clear();
+  out.beginBuild(this, generation, revision);
+  out.isLOD = false;
+  // The mesher body is written against the historical member names; bind
+  // them to the pooled build result (issue #104).
+  auto &vertices = out.opaqueVertices;
+  auto &indices = out.opaqueIndices;
+  auto &waterVertices = out.waterVertices;
+  auto &waterIndices = out.waterIndices;
 
   auto &workspace = s_meshWorkspace;
   uint32_t indexCounter = 0;
@@ -595,8 +628,8 @@ void Chunk::generateMesh()
     }
     if (!computeOccupancyY(typeScratch.data(), occMinY, occMaxY))
     {
-      meshNeedsUpdate = true;
-      state = ChunkState::MESHED;
+      // Empty occupancy: the result stays empty; publishMeshResult commits
+      // the (empty) mesh on the main thread.
       return;
     }
   }
@@ -1097,23 +1130,43 @@ void Chunk::generateMesh()
   meshSample.data.opaqueIndices = indices.size();
   meshSample.data.waterVertices = waterVertices.size();
   meshSample.data.waterIndices = waterIndices.size();
-  meshNeedsUpdate = true; // Flag for GPU upload
-  state = ChunkState::MESHED;
+}
+
+bool Chunk::generateMesh()
+{
+  MeshBuildResult *result = nullptr;
+  try
+  {
+    result = m_resultPool->acquire();
+    const uint64_t generation = m_meshGeneration;
+    const uint64_t revision = m_meshRevision.load(std::memory_order_relaxed);
+    buildMesh(*result, generation, revision);
+    m_resultPool->finishBuild(result);
+  }
+  catch (const std::bad_alloc &)
+  {
+    // Allocation failure: give the block back and retry later. Programming
+    // errors must propagate, so only bad_alloc is handled here.
+    if (result)
+      result->homePool->release(result);
+    return false;
+  }
+  // On rejection (superseded identity) the block is already back in its
+  // pool and the chunk state is untouched.
+  return publishMeshResult(result);
 }
 
 // K: Simplified LOD mesh — one top-face quad per non-empty XZ column.
 // Max 256 opaque + 256 water quads vs thousands for a full greedy mesh.
-void Chunk::generateLODMesh()
+void Chunk::buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
-  // Declare MemoryPublication first so MeshSample is destroyed first.
-  // Mesh timing must exclude telemetry ownership publication overhead.
-  MemoryPublication memoryPublication{*this};
   telemetry::MeshSample meshSample(telemetry::Lod);
-  m_isLODMesh = true;
-  vertices.clear();
-  indices.clear();
-  waterVertices.clear();
-  waterIndices.clear();
+  out.beginBuild(this, generation, revision);
+  out.isLOD = true;
+  auto &vertices = out.opaqueVertices;
+  auto &indices = out.opaqueIndices;
+  auto &waterVertices = out.waterVertices;
+  auto &waterIndices = out.waterIndices;
 
   uint32_t indexCounter = 0;
   uint32_t waterIndexCounter = 0;
@@ -1211,8 +1264,64 @@ void Chunk::generateLODMesh()
   meshSample.data.opaqueIndices = indices.size();
   meshSample.data.waterVertices = waterVertices.size();
   meshSample.data.waterIndices = waterIndices.size();
-  meshNeedsUpdate = true;
+}
+
+bool Chunk::generateLODMesh()
+{
+  MeshBuildResult *result = nullptr;
+  try
+  {
+    result = m_resultPool->acquire();
+    const uint64_t generation = m_meshGeneration;
+    const uint64_t revision = m_meshRevision.load(std::memory_order_relaxed);
+    buildLODMesh(*result, generation, revision);
+    m_resultPool->finishBuild(result);
+  }
+  catch (const std::bad_alloc &)
+  {
+    if (result)
+      result->homePool->release(result);
+    return false;
+  }
+  return publishMeshResult(result);
+}
+
+bool Chunk::publishMeshResult(MeshBuildResult *result)
+{
+  if (!result)
+    return false;
+  // Publish-time identity validation (issue #104/#114): a result built by
+  // another chunk, for a retired incarnation (generation), or from older
+  // voxel/border content (revision) must never land here. The block goes
+  // straight back to its pool and NO chunk state is touched - a stale
+  // publish cannot mark the chunk MESHED or clobber a newer pending mesh.
+  if (result->owner != this ||
+      result->generation != m_meshGeneration ||
+      result->revision != m_meshRevision.load(std::memory_order_relaxed))
+  {
+    result->homePool->release(result);
+    return false;
+  }
+  // Repeated remesh without upload: the newest complete build wins and the
+  // previous one returns to the pool.
+  if (m_pendingResult && m_pendingResult != result)
+    m_pendingResult->homePool->release(m_pendingResult);
+  m_pendingResult = result;
+  // Single state commit point: the mesh becomes official here, on the main
+  // thread, only after validation succeeded.
+  m_isLODMesh = result->isLOD;
   state = ChunkState::MESHED;
+  meshNeedsUpdate.store(true);
+  return true;
+}
+
+void Chunk::releasePendingMeshResult()
+{
+  if (!m_pendingResult)
+    return;
+  MeshBuildResult *result = m_pendingResult;
+  m_pendingResult = nullptr;
+  result->homePool->release(result);
 }
 
 void Chunk::releaseGPU()
@@ -1239,45 +1348,56 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
     releaseGPU();
   m_allocator = allocator;
 
-  opaqueIndexCount = static_cast<uint32_t>(indices.size());
-  if (!vertices.empty() && opaqueIndexCount > 0)
+  // The CPU payload lives in the attached build result (issue #104).
+  MeshBuildResult *result = m_pendingResult;
+  if (result)
   {
-    const VkDeviceSize vSize = vertices.size() * sizeof(Vertex);
-    const VkDeviceSize iSize = indices.size() * sizeof(uint32_t);
-    vertexBuffer = createBuffer(allocator, vSize,
-      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-    trackMeshBuffer(vertexBuffer, telemetry::GpuOpaqueVertex);
-    indexBuffer = createBuffer(allocator, iSize,
-      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-    trackMeshBuffer(indexBuffer, telemetry::GpuOpaqueIndex);
-    uploadBuffer(allocator, imm, vertexBuffer, vertices.data(), vSize);
-    uploadBuffer(allocator, imm, indexBuffer, indices.data(), iSize);
+    auto &vertices = result->opaqueVertices;
+    auto &indices = result->opaqueIndices;
+    auto &waterVertices = result->waterVertices;
+    auto &waterIndices = result->waterIndices;
+
+    opaqueIndexCount = static_cast<uint32_t>(indices.size());
+    if (!vertices.empty() && opaqueIndexCount > 0)
+    {
+      const VkDeviceSize vSize = vertices.size() * sizeof(Vertex);
+      const VkDeviceSize iSize = indices.size() * sizeof(uint32_t);
+      vertexBuffer = createBuffer(allocator, vSize,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+      trackMeshBuffer(vertexBuffer, telemetry::GpuOpaqueVertex);
+      indexBuffer = createBuffer(allocator, iSize,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+      trackMeshBuffer(indexBuffer, telemetry::GpuOpaqueIndex);
+      uploadBuffer(allocator, imm, vertexBuffer, vertices.data(), vSize);
+      uploadBuffer(allocator, imm, indexBuffer, indices.data(), iSize);
+    }
+
+    waterIndexCount = static_cast<uint32_t>(waterIndices.size());
+    if (!waterVertices.empty() && waterIndexCount > 0)
+    {
+      const VkDeviceSize vSize = waterVertices.size() * sizeof(Vertex);
+      const VkDeviceSize iSize = waterIndices.size() * sizeof(uint32_t);
+      waterVertexBuffer = createBuffer(allocator, vSize,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+      trackMeshBuffer(waterVertexBuffer, telemetry::GpuWaterVertex);
+      waterIndexBuffer = createBuffer(allocator, iSize,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+      trackMeshBuffer(waterIndexBuffer, telemetry::GpuWaterIndex);
+      uploadBuffer(allocator, imm, waterVertexBuffer, waterVertices.data(), vSize);
+      uploadBuffer(allocator, imm, waterIndexBuffer, waterIndices.data(), iSize);
+    }
+  }
+  else
+  {
+    opaqueIndexCount = 0;
+    waterIndexCount = 0;
   }
 
-  vertices.clear();
-  indices.clear();
-
-  waterIndexCount = static_cast<uint32_t>(waterIndices.size());
-  if (!waterVertices.empty() && waterIndexCount > 0)
-  {
-    const VkDeviceSize vSize = waterVertices.size() * sizeof(Vertex);
-    const VkDeviceSize iSize = waterIndices.size() * sizeof(uint32_t);
-    waterVertexBuffer = createBuffer(allocator, vSize,
-      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-    trackMeshBuffer(waterVertexBuffer, telemetry::GpuWaterVertex);
-    waterIndexBuffer = createBuffer(allocator, iSize,
-      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-    trackMeshBuffer(waterIndexBuffer, telemetry::GpuWaterIndex);
-    uploadBuffer(allocator, imm, waterVertexBuffer, waterVertices.data(), vSize);
-    uploadBuffer(allocator, imm, waterIndexBuffer, waterIndices.data(), iSize);
-  }
-
-  waterVertices.clear();
-  waterIndices.clear();
+  releasePendingMeshResult();
 
   releaseNeighborBorders();
   meshNeedsUpdate = false;
@@ -1292,8 +1412,12 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
 
   m_allocator = allocator;
 
-  const uint32_t newOpaqueCount = static_cast<uint32_t>(indices.size());
-  const uint32_t newWaterCount = static_cast<uint32_t>(waterIndices.size());
+  // The CPU payload lives in the attached build result (issue #104). When
+  // staging is full the result stays attached - the completed mesh is
+  // neither lost nor copied - and the upload retries next frame.
+  MeshBuildResult *result = m_pendingResult;
+  const uint32_t newOpaqueCount = result ? static_cast<uint32_t>(result->opaqueIndices.size()) : 0;
+  const uint32_t newWaterCount = result ? static_cast<uint32_t>(result->waterIndices.size()) : 0;
 
   AllocatedBuffer newV{}, newI{}, newWV{}, newWI{};
   std::vector<VkBufferCopy> copies;
@@ -1327,15 +1451,15 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
     return true;
   };
 
-  const bool needOpaque = !vertices.empty() && newOpaqueCount > 0;
-  const bool needWater = !waterVertices.empty() && newWaterCount > 0;
+  const bool needOpaque = result && !result->opaqueVertices.empty() && newOpaqueCount > 0;
+  const bool needWater = result && !result->waterVertices.empty() && newWaterCount > 0;
 
   if (needOpaque)
   {
-    const VkDeviceSize vSize = vertices.size() * sizeof(Vertex);
-    const VkDeviceSize iSize = indices.size() * sizeof(uint32_t);
-    if (!stageInto(vertices.data(), vSize, newV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, telemetry::GpuOpaqueVertex) ||
-        !stageInto(indices.data(), iSize, newI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, telemetry::GpuOpaqueIndex))
+    const VkDeviceSize vSize = result->opaqueVertices.size() * sizeof(Vertex);
+    const VkDeviceSize iSize = result->opaqueIndices.size() * sizeof(uint32_t);
+    if (!stageInto(result->opaqueVertices.data(), vSize, newV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, telemetry::GpuOpaqueVertex) ||
+        !stageInto(result->opaqueIndices.data(), iSize, newI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, telemetry::GpuOpaqueIndex))
     {
       destroyBuffer(allocator, newV);
       destroyBuffer(allocator, newI);
@@ -1346,10 +1470,10 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
 
   if (needWater)
   {
-    const VkDeviceSize vSize = waterVertices.size() * sizeof(Vertex);
-    const VkDeviceSize iSize = waterIndices.size() * sizeof(uint32_t);
-    if (!stageInto(waterVertices.data(), vSize, newWV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, telemetry::GpuWaterVertex) ||
-        !stageInto(waterIndices.data(), iSize, newWI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, telemetry::GpuWaterIndex))
+    const VkDeviceSize vSize = result->waterVertices.size() * sizeof(Vertex);
+    const VkDeviceSize iSize = result->waterIndices.size() * sizeof(uint32_t);
+    if (!stageInto(result->waterVertices.data(), vSize, newWV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, telemetry::GpuWaterVertex) ||
+        !stageInto(result->waterIndices.data(), iSize, newWI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, telemetry::GpuWaterIndex))
     {
       destroyBuffer(allocator, newV);
       destroyBuffer(allocator, newI);
@@ -1389,10 +1513,7 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
   opaqueIndexCount = needOpaque ? newOpaqueCount : 0;
   waterIndexCount = needWater ? newWaterCount : 0;
 
-  vertices.clear();
-  indices.clear();
-  waterVertices.clear();
-  waterIndices.clear();
+  releasePendingMeshResult();
 
   releaseNeighborBorders();
   meshNeedsUpdate = false;
@@ -1516,6 +1637,10 @@ void Chunk::rebuildBordersFromNeighbors(const Chunk *west, const Chunk *east,
 
   // Corner columns stay AIR exactly as in the previous rebuild path, which
   // never populated the diagonal shell columns either.
+
+  // Border content changed: invalidate in-flight results stamped with the
+  // previous revision (issue #114 review).
+  m_meshRevision.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
@@ -1535,11 +1660,12 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
   m_inTransit.store(false);
   m_activeIndex = SIZE_MAX;
 
-  // Clear buffers but retain capacity for reuse (avoid reallocation)
-  vertices.clear();
-  indices.clear();
-  waterVertices.clear();
-  waterIndices.clear();
+  // A recycled chunk is a new mesh identity (issue #104/#114): any attached
+  // build result goes back to the pool, and in-flight results for the old
+  // incarnation are rejected at publish time via both counters.
+  releasePendingMeshResult();
+  ++m_meshGeneration;
+  m_meshRevision.fetch_add(1, std::memory_order_relaxed);
 
   // Full reset returns voxel storage to the pool for retirement.
   // ForGeneration retains dirty storage until generateTerrain() overwrites it.
@@ -1565,14 +1691,15 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
 void Chunk::publishCpuTelemetry()
 {
   if (!telemetry::registry().enabled) return;
+  // Slots 3..10 (cpu.opaque/water.* mesh bytes) are always zero here since
+  // issue #104: mesh build buffers live in MeshResultPool blocks, not on
+  // chunks. The engine publishes them (and CpuMeshCapacity) from
+  // MeshResultPoolStats.
   const std::array<uint64_t, 13> current{
     m_storage ? sizeof(VoxelStorage) : 0,
     m_borders ? sizeof(ChunkNeighborBorders) : 0,
     m_borders ? sizeof(ChunkNeighborBorders) : 0,
-    vertices.size()*sizeof(Vertex), vertices.capacity()*sizeof(Vertex),
-    indices.size()*sizeof(uint32_t), indices.capacity()*sizeof(uint32_t),
-    waterVertices.size()*sizeof(Vertex), waterVertices.capacity()*sizeof(Vertex),
-    waterIndices.size()*sizeof(uint32_t), waterIndices.capacity()*sizeof(uint32_t),
+    0, 0, 0, 0, 0, 0, 0, 0,
     sizeof(biomeGrassColors)+sizeof(biomeFoliageColors)+sizeof(biomeTypes)+sizeof(heightMap), sizeof(activeVoxels)
   };
   telemetry::registry().replaceCpu(m_cpuTelemetry, current);
