@@ -1,5 +1,6 @@
 #include "ChunkManager.hpp"
 
+#include <Chunk/ChunkMeshResult.hpp>
 #include <Camera/Camera.hpp>
 #include <Engine/Profiler.hpp>
 #include <Vulkan/VkCommands.hpp>
@@ -330,7 +331,29 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
-				chunk->generateLODMesh();
+				// Build into a pooled result block (issue #104): the mesh
+				// payload never lives on the Chunk itself.
+				MeshBuildResult *result = nullptr;
+				try
+				{
+					result = chunk->getMeshResultPool()->acquire();
+				}
+				catch (const std::bad_alloc &)
+				{
+					result = nullptr; // retry next dispatch; keep the chunk unstuck
+				}
+				if (result)
+				{
+					try
+					{
+						chunk->buildLODMesh(*result);
+					}
+					catch (const std::bad_alloc &)
+					{
+						result->homePool->release(result);
+						result = nullptr;
+					}
+				}
 				const float ms = std::chrono::duration<float, std::milli>(
 									 std::chrono::steady_clock::now() - t0)
 									 .count();
@@ -338,7 +361,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 
 				{
 					std::lock_guard<std::mutex> lk(m_completedJobsMutex);
-					m_completedMeshingChunks.push_back(chunk);
+					m_completedMeshJobs.push_back({chunk, result});
 				}
 				m_pendingMeshJobsCount.fetch_sub(1);
 			});
@@ -353,7 +376,27 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
-				chunk->generateMesh();
+				MeshBuildResult *result = nullptr;
+				try
+				{
+					result = chunk->getMeshResultPool()->acquire();
+				}
+				catch (const std::bad_alloc &)
+				{
+					result = nullptr; // retry next dispatch; keep the chunk unstuck
+				}
+				if (result)
+				{
+					try
+					{
+						chunk->buildMesh(*result);
+					}
+					catch (const std::bad_alloc &)
+					{
+						result->homePool->release(result);
+						result = nullptr;
+					}
+				}
 				const float ms = std::chrono::duration<float, std::milli>(
 									 std::chrono::steady_clock::now() - t0)
 									 .count();
@@ -361,7 +404,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 
 				{
 					std::lock_guard<std::mutex> lk(m_completedJobsMutex);
-					m_completedMeshingChunks.push_back(chunk);
+					m_completedMeshJobs.push_back({chunk, result});
 				}
 				m_pendingMeshJobsCount.fetch_sub(1);
 			});
@@ -445,11 +488,11 @@ void ChunkManager::processDeferredReleases(GpuResourceRetire &retire)
 void ChunkManager::processFinishedJobs()
 {
 	std::vector<Chunk *> finishedGen;
-	std::vector<Chunk *> finishedMesh;
+	std::vector<CompletedMeshJob> finishedMesh;
 	{
 		std::lock_guard<std::mutex> lock(m_completedJobsMutex);
 		finishedGen.swap(m_completedGenerationChunks);
-		finishedMesh.swap(m_completedMeshingChunks);
+		finishedMesh.swap(m_completedMeshJobs);
 	}
 
 	for (Chunk *chunk : finishedGen)
@@ -457,10 +500,20 @@ void ChunkManager::processFinishedJobs()
 		if (chunk)
 			chunk->setInTransit(false);
 	}
-	for (Chunk *chunk : finishedMesh)
+	for (const CompletedMeshJob &job : finishedMesh)
 	{
-		if (chunk)
-			chunk->setInTransit(false);
+		// Publish before clearing in-transit so a recycled chunk can never
+		// race this decision (issue #104): stale results are refused and
+		// returned to their pool; a null result just unsticks the chunk.
+		if (job.result)
+		{
+			if (job.chunk)
+				job.chunk->publishMeshResult(job.result);
+			else
+				job.result->homePool->release(job.result);
+		}
+		if (job.chunk)
+			job.chunk->setInTransit(false);
 	}
 }
 

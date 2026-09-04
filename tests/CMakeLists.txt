@@ -253,6 +253,7 @@ add_executable(test_chunk_lifecycle
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
@@ -351,6 +352,32 @@ target_link_libraries(test_border_pool PRIVATE
 )
 
 add_test(NAME BorderPool COMMAND test_border_pool)
+
+# ---------------------------------------------------------------------------
+# MeshResultPool contract (issue #104): reusable mesh build results detached
+# from Chunk lifetime - identity bookkeeping, capacity retention, growth
+# events, concurrency, release refusal.
+# ---------------------------------------------------------------------------
+add_executable(test_mesh_result_pool
+    test_mesh_result_pool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
+)
+
+target_include_directories(test_mesh_result_pool PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(test_mesh_result_pool PRIVATE
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_mesh_result_pool PRIVATE
+    glm
+    Threads::Threads
+)
+
+add_test(NAME MeshResultPool COMMAND test_mesh_result_pool)
 
 # ---------------------------------------------------------------------------
 # Profiler worker consistency and stress test (Issue #79)

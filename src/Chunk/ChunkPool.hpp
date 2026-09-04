@@ -9,6 +9,7 @@
 #include <glm/glm.hpp>
 #include <Chunk/VoxelPool.hpp>
 #include <Chunk/ChunkBorders.hpp>
+#include <Chunk/ChunkMeshResult.hpp>
 
 class Chunk;
 
@@ -68,6 +69,8 @@ public:
 	size_t borderStorageFree() const { return m_borderPool.freeCount(); }
 	BorderPool &borderPool() { return m_borderPool; }
 	const BorderPool &borderPool() const { return m_borderPool; }
+	MeshResultPool &meshResultPool() { return m_meshPool; }
+	const MeshResultPool &meshResultPool() const { return m_meshPool; }
 
 private:
 	void publishTelemetry(); // caller holds m_mutex
@@ -80,6 +83,9 @@ private:
 	VoxelPool m_voxelPool;
 	// Must also outlive m_storage Chunk destructors (issue #103).
 	BorderPool m_borderPool;
+	// Pooled mesh build results (issue #104) - same lifetime rule: chunks
+	// release attached results in their destructors.
+	MeshResultPool m_meshPool;
 
 	/// All pool-owned chunks; unique_ptr keeps addresses stable across vector growth.
 	std::vector<std::unique_ptr<Chunk>> m_storage;

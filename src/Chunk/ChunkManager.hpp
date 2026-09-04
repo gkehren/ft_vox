@@ -23,6 +23,16 @@ class Camera;
 class ImmediateCommands;
 class StagingRing;
 class GpuResourceRetire;
+struct MeshBuildResult;
+
+/// A finished async mesh job: the built payload (may be null when the
+/// result block could not be acquired) plus the chunk it was built for, so
+/// the main thread can validate identity at publish time (issue #104).
+struct CompletedMeshJob
+{
+	Chunk *chunk{nullptr};
+	MeshBuildResult *result{nullptr};
+};
 
 /// Streams chunks around the player: load → async terrain → async mesh → main-thread GPU upload.
 class ChunkManager
@@ -104,7 +114,7 @@ private:
 
 	mutable std::mutex m_completedJobsMutex;
 	std::vector<Chunk *> m_completedGenerationChunks;
-	std::vector<Chunk *> m_completedMeshingChunks;
+	std::vector<CompletedMeshJob> m_completedMeshJobs;
 	std::atomic<size_t> m_pendingGenJobsCount{0};
 	std::atomic<size_t> m_pendingMeshJobsCount{0};
 

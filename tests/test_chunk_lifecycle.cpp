@@ -6,6 +6,7 @@
 // activeVoxels cache staying in sync and no capacity churn.
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkManager.hpp>
+#include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 
@@ -72,6 +73,14 @@ struct ChunkStateProbe
 	static const std::bitset<CHUNK_VOLUME> &active(const Chunk &c)
 	{
 		return c.activeVoxels;
+	}
+	static MeshBuildResult *pendingResult(const Chunk &c)
+	{
+		return c.m_pendingResult;
+	}
+	static uint64_t meshGeneration(const Chunk &c)
+	{
+		return c.m_meshGeneration;
 	}
 };
 
@@ -241,14 +250,24 @@ int main(int argc, char **argv)
             CHECK(registry().snapshot().current[VoxelBytes] == withStorage.current[VoxelBytes], "move assignment releases destination storage");
             c.setVoxel(1, 1, 1, STONE);
             c.generateMesh();
+            MeshBuildResult *pending = ChunkStateProbe::pendingResult(c);
+            CHECK(pending != nullptr, "generateMesh attaches a pooled build result");
+            CHECK(!pending->opaqueVertices.empty(),
+                  "attached build result carries the mesh payload");
+            CHECK(ChunkStateProbe::pendingResult(c)->owner == &c,
+                  "build result names its owning chunk");
+            // cpu.opaque/water.* mesh gauges are engine-published from
+            // MeshResultPoolStats; chunks no longer publish per-chunk mesh
+            // bytes (issue #104), so no gauge moves on mesh publication.
             const auto meshed = registry().snapshot();
-            CHECK(meshed.current[OpaqueVertexBytes] > before.current[OpaqueVertexBytes], "mesh publication includes vertex data");
-            CHECK(meshed.current[CpuMeshCapacity] >= meshed.current[OpaqueVertexBytes], "retained mesh capacity covers its data");
+            (void)meshed;
+            const uint64_t generationAfterMesh = ChunkStateProbe::meshGeneration(c);
             c.reset(glm::vec3(0));
             const auto reset = registry().snapshot();
             CHECK(reset.current[VoxelBytes] == before.current[VoxelBytes], "full reset returns voxel storage to pool");
-            CHECK(reset.current[OpaqueVertexBytes] == before.current[OpaqueVertexBytes], "reset clears logical mesh data");
-            CHECK(reset.current[CpuMeshCapacity] == meshed.current[CpuMeshCapacity], "reset retains mesh allocations");
+            CHECK(ChunkStateProbe::pendingResult(c) == nullptr, "reset returns the attached build result to its pool");
+            CHECK(ChunkStateProbe::meshGeneration(c) == generationAfterMesh + 1,
+                  "reset bumps the mesh generation");
         }
         const auto after = registry().snapshot();
         for (size_t i=0; i<=OccupancyBytes; ++i)
@@ -652,29 +671,161 @@ int main(int argc, char **argv)
 	}
 
 	// 13) Mesh output equivalence and edge behavior (issue #103/#113): the
-	// compact borders cull exactly like the dense shell did.
+	// compact borders cull exactly like the dense shell did. Since #104 the
+	// payload lives in the attached build result, so the comparison is
+	// byte-for-byte on that result (the old index-count probes read the
+	// post-upload counters, which stay 0 without an allocator).
 	{
 		TerrainGenerator mgen(99);
 		Chunk withBorders(glm::vec3(0.0f));
 		CHECK(withBorders.prepareVoxelStorageForGeneration(), "mesh-equivalence prepare");
 		withBorders.generateTerrain(mgen);
 		withBorders.generateMesh();
-		const uint32_t opaqueWith = withBorders.getOpaqueIndexCount();
+		const MeshBuildResult *meshWith = ChunkStateProbe::pendingResult(withBorders);
+		CHECK(meshWith != nullptr && !meshWith->opaqueIndices.empty(),
+			  "populated-border mesh emitted geometry into the result");
+		// meshNeedsUpdate is set for the upload stage; index counters stay
+		// zero until the GPU upload swaps the device buffers.
+		CHECK(withBorders.needsGPUUpload(), "built mesh awaits upload");
+		// Snapshot the first payload: the block is released (and detached)
+		// when the re-mesh below supersedes it, so the comparison must run
+		// against copies.
+		const std::vector<Vertex> firstOpaqueVerts = meshWith->opaqueVertices;
+		const std::vector<uint32_t> firstOpaqueIdx = meshWith->opaqueIndices;
+		const std::vector<Vertex> firstWaterVerts = meshWith->waterVertices;
+		const std::vector<uint32_t> firstWaterIdx = meshWith->waterIndices;
 
 		Chunk withoutBorders(glm::vec3(0.0f));
 		CHECK(withoutBorders.prepareVoxelStorageForGeneration(), "no-border prepare");
 		withoutBorders.generateTerrain(mgen);
 		withoutBorders.releaseNeighborBorders(); // freed after upload: borders read AIR
 		withoutBorders.generateMesh();
+		const MeshBuildResult *meshWithout = ChunkStateProbe::pendingResult(withoutBorders);
+		CHECK(meshWithout != nullptr, "missing-border mesh produced a result");
 		// With no neighbor data every border-facing surface is emitted, so
 		// the missing-border mesh is the larger one.
-		CHECK(withoutBorders.getOpaqueIndexCount() >= opaqueWith,
+		CHECK(meshWithout->opaqueIndices.size() >= meshWith->opaqueIndices.size(),
 			  "missing borders produce more geometry than populated borders");
 
 		// Deterministic re-mesh with borders present.
 		withBorders.generateMesh();
-		CHECK(withBorders.getOpaqueIndexCount() == opaqueWith,
-			  "re-mesh with populated borders is deterministic");
+		const MeshBuildResult *meshWithAgain = ChunkStateProbe::pendingResult(withBorders);
+		CHECK(meshWithAgain != meshWith, "re-mesh publishes a fresh result block");
+		CHECK(meshWithAgain->opaqueVertices == firstOpaqueVerts &&
+				  meshWithAgain->opaqueIndices == firstOpaqueIdx &&
+				  meshWithAgain->waterVertices == firstWaterVerts &&
+				  meshWithAgain->waterIndices == firstWaterIdx,
+			  "re-mesh with populated borders is byte-for-byte deterministic");
+		// The superseded block was returned to the pool by the publish step;
+		// the default pool must not be growing per remesh.
+		CHECK(MeshResultPool::defaultPool().activeCount() >= 2,
+			  "in-flight results stay active while attached");
+	}
+
+	// 13b) Publish/generation semantics (issue #104): superseded results are
+	// rejected, repeated remesh replaces the pending block, and unload with
+	// a pending result returns it to the pool.
+	{
+		MeshResultPool pool;
+		TerrainGenerator pgen(1234);
+		Chunk chunk(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		CHECK(chunk.prepareVoxelStorageForGeneration(), "publish-semantics prepare");
+		chunk.generateTerrain(pgen);
+		const uint64_t generationAfterGen = ChunkStateProbe::meshGeneration(chunk);
+
+		// Stale publish: a result built for a different generation/owner.
+		{
+			MeshBuildResult *stale = pool.acquire();
+			stale->beginBuild(&chunk, generationAfterGen + 999);
+			stale->opaqueIndices.push_back(0);
+			const size_t freeBefore = pool.freeCount();
+			CHECK(!chunk.publishMeshResult(stale),
+				  "superseded generation is rejected at publish");
+			CHECK(pool.freeCount() == freeBefore + 1,
+				  "rejected result is returned to its pool");
+			CHECK(!chunk.hasPendingMeshResult(), "rejected result is not attached");
+		}
+		// Wrong owner is rejected the same way.
+		{
+			Chunk other(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			MeshBuildResult *foreign = pool.acquire();
+			foreign->beginBuild(&other, ChunkStateProbe::meshGeneration(chunk));
+			const size_t freeBefore = pool.freeCount();
+			CHECK(!chunk.publishMeshResult(foreign),
+				  "foreign-owner result is rejected");
+			CHECK(pool.freeCount() == freeBefore + 1,
+				  "rejected foreign result is returned to its pool");
+		}
+
+		// Valid publish then repeated remesh: newest result wins, previous
+		// one returns to the pool, no leak.
+		CHECK(chunk.generateMesh(), "first publish succeeds");
+		MeshBuildResult *firstPending = ChunkStateProbe::pendingResult(chunk);
+		CHECK(firstPending != nullptr, "first result attached");
+		CHECK(pool.activeCount() == 1, "one block active while attached");
+		CHECK(chunk.generateMesh(), "repeated remesh publishes");
+		MeshBuildResult *secondPending = ChunkStateProbe::pendingResult(chunk);
+		CHECK(secondPending != nullptr && secondPending != firstPending,
+			  "repeated remesh attaches a fresh block");
+		CHECK(pool.activeCount() == 1,
+			  "superseded attached result was returned to the pool");
+
+		// Unload with a pending result: reset returns the block and bumps
+		// the generation, so the retired payload can never be re-attached.
+		const uint64_t genBeforeReset = ChunkStateProbe::meshGeneration(chunk);
+		chunk.reset(glm::vec3(16.0f, 0.0f, 0.0f));
+		CHECK(!chunk.hasPendingMeshResult(), "reset releases the pending result");
+		CHECK(pool.freeCount() == pool.capacity(), "pool balanced after reset");
+		CHECK(ChunkStateProbe::meshGeneration(chunk) == genBeforeReset + 1,
+			  "reset bumps the mesh generation");
+
+		// A publish attempt for the retired generation lands nowhere.
+		MeshBuildResult *retired = pool.acquire();
+		retired->beginBuild(&chunk, genBeforeReset);
+		const size_t freeBefore = pool.freeCount();
+		CHECK(!chunk.publishMeshResult(retired),
+			  "result of the retired generation is rejected after reset");
+		CHECK(pool.freeCount() == freeBefore + 1, "retired result returned to pool");
+	}
+
+	// 13c) Moves detach pending results (issue #104): neither side may keep
+	// a block whose owner names a gutted chunk; the generation itself is
+	// transferred as part of the chunk identity.
+	{
+		MeshResultPool pool;
+		TerrainGenerator pgen(4321);
+		Chunk source(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		CHECK(source.prepareVoxelStorageForGeneration(), "move-pending prepare");
+		source.generateTerrain(pgen);
+		CHECK(source.generateMesh(), "move-pending mesh");
+		CHECK(source.hasPendingMeshResult(), "pending result before move");
+		const uint64_t sourceGen = ChunkStateProbe::meshGeneration(source);
+
+		Chunk destination(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		destination = std::move(source);
+		CHECK(!destination.hasPendingMeshResult(), "move assignment leaves no pending result");
+		CHECK(!source.hasPendingMeshResult(), "moved-from chunk holds no pending result");
+		CHECK(pool.freeCount() == pool.capacity(), "pool balanced after move assignment");
+		CHECK(ChunkStateProbe::meshGeneration(destination) == sourceGen,
+			  "move transfers the mesh generation");
+	}
+
+	// 13d) Destruction with an attached result returns the block to its
+	// pool (issue #104): a dying chunk cannot leak a pooled build result.
+	{
+		MeshResultPool &defaultPool = MeshResultPool::defaultPool();
+		const size_t activeBefore = defaultPool.activeCount();
+		{
+			TerrainGenerator dgen(777);
+			Chunk doomed(glm::vec3(0.0f));
+			CHECK(doomed.prepareVoxelStorageForGeneration(), "dtor-release prepare");
+			doomed.generateTerrain(dgen);
+			CHECK(doomed.generateMesh(), "dtor-release mesh");
+			CHECK(defaultPool.activeCount() == activeBefore + 1,
+				  "attached result is active while the chunk lives");
+		}
+		CHECK(defaultPool.activeCount() == activeBefore,
+			  "destructor returns the attached build result to the pool");
 	}
 
 	// 14) Two-sided boundary edit data path (issue #113): the

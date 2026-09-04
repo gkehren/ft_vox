@@ -31,12 +31,15 @@
 class ImmediateCommands;
 class StagingRing;
 class GpuResourceRetire;
+struct MeshBuildResult;
+class MeshResultPool;
 
 class Chunk
 {
 public:
 	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED,
-		  VoxelPool *voxelPool = nullptr, BorderPool *borderPool = nullptr);
+		  VoxelPool *voxelPool = nullptr, BorderPool *borderPool = nullptr,
+		  MeshResultPool *meshPool = nullptr);
 	Chunk(Chunk &&other) noexcept;
 	Chunk &operator=(Chunk &&other) noexcept;
 	~Chunk();
@@ -75,8 +78,29 @@ public:
 	void drawShadow(VkCommandBuffer cmd, unsigned cascade = 0) const;
 
 	void generateTerrain(TerrainGenerator &generator);
-	void generateMesh();
-	void generateLODMesh();
+
+	// Mesh building (issue #104): the CPU mesh payload no longer lives on
+	// the Chunk. Workers build into a pooled MeshBuildResult and publish it
+	// for upload; the Chunk keeps only GPU handles/counts.
+	//
+	// buildMesh/buildLODMesh fill `out` (stamping this chunk's identity) and
+	// mark the chunk MESHED; they do not attach anything.
+	void buildMesh(MeshBuildResult &out);
+	void buildLODMesh(MeshBuildResult &out);
+	// Attach a completed build result for upload. Rejects (returns false and
+	// returns the block to its pool) when the result is superseded: built by
+	// another chunk or for a generation this chunk no longer represents.
+	// On success any previously attached result is replaced.
+	bool publishMeshResult(MeshBuildResult *result);
+	// Synchronous convenience path (bootstrap / tests): acquire a pooled
+	// block, build, publish. Returns false when nothing was published
+	// (allocation failure or superseded result).
+	bool generateMesh();
+	bool generateLODMesh();
+
+	bool hasPendingMeshResult() const { return m_pendingResult != nullptr; }
+	uint64_t meshGeneration() const { return m_meshGeneration; }
+	MeshResultPool *getMeshResultPool() const { return m_resultPool; }
 	bool hasWaterMesh() const { return waterIndexCount > 0; }
 	bool isLODMesh() const { return m_isLODMesh; }
 	bool needsGPUUpload() const { return meshNeedsUpdate.load(); }
@@ -139,10 +163,6 @@ private:
 	AllocatedBuffer waterVertexBuffer{};
 	AllocatedBuffer waterIndexBuffer{};
 
-	std::vector<Vertex> vertices;
-	std::vector<uint32_t> indices;
-	std::vector<Vertex> waterVertices;
-	std::vector<uint32_t> waterIndices;
 	VoxelPool *m_voxelPool{nullptr};
 	VoxelStorage *m_storage{nullptr};
 	void ensureVoxelStorageForEdit();
@@ -151,6 +171,13 @@ private:
 	// upload (issue #103): no per-chunk border memory is retained.
 	ChunkNeighborBorders *m_borders{nullptr};
 	BorderPool *m_borderPool{nullptr};
+	// Mesh build buffers are pooled too (issue #104): m_pendingResult holds
+	// a completed CPU mesh awaiting upload, borrowed from m_resultPool.
+	// Released on upload, reset, and moves - no per-chunk mesh capacity.
+	MeshResultPool *m_resultPool{nullptr};
+	MeshBuildResult *m_pendingResult{nullptr};
+	uint64_t m_meshGeneration{0};
+	void releasePendingMeshResult();
 
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeGrassColors{};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeFoliageColors{};
