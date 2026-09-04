@@ -258,6 +258,20 @@ target_link_libraries(test_chunk_lifecycle PRIVATE
     Threads::Threads
 )
 
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_chunk_lifecycle PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+if(APPLE)
+    target_link_libraries(test_chunk_lifecycle PRIVATE
+        "-framework Metal"
+        "-framework Foundation"
+        "-framework QuartzCore"
+        "-framework IOKit"
+        "-framework IOSurface"
+    )
+endif()
+
 add_test(NAME ChunkLifecycle COMMAND test_chunk_lifecycle)
 
 # ---------------------------------------------------------------------------

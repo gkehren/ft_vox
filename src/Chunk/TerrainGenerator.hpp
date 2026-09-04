@@ -38,11 +38,11 @@ constexpr size_t kBorderVoxelCount =
 // to memory owned by the caller - pooled Chunk storage at runtime, an owning
 // ChunkData in tests/tools. generateChunkInto() fully resets every field
 // before generating, so reused storage cannot leak data between chunks.
-// Fixed extents make a wrong-sized destination a type-level contract
-// (debug-verified at construction from sized ranges) instead of a runtime
-// check on the hot path. View semantics: a const target still allows
-// writing through its spans (only the span members themselves are
-// protected).
+// Fixed extents encode the required target sizes in the type. Callers
+// constructing these spans from dynamically-sized storage must ensure the
+// backing ranges have exactly the required sizes (debug builds verify this
+// at construction). View semantics: a const target still allows writing
+// through its spans (only the span members themselves are protected).
 struct ChunkGenerationTarget
 {
   std::span<Voxel, CHUNK_VOLUME> voxels;
