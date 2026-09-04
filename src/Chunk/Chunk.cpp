@@ -242,12 +242,17 @@ ChunkState Chunk::getState() const { return state; }
 
 const Voxel &Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
 {
-  if (!m_storage)
-  {
-    static constexpr Voxel s_air{static_cast<uint8_t>(AIR)};
-    return s_air;
-  }
-  return m_storage->voxels[getIndex(x, y, z)];
+	// Strict internal accessor (issue #114 final review): out-of-range
+	// coordinates would index past the voxel storage. Callers that can
+	// see outside the chunk must use sampleForMeshing()/isVoxelActive(),
+	// which answer AIR/false for the padded neighborhood.
+	assert(x < CHUNK_SIZE && y < CHUNK_HEIGHT && z < CHUNK_SIZE);
+	if (!m_storage)
+	{
+		static constexpr Voxel s_air{static_cast<uint8_t>(AIR)};
+		return s_air;
+	}
+	return m_storage->voxels[getIndex(x, y, z)];
 }
 
 void Chunk::setVoxel(int x, int y, int z, TextureType type)

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -538,6 +539,16 @@ void ChunkManager::processFinishedJobs()
 bool ChunkManager::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y, int z,
 									   TextureType type)
 {
+	// Coordinate validation FIRST (issue #114 final review): effectiveVoxelType()
+	// reads the voxel backing and must never see an out-of-range coordinate -
+	// a raycast hit on the top face of a y = CHUNK_HEIGHT-1 voxel produces
+	// exactly y = CHUNK_HEIGHT here. Local x/z stay in [0, CHUNK_SIZE) by
+	// construction of the world-to-chunk mapping; y has no such wrap.
+	if (x < 0 || x >= static_cast<int>(CHUNK_SIZE) ||
+		y < 0 || y >= static_cast<int>(CHUNK_HEIGHT) ||
+		z < 0 || z >= static_cast<int>(CHUNK_SIZE))
+		return false;
+
 	// Caller holds m_mutex exclusively.
 	auto it = m_chunks.find(chunkPos);
 	if (it == m_chunks.end())
@@ -565,6 +576,15 @@ bool ChunkManager::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y,
 
 TextureType ChunkManager::effectiveVoxelType(const Chunk *chunk, int x, int y, int z) const
 {
+	// Strict contract: scheduleLogicalEdit() validates coordinates before
+	// this helper runs. Debug asserts make any future caller violation
+	// immediately visible; no silent AIR fallback, which would make an
+	// invalid coordinate look legitimately placeable.
+	assert(chunk != nullptr);
+	assert(x >= 0 && x < static_cast<int>(CHUNK_SIZE));
+	assert(y >= 0 && y < static_cast<int>(CHUNK_HEIGHT));
+	assert(z >= 0 && z < static_cast<int>(CHUNK_SIZE));
+
 	// getVoxel is read-only and answers AIR without storage, so this is
 	// safe to evaluate while the chunk is being meshed/generated.
 	TextureType effective = static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),

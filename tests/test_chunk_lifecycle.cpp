@@ -935,6 +935,38 @@ int main(int argc, char **argv)
 			  "primary and four neighbors registered by the load path");
 		if (origin && east && west && south && north)
 		{
+			// (0) Coordinate validation gates the whole edit pipeline
+			// (final review): out-of-range world Y - exactly what a
+			// right-click on the top face of a y = CHUNK_HEIGHT-1 voxel
+			// produces (prev.y = CHUNK_HEIGHT) - is refused before any
+			// voxel backing access, with no state change of any kind.
+			{
+				const uint64_t revisionBefore = origin->meshRevision();
+				const size_t pendingBefore = ChunkManagerProbe::pendingEdits(manager);
+				CHECK(!manager.placeVoxel(glm::vec3(4.0f, -1.0f, 4.0f), STONE),
+					  "placing below world height is refused");
+				CHECK(!manager.placeVoxel(glm::vec3(4.0f, static_cast<float>(CHUNK_HEIGHT), 4.0f), STONE),
+					  "placing above world height is refused");
+				CHECK(!manager.deleteVoxel(glm::vec3(4.0f, -1.0f, 4.0f)),
+					  "deleting below world height is refused");
+				CHECK(!manager.deleteVoxel(glm::vec3(4.0f, static_cast<float>(CHUNK_HEIGHT), 4.0f)),
+					  "deleting above world height is refused");
+				CHECK(origin->meshRevision() == revisionBefore,
+					  "invalid edits do not bump mesh revision");
+				CHECK(ChunkManagerProbe::pendingEdits(manager) == pendingBefore,
+					  "invalid edits do not queue anything");
+
+				// Off-by-one lock: the top valid voxel coordinate is usable.
+				const glm::vec3 topPos(4.0f, static_cast<float>(CHUNK_HEIGHT - 1), 4.0f);
+				CHECK(manager.placeVoxel(topPos, STONE),
+					  "top valid voxel coordinate is accepted");
+				CHECK(origin->getVoxel(4, CHUNK_HEIGHT - 1, 4).type == static_cast<uint8_t>(STONE),
+					  "top voxel written");
+				CHECK(manager.deleteVoxel(topPos),
+					  "top valid voxel can be deleted");
+				CHECK(origin->getVoxel(4, CHUNK_HEIGHT - 1, 4).type == static_cast<uint8_t>(AIR),
+					  "top voxel removed");
+			}
 			// Terrain heights vary per column: place every test voxel at
 			// the column's topmost air cell so the effective state is
 			// guaranteed AIR before each place.
