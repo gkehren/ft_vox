@@ -1,0 +1,9 @@
+Test project D:/Projects/ft_vox/build
+    Start 2: VulkanResourceSmoke
+1/2 Test #2: VulkanResourceSmoke ..............   Passed    0.82 sec
+    Start 3: VulkanValidationErrorReporting
+2/2 Test #3: VulkanValidationErrorReporting ...   Passed    0.70 sec
+
+100% tests passed out of 2
+
+Total Test time (real) =   1.53 sec

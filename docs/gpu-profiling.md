@@ -65,9 +65,11 @@ the corrected PR with profiling enabled and disabled:
 `VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
 `VUID-VkImageViewCreateInfo-usage-02275` concerning STORAGE usage on SRGB
 swapchain images (8 and 6 occurrences respectively in each run).
-Full application validation is **not clean**, but this is preexisting rather
-than introduced by the timestamp profiler. The root cause remains unresolved
-and is tracked in [#99](https://github.com/gkehren/ft_vox/issues/99).
+That comparison was **not clean**, but this was preexisting rather than
+introduced by the timestamp profiler. Follow-up investigation in
+[#99](https://github.com/gkehren/ft_vox/issues/99) identified RTSSHooks64.dll
+interception; exiting RTSS removes both VUIDs. See
+[the RTSS exclusion procedure](vulkan-validation.md) for clean validation.
 See the [review validation report](benchmarks/issue98-validation/README.md)
 for full logs, environment, tests and limits of the comparison.
 

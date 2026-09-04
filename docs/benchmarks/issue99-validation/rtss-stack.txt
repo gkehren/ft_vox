@@ -1,0 +1,14 @@
+[Validation stack] test_vulkan_resources.exe + 23335
+[Validation stack] VkLayer_khronos_validation.dll + 8893565
+[Validation stack] VkLayer_khronos_validation.dll + 8900565
+[Validation stack] VkLayer_khronos_validation.dll + 3425925
+[Validation stack] VkLayer_khronos_validation.dll + 5095325
+[Validation stack] VkLayer_khronos_validation.dll + 5098964
+[Validation stack] VkLayer_khronos_validation.dll + 5666405
+[Validation stack] RTSSHooks64.dll + 523461
+[Validation stack] test_vulkan_resources.exe + 28908
+[Validation stack] test_vulkan_resources.exe + 29426
+[Validation stack] test_vulkan_resources.exe + 11115
+[Validation stack] test_vulkan_resources.exe + 120428
+[Validation stack] KERNEL32.DLL + 183479
+[Validation stack] ntdll.dll + 699756

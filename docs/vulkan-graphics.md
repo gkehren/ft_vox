@@ -327,6 +327,8 @@ Do not treat this section as “already shipped.” For historical feature discu
 
 ## 11. Related docs
 
+- [`vulkan-validation.md`](vulkan-validation.md) — RTSS SRGB/STORAGE diagnosis, per-app exclusion and validation error reporting
+
 - [`gpu-profiling.md`](gpu-profiling.md) — GPU timestamp lifecycle, UI, benchmark metrics and validation
 
 - [`engine-architecture.md`](engine-architecture.md) — Engine loop, chunks, streaming, terrain generation  

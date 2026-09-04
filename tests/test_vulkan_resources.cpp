@@ -40,8 +40,9 @@ static std::string resolveSpv(const char *name)
 	return std::string("ressources/shaders/spv/") + name;
 }
 
-int main()
+int main(int argc, char **argv)
 {
+	const bool validationErrorProbe = argc == 2 && std::string(argv[1]) == "--validation-error-probe";
 	if (!SDL_Init(SDL_INIT_VIDEO))
 	{
 		std::cerr << "FAIL: SDL_Init: " << SDL_GetError() << "\n";
@@ -72,6 +73,15 @@ int main()
 	{
 		VkContext context;
 		context.init(window);
+		if (validationErrorProbe && !context.isValidationEnabled())
+		{
+			std::cout << "SKIP: validation error probe requires Khronos validation\n";
+			context.shutdown();
+			SDL_DestroyWindow(window);
+			SDL_Vulkan_UnloadLibrary();
+			SDL_Quit();
+			return 77;
+		}
 		if (!context.hasDynamicRendering() ||
 			((!vkCmdBeginRendering && !vkCmdBeginRenderingKHR) ||
 			 (!vkCmdEndRendering && !vkCmdEndRenderingKHR)))
@@ -218,11 +228,25 @@ int main()
 
 		if (runVulkanResourceSmoke(context, vert, frag))
 		{
-			std::cout << "ALL RESOURCE SMOKES PASSED\n";
+			std::cout << "RESOURCE OPERATIONS PASSED\n";
 			exitCode = EXIT_SUCCESS;
 		}
 
+		if (validationErrorProbe)
+		{
+			// Exercise the real debug messenger without issuing an invalid GPU command.
+			VkDebugUtilsMessengerCallbackDataEXT message{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT};
+			message.pMessageIdName = "FT_VOX_TEST_VALIDATION_ERROR";
+			message.pMessage = "Intentional diagnostic error: the smoke must return failure.";
+			vkSubmitDebugUtilsMessageEXT(context.getInstance(), VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+				VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT, &message);
+		}
 		context.shutdown();
+		if (context.validationErrorCount() != 0)
+			throw std::runtime_error("Vulkan validation reported " +
+				std::to_string(context.validationErrorCount()) + " error(s); resource success is not clean validation");
+		if (exitCode == EXIT_SUCCESS)
+			std::cout << "ALL RESOURCE SMOKES PASSED (no validation errors reported)\n";
 	}
 	catch (const std::exception &e)
 	{

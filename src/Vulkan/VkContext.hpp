@@ -11,6 +11,7 @@
 #include <optional>
 #include <cstdint>
 #include <memory>
+#include <atomic>
 
 struct QueueFamilyIndices
 {
@@ -56,6 +57,8 @@ public:
 	bool hasTimelineSemaphores() const { return m_timelineSemaphores; }
 	bool hasPortabilitySubset() const { return m_portabilitySubset; }
 	bool isValidationEnabled() const { return m_validationEnabled; }
+	/// Includes initialization and shutdown; reset only by the next init().
+	uint64_t validationErrorCount() const { return m_validationErrors.load(std::memory_order_relaxed); }
 
 	const VkPhysicalDeviceProperties &getDeviceProperties() const { return m_deviceProperties; }
 
@@ -89,6 +92,7 @@ private:
 	VkPhysicalDeviceProperties m_deviceProperties{};
 
 	bool m_validationEnabled{false};
+	std::atomic<uint64_t> m_validationErrors{0};
 	bool m_dynamicRendering{false};
 	bool m_timelineSemaphores{false};
 	bool m_portabilitySubset{false};
