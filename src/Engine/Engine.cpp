@@ -778,6 +778,9 @@ void Engine::sampleBenchmarkFrame()
 		return;
 
 	Profiler &prof = GetProfiler();
+	// A reset during reload discards the interrupted frame, even at zero warmup.
+	if (prof.historyCount() == 0)
+		return;
 	uint64_t tJobs = 0, mJobs = 0, lJobs = 0;
 	float tMs = 0.f, mMs = 0.f, lMs = 0.f;
 	const int wc = prof.workerSnapshotCount();

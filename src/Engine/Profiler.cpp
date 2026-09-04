@@ -52,6 +52,7 @@ void Profiler::beginFrame()
 	m_entryCount = 0;
 	m_stackDepth = 0;
 	m_inFrame = true;
+	m_discardFrame = false;
 }
 
 void Profiler::endFrame()
@@ -63,8 +64,8 @@ void Profiler::endFrame()
 	while (m_stackDepth > 0)
 		closeScope();
 
-	const float frameMs = nowMs();
-	finalizeFrame(frameMs);
+	if (!m_discardFrame)
+		finalizeFrame(nowMs());
 	m_inFrame = false;
 }
 
@@ -113,6 +114,11 @@ void Profiler::closeScope()
 
 void Profiler::addWorkerSample(const char *name, float ms)
 {
+	addWorkerSample(name, ms, captureEpoch());
+}
+
+void Profiler::addWorkerSample(const char *name, float ms, CaptureEpoch epoch)
+{
 	if (!name || !enabled())
 		return;
 
@@ -129,6 +135,15 @@ void Profiler::addWorkerSample(const char *name, float ms)
 		if (bn == name || (bn && std::strcmp(bn, name) == 0))
 		{
 			std::lock_guard<std::mutex> lock(b.mutex);
+			if (epoch != captureEpoch())
+				return;
+			// A new-epoch writer may reach this bucket before clearHistory's
+			// sweep. Retire the old pair atomically without dropping new work.
+			if (b.epoch != epoch)
+			{
+				b.count = b.totalUs = 0;
+				b.epoch = epoch;
+			}
 			b.count += 1;
 			b.totalUs += us;
 			return;
@@ -139,6 +154,28 @@ void Profiler::addWorkerSample(const char *name, float ms)
 
 void Profiler::clearHistory()
 {
+	// Linearization point for the capture reset. Writers carry their epoch
+	// into the bucket lock; an old writer either precedes this reset and is
+	// drained below, or observes the new epoch and is rejected.
+	const auto epoch = m_captureEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+	const int n = m_workerBucketCount.load(std::memory_order_acquire);
+	for (int i = 0; i < n; ++i)
+	{
+		auto &bucket = m_workers[static_cast<size_t>(i)];
+		std::lock_guard<std::mutex> lock(bucket.mutex);
+		if (bucket.epoch != epoch)
+		{
+			bucket.count = bucket.totalUs = 0;
+			bucket.epoch = epoch;
+		}
+	}
+	m_lastFrameMs = 0.f;
+	m_lastEntryCount = 0;
+	m_lastEntries = {};
+	m_workerSnapCount = 0;
+	m_workerSnaps = {};
+	// Do not touch live entries or the stack: existing RAII scopes still pop.
+	m_discardFrame = m_inFrame;
 	m_history.fill(0.f);
 	m_historyWrite = 0;
 	m_historyCount = 0;
@@ -177,8 +214,13 @@ void Profiler::snapshotWorkers()
 		uint64_t us = 0;
 		{
 			std::lock_guard<std::mutex> lock(b.mutex);
-			c = b.count;
-			us = b.totalUs;
+			const auto epoch = captureEpoch();
+			if (b.epoch == epoch)
+			{
+				c = b.count;
+				us = b.totalUs;
+			}
+			b.epoch = epoch;
 			b.count = 0;
 			b.totalUs = 0;
 		}

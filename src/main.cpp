@@ -18,6 +18,7 @@ static void printUsage(const char *argv0)
 			  << "                              (defaults to ressources/default-resource-pack.zip)\n"
 			  << "  --vsync <on|off>            FIFO when on; strict IMMEDIATE and uncapped when off\n"
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
+			  << "  --benchmark-warmup <secs>   Override warmup (0 disables it)\n"
 			  << "  --benchmark-map <zoom>      Open fixed-center biome map (zoom 0.1..8)\n"
 			  << "  --benchmark-map-sequential  Compare the previous one-job map path\n"
 			  << "  --help                      Show this help\n"
@@ -41,6 +42,7 @@ int main(int argc, char **argv)
 	std::string resourcePackCli;
 	std::optional<bool> vsyncOverride;
 	float benchmarkDuration = 0.0f;
+	std::optional<float> benchmarkWarmup;
 	float benchmarkMapZoom = 0.0f;
 	bool benchmarkMapSequential = false;
 
@@ -104,6 +106,23 @@ int main(int argc, char **argv)
 			}
 			continue;
 		}
+		if (arg == "--benchmark-warmup")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --benchmark-warmup requires seconds.\n";
+				return EXIT_FAILURE;
+			}
+			char *end = nullptr;
+			const float seconds = std::strtof(argv[++i], &end);
+			if (end == argv[i] || *end || !std::isfinite(seconds) || seconds < 0.f || seconds > 300.f)
+			{
+				std::cerr << "Error: benchmark warmup must be between 0 and 300 seconds.\n";
+				return EXIT_FAILURE;
+			}
+			benchmarkWarmup = seconds;
+			continue;
+		}
 		if (arg == "--benchmark")
 		{
 			if (i + 1 >= argc)
@@ -146,6 +165,11 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
+	if (benchmarkWarmup && (benchmarkDuration == 0.f || *benchmarkWarmup > benchmarkDuration))
+	{
+		std::cerr << "Error: --benchmark-warmup requires --benchmark and cannot exceed its duration.\n";
+		return EXIT_FAILURE;
+	}
 	if ((benchmarkMapZoom > 0.0f && benchmarkDuration == 0.0f) ||
 		(benchmarkMapSequential && benchmarkMapZoom == 0.0f))
 	{
@@ -167,7 +191,7 @@ int main(int argc, char **argv)
 			config.durationSec = benchmarkDuration;
 			config.biomeMapZoom = benchmarkMapZoom;
 			config.biomeMapSequential = benchmarkMapSequential;
-			config.warmupSec = std::min(2.0f, benchmarkDuration * 0.2f);
+			config.warmupSec = benchmarkWarmup.value_or(std::min(2.0f, benchmarkDuration * 0.2f));
 			config.pathOrbits = 2;
 			config.pathRadius = 512.0f;
 			config.pathHeight = 72.0f;

@@ -220,6 +220,7 @@ private:
 	uint64_t m_mapRequestId{0};
 
 	BiomeMapJob m_mapJob{};
+	uint64_t m_mapCaptureEpoch{0};
 	BiomeMapUpload m_pendingUpload{};
 	// Owner scratch for sequential/small maps. Parallel tiles use separate
 	// bounded thread-local scratch; this retention cap allows dense reuse so

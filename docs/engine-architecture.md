@@ -101,6 +101,26 @@ Bootstrap: `generateInitialArea` fills a small radius around spawn synchronously
 
 Controls summary lives in root `README.md` (WASD, break/place, borders, etc.).
 
+### Profiler capture reset
+
+Profiler capture reset (`Profiler::clearHistory`, also used after world reload)
+clears the displayed frame/scopes, history, averages, spikes, worker snapshot,
+and pending samples from the previous capture epoch. Registered worker names
+and the capture enabled/paused setting are preserved. Reset and snapshot calls
+belong to the capture/main thread; worker submission may run concurrently.
+
+Each asynchronous job captures `captureEpoch()` at submission and supplies it
+to `addWorkerSample(name, ms, epoch)`. A result from an old epoch is rejected
+even if its job finishes after reset. Bucket mutexes protect count/time pairs;
+new-epoch samples arriving during reset are retained. The two-argument overload
+uses the epoch at the time of submission and is intended for immediate samples.
+
+When clearing inside an open frame, its instrumentation stack remains valid
+until scopes close, but that entire frame is discarded. History resumes at the
+next full completed frame. Benchmark sampling skips the discarded frame, so a
+zero-warmup reload cannot measure its pre-reset scopes or worker samples.
+Reproduce that path with `ft_vox --seed 42 --benchmark 5 --benchmark-warmup 0`.
+
 ---
 
 ## 4. World constants (`utils.hpp`)
