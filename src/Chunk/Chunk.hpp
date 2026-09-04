@@ -10,7 +10,6 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <array>
 #include <atomic>
-#include <bitset>
 #include <mutex>
 #include <unordered_map>
 #include <glm/gtx/hash.hpp>
@@ -91,6 +90,15 @@ public:
 	// thread (see meshPendingChunks) and are stamped into the result.
 	void buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision);
 	void buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision);
+	// Ranged bodies used by buildMesh/buildLODMesh with occupancy bounds
+	// derived from the section metadata. Exposed (private, probe-tested) so
+	// tests can force a full [0, CHUNK_HEIGHT-1] range and verify the
+	// metadata-driven bounds produce byte-identical meshes. The caller must
+	// have run out.beginBuild() (the wrappers do it; bounds outside the
+	// occupied span simply iterate empty slices).
+	void buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t revision,
+						 int occMinY, int occMaxY);
+	void buildLODMeshRanged(MeshBuildResult &out, int scanTopY);
 	// Main-thread commit of a completed build result (the ONLY place a mesh
 	// becomes official). Rejects - returning false and returning the block
 	// to its pool without touching any chunk state - when the result is
@@ -110,6 +118,10 @@ public:
 	uint64_t meshGeneration() const { return m_meshGeneration; }
 	uint64_t meshRevision() const { return m_meshRevision.load(std::memory_order_relaxed); }
 	MeshResultPool *getMeshResultPool() const { return m_resultPool; }
+
+	// Vertical occupancy granularity (issue #105): 16 sections of 16 voxels.
+	static constexpr int kOccupancySectionSize = 16;
+	static constexpr int kOccupancySections = CHUNK_HEIGHT / kOccupancySectionSize;
 	bool hasWaterMesh() const { return waterIndexCount > 0; }
 	bool isLODMesh() const { return m_isLODMesh; }
 	bool needsGPUUpload() const { return meshNeedsUpdate.load(); }
@@ -175,7 +187,25 @@ private:
 	VoxelPool *m_voxelPool{nullptr};
 	VoxelStorage *m_storage{nullptr};
 	void ensureVoxelStorageForEdit();
-	std::bitset<CHUNK_VOLUME> activeVoxels;
+	// Compact occupancy metadata (issue #105). The raw voxel type is the
+	// canonical per-cell occupancy source (`type != AIR`); this one array
+	// replaces the former 8 KiB activeVoxels bitset duplicate. It counts
+	// non-air voxels per vertical section (16 sections of 16 voxels), so
+	// generation/meshing can skip empty slabs without touching the whole
+	// volume. Maintained by generateTerrain() (one canonical recount) and
+	// setVoxel() (incremental delta); verified against brute force by the
+	// chunk lifecycle tests.
+	std::array<uint16_t, kOccupancySections> m_sectionNonAir{};
+	void recountOccupancy();
+	/// Derived Y span [outMinY, outMaxY] covering every section that holds
+	/// at least one non-air voxel (section-granular). Returns false when the
+	/// chunk holds no voxels at all.
+	bool occupiedSpanY(int &outMinY, int &outMaxY) const;
+	/// Narrow a section-granular span to the first/last layers that hold a
+	/// non-air voxel (at most the two boundary sections are scanned).
+	void refineOccupiedSpanY(int &occMinY, int &occMaxY) const;
+	/// Bit S set <=> section S holds at least one non-air voxel (derived).
+	uint16_t occupiedSectionMask() const;
 	// Borrowed from a BorderPool for generation/meshing and returned after
 	// upload (issue #103): no per-chunk border memory is retained.
 	ChunkNeighborBorders *m_borders{nullptr};

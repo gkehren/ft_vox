@@ -60,7 +60,7 @@ Chunk::Chunk(Chunk &&other) noexcept
       meshNeedsUpdate(other.meshNeedsUpdate.load()),
       m_voxelPool(other.m_voxelPool),
       m_storage(other.m_storage),
-      activeVoxels(std::move(other.activeVoxels)),
+      m_sectionNonAir(other.m_sectionNonAir),
       m_borderPool(other.m_borderPool),
       m_borders(other.m_borders),
       m_resultPool(other.m_resultPool),
@@ -129,7 +129,7 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     m_meshRevision.store(other.m_meshRevision.load(std::memory_order_relaxed),
                          std::memory_order_relaxed);
 
-    activeVoxels = std::move(other.activeVoxels);
+    m_sectionNonAir = other.m_sectionNonAir;
     biomeGrassColors = other.biomeGrassColors;
     biomeFoliageColors = other.biomeFoliageColors;
     biomeTypes = other.biomeTypes;
@@ -180,6 +180,13 @@ bool Chunk::prepareVoxelStorageForGeneration()
     if (!m_storage)
     {
       m_storage = m_voxelPool->acquire();
+      // A recycled pool block holds arbitrary bytes: pin it to the
+      // documented "no voxels yet" state so edits before generation behave
+      // like a fresh chunk and the occupancy metadata matches the buffer
+      // from the very first touch (issue #105).
+      std::fill(m_storage->voxels.begin(), m_storage->voxels.end(),
+                Voxel{static_cast<uint8_t>(AIR)});
+      m_sectionNonAir.fill(0);
       publishCpuTelemetry();
     }
     if (!m_borders)
@@ -205,6 +212,8 @@ void Chunk::releaseVoxelStorageOnRetire()
   VoxelStorage *st = m_storage;
   m_storage = nullptr;
   m_voxelPool->release(st);
+  // Invariant: no storage => empty occupancy metadata (issue #105).
+  m_sectionNonAir.fill(0);
   publishCpuTelemetry();
 }
 
@@ -214,6 +223,8 @@ void Chunk::ensureVoxelStorageForEdit()
   {
     m_storage = m_voxelPool->acquire();
     std::fill(m_storage->voxels.begin(), m_storage->voxels.end(), Voxel{static_cast<uint8_t>(AIR)});
+    // Fresh storage is all-air: pin the occupancy metadata to it.
+    m_sectionNonAir.fill(0);
     publishCpuTelemetry();
   }
 }
@@ -261,17 +272,25 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
       static_cast<uint32_t>(z) < CHUNK_SIZE)
   {
     size_t index = getIndex(x, y, z);
+    const bool wasAir = !m_storage ||
+                        m_storage->voxels[index].type == static_cast<uint8_t>(AIR);
     if (type != AIR)
     {
       ensureVoxelStorageForEdit();
       m_storage->voxels[index].type = static_cast<uint8_t>(type);
-      activeVoxels.set(index);
     }
     else
     {
       if (m_storage)
         m_storage->voxels[index].type = static_cast<uint8_t>(AIR);
-      activeVoxels.reset(index);
+    }
+    // Incremental occupancy (issue #105): a cell moved in or out of its
+    // vertical section; type->type rewrites leave the count untouched.
+    const bool nowAir = (type == AIR);
+    if (wasAir != nowAir)
+    {
+      const int section = y / kOccupancySectionSize;
+      m_sectionNonAir[section] += nowAir ? uint16_t(-1) : 1;
     }
     // Content invalidation (issue #114 review): any in-flight mesh built
     // from the previous content is rejected at publish time.
@@ -373,14 +392,74 @@ bool Chunk::isVoxelActive(int x, int y, int z) const
   {
     if (!m_storage)
       return false;
-    size_t index = getIndex(x, y, z);
-    return activeVoxels.test(index);
+    // Canonical occupancy (issue #105): the voxel type itself, no bitset.
+    return m_storage->voxels[getIndex(x, y, z)].type != static_cast<uint8_t>(AIR);
   }
   else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE)
   {
     return m_borders && m_borders->at(x, y, z) != static_cast<uint8_t>(AIR);
   }
   return false; // Outside known boundaries
+}
+
+void Chunk::recountOccupancy()
+{
+  m_sectionNonAir.fill(0);
+  if (!m_storage)
+    return;
+  constexpr size_t kSectionVolume =
+      static_cast<size_t>(kOccupancySectionSize) * CHUNK_SIZE * CHUNK_SIZE;
+  for (int section = 0; section < kOccupancySections; ++section)
+  {
+    const Voxel *cells = m_storage->voxels.data() + section * kSectionVolume;
+    uint16_t count = 0;
+    for (size_t i = 0; i < kSectionVolume; ++i)
+      count += cells[i].type != static_cast<uint8_t>(AIR) ? 1 : 0;
+    m_sectionNonAir[section] = count;
+  }
+}
+
+bool Chunk::occupiedSpanY(int &outMinY, int &outMaxY) const
+{
+  int first = 0;
+  int last = kOccupancySections - 1;
+  while (first <= last && m_sectionNonAir[first] == 0)
+    ++first;
+  if (first > last)
+    return false; // no non-air voxel anywhere
+  while (m_sectionNonAir[last] == 0)
+    --last;
+  outMinY = first * kOccupancySectionSize;
+  outMaxY = last * kOccupancySectionSize + (kOccupancySectionSize - 1);
+  return true;
+}
+
+void Chunk::refineOccupiedSpanY(int &occMinY, int &occMaxY) const
+{
+  if (!m_storage)
+    return;
+  const auto layerHasVoxel = [this](int y) -> bool
+  {
+    const Voxel *layer =
+        m_storage->voxels.data() + static_cast<size_t>(y) * CHUNK_SIZE * CHUNK_SIZE;
+    for (int i = 0; i < CHUNK_SIZE * CHUNK_SIZE; ++i)
+      if (layer[i].type != static_cast<uint8_t>(AIR))
+        return true;
+    return false;
+  };
+  while (occMinY < occMaxY && !layerHasVoxel(occMinY))
+    ++occMinY;
+  while (occMaxY > occMinY && !layerHasVoxel(occMaxY))
+    --occMaxY;
+}
+
+uint16_t Chunk::occupiedSectionMask() const
+{
+  uint16_t mask = 0;
+  for (int section = 0; section < kOccupancySections; ++section)
+    if (m_sectionNonAir[section] != 0)
+      mask |= static_cast<uint16_t>(1u << section);
+  return mask;
 }
 
 void Chunk::generateTerrain(TerrainGenerator &generator)
@@ -412,16 +491,11 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
       .foliageColors = biomeFoliageColors};
   generator.generateChunkInto(genX, genZ, target);
 
-  // Update bitset for active voxels
-  activeVoxels.reset(); // Clear all bits first
-  for (int i = 0; i < CHUNK_VOLUME; ++i)
-  {
-    if (this->m_storage->voxels[i].type !=
-        TextureType::AIR)
-    { // Or your equivalent of an air block
-      activeVoxels.set(i);
-    }
-  }
+  // Compact occupancy metadata (issue #105): one canonical pass that only
+  // reads the freshly written voxels and fills 16 per-section counters —
+  // it replaces the former full-volume pass whose sole purpose was
+  // rebuilding the removed activeVoxels bitset.
+  recountOccupancy();
 
   state = ChunkState::GENERATED;
   meshNeedsUpdate = true;
@@ -434,9 +508,28 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
 {
   // Mesh timing must exclude pool/publication overhead: the payload lands
   // in the pooled result block, nothing on the Chunk changes ownership.
-  telemetry::MeshSample meshSample(telemetry::Skylight);
   out.beginBuild(this, generation, revision);
   out.isLOD = false;
+  // Occupied Y span from the per-section metadata (issue #105): no 64 KiB
+  // type copy + full-buffer scan per remesh. Section-granular, then refined
+  // to byte-exact layer bounds inside the two boundary sections so slice
+  // iteration stays as tight as the old full-scan helper produced.
+  int occMinY = 0;
+  int occMaxY = CHUNK_HEIGHT - 1;
+  if (!occupiedSpanY(occMinY, occMaxY))
+  {
+    // Empty occupancy: the result stays empty; publishMeshResult commits
+    // the (empty) mesh on the main thread.
+    return;
+  }
+  refineOccupiedSpanY(occMinY, occMaxY);
+  buildMeshRanged(out, generation, revision, occMinY, occMaxY);
+}
+
+void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t revision,
+                            int occMinY, int occMaxY)
+{
+  telemetry::MeshSample meshSample(telemetry::Skylight);
   // The mesher body is written against the historical member names; bind
   // them to the pooled build result (issue #104).
   auto &vertices = out.opaqueVertices;
@@ -592,6 +685,9 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
   }
 
   meshSample.next(telemetry::Occupancy);
+  // Occupancy bounds were derived from the per-section metadata by the
+  // caller (issue #105) - the former 64 KiB typeScratch copy + full
+  // computeOccupancyY scan is gone; only the helper lambda setup remains.
   // New helper for greedy meshing that checks local voxels and the precomputed
   // neighbor shell
   auto getVoxelDataForMeshing = [&](int lx, int ly, int lz) -> TextureType
@@ -610,29 +706,6 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
 
   const int dims[] = {CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE};
 
-  // Bound meshing to occupied Y span (skip empty sky / deep-empty slabs).
-  int occMinY = 0;
-  int occMaxY = CHUNK_HEIGHT - 1;
-  {
-    // Dense type strip for the pure helper (same layout as getIndex).
-    thread_local std::vector<uint8_t> typeScratch;
-    typeScratch.resize(CHUNK_VOLUME);
-    if (m_storage)
-    {
-      for (size_t i = 0; i < CHUNK_VOLUME; ++i)
-        typeScratch[i] = m_storage->voxels[i].type;
-    }
-    else
-    {
-      std::fill(typeScratch.begin(), typeScratch.end(), static_cast<uint8_t>(AIR));
-    }
-    if (!computeOccupancyY(typeScratch.data(), occMinY, occMaxY))
-    {
-      // Empty occupancy: the result stays empty; publishMeshResult commits
-      // the (empty) mesh on the main thread.
-      return;
-    }
-  }
   meshSample.next(telemetry::FacesGreedyAO);
   // Slice range needs neighbors one cell outside solids for face detection.
   const int ySliceMin = std::max(-1, occMinY - 1);
@@ -669,6 +742,13 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
     // (last voxel layer) A face exists between slice x[d] and slice x[d]+1
     for (x[d] = dStart; x[d] < dEnd; ++x[d])
     {
+      // Empty vertical slabs cannot produce in-chunk faces (issue #105):
+      // a Y face between slices s and s+1 needs a voxel in section(s) or
+      // section(s+1), and there are no vertical neighbor borders.
+      if (d == 1 &&
+          m_sectionNonAir[std::max(x[d], 0) / kOccupancySectionSize] == 0 &&
+          m_sectionNonAir[std::min(x[d] + 1, CHUNK_HEIGHT - 1) / kOccupancySectionSize] == 0)
+        continue;
       meshSample.data.maskCells += dims[u] * dims[v];
       std::fill(workspace.mask.begin(), workspace.mask.begin() + (dims[u] * dims[v]), 0); // Reset mask for each slice
 
@@ -1160,9 +1240,20 @@ bool Chunk::generateMesh()
 // Max 256 opaque + 256 water quads vs thousands for a full greedy mesh.
 void Chunk::buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
-  telemetry::MeshSample meshSample(telemetry::Lod);
   out.beginBuild(this, generation, revision);
   out.isLOD = true;
+  // No column holds a voxel above the last occupied section (issue #105):
+  // start every column scan there instead of at CHUNK_HEIGHT - 1.
+  int occMinY = 0;
+  int occMaxY = CHUNK_HEIGHT - 1;
+  if (!occupiedSpanY(occMinY, occMaxY))
+    return; // empty chunk: the result stays empty
+  buildLODMeshRanged(out, occMaxY);
+}
+
+void Chunk::buildLODMeshRanged(MeshBuildResult &out, int scanTopY)
+{
+  telemetry::MeshSample meshSample(telemetry::Lod);
   auto &vertices = out.opaqueVertices;
   auto &indices = out.opaqueIndices;
   auto &waterVertices = out.waterVertices;
@@ -1178,7 +1269,7 @@ void Chunk::buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t rev
       // Find topmost non-AIR voxel in this column
       int topY = -1;
       TextureType topType = AIR;
-      for (int cy = CHUNK_HEIGHT - 1; cy >= 0; --cy)
+      for (int cy = scanTopY; cy >= 0; --cy)
       {
         TextureType t = static_cast<TextureType>(getVoxel(cx, cy, cz).type);
         if (t != AIR)
@@ -1674,7 +1765,9 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
     releaseVoxelStorageOnRetire();
   }
 
-  activeVoxels.reset();
+  // Empty occupancy metadata for the recycled incarnation; generation
+  // recounts it (issue #105).
+  m_sectionNonAir.fill(0);
 
   // Return transient neighbor-border storage to the BorderPool.
   // No border capacity remains attached to this Chunk.
@@ -1700,7 +1793,7 @@ void Chunk::publishCpuTelemetry()
     m_borders ? sizeof(ChunkNeighborBorders) : 0,
     m_borders ? sizeof(ChunkNeighborBorders) : 0,
     0, 0, 0, 0, 0, 0, 0, 0,
-    sizeof(biomeGrassColors)+sizeof(biomeFoliageColors)+sizeof(biomeTypes)+sizeof(heightMap), sizeof(activeVoxels)
+    sizeof(biomeGrassColors)+sizeof(biomeFoliageColors)+sizeof(biomeTypes)+sizeof(heightMap), sizeof(m_sectionNonAir)
   };
   telemetry::registry().replaceCpu(m_cpuTelemetry, current);
   m_cpuTelemetry = current;

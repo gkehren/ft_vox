@@ -151,7 +151,8 @@ File: `src/Chunk/Chunk.hpp` / `Chunk.cpp`.
 
 ### Data
 
-- Flat voxel array + active bitset  
+- Flat voxel array (the canonical occupancy source: `type != AIR`) + compact
+  per-section non-air counters for empty-slab skipping (issue #105)
 - Neighbor **shell** voxels for correct greedy meshing at borders  
 - Biome grass/foliage colors per column  
 - CPU meshes: opaque vertices/indices + water mesh  

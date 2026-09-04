@@ -143,38 +143,3 @@ inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 		needed = kMax;
 	return needed;
 }
-
-/// Occupancy bounds for non-air voxels.
-/// index = y * (CHUNK_SIZE*CHUNK_SIZE) + z * CHUNK_SIZE + x  (matches Chunk::getIndex).
-/// Returns false if the chunk is empty (all air).
-inline bool computeOccupancyY(const uint8_t *types, int &outMinY, int &outMaxY)
-{
-	if (!types)
-		return false;
-	const uint8_t air = static_cast<uint8_t>(AIR);
-	int minY = CHUNK_HEIGHT;
-	int maxY = -1;
-	for (int y = 0; y < CHUNK_HEIGHT; ++y)
-	{
-		const int layerBase = y * CHUNK_SIZE * CHUNK_SIZE;
-		bool any = false;
-		for (int i = 0; i < CHUNK_SIZE * CHUNK_SIZE; ++i)
-		{
-			if (types[layerBase + i] != air)
-			{
-				any = true;
-				break;
-			}
-		}
-		if (any)
-		{
-			minY = std::min(minY, y);
-			maxY = std::max(maxY, y);
-		}
-	}
-	if (maxY < 0)
-		return false;
-	outMinY = minY;
-	outMaxY = maxY;
-	return true;
-}

@@ -2,8 +2,8 @@
 // generation state (including the per-column biomeTypes/heightMap added by
 // the direct-to-pooled-storage change), and generateTerrain() must produce
 // data identical to the owning generateChunk() path directly into reusable
-// pooled-style storage across reset/regenerate cycles - with the
-// activeVoxels cache staying in sync and no capacity churn.
+// pooled-style storage across reset/regenerate cycles - with the compact
+// occupancy metadata staying in sync and no capacity churn.
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkManager.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
@@ -12,11 +12,11 @@
 
 #include <algorithm>
 #include <array>
-#include <bitset>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <random>
 #include <vector>
 #include <thread>
 #include <set>
@@ -77,9 +77,26 @@ struct ChunkStateProbe
 	{
 		return c.heightMap;
 	}
-	static const std::bitset<CHUNK_VOLUME> &active(const Chunk &c)
+	static const std::array<uint16_t, Chunk::kOccupancySections> &sections(const Chunk &c)
 	{
-		return c.activeVoxels;
+		return c.m_sectionNonAir;
+	}
+	static bool occupiedSpan(const Chunk &c, int &minY, int &maxY)
+	{
+		return c.occupiedSpanY(minY, maxY);
+	}
+	static uint16_t sectionMask(const Chunk &c)
+	{
+		return c.occupiedSectionMask();
+	}
+	static void buildMeshRanged(Chunk &c, MeshBuildResult &out, uint64_t generation,
+								uint64_t revision, int minY, int maxY)
+	{
+		c.buildMeshRanged(out, generation, revision, minY, maxY);
+	}
+	static void buildLODMeshRanged(Chunk &c, MeshBuildResult &out, int scanTopY)
+	{
+		c.buildLODMeshRanged(out, scanTopY);
 	}
 	static MeshBuildResult *pendingResult(const Chunk &c)
 	{
@@ -102,7 +119,7 @@ struct ChunkSnapshot
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> foliage{};
 	std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomes{};
 	std::array<int, CHUNK_SIZE * CHUNK_SIZE> heights{};
-	std::bitset<CHUNK_VOLUME> active;
+	std::array<uint16_t, Chunk::kOccupancySections> sections{};
 	ChunkState state{ChunkState::UNLOADED};
 
 	static ChunkSnapshot capture(const Chunk &c)
@@ -118,7 +135,7 @@ struct ChunkSnapshot
 		s.foliage = ChunkStateProbe::foliage(c);
 		s.biomes = ChunkStateProbe::biomes(c);
 		s.heights = ChunkStateProbe::heights(c);
-		s.active = ChunkStateProbe::active(c);
+		s.sections = ChunkStateProbe::sections(c);
 		s.state = c.getState();
 		return s;
 	}
@@ -142,20 +159,44 @@ static bool sameState(const ChunkSnapshot &a, const ChunkSnapshot &b)
 		   (!a.borders || memcmpBorderContent(*a.borders, *b.borders)) &&
 		   a.grass == b.grass &&
 		   a.foliage == b.foliage && a.biomes == b.biomes &&
-		   a.heights == b.heights && a.active == b.active;
+		   a.heights == b.heights && a.sections == b.sections;
 }
 
-/// Every non-air voxel must have its activeVoxels bit set and vice versa -
-/// the direct-generation path rebuilds this cache from the same buffer it
-/// generated into, so a storage change could desynchronize them.
+/// The per-section occupancy counters must match a brute-force scan of the
+/// voxel storage exactly - after generation AND after every edit (issue
+/// #105). Sections are 16 voxels tall; counts saturate well below uint16.
 static void checkActiveCacheInSync(const Chunk &chunk, const char *label)
 {
 	const auto voxels = ChunkStateProbe::voxels(chunk);
-	const auto &active = ChunkStateProbe::active(chunk);
-	bool inSync = !ChunkStateProbe::hasStorage(chunk) ? active.none() : voxels.size() == CHUNK_VOLUME;
-	for (size_t i = 0; inSync && i < voxels.size(); ++i)
-		inSync = active[i] == (voxels[i].type != static_cast<uint8_t>(AIR));
-	CHECK(inSync, label);
+	std::array<uint16_t, Chunk::kOccupancySections> brute{};
+	if (ChunkStateProbe::hasStorage(chunk))
+	{
+		CHECK(voxels.size() == CHUNK_VOLUME, label);
+		constexpr size_t kSectionVolume =
+		    static_cast<size_t>(Chunk::kOccupancySectionSize) * CHUNK_SIZE * CHUNK_SIZE;
+		for (size_t i = 0; i < voxels.size(); ++i)
+			brute[i / kSectionVolume] +=
+			    voxels[i].type != static_cast<uint8_t>(AIR) ? 1 : 0;
+	}
+	CHECK(brute == ChunkStateProbe::sections(chunk), label);
+	// Derived view consistency: the mask bits must match the counts, and a
+	// non-empty chunk must expose a span while an empty one must not.
+	uint16_t mask = 0;
+	int expMin = -1, expMax = -1;
+	for (int s = 0; s < Chunk::kOccupancySections; ++s)
+	{
+		if (brute[s] == 0)
+			continue;
+		mask |= static_cast<uint16_t>(1u << s);
+		if (expMin < 0)
+			expMin = s * Chunk::kOccupancySectionSize;
+		expMax = s * Chunk::kOccupancySectionSize + Chunk::kOccupancySectionSize - 1;
+	}
+	CHECK(ChunkStateProbe::sectionMask(chunk) == mask, label);
+	int minY = -1, maxY = -1;
+	const bool has = ChunkStateProbe::occupiedSpan(chunk, minY, maxY);
+	CHECK(has == (mask != 0), label);
+	CHECK(!has || (minY == expMin && maxY == expMax), label);
 }
 
 static void checkMatchesOwning(const Chunk &chunk, TerrainGenerator &gen,
@@ -299,7 +340,7 @@ int main(int argc, char **argv)
 	CHECK(ChunkStateProbe::hasStorage(a), "generated chunk has voxel storage");
 	CHECK(ChunkStateProbe::voxels(a).size() == static_cast<size_t>(CHUNK_VOLUME),
 		  "voxel storage fully sized");
-	checkActiveCacheInSync(a, "activeVoxels cache in sync after generation");
+	checkActiveCacheInSync(a, "occupancy metadata in sync after generation");
 	checkMatchesOwning(a, gen, 0, 0, "initial generation");
 	const ChunkSnapshot snapA = ChunkSnapshot::capture(a);
 	// A generated chunk must not be trivially empty (a real surface chunk
@@ -337,14 +378,14 @@ int main(int argc, char **argv)
 	CHECK(c.getState() == ChunkState::UNLOADED, "reset returns chunk to UNLOADED");
 	CHECK(sameVoxels(snapC.voxels, ChunkStateProbe::voxels(c)),
 		  "generation reset retains dirty voxels until generation overwrites them");
-	CHECK(ChunkStateProbe::active(c).none(), "reset invalidates active cache");
+	CHECK(ChunkStateProbe::sectionMask(c) == 0, "reset invalidates occupancy metadata");
 	// ForGeneration keeps voxel storage but frees borders; the prepare step
 	// re-borrows them on the calling thread per the generation contract.
 	CHECK(c.prepareVoxelStorageForGeneration(), "re-prepare after ForGeneration reset");
 	c.generateTerrain(gen);
 	CHECK(c.getState() == ChunkState::GENERATED, "regeneration completes");
 	checkMatchesOwning(c, gen, CHUNK_SIZE, CHUNK_SIZE, "recycled generation");
-	checkActiveCacheInSync(c, "activeVoxels cache in sync after recycle");
+	checkActiveCacheInSync(c, "occupancy metadata in sync after recycle");
 	CHECK(ChunkStateProbe::voxels(c).capacity() == voxelCapacity,
 		  "voxel capacity stable across recycle");
 	CHECK(ChunkStateProbe::borders(c) != nullptr,
@@ -357,7 +398,7 @@ int main(int argc, char **argv)
 					  ChunkStateProbe::voxels(c).end(),
 					  [](Voxel v) { return v.type == AIR; }),
 		  "default reset clears every voxel");
-	checkActiveCacheInSync(c, "full reset leaves an empty active cache");
+	checkActiveCacheInSync(c, "full reset leaves empty occupancy metadata");
 
 	// Exercise the real pool boundary, including cancelled generation.
 	ChunkPool pool(64);
@@ -385,7 +426,7 @@ int main(int argc, char **argv)
 		CHECK(pool.voxelStorageCapacity() == 1, "generation reused pooled storage without allocating");
 		CHECK(pool.voxelStorageActive() == 1, "1 active voxel storage");
 		checkMatchesOwning(*reused, gen, -CHUNK_SIZE, CHUNK_SIZE, "pool reuse");
-		checkActiveCacheInSync(*reused, "pool reuse active cache");
+		checkActiveCacheInSync(*reused, "pool reuse keeps occupancy metadata in sync");
 		pool.release(reused);
 		pooled = pool.acquire(glm::vec3(0.0f));
 		pool.release(pooled); // cancelled before generation
@@ -1252,6 +1293,170 @@ int main(int argc, char **argv)
 		eastN.setVoxel(4, 33, -1, BRICKS);
 		CHECK(current.sampleForMeshing(4, 33, CHUNK_SIZE - 1) == BRICKS, "north boundary edit in current");
 		CHECK(eastN.sampleForMeshing(4, 33, -1) == BRICKS, "mirrored north face write in neighbor");
+	}
+
+	// 15) Compact occupancy metadata vs brute force under randomized edits
+	// (issue #105): the per-section counters must track the canonical voxel
+	// types through generation, thousands of deterministic place/delete/type
+	// mutations, section first/last-block transitions, and back to a fully
+	// empty chunk.
+	{
+		TerrainGenerator ogen(777);
+		Chunk occ(glm::vec3(0.0f));
+		CHECK(occ.prepareVoxelStorageForGeneration(), "occupancy prepare");
+		occ.generateTerrain(ogen);
+		checkActiveCacheInSync(occ, "occupancy metadata matches brute force after generation");
+
+		// The metadata skip must be observable: a generated chunk occupies
+		// fewer than all 16 sections (no floating terrain at the world top).
+		uint16_t genMask = ChunkStateProbe::sectionMask(occ);
+		CHECK(genMask != 0 && (genMask & 0x8000) == 0,
+			  "generated chunk leaves the sky sections empty");
+
+		std::mt19937 rng(20260905u);
+		auto rollCoord = [&rng](int lo, int hi)
+		{ return static_cast<int>(rng() % static_cast<unsigned>(hi - lo + 1)) + lo; };
+		const TextureType palette[] = {AIR, STONE, BRICKS, WATER, GLASS, DIRT};
+		std::array<int64_t, Chunk::kOccupancySections> shadow{};
+		{
+			const auto v0 = ChunkStateProbe::voxels(occ);
+			for (size_t i = 0; i < v0.size(); ++i)
+				shadow[i / (Chunk::kOccupancySectionSize * CHUNK_SIZE * CHUNK_SIZE)] +=
+				    v0[i].type != static_cast<uint8_t>(AIR) ? 1 : 0;
+		}
+		for (int i = 0; i < 3000; ++i)
+		{
+			const int x = rollCoord(0, CHUNK_SIZE - 1);
+			const int y = rollCoord(0, CHUNK_HEIGHT - 1);
+			const int z = rollCoord(0, CHUNK_SIZE - 1);
+			const TextureType type = palette[rng() % 6];
+			const size_t idx = static_cast<size_t>(y) * CHUNK_SIZE * CHUNK_SIZE +
+					   z * CHUNK_SIZE + x;
+			const bool cellWasAir = ChunkStateProbe::voxels(occ)[idx].type ==
+						static_cast<uint8_t>(AIR);
+			occ.setVoxel(x, y, z, type);
+			if (cellWasAir != (type == AIR))
+				shadow[y / Chunk::kOccupancySectionSize] += (type == AIR) ? -1 : 1;
+			CHECK(shadow[y / Chunk::kOccupancySectionSize] ==
+				      static_cast<int64_t>(
+					  ChunkStateProbe::sections(occ)[y / Chunk::kOccupancySectionSize]),
+				  "incremental section count matches a running shadow count");
+			// Canonical point query must agree with the written type.
+			CHECK(occ.isVoxelActive(x, y, z) == (type != AIR),
+				  "isVoxelActive follows the canonical voxel type");
+			if (i % 250 == 249)
+				checkActiveCacheInSync(occ, "occupancy metadata survives edit batch");
+		}
+		checkActiveCacheInSync(occ, "occupancy metadata matches brute force after 3000 edits");
+
+		// Drain every remaining voxel: a GENERATED chunk must come back to
+		// zero metadata and no occupied span through edits alone.
+		const auto residue = ChunkStateProbe::voxels(occ);
+		for (size_t i = 0; i < residue.size(); ++i)
+			if (residue[i].type != static_cast<uint8_t>(AIR))
+				occ.setVoxel(static_cast<int>(i % CHUNK_SIZE),
+					     static_cast<int>(i / (CHUNK_SIZE * CHUNK_SIZE)),
+					     static_cast<int>((i / CHUNK_SIZE) % CHUNK_SIZE), AIR);
+		checkActiveCacheInSync(occ, "drained chunk has zero occupancy metadata");
+		CHECK(ChunkStateProbe::sectionMask(occ) == 0,
+			  "no section bit survives a fully drained chunk");
+		int drainedMin = -1, drainedMax = -1;
+		CHECK(!ChunkStateProbe::occupiedSpan(occ, drainedMin, drainedMax),
+			  "drained chunk reports no occupied span");
+
+		// Directed first/last-block-in-section transitions at the section
+		// seams (y=15/16 and y=239/240) and at the world extremes - from a
+		// clean slate so each place is genuinely the section's first block.
+		for (int y : {0, 15, 16, 239, 240, CHUNK_HEIGHT - 1})
+		{
+			const int section = y / Chunk::kOccupancySectionSize;
+			occ.setVoxel(3, y, 3, STONE);
+			checkActiveCacheInSync(occ, "first block sets its section");
+			CHECK((ChunkStateProbe::sectionMask(occ) >> section) & 1,
+				  "occupied section bit is set");
+			occ.setVoxel(3, y, 3, AIR);
+			checkActiveCacheInSync(occ, "last block clears its section");
+		}
+		// All-air section between two occupied ones: block in section 0,
+		// block in section 1, remove the section-0 one - bit 0 must clear
+		// while bit 1 stays.
+		occ.setVoxel(4, 15, 4, BRICKS);
+		occ.setVoxel(4, 16, 4, BRICKS);
+		checkActiveCacheInSync(occ, "two adjacent sections occupied");
+		occ.setVoxel(4, 15, 4, AIR);
+		checkActiveCacheInSync(occ, "inner section drains to air");
+		CHECK((ChunkStateProbe::sectionMask(occ) & 0b11) == 0b10,
+			  "section 0 bit cleared, section 1 bit kept");
+		occ.setVoxel(4, 16, 4, AIR);
+
+		// Empty-chunk transition: a storage-only chunk whose last block is
+		// removed must drop to zero metadata and mesh to an empty payload.
+		Chunk empty(glm::vec3(0.0f));
+		empty.setVoxel(0, 0, 0, STONE);
+		CHECK(ChunkStateProbe::sectionMask(empty) == 0x1, "single voxel occupies section 0");
+		empty.setVoxel(0, 0, 0, AIR);
+		checkActiveCacheInSync(empty, "fully emptied chunk has zero occupancy metadata");
+		CHECK(ChunkStateProbe::sectionMask(empty) == 0, "no section bit survives the last delete");
+		CHECK(empty.generateMesh(), "empty chunk publishes an (empty) mesh");
+		const MeshBuildResult *emptyMesh = ChunkStateProbe::pendingResult(empty);
+		CHECK(emptyMesh != nullptr && emptyMesh->opaqueIndices.empty() &&
+				  emptyMesh->waterIndices.empty(),
+			  "empty occupancy meshes to an empty payload");
+	}
+
+	// 16) Metadata-driven mesh bounds are geometry-neutral (issue #105):
+	// building through the public path (section-derived, refined bounds)
+	// must produce byte-identical output to a forced full-volume range, for
+	// both the greedy mesher and the LOD mesher.
+	{
+		MeshResultPool pool;
+		TerrainGenerator bgen(4242);
+		Chunk chunk(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		CHECK(chunk.prepareVoxelStorageForGeneration(), "bounds-equivalence prepare");
+		chunk.generateTerrain(bgen);
+
+		const uint64_t generation = chunk.meshGeneration();
+		const uint64_t revision = chunk.meshRevision();
+
+		// Forced full-range greedy build.
+		MeshBuildResult *full = pool.acquire();
+		full->beginBuild(&chunk, generation, revision);
+		full->isLOD = false;
+		ChunkStateProbe::buildMeshRanged(chunk, *full, generation, revision,
+										 0, CHUNK_HEIGHT - 1);
+		pool.finishBuild(full);
+		CHECK(!full->opaqueIndices.empty(), "full-range greedy build emits geometry");
+
+		// Public path with metadata bounds.
+		CHECK(chunk.generateMesh(), "metadata-bounds greedy build publishes");
+		const MeshBuildResult *ranged = ChunkStateProbe::pendingResult(chunk);
+		CHECK(ranged != nullptr, "metadata-bounds result attached");
+		CHECK(ranged->opaqueVertices == full->opaqueVertices &&
+				  ranged->opaqueIndices == full->opaqueIndices &&
+				  ranged->waterVertices == full->waterVertices &&
+				  ranged->waterIndices == full->waterIndices,
+			  "greedy mesh identical under metadata-derived bounds");
+
+		// LOD: forced top-down scan vs metadata-bounded scan start.
+		MeshBuildResult *lodFull = pool.acquire();
+		lodFull->beginBuild(&chunk, generation, revision);
+		lodFull->isLOD = true;
+		ChunkStateProbe::buildLODMeshRanged(chunk, *lodFull, CHUNK_HEIGHT - 1);
+		pool.finishBuild(lodFull);
+		CHECK(!lodFull->opaqueIndices.empty(), "full-range LOD build emits geometry");
+
+		CHECK(chunk.generateLODMesh(), "metadata-bounded LOD build publishes");
+		const MeshBuildResult *lodRanged = ChunkStateProbe::pendingResult(chunk);
+		CHECK(lodRanged != nullptr && lodRanged->isLOD,
+			  "metadata-bounded LOD result attached");
+		CHECK(lodRanged->opaqueVertices == lodFull->opaqueVertices &&
+				  lodRanged->opaqueIndices == lodFull->opaqueIndices &&
+				  lodRanged->waterVertices == lodFull->waterVertices &&
+				  lodRanged->waterIndices == lodFull->waterIndices,
+			  "LOD mesh identical under metadata-derived scan start");
+
+		pool.release(lodFull);
+		pool.release(full);
 	}
 
 	if (g_fails != 0)
