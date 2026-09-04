@@ -12,12 +12,16 @@ int main()
 {
     try
     {
-        require(gpuTimestampSupported(true, 64, 1.f), "64-bit support");
-        require(!gpuTimestampSupported(false, 64, 1.f), "device capability gate");
-        require(!gpuTimestampSupported(true, 0, 1.f), "queue capability gate");
-        require(!gpuTimestampSupported(true, 65, 1.f), "invalid bit count");
-        require(!gpuTimestampSupported(true, 64, NAN), "invalid period");
-        require(!gpuTimestampSupported(true, 64, 0.f), "zero period");
+        // The device-wide timestampComputeAndGraphics flag is deliberately not
+        // an input: a selected queue with valid timestamps is sufficient.
+        for (uint32_t bits : {36u, 40u, 48u, 56u, 64u})
+            require(gpuTimestampSupported(bits, 1.f), "valid graphics timestamp width");
+        require(!gpuTimestampSupported(0, 1.f), "queue without timestamps");
+        require(!gpuTimestampSupported(65, 1.f), "invalid bit count");
+        require(!gpuTimestampSupported(64, NAN), "invalid timestamp period");
+        require(!gpuTimestampSupported(64, INFINITY), "infinite timestamp period");
+        require(!gpuTimestampSupported(64, -1.f), "negative timestamp period");
+        require(!gpuTimestampSupported(64, 0.f), "zero timestamp period");
         require(std::abs(gpuTimestampMilliseconds(250, 10, 8, 1000.f) - .016) < 1e-9, "8-bit wrap");
         require(std::abs(gpuTimestampMilliseconds(UINT64_MAX - 9, 10, 64, 1000.f) - .020) < 1e-9, "64-bit wrap");
         require(gpuTimestampMilliseconds(0, 2000000, 64, .5f) == 1., "nanoseconds to milliseconds");
@@ -69,6 +73,23 @@ int main()
         benchmark.tick(6., camera);
         require(benchmark.report().gpuAvailable && !benchmark.report().gpuPercentilesAvailable,
                 "short capture keeps average but suppresses percentiles");
+        benchmark.config().warmupSec = 2.f;
+        benchmark.requestStart();
+        benchmark.onWorldReady(glm::vec3(0.f));
+        benchmark.tick(1., camera);
+        require(benchmark.gpuCaptureTag() == 0, "warmup has no measurement tag");
+        sample.benchmarkTag = 0;
+        benchmark.sampleGpu(sample);
+        benchmark.tick(1.1, camera);
+        require(benchmark.gpuCaptureTag() != 0, "measurement tag after warmup");
+        benchmark.sampleGpu(sample); // Late result from warmup.
+        ++sample.serial;
+        sample.benchmarkTag = benchmark.gpuCaptureTag();
+        sample.ms[0] = 3.f;
+        benchmark.sampleGpu(sample);
+        benchmark.tick(6., camera);
+        require(benchmark.report().gpuSamples == 1 && benchmark.report().gpuAvgMs == 3.f,
+                "warmup samples excluded before and after measurement starts");
         std::cout << "PASS: GPU conversion and benchmark capture isolation\n";
         return 0;
     }

@@ -31,6 +31,12 @@ public:
     int historyWrite() const { return m_historyWrite; }
     static constexpr int kHistorySize = 240;
 private:
+    enum class UnavailableReason
+    {
+        NotInitialized, NoSlots, InvalidQueueFamily, NoTimestampBits,
+        InvalidTimestampBits, InvalidTimestampPeriod, QueryPoolAllocationFailed
+    };
+    UnavailableReason m_unavailableReason{UnavailableReason::NotInitialized};
     static constexpr uint32_t kQueries = static_cast<uint32_t>(kGpuPassCount * 2);
     struct Slot
     {

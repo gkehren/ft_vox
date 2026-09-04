@@ -5,6 +5,12 @@
 
 void VkGpuProfiler::init(VkContext &context, uint32_t slots)
 {
+    if (slots == 0)
+    {
+        m_supported = false;
+        m_unavailableReason = UnavailableReason::NoSlots;
+        return;
+    }
     m_device = context.getDevice();
     const auto &limits = context.getDeviceProperties().limits;
     uint32_t count = 0;
@@ -12,12 +18,24 @@ void VkGpuProfiler::init(VkContext &context, uint32_t slots)
     std::vector<VkQueueFamilyProperties> families(count);
     vkGetPhysicalDeviceQueueFamilyProperties(context.getPhysicalDevice(), &count, families.data());
     m_period = limits.timestampPeriod;
-    m_validBits = families.at(context.getGraphicsQueueFamily()).timestampValidBits;
-    m_supported = gpuTimestampSupported(limits.timestampComputeAndGraphics == VK_TRUE, m_validBits, m_period);
+    const uint32_t family = context.getGraphicsQueueFamily();
+    if (family >= count || family >= families.size())
+    {
+        m_supported = false;
+        m_unavailableReason = UnavailableReason::InvalidQueueFamily;
+        return;
+    }
+    m_validBits = families[family].timestampValidBits;
+    m_supported = gpuTimestampSupported(m_validBits, m_period);
     if (const char *env = std::getenv("FT_VOX_GPU_PROFILING"))
         m_enabled = std::strcmp(env, "0") != 0;
     if (!m_supported)
+    {
+        m_unavailableReason = m_validBits == 0 ? UnavailableReason::NoTimestampBits :
+            m_validBits > 64 ? UnavailableReason::InvalidTimestampBits :
+            UnavailableReason::InvalidTimestampPeriod;
         return;
+    }
     m_slots.resize(slots);
     VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     info.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -27,6 +45,7 @@ void VkGpuProfiler::init(VkContext &context, uint32_t slots)
         {
             // Optional instrumentation must not prevent rendering.
             shutdown();
+            m_unavailableReason = UnavailableReason::QueryPoolAllocationFailed;
             return;
         }
 }
@@ -39,6 +58,7 @@ void VkGpuProfiler::shutdown()
     m_slots.clear();
     m_recording = nullptr;
     m_supported = false;
+    m_unavailableReason = UnavailableReason::NotInitialized;
     m_device = VK_NULL_HANDLE;
     clear();
 }
@@ -71,7 +91,19 @@ void VkGpuProfiler::setEnabled(bool enabled)
 
 const char *VkGpuProfiler::status() const
 {
-    if (!m_supported) return "GPU timestamps unavailable (device/queue or query-pool allocation)";
+    if (!m_supported)
+    {
+        switch (m_unavailableReason)
+        {
+        case UnavailableReason::NoSlots: return "GPU timestamps unavailable: no frame slots";
+        case UnavailableReason::InvalidQueueFamily: return "GPU timestamps unavailable: invalid graphics queue family";
+        case UnavailableReason::NoTimestampBits: return "GPU timestamps unavailable: graphics queue has timestampValidBits=0";
+        case UnavailableReason::InvalidTimestampBits: return "GPU timestamps unavailable: invalid timestampValidBits";
+        case UnavailableReason::InvalidTimestampPeriod: return "GPU timestamps unavailable: invalid timestampPeriod";
+        case UnavailableReason::QueryPoolAllocationFailed: return "GPU timestamps unavailable: query pool allocation failed";
+        default: return "GPU timestamps unavailable: not initialized";
+        }
+    }
     if (!m_enabled) return "GPU timestamps disabled";
     if (!m_latest.serial) return "Waiting for a completed GPU frame";
     return "GPU timestamp queries (delayed, graphics queue)";

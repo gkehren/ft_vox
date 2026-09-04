@@ -1,0 +1,102 @@
+[Vulkan] Layer name GalaxyOverlayVkLayer does not conform to naming standard (Policy #LLP_LAYER_3)
+[Vulkan] Layer name GalaxyOverlayVkLayer_VERBOSE does not conform to naming standard (Policy #LLP_LAYER_3)
+[Vulkan] Layer name GalaxyOverlayVkLayer_DEBUG does not conform to naming standard (Policy #LLP_LAYER_3)
+Vulkan device: NVIDIA GeForce RTX 4070 Ti
+Vulkan API: 1.4.351
+  validation=yes dynamicRendering=yes timelineSemaphores=yes portabilitySubset=no
+  VMA allocator: ready
+[Vulkan] Validation Error: [ VUID-VkSwapchainCreateInfoKHR-imageFormat-01778 ] | MessageID = 0xc036022f | vkCreateSwapchainKHR(): pCreateInfo->imageFormat VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL does not support usage that includes VK_IMAGE_USAGE_STORAGE_BIT. The Vulkan spec states: The implied image creation parameters of the swapchain must be supported as reported by vkGetPhysicalDeviceImageFormatProperties (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkSwapchainCreateInfoKHR-imageFormat-01778)
+[Vulkan] Validation Error: [ VUID-VkSwapchainCreateInfoKHR-imageFormat-01778 ] | MessageID = 0xc036022f | vkCreateSwapchainKHR(): pCreateInfo vkGetPhysicalDeviceImageFormatProperties() unexpectedly failed, with following params: format: VK_FORMAT_B8G8R8A8_SRGB, imageType: VK_IMAGE_TYPE_2D, tiling: VK_IMAGE_TILING_OPTIMAL, usage: VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, flags: VkImageCreateFlags(0). The Vulkan spec states: The implied image creation parameters of the swapchain must be supported as reported by vkGetPhysicalDeviceImageFormatProperties (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkSwapchainCreateInfoKHR-imageFormat-01778)
+[Vulkan] Validation Error: [ VUID-VkSwapchainCreateInfoKHR-imageFormat-01778 ] | MessageID = 0xc036022f | vkCreateSwapchainKHR(): pCreateInfo->imageArrayLayers 1, but Maximum value returned by vkGetPhysicalDeviceImageFormatProperties() is 0 for imageFormat VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL. The Vulkan spec states: The implied image creation parameters of the swapchain must be supported as reported by vkGetPhysicalDeviceImageFormatProperties (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkSwapchainCreateInfoKHR-imageFormat-01778)
+[Vulkan] Validation Error: [ VUID-VkSwapchainCreateInfoKHR-imageFormat-01778 ] | MessageID = 0xc036022f | vkCreateSwapchainKHR(): pCreateInfo->imageExtent (width = 1920, height = 1080), which is bigger than max extent (width = 0, height = 0, depth = 0)returned by vkGetPhysicalDeviceImageFormatProperties(): for imageFormat VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL. The Vulkan spec states: The implied image creation parameters of the swapchain must be supported as reported by vkGetPhysicalDeviceImageFormatProperties (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkSwapchainCreateInfoKHR-imageFormat-01778)
+Swapchain present mode: FIFO (VSync on)
+[Vulkan] Validation Error: [ VUID-VkImageViewCreateInfo-usage-02275 ] Object 0: handle = 0xf56c9b0000000004, type = VK_OBJECT_TYPE_IMAGE; | MessageID = 0x618ab1e7 | vkCreateImageView(): pCreateInfo->format VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL doesn't support VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.
+(supported features: VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT|VK_FORMAT_FEATURE_2_BLIT_SRC_BIT|VK_FORMAT_FEATURE_2_BLIT_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT|VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT|Unhandled VkFormatFeatureFlagBits2). The Vulkan spec states: If usage contains VK_IMAGE_USAGE_STORAGE_BIT, then the image view's format features must contain VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkImageViewCreateInfo-usage-02275)
+[Vulkan] Validation Error: [ VUID-VkImageViewCreateInfo-usage-02275 ] Object 0: handle = 0xe7f79a0000000005, type = VK_OBJECT_TYPE_IMAGE; | MessageID = 0x618ab1e7 | vkCreateImageView(): pCreateInfo->format VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL doesn't support VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.
+(supported features: VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT|VK_FORMAT_FEATURE_2_BLIT_SRC_BIT|VK_FORMAT_FEATURE_2_BLIT_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT|VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT|Unhandled VkFormatFeatureFlagBits2). The Vulkan spec states: If usage contains VK_IMAGE_USAGE_STORAGE_BIT, then the image view's format features must contain VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkImageViewCreateInfo-usage-02275)
+[Vulkan] Validation Error: [ VUID-VkImageViewCreateInfo-usage-02275 ] Object 0: handle = 0xf443490000000006, type = VK_OBJECT_TYPE_IMAGE; | MessageID = 0x618ab1e7 | vkCreateImageView(): pCreateInfo->format VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL doesn't support VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.
+(supported features: VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT|VK_FORMAT_FEATURE_2_BLIT_SRC_BIT|VK_FORMAT_FEATURE_2_BLIT_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT|VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT|Unhandled VkFormatFeatureFlagBits2). The Vulkan spec states: If usage contains VK_IMAGE_USAGE_STORAGE_BIT, then the image view's format features must contain VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkImageViewCreateInfo-usage-02275)
+Resource pack: ./ressources/default-resource-pack.zip
+Texture array: 101 layers (16x16)
+WorldRenderer ready (Shadow/Opaque/Water/Sky + post)
+ChunkPool: pre-allocated 8894 chunks
+SDL version: 3004012
+ft_vox: Vulkan — streaming procedural world
+  WASD fly · mouse look · LMB/RMB edit · T block · B borders
+  C free mouse · F1–F7 panels · F10 VSync · Esc quit
+  ThreadPool workers: 16
+Bootstrap: 25 chunks around spawn
+World seed: 42 chunks=25 view=512
+[stream] chunks=26 draw=9 shadow=25 q=3350/1/0
+[Vulkan] Validation Error: [ VUID-VkSwapchainCreateInfoKHR-imageFormat-01778 ] | MessageID = 0xc036022f | vkCreateSwapchainKHR(): pCreateInfo->imageFormat VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL does not support usage that includes VK_IMAGE_USAGE_STORAGE_BIT. The Vulkan spec states: The implied image creation parameters of the swapchain must be supported as reported by vkGetPhysicalDeviceImageFormatProperties (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkSwapchainCreateInfoKHR-imageFormat-01778)
+[Vulkan] Validation Error: [ VUID-VkSwapchainCreateInfoKHR-imageFormat-01778 ] | MessageID = 0xc036022f | vkCreateSwapchainKHR(): pCreateInfo vkGetPhysicalDeviceImageFormatProperties() unexpectedly failed, with following params: format: VK_FORMAT_B8G8R8A8_SRGB, imageType: VK_IMAGE_TYPE_2D, tiling: VK_IMAGE_TILING_OPTIMAL, usage: VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, flags: VkImageCreateFlags(0). The Vulkan spec states: The implied image creation parameters of the swapchain must be supported as reported by vkGetPhysicalDeviceImageFormatProperties (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkSwapchainCreateInfoKHR-imageFormat-01778)
+[Vulkan] Validation Error: [ VUID-VkSwapchainCreateInfoKHR-imageFormat-01778 ] | MessageID = 0xc036022f | vkCreateSwapchainKHR(): pCreateInfo->imageArrayLayers 1, but Maximum value returned by vkGetPhysicalDeviceImageFormatProperties() is 0 for imageFormat VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL. The Vulkan spec states: The implied image creation parameters of the swapchain must be supported as reported by vkGetPhysicalDeviceImageFormatProperties (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkSwapchainCreateInfoKHR-imageFormat-01778)
+[Vulkan] Validation Error: [ VUID-VkSwapchainCreateInfoKHR-imageFormat-01778 ] | MessageID = 0xc036022f | vkCreateSwapchainKHR(): pCreateInfo->imageExtent (width = 1920, height = 1080), which is bigger than max extent (width = 0, height = 0, depth = 0)returned by vkGetPhysicalDeviceImageFormatProperties(): for imageFormat VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL. The Vulkan spec states: The implied image creation parameters of the swapchain must be supported as reported by vkGetPhysicalDeviceImageFormatProperties (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkSwapchainCreateInfoKHR-imageFormat-01778)
+Swapchain present mode: IMMEDIATE (VSync off, uncapped)
+[Vulkan] Validation Error: [ VUID-VkImageViewCreateInfo-usage-02275 ] Object 0: handle = 0x6b3d270000000196, type = VK_OBJECT_TYPE_IMAGE; | MessageID = 0x618ab1e7 | vkCreateImageView(): pCreateInfo->format VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL doesn't support VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.
+(supported features: VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT|VK_FORMAT_FEATURE_2_BLIT_SRC_BIT|VK_FORMAT_FEATURE_2_BLIT_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT|VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT|Unhandled VkFormatFeatureFlagBits2). The Vulkan spec states: If usage contains VK_IMAGE_USAGE_STORAGE_BIT, then the image view's format features must contain VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkImageViewCreateInfo-usage-02275)
+[Vulkan] Validation Error: [ VUID-VkImageViewCreateInfo-usage-02275 ] Object 0: handle = 0x6d91ce0000000197, type = VK_OBJECT_TYPE_IMAGE; | MessageID = 0x618ab1e7 | vkCreateImageView(): pCreateInfo->format VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL doesn't support VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.
+(supported features: VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT|VK_FORMAT_FEATURE_2_BLIT_SRC_BIT|VK_FORMAT_FEATURE_2_BLIT_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT|VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT|Unhandled VkFormatFeatureFlagBits2). The Vulkan spec states: If usage contains VK_IMAGE_USAGE_STORAGE_BIT, then the image view's format features must contain VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkImageViewCreateInfo-usage-02275)
+[Vulkan] Validation Error: [ VUID-VkImageViewCreateInfo-usage-02275 ] Object 0: handle = 0x4046a90000000198, type = VK_OBJECT_TYPE_IMAGE; | MessageID = 0x618ab1e7 | vkCreateImageView(): pCreateInfo->format VK_FORMAT_B8G8R8A8_SRGB with tiling VK_IMAGE_TILING_OPTIMAL doesn't support VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.
+(supported features: VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT|VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT|VK_FORMAT_FEATURE_2_BLIT_SRC_BIT|VK_FORMAT_FEATURE_2_BLIT_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT|VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT|VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT|Unhandled VkFormatFeatureFlagBits2). The Vulkan spec states: If usage contains VK_IMAGE_USAGE_STORAGE_BIT, then the image view's format features must contain VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT (https://vulkan.lunarg.com/doc/view/1.3.290.0/windows/1.3-extensions/vkspec.html#VUID-VkImageViewCreateInfo-usage-02275)
+Bootstrap: 25 chunks around spawn
+[bench] World reloaded seed=42 chunks=25
+[stream] chunks=636 draw=106 shadow=139 q=2732/2/2
+[stream] chunks=1143 draw=285 shadow=142 q=2503/3/1
+[stream] chunks=1231 draw=298 shadow=143 q=2483/3/2
+[stream] chunks=1238 draw=292 shadow=145 q=2476/2/1
+[stream] chunks=1242 draw=287 shadow=142 q=2478/3/2
+[stream] chunks=1244 draw=301 shadow=144 q=2476/2/1
+[stream] chunks=1242 draw=299 shadow=143 q=2471/3/2
+[stream] chunks=1244 draw=290 shadow=142 q=2482/2/1
+[stream] chunks=1243 draw=298 shadow=144 q=2480/3/2
+[stream] chunks=1239 draw=293 shadow=144 q=2478/2/2
+[stream] chunks=1245 draw=289 shadow=143 q=2474/3/1
+
+ft_vox Benchmark Report
+=======================
+Score: 9999 / 10000  Grade: S
+Revision: b999bd881a02* (dirty tree at build)
+  git b999bd881a02  branch feat/82-gpu-timestamp-profiler  describe b999bd8-dirty
+  build UTC 2026-09-04T11:18:54Z
+Seed: 42  Duration: 10s  Warmup: 2s  Measured: 10.0002s  Frames: 1999
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 4.99297  min 4.9583  max 6.0725
+  p50 4.9917  p95 4.9926  p99 5.0096
+  avg FPS 200.282  1% low FPS 199.617
+  frames >16.7ms: 0  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.391458  Visibility 0.0176529
+  Acquire 0.0962726  Record 2.61116  MeshUpload 0.0680489
+  ImGui 0.0441504  Present 1.83847
+
+Worker jobs
+  TerrainGen  n=4799  avgMs=1.62321  totalMs=7789.79
+  MeshBuild   n=3599  avgMs=2.97605  totalMs=10710.8
+  MeshLOD     n=0  avgMs=0  totalMs=0
+
+GPU timestamp queries: available
+  samples=1997 avgMs=1.3281
+  p95Ms=1.8056 p99Ms=1.9728
+  Uploads avgMs=0.0137836
+  Shadow avgMs=0.137059
+  Opaque avgMs=0.34203
+  Overlays avgMs=0.00018511
+  Water avgMs=0.0838542
+  Sky avgMs=0.416509
+  Post avgMs=0.319555
+  ImGui avgMs=0.0149667
+  Delayed graphics-queue intervals; overlapping passes are not additive.
+Biome map: zoom=0 mode=scheduled (fixed center when enabled)
+  TerrainQueue n=4799 avgMs=0.00847656 totalMs=40.679
+  MeshQueue n=3599 avgMs=0.00863101 totalMs=31.063
+  BiomeMap n=0 avgMs=0 totalMs=0
+Peaks: chunks=1247 draw=305 qLoad/Gen/Mesh=2506/0/1
+
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.
+Benchmark saved: docs/benchmarks/bench_20260904_112052_b999bd881a02__s42_sc9999.txt

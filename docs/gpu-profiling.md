@@ -8,9 +8,13 @@ use 64-bit values plus availability, never `VK_QUERY_RESULT_WAIT_BIT`.
 Recording resets the pool on the GPU outside rendering. There is no added
 per-frame fence wait, queue idle or device idle for profiling.
 
-`VkGpuProfiler` requires `timestampComputeAndGraphics`, a graphics queue with
-1–64 timestamp valid bits, and a finite positive `timestampPeriod`. Allocation
-failure or unsupported timestamps leave rendering functional. Nanoseconds are
+`VkGpuProfiler` requires the selected graphics queue family to expose
+1–64 `timestampValidBits`, and a finite positive `timestampPeriod`.
+`timestampComputeAndGraphics` is a blanket guarantee across graphics/compute
+queues, not a requirement when the selected queue itself has valid timestamps.
+Allocation failure or unsupported timestamps leave rendering functional. The
+status distinguishes missing/invalid queue bits, invalid period, invalid queue
+family, zero frame slots and pool allocation failure. Nanoseconds are
 converted to milliseconds after unsigned counter subtraction and valid-bit
 masking (including the 64-bit case and one counter wrap).
 
@@ -54,14 +58,18 @@ IMMEDIATE GPU p95/p99 were 1.267/1.494 ms. Shadow averaged 0.050 ms,
 Opaque 0.097 ms, Sky 0.394 ms and Post 0.269 ms. These short runs are functional
 checks, not an overhead comparison or a performance claim.
 
-No timestamp/query validation errors were observed. Full application validation
-is **not clean** on this setup: enabled and disabled runs both report
+No timestamp/query validation errors were observed. The controlled follow-up
+comparison reproduces the same two VUIDs on base main
+`098ceae278607d3330d1d9e9a797ec94d9a170a9`, with profiling code absent, and on
+the corrected PR with profiling enabled and disabled:
 `VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
 `VUID-VkImageViewCreateInfo-usage-02275` concerning STORAGE usage on SRGB
-swapchain images. The engine requests only COLOR_ATTACHMENT and TRANSFER_DST;
-disabling implicit layers did not remove the errors. The source of the added
-usage is not established. This issue is recorded rather than hidden by changing
-swapchain formats or disabling validation.
+swapchain images (8 and 6 occurrences respectively in each run).
+Full application validation is **not clean**, but this is preexisting rather
+than introduced by the timestamp profiler. The root cause remains unresolved
+and is tracked in [#99](https://github.com/gkehren/ft_vox/issues/99).
+See the [review validation report](benchmarks/issue98-validation/README.md)
+for full logs, environment, tests and limits of the comparison.
 
 Resolution/shadow-distance/overdraw sweeps and external RenderDoc/Nsight
 comparison remain manual validation: use the Graphics/Streaming controls with

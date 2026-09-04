@@ -19,9 +19,12 @@ struct GpuFrameSample
     std::array<bool, kGpuPassCount> present{};
 };
 
-inline bool gpuTimestampSupported(bool graphicsAndCompute, uint32_t validBits, float period)
+// timestampComputeAndGraphics guarantees support across graphics/compute queues.
+// For queries on the selected graphics queue, that queue's valid bits are
+// authoritative even when the device-wide guarantee is false.
+inline bool gpuTimestampSupported(uint32_t validBits, float period)
 {
-    return graphicsAndCompute && validBits > 0 && validBits <= 64 &&
+    return validBits > 0 && validBits <= 64 &&
            std::isfinite(period) && period > 0.f;
 }
 

@@ -144,7 +144,22 @@ int main()
 		swapchain.shutdown();
 
 		VkGpuProfiler gpu;
+		gpu.init(context, 0);
+		if (gpu.supported() || std::string(gpu.status()).find("no frame slots") == std::string::npos)
+			throw std::runtime_error("zero-slot profiler should be unavailable with a diagnostic");
+		gpu.shutdown();
 		gpu.init(context, 2);
+		uint32_t familyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(context.getPhysicalDevice(), &familyCount, nullptr);
+		std::vector<VkQueueFamilyProperties> families(familyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(context.getPhysicalDevice(), &familyCount, families.data());
+		const auto &limits = context.getDeviceProperties().limits;
+		std::cout << "GPU timestamp capability:\n  graphics family: " << context.getGraphicsQueueFamily()
+			<< "\n  valid bits: " << families.at(context.getGraphicsQueueFamily()).timestampValidBits
+			<< "\n  period: " << limits.timestampPeriod << " ns"
+			<< "\n  timestampComputeAndGraphics: " << (limits.timestampComputeAndGraphics ? "true" : "false")
+			<< "\n  selected queue supported: " << (gpu.supported() ? "yes" : "no")
+			<< "\n  status: " << gpu.status() << '\n';
 		if (gpu.supported())
 		{
 			gpu.setEnabled(true);
@@ -180,6 +195,18 @@ int main()
 			record(0);
 			gpu.onSlotReady(0);
 			if (!gpu.latest().serial) throw std::runtime_error("GPU profiler failed to resume");
+			record(1); // Result completed but not yet consumed when capture is toggled.
+			gpu.setEnabled(false);
+			if (gpu.latest().serial || gpu.historyCount())
+				throw std::runtime_error("GPU toggle did not immediately clear displayed data");
+			gpu.setEnabled(true);
+			gpu.onSlotReady(1);
+			if (gpu.latest().serial || gpu.historyCount())
+				throw std::runtime_error("pending GPU sample survived OFF/ON");
+			record(0);
+			gpu.onSlotReady(0);
+			if (!gpu.latest().serial || gpu.historyCount() != 1)
+				throw std::runtime_error("fresh capture did not resume after OFF/ON");
 			std::cout << "PASS: GPU timestamp recycling, partial queries, reset and toggle\n";
 		}
 		else std::cout << "SKIP: GPU timestamps unsupported\n";
