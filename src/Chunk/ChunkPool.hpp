@@ -33,6 +33,7 @@ public:
 	bool ensureCapacity(size_t minCapacity);
 
 	/// Obtain a chunk reset to worldPosition, or nullptr if the free list is empty.
+	/// Must call generateTerrain() before consuming voxel data.
 	/// Thread-safe. Does not heap-allocate overflow chunks.
 	Chunk *acquire(const glm::vec3 &worldPosition);
 

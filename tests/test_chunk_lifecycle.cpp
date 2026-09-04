@@ -5,11 +5,13 @@
 // pooled-style storage across reset/regenerate cycles - with the
 // activeVoxels cache staying in sync and no capacity churn.
 #include <Chunk/Chunk.hpp>
+#include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -137,8 +139,38 @@ static void checkMatchesOwning(const Chunk &chunk, TerrainGenerator &gen,
 		  "height map matches owning path");
 }
 
-int main()
+// Isolate the acquisition reset cost: alternate both modes over the same
+// preallocated chunk. No generation/allocator/renderer work is timed here.
+static int runResetPerf()
 {
+	using Clock = std::chrono::steady_clock;
+	Chunk chunk(glm::vec3(0.0f));
+	constexpr int iterations = 100000;
+	double fullMs = 0.0, generationMs = 0.0;
+	for (int round = 0; round < 6; ++round)
+	{
+		for (int phase = 0; phase < 2; ++phase)
+		{
+			const bool full = ((round + phase) % 2) == 0;
+			const auto mode = full ? Chunk::ResetMode::Full : Chunk::ResetMode::ForGeneration;
+			const auto start = Clock::now();
+			for (int i = 0; i < iterations; ++i)
+				chunk.reset(glm::vec3(static_cast<float>(i % 64), 0.0f, 0.0f), mode);
+			const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+			(full ? fullMs : generationMs) += ms;
+		}
+	}
+	std::cout << "[Reset Perf] 600000 resets/mode, alternating order\n"
+			  << "full: " << fullMs << " ms total, " << fullMs / 600000 << " ms/reset\n"
+			  << "for-generation: " << generationMs << " ms total, "
+			  << generationMs / 600000 << " ms/reset\n";
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	if (argc > 1 && std::strcmp(argv[1], "--reset-perf") == 0)
+		return runResetPerf();
 	constexpr int kSeed = 4242;
 	TerrainGenerator gen(kSeed);
 
@@ -180,8 +212,12 @@ int main()
 	const size_t shellCapacity = ChunkStateProbe::shell(c).capacity();
 
 	c.reset(glm::vec3(static_cast<float>(CHUNK_SIZE), 0.0f,
-					  static_cast<float>(CHUNK_SIZE)));
+					  static_cast<float>(CHUNK_SIZE)), Chunk::ResetMode::ForGeneration);
 	CHECK(c.getState() == ChunkState::UNLOADED, "reset returns chunk to UNLOADED");
+	CHECK(sameVoxels(snapC.voxels, ChunkStateProbe::voxels(c)),
+		  "generation reset retains dirty voxels until generation overwrites them");
+	CHECK(ChunkStateProbe::active(c).none(), "reset invalidates active cache");
+	CHECK(c.isShellEmpty(), "reset invalidates neighbor shell");
 	c.generateTerrain(gen);
 	CHECK(c.getState() == ChunkState::GENERATED, "regeneration completes");
 	checkMatchesOwning(c, gen, CHUNK_SIZE, CHUNK_SIZE, "recycled generation");
@@ -190,6 +226,37 @@ int main()
 		  "voxel capacity stable across recycle");
 	CHECK(ChunkStateProbe::shell(c).capacity() == shellCapacity,
 		  "shell capacity stable across recycle");
+
+	// Full reset must still clear storage when a chunk is retired.
+	c.reset(glm::vec3(0.0f));
+	CHECK(std::all_of(ChunkStateProbe::voxels(c).begin(),
+					  ChunkStateProbe::voxels(c).end(),
+					  [](Voxel v) { return v.type == AIR; }),
+		  "default reset clears every voxel");
+	checkActiveCacheInSync(c, "full reset leaves an empty active cache");
+
+	// Exercise the real pool boundary, including cancelled generation.
+	ChunkPool pool(64);
+	Chunk *pooled = pool.acquire(glm::vec3(0.0f));
+	CHECK(pooled != nullptr, "pool acquisition succeeds");
+	if (pooled)
+	{
+		pooled->generateTerrain(gen);
+		pool.release(pooled);
+		CHECK(std::all_of(ChunkStateProbe::voxels(*pooled).begin(),
+						  ChunkStateProbe::voxels(*pooled).end(),
+						  [](Voxel v) { return v.type == AIR; }),
+			  "pool release fully clears retired voxels");
+		Chunk *reused = pool.acquire(glm::vec3(-CHUNK_SIZE, 0.0f, CHUNK_SIZE));
+		CHECK(reused == pooled, "pool reuses released storage");
+		reused->generateTerrain(gen);
+		checkMatchesOwning(*reused, gen, -CHUNK_SIZE, CHUNK_SIZE, "pool reuse");
+		checkActiveCacheInSync(*reused, "pool reuse active cache");
+		pool.release(reused);
+		pooled = pool.acquire(glm::vec3(0.0f));
+		pool.release(pooled); // cancelled before generation
+		CHECK(pool.acquiredCount() == 0, "cancelled acquisition returns to pool");
+	}
 
 	if (g_fails != 0)
 	{

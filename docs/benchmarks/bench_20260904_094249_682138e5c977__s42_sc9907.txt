@@ -1,0 +1,30 @@
+ft_vox Benchmark Report
+=======================
+Score: 9907 / 10000  Grade: S
+Revision: 682138e5c977* (dirty tree at build)
+  git 682138e5c977  branch fix/93-pooled-voxel-clearing  describe 682138e-dirty
+  build UTC 2026-09-04T09:40:07Z
+Seed: 42  Duration: 30s  Warmup: 2s  Measured: 30.0019s  Frames: 16351
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 1.82516  min 0.5082  max 12.5216
+  p50 1.0859  p95 3.8452  p99 4.1672
+  avg FPS 547.897  1% low FPS 239.969
+  frames >16.7ms: 0  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.384825  Visibility 0.0601827
+  Acquire 0.950787  Record 0.375891  MeshUpload 0.0460579
+  ImGui 0.0427599  Present 0.0576118
+
+Worker jobs
+  TerrainGen  n=20046  avgMs=1.64423  totalMs=32960.2
+  MeshBuild   n=17349  avgMs=3.09344  totalMs=53668.1
+  MeshLOD     n=367  avgMs=0.0382861  totalMs=14.051
+
+Peaks: chunks=4628 draw=1260 qLoad/Gen/Mesh=1542/3/4
+
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.
