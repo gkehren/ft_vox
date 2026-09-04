@@ -19,6 +19,7 @@
 
 #include <Chunk/TerrainGenerator.hpp>
 #include <Chunk/VoxelPool.hpp>
+#include <Chunk/ChunkBorders.hpp>
 #include <Vulkan/VkBuffer.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
@@ -34,7 +35,8 @@ class GpuResourceRetire;
 class Chunk
 {
 public:
-	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED, VoxelPool *voxelPool = nullptr);
+	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED,
+		  VoxelPool *voxelPool = nullptr, BorderPool *borderPool = nullptr);
 	Chunk(Chunk &&other) noexcept;
 	Chunk &operator=(Chunk &&other) noexcept;
 	~Chunk();
@@ -54,9 +56,14 @@ public:
 
 	bool hasVoxelStorage() const { return m_storage != nullptr; }
 	VoxelPool *getVoxelPool() const { return m_voxelPool; }
+	bool hasBorderStorage() const { return m_borders != nullptr; }
+	BorderPool *getBorderPool() const { return m_borderPool; }
 
-	/// Acquire voxel storage before dispatching to generation thread.
-	/// Returns false if allocation fails (e.g. std::bad_alloc).
+	/// Prepare all generation backing on the calling thread:
+	/// - voxel storage
+	/// - transient neighbor borders
+	/// Returns false if an allocation fails (e.g. std::bad_alloc); any
+	/// partially acquired backing is returned to its pool first.
 	bool prepareVoxelStorageForGeneration();
 
 	/// Release voxel storage upon chunk retirement.
@@ -89,9 +96,17 @@ public:
 	/// Hand buffers to the retire queue; safe during streaming unload/remesh.
 	void releaseGPUDeferred(GpuResourceRetire &retire);
 
-	bool isShellEmpty() const { return neighborShellVoxels.empty(); }
-	void freeShellVoxels();
-	void rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
+	bool isShellEmpty() const { return m_borders == nullptr; }
+
+	/// Layout-independent border sampling for meshing (issue #103).
+	/// Accepts the full padded range used by the greedy mesher: in-chunk
+	/// coordinates read local voxels, x/z = -1 / CHUNK_SIZE read neighbor
+	/// faces, diagonal coordinates read corner columns, and everything else
+	/// (including vertical padding) reads as AIR. Missing borders - freed
+	/// after upload or never built - also read as AIR.
+	TextureType sampleForMeshing(int x, int y, int z) const;
+	void releaseNeighborBorders();
+	void rebuildBordersFromNeighbors(const Chunk *west, const Chunk *east,
 								   const Chunk *south, const Chunk *north);
 
 	enum class ResetMode { Full, ForGeneration };
@@ -132,7 +147,10 @@ private:
 	VoxelStorage *m_storage{nullptr};
 	void ensureVoxelStorageForEdit();
 	std::bitset<CHUNK_VOLUME> activeVoxels;
-	std::vector<uint8_t> neighborShellVoxels;
+	// Borrowed from a BorderPool for generation/meshing and returned after
+	// upload (issue #103): no per-chunk border memory is retained.
+	ChunkNeighborBorders *m_borders{nullptr};
+	BorderPool *m_borderPool{nullptr};
 
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeGrassColors{};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeFoliageColors{};

@@ -8,6 +8,7 @@
 #include <array>
 #include <glm/glm.hpp>
 #include <Chunk/VoxelPool.hpp>
+#include <Chunk/ChunkBorders.hpp>
 
 class Chunk;
 
@@ -62,6 +63,11 @@ public:
 	size_t voxelStorageFree() const { return m_voxelPool.freeCount(); }
 	VoxelPool &voxelPool() { return m_voxelPool; }
 	const VoxelPool &voxelPool() const { return m_voxelPool; }
+	size_t borderStorageCapacity() const { return m_borderPool.capacity(); }
+	size_t borderStorageActive() const { return m_borderPool.activeCount(); }
+	size_t borderStorageFree() const { return m_borderPool.freeCount(); }
+	BorderPool &borderPool() { return m_borderPool; }
+	const BorderPool &borderPool() const { return m_borderPool; }
 
 private:
 	void publishTelemetry(); // caller holds m_mutex
@@ -72,6 +78,8 @@ private:
 	// (members destroy in reverse order): retiring chunks release their
 	// VoxelStorage back into this pool.
 	VoxelPool m_voxelPool;
+	// Must also outlive m_storage Chunk destructors (issue #103).
+	BorderPool m_borderPool;
 
 	/// All pool-owned chunks; unique_ptr keeps addresses stable across vector growth.
 	std::vector<std::unique_ptr<Chunk>> m_storage;

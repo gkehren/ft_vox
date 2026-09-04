@@ -20,6 +20,7 @@ enum Gauge : size_t {
     RetiredBytes, RetiredBuffers, PoolCapacity, PoolAcquired, PoolFree,
     ActiveChunks, DeferredChunks, StagingUsed, CpuMeshCapacity, GpuLiveBytes,
     VoxelPoolCapacity, VoxelPoolActive, VoxelPoolFree, VoxelPoolCapacityBytes,
+    BorderPoolCapacity, BorderPoolActive, BorderPoolFree, BorderPoolCapacityBytes,
     GaugeCount
 };
 inline constexpr const char* gaugeNames[] = {
@@ -34,18 +35,20 @@ inline constexpr const char* gaugeNames[] = {
     "pool.free", "chunks.active", "chunks.deferred", "staging.slice.bytes",
     "cpu.mesh.capacityBytes", "gpu.live.bytes",
     "voxel.pool.capacity", "voxel.pool.active", "voxel.pool.free",
-    "voxel.pool.capacityBytes"
+    "voxel.pool.capacityBytes", "border.pool.capacity", "border.pool.active",
+    "border.pool.free", "border.pool.capacityBytes"
 };
 enum Event : size_t {
     AllocCreated, AllocDestroyed, PoolRejected, UploadChunks, UploadVertexBytes,
     UploadIndexBytes, UploadDeferred, StagingFailures, OpaqueDraws, WaterDraws,
-    Shadow0, Shadow1, Shadow2, VoxelPoolGrow, EventCount
+    Shadow0, Shadow1, Shadow2, VoxelPoolGrow, BorderPoolGrow, EventCount
 };
 inline constexpr const char* eventNames[] = {
     "mesh.allocations.created", "mesh.allocations.destroyed", "pool.rejected",
     "upload.chunks", "upload.vertexBytes", "upload.indexBytes", "upload.deferred",
     "staging.failures", "draws.opaque", "draws.water", "draws.shadow.0",
-    "draws.shadow.1", "draws.shadow.2", "voxel.pool.growEvents"
+    "draws.shadow.1", "draws.shadow.2", "voxel.pool.growEvents",
+    "border.pool.growEvents"
 };
 enum Stage : size_t { Skylight, Blocklight, Occupancy, FacesGreedyAO, Lod, StageCount };
 inline constexpr const char* stageNames[] = {"skylight", "blocklight", "occupancy", "facesGreedyAO", "LOD"};
@@ -65,6 +68,8 @@ inline constexpr bool isCaptureLocalGauge(Gauge g) {
     case DeferredChunks:
     case VoxelPoolActive:
     case VoxelPoolFree:
+    case BorderPoolActive:
+    case BorderPoolFree:
         return true;
     default:
         return false;

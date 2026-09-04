@@ -1,4 +1,5 @@
 #include <Chunk/TerrainGenerator.hpp>
+#include <Chunk/ChunkBorders.hpp>
 #include <Chunk/StreamHelpers.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 #include <algorithm>
@@ -728,16 +729,51 @@ ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
   // caller-owned reusable storage instead.
   ChunkData chunkData;
   chunkData.voxels.resize(CHUNK_VOLUME);
-  chunkData.borderVoxels.resize(kBorderVoxelCount);
+  chunkData.borderVoxels.assign(kBorderVoxelCount, static_cast<uint8_t>(AIR));
 
+  ChunkNeighborBorders compactBorders{};
   ChunkGenerationTarget target{
       .voxels = std::span<Voxel, CHUNK_VOLUME>(chunkData.voxels),
-      .borderVoxels = std::span<uint8_t, kBorderVoxelCount>(chunkData.borderVoxels),
+      .borders = &compactBorders,
       .biomes = chunkData.biomes,
       .heightMap = chunkData.heightMap,
       .grassColors = chunkData.grassColors,
       .foliageColors = chunkData.foliageColors};
   generateChunkInto(chunkX, chunkZ, target);
+
+  // Expand the compact border output into the owning dense layout expected
+  // by the test/tool API. Faces plus corner columns are the only cells the
+  // generator ever writes; everything else stays AIR.
+  auto expandFace = [&chunkData](const std::array<uint8_t, CHUNK_HEIGHT * CHUNK_SIZE> &face,
+                                 int borderX, bool faceIsX)
+  {
+    for (int y = 0; y < static_cast<int>(CHUNK_HEIGHT); ++y)
+      for (int t = 0; t < static_cast<int>(CHUNK_SIZE); ++t)
+      {
+        const uint8_t type = face[static_cast<size_t>(y) * CHUNK_SIZE + t];
+        if (type == static_cast<uint8_t>(AIR))
+          continue;
+        const int lx = faceIsX ? borderX : t;
+        const int lz = faceIsX ? t : borderX;
+        chunkData.borderVoxels[(y + 1) * 18 * 18 + (lz + 1) * 18 + (lx + 1)] = type;
+      }
+  };
+  expandFace(compactBorders.west, -1, true);
+  expandFace(compactBorders.east, CHUNK_SIZE, true);
+  expandFace(compactBorders.south, -1, false);
+  expandFace(compactBorders.north, CHUNK_SIZE, false);
+  const std::pair<int, int> corners[4] = {{-1, -1}, {CHUNK_SIZE, -1}, {-1, CHUNK_SIZE}, {CHUNK_SIZE, CHUNK_SIZE}};
+  const std::array<uint8_t, CHUNK_HEIGHT> *cornerCols[4] = {
+      &compactBorders.cornerSW, &compactBorders.cornerSE,
+      &compactBorders.cornerNW, &compactBorders.cornerNE};
+  for (size_t c = 0; c < 4; ++c)
+    for (int y = 0; y < static_cast<int>(CHUNK_HEIGHT); ++y)
+    {
+      const uint8_t type = (*cornerCols[c])[static_cast<size_t>(y)];
+      if (type == static_cast<uint8_t>(AIR))
+        continue;
+      chunkData.borderVoxels[(y + 1) * 18 * 18 + (corners[c].second + 1) * 18 + (corners[c].first + 1)] = type;
+    }
   return chunkData;
 }
 
@@ -753,8 +789,7 @@ void TerrainGenerator::generateChunkInto(int chunkX, int chunkZ,
   // from a previously generated chunk may leak into this one.
   std::fill(target.voxels.begin(), target.voxels.end(),
             Voxel{TextureType::AIR});
-  std::fill(target.borderVoxels.begin(), target.borderVoxels.end(),
-            static_cast<uint8_t>(AIR));
+  target.borders->resetToAir(); // zero would be BEDROCK, not AIR
   std::fill(target.biomes.begin(), target.biomes.end(),
             static_cast<BiomeType>(0));
   std::fill(target.heightMap.begin(), target.heightMap.end(), 0);
@@ -2812,12 +2847,41 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
 void TerrainGenerator::generateChunkBorders(const ChunkGenerationTarget &chunkData, int chunkX,
                                             int chunkZ)
 {
-  auto setBorderVoxel = [&](int lx, int ly, int lz, TextureType type)
+  // Compact border output (issue #103): faces plus corner columns replace
+  // the dense padded shell. Vertical padding (y = -1 / CHUNK_HEIGHT) is not
+  // representable and never was written: border fill bounds start at
+  // kBedrock = 0 and stop at CHUNK_HEIGHT.
+  ChunkNeighborBorders &borders = *chunkData.borders;
+  auto setBorderVoxel = [&borders](int lx, int ly, int lz, TextureType type)
   {
-    if (lx >= -1 && lx <= CHUNK_SIZE && ly >= -1 && ly <= CHUNK_HEIGHT && lz >= -1 && lz <= CHUNK_SIZE)
+    if (ly < 0 || ly >= static_cast<int>(CHUNK_HEIGHT))
+      return;
+    const bool westSide = lx < 0;
+    const bool eastSide = lx > static_cast<int>(CHUNK_SIZE) - 1;
+    const bool southSide = lz < 0;
+    const bool northSide = lz > static_cast<int>(CHUNK_SIZE) - 1;
+    if (!westSide && !eastSide && !southSide && !northSide)
+      return;
+    const size_t yi = static_cast<size_t>(ly);
+    const auto type8 = static_cast<uint8_t>(type);
+    if (westSide || eastSide)
     {
-      chunkData.borderVoxels[(ly + 1) * 18 * 18 + (lz + 1) * 18 + (lx + 1)] = static_cast<uint8_t>(type);
+      const size_t t = static_cast<size_t>(lz);
+      if (southSide)
+      {
+        (westSide ? borders.cornerSW : borders.cornerSE)[yi] = type8;
+        return;
+      }
+      if (northSide)
+      {
+        (westSide ? borders.cornerNW : borders.cornerNE)[yi] = type8;
+        return;
+      }
+      (westSide ? borders.west : borders.east)[yi * CHUNK_SIZE + t] = type8;
+      return;
     }
+    const size_t t = static_cast<size_t>(lx);
+    (southSide ? borders.south : borders.north)[yi * CHUNK_SIZE + t] = type8;
   };
 
   // Border strips: [localX offset, localZ offset, xSize, zSize]

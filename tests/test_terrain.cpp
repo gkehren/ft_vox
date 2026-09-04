@@ -2,6 +2,7 @@
 // Also provides an opt-in biome histogram calibration tool:
 //   ./test_terrain --histogram [size] [step]   (default 2048 blocks, step 4)
 #include <Chunk/TerrainGenerator.hpp>
+#include <Chunk/ChunkBorders.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <future>
 #include <iostream>
@@ -371,19 +373,19 @@ static EdgeStats checkEdge(const ChunkData &owner, int shellLx, int shellLz,
 struct TargetBuffers
 {
 	std::vector<Voxel> voxels;
-	std::vector<uint8_t> shell;
+	ChunkNeighborBorders borders;
 	std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomes{};
 	std::array<int, CHUNK_SIZE * CHUNK_SIZE> heightMap{};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> grass{};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> foliage{};
 
-	TargetBuffers() : voxels(CHUNK_VOLUME), shell(kBorderVoxelCount) {}
+	TargetBuffers() : voxels(CHUNK_VOLUME) {}
 
 	ChunkGenerationTarget target()
 	{
 		return ChunkGenerationTarget{
 			.voxels = std::span<Voxel, CHUNK_VOLUME>(voxels),
-			.borderVoxels = std::span<uint8_t, kBorderVoxelCount>(shell),
+			.borders = &borders,
 			.biomes = biomes, .heightMap = heightMap,
 			.grassColors = grass, .foliageColors = foliage};
 	}
@@ -391,7 +393,14 @@ struct TargetBuffers
 	void poison()
 	{
 		std::fill(voxels.begin(), voxels.end(), Voxel{static_cast<uint8_t>(0xAA)});
-		std::fill(shell.begin(), shell.end(), static_cast<uint8_t>(0xFF));
+		borders.west.fill(static_cast<uint8_t>(0xFF));
+		borders.east.fill(static_cast<uint8_t>(0xFF));
+		borders.south.fill(static_cast<uint8_t>(0xFF));
+		borders.north.fill(static_cast<uint8_t>(0xFF));
+		borders.cornerSW.fill(static_cast<uint8_t>(0xFF));
+		borders.cornerSE.fill(static_cast<uint8_t>(0xFF));
+		borders.cornerNW.fill(static_cast<uint8_t>(0xFF));
+		borders.cornerNE.fill(static_cast<uint8_t>(0xFF));
 		biomes.fill(static_cast<BiomeType>(0x7F));
 		heightMap.fill(-123456);
 		grass.fill(0xDEADBEEFu);
@@ -404,10 +413,29 @@ struct TargetBuffers
 /// std::equal - portable and independent of representation.
 static bool chunkDataMatchesTarget(const ChunkData &reference, const TargetBuffers &buffers)
 {
-	return std::memcmp(reference.voxels.data(), buffers.voxels.data(),
+	// Compact borders vs the dense owning-path shell: walk every padded
+	// coordinate (faces + corners; vertical padding rows are AIR in both).
+	bool bordersMatch = true;
+	for (int y = -1; bordersMatch && y <= static_cast<int>(CHUNK_HEIGHT); ++y)
+		for (int z = -1; z <= static_cast<int>(CHUNK_SIZE) && bordersMatch; ++z)
+			for (int x = -1; x <= static_cast<int>(CHUNK_SIZE); ++x)
+			{
+				const uint8_t dense = reference.borderVoxels[
+					(y + 1) * 18 * 18 + (z + 1) * 18 + (x + 1)];
+				{
+				if (x >= 0 && x < static_cast<int>(CHUNK_SIZE) &&
+					z >= 0 && z < static_cast<int>(CHUNK_SIZE))
+					continue; // in-chunk coordinate: not border data
+				if (buffers.borders.at(x, y, z) != dense)
+				{
+					bordersMatch = false;
+					break;
+				}
+			}
+			}
+	return bordersMatch &&
+		   std::memcmp(reference.voxels.data(), buffers.voxels.data(),
 					   CHUNK_VOLUME * sizeof(Voxel)) == 0 &&
-		   std::memcmp(reference.borderVoxels.data(), buffers.shell.data(),
-					   buffers.shell.size()) == 0 &&
 		   std::equal(reference.biomes.begin(), reference.biomes.end(),
 					  buffers.biomes.begin()) &&
 		   std::equal(reference.heightMap.begin(), reference.heightMap.end(),
@@ -447,7 +475,7 @@ static void testGenerateChunkIntoTarget()
 	TargetBuffers reused;
 	reused.poison();
 	const size_t voxelCapacity = reused.voxels.capacity();
-	const size_t shellCapacity = reused.shell.capacity();
+
 	const int reuseCoords[][2] = {
 		{64, 96}, {4096, -4096}, {-8192, 8192}};
 	for (const auto &coord : reuseCoords)
@@ -459,8 +487,8 @@ static void testGenerateChunkIntoTarget()
 	}
 	CHECK(reused.voxels.capacity() == voxelCapacity,
 		  "reused voxel capacity stable across generations");
-	CHECK(reused.shell.capacity() == shellCapacity,
-		  "reused shell capacity stable across generations");
+	CHECK(ChunkNeighborBorders{}.west.size() == CHUNK_HEIGHT * CHUNK_SIZE,
+		  "compact border block carries all face samples");
 
 	// 3) Concurrent generation into per-thread buffers (thread-local
 	// generators) must match the sequential owning path.
@@ -1574,7 +1602,6 @@ static int runGenPerf(int argc, char **argv)
 	// B. pooled-target path: same buffers reused every iteration.
 	TargetBuffers reusable;
 	const size_t voxelCapacity = reusable.voxels.capacity();
-	const size_t shellCapacity = reusable.shell.capacity();
 	double pooledMsPerChunk = 0.0;
 	{
 		const auto start = Clock::now();
@@ -1590,8 +1617,7 @@ static int runGenPerf(int argc, char **argv)
 		pooledMsPerChunk = totalMs / chunks;
 	}
 	const bool capacityStable =
-		reusable.voxels.capacity() == voxelCapacity &&
-		reusable.shell.capacity() == shellCapacity;
+		reusable.voxels.capacity() == voxelCapacity;
 
 	const double deltaPct =
 		owningMsPerChunk > 0.0

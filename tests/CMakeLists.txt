@@ -252,6 +252,7 @@ add_executable(test_chunk_lifecycle
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
@@ -325,6 +326,31 @@ target_link_libraries(test_voxel_pool PRIVATE
 )
 
 add_test(NAME VoxelPool COMMAND test_voxel_pool)
+
+# ---------------------------------------------------------------------------
+# BorderPool contract (issue #113 review): compact transient border blocks,
+# ownership refusal, concurrency, growth events.
+# ---------------------------------------------------------------------------
+add_executable(test_border_pool
+    test_border_pool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+)
+
+target_include_directories(test_border_pool PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(test_border_pool PRIVATE
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_border_pool PRIVATE
+    glm
+    Threads::Threads
+)
+
+add_test(NAME BorderPool COMMAND test_border_pool)
 
 # ---------------------------------------------------------------------------
 # Profiler worker consistency and stress test (Issue #79)
