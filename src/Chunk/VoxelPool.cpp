@@ -53,9 +53,9 @@ void VoxelPool::release(VoxelStorage *storage)
 
 	std::lock_guard<std::mutex> lock(m_mutex);
 
-	// Release-build safety (issue #112 review): the asserts vanish in
-	// Release, so a wrong-pool or double release must not corrupt the free
-	// list — refuse it instead.
+	// Two protection levels (issue #112 review):
+	// Debug: a programming error is fatal and immediately visible.
+	// Release: refuse invalid ownership without corrupting the pool.
 	const bool owned =
 		std::binary_search(m_owned.begin(), m_owned.end(), storage);
 	assert(owned && "VoxelStorage returned to wrong pool");

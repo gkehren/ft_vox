@@ -17,7 +17,11 @@ What stays valid under external load:
   `voxel.pool.capacityBytes` ~290.7 MiB (4,651 blocks),
   `voxel.pool.growEvents` 68-86 per measurement window.
 - Functional invariants: zero pool rejects, zero staging failures,
-  ownership counts balanced.
+  ownership counts balanced. VoxelPool balance holds on every PR run's
+  final sample: `voxel.pool.capacity == voxel.pool.active +
+  voxel.pool.free` (4647 = 4619 + 28, 4651 = 4619 + 32,
+  4652 = 4619 + 33). Peaks are intentionally not summed the same way -
+  the three peaks may have been reached on different frames.
 
 | Metric (medians) | Base da00e51 | PR 2b92493 | Delta |
 | --- | ---: | ---: | ---: |

@@ -1,4 +1,5 @@
 #include <Engine/WorkloadTelemetry.hpp>
+#include <utils.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -44,15 +45,20 @@ int main() {
         s = r.snapshot();
         require(!s.events[AllocCreated] && !s.stageCalls[Skylight], "second capture starts empty");
 
-        // Capture-local vs persistent gauges (issue #111 review): warmup
-        // staging high-water and end-of-frame chunk-manager samples must not
-        // leak into a new measurement window, while ownership gauges survive
-        // the boundary with their peak rebased to the carried-over value.
+        // Capture-local vs persistent gauges (issue #111/#112 reviews):
+        // warmup staging high-water, end-of-frame chunk-manager samples and
+        // the VoxelPool active/free split must not leak into a new
+        // measurement window, while ownership gauges (including the pool's
+        // retained capacity) survive the boundary with their peak rebased.
         Registry w;
         w.replace(VoxelBytes, 0, 65536);
         w.set(StagingUsed, 1024 * 1024);
         w.set(ActiveChunks, 4200);
         w.set(DeferredChunks, 20);
+        w.set(VoxelPoolCapacity, 4600);
+        w.set(VoxelPoolCapacityBytes, 4600ull * CHUNK_VOLUME);
+        w.set(VoxelPoolActive, 4200);
+        w.set(VoxelPoolFree, 400);
         w.add(AllocCreated);
         w.add(UploadChunks);
         w.add(StagingFailures);
@@ -63,23 +69,50 @@ int main() {
         const auto reset = w.snapshot();
         require(reset.current[VoxelBytes] == 65536 && reset.peak[VoxelBytes] == 65536,
                 "persistent ownership survives capture, peak rebased");
+        require(reset.current[VoxelPoolCapacity] == 4600 && reset.peak[VoxelPoolCapacity] == 4600,
+                "voxel pool retained capacity survives capture");
+        require(reset.current[VoxelPoolCapacityBytes] == 4600ull * CHUNK_VOLUME &&
+                reset.peak[VoxelPoolCapacityBytes] == 4600ull * CHUNK_VOLUME,
+                "voxel pool retained capacity bytes survive capture");
         require(reset.current[StagingUsed] == 0 && reset.peak[StagingUsed] == 0,
                 "capture resets transient staging current and peak");
         require(reset.current[ActiveChunks] == 0 && reset.peak[ActiveChunks] == 0 &&
                 reset.current[DeferredChunks] == 0 && reset.peak[DeferredChunks] == 0,
                 "capture resets sampled chunk-manager gauges");
+        require(reset.current[VoxelPoolActive] == 0 && reset.peak[VoxelPoolActive] == 0,
+                "voxel pool active resets at capture boundary");
+        require(reset.current[VoxelPoolFree] == 0 && reset.peak[VoxelPoolFree] == 0,
+                "voxel pool free resets at capture boundary");
         require(!reset.events[AllocCreated] && !reset.events[UploadChunks] &&
                 !reset.events[StagingFailures] && !reset.events[OpaqueDraws],
                 "capture clears event categories");
         w.set(StagingUsed, 64 * 1024);
         w.set(ActiveChunks, 4300);
         w.set(DeferredChunks, 7);
+        w.set(VoxelPoolActive, 3500);
+        w.set(VoxelPoolFree, 1100);
         const auto measured = w.snapshot();
         require(measured.current[StagingUsed] == 64 * 1024 &&
                 measured.peak[StagingUsed] == 64 * 1024,
                 "measured staging high-water starts from zero");
         require(measured.peak[ActiveChunks] == 4300 && measured.peak[DeferredChunks] == 7,
                 "measured chunk peaks reflect measured frames only");
+        require(measured.current[VoxelPoolActive] == 3500 && measured.peak[VoxelPoolActive] == 3500,
+                "active peak belongs to measured capture");
+        require(measured.current[VoxelPoolFree] == 1100 && measured.peak[VoxelPoolFree] == 1100,
+                "free peak belongs to measured capture");
+
+        // Two successive captures (benchmark -> reload -> new benchmark in
+        // the same process): the previous run's peaks must not contribute to
+        // the next window.
+        w.beginCapture();
+        w.set(VoxelPoolActive, 3900);
+        w.set(VoxelPoolFree, 700);
+        const auto second = w.snapshot();
+        require(second.peak[VoxelPoolActive] == 3900,
+                "second capture active peak is its own, not the previous run's");
+        require(second.peak[VoxelPoolFree] == 700,
+                "second capture free peak is its own, not the previous run's");
 
         // Repeated captures (the warmup=0 path fires beginCapture several
         // times in a row) must keep ownership intact and sampled gauges at
@@ -93,6 +126,9 @@ int main() {
         require(repeated.current[StagingUsed] == 0 && repeated.peak[StagingUsed] == 0 &&
                 repeated.current[ActiveChunks] == 0 && repeated.current[DeferredChunks] == 0,
                 "repeated captures keep sampled gauges at zero");
+        require(repeated.current[VoxelPoolCapacity] == 4600 &&
+                repeated.current[VoxelPoolCapacityBytes] == 4600ull * CHUNK_VOLUME,
+                "repeated captures keep retained voxel pool capacity");
 
         std::cout << "PASS: telemetry concurrency, ownership, capture epochs, reset, "
                      "capture-local gauges\n";

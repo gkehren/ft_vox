@@ -357,7 +357,7 @@ add_test(NAME GpuProfile COMMAND test_gpu_profile)
 
 add_executable(test_workload_telemetry test_workload_telemetry.cpp)
 target_include_directories(test_workload_telemetry PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_workload_telemetry PRIVATE Threads::Threads)
+target_link_libraries(test_workload_telemetry PRIVATE glm Threads::Threads)
 add_test(NAME WorkloadTelemetry COMMAND test_workload_telemetry)
 set_tests_properties(WorkloadTelemetry PROPERTIES ENVIRONMENT "FT_VOX_TELEMETRY=1")
 add_test(NAME WorkloadTelemetryDisabled COMMAND test_workload_telemetry)

@@ -66,6 +66,10 @@ int main()
 	}
 
 	// 3) Foreign release must be refused without corrupting either pool.
+	// Release-only: in Debug the ownership assert fires (the programming
+	// error must be immediately visible), so the graceful-refusal fallback
+	// is exercised where it actually runs.
+#ifdef NDEBUG
 	{
 		VoxelPool poolA;
 		VoxelPool poolB;
@@ -80,6 +84,7 @@ int main()
 	}
 
 	// 4) Double release must be refused without duplicating the free entry.
+	// Release-only for the same reason as above.
 	{
 		VoxelPool pool;
 		VoxelStorage *s = pool.acquire();
@@ -91,6 +96,7 @@ int main()
 		CHECK(t == s, "pool still hands out the block exactly once");
 		pool.release(t);
 	}
+#endif
 
 	// 5) Concurrent acquire/release stays balanced (used from the streaming
 	// workers historically; now also from edit paths).
@@ -132,9 +138,17 @@ int main()
 			  "each allocation beyond the free list is one grow event");
 		CHECK(afterReuse.events[telemetry::VoxelPoolGrow] == 2,
 			  "free-list reuse is not counted as growth");
+		// Grow events are capture-interval events: beginCapture() clears
+		// them and reuse after the boundary stays at zero.
+		registry.beginCapture();
+		CHECK(registry.snapshot().events[telemetry::VoxelPoolGrow] == 0,
+			  "beginCapture clears grow events");
 		pool.release(b);
+		VoxelStorage *secondReuse = pool.acquire();
+		CHECK(registry.snapshot().events[telemetry::VoxelPoolGrow] == 0,
+			  "reuse after the capture boundary is still not growth");
 		pool.release(reuse);
-		(void)registry;
+		pool.release(secondReuse);
 	}
 
 	// 7) Pointer stability: retained blocks keep their address for the pool

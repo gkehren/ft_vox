@@ -51,16 +51,20 @@ enum Stage : size_t { Skylight, Blocklight, Occupancy, FacesGreedyAO, Lod, Stage
 inline constexpr const char* stageNames[] = {"skylight", "blocklight", "occupancy", "facesGreedyAO", "LOD"};
 
 // Capture-local gauges describe transient state sampled during a capture
-// window (staging slice usage; end-of-frame chunk-manager samples). Unlike
-// ownership gauges they are NOT carried across a beginCapture() boundary:
-// a warmup high-water mark must not become a measurement peak. Gauges
-// default to persistent ownership; classify one here only if its value is
-// meaningless outside the currently running capture.
+// window (staging slice usage; end-of-frame chunk-manager samples; the
+// VoxelPool active/free split). Unlike ownership gauges they are NOT
+// carried across a beginCapture() boundary: a warmup high-water mark must
+// not become a measurement peak. Gauges default to persistent ownership;
+// classify one here only if its value is meaningless outside the currently
+// running capture. Note VoxelPoolCapacity/VoxelPoolCapacityBytes stay
+// persistent: retained backing memory really exists at the boundary.
 inline constexpr bool isCaptureLocalGauge(Gauge g) {
     switch (g) {
     case StagingUsed:
     case ActiveChunks:
     case DeferredChunks:
+    case VoxelPoolActive:
+    case VoxelPoolFree:
         return true;
     default:
         return false;
