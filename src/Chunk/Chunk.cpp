@@ -85,6 +85,12 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
   if (this != &other)
   {
     releaseGPU();
+
+    // Release the destination's current backing through ITS current pools.
+    // This must happen before the pool pointers are overwritten by the
+    // transfer below, otherwise the destination's border block leaks
+    // (issue #113 review).
+    releaseNeighborBorders();
     releaseVoxelStorageOnRetire();
 
     position = std::move(other.position);
@@ -101,10 +107,12 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     m_storage = other.m_storage;
     other.m_storage = nullptr;
 
-    activeVoxels = std::move(other.activeVoxels);
+    // Transfer border ownership together with its owning pool (issue #113).
+    m_borderPool = other.m_borderPool;
     m_borders = other.m_borders;
     other.m_borders = nullptr;
-    m_borderPool = other.m_borderPool;
+
+    activeVoxels = std::move(other.activeVoxels);
     biomeGrassColors = other.biomeGrassColors;
     biomeFoliageColors = other.biomeFoliageColors;
     biomeTypes = other.biomeTypes;
@@ -139,7 +147,7 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
 
 Chunk::~Chunk()
 {
-  freeShellVoxels();
+  releaseNeighborBorders();
   releaseVoxelStorageOnRetire();
   telemetry::registry().replaceCpu(m_cpuTelemetry, std::array<uint64_t, 13>{});
   releaseGPU();
@@ -168,7 +176,7 @@ bool Chunk::prepareVoxelStorageForGeneration()
   catch (const std::bad_alloc &)
   {
     // Return whatever was acquired so partially prepared state cannot leak.
-    freeShellVoxels();
+    releaseNeighborBorders();
     releaseVoxelStorageOnRetire();
     return false;
   }
@@ -259,6 +267,9 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
       try
       {
         m_borders = m_borderPool->acquire();
+        // A freshly acquired pool block holds stale bytes: initialize it so
+        // every other sampled border coordinate reads AIR (issue #113).
+        m_borders->resetToAir();
         publishCpuTelemetry();
       }
       catch (const std::bad_alloc &)
@@ -1268,7 +1279,7 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
   waterVertices.clear();
   waterIndices.clear();
 
-  freeShellVoxels();
+  releaseNeighborBorders();
   meshNeedsUpdate = false;
 }
 
@@ -1383,7 +1394,7 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
   waterVertices.clear();
   waterIndices.clear();
 
-  freeShellVoxels();
+  releaseNeighborBorders();
   meshNeedsUpdate = false;
   return true;
 }
@@ -1445,7 +1456,7 @@ void Chunk::drawShadow(VkCommandBuffer cmd, unsigned cascade) const
   vkCmdDrawIndexed(cmd, opaqueIndexCount, 1, 0, 0, 0);
 }
 
-void Chunk::freeShellVoxels()
+void Chunk::releaseNeighborBorders()
 {
   if (!m_borders)
     return;
@@ -1460,7 +1471,7 @@ void Chunk::freeShellVoxels()
   publishCpuTelemetry();
 }
 
-void Chunk::rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
+void Chunk::rebuildBordersFromNeighbors(const Chunk *west, const Chunk *east,
                                       const Chunk *south, const Chunk *north)
 {
   MemoryPublication memoryPublication{*this};
@@ -1539,8 +1550,9 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
 
   activeVoxels.reset();
 
-  // Clear shell — keep capacity for reuse
-  freeShellVoxels();
+  // Return transient neighbor-border storage to the BorderPool.
+  // No border capacity remains attached to this Chunk.
+  releaseNeighborBorders();
 
   // Reset biome colors and per-column generation state
   biomeGrassColors.fill(0);

@@ -78,7 +78,10 @@ struct ChunkStateProbe
 struct ChunkSnapshot
 {
 	std::vector<Voxel> voxels;
-	const ChunkNeighborBorders *borders;
+	// Border state as CONTENT (state comparison) plus the borrowed pointer
+	// (ownership transfer comparison) - issue #113 review item 24.
+	std::optional<ChunkNeighborBorders> borders;
+	const ChunkNeighborBorders *borderPtr{nullptr};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> grass{};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> foliage{};
 	std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomes{};
@@ -91,7 +94,10 @@ struct ChunkSnapshot
 		ChunkSnapshot s;
 		const auto v = ChunkStateProbe::voxels(c);
 		s.voxels.assign(v.begin(), v.end());
-		s.borders = ChunkStateProbe::borders(c);
+		const ChunkNeighborBorders *bp = ChunkStateProbe::borders(c);
+		if (bp)
+			s.borders = *bp;
+		s.borderPtr = bp;
 		s.grass = ChunkStateProbe::grass(c);
 		s.foliage = ChunkStateProbe::foliage(c);
 		s.biomes = ChunkStateProbe::biomes(c);
@@ -102,6 +108,11 @@ struct ChunkSnapshot
 	}
 };
 
+static bool memcmpBorderContent(const ChunkNeighborBorders &a, const ChunkNeighborBorders &b)
+{
+	return std::memcmp(&a, &b, sizeof(ChunkNeighborBorders)) == 0;
+}
+
 static bool sameVoxels(std::span<const Voxel> a, std::span<const Voxel> b)
 {
 	return a.size() == b.size() &&
@@ -111,7 +122,9 @@ static bool sameVoxels(std::span<const Voxel> a, std::span<const Voxel> b)
 static bool sameState(const ChunkSnapshot &a, const ChunkSnapshot &b)
 {
 	return a.state == b.state && sameVoxels(a.voxels, b.voxels) &&
-		   a.borders == b.borders && a.grass == b.grass &&
+		   a.borders.has_value() == b.borders.has_value() &&
+		   (!a.borders || memcmpBorderContent(*a.borders, *b.borders)) &&
+		   a.grass == b.grass &&
 		   a.foliage == b.foliage && a.biomes == b.biomes &&
 		   a.heights == b.heights && a.active == b.active;
 }
@@ -217,7 +230,7 @@ int main(int argc, char **argv)
             const auto withStorage = registry().snapshot();
             CHECK(withStorage.current[VoxelBytes] - before.current[VoxelBytes] == CHUNK_VOLUME * sizeof(Voxel), "resident voxel allocation");
             CHECK(withStorage.current[ShellBytes] - before.current[ShellBytes] == sizeof(ChunkNeighborBorders), "border block borrowed on prepare");
-            a.freeShellVoxels();
+            a.releaseNeighborBorders();
             auto cleared = registry().snapshot();
             CHECK(cleared.current[ShellBytes] == before.current[ShellBytes], "released borders report zero shell bytes");
             CHECK(cleared.current[ShellCapacity] == before.current[ShellCapacity], "released borders retain no per-chunk capacity");
@@ -533,7 +546,7 @@ int main(int argc, char **argv)
 		CHECK(bc.sampleForMeshing(16, CHUNK_HEIGHT, 8) == AIR, "y=top padding reads AIR");
 
 		// Missing borders (freed after upload) read AIR.
-		bc.freeShellVoxels();
+		bc.releaseNeighborBorders();
 		CHECK(bc.isShellEmpty(), "freed borders leave the shell empty");
 		CHECK(bc.sampleForMeshing(-1, 40, 7) == AIR, "freed borders sample AIR");
 
@@ -542,14 +555,14 @@ int main(int argc, char **argv)
 		CHECK(!bc.isShellEmpty(), "boundary edit re-borrows borders");
 		CHECK(bc.sampleForMeshing(-1, 12, 5) == STONE, "boundary edit observable via sampling");
 
-		// rebuildShellFromNeighbors: face values come from the neighbor
+		// rebuildBordersFromNeighbors: face values come from the neighbor
 		// chunk's opposite column; missing neighbors stay AIR; corners stay
 		// AIR exactly as in the previous rebuild path.
 		Chunk neighbor(glm::vec3(static_cast<float>(CHUNK_SIZE), 0.0f, 0.0f));
 		CHECK(neighbor.prepareVoxelStorageForGeneration(), "neighbor prepare");
 		neighbor.generateTerrain(bgen);
 		neighbor.setVoxel(0, 30, 4, STONE);
-		bc.rebuildShellFromNeighbors(nullptr, &neighbor, nullptr, nullptr);
+		bc.rebuildBordersFromNeighbors(nullptr, &neighbor, nullptr, nullptr);
 		CHECK(bc.sampleForMeshing(16, 30, 4) == STONE, "east face rebuilt from neighbor");
 
 
@@ -557,6 +570,142 @@ int main(int argc, char **argv)
 
 		CHECK(bc.sampleForMeshing(-1, 30, 4) == AIR, "missing west neighbor samples AIR");
 		CHECK(bc.sampleForMeshing(-1, 30, -1) == AIR, "rebuild leaves corners AIR");
+	}
+
+	// 11) Cross-pool border-block ownership on move assignment (issue #113):
+	// the destination's borrowed border block must be returned to ITS pool
+	// before the pools travel with the transfer - otherwise it leaks.
+	{
+		VoxelPool voxelA, voxelB;
+		BorderPool borderA, borderB;
+		Chunk source(glm::vec3(0.0f), ChunkState::UNLOADED, &voxelA, &borderA);
+		Chunk destination(glm::vec3(0.0f), ChunkState::UNLOADED, &voxelB, &borderB);
+		CHECK(source.prepareVoxelStorageForGeneration(), "source prepare (border move test)");
+		CHECK(destination.prepareVoxelStorageForGeneration(), "destination prepare (border move test)");
+		CHECK(borderA.activeCount() == 1, "borderA active 1 after prepare");
+		CHECK(borderB.activeCount() == 1, "borderB active 1 after prepare");
+
+		destination = std::move(source);
+
+		CHECK(borderB.activeCount() == 0, "destination border returned to borderB");
+		CHECK(borderA.activeCount() == 1, "source border owned via borderA after move");
+		CHECK(destination.getBorderPool() == &borderA, "border pool travels with the move");
+		CHECK(destination.hasBorderStorage(), "destination owns a border block");
+		CHECK(ChunkStateProbe::borders(source) == nullptr, "source has no border");
+
+		destination.reset(glm::vec3(0.0f));
+		CHECK(borderA.activeCount() == 0, "reset returns the border to borderA");
+		CHECK(borderA.freeCount() == borderA.capacity(), "borderA block back in free list");
+		CHECK(borderB.activeCount() == 0, "borderB still fully idle");
+	}
+
+	// 12) Stale pool blocks: the pool does not clear content - every
+	// consumer initializes before sampling (issue #113).
+	{
+		// 12a) Generation overwrites a stale block byte-for-byte.
+		TerrainGenerator sgen(64);
+		BorderPool sborders;
+		Chunk g(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, &sborders);
+		CHECK(g.prepareVoxelStorageForGeneration(), "stale-generation prepare");
+		g.generateTerrain(sgen);
+		g.releaseNeighborBorders();
+		{
+			ChunkNeighborBorders *stale = sborders.acquire();
+			std::memset(stale, 0xFF, sizeof(ChunkNeighborBorders));
+			sborders.release(stale);
+		}
+		Chunk g2(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, &sborders);
+		CHECK(g2.prepareVoxelStorageForGeneration(), "stale-generation re-prepare");
+		g2.generateTerrain(sgen);
+		checkMatchesOwning(g2, sgen, 0, 0, "generation over stale border block");
+
+		// 12b) Rebuild initializes a stale block: provided face correct,
+		// missing faces AIR, corners AIR.
+		Chunk nb(glm::vec3(0.0f));
+		CHECK(nb.prepareVoxelStorageForGeneration(), "stale-rebuild prepare");
+		nb.generateTerrain(sgen);
+		Chunk east(glm::vec3(static_cast<float>(CHUNK_SIZE), 0.0f, 0.0f));
+		CHECK(east.prepareVoxelStorageForGeneration(), "stale-rebuild east prepare");
+		east.generateTerrain(sgen);
+		east.setVoxel(0, 30, 4, STONE);
+		auto *raw = const_cast<ChunkNeighborBorders *>(ChunkStateProbe::borders(nb));
+		std::memset(raw, 0xFF, sizeof(ChunkNeighborBorders));
+		nb.rebuildBordersFromNeighbors(nullptr, &east, nullptr, nullptr);
+		CHECK(nb.sampleForMeshing(16, 30, 4) == STONE, "provided face correct after stale reuse");
+		CHECK(nb.sampleForMeshing(-1, 30, 4) == AIR, "missing face AIR after stale reuse");
+		CHECK(nb.sampleForMeshing(-1, 30, -1) == AIR, "corners AIR after stale reuse");
+
+		// 12c) Boundary edit initializes a freshly re-borrowed stale block.
+		{
+			BorderPool pb;
+			Chunk eb(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, &pb);
+			{
+				ChunkNeighborBorders *stale = pb.acquire();
+				std::memset(stale, 0xFF, sizeof(ChunkNeighborBorders));
+				pb.release(stale);
+			}
+			eb.setVoxel(-1, 12, 5, STONE);
+			CHECK(eb.sampleForMeshing(-1, 12, 5) == STONE, "edited coordinate STONE on stale block");
+			CHECK(eb.sampleForMeshing(-1, 13, 5) == AIR, "other border coordinates AIR after stale reuse");
+			CHECK(eb.sampleForMeshing(-1, 12, -1) == AIR, "corner AIR after stale reuse");
+		}
+	}
+
+	// 13) Mesh output equivalence and edge behavior (issue #103/#113): the
+	// compact borders cull exactly like the dense shell did.
+	{
+		TerrainGenerator mgen(99);
+		Chunk withBorders(glm::vec3(0.0f));
+		CHECK(withBorders.prepareVoxelStorageForGeneration(), "mesh-equivalence prepare");
+		withBorders.generateTerrain(mgen);
+		withBorders.generateMesh();
+		const uint32_t opaqueWith = withBorders.getOpaqueIndexCount();
+
+		Chunk withoutBorders(glm::vec3(0.0f));
+		CHECK(withoutBorders.prepareVoxelStorageForGeneration(), "no-border prepare");
+		withoutBorders.generateTerrain(mgen);
+		withoutBorders.releaseNeighborBorders(); // freed after upload: borders read AIR
+		withoutBorders.generateMesh();
+		// With no neighbor data every border-facing surface is emitted, so
+		// the missing-border mesh is the larger one.
+		CHECK(withoutBorders.getOpaqueIndexCount() >= opaqueWith,
+			  "missing borders produce more geometry than populated borders");
+
+		// Deterministic re-mesh with borders present.
+		withBorders.generateMesh();
+		CHECK(withBorders.getOpaqueIndexCount() == opaqueWith,
+			  "re-mesh with populated borders is deterministic");
+	}
+
+	// 14) Two-sided boundary edit data path (issue #113): the
+	// ChunkManager::dirtyNeighbor routing is unchanged by #103; this
+	// validates the operations it drives - the mirror write lands in the
+	// neighbor's west-facing border at x = -1 and marks it GENERATED, and
+	// the edited chunk's own east face reflects the placed block.
+	{
+		TerrainGenerator egen(55);
+		Chunk current(glm::vec3(0.0f));
+		Chunk eastN(glm::vec3(static_cast<float>(CHUNK_SIZE), 0.0f, 0.0f));
+		CHECK(current.prepareVoxelStorageForGeneration(), "current prepare (boundary test)");
+		CHECK(eastN.prepareVoxelStorageForGeneration(), "east neighbor prepare (boundary test)");
+		current.generateTerrain(egen);
+		eastN.generateTerrain(egen);
+
+		// Boundary edit on current at x = CHUNK_SIZE-1 ...
+		current.setVoxel(CHUNK_SIZE - 1, 33, 6, STONE);
+		CHECK(current.sampleForMeshing(CHUNK_SIZE - 1, 33, 6) == STONE,
+			  "edited boundary block observable in current");
+		// ... and the manager's mirror write into the east neighbor's shell.
+		eastN.setVoxel(-1, 33, 6, STONE);
+		eastN.setState(ChunkState::GENERATED);
+		CHECK(eastN.getState() == ChunkState::GENERATED, "east neighbor marked GENERATED");
+		CHECK(eastN.sampleForMeshing(-1, 33, 6) == STONE,
+			  "mirror write observable in east neighbor's west-facing border");
+		// Same contract on the z axis (north).
+		current.setVoxel(4, 33, CHUNK_SIZE - 1, BRICKS);
+		eastN.setVoxel(4, 33, -1, BRICKS);
+		CHECK(current.sampleForMeshing(4, 33, CHUNK_SIZE - 1) == BRICKS, "north boundary edit in current");
+		CHECK(eastN.sampleForMeshing(4, 33, -1) == BRICKS, "mirrored north face write in neighbor");
 	}
 
 	if (g_fails != 0)

@@ -56,9 +56,14 @@ public:
 
 	bool hasVoxelStorage() const { return m_storage != nullptr; }
 	VoxelPool *getVoxelPool() const { return m_voxelPool; }
+	bool hasBorderStorage() const { return m_borders != nullptr; }
+	BorderPool *getBorderPool() const { return m_borderPool; }
 
-	/// Acquire voxel storage before dispatching to generation thread.
-	/// Returns false if allocation fails (e.g. std::bad_alloc).
+	/// Prepare all generation backing on the calling thread:
+	/// - voxel storage
+	/// - transient neighbor borders
+	/// Returns false if an allocation fails (e.g. std::bad_alloc); any
+	/// partially acquired backing is returned to its pool first.
 	bool prepareVoxelStorageForGeneration();
 
 	/// Release voxel storage upon chunk retirement.
@@ -100,8 +105,8 @@ public:
 	/// (including vertical padding) reads as AIR. Missing borders - freed
 	/// after upload or never built - also read as AIR.
 	TextureType sampleForMeshing(int x, int y, int z) const;
-	void freeShellVoxels();
-	void rebuildShellFromNeighbors(const Chunk *west, const Chunk *east,
+	void releaseNeighborBorders();
+	void rebuildBordersFromNeighbors(const Chunk *west, const Chunk *east,
 								   const Chunk *south, const Chunk *north);
 
 	enum class ResetMode { Full, ForGeneration };

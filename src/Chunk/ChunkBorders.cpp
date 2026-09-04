@@ -1,4 +1,5 @@
 #include "ChunkBorders.hpp"
+#include <Engine/WorkloadTelemetry.hpp>
 #include <cassert>
 
 BorderPool::BorderPool(size_t initialCapacity)
@@ -21,23 +22,24 @@ ChunkNeighborBorders *BorderPool::acquire()
 			ChunkNeighborBorders *b = m_freeList.back();
 			m_freeList.pop_back();
 			m_activeCount.fetch_add(1, std::memory_order_relaxed);
-			b->resetToAir();
 			return b;
 		}
 	}
 
-	// Allocate zeroed border storage outside the mutex. The struct is fully
-	// overwritten by generation/rebuild before it is sampled; the zero fill
-	// only guarantees deterministic AIR for coordinates those paths never
-	// write (vertical padding and corners after a face-only rebuild).
-	auto block = std::make_unique<ChunkNeighborBorders>();
+	// Allocate indeterminate border storage outside the mutex. The pool owns
+	// allocation/ownership/reuse only - it does NOT impose logical content:
+	// every borrower must initialize the block (resetToAir or a full
+	// overwrite) before exposing border coordinates (issue #113 review).
+	// Growth beyond the free list is one observable grow event; free-list
+	// reuse and reserve() preallocation are not growth.
+	auto block = std::make_unique_for_overwrite<ChunkNeighborBorders>();
 	ChunkNeighborBorders *ptr = block.get();
-	block->resetToAir();
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_storage.push_back(std::move(block));
 	auto it = std::lower_bound(m_owned.begin(), m_owned.end(), ptr);
 	m_owned.insert(it, ptr);
 	m_activeCount.fetch_add(1, std::memory_order_relaxed);
+	telemetry::registry().add(telemetry::BorderPoolGrow);
 	return ptr;
 }
 

@@ -827,6 +827,13 @@ void Engine::sampleBenchmarkFrame()
         telemetry.set(telemetry::VoxelPoolActive, chunkManager->getChunkPool()->voxelStorageActive());
         telemetry.set(telemetry::VoxelPoolFree, chunkManager->getChunkPool()->voxelStorageFree());
         telemetry.set(telemetry::VoxelPoolCapacityBytes, voxelCap * sizeof(VoxelStorage));
+
+        // border.pool.*: retained neighbor-border blocks (issue #103/#113).
+        const size_t borderCap = chunkManager->getChunkPool()->borderStorageCapacity();
+        telemetry.set(telemetry::BorderPoolCapacity, borderCap);
+        telemetry.set(telemetry::BorderPoolActive, chunkManager->getChunkPool()->borderStorageActive());
+        telemetry.set(telemetry::BorderPoolFree, chunkManager->getChunkPool()->borderStorageFree());
+        telemetry.set(telemetry::BorderPoolCapacityBytes, borderCap * sizeof(ChunkNeighborBorders));
     }
 	m_benchmark.sampleFrame(
 		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),

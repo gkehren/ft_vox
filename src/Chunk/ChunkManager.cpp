@@ -638,7 +638,7 @@ void ChunkManager::ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx
 	if (!chunk || !chunk->isShellEmpty())
 		return;
 	// Caller holds exclusive lock.
-	chunk->rebuildShellFromNeighbors(
+	chunk->rebuildBordersFromNeighbors(
 		getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),
 		getChunk(chunkIdx + glm::ivec3(+1, 0, 0)),
 		getChunk(chunkIdx + glm::ivec3(0, 0, -1)),

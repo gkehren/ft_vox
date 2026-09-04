@@ -20,7 +20,8 @@ and peak values. Events expose interval totals and averages per measured frame.
 | --- | --- |
 | `voxel.bytes` | Resident voxel storage capacity owned by active, voxel-backed chunks (free pool slots carry 0) |
 | `voxel.pool.*` | VoxelStoragePool state. **Persistent:** `capacity` and `capacityBytes` describe retained backing memory (64 KiB blocks including the free list) and survive capture boundaries. **Capture-local:** `active` and `free` are sampled during measured frames and reset at the beginning of each capture, so previous runs cannot contribute their peaks. `voxel.pool.growEvents` counts allocations beyond the free list in the interval (steady-state streaming should be near zero) |
-| `shell.sizeBytes`, `shell.capacityBytes` | Borrowed compact neighbor-border block (four horizontal faces + four diagonal corner columns, 17,408 bytes) held by actively meshing chunks; both report 0 once the block is returned to the border pool after upload (issue #103: no per-chunk retained shell capacity) |
+| `shell.sizeBytes`, `shell.capacityBytes` | Legacy names kept for #101 compatibility: the currently borrowed compact border bytes (17,408 per meshing chunk), 0 once returned after upload. The true retained metric is `border.pool.capacityBytes` |
+| `border.pool.*` | BorderPool state sampled once per measured frame. **Persistent:** `capacity`, `capacityBytes` (retained blocks including the free list). **Capture-local:** `active`, `free`. `border.pool.growEvents` counts allocations beyond the free list in the interval |
 | `cpu.{opaque,water}.{vertex,index}.*` | Each CPU mesh vector's logical size and retained capacity |
 | `cpu.mesh.capacityBytes` | Combined retained mesh capacity, with its own simultaneous peak |
 | `column.bytes`, `occupancy.bytes` | Inline biome/color/height arrays and occupancy bitsets, including free chunks |
