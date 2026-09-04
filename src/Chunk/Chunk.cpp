@@ -56,6 +56,8 @@ Chunk::Chunk(Chunk &&other) noexcept
       neighborShellVoxels(std::move(other.neighborShellVoxels)),
       biomeGrassColors(other.biomeGrassColors),
       biomeFoliageColors(other.biomeFoliageColors),
+      biomeTypes(other.biomeTypes),
+      heightMap(other.heightMap),
       vertices(std::move(other.vertices)), indices(std::move(other.indices)),
       waterVertices(std::move(other.waterVertices)), waterIndices(std::move(other.waterIndices)),
       m_isLODMesh(other.m_isLODMesh)
@@ -82,6 +84,8 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     neighborShellVoxels = std::move(other.neighborShellVoxels);
     biomeGrassColors = other.biomeGrassColors;
     biomeFoliageColors = other.biomeFoliageColors;
+    biomeTypes = other.biomeTypes;
+    heightMap = other.heightMap;
     vertices = std::move(other.vertices);
     indices = std::move(other.indices);
     waterVertices = std::move(other.waterVertices);
@@ -173,11 +177,6 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
   }
 }
 
-void Chunk::setVoxels(const std::vector<Voxel> &voxels)
-{
-  this->voxels = voxels;
-}
-
 bool Chunk::deleteVoxel(const glm::vec3 &position)
 {
   int x = static_cast<int>(position.x - this->position.x);
@@ -243,19 +242,24 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
   if (state.load() != ChunkState::UNLOADED)
     return;
 
-  std::fill(neighborShellVoxels.begin(), neighborShellVoxels.end(),
-            static_cast<uint8_t>(AIR));
-
   // Ensure we use integer coordinates aligned with world grid
   int genX = static_cast<int>(std::round(position.x));
   int genZ = static_cast<int>(std::round(position.z));
 
-  auto chunkData = generator.generateChunk(genX, genZ);
-  setVoxels(chunkData.voxels);
+  // Generate directly into this pooled chunk's reusable storage: no
+  // temporary ChunkData and no CHUNK_VOLUME / border-shell copies after
+  // generation. resize() only ever grows once; pool recycles keep capacity.
+  voxels.resize(CHUNK_VOLUME);
+  neighborShellVoxels.resize(kBorderVoxelCount);
 
-  neighborShellVoxels = chunkData.borderVoxels;
-  biomeGrassColors = chunkData.grassColors;
-  biomeFoliageColors = chunkData.foliageColors;
+  ChunkGenerationTarget target{
+      .voxels = std::span<Voxel, CHUNK_VOLUME>(voxels),
+      .borderVoxels = std::span<uint8_t, kBorderVoxelCount>(neighborShellVoxels),
+      .biomes = biomeTypes,
+      .heightMap = heightMap,
+      .grassColors = biomeGrassColors,
+      .foliageColors = biomeFoliageColors};
+  generator.generateChunkInto(genX, genZ, target);
 
   // Update bitset for active voxels
   activeVoxels.reset(); // Clear all bits first
@@ -1364,8 +1368,10 @@ void Chunk::reset(const glm::vec3 &newPosition)
   // Clear shell — keep capacity for reuse
   neighborShellVoxels.clear();
 
-  // Reset biome colors
+  // Reset biome colors and per-column generation state
   biomeGrassColors.fill(0);
   biomeFoliageColors.fill(0);
+  biomeTypes.fill(static_cast<BiomeType>(0));
+  heightMap.fill(0);
 }
 

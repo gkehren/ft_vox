@@ -364,6 +364,137 @@ static EdgeStats checkEdge(const ChunkData &owner, int shellLx, int shellLz,
 	return stats;
 }
 
+// ---------------------------------------------------------------------------
+// Generation into caller-owned storage (issue #78)
+// ---------------------------------------------------------------------------
+
+struct TargetBuffers
+{
+	std::vector<Voxel> voxels;
+	std::vector<uint8_t> shell;
+	std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomes{};
+	std::array<int, CHUNK_SIZE * CHUNK_SIZE> heightMap{};
+	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> grass{};
+	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> foliage{};
+
+	TargetBuffers() : voxels(CHUNK_VOLUME), shell(kBorderVoxelCount) {}
+
+	ChunkGenerationTarget target()
+	{
+		return ChunkGenerationTarget{
+			.voxels = std::span<Voxel, CHUNK_VOLUME>(voxels),
+			.borderVoxels = std::span<uint8_t, kBorderVoxelCount>(shell),
+			.biomes = biomes, .heightMap = heightMap,
+			.grassColors = grass, .foliageColors = foliage};
+	}
+
+	void poison()
+	{
+		std::fill(voxels.begin(), voxels.end(), Voxel{static_cast<uint8_t>(0xAA)});
+		std::fill(shell.begin(), shell.end(), static_cast<uint8_t>(0xFF));
+		biomes.fill(static_cast<BiomeType>(0x7F));
+		heightMap.fill(-123456);
+		grass.fill(0xDEADBEEFu);
+		foliage.fill(0xDEADBEEFu);
+	}
+};
+
+/// Byte-compare the raw buffers (voxels/shell are byte-oriented: Voxel is a
+/// single uint8_t) and semantically compare the typed arrays via
+/// std::equal - portable and independent of representation.
+static bool chunkDataMatchesTarget(const ChunkData &reference, const TargetBuffers &buffers)
+{
+	return std::memcmp(reference.voxels.data(), buffers.voxels.data(),
+					   CHUNK_VOLUME * sizeof(Voxel)) == 0 &&
+		   std::memcmp(reference.borderVoxels.data(), buffers.shell.data(),
+					   buffers.shell.size()) == 0 &&
+		   std::equal(reference.biomes.begin(), reference.biomes.end(),
+					  buffers.biomes.begin()) &&
+		   std::equal(reference.heightMap.begin(), reference.heightMap.end(),
+					  buffers.heightMap.begin()) &&
+		   std::equal(reference.grassColors.begin(), reference.grassColors.end(),
+					  buffers.grass.begin()) &&
+		   std::equal(reference.foliageColors.begin(), reference.foliageColors.end(),
+					  buffers.foliage.begin());
+}
+
+/// generateChunkInto (the streaming hot path) must reproduce the owning
+/// generateChunk byte-for-byte, fully reset reused storage (no data may leak
+/// from a previously generated chunk), and stay deterministic when driven
+/// concurrently from per-thread generators.
+static void testGenerateChunkIntoTarget()
+{
+	constexpr int kSeed = 777;
+	TerrainGenerator gen(kSeed);
+	const int coords[][2] = {
+		{0, 0}, {CHUNK_SIZE, -CHUNK_SIZE}, {-5 * CHUNK_SIZE, 3 * CHUNK_SIZE}, {160, -80}};
+
+	// 1) Fresh-buffer equivalence with the owning path.
+	for (const auto &coord : coords)
+	{
+		const ChunkData reference = gen.generateChunk(coord[0], coord[1]);
+		TargetBuffers buffers;
+		gen.generateChunkInto(coord[0], coord[1], buffers.target());
+		CHECK(chunkDataMatchesTarget(reference, buffers),
+			  "generateChunkInto matches owning generateChunk");
+	}
+
+	// 2) Pool-like reuse: poisoned storage from a previous generation must
+	// be fully overwritten - every field, every voxel - and successive
+	// generations into the SAME buffers through very different terrain
+	// (far-apart coords) must each match the owning path exactly. Buffer
+	// capacity must never change: generateChunkInto() may not reallocate.
+	TargetBuffers reused;
+	reused.poison();
+	const size_t voxelCapacity = reused.voxels.capacity();
+	const size_t shellCapacity = reused.shell.capacity();
+	const int reuseCoords[][2] = {
+		{64, 96}, {4096, -4096}, {-8192, 8192}};
+	for (const auto &coord : reuseCoords)
+	{
+		gen.generateChunkInto(coord[0], coord[1], reused.target());
+		const ChunkData reference = gen.generateChunk(coord[0], coord[1]);
+		CHECK(chunkDataMatchesTarget(reference, reused),
+			  "poisoned reuse leaves no leaked data");
+	}
+	CHECK(reused.voxels.capacity() == voxelCapacity,
+		  "reused voxel capacity stable across generations");
+	CHECK(reused.shell.capacity() == shellCapacity,
+		  "reused shell capacity stable across generations");
+
+	// 3) Concurrent generation into per-thread buffers (thread-local
+	// generators) must match the sequential owning path.
+	const std::pair<int, int> threaded[] = {
+		{0, 0}, {CHUNK_SIZE, -CHUNK_SIZE}, {-160, 96}, {512, 512}};
+	std::vector<ChunkData> references;
+	references.reserve(std::size(threaded));
+	for (const auto &coord : threaded)
+		references.push_back(gen.generateChunk(coord.first, coord.second));
+
+	std::vector<std::future<bool>> futures;
+	futures.reserve(std::size(threaded));
+	for (size_t reverse = std::size(threaded); reverse-- > 0;)
+	{
+		futures.push_back(std::async(std::launch::async,
+			[&references, &threaded, reverse]() {
+				TargetBuffers local;
+				TerrainGenerator::getThreadLocal(kSeed).generateChunkInto(
+					threaded[reverse].first, threaded[reverse].second,
+					local.target());
+				return chunkDataMatchesTarget(references[reverse], local);
+			}));
+	}
+	bool concurrentOk = true;
+	for (auto &future : futures)
+		concurrentOk = future.get() && concurrentOk;
+	CHECK(concurrentOk, "concurrent generateChunkInto matches owning path");
+
+	std::cout << "generateChunkInto: byte-identical on " << std::size(coords)
+			  << " chunks, poisoned reuse fully reset across "
+			  << std::size(reuseCoords) << " sequential coords, capacities stable, "
+			  << std::size(threaded) << " concurrent chunks match\n";
+}
+
 static void testBorderConsistency()
 {
 	constexpr int kSeed = 777;
@@ -1389,6 +1520,93 @@ static int oreGroup(TextureType type)
 	default:
 		return -1;
 	}
+}
+
+/// Issue #78 review: informative wall-clock comparison between the owning
+/// path and the pooled-target path over identical coordinates. NOT a CI
+/// gate (runner variance) - the deterministic criteria are structural and
+/// live in testGenerateChunkIntoTarget (capacity stability, byte equality).
+///   ./test_terrain --gen-perf [chunks] [seed]
+static int runGenPerf(int argc, char **argv)
+{
+	const int chunks = (argc > 2) ? std::clamp(std::atoi(argv[2]), 1, 100000) : 500;
+	const int seed = (argc > 3) ? std::atoi(argv[3]) : 1337;
+
+	TerrainGenerator gen(seed);
+	constexpr int kSpan = 8; // 8x8 chunk region, revisited ring
+	auto coordFor = [](int i, int &cx, int &cz) {
+		cx = (i % kSpan) * CHUNK_SIZE;
+		cz = (i / kSpan) * CHUNK_SIZE;
+	};
+
+	using Clock = std::chrono::steady_clock;
+
+	// Warm-up both paths (caches, allocator).
+	{
+		TargetBuffers warm;
+		for (int i = 0; i < 16; ++i)
+		{
+			int cx, cz;
+			coordFor(i, cx, cz);
+			auto owned = gen.generateChunk(cx, cz);
+			(void)owned;
+			gen.generateChunkInto(cx, cz, warm.target());
+		}
+	}
+
+	// A. owning path: allocates + frees a ChunkData per chunk (old hot path).
+	double owningMsPerChunk = 0.0;
+	{
+		const auto start = Clock::now();
+		for (int i = 0; i < chunks; ++i)
+		{
+			int cx, cz;
+			coordFor(i, cx, cz);
+			auto owned = gen.generateChunk(cx, cz);
+			(void)owned;
+		}
+		const double totalMs =
+			std::chrono::duration<double, std::milli>(Clock::now() - start)
+				.count();
+		owningMsPerChunk = totalMs / chunks;
+	}
+
+	// B. pooled-target path: same buffers reused every iteration.
+	TargetBuffers reusable;
+	const size_t voxelCapacity = reusable.voxels.capacity();
+	const size_t shellCapacity = reusable.shell.capacity();
+	double pooledMsPerChunk = 0.0;
+	{
+		const auto start = Clock::now();
+		for (int i = 0; i < chunks; ++i)
+		{
+			int cx, cz;
+			coordFor(i, cx, cz);
+			gen.generateChunkInto(cx, cz, reusable.target());
+		}
+		const double totalMs =
+			std::chrono::duration<double, std::milli>(Clock::now() - start)
+				.count();
+		pooledMsPerChunk = totalMs / chunks;
+	}
+	const bool capacityStable =
+		reusable.voxels.capacity() == voxelCapacity &&
+		reusable.shell.capacity() == shellCapacity;
+
+	const double deltaPct =
+		owningMsPerChunk > 0.0
+			? (pooledMsPerChunk - owningMsPerChunk) / owningMsPerChunk * 100.0
+			: 0.0;
+
+	std::cout << "[Chunk Gen Perf] seed=" << seed << " chunks=" << chunks
+			  << "\nowning:      " << owningMsPerChunk << " ms/chunk"
+			  << "\npooled-into: " << pooledMsPerChunk << " ms/chunk"
+			  << "\ndelta:       " << deltaPct << "%"
+			  << "\nreused-buffer capacity stable: "
+			  << (capacityStable ? "yes" : "NO") << "\n";
+
+	CHECK(capacityStable, "gen-perf reused-buffer capacity must stay stable");
+	return g_fails != 0 ? 1 : 0;
 }
 
 static int runWorldStats(int argc, char **argv)
@@ -2516,6 +2734,8 @@ int main(int argc, char **argv)
 		return runHeightHistogram(argc, argv);
 	if (argc > 1 && std::strcmp(argv[1], "--profile") == 0)
 		return runTerrainProfile(argc, argv);
+	if (argc > 1 && std::strcmp(argv[1], "--gen-perf") == 0)
+		return runGenPerf(argc, argv);
 	if (argc > 1 && std::strcmp(argv[1], "--world-stats") == 0)
 		return runWorldStats(argc, argv);
 
@@ -2525,6 +2745,7 @@ int main(int argc, char **argv)
 	testDeterminismSameSeed();
 	testDifferentSeedsDiffer();
 	testConcurrentAndMultiSeedDeterminism();
+	testGenerateChunkIntoTarget();
 	testTerrainProfilingDoesNotChangeOutput();
 	testBorderConsistency();
 	testBorderTrunks();

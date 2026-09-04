@@ -723,21 +723,51 @@ TerrainGenerator &TerrainGenerator::getThreadLocal(int seed)
 
 ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
 {
+  // Owning convenience wrapper (tests/tools): allocate fresh storage and
+  // generate into it. The streaming hot path uses generateChunkInto() with
+  // caller-owned reusable storage instead.
+  ChunkData chunkData;
+  chunkData.voxels.resize(CHUNK_VOLUME);
+  chunkData.borderVoxels.resize(kBorderVoxelCount);
+
+  ChunkGenerationTarget target{
+      .voxels = std::span<Voxel, CHUNK_VOLUME>(chunkData.voxels),
+      .borderVoxels = std::span<uint8_t, kBorderVoxelCount>(chunkData.borderVoxels),
+      .biomes = chunkData.biomes,
+      .heightMap = chunkData.heightMap,
+      .grassColors = chunkData.grassColors,
+      .foliageColors = chunkData.foliageColors};
+  generateChunkInto(chunkX, chunkZ, target);
+  return chunkData;
+}
+
+void TerrainGenerator::generateChunkInto(int chunkX, int chunkZ,
+                                         const ChunkGenerationTarget &target)
+{
   using Clock = std::chrono::steady_clock;
   const auto totalStart =
       m_activeProfile ? Clock::now() : Clock::time_point{};
-  ChunkData chunkData;
-  chunkData.voxels.assign(CHUNK_VOLUME, {TextureType::AIR});
-  chunkData.borderVoxels.assign(18 * (CHUNK_HEIGHT + 2) * 18,
-                                static_cast<uint8_t>(AIR));
+
+  // Reset semantics: the destination storage is reused across pooled
+  // chunks, so fully re-initialize every field before generating. Nothing
+  // from a previously generated chunk may leak into this one.
+  std::fill(target.voxels.begin(), target.voxels.end(),
+            Voxel{TextureType::AIR});
+  std::fill(target.borderVoxels.begin(), target.borderVoxels.end(),
+            static_cast<uint8_t>(AIR));
+  std::fill(target.biomes.begin(), target.biomes.end(),
+            static_cast<BiomeType>(0));
+  std::fill(target.heightMap.begin(), target.heightMap.end(), 0);
+  std::fill(target.grassColors.begin(), target.grassColors.end(), 0u);
+  std::fill(target.foliageColors.begin(), target.foliageColors.end(), 0u);
 
   // Generate the main chunk data
-  generateChunkBatch(chunkData, chunkX, chunkZ);
+  generateChunkBatch(target, chunkX, chunkZ);
 
   // Generate vegetation (trees, cacti, etc.)
   const auto vegetationStart =
       m_activeProfile ? Clock::now() : Clock::time_point{};
-  generateVegetation(chunkData, chunkX, chunkZ);
+  generateVegetation(target, chunkX, chunkZ);
   if (m_activeProfile)
     m_activeProfile->vegetationMs +=
         std::chrono::duration<double, std::milli>(Clock::now() -
@@ -747,7 +777,7 @@ ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
   // Generate border voxels for mesh optimization
   const auto borderStart =
       m_activeProfile ? Clock::now() : Clock::time_point{};
-  generateChunkBorders(chunkData, chunkX, chunkZ);
+  generateChunkBorders(target, chunkX, chunkZ);
   if (m_activeProfile)
   {
     m_activeProfile->borderMs +=
@@ -758,8 +788,6 @@ ChunkData TerrainGenerator::generateChunk(int chunkX, int chunkZ)
             .count();
     ++m_activeProfile->chunks;
   }
-
-  return chunkData;
 }
 
 ChunkData TerrainGenerator::generateChunkProfiled(
@@ -875,7 +903,7 @@ BiomeType TerrainGenerator::evaluateBiomeAt(
                         continental, erosion, pv, riverVal, height);
 }
 
-void TerrainGenerator::generateChunkBatch(ChunkData &chunkData, int chunkX,
+void TerrainGenerator::generateChunkBatch(const ChunkGenerationTarget &chunkData, int chunkX,
                                           int chunkZ)
 {
   using Clock = std::chrono::steady_clock;
@@ -2231,7 +2259,7 @@ inline TextureType logTypeForBiome(BiomeType biome, uint32_t h)
 
 } // namespace
 
-void TerrainGenerator::generateVegetation(ChunkData &chunkData, int chunkX, int chunkZ)
+void TerrainGenerator::generateVegetation(const ChunkGenerationTarget &chunkData, int chunkX, int chunkZ)
 {
   float chunkXf = static_cast<float>(chunkX) + NOISE_OFFSET;
   float chunkZf = static_cast<float>(chunkZ) + NOISE_OFFSET;
@@ -2743,7 +2771,7 @@ TextureType TerrainGenerator::getVoxelTypeAt(int worldX, int worldY, int worldZ,
 // BORDER GENERATION
 // =============================================
 
-void TerrainGenerator::generateChunkBorders(ChunkData &chunkData, int chunkX,
+void TerrainGenerator::generateChunkBorders(const ChunkGenerationTarget &chunkData, int chunkX,
                                             int chunkZ)
 {
   auto setBorderVoxel = [&](int lx, int ly, int lz, TextureType type)
