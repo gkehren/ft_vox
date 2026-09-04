@@ -1,0 +1,34 @@
+ft_vox Benchmark Report
+=======================
+Score: 10000 / 10000  Grade: S
+Revision: 6f1fbd8ac7a6* (dirty tree at build)
+  git 6f1fbd8ac7a6  branch perf/88-parallel-biome-region  describe 6f1fbd8-dirty
+  build UTC 2026-09-04T10:11:48Z
+Seed: 42  Duration: 15s  Warmup: 2s  Measured: 15.0002s  Frames: 2993
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 5.00096  min 4.8869  max 29.1626
+  p50 4.9914  p95 4.9927  p99 5
+  avg FPS 199.962  1% low FPS 200
+  frames >16.7ms: 1  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.414646  Visibility 0.0234317
+  Acquire 0.0105741  Record 0.211711  MeshUpload 0.0320863
+  ImGui 0.0652757  Present 4.28507
+
+Worker jobs
+  TerrainGen  n=6423  avgMs=1.56174  totalMs=10031
+  MeshBuild   n=4747  avgMs=2.94787  totalMs=13993.5
+  MeshLOD     n=268  avgMs=0.0641381  totalMs=17.189
+
+Biome map: zoom=0.1 mode=scheduled (fixed center when enabled)
+  TerrainQueue n=6423 avgMs=0.00920847 totalMs=59.146
+  MeshQueue n=5015 avgMs=0.00955753 totalMs=47.931
+  BiomeMap n=14 avgMs=93.0621 totalMs=1302.87
+Peaks: chunks=1942 draw=539 qLoad/Gen/Mesh=3308/1/2
+
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.

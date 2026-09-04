@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <array>
 
 enum class BenchmarkPhase
 {
@@ -25,11 +26,22 @@ struct BenchmarkConfig
 	float pathRadius{160.f};
 	float pathHeight{48.f}; // above surface Y at center
 	bool forceVsyncOff{false};
+	float biomeMapZoom{0.f}; // >0 opens a fixed-center map during the benchmark
+	bool biomeMapSequential{false}; // control measurement of the previous path
+};
+
+struct BenchmarkWorkTiming
+{
+	uint64_t count{0};
+	double totalMs{0};
 };
 
 struct BenchmarkReport
 {
 	bool valid{false};
+	std::array<BenchmarkWorkTiming, 3> backgroundWork{};
+	float biomeMapZoom{0.f};
+	bool biomeMapSequential{false};
 
 	int seed{0};
 	float durationSec{0.f};
@@ -132,6 +144,8 @@ public:
 					 size_t pendingMesh, uint64_t terrainJobs, float terrainMs, uint64_t meshJobs,
 					 float meshMs, uint64_t lodJobs, float lodMs);
 
+	/// Queue waits and completed map latency from the frame's profiler snapshot.
+	void sampleBackgroundWork(const char *name, uint64_t count, double totalMs);
 	/// Progress 0–1 over warmup+duration total wall time for UI bar (full run).
 	float totalProgress() const;
 	/// Progress 0–1 of measurement only (warmup excluded).
@@ -184,6 +198,7 @@ public:
 	void clearVsyncRestore() { m_vsyncRestorePending = false; }
 
 private:
+	std::array<BenchmarkWorkTiming, 3> m_backgroundWork{};
 	std::vector<float> m_frameMs;
 	double m_sumStreaming{0}, m_sumAcquire{0}, m_sumRecord{0}, m_sumImGui{0}, m_sumPresent{0};
 	double m_sumVisibility{0}, m_sumMeshUpload{0};

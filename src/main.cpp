@@ -2,6 +2,7 @@
 #include <Renderer/MinecraftTextures.hpp>
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -17,6 +18,8 @@ static void printUsage(const char *argv0)
 			  << "                              (defaults to ressources/default-resource-pack.zip)\n"
 			  << "  --vsync <on|off>            FIFO when on; strict IMMEDIATE and uncapped when off\n"
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
+			  << "  --benchmark-map <zoom>      Open fixed-center biome map (zoom 0.1..8)\n"
+			  << "  --benchmark-map-sequential  Compare the previous one-job map path\n"
 			  << "  --help                      Show this help\n"
 			  << "\n"
 			  << "Env: FT_VOX_RESOURCE_PACK=<path>  used when --resource-pack is not set\n";
@@ -38,6 +41,8 @@ int main(int argc, char **argv)
 	std::string resourcePackCli;
 	std::optional<bool> vsyncOverride;
 	float benchmarkDuration = 0.0f;
+	float benchmarkMapZoom = 0.0f;
+	bool benchmarkMapSequential = false;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -75,6 +80,28 @@ int main(int argc, char **argv)
 				return EXIT_FAILURE;
 			}
 			resourcePackCli = argv[++i];
+			continue;
+		}
+		if (arg == "--benchmark-map-sequential")
+		{
+			benchmarkMapSequential = true;
+			continue;
+		}
+		if (arg == "--benchmark-map")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --benchmark-map requires a zoom.\n";
+				return EXIT_FAILURE;
+			}
+			char *end = nullptr;
+			benchmarkMapZoom = std::strtof(argv[++i], &end);
+			if (end == argv[i] || *end || !std::isfinite(benchmarkMapZoom) ||
+				benchmarkMapZoom < 0.1f || benchmarkMapZoom > 8.0f)
+			{
+				std::cerr << "Error: --benchmark-map zoom must be between 0.1 and 8.\n";
+				return EXIT_FAILURE;
+			}
 			continue;
 		}
 		if (arg == "--benchmark")
@@ -119,6 +146,12 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
+	if ((benchmarkMapZoom > 0.0f && benchmarkDuration == 0.0f) ||
+		(benchmarkMapSequential && benchmarkMapZoom == 0.0f))
+	{
+		std::cerr << "Error: map benchmark options require --benchmark and --benchmark-map.\n";
+		return EXIT_FAILURE;
+	}
 	const std::string resourcePack = resolveResourcePackRoot(resourcePackCli);
 
 	try
@@ -132,6 +165,8 @@ int main(int argc, char **argv)
 			BenchmarkConfig &config = engine.benchmark().config();
 			config.seed = seed_to_use > 0 ? static_cast<int>(seed_to_use) : 42;
 			config.durationSec = benchmarkDuration;
+			config.biomeMapZoom = benchmarkMapZoom;
+			config.biomeMapSequential = benchmarkMapSequential;
 			config.warmupSec = std::min(2.0f, benchmarkDuration * 0.2f);
 			config.pathOrbits = 2;
 			config.pathRadius = 512.0f;

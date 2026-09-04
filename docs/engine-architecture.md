@@ -168,6 +168,10 @@ At mesh time, sky light is cast down open columns then **flooded** into caves (a
 
 - Work-stealing workers for **terrain generation** and **meshing**  
 - Priorities via task priority helpers (near camera first)  
+- Biome maps use up to eight Low-priority tile lanes, yielding back to the pool
+  after each tile. High/Normal work is searched across all queues first. The
+  final tile publishes via an atomic completion count; workers never wait for
+  child tasks. GameUI still permits only one map build at a time.
 
 **Rule:** GPU upload, VMA destroy, and descriptor/buffer free related to live draws happen on the **main thread** after appropriate retire delay — never free mesh buffers still referenced by in-flight frames.
 

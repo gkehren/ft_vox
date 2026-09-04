@@ -1,5 +1,9 @@
 // Biome map generation lifetime, concurrency safety, cancellation, and stale/superseded rejection tests.
 #include <Engine/GameUIBiomeMap.hpp>
+#include <Engine/ThreadPool.hpp>
+#include <chrono>
+#include <algorithm>
+#include <cstring>
 #include <Chunk/TerrainGenerator.hpp>
 
 #include <atomic>
@@ -694,8 +698,169 @@ static void test_request_scratch_reuse()
 		  "returning to dense zoom must reuse the retained capacity without churn");
 }
 
-int main()
+
+
+static void test_region_tile_plan()
 {
+	for (int seed : {42, 4242})
+	{
+		TerrainGenerator gen(seed);
+		for (float step : {0.125f, 1.0f, 10.0f, 1.0e20f})
+		{
+			const auto grid = makeBiomeRegionGrid(-16.01f, 123.6f, step, 67, 35);
+			std::vector<BiomeType> expected, assembled(67 * 35);
+			std::vector<int> visits(67 * 35);
+			CHECK(gen.getBiomeRegion(grid, expected), "sequential region succeeds");
+			auto plan = TerrainGenerator::buildBiomeRegionPlan(grid);
+			std::reverse(plan.begin(), plan.end());
+			TerrainGenerator::BiomeRegionScratch scratch;
+			for (auto tile : plan)
+			{
+				std::vector<BiomeType> pixels;
+				CHECK(gen.getBiomeRegionTile(grid, tile, pixels, &scratch), "independent tile succeeds");
+				for (int z = 0; z < tile.height; ++z)
+					for (int x = 0; x < tile.width; ++x)
+					{
+						const size_t i = static_cast<size_t>(tile.z + z) * grid.width + tile.x + x;
+						assembled[i] = pixels[static_cast<size_t>(z) * tile.width + x];
+						++visits[i];
+					}
+				CHECK(scratch.temperature.capacity() <= TerrainGenerator::kMaxTileDensePoints,
+					  "tile scratch retention stays bounded");
+			}
+			CHECK(assembled == expected, "reverse tile order preserves every biome");
+			CHECK(std::all_of(visits.begin(), visits.end(), [](int n) { return n == 1; }),
+				  "plan partitions output without gaps or overlap");
+			CHECK(!gen.getBiomeRegionTile(grid, {-1, 0, 1, 1}, assembled), "invalid rectangle rejected");
+			CHECK(assembled.empty(), "invalid rectangle never returns partial data");
+			int checks = 0;
+			CHECK(!gen.getBiomeRegionTile(grid, plan.front(), assembled, &scratch,
+				[&] { return ++checks == 2; }), "late tile cancellation rejected");
+			CHECK(assembled.empty(), "cancelled tile output cleared");
+		}
+	}
+}
+
+static void test_parallel_maps()
+{
+	for (size_t workers : {size_t(1), size_t(4)})
+	{
+		ThreadPool pool(workers);
+		for (float zoom : {0.1f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f})
+		{
+			BiomeMapRequest req;
+			req.seed = 1337;
+			req.requestId = 8;
+			req.worldGenerationId = 3;
+			req.size = 65; // odd dimensions, partial edge tiles
+			req.center = {-123.6f, 432.1f};
+			req.zoom = zoom;
+			const auto expected = generateBiomeMap(req);
+			auto future = submitBiomeMap(pool, req);
+			CHECK(future.wait_for(std::chrono::seconds(10)) == std::future_status::ready,
+				  "parallel map completes even with one worker (no nested waits)");
+			const auto actual = future.get();
+			CHECK(actual.valid && actual.rgba == expected.rgba, "scheduled map matches sequential RGBA exactly");
+			CHECK(isBiomeMapResultAcceptable(actual, 3, 1337, 8), "scheduled result preserves identity/grid");
+		}
+	}
+
+	ThreadPool pool(1);
+	BiomeMapRequest req;
+	req.size = 65;
+	req.zoom = 0.1f;
+	req.cancelToken = std::make_shared<std::atomic<bool>>(true);
+	CHECK(!submitBiomeMap(pool, req).get().valid, "pre-cancelled scheduled map rejected");
+	req.cancelToken->store(false);
+	// Parent enqueues tiles, then a queued High task cancels before they run.
+	req.onCheckpoint = [&] {
+		pool.enqueue(TaskPriority::High, [token = req.cancelToken] { token->store(true); });
+	};
+	const auto cancelled = submitBiomeMap(pool, req).get();
+	CHECK(!cancelled.valid && cancelled.rgba.empty(), "queued tiles drain cancellation without partial publication");
+	req.cancelToken->store(false);
+	req.onCheckpoint = [] { throw std::runtime_error("test failure"); };
+	CHECK(!submitBiomeMap(pool, req).get().valid, "job failure resolves future with invalid result");
+	req.onCheckpoint = {};
+	std::future<BiomeMapResult> future;
+	{
+		ThreadPool draining(2);
+		future = submitBiomeMap(draining, req);
+	} // pool shutdown must drain parent and all children without dangling state
+	CHECK(future.get().valid, "shutdown drains scheduled map");
+}
+
+static void test_global_priority()
+{
+	ThreadPool pool(2);
+	std::promise<void> enteredA, enteredB, releaseA, releaseB;
+	auto gateA = releaseA.get_future().share();
+	auto gateB = releaseB.get_future().share();
+	auto a = pool.enqueue(TaskPriority::High, [&] { enteredA.set_value(); gateA.wait(); });
+	enteredA.get_future().wait();
+	auto b = pool.enqueue(TaskPriority::High, [&] { enteredB.set_value(); gateB.wait(); });
+	enteredB.get_future().wait();
+	// Only one worker is released. Every priority has work in both queues,
+	// so local-first scheduling would select local Normal before remote High.
+	std::vector<int> order;
+	std::vector<std::future<void>> tasks;
+	for (auto priority : {TaskPriority::Low, TaskPriority::Normal, TaskPriority::High})
+		for (int i = 0; i < 2; ++i)
+			tasks.push_back(pool.enqueue(priority, [&, priority] { order.push_back(static_cast<int>(priority)); }));
+	releaseA.set_value();
+	for (auto &task : tasks)
+		task.get();
+	CHECK(order == std::vector<int>({0, 0, 1, 1, 2, 2}), "High/Normal across all queues precede local Low tiles");
+	releaseB.set_value();
+	a.get(); b.get();
+}
+
+static int benchmark_maps()
+{
+	using Clock = std::chrono::steady_clock;
+	const size_t workers = std::min(size_t(8), std::max(size_t(1), size_t(std::thread::hardware_concurrency())));
+	ThreadPool pool(workers);
+	BiomeMapRequest req;
+	req.seed = 1337;
+	req.size = 256;
+	req.center = {-123.6f, 432.1f};
+	req.scratch = std::make_shared<TerrainGenerator::BiomeRegionScratch>();
+	req.scratch->retainedPointsCap = TerrainGenerator::kMaxDenseDomainPoints;
+	std::cout << "[Biome map latency] workers=" << workers << " size=256 seed=1337 (3 runs, alternating order)\n";
+	for (float zoom : {0.1f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f})
+	{
+		req.zoom = zoom;
+		generateBiomeMap(req);
+		submitBiomeMap(pool, req).get();
+		double sequential = 0, parallel = 0;
+		for (int run = 0; run < 3; ++run)
+		{
+			BiomeMapResult reference, scheduled;
+			for (int phase = 0; phase < 2; ++phase)
+			{
+				const bool usePool = ((run + phase) % 2) != 0;
+				const auto start = Clock::now();
+				auto result = usePool ? submitBiomeMap(pool, req).get() : generateBiomeMap(req);
+				const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+				(usePool ? parallel : sequential) += ms;
+				(usePool ? scheduled : reference) = std::move(result);
+			}
+			CHECK(reference.valid && scheduled.valid && reference.rgba == scheduled.rgba,
+				  "benchmark outputs must match exactly");
+		}
+		std::cout << "zoom=" << zoom << " sequential_ms=" << sequential / 3
+				  << " scheduled_ms=" << parallel / 3 << '\n';
+	}
+	return g_fails ? 1 : 0;
+}
+
+int main(int argc, char **argv)
+{
+	if (argc > 1 && std::strcmp(argv[1], "--map-perf") == 0)
+		return benchmark_maps();
+	test_region_tile_plan();
+	test_global_priority();
+	test_parallel_maps();
 	std::cout << "[test_biome_map] Running tests...\n";
 	test_biome_map_result_validity();
 	test_deterministic_stale_generation_rejection();

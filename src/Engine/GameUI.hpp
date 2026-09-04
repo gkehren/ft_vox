@@ -119,6 +119,15 @@ public:
 	bool showHelp() const { return m_showHelp; }
 	bool showProfiler() const { return m_showProfiler; }
 
+	/// Reproducible streaming benchmark: map stays open at a fixed center.
+	void configureBenchmarkMap(float zoom)
+	{
+		m_showWorld = true;
+		m_mapZoom = zoom;
+		m_mapFollow = false;
+		invalidateBiomeMap();
+	}
+
 	void setShowHud(bool v) { m_showHud = v; }
 
 	/// Invalidate any active or in-flight biome map task and clear current texture.
@@ -212,8 +221,8 @@ private:
 
 	BiomeMapJob m_mapJob{};
 	BiomeMapUpload m_pendingUpload{};
-	// Single process-wide region scratch for the biome-map job (never one
-	// per pool worker): its retention cap allows dense-capacity reuse so
+	// Owner scratch for sequential/small maps. Parallel tiles use separate
+	// bounded thread-local scratch; this retention cap allows dense reuse so
 	// refreshes do not re-allocate the dense peak, while retention stays
 	// bounded by kMaxDenseDomainPoints per field (~10 MiB logical payload
 	// in total). The scratch holds only scratch floats - no seed- or
