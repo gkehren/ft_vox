@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Vulkan/VkContext.hpp"
+#include "Vulkan/VkGpuProfiler.hpp"
 #include "Vulkan/VkSwapchain.hpp"
 #include "Vulkan/VkBuffer.hpp"
 #include "Vulkan/VkImage.hpp"
@@ -57,7 +58,8 @@ public:
 					 const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
 					 const VkClearColorValue &clearColor,
 					 const std::function<void(VkCommandBuffer)> &preRecord = {},
-					 const std::function<void(VkCommandBuffer)> &imguiDraw = {});
+					 const std::function<void(VkCommandBuffer)> &imguiDraw = {},
+                     VkGpuProfiler *gpu = nullptr, uint64_t benchmarkTag = 0);
 
 	PostProcessSettings &postSettings() { return m_postSettings; }
 	OverlayRenderer &overlays() { return m_overlays; }

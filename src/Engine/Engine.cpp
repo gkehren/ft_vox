@@ -783,6 +783,7 @@ void Engine::sampleBenchmarkFrame()
 		return;
 	uint64_t tJobs = 0, mJobs = 0, lJobs = 0;
 	float tMs = 0.f, mMs = 0.f, lMs = 0.f;
+	m_benchmark.sampleGpu(frameCtx->gpuProfiler().latest());
 	const int wc = prof.workerSnapshotCount();
 	const WorkerSnapshot *ws = prof.workerSnapshots();
 	for (int i = 0; i < wc; ++i)
@@ -831,6 +832,7 @@ void Engine::drawUi()
 	f.generator = terrainGenerator.get();
 	f.worldRenderer = worldRenderer.get();
 	f.vk = vkContext.get();
+	f.gpu = &frameCtx->gpuProfiler();
 	f.imm = immediate.get();
 	f.shader = &shaderParams;
 	f.render = &renderSettings;
@@ -965,6 +967,7 @@ void Engine::run()
 		recreateSwapchainIfNeeded(static_cast<uint32_t>(pixelW),
 								  static_cast<uint32_t>(pixelH));
 
+		frameCtx->gpuProfiler().syncCapture(GetProfiler().captureEpoch());
 		uint32_t imageIndex = 0;
 		{
 			PROFILE_SCOPE("Acquire");
@@ -1015,6 +1018,7 @@ void Engine::run()
 									renderSettings.shadowCascadeFar, underwater);
 		}
 
+		frameCtx->gpuProfiler().syncCapture(GetProfiler().captureEpoch());
 		const int uploadBudget = uploadBudgetThisFrame;
 		{
 			PROFILE_SCOPE("Record");
@@ -1048,7 +1052,7 @@ void Engine::run()
 				[&](VkCommandBuffer cmd) {
 					if (imgui)
 						imgui->recordDraw(cmd);
-				});
+				}, &frameCtx->gpuProfiler(), m_benchmark.gpuCaptureTag());
 		}
 
 		{

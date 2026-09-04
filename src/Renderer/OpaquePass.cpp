@@ -67,8 +67,9 @@ void OpaquePass::destroyPipeline()
 void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet set0, VkDescriptorSet set1,
 						VkPipelineLayout layout, AllocatedImage &hdr, AllocatedImage &depth,
 						const std::vector<Chunk *> &chunks, OverlayRenderer &overlays,
-						const VkClearColorValue &clearColor)
+						const VkClearColorValue &clearColor, VkGpuProfiler *gpu)
 {
+	if (gpu) gpu->beginPass(cmd, GpuPass::Opaque);
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
 
@@ -116,6 +117,9 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 		if (chunk)
 			chunk->draw(cmd);
 	}
+	if (gpu) gpu->endPass(cmd, GpuPass::Opaque);
+	if (gpu) gpu->beginPass(cmd, GpuPass::Overlays);
 	overlays.record(cmd, set0, chunks);
+	if (gpu) gpu->endPass(cmd, GpuPass::Overlays);
 	endRendering(cmd);
 }

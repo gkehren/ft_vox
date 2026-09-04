@@ -33,6 +33,7 @@ struct GameUIFrame
 	TerrainGenerator *generator{nullptr};
 	WorldRenderer *worldRenderer{nullptr};
 	VkContext *vk{nullptr};
+	VkGpuProfiler *gpu{nullptr};
 	ImmediateCommands *imm{nullptr};
 
 	ShaderParameters *shader{nullptr};

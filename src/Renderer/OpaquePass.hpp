@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Vulkan/VkContext.hpp"
+#include "Vulkan/VkGpuProfiler.hpp"
 #include "Vulkan/VkImage.hpp"
 #include "Chunk/Chunk.hpp"
 #include "Renderer/OverlayRenderer.hpp"
@@ -23,7 +24,7 @@ public:
 	void record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet set0, VkDescriptorSet set1,
 				VkPipelineLayout layout, AllocatedImage &hdr, AllocatedImage &depth,
 				const std::vector<Chunk *> &chunks, OverlayRenderer &overlays,
-				const VkClearColorValue &clearColor);
+				const VkClearColorValue &clearColor, VkGpuProfiler *gpu = nullptr);
 
 private:
 	VkContext *m_context{nullptr};

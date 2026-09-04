@@ -653,7 +653,10 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 		prof.setEnabled(capturing);
 	ImGui::SameLine();
 	if (ImGui::Button("Clear history"))
+	{
 		prof.clearHistory();
+		if (frame.gpu) frame.gpu->syncCapture(prof.captureEpoch());
+	}
 	ImGui::SameLine();
 	ImGui::TextDisabled("CPU scopes · previous frame");
 
@@ -662,7 +665,7 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 	const float fpsEst = prof.fpsEstimate();
 	const float p1 = prof.onePercentLowMs();
 
-	ImGui::SeparatorText("Frame");
+	ImGui::SeparatorText("CPU frame");
 	ImGui::Text("%.1f FPS  |  %.2f ms  |  avg %.2f ms", fpsEst, frameMs, avgMs);
 	if (p1 > 0.f)
 		ImGui::Text("1%% low (slow frames): %.2f ms  (~%.0f FPS)", p1, p1 > 1e-4f ? 1000.f / p1 : 0.f);
@@ -697,7 +700,7 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 	}
 
 	// Hierarchy
-	ImGui::SeparatorText("Hierarchy (last frame)");
+	ImGui::SeparatorText("CPU hierarchy (command recording, not GPU execution)");
 	const float denom = frameMs > 1e-4f ? frameMs : 1.f;
 	if (ImGui::BeginTable("scopes", 4,
 						  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
@@ -748,6 +751,28 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 			ImGui::TextDisabled("No samples yet — wait a frame or enable Capture");
 		}
 		ImGui::EndTable();
+	}
+
+	ImGui::SeparatorText("GPU frame / passes");
+	if (frame.gpu)
+	{
+		auto &gpu = *frame.gpu;
+		bool enabled = gpu.enabled();
+		if (ImGui::Checkbox("GPU timestamps", &enabled)) gpu.setEnabled(enabled);
+		ImGui::TextDisabled("%s", gpu.status());
+		if (gpu.latest().serial)
+		{
+			for (size_t i = 0; i < kGpuPassCount; ++i)
+				if (gpu.latest().present[i])
+					ImGui::Text("%s: %.3f ms", kGpuPassNames[i], gpu.latest().ms[i]);
+			ImGui::TextDisabled("Pass intervals may overlap; do not sum them. Present wait is CPU-side.");
+			std::vector<float> ordered;
+			const int n = gpu.historyCount();
+			const int start = n < VkGpuProfiler::kHistorySize ? 0 : gpu.historyWrite();
+			for (int i = 0; i < n; ++i)
+				ordered.push_back(gpu.history()[(start + i) % VkGpuProfiler::kHistorySize]);
+			ImGui::PlotLines("##gpu", ordered.data(), n, 0, nullptr, 0.f, FLT_MAX, ImVec2(-1.f, 80.f));
+		}
 	}
 
 	// Worker jobs
@@ -921,6 +946,20 @@ void GameUI::drawBenchmarkReport(GameUIFrame &frame)
 		ImGui::EndTable();
 	}
 
+	ImGui::SeparatorText("GPU timestamps");
+	if (!r.gpuAvailable)
+		ImGui::TextDisabled("Unavailable: no completed GPU samples");
+	else
+	{
+		ImGui::Text("%llu samples | average %.3f ms", static_cast<unsigned long long>(r.gpuSamples), r.gpuAvgMs);
+		if (r.gpuPercentilesAvailable)
+			ImGui::Text("p95 %.3f ms | p99 %.3f ms", r.gpuP95Ms, r.gpuP99Ms);
+		else
+			ImGui::TextDisabled("p95/p99 unavailable (fewer than 100 samples)");
+		for (size_t i = 1; i < kGpuPassCount; ++i)
+			if (r.gpuPasses[i].count)
+				ImGui::Text("%s: %.3f ms", kGpuPassNames[i], r.gpuPasses[i].totalMs / r.gpuPasses[i].count);
+	}
 	ImGui::SeparatorText("CPU scopes (avg ms)");
 	if (ImGui::BeginTable("bm_sc", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 	{

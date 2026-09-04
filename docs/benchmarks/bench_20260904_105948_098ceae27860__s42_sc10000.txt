@@ -1,0 +1,46 @@
+ft_vox Benchmark Report
+=======================
+Score: 10000 / 10000  Grade: S
+Revision: 098ceae27860* (dirty tree at build)
+  git 098ceae27860  branch feat/82-gpu-timestamp-profiler  describe 098ceae-dirty
+  build UTC 2026-09-04T10:58:35Z
+Seed: 42  Duration: 5s  Warmup: 0s  Measured: 5.00107s  Frames: 980
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 4.99302  min 4.987  max 5.1271
+  p50 4.9922  p95 4.9966  p99 4.9981
+  avg FPS 200.28  1% low FPS 200.076
+  frames >16.7ms: 0  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.394543  Visibility 0.00387327
+  Acquire 0.0653359  Record 1.02228  MeshUpload 0.0546257
+  ImGui 0.0432418  Present 3.45818
+
+Worker jobs
+  TerrainGen  n=2385  avgMs=1.32654  totalMs=3163.79
+  MeshBuild   n=1767  avgMs=2.35665  totalMs=4164.2
+  MeshLOD     n=0  avgMs=0  totalMs=0
+
+GPU timestamp queries: available
+  samples=979 avgMs=0.903612
+  p95Ms=1.26669 p99Ms=1.49373
+  Uploads avgMs=0.013787
+  Shadow avgMs=0.0498908
+  Opaque avgMs=0.0966587
+  Overlays avgMs=0.000121332
+  Water avgMs=0.0691718
+  Sky avgMs=0.393768
+  Post avgMs=0.268501
+  ImGui avgMs=0.0115579
+  Delayed graphics-queue intervals; overlapping passes are not additive.
+Biome map: zoom=0 mode=scheduled (fixed center when enabled)
+  TerrainQueue n=2385 avgMs=0.0161312 totalMs=38.473
+  MeshQueue n=1767 avgMs=0.0136084 totalMs=24.046
+  BiomeMap n=0 avgMs=0 totalMs=0
+Peaks: chunks=490 draw=124 qLoad/Gen/Mesh=3304/1/4
+
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.

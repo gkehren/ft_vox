@@ -27,6 +27,10 @@ void Benchmark::requestStart()
 	m_elapsed = 0.f;
 	m_showReport = false;
 	m_report = {};
+	++m_gpuTag;
+	m_lastGpuSerial = 0;
+	m_gpuFrames.clear();
+	m_gpuPasses = {};
 	m_backgroundWork = {};
 	m_frameMs.clear();
 	m_sumStreaming = m_sumAcquire = m_sumRecord = m_sumImGui = m_sumPresent = 0;
@@ -152,6 +156,21 @@ void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcqu
 		++m_over33;
 }
 
+void Benchmark::sampleGpu(const GpuFrameSample &sample)
+{
+	if (m_phase != BenchmarkPhase::Running || !sample.serial ||
+		sample.serial == m_lastGpuSerial || sample.benchmarkTag != m_gpuTag || !sample.present[0])
+		return;
+	m_lastGpuSerial = sample.serial;
+	m_gpuFrames.push_back(sample.ms[0]);
+	for (size_t i = 0; i < kGpuPassCount; ++i)
+		if (sample.present[i])
+		{
+			++m_gpuPasses[i].count;
+			m_gpuPasses[i].totalMs += sample.ms[i];
+		}
+}
+
 void Benchmark::sampleBackgroundWork(const char *name, uint64_t count, double totalMs)
 {
 	if (m_phase != BenchmarkPhase::Running)
@@ -250,6 +269,21 @@ void Benchmark::finalize()
 	r.warmupSec = m_config.warmupSec;
 	r.measuredSec = std::max(0.f, m_elapsed - m_config.warmupSec);
 	r.frames = static_cast<int>(m_frameMs.size());
+	r.gpuSamples = m_gpuFrames.size();
+	r.gpuAvailable = r.gpuSamples > 0;
+	r.gpuPasses = m_gpuPasses;
+	if (r.gpuAvailable)
+	{
+		r.gpuAvgMs = static_cast<float>(m_gpuPasses[0].totalMs / r.gpuSamples);
+		r.gpuPercentilesAvailable = r.gpuSamples >= 100;
+		if (r.gpuPercentilesAvailable)
+		{
+			auto sorted = m_gpuFrames;
+			std::sort(sorted.begin(), sorted.end());
+			r.gpuP95Ms = percentileSorted(sorted, 0.95f);
+			r.gpuP99Ms = percentileSorted(sorted, 0.99f);
+		}
+	}
 
 	if (!m_frameMs.empty())
 	{
@@ -363,6 +397,20 @@ std::string Benchmark::formatReportText() const
 	  << "  totalMs=" << r.meshBuildTotalMs << "\n";
 	o << "  MeshLOD     n=" << r.meshLodJobs << "  avgMs=" << r.meshLodAvgMs
 	  << "  totalMs=" << r.meshLodTotalMs << "\n\n";
+	o << "GPU timestamp queries: " << (r.gpuAvailable ? "available" : "unavailable") << "\n";
+	if (r.gpuAvailable)
+	{
+		o << "  samples=" << r.gpuSamples << " avgMs=" << r.gpuAvgMs << "\n";
+		if (r.gpuPercentilesAvailable)
+			o << "  p95Ms=" << r.gpuP95Ms << " p99Ms=" << r.gpuP99Ms << "\n";
+		else
+			o << "  p95/p99 unavailable (fewer than 100 GPU samples)\n";
+		for (size_t i = 1; i < kGpuPassCount; ++i)
+			if (r.gpuPasses[i].count)
+				o << "  " << kGpuPassNames[i] << " avgMs="
+				  << r.gpuPasses[i].totalMs / r.gpuPasses[i].count << "\n";
+		o << "  Delayed graphics-queue intervals; overlapping passes are not additive.\n";
+	}
 	o << "Biome map: zoom=" << r.biomeMapZoom
 	  << " mode=" << (r.biomeMapSequential ? "sequential" : "scheduled")
 	  << " (fixed center when enabled)\n";

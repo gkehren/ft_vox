@@ -1,0 +1,35 @@
+ft_vox Benchmark Report
+=======================
+Score: 9983 / 10000  Grade: S
+Revision: 098ceae27860* (dirty tree at build)
+  git 098ceae27860  branch feat/82-gpu-timestamp-profiler  describe 098ceae-dirty
+  build UTC 2026-09-04T10:59:59Z
+Seed: 42  Duration: 5s  Warmup: 0s  Measured: 5.00002s  Frames: 803
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: on  PresentMode: FIFO
+
+Frame times (ms)
+  avg 6.07361  min 4.9915  max 24.2611
+  p50 6.0482  p95 6.3257  p99 6.6247
+  avg FPS 164.647  1% low FPS 150.95
+  frames >16.7ms: 1  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.402445  Visibility 0.00392267
+  Acquire 4.49213  Record 0.979295  MeshUpload 0.0636631
+  ImGui 0.0434011  Present 0.146726
+
+Worker jobs
+  TerrainGen  n=2366  avgMs=1.32995  totalMs=3146.65
+  MeshBuild   n=1757  avgMs=2.50077  totalMs=4393.85
+  MeshLOD     n=0  avgMs=0  totalMs=0
+
+GPU timestamp queries: unavailable
+Biome map: zoom=0 mode=scheduled (fixed center when enabled)
+  TerrainQueue n=2366 avgMs=0.0175507 totalMs=41.525
+  MeshQueue n=1757 avgMs=0.0181121 totalMs=31.823
+  BiomeMap n=0 avgMs=0 totalMs=0
+Peaks: chunks=492 draw=124 qLoad/Gen/Mesh=3314/2/5
+
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.
