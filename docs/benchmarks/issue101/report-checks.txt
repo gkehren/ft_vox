@@ -1,1 +1,15 @@
-PASS: all 27 gauge peaks >= current, pool balance, GPU/CPU aggregate sums, vector size/capacity, shadow cascade sum, disabled output, identical benchmark settings
+Reference report consistency checks
+Report: bench_20260904_135809_f95a5d9511e5_s42_sc9925.txt
+Revision f95a5d9 (clean HEAD), telemetry enabled, seed 42, 60s + 15s warmup
+
+PASS: all 27 gauge peaks >= current
+
+PASS: pool balance (capacity = acquired + free)
+
+PASS: gpu.live.bytes = component sum
+
+PASS: cpu.mesh.capacityBytes = component sum
+
+PASS: shadow cascade sum (shadow.0 + shadow.1 + shadow.2 = shadow.total)
+
+PASS: capture-local gauges (staging.slice.bytes, chunks.active, chunks.deferred) verified zero after capture reset; warmup staging high-water excluded from measurement (Registry unit test + real StagingRing VulkanResourceSmoke passage)

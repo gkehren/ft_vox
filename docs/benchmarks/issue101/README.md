@@ -7,61 +7,73 @@ The default orbit path and resource pack were used, with the biome map closed.
 
 ```powershell
 $env:FT_VOX_VALIDATION = '0'
-# Baseline: unmodified main at ed13e1dd6982
+# Legacy baseline: unmodified main at ed13e1dd6982
 ./build/Release/ft_vox.exe --seed 42 --benchmark 60 --benchmark-warmup 15 --vsync off
-# Instrumented branch: run each setting in a separate process
+# Instrumented reference: run each setting in a separate process
 $env:FT_VOX_TELEMETRY = '1' # repeat with '0'
 ./build/Release/ft_vox.exe --seed 42 --benchmark 60 --benchmark-warmup 15 --vsync off
 ```
 
-The baseline was built after creating the branch, before changing source, so
-its branch label is `feat/101-memory-workload-telemetry` but its clean revision
-is exactly `main` at `ed13e1dd6982`. The instrumented reports retain that base
-hash with the dirty marker and their actual build UTC. They must not be
-mistaken for measurements of the unmodified commit.
+## Reference lineage
 
-- [Complete unmodified main baseline](main-baseline.txt)
-- [Complete instrumented reference](telemetry-enabled.txt)
-- [Complete disabled-instrumentation control](telemetry-disabled.txt)
+| Role | Revision | Reports |
+| --- | --- | --- |
+| Legacy performance comparison (unmodified main) | `ed13e1dd6982` | [main-baseline.txt](main-baseline.txt) |
+| **Optimization telemetry reference (current)** | `f95a5d9` clean HEAD | [telemetry-enabled.txt](telemetry-enabled.txt) / [telemetry-disabled.txt](telemetry-disabled.txt) |
 
-| Run | Average frame ms | Average Record ms | Average MeshBuild ms/job | Average GPU ms |
-| --- | ---: | ---: | ---: | ---: |
-| Unmodified main | 1.60507 | 0.317011 | 2.32276 | 1.42449 |
-| Instrumented branch, enabled | 1.82319 | 0.375431 | 2.83370 | 1.62070 |
-| Same binary, disabled | 1.82874 | 0.374363 | 2.83077 | 1.63932 |
+The legacy baseline was built after creating the branch, before changing
+source, so its branch label is `feat/101-memory-workload-telemetry` but its
+clean revision is exactly `main` at `ed13e1dd6982`. It keeps the dirty
+instrumented-build marker and is retained for historical comparison only.
 
-Enabled and disabled measurements are close in this pair (about 0.1% difference
-in mean MeshBuild time). Both are slower than the earlier main run, including
-GPU and terrain generation time. That difference cannot be attributed to
-telemetry from these measurements; the pair is a control, not a statistically
-controlled overhead benchmark.
+The current reference pair was rebuilt and rerun from the committed clean
+`f95a5d9` HEAD (no dirty marker) after the capture-local gauge fix, using the
+same binary for both telemetry settings. Future optimization issues
+(#102+) should compare against this pair, because they will read the metrics
+this instrumentation publishes.
 
-Both main and instrumented runs reached 4,630 active chunks at peak and 1,569
-draw-list entries. The instrumented run ended at 4,620 active chunks; end-of-run
-stream logs showed approximately 4,620 active chunks with empty or nearly empty
-load/generation/mesh queues. This captures sustained streaming after 15 seconds
-of warmup, rather than a five-second startup-only profile. The orbit continues
-to replace chunks, so it is not a static-camera or zero-allocation workload.
+| Run | Average frame ms | Average Record ms | Average MeshBuild ms/job |
+| --- | ---: | ---: | ---: |
+| Unmodified main (`ed13e1d`) | 1.60507 | 0.317011 | 2.32276 |
+| `f95a5d9`, telemetry enabled | 1.59726 | 0.311557 | 2.27726 |
+| Same binary, telemetry disabled | 1.59867 | 0.311360 | 2.28611 |
+
+Enabled and disabled measurements are close in this pair (about 0.4%
+difference in mean MeshBuild time). The instrumented pair is not slower than
+the legacy baseline here, but that comparison spans different commits and is
+not a controlled telemetry-overhead measurement; the enabled/disabled pair is
+the control.
+
+The runs reached 4,635 peak acquired chunks (`chunks.active` peak 4,630, an
+end-of-frame sample) with empty or nearly empty load/generation/mesh queues at
+the end. This captures sustained streaming after 15 seconds of warmup, rather
+than a five-second startup-only profile. The orbit continues to replace
+chunks, so it is not a static-camera or zero-allocation workload.
 
 ## Memory/workload reference with telemetry enabled
 
 | Quantity | Observed value |
 | --- | ---: |
-| Pool capacity / peak acquired / peak deferred chunks | 8,894 / 4,643 / 24 |
+| Pool capacity / peak acquired / peak deferred chunks | 8,894 / 4,635 / 16 |
 | Resident voxel capacity | 555.875 MiB |
 | Retained shell capacity | 709.026 MiB |
-| Peak combined retained CPU mesh capacity | 1,300.041 MiB |
-| Peak live GPU mesh bytes | 598.625 MiB |
-| Peak retired GPU mesh bytes / buffers | 4.214 MiB / 96 |
-| Mesh buffer creations / destructions in measurement | 92,898 / 91,272 |
-| Successful asynchronous chunk uploads | 32,192 |
-| Staging slice peak / failures / deferred uploads | 0.784 MiB / 0 / 0 |
-| Average opaque / water / total shadow draws per frame | 1,488.39 / 867.661 / 651.724 |
+| Peak combined retained CPU mesh capacity | 1,301.376 MiB |
+| Peak live GPU mesh bytes | 598.738 MiB |
+| Peak retired GPU mesh bytes / buffers | 2.637 MiB / 66 |
+| Mesh buffer creations / destructions in measurement | 92,272 / 91,306 |
+| Successful asynchronous chunk uploads | 31,938 |
+| Staging slice peak / failures / deferred uploads | 0.684 MiB / 0 / 0 |
+| Average opaque / water / total shadow draws per frame | 1,527.20 / 881.21 / 649.84 |
 
-The mesh stage totals were skylight 14,922.6 ms, block light 3,171.44 ms,
-occupancy 569.93 ms and the fused face/greedy/AO/output loop 23,087.9 ms,
-over 14,737 completed full mesh jobs. LOD accounted for 17,454 jobs and
-576.679 ms. These are summed worker time, not elapsed wall time.
+Staging and chunk-manager gauges are capture-local (see below): these peaks
+describe measured frames only, so the warmup staging high-water mark no longer
+inflates them.
+
+The mesh stage totals were skylight 11,549.5 ms, block light 2,420.56 ms,
+occupancy 447.472 ms and the fused face/greedy/AO/output loop 19,129.3 ms,
+over 14,735 completed full mesh jobs. LOD accounted for 17,203 jobs and
+452.26 ms. These are summed worker time, not elapsed wall time; mesh timing
+stops before telemetry ownership publication.
 
 The full report includes each individual CPU vector size/capacity, GPU mesh
 class, cascade draw count and output count. See
@@ -71,15 +83,16 @@ and capacity peaks are measured at publication boundaries.
 
 ## Validation
 
-The final Release build passed. [CTest passed 14/14 tests in 42.08 seconds](ctest.txt).
+The final Release build passed. [CTest passed 14/14 tests in 41.84 seconds](ctest.txt).
 [Report consistency checks](report-checks.txt) passed for all 27 gauge peaks,
-CPU/GPU aggregate sums, vector size/capacity relationships, pool balance,
-shadow cascade totals, disabled output and fixed benchmark settings. Tests
-cover worker concurrency and stale capture epochs, repeated resets, disabled
-instrumentation, real chunk moves/retained storage, real Vulkan allocation
-retirement and staging exhaustion. The existing CPU/GPU profiler tests remain
-enabled. Vulkan's negative diagnostic test intentionally reports an error and
-must exit unsuccessfully; CTest recognizes that expected result.
+CPU/GPU aggregate sums, pool balance, shadow cascade totals and the
+capture-local reset property. Tests cover worker concurrency and stale capture
+epochs, repeated resets, capture-local gauge exclusion (Registry unit test and
+a real StagingRing warmup-to-measurement passage under Vulkan), disabled
+instrumentation, real chunk moves/retained storage and real Vulkan allocation
+retirement. The existing CPU/GPU profiler tests remain enabled. Vulkan's
+negative diagnostic test intentionally reports an error and must exit
+unsuccessfully; CTest recognizes that expected result.
 
 These are individual development-machine runs, not an overhead confidence
 interval. No claim of negligible overhead or renderer speedup is made from
