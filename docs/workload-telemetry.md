@@ -19,11 +19,12 @@ and peak values. Events expose interval totals and averages per measured frame.
 | Fields | Meaning |
 | --- | --- |
 | `voxel.bytes` | Resident voxel storage capacity owned by active, voxel-backed chunks (free pool slots carry 0) |
+| `voxel.pool.*` | VoxelStoragePool state sampled once per measured frame: `capacity`/`active`/`free` count 64 KiB blocks and `capacityBytes` covers blocks retained by the pool including the free list — the high-water reuse footprint. `voxel.pool.growEvents` counts allocations beyond the free list in the interval (steady-state streaming should be near zero) |
 | `shell.sizeBytes`, `shell.capacityBytes` | Logical shell data and retained allocation; clearing a shell does not free its capacity |
 | `cpu.{opaque,water}.{vertex,index}.*` | Each CPU mesh vector's logical size and retained capacity |
 | `cpu.mesh.capacityBytes` | Combined retained mesh capacity, with its own simultaneous peak |
 | `column.bytes`, `occupancy.bytes` | Inline biome/color/height arrays and occupancy bitsets, including free chunks |
-| `pool.*` | Capacity, acquired and free chunks; rejected acquisitions are interval events |
+| `pool.*` | ChunkPool state only: capacity, acquired and free chunk slots; rejected acquisitions are interval events (VoxelPool blocks are reported by `voxel.pool.*`) |
 | `chunks.active`, `chunks.deferred` | End-of-measured-frame manager counts, including the deferred chunk-release backlog |
 | `gpu.{opaque,water}.{vertex,index}.bytes` | Requested buffer bytes from successful mesh VMA allocations until retirement or immediate destruction |
 | `gpu.live.bytes` | Sum of those four live gauges, with its own simultaneous peak |

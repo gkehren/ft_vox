@@ -88,28 +88,15 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     visible = other.visible;
     state.store(other.state.load());
 
-    // If destination has a different pool than source, return source storage to its pool
-    // and re-acquire from destination pool. Otherwise just transfer pointer.
-    if (m_voxelPool != other.m_voxelPool)
-    {
-      if (other.m_storage)
-      {
-        VoxelStorage *otherStorage = other.m_storage;
-        other.m_storage = nullptr;
-        m_storage = m_voxelPool->acquire();
-        std::copy(otherStorage->voxels.begin(), otherStorage->voxels.end(), m_storage->voxels.begin());
-        other.m_voxelPool->release(otherStorage);
-      }
-      else
-      {
-        m_storage = nullptr;
-      }
-    }
-    else
-    {
-      m_storage = other.m_storage;
-      other.m_storage = nullptr;
-    }
+    // A move transfers complete ownership (issue #112 review): the voxel
+    // storage and the pool that owns it travel together. The destination
+    // may end up referencing the source's VoxelPool — re-acquiring from
+    // the destination pool here would put an allocation and a 64 KiB copy
+    // inside a noexcept move, and zeroing the source before acquiring
+    // would mutilate it if that allocation threw.
+    m_voxelPool = other.m_voxelPool;
+    m_storage = other.m_storage;
+    other.m_storage = nullptr;
 
     activeVoxels = std::move(other.activeVoxels);
     neighborShellVoxels = std::move(other.neighborShellVoxels);

@@ -815,6 +815,19 @@ void Engine::sampleBenchmarkFrame()
     auto& telemetry = telemetry::registry();
     telemetry.set(telemetry::ActiveChunks, chunkManager ? chunkManager->chunkCount() : 0);
     telemetry.set(telemetry::DeferredChunks, chunkManager ? chunkManager->deferredReleaseCount() : 0);
+    // voxel.pool.* gauges are published here on the main thread as a
+    // coherent per-frame snapshot (issue #112 review): the VoxelPool itself
+    // stays a low-level thread-safe component without telemetry in its
+    // hot path. capacityBytes covers blocks retained by the pool including
+    // the free list, i.e. the high-water reuse footprint.
+    if (chunkManager && chunkManager->getChunkPool())
+    {
+        const size_t voxelCap = chunkManager->getChunkPool()->voxelStorageCapacity();
+        telemetry.set(telemetry::VoxelPoolCapacity, voxelCap);
+        telemetry.set(telemetry::VoxelPoolActive, chunkManager->getChunkPool()->voxelStorageActive());
+        telemetry.set(telemetry::VoxelPoolFree, chunkManager->getChunkPool()->voxelStorageFree());
+        telemetry.set(telemetry::VoxelPoolCapacityBytes, voxelCap * sizeof(VoxelStorage));
+    }
 	m_benchmark.sampleFrame(
 		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),
 		prof.lastScopeMs("Record"), prof.lastScopeMs("ImGui"), prof.lastScopeMs("Present"),

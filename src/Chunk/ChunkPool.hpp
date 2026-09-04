@@ -68,6 +68,9 @@ private:
 	std::array<size_t, 3> m_telemetry{};
 	void growUnlocked(size_t addCount); // caller holds m_mutex
 
+	// Must be declared before m_storage so it outlives all Chunk destructors
+	// (members destroy in reverse order): retiring chunks release their
+	// VoxelStorage back into this pool.
 	VoxelPool m_voxelPool;
 
 	/// All pool-owned chunks; unique_ptr keeps addresses stable across vector growth.

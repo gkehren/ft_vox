@@ -5,6 +5,7 @@
 // pooled-style storage across reset/regenerate cycles - with the
 // activeVoxels cache staying in sync and no capacity churn.
 #include <Chunk/Chunk.hpp>
+#include <Chunk/ChunkManager.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 
@@ -343,23 +344,76 @@ int main(int argc, char **argv)
 		CHECK(emptyChunk.getVoxel(0, 0, 0).type == STONE, "read back stone block");
 	}
 
-	// 6) Cross-pool move-assignment safety.
+	// 6) Cross-pool move semantics (issue #112 review): a move transfers the
+	// storage together with the pool that owns it — O(1), noexcept, no
+	// reallocation and no uninitialized reads. The destination therefore
+	// ends up referencing the source's pool.
 	{
 		VoxelPool poolA;
 		VoxelPool poolB;
+		const int crossSeed = 2024;
+		TerrainGenerator crossGen(crossSeed);
+		const ChunkData reference = crossGen.generateChunk(10, 0);
+
 		Chunk chunkA(glm::vec3(10.0f, 0.0f, 0.0f), ChunkState::UNLOADED, &poolA);
 		Chunk chunkB(glm::vec3(20.0f, 0.0f, 0.0f), ChunkState::UNLOADED, &poolB);
 		CHECK(chunkA.prepareVoxelStorageForGeneration(), "prepare chunkA storage");
+		chunkA.generateTerrain(crossGen);
 		CHECK(poolA.activeCount() == 1, "poolA active count 1");
 		CHECK(poolB.activeCount() == 0, "poolB active count 0");
 
 		chunkB = std::move(chunkA);
-		CHECK(poolA.activeCount() == 0, "poolA active count 0 after cross-pool move");
-		CHECK(poolB.activeCount() == 1, "poolB active count 1 after cross-pool move");
+		CHECK(chunkB.getVoxelPool() == &poolA, "destination adopts source pool");
+		CHECK(poolA.activeCount() == 1, "poolA active count 1 after cross-pool move");
+		CHECK(poolB.activeCount() == 0, "poolB active count 0 after cross-pool move");
 		CHECK(!ChunkStateProbe::hasStorage(chunkA), "chunkA lost storage");
-		CHECK(ChunkStateProbe::hasStorage(chunkB), "chunkB has storage in poolB");
+		CHECK(ChunkStateProbe::hasStorage(chunkB), "chunkB owns the transferred storage");
+		CHECK(std::memcmp(ChunkStateProbe::voxels(chunkB).data(), reference.voxels.data(),
+						  CHUNK_VOLUME * sizeof(Voxel)) == 0,
+			  "cross-pool move carries the generated content, not uninitialized bytes");
 		chunkB.reset(glm::vec3(0.0f));
-		CHECK(poolB.activeCount() == 0, "poolB active count 0 after reset");
+		CHECK(poolA.activeCount() == 0, "storage returns to the traveled pool on reset");
+	}
+
+	// 6b) Cross-pool move-construction: same transfer model, plus destructor
+	// returning the storage to the pool the chunk references.
+	{
+		VoxelPool poolA;
+		VoxelPool poolB;
+		Chunk chunkA(glm::vec3(0.0f), ChunkState::UNLOADED, &poolA);
+		CHECK(chunkA.prepareVoxelStorageForGeneration(), "prepare chunkA storage (move-ctor)");
+		const void *storage = ChunkStateProbe::voxels(chunkA).data();
+		Chunk chunkB(std::move(chunkA));
+		CHECK(chunkB.getVoxelPool() == &poolA, "move-ctor adopts source pool");
+		CHECK(ChunkStateProbe::voxels(chunkB).data() == storage, "move-ctor keeps exact storage");
+		CHECK(!ChunkStateProbe::hasStorage(chunkA), "source left without storage");
+		CHECK(poolA.activeCount() == 1, "poolA active count 1 during move-ctor");
+		{
+			Chunk consumer(std::move(chunkB));
+			CHECK(poolA.activeCount() == 1, "storage follows the second move");
+		}
+		CHECK(poolA.activeCount() == 0, "destruction returns storage to the owning pool");
+		(void)poolB;
+	}
+
+	// 6c) ChunkPool destructor must retire chunks that still hold live
+	// voxel storage — no use-after-free, no double release.
+	{
+		TerrainGenerator dtorGen(9);
+		{
+			ChunkPool pool(8);
+			Chunk *c = pool.acquire(glm::vec3(0.0f));
+			CHECK(c != nullptr, "destructor-test acquisition succeeds");
+			if (c)
+			{
+				CHECK(c->prepareVoxelStorageForGeneration(), "destructor-test prepare succeeds");
+				c->generateTerrain(dtorGen);
+			}
+			// Intentionally no release: the ChunkPool destructor retires
+			// every chunk and returns voxel storage through the VoxelPool,
+			// which must outlive all Chunk destructors.
+		}
+		std::cout << "chunk pool destructor completed cleanly with live storage\n";
 	}
 
 	// 7) Steady-state VoxelPool recycling high-water mark.
@@ -399,6 +453,23 @@ int main(int argc, char **argv)
 		CHECK(vp.activeCount() == 0, "concurrent stress ends with 0 active");
 		CHECK(vp.capacity() == vp.freeCount(), "capacity matches free list count");
 		CHECK(vp.capacity() <= static_cast<size_t>(kThreads), "capacity bounded by thread count");
+	}
+
+	// 9) Synchronous bootstrap contract (issue #112): the ChunkManager
+	// helper prepares storage on the calling thread, generates, and returns
+	// the chunk to the pool when preparation fails.
+	{
+		ChunkPool pool(4);
+		ChunkManager manager(&gen, nullptr, &pool);
+		Chunk *chunk = pool.acquire(glm::vec3(0.0f));
+		CHECK(chunk != nullptr, "bootstrap acquisition succeeds");
+		CHECK(manager.prepareAndGenerateChunk(chunk, gen), "bootstrap prepare+generate succeeds");
+		CHECK(chunk->getState() == ChunkState::GENERATED, "bootstrap chunk generated");
+		CHECK(ChunkStateProbe::hasStorage(*chunk), "bootstrap chunk owns voxel storage");
+		CHECK(pool.voxelStorageActive() == 1, "bootstrap storage accounted active");
+		CHECK(!manager.prepareAndGenerateChunk(nullptr, gen), "null chunk rejected");
+		pool.release(chunk);
+		CHECK(pool.voxelStorageActive() == 0, "bootstrap release returns storage");
 	}
 
 	if (g_fails != 0)

@@ -18,7 +18,9 @@ enum Gauge : size_t {
     WaterIndexBytes, WaterIndexCapacity, ColumnBytes, OccupancyBytes,
     GpuOpaqueVertex, GpuOpaqueIndex, GpuWaterVertex, GpuWaterIndex,
     RetiredBytes, RetiredBuffers, PoolCapacity, PoolAcquired, PoolFree,
-    ActiveChunks, DeferredChunks, StagingUsed, CpuMeshCapacity, GpuLiveBytes, GaugeCount
+    ActiveChunks, DeferredChunks, StagingUsed, CpuMeshCapacity, GpuLiveBytes,
+    VoxelPoolCapacity, VoxelPoolActive, VoxelPoolFree, VoxelPoolCapacityBytes,
+    GaugeCount
 };
 inline constexpr const char* gaugeNames[] = {
     "voxel.bytes", "shell.sizeBytes", "shell.capacityBytes",
@@ -30,18 +32,20 @@ inline constexpr const char* gaugeNames[] = {
     "gpu.opaque.index.bytes", "gpu.water.vertex.bytes", "gpu.water.index.bytes",
     "gpu.retired.bytes", "gpu.retired.buffers", "pool.capacity", "pool.acquired",
     "pool.free", "chunks.active", "chunks.deferred", "staging.slice.bytes",
-    "cpu.mesh.capacityBytes", "gpu.live.bytes"
+    "cpu.mesh.capacityBytes", "gpu.live.bytes",
+    "voxel.pool.capacity", "voxel.pool.active", "voxel.pool.free",
+    "voxel.pool.capacityBytes"
 };
 enum Event : size_t {
     AllocCreated, AllocDestroyed, PoolRejected, UploadChunks, UploadVertexBytes,
     UploadIndexBytes, UploadDeferred, StagingFailures, OpaqueDraws, WaterDraws,
-    Shadow0, Shadow1, Shadow2, EventCount
+    Shadow0, Shadow1, Shadow2, VoxelPoolGrow, EventCount
 };
 inline constexpr const char* eventNames[] = {
     "mesh.allocations.created", "mesh.allocations.destroyed", "pool.rejected",
     "upload.chunks", "upload.vertexBytes", "upload.indexBytes", "upload.deferred",
     "staging.failures", "draws.opaque", "draws.water", "draws.shadow.0",
-    "draws.shadow.1", "draws.shadow.2"
+    "draws.shadow.1", "draws.shadow.2", "voxel.pool.growEvents"
 };
 enum Stage : size_t { Skylight, Blocklight, Occupancy, FacesGreedyAO, Lod, StageCount };
 inline constexpr const char* stageNames[] = {"skylight", "blocklight", "occupancy", "facesGreedyAO", "LOD"};
