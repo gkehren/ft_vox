@@ -143,6 +143,7 @@ set(FT_VOX_VULKAN_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkShader.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkResourceSmoke.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/StagingRing.cpp
+    ${CMAKE_SOURCE_DIR}/src/Vulkan/MeshArena.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/GpuResourceRetire.cpp
 )
 

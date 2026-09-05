@@ -7,6 +7,7 @@
 #include "Renderer/OverlayRenderer.hpp"
 
 #include <volk.h>
+#include <array>
 #include <vector>
 #include <cstdint>
 
@@ -24,9 +25,27 @@ public:
 	void record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet set0, VkDescriptorSet set1,
 				VkPipelineLayout layout, AllocatedImage &hdr, AllocatedImage &depth,
 				const std::vector<Chunk *> &chunks, OverlayRenderer &overlays,
-				const VkClearColorValue &clearColor, VkGpuProfiler *gpu = nullptr);
+				const VkClearColorValue &clearColor, uint32_t frameIndex, const MeshArenas &arenas,
+				VkGpuProfiler *gpu = nullptr);
 
 private:
+	void createIndirectBuffers();
+	void destroyIndirectBuffers();
+
+	// Host-written indirect command storage, one slot per frame in flight
+	// (issue #109): commands change every frame, so the CPU rewrites its
+	// slot while the previous frame's copy is still in flight elsewhere.
+	static constexpr uint32_t kMaxIndirectCommands = 65536;
+	struct IndirectBatch
+	{
+		AllocatedBuffer buf{};
+		void *mapped{nullptr};
+	};
 	VkContext *m_context{nullptr};
 	VkPipeline m_pipeline{VK_NULL_HANDLE};
+	std::array<IndirectBatch, 2> m_indirect{};
+	// Reused per-frame scratch: collecting ~15k commands must not
+	// reallocate every frame (issue #109).
+	std::vector<Chunk::IndirectDraw> m_scratch;
+	uint32_t m_debugFrames{0};
 };

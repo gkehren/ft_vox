@@ -43,6 +43,7 @@ void WorldRenderer::shutdown()
 	if (!m_context)
 		return;
 	m_context->waitIdle();
+	m_arenas.shutdown();
 	destroyPipelines();
 	destroyFrameUbos();
 	m_sky.shutdown();
@@ -267,10 +268,11 @@ TextureAtlasLoadReport WorldRenderer::reloadResourcePack(const std::string &reso
 }
 
 void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm,
-						 const std::string &resourcePackRoot)
+						 GpuResourceRetire &retire, const std::string &resourcePackRoot)
 {
 	m_context = &context;
 	m_imm = &imm;
+	m_arenas.init(context.getAllocator(), retire, sizeof(Vertex));
 	m_lightDir = glm::normalize(glm::vec3(0.4f, 1.0f, 0.2f));
 
 	m_textures.initialize(context, imm, resourcePackRoot);
@@ -385,19 +387,19 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 	{
 		PROFILE_SCOPE("Shadow");
 		if (gpu) gpu->beginPass(cmd, GpuPass::Shadow);
-		m_shadow.record(cmd, shadowChunks, m_cascadeMatrices, m_time);
+		m_shadow.record(cmd, frameIndex, shadowChunks, m_cascadeMatrices, m_time, m_arenas);
 		if (gpu) gpu->endPass(cmd, GpuPass::Shadow);
 	}
 	{
 		PROFILE_SCOPE("Scene");
 		m_opaque.record(cmd, extent, set0, m_set1, m_pipelineLayout, m_post.hdrColor(), m_post.sceneDepth(), chunks,
-						m_overlays, clearColor, gpu);
+						m_overlays, clearColor, frameIndex, m_arenas, gpu);
 	}
 	{
 		const auto *ubo = static_cast<const FrameUBO *>(m_frameUbos[frameIndex].uboMapped);
 		if (gpu) gpu->beginPass(cmd, GpuPass::Water);
-		m_water.record(cmd, extent, set0, m_set1, m_set2Water, m_waterPipelineLayout, m_post.hdrColor(),
-					   m_post.sceneDepth(), chunks, glm::vec3(ubo->viewPos));
+		m_water.record(cmd, frameIndex, extent, set0, m_set1, m_set2Water, m_waterPipelineLayout, m_post.hdrColor(),
+					   m_post.sceneDepth(), chunks, glm::vec3(ubo->viewPos), m_arenas);
 		if (gpu) gpu->endPass(cmd, GpuPass::Water);
 	}
 	{
