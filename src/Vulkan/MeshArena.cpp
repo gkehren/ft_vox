@@ -245,17 +245,16 @@ MeshArena::Metrics MeshArena::metrics() const
 	return m;
 }
 
-void MeshArenas::init(VmaAllocator allocator, GpuResourceRetire &retire, uint32_t vertexAlignment)
+void MeshArenas::init(VmaAllocator allocator, GpuResourceRetire &retire, uint32_t vertexAlignment,
+	                  VkDeviceSize vertexPageSize, VkDeviceSize indexPageSize)
 {
-	constexpr VkDeviceSize kVertexPageSize = 128ull * 1024ull * 1024ull; // 128 MiB
-	constexpr VkDeviceSize kIndexPageSize = 64ull * 1024ull * 1024ull;	 // 64 MiB
-	opaqueVertex.init(allocator, retire, kVertexPageSize,
+	opaqueVertex.init(allocator, retire, vertexPageSize,
 					  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexAlignment, telemetry::GpuOpaqueVertex);
-	opaqueIndex.init(allocator, retire, kIndexPageSize,
+	opaqueIndex.init(allocator, retire, indexPageSize,
 					 VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sizeof(uint32_t), telemetry::GpuOpaqueIndex);
-	waterVertex.init(allocator, retire, kVertexPageSize,
+	waterVertex.init(allocator, retire, vertexPageSize,
 					 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexAlignment, telemetry::GpuWaterVertex);
-	waterIndex.init(allocator, retire, kIndexPageSize,
+	waterIndex.init(allocator, retire, indexPageSize,
 					VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sizeof(uint32_t), telemetry::GpuWaterIndex);
 }
 

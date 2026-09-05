@@ -18,6 +18,7 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Vulkan/MeshArena.hpp>
 #include <Vulkan/StagingRing.hpp>
+#include <Vulkan/VkCommands.hpp>
 #include <Vulkan/GpuResourceRetire.hpp>
 #include <Vulkan/VkAllocator.hpp>
 #include <volk.h>
@@ -232,7 +233,12 @@ int main()
 	retire.init(vk.allocator.handle(), 2);
 	retire.beginFrame(0);
 	MeshArenas arenas;
-	arenas.init(vk.allocator.handle(), retire, sizeof(Vertex));
+	// Small pages: the spawn e2e block below then spans MULTIPLE pages per
+	// stream, exercising the page-pair grouping of the indirect path.
+	arenas.init(vk.allocator.handle(), retire, sizeof(Vertex),
+	            2ull * 1024ull * 1024ull, 1ull * 1024ull * 1024ull);
+	ImmediateCommands imm;
+	imm.init(vk.device, vk.queue, vk.queueFamily);
 
 	{
 		ChunkPool chunkPool(16);
@@ -449,6 +455,75 @@ int main()
 					cmdSum += d.cmd.indexCount;
 				CHECK(cmdSum == indexSum,
 					  "cow: merged commands still cover every live index");
+				std::cerr << "  dbg cow: liveSections=" << liveSections
+				          << " commands=" << cmds.size() << std::endl;
+				// Contiguity audit of the section ranges (repacked chunk):
+				bool contiguous = true;
+				uint32_t prevVEnd = 0, prevIEnd = 0;
+				bool firstSeen = false;
+				for (int s = 0; s < 16; ++s)
+				{
+					const uint32_t vsz = ChunkStateProbe::slotVSz(*chunk, s);
+					const uint32_t isz = ChunkStateProbe::slotISz(*chunk, s);
+					if (vsz == 0 && isz == 0)
+						continue;
+					const uint32_t voff = ChunkStateProbe::slotVOff(*chunk, s);
+					const uint32_t ioff = ChunkStateProbe::slotIOff(*chunk, s);
+					if (firstSeen)
+					{
+						if (voff != prevVEnd || ioff != prevIEnd)
+							contiguous = false;
+					}
+					prevVEnd = voff + vsz;
+					prevIEnd = ioff + isz;
+					firstSeen = true;
+				}
+				std::cerr << "  dbg cow: ranges contiguous=" << (contiguous ? "yes" : "no")
+				          << std::endl;
+				// Strict chain validity: each command must start at a slot's
+				// offset, and every slot it continues past must be exact
+				// (used == reserved) with the next slot contiguous - i.e. no
+				// command may ever draw across a slot's slack.
+				{
+					struct Range
+					{
+						uint32_t off, sz, used;
+					};
+					std::vector<Range> slots;
+					for (int s2 = 0; s2 < 16; ++s2)
+						if (ChunkStateProbe::slotIUsed(*chunk, s2) != 0)
+							slots.push_back({ChunkStateProbe::slotIOff(*chunk, s2),
+							                 ChunkStateProbe::slotISz(*chunk, s2),
+							                 ChunkStateProbe::slotIUsed(*chunk, s2)});
+					std::sort(slots.begin(), slots.end(),
+					          [](const Range &a, const Range &b) { return a.off < b.off; });
+					bool valid = true;
+					for (const auto &d : cmds)
+					{
+						uint32_t pos = d.cmd.firstIndex * sizeof(uint32_t);
+						const uint32_t end = pos + d.cmd.indexCount * sizeof(uint32_t);
+						for (size_t k = 0; k < slots.size() && pos < end; ++k)
+						{
+							if (slots[k].off != pos)
+								continue;
+							const uint32_t usedEnd = pos + slots[k].used;
+							if (usedEnd >= end)
+							{
+								pos = end;
+								break;
+							}
+							// The command continues past this slot: it must be
+							// exact and the next slot must be contiguous.
+							if (slots[k].used != slots[k].sz)
+								valid = false;
+							pos = usedEnd;
+						}
+						if (pos != end)
+							valid = false; // draw ends mid-slot (slack tail)
+					}
+					CHECK(valid,
+					      "cow: no command draws across an in-place shrink's slack");
+				}
 				bool pagesValid = true;
 				for (const auto &d : cmds)
 					pagesValid = pagesValid &&
@@ -506,11 +581,15 @@ int main()
 			staging.beginFrame(0);
 			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
 				  "cow: drained-section upload");
-			CHECK(ChunkStateProbe::slotISz(*chunk, target) > 0,
-				  "cow: in-place rebuild keeps the section's reservation");
+			// The drain usually arms every section (light range over 4096
+			// voxel edits), so this upload typically REPACKS and frees the
+			// drained section's reservation. Either way the section stays
+			// consistent for the final removal below.
+			const bool hadReservation = ChunkStateProbe::slotISz(*chunk, target) > 0;
 
-			// Now remove the last voxel: a small partial upload. The emptied
-			// section keeps its reservation (used extents drop to zero).
+			// Now remove the last voxel: a small partial upload. An emptied
+			// section keeps its reservation when one existed (used extents
+			// drop to zero); otherwise it simply has no range.
 			chunk->setVoxel(static_cast<uint32_t>(voxels.back().first.x),
 			                static_cast<uint32_t>(voxels.back().first.y),
 			                static_cast<uint32_t>(voxels.back().first.z), AIR);
@@ -527,8 +606,11 @@ int main()
 				  "cow: emptied-section upload");
 			CHECK(ChunkStateProbe::slotICount(*chunk, target) == 0,
 				  "cow: emptied slot carries no indices");
-			CHECK(ChunkStateProbe::slotISz(*chunk, target) > 0,
-				  "cow: emptied slot keeps its reservation");
+			if (hadReservation)
+			{
+				CHECK(ChunkStateProbe::slotISz(*chunk, target) > 0,
+					  "cow: emptied slot keeps its reservation");
+			}
 			CHECK(vk.flush(), "cow: emptied submit");
 
 			// Full rebuild: the repack re-allocates every section; the
@@ -540,6 +622,7 @@ int main()
 			CHECK(ChunkStateProbe::slotEmpty(*chunk, target),
 				  "cow: full repack drops the reservation of an emptied section");
 			CHECK(vk.flush(), "cow: post-clear repack submit");
+
 
 			// Reactivation: a fresh range is allocated (reservation was
 			// dropped) and the draw count reflects the new section.
@@ -563,7 +646,337 @@ int main()
 		}
 	}
 
+	// Imm-path (spawn/bootstrap) content verification: uploadToGPU with
+	// ImmediateCommands must land byte-exact section payloads in the arenas.
+	{
+		ChunkPool chunkPool3(8);
+		TerrainGenerator gen3(42);
+		ChunkManager manager3(&gen3, nullptr, &chunkPool3);
+		Camera cam3(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings3;
+		manager3.updateStreaming(cam3, settings3);
+		manager3.processChunkLoading(64);
+		Chunk *chunk = manager3.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		CHECK(chunk != nullptr, "imm: chunk registered");
+		if (chunk)
+		{
+			CHECK(manager3.prepareAndGenerateChunk(chunk, gen3), "imm: prepare+generate");
+			CHECK(chunk->generateMesh(), "imm: mesh publishes");
+			MeshBuildResult *r = ChunkStateProbe::pending(*chunk);
+			std::vector<SectionMeshPayload> cpu(r->sections.begin(), r->sections.end());
+			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+
+			// Read back every section's used vertex/index bytes from the
+			// arena pages and compare against the CPU payloads.
+			int badSections = 0;
+			for (int sec = 0; sec < 16; ++sec)
+			{
+				const uint32_t vUsed = ChunkStateProbe::slotVUsed(*chunk, sec);
+				const uint32_t iUsed = ChunkStateProbe::slotIUsed(*chunk, sec);
+				if (vUsed == 0 && iUsed == 0)
+					continue;
+				if (vUsed != cpu[static_cast<size_t>(sec)].opaqueVertices.size() * sizeof(Vertex) ||
+				    iUsed != cpu[static_cast<size_t>(sec)].opaqueIndices.size() * sizeof(uint32_t))
+				{
+					++badSections;
+					continue;
+				}
+				// vertex readback
+				{
+					AllocatedBuffer &page =
+					    arenas.opaqueVertex.pageBufferRef(ChunkStateProbe::slotVPage(*chunk, sec));
+					std::vector<uint8_t> got = [&]
+					{
+						std::vector<uint8_t> out(static_cast<size_t>(vUsed), 0);
+						AllocatedBuffer host = createBuffer(
+						    vk.allocator.handle(), vUsed, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+						    VMA_MEMORY_USAGE_AUTO,
+						    VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+						        VMA_ALLOCATION_CREATE_MAPPED_BIT);
+						VkBufferCopy c{};
+						c.srcOffset = ChunkStateProbe::slotVOff(*chunk, sec);
+						c.size = vUsed;
+						vkCmdCopyBuffer(vk.cmd, page.buffer, host.buffer, 1, &c);
+						CHECK(vk.flush(), "imm readback submit");
+						vmaInvalidateAllocation(vk.allocator.handle(), host.allocation, 0,
+						                        VK_WHOLE_SIZE);
+						void *p2 = mapBuffer(vk.allocator.handle(), host);
+						std::memcpy(out.data(), p2, static_cast<size_t>(vUsed));
+						unmapBuffer(vk.allocator.handle(), host);
+						destroyBuffer(vk.allocator.handle(), host);
+						return out;
+					}();
+					if (got != std::vector<uint8_t>(
+					               reinterpret_cast<const uint8_t *>(
+					                   cpu[static_cast<size_t>(sec)].opaqueVertices.data()),
+					               reinterpret_cast<const uint8_t *>(
+					                   cpu[static_cast<size_t>(sec)].opaqueVertices.data()) +
+					                   vUsed))
+						++badSections;
+				}
+				// index readback
+				{
+					AllocatedBuffer &page =
+					    arenas.opaqueIndex.pageBufferRef(ChunkStateProbe::slotIPage(*chunk, sec));
+					std::vector<uint8_t> out(static_cast<size_t>(iUsed), 0);
+					AllocatedBuffer host = createBuffer(
+					    vk.allocator.handle(), iUsed, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+					    VMA_MEMORY_USAGE_AUTO,
+					    VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+					        VMA_ALLOCATION_CREATE_MAPPED_BIT);
+					VkBufferCopy c{};
+					c.srcOffset = ChunkStateProbe::slotIOff(*chunk, sec);
+					c.size = iUsed;
+					vkCmdCopyBuffer(vk.cmd, page.buffer, host.buffer, 1, &c);
+					CHECK(vk.flush(), "imm readback submit");
+					vmaInvalidateAllocation(vk.allocator.handle(), host.allocation, 0,
+					                        VK_WHOLE_SIZE);
+					void *p2 = mapBuffer(vk.allocator.handle(), host);
+					std::memcpy(out.data(), p2, static_cast<size_t>(iUsed));
+					unmapBuffer(vk.allocator.handle(), host);
+					destroyBuffer(vk.allocator.handle(), host);
+					if (out != std::vector<uint8_t>(
+					               reinterpret_cast<const uint8_t *>(
+					                   cpu[static_cast<size_t>(sec)].opaqueIndices.data()),
+					               reinterpret_cast<const uint8_t *>(
+					                   cpu[static_cast<size_t>(sec)].opaqueIndices.data()) +
+					                   iUsed))
+						++badSections;
+				}
+			}
+			CHECK(badSections == 0,
+			      "imm: every section's arena bytes match the CPU payloads");
+
+			// Command validity on the bootstrap chunk: every collected
+			// command must start at a slot offset, never cross slack, and
+			// cover the whole used range.
+			{
+				struct Range
+				{
+					uint32_t off, sz, used;
+				};
+				std::vector<Range> slots;
+				for (int sec = 0; sec < 16; ++sec)
+					if (ChunkStateProbe::slotIUsed(*chunk, sec) != 0)
+						slots.push_back({ChunkStateProbe::slotIOff(*chunk, sec),
+						                 ChunkStateProbe::slotISz(*chunk, sec),
+						                 ChunkStateProbe::slotIUsed(*chunk, sec)});
+				std::sort(slots.begin(), slots.end(),
+				          [](const Range &a, const Range &b) { return a.off < b.off; });
+				std::vector<Chunk::IndirectDraw> cmds;
+				chunk->collectOpaqueDraws(cmds);
+				bool valid = !cmds.empty();
+				uint32_t covered = 0;
+				for (const auto &d : cmds)
+				{
+					const uint32_t start = d.cmd.firstIndex * sizeof(uint32_t);
+					const uint32_t end = start + d.cmd.indexCount * sizeof(uint32_t);
+					// Walk the sorted slots: the command must start at a slot
+					// offset, cross only exact (used==reserved) slots, and
+					// end exactly at a slot's used end.
+					uint32_t pos = start;
+					bool ok = false;
+					for (size_t k = 0; k < slots.size() && pos < end; ++k)
+					{
+						if (slots[k].off != pos)
+							continue;
+						if (pos + slots[k].used >= end)
+						{
+							ok = pos + slots[k].used == end;
+							break;
+						}
+						if (slots[k].used != slots[k].sz)
+							break; // would draw slack: invalid
+						pos += slots[k].used;
+					}
+					if (!ok)
+						valid = false;
+					covered += d.cmd.indexCount * sizeof(uint32_t);
+				}
+				uint32_t usedTotal = 0;
+				for (const auto &sl : slots)
+					usedTotal += sl.used;
+				CHECK(covered == usedTotal,
+				      "imm: commands cover every live index exactly once");
+				CHECK(valid, "imm: commands map exactly to each section's used range");
+			}
+		}
+	}
+
+	// Spawn-path end-to-end (issue #109 regression): generateInitialArea
+	// uploads every bootstrap chunk through the imm path; after simulated
+	// frames the collected indirect commands must still cover each chunk's
+	// live indices exactly (no ranges lost, no slack drawn).
+	{
+		ChunkPool chunkPool4(64);
+		TerrainGenerator gen4(42);
+		ChunkManager manager4(&gen4, nullptr, &chunkPool4);
+		manager4.generateInitialArea(glm::vec3(0.0f), 2, vk.allocator.handle(), imm, arenas);
+
+		uint32_t totalChunks = 0, totalCmds = 0, totalIndices = 0;
+		bool allValid = true;
+		for (int iteration = 0; iteration < 2; ++iteration)
+		{
+			// Simulate frames: retirement of freed ranges must never touch
+			// live chunk ranges.
+			for (uint64_t f = 1; f <= 5; ++f)
+				arenas.beginFrame(f * 10 + iteration);
+
+			allValid = true;
+			totalChunks = 0;
+			totalCmds = 0;
+			totalIndices = 0;
+			for (Chunk *chunk : manager4.getActiveChunks())
+			{
+				if (!chunk || chunk->getOpaqueIndexCount() == 0)
+					continue;
+				++totalChunks;
+				struct Range
+				{
+					uint32_t off, sz, used;
+				};
+				std::vector<Range> slots;
+				std::vector<Chunk::IndirectDraw> cmds;
+				chunk->collectOpaqueDraws(cmds);
+				totalCmds += static_cast<uint32_t>(cmds.size());
+				for (int sec = 0; sec < 16; ++sec)
+					if (ChunkStateProbe::slotIUsed(*chunk, sec) != 0)
+					{
+						slots.push_back({ChunkStateProbe::slotIOff(*chunk, sec),
+						                 ChunkStateProbe::slotISz(*chunk, sec),
+						                 ChunkStateProbe::slotIUsed(*chunk, sec)});
+						totalIndices += ChunkStateProbe::slotIUsed(*chunk, sec);
+					}
+				std::sort(slots.begin(), slots.end(),
+				          [](const Range &a, const Range &b) { return a.off < b.off; });
+				for (const auto &d : cmds)
+				{
+					uint32_t pos = d.cmd.firstIndex * sizeof(uint32_t);
+					const uint32_t end = pos + d.cmd.indexCount * sizeof(uint32_t);
+					for (size_t k = 0; k < slots.size() && pos < end; ++k)
+					{
+						if (slots[k].off != pos)
+							continue;
+						if (pos + slots[k].used >= end)
+						{
+							pos = end;
+							break;
+						}
+						if (slots[k].used != slots[k].sz)
+							allValid = false;
+						pos += slots[k].used;
+					}
+					if (pos != end)
+						allValid = false;
+				}
+			}
+			CHECK(allValid, "spawn: every bootstrap chunk's commands stay valid");
+		}
+		std::cerr << "  dbg spawn: chunks=" << totalChunks << " cmds=" << totalCmds
+		          << " indexBytes=" << totalIndices << std::endl;
+		CHECK(totalChunks > 0, "spawn: bootstrap chunks uploaded");
+
+		// Second phase (PR review): neighbours' mirror edits re-mesh the
+		// bootstrap chunks PARTIALLY (in-place re-stages and appends).
+		// After those uploads the collected commands must STILL be valid
+		// - no slack drawn, full coverage.
+		for (int e = 0; e < 24; ++e)
+		{
+			const int cx = (e % 3) * CHUNK_SIZE;
+			const int cz = ((e / 3) % 3) * CHUNK_SIZE;
+			for (Chunk *chunk : manager4.getActiveChunks())
+			{
+				const glm::vec3 p = chunk->getPosition();
+				if (std::abs(static_cast<int>(p.x) - cx) > 1 ||
+				    std::abs(static_cast<int>(p.z) - cz) > 1)
+					continue;
+				const int lx = (e * 7) % CHUNK_SIZE;
+				const int lz = (e * 11) % CHUNK_SIZE;
+				int top = -1;
+				for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+					if (chunk->getVoxel(static_cast<uint32_t>(lx),
+					                    static_cast<uint32_t>(y),
+					                    static_cast<uint32_t>(lz))
+					        .type != static_cast<uint8_t>(AIR))
+					{
+						top = y;
+						break;
+					}
+				if (top > 1)
+					chunk->setVoxel(lx, top, lz, BRICKS);
+			}
+		}
+		for (Chunk *chunk : manager4.getActiveChunks())
+		{
+			if (chunk->dirtySections() == 0)
+				continue;
+			const uint16_t mask = chunk->takeDirtySections();
+			MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
+			chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), mask);
+			chunk->getMeshResultPool()->finishBuild(r);
+			CHECK(chunk->publishMeshResult(r), "phase2: partial result published");
+		}
+		staging.beginFrame(0);
+		int uploaded = 0;
+		for (Chunk *chunk : manager4.getActiveChunks())
+			if (chunk->needsGPUUpload())
+			{
+				CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd,
+				                              retire, arenas),
+				      "phase2: partial upload");
+				++uploaded;
+			}
+		CHECK(vk.flush(), "phase2 submit");
+		std::cerr << "  dbg phase2: uploaded=" << uploaded << std::endl;
+
+		allValid = true;
+		uint32_t phase2Cmds = 0;
+		for (Chunk *chunk : manager4.getActiveChunks())
+		{
+			if (!chunk || chunk->getOpaqueIndexCount() == 0)
+				continue;
+			struct Range2
+			{
+				uint32_t off, sz, used;
+			};
+			std::vector<Range2> slots;
+			std::vector<Chunk::IndirectDraw> cmds;
+			chunk->collectOpaqueDraws(cmds);
+			phase2Cmds += static_cast<uint32_t>(cmds.size());
+			for (int sec = 0; sec < 16; ++sec)
+				if (ChunkStateProbe::slotIUsed(*chunk, sec) != 0)
+					slots.push_back({ChunkStateProbe::slotIOff(*chunk, sec),
+					                 ChunkStateProbe::slotISz(*chunk, sec),
+					                 ChunkStateProbe::slotIUsed(*chunk, sec)});
+			std::sort(slots.begin(), slots.end(),
+			          [](const Range2 &a, const Range2 &b) { return a.off < b.off; });
+			for (const auto &d : cmds)
+			{
+				uint32_t pos = d.cmd.firstIndex * sizeof(uint32_t);
+				const uint32_t end = pos + d.cmd.indexCount * sizeof(uint32_t);
+				for (size_t k = 0; k < slots.size() && pos < end; ++k)
+				{
+					if (slots[k].off != pos)
+						continue;
+					if (pos + slots[k].used >= end)
+					{
+						pos = end;
+						break;
+					}
+					if (slots[k].used != slots[k].sz)
+						allValid = false;
+					pos += slots[k].used;
+				}
+				if (pos != end)
+					allValid = false;
+			}
+		}
+		CHECK(allValid, "phase2: commands valid after partial rebuilds");
+		std::cerr << "  dbg phase2: cmds=" << phase2Cmds << std::endl;
+	}
+
 	arenas.shutdown();
+	imm.shutdown();
 	staging.shutdown();
 	retire.shutdown();
 	vk.shutdown();

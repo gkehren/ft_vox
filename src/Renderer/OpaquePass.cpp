@@ -6,6 +6,7 @@
 #include "utils.hpp"
 
 #include <stdexcept>
+#include <cstdlib>
 
 namespace
 {
@@ -153,6 +154,31 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 	for (Chunk *chunk : chunks)
 		if (chunk)
 			chunk->collectOpaqueDraws(m_scratch);
+	const bool directDraws = std::getenv("FT_VOX_DRAW_DIRECT") != nullptr;
+	if (directDraws)
+	{
+		// Bisect mode: bind per section and draw directly (no indirect
+		// buffer). If the world renders correctly here, the arena data is
+		// good and the bug is in the indirect command path.
+		VkBuffer curV = VK_NULL_HANDLE, curI = VK_NULL_HANDLE;
+		for (const Chunk::IndirectDraw &d : m_scratch)
+		{
+			VkBuffer vb = arenas.opaqueVertex.pageBuffer(d.vertexPage);
+			VkBuffer ib = arenas.opaqueIndex.pageBuffer(d.indexPage);
+			if (vb != curV || ib != curI)
+			{
+				VkDeviceSize voff = 0;
+				vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
+				vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+				curV = vb;
+				curI = ib;
+			}
+			vkCmdDrawIndexed(cmd, d.cmd.indexCount, 1, d.cmd.firstIndex,
+			                 d.cmd.vertexOffset, 0);
+		}
+		if (gpu) gpu->endPass(cmd, GpuPass::Opaque);
+		return;
+	}
 	if (!m_scratch.empty())
 	{
 		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
@@ -192,7 +218,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			while (j < count &&
 			       (uint64_t(m_scratch[j].vertexPage) << 32 | m_scratch[j].indexPage) == key)
 				++j;
-			VkBuffer vb = arenas.opaqueVertex.pageBuffer(static_cast<uint32_t>(key >> 32));
+					VkBuffer vb = arenas.opaqueVertex.pageBuffer(static_cast<uint32_t>(key >> 32));
 			VkBuffer ib = arenas.opaqueIndex.pageBuffer(static_cast<uint32_t>(key & 0xffffffffu));
 			VkDeviceSize voff = 0;
 			vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
@@ -201,11 +227,36 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 									 first * sizeof(VkDrawIndexedIndirectCommand),
 									 static_cast<uint32_t>(j - i), sizeof(VkDrawIndexedIndirectCommand));
 			telemetry::registry().add(telemetry::ArenaBinds);
+			if (std::getenv("FT_VOX_VALIDATE_INDIRECT") && m_debugFrames < 3)
+			{
+				const VkDeviceSize vbSize = arenas.opaqueVertex.pageSize(static_cast<uint32_t>(key >> 32));
+				const VkDeviceSize ibSize = arenas.opaqueIndex.pageSize(static_cast<uint32_t>(key & 0xffffffffu));
+				uint32_t worstEnd = 0, worstVOff = 0;
+				uint32_t bad = 0;
+				for (size_t k = i; k < j; ++k)
+				{
+					const uint32_t iStart = m_scratch[k].cmd.firstIndex * sizeof(uint32_t);
+					const uint32_t iEnd = iStart + m_scratch[k].cmd.indexCount * sizeof(uint32_t);
+					const uint32_t vBytes = static_cast<uint32_t>(m_scratch[k].cmd.vertexOffset) *
+						sizeof(Vertex);
+					if (iEnd > worstEnd) worstEnd = iEnd;
+					if (vBytes > worstVOff) worstVOff = vBytes;
+					if (iEnd > ibSize || vBytes > vbSize)
+						++bad;
+				}
+				if (bad > 0)
+					std::cerr << "[indirect] group out-of-page: bad=" << bad
+					          << " ibSize=" << ibSize << " worstIndexEnd=" << worstEnd
+					          << " vbSize=" << vbSize << " worstVertexBytes=" << worstVOff
+					          << std::endl;
+			}
 			first += static_cast<uint32_t>(j - i);
 			i = j;
 		}
 		telemetry::registry().add(telemetry::OpaqueDraws, count);
 	}
+	if (std::getenv("FT_VOX_VALIDATE_INDIRECT"))
+		++m_debugFrames;
 	if (gpu) gpu->endPass(cmd, GpuPass::Opaque);
 	if (gpu) gpu->beginPass(cmd, GpuPass::Overlays);
 	overlays.record(cmd, set0, chunks);

@@ -1771,38 +1771,24 @@ size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const
     out.push_back(d);
     return 1;
   }
-  uint32_t lastVertexEnd = 0, lastIndexEnd = 0;
-  // Merge sections whose reserved ranges are contiguous in both streams:
-  // a freshly repacked chunk lays its sections back-to-back, so the common
-  // unedited chunk collapses back to ONE command (issue #109).
-  bool merged = false;
+  // One command per live section (issue #109). Sections are NEVER merged
+  // into a single command: each section's stored indices are section-local
+  // and its vertices start at the section's own vertexBase, so only a
+  // per-section vertexOffset fetches them correctly. Merging contiguous
+  // sections would keep the first section's vertexOffset and redirect every
+  // following section's indices into the first section's vertices -
+  // destroyed geometry and missing faces.
   size_t added = 0;
   for (const SectionGpuSlot &slot : m_sectionGpu)
   {
     if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
       continue;
-    if (merged && !out.empty())
-    {
-      IndirectDraw &last = out.back();
-      if (last.vertexPage == slot.vertexPage &&
-          last.indexPage == slot.indexPage &&
-          slot.vertexOffset == lastVertexEnd && slot.indexOffset == lastIndexEnd)
-      {
-        last.cmd.indexCount += slot.indexCount;
-        lastIndexEnd = slot.indexOffset + slot.indexSlotBytes;
-        lastVertexEnd = slot.vertexOffset + slot.vertexSlotBytes;
-        continue;
-      }
-    }
     IndirectDraw d;
     d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
              static_cast<int32_t>(slot.vertexBase), 0};
     d.vertexPage = slot.vertexPage;
     d.indexPage = slot.indexPage;
     out.push_back(d);
-    lastVertexEnd = slot.vertexOffset + slot.vertexSlotBytes;
-    lastIndexEnd = slot.indexOffset + slot.indexSlotBytes;
-    merged = true;
     ++added;
   }
   return added;
@@ -1825,35 +1811,20 @@ size_t Chunk::collectWaterDraws(std::vector<IndirectDraw> &out) const
     out.push_back(d);
     return 1;
   }
-  uint32_t lastVertexEnd = 0, lastIndexEnd = 0;
-  bool merged = false;
+  // Same rule as opaque: one command per live section, each carrying its
+  // own vertexOffset (issue #109). Never merge - section-local indices
+  // would redirect into the first merged section's vertices.
   size_t added = 0;
   for (const SectionGpuSlot &slot : m_sectionGpuWater)
   {
     if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
       continue;
-    if (merged && !out.empty())
-    {
-      IndirectDraw &last = out.back();
-      if (last.vertexPage == slot.vertexPage &&
-          last.indexPage == slot.indexPage &&
-          slot.vertexOffset == lastVertexEnd && slot.indexOffset == lastIndexEnd)
-      {
-        last.cmd.indexCount += slot.indexCount;
-        lastIndexEnd = slot.indexOffset + slot.indexSlotBytes;
-        lastVertexEnd = slot.vertexOffset + slot.vertexSlotBytes;
-        continue;
-      }
-    }
     IndirectDraw d;
     d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
              static_cast<int32_t>(slot.vertexBase), 0};
     d.vertexPage = slot.vertexPage;
     d.indexPage = slot.indexPage;
     out.push_back(d);
-    lastVertexEnd = slot.vertexOffset + slot.vertexSlotBytes;
-    lastIndexEnd = slot.indexOffset + slot.indexSlotBytes;
-    merged = true;
     ++added;
   }
   return added;

@@ -23,6 +23,22 @@ void ImmediateCommands::init(VkContext &context)
 		throw std::runtime_error("Failed to create immediate command pool");
 }
 
+void ImmediateCommands::init(VkDevice device, VkQueue queue, uint32_t queueFamily)
+{
+	if (m_pool != VK_NULL_HANDLE)
+		throw std::runtime_error("ImmediateCommands already initialized");
+
+	m_device = device;
+	m_queue = queue;
+
+	VkCommandPoolCreateInfo poolInfo{};
+	poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+	poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+	poolInfo.queueFamilyIndex = queueFamily;
+	if (vkCreateCommandPool(m_device, &poolInfo, nullptr, &m_pool) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create immediate command pool");
+}
+
 void ImmediateCommands::shutdown()
 {
 	if (m_device != VK_NULL_HANDLE && m_pool != VK_NULL_HANDLE)

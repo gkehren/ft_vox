@@ -47,4 +47,5 @@ private:
 	// Reused per-frame scratch: collecting ~15k commands must not
 	// reallocate every frame (issue #109).
 	std::vector<Chunk::IndirectDraw> m_scratch;
+	uint32_t m_debugFrames{0};
 };
