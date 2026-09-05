@@ -174,6 +174,22 @@ File: `src/Chunk/Chunk.hpp` / `Chunk.cpp`.
 
 At mesh time, sky light is cast down open columns then **flooded** into caves (attenuation). Block light propagates from emissive voxels. Packed into vertex attributes for the terrain/water shaders (see graphics doc for cave fill / sun shadow mute).
 
+### Greedy meshing face keys (issue #106)
+
+`Chunk::buildMeshRanged` materializes the face inputs of every slice cell
+**once** into compact per-cell face keys (thread-local workspace, reserved
+per worker): the voxel pair straddling the face plane plus the biome owner
+color of each side. The greedy width/height expansion then evaluates the
+merge rules on these key fields — no voxel/shell re-sampling and no biome
+array lookups per probe. The key carries the raw pair (not just the cell's
+classified face) because the merge rules accept a candidate whose own
+visible face is the opposite face of a different transparent block, and they
+merge faces fronting air with faces fronting transparent blocks; a pure
+"same face" equality key cannot express those boundaries. AO and light stay
+out of the key — they are sampled at the final merged quad corners. The
+merge semantics are pinned byte-exact by `tests/test_mesh_facekey.cpp`
+(deterministic scenes plus the `--hash-corpus` dev tool).
+
 ---
 
 ## 6. ChunkPool and ThreadPool
