@@ -181,6 +181,20 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 	}
 	if (!m_scratch.empty())
 	{
+		assert(m_scratch.size() <= kMaxIndirectCommands && "OpaquePass: indirect command capacity exceeded");
+		if (m_scratch.size() > kMaxIndirectCommands)
+		{
+			// Not silent: at larger view distances or denser worlds this
+			// would silently drop geometry (issue #109 review phase 24).
+			static bool warned = false;
+			if (!warned)
+			{
+				warned = true;
+				std::cerr << "[indirect] command overflow: " << m_scratch.size()
+				          << " commands > capacity " << kMaxIndirectCommands
+				          << " - truncating" << std::endl;
+			}
+		}
 		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
 		// The overwhelming common case: every range lives in the same page
 		// pair, so a linear same-key scan replaces the sort.

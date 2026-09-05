@@ -3,6 +3,7 @@
 #include "Vulkan/VkContext.hpp"
 #include "Vulkan/VkGpuProfiler.hpp"
 #include "Vulkan/VkImage.hpp"
+#include "Vulkan/VkFrame.hpp"
 #include "Chunk/Chunk.hpp"
 #include "Renderer/OverlayRenderer.hpp"
 
@@ -43,7 +44,7 @@ private:
 	};
 	VkContext *m_context{nullptr};
 	VkPipeline m_pipeline{VK_NULL_HANDLE};
-	std::array<IndirectBatch, 2> m_indirect{};
+	std::array<IndirectBatch, VkFrameContext::kMaxFramesInFlight> m_indirect{};
 	// Reused per-frame scratch: collecting ~15k commands must not
 	// reallocate every frame (issue #109).
 	std::vector<Chunk::IndirectDraw> m_scratch;

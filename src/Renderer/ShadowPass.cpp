@@ -1,6 +1,7 @@
 #include "Renderer/ShadowPass.hpp"
 #include "Vulkan/MeshArena.hpp"
 #include <algorithm>
+#include <iostream>
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
 #include "Vulkan/VkShader.hpp"
@@ -247,6 +248,20 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 		}
 		if (!m_scratch.empty())
 		{
+			assert(m_scratch.size() <= kMaxIndirectCommands && "ShadowPass: indirect command capacity exceeded");
+			if (m_scratch.size() > kMaxIndirectCommands)
+			{
+				// Not silent: at larger view distances or denser worlds this
+				// would silently drop geometry (issue #109 review phase 24).
+				static bool warned = false;
+				if (!warned)
+				{
+						warned = true;
+						std::cerr << "[indirect] command overflow: " << m_scratch.size()
+						          << " commands > capacity " << kMaxIndirectCommands
+						          << " - truncating" << std::endl;
+				}
+			}
 			const size_t count =
 				std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
 			const uint64_t firstKey =
