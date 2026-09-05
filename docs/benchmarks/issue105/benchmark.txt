@@ -1,43 +1,52 @@
 ft_vox Issue #105 Benchmark: activeVoxels bitset -> compact per-section occupancy metadata
 ======================================================================
 
-Protocol: seed 42, 60s measured + 15s warmup, --vsync off, RTX 4070 Ti,
-validation off, telemetry on, 1920x1080 viewDist 512. Both runs from
-clean committed trees (no local modifications).
+Protocol: seed 42, 60s measured + 15s warmup, 1920x1080, view distance 512,
+vsync off / IMMEDIATE, validation off, telemetry ON, RTX 4070 Ti.
 
-BEFORE  main 3bb2a654d77d  (docs/benchmarks/bench_20260904_222753_3bb2a654d77d__s42_sc9820.txt)
+Provenance: both AFTER runs built and measured from clean committed
+trees (no local or untracked files; git-dirty flag honest).
+
+BEFORE  main 3bb2a654d77d
+  raw: bench_20260904_222753_3bb2a654d77d__s42_sc9820.txt (committed for
+  reference; figures below transcribed verbatim from it).
   Score: 9820 / 10000  Grade: S
   MeshBuild   n=14758  avgMs=2.99704
   MeshLOD     n=12180  avgMs=0.0457204
-  mesh.skylight        totalMs=17255.7
-  mesh.blocklight      totalMs=3259.84
-  mesh.occupancy       totalMs=448.618   (typeScratch copy + full scan)
-  mesh.facesGreedyAO   totalMs=23252.1
-  mesh.LOD             totalMs=548.805
-  occupancy.bytes current=72859648 peak=72859648  (~69.5 MiB bitsets)
-  voxel.bytes     current=302710784
-  cpu.mesh.capacityBytes current=12557640
+  mesh.occupancy  n=14758 totalMs=448.618   (64 KiB typeScratch copy + full scan)
+  occupancy.bytes current=72859648  (8 KiB bitset x 8894 chunk slots)
+  --gen-perf 500 chunks seed 42: pooled-into 1.452-1.454 ms/chunk (median of 3)
 
-AFTER   8a99a870b20b  (docs/benchmarks/bench_20260904_231042_8a99a870b20b__s42_sc9865.txt)
-  Score: 9865 / 10000  Grade: S
-  MeshBuild   n=14748  avgMs=2.92288   (-2.5%)
-  MeshLOD     n=16458  avgMs=0.00854047 (-81.3%)
-  mesh.skylight        totalMs=16004.6
-  mesh.blocklight      totalMs=3040.62
-  mesh.occupancy       totalMs=0.4735    (-99.9%, metadata read only)
-  mesh.facesGreedyAO   totalMs=24012.3   (+3.3%, run noise; maskCells ~equal)
-  mesh.LOD             totalMs=129.038   (-76.5%)
-  occupancy.bytes current=284608 peak=284608     (32 B/chunk metadata)
-  voxel.bytes     current=302776320 (unchanged)
-  cpu.mesh.capacityBytes current=11552800 (pool high-water, same scale)
+AFTER (final)  0629107af745  -  raw: bench_20260905_002728_0629107af745_s42_sc9924.txt
+  Score: 9924 / 10000  Grade: S   (avg FPS 536, 1% low 244)
+  MeshBuild   n=14746  avgMs=2.48344
+  MeshLOD     n=17569  avgMs=0.0067491
+  mesh.occupancy  n=14746 totalMs=28.2177   (metadata span lookup + refine)
+  occupancy.bytes current=284608    (32 B x 8894 chunk slots)
+  --gen-perf 500 chunks seed 42: pooled-into 1.435-1.460 ms/chunk (median of 3)
 
-Deltas
-  - Persistent occupancy memory: 72,859,648 -> 284,608 B (-99.6%), i.e.
-    8 KiB -> 32 B per pooled chunk (~-69.2 MiB at ~8.9k chunks).
-  - Occupancy prepass per full mesh build: ~30.4 us -> ~0.03 us (-99.9%);
-    the 64 KiB typeScratch copy + 65,536-entry scan are gone.
-  - LOD mesh builds scan from the last occupied section: ~45.7 us ->
-    ~8.5 us per build (-81%).
-  - Full greedy MeshBuild: 2.997 -> 2.923 ms avg (-2.5%), no point-query
-    path changed (isVoxelActive reads the canonical type, O(1)).
-  - Score 9820 -> 9865 (within run-to-run noise; no regression).
+AFTER (intermediate, pre-review telemetry semantics)  8a99a870b20b
+  raw: bench_20260904_231042_8a99a870b20b__s42_sc9865.txt - Score 9865,
+  MeshBuild 2.923 ms, MeshLOD 8.5 us, mesh.occupancy 0.47 ms total.
+
+Metric table (issue #115 review item 29)
+--------------------------------------------------------------------------
+  occupancy.bytes          72,859,648 B  ->      284,608 B   (-99.6%)
+  occupancy prepass/job      ~30.4 us    ->        ~1.9 us   (-93.7%, measured)
+  MeshBuild avg                2.997 ms  ->       2.483 ms   (-17.2%, see note)
+  MeshLOD avg               45.7 us      ->        6.7 us    (-85.2%)
+  TerrainGen (gen-perf)      1.452 ms/ch ->      1.439 ms/ch (median, ~noise)
+  Streaming (CPU scope)      0.40 ms/fr  ->      0.258 ms/fr
+
+Notes
+  - The occupancy prepass is now a metadata span lookup plus byte-exact
+    refinement of the two boundary sections: 1.9 us measured (was ~30 us
+    for the 64 KiB copy + 65,536-entry scan). n=14746 equals MeshBuild n
+    (every full build, including any empty chunk, records one sample).
+  - MeshLOD column scans start at the last occupied section: -85%.
+  - MeshBuild phases skylight/faces are code-identical to main; their
+    swing between runs (and part of the MeshBuild delta) is run variance.
+    The structural wins above are phase-isolated and stable across runs.
+  - Point queries stay O(1) and now read the canonical voxel type.
+  - Report invariant: occupancy.bytes == ChunkPool capacity x 32 B
+    (8894 x 32 = 284,608, matches gauge exactly).

@@ -63,10 +63,12 @@ capacity of every block), so a meshed-then-idle chunk retains nothing.
 
 ## Mesh stages
 
-Each full mesh job accumulates elapsed nanoseconds locally for skylight,
-block light, occupancy discovery and the combined face/greedy/AO/output loop.
-LOD generation has its own timer. A completed job publishes one batch under a
-mutex. Empty meshes naturally have no face-loop sample.
+Each full mesh job first measures the occupancy prepass (occupied-span lookup
+and refinement over the per-section metadata) through a dedicated single-stage
+scope - including empty chunks whose build ends right there. The greedy body
+then accumulates elapsed nanoseconds locally for skylight, block light and the
+combined face/greedy/AO/output loop. LOD generation has its own timer. A
+completed job publishes one batch under a mutex.
 
 The current mesher fuses face detection, mask updates, greedy merging, AO and
 output in nested loops. Its report includes initialized mask cells, actual AO
