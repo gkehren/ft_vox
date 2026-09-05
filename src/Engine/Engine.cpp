@@ -324,6 +324,24 @@ Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &res
 	}
 }
 
+void Engine::setInspectionView(glm::vec3 position, float yaw, float pitch, float seconds)
+{
+    m_inspectionView = true;
+    m_inspectionSeconds = seconds;
+    camera.setPosition(position);
+    camera.setYawPitch(yaw, pitch);
+    playerFlight = true;
+    resetPlayerAtCamera();
+    mouseCaptured = false;
+    SDL_SetWindowRelativeMouseMode(window, false);
+    shaderParams.dayCycleEnabled = false;
+    shaderParams.dayTime = 0.35f;
+    showDemoPlayers = false;
+    worldRenderer->overlays().setPlayers({});
+    std::cout << "Inspection camera: " << position.x << ' ' << position.y << ' ' << position.z
+              << ' ' << yaw << ' ' << pitch << '\n';
+}
+
 void Engine::placeCameraOnSurface()
 {
 	const glm::vec3 pos = camera.getPosition();
@@ -823,6 +841,7 @@ void Engine::handleEvents()
 
 void Engine::processInput(double dt)
 {
+    if (m_inspectionView) return;
 	if (m_benchmark.isActive() || paused || !windowFocused)
 	{
 		player.suspend();
@@ -1018,7 +1037,7 @@ void Engine::sampleBenchmarkFrame()
 
 void Engine::drawUi()
 {
-	if (!imgui || !gameUi)
+	if (!imgui || !gameUi || m_inspectionView)
 		return;
 
 	const bool prevCapture = mouseCaptured;
@@ -1108,6 +1127,7 @@ void Engine::run()
 	running = true;
 	lastFrame = SDL_GetTicks() / 1000.0;
 	lastTime = lastFrame;
+    const double inspectionStart = lastFrame;
 
 	const VkClearColorValue clearColor = {{0.38f, 0.58f, 0.92f, 1.0f}};
 
@@ -1116,6 +1136,8 @@ void Engine::run()
 		GetProfiler().beginFrame();
 
 		const double currentFrame = SDL_GetTicks() / 1000.0;
+        if (m_inspectionView && m_inspectionSeconds > 0.f && currentFrame - inspectionStart >= m_inspectionSeconds)
+            break;
 		deltaTime = currentFrame - lastFrame;
 		lastFrame = currentFrame;
 

@@ -152,10 +152,17 @@ void ShadowPass::destroyPipeline()
 
 void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vector<Chunk *> &shadowChunks,
 						const std::array<glm::mat4, kCascadeCount> &cascades, float time,
-						const MeshArenas &arenas)
+						VkDescriptorSet set0, VkDescriptorSet set1, const MeshArenas &arenas)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
+
+	// Alpha-cut shadows (PR #119): shadow.vert reads the MaterialTable
+	// (set 0, binding 1) and shadow.frag samples the block texture array
+	// (set 1, binding 0) to discard cutout texels.
+	const std::array<VkDescriptorSet, 2> sets = {set0, set1};
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0,
+							static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
 
 	vkbar::cmdTransitionDepth(cmd, m_shadowMap.image, VK_IMAGE_LAYOUT_UNDEFINED,
 							  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 0,
