@@ -918,8 +918,8 @@ void Chunk::computeLightField(telemetry::MeshSample &meshSample)
 // build, so section boundaries are visually identical to the unsplit mesh;
 // only quads that would cross a section boundary are split into one quad
 // per section (each section owns the faces of its own voxels). Greedy
-// rectangles never merge across sections because the owner-side gating
-// clips the seed/expansion rect to the section.
+// rectangles never merge across sections because the mask plane is clipped
+// to the section's occupied Y span and the slice walk repeats per section.
 bool Chunk::hasUnuploadedFullMesh() const
 {
   return m_pendingResult != nullptr && !m_pendingResult->isLOD;
@@ -964,8 +964,8 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
   // Slice range needs neighbors one cell outside solids for face detection.
   // For a section build the range is [ownerMinY-1, ownerMaxY]: the slice
   // below contributes only -q faces (owned by the section's first voxel
-  // layer) and the last slice only +q faces - the owner-side flags inside
-  // the loop suppress the faces owned by the adjacent sections.
+  // layer) and the last slice only +q faces - the owner check inside the
+  // classification suppresses the faces owned by the adjacent sections.
   const int ySliceMin = std::max(-1, ownerMinY - 1);
   const int ySliceMax = std::min(CHUNK_HEIGHT - 1, ownerMaxY); // x[d] runs to dims[d]-1 inclusive via < dims
 
@@ -1051,15 +1051,15 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
       // Border/shell voxels are used solely for occlusion - the neighboring
       // chunk renders its own faces. Owner colors are only ever read for
       // in-chunk owners, so the guarded side stays 0 at the two outermost
-      // slices. For d==1 the flags additionally gate the section's Y range
-      // (issue #107): the slice below the section only produces -q faces
-      // (owned by the section's first voxel layer) and the last slice only
-      // +q faces, so greedy rectangles can never cross a section boundary.
-      const bool type1ChunkSide =
-          (x[d] >= 0) && (d != 1 || (x[d] >= ownerMinY && x[d] <= ownerMaxY));
-      const bool type2ChunkSide =
-          (x[d] + 1 < dims[d]) &&
-          (d != 1 || (x[d] + 1 >= ownerMinY && x[d] + 1 <= ownerMaxY));
+      // slices. Classification is deliberately NOT section-gated (PR #117
+      // review): a cell pair at a section seam must classify to the same
+      // face - same owner, same side - in every section pass that visits
+      // the pair, exactly like the whole-chunk build; the owner check below
+      // then decides which section EMITS the face. Gating classification
+      // instead made the section above a seam classify a spurious second
+      // face whenever the first match belonged to the section below.
+      const bool type1ChunkSide = (x[d] >= 0);
+      const bool type2ChunkSide = (x[d] + 1 < dims[d]);
       const uint8_t airType = static_cast<uint8_t>(AIR);
       auto faceOwnerColor = [&](TextureType t, const glm::ivec3 &ownerCoord) -> uint32_t
       {
@@ -1129,6 +1129,16 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             // Face belongs to the voxel at x+q, pointing towards x
             hasFace = true;
             negSide = true;
+          }
+          if (hasFace && d == 1)
+          {
+            // Section-local emission of the globally classified face
+            // (PR #117 review): the owner voxel decides which section
+            // emits, so a face at a seam is emitted by exactly one section
+            // and every other pass just sees "no face for me".
+            const int ownerY = negSide ? x[d] + 1 : x[d];
+            if (ownerY < ownerMinY || ownerY > ownerMaxY)
+              hasFace = false;
           }
           faceKeyLo[cell] = makeFaceKeyLo(t1, t2, color1,
                                           (hasFace ? kFaceKeyHasFace : 0) |

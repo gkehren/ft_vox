@@ -619,6 +619,157 @@ static void testAoCornerSampling()
 		  "ao: transparent neighbor brightens the corner it touches");
 }
 
+// ---------------------------------------------------------------------------
+// Section seam ownership (PR #117 review phases 13-15, 39): an interface
+// between a y=15 and a y=16 voxel must classify exactly like the historical
+// whole-chunk mesher no matter which section's pass visits the pair - one
+// face, owned by the first-match block, emitted by its owner's section.
+// ---------------------------------------------------------------------------
+
+struct LegacyFace
+{
+	bool hasFace{false};
+	bool negSide{false};    // face owned by the upper block, pointing -q
+	TextureType owner{AIR}; // owning block type
+};
+
+static void testKeyPathMatchesFullRange(const char *label, Chunk &chunk,
+										MeshResultPool &pool);
+
+// The historical (#106) whole-chunk rules for one interface: at most one
+// face per cell pair - the lower block's +q face when it is visible against
+// the upper block, otherwise the upper block's -q face when visible against
+// the lower block. Written independently of the Chunk classifier on
+// purpose: it is the oracle the seam tests are judged against, so an error
+// shared by the sectioned and full paths cannot hide it.
+static LegacyFace classifyLegacyInterface(TextureType below, TextureType above)
+{
+	auto visible = [](TextureType t, TextureType backing)
+	{
+		return backing == AIR ||
+			   (TextureManager::isTransparent(backing) && backing != t);
+	};
+	LegacyFace f;
+	if (below != AIR && visible(below, above))
+	{
+		f.hasFace = true;
+		f.owner = below;
+	}
+	else if (above != AIR && visible(above, below))
+	{
+		f.hasFace = true;
+		f.negSide = true;
+		f.owner = above;
+	}
+	return f;
+}
+
+static void checkSeamInterface(const char *label, TextureType below,
+							   TextureType above, int x0, int z0, int w, int d_)
+{
+	Scene s;
+	for (int x = x0; x < x0 + w; ++x)
+		for (int z = z0; z < z0 + d_; ++z)
+		{
+			s.chunk.setVoxel(x, 15, z, below);
+			s.chunk.setVoxel(x, 16, z, above);
+		}
+	BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
+
+	const LegacyFace expected = classifyLegacyInterface(below, above);
+	size_t plane16 = 0, expectedFaces = 0, spurious = 0;
+	auto inspect = [&](const std::vector<QuadView> &quads, bool waterStream)
+	{
+		for (const QuadView &q : quads)
+		{
+			// Horizontal faces only (side quads span y=15..16 or 16..17).
+			if (q.mn.y != 16 || q.mx.y != 16)
+				continue;
+			++plane16;
+			const bool plusY = q.normalIdx == 2;
+			const bool rightStream = waterStream == (expected.owner == WATER);
+			if (expected.hasFace &&
+				((expected.negSide && !plusY) || (!expected.negSide && plusY)) &&
+				q.texture == static_cast<uint32_t>(expected.owner) && rightStream &&
+				q.section == (expected.negSide ? 1 : 0))
+				++expectedFaces;
+			else
+				++spurious;
+		}
+	};
+	inspect(m.opaque, false);
+	inspect(m.water, true);
+
+	CHECK(plane16 == (expected.hasFace ? 1 : 0) && expectedFaces == plane16 &&
+			  spurious == 0,
+		  label);
+	m.release();
+}
+
+static void testSectionSeamOwnership()
+{
+	// The pair is visited by section 0's pass (slice 15) AND by section 1's
+	// pass (the same slice, as its ySliceMin). The pre-review bug: section
+	// 1's pass gated the first match away and classified a second, spurious
+	// face owned by the upper block. 2x2 columns merge each interface face
+	// into one quad, so any extra face or misplacement shows up as a count.
+	struct Pair
+	{
+		const char *label;
+		TextureType below;
+		TextureType above;
+	};
+	const Pair pairs[] = {
+		{"seam stone/water: stone top face only", STONE, WATER},
+		{"seam water/stone: water top face only", WATER, STONE},
+		{"seam glass/water: glass top face only", GLASS, WATER},
+		{"seam water/glass: water top face only", WATER, GLASS},
+		{"seam leaves/water: leaves top face only", OAK_LEAVES, WATER},
+		{"seam water/leaves: water top face only", WATER, OAK_LEAVES},
+		{"seam glass/leaves: glass top face only", GLASS, OAK_LEAVES},
+		{"seam leaves/glass: leaves top face only", OAK_LEAVES, GLASS},
+		{"seam stone/glass: stone top face only", STONE, GLASS},
+		{"seam glass/stone: glass top face only", GLASS, STONE},
+		{"seam water/water: no interface face", WATER, WATER},
+		{"seam glass/glass: no interface face", GLASS, GLASS},
+		{"seam stone/stone: no interface face", STONE, STONE},
+	};
+	for (const Pair &p : pairs)
+		checkSeamInterface(p.label, p.below, p.above, 0, 0, 2, 2);
+
+	// negSide emission at the seam: water floating ON the boundary plane
+	// (air below at y=15, water at y=16) owns its bottom face at y=16 -
+	// emitted by section 1's pass, which visits the y=15 slice only for
+	// faces owned in section 1.
+	checkSeamInterface("seam air/water: water bottom face owned at y=16",
+					   AIR, WATER, 0, 0, 2, 2);
+
+	// Merge-across-seam scenes (4x4): the interface face merges into ONE
+	// quad placed in the owner's section, and no second face appears.
+	checkSeamInterface("seam 4x4 stone/water: one merged stone top quad",
+					   STONE, WATER, 0, 0, 4, 4);
+	checkSeamInterface("seam 4x4 air/water: one merged water bottom quad",
+					   AIR, WATER, 0, 0, 4, 4);
+
+	// The seam scenes must also compose: a partial build of the sections the
+	// owner lives in reproduces the full build byte for byte.
+	{
+		Scene s;
+		for (int x = 0; x < 4; ++x)
+			for (int z = 0; z < 4; ++z)
+			{
+				s.chunk.setVoxel(x, 15, z, WATER); // section 0 (y=15)
+				s.chunk.setVoxel(x, 16, z, GLASS); // section 1 (y=16)
+			}
+		BuiltMesh meta = buildWithMetadataBounds(s.chunk, s.pool);
+		CHECK(totalWaterIndices(*meta.result) > 0 &&
+				  totalOpaqueIndices(*meta.result) > 0,
+			  "seam composition scene: water and glass geometry present");
+		testKeyPathMatchesFullRange("seam composition equivalence", s.chunk, s.pool);
+		meta.release();
+	}
+}
+
 static void testKeyPathMatchesFullRange(const char *label, Chunk &chunk,
 										MeshResultPool &pool)
 {
@@ -1188,6 +1339,7 @@ int main(int argc, char **argv)
 	testChunkBorders();
 	testOccupiedSpanEdges();
 	testAoCornerSampling();
+	testSectionSeamOwnership();
 
 	// Every scene must also build identically through the forced full-range
 	// path (exercises the clamped classification rect of the key mesher).
