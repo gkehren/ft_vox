@@ -125,11 +125,18 @@ Chunk::Chunk(Chunk &&other) noexcept
       indexBuffer(other.indexBuffer),
       waterVertexBuffer(other.waterVertexBuffer),
       waterIndexBuffer(other.waterIndexBuffer),
+      m_sectionGpu(other.m_sectionGpu),
+      m_sectionGpuWater(other.m_sectionGpuWater),
+      m_vertexUsedBytes(other.m_vertexUsedBytes),
+      m_indexUsedBytes(other.m_indexUsedBytes),
+      m_waterVertexUsedBytes(other.m_waterVertexUsedBytes),
+      m_waterIndexUsedBytes(other.m_waterIndexUsedBytes),
       opaqueIndexCount(other.opaqueIndexCount), waterIndexCount(other.waterIndexCount),
       meshNeedsUpdate(other.meshNeedsUpdate.load()),
       m_voxelPool(other.m_voxelPool),
       m_storage(other.m_storage),
       m_sectionNonAir(other.m_sectionNonAir),
+      m_dirtySections(other.m_dirtySections.load(std::memory_order_relaxed)),
       m_borderPool(other.m_borderPool),
       m_borders(other.m_borders),
       m_resultPool(other.m_resultPool),
@@ -152,6 +159,16 @@ Chunk::Chunk(Chunk &&other) noexcept
   other.indexBuffer = {};
   other.waterVertexBuffer = {};
   other.waterIndexBuffer = {};
+  // Section slot layouts travel with the buffers they describe into
+  // (PR #117 review); zero the moved-from side so a recycled chunk starts
+  // from a clean slot state.
+  other.m_sectionGpu.fill({});
+  other.m_sectionGpuWater.fill({});
+  other.m_vertexUsedBytes = 0;
+  other.m_indexUsedBytes = 0;
+  other.m_waterVertexUsedBytes = 0;
+  other.m_waterIndexUsedBytes = 0;
+  other.m_dirtySections.store(0, std::memory_order_relaxed);
   other.opaqueIndexCount = 0;
   other.waterIndexCount = 0;
   // A pending build result belongs to the moved-from incarnation: release
@@ -213,6 +230,16 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     indexBuffer = other.indexBuffer;
     waterVertexBuffer = other.waterVertexBuffer;
     waterIndexBuffer = other.waterIndexBuffer;
+    // Section slot layouts travel with the buffers they describe into
+    // (PR #117 review).
+    m_sectionGpu = other.m_sectionGpu;
+    m_sectionGpuWater = other.m_sectionGpuWater;
+    m_vertexUsedBytes = other.m_vertexUsedBytes;
+    m_indexUsedBytes = other.m_indexUsedBytes;
+    m_waterVertexUsedBytes = other.m_waterVertexUsedBytes;
+    m_waterIndexUsedBytes = other.m_waterIndexUsedBytes;
+    m_dirtySections.store(other.m_dirtySections.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
     opaqueIndexCount = other.opaqueIndexCount;
     waterIndexCount = other.waterIndexCount;
     meshNeedsUpdate.store(other.meshNeedsUpdate.load());
@@ -226,6 +253,13 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     other.indexBuffer = {};
     other.waterVertexBuffer = {};
     other.waterIndexBuffer = {};
+    other.m_sectionGpu.fill({});
+    other.m_sectionGpuWater.fill({});
+    other.m_vertexUsedBytes = 0;
+    other.m_indexUsedBytes = 0;
+    other.m_waterVertexUsedBytes = 0;
+    other.m_waterIndexUsedBytes = 0;
+    other.m_dirtySections.store(0, std::memory_order_relaxed);
     other.opaqueIndexCount = 0;
     other.waterIndexCount = 0;
   }
@@ -425,45 +459,53 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
     }
 }
 
-// Section dirtying for one voxel edit (issue #107). The mesh state is one
-// payload per vertical 16^3 section, so an edit re-arms only the sections
-// whose quads can change:
-//   - the edited section always;
-//   - the section above/below when the voxel sits on a section Y boundary
-//     (faces at that plane are owned by both neighbors);
+// Section dirtying for one voxel edit (issue #107, PR #117 review). The
+// mesh state is one payload per vertical 16^3 section, so an edit re-arms
+// only the sections whose quads can change:
+//   - the edited section always, plus the section above/below when the
+//     voxel sits on a section Y boundary: faces at that plane are owned by
+//     both neighbors, and the AO corners of one side sample the other;
 //   - for in-chunk edits, a conservative light-dirty Y range. The light
 //     FIELD is recomputed chunk-wide by every build (no seams by
 //     construction); this range only decides which section meshes refresh
-//     their light bits in the same job: emissive edits spread their radius,
-//     other edits change the skylight column down to the first blocker.
-//     Deep horizontal flood beyond that range is the documented frontier
-//     for regional lighting.
-//   - border (mirror) writes change face ownership only at the written
-//     voxel's own y/16 section (cross-chunk light/AO do not exist).
+//     their light bits in the same job. Both light channels spread with a
+//     6-neighbour BFS at -1 brightness per step, so every mesh whose lit
+//     sample can change lies within the BFS radius (<= 15 hops) of a cell
+//     whose field value changes:
+//       * an occlusion change (blockTransmitsSkyLight flips) reroutes both
+//         BFS fields through the edited cell, and additionally flips the
+//         skylight column below the edit down to the first blocker - the
+//         lateral flood can bypass that blocker by up to the BFS radius,
+//         so the range bottom extends 15 cells below it, while the top
+//         covers the upward flood above the edit (overhang geometry);
+//       * an emitter added/removed/changed reseeds the block-light BFS.
+//   - border (mirror) writes change face ownership and AO sampling at the
+//     written voxel's y/16 section (cross-chunk light does not exist: the
+//     light field samples in-chunk voxels only). The Y-boundary adjacency
+//     applies to them too (edge faces' AO corners read the border strip).
 void Chunk::markEditDirtySections(int x, int y, int z, TextureType type,
                                   TextureType previousType, bool borderWrite)
 {
   if (y < 0 || y >= static_cast<int>(CHUNK_HEIGHT))
     return; // vertical padding has no mesh state
+  constexpr int kLightBfsRadius = 15;
   const int section = y / kOccupancySectionSize;
   uint16_t mask = static_cast<uint16_t>(1u << section);
-  if (!borderWrite)
-  {
-    const int inSection = y % kOccupancySectionSize;
-    if (inSection == 0 && section > 0)
-      mask |= static_cast<uint16_t>(1u << (section - 1));
-    if (inSection == kOccupancySectionSize - 1 && section + 1 < kOccupancySections)
-      mask |= static_cast<uint16_t>(1u << (section + 1));
+  const int inSection = y % kOccupancySectionSize;
+  if (inSection == 0 && section > 0)
+    mask |= static_cast<uint16_t>(1u << (section - 1));
+  if (inSection == kOccupancySectionSize - 1 && section + 1 < kOccupancySections)
+    mask |= static_cast<uint16_t>(1u << (section + 1));
 
-    int lightMinY = y;
-    int lightMaxY = y;
-    if (lighting::blockLightEmission(static_cast<uint8_t>(type)) > 0 ||
-        lighting::blockLightEmission(static_cast<uint8_t>(previousType)) > 0)
-    {
-      lightMinY = std::max(0, y - 14);
-      lightMaxY = std::min(CHUNK_HEIGHT - 1, y + 14);
-    }
-    else
+  const bool oldTransmits = blockTransmitsSkyLight(previousType);
+  const bool newTransmits = blockTransmitsSkyLight(type);
+  if (!borderWrite &&
+      (oldTransmits != newTransmits ||
+       lighting::blockLightEmission(static_cast<uint8_t>(type)) > 0 ||
+       lighting::blockLightEmission(static_cast<uint8_t>(previousType)) > 0))
+  {
+    int lightMinY = y - kLightBfsRadius;
+    if (oldTransmits != newTransmits)
     {
       // Skylight column below the edit: cells between the first blocker
       // and the edit change brightness (place blocks the shaft, delete
@@ -477,12 +519,13 @@ void Chunk::markEditDirtySections(int x, int y, int z, TextureType type,
                  static_cast<uint32_t>(z))
                                      .type)))
         --blocker;
-      lightMinY = blocker + 1;
+      lightMinY = std::min(lightMinY, blocker + 1 - kLightBfsRadius);
     }
     const int lightMinSection =
-        std::max(0, lightMinY / kOccupancySectionSize);
+        std::max(0, lightMinY) / kOccupancySectionSize;
     const int lightMaxSection =
-        std::min(kOccupancySections - 1, lightMaxY / kOccupancySectionSize);
+        std::min(kOccupancySections - 1,
+                 (y + kLightBfsRadius) / kOccupancySectionSize);
     for (int s = lightMinSection; s <= lightMaxSection; ++s)
       mask |= static_cast<uint16_t>(1u << s);
   }

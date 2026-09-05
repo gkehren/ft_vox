@@ -49,6 +49,14 @@ struct ChunkManagerProbe
 	{
 		return m.effectiveVoxelType(chunk, x, y, z);
 	}
+	// Test hook for the superseded-result drop path (PR #117 review phases
+	// 11-12): inject a completed mesh job as a worker would, without
+	// running the async machinery.
+	static void injectCompletedMeshJob(ChunkManager &m, Chunk *chunk, MeshBuildResult *result)
+	{
+		std::lock_guard<std::mutex> lock(m.m_completedJobsMutex);
+		m.m_completedMeshJobs.push_back({chunk, result});
+	}
 };
 
 // Full-quality payload lives in per-section slots since issue #107; these
@@ -117,6 +125,20 @@ struct ChunkStateProbe
 	{
 		return c.occupiedSectionMask();
 	}
+	// GPU slot layout + dirty mask state for the move-semantics tests
+	// (issue #107, PR #117 review phases 23-24).
+	static std::array<Chunk::SectionGpuSlot, Chunk::kOccupancySections> &sectionGpuMut(Chunk &c)
+	{
+		return c.m_sectionGpu;
+	}
+	static std::array<Chunk::SectionGpuSlot, Chunk::kOccupancySections> &sectionGpuWaterMut(Chunk &c)
+	{
+		return c.m_sectionGpuWater;
+	}
+	static uint32_t &vertexUsedMut(Chunk &c) { return c.m_vertexUsedBytes; }
+	static uint32_t &indexUsedMut(Chunk &c) { return c.m_indexUsedBytes; }
+	static uint32_t &waterVertexUsedMut(Chunk &c) { return c.m_waterVertexUsedBytes; }
+	static uint32_t &waterIndexUsedMut(Chunk &c) { return c.m_waterIndexUsedBytes; }
 	static void buildMeshRanged(Chunk &c, MeshBuildResult &out, uint64_t generation,
 								uint64_t revision, int minY, int maxY)
 	{
@@ -1927,11 +1949,17 @@ int main(int argc, char **argv)
 				const uint16_t mask = sec.dirtySections();
 				CHECK((mask & (1u << (surfaceY / 16))) != 0,
 					  "skylight edit dirties its own section");
-				const uint16_t aboveMask =
-				    static_cast<uint16_t>(0xFFFFu << (surfaceY / 16 + 1)) &
+				// The light BFS spreads -1 per step in every direction, so
+				// the range may reach up to 15 cells above the edit (PR #117
+				// review) - but never beyond that section.
+				const int topSection =
+					std::min(Chunk::kOccupancySections - 1,
+							 (surfaceY + 15) / Chunk::kOccupancySectionSize);
+				const uint16_t beyondMask =
+				    static_cast<uint16_t>(0xFFFFu << (topSection + 1)) &
 				    static_cast<uint16_t>((1u << Chunk::kOccupancySections) - 1u);
-				CHECK((mask & aboveMask) == 0 || surfaceY / 16 == Chunk::kOccupancySections - 1,
-					  "skylight light range never extends above the edit");
+				CHECK((mask & beyondMask) == 0 || topSection == Chunk::kOccupancySections - 1,
+					  "skylight light range stops within 15 cells above the edit");
 				sec.takeDirtySections();
 			}
 		}
@@ -1952,6 +1980,338 @@ int main(int argc, char **argv)
 			neighbor.setVoxel(CHUNK_SIZE, 70, 7, BRICKS);
 			CHECK(neighbor.dirtySections() == (1u << (70 / 16)),
 				  "east border mirror write dirties exactly the y/16 section");
+			// A mirror write on a section Y boundary also dirties the
+			// adjacent section: edge faces' AO corners of the boundary
+			// plane read the border strip from the neighboring section's
+			// pass (PR #117 review).
+			neighbor.takeDirtySections();
+			neighbor.setVoxel(-1, 64, 7, BRICKS);
+			CHECK(neighbor.dirtySections() == 0b11000,
+				  "border mirror write at y=64 dirties sections 3 and 4");
+			neighbor.takeDirtySections();
+			neighbor.setVoxel(-1, 63, 7, BRICKS);
+			CHECK(neighbor.dirtySections() == 0b11000,
+				  "border mirror write at y=63 dirties sections 3 and 4");
+		}
+	}
+
+	// 21) Dirty-mask completeness property (PR #117 review phases 16-20, 38):
+	// the fundamental invariant of section-local remeshing. For every edit
+	// scene, the sections whose payloads differ between the pre-edit and
+	// post-edit full builds must be a subset of the sections the edit
+	// dirtied, and composing pre-edit payloads with a partial rebuild at
+	// exactly the dirty mask must reproduce the post-edit full build byte
+	// for byte. This is what makes changedSections > dirtyMask impossible
+	// to ship silently - the old mask (no block-light range for occlusion
+	// changes, no BFS reach above the edit) fails the lava-shaft scene.
+	{
+		MeshResultPool pool;
+		TerrainGenerator pgen(4242);
+
+		auto fullBuild = [&](Chunk &chunk) -> MeshBuildResult *
+		{
+			MeshBuildResult *r = pool.acquire();
+			chunk.buildMesh(*r, chunk.meshGeneration(), chunk.meshRevision());
+			pool.finishBuild(r);
+			return r;
+		};
+		auto changedSections = [](const MeshBuildResult &before,
+								  const MeshBuildResult &after) -> uint16_t
+		{
+			uint16_t mask = 0;
+			for (size_t s = 0; s < before.sections.size(); ++s)
+				if (before.sections[s] != after.sections[s])
+					mask |= static_cast<uint16_t>(1u << s);
+			return mask;
+		};
+		auto topAt = [](Chunk &c, int x, int z) -> int
+		{
+			for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+				if (c.getVoxel(static_cast<uint32_t>(x), static_cast<uint32_t>(y),
+							   static_cast<uint32_t>(z))
+						.type != static_cast<uint8_t>(AIR))
+					return y;
+			return -1;
+		};
+		auto runScene = [&](const char *label, auto &&setup, auto &&edit)
+		{
+			Chunk chunk(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			CHECK(chunk.prepareVoxelStorageForGeneration(), "property: prepare");
+			chunk.generateTerrain(pgen);
+			setup(chunk);
+			chunk.takeDirtySections(); // drain generation + setup edits
+
+			MeshBuildResult *before = fullBuild(chunk);
+			edit(chunk);
+			const uint16_t mask = chunk.takeDirtySections();
+			MeshBuildResult *partial = pool.acquire();
+			chunk.buildMesh(*partial, chunk.meshGeneration(), chunk.meshRevision(), mask);
+			pool.finishBuild(partial);
+			MeshBuildResult *after = fullBuild(chunk);
+
+			const uint16_t changed = changedSections(*before, *after);
+			if (std::getenv("FT_PROP_DEBUG"))
+			{
+				std::cerr << "[prop] " << label << " mask=0x" << std::hex << mask
+				          << " changed=0x" << changed << std::dec << std::endl;
+			}
+			CHECK((changed & ~mask) == 0,
+				  (std::string(label) + ": every changed section is dirty").c_str());
+			bool composes = true;
+			for (size_t s = 0; s < before->sections.size(); ++s)
+			{
+				const SectionMeshPayload &want = ((mask >> s) & 1u)
+					                                 ? partial->sections[s]
+					                                 : before->sections[s];
+				if (!(want == after->sections[s]))
+					composes = false;
+			}
+			CHECK(composes, (std::string(label) +
+			                 ": before+partial composes into the after full build")
+			                    .c_str());
+			pool.release(before);
+			pool.release(partial);
+			pool.release(after);
+		};
+
+		const auto noSetup = [](Chunk &) {};
+		const auto lavaShaftSetup = [](Chunk &c)
+		{
+			// Underground lava pocket + a 1-wide air shaft rising out of it:
+			// block light from the lava climbs the shaft, so an occlusion
+			// change inside the lit span reroutes the BFS far from the edit.
+			for (int x = 9; x <= 11; ++x)
+				for (int z = 9; z <= 11; ++z)
+					for (int y = 39; y <= 41; ++y)
+						c.setVoxel(x, y, z, AIR);
+			for (int y = 41; y <= 56; ++y)
+				c.setVoxel(10, y, 10, AIR);
+		};
+		const auto lavaShaftLitSetup = [&lavaShaftSetup](Chunk &c)
+		{
+			lavaShaftSetup(c);
+			c.setVoxel(10, 40, 10, LAVA);
+		};
+
+		// Surface edits.
+		runScene("surface stone place", noSetup, [&topAt](Chunk &c)
+		{
+			const int y = topAt(c, 8, 8);
+			if (y >= 0 && y + 1 < static_cast<int>(CHUNK_HEIGHT))
+				c.setVoxel(8, y + 1, 8, STONE);
+		});
+		runScene("surface top delete", noSetup, [&topAt](Chunk &c)
+		{
+			const int y = topAt(c, 8, 8);
+			if (y > 0)
+				c.setVoxel(8, y, 8, AIR);
+		});
+
+		// Skylight shaft: closing and re-opening a full-height lit column.
+		const auto openShaftSetup = [](Chunk &c)
+		{
+			for (int y = 41; y <= 90; ++y)
+				c.setVoxel(8, y, 8, AIR);
+		};
+		runScene("shaft blocker place (sky column)", openShaftSetup, [](Chunk &c)
+		{
+			c.setVoxel(8, 60, 8, STONE);
+		});
+		runScene("shaft blocker delete (sky reopen)",
+				 [&openShaftSetup](Chunk &c)
+		{
+			openShaftSetup(c);
+			c.setVoxel(8, 60, 8, STONE);
+		},
+		         [](Chunk &c) { c.setVoxel(8, 60, 8, AIR); });
+
+		// Block light: emitter add/remove and occlusion reroutes near one.
+		runScene("lava placement", lavaShaftSetup, [](Chunk &c)
+		{
+			c.setVoxel(10, 40, 10, LAVA);
+		});
+		runScene("lava removal", lavaShaftLitSetup, [](Chunk &c)
+		{
+			c.setVoxel(10, 40, 10, AIR);
+		});
+		// The pre-review mask (emitter check only, sky scan down the column)
+		// misses the block-light BFS reroute of a plain opaque placement
+		// inside the lit shaft: the light dies ABOVE the edit (cells 46..55,
+		// section 3) while the edit itself sits mid-section 2 and the scan
+		// only ever reaches downward. Mid-section y on purpose.
+		runScene("stone placed inside lit shaft (BFS reroute)", lavaShaftLitSetup,
+		         [](Chunk &c) { c.setVoxel(10, 45, 10, STONE); });
+		runScene("stone removed inside lit shaft (BFS reroute)",
+				 [&lavaShaftLitSetup](Chunk &c)
+		{
+			lavaShaftLitSetup(c);
+			c.setVoxel(10, 45, 10, STONE);
+		},
+		         [](Chunk &c) { c.setVoxel(10, 45, 10, AIR); });
+
+		// Lateral sky flood: a sealed tunnel branch off the lit shaft.
+		runScene("cave tunnel opened (lateral sky flood)",
+				 [&openShaftSetup](Chunk &c)
+		{
+			openShaftSetup(c);
+			for (int x = 10; x <= 14; ++x)
+				c.setVoxel(x, 60, 8, AIR);
+			c.setVoxel(9, 60, 8, STONE); // seal
+		},
+		         [](Chunk &c) { c.setVoxel(9, 60, 8, AIR); });
+
+		// Section-boundary edits in both directions.
+		runScene("boundary edit at y=15",
+				 [](Chunk &c) { c.setVoxel(8, 15, 8, AIR); },
+		         [](Chunk &c) { c.setVoxel(8, 15, 8, STONE); });
+		runScene("boundary edit at y=16",
+				 [](Chunk &c) { c.setVoxel(8, 16, 8, AIR); },
+		         [](Chunk &c) { c.setVoxel(8, 16, 8, STONE); });
+
+		// Border mirror edit on the neighbor (its own before/after build).
+		{
+			Chunk neighbor(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f),
+			               ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			CHECK(neighbor.prepareVoxelStorageForGeneration(), "property border: prepare");
+			neighbor.generateTerrain(pgen);
+			neighbor.takeDirtySections();
+			MeshBuildResult *before = fullBuild(neighbor);
+			neighbor.setVoxel(-1, 63, 7, BRICKS);
+			const uint16_t mask = neighbor.takeDirtySections();
+			MeshBuildResult *after = fullBuild(neighbor);
+			const uint16_t changed = changedSections(*before, *after);
+			CHECK((changed & ~mask) == 0,
+				  "border mirror edit at y=63: every changed section is dirty");
+			pool.release(before);
+			pool.release(after);
+		}
+	}
+
+	// 22) Moves transfer the sectioned GPU layout and the dirty mask (PR
+	// #117 review phases 23-24): slots and used extents travel with the
+	// buffers they describe into, and the moved-from chunk starts clean.
+	{
+		MeshResultPool pool;
+		Chunk a(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		{
+			auto &slots = ChunkStateProbe::sectionGpuMut(a);
+			slots[2] = {/*vertexOffset*/ 256, /*vertexSlotBytes*/ 512,
+			            /*vertexUsedBytes*/ 480, /*vertexBase*/ 64,
+			            /*indexOffset*/ 768, /*indexSlotBytes*/ 384,
+			            /*indexUsedBytes*/ 360, /*indexCount*/ 90};
+			ChunkStateProbe::sectionGpuWaterMut(a)[5].indexCount = 12;
+		}
+		ChunkStateProbe::vertexUsedMut(a) = 1024;
+		ChunkStateProbe::indexUsedMut(a) = 2048;
+		ChunkStateProbe::waterVertexUsedMut(a) = 64;
+		ChunkStateProbe::waterIndexUsedMut(a) = 96;
+		a.markSectionsDirty(0b1010);
+
+		Chunk b(std::move(a));
+		CHECK(b.dirtySections() == 0b1010, "move ctor transfers the dirty mask");
+		const auto &bs = ChunkStateProbe::sectionGpuMut(b)[2];
+		CHECK(bs.vertexOffset == 256 && bs.vertexSlotBytes == 512 &&
+				  bs.vertexUsedBytes == 480 && bs.vertexBase == 64 &&
+				  bs.indexOffset == 768 && bs.indexSlotBytes == 384 &&
+				  bs.indexUsedBytes == 360 && bs.indexCount == 90,
+			  "move ctor transfers the opaque slot layout");
+		CHECK(ChunkStateProbe::sectionGpuWaterMut(b)[5].indexCount == 12,
+			  "move ctor transfers the water slot layout");
+		CHECK(ChunkStateProbe::vertexUsedMut(b) == 1024 &&
+				  ChunkStateProbe::indexUsedMut(b) == 2048 &&
+				  ChunkStateProbe::waterVertexUsedMut(b) == 64 &&
+				  ChunkStateProbe::waterIndexUsedMut(b) == 96,
+			  "move ctor transfers the used extents");
+		CHECK(a.dirtySections() == 0 &&
+				  ChunkStateProbe::sectionGpuMut(a)[2].indexCount == 0 &&
+				  ChunkStateProbe::sectionGpuWaterMut(a)[5].indexCount == 0 &&
+				  ChunkStateProbe::vertexUsedMut(a) == 0 &&
+				  ChunkStateProbe::indexUsedMut(a) == 0 &&
+				  ChunkStateProbe::waterVertexUsedMut(a) == 0 &&
+				  ChunkStateProbe::waterIndexUsedMut(a) == 0,
+			  "move ctor zeroes the source GPU/dirty state");
+
+		Chunk c(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		c.markSectionsDirty(0b1);
+		ChunkStateProbe::vertexUsedMut(c) = 4096;
+		c = std::move(b);
+		CHECK(c.dirtySections() == 0b1010 &&
+				  ChunkStateProbe::sectionGpuMut(c)[2].indexCount == 90 &&
+				  ChunkStateProbe::indexUsedMut(c) == 2048,
+			  "move assignment transfers the GPU/dirty state");
+		CHECK(b.dirtySections() == 0 && ChunkStateProbe::vertexUsedMut(b) == 0 &&
+				  ChunkStateProbe::sectionGpuMut(b)[2].indexCount == 0,
+			  "move assignment zeroes the source GPU/dirty state");
+	}
+
+	// 23) A completed section build superseded by a queued edit must re-arm
+	// the sections it rebuilt (PR #117 review phases 11-12): the edit only
+	// re-arms its own sections when it is applied, so without the re-arm the
+	// dropped job's sections would keep their stale GPU meshes.
+	{
+		MeshResultPool pool;
+		ChunkPool chunkPool(8);
+		TerrainGenerator mgen(1337);
+		ChunkManager manager(&mgen, nullptr, &chunkPool);
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(8);
+		Chunk *chunk = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		CHECK(chunk != nullptr, "superseded: chunk registered");
+		if (chunk)
+		{
+			CHECK(chunk->prepareVoxelStorageForGeneration(), "superseded: prepare");
+			chunk->generateTerrain(mgen);
+			chunk->takeDirtySections();
+
+			// A worker-style section build for section 2 completes while a
+			// section-8 edit is queued behind the in-transit flag.
+			MeshBuildResult *stale = pool.acquire();
+			chunk->buildMesh(*stale, chunk->meshGeneration(), chunk->meshRevision(),
+							 static_cast<uint16_t>(1u << 2));
+			pool.finishBuild(stale);
+
+			chunk->setInTransit(true);
+			int editY = -1;
+			for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+				if (chunk->getVoxel(8, static_cast<uint32_t>(y), 8).type ==
+					static_cast<uint8_t>(AIR))
+				{
+					editY = y;
+					break;
+				}
+			CHECK(editY > 0, "superseded: air column for the queued edit");
+			CHECK(manager.placeVoxel(glm::vec3(8.0f, static_cast<float>(editY), 8.0f),
+			                         STONE),
+				  "superseded: edit queued while in transit");
+			CHECK(chunk->dirtySections() == 0,
+				  "superseded: mask empty while the job is out");
+
+			ChunkManagerProbe::injectCompletedMeshJob(manager, chunk, stale);
+			manager.processFinishedJobs();
+
+			// The queued edit arms its own sections (plus the conservative
+			// light range of an occlusion change), and the dropped build
+			// re-arms the sections it had rebuilt on top.
+			const uint16_t expectedMask =
+			    static_cast<uint16_t>((1u << 2) | (1u << (editY / 16)));
+			CHECK((chunk->dirtySections() & expectedMask) == expectedMask,
+				  "superseded build re-arms its sections next to the edit's");
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == 0,
+				  "superseded: queued edit applied");
+			CHECK(pool.activeCount() == 0, "superseded: dropped result back in pool");
+
+			// The next dispatch must rebuild at least the re-armed sections.
+			const uint16_t mask = chunk->takeDirtySections();
+			CHECK((mask & expectedMask) == expectedMask,
+				  "superseded: dispatch takes the merged mask");
+			MeshBuildResult *rebuilt = pool.acquire();
+			chunk->buildMesh(*rebuilt, chunk->meshGeneration(), chunk->meshRevision(), mask);
+			pool.finishBuild(rebuilt);
+			CHECK(rebuilt->sectionsBuilt == mask,
+				  "superseded: next build stamps the merged mask");
+			pool.release(rebuilt);
 		}
 	}
 

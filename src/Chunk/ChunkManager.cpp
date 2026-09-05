@@ -541,9 +541,20 @@ void ChunkManager::processFinishedJobs()
 		if (job.result)
 		{
 			if (job.chunk && !supersededByEdit)
+			{
 				job.chunk->publishMeshResult(job.result);
+			}
 			else
+			{
+				// A superseded section build must re-arm the sections it
+				// rebuilt (PR #117 review): the queued edit only re-arms
+				// its own sections when it is applied below, so without
+				// this the dropped job's sections would keep their stale
+				// GPU meshes (old dirty A + new edit B => next mask A|B).
+				if (job.chunk)
+					job.chunk->markSectionsDirty(job.result->sectionsBuilt);
 				job.result->homePool->release(job.result);
+			}
 		}
 		if (job.chunk)
 			job.chunk->setInTransit(false);
