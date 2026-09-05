@@ -3,8 +3,9 @@
 // sectioned slot uploads of issue #107):
 //   - a staging-ring-full frame defers the upload WITHOUT losing, copying
 //     or rebuilding the completed build result;
-//   - the retry succeeds from the very same result, in place (section slots
-//     re-stage without swapping the chunk-level buffers);
+//   - the retry succeeds from the very same CPU result through the
+//     copy-on-write sectioned upload path (fresh buffers, retired old
+//     ones - no in-place GPU writes);
 //   - a partial staging failure (all opaque sections staged, the first
 //     water section does not fit) keeps the CPU result attached and the old
 //     GPU mesh untouched until the successful retry.

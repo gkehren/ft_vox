@@ -1912,9 +1912,10 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
       SectionPlan &p = plan.plans[s];
       if (((result.sectionsBuilt >> s) & 1u) == 0)
       {
-        // Dispatch contract: a partial result only reaches the upload when
-        // the chunk already carries sectioned GPU state (issue #107).
-        assert(fullRepack && "partial result without sectioned GPU state");
+        // Unmasked section: normal in both a partial build on an existing
+        // stream (the section keeps its committed slot untouched) and a
+        // partial build on a fresh stream (e.g. an all-empty water
+        // stream) - nothing to plan (PR #117 final review).
         continue;
       }
       const auto [verts, idxs] = payloadSel(s);

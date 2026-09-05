@@ -45,8 +45,10 @@ edit than the reviewed (incomplete) mask: that is the cost of the
 soundness the property test proves (changedSections must be a subset of
 the dirty mask; the old mask provably under-covered block-light BFS
 reroutes above edits). Burst edits inside one section and type-preserving
-edits stay at 1-2 sections. Every scenario remains 2-18x cheaper than a
-whole-chunk rebuild.
+edits stay at 1-2 sections. Localized edits remain roughly 2x or more
+cheaper in CPU mesh work, while edits spanning many sections converge
+toward whole-chunk rebuild cost and can land slightly above it, because
+lighting stays chunk-wide (regional lighting is the documented follow-up).
 
 3. End-to-end (ft_vox --seed 42 --benchmark 30, one run each)
 -------------------------------------------------------------------
