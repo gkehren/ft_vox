@@ -1,0 +1,98 @@
+Issue #106 - face-key masks for greedy meshing
+==============================================
+
+Change
+------
+Chunk::buildMeshRanged now materializes the face inputs of every slice cell
+once into compact per-cell face keys (thread-local workspace, reserved per
+worker; no per-slice/chunk heap churn), and the greedy width/height
+expansion evaluates the merge rules on the key fields instead of
+re-sampling both neighboring voxels and re-running the material/biome rules
+per probe. The key carries the raw voxel PAIR plus both owner colors - not
+just the cell's classified face - because the merge rules accept a
+candidate whose own visible face is the opposite face of a different
+transparent block, and they merge faces fronting air with faces fronting
+transparent blocks; a pure "same face" equality key cannot express those
+boundaries. AO/light stay out of the key (sampled at final quad corners).
+An inert fast path (identical types or two different non-air opaque types -
+no face possible from either side) skips color and classification work for
+the majority of cells. Design documented in docs/engine-architecture.md
+("Greedy meshing face keys").
+
+Byte-identity proof
+-------------------
+tests/test_mesh_facekey --hash-corpus 25 97 (3 seeds x 25 strided chunks
+with generated 4-neighborhood borders, full greedy + LOD hashes, plus one
+600-edit noisy chunk per seed): output byte-identical before/after the
+change (78/78 lines, every vertex/index count and FNV-1a payload hash
+equal). Terrain, water/coast, forest foliage, biome tint, transparency and
+chunk-border geometry are all covered by the corpus; the deterministic
+scenes in the test pin each boundary class individually. The metadata-bounds
+vs forced-full-range equivalence checks from #115 still pass on every scene.
+
+Corpus A/B (test_mesh_facekey --bench-corpus 25 97, Release, 75 builds/run,
+3 runs per side, interleaved builds on the same machine)
+------------------------------------------------------------------------
+facesGreedyAO per build (telemetry MeshBuild sub-timer, issue #101):
+  main            1374.99 / 1393.77 / 1408.97 us   (median 1393.8)
+  this branch     1284.10 / 1266.58 / 1270.62 us   (median 1270.6)
+  -> -8.8%
+
+Whole-build wall time over the corpus (median of 75 builds per run):
+  main            2.3139 / 2.3945 / 2.3340 ms
+  this branch     2.1896 / 2.2109 / 2.2412 ms   (final capture 2.1763 ms)
+  -> ~-5%
+
+Final capture per-seed medians (this branch):
+  seed 1337 median=2.1527 ms p95=2.5992 ms
+  seed 4242 median=2.2849 ms p95=2.9065 ms
+  seed 9001 median=2.1708 ms p95=2.8679 ms
+  stages: skylight 840.2us, blocklight 176.8us, occupancy 0.82us,
+          facesGreedyAO 1251.1us (n=75 each)
+
+Vertex/index counts: unchanged (byte-identical payloads, see above).
+
+End-to-end streaming benchmark (Release, same machine/protocol as #111/#115:
+FT_VOX_VALIDATION=0 FT_VOX_TELEMETRY=1, seed 42, 60s measured + 15s warmup,
+vsync off, RTX 4070 Ti)
+------------------------------------------------------------------------
+                                        main (d7875cc)   this branch
+Score                                          9924             9922
+avg FPS                                       615.4            612.6
+1% low FPS                                    271.5            266.8
+frames >16.7ms / >33.3ms                      0 / 0            0 / 0
+TerrainGen avgMs (n~16870)                   1.2744           1.2744
+MeshBuild avgMs (n~14730)                    2.3255           2.2342   (-3.9%)
+mesh.facesGreedyAO per build                 1.3532           1.2212   (-9.7%)
+MeshLOD avgMs                               0.00609          0.00601
+Report: docs/benchmarks/bench_20260905_102508_b9245450a4d3__s42_sc9922.txt
+(baseline: docs/benchmarks/bench_20260905_011252_d7875cc8f3ff__s42_sc9924.txt)
+
+A first, discarded end-to-end run on this branch (score 9863) was globally
+CPU-contended - TerrainGen, untouched by this PR, was +13% in it - and was
+replaced by the clean run above taken back-to-back with the baseline.
+
+Design iteration note
+---------------------
+The first key layout (one 64-bit "classified face" key compared by
+equality) was +13% SLOWER on the corpus and, more importantly, changed
+merge semantics: vertex counts shifted in both directions because the old
+rules evaluate the candidate's voxel PAIR, not its classification. The
+hash-corpus diff caught it immediately; the pair-carrying key above
+restored byte-identity and the win.
+
+Validation
+----------
+- ctest Release: 19/19 (incl. new MeshFaceKey)
+- Debug subset (MeshFaceKey, ChunkLifecycle, TerrainGeneration, StreamOpt,
+  MeshResultPool, WorkloadTelemetry x2, MeshUploadLifecycle): 8/8
+- Repeats: test_mesh_facekey x20 Release, x5 Debug;
+  test_chunk_lifecycle x20 Release - all green
+- git diff --check clean
+- ASan/TSan: left to CI per project convention
+
+How to reproduce
+----------------
+./build/tests/Release/test_mesh_facekey                 # contract tests
+./build/tests/Release/test_mesh_facekey --hash-corpus 25 97
+./build/tests/Release/test_mesh_facekey --bench-corpus 25 97

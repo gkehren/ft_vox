@@ -24,18 +24,86 @@ static constexpr uint32_t WATER_COLOR = 0xFF'E6804D;
 struct MeshWorkspace
 {
   std::vector<uint8_t> mask;
+  // Issue #106: face-key planes, one entry per mask cell. Written once per
+  // slice by the classification pass; the greedy probes then read key
+  // fields instead of re-sampling voxels/biome arrays. Thread-local like
+  // the mask: reserved once per worker, no heap churn afterwards.
+  std::vector<uint64_t> faceKeyLo;
+  std::vector<uint64_t> faceKeyHi;
   std::vector<glm::ivec3> skyQ;
   std::vector<glm::ivec3> blockQ;
 
   MeshWorkspace()
   {
     mask.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
+    faceKeyLo.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
+    faceKeyHi.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
     skyQ.reserve(512);
     blockQ.reserve(256);
   }
 };
 
 static thread_local MeshWorkspace s_meshWorkspace;
+
+// Issue #106: per-cell materialization of the greedy mesher's face inputs.
+// The classification pass (phase 1) samples the two voxels of a slice cell
+// exactly once and packs them with their biome owner colors; the greedy
+// width/height expansion (phase 2) then evaluates the merge rules on these
+// key fields instead of re-sampling voxels and biome arrays per probe.
+//
+// The merge semantics require the voxel PAIR, not just the cell's own
+// classified face:
+//  - a +q face fronts AIR in one cell and a transparent block in the next
+//    (stone top over air merges with stone top over water);
+//  - a -q face may merge with a cell whose own first-match classification
+//    is the opposite face of a different transparent block (a water
+//    underside merging across a cell fronting kelp/leaves/ice).
+// A single "same face" equality key cannot express those boundaries, so
+// each cell stores its raw pair and both owner colors:
+//
+//   lo: bits 0..7    type at the cell (the -q side voxel, may be a border)
+//       bits 8..15   type at cell+q (the +q side voxel, may be a border)
+//       bits 16..47  owner color of the cell-side type: biome color of its
+//                    column for grass/foliage, the constant water tint for
+//                    WATER, 0 otherwise
+//       bit  48      a visible face exists on this cell (classified once)
+//       bit  49      set when the face is owned by the cell+q voxel (-q)
+//   hi: bits 0..31   owner color of the cell+q type (same rules, at its
+//                    own column)
+// AO and light are intentionally NOT part of the key: they are sampled at
+// the final merged quad corners and never prevent a merge, exactly as
+// before (issue #106 acceptance criteria).
+inline constexpr uint64_t kFaceKeyHasFace = 1ull << 48;
+inline constexpr uint64_t kFaceKeyNegSide = 1ull << 49;
+inline uint64_t makeFaceKeyLo(uint8_t typeAtCell, uint8_t typeAtCellQ,
+                              uint32_t colorAtCell, uint64_t flags = 0)
+{
+  return static_cast<uint64_t>(typeAtCell) |
+         (static_cast<uint64_t>(typeAtCellQ) << 8) |
+         (static_cast<uint64_t>(colorAtCell) << 16) | flags;
+}
+
+// Owner-color kind per block type, precomputed once: keeps the per-cell
+// classification to a table load instead of a type switch in the hot loop.
+enum FaceColorKind : uint8_t { kColorNone, kColorGrass, kColorFoliage, kColorWater };
+inline const std::array<uint8_t, 256> &faceColorKindTable()
+{
+  static const std::array<uint8_t, 256> table = [] {
+    std::array<uint8_t, 256> kinds{};
+    for (int i = 0; i < 256; ++i)
+    {
+      const TextureType type = static_cast<TextureType>(i);
+      if (type == GRASS_TOP || type == GRASS_SIDE)
+        kinds[static_cast<size_t>(i)] = kColorGrass;
+      else if (blockIsFoliage(type))
+        kinds[static_cast<size_t>(i)] = kColorFoliage;
+      else if (type == WATER)
+        kinds[static_cast<size_t>(i)] = kColorWater;
+    }
+    return kinds;
+  }();
+  return table;
+}
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state, VoxelPool *voxelPool,
              BorderPool *borderPool, MeshResultPool *meshPool)
@@ -770,6 +838,8 @@ void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t 
     if (workspace.mask.size() < static_cast<size_t>(dims[u] * dims[v]))
     {
       workspace.mask.resize(dims[u] * dims[v]);
+      workspace.faceKeyLo.resize(dims[u] * dims[v]);
+      workspace.faceKeyHi.resize(dims[u] * dims[v]);
     }
 
     // Slice range along d; clamp Y when d==1.
@@ -810,6 +880,107 @@ void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t 
         vEnd = std::min(dims[v], occMaxY + 1);
       }
 
+      // Phase 1 (issue #106): materialize the face inputs of every cell of
+      // the slice exactly once - the two voxel types straddling the face
+      // plane plus the biome owner color of each side. The key plane covers
+      // the same clamped rect the seed loop walks; greedy expansion stays
+      // inside it because cells beyond the refined occupied Y span hold
+      // only AIR voxels (and border samples never own faces), so no
+      // in-chunk face can exist there and the old rule-based probes always
+      // broke on the first such cell.
+      uint64_t *faceKeyLo = workspace.faceKeyLo.data();
+      uint64_t *faceKeyHi = workspace.faceKeyHi.data();
+      // Chunk-ownership of the two sampled voxels is slice-invariant: the
+      // plane axes always iterate inside the chunk, so only the slice axis
+      // decides whether a sample is a local voxel or a border/shell read.
+      // Border/shell voxels are used solely for occlusion - the neighboring
+      // chunk renders its own faces. Owner colors are only ever read for
+      // in-chunk owners, so the guarded side stays 0 at the two outermost
+      // slices.
+      const bool type1ChunkSide = (x[d] >= 0);
+      const bool type2ChunkSide = (x[d] + 1 < dims[d]);
+      const uint8_t airType = static_cast<uint8_t>(AIR);
+      auto faceOwnerColor = [&](TextureType t, const glm::ivec3 &ownerCoord) -> uint32_t
+      {
+        switch (faceColorKindTable()[static_cast<size_t>(t)])
+        {
+        case kColorGrass:
+          return biomeGrassColors[ownerCoord[2] * CHUNK_SIZE + ownerCoord[0]];
+        case kColorFoliage:
+          return biomeFoliageColors[ownerCoord[2] * CHUNK_SIZE + ownerCoord[0]];
+        case kColorWater:
+          return WATER_COLOR;
+        default:
+          return 0;
+        }
+      };
+      for (x[u] = uStart; x[u] < uEnd; ++x[u])
+      {
+        for (x[v] = vStart; x[v] < vEnd; ++x[v])
+        {
+          const glm::ivec3 xq = x + q;
+          const TextureType type1 = getVoxelDataForMeshing(x[0], x[1], x[2]);
+          const TextureType type2 = getVoxelDataForMeshing(xq[0], xq[1], xq[2]);
+          const size_t cell = static_cast<size_t>(x[u]) * dims[v] + x[v];
+          const uint8_t t1 = static_cast<uint8_t>(type1);
+          const uint8_t t2 = static_cast<uint8_t>(type2);
+
+          // Inert pairs: identical types, or two different non-air opaque
+          // types. No face can be classified on them from either side and
+          // no merge probe can accept them (the backing check fails), so
+          // the owner colors and the classification are skipped.
+          if (t1 == t2 ||
+              (t1 != airType && t2 != airType &&
+               !TextureManager::isTransparent(type1) &&
+               !TextureManager::isTransparent(type2)))
+          {
+            faceKeyLo[cell] = makeFaceKeyLo(t1, t2, 0);
+            faceKeyHi[cell] = 0;
+            continue;
+          }
+
+          // Owner colors of both sides: each one is read by merge probes
+          // of the matching origin side, regardless of which face (if any)
+          // this cell itself classifies to - a -q face of T may merge
+          // across a cell whose own visible face is the opposite face of a
+          // different transparent block, and that probe compares the T-side
+          // owner color of the candidate.
+          const uint32_t color1 =
+              type1ChunkSide ? faceOwnerColor(type1, x) : 0;
+          const uint32_t color2 =
+              type2ChunkSide ? faceOwnerColor(type2, xq) : 0;
+
+          // Classify the visible face once (slice-invariant ownership
+          // sides) and store it beside the colors.
+          bool hasFace = false;
+          bool negSide = false;
+          if (type1ChunkSide && type1 != AIR &&
+              (type2 == AIR ||
+               (TextureManager::isTransparent(type2) && type1 != type2)))
+          {
+            // Face belongs to the voxel at x, pointing towards x+q
+            hasFace = true;
+          }
+          else if (type2ChunkSide && type2 != AIR &&
+                   (type1 == AIR || (TextureManager::isTransparent(type1) &&
+                                     type1 != type2)))
+          {
+            // Face belongs to the voxel at x+q, pointing towards x
+            hasFace = true;
+            negSide = true;
+          }
+          faceKeyLo[cell] = makeFaceKeyLo(t1, t2, color1,
+                                          (hasFace ? kFaceKeyHasFace : 0) |
+                                              (negSide ? kFaceKeyNegSide : 0));
+          faceKeyHi[cell] = color2;
+        }
+      }
+
+      // Phase 2 (issue #106): greedy rectangle merge over the key planes -
+      // the seed walk reads the precomputed classification and the
+      // width/height probes evaluate the exact merge rules of the old
+      // mesher on the materialized pair, with no voxel/shell sampling and
+      // no biome array lookups left in the hot loops.
       // Iterate over the plane (u, v)
       for (x[u] = uStart; x[u] < uEnd; ++x[u])
       {
@@ -821,156 +992,80 @@ void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t 
             continue; // Already processed this part of the slice
           }
 
-          // Get types of voxels on either side of the potential face
-          // Voxel at x is on one side, voxel at x+q is on the other.
-          // Use the new helper function that checks the neighbor shell
-          TextureType type1 = getVoxelDataForMeshing(x[0], x[1], x[2]);
-          TextureType type2 =
-              getVoxelDataForMeshing(x[0] + q[0], x[1] + q[1], x[2] + q[2]);
-
-          TextureType quad_type = AIR;
-          glm::ivec3 quad_normal_dir = {0, 0, 0};
-          glm::ivec3 quad_origin_voxel_coord = {
-              0, 0, 0}; // Min corner of the voxel this quad's face belongs to
-
-          // Only generate faces for voxels that are inside this chunk.
-          // Border/shell voxels are used solely for occlusion checks — the
-          // neighboring chunk is responsible for rendering its own faces.
-          bool type1InChunk = (x[0] >= 0 && x[0] < CHUNK_SIZE &&
-                               x[1] >= 0 && x[1] < CHUNK_HEIGHT &&
-                               x[2] >= 0 && x[2] < CHUNK_SIZE);
-          glm::ivec3 xq = x + q;
-          bool type2InChunk = (xq[0] >= 0 && xq[0] < CHUNK_SIZE &&
-                               xq[1] >= 0 && xq[1] < CHUNK_HEIGHT &&
-                               xq[2] >= 0 && xq[2] < CHUNK_SIZE);
-
-          if (type1 != AIR && type1InChunk &&
-              (type2 == AIR ||
-               (TextureManager::isTransparent(type2) && type1 != type2)))
-          {
-            // Face belongs to type1, pointing towards type2
-            quad_type = type1;
-            quad_normal_dir = q;
-            quad_origin_voxel_coord = x;
-          }
-          else if (type2 != AIR && type2InChunk &&
-                   (type1 == AIR || (TextureManager::isTransparent(type1) &&
-                                     type1 != type2)))
-          {
-            // Face belongs to type2, pointing towards type1
-            quad_type = type2;
-            quad_normal_dir = {-q[0], -q[1], -q[2]};
-            quad_origin_voxel_coord = xq;
-          }
-          else
+          const size_t cell = static_cast<size_t>(x[u]) * dims[v] + x[v];
+          const uint64_t keyLo = faceKeyLo[cell];
+          if ((keyLo & kFaceKeyHasFace) == 0)
           {
             continue; // No visible face here, or types are the same opaque.
           }
 
-          if (quad_type == AIR)
-            continue;
-
-          // Biome-tint types must not greedy-merge across color boundaries
-          // (water uses a constant color, so it never splits on color).
-          const bool isBiomeColoredType =
-              (quad_type == GRASS_TOP || quad_type == GRASS_SIDE ||
-               blockIsFoliage(quad_type));
-
-          uint32_t originBiomeColor = 0;
-          if (isBiomeColoredType)
-          {
-            int originColIdx = quad_origin_voxel_coord[2] * CHUNK_SIZE + quad_origin_voxel_coord[0];
-            originBiomeColor = blockIsFoliage(quad_type)
-                                   ? biomeFoliageColors[originColIdx]
-                                   : biomeGrassColors[originColIdx];
-          }
-
-          auto getCandidateBiomeColor = [&](const glm::ivec3 &coord) -> uint32_t
-          {
-            int colIdx = coord[2] * CHUNK_SIZE + coord[0];
-            return blockIsFoliage(quad_type)
-                       ? biomeFoliageColors[colIdx]
-                       : biomeGrassColors[colIdx];
-          };
+          const bool ownerAtX = (keyLo & kFaceKeyNegSide) == 0;
+          const uint8_t originType = static_cast<uint8_t>(
+              ownerAtX ? (keyLo & 0xFF) : ((keyLo >> 8) & 0xFF));
+          const TextureType quad_type = static_cast<TextureType>(originType);
+          const glm::ivec3 quad_normal_dir = ownerAtX ? q : -q;
+          const glm::ivec3 quad_origin_voxel_coord = ownerAtX ? x : (x + q);
+          const uint32_t originColor =
+              ownerAtX ? static_cast<uint32_t>(keyLo >> 16)
+                       : static_cast<uint32_t>(faceKeyHi[cell]);
 
           // Calculate width (w) of the quad along dimension u
           int w;
-          for (w = 1; x[u] + w < dims[u]; ++w)
+          for (w = 1; x[u] + w < uEnd; ++w)
           {
-            if (workspace.mask[(x[u] + w) * dims[v] + x[v]])
+            const size_t probe = static_cast<size_t>(x[u] + w) * dims[v] + x[v];
+            if (workspace.mask[probe])
               break;
-
-            glm::ivec3 next_pos_u_slice = x;
-            next_pos_u_slice[u] +=
-                w; // Next voxel in u-direction in current slice
-
-            // Use the new helper function
-            TextureType check_type1 = getVoxelDataForMeshing(
-                next_pos_u_slice[0], next_pos_u_slice[1], next_pos_u_slice[2]);
-            TextureType check_type2 = getVoxelDataForMeshing(
-                next_pos_u_slice[0] + q[0], next_pos_u_slice[1] + q[1],
-                next_pos_u_slice[2] + q[2]);
-
-            if (quad_normal_dir == q)
-            { // Face is for a block like type1
-              if (check_type1 != quad_type ||
-                  !(check_type2 == AIR ||
-                    (TextureManager::isTransparent(check_type2) &&
-                     check_type1 != check_type2)))
-                break;
+            const uint64_t key = faceKeyLo[probe];
+            if (ownerAtX)
+            {
+              const uint8_t ownerType = static_cast<uint8_t>(key & 0xFF);
+              const uint8_t backingType = static_cast<uint8_t>((key >> 8) & 0xFF);
+              if (ownerType != originType ||
+                  !(backingType == airType ||
+                    (TextureManager::isTransparent(static_cast<TextureType>(backingType)) &&
+                     ownerType != backingType)) ||
+                  static_cast<uint32_t>(key >> 16) != originColor)
+                break; // Adjacent cell is not the same mergeable face
             }
             else
-            { // Face is for a block like type2
-              if (check_type2 != quad_type ||
-                  !(check_type1 == AIR ||
-                    (TextureManager::isTransparent(check_type1) &&
-                     check_type2 != check_type1)))
-                break;
-            }
-
-            // Prevent merging across biome color boundaries
-            if (isBiomeColoredType)
             {
-              glm::ivec3 candidateVoxel = (quad_normal_dir == q)
-                                              ? next_pos_u_slice
-                                              : next_pos_u_slice + q;
-              if (getCandidateBiomeColor(candidateVoxel) != originBiomeColor)
-                break;
+              const uint8_t ownerType = static_cast<uint8_t>((key >> 8) & 0xFF);
+              const uint8_t backingType = static_cast<uint8_t>(key & 0xFF);
+              if (ownerType != originType ||
+                  !(backingType == airType ||
+                    (TextureManager::isTransparent(static_cast<TextureType>(backingType)) &&
+                     ownerType != backingType)) ||
+                  static_cast<uint32_t>(faceKeyHi[probe]) != originColor)
+                break; // Adjacent cell is not the same mergeable face
             }
           }
 
           // Calculate height (h) of the quad along dimension v
           int h;
           bool h_break = false;
-          for (h = 1; x[v] + h < dims[v]; ++h)
+          for (h = 1; x[v] + h < vEnd; ++h)
           {
             for (int k = 0; k < w;
                  ++k)
             { // Check all cells in the current row of width w
-              if (workspace.mask[(x[u] + k) * dims[v] + (x[v] + h)])
+              const size_t probe =
+                  static_cast<size_t>(x[u] + k) * dims[v] + (x[v] + h);
+              if (workspace.mask[probe])
               {
                 h_break = true;
                 break;
               }
-
-              glm::ivec3 next_pos_v_slice = x;
-              next_pos_v_slice[u] += k;
-              next_pos_v_slice[v] += h;
-
-              // Use the new helper function
-              TextureType check_type1 = getVoxelDataForMeshing(
-                  next_pos_v_slice[0], next_pos_v_slice[1],
-                  next_pos_v_slice[2]);
-              TextureType check_type2 = getVoxelDataForMeshing(
-                  next_pos_v_slice[0] + q[0], next_pos_v_slice[1] + q[1],
-                  next_pos_v_slice[2] + q[2]);
-
-              if (quad_normal_dir == q)
+              const uint64_t key = faceKeyLo[probe];
+              if (ownerAtX)
               {
-                if (check_type1 != quad_type ||
-                    !(check_type2 == AIR ||
-                      (TextureManager::isTransparent(check_type2) &&
-                       check_type1 != check_type2)))
+                const uint8_t ownerType = static_cast<uint8_t>(key & 0xFF);
+                const uint8_t backingType = static_cast<uint8_t>((key >> 8) & 0xFF);
+                if (ownerType != originType ||
+                    !(backingType == airType ||
+                      (TextureManager::isTransparent(static_cast<TextureType>(backingType)) &&
+                       ownerType != backingType)) ||
+                    static_cast<uint32_t>(key >> 16) != originColor)
                 {
                   h_break = true;
                   break;
@@ -978,23 +1073,13 @@ void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t 
               }
               else
               {
-                if (check_type2 != quad_type ||
-                    !(check_type1 == AIR ||
-                      (TextureManager::isTransparent(check_type1) &&
-                       check_type2 != check_type1)))
-                {
-                  h_break = true;
-                  break;
-                }
-              }
-
-              // Prevent merging across biome color boundaries
-              if (isBiomeColoredType)
-              {
-                glm::ivec3 candidateVoxel = (quad_normal_dir == q)
-                                                ? next_pos_v_slice
-                                                : next_pos_v_slice + q;
-                if (getCandidateBiomeColor(candidateVoxel) != originBiomeColor)
+                const uint8_t ownerType = static_cast<uint8_t>((key >> 8) & 0xFF);
+                const uint8_t backingType = static_cast<uint8_t>(key & 0xFF);
+                if (ownerType != originType ||
+                    !(backingType == airType ||
+                      (TextureManager::isTransparent(static_cast<TextureType>(backingType)) &&
+                       ownerType != backingType)) ||
+                    static_cast<uint32_t>(faceKeyHi[probe]) != originColor)
                 {
                   h_break = true;
                   break;
@@ -1088,13 +1173,9 @@ void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t 
           uint32_t packedColor = 0;
           if (needsBiomeColoring)
           {
-            int colIdx = quad_origin_voxel_coord[2] * CHUNK_SIZE + quad_origin_voxel_coord[0];
-            if (quad_type == GRASS_TOP || quad_type == GRASS_SIDE)
-              packedColor = biomeGrassColors[colIdx];
-            else if (blockIsFoliage(quad_type))
-              packedColor = biomeFoliageColors[colIdx];
-            else if (quad_type == WATER)
-              packedColor = WATER_COLOR;
+            // Decided once per cell in the classification pass (issue #106):
+            // the same owner color the merge compared.
+            packedColor = originColor;
           }
 
           auto calculateAO = [&](const glm::vec3 &localPos, int cornerIdx) -> uint32_t
