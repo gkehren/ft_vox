@@ -1,4 +1,9 @@
 #pragma once
+#include <algorithm>
+#include <array>
+#include <climits>
+#include <shared_mutex>
+
 #include <Chunk/ChunkManager.hpp>
 #include <Physics/BlockPhysics.hpp>
 

@@ -389,6 +389,7 @@ static int profilePlayerPhysics()
 
 int main(int argc, char **argv)
 {
+	if (argc > 1 && std::string_view(argv[1]) == "--physics-profile") return profilePlayerPhysics();
     // Published memory includes free pool storage and survives ownership moves.
     if (telemetry::registry().enabled) {
         using namespace telemetry;

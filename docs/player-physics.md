@@ -92,9 +92,9 @@ and world queries but will need their own activation, scheduling and update
 rules. This change does not introduce entity-to-entity collisions, a rigid-body
 engine, an ECS, fluid propagation, damage or network authority.
 
-The implementation is independent of the open face-mask (#106), mesh-section
-(#107), incremental streaming (#108), GPU arena (#109) and packed-vertex (#110)
-work. None of those issues is implemented here.
+The physics implementation remains independent of the meshing architecture
+introduced by #106 and #107. Incremental streaming (#108), GPU arenas (#109),
+and packed vertices (#110) remain out of scope.
 
 ## Validation
 
