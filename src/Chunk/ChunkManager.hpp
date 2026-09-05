@@ -180,6 +180,7 @@ private:
 	// Testing hook (issue #114 review): exposes the deferred-edit queue
 	// size without making it public API.
 	friend struct ChunkManagerProbe;
+	friend class ChunkCollisionView;
 
 	std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> m_chunks;
 	std::vector<Chunk *> m_activeChunks;

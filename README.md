@@ -143,7 +143,10 @@ sudo apt install vulkan-validationlayers
 | Input | Action |
 |-------|--------|
 | WASD / mouse | Move / look |
-| Space / Ctrl | Up / down (fly) |
+| Space | Jump / swim up / fly up |
+| Shift | Sprint / swim down / fly down |
+| V | Switch walking / debug flight (requires a clear, loaded body volume) |
+| X (flight) | Toggle flight speed boost |
 | LMB / RMB | Break / place block |
 | T | Cycle selected block |
 | B | Toggle chunk borders |

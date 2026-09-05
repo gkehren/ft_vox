@@ -1,0 +1,45 @@
+Test project D:/Projects/ft_vox/build
+      Start  1: PlayerPhysics
+ 1/20 Test  #1: PlayerPhysics ....................   Passed    0.01 sec
+      Start  2: NetworkIntegrationTest
+ 2/20 Test  #2: NetworkIntegrationTest ...........   Passed    1.20 sec
+      Start  3: VulkanResourceSmoke
+ 3/20 Test  #3: VulkanResourceSmoke ..............   Passed    0.62 sec
+      Start  4: VulkanValidationErrorReporting
+ 4/20 Test  #4: VulkanValidationErrorReporting ...   Passed    0.64 sec
+      Start  5: VisualLookDefaults
+ 5/20 Test  #5: VisualLookDefaults ...............   Passed    0.01 sec
+      Start  6: RenderHelpers
+ 6/20 Test  #6: RenderHelpers ....................   Passed    0.02 sec
+      Start  7: StreamOptHelpers
+ 7/20 Test  #7: StreamOptHelpers .................   Passed    0.01 sec
+      Start  8: TerrainGeneration
+ 8/20 Test  #8: TerrainGeneration ................   Passed   37.35 sec
+      Start  9: BiomeMapGeneration
+ 9/20 Test  #9: BiomeMapGeneration ...............   Passed    1.08 sec
+      Start 10: InputRouting
+10/20 Test #10: InputRouting .....................   Passed    0.01 sec
+      Start 11: ChunkLifecycle
+11/20 Test #11: ChunkLifecycle ...................   Passed    0.19 sec
+      Start 12: MeshFaceKey
+12/20 Test #12: MeshFaceKey ......................   Passed    0.06 sec
+      Start 13: MeshUploadLifecycle
+13/20 Test #13: MeshUploadLifecycle ..............   Passed    0.44 sec
+      Start 14: VoxelPool
+14/20 Test #14: VoxelPool ........................   Passed    0.01 sec
+      Start 15: BorderPool
+15/20 Test #15: BorderPool .......................   Passed    0.01 sec
+      Start 16: MeshResultPool
+16/20 Test #16: MeshResultPool ...................   Passed    0.02 sec
+      Start 17: ProfilerWorkerConsistency
+17/20 Test #17: ProfilerWorkerConsistency ........   Passed    0.08 sec
+      Start 18: GpuProfile
+18/20 Test #18: GpuProfile .......................   Passed    0.02 sec
+      Start 19: WorkloadTelemetry
+19/20 Test #19: WorkloadTelemetry ................   Passed    0.01 sec
+      Start 20: WorkloadTelemetryDisabled
+20/20 Test #20: WorkloadTelemetryDisabled ........   Passed    0.00 sec
+
+100% tests passed out of 20
+
+Total Test time (real) =  41.80 sec

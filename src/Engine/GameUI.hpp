@@ -3,6 +3,7 @@
 #include <Engine/EngineDefs.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Camera/Camera.hpp>
+#include <Physics/PlayerController.hpp>
 #include <Chunk/ChunkManager.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
@@ -28,6 +29,11 @@ class StagingRing;
 struct GameUIFrame
 {
 	Camera *camera{nullptr};
+	const physics::PlayerController *player{nullptr};
+	bool playerFlight{false};
+	const char *playerStatus{""};
+	std::function<void(bool)> setPlayerFlight;
+	std::function<void(CameraMode)> setCameraMode;
 	ChunkManager *chunks{nullptr};
 	ChunkPool *pool{nullptr};
 	TerrainGenerator *generator{nullptr};

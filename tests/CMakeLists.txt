@@ -4,6 +4,12 @@ add_executable(test_network
     ${CMAKE_SOURCE_DIR}/src/Network/Client.cpp
 )
 
+# CPU-only physics: no SDL, Vulkan device, meshes or terrain generation.
+add_executable(test_physics test_physics.cpp)
+target_include_directories(test_physics PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_physics PRIVATE glm)
+add_test(NAME PlayerPhysics COMMAND test_physics)
+
 target_link_libraries(test_network PRIVATE
     Boost::boost
     Boost::system

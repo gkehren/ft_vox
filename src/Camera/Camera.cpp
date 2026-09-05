@@ -88,13 +88,6 @@ void Camera::processKeyboard(double deltaTime, const bool *keys)
 			position -= isoRight * velocity;
 		if (keys[SDL_SCANCODE_D])
 			position += isoRight * velocity;
-		if (keys[SDL_SCANCODE_X])
-		{
-			if (this->movementSpeed == 2.5f)
-				this->movementSpeed *= 50.0f;
-			else
-				this->movementSpeed = 2.5f;
-		}
 
 		position.x = std::clamp(position.x, static_cast<float>(SHRT_MIN), static_cast<float>(SHRT_MAX));
 		position.y = 100.0f;
@@ -125,17 +118,6 @@ void Camera::processKeyboard(double deltaTime, const bool *keys)
 	if (keys[SDL_SCANCODE_LSHIFT])
 	{
 		position -= worldUp * velocity;
-	}
-	if (keys[SDL_SCANCODE_X])
-	{
-		if (this->movementSpeed == 2.5f)
-		{
-			this->movementSpeed *= 50.0f;
-		}
-		else
-		{
-			this->movementSpeed = 2.5f;
-		}
 	}
 
 	position.x = std::clamp(position.x, static_cast<float>(SHRT_MIN), static_cast<float>(SHRT_MAX));

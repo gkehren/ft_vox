@@ -7,6 +7,7 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Chunk/ChunkBorders.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
+#include <Chunk/ChunkCollisionView.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Engine/InputRouting.hpp>
@@ -160,7 +161,8 @@ Engine::Engine(std::string resourcePackRoot)
 
 	std::cout << "SDL version: " << SDL_GetVersion() << "\n";
 	std::cout << "ft_vox: Vulkan — streaming procedural world\n";
-	std::cout << "  WASD fly · mouse look · LMB/RMB edit · T block · B borders\n";
+	std::cout << "  WASD move · Space jump/swim up · Shift sprint/swim down · V flight\n";
+	std::cout << "  Mouse look · LMB/RMB edit · T block · B borders\n";
 	std::cout << "  C free mouse · F1–F7 panels · F10 VSync · Esc quit\n";
 	std::cout << "  ThreadPool workers: " << hw << "\n";
 }
@@ -322,16 +324,81 @@ Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &res
 void Engine::placeCameraOnSurface()
 {
 	const glm::vec3 pos = camera.getPosition();
-	for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
+	if (!chunkManager) return;
+	// Keep the established benchmark's center/altitude byte-for-byte: changing
+	// gameplay spawn must not silently change the renderer comparison workload.
+	if (m_benchmark.isActive())
 	{
-		if (chunkManager &&
-			chunkManager->isVoxelActive(glm::vec3(pos.x, static_cast<float>(y), pos.z)))
+		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
+			if (chunkManager->isVoxelActive({pos.x, float(y), pos.z}))
+			{
+				camera.setPosition({pos.x, float(y + 3), pos.z});
+				resetPlayerAtCamera();
+				return;
+			}
+		camera.setPosition({pos.x, 100.f, pos.z});
+		resetPlayerAtCamera();
+		return;
+	}
+	ChunkCollisionView world(*chunkManager);
+	physics::QueryStats queries;
+	// Closest columns first, bounded by the already bootstrapped region.
+	for (int radius = 0; radius < kBootstrapRadius * int(CHUNK_SIZE); ++radius)
+	for (int dx = -radius; dx <= radius; ++dx)
+	for (int dz = -radius; dz <= radius; ++dz)
+	{
+		if (std::max(std::abs(dx), std::abs(dz)) != radius) continue;
+		const int x = static_cast<int>(std::floor(pos.x)) + dx;
+		const int z = static_cast<int>(std::floor(pos.z)) + dz;
+		for (int y = CHUNK_HEIGHT - 1; y >= 0; --y)
 		{
-			camera.setPosition(glm::vec3(pos.x, static_cast<float>(y + 3), pos.z));
-			return;
+			const auto cell = world.sample({x, y, z});
+			if (!cell.available) break;
+			if (!cell.solid) continue;
+			physics::Body candidate;
+			candidate.position = {x + 0.5, y + 1.0 + physics::skin, z + 0.5};
+			if (physics::clear(world, candidate.bounds(), queries))
+			{
+				player.reset(candidate.position);
+				playerFlight = false;
+				playerStatus = "";
+				camera.setPosition(glm::vec3(player.eye()));
+				return;
+			}
 		}
 	}
 	camera.setPosition(glm::vec3(pos.x, 100.f, pos.z));
+	resetPlayerAtCamera();
+	playerFlight = true;
+	playerStatus = "No safe spawn in loaded terrain: fly to an open area.";
+}
+
+void Engine::resetPlayerAtCamera()
+{
+	player.reset(glm::dvec3(camera.getPosition()) - glm::dvec3(0, player.settings.eyeHeight, 0));
+	jumpPressed = false;
+}
+
+void Engine::setPlayerFlight(bool enabled)
+{
+	if (m_benchmark.isActive()) return;
+	if (!enabled)
+	{
+		if (!chunkManager) return;
+		ChunkCollisionView world(*chunkManager);
+		physics::Body candidate = player.body;
+		candidate.position = glm::dvec3(camera.getPosition()) - glm::dvec3(0, player.settings.eyeHeight, 0);
+		physics::QueryStats queries;
+		if (!physics::clear(world, candidate.bounds(), queries))
+		{
+			playerStatus = "Walk unavailable: body overlaps solid or unloaded terrain.";
+			return;
+		}
+		camera.setMode(CameraMode::PERSPECTIVE);
+	}
+	playerFlight = enabled;
+	playerStatus = "";
+	resetPlayerAtCamera();
 }
 
 void Engine::reloadWorld(int newSeed)
@@ -605,6 +672,16 @@ void Engine::handleEvents()
 		case SDL_EVENT_QUIT:
 			running = false;
 			break;
+		case SDL_EVENT_WINDOW_FOCUS_LOST:
+			windowFocused = false;
+			jumpPressed = false;
+			player.suspend();
+			break;
+		case SDL_EVENT_WINDOW_FOCUS_GAINED:
+			windowFocused = true;
+			jumpPressed = false;
+			player.suspend();
+			break;
 		case SDL_EVENT_WINDOW_RESIZED:
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 			onResize(event.window.data1, event.window.data2);
@@ -644,6 +721,20 @@ void Engine::handleEvents()
 
 			if (uiCapturesKeyboard)
 				break;
+			if (event.key.repeat || m_benchmark.isActive() || !windowFocused)
+				break;
+			if (key == SDLK_SPACE && !paused)
+				jumpPressed = true;
+			if (key == SDLK_V && !paused)
+			{
+				setPlayerFlight(!playerFlight);
+				break;
+			}
+			if (key == SDLK_X && playerFlight && !paused)
+			{
+				camera.setMovementSpeed(camera.getMovementSpeed() < 100.f ? 125.f : 20.f);
+				break;
+			}
 
 			if (keyRoute == KeyRoute::GameplayShortcut)
 			{
@@ -705,7 +796,13 @@ void Engine::handleEvents()
 				if (event.button.button == SDL_BUTTON_LEFT)
 					chunkManager->deleteVoxel(block);
 				else if (event.button.button == SDL_BUTTON_RIGHT)
-					chunkManager->placeVoxel(prev, selectedTexture);
+				{
+					// Logical pending solids immediately participate in subsequent
+					// collision queries, so the body cannot enter before publication.
+					if (playerFlight || !physics::blockCell(selectedTexture).solid ||
+						!physics::overlaps(player.body.bounds(), physics::voxelBounds(glm::ivec3(glm::floor(prev)))))
+						chunkManager->placeVoxel(prev, selectedTexture);
+				}
 			}
 			break;
 		case SDL_EVENT_MOUSE_WHEEL:
@@ -723,18 +820,56 @@ void Engine::handleEvents()
 
 void Engine::processInput(double dt)
 {
-	if (m_benchmark.locksInput())
+	if (m_benchmark.isActive() || paused || !windowFocused)
+	{
+		player.suspend();
+		jumpPressed = false;
 		return;
-	if (paused)
-		return;
-	if (imgui && imgui->wantCaptureKeyboard())
-		return;
+	}
+	// Isometric is an inspection mode; it must never move a physical body.
+	if (camera.getMode() == CameraMode::ISOMETRIC && !playerFlight)
+		setPlayerFlight(true);
+	const bool captured = imgui && imgui->wantCaptureKeyboard();
 	const bool *keys = SDL_GetKeyboardState(nullptr);
-	camera.processKeyboard(dt, keys);
+	if (playerFlight)
+	{
+		if (!captured) camera.processKeyboard(std::min(dt, 0.05), keys);
+		resetPlayerAtCamera();
+		return;
+	}
+	physics::PlayerInput input;
+	if (!captured)
+	{
+		const double yaw = glm::radians(double(camera.getYaw()));
+		const glm::dvec2 forward(std::cos(yaw), std::sin(yaw));
+		const glm::dvec2 right(-forward.y, forward.x);
+		input.move = forward * double(int(keys[SDL_SCANCODE_W]) - int(keys[SDL_SCANCODE_S])) +
+			right * double(int(keys[SDL_SCANCODE_D]) - int(keys[SDL_SCANCODE_A]));
+		input.sprint = keys[SDL_SCANCODE_LSHIFT];
+		input.jumpPressed = jumpPressed;
+		input.swimUp = keys[SDL_SCANCODE_SPACE];
+		input.swimDown = keys[SDL_SCANCODE_LSHIFT];
+	}
+	else player.clearInput();
+	jumpPressed = false;
+	if (chunkManager)
+	{
+		PROFILE_SCOPE("Physics");
+		ChunkCollisionView world(*chunkManager);
+		player.advance(dt, input, world);
+		camera.setPosition(glm::vec3(player.renderEye()));
+	}
 }
 
 void Engine::tickBenchmark(double dt)
 {
+	if (m_benchmark.isActive() && !benchmarkOwnedCamera)
+	{
+		benchmarkOwnedCamera = true;
+		flightBeforeBenchmark = playerFlight;
+		player.suspend();
+		jumpPressed = false;
+	}
 	if (m_benchmark.phase() == BenchmarkPhase::Reloading)
 	{
 		const BenchmarkConfig &cfg = m_benchmark.config();
@@ -771,6 +906,13 @@ void Engine::tickBenchmark(double dt)
 	}
 
 	// Restore VSync after done/cancel if we forced it off
+	if (!m_benchmark.isActive() && benchmarkOwnedCamera)
+	{
+		benchmarkOwnedCamera = false;
+		playerFlight = true;
+		resetPlayerAtCamera();
+		setPlayerFlight(flightBeforeBenchmark);
+	}
 	if (!m_benchmark.isActive() && m_benchmark.needsVsyncRestore())
 	{
 		setVSync(m_benchmark.prevVsync());
@@ -877,6 +1019,15 @@ void Engine::drawUi()
 
 	GameUIFrame f{};
 	f.camera = &camera;
+	f.player = &player;
+	f.playerFlight = playerFlight;
+	f.playerStatus = playerStatus;
+	f.setPlayerFlight = [this](bool enabled) { setPlayerFlight(enabled); };
+	f.setCameraMode = [this](CameraMode mode) {
+		if (m_benchmark.isActive()) return;
+		if (mode == CameraMode::ISOMETRIC && !playerFlight) setPlayerFlight(true);
+		camera.setMode(mode);
+	};
 	f.chunks = chunkManager.get();
 	f.pool = chunkPool.get();
 	f.generator = terrainGenerator.get();
@@ -1045,24 +1196,12 @@ void Engine::run()
 		{
 			PROFILE_SCOPE("UpdateUBO");
 			const float farPlane = static_cast<float>(renderSettings.maxRenderDistance) * 1.25f;
-			// Underwater: camera inside a water voxel (coarse sample via chunk manager)
+			// Visual immersion follows the eye, including water occupied by kelp.
 			bool underwater = false;
 			if (chunkManager)
 			{
-				const glm::vec3 eye = camera.getPosition();
-				if (Chunk *ch = chunkManager->getChunkAtWorldPos(eye))
-				{
-					if (ch->getState() >= ChunkState::GENERATED)
-					{
-						const int chunkX = static_cast<int>(std::floor(eye.x / static_cast<float>(CHUNK_SIZE)));
-						const int chunkZ = static_cast<int>(std::floor(eye.z / static_cast<float>(CHUNK_SIZE)));
-						const int lx = static_cast<int>(std::floor(eye.x)) - chunkX * CHUNK_SIZE;
-						const int ly = static_cast<int>(std::floor(eye.y));
-						const int lz = static_cast<int>(std::floor(eye.z)) - chunkZ * CHUNK_SIZE;
-						if (lx >= 0 && lx < CHUNK_SIZE && ly >= 0 && ly < CHUNK_HEIGHT && lz >= 0 && lz < CHUNK_SIZE)
-							underwater = (static_cast<TextureType>(ch->getVoxel(lx, ly, lz).type) == WATER);
-					}
-				}
+				ChunkCollisionView world(*chunkManager);
+				underwater = world.sample(glm::ivec3(glm::floor(camera.getPosition()))).medium == physics::Medium::Water;
 			}
 			worldRenderer->postSettings().underwater = underwater;
 			worldRenderer->updateFrameUBO(frameIndex, camera,

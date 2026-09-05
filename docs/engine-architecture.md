@@ -46,6 +46,7 @@ File: `src/Engine/Engine.hpp` / `Engine.cpp`.
 - **World:** `TerrainGenerator`, `ThreadPool`, `ChunkPool`, `ChunkManager`  
 - **GPU streaming helpers:** `StagingRing`, `GpuResourceRetire`  
 - **View:** `Camera`  
+- **Player:** `physics::PlayerController` — fixed-step CPU body, gravity, collision and swimming; camera follows interpolated eyes in walking mode
 - **Settings:** `RenderSettings`, `ShaderParameters`, `RenderTiming`, seed  
 - **Benchmark:** `Benchmark`  
 
@@ -403,10 +404,15 @@ Generation is **horizontal infinite** in practice (chunk X/Z); vertical extent i
 
 File: `src/Camera/Camera.hpp` / `Camera.cpp`.
 
-- First-person fly/look used by the sandbox  
+- First-person physical player by default, with explicit debug flight and isometric inspection
 - Supplies view matrix, position, and frustum data for culling  
-- Engine places camera on surface at spawn (`placeCameraOnSurface`)  
+- Engine finds a clear, supported player spawn (`placeCameraOnSurface`); unavailable spawn falls back to debug flight
 - Raycast against voxels for highlight and dig/place (`Engine::raycastVoxel`)  
+
+Player motion is owned by `PlayerController`, not the camera. The CPU-only
+solver queries published voxel data through a scoped `ChunkCollisionView`,
+independently of render meshes and LOD. See [player-physics.md](player-physics.md)
+for controls, timing, thread/publication contracts and future entity integration.
 
 ---
 

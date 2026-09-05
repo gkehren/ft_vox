@@ -286,17 +286,36 @@ void GameUI::drawHud(GameUIFrame &frame)
 				ImGui::Text("Biome: %s", biomeTypeString[biome]);
 		}
 
+		if (frame.player)
+		{
+			bool flight = frame.playerFlight;
+			ImGui::BeginDisabled(frame.benchmark && frame.benchmark->isActive());
+			if (ImGui::Checkbox("Debug flight [V]", &flight) && frame.setPlayerFlight)
+				frame.setPlayerFlight(flight);
+			ImGui::EndDisabled();
+			const auto &p = *frame.player;
+			ImGui::Text("%s | %.2f blocks/s", frame.playerFlight ? "Flying" :
+				p.body.waitingForTerrain ? "Waiting for terrain" :
+				p.submerged.water + p.submerged.lava > 0 ? "Swimming" :
+				p.body.grounded ? "Grounded" : "Airborne", glm::length(p.body.velocity));
+			ImGui::TextDisabled("Physics: %u steps, %llu cells, %llu dropped steps",
+				p.metrics.steps, static_cast<unsigned long long>(p.metrics.queries.cells),
+				static_cast<unsigned long long>(p.metrics.droppedSteps));
+			if (frame.playerStatus && *frame.playerStatus) ImGui::TextWrapped("%s", frame.playerStatus);
+		}
 		float speed = frame.camera->getMovementSpeed();
+		ImGui::BeginDisabled(!frame.playerFlight);
 		if (ImGui::SliderFloat("Fly speed", &speed, 1.f, 200.f, "%.1f"))
 			frame.camera->setMovementSpeed(speed);
+		ImGui::EndDisabled();
 		float sens = frame.camera->getMouseSensitivity();
 		if (ImGui::SliderFloat("Mouse sens", &sens, 0.02f, 0.5f, "%.3f"))
 			frame.camera->setMouseSensitivity(sens);
 
 		const char *modes[] = {"Perspective", "Isometric"};
 		int mode = frame.camera->getMode() == CameraMode::ISOMETRIC ? 1 : 0;
-		if (ImGui::Combo("Camera", &mode, modes, 2))
-			frame.camera->setMode(mode == 1 ? CameraMode::ISOMETRIC : CameraMode::PERSPECTIVE);
+		if (ImGui::Combo("Camera", &mode, modes, 2) && frame.setCameraMode)
+			frame.setCameraMode(mode == 1 ? CameraMode::ISOMETRIC : CameraMode::PERSPECTIVE);
 		if (frame.camera->getMode() == CameraMode::ISOMETRIC)
 		{
 			float z = frame.camera->getIsometricZoom();
@@ -1160,8 +1179,10 @@ void GameUI::drawHelp()
 		ImGui::TableSetupColumn("Action");
 		ImGui::TableHeadersRow();
 
-		helpRow("W A S D", "Move (fly)");
-		helpRow("Space / Shift", "Up / down");
+		helpRow("W A S D", "Move");
+		helpRow("Space", "Jump / swim up / fly up");
+		helpRow("Shift", "Sprint / swim down / fly down");
+		helpRow("V", "Toggle walk / debug flight");
 		helpRow("Mouse", "Look");
 		helpRow("LMB / RMB", "Break / place block");
 		helpRow("T", "Cycle selected block");
@@ -1177,7 +1198,7 @@ void GameUI::drawHelp()
 		helpRow("F6", "On-screen hints");
 		helpRow("F7", "CPU profiler + benchmark");
 		helpRow("F10", "Toggle VSync");
-		helpRow("X (iso)", "Speed boost (isometric)");
+		helpRow("X (flight)", "Toggle flight speed boost");
 
 		ImGui::EndTable();
 	}

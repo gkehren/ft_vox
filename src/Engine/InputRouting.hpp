@@ -44,6 +44,8 @@ inline KeyRoute classifyKeyRoute(int sdlKeycode)
 	case SDLK_C:
 	case SDLK_B:
 	case SDLK_T:
+	case SDLK_V: // player flight toggle (never while typing in ImGui)
+	case SDLK_X: // debug flight speed toggle
 		return KeyRoute::GameplayShortcut;
 	default:
 		return KeyRoute::NotGameUIShortcut;

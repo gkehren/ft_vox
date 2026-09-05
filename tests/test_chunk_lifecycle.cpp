@@ -8,6 +8,8 @@
 #include <Chunk/ChunkManager.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/ChunkPool.hpp>
+#include <Chunk/ChunkCollisionView.hpp>
+#include <Physics/PlayerController.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 
 #include <algorithm>
@@ -322,8 +324,72 @@ static int runResetPerf()
 	return 0;
 }
 
+static int profilePlayerPhysics()
+{
+	// A deterministic controller path through real, generated voxel data.
+	// No rendering/GPU work is included; the scoped adapter cost IS included.
+	ChunkPool pool(64);
+	TerrainGenerator generator(42);
+	ChunkManager manager(&generator, nullptr, &pool);
+	Camera camera({0.f, 100.f, 0.f});
+	RenderSettings settings;
+	manager.updateStreaming(camera, settings);
+	manager.processChunkLoading(64);
+	for (int x = -2; x <= 2; ++x)
+	for (int z = -2; z <= 2; ++z)
+	{
+		Chunk *chunk = manager.getChunk({x, 0, z});
+		if (chunk && !manager.prepareAndGenerateChunk(chunk, generator)) return 1;
+	}
+	glm::dvec3 spawn(0.5, 255, 0.5);
+	{
+		ChunkCollisionView view(manager);
+		for (int y = 255; y >= 0; --y)
+			if (view.sample({0, y, 0}).solid) { spawn.y = y + 1.0 + physics::skin; break; }
+	}
+	physics::PlayerController player;
+	std::vector<double> times;
+	times.reserve(12000);
+	uint64_t cells = 0, waits = 0;
+	double travelled = 0;
+	for (int i = 0; i < 13200; ++i)
+	{
+		if (i % 600 == 0) player.reset(spawn);
+		physics::PlayerInput input;
+		const double angle = (i % 600) * 0.012;
+		input.move = {std::cos(angle), std::sin(angle)};
+		input.sprint = (i / 300) % 2 == 1;
+		input.jumpPressed = i % 90 == 0;
+		input.swimUp = true;
+		const auto before = player.body.position;
+		const auto start = std::chrono::steady_clock::now();
+		{
+			ChunkCollisionView view(manager);
+			player.advance(physics::PlayerController::fixedStep, input, view);
+		}
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		if (i >= 1200)
+		{
+			times.push_back(ms);
+			cells += player.metrics.queries.cells;
+			waits += player.body.waitingForTerrain ? 1 : 0;
+			travelled += glm::length(player.body.position - before);
+		}
+	}
+	double total = 0;
+	for (double ms : times) total += ms;
+	std::sort(times.begin(), times.end());
+	std::cout << "Physics real voxels seed=42 ticks=" << times.size()
+		<< " avg_ms=" << total / times.size() << " p95_ms=" << times[times.size() * 95 / 100]
+		<< " cells_per_tick=" << double(cells) / times.size()
+		<< " waiting_ticks=" << waits << " travelled_blocks=" << travelled
+		<< " dropped_steps=" << player.metrics.droppedSteps << '\n';
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
+	if (argc > 1 && std::string_view(argv[1]) == "--physics-profile") return profilePlayerPhysics();
     // Published memory includes free pool storage and survives ownership moves.
     if (telemetry::registry().enabled) {
         using namespace telemetry;
@@ -2313,6 +2379,95 @@ int main(int argc, char **argv)
 				  "superseded: next build stamps the merged mask");
 			pool.release(rebuilt);
 		}
+	}
+
+	// Physics reads canonical, published voxels independently of mesh readiness.
+	{
+		ChunkPool pool(32);
+		TerrainGenerator generator(42);
+		ChunkManager manager(&generator, nullptr, &pool);
+		Camera cam({0.f, 100.f, 0.f});
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(32);
+		Chunk *chunk = manager.getChunkAtWorldPos({4.f, 220.f, 4.f});
+		Chunk *west = manager.getChunkAtWorldPos({-1.f, 220.f, 4.f});
+		CHECK(chunk && west, "physics chunks loaded");
+		if (chunk && west)
+		{
+			{
+				ChunkCollisionView view(manager);
+				CHECK(!view.sample({4, 220, 4}).available, "unprepared is unknown, not air");
+				CHECK(!view.sample({10000, 220, 4}).available, "missing chunk is unknown");
+				CHECK(view.sample({4, -1, 4}).solid, "solid lower world boundary");
+				CHECK(!view.sample({4, WORLD_HEIGHT, 4}).solid, "open sky above world");
+			}
+			CHECK(chunk->prepareVoxelStorageForGeneration(), "prepare collision chunk");
+			{
+				ChunkCollisionView view(manager);
+				CHECK(!view.sample({4, 220, 4}).available, "prepared stale backing remains unknown");
+			}
+			// Actual generation runs concurrently with repeated query views.
+			chunk->setInTransit(true);
+			std::thread generation([&] { chunk->generateTerrain(generator); });
+			for (int i = 0; i < 1000; ++i)
+			{
+				ChunkCollisionView view(manager);
+				const auto sample = view.sample({4, 0, 4});
+				CHECK(!sample.available || sample.solid, "generation never exposes stale bedrock bytes");
+			}
+			generation.join();
+			chunk->setInTransit(false);
+			CHECK(manager.prepareAndGenerateChunk(west, generator), "generate negative-coordinate chunk");
+			chunk->setVoxel(4, 220, 4, AIR);
+			west->setVoxel(15, 220, 4, GLASS);
+			{
+				ChunkCollisionView view(manager);
+				CHECK(view.sample({4, 220, 4}).available, "generated before mesh is collidable");
+				CHECK(view.sample({-1, 220, 4}).solid, "negative floor mapping and glass solidity");
+			}
+			chunk->setInTransit(true); // read-only remesh: existing voxels stay queryable
+			CHECK(manager.placeVoxel({4.f, 220.f, 4.f}, STONE), "queue physical obstacle");
+			{
+				ChunkCollisionView view(manager);
+				CHECK(view.sample({4, 220, 4}).solid, "pending placement blocks before apply");
+				CHECK(view.sample({5, 220, 4}).available, "remeshing does not turn chunk unknown");
+				physics::Body body; body.position = {2, 220, 4.5};
+				physics::QueryStats stats;
+				physics::move(view, body, {5, 0, 0}, stats);
+				CHECK(body.bounds().max.x <= 4, "body cannot enter a pending solid");
+			}
+			CHECK(manager.deleteVoxel({4.f, 220.f, 4.f}), "queue logical deletion");
+			{
+				ChunkCollisionView view(manager);
+				CHECK(!view.sample({4, 220, 4}).solid, "coalesced pending deletion removes collision");
+			}
+			CHECK(manager.placeVoxel({4.f, 220.f, 4.f}, STONE), "replace pending deletion");
+			chunk->setInTransit(false);
+			manager.processFinishedJobs();
+			{
+				ChunkCollisionView view(manager);
+				CHECK(view.sample({4, 220, 4}).solid, "applied collision matches logical state");
+			}
+			chunk->setVoxel(4, 220, 4, AIR);
+			chunk->setInTransit(true);
+			CHECK(manager.placeVoxel({4.f, 220.f, 4.f}, STONE), "queue before recycle");
+			chunk->setInTransit(false);
+			chunk->reset(chunk->getPosition(), Chunk::ResetMode::ForGeneration);
+			CHECK(chunk->prepareVoxelStorageForGeneration(), "prepare new incarnation");
+			chunk->generateTerrain(generator);
+			chunk->setVoxel(4, 220, 4, AIR);
+			{
+				ChunkCollisionView view(manager);
+				CHECK(!view.sample({4, 220, 4}).solid, "stale queued solid ignored after recycling");
+			}
+			manager.processFinishedJobs();
+		}
+		CHECK(physics::blockCell(OAK_LEAVES).solid, "foliage remains a solid cube");
+		CHECK(physics::blockCell(ICE).solid, "ice remains solid");
+		CHECK(physics::blockCell(KELP).medium == physics::Medium::Water, "kelp preserves aquatic medium");
+		CHECK(physics::blockCell(KELP_TOP).medium == physics::Medium::Water, "kelp top preserves aquatic medium");
+		CHECK(physics::blockCell(LAVA).medium == physics::Medium::Lava, "lava is a separate medium");
 	}
 
 	if (g_fails != 0)
