@@ -127,7 +127,7 @@ Engine::Engine(std::string resourcePackRoot)
 	frameCtx->init(*vkContext);
 
 	worldRenderer = std::make_unique<WorldRenderer>();
-	worldRenderer->init(*vkContext, *swapchain, *immediate, m_resourcePackRoot);
+	worldRenderer->init(*vkContext, *swapchain, *immediate, resourceRetire, m_resourcePackRoot);
 
 	imgui = std::make_unique<ImGuiLayer>();
 	imgui->init(window, *vkContext, *swapchain, *immediate);
@@ -172,10 +172,9 @@ Engine::~Engine()
 	if (vkContext)
 		vkContext->waitIdle();
 
-	resourceRetire.flush();
-	resourceRetire.shutdown();
-	stagingRing.shutdown();
-
+	// Reset order matters (issue #109): chunk/world teardown returns arena
+	// ranges, which can retire whole arena pages into the retire queue.
+	// The queue must outlive them and be flushed last.
 	gameUi.reset();
 	chunkManager.reset();
 	chunkPool.reset();
@@ -184,6 +183,10 @@ Engine::~Engine()
 
 	imgui.reset();
 	worldRenderer.reset();
+
+	resourceRetire.flush();
+	resourceRetire.shutdown();
+	stagingRing.shutdown();
 	frameCtx.reset();
 	immediate.reset();
 	swapchain.reset();
@@ -222,7 +225,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 												  chunkPool.get());
 
 	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
-									  vkContext->getAllocator(), *immediate);
+									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 	placeCameraOnSurface();
 
 	demoPlayers = {
@@ -426,7 +429,7 @@ void Engine::reloadWorld(int newSeed)
 	camera.setMovementSpeed(20.f);
 
 	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
-									  vkContext->getAllocator(), *immediate);
+									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 	placeCameraOnSurface();
 
 	demoPlayers = {
@@ -550,7 +553,7 @@ void Engine::tickStreaming(double dt)
 	}
 	{
 		PROFILE_SCOPE("DeferredRelease");
-		chunkManager->processDeferredReleases(resourceRetire);
+		chunkManager->processDeferredReleases();
 	}
 	{
 		PROFILE_SCOPE("UpdateStreaming");
@@ -1183,6 +1186,7 @@ void Engine::run()
 		const uint32_t frameIndex = frameCtx->frameIndex();
 		// Frame slot is free (fence waited): recycle retired GPU buffers + reset staging slice.
 		resourceRetire.beginFrame(frameNumber);
+		worldRenderer->arenas().beginFrame(frameNumber);
 		stagingRing.beginFrame(frameIndex);
 
 		if (imgui)
@@ -1221,7 +1225,8 @@ void Engine::run()
 					{
 						PROFILE_SCOPE("MeshUpload");
 						const int n = chunkManager->uploadPendingMeshes(
-							vkContext->getAllocator(), stagingRing, cmd, resourceRetire, camera, uploadBudget);
+							vkContext->getAllocator(), stagingRing, cmd, resourceRetire,
+							worldRenderer->arenas(), camera, uploadBudget);
 						if (n > 0)
 						{
 							// Make staged mesh data visible to vertex/index fetch in later passes.
@@ -1229,7 +1234,7 @@ void Engine::run()
 							barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 							barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 							barrier.dstAccessMask =
-								VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
+								VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
 							vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
 												 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &barrier, 0, nullptr,
 												 0, nullptr);

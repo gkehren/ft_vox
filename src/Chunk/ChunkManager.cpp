@@ -443,7 +443,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 }
 
 int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-									  GpuResourceRetire &retire, const Camera &camera, int budget)
+									  GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget)
 {
 	if (!allocator || budget <= 0 || cmd == VK_NULL_HANDLE || !staging.isValid())
 		return 0;
@@ -483,14 +483,14 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 	int uploaded = 0;
 	for (int i = 0; i < n; ++i)
 	{
-		if (!queue[i].chunk->uploadToGPUAsync(allocator, staging, cmd, retire))
+		if (!queue[i].chunk->uploadToGPUAsync(allocator, staging, cmd, retire, arenas))
 			break; // staging full — remaining wait next frame
 		++uploaded;
 	}
 	return uploaded;
 }
 
-void ChunkManager::processDeferredReleases(GpuResourceRetire &retire)
+void ChunkManager::processDeferredReleases()
 {
 	if (m_deferredRelease.empty())
 	{
@@ -507,7 +507,7 @@ void ChunkManager::processDeferredReleases(GpuResourceRetire &retire)
 	{
 		if (!c)
 			continue;
-		c->releaseGPUDeferred(retire);
+		c->releaseGPUDeferred();
 		if (m_chunkPool)
 			m_chunkPool->release(c);
 	}
@@ -1086,7 +1086,7 @@ bool ChunkManager::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &gener
 }
 
 void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
-									   ImmediateCommands &imm)
+						 ImmediateCommands &imm, MeshArenas &arenas)
 {
 	if (!m_terrainGenerator || !m_chunkPool || !allocator)
 		return;
@@ -1147,7 +1147,7 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 
 	// One-time sync upload before the first frame (nothing in flight yet).
 	for (const auto &p : created)
-		p.second->uploadToGPU(allocator, imm);
+		p.second->uploadToGPU(allocator, imm, arenas);
 
 	std::cout << "Bootstrap: " << created.size() << " chunks around spawn\n";
 }

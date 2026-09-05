@@ -4,6 +4,7 @@
 #include "Vulkan/VkImage.hpp"
 #include "Vulkan/VkCommands.hpp"
 #include "Chunk/Chunk.hpp"
+#include "Vulkan/MeshArena.hpp"
 
 #include <glm/glm.hpp>
 #include <vector>
@@ -23,9 +24,10 @@ public:
 
 	void writeSceneDescriptors(VkDescriptorSet set2, VkSampler sampler);
 
-	void record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet set0, VkDescriptorSet set1,
+	void record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent, VkDescriptorSet set0, VkDescriptorSet set1,
 				VkDescriptorSet set2, VkPipelineLayout layout, AllocatedImage &hdr, AllocatedImage &liveDepth,
-				const std::vector<Chunk *> &chunks, const glm::vec3 &camPos);
+				const std::vector<Chunk *> &chunks, const glm::vec3 &camPos,
+						const MeshArenas &arenas);
 
 	VkSampler sceneSampler() const { return m_sceneSampler; }
 
@@ -39,4 +41,16 @@ private:
 	AllocatedImage m_depthHistory{};
 	VkSampler m_sceneSampler{VK_NULL_HANDLE};
 	VkPipeline m_pipeline{VK_NULL_HANDLE};
+
+	static constexpr uint32_t kMaxIndirectCommands = 65536;
+	struct IndirectBatch
+	{
+		AllocatedBuffer buf{};
+		void *mapped{nullptr};
+	};
+	void createIndirectBuffers();
+	void destroyIndirectBuffers();
+	std::array<IndirectBatch, 2> m_indirect{};
+
+	std::vector<Chunk::IndirectDraw> m_scratch{};
 };

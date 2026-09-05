@@ -143,7 +143,7 @@ Push constants carry cascade index / shadow time for the shadow path where neede
 ### OpaquePass (`Renderer/OpaquePass.*`)
 
 - Dynamic rendering into **HDR** (`R16G16B16A16_SFLOAT`) and **D32** depth owned by `PostStack`.
-- Draws opaque chunk meshes (`Chunk::draw`).
+- Submits opaque chunk geometry through **`vkCmdDrawIndexedIndirect`** from the shared mesh arenas (issue #109): each visible chunk contributes per-section commands, grouped by arena page pair, so the arenas are bound once per pair per frame instead of two binds per chunk.
 - Then calls **`OverlayRenderer::record`** on the same command buffer before ending the rendering scope (block highlight, chunk borders, demo players).
 - Shaders: `terrain.vert` / `terrain.frag` — diffuse, face bias, sky/block light, CSM + PCF (sun **and** moon), cave fill, scotopic night grade, height/distance fog, material wind/emissive/ice.
 
@@ -194,6 +194,38 @@ True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`
 - **World gen** uses the expanded palette (birch/spruce/jungle/acacia/dark oak trees, cactus, ice, red sand/terracotta badlands, deepslate below Y≈16, stone variants). Without a pack, new blocks share oak/sand/stone fallbacks but remain distinct voxel IDs.
 
 ---
+
+### Shared mesh arenas + indirect drawing (`Vulkan/MeshArena.*`, issue #109)
+
+- Chunk meshes no longer own one VMA vertex/index allocation each. Four
+  **device-local arena** instances (opaque/water x vertex/index) back every
+  uploaded mesh: 128 MiB vertex pages, 64 MiB index pages, created on demand.
+- Each section suballocates an aligned range from its page's first-fit free
+  list (vertex ranges align to `sizeof(Vertex)` so `vertexBase` is exact).
+  Freeing is **frame-aware**: retired ranges return to the free list after
+  `kRetireDelay` frames, and fully emptied pages are destroyed through the
+  same retire queue - streaming and edits never need `vkDeviceWaitIdle`.
+- `allocate()` returns false when VMA cannot back a new page; the upload is
+  transactional, so a failed range allocation leaves every slot untouched.
+- A partial remesh re-stages its sections' ranges in place when the payload
+  fits the reservation; an outgrown section allocates a fresh range and
+  retires the old one. A full rebuild re-allocates every section compactly
+  and returns the old ranges (including reservations of emptied sections).
+- Draw submission: each pass collects `Chunk::IndirectDraw` commands (per
+  live section, or one merged command when a chunk's sections are contiguous
+  in both arenas), groups them by arena page pair, binds each pair once and
+  issues one `vkCmdDrawIndexedIndirect` per group. Commands live in
+  host-visible indirect buffers (one per frame in flight per pass), written
+  and flushed on the CPU each frame. GPU-driven culling/indirect-count
+  remains future work.
+- Indices are stored section-local: the indirect command's `vertexOffset`
+  performs the rebase on the GPU, so uploads are plain copies (no CPU rebase
+  pass). Positions remain world-space; per-draw chunk metadata can later be
+  introduced through `gl_DrawID` indexing without changing the arena layout.
+- Telemetry: `arena.pages`, `arena.freeBytes`, `arena.highWaterBytes` gauges
+  and `arena.binds`, `arena.growEvents` events complement the pre-existing
+  `mesh.allocations.*` counters (which now count page creation, not
+  per-chunk uploads).
 
 ## 5. FrameUBO contract
 

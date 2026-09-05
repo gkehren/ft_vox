@@ -21,6 +21,7 @@
 #include <Chunk/VoxelPool.hpp>
 #include <Chunk/ChunkBorders.hpp>
 #include <Vulkan/VkBuffer.hpp>
+#include <Vulkan/MeshArena.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
@@ -89,10 +90,21 @@ public:
 	/// Release voxel storage upon chunk retirement.
 	void releaseVoxelStorageOnRetire();
 
-	/// Bind opaque mesh and draw indexed into cmd. Returns index count.
-	uint32_t draw(VkCommandBuffer cmd);
-	uint32_t drawWater(VkCommandBuffer cmd);
-	void drawShadow(VkCommandBuffer cmd, unsigned cascade = 0) const;
+	// Draw command collection (issue #109): the passes bind the shared mesh
+	// arenas once per page pair and submit one indirect draw per live
+	// section. Each collected entry carries the arena pages its range lives
+	// in so the pass can group contiguous commands under one bind.
+	struct IndirectDraw
+	{
+		VkDrawIndexedIndirectCommand cmd{};
+		uint32_t vertexPage{MeshArena::kNoPage};
+		uint32_t indexPage{MeshArena::kNoPage};
+	};
+	/// Appends one IndirectDraw per live opaque section (or the single LOD
+	/// range). Returns the number appended. Skips chunks whose upload is
+	/// still pending (same rule as the former drawShadow path).
+	size_t collectOpaqueDraws(std::vector<IndirectDraw> &out) const;
+	size_t collectWaterDraws(std::vector<IndirectDraw> &out) const;
 
 	void generateTerrain(TerrainGenerator &generator);
 
@@ -175,17 +187,19 @@ public:
 	void setInTransit(bool val) { m_inTransit.store(val); }
 
 	/// Synchronous upload (bootstrap / tests). Prefer uploadToGPUAsync on the hot path.
-	void uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm);
+	void uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshArenas &arenas);
 
-	/// Record buffer copies into cmd using the staging ring; retires previous GPU buffers.
-	/// Returns false if staging is full (CPU mesh kept; try again next frame).
+	/// Suballocate arena ranges and record staging copies into cmd (issue
+	/// #109). Returns false if staging is full or the arenas cannot back a
+	/// required range (CPU mesh kept; try again next frame). On failure no
+	/// arena range, slot or draw count is modified.
 	bool uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-						  GpuResourceRetire &retire);
+						  GpuResourceRetire &retire, MeshArenas &arenas);
 
 	/// Immediate destroy (shutdown / destructor only — not while frames may reference buffers).
 	void releaseGPU();
-	/// Hand buffers to the retire queue; safe during streaming unload/remesh.
-	void releaseGPUDeferred(GpuResourceRetire &retire);
+	/// Frame-aware release of every arena range (safe during streaming).
+	void releaseGPUDeferred();
 
 	bool isShellEmpty() const { return m_borders == nullptr; }
 	/// Occupancy lifecycle (issue #115): the voxel backing holds stale pool
@@ -237,67 +251,51 @@ private:
 	std::atomic<ChunkState> state;
 
 	VmaAllocator m_allocator{VK_NULL_HANDLE};
-	AllocatedBuffer vertexBuffer{};
-	AllocatedBuffer indexBuffer{};
-	AllocatedBuffer waterVertexBuffer{};
-	AllocatedBuffer waterIndexBuffer{};
 
-	// Section-slot layout inside the chunk-level buffers (issue #107). All
-	// sections of a stream share one vertex/index buffer pair, laid out as
-	// back-to-back per-section slots, so the renderer keeps ONE bind + draw
-	// per chunk while a remesh only re-stages the affected slot(s).
-	//
-	// Uploads are copy-on-write (PR #117 review): every upload records its
-	// writes into fresh buffers (a device-to-device preserve copy keeps the
-	// current layout for partial rebuilds; a full build repacks all
-	// sections back-to-back, exact-sized), then retires the previous
-	// buffers - no command ever writes a buffer an in-flight frame may
-	// still be reading.
-	//
-	// A slot reserves `vertexSlotBytes` / `indexSlotBytes` (>= the live
-	// payload, grown with headroom on edit-driven appends; exact on full
-	// repacks); `used` bytes are live. Vertex slots are multiples of
-	// sizeof(Vertex) and `vertexBase` is the section's first vertex INDEX
-	// (offset / sizeof(Vertex)) - section indices are stored rebased onto
-	// it, so slots never move once allocated. Index slots and slack are
-	// multiples of one triangle (12 bytes), so the single packed drawIndexed
-	// over [0, indexUsedBytes) only ever decodes live triangles or whole
-	// degenerate (all-zero) triangles. When a rebuilt section outgrows its
-	// slot, a fresh slot is appended at the end of the used region; the
-	// abandoned slot leaks until the chunk's next full build (which repacks
-	// compactly) or release, bounded by the section's high-water mark.
+	// Shared mesh arena ranges (issue #109): opaque/water geometry lives in
+	// the WorldRenderer-owned MeshArenas instead of per-chunk Vulkan
+	// buffers. The LOD whole-chunk mesh owns four ranges; the sectioned
+	// full-quality mesh owns one range pair per 16^3 section below.
+	// VmaAllocator/m_allocator stays only as the bootstrap-path allocator
+	// handle for ImmediateCommands uploads.
+
+	// Section-slot ranges inside the shared arenas (issue #107/#109). A
+	// payload that fits its reserved range is re-staged in place; an
+	// outgrown payload allocates a fresh range and retires the old one
+	// (frame-aware). A full rebuild repacks every section compactly and
+	// leaves no stale range behind. Index ranges need no gap-zeroing here:
+	// indirect draws reference live ranges only.
 	struct SectionGpuSlot
 	{
-		uint32_t vertexOffset{0}; // bytes, multiple of sizeof(Vertex)
+		uint32_t vertexPage{MeshArena::kNoPage};
+		uint32_t vertexOffset{0}; // bytes within its arena page
 		uint32_t vertexSlotBytes{0};
 		uint32_t vertexUsedBytes{0};
-		uint32_t vertexBase{0}; // first vertex index of this section
-		uint32_t indexOffset{0}; // bytes, multiple of one triangle (12)
-		uint32_t indexSlotBytes{0}; // multiple of one triangle (12)
+		uint32_t vertexBase{0}; // vertexOffset / sizeof(Vertex)
+		uint32_t indexPage{MeshArena::kNoPage};
+		uint32_t indexOffset{0}; // bytes within its arena page
+		uint32_t indexSlotBytes{0};
 		uint32_t indexUsedBytes{0};
 		uint32_t indexCount{0}; // live indices (0 = empty section)
 
-		// True when the slot describes no layout at all. A full repack
-		// resets the slot table and rebuilds only the sections carrying
-		// content, so every other slot must read as empty afterwards - a
-		// stale slot would let a later partial upload plan an in-place
-		// re-stage outside the compacted buffer (PR #117 final review).
 		bool empty() const
 		{
-			return vertexOffset == 0 && vertexSlotBytes == 0 &&
-			       vertexUsedBytes == 0 && vertexBase == 0 &&
-			       indexOffset == 0 && indexSlotBytes == 0 &&
-			       indexUsedBytes == 0 && indexCount == 0;
+			return vertexPage == MeshArena::kNoPage && indexPage == MeshArena::kNoPage;
 		}
+		bool hasVertexRange() const { return vertexPage != MeshArena::kNoPage; }
+		bool hasIndexRange() const { return indexPage != MeshArena::kNoPage; }
 	};
 	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpu{};
 	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpuWater{};
-	// Live byte extent of each stream's buffers (slots are allocated from
-	// this; growth beyond the buffer size re-creates it).
-	uint32_t m_vertexUsedBytes{0};
-	uint32_t m_indexUsedBytes{0};
-	uint32_t m_waterVertexUsedBytes{0};
-	uint32_t m_waterIndexUsedBytes{0};
+	// Live byte extent of the sectioned layout is gone (issue #109): the
+	// arenas own their pages; per-section ranges above are the only state.
+
+	// Whole-chunk LOD ranges (issue #109): the simplified LOD mesh lives in
+	// the same shared arenas as the sectioned meshes.
+	MeshArena::Range m_lodOpaqueVertices{};
+	MeshArena::Range m_lodOpaqueIndices{};
+	MeshArena::Range m_lodWaterVertices{};
+	MeshArena::Range m_lodWaterIndices{};
 
 	VoxelPool *m_voxelPool{nullptr};
 	VoxelStorage *m_storage{nullptr};
@@ -338,11 +336,13 @@ private:
 	// with full one-voxel chunk/border context for faces, AO and light.
 	void buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
 							int ownerMaxY, telemetry::MeshSample &meshSample);
-	// Shared upload logic: (re)place one section's payload in its GPU slots.
-	// Returns false when staging space is missing (async path retries later).
+	// Shared upload logic: (re)place the built sections' ranges in the
+	// shared arenas. Returns false when staging space is missing or an
+	// arena cannot back a required range (async path retries later).
 	bool uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
 							StagingRing *staging, VkCommandBuffer cmd,
-							GpuResourceRetire *retire, ImmediateCommands *imm);
+							GpuResourceRetire *retire, ImmediateCommands *imm,
+							MeshArenas &arenas);
 	// Borrowed from a BorderPool for generation/meshing and returned after
 	// upload (issue #103): no per-chunk border memory is retained.
 	ChunkNeighborBorders *m_borders{nullptr};
@@ -352,6 +352,9 @@ private:
 	// Released on upload, reset, and moves - no per-chunk mesh capacity.
 	MeshResultPool *m_resultPool{nullptr};
 	MeshBuildResult *m_pendingResult{nullptr};
+	// Non-owning handle to the WorldRenderer-owned shared arenas (issue
+	// #109): set by every upload, used to retire ranges on release/unload.
+	MeshArenas *m_arenas{nullptr};
 	// Identity of the meshable content (issue #114 review):
 	//   m_meshGeneration - physical chunk incarnation; bumped on reset so a
 	//     result built for a recycled chunk pointer can never publish.

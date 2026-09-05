@@ -1,4 +1,5 @@
 #include "Renderer/WaterPass.hpp"
+#include "Vulkan/MeshArena.hpp"
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
 #include "Vulkan/VkShader.hpp"
@@ -20,6 +21,7 @@ void WaterPass::init(VkContext &context, ImmediateCommands & /*imm*/, uint32_t w
 	m_context = &context;
 	m_depthFormat = depthFmt;
 	createHistory(width, height, depthFmt);
+	createIndirectBuffers();
 	VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
 	si.magFilter = si.minFilter = VK_FILTER_LINEAR;
 	si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -31,6 +33,7 @@ void WaterPass::init(VkContext &context, ImmediateCommands & /*imm*/, uint32_t w
 void WaterPass::shutdown()
 {
 	destroyPipeline();
+	destroyIndirectBuffers();
 	if (m_context && m_sceneSampler != VK_NULL_HANDLE)
 	{
 		vkDestroySampler(m_context->getDevice(), m_sceneSampler, nullptr);
@@ -144,9 +147,35 @@ void WaterPass::writeSceneDescriptors(VkDescriptorSet set2, VkSampler sampler)
 	vkUpdateDescriptorSets(m_context->getDevice(), 2, writes, 0, nullptr);
 }
 
-void WaterPass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet set0, VkDescriptorSet set1,
+void WaterPass::createIndirectBuffers()
+{
+	for (IndirectBatch &b : m_indirect)
+	{
+		b.buf = createBuffer(m_context->getAllocator(),
+							 static_cast<VkDeviceSize>(kMaxIndirectCommands) * sizeof(VkDrawIndexedIndirectCommand),
+							 VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO,
+							 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+								 VMA_ALLOCATION_CREATE_MAPPED_BIT);
+		b.mapped = b.buf.info.pMappedData;
+		if (!b.mapped)
+			b.mapped = mapBuffer(m_context->getAllocator(), b.buf);
+	}
+}
+
+void WaterPass::destroyIndirectBuffers()
+{
+	for (IndirectBatch &b : m_indirect)
+	{
+		if (b.buf.buffer != VK_NULL_HANDLE)
+			destroyBuffer(m_context->getAllocator(), b.buf);
+		b = {};
+	}
+}
+
+void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent, VkDescriptorSet set0, VkDescriptorSet set1,
 					   VkDescriptorSet set2, VkPipelineLayout layout, AllocatedImage &hdr,
-					   AllocatedImage &liveDepth, const std::vector<Chunk *> &chunks, const glm::vec3 &camPos)
+					   AllocatedImage &liveDepth, const std::vector<Chunk *> &chunks, const glm::vec3 &camPos,
+					   const MeshArenas &arenas)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
@@ -252,8 +281,44 @@ void WaterPass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet s
 	}
 	std::sort(waterChunks.begin(), waterChunks.end(),
 			  [](const WaterEntry &a, const WaterEntry &b) { return a.dist2 > b.dist2; });
-	for (const auto &e : waterChunks)
-		e.chunk->drawWater(cmd);
 
-	endRendering(cmd);
+	// Back-to-front order is preserved exactly: commands are emitted in the
+	// sorted order and split into contiguous runs that share an arena page
+	// pair; each run is one bind + one indirect draw (issue #109).
+	m_scratch.clear();
+	for (const auto &e : waterChunks)
+		e.chunk->collectWaterDraws(m_scratch);
+	if (!m_scratch.empty())
+	{
+		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+		auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(m_indirect[frameIndex].mapped);
+		for (size_t i = 0; i < count; ++i)
+			dst[i] = m_scratch[i].cmd;
+		vmaFlushAllocation(m_context->getAllocator(), m_indirect[frameIndex].buf.allocation, 0,
+						   count * sizeof(VkDrawIndexedIndirectCommand));
+
+		size_t i = 0;
+		uint32_t first = 0;
+		while (i < count)
+		{
+			const uint64_t key = (uint64_t(m_scratch[i].vertexPage) << 32) | m_scratch[i].indexPage;
+			size_t j = i;
+			while (j < count &&
+				   (uint64_t(m_scratch[j].vertexPage) << 32 | m_scratch[j].indexPage) == key)
+				++j;
+			VkBuffer vb = arenas.waterVertex.pageBuffer(static_cast<uint32_t>(key >> 32));
+			VkBuffer ib = arenas.waterIndex.pageBuffer(static_cast<uint32_t>(key & 0xffffffffu));
+			VkDeviceSize voff = 0;
+			vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
+			vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+			vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex].buf.buffer,
+										 first * sizeof(VkDrawIndexedIndirectCommand),
+										 static_cast<uint32_t>(j - i), sizeof(VkDrawIndexedIndirectCommand));
+			telemetry::registry().add(telemetry::ArenaBinds);
+			first += static_cast<uint32_t>(j - i);
+			i = j;
+		}
+		telemetry::registry().add(telemetry::WaterDraws, count);
+	}
+
 }

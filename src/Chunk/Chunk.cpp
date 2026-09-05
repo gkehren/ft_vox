@@ -121,16 +121,12 @@ Chunk::Chunk(Chunk &&other) noexcept
     : position(std::move(other.position)), visible(other.visible),
       state(other.state.load()),
       m_allocator(other.m_allocator),
-      vertexBuffer(other.vertexBuffer),
-      indexBuffer(other.indexBuffer),
-      waterVertexBuffer(other.waterVertexBuffer),
-      waterIndexBuffer(other.waterIndexBuffer),
       m_sectionGpu(other.m_sectionGpu),
       m_sectionGpuWater(other.m_sectionGpuWater),
-      m_vertexUsedBytes(other.m_vertexUsedBytes),
-      m_indexUsedBytes(other.m_indexUsedBytes),
-      m_waterVertexUsedBytes(other.m_waterVertexUsedBytes),
-      m_waterIndexUsedBytes(other.m_waterIndexUsedBytes),
+      m_lodOpaqueVertices(other.m_lodOpaqueVertices),
+      m_lodOpaqueIndices(other.m_lodOpaqueIndices),
+      m_lodWaterVertices(other.m_lodWaterVertices),
+      m_lodWaterIndices(other.m_lodWaterIndices),
       opaqueIndexCount(other.opaqueIndexCount), waterIndexCount(other.waterIndexCount),
       meshNeedsUpdate(other.meshNeedsUpdate.load()),
       m_voxelPool(other.m_voxelPool),
@@ -140,6 +136,7 @@ Chunk::Chunk(Chunk &&other) noexcept
       m_borderPool(other.m_borderPool),
       m_borders(other.m_borders),
       m_resultPool(other.m_resultPool),
+      m_arenas(other.m_arenas),
       m_meshGeneration(other.m_meshGeneration),
       m_meshRevision(other.m_meshRevision.load(std::memory_order_relaxed)),
       biomeGrassColors(other.biomeGrassColors),
@@ -155,22 +152,18 @@ Chunk::Chunk(Chunk &&other) noexcept
   other.publishCpuTelemetry();
   publishCpuTelemetry();
   other.m_allocator = VK_NULL_HANDLE;
-  other.vertexBuffer = {};
-  other.indexBuffer = {};
-  other.waterVertexBuffer = {};
-  other.waterIndexBuffer = {};
-  // Section slot layouts travel with the buffers they describe into
-  // (PR #117 review); zero the moved-from side so a recycled chunk starts
-  // from a clean slot state.
+  // Arena ranges and slot layouts travel with the chunk (issue #109); zero
+  // the moved-from side so a recycled chunk starts from a clean GPU state.
+  other.m_lodOpaqueVertices = {};
+  other.m_lodOpaqueIndices = {};
+  other.m_lodWaterVertices = {};
+  other.m_lodWaterIndices = {};
   other.m_sectionGpu.fill({});
   other.m_sectionGpuWater.fill({});
-  other.m_vertexUsedBytes = 0;
-  other.m_indexUsedBytes = 0;
-  other.m_waterVertexUsedBytes = 0;
-  other.m_waterIndexUsedBytes = 0;
   other.m_dirtySections.store(0, std::memory_order_relaxed);
   other.opaqueIndexCount = 0;
   other.waterIndexCount = 0;
+  other.m_arenas = nullptr;
   // A pending build result belongs to the moved-from incarnation: release
   // it rather than transferring (issue #104). Its owner pointer names the
   // source chunk, and the destination identity is carried by the transfer
@@ -213,6 +206,7 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     other.m_borders = nullptr;
 
     m_resultPool = other.m_resultPool;
+    m_arenas = other.m_arenas;
     m_meshGeneration = other.m_meshGeneration;
     m_meshRevision.store(other.m_meshRevision.load(std::memory_order_relaxed),
                          std::memory_order_relaxed);
@@ -226,18 +220,13 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     biomeTypes = other.biomeTypes;
     heightMap = other.heightMap;
     m_allocator = other.m_allocator;
-    vertexBuffer = other.vertexBuffer;
-    indexBuffer = other.indexBuffer;
-    waterVertexBuffer = other.waterVertexBuffer;
-    waterIndexBuffer = other.waterIndexBuffer;
-    // Section slot layouts travel with the buffers they describe into
-    // (PR #117 review).
+    // Arena ranges travel with the chunk that describes them (issue #109).
+    m_lodOpaqueVertices = other.m_lodOpaqueVertices;
+    m_lodOpaqueIndices = other.m_lodOpaqueIndices;
+    m_lodWaterVertices = other.m_lodWaterVertices;
+    m_lodWaterIndices = other.m_lodWaterIndices;
     m_sectionGpu = other.m_sectionGpu;
     m_sectionGpuWater = other.m_sectionGpuWater;
-    m_vertexUsedBytes = other.m_vertexUsedBytes;
-    m_indexUsedBytes = other.m_indexUsedBytes;
-    m_waterVertexUsedBytes = other.m_waterVertexUsedBytes;
-    m_waterIndexUsedBytes = other.m_waterIndexUsedBytes;
     m_dirtySections.store(other.m_dirtySections.load(std::memory_order_relaxed),
                           std::memory_order_relaxed);
     opaqueIndexCount = other.opaqueIndexCount;
@@ -249,19 +238,16 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     other.publishCpuTelemetry();
     publishCpuTelemetry();
     other.m_allocator = VK_NULL_HANDLE;
-    other.vertexBuffer = {};
-    other.indexBuffer = {};
-    other.waterVertexBuffer = {};
-    other.waterIndexBuffer = {};
+    other.m_lodOpaqueVertices = {};
+    other.m_lodOpaqueIndices = {};
+    other.m_lodWaterVertices = {};
+    other.m_lodWaterIndices = {};
     other.m_sectionGpu.fill({});
     other.m_sectionGpuWater.fill({});
-    other.m_vertexUsedBytes = 0;
-    other.m_indexUsedBytes = 0;
-    other.m_waterVertexUsedBytes = 0;
-    other.m_waterIndexUsedBytes = 0;
     other.m_dirtySections.store(0, std::memory_order_relaxed);
     other.opaqueIndexCount = 0;
     other.waterIndexCount = 0;
+    other.m_arenas = nullptr;
   }
   return *this;
 }
@@ -1762,24 +1748,178 @@ void Chunk::releasePendingMeshResult()
   result->homePool->release(result);
 }
 
+
+// Draw command collection (issue #109): the passes bind the shared mesh
+// arenas once per page pair and submit one indirect draw per live section.
+// The old per-chunk bind+drawIndexed path is gone; these collectors produce
+// exactly the data each pass needs, and every section's stored indices stay
+// section-local (vertexOffset does the rebase on the GPU).
+size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const
+{
+  if (opaqueIndexCount == 0 || meshNeedsUpdate.load())
+    return 0;
+  if (m_isLODMesh)
+  {
+    if (m_lodOpaqueIndices.empty() || m_lodOpaqueVertices.empty())
+      return 0;
+    IndirectDraw d;
+    d.cmd = {static_cast<uint32_t>(m_lodOpaqueIndices.bytes / sizeof(uint32_t)), 1,
+             static_cast<uint32_t>(m_lodOpaqueIndices.offset / sizeof(uint32_t)),
+             static_cast<int32_t>(m_lodOpaqueVertices.offset / sizeof(Vertex)), 0};
+    d.vertexPage = m_lodOpaqueVertices.page;
+    d.indexPage = m_lodOpaqueIndices.page;
+    out.push_back(d);
+    return 1;
+  }
+  uint32_t lastVertexEnd = 0, lastIndexEnd = 0;
+  // Merge sections whose reserved ranges are contiguous in both streams:
+  // a freshly repacked chunk lays its sections back-to-back, so the common
+  // unedited chunk collapses back to ONE command (issue #109).
+  bool merged = false;
+  size_t added = 0;
+  for (const SectionGpuSlot &slot : m_sectionGpu)
+  {
+    if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
+      continue;
+    if (merged && !out.empty())
+    {
+      IndirectDraw &last = out.back();
+      if (last.vertexPage == slot.vertexPage &&
+          last.indexPage == slot.indexPage &&
+          slot.vertexOffset == lastVertexEnd && slot.indexOffset == lastIndexEnd)
+      {
+        last.cmd.indexCount += slot.indexCount;
+        lastIndexEnd = slot.indexOffset + slot.indexSlotBytes;
+        lastVertexEnd = slot.vertexOffset + slot.vertexSlotBytes;
+        continue;
+      }
+    }
+    IndirectDraw d;
+    d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
+             static_cast<int32_t>(slot.vertexBase), 0};
+    d.vertexPage = slot.vertexPage;
+    d.indexPage = slot.indexPage;
+    out.push_back(d);
+    lastVertexEnd = slot.vertexOffset + slot.vertexSlotBytes;
+    lastIndexEnd = slot.indexOffset + slot.indexSlotBytes;
+    merged = true;
+    ++added;
+  }
+  return added;
+}
+
+size_t Chunk::collectWaterDraws(std::vector<IndirectDraw> &out) const
+{
+  if (waterIndexCount == 0 || meshNeedsUpdate.load())
+    return 0;
+  if (m_isLODMesh)
+  {
+    if (m_lodWaterIndices.empty() || m_lodWaterVertices.empty())
+      return 0;
+    IndirectDraw d;
+    d.cmd = {static_cast<uint32_t>(m_lodWaterIndices.bytes / sizeof(uint32_t)), 1,
+             static_cast<uint32_t>(m_lodWaterIndices.offset / sizeof(uint32_t)),
+             static_cast<int32_t>(m_lodWaterVertices.offset / sizeof(Vertex)), 0};
+    d.vertexPage = m_lodWaterVertices.page;
+    d.indexPage = m_lodWaterIndices.page;
+    out.push_back(d);
+    return 1;
+  }
+  uint32_t lastVertexEnd = 0, lastIndexEnd = 0;
+  bool merged = false;
+  size_t added = 0;
+  for (const SectionGpuSlot &slot : m_sectionGpuWater)
+  {
+    if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
+      continue;
+    if (merged && !out.empty())
+    {
+      IndirectDraw &last = out.back();
+      if (last.vertexPage == slot.vertexPage &&
+          last.indexPage == slot.indexPage &&
+          slot.vertexOffset == lastVertexEnd && slot.indexOffset == lastIndexEnd)
+      {
+        last.cmd.indexCount += slot.indexCount;
+        lastIndexEnd = slot.indexOffset + slot.indexSlotBytes;
+        lastVertexEnd = slot.vertexOffset + slot.vertexSlotBytes;
+        continue;
+      }
+    }
+    IndirectDraw d;
+    d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
+             static_cast<int32_t>(slot.vertexBase), 0};
+    d.vertexPage = slot.vertexPage;
+    d.indexPage = slot.indexPage;
+    out.push_back(d);
+    lastVertexEnd = slot.vertexOffset + slot.vertexSlotBytes;
+    lastIndexEnd = slot.indexOffset + slot.indexSlotBytes;
+    merged = true;
+    ++added;
+  }
+  return added;
+}
+
 void Chunk::releaseGPU()
 {
-  if (m_allocator == VK_NULL_HANDLE)
+  if (!m_arenas)
     return;
-  destroyBuffer(m_allocator, vertexBuffer);
-  destroyBuffer(m_allocator, indexBuffer);
-  destroyBuffer(m_allocator, waterVertexBuffer);
-  destroyBuffer(m_allocator, waterIndexBuffer);
+  // Immediate free: releaseGPU runs on the destructor/reset/bootstrap paths
+  // where no in-flight frame can still reference the ranges.
+  auto freeSlot = [](MeshArena &v, MeshArena &i, SectionGpuSlot &slot)
+  {
+    if (slot.hasVertexRange())
+      v.freeImmediate({slot.vertexPage, slot.vertexOffset, slot.vertexSlotBytes});
+    if (slot.hasIndexRange())
+      i.freeImmediate({slot.indexPage, slot.indexOffset, slot.indexSlotBytes});
+    slot = {};
+  };
+  for (SectionGpuSlot &slot : m_sectionGpu)
+    freeSlot(m_arenas->opaqueVertex, m_arenas->opaqueIndex, slot);
+  for (SectionGpuSlot &slot : m_sectionGpuWater)
+    freeSlot(m_arenas->waterVertex, m_arenas->waterIndex, slot);
+  m_arenas->opaqueVertex.freeImmediate(m_lodOpaqueVertices);
+  m_arenas->opaqueIndex.freeImmediate(m_lodOpaqueIndices);
+  m_arenas->waterVertex.freeImmediate(m_lodWaterVertices);
+  m_arenas->waterIndex.freeImmediate(m_lodWaterIndices);
+  m_lodOpaqueVertices = {};
+  m_lodOpaqueIndices = {};
+  m_lodWaterVertices = {};
+  m_lodWaterIndices = {};
   m_allocator = VK_NULL_HANDLE;
   opaqueIndexCount = 0;
   waterIndexCount = 0;
-  // Section slots lived inside the destroyed buffers (issue #107).
-  m_sectionGpu.fill({});
-  m_sectionGpuWater.fill({});
-  m_vertexUsedBytes = 0;
-  m_indexUsedBytes = 0;
-  m_waterVertexUsedBytes = 0;
-  m_waterIndexUsedBytes = 0;
+}
+
+void Chunk::releaseGPUDeferred()
+{
+  if (!m_arenas)
+    return;
+  // Frame-aware free: the arenas hand retired ranges back to their free
+  // lists (and destroy emptied pages) only after the frames-in-flight
+  // delay, so streaming unload needs no device wait.
+  auto retireSlot = [](MeshArena &v, MeshArena &i, SectionGpuSlot &slot)
+  {
+    if (slot.hasVertexRange())
+      v.retire({slot.vertexPage, slot.vertexOffset, slot.vertexSlotBytes});
+    if (slot.hasIndexRange())
+      i.retire({slot.indexPage, slot.indexOffset, slot.indexSlotBytes});
+    slot = {};
+  };
+  for (SectionGpuSlot &slot : m_sectionGpu)
+    retireSlot(m_arenas->opaqueVertex, m_arenas->opaqueIndex, slot);
+  for (SectionGpuSlot &slot : m_sectionGpuWater)
+    retireSlot(m_arenas->waterVertex, m_arenas->waterIndex, slot);
+  m_arenas->opaqueVertex.retire(m_lodOpaqueVertices);
+  m_arenas->opaqueIndex.retire(m_lodOpaqueIndices);
+  m_arenas->waterVertex.retire(m_lodWaterVertices);
+  m_arenas->waterIndex.retire(m_lodWaterIndices);
+  m_lodOpaqueVertices = {};
+  m_lodOpaqueIndices = {};
+  m_lodWaterVertices = {};
+  m_lodWaterIndices = {};
+  m_allocator = VK_NULL_HANDLE;
+  opaqueIndexCount = 0;
+  waterIndexCount = 0;
 }
 
 namespace
@@ -1817,171 +1957,125 @@ inline uint32_t indexSlotCapacity(uint32_t payloadBytes)
 }
 } // namespace
 
-// Shared sectioned-upload core (issue #107, rewritten after the PR #117
-// review). Copy-on-write: every upload records its writes into FRESH
-// buffers, never into a buffer an in-flight frame may still be reading.
-//   - Full repack (fresh stream, LOD leftover, or sectionsBuilt == all):
-//     compact back-to-back exact slots - no reservations, no gaps, no
-//     fragmentation; everything is staged from the CPU payload.
-//   - Partial build: the current layout is preserved by a whole-buffer
-//     device copy (offsets - and with them the stored rebased indices -
-//     stay valid), then only the masked sections' ranges are patched in
-//     the copy: in-place re-stage when the payload fits its slot, an
-//     appended slot when it outgrows it (the abandoned slot is zeroed),
-//     a zero fill when a section empties. The zero fills go through
-//     vkCmdFillBuffer - no staged zero bytes.
-// Index slots and slack are triangle-aligned, so the single packed
-// drawIndexed over [0, indexUsed) only ever decodes live triangles or
-// whole degenerate (all-zero) triangles.
+// Shared sectioned-upload core (issue #107/#109). Suballocates arena ranges
+// instead of per-chunk buffers: every mesh lives in the WorldRenderer-owned
+// MeshArenas. A payload that fits its section's reserved range is re-staged
+// in place; an outgrown (or first) payload allocates a fresh arena range and
+// the previous one is retired frame-aware. A full rebuild (fresh stream or
+// sectionsBuilt == all) re-allocates every section so the old ranges return
+// to the arena free lists. Stored indices stay section-local: the indirect
+// draw command carries vertexOffset = vertexBase, so no CPU rebase pass and
+// no gap zeroing exist any more (indirect draws reference live ranges only).
 //
-// The upload is ONE transaction across both streams (PR #117 review):
-// plan opaque + water, preflight and reserve all staging, and only then
-// create buffers / record copies / commit. After the preflight the
-// execution cannot fail, so a staging deferral leaves every GPU handle,
-// slot, used extent and draw count untouched.
+// The upload is ONE transaction across both streams (PR #117 review): plan
+// opaque + water, preflight and reserve all staging, then allocate ranges,
+// record copies and commit. After the staging preflight and the arena
+// allocations succeed, execution is infallible; a deferral leaves every
+// range, slot and draw count untouched.
 //
 // staging/cmd/retire carry the async frame path; imm carries the
-// bootstrap/test path (which always repacks: uploadToGPU releases the old
-// GPU state first). Returns false only when the async staging ring cannot
-// hold the upload: the result stays attached and the upload retries next
-// frame.
+// bootstrap/test path (which frees replaced ranges immediately: no frame
+// can reference them yet). Returns false when the staging ring cannot hold
+// the upload or an arena cannot back a required range: the result stays
+// attached and the upload retries next frame.
 bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
                                StagingRing *staging, VkCommandBuffer cmd,
-                               GpuResourceRetire *retire, ImmediateCommands *imm)
+                               GpuResourceRetire *retire, ImmediateCommands *imm,
+                               MeshArenas &arenas)
 {
+  m_arenas = &arenas;
   struct SectionPlan
   {
-    bool active{false};  // masked and holds content
-    bool clear{false};   // masked but emptied
+    bool active{false};   // masked and holds content
+    bool clear{false};    // masked but emptied
+    bool clearFree{false}; // emptied on a full repack: free the reservation
     bool inPlace{false};
     uint32_t vBytes{0};
     uint32_t iBytes{0};
-    uint32_t vDst{0};
-    uint32_t iDst{0};
+    MeshArena::Range clearV{};
+    MeshArena::Range clearI{};
+    MeshArena::Range newV{};
+    MeshArena::Range newI{};
     uint32_t vBase{0};
-    uint32_t newVSlot{0};
-    uint32_t newISlot{0};
-    // Index ranges that must read as zero inside the drawn region: the
-    // slot's slack, and (for appended slots) the abandoned previous slot,
-    // plus the whole slot of a section that emptied while staying
-    // reserved.
-    uint32_t zeroIOff{0};
-    uint32_t zeroIBytes{0};
-    uint32_t clearIOff{0};
-    uint32_t clearIBytes{0};
     VkDeviceSize stageVOff{0};
     void *stageVPtr{nullptr};
     VkDeviceSize stageIOff{0};
     void *stageIPtr{nullptr};
+    VkDeviceSize stagingNeeded{0};
   };
   struct StreamPlan
   {
     SectionPlan plans[kOccupancySections]{};
     bool fullRepack{false};
-    uint32_t finalV{0};
-    uint32_t finalI{0};
-    VkDeviceSize stagingNeeded{0};
+    bool retireLOD{false};
   };
 
-  uint64_t stagedVertexBytes = 0;
-  uint64_t stagedIndexBytes = 0;
-  std::vector<uint32_t> zeroScratch; // bootstrap-path zero fill scratch
-
-  auto planStream = [&](auto payloadSel, AllocatedBuffer &vertexBuf,
-                        AllocatedBuffer &indexBuf,
+  auto planStream = [&](auto payloadSel, bool waterStream,
                         std::array<SectionGpuSlot, kOccupancySections> &slots,
-                        uint32_t vertexUsed, uint32_t indexUsed,
                         StreamPlan &plan)
   {
-    const bool freshStream = (vertexBuf.buffer == VK_NULL_HANDLE);
-    // Full repack when there is no usable previous layout: fresh stream, a
-    // whole-buffer LOD mesh, or an all-sections build (every payload is
-    // re-staged, so the fragmented edit layout can be compacted away -
-    // PR #117 review). Only partial builds on a live layout keep slot
-    // reservations (and their headroom).
-    plan.fullRepack = freshStream || vertexUsed == 0 ||
-                      result.sectionsBuilt == kAllSectionMask;
-    const bool fullRepack = plan.fullRepack;
-    assert(fullRepack || vertexUsed % sizeof(Vertex) == 0);
-    assert(fullRepack || indexUsed % kTriangleBytes == 0);
+    bool anyRange = false;
+    for (const SectionGpuSlot &slot : slots)
+      anyRange = anyRange || slot.hasVertexRange() || slot.hasIndexRange();
+    // Repack when there is no live sectioned layout (fresh stream or a
+    // whole-buffer LOD mesh) or when every section is rebuilt anyway: all
+    // payloads re-stage, so the old per-section ranges return to the arena
+    // free lists and the layout stays compact (issue #109).
+    plan.fullRepack = !anyRange || result.sectionsBuilt == kAllSectionMask;
+    plan.retireLOD = !(waterStream ? m_lodWaterIndices : m_lodOpaqueIndices).empty();
+    if (plan.retireLOD)
+      plan.fullRepack = true;
 
-    uint32_t curV = fullRepack ? 0 : vertexUsed;
-    uint32_t curI = fullRepack ? 0 : indexUsed;
     for (int s = 0; s < kOccupancySections; ++s)
     {
       SectionPlan &p = plan.plans[s];
       if (((result.sectionsBuilt >> s) & 1u) == 0)
       {
-        // Unmasked section: normal in both a partial build on an existing
-        // stream (the section keeps its committed slot untouched) and a
-        // partial build on a fresh stream (e.g. an all-empty water
-        // stream) - nothing to plan (PR #117 final review).
+        // Unmasked section: normal for a partial build on an existing
+        // layout (the section keeps its committed range) and for a fresh
+        // stream (nothing to plan). No assertion here: a partial build on
+        // a fresh water stream is a legal combination (PR #117 review).
         continue;
       }
       const auto [verts, idxs] = payloadSel(s);
       p.vBytes = static_cast<uint32_t>(verts->size() * sizeof(Vertex));
       p.iBytes = static_cast<uint32_t>(idxs->size() * sizeof(uint32_t));
-      assert(p.iBytes % kTriangleBytes == 0);
+      SectionGpuSlot &slot = slots[static_cast<size_t>(s)];
       if (p.vBytes == 0 && p.iBytes == 0)
       {
+        // Emptied section. On a partial build keep its reserved ranges
+        // (used extents drop to zero) so re-activation re-stages in place
+        // without a new allocation. On a full repack the reservation is
+        // returned to the arena: every range a repacked chunk describes is
+        // freshly allocated, so dead reservations cannot accumulate in the
+        // pages (same invariant as the #117 slot-table reset).
         p.clear = true;
-        if (!fullRepack && slots[s].indexSlotBytes != 0)
+        if (plan.fullRepack && (slot.hasVertexRange() || slot.hasIndexRange()))
         {
-          // Partial rebuild: preserve the reservation but neutralize its
-          // index range, so the section can re-activate in place without
-          // an append.
-          p.clearIOff = slots[s].indexOffset;
-          p.clearIBytes = slots[s].indexSlotBytes;
+          p.clearFree = true;
+          if (slot.hasVertexRange())
+            p.clearV = {slot.vertexPage, slot.vertexOffset, slot.vertexSlotBytes};
+          if (slot.hasIndexRange())
+            p.clearI = {slot.indexPage, slot.indexOffset, slot.indexSlotBytes};
         }
-        // Full repack: no reservation is carried forward - executeStream()
-        // resets the slot table before committing the compact layout, so
-        // the emptied section reads as slotless there.
         continue;
       }
       p.active = true;
-      if (!fullRepack && p.vBytes <= slots[s].vertexSlotBytes &&
-          p.iBytes <= slots[s].indexSlotBytes)
+      if (!plan.fullRepack && slot.hasVertexRange() && slot.hasIndexRange() &&
+          p.vBytes <= slot.vertexSlotBytes && p.iBytes <= slot.indexSlotBytes)
       {
         p.inPlace = true;
-        p.vDst = slots[s].vertexOffset;
-        p.iDst = slots[s].indexOffset;
-        p.vBase = slots[s].vertexBase;
-        p.zeroIOff = p.iDst + p.iBytes;
-        p.zeroIBytes = slots[s].indexSlotBytes - p.iBytes;
+        p.newV = {slot.vertexPage, slot.vertexOffset, slot.vertexSlotBytes};
+        p.newI = {slot.indexPage, slot.indexOffset, slot.indexSlotBytes};
+        p.vBase = slot.vertexBase;
       }
-      else
-      {
-        p.newVSlot = fullRepack ? alignUpBytes(p.vBytes, sizeof(Vertex))
-                                : vertexSlotCapacity(p.vBytes);
-        p.newISlot = fullRepack ? alignUpTriangles(p.iBytes)
-                                : indexSlotCapacity(p.iBytes);
-        if (!fullRepack && slots[s].indexSlotBytes != 0)
-        {
-          // The replaced slot is abandoned: its byte range must read as
-          // zero inside the drawn range.
-          p.clearIOff = slots[s].indexOffset;
-          p.clearIBytes = slots[s].indexSlotBytes;
-        }
-        p.vDst = curV;
-        p.vBase = curV / sizeof(Vertex);
-        curV += p.newVSlot;
-        p.iDst = curI;
-        curI += p.newISlot;
-        p.zeroIOff = p.iDst + p.iBytes;
-        p.zeroIBytes = p.newISlot - p.iBytes;
-      }
-      assert(p.iDst % kTriangleBytes == 0);
-      assert(p.zeroIBytes % kTriangleBytes == 0);
       if (staging)
       {
-        plan.stagingNeeded +=
-            static_cast<VkDeviceSize>(alignUpBytes(p.vBytes, StagingRing::kAlignment)) +
-            alignUpBytes(p.iBytes, StagingRing::kAlignment);
+        p.stagingNeeded = static_cast<VkDeviceSize>(
+            alignUpBytes(p.vBytes, StagingRing::kAlignment) +
+            alignUpBytes(p.iBytes, StagingRing::kAlignment));
       }
     }
-    plan.finalV = fullRepack ? curV : std::max(vertexUsed, curV);
-    plan.finalI = fullRepack ? curI : std::max(indexUsed, curI);
-    assert(plan.finalI % kTriangleBytes == 0);
   };
 
   auto reserveStream = [&](auto payloadSel, StreamPlan &plan) -> bool
@@ -2004,134 +2098,108 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
       {
         if (!staging->alloc(p.iBytes, p.stageIOff, p.stageIPtr))
           return false;
-        // Indices are stored rebased onto the section's vertex base.
-        uint32_t *out = static_cast<uint32_t *>(p.stageIPtr);
-        for (size_t k = 0; k < idxs->size(); ++k)
-          out[k] = (*idxs)[k] + p.vBase;
+        // Indices are stored section-local: the indirect draw's
+        // vertexOffset rebases them on the GPU (issue #109).
+        std::memcpy(p.stageIPtr, idxs->data(), p.iBytes);
       }
     }
     return true;
   };
 
-  auto executeStream = [&](auto payloadSel, AllocatedBuffer &vertexBuf,
-                           AllocatedBuffer &indexBuf,
+  auto executeStream = [&](auto payloadSel, bool waterStream,
+                           MeshArena &vArena, MeshArena &iArena,
                            std::array<SectionGpuSlot, kOccupancySections> &slots,
-                           uint32_t &vertexUsed, uint32_t &indexUsed,
-                           VkBufferUsageFlags vertexUsage, VkBufferUsageFlags indexUsage,
-                           telemetry::Gauge vertexGauge, telemetry::Gauge indexGauge,
                            StreamPlan &plan)
   {
-    const bool fullRepack = plan.fullRepack;
-    const uint32_t finalV = plan.finalV;
-    const uint32_t finalI = plan.finalI;
-
-    // Fresh buffers + preserve copy (first GPU mutation).
-    const bool haveOldV = vertexBuf.buffer != VK_NULL_HANDLE;
-    const bool haveOldI = indexBuf.buffer != VK_NULL_HANDLE;
-    const bool makeV = finalV != 0 || (haveOldV && !fullRepack);
-    const bool makeI = finalI != 0 || (haveOldI && !fullRepack);
-    AllocatedBuffer newV{}, newI{};
-    bool preservedV = false, preservedI = false;
-    if (makeV)
-    {
-      newV = createBuffer(allocator, std::max<VkDeviceSize>(finalV, vertexBuf.size),
-                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                              VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                              vertexUsage,
-                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-      trackMeshBuffer(newV, vertexGauge);
-      if (haveOldV && !fullRepack && vertexUsed != 0)
-      {
-        VkBufferCopy copy{};
-        copy.srcOffset = 0;
-        copy.dstOffset = 0;
-        copy.size = vertexUsed;
-        vkCmdCopyBuffer(cmd, vertexBuf.buffer, newV.buffer, 1, &copy);
-        preservedV = true;
-      }
-    }
-    if (makeI)
-    {
-      newI = createBuffer(allocator, std::max<VkDeviceSize>(finalI, indexBuf.size),
-                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                              VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                              indexUsage,
-                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-      trackMeshBuffer(newI, indexGauge);
-      if (haveOldI && !fullRepack && indexUsed != 0)
-      {
-        VkBufferCopy copy{};
-        copy.srcOffset = 0;
-        copy.dstOffset = 0;
-        copy.size = indexUsed;
-        vkCmdCopyBuffer(cmd, indexBuf.buffer, newI.buffer, 1, &copy);
-        preservedI = true;
-      }
-    }
-    if (preservedV || preservedI)
-    {
-      // The preserve copies overlap the patch ranges below; order them
-      // before the patches (PR #117 review).
-      VkMemoryBarrier barrier{};
-      barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-      barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-      barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier,
-                           0, nullptr, 0, nullptr);
-    }
-    // Retire/destroy the previous buffers only after the copies reading
-    // them are recorded.
-    if (haveOldV)
-    {
-      if (retire)
-        retire->retireBuffer(vertexBuf);
-      else
-        destroyBuffer(allocator, vertexBuf);
-    }
-    if (haveOldI)
-    {
-      if (retire)
-        retire->retireBuffer(indexBuf);
-      else
-        destroyBuffer(allocator, indexBuf);
-    }
-    vertexBuf = newV;
-    indexBuf = newI;
-
-    // Commit point passed (buffers swapped, copies recorded): a full repack
-    // invalidates the whole previous slot table. Old offsets/capacities
-    // refer to the retired layout and must never survive into the compacted
-    // replacement - a stale slot for a section that emptied would let a
-    // later partial upload plan an in-place re-stage outside the (smaller)
-    // new buffer (PR #117 final review). The commit loop below rebuilds
-    // every slot that carries content; the rest stay {}.
-    if (fullRepack)
-      slots.fill({});
-
-    // Patch the fresh buffers (staged payloads + zero fills) and commit
-    // the slot bookkeeping.
-    auto recordFill = [&](VkDeviceSize dstOff, VkDeviceSize bytes)
-    {
-      if (bytes == 0)
-        return;
-      // Offsets/sizes are triangle multiples => multiples of 4, as
-      // vkCmdFillBuffer requires. The bootstrap path (no ring) stages the
-      // zeros through ImmediateCommands instead.
-      if (staging)
-        vkCmdFillBuffer(cmd, indexBuf.buffer, dstOff, bytes, 0);
-      else
-      {
-        zeroScratch.assign(static_cast<size_t>(bytes / sizeof(uint32_t)), 0);
-        uploadBuffer(allocator, *imm, indexBuf, zeroScratch.data(), bytes, dstOff);
-      }
-    };
+    // Arena allocation first (pure CPU bookkeeping): if any range cannot be
+    // backed, every range allocated by this transaction is freed here and
+    // nothing else has been touched.
     for (int s = 0; s < kOccupancySections; ++s)
     {
       SectionPlan &p = plan.plans[s];
-      SectionGpuSlot &slot = slots[s];
+      if (!p.active || p.inPlace)
+        continue;
+      if (!vArena.allocate(p.vBytes, p.newV) || !iArena.allocate(p.iBytes, p.newI))
+      {
+        for (int t = 0; t <= s; ++t)
+        {
+          SectionPlan &q = plan.plans[t];
+          if (!q.active || q.inPlace)
+            continue;
+          if (!q.newV.empty())
+            vArena.freeImmediate(q.newV);
+          if (!q.newI.empty())
+            iArena.freeImmediate(q.newI);
+          q.newV = {};
+          q.newI = {};
+        }
+        return false;
+      }
+      SectionPlan &p2 = plan.plans[s];
+      p2.vBase = p2.newV.offset / sizeof(Vertex);
+    }
+
+    // Retire a whole-buffer LOD mesh of this stream: its ranges are about
+    // to be replaced by the sectioned layout.
+    if (plan.retireLOD)
+    {
+      if (!waterStream)
+      {
+        if (retire)
+        {
+          vArena.retire(m_lodOpaqueVertices);
+          iArena.retire(m_lodOpaqueIndices);
+        }
+        else
+        {
+          vArena.freeImmediate(m_lodOpaqueVertices);
+          iArena.freeImmediate(m_lodOpaqueIndices);
+        }
+        m_lodOpaqueVertices = {};
+        m_lodOpaqueIndices = {};
+      }
+      else
+      {
+        if (retire)
+        {
+          vArena.retire(m_lodWaterVertices);
+          iArena.retire(m_lodWaterIndices);
+        }
+        else
+        {
+          vArena.freeImmediate(m_lodWaterVertices);
+          iArena.freeImmediate(m_lodWaterIndices);
+        }
+        m_lodWaterVertices = {};
+        m_lodWaterIndices = {};
+      }
+    }
+
+    for (int s = 0; s < kOccupancySections; ++s)
+    {
+      SectionPlan &p = plan.plans[s];
+      SectionGpuSlot &slot = slots[static_cast<size_t>(s)];
       if (!p.active && !p.clear)
         continue;
+
+      if (p.clearFree)
+      {
+        // The repacked layout has no range for this section; return its
+        // reservation to the arena now (frame-aware on the async path).
+        if (retire)
+        {
+          vArena.retire(p.clearV);
+          iArena.retire(p.clearI);
+        }
+        else
+        {
+          vArena.freeImmediate(p.clearV);
+          iArena.freeImmediate(p.clearI);
+        }
+        slot = {};
+        continue;
+      }
+
       if (p.active)
       {
         if (staging)
@@ -2140,71 +2208,77 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
           {
             VkBufferCopy copy{};
             copy.srcOffset = p.stageVOff;
-            copy.dstOffset = p.vDst;
+            copy.dstOffset = p.newV.offset;
             copy.size = p.vBytes;
-            vkCmdCopyBuffer(cmd, staging->buffer(), vertexBuf.buffer, 1, &copy);
-            stagedVertexBytes += p.vBytes;
+            vkCmdCopyBuffer(cmd, staging->buffer(), vArena.pageBuffer(p.newV.page), 1, &copy);
           }
           if (p.iBytes != 0)
           {
             VkBufferCopy copy{};
             copy.srcOffset = p.stageIOff;
-            copy.dstOffset = p.iDst;
+            copy.dstOffset = p.newI.offset;
             copy.size = p.iBytes;
-            vkCmdCopyBuffer(cmd, staging->buffer(), indexBuf.buffer, 1, &copy);
-            stagedIndexBytes += p.iBytes;
+            vkCmdCopyBuffer(cmd, staging->buffer(), iArena.pageBuffer(p.newI.page), 1, &copy);
           }
         }
         else
         {
           const auto [verts, idxs] = payloadSel(s);
           if (p.vBytes != 0)
-            uploadBuffer(allocator, *imm, vertexBuf, verts->data(), p.vBytes, p.vDst);
+            uploadBuffer(allocator, *imm, vArena.pageBufferRef(p.newV.page), verts->data(),
+                         p.vBytes, p.newV.offset);
           if (p.iBytes != 0)
+            uploadBuffer(allocator, *imm, iArena.pageBufferRef(p.newI.page), idxs->data(),
+                         p.iBytes, p.newI.offset);
+        }
+
+        // Retire the replaced ranges (frame-aware on the async path) only
+        // after the copies that overwrite their replacements are recorded.
+        if (!p.inPlace)
+        {
+          if (slot.hasVertexRange())
           {
-            std::vector<uint32_t> rebased(idxs->size());
-            for (size_t k = 0; k < idxs->size(); ++k)
-              rebased[k] = (*idxs)[k] + p.vBase;
-            uploadBuffer(allocator, *imm, indexBuf, rebased.data(), p.iBytes, p.iDst);
+            if (retire)
+              vArena.retire({slot.vertexPage, slot.vertexOffset, slot.vertexSlotBytes});
+            else
+              vArena.freeImmediate({slot.vertexPage, slot.vertexOffset, slot.vertexSlotBytes});
+          }
+          if (slot.hasIndexRange())
+          {
+            if (retire)
+              iArena.retire({slot.indexPage, slot.indexOffset, slot.indexSlotBytes});
+            else
+              iArena.freeImmediate({slot.indexPage, slot.indexOffset, slot.indexSlotBytes});
           }
         }
       }
-      recordFill(p.zeroIOff, p.zeroIBytes);
-      recordFill(p.clearIOff, p.clearIBytes);
 
-      // Commit the slot bookkeeping: in-place payloads keep their slot
-      // geometry, (re)allocated slots take the planned one, and a cleared
-      // section keeps its reservation on the partial path (only the used
-      // extent drops to zero). After a full repack the table started from
-      // all-zero, so a cleared section simply stays slotless.
+      // Commit the slot bookkeeping: in-place payloads keep their range;
+      // (re)allocated ones take the fresh range; a cleared section keeps
+      // its reservation with zeroed used extents.
       if (p.active && !p.inPlace)
       {
-        slot.vertexOffset = p.vDst;
-        slot.vertexSlotBytes = p.newVSlot;
+        slot.vertexPage = p.newV.page;
+        slot.vertexOffset = p.newV.offset;
+        slot.vertexSlotBytes = p.newV.bytes;
         slot.vertexBase = p.vBase;
-        slot.indexOffset = p.iDst;
-        slot.indexSlotBytes = p.newISlot;
+        slot.indexPage = p.newI.page;
+        slot.indexOffset = p.newI.offset;
+        slot.indexSlotBytes = p.newI.bytes;
       }
-      slot.vertexUsedBytes = p.active ? p.vBytes : 0;
-      slot.indexUsedBytes = p.active ? p.iBytes : 0;
-      slot.indexCount = p.active ? p.iBytes / sizeof(uint32_t) : 0;
-    }
-#ifndef NDEBUG
-    if (fullRepack)
-    {
-      // Layout invariant (PR #117 final review): after a full repack every
-      // slot describes EXCLUSIVELY the fresh layout; sections absent from
-      // it must read as empty.
-      for (int s = 0; s < kOccupancySections; ++s)
+      if (p.active)
       {
-        if (plan.plans[s].active)
-          continue;
-        assert(slots[s].empty() && "full repack left a stale section slot");
+        slot.vertexUsedBytes = p.vBytes;
+        slot.indexUsedBytes = p.iBytes;
+        slot.indexCount = p.iBytes / sizeof(uint32_t);
+      }
+      else if (p.clear)
+      {
+        slot.vertexUsedBytes = 0;
+        slot.indexUsedBytes = 0;
+        slot.indexCount = 0;
       }
     }
-#endif
-    vertexUsed = finalV;
-    indexUsed = finalI;
   };
 
   auto opaquePayload = [&result](int s)
@@ -2218,17 +2292,18 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
                           &result.sections[s].waterIndices);
   };
 
-  // Transaction: plan both streams, preflight + reserve all staging, and
-  // only then execute (execution is infallible after the preflight).
+  // Transaction: plan both streams, preflight + reserve all staging, then
+  // allocate arena ranges and record (infallible after allocation).
   StreamPlan opaquePlan, waterPlan;
-  planStream(opaquePayload, vertexBuffer, indexBuffer, m_sectionGpu,
-             m_vertexUsedBytes, m_indexUsedBytes, opaquePlan);
-  planStream(waterPayload, waterVertexBuffer, waterIndexBuffer, m_sectionGpuWater,
-             m_waterVertexUsedBytes, m_waterIndexUsedBytes, waterPlan);
+  planStream(opaquePayload, false, m_sectionGpu, opaquePlan);
+  planStream(waterPayload, true, m_sectionGpuWater, waterPlan);
 
   if (staging)
   {
-    const VkDeviceSize totalNeeded = opaquePlan.stagingNeeded + waterPlan.stagingNeeded;
+    VkDeviceSize totalNeeded = 0;
+    for (StreamPlan *plan : {&opaquePlan, &waterPlan})
+      for (int s = 0; s < kOccupancySections; ++s)
+        totalNeeded += plan->plans[s].stagingNeeded;
     if (totalNeeded > staging->sliceCapacity() - staging->usedThisFrame())
       return false;
     if (!reserveStream(opaquePayload, opaquePlan) ||
@@ -2236,27 +2311,34 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
       return false; // unreachable after the exact preflight; nothing mutated
   }
 
-  executeStream(opaquePayload, vertexBuffer, indexBuffer, m_sectionGpu,
-                m_vertexUsedBytes, m_indexUsedBytes,
-                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                telemetry::GpuOpaqueVertex, telemetry::GpuOpaqueIndex, opaquePlan);
-  executeStream(waterPayload, waterVertexBuffer, waterIndexBuffer, m_sectionGpuWater,
-                m_waterVertexUsedBytes, m_waterIndexUsedBytes,
-                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                telemetry::GpuWaterVertex, telemetry::GpuWaterIndex, waterPlan);
+  executeStream(opaquePayload, false, arenas.opaqueVertex, arenas.opaqueIndex,
+                m_sectionGpu, opaquePlan);
+  executeStream(waterPayload, true, arenas.waterVertex, arenas.waterIndex,
+                m_sectionGpuWater, waterPlan);
 
-  // The single chunk-level draw covers the whole packed index region; its
-  // gaps are whole degenerate triangles, so the drawn count derives from
-  // the used byte extent rather than the per-section counts.
-  opaqueIndexCount = m_indexUsedBytes / sizeof(uint32_t);
-  waterIndexCount = m_waterIndexUsedBytes / sizeof(uint32_t);
+  // Draw counts derive from the per-section ranges (indirect draws consume
+  // them section by section).
+  opaqueIndexCount = 0;
+  for (const SectionGpuSlot &slot : m_sectionGpu)
+    opaqueIndexCount += slot.indexCount;
+  waterIndexCount = 0;
+  for (const SectionGpuSlot &slot : m_sectionGpuWater)
+    waterIndexCount += slot.indexCount;
 
+  uint64_t stagedVertexBytes = 0;
+  uint64_t stagedIndexBytes = 0;
+  for (StreamPlan *plan : {&opaquePlan, &waterPlan})
+    for (int s = 0; s < kOccupancySections; ++s)
+    {
+      stagedVertexBytes += plan->plans[s].active ? plan->plans[s].vBytes : 0;
+      stagedIndexBytes += plan->plans[s].active ? plan->plans[s].iBytes : 0;
+    }
   telemetry::registry().add(telemetry::UploadVertexBytes, stagedVertexBytes);
   telemetry::registry().add(telemetry::UploadIndexBytes, stagedIndexBytes);
   return true;
 }
 
-void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
+void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshArenas &arenas)
 {
   MemoryPublication memoryPublication{*this};
   if (allocator == VK_NULL_HANDLE)
@@ -2266,55 +2348,52 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
   if (m_allocator != VK_NULL_HANDLE)
     releaseGPU();
   m_allocator = allocator;
+  m_arenas = &arenas;
 
   // The CPU payload lives in the attached build result (issue #104).
   MeshBuildResult *result = m_pendingResult;
   if (result && result->isLOD)
   {
-    // Whole-chunk LOD mesh: one buffer pair, no slot layout (issue #107).
-    auto &vertices = result->opaqueVertices;
-    auto &indices = result->opaqueIndices;
-    auto &waterVertices = result->waterVertices;
-    auto &waterIndices = result->waterIndices;
-
-    opaqueIndexCount = static_cast<uint32_t>(indices.size());
-    if (!vertices.empty() && opaqueIndexCount > 0)
+    // Whole-chunk LOD mesh: one range pair per stream in the shared arenas.
+    if (!result->opaqueVertices.empty() && !result->opaqueIndices.empty())
     {
-      const VkDeviceSize vSize = vertices.size() * sizeof(Vertex);
-      const VkDeviceSize iSize = indices.size() * sizeof(uint32_t);
-      vertexBuffer = createBuffer(allocator, vSize,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-      trackMeshBuffer(vertexBuffer, telemetry::GpuOpaqueVertex);
-      indexBuffer = createBuffer(allocator, iSize,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-      trackMeshBuffer(indexBuffer, telemetry::GpuOpaqueIndex);
-      uploadBuffer(allocator, imm, vertexBuffer, vertices.data(), vSize);
-      uploadBuffer(allocator, imm, indexBuffer, indices.data(), iSize);
+      if (!arenas.opaqueVertex.allocate(
+              static_cast<uint32_t>(result->opaqueVertices.size() * sizeof(Vertex)),
+              m_lodOpaqueVertices))
+        throw std::runtime_error("Chunk::uploadToGPU: arena allocation failed");
+      if (!arenas.opaqueIndex.allocate(
+              static_cast<uint32_t>(result->opaqueIndices.size() * sizeof(uint32_t)),
+              m_lodOpaqueIndices))
+        throw std::runtime_error("Chunk::uploadToGPU: arena allocation failed");
+      uploadBuffer(allocator, imm, arenas.opaqueVertex.pageBufferRef(m_lodOpaqueVertices.page), result->opaqueVertices.data(),
+                   m_lodOpaqueVertices.bytes, m_lodOpaqueVertices.offset);
+      uploadBuffer(allocator, imm, arenas.opaqueIndex.pageBufferRef(m_lodOpaqueIndices.page), result->opaqueIndices.data(),
+                   m_lodOpaqueIndices.bytes, m_lodOpaqueIndices.offset);
+      opaqueIndexCount = static_cast<uint32_t>(result->opaqueIndices.size());
     }
-
-    waterIndexCount = static_cast<uint32_t>(waterIndices.size());
-    if (!waterVertices.empty() && waterIndexCount > 0)
+    if (!result->waterVertices.empty() && !result->waterIndices.empty())
     {
-      const VkDeviceSize vSize = waterVertices.size() * sizeof(Vertex);
-      const VkDeviceSize iSize = waterIndices.size() * sizeof(uint32_t);
-      waterVertexBuffer = createBuffer(allocator, vSize,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-      trackMeshBuffer(waterVertexBuffer, telemetry::GpuWaterVertex);
-      waterIndexBuffer = createBuffer(allocator, iSize,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-      trackMeshBuffer(waterIndexBuffer, telemetry::GpuWaterIndex);
-      uploadBuffer(allocator, imm, waterVertexBuffer, waterVertices.data(), vSize);
-      uploadBuffer(allocator, imm, waterIndexBuffer, waterIndices.data(), iSize);
+      if (!arenas.waterVertex.allocate(
+              static_cast<uint32_t>(result->waterVertices.size() * sizeof(Vertex)),
+              m_lodWaterVertices))
+        throw std::runtime_error("Chunk::uploadToGPU: arena allocation failed");
+      if (!arenas.waterIndex.allocate(
+              static_cast<uint32_t>(result->waterIndices.size() * sizeof(uint32_t)),
+              m_lodWaterIndices))
+        throw std::runtime_error("Chunk::uploadToGPU: arena allocation failed");
+      uploadBuffer(allocator, imm, arenas.waterVertex.pageBufferRef(m_lodWaterVertices.page), result->waterVertices.data(),
+                   m_lodWaterVertices.bytes, m_lodWaterVertices.offset);
+      uploadBuffer(allocator, imm, arenas.waterIndex.pageBufferRef(m_lodWaterIndices.page), result->waterIndices.data(),
+                   m_lodWaterIndices.bytes, m_lodWaterIndices.offset);
+      waterIndexCount = static_cast<uint32_t>(result->waterIndices.size());
     }
+    m_sectionGpu.fill({});
+    m_sectionGpuWater.fill({});
   }
   else if (result)
   {
-    // Full-quality sectioned upload (issue #107): slot per section.
-    uploadSectionSlots(*result, allocator, nullptr, VK_NULL_HANDLE, nullptr, &imm);
+    // Full-quality sectioned upload: arena range per section.
+    uploadSectionSlots(*result, allocator, nullptr, VK_NULL_HANDLE, nullptr, &imm, arenas);
   }
   else
   {
@@ -2329,130 +2408,118 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
 }
 
 bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-                             GpuResourceRetire &retire)
+                             GpuResourceRetire &retire, MeshArenas &arenas)
 {
   MemoryPublication memoryPublication{*this};
   if (allocator == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE || !staging.isValid())
     return false;
 
   m_allocator = allocator;
+  m_arenas = &arenas;
 
   // The CPU payload lives in the attached build result (issue #104). When
-  // staging is full the result stays attached - the completed mesh is
-  // neither lost nor copied - and the upload retries next frame.
+  // staging or an arena allocation fails, the result stays attached - the
+  // completed mesh is neither lost nor copied - and the upload retries next
+  // frame with no arena range, slot or draw count modified.
   MeshBuildResult *result = m_pendingResult;
   if (result && result->isLOD)
   {
-    // Whole-chunk LOD mesh: one buffer pair, no slot layout (issue #107).
-    const uint32_t newOpaqueCount = static_cast<uint32_t>(result->opaqueIndices.size());
-    const uint32_t newWaterCount = static_cast<uint32_t>(result->waterIndices.size());
-
-    AllocatedBuffer newV{}, newI{}, newWV{}, newWI{};
-    std::vector<VkBufferCopy> copies;
-    copies.reserve(4);
-    struct CopyJob
+    // Whole-chunk LOD mesh: one range pair per stream in the shared arenas.
+    const bool needOpaque = !result->opaqueVertices.empty() && !result->opaqueIndices.empty();
+    const bool needWater = !result->waterVertices.empty() && !result->waterIndices.empty();
+    MeshArena::Range newOV{}, newOI{}, newWV{}, newWI{};
+    if (needOpaque &&
+        (!arenas.opaqueVertex.allocate(
+             static_cast<uint32_t>(result->opaqueVertices.size() * sizeof(Vertex)), newOV) ||
+         !arenas.opaqueIndex.allocate(
+             static_cast<uint32_t>(result->opaqueIndices.size() * sizeof(uint32_t)), newOI)))
     {
-      VkBuffer dst;
-      VkDeviceSize srcOffset;
-      VkDeviceSize size;
-    };
-    std::vector<CopyJob> jobs;
-    jobs.reserve(4);
+      arenas.opaqueVertex.freeImmediate(newOV);
+      arenas.opaqueIndex.freeImmediate(newOI);
+      telemetry::registry().add(telemetry::UploadDeferred);
+      return false;
+    }
+    if (needWater &&
+        (!arenas.waterVertex.allocate(
+             static_cast<uint32_t>(result->waterVertices.size() * sizeof(Vertex)), newWV) ||
+         !arenas.waterIndex.allocate(
+             static_cast<uint32_t>(result->waterIndices.size() * sizeof(uint32_t)), newWI)))
+    {
+      arenas.opaqueVertex.freeImmediate(newOV);
+      arenas.opaqueIndex.freeImmediate(newOI);
+      arenas.waterVertex.freeImmediate(newWV);
+      arenas.waterIndex.freeImmediate(newWI);
+      telemetry::registry().add(telemetry::UploadDeferred);
+      return false;
+    }
 
-    auto stageInto = [&](const void *data, VkDeviceSize size, AllocatedBuffer &dstBuf,
-                         VkBufferUsageFlags usage, telemetry::Gauge kind) -> bool {
-      if (!data || size == 0)
-        return true;
-      dstBuf = createBuffer(allocator, size,
-                            VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
-                            VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-      trackMeshBuffer(dstBuf, kind);
-      VkDeviceSize off = 0;
-      void *ptr = nullptr;
-      if (!staging.alloc(size, off, ptr))
-      {
-        destroyBuffer(allocator, dstBuf);
-        return false;
-      }
-      std::memcpy(ptr, data, static_cast<size_t>(size));
-      jobs.push_back({dstBuf.buffer, off, size});
-      return true;
-    };
-
-    const bool needOpaque = !result->opaqueVertices.empty() && newOpaqueCount > 0;
-    const bool needWater = !result->waterVertices.empty() && newWaterCount > 0;
-
+    VkDeviceSize offV = 0, offI = 0, offWV = 0, offWI = 0;
+    void *ptrV = nullptr, *ptrI = nullptr, *ptrWV = nullptr, *ptrWI = nullptr;
+    if (needOpaque &&
+        (!staging.alloc(newOV.bytes, offV, ptrV) || !staging.alloc(newOI.bytes, offI, ptrI)))
+    {
+      arenas.opaqueVertex.freeImmediate(newOV);
+      arenas.opaqueIndex.freeImmediate(newOI);
+      arenas.waterVertex.freeImmediate(newWV);
+      arenas.waterIndex.freeImmediate(newWI);
+      telemetry::registry().add(telemetry::UploadDeferred);
+      return false;
+    }
+    if (needWater &&
+        (!staging.alloc(newWV.bytes, offWV, ptrWV) || !staging.alloc(newWI.bytes, offWI, ptrWI)))
+    {
+      arenas.opaqueVertex.freeImmediate(newOV);
+      arenas.opaqueIndex.freeImmediate(newOI);
+      arenas.waterVertex.freeImmediate(newWV);
+      arenas.waterIndex.freeImmediate(newWI);
+      telemetry::registry().add(telemetry::UploadDeferred);
+      return false;
+    }
     if (needOpaque)
     {
-      const VkDeviceSize vSize = result->opaqueVertices.size() * sizeof(Vertex);
-      const VkDeviceSize iSize = result->opaqueIndices.size() * sizeof(uint32_t);
-      if (!stageInto(result->opaqueVertices.data(), vSize, newV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, telemetry::GpuOpaqueVertex) ||
-          !stageInto(result->opaqueIndices.data(), iSize, newI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, telemetry::GpuOpaqueIndex))
-      {
-        destroyBuffer(allocator, newV);
-        destroyBuffer(allocator, newI);
-        telemetry::registry().add(telemetry::UploadDeferred);
-        return false;
-      }
+      std::memcpy(ptrV, result->opaqueVertices.data(), newOV.bytes);
+      std::memcpy(ptrI, result->opaqueIndices.data(), newOI.bytes);
+      VkBufferCopy c{};
+      c.srcOffset = offV;
+      c.dstOffset = newOV.offset;
+      c.size = newOV.bytes;
+      vkCmdCopyBuffer(cmd, staging.buffer(), arenas.opaqueVertex.pageBuffer(newOV.page), 1, &c);
+      c = {offI, newOI.offset, newOI.bytes};
+      vkCmdCopyBuffer(cmd, staging.buffer(), arenas.opaqueIndex.pageBuffer(newOI.page), 1, &c);
+      arenas.opaqueVertex.retire(m_lodOpaqueVertices);
+      arenas.opaqueIndex.retire(m_lodOpaqueIndices);
+      m_lodOpaqueVertices = newOV;
+      m_lodOpaqueIndices = newOI;
+      opaqueIndexCount = static_cast<uint32_t>(result->opaqueIndices.size());
     }
-
     if (needWater)
     {
-      const VkDeviceSize vSize = result->waterVertices.size() * sizeof(Vertex);
-      const VkDeviceSize iSize = result->waterIndices.size() * sizeof(uint32_t);
-      if (!stageInto(result->waterVertices.data(), vSize, newWV, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, telemetry::GpuWaterVertex) ||
-          !stageInto(result->waterIndices.data(), iSize, newWI, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, telemetry::GpuWaterIndex))
-      {
-        destroyBuffer(allocator, newV);
-        destroyBuffer(allocator, newI);
-        destroyBuffer(allocator, newWV);
-        destroyBuffer(allocator, newWI);
-        telemetry::registry().add(telemetry::UploadDeferred);
-        return false;
-      }
+      std::memcpy(ptrWV, result->waterVertices.data(), newWV.bytes);
+      std::memcpy(ptrWI, result->waterIndices.data(), newWI.bytes);
+      VkBufferCopy c{};
+      c.srcOffset = offWV;
+      c.dstOffset = newWV.offset;
+      c.size = newWV.bytes;
+      vkCmdCopyBuffer(cmd, staging.buffer(), arenas.waterVertex.pageBuffer(newWV.page), 1, &c);
+      c = {offWI, newWI.offset, newWI.bytes};
+      vkCmdCopyBuffer(cmd, staging.buffer(), arenas.waterIndex.pageBuffer(newWI.page), 1, &c);
+      arenas.waterVertex.retire(m_lodWaterVertices);
+      arenas.waterIndex.retire(m_lodWaterIndices);
+      m_lodWaterVertices = newWV;
+      m_lodWaterIndices = newWI;
+      waterIndexCount = static_cast<uint32_t>(result->waterIndices.size());
     }
-
-    telemetry::registry().add(telemetry::UploadChunks);
-    telemetry::registry().add(telemetry::UploadVertexBytes, newV.size + newWV.size);
-    telemetry::registry().add(telemetry::UploadIndexBytes, newI.size + newWI.size);
-    for (const auto &j : jobs)
-    {
-      VkBufferCopy copy{};
-      copy.srcOffset = j.srcOffset;
-      copy.dstOffset = 0;
-      copy.size = j.size;
-      vkCmdCopyBuffer(cmd, staging.buffer(), j.dst, 1, &copy);
-    }
-
-    // Retire previous GPU meshes (still referenced by in-flight frames).
-    if (vertexBuffer.buffer != VK_NULL_HANDLE)
-      retire.retireBuffer(vertexBuffer);
-    if (indexBuffer.buffer != VK_NULL_HANDLE)
-      retire.retireBuffer(indexBuffer);
-    if (waterVertexBuffer.buffer != VK_NULL_HANDLE)
-      retire.retireBuffer(waterVertexBuffer);
-    if (waterIndexBuffer.buffer != VK_NULL_HANDLE)
-      retire.retireBuffer(waterIndexBuffer);
-
-    vertexBuffer = newV;
-    indexBuffer = newI;
-    waterVertexBuffer = newWV;
-    waterIndexBuffer = newWI;
-    opaqueIndexCount = needOpaque ? newOpaqueCount : 0;
-    waterIndexCount = needWater ? newWaterCount : 0;
-    // Whole-buffer mesh: no valid section slots (issue #107).
+    // Whole-buffer mesh: no valid section ranges.
     m_sectionGpu.fill({});
     m_sectionGpuWater.fill({});
-    m_vertexUsedBytes = 0;
-    m_indexUsedBytes = 0;
-    m_waterVertexUsedBytes = 0;
-    m_waterIndexUsedBytes = 0;
+    m_isLODMesh = true;
+    telemetry::registry().add(telemetry::UploadChunks);
   }
   else if (result)
   {
-    // Full-quality sectioned upload (issue #107): only the built sections'
-    // slots are re-staged; a full staging ring defers the whole upload.
-    if (!uploadSectionSlots(*result, allocator, &staging, cmd, &retire, nullptr))
+    // Full-quality sectioned upload: arena range per section; only the
+    // built sections are re-staged; a full staging ring defers the upload.
+    if (!uploadSectionSlots(*result, allocator, &staging, cmd, &retire, nullptr, arenas))
     {
       telemetry::registry().add(telemetry::UploadDeferred);
       return false;
@@ -2470,70 +2537,6 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
   releaseNeighborBorders();
   meshNeedsUpdate = false;
   return true;
-}
-
-void Chunk::releaseGPUDeferred(GpuResourceRetire &retire)
-{
-  if (vertexBuffer.buffer != VK_NULL_HANDLE)
-    retire.retireBuffer(vertexBuffer);
-  if (indexBuffer.buffer != VK_NULL_HANDLE)
-    retire.retireBuffer(indexBuffer);
-  if (waterVertexBuffer.buffer != VK_NULL_HANDLE)
-    retire.retireBuffer(waterVertexBuffer);
-  if (waterIndexBuffer.buffer != VK_NULL_HANDLE)
-    retire.retireBuffer(waterIndexBuffer);
-  vertexBuffer = {};
-  indexBuffer = {};
-  waterVertexBuffer = {};
-  waterIndexBuffer = {};
-  m_allocator = VK_NULL_HANDLE;
-  opaqueIndexCount = 0;
-  waterIndexCount = 0;
-  // Section slots lived inside the retired buffers (issue #107).
-  m_sectionGpu.fill({});
-  m_sectionGpuWater.fill({});
-  m_vertexUsedBytes = 0;
-  m_indexUsedBytes = 0;
-  m_waterVertexUsedBytes = 0;
-  m_waterIndexUsedBytes = 0;
-}
-
-uint32_t Chunk::draw(VkCommandBuffer cmd)
-{
-  if (opaqueIndexCount == 0 || vertexBuffer.buffer == VK_NULL_HANDLE)
-    return 0;
-
-  VkDeviceSize offset = 0;
-  vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer.buffer, &offset);
-  vkCmdBindIndexBuffer(cmd, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-  telemetry::registry().add(telemetry::OpaqueDraws);
-  vkCmdDrawIndexed(cmd, opaqueIndexCount, 1, 0, 0, 0);
-  return opaqueIndexCount;
-}
-
-uint32_t Chunk::drawWater(VkCommandBuffer cmd)
-{
-  if (waterIndexCount == 0 || waterVertexBuffer.buffer == VK_NULL_HANDLE)
-    return 0;
-
-  VkDeviceSize offset = 0;
-  vkCmdBindVertexBuffers(cmd, 0, 1, &waterVertexBuffer.buffer, &offset);
-  vkCmdBindIndexBuffer(cmd, waterIndexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-  telemetry::registry().add(telemetry::WaterDraws);
-  vkCmdDrawIndexed(cmd, waterIndexCount, 1, 0, 0, 0);
-  return waterIndexCount;
-}
-
-void Chunk::drawShadow(VkCommandBuffer cmd, unsigned cascade) const
-{
-  if (opaqueIndexCount == 0 || meshNeedsUpdate.load() || vertexBuffer.buffer == VK_NULL_HANDLE)
-    return;
-
-  VkDeviceSize offset = 0;
-  vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer.buffer, &offset);
-  vkCmdBindIndexBuffer(cmd, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-  telemetry::registry().add(static_cast<telemetry::Event>(telemetry::Shadow0 + std::min(cascade, 2u)));
-  vkCmdDrawIndexed(cmd, opaqueIndexCount, 1, 0, 0, 0);
 }
 
 void Chunk::releaseNeighborBorders()

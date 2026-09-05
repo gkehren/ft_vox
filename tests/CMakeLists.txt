@@ -549,3 +549,35 @@ add_test(NAME WorkloadTelemetry COMMAND test_workload_telemetry)
 set_tests_properties(WorkloadTelemetry PROPERTIES ENVIRONMENT "FT_VOX_TELEMETRY=1")
 add_test(NAME WorkloadTelemetryDisabled COMMAND test_workload_telemetry)
 set_tests_properties(WorkloadTelemetryDisabled PROPERTIES ENVIRONMENT "FT_VOX_TELEMETRY=0")
+
+# ---------------------------------------------------------------------------
+# MeshArena allocator unit tests (issue #109): aligned suballocation,
+# first-fit reuse, frame-aware retirement, page growth and exhaustion.
+# Headless Vulkan device; skips quietly when no loader/device is available.
+# ---------------------------------------------------------------------------
+add_executable(test_mesh_arena
+    test_mesh_arena.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+)
+target_include_directories(test_mesh_arena PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+target_compile_definitions(test_mesh_arena PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+if(APPLE)
+    target_compile_definitions(test_mesh_arena PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_mesh_arena PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+target_link_libraries(test_mesh_arena PRIVATE
+    glm
+    SDL3::SDL3
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
+)
+add_test(NAME MeshArena COMMAND test_mesh_arena)
