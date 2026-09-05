@@ -234,6 +234,7 @@ public:
 	void reset(const glm::vec3 &newPosition, ResetMode mode = ResetMode::Full);
 
 	uint32_t getOpaqueIndexCount() const { return opaqueIndexCount; }
+	uint32_t getWaterIndexCount() const { return waterIndexCount; }
 
 	size_t getActiveIndex() const { return m_activeIndex; }
 	void setActiveIndex(size_t index) { m_activeIndex = index; }
@@ -343,6 +344,14 @@ private:
 							StagingRing *staging, VkCommandBuffer cmd,
 							GpuResourceRetire *retire, ImmediateCommands *imm,
 							MeshArenas &arenas);
+	// Retire every range described by a section slot table and reset the
+	// slots (issue #109 review: single retirement path for full->LOD and
+	// unload transitions). immediate=true for bootstrap/shutdown paths.
+	void retireSectionSlots(std::array<SectionGpuSlot, kOccupancySections> &slots,
+							MeshArena &vertexArena, MeshArena &indexArena, bool immediate);
+	// Retire LOD stream ranges and reset them to empty.
+	void retireLodRanges(MeshArena &vertexArena, MeshArena &indexArena,
+						 MeshArena::Range &vertices, MeshArena::Range &indices, bool immediate);
 	// Borrowed from a BorderPool for generation/meshing and returned after
 	// upload (issue #103): no per-chunk border memory is retained.
 	ChunkNeighborBorders *m_borders{nullptr};
