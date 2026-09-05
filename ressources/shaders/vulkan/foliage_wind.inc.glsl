@@ -17,4 +17,3 @@ vec3 applyFoliageWind(vec3 pos, uint texIdx, float time, vec2 uv)
     pos.z += c * wind * 0.55 * heightBoost;
     return pos;
 }
-
