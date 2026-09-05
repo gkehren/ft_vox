@@ -12,6 +12,28 @@
 class Chunk;
 class MeshResultPool;
 
+// Vertical mesh sections (issue #107): the logical chunk stays 16x256x16,
+// but its full-quality render mesh is one payload per 16x16x16 section so a
+// block edit rebuilds and re-uploads only the affected section(s). The
+// section count tiling matches the occupancy metadata (16 sections of 16
+// voxels, issue #105).
+inline constexpr int kChunkSectionCount = CHUNK_HEIGHT / 16;
+static_assert(CHUNK_HEIGHT % 16 == 0, "sections must tile the chunk height");
+inline constexpr uint16_t kAllSectionMask = 0xFFFFu;
+
+// One section's render payload. Indices are SECTION-LOCAL (base 0): the
+// upload rebase them onto the section's GPU vertex slot, so a section can
+// move to a new slot without touching any other section's bytes.
+struct SectionMeshPayload
+{
+	std::vector<Vertex> opaqueVertices;
+	std::vector<uint32_t> opaqueIndices;
+	std::vector<Vertex> waterVertices;
+	std::vector<uint32_t> waterIndices;
+
+	bool operator==(const SectionMeshPayload &other) const = default;
+};
+
 // Completed CPU mesh build detached from Chunk lifetime (issue #104).
 //
 // The greedy mesher used to write straight into four vectors owned by the
@@ -25,6 +47,11 @@ class MeshResultPool;
 // into it, hand it to the upload stage, and the block goes back to the pool
 // once the payload is staged. Retained capacity therefore scales with
 // concurrent meshing/upload work, not with the number of pooled chunks.
+//
+// Since issue #107 the full-quality payload lives in `sections` (one entry
+// per vertical 16^3 section; a build may fill only the dirty subset - see
+// `sectionsBuilt`). The four flat vectors below remain exclusively for the
+// whole-chunk LOD mesh of far-band chunks, which is never section-remeshed.
 //
 // Per-vector byte counters live in MeshResultAccounting and are maintained
 // by the pool under its mutex (finishBuild / release). The pool NEVER reads
@@ -56,16 +83,22 @@ struct MeshBuildResult
 	// True when built by buildLODMesh(); committed to the chunk by
 	// publishMeshResult() on the main thread.
 	bool isLOD{false};
+	// Bit s set <=> sections[s] holds a fresh full-quality payload from this
+	// build (issue #107). Full builds and LOD builds set every bit (LOD
+	// payloads ignore it). publishMeshResult() ORs the mask back into the
+	// chunk's dirty state on rejection so a superseded section is remeshed.
+	uint16_t sectionsBuilt{0};
 	// Pool the block came from. Results travel worker -> completion queue ->
 	// upload, so every holder can return the block without knowing which
 	// pool instance produced it (pools travel with their blocks, same rule
 	// as voxel/border storage in #112/#113).
 	MeshResultPool *homePool{nullptr};
 
-	// No default member initializers on the vectors beyond empty construction:
-	// pool blocks are created empty and their capacities are (re)grown by
-	// consumers. beginBuild() drops previous content while keeping capacity -
-	// reuse across jobs is the point.
+	// Full-quality payload, one slot per vertical section (issue #107).
+	// beginBuild() drops previous content while keeping capacity - reuse
+	// across jobs is the point.
+	std::array<SectionMeshPayload, kChunkSectionCount> sections;
+	// Whole-chunk LOD payload (far band only, never section-remeshed).
 	std::vector<Vertex> opaqueVertices;
 	std::vector<uint32_t> opaqueIndices;
 	std::vector<Vertex> waterVertices;
@@ -75,8 +108,11 @@ struct MeshBuildResult
 	MeshResultAccounting accounted{};
 
 	// Stamp identity and drop previous content (capacities are kept).
-	// Called by the builder; must not touch `accounted` (pool-owned).
-	void beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration, uint64_t chunkRevision);
+	// `sectionMask` records which sections this build will refresh
+	// (kAllSectionMask for whole-chunk builds). Called by the builder; must
+	// not touch `accounted` (pool-owned).
+	void beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration, uint64_t chunkRevision,
+					uint16_t sectionMask = 0);
 	// Detach identity and content without freeing capacity (release path).
 	void detach();
 };
@@ -92,6 +128,7 @@ struct MeshResultPoolStats
 	size_t free{0};
 	// Live payload bytes across finished, not-yet-released blocks (in-flight
 	// builds past finishBuild + results attached to chunks awaiting upload).
+	// Sizes/capacities sum the section payloads and the LOD vectors.
 	size_t opaqueVertexSize{0};
 	size_t opaqueIndexSize{0};
 	size_t waterVertexSize{0};

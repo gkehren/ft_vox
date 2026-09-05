@@ -12,6 +12,7 @@
 #include <Engine/WorkloadTelemetry.hpp>
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -80,6 +81,8 @@ struct QuadView
 	uint32_t texture{0};
 	bool biomeColor{false};
 	uint32_t packedColor{0};
+	int section{0};       // payload section this quad lives in
+	uint32_t firstVertex{0}; // quad's first vertex index within that section
 };
 
 static uint32_t vNormal(const Vertex &v) { return v.packedData & 0x7; }
@@ -96,7 +99,7 @@ static glm::ivec3 localPos(const Vertex &v, const Chunk &chunk)
 
 static std::vector<QuadView> decodeQuads(const std::vector<Vertex> &verts,
 										 const std::vector<uint32_t> &indices,
-										 const Chunk &chunk)
+										 const Chunk &chunk, int section)
 {
 	std::vector<QuadView> quads;
 	if (verts.size() % 4 != 0 || indices.size() != verts.size() / 4 * 6)
@@ -105,6 +108,8 @@ static std::vector<QuadView> decodeQuads(const std::vector<Vertex> &verts,
 	for (size_t q = 0; q < verts.size() / 4; ++q)
 	{
 		QuadView quad;
+		quad.section = section;
+		quad.firstVertex = static_cast<uint32_t>(q * 4);
 		quad.mn = glm::ivec3(std::numeric_limits<int>::max());
 		quad.mx = glm::ivec3(std::numeric_limits<int>::lowest());
 		for (int i = 0; i < 4; ++i)
@@ -122,6 +127,41 @@ static std::vector<QuadView> decodeQuads(const std::vector<Vertex> &verts,
 		quads.push_back(quad);
 	}
 	return quads;
+}
+
+static const Vertex &sectionVertex(const MeshBuildResult &r, const QuadView &quad, int i)
+{
+	return r.sections[static_cast<size_t>(quad.section)]
+		.opaqueVertices[static_cast<size_t>(quad.firstVertex) + static_cast<size_t>(i)];
+}
+
+static size_t totalOpaqueIndices(const MeshBuildResult &r)
+{
+	size_t n = 0;
+	for (const SectionMeshPayload &s : r.sections)
+		n += s.opaqueIndices.size();
+	return n;
+}
+static size_t totalOpaqueVertices(const MeshBuildResult &r)
+{
+	size_t n = 0;
+	for (const SectionMeshPayload &s : r.sections)
+		n += s.opaqueVertices.size();
+	return n;
+}
+static size_t totalWaterIndices(const MeshBuildResult &r)
+{
+	size_t n = 0;
+	for (const SectionMeshPayload &s : r.sections)
+		n += s.waterIndices.size();
+	return n;
+}
+static size_t totalWaterVertices(const MeshBuildResult &r)
+{
+	size_t n = 0;
+	for (const SectionMeshPayload &s : r.sections)
+		n += s.waterVertices.size();
+	return n;
 }
 
 static size_t countQuads(const std::vector<QuadView> &quads, uint32_t normalIdx,
@@ -155,10 +195,20 @@ struct BuiltMesh
 	std::vector<QuadView> opaque;
 	std::vector<QuadView> water;
 
+	// Quads compose seamlessly across sections: positions are chunk-space
+	// and each section's payload holds whole quads (4 verts + 6 indices).
 	void decode(const Chunk &chunk)
 	{
-		opaque = decodeQuads(result->opaqueVertices, result->opaqueIndices, chunk);
-		water = decodeQuads(result->waterVertices, result->waterIndices, chunk);
+		opaque.clear();
+		water.clear();
+		for (int s = 0; s < kChunkSectionCount; ++s)
+		{
+			const SectionMeshPayload &p = result->sections[static_cast<size_t>(s)];
+			std::vector<QuadView> q = decodeQuads(p.opaqueVertices, p.opaqueIndices, chunk, s);
+			opaque.insert(opaque.end(), q.begin(), q.end());
+			q = decodeQuads(p.waterVertices, p.waterIndices, chunk, s);
+			water.insert(water.end(), q.begin(), q.end());
+		}
 	}
 	void release()
 	{
@@ -209,10 +259,9 @@ static BuiltMesh buildLodWithMetadata(Chunk &chunk, MeshResultPool &pool)
 
 static void expectIdentical(const BuiltMesh &a, const BuiltMesh &b, const char *what)
 {
-	CHECK(a.result->opaqueVertices == b.result->opaqueVertices &&
-			  a.result->opaqueIndices == b.result->opaqueIndices &&
-			  a.result->waterVertices == b.result->waterVertices &&
-			  a.result->waterIndices == b.result->waterIndices,
+	CHECK(a.result->sections == b.result->sections &&
+			  a.result->opaqueVertices == b.result->opaqueVertices &&
+			  a.result->waterVertices == b.result->waterVertices,
 			  what);
 }
 
@@ -243,9 +292,9 @@ static void testUniformSlabMerges()
 	fillSlab(s.chunk, 0, 0, 4, 4, 8, STONE);
 
 	BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
-	CHECK(m.result->opaqueVertices.size() == 24, "slab: 6 quads x 4 vertices");
-	CHECK(m.result->opaqueIndices.size() == 36, "slab: 6 quads x 6 indices");
-	CHECK(m.result->waterVertices.empty() && m.result->waterIndices.empty(),
+	CHECK(totalOpaqueVertices(*m.result) == 24, "slab: 6 quads x 4 vertices");
+	CHECK(totalOpaqueIndices(*m.result) == 36, "slab: 6 quads x 6 indices");
+	CHECK(totalWaterVertices(*m.result) == 0 && totalWaterIndices(*m.result) == 0,
 		  "slab: no water geometry");
 
 	const QuadView *top = findQuad(m.opaque, 2, STONE, glm::ivec3(0, 9, 0));
@@ -258,10 +307,9 @@ static void testUniformSlabMerges()
 		// and AIR is not in the layer table), so a uniformly exposed quad
 		// shows one corner value across all four vertices. Byte-exact AO is
 		// pinned by the hash corpus and the key-vs-full-range equivalence.
-		const size_t vi = static_cast<size_t>(top - m.opaque.data()) * 4;
-		CHECK(vAo(m.result->opaqueVertices[vi]) == vAo(m.result->opaqueVertices[vi + 1]) &&
-				  vAo(m.result->opaqueVertices[vi]) == vAo(m.result->opaqueVertices[vi + 2]) &&
-				  vAo(m.result->opaqueVertices[vi]) == vAo(m.result->opaqueVertices[vi + 3]),
+		CHECK(vAo(sectionVertex(*m.result, *top, 0)) == vAo(sectionVertex(*m.result, *top, 1)) &&
+				  vAo(sectionVertex(*m.result, *top, 0)) == vAo(sectionVertex(*m.result, *top, 2)) &&
+				  vAo(sectionVertex(*m.result, *top, 0)) == vAo(sectionVertex(*m.result, *top, 3)),
 			  "slab: uniform exposure keeps uniform corner AO");
 	}
 	CHECK(findQuad(m.opaque, 3, STONE, glm::ivec3(0, 8, 0)) != nullptr &&
@@ -368,18 +416,19 @@ static void testWater()
 			fillSlab(s.chunk, 0, 0, 4, 4, y, WATER);
 
 		BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
-		CHECK(m.result->opaqueVertices.empty() && m.result->opaqueIndices.empty(),
+		CHECK(totalOpaqueVertices(*m.result) == 0 && totalOpaqueIndices(*m.result) == 0,
 			  "water box: no opaque geometry");
-		CHECK(m.result->waterVertices.size() == 24 && m.result->waterIndices.size() == 36,
+		CHECK(totalWaterVertices(*m.result) == 24 && totalWaterIndices(*m.result) == 36,
 			  "water box: 6 quads (top, bottom, four 4x2 sides)");
 		const QuadView *top = findQuad(m.water, 2, WATER, glm::ivec3(0, 10, 0));
 		CHECK(top != nullptr && top->mx == glm::ivec3(4, 10, 4),
 			  "water box: top face merged 4x4");
-		for (const Vertex &v : m.result->waterVertices)
-		{
-			CHECK(vBiome(v) && v.packedBiomeColor == 0xFFE6804Du,
-				  "water box: constant water tint on every vertex");
-		}
+		for (const SectionMeshPayload &p : m.result->sections)
+			for (const Vertex &v : p.waterVertices)
+			{
+				CHECK(vBiome(v) && v.packedBiomeColor == 0xFFE6804Du,
+					  "water box: constant water tint on every vertex");
+			}
 		m.release();
 	}
 	{
@@ -557,9 +606,8 @@ static void testAoCornerSampling()
 		const QuadView *top = findQuad(m.opaque, 2, STONE, glm::ivec3(0, 8, 0));
 		CHECK(top != nullptr && top->mx == glm::ivec3(4, 8, 4),
 			  "ao: stone top face still merged under the water cell");
-		const size_t vi = static_cast<size_t>(top - m.opaque.data()) * 4;
-		waterCornerAo = vAo(m.result->opaqueVertices[vi]); // corner at (0,8,0)
-		farCornerAo = vAo(m.result->opaqueVertices[vi + 2]); // far corner (4,8,4)
+		waterCornerAo = vAo(sectionVertex(*m.result, *top, 0)); // corner at (0,8,0)
+		farCornerAo = vAo(sectionVertex(*m.result, *top, 2));   // far corner (4,8,4)
 		m.release();
 	};
 	uint32_t plainNear = 0, plainFar = 0, waterNear = 0, waterFar = 0;
@@ -613,14 +661,12 @@ static void testNoisyEditedChunk()
 	BuiltMesh a = buildWithMetadataBounds(chunk, pool);
 	BuiltMesh b = buildForcedFullRange(chunk, pool);
 	expectIdentical(a, b, "noisy: metadata-bounds build matches forced full range");
-	CHECK(!a.result->opaqueVertices.empty(), "noisy: terrain emits geometry");
+	CHECK(totalOpaqueIndices(*a.result) > 0, "noisy: terrain emits geometry");
 
 	// Rebuild determinism through the public path (publish + pending).
 	CHECK(chunk.generateMesh(), "noisy: public mesh build publishes");
 	const MeshBuildResult *published = ChunkStateProbe::pendingResult(chunk);
-	CHECK(published != nullptr &&
-			  published->opaqueVertices == b.result->opaqueVertices &&
-			  published->waterVertices == b.result->waterVertices,
+	CHECK(published != nullptr && published->sections == b.result->sections,
 		  "noisy: public path reproduces the same payload");
 
 	a.release();
@@ -638,9 +684,7 @@ static void testMultithreadedDeterminism()
 	chunk.generateTerrain(tgen);
 
 	constexpr int kWorkers = 4;
-	std::array<std::vector<Vertex>, kWorkers> opaque{};
-	std::array<std::vector<uint32_t>, kWorkers> indices{};
-	std::array<std::vector<Vertex>, kWorkers> water{};
+	std::array<std::array<SectionMeshPayload, kChunkSectionCount>, kWorkers> sections{};
 	{
 		std::vector<MeshBuildResult *> results(kWorkers);
 		for (int i = 0; i < kWorkers; ++i)
@@ -658,15 +702,13 @@ static void testMultithreadedDeterminism()
 			w.join();
 		for (int i = 0; i < kWorkers; ++i)
 		{
-			opaque[i] = results[i]->opaqueVertices;
-			indices[i] = results[i]->opaqueIndices;
-			water[i] = results[i]->waterVertices;
+			sections[i] = results[i]->sections;
 			pool.release(results[i]);
 		}
 	}
 	for (int i = 1; i < kWorkers; ++i)
 	{
-		CHECK(opaque[i] == opaque[0] && indices[i] == indices[0] && water[i] == water[0],
+		CHECK(sections[i] == sections[0],
 			  "threads: worker builds are byte-identical");
 	}
 }
@@ -689,12 +731,25 @@ static uint64_t fnv1a(const void *data, size_t bytes, uint64_t h)
 static uint64_t meshHash(const MeshBuildResult &r)
 {
 	uint64_t h = 1469598103934665603ull;
+	for (const SectionMeshPayload &s : r.sections)
+	{
+		h = fnv1a(s.opaqueVertices.data(), s.opaqueVertices.size() * sizeof(Vertex), h);
+		h = fnv1a(s.opaqueIndices.data(), s.opaqueIndices.size() * sizeof(uint32_t), h);
+		h = fnv1a(s.waterVertices.data(), s.waterVertices.size() * sizeof(Vertex), h);
+		h = fnv1a(s.waterIndices.data(), s.waterIndices.size() * sizeof(uint32_t), h);
+	}
+	// LOD payload (empty for full-quality builds).
 	h = fnv1a(r.opaqueVertices.data(), r.opaqueVertices.size() * sizeof(Vertex), h);
 	h = fnv1a(r.opaqueIndices.data(), r.opaqueIndices.size() * sizeof(uint32_t), h);
 	h = fnv1a(r.waterVertices.data(), r.waterVertices.size() * sizeof(Vertex), h);
 	h = fnv1a(r.waterIndices.data(), r.waterIndices.size() * sizeof(uint32_t), h);
 	return h;
 }
+
+static size_t resultOpaqueVerts(const MeshBuildResult &r) { return totalOpaqueVertices(r); }
+static size_t resultOpaqueIdx(const MeshBuildResult &r) { return totalOpaqueIndices(r); }
+static size_t resultWaterVerts(const MeshBuildResult &r) { return totalWaterVertices(r); }
+static size_t resultWaterIdx(const MeshBuildResult &r) { return totalWaterIndices(r); }
 
 // One meshed chunk with a generated 4-neighborhood for border sampling.
 struct CorpusChunk
@@ -745,8 +800,8 @@ static int runHashCorpus(int argc, char **argv)
 			cc.center->generateMesh();
 			const MeshBuildResult *m = ChunkStateProbe::pendingResult(*cc.center);
 			const uint64_t hash = m ? meshHash(*m) : 0;
-			const size_t ov = m ? m->opaqueVertices.size() : 0, oi = m ? m->opaqueIndices.size() : 0;
-			const size_t wv = m ? m->waterVertices.size() : 0, wi = m ? m->waterIndices.size() : 0;
+			const size_t ov = m ? resultOpaqueVerts(*m) : 0, oi = m ? resultOpaqueIdx(*m) : 0;
+			const size_t wv = m ? resultWaterVerts(*m) : 0, wi = m ? resultWaterIdx(*m) : 0;
 			cc.center->generateLODMesh();
 			const MeshBuildResult *lod = ChunkStateProbe::pendingResult(*cc.center);
 			if (!m || !lod)
@@ -786,8 +841,8 @@ static int runHashCorpus(int argc, char **argv)
 		const MeshBuildResult *m = ChunkStateProbe::pendingResult(*cc.center);
 		if (m)
 			std::cout << "HASH seed=" << seed << " chunk=edited"
-					  << " opaque=" << m->opaqueVertices.size() << "/" << m->opaqueIndices.size()
-					  << " water=" << m->waterVertices.size() << "/" << m->waterIndices.size()
+					  << " opaque=" << resultOpaqueVerts(*m) << "/" << resultOpaqueIdx(*m)
+					  << " water=" << resultWaterVerts(*m) << "/" << resultWaterIdx(*m)
 					  << " hash=0x" << std::hex << meshHash(*m) << std::dec << "\n";
 	}
 	return g_fails != 0 ? 1 : 0;
@@ -851,6 +906,269 @@ static int runBenchCorpus(int argc, char **argv)
 	return g_fails != 0 ? 1 : 0;
 }
 
+
+// ---------------------------------------------------------------------------
+// Edit benchmark (issue #107 validation): section-selective rebuilds vs
+// whole-chunk rebuilds across the issue's edit scenarios.
+// ---------------------------------------------------------------------------
+
+struct EditBenchRow
+{
+	std::string scenario;
+	double sectionMs{0};
+	double fullMs{0};
+	int sectionsRebuilt{0};
+	size_t sectionStagedBytes{0};
+	size_t fullBytes{0};
+};
+
+static size_t maskedPayloadBytes(const MeshBuildResult &r, uint16_t mask)
+{
+	size_t bytes = 0;
+	for (int s = 0; s < kChunkSectionCount; ++s)
+	{
+		if (((mask >> s) & 1u) == 0)
+			continue;
+		const SectionMeshPayload &p = r.sections[static_cast<size_t>(s)];
+		bytes += p.opaqueVertices.size() * sizeof(Vertex);
+		bytes += p.opaqueIndices.size() * sizeof(uint32_t);
+		bytes += p.waterVertices.size() * sizeof(Vertex);
+		bytes += p.waterIndices.size() * sizeof(uint32_t);
+	}
+	return bytes;
+}
+
+static size_t totalPayloadBytes(const MeshBuildResult &r)
+{
+	return maskedPayloadBytes(r, kAllSectionMask);
+}
+
+static double medianOf(std::vector<double> &v)
+{
+	if (v.empty())
+		return 0.0;
+	std::sort(v.begin(), v.end());
+	return v[v.size() / 2];
+}
+
+// Applies `edit` to the chunk (+ mirror for border edits), builds ONLY the
+// dirty sections (repeat runs for a stable median), then a full rebuild.
+static EditBenchRow measureEdit(const std::string &name, Chunk &chunk,
+								const std::function<void()> &edit, int repeatBuilds)
+{
+	EditBenchRow row;
+	row.scenario = name;
+
+	chunk.takeDirtySections();
+	edit();
+	const uint16_t mask = chunk.takeDirtySections();
+	row.sectionsRebuilt = 0;
+	for (int s = 0; s < kChunkSectionCount; ++s)
+		if ((mask >> s) & 1u)
+			++row.sectionsRebuilt;
+
+	MeshResultPool *pool = chunk.getMeshResultPool();
+	MeshBuildResult *r = pool->acquire();
+
+	// Section-selective rebuild timing (first build warms the workspace).
+	std::vector<double> sectionMs;
+	for (int i = 0; i < repeatBuilds; ++i)
+	{
+		const auto t0 = std::chrono::steady_clock::now();
+		chunk.buildMesh(*r, chunk.meshGeneration(), chunk.meshRevision(), mask);
+		const auto t1 = std::chrono::steady_clock::now();
+		pool->finishBuild(r);
+		sectionMs.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+		if (i == 0)
+			row.sectionStagedBytes = maskedPayloadBytes(*r, mask);
+	}
+	row.sectionMs = medianOf(sectionMs);
+
+	// Whole-chunk rebuild timing on the same content.
+	std::vector<double> fullMs;
+	for (int i = 0; i < repeatBuilds; ++i)
+	{
+		const auto t0 = std::chrono::steady_clock::now();
+		chunk.buildMesh(*r, chunk.meshGeneration(), chunk.meshRevision());
+		const auto t1 = std::chrono::steady_clock::now();
+		pool->finishBuild(r);
+		fullMs.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+		if (i == 0)
+			row.fullBytes = totalPayloadBytes(*r);
+	}
+	row.fullMs = medianOf(fullMs);
+
+	pool->release(r);
+	return row;
+}
+
+static int runEditBench(int argc, char **argv)
+{
+	const int repeatBuilds = (argc > 2) ? std::max(1, std::atoi(argv[2])) : 5;
+	MeshResultPool pool;
+
+	// Initial generation throughput: full builds over generated chunks.
+	{
+		TerrainGenerator gen(1337);
+		std::vector<double> genMs;
+		Chunk warm(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		warm.prepareVoxelStorageForGeneration();
+		warm.generateTerrain(gen);
+		for (int i = 0; i < 8; ++i)
+		{
+			MeshBuildResult *r = pool.acquire();
+			const auto t0 = std::chrono::steady_clock::now();
+			warm.buildMesh(*r, warm.meshGeneration(), warm.meshRevision());
+			const auto t1 = std::chrono::steady_clock::now();
+			pool.finishBuild(r);
+			genMs.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+		}
+		std::cout << "EDITBENCH initial full build: median=" << medianOf(genMs)
+				  << " ms over " << genMs.size() << " builds\n";
+	}
+
+	TerrainGenerator gen(1337);
+	Chunk chunk(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+	chunk.prepareVoxelStorageForGeneration();
+	chunk.generateTerrain(gen);
+	// Neighbors so border sampling matches production.
+	Chunk east(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+	east.prepareVoxelStorageForGeneration();
+	east.generateTerrain(gen);
+	chunk.rebuildBordersFromNeighbors(nullptr, &east, nullptr, nullptr);
+
+	// Warm the workspace once.
+	{
+		MeshBuildResult *r = pool.acquire();
+		chunk.buildMesh(*r, chunk.meshGeneration(), chunk.meshRevision());
+		pool.finishBuild(r);
+		pool.release(r);
+	}
+
+	std::vector<EditBenchRow> rows;
+
+	// 2. one edit in the middle of a section: place a block on the surface.
+	{
+		int surfaceY = -1;
+		for (int y = CHUNK_HEIGHT - 2; y > 0; --y)
+			if (chunk.getVoxel(8, y, 8).type != static_cast<uint8_t>(AIR) &&
+					chunk.getVoxel(8, y + 1, 8).type == static_cast<uint8_t>(AIR))
+			{
+				surfaceY = y;
+				break;
+			}
+		const int py = surfaceY + 1;
+		rows.push_back(measureEdit(
+			"mid-section place @(" + std::to_string(8) + "," + std::to_string(py) + ",8)",
+			chunk, [&chunk, py]
+			{ chunk.setVoxel(8, py, 8, BRICKS); }, repeatBuilds));
+		chunk.takeDirtySections();
+		chunk.setVoxel(8, py, 8, AIR); // revert
+		chunk.takeDirtySections();
+	}
+
+	// 3. one edit at the y=15/16 boundary: place at the first layer of a
+	// section on top of solid ground.
+	{
+		int boundaryY = -1;
+		for (int y = 96; y > 16; y -= 16)
+			if (chunk.getVoxel(4, y, 4).type != static_cast<uint8_t>(AIR))
+			{
+				boundaryY = y;
+				break;
+			}
+		if (boundaryY > 0)
+		{
+			rows.push_back(measureEdit(
+				"y-boundary place @(4," + std::to_string(boundaryY) + ",4)",
+				chunk, [&chunk, boundaryY]
+				{ chunk.setVoxel(4, boundaryY, 4, BRICKS); }, repeatBuilds));
+			chunk.takeDirtySections();
+			chunk.setVoxel(4, boundaryY, 4, AIR);
+			chunk.takeDirtySections();
+		}
+	}
+
+	// 4. one edit at the x/z chunk border: x=0 mirrors into the east
+	// neighbor's border strip.
+	{
+		int surfaceY = -1;
+		for (int y = CHUNK_HEIGHT - 2; y > 0; --y)
+			if (chunk.getVoxel(0, y, 9).type != static_cast<uint8_t>(AIR) &&
+					chunk.getVoxel(0, y + 1, 9).type == static_cast<uint8_t>(AIR))
+			{
+				surfaceY = y;
+				break;
+			}
+		const int py = surfaceY + 1;
+		rows.push_back(measureEdit(
+			"chunk-border place @(0," + std::to_string(py) + ",9) + mirror",
+			chunk, [&chunk, &east, py]
+			{
+				chunk.setVoxel(0, py, 9, BRICKS);
+				east.setVoxel(CHUNK_SIZE, py, 9, BRICKS); // mirror write
+			}, repeatBuilds));
+		chunk.takeDirtySections();
+		east.takeDirtySections();
+		chunk.setVoxel(0, py, 9, AIR);
+		east.setVoxel(CHUNK_SIZE, py, 9, AIR);
+		chunk.takeDirtySections();
+		east.takeDirtySections();
+	}
+
+	// 5. burst of edits in one section: 24 place/delete pairs at y=40.
+	{
+		rows.push_back(measureEdit(
+			"burst 24 edits in section 2",
+			chunk, [&chunk]
+			{
+				for (int i = 0; i < 12; ++i)
+				{
+					chunk.setVoxel(i, 40, i, BRICKS);
+					chunk.setVoxel(i + 1, 41, i + 1, BRICKS);
+				}
+			}, repeatBuilds));
+		chunk.takeDirtySections();
+		for (int i = 0; i < 12; ++i)
+		{
+			chunk.setVoxel(i, 40, i, AIR);
+			chunk.setVoxel(i + 1, 41, i + 1, AIR);
+		}
+		chunk.takeDirtySections();
+	}
+
+	// 6. edits distributed across many sections.
+	{
+		rows.push_back(measureEdit(
+			"16 edits spread over 8 sections",
+			chunk, [&chunk]
+			{
+				for (int s = 0; s < 8; ++s)
+				{
+					chunk.setVoxel(2 + s, s * 16 + 5, 2, BRICKS);
+					chunk.setVoxel(13 - s, s * 16 + 9, 13, BRICKS);
+				}
+			}, repeatBuilds));
+		chunk.takeDirtySections();
+		for (int s = 0; s < 8; ++s)
+		{
+			chunk.setVoxel(2 + s, s * 16 + 5, 2, AIR);
+			chunk.setVoxel(13 - s, s * 16 + 9, 13, AIR);
+		}
+		chunk.takeDirtySections();
+	}
+
+	std::cout << "EDITBENCH scenario | section ms | full ms | sections | staged KiB | full KiB\n";
+	for (const EditBenchRow &r : rows)
+	{
+		std::cout << "EDITBENCH " << r.scenario << " | " << r.sectionMs << " | "
+				  << r.fullMs << " | " << r.sectionsRebuilt << " | "
+				  << (r.sectionStagedBytes / 1024.0) << " | "
+				  << (r.fullBytes / 1024.0) << "\n";
+	}
+	return 0;
+}
+
 // ---------------------------------------------------------------------------
 
 int main(int argc, char **argv)
@@ -859,6 +1177,8 @@ int main(int argc, char **argv)
 		return runHashCorpus(argc, argv);
 	if (argc > 1 && std::strcmp(argv[1], "--bench-corpus") == 0)
 		return runBenchCorpus(argc, argv);
+	if (argc > 1 && std::strcmp(argv[1], "--edit-bench") == 0)
+		return runEditBench(argc, argv);
 
 	testUniformSlabMerges();
 	testBlockTypeBoundary();

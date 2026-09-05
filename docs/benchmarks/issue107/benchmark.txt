@@ -1,0 +1,96 @@
+Issue #107 - sectioned meshes for localized remeshing
+======================================================
+
+Change
+------
+The logical chunk stays 16x256x16; its full-quality render mesh is now one
+payload per vertical 16x16x16 section (16 sections, same tiling as the #105
+occupancy metadata). Edits mark only the affected sections (own section,
+Y-boundary neighbors, the horizontal neighbor's y/16 section for border
+mirrors, plus a conservative light range: emissive +-14, skylight column
+down to its first blocker). Lighting is recomputed chunk-wide per build (the
+issue's sanctioned option) so rebuilt sections sample exactly the field a
+whole build would produce - no seams at 16-block boundaries; regional
+lighting is future work. Each stream (opaque/water) remains ONE vertex/index
+buffer pair per chunk with back-to-back per-section slots, keeping the
+renderer at one bind + drawIndexed per chunk; uploads re-stage only the
+dirty slots in three passes (plan + staging reservation before any GPU
+mutation, offset-preserving buffer growth, then copy recording + commit).
+Design documented in docs/engine-architecture.md ("Sectioned meshes").
+
+Edit benchmark (test_mesh_facekey --edit-bench, median of 5 builds, one
+generated chunk with a generated east neighbor, same machine)
+------------------------------------------------------------------------
+scenario                        | section ms | full ms | sections | staged KiB | full KiB
+mid-section surface place       |     0.8092 |  1.5369 |     2/16 |     32.0   |  150.3
+y-boundary place (y=64)         |     0.7652 |  1.5076 |     2/16 |     32.0   |  150.3
+chunk-border place + mirror     |     0.5517 |  1.6238 |     1/16 |      8.4   |  151.0
+burst of 24 edits, one section  |     0.7656 |  1.5041 |     1/16 |     31.9   |  151.1
+16 edits spread over 8 sections |     2.2335 |  2.1712 |     8/16 |    168.4   |  168.4
+
+A single edit rebuilds ~2 sections (own + light/boundary neighbor) at ~2-3x
+less CPU and ~5-18x fewer staged bytes than a whole-chunk rebuild; a spread
+burst costs the same as a full rebuild (chunk-wide lighting dominates),
+which is the documented next frontier. Empty sections never reach the
+mesher (occupancy metadata) and never allocate GPU slots until they hold
+content.
+
+Whole-chunk (full build) A/B - controlled corpus
+------------------------------------------------
+test_mesh_facekey --bench-corpus 25 97 (75 builds/run), branch worktree of
+main vs this branch, interleaved, two runs per side, same machine state:
+
+                       main                this branch         delta
+overall median         2.2549 / 2.2057 ms  1.6715 / 1.7256 ms  -22%..-26%
+mesh.skylight          878.6 / 858.0 us    434.4 / 432.8 us    about -50%
+mesh.blocklight        178.7 / 178.8 us     88.1 /  81.0 us    about -54%
+mesh.facesGreedyAO    1273.2 / 1266.8 us  1290.8 / 1289.2 us      +1.8%
+
+facesGreedyAO carries the sectioning overhead on full builds (+1.8% after
+rect-scoped mask clears); the skylight/blocklight phases got ~2x faster as
+a side effect of moving the light arrays from function-local to file-scope
+thread_local storage (MSVC TLS access overhead), which more than pays for
+the sectioning on full builds.
+
+End-to-end streaming benchmark (back-to-back pair, same conditions,
+FT_VOX_VALIDATION=0 FT_VOX_TELEMETRY=1, seed 42, 60s + 15s warmup, vsync
+off, RTX 4070 Ti)
+------------------------------------------------------------------------
+                       main           this branch
+Score                  9915           9915
+avg FPS                590.96         590.99
+1% low FPS             263.7          262.9
+frames >16.7ms/33.3ms  0 / 0          0 / 0
+MeshBuild avgMs        2.8031         2.2937    (-18.2%)
+mesh.skylight/build    1.0870 ms      0.6036 ms (-44.5%)
+mesh.facesGreedyAO     1.4890 ms      1.5916 ms (+6.9%)
+gpu.live.bytes         605.3 MB       629.3 MB  (+4.0%)
+
+Reports: docs/benchmarks/bench_20260905_12*.txt (4 A/B runs, branch
+43613d3+fixes vs main 924ae7c). GPU memory started at +27.6% with a 25%
+reservation on every slot and was fixed by exact-sized slots for
+slot-less streams (initial streaming and LOD->full transitions); the
+remaining +4.0% is per-section alignment and the zero-filled index slack
+that keeps the single chunk-level draw correct.
+
+Correctness
+-----------
+- Partial rebuild == full rebuild: a mask-restricted build reproduces the
+  full build's section byte for byte (chunk lifecycle section 20), for
+  terrain and synthetic multi-section scenes.
+- Dirty contract pinned: mid-section, y%16==0 boundary, emissive radius,
+  skylight range (never above the edit), border mirror = exactly y/16.
+- #115 metadata-bounds vs forced-full-range equivalence and #106 face-key
+  scene contracts still pass (sections compared byte-wise).
+- Mesh upload lifecycle reworked for slots: staging-full defers with ZERO
+  GPU-state mutation, retry succeeds from the same result, partial staging
+  failure keeps the CPU payload attached and the old GPU mesh untouched.
+- Multi-worker concurrent builds byte-identical; 20x Release repeats of
+  chunk lifecycle + mesh facekey green; ctest Release 19/19; Debug CRT
+  unavailable in this environment (loader error), CI covers Debug/ASan/TSan.
+
+How to reproduce
+----------------
+./build/tests/Release/test_mesh_facekey --edit-bench [repeatBuilds]
+./build/tests/Release/test_mesh_facekey --bench-corpus [chunks] [stride]
+./build/Release/ft_vox.exe --seed 42 --benchmark 60 --benchmark-warmup 15 --vsync off

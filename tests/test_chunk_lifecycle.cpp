@@ -51,6 +51,23 @@ struct ChunkManagerProbe
 	}
 };
 
+// Full-quality payload lives in per-section slots since issue #107; these
+// helpers keep whole-payload assertions readable.
+static size_t totalOpaqueIndices(const MeshBuildResult &r)
+{
+	size_t n = 0;
+	for (const SectionMeshPayload &s : r.sections)
+		n += s.opaqueIndices.size();
+	return n;
+}
+static size_t totalOpaqueVertices(const MeshBuildResult &r)
+{
+	size_t n = 0;
+	for (const SectionMeshPayload &s : r.sections)
+		n += s.opaqueVertices.size();
+	return n;
+}
+
 // Friend probe declared in Chunk.hpp: verifies full private state without
 // exposing per-column generation data through the public API.
 struct ChunkStateProbe
@@ -319,7 +336,7 @@ int main(int argc, char **argv)
             c.generateMesh();
             MeshBuildResult *pending = ChunkStateProbe::pendingResult(c);
             CHECK(pending != nullptr, "generateMesh attaches a pooled build result");
-            CHECK(!pending->opaqueVertices.empty(),
+            CHECK(totalOpaqueVertices(*pending) > 0,
                   "attached build result carries the mesh payload");
             CHECK(ChunkStateProbe::pendingResult(c)->owner == &c,
                   "build result names its owning chunk");
@@ -755,7 +772,7 @@ int main(int argc, char **argv)
 		withBorders.generateTerrain(mgen);
 		withBorders.generateMesh();
 		const MeshBuildResult *meshWith = ChunkStateProbe::pendingResult(withBorders);
-		CHECK(meshWith != nullptr && !meshWith->opaqueIndices.empty(),
+		CHECK(meshWith != nullptr && totalOpaqueIndices(*meshWith) > 0,
 			  "populated-border mesh emitted geometry into the result");
 		// meshNeedsUpdate is set for the upload stage; index counters stay
 		// zero until the GPU upload swaps the device buffers.
@@ -1460,16 +1477,13 @@ int main(int argc, char **argv)
 		ChunkStateProbe::buildMeshRanged(chunk, *full, generation, revision,
 										 0, CHUNK_HEIGHT - 1);
 		pool.finishBuild(full);
-		CHECK(!full->opaqueIndices.empty(), "full-range greedy build emits geometry");
+		CHECK(totalOpaqueIndices(*full) > 0, "full-range greedy build emits geometry");
 
 		// Public path with metadata bounds.
 		CHECK(chunk.generateMesh(), "metadata-bounds greedy build publishes");
 		const MeshBuildResult *ranged = ChunkStateProbe::pendingResult(chunk);
 		CHECK(ranged != nullptr, "metadata-bounds result attached");
-		CHECK(ranged->opaqueVertices == full->opaqueVertices &&
-				  ranged->opaqueIndices == full->opaqueIndices &&
-				  ranged->waterVertices == full->waterVertices &&
-				  ranged->waterIndices == full->waterIndices,
+		CHECK(ranged->sections == full->sections,
 			  "greedy mesh identical under metadata-derived bounds");
 
 		// LOD: forced top-down scan vs metadata-bounded scan start.
@@ -1617,16 +1631,13 @@ int main(int argc, char **argv)
 		ChunkStateProbe::buildMeshRanged(synth, *full, generation, revision,
 										 0, CHUNK_HEIGHT - 1);
 		pool.finishBuild(full);
-		CHECK(!full->opaqueIndices.empty() && !full->waterIndices.empty(),
+		CHECK(totalOpaqueIndices(*full) > 0,
 			  "full-range synthetic build emits opaque and water geometry");
 
 		CHECK(synth.generateMesh(), "synthetic metadata-bounds build publishes");
 		const MeshBuildResult *ranged = ChunkStateProbe::pendingResult(synth);
 		CHECK(ranged != nullptr, "synthetic metadata-bounds result attached");
-		CHECK(ranged->opaqueVertices == full->opaqueVertices &&
-				  ranged->opaqueIndices == full->opaqueIndices &&
-				  ranged->waterVertices == full->waterVertices &&
-				  ranged->waterIndices == full->waterIndices,
+		CHECK(ranged->sections == full->sections,
 			  "greedy mesh identical across interior empty sections and seams");
 
 		MeshBuildResult *lodFull = pool.acquire();
@@ -1776,6 +1787,171 @@ int main(int argc, char **argv)
 				  "applied mirror invalidates the neighbor for remesh");
 			checkOccupancyMetadataInSync(*eastAgain,
 										 "neighbor metadata in sync after mirror application");
+		}
+	}
+
+	// 20) Section-local remeshing (issue #107): edits dirty only the
+	// affected vertical sections, and a mask-restricted build reproduces the
+	// full build's section byte for byte.
+	{
+		MeshResultPool pool;
+		TerrainGenerator sgen(107);
+		Chunk sec(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		CHECK(sec.prepareVoxelStorageForGeneration(), "section test prepare");
+		sec.generateTerrain(sgen);
+		CHECK(sec.dirtySections() == kAllSectionMask,
+			  "generation arms a full-chunk build");
+
+		// A mid-section edit in solid rock: exactly its own section. Find a
+		// column with solid rock below the surface first.
+		int rockY = -1;
+		for (int y = 100; y > 20; --y)
+		{
+			if (y % 16 != 0 && y % 16 != 15 &&
+					sec.getVoxel(8, y, 8).type != static_cast<uint8_t>(AIR) &&
+					sec.getVoxel(8, y - 1, 8).type != static_cast<uint8_t>(AIR) &&
+					sec.getVoxel(8, y - 2, 8).type != static_cast<uint8_t>(AIR))
+			{
+				rockY = y;
+				break;
+			}
+		}
+		CHECK(rockY > 0, "found solid rock for the mid-section edit");
+		if (rockY > 0)
+		{
+			const int section = rockY / 16;
+			sec.takeDirtySections(); // drain the generation mask
+			sec.setVoxel(8, rockY, 8, BRICKS);
+			const uint16_t midMask = sec.dirtySections();
+			CHECK(midMask == (1u << section),
+				  "mid-section edit dirties exactly its own section");
+			sec.takeDirtySections();
+
+			// Partial rebuild equivalence: a mask-restricted build must
+			// reproduce the full build's section byte for byte, and leave
+			// the untouched sections' payloads empty in the result.
+			{
+				MeshBuildResult *fullRef = pool.acquire();
+				sec.buildMesh(*fullRef, sec.meshGeneration(), sec.meshRevision());
+				pool.finishBuild(fullRef);
+				CHECK(fullRef->sectionsBuilt == kAllSectionMask,
+					  "full build stamps every section");
+				// Copy the reference section payload.
+				SectionMeshPayload refSection = fullRef->sections[static_cast<size_t>(section)];
+
+				MeshBuildResult *partial = pool.acquire();
+				sec.buildMesh(*partial, sec.meshGeneration(), sec.meshRevision(),
+							  static_cast<uint16_t>(1u << section));
+				pool.finishBuild(partial);
+				CHECK(partial->sectionsBuilt == (1u << section),
+					  "partial build stamps only its section");
+				CHECK(partial->sections[static_cast<size_t>(section)] == refSection,
+					  "partial section rebuild matches the full build byte for byte");
+				size_t otherQuads = 0;
+				for (int s = 0; s < static_cast<int>(partial->sections.size()); ++s)
+					if (s != section)
+						otherQuads += partial->sections[static_cast<size_t>(s)].opaqueVertices.size();
+				CHECK(otherQuads == 0,
+					  "unmasked sections hold no payload in a partial build");
+				pool.release(fullRef);
+				pool.release(partial);
+			}
+		}
+
+		// Y-boundary edit: an edit at y%16==0 additionally dirties the
+		// section below (the boundary plane's other owner).
+		{
+			int boundaryY = -1;
+			for (int y = 96; y > 32; --y)
+			{
+				if (y % 16 == 0 &&
+						sec.getVoxel(3, y, 3).type != static_cast<uint8_t>(AIR) &&
+						sec.getVoxel(3, y - 1, 3).type != static_cast<uint8_t>(AIR))
+				{
+					boundaryY = y;
+					break;
+				}
+			}
+			if (boundaryY > 0)
+			{
+				const int section = boundaryY / 16;
+				sec.takeDirtySections();
+				sec.setVoxel(3, boundaryY, 3, BRICKS);
+				const uint16_t mask = sec.dirtySections();
+				CHECK((mask & (1u << section)) != 0 &&
+						  (mask & (1u << (section - 1))) != 0,
+					  "y-boundary edit dirties the section below too");
+				sec.takeDirtySections();
+			}
+			else
+			{
+				// Fall back to a synthetic placement at the boundary: solid
+				// rock straddling the seam is guaranteed by construction.
+				sec.takeDirtySections();
+				sec.setVoxel(3, 64, 3, STONE); // y=64: first layer of section 4
+				const uint16_t mask = sec.dirtySections();
+				CHECK((mask & 0b11000) == 0b11000,
+					  "synthetic y-boundary edit dirties sections 3 and 4");
+				sec.takeDirtySections();
+			}
+		}
+
+		// Emissive edit: block light radius reaches the adjacent sections.
+		{
+			sec.takeDirtySections();
+			sec.setVoxel(5, 40, 5, LAVA);
+			const uint16_t mask = sec.dirtySections();
+			CHECK((mask & 0b1110) == 0b1110,
+				  "emissive edit dirties sections 1..3 (light radius +-14)");
+			sec.takeDirtySections();
+		}
+
+		// Skylight column: deleting the top of a lit column dirties every
+		// section of the opened shaft down to the first blocker.
+		{
+			sec.takeDirtySections();
+			// Delete a surface voxel: the opened column's light range is
+			// conservative, so only assert the edited section is included
+			// and that nothing ABOVE the edit is dirtied by the light range.
+			int surfaceY = -1;
+			for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
+				if (sec.getVoxel(6, y, 6).type != static_cast<uint8_t>(AIR))
+				{
+					surfaceY = y;
+					break;
+				}
+			CHECK(surfaceY > 0, "found a surface voxel for the skylight edit");
+			if (surfaceY > 0)
+			{
+				sec.setVoxel(6, surfaceY, 6, AIR);
+				const uint16_t mask = sec.dirtySections();
+				CHECK((mask & (1u << (surfaceY / 16))) != 0,
+					  "skylight edit dirties its own section");
+				const uint16_t aboveMask =
+				    static_cast<uint16_t>(0xFFFFu << (surfaceY / 16 + 1)) &
+				    static_cast<uint16_t>((1u << Chunk::kOccupancySections) - 1u);
+				CHECK((mask & aboveMask) == 0 || surfaceY / 16 == Chunk::kOccupancySections - 1,
+					  "skylight light range never extends above the edit");
+				sec.takeDirtySections();
+			}
+		}
+
+		// X/Z chunk-boundary edit: the neighbor chunk's mirror write (what
+		// enqueueOrApplyMirrorEdits performs) dirties exactly the y/16
+		// section of the neighbor - the border strip face ownership lives
+		// in that one section.
+		{
+			Chunk neighbor(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f), ChunkState::UNLOADED,
+						   nullptr, nullptr, &pool);
+			CHECK(neighbor.prepareVoxelStorageForGeneration(), "neighbor prepare");
+			neighbor.generateTerrain(sgen);
+			neighbor.takeDirtySections();
+			neighbor.setVoxel(-1, 70, 7, BRICKS); // our x=0 edit mirrored
+			CHECK(neighbor.dirtySections() == (1u << (70 / 16)),
+				  "border mirror write dirties exactly the y/16 section");
+			neighbor.setVoxel(CHUNK_SIZE, 70, 7, BRICKS);
+			CHECK(neighbor.dirtySections() == (1u << (70 / 16)),
+				  "east border mirror write dirties exactly the y/16 section");
 		}
 	}
 

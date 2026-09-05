@@ -1,11 +1,13 @@
 // Mesh upload lifecycle against a real (headless) Vulkan device
-// (issue #104 acceptance criteria, review #114 items 25-28):
+// (issue #104 acceptance criteria, review #114 items 25-28, reworked for the
+// sectioned slot uploads of issue #107):
 //   - a staging-ring-full frame defers the upload WITHOUT losing, copying
 //     or rebuilding the completed build result;
-//   - a superseded/stale attempt never swaps the old GPU mesh;
-//   - the retry succeeds from the very same result;
-//   - a partial staging failure (opaque staged, water does not fit) rolls
-//     back the temporary GPU buffers and keeps the CPU result attached.
+//   - the retry succeeds from the very same result, in place (section slots
+//     re-stage without swapping the chunk-level buffers);
+//   - a partial staging failure (all opaque sections staged, the first
+//     water section does not fit) keeps the CPU result attached and the old
+//     GPU mesh untouched until the successful retry.
 // Skips quietly when no Vulkan loader/device is available (CI containers).
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkManager.hpp>
@@ -48,6 +50,43 @@ namespace
 constexpr VkDeviceSize align256(VkDeviceSize v)
 {
 	return (v + StagingRing::kAlignment - 1) / StagingRing::kAlignment * StagingRing::kAlignment;
+}
+
+// Staging bytes the sectioned upload will request for one stream
+// (per masked section with content: one vertex alloc + one index alloc).
+template <typename PayloadSel>
+VkDeviceSize streamStagingBytes(const MeshBuildResult &r, PayloadSel payloadSel)
+{
+	VkDeviceSize total = 0;
+	for (int s = 0; s < kChunkSectionCount; ++s)
+	{
+		if (((r.sectionsBuilt >> s) & 1u) == 0)
+			continue;
+		const auto [verts, idxs] = payloadSel(r, s);
+		const VkDeviceSize vBytes = verts->size() * sizeof(Vertex);
+		const VkDeviceSize iBytes = idxs->size() * sizeof(uint32_t);
+		if (vBytes == 0 && iBytes == 0)
+			continue;
+		total += align256(vBytes) + align256(iBytes);
+	}
+	return total;
+}
+
+VkDeviceSize opaqueStagingBytes(const MeshBuildResult &r)
+{
+	return streamStagingBytes(r, [](const MeshBuildResult &res, int s)
+	{
+		return std::make_pair(&res.sections[static_cast<size_t>(s)].opaqueVertices,
+							  &res.sections[static_cast<size_t>(s)].opaqueIndices);
+	});
+}
+
+size_t totalOpaqueIndices(const MeshBuildResult &r)
+{
+	size_t n = 0;
+	for (const SectionMeshPayload &p : r.sections)
+		n += p.opaqueIndices.size();
+	return n;
 }
 
 VkPhysicalDevice pickPhysicalDevice(VkInstance instance)
@@ -207,19 +246,24 @@ int main()
 			CHECK(chunk->generateMesh(), "first mesh publishes");
 			MeshBuildResult *first = ChunkStateProbe::pending(*chunk);
 			CHECK(first != nullptr, "pending result attached");
+			CHECK(first->sectionsBuilt == kAllSectionMask,
+				  "full build stamps every section");
 
 			// 25/26 baseline: a roomy ring uploads the first mesh.
 			const AllocatedBuffer firstOpaque = ChunkStateProbe::opaqueBuffer(*chunk);
 			CHECK(firstOpaque.buffer == VK_NULL_HANDLE, "no GPU mesh before upload");
-			const size_t firstIndexCount = first->opaqueIndices.size();
+			const size_t firstIndexCount = totalOpaqueIndices(*first);
+			CHECK(firstIndexCount > 0, "full build emitted geometry");
 			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire),
 				  "roomy staging uploads the mesh");
 			const AllocatedBuffer uploadedOpaque = ChunkStateProbe::opaqueBuffer(*chunk);
 			CHECK(uploadedOpaque.buffer != VK_NULL_HANDLE, "GPU mesh created");
 			CHECK(!chunk->hasPendingMeshResult(), "result consumed by upload");
 			CHECK(!chunk->needsGPUUpload(), "meshNeedsUpdate cleared by upload");
-			CHECK(chunk->getOpaqueIndexCount() == firstIndexCount,
-				  "index count matches the uploaded payload");
+			// The drawn count covers the packed slot region: live indices
+			// plus zeroed slot slack (issue #107), so it is >= the payload.
+			CHECK(chunk->getOpaqueIndexCount() >= firstIndexCount,
+				  "drawn index count covers the uploaded payload");
 
 			// 25/28: a second mesh, then a staging slice drained to capacity
 			// (StagingRing enforces a >=4 MiB per-frame minimum, so "full"
@@ -259,43 +303,43 @@ int main()
 			CHECK(chunk->getOpaqueIndexCount() == oldOpaqueCount,
 				  "draw counts unchanged by the deferred attempt");
 
-			// 26: retry with a fresh slice succeeds from the same result.
+			// 26: retry with a fresh slice succeeds from the same result
+			// without any rebuild. The payload may differ from the first
+			// build (upload released the neighbor borders), so outgrown
+			// slots append and may grow the buffer - the invariant is that
+			// the retry publishes the deferred payload's counts.
 			staging.beginFrame(0);
-			const size_t secondIndexCount = second->opaqueIndices.size();
+			const size_t secondIndexCount = totalOpaqueIndices(*second);
 			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire),
 				  "retry upload succeeds without a rebuild");
 			CHECK(!chunk->hasPendingMeshResult(), "retry consumes the same result");
-			CHECK(chunk->getOpaqueIndexCount() == secondIndexCount,
+			CHECK(chunk->getOpaqueIndexCount() >= secondIndexCount,
 				  "retry uploads the deferred payload");
-			CHECK(ChunkStateProbe::opaqueBuffer(*chunk).buffer != oldOpaque.buffer,
-				  "retry swaps in the new GPU mesh");
 
-			// 27: partial staging failure - the slice is filled so exactly
-			// the opaque pair fits and the first water allocation fails.
-			// Craft a known water payload so the boundary is deterministic.
+			// 27: partial staging failure - all opaque section allocs fit
+			// and the FIRST water section alloc does not. Craft a known
+			// water payload in section 0 so the boundary is deterministic.
 			CHECK(chunk->generateMesh(), "third mesh publishes");
 			MeshBuildResult *third = ChunkStateProbe::pending(*chunk);
-			if (third && third->waterVertices.empty())
+			if (third && third->sections[0].waterVertices.empty())
 			{
 				Vertex v{};
-				third->waterVertices.assign(64, v);
-				third->waterIndices.assign(96, 0u);
+				third->sections[0].waterVertices.assign(64, v);
+				third->sections[0].waterIndices.assign(96, 0u);
+				third->sectionsBuilt |= 1u; // section 0 now carries water
 				chunk->getMeshResultPool()->finishBuild(third); // delta accounting
 			}
 			const AllocatedBuffer prevOpaque = ChunkStateProbe::opaqueBuffer(*chunk);
-			const VkDeviceSize ov = third->opaqueVertices.size() * sizeof(Vertex);
-			const VkDeviceSize oi = third->opaqueIndices.size() * sizeof(uint32_t);
-			const VkDeviceSize wv = third->waterVertices.size() * sizeof(Vertex);
+			const VkDeviceSize opaqueNeeds = opaqueStagingBytes(*third);
 			staging.beginFrame(0);
 			{
-				// Leave exactly room for the opaque pair; the first water
-				// allocation (aligned) cannot fit in what remains.
+				// Leave exactly room for the opaque stream's allocations;
+				// the first water allocation cannot fit in what remains.
 				VkDeviceSize off = 0;
 				void *sink = nullptr;
-				const VkDeviceSize drain =
-					staging.sliceCapacity() - (align256(ov) + align256(oi));
+				const VkDeviceSize drain = staging.sliceCapacity() - opaqueNeeds;
 				CHECK(staging.alloc(drain, off, sink),
-					  "drain leaves exactly the opaque pair of room");
+					  "drain leaves exactly the opaque sections of room");
 			}
 
 			CHECK(!chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire),
