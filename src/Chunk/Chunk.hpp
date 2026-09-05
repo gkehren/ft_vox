@@ -24,6 +24,7 @@
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
+#include <Engine/WorkloadTelemetry.hpp>
 
 // TextureManager only for static isTransparent — no GL dependency in mesh gen.
 #include <Renderer/TextureManager.hpp>
@@ -106,6 +107,14 @@ public:
 	// `generation`/`revision` must be captured at dispatch time on the main
 	// thread (see meshPendingChunks) and are stamped into the result.
 	void buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision);
+	// Section-selective full-quality build (issue #107): bit s set in
+	// `sectionMask` rebuilds that vertical 16^3 section into
+	// out.sections[s] (section-local indices); unset sections keep their
+	// previously published GPU state. Lighting is recomputed chunk-wide for
+	// the job, so every rebuilt section sees the same light field a whole
+	// build would produce.
+	void buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision,
+				   uint16_t sectionMask);
 	void buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision);
 	// Ranged bodies used by buildMesh/buildLODMesh with occupancy bounds
 	// derived from the section metadata. Exposed (private, probe-tested) so
@@ -132,9 +141,22 @@ public:
 	bool generateLODMesh();
 
 	bool hasPendingMeshResult() const { return m_pendingResult != nullptr; }
+	// True when a full-quality (sectioned) build result is published but not
+	// yet uploaded: a further partial section build could not compose with
+	// the unuploaded sections, so dispatch expands its mask to all sections
+	// (issue #107).
+	bool hasUnuploadedFullMesh() const;
 	uint64_t meshGeneration() const { return m_meshGeneration; }
 	uint64_t meshRevision() const { return m_meshRevision.load(std::memory_order_relaxed); }
 	MeshResultPool *getMeshResultPool() const { return m_resultPool; }
+
+	// Section dirty tracking (issue #107): bit s set => section s needs a
+	// mesh rebuild. Edits mark the affected sections (own + Y-boundary
+	// neighbors + a conservative light range); mesh dispatch takes and
+	// clears the mask, and a rejected publish re-arms it.
+	void markSectionsDirty(uint16_t mask) { m_dirtySections.fetch_or(mask, std::memory_order_relaxed); }
+	uint16_t takeDirtySections() { return m_dirtySections.exchange(0, std::memory_order_relaxed); }
+	uint16_t dirtySections() const { return m_dirtySections.load(std::memory_order_relaxed); }
 
 	// Vertical occupancy granularity (issue #105): 16 sections of 16 voxels.
 	static constexpr int kOccupancySectionSize = 16;
@@ -220,6 +242,63 @@ private:
 	AllocatedBuffer waterVertexBuffer{};
 	AllocatedBuffer waterIndexBuffer{};
 
+	// Section-slot layout inside the chunk-level buffers (issue #107). All
+	// sections of a stream share one vertex/index buffer pair, laid out as
+	// back-to-back per-section slots, so the renderer keeps ONE bind + draw
+	// per chunk while a remesh only re-stages the affected slot(s).
+	//
+	// Uploads are copy-on-write (PR #117 review): every upload records its
+	// writes into fresh buffers (a device-to-device preserve copy keeps the
+	// current layout for partial rebuilds; a full build repacks all
+	// sections back-to-back, exact-sized), then retires the previous
+	// buffers - no command ever writes a buffer an in-flight frame may
+	// still be reading.
+	//
+	// A slot reserves `vertexSlotBytes` / `indexSlotBytes` (>= the live
+	// payload, grown with headroom on edit-driven appends; exact on full
+	// repacks); `used` bytes are live. Vertex slots are multiples of
+	// sizeof(Vertex) and `vertexBase` is the section's first vertex INDEX
+	// (offset / sizeof(Vertex)) - section indices are stored rebased onto
+	// it, so slots never move once allocated. Index slots and slack are
+	// multiples of one triangle (12 bytes), so the single packed drawIndexed
+	// over [0, indexUsedBytes) only ever decodes live triangles or whole
+	// degenerate (all-zero) triangles. When a rebuilt section outgrows its
+	// slot, a fresh slot is appended at the end of the used region; the
+	// abandoned slot leaks until the chunk's next full build (which repacks
+	// compactly) or release, bounded by the section's high-water mark.
+	struct SectionGpuSlot
+	{
+		uint32_t vertexOffset{0}; // bytes, multiple of sizeof(Vertex)
+		uint32_t vertexSlotBytes{0};
+		uint32_t vertexUsedBytes{0};
+		uint32_t vertexBase{0}; // first vertex index of this section
+		uint32_t indexOffset{0}; // bytes, multiple of one triangle (12)
+		uint32_t indexSlotBytes{0}; // multiple of one triangle (12)
+		uint32_t indexUsedBytes{0};
+		uint32_t indexCount{0}; // live indices (0 = empty section)
+
+		// True when the slot describes no layout at all. A full repack
+		// resets the slot table and rebuilds only the sections carrying
+		// content, so every other slot must read as empty afterwards - a
+		// stale slot would let a later partial upload plan an in-place
+		// re-stage outside the compacted buffer (PR #117 final review).
+		bool empty() const
+		{
+			return vertexOffset == 0 && vertexSlotBytes == 0 &&
+			       vertexUsedBytes == 0 && vertexBase == 0 &&
+			       indexOffset == 0 && indexSlotBytes == 0 &&
+			       indexUsedBytes == 0 && indexCount == 0;
+		}
+	};
+	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpu{};
+	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpuWater{};
+	// Live byte extent of each stream's buffers (slots are allocated from
+	// this; growth beyond the buffer size re-creates it).
+	uint32_t m_vertexUsedBytes{0};
+	uint32_t m_indexUsedBytes{0};
+	uint32_t m_waterVertexUsedBytes{0};
+	uint32_t m_waterIndexUsedBytes{0};
+
 	VoxelPool *m_voxelPool{nullptr};
 	VoxelStorage *m_storage{nullptr};
 	void ensureVoxelStorageForEdit();
@@ -245,6 +324,25 @@ private:
 	void validateOccupancyMetadata() const;
 	/// Bit S set <=> section S holds at least one non-air voxel (derived).
 	uint16_t occupiedSectionMask() const;
+	// Section dirtying for one voxel edit (issue #107): own section,
+	// Y-boundary neighbors, a conservative light-dirty Y range for in-chunk
+	// edits, and exactly the y/16 section for border (mirror) writes.
+	void markEditDirtySections(int x, int y, int z, TextureType type,
+							   TextureType previousType, bool borderWrite);
+	// Chunk-wide sky/block light field for one mesh job (extracted from the
+	// former monolithic buildMeshRanged so section-selective builds pay it
+	// exactly once).
+	void computeLightField(telemetry::MeshSample &meshSample);
+	// Greedy meshing of ONE vertical section into out.sections[section]
+	// (issue #107): faces owned by voxels in [ownerMinY, ownerMaxY] only,
+	// with full one-voxel chunk/border context for faces, AO and light.
+	void buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
+							int ownerMaxY, telemetry::MeshSample &meshSample);
+	// Shared upload logic: (re)place one section's payload in its GPU slots.
+	// Returns false when staging space is missing (async path retries later).
+	bool uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
+							StagingRing *staging, VkCommandBuffer cmd,
+							GpuResourceRetire *retire, ImmediateCommands *imm);
 	// Borrowed from a BorderPool for generation/meshing and returned after
 	// upload (issue #103): no per-chunk border memory is retained.
 	ChunkNeighborBorders *m_borders{nullptr};
@@ -266,6 +364,11 @@ private:
 	// worker tasks.
 	uint64_t m_meshGeneration{0};
 	std::atomic<uint64_t> m_meshRevision{0};
+	// Section dirty mask (issue #107): bit s set => section s needs a mesh
+	// rebuild. Mutated from the main thread only (edits, dispatch, publish
+	// rejection); atomic because dispatch-time captures observe it around
+	// worker tasks, same rule as m_meshRevision.
+	std::atomic<uint16_t> m_dirtySections{0};
 	void releasePendingMeshResult();
 
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeGrassColors{};

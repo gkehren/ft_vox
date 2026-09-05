@@ -1,0 +1,110 @@
+ft_vox Benchmark Report
+=======================
+Score: 9924 / 10000  Grade: S
+Revision: 924ae7cad740
+  git 924ae7cad740  branch main  describe 924ae7c
+  build UTC 2026-09-05T12:30:13Z
+Seed: 42  Duration: 60s  Warmup: 15s  Measured: 60.0009s  Frames: 37302
+Device: NVIDIA GeForce RTX 4070 Ti
+Viewport: 1920x1080  ViewDist: 512  VSync: off  PresentMode: IMMEDIATE
+
+Frame times (ms)
+  avg 1.6004  min 0.4932  max 4.2259
+  p50 1.1442  p95 3.3221  p99 3.6696
+  avg FPS 624.845  1% low FPS 272.509
+  frames >16.7ms: 0  >33.3ms: 0
+
+CPU scopes (avg ms)
+  Streaming 0.237732  Visibility 0.0385259
+  Acquire 0.994333  Record 0.28253  MeshUpload 0.0205794
+  ImGui 0.0327462  Present 0.0436176
+
+Worker jobs
+  TerrainGen  n=16872  avgMs=1.27993  totalMs=21595.1
+  MeshBuild   n=14732  avgMs=2.28569  totalMs=33672.7
+  MeshLOD     n=17195  avgMs=0.00601913  totalMs=103.499
+
+GPU timestamp queries: available
+  samples=37300 avgMs=1.43961
+  p95Ms=1.73002 p99Ms=1.92227
+  Uploads avgMs=0.00380633
+  Shadow avgMs=0.167304
+  Opaque avgMs=0.82788
+  Overlays avgMs=3.36575e-05
+  Water avgMs=0.0701104
+  Sky avgMs=0.194864
+  Post avgMs=0.168897
+  ImGui avgMs=0.00657405
+  Delayed graphics-queue intervals; overlapping passes are not additive.
+Biome map: zoom=0 mode=scheduled (fixed center when enabled)
+  TerrainQueue n=16872 avgMs=0.00847125 totalMs=142.927
+  MeshQueue n=31927 avgMs=0.00850797 totalMs=271.634
+  BiomeMap n=0 avgMs=0 totalMs=0
+Peaks: chunks=4630 draw=1569 qLoad/Gen/Mesh=5/3/3
+
+Memory / workload: enabled
+  Ownership bytes (not process RSS); current / peak at publication boundaries
+  voxel.bytes current=302710784 peak=303759360
+  shell.sizeBytes current=52224 peak=5762048
+  shell.capacityBytes current=52224 peak=5762048
+  cpu.opaque.vertex.sizeBytes current=49280 peak=875616
+  cpu.opaque.vertex.capacityBytes current=8748404 peak=8748404
+  cpu.opaque.index.sizeBytes current=10560 peak=187632
+  cpu.opaque.index.capacityBytes current=1874632 peak=1874632
+  cpu.water.vertex.sizeBytes current=8064 peak=89824
+  cpu.water.vertex.capacityBytes current=851536 peak=851536
+  cpu.water.index.sizeBytes current=1728 peak=19248
+  cpu.water.index.capacityBytes current=182448 peak=182448
+  column.bytes current=36429824 peak=36429824
+  occupancy.bytes current=284608 peak=284608
+  gpu.opaque.vertex.bytes current=489910176 peak=505644272
+  gpu.opaque.index.bytes current=104980752 peak=108352344
+  gpu.water.vertex.bytes current=8616384 peak=13428352
+  gpu.water.index.bytes current=1846368 peak=2877504
+  gpu.retired.bytes current=0 peak=3123240
+  gpu.retired.buffers current=0 peak=58
+  pool.capacity current=8894 peak=8894
+  pool.acquired current=4619 peak=4635
+  pool.free current=4275 peak=4334
+  chunks.active current=4619 peak=4630
+  chunks.deferred current=0 peak=16
+  staging.slice.bytes current=35328 peak=719360
+  cpu.mesh.capacityBytes current=11657020 peak=11657020
+  gpu.live.bytes current=605353680 peak=628022024
+  voxel.pool.capacity current=4635 peak=4635
+  voxel.pool.active current=4619 peak=4635
+  voxel.pool.free current=16 peak=27
+  voxel.pool.capacityBytes current=303759360 peak=303759360
+  border.pool.capacity current=848 peak=848
+  border.pool.active current=3 peak=329
+  border.pool.free current=845 peak=848
+  border.pool.capacityBytes current=14761984 peak=14761984
+  mesh.pool.capacity current=25 peak=25
+  mesh.pool.active current=2 peak=4
+  mesh.pool.free current=23 peak=25
+  mesh.pool.capacityBytes current=11657020 peak=11657020
+  mesh.allocations.created total=92244 avgPerFrame=2.4729
+  mesh.allocations.destroyed total=91298 avgPerFrame=2.44754
+  pool.rejected total=0 avgPerFrame=0
+  upload.chunks total=31927 avgPerFrame=0.855906
+  upload.vertexBytes total=2272395216 avgPerFrame=60918.9
+  upload.indexBytes total=486941832 avgPerFrame=13054
+  upload.deferred total=0 avgPerFrame=0
+  staging.failures total=0 avgPerFrame=0
+  draws.opaque total=56961403 avgPerFrame=1527.03
+  draws.water total=32873658 avgPerFrame=881.284
+  draws.shadow.0 total=5276080 avgPerFrame=141.442
+  draws.shadow.1 total=8660839 avgPerFrame=232.182
+  draws.shadow.2 total=10298329 avgPerFrame=276.08
+  voxel.pool.growEvents total=64 avgPerFrame=0.00171573
+  border.pool.growEvents total=0 avgPerFrame=0
+  mesh.pool.growEvents total=0 avgPerFrame=0
+  draws.shadow.total=24235248 avgPerFrame=649.704
+  mesh.skylight n=14732 totalMs=12547
+  mesh.blocklight n=14732 totalMs=2563.84
+  mesh.occupancy n=14732 totalMs=25.016
+  mesh.facesGreedyAO n=14732 totalMs=18524.5
+  mesh.LOD n=17195 totalMs=93.6254
+  mesh.maskCells=2369696000 aoVertices=63548560 opaqueVertices=76822956 opaqueIndices=115234434 waterVertices=4333284 waterIndices=6499926
+Score: 45% avgFPS@60 + 15% headroom + 30% 1%low@60 + 10% stability;
+       -15% max penalty for fraction of frames >33ms.

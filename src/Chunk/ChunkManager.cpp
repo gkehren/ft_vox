@@ -384,7 +384,17 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			const auto queuedAt = std::chrono::steady_clock::now();
 			const uint64_t meshGeneration = chunk->meshGeneration();
 			const uint64_t meshRevision = chunk->meshRevision();
-			m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, this, queuedAt, captureEpoch]() {
+			// Section-selective remesh (issue #107): the dirty mask is
+			// captured at dispatch like the identity counters. It expands to
+			// a whole-chunk build when the chunk has no usable sectioned GPU
+			// state yet (LOD promotion, first mesh after generation, fresh
+			// incarnation) or when an earlier full-quality result is still
+			// parked awaiting upload - its sections could not be composed
+			// with a partial rebuild.
+			uint16_t sectionMask = chunk->takeDirtySections();
+			if (sectionMask == 0 || chunk->isLODMesh() || chunk->hasUnuploadedFullMesh())
+				sectionMask = kAllSectionMask;
+			m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, sectionMask, this, queuedAt, captureEpoch]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
@@ -397,16 +407,23 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 				{
 					result = nullptr; // retry next dispatch; keep the chunk unstuck
 				}
+				if (!result)
+				{
+					// The mask was consumed at dispatch: re-arm it so the
+					// sections are rebuilt on the retry (issue #107).
+					chunk->markSectionsDirty(sectionMask);
+				}
 				if (result)
 				{
 					try
 					{
-						chunk->buildMesh(*result, meshGeneration, meshRevision);
+						chunk->buildMesh(*result, meshGeneration, meshRevision, sectionMask);
 						chunk->getMeshResultPool()->finishBuild(result);
 					}
 					catch (const std::bad_alloc &)
 					{
 						result->homePool->release(result);
+						chunk->markSectionsDirty(sectionMask);
 						result = nullptr;
 					}
 				}
@@ -524,9 +541,20 @@ void ChunkManager::processFinishedJobs()
 		if (job.result)
 		{
 			if (job.chunk && !supersededByEdit)
+			{
 				job.chunk->publishMeshResult(job.result);
+			}
 			else
+			{
+				// A superseded section build must re-arm the sections it
+				// rebuilt (PR #117 review): the queued edit only re-arms
+				// its own sections when it is applied below, so without
+				// this the dropped job's sections would keep their stale
+				// GPU meshes (old dirty A + new edit B => next mask A|B).
+				if (job.chunk)
+					job.chunk->markSectionsDirty(job.result->sectionsBuilt);
 				job.result->homePool->release(job.result);
+			}
 		}
 		if (job.chunk)
 			job.chunk->setInTransit(false);

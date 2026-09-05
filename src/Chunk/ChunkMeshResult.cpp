@@ -3,12 +3,58 @@
 #include <algorithm>
 #include <cassert>
 
+namespace
+{
+// Byte totals across the full-quality section payloads and the LOD vectors;
+// shared by beginBuild/detach clearing and the pool accounting.
+struct PayloadTotals
+{
+	size_t opaqueVertexSize{0}, opaqueIndexSize{0};
+	size_t waterVertexSize{0}, waterIndexSize{0};
+	size_t opaqueVertexCapacity{0}, opaqueIndexCapacity{0};
+	size_t waterVertexCapacity{0}, waterIndexCapacity{0};
+};
+
+PayloadTotals payloadTotals(const MeshBuildResult &r)
+{
+	PayloadTotals t;
+	for (const SectionMeshPayload &s : r.sections)
+	{
+		t.opaqueVertexSize += s.opaqueVertices.size() * sizeof(Vertex);
+		t.opaqueIndexSize += s.opaqueIndices.size() * sizeof(uint32_t);
+		t.waterVertexSize += s.waterVertices.size() * sizeof(Vertex);
+		t.waterIndexSize += s.waterIndices.size() * sizeof(uint32_t);
+		t.opaqueVertexCapacity += s.opaqueVertices.capacity() * sizeof(Vertex);
+		t.opaqueIndexCapacity += s.opaqueIndices.capacity() * sizeof(uint32_t);
+		t.waterVertexCapacity += s.waterVertices.capacity() * sizeof(Vertex);
+		t.waterIndexCapacity += s.waterIndices.capacity() * sizeof(uint32_t);
+	}
+	t.opaqueVertexSize += r.opaqueVertices.size() * sizeof(Vertex);
+	t.opaqueIndexSize += r.opaqueIndices.size() * sizeof(uint32_t);
+	t.waterVertexSize += r.waterVertices.size() * sizeof(Vertex);
+	t.waterIndexSize += r.waterIndices.size() * sizeof(uint32_t);
+	t.opaqueVertexCapacity += r.opaqueVertices.capacity() * sizeof(Vertex);
+	t.opaqueIndexCapacity += r.opaqueIndices.capacity() * sizeof(uint32_t);
+	t.waterVertexCapacity += r.waterVertices.capacity() * sizeof(Vertex);
+	t.waterIndexCapacity += r.waterIndices.capacity() * sizeof(uint32_t);
+	return t;
+}
+} // namespace
+
 void MeshBuildResult::beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration,
-								 uint64_t chunkRevision)
+								 uint64_t chunkRevision, uint16_t sectionMask)
 {
 	owner = chunkOwner;
 	generation = chunkGeneration;
 	revision = chunkRevision;
+	sectionsBuilt = sectionMask;
+	for (SectionMeshPayload &s : sections)
+	{
+		s.opaqueVertices.clear();
+		s.opaqueIndices.clear();
+		s.waterVertices.clear();
+		s.waterIndices.clear();
+	}
 	opaqueVertices.clear();
 	opaqueIndices.clear();
 	waterVertices.clear();
@@ -23,9 +69,17 @@ void MeshBuildResult::detach()
 	generation = 0;
 	revision = 0;
 	isLOD = false;
+	sectionsBuilt = 0;
 	// Drop content (sizes only - capacity stays with the pool block so the
 	// next borrower does not start from zero allocations). The matching
 	// size accounting is subtracted by release() under the pool mutex.
+	for (SectionMeshPayload &s : sections)
+	{
+		s.opaqueVertices.clear();
+		s.opaqueIndices.clear();
+		s.waterVertices.clear();
+		s.waterIndices.clear();
+	}
 	opaqueVertices.clear();
 	opaqueIndices.clear();
 	waterVertices.clear();
@@ -74,15 +128,7 @@ MeshBuildResult *MeshResultPool::acquire()
 
 void MeshResultPool::accountFinishLocked(MeshBuildResult *result)
 {
-	MeshResultAccounting now;
-	now.opaqueVertexSize = result->opaqueVertices.size() * sizeof(Vertex);
-	now.opaqueIndexSize = result->opaqueIndices.size() * sizeof(uint32_t);
-	now.waterVertexSize = result->waterVertices.size() * sizeof(Vertex);
-	now.waterIndexSize = result->waterIndices.size() * sizeof(uint32_t);
-	now.opaqueVertexCapacity = result->opaqueVertices.capacity() * sizeof(Vertex);
-	now.opaqueIndexCapacity = result->opaqueIndices.capacity() * sizeof(uint32_t);
-	now.waterVertexCapacity = result->waterVertices.capacity() * sizeof(Vertex);
-	now.waterIndexCapacity = result->waterIndices.capacity() * sizeof(uint32_t);
+	const PayloadTotals now = payloadTotals(*result);
 
 	// Replace the block's previously accounted values with the fresh ones:
 	// sizes were zero since release(), capacities may have grown during this
@@ -95,7 +141,14 @@ void MeshResultPool::accountFinishLocked(MeshBuildResult *result)
 	m_stats.opaqueIndexCapacity += now.opaqueIndexCapacity - result->accounted.opaqueIndexCapacity;
 	m_stats.waterVertexCapacity += now.waterVertexCapacity - result->accounted.waterVertexCapacity;
 	m_stats.waterIndexCapacity += now.waterIndexCapacity - result->accounted.waterIndexCapacity;
-	result->accounted = now;
+	result->accounted.opaqueVertexSize = now.opaqueVertexSize;
+	result->accounted.opaqueIndexSize = now.opaqueIndexSize;
+	result->accounted.waterVertexSize = now.waterVertexSize;
+	result->accounted.waterIndexSize = now.waterIndexSize;
+	result->accounted.opaqueVertexCapacity = now.opaqueVertexCapacity;
+	result->accounted.opaqueIndexCapacity = now.opaqueIndexCapacity;
+	result->accounted.waterVertexCapacity = now.waterVertexCapacity;
+	result->accounted.waterIndexCapacity = now.waterIndexCapacity;
 }
 
 void MeshResultPool::finishBuild(MeshBuildResult *result)

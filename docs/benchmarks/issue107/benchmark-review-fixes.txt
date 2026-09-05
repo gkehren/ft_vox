@@ -1,0 +1,112 @@
+PR #117 review-fix benchmarks (issue #107 section meshing)
+==========================================================
+
+Scope: performance and validation impact of the PR #117 review fixes on
+top of e0a8b93 (the reviewed #107 implementation):
+
+  6c61acb fix(mesh): classify section-seam faces with whole-chunk ownership rules
+  a1f07ac fix(chunk): complete section dirty mask for light BFS and superseded builds
+  92e3e39 fix(vulkan): rework sectioned uploads as copy-on-write with compact triangle-aligned layout
+
+Machine: Windows 11, MSVC Release, same machine for every run.
+Method: interleaved back-to-back A/B (base run, new run, repeated),
+medium corpus (40 chunks, stride 149) and edit scenarios driven by
+test_mesh_facekey's CLI modes; end-to-end via `ft_vox --seed 42
+--benchmark 30`.
+
+1. Full-build corpus (120 greedy builds per run, median of medians)
+-------------------------------------------------------------------
+                       base e0a8b93      new 92e3e39     delta
+MeshBuild overall      1.725 ms          1.788 ms        +3.7%
+  skylight             441.6 us          484.0 us        (noise, code unchanged)
+  blocklight           77.1 us           75.9 us         ~0
+  facesGreedyAO        1303.9 us         1340.8 us       +2.8%
+  occupancy            0.87 us           0.84 us         ~0
+
+The +2.8% facesGreedyAO is the price of the seam fix: the classification
+pass is no longer section-gated, so the seam slice classifies the full
+first-match rule on every section pass instead of short-circuiting. In
+exchange the mesh is CORRECT at transparent seams (fewer quads than the
+reviewed build, which emitted spurious second faces at every
+opaque/transparent Y seam crossing a section boundary).
+
+2. Edit scenarios (median of 2 interleaved runs, section = dirty-mask
+   rebuild, full = whole-chunk rebuild of the same state)
+-------------------------------------------------------------------
+                            sections    section ms      full ms
+mid-section place @65       base 2/new 3    0.77/0.86    1.53/1.77
+y-boundary place @64        base 2/new 2    0.76/0.82    1.55/1.59
+chunk-border place + mirror base 1/new 3    0.55/0.84    1.55/1.86
+burst 24 edits, 1 section   base 1/new 1    0.74/0.79    1.55/1.59
+16 edits spread, 8 sections base 8/new 9    2.23/2.43    2.23-3.09/2.29-2.37
+
+The complete dirty mask rebuilds 1-2 more sections per light-relevant
+edit than the reviewed (incomplete) mask: that is the cost of the
+soundness the property test proves (changedSections must be a subset of
+the dirty mask; the old mask provably under-covered block-light BFS
+reroutes above edits). Burst edits inside one section and type-preserving
+edits stay at 1-2 sections. Localized edits remain roughly 2x or more
+cheaper in CPU mesh work, while edits spanning many sections converge
+toward whole-chunk rebuild cost and can land slightly above it, because
+lighting stays chunk-wide (regional lighting is the documented follow-up).
+
+3. End-to-end (ft_vox --seed 42 --benchmark 30, one run each)
+-------------------------------------------------------------------
+                       base e0a8b93      new 92e3e39
+composite score        9906              9902            -0.04%
+avg FPS                567.2             544.9           (run noise)
+MeshBuild avg          2.270 ms          2.346 ms        +3.3%
+
+Consistent with the corpus: the composite score is unchanged, MeshBuild
+carries the seam-classification cost.
+
+4. Upload CPU cost (edit path)
+-------------------------------------------------------------------
+The copy-on-write upload adds a device-to-device preserve copy and 2-4
+buffer (re)allocations per edited-chunk upload. CPU staging bytes are
+unchanged (only masked sections are staged; zero fills moved to
+vkCmdFillBuffer). The full-repack path (fresh chunks, full rebuilds,
+LOD transitions) compacts the layout: usedBytes == exact payload sum,
+index slots 12-byte (triangle) aligned, no abandoned ranges - which also
+removes the reviewed build's risk of the packed drawIndexed stream
+decoding mixed live/zero index bytes at 4-byte-aligned slot gaps.
+
+5. Vulkan synchronization validation (phase 28)
+-------------------------------------------------------------------
+Setup: SDK 1.3.290.0 Khronos layer with SYNCHRONIZATION_VALIDATION +
+BEST_PRACTICES (test harness opt-in via FT_VOX_TEST_VALIDATION=1 +
+VK_LAYER_PATH; engine via FT_VOX_VALIDATION=1).
+
+- Engine (ft_vox --seed 42 --benchmark 30): 0 SYNC-HAZARD messages
+  across the full streaming flow (initial uploads, partial edit
+  uploads, slot appends, buffer growth, empty sections, LOD/full
+  transitions). Remaining layer output is 2 pre-existing non-sync VUIDs
+  (ImGui image-view usage, swapchain image format) unrelated to this PR.
+- Baseline (e0a8b93) under the same headless harness: 102 sync-hazard
+  reports, dominated by the in-place slot re-staging into live buffers
+  that the review flagged.
+- New code, same harness: 14 WAW reports confined to the harness's
+  synthetic repack (single recycled command buffer, per-upload
+  submissions separated only by host queueWaitIdle). The flagged copy
+  destination ranges were verified disjoint (e.g. [0,8736) vs
+  [8736,18592)); disjoint writes need no barrier, so these read as
+  range-tracking artifacts of the layer under the harness pattern, not
+  engine hazards.
+
+6. Reproduce
+-------------------------------------------------------------------
+  # corpus (interleave base/new):
+  build/tests/Release/test_mesh_facekey --bench-corpus 40 149
+  # edits:
+  build/tests/Release/test_mesh_facekey --edit-bench
+  # end to end:
+  build/Release/ft_vox --seed 42 --benchmark 30
+  # sync validation:
+  VK_LAYER_PATH=<sdk>/Bin FT_VOX_TEST_VALIDATION=1 \
+    build/tests/Release/test_mesh_upload
+  VK_LAYER_PATH=<sdk>/Bin FT_VOX_VALIDATION=1 \
+    build/Release/ft_vox --seed 42 --benchmark 30
+
+Raw interleaved outputs for runs 1-3 (corpus), 1-2 (edits) and the two
+end-to-end reports are retained in docs/benchmarks/
+(bench_20260905_161355_* = new, bench_20260905_161537_* = base).

@@ -190,6 +190,48 @@ out of the key — they are sampled at the final merged quad corners. The
 merge semantics are pinned byte-exact by `tests/test_mesh_facekey.cpp`
 (deterministic scenes plus the `--hash-corpus` dev tool).
 
+### Sectioned meshes (issue #107)
+
+The logical chunk stays 16×256×16, but its full-quality render mesh is one
+payload per vertical **16³ section** (the same 16-slab tiling as the
+occupancy metadata). Section `s` owns every greedy face whose owning voxel
+lies in `y ∈ [16s, 16s+15]`; the owner-side gating clips the greedy rect to
+the section, so quads never cross a section boundary and each section can be
+rebuilt and re-uploaded independently (a quad that would have merged across
+a boundary is split — a small, measured quad increase).
+
+- **Dirty granularity**: an edit marks its own section, the section above/
+  below when the voxel sits on a section Y boundary, the horizontal
+  neighbor's `y/16` section for x/z border writes (mirror), and a
+  conservative light range: emissive edits spread ±14, other edits cover the
+  skylight column down to its first blocker. Lighting itself is recomputed
+  **chunk-wide** for every build, so rebuilt sections sample exactly the
+  field a whole build would produce — no seams at 16-block boundaries
+  (regional lighting is future work; deep horizontal flood beyond the
+  conservative range is its known frontier).
+- **GPU layout**: each stream (opaque/water) is ONE vertex/index buffer pair
+  per chunk with back-to-back per-section slots (offset + reservation,
+  indices stored rebased onto the section's vertex base). A remesh re-stages
+  only the dirty sections' slots; an outgrown slot is appended at the end of
+  the used region (never moving existing slots), and buffer capacity grows
+  by re-creating the buffer and copying it to offset 0. The index stream
+  keeps the invariant "every byte in `[0, used)` is a live index or zero"
+  (slot slack and abandoned slots are zeroed — degenerate triangles), which
+  keeps the renderer at ONE bind + one `drawIndexed` per chunk.
+- **Builds**: `buildMesh(result, gen, rev, sectionMask)` builds exactly the
+  masked sections in one worker job (batched — no tiny-task overhead for
+  initial generation, which masks all 16 sections); an empty section skips
+  meshing entirely and clears its slot content on upload. The dirty mask is
+  captured at dispatch like the mesh identity, re-armed when a publish is
+  rejected, and expanded to a whole-chunk build when no sectioned GPU state
+  exists yet (LOD promotion, first build) or while an earlier full-quality
+  result still awaits upload.
+- **Tests**: `tests/test_chunk_lifecycle.cpp` pins the dirty-propagation
+  contract and the partial-rebuild ≡ full-rebuild section equivalence;
+  `tests/test_mesh_facekey.cpp --edit-bench` reports the edit scenarios
+  (mid-section, Y boundary, chunk border, burst, spread) against
+  whole-chunk rebuilds.
+
 ---
 
 ## 6. ChunkPool and ThreadPool
