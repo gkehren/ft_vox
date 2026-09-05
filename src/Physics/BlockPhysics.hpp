@@ -1,6 +1,7 @@
 #pragma once
 #include "VoxelCollision.hpp"
 #include <utils.hpp>
+#include <Renderer/MinecraftTextures.hpp>
 
 namespace physics
 {
@@ -8,7 +9,8 @@ namespace physics
 inline Cell blockCell(TextureType type)
 {
     if (type == AIR) return {true, false, Medium::Air};
-    if (type == WATER || type == KELP || type == KELP_TOP) return {true, false, Medium::Water};
+    if (type == WATER || type == KELP || type == KELP_TOP || type == SEAGRASS) return {true, false, Medium::Water};
+    if (blockIsSmallDetail(type)) return {true, false, Medium::Air};
     if (type == LAVA) return {true, false, Medium::Lava};
     return {true, true, Medium::Air};
 }

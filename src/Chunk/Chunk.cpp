@@ -990,16 +990,9 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
   // neighbor shell
   auto getVoxelDataForMeshing = [&](int lx, int ly, int lz) -> TextureType
   {
-    if (static_cast<uint32_t>(lx) < CHUNK_SIZE && static_cast<uint32_t>(ly) < CHUNK_HEIGHT &&
-        static_cast<uint32_t>(lz) < CHUNK_SIZE)
-    {
-      return static_cast<TextureType>(getVoxel(lx, ly, lz).type);
-    }
-    // Check the neighbor shell for out-of-bounds coordinates relevant to
-    // meshing.
-    // Layout-independent border sampling (issue #103): the mesher does not
-    // know the physical border representation.
-    return sampleForMeshing(lx, ly, lz);
+    const auto type = sampleForMeshing(lx, ly, lz);
+    // Details own explicit quads and must neither emit nor hide cube faces.
+    return blockIsSmallDetail(type) ? AIR : type;
   };
 
   const int dims[] = {CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE};
@@ -1545,6 +1538,42 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
     }
   }
 
+  // Small plants stay in their owner section and share the opaque alpha-test
+  // stream. Reverse triangles render the back side with normal backface culling.
+  for (int z = 0; z < CHUNK_SIZE; ++z)
+    for (int y = ownerMinY; y <= ownerMaxY; ++y)
+      for (int x = 0; x < CHUNK_SIZE; ++x)
+      {
+        const auto type = static_cast<TextureType>(getVoxel(x, y, z).type);
+        const auto shape = blockShape(type);
+        if (shape == BlockShape::Cube) continue;
+        const size_t li = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
+        const bool tint = blockUsesGrassTint(type);
+        const uint32_t packed = 2u | (static_cast<uint32_t>(type) << 3) | (tint ? 1u << 11 : 0u)
+            | (3u << 12) | lighting::packLightBits(skyLight[li], blockLight[li]);
+        auto quad = [&](std::array<glm::vec3, 4> positions) {
+          const uint32_t first = static_cast<uint32_t>(vertices.size());
+          constexpr glm::vec2 uv[] = {{0.f, 1.f}, {1.f, 1.f}, {1.f, 0.f}, {0.f, 0.f}};
+          for (size_t k = 0; k < 4; ++k)
+          {
+            Vertex v{};
+            v.position = this->position + glm::vec3(x, y, z) + positions[k];
+            v.texCoord = uv[k]; v.packedData = packed;
+            v.packedBiomeColor = tint ? biomeGrassColors[z * CHUNK_SIZE + x] : 0u;
+            vertices.push_back(v);
+          }
+          constexpr uint32_t winding[] = {0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0};
+          for (auto k : winding) indices.push_back(first + k);
+        };
+        if (shape == BlockShape::Flat)
+          quad({glm::vec3(.05f, .025f, .05f), {.95f, .025f, .05f}, {.95f, .025f, .95f}, {.05f, .025f, .95f}});
+        else
+        {
+          quad({glm::vec3(.1f, 0.f, .1f), {.9f, 0.f, .9f}, {.9f, .9f, .9f}, {.1f, .9f, .1f}});
+          quad({glm::vec3(.9f, 0.f, .1f), {.1f, 0.f, .9f}, {.1f, .9f, .9f}, {.9f, .9f, .1f}});
+        }
+      }
+
   // Accumulate across the per-section builds of one job (issue #107).
   meshSample.data.opaqueVertices += vertices.size();
   meshSample.data.opaqueIndices += indices.size();
@@ -1616,7 +1645,7 @@ void Chunk::buildLODMeshRanged(MeshBuildResult &out, int scanTopY)
       for (int cy = scanTopY; cy >= 0; --cy)
       {
         TextureType t = static_cast<TextureType>(getVoxel(cx, cy, cz).type);
-        if (t != AIR)
+        if (t != AIR && !blockIsSmallDetail(t))
         {
           topY = cy;
           topType = t;

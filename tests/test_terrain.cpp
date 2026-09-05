@@ -2,6 +2,7 @@
 // Also provides an opt-in biome histogram calibration tool:
 //   ./test_terrain --histogram [size] [step]   (default 2048 blocks, step 4)
 #include <Chunk/TerrainGenerator.hpp>
+#include "TerrainAtlas.hpp"
 #include <Chunk/ChunkBorders.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 
@@ -49,47 +50,12 @@ static int voxelIndex(int x, int y, int z)
 	return y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x;
 }
 
-/// Blocks a chunk may place locally on top of shared terrain: vegetation
-/// (trunks/canopies/cacti/spikes/bushes/boulders/fallen logs) and ore veins.
-/// These are chunk-seeded and intentionally NOT part of the deterministic
-/// border strips, so border vs neighbor-column comparisons must treat them
-/// as overwrites.
+/// Legacy underground ore/decorations remain chunk-local. All surface
+/// features, including large trees, are compared exactly against the shell.
 static bool isChunkLocalFeature(uint8_t raw)
 {
 	switch (static_cast<TextureType>(raw))
 	{
-	case OAK_LOG:
-	case BIRCH_LOG:
-	case SPRUCE_LOG:
-	case JUNGLE_LOG:
-	case ACACIA_LOG:
-	case DARK_OAK_LOG:
-	case OAK_LEAVES:
-	case BIRCH_LEAVES:
-	case SPRUCE_LEAVES:
-	case JUNGLE_LEAVES:
-	case ACACIA_LEAVES:
-	case DARK_OAK_LEAVES:
-	case CHERRY_LOG:
-	case CHERRY_LEAVES:
-	case MANGROVE_LOG:
-	case MANGROVE_ROOTS:
-	case MANGROVE_LEAVES:
-	case BAMBOO_BLOCK:
-	case BAMBOO_STALK:
-	case RED_MUSHROOM_BLOCK:
-	case BROWN_MUSHROOM_BLOCK:
-	case MUSHROOM_STEM:
-	case TUBE_CORAL_BLOCK:
-	case BRAIN_CORAL_BLOCK:
-	case BUBBLE_CORAL_BLOCK:
-	case FIRE_CORAL_BLOCK:
-	case HORN_CORAL_BLOCK:
-	case CACTUS:
-	case COBBLESTONE:		// boulders (terrain never generates cobble)
-	case MOSSY_COBBLESTONE: // mossy boulders
-	case PACKED_ICE:		// ice spikes (also terrain in ICE_SPIKES, but that matches anyway)
-	case BLUE_ICE:
 	case COAL_ORE:
 	case COPPER_ORE:
 	case DIAMOND_ORE:
@@ -109,8 +75,6 @@ static bool isChunkLocalFeature(uint8_t raw)
 	case DRIPSTONE_BLOCK:
 	case MAGMA:
 	case MOSS_BLOCK:
-	case KELP:
-	case KELP_TOP:
 		return true;
 	default:
 		return false;
@@ -658,18 +622,32 @@ static void testTerrainProfilingDoesNotChangeOutput()
 		  "terrain profile records every requested generation stage");
 }
 
+static glm::ivec2 locateBiome(TerrainGenerator &gen, BiomeType biome)
+{
+    std::vector<BiomeType> region;
+    constexpr int size = 256, step = 32;
+    gen.getBiomeRegion(0.f, 0.f, float(step), size, size, region);
+    for (int z = 0; z < size; ++z)
+        for (int x = 0; x < size; ++x)
+            if (region[z * size + x] == biome)
+                return {(x - size / 2) * step, (z - size / 2) * step};
+    CHECK(false, "requested biome is reachable in the calibration region");
+    return {};
+}
+
 static void testBorderTrunks()
 {
-	// Seed 7 has dense forest near the origin (Phase 2 terrain); scan 8x8
+	// Locate a forest instead of pinning an obsolete seed origin; scan 8x8
 	// chunks and look for trunks rooted in border columns (x = 0 or 15) —
 	// a vertical run of >= 4 logs.
 	int trunkColumns = 0;
 	TerrainGenerator gen(7);
+    const auto center = locateBiome(gen, BIOME_FOREST);
 	for (int cx = 0; cx < 8 && trunkColumns < 4; ++cx)
 	{
 		for (int cz = 0; cz < 8 && trunkColumns < 4; ++cz)
 		{
-			ChunkData data = gen.generateChunk(cx * CHUNK_SIZE, cz * CHUNK_SIZE);
+			ChunkData data = gen.generateChunk(center.x + cx * CHUNK_SIZE, center.y + cz * CHUNK_SIZE);
 			for (int z = 0; z < CHUNK_SIZE && trunkColumns < 4; ++z)
 			{
 				for (int x : {0, CHUNK_SIZE - 1})
@@ -725,7 +703,7 @@ static void testFlatRiverChannels()
 						data.voxels[voxelIndex(x, TerrainGenerator::SEA_LEVEL - 1, z)].type);
 					const auto surface = static_cast<TextureType>(
 						data.voxels[voxelIndex(x, TerrainGenerator::SEA_LEVEL, z)].type);
-					CHECK(belowSurface == WATER,
+					CHECK(belowSurface == WATER || belowSurface == SEAGRASS,
 						  "river channel contains water below the surface");
 					CHECK(surface == WATER || surface == ICE,
 						  "river surface is water or cold-climate ice");
@@ -829,11 +807,11 @@ static void testPhase3BiomePresence()
 	for (BiomeType biome : kBalancedLegacyBiomes)
 	{
 		CHECK(counts[static_cast<size_t>(biome)] >= kMinimumBalancedSamples,
-			  "ordinary legacy biome meets the final ~0.5% balance target");
+			  std::string("ordinary legacy biome meets ~0.5% target: ") + biomeTypeString[biome]);
 	}
 	for (BiomeType biome : kOrdinaryPhase3Biomes)
 		CHECK(counts[static_cast<size_t>(biome)] >= kMinimumBalancedSamples,
-			  "ordinary Phase 3 biome meets the final ~0.5% balance target");
+			  std::string("ordinary Phase 3 biome meets ~0.5% target: ") + biomeTypeString[biome]);
 
 	constexpr long long kMaximumGenericSamples =
 		static_cast<long long>(static_cast<double>(kTotalSamples) * 0.25);
@@ -977,6 +955,8 @@ static void testOasisPonds()
 static void testPhase5AquaticPolish()
 {
 	TerrainGenerator gen(1337);
+    const auto oceanCenter = locateBiome(gen, BIOME_OCEAN);
+    const auto forestCenter = locateBiome(gen, BIOME_FOREST);
 	long long kelpBlocks = 0;
 	long long kelpColumns = 0;
 	long long oceanSand = 0;
@@ -989,7 +969,8 @@ static void testPhase5AquaticPolish()
 		for (int cx = -12; cx < 12; ++cx)
 		{
 			ChunkData data =
-				gen.generateChunk(cx * CHUNK_SIZE, cz * CHUNK_SIZE);
+				gen.generateChunk((cx < 0 ? oceanCenter.x : forestCenter.x) + cx * CHUNK_SIZE,
+                                  (cx < 0 ? oceanCenter.y : forestCenter.y) + cz * CHUNK_SIZE);
 			for (int z = 0; z < CHUNK_SIZE; ++z)
 			{
 				for (int x = 0; x < CHUNK_SIZE; ++x)
@@ -2754,6 +2735,7 @@ static void testBiomeRegionMultiStepAndZoomConsistency()
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && std::strcmp(argv[1], "--atlas") == 0) return exportTerrainAtlas(argc, argv);
 	if (argc > 1 && std::strcmp(argv[1], "--histogram") == 0)
 		return runHistogram(argc, argv);
 	if (argc > 1 && std::strcmp(argv[1], "--height-histogram") == 0)

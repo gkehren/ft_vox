@@ -115,8 +115,10 @@ void ShadowPass::destroyPipeline()
 }
 
 void ShadowPass::record(VkCommandBuffer cmd, const std::vector<Chunk *> &shadowChunks,
-						const std::array<glm::mat4, kCascadeCount> &cascades, float time)
+						const std::array<glm::mat4, kCascadeCount> &cascades, float time, VkDescriptorSet set0, VkDescriptorSet set1)
 {
+	const std::array<VkDescriptorSet, 2> sets = {set0, set1};
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 2, sets.data(), 0, nullptr);
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
 

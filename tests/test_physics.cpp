@@ -1,4 +1,5 @@
 #include <Physics/PlayerController.hpp>
+#include <Physics/BlockPhysics.hpp>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -322,8 +323,22 @@ static void profile()
               << " ms cells/tick=" << double(cells) / timings.size()
               << " dropped=" << p.metrics.droppedSteps << '\n';
 }
+static void detailCollisionPolicy()
+{
+    for (auto type : {SHORT_GRASS, FERN, WILDFLOWER, DRY_SHRUB, LILY_PAD})
+    {
+        const auto cell = physics::blockCell(type);
+        CHECK(!cell.solid);
+        CHECK(cell.medium == Medium::Air);
+    }
+    CHECK(!physics::blockCell(SEAGRASS).solid);
+    CHECK(physics::blockCell(SEAGRASS).medium == Medium::Water);
+    CHECK(physics::blockCell(OAK_LOG).solid);
+    CHECK(physics::blockCell(OAK_LEAVES).solid);
+}
 int main(int argc, char **argv)
 {
+    detailCollisionPolicy();
     collisions(); movement(); streamingAndRecovery(); water(); cadence();
     if (argc > 1 && std::string_view(argv[1]) == "--profile") profile();
     if (!failures) std::cout << "PASS: voxel physics and player controller\n";

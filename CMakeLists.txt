@@ -58,7 +58,7 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
                 -I${FT_VOX_GENERATED_SHADER_DIR}
                 -I${FT_VOX_SHADER_SRC_DIR}
                 ${GLSL_PATH} -o ${SPV_PATH}
-            DEPENDS ${GLSL_PATH} ${FT_VOX_FRAME_UBO_GLSL}
+            DEPENDS ${GLSL_PATH} ${FT_VOX_FRAME_UBO_GLSL} ${FT_VOX_SHADER_SRC_DIR}/foliage_wind.inc.glsl
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )
@@ -69,7 +69,7 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
                 -I${FT_VOX_GENERATED_SHADER_DIR}
                 -I${FT_VOX_SHADER_SRC_DIR}
                 ${GLSL_PATH} -o ${SPV_PATH}
-            DEPENDS ${GLSL_PATH} ${FT_VOX_FRAME_UBO_GLSL}
+            DEPENDS ${GLSL_PATH} ${FT_VOX_FRAME_UBO_GLSL} ${FT_VOX_SHADER_SRC_DIR}/foliage_wind.inc.glsl
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )

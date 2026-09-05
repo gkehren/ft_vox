@@ -8,11 +8,14 @@
 
 /// One atlas layer: Minecraft pack basename + fallback + transparency.
 /// Indexed by TextureType 0 .. COUNT-1. Single source for load paths and isTransparent.
+enum class BlockShape : uint8_t { Cube, Cross, Flat };
+
 struct BlockLayerDesc
 {
 	const char *file;		  ///< Pack / preferred name, e.g. "birch_leaves.png"
 	const char *fallbackFile; ///< Fallback texture name in default pack, e.g. "oak_leaves.png"
 	bool transparent;
+	BlockShape shape{BlockShape::Cube};
 };
 
 /// Compile-time table in TextureType order (must match enum ordinals).
@@ -125,11 +128,27 @@ inline constexpr BlockLayerDesc kBlockLayers[] = {
 	// Phase 5 aquatic blocks
 	{"kelp_plant.png", "kelp_plant.png", true}, // KELP
 	{"kelp.png", "kelp.png", true},			  // KELP_TOP
+    {"short_grass.png", "short_grass.png", true, BlockShape::Cross},
+    {"fern.png", "fern.png", true, BlockShape::Cross},
+    {"oxeye_daisy.png", "oxeye_daisy.png", true, BlockShape::Cross},
+    {"dead_bush.png", "dead_bush.png", true, BlockShape::Cross},
+    {"seagrass.png", "seagrass.png", true, BlockShape::Cross},
+    {"lily_pad.png", "lily_pad.png", true, BlockShape::Flat},
 };
 
 static_assert(sizeof(kBlockLayers) / sizeof(kBlockLayers[0]) ==
 				  static_cast<std::size_t>(TextureType::COUNT),
 			  "kBlockLayers must match TextureType::COUNT");
+
+inline BlockShape blockShape(TextureType type)
+{
+    return type >= BEDROCK && type < COUNT ? kBlockLayers[static_cast<size_t>(type)].shape : BlockShape::Cube;
+}
+inline bool blockIsSmallDetail(TextureType type) { return blockShape(type) != BlockShape::Cube; }
+inline bool blockUsesGrassTint(TextureType type)
+{
+    return type == SHORT_GRASS || type == FERN || type == SEAGRASS || type == LILY_PAD;
+}
 
 inline bool blockLayerIsTransparent(TextureType t)
 {

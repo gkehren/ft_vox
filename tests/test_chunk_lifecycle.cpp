@@ -387,6 +387,36 @@ static int profilePlayerPhysics()
 	return 0;
 }
 
+/// Locate a chunk whose centre and corners sit solidly inland. The reworked
+/// continentalness moved coastlines, so fixed chunk pins drift between
+/// calibrations; a located origin keeps the mesh-equivalence checks on real
+/// opaque terrain regardless of where the seas end up.
+static glm::ivec2 locateInlandChunkOrigin(TerrainGenerator &gen)
+{
+	constexpr int kScanRadius = 64;
+	for (int cz = -kScanRadius; cz <= kScanRadius; ++cz)
+	{
+		for (int cx = -kScanRadius; cx <= kScanRadius; ++cx)
+		{
+			const int wx = cx * CHUNK_SIZE, wz = cz * CHUNK_SIZE;
+			bool inland = true;
+			for (const auto offset : {glm::ivec2(2, 2), {14, 2}, {2, 14}, {14, 14}, {8, 8}})
+			{
+				const auto s = gen.getTerrainSample(wx + offset.x, wz + offset.y);
+				if (s.height <= TerrainGenerator::SEA_LEVEL + 6)
+				{
+					inland = false;
+					break;
+				}
+			}
+			if (inland)
+				return {wx, wz};
+		}
+	}
+	CHECK(false, "inland terrain reachable within the scan radius");
+	return {0, 0};
+}
+
 int main(int argc, char **argv)
 {
 	if (argc > 1 && std::string_view(argv[1]) == "--physics-profile") return profilePlayerPhysics();
@@ -1551,7 +1581,9 @@ int main(int argc, char **argv)
 	{
 		MeshResultPool pool;
 		TerrainGenerator bgen(4242);
-		Chunk chunk(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		const glm::ivec2 inland = locateInlandChunkOrigin(bgen);
+		Chunk chunk(glm::vec3(float(inland.x), 0.0f, float(inland.y)), ChunkState::UNLOADED,
+					nullptr, nullptr, &pool);
 		CHECK(chunk.prepareVoxelStorageForGeneration(), "bounds-equivalence prepare");
 		chunk.generateTerrain(bgen);
 
