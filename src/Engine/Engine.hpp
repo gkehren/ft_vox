@@ -27,6 +27,7 @@
 #include <Chunk/ChunkManager.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
+#include <Physics/PlayerController.hpp>
 #include <utils.hpp>
 
 /// Vulkan engine: streaming procedural world, post, overlays, ImGui.
@@ -82,6 +83,8 @@ private:
 	void tickBenchmark(double dt);
 	void sampleBenchmarkFrame();
 	void placeCameraOnSurface();
+	void setPlayerFlight(bool enabled);
+	void resetPlayerAtCamera();
 
 	SDL_Window *window{nullptr};
 	int windowWidth{1920};
@@ -134,6 +137,13 @@ private:
 	std::vector<Chunk *> shadowList;
 	int uploadBudgetThisFrame{0};
 	Camera camera;
+	physics::PlayerController player;
+	bool playerFlight{false};
+	bool windowFocused{true};
+	bool jumpPressed{false};
+	bool benchmarkOwnedCamera{false};
+	bool flightBeforeBenchmark{false};
+	const char *playerStatus{""};
 
 	OverlayHighlight highlight{};
 	std::vector<OverlayPlayer> demoPlayers;

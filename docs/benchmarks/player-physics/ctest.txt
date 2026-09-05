@@ -1,0 +1,43 @@
+Test project D:/Projects/ft_vox_vulkan/build
+      Start  1: PlayerPhysics
+ 1/19 Test  #1: PlayerPhysics ....................   Passed    0.01 sec
+      Start  2: NetworkIntegrationTest
+ 2/19 Test  #2: NetworkIntegrationTest ...........   Passed    1.19 sec
+      Start  3: VulkanResourceSmoke
+ 3/19 Test  #3: VulkanResourceSmoke ..............   Passed    0.79 sec
+      Start  4: VulkanValidationErrorReporting
+ 4/19 Test  #4: VulkanValidationErrorReporting ...   Passed    0.75 sec
+      Start  5: VisualLookDefaults
+ 5/19 Test  #5: VisualLookDefaults ...............   Passed    0.01 sec
+      Start  6: RenderHelpers
+ 6/19 Test  #6: RenderHelpers ....................   Passed    0.02 sec
+      Start  7: StreamOptHelpers
+ 7/19 Test  #7: StreamOptHelpers .................   Passed    0.01 sec
+      Start  8: TerrainGeneration
+ 8/19 Test  #8: TerrainGeneration ................   Passed   38.00 sec
+      Start  9: BiomeMapGeneration
+ 9/19 Test  #9: BiomeMapGeneration ...............   Passed    1.10 sec
+      Start 10: InputRouting
+10/19 Test #10: InputRouting .....................   Passed    0.01 sec
+      Start 11: ChunkLifecycle
+11/19 Test #11: ChunkLifecycle ...................   Passed    0.12 sec
+      Start 12: MeshUploadLifecycle
+12/19 Test #12: MeshUploadLifecycle ..............   Passed    0.54 sec
+      Start 13: VoxelPool
+13/19 Test #13: VoxelPool ........................   Passed    0.01 sec
+      Start 14: BorderPool
+14/19 Test #14: BorderPool .......................   Passed    0.01 sec
+      Start 15: MeshResultPool
+15/19 Test #15: MeshResultPool ...................   Passed    0.02 sec
+      Start 16: ProfilerWorkerConsistency
+16/19 Test #16: ProfilerWorkerConsistency ........   Passed    0.08 sec
+      Start 17: GpuProfile
+17/19 Test #17: GpuProfile .......................   Passed    0.02 sec
+      Start 18: WorkloadTelemetry
+18/19 Test #18: WorkloadTelemetry ................   Passed    0.01 sec
+      Start 19: WorkloadTelemetryDisabled
+19/19 Test #19: WorkloadTelemetryDisabled ........   Passed    0.00 sec
+
+100% tests passed out of 19
+
+Total Test time (real) =  42.74 sec
