@@ -44,11 +44,10 @@ struct FeatureBounds
     int radius;
     int height;
     float maxSlope;
-    uint32_t priority;
 };
-inline constexpr FeatureBounds smallTree{4, 20, 2.5f, 2};
-inline constexpr FeatureBounds matureTree{8, 38, 1.5f, 3};
-inline constexpr FeatureBounds groundProp{3, 4, 1.5f, 1};
+inline constexpr FeatureBounds smallTree{4, 20, 2.5f};
+inline constexpr FeatureBounds matureTree{8, 38, 1.5f};
+inline constexpr FeatureBounds groundProp{3, 4, 1.5f};
 inline constexpr int maxFeatureRadius = matureTree.radius;
 inline constexpr int candidateCellSize = 4;
 

@@ -2349,8 +2349,9 @@ void TerrainGenerator::generateVegetation(const ChunkGenerationTarget &data, int
       assert(count < candidates.size());
       candidates[count++] = {x, z, y + 1, biome, hash, mature};
     }
-  // A total world-coordinate order gives identical overlap winners in every
-  // chunk and its shell; mature trees take precedence over small specimens.
+  // Mature trees are processed after small trees so their trunk/root geometry
+  // wins deterministic overlaps. The ordering is derived solely from world
+  // coordinates and hashes and is therefore identical in overlapping chunks.
   std::sort(candidates.begin(), candidates.begin() + count, [](const Candidate &a, const Candidate &c) {
     if (a.mature != c.mature) return !a.mature;
     if (a.hash != c.hash) return a.hash < c.hash;

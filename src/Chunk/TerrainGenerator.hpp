@@ -145,7 +145,10 @@ public:
   // channel height as generateChunkInto; no voxels, threads or GPU resources.
   struct TerrainSample
   {
-    int height;
+    // Canonical post-erosion 2D terrain height used for biome classification.
+    // Does not include surface 3D perturbation, caves, vegetation, props or
+    // ores, so it is not the final highest solid voxel of a generated chunk.
+    int postErosionHeight;
     BiomeType biome;
     float continentality, erosion, weirdness, temperature, humidity, river;
     std::array<float, static_cast<size_t>(worldgen::Relief::Count)> reliefWeights;

@@ -172,14 +172,14 @@ static void testOceanWaterNotClippedByCaveYBound()
 		{
 			const int wx = cx * CHUNK_SIZE, wz = cz * CHUNK_SIZE;
 			const auto centre = gen.getTerrainSample(wx + 8, wz + 8);
-			if (centre.biome != BIOME_OCEAN || centre.height > sea - 6)
+			if (centre.biome != BIOME_OCEAN || centre.postErosionHeight > sea - 6)
 				continue;
 			bool deepOcean = true;
 			for (int z = 0; z < CHUNK_SIZE && deepOcean; z += 5)
 				for (int x = 0; x < CHUNK_SIZE && deepOcean; x += 5)
 				{
 					const auto s = gen.getTerrainSample(wx + x, wz + z);
-					deepOcean = s.biome == BIOME_OCEAN && s.height <= sea - 2;
+					deepOcean = s.biome == BIOME_OCEAN && s.postErosionHeight <= sea - 2;
 				}
 			if (deepOcean)
 			{

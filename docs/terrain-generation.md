@@ -92,11 +92,12 @@ height, so canonical queries cannot develop seams.
   *materials* across biome boundaries without changing the canonical biome
   per column; alpine regions mix diorite/andesite, volcanic cliffs blackstone.
 - **Features**: trees and props declare `worldgen::FeatureBounds`
-  (`smallTree` r=4, `matureTree` r=8, `groundProp` r=3) with slope limits and
-  placement priority. Candidates are evaluated in world-aligned cells of 4
-  blocks with a halo matched to the largest radius, so placements resolve
-  identically regardless of chunk load order; mature trees are rare large
-  variants placed through `placeMatureTree`.
+  (`smallTree` r=4, `matureTree` r=8, `groundProp` r=3) with slope limits.
+  Candidates are evaluated in world-aligned cells of 4 blocks with a halo
+  matched to the largest radius, so placements resolve identically regardless
+  of chunk load order; mature trees are rare large variants placed through
+  `placeMatureTree` after small trees, so their trunks win deterministic
+  overlaps.
 
 ## Biome catalog
 
@@ -149,8 +150,14 @@ Small vegetation uses an explicit `BlockShape` (`Cube`, `Cross`, `Flat`) in
   are excluded from cube meshing (they never hide neighbor faces), are omitted
   from LOD meshes, cast alpha-cut shadows, and carry the shared
   `foliage_wind.inc.glsl` wind (rooted wind is damped by UV height).
-- They are non-solid for physics (`physics::blockCell` returns Air; seagrass
-  keeps its Water medium), so plants never block movement.
+- They are non-solid for physics; `physics::blockCell` is an explicit
+  gameplay policy switch (seagrass keeps its Water medium), deliberately
+  independent of `BlockShape` — changing a render shape never changes
+  collision. Semantic traits shared with worldgen live in
+  `Block/BlockTraits.hpp`, which no renderer header may own.
+- Underwater detail blocks currently replace the fluid voxel in the render
+  representation, which can expose internal water faces. Generic coexistence
+  of fluid occupancy and embedded detail geometry is tracked in #120.
 - Textures use grass tint via `blockUsesGrassTint` where appropriate.
 
 ## Adding a biome
@@ -223,6 +230,11 @@ Biome sampling is unified across the engine via a canonical erosion-aware pipeli
   `BiomeRegionGrid::pixelForWorld`). The two roundings have different roles
   and must not be interchanged: never derive a canonical biome column from a
   display pixel other than through `BiomeRegionGrid::columnAt()`.
+- **Terrain samples (`getTerrainSample()`)**: exposes the canonical
+  post-erosion 2D height field used by biome classification
+  (`TerrainSample::postErosionHeight`). It does not represent the final
+  highest solid voxel after 3D surface perturbation, cave carving, and
+  feature placement.
 - **Point queries (`getBiomeAt(worldX, worldZ)`)**: Evaluates a 5×5 cell window (halo = 2) centered on the world column via `evaluateBiomeColumn`, running thermal erosion on the neighborhood. This guarantees bit-for-bit equivalence with chunk generation without heap allocations.
 - **Region queries (`getBiomeRegion(grid, ...)`)**: The sampling domain is described by a
   `BiomeRegionGrid` (`src/Chunk/BiomeRegionGrid.hpp`) — the single source of truth mapping

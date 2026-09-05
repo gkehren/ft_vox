@@ -31,7 +31,7 @@ inline int exportTerrainAtlas(int argc, char **argv)
     }
     std::ofstream out(argv[5]);
     if (!out) { std::cerr << "cannot open atlas output\n"; return 2; }
-    out << "x,z,height,biome,relief,continentality,erosion,weirdness,temperature,humidity,river\n";
+    out << "x,z,post_erosion_height,biome,relief,continentality,erosion,weirdness,temperature,humidity,river\n";
     TerrainGenerator gen(seed);
     std::array<size_t, BIOME_COUNT> biomes{};
     std::array<size_t, 6> profiles{};
@@ -44,12 +44,12 @@ inline int exportTerrainAtlas(int argc, char **argv)
             const int wx = (x - size / 2) * step, wz = (z - size / 2) * step;
             const auto s = gen.getTerrainSample(wx, wz);
             const auto profile = std::max_element(s.reliefWeights.begin(), s.reliefWeights.end()) - s.reliefWeights.begin();
-            out << wx << ',' << wz << ',' << s.height << ',' << int(s.biome) << ',' << profile << ','
+            out << wx << ',' << wz << ',' << s.postErosionHeight << ',' << int(s.biome) << ',' << profile << ','
                 << s.continentality << ',' << s.erosion << ',' << s.weirdness << ',' << s.temperature << ','
                 << s.humidity << ',' << s.river << '\n';
             ++biomes[s.biome]; ++profiles[profile];
             biomeMap[static_cast<size_t>(z) * size + x] = static_cast<uint8_t>(s.biome);
-            heights.push_back(s.height);
+            heights.push_back(s.postErosionHeight);
         }
     if (!out) { std::cerr << "atlas write failed\n"; return 2; }
     // Connected regions at the explicit sampling resolution; boundary-touching
