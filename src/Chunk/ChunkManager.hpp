@@ -144,11 +144,17 @@ private:
 	/// in-transit target defers its mirrors too (transaction semantics).
 	bool scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y, int z,
 							 TextureType type);
+	/// Occupancy lifecycle gate (issue #115 blocker): a voxel edit must be
+	/// deferred whenever the chunk is missing, still UNLOADED (backing is
+	/// stale pool bytes until terrain generation initializes it), or in
+	/// transit for any job. UNLOADED defers regardless of transit state.
+	bool mustDeferVoxelEdit(const Chunk *chunk) const;
 	/// Storage type overlaid with the pending (non-mirror) edits for that
 	/// voxel: the state the next apply phase would produce. Read-only, so
 	/// safe to evaluate while the chunk is in transit.
 	TextureType effectiveVoxelType(const Chunk *chunk, int x, int y, int z) const;
-	/// Apply immediately or queue, depending on the chunk's transit state.
+	/// Apply immediately or queue, depending on mustDeferVoxelEdit (and the
+	/// group-level forceDefer): never writes into unreadable backing.
 	void queueOrApplyEdit(Chunk *chunk, const glm::ivec3 &chunkPos, int x, int y,
 						  int z, TextureType type, bool borderNeighbor,
 						  bool forceDefer, uint64_t editId);
@@ -160,9 +166,9 @@ private:
 	/// Queue with coalescing: an entry for the same chunk/coordinate/kind
 	/// is overwritten (last write wins) instead of accumulating.
 	void queuePendingEdit(PendingVoxelEdit edit);
-	/// Apply queued edits whose chunk is no longer in transit (main thread),
-	/// targets before mirrors; entries whose chunk generation has moved on
-	/// are dropped.
+	/// Apply queued edits whose chunk is editable now (backing readable and
+	/// not in transit; main thread), targets before mirrors; entries whose
+	/// chunk generation has moved on are dropped.
 	void applyPendingEdits();
 	bool hasPendingEditsFor(const Chunk *chunk) const;
 	/// Drop every pending edit targeting this chunk (unload/recycle path).

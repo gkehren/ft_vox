@@ -95,22 +95,6 @@ static void testRemainingBudget()
 	CHECK(remainingCountBudget(10, 99.0, 0.0) == 10, "maxStreamMs=0 disables cap");
 }
 
-static void testOccupancyY()
-{
-	std::vector<uint8_t> types(CHUNK_VOLUME, static_cast<uint8_t>(AIR));
-	// Place a solid layer at y=40 only
-	for (int z = 0; z < CHUNK_SIZE; ++z)
-		for (int x = 0; x < CHUNK_SIZE; ++x)
-			types[40 * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x] = static_cast<uint8_t>(STONE);
-
-	int minY = -1, maxY = -1;
-	CHECK(computeOccupancyY(types.data(), minY, maxY), "occupancy finds solids");
-	CHECK(minY == 40 && maxY == 40, "occupancy Y span matches single layer");
-
-	std::fill(types.begin(), types.end(), static_cast<uint8_t>(AIR));
-	CHECK(!computeOccupancyY(types.data(), minY, maxY), "empty chunk has no occupancy");
-}
-
 static void testTerrainBoundedGeneration()
 {
 	// Generate a real chunk via shipped TerrainGenerator; solids must not appear
@@ -307,7 +291,6 @@ int main()
 	testCaveYRangeBounds();
 	testChunkYFillBoundsCoversSeaLevel();
 	testRemainingBudget();
-	testOccupancyY();
 	testTerrainBoundedGeneration();
 	testOceanWaterNotClippedByCaveYBound();
 	testPoolCapacityEstimate();

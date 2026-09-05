@@ -563,12 +563,14 @@ bool ChunkManager::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y,
 		return false;
 
 	// One user interaction = one logical group: the target edit plus every
-	// neighbor mirror. If the target is in transit, its mirrors are deferred
-	// with it so the whole group lands in one apply phase (transaction
-	// semantics, issue #114 review item 6); when the target is free each
-	// piece applies immediately unless its own chunk is in transit.
+	// neighbor mirror. If the target must defer (in transit, or UNLOADED
+	// and waiting for terrain generation - issue #115 blocker), its mirrors
+	// defer with it so the whole group lands in one apply phase
+	// (transaction semantics, issue #114 review item 6). When the target
+	// applies immediately, each mirror still decides on its own chunk's
+	// state inside queueOrApplyEdit.
 	const uint64_t editId = m_nextEditId++;
-	const bool deferAll = target->isInTransit();
+	const bool deferAll = mustDeferVoxelEdit(target);
 	queueOrApplyEdit(target, chunkPos, x, y, z, type, false, deferAll, editId);
 	enqueueOrApplyMirrorEdits(chunkPos, x, y, z, type, deferAll, editId);
 	return true;
@@ -585,12 +587,22 @@ TextureType ChunkManager::effectiveVoxelType(const Chunk *chunk, int x, int y, i
 	assert(y >= 0 && y < static_cast<int>(CHUNK_HEIGHT));
 	assert(z >= 0 && z < static_cast<int>(CHUNK_SIZE));
 
-	// getVoxel is read-only and answers AIR without storage, so this is
-	// safe to evaluate while the chunk is being meshed/generated.
-	TextureType effective = static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),
-																	static_cast<uint32_t>(y),
-																	static_cast<uint32_t>(z))
-														  .type);
+	// Occupancy lifecycle (issue #115 review): an UNLOADED chunk is
+	// prepared-for-generation - its backing holds stale pool bytes and is
+	// not readable. It is logically empty: a placement defers (the chunk is
+	// in transit while generation runs), a deletion is the no-op it claims
+	// to be. The pending-edit overlay still applies so a second edit racing
+	// an already-queued one sees the queued state.
+	TextureType effective = AIR;
+	if (chunk->isVoxelBackingReadable())
+	{
+		// getVoxel is read-only and answers AIR without storage, so this is
+		// safe to evaluate while the chunk is being meshed/generated.
+		effective = static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),
+															static_cast<uint32_t>(y),
+															static_cast<uint32_t>(z))
+												 .type);
+	}
 	for (const PendingVoxelEdit &edit : m_pendingEdits)
 	{
 		if (edit.chunk == chunk && !edit.borderNeighbor &&
@@ -600,18 +612,33 @@ TextureType ChunkManager::effectiveVoxelType(const Chunk *chunk, int x, int y, i
 	return effective;
 }
 
+bool ChunkManager::mustDeferVoxelEdit(const Chunk *chunk) const
+{
+	// UNLOADED defers regardless of transit state: the backing is stale
+	// pool bytes until terrain generation initializes it (issue #115).
+	return !chunk ||
+	       chunk->getState() == ChunkState::UNLOADED ||
+	       chunk->isInTransit();
+}
+
 void ChunkManager::queueOrApplyEdit(Chunk *chunk, const glm::ivec3 &chunkPos, int x,
 									int y, int z, TextureType type, bool borderNeighbor,
 									bool forceDefer, uint64_t editId)
 {
 	if (!chunk)
 		return;
-	if (forceDefer || chunk->isInTransit())
+	// One gate for every deferral reason (issue #115 blocker): in transit
+	// for any job, or still UNLOADED - stale backing is never edited, even
+	// when no job currently owns the chunk.
+	if (forceDefer || mustDeferVoxelEdit(chunk))
 	{
 		queuePendingEdit({chunk, chunk->meshGeneration(), chunkPos, x, y, z,
 						  type, borderNeighbor, editId});
 		return;
 	}
+	// Apply path: the backing is readable and nothing owns the chunk.
+	assert(!chunk->isInTransit() && chunk->isVoxelBackingReadable() &&
+		   "edit reached the apply path on unreadable backing");
 	if (borderNeighbor)
 		ensureShellPopulated(chunk, chunkPos);
 	// setVoxel bumps the mesh revision; GENERATED re-arms meshing
@@ -704,13 +731,20 @@ void ChunkManager::applyPendingEdits()
 					continue;
 				if (!edit.chunk)
 					continue; // dangling entry: drop
-				if (edit.chunk->isInTransit())
+				// Staleness first: a recycled incarnation must never
+				// receive the queued edit, even though it now sits in the
+				// UNLOADED state.
+				if (edit.chunk->meshGeneration() != edit.generation)
+					continue; // chunk recycled since queueing: stale, drop
+				// Not readable yet: in transit for a job, or still waiting
+				// for terrain generation (issue #115 blocker - do not
+				// apply onto stale backing just because no job owns the
+				// chunk right now). Keep waiting.
+				if (mustDeferVoxelEdit(edit.chunk))
 				{
 					remaining.push_back(edit);
 					continue;
 				}
-				if (edit.chunk->meshGeneration() != edit.generation)
-					continue; // chunk recycled since queueing: stale, drop
 				// The shell rebuild inside a mirror write also bumps the
 				// revision (before setVoxel bumps it again): revision
 				// monotonicity is what matters, not exact +1 semantics.
