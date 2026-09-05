@@ -12,7 +12,7 @@ Phases 0–5. High-level engine ownership remains documented in
 - Chunk cores and one-block neighbor shells must resolve terrain, caves, and
   fluids identically.
 - Features with horizontal reach are described by bounded
-  `worldgen::FeatureBounds` (radius, height, max slope, priority) and evaluated
+  `worldgen::FeatureBounds` (radius, height, max slope) and evaluated
   from world-aligned candidate cells with a halo covering the largest radius.
 - Biome queries (point query `getBiomeAt` and region query `getBiomeRegion`)
   return canonical biome samples for every output coordinate independently of
