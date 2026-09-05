@@ -1,7 +1,7 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Chunk/ChunkBorders.hpp>
 #include <Chunk/StreamHelpers.hpp>
-#include <Renderer/MinecraftTextures.hpp>
+#include <Block/BlockTraits.hpp>
 #include <algorithm>
 #include <cassert>
 #include <chrono>
