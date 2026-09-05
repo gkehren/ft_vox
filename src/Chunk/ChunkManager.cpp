@@ -585,12 +585,22 @@ TextureType ChunkManager::effectiveVoxelType(const Chunk *chunk, int x, int y, i
 	assert(y >= 0 && y < static_cast<int>(CHUNK_HEIGHT));
 	assert(z >= 0 && z < static_cast<int>(CHUNK_SIZE));
 
-	// getVoxel is read-only and answers AIR without storage, so this is
-	// safe to evaluate while the chunk is being meshed/generated.
-	TextureType effective = static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),
-																	static_cast<uint32_t>(y),
-																	static_cast<uint32_t>(z))
-														  .type);
+	// Occupancy lifecycle (issue #115 review): an UNLOADED chunk is
+	// prepared-for-generation - its backing holds stale pool bytes and is
+	// not readable. It is logically empty: a placement defers (the chunk is
+	// in transit while generation runs), a deletion is the no-op it claims
+	// to be. The pending-edit overlay still applies so a second edit racing
+	// an already-queued one sees the queued state.
+	TextureType effective = AIR;
+	if (chunk->getState() != ChunkState::UNLOADED)
+	{
+		// getVoxel is read-only and answers AIR without storage, so this is
+		// safe to evaluate while the chunk is being meshed/generated.
+		effective = static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),
+															static_cast<uint32_t>(y),
+															static_cast<uint32_t>(z))
+												 .type);
+	}
 	for (const PendingVoxelEdit &edit : m_pendingEdits)
 	{
 		if (edit.chunk == chunk && !edit.borderNeighbor &&

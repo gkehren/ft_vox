@@ -186,4 +186,25 @@ public:
     }
     ~MeshSample() { if (tag) { next(stage); registry().worker(tag, data); } }
 };
+
+// Single-stage scope for timed work that sits outside MeshSample's
+// sequential phase chain (e.g. the occupancy prepass in Chunk::buildMesh,
+// which runs before the Skylight/Blocklight/FacesGreedyAO phases and may
+// end in an early return). One clock-read pair and one worker() merge per
+// scope; zero cost when telemetry is disabled.
+class StageSample {
+    using Clock = std::chrono::steady_clock;
+    uint64_t tag = registry().captureEpoch();
+    Stage stage;
+    Clock::time_point start{};
+public:
+    explicit StageSample(Stage s) : stage(s) { if (tag) start = Clock::now(); }
+    ~StageSample() {
+        if (!tag) return;
+        Snapshot s{};
+        s.stageNs[stage] = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
+        s.stageCalls[stage] = 1;
+        registry().worker(tag, s);
+    }
+};
 } // namespace telemetry

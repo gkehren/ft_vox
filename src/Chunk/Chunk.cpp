@@ -11,6 +11,7 @@
 #include <Vulkan/StagingRing.hpp>
 #include <Vulkan/GpuResourceRetire.hpp>
 #include <stdexcept>
+#include <cassert>
 #include <algorithm>
 #include <cstring>
 #include <glm/gtx/hash.hpp>
@@ -74,6 +75,8 @@ Chunk::Chunk(Chunk &&other) noexcept
 {
   other.m_storage = nullptr;
   other.m_borders = nullptr;
+  // Invariant: no storage => empty occupancy metadata (issue #115 review).
+  other.m_sectionNonAir.fill(0);
   other.publishCpuTelemetry();
   publishCpuTelemetry();
   other.m_allocator = VK_NULL_HANDLE;
@@ -130,6 +133,9 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
                          std::memory_order_relaxed);
 
     m_sectionNonAir = other.m_sectionNonAir;
+    // Invariant: no storage => empty occupancy metadata (issue #115 review).
+    // Zero the moved-from side only AFTER the transfer above.
+    other.m_sectionNonAir.fill(0);
     biomeGrassColors = other.biomeGrassColors;
     biomeFoliageColors = other.biomeFoliageColors;
     biomeTypes = other.biomeTypes;
@@ -173,6 +179,12 @@ bool Chunk::prepareVoxelStorageForGeneration()
 {
   // Borders are borrowed on the same main-thread step (issue #103): workers
   // stay allocation-free and generation writes into the chunk's border block.
+  //
+  // Ownership ONLY (issue #115 review): a freshly acquired voxel block keeps
+  // whatever bytes its previous incarnation left - it is NOT cleared here.
+  // generateChunkInto() remains the single authoritative reset (one
+  // CHUNK_VOLUME air fill before generating, issue #93). See the lifecycle
+  // contract on ResetMode::ForGeneration for what may be read when.
   if (m_storage && m_borders)
     return true;
   try
@@ -180,12 +192,7 @@ bool Chunk::prepareVoxelStorageForGeneration()
     if (!m_storage)
     {
       m_storage = m_voxelPool->acquire();
-      // A recycled pool block holds arbitrary bytes: pin it to the
-      // documented "no voxels yet" state so edits before generation behave
-      // like a fresh chunk and the occupancy metadata matches the buffer
-      // from the very first touch (issue #105).
-      std::fill(m_storage->voxels.begin(), m_storage->voxels.end(),
-                Voxel{static_cast<uint8_t>(AIR)});
+      // Logical occupancy is empty until generation initializes the backing.
       m_sectionNonAir.fill(0);
       publishCpuTelemetry();
     }
@@ -286,11 +293,25 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
     }
     // Incremental occupancy (issue #105): a cell moved in or out of its
     // vertical section; type->type rewrites leave the count untouched.
+    // Explicit +/- with Debug range asserts: a desync shows up as a
+    // hard failure instead of a silent uint16 wraparound.
     const bool nowAir = (type == AIR);
     if (wasAir != nowAir)
     {
+      constexpr uint16_t kSectionVolume =
+          static_cast<uint16_t>(kOccupancySectionSize) * CHUNK_SIZE * CHUNK_SIZE;
       const int section = y / kOccupancySectionSize;
-      m_sectionNonAir[section] += nowAir ? uint16_t(-1) : 1;
+      uint16_t &count = m_sectionNonAir[section];
+      if (nowAir)
+      {
+        assert(count > 0 && "occupancy section underflow");
+        --count;
+      }
+      else
+      {
+        assert(count < kSectionVolume && "occupancy section overflow");
+        ++count;
+      }
     }
     // Content invalidation (issue #114 review): any in-flight mesh built
     // from the previous content is rejected at publish time.
@@ -421,6 +442,9 @@ void Chunk::recountOccupancy()
 
 bool Chunk::occupiedSpanY(int &outMinY, int &outMaxY) const
 {
+#ifndef NDEBUG
+  validateOccupancyMetadata();
+#endif
   int first = 0;
   int last = kOccupancySections - 1;
   while (first <= last && m_sectionNonAir[first] == 0)
@@ -460,6 +484,21 @@ uint16_t Chunk::occupiedSectionMask() const
     if (m_sectionNonAir[section] != 0)
       mask |= static_cast<uint16_t>(1u << section);
   return mask;
+}
+
+void Chunk::validateOccupancyMetadata() const
+{
+  // A per-section count can never exceed the section's voxel count, and a
+  // storageless chunk must be empty (issue #115 review).
+  constexpr uint16_t kSectionVolume =
+      static_cast<uint16_t>(kOccupancySectionSize) * CHUNK_SIZE * CHUNK_SIZE;
+  for (const uint16_t count : m_sectionNonAir)
+    assert(count <= kSectionVolume && "occupancy count above section volume");
+  if (!m_storage)
+  {
+    for (const uint16_t count : m_sectionNonAir)
+      assert(count == 0 && "storageless chunk must have empty occupancy");
+  }
 }
 
 void Chunk::generateTerrain(TerrainGenerator &generator)
@@ -516,13 +555,18 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
   // iteration stays as tight as the old full-scan helper produced.
   int occMinY = 0;
   int occMaxY = CHUNK_HEIGHT - 1;
-  if (!occupiedSpanY(occMinY, occMaxY))
   {
-    // Empty occupancy: the result stays empty; publishMeshResult commits
-    // the (empty) mesh on the main thread.
-    return;
+    // The prepass is real work and is measured as such (issue #115 review),
+    // including for empty chunks whose build ends with the early return.
+    telemetry::StageSample occupancySample(telemetry::Occupancy);
+    if (!occupiedSpanY(occMinY, occMaxY))
+    {
+      // Empty occupancy: the result stays empty; publishMeshResult commits
+      // the (empty) mesh on the main thread.
+      return;
+    }
+    refineOccupiedSpanY(occMinY, occMaxY);
   }
-  refineOccupiedSpanY(occMinY, occMaxY);
   buildMeshRanged(out, generation, revision, occMinY, occMaxY);
 }
 
@@ -684,10 +728,10 @@ void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t 
     }
   }
 
-  meshSample.next(telemetry::Occupancy);
   // Occupancy bounds were derived from the per-section metadata by the
   // caller (issue #105) - the former 64 KiB typeScratch copy + full
-  // computeOccupancyY scan is gone; only the helper lambda setup remains.
+  // computeOccupancyY scan is gone, and there is no empty phase marker
+  // here anymore (issue #115 review): phases measure real work only.
   // New helper for greedy meshing that checks local voxels and the precomputed
   // neighbor shell
   auto getVoxelDataForMeshing = [&](int lx, int ly, int lz) -> TextureType
@@ -1253,6 +1297,10 @@ void Chunk::buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t rev
 
 void Chunk::buildLODMeshRanged(MeshBuildResult &out, int scanTopY)
 {
+  // Production callers pass the top of the last occupied section; the probe
+  // test passes CHUNK_HEIGHT - 1 (issue #115 review). Anything else would
+  // silently skip occupied columns or read out of range.
+  assert(scanTopY >= 0 && scanTopY < CHUNK_HEIGHT);
   telemetry::MeshSample meshSample(telemetry::Lod);
   auto &vertices = out.opaqueVertices;
   auto &indices = out.opaqueIndices;

@@ -40,10 +40,15 @@ struct VoxelView : std::span<const Voxel>
 };
 
 // Friend probe declared in ChunkManager.hpp: exposes the deferred-edit
-// queue size so coalescing behavior is observable without public API.
+// queue size so coalescing behavior is observable without public API, and
+// the effective-voxel decision helper for the UNLOADED-backing contract.
 struct ChunkManagerProbe
 {
 	static size_t pendingEdits(const ChunkManager &m) { return m.m_pendingEdits.size(); }
+	static TextureType effective(const ChunkManager &m, const Chunk *chunk, int x, int y, int z)
+	{
+		return m.effectiveVoxelType(chunk, x, y, z);
+	}
 };
 
 // Friend probe declared in Chunk.hpp: verifies full private state without
@@ -56,6 +61,12 @@ struct ChunkStateProbe
 		if (c.m_storage)
 			return VoxelView(c.m_storage->voxels.data(), CHUNK_VOLUME);
 		return VoxelView();
+	}
+	// Mutable backing access for poison/fill tests of the lifecycle
+	// contract (read-only VoxelView cannot express them).
+	static Voxel *voxelsMut(Chunk &c)
+	{
+		return c.m_storage ? c.m_storage->voxels.data() : nullptr;
 	}
 	static const ChunkNeighborBorders *borders(const Chunk &c)
 	{
@@ -165,7 +176,7 @@ static bool sameState(const ChunkSnapshot &a, const ChunkSnapshot &b)
 /// The per-section occupancy counters must match a brute-force scan of the
 /// voxel storage exactly - after generation AND after every edit (issue
 /// #105). Sections are 16 voxels tall; counts saturate well below uint16.
-static void checkActiveCacheInSync(const Chunk &chunk, const char *label)
+static void checkOccupancyMetadataInSync(const Chunk &chunk, const char *label)
 {
 	const auto voxels = ChunkStateProbe::voxels(chunk);
 	std::array<uint16_t, Chunk::kOccupancySections> brute{};
@@ -296,6 +307,14 @@ int main(int argc, char **argv)
             Chunk c(glm::vec3(0));
             c = std::move(b);
             CHECK(registry().snapshot().current[VoxelBytes] == withStorage.current[VoxelBytes], "move assignment releases destination storage");
+            // The moved-in backing is prepared-but-stale (ownership-only
+            // prepare, issue #115 review): borders were released earlier in
+            // this section, so re-borrow them, then let generation
+            // initialize the backing before edits/meshing read it.
+            CHECK(c.prepareVoxelStorageForGeneration(), "re-prepare borders on the moved chunk");
+            TerrainGenerator tgen(20260905);
+            c.generateTerrain(tgen);
+            CHECK(c.getState() == ChunkState::GENERATED, "moved chunk generates in place");
             c.setVoxel(1, 1, 1, STONE);
             c.generateMesh();
             MeshBuildResult *pending = ChunkStateProbe::pendingResult(c);
@@ -340,7 +359,7 @@ int main(int argc, char **argv)
 	CHECK(ChunkStateProbe::hasStorage(a), "generated chunk has voxel storage");
 	CHECK(ChunkStateProbe::voxels(a).size() == static_cast<size_t>(CHUNK_VOLUME),
 		  "voxel storage fully sized");
-	checkActiveCacheInSync(a, "occupancy metadata in sync after generation");
+	checkOccupancyMetadataInSync(a, "occupancy metadata in sync after generation");
 	checkMatchesOwning(a, gen, 0, 0, "initial generation");
 	const ChunkSnapshot snapA = ChunkSnapshot::capture(a);
 	// A generated chunk must not be trivially empty (a real surface chunk
@@ -353,6 +372,9 @@ int main(int argc, char **argv)
 	// 2) Move-construction carries the full generation state.
 	Chunk b(std::move(a));
 	CHECK(!ChunkStateProbe::hasStorage(a), "moved-from chunk has no storage");
+	CHECK(ChunkStateProbe::sectionMask(a) == 0,
+		  "moved-from chunk has empty occupancy metadata");
+	checkOccupancyMetadataInSync(a, "move-ctor moved-from chunk satisfies the occupancy contract");
 	CHECK(ChunkStateProbe::hasStorage(b), "moved-to chunk has storage");
 	const ChunkSnapshot snapB = ChunkSnapshot::capture(b);
 	CHECK(sameState(snapA, snapB),
@@ -363,6 +385,9 @@ int main(int argc, char **argv)
 	Chunk c(glm::vec3(9876.0f, 0.0f, -4321.0f));
 	c = std::move(b);
 	CHECK(!ChunkStateProbe::hasStorage(b), "moved-from chunk has no storage");
+	CHECK(ChunkStateProbe::sectionMask(b) == 0,
+		  "move-assigned moved-from chunk has empty occupancy metadata");
+	checkOccupancyMetadataInSync(b, "move-assign moved-from chunk satisfies the occupancy contract");
 	CHECK(ChunkStateProbe::hasStorage(c), "moved-to chunk has storage");
 	const ChunkSnapshot snapC = ChunkSnapshot::capture(c);
 	CHECK(sameState(snapA, snapC),
@@ -385,7 +410,7 @@ int main(int argc, char **argv)
 	c.generateTerrain(gen);
 	CHECK(c.getState() == ChunkState::GENERATED, "regeneration completes");
 	checkMatchesOwning(c, gen, CHUNK_SIZE, CHUNK_SIZE, "recycled generation");
-	checkActiveCacheInSync(c, "occupancy metadata in sync after recycle");
+	checkOccupancyMetadataInSync(c, "occupancy metadata in sync after recycle");
 	CHECK(ChunkStateProbe::voxels(c).capacity() == voxelCapacity,
 		  "voxel capacity stable across recycle");
 	CHECK(ChunkStateProbe::borders(c) != nullptr,
@@ -398,7 +423,7 @@ int main(int argc, char **argv)
 					  ChunkStateProbe::voxels(c).end(),
 					  [](Voxel v) { return v.type == AIR; }),
 		  "default reset clears every voxel");
-	checkActiveCacheInSync(c, "full reset leaves empty occupancy metadata");
+	checkOccupancyMetadataInSync(c, "full reset leaves empty occupancy metadata");
 
 	// Exercise the real pool boundary, including cancelled generation.
 	ChunkPool pool(64);
@@ -426,7 +451,7 @@ int main(int argc, char **argv)
 		CHECK(pool.voxelStorageCapacity() == 1, "generation reused pooled storage without allocating");
 		CHECK(pool.voxelStorageActive() == 1, "1 active voxel storage");
 		checkMatchesOwning(*reused, gen, -CHUNK_SIZE, CHUNK_SIZE, "pool reuse");
-		checkActiveCacheInSync(*reused, "pool reuse keeps occupancy metadata in sync");
+		checkOccupancyMetadataInSync(*reused, "pool reuse keeps occupancy metadata in sync");
 		pool.release(reused);
 		pooled = pool.acquire(glm::vec3(0.0f));
 		pool.release(pooled); // cancelled before generation
@@ -1305,7 +1330,7 @@ int main(int argc, char **argv)
 		Chunk occ(glm::vec3(0.0f));
 		CHECK(occ.prepareVoxelStorageForGeneration(), "occupancy prepare");
 		occ.generateTerrain(ogen);
-		checkActiveCacheInSync(occ, "occupancy metadata matches brute force after generation");
+		checkOccupancyMetadataInSync(occ, "occupancy metadata matches brute force after generation");
 
 		// The metadata skip must be observable: a generated chunk occupies
 		// fewer than all 16 sections (no floating terrain at the world top).
@@ -1345,9 +1370,9 @@ int main(int argc, char **argv)
 			CHECK(occ.isVoxelActive(x, y, z) == (type != AIR),
 				  "isVoxelActive follows the canonical voxel type");
 			if (i % 250 == 249)
-				checkActiveCacheInSync(occ, "occupancy metadata survives edit batch");
+				checkOccupancyMetadataInSync(occ, "occupancy metadata survives edit batch");
 		}
-		checkActiveCacheInSync(occ, "occupancy metadata matches brute force after 3000 edits");
+		checkOccupancyMetadataInSync(occ, "occupancy metadata matches brute force after 3000 edits");
 
 		// Drain every remaining voxel: a GENERATED chunk must come back to
 		// zero metadata and no occupied span through edits alone.
@@ -1357,7 +1382,7 @@ int main(int argc, char **argv)
 				occ.setVoxel(static_cast<int>(i % CHUNK_SIZE),
 					     static_cast<int>(i / (CHUNK_SIZE * CHUNK_SIZE)),
 					     static_cast<int>((i / CHUNK_SIZE) % CHUNK_SIZE), AIR);
-		checkActiveCacheInSync(occ, "drained chunk has zero occupancy metadata");
+		checkOccupancyMetadataInSync(occ, "drained chunk has zero occupancy metadata");
 		CHECK(ChunkStateProbe::sectionMask(occ) == 0,
 			  "no section bit survives a fully drained chunk");
 		int drainedMin = -1, drainedMax = -1;
@@ -1371,20 +1396,20 @@ int main(int argc, char **argv)
 		{
 			const int section = y / Chunk::kOccupancySectionSize;
 			occ.setVoxel(3, y, 3, STONE);
-			checkActiveCacheInSync(occ, "first block sets its section");
+			checkOccupancyMetadataInSync(occ, "first block sets its section");
 			CHECK((ChunkStateProbe::sectionMask(occ) >> section) & 1,
 				  "occupied section bit is set");
 			occ.setVoxel(3, y, 3, AIR);
-			checkActiveCacheInSync(occ, "last block clears its section");
+			checkOccupancyMetadataInSync(occ, "last block clears its section");
 		}
 		// All-air section between two occupied ones: block in section 0,
 		// block in section 1, remove the section-0 one - bit 0 must clear
 		// while bit 1 stays.
 		occ.setVoxel(4, 15, 4, BRICKS);
 		occ.setVoxel(4, 16, 4, BRICKS);
-		checkActiveCacheInSync(occ, "two adjacent sections occupied");
+		checkOccupancyMetadataInSync(occ, "two adjacent sections occupied");
 		occ.setVoxel(4, 15, 4, AIR);
-		checkActiveCacheInSync(occ, "inner section drains to air");
+		checkOccupancyMetadataInSync(occ, "inner section drains to air");
 		CHECK((ChunkStateProbe::sectionMask(occ) & 0b11) == 0b10,
 			  "section 0 bit cleared, section 1 bit kept");
 		occ.setVoxel(4, 16, 4, AIR);
@@ -1395,7 +1420,7 @@ int main(int argc, char **argv)
 		empty.setVoxel(0, 0, 0, STONE);
 		CHECK(ChunkStateProbe::sectionMask(empty) == 0x1, "single voxel occupies section 0");
 		empty.setVoxel(0, 0, 0, AIR);
-		checkActiveCacheInSync(empty, "fully emptied chunk has zero occupancy metadata");
+		checkOccupancyMetadataInSync(empty, "fully emptied chunk has zero occupancy metadata");
 		CHECK(ChunkStateProbe::sectionMask(empty) == 0, "no section bit survives the last delete");
 		CHECK(empty.generateMesh(), "empty chunk publishes an (empty) mesh");
 		const MeshBuildResult *emptyMesh = ChunkStateProbe::pendingResult(empty);
@@ -1454,6 +1479,162 @@ int main(int argc, char **argv)
 				  lodRanged->waterVertices == lodFull->waterVertices &&
 				  lodRanged->waterIndices == lodFull->waterIndices,
 			  "LOD mesh identical under metadata-derived scan start");
+
+		pool.release(lodFull);
+		pool.release(full);
+	}
+
+	// 17) Prepared-backing lifecycle (issue #115 review): prepare is
+	// ownership only and must not clear a recycled block (issue #93's single
+	// CHUNK_VOLUME generation clear lives in generateChunkInto), an
+	// UNLOADED chunk's stale backing must not be read to decide edits, and
+	// the ForGeneration reset documents the one state where buffer and
+	// metadata are deliberately not in sync.
+	{
+		TerrainGenerator pgen(919);
+		VoxelPool pool;
+		ChunkPool cpool(4);
+
+		// (a) prepare() leaves reused backing untouched.
+		Chunk poison(glm::vec3(0.0f), ChunkState::UNLOADED, &pool);
+		CHECK(poison.prepareVoxelStorageForGeneration(), "poison prepare");
+		{
+			Voxel *vv = ChunkStateProbe::voxelsMut(poison);
+			std::fill(vv, vv + CHUNK_VOLUME, Voxel{static_cast<uint8_t>(GRASS_TOP)});
+		}
+		const Voxel *poisonedBlock = ChunkStateProbe::voxels(poison).data();
+		poison.reset(glm::vec3(0.0f)); // Full: releases the poisoned block
+		CHECK(!ChunkStateProbe::hasStorage(poison), "poisoned storage released");
+		CHECK(poison.prepareVoxelStorageForGeneration(), "re-prepare acquires a block");
+		{
+			const auto vv = ChunkStateProbe::voxels(poison);
+			// The pool holds exactly one block, so this must be the
+			// poisoned one - and prepare must NOT have cleared it.
+			CHECK(vv.data() == poisonedBlock, "pool recycles the same block");
+			CHECK(vv.front().type == static_cast<uint8_t>(GRASS_TOP) &&
+					  vv[CHUNK_VOLUME / 2].type == static_cast<uint8_t>(GRASS_TOP) &&
+					  vv.back().type == static_cast<uint8_t>(GRASS_TOP),
+				  "prepare does not clear generation backing (single clear stays in generateChunkInto)");
+		}
+		// generateChunkInto() alone initializes the backing: the final
+		// terrain must be identical to the owning path despite the poison.
+		poison.generateTerrain(pgen);
+		checkOccupancyMetadataInSync(poison, "generation recounts poisoned backing");
+		checkMatchesOwning(poison, pgen, 0, 0, "generation over poisoned backing is deterministic");
+
+		// (b) Edits never consult stale backing: an UNLOADED (prepared,
+		// not yet generated) chunk answers "logically empty", so a delete
+		// is refused and a placement is accepted regardless of the poison.
+		Chunk ungen(glm::vec3(0.0f), ChunkState::UNLOADED, &pool);
+		CHECK(ungen.prepareVoxelStorageForGeneration(), "ungenerated prepare");
+		{
+			Voxel *vv = ChunkStateProbe::voxelsMut(ungen);
+			std::fill(vv, vv + CHUNK_VOLUME, Voxel{static_cast<uint8_t>(GRASS_TOP)});
+		}
+		ungen.setInTransit(true); // generation in flight
+		{
+			ChunkManager probeHolder(&pgen, nullptr, &cpool);
+			CHECK(ChunkManagerProbe::effective(probeHolder, &ungen, 4, 40, 4) == AIR,
+				  "UNLOADED backing is not read for edit decisions");
+		}
+		ungen.setInTransit(false);
+
+		// (c) ForGeneration: the documented desync window. Storage (with
+		// stale bytes) is retained, metadata drops to zero, and generation
+		// restores the exact match.
+		Chunk lifecycle(glm::vec3(0.0f), ChunkState::UNLOADED, &pool);
+		CHECK(lifecycle.prepareVoxelStorageForGeneration(), "lifecycle prepare");
+		lifecycle.generateTerrain(pgen);
+		CHECK(ChunkStateProbe::sectionMask(lifecycle) != 0,
+			  "generated chunk has occupied sections");
+		const Voxel *retainedStorage = ChunkStateProbe::voxels(lifecycle).data();
+		lifecycle.reset(glm::vec3(0.0f), Chunk::ResetMode::ForGeneration);
+		CHECK(ChunkStateProbe::hasStorage(lifecycle) &&
+				  ChunkStateProbe::voxels(lifecycle).data() == retainedStorage,
+			  "ForGeneration retains the storage block");
+		CHECK(ChunkStateProbe::sectionMask(lifecycle) == 0,
+			  "ForGeneration resets occupancy metadata to zero");
+		CHECK(lifecycle.getState() == ChunkState::UNLOADED,
+			  "ForGeneration returns to UNLOADED");
+		CHECK(lifecycle.prepareVoxelStorageForGeneration(),
+			  "prepare is a no-op success while storage is retained");
+		CHECK(ChunkStateProbe::sectionMask(lifecycle) == 0,
+			  "metadata stays zero through the prepared phase");
+		lifecycle.generateTerrain(pgen);
+		checkOccupancyMetadataInSync(lifecycle, "ForGeneration regeneration restores the match");
+		checkMatchesOwning(lifecycle, pgen, 0, 0, "ForGeneration regeneration is deterministic");
+	}
+
+	// 18) Synthetic occupancy geometry (issue #115 review): an interior
+	// run of empty sections, both section seam classes, and an isolated
+	// water section must mesh identically under metadata bounds and a
+	// forced full range - this pins the d==1 empty-slab slice skip.
+	{
+		MeshResultPool pool;
+		Chunk synth(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		// Edits on a storageless chunk air-initialize the backing (edit
+		// path), giving a pristine all-air canvas once voxels are placed.
+		auto place = [&synth](int x, int y, int z, TextureType t)
+		{ synth.setVoxel(x, y, z, t); };
+		// Section 1 patch (sections 2..8 stay empty).
+		for (int x = 4; x < 8; ++x)
+			for (int z = 4; z < 8; ++z)
+				place(x, 20, z, STONE);
+		// Section 9 isolated block.
+		place(10, 150, 10, BRICKS);
+		// Section 4 isolated water (also exercises the water mesh path).
+		place(2, 70, 2, WATER);
+		place(3, 70, 2, WATER);
+		// Both seam classes: y=15/16 (sections 0/1) and y=239/240 (14/15).
+		place(0, 15, 0, DIRT);
+		place(0, 16, 0, STONE);
+		place(5, 239, 5, STONE);
+		place(5, 240, 5, DIRT);
+		place(6, 240, 6, GLASS);
+
+		uint16_t expectedMask = 0;
+		for (int s : {0, 1, 4, 9, 14, 15})
+			expectedMask |= static_cast<uint16_t>(1u << s);
+		CHECK(ChunkStateProbe::sectionMask(synth) == expectedMask,
+			  "synthetic chunk occupies exactly the intended sections");
+
+		const uint64_t generation = synth.meshGeneration();
+		const uint64_t revision = synth.meshRevision();
+
+		MeshBuildResult *full = pool.acquire();
+		full->beginBuild(&synth, generation, revision);
+		full->isLOD = false;
+		ChunkStateProbe::buildMeshRanged(synth, *full, generation, revision,
+										 0, CHUNK_HEIGHT - 1);
+		pool.finishBuild(full);
+		CHECK(!full->opaqueIndices.empty() && !full->waterIndices.empty(),
+			  "full-range synthetic build emits opaque and water geometry");
+
+		CHECK(synth.generateMesh(), "synthetic metadata-bounds build publishes");
+		const MeshBuildResult *ranged = ChunkStateProbe::pendingResult(synth);
+		CHECK(ranged != nullptr, "synthetic metadata-bounds result attached");
+		CHECK(ranged->opaqueVertices == full->opaqueVertices &&
+				  ranged->opaqueIndices == full->opaqueIndices &&
+				  ranged->waterVertices == full->waterVertices &&
+				  ranged->waterIndices == full->waterIndices,
+			  "greedy mesh identical across interior empty sections and seams");
+
+		MeshBuildResult *lodFull = pool.acquire();
+		lodFull->beginBuild(&synth, generation, revision);
+		lodFull->isLOD = true;
+		ChunkStateProbe::buildLODMeshRanged(synth, *lodFull, CHUNK_HEIGHT - 1);
+		pool.finishBuild(lodFull);
+		CHECK(!lodFull->opaqueIndices.empty(), "full-range synthetic LOD emits geometry");
+
+		CHECK(synth.generateLODMesh(), "synthetic metadata-bounded LOD publishes");
+		const MeshBuildResult *lodRanged = ChunkStateProbe::pendingResult(synth);
+		CHECK(lodRanged != nullptr && lodRanged->isLOD,
+			  "synthetic metadata-bounded LOD attached");
+		CHECK(lodRanged->opaqueVertices == lodFull->opaqueVertices &&
+				  lodRanged->opaqueIndices == lodFull->opaqueIndices &&
+				  lodRanged->waterVertices == lodFull->waterVertices &&
+				  lodRanged->waterIndices == lodFull->waterIndices,
+			  "LOD mesh identical under isolated sections and seams");
 
 		pool.release(lodFull);
 		pool.release(full);
