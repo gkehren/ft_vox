@@ -403,7 +403,7 @@ static glm::ivec2 locateInlandChunkOrigin(TerrainGenerator &gen)
 			for (const auto offset : {glm::ivec2(2, 2), {14, 2}, {2, 14}, {14, 14}, {8, 8}})
 			{
 				const auto s = gen.getTerrainSample(wx + offset.x, wz + offset.y);
-				if (s.height <= TerrainGenerator::SEA_LEVEL + 6)
+				if (s.postErosionHeight <= TerrainGenerator::SEA_LEVEL + 6)
 				{
 					inland = false;
 					break;

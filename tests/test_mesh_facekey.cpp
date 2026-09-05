@@ -1347,6 +1347,7 @@ static void testSmallPlantGeometry()
                   "detail geometry remains inside its owning column");
             CHECK(local.y >= 16.f && local.y < 17.f, "detail remains in its owning section");
             CHECK(vTexture(v) == static_cast<uint32_t>(type), "detail keeps its atlas layer");
+            CHECK(vNormal(v) == 2u, "detail quads use the stylized upward lighting normal");
             CHECK(vBiome(v) == blockUsesGrassTint(type), "only grayscale plants receive grass tint");
         }
         for (uint32_t index : p.opaqueIndices)

@@ -1540,6 +1540,12 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
 
   // Small plants stay in their owner section and share the opaque alpha-test
   // stream. Reverse triangles render the back side with normal backface culling.
+  // Cross/flat vegetation deliberately uses an upward lighting normal
+  // (kDetailLightingNormal): it avoids dark alternating planes on
+  // double-sided foliage and gives consistent stylized vegetation lighting
+  // independent of plane orientation. For lily pads +Y is also the
+  // geometrically correct face normal.
+  constexpr uint32_t kDetailLightingNormal = 2u; // +Y stylized foliage lighting
   for (int z = 0; z < CHUNK_SIZE; ++z)
     for (int y = ownerMinY; y <= ownerMaxY; ++y)
       for (int x = 0; x < CHUNK_SIZE; ++x)
@@ -1549,7 +1555,8 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
         if (shape == BlockShape::Cube) continue;
         const size_t li = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
         const bool tint = blockUsesGrassTint(type);
-        const uint32_t packed = 2u | (static_cast<uint32_t>(type) << 3) | (tint ? 1u << 11 : 0u)
+        const uint32_t packed = kDetailLightingNormal | (static_cast<uint32_t>(type) << 3)
+            | (tint ? 1u << 11 : 0u)
             | (3u << 12) | lighting::packLightBits(skyLight[li], blockLight[li]);
         auto quad = [&](std::array<glm::vec3, 4> positions) {
           const uint32_t first = static_cast<uint32_t>(vertices.size());
