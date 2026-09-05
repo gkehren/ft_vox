@@ -1,0 +1,66 @@
+Issue #109 benchmarks — shared mesh arenas + indirect drawing
+==============================================================
+
+Scope: replace per-chunk mesh VMA buffers with 4 shared device-local
+arenas (opaque/water x vertex/index, paged, frame-aware retirement) and
+submit opaque/water/shadow geometry through vkCmdDrawIndexedIndirect.
+
+Base: origin/main d677d9d (post-#118). Branch: gpu-mesh-arenas.
+Machine: Windows 11, MSVC Release, Ryzen 7 9800X3D, RTX 4070 Ti.
+Protocol: interleaved runs (main, PR, main, PR, ...), median of 4 pairs,
+`ft_vox --seed 42 --benchmark 30` (30 s measured, 2 s warmup), view
+distance 512, vsync off, validation off.
+
+Streaming benchmark (median of 4 interleaved pairs)
+---------------------------------------------------
+                     main d677d9d    arenas branch   delta
+Frame avg ms         1.85            1.77            -4.3%
+Frame p95 ms         3.94            3.74            -5.1%
+Streaming ms         0.36            0.31            -13.9%
+Record ms            0.35            0.38            +8.6%
+GPU avg ms           1.64            1.55            -5.5%
+VMA allocations      57,903          3               -99.99%
+draws.opaque (cmds)  18.5M           84.7M           (see note)
+
+Notes:
+- The "draws.opaque" counter changes meaning with this PR: it now counts
+  indirect commands (one per live section, merged when a chunk's sections
+  are contiguous in both arenas) instead of one per-chunk drawIndexed.
+  The GPU absorbs the higher command count without regression (GPU avg
+  -5.5%, frame p95 -5.1%).
+- Record carries the CPU cost of building the per-pass indirect command
+  lists (+0.03 ms): collecting per-section commands for opaque, three
+  shadow cascades and the ordered water list. This is the documented
+  cost of the CPU-built indirect path; GPU-driven culling/count (issue
+  follow-up) removes it later.
+- Physics is suspended during this benchmark; renderer comparison only.
+
+VMA allocation churn (the issue's core target)
+----------------------------------------------
+mesh.allocations.created over a 30 s streaming run:
+  main:   57,903 allocations (4+ per chunk upload, retired per frame)
+  arenas: 3 allocations (page creation events only)
+
+Arena metrics (arena.* gauges, 30 s run): pages stay single-digit,
+growEvents bounded by steady-state world size; empty pages are released
+through the frame-aware retire queue.
+
+ Vulkan validation
+------------------
+FT_VOX_VALIDATION=1 + Khronos layer (SDK 1.3.290) over the same 30 s
+benchmark: 0 sync hazards, 0 object-leak reports (the arena/page retire
+ordering is exercised in Engine::~Engine: the retire queue must outlive
+chunk/world teardown).
+
+Reproduce
+---------
+  # streaming A/B
+  ft_vox --seed 42 --benchmark 30
+  # validation
+  VK_LAYER_PATH=<sdk>/Bin FT_VOX_VALIDATION=1 ft_vox --seed 42 --benchmark 30
+  # allocator unit tests
+  build/tests/Release/test_mesh_arena
+  # upload lifecycle against arenas
+  build/tests/Release/test_mesh_upload
+
+Raw interleaved reports: bench_20260905_201526..202529 (4 pairs).
