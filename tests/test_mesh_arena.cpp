@@ -131,8 +131,10 @@ int main()
 
 	// Small page (256 KiB) so growth and exhaustion are reachable quickly.
 	MeshArena arena;
+	// 2 frames in flight -> the arena's retirement delay is 3 beginFrames.
 	arena.init(vk.allocator.handle(), retire, 256 * 1024,
-			   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, sizeof(Vertex), telemetry::GpuOpaqueVertex);
+			   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, sizeof(Vertex), telemetry::GpuOpaqueVertex,
+			   2);
 
 	// Every range allocated below is collected here so the drain test can
 	// return the arena to a fully free state.
@@ -190,7 +192,7 @@ int main()
 		CHECK(arena.allocate(560, early), "alloc during retire delay");
 		CHECK(!(early.page == r.page && early.offset == off),
 			  "retired range is not reused before the delay");
-		arena.beginFrame(1 + MeshArena::kRetireDelay);
+		arena.beginFrame(4);
 		MeshArena::Range late;
 		CHECK(arena.allocate(560, late), "alloc after the delay");
 		CHECK(late.page == r.page && late.offset == off,
@@ -243,6 +245,132 @@ int main()
 		const auto after = arena.metrics();
 		CHECK(after.pages == 0, "fully drained arena releases every page");
 		CHECK(after.liveBytes == 0, "drained arena holds no live bytes");
+	}
+
+	// 6. Deterministic allocation failure:
+	{
+		arena.setFailNextPageAllocations(1);
+		MeshArena::Range failR;
+		CHECK(!arena.allocate(1024, failR), "injected page failure returns false");
+		CHECK(arena.metrics().pages == 0, "no page created on injected failure");
+		CHECK(arena.liveBlocks() == 0, "liveBlocks unchanged on failed alloc");
+		CHECK(arena.liveBytes() == 0, "liveBytes unchanged on failed alloc");
+
+		// Subsequent allocation succeeds once failure count is consumed.
+		MeshArena::Range okR;
+		CHECK(arena.allocate(1024, okR), "allocation succeeds after failure count consumed");
+		CHECK(arena.metrics().pages == 1, "page created on successful alloc");
+		CHECK(arena.liveBlocks() == 1, "liveBlocks incremented on success");
+		CHECK(arena.liveBytes() == okR.bytes, "liveBytes updated on success");
+		arena.freeImmediate(okR);
+		arena.beginFrame(150);
+		CHECK(arena.metrics().pages == 0, "page released after okR freed");
+		retire.flush();
+	}
+
+	// 7. Counter consistency and pending retirement:
+	//    liveBlocks and liveBytes track both active and pending-retirement ranges.
+	{
+		MeshArena::Range r1, r2, r3;
+		CHECK(arena.allocate(512, r1), "alloc r1");
+		CHECK(arena.allocate(512, r2), "alloc r2");
+		CHECK(arena.allocate(512, r3), "alloc r3");
+		CHECK(arena.liveBlocks() == 3, "liveBlocks == 3");
+		const uint64_t expectedBytes = r1.bytes + r2.bytes + r3.bytes;
+		CHECK(arena.liveBytes() == expectedBytes, "liveBytes matches sum of 3 allocations");
+
+		// Retire r1: still consumes the arena until retirement delay elapses
+		arena.retire(r1);
+		CHECK(arena.liveBlocks() == 3, "liveBlocks unchanged while r1 pending");
+		CHECK(arena.liveBytes() == expectedBytes, "liveBytes unchanged while r1 pending");
+
+		// freeImmediate r2: decrements immediately
+		arena.freeImmediate(r2);
+		CHECK(arena.liveBlocks() == 2, "liveBlocks decremented after freeImmediate r2");
+		CHECK(arena.liveBytes() == r1.bytes + r3.bytes, "liveBytes decremented after freeImmediate r2");
+
+		// Advance frames past retirement delay for r1
+		arena.beginFrame(200);
+		arena.beginFrame(201);
+		arena.beginFrame(202);
+		arena.beginFrame(203);
+		CHECK(arena.liveBlocks() == 1, "liveBlocks decremented after r1 delay elapsed");
+		CHECK(arena.liveBytes() == r3.bytes, "liveBytes decremented after r1 delay elapsed");
+
+		// Pending retired range cannot be reused before its delay
+		MeshArena::Range r4;
+		CHECK(arena.allocate(512, r4), "alloc r4");
+		arena.retire(r4); // retired at frame 203, delay 3 -> expires at 206
+		const uint32_t off4 = r4.offset;
+		arena.beginFrame(204);
+		arena.beginFrame(205);
+		MeshArena::Range earlyR;
+		CHECK(arena.allocate(512, earlyR), "early alloc during retire delay");
+		CHECK(!(earlyR.page == r4.page && earlyR.offset == off4),
+			  "pending retired range cannot be reused before retirement frame");
+		// Advance frame past delay
+		arena.beginFrame(207);
+		MeshArena::Range lateR;
+		CHECK(arena.allocate(512, lateR), "alloc after retirement frame");
+		CHECK(lateR.page == r4.page && lateR.offset == off4,
+			  "range reuse succeeds after exact retirement frame");
+
+		arena.freeImmediate(r3);
+		arena.freeImmediate(earlyR);
+		arena.freeImmediate(lateR);
+		arena.beginFrame(210);
+		CHECK(arena.liveBlocks() == 0, "liveBlocks back to 0");
+		CHECK(arena.liveBytes() == 0, "liveBytes back to 0");
+		retire.flush();
+	}
+
+	// 8. Page cannot be destroyed while pending ranges exist:
+	{
+		MeshArena::Range soleR;
+		CHECK(arena.allocate(1024, soleR), "alloc sole range on page");
+		arena.retire(soleR); // retired at frame 210 -> expires at 213
+		arena.beginFrame(211);
+		CHECK(arena.metrics().pages >= 1, "page not destroyed while range pending");
+		arena.beginFrame(215);
+		// After delay, page returns to free and gets released to retire queue
+		CHECK(arena.metrics().pages == 0, "page released after all ranges retired and freed");
+		retire.flush();
+	}
+
+	// 9. Oversize page allocation (> pageSize = 256 KiB):
+	{
+		MeshArena::Range oversizeR;
+		CHECK(arena.allocate(512 * 1024, oversizeR), "oversize 512 KiB allocation succeeds");
+		CHECK(oversizeR.bytes >= 512 * 1024, "oversize range has requested capacity");
+		CHECK(arena.pageSize(oversizeR.page) >= 512 * 1024, "oversize page created with proper size");
+		arena.freeImmediate(oversizeR);
+		arena.beginFrame(400);
+		CHECK(arena.metrics().pages == 0, "oversize page released");
+		retire.flush();
+	}
+
+	// 10. Multiple pages release independently:
+	{
+		// Force multiple pages by allocating several 200 KiB blocks
+		MeshArena::Range p0R, p1R;
+		CHECK(arena.allocate(200 * 1024, p0R), "alloc p0R");
+		CHECK(arena.allocate(200 * 1024, p1R), "alloc p1R");
+		CHECK(p0R.page != p1R.page, "allocations land on separate pages");
+		const uint32_t pagesBoth = arena.metrics().pages;
+		CHECK(pagesBoth >= 2, "at least 2 pages allocated");
+
+		// Free page 1 first; page 0 range remains held
+		arena.freeImmediate(p1R);
+		arena.beginFrame(500);
+		CHECK(arena.metrics().pages == pagesBoth - 1, "page 1 released independently");
+		CHECK(arena.liveBlocks() == 1, "page 0 range remains live");
+
+		// Free page 0
+		arena.freeImmediate(p0R);
+		arena.beginFrame(501);
+		CHECK(arena.metrics().pages == 0, "page 0 released independently");
+		CHECK(arena.liveBlocks() == 0, "all liveBlocks freed");
+		retire.flush();
 	}
 
 	// Flushed retired pages live in the retire queue: flush it before

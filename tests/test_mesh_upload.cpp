@@ -56,8 +56,19 @@ struct ChunkStateProbe
 	static uint32_t slotIUsed(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].indexUsedBytes; }
 	static uint32_t slotICount(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].indexCount; }
 	static uint32_t slotWICount(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].indexCount; }
+	static uint32_t slotWVPage(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].vertexPage; }
+	static uint32_t slotWVOff(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].vertexOffset; }
+	static uint32_t slotWVSz(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].vertexSlotBytes; }
+	static uint32_t slotWIPage(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].indexPage; }
+	static uint32_t slotWIOff(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].indexOffset; }
+	static uint32_t slotWISz(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].indexSlotBytes; }
 	static bool slotEmpty(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].empty(); }
+	static bool slotWaterEmpty(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].empty(); }
 	static uint16_t sectionNonAir(const Chunk &c, int s) { return c.m_sectionNonAir[static_cast<size_t>(s)]; }
+	static MeshArena::Range lodOpaqueV(const Chunk &c) { return c.m_lodOpaqueVertices; }
+	static MeshArena::Range lodOpaqueI(const Chunk &c) { return c.m_lodOpaqueIndices; }
+	static MeshArena::Range lodWaterV(const Chunk &c) { return c.m_lodWaterVertices; }
+	static MeshArena::Range lodWaterI(const Chunk &c) { return c.m_lodWaterIndices; }
 };
 
 namespace
@@ -235,7 +246,7 @@ int main()
 	MeshArenas arenas;
 	// Small pages: the spawn e2e block below then spans MULTIPLE pages per
 	// stream, exercising the page-pair grouping of the indirect path.
-	arenas.init(vk.allocator.handle(), retire, sizeof(Vertex),
+	arenas.init(vk.allocator.handle(), retire, sizeof(Vertex), 2,
 	            2ull * 1024ull * 1024ull, 1ull * 1024ull * 1024ull);
 	ImmediateCommands imm;
 	imm.init(vk.device, vk.queue, vk.queueFamily);
@@ -412,9 +423,9 @@ int main()
 		}
 	}
 
-	// Arena lifecycle block: emptied section keeps its reservation on a
-	// partial upload; a full repack re-allocates compactly; indirect draw
-	// collection groups by page pair.
+	// Arena lifecycle block: emptied section drops its reservation immediately
+	// on a partial upload; reactivation allocates fresh ranges; indirect draw
+	// collection yields one command per live section grouped by page pair.
 	{
 		ChunkPool chunkPool2(16);
 		TerrainGenerator gen2(77);
@@ -424,18 +435,18 @@ int main()
 		manager2.updateStreaming(cam2, settings2);
 		manager2.processChunkLoading(64);
 		Chunk *chunk = manager2.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
-		CHECK(chunk != nullptr, "cow: chunk registered");
+		CHECK(chunk != nullptr, "arena: chunk registered");
 		if (chunk)
 		{
-			CHECK(manager2.prepareAndGenerateChunk(chunk, gen2), "cow: prepare+generate");
-			CHECK(chunk->generateMesh(), "cow: full mesh publishes");
+			CHECK(manager2.prepareAndGenerateChunk(chunk, gen2), "arena: prepare+generate");
+			CHECK(chunk->generateMesh(), "arena: full mesh publishes");
 			staging.beginFrame(0);
 			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
-				  "cow: full upload");
-			CHECK(vk.flush(), "cow: full submit");
+				  "arena: full upload");
+			CHECK(vk.flush(), "arena: full submit");
 
 			// Indirect collection: every live section yields exactly one
-			// command, each carrying valid arena pages.
+			// command carrying its own vertexOffset (issue #109).
 			{
 				std::vector<Chunk::IndirectDraw> cmds;
 				uint32_t liveSections = 0, indexSum = 0;
@@ -445,114 +456,37 @@ int main()
 					indexSum += ChunkStateProbe::slotICount(*chunk, s);
 				}
 				chunk->collectOpaqueDraws(cmds);
-				// Contiguous sections merge into one command, so the count is
-				// at most the live-section count; the drawn indices are the
-				// same set either way.
-				CHECK(cmds.size() <= liveSections,
-					  "cow: collection yields at most one command per live section");
+				CHECK(cmds.size() == liveSections,
+					  "arena: collection yields exactly one command per live section");
 				uint32_t cmdSum = 0;
 				for (const auto &d : cmds)
 					cmdSum += d.cmd.indexCount;
 				CHECK(cmdSum == indexSum,
-					  "cow: merged commands still cover every live index");
-				std::cerr << "  dbg cow: liveSections=" << liveSections
-				          << " commands=" << cmds.size() << std::endl;
-				// Contiguity audit of the section ranges (repacked chunk):
-				bool contiguous = true;
-				uint32_t prevVEnd = 0, prevIEnd = 0;
-				bool firstSeen = false;
-				for (int s = 0; s < 16; ++s)
-				{
-					const uint32_t vsz = ChunkStateProbe::slotVSz(*chunk, s);
-					const uint32_t isz = ChunkStateProbe::slotISz(*chunk, s);
-					if (vsz == 0 && isz == 0)
-						continue;
-					const uint32_t voff = ChunkStateProbe::slotVOff(*chunk, s);
-					const uint32_t ioff = ChunkStateProbe::slotIOff(*chunk, s);
-					if (firstSeen)
-					{
-						if (voff != prevVEnd || ioff != prevIEnd)
-							contiguous = false;
-					}
-					prevVEnd = voff + vsz;
-					prevIEnd = ioff + isz;
-					firstSeen = true;
-				}
-				std::cerr << "  dbg cow: ranges contiguous=" << (contiguous ? "yes" : "no")
-				          << std::endl;
-				// Strict chain validity: each command must start at a slot's
-				// offset, and every slot it continues past must be exact
-				// (used == reserved) with the next slot contiguous - i.e. no
-				// command may ever draw across a slot's slack.
-				{
-					struct Range
-					{
-						uint32_t off, sz, used;
-					};
-					std::vector<Range> slots;
-					for (int s2 = 0; s2 < 16; ++s2)
-						if (ChunkStateProbe::slotIUsed(*chunk, s2) != 0)
-							slots.push_back({ChunkStateProbe::slotIOff(*chunk, s2),
-							                 ChunkStateProbe::slotISz(*chunk, s2),
-							                 ChunkStateProbe::slotIUsed(*chunk, s2)});
-					std::sort(slots.begin(), slots.end(),
-					          [](const Range &a, const Range &b) { return a.off < b.off; });
-					bool valid = true;
-					for (const auto &d : cmds)
-					{
-						uint32_t pos = d.cmd.firstIndex * sizeof(uint32_t);
-						const uint32_t end = pos + d.cmd.indexCount * sizeof(uint32_t);
-						for (size_t k = 0; k < slots.size() && pos < end; ++k)
-						{
-							if (slots[k].off != pos)
-								continue;
-							const uint32_t usedEnd = pos + slots[k].used;
-							if (usedEnd >= end)
-							{
-								pos = end;
-								break;
-							}
-							// The command continues past this slot: it must be
-							// exact and the next slot must be contiguous.
-							if (slots[k].used != slots[k].sz)
-								valid = false;
-							pos = usedEnd;
-						}
-						if (pos != end)
-							valid = false; // draw ends mid-slot (slack tail)
-					}
-					CHECK(valid,
-					      "cow: no command draws across an in-place shrink's slack");
-				}
+					  "arena: section commands cover every live index");
 				bool pagesValid = true;
 				for (const auto &d : cmds)
 					pagesValid = pagesValid &&
 					             d.vertexPage != MeshArena::kNoPage &&
 					             d.indexPage != MeshArena::kNoPage &&
 					             d.cmd.indexCount > 0 && d.cmd.instanceCount == 1;
-				CHECK(pagesValid, "cow: collected commands carry valid arena pages");
+				CHECK(pagesValid, "arena: collected commands carry valid arena pages");
 			}
 
-			// Empty the smallest section, partial upload: the reservation is
-			// kept (used extents drop to zero) so reactivation stays cheap.
+			// Empty the smallest section: partial upload must drop its reservation
+			// immediately (slot becomes empty, old ranges retired; Phase 2 item 4).
 			int target = -1;
 			uint16_t best = 0xFFFF;
 			for (int s = 0; s < 16; ++s)
 			{
 				const uint16_t n = ChunkStateProbe::sectionNonAir(*chunk, s);
-				// Only sections that own a reserved range exercise the
-				// keep-reservation path (a fully buried section may have no
-				// visible faces and therefore no range at all).
 				if (n != 0 && ChunkStateProbe::slotISz(*chunk, s) > 0 && n < best)
 				{
 					best = n;
 					target = s;
 				}
 			}
-			CHECK(target >= 0, "cow: found a reserved section to empty");
+			CHECK(target >= 0, "arena: found a reserved section to empty");
 			const int y0 = target * 16;
-			// Collect the section's voxels; drain all but the last first so
-			// the partial upload exercises the keep-reservation path.
 			std::vector<std::pair<glm::ivec3, uint8_t>> voxels;
 			for (int y = y0; y < y0 + 16; ++y)
 				for (int x = 0; x < 16; ++x)
@@ -565,84 +499,72 @@ int main()
 						if (t != static_cast<uint8_t>(AIR))
 							voxels.emplace_back(glm::ivec3(x, y, z), t);
 					}
-			CHECK(voxels.size() >= 2, "cow: section holds voxels to drain");
+			CHECK(voxels.size() >= 2, "arena: section holds voxels to drain");
 			for (size_t k = 0; k + 1 < voxels.size(); ++k)
 				chunk->setVoxel(static_cast<uint32_t>(voxels[k].first.x),
 				                static_cast<uint32_t>(voxels[k].first.y),
 				                static_cast<uint32_t>(voxels[k].first.z), AIR);
 			const uint16_t mask = chunk->takeDirtySections();
-			CHECK((mask & (1u << target)) != 0, "cow: draining dirties the section");
+			CHECK((mask & (1u << target)) != 0, "arena: draining dirties the section");
 			{
 				MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
 				chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), mask);
 				chunk->getMeshResultPool()->finishBuild(r);
-				CHECK(chunk->publishMeshResult(r), "cow: drained result published");
+				CHECK(chunk->publishMeshResult(r), "arena: drained result published");
 			}
 			staging.beginFrame(0);
 			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
-				  "cow: drained-section upload");
-			// The drain usually arms every section (light range over 4096
-			// voxel edits), so this upload typically REPACKS and frees the
-			// drained section's reservation. Either way the section stays
-			// consistent for the final removal below.
-			const bool hadReservation = ChunkStateProbe::slotISz(*chunk, target) > 0;
+				  "arena: drained-section upload");
 
-			// Now remove the last voxel: a small partial upload. An emptied
-			// section keeps its reservation when one existed (used extents
-			// drop to zero); otherwise it simply has no range.
+			// Remove the last voxel: partial upload.
+			// Emptied section MUST retire its reservation and become empty.
 			chunk->setVoxel(static_cast<uint32_t>(voxels.back().first.x),
 			                static_cast<uint32_t>(voxels.back().first.y),
 			                static_cast<uint32_t>(voxels.back().first.z), AIR);
 			const uint16_t mask2 = chunk->takeDirtySections();
-			CHECK((mask2 & (1u << target)) != 0, "cow: final removal dirties the section");
+			CHECK((mask2 & (1u << target)) != 0, "arena: final removal dirties the section");
 			{
 				MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
 				chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), mask2);
 				chunk->getMeshResultPool()->finishBuild(r);
-				CHECK(chunk->publishMeshResult(r), "cow: emptied result published");
+				CHECK(chunk->publishMeshResult(r), "arena: emptied result published");
 			}
 			staging.beginFrame(0);
 			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
-				  "cow: emptied-section upload");
+				  "arena: emptied-section upload");
 			CHECK(ChunkStateProbe::slotICount(*chunk, target) == 0,
-				  "cow: emptied slot carries no indices");
-			if (hadReservation)
-			{
-				CHECK(ChunkStateProbe::slotISz(*chunk, target) > 0,
-					  "cow: emptied slot keeps its reservation");
-			}
-			CHECK(vk.flush(), "cow: emptied submit");
+				  "arena: emptied slot carries no indices");
+			CHECK(ChunkStateProbe::slotEmpty(*chunk, target),
+				  "arena: emptied slot drops its reservation immediately");
+			CHECK(vk.flush(), "arena: emptied submit");
 
-			// Full rebuild: the repack re-allocates every section; the
-			// emptied section's stale reservation must be gone.
-			CHECK(chunk->generateMesh(), "cow: post-clear full rebuild publishes");
+			// Full rebuild: every section is rebuilt; emptied section remains empty.
+			CHECK(chunk->generateMesh(), "arena: post-clear full rebuild publishes");
 			staging.beginFrame(0);
 			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
-				  "cow: post-clear repack upload");
+				  "arena: post-clear repack upload");
 			CHECK(ChunkStateProbe::slotEmpty(*chunk, target),
-				  "cow: full repack drops the reservation of an emptied section");
-			CHECK(vk.flush(), "cow: post-clear repack submit");
+				  "arena: full repack keeps emptied section empty");
+			CHECK(vk.flush(), "arena: post-clear repack submit");
 
-
-			// Reactivation: a fresh range is allocated (reservation was
-			// dropped) and the draw count reflects the new section.
+			// Reactivation: a fresh range is allocated and the draw count reflects the new section.
 			chunk->setVoxel(8, y0 + 8, 8, BRICKS);
 			const uint16_t reactivateMask = chunk->takeDirtySections();
-			CHECK((reactivateMask & (1u << target)) != 0, "cow: reactivation dirties the section");
+			CHECK((reactivateMask & (1u << target)) != 0, "arena: reactivation dirties the section");
 			{
 				MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
 				chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), reactivateMask);
 				chunk->getMeshResultPool()->finishBuild(r);
-				CHECK(chunk->publishMeshResult(r), "cow: reactivation published");
+				CHECK(chunk->publishMeshResult(r), "arena: reactivation published");
 			}
 			staging.beginFrame(0);
 			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
-				  "cow: reactivation upload");
+				  "arena: reactivation upload");
 			CHECK(!ChunkStateProbe::slotEmpty(*chunk, target),
-				  "cow: reactivated section owns a real range");
+				  "arena: reactivated section owns a real range");
 			CHECK(ChunkStateProbe::slotICount(*chunk, target) > 0,
-				  "cow: reactivated section carries indices");
-			CHECK(vk.flush(), "cow: reactivation submit");
+				  "arena: reactivated section carries indices");
+			CHECK(vk.flush(), "arena: reactivation submit");
 		}
 	}
 
@@ -973,6 +895,363 @@ int main()
 		}
 		CHECK(allValid, "phase2: commands valid after partial rebuilds");
 		std::cerr << "  dbg phase2: cmds=" << phase2Cmds << std::endl;
+	}
+
+	// =========================================================================
+	// Phase 11: In-flight partial remesh without queueWaitIdle (item 27)
+	// =========================================================================
+	{
+		ChunkPool chunkPool(8);
+		TerrainGenerator gen(101);
+		ChunkManager manager(&gen, nullptr, &chunkPool);
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(16);
+		Chunk *chunk = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		CHECK(chunk != nullptr, "inflight: chunk loaded");
+		if (chunk)
+		{
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "inflight: prep+gen");
+			CHECK(chunk->generateMesh(), "inflight: initial mesh");
+			staging.beginFrame(0);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "inflight: initial upload");
+			CHECK(vk.flush(), "inflight: submit frame 0");
+
+			// Frame 0: find a section with non-empty mesh
+			int sec = -1;
+			for (int s = 0; s < 16; ++s)
+				if (ChunkStateProbe::slotICount(*chunk, s) > 0)
+				{
+					sec = s;
+					break;
+				}
+			CHECK(sec >= 0, "inflight: found section to edit");
+			const uint32_t vPage0 = ChunkStateProbe::slotVPage(*chunk, sec);
+			const uint32_t vOff0 = ChunkStateProbe::slotVOff(*chunk, sec);
+			const uint32_t iPage0 = ChunkStateProbe::slotIPage(*chunk, sec);
+			const uint32_t iOff0 = ChunkStateProbe::slotIOff(*chunk, sec);
+
+			// Frame 1: edit same section, partial remesh, upload, submit (DO NOT WAIT IDLE)
+			const int y0 = sec * 16;
+			chunk->setVoxel(4, y0 + 4, 4, STONE);
+			const uint16_t mask1 = chunk->takeDirtySections();
+			CHECK((mask1 & (1u << sec)) != 0, "inflight: frame 1 dirty section");
+			{
+				MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
+				chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), mask1);
+				chunk->getMeshResultPool()->finishBuild(r);
+				CHECK(chunk->publishMeshResult(r), "inflight: frame 1 mesh published");
+			}
+			staging.beginFrame(1);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "inflight: frame 1 upload");
+			CHECK(vk.flush(), "inflight: submit frame 1 (no wait idle)");
+
+			const uint32_t vPage1 = ChunkStateProbe::slotVPage(*chunk, sec);
+			const uint32_t vOff1 = ChunkStateProbe::slotVOff(*chunk, sec);
+			const uint32_t iPage1 = ChunkStateProbe::slotIPage(*chunk, sec);
+			const uint32_t iOff1 = ChunkStateProbe::slotIOff(*chunk, sec);
+			CHECK(vPage1 != vPage0 || vOff1 != vOff0, "inflight: frame 1 fresh vertex range");
+			CHECK(iPage1 != iPage0 || iOff1 != iOff0, "inflight: frame 1 fresh index range");
+
+			// Frame 2: another edit in the same section, upload, submit (DO NOT WAIT IDLE)
+			chunk->setVoxel(5, y0 + 5, 5, DIRT);
+			const uint16_t mask2 = chunk->takeDirtySections();
+			CHECK((mask2 & (1u << sec)) != 0, "inflight: frame 2 dirty section");
+			{
+				MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
+				chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), mask2);
+				chunk->getMeshResultPool()->finishBuild(r);
+				CHECK(chunk->publishMeshResult(r), "inflight: frame 2 mesh published");
+			}
+			staging.beginFrame(0);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "inflight: frame 2 upload");
+			CHECK(vk.flush(), "inflight: submit frame 2 (no wait idle)");
+
+			const uint32_t vPage2 = ChunkStateProbe::slotVPage(*chunk, sec);
+			const uint32_t vOff2 = ChunkStateProbe::slotVOff(*chunk, sec);
+			const uint32_t iPage2 = ChunkStateProbe::slotIPage(*chunk, sec);
+			const uint32_t iOff2 = ChunkStateProbe::slotIOff(*chunk, sec);
+			CHECK(vPage2 != vPage0 || vOff2 != vOff0, "inflight: frame 2 does not reuse frame 0 V");
+			CHECK(iPage2 != iPage0 || iOff2 != iOff0, "inflight: frame 2 does not reuse frame 0 I");
+			CHECK(vPage2 != vPage1 || vOff2 != vOff1, "inflight: frame 2 does not reuse frame 1 V");
+			CHECK(iPage2 != iPage1 || iOff2 != iOff1, "inflight: frame 2 does not reuse frame 1 I");
+
+			// Wait idle and tick retirement frames to verify reuse
+			vkQueueWaitIdle(vk.queue);
+			for (uint64_t f = 1; f <= 10; ++f)
+			{
+				arenas.beginFrame(f * 10);
+				retire.beginFrame(f * 10);
+			}
+			retire.flush();
+		}
+	}
+
+	// =========================================================================
+	// Phase 12: LOD Transitions (items 28, 29, 30, 31)
+	// =========================================================================
+	{
+		ChunkPool chunkPool(8);
+		TerrainGenerator gen(202);
+		ChunkManager manager(&gen, nullptr, &chunkPool);
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(16);
+		Chunk *chunk = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		CHECK(chunk != nullptr, "lod: chunk loaded");
+		if (chunk)
+		{
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "lod: prep+gen");
+			CHECK(chunk->generateMesh(), "lod: full mesh gen");
+			staging.beginFrame(0);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "lod: full upload");
+			CHECK(vk.flush(), "lod: full submit");
+			CHECK(!chunk->isLODMesh(), "lod: chunk starts in full-quality mesh");
+			CHECK(chunk->getOpaqueIndexCount() > 0, "lod: full mesh has indices");
+
+			// 28. Full -> LOD transition:
+			{
+				MeshBuildResult *lod = chunk->getMeshResultPool()->acquire();
+				lod->isLOD = true;
+				lod->owner = chunk;
+				lod->generation = chunk->meshGeneration();
+				lod->revision = chunk->meshRevision();
+				Vertex v{};
+				lod->opaqueVertices.assign(128, v);
+				lod->opaqueIndices.assign(192, 0u);
+				chunk->getMeshResultPool()->finishBuild(lod);
+				CHECK(chunk->publishMeshResult(lod), "lod: publish LOD mesh");
+				staging.beginFrame(0);
+				CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+				      "lod: upload LOD mesh");
+				CHECK(vk.flush(), "lod: LOD submit");
+				CHECK(chunk->isLODMesh(), "lod: chunk is now LOD mesh");
+				CHECK(chunk->getOpaqueIndexCount() == 192, "lod: LOD index count matches");
+				// Section slot table must be completely empty!
+				bool allEmpty = true;
+				for (int s = 0; s < 16; ++s)
+					if (!ChunkStateProbe::slotEmpty(*chunk, s))
+						allEmpty = false;
+				CHECK(allEmpty, "lod: Full->LOD cleared all section slots");
+				std::vector<Chunk::IndirectDraw> draws;
+				CHECK(chunk->collectOpaqueDraws(draws) == 1, "lod: LOD yields exactly 1 draw command");
+			}
+
+			// 29. LOD -> Full transition:
+			{
+				MeshBuildResult *full = chunk->getMeshResultPool()->acquire();
+				full->isLOD = false;
+				chunk->buildMesh(*full, chunk->meshGeneration(), chunk->meshRevision(), kAllSectionMask);
+				chunk->getMeshResultPool()->finishBuild(full);
+				CHECK(chunk->publishMeshResult(full), "lod: publish full mesh after LOD");
+				staging.beginFrame(0);
+				CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+				      "lod: upload full mesh after LOD");
+				CHECK(vk.flush(), "lod: full submit after LOD");
+				CHECK(!chunk->isLODMesh(), "lod: chunk transitioned back to full quality");
+				CHECK(ChunkStateProbe::lodOpaqueV(*chunk).empty(), "lod: old LOD vertex range retired/cleared");
+				CHECK(ChunkStateProbe::lodOpaqueI(*chunk).empty(), "lod: old LOD index range retired/cleared");
+				std::vector<Chunk::IndirectDraw> draws;
+				CHECK(chunk->collectOpaqueDraws(draws) > 1, "lod: full mesh yields multiple section draws");
+			}
+
+			// 30. LOD nonempty -> empty:
+			{
+				// First upload nonempty LOD with both opaque and water
+				MeshBuildResult *lodNonEmpty = chunk->getMeshResultPool()->acquire();
+				lodNonEmpty->isLOD = true;
+				lodNonEmpty->owner = chunk;
+				lodNonEmpty->generation = chunk->meshGeneration();
+				lodNonEmpty->revision = chunk->meshRevision();
+				Vertex v{};
+				lodNonEmpty->opaqueVertices.assign(64, v);
+				lodNonEmpty->opaqueIndices.assign(96, 0u);
+				lodNonEmpty->waterVertices.assign(64, v);
+				lodNonEmpty->waterIndices.assign(96, 0u);
+				chunk->getMeshResultPool()->finishBuild(lodNonEmpty);
+				CHECK(chunk->publishMeshResult(lodNonEmpty), "lod: publish nonempty LOD");
+				staging.beginFrame(0);
+				CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+				      "lod: upload nonempty opaque+water LOD");
+				CHECK(vk.flush(), "lod: nonempty submit");
+				CHECK(chunk->getOpaqueIndexCount() == 96, "lod: opaque 96");
+				CHECK(chunk->getWaterIndexCount() == 96, "lod: water 96");
+
+				// Now upload empty LOD (opaque empty, water empty)
+				MeshBuildResult *lodEmpty = chunk->getMeshResultPool()->acquire();
+				lodEmpty->isLOD = true; // empty vertices & indices
+				lodEmpty->owner = chunk;
+				lodEmpty->generation = chunk->meshGeneration();
+				lodEmpty->revision = chunk->meshRevision();
+				chunk->getMeshResultPool()->finishBuild(lodEmpty);
+				CHECK(chunk->publishMeshResult(lodEmpty), "lod: publish empty LOD");
+				staging.beginFrame(0);
+				CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+				      "lod: upload empty LOD");
+				CHECK(vk.flush(), "lod: empty LOD submit");
+				CHECK(chunk->getOpaqueIndexCount() == 0, "lod: opaque empty -> 0");
+				CHECK(chunk->getWaterIndexCount() == 0, "lod: water empty -> 0");
+				CHECK(ChunkStateProbe::lodOpaqueV(*chunk).empty(), "lod: opaque V cleared");
+				CHECK(ChunkStateProbe::lodOpaqueI(*chunk).empty(), "lod: opaque I cleared");
+				CHECK(ChunkStateProbe::lodWaterV(*chunk).empty(), "lod: water V cleared");
+				CHECK(ChunkStateProbe::lodWaterI(*chunk).empty(), "lod: water I cleared");
+				std::vector<Chunk::IndirectDraw> draws;
+				CHECK(chunk->collectOpaqueDraws(draws) == 0, "lod: collectOpaqueDraws is 0");
+				CHECK(chunk->collectWaterDraws(draws) == 0, "lod: collectWaterDraws is 0");
+			}
+
+			// 31. Stress loop: 100x Full <-> LOD alternating
+			{
+				for (int iter = 0; iter < 100; ++iter)
+				{
+					// LOD upload
+					MeshBuildResult *lod = chunk->getMeshResultPool()->acquire();
+					lod->isLOD = true;
+					lod->owner = chunk;
+					lod->generation = chunk->meshGeneration();
+					lod->revision = chunk->meshRevision();
+					Vertex v{};
+					lod->opaqueVertices.assign(128, v);
+					lod->opaqueIndices.assign(192, 0u);
+					chunk->getMeshResultPool()->finishBuild(lod);
+					chunk->publishMeshResult(lod);
+					staging.beginFrame(0);
+					chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas);
+
+					// Full upload
+					MeshBuildResult *full = chunk->getMeshResultPool()->acquire();
+					full->isLOD = false;
+					chunk->buildMesh(*full, chunk->meshGeneration(), chunk->meshRevision(), kAllSectionMask);
+					chunk->getMeshResultPool()->finishBuild(full);
+					chunk->publishMeshResult(full);
+					staging.beginFrame(0);
+					chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas);
+
+					// Advance frame periodically to retire expired ranges
+					arenas.beginFrame(1000 + iter);
+					retire.beginFrame(1000 + iter);
+				}
+				CHECK(vk.flush(), "lod: stress loop flush");
+				vkQueueWaitIdle(vk.queue);
+				for (uint64_t f = 1; f <= 10; ++f)
+				{
+					arenas.beginFrame(2000 + f);
+					retire.beginFrame(2000 + f);
+				}
+				retire.flush();
+				// Ensure no runaway memory growth
+				CHECK(arenas.opaqueVertex.metrics().pages <= 4, "lod: pages stabilized after 100x stress loop");
+				CHECK(arenas.opaqueIndex.metrics().pages <= 4, "lod: index pages stabilized after 100x stress loop");
+			}
+		}
+	}
+
+	// =========================================================================
+	// Phase 13: Transaction rollback on water failure (item 32)
+	// =========================================================================
+	{
+		ChunkPool chunkPool(8);
+		TerrainGenerator gen(303);
+		ChunkManager manager(&gen, nullptr, &chunkPool);
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(16);
+		Chunk *chunk = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		CHECK(chunk != nullptr, "trans: chunk loaded");
+		if (chunk)
+		{
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "trans: prep+gen");
+			CHECK(chunk->generateMesh(), "trans: initial mesh");
+			staging.beginFrame(0);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "trans: initial upload");
+			CHECK(vk.flush(), "trans: submit initial");
+
+			// Create a fresh mesh result with BOTH opaque and water
+			MeshBuildResult *res = chunk->getMeshResultPool()->acquire();
+			chunk->buildMesh(*res, chunk->meshGeneration(), chunk->meshRevision(), kAllSectionMask);
+			Vertex v{};
+			res->sections[0].waterVertices.assign(64, v);
+			res->sections[0].waterIndices.assign(96, 0u);
+			res->sectionsBuilt |= 1u;
+			chunk->getMeshResultPool()->finishBuild(res);
+			CHECK(chunk->publishMeshResult(res), "trans: mesh with water published");
+
+			// Snapshot current chunk state
+			const uint32_t snapOpaqueCount = chunk->getOpaqueIndexCount();
+			const uint32_t snapWaterCount = chunk->getWaterIndexCount();
+			const bool snapIsLOD = chunk->isLODMesh();
+			uint32_t snapOpaqueSlots[16][4];
+			uint32_t snapWaterSlots[16][4];
+			for (int s = 0; s < 16; ++s)
+			{
+				snapOpaqueSlots[s][0] = ChunkStateProbe::slotVPage(*chunk, s);
+				snapOpaqueSlots[s][1] = ChunkStateProbe::slotVOff(*chunk, s);
+				snapOpaqueSlots[s][2] = ChunkStateProbe::slotIPage(*chunk, s);
+				snapOpaqueSlots[s][3] = ChunkStateProbe::slotIOff(*chunk, s);
+
+				snapWaterSlots[s][0] = ChunkStateProbe::slotWVPage(*chunk, s);
+				snapWaterSlots[s][1] = ChunkStateProbe::slotWVOff(*chunk, s);
+				snapWaterSlots[s][2] = ChunkStateProbe::slotWIPage(*chunk, s);
+				snapWaterSlots[s][3] = ChunkStateProbe::slotWIOff(*chunk, s);
+			}
+			const auto metricsOVBefore = arenas.opaqueVertex.metrics();
+			const auto metricsOIBefore = arenas.opaqueIndex.metrics();
+			const auto metricsWVBefore = arenas.waterVertex.metrics();
+			const auto metricsWIBefore = arenas.waterIndex.metrics();
+
+			// Inject failure on waterIndex arena allocation!
+			// Opaque vertex and index allocations will succeed, then waterIndex fails.
+			arenas.waterIndex.setFailNextAllocations(1);
+
+			staging.beginFrame(0);
+			const bool uploaded = chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas);
+			CHECK(!uploaded, "trans: upload failed when water allocation failed");
+			CHECK(ChunkStateProbe::pending(*chunk) == res, "trans: pending result attached (survives rollback)");
+			CHECK(chunk->needsGPUUpload(), "trans: meshNeedsUpdate remains armed");
+			CHECK(chunk->getOpaqueIndexCount() == snapOpaqueCount, "trans: opaqueIndexCount identical");
+			CHECK(chunk->getWaterIndexCount() == snapWaterCount, "trans: waterIndexCount identical");
+			CHECK(chunk->isLODMesh() == snapIsLOD, "trans: isLODMesh identical");
+
+			// Verify every section slot in both streams is byte-for-byte identical
+			bool slotsMatch = true;
+			for (int s = 0; s < 16; ++s)
+			{
+				if (ChunkStateProbe::slotVPage(*chunk, s) != snapOpaqueSlots[s][0] ||
+				    ChunkStateProbe::slotVOff(*chunk, s) != snapOpaqueSlots[s][1] ||
+				    ChunkStateProbe::slotIPage(*chunk, s) != snapOpaqueSlots[s][2] ||
+				    ChunkStateProbe::slotIOff(*chunk, s) != snapOpaqueSlots[s][3] ||
+				    ChunkStateProbe::slotWVPage(*chunk, s) != snapWaterSlots[s][0] ||
+				    ChunkStateProbe::slotWVOff(*chunk, s) != snapWaterSlots[s][1] ||
+				    ChunkStateProbe::slotWIPage(*chunk, s) != snapWaterSlots[s][2] ||
+				    ChunkStateProbe::slotWIOff(*chunk, s) != snapWaterSlots[s][3])
+					slotsMatch = false;
+			}
+			CHECK(slotsMatch, "trans: every section slot is byte-for-byte identical after rollback");
+
+			// Verify arena metrics are identical (all rolled back ranges freed)
+			CHECK(arenas.opaqueVertex.metrics().liveBlocks == metricsOVBefore.liveBlocks,
+			      "trans: opaque vertex live blocks rolled back");
+			CHECK(arenas.opaqueIndex.metrics().liveBlocks == metricsOIBefore.liveBlocks,
+			      "trans: opaque index live blocks rolled back");
+			CHECK(arenas.waterVertex.metrics().liveBlocks == metricsWVBefore.liveBlocks,
+			      "trans: water vertex live blocks rolled back");
+			CHECK(arenas.waterIndex.metrics().liveBlocks == metricsWIBefore.liveBlocks,
+			      "trans: water index live blocks rolled back");
+
+			// Retry without failure injection -> succeeds!
+			staging.beginFrame(0);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "trans: retry after failure succeeds");
+			CHECK(vk.flush(), "trans: retry submit");
+		}
 	}
 
 	arenas.shutdown();
