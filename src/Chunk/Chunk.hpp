@@ -276,6 +276,19 @@ private:
 		uint32_t indexSlotBytes{0}; // multiple of one triangle (12)
 		uint32_t indexUsedBytes{0};
 		uint32_t indexCount{0}; // live indices (0 = empty section)
+
+		// True when the slot describes no layout at all. A full repack
+		// resets the slot table and rebuilds only the sections carrying
+		// content, so every other slot must read as empty afterwards - a
+		// stale slot would let a later partial upload plan an in-place
+		// re-stage outside the compacted buffer (PR #117 final review).
+		bool empty() const
+		{
+			return vertexOffset == 0 && vertexSlotBytes == 0 &&
+			       vertexUsedBytes == 0 && vertexBase == 0 &&
+			       indexOffset == 0 && indexSlotBytes == 0 &&
+			       indexUsedBytes == 0 && indexCount == 0;
+		}
 	};
 	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpu{};
 	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpuWater{};

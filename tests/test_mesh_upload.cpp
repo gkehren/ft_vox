@@ -43,6 +43,7 @@ struct ChunkStateProbe
 	static AllocatedBuffer opaqueBuffer(const Chunk &c) { return c.vertexBuffer; }
 	static AllocatedBuffer waterBuffer(const Chunk &c) { return c.waterVertexBuffer; }
 	static AllocatedBuffer indexBufferOf(const Chunk &c) { return c.indexBuffer; }
+	static AllocatedBuffer waterIndexBufferOf(const Chunk &c) { return c.waterIndexBuffer; }
 	// Section slot layout + used extents (PR #117 review phases 25-27):
 	// scalar getters only - SectionGpuSlot itself is private.
 	static uint32_t slotVOff(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].vertexOffset; }
@@ -53,10 +54,18 @@ struct ChunkStateProbe
 	static uint32_t slotISz(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].indexSlotBytes; }
 	static uint32_t slotIUsed(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].indexUsedBytes; }
 	static uint32_t slotICount(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].indexCount; }
+	static uint32_t slotWVOff(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].vertexOffset; }
+	static uint32_t slotWVSz(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].vertexSlotBytes; }
+	static uint32_t slotWVUsed(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].vertexUsedBytes; }
+	static uint32_t slotWVBase(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].vertexBase; }
 	static uint32_t slotWIOff(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].indexOffset; }
 	static uint32_t slotWISz(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].indexSlotBytes; }
 	static uint32_t slotWIUsed(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].indexUsedBytes; }
 	static uint32_t slotWICount(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].indexCount; }
+	// True when the section's opaque/water slot describes no layout at all
+	// (the full-repack invariant of PR #117's final review).
+	static bool slotEmpty(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].empty(); }
+	static bool slotWEmpty(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].empty(); }
 	static uint32_t usedV(const Chunk &c) { return c.m_vertexUsedBytes; }
 	static uint32_t usedI(const Chunk &c) { return c.m_indexUsedBytes; }
 	static uint32_t usedWV(const Chunk &c) { return c.m_waterVertexUsedBytes; }
@@ -649,6 +658,110 @@ int main()
 				CHECK(ok, what);
 			};
 
+			// Layout invariants (PR #117 final review): every slot lives
+			// inside the packed extent, keeps its alignment, and - after a
+			// full repack - a slot with no content is completely reset.
+			auto checkSectionGpuLayout = [&](bool water, bool fullRepackCleared,
+			                                 const char *what)
+			{
+				const uint32_t usedV = water ? ChunkStateProbe::usedWV(*chunk)
+				                             : ChunkStateProbe::usedV(*chunk);
+				const uint32_t usedI = water ? ChunkStateProbe::usedWI(*chunk)
+				                             : ChunkStateProbe::usedI(*chunk);
+				bool ok = (usedI % 12) == 0;
+				for (int s = 0; s < kSections && ok; ++s)
+				{
+					const uint32_t vOff = water ? ChunkStateProbe::slotWVOff(*chunk, s)
+					                            : ChunkStateProbe::slotVOff(*chunk, s);
+					const uint32_t vSz = water ? ChunkStateProbe::slotWVSz(*chunk, s)
+					                           : ChunkStateProbe::slotVSz(*chunk, s);
+					const uint32_t vUsed = water ? ChunkStateProbe::slotWVUsed(*chunk, s)
+					                             : ChunkStateProbe::slotVUsed(*chunk, s);
+					const uint32_t iOff = water ? ChunkStateProbe::slotWIOff(*chunk, s)
+					                            : ChunkStateProbe::slotIOff(*chunk, s);
+					const uint32_t iSz = water ? ChunkStateProbe::slotWISz(*chunk, s)
+					                           : ChunkStateProbe::slotISz(*chunk, s);
+					const uint32_t iUsed = water ? ChunkStateProbe::slotWIUsed(*chunk, s)
+					                             : ChunkStateProbe::slotIUsed(*chunk, s);
+					if (vSz != 0)
+						ok = vOff % sizeof(Vertex) == 0 && vOff + vSz <= usedV &&
+						     vUsed <= vSz;
+					if (ok && iSz != 0)
+						ok = iOff % 12 == 0 && iSz % 12 == 0 && iOff + iSz <= usedI &&
+						     iUsed <= iSz;
+					if (ok && fullRepackCleared && vUsed == 0 && iUsed == 0)
+						ok = water ? ChunkStateProbe::slotWEmpty(*chunk, s)
+						           : ChunkStateProbe::slotEmpty(*chunk, s);
+				}
+				CHECK(ok, what);
+			};
+			// Live + reserved slots must never overlap within a stream.
+			auto checkNoOverlap = [&](bool water, const char *what)
+			{
+				struct Range
+				{
+					uint32_t begin;
+					uint32_t end;
+				};
+				std::vector<Range> vRanges, iRanges;
+				for (int s = 0; s < kSections; ++s)
+				{
+					const uint32_t vOff = water ? ChunkStateProbe::slotWVOff(*chunk, s)
+					                            : ChunkStateProbe::slotVOff(*chunk, s);
+					const uint32_t vSz = water ? ChunkStateProbe::slotWVSz(*chunk, s)
+					                           : ChunkStateProbe::slotVSz(*chunk, s);
+					const uint32_t iOff = water ? ChunkStateProbe::slotWIOff(*chunk, s)
+					                            : ChunkStateProbe::slotIOff(*chunk, s);
+					const uint32_t iSz = water ? ChunkStateProbe::slotWISz(*chunk, s)
+					                           : ChunkStateProbe::slotISz(*chunk, s);
+					if (vSz != 0)
+						vRanges.push_back({vOff, vOff + vSz});
+					if (iSz != 0)
+						iRanges.push_back({iOff, iOff + iSz});
+				}
+				bool ok = true;
+				for (std::vector<Range> *ranges : {&vRanges, &iRanges})
+				{
+					std::sort(ranges->begin(), ranges->end(),
+					          [](const Range &a, const Range &b)
+					          { return a.begin < b.begin; });
+					for (size_t k = 1; k < ranges->size(); ++k)
+						ok = ok && (*ranges)[k - 1].end <= (*ranges)[k].begin;
+				}
+				CHECK(ok, what);
+			};
+			// Composed byte image of the WATER index stream (mirrors
+			// compareIndexStream).
+			auto compareWaterStream = [&](const char *what)
+			{
+				const VkDeviceSize bytes = ChunkStateProbe::usedWI(*chunk);
+				std::vector<uint8_t> expected(static_cast<size_t>(bytes), 0);
+				bool shapesMatch = true;
+				for (int s = 0; s < kSections; ++s)
+				{
+					const uint32_t iUsed = ChunkStateProbe::slotWIUsed(*chunk, s);
+					const size_t payload =
+					    cpuView[static_cast<size_t>(s)].waterIndices.size() * sizeof(uint32_t);
+					if (iUsed != payload)
+						shapesMatch = false;
+					if (iUsed == 0)
+						continue;
+					const size_t off = ChunkStateProbe::slotWIOff(*chunk, s);
+					const uint32_t base = ChunkStateProbe::slotWVBase(*chunk, s);
+					const auto &idx = cpuView[static_cast<size_t>(s)].waterIndices;
+					for (size_t k = 0; k < idx.size(); ++k)
+					{
+						const uint32_t v = idx[k] + base;
+						std::memcpy(expected.data() + off + k * sizeof(uint32_t), &v,
+						            sizeof(uint32_t));
+					}
+				}
+				CHECK(shapesMatch, what);
+				const std::vector<uint8_t> got =
+				    readbackBuffer(ChunkStateProbe::waterIndexBufferOf(*chunk), bytes);
+				CHECK(got == expected, what);
+			};
+
 			auto uploadPending = [&](const char *what)
 			{
 				staging.beginFrame(0);
@@ -720,6 +833,9 @@ int main()
 
 			// (C) Emptied section: zero payload keeps its reserved slot,
 			// the range reads as zeros, and the draw stays valid.
+			int emptiedSection = -1;
+			int witnessSection = -1;
+			uint32_t witnessVOff = 0, witnessIOff = 0;
 			{
 				int target = -1;
 				uint16_t best = 0xFFFF;
@@ -761,6 +877,7 @@ int main()
 				      "cow: emptied slot keeps its reservation");
 				CHECK(vk.flush(), "cow: emptied submit");
 				compareIndexStream("cow: index stream after clear matches the composed payloads");
+				emptiedSection = target;
 			}
 
 			// (D) Full rebuild compacts the layout: exact slots,
@@ -792,8 +909,74 @@ int main()
 				std::sort(ends.begin(), ends.end());
 				CHECK(ends.empty() || ends.back() == ChunkStateProbe::usedI(*chunk),
 				      "cow: compacted layout is back-to-back");
+				// BLOCKER (PR #117 final review): the full repack must reset
+				// the whole slot table - a section emptied before the repack
+				// (here (C)'s target) must not keep the retired layout's
+				// offsets/capacities, or a later reactivation would re-stage
+				// in place outside the compacted buffer.
+				CHECK(ChunkStateProbe::slotEmpty(*chunk, emptiedSection),
+				      "cow: full repack drops the slot of an emptied section");
+				checkSectionGpuLayout(false, true,
+				                      "cow: opaque layout invariants after compaction");
+				checkSectionGpuLayout(true, true,
+				                      "cow: water layout invariants after compaction");
+				checkNoOverlap(false, "cow: opaque slots never overlap after compaction");
+				checkNoOverlap(true, "cow: water slots never overlap after compaction");
 				CHECK(vk.flush(), "cow: compaction submit");
 				compareIndexStream("cow: compacted index stream matches the composed payloads");
+				// Witness slot for the reactivation below.
+				for (int s = 0; s < kSections; ++s)
+					if (ChunkStateProbe::slotIUsed(*chunk, s) != 0)
+					{
+						witnessSection = s;
+						witnessVOff = ChunkStateProbe::slotVOff(*chunk, s);
+						witnessIOff = ChunkStateProbe::slotIOff(*chunk, s);
+						break;
+					}
+			}
+
+			// (D2) Reactivating a section the full repack left slotless must
+			// APPEND a fresh slot - never reuse the retired layout's stale
+			// offsets - and leave every other section byte-identical.
+			{
+				CHECK(witnessSection >= 0, "cow: witness section for reactivation");
+				const int y0 = emptiedSection * 16;
+				chunk->setVoxel(8, y0 + 8, 8, BRICKS);
+				const uint16_t mask = chunk->takeDirtySections();
+				CHECK((mask & (1u << emptiedSection)) != 0,
+				      "cow: reactivation dirties the emptied section");
+				{
+					MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
+					chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), mask);
+					chunk->getMeshResultPool()->finishBuild(r);
+					for (int s = 0; s < kSections; ++s)
+						if ((mask >> s) & 1u)
+							cpuView[static_cast<size_t>(s)] = r->sections[static_cast<size_t>(s)];
+					CHECK(chunk->publishMeshResult(r), "cow: reactivation result published");
+				}
+				uploadPending("cow: reactivation upload (fresh slot append)");
+				CHECK(!ChunkStateProbe::slotEmpty(*chunk, emptiedSection),
+				      "cow: reactivated section owns a real slot");
+				// The append path allocates from the end of the used region,
+				// so the fresh slot must close the packed extent - a stale
+				// offset reuse would sit mid-buffer instead.
+				CHECK(ChunkStateProbe::slotVOff(*chunk, emptiedSection) +
+				                  ChunkStateProbe::slotVSz(*chunk, emptiedSection) ==
+				              ChunkStateProbe::usedV(*chunk) &&
+				          ChunkStateProbe::slotIOff(*chunk, emptiedSection) +
+				                  ChunkStateProbe::slotISz(*chunk, emptiedSection) ==
+				              ChunkStateProbe::usedI(*chunk),
+				      "cow: reactivation appends its slot at the packed extent");
+				CHECK(ChunkStateProbe::slotVOff(*chunk, witnessSection) == witnessVOff &&
+				          ChunkStateProbe::slotIOff(*chunk, witnessSection) == witnessIOff,
+				      "cow: reactivation leaves other slots untouched");
+				checkSectionGpuLayout(false, false,
+				                      "cow: opaque layout invariants after reactivation");
+				checkNoOverlap(false,
+				               "cow: opaque slots never overlap after reactivation");
+				CHECK(vk.flush(), "cow: reactivation submit");
+				compareIndexStream("cow: index stream after reactivation matches the payloads");
+				compareVertexStream("cow: vertex payloads after reactivation match per slot");
 			}
 
 			// (E) LOD <-> full transitions reset the slot state cleanly.
@@ -809,6 +992,15 @@ int main()
 				CHECK(ChunkStateProbe::usedI(*chunk) == 0 &&
 				          ChunkStateProbe::usedV(*chunk) == 0,
 				      "cow: LOD upload zeroes the used extents");
+				{
+					bool waterSlots = false;
+					for (int s = 0; s < kSections; ++s)
+						waterSlots = waterSlots || !ChunkStateProbe::slotWEmpty(*chunk, s);
+					CHECK(!waterSlots &&
+					              ChunkStateProbe::usedWV(*chunk) == 0 &&
+					              ChunkStateProbe::usedWI(*chunk) == 0,
+					      "cow: LOD upload resets the water stream too");
+				}
 				// This seed's terrain is water-covered: the LOD carries water
 				// quads only, so the opaque draw count legitimately reads zero.
 				CHECK(chunk->getOpaqueIndexCount() > 0 || chunk->hasWaterMesh(),
@@ -851,6 +1043,106 @@ int main()
 				uploadPending("cow: full upload after parked partial");
 				CHECK(vk.flush(), "cow: parked-partial submit");
 				CHECK(chunk->getOpaqueIndexCount() > 0, "cow: draw count valid after the swap");
+			}
+
+			// (G) A fully emptied water stream (PR #117 final review): the
+			// full repack must leave every water slot {}, retire the water
+			// buffers and zero the draw state; re-adding one water voxel
+			// appends a fresh slot and the composed water stream matches
+			// the CPU payloads exactly.
+			{
+				int wx = -1, wy = -1, wz = -1;
+				for (int y = 0; y < static_cast<int>(CHUNK_HEIGHT) && wx < 0; ++y)
+					for (int x = 0; x < 16 && wx < 0; ++x)
+						for (int z = 0; z < 16 && wx < 0; ++z)
+							if (chunk->getVoxel(static_cast<uint32_t>(x),
+							                    static_cast<uint32_t>(y),
+							                    static_cast<uint32_t>(z))
+							        .type == static_cast<uint8_t>(WATER))
+							{
+								wx = x;
+								wy = y;
+								wz = z;
+							}
+				CHECK(wx >= 0, "cow: chunk holds water to empty");
+				for (int y = 0; y < static_cast<int>(CHUNK_HEIGHT); ++y)
+					for (int x = 0; x < 16; ++x)
+						for (int z = 0; z < 16; ++z)
+							if (chunk->getVoxel(static_cast<uint32_t>(x),
+							                    static_cast<uint32_t>(y),
+							                    static_cast<uint32_t>(z))
+							        .type == static_cast<uint8_t>(WATER))
+								chunk->setVoxel(x, y, z, AIR);
+				const uint16_t drainMask = chunk->takeDirtySections();
+				CHECK(drainMask != 0, "cow: water deletion dirties its sections");
+				{
+					MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
+					chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(),
+									 drainMask);
+					chunk->getMeshResultPool()->finishBuild(r);
+					for (int s = 0; s < kSections; ++s)
+						if ((drainMask >> s) & 1u)
+							cpuView[static_cast<size_t>(s)] = r->sections[static_cast<size_t>(s)];
+					CHECK(chunk->publishMeshResult(r), "cow: water-drain result published");
+				}
+				uploadPending("cow: water-drain partial upload");
+				// Partial path: cleared water slots keep their reservations
+				// (used extents zeroed, capacities intact).
+				{
+					bool anyWaterUsed = false;
+					for (int s = 0; s < kSections; ++s)
+						anyWaterUsed = anyWaterUsed ||
+						               ChunkStateProbe::slotWIUsed(*chunk, s) != 0;
+					CHECK(!anyWaterUsed,
+					      "cow: drained partial upload leaves no live water indices");
+				}
+
+				CHECK(chunk->generateMesh(), "cow: post-drain full rebuild publishes");
+				{
+					MeshBuildResult *r = ChunkStateProbe::pending(*chunk);
+					for (int s = 0; s < kSections; ++s)
+						cpuView[static_cast<size_t>(s)] = r->sections[static_cast<size_t>(s)];
+				}
+				uploadPending("cow: water-stream full repack upload");
+				CHECK(ChunkStateProbe::usedWV(*chunk) == 0 &&
+				          ChunkStateProbe::usedWI(*chunk) == 0 &&
+				          !chunk->hasWaterMesh(),
+				      "cow: repacked water stream carries nothing");
+				{
+					bool waterSlots = false;
+					for (int s = 0; s < kSections; ++s)
+						waterSlots = waterSlots || !ChunkStateProbe::slotWEmpty(*chunk, s);
+					CHECK(!waterSlots,
+					      "cow: full repack leaves no stale water slots");
+				}
+				CHECK(ChunkStateProbe::waterBuffer(*chunk).buffer == VK_NULL_HANDLE,
+				      "cow: empty water stream retires its buffers");
+				checkSectionGpuLayout(true, true,
+				                      "cow: water layout invariants after the empty repack");
+
+				// Re-activate: one water voxel back at a drained position.
+				chunk->setVoxel(static_cast<uint32_t>(wx), static_cast<uint32_t>(wy),
+				                static_cast<uint32_t>(wz), WATER);
+				const uint16_t mask = chunk->takeDirtySections();
+				CHECK((mask & (1u << (wy / 16))) != 0,
+				      "cow: re-added water dirties its section");
+				{
+					MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
+					chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), mask);
+					chunk->getMeshResultPool()->finishBuild(r);
+					for (int s = 0; s < kSections; ++s)
+						if ((mask >> s) & 1u)
+							cpuView[static_cast<size_t>(s)] = r->sections[static_cast<size_t>(s)];
+					CHECK(chunk->publishMeshResult(r), "cow: water reactivation published");
+				}
+				uploadPending("cow: water reactivation upload");
+				CHECK(chunk->hasWaterMesh() && ChunkStateProbe::usedWI(*chunk) > 0,
+				      "cow: water stream reactivated");
+				checkSectionGpuLayout(true, false,
+				                      "cow: water layout invariants after reactivation");
+				checkNoOverlap(true, "cow: water slots never overlap after reactivation");
+				CHECK(vk.flush(), "cow: water reactivation submit");
+				compareWaterStream("cow: water stream after reactivation matches the payloads");
 			}
 
 			// All submissions completed: safe to release every retired buffer

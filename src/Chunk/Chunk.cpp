@@ -1926,10 +1926,15 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
         p.clear = true;
         if (!fullRepack && slots[s].indexSlotBytes != 0)
         {
-          // Emptied section: zero its whole reserved index slot.
+          // Partial rebuild: preserve the reservation but neutralize its
+          // index range, so the section can re-activate in place without
+          // an append.
           p.clearIOff = slots[s].indexOffset;
           p.clearIBytes = slots[s].indexSlotBytes;
         }
+        // Full repack: no reservation is carried forward - executeStream()
+        // resets the slot table before committing the compact layout, so
+        // the emptied section reads as slotless there.
         continue;
       }
       p.active = true;
@@ -2093,6 +2098,16 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
     vertexBuf = newV;
     indexBuf = newI;
 
+    // Commit point passed (buffers swapped, copies recorded): a full repack
+    // invalidates the whole previous slot table. Old offsets/capacities
+    // refer to the retired layout and must never survive into the compacted
+    // replacement - a stale slot for a section that emptied would let a
+    // later partial upload plan an in-place re-stage outside the (smaller)
+    // new buffer (PR #117 final review). The commit loop below rebuilds
+    // every slot that carries content; the rest stay {}.
+    if (fullRepack)
+      slots.fill({});
+
     // Patch the fresh buffers (staged payloads + zero fills) and commit
     // the slot bookkeeping.
     auto recordFill = [&](VkDeviceSize dstOff, VkDeviceSize bytes)
@@ -2158,8 +2173,9 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
 
       // Commit the slot bookkeeping: in-place payloads keep their slot
       // geometry, (re)allocated slots take the planned one, and a cleared
-      // section keeps its reservation untouched (only the used extent
-      // drops to zero).
+      // section keeps its reservation on the partial path (only the used
+      // extent drops to zero). After a full repack the table started from
+      // all-zero, so a cleared section simply stays slotless.
       if (p.active && !p.inPlace)
       {
         slot.vertexOffset = p.vDst;
@@ -2172,6 +2188,20 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
       slot.indexUsedBytes = p.active ? p.iBytes : 0;
       slot.indexCount = p.active ? p.iBytes / sizeof(uint32_t) : 0;
     }
+#ifndef NDEBUG
+    if (fullRepack)
+    {
+      // Layout invariant (PR #117 final review): after a full repack every
+      // slot describes EXCLUSIVELY the fresh layout; sections absent from
+      // it must read as empty.
+      for (int s = 0; s < kOccupancySections; ++s)
+      {
+        if (plan.plans[s].active)
+          continue;
+        assert(slots[s].empty() && "full repack left a stale section slot");
+      }
+    }
+#endif
     vertexUsed = finalV;
     indexUsed = finalI;
   };
