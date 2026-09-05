@@ -16,6 +16,8 @@ public:
 	ImmediateCommands &operator=(const ImmediateCommands &) = delete;
 
 	void init(VkContext &context);
+	/// Device-level init without a full VkContext (headless tests).
+	void init(VkDevice device, VkQueue queue, uint32_t queueFamily);
 	void shutdown();
 
 	void submitAndWait(const std::function<void(VkCommandBuffer)> &record);

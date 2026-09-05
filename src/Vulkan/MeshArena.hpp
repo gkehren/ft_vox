@@ -115,7 +115,9 @@ struct MeshArenas
 	MeshArena waterVertex;
 	MeshArena waterIndex;
 
-	void init(VmaAllocator allocator, GpuResourceRetire &retire, uint32_t vertexAlignment);
+	void init(VmaAllocator allocator, GpuResourceRetire &retire, uint32_t vertexAlignment,
+	          VkDeviceSize vertexPageSize = 128ull * 1024ull * 1024ull,
+	          VkDeviceSize indexPageSize = 64ull * 1024ull * 1024ull);
 	void shutdown();
 	void beginFrame(uint64_t frameNumber);
 };

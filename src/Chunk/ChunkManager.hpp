@@ -114,6 +114,8 @@ public:
 	size_t pendingGenJobs() const;
 	size_t pendingMeshJobs() const;
 	ChunkPool *getChunkPool() const { return m_chunkPool; }
+	/// Test/inspection access to the active chunk set (unordered).
+	const std::vector<Chunk *> &getActiveChunks() const { return m_activeChunks; }
 
 	/// Synchronous bootstrap near spawn so the first frame has terrain.
 	void generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
