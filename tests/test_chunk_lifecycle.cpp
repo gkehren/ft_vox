@@ -999,6 +999,16 @@ int main(int argc, char **argv)
 		CHECK(origin != nullptr && east != nullptr && west != nullptr &&
 				  south != nullptr && north != nullptr,
 			  "primary and four neighbors registered by the load path");
+		// Generate the loaded chunks synchronously (the tests run without a
+		// thread pool, so generatePendingVoxels is a no-op): the edit
+		// contract applies immediate edits only to GENERATED chunks - on
+		// UNLOADED chunks everything queues until generation lands (issue
+		// #115 blocker).
+		for (Chunk *c : {origin, east, west, south, north})
+		{
+			CHECK(c->prepareVoxelStorageForGeneration(), "13e synchronous prepare");
+			c->generateTerrain(mgen);
+		}
 		if (origin && east && west && south && north)
 		{
 			// (0) Coordinate validation gates the whole edit pipeline
@@ -1638,6 +1648,135 @@ int main(int argc, char **argv)
 
 		pool.release(lodFull);
 		pool.release(full);
+	}
+
+	// 19) Edits on chunks still waiting for terrain generation (issue #115
+	// blocker): an UNLOADED chunk - in transit or not - never takes a
+	// direct edit. placeVoxel reports logical acceptance and queues;
+	// deleteVoxel is the no-op its logical-AIR state implies; the queued
+	// edits apply only after generation produces readable backing, and
+	// generation itself is never short-circuited.
+	{
+		ChunkPool pool(32);
+		TerrainGenerator wgen(4711);
+		ChunkManager manager(&wgen, nullptr, &pool);
+
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(64);
+
+		// (a) Loaded but generation never dispatched.
+		Chunk *waiting = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		Chunk *eastN = manager.getChunkAtWorldPos(
+			glm::vec3(static_cast<float>(CHUNK_SIZE) + 4.0f, 40.0f, 4.0f));
+		CHECK(waiting != nullptr && eastN != nullptr,
+			  "loaded-not-generated chunks registered");
+		if (waiting && eastN)
+		{
+			CHECK(waiting->getState() == ChunkState::UNLOADED,
+				  "chunk loaded but not yet generated");
+			CHECK(!waiting->isInTransit(), "no generation dispatched yet");
+			const size_t queuedBefore = ChunkManagerProbe::pendingEdits(manager);
+
+			// Delete on a logically-empty UNLOADED chunk: refused, nothing
+			// queued, backing untouched.
+			CHECK(!manager.deleteVoxel(glm::vec3(4.0f, 80.0f, 4.0f)),
+				  "delete on UNLOADED chunk is refused (logical AIR)");
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == queuedBefore,
+				  "refused delete queues nothing");
+
+			// Place: logical acceptance, physical deferral.
+			CHECK(manager.placeVoxel(glm::vec3(4.0f, 80.0f, 4.0f), STONE),
+				  "place on UNLOADED chunk is logically accepted");
+			CHECK(waiting->getState() == ChunkState::UNLOADED,
+				  "queued edit does not change the chunk state");
+			CHECK(!waiting->isVoxelActive(4, 80, 4),
+				  "queued edit does not touch the stale backing");
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == queuedBefore + 1,
+				  "accepted place queues exactly one target entry");
+
+			// (b) Coalescing while waiting for generation: place, delete
+			// and re-place on the same coordinate collapse to one entry
+			// whose type is the last logical state.
+			CHECK(manager.deleteVoxel(glm::vec3(4.0f, 80.0f, 4.0f)),
+				  "delete of the queued stone is accepted (overlay sees STONE)");
+			CHECK(manager.placeVoxel(glm::vec3(4.0f, 80.0f, 4.0f), BRICKS),
+				  "re-place on the queued coordinate is accepted");
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == queuedBefore + 1,
+				  "successive edits coalesce to one pending entry");
+
+			// (c) UNLOADED + inTransit defers exactly like UNLOADED alone.
+			waiting->setInTransit(true); // generation job hypothetically in flight
+			CHECK(manager.placeVoxel(glm::vec3(5.0f, 80.0f, 4.0f), STONE),
+				  "place while UNLOADED+inTransit is logically accepted");
+			waiting->setInTransit(false);
+			CHECK(!waiting->isVoxelActive(5, 80, 4),
+				  "transit deferral also skips the stale backing");
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == queuedBefore + 2,
+				  "second coordinate queues a second entry");
+
+			// (d) Generation is not short-circuited: the terrain lands in
+			// full, then the queued edits apply on top of it.
+			CHECK(waiting->prepareVoxelStorageForGeneration(),
+				  "prepare before synchronous generation");
+			waiting->generateTerrain(wgen);
+			CHECK(waiting->getState() == ChunkState::GENERATED,
+				  "terrain generation completes with queued edits pending");
+			manager.processFinishedJobs();
+			CHECK(waiting->getVoxel(4, 0, 4).type != static_cast<uint8_t>(AIR),
+				  "generated terrain is present below the edits");
+			CHECK(waiting->getVoxel(4, 80, 4).type == static_cast<uint8_t>(BRICKS),
+				  "coalesced edit applies its last logical state after generation");
+			CHECK(waiting->getVoxel(5, 80, 4).type == static_cast<uint8_t>(STONE),
+				  "transit-queued edit applies after generation");
+			checkOccupancyMetadataInSync(*waiting,
+										 "metadata in sync after queued edits land on generated terrain");
+		}
+
+		// (e) Mirror toward an UNLOADED neighbor: the GENERATED target
+		// applies immediately while the neighbor's mirror write queues;
+		// it applies once the neighbor's own generation completes.
+		Chunk *target = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		Chunk *eastAgain = manager.getChunkAtWorldPos(
+			glm::vec3(static_cast<float>(CHUNK_SIZE) + 4.0f, 40.0f, 4.0f));
+		CHECK(target != nullptr && eastAgain != nullptr, "mirror-scenario chunks found");
+		if (target && eastAgain && target->getState() == ChunkState::GENERATED)
+		{
+			int yEdge = -1;
+			for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+				if (target->getVoxel(CHUNK_SIZE - 1, y, 8).type == static_cast<uint8_t>(AIR))
+				{
+					yEdge = y;
+					break;
+				}
+			CHECK(yEdge > 0, "found an air cell on the target's east edge");
+
+			CHECK(manager.placeVoxel(glm::vec3(15.0f, static_cast<float>(yEdge), 8.0f), STONE),
+				  "boundary edit on the generated target is accepted");
+			CHECK(target->getVoxel(CHUNK_SIZE - 1, yEdge, 8).type == static_cast<uint8_t>(STONE),
+				  "generated target applies its own edit immediately");
+			CHECK(eastAgain->getState() == ChunkState::UNLOADED,
+				  "mirror neighbor is still UNLOADED");
+			CHECK(eastAgain->sampleForMeshing(-1, yEdge, 8) == AIR,
+				  "mirror write does not touch the UNLOADED neighbor");
+			CHECK(ChunkManagerProbe::pendingEdits(manager) == 1,
+				  "exactly the neighbor mirror stays queued");
+
+			const uint64_t revAfterGen = eastAgain->meshRevision();
+			CHECK(eastAgain->prepareVoxelStorageForGeneration(),
+				  "neighbor prepare before its generation");
+			eastAgain->generateTerrain(wgen);
+			CHECK(eastAgain->getState() == ChunkState::GENERATED,
+				  "neighbor generation completes");
+			manager.processFinishedJobs();
+			CHECK(eastAgain->sampleForMeshing(-1, yEdge, 8) == STONE,
+				  "queued mirror applies after the neighbor generates");
+			CHECK(eastAgain->meshRevision() > revAfterGen,
+				  "applied mirror invalidates the neighbor for remesh");
+			checkOccupancyMetadataInSync(*eastAgain,
+										 "neighbor metadata in sync after mirror application");
+		}
 	}
 
 	if (g_fails != 0)

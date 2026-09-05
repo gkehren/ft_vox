@@ -166,6 +166,14 @@ public:
 	void releaseGPUDeferred(GpuResourceRetire &retire);
 
 	bool isShellEmpty() const { return m_borders == nullptr; }
+	/// Occupancy lifecycle (issue #115): the voxel backing holds stale pool
+	/// bytes until terrain generation initializes it. True only in the
+	/// generated/editable states (GENERATED or MESHED) - the gate every
+	/// direct voxel read/write must pass.
+	bool isVoxelBackingReadable() const
+	{
+		return state.load() != ChunkState::UNLOADED;
+	}
 
 	/// Layout-independent border sampling for meshing (issue #103).
 	/// Accepts the full padded range used by the greedy mesher: in-chunk
