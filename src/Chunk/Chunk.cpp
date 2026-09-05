@@ -1788,10 +1788,23 @@ inline uint32_t alignUpBytes(uint32_t value, uint32_t alignment)
 {
   return (value + alignment - 1) / alignment * alignment;
 }
-// Slot reservation for a (re)allocated section: live payload + 25% headroom
-// so bursts of edits in one section mostly re-stage in place instead of
-// appending new slots. Vertex reservations stay multiples of sizeof(Vertex)
-// so the section's index base is exact.
+// Index slots and their slack must sit on whole-triangle boundaries: the
+// chunk draws ONE packed index stream from offset 0, so a gap (slot slack,
+// abandoned slot) only decodes as degenerate triangles when the gap's start
+// and length are multiples of one triangle (PR #117 review). Greedy payloads
+// are always whole quads (6 indices), so this only shapes reservations.
+constexpr uint32_t kTriangleIndexCount = 3;
+constexpr uint32_t kTriangleBytes = kTriangleIndexCount * sizeof(uint32_t);
+inline uint32_t alignUpTriangles(uint32_t indexBytes)
+{
+  return alignUpBytes(indexBytes, kTriangleBytes);
+}
+// Slot reservation for an edit-driven (re)allocation: live payload + 25%
+// headroom so bursts of edits in one section mostly re-stage in place
+// instead of appending new slots. Vertex reservations stay multiples of
+// sizeof(Vertex) so the section's index base is exact; index reservations
+// stay multiples of one triangle so appended slots never unalign the
+// packed draw stream. Full repacks use exact sizes instead.
 inline uint32_t vertexSlotCapacity(uint32_t payloadBytes)
 {
   return std::max<uint32_t>(alignUpBytes(payloadBytes + payloadBytes / 4, sizeof(Vertex)),
@@ -1799,45 +1812,47 @@ inline uint32_t vertexSlotCapacity(uint32_t payloadBytes)
 }
 inline uint32_t indexSlotCapacity(uint32_t payloadBytes)
 {
-  return std::max<uint32_t>(alignUpBytes(payloadBytes + payloadBytes / 4, sizeof(uint32_t)),
-                            6 * sizeof(uint32_t));
+  return std::max<uint32_t>(alignUpTriangles(payloadBytes + payloadBytes / 4),
+                            2 * kTriangleBytes);
 }
 } // namespace
 
-// Shared sectioned-upload core (issue #107): places the build result's
-// section payloads into the chunk-level vertex/index buffer pairs. Each
-// section owns a slot (offset + reservation, indices stored rebased onto
-// the section's vertex base); a payload that fits its slot is re-staged in
-// place, an outgrown payload gets a fresh slot APPENDED at the end of the
-// used region - existing slots never move, so stored indices stay valid
-// without a rewrite. When capacity runs out the buffer is re-created and
-// its used region copied to offset 0 (plain bytes; offsets are unchanged).
+// Shared sectioned-upload core (issue #107, rewritten after the PR #117
+// review). Copy-on-write: every upload records its writes into FRESH
+// buffers, never into a buffer an in-flight frame may still be reading.
+//   - Full repack (fresh stream, LOD leftover, or sectionsBuilt == all):
+//     compact back-to-back exact slots - no reservations, no gaps, no
+//     fragmentation; everything is staged from the CPU payload.
+//   - Partial build: the current layout is preserved by a whole-buffer
+//     device copy (offsets - and with them the stored rebased indices -
+//     stay valid), then only the masked sections' ranges are patched in
+//     the copy: in-place re-stage when the payload fits its slot, an
+//     appended slot when it outgrows it (the abandoned slot is zeroed),
+//     a zero fill when a section empties. The zero fills go through
+//     vkCmdFillBuffer - no staged zero bytes.
+// Index slots and slack are triangle-aligned, so the single packed
+// drawIndexed over [0, indexUsed) only ever decodes live triangles or
+// whole degenerate (all-zero) triangles.
+//
+// The upload is ONE transaction across both streams (PR #117 review):
+// plan opaque + water, preflight and reserve all staging, and only then
+// create buffers / record copies / commit. After the preflight the
+// execution cannot fail, so a staging deferral leaves every GPU handle,
+// slot, used extent and draw count untouched.
 //
 // staging/cmd/retire carry the async frame path; imm carries the
-// bootstrap/test path. Returns false only when the async staging ring is
-// full: the result stays attached, already-recorded copies are idempotent,
-// and the upload retries next frame.
+// bootstrap/test path (which always repacks: uploadToGPU releases the old
+// GPU state first). Returns false only when the async staging ring cannot
+// hold the upload: the result stays attached and the upload retries next
+// frame.
 bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
                                StagingRing *staging, VkCommandBuffer cmd,
                                GpuResourceRetire *retire, ImmediateCommands *imm)
 {
-  // Three passes keep a staging failure free of GPU-state mutation:
-  //   1. plan every masked section (in place vs appended slot) and reserve +
-  //      fill the staging slices - the vertex bases of appended slots are
-  //      deterministic here, so rebased indices are written once;
-  //   2. create/grow the buffers (the whole old buffer is copied to offset 0
-  //      of the new one, so every existing slot keeps its offset);
-  //   3. record the copies (or upload directly on the bootstrap path) and
-  //      commit the slot bookkeeping.
-  uint64_t stagedVertexBytes = 0;
-  uint64_t stagedIndexBytes = 0;
-  std::vector<uint32_t> rebased;    // bootstrap-path index rebase scratch
-  std::vector<uint32_t> zeroScratch; // bootstrap-path zero fill scratch
-
   struct SectionPlan
   {
     bool active{false};  // masked and holds content
-    bool clear{false};   // masked but emptied: clear the slot content
+    bool clear{false};   // masked but emptied
     bool inPlace{false};
     uint32_t vBytes{0};
     uint32_t iBytes{0};
@@ -1846,10 +1861,10 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
     uint32_t vBase{0};
     uint32_t newVSlot{0};
     uint32_t newISlot{0};
-    // Index-stream bytes that must read as zero inside the drawn range
-    // [0, indexUsed): the slot's unused slack, and (for appended slots) the
-    // abandoned previous slot. Keeps the single chunk-level drawIndexed
-    // correct without ever compacting the buffer.
+    // Index ranges that must read as zero inside the drawn region: the
+    // slot's slack, and (for appended slots) the abandoned previous slot,
+    // plus the whole slot of a section that emptied while staying
+    // reserved.
     uint32_t zeroIOff{0};
     uint32_t zeroIBytes{0};
     uint32_t clearIOff{0};
@@ -1858,61 +1873,83 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
     void *stageVPtr{nullptr};
     VkDeviceSize stageIOff{0};
     void *stageIPtr{nullptr};
-    VkDeviceSize stageZeroOff{0};
-    void *stageZeroPtr{nullptr};
   };
-
-  auto uploadStream = [&](auto payloadSel, AllocatedBuffer &vertexBuf,
-                          AllocatedBuffer &indexBuf,
-                          std::array<SectionGpuSlot, kOccupancySections> &slots,
-                          uint32_t &vertexUsed, uint32_t &indexUsed,
-                          VkBufferUsageFlags vertexUsage, VkBufferUsageFlags indexUsage,
-                          telemetry::Gauge vertexGauge, telemetry::Gauge indexGauge) -> bool
+  struct StreamPlan
   {
     SectionPlan plans[kOccupancySections]{};
-    const bool freshStream = (vertexBuf.buffer == VK_NULL_HANDLE);
-    // A stream without live slots (fresh, or a whole-buffer LOD mesh that a
-    // sectioned upload replaces) is laid out from scratch with EXACT slot
-    // sizes - never-edited chunks must carry no reservation waste (issue
-    // #107 review). Only edit-driven appends on an existing layout buy
-    // headroom.
-    const bool exactSizing = freshStream || vertexUsed == 0;
-    // Cursor for appended slots; appended slots never move existing ones.
-    uint32_t curV = vertexUsed;
-    uint32_t curI = indexUsed;
+    bool fullRepack{false};
+    uint32_t finalV{0};
+    uint32_t finalI{0};
+    VkDeviceSize stagingNeeded{0};
+  };
 
-    // Pass 1: plan + reserve staging before touching any GPU state.
-    uint32_t appendCapV = 0;
-    uint32_t appendCapI = 0;
+  uint64_t stagedVertexBytes = 0;
+  uint64_t stagedIndexBytes = 0;
+  std::vector<uint32_t> zeroScratch; // bootstrap-path zero fill scratch
+
+  auto planStream = [&](auto payloadSel, AllocatedBuffer &vertexBuf,
+                        AllocatedBuffer &indexBuf,
+                        std::array<SectionGpuSlot, kOccupancySections> &slots,
+                        uint32_t vertexUsed, uint32_t indexUsed,
+                        StreamPlan &plan)
+  {
+    const bool freshStream = (vertexBuf.buffer == VK_NULL_HANDLE);
+    // Full repack when there is no usable previous layout: fresh stream, a
+    // whole-buffer LOD mesh, or an all-sections build (every payload is
+    // re-staged, so the fragmented edit layout can be compacted away -
+    // PR #117 review). Only partial builds on a live layout keep slot
+    // reservations (and their headroom).
+    plan.fullRepack = freshStream || vertexUsed == 0 ||
+                      result.sectionsBuilt == kAllSectionMask;
+    const bool fullRepack = plan.fullRepack;
+    assert(fullRepack || vertexUsed % sizeof(Vertex) == 0);
+    assert(fullRepack || indexUsed % kTriangleBytes == 0);
+
+    uint32_t curV = fullRepack ? 0 : vertexUsed;
+    uint32_t curI = fullRepack ? 0 : indexUsed;
     for (int s = 0; s < kOccupancySections; ++s)
     {
-      SectionPlan &p = plans[s];
+      SectionPlan &p = plan.plans[s];
       if (((result.sectionsBuilt >> s) & 1u) == 0)
+      {
+        // Dispatch contract: a partial result only reaches the upload when
+        // the chunk already carries sectioned GPU state (issue #107).
+        assert(fullRepack && "partial result without sectioned GPU state");
         continue;
+      }
       const auto [verts, idxs] = payloadSel(s);
       p.vBytes = static_cast<uint32_t>(verts->size() * sizeof(Vertex));
       p.iBytes = static_cast<uint32_t>(idxs->size() * sizeof(uint32_t));
+      assert(p.iBytes % kTriangleBytes == 0);
       if (p.vBytes == 0 && p.iBytes == 0)
       {
         p.clear = true;
+        if (!fullRepack && slots[s].indexSlotBytes != 0)
+        {
+          // Emptied section: zero its whole reserved index slot.
+          p.clearIOff = slots[s].indexOffset;
+          p.clearIBytes = slots[s].indexSlotBytes;
+        }
         continue;
       }
       p.active = true;
-      if (!freshStream && p.vBytes <= slots[s].vertexSlotBytes &&
+      if (!fullRepack && p.vBytes <= slots[s].vertexSlotBytes &&
           p.iBytes <= slots[s].indexSlotBytes)
       {
         p.inPlace = true;
         p.vDst = slots[s].vertexOffset;
         p.iDst = slots[s].indexOffset;
         p.vBase = slots[s].vertexBase;
+        p.zeroIOff = p.iDst + p.iBytes;
+        p.zeroIBytes = slots[s].indexSlotBytes - p.iBytes;
       }
       else
       {
-        p.newVSlot = exactSizing ? alignUpBytes(p.vBytes, sizeof(Vertex))
-                                 : vertexSlotCapacity(p.vBytes);
-        p.newISlot = exactSizing ? alignUpBytes(p.iBytes, sizeof(uint32_t))
-                                 : indexSlotCapacity(p.iBytes);
-        if (slots[s].indexSlotBytes != 0)
+        p.newVSlot = fullRepack ? alignUpBytes(p.vBytes, sizeof(Vertex))
+                                : vertexSlotCapacity(p.vBytes);
+        p.newISlot = fullRepack ? alignUpTriangles(p.iBytes)
+                                : indexSlotCapacity(p.iBytes);
+        if (!fullRepack && slots[s].indexSlotBytes != 0)
         {
           // The replaced slot is abandoned: its byte range must read as
           // zero inside the drawn range.
@@ -1924,195 +1961,206 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
         curV += p.newVSlot;
         p.iDst = curI;
         curI += p.newISlot;
-        appendCapV += p.newVSlot;
-        appendCapI += p.newISlot;
+        p.zeroIOff = p.iDst + p.iBytes;
+        p.zeroIBytes = p.newISlot - p.iBytes;
       }
-      // The slot slack sits inside the drawn range: zero it.
-      p.zeroIOff = p.iDst + p.iBytes;
-      p.zeroIBytes = (p.inPlace ? slots[s].indexSlotBytes : p.newISlot) - p.iBytes;
+      assert(p.iDst % kTriangleBytes == 0);
+      assert(p.zeroIBytes % kTriangleBytes == 0);
       if (staging)
       {
-        if (p.vBytes != 0)
-        {
-          if (!staging->alloc(p.vBytes, p.stageVOff, p.stageVPtr))
-            return false;
-          std::memcpy(p.stageVPtr, verts->data(), p.vBytes);
-        }
-        if (p.iBytes != 0)
-        {
-          if (!staging->alloc(p.iBytes, p.stageIOff, p.stageIPtr))
-            return false;
-          uint32_t *out = static_cast<uint32_t *>(p.stageIPtr);
-          for (size_t k = 0; k < idxs->size(); ++k)
-            out[k] = (*idxs)[k] + p.vBase;
-        }
-        const VkDeviceSize zeroTotal =
-            static_cast<VkDeviceSize>(p.zeroIBytes + p.clearIBytes);
-        if (zeroTotal != 0)
-        {
-          if (!staging->alloc(zeroTotal, p.stageZeroOff, p.stageZeroPtr))
-            return false;
-          std::memset(p.stageZeroPtr, 0, static_cast<size_t>(zeroTotal));
-        }
+        plan.stagingNeeded +=
+            static_cast<VkDeviceSize>(alignUpBytes(p.vBytes, StagingRing::kAlignment)) +
+            alignUpBytes(p.iBytes, StagingRing::kAlignment);
       }
     }
+    plan.finalV = fullRepack ? curV : std::max(vertexUsed, curV);
+    plan.finalI = fullRepack ? curI : std::max(indexUsed, curI);
+    assert(plan.finalI % kTriangleBytes == 0);
+  };
 
-    // Pass 2: buffer creation/growth (offset-preserving).
-    if (freshStream)
-    {
-      if (appendCapV == 0 && appendCapI == 0)
-        return true; // stream carries no masked content
-      vertexBuf = createBuffer(allocator, std::max<VkDeviceSize>(appendCapV, 1),
-                               VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                               VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-      trackMeshBuffer(vertexBuf, vertexGauge);
-      indexBuf = createBuffer(allocator, std::max<VkDeviceSize>(appendCapI, 1),
-                              VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                              VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-      trackMeshBuffer(indexBuf, indexGauge);
-      vertexUsed = 0;
-      indexUsed = 0;
-    }
-    else
-    {
-      auto grow = [&](AllocatedBuffer &buf, uint32_t liveBytes, uint32_t needed,
-                      VkBufferUsageFlags usage, telemetry::Gauge gauge)
-      {
-        if (static_cast<VkDeviceSize>(needed) <= buf.size)
-          return;
-        const VkDeviceSize newCapacity =
-            std::max<VkDeviceSize>(needed, buf.size * 2);
-        AllocatedBuffer nb = createBuffer(allocator, newCapacity,
-                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
-                                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-        trackMeshBuffer(nb, gauge);
-        // Copy only the live region [0, liveBytes): every slot keeps its
-        // offset, and bytes beyond it were never live.
-        const VkDeviceSize bytes = liveBytes;
-        if (bytes != 0 && staging)
-        {
-          VkBufferCopy copy{};
-          copy.srcOffset = 0;
-          copy.dstOffset = 0;
-          copy.size = bytes;
-          vkCmdCopyBuffer(cmd, buf.buffer, nb.buffer, 1, &copy);
-          retire->retireBuffer(buf);
-        }
-        else
-        {
-          if (bytes != 0)
-          {
-            imm->submitAndWait([&](VkCommandBuffer c)
-            {
-              VkBufferCopy copy{};
-              copy.srcOffset = 0;
-              copy.dstOffset = 0;
-              copy.size = bytes;
-              vkCmdCopyBuffer(c, buf.buffer, nb.buffer, 1, &copy);
-            });
-          }
-          destroyBuffer(allocator, buf);
-        }
-        buf = nb;
-      };
-      grow(vertexBuf, vertexUsed, curV, vertexUsage, vertexGauge);
-      grow(indexBuf, indexUsed, curI, indexUsage, indexGauge);
-    }
-
-    // Pass 3: record/upload and commit slot bookkeeping.
+  auto reserveStream = [&](auto payloadSel, StreamPlan &plan) -> bool
+  {
+    if (!staging)
+      return true;
     for (int s = 0; s < kOccupancySections; ++s)
     {
-      SectionPlan &p = plans[s];
+      SectionPlan &p = plan.plans[s];
+      if (!p.active)
+        continue;
+      const auto [verts, idxs] = payloadSel(s);
+      if (p.vBytes != 0)
+      {
+        if (!staging->alloc(p.vBytes, p.stageVOff, p.stageVPtr))
+          return false;
+        std::memcpy(p.stageVPtr, verts->data(), p.vBytes);
+      }
+      if (p.iBytes != 0)
+      {
+        if (!staging->alloc(p.iBytes, p.stageIOff, p.stageIPtr))
+          return false;
+        // Indices are stored rebased onto the section's vertex base.
+        uint32_t *out = static_cast<uint32_t *>(p.stageIPtr);
+        for (size_t k = 0; k < idxs->size(); ++k)
+          out[k] = (*idxs)[k] + p.vBase;
+      }
+    }
+    return true;
+  };
+
+  auto executeStream = [&](auto payloadSel, AllocatedBuffer &vertexBuf,
+                           AllocatedBuffer &indexBuf,
+                           std::array<SectionGpuSlot, kOccupancySections> &slots,
+                           uint32_t &vertexUsed, uint32_t &indexUsed,
+                           VkBufferUsageFlags vertexUsage, VkBufferUsageFlags indexUsage,
+                           telemetry::Gauge vertexGauge, telemetry::Gauge indexGauge,
+                           StreamPlan &plan)
+  {
+    const bool fullRepack = plan.fullRepack;
+    const uint32_t finalV = plan.finalV;
+    const uint32_t finalI = plan.finalI;
+
+    // Fresh buffers + preserve copy (first GPU mutation).
+    const bool haveOldV = vertexBuf.buffer != VK_NULL_HANDLE;
+    const bool haveOldI = indexBuf.buffer != VK_NULL_HANDLE;
+    const bool makeV = finalV != 0 || (haveOldV && !fullRepack);
+    const bool makeI = finalI != 0 || (haveOldI && !fullRepack);
+    AllocatedBuffer newV{}, newI{};
+    bool preservedV = false, preservedI = false;
+    if (makeV)
+    {
+      newV = createBuffer(allocator, std::max<VkDeviceSize>(finalV, vertexBuf.size),
+                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                              VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                              vertexUsage,
+                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+      trackMeshBuffer(newV, vertexGauge);
+      if (haveOldV && !fullRepack && vertexUsed != 0)
+      {
+        VkBufferCopy copy{};
+        copy.srcOffset = 0;
+        copy.dstOffset = 0;
+        copy.size = vertexUsed;
+        vkCmdCopyBuffer(cmd, vertexBuf.buffer, newV.buffer, 1, &copy);
+        preservedV = true;
+      }
+    }
+    if (makeI)
+    {
+      newI = createBuffer(allocator, std::max<VkDeviceSize>(finalI, indexBuf.size),
+                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                              VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                              indexUsage,
+                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+      trackMeshBuffer(newI, indexGauge);
+      if (haveOldI && !fullRepack && indexUsed != 0)
+      {
+        VkBufferCopy copy{};
+        copy.srcOffset = 0;
+        copy.dstOffset = 0;
+        copy.size = indexUsed;
+        vkCmdCopyBuffer(cmd, indexBuf.buffer, newI.buffer, 1, &copy);
+        preservedI = true;
+      }
+    }
+    if (preservedV || preservedI)
+    {
+      // The preserve copies overlap the patch ranges below; order them
+      // before the patches (PR #117 review).
+      VkMemoryBarrier barrier{};
+      barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+      barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier,
+                           0, nullptr, 0, nullptr);
+    }
+    // Retire/destroy the previous buffers only after the copies reading
+    // them are recorded.
+    if (haveOldV)
+    {
+      if (retire)
+        retire->retireBuffer(vertexBuf);
+      else
+        destroyBuffer(allocator, vertexBuf);
+    }
+    if (haveOldI)
+    {
+      if (retire)
+        retire->retireBuffer(indexBuf);
+      else
+        destroyBuffer(allocator, indexBuf);
+    }
+    vertexBuf = newV;
+    indexBuf = newI;
+
+    // Patch the fresh buffers (staged payloads + zero fills) and commit
+    // the slot bookkeeping.
+    auto recordFill = [&](VkDeviceSize dstOff, VkDeviceSize bytes)
+    {
+      if (bytes == 0)
+        return;
+      // Offsets/sizes are triangle multiples => multiples of 4, as
+      // vkCmdFillBuffer requires. The bootstrap path (no ring) stages the
+      // zeros through ImmediateCommands instead.
+      if (staging)
+        vkCmdFillBuffer(cmd, indexBuf.buffer, dstOff, bytes, 0);
+      else
+      {
+        zeroScratch.assign(static_cast<size_t>(bytes / sizeof(uint32_t)), 0);
+        uploadBuffer(allocator, *imm, indexBuf, zeroScratch.data(), bytes, dstOff);
+      }
+    };
+    for (int s = 0; s < kOccupancySections; ++s)
+    {
+      SectionPlan &p = plan.plans[s];
       SectionGpuSlot &slot = slots[s];
       if (!p.active && !p.clear)
         continue;
-      if (p.clear)
+      if (p.active)
       {
-        // Emptied section: zero its whole index slot (it stays reserved).
-        if (slot.indexSlotBytes != 0)
+        if (staging)
         {
-          if (staging)
+          if (p.vBytes != 0)
           {
             VkBufferCopy copy{};
-            copy.srcOffset = p.stageZeroOff;
-            copy.dstOffset = slot.indexOffset;
-            copy.size = slot.indexSlotBytes;
-            vkCmdCopyBuffer(cmd, staging->buffer(), indexBuf.buffer, 1, &copy);
+            copy.srcOffset = p.stageVOff;
+            copy.dstOffset = p.vDst;
+            copy.size = p.vBytes;
+            vkCmdCopyBuffer(cmd, staging->buffer(), vertexBuf.buffer, 1, &copy);
+            stagedVertexBytes += p.vBytes;
           }
-          else
+          if (p.iBytes != 0)
           {
-            zeroScratch.assign(slot.indexSlotBytes / sizeof(uint32_t), 0);
-            uploadBuffer(allocator, *imm, indexBuf, zeroScratch.data(),
-                         slot.indexSlotBytes, slot.indexOffset);
+            VkBufferCopy copy{};
+            copy.srcOffset = p.stageIOff;
+            copy.dstOffset = p.iDst;
+            copy.size = p.iBytes;
+            vkCmdCopyBuffer(cmd, staging->buffer(), indexBuf.buffer, 1, &copy);
+            stagedIndexBytes += p.iBytes;
           }
         }
-        slot.vertexUsedBytes = 0;
-        slot.indexUsedBytes = 0;
-        slot.indexCount = 0;
-        continue;
-      }
-      if (staging)
-      {
-        if (p.vBytes != 0)
+        else
         {
-          VkBufferCopy copy{};
-          copy.srcOffset = p.stageVOff;
-          copy.dstOffset = p.vDst;
-          copy.size = p.vBytes;
-          vkCmdCopyBuffer(cmd, staging->buffer(), vertexBuf.buffer, 1, &copy);
-          stagedVertexBytes += p.vBytes;
-        }
-        if (p.iBytes != 0)
-        {
-          VkBufferCopy copy{};
-          copy.srcOffset = p.stageIOff;
-          copy.dstOffset = p.iDst;
-          copy.size = p.iBytes;
-          vkCmdCopyBuffer(cmd, staging->buffer(), indexBuf.buffer, 1, &copy);
-          stagedIndexBytes += p.iBytes;
-        }
-        VkDeviceSize zeroDone = 0;
-        auto recordZero = [&](VkDeviceSize dstOff, VkDeviceSize bytes)
-        {
-          if (bytes == 0)
-            return;
-          VkBufferCopy copy{};
-          copy.srcOffset = p.stageZeroOff + zeroDone;
-          copy.dstOffset = dstOff;
-          copy.size = bytes;
-          vkCmdCopyBuffer(cmd, staging->buffer(), indexBuf.buffer, 1, &copy);
-          zeroDone += bytes;
-        };
-        recordZero(p.zeroIOff, p.zeroIBytes);
-        recordZero(p.clearIOff, p.clearIBytes);
-        stagedIndexBytes += zeroDone;
-      }
-      else
-      {
-        const auto [verts, idxs] = payloadSel(s);
-        if (p.vBytes != 0)
-          uploadBuffer(allocator, *imm, vertexBuf, verts->data(), p.vBytes, p.vDst);
-        if (p.iBytes != 0)
-        {
-          rebased.resize(idxs->size());
-          for (size_t k = 0; k < idxs->size(); ++k)
-            rebased[k] = (*idxs)[k] + p.vBase;
-          uploadBuffer(allocator, *imm, indexBuf, rebased.data(), p.iBytes, p.iDst);
-        }
-        if (p.zeroIBytes != 0)
-        {
-          zeroScratch.assign(p.zeroIBytes / sizeof(uint32_t), 0);
-          uploadBuffer(allocator, *imm, indexBuf, zeroScratch.data(), p.zeroIBytes, p.zeroIOff);
-        }
-        if (p.clearIBytes != 0)
-        {
-          zeroScratch.assign(p.clearIBytes / sizeof(uint32_t), 0);
-          uploadBuffer(allocator, *imm, indexBuf, zeroScratch.data(), p.clearIBytes, p.clearIOff);
+          const auto [verts, idxs] = payloadSel(s);
+          if (p.vBytes != 0)
+            uploadBuffer(allocator, *imm, vertexBuf, verts->data(), p.vBytes, p.vDst);
+          if (p.iBytes != 0)
+          {
+            std::vector<uint32_t> rebased(idxs->size());
+            for (size_t k = 0; k < idxs->size(); ++k)
+              rebased[k] = (*idxs)[k] + p.vBase;
+            uploadBuffer(allocator, *imm, indexBuf, rebased.data(), p.iBytes, p.iDst);
+          }
         }
       }
-      if (!p.inPlace)
+      recordFill(p.zeroIOff, p.zeroIBytes);
+      recordFill(p.clearIOff, p.clearIBytes);
+
+      // Commit the slot bookkeeping: in-place payloads keep their slot
+      // geometry, (re)allocated slots take the planned one, and a cleared
+      // section keeps its reservation untouched (only the used extent
+      // drops to zero).
+      if (p.active && !p.inPlace)
       {
         slot.vertexOffset = p.vDst;
         slot.vertexSlotBytes = p.newVSlot;
@@ -2120,16 +2168,12 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
         slot.indexOffset = p.iDst;
         slot.indexSlotBytes = p.newISlot;
       }
-      slot.vertexUsedBytes = p.vBytes;
-      slot.indexUsedBytes = p.iBytes;
-      slot.indexCount = p.iBytes / sizeof(uint32_t);
+      slot.vertexUsedBytes = p.active ? p.vBytes : 0;
+      slot.indexUsedBytes = p.active ? p.iBytes : 0;
+      slot.indexCount = p.active ? p.iBytes / sizeof(uint32_t) : 0;
     }
-    // Commit the packed extent (covers live slots + zeroed gaps). When the
-    // layout was rebuilt from scratch (no live slots before), the cursor
-    // started at 0; otherwise it only grew.
-    vertexUsed = exactSizing ? curV : std::max(vertexUsed, curV);
-    indexUsed = exactSizing ? curI : std::max(indexUsed, curI);
-    return true;
+    vertexUsed = finalV;
+    indexUsed = finalI;
   };
 
   auto opaquePayload = [&result](int s)
@@ -2143,19 +2187,35 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
                           &result.sections[s].waterIndices);
   };
 
-  if (!uploadStream(opaquePayload, vertexBuffer, indexBuffer, m_sectionGpu,
-                    m_vertexUsedBytes, m_indexUsedBytes,
-                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                    telemetry::GpuOpaqueVertex, telemetry::GpuOpaqueIndex))
-    return false;
-  if (!uploadStream(waterPayload, waterVertexBuffer, waterIndexBuffer, m_sectionGpuWater,
-                    m_waterVertexUsedBytes, m_waterIndexUsedBytes,
-                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                    telemetry::GpuWaterVertex, telemetry::GpuWaterIndex))
-    return false;
+  // Transaction: plan both streams, preflight + reserve all staging, and
+  // only then execute (execution is infallible after the preflight).
+  StreamPlan opaquePlan, waterPlan;
+  planStream(opaquePayload, vertexBuffer, indexBuffer, m_sectionGpu,
+             m_vertexUsedBytes, m_indexUsedBytes, opaquePlan);
+  planStream(waterPayload, waterVertexBuffer, waterIndexBuffer, m_sectionGpuWater,
+             m_waterVertexUsedBytes, m_waterIndexUsedBytes, waterPlan);
+
+  if (staging)
+  {
+    const VkDeviceSize totalNeeded = opaquePlan.stagingNeeded + waterPlan.stagingNeeded;
+    if (totalNeeded > staging->sliceCapacity() - staging->usedThisFrame())
+      return false;
+    if (!reserveStream(opaquePayload, opaquePlan) ||
+        !reserveStream(waterPayload, waterPlan))
+      return false; // unreachable after the exact preflight; nothing mutated
+  }
+
+  executeStream(opaquePayload, vertexBuffer, indexBuffer, m_sectionGpu,
+                m_vertexUsedBytes, m_indexUsedBytes,
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                telemetry::GpuOpaqueVertex, telemetry::GpuOpaqueIndex, opaquePlan);
+  executeStream(waterPayload, waterVertexBuffer, waterIndexBuffer, m_sectionGpuWater,
+                m_waterVertexUsedBytes, m_waterIndexUsedBytes,
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                telemetry::GpuWaterVertex, telemetry::GpuWaterIndex, waterPlan);
 
   // The single chunk-level draw covers the whole packed index region; its
-  // gaps are zeroed (degenerate triangles), so the drawn count derives from
+  // gaps are whole degenerate triangles, so the drawn count derives from
   // the used byte extent rather than the per-section counts.
   opaqueIndexCount = m_indexUsedBytes / sizeof(uint32_t);
   waterIndexCount = m_waterIndexUsedBytes / sizeof(uint32_t);
@@ -2164,6 +2224,7 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
   telemetry::registry().add(telemetry::UploadIndexBytes, stagedIndexBytes);
   return true;
 }
+
 void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm)
 {
   MemoryPublication memoryPublication{*this};

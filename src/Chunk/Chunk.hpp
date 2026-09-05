@@ -247,23 +247,33 @@ private:
 	// back-to-back per-section slots, so the renderer keeps ONE bind + draw
 	// per chunk while a remesh only re-stages the affected slot(s).
 	//
+	// Uploads are copy-on-write (PR #117 review): every upload records its
+	// writes into fresh buffers (a device-to-device preserve copy keeps the
+	// current layout for partial rebuilds; a full build repacks all
+	// sections back-to-back, exact-sized), then retires the previous
+	// buffers - no command ever writes a buffer an in-flight frame may
+	// still be reading.
+	//
 	// A slot reserves `vertexSlotBytes` / `indexSlotBytes` (>= the live
-	// payload, grown with headroom); `used` bytes are live. Vertex slots are
-	// multiples of sizeof(Vertex) and `vertexBase` is the section's first
-	// vertex INDEX (offset / sizeof(Vertex)) - section indices are stored
-	// rebased onto it, so slots never move once allocated. When a rebuilt
-	// section outgrows its slot, a fresh slot is appended at the end of the
-	// used region (growing the buffer wholesale - a plain offset-0 copy -
-	// when capacity runs out); the abandoned slot leaks until the chunk's
-	// next full build or release, bounded by the section's high-water mark.
+	// payload, grown with headroom on edit-driven appends; exact on full
+	// repacks); `used` bytes are live. Vertex slots are multiples of
+	// sizeof(Vertex) and `vertexBase` is the section's first vertex INDEX
+	// (offset / sizeof(Vertex)) - section indices are stored rebased onto
+	// it, so slots never move once allocated. Index slots and slack are
+	// multiples of one triangle (12 bytes), so the single packed drawIndexed
+	// over [0, indexUsedBytes) only ever decodes live triangles or whole
+	// degenerate (all-zero) triangles. When a rebuilt section outgrows its
+	// slot, a fresh slot is appended at the end of the used region; the
+	// abandoned slot leaks until the chunk's next full build (which repacks
+	// compactly) or release, bounded by the section's high-water mark.
 	struct SectionGpuSlot
 	{
 		uint32_t vertexOffset{0}; // bytes, multiple of sizeof(Vertex)
 		uint32_t vertexSlotBytes{0};
 		uint32_t vertexUsedBytes{0};
 		uint32_t vertexBase{0}; // first vertex index of this section
-		uint32_t indexOffset{0}; // bytes, multiple of 4
-		uint32_t indexSlotBytes{0};
+		uint32_t indexOffset{0}; // bytes, multiple of one triangle (12)
+		uint32_t indexSlotBytes{0}; // multiple of one triangle (12)
 		uint32_t indexUsedBytes{0};
 		uint32_t indexCount{0}; // live indices (0 = empty section)
 	};
