@@ -22,7 +22,7 @@ enum Gauge : size_t {
     VoxelPoolCapacity, VoxelPoolActive, VoxelPoolFree, VoxelPoolCapacityBytes,
     BorderPoolCapacity, BorderPoolActive, BorderPoolFree, BorderPoolCapacityBytes,
     MeshPoolCapacity, MeshPoolActive, MeshPoolFree, MeshPoolCapacityBytes,
-    GaugeCount
+    ArenaPages, ArenaFreeBytes, ArenaHighWater, GaugeCount
 };
 inline constexpr const char* gaugeNames[] = {
     "voxel.bytes", "shell.sizeBytes", "shell.capacityBytes",
@@ -39,19 +39,22 @@ inline constexpr const char* gaugeNames[] = {
     "voxel.pool.capacityBytes", "border.pool.capacity", "border.pool.active",
     "border.pool.free", "border.pool.capacityBytes",
     "mesh.pool.capacity", "mesh.pool.active", "mesh.pool.free",
-    "mesh.pool.capacityBytes"
+    "mesh.pool.capacityBytes", "arena.pages", "arena.freeBytes",
+    "arena.highWaterBytes"
 };
 enum Event : size_t {
     AllocCreated, AllocDestroyed, PoolRejected, UploadChunks, UploadVertexBytes,
     UploadIndexBytes, UploadDeferred, StagingFailures, OpaqueDraws, WaterDraws,
-    Shadow0, Shadow1, Shadow2, VoxelPoolGrow, BorderPoolGrow, MeshPoolGrow, EventCount
+    Shadow0, Shadow1, Shadow2, VoxelPoolGrow, BorderPoolGrow, MeshPoolGrow,
+    ArenaBinds, ArenaGrow, EventCount
 };
 inline constexpr const char* eventNames[] = {
     "mesh.allocations.created", "mesh.allocations.destroyed", "pool.rejected",
     "upload.chunks", "upload.vertexBytes", "upload.indexBytes", "upload.deferred",
     "staging.failures", "draws.opaque", "draws.water", "draws.shadow.0",
     "draws.shadow.1", "draws.shadow.2", "voxel.pool.growEvents",
-    "border.pool.growEvents", "mesh.pool.growEvents"
+    "border.pool.growEvents", "mesh.pool.growEvents", "arena.binds",
+    "arena.growEvents"
 };
 enum Stage : size_t { Skylight, Blocklight, Occupancy, FacesGreedyAO, Lod, StageCount };
 inline constexpr const char* stageNames[] = {"skylight", "blocklight", "occupancy", "facesGreedyAO", "LOD"};

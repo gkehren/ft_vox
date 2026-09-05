@@ -6,6 +6,7 @@
 #include "Vulkan/VkBuffer.hpp"
 #include "Vulkan/VkImage.hpp"
 #include "Vulkan/VkCommands.hpp"
+#include "Vulkan/MeshArena.hpp"
 #include "Renderer/TextureManager.hpp"
 #include "Renderer/PostStack.hpp"
 #include "Renderer/OverlayRenderer.hpp"
@@ -38,7 +39,7 @@ public:
 
 	/// @param resourcePackRoot Optional Minecraft pack root (see TextureManager).
 	void init(VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm,
-			  const std::string &resourcePackRoot = {});
+			  GpuResourceRetire &retire, const std::string &resourcePackRoot = {});
 	void shutdown();
 	void onSwapchainRecreate(VkSwapchain &swapchain);
 
@@ -64,6 +65,8 @@ public:
 	PostProcessSettings &postSettings() { return m_postSettings; }
 	OverlayRenderer &overlays() { return m_overlays; }
 	TextureManager &getTextureManager() { return m_textures; }
+	/// Shared device-local mesh arenas every chunk suballocates from (issue #109).
+	MeshArenas &arenas() { return m_arenas; }
 	VmaAllocator getAllocator() const { return m_context->getAllocator(); }
 
 private:
@@ -89,6 +92,7 @@ private:
 	PostStack m_post;
 	OverlayRenderer m_overlays;
 	PostProcessSettings m_postSettings{};
+	MeshArenas m_arenas{};
 	ShadowPass m_shadow;
 	OpaquePass m_opaque;
 	WaterPass m_water;

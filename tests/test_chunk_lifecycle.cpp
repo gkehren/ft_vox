@@ -137,10 +137,14 @@ struct ChunkStateProbe
 	{
 		return c.m_sectionGpuWater;
 	}
-	static uint32_t &vertexUsedMut(Chunk &c) { return c.m_vertexUsedBytes; }
-	static uint32_t &indexUsedMut(Chunk &c) { return c.m_indexUsedBytes; }
-	static uint32_t &waterVertexUsedMut(Chunk &c) { return c.m_waterVertexUsedBytes; }
-	static uint32_t &waterIndexUsedMut(Chunk &c) { return c.m_waterIndexUsedBytes; }
+	// LOD arena ranges + shared-arenas pointer (issue #109 move semantics).
+	static MeshArena::Range &lodOpaqueVMut(Chunk &c) { return c.m_lodOpaqueVertices; }
+	static MeshArena::Range &lodOpaqueIMut(Chunk &c) { return c.m_lodOpaqueIndices; }
+	static MeshArena::Range &lodWaterVMut(Chunk &c) { return c.m_lodWaterVertices; }
+	static MeshArena::Range &lodWaterIMut(Chunk &c) { return c.m_lodWaterIndices; }
+	static void setArenas(Chunk &c, MeshArenas &a) { c.m_arenas = &a; }
+	static void clearArenas(Chunk &c) { c.m_arenas = nullptr; }
+	static const MeshArenas *arenas(const Chunk &c) { return c.m_arenas; }
 	static void buildMeshRanged(Chunk &c, MeshBuildResult &out, uint64_t generation,
 								uint64_t revision, int minY, int maxY)
 	{
@@ -2253,24 +2257,26 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// 22) Moves transfer the sectioned GPU layout and the dirty mask (PR
-	// #117 review phases 23-24): slots and used extents travel with the
-	// buffers they describe into, and the moved-from chunk starts clean.
+	// 22) Moves transfer the sectioned GPU layout, the LOD arena ranges and
+	// the dirty mask (issue #107/#109): slots, arena ranges and the arenas
+	// pointer travel with the chunk, and the moved-from chunk starts clean.
 	{
 		MeshResultPool pool;
+		MeshArenas arenas; // non-initiated: the move test only checks pointers
 		Chunk a(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
 		{
 			auto &slots = ChunkStateProbe::sectionGpuMut(a);
-			slots[2] = {/*vertexOffset*/ 256, /*vertexSlotBytes*/ 512,
+			slots[2] = {/*vertexPage*/ 0, /*vertexOffset*/ 256, /*vertexSlotBytes*/ 512,
 			            /*vertexUsedBytes*/ 480, /*vertexBase*/ 64,
-			            /*indexOffset*/ 768, /*indexSlotBytes*/ 384,
+			            /*indexPage*/ 1, /*indexOffset*/ 768, /*indexSlotBytes*/ 384,
 			            /*indexUsedBytes*/ 360, /*indexCount*/ 90};
 			ChunkStateProbe::sectionGpuWaterMut(a)[5].indexCount = 12;
 		}
-		ChunkStateProbe::vertexUsedMut(a) = 1024;
-		ChunkStateProbe::indexUsedMut(a) = 2048;
-		ChunkStateProbe::waterVertexUsedMut(a) = 64;
-		ChunkStateProbe::waterIndexUsedMut(a) = 96;
+		ChunkStateProbe::lodOpaqueVMut(a) = {/*page*/ 0, /*offset*/ 1024, /*bytes*/ 2048};
+		ChunkStateProbe::lodOpaqueIMut(a) = {1, 128, 512};
+		ChunkStateProbe::lodWaterVMut(a) = {2, 64, 128};
+		ChunkStateProbe::lodWaterIMut(a) = {3, 32, 96};
+		ChunkStateProbe::setArenas(a, arenas);
 		a.markSectionsDirty(0b1010);
 
 		Chunk b(std::move(a));
@@ -2283,31 +2289,45 @@ int main(int argc, char **argv)
 			  "move ctor transfers the opaque slot layout");
 		CHECK(ChunkStateProbe::sectionGpuWaterMut(b)[5].indexCount == 12,
 			  "move ctor transfers the water slot layout");
-		CHECK(ChunkStateProbe::vertexUsedMut(b) == 1024 &&
-				  ChunkStateProbe::indexUsedMut(b) == 2048 &&
-				  ChunkStateProbe::waterVertexUsedMut(b) == 64 &&
-				  ChunkStateProbe::waterIndexUsedMut(b) == 96,
-			  "move ctor transfers the used extents");
+		CHECK(ChunkStateProbe::lodOpaqueVMut(b).offset == 1024 &&
+				  ChunkStateProbe::lodOpaqueIMut(b).bytes == 512 &&
+				  ChunkStateProbe::lodWaterVMut(b).offset == 64 &&
+				  ChunkStateProbe::lodWaterIMut(b).bytes == 96,
+			  "move ctor transfers the LOD arena ranges");
+		CHECK(ChunkStateProbe::arenas(b) == &arenas,
+			  "move ctor transfers the arenas pointer");
 		CHECK(a.dirtySections() == 0 &&
 				  ChunkStateProbe::sectionGpuMut(a)[2].indexCount == 0 &&
 				  ChunkStateProbe::sectionGpuWaterMut(a)[5].indexCount == 0 &&
-				  ChunkStateProbe::vertexUsedMut(a) == 0 &&
-				  ChunkStateProbe::indexUsedMut(a) == 0 &&
-				  ChunkStateProbe::waterVertexUsedMut(a) == 0 &&
-				  ChunkStateProbe::waterIndexUsedMut(a) == 0,
+				  ChunkStateProbe::lodOpaqueIMut(a).empty() &&
+				  ChunkStateProbe::lodWaterIMut(a).empty() &&
+				  ChunkStateProbe::arenas(a) == nullptr,
 			  "move ctor zeroes the source GPU/dirty state");
 
 		Chunk c(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
 		c.markSectionsDirty(0b1);
-		ChunkStateProbe::vertexUsedMut(c) = 4096;
+		ChunkStateProbe::lodOpaqueVMut(c) = {9, 9, 9};
 		c = std::move(b);
 		CHECK(c.dirtySections() == 0b1010 &&
 				  ChunkStateProbe::sectionGpuMut(c)[2].indexCount == 90 &&
-				  ChunkStateProbe::indexUsedMut(c) == 2048,
+				  ChunkStateProbe::lodOpaqueVMut(c).offset == 1024,
 			  "move assignment transfers the GPU/dirty state");
-		CHECK(b.dirtySections() == 0 && ChunkStateProbe::vertexUsedMut(b) == 0 &&
+		CHECK(b.dirtySections() == 0 && ChunkStateProbe::lodOpaqueVMut(b).empty() &&
 				  ChunkStateProbe::sectionGpuMut(b)[2].indexCount == 0,
 			  "move assignment zeroes the source GPU/dirty state");
+
+		// The test fabricated arena ranges that reference no real page:
+		// drop the synthetic GPU state before the destructors run.
+		for (auto *ch : {&a, &b, &c})
+		{
+			ChunkStateProbe::sectionGpuMut(*ch).fill({});
+			ChunkStateProbe::sectionGpuWaterMut(*ch).fill({});
+			ChunkStateProbe::lodOpaqueVMut(*ch) = {};
+			ChunkStateProbe::lodOpaqueIMut(*ch) = {};
+			ChunkStateProbe::lodWaterVMut(*ch) = {};
+			ChunkStateProbe::lodWaterIMut(*ch) = {};
+			ChunkStateProbe::clearArenas(*ch);
+		}
 	}
 
 	// 23) A completed section build superseded by a queued edit must re-arm
