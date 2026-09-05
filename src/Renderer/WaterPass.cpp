@@ -7,6 +7,7 @@
 #include "utils.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <stdexcept>
 
 namespace
@@ -290,6 +291,20 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 		e.chunk->collectWaterDraws(m_scratch);
 	if (!m_scratch.empty())
 	{
+		assert(m_scratch.size() <= kMaxIndirectCommands && "WaterPass: indirect command capacity exceeded");
+		if (m_scratch.size() > kMaxIndirectCommands)
+		{
+			// Not silent: at larger view distances or denser worlds this
+			// would silently drop geometry (issue #109 review phase 24).
+			static bool warned = false;
+			if (!warned)
+			{
+				warned = true;
+				std::cerr << "[indirect] command overflow: " << m_scratch.size()
+				          << " commands > capacity " << kMaxIndirectCommands
+				          << " - truncating" << std::endl;
+			}
+		}
 		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
 		auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(m_indirect[frameIndex].mapped);
 		for (size_t i = 0; i < count; ++i)
@@ -320,5 +335,10 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 		}
 		telemetry::registry().add(telemetry::WaterDraws, count);
 	}
+
+	// The dynamic rendering scope is ALWAYS closed, even when no water
+	// commands were collected: leaving it open corrupts every subsequent
+	// pass in the frame graph (missing faces across the world).
+	endRendering(cmd);
 
 }
