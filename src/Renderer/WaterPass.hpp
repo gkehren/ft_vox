@@ -3,6 +3,7 @@
 #include "Vulkan/VkContext.hpp"
 #include "Vulkan/VkImage.hpp"
 #include "Vulkan/VkCommands.hpp"
+#include "Vulkan/VkFrame.hpp"
 #include "Chunk/Chunk.hpp"
 #include "Vulkan/MeshArena.hpp"
 
@@ -50,7 +51,7 @@ private:
 	};
 	void createIndirectBuffers();
 	void destroyIndirectBuffers();
-	std::array<IndirectBatch, 2> m_indirect{};
+	std::array<IndirectBatch, VkFrameContext::kMaxFramesInFlight> m_indirect{};
 
 	std::vector<Chunk::IndirectDraw> m_scratch{};
 };

@@ -272,7 +272,7 @@ void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCo
 {
 	m_context = &context;
 	m_imm = &imm;
-	m_arenas.init(context.getAllocator(), retire, sizeof(Vertex));
+	m_arenas.init(context.getAllocator(), retire, sizeof(Vertex), kMaxFramesInFlight);
 	m_lightDir = glm::normalize(glm::vec3(0.4f, 1.0f, 0.2f));
 
 	m_textures.initialize(context, imm, resourcePackRoot);

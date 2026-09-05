@@ -2,6 +2,7 @@
 
 #include "Vulkan/VkContext.hpp"
 #include "Vulkan/VkImage.hpp"
+#include "Vulkan/VkFrame.hpp"
 #include "Renderer/ShadowCascades.hpp"
 #include "Chunk/Chunk.hpp"
 #include "Vulkan/MeshArena.hpp"
@@ -53,7 +54,7 @@ private:
 	void createIndirectBuffers();
 	void destroyIndirectBuffers();
 	// One indirect storage slot per cascade per frame in flight.
-	std::array<std::array<IndirectBatch, kCascadeCount>, 2> m_indirect{};
+	std::array<std::array<IndirectBatch, kCascadeCount>, VkFrameContext::kMaxFramesInFlight> m_indirect{};
 
 	std::vector<Chunk::IndirectDraw> m_scratch{};
 };
