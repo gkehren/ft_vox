@@ -11,8 +11,9 @@ Phases 0–5. High-level engine ownership remains documented in
   stored in byte-sized world and atlas data.
 - Chunk cores and one-block neighbor shells must resolve terrain, caves, and
   fluids identically.
-- Features with horizontal reach are evaluated from the deterministic
-  `MAX_TREE_RADIUS` candidate halo.
+- Features with horizontal reach are described by bounded
+  `worldgen::FeatureBounds` (radius, height, max slope) and evaluated
+  from world-aligned candidate cells with a halo covering the largest radius.
 - Biome queries (point query `getBiomeAt` and region query `getBiomeRegion`)
   return canonical biome samples for every output coordinate independently of
   display sampling step, using the canonical block-resolution erosion-aware
@@ -22,8 +23,9 @@ Phases 0–5. High-level engine ownership remains documented in
 
 ## Pipeline
 
-1. Batch the 2D terrain and climate graphs over an extended window (halo >= 2;
-   chunks use 28×28 with halo=6 to cover the vegetation candidate ring).
+1. Batch the 2D terrain and climate graphs over an extended window (halo = 20;
+   chunks use 56×56 with `EXT_CORE_OFFSET = 2 * maxFeatureRadius + 4` to cover
+   the vegetation candidate ring).
 2. Calculate continuous heights and apply one deterministic thermal-erosion
    pass at block resolution.
 3. Select biomes from terrain band, temperature, humidity, weirdness, erosion,
@@ -40,10 +42,10 @@ Phases 0–5. High-level engine ownership remains documented in
 
 | Field | Graph | Octaves | Domain scale | Seed offset |
 |------|-------|---------|--------------|-------------|
-| Continentality | OpenSimplex2 FBm + gradient warp | 5 | 0.002 | 0 |
-| Erosion | Perlin FBm | 4 | 0.004 | 1000 |
-| Peaks/valleys | OpenSimplex2 FBm + gradient warp | 6 | 0.010 | 2000 |
-| Mountain ridge | OpenSimplex2 ridged + gradient warp | 4 | 0.004 | 3000 |
+| Continentality | OpenSimplex2 FBm + gradient warp | 5 | 0.00045 | 0 |
+| Erosion | Perlin FBm | 4 | 0.0008 | 1000 |
+| Peaks/valleys | OpenSimplex2 FBm + gradient warp | 6 | 0.0045 | 2000 |
+| Mountain ridge | OpenSimplex2 ridged + gradient warp | 4 | 0.002 | 3000 |
 | Temperature | OpenSimplex2 FBm | 4 | 0.0007 | 6000 |
 | Humidity | OpenSimplex2 FBm | 4 | 0.0009 | 7000 |
 | Weirdness | OpenSimplex2 FBm | 3 | 0.0015 | 8000 |
@@ -61,6 +63,41 @@ The spaghetti and cavern fields use a world-aligned half-resolution grid below
 y=96. The grid includes a two-block halo and is reused by both core and shell
 generation. This reduced the initial dense Phase 4 implementation from roughly
 2.80 ms/chunk to about 1.8–1.9 ms/chunk on the Apple M1 Pro reference machine.
+
+## World geography (`src/Chunk/TerrainProfiles.hpp`)
+
+Land/sea shape and regional relief are two independent inputs to
+`calculateHeightFloat`; the discrete biome never feeds back into its own
+height, so canonical queries cannot develop seams.
+
+- **Continental shelf**: `land = blend(-0.50, -0.18, continental)` drives the
+  ocean→land interpolation, and `inland = blend(-0.18, 0.12, continental)`
+  attenuates relief amplitude near coasts. Only columns where that blend is
+  still active (`continental < -0.18`) may classify as Ocean or Beach; deeper
+  water inside continents is an inland pond (oasis), never ocean.
+- **Regional relief profiles**: `reliefWeights(erosion, weirdness)` blends the
+  six `worldgen::Relief` profiles — Rolling, Plateau, Massif, Canyon, Cliffs,
+  Basin — into one continuous field. Adjacent profiles interpolate instead of
+  switching at classification thresholds; the extreme shapes (massifs,
+  canyons, cliffs) occupy identifiable low-erosion / high-weirdness regions.
+- **Climate signatures** are continuous height modifiers sharing the same
+  fields the biome selector reads: arid duning + terracing, wetland
+  flattening, the oasis pond (saturating lerp toward −8 so the core keeps a
+  real sub-sea water floor), and volcanic cones.
+- **Rivers** carve the same height field through `worldgen::riverWidth`;
+  valley profile and channel floor are one function shared by chunk
+  generation, point queries, and the biome map.
+- **Surface palettes**: each `BiomeConfig` carries a `worldgen::Palette` and a
+  `worldgen::Decoration` set. A stochastic offset kernel blends surface
+  *materials* across biome boundaries without changing the canonical biome
+  per column; alpine regions mix diorite/andesite, volcanic cliffs blackstone.
+- **Features**: trees and props declare `worldgen::FeatureBounds`
+  (`smallTree` r=4, `matureTree` r=8, `groundProp` r=3) with slope limits.
+  Candidates are evaluated in world-aligned cells of 4 blocks with a halo
+  matched to the largest radius, so placements resolve identically regardless
+  of chunk load order; mature trees are rare large variants placed through
+  `placeMatureTree` after small trees, so their trunks win deterministic
+  overlaps.
 
 ## Biome catalog
 
@@ -100,12 +137,28 @@ Coral Reef are intentionally rare and are measured separately.
 | 3 | Cherry/mangrove wood and leaves, bamboo, mushroom blocks, basalt, blackstone, magma, five coral blocks |
 | 4 | Lava, eight deepslate ore variants, dripstone |
 | 5 | Kelp plant and kelp top |
+| World rework | Short grass, fern, wildflower, dry shrub (cross planes), seagrass (cross, underwater), lily pad (flat plane) |
 
 Each block before `TextureType::COUNT` has exactly one `kBlockLayers` row and a
 display name. Bundled PNGs live in `ressources/textures/`. Kelp uses transparent
-cube rendering because it remains visually acceptable under water. Lily pads
-and seagrass are deliberately deferred: their flat/cross-plane geometry would
-be misleading as full collidable cubes.
+cube rendering because it remains visually acceptable under water.
+
+Small vegetation uses an explicit `BlockShape` (`Cube`, `Cross`, `Flat`) in
+`MinecraftTextures.hpp`, independent of transparency and collision:
+
+- Cross/flat shapes render double-sided quads in the opaque alpha-test stream,
+  are excluded from cube meshing (they never hide neighbor faces), are omitted
+  from LOD meshes, cast alpha-cut shadows, and carry the shared
+  `foliage_wind.inc.glsl` wind (rooted wind is damped by UV height).
+- They are non-solid for physics; `physics::blockCell` is an explicit
+  gameplay policy switch (seagrass keeps its Water medium), deliberately
+  independent of `BlockShape` — changing a render shape never changes
+  collision. Semantic traits shared with worldgen live in
+  `Block/BlockTraits.hpp`, which no renderer header may own.
+- Underwater detail blocks currently replace the fluid voxel in the render
+  representation, which can expose internal water faces. Generic coexistence
+  of fluid occupancy and embedded detail geometry is tracked in #120.
+- Textures use grass tint via `blockUsesGrassTint` where appropriate.
 
 ## Adding a biome
 
@@ -114,8 +167,9 @@ be misleading as full collidable cubes.
 3. Add one `BiomeConfig` initializer in `TerrainGenerator::initBiomeConfigs`.
 4. Add a structured selection path in `determineBiome`.
 5. Add its map color to `GameUI::kBiomeColors`.
-6. Add or reuse a deterministic feature placer without exceeding
-   `MAX_TREE_RADIUS`.
+6. Add or reuse a deterministic feature placer declared with
+   `worldgen::FeatureBounds`, and choose its `Relief`/`Palette`/`Decoration`
+   profile in `initBiomeConfigs`.
 7. Extend occurrence, configuration, feature, and border tests.
 8. Run multi-seed histograms and document whether the biome is ordinary or
    intentionally rare.
@@ -143,6 +197,9 @@ be misleading as full collidable cubes.
 
 # Per-stage terrain profile
 ./build-vk/tests/test_terrain --profile 32 1337
+
+# Canonical sample atlas (biome, height, all noise fields) as CSV for plots
+./build-vk/tests/test_terrain --atlas 256 32 1337 atlas.csv
 
 # Multi-seed world report: biomes, heights, features, caves, and ores
 ./build-vk/tests/test_terrain --world-stats 16 3
@@ -173,6 +230,11 @@ Biome sampling is unified across the engine via a canonical erosion-aware pipeli
   `BiomeRegionGrid::pixelForWorld`). The two roundings have different roles
   and must not be interchanged: never derive a canonical biome column from a
   display pixel other than through `BiomeRegionGrid::columnAt()`.
+- **Terrain samples (`getTerrainSample()`)**: exposes the canonical
+  post-erosion 2D height field used by biome classification
+  (`TerrainSample::postErosionHeight`). It does not represent the final
+  highest solid voxel after 3D surface perturbation, cave carving, and
+  feature placement.
 - **Point queries (`getBiomeAt(worldX, worldZ)`)**: Evaluates a 5×5 cell window (halo = 2) centered on the world column via `evaluateBiomeColumn`, running thermal erosion on the neighborhood. This guarantees bit-for-bit equivalence with chunk generation without heap allocations.
 - **Region queries (`getBiomeRegion(grid, ...)`)**: The sampling domain is described by a
   `BiomeRegionGrid` (`src/Chunk/BiomeRegionGrid.hpp`) — the single source of truth mapping

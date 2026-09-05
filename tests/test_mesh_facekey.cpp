@@ -1322,6 +1322,50 @@ static int runEditBench(int argc, char **argv)
 
 // ---------------------------------------------------------------------------
 
+static void testSmallPlantGeometry()
+{
+    for (const auto type : {SHORT_GRASS, FERN, WILDFLOWER, DRY_SHRUB, SEAGRASS, LILY_PAD})
+    {
+        Scene s(glm::vec3(-16.f, 0.f, -32.f));
+        // Plant on the first cell of a section: the section beneath still
+        // owns and emits the support's entire top face.
+        s.chunk.setVoxel(0, 15, 0, STONE);
+        s.chunk.setVoxel(0, 16, 0, type);
+        auto *r = s.pool.acquire();
+        s.chunk.buildMesh(*r, s.chunk.meshGeneration(), s.chunk.meshRevision());
+        s.pool.finishBuild(r);
+        CHECK(r->sections[0].opaqueVertices.size() == 24, "plant does not hide the support cube");
+        const auto &p = r->sections[1];
+        const size_t quads = type == LILY_PAD ? 1u : 2u;
+        CHECK(p.opaqueVertices.size() == quads * 4 && p.opaqueIndices.size() == quads * 12,
+              "small plants emit only explicit double-sided planes");
+        CHECK(p.waterVertices.empty(), "alpha-cut plants use the opaque stream");
+        for (const auto &v : p.opaqueVertices)
+        {
+            const auto local = v.position - s.chunk.getPosition();
+            CHECK(local.x >= 0.f && local.x <= 1.f && local.z >= 0.f && local.z <= 1.f,
+                  "detail geometry remains inside its owning column");
+            CHECK(local.y >= 16.f && local.y < 17.f, "detail remains in its owning section");
+            CHECK(vTexture(v) == static_cast<uint32_t>(type), "detail keeps its atlas layer");
+            CHECK(vNormal(v) == 2u, "detail quads use the stylized upward lighting normal");
+            CHECK(vBiome(v) == blockUsesGrassTint(type), "only grayscale plants receive grass tint");
+        }
+        for (uint32_t index : p.opaqueIndices)
+            CHECK(index < p.opaqueVertices.size(), "detail indices are section local");
+        for (size_t q = 0; q < quads; ++q)
+            CHECK(p.opaqueIndices[q * 12] == p.opaqueIndices[q * 12 + 8] &&
+                  p.opaqueIndices[q * 12 + 2] == p.opaqueIndices[q * 12 + 6],
+                  "back triangles reverse the front winding");
+        s.pool.release(r);
+        r = s.pool.acquire();
+        s.chunk.buildLODMesh(*r, s.chunk.meshGeneration(), s.chunk.meshRevision());
+        s.pool.finishBuild(r);
+        for (const auto &v : r->opaqueVertices)
+            CHECK(vTexture(v) == STONE && v.position.y == 16.f, "LOD omits the plant and preserves its support");
+        s.pool.release(r);
+    }
+}
+
 int main(int argc, char **argv)
 {
 	if (argc > 1 && std::strcmp(argv[1], "--hash-corpus") == 0)
@@ -1331,6 +1375,7 @@ int main(int argc, char **argv)
 	if (argc > 1 && std::strcmp(argv[1], "--edit-bench") == 0)
 		return runEditBench(argc, argv);
 
+    testSmallPlantGeometry();
 	testUniformSlabMerges();
 	testBlockTypeBoundary();
 	testTransparencyPairs();

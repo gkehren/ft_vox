@@ -148,19 +148,49 @@ static void testChunkYFillBoundsCoversSeaLevel()
 /// Regression against clipping ocean fill to yNoiseEnd.
 ///
 /// TerrainGenerator uses **chunk-wide** maxSurfaceHeight for computeChunkYFillBounds.
-/// Pin seed=99991, bx=-512, bz=-336 (re-pinned after the Phase 2 terrain rework):
-/// chunk maxSolid=46 so yNoiseEnd=63 (<= SEA_LEVEL). SEA_LEVEL=64 is only filled
-/// when yFillEnd = computeColumnFillEnd(...) extends past yNoiseEnd.
-/// Setting yFillEnd = yNoiseEnd alone leaves AIR at y=64 → this test fails.
+/// The reworked continentalness moved coastlines, so the chunk is located
+/// dynamically instead of pinning seed coordinates that drift on every
+/// calibration: the scan demands a chunk whose columns are all deep ocean,
+/// i.e. maxSolid stays on the seafloor so yNoiseEnd <= SEA_LEVEL and
+/// SEA_LEVEL is only filled when yFillEnd = computeColumnFillEnd(...)
+/// extends past yNoiseEnd. Setting yFillEnd = yNoiseEnd alone leaves AIR at
+/// y=64 → this test fails.
 static void testOceanWaterNotClippedByCaveYBound()
 {
 	const int sea = TerrainGenerator::SEA_LEVEL;
 	const int margin = 16;
 	constexpr int kSeed = 99991;
-	constexpr int kCx = -512;
-	constexpr int kCz = -336;
+	constexpr int kScanRadius = 96;
 
 	TerrainGenerator gen(kSeed);
+	int kCx = 0;
+	int kCz = 0;
+	bool found = false;
+	for (int cz = -kScanRadius; cz <= kScanRadius && !found; ++cz)
+	{
+		for (int cx = -kScanRadius; cx <= kScanRadius && !found; ++cx)
+		{
+			const int wx = cx * CHUNK_SIZE, wz = cz * CHUNK_SIZE;
+			const auto centre = gen.getTerrainSample(wx + 8, wz + 8);
+			if (centre.biome != BIOME_OCEAN || centre.postErosionHeight > sea - 6)
+				continue;
+			bool deepOcean = true;
+			for (int z = 0; z < CHUNK_SIZE && deepOcean; z += 5)
+				for (int x = 0; x < CHUNK_SIZE && deepOcean; x += 5)
+				{
+					const auto s = gen.getTerrainSample(wx + x, wz + z);
+					deepOcean = s.biome == BIOME_OCEAN && s.postErosionHeight <= sea - 2;
+				}
+			if (deepOcean)
+			{
+				kCx = wx;
+				kCz = wz;
+				found = true;
+			}
+		}
+	}
+	CHECK(found, "deep open-ocean chunk reachable within the scan radius");
+
 	ChunkData data = gen.generateChunk(kCx, kCz);
 
 	// Chunk-wide max solid (non-air, non-water) — same class of input as maxSurfaceHeight.
@@ -235,45 +265,62 @@ static void testPoolCapacityEstimate()
 
 /// Ice spikes use treeDensity=0 and hasCacti=false; generateVegetation must still run
 /// placeIceSpike (not skip the whole biome on the density gate).
-/// Pinned: seed=1337, chunk world origin (512, -1248) has ice-spike columns + spikes.
+/// The chunk is located dynamically: the continental rework invalidated the
+/// old seed-1337 pin, and future calibrations must not break the regression.
 static void testIceSpikeVegetationReachable()
 {
 	constexpr int kSeed = 1337;
-	constexpr int kOriginX = 512;
-	constexpr int kOriginZ = -1248;
+	constexpr int kScanRadius = 96;
+	constexpr int kMaxAttempts = 24;
 
 	const BiomeConfig &cfg = TerrainGenerator::getBiomeConfig(BIOME_ICE_SPIKES);
 	CHECK(cfg.treeDensity == 0.0f, "ice spikes config treeDensity is 0 (regression: density gate)");
 	CHECK(!cfg.hasCacti, "ice spikes config hasCacti is false (regression: density gate)");
 
 	TerrainGenerator gen(kSeed);
-	int iceCols = 0;
-	for (int z = 0; z < CHUNK_SIZE; ++z)
-		for (int x = 0; x < CHUNK_SIZE; ++x)
-			if (gen.getBiomeAt(kOriginX + x, kOriginZ + z) == BIOME_ICE_SPIKES)
-				++iceCols;
-	CHECK(iceCols > 0, "pinned chunk has BIOME_ICE_SPIKES columns");
-
-	ChunkData data = gen.generateChunk(kOriginX, kOriginZ);
 	int spikeBlocks = 0;
 	int iceBiomeColsInChunk = 0;
-	for (int z = 0; z < CHUNK_SIZE; ++z)
+	int attempts = 0;
+	for (int cz = -kScanRadius; cz <= kScanRadius && spikeBlocks == 0 && attempts < kMaxAttempts; ++cz)
 	{
-		for (int x = 0; x < CHUNK_SIZE; ++x)
+		for (int cx = -kScanRadius; cx <= kScanRadius && spikeBlocks == 0 && attempts < kMaxAttempts; ++cx)
 		{
-			const size_t col = static_cast<size_t>(z * CHUNK_SIZE + x);
-			if (data.biomes[col] != BIOME_ICE_SPIKES)
+			const int kOriginX = cx * CHUNK_SIZE;
+			const int kOriginZ = cz * CHUNK_SIZE;
+			if (gen.getBiomeAt(kOriginX + 8, kOriginZ + 8) != BIOME_ICE_SPIKES)
 				continue;
-			++iceBiomeColsInChunk;
-			const int h = data.heightMap[col];
-			for (int y = h + 1; y < CHUNK_HEIGHT && y <= h + 30; ++y)
+			++attempts;
+
+			int iceCols = 0;
+			for (int z = 0; z < CHUNK_SIZE; ++z)
+				for (int x = 0; x < CHUNK_SIZE; ++x)
+					if (gen.getBiomeAt(kOriginX + x, kOriginZ + z) == BIOME_ICE_SPIKES)
+						++iceCols;
+			if (iceCols == 0)
+				continue;
+
+			ChunkData data = gen.generateChunk(kOriginX, kOriginZ);
+			for (int z = 0; z < CHUNK_SIZE; ++z)
 			{
-				const size_t idx =
-					static_cast<size_t>(y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x);
-				const uint8_t t = data.voxels[idx].type;
-				if (t == static_cast<uint8_t>(PACKED_ICE) || t == static_cast<uint8_t>(BLUE_ICE))
-					++spikeBlocks;
+				for (int x = 0; x < CHUNK_SIZE; ++x)
+				{
+					const size_t col = static_cast<size_t>(z * CHUNK_SIZE + x);
+					if (data.biomes[col] != BIOME_ICE_SPIKES)
+						continue;
+					++iceBiomeColsInChunk;
+					const int h = data.heightMap[col];
+					for (int y = h + 1; y < CHUNK_HEIGHT && y <= h + 30; ++y)
+					{
+						const size_t idx =
+							static_cast<size_t>(y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x);
+						const uint8_t t = data.voxels[idx].type;
+						if (t == static_cast<uint8_t>(PACKED_ICE) || t == static_cast<uint8_t>(BLUE_ICE))
+							++spikeBlocks;
+					}
+				}
 			}
+			if (spikeBlocks > 0)
+				std::cout << "  located ice-spike chunk cx=" << kOriginX << " cz=" << kOriginZ << "\n";
 		}
 	}
 	CHECK(iceBiomeColsInChunk > 0, "generated chunk records ice-spike biomes");

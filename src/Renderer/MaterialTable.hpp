@@ -18,6 +18,7 @@ enum Flags : uint32_t
 	FoliageWind = 1u << 0,
 	Emissive = 1u << 1,
 	IceSpec = 1u << 2,
+    RootedWind = 1u << 3,
 };
 
 struct MaterialInfo
@@ -36,6 +37,11 @@ inline MaterialInfo infoFor(TextureType t)
 		m.flags |= FoliageWind;
 		m.windStrength = 0.14f;
 	}
+	else if (blockShape(t) == BlockShape::Cross && t != SEAGRASS)
+    {
+        m.flags |= FoliageWind | RootedWind;
+        m.windStrength = 0.08f;
+    }
 	else if (t == MOSS_BLOCK)
 	{
 		m.flags |= FoliageWind;

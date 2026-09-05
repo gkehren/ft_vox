@@ -14,30 +14,16 @@ layout(push_constant) uniform PC {
     float pad2;
 } pc;
 
-// Shadow has no material UBO; match materials::infoFor(OAK_LEAVES) wind policy.
-// OAK_LEAVES TextureType ordinal + wind strength from MaterialTable.hpp
-const uint TEX_OAK_LEAVES = 8u;
-const float kLeafWind = 0.14;
-
-vec3 applyFoliageWind(vec3 pos, uint texIdx, float time)
-{
-    if (texIdx != TEX_OAK_LEAVES)
-        return pos;
-
-    const float wind = kLeafWind;
-    float h = fract(sin(dot(pos.xz, vec2(12.9898, 78.233))) * 43758.5453);
-    float phase = pos.x * 0.65 + pos.z * 0.55 + h * 6.2831853;
-    float s = sin(time * 1.7 + phase) * 0.65 + sin(time * 2.35 + phase * 1.3) * 0.35;
-    float c = cos(time * 1.4 + phase * 0.9);
-    float heightBoost = 0.70 + 0.30 * clamp((pos.y - 60.0) / 40.0, 0.0, 1.0);
-    pos.x += s * wind * heightBoost;
-    pos.z += c * wind * 0.55 * heightBoost;
-    return pos;
-}
+layout(set = 0, binding = 1) uniform MaterialTable { vec4 mats[256]; } materialTable;
+layout(location = 0) out vec2 vTexCoord;
+layout(location = 1) flat out uint vTextureIndex;
+#include "foliage_wind.inc.glsl"
 
 void main()
 {
     uint texIdx = (aPackedData >> 3u) & 0xFFu;
-    vec3 pos = applyFoliageWind(aPos, texIdx, pc.time);
+    vec3 pos = applyFoliageWind(aPos, texIdx, pc.time, aTexCoord);
+    vTexCoord = aTexCoord;
+    vTextureIndex = texIdx;
     gl_Position = pc.lightSpace * vec4(pos, 1.0);
 }

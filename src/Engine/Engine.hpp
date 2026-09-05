@@ -44,6 +44,10 @@ public:
 	void setVSync(bool enabled);
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
+    /// Fixed daylight camera for reproducible world-generation visual review.
+    /// Call after initializeNoiseGenerator. Exits after seconds (0 = interactive).
+    void setInspectionView(glm::vec3 position, float yaw, float pitch, float seconds);
+
 	Benchmark &benchmark() { return m_benchmark; }
 	const Benchmark &benchmark() const { return m_benchmark; }
 
@@ -97,6 +101,8 @@ private:
 	bool showChunkBorders{false};
 	bool showDemoPlayers{true};
 	bool paused{false};
+    bool m_inspectionView{false};
+    float m_inspectionSeconds{0.f};
 
 	double deltaTime{0.0};
 	double lastFrame{0.0};

@@ -292,6 +292,12 @@ enum TextureType
 	// Phase 5 aquatic blocks (append-only)
 	KELP,
 	KELP_TOP,
+	SHORT_GRASS,
+	FERN,
+	WILDFLOWER,
+	DRY_SHRUB,
+	SEAGRASS,
+	LILY_PAD,
 	COUNT, // Keep last
 	AIR	   // Keep after count beacuse AIR is not a texture
 };
@@ -408,6 +414,12 @@ inline constexpr std::array<std::string_view, COUNT> textureTypeString = [] {
 	names[DRIPSTONE_BLOCK] = "Dripstone Block";
 	names[KELP] = "Kelp";
 	names[KELP_TOP] = "Kelp Top";
+	names[SHORT_GRASS] = "Short Grass";
+	names[FERN] = "Fern";
+	names[WILDFLOWER] = "Wildflower";
+	names[DRY_SHRUB] = "Dry Shrub";
+	names[SEAGRASS] = "Seagrass";
+	names[LILY_PAD] = "Lily Pad";
 	return names;
 }();
 

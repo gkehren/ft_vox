@@ -141,7 +141,10 @@ void WorldRenderer::createPipelineLayouts()
 	{
 		VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 80};
 		VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-		li.pushConstantRangeCount = 1;
+		const std::array<VkDescriptorSetLayout, 2> layouts = {m_setLayout0, m_setLayout1};
+        li.setLayoutCount = static_cast<uint32_t>(layouts.size());
+        li.pSetLayouts = layouts.data();
+        li.pushConstantRangeCount = 1;
 		li.pPushConstantRanges = &pcr;
 		if (vkCreatePipelineLayout(m_context->getDevice(), &li, nullptr, &m_shadowPipelineLayout) != VK_SUCCESS)
 			throw std::runtime_error("shadow layout failed");
@@ -385,7 +388,7 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 	{
 		PROFILE_SCOPE("Shadow");
 		if (gpu) gpu->beginPass(cmd, GpuPass::Shadow);
-		m_shadow.record(cmd, shadowChunks, m_cascadeMatrices, m_time);
+		m_shadow.record(cmd, shadowChunks, m_cascadeMatrices, m_time, set0, m_set1);
 		if (gpu) gpu->endPass(cmd, GpuPass::Shadow);
 	}
 	{

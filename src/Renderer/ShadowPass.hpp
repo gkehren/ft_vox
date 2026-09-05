@@ -28,7 +28,7 @@ public:
 	const std::array<VkImageView, kCascadeCount> &layerViews() const { return m_shadowLayerViews; }
 
 	void record(VkCommandBuffer cmd, const std::vector<Chunk *> &shadowChunks,
-				const std::array<glm::mat4, kCascadeCount> &cascades, float time);
+				const std::array<glm::mat4, kCascadeCount> &cascades, float time, VkDescriptorSet set0, VkDescriptorSet set1);
 
 private:
 	void createResources();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <utils.hpp>
+#include <Block/BlockTraits.hpp>
 
 #include <cstddef>
 #include <fstream>
@@ -8,11 +9,14 @@
 
 /// One atlas layer: Minecraft pack basename + fallback + transparency.
 /// Indexed by TextureType 0 .. COUNT-1. Single source for load paths and isTransparent.
+enum class BlockShape : uint8_t { Cube, Cross, Flat };
+
 struct BlockLayerDesc
 {
 	const char *file;		  ///< Pack / preferred name, e.g. "birch_leaves.png"
 	const char *fallbackFile; ///< Fallback texture name in default pack, e.g. "oak_leaves.png"
 	bool transparent;
+	BlockShape shape{BlockShape::Cube};
 };
 
 /// Compile-time table in TextureType order (must match enum ordinals).
@@ -125,11 +129,27 @@ inline constexpr BlockLayerDesc kBlockLayers[] = {
 	// Phase 5 aquatic blocks
 	{"kelp_plant.png", "kelp_plant.png", true}, // KELP
 	{"kelp.png", "kelp.png", true},			  // KELP_TOP
+    {"short_grass.png", "short_grass.png", true, BlockShape::Cross},
+    {"fern.png", "fern.png", true, BlockShape::Cross},
+    {"oxeye_daisy.png", "oxeye_daisy.png", true, BlockShape::Cross},
+    {"dead_bush.png", "dead_bush.png", true, BlockShape::Cross},
+    {"seagrass.png", "seagrass.png", true, BlockShape::Cross},
+    {"lily_pad.png", "lily_pad.png", true, BlockShape::Flat},
 };
 
 static_assert(sizeof(kBlockLayers) / sizeof(kBlockLayers[0]) ==
 				  static_cast<std::size_t>(TextureType::COUNT),
 			  "kBlockLayers must match TextureType::COUNT");
+
+inline BlockShape blockShape(TextureType type)
+{
+    return type >= BEDROCK && type < COUNT ? kBlockLayers[static_cast<size_t>(type)].shape : BlockShape::Cube;
+}
+inline bool blockIsSmallDetail(TextureType type) { return blockShape(type) != BlockShape::Cube; }
+inline bool blockUsesGrassTint(TextureType type)
+{
+    return type == SHORT_GRASS || type == FERN || type == SEAGRASS || type == LILY_PAD;
+}
 
 inline bool blockLayerIsTransparent(TextureType t)
 {
@@ -156,87 +176,14 @@ inline const char *blockLayerFallbackFile(TextureType t)
 }
 
 // ---------------------------------------------------------------------------
-// Block policy helpers (meshing / materials)
+// Block policy helpers (meshing / materials). Semantic gameplay traits live
+// in Block/BlockTraits.hpp; everything here is render-side.
 // ---------------------------------------------------------------------------
-
-inline bool blockIsLeaves(TextureType t)
-{
-	switch (t)
-	{
-	case OAK_LEAVES:
-	case BIRCH_LEAVES:
-	case SPRUCE_LEAVES:
-	case JUNGLE_LEAVES:
-	case ACACIA_LEAVES:
-	case DARK_OAK_LEAVES:
-	case CHERRY_LEAVES:
-	case MANGROVE_LEAVES:
-		return true;
-	default:
-		return false;
-	}
-}
 
 /// Biome foliage tint + wind (all leaf species).
 inline bool blockIsFoliage(TextureType t)
 {
 	return blockIsLeaves(t);
-}
-
-inline bool blockIsIce(TextureType t)
-{
-	return t == ICE || t == PACKED_ICE || t == BLUE_ICE;
-}
-
-/// Surfaces that can host trees / cacti / ice spikes.
-inline bool blockIsPlantableSurface(TextureType t)
-{
-	switch (t)
-	{
-	case GRASS_TOP:
-	case DIRT:
-	case SAND:
-	case SNOW:
-	case RED_SAND:
-	case PODZOL:
-	case COARSE_DIRT:
-	case MUD:
-	case MOSS_BLOCK:
-	case TERRACOTTA:
-	case ORANGE_TERRACOTTA:
-	case RED_TERRACOTTA:
-	case YELLOW_TERRACOTTA:
-	case BROWN_TERRACOTTA:
-	case WHITE_TERRACOTTA:
-	case PACKED_ICE:
-		return true;
-	default:
-		return false;
-	}
-}
-
-/// Stone-like hosts that ore veins may replace.
-inline bool blockIsOreHost(TextureType t)
-{
-	switch (t)
-	{
-	case STONE:
-	case ANDESITE:
-	case DIORITE:
-	case GRANITE:
-	case TUFF:
-	case DEEPSLATE:
-		return true;
-	default:
-		return false;
-	}
-}
-
-/// Soft ground valid for cactus placement (desert / badlands).
-inline bool blockIsCactusGround(TextureType t)
-{
-	return t == SAND || t == RED_SAND || t == TERRACOTTA || t == ORANGE_TERRACOTTA ||
-		   t == RED_TERRACOTTA;
 }
 
 /// Sky-light propagates through air and transparent layers (same table as meshing).

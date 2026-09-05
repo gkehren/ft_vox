@@ -21,6 +21,7 @@ static void printUsage(const char *argv0)
 			  << "  --benchmark-warmup <secs>   Override warmup (0 disables it)\n"
 			  << "  --benchmark-map <zoom>      Open fixed-center biome map (zoom 0.1..8)\n"
 			  << "  --benchmark-map-sequential  Compare the previous one-job map path\n"
+              << "  --view x y z yaw pitch secs Fixed daylight view for terrain review (secs 0 = no timeout)\n"
 			  << "  --help                      Show this help\n"
 			  << "\n"
 			  << "Env: FT_VOX_RESOURCE_PACK=<path>  used when --resource-pack is not set\n";
@@ -45,10 +46,30 @@ int main(int argc, char **argv)
 	std::optional<float> benchmarkWarmup;
 	float benchmarkMapZoom = 0.0f;
 	bool benchmarkMapSequential = false;
+    std::optional<std::array<float, 6>> inspection;
 
 	for (int i = 1; i < argc; ++i)
 	{
 		const std::string arg = argv[i];
+        if (arg == "--view")
+        {
+            if (i + 6 >= argc) { std::cerr << "--view requires x y z yaw pitch seconds\n"; return EXIT_FAILURE; }
+            std::array<float, 6> values{};
+            for (auto &value : values)
+            {
+                char *end = nullptr;
+                const char *start = argv[++i];
+                value = std::strtof(start, &end);
+                if (end == start || *end || !std::isfinite(value))
+                { std::cerr << "--view requires finite numbers\n"; return EXIT_FAILURE; }
+            }
+            if (std::abs(values[0]) > 1000000.f || std::abs(values[2]) > 1000000.f ||
+                values[1] < 0.f || values[1] > 512.f || std::abs(values[3]) > 360.f ||
+                std::abs(values[4]) > 89.f || values[5] < 0.f || values[5] > 300.f)
+            { std::cerr << "--view coordinates or duration outside inspection bounds\n"; return EXIT_FAILURE; }
+            inspection = values;
+            continue;
+        }
 		if (arg == "--help" || arg == "-h")
 		{
 			printUsage(argv[0]);
@@ -165,6 +186,8 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
+    if (inspection && benchmarkDuration > 0.f)
+    { std::cerr << "--view and --benchmark are separate camera modes\n"; return EXIT_FAILURE; }
 	if (benchmarkWarmup && (benchmarkDuration == 0.f || *benchmarkWarmup > benchmarkDuration))
 	{
 		std::cerr << "Error: --benchmark-warmup requires --benchmark and cannot exceed its duration.\n";
@@ -182,6 +205,11 @@ int main(int argc, char **argv)
 	{
 		Engine engine(resourcePack);
 		engine.initializeNoiseGenerator(static_cast<int>(seed_to_use));
+        if (inspection)
+        {
+            const auto &v = *inspection;
+            engine.setInspectionView({v[0], v[1], v[2]}, v[3], v[4], v[5]);
+        }
 		if (vsyncOverride)
 			engine.setVSync(*vsyncOverride);
 		if (benchmarkDuration > 0.0f)
