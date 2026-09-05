@@ -1,11 +1,13 @@
 #include "Vulkan/MeshArena.hpp"
 
 #include <algorithm>
+#include <stdexcept>
 #include <cassert>
 #include <iostream>
 
 void MeshArena::init(VmaAllocator allocator, GpuResourceRetire &retire, VkDeviceSize pageSize,
-					 VkBufferUsageFlags usage, uint32_t alignment, telemetry::Gauge gauge)
+					 VkBufferUsageFlags usage, uint32_t alignment, telemetry::Gauge gauge,
+					 uint32_t framesInFlight)
 {
 	m_allocator = allocator;
 	m_retire = &retire;
@@ -13,6 +15,10 @@ void MeshArena::init(VmaAllocator allocator, GpuResourceRetire &retire, VkDevice
 	m_usage = usage;
 	m_alignment = alignment;
 	m_gauge = gauge;
+	// framesInFlight + 1: a range retired during frame F's upload was last
+	// referenced by frame F-1's commands; one extra frame of margin, in
+	// line with GpuResourceRetire's own safety window.
+	m_retireDelay = framesInFlight + 1;
 }
 
 void MeshArena::shutdown()
@@ -27,10 +33,20 @@ void MeshArena::shutdown()
 	m_pending.clear();
 	m_frame = 0;
 	m_highWater = 0;
+	m_liveBytes = 0;
+	m_liveBlocks = 0;
+	m_failNextPages = 0;
+	m_failNextAllocs = 0;
 }
 
 bool MeshArena::createPage(uint32_t atLeastBytes)
 {
+	// Deterministic test hook: fail exactly as a VMA OOM would.
+	if (m_failNextPages > 0)
+	{
+		--m_failNextPages;
+		return false;
+	}
 	// Dedicated oversize pages round up to whole m_pageSize units so the
 	// arena keeps a predictable page quantum.
 	VkDeviceSize size = m_pageSize;
@@ -38,9 +54,19 @@ bool MeshArena::createPage(uint32_t atLeastBytes)
 		size *= 2;
 
 	Page p;
-	p.buf = createBuffer(m_allocator, size,
-						 VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | m_usage,
-						 VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+	try
+	{
+		p.buf = createBuffer(m_allocator, size,
+		                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+		                         VK_BUFFER_USAGE_TRANSFER_DST_BIT | m_usage,
+		                     VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+	}
+	catch (const std::runtime_error &)
+	{
+		// VMA could not back the page: report the failure to the caller
+		// instead of propagating - the upload retries next frame.
+		return false;
+	}
 	if (p.buf.buffer == VK_NULL_HANDLE)
 		return false;
 	trackMeshBuffer(p.buf, m_gauge);
@@ -56,6 +82,11 @@ bool MeshArena::allocate(uint32_t bytes, Range &out)
 	out = {};
 	if (bytes == 0)
 		return true;
+	if (m_failNextAllocs > 0)
+	{
+		--m_failNextAllocs;
+		return false;
+	}
 	const uint32_t aligned =
 		(bytes + m_alignment - 1) / m_alignment * m_alignment;
 
@@ -97,6 +128,8 @@ bool MeshArena::allocate(uint32_t bytes, Range &out)
 			out.offset = alignedOff;
 			out.bytes = aligned;
 			++m_liveBlocks;
+			m_liveBytes += out.bytes;
+			m_highWater = std::max(m_highWater, m_liveBytes);
 			return true;
 		}
 	}
@@ -112,6 +145,8 @@ bool MeshArena::allocate(uint32_t bytes, Range &out)
 	p.freeList.clear();
 	p.freeList.emplace_back(aligned, static_cast<uint32_t>(p.buf.size) - aligned);
 	++m_liveBlocks;
+	m_liveBytes += out.bytes;
+	m_highWater = std::max(m_highWater, m_liveBytes);
 	return true;
 }
 
@@ -144,7 +179,7 @@ void MeshArena::retire(const Range &range)
 {
 	if (range.empty())
 		return;
-	m_pending.push_back({range, m_frame + kRetireDelay});
+	m_pending.push_back({range, m_frame + m_retireDelay});
 }
 
 void MeshArena::freeImmediate(const Range &range)
@@ -168,6 +203,7 @@ void MeshArena::freeImmediate(const Range &range)
 #endif
 	if (m_liveBlocks > 0)
 		--m_liveBlocks;
+	m_liveBytes -= range.bytes;
 	insertFree(range.page, range.offset, range.bytes);
 	if (p.freeList.size() == 1 && p.freeList.front() == std::make_pair(0u, static_cast<uint32_t>(p.buf.size)))
 		releasePage(p);
@@ -188,6 +224,7 @@ void MeshArena::beginFrame(uint64_t frameNumber)
 				continue;
 			if (m_liveBlocks > 0)
 				--m_liveBlocks;
+			m_liveBytes -= r.bytes;
 			insertFree(r.page, r.offset, r.bytes);
 		}
 	}
@@ -200,12 +237,8 @@ void MeshArena::beginFrame(uint64_t frameNumber)
 			releasePage(p);
 	}
 
-	// Publish arena metrics (issue #101/#109): page count, free bytes and
-	// live-bytes high-water for this stream.
-	Metrics m = metrics();
-	telemetry::registry().set(telemetry::ArenaPages, m.pages);
-	telemetry::registry().set(telemetry::ArenaFreeBytes, m.freeBytes);
-	telemetry::registry().set(telemetry::ArenaHighWater, m_highWater);
+	// Per-arena gauges are published by MeshArenas::beginFrame as a single
+	// aggregate over the four streams.
 }
 
 void MeshArena::releasePage(Page &p)
@@ -229,6 +262,8 @@ MeshArena::Metrics MeshArena::metrics() const
 {
 	Metrics m;
 	m.liveBlocks = m_liveBlocks;
+	m.liveBytes = m_liveBytes;
+	m.highWaterBytes = m_highWater;
 	for (const Page &p : m_pages)
 	{
 		if (!p.alive)
@@ -239,23 +274,30 @@ MeshArena::Metrics MeshArena::metrics() const
 			free += bytes;
 		const uint64_t live = static_cast<uint64_t>(p.buf.size) - free;
 		m.freeBytes += free;
-		m.liveBytes += live;
 	}
 	m.highWaterBytes = m_highWater;
 	return m;
 }
 
 void MeshArenas::init(VmaAllocator allocator, GpuResourceRetire &retire, uint32_t vertexAlignment,
+	                  uint32_t framesInFlight,
 	                  VkDeviceSize vertexPageSize, VkDeviceSize indexPageSize)
 {
+	// framesInFlight + 1: one extra frame of margin over the strict
+	// in-flight window (see MeshArena::init documentation).
+	const uint32_t delay = framesInFlight + 1;
 	opaqueVertex.init(allocator, retire, vertexPageSize,
-					  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexAlignment, telemetry::GpuOpaqueVertex);
+					  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexAlignment,
+					  telemetry::GpuOpaqueVertex, delay);
 	opaqueIndex.init(allocator, retire, indexPageSize,
-					 VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sizeof(uint32_t), telemetry::GpuOpaqueIndex);
+					 VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sizeof(uint32_t),
+					 telemetry::GpuOpaqueIndex, delay);
 	waterVertex.init(allocator, retire, vertexPageSize,
-					 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexAlignment, telemetry::GpuWaterVertex);
+					 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexAlignment,
+					 telemetry::GpuWaterVertex, delay);
 	waterIndex.init(allocator, retire, indexPageSize,
-					VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sizeof(uint32_t), telemetry::GpuWaterIndex);
+					VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sizeof(uint32_t),
+					telemetry::GpuWaterIndex, delay);
 }
 
 void MeshArenas::shutdown()
@@ -272,4 +314,24 @@ void MeshArenas::beginFrame(uint64_t frameNumber)
 	opaqueIndex.beginFrame(frameNumber);
 	waterVertex.beginFrame(frameNumber);
 	waterIndex.beginFrame(frameNumber);
+
+	// Aggregated arena telemetry (issue #109): the gauges describe the four
+	// streams together; the high-water mark tracks the live total across
+	// all arenas at the same instant (summing per-arena high-waters would
+	// mix unrelated instants).
+	const uint64_t currentLive = opaqueVertex.liveBytes() + opaqueIndex.liveBytes() +
+	                             waterVertex.liveBytes() + waterIndex.liveBytes();
+	m_totalHighWater = std::max(m_totalHighWater, currentLive);
+
+	uint64_t freeBytes = 0;
+	uint32_t pages = 0;
+	for (const MeshArena *a : {&opaqueVertex, &opaqueIndex, &waterVertex, &waterIndex})
+	{
+		const auto m = a->metrics();
+		freeBytes += m.freeBytes;
+		pages += m.pages;
+	}
+	telemetry::registry().set(telemetry::ArenaPages, pages);
+	telemetry::registry().set(telemetry::ArenaFreeBytes, freeBytes);
+	telemetry::registry().set(telemetry::ArenaHighWater, m_totalHighWater);
 }

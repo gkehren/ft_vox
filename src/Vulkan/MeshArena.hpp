@@ -28,12 +28,6 @@ class MeshArena
 {
 public:
 	static constexpr uint32_t kNoPage = UINT32_MAX;
-	// A retired block returns to the free list after this many beginFrame()
-	// calls: two frames in flight plus the submit of the current one. Pages
-	// whose last live block was freed are handed to the GpuResourceRetire
-	// queue at the same point, which adds its own frame-aware destruction
-	// delay on top.
-	static constexpr uint64_t kRetireDelay = 3;
 
 	struct Range
 	{
@@ -43,15 +37,21 @@ public:
 		bool empty() const { return page == kNoPage; }
 	};
 
+	// Frame-aware retirement delay: framesInFlight + 1. A range retired
+	// during frame F's upload was last referenced by frame F-1's commands
+	// (still in flight); with `framesInFlight` frames in flight it is safe
+	// once frame F+framesInFlight has begun - the extra +1 keeps one frame
+	// of margin, mirroring GpuResourceRetire's own safety window.
 	void init(VmaAllocator allocator, GpuResourceRetire &retire, VkDeviceSize pageSize,
-			  VkBufferUsageFlags usage, uint32_t alignment, telemetry::Gauge gauge);
+			  VkBufferUsageFlags usage, uint32_t alignment, telemetry::Gauge gauge,
+			  uint32_t framesInFlight);
 	void shutdown(); // immediate destroy of every page (device idle expected)
 
 	// Returns false only when a new page would be required and its backing
 	// allocation fails. Pure CPU bookkeeping: no commands, no GPU mutation.
 	bool allocate(uint32_t bytes, Range &out);
 	// Frame-aware free: the range's bytes return to the free list after
-	// kRetireDelay beginFrame() calls.
+	// (framesInFlight + 1) beginFrame() calls.
 	void retire(const Range &range);
 	// Immediate free (bootstrap/shutdown paths only: no in-flight frame can
 	// still reference the range).
@@ -59,6 +59,12 @@ public:
 	// Drives delayed frees, page destruction and arena telemetry. Call once
 	// per rendered frame, in frame order.
 	void beginFrame(uint64_t frameNumber);
+
+	// Test-only deterministic failure injection (issue #109 review): the
+	// next `count` page creations or allocations report failure exactly as
+	// a VMA OOM would, without exhausting real device memory.
+	void setFailNextPageAllocations(uint32_t count) { m_failNextPages = count; }
+	void setFailNextAllocations(uint32_t count) { m_failNextAllocs = count; }
 
 	VkBuffer pageBuffer(uint32_t page) const;
 	// Mutable page access for the ImmediateCommands bootstrap upload path.
@@ -74,6 +80,11 @@ public:
 		uint64_t highWaterBytes{0};
 	};
 	Metrics metrics() const;
+	// Live bytes: published ranges + ranges still pending retirement (both
+	// consume the arena until they return to the free list).
+	uint64_t liveBytes() const { return m_liveBytes; }
+	uint64_t highWaterBytes() const { return m_highWater; }
+	uint32_t liveBlocks() const { return m_liveBlocks; }
 
 private:
 	using FreeBlock = std::pair<uint32_t, uint32_t>; // (offset, bytes), sorted by offset
@@ -99,15 +110,21 @@ private:
 	uint32_t m_alignment{1};
 	VkDeviceSize m_pageSize{0};
 	telemetry::Gauge m_gauge{};
+	uint32_t m_retireDelay{3};
 	std::vector<Page> m_pages;
 	std::vector<PendingFree> m_pending;
 	uint64_t m_frame{0};
 	uint64_t m_highWater{0};
+	uint64_t m_liveBytes{0};
 	uint32_t m_liveBlocks{0};
+	uint32_t m_failNextPages{0};
+	uint32_t m_failNextAllocs{0};
 };
 
 // The four per-stream arenas shared by every chunk (issue #109). Owned by
-// WorldRenderer; the chunk upload path suballocates from them.
+// WorldRenderer; the chunk upload path suballocates from them. The arena.*
+// telemetry gauges are published HERE, aggregated over all four streams
+// (per-arena metrics are still reachable through MeshArena::metrics).
 struct MeshArenas
 {
 	MeshArena opaqueVertex;
@@ -116,8 +133,12 @@ struct MeshArenas
 	MeshArena waterIndex;
 
 	void init(VmaAllocator allocator, GpuResourceRetire &retire, uint32_t vertexAlignment,
+	          uint32_t framesInFlight,
 	          VkDeviceSize vertexPageSize = 128ull * 1024ull * 1024ull,
 	          VkDeviceSize indexPageSize = 64ull * 1024ull * 1024ull);
 	void shutdown();
 	void beginFrame(uint64_t frameNumber);
+
+private:
+	uint64_t m_totalHighWater{0};
 };
