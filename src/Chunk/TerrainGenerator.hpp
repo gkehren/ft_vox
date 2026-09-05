@@ -13,7 +13,7 @@
 #include <Chunk/BiomeRegionGrid.hpp>
 #include <Chunk/TerrainProfiles.hpp>
 #include <Chunk/ChunkBorders.hpp>
-#include <Renderer/MinecraftTextures.hpp>
+#include <Block/BlockTraits.hpp>
 
 struct ChunkData
 {

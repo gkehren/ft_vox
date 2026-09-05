@@ -1,5 +1,5 @@
 #include <Chunk/TerrainGenerator.hpp>
-#include <Renderer/MinecraftTextures.hpp>
+#include <Block/BlockTraits.hpp>
 #include <cmath>
 #include <algorithm>
 
