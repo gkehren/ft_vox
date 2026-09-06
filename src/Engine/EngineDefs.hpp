@@ -75,10 +75,12 @@ struct RenderSettings
 	int raycastDistance{8};
 	bool vsyncEnabled{true};
 
-	// View-direction load bias in [0,1): chunks ahead of the camera count as
-	// closer — they load first and up to ~1/sqrt(1-bias) farther out (bias 0.3
-	// → ~x1.19 ahead, ~x0.87 behind). Keeps the loaded region inside the
-	// 1.5x unload radius (no thrash) while favoring what the player sees.
+	// View-direction load bias: chunks ahead of the camera count as closer —
+	// they load first and up to maxRenderDistance / sqrt(1-bias) farther out.
+	// Capped at kSafeMaxStreamFrontBias so the furthest desired chunk center
+	// remains inside the kChunkUnloadDistanceFactor unload hysteresis radius
+	// (architectural invariant: desired footprint ⊆ unload region; see
+	// StreamHelpers.hpp).
 	float streamFrontBias{0.30f};
 
 	// Per-second chunk pipeline throughput — frame-rate-independent budgets.

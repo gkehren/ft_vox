@@ -863,7 +863,8 @@ void ChunkManager::collectShadowList(std::vector<Chunk *> &out, const Camera &ca
 
 void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings)
 {
-	const float unloadDist = static_cast<float>(settings.maxRenderDistance) * 1.5f;
+	const float unloadDist =
+		static_cast<float>(settings.maxRenderDistance) * kChunkUnloadDistanceFactor;
 	const float unloadDistSq = unloadDist * unloadDist;
 
 	std::vector<glm::ivec3> toUnload;
@@ -938,6 +939,8 @@ StreamingUpdateKind ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &ca
 
 	m_desiredFootprint = computeDesiredFootprintFull(cameraChunkPos, camPos, camForwardXZ, frontBias,
 													settings.maxRenderDistance);
+	m_streamStats.footprintRowsVisited +=
+		static_cast<uint64_t>(m_desiredFootprint.maxZ - m_desiredFootprint.minZ + 1);
 
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
 	m_loadQueue.clear();
@@ -1036,6 +1039,8 @@ StreamingUpdateKind ChunkManager::reconcileStreamingIncremental(const glm::ivec3
 	ChunkDesiredFootprint newFootprint =
 		computeDesiredFootprintIncremental(m_desiredFootprint, cameraChunkPos, camPos, camForwardXZ,
 										   frontBias, settings.maxRenderDistance);
+	m_streamStats.footprintRowsVisited +=
+		static_cast<uint64_t>(newFootprint.maxZ - newFootprint.minZ + 1);
 	FootprintDiff diff = computeFootprintDiff(m_desiredFootprint, newFootprint);
 	m_desiredFootprint = std::move(newFootprint);
 
@@ -1056,6 +1061,8 @@ StreamingUpdateKind ChunkManager::reconcileStreamingHeading(const glm::ivec3 &ca
 	ChunkDesiredFootprint newFootprint =
 		computeDesiredFootprintFull(cameraChunkPos, camPos, camForwardXZ, frontBias,
 									settings.maxRenderDistance);
+	m_streamStats.footprintRowsVisited +=
+		static_cast<uint64_t>(newFootprint.maxZ - newFootprint.minZ + 1);
 	FootprintDiff diff = computeFootprintDiff(m_desiredFootprint, newFootprint);
 	m_desiredFootprint = std::move(newFootprint);
 

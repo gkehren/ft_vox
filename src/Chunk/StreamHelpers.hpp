@@ -17,6 +17,78 @@ struct LoadCandidate
 	float distSq{0.f};
 };
 
+/// Out-of-range unload hysteresis factor: chunks unload beyond
+/// maxRenderDistance * this (must stay in sync with the load reach below).
+constexpr float kChunkUnloadDistanceFactor = 1.5f;
+
+/// Largest streamFrontBias that keeps the invariant
+/// `desired load footprint ⊆ unload hysteresis radius`: the ahead reach is
+/// maxRenderDistance / sqrt(1 - bias), so bias must satisfy
+/// 1/sqrt(1-bias) <= kChunkUnloadDistanceFactor, i.e.
+/// bias <= 1 - 1/unloadFactor^2 ≈ 0.5556. 0.55 keeps a small numeric margin
+/// for float noise and chunk-center vs boundary differences.
+constexpr float kSafeMaxStreamFrontBias = 0.55f;
+
+/// Runtime front-bias value actually used by the footprint math: clamped to
+/// the unload-safe maximum so the furthest desired chunk center always stays
+/// inside the 1.5x unload radius. The UI may hand in anything; compare/store
+/// the canonical value, not the raw one, so clamped settings never trigger
+/// spurious rebuilds.
+inline float normalizedStreamFrontBias(float bias)
+{
+	return glm::clamp(bias, 0.f, kSafeMaxStreamFrontBias);
+}
+
+/// Bias below which front-bias reshaping is considered absent: at bias 0 the
+/// desired region is rotation-invariant, so heading changes are no-ops.
+constexpr float kStreamBiasEpsilon = 1e-4f;
+
+/// True when two front-bias settings differ beyond float noise after
+/// normalization. Single comparison rule for every invalidation check.
+inline bool streamFrontBiasChanged(float a, float b)
+{
+	return std::abs(normalizedStreamFrontBias(a) - normalizedStreamFrontBias(b)) > kStreamBiasEpsilon;
+}
+
+/// Cheap main-thread streaming maintenance counters (issue #108): how frames
+/// split between the zero-work fast path and the reconciliation paths, plus
+/// queue churn. Published via ChunkManager::streamingMaintenanceStats() for
+/// benchmarks and tests; the pure helpers above stay un-instrumented.
+struct StreamingMaintenanceStats
+{
+	uint64_t zeroWork{0};
+	uint64_t incrementalUpdates{0};
+	uint64_t headingRebuilds{0};
+	uint64_t fullRebuilds{0};
+	uint64_t queueSorts{0};
+	uint64_t footprintRowsVisited{0};
+	uint64_t enteringCandidates{0};
+	uint64_t exitingCandidates{0};
+	uint64_t unloadScans{0};
+
+	/// Number of maintenance dispatches (the benchmark compares this against
+	/// its measured frame count to assert a leak-free counter window).
+	uint64_t maintenanceCalls() const
+	{
+		return zeroWork + incrementalUpdates + headingRebuilds + fullRebuilds;
+	}
+};
+
+/// Windowed stats: a - b (benchmark reports measurement window only).
+inline StreamingMaintenanceStats subtractStreamingStats(const StreamingMaintenanceStats &a,
+														const StreamingMaintenanceStats &b)
+{
+	return {a.zeroWork - b.zeroWork,
+			a.incrementalUpdates - b.incrementalUpdates,
+			a.headingRebuilds - b.headingRebuilds,
+			a.fullRebuilds - b.fullRebuilds,
+			a.queueSorts - b.queueSorts,
+			a.footprintRowsVisited - b.footprintRowsVisited,
+			a.enteringCandidates - b.enteringCandidates,
+			a.exitingCandidates - b.exitingCandidates,
+			a.unloadScans - b.unloadScans};
+}
+
 /// Nearest-first ordering for chunk load selection.
 inline void sortLoadCandidatesNearestFirst(std::vector<LoadCandidate> &candidates)
 {
@@ -34,7 +106,7 @@ inline float biasedLoadDistSq(const glm::vec3 &camPos, const glm::vec3 &chunkCen
 	const float dx = chunkCenter.x - camPos.x;
 	const float dz = chunkCenter.z - camPos.z;
 	const float distSq = dx * dx + dz * dz;
-	const float bias = glm::clamp(frontBias, 0.f, 0.9f);
+	const float bias = normalizedStreamFrontBias(frontBias);
 	if (bias <= 0.f || distSq < 1e-6f)
 		return distSq;
 	const float invLen = 1.0f / std::sqrt(distSq);
@@ -122,7 +194,7 @@ inline int remainingCountBudget(int requested, double elapsedMs, double maxStrea
 /// Steady-state + headroom ChunkPool size for a view distance.
 /// Matches ChunkManager unload radius = unloadFactor * maxRenderDistance.
 inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
-										float unloadFactor = 1.5f,
+										float unloadFactor = kChunkUnloadDistanceFactor,
 										float margin = 1.15f)
 {
 	constexpr size_t kMin = 64;
@@ -167,41 +239,6 @@ inline glm::ivec2 streamingMovementAnchor(const glm::vec3 &pos)
 		static_cast<int>(std::floor(pos.x / static_cast<float>(kStreamingAnchorBlocks))),
 		static_cast<int>(std::floor(pos.z / static_cast<float>(kStreamingAnchorBlocks)))};
 }
-
-/// Bias below which front-bias reshaping is considered absent: at bias 0 the
-/// desired region is rotation-invariant, so heading changes are no-ops.
-constexpr float kStreamBiasEpsilon = 1e-4f;
-
-/// Runtime front-bias value actually used by the footprint math (the UI may
-/// hand in values beyond the clamp — compare/store the canonical value, not
-/// the raw one, so clamped settings never trigger spurious rebuilds).
-inline float normalizedStreamFrontBias(float bias)
-{
-	return glm::clamp(bias, 0.f, 0.9f);
-}
-
-/// True when two front-bias settings differ beyond float noise after
-/// normalization. Single comparison rule for every invalidation check.
-inline bool streamFrontBiasChanged(float a, float b)
-{
-	return std::abs(normalizedStreamFrontBias(a) - normalizedStreamFrontBias(b)) > kStreamBiasEpsilon;
-}
-
-/// Cheap main-thread streaming maintenance counters (issue #108): how frames
-/// split between the zero-work fast path and the reconciliation paths, plus
-/// queue churn. Published via ChunkManager::streamingMaintenanceStats() for
-/// benchmarks and tests; the pure helpers above stay un-instrumented.
-struct StreamingMaintenanceStats
-{
-	uint64_t zeroWork{0};
-	uint64_t incrementalUpdates{0};
-	uint64_t headingRebuilds{0};
-	uint64_t fullRebuilds{0};
-	uint64_t queueSorts{0};
-	uint64_t enteringCandidates{0};
-	uint64_t exitingCandidates{0};
-	uint64_t unloadScans{0};
-};
 
 /// Contiguous interval of chunk X coordinates in a row Z that lie within the desired load region.
 struct ChunkRowSpan
@@ -250,7 +287,7 @@ inline std::vector<glm::ivec3> computeDesiredChunkSetBruteForce(
 {
 	const float maxDistSq = static_cast<float>(maxRenderDistance) * static_cast<float>(maxRenderDistance);
 	const float reachBlocks =
-		static_cast<float>(maxRenderDistance) / std::sqrt(1.0f - glm::clamp(frontBias, 0.f, 0.9f));
+		static_cast<float>(maxRenderDistance) / std::sqrt(1.0f - normalizedStreamFrontBias(frontBias));
 	const int radius =
 		static_cast<int>(std::ceil(reachBlocks / static_cast<float>(CHUNK_SIZE)));
 
@@ -392,7 +429,7 @@ inline ChunkDesiredFootprint computeDesiredFootprintFull(
 {
 	const float maxDistSq = static_cast<float>(maxRenderDistance) * static_cast<float>(maxRenderDistance);
 	const float reachBlocks =
-		static_cast<float>(maxRenderDistance) / std::sqrt(1.0f - glm::clamp(frontBias, 0.f, 0.9f));
+		static_cast<float>(maxRenderDistance) / std::sqrt(1.0f - normalizedStreamFrontBias(frontBias));
 	const int radius =
 		static_cast<int>(std::ceil(reachBlocks / static_cast<float>(CHUNK_SIZE)));
 
@@ -421,7 +458,7 @@ inline ChunkDesiredFootprint computeDesiredFootprintIncremental(
 {
 	const float maxDistSq = static_cast<float>(maxRenderDistance) * static_cast<float>(maxRenderDistance);
 	const float reachBlocks =
-		static_cast<float>(maxRenderDistance) / std::sqrt(1.0f - glm::clamp(frontBias, 0.f, 0.9f));
+		static_cast<float>(maxRenderDistance) / std::sqrt(1.0f - normalizedStreamFrontBias(frontBias));
 	const int radius =
 		static_cast<int>(std::ceil(reachBlocks / static_cast<float>(CHUNK_SIZE)));
 

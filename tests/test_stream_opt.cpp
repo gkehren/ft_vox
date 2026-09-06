@@ -561,12 +561,69 @@ static void testAnchorAndBiasHelpers()
 		  "negative anchors floor symmetrically");
 	CHECK(streamingMovementAnchor(glm::vec3(15.9f, 0.f, 16.1f)) == glm::ivec2(3, 4), "anchor cells are 4 blocks");
 
-	// Bias normalization + epsilon comparison.
-	CHECK(normalizedStreamFrontBias(0.95f) == 0.9f, "bias clamps to 0.9");
+	// Bias normalization + epsilon comparison (no float-equality on the cap).
+	CHECK(std::abs(normalizedStreamFrontBias(0.95f) - kSafeMaxStreamFrontBias) < 1e-6f,
+		  "bias clamps to the unload-safe maximum");
+	CHECK(std::abs(normalizedStreamFrontBias(0.9f) - kSafeMaxStreamFrontBias) < 1e-6f,
+		  "legacy 0.9 cap clamps to the unload-safe maximum");
 	CHECK(normalizedStreamFrontBias(-0.5f) == 0.f, "negative bias clamps to 0");
 	CHECK(!streamFrontBiasChanged(0.3f, 0.30005f), "bias float noise below epsilon is ignored");
 	CHECK(streamFrontBiasChanged(0.3f, 0.301f), "real bias change is detected");
 	CHECK(!streamFrontBiasChanged(0.95f, 0.99f), "clamped bias values compare canonically");
+}
+
+static void testFrontBiasFitsUnloadRadius()
+{
+	// Architectural invariant: desired load footprint ⊆ unload hysteresis.
+	// Ahead reach = viewDist / sqrt(1 - bias) must stay <= viewDist * 1.5.
+	const float reachFactor = 1.0f / std::sqrt(1.0f - normalizedStreamFrontBias(kSafeMaxStreamFrontBias));
+	CHECK(reachFactor <= kChunkUnloadDistanceFactor,
+		  "max stream bias stays inside unload radius");
+	CHECK(kSafeMaxStreamFrontBias < 1.0f - 1.0f / (kChunkUnloadDistanceFactor * kChunkUnloadDistanceFactor) + 1e-6f,
+		  "safe bias cap respects the closed-form bound");
+
+	const float rawBiases[] = {0.f, 0.30f, 0.55f, 0.6f, 0.9f, 0.99f};
+	for (float raw : rawBiases)
+	{
+		const float norm = normalizedStreamFrontBias(raw);
+		CHECK(norm >= 0.f && norm <= kSafeMaxStreamFrontBias + 1e-6f, "normalized bias within safe range");
+		const float factor = 1.0f / std::sqrt(1.0f - norm);
+		CHECK(factor <= kChunkUnloadDistanceFactor + 1e-4f, "every normalized bias keeps the reach inside unload");
+	}
+}
+
+static void testSubtractStreamingStats()
+{
+	StreamingMaintenanceStats start;
+	start.zeroWork = 100;
+	start.incrementalUpdates = 20;
+	start.headingRebuilds = 2;
+	start.fullRebuilds = 1;
+	start.queueSorts = 12;
+	start.footprintRowsVisited = 500;
+	start.enteringCandidates = 300;
+	start.exitingCandidates = 280;
+	start.unloadScans = 5;
+
+	StreamingMaintenanceStats end;
+	end.zeroWork = 180;
+	end.incrementalUpdates = 35;
+	end.headingRebuilds = 2;
+	end.fullRebuilds = 3;
+	end.queueSorts = 20;
+	end.footprintRowsVisited = 900;
+	end.enteringCandidates = 360;
+	end.exitingCandidates = 355;
+	end.unloadScans = 7;
+
+	const auto d = subtractStreamingStats(end, start);
+	CHECK(d.zeroWork == 80 && d.incrementalUpdates == 15, "delta: dispatch counters subtract");
+	CHECK(d.headingRebuilds == 0 && d.fullRebuilds == 2, "delta: rebuild counters subtract");
+	CHECK(d.queueSorts == 8, "delta: sorts subtract");
+	CHECK(d.footprintRowsVisited == 400, "delta: rows subtract");
+	CHECK(d.enteringCandidates == 60 && d.exitingCandidates == 75, "delta: candidate churn subtract");
+	CHECK(d.unloadScans == 2, "delta: unload scans subtract");
+	CHECK(d.maintenanceCalls() == 97, "delta: maintenance calls = zero+incr+heading+full");
 }
 
 static void testMinimalRenderDistanceFootprints()
@@ -599,6 +656,8 @@ int main()
 	testIncrementalQueueMaintenance();
 	testFootprintDiffUnits();
 	testAnchorAndBiasHelpers();
+	testFrontBiasFitsUnloadRadius();
+	testSubtractStreamingStats();
 	testMinimalRenderDistanceFootprints();
 
 	if (g_fails != 0)

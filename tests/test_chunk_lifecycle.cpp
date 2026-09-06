@@ -716,11 +716,12 @@ static void runStreamingDispatchTests()
 
 		settings.streamFrontBias = 0.95f;
 		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild,
-			  "out-of-range bias rebuilds (normalized to 0.9)");
+			  "out-of-range bias rebuilds (normalized to the safe maximum)");
 		settings.streamFrontBias = 0.99f;
 		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::None,
 			  "clamped bias change (0.95 -> 0.99) is a no-op");
-		checkManagerDesiredMatchesBrute(manager, camera, 0.9f, 256, "clamped-bias footprint matches brute force");
+		checkManagerDesiredMatchesBrute(manager, camera, kSafeMaxStreamFrontBias, 256,
+										"clamped-bias footprint matches brute force");
 	}
 
 	// Render-distance changes rebuild and converge; teleports rebuild.
@@ -750,6 +751,92 @@ static void runStreamingDispatchTests()
 		CHECK(ChunkManagerStreamProbe::queueHead(manager) == 0, "teleport resets the queue head");
 		checkManagerDesiredMatchesBrute(manager, camera, bias, 384, "post-teleport footprint matches brute force");
 		checkStreamingQueueInvariants(manager, "post-teleport queue invariants");
+	}
+
+	// Geometric invariant: desired footprint ⊆ unload hysteresis radius.
+	// Raw bias 0.9 clamps to the safe maximum; for every heading, every
+	// desired chunk CENTER must lie within maxRenderDistance * 1.5 (XZ) of
+	// the camera. A small epsilon absorbs float noise; the center-based rule
+	// matches the unload check, which also measures to chunk centers.
+	{
+		constexpr int view = 128;
+		const glm::vec3 basePos(200.3f, 100.f, 200.7f);
+		const float unloadDistSq = view * kChunkUnloadDistanceFactor * (view * kChunkUnloadDistanceFactor);
+		const std::vector<glm::vec2> headings = {
+			{1.f, 0.f}, {-1.f, 0.f}, {0.f, 1.f}, {0.f, -1.f},
+			{0.70710678f, 0.70710678f}, // diagonal
+		};
+		for (const glm::vec2 &fwd : headings)
+		{
+			ChunkManager manager(&generator, nullptr, &pool);
+			RenderSettings settings;
+			settings.streamFrontBias = 0.9f; // raw, above the safe cap on purpose
+			settings.maxRenderDistance = view;
+			Camera camera(basePos);
+			camera.setYawPitch(glm::degrees(std::atan2(fwd.y, fwd.x)), 0.f);
+			manager.updateStreaming(camera, settings);
+			const auto desired = managerDesiredSet(manager);
+			CHECK(!desired.empty(), "bias-max footprint non-empty");
+			float worstDistSq = 0.f;
+			for (const auto &c : desired)
+			{
+				const glm::vec3 center(c.x * 16 + 8.f, 0.f, c.z * 16 + 8.f);
+				const float dx = basePos.x - center.x;
+				const float dz = basePos.z - center.z;
+				const float distSq = dx * dx + dz * dz;
+				worstDistSq = std::max(worstDistSq, distSq);
+				CHECK(distSq <= unloadDistSq + 4.f,
+					  "desired chunk center lies inside the unload hysteresis radius");
+			}
+			(void)worstDistSq;
+		}
+	}
+
+	// Anti-starvation: a loaded, still-desired chunk must never be evicted by
+	// the unload scan (desired ∩ unloadCandidates = ∅). Raw bias 0.9 → safe
+	// cap; the farthest ahead chunk is loaded, then the 60-frame unload
+	// cadence fires several times — the chunk must survive all of them.
+	{
+		ChunkPool bigPool(512);
+		ChunkManager manager(&generator, nullptr, &bigPool);
+		RenderSettings settings;
+		settings.streamFrontBias = 0.9f;
+		settings.maxRenderDistance = 64;
+		Camera camera(glm::vec3(8.f, 100.f, 8.f));
+		manager.updateStreaming(camera, settings);
+		for (int i = 0; i < 40; ++i)
+			manager.processChunkLoading(4096);
+
+		// Farthest desired chunk ahead of the camera (+X heading).
+		glm::ivec3 farAhead{0, 0, 0};
+		float bestDist = -1.f;
+		for (const auto &c : managerDesiredSet(manager))
+		{
+			if (c.x <= 0)
+				continue;
+			const glm::vec3 center(c.x * 16 + 8.f, 0.f, c.z * 16 + 8.f);
+			const float d = center.x - camera.getPosition().x;
+			if (d > bestDist)
+			{
+				bestDist = d;
+				farAhead = c;
+			}
+		}
+		CHECK(bestDist > 0.f, "found desired chunks ahead of the camera");
+		CHECK(ChunkManagerStreamProbe::chunks(manager).count(farAhead) == 1,
+			  "farthest ahead chunk got loaded");
+
+		const auto before = manager.streamingMaintenanceStats();
+		for (int i = 0; i < 200; ++i)
+			manager.updateStreaming(camera, settings);
+		const auto after = manager.streamingMaintenanceStats();
+		CHECK(after.unloadScans > before.unloadScans, "unload cadence fired during the stationary window");
+		CHECK(ChunkManagerStreamProbe::chunks(manager).count(farAhead) == 1,
+			  "still-desired ahead chunk survives every unload scan");
+		// Full invariant: every desired coordinate is loaded — none was evicted.
+		for (const auto &c : managerDesiredSet(manager))
+			CHECK(ChunkManagerStreamProbe::chunks(manager).count(c) == 1,
+				  "desired chunk remains loaded after unload scans (no thrash)");
 	}
 
 	// Negative coordinates: floor-quantized anchors and chunk math must behave
