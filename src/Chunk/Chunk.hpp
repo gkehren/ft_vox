@@ -238,6 +238,8 @@ public:
 	uint32_t getWaterIndexCount() const { return waterIndexCount; }
 	uint32_t getCachedOpaqueDrawCount() const { return m_cachedOpaqueDrawCount; }
 	uint32_t getCachedWaterDrawCount() const { return m_cachedWaterDrawCount; }
+	const IndirectDraw *cachedOpaqueDraws() const { return m_cachedOpaqueDraws.data(); }
+	const IndirectDraw *cachedWaterDraws() const { return m_cachedWaterDraws.data(); }
 
 	size_t getActiveIndex() const { return m_activeIndex; }
 	void setActiveIndex(size_t index) { m_activeIndex = index; }
@@ -423,3 +425,21 @@ private:
 	// exposing that state in the public API.
 	friend struct ChunkStateProbe;
 };
+
+inline size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const
+{
+	if (m_cachedOpaqueDrawCount == 0 || opaqueIndexCount == 0 || meshNeedsUpdate.load(std::memory_order_relaxed))
+		return 0;
+	out.insert(out.end(), m_cachedOpaqueDraws.data(),
+	           m_cachedOpaqueDraws.data() + m_cachedOpaqueDrawCount);
+	return m_cachedOpaqueDrawCount;
+}
+
+inline size_t Chunk::collectWaterDraws(std::vector<IndirectDraw> &out) const
+{
+	if (m_cachedWaterDrawCount == 0 || waterIndexCount == 0 || meshNeedsUpdate.load(std::memory_order_relaxed))
+		return 0;
+	out.insert(out.end(), m_cachedWaterDraws.data(),
+	           m_cachedWaterDraws.data() + m_cachedWaterDrawCount);
+	return m_cachedWaterDrawCount;
+}

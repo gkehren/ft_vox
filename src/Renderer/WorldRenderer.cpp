@@ -424,6 +424,7 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 						m_overlays, clearColor, frameIndex, m_arenas, drawDataMapped, drawDataBuffer, gpu);
 	}
 	{
+		PROFILE_SCOPE("Water");
 		const auto *ubo = static_cast<const FrameUBO *>(m_frameUbos[frameIndex].uboMapped);
 		if (gpu) gpu->beginPass(cmd, GpuPass::Water);
 		m_water.record(cmd, frameIndex, extent, set0, m_set1, m_set2Water, m_waterPipelineLayout, m_post.hdrColor(),

@@ -268,49 +268,47 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 								1.f / static_cast<float>(std::max(1u, extent.height)), 0.f, 0.f};
 	vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(invScreen), invScreen);
 
-	struct WaterEntry
-	{
-		Chunk *chunk;
-		float dist2;
-	};
-	std::vector<WaterEntry> waterChunks;
-	waterChunks.reserve(chunks.size());
+	m_waterChunks.clear();
 	for (Chunk *chunk : chunks)
 	{
-		if (chunk && chunk->hasWaterMesh())
+		if (chunk && chunk->getCachedWaterDrawCount() > 0)
 		{
 			const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
 			const glm::vec3 d = c - camPos;
-			waterChunks.push_back({chunk, glm::dot(d, d)});
+			m_waterChunks.push_back({chunk, glm::dot(d, d)});
 		}
 	}
-	std::sort(waterChunks.begin(), waterChunks.end(),
+	std::sort(m_waterChunks.begin(), m_waterChunks.end(),
 			  [](const WaterEntry &a, const WaterEntry &b) { return a.dist2 > b.dist2; });
 
-	// Back-to-front order is preserved exactly: commands are emitted in the
-	// sorted order and split into contiguous runs that share an arena page
-	// pair; each run is one bind + one indirect draw (issue #109).
-	m_scratch.clear();
-	for (const auto &e : waterChunks)
-		e.chunk->collectWaterDraws(m_scratch);
-	m_lastCommands = static_cast<uint32_t>(m_scratch.size());
-	if (!m_scratch.empty())
+	if (m_scratch.size() < kMaxIndirectCommands)
+		m_scratch.resize(kMaxIndirectCommands);
+	size_t scratchCount = 0;
+	Chunk::IndirectDraw *outPtr = m_scratch.data();
+	for (const auto &e : m_waterChunks)
 	{
-		assert(m_scratch.size() <= kMaxIndirectCommands && "WaterPass: indirect command capacity exceeded");
-		if (m_scratch.size() > kMaxIndirectCommands)
+		const uint32_t cCount = e.chunk->getCachedWaterDrawCount();
+		if (scratchCount + cCount <= kMaxIndirectCommands)
 		{
-			// Not silent: at larger view distances or denser worlds this
-			// would silently drop geometry (issue #109 review phase 24).
+			std::memcpy(outPtr + scratchCount, e.chunk->cachedWaterDraws(), cCount * sizeof(Chunk::IndirectDraw));
+			scratchCount += cCount;
+		}
+		else
+		{
 			static bool warned = false;
 			if (!warned)
 			{
 				warned = true;
-				std::cerr << "[indirect] command overflow: " << m_scratch.size()
-				          << " commands > capacity " << kMaxIndirectCommands
+				std::cerr << "[indirect] command overflow in water: "
+				          << (scratchCount + cCount) << " > " << kMaxIndirectCommands
 				          << " - truncating" << std::endl;
 			}
 		}
-		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+	}
+	m_lastCommands = static_cast<uint32_t>(scratchCount);
+	if (scratchCount > 0)
+	{
+		const size_t count = scratchCount;
 		// Computed once per record: batches obey multiDrawIndirect and
 		// maxDrawIndirectCount (see IndirectDrawUtils.hpp).
 		const uint32_t batchLimit = indirectBatchLimit(
