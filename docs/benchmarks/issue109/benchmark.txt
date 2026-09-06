@@ -5,9 +5,10 @@ Scope: replace per-chunk mesh VMA buffers with 4 shared device-local
 arenas (opaque/water x vertex/index, paged, frame-aware retirement) and
 submit opaque/water/shadow geometry through vkCmdDrawIndexedIndirect.
 
-Base: origin/main d677d9d (post-#118). Branch: gpu-mesh-arenas at f4600aa
-(final review cycle: explicit bootstrap failure, single +1 retire margin,
-direct-draw scope fix, multiDrawIndirect feature enablement).
+Base: origin/main d677d9d (post-#118). Branch: gpu-mesh-arenas at 4266a51
+(measured after the multiDrawIndirect enablement; the follow-up
+maxDrawIndirectCount batching fix does not touch steady-state batches on
+hardware whose limit is UINT32_MAX).
 Machine: Windows 11, MSVC Release, Ryzen 7 9800X3D, RTX 4070 Ti.
 Protocol: interleaved runs (main, PR, main, PR, ...), median of 4 pairs,
 `ft_vox --seed 42 --benchmark 30` (30 s measured, 3 s warmup), view
