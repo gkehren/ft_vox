@@ -38,7 +38,9 @@ revision appends its own files).
 Same protocol, clean-tree builds of both sides, interleaved 2×2 (2026-09-06,
 ~16:00 — this session the machine was noticeably noisier than the earlier
 runs: main's own Streaming also drifted 0.35→0.40 ms, so compare sides, not
-sessions):
+sessions). The A/B measures the default 0.30 hot path, unchanged by the
+review follow-up 7e4b14b (CLI hook fix + counter-window hardening — see the
+smoke sections below).
 
 | Metric | main `1d62865` | PR `2ea12ca` |
 |---|---|---|
@@ -50,12 +52,20 @@ sessions):
 | rowsVisited | n/a | ~79 rows per reconciliation (O(r), r ≈ 37 at view 512) |
 | enter/exit | n/a | 21010/21008, balanced |
 
-**Bias-max smoke** (`--benchmark 30 --front-bias 0.55`, the unload-safe cap):
-score 9840 (S), `Streaming` 0.171 ms, **0 frames > 16.7 ms**, zeroWork 86.5 %,
-`chunks.active` peak 4677 with deferred churn settling to 0 (no unload/reload
+**Bias-max smoke** (`--benchmark 30 --front-bias 0.55`, the unload-safe cap;
+review follow-up 7e4b14b fixed the CLI hook being consumed before it was
+applied — the first "0.55" report actually ran at 0.30, exposed by its
+79 rows/reconciliation): score 9920 (S), **`FrontBias: 0.55` recorded in the
+report**, **177510 / 1830 = 97.0 rows per reconciliation** (= radius 48, the
+0.55 footprint — arithmetic provenance), `Streaming` 0.143 ms, **0 frames >
+16.7 ms**, zeroWork 88.5 %, deferred churn settling (no unload/reload
 oscillation at the cap). Combined with the geometric test (every desired
 chunk center inside view × 1.5 for all headings at raw bias 0.9) this closes
 the `desired ⊆ unload` contract end-to-end.
+
+**Zero-warmup window check** (`--benchmark-warmup 0`, review follow-up):
+maintenance calls == measured frames **exactly** (16549 / 16549) — the
+window opens even without a Warmup->Running flip in tick().
 
 ## Post-review revision (77576c4, anchor-driven reconciliation + counters)
 
