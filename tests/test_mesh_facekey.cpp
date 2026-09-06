@@ -1534,7 +1534,6 @@ static void testWaterFilledKelpVariants()
 			}
 		if (detail != AIR)
 			s->chunk.setVoxel(3, detailY, 3, detail);
-		*outResult = s->pool.acquire();
 		MeshBuildResult *r = s->pool.acquire();
 		s->chunk.buildMesh(*r, s->chunk.meshGeneration(), s->chunk.meshRevision());
 		s->pool.finishBuild(r);
@@ -1591,7 +1590,6 @@ static void testWaterFilledKelpVariants()
 				s->chunk.setVoxel(4, y, 4, WATER);
 			if (detail != AIR)
 				s->chunk.setVoxel(4, detailY, 4, detail);
-			*outResult = s->pool.acquire();
 			MeshBuildResult *r = s->pool.acquire();
 			s->chunk.buildMesh(*r, s->chunk.meshGeneration(), s->chunk.meshRevision());
 			s->pool.finishBuild(r);
@@ -1601,10 +1599,8 @@ static void testWaterFilledKelpVariants()
 		MeshBuildResult *rCol = nullptr, *rKelp = nullptr;
 		Scene *sCol = buildColumn(AIR, 0, &rCol);
 		Scene *sKelp = buildColumn(KELP, 15, &rKelp);
-		CHECK(rCol->waterVertices == rKelp->waterVertices,
+		CHECK(sameWaterMesh(*rCol, *rKelp),
 			  "water-filled variants: KELP on the y=15/16 seam keeps the exact fluid mesh");
-		CHECK(rCol->waterIndices == rKelp->waterIndices,
-			  "water-filled variants: KELP seam indices identical");
 		sCol->pool.release(rCol);
 		sKelp->pool.release(rKelp);
 		delete sCol;
@@ -1628,7 +1624,7 @@ static void testWaterFilledKelpVariants()
 		sDetail.chunk.buildMesh(*rDet, sDetail.chunk.meshGeneration(), sDetail.chunk.meshRevision());
 		sRef.pool.finishBuild(rRef);
 		sDetail.pool.finishBuild(rDet);
-		CHECK(rRef->waterVertices == rDet->waterVertices,
+		CHECK(sameWaterMesh(*rRef, *rDet),
 			  "water-filled variants: KELP at the chunk border keeps the exact fluid mesh");
 		sRef.pool.release(rRef);
 		sDetail.pool.release(rDet);
@@ -1660,20 +1656,26 @@ static void testWaterFilledKelpVariants()
 	// F) KELP geometry non-regression: the current representation is cross
 	// quads (NOT a cube) - a lone KELP still emits its own detail quads.
 	{
-		CHECK(blockShape(KELP) == BlockShape::Cross,
-			  "kelp geometry contract: KELP stays a cross detail");
-		CHECK(blockShape(KELP_TOP) == BlockShape::Cross,
-			  "kelp geometry contract: KELP_TOP stays a cross detail");
+		CHECK(blockShape(KELP) == BlockShape::Cube,
+			  "kelp geometry contract: KELP is a cube");
+		CHECK(blockShape(KELP_TOP) == BlockShape::Cube,
+			  "kelp geometry contract: KELP_TOP is a cube");
+		CHECK(blockContainsWater(KELP) && blockContainsWater(KELP_TOP),
+			  "kelp geometry contract: kelp holds water");
 		MeshBuildResult *r = nullptr;
 		Scene *s = buildVolume(AIR, 0, &r);
 		s->chunk.setVoxel(3, 7, 3, KELP); // lone kelp cell above the water
 		MeshBuildResult *r2 = s->pool.acquire();
 		s->chunk.buildMesh(*r2, s->chunk.meshGeneration(), s->chunk.meshRevision());
 		s->pool.finishBuild(r2);
-		size_t withKelp = 0;
+		size_t kelpVertices = 0;
 		for (const auto &sec : r2->sections)
-			withKelp += sec.opaqueVertices.size();
-		CHECK(withKelp > 0, "kelp geometry contract: lone KELP still emits its quads");
+			for (const auto &v : sec.opaqueVertices)
+			{
+				if (vTexture(v) == KELP)
+					++kelpVertices;
+			}
+		CHECK(kelpVertices > 0, "kelp geometry contract: lone KELP still emits its quads");
 		s->pool.release(r);
 		delete s;
 	}
@@ -1690,6 +1692,7 @@ int main(int argc, char **argv)
 
     testSmallPlantGeometry();
     testWaterWithEmbeddedDetails();
+    testWaterFilledKelpVariants();
 	testUniformSlabMerges();
 	testBlockTypeBoundary();
 	testTransparencyPairs();
