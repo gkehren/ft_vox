@@ -37,6 +37,9 @@ private:
 	bool m_isZip{false};
 	bool m_isOpen{false};
 	std::string m_zipBlockPrefix;
+	/// Directory packs: resolved `<...>/assets/minecraft` (root or one wrapped
+	/// subdirectory), empty when the pack keeps `assets/` elsewhere.
+	std::string m_minecraftRoot;
 
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;

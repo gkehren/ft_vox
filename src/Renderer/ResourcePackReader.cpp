@@ -28,7 +28,8 @@ ResourcePackReader::~ResourcePackReader()
 
 ResourcePackReader::ResourcePackReader(ResourcePackReader &&other) noexcept
 	: m_path(std::move(other.m_path)), m_isZip(other.m_isZip), m_isOpen(other.m_isOpen),
-	  m_zipBlockPrefix(std::move(other.m_zipBlockPrefix)), m_impl(std::move(other.m_impl))
+	  m_zipBlockPrefix(std::move(other.m_zipBlockPrefix)), m_minecraftRoot(std::move(other.m_minecraftRoot)),
+	  m_impl(std::move(other.m_impl))
 {
 	other.m_isOpen = false;
 	other.m_isZip = false;
@@ -43,6 +44,7 @@ ResourcePackReader &ResourcePackReader::operator=(ResourcePackReader &&other) no
 		m_isZip = other.m_isZip;
 		m_isOpen = other.m_isOpen;
 		m_zipBlockPrefix = std::move(other.m_zipBlockPrefix);
+		m_minecraftRoot = std::move(other.m_minecraftRoot);
 		m_impl = std::move(other.m_impl);
 		other.m_isOpen = false;
 		other.m_isZip = false;
@@ -61,6 +63,7 @@ void ResourcePackReader::close()
 	m_isOpen = false;
 	m_isZip = false;
 	m_zipBlockPrefix.clear();
+	m_minecraftRoot.clear();
 	m_path.clear();
 }
 
@@ -83,6 +86,21 @@ bool ResourcePackReader::open(const std::string &path)
 	{
 		m_isZip = false;
 		m_isOpen = true;
+		// Resolve assets/minecraft once: pack root, or one wrapped subdirectory
+		// (same shape as the wrapped roots ZIP packs commonly ship).
+		if (fs::exists(p / "assets/minecraft", ec))
+			m_minecraftRoot = (p / "assets/minecraft").string();
+		else
+		{
+			std::error_code itEc;
+			for (const fs::directory_entry &entry : fs::directory_iterator(p, itEc))
+			{
+				if (!entry.is_directory(itEc) || !fs::exists(entry.path() / "assets/minecraft", ec))
+					continue;
+				m_minecraftRoot = (entry.path() / "assets/minecraft").string();
+				break;
+			}
+		}
 		return true;
 	}
 
@@ -231,7 +249,10 @@ bool ResourcePackReader::readEntityTexture(const std::string &relativePath, std:
             out.clear(); return false;
         }
     } else {
-        std::ifstream file(fs::path(m_path)/suffix,std::ios::binary|std::ios::ate);
+        const fs::path entityPath = m_minecraftRoot.empty()
+            ? fs::path(m_path) / suffix
+            : fs::path(m_minecraftRoot) / "textures/entity" / relative.generic_string();
+        std::ifstream file(entityPath,std::ios::binary|std::ios::ate);
         if (!file) return false;
         auto size=file.tellg();
         if (size<=0 || size>64*1024*1024) return false;

@@ -115,6 +115,12 @@ int main(int argc, char **argv)
         pack = loadMobTextures(zip.string(), defaultPack);
         CHECK(pack.report.hits == 1);
         CHECK(pack.report.misses == 5);
+        // Directory packs may wrap assets under one folder, like ZIP packs.
+        const auto wrapped = fixture / "wrapped-pack";
+        write(wrapped / "wrapper/assets/minecraft/textures/entity/cow/cow_temperate.png", cow);
+        pack = loadMobTextures(wrapped.string(), defaultPack);
+        CHECK(pack.report.hits == 1);
+        CHECK(pack.report.misses == 5);
         pack = loadMobTextures((fixture / "missing").string(), defaultPack);
         CHECK(pack.report.hits == 0);
         CHECK(pack.report.misses == 6);
