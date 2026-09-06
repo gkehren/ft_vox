@@ -493,43 +493,94 @@ static void testIncrementalQueueMaintenance()
 	CHECK(toLoad.size() == 5, "pulled 5 items");
 	CHECK(toLoad[0].x == 0 && toLoad[4].x == 4, "nearest candidates pulled first");
 	CHECK(queueHead == 5, "head advanced without vector memmove");
+	CHECK(queue.size() == 20, "head consumption does not resize/shift the vector");
 	CHECK(queue.size() - queueHead == 15, "15 items remaining in queue");
 	CHECK(enqueued.size() == 15, "enqueued set erased accurately");
 	CHECK(enqueued.count({0, 0, 0}) == 0, "popped item no longer in enqueued set");
 	CHECK(enqueued.count({5, 0, 0}) == 1, "unpopped item remains in enqueued set");
+	// Full diff application (entering/exiting/prune/sort) is covered by the
+	// ChunkManager production tests in test_chunk_lifecycle.
+}
 
-	// Add 3 new entering items and 2 exiting
-	FootprintDiff diff;
-	diff.entering = {{20, 0, 0}, {21, 0, 0}, {22, 0, 0}};
-	diff.exiting = {{18, 0, 0}, {19, 0, 0}};
+static ChunkDesiredFootprint makeSingleRowFootprint(int z, int minX, int maxX)
+{
+	ChunkDesiredFootprint fp;
+	if (minX > maxX)
+		return fp; // empty
+	fp.minZ = z;
+	fp.maxZ = z;
+	fp.spans.push_back({minX, maxX});
+	return fp;
+}
 
-	for (const auto &p : diff.exiting)
-		enqueued.erase(p);
+static void testFootprintDiffUnits()
+{
+	// empty -> empty
+	auto d0 = computeFootprintDiff(makeSingleRowFootprint(5, 1, 0), makeSingleRowFootprint(5, 1, 0));
+	CHECK(d0.entering.empty() && d0.exiting.empty(), "empty -> empty produces no diff");
 
-	for (const auto &p : diff.entering)
+	// empty -> populated / populated -> empty
+	auto d1 = computeFootprintDiff(ChunkDesiredFootprint{}, makeSingleRowFootprint(2, 3, 5));
+	CHECK(d1.exiting.empty() && d1.entering.size() == 3, "empty -> populated enters all cells");
+	auto d2 = computeFootprintDiff(makeSingleRowFootprint(2, 3, 5), ChunkDesiredFootprint{});
+	CHECK(d2.entering.empty() && d2.exiting.size() == 3, "populated -> empty exits all cells");
+
+	// disjoint spans swap entirely
+	auto d3 = computeFootprintDiff(makeSingleRowFootprint(0, 0, 5), makeSingleRowFootprint(0, 10, 15));
+	CHECK(d3.exiting.size() == 6 && d3.entering.size() == 6, "disjoint spans exit old and enter new entirely");
+
+	// left extension / shrink
+	auto d4 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 3, 10));
+	CHECK(d4.entering.size() == 2 && d4.entering[0].x == 3 && d4.entering[1].x == 4 && d4.exiting.empty(),
+		  "left extension enters only the new cells");
+	auto d5 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 7, 10));
+	CHECK(d5.exiting.size() == 2 && d5.exiting[0].x == 5 && d5.exiting[1].x == 6 && d5.entering.empty(),
+		  "left shrink exits only the dropped cells");
+
+	// right extension / shrink
+	auto d6 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 5, 12));
+	CHECK(d6.entering.size() == 2 && d6.entering[0].x == 11 && d6.entering[1].x == 12,
+		  "right extension enters only the new cells");
+	auto d7 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 5, 8));
+	CHECK(d7.exiting.size() == 2 && d7.exiting[0].x == 9 && d7.exiting[1].x == 10,
+		  "right shrink exits only the dropped cells");
+
+	// both sides at once
+	auto d8 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 3, 12));
+	CHECK(d8.entering.size() == 4 && d8.exiting.empty(), "both-side extension enters the 4 new cells");
+	auto d9 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 7, 8));
+	CHECK(d9.exiting.size() == 4 && d9.entering.empty(), "both-side shrink exits the 4 dropped cells");
+}
+
+static void testAnchorAndBiasHelpers()
+{
+	// Floor quantization across zero and negative coordinates.
+	CHECK(streamingMovementAnchor(glm::vec3(0.f, 0.f, 0.f)) == glm::ivec2(0, 0), "anchor at origin");
+	CHECK(streamingMovementAnchor(glm::vec3(3.9f, 0.f, -0.1f)) == glm::ivec2(0, -1), "anchor floors across zero");
+	CHECK(streamingMovementAnchor(glm::vec3(-0.1f, 0.f, -4.1f)) == glm::ivec2(-1, -2),
+		  "negative anchors floor symmetrically");
+	CHECK(streamingMovementAnchor(glm::vec3(15.9f, 0.f, 16.1f)) == glm::ivec2(3, 4), "anchor cells are 4 blocks");
+
+	// Bias normalization + epsilon comparison.
+	CHECK(normalizedStreamFrontBias(0.95f) == 0.9f, "bias clamps to 0.9");
+	CHECK(normalizedStreamFrontBias(-0.5f) == 0.f, "negative bias clamps to 0");
+	CHECK(!streamFrontBiasChanged(0.3f, 0.30005f), "bias float noise below epsilon is ignored");
+	CHECK(streamFrontBiasChanged(0.3f, 0.301f), "real bias change is detected");
+	CHECK(!streamFrontBiasChanged(0.95f, 0.99f), "clamped bias values compare canonically");
+}
+
+static void testMinimalRenderDistanceFootprints()
+{
+	const glm::ivec3 chunk(3, 0, -2);
+	for (int view : {16, 32})
 	{
-		queue.push_back({p, static_cast<float>(p.x)});
-		enqueued.insert(p);
+		const glm::vec3 pos(chunk.x * 16 + 5.f, 64.f, chunk.z * 16 + 9.f);
+		const glm::vec2 fwd(1.f, 0.f);
+		const auto fp = computeDesiredFootprintFull(chunk, pos, fwd, 0.35f, view);
+		const auto expected = toCoordSet(computeDesiredChunkSetBruteForce(chunk, pos, fwd, 0.35f, view));
+		CHECK(!expected.empty(), "minimal view desired set is non-empty");
+		CHECK(toCoordSet(footprintToCoordList(fp)) == expected, "minimal view footprint matches brute force");
 	}
-
-	// Compact & prune
-	if (queueHead > 0)
-	{
-		queue.erase(queue.begin(), queue.begin() + queueHead);
-		queueHead = 0;
-	}
-	queue.erase(std::remove_if(queue.begin(), queue.end(),
-							   [&](const LoadCandidate &c) {
-								   return enqueued.count(c.pos) == 0;
-							   }),
-				queue.end());
-	sortLoadCandidatesNearestFirst(queue);
-
-	CHECK(queue.size() == 16, "surviving + entered - exited items correct");
-	CHECK(queue.front().pos.x == 5, "nearest surviving item is first");
-	CHECK(queue.back().pos.x == 22, "farthest entered item is last");
-	CHECK(enqueued.count({18, 0, 0}) == 0, "exited item purged from enqueued set");
-	CHECK(enqueued.count({22, 0, 0}) == 1, "entered item exists in enqueued set");
 }
 
 int main()
@@ -546,6 +597,9 @@ int main()
 	testIceSpikeVegetationReachable();
 	testDeterministicIncrementalFootprintAgainstBruteForce();
 	testIncrementalQueueMaintenance();
+	testFootprintDiffUnits();
+	testAnchorAndBiasHelpers();
+	testMinimalRenderDistanceFootprints();
 
 	if (g_fails != 0)
 	{
