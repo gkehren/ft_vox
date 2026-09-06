@@ -33,13 +33,31 @@ revision appends its own files).
 | TerrainGen n / avgMs | 18995 / 2.545 | 19056 / 2.550 | parity |
 | MeshQueue avgMs | 0.0100 | 0.0101 | parity |
 
-## Post-review revision
+## Post-review revision (77576c4, anchor-driven reconciliation + counters)
 
-See the `bench_*` files and the `Stream maintenance:` line added by the
-review telemetry; the PR description carries the final table (steady-state,
-forced-incremental and end-to-end regimes).
+Same protocol, fresh clean-tree builds of both sides, interleaved 2×2:
 
-## Interpretation
+| Metric | main `1d62865` | PR `77576c4` |
+|---|---|---|
+| CPU `Streaming` avg | 0.355 / 0.348 ms | 0.161 / 0.174 ms (**−51/−54 %**) |
+| Frame avg | 2.020 / 2.003 ms | 1.923 / 1.970 ms |
+| Score | 9900 / 9901 (S) | 9914 / 9906 (S) |
+| `chunks.active` peak | 4627 | 4677 |
+| Maintenance split | n/a (rescanned every frame) | zeroWork 88.2-88.4 %, incremental ~1940, heading 0, full 1, queueSorts ~1941, unloadScans 512 |
+
+Headless maintenance cost (`test_chunk_lifecycle --stream-perf`, view 512,
+bias 0.3, empty loaded set): stationary frames ~0.011 us/call; forced
+anchor crossings ~116 us/call with the queue kept full (pessimistic
+sort-dominated bound — the engine's load budget drains the queue every
+frame, shrinking the sort).
+
+Honesty note: the branch shows 2 frames > 16.7 ms per run (run 1 max
+71.6 ms, run 2 max 23.1 ms) where main showed none this session; score
+and 1% low are unchanged and the count is identical across both branch
+runs, but the spike is unexplained — flagged for follow-up if it
+reproduces.
+
+## Interpretation (pre-review measurements)
 
 - Main-thread `Streaming` drops ~2.2× in the moving-camera benchmark even at
   the pre-review revision; the reviewed revision additionally removes the
