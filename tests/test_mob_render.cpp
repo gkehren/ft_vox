@@ -34,6 +34,7 @@ struct Fixture
     VkDescriptorSet set{};
     AllocatedBuffer uniform{}, readback{};
     uint32_t width = 1200, height = 600;
+    double lastRecordMs{}; // CPU command-recording cost of the last render()
     Fixture(SDL_Window *window)
     {
         context.init(window);
@@ -114,6 +115,8 @@ struct Fixture
     {
         renderer.prepare(slot, ubo, states);
         writeBuffer(context.getAllocator(), uniform, &ubo, sizeof(ubo));
+        lastRecordMs = 0;
+        const auto recordStart = std::chrono::steady_clock::now();
         imm.submitAndWait([&](VkCommandBuffer cmd) {
             gpu.beginRecording(cmd, slot, 0);
             auto begin = vkCmdBeginRendering ? vkCmdBeginRendering : vkCmdBeginRenderingKHR;
@@ -200,6 +203,9 @@ struct Fixture
                 vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
                                      &barrier, 0, nullptr, 0, nullptr);
             }
+            lastRecordMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - recordStart)
+                    .count();
         });
         gpu.markSubmitted(slot);
         gpu.onSlotReady(slot);
@@ -331,7 +337,7 @@ int main(int argc, char **argv)
             states.push_back(
                 {entities::MobSpecies(i % int(entities::kMobSpeciesCount)),
                  {(i % 8 - 3.5f) * 2.2f, 0, (i / 8) * 2.2f}, 0, 1, 0, 0, 1});
-        std::vector<double> gpuTimes, cpuTimes;
+        std::vector<double> gpuTimes, cpuTimes, recordTimes;
         size_t serial = 0;
         for (int i = 0; i < 160; ++i)
         {
@@ -343,6 +349,7 @@ int main(int argc, char **argv)
             if (i >= 40)
             {
                 cpuTimes.push_back(cpu);
+                recordTimes.push_back(f.lastRecordMs);
                 if (sample.serial != serial && sample.present[size_t(GpuPass::Mobs)])
                 {
                     double sum = sample.ms[size_t(GpuPass::Mobs)];
@@ -369,6 +376,10 @@ int main(int argc, char **argv)
                    << " p95_ms=" << gpuTimes[gpuTimes.size() * 95 / 100] << " samples=" << gpuTimes.size()
                    << "\n";
         }
+        std::sort(recordTimes.begin(), recordTimes.end());
+        report << "48 mobs command recording CPU mean_ms="
+               << std::accumulate(recordTimes.begin(), recordTimes.end(), 0.0) / recordTimes.size()
+               << " p95_ms=" << recordTimes[recordTimes.size() * 95 / 100] << "\n";
         report << "Host submit+GPU wait mean_ms="
                << std::accumulate(cpuTimes.begin(), cpuTimes.end(), 0.0) / cpuTimes.size()
                << " (not CPU simulation time)\n";

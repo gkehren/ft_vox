@@ -1,0 +1,5 @@
+Device: NVIDIA GeForce RTX 4070 Ti
+48 mobs color + 3 shadows GPU mean_ms=0.0190891 p95_ms=0.02048 samples=120
+48 mobs command recording CPU mean_ms=2.91524 p95_ms=3.6439
+Host submit+GPU wait mean_ms=3.29977 (not CPU simulation time)
+Validation enabled=1 errors=0
