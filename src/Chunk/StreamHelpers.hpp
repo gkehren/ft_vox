@@ -143,3 +143,325 @@ inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 		needed = kMax;
 	return needed;
 }
+
+// -----------------------------------------------------------------------------
+// Incremental streaming structures & helpers (issue #108)
+// -----------------------------------------------------------------------------
+
+/// Minimum dot-product between camera forward vectors before front-bias
+/// requires queue/footprint reconciliation (~10 degrees).
+constexpr float kStreamHeadingCosThreshold = 0.985f;
+
+/// Contiguous interval of chunk X coordinates in a row Z that lie within the desired load region.
+struct ChunkRowSpan
+{
+	int minX{1};
+	int maxX{0};
+	bool empty() const noexcept { return minX > maxX; }
+	bool contains(int x) const noexcept { return x >= minX && x <= maxX; }
+};
+
+/// Bounded desired-chunk footprint represented as a span per row Z.
+struct ChunkDesiredFootprint
+{
+	int minZ{1};
+	int maxZ{0};
+	std::vector<ChunkRowSpan> spans; // index: z - minZ
+
+	bool empty() const noexcept { return minZ > maxZ || spans.empty(); }
+	const ChunkRowSpan *spanForZ(int z) const noexcept
+	{
+		if (z < minZ || z > maxZ || spans.empty())
+			return nullptr;
+		return &spans[static_cast<size_t>(z - minZ)];
+	}
+	bool contains(int x, int z) const noexcept
+	{
+		const ChunkRowSpan *s = spanForZ(z);
+		return s && s->contains(x);
+	}
+};
+
+/// Newly entered and newly exited coordinates produced by an incremental update.
+struct FootprintDiff
+{
+	std::vector<glm::ivec3> entering;
+	std::vector<glm::ivec3> exiting;
+};
+
+/// Brute-force reference implementation for deterministic validation and testing.
+inline std::vector<glm::ivec3> computeDesiredChunkSetBruteForce(
+	const glm::ivec3 &camChunk,
+	const glm::vec3 &camPos,
+	const glm::vec2 &camForwardXZ,
+	float frontBias,
+	int maxRenderDistance)
+{
+	const float maxDistSq = static_cast<float>(maxRenderDistance) * static_cast<float>(maxRenderDistance);
+	const float reachBlocks =
+		static_cast<float>(maxRenderDistance) / std::sqrt(1.0f - glm::clamp(frontBias, 0.f, 0.9f));
+	const int radius =
+		static_cast<int>(std::ceil(reachBlocks / static_cast<float>(CHUNK_SIZE)));
+
+	std::vector<glm::ivec3> res;
+	for (int z = -radius; z <= radius; ++z)
+	{
+		for (int x = -radius; x <= radius; ++x)
+		{
+			const glm::ivec3 pos = camChunk + glm::ivec3(x, 0, z);
+			const glm::vec3 center(
+				pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
+				pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
+			if (biasedLoadDistSq(camPos, center, camForwardXZ, frontBias) <= maxDistSq)
+				res.push_back(pos);
+		}
+	}
+	return res;
+}
+
+/// Convert footprint spans to an explicit coordinate list (for verification).
+inline std::vector<glm::ivec3> footprintToCoordList(const ChunkDesiredFootprint &fp)
+{
+	std::vector<glm::ivec3> res;
+	if (fp.empty())
+		return res;
+	for (int z = fp.minZ; z <= fp.maxZ; ++z)
+	{
+		const ChunkRowSpan *s = fp.spanForZ(z);
+		if (s && !s->empty())
+		{
+			for (int x = s->minX; x <= s->maxX; ++x)
+				res.push_back({x, 0, z});
+		}
+	}
+	return res;
+}
+
+/// Compute full contiguous row span for row z.
+inline ChunkRowSpan computeRowSpanFull(int z, const glm::ivec3 &camChunk, const glm::vec3 &camPos,
+									  const glm::vec2 &camForwardXZ, float frontBias, float maxDistSq, int radius)
+{
+	const int xStart = camChunk.x - radius;
+	const int xEnd = camChunk.x + radius;
+	int minX = xEnd + 1;
+	int maxX = xStart - 1;
+
+	for (int x = xStart; x <= xEnd; ++x)
+	{
+		const glm::vec3 center(
+			x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
+			z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
+		if (biasedLoadDistSq(camPos, center, camForwardXZ, frontBias) <= maxDistSq)
+		{
+			minX = x;
+			break;
+		}
+	}
+	if (minX > xEnd)
+		return ChunkRowSpan{1, 0};
+
+	for (int x = xEnd; x >= minX; --x)
+	{
+		const glm::vec3 center(
+			x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
+			z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
+		if (biasedLoadDistSq(camPos, center, camForwardXZ, frontBias) <= maxDistSq)
+		{
+			maxX = x;
+			break;
+		}
+	}
+	return ChunkRowSpan{minX, maxX};
+}
+
+/// Incrementally update row span for row z starting from previous span.
+inline ChunkRowSpan computeRowSpanIncremental(int z, const ChunkRowSpan &oldSpan,
+											  const glm::ivec3 &camChunk, const glm::vec3 &camPos,
+											  const glm::vec2 &camForwardXZ, float frontBias, float maxDistSq, int radius)
+{
+	const int xStart = camChunk.x - radius;
+	const int xEnd = camChunk.x + radius;
+
+	if (oldSpan.empty())
+		return computeRowSpanFull(z, camChunk, camPos, camForwardXZ, frontBias, maxDistSq, radius);
+
+	auto inRange = [&](int x) -> bool {
+		if (x < xStart || x > xEnd)
+			return false;
+		const glm::vec3 center(
+			x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
+			z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
+		return biasedLoadDistSq(camPos, center, camForwardXZ, frontBias) <= maxDistSq;
+	};
+
+	const bool minInRange = inRange(oldSpan.minX);
+	const bool maxInRange = inRange(oldSpan.maxX);
+
+	// If neither endpoint is in range, row shifted completely or emptied (tip rows).
+	if (!minInRange && !maxInRange)
+		return computeRowSpanFull(z, camChunk, camPos, camForwardXZ, frontBias, maxDistSq, radius);
+
+	int minX = oldSpan.minX;
+	if (minInRange)
+	{
+		while (minX > xStart && inRange(minX - 1))
+			--minX;
+	}
+	else
+	{
+		while (minX <= oldSpan.maxX && !inRange(minX))
+			++minX;
+	}
+
+	int maxX = oldSpan.maxX;
+	if (maxInRange)
+	{
+		while (maxX < xEnd && inRange(maxX + 1))
+			++maxX;
+	}
+	else
+	{
+		while (maxX >= minX && !inRange(maxX))
+			--maxX;
+	}
+
+	if (minX > maxX)
+		return ChunkRowSpan{1, 0};
+
+	return ChunkRowSpan{minX, maxX};
+}
+
+/// Compute full footprint from scratch.
+inline ChunkDesiredFootprint computeDesiredFootprintFull(
+	const glm::ivec3 &camChunk,
+	const glm::vec3 &camPos,
+	const glm::vec2 &camForwardXZ,
+	float frontBias,
+	int maxRenderDistance)
+{
+	const float maxDistSq = static_cast<float>(maxRenderDistance) * static_cast<float>(maxRenderDistance);
+	const float reachBlocks =
+		static_cast<float>(maxRenderDistance) / std::sqrt(1.0f - glm::clamp(frontBias, 0.f, 0.9f));
+	const int radius =
+		static_cast<int>(std::ceil(reachBlocks / static_cast<float>(CHUNK_SIZE)));
+
+	ChunkDesiredFootprint fp;
+	fp.minZ = camChunk.z - radius;
+	fp.maxZ = camChunk.z + radius;
+	const size_t rowCount = static_cast<size_t>(fp.maxZ - fp.minZ + 1);
+	fp.spans.resize(rowCount);
+
+	for (int z = fp.minZ; z <= fp.maxZ; ++z)
+	{
+		fp.spans[static_cast<size_t>(z - fp.minZ)] =
+			computeRowSpanFull(z, camChunk, camPos, camForwardXZ, frontBias, maxDistSq, radius);
+	}
+	return fp;
+}
+
+/// Compute updated footprint incrementally from previous footprint.
+inline ChunkDesiredFootprint computeDesiredFootprintIncremental(
+	const ChunkDesiredFootprint &oldFootprint,
+	const glm::ivec3 &camChunk,
+	const glm::vec3 &camPos,
+	const glm::vec2 &camForwardXZ,
+	float frontBias,
+	int maxRenderDistance)
+{
+	const float maxDistSq = static_cast<float>(maxRenderDistance) * static_cast<float>(maxRenderDistance);
+	const float reachBlocks =
+		static_cast<float>(maxRenderDistance) / std::sqrt(1.0f - glm::clamp(frontBias, 0.f, 0.9f));
+	const int radius =
+		static_cast<int>(std::ceil(reachBlocks / static_cast<float>(CHUNK_SIZE)));
+
+	ChunkDesiredFootprint fp;
+	fp.minZ = camChunk.z - radius;
+	fp.maxZ = camChunk.z + radius;
+	const size_t rowCount = static_cast<size_t>(fp.maxZ - fp.minZ + 1);
+	fp.spans.resize(rowCount);
+
+	for (int z = fp.minZ; z <= fp.maxZ; ++z)
+	{
+		const ChunkRowSpan *oldSpan = oldFootprint.spanForZ(z);
+		ChunkRowSpan dummyEmpty{1, 0};
+		const ChunkRowSpan &sOld = oldSpan ? *oldSpan : dummyEmpty;
+		fp.spans[static_cast<size_t>(z - fp.minZ)] =
+			computeRowSpanIncremental(z, sOld, camChunk, camPos, camForwardXZ, frontBias, maxDistSq, radius);
+	}
+	return fp;
+}
+
+/// Compute symmetric difference between old and new footprint.
+inline FootprintDiff computeFootprintDiff(const ChunkDesiredFootprint &oldFootprint,
+										  const ChunkDesiredFootprint &newFootprint)
+{
+	FootprintDiff diff;
+	if (oldFootprint.empty() && newFootprint.empty())
+		return diff;
+
+	const int zMin = std::min(oldFootprint.empty() ? newFootprint.minZ : oldFootprint.minZ,
+							  newFootprint.empty() ? oldFootprint.minZ : newFootprint.minZ);
+	const int zMax = std::max(oldFootprint.empty() ? newFootprint.maxZ : oldFootprint.maxZ,
+							  newFootprint.empty() ? oldFootprint.maxZ : newFootprint.maxZ);
+
+	for (int z = zMin; z <= zMax; ++z)
+	{
+		const ChunkRowSpan *sOld = oldFootprint.spanForZ(z);
+		const ChunkRowSpan *sNew = newFootprint.spanForZ(z);
+		const bool hasOld = (sOld && !sOld->empty());
+		const bool hasNew = (sNew && !sNew->empty());
+
+		if (!hasOld && !hasNew)
+			continue;
+		if (!hasOld && hasNew)
+		{
+			for (int x = sNew->minX; x <= sNew->maxX; ++x)
+				diff.entering.push_back({x, 0, z});
+			continue;
+		}
+		if (hasOld && !hasNew)
+		{
+			for (int x = sOld->minX; x <= sOld->maxX; ++x)
+				diff.exiting.push_back({x, 0, z});
+			continue;
+		}
+
+		// Both old and new exist
+		if (sNew->minX > sOld->maxX || sNew->maxX < sOld->minX)
+		{
+			// Disjoint
+			for (int x = sOld->minX; x <= sOld->maxX; ++x)
+				diff.exiting.push_back({x, 0, z});
+			for (int x = sNew->minX; x <= sNew->maxX; ++x)
+				diff.entering.push_back({x, 0, z});
+			continue;
+		}
+
+		// Overlapping spans:
+		// Left side
+		if (sNew->minX < sOld->minX)
+		{
+			for (int x = sNew->minX; x < sOld->minX; ++x)
+				diff.entering.push_back({x, 0, z});
+		}
+		else if (sNew->minX > sOld->minX)
+		{
+			for (int x = sOld->minX; x < sNew->minX; ++x)
+				diff.exiting.push_back({x, 0, z});
+		}
+
+		// Right side
+		if (sNew->maxX > sOld->maxX)
+		{
+			for (int x = sOld->maxX + 1; x <= sNew->maxX; ++x)
+				diff.entering.push_back({x, 0, z});
+		}
+		else if (sNew->maxX < sOld->maxX)
+		{
+			for (int x = sNew->maxX + 1; x <= sOld->maxX; ++x)
+				diff.exiting.push_back({x, 0, z});
+		}
+	}
+	return diff;
+}
+

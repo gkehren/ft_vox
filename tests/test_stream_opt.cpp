@@ -6,6 +6,8 @@
 #include <cmath>
 #include <iostream>
 #include <vector>
+#include <set>
+#include <unordered_set>
 
 static int g_fails = 0;
 
@@ -330,6 +332,206 @@ static void testIceSpikeVegetationReachable()
 			  << spikeBlocks << "\n";
 }
 
+struct IVec3Compare
+{
+	bool operator()(const glm::ivec3 &a, const glm::ivec3 &b) const
+	{
+		if (a.x != b.x) return a.x < b.x;
+		if (a.y != b.y) return a.y < b.y;
+		return a.z < b.z;
+	}
+};
+
+static std::set<glm::ivec3, IVec3Compare> toCoordSet(const std::vector<glm::ivec3> &vec)
+{
+	return std::set<glm::ivec3, IVec3Compare>(vec.begin(), vec.end());
+}
+
+static void testDeterministicIncrementalFootprintAgainstBruteForce()
+{
+	int viewDist = 256;
+	float bias = 0.35f;
+	glm::vec3 camPos(8.f, 64.f, 8.f);
+	glm::ivec3 camChunk(0, 0, 0);
+	glm::vec2 fwd(1.f, 0.f);
+
+	// 1. Initial full footprint
+	ChunkDesiredFootprint fp = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+	std::vector<glm::ivec3> bruteList = computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist);
+	auto runningSet = toCoordSet(footprintToCoordList(fp));
+	auto bruteSet = toCoordSet(bruteList);
+	CHECK(runningSet == bruteSet, "Initial full footprint matches brute-force reference");
+	CHECK(!runningSet.empty(), "Initial desired set is non-empty");
+
+	// 2. Many frames inside one chunk (sub-chunk movements)
+	for (int frame = 0; frame < 30; ++frame)
+	{
+		camPos += glm::vec3(0.2f, 0.f, 0.15f);
+		glm::ivec3 chunkAtPos(
+			static_cast<int>(std::floor(camPos.x / static_cast<float>(CHUNK_SIZE))),
+			0,
+			static_cast<int>(std::floor(camPos.z / static_cast<float>(CHUNK_SIZE))));
+		CHECK(chunkAtPos == camChunk, "Still inside chunk (0,0)");
+
+		ChunkDesiredFootprint fpSub = computeDesiredFootprintIncremental(fp, camChunk, camPos, fwd, bias, viewDist);
+		FootprintDiff diff = computeFootprintDiff(fp, fpSub);
+		for (const auto &p : diff.exiting) runningSet.erase(p);
+		for (const auto &p : diff.entering) runningSet.insert(p);
+		fp = std::move(fpSub);
+
+		auto expected = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+		CHECK(runningSet == expected, "Sub-chunk movement preserves exact match with brute force");
+	}
+
+	// 3. One-chunk cardinal steps
+	const std::vector<glm::ivec3> steps = {
+		{1, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, 1},
+		{-1, 0, 0}, {-1, 0, 0}, {0, 0, -1}, {0, 0, -1}
+	};
+	for (const auto &d : steps)
+	{
+		camChunk += d;
+		camPos += glm::vec3(static_cast<float>(d.x * CHUNK_SIZE), 0.f, static_cast<float>(d.z * CHUNK_SIZE));
+
+		ChunkDesiredFootprint fpStep = computeDesiredFootprintIncremental(fp, camChunk, camPos, fwd, bias, viewDist);
+		FootprintDiff diff = computeFootprintDiff(fp, fpStep);
+		CHECK(!diff.entering.empty() || !diff.exiting.empty(), "1-chunk step produces non-trivial diff");
+
+		for (const auto &p : diff.exiting) runningSet.erase(p);
+		for (const auto &p : diff.entering) runningSet.insert(p);
+		fp = std::move(fpStep);
+
+		auto expected = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+		CHECK(runningSet == expected, "1-chunk step incremental diff exactly matches brute force");
+	}
+
+	// 4. Diagonal steps
+	const std::vector<glm::ivec3> diagSteps = {
+		{1, 0, 1}, {-1, 0, 1}, {-1, 0, -1}, {1, 0, -1}
+	};
+	for (const auto &d : diagSteps)
+	{
+		camChunk += d;
+		camPos += glm::vec3(static_cast<float>(d.x * CHUNK_SIZE), 0.f, static_cast<float>(d.z * CHUNK_SIZE));
+
+		ChunkDesiredFootprint fpStep = computeDesiredFootprintIncremental(fp, camChunk, camPos, fwd, bias, viewDist);
+		FootprintDiff diff = computeFootprintDiff(fp, fpStep);
+		for (const auto &p : diff.exiting) runningSet.erase(p);
+		for (const auto &p : diff.entering) runningSet.insert(p);
+		fp = std::move(fpStep);
+
+		auto expected = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+		CHECK(runningSet == expected, "Diagonal step incremental diff exactly matches brute force");
+	}
+
+	// 5. Rapid 180° heading changes
+	const std::vector<glm::vec2> headings = {
+		{-1.f, 0.f}, {0.f, 1.f}, {0.f, -1.f}, {1.f, 0.f}
+	};
+	for (const auto &newFwd : headings)
+	{
+		fwd = newFwd;
+		ChunkDesiredFootprint fpTurn = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+		FootprintDiff diff = computeFootprintDiff(fp, fpTurn);
+		for (const auto &p : diff.exiting) runningSet.erase(p);
+		for (const auto &p : diff.entering) runningSet.insert(p);
+		fp = std::move(fpTurn);
+
+		auto expected = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+		CHECK(runningSet == expected, "Heading change diff exactly matches brute force");
+	}
+
+	// 6. Teleport
+	camChunk = glm::ivec3(50, 0, -30);
+	camPos = glm::vec3(50 * 16 + 8, 64, -30 * 16 + 8);
+	fp = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+	runningSet = toCoordSet(footprintToCoordList(fp));
+	auto expectedTeleport = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+	CHECK(runningSet == expectedTeleport, "Teleport full rebuild matches brute force");
+
+	// 7. Render-distance shrink/grow
+	viewDist = 128; // shrink
+	fp = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+	runningSet = toCoordSet(footprintToCoordList(fp));
+	auto expectedShrink = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+	CHECK(runningSet == expectedShrink, "Render distance shrink matches brute force");
+
+	viewDist = 384; // grow
+	fp = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+	runningSet = toCoordSet(footprintToCoordList(fp));
+	auto expectedGrow = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+	CHECK(runningSet == expectedGrow, "Render distance grow matches brute force");
+}
+
+static void testIncrementalQueueMaintenance()
+{
+	std::vector<LoadCandidate> queue;
+	size_t queueHead = 0;
+	std::unordered_set<glm::ivec3, IVec3Hash> enqueued;
+
+	for (int i = 0; i < 20; ++i)
+	{
+		glm::ivec3 p(i, 0, 0);
+		queue.push_back({p, static_cast<float>(i)});
+		enqueued.insert(p);
+	}
+	sortLoadCandidatesNearestFirst(queue);
+
+	// Consume 5 items
+	int budget = 5;
+	std::vector<glm::ivec3> toLoad;
+	const size_t available = queue.size() - queueHead;
+	const int n = std::min(budget, static_cast<int>(available));
+	for (int i = 0; i < n; ++i)
+	{
+		const glm::ivec3 pos = queue[queueHead + static_cast<size_t>(i)].pos;
+		enqueued.erase(pos);
+		toLoad.push_back(pos);
+	}
+	queueHead += static_cast<size_t>(n);
+
+	CHECK(toLoad.size() == 5, "pulled 5 items");
+	CHECK(toLoad[0].x == 0 && toLoad[4].x == 4, "nearest candidates pulled first");
+	CHECK(queueHead == 5, "head advanced without vector memmove");
+	CHECK(queue.size() - queueHead == 15, "15 items remaining in queue");
+	CHECK(enqueued.size() == 15, "enqueued set erased accurately");
+	CHECK(enqueued.count({0, 0, 0}) == 0, "popped item no longer in enqueued set");
+	CHECK(enqueued.count({5, 0, 0}) == 1, "unpopped item remains in enqueued set");
+
+	// Add 3 new entering items and 2 exiting
+	FootprintDiff diff;
+	diff.entering = {{20, 0, 0}, {21, 0, 0}, {22, 0, 0}};
+	diff.exiting = {{18, 0, 0}, {19, 0, 0}};
+
+	for (const auto &p : diff.exiting)
+		enqueued.erase(p);
+
+	for (const auto &p : diff.entering)
+	{
+		queue.push_back({p, static_cast<float>(p.x)});
+		enqueued.insert(p);
+	}
+
+	// Compact & prune
+	if (queueHead > 0)
+	{
+		queue.erase(queue.begin(), queue.begin() + queueHead);
+		queueHead = 0;
+	}
+	queue.erase(std::remove_if(queue.begin(), queue.end(),
+							   [&](const LoadCandidate &c) {
+								   return enqueued.count(c.pos) == 0;
+							   }),
+				queue.end());
+	sortLoadCandidatesNearestFirst(queue);
+
+	CHECK(queue.size() == 16, "surviving + entered - exited items correct");
+	CHECK(queue.front().pos.x == 5, "nearest surviving item is first");
+	CHECK(queue.back().pos.x == 22, "farthest entered item is last");
+	CHECK(enqueued.count({18, 0, 0}) == 0, "exited item purged from enqueued set");
+	CHECK(enqueued.count({22, 0, 0}) == 1, "entered item exists in enqueued set");
+}
+
 int main()
 {
 	testLoadPriorityNearestFirst();
@@ -342,12 +544,14 @@ int main()
 	testOceanWaterNotClippedByCaveYBound();
 	testPoolCapacityEstimate();
 	testIceSpikeVegetationReachable();
+	testDeterministicIncrementalFootprintAgainstBruteForce();
+	testIncrementalQueueMaintenance();
 
 	if (g_fails != 0)
 	{
 		std::cerr << g_fails << " check(s) failed\n";
 		return 1;
 	}
-	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate + ice spikes\n";
+	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate + ice spikes + incremental footprint vs brute force\n";
 	return 0;
 }

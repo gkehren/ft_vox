@@ -131,6 +131,12 @@ private:
 	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);
 	void loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
 								const RenderSettings &settings);
+	void rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+								   const RenderSettings &settings);
+	void updateStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+									const RenderSettings &settings, const glm::ivec3 &delta);
+	void reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+								   const RenderSettings &settings);
 	void ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx);
 
 	// --- Deferred edit subsystem (issue #114 review). Main-thread only:
@@ -182,13 +188,29 @@ private:
 	// Testing hook (issue #114 review): exposes the deferred-edit queue
 	// size without making it public API.
 	friend struct ChunkManagerProbe;
+	friend struct ChunkManagerStreamProbe;
 	friend class ChunkCollisionView;
+
+	struct StreamState
+	{
+		glm::ivec3 lastCamChunk{std::numeric_limits<int>::max(), 0, std::numeric_limits<int>::max()};
+		glm::vec3 lastCamPos{0.f};
+		glm::vec2 lastCamForwardXZ{0.f, 1.f};
+		int lastMaxRenderDistance{-1};
+		float lastStreamFrontBias{-1.f};
+		bool initialized{false};
+	};
 
 	std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> m_chunks;
 	std::vector<Chunk *> m_activeChunks;
 	/// Distance-prioritized load queue (not FIFO — re-sorted / pruned each stream tick).
 	std::vector<LoadCandidate> m_loadQueue;
 	std::unordered_set<glm::ivec3, IVec3Hash> m_enqueuedLoads;
+	StreamState m_streamState;
+	ChunkDesiredFootprint m_desiredFootprint;
+	size_t m_loadQueueHead{0};
+	bool m_queueNeedsSort{false};
+	int m_streamFramesSinceUnloadCheck{0};
 
 	mutable std::mutex m_completedJobsMutex;
 	std::vector<Chunk *> m_completedGenerationChunks;
