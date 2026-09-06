@@ -5,22 +5,28 @@ Scope: replace per-chunk mesh VMA buffers with 4 shared device-local
 arenas (opaque/water x vertex/index, paged, frame-aware retirement) and
 submit opaque/water/shadow geometry through vkCmdDrawIndexedIndirect.
 
-Base: origin/main d677d9d (post-#118). Branch: gpu-mesh-arenas.
+Base: origin/main d677d9d (post-#118). Branch: gpu-mesh-arenas at 9d27993
+(final review cycle: explicit bootstrap failure, single +1 retire margin,
+direct-draw scope fix).
 Machine: Windows 11, MSVC Release, Ryzen 7 9800X3D, RTX 4070 Ti.
 Protocol: interleaved runs (main, PR, main, PR, ...), median of 4 pairs,
-`ft_vox --seed 42 --benchmark 30` (30 s measured, 2 s warmup), view
+`ft_vox --seed 42 --benchmark 30` (30 s measured, 3 s warmup), view
 distance 512, vsync off, validation off.
 
 Streaming benchmark (median of 4 interleaved pairs)
 ---------------------------------------------------
-                     main d677d9d    arenas branch   delta
-Frame avg ms         1.85            1.77            -4.3%
-Frame p95 ms         3.94            3.74            -5.1%
-Streaming ms         0.36            0.31            -13.9%
-Record ms            0.35            0.38            +8.6%
-GPU avg ms           1.64            1.55            -5.5%
-VMA allocations      57,903          3               -99.99%
-draws.opaque (cmds)  18.5M           84.7M           (see note)
+                        main d677d9d    arenas branch   delta
+Frame avg ms            1.65            1.69            +2.6%
+Frame p95 ms            3.54            3.60            +1.8%
+Frame p99 ms            3.87            3.90            +0.7%
+Streaming ms            0.25            0.26            +4.0%
+Record avg ms           0.28            0.35            +22.7%
+Record p50 / p95 / p99  -               0.34 / 0.45 / 0.52
+GPU avg ms              1.48            1.50            +1.4%
+VMA allocations         59,848          3               -99.99%
+draws.opaque (cmds)     21.2M           121.0M          (see note)
+indirect.commands.peak  -               ~14.0k          (see note)
+score                   9919            9918            (noise)
 
 Notes:
 - The "draws.opaque" counter changes meaning with this PR: it now counts
@@ -28,20 +34,25 @@ Notes:
   (section-local indices are rebased by the command's vertexOffset, so
   merging would redirect indices to another section's vertices). Commands
   are grouped only at submission time by (vertexPage, indexPage) to
-  reduce buffer binds.
-  The GPU absorbs the higher command count without regression (GPU avg
-  -5.5%, frame p95 -5.1%).
-- Record carries the CPU cost of building the per-pass indirect command
-  lists (+0.03 ms): collecting per-section commands for opaque, three
-  shadow cascades and the ordered water list. This is the documented
-  cost of the CPU-built indirect path; GPU-driven culling/count (issue
-  follow-up) removes it later.
+  reduce buffer binds. The shadow total is ~3x the opaque count (one
+  collection per cascade), water adds its back-to-front list.
+- indirect.commands.peak (~14k = opaque + cascades + water demand per
+  frame, pre-truncation) sits at ~21% of kMaxIndirectCommands (65,536):
+  no overflow at view distance 512; dynamic batching stays follow-up.
+- Frame/GPU deltas are inside run-to-run noise (scores are 1-2 points
+  apart on a 0-10000 scale). Record carries the CPU cost of building the
+  per-pass indirect command lists (+0.07 ms avg): collecting per-section
+  commands for opaque, three shadow cascades and the ordered water list
+  every frame. This is the documented cost of the CPU-built indirect
+  path; the identified follow-ups are per-chunk cached draw descriptors
+  (rebuild at upload-commit instead of per pass per frame) and then
+  GPU-driven culling/count.
 - Physics is suspended during this benchmark; renderer comparison only.
 
 VMA allocation churn (the issue's core target)
 ----------------------------------------------
 mesh.allocations.created over a 30 s streaming run:
-  main:   57,903 allocations (4+ per chunk upload, retired per frame)
+  main:   59,848 allocations (4+ per chunk upload, retired per frame)
   arenas: 3 allocations (page creation events only)
 
 Arena metrics (arena.* gauges, 30 s run): pages stay single-digit,
@@ -66,4 +77,5 @@ Reproduce
   # upload lifecycle against arenas
   build/tests/Release/test_mesh_upload
 
-Raw interleaved reports: bench_20260905_201526..202529 (4 pairs).
+Raw interleaved reports: bench_20260906_004234..004942 (4 pairs, 10 runs;
+004234 is a pre-protocol diagnostic and excluded from the medians).
