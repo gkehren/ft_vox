@@ -61,6 +61,21 @@ struct PendingVoxelEdit
 	uint64_t editId{0};
 };
 
+/// What the last streaming maintenance tick did (issue #108 review): lets
+/// tests and telemetry assert the zero-work / incremental / rebuild contract.
+enum class StreamingUpdateKind
+{
+	None,			// steady state: camera inside the same chunk, anchor and heading
+	Incremental,	// chunk-cross or movement-anchor change: O(r) footprint diff
+	HeadingRebuild, // heading threshold exceeded: full footprint recompute + diff
+	FullRebuild		// startup / teleport / settings change: queue rebuilt from scratch
+};
+
+/// Hard cadence floor between out-of-range unload scans (issue #108 review):
+/// unload checks run on chunk-cross/teleport or settings changes, and at
+/// least every this many frames otherwise.
+constexpr uint32_t kUnloadCheckIntervalFrames = 60;
+
 /// Streams chunks around the player: load → async terrain → async mesh → main-thread GPU upload.
 class ChunkManager
 {
@@ -69,7 +84,9 @@ public:
 	~ChunkManager();
 
 	/// Enqueue loads / mark far chunks for unload based on camera position.
-	void updateStreaming(const Camera &camera, const RenderSettings &settings);
+	/// Returns what the load-side maintenance did this tick (the out-of-range
+	/// unload scan is a separate concern driven by the same triggers).
+	StreamingUpdateKind updateStreaming(const Camera &camera, const RenderSettings &settings);
 
 	/// Pull from the load queue (pool acquire). budget = max chunks this frame.
 	void processChunkLoading(int budget);
@@ -108,6 +125,10 @@ public:
 	Chunk *getChunk(const glm::ivec3 &chunkPos);
 	const Chunk *getChunk(const glm::ivec3 &chunkPos) const;
 
+	/// Snapshot of the streaming maintenance counters (issue #108). Main
+	/// thread writes and reads them, so no lock is taken.
+	StreamingMaintenanceStats streamingMaintenanceStats() const { return m_streamStats; }
+
 	size_t deferredReleaseCount() const { return m_deferredRelease.size(); }
 	size_t chunkCount() const;
 	size_t pendingLoadCount() const;
@@ -129,8 +150,19 @@ public:
 
 private:
 	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);
-	void loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-								const RenderSettings &settings);
+	StreamingUpdateKind loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+											   const RenderSettings &settings);
+	StreamingUpdateKind rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+												  const RenderSettings &settings);
+	StreamingUpdateKind reconcileStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+													  const RenderSettings &settings);
+	StreamingUpdateKind reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+												  const RenderSettings &settings);
+	/// Shared tail of the incremental streaming updates: apply a footprint
+	/// diff to the load queue (enqueue entering coords, purge exiting ones,
+	/// compact consumed entries, refresh biased distances, re-sort).
+	void applyFootprintDiffToQueue(const FootprintDiff &diff, const glm::vec3 &camPos,
+								   const glm::vec2 &camForwardXZ, float frontBias);
 	void ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx);
 
 	// --- Deferred edit subsystem (issue #114 review). Main-thread only:
@@ -182,13 +214,30 @@ private:
 	// Testing hook (issue #114 review): exposes the deferred-edit queue
 	// size without making it public API.
 	friend struct ChunkManagerProbe;
+	friend struct ChunkManagerStreamProbe;
 	friend class ChunkCollisionView;
+
+	struct StreamState
+	{
+		glm::ivec3 lastCamChunk{std::numeric_limits<int>::max(), 0, std::numeric_limits<int>::max()};
+		glm::ivec2 lastMovementAnchor{std::numeric_limits<int>::max(), std::numeric_limits<int>::max()};
+		glm::vec2 lastCamForwardXZ{0.f, 1.f};
+		int lastMaxRenderDistance{-1};
+		float lastStreamFrontBias{-1.f};
+		bool initialized{false};
+	};
 
 	std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> m_chunks;
 	std::vector<Chunk *> m_activeChunks;
 	/// Distance-prioritized load queue (not FIFO — re-sorted / pruned each stream tick).
 	std::vector<LoadCandidate> m_loadQueue;
 	std::unordered_set<glm::ivec3, IVec3Hash> m_enqueuedLoads;
+	StreamState m_streamState;
+	ChunkDesiredFootprint m_desiredFootprint;
+	size_t m_loadQueueHead{0};
+	bool m_queueNeedsSort{false};
+	uint32_t m_streamFramesSinceUnloadCheck{0};
+	StreamingMaintenanceStats m_streamStats;
 
 	mutable std::mutex m_completedJobsMutex;
 	std::vector<Chunk *> m_completedGenerationChunks;

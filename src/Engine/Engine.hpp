@@ -44,6 +44,11 @@ public:
 	void setVSync(bool enabled);
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
+	/// Override the streaming front load bias (clamped to the unload-safe
+	/// maximum in StreamHelpers.hpp). Call after construction, before run();
+	/// writes RenderSettings directly so the value is live for this session.
+	void setStreamFrontBias(float bias) { renderSettings.streamFrontBias = normalizedStreamFrontBias(bias); }
+
     /// Fixed daylight camera for reproducible world-generation visual review.
     /// Call after initializeNoiseGenerator. Exits after seconds (0 = interactive).
     void setInspectionView(glm::vec3 position, float yaw, float pitch, float seconds);

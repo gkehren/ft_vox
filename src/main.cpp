@@ -1,4 +1,5 @@
 #include <Engine/Engine.hpp>
+#include <Chunk/StreamHelpers.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 #include <algorithm>
 #include <cstdlib>
@@ -18,6 +19,8 @@ static void printUsage(const char *argv0)
 			  << "                              (defaults to ressources/default-resource-pack.zip)\n"
 			  << "  --vsync <on|off>            FIFO when on; strict IMMEDIATE and uncapped when off\n"
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
+			  << "  --front-bias <value>        Override streaming front load bias [0, "
+			  << kSafeMaxStreamFrontBias << "] (clamped)\n"
 			  << "  --benchmark-warmup <secs>   Override warmup (0 disables it)\n"
 			  << "  --benchmark-map <zoom>      Open fixed-center biome map (zoom 0.1..8)\n"
 			  << "  --benchmark-map-sequential  Compare the previous one-job map path\n"
@@ -44,6 +47,7 @@ int main(int argc, char **argv)
 	std::optional<bool> vsyncOverride;
 	float benchmarkDuration = 0.0f;
 	std::optional<float> benchmarkWarmup;
+	std::optional<float> frontBiasOverride;
 	float benchmarkMapZoom = 0.0f;
 	bool benchmarkMapSequential = false;
     std::optional<std::array<float, 6>> inspection;
@@ -162,6 +166,24 @@ int main(int argc, char **argv)
 			}
 			continue;
 		}
+		if (arg == "--front-bias")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --front-bias requires a value.\n";
+				return EXIT_FAILURE;
+			}
+			char *end = nullptr;
+			const float val = std::strtof(argv[++i], &end);
+			if (end == argv[i] || *end || !std::isfinite(val) || val < 0.f)
+			{
+				std::cerr << "Error: --front-bias requires a number in [0, "
+						  << kSafeMaxStreamFrontBias << "] (values above are clamped).\n";
+				return EXIT_FAILURE;
+			}
+			frontBiasOverride = val;
+			continue;
+		}
 		if (arg == "--vsync")
 		{
 			if (i + 1 >= argc)
@@ -212,6 +234,8 @@ int main(int argc, char **argv)
         }
 		if (vsyncOverride)
 			engine.setVSync(*vsyncOverride);
+		if (frontBiasOverride)
+			engine.setStreamFrontBias(*frontBiasOverride);
 		if (benchmarkDuration > 0.0f)
 		{
 			BenchmarkConfig &config = engine.benchmark().config();

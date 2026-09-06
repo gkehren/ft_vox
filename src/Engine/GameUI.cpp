@@ -573,11 +573,12 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 	if (rs.minRenderDistance > rs.maxRenderDistance)
 		rs.minRenderDistance = rs.maxRenderDistance;
 	ImGui::SliderInt("Full-mesh near range", &rs.minRenderDistance, 32, rs.maxRenderDistance);
-	ImGui::SliderFloat("Front load bias", &rs.streamFrontBias, 0.f, 0.6f, "%.2f");
+	ImGui::SliderFloat("Front load bias", &rs.streamFrontBias, 0.f, kSafeMaxStreamFrontBias, "%.2f");
 	ImGui::TextDisabled("Ahead reach ~ ×%.2f, behind ~ ×%.2f",
-						1.0f / std::sqrt(1.0f - glm::clamp(rs.streamFrontBias, 0.f, 0.9f)),
-						1.0f / std::sqrt(1.0f + glm::clamp(rs.streamFrontBias, 0.f, 0.9f)));
-	ImGui::TextDisabled("Unload at ~1.5× view distance");
+						1.0f / std::sqrt(1.0f - normalizedStreamFrontBias(rs.streamFrontBias)),
+						1.0f / std::sqrt(1.0f + normalizedStreamFrontBias(rs.streamFrontBias)));
+	ImGui::TextDisabled("Unload at ~%.2f× view distance; bias capped so ahead reach stays inside it",
+						kChunkUnloadDistanceFactor);
 
 	const size_t poolNeed = estimateChunkPoolCapacity(rs.maxRenderDistance);
 	if (frame.pool && rs.maxRenderDistance != prevMaxRd)

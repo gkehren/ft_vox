@@ -140,8 +140,8 @@ Engine::Engine(std::string resourcePackRoot)
 
 	renderSettings.minRenderDistance = 192;
 	renderSettings.maxRenderDistance = 512;
-	renderSettings.streamFrontBias = 0.30f;
-	// Pool sized for unload disk (1.5× view) + headroom; grows later via ensureCapacity.
+	renderSettings.streamFrontBias = 0.30f; // may be overridden by setStreamFrontBias before run()
+	// Pool sized for unload disk (kChunkUnloadDistanceFactor × view) + headroom.
 	chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 
 	renderSettings.loadPerSec = 640;
@@ -914,7 +914,8 @@ void Engine::tickBenchmark(double dt)
 				: nullptr,
 			vkContext ? vkContext->getDeviceProperties().deviceName : nullptr,
 			vkContext ? vkContext->hasMultiDrawIndirect() : false,
-			vkContext ? vkContext->maxDrawIndirectCount() : 0);
+			vkContext ? vkContext->maxDrawIndirectCount() : 0,
+			renderSettings.streamFrontBias);
 
 		reloadWorld(cfg.seed);
 		m_benchmark.onWorldReady(camera.getPosition());
@@ -927,6 +928,10 @@ void Engine::tickBenchmark(double dt)
 		m_benchmark.phase() == BenchmarkPhase::Running)
 	{
 		m_benchmark.tick(dt, camera);
+		// Open the streaming-counter window before this frame's tickStreaming
+		// so warmup work stays outside the reported counters (issue #108).
+		if (m_benchmark.consumeStreamingWindowStart() && chunkManager)
+			m_benchmark.beginStreamingMeasurement(chunkManager->streamingMaintenanceStats());
 	}
 
 	// Restore VSync after done/cancel if we forced it off
@@ -1033,6 +1038,8 @@ void Engine::sampleBenchmarkFrame()
 		chunkManager ? chunkManager->pendingGenJobs() : 0,
 		chunkManager ? chunkManager->pendingMeshJobs() : 0, tJobs, tMs, mJobs, mMs, lJobs, lMs);
 	m_benchmark.sampleIndirectCommands(worldRenderer ? worldRenderer->lastIndirectCommandCount() : 0);
+	if (chunkManager)
+		m_benchmark.sampleStreamingStats(chunkManager->streamingMaintenanceStats());
 }
 
 void Engine::drawUi()

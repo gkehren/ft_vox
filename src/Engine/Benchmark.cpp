@@ -2,6 +2,7 @@
 #include "Engine/BuildInfo.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -42,6 +43,15 @@ void Benchmark::requestStart()
 	m_peakChunks = m_peakDraw = m_peakLoad = m_peakGen = m_peakMesh = 0;
 	m_peakIndirectCommands = 0;
 	m_over16 = m_over33 = 0;
+	// Streaming-counter window state must reset with everything else: a
+	// second benchmark in the same process would otherwise subtract fresh
+	// ChunkManager counters from stale ones (uint64 underflow), and a new run
+	// must reopen its own window at the Warmup->Running flip (issue #108).
+	m_streamStats = {};
+	m_streamStatsStart = {};
+	m_streamStatsLatest = {};
+	m_streamStatsStarted = false;
+	m_streamWindowStartPending = false;
 	const float dur = std::clamp(m_config.durationSec, 5.f, 300.f);
 	m_config.durationSec = dur;
 	m_config.warmupSec = std::clamp(m_config.warmupSec, 0.f, dur);
@@ -69,6 +79,10 @@ void Benchmark::onWorldReady(const glm::vec3 &surfaceCenter)
 	{
 		telemetry::registry().beginCapture();
 		m_phase = BenchmarkPhase::Running;
+		// No Warmup->Running flip will happen in tick(): open the streaming
+		// counter window here so the engine snapshots before this frame's
+		// tickStreaming (issue #108).
+		m_streamWindowStartPending = true;
 	}
 }
 
@@ -76,7 +90,8 @@ void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
 									const char *presentMode,
 									const char *device,
 									bool multiDrawIndirect,
-									uint32_t maxDrawIndirectCount)
+									uint32_t maxDrawIndirectCount,
+									float streamFrontBias)
 {
 	m_viewDistance = viewDist;
 	m_windowW = w;
@@ -86,6 +101,7 @@ void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
 	m_deviceName = device ? device : "";
 	m_multiDrawIndirect = multiDrawIndirect;
 	m_maxDrawIndirectCount = maxDrawIndirectCount;
+	m_streamFrontBias = streamFrontBias;
 }
 
 void Benchmark::applyCamera(Camera &camera, float t01) const
@@ -122,6 +138,9 @@ void Benchmark::tick(double dt, Camera &camera)
 	{
 		telemetry::registry().beginCapture();
 		m_phase = BenchmarkPhase::Running;
+		// Open the streaming-counter window: the engine snapshots the
+		// ChunkManager counters before this frame's tickStreaming (issue #108).
+		m_streamWindowStartPending = true;
 	}
 
 	if (m_phase == BenchmarkPhase::Running &&
@@ -360,6 +379,17 @@ void Benchmark::finalize()
 	r.peakPendingLoad = m_peakLoad;
 	r.peakPendingGen = m_peakGen;
 	r.peakPendingMesh = m_peakMesh;
+	// Report the measurement window only: warmup frames must not pollute the
+	// streaming maintenance counters (issue #108 review).
+	r.streamStats = subtractStreamingStats(m_streamStatsLatest, m_streamStatsStart);
+	{
+		// Window sanity: one maintenance dispatch per measured frame (±1 for
+		// the boundary frames around the Warmup→Running flip).
+		const uint64_t calls = r.streamStats.maintenanceCalls();
+		const uint64_t frames = static_cast<uint64_t>(r.frames);
+		assert(std::abs(static_cast<long long>(calls) - static_cast<long long>(frames)) <= 1 &&
+			   "streaming counter window does not match measured frames");
+	}
 	r.framesOver16ms = m_over16;
 	r.framesOver33ms = m_over33;
 
@@ -369,6 +399,7 @@ void Benchmark::finalize()
 	r.vsync = m_vsync;
 	r.multiDrawIndirect = m_multiDrawIndirect;
 	r.maxDrawIndirectCount = m_maxDrawIndirectCount;
+	r.streamFrontBias = m_streamFrontBias;
 	r.presentMode = m_presentMode;
 	r.deviceName = m_deviceName;
 
@@ -405,10 +436,28 @@ std::string Benchmark::formatReportText() const
 	  << "s  Measured: " << r.measuredSec << "s  Frames: " << r.frames << "\n";
 	o << "Device: " << r.deviceName << "\n";
 	o << "Viewport: " << r.windowW << "x" << r.windowH << "  ViewDist: " << r.viewDistance
+	  << "  FrontBias: " << r.streamFrontBias
 	  << "  VSync: " << (r.vsync ? "on" : "off")
 	  << "  PresentMode: " << r.presentMode << "\n";
 	o << "Indirect: multiDrawIndirect=" << (r.multiDrawIndirect ? "yes" : "no")
-	  << "  maxDrawIndirectCount=" << r.maxDrawIndirectCount << "\n\n";
+	  << "  maxDrawIndirectCount=" << r.maxDrawIndirectCount << "\n";
+	{
+		// Issue #108: how maintenance frames split across the dispatch paths.
+		const uint64_t maintenanceCalls = r.streamStats.zeroWork + r.streamStats.incrementalUpdates +
+										  r.streamStats.headingRebuilds + r.streamStats.fullRebuilds;
+		const float zeroPct = maintenanceCalls > 0
+								  ? 100.f * static_cast<float>(r.streamStats.zeroWork) / static_cast<float>(maintenanceCalls)
+								  : 0.f;
+		o << "Stream maintenance: zeroWork=" << r.streamStats.zeroWork << " (" << zeroPct << "% of calls)"
+		  << "  incremental=" << r.streamStats.incrementalUpdates
+		  << "  heading=" << r.streamStats.headingRebuilds
+		  << "  full=" << r.streamStats.fullRebuilds
+		  << "  queueSorts=" << r.streamStats.queueSorts
+		  << "  rowsVisited=" << r.streamStats.footprintRowsVisited
+		  << "  enter=" << r.streamStats.enteringCandidates
+		  << "  exit=" << r.streamStats.exitingCandidates
+		  << "  unloadScans=" << r.streamStats.unloadScans << "\n\n";
+	}
 	o << "Frame times (ms)\n";
 	o << "  avg " << r.avgMs << "  min " << r.minMs << "  max " << r.maxMs << "\n";
 	o << "  p50 " << r.p50Ms << "  p95 " << r.p95Ms << "  p99 " << r.p99Ms << "\n";

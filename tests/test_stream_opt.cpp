@@ -6,6 +6,8 @@
 #include <cmath>
 #include <iostream>
 #include <vector>
+#include <set>
+#include <unordered_set>
 
 static int g_fails = 0;
 
@@ -330,6 +332,314 @@ static void testIceSpikeVegetationReachable()
 			  << spikeBlocks << "\n";
 }
 
+struct IVec3Compare
+{
+	bool operator()(const glm::ivec3 &a, const glm::ivec3 &b) const
+	{
+		if (a.x != b.x) return a.x < b.x;
+		if (a.y != b.y) return a.y < b.y;
+		return a.z < b.z;
+	}
+};
+
+static std::set<glm::ivec3, IVec3Compare> toCoordSet(const std::vector<glm::ivec3> &vec)
+{
+	return std::set<glm::ivec3, IVec3Compare>(vec.begin(), vec.end());
+}
+
+static void testDeterministicIncrementalFootprintAgainstBruteForce()
+{
+	int viewDist = 256;
+	float bias = 0.35f;
+	glm::vec3 camPos(8.f, 64.f, 8.f);
+	glm::ivec3 camChunk(0, 0, 0);
+	glm::vec2 fwd(1.f, 0.f);
+
+	// 1. Initial full footprint
+	ChunkDesiredFootprint fp = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+	std::vector<glm::ivec3> bruteList = computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist);
+	auto runningSet = toCoordSet(footprintToCoordList(fp));
+	auto bruteSet = toCoordSet(bruteList);
+	CHECK(runningSet == bruteSet, "Initial full footprint matches brute-force reference");
+	CHECK(!runningSet.empty(), "Initial desired set is non-empty");
+
+	// 2. Many frames inside one chunk (sub-chunk movements)
+	for (int frame = 0; frame < 30; ++frame)
+	{
+		camPos += glm::vec3(0.2f, 0.f, 0.15f);
+		glm::ivec3 chunkAtPos(
+			static_cast<int>(std::floor(camPos.x / static_cast<float>(CHUNK_SIZE))),
+			0,
+			static_cast<int>(std::floor(camPos.z / static_cast<float>(CHUNK_SIZE))));
+		CHECK(chunkAtPos == camChunk, "Still inside chunk (0,0)");
+
+		ChunkDesiredFootprint fpSub = computeDesiredFootprintIncremental(fp, camChunk, camPos, fwd, bias, viewDist);
+		FootprintDiff diff = computeFootprintDiff(fp, fpSub);
+		for (const auto &p : diff.exiting) runningSet.erase(p);
+		for (const auto &p : diff.entering) runningSet.insert(p);
+		fp = std::move(fpSub);
+
+		auto expected = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+		CHECK(runningSet == expected, "Sub-chunk movement preserves exact match with brute force");
+	}
+
+	// 3. One-chunk cardinal steps
+	const std::vector<glm::ivec3> steps = {
+		{1, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, 1},
+		{-1, 0, 0}, {-1, 0, 0}, {0, 0, -1}, {0, 0, -1}
+	};
+	for (const auto &d : steps)
+	{
+		camChunk += d;
+		camPos += glm::vec3(static_cast<float>(d.x * CHUNK_SIZE), 0.f, static_cast<float>(d.z * CHUNK_SIZE));
+
+		ChunkDesiredFootprint fpStep = computeDesiredFootprintIncremental(fp, camChunk, camPos, fwd, bias, viewDist);
+		FootprintDiff diff = computeFootprintDiff(fp, fpStep);
+		CHECK(!diff.entering.empty() || !diff.exiting.empty(), "1-chunk step produces non-trivial diff");
+
+		for (const auto &p : diff.exiting) runningSet.erase(p);
+		for (const auto &p : diff.entering) runningSet.insert(p);
+		fp = std::move(fpStep);
+
+		auto expected = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+		CHECK(runningSet == expected, "1-chunk step incremental diff exactly matches brute force");
+	}
+
+	// 4. Diagonal steps
+	const std::vector<glm::ivec3> diagSteps = {
+		{1, 0, 1}, {-1, 0, 1}, {-1, 0, -1}, {1, 0, -1}
+	};
+	for (const auto &d : diagSteps)
+	{
+		camChunk += d;
+		camPos += glm::vec3(static_cast<float>(d.x * CHUNK_SIZE), 0.f, static_cast<float>(d.z * CHUNK_SIZE));
+
+		ChunkDesiredFootprint fpStep = computeDesiredFootprintIncremental(fp, camChunk, camPos, fwd, bias, viewDist);
+		FootprintDiff diff = computeFootprintDiff(fp, fpStep);
+		for (const auto &p : diff.exiting) runningSet.erase(p);
+		for (const auto &p : diff.entering) runningSet.insert(p);
+		fp = std::move(fpStep);
+
+		auto expected = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+		CHECK(runningSet == expected, "Diagonal step incremental diff exactly matches brute force");
+	}
+
+	// 5. Rapid 180° heading changes
+	const std::vector<glm::vec2> headings = {
+		{-1.f, 0.f}, {0.f, 1.f}, {0.f, -1.f}, {1.f, 0.f}
+	};
+	for (const auto &newFwd : headings)
+	{
+		fwd = newFwd;
+		ChunkDesiredFootprint fpTurn = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+		FootprintDiff diff = computeFootprintDiff(fp, fpTurn);
+		for (const auto &p : diff.exiting) runningSet.erase(p);
+		for (const auto &p : diff.entering) runningSet.insert(p);
+		fp = std::move(fpTurn);
+
+		auto expected = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+		CHECK(runningSet == expected, "Heading change diff exactly matches brute force");
+	}
+
+	// 6. Teleport
+	camChunk = glm::ivec3(50, 0, -30);
+	camPos = glm::vec3(50 * 16 + 8, 64, -30 * 16 + 8);
+	fp = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+	runningSet = toCoordSet(footprintToCoordList(fp));
+	auto expectedTeleport = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+	CHECK(runningSet == expectedTeleport, "Teleport full rebuild matches brute force");
+
+	// 7. Render-distance shrink/grow
+	viewDist = 128; // shrink
+	fp = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+	runningSet = toCoordSet(footprintToCoordList(fp));
+	auto expectedShrink = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+	CHECK(runningSet == expectedShrink, "Render distance shrink matches brute force");
+
+	viewDist = 384; // grow
+	fp = computeDesiredFootprintFull(camChunk, camPos, fwd, bias, viewDist);
+	runningSet = toCoordSet(footprintToCoordList(fp));
+	auto expectedGrow = toCoordSet(computeDesiredChunkSetBruteForce(camChunk, camPos, fwd, bias, viewDist));
+	CHECK(runningSet == expectedGrow, "Render distance grow matches brute force");
+}
+
+static void testIncrementalQueueMaintenance()
+{
+	std::vector<LoadCandidate> queue;
+	size_t queueHead = 0;
+	std::unordered_set<glm::ivec3, IVec3Hash> enqueued;
+
+	for (int i = 0; i < 20; ++i)
+	{
+		glm::ivec3 p(i, 0, 0);
+		queue.push_back({p, static_cast<float>(i)});
+		enqueued.insert(p);
+	}
+	sortLoadCandidatesNearestFirst(queue);
+
+	// Consume 5 items
+	int budget = 5;
+	std::vector<glm::ivec3> toLoad;
+	const size_t available = queue.size() - queueHead;
+	const int n = std::min(budget, static_cast<int>(available));
+	for (int i = 0; i < n; ++i)
+	{
+		const glm::ivec3 pos = queue[queueHead + static_cast<size_t>(i)].pos;
+		enqueued.erase(pos);
+		toLoad.push_back(pos);
+	}
+	queueHead += static_cast<size_t>(n);
+
+	CHECK(toLoad.size() == 5, "pulled 5 items");
+	CHECK(toLoad[0].x == 0 && toLoad[4].x == 4, "nearest candidates pulled first");
+	CHECK(queueHead == 5, "head advanced without vector memmove");
+	CHECK(queue.size() == 20, "head consumption does not resize/shift the vector");
+	CHECK(queue.size() - queueHead == 15, "15 items remaining in queue");
+	CHECK(enqueued.size() == 15, "enqueued set erased accurately");
+	CHECK(enqueued.count({0, 0, 0}) == 0, "popped item no longer in enqueued set");
+	CHECK(enqueued.count({5, 0, 0}) == 1, "unpopped item remains in enqueued set");
+	// Full diff application (entering/exiting/prune/sort) is covered by the
+	// ChunkManager production tests in test_chunk_lifecycle.
+}
+
+static ChunkDesiredFootprint makeSingleRowFootprint(int z, int minX, int maxX)
+{
+	ChunkDesiredFootprint fp;
+	if (minX > maxX)
+		return fp; // empty
+	fp.minZ = z;
+	fp.maxZ = z;
+	fp.spans.push_back({minX, maxX});
+	return fp;
+}
+
+static void testFootprintDiffUnits()
+{
+	// empty -> empty
+	auto d0 = computeFootprintDiff(makeSingleRowFootprint(5, 1, 0), makeSingleRowFootprint(5, 1, 0));
+	CHECK(d0.entering.empty() && d0.exiting.empty(), "empty -> empty produces no diff");
+
+	// empty -> populated / populated -> empty
+	auto d1 = computeFootprintDiff(ChunkDesiredFootprint{}, makeSingleRowFootprint(2, 3, 5));
+	CHECK(d1.exiting.empty() && d1.entering.size() == 3, "empty -> populated enters all cells");
+	auto d2 = computeFootprintDiff(makeSingleRowFootprint(2, 3, 5), ChunkDesiredFootprint{});
+	CHECK(d2.entering.empty() && d2.exiting.size() == 3, "populated -> empty exits all cells");
+
+	// disjoint spans swap entirely
+	auto d3 = computeFootprintDiff(makeSingleRowFootprint(0, 0, 5), makeSingleRowFootprint(0, 10, 15));
+	CHECK(d3.exiting.size() == 6 && d3.entering.size() == 6, "disjoint spans exit old and enter new entirely");
+
+	// left extension / shrink
+	auto d4 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 3, 10));
+	CHECK(d4.entering.size() == 2 && d4.entering[0].x == 3 && d4.entering[1].x == 4 && d4.exiting.empty(),
+		  "left extension enters only the new cells");
+	auto d5 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 7, 10));
+	CHECK(d5.exiting.size() == 2 && d5.exiting[0].x == 5 && d5.exiting[1].x == 6 && d5.entering.empty(),
+		  "left shrink exits only the dropped cells");
+
+	// right extension / shrink
+	auto d6 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 5, 12));
+	CHECK(d6.entering.size() == 2 && d6.entering[0].x == 11 && d6.entering[1].x == 12,
+		  "right extension enters only the new cells");
+	auto d7 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 5, 8));
+	CHECK(d7.exiting.size() == 2 && d7.exiting[0].x == 9 && d7.exiting[1].x == 10,
+		  "right shrink exits only the dropped cells");
+
+	// both sides at once
+	auto d8 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 3, 12));
+	CHECK(d8.entering.size() == 4 && d8.exiting.empty(), "both-side extension enters the 4 new cells");
+	auto d9 = computeFootprintDiff(makeSingleRowFootprint(0, 5, 10), makeSingleRowFootprint(0, 7, 8));
+	CHECK(d9.exiting.size() == 4 && d9.entering.empty(), "both-side shrink exits the 4 dropped cells");
+}
+
+static void testAnchorAndBiasHelpers()
+{
+	// Floor quantization across zero and negative coordinates.
+	CHECK(streamingMovementAnchor(glm::vec3(0.f, 0.f, 0.f)) == glm::ivec2(0, 0), "anchor at origin");
+	CHECK(streamingMovementAnchor(glm::vec3(3.9f, 0.f, -0.1f)) == glm::ivec2(0, -1), "anchor floors across zero");
+	CHECK(streamingMovementAnchor(glm::vec3(-0.1f, 0.f, -4.1f)) == glm::ivec2(-1, -2),
+		  "negative anchors floor symmetrically");
+	CHECK(streamingMovementAnchor(glm::vec3(15.9f, 0.f, 16.1f)) == glm::ivec2(3, 4), "anchor cells are 4 blocks");
+
+	// Bias normalization + epsilon comparison (no float-equality on the cap).
+	CHECK(std::abs(normalizedStreamFrontBias(0.95f) - kSafeMaxStreamFrontBias) < 1e-6f,
+		  "bias clamps to the unload-safe maximum");
+	CHECK(std::abs(normalizedStreamFrontBias(0.9f) - kSafeMaxStreamFrontBias) < 1e-6f,
+		  "legacy 0.9 cap clamps to the unload-safe maximum");
+	CHECK(normalizedStreamFrontBias(-0.5f) == 0.f, "negative bias clamps to 0");
+	CHECK(!streamFrontBiasChanged(0.3f, 0.30005f), "bias float noise below epsilon is ignored");
+	CHECK(streamFrontBiasChanged(0.3f, 0.301f), "real bias change is detected");
+	CHECK(!streamFrontBiasChanged(0.95f, 0.99f), "clamped bias values compare canonically");
+}
+
+static void testFrontBiasFitsUnloadRadius()
+{
+	// Architectural invariant: desired load footprint ⊆ unload hysteresis.
+	// Ahead reach = viewDist / sqrt(1 - bias) must stay <= viewDist * 1.5.
+	const float reachFactor = 1.0f / std::sqrt(1.0f - normalizedStreamFrontBias(kSafeMaxStreamFrontBias));
+	CHECK(reachFactor <= kChunkUnloadDistanceFactor,
+		  "max stream bias stays inside unload radius");
+	CHECK(kSafeMaxStreamFrontBias < 1.0f - 1.0f / (kChunkUnloadDistanceFactor * kChunkUnloadDistanceFactor) + 1e-6f,
+		  "safe bias cap respects the closed-form bound");
+
+	const float rawBiases[] = {0.f, 0.30f, 0.55f, 0.6f, 0.9f, 0.99f};
+	for (float raw : rawBiases)
+	{
+		const float norm = normalizedStreamFrontBias(raw);
+		CHECK(norm >= 0.f && norm <= kSafeMaxStreamFrontBias + 1e-6f, "normalized bias within safe range");
+		const float factor = 1.0f / std::sqrt(1.0f - norm);
+		CHECK(factor <= kChunkUnloadDistanceFactor + 1e-4f, "every normalized bias keeps the reach inside unload");
+	}
+}
+
+static void testSubtractStreamingStats()
+{
+	StreamingMaintenanceStats start;
+	start.zeroWork = 100;
+	start.incrementalUpdates = 20;
+	start.headingRebuilds = 2;
+	start.fullRebuilds = 1;
+	start.queueSorts = 12;
+	start.footprintRowsVisited = 500;
+	start.enteringCandidates = 300;
+	start.exitingCandidates = 280;
+	start.unloadScans = 5;
+
+	StreamingMaintenanceStats end;
+	end.zeroWork = 180;
+	end.incrementalUpdates = 35;
+	end.headingRebuilds = 2;
+	end.fullRebuilds = 3;
+	end.queueSorts = 20;
+	end.footprintRowsVisited = 900;
+	end.enteringCandidates = 360;
+	end.exitingCandidates = 355;
+	end.unloadScans = 7;
+
+	const auto d = subtractStreamingStats(end, start);
+	CHECK(d.zeroWork == 80 && d.incrementalUpdates == 15, "delta: dispatch counters subtract");
+	CHECK(d.headingRebuilds == 0 && d.fullRebuilds == 2, "delta: rebuild counters subtract");
+	CHECK(d.queueSorts == 8, "delta: sorts subtract");
+	CHECK(d.footprintRowsVisited == 400, "delta: rows subtract");
+	CHECK(d.enteringCandidates == 60 && d.exitingCandidates == 75, "delta: candidate churn subtract");
+	CHECK(d.unloadScans == 2, "delta: unload scans subtract");
+	CHECK(d.maintenanceCalls() == 97, "delta: maintenance calls = zero+incr+heading+full");
+}
+
+static void testMinimalRenderDistanceFootprints()
+{
+	const glm::ivec3 chunk(3, 0, -2);
+	for (int view : {16, 32})
+	{
+		const glm::vec3 pos(chunk.x * 16 + 5.f, 64.f, chunk.z * 16 + 9.f);
+		const glm::vec2 fwd(1.f, 0.f);
+		const auto fp = computeDesiredFootprintFull(chunk, pos, fwd, 0.35f, view);
+		const auto expected = toCoordSet(computeDesiredChunkSetBruteForce(chunk, pos, fwd, 0.35f, view));
+		CHECK(!expected.empty(), "minimal view desired set is non-empty");
+		CHECK(toCoordSet(footprintToCoordList(fp)) == expected, "minimal view footprint matches brute force");
+	}
+}
+
 int main()
 {
 	testLoadPriorityNearestFirst();
@@ -342,12 +652,19 @@ int main()
 	testOceanWaterNotClippedByCaveYBound();
 	testPoolCapacityEstimate();
 	testIceSpikeVegetationReachable();
+	testDeterministicIncrementalFootprintAgainstBruteForce();
+	testIncrementalQueueMaintenance();
+	testFootprintDiffUnits();
+	testAnchorAndBiasHelpers();
+	testFrontBiasFitsUnloadRadius();
+	testSubtractStreamingStats();
+	testMinimalRenderDistanceFootprints();
 
 	if (g_fails != 0)
 	{
 		std::cerr << g_fails << " check(s) failed\n";
 		return 1;
 	}
-	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate + ice spikes\n";
+	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate + ice spikes + incremental footprint vs brute force\n";
 	return 0;
 }

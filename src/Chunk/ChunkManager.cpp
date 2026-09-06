@@ -58,11 +58,29 @@ glm::ivec3 ChunkManager::worldToChunkCoord(const glm::vec3 &worldPos)
 		static_cast<int>(std::floor(worldPos.z / static_cast<float>(CHUNK_SIZE)))};
 }
 
-void ChunkManager::updateStreaming(const Camera &camera, const RenderSettings &settings)
+StreamingUpdateKind ChunkManager::updateStreaming(const Camera &camera, const RenderSettings &settings)
 {
-	queueUnloadOutOfRange(camera, settings);
 	const glm::ivec3 camChunk = worldToChunkCoord(camera.getPosition());
-	loadChunksAroundPlayer(camChunk, camera, settings);
+
+	// Unload triggers mirror the load-side reconciliation triggers minus
+	// intra-chunk anchor moves: the 1.5x unload hysteresis makes 4-block
+	// precision worthless and the m_activeChunks scan is the expensive part.
+	// Read BEFORE loadChunksAroundPlayer publishes the new camera state
+	// (issue #108 review: one trigger definition, no duplicated logic).
+	const bool unloadRelevant = !m_streamState.initialized ||
+								camChunk != m_streamState.lastCamChunk ||
+								settings.maxRenderDistance != m_streamState.lastMaxRenderDistance ||
+								streamFrontBiasChanged(settings.streamFrontBias, m_streamState.lastStreamFrontBias);
+
+	++m_streamFramesSinceUnloadCheck;
+	if (unloadRelevant || m_streamFramesSinceUnloadCheck >= kUnloadCheckIntervalFrames)
+	{
+		queueUnloadOutOfRange(camera, settings);
+		++m_streamStats.unloadScans;
+		m_streamFramesSinceUnloadCheck = 0;
+	}
+
+	return loadChunksAroundPlayer(camChunk, camera, settings);
 }
 
 void ChunkManager::processChunkLoading(int budget)
@@ -79,18 +97,33 @@ void ChunkManager::processChunkLoading(int budget)
 	std::vector<glm::ivec3> toLoad;
 	{
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		// Nearest-first: re-sort so player motion never leaves stale far loads ahead.
-		sortLoadCandidatesNearestFirst(m_loadQueue);
-		const int n = std::min(budget, static_cast<int>(m_loadQueue.size()));
+		if (m_queueNeedsSort)
+		{
+			if (m_loadQueueHead > 0)
+			{
+				m_loadQueue.erase(m_loadQueue.begin(), m_loadQueue.begin() + m_loadQueueHead);
+				m_loadQueueHead = 0;
+			}
+			sortLoadCandidatesNearestFirst(m_loadQueue);
+			++m_streamStats.queueSorts;
+			m_queueNeedsSort = false;
+		}
+
+		const size_t available = (m_loadQueue.size() >= m_loadQueueHead) ? (m_loadQueue.size() - m_loadQueueHead) : 0;
+		const int n = std::min(budget, static_cast<int>(available));
 		toLoad.reserve(static_cast<size_t>(n));
 		for (int i = 0; i < n; ++i)
 		{
-			const glm::ivec3 pos = m_loadQueue[static_cast<size_t>(i)].pos;
+			const glm::ivec3 pos = m_loadQueue[m_loadQueueHead + static_cast<size_t>(i)].pos;
 			m_enqueuedLoads.erase(pos);
 			toLoad.push_back(pos);
 		}
-		if (n > 0)
-			m_loadQueue.erase(m_loadQueue.begin(), m_loadQueue.begin() + n);
+		m_loadQueueHead += static_cast<size_t>(n);
+		if (m_loadQueueHead == m_loadQueue.size())
+		{
+			m_loadQueue.clear();
+			m_loadQueueHead = 0;
+		}
 	}
 	if (toLoad.empty())
 		return;
@@ -135,6 +168,7 @@ void ChunkManager::processChunkLoading(int budget)
 			continue;
 		m_loadQueue.push_back({pos, 0.f});
 		m_enqueuedLoads.insert(pos);
+		m_queueNeedsSort = true;
 	}
 }
 
@@ -829,22 +863,28 @@ void ChunkManager::collectShadowList(std::vector<Chunk *> &out, const Camera &ca
 
 void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings)
 {
-	const float unloadDist = static_cast<float>(settings.maxRenderDistance) * 1.5f;
+	const float unloadDist =
+		static_cast<float>(settings.maxRenderDistance) * kChunkUnloadDistanceFactor;
 	const float unloadDistSq = unloadDist * unloadDist;
 
 	std::vector<glm::ivec3> toUnload;
 	{
 		std::shared_lock<std::shared_mutex> lock(m_mutex);
-		for (const auto &pair : m_chunks)
+		for (Chunk *chunk : m_activeChunks)
 		{
-			Chunk *chunk = pair.second;
 			if (!chunk || chunk->isInTransit())
 				continue;
 			const glm::vec3 center = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
 			const float dx = camera.getPosition().x - center.x;
 			const float dz = camera.getPosition().z - center.z;
 			if (dx * dx + dz * dz > unloadDistSq)
-				toUnload.push_back(pair.first);
+			{
+				const glm::ivec3 chunkPos(
+					static_cast<int>(std::floor(chunk->getPosition().x / static_cast<float>(CHUNK_SIZE))),
+					0,
+					static_cast<int>(std::floor(chunk->getPosition().z / static_cast<float>(CHUNK_SIZE))));
+				toUnload.push_back(chunkPos);
+			}
 		}
 	}
 
@@ -872,91 +912,207 @@ void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSetti
 		}
 		m_chunks.erase(it);
 		m_deferredRelease.push_back(chunk);
-		// The chunk is leaving the manager: any pending edit targeting it
-		// would either dangle into the free pool or, worse, land on a
-		// recycled incarnation (the generation stamp in applyPendingEdits
-		// is the last-resort guard, this purge is the timely one).
 		erasePendingEditsFor(chunk);
 	}
 	if (!toUnload.empty())
 		m_deferredReleaseAge = 0; // reset age so new unloads wait full delay
 }
 
-void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-										  const RenderSettings &settings)
+namespace
 {
-	// Scan radius covers the view-direction front extension (bias stretches the
-	// loaded region ahead up to ~1/sqrt(1-bias) × maxRenderDistance).
-	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
-	const float reachBlocks =
-		static_cast<float>(settings.maxRenderDistance) / std::sqrt(1.0f - frontBias);
-	const int radius =
-		static_cast<int>(std::ceil(reachBlocks / static_cast<float>(CHUNK_SIZE)));
-	const float maxDistSq = static_cast<float>(settings.maxRenderDistance) * static_cast<float>(settings.maxRenderDistance);
+/// Normalized XZ camera forward (fallback +Z when the forward is vertical).
+glm::vec2 normalizedForwardXZ(const Camera &camera)
+{
+	glm::vec2 fwd(camera.getFront().x, camera.getFront().z);
+	if (glm::dot(fwd, fwd) < 1e-6f)
+		fwd = glm::vec2(0.f, 1.f);
+	return glm::normalize(fwd);
+}
+} // namespace
+
+StreamingUpdateKind ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+															const RenderSettings &settings)
+{
+	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
 	const glm::vec3 camPos = camera.getPosition();
-	const glm::vec3 camFront = camera.getFront();
-	glm::vec2 camForwardXZ(camFront.x, camFront.z);
-	if (glm::dot(camForwardXZ, camForwardXZ) < 1e-6f)
-		camForwardXZ = glm::vec2(0.f, 1.f);
-	camForwardXZ = glm::normalize(camForwardXZ);
+	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
 
-	struct LoadInfo
-	{
-		glm::ivec3 pos;
-		float distSq;
-	};
-	std::vector<LoadInfo> candidates;
-	candidates.reserve(static_cast<size_t>((2 * radius + 1) * (2 * radius + 1)));
-
-	{
-		std::shared_lock<std::shared_mutex> lock(m_mutex);
-		for (int x = -radius; x <= radius; ++x)
-		{
-			for (int z = -radius; z <= radius; ++z)
-			{
-				const glm::ivec3 chunkPos = cameraChunkPos + glm::ivec3(x, 0, z);
-				if (m_chunks.find(chunkPos) != m_chunks.end())
-					continue;
-
-				const glm::vec3 center(
-					chunkPos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
-					chunkPos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
-				const float distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
-				if (distSq <= maxDistSq)
-					candidates.push_back({chunkPos, distSq});
-			}
-		}
-	}
+	m_desiredFootprint = computeDesiredFootprintFull(cameraChunkPos, camPos, camForwardXZ, frontBias,
+													settings.maxRenderDistance);
+	m_streamStats.footprintRowsVisited +=
+		static_cast<uint64_t>(m_desiredFootprint.maxZ - m_desiredFootprint.minZ + 1);
 
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
-
-	// Drop loads that are already present or now out of range after camera motion.
-	pruneLoadCandidatesByDistance(m_loadQueue, camPos, maxDistSq, camForwardXZ, frontBias);
-	m_loadQueue.erase(std::remove_if(m_loadQueue.begin(), m_loadQueue.end(),
-									 [&](const LoadCandidate &c) {
-										 if (m_chunks.find(c.pos) != m_chunks.end())
-										 {
-											 m_enqueuedLoads.erase(c.pos);
-											 return true;
-										 }
-										 return false;
-									 }),
-					  m_loadQueue.end());
-	// Rebuild enqueued set from surviving queue entries.
+	m_loadQueue.clear();
+	m_loadQueueHead = 0;
 	m_enqueuedLoads.clear();
-	for (const auto &c : m_loadQueue)
-		m_enqueuedLoads.insert(c.pos);
 
-	for (const auto &info : candidates)
+	for (int z = m_desiredFootprint.minZ; z <= m_desiredFootprint.maxZ; ++z)
 	{
-		if (m_chunks.find(info.pos) != m_chunks.end())
+		const ChunkRowSpan *s = m_desiredFootprint.spanForZ(z);
+		if (!s || s->empty())
 			continue;
-		if (m_enqueuedLoads.count(info.pos) != 0)
-			continue;
-		m_loadQueue.push_back({info.pos, info.distSq});
-		m_enqueuedLoads.insert(info.pos);
+		for (int x = s->minX; x <= s->maxX; ++x)
+		{
+			const glm::ivec3 pos(x, 0, z);
+			if (m_chunks.find(pos) != m_chunks.end())
+				continue;
+			const glm::vec3 center(
+				pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
+				pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
+			const float distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
+			m_loadQueue.push_back({pos, distSq});
+			m_enqueuedLoads.insert(pos);
+		}
 	}
 	sortLoadCandidatesNearestFirst(m_loadQueue);
+	++m_streamStats.queueSorts;
+	m_queueNeedsSort = false;
+
+	m_streamState.lastCamChunk = cameraChunkPos;
+	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
+	m_streamState.lastCamForwardXZ = camForwardXZ;
+	m_streamState.lastMaxRenderDistance = settings.maxRenderDistance;
+	m_streamState.lastStreamFrontBias = normalizedStreamFrontBias(settings.streamFrontBias);
+	m_streamState.initialized = true;
+	++m_streamStats.fullRebuilds;
+	return StreamingUpdateKind::FullRebuild;
+}
+
+void ChunkManager::applyFootprintDiffToQueue(const FootprintDiff &diff, const glm::vec3 &camPos,
+											 const glm::vec2 &camForwardXZ, float frontBias)
+{
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
+
+	for (const glm::ivec3 &pos : diff.exiting)
+	{
+		m_enqueuedLoads.erase(pos);
+	}
+
+	for (const glm::ivec3 &pos : diff.entering)
+	{
+		if (m_chunks.find(pos) != m_chunks.end())
+			continue;
+		if (m_enqueuedLoads.count(pos) != 0)
+			continue;
+		const glm::vec3 center(
+			pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
+			pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
+		const float distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
+		m_loadQueue.push_back({pos, distSq});
+		m_enqueuedLoads.insert(pos);
+	}
+
+	if (m_loadQueueHead > 0)
+	{
+		m_loadQueue.erase(m_loadQueue.begin(), m_loadQueue.begin() + m_loadQueueHead);
+		m_loadQueueHead = 0;
+	}
+	m_loadQueue.erase(std::remove_if(m_loadQueue.begin(), m_loadQueue.end(),
+									 [&](const LoadCandidate &c) {
+										 return m_enqueuedLoads.count(c.pos) == 0;
+									 }),
+					  m_loadQueue.end());
+
+	for (auto &c : m_loadQueue)
+	{
+		const glm::vec3 center(
+			c.pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
+			c.pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
+		c.distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
+	}
+	sortLoadCandidatesNearestFirst(m_loadQueue);
+	++m_streamStats.queueSorts;
+	m_streamStats.enteringCandidates += diff.entering.size();
+	m_streamStats.exitingCandidates += diff.exiting.size();
+	m_queueNeedsSort = false;
+	m_streamState.lastCamForwardXZ = camForwardXZ;
+}
+
+StreamingUpdateKind ChunkManager::reconcileStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+																const RenderSettings &settings)
+{
+	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
+	const glm::vec3 camPos = camera.getPosition();
+	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
+
+	ChunkDesiredFootprint newFootprint =
+		computeDesiredFootprintIncremental(m_desiredFootprint, cameraChunkPos, camPos, camForwardXZ,
+										   frontBias, settings.maxRenderDistance);
+	m_streamStats.footprintRowsVisited +=
+		static_cast<uint64_t>(newFootprint.maxZ - newFootprint.minZ + 1);
+	FootprintDiff diff = computeFootprintDiff(m_desiredFootprint, newFootprint);
+	m_desiredFootprint = std::move(newFootprint);
+
+	applyFootprintDiffToQueue(diff, camPos, camForwardXZ, frontBias);
+	m_streamState.lastCamChunk = cameraChunkPos;
+	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
+	++m_streamStats.incrementalUpdates;
+	return StreamingUpdateKind::Incremental;
+}
+
+StreamingUpdateKind ChunkManager::reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+															const RenderSettings &settings)
+{
+	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
+	const glm::vec3 camPos = camera.getPosition();
+	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
+
+	ChunkDesiredFootprint newFootprint =
+		computeDesiredFootprintFull(cameraChunkPos, camPos, camForwardXZ, frontBias,
+									settings.maxRenderDistance);
+	m_streamStats.footprintRowsVisited +=
+		static_cast<uint64_t>(newFootprint.maxZ - newFootprint.minZ + 1);
+	FootprintDiff diff = computeFootprintDiff(m_desiredFootprint, newFootprint);
+	m_desiredFootprint = std::move(newFootprint);
+
+	applyFootprintDiffToQueue(diff, camPos, camForwardXZ, frontBias);
+	// The heading path also serves chunk-cross frames (heading has dispatch
+	// priority), so it must publish the full camera state.
+	m_streamState.lastCamChunk = cameraChunkPos;
+	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
+	++m_streamStats.headingRebuilds;
+	return StreamingUpdateKind::HeadingRebuild;
+}
+
+StreamingUpdateKind ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+														 const RenderSettings &settings)
+{
+	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
+	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
+
+	if (!m_streamState.initialized ||
+		settings.maxRenderDistance != m_streamState.lastMaxRenderDistance ||
+		streamFrontBiasChanged(settings.streamFrontBias, m_streamState.lastStreamFrontBias))
+	{
+		return rebuildStreamingQueueFull(cameraChunkPos, camera, settings);
+	}
+
+	const glm::ivec3 chunkDelta = cameraChunkPos - m_streamState.lastCamChunk;
+	if (std::abs(chunkDelta.x) > 1 || std::abs(chunkDelta.z) > 1)
+		return rebuildStreamingQueueFull(cameraChunkPos, camera, settings); // teleport
+
+	// A heading change beyond the threshold reshapes the whole footprint, so
+	// it supersedes a simultaneous chunk-cross/anchor move (explicit priority:
+	// settings > teleport > heading > movement — issue #108 review).
+	if (frontBias > kStreamBiasEpsilon &&
+		glm::dot(camForwardXZ, m_streamState.lastCamForwardXZ) < kStreamHeadingCosThreshold)
+	{
+		return reconcileStreamingHeading(cameraChunkPos, camera, settings);
+	}
+
+	if (chunkDelta.x != 0 || chunkDelta.z != 0)
+		return reconcileStreamingIncremental(cameraChunkPos, camera, settings);
+
+	// Intra-chunk movement: the footprint is a function of the exact camera
+	// position, so reconcile at movement-anchor granularity instead of letting
+	// it go stale for up to a full 16-block chunk (issue #108 review).
+	const glm::ivec2 anchor = streamingMovementAnchor(camera.getPosition());
+	if (anchor != m_streamState.lastMovementAnchor)
+		return reconcileStreamingIncremental(cameraChunkPos, camera, settings);
+
+	++m_streamStats.zeroWork;
+	return StreamingUpdateKind::None; // exact zero-work steady state
 }
 
 void ChunkManager::ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx)
@@ -1054,7 +1210,7 @@ size_t ChunkManager::chunkCount() const
 size_t ChunkManager::pendingLoadCount() const
 {
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	return m_loadQueue.size();
+	return (m_loadQueue.size() >= m_loadQueueHead) ? (m_loadQueue.size() - m_loadQueueHead) : 0;
 }
 
 size_t ChunkManager::pendingGenJobs() const
