@@ -1550,6 +1550,50 @@ int main()
 
 			chunkPool.release(chunk);
 		}
+
+		// -----------------------------------------------------------------
+		// 16. Renderable-cache invariant across pending uploads (issue #122
+		// review): while meshNeedsUpdate is set (edit published, GPU commit
+		// pending), the cached descriptors describe ranges the commit will
+		// replace — opaque, shadow and water passes must not draw them.
+		// -----------------------------------------------------------------
+		{
+			Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f, 0.0f, 0.0f));
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "invariant: prepare+generate");
+			CHECK(chunk->generateMesh(), "invariant: mesh publishes");
+			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			CHECK(chunk->hasRenderableOpaqueDraws(), "invariant: uploaded chunk is renderable");
+
+			std::vector<Chunk::IndirectDraw> draws;
+			const size_t before = chunk->collectOpaqueDraws(draws);
+			CHECK(before > 0, "invariant: committed draws collectable");
+
+			// Edit the chunk: meshNeedsUpdate goes true while the remeshed
+			// result waits for its GPU commit.
+			CHECK(chunk->placeVoxel(glm::vec3(5.f, 140.f, 5.f), STONE),
+			      "invariant: edit accepted above surface");
+			CHECK(chunk->needsGPUUpload(), "invariant: edit raises needsGPUUpload");
+			CHECK(!chunk->hasRenderableOpaqueDraws(),
+			      "invariant: pending upload hides opaque cache");
+			CHECK(chunk->collectOpaqueDraws(draws) == 0,
+			      "invariant: no opaque draws collected while pending");
+			CHECK(!chunk->hasRenderableWaterDraws(),
+			      "invariant: pending upload hides water cache");
+			CHECK(chunk->collectWaterDraws(draws) == 0,
+			      "invariant: no water draws collected while pending");
+			// Raw counters stay cached (the data is stale, not gone).
+			CHECK(chunk->getCachedOpaqueDrawCount() == before,
+			      "invariant: stale cache retained behind the guard");
+
+			// Commit the remesh: renderability returns with fresh draws.
+			CHECK(chunk->generateMesh(), "invariant: remesh publishes");
+			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			CHECK(!chunk->needsGPUUpload(), "invariant: commit clears needsGPUUpload");
+			CHECK(chunk->hasRenderableOpaqueDraws(), "invariant: opaque renderable after commit");
+			CHECK(chunk->collectOpaqueDraws(draws) > 0, "invariant: opaque draws return after commit");
+
+			chunkPool.release(chunk);
+		}
 	}
 
 	arenas.shutdown();

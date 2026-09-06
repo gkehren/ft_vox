@@ -151,6 +151,39 @@ set_tests_properties(RenderHelpers PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
+# Indirect draw emit: page-pair bucket grouping (issue #122 review)
+# ---------------------------------------------------------------------------
+add_executable(test_indirect_draw_emit
+    test_indirect_draw_emit.cpp
+)
+
+target_include_directories(test_indirect_draw_emit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_indirect_draw_emit PRIVATE
+    VK_NO_PROTOTYPES
+    VK_USE_PLATFORM_WIN32_KHR
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_indirect_draw_emit PRIVATE
+    glm
+    FastNoise2
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
+)
+
+if(UNIX)
+    target_compile_definitions(test_indirect_draw_emit PRIVATE VK_USE_PLATFORM_XLIB_KHR)
+endif()
+
+add_test(NAME IndirectDrawEmit COMMAND test_indirect_draw_emit)
+
+# ---------------------------------------------------------------------------
 # Phase D stream CPU helpers (load priority, occupancy, cave Y bounds)
 # ---------------------------------------------------------------------------
 add_executable(test_stream_opt
