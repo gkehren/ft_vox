@@ -96,7 +96,7 @@ static void tick(Mob &m, const World &w, int n)
 }
 static void controller()
 {
-    for (int species = 0; species < 4; ++species)
+    for (size_t species = 0; species < kMobSpeciesCount; ++species)
     {
         World w;
         auto m = walker(MobSpecies(species));
@@ -258,7 +258,7 @@ static void finiteSteering()
     MobSystem s;
     s.reset(7);
     for (size_t i = 0; i < MobSettings::capacity; ++i)
-        CHECK(s.add(MobSpecies(i % 4), {(i % 8) * 1.5, 0.001, (i / 8) * 1.5}, i + 1, i + 1, w));
+        CHECK(s.add(MobSpecies(i % kMobSpeciesCount), {(i % 8) * 1.5, 0.001, (i / 8) * 1.5}, i + 1, i + 1, w));
     for (int i = 0; i < 1000; ++i)
     {
         s.update(1.0 / 60, w, {5.0, 0, 4.0}, 112);
@@ -300,7 +300,7 @@ static void profile()
     MobSystem s;
     s.reset(42);
     for (int i = 0; i < 48; ++i)
-        CHECK(s.add(MobSpecies(i % 4), {(i % 8) * 4.0, 0.001, (i / 8) * 4.0}, i + 1, i + 1, w));
+        CHECK(s.add(MobSpecies(i % kMobSpeciesCount), {(i % 8) * 4.0, 0.001, (i / 8) * 4.0}, i + 1, i + 1, w));
     for (int i = 0; i < 600; ++i)
         s.update(1.0 / 60, w, {16, 0, 12}, 112);
     std::vector<MobRenderState> states;

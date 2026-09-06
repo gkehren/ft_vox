@@ -52,7 +52,7 @@ void MobSystem::reset(uint64_t seed)
 bool MobSystem::add(MobSpecies species, glm::dvec3 feet, uint64_t id, uint64_t origin,
                     const physics::VoxelCollisionWorld &world)
 {
-    if (m_mobs.size() >= MobSettings::capacity || size_t(species) >= speciesSettings.size())
+    if (m_mobs.size() >= MobSettings::capacity || size_t(species) >= kMobSpeciesCount)
         return false;
     for (auto &m : m_mobs)
         if (m.id == id)
@@ -119,7 +119,8 @@ void MobSystem::populate(const MobWorld &world, glm::dvec3 observer, double radi
             continue;
         if (++attempts > 4)
             break;
-        MobSpecies species = MobSpecies(int(random(rng) * 4));
+        const auto speciesIndex = size_t(random(rng) * double(kMobSpeciesCount));
+        MobSpecies species = MobSpecies(std::min(speciesIndex, kMobSpeciesCount - 1));
         const int members = 2 + int(random(rng) * 3);
         bool spawned = false;
         for (int j = 0; j < members; ++j)

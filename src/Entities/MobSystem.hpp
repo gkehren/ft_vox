@@ -15,13 +15,15 @@ enum class MobSpecies : uint8_t
     Chicken,
     Count
 };
+inline constexpr size_t kMobSpeciesCount = size_t(MobSpecies::Count);
 struct SpeciesSettings
 {
     glm::dvec3 size;
     double speed;
 };
-inline const std::array<SpeciesSettings, 4> speciesSettings{
+inline const std::array<SpeciesSettings, kMobSpeciesCount> speciesSettings{
     {{{0.9, 1.4, 0.9}, 1.1}, {{0.9, 0.9, 0.9}, 1.0}, {{0.9, 1.3, 0.9}, 1.0}, {{0.4, 0.7, 0.4}, 0.8}}};
+static_assert(speciesSettings.size() == kMobSpeciesCount);
 struct MobSettings
 {
     static constexpr size_t capacity = 48;

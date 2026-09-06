@@ -35,7 +35,7 @@ struct MobModel
 struct MobModels
 {
     std::vector<MobVertex> vertices;
-    std::array<MobModel, 4> models;
+    std::array<MobModel, kMobSpeciesCount> models;
     MobModels();
 };
 glm::mat4 mobPartTransform(const MobRenderState &state, const MobPart &part);

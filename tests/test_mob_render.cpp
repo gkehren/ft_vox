@@ -272,8 +272,8 @@ int main(int argc, char **argv)
     {
         Fixture f(window);
         std::vector<entities::MobRenderState> states;
-        for (int i = 0; i < 4; ++i)
-            states.push_back({entities::MobSpecies(i), {(i - 1.5f) * 2.0f, 0, 0}, 0, 0, 0, 0, 0});
+        for (size_t i = 0; i < entities::kMobSpeciesCount; ++i)
+            states.push_back({entities::MobSpecies(i), {(float(i) - 1.5f) * 2.0f, 0, 0}, 0, 0, 0, 0, 0});
         auto u = frame(2);
         auto image = f.render(states, u, 0);
         f.save(output / "four-species.ppm", image);
@@ -329,7 +329,8 @@ int main(int argc, char **argv)
         states.clear();
         for (int i = 0; i < 48; ++i)
             states.push_back(
-                {entities::MobSpecies(i % 4), {(i % 8 - 3.5f) * 2.2f, 0, (i / 8) * 2.2f}, 0, 1, 0, 0, 1});
+                {entities::MobSpecies(i % int(entities::kMobSpeciesCount)),
+                 {(i % 8 - 3.5f) * 2.2f, 0, (i / 8) * 2.2f}, 0, 1, 0, 0, 1});
         std::vector<double> gpuTimes, cpuTimes;
         size_t serial = 0;
         for (int i = 0; i < 160; ++i)
