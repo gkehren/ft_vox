@@ -55,6 +55,16 @@ public:
 
 	bool hasDynamicRendering() const { return m_dynamicRendering; }
 	bool hasTimelineSemaphores() const { return m_timelineSemaphores; }
+	/// Whether vkCmdDrawIndexedIndirect may batch drawCount > 1. When false,
+	/// indirect passes must issue one draw per command (drawCount = 1).
+	bool hasMultiDrawIndirect() const { return m_multiDrawIndirect; }
+	/// Spec ceiling for one vkCmdDrawIndexedIndirect's drawCount
+	/// (VUID-vkCmdDrawIndexedIndirect-drawCount-02719). Batches must be split
+	/// against this even when multiDrawIndirect is enabled.
+	uint32_t maxDrawIndirectCount() const
+	{
+		return m_deviceProperties.limits.maxDrawIndirectCount;
+	}
 	bool hasPortabilitySubset() const { return m_portabilitySubset; }
 	bool isValidationEnabled() const { return m_validationEnabled; }
 	/// Includes initialization and shutdown; reset only by the next init().
@@ -95,6 +105,7 @@ private:
 	std::atomic<uint64_t> m_validationErrors{0};
 	bool m_dynamicRendering{false};
 	bool m_timelineSemaphores{false};
+	bool m_multiDrawIndirect{false};
 	bool m_portabilitySubset{false};
 
 	std::unique_ptr<VkAllocator> m_allocator;

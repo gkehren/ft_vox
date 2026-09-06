@@ -83,10 +83,10 @@ public:
 	/// Record mesh uploads into cmd (staging ring). No device idle. Distance-prioritized.
 	/// Returns number of chunks uploaded this call.
 	int uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-							GpuResourceRetire &retire, const Camera &camera, int budget);
+							GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget);
 
-	/// After frames-in-flight delay, retire GPU buffers and return chunks to the pool.
-	void processDeferredReleases(GpuResourceRetire &retire);
+	/// After frames-in-flight delay, retire arena ranges and return chunks to the pool.
+	void processDeferredReleases();
 
 	/// Join finished worker jobs and clear in-transit flags.
 	void processFinishedJobs();
@@ -114,10 +114,12 @@ public:
 	size_t pendingGenJobs() const;
 	size_t pendingMeshJobs() const;
 	ChunkPool *getChunkPool() const { return m_chunkPool; }
+	/// Test/inspection access to the active chunk set (unordered).
+	const std::vector<Chunk *> &getActiveChunks() const { return m_activeChunks; }
 
 	/// Synchronous bootstrap near spawn so the first frame has terrain.
 	void generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
-							 ImmediateCommands &imm);
+							 ImmediateCommands &imm, MeshArenas &arenas);
 
 	/// Shared synchronous generation contract (issue #112): prepares voxel
 	/// storage on the calling thread immediately before generateTerrain().

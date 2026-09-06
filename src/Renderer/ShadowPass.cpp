@@ -1,4 +1,8 @@
 #include "Renderer/ShadowPass.hpp"
+#include "Renderer/IndirectDrawEmit.hpp"
+#include "Vulkan/MeshArena.hpp"
+#include <algorithm>
+#include <iostream>
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
 #include "Vulkan/VkShader.hpp"
@@ -19,12 +23,44 @@ void ShadowPass::init(VkContext &context)
 {
 	m_context = &context;
 	createResources();
+	createIndirectBuffers();
+}
+
+void ShadowPass::createIndirectBuffers()
+{
+	for (auto &frameSlots : m_indirect)
+		for (auto &b : frameSlots)
+		{
+			b.buf = createBuffer(m_context->getAllocator(),
+								 static_cast<VkDeviceSize>(kMaxIndirectCommands) *
+									 sizeof(VkDrawIndexedIndirectCommand),
+								 VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO,
+								 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+									 VMA_ALLOCATION_CREATE_MAPPED_BIT);
+			b.mapped = b.buf.info.pMappedData;
+			if (!b.mapped)
+				b.mapped = mapBuffer(m_context->getAllocator(), b.buf);
+		}
+}
+
+void ShadowPass::destroyIndirectBuffers()
+{
+	if (!m_context)
+		return;
+	for (auto &frameSlots : m_indirect)
+		for (auto &b : frameSlots)
+		{
+			if (b.buf.buffer != VK_NULL_HANDLE)
+				destroyBuffer(m_context->getAllocator(), b.buf);
+			b = {};
+		}
 }
 
 void ShadowPass::shutdown()
 {
 	destroyPipeline();
 	destroyResources();
+	destroyIndirectBuffers();
 	m_context = nullptr;
 }
 
@@ -114,8 +150,9 @@ void ShadowPass::destroyPipeline()
 	m_pipeline = VK_NULL_HANDLE;
 }
 
-void ShadowPass::record(VkCommandBuffer cmd, const std::vector<Chunk *> &shadowChunks,
-						const std::array<glm::mat4, kCascadeCount> &cascades, float time)
+void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vector<Chunk *> &shadowChunks,
+						const std::array<glm::mat4, kCascadeCount> &cascades, float time,
+						const MeshArenas &arenas)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
@@ -134,6 +171,7 @@ void ShadowPass::record(VkCommandBuffer cmd, const std::vector<Chunk *> &shadowC
 	};
 	static_assert(sizeof(ShadowPC) == 80, "ShadowPC must match shadow.vert");
 
+	m_lastCommands = 0;
 	for (int c = 0; c < kCascadeCount; ++c)
 	{
 		VkRenderingAttachmentInfo depthAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -187,6 +225,11 @@ void ShadowPass::record(VkCommandBuffer cmd, const std::vector<Chunk *> &shadowC
 			planeOffsets[i] = p.w + glm::dot(planeNormals[i], optOffset);
 		}
 
+		// Same cascade culling as before, but the visible chunks now
+		// contribute indirect commands into the shared arenas (issue #109):
+		// the cascade binds the arena pages once per page pair instead of
+		// rebinding per-chunk buffers.
+		m_scratch.clear();
 		for (Chunk *chunk : shadowChunks)
 		{
 			if (!chunk || chunk->getOpaqueIndexCount() == 0)
@@ -203,7 +246,80 @@ void ShadowPass::record(VkCommandBuffer cmd, const std::vector<Chunk *> &shadowC
 				}
 			}
 			if (visible)
-				chunk->drawShadow(cmd, static_cast<unsigned>(c));
+				chunk->collectOpaqueDraws(m_scratch);
+		}
+		m_lastCommands += static_cast<uint32_t>(m_scratch.size());
+		if (!m_scratch.empty())
+		{
+			assert(m_scratch.size() <= kMaxIndirectCommands && "ShadowPass: indirect command capacity exceeded");
+			if (m_scratch.size() > kMaxIndirectCommands)
+			{
+				// Not silent: at larger view distances or denser worlds this
+				// would silently drop geometry (issue #109 review phase 24).
+				static bool warned = false;
+				if (!warned)
+				{
+						warned = true;
+						std::cerr << "[indirect] command overflow: " << m_scratch.size()
+						          << " commands > capacity " << kMaxIndirectCommands
+						          << " - truncating" << std::endl;
+				}
+			}
+			const size_t count =
+				std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+			// Computed once per cascade: batches obey multiDrawIndirect and
+			// maxDrawIndirectCount (see IndirectDrawUtils.hpp).
+			const uint32_t batchLimit = indirectBatchLimit(
+				m_context->hasMultiDrawIndirect(), m_context->maxDrawIndirectCount());
+			const uint64_t firstKey =
+				(uint64_t(m_scratch[0].vertexPage) << 32) | m_scratch[0].indexPage;
+			bool single = true;
+			for (const Chunk::IndirectDraw &d : m_scratch)
+				if (((uint64_t(d.vertexPage) << 32) | d.indexPage) != firstKey)
+				{
+					single = false;
+					break;
+				}
+			if (!single)
+				std::sort(m_scratch.begin(), m_scratch.end(),
+				          [](const Chunk::IndirectDraw &a, const Chunk::IndirectDraw &b)
+				          {
+					          const uint64_t ka = (uint64_t(a.vertexPage) << 32) | a.indexPage;
+					          const uint64_t kb = (uint64_t(b.vertexPage) << 32) | b.indexPage;
+					          return ka < kb;
+				          });
+			auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(
+				m_indirect[frameIndex][static_cast<size_t>(c)].mapped);
+			for (size_t i = 0; i < count; ++i)
+				dst[i] = m_scratch[i].cmd;
+			vmaFlushAllocation(m_context->getAllocator(),
+							   m_indirect[frameIndex][static_cast<size_t>(c)].buf.allocation, 0,
+							   count * sizeof(VkDrawIndexedIndirectCommand));
+
+			size_t i = 0;
+			uint32_t first = 0;
+			while (i < count)
+			{
+				const uint64_t key = (uint64_t(m_scratch[i].vertexPage) << 32) | m_scratch[i].indexPage;
+				size_t j = i;
+				while (j < count &&
+					   (uint64_t(m_scratch[j].vertexPage) << 32 | m_scratch[j].indexPage) == key)
+					++j;
+				VkBuffer vb = arenas.opaqueVertex.pageBuffer(static_cast<uint32_t>(key >> 32));
+				VkBuffer ib = arenas.opaqueIndex.pageBuffer(static_cast<uint32_t>(key & 0xffffffffu));
+				VkDeviceSize voff = 0;
+				vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
+				vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+				// One call per batch: drawCount stays under the hardware
+				// ceiling and degrades to per-command draws without
+				// multiDrawIndirect.
+				issueIndirectRange(cmd, m_indirect[frameIndex][static_cast<size_t>(c)].buf.buffer,
+								   first, j - i, batchLimit);
+				telemetry::registry().add(telemetry::ArenaBinds);
+				first += static_cast<uint32_t>(j - i);
+				i = j;
+			}
+			telemetry::registry().add(static_cast<telemetry::Event>(telemetry::Shadow0 + c), count);
 		}
 		endRendering(cmd);
 	}

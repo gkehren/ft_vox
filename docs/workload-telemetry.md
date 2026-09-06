@@ -31,7 +31,7 @@ and peak values. Events expose interval totals and averages per measured frame.
 | `gpu.{opaque,water}.{vertex,index}.bytes` | Requested buffer bytes from successful mesh VMA allocations until retirement or immediate destruction |
 | `gpu.live.bytes` | Sum of those four live gauges, with its own simultaneous peak |
 | `gpu.retired.*` | Mesh buffer bytes and count in the deferred GPU destruction queue |
-| `mesh.allocations.*` | Successful mesh buffer creations and actual destructions; includes allocations rolled back after a staging failure |
+| `mesh.allocations.*` | Before #109: mesh GPU buffer creations and destructions; after #109: mesh arena backing-page creations and actual destructions; includes allocations rolled back after a staging failure |
 | `upload.*` | Successful asynchronous chunk uploads and copied vertex/index bytes; deferred counts are failed chunk attempts, not unique chunks |
 | `staging.slice.bytes` | Aligned cursor usage in the current frame slice; peak includes space consumed by subsequently aborted upload attempts |
 | `staging.failures` | Allocations rejected for lack of room in that slice |

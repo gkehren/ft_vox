@@ -34,17 +34,20 @@ void Benchmark::requestStart()
 	m_gpuPasses = {};
 	m_backgroundWork = {};
 	m_frameMs.clear();
+	m_recordMs.clear();
 	m_sumStreaming = m_sumAcquire = m_sumRecord = m_sumImGui = m_sumPresent = 0;
 	m_sumVisibility = m_sumMeshUpload = 0;
 	m_terrainJobs = m_meshJobs = m_lodJobs = 0;
 	m_terrainMs = m_meshMs = m_lodMs = 0;
 	m_peakChunks = m_peakDraw = m_peakLoad = m_peakGen = m_peakMesh = 0;
+	m_peakIndirectCommands = 0;
 	m_over16 = m_over33 = 0;
 	const float dur = std::clamp(m_config.durationSec, 5.f, 300.f);
 	m_config.durationSec = dur;
 	m_config.warmupSec = std::clamp(m_config.warmupSec, 0.f, dur);
 	const size_t est = static_cast<size_t>(std::ceil((dur + 5.f) * 120.f));
 	m_frameMs.reserve(est);
+	m_recordMs.reserve(est);
 }
 
 void Benchmark::cancel()
@@ -71,7 +74,9 @@ void Benchmark::onWorldReady(const glm::vec3 &surfaceCenter)
 
 void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
 									const char *presentMode,
-									const char *device)
+									const char *device,
+									bool multiDrawIndirect,
+									uint32_t maxDrawIndirectCount)
 {
 	m_viewDistance = viewDist;
 	m_windowW = w;
@@ -79,6 +84,8 @@ void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
 	m_vsync = vsync;
 	m_presentMode = presentMode ? presentMode : "";
 	m_deviceName = device ? device : "";
+	m_multiDrawIndirect = multiDrawIndirect;
+	m_maxDrawIndirectCount = maxDrawIndirectCount;
 }
 
 void Benchmark::applyCamera(Camera &camera, float t01) const
@@ -136,6 +143,7 @@ void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcqu
 		return;
 
 	m_frameMs.push_back(frameMs);
+	m_recordMs.push_back(scopeRecord);
 	m_sumStreaming += scopeStreaming;
 	m_sumAcquire += scopeAcquire;
 	m_sumRecord += scopeRecord;
@@ -324,6 +332,14 @@ void Benchmark::finalize()
 	r.avgPresent = static_cast<float>(m_sumPresent) * invN;
 	r.avgVisibility = static_cast<float>(m_sumVisibility) * invN;
 	r.avgMeshUpload = static_cast<float>(m_sumMeshUpload) * invN;
+	if (!m_recordMs.empty())
+	{
+		std::vector<float> sortedRecord = m_recordMs;
+		std::sort(sortedRecord.begin(), sortedRecord.end());
+		r.p50RecordMs = percentileSorted(sortedRecord, 0.50f);
+		r.p95RecordMs = percentileSorted(sortedRecord, 0.95f);
+		r.p99RecordMs = percentileSorted(sortedRecord, 0.99f);
+	}
 
 	r.backgroundWork = m_backgroundWork;
 	r.biomeMapZoom = m_config.biomeMapZoom;
@@ -340,6 +356,7 @@ void Benchmark::finalize()
 
 	r.peakChunks = m_peakChunks;
 	r.peakDraw = m_peakDraw;
+	r.peakIndirectCommands = m_peakIndirectCommands;
 	r.peakPendingLoad = m_peakLoad;
 	r.peakPendingGen = m_peakGen;
 	r.peakPendingMesh = m_peakMesh;
@@ -350,6 +367,8 @@ void Benchmark::finalize()
 	r.windowW = m_windowW;
 	r.windowH = m_windowH;
 	r.vsync = m_vsync;
+	r.multiDrawIndirect = m_multiDrawIndirect;
+	r.maxDrawIndirectCount = m_maxDrawIndirectCount;
 	r.presentMode = m_presentMode;
 	r.deviceName = m_deviceName;
 
@@ -387,7 +406,9 @@ std::string Benchmark::formatReportText() const
 	o << "Device: " << r.deviceName << "\n";
 	o << "Viewport: " << r.windowW << "x" << r.windowH << "  ViewDist: " << r.viewDistance
 	  << "  VSync: " << (r.vsync ? "on" : "off")
-	  << "  PresentMode: " << r.presentMode << "\n\n";
+	  << "  PresentMode: " << r.presentMode << "\n";
+	o << "Indirect: multiDrawIndirect=" << (r.multiDrawIndirect ? "yes" : "no")
+	  << "  maxDrawIndirectCount=" << r.maxDrawIndirectCount << "\n\n";
 	o << "Frame times (ms)\n";
 	o << "  avg " << r.avgMs << "  min " << r.minMs << "  max " << r.maxMs << "\n";
 	o << "  p50 " << r.p50Ms << "  p95 " << r.p95Ms << "  p99 " << r.p99Ms << "\n";
@@ -397,6 +418,8 @@ std::string Benchmark::formatReportText() const
 	o << "  Streaming " << r.avgStreaming << "  Visibility " << r.avgVisibility << "\n";
 	o << "  Acquire " << r.avgAcquire << "  Record " << r.avgRecord << "  MeshUpload "
 	  << r.avgMeshUpload << "\n";
+	o << "  Record p50 " << r.p50RecordMs << "  p95 " << r.p95RecordMs << "  p99 "
+	  << r.p99RecordMs << "\n";
 	o << "  ImGui " << r.avgImGui << "  Present " << r.avgPresent << "\n\n";
 	o << "Worker jobs\n";
 	o << "  TerrainGen  n=" << r.terrainGenJobs << "  avgMs=" << r.terrainGenAvgMs
@@ -430,6 +453,7 @@ std::string Benchmark::formatReportText() const
 		  << " totalMs=" << work.totalMs << "\n";
 	}
 	o << "Peaks: chunks=" << r.peakChunks << " draw=" << r.peakDraw
+	  << " indirect.commands.peak=" << r.peakIndirectCommands
 	  << " qLoad/Gen/Mesh=" << r.peakPendingLoad << "/" << r.peakPendingGen << "/"
 	  << r.peakPendingMesh << "\n\n";
     o << "Memory / workload: " << (r.workload.enabled ? "enabled" : "disabled") << "\n";

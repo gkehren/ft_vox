@@ -166,8 +166,8 @@ File: `src/Chunk/Chunk.hpp` / `Chunk.cpp`.
 | `generateTerrain` | Fill voxels via `TerrainGenerator` |
 | `generateMesh` / `generateLODMesh` | Greedy meshing; far chunks may use LOD mesh |
 | `uploadToGPU` | Sync upload (bootstrap/tests) |
-| `uploadToGPUAsync` | Staging ring + retire old buffers (hot path) |
-| `draw` / `drawWater` / `drawShadow` | Bind + draw indexed |
+| `uploadToGPUAsync` | Staging ring + fresh arena ranges, frame-aware retire of replaced ranges (hot path) |
+| `collectOpaqueDraws` / `collectWaterDraws` | Emit one `VkDrawIndexedIndirectCommand` per live section (grouped by arena page pair) |
 | `deleteVoxel` / `placeVoxel` | Edit + remesh flags |
 | `rebuildShellFromNeighbors` | Face correctness across chunk edges |
 
@@ -210,15 +210,14 @@ a boundary is split — a small, measured quad increase).
   field a whole build would produce — no seams at 16-block boundaries
   (regional lighting is future work; deep horizontal flood beyond the
   conservative range is its known frontier).
-- **GPU layout**: each stream (opaque/water) is ONE vertex/index buffer pair
-  per chunk with back-to-back per-section slots (offset + reservation,
-  indices stored rebased onto the section's vertex base). A remesh re-stages
-  only the dirty sections' slots; an outgrown slot is appended at the end of
-  the used region (never moving existing slots), and buffer capacity grows
-  by re-creating the buffer and copying it to offset 0. The index stream
-  keeps the invariant "every byte in `[0, used)` is a live index or zero"
-  (slot slack and abandoned slots are zeroed — degenerate triangles), which
-  keeps the renderer at ONE bind + one `drawIndexed` per chunk.
+- **GPU layout**: chunk geometry lives in four shared device-local arenas
+  (opaque/water x vertex/index) owned by the WorldRenderer; each section
+  holds an aligned range pair (`Chunk::SectionGpuSlot`). Published ranges
+  are immutable: a remesh allocates fresh ranges for the dirty sections,
+  atomically swaps in the replacement slot table, then retires the replaced
+  ranges frame-aware. Draw submission is indirect: one command per live
+  section (section-local indices rebased by the command's `vertexOffset`),
+  grouped by arena page pair.
 - **Builds**: `buildMesh(result, gen, rev, sectionMask)` builds exactly the
   masked sections in one worker job (batched — no tiny-task overhead for
   initial generation, which masks all 16 sections); an empty section skips

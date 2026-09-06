@@ -127,7 +127,7 @@ Engine::Engine(std::string resourcePackRoot)
 	frameCtx->init(*vkContext);
 
 	worldRenderer = std::make_unique<WorldRenderer>();
-	worldRenderer->init(*vkContext, *swapchain, *immediate, m_resourcePackRoot);
+	worldRenderer->init(*vkContext, *swapchain, *immediate, resourceRetire, m_resourcePackRoot);
 
 	imgui = std::make_unique<ImGuiLayer>();
 	imgui->init(window, *vkContext, *swapchain, *immediate);
@@ -172,10 +172,9 @@ Engine::~Engine()
 	if (vkContext)
 		vkContext->waitIdle();
 
-	resourceRetire.flush();
-	resourceRetire.shutdown();
-	stagingRing.shutdown();
-
+	// Reset order matters (issue #109): chunk/world teardown returns arena
+	// ranges, which can retire whole arena pages into the retire queue.
+	// The queue must outlive them and be flushed last.
 	gameUi.reset();
 	chunkManager.reset();
 	chunkPool.reset();
@@ -184,6 +183,10 @@ Engine::~Engine()
 
 	imgui.reset();
 	worldRenderer.reset();
+
+	resourceRetire.flush();
+	resourceRetire.shutdown();
+	stagingRing.shutdown();
 	frameCtx.reset();
 	immediate.reset();
 	swapchain.reset();
@@ -222,7 +225,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 												  chunkPool.get());
 
 	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
-									  vkContext->getAllocator(), *immediate);
+									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 	placeCameraOnSurface();
 
 	demoPlayers = {
@@ -426,7 +429,7 @@ void Engine::reloadWorld(int newSeed)
 	camera.setMovementSpeed(20.f);
 
 	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
-									  vkContext->getAllocator(), *immediate);
+									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 	placeCameraOnSurface();
 
 	demoPlayers = {
@@ -550,7 +553,7 @@ void Engine::tickStreaming(double dt)
 	}
 	{
 		PROFILE_SCOPE("DeferredRelease");
-		chunkManager->processDeferredReleases(resourceRetire);
+		chunkManager->processDeferredReleases();
 	}
 	{
 		PROFILE_SCOPE("UpdateStreaming");
@@ -890,7 +893,9 @@ void Engine::tickBenchmark(double dt)
 			swapchain
 				? VkSwapchain::presentModeName(swapchain->getPresentMode())
 				: nullptr,
-			vkContext ? vkContext->getDeviceProperties().deviceName : nullptr);
+			vkContext ? vkContext->getDeviceProperties().deviceName : nullptr,
+			vkContext ? vkContext->hasMultiDrawIndirect() : false,
+			vkContext ? vkContext->maxDrawIndirectCount() : 0);
 
 		reloadWorld(cfg.seed);
 		m_benchmark.onWorldReady(camera.getPosition());
@@ -1008,6 +1013,7 @@ void Engine::sampleBenchmarkFrame()
 		chunkManager ? chunkManager->pendingLoadCount() : 0,
 		chunkManager ? chunkManager->pendingGenJobs() : 0,
 		chunkManager ? chunkManager->pendingMeshJobs() : 0, tJobs, tMs, mJobs, mMs, lJobs, lMs);
+	m_benchmark.sampleIndirectCommands(worldRenderer ? worldRenderer->lastIndirectCommandCount() : 0);
 }
 
 void Engine::drawUi()
@@ -1183,6 +1189,7 @@ void Engine::run()
 		const uint32_t frameIndex = frameCtx->frameIndex();
 		// Frame slot is free (fence waited): recycle retired GPU buffers + reset staging slice.
 		resourceRetire.beginFrame(frameNumber);
+		worldRenderer->arenas().beginFrame(frameNumber);
 		stagingRing.beginFrame(frameIndex);
 
 		if (imgui)
@@ -1221,7 +1228,8 @@ void Engine::run()
 					{
 						PROFILE_SCOPE("MeshUpload");
 						const int n = chunkManager->uploadPendingMeshes(
-							vkContext->getAllocator(), stagingRing, cmd, resourceRetire, camera, uploadBudget);
+							vkContext->getAllocator(), stagingRing, cmd, resourceRetire,
+							worldRenderer->arenas(), camera, uploadBudget);
 						if (n > 0)
 						{
 							// Make staged mesh data visible to vertex/index fetch in later passes.

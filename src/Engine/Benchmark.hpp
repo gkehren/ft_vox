@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <array>
@@ -69,6 +70,9 @@ struct BenchmarkReport
 	float avgStreaming{0.f};
 	float avgAcquire{0.f};
 	float avgRecord{0.f};
+	float p50RecordMs{0.f};
+	float p95RecordMs{0.f};
+	float p99RecordMs{0.f};
 	float avgImGui{0.f};
 	float avgPresent{0.f};
 	float avgVisibility{0.f};
@@ -86,6 +90,7 @@ struct BenchmarkReport
 
 	size_t peakChunks{0};
 	size_t peakDraw{0};
+	size_t peakIndirectCommands{0};
 	size_t peakPendingLoad{0};
 	size_t peakPendingGen{0};
 	size_t peakPendingMesh{0};
@@ -97,6 +102,8 @@ struct BenchmarkReport
 	int windowW{0};
 	int windowH{0};
 	bool vsync{false};
+	bool multiDrawIndirect{false};
+	uint32_t maxDrawIndirectCount{0};
 	std::string presentMode;
 	std::string deviceName;
 
@@ -153,6 +160,12 @@ public:
 
 	/// Queue waits and completed map latency from the frame's profiler snapshot.
 	void sampleBackgroundWork(const char *name, uint64_t count, double totalMs);
+	/// Per-frame indirect command demand (all passes); tracks the peak.
+	void sampleIndirectCommands(size_t commands)
+	{
+		if (m_phase == BenchmarkPhase::Running)
+			m_peakIndirectCommands = std::max(m_peakIndirectCommands, commands);
+	}
 	/// Zero outside measurement; tags exclude delayed warmup/previous-run results.
 	uint64_t gpuCaptureTag() const { return m_phase == BenchmarkPhase::Running ? m_gpuTag : 0; }
 	void sampleGpu(const GpuFrameSample &sample);
@@ -213,6 +226,7 @@ private:
 	std::vector<float> m_gpuFrames;
 	std::array<BenchmarkWorkTiming, kGpuPassCount> m_gpuPasses{};
 	std::vector<float> m_frameMs;
+	std::vector<float> m_recordMs;
 	double m_sumStreaming{0}, m_sumAcquire{0}, m_sumRecord{0}, m_sumImGui{0}, m_sumPresent{0};
 	double m_sumVisibility{0}, m_sumMeshUpload{0};
 
@@ -224,18 +238,23 @@ private:
 	double m_lodMs{0};
 
 	size_t m_peakChunks{0}, m_peakDraw{0}, m_peakLoad{0}, m_peakGen{0}, m_peakMesh{0};
+	size_t m_peakIndirectCommands{0};
 	int m_over16{0}, m_over33{0};
 
 	// Settings snapshotted at start of measurement
 	int m_viewDistance{0};
 	int m_windowW{0}, m_windowH{0};
 	bool m_vsync{false};
+	bool m_multiDrawIndirect{false};
+	uint32_t m_maxDrawIndirectCount{0};
 	std::string m_presentMode;
 	std::string m_deviceName;
 
 public:
 	void setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
-							 const char *presentMode, const char *device);
+							 const char *presentMode, const char *device,
+							 bool multiDrawIndirect = false,
+							 uint32_t maxDrawIndirectCount = 0);
 	void markForceVsync(bool prevVsync)
 	{
 		m_hadForceVsync = true;
