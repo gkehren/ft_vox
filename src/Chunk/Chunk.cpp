@@ -993,8 +993,15 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
   auto getVoxelDataForMeshing = [&](int lx, int ly, int lz) -> TextureType
   {
     const auto type = sampleForMeshing(lx, ly, lz);
-    // Details own explicit quads and must neither emit nor hide cube faces.
-    return blockIsSmallDetail(type) ? AIR : type;
+    // Details own explicit quads and must neither emit nor hide cube faces,
+    // but water-containing details preserve fluid continuity and occlusion.
+    if (blockIsSmallDetail(type))
+    {
+      if (blockContainedMedium(type) == BlockMedium::Water)
+        return WATER;
+      return AIR;
+    }
+    return type;
   };
 
   const int dims[] = {CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE};
@@ -1154,6 +1161,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
           bool hasFace = false;
           bool negSide = false;
           if (type1ChunkSide && type1 != AIR &&
+              !(type1 == WATER && blockIsWater(type2)) &&
               (type2 == AIR ||
                (TextureManager::isTransparent(type2) && type1 != type2)))
           {
@@ -1161,6 +1169,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             hasFace = true;
           }
           else if (type2ChunkSide && type2 != AIR &&
+                   !(type2 == WATER && blockIsWater(type1)) &&
                    (type1 == AIR || (TextureManager::isTransparent(type1) &&
                                      type1 != type2)))
           {
@@ -1218,6 +1227,19 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
               ownerAtX ? static_cast<uint32_t>(keyLo >> 16)
                        : static_cast<uint32_t>(faceKeyHi[cell]);
 
+          auto isMergeableFace = [&](uint8_t ownerType, uint8_t backingType) -> bool
+          {
+            if (ownerType != originType)
+              return false;
+            if (ownerType == static_cast<uint8_t>(WATER) &&
+                blockIsWater(static_cast<TextureType>(backingType)))
+              return false;
+            if (backingType == airType)
+              return true;
+            return TextureManager::isTransparent(static_cast<TextureType>(backingType)) &&
+                   ownerType != backingType;
+          };
+
           // Calculate width (w) of the quad along dimension u
           int w;
           for (w = 1; x[u] + w < uEnd; ++w)
@@ -1230,10 +1252,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             {
               const uint8_t ownerType = static_cast<uint8_t>(key & 0xFF);
               const uint8_t backingType = static_cast<uint8_t>((key >> 8) & 0xFF);
-              if (ownerType != originType ||
-                  !(backingType == airType ||
-                    (TextureManager::isTransparent(static_cast<TextureType>(backingType)) &&
-                     ownerType != backingType)) ||
+              if (!isMergeableFace(ownerType, backingType) ||
                   static_cast<uint32_t>(key >> 16) != originColor)
                 break; // Adjacent cell is not the same mergeable face
             }
@@ -1241,10 +1260,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             {
               const uint8_t ownerType = static_cast<uint8_t>((key >> 8) & 0xFF);
               const uint8_t backingType = static_cast<uint8_t>(key & 0xFF);
-              if (ownerType != originType ||
-                  !(backingType == airType ||
-                    (TextureManager::isTransparent(static_cast<TextureType>(backingType)) &&
-                     ownerType != backingType)) ||
+              if (!isMergeableFace(ownerType, backingType) ||
                   static_cast<uint32_t>(faceKeyHi[probe]) != originColor)
                 break; // Adjacent cell is not the same mergeable face
             }
@@ -1270,10 +1286,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
               {
                 const uint8_t ownerType = static_cast<uint8_t>(key & 0xFF);
                 const uint8_t backingType = static_cast<uint8_t>((key >> 8) & 0xFF);
-                if (ownerType != originType ||
-                    !(backingType == airType ||
-                      (TextureManager::isTransparent(static_cast<TextureType>(backingType)) &&
-                       ownerType != backingType)) ||
+                if (!isMergeableFace(ownerType, backingType) ||
                     static_cast<uint32_t>(key >> 16) != originColor)
                 {
                   h_break = true;
@@ -1284,10 +1297,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
               {
                 const uint8_t ownerType = static_cast<uint8_t>((key >> 8) & 0xFF);
                 const uint8_t backingType = static_cast<uint8_t>(key & 0xFF);
-                if (ownerType != originType ||
-                    !(backingType == airType ||
-                      (TextureManager::isTransparent(static_cast<TextureType>(backingType)) &&
-                       ownerType != backingType)) ||
+                if (!isMergeableFace(ownerType, backingType) ||
                     static_cast<uint32_t>(faceKeyHi[probe]) != originColor)
                 {
                   h_break = true;
@@ -1665,8 +1675,18 @@ void Chunk::buildLODMeshRanged(MeshBuildResult &out, int scanTopY)
       for (int cy = scanTopY; cy >= 0; --cy)
       {
         TextureType t = static_cast<TextureType>(getVoxel(cx, cy, cz).type);
-        if (t != AIR && !blockIsSmallDetail(t))
+        if (t != AIR)
         {
+          if (blockIsSmallDetail(t))
+          {
+            if (blockContainedMedium(t) == BlockMedium::Water)
+            {
+              topY = cy;
+              topType = WATER;
+              break;
+            }
+            continue;
+          }
           topY = cy;
           topType = t;
           break;

@@ -1339,7 +1339,14 @@ static void testSmallPlantGeometry()
         const size_t quads = type == LILY_PAD ? 1u : 2u;
         CHECK(p.opaqueVertices.size() == quads * 4 && p.opaqueIndices.size() == quads * 12,
               "small plants emit only explicit double-sided planes");
-        CHECK(p.waterVertices.empty(), "alpha-cut plants use the opaque stream");
+        if (blockContainedMedium(type) == BlockMedium::None)
+        {
+            CHECK(p.waterVertices.empty(), "dry plants do not emit water stream");
+        }
+        else
+        {
+            CHECK(!p.waterVertices.empty(), "water-containing detail preserves water stream");
+        }
         for (const auto &v : p.opaqueVertices)
         {
             const auto local = v.decodePosition();
@@ -1360,10 +1367,149 @@ static void testSmallPlantGeometry()
         r = s.pool.acquire();
         s.chunk.buildLODMesh(*r, s.chunk.meshGeneration(), s.chunk.meshRevision());
         s.pool.finishBuild(r);
-        for (const auto &v : r->opaqueVertices)
-            CHECK(vTexture(v) == STONE && v.decodePosition().y == 16.f, "LOD omits the plant and preserves its support");
+        if (blockContainedMedium(type) == BlockMedium::None)
+        {
+            for (const auto &v : r->opaqueVertices)
+                CHECK(vTexture(v) == STONE && v.decodePosition().y == 16.f, "LOD omits the plant and preserves its support");
+        }
+        else
+        {
+            CHECK(r->opaqueVertices.empty(), "LOD omits detail geometry for underwater plant");
+            CHECK(!r->waterVertices.empty(), "LOD preserves water volume for underwater plant");
+            for (const auto &v : r->waterVertices)
+                CHECK(vTexture(v) == WATER && v.decodePosition().y == 17.f, "LOD water top quad sits at top of water cell");
+        }
         s.pool.release(r);
     }
+}
+
+static void testWaterWithEmbeddedDetails()
+{
+    // 1. Water continuity inside one chunk (issue #120 regression):
+    // Scene A: solid volume of WATER (4x4x3, from x=2..5, y=4..6, z=2..5) on a STONE base (y=3)
+    // Scene B: identical volume, but with (3, 5, 3) and (4, 6, 4) replaced by SEAGRASS.
+    // (3, 5, 3) is an interior submerged cell; (4, 6, 4) is on the water surface.
+    Scene sA, sB;
+    for (int x = 2; x <= 5; ++x)
+        for (int z = 2; z <= 5; ++z)
+        {
+            sA.chunk.setVoxel(x, 3, z, STONE);
+            sB.chunk.setVoxel(x, 3, z, STONE);
+            for (int y = 4; y <= 6; ++y)
+            {
+                sA.chunk.setVoxel(x, y, z, WATER);
+                sB.chunk.setVoxel(x, y, z, WATER);
+            }
+        }
+    sB.chunk.setVoxel(3, 5, 3, SEAGRASS); // interior underwater detail
+    sB.chunk.setVoxel(4, 6, 4, SEAGRASS); // surface underwater detail
+
+    auto *rA = sA.pool.acquire();
+    auto *rB = sB.pool.acquire();
+    sA.chunk.buildMesh(*rA, sA.chunk.meshGeneration(), sA.chunk.meshRevision());
+    sB.chunk.buildMesh(*rB, sB.chunk.meshGeneration(), sB.chunk.meshRevision());
+    sA.pool.finishBuild(rA);
+    sB.pool.finishBuild(rB);
+
+    // Fluid mesh representing the surrounding water volume must be equivalent at cell boundaries
+    CHECK(totalWaterVertices(*rA) == totalWaterVertices(*rB),
+          "water continuity: fluid vertices count identical between pure water and water+seagrass");
+    CHECK(totalWaterIndices(*rA) == totalWaterIndices(*rB),
+          "water continuity: fluid indices count identical between pure water and water+seagrass");
+
+    // Scene B additionally contains only the detail geometry (2 seagrass * 2 cross quads * 4 verts = 16 verts)
+    size_t opaqueA = 0, opaqueB = 0;
+    for (const auto &sec : rA->sections) opaqueA += sec.opaqueVertices.size();
+    for (const auto &sec : rB->sections) opaqueB += sec.opaqueVertices.size();
+    CHECK(opaqueB == opaqueA + 16, "scene with seagrass additionally contains only the detail geometry");
+
+    // 2. Section boundary continuity (y=15 / y=16 across section 0 and 1)
+    // Scene C: water column crossing section boundary (y=14..17)
+    // Scene D: same column with y=15 (top of section 0) replaced by SEAGRASS
+    // Scene E: same column with y=16 (bottom of section 1) replaced by SEAGRASS
+    Scene sC, sD, sE;
+    for (int y = 14; y <= 17; ++y)
+    {
+        sC.chunk.setVoxel(4, y, 4, WATER);
+        sD.chunk.setVoxel(4, y, 4, WATER);
+        sE.chunk.setVoxel(4, y, 4, WATER);
+    }
+    sD.chunk.setVoxel(4, 15, 4, SEAGRASS);
+    sE.chunk.setVoxel(4, 16, 4, SEAGRASS);
+
+    auto *rC = sC.pool.acquire();
+    auto *rD = sD.pool.acquire();
+    auto *rE = sE.pool.acquire();
+    sC.chunk.buildMesh(*rC, sC.chunk.meshGeneration(), sC.chunk.meshRevision());
+    sD.chunk.buildMesh(*rD, sD.chunk.meshGeneration(), sD.chunk.meshRevision());
+    sE.chunk.buildMesh(*rE, sE.chunk.meshGeneration(), sE.chunk.meshRevision());
+    sC.pool.finishBuild(rC);
+    sD.pool.finishBuild(rD);
+    sE.pool.finishBuild(rE);
+
+    // Fluid mesh at section boundaries must remain equivalent (no spurious internal water faces)
+    CHECK(totalWaterVertices(*rC) == totalWaterVertices(*rD), "section seam water vertices equal (y=15 detail)");
+    CHECK(totalWaterIndices(*rC) == totalWaterIndices(*rD), "section seam water indices equal (y=15 detail)");
+    CHECK(totalWaterVertices(*rC) == totalWaterVertices(*rE), "section seam water vertices equal (y=16 detail)");
+    CHECK(totalWaterIndices(*rC) == totalWaterIndices(*rE), "section seam water indices equal (y=16 detail)");
+
+    // 3. Chunk X/Z border continuity
+    // Water slab bordering chunk edge at x=15 and x=16 (border shell)
+    Scene sBorderRef, sBorderDetail;
+
+    for (int z = 4; z <= 7; ++z)
+    {
+        for (int y = 4; y <= 6; ++y)
+        {
+            sBorderRef.chunk.setVoxel(14, y, z, WATER);
+            sBorderRef.chunk.setVoxel(15, y, z, WATER);
+            sBorderDetail.chunk.setVoxel(14, y, z, WATER);
+            // Replace x=15 with SEAGRASS on border
+            sBorderDetail.chunk.setVoxel(15, y, z, (z == 5) ? SEAGRASS : WATER);
+
+            // East neighbor provides border shell at x=16
+            sBorderRef.chunk.setVoxel(16, y, z, WATER);
+            sBorderDetail.chunk.setVoxel(16, y, z, WATER);
+        }
+    }
+
+    auto *rBorderRef = sBorderRef.pool.acquire();
+    auto *rBorderDetail = sBorderDetail.pool.acquire();
+    sBorderRef.chunk.buildMesh(*rBorderRef, sBorderRef.chunk.meshGeneration(), sBorderRef.chunk.meshRevision());
+    sBorderDetail.chunk.buildMesh(*rBorderDetail, sBorderDetail.chunk.meshGeneration(), sBorderDetail.chunk.meshRevision());
+    sBorderRef.pool.finishBuild(rBorderRef);
+    sBorderDetail.pool.finishBuild(rBorderDetail);
+
+    CHECK(totalWaterVertices(*rBorderRef) == totalWaterVertices(*rBorderDetail),
+          "chunk border water vertices equal with border seagrass");
+    CHECK(totalWaterIndices(*rBorderRef) == totalWaterIndices(*rBorderDetail),
+          "chunk border water indices equal with border seagrass");
+
+    // 4. LOD behavior
+    // Omitting detail geometry must preserve the water volume
+    auto *rLodA = sA.pool.acquire();
+    auto *rLodB = sB.pool.acquire();
+    sA.chunk.buildLODMesh(*rLodA, sA.chunk.meshGeneration(), sA.chunk.meshRevision());
+    sB.chunk.buildLODMesh(*rLodB, sB.chunk.meshGeneration(), sB.chunk.meshRevision());
+    sA.pool.finishBuild(rLodA);
+    sB.pool.finishBuild(rLodB);
+
+    CHECK(rLodA->waterVertices.size() == rLodB->waterVertices.size(),
+          "LOD water vertices match between pure water and water+seagrass");
+    CHECK(rLodA->waterIndices.size() == rLodB->waterIndices.size(),
+          "LOD water indices match between pure water and water+seagrass");
+    CHECK(rLodB->opaqueVertices.empty(), "LOD omits small detail geometry");
+
+    // Clean up acquired results
+    sA.pool.release(rA);
+    sB.pool.release(rB);
+    sC.pool.release(rC);
+    sD.pool.release(rD);
+    sE.pool.release(rE);
+    sBorderRef.pool.release(rBorderRef);
+    sBorderDetail.pool.release(rBorderDetail);
+    sA.pool.release(rLodA);
+    sB.pool.release(rLodB);
 }
 
 int main(int argc, char **argv)
@@ -1376,6 +1522,7 @@ int main(int argc, char **argv)
 		return runEditBench(argc, argv);
 
     testSmallPlantGeometry();
+    testWaterWithEmbeddedDetails();
 	testUniformSlabMerges();
 	testBlockTypeBoundary();
 	testTransparencyPairs();

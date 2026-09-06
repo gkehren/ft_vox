@@ -325,6 +325,52 @@ static void profile()
 }
 static void detailCollisionPolicy()
 {
+    // 1. BlockMedium and blockContainedMedium trait queries
+    CHECK(blockContainedMedium(WATER) == BlockMedium::Water);
+    CHECK(blockContainedMedium(SEAGRASS) == BlockMedium::Water);
+    CHECK(blockContainedMedium(KELP) == BlockMedium::Water);
+    CHECK(blockContainedMedium(KELP_TOP) == BlockMedium::Water);
+    CHECK(blockContainedMedium(LAVA) == BlockMedium::Lava);
+    CHECK(blockContainedMedium(AIR) == BlockMedium::None);
+    CHECK(blockContainedMedium(STONE) == BlockMedium::None);
+    CHECK(blockContainedMedium(SHORT_GRASS) == BlockMedium::None);
+    CHECK(blockContainedMedium(LILY_PAD) == BlockMedium::None);
+
+    CHECK(blockIsWater(WATER));
+    CHECK(blockIsWater(SEAGRASS));
+    CHECK(blockIsWater(KELP));
+    CHECK(blockIsWater(KELP_TOP));
+    CHECK(!blockIsWater(LAVA));
+    CHECK(!blockIsWater(AIR));
+    CHECK(!blockIsWater(STONE));
+
+    CHECK(blockHasFluid(WATER));
+    CHECK(blockHasFluid(SEAGRASS));
+    CHECK(blockHasFluid(KELP));
+    CHECK(blockHasFluid(KELP_TOP));
+    CHECK(blockHasFluid(LAVA));
+    CHECK(!blockHasFluid(AIR));
+    CHECK(!blockHasFluid(STONE));
+
+    // 2. Voxel struct helpers
+    Voxel vSeagrass{static_cast<uint8_t>(SEAGRASS)};
+    CHECK(vSeagrass.containedMedium() == BlockMedium::Water);
+    CHECK(vSeagrass.isWater());
+    CHECK(vSeagrass.hasFluid());
+    CHECK(vSeagrass.getTextureType() == SEAGRASS);
+
+    Voxel vGrass{static_cast<uint8_t>(SHORT_GRASS)};
+    CHECK(vGrass.containedMedium() == BlockMedium::None);
+    CHECK(!vGrass.isWater());
+    CHECK(!vGrass.hasFluid());
+    CHECK(vGrass.getTextureType() == SHORT_GRASS);
+
+    Voxel vWater{static_cast<uint8_t>(WATER)};
+    CHECK(vWater.containedMedium() == BlockMedium::Water);
+    CHECK(vWater.isWater());
+    CHECK(vWater.hasFluid());
+
+    // 3. Physics medium and collision policy (independent of visual shape)
     for (auto type : {SHORT_GRASS, FERN, WILDFLOWER, DRY_SHRUB, LILY_PAD})
     {
         const auto cell = physics::blockCell(type);
@@ -333,6 +379,14 @@ static void detailCollisionPolicy()
     }
     CHECK(!physics::blockCell(SEAGRASS).solid);
     CHECK(physics::blockCell(SEAGRASS).medium == Medium::Water);
+    CHECK(!physics::blockCell(KELP).solid);
+    CHECK(physics::blockCell(KELP).medium == Medium::Water);
+    CHECK(!physics::blockCell(KELP_TOP).solid);
+    CHECK(physics::blockCell(KELP_TOP).medium == Medium::Water);
+    CHECK(!physics::blockCell(WATER).solid);
+    CHECK(physics::blockCell(WATER).medium == Medium::Water);
+    CHECK(!physics::blockCell(LAVA).solid);
+    CHECK(physics::blockCell(LAVA).medium == Medium::Lava);
     CHECK(physics::blockCell(OAK_LOG).solid);
     CHECK(physics::blockCell(OAK_LEAVES).solid);
 }
