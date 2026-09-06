@@ -28,6 +28,7 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
 #include <Physics/PlayerController.hpp>
+#include <Entities/MobSystem.hpp>
 #include <utils.hpp>
 
 /// Vulkan engine: streaming procedural world, post, overlays, ImGui.
@@ -71,6 +72,7 @@ public:
 		std::string message;	 ///< UI / console facing status
 		int packHits{0};
 		int packMisses{0};
+        int entityHits{0}, entityMisses{0};
 	};
 
 	/// Hot-reload block atlas from Minecraft pack root (empty = bundled textures).
@@ -105,6 +107,9 @@ private:
 	std::optional<bool> m_pendingVSync;
 	bool showChunkBorders{false};
 	bool showDemoPlayers{true};
+    bool mobsEnabled{true};
+    entities::MobSystem mobs;
+    std::vector<entities::MobRenderState> mobStates;
 	bool paused{false};
     bool m_inspectionView{false};
     float m_inspectionSeconds{0.f};

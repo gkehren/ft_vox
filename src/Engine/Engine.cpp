@@ -8,6 +8,7 @@
 #include <Chunk/ChunkBorders.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/ChunkCollisionView.hpp>
+#include <Chunk/ChunkMobWorld.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Engine/InputRouting.hpp>
@@ -220,6 +221,8 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	if (gameUi)
 		gameUi->invalidateBiomeMap();
 
+	mobs.reset(seed);
+    mobStates.reserve(entities::MobSettings::capacity);
 	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
 	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
 												  chunkPool.get());
@@ -282,6 +285,8 @@ Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &res
 		out.atlasOk = true;
 		out.packHits = report.packHits;
 		out.packMisses = report.packMisses;
+        const auto entityReport = worldRenderer->mobTextureReport();
+        out.entityHits = entityReport.hits; out.entityMisses = entityReport.misses;
 
 		if (path.empty())
 		{
@@ -290,24 +295,25 @@ Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &res
 			return out;
 		}
 
-		if (report.packInvalid())
+		if (report.packInvalid() && out.entityHits == 0)
 		{
 			// Fully invalid: use default assets and clear active pack so UI matches reality.
 			m_resourcePackRoot.clear();
 			out.isError = true;
 			out.message =
-				"Invalid resource pack: no block textures found. "
+				"Invalid resource pack: no block or mob textures found. "
 				"Using default resource pack.";
 			return out;
 		}
 
 		m_resourcePackRoot = path;
-		if (report.packIncomplete())
+		if (report.packMisses > 0 || out.entityMisses > 0)
 		{
 			out.isWarning = true;
 			out.message = "Resource pack incomplete: " + std::to_string(report.packMisses) + " of " +
 						  std::to_string(report.requiredLayers) +
-						  " block textures missing. Default resource pack used for missing textures.";
+						  " block textures missing; mobs: " + std::to_string(out.entityHits) + " loaded, " +
+                    std::to_string(out.entityMisses) + " missing. Default pack used for missing textures.";
 			return out;
 		}
 
@@ -438,6 +444,8 @@ void Engine::reloadWorld(int newSeed)
 	vkContext->waitIdle();
 	resourceRetire.flush();
 	chunkManager.reset();
+	mobs.reset(seed);
+    mobStates.reserve(entities::MobSettings::capacity);
 	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
 	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
 												  chunkPool.get());
@@ -1075,6 +1083,9 @@ void Engine::drawUi()
 	f.mouseCaptured = &mouseCaptured;
 	f.showChunkBorders = &showChunkBorders;
 	f.showDemoPlayers = &showDemoPlayers;
+    f.mobsEnabled = &mobsEnabled;
+    f.mobCount = mobStates.size();
+    f.mobVisible = worldRenderer->visibleMobs();
 	f.paused = &paused;
 	f.seed = seed;
 	f.worldGenerationId = m_worldGenerationId;
@@ -1187,6 +1198,17 @@ void Engine::run()
 			tickDayCycle(deltaTime);
 		}
 		tickStreaming(deltaTime);
+        {
+            PROFILE_SCOPE("Mobs");
+            if (chunkManager && terrainGenerator) {
+                ChunkMobWorld world(*chunkManager, *terrainGenerator);
+                const bool disabled = !mobsEnabled || m_benchmark.isActive();
+                mobs.update(deltaTime, world, glm::dvec3(camera.getPosition()),
+                            renderSettings.maxRenderDistance, paused || !windowFocused || disabled);
+                if (disabled) mobStates.clear(); else mobs.renderStates(mobStates);
+                worldRenderer->setMobs(mobStates);
+            }
+        }
 		{
 			PROFILE_SCOPE("Highlight");
 			updateHighlight();

@@ -371,6 +371,10 @@ void GameUI::drawHud(GameUIFrame &frame)
 		ImGui::Checkbox("Chunk borders [B]", frame.showChunkBorders);
 	if (frame.showDemoPlayers)
 		ImGui::Checkbox("Demo players", frame.showDemoPlayers);
+    if (frame.mobsEnabled) {
+        ImGui::Checkbox("Passive mobs", frame.mobsEnabled);
+        ImGui::Text("Mobs: %zu active / %zu visible", frame.mobCount, frame.mobVisible);
+    }
 	if (frame.mouseCaptured)
 	{
 		if (ImGui::Checkbox("Capture mouse [C]", frame.mouseCaptured))

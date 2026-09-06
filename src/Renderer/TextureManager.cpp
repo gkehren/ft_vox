@@ -128,8 +128,8 @@ CpuAtlasBuild buildCpuAtlas(const std::string &packRoot, std::vector<uint8_t> &a
 
 	if (built.report.packInvalid())
 	{
-		std::cerr << "Invalid resource pack '" << packRoot
-				  << "': no block textures found. Falling back to default resource pack.\n";
+		std::cerr << "Resource pack '" << packRoot
+				  << "': no block overrides found. Using default block textures.\n";
 	}
 	else if (built.report.packIncomplete())
 	{
@@ -209,9 +209,11 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 
 	// 2) Build replacement GPU resources into temps.
 	AllocatedImage newImage{};
+    AllocatedBuffer staging{};
 	VkSampler newSampler = VK_NULL_HANDLE;
 
 	auto cleanupNew = [&]() {
+        if (staging.buffer) destroyBuffer(context.getAllocator(), staging);
 		if (newSampler != VK_NULL_HANDLE)
 		{
 			vkDestroySampler(context.getDevice(), newSampler, nullptr);
@@ -263,7 +265,7 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 		if (vkCreateImageView(context.getDevice(), &viewInfo, nullptr, &newImage.view) != VK_SUCCESS)
 			throw std::runtime_error("Failed to create texture array view");
 
-		AllocatedBuffer staging = createBuffer(
+		staging = createBuffer(
 			context.getAllocator(), totalSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO,
 			VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
 		writeBuffer(context.getAllocator(), staging, atlas.data(), totalSize);
@@ -328,4 +330,10 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 
 	std::cout << "Texture array: " << layers << " layers (" << layerSize << "x" << layerSize << ")\n";
 	return m_lastReport;
+}
+
+void TextureManager::swap(TextureManager &other) noexcept {
+    using std::swap;
+    swap(m_context,other.m_context); swap(m_image,other.m_image); swap(m_sampler,other.m_sampler);
+    swap(m_layerSize,other.m_layerSize); swap(m_lastReport,other.m_lastReport);
 }

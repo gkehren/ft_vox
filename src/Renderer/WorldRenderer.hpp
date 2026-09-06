@@ -8,6 +8,7 @@
 #include "Vulkan/VkCommands.hpp"
 #include "Vulkan/MeshArena.hpp"
 #include "Renderer/TextureManager.hpp"
+#include "Renderer/MobRenderer.hpp"
 #include "Renderer/PostStack.hpp"
 #include "Renderer/OverlayRenderer.hpp"
 #include "Renderer/ShadowCascades.hpp"
@@ -63,7 +64,10 @@ public:
 					 const std::function<void(VkCommandBuffer)> &imguiDraw = {},
                      VkGpuProfiler *gpu = nullptr, uint64_t benchmarkTag = 0);
 
-	PostProcessSettings &postSettings() { return m_postSettings; }
+	void setMobs(const std::vector<entities::MobRenderState> &states) { m_mobStates = states; }
+    size_t visibleMobs() const { return m_mobs.visibleCount(); }
+    MobTextureReport mobTextureReport() const { return m_mobs.textureReport(); }
+    PostProcessSettings &postSettings() { return m_postSettings; }
 	OverlayRenderer &overlays() { return m_overlays; }
 	TextureManager &getTextureManager() { return m_textures; }
 	/// Shared device-local mesh arenas every chunk suballocates from (issue #109).
@@ -99,6 +103,8 @@ private:
 	VkContext *m_context{nullptr};
 	ImmediateCommands *m_imm{nullptr};
 	TextureManager m_textures;
+    MobRenderer m_mobs;
+    std::vector<entities::MobRenderState> m_mobStates;
 	PostStack m_post;
 	OverlayRenderer m_overlays;
 	PostProcessSettings m_postSettings{};

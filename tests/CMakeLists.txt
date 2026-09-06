@@ -284,6 +284,7 @@ add_test(NAME InputRouting COMMAND test_input_routing)
 # ---------------------------------------------------------------------------
 add_executable(test_chunk_lifecycle
     test_chunk_lifecycle.cpp
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
@@ -611,3 +612,44 @@ target_link_libraries(test_mesh_arena PRIVATE
     Threads::Threads
 )
 add_test(NAME MeshArena COMMAND test_mesh_arena)
+
+# Passive entities: CPU simulation/model contracts, no graphics device.
+add_executable(test_mobs test_mobs.cpp
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp)
+target_include_directories(test_mobs PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_mobs PRIVATE glm)
+add_test(NAME PassiveMobs COMMAND test_mobs)
+
+add_executable(test_mob_textures test_mob_textures.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/MobTextures.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp)
+target_include_directories(test_mob_textures PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_mob_textures PRIVATE miniz::miniz)
+add_test(NAME MobTextures COMMAND test_mob_textures ${CMAKE_SOURCE_DIR}/ressources/default-resource-pack.zip)
+
+# Offscreen Vulkan evidence: actual mob pipelines, texture rollback and frame slots.
+add_executable(test_mob_render test_mob_render.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/MobRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/MobTextures.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/TextureManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp)
+target_include_directories(test_mob_render PRIVATE ${CMAKE_SOURCE_DIR}/src ${Vulkan_INCLUDE_DIRS})
+target_compile_definitions(test_mob_render PRIVATE VK_NO_PROTOTYPES GLM_FORCE_DEPTH_ZERO_TO_ONE)
+target_link_libraries(test_mob_render PRIVATE SDL3::SDL3 volk::volk GPUOpen::VulkanMemoryAllocator glm miniz::miniz Threads::Threads)
+if(APPLE)
+    target_compile_definitions(test_mob_render PRIVATE VK_USE_PLATFORM_METAL_EXT)
+    target_link_libraries(test_mob_render PRIVATE "-framework Metal" "-framework Foundation" "-framework QuartzCore" "-framework IOKit" "-framework IOSurface")
+elseif(WIN32)
+    target_compile_definitions(test_mob_render PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+elseif(UNIX)
+    target_link_libraries(test_mob_render PRIVATE ${CMAKE_DL_LIBS})
+endif()
+add_dependencies(test_mob_render ft_vox_shaders)
+add_test(NAME MobVulkanRender COMMAND test_mob_render ${CMAKE_BINARY_DIR}/mob-qa)
+set_tests_properties(MobVulkanRender PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} ENVIRONMENT "FT_VOX_VALIDATION=1")
+
+add_test(NAME MobRealTerrain COMMAND test_chunk_lifecycle --mobs-profile)

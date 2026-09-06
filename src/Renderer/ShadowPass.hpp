@@ -1,11 +1,14 @@
 #pragma once
 
 #include "Vulkan/VkContext.hpp"
+#include "Vulkan/VkGpuProfiler.hpp"
 #include "Vulkan/VkImage.hpp"
 #include "Vulkan/VkFrame.hpp"
 #include "Renderer/ShadowCascades.hpp"
 #include "Chunk/Chunk.hpp"
 #include "Vulkan/MeshArena.hpp"
+
+class MobRenderer;
 
 #include <glm/glm.hpp>
 #include <array>
@@ -38,7 +41,8 @@ public:
 	void record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vector<Chunk *> &shadowChunks,
 				const std::array<glm::mat4, kCascadeCount> &cascades, float time,
 				VkDescriptorSet set0, VkDescriptorSet set1, const MeshArenas &arenas,
-				VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer);
+				VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer,
+				MobRenderer *mobs = nullptr, VkGpuProfiler *gpu = nullptr);
 
 	// Indirect commands demanded by the last record, summed over cascades
 	// (pre-truncation); WorldRenderer aggregates for the benchmark's peak.

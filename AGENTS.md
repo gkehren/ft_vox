@@ -25,7 +25,8 @@
   - **`ChunkManager`**: distance streaming (load → async gen → async mesh → main-thread upload), unload + pool recycle
   - **`ChunkPool`** + **`ThreadPool`**: preallocated chunks and work-stealing workers
   - **`TerrainGenerator`**: FastNoise2 biomes / height / caves
-- **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator — **ShadowPass → OpaquePass → WaterPass → SkyPass → PostStack** (+ `OverlayRenderer`, `TextureManager`, `FrameUBO`, `MaterialTable`, `Lighting`, `ShadowCascades`)
+- **Entities (`src/Entities/`)**: `MobSystem` — CPU fixed-step passive mobs (cow/pig/sheep/chicken): deterministic seed-based group spawning, ambient wander AI on the shared voxel collision solver; `MobModel` bakes the Minecraft box-UV articulated meshes
+- **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator — **ShadowPass → OpaquePass → WaterPass → SkyPass → PostStack** (+ `MobRenderer`, `OverlayRenderer`, `TextureManager`, `FrameUBO`, `MaterialTable`, `Lighting`, `ShadowCascades`)
 
 ### Networking (`src/Network/`)
 - **Client/Server**: Boost.Asio UDP for player position and world state (not yet re-wired into Vulkan Engine UI).

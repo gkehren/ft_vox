@@ -30,11 +30,16 @@ public:
 	/// Returns true if found and read into `outBuffer`.
 	bool readBlockTexture(const std::string &basename, std::vector<uint8_t> &outBuffer);
 
+    bool readEntityTexture(const std::string &relativePath, std::vector<uint8_t> &outBuffer);
+
 private:
 	std::string m_path;
 	bool m_isZip{false};
 	bool m_isOpen{false};
 	std::string m_zipBlockPrefix;
+	/// Directory packs: resolved `<...>/assets/minecraft` (root or one wrapped
+	/// subdirectory), empty when the pack keeps `assets/` elsewhere.
+	std::string m_minecraftRoot;
 
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;

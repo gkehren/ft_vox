@@ -234,11 +234,14 @@ void uploadImage2D(VmaAllocator allocator,
 		VMA_MEMORY_USAGE_AUTO,
 		VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
 
+	try
+	{
 	// Prefer mapped pointer from allocation info when available
 	void *mapped = staging.info.pMappedData;
 	if (!mapped)
 		mapped = mapBuffer(allocator, staging);
 	std::memcpy(mapped, pixels, static_cast<size_t>(dataSize));
+	vmaFlushAllocation(allocator, staging.allocation, 0, dataSize);
 	if (!staging.info.pMappedData)
 		unmapBuffer(allocator, staging);
 
@@ -264,5 +267,7 @@ void uploadImage2D(VmaAllocator allocator,
 								 VK_IMAGE_ASPECT_COLOR_BIT, image.mipLevels, image.arrayLayers);
 	});
 
+	}
+	catch (...) { destroyBuffer(allocator, staging); throw; }
 	destroyBuffer(allocator, staging);
 }

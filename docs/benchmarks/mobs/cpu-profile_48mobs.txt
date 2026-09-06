@@ -1,0 +1,2 @@
+cpu-48mobs: 48 mobs CPU mean_ms=0.0245153 p95_ms=0.0324 cells/tick=1800 allocations=0 dropped=0
+cpu-48mobs: Passive mobs: 0 failures
