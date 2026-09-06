@@ -33,6 +33,30 @@ revision appends its own files).
 | TerrainGen n / avgMs | 18995 / 2.545 | 19056 / 2.550 | parity |
 | MeshQueue avgMs | 0.0100 | 0.0101 | parity |
 
+## Final revision (2ea12ca: unload-safe bias cap + windowed counters)
+
+Same protocol, clean-tree builds of both sides, interleaved 2×2 (2026-09-06,
+~16:00 — this session the machine was noticeably noisier than the earlier
+runs: main's own Streaming also drifted 0.35→0.40 ms, so compare sides, not
+sessions):
+
+| Metric | main `1d62865` | PR `2ea12ca` |
+|---|---|---|
+| CPU `Streaming` avg | 0.391 / 0.406 ms | 0.239 / 0.236 ms (**−39/−42 %**) |
+| Score | 9843 / 9853 (S) | 9837 / 9835 (S) |
+| `chunks.active` peak | 4628 / 4625 | 4676 / 4677 (fill parity) |
+| Maintenance window | n/a | calls == measured frames **exactly** (10161/10161, 9884/9884) |
+| Split | rescan every frame | zeroWork 82.0-82.2 %, incremental ~1790, heading 0, full 0 |
+| rowsVisited | n/a | ~79 rows per reconciliation (O(r), r ≈ 37 at view 512) |
+| enter/exit | n/a | 21010/21008, balanced |
+
+**Bias-max smoke** (`--benchmark 30 --front-bias 0.55`, the unload-safe cap):
+score 9840 (S), `Streaming` 0.171 ms, **0 frames > 16.7 ms**, zeroWork 86.5 %,
+`chunks.active` peak 4677 with deferred churn settling to 0 (no unload/reload
+oscillation at the cap). Combined with the geometric test (every desired
+chunk center inside view × 1.5 for all headings at raw bias 0.9) this closes
+the `desired ⊆ unload` contract end-to-end.
+
 ## Post-review revision (77576c4, anchor-driven reconciliation + counters)
 
 Same protocol, fresh clean-tree builds of both sides, interleaved 2×2:
