@@ -244,6 +244,10 @@ private:
 	size_t m_peakIndirectCommands{0};
 	int m_over16{0}, m_over33{0};
 	StreamingMaintenanceStats m_streamStats{};
+	StreamingMaintenanceStats m_streamStatsStart{};
+	StreamingMaintenanceStats m_streamStatsLatest{};
+	bool m_streamStatsStarted{false};
+	bool m_streamWindowStartPending{false};
 
 	// Settings snapshotted at start of measurement
 	int m_viewDistance{0};
@@ -262,6 +266,32 @@ public:
 	/// Latest streaming maintenance counters, sampled by the engine each frame
 	/// and published in the report (issue #108).
 	void setStreamingMaintenanceStats(const StreamingMaintenanceStats &s) { m_streamStats = s; }
+
+	/// Streaming-counter measurement window (issue #108 review): the engine
+	/// calls beginStreamingMeasurement exactly once when the benchmark leaves
+	/// warmup (before that frame's tickStreaming), keeps calling
+	/// sampleStreamingStats after each measured frame's streaming tick, and
+	/// finalize reports latest - start — warmup work stays out of the report.
+	void beginStreamingMeasurement(const StreamingMaintenanceStats &s)
+	{
+		m_streamStatsStart = s;
+		m_streamStatsLatest = s;
+		m_streamStatsStarted = true;
+	}
+	void sampleStreamingStats(const StreamingMaintenanceStats &s)
+	{
+		if (m_streamStatsStarted)
+			m_streamStatsLatest = s;
+	}
+	/// True exactly once, on the frame where Warmup flipped to Running. The
+	/// engine must snapshot the streaming counters before that frame's
+	/// tickStreaming so the window opens on a known boundary.
+	bool consumeStreamingWindowStart()
+	{
+		const bool v = m_streamWindowStartPending;
+		m_streamWindowStartPending = false;
+		return v;
+	}
 	void markForceVsync(bool prevVsync)
 	{
 		m_hadForceVsync = true;

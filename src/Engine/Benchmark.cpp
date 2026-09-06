@@ -2,6 +2,7 @@
 #include "Engine/BuildInfo.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -122,6 +123,9 @@ void Benchmark::tick(double dt, Camera &camera)
 	{
 		telemetry::registry().beginCapture();
 		m_phase = BenchmarkPhase::Running;
+		// Open the streaming-counter window: the engine snapshots the
+		// ChunkManager counters before this frame's tickStreaming (issue #108).
+		m_streamWindowStartPending = true;
 	}
 
 	if (m_phase == BenchmarkPhase::Running &&
@@ -360,7 +364,17 @@ void Benchmark::finalize()
 	r.peakPendingLoad = m_peakLoad;
 	r.peakPendingGen = m_peakGen;
 	r.peakPendingMesh = m_peakMesh;
-	r.streamStats = m_streamStats;
+	// Report the measurement window only: warmup frames must not pollute the
+	// streaming maintenance counters (issue #108 review).
+	r.streamStats = subtractStreamingStats(m_streamStatsLatest, m_streamStatsStart);
+	{
+		// Window sanity: one maintenance dispatch per measured frame (±1 for
+		// the boundary frames around the Warmup→Running flip).
+		const uint64_t calls = r.streamStats.maintenanceCalls();
+		const uint64_t frames = static_cast<uint64_t>(r.frames);
+		assert(std::abs(static_cast<long long>(calls) - static_cast<long long>(frames)) <= 1 &&
+			   "streaming counter window does not match measured frames");
+	}
 	r.framesOver16ms = m_over16;
 	r.framesOver33ms = m_over33;
 
@@ -422,6 +436,7 @@ std::string Benchmark::formatReportText() const
 		  << "  heading=" << r.streamStats.headingRebuilds
 		  << "  full=" << r.streamStats.fullRebuilds
 		  << "  queueSorts=" << r.streamStats.queueSorts
+		  << "  rowsVisited=" << r.streamStats.footprintRowsVisited
 		  << "  enter=" << r.streamStats.enteringCandidates
 		  << "  exit=" << r.streamStats.exitingCandidates
 		  << "  unloadScans=" << r.streamStats.unloadScans << "\n\n";
