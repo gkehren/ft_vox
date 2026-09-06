@@ -9,6 +9,7 @@
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/TerrainGenerator.hpp>
+#include <Renderer/MinecraftTextures.hpp>
 #include <Engine/WorkloadTelemetry.hpp>
 
 #include <algorithm>
@@ -1510,6 +1511,172 @@ static void testWaterWithEmbeddedDetails()
     sBorderDetail.pool.release(rBorderDetail);
     sA.pool.release(rLodA);
     sB.pool.release(rLodB);
+}
+
+static void testWaterFilledKelpVariants()
+{
+	// Issue #120 review: the three water-containing details must behave
+	// identically to plain WATER for the fluid mesher, while keeping their
+	// own geometry. Stronger than count equality: the water vertex/index
+	// vectors must be exactly equal (packedPos, packedData, UV, biome,
+	// indices) between the reference and the variant scene.
+	const TextureType details[] = {SEAGRASS, KELP, KELP_TOP};
+
+	auto buildVolume = [](TextureType detail, int detailY, MeshBuildResult **outResult) -> Scene *
+	{
+		auto *s = new Scene();
+		for (int x = 2; x <= 5; ++x)
+			for (int z = 2; z <= 5; ++z)
+			{
+				s->chunk.setVoxel(x, 3, z, STONE);
+				for (int y = 4; y <= 6; ++y)
+					s->chunk.setVoxel(x, y, z, WATER);
+			}
+		if (detail != AIR)
+			s->chunk.setVoxel(3, detailY, 3, detail);
+		*outResult = s->pool.acquire();
+		MeshBuildResult *r = s->pool.acquire();
+		s->chunk.buildMesh(*r, s->chunk.meshGeneration(), s->chunk.meshRevision());
+		s->pool.finishBuild(r);
+		*outResult = r;
+		return s;
+	};
+
+	auto sameWaterMesh = [](const MeshBuildResult &a, const MeshBuildResult &b) {
+		for (size_t s = 0; s < a.sections.size(); ++s)
+		{
+			if (a.sections[s].waterVertices != b.sections[s].waterVertices)
+				return false;
+			if (a.sections[s].waterIndices != b.sections[s].waterIndices)
+				return false;
+		}
+		return true;
+	};
+
+	// A) interior detail vs plain water, per detail type: exact fluid mesh.
+	for (TextureType detail : details)
+	{
+		MeshBuildResult *rRef = nullptr, *rVar = nullptr;
+		Scene *sRef = buildVolume(AIR, 5, &rRef);
+		Scene *sVar = buildVolume(detail, 5, &rVar);
+		CHECK(sameWaterMesh(*rRef, *rVar),
+			  "water-filled variants: interior detail keeps the exact fluid mesh");
+		sRef->pool.release(rRef);
+		sVar->pool.release(rVar);
+		delete sRef;
+		delete sVar;
+	}
+
+	// B) surface detail (KELP_TOP is the natural top-of-column block): the
+	// water top surface must be identical to the plain-water surface.
+	{
+		MeshBuildResult *rRef = nullptr, *rTop = nullptr;
+		Scene *sRef = buildVolume(AIR, 6, &rRef);
+		Scene *sTop = buildVolume(KELP_TOP, 6, &rTop);
+		CHECK(sameWaterMesh(*rRef, *rTop),
+			  "water-filled variants: KELP_TOP at the surface keeps the exact fluid surface");
+		sRef->pool.release(rRef);
+		sTop->pool.release(rTop);
+		delete sRef;
+		delete sTop;
+	}
+
+	// C) section seam (y=15/16) with KELP: the water mesh must stay identical
+	// to the plain column.
+	{
+		auto buildColumn = [](TextureType detail, int detailY, MeshBuildResult **outResult) -> Scene *
+		{
+			auto *s = new Scene();
+			for (int y = 14; y <= 17; ++y)
+				s->chunk.setVoxel(4, y, 4, WATER);
+			if (detail != AIR)
+				s->chunk.setVoxel(4, detailY, 4, detail);
+			*outResult = s->pool.acquire();
+			MeshBuildResult *r = s->pool.acquire();
+			s->chunk.buildMesh(*r, s->chunk.meshGeneration(), s->chunk.meshRevision());
+			s->pool.finishBuild(r);
+			*outResult = r;
+			return s;
+		};
+		MeshBuildResult *rCol = nullptr, *rKelp = nullptr;
+		Scene *sCol = buildColumn(AIR, 0, &rCol);
+		Scene *sKelp = buildColumn(KELP, 15, &rKelp);
+		CHECK(rCol->waterVertices == rKelp->waterVertices,
+			  "water-filled variants: KELP on the y=15/16 seam keeps the exact fluid mesh");
+		CHECK(rCol->waterIndices == rKelp->waterIndices,
+			  "water-filled variants: KELP seam indices identical");
+		sCol->pool.release(rCol);
+		sKelp->pool.release(rKelp);
+		delete sCol;
+		delete sKelp;
+	}
+
+	// D) chunk border: KELP at x=15, neighbor shell at x=16 - no extra
+	// internal water face compared to the border-plain reference.
+	{
+		Scene sRef, sDetail;
+		for (int y = 4; y <= 6; ++y)
+			for (int z = 2; z <= 5; ++z)
+			{
+				sRef.chunk.setVoxel(15, y, z, WATER);
+				sDetail.chunk.setVoxel(15, y, z, WATER);
+			}
+		sDetail.chunk.setVoxel(15, 5, 3, KELP);
+		MeshBuildResult *rRef = sRef.pool.acquire();
+		MeshBuildResult *rDet = sDetail.pool.acquire();
+		sRef.chunk.buildMesh(*rRef, sRef.chunk.meshGeneration(), sRef.chunk.meshRevision());
+		sDetail.chunk.buildMesh(*rDet, sDetail.chunk.meshGeneration(), sDetail.chunk.meshRevision());
+		sRef.pool.finishBuild(rRef);
+		sDetail.pool.finishBuild(rDet);
+		CHECK(rRef->waterVertices == rDet->waterVertices,
+			  "water-filled variants: KELP at the chunk border keeps the exact fluid mesh");
+		sRef.pool.release(rRef);
+		sDetail.pool.release(rDet);
+	}
+
+	// E) LOD: KELP_TOP at the top of the column must preserve the water
+	// surface while omitting the detail geometry.
+	{
+		MeshBuildResult *rRef = nullptr, *rTop = nullptr;
+		Scene *sRef = buildVolume(AIR, 6, &rRef);
+		Scene *sTop = buildVolume(KELP_TOP, 6, &rTop);
+		MeshBuildResult *lodRef = sRef->pool.acquire();
+		MeshBuildResult *lodTop = sTop->pool.acquire();
+		sRef->chunk.buildLODMesh(*lodRef, sRef->chunk.meshGeneration(), sRef->chunk.meshRevision());
+		sTop->chunk.buildLODMesh(*lodTop, sTop->chunk.meshGeneration(), sTop->chunk.meshRevision());
+		sRef->pool.finishBuild(lodRef);
+		sTop->pool.finishBuild(lodTop);
+		CHECK(lodRef->waterVertices == lodTop->waterVertices &&
+				  lodRef->waterIndices == lodTop->waterIndices,
+			  "water-filled variants: LOD keeps the exact water surface under KELP_TOP");
+		CHECK(lodTop->opaqueVertices.empty(),
+			  "water-filled variants: LOD omits the KELP_TOP detail geometry");
+		sRef->pool.release(lodRef);
+		sTop->pool.release(lodTop);
+		delete sRef;
+		delete sTop;
+	}
+
+	// F) KELP geometry non-regression: the current representation is cross
+	// quads (NOT a cube) - a lone KELP still emits its own detail quads.
+	{
+		CHECK(blockShape(KELP) == BlockShape::Cross,
+			  "kelp geometry contract: KELP stays a cross detail");
+		CHECK(blockShape(KELP_TOP) == BlockShape::Cross,
+			  "kelp geometry contract: KELP_TOP stays a cross detail");
+		MeshBuildResult *r = nullptr;
+		Scene *s = buildVolume(AIR, 0, &r);
+		s->chunk.setVoxel(3, 7, 3, KELP); // lone kelp cell above the water
+		MeshBuildResult *r2 = s->pool.acquire();
+		s->chunk.buildMesh(*r2, s->chunk.meshGeneration(), s->chunk.meshRevision());
+		s->pool.finishBuild(r2);
+		size_t withKelp = 0;
+		for (const auto &sec : r2->sections)
+			withKelp += sec.opaqueVertices.size();
+		CHECK(withKelp > 0, "kelp geometry contract: lone KELP still emits its quads");
+		s->pool.release(r);
+		delete s;
+	}
 }
 
 int main(int argc, char **argv)
