@@ -51,6 +51,8 @@ struct GameUIFrame
 	bool *mouseCaptured{nullptr};
 	bool *showChunkBorders{nullptr};
 	bool *showDemoPlayers{nullptr};
+    bool *mobsEnabled{nullptr};
+    size_t mobCount{}, mobVisible{};
 	bool *paused{nullptr};
 
 	int seed{0};

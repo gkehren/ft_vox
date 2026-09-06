@@ -30,6 +30,8 @@ public:
 	/// Returns true if found and read into `outBuffer`.
 	bool readBlockTexture(const std::string &basename, std::vector<uint8_t> &outBuffer);
 
+    bool readEntityTexture(const std::string &relativePath, std::vector<uint8_t> &outBuffer);
+
 private:
 	std::string m_path;
 	bool m_isZip{false};

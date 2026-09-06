@@ -12,6 +12,8 @@
 #include <vector>
 #include <cstdint>
 
+class MobRenderer;
+
 /// Opaque HDR terrain + overlays into color/depth targets.
 class OpaquePass
 {
@@ -28,7 +30,7 @@ public:
 				const std::vector<Chunk *> &chunks, OverlayRenderer &overlays,
 				const VkClearColorValue &clearColor, uint32_t frameIndex, const MeshArenas &arenas,
 				VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer,
-				VkGpuProfiler *gpu = nullptr);
+				VkGpuProfiler *gpu = nullptr, MobRenderer *mobs = nullptr);
 
 	// Indirect commands demanded by the last record (pre-truncation);
 	// WorldRenderer aggregates the passes for the benchmark's peak.

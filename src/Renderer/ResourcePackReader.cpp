@@ -205,3 +205,39 @@ bool ResourcePackReader::readBlockTexture(const std::string &basename, std::vect
 		return false;
 	}
 }
+
+// Exact namespace-relative paths; ZIPs may wrap assets in one or more folders.
+bool ResourcePackReader::readEntityTexture(const std::string &relativePath, std::vector<uint8_t> &out)
+{
+    out.clear();
+    if (!m_isOpen || relativePath.empty()) return false;
+    const fs::path relative(relativePath);
+    if (relative.is_absolute() || relative.has_root_name()) return false;
+    for (auto &part : relative) if (part == "..") return false;
+    const std::string suffix = "assets/minecraft/textures/entity/" + relative.generic_string();
+    if (m_isZip) {
+        const mz_uint count = mz_zip_reader_get_num_files(&m_impl->zip);
+        for (mz_uint i=0; i<count; ++i) {
+            mz_zip_archive_file_stat stat{};
+            if (!mz_zip_reader_file_stat(&m_impl->zip,i,&stat)) continue;
+            std::string name(stat.m_filename);
+            std::replace(name.begin(),name.end(),'\\','/');
+            if (name.size()<suffix.size() || name.compare(name.size()-suffix.size(),suffix.size(),suffix)!=0) continue;
+            const auto start=name.size()-suffix.size();
+            if (start && name[start-1]!='/') continue;
+            if (!stat.m_uncomp_size || stat.m_uncomp_size>64*1024*1024) return false;
+            out.resize(size_t(stat.m_uncomp_size));
+            if (mz_zip_reader_extract_to_mem(&m_impl->zip,i,out.data(),out.size(),0)) return true;
+            out.clear(); return false;
+        }
+    } else {
+        std::ifstream file(fs::path(m_path)/suffix,std::ios::binary|std::ios::ate);
+        if (!file) return false;
+        auto size=file.tellg();
+        if (size<=0 || size>64*1024*1024) return false;
+        out.resize(size_t(size)); file.seekg(0);
+        if (file.read(reinterpret_cast<char*>(out.data()),size)) return true;
+        out.clear();
+    }
+    return false;
+}

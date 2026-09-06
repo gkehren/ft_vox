@@ -64,6 +64,7 @@ void writeBuffer(VmaAllocator allocator, AllocatedBuffer &buf, const void *data,
 		throw std::runtime_error("writeBuffer: range out of bounds");
 	void *mapped = mapBuffer(allocator, buf);
 	std::memcpy(static_cast<char *>(mapped) + offset, data, static_cast<size_t>(size));
+	vmaFlushAllocation(allocator, buf.allocation, offset, size);
 	unmapBuffer(allocator, buf);
 }
 

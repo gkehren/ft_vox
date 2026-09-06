@@ -1,0 +1,88 @@
+#pragma once
+#include <Physics/VoxelCollision.hpp>
+#include <array>
+#include <optional>
+#include <vector>
+#include <span>
+
+namespace entities
+{
+enum class MobSpecies : uint8_t
+{
+    Cow,
+    Pig,
+    Sheep,
+    Chicken,
+    Count
+};
+struct SpeciesSettings
+{
+    glm::dvec3 size;
+    double speed;
+};
+inline const std::array<SpeciesSettings, 4> speciesSettings{
+    {{{0.9, 1.4, 0.9}, 1.1}, {{0.9, 0.9, 0.9}, 1.0}, {{0.9, 1.3, 0.9}, 1.0}, {{0.4, 0.7, 0.4}, 0.8}}};
+struct MobSettings
+{
+    static constexpr size_t capacity = 48;
+    double spawnMin = 24, spawnMax = 80, retireDistance = 112;
+    double fixedStep = 1.0 / 60.0;
+    int maxSteps = 8;
+};
+// Surface returns feet on grass in an eligible biome, or no candidate. Unknown
+// terrain is never inferred from procedural height: actual voxels are required.
+class MobWorld : public physics::VoxelCollisionWorld
+{
+  public:
+    virtual std::optional<glm::dvec3> surface(int x, int z) const = 0;
+};
+struct Mob
+{
+    uint64_t id{}, origin{}, random{};
+    MobSpecies species{};
+    physics::Body body;
+    glm::dvec3 previous{};
+    double yaw{}, previousYaw{}, targetYaw{}, timer{}, gait{}, previousGait{}, age{};
+    double stride{}, previousStride{}, shoreTimer{};
+    bool walking{};
+};
+struct MobRenderState
+{
+    MobSpecies species{};
+    glm::vec3 position{};
+    float yaw{}, gait{}, look{}, flap{}, stride{};
+};
+// One fixed-step controller, reusable with synthetic voxel worlds and no engine.
+void tickMob(Mob &, const physics::VoxelCollisionWorld &, double dt, std::span<const glm::dvec3> neighbors,
+             physics::QueryStats &);
+class MobSystem
+{
+  public:
+    MobSystem();
+    void reset(uint64_t seed);
+    void update(double dt, const MobWorld &world, glm::dvec3 observer, double availableRadius,
+                bool suspended = false);
+    void renderStates(std::vector<MobRenderState> &out) const;
+    const std::vector<Mob> &mobs() const { return m_mobs; }
+    uint64_t droppedSteps() const { return m_dropped; }
+    const physics::QueryStats &queryStats() const { return m_queries; }
+    MobSettings settings;
+    // Also used by deterministic fixtures; rejects unknown, fluid or occupied bodies.
+    bool add(MobSpecies species, glm::dvec3 feet, uint64_t id, uint64_t origin,
+             const physics::VoxelCollisionWorld &world);
+
+  private:
+    struct Group
+    {
+        uint64_t key;
+        glm::dvec2 center;
+    };
+    void populate(const MobWorld &, glm::dvec3 observer, double radius);
+    void step(const MobWorld &);
+    std::vector<Mob> m_mobs;
+    std::vector<Group> m_groups;
+    uint64_t m_seed{}, m_dropped{};
+    double m_accumulator{}, m_spawnTimer{};
+    physics::QueryStats m_queries{};
+};
+} // namespace entities

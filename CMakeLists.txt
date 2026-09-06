@@ -94,6 +94,9 @@ ft_vox_compile_shader(frag bloomBlur.frag.glsl bloomBlur.frag.spv)
 ft_vox_compile_shader(frag godRays.frag.glsl godRays.frag.spv)
 ft_vox_compile_shader(frag ssao.frag.glsl ssao.frag.spv)
 ft_vox_compile_shader(frag composite.frag.glsl composite.frag.spv)
+ft_vox_compile_shader(vert mob.vert.glsl mob.vert.spv)
+ft_vox_compile_shader(frag mob.frag.glsl mob.frag.spv)
+ft_vox_compile_shader(frag mob_shadow.frag.glsl mob_shadow.frag.spv)
 ft_vox_compile_shader(vert overlay.vert.glsl overlay.vert.spv)
 ft_vox_compile_shader(frag overlay.frag.glsl overlay.frag.spv)
 add_custom_target(ft_vox_shaders ALL DEPENDS ${FT_VOX_SPV_FILES} ft_vox_frame_ubo_glsl)
@@ -148,6 +151,10 @@ set(FT_VOX_VULKAN_SOURCES
 )
 
 set(FT_VOX_RENDERER_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/MobTextures.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/MobRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/TextureManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/WorldRenderer.cpp

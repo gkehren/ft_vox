@@ -6,10 +6,10 @@
 #include <cstdint>
 #include <limits>
 
-enum class GpuPass : uint32_t { Frame, Upload, Shadow, Opaque, Overlays, Water, Sky, Post, ImGui, Count };
+enum class GpuPass : uint32_t { Frame, Upload, Shadow, Opaque, Overlays, Water, Sky, Post, ImGui, Mobs, MobShadow0, MobShadow1, MobShadow2, Count };
 inline constexpr size_t kGpuPassCount = static_cast<size_t>(GpuPass::Count);
 inline constexpr std::array<const char *, kGpuPassCount> kGpuPassNames = {
-    "GPU Frame", "Uploads", "Shadow", "Opaque", "Overlays", "Water", "Sky", "Post", "ImGui"};
+    "GPU Frame", "Uploads", "Shadow", "Opaque", "Overlays", "Water", "Sky", "Post", "ImGui", "Mobs", "Mob shadow 0", "Mob shadow 1", "Mob shadow 2"};
 
 struct GpuFrameSample
 {

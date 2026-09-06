@@ -9,6 +9,7 @@
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/ChunkCollisionView.hpp>
+#include <Chunk/ChunkMobWorld.hpp>
 #include <Physics/PlayerController.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
@@ -371,6 +372,79 @@ static int runStreamPerf()
 			  << "incremental: " << incrementalN << " calls, " << incrementalMs << " ms total, "
 			  << incrementalMs / incrementalN * 1000.0 << " us/call (incremental=" << s.incrementalUpdates << ")\n";
 	return 0;
+}
+
+static int profileMobs()
+{
+    TerrainGenerator generator(42);
+    glm::ivec2 center{};
+    bool found = false;
+    for (int radius = 0; radius <= 32 && !found; ++radius)
+    for (int z = -radius; z <= radius && !found; ++z)
+    for (int x = -radius; x <= radius && !found; ++x)
+    {
+        if (std::max(std::abs(x), std::abs(z)) != radius) continue;
+        auto biome = generator.getBiomeAt(x * 64, z * 64);
+        if (biome == BIOME_PLAINS || biome == BIOME_FLOWER_MEADOW)
+        { center = {x * 64, z * 64}; found = true; }
+    }
+    if (!found) { std::cerr << "No meadow fixture found\n"; return 1; }
+    ChunkPool pool(512);
+    ChunkManager manager(&generator, nullptr, &pool);
+    Camera camera({float(center.x), 100.f, float(center.y)});
+    RenderSettings settings;
+    settings.minRenderDistance = 112; settings.maxRenderDistance = 112;
+    manager.updateStreaming(camera, settings);
+    manager.processChunkLoading(512);
+    {
+        ChunkMobWorld world(manager, generator);
+        CHECK(!world.surface(center.x, center.y), "unpublished terrain cannot spawn mobs");
+    }
+    for (auto *chunk : manager.getActiveChunks())
+        if (!manager.prepareAndGenerateChunk(chunk, generator)) return 1;
+    entities::MobSystem mobs;
+    mobs.reset(42);
+    for (int i = 0; i < 600; ++i) {
+        ChunkMobWorld world(manager, generator);
+        mobs.update(1.0/60, world, {center.x,100,center.y},112);
+    }
+    const auto natural = mobs.mobs().size();
+    CHECK(natural > 0, "natural mobs spawn on generated meadow voxels");
+    {
+        ChunkMobWorld world(manager, generator);
+        for (int z = -72; z <= 72 && mobs.mobs().size() < 48; z += 3)
+        for (int x = -72; x <= 72 && mobs.mobs().size() < 48; x += 3) {
+            auto feet = world.surface(center.x+x,center.y+z);
+            if(feet) mobs.add(entities::MobSpecies(mobs.mobs().size()%4),*feet,
+                100000+mobs.mobs().size(),100000+mobs.mobs().size(),world);
+        }
+    }
+    CHECK(mobs.mobs().size()==48, "48 real-terrain fixture mobs");
+    std::cout << "MOB FIXTURE seed=42 center=" << center.x << "," << center.y << " natural=" << natural << "\n";
+    for (const auto &mob : mobs.mobs()) std::cout << "mob " << int(mob.species) << " at " << mob.body.position.x << " " << mob.body.position.y << " " << mob.body.position.z << "\n";
+    std::vector<double> timings; timings.reserve(6000);
+    uint64_t cells = 0; double distance = 0;
+    for (int i=0; i<6600; ++i) {
+        std::array<glm::dvec3,48> before{};
+        for(size_t j=0;j<mobs.mobs().size();++j) before[j]=mobs.mobs()[j].body.position;
+        auto start=std::chrono::steady_clock::now();
+        {
+            ChunkMobWorld world(manager,generator);
+            mobs.update(1.0/60,world,{center.x,100,center.y},112);
+        }
+        double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+        if(i>=600) {
+            timings.push_back(ms);cells+=mobs.queryStats().cells;
+            for(size_t j=0;j<mobs.mobs().size();++j) distance+=glm::length(mobs.mobs()[j].body.position-before[j]);
+        }
+    }
+    double total=0;for(auto ms:timings)total+=ms;std::sort(timings.begin(),timings.end());
+    std::cout << "Mobs real voxels count=" << mobs.mobs().size() << " mean_ms=" << total/timings.size()
+        << " p95_ms=" << timings[timings.size()*95/100] << " cells/tick=" << cells/timings.size()
+        << " travelled=" << distance << " dropped=" << mobs.droppedSteps() << "\n";
+    CHECK(distance>100, "animals actually move across generated terrain");
+    CHECK(mobs.mobs().size()<=48, "real-world population bounded");
+    return g_fails?1:0;
 }
 
 static int profilePlayerPhysics()
@@ -938,6 +1012,7 @@ static void runStreamingDispatchTests()
 
 int main(int argc, char **argv)
 {
+	if (argc > 1 && std::string_view(argv[1]) == "--mobs-profile") return profileMobs();
 	if (argc > 1 && std::string_view(argv[1]) == "--physics-profile") return profilePlayerPhysics();
 	if (argc > 1 && std::string_view(argv[1]) == "--stream-perf") return runStreamPerf();
     // Published memory includes free pool storage and survives ownership moves.

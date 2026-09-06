@@ -26,6 +26,7 @@ public:
 	TextureAtlasLoadReport initialize(VkContext &context, ImmediateCommands &imm,
 									  const std::string &resourcePackRoot = {});
 	void shutdown();
+    void swap(TextureManager &other) noexcept;
 
 	VkImageView getImageView() const { return m_image.view; }
 	VkSampler getSampler() const { return m_sampler; }

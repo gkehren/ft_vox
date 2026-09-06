@@ -17,7 +17,8 @@ public:
     explicit ChunkCollisionView(const ChunkManager &manager)
         : manager(manager), lock(manager.m_mutex) {}
 
-    physics::Cell sample(glm::ivec3 p) const override
+    physics::Cell sample(glm::ivec3 p) const override { return sampleWithType(p, nullptr); }
+    physics::Cell sampleWithType(glm::ivec3 p, TextureType *outType) const
     {
         // Fixed vertical world, with a solid lower boundary and open sky.
         if (p.y < 0) return {true, true};
@@ -48,6 +49,7 @@ public:
             if (!edit.borderNeighbor && edit.chunk == chunk &&
                 edit.generation == chunk->meshGeneration() && edit.x == x && edit.y == p.y && edit.z == z)
                 type = edit.type;
+        if (outType) *outType = type;
         return physics::blockCell(type);
     }
 private:

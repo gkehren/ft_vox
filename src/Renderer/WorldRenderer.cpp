@@ -49,6 +49,7 @@ void WorldRenderer::shutdown()
 	m_sky.shutdown();
 	m_water.shutdown();
 	m_opaque.shutdown();
+	m_mobs.shutdown();
 	m_shadow.shutdown();
 	m_overlays.shutdown();
 	m_post.shutdown();
@@ -287,7 +288,11 @@ TextureAtlasLoadReport WorldRenderer::reloadResourcePack(const std::string &reso
 	if (!m_context || !m_imm)
 		throw std::runtime_error("WorldRenderer::reloadResourcePack before init");
 	// Failure-atomic: TextureManager keeps the previous atlas if rebuild throws.
-	const TextureAtlasLoadReport report = m_textures.initialize(*m_context, *m_imm, resourcePackRoot);
+	TextureManager replacement;
+    const TextureAtlasLoadReport report = replacement.initialize(*m_context, *m_imm, resourcePackRoot);
+    auto mobTextures = m_mobs.prepareTextures(*m_imm, resourcePackRoot);
+    m_textures.swap(replacement);
+    m_mobs.commitTextures(std::move(mobTextures));
 	writeSet1Descriptors();
 	return report;
 }
@@ -320,6 +325,9 @@ void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCo
 	m_post.init(context, imm, m_setLayout0, swapchain.getImageFormat(), extent.width, extent.height);
 	m_sky.init(context, imm, m_setLayout0, m_post.hdrFormat(), m_post.depthFormat());
 	m_overlays.init(context, imm, m_setLayout0, m_post.hdrFormat(), m_post.depthFormat());
+    m_mobs.init(context, imm, m_setLayout0, m_shadow.arrayView(), m_shadow.sampler(),
+                m_post.hdrFormat(), m_post.depthFormat(), resourcePackRoot);
+    m_mobStates.reserve(entities::MobSettings::capacity);
 	createPipelines();
 	createFrameUbos();
 	writeSet1Descriptors();
@@ -382,6 +390,7 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 								params.waterFoamStrength);
 
 	std::memcpy(m_frameUbos[frameIndex].uboMapped, &ubo, sizeof(FrameUBO));
+    m_mobs.prepare(frameIndex, ubo, m_mobStates);
 }
 
 void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t imageIndex,
@@ -415,13 +424,13 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 		PROFILE_SCOPE("Shadow");
 		if (gpu) gpu->beginPass(cmd, GpuPass::Shadow);
 		m_shadow.record(cmd, frameIndex, shadowChunks, m_cascadeMatrices, m_time, set0, m_set1, m_arenas,
-		                drawDataMapped, drawDataBuffer);
+		                drawDataMapped, drawDataBuffer, &m_mobs, gpu);
 		if (gpu) gpu->endPass(cmd, GpuPass::Shadow);
 	}
 	{
 		PROFILE_SCOPE("Scene");
 		m_opaque.record(cmd, extent, set0, m_set1, m_pipelineLayout, m_post.hdrColor(), m_post.sceneDepth(), chunks,
-						m_overlays, clearColor, frameIndex, m_arenas, drawDataMapped, drawDataBuffer, gpu);
+						m_overlays, clearColor, frameIndex, m_arenas, drawDataMapped, drawDataBuffer, gpu, &m_mobs);
 	}
 	{
 		const auto *ubo = static_cast<const FrameUBO *>(m_frameUbos[frameIndex].uboMapped);

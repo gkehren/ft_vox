@@ -1,4 +1,5 @@
 #include "Renderer/ShadowPass.hpp"
+#include "Renderer/MobRenderer.hpp"
 #include "Renderer/IndirectDrawEmit.hpp"
 #include "Renderer/VoxelDrawDataLayout.hpp"
 #include "Vulkan/MeshArena.hpp"
@@ -155,7 +156,8 @@ void ShadowPass::destroyPipeline()
 void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vector<Chunk *> &shadowChunks,
 						const std::array<glm::mat4, kCascadeCount> &cascades, float time,
 						VkDescriptorSet set0, VkDescriptorSet set1, const MeshArenas &arenas,
-						VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer)
+						VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer,
+						MobRenderer *mobs, VkGpuProfiler *gpu)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
@@ -202,6 +204,7 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 		vkCmdSetViewport(cmd, 0, 1, &vp);
 		vkCmdSetScissor(cmd, 0, 1, &scissor);
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 2, sets.data(), 0, nullptr);
 
 		ShadowPC pc{};
 		pc.lightSpace = cascades[static_cast<size_t>(c)];
@@ -346,6 +349,10 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 			}
 			telemetry::registry().add(static_cast<telemetry::Event>(telemetry::Shadow0 + c), count);
 		}
+        const auto mobPass = static_cast<GpuPass>(uint32_t(GpuPass::MobShadow0)+c);
+        if (gpu) gpu->beginPass(cmd, mobPass);
+        if (mobs) mobs->record(cmd, frameIndex, set0, c);
+        if (gpu) gpu->endPass(cmd, mobPass);
 		endRendering(cmd);
 	}
 

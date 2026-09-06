@@ -1,4 +1,5 @@
 #include "Renderer/OpaquePass.hpp"
+#include "Renderer/MobRenderer.hpp"
 #include "Renderer/IndirectDrawEmit.hpp"
 #include "Renderer/VoxelDrawDataLayout.hpp"
 #include "Vulkan/MeshArena.hpp"
@@ -106,7 +107,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 						const std::vector<Chunk *> &chunks, OverlayRenderer &overlays,
 						const VkClearColorValue &clearColor, uint32_t frameIndex, const MeshArenas &arenas,
 						VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer,
-						VkGpuProfiler *gpu)
+						VkGpuProfiler *gpu, MobRenderer *mobs)
 {
 	if (gpu) gpu->beginPass(cmd, GpuPass::Opaque);
 	const auto beginRendering = beginR();
@@ -311,6 +312,9 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 	if (std::getenv("FT_VOX_VALIDATE_INDIRECT"))
 		++m_debugFrames;
 	if (gpu) gpu->endPass(cmd, GpuPass::Opaque);
+	if (gpu) gpu->beginPass(cmd, GpuPass::Mobs);
+    if (mobs) mobs->record(cmd, frameIndex, set0);
+    if (gpu) gpu->endPass(cmd, GpuPass::Mobs);
 	if (gpu) gpu->beginPass(cmd, GpuPass::Overlays);
 	overlays.record(cmd, set0, chunks);
 	if (gpu) gpu->endPass(cmd, GpuPass::Overlays);
