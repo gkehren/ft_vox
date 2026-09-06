@@ -1,5 +1,6 @@
 #include "MobSystem.hpp"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <numbers>
 
@@ -76,6 +77,7 @@ bool MobSystem::add(MobSpecies species, glm::dvec3 feet, uint64_t id, uint64_t o
     m.previous = feet;
     m.yaw = m.previousYaw = m.targetYaw = random(m.randomState) * 6.283185307;
     m.timer = 2 + 4 * random(m.randomState);
+    assert(size_t(m.species) < kMobSpeciesCount);
     m_mobs.push_back(m);
     return true;
 }
@@ -275,6 +277,11 @@ void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
     m.stride += (std::clamp(travelled / dt, 0.0, 1.0) - m.stride) * std::min(1.0, 10 * dt);
     if (speed > 0 && travelled < 0.0001 && m.body.grounded && !m.body.waitingForTerrain)
         m.timer = std::min(m.timer, 0.25);
+    // Any future AI producing NaN must trip here in Debug, not leak into AABB
+    // voxel queries (where floor(NaN) casts are undefined behavior).
+    assert(std::isfinite(m.body.position.x) && std::isfinite(m.body.position.y) &&
+           std::isfinite(m.body.position.z));
+    assert(std::isfinite(m.yaw) && std::isfinite(m.targetYaw));
 }
 
 void MobSystem::update(double dt, const MobWorld &world, glm::dvec3 observer, double availableRadius,

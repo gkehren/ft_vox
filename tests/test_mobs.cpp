@@ -231,6 +231,33 @@ static void timing()
     for (auto p : final)
         CHECK(glm::length(p - final[0]) < 1e-7);
 }
+static void contracts()
+{
+    World w;
+    MobSystem s;
+    s.reset(42);
+    // Out-of-range species is rejected before any state mutation.
+    CHECK(!s.add(static_cast<MobSpecies>(255), {0.5, 0.001, 0.5}, 1, 1, w));
+    CHECK(s.mobs().empty());
+    // Duplicate ids are rejected and leave the population unchanged.
+    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 42, 42, w));
+    CHECK(!s.add(MobSpecies::Pig, {8.5, 0.001, 0.5}, 42, 42, w));
+    CHECK(s.mobs().size() == 1);
+    // Capacity is a hard ceiling.
+    for (size_t i = s.mobs().size(); i < MobSettings::capacity; ++i)
+        CHECK(s.add(MobSpecies(i % kMobSpeciesCount), {8.0 + (i % 8) * 4.0, 0.001, 8.0 + (i / 8) * 4.0},
+                    100 + i, 100 + i, w));
+    CHECK(s.mobs().size() == MobSettings::capacity);
+    CHECK(!s.add(MobSpecies::Chicken, {-4.5, 0.001, 0.5}, 999, 999, w));
+    CHECK(s.mobs().size() == MobSettings::capacity);
+    // Reset clears population and simulation bookkeeping; ids become reusable.
+    s.update(1.0 / 60, w, {16, 0, 12}, 112);
+    s.reset(7);
+    CHECK(s.mobs().empty());
+    CHECK(s.droppedSteps() == 0);
+    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 42, 42, w));
+    CHECK(s.mobs().size() == 1);
+}
 static void finiteSteering()
 {
     // Two neighbors dead ahead at 0.25 blocks contribute separation vectors
@@ -349,6 +376,7 @@ int main(int argc, char **argv)
         return 0;
     }
     controller();
+    contracts();
     finiteSteering();
     population();
     timing();
