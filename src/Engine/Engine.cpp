@@ -140,9 +140,7 @@ Engine::Engine(std::string resourcePackRoot)
 
 	renderSettings.minRenderDistance = 192;
 	renderSettings.maxRenderDistance = 512;
-	renderSettings.streamFrontBias = 0.30f;
-	if (m_cliFrontBias)
-		renderSettings.streamFrontBias = *m_cliFrontBias;
+	renderSettings.streamFrontBias = 0.30f; // may be overridden by setStreamFrontBias before run()
 	// Pool sized for unload disk (kChunkUnloadDistanceFactor × view) + headroom.
 	chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 
@@ -916,7 +914,8 @@ void Engine::tickBenchmark(double dt)
 				: nullptr,
 			vkContext ? vkContext->getDeviceProperties().deviceName : nullptr,
 			vkContext ? vkContext->hasMultiDrawIndirect() : false,
-			vkContext ? vkContext->maxDrawIndirectCount() : 0);
+			vkContext ? vkContext->maxDrawIndirectCount() : 0,
+			renderSettings.streamFrontBias);
 
 		reloadWorld(cfg.seed);
 		m_benchmark.onWorldReady(camera.getPosition());

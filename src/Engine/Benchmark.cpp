@@ -43,6 +43,15 @@ void Benchmark::requestStart()
 	m_peakChunks = m_peakDraw = m_peakLoad = m_peakGen = m_peakMesh = 0;
 	m_peakIndirectCommands = 0;
 	m_over16 = m_over33 = 0;
+	// Streaming-counter window state must reset with everything else: a
+	// second benchmark in the same process would otherwise subtract fresh
+	// ChunkManager counters from stale ones (uint64 underflow), and a new run
+	// must reopen its own window at the Warmup->Running flip (issue #108).
+	m_streamStats = {};
+	m_streamStatsStart = {};
+	m_streamStatsLatest = {};
+	m_streamStatsStarted = false;
+	m_streamWindowStartPending = false;
 	const float dur = std::clamp(m_config.durationSec, 5.f, 300.f);
 	m_config.durationSec = dur;
 	m_config.warmupSec = std::clamp(m_config.warmupSec, 0.f, dur);
@@ -70,6 +79,10 @@ void Benchmark::onWorldReady(const glm::vec3 &surfaceCenter)
 	{
 		telemetry::registry().beginCapture();
 		m_phase = BenchmarkPhase::Running;
+		// No Warmup->Running flip will happen in tick(): open the streaming
+		// counter window here so the engine snapshots before this frame's
+		// tickStreaming (issue #108).
+		m_streamWindowStartPending = true;
 	}
 }
 
@@ -77,7 +90,8 @@ void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
 									const char *presentMode,
 									const char *device,
 									bool multiDrawIndirect,
-									uint32_t maxDrawIndirectCount)
+									uint32_t maxDrawIndirectCount,
+									float streamFrontBias)
 {
 	m_viewDistance = viewDist;
 	m_windowW = w;
@@ -87,6 +101,7 @@ void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
 	m_deviceName = device ? device : "";
 	m_multiDrawIndirect = multiDrawIndirect;
 	m_maxDrawIndirectCount = maxDrawIndirectCount;
+	m_streamFrontBias = streamFrontBias;
 }
 
 void Benchmark::applyCamera(Camera &camera, float t01) const
@@ -384,6 +399,7 @@ void Benchmark::finalize()
 	r.vsync = m_vsync;
 	r.multiDrawIndirect = m_multiDrawIndirect;
 	r.maxDrawIndirectCount = m_maxDrawIndirectCount;
+	r.streamFrontBias = m_streamFrontBias;
 	r.presentMode = m_presentMode;
 	r.deviceName = m_deviceName;
 
@@ -420,6 +436,7 @@ std::string Benchmark::formatReportText() const
 	  << "s  Measured: " << r.measuredSec << "s  Frames: " << r.frames << "\n";
 	o << "Device: " << r.deviceName << "\n";
 	o << "Viewport: " << r.windowW << "x" << r.windowH << "  ViewDist: " << r.viewDistance
+	  << "  FrontBias: " << r.streamFrontBias
 	  << "  VSync: " << (r.vsync ? "on" : "off")
 	  << "  PresentMode: " << r.presentMode << "\n";
 	o << "Indirect: multiDrawIndirect=" << (r.multiDrawIndirect ? "yes" : "no")

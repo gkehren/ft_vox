@@ -107,6 +107,7 @@ struct BenchmarkReport
 	bool vsync{false};
 	bool multiDrawIndirect{false};
 	uint32_t maxDrawIndirectCount{0};
+	float streamFrontBias{0.f};
 	std::string presentMode;
 	std::string deviceName;
 
@@ -255,6 +256,7 @@ private:
 	bool m_vsync{false};
 	bool m_multiDrawIndirect{false};
 	uint32_t m_maxDrawIndirectCount{0};
+	float m_streamFrontBias{0.f};
 	std::string m_presentMode;
 	std::string m_deviceName;
 
@@ -262,7 +264,8 @@ public:
 	void setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
 							 const char *presentMode, const char *device,
 							 bool multiDrawIndirect = false,
-							 uint32_t maxDrawIndirectCount = 0);
+							 uint32_t maxDrawIndirectCount = 0,
+							 float streamFrontBias = 0.f);
 	/// Latest streaming maintenance counters, sampled by the engine each frame
 	/// and published in the report (issue #108).
 	void setStreamingMaintenanceStats(const StreamingMaintenanceStats &s) { m_streamStats = s; }
