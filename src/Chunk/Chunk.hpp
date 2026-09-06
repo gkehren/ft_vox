@@ -235,6 +235,8 @@ public:
 
 	uint32_t getOpaqueIndexCount() const { return opaqueIndexCount; }
 	uint32_t getWaterIndexCount() const { return waterIndexCount; }
+	uint32_t getCachedOpaqueDrawCount() const { return m_cachedOpaqueDrawCount; }
+	uint32_t getCachedWaterDrawCount() const { return m_cachedWaterDrawCount; }
 
 	size_t getActiveIndex() const { return m_activeIndex; }
 	void setActiveIndex(size_t index) { m_activeIndex = index; }
@@ -298,6 +300,16 @@ private:
 	MeshArena::Range m_lodOpaqueIndices{};
 	MeshArena::Range m_lodWaterVertices{};
 	MeshArena::Range m_lodWaterIndices{};
+
+	// Per-chunk indirect draw cache (issue #109 / issue #122): rebuilt only
+	// when GPU mesh state changes (upload commit paths, LOD transitions,
+	// reset/release). Eliminates per-pass per-frame reconstruction of draw
+	// descriptors across OpaquePass, ShadowPass (3 cascades), and WaterPass.
+	void rebuildIndirectDrawCache();
+	uint32_t m_cachedOpaqueDrawCount{0};
+	uint32_t m_cachedWaterDrawCount{0};
+	std::array<IndirectDraw, kOccupancySections> m_cachedOpaqueDraws{};
+	std::array<IndirectDraw, kOccupancySections> m_cachedWaterDraws{};
 
 	VoxelPool *m_voxelPool{nullptr};
 	VoxelStorage *m_storage{nullptr};
