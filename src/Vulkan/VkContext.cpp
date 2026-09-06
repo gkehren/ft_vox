@@ -141,6 +141,7 @@ void VkContext::init(SDL_Window *window)
 			  << " dynamicRendering=" << (m_dynamicRendering ? "yes" : "no")
 			  << " timelineSemaphores=" << (m_timelineSemaphores ? "yes" : "no")
 			  << " multiDrawIndirect=" << (m_multiDrawIndirect ? "yes" : "no")
+			  << " maxDrawIndirectCount=" << m_deviceProperties.limits.maxDrawIndirectCount
 			  << " portabilitySubset=" << (m_portabilitySubset ? "yes" : "no") << "\n";
 	std::cout << "  VMA allocator: ready\n";
 }

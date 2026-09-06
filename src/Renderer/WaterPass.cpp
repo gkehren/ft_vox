@@ -1,4 +1,5 @@
 #include "Renderer/WaterPass.hpp"
+#include "Renderer/IndirectDrawEmit.hpp"
 #include "Vulkan/MeshArena.hpp"
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
@@ -307,6 +308,10 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 			}
 		}
 		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+		// Computed once per record: batches obey multiDrawIndirect and
+		// maxDrawIndirectCount (see IndirectDrawUtils.hpp).
+		const uint32_t batchLimit = indirectBatchLimit(
+			m_context->hasMultiDrawIndirect(), m_context->maxDrawIndirectCount());
 		auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(m_indirect[frameIndex].mapped);
 		for (size_t i = 0; i < count; ++i)
 			dst[i] = m_scratch[i].cmd;
@@ -327,21 +332,12 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 			VkDeviceSize voff = 0;
 			vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
 			vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
-			if (m_context->hasMultiDrawIndirect())
-			{
-				vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex].buf.buffer,
-										 first * sizeof(VkDrawIndexedIndirectCommand),
-										 static_cast<uint32_t>(j - i), sizeof(VkDrawIndexedIndirectCommand));
-			}
-			else
-			{
-				// Without multiDrawIndirect, drawCount must be 0 or 1: issue
-				// the run one command at a time (back-to-front order kept).
-				for (size_t k = i; k < j; ++k)
-					vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex].buf.buffer,
-											 k * sizeof(VkDrawIndexedIndirectCommand), 1,
-											 sizeof(VkDrawIndexedIndirectCommand));
-			}
+			// One call per batch inside the contiguous run: the back-to-front
+			// order is untouched, the run is only split because of the
+			// hardware batch ceiling (or per command without
+			// multiDrawIndirect).
+			issueIndirectRange(cmd, m_indirect[frameIndex].buf.buffer, first, j - i,
+							   batchLimit);
 			telemetry::registry().add(telemetry::ArenaBinds);
 			first += static_cast<uint32_t>(j - i);
 			i = j;

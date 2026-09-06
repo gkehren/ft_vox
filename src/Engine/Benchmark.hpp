@@ -102,6 +102,8 @@ struct BenchmarkReport
 	int windowW{0};
 	int windowH{0};
 	bool vsync{false};
+	bool multiDrawIndirect{false};
+	uint32_t maxDrawIndirectCount{0};
 	std::string presentMode;
 	std::string deviceName;
 
@@ -243,12 +245,16 @@ private:
 	int m_viewDistance{0};
 	int m_windowW{0}, m_windowH{0};
 	bool m_vsync{false};
+	bool m_multiDrawIndirect{false};
+	uint32_t m_maxDrawIndirectCount{0};
 	std::string m_presentMode;
 	std::string m_deviceName;
 
 public:
 	void setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
-							 const char *presentMode, const char *device);
+							 const char *presentMode, const char *device,
+							 bool multiDrawIndirect = false,
+							 uint32_t maxDrawIndirectCount = 0);
 	void markForceVsync(bool prevVsync)
 	{
 		m_hadForceVsync = true;

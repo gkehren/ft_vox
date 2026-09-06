@@ -893,7 +893,9 @@ void Engine::tickBenchmark(double dt)
 			swapchain
 				? VkSwapchain::presentModeName(swapchain->getPresentMode())
 				: nullptr,
-			vkContext ? vkContext->getDeviceProperties().deviceName : nullptr);
+			vkContext ? vkContext->getDeviceProperties().deviceName : nullptr,
+			vkContext ? vkContext->hasMultiDrawIndirect() : false,
+			vkContext ? vkContext->maxDrawIndirectCount() : 0);
 
 		reloadWorld(cfg.seed);
 		m_benchmark.onWorldReady(camera.getPosition());

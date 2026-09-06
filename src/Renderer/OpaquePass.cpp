@@ -1,4 +1,5 @@
 #include "Renderer/OpaquePass.hpp"
+#include "Renderer/IndirectDrawEmit.hpp"
 #include "Vulkan/MeshArena.hpp"
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
@@ -198,6 +199,10 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			}
 		}
 		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+		// Computed once per record: batches obey multiDrawIndirect and
+		// maxDrawIndirectCount (see IndirectDrawUtils.hpp).
+		const uint32_t batchLimit = indirectBatchLimit(
+			m_context->hasMultiDrawIndirect(), m_context->maxDrawIndirectCount());
 		// The overwhelming common case: every range lives in the same page
 		// pair, so a linear same-key scan replaces the sort.
 		const uint64_t firstKey =
@@ -239,21 +244,10 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			VkDeviceSize voff = 0;
 			vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
 			vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
-			if (m_context->hasMultiDrawIndirect())
-			{
-				vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex].buf.buffer,
-										 first * sizeof(VkDrawIndexedIndirectCommand),
-										 static_cast<uint32_t>(j - i), sizeof(VkDrawIndexedIndirectCommand));
-			}
-			else
-			{
-				// Without multiDrawIndirect, drawCount must be 0 or 1: issue
-				// the group one command at a time.
-				for (size_t k = i; k < j; ++k)
-					vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex].buf.buffer,
-											 k * sizeof(VkDrawIndexedIndirectCommand), 1,
-											 sizeof(VkDrawIndexedIndirectCommand));
-			}
+			// One call per batch: drawCount stays under the hardware ceiling
+			// and degrades to per-command draws without multiDrawIndirect.
+			issueIndirectRange(cmd, m_indirect[frameIndex].buf.buffer, first, j - i,
+							   batchLimit);
 			telemetry::registry().add(telemetry::ArenaBinds);
 			if (std::getenv("FT_VOX_VALIDATE_INDIRECT") && m_debugFrames < 3)
 			{

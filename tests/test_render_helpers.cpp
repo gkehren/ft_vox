@@ -8,6 +8,7 @@
 #include <Renderer/PostDefaults.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 #include <Renderer/ResourcePackReader.hpp>
+#include <Renderer/IndirectDrawUtils.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <fstream>
 #include <filesystem>
@@ -515,11 +516,66 @@ int main()
 		}
 	}
 
+	// --- Indirect batching contract (issue #109 review) ---
+	{
+		// Batch-limit policy: no multiDrawIndirect -> exactly one command
+		// per draw, whatever the hardware claims.
+		if (indirectBatchLimit(false, 65535u) != 1)
+			ok = fail("indirectBatchLimit without multiDrawIndirect must be 1");
+		if (indirectBatchLimit(false, 0u) != 1)
+			ok = fail("indirectBatchLimit(false, 0) must still be 1");
+		// Degenerate hardware values can never produce a 0 limit.
+		if (indirectBatchLimit(true, 0u) != 1)
+			ok = fail("indirectBatchLimit(true, 0) must clamp to 1");
+		if (indirectBatchLimit(true, 4096u) != 4096u)
+			ok = fail("indirectBatchLimit(true, 4096) must pass the hardware limit through");
+
+		const struct
+		{
+			size_t total;
+			uint32_t maxBatch;
+			size_t expectedBatches;
+		} cases[] = {
+			{0, 64, 0},     {1, 1, 1},        {10, 1, 10},
+			{10, 4, 3},     {4096, 4096, 1},  {4097, 4096, 2},
+		};
+		for (const auto &c : cases)
+		{
+			const std::vector<uint32_t> counts =
+				splitIndirectBatchCounts(c.total, c.maxBatch);
+			if (counts.size() != c.expectedBatches)
+				ok = fail("splitIndirectBatchCounts(" + std::to_string(c.total) + ", " +
+				          std::to_string(c.maxBatch) + ") produced " +
+				          std::to_string(counts.size()) + " batches, expected " +
+				          std::to_string(c.expectedBatches));
+			size_t sum = 0;
+			for (const uint32_t batch : counts)
+			{
+				if (batch < 1 || batch > c.maxBatch)
+					ok = fail("batch outside [1, maxBatch] for total=" +
+					          std::to_string(c.total) + " maxBatch=" +
+					          std::to_string(c.maxBatch));
+				sum += batch;
+			}
+			if (sum != c.total)
+				ok = fail("split batches must sum to the command count");
+		}
+		// Exact shapes from the review plan.
+		{
+			const auto big = splitIndirectBatchCounts(4097, 4096);
+			if (big.size() != 2 || big[0] != 4096u || big[1] != 1u)
+				ok = fail("4097/4096 must split into [4096, 1]");
+			const auto ones = splitIndirectBatchCounts(10, 1);
+			if (ones.size() != 10)
+				ok = fail("10/1 must split into ten single-command batches");
+		}
+	}
+
 	if (!ok)
 	{
 		std::cerr << "test_render_helpers: FAILED\n";
 		return EXIT_FAILURE;
 	}
-	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + block textures + FrameUBO)\n";
+	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + block textures + FrameUBO + indirect batching)\n";
 	return EXIT_SUCCESS;
 }

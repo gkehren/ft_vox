@@ -74,7 +74,9 @@ void Benchmark::onWorldReady(const glm::vec3 &surfaceCenter)
 
 void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
 									const char *presentMode,
-									const char *device)
+									const char *device,
+									bool multiDrawIndirect,
+									uint32_t maxDrawIndirectCount)
 {
 	m_viewDistance = viewDist;
 	m_windowW = w;
@@ -82,6 +84,8 @@ void Benchmark::setSettingsSnapshot(int viewDist, int w, int h, bool vsync,
 	m_vsync = vsync;
 	m_presentMode = presentMode ? presentMode : "";
 	m_deviceName = device ? device : "";
+	m_multiDrawIndirect = multiDrawIndirect;
+	m_maxDrawIndirectCount = maxDrawIndirectCount;
 }
 
 void Benchmark::applyCamera(Camera &camera, float t01) const
@@ -363,6 +367,8 @@ void Benchmark::finalize()
 	r.windowW = m_windowW;
 	r.windowH = m_windowH;
 	r.vsync = m_vsync;
+	r.multiDrawIndirect = m_multiDrawIndirect;
+	r.maxDrawIndirectCount = m_maxDrawIndirectCount;
 	r.presentMode = m_presentMode;
 	r.deviceName = m_deviceName;
 
@@ -400,7 +406,9 @@ std::string Benchmark::formatReportText() const
 	o << "Device: " << r.deviceName << "\n";
 	o << "Viewport: " << r.windowW << "x" << r.windowH << "  ViewDist: " << r.viewDistance
 	  << "  VSync: " << (r.vsync ? "on" : "off")
-	  << "  PresentMode: " << r.presentMode << "\n\n";
+	  << "  PresentMode: " << r.presentMode << "\n";
+	o << "Indirect: multiDrawIndirect=" << (r.multiDrawIndirect ? "yes" : "no")
+	  << "  maxDrawIndirectCount=" << r.maxDrawIndirectCount << "\n\n";
 	o << "Frame times (ms)\n";
 	o << "  avg " << r.avgMs << "  min " << r.minMs << "  max " << r.maxMs << "\n";
 	o << "  p50 " << r.p50Ms << "  p95 " << r.p95Ms << "  p99 " << r.p99Ms << "\n";

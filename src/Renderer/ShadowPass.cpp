@@ -1,4 +1,5 @@
 #include "Renderer/ShadowPass.hpp"
+#include "Renderer/IndirectDrawEmit.hpp"
 #include "Vulkan/MeshArena.hpp"
 #include <algorithm>
 #include <iostream>
@@ -266,6 +267,10 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 			}
 			const size_t count =
 				std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+			// Computed once per cascade: batches obey multiDrawIndirect and
+			// maxDrawIndirectCount (see IndirectDrawUtils.hpp).
+			const uint32_t batchLimit = indirectBatchLimit(
+				m_context->hasMultiDrawIndirect(), m_context->maxDrawIndirectCount());
 			const uint64_t firstKey =
 				(uint64_t(m_scratch[0].vertexPage) << 32) | m_scratch[0].indexPage;
 			bool single = true;
@@ -305,21 +310,11 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 				VkDeviceSize voff = 0;
 				vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
 				vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
-				if (m_context->hasMultiDrawIndirect())
-				{
-					vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex][static_cast<size_t>(c)].buf.buffer,
-											 first * sizeof(VkDrawIndexedIndirectCommand),
-											 static_cast<uint32_t>(j - i), sizeof(VkDrawIndexedIndirectCommand));
-				}
-				else
-				{
-					// Without multiDrawIndirect, drawCount must be 0 or 1:
-					// issue the group one command at a time.
-					for (size_t k = i; k < j; ++k)
-						vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex][static_cast<size_t>(c)].buf.buffer,
-												 k * sizeof(VkDrawIndexedIndirectCommand), 1,
-												 sizeof(VkDrawIndexedIndirectCommand));
-				}
+				// One call per batch: drawCount stays under the hardware
+				// ceiling and degrades to per-command draws without
+				// multiDrawIndirect.
+				issueIndirectRange(cmd, m_indirect[frameIndex][static_cast<size_t>(c)].buf.buffer,
+								   first, j - i, batchLimit);
 				telemetry::registry().add(telemetry::ArenaBinds);
 				first += static_cast<uint32_t>(j - i);
 				i = j;

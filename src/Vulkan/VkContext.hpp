@@ -58,6 +58,13 @@ public:
 	/// Whether vkCmdDrawIndexedIndirect may batch drawCount > 1. When false,
 	/// indirect passes must issue one draw per command (drawCount = 1).
 	bool hasMultiDrawIndirect() const { return m_multiDrawIndirect; }
+	/// Spec ceiling for one vkCmdDrawIndexedIndirect's drawCount
+	/// (VUID-vkCmdDrawIndexedIndirect-drawCount-02719). Batches must be split
+	/// against this even when multiDrawIndirect is enabled.
+	uint32_t maxDrawIndirectCount() const
+	{
+		return m_deviceProperties.limits.maxDrawIndirectCount;
+	}
 	bool hasPortabilitySubset() const { return m_portabilitySubset; }
 	bool isValidationEnabled() const { return m_validationEnabled; }
 	/// Includes initialization and shutdown; reset only by the next init().
