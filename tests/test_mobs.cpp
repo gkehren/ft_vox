@@ -231,6 +231,47 @@ static void timing()
     for (auto p : final)
         CHECK(glm::length(p - final[0]) < 1e-7);
 }
+static void finiteSteering()
+{
+    // Two neighbors dead ahead at 0.25 blocks contribute separation vectors
+    // that cancel the walk direction exactly (yaw 0 = exact -Z). While
+    // airborne the obstacle probes are skipped, so a normalized zero would
+    // flow straight into velocity/position; steering must fall back to yaw.
+    World w;
+    auto m = walker();
+    m.yaw = m.targetYaw = 0;
+    m.body.grounded = false;
+    m.body.position = {0, 2.0, 0};
+    const std::array<glm::dvec3, 2> neighbors{glm::dvec3{0, 2.0, -0.25}, glm::dvec3{0, 2.0, -0.25}};
+    physics::QueryStats q;
+    for (int i = 0; i < 120; ++i)
+        tickMob(m, w, 1.0 / 60, neighbors, q);
+    CHECK(std::isfinite(m.body.position.x));
+    CHECK(std::isfinite(m.body.position.y));
+    CHECK(std::isfinite(m.body.position.z));
+    CHECK(std::isfinite(m.body.velocity.x));
+    CHECK(std::isfinite(m.body.velocity.y));
+    CHECK(std::isfinite(m.body.velocity.z));
+    CHECK(std::isfinite(m.yaw));
+    CHECK(std::isfinite(m.targetYaw));
+    // 48 densely packed mobs stay finite over a long run.
+    MobSystem s;
+    s.reset(7);
+    for (size_t i = 0; i < MobSettings::capacity; ++i)
+        CHECK(s.add(MobSpecies(i % 4), {(i % 8) * 1.5, 0.001, (i / 8) * 1.5}, i + 1, i + 1, w));
+    for (int i = 0; i < 1000; ++i)
+    {
+        s.update(1.0 / 60, w, {5.0, 0, 4.0}, 112);
+        for (auto &mob : s.mobs())
+        {
+            CHECK(std::isfinite(mob.body.position.x));
+            CHECK(std::isfinite(mob.body.position.y));
+            CHECK(std::isfinite(mob.body.position.z));
+            CHECK(std::isfinite(mob.yaw));
+            CHECK(std::isfinite(mob.targetYaw));
+        }
+    }
+}
 static void models()
 {
     MobModels models;
@@ -308,6 +349,7 @@ int main(int argc, char **argv)
         return 0;
     }
     controller();
+    finiteSteering();
     population();
     timing();
     models();

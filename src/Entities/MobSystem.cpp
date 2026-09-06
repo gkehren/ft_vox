@@ -172,7 +172,13 @@ void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
         if (d > 0.001 && d < 1.5)
             direction += away / d * ((1.5 - d) * 0.4);
     }
-    direction = glm::normalize(direction);
+    // Neighbor separation can cancel the walk direction exactly; normalizing a
+    // zero vector would poison position/velocity/voxel queries with NaN.
+    const double directionSq = glm::dot(direction, direction);
+    if (directionSq > 1e-12)
+        direction /= std::sqrt(directionSq);
+    else
+        direction = glm::dvec3{std::sin(m.yaw), 0.0, -std::cos(m.yaw)};
     auto immersion = physics::immersion(world, m.body.bounds(), queries);
     bool swimming = immersion.water + immersion.lava > 0.1;
     m.shoreTimer -= dt;
