@@ -167,7 +167,7 @@ File: `src/Chunk/Chunk.hpp` / `Chunk.cpp`.
 | `generateMesh` / `generateLODMesh` | Greedy meshing; far chunks may use LOD mesh |
 | `uploadToGPU` | Sync upload (bootstrap/tests) |
 | `uploadToGPUAsync` | Staging ring + fresh arena ranges, frame-aware retire of replaced ranges (hot path) |
-| `collectOpaqueDraws` / `collectWaterDraws` | Emit one `VkDrawIndexedIndirectCommand` per live section (grouped by arena page pair) |
+| `collectOpaqueDraws` / `collectWaterDraws` | Append cached `VkDrawIndexedIndirectCommand` descriptors per live section (rebuilt at upload-commit, issue #109 / #122) |
 | `deleteVoxel` / `placeVoxel` | Edit + remesh flags |
 | `rebuildShellFromNeighbors` | Face correctness across chunk edges |
 

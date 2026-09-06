@@ -1491,6 +1491,65 @@ int main()
 			CHECK(chunk->getOpaqueIndexCount() == 144 && chunk->getWaterIndexCount() == 96,
 			      "bootfail C: retry published both streams");
 		}
+
+		// -----------------------------------------------------------------
+		// 15. Indirect Draw Descriptor Cache (issue #109 / issue #122)
+		// -----------------------------------------------------------------
+		{
+			Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f, 0.0f, 0.0f));
+			CHECK(chunk->getCachedOpaqueDrawCount() == 0, "cache: fresh chunk has 0 cached opaque draws");
+			CHECK(chunk->getCachedWaterDrawCount() == 0, "cache: fresh chunk has 0 cached water draws");
+
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "cache: prepare+generate");
+			CHECK(chunk->generateMesh(), "cache: mesh publishes");
+			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+
+			const uint32_t opCount = chunk->getCachedOpaqueDrawCount();
+			const uint32_t wtCount = chunk->getCachedWaterDrawCount();
+			CHECK(opCount > 0, "cache: full mesh populates cached opaque draws");
+
+			std::vector<Chunk::IndirectDraw> opDraws1, opDraws2;
+			size_t collected1 = chunk->collectOpaqueDraws(opDraws1);
+			CHECK(collected1 == opCount, "cache: collectOpaqueDraws matches cached count");
+			CHECK(opDraws1.size() == opCount, "cache: collectOpaqueDraws output size matches");
+
+			// Multiple collections without upload yield identical results
+			size_t collected2 = chunk->collectOpaqueDraws(opDraws2);
+			CHECK(collected2 == opCount && opDraws2.size() == opCount, "cache: second collection matches");
+			for (size_t i = 0; i < opCount; ++i)
+			{
+				CHECK(opDraws1[i].cmd.indexCount == opDraws2[i].cmd.indexCount, "cache: draw indexCount identical");
+				CHECK(opDraws1[i].cmd.firstIndex == opDraws2[i].cmd.firstIndex, "cache: draw firstIndex identical");
+				CHECK(opDraws1[i].cmd.vertexOffset == opDraws2[i].cmd.vertexOffset, "cache: draw vertexOffset identical");
+				CHECK(opDraws1[i].vertexPage == opDraws2[i].vertexPage, "cache: draw vertexPage identical");
+				CHECK(opDraws1[i].indexPage == opDraws2[i].indexPage, "cache: draw indexPage identical");
+			}
+
+			// Move constructor preserves cache
+			Chunk moved(std::move(*chunk));
+			CHECK(moved.getCachedOpaqueDrawCount() == opCount, "cache: move ctor transfers cached opaque count");
+			CHECK(moved.getCachedWaterDrawCount() == wtCount, "cache: move ctor transfers cached water count");
+			CHECK(chunk->getCachedOpaqueDrawCount() == 0, "cache: move ctor zeroes source opaque count");
+			CHECK(chunk->getCachedWaterDrawCount() == 0, "cache: move ctor zeroes source water count");
+
+			std::vector<Chunk::IndirectDraw> movedDraws;
+			CHECK(moved.collectOpaqueDraws(movedDraws) == opCount, "cache: moved chunk collects correctly");
+
+			// Move assignment preserves cache
+			Chunk assigned(glm::vec3(16.0f, 0.0f, 0.0f));
+			assigned = std::move(moved);
+			CHECK(assigned.getCachedOpaqueDrawCount() == opCount, "cache: move assign transfers cached count");
+			CHECK(moved.getCachedOpaqueDrawCount() == 0, "cache: move assign zeroes source count");
+
+			// Release resets cache
+			assigned.releaseGPU();
+			CHECK(assigned.getCachedOpaqueDrawCount() == 0, "cache: releaseGPU zeroes cached opaque count");
+			CHECK(assigned.getCachedWaterDrawCount() == 0, "cache: releaseGPU zeroes cached water count");
+			std::vector<Chunk::IndirectDraw> emptyDraws;
+			CHECK(assigned.collectOpaqueDraws(emptyDraws) == 0, "cache: collection on released chunk is empty");
+
+			chunkPool.release(chunk);
+		}
 	}
 
 	arenas.shutdown();

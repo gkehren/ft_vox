@@ -127,6 +127,10 @@ Chunk::Chunk(Chunk &&other) noexcept
       m_lodOpaqueIndices(other.m_lodOpaqueIndices),
       m_lodWaterVertices(other.m_lodWaterVertices),
       m_lodWaterIndices(other.m_lodWaterIndices),
+      m_cachedOpaqueDrawCount(other.m_cachedOpaqueDrawCount),
+      m_cachedWaterDrawCount(other.m_cachedWaterDrawCount),
+      m_cachedOpaqueDraws(other.m_cachedOpaqueDraws),
+      m_cachedWaterDraws(other.m_cachedWaterDraws),
       opaqueIndexCount(other.opaqueIndexCount), waterIndexCount(other.waterIndexCount),
       meshNeedsUpdate(other.meshNeedsUpdate.load()),
       m_voxelPool(other.m_voxelPool),
@@ -158,6 +162,10 @@ Chunk::Chunk(Chunk &&other) noexcept
   other.m_lodOpaqueIndices = {};
   other.m_lodWaterVertices = {};
   other.m_lodWaterIndices = {};
+  other.m_cachedOpaqueDrawCount = 0;
+  other.m_cachedWaterDrawCount = 0;
+  other.m_cachedOpaqueDraws.fill({});
+  other.m_cachedWaterDraws.fill({});
   other.m_sectionGpu.fill({});
   other.m_sectionGpuWater.fill({});
   other.m_dirtySections.store(0, std::memory_order_relaxed);
@@ -225,6 +233,10 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     m_lodOpaqueIndices = other.m_lodOpaqueIndices;
     m_lodWaterVertices = other.m_lodWaterVertices;
     m_lodWaterIndices = other.m_lodWaterIndices;
+    m_cachedOpaqueDrawCount = other.m_cachedOpaqueDrawCount;
+    m_cachedWaterDrawCount = other.m_cachedWaterDrawCount;
+    m_cachedOpaqueDraws = other.m_cachedOpaqueDraws;
+    m_cachedWaterDraws = other.m_cachedWaterDraws;
     m_sectionGpu = other.m_sectionGpu;
     m_sectionGpuWater = other.m_sectionGpuWater;
     m_dirtySections.store(other.m_dirtySections.load(std::memory_order_relaxed),
@@ -242,6 +254,10 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     other.m_lodOpaqueIndices = {};
     other.m_lodWaterVertices = {};
     other.m_lodWaterIndices = {};
+    other.m_cachedOpaqueDrawCount = 0;
+    other.m_cachedWaterDrawCount = 0;
+    other.m_cachedOpaqueDraws.fill({});
+    other.m_cachedWaterDraws.fill({});
     other.m_sectionGpu.fill({});
     other.m_sectionGpuWater.fill({});
     other.m_dirtySections.store(0, std::memory_order_relaxed);
@@ -1785,28 +1801,43 @@ void Chunk::releasePendingMeshResult()
 }
 
 
-// Draw command collection (issue #109): the passes bind the shared mesh
-// arenas once per page pair and submit one indirect draw per live section.
-// The old per-chunk bind+drawIndexed path is gone; these collectors produce
-// exactly the data each pass needs, and every section's stored indices stay
-// section-local (vertexOffset does the rebase on the GPU).
-size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const
+// Draw command collection (issue #109 / issue #122): draw descriptors are
+// cached per chunk and rebuilt exclusively when GPU-side truth changes
+// (upload commit paths, LOD transitions, reset/release). The passes bind the
+// shared mesh arenas once per page pair and submit one indirect draw per live
+// section; every section's stored indices stay section-local (vertexOffset
+// does the rebase on the GPU).
+void Chunk::rebuildIndirectDrawCache()
 {
-  if (opaqueIndexCount == 0 || meshNeedsUpdate.load())
-    return 0;
+  m_cachedOpaqueDrawCount = 0;
+  m_cachedWaterDrawCount = 0;
+
   if (m_isLODMesh)
   {
-    if (m_lodOpaqueIndices.empty() || m_lodOpaqueVertices.empty())
-      return 0;
-    IndirectDraw d;
-    d.cmd = {static_cast<uint32_t>(m_lodOpaqueIndices.bytes / sizeof(uint32_t)), 1,
-             static_cast<uint32_t>(m_lodOpaqueIndices.offset / sizeof(uint32_t)),
-             static_cast<int32_t>(m_lodOpaqueVertices.offset / sizeof(Vertex)), 0};
-    d.vertexPage = m_lodOpaqueVertices.page;
-    d.indexPage = m_lodOpaqueIndices.page;
-    out.push_back(d);
-    return 1;
+    if (opaqueIndexCount > 0 && !m_lodOpaqueIndices.empty() && !m_lodOpaqueVertices.empty())
+    {
+      IndirectDraw &d = m_cachedOpaqueDraws[0];
+      d.cmd = {static_cast<uint32_t>(m_lodOpaqueIndices.bytes / sizeof(uint32_t)), 1,
+               static_cast<uint32_t>(m_lodOpaqueIndices.offset / sizeof(uint32_t)),
+               static_cast<int32_t>(m_lodOpaqueVertices.offset / sizeof(Vertex)), 0};
+      d.vertexPage = m_lodOpaqueVertices.page;
+      d.indexPage = m_lodOpaqueIndices.page;
+      m_cachedOpaqueDrawCount = 1;
+    }
+
+    if (waterIndexCount > 0 && !m_lodWaterIndices.empty() && !m_lodWaterVertices.empty())
+    {
+      IndirectDraw &d = m_cachedWaterDraws[0];
+      d.cmd = {static_cast<uint32_t>(m_lodWaterIndices.bytes / sizeof(uint32_t)), 1,
+               static_cast<uint32_t>(m_lodWaterIndices.offset / sizeof(uint32_t)),
+               static_cast<int32_t>(m_lodWaterVertices.offset / sizeof(Vertex)), 0};
+      d.vertexPage = m_lodWaterVertices.page;
+      d.indexPage = m_lodWaterIndices.page;
+      m_cachedWaterDrawCount = 1;
+    }
+    return;
   }
+
   // One command per live section (issue #109). Sections are NEVER merged
   // into a single command: each section's stored indices are section-local
   // and its vertices start at the section's own vertexBase, so only a
@@ -1814,62 +1845,64 @@ size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const
   // sections would keep the first section's vertexOffset and redirect every
   // following section's indices into the first section's vertices -
   // destroyed geometry and missing faces.
-  size_t added = 0;
-  for (const SectionGpuSlot &slot : m_sectionGpu)
+  if (opaqueIndexCount > 0)
   {
-    if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
-      continue;
-    IndirectDraw d;
-    d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
-             static_cast<int32_t>(slot.vertexBase), 0};
-    d.vertexPage = slot.vertexPage;
-    d.indexPage = slot.indexPage;
-    out.push_back(d);
-    ++added;
+    for (const SectionGpuSlot &slot : m_sectionGpu)
+    {
+      if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
+        continue;
+      IndirectDraw &d = m_cachedOpaqueDraws[m_cachedOpaqueDrawCount++];
+      d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
+               static_cast<int32_t>(slot.vertexBase), 0};
+      d.vertexPage = slot.vertexPage;
+      d.indexPage = slot.indexPage;
+    }
   }
-  return added;
+
+  // Same rule as opaque: one command per live section, each carrying its
+  // own vertexOffset (issue #109). Never merge - section-local indices
+  // would redirect into the first merged section's vertices.
+  if (waterIndexCount > 0)
+  {
+    for (const SectionGpuSlot &slot : m_sectionGpuWater)
+    {
+      if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
+        continue;
+      IndirectDraw &d = m_cachedWaterDraws[m_cachedWaterDrawCount++];
+      d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
+               static_cast<int32_t>(slot.vertexBase), 0};
+      d.vertexPage = slot.vertexPage;
+      d.indexPage = slot.indexPage;
+    }
+  }
+}
+
+size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const
+{
+  if (opaqueIndexCount == 0 || meshNeedsUpdate.load() || m_cachedOpaqueDrawCount == 0)
+    return 0;
+  out.insert(out.end(), m_cachedOpaqueDraws.data(),
+             m_cachedOpaqueDraws.data() + m_cachedOpaqueDrawCount);
+  return m_cachedOpaqueDrawCount;
 }
 
 size_t Chunk::collectWaterDraws(std::vector<IndirectDraw> &out) const
 {
-  if (waterIndexCount == 0 || meshNeedsUpdate.load())
+  if (waterIndexCount == 0 || meshNeedsUpdate.load() || m_cachedWaterDrawCount == 0)
     return 0;
-  if (m_isLODMesh)
-  {
-    if (m_lodWaterIndices.empty() || m_lodWaterVertices.empty())
-      return 0;
-    IndirectDraw d;
-    d.cmd = {static_cast<uint32_t>(m_lodWaterIndices.bytes / sizeof(uint32_t)), 1,
-             static_cast<uint32_t>(m_lodWaterIndices.offset / sizeof(uint32_t)),
-             static_cast<int32_t>(m_lodWaterVertices.offset / sizeof(Vertex)), 0};
-    d.vertexPage = m_lodWaterVertices.page;
-    d.indexPage = m_lodWaterIndices.page;
-    out.push_back(d);
-    return 1;
-  }
-  // Same rule as opaque: one command per live section, each carrying its
-  // own vertexOffset (issue #109). Never merge - section-local indices
-  // would redirect into the first merged section's vertices.
-  size_t added = 0;
-  for (const SectionGpuSlot &slot : m_sectionGpuWater)
-  {
-    if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
-      continue;
-    IndirectDraw d;
-    d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
-             static_cast<int32_t>(slot.vertexBase), 0};
-    d.vertexPage = slot.vertexPage;
-    d.indexPage = slot.indexPage;
-    out.push_back(d);
-    ++added;
-  }
-  return added;
+  out.insert(out.end(), m_cachedWaterDraws.data(),
+             m_cachedWaterDraws.data() + m_cachedWaterDrawCount);
+  return m_cachedWaterDrawCount;
 }
 
 void Chunk::releaseGPU()
 {
   if (!m_arenas)
+  {
+    m_cachedOpaqueDrawCount = 0;
+    m_cachedWaterDrawCount = 0;
     return;
+  }
   // Immediate free: releaseGPU runs on the destructor/reset/bootstrap paths
   // where no in-flight frame can still reference the ranges.
   retireSectionSlots(m_sectionGpu, m_arenas->opaqueVertex, m_arenas->opaqueIndex, true);
@@ -1881,12 +1914,18 @@ void Chunk::releaseGPU()
   m_allocator = VK_NULL_HANDLE;
   opaqueIndexCount = 0;
   waterIndexCount = 0;
+  m_cachedOpaqueDrawCount = 0;
+  m_cachedWaterDrawCount = 0;
 }
 
 void Chunk::releaseGPUDeferred()
 {
   if (!m_arenas)
+  {
+    m_cachedOpaqueDrawCount = 0;
+    m_cachedWaterDrawCount = 0;
     return;
+  }
   // Frame-aware free: the arenas hand retired ranges back to their free
   // lists (and destroy emptied pages) only after the frames-in-flight
   // delay, so streaming unload needs no device wait.
@@ -1899,6 +1938,8 @@ void Chunk::releaseGPUDeferred()
   m_allocator = VK_NULL_HANDLE;
   opaqueIndexCount = 0;
   waterIndexCount = 0;
+  m_cachedOpaqueDrawCount = 0;
+  m_cachedWaterDrawCount = 0;
 }
 
 namespace
@@ -2258,6 +2299,8 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
     m_isLODMesh = false;
   }
 
+  rebuildIndirectDrawCache();
+
   uint64_t stagedVertexBytes = 0;
   uint64_t stagedIndexBytes = 0;
   for (StreamUploadPlan *plan : {&opaquePlan, &waterPlan})
@@ -2312,6 +2355,8 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
       m_lodWaterIndices = {};
       opaqueIndexCount = 0;
       waterIndexCount = 0;
+      m_cachedOpaqueDrawCount = 0;
+      m_cachedWaterDrawCount = 0;
     };
     if (needOpaque)
     {
@@ -2365,6 +2410,7 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
     m_sectionGpu.fill({});
     m_sectionGpuWater.fill({});
     m_isLODMesh = true;
+    rebuildIndirectDrawCache();
   }
   else if (result)
   {
@@ -2378,6 +2424,8 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
   {
     opaqueIndexCount = 0;
     waterIndexCount = 0;
+    m_cachedOpaqueDrawCount = 0;
+    m_cachedWaterDrawCount = 0;
   }
 
   releasePendingMeshResult();
@@ -2527,6 +2575,7 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
                           ? static_cast<uint32_t>(result->waterIndices.size())
                           : 0;
     m_isLODMesh = true;
+    rebuildIndirectDrawCache();
     telemetry::registry().add(telemetry::UploadChunks);
   }
   else if (result)
@@ -2545,6 +2594,8 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
   {
     opaqueIndexCount = 0;
     waterIndexCount = 0;
+    m_cachedOpaqueDrawCount = 0;
+    m_cachedWaterDrawCount = 0;
   }
 
   releasePendingMeshResult();
