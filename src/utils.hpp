@@ -6,6 +6,9 @@
 #include <string_view>
 #include <tuple>
 #include <glm/glm.hpp>
+#include <cassert>
+#include <cmath>
+#include <cstddef>
 #include <cstring>
 
 #ifdef _WIN32
@@ -40,9 +43,24 @@ struct VoxelDrawData
 	uint32_t flags;
 };
 static_assert(sizeof(VoxelDrawData) == 16, "VoxelDrawData must be 16 bytes");
+static_assert(alignof(VoxelDrawData) >= 4, "VoxelDrawData must be at least 4-byte aligned");
 
 struct Vertex
 {
+	// Packed position layout: chunk-local quantized at kPositionScale.
+	// X/Z cover chunk-local 0..16 including greedy endpoints at boundaries;
+	// Y covers the full chunk height (0..256). Out-of-range coordinates are
+	// a meshing bug: packPosition asserts in Debug instead of wrapping.
+	static constexpr uint32_t kXBits = 9;
+	static constexpr uint32_t kYBits = 14;
+	static constexpr uint32_t kZBits = 9;
+	static constexpr uint32_t kXMask = (1u << kXBits) - 1u;
+	static constexpr uint32_t kYMask = (1u << kYBits) - 1u;
+	static constexpr uint32_t kZMask = (1u << kZBits) - 1u;
+	static constexpr uint32_t kXMax = kXMask;	   // 511 -> 31.9375 at 1/16
+	static constexpr uint32_t kYMax = kYMask;	   // 16383 -> 1023.9375
+	static constexpr uint32_t kZMax = kZMask;
+
 	uint32_t packedPos;        // 9 bits X (scale 16), 14 bits Y (scale 16), 9 bits Z (scale 16)
 	uint32_t packedData;       // 0-2: normal, 3-10: textureIndex, 11: useBiomeColor, 12-13: AO, 14-17: skyLight, 18-21: blockLight
 	uint16_t texCoordU;
@@ -54,17 +72,24 @@ struct Vertex
 
 	static uint32_t packPosition(const glm::vec3 &localPos)
 	{
-		const uint32_t px = static_cast<uint32_t>(std::lround(localPos.x * kPositionScale)) & 0x1FFu;
-		const uint32_t py = static_cast<uint32_t>(std::lround(localPos.y * kPositionScale)) & 0x3FFFu;
-		const uint32_t pz = static_cast<uint32_t>(std::lround(localPos.z * kPositionScale)) & 0x1FFu;
-		return px | (py << 9u) | (pz << 23u);
+		const long qx = std::lround(localPos.x * kPositionScale);
+		const long qy = std::lround(localPos.y * kPositionScale);
+		const long qz = std::lround(localPos.z * kPositionScale);
+		assert(qx >= 0 && qx <= static_cast<long>(kXMax) && "chunk-local X outside packed range");
+		assert(qy >= 0 && qy <= static_cast<long>(kYMax) && "chunk-local Y outside packed range");
+		assert(qz >= 0 && qz <= static_cast<long>(kZMax) && "chunk-local Z outside packed range");
+
+		const uint32_t px = static_cast<uint32_t>(qx) & kXMask;
+		const uint32_t py = static_cast<uint32_t>(qy) & kYMask;
+		const uint32_t pz = static_cast<uint32_t>(qz) & kZMask;
+		return px | (py << kXBits) | (pz << (kXBits + kYBits));
 	}
 
 	static glm::vec3 unpackPosition(uint32_t p)
 	{
-		const float x = static_cast<float>(p & 0x1FFu) * kInvPositionScale;
-		const float y = static_cast<float>((p >> 9u) & 0x3FFFu) * kInvPositionScale;
-		const float z = static_cast<float>((p >> 23u) & 0x1FFu) * kInvPositionScale;
+		const float x = static_cast<float>(p & kXMask) * kInvPositionScale;
+		const float y = static_cast<float>((p >> kXBits) & kYMask) * kInvPositionScale;
+		const float z = static_cast<float>((p >> (kXBits + kYBits)) & kZMask) * kInvPositionScale;
 		return {x, y, z};
 	}
 
@@ -88,6 +113,13 @@ struct Vertex
 	}
 };
 static_assert(sizeof(Vertex) == 16, "Vertex must be 16 bytes");
+// Vertex-input attribute offsets must match makeVertexInput (WorldRenderer):
+// R32_UINT @0, R32_UINT @4, R16G16_UINT @8, R32_UINT @12.
+static_assert(offsetof(Vertex, packedPos) == 0, "vertex attribute 0 offset");
+static_assert(offsetof(Vertex, packedData) == 4, "vertex attribute 1 offset");
+static_assert(offsetof(Vertex, texCoordU) == 8, "vertex attribute 2 offset");
+static_assert(offsetof(Vertex, packedBiomeColor) == 12, "vertex attribute 3 offset");
+
 
 inline void hash_combine(std::size_t &seed, uint32_t v)
 {

@@ -40,6 +40,7 @@ void main()
     vec3 baseN = NORMALS[normalIdx];
 
     vec2 texCoord = vec2(aTexCoord);
+    // instanceCount=1 per draw: gl_InstanceIndex == firstInstance (see terrain.vert).
     ivec3 chunkOrigin = drawData[gl_InstanceIndex].worldOrigin;
     vec3 localPos = vec3(
         float(aPackedPos & 0x1FFu),

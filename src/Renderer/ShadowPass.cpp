@@ -1,7 +1,9 @@
 #include "Renderer/ShadowPass.hpp"
 #include "Renderer/IndirectDrawEmit.hpp"
+#include "Renderer/VoxelDrawDataLayout.hpp"
 #include "Vulkan/MeshArena.hpp"
 #include <algorithm>
+#include <cassert>
 #include <iostream>
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
@@ -296,7 +298,8 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 					          const uint64_t kb = (uint64_t(b.vertexPage) << 32) | b.indexPage;
 					          return ka < kb;
 				          });
-			const uint32_t baseInstance = 131072u + static_cast<uint32_t>(c) * 65536u;
+			const uint32_t baseInstance = voxel_draw::shadowBase(static_cast<uint32_t>(c));
+			assert(baseInstance + count <= voxel_draw::kEntryCount);
 			auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(
 				m_indirect[frameIndex][static_cast<size_t>(c)].mapped);
 			for (size_t i = 0; i < count; ++i)

@@ -63,6 +63,10 @@ void main()
     vBiomeColor = vec3(r, g, b);
     vTexCoord = vec2(aTexCoord);
 
+    // Each voxel draw uses instanceCount=1, so gl_InstanceIndex equals
+    // VkDrawIndexedIndirectCommand::firstInstance (requires the
+    // drawIndirectFirstInstance device feature) and directly indexes the
+    // per-frame VoxelDrawData table.
     ivec3 chunkOrigin = drawData[gl_InstanceIndex].worldOrigin;
     vec3 localPos = vec3(
         float(aPackedPos & 0x1FFu),

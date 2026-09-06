@@ -11,6 +11,7 @@
 #include "Renderer/PostStack.hpp"
 #include "Renderer/OverlayRenderer.hpp"
 #include "Renderer/ShadowCascades.hpp"
+#include "Renderer/VoxelDrawDataLayout.hpp"
 #include "Renderer/Lighting.hpp"
 #include "Renderer/FrameUBO.hpp"
 #include "Renderer/ShadowPass.hpp"
@@ -70,11 +71,9 @@ public:
 	/// Indirect commands demanded by the last recorded frame, all passes
 	/// summed (opaque + shadow cascades + water, pre-truncation).
 	uint32_t lastIndirectCommandCount() const { return m_lastIndirectCommands; }
-	static constexpr uint32_t kMaxIndirectCommandsPerPass = 65536;
-	static constexpr uint32_t kOpaqueDrawBase = 0;
-	static constexpr uint32_t kWaterDrawBase = 65536;
-	static constexpr uint32_t kShadowDrawBase = 131072; // + cascade * 65536
-	static constexpr uint32_t kMaxDrawDataEntries = 65536 * 6; // 393,216 entries (6 MiB)
+	/// Per-frame VoxelDrawData table layout (regions per pass, single source
+	/// of truth in VoxelDrawDataLayout.hpp).
+	static constexpr uint32_t kMaxDrawDataEntries = voxel_draw::kEntryCount;
 
 	VmaAllocator getAllocator() const { return m_context->getAllocator(); }
 

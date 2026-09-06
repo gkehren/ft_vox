@@ -1,11 +1,14 @@
 #include "Renderer/WaterPass.hpp"
 #include "Renderer/IndirectDrawEmit.hpp"
+#include "Renderer/VoxelDrawDataLayout.hpp"
 #include "Vulkan/MeshArena.hpp"
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
 #include "Vulkan/VkShader.hpp"
 #include "Vulkan/VkCommands.hpp"
 #include "utils.hpp"
+
+#include <cassert>
 
 #include <algorithm>
 #include <iostream>
@@ -312,7 +315,8 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 		// maxDrawIndirectCount (see IndirectDrawUtils.hpp).
 		const uint32_t batchLimit = indirectBatchLimit(
 			m_context->hasMultiDrawIndirect(), m_context->maxDrawIndirectCount());
-		const uint32_t baseInstance = 65536u; // WorldRenderer::kWaterDrawBase
+		const uint32_t baseInstance = voxel_draw::kWaterBase;
+		assert(baseInstance + count <= voxel_draw::kEntryCount);
 		auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(m_indirect[frameIndex].mapped);
 		for (size_t i = 0; i < count; ++i)
 		{

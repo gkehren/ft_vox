@@ -47,7 +47,7 @@ int main()
 {
 	std::cout << "[TEST] Starting Network Server/Client Handshake Test..." << std::endl;
 
-	const unsigned short test_port = 24242;
+	const unsigned short test_port = 54321;
 	const uint32_t test_seed = 424242;
 
 	// Start Server

@@ -628,6 +628,16 @@ int main()
 		const glm::vec3 expectedWorld = glm::vec3(worldOrigin) + localPos;
 		if (worldPos != expectedWorld)
 			ok = fail("Large world coordinate reconstruction failed");
+
+		// Format contract maxima: the largest geometry the mesher can emit
+		// (greedy endpoints at chunk boundaries, full chunk height) must
+		// round-trip exactly through the packed position.
+		const glm::vec3 contractMax(CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE);
+		if (Vertex::unpackPosition(Vertex::packPosition(contractMax)) != contractMax)
+			ok = fail("Packed position contract maximum (16, 256, 16) failed round-trip");
+		static_assert(Vertex::kXMax >= CHUNK_SIZE * 16, "X range covers chunk width");
+		static_assert(Vertex::kYMax >= CHUNK_HEIGHT * 16, "Y range covers chunk height");
+		static_assert(Vertex::kZMax >= CHUNK_SIZE * 16, "Z range covers chunk width");
 	}
 
 	if (!ok)

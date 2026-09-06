@@ -1,11 +1,13 @@
 #include "Renderer/OpaquePass.hpp"
 #include "Renderer/IndirectDrawEmit.hpp"
+#include "Renderer/VoxelDrawDataLayout.hpp"
 #include "Vulkan/MeshArena.hpp"
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
 #include "Vulkan/VkShader.hpp"
 #include "utils.hpp"
 
+#include <cassert>
 #include <stdexcept>
 #include <cstdlib>
 
@@ -157,7 +159,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 		if (chunk)
 			chunk->collectOpaqueDraws(m_scratch);
 	m_lastCommands = static_cast<uint32_t>(m_scratch.size());
-	const uint32_t baseInstance = 0; // WorldRenderer::kOpaqueDrawBase
+	const uint32_t baseInstance = voxel_draw::kOpaqueBase;
 	const bool directDraws = std::getenv("FT_VOX_DRAW_DIRECT") != nullptr;
 	if (directDraws)
 	{
@@ -168,6 +170,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 		// like the indirect path, so the rest of the frame graph is
 		// identical.
 		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+		assert(baseInstance + count <= voxel_draw::kEntryCount);
 		if (drawDataOut)
 		{
 			for (size_t i = 0; i < count; ++i)
@@ -213,6 +216,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			}
 		}
 		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+		assert(baseInstance + count <= voxel_draw::kEntryCount);
 		// Computed once per record: batches obey multiDrawIndirect and
 		// maxDrawIndirectCount (see IndirectDrawUtils.hpp).
 		const uint32_t batchLimit = indirectBatchLimit(
