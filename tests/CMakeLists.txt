@@ -162,9 +162,10 @@ target_include_directories(test_indirect_draw_emit PRIVATE
     ${Vulkan_INCLUDE_DIRS}
 )
 
+# CPU/header-only test: no Vulkan surface/window APIs are used, therefore
+# no VK_USE_PLATFORM_* definition is required.
 target_compile_definitions(test_indirect_draw_emit PRIVATE
     VK_NO_PROTOTYPES
-    VK_USE_PLATFORM_WIN32_KHR
     GLM_FORCE_DEPTH_ZERO_TO_ONE
     GLM_ENABLE_EXPERIMENTAL
 )
@@ -176,10 +177,6 @@ target_link_libraries(test_indirect_draw_emit PRIVATE
     GPUOpen::VulkanMemoryAllocator
     Threads::Threads
 )
-
-if(UNIX)
-    target_compile_definitions(test_indirect_draw_emit PRIVATE VK_USE_PLATFORM_XLIB_KHR)
-endif()
 
 add_test(NAME IndirectDrawEmit COMMAND test_indirect_draw_emit)
 
