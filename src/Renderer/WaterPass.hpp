@@ -58,5 +58,11 @@ private:
 	std::array<IndirectBatch, VkFrameContext::kMaxFramesInFlight> m_indirect{};
 
 	std::vector<Chunk::IndirectDraw> m_scratch{};
+	struct WaterEntry
+	{
+		Chunk *chunk;
+		float dist2;
+	};
+	std::vector<WaterEntry> m_waterChunks{};
 	uint32_t m_lastCommands{0};
 };

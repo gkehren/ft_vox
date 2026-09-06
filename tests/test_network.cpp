@@ -47,30 +47,34 @@ int main()
 {
 	std::cout << "[TEST] Starting Network Server/Client Handshake Test..." << std::endl;
 
-	const unsigned short test_port = 54321;
 	const uint32_t test_seed = 424242;
 
-	// Start Server
-	Server server(test_port, test_seed);
-	server.start();
-	assert(server.isRunning());
-	std::cout << "[TEST] Server started on port " << test_port << std::endl;
-
-	// Start Client 1
-	Client client1;
-	client1.connect("127.0.0.1", test_port);
-	std::cout << "[TEST] Client 1 connecting..." << std::endl;
-
-	// Start Client 2
-	Client client2;
-	client2.connect("127.0.0.1", test_port);
-	std::cout << "[TEST] Client 2 connecting..." << std::endl;
-
-	// Wait up to 3 seconds for handshakes
-	int attempts = 0;
-	while (attempts < 30)
+	try
 	{
-		if (client1.getPlayerId() != 0 && client2.getPlayerId() != 0 &&
+		// Start Server on an OS-assigned ephemeral port: hard-coded ports
+		// keep colliding with Windows/WinNAT excluded port ranges, which
+		// fails the bind before the test body even runs.
+		Server server(0, test_seed);
+		server.start();
+		assert(server.isRunning());
+		const unsigned short test_port = server.port();
+		std::cout << "[TEST] Server started on port " << test_port << std::endl;
+
+		// Start Client 1
+		Client client1;
+		client1.connect("127.0.0.1", test_port);
+		std::cout << "[TEST] Client 1 connecting..." << std::endl;
+
+		// Start Client 2
+		Client client2;
+		client2.connect("127.0.0.1", test_port);
+		std::cout << "[TEST] Client 2 connecting..." << std::endl;
+
+		// Wait up to 3 seconds for handshakes
+		int attempts = 0;
+		while (attempts < 30)
+		{
+			if (client1.getPlayerId() != 0 && client2.getPlayerId() != 0 &&
 			client1.getWorldSeed() == test_seed && client2.getWorldSeed() == test_seed)
 		{
 			break;
@@ -151,4 +155,10 @@ int main()
 
 	std::cout << "[TEST] All network and spoofing tests passed successfully!" << std::endl;
 	return 0;
+	}
+	catch (const std::exception &e)
+	{
+		std::cerr << "[TEST] Exception: " << e.what() << std::endl;
+		return 1;
+	}
 }

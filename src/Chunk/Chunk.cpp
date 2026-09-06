@@ -1892,24 +1892,6 @@ void Chunk::rebuildIndirectDrawCache()
   }
 }
 
-size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const
-{
-  if (opaqueIndexCount == 0 || meshNeedsUpdate.load() || m_cachedOpaqueDrawCount == 0)
-    return 0;
-  out.insert(out.end(), m_cachedOpaqueDraws.data(),
-             m_cachedOpaqueDraws.data() + m_cachedOpaqueDrawCount);
-  return m_cachedOpaqueDrawCount;
-}
-
-size_t Chunk::collectWaterDraws(std::vector<IndirectDraw> &out) const
-{
-  if (waterIndexCount == 0 || meshNeedsUpdate.load() || m_cachedWaterDrawCount == 0)
-    return 0;
-  out.insert(out.end(), m_cachedWaterDraws.data(),
-             m_cachedWaterDraws.data() + m_cachedWaterDrawCount);
-  return m_cachedWaterDrawCount;
-}
-
 void Chunk::releaseGPU()
 {
   if (!m_arenas)

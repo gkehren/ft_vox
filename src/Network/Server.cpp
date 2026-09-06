@@ -39,6 +39,12 @@ bool Server::isRunning() const
 	return running;
 }
 
+unsigned short Server::port() const
+{
+	const boost::asio::ip::udp::endpoint bound = socket.local_endpoint();
+	return bound.port();
+}
+
 size_t Server::getClientCount() const
 {
 	return playerPositions.size();
