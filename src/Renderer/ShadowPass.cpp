@@ -170,6 +170,7 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 	};
 	static_assert(sizeof(ShadowPC) == 80, "ShadowPC must match shadow.vert");
 
+	m_lastCommands = 0;
 	for (int c = 0; c < kCascadeCount; ++c)
 	{
 		VkRenderingAttachmentInfo depthAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -246,6 +247,7 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 			if (visible)
 				chunk->collectOpaqueDraws(m_scratch);
 		}
+		m_lastCommands += static_cast<uint32_t>(m_scratch.size());
 		if (!m_scratch.empty())
 		{
 			assert(m_scratch.size() <= kMaxIndirectCommands && "ShadowPass: indirect command capacity exceeded");

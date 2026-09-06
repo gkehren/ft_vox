@@ -402,6 +402,9 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 					   m_post.sceneDepth(), chunks, glm::vec3(ubo->viewPos), m_arenas);
 		if (gpu) gpu->endPass(cmd, GpuPass::Water);
 	}
+	// Telemetry for the benchmark's indirect peak: what the CPU-built
+	// command lists demand per frame, across every consuming pass.
+	m_lastIndirectCommands = m_shadow.lastCommands() + m_opaque.lastCommands() + m_water.lastCommands();
 	{
 		PROFILE_SCOPE("Sky");
 		if (gpu) gpu->beginPass(cmd, GpuPass::Sky);

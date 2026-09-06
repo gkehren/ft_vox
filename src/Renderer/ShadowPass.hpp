@@ -39,6 +39,10 @@ public:
 				const std::array<glm::mat4, kCascadeCount> &cascades, float time,
 						const MeshArenas &arenas);
 
+	// Indirect commands demanded by the last record, summed over cascades
+	// (pre-truncation); WorldRenderer aggregates for the benchmark's peak.
+	uint32_t lastCommands() const { return m_lastCommands; }
+
 private:
 	void createResources();
 	void destroyResources();
@@ -57,4 +61,5 @@ private:
 	std::array<std::array<IndirectBatch, kCascadeCount>, VkFrameContext::kMaxFramesInFlight> m_indirect{};
 
 	std::vector<Chunk::IndirectDraw> m_scratch{};
+	uint32_t m_lastCommands{0};
 };

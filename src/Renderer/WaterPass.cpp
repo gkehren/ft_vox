@@ -289,6 +289,7 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 	m_scratch.clear();
 	for (const auto &e : waterChunks)
 		e.chunk->collectWaterDraws(m_scratch);
+	m_lastCommands = static_cast<uint32_t>(m_scratch.size());
 	if (!m_scratch.empty())
 	{
 		assert(m_scratch.size() <= kMaxIndirectCommands && "WaterPass: indirect command capacity exceeded");

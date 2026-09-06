@@ -32,6 +32,10 @@ public:
 
 	VkSampler sceneSampler() const { return m_sceneSampler; }
 
+	// Indirect commands demanded by the last record (pre-truncation);
+	// WorldRenderer aggregates the passes for the benchmark's peak.
+	uint32_t lastCommands() const { return m_lastCommands; }
+
 private:
 	void createHistory(uint32_t w, uint32_t h, VkFormat depthFmt);
 	void destroyHistory();
@@ -54,4 +58,5 @@ private:
 	std::array<IndirectBatch, VkFrameContext::kMaxFramesInFlight> m_indirect{};
 
 	std::vector<Chunk::IndirectDraw> m_scratch{};
+	uint32_t m_lastCommands{0};
 };

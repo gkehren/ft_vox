@@ -29,6 +29,10 @@ public:
 				const VkClearColorValue &clearColor, uint32_t frameIndex, const MeshArenas &arenas,
 				VkGpuProfiler *gpu = nullptr);
 
+	// Indirect commands demanded by the last record (pre-truncation);
+	// WorldRenderer aggregates the passes for the benchmark's peak.
+	uint32_t lastCommands() const { return m_lastCommands; }
+
 private:
 	void createIndirectBuffers();
 	void destroyIndirectBuffers();
@@ -49,4 +53,5 @@ private:
 	// reallocate every frame (issue #109).
 	std::vector<Chunk::IndirectDraw> m_scratch;
 	uint32_t m_debugFrames{0};
+	uint32_t m_lastCommands{0};
 };

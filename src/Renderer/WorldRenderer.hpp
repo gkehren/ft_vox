@@ -67,6 +67,9 @@ public:
 	TextureManager &getTextureManager() { return m_textures; }
 	/// Shared device-local mesh arenas every chunk suballocates from (issue #109).
 	MeshArenas &arenas() { return m_arenas; }
+	/// Indirect commands demanded by the last recorded frame, all passes
+	/// summed (opaque + shadow cascades + water, pre-truncation).
+	uint32_t lastIndirectCommandCount() const { return m_lastIndirectCommands; }
 	VmaAllocator getAllocator() const { return m_context->getAllocator(); }
 
 private:
@@ -97,6 +100,7 @@ private:
 	OpaquePass m_opaque;
 	WaterPass m_water;
 	SkyPass m_sky;
+	uint32_t m_lastIndirectCommands{0};
 
 	VkDescriptorSetLayout m_setLayout0{VK_NULL_HANDLE};
 	VkDescriptorSetLayout m_setLayout1{VK_NULL_HANDLE};

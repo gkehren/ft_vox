@@ -1011,6 +1011,7 @@ void Engine::sampleBenchmarkFrame()
 		chunkManager ? chunkManager->pendingLoadCount() : 0,
 		chunkManager ? chunkManager->pendingGenJobs() : 0,
 		chunkManager ? chunkManager->pendingMeshJobs() : 0, tJobs, tMs, mJobs, mMs, lJobs, lMs);
+	m_benchmark.sampleIndirectCommands(worldRenderer ? worldRenderer->lastIndirectCommandCount() : 0);
 }
 
 void Engine::drawUi()

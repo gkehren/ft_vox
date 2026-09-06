@@ -154,6 +154,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 	for (Chunk *chunk : chunks)
 		if (chunk)
 			chunk->collectOpaqueDraws(m_scratch);
+	m_lastCommands = static_cast<uint32_t>(m_scratch.size());
 	const bool directDraws = std::getenv("FT_VOX_DRAW_DIRECT") != nullptr;
 	if (directDraws)
 	{
