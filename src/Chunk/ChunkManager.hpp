@@ -84,7 +84,9 @@ public:
 	~ChunkManager();
 
 	/// Enqueue loads / mark far chunks for unload based on camera position.
-	void updateStreaming(const Camera &camera, const RenderSettings &settings);
+	/// Returns what the load-side maintenance did this tick (the out-of-range
+	/// unload scan is a separate concern driven by the same triggers).
+	StreamingUpdateKind updateStreaming(const Camera &camera, const RenderSettings &settings);
 
 	/// Pull from the load queue (pool acquire). budget = max chunks this frame.
 	void processChunkLoading(int budget);
@@ -122,6 +124,10 @@ public:
 	Chunk *getChunkAtWorldPos(const glm::vec3 &worldPos);
 	Chunk *getChunk(const glm::ivec3 &chunkPos);
 	const Chunk *getChunk(const glm::ivec3 &chunkPos) const;
+
+	/// Snapshot of the streaming maintenance counters (issue #108). Main
+	/// thread writes and reads them, so no lock is taken.
+	StreamingMaintenanceStats streamingMaintenanceStats() const { return m_streamStats; }
 
 	size_t deferredReleaseCount() const { return m_deferredRelease.size(); }
 	size_t chunkCount() const;
@@ -231,6 +237,7 @@ private:
 	size_t m_loadQueueHead{0};
 	bool m_queueNeedsSort{false};
 	uint32_t m_streamFramesSinceUnloadCheck{0};
+	StreamingMaintenanceStats m_streamStats;
 
 	mutable std::mutex m_completedJobsMutex;
 	std::vector<Chunk *> m_completedGenerationChunks;

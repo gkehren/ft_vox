@@ -541,9 +541,15 @@ static void runStreamingDispatchTests()
 
 		// Steady state: same spot → zero work, queue untouched.
 		const size_t queueSizeBefore = ChunkManagerStreamProbe::queue(manager).size();
+		const auto statsBefore = manager.streamingMaintenanceStats();
 		for (int i = 0; i < 100; ++i)
 			CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::None,
 				  "stationary frame is zero-work");
+		const auto statsAfter = manager.streamingMaintenanceStats();
+		CHECK(statsAfter.zeroWork - statsBefore.zeroWork == 100,
+			  "100 stationary frames count as 100 zero-work ticks");
+		CHECK(statsAfter.unloadScans - statsBefore.unloadScans <= 1,
+			  "stationary frames do not spam unload scans (60-frame floor)");
 		CHECK(ChunkManagerStreamProbe::queue(manager).size() == queueSizeBefore,
 			  "stationary frames leave the queue untouched");
 

@@ -3,6 +3,7 @@
 #include <Engine/WorkloadTelemetry.hpp>
 #include <Camera/Camera.hpp>
 #include <Engine/GpuProfile.hpp>
+#include <Chunk/StreamHelpers.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -94,6 +95,8 @@ struct BenchmarkReport
 	size_t peakPendingLoad{0};
 	size_t peakPendingGen{0};
 	size_t peakPendingMesh{0};
+
+	StreamingMaintenanceStats streamStats{};
 
 	int framesOver16ms{0};
 	int framesOver33ms{0};
@@ -240,6 +243,7 @@ private:
 	size_t m_peakChunks{0}, m_peakDraw{0}, m_peakLoad{0}, m_peakGen{0}, m_peakMesh{0};
 	size_t m_peakIndirectCommands{0};
 	int m_over16{0}, m_over33{0};
+	StreamingMaintenanceStats m_streamStats{};
 
 	// Settings snapshotted at start of measurement
 	int m_viewDistance{0};
@@ -255,6 +259,9 @@ public:
 							 const char *presentMode, const char *device,
 							 bool multiDrawIndirect = false,
 							 uint32_t maxDrawIndirectCount = 0);
+	/// Latest streaming maintenance counters, sampled by the engine each frame
+	/// and published in the report (issue #108).
+	void setStreamingMaintenanceStats(const StreamingMaintenanceStats &s) { m_streamStats = s; }
 	void markForceVsync(bool prevVsync)
 	{
 		m_hadForceVsync = true;

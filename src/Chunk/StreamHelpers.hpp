@@ -187,6 +187,22 @@ inline bool streamFrontBiasChanged(float a, float b)
 	return std::abs(normalizedStreamFrontBias(a) - normalizedStreamFrontBias(b)) > kStreamBiasEpsilon;
 }
 
+/// Cheap main-thread streaming maintenance counters (issue #108): how frames
+/// split between the zero-work fast path and the reconciliation paths, plus
+/// queue churn. Published via ChunkManager::streamingMaintenanceStats() for
+/// benchmarks and tests; the pure helpers above stay un-instrumented.
+struct StreamingMaintenanceStats
+{
+	uint64_t zeroWork{0};
+	uint64_t incrementalUpdates{0};
+	uint64_t headingRebuilds{0};
+	uint64_t fullRebuilds{0};
+	uint64_t queueSorts{0};
+	uint64_t enteringCandidates{0};
+	uint64_t exitingCandidates{0};
+	uint64_t unloadScans{0};
+};
+
 /// Contiguous interval of chunk X coordinates in a row Z that lie within the desired load region.
 struct ChunkRowSpan
 {

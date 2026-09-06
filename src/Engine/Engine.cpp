@@ -1033,6 +1033,8 @@ void Engine::sampleBenchmarkFrame()
 		chunkManager ? chunkManager->pendingGenJobs() : 0,
 		chunkManager ? chunkManager->pendingMeshJobs() : 0, tJobs, tMs, mJobs, mMs, lJobs, lMs);
 	m_benchmark.sampleIndirectCommands(worldRenderer ? worldRenderer->lastIndirectCommandCount() : 0);
+	if (chunkManager)
+		m_benchmark.setStreamingMaintenanceStats(chunkManager->streamingMaintenanceStats());
 }
 
 void Engine::drawUi()

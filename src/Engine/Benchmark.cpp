@@ -360,6 +360,7 @@ void Benchmark::finalize()
 	r.peakPendingLoad = m_peakLoad;
 	r.peakPendingGen = m_peakGen;
 	r.peakPendingMesh = m_peakMesh;
+	r.streamStats = m_streamStats;
 	r.framesOver16ms = m_over16;
 	r.framesOver33ms = m_over33;
 
@@ -408,7 +409,23 @@ std::string Benchmark::formatReportText() const
 	  << "  VSync: " << (r.vsync ? "on" : "off")
 	  << "  PresentMode: " << r.presentMode << "\n";
 	o << "Indirect: multiDrawIndirect=" << (r.multiDrawIndirect ? "yes" : "no")
-	  << "  maxDrawIndirectCount=" << r.maxDrawIndirectCount << "\n\n";
+	  << "  maxDrawIndirectCount=" << r.maxDrawIndirectCount << "\n";
+	{
+		// Issue #108: how maintenance frames split across the dispatch paths.
+		const uint64_t maintenanceCalls = r.streamStats.zeroWork + r.streamStats.incrementalUpdates +
+										  r.streamStats.headingRebuilds + r.streamStats.fullRebuilds;
+		const float zeroPct = maintenanceCalls > 0
+								  ? 100.f * static_cast<float>(r.streamStats.zeroWork) / static_cast<float>(maintenanceCalls)
+								  : 0.f;
+		o << "Stream maintenance: zeroWork=" << r.streamStats.zeroWork << " (" << zeroPct << "% of calls)"
+		  << "  incremental=" << r.streamStats.incrementalUpdates
+		  << "  heading=" << r.streamStats.headingRebuilds
+		  << "  full=" << r.streamStats.fullRebuilds
+		  << "  queueSorts=" << r.streamStats.queueSorts
+		  << "  enter=" << r.streamStats.enteringCandidates
+		  << "  exit=" << r.streamStats.exitingCandidates
+		  << "  unloadScans=" << r.streamStats.unloadScans << "\n\n";
+	}
 	o << "Frame times (ms)\n";
 	o << "  avg " << r.avgMs << "  min " << r.minMs << "  max " << r.maxMs << "\n";
 	o << "  p50 " << r.p50Ms << "  p95 " << r.p95Ms << "  p99 " << r.p99Ms << "\n";

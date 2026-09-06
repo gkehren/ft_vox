@@ -58,7 +58,7 @@ glm::ivec3 ChunkManager::worldToChunkCoord(const glm::vec3 &worldPos)
 		static_cast<int>(std::floor(worldPos.z / static_cast<float>(CHUNK_SIZE)))};
 }
 
-void ChunkManager::updateStreaming(const Camera &camera, const RenderSettings &settings)
+StreamingUpdateKind ChunkManager::updateStreaming(const Camera &camera, const RenderSettings &settings)
 {
 	const glm::ivec3 camChunk = worldToChunkCoord(camera.getPosition());
 
@@ -76,10 +76,11 @@ void ChunkManager::updateStreaming(const Camera &camera, const RenderSettings &s
 	if (unloadRelevant || m_streamFramesSinceUnloadCheck >= kUnloadCheckIntervalFrames)
 	{
 		queueUnloadOutOfRange(camera, settings);
+		++m_streamStats.unloadScans;
 		m_streamFramesSinceUnloadCheck = 0;
 	}
 
-	loadChunksAroundPlayer(camChunk, camera, settings);
+	return loadChunksAroundPlayer(camChunk, camera, settings);
 }
 
 void ChunkManager::processChunkLoading(int budget)
@@ -104,6 +105,7 @@ void ChunkManager::processChunkLoading(int budget)
 				m_loadQueueHead = 0;
 			}
 			sortLoadCandidatesNearestFirst(m_loadQueue);
+			++m_streamStats.queueSorts;
 			m_queueNeedsSort = false;
 		}
 
@@ -961,6 +963,7 @@ StreamingUpdateKind ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &ca
 		}
 	}
 	sortLoadCandidatesNearestFirst(m_loadQueue);
+	++m_streamStats.queueSorts;
 	m_queueNeedsSort = false;
 
 	m_streamState.lastCamChunk = cameraChunkPos;
@@ -969,6 +972,7 @@ StreamingUpdateKind ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &ca
 	m_streamState.lastMaxRenderDistance = settings.maxRenderDistance;
 	m_streamState.lastStreamFrontBias = normalizedStreamFrontBias(settings.streamFrontBias);
 	m_streamState.initialized = true;
+	++m_streamStats.fullRebuilds;
 	return StreamingUpdateKind::FullRebuild;
 }
 
@@ -1015,6 +1019,9 @@ void ChunkManager::applyFootprintDiffToQueue(const FootprintDiff &diff, const gl
 		c.distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
 	}
 	sortLoadCandidatesNearestFirst(m_loadQueue);
+	++m_streamStats.queueSorts;
+	m_streamStats.enteringCandidates += diff.entering.size();
+	m_streamStats.exitingCandidates += diff.exiting.size();
 	m_queueNeedsSort = false;
 	m_streamState.lastCamForwardXZ = camForwardXZ;
 }
@@ -1035,6 +1042,7 @@ StreamingUpdateKind ChunkManager::reconcileStreamingIncremental(const glm::ivec3
 	applyFootprintDiffToQueue(diff, camPos, camForwardXZ, frontBias);
 	m_streamState.lastCamChunk = cameraChunkPos;
 	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
+	++m_streamStats.incrementalUpdates;
 	return StreamingUpdateKind::Incremental;
 }
 
@@ -1056,6 +1064,7 @@ StreamingUpdateKind ChunkManager::reconcileStreamingHeading(const glm::ivec3 &ca
 	// priority), so it must publish the full camera state.
 	m_streamState.lastCamChunk = cameraChunkPos;
 	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
+	++m_streamStats.headingRebuilds;
 	return StreamingUpdateKind::HeadingRebuild;
 }
 
@@ -1095,6 +1104,7 @@ StreamingUpdateKind ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &camer
 	if (anchor != m_streamState.lastMovementAnchor)
 		return reconcileStreamingIncremental(cameraChunkPos, camera, settings);
 
+	++m_streamStats.zeroWork;
 	return StreamingUpdateKind::None; // exact zero-work steady state
 }
 
