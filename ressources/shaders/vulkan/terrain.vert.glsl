@@ -1,8 +1,8 @@
 #version 450
 
-layout(location = 0) in vec3 aPos;
+layout(location = 0) in uint aPackedPos;
 layout(location = 1) in uint aPackedData;
-layout(location = 2) in vec2 aTexCoord;
+layout(location = 2) in uvec2 aTexCoord;
 layout(location = 3) in uint aPackedBiomeColor;
 
 // Must match src/Renderer/FrameUBO.hpp (std140, sizeof 528)
@@ -12,6 +12,15 @@ layout(location = 3) in uint aPackedBiomeColor;
 layout(set = 0, binding = 1) uniform MaterialTable {
     vec4 mats[256];
 } materialTable;
+
+struct VoxelDrawData {
+    ivec3 worldOrigin;
+    uint flags;
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer DrawDataTable {
+    VoxelDrawData drawData[];
+};
 
 layout(location = 0) out vec3 vFragPos;
 layout(location = 1) out vec3 vNormal;
@@ -52,10 +61,18 @@ void main()
     float g = float((aPackedBiomeColor >> 8u) & 0xFFu) / 255.0;
     float b = float((aPackedBiomeColor >> 16u) & 0xFFu) / 255.0;
     vBiomeColor = vec3(r, g, b);
-    vTexCoord = aTexCoord;
+    vTexCoord = vec2(aTexCoord);
+
+    ivec3 chunkOrigin = drawData[gl_InstanceIndex].worldOrigin;
+    vec3 localPos = vec3(
+        float(aPackedPos & 0x1FFu),
+        float((aPackedPos >> 9u) & 0x3FFFu),
+        float((aPackedPos >> 23u) & 0x1FFu)
+    ) * (1.0 / 16.0);
+    vec3 worldPos = vec3(chunkOrigin) + localPos;
 
     float time = frame.skyParams.x;
-    vec3 pos = applyFoliageWind(aPos, texIdx, time, aTexCoord);
+    vec3 pos = applyFoliageWind(worldPos, texIdx, time, vTexCoord);
     vFragPos = pos;
 
     vec4 viewPos4 = frame.view * vec4(pos, 1.0);

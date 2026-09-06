@@ -38,7 +38,7 @@ static int g_fails = 0;
 		}                                                                      \
 	} while (0)
 
-static_assert(sizeof(Vertex) == 28, "Vertex must be padding-free for byte hashing");
+static_assert(sizeof(Vertex) == 16, "Vertex must be padding-free for byte hashing");
 
 // Friend probe declared in Chunk.hpp: private state and ranged build entry
 // points for the equivalence checks.
@@ -90,9 +90,9 @@ static uint32_t vTexture(const Vertex &v) { return (v.packedData >> 3) & 0xFF; }
 static bool vBiome(const Vertex &v) { return (v.packedData >> 11) & 1; }
 static uint32_t vAo(const Vertex &v) { return (v.packedData >> 12) & 0x3; }
 
-static glm::ivec3 localPos(const Vertex &v, const Chunk &chunk)
+static glm::ivec3 localPos(const Vertex &v, const Chunk &/*chunk*/)
 {
-	const glm::vec3 d = v.position - chunk.getPosition();
+	const glm::vec3 d = v.decodePosition();
 	return {static_cast<int>(std::lround(d.x)), static_cast<int>(std::lround(d.y)),
 			static_cast<int>(std::lround(d.z))};
 }
@@ -1342,7 +1342,7 @@ static void testSmallPlantGeometry()
         CHECK(p.waterVertices.empty(), "alpha-cut plants use the opaque stream");
         for (const auto &v : p.opaqueVertices)
         {
-            const auto local = v.position - s.chunk.getPosition();
+            const auto local = v.decodePosition();
             CHECK(local.x >= 0.f && local.x <= 1.f && local.z >= 0.f && local.z <= 1.f,
                   "detail geometry remains inside its owning column");
             CHECK(local.y >= 16.f && local.y < 17.f, "detail remains in its owning section");
@@ -1361,7 +1361,7 @@ static void testSmallPlantGeometry()
         s.chunk.buildLODMesh(*r, s.chunk.meshGeneration(), s.chunk.meshRevision());
         s.pool.finishBuild(r);
         for (const auto &v : r->opaqueVertices)
-            CHECK(vTexture(v) == STONE && v.position.y == 16.f, "LOD omits the plant and preserves its support");
+            CHECK(vTexture(v) == STONE && v.decodePosition().y == 16.f, "LOD omits the plant and preserves its support");
         s.pool.release(r);
     }
 }

@@ -152,7 +152,8 @@ void ShadowPass::destroyPipeline()
 
 void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vector<Chunk *> &shadowChunks,
 						const std::array<glm::mat4, kCascadeCount> &cascades, float time,
-						VkDescriptorSet set0, VkDescriptorSet set1, const MeshArenas &arenas)
+						VkDescriptorSet set0, VkDescriptorSet set1, const MeshArenas &arenas,
+						VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
@@ -295,13 +296,27 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 					          const uint64_t kb = (uint64_t(b.vertexPage) << 32) | b.indexPage;
 					          return ka < kb;
 				          });
+			const uint32_t baseInstance = 131072u + static_cast<uint32_t>(c) * 65536u;
 			auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(
 				m_indirect[frameIndex][static_cast<size_t>(c)].mapped);
 			for (size_t i = 0; i < count; ++i)
+			{
 				dst[i] = m_scratch[i].cmd;
+				dst[i].firstInstance = static_cast<uint32_t>(baseInstance + i);
+				if (drawDataOut)
+				{
+					drawDataOut[baseInstance + i].worldOrigin = m_scratch[i].chunkOrigin;
+					drawDataOut[baseInstance + i].flags = 0;
+				}
+			}
 			vmaFlushAllocation(m_context->getAllocator(),
 							   m_indirect[frameIndex][static_cast<size_t>(c)].buf.allocation, 0,
 							   count * sizeof(VkDrawIndexedIndirectCommand));
+			if (drawDataOut)
+			{
+				vmaFlushAllocation(m_context->getAllocator(), drawDataBuffer.allocation,
+								   baseInstance * sizeof(VoxelDrawData), count * sizeof(VoxelDrawData));
+			}
 
 			size_t i = 0;
 			uint32_t first = 0;

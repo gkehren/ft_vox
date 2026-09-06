@@ -177,7 +177,7 @@ void WaterPass::destroyIndirectBuffers()
 void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent, VkDescriptorSet set0, VkDescriptorSet set1,
 					   VkDescriptorSet set2, VkPipelineLayout layout, AllocatedImage &hdr,
 					   AllocatedImage &liveDepth, const std::vector<Chunk *> &chunks, const glm::vec3 &camPos,
-					   const MeshArenas &arenas)
+					   const MeshArenas &arenas, VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
@@ -312,11 +312,25 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 		// maxDrawIndirectCount (see IndirectDrawUtils.hpp).
 		const uint32_t batchLimit = indirectBatchLimit(
 			m_context->hasMultiDrawIndirect(), m_context->maxDrawIndirectCount());
+		const uint32_t baseInstance = 65536u; // WorldRenderer::kWaterDrawBase
 		auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(m_indirect[frameIndex].mapped);
 		for (size_t i = 0; i < count; ++i)
+		{
 			dst[i] = m_scratch[i].cmd;
+			dst[i].firstInstance = static_cast<uint32_t>(baseInstance + i);
+			if (drawDataOut)
+			{
+				drawDataOut[baseInstance + i].worldOrigin = m_scratch[i].chunkOrigin;
+				drawDataOut[baseInstance + i].flags = 0;
+			}
+		}
 		vmaFlushAllocation(m_context->getAllocator(), m_indirect[frameIndex].buf.allocation, 0,
 						   count * sizeof(VkDrawIndexedIndirectCommand));
+		if (drawDataOut)
+		{
+			vmaFlushAllocation(m_context->getAllocator(), drawDataBuffer.allocation,
+							   baseInstance * sizeof(VoxelDrawData), count * sizeof(VoxelDrawData));
+		}
 
 		size_t i = 0;
 		uint32_t first = 0;

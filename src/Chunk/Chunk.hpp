@@ -99,6 +99,7 @@ public:
 		VkDrawIndexedIndirectCommand cmd{};
 		uint32_t vertexPage{MeshArena::kNoPage};
 		uint32_t indexPage{MeshArena::kNoPage};
+		glm::ivec3 chunkOrigin{0};
 	};
 	/// Appends one IndirectDraw per live opaque section (or the single LOD
 	/// range). Returns the number appended. Skips chunks whose upload is

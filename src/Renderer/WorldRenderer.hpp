@@ -70,6 +70,12 @@ public:
 	/// Indirect commands demanded by the last recorded frame, all passes
 	/// summed (opaque + shadow cascades + water, pre-truncation).
 	uint32_t lastIndirectCommandCount() const { return m_lastIndirectCommands; }
+	static constexpr uint32_t kMaxIndirectCommandsPerPass = 65536;
+	static constexpr uint32_t kOpaqueDrawBase = 0;
+	static constexpr uint32_t kWaterDrawBase = 65536;
+	static constexpr uint32_t kShadowDrawBase = 131072; // + cascade * 65536
+	static constexpr uint32_t kMaxDrawDataEntries = 65536 * 6; // 393,216 entries (6 MiB)
+
 	VmaAllocator getAllocator() const { return m_context->getAllocator(); }
 
 private:
@@ -77,6 +83,8 @@ private:
 	{
 		AllocatedBuffer ubo{};
 		void *uboMapped{nullptr};
+		AllocatedBuffer drawDataBuffer{};
+		void *drawDataMapped{nullptr};
 		VkDescriptorSet descriptorSet0{VK_NULL_HANDLE};
 	};
 

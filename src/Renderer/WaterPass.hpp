@@ -28,7 +28,7 @@ public:
 	void record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent, VkDescriptorSet set0, VkDescriptorSet set1,
 				VkDescriptorSet set2, VkPipelineLayout layout, AllocatedImage &hdr, AllocatedImage &liveDepth,
 				const std::vector<Chunk *> &chunks, const glm::vec3 &camPos,
-						const MeshArenas &arenas);
+				const MeshArenas &arenas, VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer);
 
 	VkSampler sceneSampler() const { return m_sceneSampler; }
 

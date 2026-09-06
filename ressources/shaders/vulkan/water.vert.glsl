@@ -1,11 +1,20 @@
 #version 450
 
-layout(location = 0) in vec3 aPos;
+layout(location = 0) in uint aPackedPos;
 layout(location = 1) in uint aPackedData;
-layout(location = 2) in vec2 aTexCoord;
+layout(location = 2) in uvec2 aTexCoord;
 layout(location = 3) in uint aPackedBiomeColor;
 
 #include "frame_ubo.inc.glsl"
+
+struct VoxelDrawData {
+    ivec3 worldOrigin;
+    uint flags;
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer DrawDataTable {
+    VoxelDrawData drawData[];
+};
 
 layout(location = 0) out vec3 vFragPos;
 layout(location = 1) out vec3 vNormal;
@@ -30,8 +39,17 @@ void main()
     uint normalIdx = aPackedData & 0x7u;
     vec3 baseN = NORMALS[normalIdx];
 
+    vec2 texCoord = vec2(aTexCoord);
+    ivec3 chunkOrigin = drawData[gl_InstanceIndex].worldOrigin;
+    vec3 localPos = vec3(
+        float(aPackedPos & 0x1FFu),
+        float((aPackedPos >> 9u) & 0x3FFFu),
+        float((aPackedPos >> 23u) & 0x1FFu)
+    ) * (1.0 / 16.0);
+    vec3 worldPos = vec3(chunkOrigin) + localPos;
+
     // Animate top faces primarily
-    vec3 pos = aPos;
+    vec3 pos = worldPos;
     float top = step(0.9, baseN.y);
     float w1 = sin(pos.x * 0.35 + time * 1.6) * cos(pos.z * 0.28 + time * 1.1);
     float w2 = sin(pos.x * 0.12 + pos.z * 0.18 + time * 0.7);
@@ -47,7 +65,7 @@ void main()
 
     vFragPos = pos;
     vNormal = n;
-    vTexCoord = aTexCoord + vec2(time * 0.02, time * 0.015);
+    vTexCoord = texCoord + vec2(time * 0.02, time * 0.015);
 
     vec4 viewPos4 = frame.view * vec4(pos, 1.0);
     vViewDepth = -viewPos4.z;

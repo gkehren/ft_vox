@@ -20,9 +20,9 @@ VkPipelineVertexInputStateCreateInfo makeVertexInput(VkVertexInputBindingDescrip
 	binding.binding = 0;
 	binding.stride = sizeof(Vertex);
 	binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-	attrs[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)};
+	attrs[0] = {0, 0, VK_FORMAT_R32_UINT, offsetof(Vertex, packedPos)};
 	attrs[1] = {1, 0, VK_FORMAT_R32_UINT, offsetof(Vertex, packedData)};
-	attrs[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex, texCoord)};
+	attrs[2] = {2, 0, VK_FORMAT_R16G16_UINT, offsetof(Vertex, texCoordU)};
 	attrs[3] = {3, 0, VK_FORMAT_R32_UINT, offsetof(Vertex, packedBiomeColor)};
 	VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 	vi.vertexBindingDescriptionCount = 1;
@@ -85,12 +85,14 @@ void WorldRenderer::shutdown()
 
 void WorldRenderer::createDescriptors()
 {
-	// set0: FrameUBO + MaterialTable
-	std::array<VkDescriptorSetLayoutBinding, 2> set0{};
+	// set0: FrameUBO + MaterialTable + DrawDataTable
+	std::array<VkDescriptorSetLayoutBinding, 3> set0{};
 	set0[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
 			   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 	set0[1] = {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
 			   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+	set0[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+			   VK_SHADER_STAGE_VERTEX_BIT, nullptr};
 	VkDescriptorSetLayoutCreateInfo layout0{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
 	layout0.bindingCount = static_cast<uint32_t>(set0.size());
 	layout0.pBindings = set0.data();
@@ -108,9 +110,10 @@ void WorldRenderer::createDescriptors()
 	if (vkCreateDescriptorSetLayout(m_context->getDevice(), &layout1, nullptr, &m_setLayout2) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create set layout 2");
 
-	std::array<VkDescriptorPoolSize, 2> poolSizes{};
+	std::array<VkDescriptorPoolSize, 3> poolSizes{};
 	poolSizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxFramesInFlight * 2 + 2};
 	poolSizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8};
+	poolSizes[2] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxFramesInFlight + 2};
 	VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
 	poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
 	poolInfo.pPoolSizes = poolSizes.data();
@@ -178,6 +181,16 @@ void WorldRenderer::createFrameUbos()
 		if (!f.uboMapped)
 			f.uboMapped = mapBuffer(m_context->getAllocator(), f.ubo);
 
+		f.drawDataBuffer = createBuffer(m_context->getAllocator(),
+		                                kMaxDrawDataEntries * sizeof(VoxelDrawData),
+		                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		                                VMA_MEMORY_USAGE_CPU_TO_GPU,
+		                                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+		                                    VMA_ALLOCATION_CREATE_MAPPED_BIT);
+		f.drawDataMapped = f.drawDataBuffer.info.pMappedData;
+		if (!f.drawDataMapped)
+			f.drawDataMapped = mapBuffer(m_context->getAllocator(), f.drawDataBuffer);
+
 		VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
 		alloc.descriptorPool = m_descriptorPool;
 		alloc.descriptorSetCount = 1;
@@ -187,7 +200,8 @@ void WorldRenderer::createFrameUbos()
 
 		VkDescriptorBufferInfo frameBi{f.ubo.buffer, 0, sizeof(FrameUBO)};
 		VkDescriptorBufferInfo matBi{m_materialUbo.buffer, 0, sizeof(materials::MaterialTableUBO)};
-		VkWriteDescriptorSet writes[2]{};
+		VkDescriptorBufferInfo drawDataBi{f.drawDataBuffer.buffer, 0, kMaxDrawDataEntries * sizeof(VoxelDrawData)};
+		VkWriteDescriptorSet writes[3]{};
 		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writes[0].dstSet = f.descriptorSet0;
 		writes[0].dstBinding = 0;
@@ -197,7 +211,11 @@ void WorldRenderer::createFrameUbos()
 		writes[1] = writes[0];
 		writes[1].dstBinding = 1;
 		writes[1].pBufferInfo = &matBi;
-		vkUpdateDescriptorSets(m_context->getDevice(), 2, writes, 0, nullptr);
+		writes[2] = writes[0];
+		writes[2].dstBinding = 2;
+		writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[2].pBufferInfo = &drawDataBi;
+		vkUpdateDescriptorSets(m_context->getDevice(), 3, writes, 0, nullptr);
 	}
 }
 
@@ -209,6 +227,8 @@ void WorldRenderer::destroyFrameUbos()
 	{
 		if (f.ubo.buffer != VK_NULL_HANDLE)
 			destroyBuffer(m_context->getAllocator(), f.ubo);
+		if (f.drawDataBuffer.buffer != VK_NULL_HANDLE)
+			destroyBuffer(m_context->getAllocator(), f.drawDataBuffer);
 		f = {};
 	}
 }
@@ -388,23 +408,26 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 	if (gpu) gpu->endPass(cmd, GpuPass::Upload);
 
 	const VkDescriptorSet set0 = m_frameUbos[frameIndex].descriptorSet0;
+	auto *drawDataMapped = static_cast<VoxelDrawData *>(m_frameUbos[frameIndex].drawDataMapped);
+	AllocatedBuffer &drawDataBuffer = m_frameUbos[frameIndex].drawDataBuffer;
 
 	{
 		PROFILE_SCOPE("Shadow");
 		if (gpu) gpu->beginPass(cmd, GpuPass::Shadow);
-		m_shadow.record(cmd, frameIndex, shadowChunks, m_cascadeMatrices, m_time, set0, m_set1, m_arenas);
+		m_shadow.record(cmd, frameIndex, shadowChunks, m_cascadeMatrices, m_time, set0, m_set1, m_arenas,
+		                drawDataMapped, drawDataBuffer);
 		if (gpu) gpu->endPass(cmd, GpuPass::Shadow);
 	}
 	{
 		PROFILE_SCOPE("Scene");
 		m_opaque.record(cmd, extent, set0, m_set1, m_pipelineLayout, m_post.hdrColor(), m_post.sceneDepth(), chunks,
-						m_overlays, clearColor, frameIndex, m_arenas, gpu);
+						m_overlays, clearColor, frameIndex, m_arenas, drawDataMapped, drawDataBuffer, gpu);
 	}
 	{
 		const auto *ubo = static_cast<const FrameUBO *>(m_frameUbos[frameIndex].uboMapped);
 		if (gpu) gpu->beginPass(cmd, GpuPass::Water);
 		m_water.record(cmd, frameIndex, extent, set0, m_set1, m_set2Water, m_waterPipelineLayout, m_post.hdrColor(),
-					   m_post.sceneDepth(), chunks, glm::vec3(ubo->viewPos), m_arenas);
+					   m_post.sceneDepth(), chunks, glm::vec3(ubo->viewPos), m_arenas, drawDataMapped, drawDataBuffer);
 		if (gpu) gpu->endPass(cmd, GpuPass::Water);
 	}
 	// Telemetry for the benchmark's indirect peak: what the CPU-built

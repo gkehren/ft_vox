@@ -1356,9 +1356,8 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
           const float texture_idx_val = static_cast<float>(faceTex);
 
           uint32_t vert_indices[4];
-          glm::vec3 quad_vertices_world[4] = {
-              this->position + v0_local, this->position + v1_local,
-              this->position + v2_local, this->position + v3_local};
+          const glm::vec3 quad_vertices_local[4] = {
+              v0_local, v1_local, v2_local, v3_local};
 
           int normalIdx = 0;
           if (quad_normal_dir.x > 0)
@@ -1492,14 +1491,14 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
           for (int i = 0; i < 4; ++i)
           {
             Vertex vert;
-            vert.position = quad_vertices_world[i];
-
-            glm::vec3 localPos = vert.position - this->position;
+            const glm::vec3 &localPos = quad_vertices_local[i];
             uint32_t ao = calculateAO(localPos, i);
             ++meshSample.data.aoVertices;
 
+            vert.packedPos = Vertex::packPosition(localPos);
             vert.packedData = packedData | (ao << 12) | lightBits;
-            vert.texCoord = tc[i];
+            vert.texCoordU = static_cast<uint16_t>(std::lround(tc[i].x));
+            vert.texCoordV = static_cast<uint16_t>(std::lround(tc[i].y));
             vert.packedBiomeColor = packedColor;
 
             // I: Direct push for both water and opaque — greedy quads never share vertices
@@ -1566,8 +1565,11 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
           for (size_t k = 0; k < 4; ++k)
           {
             Vertex v{};
-            v.position = this->position + glm::vec3(x, y, z) + positions[k];
-            v.texCoord = uv[k]; v.packedData = packed;
+            const glm::vec3 localPos = glm::vec3(x, y, z) + positions[k];
+            v.packedPos = Vertex::packPosition(localPos);
+            v.texCoordU = static_cast<uint16_t>(uv[k].x);
+            v.texCoordV = static_cast<uint16_t>(uv[k].y);
+            v.packedData = packed;
             v.packedBiomeColor = tint ? biomeGrassColors[z * CHUNK_SIZE + x] : 0u;
             vertices.push_back(v);
           }
@@ -1575,11 +1577,20 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
           for (auto k : winding) indices.push_back(first + k);
         };
         if (shape == BlockShape::Flat)
-          quad({glm::vec3(.05f, .025f, .05f), {.95f, .025f, .05f}, {.95f, .025f, .95f}, {.05f, .025f, .95f}});
+          quad({glm::vec3(1.f / 16.f, 1.f / 16.f, 1.f / 16.f),
+                {15.f / 16.f, 1.f / 16.f, 1.f / 16.f},
+                {15.f / 16.f, 1.f / 16.f, 15.f / 16.f},
+                {1.f / 16.f, 1.f / 16.f, 15.f / 16.f}});
         else
         {
-          quad({glm::vec3(.1f, 0.f, .1f), {.9f, 0.f, .9f}, {.9f, .9f, .9f}, {.1f, .9f, .1f}});
-          quad({glm::vec3(.9f, 0.f, .1f), {.1f, 0.f, .9f}, {.1f, .9f, .9f}, {.9f, .9f, .1f}});
+          quad({glm::vec3(2.f / 16.f, 0.f, 2.f / 16.f),
+                {14.f / 16.f, 0.f, 14.f / 16.f},
+                {14.f / 16.f, 14.f / 16.f, 14.f / 16.f},
+                {2.f / 16.f, 14.f / 16.f, 2.f / 16.f}});
+          quad({glm::vec3(14.f / 16.f, 0.f, 2.f / 16.f),
+                {2.f / 16.f, 0.f, 14.f / 16.f},
+                {2.f / 16.f, 14.f / 16.f, 14.f / 16.f},
+                {14.f / 16.f, 14.f / 16.f, 2.f / 16.f}});
         }
       }
 
@@ -1697,16 +1708,16 @@ void Chunk::buildLODMeshRanged(MeshBuildResult &out, int scanTopY)
       float fz = float(cz);
 
       Vertex v0, v1, v2, v3;
-      v0.position = this->position + glm::vec3(fx, fy, fz);
-      v1.position = this->position + glm::vec3(fx, fy, fz + 1.f);
-      v2.position = this->position + glm::vec3(fx + 1.f, fy, fz + 1.f);
-      v3.position = this->position + glm::vec3(fx + 1.f, fy, fz);
+      v0.packedPos = Vertex::packPosition(glm::vec3(fx, fy, fz));
+      v1.packedPos = Vertex::packPosition(glm::vec3(fx, fy, fz + 1.f));
+      v2.packedPos = Vertex::packPosition(glm::vec3(fx + 1.f, fy, fz + 1.f));
+      v3.packedPos = Vertex::packPosition(glm::vec3(fx + 1.f, fy, fz));
 
       // swapUV=true (d=1), w=1, h=1 -> tc_u=1, tc_v=1
-      v0.texCoord = {0.f, 0.f};
-      v1.texCoord = {0.f, 1.f};
-      v2.texCoord = {1.f, 1.f};
-      v3.texCoord = {1.f, 0.f};
+      v0.texCoordU = 0; v0.texCoordV = 0;
+      v1.texCoordU = 0; v1.texCoordV = 1;
+      v2.texCoordU = 1; v2.texCoordV = 1;
+      v3.texCoordU = 1; v3.texCoordV = 0;
 
       v0.packedData = v1.packedData = v2.packedData = v3.packedData = packedData;
       v0.packedBiomeColor = v1.packedBiomeColor =
@@ -1822,6 +1833,7 @@ void Chunk::rebuildIndirectDrawCache()
                static_cast<int32_t>(m_lodOpaqueVertices.offset / sizeof(Vertex)), 0};
       d.vertexPage = m_lodOpaqueVertices.page;
       d.indexPage = m_lodOpaqueIndices.page;
+      d.chunkOrigin = glm::ivec3(this->position);
       m_cachedOpaqueDrawCount = 1;
     }
 
@@ -1833,6 +1845,7 @@ void Chunk::rebuildIndirectDrawCache()
                static_cast<int32_t>(m_lodWaterVertices.offset / sizeof(Vertex)), 0};
       d.vertexPage = m_lodWaterVertices.page;
       d.indexPage = m_lodWaterIndices.page;
+      d.chunkOrigin = glm::ivec3(this->position);
       m_cachedWaterDrawCount = 1;
     }
     return;
@@ -1856,6 +1869,7 @@ void Chunk::rebuildIndirectDrawCache()
                static_cast<int32_t>(slot.vertexBase), 0};
       d.vertexPage = slot.vertexPage;
       d.indexPage = slot.indexPage;
+      d.chunkOrigin = glm::ivec3(this->position);
     }
   }
 
@@ -1873,6 +1887,7 @@ void Chunk::rebuildIndirectDrawCache()
                static_cast<int32_t>(slot.vertexBase), 0};
       d.vertexPage = slot.vertexPage;
       d.indexPage = slot.indexPage;
+      d.chunkOrigin = glm::ivec3(this->position);
     }
   }
 }

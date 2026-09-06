@@ -34,21 +34,60 @@ struct Voxel
 	uint8_t type; // Supports up to 256 block types (0-255)
 };
 
+struct VoxelDrawData
+{
+	glm::ivec3 worldOrigin;
+	uint32_t flags;
+};
+static_assert(sizeof(VoxelDrawData) == 16, "VoxelDrawData must be 16 bytes");
+
 struct Vertex
 {
-	glm::vec3 position;
-	uint32_t packedData; // 0-2: normal, 3-10: textureIndex, 11: useBiomeColor, 12-13: AO
-	glm::vec2 texCoord;
+	uint32_t packedPos;        // 9 bits X (scale 16), 14 bits Y (scale 16), 9 bits Z (scale 16)
+	uint32_t packedData;       // 0-2: normal, 3-10: textureIndex, 11: useBiomeColor, 12-13: AO, 14-17: skyLight, 18-21: blockLight
+	uint16_t texCoordU;
+	uint16_t texCoordV;
 	uint32_t packedBiomeColor; // RGBA8
+
+	static constexpr float kPositionScale = 16.0f;
+	static constexpr float kInvPositionScale = 1.0f / 16.0f;
+
+	static uint32_t packPosition(const glm::vec3 &localPos)
+	{
+		const uint32_t px = static_cast<uint32_t>(std::lround(localPos.x * kPositionScale)) & 0x1FFu;
+		const uint32_t py = static_cast<uint32_t>(std::lround(localPos.y * kPositionScale)) & 0x3FFFu;
+		const uint32_t pz = static_cast<uint32_t>(std::lround(localPos.z * kPositionScale)) & 0x1FFu;
+		return px | (py << 9u) | (pz << 23u);
+	}
+
+	static glm::vec3 unpackPosition(uint32_t p)
+	{
+		const float x = static_cast<float>(p & 0x1FFu) * kInvPositionScale;
+		const float y = static_cast<float>((p >> 9u) & 0x3FFFu) * kInvPositionScale;
+		const float z = static_cast<float>((p >> 23u) & 0x1FFu) * kInvPositionScale;
+		return {x, y, z};
+	}
+
+	glm::vec3 decodePosition(const glm::vec3 &origin = {0.f, 0.f, 0.f}) const
+	{
+		return origin + unpackPosition(packedPos);
+	}
+
+	glm::vec2 decodeTexCoord() const
+	{
+		return {static_cast<float>(texCoordU), static_cast<float>(texCoordV)};
+	}
 
 	bool operator==(const Vertex &other) const
 	{
-		return position == other.position &&
-			   packedData == other.packedData &&
-			   texCoord == other.texCoord &&
-			   packedBiomeColor == other.packedBiomeColor;
+		return packedPos == other.packedPos &&
+		       packedData == other.packedData &&
+		       texCoordU == other.texCoordU &&
+		       texCoordV == other.texCoordV &&
+		       packedBiomeColor == other.packedBiomeColor;
 	}
 };
+static_assert(sizeof(Vertex) == 16, "Vertex must be 16 bytes");
 
 inline void hash_combine(std::size_t &seed, uint32_t v)
 {
@@ -60,19 +99,9 @@ struct VertexHasher
 	std::size_t operator()(const Vertex &vertex) const
 	{
 		size_t seed = 0;
-		uint32_t px, py, pz, tx, ty;
-		std::memcpy(&px, &vertex.position.x, 4);
-		std::memcpy(&py, &vertex.position.y, 4);
-		std::memcpy(&pz, &vertex.position.z, 4);
-		std::memcpy(&tx, &vertex.texCoord.x, 4);
-		std::memcpy(&ty, &vertex.texCoord.y, 4);
-
-		hash_combine(seed, px);
-		hash_combine(seed, py);
-		hash_combine(seed, pz);
+		hash_combine(seed, vertex.packedPos);
 		hash_combine(seed, vertex.packedData);
-		hash_combine(seed, tx);
-		hash_combine(seed, ty);
+		hash_combine(seed, static_cast<uint32_t>(vertex.texCoordU) | (static_cast<uint32_t>(vertex.texCoordV) << 16u));
 		hash_combine(seed, vertex.packedBiomeColor);
 		return seed;
 	}

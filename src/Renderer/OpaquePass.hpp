@@ -27,6 +27,7 @@ public:
 				VkPipelineLayout layout, AllocatedImage &hdr, AllocatedImage &depth,
 				const std::vector<Chunk *> &chunks, OverlayRenderer &overlays,
 				const VkClearColorValue &clearColor, uint32_t frameIndex, const MeshArenas &arenas,
+				VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer,
 				VkGpuProfiler *gpu = nullptr);
 
 	// Indirect commands demanded by the last record (pre-truncation);

@@ -571,6 +571,65 @@ int main()
 		}
 	}
 
+	// --- Packed Vertex & VoxelDrawData (issue #110) ---
+	{
+		static_assert(sizeof(Vertex) == 16, "Vertex must be 16 bytes");
+		static_assert(sizeof(VoxelDrawData) == 16, "VoxelDrawData must be 16 bytes for std430");
+
+		// Test exact integer boundaries on X, Y, Z
+		for (int x = 0; x <= 16; ++x)
+		{
+			for (int z = 0; z <= 16; ++z)
+			{
+				for (int y = 0; y <= 256; y += 16)
+				{
+					const glm::vec3 pos(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+					const uint32_t packed = Vertex::packPosition(pos);
+					const glm::vec3 decoded = Vertex::unpackPosition(packed);
+					if (decoded != pos)
+					{
+						ok = fail("Integer coordinate (" + std::to_string(x) + ", " +
+						          std::to_string(y) + ", " + std::to_string(z) +
+						          ") failed round-trip");
+					}
+				}
+			}
+		}
+
+		// Test plant detail coordinates (1/16 fractions)
+		const glm::vec3 plantOffsets[] = {
+			{1.f / 16.f, 1.f / 16.f, 1.f / 16.f},
+			{15.f / 16.f, 1.f / 16.f, 15.f / 16.f},
+			{2.f / 16.f, 0.f, 2.f / 16.f},
+			{14.f / 16.f, 14.f / 16.f, 14.f / 16.f},
+		};
+		for (const auto &offset : plantOffsets)
+		{
+			const glm::vec3 pos = glm::vec3(5.f, 64.f, 7.f) + offset;
+			const uint32_t packed = Vertex::packPosition(pos);
+			const glm::vec3 decoded = Vertex::unpackPosition(packed);
+			if (glm::length(decoded - pos) > 1e-5f)
+				ok = fail("Plant fraction failed round-trip");
+		}
+
+		// Test UV coordinate precision
+		Vertex v{};
+		v.texCoordU = 16;
+		v.texCoordV = 256;
+		const glm::vec2 uv = v.decodeTexCoord();
+		if (uv.x != 16.f || uv.y != 256.f)
+			ok = fail("UV decode failed");
+
+		// Test large world origin + local position reconstruction
+		const glm::ivec3 worldOrigin(100000, 0, -500000);
+		const glm::vec3 localPos(8.f, 128.f, 8.f);
+		v.packedPos = Vertex::packPosition(localPos);
+		const glm::vec3 worldPos = v.decodePosition(glm::vec3(worldOrigin));
+		const glm::vec3 expectedWorld = glm::vec3(worldOrigin) + localPos;
+		if (worldPos != expectedWorld)
+			ok = fail("Large world coordinate reconstruction failed");
+	}
+
 	if (!ok)
 	{
 		std::cerr << "test_render_helpers: FAILED\n";
