@@ -284,7 +284,7 @@ GPU mesh upload is **not** in `tickStreaming`. It runs later inside `WorldRender
 - **`minRenderDistance`** (blocks, default 192) — near band: full mesh  
 - **`maxRenderDistance`** (blocks, default 512) — stream/unload radius; far band may use **LOD mesh**  
 - **`streamFrontBias`** (default 0.30) — view-direction load bias: chunks ahead of the camera count as closer (load first, reach ~×1.19 ahead / ~×0.87 behind); stays inside the 1.5× unload radius (no thrash). See `biasedLoadDistSq` in `StreamHelpers.hpp`
-- Load queue is **distance-prioritized** (not pure FIFO); pruned each stream tick (`StreamHelpers.hpp` helpers: `LoadCandidate`, radius math, shell indexing)
+- Load queue is **distance-prioritized** (not pure FIFO) and maintained **incrementally** (issue #108). The desired-chunk footprint is stored as per-row X spans (`ChunkDesiredFootprint` in `StreamHelpers.hpp`): frames inside the same chunk with unchanged settings do no scanning at all, 1-chunk moves apply a `FootprintDiff` (new rows/spans minus old), and full rebuilds are reserved for teleports, render-distance or front-bias changes. Camera heading only matters while `streamFrontBias > 0`; rotations beyond ~10° (`kStreamHeadingCosThreshold`) re-reconcile the footprint. Candidates are re-sorted only when the candidate set changes; consumption uses a head index instead of shifting the vector each tick. Out-of-range unloads run on chunk-cross / settings change and at least every 60 frames (unload hysteresis is 1.5× view distance, unchanged).
 
 ### Draw lists
 
