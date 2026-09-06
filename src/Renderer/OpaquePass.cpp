@@ -159,7 +159,10 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 	{
 		// Bisect mode: bind per section and draw directly (no indirect
 		// buffer). If the world renders correctly here, the arena data is
-		// good and the bug is in the indirect command path.
+		// good and the bug is in the indirect command path. Only the draw
+		// dispatch changes: overlays and the rendering scope close exactly
+		// like the indirect path, so the rest of the frame graph is
+		// identical.
 		VkBuffer curV = VK_NULL_HANDLE, curI = VK_NULL_HANDLE;
 		for (const Chunk::IndirectDraw &d : m_scratch)
 		{
@@ -176,10 +179,8 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			vkCmdDrawIndexed(cmd, d.cmd.indexCount, 1, d.cmd.firstIndex,
 			                 d.cmd.vertexOffset, 0);
 		}
-		if (gpu) gpu->endPass(cmd, GpuPass::Opaque);
-		return;
 	}
-	if (!m_scratch.empty())
+	else if (!m_scratch.empty())
 	{
 		assert(m_scratch.size() <= kMaxIndirectCommands && "OpaquePass: indirect command capacity exceeded");
 		if (m_scratch.size() > kMaxIndirectCommands)
