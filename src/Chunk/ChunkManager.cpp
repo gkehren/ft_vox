@@ -61,19 +61,22 @@ glm::ivec3 ChunkManager::worldToChunkCoord(const glm::vec3 &worldPos)
 void ChunkManager::updateStreaming(const Camera &camera, const RenderSettings &settings)
 {
 	const glm::ivec3 camChunk = worldToChunkCoord(camera.getPosition());
-	const bool camChunkChanged = (!m_streamState.initialized || camChunk != m_streamState.lastCamChunk);
-	const bool settingsChanged = (!m_streamState.initialized ||
-								  settings.maxRenderDistance != m_streamState.lastMaxRenderDistance ||
-								  settings.streamFrontBias != m_streamState.lastStreamFrontBias);
 
-	if (camChunkChanged || settingsChanged || m_streamFramesSinceUnloadCheck >= 60)
+	// Unload triggers mirror the load-side reconciliation triggers minus
+	// intra-chunk anchor moves: the 1.5x unload hysteresis makes 4-block
+	// precision worthless and the m_activeChunks scan is the expensive part.
+	// Read BEFORE loadChunksAroundPlayer publishes the new camera state
+	// (issue #108 review: one trigger definition, no duplicated logic).
+	const bool unloadRelevant = !m_streamState.initialized ||
+								camChunk != m_streamState.lastCamChunk ||
+								settings.maxRenderDistance != m_streamState.lastMaxRenderDistance ||
+								streamFrontBiasChanged(settings.streamFrontBias, m_streamState.lastStreamFrontBias);
+
+	++m_streamFramesSinceUnloadCheck;
+	if (unloadRelevant || m_streamFramesSinceUnloadCheck >= kUnloadCheckIntervalFrames)
 	{
 		queueUnloadOutOfRange(camera, settings);
 		m_streamFramesSinceUnloadCheck = 0;
-	}
-	else
-	{
-		++m_streamFramesSinceUnloadCheck;
 	}
 
 	loadChunksAroundPlayer(camChunk, camera, settings);
@@ -924,10 +927,10 @@ glm::vec2 normalizedForwardXZ(const Camera &camera)
 }
 } // namespace
 
-void ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-											 const RenderSettings &settings)
+StreamingUpdateKind ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+															const RenderSettings &settings)
 {
-	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
+	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
 	const glm::vec3 camPos = camera.getPosition();
 	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
 
@@ -961,10 +964,12 @@ void ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, c
 	m_queueNeedsSort = false;
 
 	m_streamState.lastCamChunk = cameraChunkPos;
+	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
 	m_streamState.lastCamForwardXZ = camForwardXZ;
 	m_streamState.lastMaxRenderDistance = settings.maxRenderDistance;
-	m_streamState.lastStreamFrontBias = settings.streamFrontBias;
+	m_streamState.lastStreamFrontBias = normalizedStreamFrontBias(settings.streamFrontBias);
 	m_streamState.initialized = true;
+	return StreamingUpdateKind::FullRebuild;
 }
 
 void ChunkManager::applyFootprintDiffToQueue(const FootprintDiff &diff, const glm::vec3 &camPos,
@@ -1014,10 +1019,10 @@ void ChunkManager::applyFootprintDiffToQueue(const FootprintDiff &diff, const gl
 	m_streamState.lastCamForwardXZ = camForwardXZ;
 }
 
-void ChunkManager::updateStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-											  const RenderSettings &settings)
+StreamingUpdateKind ChunkManager::reconcileStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+																const RenderSettings &settings)
 {
-	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
+	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
 	const glm::vec3 camPos = camera.getPosition();
 	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
 
@@ -1029,12 +1034,14 @@ void ChunkManager::updateStreamingIncremental(const glm::ivec3 &cameraChunkPos, 
 
 	applyFootprintDiffToQueue(diff, camPos, camForwardXZ, frontBias);
 	m_streamState.lastCamChunk = cameraChunkPos;
+	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
+	return StreamingUpdateKind::Incremental;
 }
 
-void ChunkManager::reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-											 const RenderSettings &settings)
+StreamingUpdateKind ChunkManager::reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+															const RenderSettings &settings)
 {
-	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
+	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
 	const glm::vec3 camPos = camera.getPosition();
 	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
 
@@ -1045,50 +1052,50 @@ void ChunkManager::reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, c
 	m_desiredFootprint = std::move(newFootprint);
 
 	applyFootprintDiffToQueue(diff, camPos, camForwardXZ, frontBias);
+	// The heading path also serves chunk-cross frames (heading has dispatch
+	// priority), so it must publish the full camera state.
+	m_streamState.lastCamChunk = cameraChunkPos;
+	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
+	return StreamingUpdateKind::HeadingRebuild;
 }
 
-void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-										  const RenderSettings &settings)
+StreamingUpdateKind ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+														 const RenderSettings &settings)
 {
-	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
+	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
 	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
 
 	if (!m_streamState.initialized ||
 		settings.maxRenderDistance != m_streamState.lastMaxRenderDistance ||
-		std::abs(settings.streamFrontBias - m_streamState.lastStreamFrontBias) > 1e-4f)
+		streamFrontBiasChanged(settings.streamFrontBias, m_streamState.lastStreamFrontBias))
 	{
-		rebuildStreamingQueueFull(cameraChunkPos, camera, settings);
-		return;
+		return rebuildStreamingQueueFull(cameraChunkPos, camera, settings);
 	}
 
-	const glm::ivec3 delta = cameraChunkPos - m_streamState.lastCamChunk;
-	const bool isTeleport = (std::abs(delta.x) > 1 || std::abs(delta.z) > 1);
-	const bool isOneChunk = (std::abs(delta.x) <= 1 && std::abs(delta.z) <= 1 && (delta.x != 0 || delta.z != 0));
+	const glm::ivec3 chunkDelta = cameraChunkPos - m_streamState.lastCamChunk;
+	if (std::abs(chunkDelta.x) > 1 || std::abs(chunkDelta.z) > 1)
+		return rebuildStreamingQueueFull(cameraChunkPos, camera, settings); // teleport
 
-	if (isTeleport)
+	// A heading change beyond the threshold reshapes the whole footprint, so
+	// it supersedes a simultaneous chunk-cross/anchor move (explicit priority:
+	// settings > teleport > heading > movement — issue #108 review).
+	if (frontBias > kStreamBiasEpsilon &&
+		glm::dot(camForwardXZ, m_streamState.lastCamForwardXZ) < kStreamHeadingCosThreshold)
 	{
-		rebuildStreamingQueueFull(cameraChunkPos, camera, settings);
-		return;
+		return reconcileStreamingHeading(cameraChunkPos, camera, settings);
 	}
 
-	if (isOneChunk)
-	{
-		updateStreamingIncremental(cameraChunkPos, camera, settings);
-		return;
-	}
+	if (chunkDelta.x != 0 || chunkDelta.z != 0)
+		return reconcileStreamingIncremental(cameraChunkPos, camera, settings);
 
-	// Inside the same chunk: check if heading changed beyond threshold
-	if (frontBias > 0.001f)
-	{
-		const float headingDot = glm::dot(camForwardXZ, m_streamState.lastCamForwardXZ);
-		if (headingDot < kStreamHeadingCosThreshold)
-		{
-			reconcileStreamingHeading(cameraChunkPos, camera, settings);
-			return;
-		}
-	}
+	// Intra-chunk movement: the footprint is a function of the exact camera
+	// position, so reconcile at movement-anchor granularity instead of letting
+	// it go stale for up to a full 16-block chunk (issue #108 review).
+	const glm::ivec2 anchor = streamingMovementAnchor(camera.getPosition());
+	if (anchor != m_streamState.lastMovementAnchor)
+		return reconcileStreamingIncremental(cameraChunkPos, camera, settings);
 
-	// Same chunk, same settings, same heading: ZERO WORK!
+	return StreamingUpdateKind::None; // exact zero-work steady state
 }
 
 void ChunkManager::ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx)

@@ -61,6 +61,21 @@ struct PendingVoxelEdit
 	uint64_t editId{0};
 };
 
+/// What the last streaming maintenance tick did (issue #108 review): lets
+/// tests and telemetry assert the zero-work / incremental / rebuild contract.
+enum class StreamingUpdateKind
+{
+	None,			// steady state: camera inside the same chunk, anchor and heading
+	Incremental,	// chunk-cross or movement-anchor change: O(r) footprint diff
+	HeadingRebuild, // heading threshold exceeded: full footprint recompute + diff
+	FullRebuild		// startup / teleport / settings change: queue rebuilt from scratch
+};
+
+/// Hard cadence floor between out-of-range unload scans (issue #108 review):
+/// unload checks run on chunk-cross/teleport or settings changes, and at
+/// least every this many frames otherwise.
+constexpr uint32_t kUnloadCheckIntervalFrames = 60;
+
 /// Streams chunks around the player: load → async terrain → async mesh → main-thread GPU upload.
 class ChunkManager
 {
@@ -129,14 +144,14 @@ public:
 
 private:
 	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);
-	void loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-								const RenderSettings &settings);
-	void rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-								   const RenderSettings &settings);
-	void updateStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-									const RenderSettings &settings);
-	void reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-								   const RenderSettings &settings);
+	StreamingUpdateKind loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+											   const RenderSettings &settings);
+	StreamingUpdateKind rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+												  const RenderSettings &settings);
+	StreamingUpdateKind reconcileStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+													  const RenderSettings &settings);
+	StreamingUpdateKind reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+												  const RenderSettings &settings);
 	/// Shared tail of the incremental streaming updates: apply a footprint
 	/// diff to the load queue (enqueue entering coords, purge exiting ones,
 	/// compact consumed entries, refresh biased distances, re-sort).
@@ -199,6 +214,7 @@ private:
 	struct StreamState
 	{
 		glm::ivec3 lastCamChunk{std::numeric_limits<int>::max(), 0, std::numeric_limits<int>::max()};
+		glm::ivec2 lastMovementAnchor{std::numeric_limits<int>::max(), std::numeric_limits<int>::max()};
 		glm::vec2 lastCamForwardXZ{0.f, 1.f};
 		int lastMaxRenderDistance{-1};
 		float lastStreamFrontBias{-1.f};
@@ -214,7 +230,7 @@ private:
 	ChunkDesiredFootprint m_desiredFootprint;
 	size_t m_loadQueueHead{0};
 	bool m_queueNeedsSort{false};
-	int m_streamFramesSinceUnloadCheck{0};
+	uint32_t m_streamFramesSinceUnloadCheck{0};
 
 	mutable std::mutex m_completedJobsMutex;
 	std::vector<Chunk *> m_completedGenerationChunks;

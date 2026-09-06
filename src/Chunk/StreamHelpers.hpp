@@ -152,6 +152,41 @@ inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 /// requires queue/footprint reconciliation (~10 degrees).
 constexpr float kStreamHeadingCosThreshold = 0.985f;
 
+/// Intra-chunk movement granularity for streaming reconciliation (issue #108
+/// review): the desired footprint is a function of the exact camera position,
+/// so maintenance must not go stale for a whole 16-block chunk. Reconcile
+/// whenever the camera enters a new world-space anchor cell (4 blocks → at
+/// most 4 reconciliations per axis per chunk, still far below a full scan).
+constexpr int kStreamingAnchorBlocks = 4;
+
+/// Quantized world-space anchor cell of the camera XZ position. Floor
+/// division so negative coordinates quantize symmetrically.
+inline glm::ivec2 streamingMovementAnchor(const glm::vec3 &pos)
+{
+	return {
+		static_cast<int>(std::floor(pos.x / static_cast<float>(kStreamingAnchorBlocks))),
+		static_cast<int>(std::floor(pos.z / static_cast<float>(kStreamingAnchorBlocks)))};
+}
+
+/// Bias below which front-bias reshaping is considered absent: at bias 0 the
+/// desired region is rotation-invariant, so heading changes are no-ops.
+constexpr float kStreamBiasEpsilon = 1e-4f;
+
+/// Runtime front-bias value actually used by the footprint math (the UI may
+/// hand in values beyond the clamp — compare/store the canonical value, not
+/// the raw one, so clamped settings never trigger spurious rebuilds).
+inline float normalizedStreamFrontBias(float bias)
+{
+	return glm::clamp(bias, 0.f, 0.9f);
+}
+
+/// True when two front-bias settings differ beyond float noise after
+/// normalization. Single comparison rule for every invalidation check.
+inline bool streamFrontBiasChanged(float a, float b)
+{
+	return std::abs(normalizedStreamFrontBias(a) - normalizedStreamFrontBias(b)) > kStreamBiasEpsilon;
+}
+
 /// Contiguous interval of chunk X coordinates in a row Z that lie within the desired load region.
 struct ChunkRowSpan
 {
