@@ -156,12 +156,16 @@ Small vegetation uses an explicit `BlockShape` (`Cube`, `Cross`, `Flat`) in
   collision. Semantic traits shared with worldgen live in
   `Block/BlockTraits.hpp`, which no renderer header may own.
 - Water-containing details (SEAGRASS, KELP, KELP_TOP) coexist with their
-  fluid (issue #120): `blockContainedMedium()` is the neutral medium trait,
-  the cube mesher maps them to WATER for fluid continuity/occlusion (their
-  own cross/flat quads are still emitted from the raw type, so no holes open
-  in the surrounding volume), and LOD keeps the water column while omitting
-  the detail geometry. Dry details (SHORT_GRASS, WILDFLOWER, LILY_PAD, …)
-  carry `BlockMedium::None` and behave exactly as before.
+  fluid (issue #120): fluid occupancy follows `blockContainsWater()` — a
+  neutral medium trait independent of `BlockShape` — so the fluid mesher
+  treats those cells exactly like WATER (continuity, occlusion, greedy
+  merging) while each detail still emits its own cross/flat quads from the
+  raw type. No holes open in the surrounding volume. Dry details
+  (SHORT_GRASS, WILDFLOWER, LILY_PAD, …) carry `BlockMedium::None` and
+  behave exactly as before.
+- Geometry and medium are independent traits: KELP keeps its cross-quad
+  representation while holding water; the LOD drops detail geometry but
+  never the contained medium.
 - Textures use grass tint via `blockUsesGrassTint` where appropriate.
 
 ## Adding a biome
