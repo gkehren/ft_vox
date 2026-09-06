@@ -1,4 +1,5 @@
 #pragma once
+#include <Entities/MobTypes.hpp>
 #include <Physics/VoxelCollision.hpp>
 #include <array>
 #include <optional>
@@ -7,15 +8,6 @@
 
 namespace entities
 {
-enum class MobSpecies : uint8_t
-{
-    Cow,
-    Pig,
-    Sheep,
-    Chicken,
-    Count
-};
-inline constexpr size_t kMobSpeciesCount = size_t(MobSpecies::Count);
 struct SpeciesSettings
 {
     glm::dvec3 size;
@@ -40,19 +32,15 @@ class MobWorld : public physics::VoxelCollisionWorld
 };
 struct Mob
 {
-    uint64_t id{}, origin{}, random{};
+    EntityId id{};
+    SpawnGroupId origin{};
+    uint64_t randomState{};
     MobSpecies species{};
     physics::Body body;
     glm::dvec3 previous{};
     double yaw{}, previousYaw{}, targetYaw{}, timer{}, gait{}, previousGait{}, age{};
     double stride{}, previousStride{}, shoreTimer{};
     bool walking{};
-};
-struct MobRenderState
-{
-    MobSpecies species{};
-    glm::vec3 position{};
-    float yaw{}, gait{}, look{}, flap{}, stride{};
 };
 // One fixed-step controller, reusable with synthetic voxel worlds and no engine.
 void tickMob(Mob &, const physics::VoxelCollisionWorld &, double dt, std::span<const glm::dvec3> neighbors,

@@ -78,7 +78,7 @@ static Mob walker(MobSpecies species = MobSpecies::Cow)
 {
     Mob m{};
     m.id = 1;
-    m.random = 123;
+    m.randomState = 123;
     m.species = species;
     m.body.size = speciesSettings[size_t(species)].size;
     m.body.position = {0, 0.001, 0};

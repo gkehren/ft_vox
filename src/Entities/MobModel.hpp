@@ -1,6 +1,8 @@
 #pragma once
-#include "MobSystem.hpp"
+#include <Entities/MobTypes.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <array>
+#include <cstdint>
 #include <vector>
 
 namespace entities

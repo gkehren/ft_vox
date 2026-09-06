@@ -1,4 +1,6 @@
 #pragma once
+#include <Entities/MobTypes.hpp>
+#include <Entities/MobSystem.hpp>
 #include <Entities/MobModel.hpp>
 #include <Renderer/MobTextures.hpp>
 #include <Renderer/FrameUBO.hpp>

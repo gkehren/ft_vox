@@ -60,7 +60,7 @@ bool MobSystem::add(MobSpecies species, glm::dvec3 feet, uint64_t id, uint64_t o
     Mob m{};
     m.id = id;
     m.origin = origin;
-    m.random = mix(id ^ m_seed);
+    m.randomState = mix(id ^ m_seed);
     m.species = species;
     m.body.position = feet;
     m.body.size = speciesSettings[size_t(species)].size;
@@ -74,8 +74,8 @@ bool MobSystem::add(MobSpecies species, glm::dvec3 feet, uint64_t id, uint64_t o
             return false;
     m.body.grounded = true;
     m.previous = feet;
-    m.yaw = m.previousYaw = m.targetYaw = random(m.random) * 6.283185307;
-    m.timer = 2 + 4 * random(m.random);
+    m.yaw = m.previousYaw = m.targetYaw = random(m.randomState) * 6.283185307;
+    m.timer = 2 + 4 * random(m.randomState);
     m_mobs.push_back(m);
     return true;
 }
@@ -160,8 +160,8 @@ void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
     if (m.timer <= 0)
     {
         m.walking = !m.walking;
-        m.timer = m.walking ? 3 + 5 * random(m.random) : 2 + 4 * random(m.random);
-        m.targetYaw = m.yaw + (random(m.random) - 0.5) * 4.5;
+        m.timer = m.walking ? 3 + 5 * random(m.randomState) : 2 + 4 * random(m.randomState);
+        m.targetYaw = m.yaw + (random(m.randomState) - 0.5) * 4.5;
     }
     m.yaw += std::clamp(angle(m.targetYaw - m.yaw), -2.0 * dt, 2.0 * dt);
     glm::dvec3 direction(std::sin(m.yaw), 0, -std::cos(m.yaw));
@@ -246,7 +246,7 @@ void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
             else
             {
                 horizontal = {0, 0, 0};
-                m.targetYaw = m.yaw + 1.2 + random(m.random) * 1.5;
+                m.targetYaw = m.yaw + 1.2 + random(m.randomState) * 1.5;
                 m.timer = std::min(m.timer, 0.6);
             }
         }
