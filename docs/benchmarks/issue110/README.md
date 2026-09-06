@@ -12,6 +12,36 @@ Both binaries built Release from clean trees with CMake on Windows (MSVC 2022, x
 - Raw reports archived in this directory:
   - Baseline: `bench_20260906_174831_c8687168b7e2_s42_sc9926.txt`
   - PR (Packed): `bench_20260906_175733_c8687168b7e2__s42_sc9861.txt`
+    (provenance caveat: built from a dirty tree, so the revision label shows
+    the parent hash + `*`; the binary was the packed build)
+
+## Interleaved 30 s A/B (3 pairs, clean trees, post-review confirmation)
+
+`M,P,M,P,M,P` vs main `c868716`, same settings at 30 s duration
+(`bench_20260906_181*` files in this directory):
+
+| Metric | main | PR | Δ |
+|---|---|---|---|
+| `upload.vertexBytes` / frame | 148-157 KB | **80-88 KB** | **≈ −45 %** (28→16 ratio) |
+| `upload.indexBytes` / frame | 33-35 KB | 32-35 KB | parity (indices unchanged) |
+| `cpu.mesh.capacityBytes` | 19.6-21.2 MB | 13.7-16.6 MB | −25…−31 % |
+| `gpu.live.bytes` | 1.07 GB (10 arena pages) | 0.81 GB (8 pages) | −25 % |
+| Record avg | 0.362-0.387 ms | 0.333-0.366 ms | ≈ −5 % (within noise) |
+| GPU Shadow avgMs | 0.253-0.291 | **0.181-0.212** | **−28 %** (vertex fetch) |
+| GPU Opaque avgMs | 0.986-1.039 | 0.947-1.049 | parity |
+| Score | 9909-9922 (S) | 9911-9916 (S) | parity |
+
+The −45 % vertex upload bytes with flat index bytes confirm the packing is
+exactly the 28→16 stride change with no extra geometry; the shadow pass
+improves most because it re-fetches the whole scene's vertices per cascade.
+
+## Visual validation
+
+- Spawn view (grass/trees/snow/water): geometry coherent, no chunk seams,
+  trees and foliage intact, greedy quads correct.
+- Far-from-origin view (10000, 110, 10000): large greedy water surface
+  renders perfectly smooth — no precision artifacts at 10k blocks (positions
+  are chunk-local; the ivec3 origin keeps full precision).
 
 ## Memory & Workload Telemetry
 
