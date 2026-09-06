@@ -37,7 +37,7 @@ public:
 	};
 	void record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vector<Chunk *> &shadowChunks,
 				const std::array<glm::mat4, kCascadeCount> &cascades, float time,
-						const MeshArenas &arenas);
+				VkDescriptorSet set0, VkDescriptorSet set1, const MeshArenas &arenas);
 
 	// Indirect commands demanded by the last record, summed over cascades
 	// (pre-truncation); WorldRenderer aggregates for the benchmark's peak.

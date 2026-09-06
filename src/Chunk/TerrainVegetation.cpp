@@ -1,9 +1,84 @@
 #include <Chunk/TerrainGenerator.hpp>
-#include <Renderer/MinecraftTextures.hpp>
+#include <Block/BlockTraits.hpp>
 #include <cmath>
+#include <algorithm>
 
 // Vegetation placers (trees, cactus, ice spikes) — split out of TerrainGenerator.cpp
 // so core noise/batch generation stays scannable.
+
+void TerrainGenerator::placeMatureTree(const ChunkGenerationTarget &data, int x, int z,
+                                       int base, BiomeType biome, uint32_t hash)
+{
+  TextureType log = OAK_LOG, leaf = OAK_LEAVES;
+  bool conifer = false;
+  switch (biome)
+  {
+  case BIOME_BIRCH_FOREST: log = BIRCH_LOG; leaf = BIRCH_LEAVES; break;
+  case BIOME_CHERRY_GROVE: log = CHERRY_LOG; leaf = CHERRY_LEAVES; break;
+  case BIOME_DARK_FOREST: case BIOME_AUTUMN_FOREST: log = DARK_OAK_LOG; leaf = DARK_OAK_LEAVES; break;
+  case BIOME_JUNGLE: log = JUNGLE_LOG; leaf = JUNGLE_LEAVES; break;
+  case BIOME_SWAMP: case BIOME_MANGROVE_SWAMP: log = MANGROVE_LOG; leaf = MANGROVE_LEAVES; break;
+  case BIOME_SAVANNA: log = ACACIA_LOG; leaf = ACACIA_LEAVES; break;
+  case BIOME_SNOWY_TAIGA: case BIOME_SNOWY_TUNDRA: case BIOME_MOUNTAINS:
+  case BIOME_REDWOOD_FOREST: case BIOME_SNOWY_MOUNTAINS:
+    log = SPRUCE_LOG; leaf = SPRUCE_LEAVES; conifer = true; break;
+  default: break;
+  }
+  const int height = (conifer ? 23 : biome == BIOME_JUNGLE ? 19 : 11) + static_cast<int>((hash >> 10) % 8u);
+  const bool thick = biome != BIOME_BIRCH_FOREST && biome != BIOME_SAVANNA;
+  for (int y = 0; y < height; ++y)
+    for (int dz = 0; dz <= (thick ? 1 : 0); ++dz)
+      for (int dx = 0; dx <= (thick ? 1 : 0); ++dx)
+        setVoxelSafe(data, x + dx, base + y, z + dz, log);
+
+  auto crown = [&](int cx, int cy, int cz, int radius, int vertical) {
+    for (int dy = -vertical; dy <= vertical; ++dy)
+      for (int dz = -radius; dz <= radius; ++dz)
+        for (int dx = -radius; dx <= radius; ++dx)
+        {
+          if (dx * dx + dz * dz + dy * dy * radius * radius / (vertical * vertical) > radius * radius + 1)
+            continue;
+          // Lobed crowns with sparse, reproducible edge holes.
+          const auto edge = treeHash(dx + cx, dz + cz, static_cast<int>(hash ^ static_cast<uint32_t>(dy)));
+          if (dx * dx + dz * dz > radius * radius - 2 && (edge & 7u) == 0u) continue;
+          const int px = x + cx + dx, pz = z + cz + dz, py = base + cy + dy;
+          const auto old = featureVoxel(data, px, py, pz);
+          if (old == AIR || blockIsLeaves(old)) setVoxelSafe(data, px, py, pz, leaf);
+        }
+  };
+  if (conifer)
+  {
+    for (int depth = 0; depth < height - 7; depth += 2)
+      crown(0, height - depth, 0, std::min(6, 1 + depth / 3), 1);
+  }
+  else
+  {
+    const bool flat = biome == BIOME_SAVANNA || biome == BIOME_CHERRY_GROVE;
+    crown(0, height, 0, 4, flat ? 2 : 3);
+    constexpr int directions[4][2] = {{1, 0}, {0, 1}, {-1, 0}, {0, -1}};
+    for (int n = 0; n < 4; ++n)
+    {
+      const auto &dir = directions[(n + (hash >> 20)) % 4];
+      const int reach = 3 + static_cast<int>((hash >> (n * 3)) & 1u);
+      const int branchY = height - 5 + n % 3;
+      for (int k = 0; k <= reach; ++k)
+      {
+        const int py = base + branchY + k / 2;
+        // Two voxels at a rise keep branches face-connected.
+        setVoxelSafe(data, x + dir[0] * k, py, z + dir[1] * k, log);
+        if (k > 0) setVoxelSafe(data, x + dir[0] * (k - 1), py, z + dir[1] * (k - 1), log);
+      }
+      crown(dir[0] * reach, branchY + reach / 2 + 1, dir[1] * reach, 3, flat ? 1 : 2);
+    }
+  }
+  // Buttresses remain within the checked 3x3 support footprint.
+  if (thick)
+    for (int dz = -1; dz <= 1; ++dz)
+      for (int dx = -1; dx <= 1; ++dx)
+        if (std::abs(dx) + std::abs(dz) == 1)
+          for (int y = -1; y <= 0; ++y)
+            setVoxelSafe(data, x + dx, base + y, z + dz, biome == BIOME_MANGROVE_SWAMP ? MANGROVE_ROOTS : log);
+}
 
 void TerrainGenerator::placeTree(const ChunkGenerationTarget &chunkData, int localX, int localZ,
                                  int baseY, BiomeType biome, int worldX, int worldZ)
@@ -191,8 +266,8 @@ void TerrainGenerator::placeSpruceTree(const ChunkGenerationTarget &chunkData, i
       ++radius; // fat variant: bump radius on non-apex layers
     // Keep the widest layers within MAX_TREE_RADIUS so cross-chunk candidates
     // (evaluated in a ring of that width) place complete canopies.
-    if (radius > MAX_TREE_RADIUS)
-      radius = MAX_TREE_RADIUS;
+    if (radius > worldgen::smallTree.radius)
+      radius = worldgen::smallTree.radius;
 
     for (int dx = -radius; dx <= radius; ++dx)
     {
@@ -398,7 +473,7 @@ void TerrainGenerator::placeRedwoodTree(const ChunkGenerationTarget &chunkData, 
   for (int depth = 0; depth <= 12; depth += 2)
   {
     const int ly = topY - depth;
-    const int radius = std::min(MAX_TREE_RADIUS, 1 + depth / 3);
+    const int radius = std::min(worldgen::smallTree.radius, 1 + depth / 3);
     for (int dx = 1 - radius; dx <= radius; ++dx)
     {
       for (int dz = 1 - radius; dz <= radius; ++dz)

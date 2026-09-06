@@ -142,6 +142,11 @@ void WorldRenderer::createPipelineLayouts()
 	{
 		VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 80};
 		VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+		// The shadow pipeline reads the MaterialTable (set 0) and the block
+		// texture array (set 1) for alpha-cut shadows (PR #119).
+		const std::array<VkDescriptorSetLayout, 2> layouts = {m_setLayout0, m_setLayout1};
+		li.setLayoutCount = static_cast<uint32_t>(layouts.size());
+		li.pSetLayouts = layouts.data();
 		li.pushConstantRangeCount = 1;
 		li.pPushConstantRanges = &pcr;
 		if (vkCreatePipelineLayout(m_context->getDevice(), &li, nullptr, &m_shadowPipelineLayout) != VK_SUCCESS)
@@ -387,7 +392,7 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 	{
 		PROFILE_SCOPE("Shadow");
 		if (gpu) gpu->beginPass(cmd, GpuPass::Shadow);
-		m_shadow.record(cmd, frameIndex, shadowChunks, m_cascadeMatrices, m_time, m_arenas);
+		m_shadow.record(cmd, frameIndex, shadowChunks, m_cascadeMatrices, m_time, set0, m_set1, m_arenas);
 		if (gpu) gpu->endPass(cmd, GpuPass::Shadow);
 	}
 	{

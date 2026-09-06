@@ -11,6 +11,9 @@
 
 #include <utils.hpp>
 #include <Chunk/BiomeRegionGrid.hpp>
+#include <Chunk/TerrainProfiles.hpp>
+#include <Chunk/ChunkBorders.hpp>
+#include <Block/BlockTraits.hpp>
 
 struct ChunkData
 {
@@ -96,6 +99,9 @@ struct BiomeConfig
   // Amplitude of the 3D surface perturbation (overhangs/cliffs). 0 = flat
   // heightmap terrain; mountains use ~8, badlands hoodoos ~5.
   float surfacePerturbAmp;
+  worldgen::Relief relief{worldgen::Relief::Rolling};
+  worldgen::Palette palette{worldgen::Palette::Temperate};
+  worldgen::Decoration decoration{worldgen::Decoration::Meadow};
 };
 
 class TerrainGenerator
@@ -107,7 +113,7 @@ public:
   // Max horizontal reach of any vegetation feature from its trunk/center column.
   // Vegetation candidates are evaluated in a ring of this width around each
   // chunk so canopies from neighbor chunks are placed deterministically.
-  static constexpr int MAX_TREE_RADIUS = 4;
+  static constexpr int MAX_TREE_RADIUS = worldgen::maxFeatureRadius;
   // Offset added to all noise coordinates to avoid symmetry artifacts near the origin.
   static constexpr float NOISE_OFFSET = 10000.0f;
 
@@ -134,6 +140,20 @@ public:
   // Get biome at world position (for cross-chunk queries). Equivalent to
   // the biome stored in the generated chunk containing (worldX, worldZ).
   BiomeType getBiomeAt(int worldX, int worldZ) const;
+
+  // Calibration/inspection API. Same block-resolution erosion and final
+  // channel height as generateChunkInto; no voxels, threads or GPU resources.
+  struct TerrainSample
+  {
+    // Canonical post-erosion 2D terrain height used for biome classification.
+    // Does not include surface 3D perturbation, caves, vegetation, props or
+    // ores, so it is not the final highest solid voxel of a generated chunk.
+    int postErosionHeight;
+    BiomeType biome;
+    float continentality, erosion, weirdness, temperature, humidity, river;
+    std::array<float, static_cast<size_t>(worldgen::Relief::Count)> reliefWeights;
+  };
+  TerrainSample getTerrainSample(int worldX, int worldZ) const;
 
   // Optional early-exit hook polled between region tiles; return true to
   // cancel. Kept as a lightweight std::function so TerrainGenerator stays
@@ -340,7 +360,7 @@ private:
   // Height calculation (weirdness drives river valley width, matching determineBiome)
   int calculateHeight(float continental, float erosion, float peaksValleys,
                       float ridge, float riverVal, float weirdness) const;
-  float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge, float riverVal, float weirdness) const;
+  float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge, float riverVal, float weirdness, float temperature = 0.f, float humidity = 0.f) const;
   void applyErosion(float *heightMap, int size) const;
   void applyCanonicalErosion(float *heightMap, int width, int height, float *tempBuffer = nullptr) const;
 
@@ -412,7 +432,7 @@ private:
   }
 
   // Voxel type determination (slope = max |height delta| to 4 neighbors, for rock exposure)
-  TextureType getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight, BiomeType biome, float temperature, float slope, float density = -1.0f) const;
+  TextureType getVoxelTypeAt(int worldX, int worldY, int worldZ, int terrainHeight, BiomeType biome, float temperature, float slope, float density = -1.0f, BiomeType surfaceBiome = BIOME_COUNT) const;
 
   // =============================================
   // UTILITY FUNCTIONS
@@ -429,15 +449,25 @@ private:
     return z * CHUNK_SIZE + x;
   }
 
-  // Safe voxel setting (bounds checking)
-  inline bool setVoxelSafe(const ChunkGenerationTarget &chunkData, int x, int y, int z, TextureType type)
+  // A feature writes the core and its meshing shell through the same path.
+  inline bool setVoxelSafe(const ChunkGenerationTarget &data, int x, int y, int z, TextureType type)
   {
-    if (x < 0 || x >= CHUNK_SIZE || z < 0 || z >= CHUNK_SIZE ||
-        y < 0 || y >= CHUNK_HEIGHT)
-    {
+    if (x < -1 || x > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE || y < 0 || y >= CHUNK_HEIGHT)
       return false;
-    }
-    chunkData.voxels[getVoxelIndex(x, y, z)].type = type;
+    const auto old = featureVoxel(data, x, y, z);
+    if (blockIsLeaves(type) && old != AIR && !blockIsLeaves(old)) return false;
+    if (x >= 0 && x < CHUNK_SIZE && z >= 0 && z < CHUNK_SIZE)
+      data.voxels[getVoxelIndex(x, y, z)].type = type;
+    else
+      data.borders->mutableAt(x, y, z) = static_cast<uint8_t>(type);
     return true;
   }
+  inline TextureType featureVoxel(const ChunkGenerationTarget &data, int x, int y, int z) const
+  {
+    if (y < 0 || y >= CHUNK_HEIGHT) return AIR;
+    if (x >= 0 && x < CHUNK_SIZE && z >= 0 && z < CHUNK_SIZE)
+      return static_cast<TextureType>(data.voxels[getVoxelIndex(x, y, z)].type);
+    return static_cast<TextureType>(data.borders->at(x, y, z));
+  }
+  void placeMatureTree(const ChunkGenerationTarget &, int, int, int, BiomeType, uint32_t);
 };
