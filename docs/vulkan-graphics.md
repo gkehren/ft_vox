@@ -96,7 +96,7 @@ Engine
         ├── TextureManager
         ├── MobRenderer        ← passive mobs (opaque + shadow cascades)
         ├── ShadowPass
-        ├── OpaquePass  (+ OverlayRenderer and MobRenderer at end of opaque render)
+        ├── OpaquePass  (+ MobRenderer then OverlayRenderer at end of opaque render)
         ├── WaterPass
         ├── SkyPass
         └── PostStack
@@ -192,16 +192,17 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
   cascade matrices; a per-draw visibility mask selects which pass sees which mob
   (`visibleCount` feeds the HUD). Casters behind the camera are still drawn into
   shadow cascades.
-- **Draws:** `record` is called once inside OpaquePass (HDR color + depth, after
+- **Draws:** `record` is called once inside OpaquePass (HDR color + depth, before
   overlays) and once per shadow cascade inside ShadowPass. Push constant = the
   view-projection of the target (camera or cascade); descriptor set 0 is the frame
-  set, set 1 is the mob albedo. Per-part draw calls are batched by texture to
-  minimize descriptor rebinding; shadow pipeline adds depth bias and an
-  alpha-cut-only fragment shader.
+  set, set 1 is the mob albedo. Per-part draw calls reuse the currently bound
+  texture descriptor when consecutive parts use the same texture, avoiding
+  redundant descriptor binds (draws are not reordered or merged); shadow pipeline
+  adds depth bias and an alpha-cut-only fragment shader.
 - **Textures (`MobTextures`):** six entity PNGs (`cow_temperate`, `pig_temperate`,
   `sheep`, `sheep_wool`, `sheep_wool_undercoat`, `chicken_temperate`) loaded
   through `ResourcePackReader::readEntityTexture` (`assets/minecraft/textures/entity/…`,
-  ZIP or folder packs, wrapped roots, classic-name aliases). Both square (64×64)
+  ZIP or folder packs, wrapped roots for both, classic-name aliases). Both square (64×64)
   and classic (64×32) skins are supported — `uvScale` folds the box UV layout to
   the image aspect. Nearest filtering, clamp to edge.
 - **Reload:** part of the failure-atomic resource-pack path. `prepareTextures`

@@ -74,7 +74,7 @@ Matches `Engine.cpp` order:
 11. **UBO** — underwater sample + `WorldRenderer::updateFrameUBO` (which also runs `MobRenderer::prepare`: frustum masks + per-part transforms for camera and cascades)  
 12. **Record** — `WorldRenderer::recordFrame`:  
     - **preRecord:** `uploadPendingMeshes` + transfer→vertex barrier  
-    - **ShadowPass → OpaquePass** (opaque chunks + **overlays inside OpaquePass** + **mobs inside OpaquePass and every shadow cascade**) **→ WaterPass → SkyPass → PostStack**  
+    - **ShadowPass → OpaquePass** (opaque chunks + **mobs then overlays inside OpaquePass** + **mobs inside every shadow cascade**) **→ WaterPass → SkyPass → PostStack**  
     - **imguiDraw:** `imgui->recordDraw` onto swapchain after composite  
 13. **Submit / present** — `VkFrameContext::submitAndPresent`  
 14. **Profiler end** + copy scopes into `RenderTiming` / benchmark sample  
@@ -437,12 +437,13 @@ recreated as chunks stream in and out.
 | Group size | 2–4 of one species |
 | Spawn band | 24–80 blocks from the observer, capped by loaded radius |
 | Retire | beyond 112 blocks, or when the mob's terrain sample is unavailable |
-| Spawn scan | every 0.5 s, ≤4 group attempts per scan |
+| Spawn scan | every `spawnInterval` (0.5 s), ≤`maxGroupAttemptsPerScan` (4) group attempts per scan |
 
-- Candidate groups are keyed by **chunk coordinates + world seed** (hash-based),
-  so spawn decisions do not depend on chunk generation order and cannot duplicate
-  while a group stays in the active zone; processed groups are remembered until
-  they retire.
+- Group eligibility, species and member layout are deterministic functions of
+  the **world seed + chunk coordinates** (no shared global RNG sequence), and a
+  processed group cannot duplicate while it stays in the active zone. The exact
+  active population may still vary with terrain publication order and observer
+  streaming state (capacity, spawn band and scan budget decide the rest).
 - `ChunkMobWorld::surface` only accepts feet positions on **grass with a fully
   air column above**, in temperate biomes (plains, flower meadow, forest, birch,
   autumn forest, cherry grove), read from **published voxels** — never inferred
