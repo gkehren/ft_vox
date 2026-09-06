@@ -47,15 +47,17 @@ int main()
 {
 	std::cout << "[TEST] Starting Network Server/Client Handshake Test..." << std::endl;
 
-	const unsigned short test_port = 42424;
 	const uint32_t test_seed = 424242;
 
 	try
 	{
-		// Start Server
-		Server server(test_port, test_seed);
+		// Start Server on an OS-assigned ephemeral port: hard-coded ports
+		// keep colliding with Windows/WinNAT excluded port ranges, which
+		// fails the bind before the test body even runs.
+		Server server(0, test_seed);
 		server.start();
 		assert(server.isRunning());
+		const unsigned short test_port = server.port();
 		std::cout << "[TEST] Server started on port " << test_port << std::endl;
 
 		// Start Client 1

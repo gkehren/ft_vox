@@ -46,7 +46,9 @@ struct PageBatch
 /// Groups `count` draw commands by arena (vertexPage, indexPage) pair into
 /// `dst` and `drawDataOut`. Populates `outBatches` with contiguous ranges
 /// for each distinct page pair.
-template <size_t MaxBatches = 32>
+// 128 bucket slots: distinct (vertexPage, indexPage) pairs can in theory
+// reach pages(vertex) x pages(index); the Debug assert catches overflow.
+template <size_t MaxBatches = 128>
 inline size_t groupIndirectDrawsByPage(
 	const Chunk::IndirectDraw *src, size_t count, uint32_t baseInstance,
 	VkDrawIndexedIndirectCommand *dst, VoxelDrawData *drawDataOut,

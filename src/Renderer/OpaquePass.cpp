@@ -8,6 +8,7 @@
 #include "utils.hpp"
 
 #include <cassert>
+#include <iostream>
 #include <stdexcept>
 #include <cstdlib>
 
@@ -168,6 +169,19 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			std::memcpy(outPtr + count, chunk->cachedOpaqueDraws(), n * sizeof(Chunk::IndirectDraw));
 			count += n;
 		}
+		else
+		{
+			// Not silent: at larger view distances or denser worlds this
+			// would silently drop geometry (issue #109 review phase 24).
+			static bool warned = false;
+			if (!warned)
+			{
+				warned = true;
+				std::cerr << "[indirect] command overflow in opaque: chunk with " << n
+				          << " commands does not fit in " << kMaxIndirectCommands
+				          << " - skipping" << std::endl;
+			}
+		}
 	}
 	m_lastCommands = static_cast<uint32_t>(count);
 	const uint32_t baseInstance = voxel_draw::kOpaqueBase;
@@ -220,7 +234,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			m_context->hasMultiDrawIndirect(), m_context->maxDrawIndirectCount());
 
 		auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(m_indirect[frameIndex].mapped);
-		std::array<PageBatch, 32> batches{};
+		std::array<PageBatch, 128> batches{};
 		const size_t batchCount = groupIndirectDrawsByPage(
 			m_scratch.data(), count, baseInstance, dst, drawDataOut, batches);
 

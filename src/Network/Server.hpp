@@ -19,6 +19,11 @@ public:
 	void stop();
 	bool isRunning() const;
 
+	/// The port the socket actually bound to. Pass 0 to the constructor to
+	/// let the OS pick a free (ephemeral) port — the test suite does this so
+	/// a WinNAT excluded port range can never fail the bind.
+	unsigned short port() const;
+
 	size_t getClientCount() const;
 
 private:

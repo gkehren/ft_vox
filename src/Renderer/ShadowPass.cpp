@@ -292,7 +292,7 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 			assert(baseInstance + count <= voxel_draw::kEntryCount);
 			auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(
 				m_indirect[frameIndex][static_cast<size_t>(c)].mapped);
-			std::array<PageBatch, 32> batches{};
+			std::array<PageBatch, 128> batches{};
 			const size_t batchCount = groupIndirectDrawsByPage(
 				m_scratch.data(), count, baseInstance, dst, drawDataOut, batches);
 
