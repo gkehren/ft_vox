@@ -140,6 +140,7 @@ void VkContext::init(SDL_Window *window)
 	std::cout << "  validation=" << (m_validationEnabled ? "yes" : "no")
 			  << " dynamicRendering=" << (m_dynamicRendering ? "yes" : "no")
 			  << " timelineSemaphores=" << (m_timelineSemaphores ? "yes" : "no")
+			  << " multiDrawIndirect=" << (m_multiDrawIndirect ? "yes" : "no")
 			  << " portabilitySubset=" << (m_portabilitySubset ? "yes" : "no") << "\n";
 	std::cout << "  VMA allocator: ready\n";
 }
@@ -526,6 +527,10 @@ void VkContext::createLogicalDevice()
 
 	features12.timelineSemaphore = available12.timelineSemaphore;
 	m_timelineSemaphores = available12.timelineSemaphore == VK_TRUE;
+	// The indirect passes batch whole page-pair groups into one draw call;
+	// enabling the core-1.0 feature only when the device advertises it keeps
+	// drawCount legal everywhere (VUID-vkCmdDrawIndexedIndirect-drawCount-02718).
+	m_multiDrawIndirect = features2.features.multiDrawIndirect == VK_TRUE;
 
 	if (m_dynamicRendering)
 	{
@@ -542,6 +547,7 @@ void VkContext::createLogicalDevice()
 	VkPhysicalDeviceFeatures enabledFeatures{};
 	enabledFeatures.samplerAnisotropy = features2.features.samplerAnisotropy;
 	enabledFeatures.fillModeNonSolid = features2.features.fillModeNonSolid;
+	enabledFeatures.multiDrawIndirect = features2.features.multiDrawIndirect;
 
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

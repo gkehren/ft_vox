@@ -239,9 +239,21 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			VkDeviceSize voff = 0;
 			vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
 			vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
-			vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex].buf.buffer,
-									 first * sizeof(VkDrawIndexedIndirectCommand),
-									 static_cast<uint32_t>(j - i), sizeof(VkDrawIndexedIndirectCommand));
+			if (m_context->hasMultiDrawIndirect())
+			{
+				vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex].buf.buffer,
+										 first * sizeof(VkDrawIndexedIndirectCommand),
+										 static_cast<uint32_t>(j - i), sizeof(VkDrawIndexedIndirectCommand));
+			}
+			else
+			{
+				// Without multiDrawIndirect, drawCount must be 0 or 1: issue
+				// the group one command at a time.
+				for (size_t k = i; k < j; ++k)
+					vkCmdDrawIndexedIndirect(cmd, m_indirect[frameIndex].buf.buffer,
+											 k * sizeof(VkDrawIndexedIndirectCommand), 1,
+											 sizeof(VkDrawIndexedIndirectCommand));
+			}
 			telemetry::registry().add(telemetry::ArenaBinds);
 			if (std::getenv("FT_VOX_VALIDATE_INDIRECT") && m_debugFrames < 3)
 			{
