@@ -17,6 +17,10 @@ enum class MobSpecies : uint8_t
 };
 inline constexpr size_t kMobSpeciesCount = size_t(MobSpecies::Count);
 
+// Hard population ceiling shared by the simulation (capacity) and the
+// renderer (instance/draw budget), without pulling simulation headers.
+inline constexpr size_t kMaxMobCount = 48;
+
 using EntityId = uint64_t;
 using SpawnGroupId = uint64_t;
 

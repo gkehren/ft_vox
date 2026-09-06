@@ -327,7 +327,7 @@ void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCo
 	m_overlays.init(context, imm, m_setLayout0, m_post.hdrFormat(), m_post.depthFormat());
     m_mobs.init(context, imm, m_setLayout0, m_shadow.arrayView(), m_shadow.sampler(),
                 m_post.hdrFormat(), m_post.depthFormat(), resourcePackRoot);
-    m_mobStates.reserve(entities::MobSettings::capacity);
+    m_mobStates.reserve(entities::kMaxMobCount);
 	createPipelines();
 	createFrameUbos();
 	writeSet1Descriptors();

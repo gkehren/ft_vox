@@ -1,12 +1,16 @@
 #pragma once
 #include <Entities/MobTypes.hpp>
-#include <Entities/MobSystem.hpp>
 #include <Entities/MobModel.hpp>
 #include <Renderer/MobTextures.hpp>
 #include <Renderer/FrameUBO.hpp>
 #include <Vulkan/VkContext.hpp>
 #include <Vulkan/VkImage.hpp>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 class MobRenderer
 {
@@ -43,7 +47,7 @@ class MobRenderer
         uint32_t first, count, instance, texture;
         uint8_t visibility;
     };
-    static constexpr size_t kMaxParts = 32 * entities::MobSettings::capacity;
+    static constexpr size_t kMaxParts = 32 * entities::kMaxMobCount;
     VkContext *m_context{};
     VkDescriptorSetLayout m_textureLayout{}, m_frameLayout{};
     VkPipelineLayout m_layout{};

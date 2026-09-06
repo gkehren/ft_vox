@@ -18,7 +18,7 @@ inline const std::array<SpeciesSettings, kMobSpeciesCount> speciesSettings{
 static_assert(speciesSettings.size() == kMobSpeciesCount);
 struct MobSettings
 {
-    static constexpr size_t capacity = 48;
+    static constexpr size_t capacity = kMaxMobCount;
 
     double spawnMin = 24.0;
     double spawnMax = 80.0;
