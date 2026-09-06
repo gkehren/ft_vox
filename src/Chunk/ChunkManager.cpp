@@ -912,16 +912,24 @@ void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSetti
 		m_deferredReleaseAge = 0; // reset age so new unloads wait full delay
 }
 
+namespace
+{
+/// Normalized XZ camera forward (fallback +Z when the forward is vertical).
+glm::vec2 normalizedForwardXZ(const Camera &camera)
+{
+	glm::vec2 fwd(camera.getFront().x, camera.getFront().z);
+	if (glm::dot(fwd, fwd) < 1e-6f)
+		fwd = glm::vec2(0.f, 1.f);
+	return glm::normalize(fwd);
+}
+} // namespace
+
 void ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
 											 const RenderSettings &settings)
 {
 	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
 	const glm::vec3 camPos = camera.getPosition();
-	const glm::vec3 camFront = camera.getFront();
-	glm::vec2 camForwardXZ(camFront.x, camFront.z);
-	if (glm::dot(camForwardXZ, camForwardXZ) < 1e-6f)
-		camForwardXZ = glm::vec2(0.f, 1.f);
-	camForwardXZ = glm::normalize(camForwardXZ);
+	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
 
 	m_desiredFootprint = computeDesiredFootprintFull(cameraChunkPos, camPos, camForwardXZ, frontBias,
 													settings.maxRenderDistance);
@@ -953,32 +961,15 @@ void ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, c
 	m_queueNeedsSort = false;
 
 	m_streamState.lastCamChunk = cameraChunkPos;
-	m_streamState.lastCamPos = camPos;
 	m_streamState.lastCamForwardXZ = camForwardXZ;
 	m_streamState.lastMaxRenderDistance = settings.maxRenderDistance;
 	m_streamState.lastStreamFrontBias = settings.streamFrontBias;
 	m_streamState.initialized = true;
 }
 
-void ChunkManager::updateStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-											  const RenderSettings &settings, const glm::ivec3 &delta)
+void ChunkManager::applyFootprintDiffToQueue(const FootprintDiff &diff, const glm::vec3 &camPos,
+											 const glm::vec2 &camForwardXZ, float frontBias)
 {
-	(void)delta;
-	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
-	const glm::vec3 camPos = camera.getPosition();
-	const glm::vec3 camFront = camera.getFront();
-	glm::vec2 camForwardXZ(camFront.x, camFront.z);
-	if (glm::dot(camForwardXZ, camForwardXZ) < 1e-6f)
-		camForwardXZ = glm::vec2(0.f, 1.f);
-	camForwardXZ = glm::normalize(camForwardXZ);
-
-	ChunkDesiredFootprint newFootprint =
-		computeDesiredFootprintIncremental(m_desiredFootprint, cameraChunkPos, camPos, camForwardXZ, frontBias,
-										  settings.maxRenderDistance);
-
-	FootprintDiff diff = computeFootprintDiff(m_desiredFootprint, newFootprint);
-	m_desiredFootprint = std::move(newFootprint);
-
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
 
 	for (const glm::ivec3 &pos : diff.exiting)
@@ -1020,10 +1011,24 @@ void ChunkManager::updateStreamingIncremental(const glm::ivec3 &cameraChunkPos, 
 	}
 	sortLoadCandidatesNearestFirst(m_loadQueue);
 	m_queueNeedsSort = false;
-
-	m_streamState.lastCamChunk = cameraChunkPos;
-	m_streamState.lastCamPos = camPos;
 	m_streamState.lastCamForwardXZ = camForwardXZ;
+}
+
+void ChunkManager::updateStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
+											  const RenderSettings &settings)
+{
+	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
+	const glm::vec3 camPos = camera.getPosition();
+	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
+
+	ChunkDesiredFootprint newFootprint =
+		computeDesiredFootprintIncremental(m_desiredFootprint, cameraChunkPos, camPos, camForwardXZ,
+										   frontBias, settings.maxRenderDistance);
+	FootprintDiff diff = computeFootprintDiff(m_desiredFootprint, newFootprint);
+	m_desiredFootprint = std::move(newFootprint);
+
+	applyFootprintDiffToQueue(diff, camPos, camForwardXZ, frontBias);
+	m_streamState.lastCamChunk = cameraChunkPos;
 }
 
 void ChunkManager::reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
@@ -1031,74 +1036,22 @@ void ChunkManager::reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, c
 {
 	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
 	const glm::vec3 camPos = camera.getPosition();
-	const glm::vec3 camFront = camera.getFront();
-	glm::vec2 camForwardXZ(camFront.x, camFront.z);
-	if (glm::dot(camForwardXZ, camForwardXZ) < 1e-6f)
-		camForwardXZ = glm::vec2(0.f, 1.f);
-	camForwardXZ = glm::normalize(camForwardXZ);
+	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
 
 	ChunkDesiredFootprint newFootprint =
 		computeDesiredFootprintFull(cameraChunkPos, camPos, camForwardXZ, frontBias,
 									settings.maxRenderDistance);
-
 	FootprintDiff diff = computeFootprintDiff(m_desiredFootprint, newFootprint);
 	m_desiredFootprint = std::move(newFootprint);
 
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-
-	for (const glm::ivec3 &pos : diff.exiting)
-	{
-		m_enqueuedLoads.erase(pos);
-	}
-
-	for (const glm::ivec3 &pos : diff.entering)
-	{
-		if (m_chunks.find(pos) != m_chunks.end())
-			continue;
-		if (m_enqueuedLoads.count(pos) != 0)
-			continue;
-		const glm::vec3 center(
-			pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
-			pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
-		const float distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
-		m_loadQueue.push_back({pos, distSq});
-		m_enqueuedLoads.insert(pos);
-	}
-
-	if (m_loadQueueHead > 0)
-	{
-		m_loadQueue.erase(m_loadQueue.begin(), m_loadQueue.begin() + m_loadQueueHead);
-		m_loadQueueHead = 0;
-	}
-	m_loadQueue.erase(std::remove_if(m_loadQueue.begin(), m_loadQueue.end(),
-									 [&](const LoadCandidate &c) {
-										 return m_enqueuedLoads.count(c.pos) == 0;
-									 }),
-					  m_loadQueue.end());
-
-	for (auto &c : m_loadQueue)
-	{
-		const glm::vec3 center(
-			c.pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
-			c.pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
-		c.distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
-	}
-	sortLoadCandidatesNearestFirst(m_loadQueue);
-	m_queueNeedsSort = false;
-
-	m_streamState.lastCamPos = camPos;
-	m_streamState.lastCamForwardXZ = camForwardXZ;
+	applyFootprintDiffToQueue(diff, camPos, camForwardXZ, frontBias);
 }
 
 void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
 										  const RenderSettings &settings)
 {
 	const float frontBias = glm::clamp(settings.streamFrontBias, 0.f, 0.9f);
-	const glm::vec3 camFront = camera.getFront();
-	glm::vec2 camForwardXZ(camFront.x, camFront.z);
-	if (glm::dot(camForwardXZ, camForwardXZ) < 1e-6f)
-		camForwardXZ = glm::vec2(0.f, 1.f);
-	camForwardXZ = glm::normalize(camForwardXZ);
+	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
 
 	if (!m_streamState.initialized ||
 		settings.maxRenderDistance != m_streamState.lastMaxRenderDistance ||
@@ -1120,7 +1073,7 @@ void ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, cons
 
 	if (isOneChunk)
 	{
-		updateStreamingIncremental(cameraChunkPos, camera, settings, delta);
+		updateStreamingIncremental(cameraChunkPos, camera, settings);
 		return;
 	}
 

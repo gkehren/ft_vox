@@ -134,9 +134,14 @@ private:
 	void rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
 								   const RenderSettings &settings);
 	void updateStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-									const RenderSettings &settings, const glm::ivec3 &delta);
+									const RenderSettings &settings);
 	void reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
 								   const RenderSettings &settings);
+	/// Shared tail of the incremental streaming updates: apply a footprint
+	/// diff to the load queue (enqueue entering coords, purge exiting ones,
+	/// compact consumed entries, refresh biased distances, re-sort).
+	void applyFootprintDiffToQueue(const FootprintDiff &diff, const glm::vec3 &camPos,
+								   const glm::vec2 &camForwardXZ, float frontBias);
 	void ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx);
 
 	// --- Deferred edit subsystem (issue #114 review). Main-thread only:
@@ -194,7 +199,6 @@ private:
 	struct StreamState
 	{
 		glm::ivec3 lastCamChunk{std::numeric_limits<int>::max(), 0, std::numeric_limits<int>::max()};
-		glm::vec3 lastCamPos{0.f};
 		glm::vec2 lastCamForwardXZ{0.f, 1.f};
 		int lastMaxRenderDistance{-1};
 		float lastStreamFrontBias{-1.f};
