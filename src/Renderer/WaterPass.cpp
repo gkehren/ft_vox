@@ -268,10 +268,15 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 								1.f / static_cast<float>(std::max(1u, extent.height)), 0.f, 0.f};
 	vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(invScreen), invScreen);
 
+	// Water draw order MUST NOT be reordered by page pair (unlike opaque /
+	// shadow): chunks are sorted back-to-front, their cached draws memcpy'd
+	// in that order, and only contiguous same-page-pair runs are split out
+	// for binding. Bucketing the whole set would break water transparency
+	// ordering — do not "optimize" this into emitGroupedIndirectDraws.
 	m_waterChunks.clear();
 	for (Chunk *chunk : chunks)
 	{
-		if (chunk && chunk->getCachedWaterDrawCount() > 0)
+		if (chunk && chunk->hasRenderableWaterDraws())
 		{
 			const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
 			const glm::vec3 d = c - camPos;
@@ -283,11 +288,13 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 
 	if (m_scratch.size() < kMaxIndirectCommands)
 		m_scratch.resize(kMaxIndirectCommands);
-	size_t scratchCount = 0;
+	size_t demandedCount = 0;  // commands requested (pre-truncation)
+	size_t scratchCount = 0;   // commands actually emitted this frame
 	Chunk::IndirectDraw *outPtr = m_scratch.data();
 	for (const auto &e : m_waterChunks)
 	{
 		const uint32_t cCount = e.chunk->getCachedWaterDrawCount();
+		demandedCount += cCount;
 		if (scratchCount + cCount <= kMaxIndirectCommands)
 		{
 			std::memcpy(outPtr + scratchCount, e.chunk->cachedWaterDraws(), cCount * sizeof(Chunk::IndirectDraw));
@@ -299,13 +306,13 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 			if (!warned)
 			{
 				warned = true;
-				std::cerr << "[indirect] command overflow in water: "
-				          << (scratchCount + cCount) << " > " << kMaxIndirectCommands
-				          << " - truncating" << std::endl;
+				std::cerr << "[indirect] water command capacity exceeded: demanded=" << demandedCount
+				          << " emitted=" << scratchCount << " capacity=" << kMaxIndirectCommands
+				          << " chunkCommands=" << cCount << " - chunk skipped" << std::endl;
 			}
 		}
 	}
-	m_lastCommands = static_cast<uint32_t>(scratchCount);
+	m_lastCommands = static_cast<uint32_t>(std::min<size_t>(demandedCount, UINT32_MAX));
 	if (scratchCount > 0)
 	{
 		const size_t count = scratchCount;

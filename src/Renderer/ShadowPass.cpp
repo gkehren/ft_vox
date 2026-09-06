@@ -241,11 +241,14 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 		// rebinding per-chunk buffers.
 		if (m_scratch.size() < kMaxIndirectCommands)
 			m_scratch.resize(kMaxIndirectCommands);
-		size_t scratchCount = 0;
+		size_t scratchCount = 0;      // commands actually emitted this cascade
+		size_t cascadeDemanded = 0;   // commands requested (pre-truncation)
 		Chunk::IndirectDraw *outPtr = m_scratch.data();
 		for (Chunk *chunk : shadowChunks)
 		{
-			if (!chunk || chunk->getCachedOpaqueDrawCount() == 0)
+			// hasRenderableOpaqueDraws() includes needsGPUUpload: a mesh
+			// pending upload must not cast shadows from its stale cache.
+			if (!chunk || !chunk->hasRenderableOpaqueDraws())
 				continue;
 
 			const glm::vec3 aabbMin = chunk->getPosition();
@@ -261,6 +264,7 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 			if (visible)
 			{
 				const uint32_t cCount = chunk->getCachedOpaqueDrawCount();
+				cascadeDemanded += cCount;
 				if (scratchCount + cCount <= kMaxIndirectCommands)
 				{
 					std::memcpy(outPtr + scratchCount, chunk->cachedOpaqueDraws(), cCount * sizeof(Chunk::IndirectDraw));
@@ -272,14 +276,15 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 					if (!warned)
 					{
 						warned = true;
-						std::cerr << "[indirect] command overflow in shadow cascade: "
-						          << (scratchCount + cCount) << " > " << kMaxIndirectCommands
-						          << " - truncating" << std::endl;
+						std::cerr << "[indirect] shadow command capacity exceeded: demanded="
+						          << cascadeDemanded << " emitted=" << scratchCount
+						          << " capacity=" << kMaxIndirectCommands
+						          << " chunkCommands=" << cCount << " - chunk skipped" << std::endl;
 					}
 				}
 			}
 		}
-		m_lastCommands += static_cast<uint32_t>(scratchCount);
+		m_lastCommands += static_cast<uint32_t>(std::min<size_t>(cascadeDemanded, UINT32_MAX));
 		if (scratchCount > 0)
 		{
 			const size_t count = scratchCount;
@@ -293,7 +298,7 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 			auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(
 				m_indirect[frameIndex][static_cast<size_t>(c)].mapped);
 			std::array<PageBatch, 128> batches{};
-			const size_t batchCount = groupIndirectDrawsByPage(
+			const GroupedDraws grouped = emitGroupedIndirectDraws(
 				m_scratch.data(), count, baseInstance, dst, drawDataOut, batches);
 
 			vmaFlushAllocation(m_context->getAllocator(),
@@ -305,21 +310,48 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 								   baseInstance * sizeof(VoxelDrawData), count * sizeof(VoxelDrawData));
 			}
 
-			for (size_t b = 0; b < batchCount; ++b)
+			if (!grouped.usedFallback)
 			{
-				const uint64_t key = batches[b].key;
-				const uint32_t bCount = batches[b].count;
-				VkBuffer vb = arenas.opaqueVertex.pageBuffer(static_cast<uint32_t>(key >> 32));
-				VkBuffer ib = arenas.opaqueIndex.pageBuffer(static_cast<uint32_t>(key & 0xffffffffu));
-				VkDeviceSize voff = 0;
-				vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
-				vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
-				// One call per batch: drawCount stays under the hardware
-				// ceiling and degrades to per-command draws without
-				// multiDrawIndirect.
-				issueIndirectRange(cmd, m_indirect[frameIndex][static_cast<size_t>(c)].buf.buffer,
-								   batches[b].first, bCount, batchLimit);
-				telemetry::registry().add(telemetry::ArenaBinds);
+				for (size_t b = 0; b < grouped.batchCount; ++b)
+				{
+					const uint64_t key = batches[b].key;
+					VkBuffer vb = arenas.opaqueVertex.pageBuffer(static_cast<uint32_t>(key >> 32));
+					VkBuffer ib = arenas.opaqueIndex.pageBuffer(static_cast<uint32_t>(key & 0xffffffffu));
+					VkDeviceSize voff = 0;
+					vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
+					vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+					// One call per batch: drawCount stays under the hardware
+					// ceiling and degrades to per-command draws without
+					// multiDrawIndirect.
+					issueIndirectRange(cmd, m_indirect[frameIndex][static_cast<size_t>(c)].buf.buffer,
+									   batches[b].first, batches[b].count, batchLimit);
+					telemetry::registry().add(telemetry::ArenaBinds);
+				}
+			}
+			else
+			{
+				// Rare >128-page-pair fallback: src sorted by key, dst
+				// sequential — emit contiguous same-key runs.
+				size_t i = 0;
+				uint32_t first = 0;
+				while (i < count)
+				{
+					const uint64_t key = (uint64_t(m_scratch[i].vertexPage) << 32) | m_scratch[i].indexPage;
+					size_t j = i;
+					while (j < count &&
+						   ((uint64_t(m_scratch[j].vertexPage) << 32) | m_scratch[j].indexPage) == key)
+						++j;
+					VkBuffer vb = arenas.opaqueVertex.pageBuffer(static_cast<uint32_t>(key >> 32));
+					VkBuffer ib = arenas.opaqueIndex.pageBuffer(static_cast<uint32_t>(key & 0xffffffffu));
+					VkDeviceSize voff = 0;
+					vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &voff);
+					vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+					issueIndirectRange(cmd, m_indirect[frameIndex][static_cast<size_t>(c)].buf.buffer,
+									   first, j - i, batchLimit);
+					telemetry::registry().add(telemetry::ArenaBinds);
+					first += static_cast<uint32_t>(j - i);
+					i = j;
+				}
 			}
 			telemetry::registry().add(static_cast<telemetry::Event>(telemetry::Shadow0 + c), count);
 		}

@@ -241,6 +241,21 @@ public:
 	const IndirectDraw *cachedOpaqueDraws() const { return m_cachedOpaqueDraws.data(); }
 	const IndirectDraw *cachedWaterDraws() const { return m_cachedWaterDraws.data(); }
 
+	/// Renderable-cache contract shared by every consuming pass (issue #122
+	/// review): non-empty cache AND live indices AND no pending GPU upload.
+	/// While needsGPUUpload() is set the cached descriptors describe ranges a
+	/// commit is about to replace — drawing them would show stale geometry.
+	bool hasRenderableOpaqueDraws() const
+	{
+		return m_cachedOpaqueDrawCount > 0 && opaqueIndexCount > 0 &&
+			   !meshNeedsUpdate.load(std::memory_order_relaxed);
+	}
+	bool hasRenderableWaterDraws() const
+	{
+		return m_cachedWaterDrawCount > 0 && waterIndexCount > 0 &&
+			   !meshNeedsUpdate.load(std::memory_order_relaxed);
+	}
+
 	size_t getActiveIndex() const { return m_activeIndex; }
 	void setActiveIndex(size_t index) { m_activeIndex = index; }
 
@@ -428,7 +443,7 @@ private:
 
 inline size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const
 {
-	if (m_cachedOpaqueDrawCount == 0 || opaqueIndexCount == 0 || meshNeedsUpdate.load(std::memory_order_relaxed))
+	if (!hasRenderableOpaqueDraws())
 		return 0;
 	out.insert(out.end(), m_cachedOpaqueDraws.data(),
 	           m_cachedOpaqueDraws.data() + m_cachedOpaqueDrawCount);
@@ -437,7 +452,7 @@ inline size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const
 
 inline size_t Chunk::collectWaterDraws(std::vector<IndirectDraw> &out) const
 {
-	if (m_cachedWaterDrawCount == 0 || waterIndexCount == 0 || meshNeedsUpdate.load(std::memory_order_relaxed))
+	if (!hasRenderableWaterDraws())
 		return 0;
 	out.insert(out.end(), m_cachedWaterDraws.data(),
 	           m_cachedWaterDraws.data() + m_cachedWaterDrawCount);
