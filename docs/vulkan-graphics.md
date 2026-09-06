@@ -94,8 +94,9 @@ Engine
   ├── StagingRing, GpuResourceRetire
   └── WorldRenderer           ← record only
         ├── TextureManager
+        ├── MobRenderer        ← passive mobs (opaque + shadow cascades)
         ├── ShadowPass
-        ├── OpaquePass  (+ OverlayRenderer at end of opaque render)
+        ├── OpaquePass  (+ OverlayRenderer and MobRenderer at end of opaque render)
         ├── WaterPass
         ├── SkyPass
         └── PostStack
@@ -108,8 +109,8 @@ Recorded in `WorldRenderer::recordFrame` (see `WorldRenderer.cpp`):
 | Step | Owner | Writes | Notes |
 |------|--------|--------|--------|
 | 0 | **preRecord** callback | mesh GPU buffers | `Engine` records `uploadPendingMeshes` + transfer→vertex barrier here, before draws |
-| 1 | **ShadowPass** | Cascaded depth array | Directional sun; leaf wind in shadow VS |
-| 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (per-section `Chunk::collectOpaqueDraws` commands + indirect draws), then **`OverlayRenderer::record` inside the same dynamic rendering** (highlight / borders / demo players) |
+| 1 | **ShadowPass** | Cascaded depth array | Directional sun; leaf wind in shadow VS; per cascade, **`MobRenderer::record`** alpha-cuts mobs into the same depth attachment (`GpuPass::MobShadow0-2`) |
+| 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (per-section `Chunk::collectOpaqueDraws` commands + indirect draws), then **`OverlayRenderer::record`** (highlight / borders / demo players) and **`MobRenderer::record`** (passive mobs) inside the same dynamic rendering |
 | 3 | **WaterPass** | HDR (transparent) | History color/depth for refraction; set2 scene samples |
 | 4 | **SkyPass** | HDR + god-ray source MRT, depth test | Procedural sky, sun/moon/stars/clouds |
 | 5 | **PostStack** | Swapchain | SSAO → bloom → god rays → composite |
@@ -177,6 +178,37 @@ True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`
 - Block highlight, player markers, optional chunk borders.
 - Invoked **from OpaquePass** (not a standalone step after sky).
 - Shaders: `overlay.vert` / `overlay.frag`.
+
+### MobRenderer (`Renderer/MobRenderer.*` + `Entities/MobModel.*`)
+
+Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-architecture.md`](engine-architecture.md) §9).
+
+- **Static geometry, instanced transforms:** all four species are baked once into
+  one shared vertex buffer (`Entities/MobModel`, Minecraft box-UV unfolding with
+  horns / snout / fleece layers / beak / wings). Each frame, `prepare` writes one
+  `Instance {mat4 model, vec4 uvScale}` per body part into a per-frame-in-flight
+  mapped buffer — no per-animal mesh rebuilds or uploads.
+- **Visibility:** one frustum test per mob against the camera matrix and the three
+  cascade matrices; a per-draw visibility mask selects which pass sees which mob
+  (`visibleCount` feeds the HUD). Casters behind the camera are still drawn into
+  shadow cascades.
+- **Draws:** `record` is called once inside OpaquePass (HDR color + depth, after
+  overlays) and once per shadow cascade inside ShadowPass. Push constant = the
+  view-projection of the target (camera or cascade); descriptor set 0 is the frame
+  set, set 1 is the mob albedo. Per-part draw calls are batched by texture to
+  minimize descriptor rebinding; shadow pipeline adds depth bias and an
+  alpha-cut-only fragment shader.
+- **Textures (`MobTextures`):** six entity PNGs (`cow_temperate`, `pig_temperate`,
+  `sheep`, `sheep_wool`, `sheep_wool_undercoat`, `chicken_temperate`) loaded
+  through `ResourcePackReader::readEntityTexture` (`assets/minecraft/textures/entity/…`,
+  ZIP or folder packs, wrapped roots, classic-name aliases). Both square (64×64)
+  and classic (64×32) skins are supported — `uvScale` folds the box UV layout to
+  the image aspect. Nearest filtering, clamp to edge.
+- **Reload:** part of the failure-atomic resource-pack path. `prepareTextures`
+  stages a complete new `Textures` bundle (image, sampler, descriptor pool/sets)
+  before `commitTextures` swaps it in; a GPU failure anywhere keeps the previous
+  bundle live. `TextureManager::swap` gives the block atlas the same atomicity.
+- Profiler passes: `GpuPass::Mobs` (color) and `GpuPass::MobShadow0-2`.
 
 ### TextureManager (`Renderer/TextureManager.*`)
 
@@ -294,6 +326,8 @@ All under `ressources/shaders/vulkan/` (GLSL compiled to SPIR-V at build):
 | `water.vert.glsl` / `water.frag.glsl` | VS/FS | WaterPass |
 | `skybox.vert.glsl` / `skybox.frag.glsl` | VS/FS | SkyPass |
 | `overlay.vert.glsl` / `overlay.frag.glsl` | VS/FS | OverlayRenderer |
+| `mob.vert.glsl` / `mob.frag.glsl` | VS/FS | MobRenderer (opaque HDR pass) |
+| `mob_shadow.frag.glsl` (+ `mob.vert.glsl`) | VS/FS | MobRenderer (shadow cascades, alpha cut) |
 | `fullscreen.vert.glsl` | VS | All post passes |
 | `ssao.frag.glsl` | FS | PostStack |
 | `bloomExtract.frag.glsl` / `bloomBlur.frag.glsl` | FS | PostStack |

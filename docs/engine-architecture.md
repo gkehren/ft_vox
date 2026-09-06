@@ -13,10 +13,11 @@ main.cpp
   └── Engine::run()
         ├── SDL window (Vulkan)
         ├── VkContext / VkSwapchain / VkFrameContext
-        ├── WorldRenderer (+ passes, post, overlays)
+        ├── WorldRenderer (+ passes, post, overlays, mobs)
         ├── TerrainGenerator + ThreadPool + ChunkPool + ChunkManager
         ├── StagingRing + GpuResourceRetire
         ├── Camera
+        ├── entities::MobSystem (passive mobs)
         └── ImGuiLayer + GameUI
 ```
 
@@ -24,6 +25,7 @@ main.cpp
 |------|-----------|---------------|
 | App / loop | `src/Engine/` | `Engine`, `EngineDefs`, `GameUI`, `ImGuiLayer`, `ThreadPool`, `Profiler`, `Benchmark` |
 | World data | `src/Chunk/` | `Chunk`, `ChunkManager`, `ChunkPool`, `TerrainGenerator`, `StreamHelpers` |
+| Entities | `src/Entities/` | `MobSystem`, `MobModel` (passive mobs) |
 | Camera | `src/Camera/` | `Camera` |
 | Rendering | `src/Renderer/` | `WorldRenderer`, passes, `PostStack`, … |
 | Vulkan glue | `src/Vulkan/` | Context, frames, staging, retire |
@@ -47,6 +49,7 @@ File: `src/Engine/Engine.hpp` / `Engine.cpp`.
 - **GPU streaming helpers:** `StagingRing`, `GpuResourceRetire`  
 - **View:** `Camera`  
 - **Player:** `physics::PlayerController` — fixed-step CPU body, gravity, collision and swimming; camera follows interpolated eyes in walking mode
+- **Entities:** `entities::MobSystem` — CPU-only passive mob simulation (see §9); render states are pushed to `WorldRenderer::setMobs` each frame
 - **Settings:** `RenderSettings`, `ShaderParameters`, `RenderTiming`, seed  
 - **Benchmark:** `Benchmark`  
 
@@ -62,18 +65,19 @@ Matches `Engine.cpp` order:
    - `updateStreaming` → budgeted `processChunkLoading` / `generatePendingVoxels` / `meshPendingChunks` (`maxStreamMs` envelope)  
    - `updateVisibility` → `collectDrawList` / `collectShadowList`  
    - Computes `uploadBudgetThisFrame` (uploads are **not** done here)  
-5. **Highlight** — raycast block under cursor (`updateHighlight`)  
-6. **Deferred swapchain recreation** if needed — resize, VSync, or WSI invalidation follows one Engine-owned path that refreshes frame synchronization, `WorldRenderer`, and ImGui before acquisition
-7. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer  
-8. **Retire/staging frame slots** — `resourceRetire.beginFrame`, `stagingRing.beginFrame` (fence already waited)  
-9. **ImGui UI build** — `imgui->beginFrame` / `drawUi` / `endFrame` (CPU only; draw later)  
-10. **UBO** — underwater sample + `WorldRenderer::updateFrameUBO`  
-11. **Record** — `WorldRenderer::recordFrame`:  
+5. **Mobs** — scoped `ChunkMobWorld` adapter over `ChunkManager` + `TerrainGenerator`; `entities::MobSystem::update` (fixed-step AI/physics, spawn/retire) then `renderStates` → `WorldRenderer::setMobs`. Suspended while paused, unfocused, mobs toggled off, or during benchmarks  
+6. **Highlight** — raycast block under cursor (`updateHighlight`)  
+7. **Deferred swapchain recreation** if needed — resize, VSync, or WSI invalidation follows one Engine-owned path that refreshes frame synchronization, `WorldRenderer`, and ImGui before acquisition
+8. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer  
+9. **Retire/staging frame slots** — `resourceRetire.beginFrame`, `stagingRing.beginFrame` (fence already waited)  
+10. **ImGui UI build** — `imgui->beginFrame` / `drawUi` / `endFrame` (CPU only; draw later)  
+11. **UBO** — underwater sample + `WorldRenderer::updateFrameUBO` (which also runs `MobRenderer::prepare`: frustum masks + per-part transforms for camera and cascades)  
+12. **Record** — `WorldRenderer::recordFrame`:  
     - **preRecord:** `uploadPendingMeshes` + transfer→vertex barrier  
-    - **ShadowPass → OpaquePass** (opaque chunks + **overlays inside OpaquePass**) **→ WaterPass → SkyPass → PostStack**  
+    - **ShadowPass → OpaquePass** (opaque chunks + **overlays inside OpaquePass** + **mobs inside OpaquePass and every shadow cascade**) **→ WaterPass → SkyPass → PostStack**  
     - **imguiDraw:** `imgui->recordDraw` onto swapchain after composite  
-12. **Submit / present** — `VkFrameContext::submitAndPresent`  
-13. **Profiler end** + copy scopes into `RenderTiming` / benchmark sample  
+13. **Submit / present** — `VkFrameContext::submitAndPresent`  
+14. **Profiler end** + copy scopes into `RenderTiming` / benchmark sample  
 
 Bootstrap: `generateInitialArea` fills a small radius around spawn synchronously so the first frames are not empty.
 
@@ -399,7 +403,68 @@ Generation is **horizontal infinite** in practice (chunk X/Z); vertical extent i
 
 ---
 
-## 9. Camera
+## 9. Passive mobs (`Entities/`)
+
+Files: `src/Entities/MobSystem.*` (simulation), `src/Entities/MobModel.*` (articulated box models), `src/Chunk/ChunkMobWorld.hpp` (world adapter). Rendering side: `MobRenderer` — see [`vulkan-graphics.md`](vulkan-graphics.md).
+
+Four passive species (`MobSpecies`: Cow, Pig, Sheep, Chicken) live in the world with a
+simple ambient AI. There is intentionally **no** combat, health, breeding, babies,
+death, or persistence: the population is deterministic from the world seed and
+recreated as chunks stream in and out.
+
+### Simulation contract
+
+- **Fixed step 60 Hz** with up to 8 catch-up steps per frame; visual state is
+  interpolated (`renderStates`) from previous/current positions and yaws. Steps
+  beyond the budget are counted (`droppedSteps`), never accumulated. Suspended
+  (positions frozen, accumulator cleared) while paused, unfocused, mobs toggled
+  off, or benchmarking.
+- **Reuse of player physics:** mobs are `physics::Body` volumes moved through the
+  same `VoxelCollisionWorld` solve as the player, sampled via `ChunkCollisionView`.
+  No chunk pointer survives an update: the adapter is scoped per frame and must be
+  destroyed before streaming/edit publication.
+- **`tickMob`** is a free function (one fixed-step controller) so tests drive it
+  without an engine: walk/idle cycles (3–8 s / 2–6 s), progressive yaw turns,
+  neighbor separation, cliff/water probes one body-width ahead, one-block steps
+  via a physical hop (never a teleport), buoyancy + shore seeking in water, and
+  a re-target when stuck or when terrain is unavailable (`waitingForTerrain`).
+
+### Spawning and population (all constants in `MobSettings`)
+
+| Knob | Value |
+|------|-------|
+| Capacity | 48 mobs |
+| Group size | 2–4 of one species |
+| Spawn band | 24–80 blocks from the observer, capped by loaded radius |
+| Retire | beyond 112 blocks, or when the mob's terrain sample is unavailable |
+| Spawn scan | every 0.5 s, ≤4 group attempts per scan |
+
+- Candidate groups are keyed by **chunk coordinates + world seed** (hash-based),
+  so spawn decisions do not depend on chunk generation order and cannot duplicate
+  while a group stays in the active zone; processed groups are remembered until
+  they retire.
+- `ChunkMobWorld::surface` only accepts feet positions on **grass with a fully
+  air column above**, in temperate biomes (plains, flower meadow, forest, birch,
+  autumn forest, cherry grove), read from **published voxels** — never inferred
+  from procedural height.
+
+### Render handoff
+
+`MobRenderState` (species, interpolated position/yaw/gait/stride, idle look,
+flap) is a plain CPU struct; `WorldRenderer::setMobs` copies it for the frame and
+`MobRenderer::prepare` builds per-part transforms. UI: HUD "Passive mobs" toggle
+and active/visible counters (`GameUI`); CPU time under the `Mobs` profiler scope,
+GPU under `GpuPass::Mobs` / `MobShadow0-2`.
+
+### Tests
+
+- `tests/test_mobs.cpp` — AI behaviors, deterministic population, models; `--profile` prints 48-mob CPU cost (allocation-free per tick).
+- `tests/test_chunk_lifecycle.cpp --mobs-profile` — spawning/movement on real generated terrain.
+- `tests/test_mob_textures.cpp`, `tests/test_mob_render.cpp` — resource and Vulkan coverage (see renderer doc).
+
+---
+
+## 10. Camera
 
 File: `src/Camera/Camera.hpp` / `Camera.cpp`.
 
@@ -415,7 +480,7 @@ for controls, timing, thread/publication contracts and future entity integration
 
 ---
 
-## 10. Interaction with the renderer
+## 11. Interaction with the renderer
 
 | Engine data | Consumed by |
 |-------------|-------------|
@@ -432,7 +497,7 @@ for controls, timing, thread/publication contracts and future entity integration
 
 ---
 
-## 11. Networking (status)
+## 12. Networking (status)
 
 `src/Network/` — Boost.Asio UDP client/server for position/world state.
 
@@ -443,7 +508,7 @@ Document presence only; do not assume multiplayer is live in the main binary UX.
 
 ---
 
-## 12. Related docs
+## 13. Related docs
 
 - [`vulkan-graphics.md`](vulkan-graphics.md) — Vulkan device, pass graph, shaders, post  
 - [`terrain-generation.md`](terrain-generation.md) — noise graphs, biome/block catalog, extension procedures, calibration
