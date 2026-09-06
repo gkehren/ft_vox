@@ -80,6 +80,10 @@ public:
 		uint64_t highWaterBytes{0};
 	};
 	Metrics metrics() const;
+	// Frames a retired range waits in the pending queue before its bytes
+	// return to the free list (= framesInFlight + 1, set by init). Exposed
+	// so tests can pin the wrapper's delay plumbing.
+	uint32_t retireDelay() const { return m_retireDelay; }
 	// Live bytes: published ranges + ranges still pending retirement (both
 	// consume the arena until they return to the free list).
 	uint64_t liveBytes() const { return m_liveBytes; }

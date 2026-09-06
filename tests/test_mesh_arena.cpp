@@ -378,6 +378,37 @@ int main()
 	retire.flush();
 	arena.shutdown();
 
+	// 11. MeshArenas wrapper pins the retirement margin (issue #121 review):
+	//     the +1 must be applied exactly once, inside MeshArena::init. The
+	//     wrapper passes framesInFlight through untouched - 2 frames in
+	//     flight means a delay of 3, not 4.
+	{
+		MeshArenas arenas;
+		arenas.init(vk.allocator.handle(), retire, sizeof(Vertex), 2,
+		            256 * 1024, 128 * 1024);
+		CHECK(arenas.opaqueVertex.retireDelay() == 3, "opaque vertex delay = FIF+1 = 3");
+		CHECK(arenas.opaqueIndex.retireDelay() == 3, "opaque index delay = FIF+1 = 3");
+		CHECK(arenas.waterVertex.retireDelay() == 3, "water vertex delay = FIF+1 = 3");
+		CHECK(arenas.waterIndex.retireDelay() == 3, "water index delay = FIF+1 = 3");
+
+		// Behavioral cross-check on the real wrapper config: retire a range
+		// at the arena's current frame 0, it must come back after exactly
+		// 3 beginFrame calls (1 and 2 are still inside the delay).
+		MeshArena::Range r;
+		CHECK(arenas.opaqueVertex.allocate(1024, r), "wrapper: allocate");
+		CHECK(arenas.opaqueVertex.metrics().pages == 1, "wrapper: one page created");
+		arenas.opaqueVertex.retire(r);
+		arenas.beginFrame(1);
+		arenas.beginFrame(2);
+		CHECK(arenas.opaqueVertex.metrics().pages == 1,
+		      "wrapper: page still held during the delay window");
+		arenas.beginFrame(3);
+		CHECK(arenas.opaqueVertex.metrics().pages == 0,
+		      "wrapper: page released after exactly FIF+1 frames");
+		arenas.shutdown();
+		retire.flush();
+	}
+
 	if (g_fails != 0)
 	{
 		std::cerr << g_fails << " check(s) failed\n";

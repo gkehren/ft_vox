@@ -283,21 +283,21 @@ void MeshArenas::init(VmaAllocator allocator, GpuResourceRetire &retire, uint32_
 	                  uint32_t framesInFlight,
 	                  VkDeviceSize vertexPageSize, VkDeviceSize indexPageSize)
 {
-	// framesInFlight + 1: one extra frame of margin over the strict
-	// in-flight window (see MeshArena::init documentation).
-	const uint32_t delay = framesInFlight + 1;
+	// Pass framesInFlight through untouched: MeshArena::init derives the
+	// retirement margin (framesInFlight + 1) in exactly one place. Adding it
+	// here too would double the margin (issue #121 review).
 	opaqueVertex.init(allocator, retire, vertexPageSize,
 					  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexAlignment,
-					  telemetry::GpuOpaqueVertex, delay);
+					  telemetry::GpuOpaqueVertex, framesInFlight);
 	opaqueIndex.init(allocator, retire, indexPageSize,
 					 VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sizeof(uint32_t),
-					 telemetry::GpuOpaqueIndex, delay);
+					 telemetry::GpuOpaqueIndex, framesInFlight);
 	waterVertex.init(allocator, retire, vertexPageSize,
 					 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexAlignment,
-					 telemetry::GpuWaterVertex, delay);
+					 telemetry::GpuWaterVertex, framesInFlight);
 	waterIndex.init(allocator, retire, indexPageSize,
 					VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sizeof(uint32_t),
-					telemetry::GpuWaterIndex, delay);
+					telemetry::GpuWaterIndex, framesInFlight);
 }
 
 void MeshArenas::shutdown()
