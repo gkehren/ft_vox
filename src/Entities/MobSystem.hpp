@@ -19,9 +19,19 @@ static_assert(speciesSettings.size() == kMobSpeciesCount);
 struct MobSettings
 {
     static constexpr size_t capacity = 48;
-    double spawnMin = 24, spawnMax = 80, retireDistance = 112;
+
+    double spawnMin = 24.0;
+    double spawnMax = 80.0;
+    double retireDistance = 112.0;
+
+    double spawnInterval = 0.5;  // seconds between population scans
+    double spawnChance = 0.22;   // per chunk-column group candidacy
+    uint32_t minGroupSize = 2;
+    uint32_t maxGroupSize = 4;
+    uint32_t maxGroupAttemptsPerScan = 4;
+
     double fixedStep = 1.0 / 60.0;
-    int maxSteps = 8;
+    uint32_t maxSteps = 8;
 };
 // Surface returns feet on grass in an eligible biome, or no candidate. Unknown
 // terrain is never inferred from procedural height: actual voxels are required.

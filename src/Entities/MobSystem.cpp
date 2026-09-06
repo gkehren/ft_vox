@@ -110,18 +110,19 @@ void MobSystem::populate(const MobWorld &world, glm::dvec3 observer, double radi
         auto c = candidates[i];
         const uint64_t key = (uint64_t(uint32_t(c.x)) << 32) | uint32_t(c.z);
         uint64_t rng = mix(key ^ mix(m_seed));
-        if (random(rng) > 0.22)
+        if (random(rng) > settings.spawnChance)
             continue;
         if (std::any_of(m_groups.begin(), m_groups.end(), [&](auto &g) { return g.key == key; }))
             continue;
         // Retry unpublished chunks on a later scan, without monopolizing the budget.
         if (!world.sample({c.x * 16 + 8, 128, c.z * 16 + 8}).available)
             continue;
-        if (++attempts > 4)
+        if (++attempts > int(settings.maxGroupAttemptsPerScan))
             break;
         const auto speciesIndex = size_t(random(rng) * double(kMobSpeciesCount));
         MobSpecies species = MobSpecies(std::min(speciesIndex, kMobSpeciesCount - 1));
-        const int members = 2 + int(random(rng) * 3);
+        const int members =
+            int(settings.minGroupSize) + int(random(rng) * double(settings.maxGroupSize - settings.minGroupSize + 1));
         bool spawned = false;
         for (int j = 0; j < members; ++j)
         {
@@ -306,10 +307,10 @@ void MobSystem::update(double dt, const MobWorld &world, glm::dvec3 observer, do
     if (m_spawnTimer <= 0)
     {
         populate(world, observer, std::min(settings.spawnMax, retire));
-        m_spawnTimer = 0.5;
+        m_spawnTimer = settings.spawnInterval;
     }
     m_accumulator += dt;
-    int steps = 0;
+    uint32_t steps = 0;
     while (m_accumulator + 1e-12 >= settings.fixedStep && steps < settings.maxSteps)
     {
         step(world);
