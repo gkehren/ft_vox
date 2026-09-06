@@ -11,6 +11,7 @@
 #include "Renderer/PostStack.hpp"
 #include "Renderer/OverlayRenderer.hpp"
 #include "Renderer/ShadowCascades.hpp"
+#include "Renderer/VoxelDrawDataLayout.hpp"
 #include "Renderer/Lighting.hpp"
 #include "Renderer/FrameUBO.hpp"
 #include "Renderer/ShadowPass.hpp"
@@ -70,6 +71,10 @@ public:
 	/// Indirect commands demanded by the last recorded frame, all passes
 	/// summed (opaque + shadow cascades + water, pre-truncation).
 	uint32_t lastIndirectCommandCount() const { return m_lastIndirectCommands; }
+	/// Per-frame VoxelDrawData table layout (regions per pass, single source
+	/// of truth in VoxelDrawDataLayout.hpp).
+	static constexpr uint32_t kMaxDrawDataEntries = voxel_draw::kEntryCount;
+
 	VmaAllocator getAllocator() const { return m_context->getAllocator(); }
 
 private:
@@ -77,6 +82,8 @@ private:
 	{
 		AllocatedBuffer ubo{};
 		void *uboMapped{nullptr};
+		AllocatedBuffer drawDataBuffer{};
+		void *drawDataMapped{nullptr};
 		VkDescriptorSet descriptorSet0{VK_NULL_HANDLE};
 	};
 

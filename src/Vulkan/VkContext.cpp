@@ -141,6 +141,7 @@ void VkContext::init(SDL_Window *window)
 			  << " dynamicRendering=" << (m_dynamicRendering ? "yes" : "no")
 			  << " timelineSemaphores=" << (m_timelineSemaphores ? "yes" : "no")
 			  << " multiDrawIndirect=" << (m_multiDrawIndirect ? "yes" : "no")
+			  << " drawIndirectFirstInstance=yes"
 			  << " maxDrawIndirectCount=" << m_deviceProperties.limits.maxDrawIndirectCount
 			  << " portabilitySubset=" << (m_portabilitySubset ? "yes" : "no") << "\n";
 	std::cout << "  VMA allocator: ready\n";
@@ -532,6 +533,13 @@ void VkContext::createLogicalDevice()
 	// enabling the core-1.0 feature only when the device advertises it keeps
 	// drawCount legal everywhere (VUID-vkCmdDrawIndexedIndirect-drawCount-02718).
 	m_multiDrawIndirect = features2.features.multiDrawIndirect == VK_TRUE;
+	// Per-draw voxel data (issue #110): every indirect command carries a
+	// non-zero firstInstance indexing the VoxelDrawData table — honoring it
+	// requires the core-1.0 drawIndirectFirstInstance feature.
+	if (features2.features.drawIndirectFirstInstance != VK_TRUE)
+		throw std::runtime_error(
+			"Selected Vulkan device does not support drawIndirectFirstInstance "
+			"(required by the packed-voxel per-draw-data renderer)");
 
 	if (m_dynamicRendering)
 	{
@@ -549,6 +557,7 @@ void VkContext::createLogicalDevice()
 	enabledFeatures.samplerAnisotropy = features2.features.samplerAnisotropy;
 	enabledFeatures.fillModeNonSolid = features2.features.fillModeNonSolid;
 	enabledFeatures.multiDrawIndirect = features2.features.multiDrawIndirect;
+	enabledFeatures.drawIndirectFirstInstance = VK_TRUE; // verified above
 
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

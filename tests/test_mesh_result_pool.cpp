@@ -35,7 +35,7 @@ static void fillJunk(MeshBuildResult &r)
 	for (int i = 0; i < 1000; ++i)
 	{
 		Vertex v{};
-		v.position = glm::vec3(float(i));
+		v.packedPos = uint32_t(i);
 		r.opaqueVertices.push_back(v);
 		r.opaqueIndices.push_back(uint32_t(i));
 		if (i < 50)

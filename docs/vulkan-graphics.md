@@ -225,8 +225,9 @@ True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`
   remains future work.
 - Indices are stored section-local: the indirect command's `vertexOffset`
   performs the rebase on the GPU, so uploads are plain copies (no CPU rebase
-  pass). Positions remain world-space; per-draw chunk metadata can later be
-  introduced through `gl_DrawID` indexing without changing the arena layout.
+  pass). Positions are stored in chunk-local packed 16-byte `Vertex` records;
+  per-draw chunk origin is passed via `VoxelDrawData` in a frame-mapped SSBO
+  (set 0, binding 2) indexed via `gl_InstanceIndex` (`firstInstance`, issue #110).
 - Telemetry: `arena.pages`, `arena.freeBytes`, `arena.highWaterBytes` gauges
   and `arena.binds`, `arena.growEvents` events complement the pre-existing
   `mesh.allocations.*` counters (which now count page creation, not

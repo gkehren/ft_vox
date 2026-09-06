@@ -1,11 +1,13 @@
 #include "Renderer/OpaquePass.hpp"
 #include "Renderer/IndirectDrawEmit.hpp"
+#include "Renderer/VoxelDrawDataLayout.hpp"
 #include "Vulkan/MeshArena.hpp"
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/GraphicsPipelineBuilder.hpp"
 #include "Vulkan/VkShader.hpp"
 #include "utils.hpp"
 
+#include <cassert>
 #include <stdexcept>
 #include <cstdlib>
 
@@ -103,6 +105,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 						VkPipelineLayout layout, AllocatedImage &hdr, AllocatedImage &depth,
 						const std::vector<Chunk *> &chunks, OverlayRenderer &overlays,
 						const VkClearColorValue &clearColor, uint32_t frameIndex, const MeshArenas &arenas,
+						VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer,
 						VkGpuProfiler *gpu)
 {
 	if (gpu) gpu->beginPass(cmd, GpuPass::Opaque);
@@ -156,6 +159,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 		if (chunk)
 			chunk->collectOpaqueDraws(m_scratch);
 	m_lastCommands = static_cast<uint32_t>(m_scratch.size());
+	const uint32_t baseInstance = voxel_draw::kOpaqueBase;
 	const bool directDraws = std::getenv("FT_VOX_DRAW_DIRECT") != nullptr;
 	if (directDraws)
 	{
@@ -165,9 +169,22 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 		// dispatch changes: overlays and the rendering scope close exactly
 		// like the indirect path, so the rest of the frame graph is
 		// identical.
-		VkBuffer curV = VK_NULL_HANDLE, curI = VK_NULL_HANDLE;
-		for (const Chunk::IndirectDraw &d : m_scratch)
+		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+		assert(baseInstance + count <= voxel_draw::kEntryCount);
+		if (drawDataOut)
 		{
+			for (size_t i = 0; i < count; ++i)
+			{
+				drawDataOut[baseInstance + i].worldOrigin = m_scratch[i].chunkOrigin;
+				drawDataOut[baseInstance + i].flags = 0;
+			}
+			vmaFlushAllocation(m_context->getAllocator(), drawDataBuffer.allocation,
+							   baseInstance * sizeof(VoxelDrawData), count * sizeof(VoxelDrawData));
+		}
+		VkBuffer curV = VK_NULL_HANDLE, curI = VK_NULL_HANDLE;
+		for (size_t i = 0; i < count; ++i)
+		{
+			const Chunk::IndirectDraw &d = m_scratch[i];
 			VkBuffer vb = arenas.opaqueVertex.pageBuffer(d.vertexPage);
 			VkBuffer ib = arenas.opaqueIndex.pageBuffer(d.indexPage);
 			if (vb != curV || ib != curI)
@@ -179,7 +196,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 				curI = ib;
 			}
 			vkCmdDrawIndexed(cmd, d.cmd.indexCount, 1, d.cmd.firstIndex,
-			                 d.cmd.vertexOffset, 0);
+			                 d.cmd.vertexOffset, static_cast<uint32_t>(baseInstance + i));
 		}
 	}
 	else if (!m_scratch.empty())
@@ -199,6 +216,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			}
 		}
 		const size_t count = std::min<size_t>(m_scratch.size(), kMaxIndirectCommands);
+		assert(baseInstance + count <= voxel_draw::kEntryCount);
 		// Computed once per record: batches obey multiDrawIndirect and
 		// maxDrawIndirectCount (see IndirectDrawUtils.hpp).
 		const uint32_t batchLimit = indirectBatchLimit(
@@ -224,11 +242,24 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 			          });
 		auto *dst = static_cast<VkDrawIndexedIndirectCommand *>(m_indirect[frameIndex].mapped);
 		for (size_t i = 0; i < count; ++i)
+		{
 			dst[i] = m_scratch[i].cmd;
+			dst[i].firstInstance = static_cast<uint32_t>(baseInstance + i);
+			if (drawDataOut)
+			{
+				drawDataOut[baseInstance + i].worldOrigin = m_scratch[i].chunkOrigin;
+				drawDataOut[baseInstance + i].flags = 0;
+			}
+		}
 		// Flush only what was written: a full 1.25 MiB flush per frame
 		// measurably regressed CPU record time.
 		vmaFlushAllocation(m_context->getAllocator(), m_indirect[frameIndex].buf.allocation, 0,
 						   count * sizeof(VkDrawIndexedIndirectCommand));
+		if (drawDataOut)
+		{
+			vmaFlushAllocation(m_context->getAllocator(), drawDataBuffer.allocation,
+							   baseInstance * sizeof(VoxelDrawData), count * sizeof(VoxelDrawData));
+		}
 
 		size_t i = 0;
 		uint32_t first = 0;

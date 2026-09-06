@@ -139,7 +139,7 @@ Reproduce that path with `ft_vox --seed 42 --benchmark 5 --benchmark-warmup 0`.
 ### Voxel and mesh types
 
 - **`Voxel`** — `uint8_t type` (block id / `TextureType`)  
-- **`Vertex`** — position, packed normal/tex/AO/biome flags, UV, packed biome color  
+- **`Vertex`** — 16-byte packed voxel vertex (chunk-local position, packed normal/tex/AO/lighting, UV, packed biome color) + per-draw `VoxelDrawData` world origin (issue #110)  
 - **`TextureType`** — block atlas indices (stone, dirt, grass, leaves, water, ores, …)  
 - **`BiomeType`** — ocean, beach, plains, forests, deserts, tundra, mountains, …  
 - **`ChunkState`** — lifecycle for streaming (unloaded → generated → meshed → GPU-ready, plus transit flags)
