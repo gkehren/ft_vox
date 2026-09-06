@@ -1254,6 +1254,245 @@ int main()
 		}
 	}
 
+	// =========================================================================
+	// Phase 14: synchronous bootstrap failure is loud and clean
+	//
+	// The bootstrap path (uploadToGPU) cannot retry silently: an arena OOM
+	// must throw WITHOUT leaking partially-allocated ranges, WITHOUT
+	// publishing slots or draw counts, and WITHOUT consuming the pending CPU
+	// result. Covered scenarios:
+	//   A. full-quality bootstrap: first allocation fails
+	//   B. LOD bootstrap: opaque index fails after the vertex range succeeded
+	//   C. LOD bootstrap: water fails AFTER opaque uploaded fully (the whole
+	//      LOD transaction rolls back)
+	// =========================================================================
+	{
+		ChunkPool chunkPool(8);
+		TerrainGenerator gen(404);
+		ChunkManager manager(&gen, nullptr, &chunkPool);
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(16);
+		Chunk *chunk = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		CHECK(chunk != nullptr, "bootfail A: chunk loaded");
+		if (chunk)
+		{
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "bootfail A: prep+gen");
+			CHECK(chunk->generateMesh(), "bootfail A: initial mesh");
+			CHECK(ChunkStateProbe::pending(*chunk) != nullptr, "bootfail A: pending attached");
+
+			const auto ovM = arenas.opaqueVertex.metrics();
+			const auto oiM = arenas.opaqueIndex.metrics();
+			const auto wvM = arenas.waterVertex.metrics();
+			const auto wiM = arenas.waterIndex.metrics();
+
+			arenas.opaqueVertex.setFailNextAllocations(1);
+			bool threw = false;
+			try
+			{
+				chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			}
+			catch (const std::runtime_error &)
+			{
+				threw = true;
+			}
+			CHECK(threw, "bootfail A: full-quality OOM throws (never silently ignored)");
+			CHECK(ChunkStateProbe::pending(*chunk) != nullptr,
+			      "bootfail A: pending result NOT consumed by the failure");
+			CHECK(chunk->needsGPUUpload(), "bootfail A: meshNeedsUpdate stays armed");
+			CHECK(chunk->getOpaqueIndexCount() == 0 && chunk->getWaterIndexCount() == 0,
+			      "bootfail A: no phantom draw count");
+			bool allEmpty = true;
+			for (int s = 0; s < 16; ++s)
+				allEmpty = allEmpty && ChunkStateProbe::slotEmpty(*chunk, s) &&
+				           ChunkStateProbe::slotWaterEmpty(*chunk, s);
+			CHECK(allEmpty, "bootfail A: no section slot published");
+			CHECK(arenas.opaqueVertex.metrics().liveBlocks == ovM.liveBlocks &&
+			      arenas.opaqueVertex.metrics().liveBytes == ovM.liveBytes &&
+			      arenas.opaqueIndex.metrics().liveBlocks == oiM.liveBlocks &&
+			      arenas.opaqueIndex.metrics().liveBytes == oiM.liveBytes &&
+			      arenas.waterVertex.metrics().liveBlocks == wvM.liveBlocks &&
+			      arenas.waterIndex.metrics().liveBytes == wiM.liveBytes,
+			      "bootfail A: arena counters untouched (nothing leaked)");
+
+			// Recovery: the same bootstrap succeeds once the hook is consumed.
+			threw = false;
+			try
+			{
+				chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			}
+			catch (const std::runtime_error &)
+			{
+				threw = true;
+			}
+			CHECK(!threw, "bootfail A: retry succeeds");
+			CHECK(ChunkStateProbe::pending(*chunk) == nullptr,
+			      "bootfail A: retry consumed the result");
+			CHECK(chunk->getOpaqueIndexCount() > 0, "bootfail A: retry published opaque geometry");
+		}
+	}
+
+	{
+		ChunkPool chunkPool(8);
+		TerrainGenerator gen(505);
+		ChunkManager manager(&gen, nullptr, &chunkPool);
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(16);
+		Chunk *chunk = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		CHECK(chunk != nullptr, "bootfail B: chunk loaded");
+		if (chunk)
+		{
+			// Pure LOD bootstrap: the chunk was generated but never uploaded;
+			// the LOD result replaces the never-uploaded full result.
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "bootfail B: prep+gen");
+			MeshBuildResult *lod = chunk->getMeshResultPool()->acquire();
+			lod->isLOD = true;
+			lod->owner = chunk;
+			lod->generation = chunk->meshGeneration();
+			lod->revision = chunk->meshRevision();
+			Vertex v{};
+			lod->opaqueVertices.assign(128, v);
+			lod->opaqueIndices.assign(192, 0u);
+			lod->waterVertices.assign(32, v);
+			lod->waterIndices.assign(48, 0u);
+			chunk->getMeshResultPool()->finishBuild(lod);
+			CHECK(chunk->publishMeshResult(lod), "bootfail B: LOD result published");
+
+			const auto ovM = arenas.opaqueVertex.metrics();
+			const auto oiM = arenas.opaqueIndex.metrics();
+			const auto wvM = arenas.waterVertex.metrics();
+			const auto wiM = arenas.waterIndex.metrics();
+
+			arenas.opaqueIndex.setFailNextAllocations(1);
+			bool threw = false;
+			try
+			{
+				chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			}
+			catch (const std::runtime_error &)
+			{
+				threw = true;
+			}
+			CHECK(threw, "bootfail B: LOD opaque-index OOM throws");
+			CHECK(ChunkStateProbe::pending(*chunk) == lod,
+			      "bootfail B: pending LOD result retained");
+			CHECK(ChunkStateProbe::lodOpaqueV(*chunk).empty() &&
+			      ChunkStateProbe::lodOpaqueI(*chunk).empty(),
+			      "bootfail B: partial opaque pair rolled back (no leaked vertex range)");
+			CHECK(ChunkStateProbe::lodWaterV(*chunk).empty() &&
+			      ChunkStateProbe::lodWaterI(*chunk).empty(),
+			      "bootfail B: water ranges untouched");
+			CHECK(chunk->getOpaqueIndexCount() == 0 && chunk->getWaterIndexCount() == 0,
+			      "bootfail B: no phantom LOD counts");
+			CHECK(arenas.opaqueVertex.metrics().liveBlocks == ovM.liveBlocks &&
+			      arenas.opaqueVertex.metrics().liveBytes == ovM.liveBytes &&
+			      arenas.opaqueIndex.metrics().liveBlocks == oiM.liveBlocks &&
+			      arenas.opaqueIndex.metrics().liveBytes == oiM.liveBytes,
+			      "bootfail B: opaque counters untouched after pair rollback");
+
+			// Recovery.
+			threw = false;
+			try
+			{
+				chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			}
+			catch (const std::runtime_error &)
+			{
+				threw = true;
+			}
+			CHECK(!threw, "bootfail B: retry succeeds");
+			CHECK(chunk->isLODMesh(), "bootfail B: retry flagged LOD");
+			CHECK(chunk->getOpaqueIndexCount() == 192 && chunk->getWaterIndexCount() == 48,
+			      "bootfail B: retry published both streams");
+			CHECK(!ChunkStateProbe::lodOpaqueV(*chunk).empty() &&
+			      !ChunkStateProbe::lodWaterI(*chunk).empty(),
+			      "bootfail B: retry holds LOD ranges");
+			CHECK(ChunkStateProbe::pending(*chunk) == nullptr,
+			      "bootfail B: retry consumed the result");
+		}
+	}
+
+	{
+		ChunkPool chunkPool(8);
+		TerrainGenerator gen(606);
+		ChunkManager manager(&gen, nullptr, &chunkPool);
+		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
+		RenderSettings settings;
+		manager.updateStreaming(cam, settings);
+		manager.processChunkLoading(16);
+		Chunk *chunk = manager.getChunkAtWorldPos(glm::vec3(4.0f, 40.0f, 4.0f));
+		CHECK(chunk != nullptr, "bootfail C: chunk loaded");
+		if (chunk)
+		{
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "bootfail C: prep+gen");
+			MeshBuildResult *lod = chunk->getMeshResultPool()->acquire();
+			lod->isLOD = true;
+			lod->owner = chunk;
+			lod->generation = chunk->meshGeneration();
+			lod->revision = chunk->meshRevision();
+			Vertex v{};
+			lod->opaqueVertices.assign(96, v);
+			lod->opaqueIndices.assign(144, 0u);
+			lod->waterVertices.assign(64, v);
+			lod->waterIndices.assign(96, 0u);
+			chunk->getMeshResultPool()->finishBuild(lod);
+			CHECK(chunk->publishMeshResult(lod), "bootfail C: LOD result published");
+
+			const auto ovM = arenas.opaqueVertex.metrics();
+			const auto oiM = arenas.opaqueIndex.metrics();
+			const auto wvM = arenas.waterVertex.metrics();
+			const auto wiM = arenas.waterIndex.metrics();
+
+			// Water fails AFTER opaque allocated AND uploaded: the whole LOD
+			// upload is one transaction, so the opaque success must not
+			// survive the throw.
+			arenas.waterVertex.setFailNextAllocations(1);
+			bool threw = false;
+			try
+			{
+				chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			}
+			catch (const std::runtime_error &)
+			{
+				threw = true;
+			}
+			CHECK(threw, "bootfail C: LOD water OOM throws after opaque success");
+			CHECK(ChunkStateProbe::pending(*chunk) == lod,
+			      "bootfail C: pending LOD result retained");
+			CHECK(ChunkStateProbe::lodOpaqueV(*chunk).empty() &&
+			      ChunkStateProbe::lodOpaqueI(*chunk).empty() &&
+			      ChunkStateProbe::lodWaterV(*chunk).empty() &&
+			      ChunkStateProbe::lodWaterI(*chunk).empty(),
+			      "bootfail C: whole transaction rolled back (uploaded opaque pair too)");
+			CHECK(chunk->getOpaqueIndexCount() == 0 && chunk->getWaterIndexCount() == 0,
+			      "bootfail C: no stale draw counts after rollback");
+			CHECK(arenas.opaqueVertex.metrics().liveBlocks == ovM.liveBlocks &&
+			      arenas.opaqueVertex.metrics().liveBytes == ovM.liveBytes &&
+			      arenas.opaqueIndex.metrics().liveBlocks == oiM.liveBlocks &&
+			      arenas.opaqueIndex.metrics().liveBytes == oiM.liveBytes &&
+			      arenas.waterVertex.metrics().liveBlocks == wvM.liveBlocks &&
+			      arenas.waterIndex.metrics().liveBytes == wiM.liveBytes,
+			      "bootfail C: no leaked range despite opaque upload success");
+
+			// Recovery.
+			threw = false;
+			try
+			{
+				chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			}
+			catch (const std::runtime_error &)
+			{
+				threw = true;
+			}
+			CHECK(!threw, "bootfail C: retry succeeds");
+			CHECK(chunk->getOpaqueIndexCount() == 144 && chunk->getWaterIndexCount() == 96,
+			      "bootfail C: retry published both streams");
+		}
+	}
+
 	arenas.shutdown();
 	imm.shutdown();
 	staging.shutdown();

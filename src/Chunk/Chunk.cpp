@@ -2252,12 +2252,31 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
   m_arenas = &arenas;
 
   // The CPU payload lives in the attached build result (issue #104).
+  // Bootstrap is synchronous, so an arena OOM is fatal - but it must be loud
+  // AND clean: every range a partially-successful sequence allocated is freed
+  // before throwing, no count or slot pretends a mesh was uploaded, and the
+  // pending CPU result stays attached (nothing was consumed).
   MeshBuildResult *result = m_pendingResult;
   if (result && result->isLOD)
   {
     // Whole-chunk LOD mesh: one range pair per stream in the shared arenas.
+    // The whole upload is one transaction: opaque succeeding does not survive
+    // a water failure.
     const bool needOpaque = !result->opaqueVertices.empty() && !result->opaqueIndices.empty();
     const bool needWater = !result->waterVertices.empty() && !result->waterIndices.empty();
+    auto rollbackLodRanges = [&]()
+    {
+      arenas.opaqueVertex.freeImmediate(m_lodOpaqueVertices);
+      arenas.opaqueIndex.freeImmediate(m_lodOpaqueIndices);
+      arenas.waterVertex.freeImmediate(m_lodWaterVertices);
+      arenas.waterIndex.freeImmediate(m_lodWaterIndices);
+      m_lodOpaqueVertices = {};
+      m_lodOpaqueIndices = {};
+      m_lodWaterVertices = {};
+      m_lodWaterIndices = {};
+      opaqueIndexCount = 0;
+      waterIndexCount = 0;
+    };
     if (needOpaque)
     {
       if (!arenas.opaqueVertex.allocate(
@@ -2266,7 +2285,10 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
           !arenas.opaqueIndex.allocate(
               static_cast<uint32_t>(result->opaqueIndices.size() * sizeof(uint32_t)),
               m_lodOpaqueIndices))
+      {
+        rollbackLodRanges();
         throw std::runtime_error("Chunk::uploadToGPU: arena allocation failed");
+      }
       uploadBuffer(allocator, imm, arenas.opaqueVertex.pageBufferRef(m_lodOpaqueVertices.page),
                    result->opaqueVertices.data(), m_lodOpaqueVertices.bytes,
                    m_lodOpaqueVertices.offset);
@@ -2287,7 +2309,10 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
           !arenas.waterIndex.allocate(
               static_cast<uint32_t>(result->waterIndices.size() * sizeof(uint32_t)),
               m_lodWaterIndices))
+      {
+        rollbackLodRanges();
         throw std::runtime_error("Chunk::uploadToGPU: arena allocation failed");
+      }
       uploadBuffer(allocator, imm, arenas.waterVertex.pageBufferRef(m_lodWaterVertices.page),
                    result->waterVertices.data(), m_lodWaterVertices.bytes,
                    m_lodWaterVertices.offset);
@@ -2307,8 +2332,11 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
   }
   else if (result)
   {
-    // Full-quality sectioned upload: arena range per section.
-    uploadSectionSlots(*result, allocator, nullptr, VK_NULL_HANDLE, nullptr, &imm, arenas);
+    // Full-quality sectioned upload: arena range per section. The upload is
+    // transactional - on failure nothing was published and the pending CPU
+    // result stays attached - so a synchronous bootstrap must not swallow it.
+    if (!uploadSectionSlots(*result, allocator, nullptr, VK_NULL_HANDLE, nullptr, &imm, arenas))
+      throw std::runtime_error("Chunk::uploadToGPU: arena allocation failed");
   }
   else
   {
