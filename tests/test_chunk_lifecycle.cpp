@@ -11,10 +11,12 @@
 #include <Chunk/ChunkCollisionView.hpp>
 #include <Physics/PlayerController.hpp>
 #include <Chunk/TerrainGenerator.hpp>
+#include <Camera/Camera.hpp>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -419,6 +421,383 @@ static glm::ivec2 locateInlandChunkOrigin(TerrainGenerator &gen)
 	}
 	CHECK(false, "inland terrain reachable within the scan radius");
 	return {0, 0};
+}
+
+// -----------------------------------------------------------------------------
+// Streaming dispatch contract (issue #108 review): drive a real ChunkManager
+// through updateStreaming and validate the desired footprint and the load
+// queue against the brute-force oracle at every reconciliation boundary.
+// -----------------------------------------------------------------------------
+struct ChunkManagerStreamProbe
+{
+	static const ChunkDesiredFootprint &footprint(const ChunkManager &m) { return m.m_desiredFootprint; }
+	static const std::unordered_set<glm::ivec3, IVec3Hash> &enqueued(const ChunkManager &m) { return m.m_enqueuedLoads; }
+	static size_t queueHead(const ChunkManager &m) { return m.m_loadQueueHead; }
+	static const std::vector<LoadCandidate> &queue(const ChunkManager &m) { return m.m_loadQueue; }
+	static const ChunkManager::StreamState &state(const ChunkManager &m) { return m.m_streamState; }
+	static const std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> &chunks(const ChunkManager &m) { return m.m_chunks; }
+};
+
+struct StreamIVec3Less
+{
+	bool operator()(const glm::ivec3 &a, const glm::ivec3 &b) const
+	{
+		if (a.x != b.x) return a.x < b.x;
+		if (a.y != b.y) return a.y < b.y;
+		return a.z < b.z;
+	}
+};
+
+static std::set<glm::ivec3, StreamIVec3Less> toOrderedSet(const std::vector<glm::ivec3> &v)
+{
+	return std::set<glm::ivec3, StreamIVec3Less>(v.begin(), v.end());
+}
+
+static glm::ivec3 chunkOfPosition(const glm::vec3 &p)
+{
+	return {static_cast<int>(std::floor(p.x / static_cast<float>(CHUNK_SIZE))), 0,
+			static_cast<int>(std::floor(p.z / static_cast<float>(CHUNK_SIZE)))};
+}
+
+static std::set<glm::ivec3, StreamIVec3Less> managerDesiredSet(const ChunkManager &manager)
+{
+	const auto &list = footprintToCoordList(ChunkManagerStreamProbe::footprint(manager));
+	return std::set<glm::ivec3, StreamIVec3Less>(list.begin(), list.end());
+}
+
+static void checkManagerDesiredMatchesBrute(const ChunkManager &manager, const Camera &camera,
+											float bias, int viewDist, const char *what)
+{
+	const glm::vec3 pos = camera.getPosition();
+	const glm::vec3 front = camera.getFront();
+	glm::vec2 fwd(front.x, front.z);
+	if (glm::dot(fwd, fwd) < 1e-6f)
+		fwd = glm::vec2(0.f, 1.f);
+	fwd = glm::normalize(fwd);
+	const auto expected = toOrderedSet(
+		computeDesiredChunkSetBruteForce(chunkOfPosition(pos), pos, fwd, bias, viewDist));
+	const auto actual = managerDesiredSet(manager);
+	if (actual != expected)
+	{
+		// First divergence for debuggability.
+		for (const auto &c : expected)
+			if (actual.count(c) == 0) { std::cerr << "  missing " << c.x << "," << c.z << "\n"; break; }
+		for (const auto &c : actual)
+			if (expected.count(c) == 0) { std::cerr << "  extra   " << c.x << "," << c.z << "\n"; break; }
+	}
+	CHECK(actual == expected, what);
+}
+
+/// Queue invariants at rest (these tests never call processChunkLoading, so
+/// nothing is in flight or consumed): every live queue entry (index >= head)
+/// is marked enqueued and the enqueued set holds exactly the distinct live
+/// entries; nothing queued is already loaded; queued set == desired
+/// footprint minus loaded chunks.
+static void checkStreamingQueueInvariants(const ChunkManager &manager, const char *what)
+{
+	const auto &q = ChunkManagerStreamProbe::queue(manager);
+	const size_t head = ChunkManagerStreamProbe::queueHead(manager);
+	const auto &enq = ChunkManagerStreamProbe::enqueued(manager);
+
+	CHECK(head <= q.size(), "queue head within bounds");
+	std::set<glm::ivec3, StreamIVec3Less> live;
+	for (size_t i = head; i < q.size(); ++i)
+	{
+		CHECK(enq.count(q[i].pos) == 1, "live queue entry is marked enqueued");
+		live.insert(q[i].pos);
+	}
+	CHECK(enq.size() == live.size(), "enqueued set holds exactly the live queue entries");
+	CHECK(live.size() == q.size() - head, "no duplicate coordinates in the live queue");
+
+	for (const auto &c : live)
+		CHECK(ChunkManagerStreamProbe::chunks(manager).count(c) == 0,
+			  "queued coordinate is not already loaded");
+
+	std::set<glm::ivec3, StreamIVec3Less> desiredMinusLoaded = managerDesiredSet(manager);
+	for (const auto &c : ChunkManagerStreamProbe::chunks(manager))
+		desiredMinusLoaded.erase(c.first);
+	CHECK(live == desiredMinusLoaded, "queued set equals desired footprint minus loaded chunks");
+}
+
+static void runStreamingDispatchTests()
+{
+	const float bias = 0.35f;
+	TerrainGenerator generator(42);
+	ChunkPool pool(64);
+
+	{
+		ChunkManager manager(&generator, nullptr, &pool);
+		RenderSettings settings;
+		settings.streamFrontBias = bias;
+		settings.maxRenderDistance = 256;
+
+		// Startup: FullRebuild with an exact desired set.
+		Camera camera(glm::vec3(8.f, 100.f, 8.f));
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild,
+			  "startup takes the full-rebuild path");
+		checkManagerDesiredMatchesBrute(manager, camera, bias, 256, "startup footprint matches brute force");
+		checkStreamingQueueInvariants(manager, "startup queue invariants");
+		CHECK(ChunkManagerStreamProbe::queueHead(manager) == 0, "full rebuild resets the queue head");
+
+		// Steady state: same spot → zero work, queue untouched.
+		const size_t queueSizeBefore = ChunkManagerStreamProbe::queue(manager).size();
+		for (int i = 0; i < 100; ++i)
+			CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::None,
+				  "stationary frame is zero-work");
+		CHECK(ChunkManagerStreamProbe::queue(manager).size() == queueSizeBefore,
+			  "stationary frames leave the queue untouched");
+
+		// Sub-anchor movement (< 4 blocks): still zero work.
+		camera.setPosition(glm::vec3(9.5f, 100.f, 8.2f));
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::None,
+			  "sub-anchor movement stays zero-work");
+
+		// Anchor crossing: incremental reconcile, footprint exact again.
+		camera.setPosition(glm::vec3(12.5f, 100.f, 8.2f));
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::Incremental,
+			  "movement-anchor crossing reconciles incrementally");
+		checkManagerDesiredMatchesBrute(manager, camera, bias, 256, "post-anchor footprint matches brute force");
+		checkStreamingQueueInvariants(manager, "post-anchor queue invariants");
+	}
+
+	// Walk a full chunk WITHOUT crossing the chunk boundary (x: 0.5 → 15.5):
+	// each movement-anchor transition (x = 4, 8, 12) must reconcile and keep
+	// the desired set exact — this is the stale-footprint blocker scenario.
+	{
+		ChunkManager manager(&generator, nullptr, &pool);
+		RenderSettings settings;
+		settings.streamFrontBias = bias;
+		settings.maxRenderDistance = 256;
+		Camera camera(glm::vec3(0.5f, 100.f, 8.f));
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild,
+			  "boundary walk: startup rebuild");
+		int incrementalCount = 0;
+		for (float x = 1.5f; x <= 15.5f; x += 1.0f)
+		{
+			camera.setPosition(glm::vec3(x, 100.f, 8.f));
+			const StreamingUpdateKind kind = manager.updateStreaming(camera, settings);
+			if (kind == StreamingUpdateKind::Incremental)
+			{
+				++incrementalCount;
+				checkManagerDesiredMatchesBrute(manager, camera, bias, 256,
+												"boundary walk: footprint exact after every anchor reconciliation");
+				checkStreamingQueueInvariants(manager, "boundary walk: queue invariants after reconciliation");
+			}
+			else
+			{
+				CHECK(kind == StreamingUpdateKind::None, "boundary walk: only None or Incremental within one chunk");
+			}
+		}
+		CHECK(incrementalCount == 3, "boundary walk crossed exactly the 4/8/12 anchor boundaries");
+	}
+
+	// Chunk crossings in every direction + diagonal; then movement + a big
+	// rotation in the SAME frame (heading has dispatch priority).
+	{
+		ChunkManager manager(&generator, nullptr, &pool);
+		RenderSettings settings;
+		settings.streamFrontBias = bias;
+		settings.maxRenderDistance = 256;
+		Camera camera(glm::vec3(15.9f, 100.f, 15.9f));
+		manager.updateStreaming(camera, settings);
+		const std::vector<glm::vec3> crossings = {
+			glm::vec3(16.1f, 100.f, 15.9f), // +X
+			glm::vec3(15.9f, 100.f, 15.9f), // -X (back)
+			glm::vec3(15.9f, 100.f, 16.1f), // +Z
+			glm::vec3(15.9f, 100.f, 15.9f), // -Z (back)
+			glm::vec3(16.1f, 100.f, 16.1f), // diagonal +X+Z
+		};
+		for (const glm::vec3 &p : crossings)
+		{
+			camera.setPosition(p);
+			CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::Incremental,
+				  "chunk crossing reconciles incrementally");
+			CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == chunkOfPosition(p),
+				  "chunk crossing publishes the new camera chunk");
+			checkManagerDesiredMatchesBrute(manager, camera, bias, 256, "chunk-cross footprint matches brute force");
+			checkStreamingQueueInvariants(manager, "chunk-cross queue invariants");
+		}
+
+		// Cross two chunks (+X) and rotate 180° in the same frame → the
+		// heading path wins and must still publish the moved-to chunk.
+		camera.setPosition(glm::vec3(32.1f, 100.f, 16.1f));
+		camera.setYawPitch(180.f, 0.f);
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::HeadingRebuild,
+			  "movement + large rotation takes the heading path");
+		checkManagerDesiredMatchesBrute(manager, camera, bias, 256, "heading-rebuild footprint matches brute force");
+		checkStreamingQueueInvariants(manager, "heading-rebuild queue invariants");
+		CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == chunkOfPosition(camera.getPosition()),
+			  "heading path publishes the camera chunk on combined movement");
+
+		// Small rotation (~5°) with an anchor-crossing move → plain
+		// incremental (the drift alone stays below the heading threshold).
+		camera.setYawPitch(185.f, 0.f);
+		camera.setPosition(glm::vec3(36.1f, 100.f, 16.1f));
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::Incremental,
+			  "small heading drift with anchor move stays incremental");
+		checkManagerDesiredMatchesBrute(manager, camera, bias, 256, "heading-drift footprint matches brute force");
+		checkStreamingQueueInvariants(manager, "heading-drift queue invariants");
+
+		// A sub-anchor move with the same drift stays zero-work (footprint
+		// staleness bounded by one anchor cell).
+		camera.setPosition(glm::vec3(36.9f, 100.f, 16.5f));
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::None,
+			  "sub-anchor move with small drift stays zero-work");
+	}
+
+	// Front-bias invalidation: float noise below the epsilon is ignored, a
+	// real change rebuilds exactly once, and clamped settings compare on the
+	// normalized value actually used by the algorithm.
+	{
+		ChunkManager manager(&generator, nullptr, &pool);
+		RenderSettings settings;
+		settings.streamFrontBias = 0.30f;
+		settings.maxRenderDistance = 256;
+		Camera camera(glm::vec3(8.f, 100.f, 8.f));
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild,
+			  "bias: startup rebuild");
+		settings.streamFrontBias = 0.30005f;
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::None,
+			  "bias float noise below epsilon does not rebuild");
+		settings.streamFrontBias = 0.301f;
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild,
+			  "real bias change takes the full-rebuild path");
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::None,
+			  "rebuild publishes state: next identical frame is zero-work");
+
+		settings.streamFrontBias = 0.95f;
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild,
+			  "out-of-range bias rebuilds (normalized to 0.9)");
+		settings.streamFrontBias = 0.99f;
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::None,
+			  "clamped bias change (0.95 -> 0.99) is a no-op");
+		checkManagerDesiredMatchesBrute(manager, camera, 0.9f, 256, "clamped-bias footprint matches brute force");
+	}
+
+	// Render-distance changes rebuild and converge; teleports rebuild.
+	{
+		ChunkManager manager(&generator, nullptr, &pool);
+		RenderSettings settings;
+		settings.streamFrontBias = bias;
+		settings.maxRenderDistance = 512;
+		Camera camera(glm::vec3(8.f, 100.f, 8.f));
+		manager.updateStreaming(camera, settings);
+		checkManagerDesiredMatchesBrute(manager, camera, bias, 512, "view 512 footprint matches brute force");
+		checkStreamingQueueInvariants(manager, "view 512 queue invariants");
+
+		settings.maxRenderDistance = 128;
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild, "view shrink rebuilds");
+		checkManagerDesiredMatchesBrute(manager, camera, bias, 128, "view 128 footprint matches brute force");
+		checkStreamingQueueInvariants(manager, "view 128 queue invariants");
+
+		settings.maxRenderDistance = 384;
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild, "view grow rebuilds");
+		checkManagerDesiredMatchesBrute(manager, camera, bias, 384, "view 384 footprint matches brute force");
+
+		camera.setPosition(glm::vec3(50 * 16 + 8.f, 100.f, -30 * 16 + 3.f));
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild, "teleport rebuilds");
+		CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == chunkOfPosition(camera.getPosition()),
+			  "teleport publishes the new camera chunk");
+		CHECK(ChunkManagerStreamProbe::queueHead(manager) == 0, "teleport resets the queue head");
+		checkManagerDesiredMatchesBrute(manager, camera, bias, 384, "post-teleport footprint matches brute force");
+		checkStreamingQueueInvariants(manager, "post-teleport queue invariants");
+	}
+
+	// Negative coordinates: floor-quantized anchors and chunk math must behave
+	// across zero and negative boundaries (-0.1 walks to -16.1, crossing the
+	// chunk -1 → -2 boundary).
+	{
+		ChunkManager manager(&generator, nullptr, &pool);
+		RenderSettings settings;
+		settings.streamFrontBias = bias;
+		settings.maxRenderDistance = 128;
+		Camera camera(glm::vec3(-0.1f, 100.f, -0.1f));
+		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild,
+			  "negative startup rebuild");
+		CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == glm::ivec3(-1, 0, -1),
+			  "negative coords floor into chunk (-1,-1)");
+		for (float x = -1.1f; x >= -16.2f; x -= 1.0f)
+		{
+			camera.setPosition(glm::vec3(x, 100.f, -0.1f));
+			const StreamingUpdateKind kind = manager.updateStreaming(camera, settings);
+			if (kind != StreamingUpdateKind::None)
+			{
+				checkManagerDesiredMatchesBrute(manager, camera, bias, 128, "negative walk footprint matches brute force");
+				checkStreamingQueueInvariants(manager, "negative walk queue invariants");
+			}
+		}
+		CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == glm::ivec3(-2, 0, -1),
+			  "negative walk crossed into chunk (-2,-1)");
+	}
+
+	// Deterministic pseudo-random transitions: after every actual
+	// reconciliation the footprint must equal the brute-force oracle and the
+	// queue must satisfy its invariants. None frames are allowed to be stale
+	// by up to one anchor cell (that is the documented quantization).
+	{
+		ChunkManager manager(&generator, nullptr, &pool);
+		RenderSettings settings;
+		settings.streamFrontBias = 0.3f;
+		settings.maxRenderDistance = 256;
+		Camera camera(glm::vec3(8.f, 100.f, 8.f));
+		float yaw = 0.f;
+		manager.updateStreaming(camera, settings);
+
+		uint64_t rng = 0x9E3779B97F4A7C15ull; // fixed seed: deterministic run
+		auto next = [&rng]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 7;
+			rng ^= rng << 17;
+			return rng;
+		};
+		int reconciliations = 0;
+		for (int step = 0; step < 300; ++step)
+		{
+			const uint64_t r = next();
+			glm::vec3 pos = camera.getPosition();
+			switch (r % 10)
+			{
+			case 0: // rare teleport
+				pos.x += static_cast<float>(next() % 200) - 100.f;
+				pos.z += static_cast<float>(next() % 200) - 100.f;
+				break;
+			case 1:
+			case 2: // multi-chunk move
+				pos.x += static_cast<float>(next() % 40) - 20.f;
+				pos.z += static_cast<float>(next() % 40) - 20.f;
+				break;
+			default: // sub-chunk wander (0..8 blocks)
+				pos.x += static_cast<float>(next() % 9) - 4.f;
+				pos.z += static_cast<float>(next() % 9) - 4.f;
+				break;
+			}
+			camera.setPosition(pos);
+
+			const uint64_t h = next();
+			if (h % 5 == 0)
+				yaw += 30.f + static_cast<float>(next() % 151); // 30..180° turn
+			else if (h % 5 == 1)
+				yaw += static_cast<float>(next() % 7) - 3.f; // small drift
+			camera.setYawPitch(yaw, 0.f);
+
+			const uint64_t b = next();
+			if (b % 7 == 0)
+				settings.streamFrontBias = static_cast<float>(b % 3) * 0.3f; // 0 / 0.3 / 0.6
+			const uint64_t v = next();
+			if (v % 11 == 0)
+				settings.maxRenderDistance = 128 + static_cast<int>(v % 3) * 128; // 128/256/384
+
+			const StreamingUpdateKind kind = manager.updateStreaming(camera, settings);
+			if (kind != StreamingUpdateKind::None)
+			{
+				++reconciliations;
+				checkManagerDesiredMatchesBrute(manager, camera, normalizedStreamFrontBias(settings.streamFrontBias),
+												settings.maxRenderDistance, "randomized: footprint matches brute force");
+				checkStreamingQueueInvariants(manager, "randomized: queue invariants");
+			}
+		}
+		CHECK(reconciliations > 100, "randomized path exercised plenty of reconciliations");
+	}
 }
 
 int main(int argc, char **argv)
@@ -2522,12 +2901,15 @@ int main(int argc, char **argv)
 		CHECK(physics::blockCell(LAVA).medium == physics::Medium::Lava, "lava is a separate medium");
 	}
 
+	runStreamingDispatchTests();
+
 	if (g_fails != 0)
 	{
 		std::cerr << g_fails << " check(s) failed\n";
 		return 1;
 	}
 	std::cout << "PASS: chunk lifecycle - moves carry full state, "
-			  << "recycled generateTerrain matches owning path, capacities stable\n";
+			  << "recycled generateTerrain matches owning path, capacities stable, "
+			  << "streaming dispatch matches brute-force oracle\n";
 	return 0;
 }
