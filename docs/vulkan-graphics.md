@@ -19,7 +19,7 @@ For engine loop, streaming, and world generation, see [`engine-architecture.md`]
 | Staging / retire | Async mesh upload, deferred GPU free | `Vulkan/StagingRing`, `Vulkan/GpuResourceRetire` |
 | Barriers / pipelines | Shared helpers | `Vulkan/ImageBarrier.hpp` (`vkbar::`), `Vulkan/GraphicsPipelineBuilder.hpp` |
 | Frame graph | Pass orchestration | `Renderer/WorldRenderer` |
-| Passes | Shadow → opaque (+ overlays) → water → sky → post | `Renderer/*Pass*`, `PostStack`, `OverlayRenderer` |
+| Passes | Shadow → opaque (+ mobs, overlays) → water → sky → post | `Renderer/*Pass*`, `PostStack`, `OverlayRenderer` |
 | Shaders | GLSL → SPIR-V offline | `ressources/shaders/vulkan/` |
 
 **API target:** Vulkan **1.2+**, with required dynamic rendering provided by
@@ -110,7 +110,7 @@ Recorded in `WorldRenderer::recordFrame` (see `WorldRenderer.cpp`):
 |------|--------|--------|--------|
 | 0 | **preRecord** callback | mesh GPU buffers | `Engine` records `uploadPendingMeshes` + transfer→vertex barrier here, before draws |
 | 1 | **ShadowPass** | Cascaded depth array | Directional sun; leaf wind in shadow VS; per cascade, **`MobRenderer::record`** alpha-cuts mobs into the same depth attachment (`GpuPass::MobShadow0-2`) |
-| 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (per-section `Chunk::collectOpaqueDraws` commands + indirect draws), then **`OverlayRenderer::record`** (highlight / borders / demo players) and **`MobRenderer::record`** (passive mobs) inside the same dynamic rendering |
+| 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (per-section `Chunk::collectOpaqueDraws` commands + indirect draws), then **`MobRenderer::record`** for passive mobs, then **`OverlayRenderer::record`** for highlight / borders / demo players — all inside the same dynamic-rendering scope |
 | 3 | **WaterPass** | HDR (transparent) | History color/depth for refraction; set2 scene samples |
 | 4 | **SkyPass** | HDR + god-ray source MRT, depth test | Procedural sky, sun/moon/stars/clouds |
 | 5 | **PostStack** | Swapchain | SSAO → bloom → god rays → composite |

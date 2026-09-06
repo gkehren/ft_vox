@@ -36,6 +36,21 @@ bool dry(const physics::VoxelCollisionWorld &w, const physics::Body &b, physics:
     auto i = physics::immersion(w, b.bounds(), q);
     return i.water + i.lava < 0.001;
 }
+// Only invariants the fixed-step loop and populate() arithmetic actually rely
+// on (uint32 group-size subtraction, division by fixedStep, percentage draw).
+// Deliberately lenient about, e.g., retireDistance < spawnMax.
+void validateSettings(const MobSettings &s)
+{
+    assert(std::isfinite(s.spawnMin) && std::isfinite(s.spawnMax) && std::isfinite(s.retireDistance));
+    assert(std::isfinite(s.spawnInterval) && std::isfinite(s.spawnChance) && std::isfinite(s.fixedStep));
+    assert(s.spawnMin >= 0.0 && s.spawnMax >= s.spawnMin);
+    assert(s.spawnInterval > 0.0);
+    assert(s.spawnChance >= 0.0 && s.spawnChance <= 1.0);
+    assert(s.minGroupSize > 0 && s.maxGroupSize >= s.minGroupSize);
+    assert(s.maxGroupAttemptsPerScan > 0);
+    assert(s.fixedStep > 0.0);
+    assert(s.maxSteps > 0);
+}
 } // namespace
 MobSystem::MobSystem()
 {
@@ -287,6 +302,7 @@ void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
 void MobSystem::update(double dt, const MobWorld &world, glm::dvec3 observer, double availableRadius,
                        bool suspended)
 {
+    validateSettings(settings);
     m_queries = {};
     if (suspended)
     {

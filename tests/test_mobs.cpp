@@ -257,6 +257,21 @@ static void contracts()
     CHECK(s.droppedSteps() == 0);
     CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 42, 42, w));
     CHECK(s.mobs().size() == 1);
+    // Valid boundary settings stay bounded and NaN-free (solo groups, every
+    // chunk-column eligible, single attempt per scan).
+    MobSystem tight;
+    tight.reset(42);
+    tight.settings.minGroupSize = 1;
+    tight.settings.maxGroupSize = 1;
+    tight.settings.spawnChance = 1.0;
+    tight.settings.maxGroupAttemptsPerScan = 1;
+    for (int i = 0; i < 600; ++i)
+    {
+        tight.update(1.0 / 60, w, {0, 0, 0}, 112);
+        CHECK(tight.mobs().size() <= MobSettings::capacity);
+        for (auto &mob : tight.mobs())
+            CHECK(std::isfinite(mob.body.position.x) && std::isfinite(mob.body.position.z));
+    }
 }
 static void finiteSteering()
 {
