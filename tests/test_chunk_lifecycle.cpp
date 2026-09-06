@@ -330,6 +330,49 @@ static int runResetPerf()
 	return 0;
 }
 
+// Streaming maintenance cost, isolated from chunk loading (issue #108): a
+// full ChunkManager runs its updateStreaming dispatch with an empty queue
+// region per regime — stationary (zero-work path) and forced incremental
+// (anchor crossing every call). No chunks are acquired, so the number IS the
+// maintenance cost, not masked by allocation/gen/mesh work.
+static int runStreamPerf()
+{
+	using Clock = std::chrono::steady_clock;
+	TerrainGenerator generator(42);
+	ChunkPool pool(64);
+	ChunkManager manager(&generator, nullptr, &pool);
+	RenderSettings settings;
+	settings.streamFrontBias = 0.3f;
+	settings.maxRenderDistance = 512;
+	Camera camera(glm::vec3(8.f, 100.f, 8.f));
+	manager.updateStreaming(camera, settings);
+
+	constexpr int stationaryN = 200000;
+	const auto start = Clock::now();
+	for (int i = 0; i < stationaryN; ++i)
+		manager.updateStreaming(camera, settings);
+	const double stationaryMs = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+
+	constexpr int incrementalN = 100000;
+	const auto start2 = Clock::now();
+	for (int i = 1; i <= incrementalN; ++i)
+	{
+		camera.setPosition(glm::vec3(8.f + static_cast<float>(i) * 4.1f, 100.f, 8.f)); // new anchor each call
+		manager.updateStreaming(camera, settings);
+	}
+	const double incrementalMs = std::chrono::duration<double, std::milli>(Clock::now() - start2).count();
+
+	const auto s = manager.streamingMaintenanceStats();
+	std::cout << "[Stream Perf] view=512 bias=0.3; queue stays FULL (nothing consumed)\n"
+			  << "  -> incremental is the pessimistic sort-dominated bound; in-game the\n"
+			  << "  load budget drains the queue every frame, shrinking the sort.\n"
+			  << "stationary:  " << stationaryN << " calls, " << stationaryMs << " ms total, "
+			  << stationaryMs / stationaryN * 1000.0 << " us/call (zeroWork=" << s.zeroWork << ")\n"
+			  << "incremental: " << incrementalN << " calls, " << incrementalMs << " ms total, "
+			  << incrementalMs / incrementalN * 1000.0 << " us/call (incremental=" << s.incrementalUpdates << ")\n";
+	return 0;
+}
+
 static int profilePlayerPhysics()
 {
 	// A deterministic controller path through real, generated voxel data.
@@ -809,6 +852,7 @@ static void runStreamingDispatchTests()
 int main(int argc, char **argv)
 {
 	if (argc > 1 && std::string_view(argv[1]) == "--physics-profile") return profilePlayerPhysics();
+	if (argc > 1 && std::string_view(argv[1]) == "--stream-perf") return runStreamPerf();
     // Published memory includes free pool storage and survives ownership moves.
     if (telemetry::registry().enabled) {
         using namespace telemetry;
