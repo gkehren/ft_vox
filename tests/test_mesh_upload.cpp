@@ -799,9 +799,9 @@ int main()
 		CHECK(totalChunks > 0, "spawn: bootstrap chunks uploaded");
 
 		// Second phase (PR review): neighbours' mirror edits re-mesh the
-		// bootstrap chunks PARTIALLY (in-place re-stages and appends).
-		// After those uploads the collected commands must STILL be valid
-		// - no slack drawn, full coverage.
+		// bootstrap chunks PARTIALLY (fresh ranges per touched section,
+		// atomic slot swap). After those uploads the collected commands
+		// must STILL be valid - no slack drawn, full coverage.
 		for (int e = 0; e < 24; ++e)
 		{
 			const int cx = (e % 3) * CHUNK_SIZE;

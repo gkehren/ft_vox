@@ -2495,8 +2495,9 @@ bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCom
   }
   else if (result)
   {
-    // Full-quality sectioned upload: only the built sections are re-staged;
-    // a full staging ring defers the whole upload.
+    // Full-quality sectioned upload: only the built sections are re-uploaded
+    // (fresh ranges, atomic slot swap); a full staging ring defers the whole
+    // upload.
     if (!uploadSectionSlots(*result, allocator, &staging, cmd, &retire, nullptr, arenas))
     {
       telemetry::registry().add(telemetry::UploadDeferred);

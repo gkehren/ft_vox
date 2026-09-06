@@ -260,12 +260,13 @@ private:
 	// VmaAllocator/m_allocator stays only as the bootstrap-path allocator
 	// handle for ImmediateCommands uploads.
 
-	// Section-slot ranges inside the shared arenas (issue #107/#109). A
-	// payload that fits its reserved range is re-staged in place; an
-	// outgrown payload allocates a fresh range and retires the old one
-	// (frame-aware). A full rebuild repacks every section compactly and
-	// leaves no stale range behind. Index ranges need no gap-zeroing here:
-	// indirect draws reference live ranges only.
+	// Section ranges inside the shared mesh arenas (issue #107/#109).
+	// Published ranges are immutable: any rebuilt non-empty section
+	// allocates fresh vertex/index ranges, uploads into them, atomically
+	// publishes the replacement slot, then retires the previous ranges
+	// frame-aware. A rebuilt empty section retires its old ranges and
+	// becomes slotless - no stale range is ever referenced. Index ranges
+	// need no gap-zeroing here: indirect draws reference live ranges only.
 	struct SectionGpuSlot
 	{
 		uint32_t vertexPage{MeshArena::kNoPage};

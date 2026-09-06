@@ -180,7 +180,7 @@ int main()
 	}
 
 	// 3. Frame-aware retirement: a retired range is NOT reusable before the
-	//    delay elapses, and becomes reusable after kRetireDelay frames.
+	//    delay elapses, and becomes reusable after framesInFlight + 1 frames.
 	{
 		MeshArena::Range r;
 		CHECK(arena.allocate(560, r), "alloc for retire test");

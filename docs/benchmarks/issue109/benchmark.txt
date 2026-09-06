@@ -24,8 +24,11 @@ draws.opaque (cmds)  18.5M           84.7M           (see note)
 
 Notes:
 - The "draws.opaque" counter changes meaning with this PR: it now counts
-  indirect commands (one per live section, merged when a chunk's sections
-  are contiguous in both arenas) instead of one per-chunk drawIndexed.
+  indirect commands - exactly one per live section, never merged
+  (section-local indices are rebased by the command's vertexOffset, so
+  merging would redirect indices to another section's vertices). Commands
+  are grouped only at submission time by (vertexPage, indexPage) to
+  reduce buffer binds.
   The GPU absorbs the higher command count without regression (GPU avg
   -5.5%, frame p95 -5.1%).
 - Record carries the CPU cost of building the per-pass indirect command

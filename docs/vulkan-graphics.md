@@ -109,7 +109,7 @@ Recorded in `WorldRenderer::recordFrame` (see `WorldRenderer.cpp`):
 |------|--------|--------|--------|
 | 0 | **preRecord** callback | mesh GPU buffers | `Engine` records `uploadPendingMeshes` + transfer→vertex barrier here, before draws |
 | 1 | **ShadowPass** | Cascaded depth array | Directional sun; leaf wind in shadow VS |
-| 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (`Chunk::draw`), then **`OverlayRenderer::record` inside the same dynamic rendering** (highlight / borders / demo players) |
+| 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (per-section `Chunk::collectOpaqueDraws` commands + indirect draws), then **`OverlayRenderer::record` inside the same dynamic rendering** (highlight / borders / demo players) |
 | 3 | **WaterPass** | HDR (transparent) | History color/depth for refraction; set2 scene samples |
 | 4 | **SkyPass** | HDR + god-ray source MRT, depth test | Procedural sky, sun/moon/stars/clouds |
 | 5 | **PostStack** | Swapchain | SSAO → bloom → god rays → composite |
@@ -143,14 +143,14 @@ Push constants carry cascade index / shadow time for the shadow path where neede
 ### OpaquePass (`Renderer/OpaquePass.*`)
 
 - Dynamic rendering into **HDR** (`R16G16B16A16_SFLOAT`) and **D32** depth owned by `PostStack`.
-- Submits opaque chunk geometry through **`vkCmdDrawIndexedIndirect`** from the shared mesh arenas (issue #109): each visible chunk contributes per-section commands, grouped by arena page pair, so the arenas are bound once per pair per frame instead of two binds per chunk.
+- Submits opaque chunk geometry through **`vkCmdDrawIndexedIndirect`** from the shared mesh arenas (issue #109): each live section emits exactly one command - section indices are stored section-local and the command's `vertexOffset` rebases them, so commands are never merged. Commands are grouped by arena page pair at submission time, so the arenas are bound once per pair per frame instead of two binds per chunk.
 - Then calls **`OverlayRenderer::record`** on the same command buffer before ending the rendering scope (block highlight, chunk borders, demo players).
 - Shaders: `terrain.vert` / `terrain.frag` — diffuse, face bias, sky/block light, CSM + PCF (sun **and** moon), cave fill, scotopic night grade, height/distance fog, material wind/emissive/ice.
 
 ### WaterPass (`Renderer/WaterPass.*`)
 
 - Copies previous opaque HDR/depth into **history** images for refraction.
-- Transparent water mesh (`Chunk::drawWater`).
+- Transparent water mesh (`Chunk::collectWaterDraws`; back-to-front order preserved, one command per live section, contiguous same-page-pair runs drawn per bind).
 - Shaders: `water.vert` / `water.frag` — vertex wave displacement + fragment-level procedural wave normals (3-octave value noise, top-face masked), Fresnel F0=0.02, **analytic sky reflection** (gradient identical to `skybox.frag` per phase: day blue / sunset orange / night near-black), **Beer-Lambert depth absorption** (linearized history depth vs view depth → teal body, red dies first), sun/moon glitter (pow 700 + sheen) on wave normals, shore foam from real water column + whitecaps, history refraction, near-opaque alpha (refraction composited in-color).
 
 ### SkyPass (`Renderer/SkyPass.*`)
@@ -203,20 +203,25 @@ True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`
 - Each section suballocates an aligned range from its page's first-fit free
   list (vertex ranges align to `sizeof(Vertex)` so `vertexBase` is exact).
   Freeing is **frame-aware**: retired ranges return to the free list after
-  `kRetireDelay` frames, and fully emptied pages are destroyed through the
+  `framesInFlight + 1` frames, and fully emptied pages are destroyed through the
   same retire queue - streaming and edits never need `vkDeviceWaitIdle`.
 - `allocate()` returns false when VMA cannot back a new page; the upload is
   transactional, so a failed range allocation leaves every slot untouched.
-- A partial remesh re-stages its sections' ranges in place when the payload
-  fits the reservation; an outgrown section allocates a fresh range and
-  retires the old one. A full rebuild re-allocates every section compactly
-  and returns the old ranges (including reservations of emptied sections).
-- Draw submission: each pass collects `Chunk::IndirectDraw` commands (per
-  live section, or one merged command when a chunk's sections are contiguous
-  in both arenas), groups them by arena page pair, binds each pair once and
-  issues one `vkCmdDrawIndexedIndirect` per group. Commands live in
-  host-visible indirect buffers (one per frame in flight per pass), written
-  and flushed on the CPU each frame. GPU-driven culling/indirect-count
+- Published arena ranges are immutable. Every upload plans the touched
+  sections, allocates ALL fresh vertex/index ranges for opaque and water
+  together (any allocation failure frees the ranges the transaction created
+  and leaves every slot, LOD handle and draw count untouched), records the
+  copies, atomically swaps in the replacement slot table, and only then
+  retires the replaced ranges frame-aware. A rebuilt empty section becomes
+  slotless. The synchronous bootstrap surfaces an allocation failure by
+  throwing instead of pretending the upload happened; the pending CPU
+  result stays attached for a retry.
+- Draw submission: each pass collects `Chunk::IndirectDraw` commands - one
+  per live section, never merged (section-local indices are rebased by the
+  command's `vertexOffset`) - groups them by arena page pair, binds each
+  pair once and issues one `vkCmdDrawIndexedIndirect` per group. Commands
+  live in host-visible indirect buffers (one per frame in flight per pass),
+  written and flushed on the CPU each frame. GPU-driven culling/indirect-count
   remains future work.
 - Indices are stored section-local: the indirect command's `vertexOffset`
   performs the rebase on the GPU, so uploads are plain copies (no CPU rebase
