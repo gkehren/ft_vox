@@ -990,17 +990,18 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
 
   // New helper for greedy meshing that checks local voxels and the precomputed
   // neighbor shell
-  auto getVoxelDataForMeshing = [&](int lx, int ly, int lz) -> TextureType
+  auto getBlockGeometryForMeshing = [&](int lx, int ly, int lz) -> TextureType
   {
     const auto type = sampleForMeshing(lx, ly, lz);
-    // Details own explicit quads and must neither emit nor hide cube faces,
-    // but water-containing details preserve fluid continuity and occlusion.
+    // Two orthogonal views (issue #120 review): fluid occupancy comes only
+    // from blockContainsWater — never BlockShape — so KELP (cross quads) and
+    // a future waterlogged cube hold water exactly like a plain WATER cell.
+    // Details without fluid fall back to AIR: their explicit quads are
+    // emitted by the detail pass and must neither emit nor hide cube faces.
+    if (blockContainsWater(type))
+      return WATER;
     if (blockIsSmallDetail(type))
-    {
-      if (blockContainedMedium(type) == BlockMedium::Water)
-        return WATER;
       return AIR;
-    }
     return type;
   };
 
@@ -1125,8 +1126,8 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
         for (x[v] = vStart; x[v] < vEnd; ++x[v])
         {
           const glm::ivec3 xq = x + q;
-          const TextureType type1 = getVoxelDataForMeshing(x[0], x[1], x[2]);
-          const TextureType type2 = getVoxelDataForMeshing(xq[0], xq[1], xq[2]);
+          const TextureType type1 = getBlockGeometryForMeshing(x[0], x[1], x[2]);
+          const TextureType type2 = getBlockGeometryForMeshing(xq[0], xq[1], xq[2]);
           const size_t cell = static_cast<size_t>(x[u]) * dims[v] + x[v];
           const uint8_t t1 = static_cast<uint8_t>(type1);
           const uint8_t t2 = static_cast<uint8_t>(type2);
@@ -1161,7 +1162,6 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
           bool hasFace = false;
           bool negSide = false;
           if (type1ChunkSide && type1 != AIR &&
-              !(type1 == WATER && blockIsWater(type2)) &&
               (type2 == AIR ||
                (TextureManager::isTransparent(type2) && type1 != type2)))
           {
@@ -1169,7 +1169,6 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             hasFace = true;
           }
           else if (type2ChunkSide && type2 != AIR &&
-                   !(type2 == WATER && blockIsWater(type1)) &&
                    (type1 == AIR || (TextureManager::isTransparent(type1) &&
                                      type1 != type2)))
           {
@@ -1230,9 +1229,6 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
           auto isMergeableFace = [&](uint8_t ownerType, uint8_t backingType) -> bool
           {
             if (ownerType != originType)
-              return false;
-            if (ownerType == static_cast<uint8_t>(WATER) &&
-                blockIsWater(static_cast<TextureType>(backingType)))
               return false;
             if (backingType == airType)
               return true;
@@ -1406,7 +1402,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
 
             auto isSolid = [&](int du, int dv)
             {
-              return !TextureManager::isTransparent(getVoxelDataForMeshing(
+              return !TextureManager::isTransparent(getBlockGeometryForMeshing(
                   (d == 0 ? layerD : (u == 0 ? pu + du : pv + du)),
                   (d == 1 ? layerD : (u == 1 ? pu + du : pv + du)),
                   (d == 2 ? layerD : (u == 2 ? pu + du : pv + du))));
@@ -1675,18 +1671,20 @@ void Chunk::buildLODMeshRanged(MeshBuildResult &out, int scanTopY)
       for (int cy = scanTopY; cy >= 0; --cy)
       {
         TextureType t = static_cast<TextureType>(getVoxel(cx, cy, cz).type);
+        // Fluid occupancy is evaluated BEFORE the geometry view (issue #120
+        // review): a water-containing detail — cross or a future waterlogged
+        // cube — preserves the water column even when its geometry is
+        // omitted from the LOD.
+        if (blockContainsWater(t))
+        {
+          topY = cy;
+          topType = WATER;
+          break;
+        }
         if (t != AIR)
         {
           if (blockIsSmallDetail(t))
-          {
-            if (blockContainedMedium(t) == BlockMedium::Water)
-            {
-              topY = cy;
-              topType = WATER;
-              break;
-            }
             continue;
-          }
           topY = cy;
           topType = t;
           break;

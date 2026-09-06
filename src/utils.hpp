@@ -399,6 +399,16 @@ inline constexpr bool blockIsWater(TextureType type)
 	return blockContainedMedium(type) == BlockMedium::Water;
 }
 
+/// Fluid-occupancy view for meshing (issue #120 review): the water renderer
+/// only ever emits the Water material, so the contained medium collapses to
+/// "does this cell hold renderable water". Independent of BlockShape — a
+/// cross-shaped KELP and a future waterlogged cube hold water exactly like
+/// a plain WATER cell.
+inline constexpr bool blockContainsWater(TextureType type)
+{
+	return blockContainedMedium(type) == BlockMedium::Water;
+}
+
 struct Voxel
 {
 	uint8_t type; // Supports up to 256 block types (0-255)
