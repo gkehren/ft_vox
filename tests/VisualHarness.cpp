@@ -10,7 +10,7 @@
 #include <cstring>
 #include <stdexcept>
 
-bool VisualHarness::initDevice(std::ostream &log)
+bool VisualHarness::initDevice(std::ostream &log, uint32_t width, uint32_t height)
 {
 	if (!SDL_Init(SDL_INIT_VIDEO))
 	{
@@ -22,7 +22,7 @@ bool VisualHarness::initDevice(std::ostream &log)
 		log << "SKIP: no Vulkan loader available\n";
 		return false;
 	}
-	m_window = SDL_CreateWindow("ft_vox visual tests", kWidth, kHeight, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN);
+	m_window = SDL_CreateWindow("ft_vox visual tests", width, height, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN);
 	if (!m_window)
 	{
 		log << "SKIP: window creation failed: " << SDL_GetError() << "\n";
@@ -38,17 +38,17 @@ bool VisualHarness::initDevice(std::ostream &log)
 		return false;
 	}
 
-	m_swapchain.init(m_context, kWidth, kHeight, true);
+	m_swapchain.init(m_context, width, height, true);
 	m_extent = m_swapchain.getExtent();
 	m_targetFormat = m_swapchain.getImageFormat();
 
 	// Golden-image contract (review P2): fixed resolution + 8-bit sRGB
 	// composite. Anything else would compare against references produced
 	// under a different resolution/encoding.
-	if (m_extent.width != kWidth || m_extent.height != kHeight)
+	if (m_extent.width != width || m_extent.height != height)
 	{
 		log << "SKIP: surface caps force extent " << m_extent.width << "x" << m_extent.height
-			<< ", the golden contract requires " << kWidth << "x" << kHeight << "\n";
+			<< ", the golden contract requires " << width << "x" << height << "\n";
 		return false;
 	}
 	switch (m_targetFormat)
@@ -93,6 +93,7 @@ void VisualHarness::initRenderer(std::ostream &log)
 		createBuffer(allocator, size_t(m_extent.width) * m_extent.height * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 					 VMA_MEMORY_USAGE_AUTO,
 					 VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+	m_gpu.init(m_context, 1);
 	m_rendererReady = true;
 	log << "VisualHarness renderer ready (Shadow/Opaque/Water/Sky + post)\n";
 }
@@ -103,6 +104,7 @@ void VisualHarness::shutdown()
 		return;
 	if (m_deviceReady)
 		m_context.waitIdle();
+	m_gpu.shutdown();
 	m_chunkManager.reset();
 	m_terrain.reset();
 	if (m_rendererReady)
@@ -183,8 +185,12 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 
 	const VkClearColorValue clearColor{{0.38f, 0.58f, 0.92f, 1.0f}};
 	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
+		m_gpu.beginRecording(cmd, 0, 0);
+		m_gpu.beginPass(cmd, GpuPass::Frame);
 		m_renderer.recordFrameToImage(cmd, 0, m_target.image, m_target.view, m_extent, m_drawList,
-									  m_shadowList, clearColor, {}, nullptr);
+									  m_shadowList, clearColor, {}, &m_gpu);
+		m_gpu.endPass(cmd, GpuPass::Frame);
+		m_gpu.endRecording(cmd);
 		// LDR composite readback.
 		cmdTransitionImageLayout(cmd, m_target.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 								 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -215,6 +221,8 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 							 nullptr, 0, nullptr);
 	});
 
+	m_gpu.markSubmitted(0);
+	m_gpu.onSlotReady(0);
 	auto scanNonFinite = [this](const AllocatedBuffer &buffer, size_t halfCount) {
 		vmaInvalidateAllocation(m_context.getAllocator(), buffer.allocation, 0, VK_WHOLE_SIZE);
 		auto *data = static_cast<const uint16_t *>(buffer.info.pMappedData);

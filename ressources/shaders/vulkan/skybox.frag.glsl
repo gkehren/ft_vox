@@ -5,6 +5,7 @@ layout (location = 1) out vec4 GodRaysSource;
 layout(location = 0) in vec3 TexCoords;
 
 #include "frame_ubo.inc.glsl"
+#include "sky_radiance.inc.glsl"
 
 #define sunDir frame.sunDir.xyz
 #define moonDir frame.moonDir.xyz
@@ -64,35 +65,7 @@ void main()
     float sunset = sunsetFactor / factorTotal;
     float night = nightFactor / factorTotal;
 
-    // 2. Zenith / horizon — deep day blue, near-black cinematic night
-    vec3 dayZenith = vec3(0.06, 0.24, 0.68);
-    vec3 sunsetZenith = vec3(0.18, 0.08, 0.28);
-    vec3 nightZenith = vec3(0.002, 0.005, 0.013);
-    vec3 zenithColor = dayZenith * day + sunsetZenith * sunset + nightZenith * night;
-
-    vec3 dayHorizon = vec3(0.36, 0.62, 0.92);
-    vec3 sunsetHorizon = vec3(0.95, 0.35, 0.12);
-    vec3 nightHorizon = vec3(0.006, 0.010, 0.024);
-    vec3 horizonColor = dayHorizon * day + sunsetHorizon * sunset + nightHorizon * night;
-    horizonColor = mix(horizonColor, fogColor, 0.12);
-
-    // 3. Sky gradient (interpolate horizon to zenith)
-    float grad = pow(1.0 - h, 2.8);
-    vec3 skyColor = mix(zenithColor, horizonColor, grad);
-
-    // Concentrate twilight warmth around the sun instead of tinting the full sky.
-    vec2 viewH = normalize(V.xz + vec2(0.0001));
-    vec2 sunH = normalize(sunDir.xz + vec2(0.0001));
-    float horizonBand = pow(1.0 - h, 4.5);
-    float sunsetFacing = pow(max(dot(viewH, sunH), 0.0), 3.5);
-    // Concentrated twilight warmth (was 0.48 additive → clipped to white near sun)
-    skyColor += vec3(0.30, 0.09, 0.03) * sunset * horizonBand * pow(sunsetFacing, 1.4);
-    // Soft daytime sun scatter near horizon
-    skyColor += vec3(0.12, 0.18, 0.28) * day * pow(1.0 - h, 6.0) * 0.35;
-    // Faint residual horizon glow toward the moon azimuth at night
-    vec2 moonH = normalize(moonDir.xz + vec2(0.0001));
-    float moonFacing = pow(max(dot(viewH, moonH), 0.0), 4.0);
-    skyColor += vec3(0.020, 0.030, 0.055) * night * horizonBand * moonFacing;
+    vec3 skyColor = analyticSkyRadiance(V, day, sunset, night);
 
     float sunGlow = max(dot(V, sunDir), 0.0);
     float moonGlow = max(dot(V, moonDir), 0.0);

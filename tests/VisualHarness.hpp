@@ -13,6 +13,7 @@
 /// Everything from WorldRenderer::init onward must be validation-clean.
 
 #include "VisualImage.hpp"
+#include "Vulkan/VkGpuProfiler.hpp"
 
 #include "Vulkan/VkContext.hpp"
 #include "Vulkan/VkSwapchain.hpp"
@@ -48,7 +49,8 @@ public:
 	/// Stage 1: SDL window + Vulkan device + swapchain + immediate commands.
 	/// Returns false when the environment cannot provide a usable Vulkan
 	/// device/surface or the golden-image contract — the caller must SKIP.
-	bool initDevice(std::ostream &log);
+	bool initDevice(std::ostream &log, uint32_t width = kWidth, uint32_t height = kHeight);
+	const GpuFrameSample &gpuSample() const { return m_gpu.latest(); }
 
 	/// Stage 2: production renderer + offscreen composite target + readback
 	/// buffers. Throws on failure (that is a test failure, not a skip). The
@@ -93,6 +95,7 @@ public:
   private:
 	SDL_Window *m_window{nullptr};
 	VkContext m_context;
+	VkGpuProfiler m_gpu;
 	VkSwapchain m_swapchain;
 	ImmediateCommands m_imm;
 	GpuResourceRetire m_retire;

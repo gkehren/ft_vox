@@ -722,11 +722,99 @@ int runAoMotionCheck(VisualHarness &harness, const std::vector<SceneSpec> &scene
 	return 1;
 }
 
+
+// Explicit diagnostic mode: never reads or rewrites golden references.
+int runWaterAudit(VisualHarness &h, const fs::path &out) {
+    fs::create_directories(out);
+    h.beginScene(4217);
+    h.camera().setPosition({20.f, 108.f, 0.f});
+    h.camera().setYawPitch(180.f, -12.f);
+    h.buildArea(h.camera().getPosition(), 4);
+    // Closed lake, shallow beach, cliff/tree line, bridge and submerged details.
+    for (int x = -24; x <= 40; ++x)
+        for (int z = -28; z <= 28; ++z)
+            for (int y = 98; y <= 125; ++y) {
+                TextureType block = AIR;
+                int floor = x < -12 ? 104 : (x < -6 ? 102 : 98);
+                if (y <= floor) block = SAND;
+                else if (y <= 104) block = WATER;
+                if (x >= -20 && x <= -17 && y <= 115) block = STONE;
+                if (x >= -14 && x <= -12 && z >= -5 && z <= -3 && y <= 115) block = OAK_LOG;
+                if (x >= -16 && x <= -10 && z >= -7 && z <= -1 && y >= 114 && y <= 118) block = OAK_LEAVES;
+                if (x >= -2 && x <= 2 && z >= -10 && z <= 10 && y == 110) block = STONE;
+                if (x == 8 && z % 4 == 0 && y == 99) block = SEAGRASS;
+                if (x == 10 && z % 5 == 0 && y >= 99 && y <= 102) block = y == 102 ? KELP_TOP : KELP;
+                h.chunks().placeVoxel(glm::vec3(x, y, z), block);
+            }
+    h.remeshEditedChunks();
+    int errors = 0;
+    const long baseline = h.validationErrors();
+    std::ostringstream report;
+    report << "tier,width,height,water_ms,frame_ms,samples\n";
+    for (int tier = 0; tier < 4; ++tier) {
+        h.post().applyPreset(static_cast<GraphicsQualityPreset>(tier));
+        h.renderer().applyShadowMapSize(h.post().shadowMapSize);
+        h.shader().dayTime = 0.35f;
+        updateAtmosphereFromDayTime(h.shader());
+        double water = 0, frame = 0;
+        int samples = 0;
+        for (int i = 0; i < 28; ++i) {
+            const auto img = h.renderFrame(11.f, {});
+            if (!img.valid() || h.lastNonFiniteSamples()) ++errors;
+            if (i == 27 && !visual::writePng((out / ("tier_" + std::to_string(tier) + ".png")).string(), img)) ++errors;
+            const auto &gpu = h.gpuSample();
+            if (i >= 8 && gpu.present[size_t(GpuPass::Water)] && gpu.present[size_t(GpuPass::Frame)]) {
+                water += gpu.ms[size_t(GpuPass::Water)]; frame += gpu.ms[size_t(GpuPass::Frame)]; ++samples;
+            }
+        }
+        if (samples == 0) ++errors;
+        report << tier << ',' << h.extent().width << ',' << h.extent().height << ','
+               << water / std::max(samples, 1) << ',' << frame / std::max(samples, 1) << ',' << samples << '\n';
+    }
+    // Hold post and shadow quality fixed: only toggle SSR to prove scene contribution.
+    h.post().qualityPreset = GraphicsQualityPreset::Medium;
+    const auto skyOnly = h.renderFrame(11.f, {});
+    h.post().qualityPreset = GraphicsQualityPreset::High;
+    const auto ssr = h.renderFrame(11.f, {});
+    const auto repeated = h.renderFrame(11.f, {});
+    if (ssr.pixels != repeated.pixels) { ++errors; std::cerr << "SSR is not deterministic\n"; }
+    h.post().qualityPreset = GraphicsQualityPreset::Low;
+    const auto unshadowed = h.renderFrame(11.f, {});
+    const auto shadowDelta = visual::compareImages(skyOnly, unshadowed, 2);
+    if (shadowDelta.hotPixels < 10) { ++errors; std::cerr << "Water shadows did not change scene pixels\n"; }
+    h.post().qualityPreset = GraphicsQualityPreset::High;
+    auto delta = visual::compareImages(ssr, skyOnly, 2);
+    if (delta.hotPixels < 10) { ++errors; std::cerr << "SSR did not change scene pixels\n"; }
+    visual::writePng((out / "ssr_difference.png").string(), visual::makeDiffImage(ssr, skyOnly));
+    const char *names[] = {"lake", "river_edge", "bridge", "shore", "foreground", "sunset", "moon", "surface_crossing", "kelp"};
+    for (int scene = 0; scene < 9; ++scene) {
+        h.shader().dayTime = scene == 5 ? 0.77f : scene == 6 ? 0.0f : 0.35f;
+        updateAtmosphereFromDayTime(h.shader());
+        for (int i = 0; i < 12; ++i) {
+            float y = scene == 7 ? 104.5f + float(i - 6) * 0.15f : scene == 8 ? 102.f : 108.f;
+            float x = scene == 2 ? 5.f : scene == 3 ? 0.f : 20.f;
+            float z = scene == 1 ? 12.f : scene == 4 ? -6.f : 0.f;
+            h.camera().setPosition({x, y, z + float(i) * 0.06f});
+            h.camera().setYawPitch(180.f + float(i) * 0.15f, scene == 8 ? -20.f : -12.f);
+            h.post().underwater = y < 105.f;
+            const auto img = h.renderFrame(11.f + float(i) / 30.f, {});
+            if (!img.valid() || h.lastNonFiniteSamples()) ++errors;
+            if (!visual::writePng((out / (std::string(names[scene]) + "_" + std::to_string(i) + ".png")).string(), img)) ++errors;
+        }
+    }
+    if (h.validationErrors() != baseline) ++errors;
+    writeText(out / "timings.csv", report.str());
+    std::cout << report.str() << "water audit errors=" << errors << '\n';
+    return errors ? 1 : 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
 	bool updateReferences = false;
+	bool waterAudit = false;
+	uint32_t auditHeight = 1080;
 	bool strict = false;
 	bool smoke = std::getenv("FT_VOX_VISUAL_SMOKE") != nullptr &&
 				 std::string(std::getenv("FT_VOX_VISUAL_SMOKE")) == "1";
@@ -737,7 +825,11 @@ int main(int argc, char **argv)
 	for (int i = 1; i < argc; ++i)
 	{
 		const std::string arg = argv[i];
-		if (arg == "--update-references")
+		if (arg == "--water-audit")
+			waterAudit = true;
+		else if (arg == "--audit-1440")
+			auditHeight = 1440;
+		else if (arg == "--update-references")
 			updateReferences = true;
 		else if (arg == "--smoke")
 			smoke = true;
@@ -769,7 +861,7 @@ int main(int argc, char **argv)
 		smoke = false;
 
 	VisualHarness harness;
-	if (!harness.initDevice(std::cout))
+	if (!harness.initDevice(std::cout, waterAudit ? auditHeight * 16 / 9 : VisualHarness::kWidth, waterAudit ? auditHeight : VisualHarness::kHeight))
 		return 77; // no Vulkan device/surface or golden contract: explicit skip
 
 	// Validation baseline (review P1): ONLY the device/swapchain phase may
@@ -799,6 +891,14 @@ int main(int argc, char **argv)
 				  << " Vulkan validation error(s) during renderer init\n";
 		harness.shutdown();
 		return 1;
+	}
+
+	if (waterAudit) {
+		int result = 1;
+		try { result = runWaterAudit(harness, outDir); }
+		catch (const std::exception &e) { std::cerr << "water audit failed: " << e.what() << "\n"; }
+		harness.shutdown();
+		return result;
 	}
 
 	if (smoke)
