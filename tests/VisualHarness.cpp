@@ -134,6 +134,67 @@ void VisualHarness::shutdown()
 	m_window = nullptr;
 }
 
+autoexposure::ExposureGpuState VisualHarness::exposureMeterProbe(
+	const VkClearColorValue &full, const VkClearColorValue *leftQuarter,
+	const PostProcessSettings &settings)
+{
+	assert(m_rendererReady);
+	AllocatedImage &hdr = m_renderer.hdrColor();
+	VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+	// Paint pass: SHADER_READ (post-frame invariant) -> COLOR_ATTACHMENT,
+	// full-frame clear + optional left-quarter overlay via clear attachments
+	// (the HDR target has no TRANSFER_DST usage, so no transfer clears).
+	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
+		cmdTransitionImageLayout(cmd, hdr.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+									 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+		ca.imageView = hdr.view;
+		ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+		ri.renderArea = {{0, 0}, m_extent};
+		ri.layerCount = 1;
+		ri.colorAttachmentCount = 1;
+		ri.pColorAttachments = &ca;
+		// volk loads core-1.3 entry points only for a 1.3 instance; the
+		// engine targets 1.2 + VK_KHR_dynamic_rendering (same fallback
+		// pattern as PostStack::beginR/endR).
+		auto beginRendering = vkCmdBeginRendering ? vkCmdBeginRendering : vkCmdBeginRenderingKHR;
+		auto endRendering = vkCmdEndRendering ? vkCmdEndRendering : vkCmdEndRenderingKHR;
+		beginRendering(cmd, &ri);
+		VkClearRect rects[2] = {
+			{{{0, 0}, {m_extent.width, m_extent.height}}, 0, 1},
+			{{{0, 0}, {m_extent.width / 4, m_extent.height}}, 0, 1},
+		};
+		VkClearAttachment att{};
+		att.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		att.colorAttachment = 0;
+		att.clearValue.color = full;
+		vkCmdClearAttachments(cmd, 1, &att, 1, rects);
+		if (leftQuarter)
+		{
+			att.clearValue.color = *leftQuarter;
+			vkCmdClearAttachments(cmd, 1, &att, 1, &rects[1]);
+		}
+		endRendering(cmd);
+		cmdTransitionImageLayout(cmd, hdr.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+									 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	});
+
+	// Probe passes (own submits, dt = 0 leaves the history untouched): the
+	// record-time readout copy of pass B observes the state pass A wrote
+	// (pass A's submit has completed by the time B is recorded).
+	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
+		m_renderer.recordExposureProbe(cmd, m_frameSlot, settings);
+	});
+	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
+		m_renderer.recordExposureProbe(cmd, m_frameSlot, settings);
+	});
+	return m_renderer.exposureReadout();
+}
+
 void VisualHarness::beginScene(int seed)
 {
 	if (m_deviceReady)

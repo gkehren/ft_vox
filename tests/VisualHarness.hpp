@@ -95,6 +95,15 @@ public:
 	/// runtime alternates slots every frame; tests can drive the same
 	/// alternation to exercise per-slot state handling.
 	void setFrameSlot(uint32_t slot) { m_frameSlot = slot & 1u; }
+	/// Synthetic-meter probe (issue #140 tooling): paints the HDR target with
+	/// a uniform color (optionally overlaid with a different color on the
+	/// left quarter of the frame) and runs ONLY the exposure metering +
+	/// adaptation chain — no world rendering. Submitted synchronously; the
+	/// returned state is the one produced by the synthetic content. Requires
+	/// auto exposure enabled in `settings`.
+	autoexposure::ExposureGpuState exposureMeterProbe(const VkClearColorValue &full,
+													  const VkClearColorValue *leftQuarter,
+													  const PostProcessSettings &settings);
 
   private:
 	SDL_Window *m_window{nullptr};

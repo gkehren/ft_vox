@@ -528,18 +528,27 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			ImGui::SliderInt("Bloom blur iters", &pp.bloomBlurIterations, 1, 5);
 		}
 		ImGui::Checkbox("FXAA", &pp.fxaaEnabled);
+		// True capability, not just the setting: without fragment SSBO stores
+		// the renderer runs the manual path regardless of the checkbox, so it
+		// must stay togglable and the manual slider must stay editable.
+		const bool autoSupported = frame.worldRenderer->autoExposureSupported();
+		const bool autoActive = pp.autoExposureEnabled && autoSupported;
+		ImGui::BeginDisabled(!autoSupported);
 		ImGui::Checkbox("Auto exposure", &pp.autoExposureEnabled);
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Meter HDR scene luminance and adapt exposure over time (eye adaptation).");
-		// Greyed out while auto exposure drives the frame, but shows (and stays
-		// editable for) the value used as soon as auto is switched off.
-		ImGui::BeginDisabled(pp.autoExposureEnabled);
+			ImGui::SetTooltip(autoSupported
+								  ? "Meter HDR scene luminance and adapt exposure over time (eye adaptation)."
+								  : "Fragment SSBO stores unavailable on this GPU — the manual path is used.");
+		ImGui::EndDisabled();
+		// Greyed out while auto exposure actually drives the frame, but shows
+		// (and stays editable for) the value used as soon as auto is off.
+		ImGui::BeginDisabled(autoActive);
 		ImGui::SliderFloat("Manual exposure", &pp.exposure, 0.1f, 5.f);
 		ImGui::EndDisabled();
 		ImGui::SliderFloat("Compensation (EV)", &pp.exposureCompensation, -3.0f, 3.0f, "%.1f");
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Auto-exposure bias in stops. 0 = neutral, +1 doubles the target exposure.");
-		if (pp.autoExposureEnabled)
+		if (autoActive)
 		{
 			ImGui::Indent();
 			ImGui::SliderFloat("Middle grey", &pp.autoExposureMiddleGrey, 0.1f, 2.0f, "%.2f");
@@ -850,7 +859,8 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 	}
 
 	// Auto-exposure readout (issue #140): GPU state read back after the frame's
-	// fence wait, so values lag one frame behind by design.
+	// fence wait. The snapshot belongs to the current frame slot, so values come
+	// from its PREVIOUS use — up to kFramesInFlight frames stale by design.
 	if (frame.worldRenderer)
 	{
 		const auto &exp = frame.worldRenderer->exposureReadout();

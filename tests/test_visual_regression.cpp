@@ -1168,6 +1168,63 @@ int runAdaptationCheck(VisualHarness &harness)
 	return 1;
 }
 
+// Synthetic-meter check (issue #140): injects known HDR values directly into
+// the metering chain (no world rendering) and validates the meter reading
+// exactly. Uniform greys pin the luminance weights + log2 + clip plumbing
+// end to end; the 25/75 vertical split pins the exact 16-texelFetch mean of
+// the final reduction stage — the historical central-2x2 sampling bias would
+// read -4 EV here instead of the exact -2 EV.
+int runExposureMeterCheck(VisualHarness &harness)
+{
+	std::vector<std::string> errors;
+	if (!harness.renderer().autoExposureSupported())
+	{
+		std::cout << "  SKIP auto-exposure-meter: fragmentStoresAndAtomics unavailable" << std::endl;
+		return 0;
+	}
+	PostProcessSettings settings{}; // auto exposure on (defaults)
+
+	const VkClearColorValue grey1{{1.f, 1.f, 1.f, 1.f}};
+	const VkClearColorValue grey4{{4.f, 4.f, 4.f, 1.f}};
+	const VkClearColorValue greyQuarter{{0.25f, 0.25f, 0.25f, 1.f}};
+	const VkClearColorValue lum16{{16.f, 16.f, 16.f, 1.f}};
+	const VkClearColorValue lumSixteenth{{1.f / 16.f, 1.f / 16.f, 1.f / 16.f, 1.f}};
+	struct Case
+	{
+		const char *name;
+		const VkClearColorValue &full;
+		const VkClearColorValue *quarter; // null: uniform frame
+		float wantEv;
+	};
+	const Case cases[] = {
+		{"grey 1.0", grey1, nullptr, 0.f},		 // log2(1) = 0
+		{"grey 4.0", grey4, nullptr, 2.f},		 // log2(4) = +2
+		{"grey 0.25", greyQuarter, nullptr, -2.f}, // log2(0.25) = -2
+		// left quarter at +4 EV, rest at -4 EV, blocks never straddle the
+		// boundary: the exact meter mean is (4 + 3*(-4)) / 4 = -2 EV.
+		{"quarter 25/75 split", lumSixteenth, &lum16, -2.f},
+	};
+	for (const Case &c : cases)
+	{
+		const auto st = harness.exposureMeterProbe(c.full, c.quarter, settings);
+		if (std::abs(st.meteredLogLum - c.wantEv) > 5e-3f)
+			errors.push_back(std::string(c.name) + ": metered " +
+							 std::to_string(st.meteredLogLum) + " EV, want " +
+							 std::to_string(c.wantEv) + " EV");
+	}
+	if (harness.validationErrors() != 0)
+		errors.push_back("validation errors raised during the meter probes");
+
+	for (const std::string &error : errors)
+		std::cerr << "  FAIL auto-exposure-meter: " << error << std::endl;
+	if (errors.empty())
+	{
+		std::cout << "  PASS auto-exposure-meter" << std::endl;
+		return 0;
+	}
+	return 1;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -1544,6 +1601,8 @@ int main(int argc, char **argv)
 		std::cout << "[auto-exposure-adaptation] dark-room temporal adaptation\n";
 		try
 		{
+			if (runExposureMeterCheck(harness) != 0)
+				++failures;
 			if (runAdaptationCheck(harness) != 0)
 				++failures;
 		}

@@ -91,6 +91,16 @@ public:
 	/// 1x1 R32F adapted-exposure target for tooling readback. Layout is
 	/// SHADER_READ_ONLY_OPTIMAL between frames.
 	AllocatedImage &exposureTarget() { return m_post.exposureTarget(); }
+	/// Whether the GPU supports the auto-exposure adaptation path
+	/// (fragmentStoresAndAtomics). When false, the renderer runs the
+	/// deterministic manual exposure path regardless of the setting.
+	bool autoExposureSupported() const { return m_context->fragmentStoresAndAtomics(); }
+	/// Tooling only — see PostStack::recordExposureProbe.
+	void recordExposureProbe(VkCommandBuffer cmd, uint32_t frameIndex,
+							 const PostProcessSettings &settings)
+	{
+		m_post.recordExposureProbe(cmd, frameIndex, settings);
+	}
 	/// Shadow map resolution actually in GPU resources (issue #137). Differs
 	/// from postSettings().shadowMapSize until applyShadowMapSize runs.
 	uint32_t activeShadowMapSize() const { return m_shadow.mapSize(); }

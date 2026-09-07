@@ -66,6 +66,17 @@ public:
 	/// readback. Layout is SHADER_READ_ONLY_OPTIMAL between frames.
 	AllocatedImage &exposureTarget() { return m_lum1; }
 
+	/// Tooling only (synthetic-meter tests): runs the metering + adaptation
+	/// chain on the CURRENT HDR content. The caller owns the HDR image — it
+	/// must be in SHADER_READ_ONLY_OPTIMAL and already carry the desired
+	/// synthetic pattern (cleared/copied by the caller) — and submits the
+	/// command buffer synchronously so the CPU readout can observe the state
+	/// right after. Uses dt = 0: the temporal state is untouched, only
+	/// metered/target/clamp values are refreshed. No-op when
+	/// fragmentStoresAndAtomics is unsupported.
+	void recordExposureProbe(VkCommandBuffer cmd, uint32_t frameIndex,
+							 const PostProcessSettings &settings);
+
 private:
 	void createTargets(uint32_t w, uint32_t h);
 	void destroyTargets();

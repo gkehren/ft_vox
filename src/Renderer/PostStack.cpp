@@ -373,7 +373,13 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 	VkShaderModule ssaoUpF = load("ssaoUpsample.frag.spv");
 	VkShaderModule compF = load("composite.frag.spv");
 	VkShaderModule downF = load("luminance_downsample.frag.spv");
-	VkShaderModule adaptF = load("exposure_adapt.frag.spv");
+	// exposure_adapt.frag writes SSBOs from the fragment stage: without
+	// fragmentStoresAndAtomics the SPIR-V contract (NonWritable) would be
+	// violated, so the pipeline is not created at all and the engine stays
+	// on the manual exposure path (autoExposureActive gates recording).
+	VkShaderModule adaptF = VK_NULL_HANDLE;
+	if (m_context->fragmentStoresAndAtomics())
+		adaptF = load("exposure_adapt.frag.spv");
 
 	VkVertexInputBindingDescription bind{0, 4 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
 	std::array<VkVertexInputAttributeDescription, 2> attrs = {{
@@ -444,11 +450,14 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 	makeFS(compF, m_compositeLayout, swapchainFormat, m_compositePipe);
 	const VkFormat lumFmt = VK_FORMAT_R32_SFLOAT;
 	makeFS(downF, m_postLayout1, lumFmt, m_downsamplePipe);
-	makeFS(adaptF, m_exposureLayout, lumFmt, m_adaptPipe);
+	if (adaptF)
+		makeFS(adaptF, m_exposureLayout, lumFmt, m_adaptPipe);
 
 
-	for (auto m : {fsVert, extractF, blurF, godF, ssaoF, ssaoUpF, compF, downF, adaptF})
+	for (auto m : {fsVert, extractF, blurF, godF, ssaoF, ssaoUpF, compF, downF})
 		destroyShaderModule(m_context->getDevice(), m);
+	if (adaptF)
+		destroyShaderModule(m_context->getDevice(), adaptF);
 }
 
 void PostStack::destroyPipelines()
@@ -965,4 +974,12 @@ void PostStack::recordExposure(VkCommandBuffer cmd, uint32_t frameIndex,
 	post[1].buffer = m_exposureSnapshot[frameIndex].buffer;
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 						 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 2, post, 0, nullptr);
+}
+
+void PostStack::recordExposureProbe(VkCommandBuffer cmd, uint32_t frameIndex,
+									const PostProcessSettings &settings)
+{
+	// dt = 0: the adaptation history is a strict no-op, only the metered /
+	// target / clamp outputs of this synthetic frame are produced.
+	recordExposure(cmd, frameIndex, settings, 0.0f);
 }
