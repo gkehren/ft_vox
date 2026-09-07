@@ -20,4 +20,5 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 moonAmbient; // rgb + strength
     vec4 lightingParams; // blockLightScale, emissiveScale, fogBaseY, underwater
     vec4 waterParams; // wave, refraction, specular, foam
+    vec4 cascadeTexelSizes; // xyz = world units/texel per cascade, w = map resolution
 } frame;

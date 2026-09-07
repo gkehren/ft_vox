@@ -136,8 +136,10 @@ Push constants carry cascade index / shadow time for the shadow path where neede
 
 ### ShadowPass (`Renderer/ShadowPass.*`)
 
-- **Cascaded shadow maps (CSM):** `shadow::kCascadeCount` (**3**), map size `shadow::kShadowMapSize` (**1024**), practical splits (`ShadowCascades.hpp`).
-- Depth array image + one sampler; light matrices computed in `WorldRenderer::updateFrameUBO` using camera frustum slices.
+- **Cascaded shadow maps (CSM):** `shadow::kCascadeCount` (**3**), practical splits (`ShadowCascades.hpp`).
+- Depth array image + one **comparison sampler** (`LESS_OR_EQUAL`, border = lit); light matrices computed in `WorldRenderer::updateFrameUBO` using camera frustum slices, which also publishes per-cascade **world-units-per-texel** (`FrameUBO::cascadeTexelSizes`).
+- **Receiver sampling is shared** by terrain and mobs through `ressources/shaders/vulkan/csm.inc.glsl` (`sampleDirectionalShadow`): texel-footprint-scaled receiver bias + raster depth bias documented together, 12-tap Poisson rotated by interleaved-gradient noise, radius derived from `textureSize` (no hardcoded map size), cascade blend band preserved.
+- **Quality tier** (issue #137): `PostProcessSettings::shadowMapSize` (1024 Low/Medium, 2048 High/Cinematic presets) recreates the shadow array deferred (`WorldRenderer::applyShadowMapSize` → device idle, rebuild, rewrite receiver descriptors incl. mob sets); CLI override `--shadow-size N`. Debug visualization modes (cascade index / blend bands / texel density / raw depth) via `ShaderParameters::shadowDebug` → `FrameUBO::visualParams.w`, read by `terrain.frag.glsl`.
 - Pipeline: `shadow.vert` / `shadow.frag` (depth-only style).
 - Caster list comes from `ChunkManager::collectShadowList` (XZ radius = `RenderSettings::shadowDistance`).
 

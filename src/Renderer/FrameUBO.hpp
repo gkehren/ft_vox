@@ -26,9 +26,8 @@ struct FrameUBO
 	glm::vec4 moonAmbient;	 // rgb + strength
 	glm::vec4 lightingParams;	 // blockLightScale, emissiveScale, fogBaseY, underwater
 	glm::vec4 waterParams;	 // wave, refraction, specular, foam
+	glm::vec4 cascadeTexelSizes; // xyz = world units/texel per cascade, w = map resolution
 };
 
-// 16 mat4/vec4 slots after the 5 matrices: 5*64 + 13*16 = 320+208 = 528
-// matrices: view,proj,c0,c1,c2 = 5 * 64 = 320
-// remaining: 13 * 16 = 208 → total 528
-static_assert(sizeof(FrameUBO) == 528, "FrameUBO std140 size must match GLSL (no dead postParams)");
+// 14 mat4/vec4 slots after the 5 matrices: 5*64 + 14*16 = 320+224 = 544
+static_assert(sizeof(FrameUBO) == 544, "FrameUBO std140 size must match GLSL (no dead postParams)");

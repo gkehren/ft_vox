@@ -24,6 +24,7 @@ static void printUsage(const char *argv0)
 			  << "  --benchmark-warmup <secs>   Override warmup (0 disables it)\n"
 			  << "  --benchmark-map <zoom>      Open fixed-center biome map (zoom 0.1..8)\n"
 			  << "  --benchmark-map-sequential  Compare the previous one-job map path\n"
+			  << "  --shadow-size <n>           Shadow map resolution tier (512, 1024, 2048, 4096)\n"
               << "  --view x y z yaw pitch secs Fixed daylight view for terrain review (secs 0 = no timeout)\n"
 			  << "  --help                      Show this help\n"
 			  << "\n"
@@ -50,11 +51,28 @@ int main(int argc, char **argv)
 	std::optional<float> frontBiasOverride;
 	float benchmarkMapZoom = 0.0f;
 	bool benchmarkMapSequential = false;
+	int shadowMapSizeOverride = 0;
     std::optional<std::array<float, 6>> inspection;
 
 	for (int i = 1; i < argc; ++i)
 	{
 		const std::string arg = argv[i];
+		if (arg == "--shadow-size")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --shadow-size requires a resolution (512, 1024, 2048 or 4096).\n";
+				return EXIT_FAILURE;
+			}
+			shadowMapSizeOverride = std::atoi(argv[++i]);
+			if (shadowMapSizeOverride != 512 && shadowMapSizeOverride != 1024 &&
+				shadowMapSizeOverride != 2048 && shadowMapSizeOverride != 4096)
+			{
+				std::cerr << "Error: --shadow-size must be 512, 1024, 2048 or 4096.\n";
+				return EXIT_FAILURE;
+			}
+			continue;
+		}
         if (arg == "--view")
         {
             if (i + 6 >= argc) { std::cerr << "--view requires x y z yaw pitch seconds\n"; return EXIT_FAILURE; }
@@ -236,6 +254,8 @@ int main(int argc, char **argv)
 			engine.setVSync(*vsyncOverride);
 		if (frontBiasOverride)
 			engine.setStreamFrontBias(*frontBiasOverride);
+		if (shadowMapSizeOverride > 0)
+			engine.setShadowMapSize(shadowMapSizeOverride);
 		if (benchmarkDuration > 0.0f)
 		{
 			BenchmarkConfig &config = engine.benchmark().config();

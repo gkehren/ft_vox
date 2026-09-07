@@ -28,6 +28,10 @@ class MobRenderer
     ~MobRenderer() { shutdown(); }
     void init(VkContext &, ImmediateCommands &, VkDescriptorSetLayout frameLayout, VkImageView shadow,
               VkSampler shadowSampler, VkFormat color, VkFormat depth, const std::string &pack);
+    /// Rebind the shadow map view + sampler in every committed per-model
+    /// descriptor set (issue #137: shadow map resolution changes recreate
+    /// both the image and the sampler). Caller must device-idle first.
+    void refreshShadowBinding(VkImageView shadowView, VkSampler shadowSampler);
     void shutdown();
     std::unique_ptr<Textures> prepareTextures(ImmediateCommands &, const std::string &);
     void commitTextures(std::unique_ptr<Textures> textures) { m_textures.swap(textures); }

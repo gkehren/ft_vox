@@ -254,8 +254,8 @@ int main()
 
 	// FrameUBO contract + material table (shipped helpers, not test re-implementation)
 	{
-		if (sizeof(FrameUBO) != 528)
-			ok = fail(std::string("FrameUBO sizeof must be 528 (got ") + std::to_string(sizeof(FrameUBO)) + ")");
+		if (sizeof(FrameUBO) != 544)
+			ok = fail(std::string("FrameUBO sizeof must be 544 (got ") + std::to_string(sizeof(FrameUBO)) + ")");
 		if (materials::hasFoliageWind(static_cast<uint8_t>(STONE)))
 			ok = fail("stone must not have foliage wind");
 		if (!materials::hasFoliageWind(static_cast<uint8_t>(OAK_LEAVES)))

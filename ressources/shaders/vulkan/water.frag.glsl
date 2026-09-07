@@ -9,7 +9,6 @@ layout(location = 4) in float vViewDepth;
 #include "frame_ubo.inc.glsl"
 
 layout(set = 1, binding = 0) uniform sampler2DArray textureArray;
-layout(set = 1, binding = 1) uniform sampler2DArray shadowMap;
 // Opaque scene history (color) + depth history (real depth, not color)
 layout(set = 2, binding = 0) uniform sampler2D sceneColor;
 layout(set = 2, binding = 1) uniform sampler2D sceneDepth;

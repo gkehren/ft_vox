@@ -73,6 +73,27 @@ std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCom
     }
     return result;
 }
+
+void MobRenderer::refreshShadowBinding(VkImageView shadowView, VkSampler shadowSampler)
+{
+    if (!m_textures || shadowView == VK_NULL_HANDLE || shadowSampler == VK_NULL_HANDLE)
+        return;
+    m_shadowView = shadowView;
+    m_shadowSampler = shadowSampler;
+    const auto device = m_context->getDevice();
+    for (size_t i = 0; i < m_textures->sets.size(); ++i)
+    {
+        VkDescriptorImageInfo shadowInfo{m_shadowSampler, m_shadowView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = m_textures->sets[i];
+        write.dstBinding = 1;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &shadowInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    }
+}
+
 void MobRenderer::init(VkContext &context, ImmediateCommands &imm, VkDescriptorSetLayout frameLayout,
                        VkImageView shadow, VkSampler shadowSampler, VkFormat color, VkFormat depth,
                        const std::string &pack)

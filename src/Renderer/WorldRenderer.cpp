@@ -297,6 +297,22 @@ TextureAtlasLoadReport WorldRenderer::reloadResourcePack(const std::string &reso
 	return report;
 }
 
+void WorldRenderer::applyShadowMapSize(uint32_t size)
+{
+	if (!m_context || size == 0 || size == m_shadow.mapSize())
+		return;
+	// Deferred recreation trigger (issue #137): modeled on the resource-pack
+	// reload — device idle, rebuild shadow resources, rewrite every receiver
+	// descriptor that captured the old image view (WorldRenderer set1 + the
+	// six MobRenderer per-model sets). Rare: user/preset action only.
+	m_context->waitIdle();
+	m_shadow.resizeShadowMap(size);
+	writeSet1Descriptors();
+	// resizeShadowMap recreated the SAMPLER too — mobs must rebind the new
+	// handle, not their stale copy.
+	m_mobs.refreshShadowBinding(m_shadow.arrayView(), m_shadow.sampler());
+}
+
 void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm,
 						 GpuResourceRetire &retire, const std::string &resourcePackRoot)
 {
@@ -365,9 +381,10 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 	const float cascadeFar = std::max(shadowCascadeFar, 64.f);
 	const float aspect = (aspectH > 1e-5f) ? (aspectW / aspectH) : (16.f / 9.f);
 	glm::vec4 splits{};
+	std::array<float, kCascadeCount> halfExtents{};
 	shadow::buildCascadeUBOFromFront(camera.getPosition(), camera.getFront(), glm::vec3(0.f, 1.f, 0.f), m_lightDir,
 									0.1f, cascadeFar, aspect, shadow::kDefaultFovYDegrees, m_cascadeMatrices, splits,
-									nullptr);
+									&halfExtents, m_shadow.mapSize());
 
 	FrameUBO ubo{};
 	ubo.view = camera.getViewMatrix();
@@ -380,10 +397,17 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 	ubo.fogColor = glm::vec4(params.fogColor, 1.0f);
 	ubo.fogParams = glm::vec4(params.fogStart, params.fogEnd, params.fogDensity, params.fogHeightFalloff);
 	packFrameLightVisual(params, ubo.lightParams, ubo.visualParams);
+	ubo.visualParams.w = params.shadowDebug; // shadow debug channel (issue #137)
 	ubo.sunDir = glm::vec4(sunDir, 0.0f);
 	ubo.moonDir = glm::vec4(moonDir, 0.0f);
 	ubo.skyParams = glm::vec4(time, params.dayFactor, params.sunsetFactor, params.nightFactor);
 	ubo.cascadeSplits = splits;
+	// Real cascade texel footprints (issue #137): receivers scale bias and
+	// the debug density view from these instead of hardcoding a 1024 map.
+	ubo.cascadeTexelSizes = glm::vec4(2.f * halfExtents[0] / float(m_shadow.mapSize()),
+									  2.f * halfExtents[1] / float(m_shadow.mapSize()),
+									  2.f * halfExtents[2] / float(m_shadow.mapSize()),
+									  float(m_shadow.mapSize()));
 	ubo.moonAmbient = glm::vec4(0.22f, 0.30f, 0.48f, params.moonAmbientStrength);
 	ubo.lightingParams = glm::vec4(params.blockLightScale, params.emissiveScale, params.fogBaseY,
 								underwater ? 1.0f : 0.0f);

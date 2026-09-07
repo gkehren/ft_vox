@@ -202,7 +202,8 @@ inline void buildCascadeUBO(const glm::vec3 &camPos, const glm::vec3 &front, con
 							const glm::vec3 &up, const glm::vec3 &lightDir,
 							float nearPlane, float farPlane, float aspect, float fovYDegrees,
 							std::array<glm::mat4, kCascadeCount> &outMatrices, glm::vec4 &outSplits,
-							std::array<float, kCascadeCount> *outHalfExtents = nullptr)
+							std::array<float, kCascadeCount> *outHalfExtents = nullptr,
+							uint32_t shadowMapResolution = kShadowMapSize)
 {
 	const auto splits = computeCascadeSplits(nearPlane, farPlane);
 	const float fovY = glm::radians(fovYDegrees);
@@ -213,7 +214,8 @@ inline void buildCascadeUBO(const glm::vec3 &camPos, const glm::vec3 &front, con
 	for (int i = 0; i < kCascadeCount; ++i)
 	{
 		const CascadeBounds b = computeFrustumSliceCascade(
-			camPos, f, r, u, lightDir, fovY, std::max(aspect, 0.1f), prev, splits[i], kShadowMapSize);
+			camPos, f, r, u, lightDir, fovY, std::max(aspect, 0.1f), prev, splits[i],
+			shadowMapResolution);
 		outMatrices[i] = b.lightViewProj;
 		if (outHalfExtents)
 			(*outHalfExtents)[i] = std::max(b.halfExtentX, b.halfExtentY);
@@ -227,7 +229,8 @@ inline void buildCascadeUBOFromFront(const glm::vec3 &camPos, const glm::vec3 &f
 									 const glm::vec3 &worldUp, const glm::vec3 &lightDir,
 									 float nearPlane, float farPlane, float aspect, float fovYDegrees,
 									 std::array<glm::mat4, kCascadeCount> &outMatrices, glm::vec4 &outSplits,
-									 std::array<float, kCascadeCount> *outHalfExtents = nullptr)
+									 std::array<float, kCascadeCount> *outHalfExtents = nullptr,
+									 uint32_t shadowMapResolution = kShadowMapSize)
 {
 	const glm::vec3 f = glm::normalize(front);
 	glm::vec3 r = glm::cross(f, glm::normalize(worldUp));
@@ -236,7 +239,7 @@ inline void buildCascadeUBOFromFront(const glm::vec3 &camPos, const glm::vec3 &f
 	r = glm::normalize(r);
 	const glm::vec3 u = glm::normalize(glm::cross(r, f));
 	buildCascadeUBO(camPos, f, r, u, lightDir, nearPlane, farPlane, aspect, fovYDegrees,
-					outMatrices, outSplits, outHalfExtents);
+					outMatrices, outSplits, outHalfExtents, shadowMapResolution);
 }
 
 /// Legacy overload kept for older call sites / tests — builds a default forward camera.

@@ -58,6 +58,10 @@ struct ShaderParameters
 	float waterRefraction = 0.012f;
 	float waterSpecular = 1.15f;
 	float waterFoamStrength = 0.55f;
+
+	/// Shadow debug visualization (issue #137): 0 off, 1 cascade index color,
+	/// 2 cascade blend bands, 3 world-units-per-texel density, 4 raw depth.
+	float shadowDebug = 0.0f;
 };
 
 /// Packs light + visual knobs for FrameUBO std140 (matches terrain/sky shaders).
@@ -176,6 +180,11 @@ struct PostProcessSettings
 	bool underwater{false};
 	float underwaterStrength{1.0f};
 
+	/// Shadow map resolution tier (issue #137): 1024 (Low/Medium) or 2048
+	/// (High/Cinematic). Changing it recreates the shadow map array — the
+	/// engine applies the change deferred, before the next frame.
+	int shadowMapSize{1024};
+
 	/// Last preset applied via applyPreset (UI combo). Manual tweaks do not clear this.
 	GraphicsQualityPreset qualityPreset{GraphicsQualityPreset::Medium};
 
@@ -207,6 +216,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 	switch (preset)
 	{
 	case GraphicsQualityPreset::Low:
+		shadowMapSize = 1024;
 		bloomEnabled = true;
 		bloomThreshold = 1.65f;
 		bloomIntensity = 0.06f;
@@ -226,6 +236,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		break;
 	case GraphicsQualityPreset::Medium:
 		// Match constructor defaults (current balanced path)
+		shadowMapSize = 1024;
 		bloomEnabled = true;
 		bloomThreshold = 1.45f;
 		bloomIntensity = 0.12f;
@@ -244,6 +255,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		vignette = 0.22f;
 		break;
 	case GraphicsQualityPreset::High:
+		shadowMapSize = 2048; // higher near-cascade resolution tier
 		bloomEnabled = true;
 		bloomThreshold = 1.30f;
 		bloomIntensity = 0.16f;
@@ -264,6 +276,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		postContrast = 1.04f;
 		break;
 	case GraphicsQualityPreset::Cinematic:
+		shadowMapSize = 2048;
 		bloomEnabled = true;
 		bloomThreshold = 1.35f; // sun/emissive peaks only — no midtone wash
 		bloomIntensity = 0.20f;
