@@ -127,8 +127,8 @@ inline constexpr BlockLayerDesc kBlockLayers[] = {
 	{"deepslate_redstone_ore.png", "deepslate_redstone_ore.png", false}, // DEEPSLATE_REDSTONE_ORE
 	{"dripstone_block.png", "dripstone_block.png", false},			 // DRIPSTONE_BLOCK
 	// Phase 5 aquatic blocks
-	{"kelp_plant.png", "kelp_plant.png", true}, // KELP
-	{"kelp.png", "kelp.png", true},			  // KELP_TOP
+	{"kelp_plant.png", "kelp_plant.png", true, BlockShape::Cross}, // KELP
+	{"kelp.png", "kelp.png", true, BlockShape::Cross},			  // KELP_TOP
     {"short_grass.png", "short_grass.png", true, BlockShape::Cross},
     {"fern.png", "fern.png", true, BlockShape::Cross},
     {"oxeye_daisy.png", "oxeye_daisy.png", true, BlockShape::Cross},

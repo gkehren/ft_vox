@@ -1656,12 +1656,12 @@ static void testWaterFilledKelpVariants()
 	// F) KELP geometry non-regression: the current representation is cross
 	// quads (NOT a cube) - a lone KELP still emits its own detail quads.
 	{
-		CHECK(blockShape(KELP) == BlockShape::Cube,
-			  "kelp geometry contract: KELP is a cube");
-		CHECK(blockShape(KELP_TOP) == BlockShape::Cube,
-			  "kelp geometry contract: KELP_TOP is a cube");
+		CHECK(blockShape(KELP) == BlockShape::Cross,
+			  "kelp geometry contract: KELP renders as a cross detail");
+		CHECK(blockShape(KELP_TOP) == BlockShape::Cross,
+			  "kelp geometry contract: KELP_TOP renders as a cross detail");
 		CHECK(blockContainsWater(KELP) && blockContainsWater(KELP_TOP),
-			  "kelp geometry contract: kelp holds water");
+			  "kelp geometry contract: kelp still holds water");
 		MeshBuildResult *r = nullptr;
 		Scene *s = buildVolume(AIR, 0, &r);
 		s->chunk.setVoxel(3, 7, 3, KELP); // lone kelp cell above the water

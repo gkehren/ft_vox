@@ -159,7 +159,8 @@ Small vegetation uses an explicit `BlockShape` (`Cube`, `Cross`, `Flat`) in
   fluid (issue #120): fluid occupancy follows `blockContainsWater()` — a
   neutral medium trait independent of `BlockShape`. Geometry and medium are
   separate meshing views: the block pass emits each block's own geometry
-  (KELP keeps its cube representation, SEAGRASS its cross quads) while a
+  (KELP and KELP_TOP render as double-sided cross details, SEAGRASS its
+  cross quads) while a
   dedicated binary fluid pass meshes the water volume from
   `blockContainsWater` only — WATER<->WATER (any water-containing type
   included) emits nothing, so no holes open in the surrounding volume. Dry
