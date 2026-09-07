@@ -159,8 +159,8 @@ void main()
         mapped += vec3(0.0, 0.04, 0.05) * c * s;
     }
 
-    // Film grain (after grade so it stays visible), weighted by luminance:
-    // near-black areas (night sky) stay clean instead of turning into grey noise
+    // Film grain (after grade so it stays visible) — multiplicative, so the
+    // absolute noise scales down with value and near-black night sky stays clean
     if (grainStrength > 0.0005)
     {
         float n = filmNoise(vUV, time);

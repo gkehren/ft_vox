@@ -166,8 +166,8 @@ void main()
     vec3 skyFill = mix(vec3(0.82, 0.90, 1.0), vec3(1.0, 0.82, 0.68), sunsetFactor * 0.4);
     vec3 outdoorAmbient = skyFill * ambientStrength * dayFactor
                         + frame.moonAmbient.rgb * frame.moonAmbient.w * nightFactor;
-    // Enclosed rock gets a small phase-independent floor; no sun-oriented
-    // top-face bonus underground and no night-time multiplier on cave fill.
+    // Enclosed rock gets a small time-of-day-independent floor, shaped only
+    // by the shared hemisphere term; no night-time multiplier on cave fill.
     vec3 caveAmbient = vec3(0.085, 0.094, 0.117);
     vec3 ambient = mix(caveAmbient, outdoorAmbient, sky) * hemisphere;
     vec3 direct = lightTint * diff * dayLightFactor * sunReach * (1.0 - shadow);

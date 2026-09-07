@@ -131,13 +131,27 @@ enum class OutputTransfer
 	Unsupported,
 };
 
+/// Strict allowlist: the composite pipeline only knows how to transfer exactly
+/// two {format, colorSpace} pairs — B8G8R8A8/R8G8B8A8 sRGB (hardware encode)
+/// and B8G8R8A8/R8G8B8A8 UNORM (shader encode), both with SRGB_NONLINEAR.
+/// Any other format — even other members of the sRGB format family, or other
+/// UNORM/float encodings — and any other color space is refused as Unsupported
+/// instead of guessing a transfer the pipeline was not built for.
 inline OutputTransfer classifyOutputTransfer(VkFormat format, VkColorSpaceKHR colorSpace)
 {
 	if (colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
 		return OutputTransfer::Unsupported;
-	if (isSrgbFormat(format))
+	switch (format)
+	{
+	case VK_FORMAT_B8G8R8A8_SRGB:
+	case VK_FORMAT_R8G8B8A8_SRGB:
 		return OutputTransfer::HardwareSrgb;
-	return OutputTransfer::ShaderSrgb;
+	case VK_FORMAT_B8G8R8A8_UNORM:
+	case VK_FORMAT_R8G8B8A8_UNORM:
+		return OutputTransfer::ShaderSrgb;
+	default:
+		return OutputTransfer::Unsupported;
+	}
 }
 
 /// True when the composite shader must apply the explicit linear→sRGB encode

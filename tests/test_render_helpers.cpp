@@ -179,7 +179,7 @@ int main()
 			ok = fail("night moon ambient should be cool and non-zero");
 	}
 
-	// --- Emissive / block light / localLightScale ---
+	// --- Emissive / block light ---
 	{
 		if (lighting::emissiveIntensityForBlock(static_cast<uint8_t>(STONE)) > 1e-5f)
 			ok = fail("stone must not be emissive");
@@ -199,20 +199,6 @@ int main()
 		lighting::unpackLightBits(packed, sky, blk);
 		if (sky != 15 || blk != 10)
 			ok = fail("pack/unpack light bits round-trip failed");
-
-		const float caveScale = lighting::localLightScale(0.0f, 0.0f);
-		const float torchScale = lighting::localLightScale(0.0f, 14.0f / 15.0f);
-		if (std::abs(caveScale - lighting::kCaveLightFloor) > 1e-5f)
-			ok = fail("localLightScale(0,0) must match kCaveLightFloor");
-		if (!(caveScale > 0.36f && caveScale < 0.50f))
-			ok = fail("cave light floor should be readable (~0.42) not crushed/washed");
-		if (!(torchScale > caveScale + 0.4f))
-			ok = fail("torch block light must brighten vs unlit cave");
-		// Smoothstep curve: at 0.75 input, output > linear interpolation
-		const float at75 = lighting::localLightScale(0.75f, 0.0f);
-		const float linear75 = lighting::kCaveLightFloor + (1.f - lighting::kCaveLightFloor) * 0.75f;
-		if (!(at75 > linear75 + 0.01f))
-			ok = fail("localLightScale should use smoothstep curve (> linear at 0.75)");
 	}
 
 	// Settings defaults + outdoor look (fog / SSAO mildness)
@@ -249,11 +235,6 @@ int main()
 			ok = fail("far fog must respect kTerrainFogAmountCap");
 		if (!(farFog >= midFog))
 			ok = fail("far fog should be ≥ mid fog");
-		// localLightScale cave floor readable but still dark vs outdoor full light
-		if (std::abs(lighting::localLightScale(0.f, 0.f) - lighting::kCaveLightFloor) > 1e-5f)
-			ok = fail("localLightScale cave floor must match kCaveLightFloor");
-		if (!(lighting::localLightScale(1.f, 0.f) > 0.98f))
-			ok = fail("full sky light should approach 1.0");
 		if (lighting::sunShadowWeight(0.f) > 1e-4f)
 			ok = fail("sunShadowWeight(0) must mute CSM in caves");
 		if (lighting::sunShadowWeight(1.f) < 0.99f)
@@ -731,6 +712,14 @@ int main()
 			classifyOutputTransfer(VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT) != OutputTransfer::Unsupported ||
 			classifyOutputTransfer(VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) != OutputTransfer::Unsupported)
 			ok = fail("non-SDR color spaces (HDR10/PQ, Display-P3, extended sRGB) must be refused");
+		// Strict allowlist: with SRGB_NONLINEAR, only the B8G8R8A8/R8G8B8A8 sRGB
+		// and UNORM pairs are supported — every other format must be refused,
+		// including other sRGB-family members like A8B8G8R8_SRGB_PACK32.
+		if (classifyOutputTransfer(VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::Unsupported ||
+			classifyOutputTransfer(VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::Unsupported ||
+			classifyOutputTransfer(VK_FORMAT_UNDEFINED, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::Unsupported ||
+			classifyOutputTransfer(VK_FORMAT_A8B8G8R8_SRGB_PACK32, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::Unsupported)
+			ok = fail("strict allowlist must reject non-allowlisted {format, SRGB_NONLINEAR} pairs as Unsupported");
 		if (!outputTransferRequiresShaderEncode(OutputTransfer::ShaderSrgb) ||
 			outputTransferRequiresShaderEncode(OutputTransfer::HardwareSrgb))
 			ok = fail("only the ShaderSrgb path sets the composite encode flag");
