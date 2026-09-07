@@ -64,6 +64,19 @@ public:
 					 const std::function<void(VkCommandBuffer)> &imguiDraw = {},
                      VkGpuProfiler *gpu = nullptr, uint64_t benchmarkTag = 0);
 
+	/// Offscreen variant for tooling (visual-regression tests): identical pass
+	/// graph and production shaders, but composites into a caller-owned target
+	/// which is left in COLOR_ATTACHMENT_OPTIMAL. No ImGui overlay, no
+	/// PRESENT transition — the runtime path never records this way. The
+	/// command buffer must already be in the recording state and is NOT ended
+	/// here (ImmediateCommands::submitAndWait owns the lifecycle).
+	void recordFrameToImage(VkCommandBuffer cmd, uint32_t frameIndex, VkImage targetImage,
+							VkImageView targetView, VkExtent2D extent,
+							const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
+							const VkClearColorValue &clearColor,
+							const std::function<void(VkCommandBuffer)> &preRecord = {},
+							VkGpuProfiler *gpu = nullptr);
+
 	void setMobs(const std::vector<entities::MobRenderState> &states) { m_mobStates = states; }
     size_t visibleMobs() const { return m_mobs.visibleCount(); }
     MobTextureReport mobTextureReport() const { return m_mobs.textureReport(); }
@@ -99,6 +112,15 @@ private:
 	void destroyFrameUbos();
 	void writeSet1Descriptors();
 	void writeMaterialDescriptors();
+
+	/// Shadow → Opaque → Water → Sky → Post into an explicit composite target
+	/// (swapchain image or offscreen tooling target). The command buffer must
+	/// already be begun; it is NOT ended here so recordFrame can append the
+	/// ImGui pass and the PRESENT transition.
+	void recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent,
+							VkImage targetImage, VkImageView targetView,
+							const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
+							const VkClearColorValue &clearColor, VkGpuProfiler *gpu);
 
 	VkContext *m_context{nullptr};
 	ImmediateCommands *m_imm{nullptr};

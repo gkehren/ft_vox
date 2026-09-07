@@ -655,6 +655,72 @@ set_tests_properties(MobVulkanRender PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE
 add_test(NAME MobRealTerrain COMMAND test_chunk_lifecycle --mobs-profile)
 
 # ---------------------------------------------------------------------------
+# Deterministic visual regression (issue #142): fixed scenes rendered offscreen
+# through the production WorldRenderer pass graph, tolerant comparison against
+# committed references in tests/visual-references/. References are only
+# written by the explicit --update-references developer action.
+#   ft_vox_visual_tests --update-references
+# ---------------------------------------------------------------------------
+add_executable(ft_vox_visual_tests
+    test_visual_regression.cpp
+    VisualHarness.cpp
+    VisualImage.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+    ${FT_VOX_RENDERER_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp)
+
+target_include_directories(ft_vox_visual_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+target_compile_definitions(ft_vox_visual_tests PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+if(APPLE)
+    target_compile_definitions(ft_vox_visual_tests PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(ft_vox_visual_tests PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+target_link_libraries(ft_vox_visual_tests PRIVATE
+    glm
+    FastNoise2
+    SDL3::SDL3
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    miniz::miniz
+    Threads::Threads
+)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(ft_vox_visual_tests PRIVATE ${CMAKE_DL_LIBS})
+endif()
+if(APPLE)
+    target_link_libraries(ft_vox_visual_tests PRIVATE
+        "-framework Metal" "-framework Foundation" "-framework QuartzCore" "-framework IOKit" "-framework IOSurface")
+endif()
+add_dependencies(ft_vox_visual_tests ft_vox_shaders)
+add_custom_command(TARGET ft_vox_visual_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:ft_vox_visual_tests>/ressources/shaders/spv
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FT_VOX_SPV_FILES}
+            $<TARGET_FILE_DIR:ft_vox_visual_tests>/ressources/shaders/spv)
+add_test(NAME VisualRegression COMMAND ft_vox_visual_tests
+    ${CMAKE_SOURCE_DIR}/tests/visual-references ${CMAKE_BINARY_DIR}/visual-qa)
+set_tests_properties(VisualRegression PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    ENVIRONMENT "FT_VOX_VALIDATION=1"
+    SKIP_RETURN_CODE 77)
+
+# ---------------------------------------------------------------------------
 # VSync frame pacing (PR #145): pure computePacedDeltaTime contract
 # ---------------------------------------------------------------------------
 add_executable(test_frame_pacing

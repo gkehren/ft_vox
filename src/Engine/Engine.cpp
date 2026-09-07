@@ -36,41 +36,6 @@ int budgetFromRate(int perSec, double dt, double &accum)
 		accum -= static_cast<double>(n);
 	return std::clamp(n, 0, 64);
 }
-
-void updateAtmosphereFromDayTime(ShaderParameters &sp)
-{
-	const float dayTime = sp.dayTime;
-	const float sunAngle = dayTime * 6.2831853f - 1.5707963f;
-	const glm::vec3 sunDir =
-		glm::normalize(glm::vec3(std::cos(sunAngle), std::sin(sunAngle) * 0.85f + 0.15f, 0.35f));
-	sp.sunDirection = sunDir;
-	sp.lightDirection = sunDir.y > 0.05f ? sunDir : -sunDir;
-
-	sp.dayFactor = glm::smoothstep(-0.05f, 0.25f, sunDir.y);
-	sp.nightFactor = glm::smoothstep(0.05f, -0.15f, sunDir.y);
-	sp.sunsetFactor = glm::clamp(1.0f - std::abs(sunDir.y) * 3.0f, 0.0f, 1.0f) * (1.0f - sp.nightFactor);
-
-	if (sp.automaticAtmosphere)
-	{
-		// Day fog: deep blue → warm sunset → near-black cinematic night
-		const glm::vec3 dayFog(0.38f, 0.60f, 0.90f);
-		const glm::vec3 sunsetFog(0.85f, 0.40f, 0.22f);
-		const glm::vec3 nightFog(0.005f, 0.008f, 0.020f);
-		sp.fogColor = dayFog * sp.dayFactor + sunsetFog * sp.sunsetFactor + nightFog * sp.nightFactor;
-		// Lowered levels: ambient+diffuse+topLight used to sum >1.3x albedo and pushed
-		// everything into the ACES shoulder (chalky desaturated look). Target ~0.75x.
-		sp.ambientStrength = 0.13f + 0.05f * sp.dayFactor + 0.03f * sp.sunsetFactor;
-		sp.diffuseIntensity = 0.55f + 0.25f * sp.dayFactor + 0.10f * sp.sunsetFactor;
-		// Slightly denser, closer fog at night for mood (driven by dark nightFog)
-		sp.fogDensity = 0.045f + 0.03f * sp.nightFactor;
-		sp.fogStart = 300.0f - 80.0f * sp.nightFactor;
-		sp.fogEnd = 880.0f - 180.0f * sp.nightFactor;
-	}
-
-	// Approximate sun world position for debug display.
-	sp.sunPosition = sp.celestialOrbitCenter + sunDir * sp.celestialOrbitRadius;
-	sp.moonPosition = sp.celestialOrbitCenter - sunDir * sp.celestialOrbitRadius;
-}
 } // namespace
 
 Engine::Engine(std::string resourcePackRoot)

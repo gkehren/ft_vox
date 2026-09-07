@@ -8,6 +8,7 @@
 
 - [`docs/vulkan-graphics.md`](docs/vulkan-graphics.md) — Vulkan device path, pass graph, shaders, post
 - [`docs/engine-architecture.md`](docs/engine-architecture.md) — Engine loop, chunks, streaming, terrain gen
+- [`docs/visual-regression.md`](docs/visual-regression.md) — Visual-regression harness: scenes, references, tolerances
 
 ## Architecture Overview
 
@@ -113,6 +114,12 @@ cd build-vk && ctest --output-on-failure
 
 # Automated Vulkan streaming benchmark (saves a report, then exits)
 ./build-vk/ft_vox --seed 42 --benchmark 30
+
+# Visual regression (offscreen golden-image comparison)
+ctest -R VisualRegression --output-on-failure   # from the build dir
+# References are committed in tests/visual-references/ and regenerated ONLY
+# explicitly via `ft_vox_visual_tests --update-references`. Details:
+# docs/visual-regression.md
 ```
 
 ### Key Conventions

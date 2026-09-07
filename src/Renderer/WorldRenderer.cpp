@@ -393,29 +393,11 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
     m_mobs.prepare(frameIndex, ubo, m_mobStates);
 }
 
-void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t imageIndex,
-								  VkSwapchain &swapchain, const std::vector<Chunk *> &chunks,
-								  const std::vector<Chunk *> &shadowChunks, const VkClearColorValue &clearColor,
-								  const std::function<void(VkCommandBuffer)> &preRecord,
-								  const std::function<void(VkCommandBuffer)> &imguiDraw,
-                                  VkGpuProfiler *gpu, uint64_t benchmarkTag)
+void WorldRenderer::recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent,
+									   VkImage targetImage, VkImageView targetView,
+									   const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
+									   const VkClearColorValue &clearColor, VkGpuProfiler *gpu)
 {
-	const VkExtent2D extent = swapchain.getExtent();
-	const auto beginRendering = beginR();
-	const auto endRendering = endR();
-	if (!beginRendering || !endRendering)
-		throw std::runtime_error("Dynamic rendering entry points unavailable");
-
-	VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS)
-		throw std::runtime_error("Failed to begin terrain command buffer");
-
-	if (gpu) gpu->beginRecording(cmd, frameIndex, benchmarkTag);
-	if (gpu) gpu->beginPass(cmd, GpuPass::Upload);
-	if (preRecord)
-		preRecord(cmd);
-	if (gpu) gpu->endPass(cmd, GpuPass::Upload);
-
 	const VkDescriptorSet set0 = m_frameUbos[frameIndex].descriptorSet0;
 	auto *drawDataMapped = static_cast<VoxelDrawData *>(m_frameUbos[frameIndex].drawDataMapped);
 	AllocatedBuffer &drawDataBuffer = m_frameUbos[frameIndex].drawDataBuffer;
@@ -466,12 +448,38 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 		}
 		m_postSettings.underwater = ubo->lightingParams.w > 0.5f;
 		if (gpu) gpu->beginPass(cmd, GpuPass::Post);
-		m_post.recordPost(cmd, swapchain.getImages()[imageIndex],
-						  swapchain.getImageViews()[imageIndex], extent,
+		m_post.recordPost(cmd, targetImage, targetView, extent,
 						  frameIndex, set0, m_postSettings, sunScreen,
 						  sunVisibility, m_time, ubo->projection);
 		if (gpu) gpu->endPass(cmd, GpuPass::Post);
 	}
+}
+
+void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t imageIndex,
+								  VkSwapchain &swapchain, const std::vector<Chunk *> &chunks,
+								  const std::vector<Chunk *> &shadowChunks, const VkClearColorValue &clearColor,
+								  const std::function<void(VkCommandBuffer)> &preRecord,
+								  const std::function<void(VkCommandBuffer)> &imguiDraw,
+								  VkGpuProfiler *gpu, uint64_t benchmarkTag)
+{
+	const VkExtent2D extent = swapchain.getExtent();
+	const auto beginRendering = beginR();
+	const auto endRendering = endR();
+	if (!beginRendering || !endRendering)
+		throw std::runtime_error("Dynamic rendering entry points unavailable");
+
+	VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS)
+		throw std::runtime_error("Failed to begin terrain command buffer");
+
+	if (gpu) gpu->beginRecording(cmd, frameIndex, benchmarkTag);
+	if (gpu) gpu->beginPass(cmd, GpuPass::Upload);
+	if (preRecord)
+		preRecord(cmd);
+	if (gpu) gpu->endPass(cmd, GpuPass::Upload);
+
+	recordSceneAndPost(cmd, frameIndex, extent, swapchain.getImages()[imageIndex],
+					   swapchain.getImageViews()[imageIndex], chunks, shadowChunks, clearColor, gpu);
 
 	if (imguiDraw)
 	{
@@ -504,4 +512,24 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 	if (gpu) gpu->endRecording(cmd);
 	if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
 		throw std::runtime_error("Failed to end terrain command buffer");
+}
+
+void WorldRenderer::recordFrameToImage(VkCommandBuffer cmd, uint32_t frameIndex, VkImage targetImage,
+									   VkImageView targetView, VkExtent2D extent,
+									   const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
+									   const VkClearColorValue &clearColor,
+									   const std::function<void(VkCommandBuffer)> &preRecord,
+									   VkGpuProfiler *gpu)
+{
+	// The caller owns the command-buffer lifecycle (submitAndWait begins and
+	// ends it around this call), unlike recordFrame's VkFrameContext path.
+	if (gpu) gpu->beginRecording(cmd, frameIndex, 0);
+	if (gpu) gpu->beginPass(cmd, GpuPass::Upload);
+	if (preRecord)
+		preRecord(cmd);
+	if (gpu) gpu->endPass(cmd, GpuPass::Upload);
+
+	recordSceneAndPost(cmd, frameIndex, extent, targetImage, targetView, chunks, shadowChunks, clearColor, gpu);
+	// Target stays in COLOR_ATTACHMENT_OPTIMAL: the caller owns any further
+	// transition (test readback to TRANSFER_SRC).
 }
