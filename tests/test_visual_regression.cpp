@@ -994,11 +994,9 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
 // (WorldRenderer::exposureReadout, copied from the frame slot's SSBO during
 // recordExposure after the slot's fence was waited).
 //
-// Readout lag: recordExposure copies the state BEFORE the frame's adapt pass,
-// so the readout observed after frame k is the GPU state after frame k-1 —
-// every sampled sequence below therefore renders one throwaway "flush" frame
-// before trusting the readout, and the observed sequence lags the rendered
-// frames by exactly one step.
+// The render path performs no per-frame readback: each sample refreshes the
+// debug readout explicitly after the (synchronous) render, so it observes
+// exactly the state the sampled frame produced.
 // ---------------------------------------------------------------------------
 int runAdaptationCheck(VisualHarness &harness)
 {
@@ -1021,11 +1019,13 @@ int runAdaptationCheck(VisualHarness &harness)
 	carveCaveRoom(harness.chunks(), anchor);
 	harness.remeshEditedChunks();
 
-	// One rendered frame = one adaptation step at the given dt; returns the
-	// readout observed after the frame (the state after the PREVIOUS frame).
+	// One rendered frame = one adaptation step at the given dt. The submit
+	// is synchronous, so an on-demand refresh afterwards observes exactly
+	// THIS frame's state (renderExposure performs no per-frame readback).
 	const auto step = [&](float dt) {
 		harness.renderer().setFrameDt(dt);
 		harness.renderFrame(kTime, {});
+		harness.renderer().refreshExposureReadout();
 		return harness.renderer().exposureReadout();
 	};
 
@@ -1036,7 +1036,7 @@ int runAdaptationCheck(VisualHarness &harness)
 	harness.post().autoExposureEnabled = false;
 	step(1.f / 60.f); // discarded manual frame
 	harness.post().autoExposureEnabled = true;
-	step(1.f / 60.f); // seed frame — readout still pre-seed, flushed below
+	step(1.f / 60.f); // seed frame: adaptation starts from the manual exposure
 
 	if (harness.lastNonFiniteSamples() > 0)
 		errors.push_back("non-finite HDR samples in the dark-room frames");
@@ -1046,8 +1046,7 @@ int runAdaptationCheck(VisualHarness &harness)
 	float targetExposure = 0.0f;
 	for (int i = 0; i < 40; ++i)
 	{
-		// First sample flushes the seed frame's state out of the readout.
-		const auto s = step(i == 0 ? 1.f / 60.f : 1.f / 30.f);
+		const auto s = step(1.f / 30.f);
 		adaptedLog.push_back(std::log2(std::max(s.adaptedExposure, 1e-6f)));
 		targetExposure = s.targetExposure;
 	}
@@ -1125,9 +1124,8 @@ int runAdaptationCheck(VisualHarness &harness)
 				harness.setFrameSlot(uint32_t(i) & 1u);
 			step(1.f / 30.f);
 		}
-		// Observe the flush frame: whatever the slot pattern, the last two
-		// same-slot frames are exactly one lag apart, so the flush readout
-		// reflects the same adaptation step count in both runs.
+		// The refresh observes exactly the last step's state, whatever the
+		// slot pattern - the two runs are directly comparable.
 		return step(1.f / 30.f).adaptedExposure;
 	};
 	const float fixedSlotEnd = reseedRunSlots(false);
@@ -1184,6 +1182,10 @@ int runExposureMeterCheck(VisualHarness &harness)
 	}
 	PostProcessSettings settings{}; // auto exposure on (defaults)
 
+	// Judge only the errors the probes themselves may raise: the harness
+	// tolerates an init-time baseline (e.g. overlay-injected errors).
+	const auto validationBefore = harness.validationErrors();
+
 	const VkClearColorValue grey1{{1.f, 1.f, 1.f, 1.f}};
 	const VkClearColorValue grey4{{4.f, 4.f, 4.f, 1.f}};
 	const VkClearColorValue greyQuarter{{0.25f, 0.25f, 0.25f, 1.f}};
@@ -1212,7 +1214,7 @@ int runExposureMeterCheck(VisualHarness &harness)
 							 std::to_string(st.meteredLogLum) + " EV, want " +
 							 std::to_string(c.wantEv) + " EV");
 	}
-	if (harness.validationErrors() != 0)
+	if (harness.validationErrors() != validationBefore)
 		errors.push_back("validation errors raised during the meter probes");
 
 	for (const std::string &error : errors)
@@ -1507,7 +1509,9 @@ int main(int argc, char **argv)
 		std::find(onlyScenes.begin(), onlyScenes.end(), "resize_check") != onlyScenes.end();
 	const bool adaptationRequested =
 		std::find(onlyScenes.begin(), onlyScenes.end(), "auto_exposure_adaptation") != onlyScenes.end();
-	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested && !adaptationRequested)
+	const bool meterRequested =
+		std::find(onlyScenes.begin(), onlyScenes.end(), "auto_exposure_meter") != onlyScenes.end();
+	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested && !adaptationRequested && !meterRequested)
 	{
 		std::cerr << "FAIL: --scene";
 		for (const std::string &name : onlyScenes)
@@ -1596,19 +1600,31 @@ int main(int argc, char **argv)
 	// Temporal auto-exposure adaptation check (issue #140): GPU-exercised,
 	// verified through the CPU debug readout. Runs with the full suite or
 	// when requested by name (--scene auto_exposure_adaptation).
-	if (onlyScenes.empty() || adaptationRequested)
+	if (onlyScenes.empty() || adaptationRequested || meterRequested)
 	{
-		std::cout << "[auto-exposure-adaptation] dark-room temporal adaptation\n";
+		if (onlyScenes.empty() || meterRequested)
+		{
+			std::cout << "[auto-exposure-meter] synthetic HDR meter values" << std::endl;
+			try
+			{
+				if (runExposureMeterCheck(harness) != 0)
+					++failures;
+			}
+			catch (const std::exception &e)
+			{
+				std::cerr << "  FAIL auto-exposure-meter: exception: " << e.what() << std::endl;
+				++failures;
+			}
+		}
+		std::cout << "[auto-exposure-adaptation] dark-room temporal adaptation" << std::endl;
 		try
 		{
-			if (runExposureMeterCheck(harness) != 0)
-				++failures;
 			if (runAdaptationCheck(harness) != 0)
 				++failures;
 		}
 		catch (const std::exception &e)
 		{
-			std::cerr << "  FAIL auto-exposure-adaptation: exception: " << e.what() << "\n";
+			std::cerr << "  FAIL auto-exposure-adaptation: exception: " << e.what() << std::endl;
 			++failures;
 		}
 	}

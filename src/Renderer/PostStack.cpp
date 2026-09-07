@@ -882,16 +882,6 @@ void PostStack::recordExposure(VkCommandBuffer cmd, uint32_t frameIndex,
 	if (frameIndex >= kFramesInFlight)
 		return;
 
-	// Debug readout: this slot's snapshot holds the values from the previous
-	// use of this slot, and that frame's fence was already waited in
-	// beginFrame - copying here introduces no synchronization.
-	if (void *mapped = m_exposureSnapshot[frameIndex].info.pMappedData)
-	{
-		vmaInvalidateAllocation(m_context->getAllocator(),
-								m_exposureSnapshot[frameIndex].allocation, 0, VK_WHOLE_SIZE);
-		std::memcpy(&m_exposureReadout, mapped, sizeof(m_exposureReadout));
-	}
-
 	const bool useAuto = autoExposureActive(settings);
 	const bool seed = m_forceSeed || (useAuto && !m_lastAutoEnabled);
 	m_forceSeed = false;
@@ -974,6 +964,23 @@ void PostStack::recordExposure(VkCommandBuffer cmd, uint32_t frameIndex,
 	post[1].buffer = m_exposureSnapshot[frameIndex].buffer;
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 						 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 2, post, 0, nullptr);
+}
+
+void PostStack::refreshExposureReadout(uint32_t frameIndex)
+{
+	// On-demand debug readback (issue #140: no per-frame GPU->CPU traffic).
+	// Call only after the frame slot's fence has been waited (beginFrame, or
+	// a synchronous tooling submit), ideally throttled - see GameUI.
+	if (frameIndex >= kFramesInFlight)
+		return;
+	AllocatedBuffer &snapshot = m_exposureSnapshot[frameIndex];
+	if (!snapshot.buffer)
+		return;
+	if (void *mapped = snapshot.info.pMappedData)
+	{
+		vmaInvalidateAllocation(m_context->getAllocator(), snapshot.allocation, 0, VK_WHOLE_SIZE);
+		std::memcpy(&m_exposureReadout, mapped, sizeof(m_exposureReadout));
+	}
 }
 
 void PostStack::recordExposureProbe(VkCommandBuffer cmd, uint32_t frameIndex,

@@ -858,11 +858,19 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 		}
 	}
 
-	// Auto-exposure readout (issue #140): GPU state read back after the frame's
-	// fence wait. The snapshot belongs to the current frame slot, so values come
-	// from its PREVIOUS use — up to kFramesInFlight frames stale by design.
+	// Auto-exposure readout (issue #140): the ONLY GPU->CPU traffic of the
+	// feature, pulled on demand at ~10 Hz while this panel is visible (the
+	// slot's fence was already waited in beginFrame — no added stall). With
+	// the panel closed, zero readback happens.
 	if (frame.worldRenderer)
 	{
+		static float s_lastRefresh = -1.0f;
+		const float now = static_cast<float>(ImGui::GetTime());
+		if (now - s_lastRefresh >= 0.1f)
+		{
+			frame.worldRenderer->refreshExposureReadout();
+			s_lastRefresh = now;
+		}
 		const auto &exp = frame.worldRenderer->exposureReadout();
 		ImGui::Text("Metered: %.2f EV", exp.meteredLogLum);
 		ImGui::Text("Exposure: %.3f (target %.3f)", exp.adaptedExposure, exp.targetExposure);

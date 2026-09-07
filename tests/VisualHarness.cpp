@@ -142,12 +142,14 @@ autoexposure::ExposureGpuState VisualHarness::exposureMeterProbe(
 	AllocatedImage &hdr = m_renderer.hdrColor();
 	VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-	// Paint pass: SHADER_READ (post-frame invariant) -> COLOR_ATTACHMENT,
-	// full-frame clear + optional left-quarter overlay via clear attachments
-	// (the HDR target has no TRANSFER_DST usage, so no transfer clears).
+	// Paint pass: -> COLOR_ATTACHMENT, full-frame clear + optional left-quarter
+	// overlay via clear attachments (the HDR target has no TRANSFER_DST usage,
+	// so no transfer clears). oldLayout = UNDEFINED is legal whatever the
+	// current layout (the whole image is cleared afterwards: contents are
+	// don't-care) - also valid on a fresh, never rendered target.
 	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
-		cmdTransitionImageLayout(cmd, hdr.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-									 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		cmdTransitionImageLayout(cmd, hdr.image, VK_IMAGE_LAYOUT_UNDEFINED,
+								 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 		VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
 		ca.imageView = hdr.view;
 		ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -183,15 +185,13 @@ autoexposure::ExposureGpuState VisualHarness::exposureMeterProbe(
 									 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	});
 
-	// Probe passes (own submits, dt = 0 leaves the history untouched): the
-	// record-time readout copy of pass B observes the state pass A wrote
-	// (pass A's submit has completed by the time B is recorded).
+	// Probe pass (own submit, dt = 0 leaves the history untouched), then an
+	// on-demand refresh: the submit is synchronous, so the refresh observes
+	// exactly the synthetic frame's state.
 	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
 		m_renderer.recordExposureProbe(cmd, m_frameSlot, settings);
 	});
-	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
-		m_renderer.recordExposureProbe(cmd, m_frameSlot, settings);
-	});
+	m_renderer.refreshExposureReadout();
 	return m_renderer.exposureReadout();
 }
 

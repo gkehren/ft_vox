@@ -58,10 +58,15 @@ public:
 					float frameDt = 1.f / 60.f,
 					VkGpuProfiler *profiler = nullptr);
 
-	/// Debug readout: CPU copy of the current frame slot's exposure snapshot.
-	/// The slot's fence was already waited before recording, so this never
-	/// synchronizes; values are those of the previous use of the slot.
+	/// Debug readout: last value pulled from the frame slot's exposure
+	/// snapshot. Populated ONLY by refreshExposureReadout - the render path
+	/// performs no per-frame GPU->CPU traffic.
 	const autoexposure::ExposureGpuState &exposureReadout() const { return m_exposureReadout; }
+	/// Copy the given slot's snapshot to the CPU for debug display. Call
+	/// after that slot's fence has been waited (beginFrame, or a synchronous
+	/// tooling submit) and throttle (~10 Hz) - this is the only GPU->CPU
+	/// traffic of the feature and it happens on demand, never per frame.
+	void refreshExposureReadout(uint32_t frameIndex);
 	/// 1x1 R32F adapted-exposure target (last recorded frame), for tooling
 	/// readback. Layout is SHADER_READ_ONLY_OPTIMAL between frames.
 	AllocatedImage &exposureTarget() { return m_lum1; }

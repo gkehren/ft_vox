@@ -447,6 +447,7 @@ void WorldRenderer::recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex,
 									   const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
 									   const VkClearColorValue &clearColor, VkGpuProfiler *gpu)
 {
+	m_lastFrameIndex = frameIndex;
 	const VkDescriptorSet set0 = m_frameUbos[frameIndex].descriptorSet0;
 	auto *drawDataMapped = static_cast<VoxelDrawData *>(m_frameUbos[frameIndex].drawDataMapped);
 	AllocatedBuffer &drawDataBuffer = m_frameUbos[frameIndex].drawDataBuffer;

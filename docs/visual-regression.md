@@ -103,13 +103,24 @@ immediately after an off→on toggle of `autoExposureEnabled`; the off frames in
 between run the manual composite and are discarded, and the two-renders
 bit-identical contract stays intact.
 
+**Synthetic meter check (`auto-exposure-meter`).** A standalone GPU-exercised
+run — always part of the suite, also selectable via
+`--scene auto_exposure_meter` — injects known HDR values directly into the
+metering chain through a tooling probe (`PostStack::recordExposureProbe`, no
+world rendering) and validates exact meter readings: uniform greys must read
+0 / +2 / −2 EV, and a block-aligned 25/75 vertical split (+4 EV quarter over
+−4 EV) must average to exactly −2 EV (the historical central-2×2 sampling
+bias would read −4 EV). Validation errors are judged as a before/after delta
+of the probe only (device/swapchain baseline excluded).
+
 **Temporal adaptation check (`auto-exposure-adaptation`).** A standalone
 GPU-exercised run — always part of the suite, also selectable via
 `--scene auto_exposure_adaptation` — drives the production metering +
 adaptation passes over many consecutive frames in a sealed dark room and
 validates the CPU debug readout (`WorldRenderer::exposureReadout`). The
-readout is one frame stale by design, so every sampled sequence renders
-throwaway "flush" frames before trusting it. It asserts:
+render path performs no per-frame readback: each sample refreshes the
+readout explicitly after its (synchronous) render, so it observes exactly
+the state that frame produced. It asserts:
 
 - **Monotonic, overshoot-free adaptation:** 40 observed states climbing toward
   the target never decrease (1e-5 log2 jitter allowed per step) and never

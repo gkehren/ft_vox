@@ -85,9 +85,13 @@ public:
 	/// engine sets it before recordFrame; tooling sets it before each
 	/// offscreen render so adaptation is deterministic under test.
 	void setFrameDt(float dt) { m_frameDt = dt; }
-	/// Debug readout of the auto-exposure state (values from the previous
-	/// use of the current frame slot; never synchronizes).
+	/// Debug readout of the auto-exposure state. Populated only by
+	/// refreshExposureReadout — the render path never reads GPU state back.
 	const autoexposure::ExposureGpuState &exposureReadout() const { return m_post.exposureReadout(); }
+	/// Pull the exposure snapshot of the last recorded frame slot into the
+	/// debug readout (on demand: call after the frame's fence wait, throttle
+	/// to ~10 Hz). Used by the profiler panel; no per-frame GPU->CPU traffic.
+	void refreshExposureReadout() { m_post.refreshExposureReadout(m_lastFrameIndex); }
 	/// 1x1 R32F adapted-exposure target for tooling readback. Layout is
 	/// SHADER_READ_ONLY_OPTIMAL between frames.
 	AllocatedImage &exposureTarget() { return m_post.exposureTarget(); }
@@ -161,6 +165,8 @@ private:
 	PostProcessSettings m_postSettings{};
 	/// Frame delta for auto-exposure adaptation (issue #140).
 	float m_frameDt{1.f / 60.f};
+	/// Slot of the last recorded frame (drives on-demand debug readout).
+	uint32_t m_lastFrameIndex{0};
 	MeshArenas m_arenas{};
 	ShadowPass m_shadow;
 	OpaquePass m_opaque;
