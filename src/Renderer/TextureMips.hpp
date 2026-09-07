@@ -14,8 +14,10 @@ namespace texture_mips
 	uint32_t chainBytes(uint32_t baseSize);					 // total byte size of one layer's chain
 
 	// Generate the full mip chain for ONE RGBA8 sRGB layer.
-	// layerPixels: baseSize*baseSize*4 bytes (mip 0). outChain: chainBytes(baseSize) bytes;
-	// mip 0 is copied verbatim, every following level is generated.
+	// layerPixels: baseSize*baseSize*4 bytes (mip 0). outChain: chainBytes(baseSize) bytes.
+	// Mip 0 preserves source alpha and RGB for alpha > 0; the RGB of alpha-0
+	// texels may be edge-dilated (alpha bleeding) to avoid dark fringes.
+	// Every following level is generated.
 	//
 	// Filtering policy (issue #136):
 	//  - integer-window partition downsampling: destination texel i averages the

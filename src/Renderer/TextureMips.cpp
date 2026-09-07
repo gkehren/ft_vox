@@ -232,8 +232,9 @@ void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *
 {
 	const uint32_t levels = mipLevelCount(baseSize);
 
-	// Mip 0 is the verbatim source; its cutout coverage is the target every
-	// generated level must preserve.
+	// Mip 0 keeps the source alpha and the RGB of alpha > 0 texels; only
+	// alpha-0 RGB may be edge-dilated below. Its cutout coverage is the
+	// target every generated level must preserve.
 	std::memcpy(outChain, layerPixels, mipLevelBytes(baseSize, 0));
 	const float targetCoverage = cutoutCoverage(outChain, baseSize);
 	// The base level is served too: slight minification already filters mip 0
