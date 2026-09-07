@@ -2,22 +2,28 @@
 //
 // BIAS POLICY
 // -----------
-// The RECEIVER depth bias scales with the cascade texel footprint in world
-// units (frame.cascadeTexelSizes: xyz = world units per texel for cascades
-// 0..2): cascade 0 keeps the production-tuned magnitude
-// (max(0.012*(1-NdL), 0.0035)) and farther cascades scale linearly with their
-// real footprint (texelScale). The SENDER raster depth bias (constant 1.75,
+// frame.cascadeBiasScales[c] = (2*halfExtent(c)/mapSize) / lightDepthSpan(c)
+// — the receiver's normalized-depth shift per world-unit texel footprint.
+// The shader multiplies it by the DIMENSIONLESS factors
+// shadow::kReceiverBiasSlope/kReceiverBiasBase (mirrored here): the bias
+// therefore halves when the shadow map resolution doubles and grows with
+// the cascade footprint. The SENDER raster depth bias (constant 1.75,
 // slope 2.5, front-face culling) handles caster-side depth precision and
-// aliasing on its own and stays independent of the receiver bias; the two are
-// tuned as ONE system — adjust them together, never in isolation.
+// aliasing on its own and stays independent of the receiver bias; the two
+// are tuned as ONE system — adjust them together, never in isolation.
 //
 // Sampling goes through the hardware COMPARISON sampler
 // (LESS_OR_EQUAL, CLAMP_TO_BORDER with an opaque-white border = lit):
-// texture() returns 1.0 = lit, 0.0 = shadowed, with 2x2 PCF per tap.
-// Out-of-bounds UV/z reads the opaque-white border, so out-of-frustum is lit
-// — one unified no-leak special case (none).
+// texture() returns the 2x2 hardware-PCF-filtered lit fraction directly —
+// accumulate it as-is, never re-binarize. Out-of-frustum UV/z reads the
+// opaque-white border, so out-of-frustum is lit — one unified
+// no-special-case policy.
 
 layout(set = 1, binding = 1) uniform sampler2DArrayShadow shadowMap;
+
+// Keep in sync with shadow::kReceiverBiasSlope / kReceiverBiasBase.
+const float CSM_BIAS_SLOPE = 22.0; // dimensionless: * normalized-depth-per-texel
+const float CSM_BIAS_BASE = 6.5;   // dimensionless floor factor
 
 // 12-tap Poisson disk (unit radius)
 const vec2 CSM_POISSON[12] = vec2[](
@@ -26,6 +32,19 @@ const vec2 CSM_POISSON[12] = vec2[](
     vec2( 0.519,  0.767), vec2( 0.185, -0.893), vec2( 0.507,  0.064),
     vec2( 0.896,  0.412), vec2(-0.322, -0.932), vec2(-0.792, -0.598)
 );
+
+// Stable per-shadow-map-texel rotation angle in [0, 2π): hashed from the
+// texel-snapped light-space position (+cascade), NOT gl_FragCoord, so the
+// disk orientation follows the world through camera translation/rotation
+// instead of crawling across the surface.
+float csmTexelRotationAngle(ivec2 texel, int cascade)
+{
+    uint h = uint(texel.x) * 73856093u ^ uint(texel.y) * 19349663u ^ uint(cascade) * 83492791u;
+    h = (h ^ (h >> 16u)) * 0x45d9f3bu;
+    h = (h ^ (h >> 16u)) * 0x45d9f3bu;
+    h ^= h >> 16u;
+    return 6.2831853 * float(h & 0xFFFFFFu) / float(0xFFFFFFu);
+}
 
 mat4 csmCascadeMatrix(int c)
 {
@@ -50,29 +69,32 @@ float csmSampleCascadeLit(vec3 worldPos, vec3 normal, vec3 lightDir, int cascade
 
     float currentDepth = projCoords.z;
     float nDotL = max(dot(normal, lightDir), 0.0);
-    // Receiver bias scales with the cascade texel footprint (see BIAS POLICY).
-    float texelScale = frame.cascadeTexelSizes[cascade] / max(frame.cascadeTexelSizes.x, 1e-6);
-    float bias = max(0.012 * (1.0 - nDotL), 0.0035) * texelScale;
+    // Receiver bias scales with the real normalized-depth texel footprint
+    // (see BIAS POLICY); resolution changes flow straight through.
+    float bias = max(CSM_BIAS_SLOPE * (1.0 - nDotL), CSM_BIAS_BASE)
+               * frame.cascadeBiasScales[cascade];
 
     // Radius in UV from the real shadow map resolution (no hardcoded size).
-    vec2 texelUV = 1.0 / vec2(textureSize(shadowMap, 0).xy);
-    vec2 radius = (1.5 + float(cascade)) * texelUV;
+    vec2 shadowMapSize = vec2(textureSize(shadowMap, 0).xy);
+    vec2 radius = (1.5 + float(cascade)) / shadowMapSize;
 
-    // Interleaved-gradient-noise disk rotation: stable per pixel
-    // (deterministic across frames), kills fixed-pattern banding.
-    float angle = 6.2831853 * fract(52.9829189
-        * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    // Rotation keyed on the (stabilized) shadow-map texel: world-stable.
+    ivec2 texel = ivec2(floor(projCoords.xy * shadowMapSize));
+    float angle = csmTexelRotationAngle(texel, cascade);
     float s = sin(angle);
     float c = cos(angle);
     mat2 rot = mat2(c, -s, s, c);
 
-    float shadow = 0.0;
+    // Hardware comparison PCF: texture() already returns the 2x2-filtered
+    // lit fraction — accumulate directly (review P1: < 0.5 re-binarization
+    // would discard it).
+    float lit = 0.0;
     for (int i = 0; i < 12; ++i)
     {
         vec2 uv = projCoords.xy + rot * (CSM_POISSON[i] * radius * 2.5);
-        shadow += texture(shadowMap, vec4(uv, float(cascade), currentDepth - bias)) < 0.5 ? 1.0 : 0.0;
+        lit += texture(shadowMap, vec4(uv, float(cascade), currentDepth - bias));
     }
-    return 1.0 - shadow / 12.0;
+    return lit / 12.0;
 }
 
 // SHADOW amount (0.0 = fully lit, 1.0 = fully shadowed) — same semantics as

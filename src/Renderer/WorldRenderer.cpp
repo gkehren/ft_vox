@@ -382,9 +382,10 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 	const float aspect = (aspectH > 1e-5f) ? (aspectW / aspectH) : (16.f / 9.f);
 	glm::vec4 splits{};
 	std::array<float, kCascadeCount> halfExtents{};
+	std::array<float, kCascadeCount> depthSpans{};
 	shadow::buildCascadeUBOFromFront(camera.getPosition(), camera.getFront(), glm::vec3(0.f, 1.f, 0.f), m_lightDir,
 									0.1f, cascadeFar, aspect, shadow::kDefaultFovYDegrees, m_cascadeMatrices, splits,
-									&halfExtents, m_shadow.mapSize());
+									&halfExtents, m_shadow.mapSize(), &depthSpans);
 
 	FrameUBO ubo{};
 	ubo.view = camera.getViewMatrix();
@@ -402,12 +403,16 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 	ubo.moonDir = glm::vec4(moonDir, 0.0f);
 	ubo.skyParams = glm::vec4(time, params.dayFactor, params.sunsetFactor, params.nightFactor);
 	ubo.cascadeSplits = splits;
-	// Real cascade texel footprints (issue #137): receivers scale bias and
-	// the debug density view from these instead of hardcoding a 1024 map.
-	ubo.cascadeTexelSizes = glm::vec4(2.f * halfExtents[0] / float(m_shadow.mapSize()),
-									  2.f * halfExtents[1] / float(m_shadow.mapSize()),
-									  2.f * halfExtents[2] / float(m_shadow.mapSize()),
-									  float(m_shadow.mapSize()));
+	// Receiver bias scales (issue #137): normalized-depth units per world
+	// texel footprint — (2*halfExtent/res) / depthSpan. Halving the map
+	// resolution halves the bias; growing cascade footprint grows it.
+	// Shader multiplies these by the dimensionless shadow::kReceiverBias*
+	// constants (csm.inc.glsl BIAS POLICY).
+	ubo.cascadeBiasScales = glm::vec4(
+		(2.f * halfExtents[0] / float(m_shadow.mapSize())) / depthSpans[0],
+		(2.f * halfExtents[1] / float(m_shadow.mapSize())) / depthSpans[1],
+		(2.f * halfExtents[2] / float(m_shadow.mapSize())) / depthSpans[2],
+		float(m_shadow.mapSize()));
 	ubo.moonAmbient = glm::vec4(0.22f, 0.30f, 0.48f, params.moonAmbientStrength);
 	ubo.lightingParams = glm::vec4(params.blockLightScale, params.emissiveScale, params.fogBaseY,
 								underwater ? 1.0f : 0.0f);

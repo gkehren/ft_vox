@@ -113,6 +113,11 @@ int main()
 			ok = fail("Low preset should disable god rays");
 		if (!high.godRaysEnabled || !cine.godRaysEnabled)
 			ok = fail("High/Cinematic should enable god rays");
+		// Shadow quality tier (issue #137): Low/Medium target 1024, High/Cinematic 2048.
+		if (low.shadowMapSize != 1024 || med.shadowMapSize != 1024)
+			ok = fail("Low/Medium presets must target a 1024 shadow map");
+		if (high.shadowMapSize != 2048 || cine.shadowMapSize != 2048)
+			ok = fail("High/Cinematic presets must target a 2048 shadow map");
 		if (!(cine.filmGrain > med.filmGrain && cine.vignette > med.vignette))
 			ok = fail("Cinematic should push film grain and vignette above Medium");
 		// Underwater runtime state preserved

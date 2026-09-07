@@ -504,7 +504,7 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		int shadowSizeIdx = pp.shadowMapSize >= 2048 ? 1 : 0;
 		if (ImGui::Combo("Shadow resolution", &shadowSizeIdx, shadowSizeNames, IM_ARRAYSIZE(shadowSizeNames)))
 			pp.shadowMapSize = shadowSizeIdx == 1 ? 2048 : 1024;
-		const char *shadowDebugNames[] = {"Off", "Cascade index", "Blend bands", "Texel density", "Raw depth"};
+		const char *shadowDebugNames[] = {"Off", "Cascade index", "Blend bands", "Texel density", "Receiver depth"};
 		int shadowDebugIdx = int(sp.shadowDebug);
 		if (ImGui::Combo("Shadow debug", &shadowDebugIdx, shadowDebugNames, IM_ARRAYSIZE(shadowDebugNames)))
 			sp.shadowDebug = float(shadowDebugIdx);

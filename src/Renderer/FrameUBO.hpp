@@ -26,7 +26,7 @@ struct FrameUBO
 	glm::vec4 moonAmbient;	 // rgb + strength
 	glm::vec4 lightingParams;	 // blockLightScale, emissiveScale, fogBaseY, underwater
 	glm::vec4 waterParams;	 // wave, refraction, specular, foam
-	glm::vec4 cascadeTexelSizes; // xyz = world units/texel per cascade, w = map resolution
+	glm::vec4 cascadeBiasScales; // xyz = normalized-depth units per world texel (worldUnitsPerTexel/depthSpan), w = map resolution
 };
 
 // 14 mat4/vec4 slots after the 5 matrices: 5*64 + 14*16 = 320+224 = 544

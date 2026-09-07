@@ -203,7 +203,8 @@ inline void buildCascadeUBO(const glm::vec3 &camPos, const glm::vec3 &front, con
 							float nearPlane, float farPlane, float aspect, float fovYDegrees,
 							std::array<glm::mat4, kCascadeCount> &outMatrices, glm::vec4 &outSplits,
 							std::array<float, kCascadeCount> *outHalfExtents = nullptr,
-							uint32_t shadowMapResolution = kShadowMapSize)
+							uint32_t shadowMapResolution = kShadowMapSize,
+							std::array<float, kCascadeCount> *outDepthSpans = nullptr)
 {
 	const auto splits = computeCascadeSplits(nearPlane, farPlane);
 	const float fovY = glm::radians(fovYDegrees);
@@ -219,6 +220,8 @@ inline void buildCascadeUBO(const glm::vec3 &camPos, const glm::vec3 &front, con
 		outMatrices[i] = b.lightViewProj;
 		if (outHalfExtents)
 			(*outHalfExtents)[i] = std::max(b.halfExtentX, b.halfExtentY);
+		if (outDepthSpans)
+			(*outDepthSpans)[i] = std::max(b.zFar - b.zNear, 1.0f);
 		prev = splits[i];
 	}
 	outSplits = glm::vec4(splits[0], splits[1], splits[2], static_cast<float>(kCascadeCount));
@@ -230,7 +233,8 @@ inline void buildCascadeUBOFromFront(const glm::vec3 &camPos, const glm::vec3 &f
 									 float nearPlane, float farPlane, float aspect, float fovYDegrees,
 									 std::array<glm::mat4, kCascadeCount> &outMatrices, glm::vec4 &outSplits,
 									 std::array<float, kCascadeCount> *outHalfExtents = nullptr,
-									 uint32_t shadowMapResolution = kShadowMapSize)
+									 uint32_t shadowMapResolution = kShadowMapSize,
+									 std::array<float, kCascadeCount> *outDepthSpans = nullptr)
 {
 	const glm::vec3 f = glm::normalize(front);
 	glm::vec3 r = glm::cross(f, glm::normalize(worldUp));
@@ -239,7 +243,7 @@ inline void buildCascadeUBOFromFront(const glm::vec3 &camPos, const glm::vec3 &f
 	r = glm::normalize(r);
 	const glm::vec3 u = glm::normalize(glm::cross(r, f));
 	buildCascadeUBO(camPos, f, r, u, lightDir, nearPlane, farPlane, aspect, fovYDegrees,
-					outMatrices, outSplits, outHalfExtents, shadowMapResolution);
+					outMatrices, outSplits, outHalfExtents, shadowMapResolution, outDepthSpans);
 }
 
 /// Legacy overload kept for older call sites / tests — builds a default forward camera.
@@ -254,11 +258,26 @@ inline void buildCascadeUBO(const glm::vec3 &cameraPos, const glm::vec3 &lightDi
 }
 
 /// Shadow depth bias matching terrain.frag (for unit tests / docs).
+/// DEPRECATED form: absolute normalized-depth constants that ignore the
+/// cascade footprint. Kept only to document what the receiver bias was
+/// calibrated against; the live contract is the dimensionless
+/// kReceiverBiasSlope/kReceiverBiasBase pair applied to
+/// FrameUBO::cascadeBiasScales (worldUnitsPerTexel / depthSpan) in
+/// csm.inc.glsl — see the BIAS POLICY header there.
 inline float shadowDepthBias(float nDotL)
 {
 	const float ndl = std::clamp(nDotL, 0.0f, 1.0f);
 	return std::max(0.012f * (1.0f - ndl), 0.0035f);
 }
+
+/// Dimensionless receiver-bias factors (issue #137): the shader multiplies
+/// them by the cascade's normalized-depth-per-texel footprint
+/// (worldUnitsPerTexel / light-space depth span), so the bias halves when
+/// the shadow map resolution doubles and grows with cascade footprint.
+/// Calibrated so cascade 0 @1024 reproduces the legacy shadowDepthBias
+/// magnitudes. Keep in sync with csm.inc.glsl.
+inline constexpr float kReceiverBiasSlope = 22.0f;
+inline constexpr float kReceiverBiasBase = 6.5f;
 
 /// Cascade blend weight in [0,1] for soft transition near split (matches terrain.frag).
 /// viewDepth in same space as splits; returns 1 = fully this cascade, lower = blend toward next.

@@ -79,9 +79,10 @@ void main()
     float shadow = sunShadow * sunReach;
 
     // Shadow debug visualization (issue #137): frame.visualParams.w selects
-    // the mode. 1 = cascade index color, 2 = cascade blend band, 3 = shadow
-    // texel density (relative footprint), 4 = raw shadow depth. Terrain-only
-    // tool; mobs share the sampling path but not the debug output.
+    // the mode. 1 = cascade index color, 2 = cascade blend band (only
+    // cascades 0/1 blend — cascade 2 has no next), 3 = shadow texel density
+    // (relative footprint, non-periodic), 4 = receiver light-space depth.
+    // Terrain-only tool; mobs share the sampling path but not the output.
     int shadowDebugMode = int(frame.visualParams.w + 0.5);
     if (shadowDebugMode > 0)
     {
@@ -97,26 +98,35 @@ void main()
         }
         if (shadowDebugMode == 2)
         {
-            float splitEnd = cascade == 0 ? s0 : (cascade == 1 ? s1 : s2);
-            float splitStart = cascade == 0 ? 0.1 : (cascade == 1 ? s0 : s1);
-            float band = max(splitEnd - splitStart, 1.0) * 0.12;
-            float bandW = clamp((vViewDepth - (splitEnd - band)) / max(band, 1e-3), 0.0, 1.0);
+            float bandW = 0.0;
+            if (cascade < 2)
+            {
+                float splitEnd = cascade == 0 ? s0 : s1;
+                float splitStart = cascade == 0 ? 0.1 : s0;
+                float band = max(splitEnd - splitStart, 1.0) * 0.12;
+                bandW = clamp((vViewDepth - (splitEnd - band)) / max(band, 1e-3), 0.0, 1.0);
+            }
             outColor = vec4(mix(vec3(0.05), vec3(1.0, 0.6, 0.1), bandW), 1.0);
             return;
         }
         if (shadowDebugMode == 3)
         {
-            // Cascade footprint relative to cascade 0: dark = dense shadow
-            // texels, bright = coarse texels.
-            float density = frame.cascadeTexelSizes[cascade] / max(frame.cascadeTexelSizes.x, 1e-6);
-            outColor = vec4(vec3(fract(density * 0.5)), 1.0);
+            // Cascade footprint relative to cascade 0, on a log scale so the
+            // value never wraps: 0 = same density as cascade 0, 1 = 16x coarser.
+            float density = frame.cascadeBiasScales[cascade] / max(frame.cascadeBiasScales.x, 1e-8);
+            float t = clamp(log2(max(density, 1.0)) / 4.0, 0.0, 1.0);
+            outColor = vec4(vec3(t), 1.0);
             return;
         }
         if (shadowDebugMode == 4)
         {
+            // Receiver depth in the light-space ortho projection — already
+            // [0,1] with GLM_FORCE_DEPTH_ZERO_TO_ONE (this is the receiver's
+            // projected depth, not the shadow-map content; reading the map
+            // back would need a separate non-comparison debug sampler).
             vec4 ls = csmCascadeMatrix(cascade) * vec4(vFragPos, 1.0);
             vec3 p = ls.xyz / max(ls.w, 1e-6);
-            outColor = vec4(vec3(p.z * 0.5 + 0.5), 1.0);
+            outColor = vec4(vec3(clamp(p.z, 0.0, 1.0)), 1.0);
             return;
         }
     }

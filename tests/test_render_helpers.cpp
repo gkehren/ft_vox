@@ -70,6 +70,26 @@ int main()
 										nearP, farP, 16.f / 9.f, shadow::kDefaultFovYDegrees,
 										mats, splitVec, &extents);
 
+		// Issue #137 resolution contract: doubling the shadow map resolution
+		// must halve the world-units-per-texel footprint the receivers use
+		// (texel snapping perturbs extents slightly, hence the tolerance).
+		{
+			std::array<glm::mat4, shadow::kCascadeCount> matsHi{};
+			std::array<float, shadow::kCascadeCount> extentsHi{};
+			glm::vec4 splitsHi{};
+			shadow::buildCascadeUBOFromFront(camPos, front, glm::vec3(0.f, 1.f, 0.f), lightDir,
+											nearP, farP, 16.f / 9.f, shadow::kDefaultFovYDegrees,
+											matsHi, splitsHi, &extentsHi, shadow::kShadowMapSize * 2);
+			for (int c = 0; c < shadow::kCascadeCount; ++c)
+			{
+				const float lowTexel = extents[size_t(c)] / float(shadow::kShadowMapSize);
+				const float highTexel = extentsHi[size_t(c)] / float(shadow::kShadowMapSize * 2);
+				if (!(highTexel < lowTexel * 0.75f))
+					ok = fail("cascade world-units-per-texel must shrink with resolution (cascade " +
+							  std::to_string(c) + ")");
+			}
+		}
+
 		if (static_cast<int>(splitVec.w + 0.5f) != shadow::kCascadeCount)
 			ok = fail("cascadeSplits.w must be cascade count");
 		if (!(splitVec.x > 0.f && splitVec.y > splitVec.x && splitVec.z >= splitVec.y - 1e-3f))
@@ -143,6 +163,11 @@ int main()
 		const float b1 = shadow::shadowDepthBias(0.0f);
 		if (!(b1 > b0 && b0 >= 0.003f))
 			ok = fail("shadowDepthBias must increase as N·L drops, floor ~0.0035");
+
+		// Issue #137 receiver-bias contract: dimensionless factors applied to
+		// FrameUBO::cascadeBiasScales (normalized depth per world texel).
+		if (!(shadow::kReceiverBiasSlope > shadow::kReceiverBiasBase && shadow::kReceiverBiasBase > 0.f))
+			ok = fail("kReceiverBiasSlope/Base must be positive with slope > base");
 
 		const float wFull = shadow::cascadeBlendWeight(10.f, 50.f, 0.1f, 0.12f);
 		const float wEdge = shadow::cascadeBlendWeight(48.f, 50.f, 0.1f, 0.12f);
@@ -488,7 +513,7 @@ int main()
 				ok = fail("frame_ubo.inc.glsl must be marked AUTO-GENERATED");
 			// Spot-check fields from FrameUBO.hpp
 			for (const char *field : {"mat4 view", "mat4 projection", "vec4 lightingParams", "vec4 waterParams",
-									  "vec4 cascadeSplits", "vec4 moonAmbient"})
+									  "vec4 cascadeSplits", "vec4 moonAmbient", "vec4 cascadeBiasScales"})
 			{
 				if (glsl.find(field) == std::string::npos)
 					ok = fail(std::string("generated FrameUBO GLSL missing field: ") + field);

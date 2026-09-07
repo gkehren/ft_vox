@@ -52,8 +52,14 @@ struct Fixture
             shadowViews[i] = createImageView2DLayer(device, shadow.image, VK_FORMAT_D32_SFLOAT,
                                                     VK_IMAGE_ASPECT_DEPTH_BIT, i);
         VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-        si.magFilter = si.minFilter = VK_FILTER_NEAREST;
-        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        // Production shadow-sampler contract (issue #137): mob.frag samples a
+        // sampler2DArrayShadow — Dref ops are UB with compareEnable == FALSE.
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        si.compareEnable = VK_TRUE;
+        si.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         if (vkCreateSampler(device, &si, nullptr, &shadowSampler) != VK_SUCCESS)
             throw std::runtime_error("sampler");
         VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
@@ -264,6 +270,9 @@ static FrameUBO frame(float aspect, bool crowded = false)
         glm::ortho(-20.f, 20.f, -20.f, 20.f, 0.1f, 80.f) *
         glm::lookAt(glm::vec3(-15, 30, -20), glm::vec3(0), glm::vec3(0, 1, 0));
     u.cascadeSplits = {20, 40, 80, 3};
+    // Non-zero receiver-bias scales (issue #137 contract): the shared CSM
+    // include multiplies these by the dimensionless slope/base factors.
+    u.cascadeBiasScales = {0.0005f, 0.001f, 0.002f, 1024.f};
     return u;
 }
 int main(int argc, char **argv)
