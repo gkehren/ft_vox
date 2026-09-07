@@ -189,12 +189,8 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 
 	const VkClearColorValue clearColor{{0.38f, 0.58f, 0.92f, 1.0f}};
 	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
-		m_gpu.beginRecording(cmd, 0, 0);
-		m_gpu.beginPass(cmd, GpuPass::Frame);
 		m_renderer.recordFrameToImage(cmd, 0, m_target.image, m_target.view, m_extent, m_drawList,
 									  m_shadowList, clearColor, {}, &m_gpu);
-		m_gpu.endPass(cmd, GpuPass::Frame);
-		m_gpu.endRecording(cmd);
 		// LDR composite readback.
 		cmdTransitionImageLayout(cmd, m_target.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 								 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);

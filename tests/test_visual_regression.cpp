@@ -749,27 +749,53 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
     h.remeshEditedChunks();
     int errors = 0;
     const long baseline = h.validationErrors();
+    // Three interleaved sweeps (ascending / descending / ascending preset
+    // order) average out GPU clock ramp and thermal drift that biased a
+    // single ordered pass; the published number is the median sweep mean.
+    auto medianOf3 = [](double a, double b, double c) {
+        return a + b + c - std::max(a, std::max(b, c)) - std::min(a, std::min(b, c));
+    };
+    const int sweepOrder[3][4] = {{0, 1, 2, 3}, {3, 2, 1, 0}, {0, 1, 2, 3}};
+    double sweepWater[3][4] = {};
+    double sweepFrame[3][4] = {};
+    int sweepSamples[3][4] = {};
+    for (int sweep = 0; sweep < 3; ++sweep)
+        for (int position = 0; position < 4; ++position) {
+            const int tier = sweepOrder[sweep][position];
+            h.post().applyPreset(static_cast<GraphicsQualityPreset>(tier));
+            h.renderer().applyShadowMapSize(h.post().shadowMapSize);
+            h.shader().dayTime = 0.35f;
+            updateAtmosphereFromDayTime(h.shader());
+            double water = 0, frame = 0;
+            int samples = 0;
+            for (int i = 0; i < 12; ++i) {
+                const auto img = h.renderFrame(11.f, {});
+                if (!img.valid() || h.lastNonFiniteSamples()) ++errors;
+                if (sweep == 2 && i == 11 &&
+                    !visual::writePng((out / ("tier_" + std::to_string(tier) + ".png")).string(), img))
+                    ++errors;
+                const auto &gpu = h.gpuSample();
+                if (i >= 4 && gpu.present[size_t(GpuPass::Water)] && gpu.present[size_t(GpuPass::Frame)]) {
+                    water += gpu.ms[size_t(GpuPass::Water)]; frame += gpu.ms[size_t(GpuPass::Frame)]; ++samples;
+                }
+            }
+            if (samples == 0) ++errors;
+            sweepWater[sweep][tier] = water / std::max(samples, 1);
+            sweepFrame[sweep][tier] = frame / std::max(samples, 1);
+            sweepSamples[sweep][tier] = samples;
+        }
     std::ostringstream report;
     report << "tier,width,height,water_ms,frame_ms,samples\n";
     for (int tier = 0; tier < 4; ++tier) {
-        h.post().applyPreset(static_cast<GraphicsQualityPreset>(tier));
-        h.renderer().applyShadowMapSize(h.post().shadowMapSize);
-        h.shader().dayTime = 0.35f;
-        updateAtmosphereFromDayTime(h.shader());
-        double water = 0, frame = 0;
-        int samples = 0;
-        for (int i = 0; i < 28; ++i) {
-            const auto img = h.renderFrame(11.f, {});
-            if (!img.valid() || h.lastNonFiniteSamples()) ++errors;
-            if (i == 27 && !visual::writePng((out / ("tier_" + std::to_string(tier) + ".png")).string(), img)) ++errors;
-            const auto &gpu = h.gpuSample();
-            if (i >= 8 && gpu.present[size_t(GpuPass::Water)] && gpu.present[size_t(GpuPass::Frame)]) {
-                water += gpu.ms[size_t(GpuPass::Water)]; frame += gpu.ms[size_t(GpuPass::Frame)]; ++samples;
-            }
-        }
-        if (samples == 0) ++errors;
+        std::cout << "tier " << tier << " sweep means (ms): water "
+                  << sweepWater[0][tier] << '/' << sweepWater[1][tier] << '/' << sweepWater[2][tier]
+                  << ", frame " << sweepFrame[0][tier] << '/' << sweepFrame[1][tier] << '/'
+                  << sweepFrame[2][tier] << '\n';
+        const int totalSamples = sweepSamples[0][tier] + sweepSamples[1][tier] + sweepSamples[2][tier];
         report << tier << ',' << h.extent().width << ',' << h.extent().height << ','
-               << water / std::max(samples, 1) << ',' << frame / std::max(samples, 1) << ',' << samples << '\n';
+               << medianOf3(sweepWater[0][tier], sweepWater[1][tier], sweepWater[2][tier]) << ','
+               << medianOf3(sweepFrame[0][tier], sweepFrame[1][tier], sweepFrame[2][tier]) << ','
+               << totalSamples << '\n';
     }
     // Hold post and shadow quality fixed: only toggle SSR to prove scene contribution.
     h.post().qualityPreset = GraphicsQualityPreset::Medium;

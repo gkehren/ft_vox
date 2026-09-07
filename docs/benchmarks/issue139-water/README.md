@@ -19,16 +19,19 @@ artifact directories above; no golden references were changed.
 
 ## GPU measurements
 
-The adjacent CSVs contain means of 20 GPU timestamp samples per tier, following
-eight warmup frames. Tier 0/1/2/3 means Low/Medium/High/Cinematic. The frame column
-covers Shadow through Post; synchronous CPU readback, PNG encoding, presentation,
-streaming and ImGui are excluded. Water includes the existing history copies.
-These fixed-fixture results are not a general gameplay frame-rate claim. Full
-presets are applied, including their actual shadow-map sizes. Final measurements
-are made with the RTSS overlay closed; the explicit Khronos validation layer
-remains enabled and both runs exit with code 0. The harness now destroys its
-VkContext before `SDL_Vulkan_UnloadLibrary`, fixing an exit-time access
-violation that RTSS's loader retention had been masking on this machine.
+The adjacent CSVs contain the median of three interleaved preset sweeps
+(ascending / descending / ascending; 8 synchronous GPU samples per tier and
+sweep after 4 warmup frames). Per-sweep means are printed by the audit so the
+spread stays visible. Tier 0/1/2/3 means Low/Medium/High/Cinematic. The frame
+column covers Shadow through Post; synchronous CPU readback, PNG encoding,
+presentation, streaming and ImGui are excluded. Water includes the existing
+history copies. These fixed-fixture results are not a general gameplay
+frame-rate claim. Full presets are applied, including their actual shadow-map
+sizes. Final measurements are made with the RTSS overlay closed; the explicit
+Khronos validation layer remains enabled and both runs exit with code 0. The
+harness destroys its VkContext before `SDL_Vulkan_UnloadLibrary`, fixing an
+exit-time access violation that RTSS's loader retention had been masking on
+this machine, and leaves GPU profiler ownership to `recordFrameToImage`.
 
 SSR has 0/0/24/48 march steps, with five bisections per candidate crossing.
 Thickness is 0.35 view-space units; ranges are 40/64 units on High/Cinematic.
