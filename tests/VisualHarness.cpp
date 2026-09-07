@@ -93,7 +93,7 @@ void VisualHarness::initRenderer(std::ostream &log)
 		createBuffer(allocator, size_t(m_extent.width) * m_extent.height * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 					 VMA_MEMORY_USAGE_AUTO,
 					 VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
-	m_gpu.init(m_context, 1);
+	m_gpu.init(m_context, WorldRenderer::kMaxFramesInFlight); // both FIF slots may be driven
 	m_rendererReady = true;
 	log << "VisualHarness renderer ready (Shadow/Opaque/Water/Sky + post)\n";
 }
@@ -172,7 +172,7 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 	m_renderer.setMobs(mobs);
 	const float farPlane = m_renderSettings.maxRenderDistance * 1.25f;
 	const bool underwater = m_renderer.postSettings().underwater;
-	m_renderer.updateFrameUBO(0, m_camera, static_cast<float>(m_extent.width),
+	m_renderer.updateFrameUBO(m_frameSlot, m_camera, static_cast<float>(m_extent.width),
 							  static_cast<float>(m_extent.height), farPlane, time, m_shader,
 							  m_renderSettings.shadowCascadeFar, underwater);
 
@@ -189,7 +189,7 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 
 	const VkClearColorValue clearColor{{0.38f, 0.58f, 0.92f, 1.0f}};
 	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
-		m_renderer.recordFrameToImage(cmd, 0, m_target.image, m_target.view, m_extent, m_drawList,
+		m_renderer.recordFrameToImage(cmd, m_frameSlot, m_target.image, m_target.view, m_extent, m_drawList,
 									  m_shadowList, clearColor, {}, &m_gpu);
 		// LDR composite readback.
 		cmdTransitionImageLayout(cmd, m_target.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -221,8 +221,8 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 							 nullptr, 0, nullptr);
 	});
 
-	m_gpu.markSubmitted(0);
-	m_gpu.onSlotReady(0);
+	m_gpu.markSubmitted(m_frameSlot);
+	m_gpu.onSlotReady(m_frameSlot);
 	auto scanNonFinite = [this](const AllocatedBuffer &buffer, size_t halfCount) {
 		vmaInvalidateAllocation(m_context.getAllocator(), buffer.allocation, 0, VK_WHOLE_SIZE);
 		auto *data = static_cast<const uint16_t *>(buffer.info.pMappedData);

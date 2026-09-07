@@ -4,13 +4,15 @@ Issue : https://github.com/gkehren/ft_vox/issues/140
 
 Branche : `fix/140-auto-exposure`
 
-> **Statut : implémenté.** Mesure GPU = réduction log-luminance bornée en 4 passes
-> graphiques (pas de compute) + SSBO d'état par frame-in-flight ; lecture CPU de
-> diagnostic après fence wait uniquement. Coût mesuré : 0,14 ms GPU (RTX 4070 Ti),
-> zéro erreur de validation, 30/30 tests verts dont 2 nouvelles scènes de référence
-> auto et un banc d'adaptation temporelle. Détails : `docs/vulkan-graphics.md` §Post,
-> `docs/visual-regression.md` §scènes. Les validations subjectives (vidéos de
-> transition, scène immobile plusieurs minutes) restent à faire en jeu.
+> **Statut : implémenté (rebasé sur #150/#151).** Mesure GPU = réduction log-luminance
+> bornée en 4 passes graphiques (pas de compute) + UN historique GPU partagé (l'état
+> temporel est une valeur logique unique) + snapshots CPU par frame-in-flight pour le
+> diagnostic, lus après fence wait uniquement. Coût mesuré : +0,088 ms GPU au total
+> (sous-passe Exposure 0,120 ms, RTX 4070 Ti). Zéro erreur de validation, 30/30 tests
+> verts dont 2 nouvelles scènes de référence auto et un banc d'adaptation temporelle
+> (alternance de slots FIF, no-op dt=0, indépendance au découpage des frames). Détails :
+> `docs/vulkan-graphics.md` §Post, `docs/visual-regression.md` §scènes. Les validations
+> subjectives (vidéos de transition, scène immobile plusieurs minutes) restent à faire en jeu.
 
 ## Objectif
 
@@ -89,4 +91,3 @@ Implémenter une exposition automatique fondée sur la luminance HDR, avec une a
 - [ ] Reporter les résultats mesurés et les éventuelles limites de validation.
 - [ ] Vérifier chaque critère d’acceptation de l’issue #140 avant de considérer la correction terminée.
 
-Ce fichier décrit le travail à effectuer ; aucune implémentation ni validation de la correction n’est incluse à ce stade.

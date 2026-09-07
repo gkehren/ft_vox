@@ -121,6 +121,13 @@ throwaway "flush" frames before trusting it. It asserts:
 - **Clamp-state reporting:** with `autoExposureMaxEv` forced to +1, the dark
   room must report `clampState = 2` (max clamp); a vacuity guard requires the
   room's metered luminance to be ≤ −1 EV first.
+- **Frame-in-flight slot alternation:** two runs with identical dt sequences —
+  one on a fixed frame slot, one alternating slots 0/1 like the runtime — must
+  land on the same adaptation (1e-3 relative). The temporal state is a single
+  logical history, not per-slot; per-slot independent state would diverge here.
+- **`dt ≤ 0` is a strict no-op:** consecutive zero-dt frames must observe
+  identical readouts — a zero step can never snap the exposure to the target
+  (the exact-settle rule fires only on arrival within 1e-4 EV).
 - No non-finite HDR samples in any of the dark-room frames.
 
 ## 5. Comparison policy

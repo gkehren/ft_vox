@@ -91,6 +91,10 @@ public:
 	/// slot 0 — submitAndWait guarantees the GPU is idle between frames.
 	/// Also copies the HDR scene target and counts non-finite fp16 samples.
 	visual::RgbaImage renderFrame(float time, const std::vector<entities::MobRenderState> &mobs);
+	/// Frame-in-flight slot (0/1) used by the next renderFrame calls. The
+	/// runtime alternates slots every frame; tests can drive the same
+	/// alternation to exercise per-slot state handling.
+	void setFrameSlot(uint32_t slot) { m_frameSlot = slot & 1u; }
 
   private:
 	SDL_Window *m_window{nullptr};
@@ -106,6 +110,7 @@ public:
 	AllocatedBuffer m_hdrReadback{};
 	long long m_lastNonFinite{0};
 	uint64_t m_frameCounter{0};
+	uint32_t m_frameSlot{0};
 	bool m_deviceReady{false};
 	bool m_rendererReady{false};
 

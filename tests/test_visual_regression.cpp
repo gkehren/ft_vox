@@ -632,6 +632,9 @@ int runAoMotionCheck(VisualHarness &harness, const std::vector<SceneSpec> &scene
 		harness.shader() = ShaderParameters{};
 		harness.renderSettings() = RenderSettings{};
 		harness.post() = PostProcessSettings{};
+		// The AO determinism check compares bit-identical reruns of the same
+		// pose - auto exposure would advance the adaptation between frames.
+		harness.post().autoExposureEnabled = false;
 		harness.post().underwater = motionScene->underwater;
 		harness.shader().dayTime = motionScene->dayTime;
 		updateAtmosphereFromDayTime(harness.shader());
@@ -1102,6 +1105,58 @@ int runAdaptationCheck(VisualHarness &harness)
 		errors.push_back("dark scene must report the max-EV clamp (clampState " +
 						 std::to_string(limit.clampState) + ", want 2)");
 	harness.post().autoExposureMaxEv = 4.0f;
+
+	// --- Frame-in-flight slot alternation: the runtime alternates slots
+	// 0,1,0,1..., but the adaptation history is a SINGLE logical value. Two
+	// runs with identical dt sequences - one on a fixed slot, one alternating
+	// - must produce the same adaptation; a per-slot independent history
+	// would make the alternating run diverge (stale double-stepped state).
+	// Both runs end with one extra flush frame on their final slot so the
+	// one-frame-stale readout observes the same adaptation step count.
+	const auto reseedRunSlots = [&](bool alternate) {
+		harness.setFrameSlot(0);
+		harness.post().autoExposureEnabled = false;
+		step(1.f / 60.f); // re-arm the rising edge
+		harness.post().autoExposureEnabled = true;
+		step(1.f / 60.f); // seed frame: identical start state for both runs
+		for (int i = 0; i < 24; ++i)
+		{
+			if (alternate)
+				harness.setFrameSlot(uint32_t(i) & 1u);
+			step(1.f / 30.f);
+		}
+		// Observe the flush frame: whatever the slot pattern, the last two
+		// same-slot frames are exactly one lag apart, so the flush readout
+		// reflects the same adaptation step count in both runs.
+		return step(1.f / 30.f).adaptedExposure;
+	};
+	const float fixedSlotEnd = reseedRunSlots(false);
+	const float altSlotEnd = reseedRunSlots(true);
+	harness.setFrameSlot(0);
+	if (std::abs(fixedSlotEnd - altSlotEnd) / std::max(fixedSlotEnd, altSlotEnd) > 1e-3f)
+		errors.push_back("alternating frame-in-flight slots changed the adaptation (" +
+						 std::to_string(fixedSlotEnd) + " vs " + std::to_string(altSlotEnd) +
+						 "): the history must be a single logical state, not per-slot");
+
+	// --- dt <= 0 must leave the exposure strictly unchanged (paused frames):
+	// consecutive dt=0 frames must observe identical readouts. If a zero step
+	// ever snapped to the target, each frame would advance and the readouts
+	// would differ.
+	{
+		harness.setFrameSlot(0);
+		harness.post().autoExposureEnabled = false;
+		step(1.f / 60.f);
+		harness.post().autoExposureEnabled = true;
+		step(1.f / 60.f); // seed
+		step(1.f / 30.f); // a real step so we are NOT at the target
+		const float frozenA = step(0.f).adaptedExposure;
+		const float frozenB = step(0.f).adaptedExposure;
+		const float frozenC = step(-1.f).adaptedExposure; // negative dt: no-op too
+		if (!(frozenA == frozenB && frozenB == frozenC))
+			errors.push_back("dt<=0 frames changed the exposure (" +
+							 std::to_string(frozenA) + ", " + std::to_string(frozenB) + ", " +
+							 std::to_string(frozenC) + "): zero steps must be strict no-ops");
+	}
 
 	for (const std::string &error : errors)
 		std::cerr << "  FAIL auto-exposure-adaptation: " << error << "\n";

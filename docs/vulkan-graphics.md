@@ -254,7 +254,7 @@ HDR RGBA16F (SHADER_READ)
   | `autoExposureSpeedUp / SpeedDown` | 3.0 / 1.25 | Inverse seconds, frame-rate independent |
 
 - **Device support:** requires `fragmentStoresAndAtomics` (queried in `VkContext`); when absent the engine stays on the manual path instead of failing.
-- **Diagnostics:** Graphics panel controls (auto toggle, compensation, middle grey, EV limits, speeds), profiler readouts (metered EV, current/target exposure, clamp state) fed by the fence-safe snapshot copy, and a dedicated `GpuPass::Exposure` timestamp row (nested inside the Post pass timing). Measured cost ~0.14 ms on an RTX 4070 Ti at 1080p.
+- **Diagnostics:** Graphics panel controls (auto toggle, compensation, middle grey, EV limits, speeds), profiler readouts (metered EV, current/target exposure, clamp state) fed by the fence-safe snapshot copy, and a dedicated `GpuPass::Exposure` timestamp row (nested inside the Post pass timing). Measured cost (RTX 4070 Ti, seed 42 benchmark, Release, base 12acedd vs this change): Post pass 0.317 -> 0.405 ms (delta +0.088 ms; the Post bracket includes the Exposure sub-pass), Exposure sub-pass alone reads 0.120 ms, score unchanged.
 
 
 ### Color-space contract (`Renderer/ColorSpace.hpp`, issue #135)
