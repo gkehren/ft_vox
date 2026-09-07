@@ -764,13 +764,17 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (ranScenes == 0)
+	// "resize_check" is a valid selection too — only fail when some real
+	// scene name matched nothing.
+	const bool resizeRequested =
+		std::find(onlyScenes.begin(), onlyScenes.end(), "resize_check") != onlyScenes.end();
+	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested)
 	{
 		std::cerr << "FAIL: --scene";
 		for (const std::string &name : onlyScenes)
 			std::cerr << " " << name;
 		std::cerr << " matched no scene (valid names: noon_terrain, cascade_transition, cave_emissive,"
-					 " water_shore, sunset, midnight, mob_lighting, underwater)\n";
+					 " water_shore, sunset, midnight, mob_lighting, underwater, resize_check)\n";
 		++failures;
 	}
 
@@ -779,7 +783,7 @@ int main(int argc, char **argv)
 	// again — must stay deterministic and validation-clean. This is the
 	// regression gate for the stale-sampler descriptor bug found during
 	// development (the recreated sampler must reach the mob sets).
-	if (onlyScenes.empty() || std::find(onlyScenes.begin(), onlyScenes.end(), "resize_check") != onlyScenes.end())
+	if (onlyScenes.empty() || resizeRequested)
 	{
 		std::cout << "[resize-check] 1024 -> 2048 with terrain + mobs\n";
 		try

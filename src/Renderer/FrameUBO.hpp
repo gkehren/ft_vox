@@ -27,7 +27,8 @@ struct FrameUBO
 	glm::vec4 lightingParams;	 // blockLightScale, emissiveScale, fogBaseY, underwater
 	glm::vec4 waterParams;	 // wave, refraction, specular, foam
 	glm::vec4 cascadeBiasScales; // xyz = normalized-depth units per world texel (worldUnitsPerTexel/depthSpan), w = map resolution
+	glm::vec4 cascadeTexelWorldSizes; // xyz = world units per texel XY per cascade (debug density), w unused
 };
 
-// 14 mat4/vec4 slots after the 5 matrices: 5*64 + 14*16 = 320+224 = 544
-static_assert(sizeof(FrameUBO) == 544, "FrameUBO std140 size must match GLSL (no dead postParams)");
+// 15 mat4/vec4 slots after the 5 matrices: 5*64 + 15*16 = 320+240 = 560
+static_assert(sizeof(FrameUBO) == 560, "FrameUBO std140 size must match GLSL (no dead postParams)");

@@ -111,9 +111,10 @@ void main()
         }
         if (shadowDebugMode == 3)
         {
-            // Cascade footprint relative to cascade 0, on a log scale so the
-            // value never wraps: 0 = same density as cascade 0, 1 = 16x coarser.
-            float density = frame.cascadeBiasScales[cascade] / max(frame.cascadeBiasScales.x, 1e-8);
+            // Real world-units-per-texel relative to cascade 0, on a log
+            // scale: 0 = same texel density as cascade 0, 1 = 16x coarser.
+            float density = frame.cascadeTexelWorldSizes[cascade] /
+                            max(frame.cascadeTexelWorldSizes.x, 1e-8);
             float t = clamp(log2(max(density, 1.0)) / 4.0, 0.0, 1.0);
             outColor = vec4(vec3(t), 1.0);
             return;

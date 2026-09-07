@@ -21,4 +21,5 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 lightingParams; // blockLightScale, emissiveScale, fogBaseY, underwater
     vec4 waterParams; // wave, refraction, specular, foam
     vec4 cascadeBiasScales; // xyz = normalized-depth units per world texel (worldUnitsPerTexel/depthSpan), w = map resolution
+    vec4 cascadeTexelWorldSizes; // xyz = world units per texel XY per cascade (debug density), w unused
 } frame;

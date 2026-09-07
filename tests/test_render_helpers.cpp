@@ -71,8 +71,7 @@ int main()
 										mats, splitVec, &extents);
 
 		// Issue #137 resolution contract: doubling the shadow map resolution
-		// must halve the world-units-per-texel footprint the receivers use
-		// (texel snapping perturbs extents slightly, hence the tolerance).
+		// must halve the world-units-per-texel footprint the receivers use.
 		{
 			std::array<glm::mat4, shadow::kCascadeCount> matsHi{};
 			std::array<float, shadow::kCascadeCount> extentsHi{};
@@ -87,6 +86,33 @@ int main()
 				if (!(highTexel < lowTexel * 0.75f))
 					ok = fail("cascade world-units-per-texel must shrink with resolution (cascade " +
 							  std::to_string(c) + ")");
+			}
+		}
+
+		// Issue #137 swimming contract: a sub-texel camera translation AND a
+		// small rotation must move a fixed world point by whole texels only
+		// (fractional texel position preserved) — the grid is world-stable.
+		{
+			const glm::vec3 worldPoint = camPos + front * 20.f + glm::vec3(1.f, 0.f, 0.f);
+			auto texelAt = [&](const glm::vec3 &cam, const glm::vec3 &f) {
+				std::array<glm::mat4, shadow::kCascadeCount> m{};
+				glm::vec4 s{};
+				shadow::buildCascadeUBOFromFront(cam, f, glm::vec3(0.f, 1.f, 0.f), lightDir,
+												nearP, farP, 16.f / 9.f, shadow::kDefaultFovYDegrees, m, s);
+				const glm::vec3 ls = glm::vec3(m[0] * glm::vec4(worldPoint, 1.f));
+				return glm::vec2((ls.x * 0.5f + 0.5f) * float(shadow::kShadowMapSize),
+								 (ls.y * 0.5f + 0.5f) * float(shadow::kShadowMapSize));
+			};
+			const glm::vec2 base = texelAt(camPos, front);
+			const glm::vec2 translated = texelAt(camPos + glm::vec3(0.01f, 0.f, 0.017f), front);
+			const glm::vec3 rotatedFront = glm::normalize(front + glm::vec3(0.1f, 0.f, 0.f));
+			const glm::vec2 rotated = texelAt(camPos, rotatedFront);
+			for (const glm::vec2 delta : {translated - base, rotated - base})
+			{
+				if (std::abs(delta.x - std::round(delta.x)) > 1e-3f ||
+					std::abs(delta.y - std::round(delta.y)) > 1e-3f)
+					ok = fail("shadow texel grid must be world-stable under sub-texel camera motion "
+							  "(fractional texel position drifted)");
 			}
 		}
 
@@ -279,8 +305,8 @@ int main()
 
 	// FrameUBO contract + material table (shipped helpers, not test re-implementation)
 	{
-		if (sizeof(FrameUBO) != 544)
-			ok = fail(std::string("FrameUBO sizeof must be 544 (got ") + std::to_string(sizeof(FrameUBO)) + ")");
+		if (sizeof(FrameUBO) != 560)
+			ok = fail(std::string("FrameUBO sizeof must be 560 (got ") + std::to_string(sizeof(FrameUBO)) + ")");
 		if (materials::hasFoliageWind(static_cast<uint8_t>(STONE)))
 			ok = fail("stone must not have foliage wind");
 		if (!materials::hasFoliageWind(static_cast<uint8_t>(OAK_LEAVES)))
@@ -513,7 +539,8 @@ int main()
 				ok = fail("frame_ubo.inc.glsl must be marked AUTO-GENERATED");
 			// Spot-check fields from FrameUBO.hpp
 			for (const char *field : {"mat4 view", "mat4 projection", "vec4 lightingParams", "vec4 waterParams",
-									  "vec4 cascadeSplits", "vec4 moonAmbient", "vec4 cascadeBiasScales"})
+									  "vec4 cascadeSplits", "vec4 moonAmbient", "vec4 cascadeBiasScales",
+									  "vec4 cascadeTexelWorldSizes"})
 			{
 				if (glsl.find(field) == std::string::npos)
 					ok = fail(std::string("generated FrameUBO GLSL missing field: ") + field);

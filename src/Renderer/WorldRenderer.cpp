@@ -404,15 +404,21 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 	ubo.skyParams = glm::vec4(time, params.dayFactor, params.sunsetFactor, params.nightFactor);
 	ubo.cascadeSplits = splits;
 	// Receiver bias scales (issue #137): normalized-depth units per world
-	// texel footprint — (2*halfExtent/res) / depthSpan. Halving the map
+	// texel footprint — (2*halfExtent/res) / depthSpan. Doubling the map
 	// resolution halves the bias; growing cascade footprint grows it.
 	// Shader multiplies these by the dimensionless shadow::kReceiverBias*
-	// constants (csm.inc.glsl BIAS POLICY).
+	// constants (csm.inc.glsl BIAS POLICY). cascadeTexelWorldSizes keeps the
+	// plain XY world-units-per-texel for the debug density view.
 	ubo.cascadeBiasScales = glm::vec4(
 		(2.f * halfExtents[0] / float(m_shadow.mapSize())) / depthSpans[0],
 		(2.f * halfExtents[1] / float(m_shadow.mapSize())) / depthSpans[1],
 		(2.f * halfExtents[2] / float(m_shadow.mapSize())) / depthSpans[2],
 		float(m_shadow.mapSize()));
+	ubo.cascadeTexelWorldSizes = glm::vec4(
+		2.f * halfExtents[0] / float(m_shadow.mapSize()),
+		2.f * halfExtents[1] / float(m_shadow.mapSize()),
+		2.f * halfExtents[2] / float(m_shadow.mapSize()),
+		0.f);
 	ubo.moonAmbient = glm::vec4(0.22f, 0.30f, 0.48f, params.moonAmbientStrength);
 	ubo.lightingParams = glm::vec4(params.blockLightScale, params.emissiveScale, params.fogBaseY,
 								underwater ? 1.0f : 0.0f);

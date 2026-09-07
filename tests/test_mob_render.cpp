@@ -273,6 +273,7 @@ static FrameUBO frame(float aspect, bool crowded = false)
     // Non-zero receiver-bias scales (issue #137 contract): the shared CSM
     // include multiplies these by the dimensionless slope/base factors.
     u.cascadeBiasScales = {0.0005f, 0.001f, 0.002f, 1024.f};
+    u.cascadeTexelWorldSizes = {0.06f, 0.12f, 0.24f, 0.f};
     return u;
 }
 int main(int argc, char **argv)

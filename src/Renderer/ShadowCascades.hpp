@@ -97,8 +97,18 @@ struct CascadeBounds
 	bool finite{false};
 };
 
-/// Frustum-slice cascade matrix: tight ortho around the view frustum slice in light space.
-/// Texel-snaps the center to reduce swimming. shadowMapResolution used for snap quanta.
+/// Frustum-slice cascade matrix with a WORLD-STABLE texel grid (issue #137).
+///
+/// Stability comes from three properties:
+/// 1. The light rotation is built WITHOUT a camera-following translation, so
+///    corner coordinates can be expressed in an ABSOLUTE light frame.
+/// 2. The ortho extent is a slice bounding-sphere radius — it depends only on
+///    the slice range and fov, so the box does not breathe when the camera
+///    rotates (a tight AABB would resize continuously).
+/// 3. The view anchor is the sphere center snapped to the texel grid IN THE
+///    ABSOLUTE light frame, so the view (and the texel grid it defines) only
+///    ever moves in whole-texel steps: a fixed world point keeps its
+///    fractional texel position under camera translation AND rotation.
 inline CascadeBounds computeFrustumSliceCascade(const glm::vec3 &camPos, const glm::vec3 &front,
 												const glm::vec3 &right, const glm::vec3 &up,
 												const glm::vec3 &lightDir,
@@ -113,68 +123,49 @@ inline CascadeBounds computeFrustumSliceCascade(const glm::vec3 &camPos, const g
 	std::array<glm::vec3, 8> corners{};
 	frustumSliceCornersWorld(camPos, front, right, up, fovYRadians, aspect, sliceNear, sliceFar, corners);
 
-	// Center of frustum slice in world
-	glm::vec3 center(0.f);
+	// Absolute light frame: pure rotation (lookAt from the origin), no
+	// camera-following translation.
+	const glm::mat3 lightRot(glm::lookAt(dir, glm::vec3(0.f), lightUp));
+
+	// Slice bounding sphere centered on the view axis: enclosing radius of
+	// the eight slice corners. Rotation-invariant by construction.
+	const glm::vec3 sphereCenter = camPos + front * (0.5f * (sliceNear + sliceFar));
+	float radius = 0.f;
 	for (const auto &c : corners)
-		center += c;
-	center *= (1.f / 8.f);
+		radius = std::max(radius, glm::length(c - sphereCenter));
+	radius += 4.f; // filter-radius margin
 
-	// Light view: camera sits on the *sun side* looking at the slice center.
-	// lightDir is "toward the sun" (same as terrain.frag N·L), so the light
-	// arrives from +dir; place the cascade eye at center + dir * pullBack.
-	// (center - dir put the camera on the anti-sun side → inverted self-shadow.)
+	const float texel = (2.f * radius) / static_cast<float>(std::max(1u, shadowMapResolution));
+
+	// Snap the sphere center to the texel grid in the ABSOLUTE light frame,
+	// then map it back to a world anchor for the view.
+	const glm::vec3 absCenter = lightRot * sphereCenter;
+	const glm::vec3 snappedAbs(std::floor(absCenter.x / texel) * texel,
+							   std::floor(absCenter.y / texel) * texel,
+							   absCenter.z);
+	const glm::vec3 worldAnchor = glm::transpose(lightRot) * snappedAbs;
+
+	// Light view: eye on the *sun side* of the anchor. lightDir is "toward
+	// the sun" (same as terrain.frag N·L), so the light arrives from +dir.
+	// (anchor - dir put the camera on the anti-sun side → inverted self-shadow.)
 	const float pullBack = 500.f;
-	const glm::vec3 lightEye = center + dir * pullBack;
-	out.lightView = glm::lookAt(lightEye, center, lightUp);
+	out.lightView = glm::lookAt(worldAnchor + dir * pullBack, worldAnchor, lightUp);
+	out.halfExtentX = radius;
+	out.halfExtentY = radius;
 
-	// AABB of corners in light space
-	float minX = std::numeric_limits<float>::max();
-	float minY = std::numeric_limits<float>::max();
+	// Depth bounds from the corners in the final view frame (Z is not part
+	// of the XY texel grid; pads keep inter-slice casters).
 	float minZ = std::numeric_limits<float>::max();
-	float maxX = std::numeric_limits<float>::lowest();
-	float maxY = std::numeric_limits<float>::lowest();
 	float maxZ = std::numeric_limits<float>::lowest();
 	for (const auto &c : corners)
 	{
-		const glm::vec3 ls = glm::vec3(out.lightView * glm::vec4(c, 1.f));
-		minX = std::min(minX, ls.x);
-		minY = std::min(minY, ls.y);
-		minZ = std::min(minZ, ls.z);
-		maxX = std::max(maxX, ls.x);
-		maxY = std::max(maxY, ls.y);
-		maxZ = std::max(maxZ, ls.z);
+		const float z = (out.lightView * glm::vec4(c, 1.f)).z;
+		minZ = std::min(minZ, z);
+		maxZ = std::max(maxZ, z);
 	}
-
-	// Pad XY (acne / filter radius) and extend Z for casters outside the slice
-	const float padXY = std::max((maxX - minX), (maxY - minY)) * 0.08f + 4.f;
-	minX -= padXY;
-	maxX += padXY;
-	minY -= padXY;
-	maxY += padXY;
-	// Pull Z back so casters between light and frustum still cast into the slice
 	const float zPad = (maxZ - minZ) * 0.5f + 80.f;
 	minZ -= zPad;
 	maxZ += 16.f;
-
-	// Texel snap: quantize ortho center so shadows don't swim
-	const float worldUnitsPerTexelX = (maxX - minX) / static_cast<float>(std::max(1u, shadowMapResolution));
-	const float worldUnitsPerTexelY = (maxY - minY) / static_cast<float>(std::max(1u, shadowMapResolution));
-	if (worldUnitsPerTexelX > 1e-6f && worldUnitsPerTexelY > 1e-6f)
-	{
-		const float midX = 0.5f * (minX + maxX);
-		const float midY = 0.5f * (minY + maxY);
-		const float snappedX = std::floor(midX / worldUnitsPerTexelX) * worldUnitsPerTexelX;
-		const float snappedY = std::floor(midY / worldUnitsPerTexelY) * worldUnitsPerTexelY;
-		const float dx = snappedX - midX;
-		const float dy = snappedY - midY;
-		minX += dx;
-		maxX += dx;
-		minY += dy;
-		maxY += dy;
-	}
-
-	out.halfExtentX = 0.5f * (maxX - minX);
-	out.halfExtentY = 0.5f * (maxY - minY);
 
 	// GLM RH lookAt: view looks down -Z, so scene points have negative eye Z.
 	// glm::ortho(zNear, zFar) expects positive distances (maps eye.z ∈ [-zFar,-zNear]).
@@ -189,7 +180,7 @@ inline CascadeBounds computeFrustumSliceCascade(const glm::vec3 &camPos, const g
 	out.zNear = zNearDist;
 	out.zFar = zFarDist;
 
-	out.lightProj = glm::ortho(minX, maxX, minY, maxY, zNearDist, zFarDist);
+	out.lightProj = glm::ortho(-radius, radius, -radius, radius, zNearDist, zFarDist);
 	out.lightViewProj = out.lightProj * out.lightView;
 	out.finite = std::isfinite(out.halfExtentX) && std::isfinite(out.halfExtentY) &&
 				 std::isfinite(out.lightViewProj[0][0]) && std::isfinite(out.lightViewProj[3][3]);
