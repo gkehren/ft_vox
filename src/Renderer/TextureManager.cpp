@@ -141,6 +141,13 @@ CpuAtlasBuild buildCpuAtlas(const std::string &packRoot, std::vector<uint8_t> &a
 
 	if (layerSize == 0)
 		layerSize = 16;
+	// Normalize the canonical layer size to a power of two (min 16): POT layers
+	// keep the mip chain and samplers well-behaved, and the area downsampling
+	// in the mip generator then never drops source texels (issue #136).
+	uint32_t pow2LayerSize = 16;
+	while (pow2LayerSize < layerSize)
+		pow2LayerSize <<= 1;
+	layerSize = pow2LayerSize;
 	built.layerSize = layerSize;
 
 	const size_t layerBytes = static_cast<size_t>(layerSize) * layerSize * 4;
@@ -286,7 +293,7 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 									 layers);
 
 			// One region per (layer, mip level); the staging buffer is laid out
-			// mip-major/layer-minor (see texture_mips::buildMipChainAtlas).
+			// layer-major/mip-minor (see texture_mips::buildMipChainAtlas).
 			std::vector<VkBufferImageCopy> regions;
 			regions.reserve(layers * mipCount);
 			for (uint32_t layer = 0; layer < layers; ++layer)

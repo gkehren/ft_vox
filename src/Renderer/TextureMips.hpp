@@ -18,22 +18,29 @@ namespace texture_mips
 	// mip 0 is copied verbatim, every following level is generated.
 	//
 	// Filtering policy (issue #136):
-	//  - linear light: each texel's RGB is sRGB-decoded (colorspace::srgbToLinear), box-averaged,
-	//    re-encoded (colorspace::linearToSrgb) — never average gamma-encoded values;
-	//  - color is premultiplied by alpha before averaging and un-premultiplied after, so fully
-	//    transparent texels cannot bleed their RGB into the result (no fringe/halo);
-	//  - alpha is averaged in linear alpha space, then rescaled per texel with the geometric mean
-	//    of the window's average and maximum alpha (a' = min(1, sqrt(avg * max)), the Minecraft
-	//    cutout-mip trick): for the binary cutout textures used by voxel games any window holding
-	//    an opaque tap stays >= kAlphaCutoutThreshold, so foliage silhouettes thin gracefully with
-	//    distance instead of vanishing, while fully transparent windows still collapse to 0;
-	//  - texels whose rescaled alpha is ~0 get RGB 0 (transparent black) to avoid halo pollution;
-	//  - opaque textures stay fully opaque (alpha 255 through every level);
-	//  - odd source sizes: downsample w -> max(w/2, 1); the source window of texel x is {2x, 2x+1}
-	//    clamped to the last texel (boundary texels are duplicated, never read out of bounds).
+	//  - area downsampling: destination texel i averages the source window
+	//    [i*src/dst, (i+1)*src/dst), so every source texel contributes exactly
+	//    once — no dropped edge row/column on non-power-of-two sizes;
+	//  - linear light: each texel's RGB is sRGB-decoded (colorspace::srgbToLinear),
+	//    box-averaged premultiplied by alpha, re-encoded (colorspace::linearToSrgb)
+	//    — never average gamma-encoded values, and fully transparent texels
+	//    cannot bleed their RGB into the result (no fringe/halo);
+	//  - alpha coverage preservation (DirectXTex-style rescale): alpha is averaged
+	//    plainly, then each level's cutout coverage (fraction of texels with
+	//    alpha >= kAlphaCutoutThreshold) is brought back to the base level's
+	//    coverage by a per-level binary search over an alpha scale, ties resolving
+	//    toward the higher coverage so silhouettes never vanish. Fully transparent
+	//    layers skip the rescale; fully opaque layers keep alpha exactly 255;
+	//  - texels whose final alpha is 0 store RGB 0, then receive a 1-texel edge
+	//    dilation (alpha bleeding): they take the color of their covered
+	//    neighbors so GPU LINEAR minification across a cutout edge blends toward
+	//    the real border color instead of black (dark fringe);
+	//  - odd source sizes: windows are area-mapped (see above), boundary texels
+	//    are never read out of bounds.
 	void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *outChain);
 
-	// Multi-layer upload buffer for the texture array, mip-major / layer-minor:
+	// Multi-layer upload buffer for the texture array, layer-major / mip-minor
+	// (each layer's full chain is contiguous):
 	//   offset(level, layer) = chainOffset(baseSize, level) + layer * chainBytes(baseSize)
 	// `atlas` holds `layers` tightly-packed mip-0 layers (baseSize*baseSize*4 bytes each).
 	std::vector<uint8_t> buildMipChainAtlas(uint32_t baseSize, uint32_t layers, const std::vector<uint8_t> &atlas);
