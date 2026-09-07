@@ -124,6 +124,10 @@ void VisualHarness::shutdown()
 		m_imm.shutdown();
 		m_swapchain.shutdown();
 	}
+	// Destroy device/instance before SDL unloads vulkan-1.dll: VkContext's
+	// destructor would otherwise run after SDL_Vulkan_UnloadLibrary and call
+	// volk entry points into an unloaded module (access violation at exit).
+	m_context.shutdown();
 	SDL_DestroyWindow(m_window);
 	SDL_Vulkan_UnloadLibrary();
 	SDL_Quit();
