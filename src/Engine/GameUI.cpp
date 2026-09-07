@@ -460,17 +460,19 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			sp.dayCycleEnabled = false;
 			sp.dayTime = t;
 		};
+		// Preset values match the actual sun curve in updateAtmosphereFromDayTime
+		// (sunAngle = dayTime*2π − π/2): noon peaks at 0.5, midnight is 0.0.
 		if (ImGui::Button("Sunrise"))
-			preset(0.0f);
-		ImGui::SameLine();
-		if (ImGui::Button("Noon"))
 			preset(0.25f);
 		ImGui::SameLine();
-		if (ImGui::Button("Sunset"))
+		if (ImGui::Button("Noon"))
 			preset(0.5f);
 		ImGui::SameLine();
-		if (ImGui::Button("Midnight"))
+		if (ImGui::Button("Sunset"))
 			preset(0.75f);
+		ImGui::SameLine();
+		if (ImGui::Button("Midnight"))
+			preset(0.0f);
 
 		ImGui::Text("Day / sunset / night: %.2f / %.2f / %.2f",
 					sp.dayFactor, sp.sunsetFactor, sp.nightFactor);

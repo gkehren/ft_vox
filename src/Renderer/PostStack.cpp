@@ -188,10 +188,17 @@ void PostStack::destroyTargets()
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_ssao);
 }
 
-void PostStack::createPipelines(VkFormat swapchainFormat)
+void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapchainColorSpace)
 {
 	m_swapchainFormat = swapchainFormat;
-	m_swapchainRequiresSrgbEncode = colorspace::swapchainRequiresShaderOutputTransfer(swapchainFormat);
+	m_swapchainColorSpace = swapchainColorSpace;
+	m_outputTransfer = colorspace::classifyOutputTransfer(swapchainFormat, swapchainColorSpace);
+	if (m_outputTransfer == colorspace::OutputTransfer::Unsupported)
+		throw std::runtime_error(
+			"PostStack: unsupported swapchain color space for the SDR sRGB pipeline "
+			"(expected SRGB_NONLINEAR with an sRGB or UNORM 8-bit format)");
+	m_swapchainRequiresSrgbEncode =
+		colorspace::outputTransferRequiresShaderEncode(m_outputTransfer);
 	if (!m_postSetLayout)
 	{
 		VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
@@ -357,27 +364,30 @@ void PostStack::destroyPipelines()
 }
 
 void PostStack::init(VkContext &context, ImmediateCommands &imm, VkDescriptorSetLayout frameSetLayout,
-					 VkFormat swapchainFormat, uint32_t width, uint32_t height)
+					 VkFormat swapchainFormat, VkColorSpaceKHR swapchainColorSpace,
+					 uint32_t width, uint32_t height)
 {
 	m_context = &context;
 	m_frameSetLayout = frameSetLayout;
 	createSamplers();
 	createFullscreenQuad(imm);
 	createDefaultImages(imm);
-	createPipelines(swapchainFormat);
+	createPipelines(swapchainFormat, swapchainColorSpace);
 	createTargets(width, height);
 }
 
-void PostStack::resize(uint32_t width, uint32_t height, VkFormat swapchainFormat)
+void PostStack::resize(uint32_t width, uint32_t height, VkFormat swapchainFormat,
+					   VkColorSpaceKHR swapchainColorSpace)
 {
-	if (!m_context || (width == m_width && height == m_height && swapchainFormat == m_swapchainFormat))
+	if (!m_context || (width == m_width && height == m_height &&
+					   swapchainFormat == m_swapchainFormat && swapchainColorSpace == m_swapchainColorSpace))
 		return;
 	m_context->waitIdle();
 	destroyTargets();
-	if (swapchainFormat != m_swapchainFormat)
+	if (swapchainFormat != m_swapchainFormat || swapchainColorSpace != m_swapchainColorSpace)
 	{
 		destroyPipelines();
-		createPipelines(swapchainFormat);
+		createPipelines(swapchainFormat, swapchainColorSpace);
 	}
 	createTargets(width, height);
 }

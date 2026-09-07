@@ -27,21 +27,25 @@ struct ShaderParameters
 	float dayFactor = 1.0f;
 	float sunsetFactor = 0.0f;
 	float nightFactor = 0.0f;
-	// Outdoor lighting — mid path (not milky, not neon, not washed-out beige)
-	float ambientStrength = 0.22f;
-	float diffuseIntensity = 0.88f;
+	// Outdoor lighting — re-baselined for the linear-light pipeline (issue #135):
+	// albedo now decodes sRGB->linear (mid-tones ~2.3x darker than the old
+	// gamma-as-linear sampling), so ambient/diffuse lift proportionally.
+	// Playability-first: bright enough that sunlit scenes feel sunny.
+	float ambientStrength = 0.38f;
+	float diffuseIntensity = 0.92f;
 	float lightLevels = 5.0f;
-	/// Cool moon fill at night (scales with nightFactor). Subtle: the directional
-	/// moonlight term in terrain.frag does the shaping, this is only a flat fill.
-	float moonAmbientStrength = 0.22f;
+	/// Cool moon fill at night (scales with nightFactor). Lifted for playability:
+	/// nights must keep silhouettes and ground detail readable (issue #135).
+	float moonAmbientStrength = 0.45f;
 	/// Scales mesh block-light contribution in terrain shader.
 	float blockLightScale = 1.0f;
 	/// Scales emissive block HDR contribution.
 	float emissiveScale = 1.0f;
 
-	// Day/Night cycle
+	// Day/Night cycle — dayTime maps to sun angle 2πt − π/2:
+	// 0.0 midnight, ~0.25 sunrise, 0.5 noon, ~0.75 sunset
 	bool dayCycleEnabled = true;
-	float dayTime = 0.25f; // 0.0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight
+	float dayTime = 0.5f;
 	float dayCycleSpeed = 0.002f;
 
 	// visual — gentle punch for readable sand/grass/water chroma
@@ -136,7 +140,9 @@ struct PostProcessSettings
 	int bloomBlurIterations{3};
 	bool fxaaEnabled{true};
 	bool autoExposureEnabled{true};
-	float exposure{0.94f};
+	/// Re-baselined for the single sRGB output transfer (issue #135): the old
+	/// double output gamma no longer brightens mid-tones, so exposure lifts.
+	float exposure{1.25f};
 	float exposureCompensation{1.0f};
 	int toneMapper{0}; // 0 = ACES, 1 = Reinhard
 	/// Creative midtone gamma grade (1.0 = neutral display-linear; not framebuffer transfer).
@@ -186,7 +192,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 	const float underStr = underwaterStrength;
 
 	// Shared grade defaults (Medium baseline)
-	exposure = 0.94f;
+	exposure = 1.25f;
 	exposureCompensation = 1.0f;
 	toneMapper = 0;
 	gamma = 1.0f;
@@ -276,7 +282,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		vignette = 0.38f;
 		postSaturation = 1.10f; // counter ACES highlight desaturation
 		postContrast = 1.08f;
-		exposure = 0.90f;
+		exposure = 1.20f; // keeps the cinematic slightly-dimmer offset vs Medium
 		break;
 	}
 
@@ -316,10 +322,11 @@ inline void updateAtmosphereFromDayTime(ShaderParameters &sp)
 		const glm::vec3 sunsetFog(0.85f, 0.40f, 0.22f);
 		const glm::vec3 nightFog(0.005f, 0.008f, 0.020f);
 		sp.fogColor = dayFog * sp.dayFactor + sunsetFog * sp.sunsetFactor + nightFog * sp.nightFactor;
-		// Lowered levels: ambient+diffuse+topLight used to sum >1.3x albedo and pushed
-		// everything into the ACES shoulder (chalky desaturated look). Target ~0.75x.
-		sp.ambientStrength = 0.13f + 0.05f * sp.dayFactor + 0.03f * sp.sunsetFactor;
-		sp.diffuseIntensity = 0.55f + 0.25f * sp.dayFactor + 0.10f * sp.sunsetFactor;
+		// Linear-light baseline (#135): matches the manual noon defaults in
+		// ShaderParameters (0.38 / 0.92 at full day). The terrain shader applies
+		// the celestial phase (lightTint / dayLightFactor) itself.
+		sp.ambientStrength = 0.13f + 0.25f * sp.dayFactor;
+		sp.diffuseIntensity = 0.55f + 0.37f * sp.dayFactor;
 		// Slightly denser, closer fog at night for mood (driven by dark nightFog)
 		sp.fogDensity = 0.045f + 0.03f * sp.nightFactor;
 		sp.fogStart = 300.0f - 80.0f * sp.nightFactor;

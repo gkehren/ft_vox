@@ -125,9 +125,10 @@ inline float combinedLightFactor(uint8_t skyLight, uint8_t blockLight, float day
 }
 
 /// Cave ambient floor when sky+block light are 0 (must match terrain.frag kCaveFloor).
-inline constexpr float kCaveLightFloor = 0.22f;
+/// Lifted to 0.42 for playability-first caves (issue #135 re-baseline).
+inline constexpr float kCaveLightFloor = 0.42f;
 /// Soft cave fill RGB scale (unlit rock stays readable). Must match terrain.frag.
-inline constexpr float kCaveFillScale = 0.065f;
+inline constexpr float kCaveFillScale = 0.085f;
 /// SSAO composite floor — must match composite.frag.
 inline constexpr float kSsaoAoFloor = 0.62f;
 
