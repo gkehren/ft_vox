@@ -317,8 +317,8 @@ std::vector<SceneSpec> buildSceneTable()
 	};
 
 	// --- water_shore --------------------------------------------------------
-	// Shoreline crossing with a cliff-side camera: refraction, absorption,
-	// foam and the #120 water semantics.
+	// Shoreline crossing viewed from shallow water toward a low beach:
+	// refraction, absorption, foam and the #120 water semantics.
 	scenes.push_back({});
 	SceneSpec &shore = scenes.back();
 	shore.name = "water_shore";
@@ -677,11 +677,15 @@ int main(int argc, char **argv)
 				const RgbaImage expected = visual::readPng(refPath.string());
 				if (updateReferences)
 				{
-					// Update mode still produces review artifacts: the OLD
-					// reference and the diff against it, so the PR shows
-					// exactly what changed.
+					// Update mode still produces review artifacts: the new
+					// render, the OLD reference and the diff between them,
+					// so the PR shows exactly what changed.
+					const bool wroteActual = visual::writePng((sceneOut / "actual.png").string(), actual);
 					if (!visual::writePng(refPath.string(), actual))
-						errors.push_back("failed to write reference " + refPath.string());
+					{
+						errors.push_back("failed to write reference " + refPath.string() +
+										 (wroteActual ? "" : " (and actual.png artifact)"));
+					}
 					else
 					{
 						++updated;
@@ -691,6 +695,8 @@ int main(int argc, char **argv)
 							const CompareThresholds contextThresholds = scene.thresholds;
 							const ImageMetrics shift = visual::compareImages(actual, expected,
 																			 contextThresholds.hotPixelThreshold);
+							if (!wroteActual)
+								errors.push_back("failed to write actual.png artifact");
 							visual::writePng((sceneOut / "expected.png").string(), expected);
 							visual::writePng((sceneOut / "diff.png").string(),
 											 visual::makeDiffImage(actual, expected));

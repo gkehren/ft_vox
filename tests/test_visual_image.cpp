@@ -11,6 +11,7 @@
 
 #include "VisualImage.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
