@@ -97,7 +97,10 @@ private:
 	void setPlayerFlight(bool enabled);
 	void resetPlayerAtCamera();
 	void updateDisplayRefreshRate();
-	double computePacedDeltaTime(double rawDt);
+	/// Re-synchronize the high-resolution frame clock to "now" (issue: a
+	/// non-simulated stretch — minimized window, failed acquire, UI stall —
+	/// must never feed its elapsed time into the next gameplay timestep).
+	void resetFrameClock();
 
 	SDL_Window *window{nullptr};
 	int windowWidth{1920};

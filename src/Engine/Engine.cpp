@@ -1,4 +1,5 @@
 #include "Engine/Engine.hpp"
+#include "Engine/FramePacing.hpp"
 
 #include <SDL3/SDL_vulkan.h>
 #include <Vulkan/VkLoadLibrary.hpp>
@@ -719,6 +720,15 @@ void Engine::handleEvents()
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 			onResize(event.window.data1, event.window.data2);
 			break;
+		case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+			// The window moved to another monitor: the pacing refresh rate
+			// must follow (165 Hz -> 60 Hz or back), otherwise VSync pacing
+			// keeps snapping to the old interval.
+			updateDisplayRefreshRate();
+			break;
+		case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+			updateDisplayRefreshRate();
+			break;
 		case SDL_EVENT_KEY_DOWN:
 		{
 			const SDL_Keycode key = event.key.key;
@@ -1146,6 +1156,7 @@ void Engine::drawUi()
 
 void Engine::updateDisplayRefreshRate()
 {
+	float previous = m_displayRefreshRate;
 	m_displayRefreshRate = 0.0f;
 	if (!window)
 		return;
@@ -1155,34 +1166,22 @@ void Engine::updateDisplayRefreshRate()
 	if (displayId)
 	{
 		const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(displayId);
-		if (mode && mode->refresh_rate > 0.0f)
+		if (mode && std::isfinite(mode->refresh_rate) && mode->refresh_rate > 10.0f)
 			m_displayRefreshRate = mode->refresh_rate;
 	}
+	if (m_displayRefreshRate != previous)
+		std::cout << "Display refresh rate: " << m_displayRefreshRate << " Hz\n";
 }
 
-double Engine::computePacedDeltaTime(double rawDt)
+void Engine::resetFrameClock()
 {
-	if (!std::isfinite(rawDt) || rawDt <= 0.0)
-		return 1.0 / 60.0;
-	if (rawDt > 0.25)
-		return 0.25;
-
-	const bool vsyncActive = swapchain ? swapchain->isVSync() : renderSettings.vsyncEnabled;
-	if (vsyncActive && m_displayRefreshRate > 10.0f)
+	m_lastPerfCounter = SDL_GetPerformanceCounter();
+	if (m_perfFrequency != 0)
 	{
-		const double targetInterval = 1.0 / static_cast<double>(m_displayRefreshRate);
-		const double ratio = rawDt / targetInterval;
-		const double nearestMultiples = std::round(ratio);
-		if (nearestMultiples >= 1.0 && nearestMultiples <= 4.0)
-		{
-			const double expected = nearestMultiples * targetInterval;
-			if (std::abs(rawDt - expected) <= targetInterval * 0.25)
-			{
-				return expected;
-			}
-		}
+		const double now = static_cast<double>(m_lastPerfCounter) / static_cast<double>(m_perfFrequency);
+		lastFrame = now;
+		lastTime = now;
 	}
-	return rawDt;
 }
 
 void Engine::run()
@@ -1219,6 +1218,10 @@ void Engine::run()
 		{
 			GetProfiler().endFrame();
 			SDL_Delay(16);
+			// The window is minimized/hidden: re-synchronize the frame clock
+			// AFTER the sleep so the whole skipped stretch never feeds the
+			// next gameplay timestep (restore = rawDt of a normal frame).
+			resetFrameClock();
 			continue;
 		}
 
@@ -1226,6 +1229,18 @@ void Engine::run()
 								  static_cast<uint32_t>(pixelH));
 
 		frameCtx->gpuProfiler().syncCapture(GetProfiler().captureEpoch());
+		// Inspection timeout check runs BEFORE acquisition: breaking after a
+		// successful beginFrame would leave the image acquired with no
+		// submit/present (Vulkan contract violation).
+		const uint64_t preAcquireCounter = SDL_GetPerformanceCounter();
+		const double preAcquireTime = static_cast<double>(preAcquireCounter) / static_cast<double>(m_perfFrequency);
+		if (m_inspectionView && m_inspectionSeconds > 0.f &&
+			preAcquireTime - inspectionStart >= m_inspectionSeconds)
+		{
+			GetProfiler().endFrame();
+			break;
+		}
+
 		uint32_t imageIndex = 0;
 		{
 			PROFILE_SCOPE("Acquire");
@@ -1233,17 +1248,16 @@ void Engine::run()
 			{
 				requestSwapchainRecreate();
 				GetProfiler().endFrame();
+				// A failed acquire can block on presentation for a long
+				// time: that stretch is not simulated, so the frame clock
+				// is re-synchronized instead of feeding it to gameplay.
+				resetFrameClock();
 				continue;
 			}
 		}
 
 		const uint64_t currentPerfCounter = SDL_GetPerformanceCounter();
 		const double currentFrame = static_cast<double>(currentPerfCounter) / static_cast<double>(m_perfFrequency);
-		if (m_inspectionView && m_inspectionSeconds > 0.f && currentFrame - inspectionStart >= m_inspectionSeconds)
-		{
-			GetProfiler().endFrame();
-			break;
-		}
 
 		const double rawDt = (m_lastPerfCounter > 0)
 			? static_cast<double>(currentPerfCounter - m_lastPerfCounter) / static_cast<double>(m_perfFrequency)
@@ -1251,7 +1265,10 @@ void Engine::run()
 		m_lastPerfCounter = currentPerfCounter;
 		lastFrame = currentFrame;
 
-		deltaTime = computePacedDeltaTime(rawDt);
+		deltaTime = frame_pacing::computePacedDeltaTime(
+			rawDt,
+			swapchain ? swapchain->isVSync() : renderSettings.vsyncEnabled,
+			static_cast<double>(m_displayRefreshRate));
 
 		frameCount++;
 		if (currentFrame - lastTime >= 1.0)
