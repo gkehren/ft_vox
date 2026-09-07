@@ -1562,18 +1562,52 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
   // gating as the block pass, and chunk borders read the same neighbor
   // shell.
   {
+    // Per-section water occupancy grid: one sample per cell instead of two
+    // to six per cell per direction, plus an early-out for water-free
+    // sections (the overwhelming majority inland).
+    const int yLo = ownerMinY;
+    const int yHi = ownerMaxY;
+    const int ySize = yHi - yLo + 1;
+    std::vector<uint8_t> waterGrid(static_cast<size_t>(CHUNK_SIZE) * ySize * CHUNK_SIZE);
+    std::vector<uint8_t> openGrid(static_cast<size_t>(CHUNK_SIZE) * ySize * CHUNK_SIZE);
+    size_t waterCount = 0;
+    for (int y = yLo; y <= yHi; ++y)
+      for (int z = 0; z < CHUNK_SIZE; ++z)
+        for (int x = 0; x < CHUNK_SIZE; ++x)
+        {
+          const size_t gi = (static_cast<size_t>(y - yLo) * CHUNK_SIZE + z) * CHUNK_SIZE + x;
+          if (blockContainsWater(sampleForMeshing(x, y, z)))
+          {
+            waterGrid[gi] = 1;
+            ++waterCount;
+          }
+          const TextureType geo = getBlockGeometryForMeshing(x, y, z);
+          openGrid[gi] = (geo == AIR || TextureManager::isTransparent(geo)) ? 1 : 0;
+        }
+
+    if (waterCount != 0)
+    {
     const auto waterOccupied = [&](int lx, int ly, int lz) -> bool {
-      return blockContainsWater(sampleForMeshing(lx, ly, lz));
+      if (ly < yLo || ly > yHi || lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE)
+        return blockContainsWater(sampleForMeshing(lx, ly, lz));
+      return waterGrid[(static_cast<size_t>(ly - yLo) * CHUNK_SIZE + lz) * CHUNK_SIZE + lx] != 0;
     };
     const auto fluidSideOpen = [&](int lx, int ly, int lz, int dir) -> bool {
       if (waterOccupied(lx, ly, lz))
         return false;
-      const TextureType geo = getBlockGeometryForMeshing(lx, ly, lz);
-      if (geo == AIR)
-        return true;
-      if (!TextureManager::isTransparent(geo))
-        return false;
-      return dir > 0; // transparent neighbor on the -q side owns the pair face
+      if (lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE || ly < yLo || ly > yHi)
+      {
+        const TextureType geo = getBlockGeometryForMeshing(lx, ly, lz);
+        // Same legacy pair priority as below: a transparent neighbor on the
+        // -q side owns the interface face.
+        return geo == AIR || (TextureManager::isTransparent(geo) && dir > 0);
+      }
+      const bool open =
+          openGrid[(static_cast<size_t>(ly - yLo) * CHUNK_SIZE + lz) * CHUNK_SIZE + lx] != 0;
+      // Legacy pair priority: a transparent non-water neighbor on the -q
+      // side owns the interface face, so the fluid face only wins at
+      // dir > 0 against such a neighbor.
+      return open && dir > 0;
     };
 
     for (int d = 0; d < 3; ++d)
@@ -1766,6 +1800,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             }
         }
       }
+    }
     }
   }
 
