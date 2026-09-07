@@ -138,11 +138,13 @@ target_include_directories(test_render_helpers PRIVATE
 target_compile_definitions(test_render_helpers PRIVATE
     GLM_FORCE_DEPTH_ZERO_TO_ONE
     GLM_ENABLE_EXPERIMENTAL
+    VK_NO_PROTOTYPES
 )
 
 target_link_libraries(test_render_helpers PRIVATE
     glm
     miniz::miniz
+    volk::volk
 )
 
 add_test(NAME RenderHelpers COMMAND test_render_helpers)

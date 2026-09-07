@@ -72,6 +72,8 @@ int main()
 		ok = fail("default postSaturation out of balanced range [0.98, 1.08]");
 	if (pp.postContrast < 1.0f || pp.postContrast > 1.08f)
 		ok = fail("default postContrast out of balanced range [1.0, 1.08]");
+	if (std::abs(pp.gamma - 1.0f) > 1e-4f)
+		ok = fail("default gamma must be 1.0f (neutral display-linear midtone baseline)");
 
 	// --- Quality presets (shipped applyPreset; Low lighter than High/Cinematic) ---
 	{
@@ -88,6 +90,9 @@ int main()
 			ok = fail("applyPreset(Low) must set qualityPreset");
 		if (med.qualityPreset != GraphicsQualityPreset::Medium)
 			ok = fail("applyPreset(Medium) must set qualityPreset");
+		if (std::abs(low.gamma - 1.0f) > 1e-4f || std::abs(med.gamma - 1.0f) > 1e-4f ||
+			std::abs(high.gamma - 1.0f) > 1e-4f || std::abs(cine.gamma - 1.0f) > 1e-4f)
+			ok = fail("quality presets must maintain neutral gamma = 1.0f");
 		if (low.ssaoEnabled)
 			ok = fail("Low preset should disable SSAO");
 		if (!med.ssaoEnabled || !high.ssaoEnabled || !cine.ssaoEnabled)

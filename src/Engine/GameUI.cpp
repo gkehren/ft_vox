@@ -516,7 +516,9 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		}
 		ImGui::Checkbox("FXAA", &pp.fxaaEnabled);
 		ImGui::SliderFloat("Exposure", &pp.exposure, 0.1f, 5.f);
-		ImGui::SliderFloat("Gamma", &pp.gamma, 0.5f, 4.f);
+		ImGui::SliderFloat("Gamma", &pp.gamma, 0.5f, 2.5f);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Artistic midtone grade (1.0 = neutral linear display)");
 		ImGui::SliderFloat("Post saturation", &pp.postSaturation, 0.5f, 2.f);
 		ImGui::SliderFloat("Post contrast", &pp.postContrast, 0.5f, 1.8f);
 		ImGui::SliderFloat("Film grain", &pp.filmGrain, 0.f, 0.12f, "%.3f");

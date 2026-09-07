@@ -1,5 +1,6 @@
 #include "TextureManager.hpp"
 #include "ResourcePackReader.hpp"
+#include "ColorSpace.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image/stb_image.h>
@@ -231,7 +232,7 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 		imageInfo.extent = {layerSize, layerSize, 1};
 		imageInfo.mipLevels = 1;
 		imageInfo.arrayLayers = layers;
-		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		imageInfo.format = colorspace::kAlbedoTextureFormat;
 		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -241,7 +242,7 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
-		newImage.format = VK_FORMAT_R8G8B8A8_UNORM;
+		newImage.format = colorspace::kAlbedoTextureFormat;
 		newImage.width = layerSize;
 		newImage.height = layerSize;
 		newImage.mipLevels = 1;
@@ -255,7 +256,7 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		viewInfo.image = newImage.image;
 		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-		viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		viewInfo.format = colorspace::kAlbedoTextureFormat;
 		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		viewInfo.subresourceRange.baseMipLevel = 0;
 		viewInfo.subresourceRange.levelCount = 1;

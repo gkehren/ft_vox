@@ -30,6 +30,7 @@ public:
 
 	VkImageView getImageView() const { return m_image.view; }
 	VkSampler getSampler() const { return m_sampler; }
+	VkFormat getFormat() const { return m_image.format; }
 	bool isValid() const { return m_image.image != VK_NULL_HANDLE; }
 	uint32_t layerSize() const { return m_layerSize; }
 	const TextureAtlasLoadReport &lastLoadReport() const { return m_lastReport; }

@@ -139,7 +139,8 @@ struct PostProcessSettings
 	float exposure{0.94f};
 	float exposureCompensation{1.0f};
 	int toneMapper{0}; // 0 = ACES, 1 = Reinhard
-	float gamma{2.2f};
+	/// Creative midtone gamma grade (1.0 = neutral display-linear; not framebuffer transfer).
+	float gamma{1.0f};
 	// Gentle post grade — natural chroma without neon
 	float postSaturation{1.02f};
 	float postContrast{1.03f};
@@ -188,7 +189,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 	exposure = 0.94f;
 	exposureCompensation = 1.0f;
 	toneMapper = 0;
-	gamma = 2.2f;
+	gamma = 1.0f;
 	postSaturation = 1.02f;
 	postContrast = 1.03f;
 	fxaaEnabled = true;

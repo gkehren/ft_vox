@@ -30,6 +30,8 @@ public:
 	AllocatedImage &sceneDepth() { return m_sceneDepth; }
 	VkFormat depthFormat() const { return m_depthFormat; }
 	VkFormat hdrFormat() const { return m_hdrFormat; }
+	VkFormat swapchainFormat() const { return m_swapchainFormat; }
+	bool swapchainRequiresSrgbEncode() const { return m_swapchainRequiresSrgbEncode; }
 
 	/// Fullscreen post: SSAO → bloom → depth-aware god rays → composite.
 	void recordPost(VkCommandBuffer cmd,
@@ -103,6 +105,7 @@ private:
 	VkPipeline m_compositePipe{VK_NULL_HANDLE};
 
 	VkFormat m_swapchainFormat{VK_FORMAT_UNDEFINED};
+	bool m_swapchainRequiresSrgbEncode{false};
 	PostCompositeSources m_lastCompositeSrc[kFramesInFlight] = {
 		{true, true, true}, {true, true, true}}; // force first write per frame
 };

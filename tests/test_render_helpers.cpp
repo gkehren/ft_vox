@@ -9,6 +9,7 @@
 #include <Renderer/MinecraftTextures.hpp>
 #include <Renderer/ResourcePackReader.hpp>
 #include <Renderer/IndirectDrawUtils.hpp>
+#include <Renderer/ColorSpace.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <fstream>
 #include <filesystem>
@@ -640,11 +641,124 @@ int main()
 		static_assert(Vertex::kZMax >= CHUNK_SIZE * 16, "Z range covers chunk width");
 	}
 
+	// --- Color space and sRGB output transfer helpers (issue #135) ---
+	{
+		using namespace colorspace;
+
+		// 1. sRGB decode known points
+		if (std::abs(srgbToLinear(0.0f) - 0.0f) > 1e-6f)
+			ok = fail("srgbToLinear(0.0) must be 0.0");
+		if (std::abs(srgbToLinear(1.0f) - 1.0f) > 1e-6f)
+			ok = fail("srgbToLinear(1.0) must be 1.0");
+
+		// 8-bit mid-gray 128 / 255 ~= 0.50196078 -> linear light ~= 0.2158605
+		const float midGraySrgb = 128.0f / 255.0f;
+		const float midGrayLinear = srgbToLinear(midGraySrgb);
+		if (std::abs(midGrayLinear - 0.2158605f) > 1e-4f)
+			ok = fail("srgbToLinear mid-gray (128/255) must decode to ~0.21586");
+
+		// Linear toe (< 0.04045): 0.02 / 12.92 ~= 0.0015479876
+		const float toeLinear = srgbToLinear(0.02f);
+		if (std::abs(toeLinear - (0.02f / 12.92f)) > 1e-6f)
+			ok = fail("srgbToLinear linear toe (< 0.04045) mismatch");
+
+		// 2. sRGB encode known points
+		if (std::abs(linearToSrgb(0.0f) - 0.0f) > 1e-6f)
+			ok = fail("linearToSrgb(0.0) must be 0.0");
+		if (std::abs(linearToSrgb(1.0f) - 1.0f) > 1e-6f)
+			ok = fail("linearToSrgb(1.0) must be 1.0");
+		if (std::abs(linearToSrgb(0.2158605f) - midGraySrgb) > 1e-4f)
+			ok = fail("linearToSrgb(0.21586) must encode back to ~0.50196");
+		if (std::abs(linearToSrgb(toeLinear) - 0.02f) > 1e-6f)
+			ok = fail("linearToSrgb linear toe (< 0.0031308) mismatch");
+
+		// 3. Round-trip accuracy across [0, 1]
+		for (int i = 0; i <= 255; ++i)
+		{
+			const float srgb = static_cast<float>(i) / 255.0f;
+			const float lin = srgbToLinear(srgb);
+			const float roundtrip = linearToSrgb(lin);
+			if (std::abs(roundtrip - srgb) > 1e-4f)
+				ok = fail("sRGB round-trip error exceeded 1e-4 at 8-bit index " + std::to_string(i));
+		}
+
+		// Vector overloads
+		const glm::vec3 srgbV(0.0f, midGraySrgb, 1.0f);
+		const glm::vec3 linV = srgbToLinear(srgbV);
+		if (std::abs(linV.x - 0.0f) > 1e-6f || std::abs(linV.y - midGrayLinear) > 1e-4f ||
+			std::abs(linV.z - 1.0f) > 1e-6f)
+			ok = fail("srgbToLinear(vec3) component mismatch");
+
+		const glm::vec3 srgbRoundtrip = linearToSrgb(linV);
+		if (glm::length(srgbRoundtrip - srgbV) > 1e-4f)
+			ok = fail("linearToSrgb(vec3) round-trip mismatch");
+
+		// 4. Format classification policy
+		if (kAlbedoTextureFormat != VK_FORMAT_R8G8B8A8_SRGB)
+			ok = fail("kAlbedoTextureFormat must be VK_FORMAT_R8G8B8A8_SRGB");
+		if (!isAlbedoColorFormat(VK_FORMAT_R8G8B8A8_SRGB) || !isAlbedoColorFormat(VK_FORMAT_B8G8R8A8_SRGB))
+			ok = fail("sRGB formats must be recognized as valid albedo formats");
+		if (isAlbedoColorFormat(VK_FORMAT_R8G8B8A8_UNORM) || isAlbedoColorFormat(VK_FORMAT_B8G8R8A8_UNORM))
+			ok = fail("UNORM formats must not be accepted as albedo color formats without conversion");
+
+		// 5. Non-color data formats policy
+		if (!isNonColorDataFormat(VK_FORMAT_D32_SFLOAT) ||
+			!isNonColorDataFormat(VK_FORMAT_R16G16B16A16_SFLOAT) ||
+			!isNonColorDataFormat(VK_FORMAT_R8_UNORM))
+			ok = fail("Depth, HDR color buffer, and SSAO targets must be classified as non-color data");
+		if (isNonColorDataFormat(VK_FORMAT_R8G8B8A8_SRGB))
+			ok = fail("sRGB format cannot be non-color data");
+
+		// 6. Swapchain output transfer policy
+		if (swapchainRequiresShaderOutputTransfer(VK_FORMAT_B8G8R8A8_SRGB) ||
+			swapchainRequiresShaderOutputTransfer(VK_FORMAT_R8G8B8A8_SRGB))
+			ok = fail("sRGB swapchain must NOT require shader output transfer (attachment does it)");
+		if (!swapchainRequiresShaderOutputTransfer(VK_FORMAT_B8G8R8A8_UNORM) ||
+			!swapchainRequiresShaderOutputTransfer(VK_FORMAT_R8G8B8A8_UNORM))
+			ok = fail("UNORM fallback swapchain MUST require shader output transfer");
+
+		// 7. End-to-end simulation: sRGB swapchain vs UNORM fallback parity
+		const glm::vec3 testColors[] = {
+			glm::vec3(0.0f),
+			glm::vec3(0.21586f),                   // mid-gray
+			glm::vec3(0.12f, 0.55f, 0.22f),        // foliage green
+			glm::vec3(0.85f, 0.72f, 0.45f),        // sand
+			glm::vec3(0.02f, 0.03f, 0.08f),        // dark cave / night
+			glm::vec3(1.0f)                        // peak white
+		};
+		for (const auto &c : testColors)
+		{
+			const glm::vec3 outSrgb = simulateDisplayOutput(c, kNeutralGamma, VK_FORMAT_B8G8R8A8_SRGB);
+			const glm::vec3 outUnorm = simulateDisplayOutput(c, kNeutralGamma, VK_FORMAT_B8G8R8A8_UNORM);
+			if (glm::length(outSrgb - outUnorm) > 1e-4f)
+				ok = fail("Discrepancy between sRGB swapchain and UNORM swapchain display output");
+
+			// Verify that output matches exactly one sRGB encode:
+			const glm::vec3 expected = linearToSrgb(c);
+			if (glm::length(outSrgb - expected) > 1e-4f)
+				ok = fail("Output does not match standard single sRGB transfer");
+		}
+
+		// 8. Creative gamma operator neutrality
+		const glm::vec3 sample(0.35f, 0.62f, 0.18f);
+		if (glm::length(applyArtisticGamma(sample, 1.0f) - sample) > 1e-6f)
+			ok = fail("applyArtisticGamma with gamma=1.0 must be exact identity");
+		if (std::abs(applyArtisticGamma(0.5f, 1.0f) - 0.5f) > 1e-6f)
+			ok = fail("applyArtisticGamma(float) with gamma=1.0 must be exact identity");
+
+		// Proves that old double-gamma bug significantly distorted output:
+		// e.g. for linear mid-gray 0.21586, correct sRGB is 0.50196,
+		// but double-transfer produced ~0.735 (46% brighter!)
+		const float oldDoubleTransfer = linearToSrgb(std::pow(midGrayLinear, 1.0f / 2.2f));
+		if (std::abs(oldDoubleTransfer - midGraySrgb) < 0.15f)
+			ok = fail("Old transfer was not distinctively washed out (double gamma check)");
+	}
+
 	if (!ok)
 	{
 		std::cerr << "test_render_helpers: FAILED\n";
 		return EXIT_FAILURE;
 	}
-	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + block textures + FrameUBO + indirect batching)\n";
+	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + block textures + FrameUBO + indirect batching + colorspace)\n";
 	return EXIT_SUCCESS;
 }

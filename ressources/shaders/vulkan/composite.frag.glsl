@@ -12,7 +12,7 @@ layout(push_constant) uniform PC {
     vec4 p1; // x=bloomOn, y=fxaaOn, z=godRaysOn, w=postSaturation
     vec4 p2; // xy=texelSize, z=postContrast, w=ssaoOn
     vec4 p3; // x=ssaoIntensity, y=underwater, z=underwaterStrength, w=time
-    vec4 p4; // x=filmGrain, y=vignette, z=unused, w=unused
+    vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=unused
 } pc;
 
 vec3 acesFilm(vec3 x)
@@ -32,10 +32,13 @@ float getLDRLuminance(vec2 uv)
     float gamma = max(pc.p0.z, 0.001);
     int toneMapper = int(pc.p0.w + 0.5);
     vec3 hdrColor = texture(hdrBuffer, uv).rgb;
-    vec3 mapped = hdrColor * exposure;
+    vec3 mapped = max(hdrColor * exposure, vec3(0.0));
     mapped = toneMapper == 0 ? acesFilm(mapped) : reinhard(mapped);
-    mapped = pow(max(mapped, vec3(0.0)), vec3(1.0 / gamma));
-    return dot(mapped, vec3(0.299, 0.587, 0.114));
+    if (abs(gamma - 1.0) > 0.001)
+        mapped = pow(mapped, vec3(1.0 / gamma));
+    // Perceptual luminance for FXAA contrast evaluation
+    vec3 perceptual = sqrt(mapped);
+    return dot(perceptual, vec3(0.299, 0.587, 0.114));
 }
 
 vec3 applyFXAA(vec2 uv)
@@ -119,7 +122,10 @@ void main()
 
     vec3 mapped = max(hdrColor * exposure, vec3(0.0));
     mapped = toneMapper == 0 ? acesFilm(mapped) : reinhard(mapped);
-    mapped = pow(mapped, vec3(1.0 / gamma));
+
+    // Creative midtone gamma grading (1.0 = neutral display-linear)
+    if (abs(gamma - 1.0) > 0.001)
+        mapped = pow(mapped, vec3(1.0 / gamma));
 
     float postContrast = max(pc.p2.z, 0.01);
     float postSat = max(pc.p1.w, 0.0);
@@ -159,6 +165,20 @@ void main()
         float n = filmNoise(vUV, time);
         float glum = dot(mapped, vec3(0.299, 0.587, 0.114));
         mapped += (n - 0.5) * grainStrength * (0.20 + 0.80 * smoothstep(0.05, 0.35, glum));
+    }
+
+    mapped = clamp(mapped, 0.0, 1.0);
+
+    // Format-dependent output transfer:
+    // If the swapchain image is sRGB (pc.p4.z <= 0.5), we output display-linear values;
+    // the sRGB framebuffer write performs hardware linear->sRGB conversion.
+    // If the swapchain is UNORM fallback (pc.p4.z > 0.5), perform explicit piecewise sRGB transfer.
+    if (pc.p4.z > 0.5)
+    {
+        bvec3 cutoff = lessThanEqual(mapped, vec3(0.0031308));
+        vec3 higher = vec3(1.055) * pow(mapped, vec3(1.0 / 2.4)) - vec3(0.055);
+        vec3 lower = mapped * vec3(12.92);
+        mapped = mix(higher, lower, cutoff);
     }
 
     outColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
