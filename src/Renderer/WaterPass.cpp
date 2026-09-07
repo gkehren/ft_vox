@@ -274,12 +274,15 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 	// for binding. Bucketing the whole set would break water transparency
 	// ordering — do not "optimize" this into emitGroupedIndirectDraws.
 	m_waterChunks.clear();
+	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
+	const float camOffsetY = camPos.y;
 	for (Chunk *chunk : chunks)
 	{
 		if (chunk && chunk->hasRenderableWaterDraws())
 		{
-			const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
-			const glm::vec3 d = c - camPos;
+			const glm::vec3 p = chunk->getPosition();
+			const glm::vec3 d(p.x - camOffsetX, p.y - camOffsetY, p.z - camOffsetZ);
 			m_waterChunks.push_back({chunk, glm::dot(d, d)});
 		}
 	}

@@ -243,14 +243,16 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 	queue.clear();
 	queue.reserve(m_activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
+	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
 
 	for (Chunk *chunk : m_activeChunks)
 	{
 		if (chunk->getState() == ChunkState::UNLOADED && !chunk->isInTransit())
 		{
-			const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
-			const float dx = c.x - camPos.x;
-			const float dz = c.z - camPos.z;
+			const glm::vec3 p = chunk->getPosition();
+			const float dx = p.x - camOffsetX;
+			const float dz = p.z - camOffsetZ;
 			queue.push_back({chunk, dx * dx + dz * dz});
 		}
 	}
@@ -312,6 +314,8 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	queue.clear();
 	queue.reserve(m_activeChunks.size());
 	const glm::vec3 camPos = camera.getPosition();
+	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
 
 	const float lodThresh = static_cast<float>(settings.minRenderDistance) * 2.f;
 	const float lodThreshSq = lodThresh * lodThresh;
@@ -321,9 +325,9 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	{
 		if (chunk->isLODMesh() && chunk->getState() == ChunkState::MESHED && !chunk->isInTransit())
 		{
-			const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
-			const float dx = c.x - camPos.x;
-			const float dz = c.z - camPos.z;
+			const glm::vec3 p = chunk->getPosition();
+			const float dx = p.x - camOffsetX;
+			const float dz = p.z - camOffsetZ;
 			if (dx * dx + dz * dz < lodThreshSq)
 				chunk->setState(ChunkState::GENERATED);
 		}
@@ -333,9 +337,9 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	{
 		if (chunk->getState() == ChunkState::GENERATED && !chunk->isInTransit())
 		{
-			const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
-			const float dx = c.x - camPos.x;
-			const float dz = c.z - camPos.z;
+			const glm::vec3 p = chunk->getPosition();
+			const float dx = p.x - camOffsetX;
+			const float dz = p.z - camOffsetZ;
 			queue.push_back({chunk, dx * dx + dz * dz});
 		}
 	}
@@ -493,15 +497,17 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		queue.reserve(m_activeChunks.size());
 		const glm::vec3 camPos = camera.getPosition();
+		const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
+		const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
 		for (Chunk *chunk : m_activeChunks)
 		{
 			if (!chunk)
 				continue;
 			if (chunk->getState() == ChunkState::MESHED && chunk->needsGPUUpload() && !chunk->isInTransit())
 			{
-				const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
-				const float dx = c.x - camPos.x;
-				const float dz = c.z - camPos.z;
+				const glm::vec3 p = chunk->getPosition();
+				const float dx = p.x - camOffsetX;
+				const float dz = p.z - camOffsetZ;
 				queue.push_back({chunk, dx * dx + dz * dz});
 			}
 		}
@@ -844,6 +850,8 @@ void ChunkManager::collectShadowList(std::vector<Chunk *> &out, const Camera &ca
 	out.clear();
 	const float r2 = shadowRadius * shadowRadius;
 	const glm::vec3 cam = camera.getPosition();
+	const float camOffsetX = cam.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = cam.z - CHUNK_SIZE * 0.5f;
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	out.reserve(m_activeChunks.size() / 2 + 8);
 	for (Chunk *chunk : m_activeChunks)
@@ -852,9 +860,9 @@ void ChunkManager::collectShadowList(std::vector<Chunk *> &out, const Camera &ca
 			continue;
 		if (chunk->getOpaqueIndexCount() == 0)
 			continue;
-		const glm::vec3 c = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
-		const float dx = c.x - cam.x;
-		const float dz = c.z - cam.z;
+		const glm::vec3 p = chunk->getPosition();
+		const float dx = p.x - camOffsetX;
+		const float dz = p.z - camOffsetZ;
 		if (dx * dx + dz * dz > r2)
 			continue;
 		out.push_back(chunk);
