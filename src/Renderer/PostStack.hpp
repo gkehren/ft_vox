@@ -5,6 +5,7 @@
 #include "Vulkan/VkBuffer.hpp"
 #include "Vulkan/VkImage.hpp"
 #include "Vulkan/VkCommands.hpp"
+#include "Vulkan/VkGpuProfiler.hpp"
 #include "Engine/EngineDefs.hpp"
 #include "Renderer/ColorSpace.hpp"
 #include "Renderer/PostDefaults.hpp"
@@ -13,7 +14,8 @@
 #include <volk.h>
 #include <cstdint>
 
-/// HDR targets + SSAO / bloom / god rays / composite.
+/// HDR targets + SSAO (half-res AO+normals → full-res bilateral upsample) /
+/// bloom / god rays / composite.
 /// Sky is owned by SkyPass; this stack only owns fullscreen post + scene HDR/depth.
 class PostStack
 {
@@ -38,7 +40,7 @@ public:
 	colorspace::OutputTransfer outputTransfer() const { return m_outputTransfer; }
 	bool swapchainRequiresSrgbEncode() const { return m_swapchainRequiresSrgbEncode; }
 
-	/// Fullscreen post: SSAO → bloom → depth-aware god rays → composite.
+	/// Fullscreen post: SSAO → AO upsample → bloom → depth-aware god rays → composite.
 	void recordPost(VkCommandBuffer cmd,
 					VkImage swapchainImage,
 					VkImageView swapchainView,
@@ -49,7 +51,8 @@ public:
 					const glm::vec2 &sunScreen,
 					float sunVisibility,
 					float time,
-					const glm::mat4 &projection);
+					const glm::mat4 &projection,
+					VkGpuProfiler *profiler = nullptr);
 
 private:
 	void createTargets(uint32_t w, uint32_t h);
@@ -76,7 +79,8 @@ private:
 	AllocatedImage m_sceneDepth{};
 	AllocatedImage m_bloom[2]{};
 	AllocatedImage m_godRays{};
-	AllocatedImage m_ssao{};
+	AllocatedImage m_ssao{};	  ///< Half-res RGBA8: r = raw AO, gb = encoded view normal.
+	AllocatedImage m_ssaoUp{};	 ///< Full-res R8: bilateral-upsampled final AO.
 
 	/// Always-valid 1×1 fallbacks for disabled effects (SHADER_READ_ONLY).
 	AllocatedImage m_defaultBlack{};	// HDR black — bloom / god rays off
@@ -90,23 +94,27 @@ private:
 	VkDescriptorSetLayout m_postSetLayout{VK_NULL_HANDLE};
 	VkDescriptorSetLayout m_godSetLayout{VK_NULL_HANDLE};
 	VkDescriptorSetLayout m_compositeSetLayout{VK_NULL_HANDLE};
+	VkDescriptorSetLayout m_ssaoUpLayout{VK_NULL_HANDLE}; ///< ssaoUpsample: b0 half-res AO+normals (linear), b1 full-res depth (nearest).
 	VkDescriptorPool m_postPool{VK_NULL_HANDLE};
 	VkDescriptorSet m_setExtract{VK_NULL_HANDLE};
 	VkDescriptorSet m_setBlur[2]{};
 	VkDescriptorSet m_setGodRays{VK_NULL_HANDLE};
 	VkDescriptorSet m_setSsao{VK_NULL_HANDLE};
+	VkDescriptorSet m_setSsaoUp{VK_NULL_HANDLE};
 	static constexpr uint32_t kFramesInFlight = 2;
 	VkDescriptorSet m_setComposite[kFramesInFlight]{};
 
 	VkPipelineLayout m_postLayout1{VK_NULL_HANDLE};
 	VkPipelineLayout m_godLayout{VK_NULL_HANDLE};
 	VkPipelineLayout m_ssaoLayout{VK_NULL_HANDLE};
+	VkPipelineLayout m_ssaoUpPipeLayout{VK_NULL_HANDLE};
 	VkPipelineLayout m_compositeLayout{VK_NULL_HANDLE};
 
 	VkPipeline m_extractPipe{VK_NULL_HANDLE};
 	VkPipeline m_blurPipe{VK_NULL_HANDLE};
 	VkPipeline m_godRaysPipe{VK_NULL_HANDLE};
 	VkPipeline m_ssaoPipe{VK_NULL_HANDLE};
+	VkPipeline m_ssaoUpPipe{VK_NULL_HANDLE};
 	VkPipeline m_compositePipe{VK_NULL_HANDLE};
 
 	VkFormat m_swapchainFormat{VK_FORMAT_UNDEFINED};

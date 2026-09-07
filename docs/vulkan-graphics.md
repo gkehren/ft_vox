@@ -113,7 +113,7 @@ Recorded in `WorldRenderer::recordFrame` (see `WorldRenderer.cpp`):
 | 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (per-section `Chunk::collectOpaqueDraws` commands + indirect draws), then **`MobRenderer::record`** for passive mobs, then **`OverlayRenderer::record`** for highlight / borders / demo players — all inside the same dynamic-rendering scope |
 | 3 | **WaterPass** | HDR (transparent) | History color/depth for refraction; set2 scene samples |
 | 4 | **SkyPass** | HDR + god-ray source MRT, depth test | Procedural sky, sun/moon/stars/clouds |
-| 5 | **PostStack** | Swapchain | SSAO → bloom → god rays → composite |
+| 5 | **PostStack** | Swapchain | SSAO (half-res) → AO bilateral upsample → bloom → god rays → composite |
 | 6 | **imguiDraw** callback | Swapchain (load) | ImGui after composite; not a world pass |
 
 **Overlays are not a separate post-sky pass.** They run at the end of **OpaquePass** while HDR/depth are still the color/depth attachments (`OpaquePass.cpp`).
@@ -170,12 +170,43 @@ Fullscreen chain on a unit quad (`fullscreen.vert`):
 
 | Stage | Shader | Default behavior when disabled |
 |-------|--------|--------------------------------|
-| SSAO (half-res) | `ssao.frag` | Skip; composite samples **1×1 white** AO |
+| SSAO (half-res RGBA8) | `ssao.frag` | Skip; upsample + composite sample **1×1 white** AO |
+| AO bilateral upsample (full-res R8) | `ssaoUpsample.frag` | Skip; composite samples **1×1 white** AO |
 | Bloom extract + blur | `bloomExtract.frag`, `bloomBlur.frag` | Skip; composite samples **1×1 black** |
 | God rays | `godRays.frag` | Skip unless `lighting::godRaysPassActive`; black default |
 | Composite | `composite.frag` | Tonemap, grade, FXAA, grain, vignette, underwater |
 
 True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`). Selection is pure helper logic in `PostDefaults.hpp` (`postCompositeSources`) so composite never samples half-res targets that were not written this frame.
+
+#### SSAO — GTAO-style horizon AO (issue #138)
+
+Normal-aware horizon-based ambient occlusion, replacing the old depth-difference estimator (whose compensating high AO floor and damping are gone):
+
+```text
+full-res depth (nearest)
+  -> ssao.frag (half-res): raw AO + encoded view-space normal
+     target: R8G8B8A8_UNORM (r = AO, gb = normal.xy * 0.5 + 0.5, a = normal.z * 0.5 + 0.5)
+  -> ssaoUpsample.frag (full-res): joint bilateral upsample (texel-exact texelFetch on the
+     four true half-res texels; depth-nearest fallback)
+     target: R8_UNORM (upsampled/denoised AO)
+  -> composite.frag: b3 = final AO, b4 = raw half-res RGBA (debug views)
+```
+
+- **Estimator:** per pixel, view position and a camera-facing normal are reconstructed from depth (edge-aware central differences, orientation fixed by `dot(N, normalize(P))` so it is UV/y-flip independent). Each slice builds an exact frame: `zeta = cross(dq, V)` is the **slice-plane normal** (never an elevation axis — every sample vector lies in the plane, so `dot(v, zeta) == 0`), the in-plane axes are `xi = cross(V, zeta)` (horizontal) and `eta = -V` (elevation, toward the camera). `steps` samples are marched per slice with mid-bin placement (the outermost sample never sits on the radius boundary where falloff reaches zero). Per side (+xi / −xi, each parameterized on its own axis so angles stay in [−π/2, π/2]) the tangent window comes from `N` restricted to the frame (`dot(N, xi)`, `dot(N, eta)`; `sN > 0` for camera-facing normals), and each sample contributes `max(0, sin(theta_sample) − sin(theta_lower)) × falloff` with the distance falloff applied **before the max** — the horizon is monotone, adding a farther occluder can never reduce a slice's occlusion. Any non-sky forward sample occludes (the signed horizon vs the tangent plane decides; "object on the ground in front of P" and "crease beside P" both register); self-occlusion is suppressed by the tangent-plane clamp. Slice rotation uses per-pixel interleaved-gradient-noise jitter — **deterministic, no time term** — so the visual-regression harness stays reproducible.
+- **View-space semantics** (meters):
+  - `ssaoRadius` — occluder search radius around the pixel's view-space position at the pixel's view depth, **isotropic**: the UV step per slice direction is derived from both per-axis FOV scales (`invProj[0][0]` horizontal, `invProj[1][1]` vertical).
+- **Output/application:** the half-res shader writes raw AO only — no internal floor, no damping, no intensity. Composite applies `mix(1, ao, clamp(ssaoIntensity, 0, 0.85))` (matching `lighting::clampSsaoIntensity`) and then the safety-only floor `max(ao, 0.10)` (= `lighting::kSsaoAoFloor`; must match `composite.frag`).
+- **Presets** (`PostProcessSettings::applyPreset`; cost scales with directions × steps):
+
+  | Preset | SSAO | Radius (m) | Intensity | Directions × Steps |
+  |--------|------|-----------|-----------|--------------------|
+  | Low | off | 0.4 | 0.25 | 4 × 2 (skipped) |
+  | Medium (defaults) | on | 0.6 | 0.40 | 4 × 3 |
+  | High | on | 0.8 | 0.55 | 6 × 4 |
+  | Cinematic | on | 1.0 | 0.62 | 8 × 4 |
+
+  GPU cost per enabled tier (RTX 4070 Ti, 1920×1080, `--seed 42 --quality <tier> --benchmark 30 --vsync off`, clean tree at commit; the `GpuPass::Ssao` interval covers SSAO + upsample; High/Cinematic include the #148 2048 shadow maps): **Medium 4×3 = 0.060 ms**, **High 6×4 = 0.095 ms**, **Cinematic 8×4 = 0.096 ms** (Post chain 0.176 / 0.237 / 0.246 ms respectively). Reports (each carries its `Quality:` label): `docs/benchmarks/bench_20260907_185{720,753,826}_*`. Temporal stability: the harness renders `noon_terrain` at two poses 0.125 units apart under SSAO on / SSAO off / isolated final-AO buffer; the isolated AO buffer must stay under 20/255 motion delta (smoke bound) — measured **1.465/255** — and the composited AO-on delta must stay within the SSAO-off parallax baseline (measured ratio 0.997).
+- **Debug views:** Graphics panel → Post-processing → **SSAO debug view** (Off / AO (final) / AO (raw) / Normals (view)); passed to composite as push constant `p4.w`. Debug output bypasses tonemap/grade but still applies the swapchain output-transfer contract (`linearToSrgb` on UNORM + SRGB_NONLINEAR). The selector resets to Off whenever SSAO is disabled; presets also reset it. The encoded normal is `gb = xy`, `a = z` (the z sign is stored, not reconstructed).
 
 ### Color-space contract (`Renderer/ColorSpace.hpp`, issue #135)
 
@@ -353,7 +384,7 @@ Pure helpers shared with unit tests (`tests/test_render_helpers.cpp`):
 - Height fog / terrain fog amount caps  
 - Moon ambient color  
 - Cave light floor / fill, sun-shadow weight by sky light  
-- SSAO intensity clamp  
+- SSAO intensity clamp + composite AO floor (`kSsaoAoFloor`, mirrored in `composite.frag`)  
 - God-ray pass active predicate (`godRaysPassActive`)  
 - Block light packing / emissive intensities  
 
@@ -380,7 +411,8 @@ All under `ressources/shaders/vulkan/` (GLSL compiled to SPIR-V at build):
 | `mob.vert.glsl` / `mob.frag.glsl` | VS/FS | MobRenderer (opaque HDR pass) |
 | `mob_shadow.frag.glsl` (+ `mob.vert.glsl`) | VS/FS | MobRenderer (shadow cascades, alpha cut) |
 | `fullscreen.vert.glsl` | VS | All post passes |
-| `ssao.frag.glsl` | FS | PostStack |
+| `ssao.frag.glsl` | FS | PostStack (half-res horizon AO) |
+| `ssaoUpsample.frag.glsl` | FS | PostStack (bilateral upsample to full-res AO) |
 | `bloomExtract.frag.glsl` / `bloomBlur.frag.glsl` | FS | PostStack |
 | `godRays.frag.glsl` | FS | PostStack |
 | `composite.frag.glsl` | FS | PostStack (tonemap, grade, FXAA, grain, vignette, underwater) |
@@ -408,7 +440,7 @@ What the pipeline implements **now** (not a roadmap):
 | Water: wave normals, sky reflection, depth absorption, glitter, foam | WaterPass + history; analytic per-phase sky reflection; Beer-Lambert teal body |
 | Procedural sky, sun/moon, stars, clouds | SkyPass — cratered HDR moon, two-layer tinted stars, moon silver lining on night clouds |
 | Height + distance fog, aerial-style haze | `terrain.frag` + `lighting` helpers |
-| SSAO, bloom, depth-aware god rays | PostStack half-res where applicable |
+| SSAO (GTAO-style horizon AO + bilateral upsample), bloom, depth-aware god rays | PostStack half-res AO where applicable |
 | ACES/Reinhard, exposure, FXAA, grain, vignette | `composite.frag` |
 | Underwater grade | Engine sets flag from voxel sample; composite + UBO |
 | Quality presets | Low/Med/High/Cinematic on existing post knobs only |

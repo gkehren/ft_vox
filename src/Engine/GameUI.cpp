@@ -425,7 +425,7 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		{
 			pp.applyPreset(static_cast<GraphicsQualityPreset>(presetIdx));
 		}
-		ImGui::TextDisabled("Packs SSAO / bloom / god rays / grain. Manual sliders below still work.");
+		ImGui::TextDisabled("Packs shadow resolution / SSAO / bloom / god rays / grain. Manual sliders below still work.");
 	}
 
 	drawResourcePackSection(frame, m_resourcePackUi, m_showGraphics);
@@ -540,12 +540,21 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		ImGui::Combo("Tone mapper", &pp.toneMapper, toneMappers, IM_ARRAYSIZE(toneMappers));
 
 		ImGui::Separator();
-		ImGui::Checkbox("SSAO", &pp.ssaoEnabled);
+		// Leaving SSAO off while a debug view is selected would freeze the
+		// frame on that debug output (composite checks the debug flag before
+		// ssaoEnabled) with the selector hidden — reset it on disable.
+		if (ImGui::Checkbox("SSAO", &pp.ssaoEnabled) && !pp.ssaoEnabled)
+			pp.ssaoDebugView = 0;
 		if (pp.ssaoEnabled)
 		{
-			ImGui::SliderFloat("SSAO radius", &pp.ssaoRadius, 0.1f, 2.f);
-			ImGui::SliderFloat("SSAO bias", &pp.ssaoBias, 0.001f, 0.1f, "%.4f");
+			ImGui::SliderFloat("SSAO radius (m)", &pp.ssaoRadius, 0.05f, 3.0f);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Occluder search radius in view-space meters at the pixel's depth (isotropic)");
 			ImGui::SliderFloat("SSAO intensity", &pp.ssaoIntensity, 0.f, 2.f);
+			ImGui::SliderInt("SSAO directions", &pp.ssaoDirections, 4, 8);
+			ImGui::SliderInt("SSAO steps", &pp.ssaoSteps, 1, 4);
+			const char *ssaoDebugViews[] = {"Off", "AO (final)", "AO (raw)", "Normals (view)"};
+			ImGui::Combo("SSAO debug view", &pp.ssaoDebugView, ssaoDebugViews, IM_ARRAYSIZE(ssaoDebugViews));
 		}
 
 		ImGui::Separator();

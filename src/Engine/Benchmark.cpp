@@ -402,6 +402,7 @@ void Benchmark::finalize()
 	r.streamFrontBias = m_streamFrontBias;
 	r.presentMode = m_presentMode;
 	r.deviceName = m_deviceName;
+	r.qualityLabel = m_config.qualityLabel;
 
 	r.gitHash = BuildInfo::gitHash();
 	r.gitBranch = BuildInfo::gitBranch();
@@ -439,6 +440,8 @@ std::string Benchmark::formatReportText() const
 	  << "  FrontBias: " << r.streamFrontBias
 	  << "  VSync: " << (r.vsync ? "on" : "off")
 	  << "  PresentMode: " << r.presentMode << "\n";
+	if (!r.qualityLabel.empty())
+		o << "Quality: " << r.qualityLabel << "\n";
 	o << "Indirect: multiDrawIndirect=" << (r.multiDrawIndirect ? "yes" : "no")
 	  << "  maxDrawIndirectCount=" << r.maxDrawIndirectCount << "\n";
 	{

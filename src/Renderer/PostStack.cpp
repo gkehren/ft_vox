@@ -38,8 +38,13 @@ struct GodPC
 };
 struct SsaoPC
 {
-	glm::vec4 p0;
-	glm::vec4 p1;
+	glm::vec4 p0; // xy = inv full-res resolution, z = radius (view meters), w = unused
+	glm::vec4 p1; // x = directions (4..8), y = steps (1..4), zw unused
+	glm::mat4 invProj;
+};
+struct UpsamplePC
+{
+	glm::vec4 p0; // xy = inv full-res resolution, zw unused
 	glm::mat4 invProj;
 };
 struct CompPC
@@ -48,7 +53,7 @@ struct CompPC
 	glm::vec4 p1;
 	glm::vec4 p2;
 	glm::vec4 p3;
-	glm::vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=unused
+	glm::vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=ssaoDebugView (0=off,1=final,2=raw,3=normals)
 };
 } // namespace
 
@@ -69,6 +74,8 @@ void PostStack::shutdown()
 		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_godSetLayout, nullptr);
 	if (m_compositeSetLayout)
 		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_compositeSetLayout, nullptr);
+	if (m_ssaoUpLayout)
+		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_ssaoUpLayout, nullptr);
 	if (m_linearSampler)
 		vkDestroySampler(m_context->getDevice(), m_linearSampler, nullptr);
 	if (m_nearestSampler)
@@ -77,7 +84,7 @@ void PostStack::shutdown()
 		destroyBuffer(m_context->getAllocator(), m_quadVBO);
 	destroyDefaultImages();
 	m_postPool = VK_NULL_HANDLE;
-	m_postSetLayout = m_godSetLayout = m_compositeSetLayout = VK_NULL_HANDLE;
+	m_postSetLayout = m_godSetLayout = m_compositeSetLayout = m_ssaoUpLayout = VK_NULL_HANDLE;
 	m_linearSampler = m_nearestSampler = VK_NULL_HANDLE;
 	m_context = nullptr;
 }
@@ -132,7 +139,8 @@ void PostStack::createTargets(uint32_t w, uint32_t h)
 	m_bloom[0] = makeColor(hw, hh, m_hdrFormat);
 	m_bloom[1] = makeColor(hw, hh, m_hdrFormat);
 	m_godRays = makeColor(hw, hh, m_hdrFormat);
-	m_ssao = makeColor(hw, hh, VK_FORMAT_R8_UNORM);
+	m_ssao = makeColor(hw, hh, VK_FORMAT_R8G8B8A8_UNORM); // r = AO, gb = encoded normal
+	m_ssaoUp = makeColor(w, h, VK_FORMAT_R8_UNORM);		  // bilateral-upsampled final AO
 
 	auto write1 = [&](VkDescriptorSet set, VkImageView view, VkSampler samp = VK_NULL_HANDLE) {
 		VkDescriptorImageInfo ii{samp ? samp : m_linearSampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -148,6 +156,25 @@ void PostStack::createTargets(uint32_t w, uint32_t h)
 	write1(m_setBlur[0], m_bloom[0].view);
 	write1(m_setBlur[1], m_bloom[1].view);
 	write1(m_setSsao, m_sceneDepth.view, m_nearestSampler);
+
+	// ssaoUpsample: b0 half-res AO+normals (linear), b1 full-res depth (nearest)
+	{
+		VkDescriptorImageInfo imgs[2] = {
+			{m_linearSampler, m_ssao.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+			{m_nearestSampler, m_sceneDepth.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+		};
+		std::array<VkWriteDescriptorSet, 2> ws{};
+		for (int i = 0; i < 2; ++i)
+		{
+			ws[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			ws[i].dstSet = m_setSsaoUp;
+			ws[i].dstBinding = static_cast<uint32_t>(i);
+			ws[i].descriptorCount = 1;
+			ws[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			ws[i].pImageInfo = &imgs[i];
+		}
+		vkUpdateDescriptorSets(m_context->getDevice(), 2, ws.data(), 0, nullptr);
+	}
 
 	{
 		VkDescriptorImageInfo imgs[2] = {
@@ -186,6 +213,7 @@ void PostStack::destroyTargets()
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_bloom[1]);
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_godRays);
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_ssao);
+	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_ssaoUp);
 }
 
 void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapchainColorSpace)
@@ -214,12 +242,19 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 		li.pBindings = gb.data();
 		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_godSetLayout);
 
-		std::array<VkDescriptorSetLayoutBinding, 4> cb{};
-		for (int i = 0; i < 4; ++i)
+		std::array<VkDescriptorSetLayoutBinding, 5> cb{};
+		for (int i = 0; i < 5; ++i)
 			cb[i] = {static_cast<uint32_t>(i), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-		li.bindingCount = 4;
+		li.bindingCount = 5;
 		li.pBindings = cb.data();
 		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_compositeSetLayout);
+
+		std::array<VkDescriptorSetLayoutBinding, 2> ub{};
+		ub[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+		ub[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+		li.bindingCount = 2;
+		li.pBindings = ub.data();
+		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_ssaoUpLayout);
 
 		std::array<VkDescriptorPoolSize, 1> ps{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32}}};
 		VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -239,6 +274,7 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 		alloc(m_postSetLayout, m_setBlur[0]);
 		alloc(m_postSetLayout, m_setBlur[1]);
 		alloc(m_postSetLayout, m_setSsao);
+		alloc(m_ssaoUpLayout, m_setSsaoUp);
 		alloc(m_godSetLayout, m_setGodRays);
 		for (VkDescriptorSet &set : m_setComposite)
 			alloc(m_compositeSetLayout, set);
@@ -255,6 +291,9 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 		pl.pSetLayouts = &m_godSetLayout;
 		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_godLayout);
 
+		pl.pSetLayouts = &m_ssaoUpLayout;
+		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoUpPipeLayout);
+
 		pl.pSetLayouts = &m_compositeSetLayout;
 		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_compositeLayout);
 	}
@@ -265,6 +304,7 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 	VkShaderModule blurF = load("bloomBlur.frag.spv");
 	VkShaderModule godF = load("godRays.frag.spv");
 	VkShaderModule ssaoF = load("ssao.frag.spv");
+	VkShaderModule ssaoUpF = load("ssaoUpsample.frag.spv");
 	VkShaderModule compF = load("composite.frag.spv");
 
 	VkVertexInputBindingDescription bind{0, 4 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
@@ -326,15 +366,17 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 			throw std::runtime_error("post pipeline failed");
 	};
 
-	const VkFormat ssaoFmt = VK_FORMAT_R8_UNORM;
+	const VkFormat ssaoFmt = VK_FORMAT_R8G8B8A8_UNORM; // half-res AO+normals
+	const VkFormat ssaoUpFmt = VK_FORMAT_R8_UNORM;	 // full-res final AO
 	makeFS(extractF, m_postLayout1, m_hdrFormat, m_extractPipe);
 	makeFS(blurF, m_postLayout1, m_hdrFormat, m_blurPipe);
 	makeFS(godF, m_godLayout, m_hdrFormat, m_godRaysPipe);
 	makeFS(ssaoF, m_ssaoLayout, ssaoFmt, m_ssaoPipe);
+	makeFS(ssaoUpF, m_ssaoUpPipeLayout, ssaoUpFmt, m_ssaoUpPipe);
 	makeFS(compF, m_compositeLayout, swapchainFormat, m_compositePipe);
 
 
-	for (auto m : {fsVert, extractF, blurF, godF, ssaoF, compF})
+	for (auto m : {fsVert, extractF, blurF, godF, ssaoF, ssaoUpF, compF})
 		destroyShaderModule(m_context->getDevice(), m);
 }
 
@@ -351,6 +393,7 @@ void PostStack::destroyPipelines()
 	d(m_blurPipe);
 	d(m_godRaysPipe);
 	d(m_ssaoPipe);
+	d(m_ssaoUpPipe);
 	d(m_compositePipe);
 	auto dl = [&](VkPipelineLayout &l) {
 		if (l)
@@ -360,6 +403,7 @@ void PostStack::destroyPipelines()
 	dl(m_postLayout1);
 	dl(m_godLayout);
 	dl(m_ssaoLayout);
+	dl(m_ssaoUpPipeLayout);
 	dl(m_compositeLayout);
 }
 
@@ -450,15 +494,17 @@ void PostStack::writeCompositeDescriptors(const PostCompositeSources &src,
 		return;
 	VkImageView bloomView = src.bloomUseDefault ? m_defaultBlack.view : m_bloom[0].view;
 	VkImageView godView = src.godRaysUseDefault ? m_defaultBlack.view : m_godRays.view;
-	VkImageView ssaoView = src.ssaoUseDefault ? m_defaultWhiteR8.view : m_ssao.view;
-	VkDescriptorImageInfo imgs[4] = {
+	VkImageView ssaoView = src.ssaoUseDefault ? m_defaultWhiteR8.view : m_ssaoUp.view; // final AO
+	VkImageView ssaoRawView = src.ssaoUseDefault ? m_defaultWhiteR8.view : m_ssao.view; // raw AO+normals
+	VkDescriptorImageInfo imgs[5] = {
 		{m_linearSampler, m_hdr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 		{m_linearSampler, bloomView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 		{m_linearSampler, godView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 		{m_linearSampler, ssaoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+		{m_linearSampler, ssaoRawView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 	};
-	std::array<VkWriteDescriptorSet, 4> ws{};
-	for (int i = 0; i < 4; ++i)
+	std::array<VkWriteDescriptorSet, 5> ws{};
+	for (int i = 0; i < 5; ++i)
 	{
 		ws[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		ws[i].dstSet = m_setComposite[frameIndex];
@@ -467,7 +513,7 @@ void PostStack::writeCompositeDescriptors(const PostCompositeSources &src,
 		ws[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		ws[i].pImageInfo = &imgs[i];
 	}
-	vkUpdateDescriptorSets(m_context->getDevice(), 4, ws.data(), 0, nullptr);
+	vkUpdateDescriptorSets(m_context->getDevice(), 5, ws.data(), 0, nullptr);
 	m_lastCompositeSrc[frameIndex] = src;
 }
 
@@ -476,7 +522,8 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 						   VkExtent2D extent, uint32_t frameIndex,
 						   VkDescriptorSet /*frameSet0*/,
 						   const PostProcessSettings &settings, const glm::vec2 &sunScreen,
-						   float sunVisibility, float time, const glm::mat4 &projection)
+						   float sunVisibility, float time, const glm::mat4 &projection,
+						   VkGpuProfiler *profiler)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
@@ -523,20 +570,36 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 		endRendering(cmd);
 	};
 
-	// --- SSAO half-res (skip entirely when disabled — composite treats ao=1 via flag) ---
+	// --- SSAO half-res + bilateral upsample (skip both when disabled — composite
+	// treats ao=1 via flag); timed as its own GpuPass inside the Post scope ---
 	if (settings.ssaoEnabled)
 	{
+		if (profiler)
+			profiler->beginPass(cmd, GpuPass::Ssao);
 		vkbar::cmdTransitionColor(cmd, m_ssao.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 		SsaoPC spc{};
 		spc.p0 = glm::vec4(1.f / static_cast<float>(extent.width), 1.f / static_cast<float>(extent.height),
-						   settings.ssaoRadius, settings.ssaoBias);
-		spc.p1 = glm::vec4(std::min(settings.ssaoIntensity, 0.85f), 0.1f, 1000.f, 0.f);
+						   settings.ssaoRadius, 0.f); // w unused (shader reserves it)
+		spc.p1 = glm::vec4(float(settings.ssaoDirections), float(settings.ssaoSteps), 0.f, 0.f);
 		spc.invProj = glm::inverse(projection);
 		fsDraw(m_ssaoPipe, m_ssaoLayout, m_setSsao, m_ssao.view, half, &spc, sizeof(spc));
 		vkbar::cmdTransitionColor(cmd, m_ssao.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+		// Depth-aware bilateral upsample → full-res final AO
+		vkbar::cmdTransitionColor(cmd, m_ssaoUp.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+		UpsamplePC upc{};
+		upc.p0 = glm::vec4(1.f / static_cast<float>(extent.width), 1.f / static_cast<float>(extent.height), 0.f, 0.f);
+		upc.invProj = spc.invProj;
+		fsDraw(m_ssaoUpPipe, m_ssaoUpPipeLayout, m_setSsaoUp, m_ssaoUp.view, extent, &upc, sizeof(upc));
+		vkbar::cmdTransitionColor(cmd, m_ssaoUp.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+		if (profiler)
+			profiler->endPass(cmd, GpuPass::Ssao);
 	}
 
 	// Bloom (skip when disabled)
@@ -618,7 +681,8 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 					   settings.underwaterStrength,
 					   time);
 	cpc.p4 = glm::vec4(settings.filmGrain, settings.vignette,
-					   m_swapchainRequiresSrgbEncode ? 1.0f : 0.0f, 0.0f);
+					   m_swapchainRequiresSrgbEncode ? 1.0f : 0.0f,
+					   static_cast<float>(settings.ssaoDebugView));
 	fsDraw(m_compositePipe, m_compositeLayout,
 		   m_setComposite[frameIndex % kFramesInFlight], swapchainView, extent,
 		   &cpc, sizeof(cpc));

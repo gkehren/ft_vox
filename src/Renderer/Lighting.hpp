@@ -124,8 +124,33 @@ inline float combinedLightFactor(uint8_t skyLight, uint8_t blockLight, float day
 	return std::max(sky, blk);
 }
 
-/// SSAO composite floor — must match composite.frag.
-inline constexpr float kSsaoAoFloor = 0.62f;
+/// SSAO composite floor — safety-only clamp, the horizon-based estimator no
+/// longer needs a high global floor. Must match composite.frag.
+inline constexpr float kSsaoAoFloor = 0.10f;
+
+/// Edge-aware neighbor selection for the SSAO normal reconstruction — the
+/// selection policy of ssao.frag.glsl (keep the GLSL in sync; unit-tested in
+/// test_render_helpers.cpp because the original bug was exactly a selection
+/// defect: an invalid neighbor substituted with the center would win the
+/// smaller-delta comparison with a fake zero delta). Both valid → the
+/// smaller |delta| wins (ties → A); a single valid neighbor wins; none →
+/// the axis contributes nothing.
+enum class SsaoAxisPick
+{
+	A,
+	B,
+	None
+};
+inline SsaoAxisPick ssaoPickAxisDelta(bool validA, bool validB, float absDeltaA, float absDeltaB)
+{
+	if (validA && validB)
+		return absDeltaA <= absDeltaB ? SsaoAxisPick::A : SsaoAxisPick::B;
+	if (validA)
+		return SsaoAxisPick::A;
+	if (validB)
+		return SsaoAxisPick::B;
+	return SsaoAxisPick::None;
+}
 
 /// Weight for directional CSM: 0 deep caves, 1 open sky (matches terrain.frag sunReach).
 /// Input is RAW sky light (not day-scaled) so moonlight shadows work at night.
