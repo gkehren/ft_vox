@@ -1,6 +1,7 @@
 #include "TextureManager.hpp"
 #include "ResourcePackReader.hpp"
 #include "ColorSpace.hpp"
+#include "Renderer/TextureMips.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image/stb_image.h>
@@ -205,8 +206,12 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 	const CpuAtlasBuild cpu = buildCpuAtlas(packRoot, atlas);
 	const uint32_t layerSize = cpu.layerSize;
 	const uint32_t layers = static_cast<uint32_t>(TextureType::COUNT);
-	const VkDeviceSize layerBytes = static_cast<VkDeviceSize>(layerSize) * layerSize * 4;
-	const VkDeviceSize totalSize = layerBytes * layers;
+
+	// Full CPU-generated mip chain (linear-light box filter, alpha-coverage
+	// preserving — see Renderer/TextureMips.hpp). One staging buffer holds every
+	// layer's chain; a single vkCmdCopyBufferToImage writes all levels.
+	const uint32_t mipCount = texture_mips::mipLevelCount(layerSize);
+	std::vector<uint8_t> upload = texture_mips::buildMipChainAtlas(layerSize, layers, atlas);
 
 	// 2) Build replacement GPU resources into temps.
 	AllocatedImage newImage{};
@@ -224,13 +229,17 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 			destroyImage(context.getAllocator(), context.getDevice(), newImage);
 	};
 
+	// Resolved once up front so the completion log can report it too.
+	const auto aniso = texture_mips::resolveAnisotropy(context.samplerAnisotropyEnabled(),
+													   context.getDeviceProperties().limits.maxSamplerAnisotropy);
+
 	try
 	{
 		VkImageCreateInfo imageInfo{};
 		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 		imageInfo.imageType = VK_IMAGE_TYPE_2D;
 		imageInfo.extent = {layerSize, layerSize, 1};
-		imageInfo.mipLevels = 1;
+		imageInfo.mipLevels = mipCount;
 		imageInfo.arrayLayers = layers;
 		imageInfo.format = colorspace::kAlbedoTextureFormat;
 		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -245,7 +254,7 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 		newImage.format = colorspace::kAlbedoTextureFormat;
 		newImage.width = layerSize;
 		newImage.height = layerSize;
-		newImage.mipLevels = 1;
+		newImage.mipLevels = mipCount;
 		newImage.arrayLayers = layers;
 
 		if (vmaCreateImage(context.getAllocator(), &imageInfo, &allocInfo, &newImage.image, &newImage.allocation,
@@ -259,7 +268,7 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 		viewInfo.format = colorspace::kAlbedoTextureFormat;
 		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		viewInfo.subresourceRange.baseMipLevel = 0;
-		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.levelCount = mipCount;
 		viewInfo.subresourceRange.baseArrayLayer = 0;
 		viewInfo.subresourceRange.layerCount = layers;
 
@@ -267,30 +276,41 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 			throw std::runtime_error("Failed to create texture array view");
 
 		staging = createBuffer(
-			context.getAllocator(), totalSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO,
+			context.getAllocator(), upload.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO,
 			VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
-		writeBuffer(context.getAllocator(), staging, atlas.data(), totalSize);
+		writeBuffer(context.getAllocator(), staging, upload.data(), upload.size());
 
 		imm.submitAndWait([&](VkCommandBuffer cmd) {
 			cmdTransitionImageLayout(cmd, newImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
-									 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 1, layers);
+									 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, mipCount,
+									 layers);
 
-			std::vector<VkBufferImageCopy> regions(layers);
+			// One region per (layer, mip level); the staging buffer is laid out
+			// mip-major/layer-minor (see texture_mips::buildMipChainAtlas).
+			std::vector<VkBufferImageCopy> regions;
+			regions.reserve(layers * mipCount);
 			for (uint32_t layer = 0; layer < layers; ++layer)
 			{
-				regions[layer] = {};
-				regions[layer].bufferOffset = layerBytes * layer;
-				regions[layer].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-				regions[layer].imageSubresource.mipLevel = 0;
-				regions[layer].imageSubresource.baseArrayLayer = layer;
-				regions[layer].imageSubresource.layerCount = 1;
-				regions[layer].imageExtent = {layerSize, layerSize, 1};
+				for (uint32_t level = 0; level < mipCount; ++level)
+				{
+					VkBufferImageCopy &r = regions.emplace_back();
+					r.bufferOffset = texture_mips::chainOffset(layerSize, level) + layer * texture_mips::chainBytes(layerSize);
+					r.bufferRowLength = 0;
+					r.bufferImageHeight = 0;
+					r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+					r.imageSubresource.mipLevel = level;
+					r.imageSubresource.baseArrayLayer = layer;
+					r.imageSubresource.layerCount = 1;
+					const uint32_t mipSize = std::max(layerSize >> level, 1u);
+					r.imageOffset = {0, 0, 0};
+					r.imageExtent = {mipSize, mipSize, 1};
+				}
 			}
 			vkCmdCopyBufferToImage(cmd, staging.buffer, newImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 								   static_cast<uint32_t>(regions.size()), regions.data());
 
 			cmdTransitionImageLayout(cmd, newImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-									 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 1,
+									 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, mipCount,
 									 layers);
 		});
 
@@ -298,17 +318,27 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 
 		VkSamplerCreateInfo samplerInfo{};
 		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		// NEAREST magnification preserves the pixel-art look up close; LINEAR
+		// minification + LINEAR mip selection + anisotropy stabilize distant
+		// terrain. Mips are generated CPU-side in linear light with
+		// alpha-coverage preservation (see Renderer/TextureMips.hpp) so cutout
+		// foliage keeps its silhouette at every level.
 		samplerInfo.magFilter = VK_FILTER_NEAREST;
-		samplerInfo.minFilter = VK_FILTER_NEAREST;
+		samplerInfo.minFilter = VK_FILTER_LINEAR;
 		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.anisotropyEnable = VK_FALSE;
-		samplerInfo.maxAnisotropy = 1.0f;
+		// Feature-gated: capped at 8x, clamped to the device limit, and cleanly
+		// disabled when samplerAnisotropy is unsupported — never a hard requirement.
+		samplerInfo.anisotropyEnable = aniso.enabled ? VK_TRUE : VK_FALSE;
+		samplerInfo.maxAnisotropy = aniso.maxAnisotropy;
 		samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
 		samplerInfo.unnormalizedCoordinates = VK_FALSE;
 		samplerInfo.compareEnable = VK_FALSE;
-		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		samplerInfo.minLod = 0.0f;
+		samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+		samplerInfo.mipLodBias = 0.0f;
 		if (vkCreateSampler(context.getDevice(), &samplerInfo, nullptr, &newSampler) != VK_SUCCESS)
 			throw std::runtime_error("Failed to create texture sampler");
 	}
@@ -329,7 +359,10 @@ TextureAtlasLoadReport TextureManager::initialize(VkContext &context, ImmediateC
 	m_layerSize = layerSize;
 	m_lastReport = cpu.report;
 
-	std::cout << "Texture array: " << layers << " layers (" << layerSize << "x" << layerSize << ")\n";
+	const std::string anisoText =
+		aniso.enabled ? std::to_string(static_cast<int>(aniso.maxAnisotropy)) + std::string("x") : std::string("off");
+	std::cout << "Texture array: " << layers << " layers (" << layerSize << "x" << layerSize << ", " << mipCount
+			  << " mips, aniso " << anisoText << ")\n";
 	return m_lastReport;
 }
 

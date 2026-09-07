@@ -66,6 +66,10 @@ public:
 		return m_deviceProperties.limits.maxDrawIndirectCount;
 	}
 	bool hasPortabilitySubset() const { return m_portabilitySubset; }
+	/// Whether the device actually enabled samplerAnisotropy. Sampler creation
+	/// (TextureManager) gates anisotropy on this; the ceiling lives in
+	/// getDeviceProperties().limits.maxSamplerAnisotropy.
+	bool samplerAnisotropyEnabled() const { return m_samplerAnisotropyEnabled; }
 	bool isValidationEnabled() const { return m_validationEnabled; }
 	/// Includes initialization and shutdown; reset only by the next init().
 	uint64_t validationErrorCount() const { return m_validationErrors.load(std::memory_order_relaxed); }
@@ -107,6 +111,7 @@ private:
 	bool m_timelineSemaphores{false};
 	bool m_multiDrawIndirect{false};
 	bool m_portabilitySubset{false};
+	bool m_samplerAnisotropyEnabled{false};
 
 	std::unique_ptr<VkAllocator> m_allocator;
 

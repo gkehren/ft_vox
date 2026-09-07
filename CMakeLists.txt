@@ -62,6 +62,7 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
                 ${FT_VOX_SHADER_SRC_DIR}/foliage_wind.inc.glsl
                 ${FT_VOX_SHADER_SRC_DIR}/colorspace.inc.glsl
                 ${FT_VOX_SHADER_SRC_DIR}/csm.inc.glsl
+                ${FT_VOX_SHADER_SRC_DIR}/cutout.inc.glsl
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )
@@ -76,6 +77,7 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
                 ${FT_VOX_SHADER_SRC_DIR}/foliage_wind.inc.glsl
                 ${FT_VOX_SHADER_SRC_DIR}/colorspace.inc.glsl
                 ${FT_VOX_SHADER_SRC_DIR}/csm.inc.glsl
+                ${FT_VOX_SHADER_SRC_DIR}/cutout.inc.glsl
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )
@@ -162,6 +164,7 @@ set(FT_VOX_RENDERER_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Renderer/MobTextures.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/MobRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/TextureMips.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/TextureManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/WorldRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/PostStack.cpp

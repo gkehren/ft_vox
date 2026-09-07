@@ -240,6 +240,21 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
 - Block **texture array** (`sampler2DArray`) for all solid/water materials (~70 layers: core blocks + wood species, climate surfaces, ice, deepslate, etc.). Uploaded as **sRGB** (`colorspace::kAlbedoTextureFormat`) — see [Color-space contract](#color-space-contract-renderercolorspacehpp-issue-135).
 - **Single layer table** `kBlockLayers` in `Renderer/MinecraftTextures.hpp`: Minecraft basename + **bundled fallback** PNG + transparency per `TextureType`. Meshing `TextureManager::isTransparent` and atlas load both use it. Face remap / foliage / ice helpers live here too (`blockTopFace`, `blockIsFoliage`, …).
 - Each PNG is decoded **once**; layer size = max frame edge; nearest-neighbor into the atlas.
+- **Mip chain (CPU-generated):** each decoded RGBA8 layer also gets a full mip
+  chain built on the CPU (`Renderer/TextureMips.*`): texels are sRGB-decoded to
+  linear light before averaging, color is filtered premultiplied, and alpha is
+  rescaled so coverage above the canonical cutout threshold (`0.5` — shared with
+  the shaders through `ressources/shaders/vulkan/cutout.inc.glsl` and
+  `src/Renderer/TextureMips.hpp`) survives downsampling — cutout foliage keeps its
+  silhouette at every level. The whole chain is staged and uploaded in one
+  `vkCmdCopyBufferToImage` (one copy region per layer × mip); a full chain costs
+  ~+33% extra device memory.
+- **Sampler:** NEAREST magnification (keeps the pixel-art look up close), LINEAR
+  minification with LINEAR mip selection, `maxLod = VK_LOD_CLAMP_NONE`. Anisotropy
+  is enabled only when the device enabled `samplerAnisotropy`
+  (`VkContext::samplerAnisotropyEnabled`), capped at 8x and clamped to the device
+  limit; unsupported devices fall back gracefully to 1x.
+- Water and shadow passes sample through the same sampler via set1 binding 0.
 - Path resolve (explicit pack root only — no getenv in texture code):
   1. `{pack_root}/assets/minecraft/textures/block/<name>.png` when pack is non-empty and file exists
   2. Else `{RES_PATH}textures/<name>.png` when that file exists

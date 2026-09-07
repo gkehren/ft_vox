@@ -10,11 +10,13 @@
 #include <Renderer/ResourcePackReader.hpp>
 #include <Renderer/IndirectDrawUtils.hpp>
 #include <Renderer/ColorSpace.hpp>
+#include <Renderer/TextureMips.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <fstream>
 #include <filesystem>
 #include <utils.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -821,6 +823,276 @@ int main()
 		const float oldDoubleTransfer = linearToSrgb(std::pow(midGrayLinear, 1.0f / 2.2f));
 		if (std::abs(oldDoubleTransfer - midGraySrgb) < 0.15f)
 			ok = fail("Old transfer was not distinctively washed out (double gamma check)");
+	}
+
+	// --- Texture mip chains + cutout policy (issue #136) ---
+	{
+		using namespace texture_mips;
+
+		// 1. Mip level counts: floor(log2(size)) + 1
+		{
+			const struct
+			{
+				uint32_t size;
+				uint32_t levels;
+			} countCases[] = {
+				{1, 1}, {2, 2}, {16, 5}, {64, 7}, {20, 5}, {3, 2},
+			};
+			for (const auto &c : countCases)
+			{
+				if (mipLevelCount(c.size) != c.levels)
+					ok = fail("mipLevelCount(" + std::to_string(c.size) + ") must be " +
+					          std::to_string(c.levels) + " (got " +
+					          std::to_string(mipLevelCount(c.size)) + ")");
+			}
+		}
+
+		// 2. Chain layout: 16 px -> 5 levels of (256+64+16+4+1) texels
+		if (chainBytes(16) != (256 + 64 + 16 + 4 + 1) * 4)
+			ok = fail("chainBytes(16) must be (256+64+16+4+1)*4");
+		if (chainOffset(16, 1) != 256 * 4)
+			ok = fail("chainOffset(16, 1) must be 256*4");
+		if (chainOffset(16, 4) != (256 + 64 + 16 + 4) * 4)
+			ok = fail("chainOffset(16, 4) must be (256+64+16+4)*4");
+		if (mipLevelBytes(16, 2) != 16 * 4)
+			ok = fail("mipLevelBytes(16, 2) must be 16*4");
+		if (chainOffset(16, 5) != chainBytes(16))
+			ok = fail("chainOffset past the last level must equal chainBytes");
+
+		// 3. Opaque textures stay fully opaque through every level
+		{
+			const uint32_t base = 16;
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					texel[0] = static_cast<uint8_t>((x * 17 + 11) & 0xff);
+					texel[1] = static_cast<uint8_t>((y * 29 + 7) & 0xff);
+					texel[2] = static_cast<uint8_t>((x * 7 + y * 13 + 3) & 0xff);
+					texel[3] = 255;
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+			const uint32_t levels = mipLevelCount(base);
+			for (uint32_t level = 0; level < levels; ++level)
+			{
+				const uint32_t w = std::max(base >> level, 1u);
+				const uint8_t *pixels = chain.data() + chainOffset(base, level);
+				for (uint32_t i = 0; i < w * w; ++i)
+				{
+					if (pixels[i * 4 + 3] != 255)
+					{
+						ok = fail("opaque texture must stay alpha 255 at level " +
+						          std::to_string(level));
+						break;
+					}
+				}
+			}
+		}
+
+		// 4. Coverage preserved: binary cutout alpha must survive the whole chain.
+		// A per-texel checkerboard is symmetric under the 2x2 box window, so every
+		// filtered texel carries the coverage-preserving rescale sqrt(avg * max) =
+		// sqrt(0.5): the fraction of texels at/above the threshold must never
+		// collapse (silhouettes cannot vanish).
+		{
+			const uint32_t base = 8;
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					if ((x + y) % 2 == 0)
+					{
+						texel[0] = 0;
+						texel[1] = 255;
+						texel[2] = 0;
+						texel[3] = 255;
+					}
+					else
+					{
+						// Deliberately loud RGB under the transparent texel: an
+						// alpha-unaware filter would bleed red down the chain.
+						texel[0] = 255;
+						texel[1] = 0;
+						texel[2] = 0;
+						texel[3] = 0;
+					}
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+			const uint32_t levels = mipLevelCount(base);
+			for (uint32_t level = 0; level < levels; ++level)
+			{
+				const uint32_t w = std::max(base >> level, 1u);
+				const uint8_t *pixels = chain.data() + chainOffset(base, level);
+				uint32_t covered = 0;
+				for (uint32_t i = 0; i < w * w; ++i)
+				{
+					const float a = static_cast<float>(pixels[i * 4 + 3]) / 255.0f;
+					if (a >= kAlphaCutoutThreshold)
+						++covered;
+					// Transparent-black policy: generated texels below the
+					// threshold must not carry fringe RGB.
+					if (level > 0 && pixels[i * 4 + 3] == 0 &&
+						(pixels[i * 4] != 0 || pixels[i * 4 + 1] != 0 || pixels[i * 4 + 2] != 0))
+						ok = fail("generated fully transparent texel must be transparent black at level " +
+						          std::to_string(level));
+				}
+				const float fraction = static_cast<float>(covered) / static_cast<float>(w * w);
+				if (level > 0 && fraction < 0.5f)
+					ok = fail("coverage collapsed below 0.5 at level " + std::to_string(level) +
+					          " (fraction " + std::to_string(fraction) + ")");
+			}
+			// Coverage-preserving rescale: level 1 (4x4) is a uniform blend with
+			// avg alpha 0.5 and max alpha 1.0, so sqrt(avg * max) = sqrt(0.5).
+			const uint8_t *level1 = chain.data() + chainOffset(base, 1);
+			for (uint32_t i = 0; i < 16; ++i)
+			{
+				const float a = static_cast<float>(level1[i * 4 + 3]) / 255.0f;
+				if (std::abs(a - 0.70711f) > 2.0f / 255.0f)
+					ok = fail("checkerboard level 1 alpha must equal sqrt(0.5) coverage rescale");
+			}
+			// The loud transparent-red RGB must not bleed into any filtered level.
+			for (uint32_t level = 1; level < levels; ++level)
+			{
+				const uint32_t w = std::max(base >> level, 1u);
+				const uint8_t *pixels = chain.data() + chainOffset(base, level);
+				for (uint32_t i = 0; i < w * w; ++i)
+				{
+					if (pixels[i * 4] > pixels[i * 4 + 1])
+					{
+						ok = fail("transparent red bled into filtered level " + std::to_string(level));
+						break;
+					}
+				}
+			}
+		}
+
+		// 5. No fringe: premultiplied filtering must not bleed cut-out texel RGB
+		{
+			const uint32_t base = 2;
+			const std::vector<uint8_t> layer = {
+				// top row: two opaque green texels
+				0, 255, 0, 255, 0, 255, 0, 255,
+				// bottom row: two fully transparent magenta texels (would fringe if bled)
+				255, 0, 255, 0, 255, 0, 255, 0,
+			};
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+			const uint8_t *level1 = chain.data() + chainOffset(base, 1); // 1x1
+			const float a = static_cast<float>(level1[3]) / 255.0f;
+			if (std::abs(a - 0.70711f) > 2.0f / 255.0f)
+				ok = fail("half-coverage 2x2 texel must rescale to sqrt(0.5) alpha");
+			const float r = static_cast<float>(level1[0]) / 255.0f;
+			const float g = static_cast<float>(level1[1]) / 255.0f;
+			const float b = static_cast<float>(level1[2]) / 255.0f;
+			if (!(g > r && g > b))
+				ok = fail("fringe filter must stay green-dominant (G strictly max)");
+			if (r >= 60.0f / 255.0f || b >= 60.0f / 255.0f)
+				ok = fail("fringe filter must not bleed transparent magenta (R/B < 60/255)");
+
+			// Sub-threshold soft alpha must never be amplified across the cutout
+			// threshold (sqrt(avg * max) <= max): a texture the shader cuts at
+			// mip 0 stays cut at every level, and its RGB must survive un-bled so
+			// deeper premultiplied averages stay correct.
+			const std::vector<uint8_t> faint = {
+				128, 0, 128, 100, 128, 0, 128, 100,
+				128, 0, 128, 100, 128, 0, 128, 100,
+			};
+			std::vector<uint8_t> faintChain(chainBytes(base), 0);
+			generateLayerChain(base, faint.data(), faintChain.data());
+			const uint8_t *faint1 = faintChain.data() + chainOffset(base, 1);
+			if (faint1[3] != 100)
+				ok = fail("sub-threshold soft alpha must stay below the cutout threshold");
+			if (std::abs(int(faint1[0]) - 128) > 1 || faint1[1] > 1 || std::abs(int(faint1[2]) - 128) > 1)
+				ok = fail("soft-alpha RGB must survive premultiplied filtering unchanged");
+		}
+
+		// 6. Anisotropy policy: device-gated, clamped to the device limit, >= 1.0
+		{
+			const SamplerAnisotropy unsupported = resolveAnisotropy(false, 16.0f);
+			if (unsupported.enabled || unsupported.maxAnisotropy != 1.0f)
+				ok = fail("anisotropy must be disabled with maxAnisotropy 1.0 when unsupported");
+			const SamplerAnisotropy full = resolveAnisotropy(true, 16.0f);
+			if (!full.enabled || full.maxAnisotropy != 8.0f)
+				ok = fail("anisotropy must honor the 8.0 request on capable devices");
+			const SamplerAnisotropy clamp4 = resolveAnisotropy(true, 4.0f);
+			if (!clamp4.enabled || clamp4.maxAnisotropy != 4.0f)
+				ok = fail("anisotropy must clamp to the 4.0 device limit");
+			const SamplerAnisotropy clamp2 = resolveAnisotropy(true, 2.0f);
+			if (!clamp2.enabled || clamp2.maxAnisotropy != 2.0f)
+				ok = fail("anisotropy must clamp to the 2.0 device limit");
+		}
+
+		// 7. Shader cutout threshold stays in sync with the mip generator
+		{
+			namespace fs = std::filesystem;
+			const char *candidates[] = {
+				"ressources/shaders/vulkan/cutout.inc.glsl",
+				"../ressources/shaders/vulkan/cutout.inc.glsl",
+				"../../ressources/shaders/vulkan/cutout.inc.glsl",
+			};
+			std::string glsl;
+			for (const char *c : candidates)
+			{
+				std::ifstream in(c);
+				if (in)
+				{
+					glsl.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+					break;
+				}
+			}
+			if (glsl.empty())
+			{
+				ok = fail("cutout.inc.glsl not found under ressources/shaders/vulkan");
+			}
+			else
+			{
+				const std::string key = "const float kAlphaCutoutThreshold = ";
+				const auto at = glsl.find(key);
+				if (at == std::string::npos)
+					ok = fail("cutout.inc.glsl must define kAlphaCutoutThreshold = <float>");
+				else
+				{
+					const float shaderThreshold = std::strtof(glsl.c_str() + at + key.size(), nullptr);
+					if (std::abs(shaderThreshold - kAlphaCutoutThreshold) > 1e-6f)
+						ok = fail("cutout.inc.glsl threshold must equal texture_mips::kAlphaCutoutThreshold");
+				}
+			}
+		}
+
+		// 8. Informational: CPU mip generation cost (no assertion)
+		{
+			const uint32_t base = 64;
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					texel[0] = static_cast<uint8_t>(x * 4);
+					texel[1] = static_cast<uint8_t>(y * 4);
+					texel[2] = static_cast<uint8_t>((x + y) * 2);
+					texel[3] = static_cast<uint8_t>((x + y) & 0xff);
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			const auto start = std::chrono::steady_clock::now();
+			constexpr int kIterations = 1000;
+			for (int i = 0; i < kIterations; ++i)
+				generateLayerChain(base, layer.data(), chain.data());
+			const auto elapsed = std::chrono::steady_clock::now() - start;
+			const double msPerLayer =
+				std::chrono::duration<double, std::milli>(elapsed).count() / kIterations;
+			std::cout << "test_render_helpers: generateLayerChain(64) average "
+			          << msPerLayer << " ms/layer over " << kIterations << " iterations\n";
+		}
 	}
 
 	if (!ok)

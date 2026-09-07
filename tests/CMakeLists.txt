@@ -129,6 +129,7 @@ add_test(NAME VisualLookDefaults COMMAND test_visual_look)
 add_executable(test_render_helpers
     test_render_helpers.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/TextureMips.cpp
 )
 
 target_include_directories(test_render_helpers PRIVATE
@@ -637,6 +638,7 @@ add_executable(test_mob_render test_mob_render.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/MobRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/MobTextures.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/TextureMips.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/TextureManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp)
 target_include_directories(test_mob_render PRIVATE ${CMAKE_SOURCE_DIR}/src ${Vulkan_INCLUDE_DIRS})

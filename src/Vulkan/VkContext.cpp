@@ -558,6 +558,9 @@ void VkContext::createLogicalDevice()
 	enabledFeatures.fillModeNonSolid = features2.features.fillModeNonSolid;
 	enabledFeatures.multiDrawIndirect = features2.features.multiDrawIndirect;
 	enabledFeatures.drawIndirectFirstInstance = VK_TRUE; // verified above
+	// Store what was actually enabled: TextureManager gates sampler anisotropy
+	// on this instead of assuming the provisional request succeeded.
+	m_samplerAnisotropyEnabled = enabledFeatures.samplerAnisotropy == VK_TRUE;
 
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
