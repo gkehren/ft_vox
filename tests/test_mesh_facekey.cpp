@@ -419,8 +419,10 @@ static void testWater()
 		BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
 		CHECK(totalOpaqueVertices(*m.result) == 0 && totalOpaqueIndices(*m.result) == 0,
 			  "water box: no opaque geometry");
+		for (const SectionMeshPayload &p : m.result->sections)
+			for (const Vertex &v : p.waterVertices)
 		CHECK(totalWaterVertices(*m.result) == 24 && totalWaterIndices(*m.result) == 36,
-			  "water box: 6 quads (top, bottom, four 4x2 sides)");
+				  "water box: 6 quads (top, bottom, four 4x2 sides)");
 		const QuadView *top = findQuad(m.water, 2, WATER, glm::ivec3(0, 10, 0));
 		CHECK(top != nullptr && top->mx == glm::ivec3(4, 10, 4),
 			  "water box: top face merged 4x4");
@@ -1676,9 +1678,72 @@ static void testWaterFilledKelpVariants()
 					++kelpVertices;
 			}
 		CHECK(kelpVertices > 0, "kelp geometry contract: lone KELP still emits its quads");
+		s->pool.release(r2);
 		s->pool.release(r);
 		delete s;
 	}
+}
+
+static void testIsolatedWaterVoxel()
+{
+	// Issue #120 review P1: a lone WATER voxel in the middle of the chunk
+	// must emit exactly its six faces. The -X/-Z faces go through the
+	// in-grid openness branch (unlike border faces), so this catches a
+	// fluid-neighbor rule that drops the faces against AIR on the -q side.
+	Scene s;
+	s.chunk.setVoxel(8, 8, 8, WATER);
+	BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
+	CHECK(totalWaterVertices(*m.result) == 24 && totalWaterIndices(*m.result) == 36,
+		  "lone water voxel: 6 quads (24 verts, 36 indices)");
+	const glm::ivec3 mnByNormal[6] = {
+		{9, 8, 8}, // +X
+		{8, 8, 8}, // -X
+		{8, 9, 8}, // +Y
+		{8, 8, 8}, // -Y
+		{8, 8, 9}, // +Z
+		{8, 8, 8}, // -Z
+	};
+	for (int normalIdx = 0; normalIdx < 6; ++normalIdx)
+	{
+		const QuadView *q = findQuad(m.water, normalIdx, WATER, mnByNormal[normalIdx]);
+		CHECK(q != nullptr, "lone water voxel: one face per normal direction");
+		if (q)
+		{
+			// A face quad is a 1x1 tile: unit extent on the two tangent axes,
+			// zero extent on the normal axis (mx is exclusive).
+			const int dx = q->mx.x - q->mn.x;
+			const int dy = q->mx.y - q->mn.y;
+			const int dz = q->mx.z - q->mn.z;
+			const bool single = (normalIdx < 2) ? (dx == 0 && dy == 1 && dz == 1)
+			                    : (normalIdx < 4) ? (dx == 1 && dy == 0 && dz == 1)
+			                                      : (dx == 1 && dy == 1 && dz == 0);
+			CHECK(single, "lone water voxel: face is single-cell sized");
+		}
+	}
+	CHECK(m.opaque.empty(), "lone water voxel: no opaque geometry");
+	m.release();
+}
+
+static void testWaterSeamPartialVsFull()
+{
+	// Issue #120 review P1: fluid quads spanning the y=15/16 section seam
+	// must be emitted by exactly one section and stay inside its Y span -
+	// the partial (metadata-bounds) build must compose into the full build
+	// byte for byte, and no fluid quad may cross a section boundary.
+	Scene s;
+	for (int x = 4; x <= 7; ++x)
+		for (int z = 4; z <= 7; ++z)
+			for (int y = 10; y <= 21; ++y)
+				s.chunk.setVoxel(x, y, z, WATER);
+	BuiltMesh meta = buildWithMetadataBounds(s.chunk, s.pool);
+	BuiltMesh full = buildForcedFullRange(s.chunk, s.pool);
+	expectIdentical(meta, full, "water seam: metadata-bounds build matches forced full range");
+	for (const QuadView &q : meta.water)
+		CHECK((q.mn.y / 16) == ((q.mx.y - 1) / 16),
+			  "water seam: no fluid quad crosses a section boundary");
+	CHECK(!meta.water.empty(), "water seam: fluid geometry present");
+	meta.release();
+	full.release();
 }
 
 int main(int argc, char **argv)
@@ -1693,6 +1758,8 @@ int main(int argc, char **argv)
     testSmallPlantGeometry();
     testWaterWithEmbeddedDetails();
     testWaterFilledKelpVariants();
+    testIsolatedWaterVoxel();
+    testWaterSeamPartialVsFull();
 	testUniformSlabMerges();
 	testBlockTypeBoundary();
 	testTransparencyPairs();

@@ -32,6 +32,13 @@ struct MeshWorkspace
   std::vector<uint64_t> faceKeyHi;
   std::vector<glm::ivec3> skyQ;
   std::vector<glm::ivec3> blockQ;
+  // Fluid pass grids (issue #120): water occupancy and neighbor openness,
+  // one entry per cell of the section band. Thread-local: sized on demand
+  // and reused across sections/builds without per-section allocations.
+  std::vector<uint8_t> waterGrid;
+  std::vector<uint8_t> openGrid;
+  // 0 = closed (opaque block), 1 = open air, 2 = open transparent block.
+  // Filled only when the section actually holds water.
 
   MeshWorkspace()
   {
@@ -40,6 +47,8 @@ struct MeshWorkspace
     faceKeyHi.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
     skyQ.reserve(512);
     blockQ.reserve(256);
+    waterGrid.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
+    openGrid.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
   }
 };
 
@@ -1562,245 +1571,261 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
   // gating as the block pass, and chunk borders read the same neighbor
   // shell.
   {
-    // Per-section water occupancy grid: one sample per cell instead of two
-    // to six per cell per direction, plus an early-out for water-free
-    // sections (the overwhelming majority inland).
+    // Scan 1 (water occupancy): one blockContainsWater sample per cell of
+    // the section band, straight from the chunk voxels. Water-free sections
+    // - the overwhelming majority inland - stop here and pay nothing else.
     const int yLo = ownerMinY;
     const int yHi = ownerMaxY;
     const int ySize = yHi - yLo + 1;
-    std::vector<uint8_t> waterGrid(static_cast<size_t>(CHUNK_SIZE) * ySize * CHUNK_SIZE);
-    std::vector<uint8_t> openGrid(static_cast<size_t>(CHUNK_SIZE) * ySize * CHUNK_SIZE);
+    if (static_cast<size_t>(CHUNK_SIZE) * ySize > workspace.waterGrid.size())
+      workspace.waterGrid.resize(static_cast<size_t>(CHUNK_SIZE) * ySize);
     size_t waterCount = 0;
     for (int y = yLo; y <= yHi; ++y)
       for (int z = 0; z < CHUNK_SIZE; ++z)
         for (int x = 0; x < CHUNK_SIZE; ++x)
         {
           const size_t gi = (static_cast<size_t>(y - yLo) * CHUNK_SIZE + z) * CHUNK_SIZE + x;
-          if (blockContainsWater(sampleForMeshing(x, y, z)))
+          if (blockContainsWater(getVoxel(x, y, z).getTextureType()))
           {
-            waterGrid[gi] = 1;
+            workspace.waterGrid[gi] = 1;
             ++waterCount;
           }
-          const TextureType geo = getBlockGeometryForMeshing(x, y, z);
-          openGrid[gi] = (geo == AIR || TextureManager::isTransparent(geo)) ? 1 : 0;
+          else
+          {
+            workspace.waterGrid[gi] = 0;
+          }
         }
 
+    // Scan 2 (neighbor openness), only for sections that hold water:
+    // 0 = closed (opaque block), 1 = open air, 2 = open transparent block.
     if (waterCount != 0)
     {
-    const auto waterOccupied = [&](int lx, int ly, int lz) -> bool {
-      if (ly < yLo || ly > yHi || lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE)
-        return blockContainsWater(sampleForMeshing(lx, ly, lz));
-      return waterGrid[(static_cast<size_t>(ly - yLo) * CHUNK_SIZE + lz) * CHUNK_SIZE + lx] != 0;
-    };
+      if (static_cast<size_t>(CHUNK_SIZE) * ySize > workspace.openGrid.size())
+        workspace.openGrid.resize(static_cast<size_t>(CHUNK_SIZE) * ySize);
+      for (int y = yLo; y <= yHi; ++y)
+        for (int z = 0; z < CHUNK_SIZE; ++z)
+          for (int x = 0; x < CHUNK_SIZE; ++x)
+          {
+            const TextureType geo = getBlockGeometryForMeshing(x, y, z);
+            workspace.openGrid[(static_cast<size_t>(y - yLo) * CHUNK_SIZE + z) * CHUNK_SIZE + x] =
+                (geo == AIR || TextureManager::isTransparent(geo)) ? 1 : 0;
+          }
+
+      const auto waterOccupied = [&](int lx, int ly, int lz) -> bool {
+        if (ly < yLo || ly > yHi || lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE)
+          return blockContainsWater(sampleForMeshing(lx, ly, lz));
+        return workspace.waterGrid[(static_cast<size_t>(ly - yLo) * CHUNK_SIZE + lz) * CHUNK_SIZE + lx] != 0;
+      };
+    // Three-state neighbor openness (issue #120 review): fluid occupancy
+    // first (a water-containing neighbor never exposes a fluid face), then
+    // AIR always exposes the fluid face; a transparent block only at
+    // dir > 0 (the -q side sample owns the interface face per the legacy
+    // pair priority); an opaque block never does.
     const auto fluidSideOpen = [&](int lx, int ly, int lz, int dir) -> bool {
       if (waterOccupied(lx, ly, lz))
         return false;
-      if (lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE || ly < yLo || ly > yHi)
+      if (ly < yLo || ly > yHi || lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE)
       {
         const TextureType geo = getBlockGeometryForMeshing(lx, ly, lz);
-        // Same legacy pair priority as below: a transparent neighbor on the
-        // -q side owns the interface face.
         return geo == AIR || (TextureManager::isTransparent(geo) && dir > 0);
       }
-      const bool open =
-          openGrid[(static_cast<size_t>(ly - yLo) * CHUNK_SIZE + lz) * CHUNK_SIZE + lx] != 0;
-      // Legacy pair priority: a transparent non-water neighbor on the -q
-      // side owns the interface face, so the fluid face only wins at
-      // dir > 0 against such a neighbor.
-      return open && dir > 0;
+      const uint8_t kind = workspace.openGrid[(static_cast<size_t>(ly - yLo) * CHUNK_SIZE + lz) * CHUNK_SIZE + lx];
+      return kind == 1 || (kind == 2 && dir > 0);
     };
 
-    for (int d = 0; d < 3; ++d)
-    {
-      const int u = (d + 1) % 3;
-      const int v = (d + 2) % 3;
-      int x[3] = {0, 0, 0};
-      // Clamp the plane rect to the section's Y span exactly like the block
-      // pass (issue #107): without it, vertical fluid faces spanning several
-      // sections would be re-emitted by every section pass.
-      int uStart = 0, uEnd = dims[u];
-      int vStart = 0, vEnd = dims[v];
-      if (u == 1)
+      for (int d = 0; d < 3; ++d)
       {
-        uStart = std::max(0, ownerMinY);
-        uEnd = std::min(dims[u], ownerMaxY + 1);
-      }
-      if (v == 1)
-      {
-        vStart = std::max(0, ownerMinY);
-        vEnd = std::min(dims[v], ownerMaxY + 1);
-      }
-      for (x[d] = 0; x[d] < dims[d]; ++x[d])
-      {
-        // Section-local emission: the water cell owning the face decides
-        // which section emits, exactly like the block pass owner gating.
-        if (d == 1 && (x[d] < ownerMinY || x[d] > ownerMaxY))
-          continue;
-        for (int row = uStart; row < uEnd; ++row)
-          std::fill(workspace.mask.begin() + static_cast<size_t>(row) * dims[v] + vStart,
-                    workspace.mask.begin() + static_cast<size_t>(row) * dims[v] + vEnd, 0);
-        for (int side = 0; side < 2; ++side)
+        const int u = (d + 1) % 3;
+        const int v = (d + 2) % 3;
+        int x[3] = {0, 0, 0};
+        // Clamp the plane rect to the section's Y span exactly like the block
+        // pass (issue #107): without it, vertical fluid faces spanning several
+        // sections would be re-emitted by every section pass.
+        int uStart = 0, uEnd = dims[u];
+        int vStart = 0, vEnd = dims[v];
+        if (u == 1)
         {
-          const int dir = (side == 0) ? -1 : 1;
-          const int planeD = x[d] + (dir > 0 ? 1 : 0);
+          uStart = std::max(0, ownerMinY);
+          uEnd = std::min(dims[u], ownerMaxY + 1);
+        }
+        if (v == 1)
+        {
+          vStart = std::max(0, ownerMinY);
+          vEnd = std::min(dims[v], ownerMaxY + 1);
+        }
+        for (x[d] = 0; x[d] < dims[d]; ++x[d])
+        {
+          // Section-local emission: the water cell owning the face decides
+          // which section emits, exactly like the block pass owner gating.
+          if (d == 1 && (x[d] < ownerMinY || x[d] > ownerMaxY))
+            continue;
+          for (int row = uStart; row < uEnd; ++row)
+            std::fill(workspace.mask.begin() + static_cast<size_t>(row) * dims[v] + vStart,
+                      workspace.mask.begin() + static_cast<size_t>(row) * dims[v] + vEnd, 0);
+          for (int side = 0; side < 2; ++side)
+          {
+            const int dir = (side == 0) ? -1 : 1;
+            const int planeD = x[d] + (dir > 0 ? 1 : 0);
 
-          // 1) face mask for this slice + direction
-          for (x[u] = uStart; x[u] < uEnd; ++x[u])
-            for (x[v] = vStart; x[v] < vEnd; ++x[v])
-            {
-              glm::ivec3 n{x[0], x[1], x[2]};
-              n[d] += dir;
-              const bool face =
-                  waterOccupied(x[0], x[1], x[2]) && fluidSideOpen(n[0], n[1], n[2], dir);
-              workspace.mask[static_cast<size_t>(x[u]) * dims[v] + x[v]] = face ? 1 : 0;
-            }
-
-          // 2) greedy rectangle merge over the mask
-          for (x[u] = uStart; x[u] < uEnd; ++x[u])
-            for (x[v] = vStart; x[v] < vEnd; ++x[v])
-            {
-              if (workspace.mask[static_cast<size_t>(x[u]) * dims[v] + x[v]] == 0)
-                continue;
-
-              int w = 1;
-              while (x[u] + w < dims[u] &&
-                     workspace.mask[static_cast<size_t>(x[u] + w) * dims[v] + x[v]])
-                ++w;
-              int h = 1;
-              for (; x[v] + h < dims[v]; ++h)
+            // 1) face mask for this slice + direction
+            for (x[u] = uStart; x[u] < uEnd; ++x[u])
+              for (x[v] = vStart; x[v] < vEnd; ++x[v])
               {
-                bool rowFull = true;
-                for (int iw = 0; iw < w; ++iw)
+                glm::ivec3 n{x[0], x[1], x[2]};
+                n[d] += dir;
+                const bool face =
+                    waterOccupied(x[0], x[1], x[2]) && fluidSideOpen(n[0], n[1], n[2], dir);
+                workspace.mask[static_cast<size_t>(x[u]) * dims[v] + x[v]] = face ? 1 : 0;
+              }
+
+            // 2) greedy rectangle merge over the mask (expansion stays inside
+            // the clamped rect: stale cells outside it belong to other
+            // sections and must never extend a fluid quad)
+            for (x[u] = uStart; x[u] < uEnd; ++x[u])
+              for (x[v] = vStart; x[v] < vEnd; ++x[v])
+              {
+                if (workspace.mask[static_cast<size_t>(x[u]) * dims[v] + x[v]] == 0)
+                  continue;
+
+                int w = 1;
+                while (x[u] + w < uEnd &&
+                       workspace.mask[static_cast<size_t>(x[u] + w) * dims[v] + x[v]])
+                  ++w;
+                int h = 1;
+                for (; x[v] + h < vEnd; ++h)
                 {
-                  if (workspace.mask[static_cast<size_t>(x[u] + iw) * dims[v] + (x[v] + h)] == 0)
+                  bool rowFull = true;
+                  for (int iw = 0; iw < w; ++iw)
                   {
-                    rowFull = false;
+                    if (workspace.mask[static_cast<size_t>(x[u] + iw) * dims[v] + (x[v] + h)] == 0)
+                    {
+                      rowFull = false;
+                      break;
+                    }
+                  }
+                  if (!rowFull)
                     break;
-                  }
                 }
-                if (!rowFull)
-                  break;
-              }
-              for (int iw = 0; iw < w; ++iw)
-                for (int ih = 0; ih < h; ++ih)
-                  workspace.mask[static_cast<size_t>(x[u] + iw) * dims[v] + (x[v] + ih)] = 0;
+                for (int iw = 0; iw < w; ++iw)
+                  for (int ih = 0; ih < h; ++ih)
+                    workspace.mask[static_cast<size_t>(x[u] + iw) * dims[v] + (x[v] + ih)] = 0;
 
-              // 3) emit the quad (same vertex layout as the block pass)
-              glm::vec3 sFloat{};
-              sFloat[d] = static_cast<float>(planeD);
-              sFloat[u] = static_cast<float>(x[u]);
-              sFloat[v] = static_cast<float>(x[v]);
-              glm::vec3 widthVec{};
-              widthVec[u] = static_cast<float>(w);
-              glm::vec3 heightVec{};
-              heightVec[v] = static_cast<float>(h);
-              const glm::vec3 quad_vertices_local[4] = {
-                  sFloat, sFloat + widthVec, sFloat + widthVec + heightVec, sFloat + heightVec};
+                // 3) emit the quad (same vertex layout as the block pass)
+                glm::vec3 sFloat{};
+                sFloat[d] = static_cast<float>(planeD);
+                sFloat[u] = static_cast<float>(x[u]);
+                sFloat[v] = static_cast<float>(x[v]);
+                glm::vec3 widthVec{};
+                widthVec[u] = static_cast<float>(w);
+                glm::vec3 heightVec{};
+                heightVec[v] = static_cast<float>(h);
+                const glm::vec3 quad_vertices_local[4] = {
+                    sFloat, sFloat + widthVec, sFloat + widthVec + heightVec, sFloat + heightVec};
 
-              glm::vec2 tc[4];
-              const bool swapUV = (d == 0 || d == 1);
-              const float tc_u = swapUV ? static_cast<float>(h) : static_cast<float>(w);
-              const float tc_v = swapUV ? static_cast<float>(w) : static_cast<float>(h);
-              if (swapUV)
-              {
-                tc[0] = {0.f, 0.f};
-                tc[1] = {0.f, tc_v};
-                tc[2] = {tc_u, tc_v};
-                tc[3] = {tc_u, 0.f};
-              }
-              else
-              {
-                tc[0] = {0.f, 0.f};
-                tc[1] = {tc_u, 0.f};
-                tc[2] = {tc_u, tc_v};
-                tc[3] = {0.f, tc_v};
-              }
-
-              glm::vec3 normalDir{};
-              normalDir[d] = static_cast<float>(dir);
-              int normalIdx = 0;
-              if (normalDir.x > 0) normalIdx = 0;
-              else if (normalDir.x < 0) normalIdx = 1;
-              else if (normalDir.y > 0) normalIdx = 2;
-              else if (normalDir.y < 0) normalIdx = 3;
-              else if (normalDir.z > 0) normalIdx = 4;
-              else normalIdx = 5;
-
-              const uint32_t packedData = (normalIdx & 0x7) |
-                                          ((static_cast<uint32_t>(WATER) & 0xFF) << 3) |
-                                          (1u << 11); // water takes its WATER_COLOR tint
-
-              // Ambient occlusion uses the geometric view: water and details
-              // never occlude a fluid corner.
-              uint32_t vert_indices[4];
-              for (int i = 0; i < 4; ++i)
-              {
-                const glm::vec3 &localPos = quad_vertices_local[i];
-                int pd = static_cast<int>(std::round(localPos[d]));
-                int pu = static_cast<int>(std::round(localPos[u]));
-                int pv = static_cast<int>(std::round(localPos[v]));
-                const int layerD = (dir > 0) ? planeD : planeD - 1;
-                auto aoSolid = [&](int du, int dv)
+                glm::vec2 tc[4];
+                const bool swapUV = (d == 0 || d == 1);
+                const float tc_u = swapUV ? static_cast<float>(h) : static_cast<float>(w);
+                const float tc_v = swapUV ? static_cast<float>(w) : static_cast<float>(h);
+                if (swapUV)
                 {
-                  return !TextureManager::isTransparent(getBlockGeometryForMeshing(
-                      (d == 0 ? layerD : (u == 0 ? pu + du : pv + du)),
-                      (d == 1 ? layerD : (u == 1 ? pu + du : pv + du)),
-                      (d == 2 ? layerD : (u == 2 ? pu + du : pv + du))));
-                };
-                const bool q1 = aoSolid(0, 0);
-                const bool q2 = aoSolid(-1, 0);
-                const bool q3 = aoSolid(-1, -1);
-                const bool q4 = aoSolid(0, -1);
-                bool s1, s2, c;
-                if (i == 0) { s1 = q2; s2 = q4; c = q3; }
-                else if (i == 1) { s1 = q1; s2 = q3; c = q4; }
-                else if (i == 2) { s1 = q2; s2 = q4; c = q1; }
-                else { s1 = q1; s2 = q3; c = q2; }
-                const uint32_t ao = (s1 && s2) ? 0u : 3u - static_cast<uint32_t>(s1 + s2 + c);
-
-                // Light from the open neighbor cell (same policy as the
-                // block pass); outside the chunk falls back to daylight.
-                uint8_t faceSky = 12;
-                uint8_t faceBlock = 0;
+                  tc[0] = {0.f, 0.f};
+                  tc[1] = {0.f, tc_v};
+                  tc[2] = {tc_u, tc_v};
+                  tc[3] = {tc_u, 0.f};
+                }
+                else
                 {
-                  glm::ivec3 n{x[0], x[1], x[2]};
-                  n[d] += dir;
-                  if (n.x >= 0 && n.x < CHUNK_SIZE && n.y >= 0 && n.y < CHUNK_HEIGHT &&
-                      n.z >= 0 && n.z < CHUNK_SIZE)
+                  tc[0] = {0.f, 0.f};
+                  tc[1] = {tc_u, 0.f};
+                  tc[2] = {tc_u, tc_v};
+                  tc[3] = {0.f, tc_v};
+                }
+
+                glm::vec3 normalDir{};
+                normalDir[d] = static_cast<float>(dir);
+                int normalIdx = 0;
+                if (normalDir.x > 0) normalIdx = 0;
+                else if (normalDir.x < 0) normalIdx = 1;
+                else if (normalDir.y > 0) normalIdx = 2;
+                else if (normalDir.y < 0) normalIdx = 3;
+                else if (normalDir.z > 0) normalIdx = 4;
+                else normalIdx = 5;
+
+                const uint32_t packedData = (normalIdx & 0x7) |
+                                            ((static_cast<uint32_t>(WATER) & 0xFF) << 3) |
+                                            (1u << 11); // water takes its WATER_COLOR tint
+
+                // Ambient occlusion uses the geometric view: water and details
+                // never occlude a fluid corner.
+                uint32_t vert_indices[4];
+                for (int i = 0; i < 4; ++i)
+                {
+                  const glm::vec3 &localPos = quad_vertices_local[i];
+                  int pd = static_cast<int>(std::round(localPos[d]));
+                  int pu = static_cast<int>(std::round(localPos[u]));
+                  int pv = static_cast<int>(std::round(localPos[v]));
+                  const int layerD = (dir > 0) ? planeD : planeD - 1;
+                  auto aoSolid = [&](int du, int dv)
                   {
-                    const size_t li = static_cast<size_t>(n.x + CHUNK_SIZE * (n.y + CHUNK_HEIGHT * n.z));
-                    faceSky = skyLight[li];
-                    faceBlock = blockLight[li];
+                    return !TextureManager::isTransparent(getBlockGeometryForMeshing(
+                        (d == 0 ? layerD : (u == 0 ? pu + du : pv + du)),
+                        (d == 1 ? layerD : (u == 1 ? pu + du : pv + du)),
+                        (d == 2 ? layerD : (u == 2 ? pu + du : pv + du))));
+                  };
+                  const bool q1 = aoSolid(0, 0);
+                  const bool q2 = aoSolid(-1, 0);
+                  const bool q3 = aoSolid(-1, -1);
+                  const bool q4 = aoSolid(0, -1);
+                  bool s1, s2, c;
+                  if (i == 0) { s1 = q2; s2 = q4; c = q3; }
+                  else if (i == 1) { s1 = q1; s2 = q3; c = q4; }
+                  else if (i == 2) { s1 = q2; s2 = q4; c = q1; }
+                  else { s1 = q1; s2 = q3; c = q2; }
+                  const uint32_t ao = (s1 && s2) ? 0u : 3u - static_cast<uint32_t>(s1 + s2 + c);
+
+                  // Light from the open neighbor cell (same policy as the
+                  // block pass); outside the chunk falls back to daylight.
+                  uint8_t faceSky = 12;
+                  uint8_t faceBlock = 0;
+                  {
+                    glm::ivec3 n{x[0], x[1], x[2]};
+                    n[d] += dir;
+                    if (n.x >= 0 && n.x < CHUNK_SIZE && n.y >= 0 && n.y < CHUNK_HEIGHT &&
+                        n.z >= 0 && n.z < CHUNK_SIZE)
+                    {
+                      const size_t li = static_cast<size_t>(n.x + CHUNK_SIZE * (n.y + CHUNK_HEIGHT * n.z));
+                      faceSky = skyLight[li];
+                      faceBlock = blockLight[li];
+                    }
                   }
+
+                  Vertex vert;
+                  vert.packedPos = Vertex::packPosition(localPos);
+                  vert.packedData = packedData | (ao << 12) |
+                                    lighting::packLightBits(faceSky, faceBlock);
+                  vert.texCoordU = static_cast<uint16_t>(std::lround(tc[i].x));
+                  vert.texCoordV = static_cast<uint16_t>(std::lround(tc[i].y));
+                  vert.packedBiomeColor = WATER_COLOR;
+                  waterVertices.push_back(vert);
+                  vert_indices[i] = waterIndexCounter++;
                 }
 
-                Vertex vert;
-                vert.packedPos = Vertex::packPosition(localPos);
-                vert.packedData = packedData | (ao << 12) |
-                                  lighting::packLightBits(faceSky, faceBlock);
-                vert.texCoordU = static_cast<uint16_t>(std::lround(tc[i].x));
-                vert.texCoordV = static_cast<uint16_t>(std::lround(tc[i].y));
-                vert.packedBiomeColor = WATER_COLOR;
-                waterVertices.push_back(vert);
-                vert_indices[i] = waterIndexCounter++;
+                if (dir > 0)
+                {
+                  waterIndices.insert(waterIndices.end(),
+                                      {vert_indices[0], vert_indices[1], vert_indices[2],
+                                       vert_indices[0], vert_indices[2], vert_indices[3]});
+                }
+                else
+                {
+                  waterIndices.insert(waterIndices.end(),
+                                      {vert_indices[0], vert_indices[2], vert_indices[1],
+                                       vert_indices[0], vert_indices[3], vert_indices[2]});
+                }
               }
-
-              if (dir > 0)
-              {
-                waterIndices.insert(waterIndices.end(),
-                                    {vert_indices[0], vert_indices[1], vert_indices[2],
-                                     vert_indices[0], vert_indices[2], vert_indices[3]});
-              }
-              else
-              {
-                waterIndices.insert(waterIndices.end(),
-                                    {vert_indices[0], vert_indices[2], vert_indices[1],
-                                     vert_indices[0], vert_indices[3], vert_indices[2]});
-              }
-            }
+          }
         }
       }
-    }
     }
   }
 
