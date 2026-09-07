@@ -96,6 +96,11 @@ private:
 	void placeCameraOnSurface();
 	void setPlayerFlight(bool enabled);
 	void resetPlayerAtCamera();
+	void updateDisplayRefreshRate();
+	/// Re-synchronize the high-resolution frame clock to "now" (issue: a
+	/// non-simulated stretch — minimized window, failed acquire, UI stall —
+	/// must never feed its elapsed time into the next gameplay timestep).
+	void resetFrameClock();
 
 	SDL_Window *window{nullptr};
 	int windowWidth{1920};
@@ -119,6 +124,9 @@ private:
 	double frameCount{0.0};
 	double lastTime{0.0};
 	double fps{0.0};
+	uint64_t m_perfFrequency{0};
+	uint64_t m_lastPerfCounter{0};
+	float m_displayRefreshRate{0.0f};
 
 	double streamAccum{0.0};
 

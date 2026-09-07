@@ -653,3 +653,16 @@ add_test(NAME MobVulkanRender COMMAND test_mob_render ${CMAKE_BINARY_DIR}/mob-qa
 set_tests_properties(MobVulkanRender PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} ENVIRONMENT "FT_VOX_VALIDATION=1")
 
 add_test(NAME MobRealTerrain COMMAND test_chunk_lifecycle --mobs-profile)
+
+# ---------------------------------------------------------------------------
+# VSync frame pacing (PR #145): pure computePacedDeltaTime contract
+# ---------------------------------------------------------------------------
+add_executable(test_frame_pacing
+    test_frame_pacing.cpp
+)
+
+target_include_directories(test_frame_pacing PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME FramePacing COMMAND test_frame_pacing)
