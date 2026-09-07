@@ -9,6 +9,13 @@ namespace physics
 // never silently change its collision medium.
 inline Cell blockCell(TextureType type)
 {
+    const BlockMedium contained = blockContainedMedium(type);
+    Medium medium = Medium::Air;
+    if (contained == BlockMedium::Water)
+        medium = Medium::Water;
+    else if (contained == BlockMedium::Lava)
+        medium = Medium::Lava;
+
     switch (type)
     {
     case AIR:
@@ -17,19 +24,15 @@ inline Cell blockCell(TextureType type)
     case WILDFLOWER:
     case DRY_SHRUB:
     case LILY_PAD:
-        return {true, false, Medium::Air};
-
     case WATER:
     case KELP:
     case KELP_TOP:
     case SEAGRASS:
-        return {true, false, Medium::Water};
-
     case LAVA:
-        return {true, false, Medium::Lava};
+        return {true, false, medium};
 
     default:
-        return {true, true, Medium::Air};
+        return {true, true, medium};
     }
 }
 } // namespace physics

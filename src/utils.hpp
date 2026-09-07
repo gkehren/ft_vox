@@ -32,10 +32,7 @@ struct IVec3Hash
 	}
 };
 
-struct Voxel
-{
-	uint8_t type; // Supports up to 256 block types (0-255)
-};
+
 
 struct VoxelDrawData
 {
@@ -369,8 +366,62 @@ static_assert(LAVA == HORN_CORAL_BLOCK + 1,
 			  "Phase 4 TextureType entries must stay append-only");
 static_assert(KELP == DRIPSTONE_BLOCK + 1,
 			  "Phase 5 TextureType entries must stay append-only");
+enum class BlockMedium : uint8_t
+{
+	None,
+	Water,
+	Lava,
+};
+
+inline constexpr BlockMedium blockContainedMedium(TextureType type)
+{
+	switch (type)
+	{
+	case WATER:
+	case SEAGRASS:
+	case KELP:
+	case KELP_TOP:
+		return BlockMedium::Water;
+	case LAVA:
+		return BlockMedium::Lava;
+	default:
+		return BlockMedium::None;
+	}
+}
+
+inline constexpr bool blockHasFluid(TextureType type)
+{
+	return blockContainedMedium(type) != BlockMedium::None;
+}
+
+inline constexpr bool blockIsWater(TextureType type)
+{
+	return blockContainedMedium(type) == BlockMedium::Water;
+}
+
+/// Fluid-occupancy view for meshing (issue #120 review): the water renderer
+/// only ever emits the Water material, so the contained medium collapses to
+/// "does this cell hold renderable water". Independent of BlockShape — a
+/// cross-shaped KELP and a future waterlogged cube hold water exactly like
+/// a plain WATER cell.
+inline constexpr bool blockContainsWater(TextureType type)
+{
+	return blockContainedMedium(type) == BlockMedium::Water;
+}
+
+struct Voxel
+{
+	uint8_t type; // Supports up to 256 block types (0-255)
+
+	constexpr TextureType getTextureType() const { return static_cast<TextureType>(type); }
+	constexpr BlockMedium containedMedium() const { return blockContainedMedium(static_cast<TextureType>(type)); }
+	constexpr bool isWater() const { return containedMedium() == BlockMedium::Water; }
+	constexpr bool hasFluid() const { return containedMedium() != BlockMedium::None; }
+};
 // Ensure TextureType fits in Voxel::type (uint8_t)
 static_assert(static_cast<int>(AIR) <= 255, "TextureType values exceed uint8_t range for Voxel::type");
+static_assert(sizeof(Voxel) == 1, "Voxel must be exactly 1 byte");
+
 
 inline constexpr std::array<std::string_view, COUNT> textureTypeString = [] {
 	std::array<std::string_view, COUNT> names{};

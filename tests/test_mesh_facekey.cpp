@@ -9,6 +9,7 @@
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/TerrainGenerator.hpp>
+#include <Renderer/MinecraftTextures.hpp>
 #include <Engine/WorkloadTelemetry.hpp>
 
 #include <algorithm>
@@ -402,6 +403,32 @@ static void testTransparencyPairs()
 			  "glass|stone: stone -X face exists against glass");
 		CHECK(findQuad(m.opaque, 0, GLASS, glm::ivec3(4, 8, 0)) == nullptr,
 			  "glass|stone: glass owns no +X face against stone");
+		m.release();
+	}
+	{
+		// GLASS x=7 | WATER x=8 (in-section): GLASS (+X, -q side) owns the
+		// interface face per legacy priority; WATER (-X) must emit nothing.
+		Scene s;
+		s.chunk.setVoxel(7, 8, 0, GLASS);
+		s.chunk.setVoxel(8, 8, 0, WATER);
+		BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
+		CHECK(findQuad(m.opaque, 0, GLASS, glm::ivec3(8, 8, 0)) != nullptr,
+			  "in-section glass|water: glass +X face exists at interface");
+		CHECK(findQuad(m.water, 1, WATER, glm::ivec3(8, 8, 0)) == nullptr,
+			  "in-section glass|water: water -X face is culled");
+		m.release();
+	}
+	{
+		// WATER x=7 | GLASS x=8 (in-section): WATER (+X, -q side) owns the
+		// interface face per legacy priority; GLASS (-X) must emit nothing.
+		Scene s;
+		s.chunk.setVoxel(7, 8, 0, WATER);
+		s.chunk.setVoxel(8, 8, 0, GLASS);
+		BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
+		CHECK(findQuad(m.water, 0, WATER, glm::ivec3(8, 8, 0)) != nullptr,
+			  "in-section water|glass: water +X face exists at interface");
+		CHECK(findQuad(m.opaque, 1, GLASS, glm::ivec3(8, 8, 0)) == nullptr,
+			  "in-section water|glass: glass -X face is culled");
 		m.release();
 	}
 }
@@ -1339,7 +1366,14 @@ static void testSmallPlantGeometry()
         const size_t quads = type == LILY_PAD ? 1u : 2u;
         CHECK(p.opaqueVertices.size() == quads * 4 && p.opaqueIndices.size() == quads * 12,
               "small plants emit only explicit double-sided planes");
-        CHECK(p.waterVertices.empty(), "alpha-cut plants use the opaque stream");
+        if (blockContainedMedium(type) == BlockMedium::None)
+        {
+            CHECK(p.waterVertices.empty(), "dry plants do not emit water stream");
+        }
+        else
+        {
+            CHECK(!p.waterVertices.empty(), "water-containing detail preserves water stream");
+        }
         for (const auto &v : p.opaqueVertices)
         {
             const auto local = v.decodePosition();
@@ -1360,10 +1394,380 @@ static void testSmallPlantGeometry()
         r = s.pool.acquire();
         s.chunk.buildLODMesh(*r, s.chunk.meshGeneration(), s.chunk.meshRevision());
         s.pool.finishBuild(r);
-        for (const auto &v : r->opaqueVertices)
-            CHECK(vTexture(v) == STONE && v.decodePosition().y == 16.f, "LOD omits the plant and preserves its support");
+        if (blockContainedMedium(type) == BlockMedium::None)
+        {
+            for (const auto &v : r->opaqueVertices)
+                CHECK(vTexture(v) == STONE && v.decodePosition().y == 16.f, "LOD omits the plant and preserves its support");
+        }
+        else
+        {
+            CHECK(r->opaqueVertices.empty(), "LOD omits detail geometry for underwater plant");
+            CHECK(!r->waterVertices.empty(), "LOD preserves water volume for underwater plant");
+            for (const auto &v : r->waterVertices)
+                CHECK(vTexture(v) == WATER && v.decodePosition().y == 17.f, "LOD water top quad sits at top of water cell");
+        }
         s.pool.release(r);
     }
+}
+
+static void testWaterWithEmbeddedDetails()
+{
+    // 1. Water continuity inside one chunk (issue #120 regression):
+    // Scene A: solid volume of WATER (4x4x3, from x=2..5, y=4..6, z=2..5) on a STONE base (y=3)
+    // Scene B: identical volume, but with (3, 5, 3) and (4, 6, 4) replaced by SEAGRASS.
+    // (3, 5, 3) is an interior submerged cell; (4, 6, 4) is on the water surface.
+    Scene sA, sB;
+    for (int x = 2; x <= 5; ++x)
+        for (int z = 2; z <= 5; ++z)
+        {
+            sA.chunk.setVoxel(x, 3, z, STONE);
+            sB.chunk.setVoxel(x, 3, z, STONE);
+            for (int y = 4; y <= 6; ++y)
+            {
+                sA.chunk.setVoxel(x, y, z, WATER);
+                sB.chunk.setVoxel(x, y, z, WATER);
+            }
+        }
+    sB.chunk.setVoxel(3, 5, 3, SEAGRASS); // interior underwater detail
+    sB.chunk.setVoxel(4, 6, 4, SEAGRASS); // surface underwater detail
+
+    auto *rA = sA.pool.acquire();
+    auto *rB = sB.pool.acquire();
+    sA.chunk.buildMesh(*rA, sA.chunk.meshGeneration(), sA.chunk.meshRevision());
+    sB.chunk.buildMesh(*rB, sB.chunk.meshGeneration(), sB.chunk.meshRevision());
+    sA.pool.finishBuild(rA);
+    sB.pool.finishBuild(rB);
+
+    // Fluid mesh representing the surrounding water volume must be equivalent at cell boundaries
+    CHECK(totalWaterVertices(*rA) == totalWaterVertices(*rB),
+          "water continuity: fluid vertices count identical between pure water and water+seagrass");
+    CHECK(totalWaterIndices(*rA) == totalWaterIndices(*rB),
+          "water continuity: fluid indices count identical between pure water and water+seagrass");
+
+    // Scene B additionally contains only the detail geometry (2 seagrass * 2 cross quads * 4 verts = 16 verts)
+    size_t opaqueA = 0, opaqueB = 0;
+    for (const auto &sec : rA->sections) opaqueA += sec.opaqueVertices.size();
+    for (const auto &sec : rB->sections) opaqueB += sec.opaqueVertices.size();
+    CHECK(opaqueB == opaqueA + 16, "scene with seagrass additionally contains only the detail geometry");
+
+    // 2. Section boundary continuity (y=15 / y=16 across section 0 and 1)
+    // Scene C: water column crossing section boundary (y=14..17)
+    // Scene D: same column with y=15 (top of section 0) replaced by SEAGRASS
+    // Scene E: same column with y=16 (bottom of section 1) replaced by SEAGRASS
+    Scene sC, sD, sE;
+    for (int y = 14; y <= 17; ++y)
+    {
+        sC.chunk.setVoxel(4, y, 4, WATER);
+        sD.chunk.setVoxel(4, y, 4, WATER);
+        sE.chunk.setVoxel(4, y, 4, WATER);
+    }
+    sD.chunk.setVoxel(4, 15, 4, SEAGRASS);
+    sE.chunk.setVoxel(4, 16, 4, SEAGRASS);
+
+    auto *rC = sC.pool.acquire();
+    auto *rD = sD.pool.acquire();
+    auto *rE = sE.pool.acquire();
+    sC.chunk.buildMesh(*rC, sC.chunk.meshGeneration(), sC.chunk.meshRevision());
+    sD.chunk.buildMesh(*rD, sD.chunk.meshGeneration(), sD.chunk.meshRevision());
+    sE.chunk.buildMesh(*rE, sE.chunk.meshGeneration(), sE.chunk.meshRevision());
+    sC.pool.finishBuild(rC);
+    sD.pool.finishBuild(rD);
+    sE.pool.finishBuild(rE);
+
+    // Fluid mesh at section boundaries must remain equivalent (no spurious internal water faces)
+    CHECK(totalWaterVertices(*rC) == totalWaterVertices(*rD), "section seam water vertices equal (y=15 detail)");
+    CHECK(totalWaterIndices(*rC) == totalWaterIndices(*rD), "section seam water indices equal (y=15 detail)");
+    CHECK(totalWaterVertices(*rC) == totalWaterVertices(*rE), "section seam water vertices equal (y=16 detail)");
+    CHECK(totalWaterIndices(*rC) == totalWaterIndices(*rE), "section seam water indices equal (y=16 detail)");
+
+    // 3. Chunk X/Z border continuity
+    // Water slab bordering chunk edge at x=15 and x=16 (border shell)
+    Scene sBorderRef, sBorderDetail;
+
+    for (int z = 4; z <= 7; ++z)
+    {
+        for (int y = 4; y <= 6; ++y)
+        {
+            sBorderRef.chunk.setVoxel(14, y, z, WATER);
+            sBorderRef.chunk.setVoxel(15, y, z, WATER);
+            sBorderDetail.chunk.setVoxel(14, y, z, WATER);
+            // Replace x=15 with SEAGRASS on border
+            sBorderDetail.chunk.setVoxel(15, y, z, (z == 5) ? SEAGRASS : WATER);
+
+            // East neighbor provides border shell at x=16
+            sBorderRef.chunk.setVoxel(16, y, z, WATER);
+            sBorderDetail.chunk.setVoxel(16, y, z, WATER);
+        }
+    }
+
+    auto *rBorderRef = sBorderRef.pool.acquire();
+    auto *rBorderDetail = sBorderDetail.pool.acquire();
+    sBorderRef.chunk.buildMesh(*rBorderRef, sBorderRef.chunk.meshGeneration(), sBorderRef.chunk.meshRevision());
+    sBorderDetail.chunk.buildMesh(*rBorderDetail, sBorderDetail.chunk.meshGeneration(), sBorderDetail.chunk.meshRevision());
+    sBorderRef.pool.finishBuild(rBorderRef);
+    sBorderDetail.pool.finishBuild(rBorderDetail);
+
+    CHECK(totalWaterVertices(*rBorderRef) == totalWaterVertices(*rBorderDetail),
+          "chunk border water vertices equal with border seagrass");
+    CHECK(totalWaterIndices(*rBorderRef) == totalWaterIndices(*rBorderDetail),
+          "chunk border water indices equal with border seagrass");
+
+    // 4. LOD behavior
+    // Omitting detail geometry must preserve the water volume
+    auto *rLodA = sA.pool.acquire();
+    auto *rLodB = sB.pool.acquire();
+    sA.chunk.buildLODMesh(*rLodA, sA.chunk.meshGeneration(), sA.chunk.meshRevision());
+    sB.chunk.buildLODMesh(*rLodB, sB.chunk.meshGeneration(), sB.chunk.meshRevision());
+    sA.pool.finishBuild(rLodA);
+    sB.pool.finishBuild(rLodB);
+
+    CHECK(rLodA->waterVertices.size() == rLodB->waterVertices.size(),
+          "LOD water vertices match between pure water and water+seagrass");
+    CHECK(rLodA->waterIndices.size() == rLodB->waterIndices.size(),
+          "LOD water indices match between pure water and water+seagrass");
+    CHECK(rLodB->opaqueVertices.empty(), "LOD omits small detail geometry");
+
+    // Clean up acquired results
+    sA.pool.release(rA);
+    sB.pool.release(rB);
+    sC.pool.release(rC);
+    sD.pool.release(rD);
+    sE.pool.release(rE);
+    sBorderRef.pool.release(rBorderRef);
+    sBorderDetail.pool.release(rBorderDetail);
+    sA.pool.release(rLodA);
+    sB.pool.release(rLodB);
+}
+
+static void testWaterFilledKelpVariants()
+{
+	// Issue #120 review: the three water-containing details must behave
+	// identically to plain WATER for the fluid mesher, while keeping their
+	// own geometry. Stronger than count equality: the water vertex/index
+	// vectors must be exactly equal (packedPos, packedData, UV, biome,
+	// indices) between the reference and the variant scene.
+	const TextureType details[] = {SEAGRASS, KELP, KELP_TOP};
+
+	auto buildVolume = [](TextureType detail, int detailY, MeshBuildResult **outResult) -> Scene *
+	{
+		auto *s = new Scene();
+		for (int x = 2; x <= 5; ++x)
+			for (int z = 2; z <= 5; ++z)
+			{
+				s->chunk.setVoxel(x, 3, z, STONE);
+				for (int y = 4; y <= 6; ++y)
+					s->chunk.setVoxel(x, y, z, WATER);
+			}
+		if (detail != AIR)
+			s->chunk.setVoxel(3, detailY, 3, detail);
+		MeshBuildResult *r = s->pool.acquire();
+		s->chunk.buildMesh(*r, s->chunk.meshGeneration(), s->chunk.meshRevision());
+		s->pool.finishBuild(r);
+		*outResult = r;
+		return s;
+	};
+
+	auto sameWaterMesh = [](const MeshBuildResult &a, const MeshBuildResult &b) {
+		for (size_t s = 0; s < a.sections.size(); ++s)
+		{
+			if (a.sections[s].waterVertices != b.sections[s].waterVertices)
+				return false;
+			if (a.sections[s].waterIndices != b.sections[s].waterIndices)
+				return false;
+		}
+		return true;
+	};
+
+	// A) interior detail vs plain water, per detail type: exact fluid mesh.
+	for (TextureType detail : details)
+	{
+		MeshBuildResult *rRef = nullptr, *rVar = nullptr;
+		Scene *sRef = buildVolume(AIR, 5, &rRef);
+		Scene *sVar = buildVolume(detail, 5, &rVar);
+		CHECK(sameWaterMesh(*rRef, *rVar),
+			  "water-filled variants: interior detail keeps the exact fluid mesh");
+		sRef->pool.release(rRef);
+		sVar->pool.release(rVar);
+		delete sRef;
+		delete sVar;
+	}
+
+	// B) surface detail (KELP_TOP is the natural top-of-column block): the
+	// water top surface must be identical to the plain-water surface.
+	{
+		MeshBuildResult *rRef = nullptr, *rTop = nullptr;
+		Scene *sRef = buildVolume(AIR, 6, &rRef);
+		Scene *sTop = buildVolume(KELP_TOP, 6, &rTop);
+		CHECK(sameWaterMesh(*rRef, *rTop),
+			  "water-filled variants: KELP_TOP at the surface keeps the exact fluid surface");
+		sRef->pool.release(rRef);
+		sTop->pool.release(rTop);
+		delete sRef;
+		delete sTop;
+	}
+
+	// C) section seam (y=15/16) with KELP: the water mesh must stay identical
+	// to the plain column.
+	{
+		auto buildColumn = [](TextureType detail, int detailY, MeshBuildResult **outResult) -> Scene *
+		{
+			auto *s = new Scene();
+			for (int y = 14; y <= 17; ++y)
+				s->chunk.setVoxel(4, y, 4, WATER);
+			if (detail != AIR)
+				s->chunk.setVoxel(4, detailY, 4, detail);
+			MeshBuildResult *r = s->pool.acquire();
+			s->chunk.buildMesh(*r, s->chunk.meshGeneration(), s->chunk.meshRevision());
+			s->pool.finishBuild(r);
+			*outResult = r;
+			return s;
+		};
+		MeshBuildResult *rCol = nullptr, *rKelp = nullptr;
+		Scene *sCol = buildColumn(AIR, 0, &rCol);
+		Scene *sKelp = buildColumn(KELP, 15, &rKelp);
+		CHECK(sameWaterMesh(*rCol, *rKelp),
+			  "water-filled variants: KELP on the y=15/16 seam keeps the exact fluid mesh");
+		sCol->pool.release(rCol);
+		sKelp->pool.release(rKelp);
+		delete sCol;
+		delete sKelp;
+	}
+
+	// D) chunk border: KELP at x=15, neighbor shell at x=16 - no extra
+	// internal water face compared to the border-plain reference.
+	{
+		Scene sRef, sDetail;
+		for (int y = 4; y <= 6; ++y)
+			for (int z = 2; z <= 5; ++z)
+			{
+				sRef.chunk.setVoxel(15, y, z, WATER);
+				sDetail.chunk.setVoxel(15, y, z, WATER);
+			}
+		sDetail.chunk.setVoxel(15, 5, 3, KELP);
+		MeshBuildResult *rRef = sRef.pool.acquire();
+		MeshBuildResult *rDet = sDetail.pool.acquire();
+		sRef.chunk.buildMesh(*rRef, sRef.chunk.meshGeneration(), sRef.chunk.meshRevision());
+		sDetail.chunk.buildMesh(*rDet, sDetail.chunk.meshGeneration(), sDetail.chunk.meshRevision());
+		sRef.pool.finishBuild(rRef);
+		sDetail.pool.finishBuild(rDet);
+		CHECK(sameWaterMesh(*rRef, *rDet),
+			  "water-filled variants: KELP at the chunk border keeps the exact fluid mesh");
+		sRef.pool.release(rRef);
+		sDetail.pool.release(rDet);
+	}
+
+	// E) LOD: KELP_TOP at the top of the column must preserve the water
+	// surface while omitting the detail geometry.
+	{
+		MeshBuildResult *rRef = nullptr, *rTop = nullptr;
+		Scene *sRef = buildVolume(AIR, 6, &rRef);
+		Scene *sTop = buildVolume(KELP_TOP, 6, &rTop);
+		MeshBuildResult *lodRef = sRef->pool.acquire();
+		MeshBuildResult *lodTop = sTop->pool.acquire();
+		sRef->chunk.buildLODMesh(*lodRef, sRef->chunk.meshGeneration(), sRef->chunk.meshRevision());
+		sTop->chunk.buildLODMesh(*lodTop, sTop->chunk.meshGeneration(), sTop->chunk.meshRevision());
+		sRef->pool.finishBuild(lodRef);
+		sTop->pool.finishBuild(lodTop);
+		CHECK(lodRef->waterVertices == lodTop->waterVertices &&
+				  lodRef->waterIndices == lodTop->waterIndices,
+			  "water-filled variants: LOD keeps the exact water surface under KELP_TOP");
+		CHECK(lodTop->opaqueVertices.empty(),
+			  "water-filled variants: LOD omits the KELP_TOP detail geometry");
+		sRef->pool.release(lodRef);
+		sTop->pool.release(lodTop);
+		delete sRef;
+		delete sTop;
+	}
+
+	// F) KELP geometry non-regression: the current representation is cross
+	// quads (NOT a cube) - a lone KELP still emits its own detail quads.
+	{
+		CHECK(blockShape(KELP) == BlockShape::Cross,
+			  "kelp geometry contract: KELP renders as a cross detail");
+		CHECK(blockShape(KELP_TOP) == BlockShape::Cross,
+			  "kelp geometry contract: KELP_TOP renders as a cross detail");
+		CHECK(blockContainsWater(KELP) && blockContainsWater(KELP_TOP),
+			  "kelp geometry contract: kelp still holds water");
+		MeshBuildResult *r = nullptr;
+		Scene *s = buildVolume(AIR, 0, &r);
+		s->chunk.setVoxel(3, 7, 3, KELP); // lone kelp cell above the water
+		MeshBuildResult *r2 = s->pool.acquire();
+		s->chunk.buildMesh(*r2, s->chunk.meshGeneration(), s->chunk.meshRevision());
+		s->pool.finishBuild(r2);
+		size_t kelpVertices = 0;
+		for (const auto &sec : r2->sections)
+			for (const auto &v : sec.opaqueVertices)
+			{
+				if (vTexture(v) == KELP)
+					++kelpVertices;
+			}
+		CHECK(kelpVertices > 0, "kelp geometry contract: lone KELP still emits its quads");
+		s->pool.release(r2);
+		s->pool.release(r);
+		delete s;
+	}
+}
+
+static void testIsolatedWaterVoxel()
+{
+	// Issue #120 review P1: a lone WATER voxel in the middle of the chunk
+	// must emit exactly its six faces. The -X/-Z faces go through the
+	// in-grid openness branch (unlike border faces), so this catches a
+	// fluid-neighbor rule that drops the faces against AIR on the -q side.
+	Scene s;
+	s.chunk.setVoxel(8, 8, 8, WATER);
+	BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
+	CHECK(totalWaterVertices(*m.result) == 24 && totalWaterIndices(*m.result) == 36,
+		  "lone water voxel: 6 quads (24 verts, 36 indices)");
+	const glm::ivec3 mnByNormal[6] = {
+		{9, 8, 8}, // +X
+		{8, 8, 8}, // -X
+		{8, 9, 8}, // +Y
+		{8, 8, 8}, // -Y
+		{8, 8, 9}, // +Z
+		{8, 8, 8}, // -Z
+	};
+	for (int normalIdx = 0; normalIdx < 6; ++normalIdx)
+	{
+		const QuadView *q = findQuad(m.water, normalIdx, WATER, mnByNormal[normalIdx]);
+		CHECK(q != nullptr, "lone water voxel: one face per normal direction");
+		if (q)
+		{
+			// A face quad is a 1x1 tile: unit extent on the two tangent axes,
+			// zero extent on the normal axis (mx is exclusive).
+			const int dx = q->mx.x - q->mn.x;
+			const int dy = q->mx.y - q->mn.y;
+			const int dz = q->mx.z - q->mn.z;
+			const bool single = (normalIdx < 2) ? (dx == 0 && dy == 1 && dz == 1)
+			                    : (normalIdx < 4) ? (dx == 1 && dy == 0 && dz == 1)
+			                                      : (dx == 1 && dy == 1 && dz == 0);
+			CHECK(single, "lone water voxel: face is single-cell sized");
+		}
+	}
+	CHECK(m.opaque.empty(), "lone water voxel: no opaque geometry");
+	m.release();
+}
+
+static void testWaterSeamPartialVsFull()
+{
+	// Issue #120 review P1: fluid quads spanning the y=15/16 section seam
+	// must be emitted by exactly one section and stay inside its Y span -
+	// the partial (metadata-bounds) build must compose into the full build
+	// byte for byte, and no fluid quad may cross a section boundary.
+	Scene s;
+	for (int x = 4; x <= 7; ++x)
+		for (int z = 4; z <= 7; ++z)
+			for (int y = 10; y <= 21; ++y)
+				s.chunk.setVoxel(x, y, z, WATER);
+	BuiltMesh meta = buildWithMetadataBounds(s.chunk, s.pool);
+	BuiltMesh full = buildForcedFullRange(s.chunk, s.pool);
+	expectIdentical(meta, full, "water seam: metadata-bounds build matches forced full range");
+	for (const QuadView &q : meta.water)
+		CHECK((q.mn.y / 16) == ((q.mx.y - 1) / 16),
+			  "water seam: no fluid quad crosses a section boundary");
+	CHECK(!meta.water.empty(), "water seam: fluid geometry present");
+	meta.release();
+	full.release();
 }
 
 int main(int argc, char **argv)
@@ -1376,6 +1780,10 @@ int main(int argc, char **argv)
 		return runEditBench(argc, argv);
 
     testSmallPlantGeometry();
+    testWaterWithEmbeddedDetails();
+    testWaterFilledKelpVariants();
+    testIsolatedWaterVoxel();
+    testWaterSeamPartialVsFull();
 	testUniformSlabMerges();
 	testBlockTypeBoundary();
 	testTransparencyPairs();

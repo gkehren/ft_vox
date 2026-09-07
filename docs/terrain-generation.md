@@ -155,9 +155,20 @@ Small vegetation uses an explicit `BlockShape` (`Cube`, `Cross`, `Flat`) in
   independent of `BlockShape` — changing a render shape never changes
   collision. Semantic traits shared with worldgen live in
   `Block/BlockTraits.hpp`, which no renderer header may own.
-- Underwater detail blocks currently replace the fluid voxel in the render
-  representation, which can expose internal water faces. Generic coexistence
-  of fluid occupancy and embedded detail geometry is tracked in #120.
+- Water-containing details (SEAGRASS, KELP, KELP_TOP) coexist with their
+  fluid (issue #120): fluid occupancy follows `blockContainsWater()` — a
+  neutral medium trait independent of `BlockShape`. Geometry and medium are
+  separate meshing views: the block pass emits each block's own geometry
+  (KELP and KELP_TOP render as double-sided cross details, SEAGRASS its
+  cross quads) while a
+  dedicated binary fluid pass meshes the water volume from
+  `blockContainsWater` only — WATER<->WATER (any water-containing type
+  included) emits nothing, so no holes open in the surrounding volume. Dry
+  details (SHORT_GRASS, WILDFLOWER, LILY_PAD, …) carry `BlockMedium::None`
+  and behave exactly as before.
+- The LOD drops detail geometry but never the contained medium (the
+  contained-medium check runs before the geometry check in the column
+  scan).
 - Textures use grass tint via `blockUsesGrassTint` where appropriate.
 
 ## Adding a biome
