@@ -48,3 +48,5 @@ CMakeSettings.json
 .cache/
 
 docs/default-resource-pack
+# Visual-regression manual-run artifacts (default --out dir)
+visual-qa/
