@@ -48,3 +48,6 @@
 ## 2024-05-18 - [ChunkManager Hot-Path Thread-Local Queues]
 **Learning:** [The `ChunkManager` relies on dynamically creating `std::vector<Item>` queues inside hot path methods (`generatePendingVoxels`, `meshPendingChunks`, `uploadPendingMeshes`) which are called frequently in the main loop. These dynamic heap allocations can degrade performance. Reusing memory is complex due to `std::shared_mutex` usage and potential concurrency.]
 **Action:** [Use `thread_local std::vector<Item>` with a `queue.clear()` at the start of the method to safely reuse allocated capacity across frames without introducing data races or locking overhead in concurrent methods.]
+## 2024-05-24 - Loop Invariant Distance Calculation
+**Learning:** In hot rendering loops (like `ChunkManager` updates and `WaterPass`), calculating vector offsets relative to a constant origin (like camera position) per-object inside the loop causes unnecessary float additions/subtractions across thousands of items.
+**Action:** Always apply Loop Invariant Code Motion (LICM). Pre-calculate the invariant coordinate offsets outside the iteration loop, reducing the inner loop body to a single subtraction per component before calculating lengths or squared distances.
