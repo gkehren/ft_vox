@@ -18,25 +18,30 @@ namespace texture_mips
 	// mip 0 is copied verbatim, every following level is generated.
 	//
 	// Filtering policy (issue #136):
-	//  - area downsampling: destination texel i averages the source window
-	//    [i*src/dst, (i+1)*src/dst), so every source texel contributes exactly
-	//    once — no dropped edge row/column on non-power-of-two sizes;
+	//  - integer-window partition downsampling: destination texel i averages the
+	//    source window [i*src/dst, (i+1)*src/dst) — every source texel contributes
+	//    exactly once and NPOT edge rows/columns are never dropped (a partition of
+	//    the source domain, not a continuous area filter);
 	//  - linear light: each texel's RGB is sRGB-decoded (colorspace::srgbToLinear),
 	//    box-averaged premultiplied by alpha, re-encoded (colorspace::linearToSrgb)
 	//    — never average gamma-encoded values, and fully transparent texels
 	//    cannot bleed their RGB into the result (no fringe/halo);
-	//  - alpha coverage preservation (DirectXTex-style rescale): alpha is averaged
-	//    plainly, then each level's cutout coverage (fraction of texels with
-	//    alpha >= kAlphaCutoutThreshold) is brought back to the base level's
-	//    coverage by a per-level binary search over an alpha scale, ties resolving
-	//    toward the higher coverage so silhouettes never vanish. Fully transparent
-	//    layers skip the rescale; fully opaque layers keep alpha exactly 255;
+	//  - alpha coverage preservation (DirectXTex-style rescale + quantized tie
+	//    resolution): alpha is averaged plainly, then each level's cutout coverage
+	//    (fraction of texels with alpha >= kAlphaCutoutThreshold) is brought back
+	//    to the base level's coverage by a per-level binary search over an alpha
+	//    scale, then individual boundary texels are promoted/demoted until the
+	//    covered texel COUNT equals round(targetCoverage * texelCount) — a uniform
+	//    scale alone cannot break alpha ties (isolated same-alpha details would
+	//    vanish). Ties spread by 4x4 Bayer rank. Fully transparent layers skip the
+	//    rescale; fully opaque layers keep alpha exactly 255;
 	//  - texels whose final alpha is 0 store RGB 0, then receive a 1-texel edge
-	//    dilation (alpha bleeding): they take the color of their covered
-	//    neighbors so GPU LINEAR minification across a cutout edge blends toward
-	//    the real border color instead of black (dark fringe);
-	//  - odd source sizes: windows are area-mapped (see above), boundary texels
-	//    are never read out of bounds.
+	//    dilation (alpha bleeding) on EVERY level including mip 0: they take the
+	//    color of their covered neighbors so GPU LINEAR filtering across a cutout
+	//    edge blends toward the real border color instead of black (dark fringe),
+	//    even during slight minification of the base level;
+	//  - odd source sizes: windows are partition-mapped (see above), boundary
+	//    texels are never read out of bounds.
 	void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *outChain);
 
 	// Multi-layer upload buffer for the texture array, layer-major / mip-minor

@@ -247,14 +247,19 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
   and cutout alpha coverage is preserved by a per-level rescale that brings
   each mip's coverage (fraction of texels above the canonical `0.5` threshold —
   shared with the shaders through `ressources/shaders/vulkan/cutout.inc.glsl`
-  and `src/Renderer/TextureMips.hpp`) back to the base layer's coverage
-  (DirectXTex-style binary search, ties toward retention). Fully transparent
-  texels are alpha-bleed dilated with their covered neighbors' color so LINEAR
-  minification never darkens cutout edges. Downsampling is area-based (every
-  source texel contributes exactly once, even on non-POT inputs). The whole
-  chain is staged and uploaded in one `vkCmdCopyBufferToImage` (one copy region
-  per layer × mip, layer-major/mip-minor staging layout); a full chain costs
-  ~+33% extra device memory for that image.
+  and `src/Renderer/TextureMips.hpp`) back to the base layer's coverage:
+  DirectXTex-style binary search plus quantized tie resolution that
+  promotes/demotes individual boundary texels until the covered texel count
+  matches the target exactly (Bayer-spread), so isolated same-alpha details
+  survive. Fully transparent texels are alpha-bleed dilated with their covered
+  neighbors' color on every level including mip 0, so LINEAR filtering never
+  darkens cutout edges. Downsampling partitions the source domain in integer
+  windows — every source texel contributes exactly once (NPOT edges are never
+  dropped), and the canonical layer size is normalized to a power of two
+  (min 16). The whole chain is staged and uploaded in one
+  `vkCmdCopyBufferToImage` (one copy region per layer × mip,
+  layer-major/mip-minor staging layout); a full chain costs ~+33% extra device
+  memory for that image.
 - **Sampler:** NEAREST magnification (keeps the pixel-art look up close), LINEAR
   minification with LINEAR mip selection, `maxLod = VK_LOD_CLAMP_NONE`. Anisotropy
   is enabled only when the device enabled `samplerAnisotropy`

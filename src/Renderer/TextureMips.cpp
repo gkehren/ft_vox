@@ -76,16 +76,75 @@ float scaledCutoutCoverage(const uint8_t *level, uint32_t w, float scale)
 	return static_cast<float>(covered) / static_cast<float>(texels);
 }
 
-// Rescale the level's alpha around the cutout threshold; texels that end up
-// fully transparent collapse to transparent black.
-void applyAlphaScale(uint8_t *level, uint32_t w, float scale)
+// Deterministic 4x4 Bayer rank used to spread tie resolutions across a level
+// instead of clustering them.
+uint32_t bayer4Rank(uint32_t x, uint32_t y)
+{
+	static constexpr uint32_t kBayer4[16] = {
+		0,  8,  2, 10,
+		12,  4, 14,  6,
+		3,  11,  1,  9,
+		15,  7, 13,  5,
+	};
+	return kBayer4[(y % 4) * 4 + (x % 4)];
+}
+
+// Alpha values assigned to boundary texels when the coverage count must be
+// quantized: one on each side of the canonical threshold.
+constexpr float kPromotedCutoutAlpha = 128.0f / 255.0f; // >= kAlphaCutoutThreshold
+constexpr float kDemotedCutoutAlpha = 127.0f / 255.0f;  // <  kAlphaCutoutThreshold
+
+// Coverage-preserving rescale, quantized (issue #136 review): the global
+// `scale` from the binary search is only the first approximation — a uniform
+// multiplier cannot break alpha ties (four isolated 0.25 texels can only all
+// pass or all fail together, erasing representable details). After scaling,
+// texels are promoted/demoted individually until the level's cutout texel
+// count matches round(targetCoverage * texelCount): candidates closest to the
+// threshold first, ties spread by Bayer rank then resolved by index.
+void applyCoverageRescale(uint8_t *level, uint32_t w, float scale, float targetCoverage)
 {
 	const uint64_t texels = static_cast<uint64_t>(w) * w;
+	std::vector<float> scaled(texels);
+	uint64_t covered = 0;
+	for (uint64_t i = 0; i < texels; ++i)
+	{
+		scaled[i] = std::min(1.0f, static_cast<float>(level[i * kBytesPerTexel + 3]) / 255.0f * scale);
+		if (scaled[i] >= kAlphaCutoutThreshold)
+			++covered;
+	}
+	const uint64_t targetCount =
+		static_cast<uint64_t>(std::lround(targetCoverage * static_cast<double>(texels)));
+	if (covered != targetCount)
+	{
+		const bool promote = covered < targetCount;
+		std::vector<uint64_t> candidates;
+		candidates.reserve(texels);
+		for (uint64_t i = 0; i < texels; ++i)
+		{
+			const bool isCovered = scaled[i] >= kAlphaCutoutThreshold;
+			if (promote ? !isCovered : isCovered)
+				candidates.push_back(i);
+		}
+		std::sort(candidates.begin(), candidates.end(), [&](uint64_t a, uint64_t b) {
+			const float fa = scaled[a];
+			const float fb = scaled[b];
+			if (fa != fb)
+				return promote ? fa > fb : fa < fb; // closest to the threshold first
+			const uint32_t ra = bayer4Rank(static_cast<uint32_t>(a % w), static_cast<uint32_t>(a / w));
+			const uint32_t rb = bayer4Rank(static_cast<uint32_t>(b % w), static_cast<uint32_t>(b / w));
+			if (ra != rb)
+				return ra < rb;
+			return a < b;
+		});
+		const uint64_t moves = std::min<uint64_t>(
+			promote ? targetCount - covered : covered - targetCount, candidates.size());
+		for (uint64_t k = 0; k < moves; ++k)
+			scaled[candidates[static_cast<size_t>(k)]] = promote ? kPromotedCutoutAlpha : kDemotedCutoutAlpha;
+	}
 	for (uint64_t i = 0; i < texels; ++i)
 	{
 		uint8_t *texel = level + i * kBytesPerTexel;
-		const float a = static_cast<float>(texel[3]) / 255.0f * scale;
-		texel[3] = toByte(a);
+		texel[3] = toByte(scaled[i]);
 		if (texel[3] == 0)
 		{
 			texel[0] = 0;
@@ -177,6 +236,11 @@ void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *
 	// generated level must preserve.
 	std::memcpy(outChain, layerPixels, mipLevelBytes(baseSize, 0));
 	const float targetCoverage = cutoutCoverage(outChain, baseSize);
+	// The base level is served too: slight minification already filters mip 0
+	// with LINEAR, so alpha-0 texels next to cutout texels need the border
+	// color here as well (dark fringe near LOD 0 — issue #136 review).
+	if (targetCoverage > 0.0f)
+		dilateBorderColors(outChain, baseSize);
 
 	for (uint32_t level = 1; level < levels; ++level)
 	{
@@ -242,12 +306,13 @@ void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *
 			}
 		}
 
-		// Coverage preservation (DirectXTex-style alpha rescale, issue #136):
-		// plain box averaging drifts cutout coverage upward as levels densify
-		// (a 50% mask measured 100% at mip 1). A per-level binary search finds
-		// the alpha scale that brings this level's cutout coverage back to the
-		// base level's; ties resolve toward the higher coverage so silhouettes
-		// never vanish. Fully transparent (nothing to preserve) and fully
+		// Coverage preservation (DirectXTex-style alpha rescale + quantized tie
+		// resolution, issue #136): plain box averaging drifts cutout coverage
+		// upward as levels densify (a 50% mask measured 100% at mip 1). A
+		// per-level binary search finds the alpha scale that brings this
+		// level's cutout coverage back toward the base level's, then boundary
+		// texels are promoted/demoted so the covered texel COUNT matches the
+		// target exactly. Fully transparent (nothing to preserve) and fully
 		// opaque (alpha must stay exactly 255) layers skip the search.
 		if (targetCoverage > 0.0f && targetCoverage < 1.0f)
 		{
@@ -277,7 +342,7 @@ void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *
 					else
 						break;
 				}
-				applyAlphaScale(dst, dstW, bestScale);
+				applyCoverageRescale(dst, dstW, bestScale, targetCoverage);
 			}
 		}
 
