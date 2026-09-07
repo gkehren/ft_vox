@@ -528,7 +528,33 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			ImGui::SliderInt("Bloom blur iters", &pp.bloomBlurIterations, 1, 5);
 		}
 		ImGui::Checkbox("FXAA", &pp.fxaaEnabled);
-		ImGui::SliderFloat("Exposure", &pp.exposure, 0.1f, 5.f);
+		ImGui::Checkbox("Auto exposure", &pp.autoExposureEnabled);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Meter HDR scene luminance and adapt exposure over time (eye adaptation).");
+		// Greyed out while auto exposure drives the frame, but shows (and stays
+		// editable for) the value used as soon as auto is switched off.
+		ImGui::BeginDisabled(pp.autoExposureEnabled);
+		ImGui::SliderFloat("Manual exposure", &pp.exposure, 0.1f, 5.f);
+		ImGui::EndDisabled();
+		ImGui::SliderFloat("Compensation (EV)", &pp.exposureCompensation, -3.0f, 3.0f, "%.1f");
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Auto-exposure bias in stops. 0 = neutral, +1 doubles the target exposure.");
+		if (pp.autoExposureEnabled)
+		{
+			ImGui::Indent();
+			ImGui::SliderFloat("Middle grey", &pp.autoExposureMiddleGrey, 0.1f, 2.0f, "%.2f");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Scene luminance mapped to exposure 1.0.");
+			ImGui::SliderFloat("Min EV", &pp.autoExposureMinEv, -6.0f, 0.0f, "%.1f");
+			ImGui::SliderFloat("Max EV", &pp.autoExposureMaxEv, 0.0f, 6.0f, "%.1f");
+			ImGui::SliderFloat("Adapt speed (brighten)", &pp.autoExposureSpeedUp, 0.25f, 10.0f, "%.2f /s");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("How fast exposure drops when the scene brightens.");
+			ImGui::SliderFloat("Adapt speed (darken)", &pp.autoExposureSpeedDown, 0.25f, 10.0f, "%.2f /s");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("How fast exposure rises when the scene darkens (eye dilation).");
+			ImGui::Unindent();
+		}
 		ImGui::SliderFloat("Gamma", &pp.gamma, 0.5f, 2.5f);
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Artistic midtone grade (1.0 = neutral linear display)");
@@ -821,6 +847,17 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 				ordered.push_back(gpu.history()[(start + i) % VkGpuProfiler::kHistorySize]);
 			ImGui::PlotLines("##gpu", ordered.data(), n, 0, nullptr, 0.f, FLT_MAX, ImVec2(-1.f, 80.f));
 		}
+	}
+
+	// Auto-exposure readout (issue #140): GPU state read back after the frame's
+	// fence wait, so values lag one frame behind by design.
+	if (frame.worldRenderer)
+	{
+		const auto &exp = frame.worldRenderer->exposureReadout();
+		ImGui::Text("Metered: %.2f EV", exp.meteredLogLum);
+		ImGui::Text("Exposure: %.3f (target %.3f)", exp.adaptedExposure, exp.targetExposure);
+		const char *clampTxt = exp.clampState == 1 ? "min clamp" : exp.clampState == 2 ? "max clamp" : "in range";
+		ImGui::TextDisabled("Target %s", clampTxt);
 	}
 
 	// Worker jobs

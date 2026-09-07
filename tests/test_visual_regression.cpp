@@ -159,6 +159,34 @@ glm::ivec2 findDeepWaterColumn(TerrainGenerator &gen, int laneZ)
 	return {0, laneZ};
 }
 
+/// Chunk-aligned anchor for the sealed cave room (cave_emissive and the
+/// auto_exposure scenes): thick rock so the carved room stays sealed; the
+/// room is centered inside one chunk (local 8, 38, 8) so light BFS never
+/// crosses a border.
+glm::vec3 findCaveAnchor(TerrainGenerator &gen)
+{
+	const glm::ivec2 col = findLandColumn(gen, 85, 130, 8);
+	const int baseX = (col.x / CHUNK_SIZE) * CHUNK_SIZE;
+	const int baseZ = (col.y / CHUNK_SIZE) * CHUNK_SIZE;
+	return glm::vec3(float(baseX + 8), 38.f, float(baseZ + 8));
+}
+
+/// Carve the squashed-sphere cavity (dy weighted 1.2): the floor ends up
+/// around y = 34 near the center, stepping up towards the rim. Light-source
+/// fixtures (lava/magma) are added by the caller, if any.
+void carveCaveRoom(ChunkManager &chunks, const glm::vec3 &anchor)
+{
+	const int cx = int(anchor.x), cy = int(anchor.y), cz = int(anchor.z);
+	for (int dz = -6; dz <= 6; ++dz)
+		for (int dx = -6; dx <= 6; ++dx)
+			for (int dy = -5; dy <= 4; ++dy)
+			{
+				const float room = float(dx * dx + dz * dz) + float(dy * dy) * 1.44f;
+				if (room <= 30.f)
+					chunks.deleteVoxel(glm::vec3(float(cx + dx), float(cy + dy), float(cz + dz)));
+			}
+}
+
 float yawToward(const glm::vec3 &from, const glm::vec3 &to)
 {
 	return glm::degrees(std::atan2(to.z - from.z, to.x - from.x));
@@ -196,6 +224,11 @@ struct SceneSpec
 	float time = 0.0f;
 	int areaRadiusChunks = 6;
 	bool underwater = false;
+	/// Render through the AUTO exposure path (issue #140) instead of the
+	/// fixed manual exposure the existing golden references were captured
+	/// with. See the double-render block in main for how the bit-identical
+	/// determinism check is preserved for adapting scenes.
+	bool autoExposure = false;
 	/// Render an extra base frame with no mobs (entity/terrain consistency).
 	bool mobDeltaBase = false;
 	CompareThresholds thresholds{};
@@ -206,6 +239,19 @@ struct SceneSpec
 	/// Targeted numeric assertions on the actual (and optional mob-free) image.
 	std::function<std::vector<std::string>(const RgbaImage &actual, const RgbaImage &mobFreeBase)> invariants;
 };
+
+/// Shared noon terrain viewpoint (noon_terrain + auto_exposure_noon): a fixed
+/// camera over sunlit mixed terrain with tight fog for long shadows.
+void spotNoonTerrain(SceneRun &run)
+{
+	VisualHarness &h = run.harness;
+	const glm::ivec2 col = findLandColumn(h.terrain(), 70, 100, 8);
+	const float ground = float(h.terrain().getTerrainSample(col.x, col.y).postErosionHeight);
+	h.camera().setPosition(glm::vec3(col.x + 10.f, ground + 14.f, col.y + 10.f));
+	h.camera().setYawPitch(225.f, -28.f); // look back across the anchor column
+	h.shader().fogStart = 60.f;
+	h.shader().fogEnd = 135.f;
+}
 
 std::vector<SceneSpec> buildSceneTable()
 {
@@ -220,15 +266,7 @@ std::vector<SceneSpec> buildSceneTable()
 	noon.seed = 4217;
 	noon.dayTime = 0.30f; // full day factor, sun low enough for long shadows
 	noon.time = 11.0f;
-	noon.spot = [](SceneRun &run) {
-		VisualHarness &h = run.harness;
-		const glm::ivec2 col = findLandColumn(h.terrain(), 70, 100, 8);
-		const float ground = float(h.terrain().getTerrainSample(col.x, col.y).postErosionHeight);
-		h.camera().setPosition(glm::vec3(col.x + 10.f, ground + 14.f, col.y + 10.f));
-		h.camera().setYawPitch(225.f, -28.f); // look back across the anchor column
-		h.shader().fogStart = 60.f;
-		h.shader().fogEnd = 135.f;
-	};
+	noon.spot = spotNoonTerrain;
 	noon.invariants = [](const RgbaImage &actual, const RgbaImage &) {
 		std::vector<std::string> errors;
 		// Top 5% rows stay genuinely sky/clouds for this fixed camera. The wider
@@ -283,30 +321,16 @@ std::vector<SceneSpec> buildSceneTable()
 	cave.areaRadiusChunks = 3;
 	cave.spot = [](SceneRun &run) {
 		VisualHarness &h = run.harness;
-		// Thick rock so the carved room stays sealed; center the room inside
-		// one chunk (local 8, 38, 8) so light BFS never crosses a border.
-		const glm::ivec2 col = findLandColumn(h.terrain(), 85, 130, 8);
-		const int baseX = (col.x / CHUNK_SIZE) * CHUNK_SIZE;
-		const int baseZ = (col.y / CHUNK_SIZE) * CHUNK_SIZE;
-		run.anchor = glm::vec3(float(baseX + 8), 38.f, float(baseZ + 8));
+		run.anchor = findCaveAnchor(h.terrain());
 		h.camera().setPosition(run.anchor + glm::vec3(-3.2f, 1.5f, -3.2f));
 		h.camera().setYawPitch(45.f, -12.f); // look across the lava pool
 	};
 	cave.fixture = [](SceneRun &run) {
 		ChunkManager &chunks = run.harness.chunks();
-		const int cx = int(run.anchor.x), cy = int(run.anchor.y), cz = int(run.anchor.z);
-		// Squashed-sphere cavity (dy weighted 1.2): floor ends up around
-		// y = 34 near the center, stepping up towards the rim.
-		for (int dz = -6; dz <= 6; ++dz)
-			for (int dx = -6; dx <= 6; ++dx)
-				for (int dy = -5; dy <= 4; ++dy)
-				{
-					const float room = float(dx * dx + dz * dz) + float(dy * dy) * 1.44f;
-					if (room <= 30.f)
-						chunks.deleteVoxel(glm::vec3(float(cx + dx), float(cy + dy), float(cz + dz)));
-				}
+		carveCaveRoom(chunks, run.anchor);
 		// Lava pool embedded in the center floor (top face exposed by the
 		// y=34 cavity), magma ring on the first carved step around it.
+		const int cx = int(run.anchor.x), cy = int(run.anchor.y), cz = int(run.anchor.z);
 		for (int dz = -4; dz <= 4; ++dz)
 			for (int dx = -4; dx <= 4; ++dx)
 			{
@@ -512,6 +536,44 @@ std::vector<SceneSpec> buildSceneTable()
 		need(all.meanLuma > 2.0 && all.meanLuma < 200.0, errors,
 			 "underwater exposure out of range (mean luma " + std::to_string(all.meanLuma) + ")");
 		return errors;
+	};
+
+	// --- auto_exposure_noon --------------------------------------------------
+	// The exact noon_terrain viewpoint/atmosphere through the AUTO exposure
+	// path (issue #140): same pinned meter, adaptation seeded from the manual
+	// exposure. Existing golden references stay pinned to fixed exposure; auto
+	// mode gets dedicated scenes. See the double-render block in main for the
+	// off->on seeding that keeps the bit-identical check meaningful here.
+	scenes.push_back({});
+	SceneSpec &autoNoon = scenes.back();
+	autoNoon.name = "auto_exposure_noon";
+	autoNoon.seed = 4217;
+	autoNoon.dayTime = 0.30f;
+	autoNoon.time = 11.0f;
+	autoNoon.autoExposure = true;
+	autoNoon.spot = spotNoonTerrain;
+
+	// --- auto_exposure_cave --------------------------------------------------
+	// The cave_emissive room positioning with the lava kept out: a sealed,
+	// unlit interior whose meter reads near the clipping floor, so the
+	// adapted exposure climbs toward the max-EV clamp (+4 EV with defaults).
+	scenes.push_back({});
+	SceneSpec &autoCave = scenes.back();
+	autoCave.name = "auto_exposure_cave";
+	autoCave.seed = 9001;
+	autoCave.dayTime = 0.25f; // irrelevant inside the enclosed room
+	autoCave.time = 3.0f;
+	autoCave.areaRadiusChunks = 3;
+	autoCave.autoExposure = true;
+	autoCave.spot = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		run.anchor = findCaveAnchor(h.terrain());
+		h.camera().setPosition(run.anchor + glm::vec3(-3.2f, 1.5f, -3.2f));
+		h.camera().setYawPitch(45.f, -12.f); // look across the (dark) room
+	};
+	autoCave.fixture = [](SceneRun &run) {
+		carveCaveRoom(run.harness.chunks(), run.anchor);
+		run.worldEdited = true;
 	};
 
 	return scenes;
@@ -923,6 +985,134 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
     return errors ? 1 : 0;
 }
 
+// Temporal auto-exposure adaptation check (issue #140). GPU-exercised: drives
+// the production metering + exposure_adapt passes over many consecutive
+// frames in a sealed dark room and validates the CPU debug readout
+// (WorldRenderer::exposureReadout, copied from the frame slot's SSBO during
+// recordExposure after the slot's fence was waited).
+//
+// Readout lag: recordExposure copies the state BEFORE the frame's adapt pass,
+// so the readout observed after frame k is the GPU state after frame k-1 —
+// every sampled sequence below therefore renders one throwaway "flush" frame
+// before trusting the readout, and the observed sequence lags the rendered
+// frames by exactly one step.
+// ---------------------------------------------------------------------------
+int runAdaptationCheck(VisualHarness &harness)
+{
+	std::vector<std::string> errors;
+	const float kTime = 3.0f; // pinned animation time — fully static scene
+
+	harness.beginScene(9001);
+	harness.shader() = ShaderParameters{};
+	harness.renderSettings() = RenderSettings{};
+	harness.post() = PostProcessSettings{}; // auto exposure on (defaults)
+	harness.shader().dayTime = 0.25f;		// irrelevant inside the sealed room
+	updateAtmosphereFromDayTime(harness.shader());
+
+	// cave_emissive positioning, no light sources: the meter sits far below
+	// middle grey, so exposure must climb toward the max-EV clamp.
+	const glm::vec3 anchor = findCaveAnchor(harness.terrain());
+	harness.camera().setPosition(anchor + glm::vec3(-3.2f, 1.5f, -3.2f));
+	harness.camera().setYawPitch(45.f, -12.f);
+	harness.buildArea(harness.camera().getPosition(), 3);
+	carveCaveRoom(harness.chunks(), anchor);
+	harness.remeshEditedChunks();
+
+	// One rendered frame = one adaptation step at the given dt; returns the
+	// readout observed after the frame (the state after the PREVIOUS frame).
+	const auto step = [&](float dt) {
+		harness.renderer().setFrameDt(dt);
+		harness.renderFrame(kTime, {});
+		return harness.renderer().exposureReadout();
+	};
+
+	// Rising-edge re-seed (PostStack::recordExposure: seed on
+	// useAuto && !m_lastAutoEnabled, and the adapt pass is skipped entirely
+	// while auto is off): one manual frame re-arms the edge, the next auto
+	// frame seeds the adaptation from the manual exposure.
+	harness.post().autoExposureEnabled = false;
+	step(1.f / 60.f); // discarded manual frame
+	harness.post().autoExposureEnabled = true;
+	step(1.f / 60.f); // seed frame — readout still pre-seed, flushed below
+
+	if (harness.lastNonFiniteSamples() > 0)
+		errors.push_back("non-finite HDR samples in the dark-room frames");
+
+	// --- Monotonic approach, no overshoot (40 observed states, ~1.3 s) ---
+	std::vector<float> adaptedLog;
+	float targetExposure = 0.0f;
+	for (int i = 0; i < 40; ++i)
+	{
+		// First sample flushes the seed frame's state out of the readout.
+		const auto s = step(i == 0 ? 1.f / 60.f : 1.f / 30.f);
+		adaptedLog.push_back(std::log2(std::max(s.adaptedExposure, 1e-6f)));
+		targetExposure = s.targetExposure;
+	}
+	const float targetLog = std::log2(std::max(targetExposure, 1e-6f));
+	for (size_t i = 1; i < adaptedLog.size(); ++i)
+	{
+		if (adaptedLog[i] < adaptedLog[i - 1] - 1e-5f)
+		{
+			errors.push_back("adapted exposure is not monotonic toward the target (sample " +
+							 std::to_string(i) + ")");
+			break;
+		}
+	}
+	if (targetLog < adaptedLog.back() - 1e-3f)
+		errors.push_back("adapted exposure overshot the target (adapted log2 " +
+						 std::to_string(adaptedLog.back()) + " > target " +
+						 std::to_string(targetLog) + ")");
+	if (!(targetLog > adaptedLog.front()))
+		errors.push_back("the dark room did not drive adaptation upward (target log2 " +
+						 std::to_string(targetLog) + ")");
+
+	// --- Frame-split independence: identical simulated time, two splits ---
+	// Both runs re-seed from the same manual exposure via the off->on toggle,
+	// then integrate the same simulated second: the per-step alpha
+	// 1 - exp(-speed*dt) is the exact exponential integral, so 30x1/30 and
+	// 60x1/60 must land on the same value modulo GPU fp32 rounding.
+	const auto reseedAndRun = [&](int frames, float dt) {
+		harness.post().autoExposureEnabled = false;
+		step(1.f / 60.f); // re-arm the rising edge
+		harness.post().autoExposureEnabled = true;
+		step(1.f / 60.f); // seed frame: identical start state for both splits
+		for (int i = 0; i < frames; ++i)
+			step(dt);
+		step(1.f / 60.f); // flush: readout now holds the state after the last frame
+		return harness.renderer().exposureReadout().adaptedExposure;
+	};
+	const float end30 = reseedAndRun(30, 1.f / 30.f);
+	const float end60 = reseedAndRun(60, 1.f / 60.f);
+	if (std::abs(end30 - end60) / std::max(end30, end60) > 5e-3f)
+		errors.push_back("frame-split independence violated: 30x1/30s ended at " +
+						 std::to_string(end30) + ", 60x1/60s at " + std::to_string(end60));
+
+	// --- Limit reporting: clampState must flag the max-EV clamp in the dark ---
+	// With the default maxEv=+4 the room is not PROVABLY dark enough to hit
+	// the clamp, so force a small clamp: the precondition check below asserts
+	// metered <= -1 EV, which makes the raw target (-metered) >= +1 EV and
+	// therefore guarantees the raw target rides the maxEv=+1 clamp.
+	harness.post().autoExposureMaxEv = 1.0f;
+	step(1.f / 60.f); // adapt pass runs with maxEv=+1; readout is one frame stale
+	const auto limit = step(1.f / 60.f); // readout reflects the maxEv=+1 pass
+	if (limit.meteredLogLum > -1.0f)
+		errors.push_back("the sealed room is not dark (metered " +
+						 std::to_string(limit.meteredLogLum) + " EV) — clamp check vacuous");
+	if (limit.clampState != 2u)
+		errors.push_back("dark scene must report the max-EV clamp (clampState " +
+						 std::to_string(limit.clampState) + ", want 2)");
+	harness.post().autoExposureMaxEv = 4.0f;
+
+	for (const std::string &error : errors)
+		std::cerr << "  FAIL auto-exposure-adaptation: " << error << "\n";
+	if (errors.empty())
+	{
+		std::cout << "  PASS auto-exposure-adaptation\n";
+		return 0;
+	}
+	return 1;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -1041,6 +1231,10 @@ int main(int argc, char **argv)
 			harness.shader() = ShaderParameters{};
 			harness.renderSettings() = RenderSettings{};
 			harness.post() = PostProcessSettings{};
+			// Existing golden references were captured with a FIXED manual
+			// exposure — auto mode gets the dedicated auto_exposure_* scenes
+			// (issue #140), which opt back in below via SceneSpec::autoExposure.
+			harness.post().autoExposureEnabled = false;
 			harness.post().underwater = scene.underwater;
 			harness.shader().dayTime = scene.dayTime;
 			updateAtmosphereFromDayTime(harness.shader());
@@ -1055,8 +1249,30 @@ int main(int argc, char **argv)
 			// Two identical renders must be bit-identical: pins every
 			// animation/feed-forward input and catches nondeterminism before
 			// it can pollute the reference comparison.
-			const RgbaImage first = harness.renderFrame(scene.time, run.mobs);
-			const RgbaImage actual = harness.renderFrame(scene.time, run.mobs);
+			//
+			// Auto-exposure scenes (issue #140): every recorded frame advances
+			// the adaptation SSBO (exposure_adapt.frag) and the composite
+			// consumes it in the same frame, so back-to-back auto frames can
+			// never be bit-identical while adapting. recordExposure re-seeds
+			// the adaptation from the manual exposure on the auto-mode RISING
+			// edge, and a seeded frame ignores the stale state entirely (its
+			// output depends only on the push constants and the static
+			// scene meter). So each compared frame is rendered immediately
+			// after an off->on toggle: both carry the identical seed exposure
+			// and the bit-identical contract stays intact. The off frames in
+			// between run the manual composite and are discarded.
+			const bool autoScene = scene.autoExposure;
+			const auto renderComparedFrame = [&]() {
+				if (autoScene)
+				{
+					harness.post().autoExposureEnabled = false;
+					harness.renderFrame(scene.time, run.mobs); // discarded: re-arm the rising edge
+					harness.post().autoExposureEnabled = true;
+				}
+				return harness.renderFrame(scene.time, run.mobs);
+			};
+			const RgbaImage first = renderComparedFrame();
+			const RgbaImage actual = renderComparedFrame();
 			std::vector<std::string> errors;
 			need(actual.valid(), errors, "render produced an invalid image");
 			if (first.valid() && actual.valid() &&
@@ -1173,17 +1389,20 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// "resize_check" is a valid selection too — only fail when some real
-	// scene name matched nothing.
+	// "resize_check" and "auto_exposure_adaptation" are valid selections too —
+	// only fail when some real scene name matched nothing.
 	const bool resizeRequested =
 		std::find(onlyScenes.begin(), onlyScenes.end(), "resize_check") != onlyScenes.end();
-	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested)
+	const bool adaptationRequested =
+		std::find(onlyScenes.begin(), onlyScenes.end(), "auto_exposure_adaptation") != onlyScenes.end();
+	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested && !adaptationRequested)
 	{
 		std::cerr << "FAIL: --scene";
 		for (const std::string &name : onlyScenes)
 			std::cerr << " " << name;
 		std::cerr << " matched no scene (valid names: noon_terrain, cascade_transition, cave_emissive,"
-					 " water_shore, sunset, midnight, mob_lighting, underwater, resize_check)\n";
+					 " water_shore, sunset, midnight, mob_lighting, underwater, auto_exposure_noon,"
+					 " auto_exposure_cave, auto_exposure_adaptation, resize_check)\n";
 		++failures;
 	}
 
@@ -1200,6 +1419,11 @@ int main(int argc, char **argv)
 			const long before = harness.validationErrors();
 			harness.beginScene(4217);
 			harness.post() = PostProcessSettings{};
+			// Manual exposure here too (issue #140): the adaptation would
+			// advance between the two post-resize frames and trip the
+			// bit-identical check — resize-check pins the shadow-map change,
+			// not exposure.
+			harness.post().autoExposureEnabled = false;
 			harness.shader() = ShaderParameters{};
 			harness.shader().dayTime = 0.30f;
 			updateAtmosphereFromDayTime(harness.shader());
@@ -1256,6 +1480,24 @@ int main(int argc, char **argv)
 	if (onlyScenes.empty() ||
 		std::find(onlyScenes.begin(), onlyScenes.end(), "noon_terrain") != onlyScenes.end())
 		failures += runAoMotionCheck(harness, scenes, outDir);
+
+	// Temporal auto-exposure adaptation check (issue #140): GPU-exercised,
+	// verified through the CPU debug readout. Runs with the full suite or
+	// when requested by name (--scene auto_exposure_adaptation).
+	if (onlyScenes.empty() || adaptationRequested)
+	{
+		std::cout << "[auto-exposure-adaptation] dark-room temporal adaptation\n";
+		try
+		{
+			if (runAdaptationCheck(harness) != 0)
+				++failures;
+		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "  FAIL auto-exposure-adaptation: exception: " << e.what() << "\n";
+			++failures;
+		}
+	}
 
 	const long renderValidationErrors = harness.validationErrors() - baselineValidation;
 	if (renderValidationErrors > 0)

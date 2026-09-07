@@ -81,6 +81,16 @@ public:
     size_t visibleMobs() const { return m_mobs.visibleCount(); }
     MobTextureReport mobTextureReport() const { return m_mobs.textureReport(); }
 	PostProcessSettings &postSettings() { return m_postSettings; }
+	/// Frame delta driving the auto-exposure adaptation (issue #140). The
+	/// engine sets it before recordFrame; tooling sets it before each
+	/// offscreen render so adaptation is deterministic under test.
+	void setFrameDt(float dt) { m_frameDt = dt; }
+	/// Debug readout of the auto-exposure state (values from the previous
+	/// use of the current frame slot; never synchronizes).
+	const autoexposure::ExposureGpuState &exposureReadout() const { return m_post.exposureReadout(); }
+	/// 1x1 R32F adapted-exposure target for tooling readback. Layout is
+	/// SHADER_READ_ONLY_OPTIMAL between frames.
+	AllocatedImage &exposureTarget() { return m_post.exposureTarget(); }
 	/// Shadow map resolution actually in GPU resources (issue #137). Differs
 	/// from postSettings().shadowMapSize until applyShadowMapSize runs.
 	uint32_t activeShadowMapSize() const { return m_shadow.mapSize(); }
@@ -139,6 +149,8 @@ private:
 	PostStack m_post;
 	OverlayRenderer m_overlays;
 	PostProcessSettings m_postSettings{};
+	/// Frame delta for auto-exposure adaptation (issue #140).
+	float m_frameDt{1.f / 60.f};
 	MeshArenas m_arenas{};
 	ShadowPass m_shadow;
 	OpaquePass m_opaque;

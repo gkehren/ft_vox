@@ -70,6 +70,10 @@ public:
 	/// (TextureManager) gates anisotropy on this; the ceiling lives in
 	/// getDeviceProperties().limits.maxSamplerAnisotropy.
 	bool samplerAnisotropyEnabled() const { return m_samplerAnisotropyEnabled; }
+	/// Whether fragment-stage SSBO stores are available (auto-exposure
+	/// adaptation, issue #140). When false the engine runs the manual
+	/// exposure path; device creation does not fail.
+	bool fragmentStoresAndAtomics() const { return m_fragmentStoresAndAtomics; }
 	bool isValidationEnabled() const { return m_validationEnabled; }
 	/// Includes initialization and shutdown; reset only by the next init().
 	uint64_t validationErrorCount() const { return m_validationErrors.load(std::memory_order_relaxed); }
@@ -112,6 +116,7 @@ private:
 	bool m_multiDrawIndirect{false};
 	bool m_portabilitySubset{false};
 	bool m_samplerAnisotropyEnabled{false};
+	bool m_fragmentStoresAndAtomics{false};
 
 	std::unique_ptr<VkAllocator> m_allocator;
 

@@ -558,6 +558,12 @@ void VkContext::createLogicalDevice()
 	enabledFeatures.fillModeNonSolid = features2.features.fillModeNonSolid;
 	enabledFeatures.multiDrawIndirect = features2.features.multiDrawIndirect;
 	enabledFeatures.drawIndirectFirstInstance = VK_TRUE; // verified above
+	// GPU auto-exposure (issue #140): exposure_adapt.frag writes the exposure
+	// state SSBO from the fragment stage. Optional feature: when missing, the
+	// engine stays on the deterministic manual-exposure path (PostStack gates
+	// the metering passes on this flag) instead of failing device creation.
+	m_fragmentStoresAndAtomics = features2.features.fragmentStoresAndAtomics == VK_TRUE;
+	enabledFeatures.fragmentStoresAndAtomics = m_fragmentStoresAndAtomics ? VK_TRUE : VK_FALSE;
 	// Store what was actually enabled: TextureManager gates sampler anisotropy
 	// on this instead of assuming the provisional request succeeded.
 	m_samplerAnisotropyEnabled = enabledFeatures.samplerAnisotropy == VK_TRUE;

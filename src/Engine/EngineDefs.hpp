@@ -148,8 +148,25 @@ struct PostProcessSettings
 	bool autoExposureEnabled{true};
 	/// Re-baselined for the single sRGB output transfer (issue #135): the old
 	/// double output gamma no longer brightens mid-tones, so exposure lifts.
+	/// Exact exposure of the MANUAL path; auto mode derives it from the HDR
+	/// scene luminance with the settings below (issue #140).
 	float exposure{1.25f};
-	float exposureCompensation{1.0f};
+	/// Exposure compensation in EV stops for the AUTO path: 0 is neutral,
+	/// +1 doubles the target exposure (image gets brighter), -1 halves it.
+	/// The manual path uses `exposure` exactly as set.
+	float exposureCompensation{0.0f};
+	/// Auto-exposure tuning (issue #140). middleGrey is the metered scene
+	/// luminance (linear HDR units, 1.0 ≈ lit terrain under noon sun) that
+	/// maps to exposure 1.0. minEv/maxEv clamp the TARGET exposure in EV
+	/// relative to 1.0 (exposure = 2^ev). speedUp/speedDown are inverse
+	/// seconds, frame-rate independent: speedUp applies while the scene
+	/// brightens (exposure drops), speedDown while it darkens (exposure
+	/// rises, like eye dilation). Math: Renderer/AutoExposure.hpp.
+	float autoExposureMiddleGrey{1.0f};
+	float autoExposureMinEv{-4.0f};
+	float autoExposureMaxEv{4.0f};
+	float autoExposureSpeedUp{3.0f};
+	float autoExposureSpeedDown{1.25f};
 	int toneMapper{0}; // 0 = ACES, 1 = Reinhard
 	/// Creative midtone gamma grade (1.0 = neutral display-linear; not framebuffer transfer).
 	float gamma{1.0f};
@@ -210,13 +227,18 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 
 	// Shared grade defaults (Medium baseline)
 	exposure = 1.25f;
-	exposureCompensation = 1.0f;
+	exposureCompensation = 0.0f; // EV stops: 0 is neutral
 	toneMapper = 0;
 	gamma = 1.0f;
 	postSaturation = 1.02f;
 	postContrast = 1.03f;
 	fxaaEnabled = true;
 	autoExposureEnabled = true;
+	autoExposureMiddleGrey = 1.0f;
+	autoExposureMinEv = -4.0f;
+	autoExposureMaxEv = 4.0f;
+	autoExposureSpeedUp = 3.0f;
+	autoExposureSpeedDown = 1.25f;
 	godRaysBoostPreview = false;
 	godRaysDepthOcclusion = true;
 	ssaoDebugView = 0;  // diagnostics never persist across presets

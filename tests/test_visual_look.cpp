@@ -77,11 +77,35 @@ int main()
 		ok = fail("default postContrast out of balanced range [1.0, 1.08]");
 	if (std::abs(pp.gamma - 1.0f) > 1e-4f)
 		ok = fail("default gamma must be 1.0f (neutral display-linear midtone baseline)");
+	// Auto exposure (issue #140): compensation is EV stops (0 = neutral, +1
+	// doubles the exposure), auto mode defaults on, and the five tunables
+	// ship with the same defaults as the CPU reference in AutoExposure.hpp.
+	if (std::abs(pp.exposureCompensation) > 1e-6f)
+		ok = fail("default exposureCompensation must be 0 EV (neutral)");
+	if (!pp.autoExposureEnabled)
+		ok = fail("auto exposure should default on");
+	if (pp.autoExposureMiddleGrey != 1.0f || pp.autoExposureMinEv != -4.0f ||
+		pp.autoExposureMaxEv != 4.0f || pp.autoExposureSpeedUp != 3.0f ||
+		pp.autoExposureSpeedDown != 1.25f)
+		ok = fail("auto-exposure defaults drifted (middleGrey 1, minEv -4, maxEv +4, speedUp 3, speedDown 1.25)");
 
 	// --- Quality presets (shipped applyPreset; Low lighter than High/Cinematic) ---
 	{
 		PostProcessSettings low{}, med{}, high{}, cine{};
 		// Dirty knobs then re-apply to prove applicator overwrites
+		const auto dirtyAutoExposure = [](PostProcessSettings &p) {
+			p.autoExposureEnabled = false;
+			p.exposureCompensation = 1.5f;
+			p.autoExposureMiddleGrey = 0.2f;
+			p.autoExposureMinEv = -1.0f;
+			p.autoExposureMaxEv = 2.0f;
+			p.autoExposureSpeedUp = 9.0f;
+			p.autoExposureSpeedDown = 4.0f;
+		};
+		dirtyAutoExposure(low);
+		dirtyAutoExposure(med);
+		dirtyAutoExposure(high);
+		dirtyAutoExposure(cine);
 		low.ssaoIntensity = 9.f;
 		low.bloomBlurIterations = 99;
 		low.ssaoDebugView = 3;
@@ -149,6 +173,22 @@ int main()
 		uw.applyPreset(GraphicsQualityPreset::Low);
 		if (!uw.underwater || std::abs(uw.underwaterStrength - 1.25f) > 1e-5f)
 			ok = fail("applyPreset must preserve underwater state");
+		// Auto exposure resets (issue #140): every preset re-engages auto
+		// mode and resets compensation + the five tunables to the defaults.
+		const auto checkAutoExposureReset = [&](const PostProcessSettings &p, const char *name) {
+			if (!p.autoExposureEnabled)
+				ok = fail(std::string(name) + " preset must re-enable auto exposure");
+			if (std::abs(p.exposureCompensation) > 1e-6f)
+				ok = fail(std::string(name) + " preset must reset exposureCompensation to 0 EV");
+			if (p.autoExposureMiddleGrey != 1.0f || p.autoExposureMinEv != -4.0f ||
+				p.autoExposureMaxEv != 4.0f || p.autoExposureSpeedUp != 3.0f ||
+				p.autoExposureSpeedDown != 1.25f)
+				ok = fail(std::string(name) + " preset must reset the auto-exposure tunables to defaults");
+		};
+		checkAutoExposureReset(low, "Low");
+		checkAutoExposureReset(med, "Medium");
+		checkAutoExposureReset(high, "High");
+		checkAutoExposureReset(cine, "Cinematic");
 	}
 
 	// --- Biome palette: readable chroma, not neon ---

@@ -113,7 +113,7 @@ Recorded in `WorldRenderer::recordFrame` (see `WorldRenderer.cpp`):
 | 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (per-section `Chunk::collectOpaqueDraws` commands + indirect draws), then **`MobRenderer::record`** for passive mobs, then **`OverlayRenderer::record`** for highlight / borders / demo players — all inside the same dynamic-rendering scope |
 | 3 | **WaterPass** | HDR (transparent) | History color/depth for refraction; set2 scene samples |
 | 4 | **SkyPass** | HDR + god-ray source MRT, depth test | Procedural sky, sun/moon/stars/clouds |
-| 5 | **PostStack** | Swapchain | SSAO (half-res) → AO bilateral upsample → bloom → god rays → composite |
+| 5 | **PostStack** | Swapchain | Exposure metering (auto only) → SSAO (half-res) → AO bilateral upsample → bloom → god rays → composite |
 | 6 | **imguiDraw** callback | Swapchain (load) | ImGui after composite; not a world pass |
 
 **Overlays are not a separate post-sky pass.** They run at the end of **OpaquePass** while HDR/depth are still the color/depth attachments (`OpaquePass.cpp`).
@@ -178,6 +178,7 @@ Fullscreen chain on a unit quad (`fullscreen.vert`):
 |-------|--------|--------------------------------|
 | SSAO (half-res RGBA8) | `ssao.frag` | Skip; upsample + composite sample **1×1 white** AO |
 | AO bilateral upsample (full-res R8) | `ssaoUpsample.frag` | Skip; composite samples **1×1 white** AO |
+| Exposure metering (auto, issue #140) | `luminance_downsample.frag`, `exposure_adapt.frag` | Skip all metering passes; composite uses the exact manual exposure |
 | Bloom extract + blur | `bloomExtract.frag`, `bloomBlur.frag` | Skip; composite samples **1×1 black** |
 | God rays | `godRays.frag` | Skip unless `lighting::godRaysPassActive`; black default |
 | Composite | `composite.frag` | Tonemap, grade, FXAA, grain, vignette, underwater |
@@ -217,6 +218,44 @@ The distance falloff is applied per sample before the side-local maximum, so far
 
   GPU cost per enabled tier (RTX 4070 Ti, 1920×1080, `--seed 42 --quality <tier> --benchmark 30 --vsync off`, clean tree at the final commit; the `GpuPass::Ssao` interval covers SSAO + upsample; High/Cinematic include the #148 2048 shadow maps and #149's anisotropic atlas): **Medium 4×3 = 0.058 ms**, **High 6×4 = 0.088 ms**, **Cinematic 8×4 = 0.098 ms** (Post chain 0.176 / 0.229 / 0.249 ms respectively). Reports (each carries its `Quality:` label): `docs/benchmarks/bench_20260907_200{150,223,257}_*`. Temporal stability: the harness renders `noon_terrain` at two poses 0.125 units apart under SSAO on / SSAO off / isolated final-AO buffer; the isolated AO buffer must satisfy mean ≤ 20/255, p99 ≤ 40/255 and ≤ 1 % of pixels above 20/255 — measured **mean 1.300, p99 11.0, frac>20 0.03 %** — and the composited AO-on delta must stay within the SSAO-off parallax baseline (measured ratio 0.998).
 - **Debug views:** Graphics panel → Post-processing → **SSAO debug view** (Off / AO (final) / AO (raw) / Normals (view)); passed to composite as push constant `p4.w`. Debug output bypasses tonemap/grade but still applies the swapchain output-transfer contract (`linearToSrgb` on UNORM + SRGB_NONLINEAR). The selector resets to Off whenever SSAO is disabled; presets also reset it. The encoded normal is `gb = xy`, `a = z` (the z sign is stored, not reconstructed).
+HDR RGBA16F -> 64x64 -> 16x16 -> 4x4 R32F log-luminance   luminance_downsample.frag.glsl
+4x4 -> 1x1 R32F (debug) + 16-byte state SSBO write         exposure_adapt.frag.glsl
+- **Metering — clipped log-average:** each downsample stage averages 16 spread taps of log2 luminance, every sample clipped to [−8, +8] EV so sun-disc/emissive pixels cannot dominate the mean. The HDR stage samples through the linear sampler (RGBA16F is always filterable); the smaller stages use nearest. `exposure_adapt` averages the 4×4 into the meter reading and derives `targetEv = clamp(log2(middleGrey) − meteredLogLum + compensationEv, minEv, maxEv)`, `exposure = 2^targetEv`.
+- **State & sync:** `exposure_adapt` writes a 16-byte `autoexposure::ExposureGpuState` `{adaptedExposure, targetExposure, meteredLogLum, clampState}` into a host-visible persistent-mapped SSBO, **one per frame-in-flight**. A buffer barrier (fragment-shader write → read) orders the adapt write before the composite read within the frame; cross-slot hazards are covered by the existing per-slot fence wait in `VkFrameContext::beginFrame`. The CPU debug readout copies the current slot's buffer at the top of `recordExposure` — after that slot's fence was already waited — so there is no readback and no new synchronization on the hot path. This is the engine's only fragment-stage SSBO write, which is why `fragmentStoresAndAtomics` is now a queried + **hard-required** device feature (`VkContext`).
+
+#### Auto exposure — HDR luminance metering + temporal adaptation (issue #140)
+
+Graphics-only reduction (no compute, no readback on the hot path), recorded at the top of `PostStack::recordPost` when auto exposure is enabled — it meters the **raw scene HDR before tone mapping and before bloom/god-rays are added**:
+
+```text
+HDR RGBA16F (SHADER_READ)
+  -> luminance_downsample.frag: HDR -> 64x64 -> 16x16 -> 4x4, R32F log2 luminance
+     (16 spread NEAREST taps per /4 stage; only stage 0 converts luminance to
+     log2, later stages average the already-converted .r channel; every sample
+     clipped to [-8, +8] EV so sun/emissive outliers cannot dominate the mean)
+  -> exposure_adapt.frag (4x4 -> 1x1 R32F): exact 16-texelFetch meter average,
+     target = clamp(log2(middleGrey) - meteredLogLum + compensationEv, minEv, maxEv)
+     temporal: alpha = 1 - exp(-speed*dt), asymmetric speeds (up 3/s while the
+     scene brightens, down 1.25/s while it darkens), dt <= 0 is a strict no-op,
+     exact settle only when |target - adapted| < 1e-4 (arrival, never step size)
+```
+
+- **State model:** ONE shared 16-byte history SSBO (host-visible, persistent across resize — the metering chain has fixed resolution) holds the temporal state, plus per-frame-in-flight CPU-visible snapshots written by the same pass. The history buffer is bound as composite `set 0, binding 5` and read by `resolveExposure()` when push constant `p5.x` (useAutoExposure) is set; the manual path uses the exact `exposure` push value. Cross-frame ordering relies on the same-queue in-order execution guarantee plus a `SHADER_WRITE -> SHADER_READ` buffer barrier before the adapt pass; the same-frame composite read is ordered by a barrier after it. The CPU debug readout copies the current slot's snapshot after that slot's fence was waited (no added synchronization).
+- **Mode transitions:** manual mode skips all metering passes (deterministic output, suspended adaptation). Re-enabling auto re-seeds the history from the current manual exposure (rising-edge detection; also forced on first use), so there is no hidden jump. A swapchain resize keeps the adaptation running seamlessly.
+- **Settings** (all reset by `applyPreset`; CPU mirror + unit tests in `Renderer/AutoExposure.hpp` — the GLSL formulas must stay in sync):
+
+  | Setting | Default | Semantics |
+  |--------|------|-----------|
+  | `autoExposureEnabled` | on | Meters HDR luminance and adapts exposure over time |
+  | `exposure` | 1.25 | Exact manual exposure (auto off) |
+  | `exposureCompensation` | 0.0 | EV stops on the auto path (0 neutral, +1 = 2x brighter target) |
+  | `autoExposureMiddleGrey` | 1.0 | Scene luminance mapped to exposure 1.0 |
+  | `autoExposureMinEv / MaxEv` | -4 / +4 | Clamp on the target exposure (`exposure = 2^ev`) |
+  | `autoExposureSpeedUp / SpeedDown` | 3.0 / 1.25 | Inverse seconds, frame-rate independent |
+
+- **Device support:** requires `fragmentStoresAndAtomics` (queried in `VkContext`); when absent the engine stays on the manual path instead of failing.
+- **Diagnostics:** Graphics panel controls (auto toggle, compensation, middle grey, EV limits, speeds), profiler readouts (metered EV, current/target exposure, clamp state) fed by the fence-safe snapshot copy, and a dedicated `GpuPass::Exposure` timestamp row (nested inside the Post pass timing). Measured cost ~0.14 ms on an RTX 4070 Ti at 1080p.
+
 
 ### Color-space contract (`Renderer/ColorSpace.hpp`, issue #135)
 
@@ -423,6 +462,8 @@ All under `ressources/shaders/vulkan/` (GLSL compiled to SPIR-V at build):
 | `fullscreen.vert.glsl` | VS | All post passes |
 | `ssao.frag.glsl` | FS | PostStack (half-res horizon AO) |
 | `ssaoUpsample.frag.glsl` | FS | PostStack (bilateral upsample to full-res AO) |
+| `luminance_downsample.frag.glsl` | FS | PostStack (auto-exposure log-luminance metering chain) |
+| `exposure_adapt.frag.glsl` | FS | PostStack (auto-exposure adaptation; writes the per-frame state SSBO) |
 | `bloomExtract.frag.glsl` / `bloomBlur.frag.glsl` | FS | PostStack |
 | `godRays.frag.glsl` | FS | PostStack |
 | `composite.frag.glsl` | FS | PostStack (tonemap, grade, FXAA, grain, vignette, underwater) |
@@ -451,7 +492,7 @@ What the pipeline implements **now** (not a roadmap):
 | Procedural sky, sun/moon, stars, clouds | SkyPass — cratered HDR moon, two-layer tinted stars, moon silver lining on night clouds |
 | Height + distance fog, aerial-style haze | `terrain.frag` + `lighting` helpers |
 | SSAO (GTAO-style horizon AO + bilateral upsample), bloom, depth-aware god rays | PostStack half-res AO where applicable |
-| ACES/Reinhard, exposure, FXAA, grain, vignette | `composite.frag` |
+| ACES/Reinhard, auto/manual exposure, FXAA, grain, vignette | `composite.frag`; auto exposure meters the raw scene HDR (issue #140) |
 | Underwater grade | Engine sets flag from voxel sample; composite + UBO |
 | Quality presets | Low/Med/High/Cinematic on existing post knobs only |
 
