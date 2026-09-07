@@ -432,6 +432,12 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 	ubo.waterParams = glm::vec4(params.waterWaveStrength, params.waterRefraction, params.waterSpecular,
 								params.waterFoamStrength);
 
+	const auto waterTier = m_postSettings.qualityPreset;
+	ubo.waterQuality = glm::vec4(
+		waterTier == GraphicsQualityPreset::Cinematic ? 48.f : waterTier == GraphicsQualityPreset::High ? 24.f : 0.f,
+		waterTier == GraphicsQualityPreset::Cinematic ? 64.f : 40.f, 0.35f,
+		waterTier == GraphicsQualityPreset::Low ? 0.f : 1.f);
+
 	std::memcpy(m_frameUbos[frameIndex].uboMapped, &ubo, sizeof(FrameUBO));
     m_mobs.prepare(frameIndex, ubo, m_mobStates);
 }

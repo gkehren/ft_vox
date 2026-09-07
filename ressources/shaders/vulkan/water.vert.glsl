@@ -21,6 +21,7 @@ layout(location = 1) out vec3 vNormal;
 layout(location = 2) out vec2 vTexCoord;
 layout(location = 3) out vec4 vClipPos;
 layout(location = 4) out float vViewDepth;
+layout(location = 5) flat out vec3 vGeoNormal;
 
 const vec3 NORMALS[6] = vec3[](
     vec3(1.0, 0.0, 0.0),
@@ -66,6 +67,7 @@ void main()
 
     vFragPos = pos;
     vNormal = n;
+    vGeoNormal = baseN;
     vTexCoord = texCoord + vec2(time * 0.02, time * 0.015);
 
     vec4 viewPos4 = frame.view * vec4(pos, 1.0);

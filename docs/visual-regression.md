@@ -235,3 +235,41 @@ The harness intentionally does **not**:
 - exercise the window/surface present path;
 - measure performance (the existing `--benchmark` mode covers that);
 - accept interactive input.
+
+## Water audit (issue #139)
+
+The explicit `--water-audit` mode is separate from golden comparisons. It creates
+an edited lake with a shallow shore, cliff, tree, overhang and water-filled
+kelp/seagrass. Nine camera/time variants write twelve consecutive PNG frames
+each (lake, edge, bridge, shore, foreground, sunset, moon, surface crossing,
+kelp). It checks finite HDR output, SSR contribution, identical-frame SSR
+determinism and directional-shadow contribution with other post settings held
+fixed. Renderer validation errors fail the audit. Device-init overlay errors
+remain separately reported under the existing baseline policy.
+
+Two stability probes complement the still-frame checks. Both freeze the water
+animation time and strafe the camera by 0.125 world units, comparing the frame
+pair with SSR (High) against the parallax baseline without SSR (Medium; water
+shadows stay on in both). The SSR-on motion must stay within a generous
+multiple of the baseline (mean absolute error and hot-pixel ratio are printed
+for calibration). The sequence runs at the default wave strength and again at
+`waterWaveStrength` 0.25 for stability only. A separate gating probe at 0.45
+— the slider reaches 0.5 — asserts the contributions survive: the SSR delta
+must keep at least 40% of the default-wave delta and shadow reception at
+least 50%; gating keys on the geometric face normal, so wave strength must
+not toggle scene reflections (regression probe for gating on the
+wave-animated shading normal).
+
+```
+./build/tests/Release/ft_vox_visual_tests.exe --water-audit --out build/issue-139-qa/1080
+./build/tests/Release/ft_vox_visual_tests.exe --water-audit --audit-1440 --out build/issue-139-qa/1440
+```
+
+Only this mode requests 1920x1080 or 2560x1440. Normal golden runs retain the
+640x360 contract. Timings run three interleaved preset sweeps (ascending /
+descending / ascending; 8 synchronous GPU samples per tier and sweep after 4
+warmup frames) so clock ramp and thermal drift cannot order the tiers;
+`timings.csv` publishes the median sweep means for Water and the production
+pass graph GPU frame (excluding test readback). These are fixed-fixture
+costs, not streaming or presentation benchmarks. No golden files are read or
+updated in this mode.

@@ -722,11 +722,214 @@ int runAoMotionCheck(VisualHarness &harness, const std::vector<SceneSpec> &scene
 	return 1;
 }
 
+
+// Explicit diagnostic mode: never reads or rewrites golden references.
+int runWaterAudit(VisualHarness &h, const fs::path &out) {
+    fs::create_directories(out);
+    h.beginScene(4217);
+    h.camera().setPosition({20.f, 108.f, 0.f});
+    h.camera().setYawPitch(180.f, -12.f);
+    h.buildArea(h.camera().getPosition(), 4);
+    // Closed lake, shallow beach, cliff/tree line, bridge and submerged details.
+    for (int x = -24; x <= 40; ++x)
+        for (int z = -28; z <= 28; ++z)
+            for (int y = 98; y <= 125; ++y) {
+                TextureType block = AIR;
+                int floor = x < -12 ? 104 : (x < -6 ? 102 : 98);
+                if (y <= floor) block = SAND;
+                else if (y <= 104) block = WATER;
+                if (x >= -20 && x <= -17 && y <= 115) block = STONE;
+                if (x >= -14 && x <= -12 && z >= -5 && z <= -3 && y <= 115) block = OAK_LOG;
+                if (x >= -16 && x <= -10 && z >= -7 && z <= -1 && y >= 114 && y <= 118) block = OAK_LEAVES;
+                if (x >= -2 && x <= 2 && z >= -10 && z <= 10 && y == 110) block = STONE;
+                if (x == 8 && z % 4 == 0 && y == 99) block = SEAGRASS;
+                if (x == 10 && z % 5 == 0 && y >= 99 && y <= 102) block = y == 102 ? KELP_TOP : KELP;
+                h.chunks().placeVoxel(glm::vec3(x, y, z), block);
+            }
+    h.remeshEditedChunks();
+    int errors = 0;
+    const long baseline = h.validationErrors();
+    // Three interleaved sweeps (ascending / descending / ascending preset
+    // order) average out GPU clock ramp and thermal drift that biased a
+    // single ordered pass; the published number is the median sweep mean.
+    auto medianOf3 = [](double a, double b, double c) {
+        return a + b + c - std::max(a, std::max(b, c)) - std::min(a, std::min(b, c));
+    };
+    const int sweepOrder[3][4] = {{0, 1, 2, 3}, {3, 2, 1, 0}, {0, 1, 2, 3}};
+    double sweepWater[3][4] = {};
+    double sweepFrame[3][4] = {};
+    int sweepSamples[3][4] = {};
+    for (int sweep = 0; sweep < 3; ++sweep)
+        for (int position = 0; position < 4; ++position) {
+            const int tier = sweepOrder[sweep][position];
+            h.post().applyPreset(static_cast<GraphicsQualityPreset>(tier));
+            h.renderer().applyShadowMapSize(h.post().shadowMapSize);
+            h.shader().dayTime = 0.35f;
+            updateAtmosphereFromDayTime(h.shader());
+            double water = 0, frame = 0;
+            int samples = 0;
+            for (int i = 0; i < 12; ++i) {
+                const auto img = h.renderFrame(11.f, {});
+                if (!img.valid() || h.lastNonFiniteSamples()) ++errors;
+                if (sweep == 2 && i == 11 &&
+                    !visual::writePng((out / ("tier_" + std::to_string(tier) + ".png")).string(), img))
+                    ++errors;
+                const auto &gpu = h.gpuSample();
+                if (i >= 4 && gpu.present[size_t(GpuPass::Water)] && gpu.present[size_t(GpuPass::Frame)]) {
+                    water += gpu.ms[size_t(GpuPass::Water)]; frame += gpu.ms[size_t(GpuPass::Frame)]; ++samples;
+                }
+            }
+            if (samples == 0) ++errors;
+            sweepWater[sweep][tier] = water / std::max(samples, 1);
+            sweepFrame[sweep][tier] = frame / std::max(samples, 1);
+            sweepSamples[sweep][tier] = samples;
+        }
+    std::ostringstream report;
+    report << "tier,width,height,water_ms,frame_ms,samples\n";
+    for (int tier = 0; tier < 4; ++tier) {
+        std::cout << "tier " << tier << " sweep means (ms): water "
+                  << sweepWater[0][tier] << '/' << sweepWater[1][tier] << '/' << sweepWater[2][tier]
+                  << ", frame " << sweepFrame[0][tier] << '/' << sweepFrame[1][tier] << '/'
+                  << sweepFrame[2][tier] << '\n';
+        const int totalSamples = sweepSamples[0][tier] + sweepSamples[1][tier] + sweepSamples[2][tier];
+        report << tier << ',' << h.extent().width << ',' << h.extent().height << ','
+               << medianOf3(sweepWater[0][tier], sweepWater[1][tier], sweepWater[2][tier]) << ','
+               << medianOf3(sweepFrame[0][tier], sweepFrame[1][tier], sweepFrame[2][tier]) << ','
+               << totalSamples << '\n';
+    }
+    // Hold post and shadow quality fixed: only toggle SSR to prove scene contribution.
+    h.post().qualityPreset = GraphicsQualityPreset::Medium;
+    const auto skyOnly = h.renderFrame(11.f, {});
+    h.post().qualityPreset = GraphicsQualityPreset::High;
+    const auto ssr = h.renderFrame(11.f, {});
+    const auto repeated = h.renderFrame(11.f, {});
+    if (ssr.pixels != repeated.pixels) { ++errors; std::cerr << "SSR is not deterministic\n"; }
+    h.post().qualityPreset = GraphicsQualityPreset::Low;
+    const auto unshadowed = h.renderFrame(11.f, {});
+    const auto shadowDelta = visual::compareImages(skyOnly, unshadowed, 2);
+    if (shadowDelta.hotPixels < 10) { ++errors; std::cerr << "Water shadows did not change scene pixels\n"; }
+    h.post().qualityPreset = GraphicsQualityPreset::High;
+    auto delta = visual::compareImages(ssr, skyOnly, 2);
+    if (delta.hotPixels < 10) { ++errors; std::cerr << "SSR did not change scene pixels\n"; }
+    visual::writePng((out / "ssr_difference.png").string(), visual::makeDiffImage(ssr, skyOnly));
+
+    // Temporal stability probe: freeze time so wave animation cannot mask
+    // crawling, strafe the camera 0.125 world units and measure the frame
+    // pair with SSR (High) and without (Medium; water shadows stay on in
+    // both, so SSR is the only difference). The SSR-off pair is the
+    // parallax baseline — mirrored views legitimately move more than the
+    // direct view under the same strafe. Repeated at wave strength 0.25;
+    // the gating probe below covers the 0.45 extreme.
+    const float defaultWaveStrength = h.shader().waterWaveStrength;
+    const glm::vec3 anchorPos = h.camera().getPosition();
+    const float anchorYaw = glm::radians(h.camera().getYaw());
+    const glm::vec3 strafedPos =
+        anchorPos + glm::vec3(-std::sin(anchorYaw), 0.0f, std::cos(anchorYaw)) * 0.125f;
+    auto frozenStrafeDelta = [&](bool ssrOn, float waveStrength) {
+        h.shader().waterWaveStrength = waveStrength;
+        h.post().qualityPreset = ssrOn ? GraphicsQualityPreset::High : GraphicsQualityPreset::Medium;
+        const auto anchor = h.renderFrame(11.f, {});
+        const auto anchorRepeat = h.renderFrame(11.f, {});
+        h.camera().setPosition(strafedPos);
+        const auto strafed = h.renderFrame(11.f, {});
+        h.camera().setPosition(anchorPos);
+        if (!anchor.valid() || !strafed.valid() || anchorRepeat.pixels != anchor.pixels ||
+            h.lastNonFiniteSamples())
+            ++errors;
+        return visual::compareImages(strafed, anchor, 8);
+    };
+    auto stabilityCheck = [&](const char *label, const auto &on, const auto &off) {
+        if (!on.comparable() || !off.comparable())
+        {
+            ++errors;
+            std::cerr << label << ": stability frames incomparable\n";
+            return;
+        }
+        std::cout << "stability " << label << ": on mean=" << on.meanAbsError
+                  << " hot=" << on.hotPixelRatio << " | off mean=" << off.meanAbsError
+                  << " hot=" << off.hotPixelRatio << '\n';
+        // Measured SSR-on overhead on the reference GPU is ~1.5% hot / 0.0015
+        // mean over the SSR-off baseline; the bounds keep a ~3x margin while
+        // still catching explosive crawling or shimmer.
+        if (on.hotPixelRatio > off.hotPixelRatio + 0.05 ||
+            on.meanAbsError > off.meanAbsError + 0.006)
+        {
+            ++errors;
+            std::cerr << label << ": SSR unstable under frozen-time strafe\n";
+        }
+    };
+    const auto onDefault = frozenStrafeDelta(true, defaultWaveStrength);
+    const auto offDefault = frozenStrafeDelta(false, defaultWaveStrength);
+    const auto onHighWave = frozenStrafeDelta(true, 0.25f);
+    const auto offHighWave = frozenStrafeDelta(false, 0.25f);
+    stabilityCheck("wave_default", onDefault, offDefault);
+    stabilityCheck("wave_0.25", onHighWave, offHighWave);
+
+    // Gating regression probe: with wave strength well above the default
+    // (the slider reaches 0.5), a top face must keep both its scene
+    // reflection and its shadow reception — gating on the wave-animated
+    // shading normal would silently drop SSR and CSM reception across much
+    // of the surface.
+    h.shader().waterWaveStrength = 0.45f;
+    h.post().qualityPreset = GraphicsQualityPreset::Low;
+    const auto highWaveUnshadowed = h.renderFrame(11.f, {});
+    h.post().qualityPreset = GraphicsQualityPreset::Medium;
+    const auto highWaveSky = h.renderFrame(11.f, {});
+    h.post().qualityPreset = GraphicsQualityPreset::High;
+    const auto highWaveSsr = h.renderFrame(11.f, {});
+    h.shader().waterWaveStrength = defaultWaveStrength;
+    h.post().qualityPreset = GraphicsQualityPreset::High;
+    const auto ssrWaveDelta = visual::compareImages(highWaveSsr, highWaveSky, 2);
+    const auto shadowWaveDelta = visual::compareImages(highWaveSky, highWaveUnshadowed, 2);
+    std::cout << "wave 0.45 deltas (hot pixels): ssr " << ssrWaveDelta.hotPixels << " vs default "
+              << delta.hotPixels << " | shadows " << shadowWaveDelta.hotPixels << " vs default "
+              << shadowDelta.hotPixels << '\n';
+    // Reference margins (RTX 4070 Ti, 1080p, measured): with geometric
+    // gating the wave-0.45 SSR delta keeps ~61% of the default-wave delta
+    // (the rest is legitimate wave-tilt fade) while shading-normal gating
+    // collapses it to ~15% — the SSR leg is the primary detector at a 40%
+    // threshold. The shadow leg is a safety net for shadow-reception
+    // collapse and is not confounded by wave tilt (fixed ~90% of default).
+    if ((ssrWaveDelta.comparable() && delta.comparable() &&
+         double(ssrWaveDelta.hotPixels) < double(delta.hotPixels) * 0.4) ||
+        (shadowWaveDelta.comparable() && shadowDelta.comparable() &&
+         double(shadowWaveDelta.hotPixels) < double(shadowDelta.hotPixels) * 0.5))
+    {
+        ++errors;
+        std::cerr << "water SSR or shadow contribution collapses at wave strength 0.45 (gating must use the geometric normal)\n";
+    }
+    visual::writePng((out / "ssr_wave045_difference.png").string(),
+                     visual::makeDiffImage(highWaveSsr, highWaveSky));
+
+    const char *names[] = {"lake", "river_edge", "bridge", "shore", "foreground", "sunset", "moon", "surface_crossing", "kelp"};
+    for (int scene = 0; scene < 9; ++scene) {
+        h.shader().dayTime = scene == 5 ? 0.77f : scene == 6 ? 0.0f : 0.35f;
+        updateAtmosphereFromDayTime(h.shader());
+        for (int i = 0; i < 12; ++i) {
+            float y = scene == 7 ? 104.5f + float(i - 6) * 0.15f : scene == 8 ? 102.f : 108.f;
+            float x = scene == 2 ? 5.f : scene == 3 ? 0.f : 20.f;
+            float z = scene == 1 ? 12.f : scene == 4 ? -6.f : 0.f;
+            h.camera().setPosition({x, y, z + float(i) * 0.06f});
+            h.camera().setYawPitch(180.f + float(i) * 0.15f, scene == 8 ? -20.f : -12.f);
+            h.post().underwater = y < 105.f;
+            const auto img = h.renderFrame(11.f + float(i) / 30.f, {});
+            if (!img.valid() || h.lastNonFiniteSamples()) ++errors;
+            if (!visual::writePng((out / (std::string(names[scene]) + "_" + std::to_string(i) + ".png")).string(), img)) ++errors;
+        }
+    }
+    if (h.validationErrors() != baseline) ++errors;
+    writeText(out / "timings.csv", report.str());
+    std::cout << report.str() << "water audit errors=" << errors << '\n';
+    return errors ? 1 : 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
 	bool updateReferences = false;
+	bool waterAudit = false;
+	uint32_t auditHeight = 1080;
 	bool strict = false;
 	bool smoke = std::getenv("FT_VOX_VISUAL_SMOKE") != nullptr &&
 				 std::string(std::getenv("FT_VOX_VISUAL_SMOKE")) == "1";
@@ -737,7 +940,11 @@ int main(int argc, char **argv)
 	for (int i = 1; i < argc; ++i)
 	{
 		const std::string arg = argv[i];
-		if (arg == "--update-references")
+		if (arg == "--water-audit")
+			waterAudit = true;
+		else if (arg == "--audit-1440")
+			auditHeight = 1440;
+		else if (arg == "--update-references")
 			updateReferences = true;
 		else if (arg == "--smoke")
 			smoke = true;
@@ -769,7 +976,7 @@ int main(int argc, char **argv)
 		smoke = false;
 
 	VisualHarness harness;
-	if (!harness.initDevice(std::cout))
+	if (!harness.initDevice(std::cout, waterAudit ? auditHeight * 16 / 9 : VisualHarness::kWidth, waterAudit ? auditHeight : VisualHarness::kHeight))
 		return 77; // no Vulkan device/surface or golden contract: explicit skip
 
 	// Validation baseline (review P1): ONLY the device/swapchain phase may
@@ -799,6 +1006,14 @@ int main(int argc, char **argv)
 				  << " Vulkan validation error(s) during renderer init\n";
 		harness.shutdown();
 		return 1;
+	}
+
+	if (waterAudit) {
+		int result = 1;
+		try { result = runWaterAudit(harness, outDir); }
+		catch (const std::exception &e) { std::cerr << "water audit failed: " << e.what() << "\n"; }
+		harness.shutdown();
+		return result;
 	}
 
 	if (smoke)

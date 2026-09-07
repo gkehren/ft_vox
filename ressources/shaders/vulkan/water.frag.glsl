@@ -5,8 +5,11 @@ layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec2 vTexCoord;
 layout(location = 3) in vec4 vClipPos;
 layout(location = 4) in float vViewDepth;
+layout(location = 5) flat in vec3 vGeoNormal;
 
 #include "frame_ubo.inc.glsl"
+#include "sky_radiance.inc.glsl"
+#include "csm.inc.glsl"
 
 layout(set = 1, binding = 0) uniform sampler2DArray textureArray;
 // Opaque scene history (color) + depth history (real depth, not color)
@@ -53,32 +56,81 @@ vec3 waveNormal(vec2 p, float t, float amp) {
     return normalize(vec3(-grad.x * amp, 1.0, -grad.y * amp));
 }
 
-// Sky gradient identical to skybox.frag.glsl so reflections match the sky
-vec3 skyReflection(vec3 R, float day, float sunset, float night) {
-    float h = max(R.y, 0.0);
-    vec3 zenith = vec3(0.06, 0.24, 0.68) * day
-                + vec3(0.18, 0.08, 0.28) * sunset
-                + vec3(0.002, 0.005, 0.013) * night;
-    vec3 horizon = vec3(0.36, 0.62, 0.92) * day
-                 + vec3(0.95, 0.35, 0.12) * sunset
-                 + vec3(0.006, 0.010, 0.024) * night;
-    horizon = mix(horizon, frame.fogColor.rgb, 0.12);
-    float grad = pow(1.0 - h, 2.8);
-    vec3 sky = mix(zenith, horizon, grad);
+// Depth is fetched without filtering: interpolation across a silhouette invents geometry.
+float opaqueViewDepth(vec2 uv) {
+    ivec2 size = textureSize(sceneDepth, 0);
+    float d = texelFetch(sceneDepth, clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1), 0).r;
+    return frame.projection[3][2] / (d + frame.projection[2][2]);
+}
 
-    // Concentrated twilight warmth toward the sun azimuth
-    vec2 viewH = normalize(R.xz + vec2(0.0001));
-    vec2 sunH = normalize(frame.sunDir.xz + vec2(0.0001));
-    float horizonBand = pow(1.0 - h, 4.5);
-    float sunsetFacing = pow(max(dot(viewH, sunH), 0.0), 3.5);
-    sky += vec3(0.30, 0.09, 0.03) * sunset * horizonBand * pow(sunsetFacing, 1.4);
-    // Soft daytime sun scatter near horizon
-    sky += vec3(0.12, 0.18, 0.28) * day * pow(1.0 - h, 6.0) * 0.35;
-    // Faint residual horizon glow toward the moon azimuth at night
-    vec2 moonH = normalize(frame.moonDir.xz + vec2(0.0001));
-    float moonFacing = pow(max(dot(viewH, moonH), 0.0), 4.0);
-    sky += vec3(0.020, 0.030, 0.055) * night * horizonBand * moonFacing;
-    return sky;
+// Validate the entire bilinear color footprint, not only its nearest depth texel.
+bool refractionFootprintSafe(vec2 uv, float surface, float expected, float tolerance) {
+    vec2 size = vec2(textureSize(sceneDepth, 0));
+    vec2 base = floor(uv * size - 0.5) + 0.5;
+    for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x) {
+            float d = opaqueViewDepth((base + vec2(x, y)) / size);
+            if (d <= surface + 0.02 || abs(d - expected) >= tolerance) return false;
+        }
+    return true;
+}
+
+bool projectWaterRay(vec3 p, out vec2 uv) {
+    vec4 clip = frame.projection * vec4(p, 1.0);
+    if (clip.w <= 0.0) return false;
+    vec3 ndc = clip.xyz / clip.w;
+    // Production uses a negative-height Vulkan viewport.
+    uv = ndc.xy * vec2(0.5, -0.5) + 0.5;
+    vec2 margin = pc.invScreen * 1.5;
+    return ndc.z > 0.0 && ndc.z < 1.0 &&
+           all(greaterThan(uv, margin)) && all(lessThan(uv, 1.0 - margin));
+}
+
+vec3 sceneReflection(vec3 R, vec3 fallback) {
+    int steps = int(frame.waterQuality.x);
+    // A top surface cannot reflect the submerged floor. Below-horizon rays
+    // retain the unmodified direction and use the horizon fallback.
+    if (steps == 0 || R.y <= 0.0) return fallback;
+    vec3 origin = (frame.view * vec4(vFragPos + normalize(vNormal) * 0.08, 1.0)).xyz;
+    vec3 direction = mat3(frame.view) * R;
+    float previousT = 0.0;
+    float previousDelta = -1.0;
+    float range = frame.waterQuality.y;
+    float thickness = frame.waterQuality.z; // world/view-space metres, not device depth
+    for (int i = 1; i <= 48; ++i) {
+        if (i > steps) break;
+        float f = float(i) / float(steps);
+        float t = 0.12 + range * f * f;
+        vec3 ray = origin + direction * t;
+        vec2 uv;
+        if (!projectWaterRay(ray, uv)) break;
+        float delta = -ray.z - opaqueViewDepth(uv);
+        if (delta >= 0.0 && previousDelta < 0.0) {
+            float lo = previousT, hi = t;
+            for (int j = 0; j < 5; ++j) {
+                float mid = (lo + hi) * 0.5;
+                vec3 probe = origin + direction * mid;
+                vec2 probeUV;
+                if (!projectWaterRay(probe, probeUV)) return fallback;
+                if (-probe.z > opaqueViewDepth(probeUV)) hi = mid; else lo = mid;
+            }
+            ray = origin + direction * hi;
+            if (!projectWaterRay(ray, uv)) return fallback;
+            delta = -ray.z - opaqueViewDepth(uv);
+            if (delta >= 0.0 && delta < thickness) {
+                vec2 edge = min(uv, 1.0 - uv);
+                float confidence = smoothstep(0.0, 0.08, min(edge.x, edge.y));
+                confidence *= 1.0 - smoothstep(range * 0.5, range, hi);
+                confidence *= 1.0 - smoothstep(thickness * 0.5, thickness, delta);
+                confidence *= smoothstep(0.15, 0.6, hi);
+                confidence *= smoothstep(0.0, 0.1, R.y);
+                return mix(fallback, texture(sceneColor, uv).rgb, confidence);
+            }
+        }
+        previousT = t;
+        previousDelta = delta;
+    }
+    return fallback;
 }
 
 void main()
@@ -92,7 +144,12 @@ void main()
     float sunsetFactor = frame.skyParams.z;
     float nightFactor = frame.skyParams.w;
 
-    vec3 geoN = normalize(vNormal);
+    // Geometric face normal, flat from the vertex stage. Gating (top-face
+    // classification, CSM receiver bias) must key on this, not on the
+    // wave-perturbed shading normal: the shading normal oscillates with
+    // wave strength and phase, which would spatially/temporally toggle SSR
+    // and shadow reception on true horizontal faces.
+    vec3 geoN = normalize(vGeoNormal);
     vec3 V = normalize(frame.viewPos.xyz - vFragPos);
 
     // Fragment-level wave normals on top faces only (sides stay voxel-flat)
@@ -104,31 +161,46 @@ void main()
     }
 
     // Screen-space refraction of the opaque history
-    vec2 screenUV = clamp(gl_FragCoord.xy * pc.invScreen, vec2(0.001), vec2(0.999));
-    vec2 distort = N.xz * refractionStr * 2.0;
-    vec2 refrUV = clamp(screenUV + distort, vec2(0.001), vec2(0.999));
+    vec2 margin = pc.invScreen * 1.5;
+    vec2 screenUV = clamp(gl_FragCoord.xy * pc.invScreen, margin, 1.0 - margin);
+    float surfaceDepth = -(frame.view * vec4(vFragPos, 1.0)).z;
+    float linOpaque = opaqueViewDepth(screenUV);
+    float column = clamp(linOpaque - surfaceDepth, 0.0, 64.0);
+    vec2 edge = min(screenUV, 1.0 - screenUV);
+    float edgeFade = smoothstep(0.0, 0.04, min(edge.x, edge.y));
+    vec2 distort = N.xz * refractionStr * 2.0 * edgeFade * smoothstep(0.0, 0.8, column);
+    vec2 refrUV = screenUV;
+    // Reject foreground and disocclusion jumps. A bounded backoff preserves shorelines.
+    for (int i = 0; i < 4; ++i) {
+        vec2 candidate = clamp(screenUV + distort, margin, 1.0 - margin);
+        if (refractionFootprintSafe(candidate, surfaceDepth, linOpaque, max(0.5, column * 0.25))) {
+            refrUV = candidate;
+            break;
+        }
+        distort *= 0.5;
+    }
     vec3 scene = texture(sceneColor, refrUV).rgb;
-
-    // Water column: linearized opaque depth vs water view depth (GLM RH_ZO)
-    float opaqueDepth = texture(sceneDepth, screenUV).r;
-    float linOpaque = frame.projection[3][2] / (opaqueDepth + frame.projection[2][2]);
-    float column = clamp(linOpaque - vViewDepth, 0.0, 64.0);
+    float directVisibility = 1.0;
+    if (topMask > 0.001 && frame.waterQuality.w > 0.5)
+        directVisibility -= sampleDirectionalShadow(vFragPos, geoN,
+                            normalize(frame.lightDirection.xyz), surfaceDepth);
 
     // Beer-Lambert absorption: red dies first -> teal body
     vec3 sigma = vec3(0.42, 0.16, 0.10) * 0.35;
     vec3 absorb = exp(-column * sigma);
     float scatterAmt = 1.0 - exp(-column * 0.22);
     vec3 scatterColor = vec3(0.015, 0.14, 0.24);
-    float scatterLight = dayFactor * 0.9 + sunsetFactor * 0.55 + 0.03;
+    float scatterLight = (dayFactor * 0.9 + sunsetFactor * 0.55) * (0.25 + 0.75 * directVisibility) + 0.03;
     vec3 waterBody = scene * absorb + scatterColor * scatterAmt * scatterLight;
 
     // Fresnel + analytic sky reflection
     float F0 = 0.02;
     float fres = F0 + (1.0 - F0) * pow(1.0 - max(dot(N, V), 0.0), 5.0);
     vec3 R = reflect(-V, N);
-    R.y = abs(R.y); // keep reflections above the horizon
-    vec3 refl = skyReflection(R, dayFactor, sunsetFactor, nightFactor);
+    vec3 refl = analyticSkyRadiance(R, dayFactor, sunsetFactor, nightFactor);
 
+    if (topMask > 0.95 && frame.lightingParams.w < 0.5)
+        refl = sceneReflection(R, refl);
     vec3 color = mix(waterBody, refl, fres);
 
     // Sun glitter on the wave normals
@@ -138,14 +210,14 @@ void main()
     vec3 sunTint = mix(vec3(1.0, 0.96, 0.72), vec3(1.0, 0.45, 0.12), sunLow * sunLow);
     float sunGlitter = pow(RdotS, 700.0) * specularStr * sunVis * (0.35 + 0.65 * dayFactor);
     float sunSheen = pow(RdotS, 64.0) * specularStr * sunVis * 0.08 * (0.3 + 0.7 * dayFactor);
-    color += sunTint * (sunGlitter * 2.2 + sunSheen);
+    color += sunTint * (sunGlitter * 2.2 + sunSheen) * directVisibility;
 
     // Moon glitter (cool tint, night only)
     float moonVis = smoothstep(0.02, 0.28, frame.moonDir.y);
     float RdotM = max(dot(R, frame.moonDir.xyz), 0.0);
     float moonGlitter = pow(RdotM, 700.0) * specularStr * moonVis * nightFactor;
     float moonSheen = pow(RdotM, 64.0) * specularStr * moonVis * nightFactor * 0.10;
-    color += vec3(0.55, 0.68, 1.0) * (moonGlitter * 1.4 + moonSheen);
+    color += vec3(0.55, 0.68, 1.0) * (moonGlitter * 1.4 + moonSheen) * directVisibility;
 
     // Foam: shore band from the real water column + wave-crest whitecaps
     float foamNoise = wnoise(vFragPos.xz * 1.8 + vec2(time * 0.35, -time * 0.25))

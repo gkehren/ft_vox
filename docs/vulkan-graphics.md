@@ -156,7 +156,13 @@ Push constants carry cascade index / shadow time for the shadow path where neede
 
 - Copies previous opaque HDR/depth into **history** images for refraction.
 - Transparent water mesh (`Chunk::collectWaterDraws`; back-to-front order preserved, one command per live section, contiguous same-page-pair runs drawn per bind).
-- Shaders: `water.vert` / `water.frag` — vertex wave displacement + fragment-level procedural wave normals (3-octave value noise, top-face masked), Fresnel F0=0.02, **analytic sky reflection** (gradient identical to `skybox.frag` per phase: day blue / sunset orange / night near-black), **Beer-Lambert depth absorption** (linearized history depth vs view depth → teal body, red dies first), sun/moon glitter (pow 700 + sheen) on wave normals, shore foam from real water column + whitecaps, history refraction, near-opaque alpha (refraction composited in-color).
+- Shaders: `water.vert` / `water.frag`: animated displacement and three-octave wave normals, Fresnel F0=0.02, Beer-Lambert water-column absorption, foam and sun/moon glitter.
+- `sky_radiance.inc.glsl` supplies the normalized day/sunset/night gradient and directional horizon glow to both the sky and water. Clouds/stars/discs are not part of this inexpensive fallback. Downward reflection directions are not mirrored upward.
+- High/Cinematic trace current-frame opaque color/depth (no temporal history or extra world render): 24/48 quadratic-distance steps over 40/64 world units, five bisections per candidate crossing and a 0.35 view-space-unit thickness. Confidence fades at screen edges, grazing horizon directions, long rays and uncertain hits. Vertical faces and underwater cameras use the sky fallback. Missing/offscreen geometry cannot be reflected.
+- Top-face classification (SSR eligibility, wave-normal and whitecap masking) and the CSM receiver normal use the flat geometric face normal passed from the vertex stage — never the wave-perturbed shading normal, which oscillates with wave strength and phase and would spatially/temporally toggle SSR and shadow reception on true horizontal faces.
+- Refraction uses unfiltered reconstructed depth and validates all four texels in the bilinear color footprint. It rejects foreground samples and depth jumps, backs off distortion up to four times, and falls back to the original UV. Distortion fades at shores and screen edges.
+- Medium and above receive the shared CSM policy on top faces. Visibility modulates direct scatter and sun/moon glitter; the refracted opaque color and ambient scatter remain independent of that multiplier.
+- Low/Medium use sky-only reflection; all tiers use depth-safe refraction. The quality is carried in the std140 `waterQuality` vector (steps, range, thickness, shadow enable). No additional images or changes to transparent draw ordering. See [issue #139 measurements](benchmarks/issue139-water/README.md).
 
 ### SkyPass (`Renderer/SkyPass.*`)
 

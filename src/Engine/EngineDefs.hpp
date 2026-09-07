@@ -125,7 +125,9 @@ struct RenderTiming
 	float totalFrame{0.0f};
 };
 
-/// Named graphics quality packs (existing post knobs only — no new effects).
+/// Named graphics quality packs. Beyond post knobs, the preset also scales
+/// the water path (SSR march budget from High up, water shadows from Medium
+/// up) — see WorldRenderer::updateFrameUBO.
 enum class GraphicsQualityPreset
 {
 	Low = 0,
@@ -197,7 +199,8 @@ struct PostProcessSettings
 	void applyPreset(GraphicsQualityPreset preset);
 };
 
-/// Apply Low / Medium / High / Cinematic packs onto existing post knobs only.
+/// Apply Low / Medium / High / Cinematic packs (post knobs plus the water
+/// SSR / shadow scaling described above).
 inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 {
 	qualityPreset = preset;
