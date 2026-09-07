@@ -94,6 +94,10 @@ struct CascadeBounds
 	float halfExtentY{0.f};
 	float zNear{0.f};
 	float zFar{0.f};
+	/// Snapped view-anchor coordinate in the ABSOLUTE light-frame texel grid
+	/// (issue #137): receivers add this to their local shadow-map texel to get
+	/// a world-stable absolute texel for filter rotation.
+	glm::ivec2 gridOffset{0, 0};
 	bool finite{false};
 };
 
@@ -138,11 +142,14 @@ inline CascadeBounds computeFrustumSliceCascade(const glm::vec3 &camPos, const g
 	const float texel = (2.f * radius) / static_cast<float>(std::max(1u, shadowMapResolution));
 
 	// Snap the sphere center to the texel grid in the ABSOLUTE light frame,
-	// then map it back to a world anchor for the view.
+	// then map it back to a world anchor for the view. The integer grid
+	// coordinate is published as gridOffset so receivers can rebuild the
+	// world-stable ABSOLUTE texel of any point (local texel + grid offset).
 	const glm::vec3 absCenter = lightRot * sphereCenter;
-	const glm::vec3 snappedAbs(std::floor(absCenter.x / texel) * texel,
-							   std::floor(absCenter.y / texel) * texel,
-							   absCenter.z);
+	const int gridX = static_cast<int>(std::floor(absCenter.x / texel));
+	const int gridY = static_cast<int>(std::floor(absCenter.y / texel));
+	const glm::vec3 snappedAbs(float(gridX) * texel, float(gridY) * texel, absCenter.z);
+	out.gridOffset = {gridX, gridY};
 	const glm::vec3 worldAnchor = glm::transpose(lightRot) * snappedAbs;
 
 	// Light view: eye on the *sun side* of the anchor. lightDir is "toward
@@ -195,7 +202,8 @@ inline void buildCascadeUBO(const glm::vec3 &camPos, const glm::vec3 &front, con
 							std::array<glm::mat4, kCascadeCount> &outMatrices, glm::vec4 &outSplits,
 							std::array<float, kCascadeCount> *outHalfExtents = nullptr,
 							uint32_t shadowMapResolution = kShadowMapSize,
-							std::array<float, kCascadeCount> *outDepthSpans = nullptr)
+							std::array<float, kCascadeCount> *outDepthSpans = nullptr,
+							std::array<glm::ivec2, kCascadeCount> *outGridOffsets = nullptr)
 {
 	const auto splits = computeCascadeSplits(nearPlane, farPlane);
 	const float fovY = glm::radians(fovYDegrees);
@@ -213,6 +221,8 @@ inline void buildCascadeUBO(const glm::vec3 &camPos, const glm::vec3 &front, con
 			(*outHalfExtents)[i] = std::max(b.halfExtentX, b.halfExtentY);
 		if (outDepthSpans)
 			(*outDepthSpans)[i] = std::max(b.zFar - b.zNear, 1.0f);
+		if (outGridOffsets)
+			(*outGridOffsets)[i] = b.gridOffset;
 		prev = splits[i];
 	}
 	outSplits = glm::vec4(splits[0], splits[1], splits[2], static_cast<float>(kCascadeCount));
@@ -225,7 +235,8 @@ inline void buildCascadeUBOFromFront(const glm::vec3 &camPos, const glm::vec3 &f
 									 std::array<glm::mat4, kCascadeCount> &outMatrices, glm::vec4 &outSplits,
 									 std::array<float, kCascadeCount> *outHalfExtents = nullptr,
 									 uint32_t shadowMapResolution = kShadowMapSize,
-									 std::array<float, kCascadeCount> *outDepthSpans = nullptr)
+									 std::array<float, kCascadeCount> *outDepthSpans = nullptr,
+									 std::array<glm::ivec2, kCascadeCount> *outGridOffsets = nullptr)
 {
 	const glm::vec3 f = glm::normalize(front);
 	glm::vec3 r = glm::cross(f, glm::normalize(worldUp));
@@ -234,7 +245,8 @@ inline void buildCascadeUBOFromFront(const glm::vec3 &camPos, const glm::vec3 &f
 	r = glm::normalize(r);
 	const glm::vec3 u = glm::normalize(glm::cross(r, f));
 	buildCascadeUBO(camPos, f, r, u, lightDir, nearPlane, farPlane, aspect, fovYDegrees,
-					outMatrices, outSplits, outHalfExtents, shadowMapResolution, outDepthSpans);
+					outMatrices, outSplits, outHalfExtents, shadowMapResolution, outDepthSpans,
+					outGridOffsets);
 }
 
 /// Legacy overload kept for older call sites / tests — builds a default forward camera.

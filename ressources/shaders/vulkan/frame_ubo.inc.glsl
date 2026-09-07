@@ -22,4 +22,6 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 waterParams; // wave, refraction, specular, foam
     vec4 cascadeBiasScales; // xyz = normalized-depth units per world texel (worldUnitsPerTexel/depthSpan), w = map resolution
     vec4 cascadeTexelWorldSizes; // xyz = world units per texel XY per cascade (debug density), w unused
+    vec4 cascadeGridOffsets01; // xy = cascade0 absolute grid offset, zw = cascade1 (ints as floats)
+    vec4 cascadeGridOffsets2; // xy = cascade2 absolute grid offset, zw unused
 } frame;

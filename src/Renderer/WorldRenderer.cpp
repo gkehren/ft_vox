@@ -383,9 +383,10 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 	glm::vec4 splits{};
 	std::array<float, kCascadeCount> halfExtents{};
 	std::array<float, kCascadeCount> depthSpans{};
+	std::array<glm::ivec2, kCascadeCount> gridOffsets{};
 	shadow::buildCascadeUBOFromFront(camera.getPosition(), camera.getFront(), glm::vec3(0.f, 1.f, 0.f), m_lightDir,
 									0.1f, cascadeFar, aspect, shadow::kDefaultFovYDegrees, m_cascadeMatrices, splits,
-									&halfExtents, m_shadow.mapSize(), &depthSpans);
+									&halfExtents, m_shadow.mapSize(), &depthSpans, &gridOffsets);
 
 	FrameUBO ubo{};
 	ubo.view = camera.getViewMatrix();
@@ -419,6 +420,12 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 		2.f * halfExtents[1] / float(m_shadow.mapSize()),
 		2.f * halfExtents[2] / float(m_shadow.mapSize()),
 		0.f);
+	// Absolute light-grid origins (issue #137): receivers add these to their
+	// local shadow-map texel so the Poisson rotation hash is world-stable
+	// across cascade recentering. Exact integers as floats (|offset| << 2^24).
+	ubo.cascadeGridOffsets01 = glm::vec4(float(gridOffsets[0].x), float(gridOffsets[0].y),
+										 float(gridOffsets[1].x), float(gridOffsets[1].y));
+	ubo.cascadeGridOffsets2 = glm::vec4(float(gridOffsets[2].x), float(gridOffsets[2].y), 0.f, 0.f);
 	ubo.moonAmbient = glm::vec4(0.22f, 0.30f, 0.48f, params.moonAmbientStrength);
 	ubo.lightingParams = glm::vec4(params.blockLightScale, params.emissiveScale, params.fogBaseY,
 								underwater ? 1.0f : 0.0f);

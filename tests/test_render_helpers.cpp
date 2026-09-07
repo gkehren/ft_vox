@@ -89,31 +89,34 @@ int main()
 			}
 		}
 
-		// Issue #137 swimming contract: a sub-texel camera translation AND a
-		// small rotation must move a fixed world point by whole texels only
-		// (fractional texel position preserved) — the grid is world-stable.
+		// Issue #137 swimming contract: a fixed world point keeps its
+		// ABSOLUTE shadow texel across camera motion. When the cascade
+		// recenters, the local texel shifts by -N while the grid origin
+		// shifts by +N — the test must actually CROSS a grid boundary
+		// (local texel changes) and still find the absolute texel intact;
+		// that identity is exactly what the Poisson rotation hash consumes.
 		{
 			const glm::vec3 worldPoint = camPos + front * 20.f + glm::vec3(1.f, 0.f, 0.f);
 			auto texelAt = [&](const glm::vec3 &cam, const glm::vec3 &f) {
 				std::array<glm::mat4, shadow::kCascadeCount> m{};
 				glm::vec4 s{};
+				std::array<glm::ivec2, shadow::kCascadeCount> grids{};
 				shadow::buildCascadeUBOFromFront(cam, f, glm::vec3(0.f, 1.f, 0.f), lightDir,
-												nearP, farP, 16.f / 9.f, shadow::kDefaultFovYDegrees, m, s);
+												nearP, farP, 16.f / 9.f, shadow::kDefaultFovYDegrees, m, s,
+												nullptr, shadow::kShadowMapSize, nullptr, &grids);
 				const glm::vec3 ls = glm::vec3(m[0] * glm::vec4(worldPoint, 1.f));
-				return glm::vec2((ls.x * 0.5f + 0.5f) * float(shadow::kShadowMapSize),
-								 (ls.y * 0.5f + 0.5f) * float(shadow::kShadowMapSize));
+				glm::ivec2 local = {int(std::floor((ls.x * 0.5f + 0.5f) * float(shadow::kShadowMapSize))),
+									int(std::floor((ls.y * 0.5f + 0.5f) * float(shadow::kShadowMapSize)))};
+				return std::pair<glm::ivec2, glm::ivec2>{local, grids[0]};
 			};
-			const glm::vec2 base = texelAt(camPos, front);
-			const glm::vec2 translated = texelAt(camPos + glm::vec3(0.01f, 0.f, 0.017f), front);
+			const auto [localA, gridA] = texelAt(camPos, front);
+			const auto [localT, gridT] = texelAt(camPos + glm::vec3(0.15f, 0.f, 0.1f), front);
 			const glm::vec3 rotatedFront = glm::normalize(front + glm::vec3(0.1f, 0.f, 0.f));
-			const glm::vec2 rotated = texelAt(camPos, rotatedFront);
-			for (const glm::vec2 delta : {translated - base, rotated - base})
-			{
-				if (std::abs(delta.x - std::round(delta.x)) > 1e-3f ||
-					std::abs(delta.y - std::round(delta.y)) > 1e-3f)
-					ok = fail("shadow texel grid must be world-stable under sub-texel camera motion "
-							  "(fractional texel position drifted)");
-			}
+			const auto [localR, gridR] = texelAt(camPos, rotatedFront);
+			if (localA == localT || localA == localR)
+				ok = fail("shadow-grid boundary was not crossed by the test motion — test is vacuous");
+			if (localA + gridA != localT + gridT || localA + gridA != localR + gridR)
+				ok = fail("absolute shadow texel of a fixed world point changed across camera motion");
 		}
 
 		if (static_cast<int>(splitVec.w + 0.5f) != shadow::kCascadeCount)
@@ -305,8 +308,8 @@ int main()
 
 	// FrameUBO contract + material table (shipped helpers, not test re-implementation)
 	{
-		if (sizeof(FrameUBO) != 560)
-			ok = fail(std::string("FrameUBO sizeof must be 560 (got ") + std::to_string(sizeof(FrameUBO)) + ")");
+		if (sizeof(FrameUBO) != 592)
+			ok = fail(std::string("FrameUBO sizeof must be 592 (got ") + std::to_string(sizeof(FrameUBO)) + ")");
 		if (materials::hasFoliageWind(static_cast<uint8_t>(STONE)))
 			ok = fail("stone must not have foliage wind");
 		if (!materials::hasFoliageWind(static_cast<uint8_t>(OAK_LEAVES)))
@@ -540,7 +543,8 @@ int main()
 			// Spot-check fields from FrameUBO.hpp
 			for (const char *field : {"mat4 view", "mat4 projection", "vec4 lightingParams", "vec4 waterParams",
 									  "vec4 cascadeSplits", "vec4 moonAmbient", "vec4 cascadeBiasScales",
-									  "vec4 cascadeTexelWorldSizes"})
+									  "vec4 cascadeTexelWorldSizes", "vec4 cascadeGridOffsets01",
+									  "vec4 cascadeGridOffsets2"})
 			{
 				if (glsl.find(field) == std::string::npos)
 					ok = fail(std::string("generated FrameUBO GLSL missing field: ") + field);

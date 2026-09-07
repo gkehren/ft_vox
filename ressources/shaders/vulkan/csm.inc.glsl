@@ -53,6 +53,14 @@ mat4 csmCascadeMatrix(int c)
     return frame.cascadeMatrix2;
 }
 
+// Absolute light-grid origin of a cascade (view anchor in texel units).
+ivec2 csmCascadeGridOffset(int c)
+{
+    if (c == 0) return ivec2(frame.cascadeGridOffsets01.xy);
+    if (c == 1) return ivec2(frame.cascadeGridOffsets01.zw);
+    return ivec2(frame.cascadeGridOffsets2.xy);
+}
+
 // LIT fraction (0.0 = fully shadowed, 1.0 = fully lit) for one cascade.
 float csmSampleCascadeLit(vec3 worldPos, vec3 normal, vec3 lightDir, int cascade)
 {
@@ -78,8 +86,12 @@ float csmSampleCascadeLit(vec3 worldPos, vec3 normal, vec3 lightDir, int cascade
     vec2 shadowMapSize = vec2(textureSize(shadowMap, 0).xy);
     vec2 radius = (1.5 + float(cascade)) / shadowMapSize;
 
-    // Rotation keyed on the (stabilized) shadow-map texel: world-stable.
-    ivec2 texel = ivec2(floor(projCoords.xy * shadowMapSize));
+    // Rotation keyed on the WORLD-STABLE ABSOLUTE texel: local shadow-map
+    // texel + the cascade's absolute grid origin. When the cascade recenters
+    // by N texels the local index shifts by -N while the grid origin shifts
+    // by +N, so the absolute texel (and the Poisson orientation) of a fixed
+    // world point never changes.
+    ivec2 texel = ivec2(floor(projCoords.xy * shadowMapSize)) + csmCascadeGridOffset(cascade);
     float angle = csmTexelRotationAngle(texel, cascade);
     float s = sin(angle);
     float c = cos(angle);
