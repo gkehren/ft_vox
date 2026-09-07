@@ -170,11 +170,16 @@ struct PostProcessSettings
 	/// Occlude shafts by scene depth (geometry blocks light shafts).
 	bool godRaysDepthOcclusion{true};
 
-	// SSAO (half-res) — mild defaults; full intensity caused milky outdoor veil
+	// SSAO — normal-aware horizon-based (GTAO-style) estimator at half res,
+	// bilateral-upsampled to a full-res AO buffer. radius is expressed in
+	// view-space meters (see ssao.frag.glsl); defaults below equal the
+	// Medium preset.
 	bool ssaoEnabled{true};
-	float ssaoRadius{0.40f};
-	float ssaoBias{0.035f};
+	float ssaoRadius{0.6f};  // view-space occluder search radius, meters (isotropic)
 	float ssaoIntensity{0.40f};
+	int ssaoDirections{4};   // horizon directions (4..8)
+	int ssaoSteps{3};        // march steps per direction (1..4)
+	int ssaoDebugView{0};    // 0=Off 1=FinalAO 2=RawAO 3=Normals
 
 	// Underwater look (set by engine when camera is submerged)
 	bool underwater{false};
@@ -211,7 +216,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 	autoExposureEnabled = true;
 	godRaysBoostPreview = false;
 	godRaysDepthOcclusion = true;
-	ssaoBias = 0.035f;
+	ssaoDebugView = 0;  // diagnostics never persist across presets
 
 	switch (preset)
 	{
@@ -222,8 +227,10 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		bloomIntensity = 0.06f;
 		bloomBlurIterations = 1;
 		ssaoEnabled = false;
-		ssaoRadius = 0.30f;
+		ssaoRadius = 0.4f;
 		ssaoIntensity = 0.25f;
+		ssaoDirections = 4;
+		ssaoSteps = 2;
 		godRaysEnabled = false;
 		godRaysDensity = 0.70f;
 		godRaysWeight = 0.015f;
@@ -242,8 +249,10 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		bloomIntensity = 0.12f;
 		bloomBlurIterations = 3;
 		ssaoEnabled = true;
-		ssaoRadius = 0.40f;
+		ssaoRadius = 0.6f;
 		ssaoIntensity = 0.40f;
+		ssaoDirections = 4;
+		ssaoSteps = 3;
 		godRaysEnabled = true;
 		godRaysDensity = 0.85f;
 		godRaysWeight = 0.022f;
@@ -261,8 +270,10 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		bloomIntensity = 0.16f;
 		bloomBlurIterations = 4;
 		ssaoEnabled = true;
-		ssaoRadius = 0.48f;
+		ssaoRadius = 0.8f;
 		ssaoIntensity = 0.55f;
+		ssaoDirections = 6;
+		ssaoSteps = 4;
 		godRaysEnabled = true;
 		godRaysDensity = 0.95f;
 		godRaysWeight = 0.028f;
@@ -282,8 +293,10 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 		bloomIntensity = 0.20f;
 		bloomBlurIterations = 5;
 		ssaoEnabled = true;
-		ssaoRadius = 0.55f;
+		ssaoRadius = 1.0f;
 		ssaoIntensity = 0.62f;
+		ssaoDirections = 8;
+		ssaoSteps = 4;
 		godRaysEnabled = true;
 		godRaysDensity = 1.05f;
 		godRaysWeight = 0.032f;

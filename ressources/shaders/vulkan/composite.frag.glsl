@@ -7,14 +7,15 @@ layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0) uniform sampler2D hdrBuffer;
 layout(set = 0, binding = 1) uniform sampler2D bloomBuffer;
 layout(set = 0, binding = 2) uniform sampler2D godRaysBuffer;
-layout(set = 0, binding = 3) uniform sampler2D ssaoBuffer;
+layout(set = 0, binding = 3) uniform sampler2D ssaoBuffer;     // FINAL upsampled AO (full-res R8, linear)
+layout(set = 0, binding = 4) uniform sampler2D ssaoRawBuffer;  // RAW half-res SSAO RGBA (linear: r = raw AO, gb = encoded normal)
 
 layout(push_constant) uniform PC {
     vec4 p0; // x=exposure, y=bloomIntensity, z=gamma, w=toneMapper
     vec4 p1; // x=bloomOn, y=fxaaOn, z=godRaysOn, w=postSaturation
     vec4 p2; // xy=texelSize, z=postContrast, w=ssaoOn
     vec4 p3; // x=ssaoIntensity, y=underwater, z=underwaterStrength, w=time
-    vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=unused
+    vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=ssaoDebugView (0=Off 1=FinalAO 2=RawAO 3=Normals)
 } pc;
 
 vec3 acesFilm(vec3 x)
@@ -104,16 +105,50 @@ void main()
     float grainStrength = max(pc.p4.x, 0.0);
     float vignetteStrength = clamp(pc.p4.y, 0.0, 1.0);
 
+    // SSAO debug views (Graphics panel): bypass tonemap/grade entirely —
+    // intended for diagnostics only. The swapchain output-transfer contract
+    // (linearToSrgb on UNORM + SRGB_NONLINEAR, pc.p4.z) still applies so
+    // debug views read consistently with the rest of the composite.
+    float dbg = pc.p4.w;
+    bool debugView = false;
+    vec3 debugOut = vec3(0.0);
+    if (dbg > 0.5 && dbg < 1.5)
+    {
+        debugOut = vec3(texture(ssaoBuffer, vUV).r); // final upsampled AO
+        debugView = true;
+    }
+    else if (dbg > 1.5 && dbg < 2.5)
+    {
+        debugOut = vec3(texture(ssaoRawBuffer, vUV).r); // raw half-res AO
+        debugView = true;
+    }
+    else if (dbg > 2.5)
+    {
+        // Encoded view-space normal from the raw half-res target:
+        // gb = xy, a = z (the z sign is stored, not reconstructed).
+        vec4 nb = texture(ssaoRawBuffer, vUV);
+        debugOut = clamp(nb.gba, 0.0, 1.0);
+        debugView = true;
+    }
+    if (debugView)
+    {
+        if (pc.p4.z > 0.5)
+            debugOut = linearToSrgb(debugOut);
+        outColor = vec4(clamp(debugOut, 0.0, 1.0), 1.0);
+        return;
+    }
+
     vec3 hdrColor = fxaaEnabled ? applyFXAA(vUV) : texture(hdrBuffer, vUV).rgb;
 
     if (ssaoEnabled)
     {
-        // Cap intensity (matches lighting::clampSsaoIntensity) — avoids milky full-frame veil
+        // Cap intensity (matches lighting::clampSsaoIntensity)
         float ao = texture(ssaoBuffer, vUV).r;
         float intens = clamp(ssaoIntensity, 0.0, 0.85);
         ao = mix(1.0, ao, intens);
-        // Never crush outdoor slopes / dark caves below a soft floor (lighting::kSsaoAoFloor)
-        ao = max(ao, 0.62);
+        // Safety-only clamp — the horizon-based estimator no longer needs a
+        // high global floor. Must match lighting::kSsaoAoFloor (Lighting.hpp).
+        ao = max(ao, 0.10);
         hdrColor *= ao;
     }
 

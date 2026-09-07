@@ -36,6 +36,19 @@ int budgetFromRate(int perSec, double dt, double &accum)
 		accum -= static_cast<double>(n);
 	return std::clamp(n, 0, 64);
 }
+
+/// Report name for a graphics quality preset (benchmark tracing, issue #138).
+const char *graphicsQualityPresetName(GraphicsQualityPreset preset)
+{
+	switch (preset)
+	{
+	case GraphicsQualityPreset::Low: return "low";
+	case GraphicsQualityPreset::Medium: return "medium";
+	case GraphicsQualityPreset::High: return "high";
+	case GraphicsQualityPreset::Cinematic: return "cinematic";
+	}
+	return "medium";
+}
 } // namespace
 
 Engine::Engine(std::string resourcePackRoot)
@@ -234,6 +247,21 @@ void Engine::setVSync(bool enabled)
 	// the old swapchain remains alive through record/submit/present.
 	m_pendingVSync = enabled;
 	requestSwapchainRecreate();
+}
+
+void Engine::setGraphicsQualityPreset(GraphicsQualityPreset preset)
+{
+	// Apply immediately when the renderer exists (GUI/tool callers); CLI
+	// parsing runs before init, so park it and apply at the top of run().
+	if (worldRenderer)
+		worldRenderer->postSettings().applyPreset(preset);
+	else
+		m_pendingQualityPreset = preset;
+	// Tag benchmark reports with the quality tier (issue #138): the parked
+	// path writes the label here too, so both apply paths stay consistent.
+	// A benchmark in flight keeps the tier its measured frames rendered with.
+	if (!m_benchmark.isActive())
+		m_benchmark.config().qualityLabel = graphicsQualityPresetName(preset);
 }
 
 Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &resourcePackRoot)
@@ -1152,6 +1180,11 @@ void Engine::resetFrameClock()
 void Engine::run()
 {
 	running = true;
+	if (m_pendingQualityPreset)
+	{
+		worldRenderer->postSettings().applyPreset(*m_pendingQualityPreset);
+		m_pendingQualityPreset.reset();
+	}
 	if (m_perfFrequency == 0)
 		m_perfFrequency = SDL_GetPerformanceFrequency();
 	updateDisplayRefreshRate();

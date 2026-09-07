@@ -7,6 +7,11 @@
 /// readback against committed tolerant references in
 /// tests/visual-references/ (never bit-exact across GPU vendors).
 ///
+/// An additional self-contained numeric check (no references) validates the
+/// SSAO camera-motion stability (issue #138): the noon_terrain setup is
+/// rendered at two nearby poses with SSAO on and off, and the AO-on motion
+/// delta must stay within the no-AO parallax baseline.
+///
 /// Usage:
 ///   ft_vox_visual_tests [--update-references] [--smoke]
 ///                       [--scene NAME]... [--refs DIR] [--out DIR]
@@ -23,9 +28,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <numeric>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -533,6 +540,188 @@ void writeText(const fs::path &path, const std::string &text)
 	file << text;
 }
 
+// ---------------------------------------------------------------------------
+// AO camera-motion stability (issue #138): render the noon_terrain setup at
+// two nearby camera poses under three configurations — SSAO on (composited
+// frame), SSAO off (parallax baseline), and the isolated final-AO buffer via
+// the SSAO debug view. The composited no-AO delta is the parallax baseline
+// for a smoke comparison; the isolated AO-buffer delta is the targeted
+// crawl/shimmer measure (its absolute motion delta must stay small — the
+// composited comparison alone cannot separate AO noise from the overall
+// darkening AO applies). Purely numeric — no reference images involved.
+// ---------------------------------------------------------------------------
+
+int runAoMotionCheck(VisualHarness &harness, const std::vector<SceneSpec> &scenes,
+					 const fs::path &outDir)
+{
+	const SceneSpec *motionScene = nullptr;
+	for (const SceneSpec &scene : scenes)
+		if (std::string(scene.name) == "noon_terrain")
+			motionScene = &scene;
+	if (!motionScene)
+		return 0;
+
+		std::vector<std::string> errors;
+		RgbaImage aoBase, aoMoved, rawBase, rawMoved, dbgBase, dbgMoved;
+	try
+	{
+		harness.beginScene(motionScene->seed);
+		SceneRun run{harness, {}, false};
+		harness.shader() = ShaderParameters{};
+		harness.renderSettings() = RenderSettings{};
+		harness.post() = PostProcessSettings{};
+		harness.post().underwater = motionScene->underwater;
+		harness.shader().dayTime = motionScene->dayTime;
+		updateAtmosphereFromDayTime(harness.shader());
+		if (motionScene->spot)
+			motionScene->spot(run);
+		harness.buildArea(harness.camera().getPosition(), motionScene->areaRadiusChunks);
+		if (motionScene->fixture)
+			motionScene->fixture(run);
+		if (run.worldEdited)
+			harness.remeshEditedChunks();
+
+		// Second pose: 0.125 world units strafed along the camera right
+		// vector, derived from yaw exactly like Camera::updateCameraVectors.
+		const glm::vec3 basePos = harness.camera().getPosition();
+		const float yawRad = glm::radians(harness.camera().getYaw());
+		const glm::vec3 right(-std::sin(yawRad), 0.0f, std::cos(yawRad));
+		const glm::vec3 movedPos = basePos + right * 0.125f;
+
+		// Every pose/state renders twice: the bit-identical guard keeps
+		// nondeterminism out of the metric (same contract as the scenes).
+		const bool ssaoDefault = harness.post().ssaoEnabled;
+		harness.post().ssaoEnabled = true;
+		aoBase = harness.renderFrame(motionScene->time, run.mobs);
+		const RgbaImage aoBaseRepeat = harness.renderFrame(motionScene->time, run.mobs);
+		harness.camera().setPosition(movedPos);
+		aoMoved = harness.renderFrame(motionScene->time, run.mobs);
+		const RgbaImage aoMovedRepeat = harness.renderFrame(motionScene->time, run.mobs);
+		harness.camera().setPosition(basePos);
+		harness.post().ssaoEnabled = false;
+		rawBase = harness.renderFrame(motionScene->time, run.mobs);
+		const RgbaImage rawBaseRepeat = harness.renderFrame(motionScene->time, run.mobs);
+		harness.camera().setPosition(movedPos);
+		rawMoved = harness.renderFrame(motionScene->time, run.mobs);
+		const RgbaImage rawMovedRepeat = harness.renderFrame(motionScene->time, run.mobs);
+		harness.camera().setPosition(basePos);
+		harness.post().ssaoEnabled = ssaoDefault;
+
+		// Final-AO buffer (debug view isolates the AO term from lighting).
+		// The composited comparison below cannot fully separate AO crawling
+		// from parallax darkening (AO multiplies the frame and lowers its
+		// amplitudes), so this absolute metric on the AO output itself is the
+		// targeted crawl measure; the composited ratio stays as a smoke check.
+		const int debugViewDefault = harness.post().ssaoDebugView;
+		harness.post().ssaoEnabled = true;
+		harness.post().ssaoDebugView = 1; // AO (final) grayscale
+		dbgBase = harness.renderFrame(motionScene->time, run.mobs);
+		const RgbaImage dbgBaseRepeat = harness.renderFrame(motionScene->time, run.mobs);
+		harness.camera().setPosition(movedPos);
+		dbgMoved = harness.renderFrame(motionScene->time, run.mobs);
+		const RgbaImage dbgMovedRepeat = harness.renderFrame(motionScene->time, run.mobs);
+		harness.camera().setPosition(basePos);
+		harness.post().ssaoDebugView = debugViewDefault;
+
+		need(aoBase.valid() && aoMoved.valid() && rawBase.valid() && rawMoved.valid() &&
+				 dbgBase.valid() && dbgMoved.valid(),
+			 errors, "render produced an invalid image");
+		if (dbgBase.valid() && dbgBaseRepeat.valid() &&
+			!std::equal(dbgBase.pixels.begin(), dbgBase.pixels.end(), dbgBaseRepeat.pixels.begin()))
+			errors.push_back("AO-debug base pose frames differ (nondeterministic render)");
+		if (dbgMoved.valid() && dbgMovedRepeat.valid() &&
+			!std::equal(dbgMoved.pixels.begin(), dbgMoved.pixels.end(), dbgMovedRepeat.pixels.begin()))
+			errors.push_back("AO-debug moved pose frames differ (nondeterministic render)");
+		if (aoBase.valid() && aoBaseRepeat.valid() &&
+			!std::equal(aoBase.pixels.begin(), aoBase.pixels.end(), aoBaseRepeat.pixels.begin()))
+			errors.push_back("AO-on base pose frames differ (nondeterministic render)");
+		if (aoMoved.valid() && aoMovedRepeat.valid() &&
+			!std::equal(aoMoved.pixels.begin(), aoMoved.pixels.end(), aoMovedRepeat.pixels.begin()))
+			errors.push_back("AO-on moved pose frames differ (nondeterministic render)");
+		if (rawBase.valid() && rawBaseRepeat.valid() &&
+			!std::equal(rawBase.pixels.begin(), rawBase.pixels.end(), rawBaseRepeat.pixels.begin()))
+			errors.push_back("AO-off base pose frames differ (nondeterministic render)");
+		if (rawMoved.valid() && rawMovedRepeat.valid() &&
+			!std::equal(rawMoved.pixels.begin(), rawMoved.pixels.end(), rawMovedRepeat.pixels.begin()))
+			errors.push_back("AO-off moved pose frames differ (nondeterministic render)");
+
+			if (errors.empty())
+			{
+				const ImageMetrics aoOn = visual::compareImages(aoBase, aoMoved, 20);
+				const ImageMetrics aoOff = visual::compareImages(rawBase, rawMoved, 20);
+				need(aoOn.comparable() && aoOff.comparable(), errors, "motion frames not comparable");
+				if (aoOn.comparable() && aoOff.comparable())
+				{
+					// Smoke PASS: AO-on composited motion delta stays within
+					// the no-AO parallax baseline plus 15% / 1-LSB slack.
+					const bool pass = aoOn.meanAbsError <= aoOff.meanAbsError * 1.15 + 1.0 / 255.0;
+
+					// Targeted metrics on the isolated AO buffer (grayscale —
+					// red channel), per pixel: a global MAE bound alone can
+					// hide a small strongly-unstable region, so also bound
+					// the tail (p99) and the fraction of moving pixels.
+					std::vector<double> aoDeltas;
+					aoDeltas.reserve(dbgBase.pixelCount());
+					for (size_t i = 0; i + 3 < dbgBase.pixels.size(); i += 4)
+						aoDeltas.push_back(std::abs(double(dbgBase.pixels[i]) - double(dbgMoved.pixels[i])) / 255.0);
+					std::sort(aoDeltas.begin(), aoDeltas.end());
+					const auto fractionAbove = [&](double threshold255) {
+						if (aoDeltas.empty())
+							return 0.0;
+						const auto it = std::lower_bound(aoDeltas.begin(), aoDeltas.end(), threshold255 / 255.0);
+						return double(aoDeltas.end() - it) / double(aoDeltas.size());
+					};
+					const double aoMean = aoDeltas.empty()
+											  ? 0.0
+											  : std::accumulate(aoDeltas.begin(), aoDeltas.end(), 0.0) / double(aoDeltas.size());
+					const double aoP99 = aoDeltas.empty()
+											 ? 0.0
+											 : aoDeltas[size_t(0.99 * double(aoDeltas.size() - 1))];
+					const double fracAbove10 = fractionAbove(10.0);
+					const double fracAbove20 = fractionAbove(20.0);
+					const bool dbgPass = aoMean <= 20.0 / 255.0 && aoP99 <= 40.0 / 255.0 && fracAbove20 <= 0.01;
+
+					const double aoOn255 = aoOn.meanAbsError * 255.0;
+					const double aoOff255 = aoOff.meanAbsError * 255.0;
+					const double ratio =
+						aoOff.meanAbsError > 1e-12 ? aoOn.meanAbsError / aoOff.meanAbsError : 0.0;
+					std::ostringstream line;
+					line << std::fixed << std::setprecision(3);
+					line << "[motion] " << motionScene->name << " aoOn=" << aoOn255
+						 << "/255 aoOff=" << aoOff255 << "/255 ratio=" << ratio
+						 << " aoDebug: mean=" << aoMean * 255.0 << " p99=" << aoP99 * 255.0
+						 << " frac>10=" << fracAbove10 * 100.0 << "%"
+						 << " frac>20=" << fracAbove20 * 100.0 << "% -> "
+						 << (pass && dbgPass ? "PASS" : "FAIL");
+					std::cout << line.str() << "\n";
+					need(pass, errors, "AO-on motion delta exceeds the no-AO baseline (AO crawling/shimmer)");
+					need(dbgPass, errors,
+						 "isolated AO buffer motion metrics out of bounds (mean/p99/moving-fraction)");
+				}
+			}
+	}
+	catch (const std::exception &e)
+	{
+		errors.push_back(std::string("exception: ") + e.what());
+	}
+
+	if (errors.empty())
+		return 0;
+
+	for (const std::string &error : errors)
+		std::cerr << "  FAIL ao_motion: " << error << "\n";
+	const fs::path checkOut = outDir / "ao_motion";
+	visual::writePng((checkOut / "ao_on_base.png").string(), aoBase);
+	visual::writePng((checkOut / "ao_on_moved.png").string(), aoMoved);
+	visual::writePng((checkOut / "ao_off_base.png").string(), rawBase);
+	visual::writePng((checkOut / "ao_off_moved.png").string(), rawMoved);
+	std::string report;
+	for (const std::string &error : errors)
+		report += error + "\n";
+	writeText(checkOut / "errors.txt", report);
+	return 1;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -846,6 +1035,12 @@ int main(int argc, char **argv)
 			++failures;
 		}
 	}
+	// AO camera-motion stability (issue #138): cheap deterministic numeric
+	// check on the noon_terrain setup — runs in both smoke and strict modes,
+	// and honors a --scene filter only when it excludes noon_terrain.
+	if (onlyScenes.empty() ||
+		std::find(onlyScenes.begin(), onlyScenes.end(), "noon_terrain") != onlyScenes.end())
+		failures += runAoMotionCheck(harness, scenes, outDir);
 
 	const long renderValidationErrors = harness.validationErrors() - baselineValidation;
 	if (renderValidationErrors > 0)
@@ -863,7 +1058,7 @@ int main(int argc, char **argv)
 				  << ")\n";
 		return 0;
 	}
-	std::cout << "ft_vox_visual_tests: FAILED (" << failures << " scene failure(s)); artifacts in "
+	std::cout << "ft_vox_visual_tests: FAILED (" << failures << " failure(s)); artifacts in "
 			  << fs::absolute(outDir).string() << "\n";
 	return 1;
 }

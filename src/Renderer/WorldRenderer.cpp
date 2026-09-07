@@ -493,7 +493,7 @@ void WorldRenderer::recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex,
 		if (gpu) gpu->beginPass(cmd, GpuPass::Post);
 		m_post.recordPost(cmd, targetImage, targetView, extent,
 						  frameIndex, set0, m_postSettings, sunScreen,
-						  sunVisibility, m_time, ubo->projection);
+						  sunVisibility, m_time, ubo->projection, gpu);
 		if (gpu) gpu->endPass(cmd, GpuPass::Post);
 	}
 }

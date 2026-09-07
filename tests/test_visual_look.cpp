@@ -84,6 +84,7 @@ int main()
 		// Dirty knobs then re-apply to prove applicator overwrites
 		low.ssaoIntensity = 9.f;
 		low.bloomBlurIterations = 99;
+		low.ssaoDebugView = 3;
 		low.applyPreset(GraphicsQualityPreset::Low);
 		med.applyPreset(GraphicsQualityPreset::Medium);
 		high.applyPreset(GraphicsQualityPreset::High);
@@ -103,6 +104,27 @@ int main()
 		if (!(low.ssaoIntensity < med.ssaoIntensity && med.ssaoIntensity < high.ssaoIntensity &&
 			  high.ssaoIntensity < cine.ssaoIntensity))
 			ok = fail("SSAO intensity must increase Low < Medium < High < Cinematic");
+		// Horizon-AO cost knobs: quality scales the estimator budget (never down)
+		if (!(low.ssaoDirections <= med.ssaoDirections && med.ssaoDirections <= high.ssaoDirections &&
+			  high.ssaoDirections <= cine.ssaoDirections))
+			ok = fail("SSAO directions must be non-decreasing Low < Medium < High < Cinematic");
+		if (!(low.ssaoSteps <= med.ssaoSteps && med.ssaoSteps <= high.ssaoSteps &&
+			  high.ssaoSteps <= cine.ssaoSteps))
+			ok = fail("SSAO steps must be non-decreasing Low < Medium < High < Cinematic");
+		if (low.ssaoDebugView != 0)
+			ok = fail("applyPreset must reset the SSAO debug view to Off");
+		// House rule: constructor defaults == Medium preset values
+		{
+			PostProcessSettings def{}, medDef{};
+			medDef.applyPreset(GraphicsQualityPreset::Medium);
+			if (def.ssaoEnabled != medDef.ssaoEnabled ||
+				std::abs(def.ssaoRadius - medDef.ssaoRadius) > 1e-5f ||
+				std::abs(def.ssaoIntensity - medDef.ssaoIntensity) > 1e-5f ||
+				def.ssaoDirections != medDef.ssaoDirections ||
+				def.ssaoSteps != medDef.ssaoSteps ||
+				def.ssaoDebugView != medDef.ssaoDebugView)
+				ok = fail("SSAO defaults must equal the Medium preset (house rule: Medium = constructor defaults)");
+		}
 		if (!(low.bloomBlurIterations < med.bloomBlurIterations &&
 			  med.bloomBlurIterations < high.bloomBlurIterations &&
 			  high.bloomBlurIterations <= cine.bloomBlurIterations))

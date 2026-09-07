@@ -50,6 +50,11 @@ public:
 	/// writes RenderSettings directly so the value is live for this session.
 	void setStreamFrontBias(float bias) { renderSettings.streamFrontBias = normalizedStreamFrontBias(bias); }
 
+	/// Apply a named graphics quality preset (Low/Medium/High/Cinematic) to
+	/// the post stack. Applies immediately when the renderer exists,
+	/// otherwise on run() — safe to call from CLI parsing before init.
+	void setGraphicsQualityPreset(GraphicsQualityPreset preset);
+
 	/// Shadow map resolution override (issue #137): 512/1024/2048/4096. Call
 	/// after construction, before run(); the engine recreates the shadow map
 	/// deferred on the first frame.
@@ -127,6 +132,7 @@ private:
 	bool paused{false};
     bool m_inspectionView{false};
     float m_inspectionSeconds{0.f};
+    std::optional<GraphicsQualityPreset> m_pendingQualityPreset;
 
 	double deltaTime{0.0};
 	double lastFrame{0.0};

@@ -32,6 +32,7 @@ struct BenchmarkConfig
 	bool forceVsyncOff{false};
 	float biomeMapZoom{0.f}; // >0 opens a fixed-center map during the benchmark
 	bool biomeMapSequential{false}; // control measurement of the previous path
+	std::string qualityLabel; // graphics preset name ("low"/"medium"/"high"/"cinematic"); empty = unset
 };
 
 struct BenchmarkWorkTiming
@@ -110,6 +111,7 @@ struct BenchmarkReport
 	float streamFrontBias{0.f};
 	std::string presentMode;
 	std::string deviceName;
+	std::string qualityLabel; // preset active during the run (issue #138 per-tier tracing)
 
 	/// Build-time code identity (git hash, dirty flag, branch, build UTC).
 	std::string gitHash;

@@ -21,6 +21,7 @@ static void printUsage(const char *argv0)
 			  << "  --benchmark <seconds>       Run a wide streaming benchmark, save report, exit\n"
 			  << "  --front-bias <value>        Override streaming front load bias [0, "
 			  << kSafeMaxStreamFrontBias << "] (clamped)\n"
+			  << "  --quality <name|0-3>        Graphics preset: low|medium|high|cinematic\n"
 			  << "  --benchmark-warmup <secs>   Override warmup (0 disables it)\n"
 			  << "  --benchmark-map <zoom>      Open fixed-center biome map (zoom 0.1..8)\n"
 			  << "  --benchmark-map-sequential  Compare the previous one-job map path\n"
@@ -49,6 +50,7 @@ int main(int argc, char **argv)
 	float benchmarkDuration = 0.0f;
 	std::optional<float> benchmarkWarmup;
 	std::optional<float> frontBiasOverride;
+	std::optional<int> qualityPreset;
 	float benchmarkMapZoom = 0.0f;
 	bool benchmarkMapSequential = false;
 	int shadowMapSizeOverride = 0;
@@ -202,6 +204,31 @@ int main(int argc, char **argv)
 			frontBiasOverride = val;
 			continue;
 		}
+		if (arg == "--quality")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --quality requires low|medium|high|cinematic (or 0-3).\n";
+				return EXIT_FAILURE;
+			}
+			const std::string value = argv[++i];
+			int preset = -1;
+			if (value == "low" || value == "0")
+				preset = 0;
+			else if (value == "medium" || value == "1")
+				preset = 1;
+			else if (value == "high" || value == "2")
+				preset = 2;
+			else if (value == "cinematic" || value == "3")
+				preset = 3;
+			if (preset < 0)
+			{
+				std::cerr << "Error: --quality accepts low|medium|high|cinematic (or 0-3).\n";
+				return EXIT_FAILURE;
+			}
+			qualityPreset = preset;
+			continue;
+		}
 		if (arg == "--vsync")
 		{
 			if (i + 1 >= argc)
@@ -252,6 +279,8 @@ int main(int argc, char **argv)
         }
 		if (vsyncOverride)
 			engine.setVSync(*vsyncOverride);
+		if (qualityPreset)
+			engine.setGraphicsQualityPreset(static_cast<GraphicsQualityPreset>(*qualityPreset));
 		if (frontBiasOverride)
 			engine.setStreamFrontBias(*frontBiasOverride);
 		if (shadowMapSizeOverride > 0)

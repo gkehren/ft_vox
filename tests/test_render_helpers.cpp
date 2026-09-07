@@ -276,6 +276,27 @@ int main()
 			ok = fail("clampSsaoIntensity must cap at kSsaoIntensityMax");
 		if (lighting::clampSsaoIntensity(0.3f) > 0.31f)
 			ok = fail("clampSsaoIntensity must pass through mild values");
+		// Horizon-AO estimator: composite uses a safety-only floor (0.62 was
+		// compensating the old depth-difference estimator — no longer needed).
+		if (std::abs(lighting::kSsaoAoFloor - 0.10f) > 1e-5f)
+			ok = fail("kSsaoAoFloor must be 0.10 (safety-only clamp, must match composite.frag)");
+		// Edge-aware SSAO normal axis selection (mirrors ssao.frag.glsl):
+		// both valid -> smaller |dz| (tie -> A); single valid side wins;
+		// none valid -> no delta (safe fallback). Guards the regression where
+		// an invalid neighbor substituted with the center won with delta 0.
+		using AP = lighting::SsaoAxisPick;
+		if (lighting::ssaoPickAxisDelta(true, true, 0.3f, 0.1f) != AP::B)
+			ok = fail("ssaoPickAxisDelta must pick the smaller delta (B)");
+		if (lighting::ssaoPickAxisDelta(true, true, 0.1f, 0.3f) != AP::A)
+			ok = fail("ssaoPickAxisDelta must pick the smaller delta (A)");
+		if (lighting::ssaoPickAxisDelta(true, true, 0.2f, 0.2f) != AP::A)
+			ok = fail("ssaoPickAxisDelta must break ties toward A");
+		if (lighting::ssaoPickAxisDelta(true, false, 5.0f, 0.0f) != AP::A)
+			ok = fail("ssaoPickAxisDelta must use the only valid side (A)");
+		if (lighting::ssaoPickAxisDelta(false, true, 0.0f, 5.0f) != AP::B)
+			ok = fail("ssaoPickAxisDelta must use the only valid side (B)");
+		if (lighting::ssaoPickAxisDelta(false, false, 0.0f, 0.0f) != AP::None)
+			ok = fail("ssaoPickAxisDelta must report None when no neighbor is valid");
 		if (!pp.godRaysDepthOcclusion)
 			ok = fail("god ray depth occlusion should default on");
 		ShaderParameters sp{};
