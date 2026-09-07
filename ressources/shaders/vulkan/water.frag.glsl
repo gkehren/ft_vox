@@ -5,6 +5,7 @@ layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec2 vTexCoord;
 layout(location = 3) in vec4 vClipPos;
 layout(location = 4) in float vViewDepth;
+layout(location = 5) flat in vec3 vGeoNormal;
 
 #include "frame_ubo.inc.glsl"
 #include "sky_radiance.inc.glsl"
@@ -143,7 +144,12 @@ void main()
     float sunsetFactor = frame.skyParams.z;
     float nightFactor = frame.skyParams.w;
 
-    vec3 geoN = normalize(vNormal);
+    // Geometric face normal, flat from the vertex stage. Gating (top-face
+    // classification, CSM receiver bias) must key on this, not on the
+    // wave-perturbed shading normal: the shading normal oscillates with
+    // wave strength and phase, which would spatially/temporally toggle SSR
+    // and shadow reception on true horizontal faces.
+    vec3 geoN = normalize(vGeoNormal);
     vec3 V = normalize(frame.viewPos.xyz - vFragPos);
 
     // Fragment-level wave normals on top faces only (sides stay voxel-flat)

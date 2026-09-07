@@ -786,6 +786,95 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
     auto delta = visual::compareImages(ssr, skyOnly, 2);
     if (delta.hotPixels < 10) { ++errors; std::cerr << "SSR did not change scene pixels\n"; }
     visual::writePng((out / "ssr_difference.png").string(), visual::makeDiffImage(ssr, skyOnly));
+
+    // Temporal stability probe: freeze time so wave animation cannot mask
+    // crawling, strafe the camera 0.125 world units and measure the frame
+    // pair with SSR (High) and without (Medium; water shadows stay on in
+    // both, so SSR is the only difference). The SSR-off pair is the
+    // parallax baseline — mirrored views legitimately move more than the
+    // direct view under the same strafe. Repeated at wave strength 0.25;
+    // the gating probe below covers the 0.45 extreme.
+    const float defaultWaveStrength = h.shader().waterWaveStrength;
+    const glm::vec3 anchorPos = h.camera().getPosition();
+    const float anchorYaw = glm::radians(h.camera().getYaw());
+    const glm::vec3 strafedPos =
+        anchorPos + glm::vec3(-std::sin(anchorYaw), 0.0f, std::cos(anchorYaw)) * 0.125f;
+    auto frozenStrafeDelta = [&](bool ssrOn, float waveStrength) {
+        h.shader().waterWaveStrength = waveStrength;
+        h.post().qualityPreset = ssrOn ? GraphicsQualityPreset::High : GraphicsQualityPreset::Medium;
+        const auto anchor = h.renderFrame(11.f, {});
+        const auto anchorRepeat = h.renderFrame(11.f, {});
+        h.camera().setPosition(strafedPos);
+        const auto strafed = h.renderFrame(11.f, {});
+        h.camera().setPosition(anchorPos);
+        if (!anchor.valid() || !strafed.valid() || anchorRepeat.pixels != anchor.pixels ||
+            h.lastNonFiniteSamples())
+            ++errors;
+        return visual::compareImages(strafed, anchor, 8);
+    };
+    auto stabilityCheck = [&](const char *label, const auto &on, const auto &off) {
+        if (!on.comparable() || !off.comparable())
+        {
+            ++errors;
+            std::cerr << label << ": stability frames incomparable\n";
+            return;
+        }
+        std::cout << "stability " << label << ": on mean=" << on.meanAbsError
+                  << " hot=" << on.hotPixelRatio << " | off mean=" << off.meanAbsError
+                  << " hot=" << off.hotPixelRatio << '\n';
+        // Measured SSR-on overhead on the reference GPU is ~1.5% hot / 0.0015
+        // mean over the SSR-off baseline; the bounds keep a ~3x margin while
+        // still catching explosive crawling or shimmer.
+        if (on.hotPixelRatio > off.hotPixelRatio + 0.05 ||
+            on.meanAbsError > off.meanAbsError + 0.006)
+        {
+            ++errors;
+            std::cerr << label << ": SSR unstable under frozen-time strafe\n";
+        }
+    };
+    const auto onDefault = frozenStrafeDelta(true, defaultWaveStrength);
+    const auto offDefault = frozenStrafeDelta(false, defaultWaveStrength);
+    const auto onHighWave = frozenStrafeDelta(true, 0.25f);
+    const auto offHighWave = frozenStrafeDelta(false, 0.25f);
+    stabilityCheck("wave_default", onDefault, offDefault);
+    stabilityCheck("wave_0.25", onHighWave, offHighWave);
+
+    // Gating regression probe: with wave strength well above the default
+    // (the slider reaches 0.5), a top face must keep both its scene
+    // reflection and its shadow reception — gating on the wave-animated
+    // shading normal would silently drop SSR and CSM reception across much
+    // of the surface.
+    h.shader().waterWaveStrength = 0.45f;
+    h.post().qualityPreset = GraphicsQualityPreset::Low;
+    const auto highWaveUnshadowed = h.renderFrame(11.f, {});
+    h.post().qualityPreset = GraphicsQualityPreset::Medium;
+    const auto highWaveSky = h.renderFrame(11.f, {});
+    h.post().qualityPreset = GraphicsQualityPreset::High;
+    const auto highWaveSsr = h.renderFrame(11.f, {});
+    h.shader().waterWaveStrength = defaultWaveStrength;
+    h.post().qualityPreset = GraphicsQualityPreset::High;
+    const auto ssrWaveDelta = visual::compareImages(highWaveSsr, highWaveSky, 2);
+    const auto shadowWaveDelta = visual::compareImages(highWaveSky, highWaveUnshadowed, 2);
+    std::cout << "wave 0.45 deltas (hot pixels): ssr " << ssrWaveDelta.hotPixels << " vs default "
+              << delta.hotPixels << " | shadows " << shadowWaveDelta.hotPixels << " vs default "
+              << shadowDelta.hotPixels << '\n';
+    // Reference margins (RTX 4070 Ti, 1080p, measured): with geometric
+    // gating the wave-0.45 SSR delta keeps ~61% of the default-wave delta
+    // (the rest is legitimate wave-tilt fade) while shading-normal gating
+    // collapses it to ~15% — the SSR leg is the primary detector at a 40%
+    // threshold. The shadow leg is a safety net for shadow-reception
+    // collapse and is not confounded by wave tilt (fixed ~90% of default).
+    if ((ssrWaveDelta.comparable() && delta.comparable() &&
+         double(ssrWaveDelta.hotPixels) < double(delta.hotPixels) * 0.4) ||
+        (shadowWaveDelta.comparable() && shadowDelta.comparable() &&
+         double(shadowWaveDelta.hotPixels) < double(shadowDelta.hotPixels) * 0.5))
+    {
+        ++errors;
+        std::cerr << "water SSR or shadow contribution collapses at wave strength 0.45 (gating must use the geometric normal)\n";
+    }
+    visual::writePng((out / "ssr_wave045_difference.png").string(),
+                     visual::makeDiffImage(highWaveSsr, highWaveSky));
+
     const char *names[] = {"lake", "river_edge", "bridge", "shore", "foreground", "sunset", "moon", "surface_crossing", "kelp"};
     for (int scene = 0; scene < 9; ++scene) {
         h.shader().dayTime = scene == 5 ? 0.77f : scene == 6 ? 0.0f : 0.35f;

@@ -425,7 +425,7 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		{
 			pp.applyPreset(static_cast<GraphicsQualityPreset>(presetIdx));
 		}
-		ImGui::TextDisabled("Packs shadow resolution / SSAO / bloom / god rays / grain. Manual sliders below still work.");
+		ImGui::TextDisabled("Packs shadow resolution / SSAO / water SSR & shadows / bloom / god rays / grain. Manual sliders below still work.");
 	}
 
 	drawResourcePackSection(frame, m_resourcePackUi, m_showGraphics);

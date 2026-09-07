@@ -247,6 +247,16 @@ determinism and directional-shadow contribution with other post settings held
 fixed. Renderer validation errors fail the audit. Device-init overlay errors
 remain separately reported under the existing baseline policy.
 
+Two stability probes complement the still-frame checks. Both freeze the water
+animation time and strafe the camera by 0.125 world units, comparing the frame
+pair with SSR (High) against the parallax baseline without SSR (Medium; water
+shadows stay on in both). The SSR-on motion must stay within a generous
+multiple of the baseline (mean absolute error and hot-pixel ratio are printed
+for calibration). The sequence repeats at `waterWaveStrength` 0.25 — the slider
+reaches 0.5 — and asserts the SSR contribution survives: top-face gating keys
+on the geometric face normal, so wave strength must not toggle scene
+reflections (regression probe for gating on the wave-animated shading normal).
+
 ```
 ./build/tests/Release/ft_vox_visual_tests.exe --water-audit --out build/issue-139-qa/1080
 ./build/tests/Release/ft_vox_visual_tests.exe --water-audit --audit-1440 --out build/issue-139-qa/1440

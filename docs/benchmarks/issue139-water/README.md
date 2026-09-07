@@ -44,7 +44,11 @@ preserved.
 - Existing VisualRegression smoke comparisons pass without reference updates.
 - The explicit audit checks SSR changes scene pixels with other post knobs held
   fixed, repeat-frame determinism, water shadow contribution, finite HDR output,
-  valid captures and renderer validation errors.
+  valid captures and renderer validation errors. Frozen-time strafe pairs bound
+  SSR motion against the no-SSR parallax baseline (default wave and 0.25), and a
+  wave-strength 0.45 probe keeps SSR and shadow reception alive where gating on
+  the wave-animated shading normal would collapse them (regression for
+  geometric-normal gating).
 - The final audit runs pass those checks at both resolutions with zero renderer
   validation errors, in the default environment (RTSS closed, implicit layers
   untouched). Earlier runs with the RTSS overlay active injected seven known
