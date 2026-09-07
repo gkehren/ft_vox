@@ -231,7 +231,7 @@ bool ResourcePackReader::readEntityTexture(const std::string &relativePath, std:
     if (!m_isOpen || relativePath.empty()) return false;
     const fs::path relative(relativePath);
     if (relative.is_absolute() || relative.has_root_name()) return false;
-    for (auto &part : relative) if (part == "..") return false;
+    for (const auto &part : relative) if (part == "..") return false;
     const std::string suffix = "assets/minecraft/textures/entity/" + relative.generic_string();
     if (m_isZip) {
         const mz_uint count = mz_zip_reader_get_num_files(&m_impl->zip);

@@ -2176,7 +2176,8 @@ void Chunk::rebuildIndirectDrawCache()
       if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
         continue;
       IndirectDraw &d = m_cachedOpaqueDraws[m_cachedOpaqueDrawCount++];
-      d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
+      d.cmd = {slot.indexCount, 1,
+               static_cast<uint32_t>(slot.indexOffset / sizeof(uint32_t)),
                static_cast<int32_t>(slot.vertexBase), 0};
       d.vertexPage = slot.vertexPage;
       d.indexPage = slot.indexPage;
@@ -2194,7 +2195,8 @@ void Chunk::rebuildIndirectDrawCache()
       if (slot.indexCount == 0 || !slot.hasVertexRange() || !slot.hasIndexRange())
         continue;
       IndirectDraw &d = m_cachedWaterDraws[m_cachedWaterDrawCount++];
-      d.cmd = {slot.indexCount, 1, slot.indexOffset / sizeof(uint32_t),
+      d.cmd = {slot.indexCount, 1,
+               static_cast<uint32_t>(slot.indexOffset / sizeof(uint32_t)),
                static_cast<int32_t>(slot.vertexBase), 0};
       d.vertexPage = slot.vertexPage;
       d.indexPage = slot.indexPage;
