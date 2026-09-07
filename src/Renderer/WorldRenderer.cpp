@@ -322,7 +322,8 @@ void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCo
 
 	const auto extent = swapchain.getExtent();
 	m_water.init(context, imm, extent.width, extent.height, VK_FORMAT_D32_SFLOAT);
-	m_post.init(context, imm, m_setLayout0, swapchain.getImageFormat(), extent.width, extent.height);
+	m_post.init(context, imm, m_setLayout0, swapchain.getImageFormat(), swapchain.getColorSpace(),
+				extent.width, extent.height);
 	m_sky.init(context, imm, m_setLayout0, m_post.hdrFormat(), m_post.depthFormat());
 	m_overlays.init(context, imm, m_setLayout0, m_post.hdrFormat(), m_post.depthFormat());
     m_mobs.init(context, imm, m_setLayout0, m_shadow.arrayView(), m_shadow.sampler(),
@@ -339,7 +340,7 @@ void WorldRenderer::onSwapchainRecreate(VkSwapchain &swapchain)
 {
 	m_context->waitIdle();
 	const auto extent = swapchain.getExtent();
-	m_post.resize(extent.width, extent.height, swapchain.getImageFormat());
+	m_post.resize(extent.width, extent.height, swapchain.getImageFormat(), swapchain.getColorSpace());
 	m_water.resize(extent.width, extent.height, m_post.depthFormat());
 	m_water.writeSceneDescriptors(m_set2Water, m_water.sceneSampler());
 	m_sky.recreatePipeline(m_post.hdrFormat(), m_post.depthFormat());

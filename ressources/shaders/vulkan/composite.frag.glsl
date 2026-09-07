@@ -2,6 +2,8 @@
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 outColor;
 
+#include "colorspace.inc.glsl"
+
 layout(set = 0, binding = 0) uniform sampler2D hdrBuffer;
 layout(set = 0, binding = 1) uniform sampler2D bloomBuffer;
 layout(set = 0, binding = 2) uniform sampler2D godRaysBuffer;
@@ -12,7 +14,7 @@ layout(push_constant) uniform PC {
     vec4 p1; // x=bloomOn, y=fxaaOn, z=godRaysOn, w=postSaturation
     vec4 p2; // xy=texelSize, z=postContrast, w=ssaoOn
     vec4 p3; // x=ssaoIntensity, y=underwater, z=underwaterStrength, w=time
-    vec4 p4; // x=filmGrain, y=vignette, z=unused, w=unused
+    vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=unused
 } pc;
 
 vec3 acesFilm(vec3 x)
@@ -32,10 +34,13 @@ float getLDRLuminance(vec2 uv)
     float gamma = max(pc.p0.z, 0.001);
     int toneMapper = int(pc.p0.w + 0.5);
     vec3 hdrColor = texture(hdrBuffer, uv).rgb;
-    vec3 mapped = hdrColor * exposure;
+    vec3 mapped = max(hdrColor * exposure, vec3(0.0));
     mapped = toneMapper == 0 ? acesFilm(mapped) : reinhard(mapped);
-    mapped = pow(max(mapped, vec3(0.0)), vec3(1.0 / gamma));
-    return dot(mapped, vec3(0.299, 0.587, 0.114));
+    if (abs(gamma - 1.0) > 0.001)
+        mapped = pow(mapped, vec3(1.0 / gamma));
+    // Perceptual luminance for FXAA contrast evaluation
+    vec3 perceptual = sqrt(mapped);
+    return dot(perceptual, vec3(0.299, 0.587, 0.114));
 }
 
 vec3 applyFXAA(vec2 uv)
@@ -119,22 +124,24 @@ void main()
 
     vec3 mapped = max(hdrColor * exposure, vec3(0.0));
     mapped = toneMapper == 0 ? acesFilm(mapped) : reinhard(mapped);
-    mapped = pow(mapped, vec3(1.0 / gamma));
+
+    // Creative midtone gamma grading (1.0 = neutral display-linear)
+    if (abs(gamma - 1.0) > 0.001)
+        mapped = pow(mapped, vec3(1.0 / gamma));
 
     float postContrast = max(pc.p2.z, 0.01);
     float postSat = max(pc.p1.w, 0.0);
     if (abs(postContrast - 1.0) > 0.001)
-        mapped = (mapped - vec3(0.5)) * postContrast + vec3(0.5);
+        mapped = gradeContrast(mapped, postContrast);
     if (abs(postSat - 1.0) > 0.001) {
-        float lum = dot(max(mapped, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
-        mapped = mix(vec3(lum), mapped, postSat);
+        mapped = gradeSaturation(mapped, postSat);
     }
 
     // Global vignette (subtle edge darkening)
     if (vignetteStrength > 0.001)
     {
         float d = length(vUV - vec2(0.5));
-        float vig = smoothstep(0.92, 0.28, d);
+        float vig = 1.0 - smoothstep(0.28, 0.92, d);
         mapped *= mix(1.0, vig, vignetteStrength);
     }
 
@@ -145,21 +152,30 @@ void main()
         vec3 underTint = vec3(0.15, 0.45, 0.55);
         mapped = mix(mapped, mapped * underTint * 1.4, 0.55 * s);
         mapped.r *= mix(1.0, 0.65, s);
-        float vig = smoothstep(0.95, 0.25, length(vUV - 0.5));
+        float vig = 1.0 - smoothstep(0.25, 0.95, length(vUV - 0.5));
         mapped *= mix(1.0, vig, 0.35 * s);
         // Caustic shimmer
         float c = 0.5 + 0.5 * sin(vUV.x * 40.0 + time * 2.0) * sin(vUV.y * 35.0 - time * 1.5);
         mapped += vec3(0.0, 0.04, 0.05) * c * s;
     }
 
-    // Film grain (after grade so it stays visible), weighted by luminance:
-    // near-black areas (night sky) stay clean instead of turning into grey noise
+    // Film grain (after grade so it stays visible) — multiplicative, so the
+    // absolute noise scales down with value and near-black night sky stays clean
     if (grainStrength > 0.0005)
     {
         float n = filmNoise(vUV, time);
-        float glum = dot(mapped, vec3(0.299, 0.587, 0.114));
-        mapped += (n - 0.5) * grainStrength * (0.20 + 0.80 * smoothstep(0.05, 0.35, glum));
+        mapped *= 1.0 + (n - 0.5) * grainStrength;
     }
+
+    mapped = clamp(mapped, 0.0, 1.0);
+
+    // Format-dependent output transfer (decided CPU-side from the
+    // {VkFormat, VkColorSpaceKHR} pair — see colorspace::classifyOutputTransfer):
+    // If the swapchain image is sRGB (pc.p4.z <= 0.5), we output display-linear values;
+    // the sRGB framebuffer write performs hardware linear->sRGB conversion.
+    // If the swapchain is UNORM + SRGB_NONLINEAR (pc.p4.z > 0.5), encode explicitly.
+    if (pc.p4.z > 0.5)
+        mapped = linearToSrgb(mapped);
 
     outColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
 }

@@ -43,6 +43,7 @@ const vec3 NORMALS[6] = vec3[](
 );
 
 #include "foliage_wind.inc.glsl"
+#include "colorspace.inc.glsl"
 
 void main()
 {
@@ -60,7 +61,10 @@ void main()
     float r = float(aPackedBiomeColor & 0xFFu) / 255.0;
     float g = float((aPackedBiomeColor >> 8u) & 0xFFu) / 255.0;
     float b = float((aPackedBiomeColor >> 16u) & 0xFFu) / 255.0;
-    vBiomeColor = vec3(r, g, b);
+    // Biome tints are sRGB-authored (BiomeConfig colors are display-domain,
+    // quantized to RGB8 like a texture): decode so the tint is linear-light
+    // before terrain.frag mixes it with the linear-decoded albedo (issue #135).
+    vBiomeColor = srgbToLinear(vec3(r, g, b));
     vTexCoord = vec2(aTexCoord);
 
     // Each voxel draw uses instanceCount=1, so gl_InstanceIndex equals

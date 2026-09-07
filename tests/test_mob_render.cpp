@@ -1,4 +1,6 @@
 #include <Renderer/MobRenderer.hpp>
+#include <Renderer/TextureManager.hpp>
+#include <Renderer/ColorSpace.hpp>
 #include <Vulkan/VkLoadLibrary.hpp>
 #include <Vulkan/VkGpuProfiler.hpp>
 #include <Vulkan/ImageBarrier.hpp>
@@ -277,6 +279,17 @@ int main(int argc, char **argv)
     try
     {
         Fixture f(window);
+        // Issue #135 integration: the albedo images actually created on the GPU
+        // must be sRGB so the hardware decodes them to linear on sample — asserts
+        // the real wiring, not just the kAlbedoTextureFormat policy constant.
+        if (f.renderer.textureFormat() != colorspace::kAlbedoTextureFormat)
+            throw std::runtime_error("MobRenderer entity albedo textures must be created sRGB");
+        {
+            TextureManager atlas;
+            atlas.initialize(f.context, f.imm, "");
+            if (!atlas.isValid() || atlas.getFormat() != colorspace::kAlbedoTextureFormat)
+                throw std::runtime_error("TextureManager block atlas must be created sRGB");
+        }
         std::vector<entities::MobRenderState> states;
         for (size_t i = 0; i < entities::kMobSpeciesCount; ++i)
             states.push_back({entities::MobSpecies(i), {(float(i) - 1.5f) * 2.0f, 0, 0}, 0, 0, 0, 0, 0});

@@ -460,17 +460,19 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			sp.dayCycleEnabled = false;
 			sp.dayTime = t;
 		};
+		// Preset values match the actual sun curve in updateAtmosphereFromDayTime
+		// (sunAngle = dayTime*2π − π/2): noon peaks at 0.5, midnight is 0.0.
 		if (ImGui::Button("Sunrise"))
-			preset(0.0f);
-		ImGui::SameLine();
-		if (ImGui::Button("Noon"))
 			preset(0.25f);
 		ImGui::SameLine();
-		if (ImGui::Button("Sunset"))
+		if (ImGui::Button("Noon"))
 			preset(0.5f);
 		ImGui::SameLine();
-		if (ImGui::Button("Midnight"))
+		if (ImGui::Button("Sunset"))
 			preset(0.75f);
+		ImGui::SameLine();
+		if (ImGui::Button("Midnight"))
+			preset(0.0f);
 
 		ImGui::Text("Day / sunset / night: %.2f / %.2f / %.2f",
 					sp.dayFactor, sp.sunsetFactor, sp.nightFactor);
@@ -516,7 +518,9 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		}
 		ImGui::Checkbox("FXAA", &pp.fxaaEnabled);
 		ImGui::SliderFloat("Exposure", &pp.exposure, 0.1f, 5.f);
-		ImGui::SliderFloat("Gamma", &pp.gamma, 0.5f, 4.f);
+		ImGui::SliderFloat("Gamma", &pp.gamma, 0.5f, 2.5f);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Artistic midtone grade (1.0 = neutral linear display)");
 		ImGui::SliderFloat("Post saturation", &pp.postSaturation, 0.5f, 2.f);
 		ImGui::SliderFloat("Post contrast", &pp.postContrast, 0.5f, 1.8f);
 		ImGui::SliderFloat("Film grain", &pp.filmGrain, 0.f, 0.12f, "%.3f");

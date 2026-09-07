@@ -32,6 +32,7 @@ class MobRenderer
     std::unique_ptr<Textures> prepareTextures(ImmediateCommands &, const std::string &);
     void commitTextures(std::unique_ptr<Textures> textures) { m_textures.swap(textures); }
     MobTextureReport textureReport() const { return m_textures ? m_textures->report : MobTextureReport{}; }
+    VkFormat textureFormat() const { return (m_textures && m_textures->images[0].image) ? m_textures->images[0].format : VK_FORMAT_UNDEFINED; }
     void prepare(uint32_t frame, const FrameUBO &, const std::vector<entities::MobRenderState> &);
     void record(VkCommandBuffer, uint32_t frame, VkDescriptorSet frameSet, int cascade = -1);
     size_t visibleCount() const { return m_visible; }

@@ -173,6 +173,26 @@ Fullscreen chain on a unit quad (`fullscreen.vert`):
 
 True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`). Selection is pure helper logic in `PostDefaults.hpp` (`postCompositeSources`) so composite never samples half-res targets that were not written this frame.
 
+### Color-space contract (`Renderer/ColorSpace.hpp`, issue #135)
+
+One explicit end-to-end contract; helpers, format policy and unit tests live in `ColorSpace.hpp`:
+
+```text
+sRGB-authored albedo PNG
+  --hardware sRGB decode (sRGB image format)-->
+linear RGB
+  -> all lighting / fog / HDR post in linear space
+  -> tone mapping to display-linear [0, 1]
+  --sRGB swapchain conversion-->
+display
+```
+
+- **Albedo textures** (block atlas + mob textures, bundled or resource-pack) are uploaded as `VK_FORMAT_R8G8B8A8_SRGB` (`colorspace::kAlbedoTextureFormat`) so Vulkan decodes sRGB→linear on sample. Alpha is untouched (sRGB affects RGB only). Non-color data (depth, AO, masks, HDR targets) stays UNORM/float — never sRGB. `test_mob_render` asserts the *actually created* GPU images are sRGB for both the atlas and mob textures.
+- **Biome tint colors are sRGB-authored**: `BiomeConfig` grass/foliage colors are display-domain values quantized to RGB8 (like texture pixels); `terrain.vert` decodes them via `srgbToLinear` before `terrain.frag` mixes the tint with the linear-decoded albedo.
+- **Output transfer is decided from the {`VkFormat`, `VkColorSpaceKHR`} pair** (`colorspace::classifyOutputTransfer`), not the format alone: the presentation engine interprets pixel values through the color space. Policy is strictly SDR — `VkSwapchain` prefers an sRGB image format + `SRGB_NONLINEAR` (hardware encode on attachment write), accepts the UNORM equivalent + `SRGB_NONLINEAR` (composite encodes via `linearToSrgb`), and *refuses* anything else (HDR10/PQ, Display-P3, extended sRGB…) instead of guessing a transfer. `PostStack::createPipelines` throws on `OutputTransfer::Unsupported` and passes the shader-encode flag to `composite.frag` as push-constant `p4.z`. No double transfer either way; both paths converge on exactly one linear→sRGB encode (asserted by `simulateDisplayOutput` parity tests).
+- **Luminance weights are per-domain**: physical luminance on *linear* RGB uses Rec. 709 weights (`kRec709Luma` — terrain saturation, scotopic night, biome tint luminance); FXAA edge detection and film grain keep the Rec. 601-on-perceptual (sqrt) convention. Shared GLSL transfers live in `colorspace.inc.glsl`.
+- **`gamma` setting is a creative midtone grade** (default 1.0 = neutral display-linear), applied after tone mapping and before the final sRGB transfer — it is *not* a framebuffer transfer function and must not be used to compensate format semantics. The neutral epsilon (|γ−1| ≤ 0.001 skips the grade) is mirrored exactly between `ColorSpace.hpp` and `composite.frag`.
+
 ### OverlayRenderer (`Renderer/OverlayRenderer.*`)
 
 - Block highlight, player markers, optional chunk borders.
@@ -213,7 +233,7 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
 
 ### TextureManager (`Renderer/TextureManager.*`)
 
-- Block **texture array** (`sampler2DArray`) for all solid/water materials (~70 layers: core blocks + wood species, climate surfaces, ice, deepslate, etc.).
+- Block **texture array** (`sampler2DArray`) for all solid/water materials (~70 layers: core blocks + wood species, climate surfaces, ice, deepslate, etc.). Uploaded as **sRGB** (`colorspace::kAlbedoTextureFormat`) — see [Color-space contract](#color-space-contract-renderercolorspacehpp-issue-135).
 - **Single layer table** `kBlockLayers` in `Renderer/MinecraftTextures.hpp`: Minecraft basename + **bundled fallback** PNG + transparency per `TextureType`. Meshing `TextureManager::isTransparent` and atlas load both use it. Face remap / foliage / ice helpers live here too (`blockTopFace`, `blockIsFoliage`, …).
 - Each PNG is decoded **once**; layer size = max frame edge; nearest-neighbor into the atlas.
 - Path resolve (explicit pack root only — no getenv in texture code):

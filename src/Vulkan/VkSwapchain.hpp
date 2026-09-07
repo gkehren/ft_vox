@@ -29,6 +29,7 @@ public:
 
 	VkSwapchainKHR getSwapchain() const { return m_swapchain; }
 	VkFormat getImageFormat() const { return m_imageFormat; }
+	VkColorSpaceKHR getColorSpace() const { return m_colorSpace; }
 	VkExtent2D getExtent() const { return m_extent; }
 	uint32_t getImageCount() const { return static_cast<uint32_t>(m_images.size()); }
 	uint32_t getMinImageCount() const { return m_minImageCount; }
@@ -60,6 +61,7 @@ private:
 	std::vector<VkImage> m_images;
 	std::vector<VkImageView> m_imageViews;
 	VkFormat m_imageFormat{VK_FORMAT_UNDEFINED};
+	VkColorSpaceKHR m_colorSpace{VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
 	VkExtent2D m_extent{};
 	uint32_t m_minImageCount{0};
 	bool m_vsync{true};

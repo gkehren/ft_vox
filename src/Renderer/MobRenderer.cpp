@@ -1,4 +1,5 @@
 #include "MobRenderer.hpp"
+#include "ColorSpace.hpp"
 #include <Vulkan/GraphicsPipelineBuilder.hpp>
 #include <Vulkan/VkShader.hpp>
 #include <Vulkan/VkUpload.hpp>
@@ -46,7 +47,7 @@ std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCom
         const auto &pixels = cpu.images[i];
         auto &img = result->images[i];
         img = createImage2D(m_context->getAllocator(), device, pixels.width, pixels.height,
-                            VK_FORMAT_R8G8B8A8_UNORM,
+                            colorspace::kAlbedoTextureFormat,
                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         uploadImage2D(m_context->getAllocator(), imm, img, pixels.rgba.data(), pixels.rgba.size());
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};

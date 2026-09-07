@@ -6,6 +6,7 @@
 #include "Vulkan/VkImage.hpp"
 #include "Vulkan/VkCommands.hpp"
 #include "Engine/EngineDefs.hpp"
+#include "Renderer/ColorSpace.hpp"
 #include "Renderer/PostDefaults.hpp"
 
 #include <glm/glm.hpp>
@@ -21,15 +22,21 @@ public:
 	~PostStack();
 
 	void init(VkContext &context, ImmediateCommands &imm, VkDescriptorSetLayout frameSetLayout,
-			  VkFormat swapchainFormat, uint32_t width, uint32_t height);
+			  VkFormat swapchainFormat, VkColorSpaceKHR swapchainColorSpace,
+			  uint32_t width, uint32_t height);
 	void shutdown();
-	void resize(uint32_t width, uint32_t height, VkFormat swapchainFormat);
+	void resize(uint32_t width, uint32_t height, VkFormat swapchainFormat,
+				VkColorSpaceKHR swapchainColorSpace);
 
 	AllocatedImage &hdrColor() { return m_hdr; }
 	AllocatedImage &godSource() { return m_godSource; }
 	AllocatedImage &sceneDepth() { return m_sceneDepth; }
 	VkFormat depthFormat() const { return m_depthFormat; }
 	VkFormat hdrFormat() const { return m_hdrFormat; }
+	VkFormat swapchainFormat() const { return m_swapchainFormat; }
+	VkColorSpaceKHR swapchainColorSpace() const { return m_swapchainColorSpace; }
+	colorspace::OutputTransfer outputTransfer() const { return m_outputTransfer; }
+	bool swapchainRequiresSrgbEncode() const { return m_swapchainRequiresSrgbEncode; }
 
 	/// Fullscreen post: SSAO → bloom → depth-aware god rays → composite.
 	void recordPost(VkCommandBuffer cmd,
@@ -49,7 +56,7 @@ private:
 	void destroyTargets();
 	void createDefaultImages(ImmediateCommands &imm);
 	void destroyDefaultImages();
-	void createPipelines(VkFormat swapchainFormat);
+	void createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapchainColorSpace);
 	void destroyPipelines();
 	void createFullscreenQuad(ImmediateCommands &imm);
 	void createSamplers();
@@ -103,6 +110,9 @@ private:
 	VkPipeline m_compositePipe{VK_NULL_HANDLE};
 
 	VkFormat m_swapchainFormat{VK_FORMAT_UNDEFINED};
+	VkColorSpaceKHR m_swapchainColorSpace{VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+	colorspace::OutputTransfer m_outputTransfer{colorspace::OutputTransfer::HardwareSrgb};
+	bool m_swapchainRequiresSrgbEncode{false};
 	PostCompositeSources m_lastCompositeSrc[kFramesInFlight] = {
 		{true, true, true}, {true, true, true}}; // force first write per frame
 };

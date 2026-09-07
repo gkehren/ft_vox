@@ -52,10 +52,13 @@ int main()
 		ok = fail("default saturationLevel out of balanced range [1.0, 1.10]");
 	if (sp.contrastLevel < 1.0f || sp.contrastLevel > 1.08f)
 		ok = fail("default contrastLevel out of balanced range [1.0, 1.08]");
-	if (sp.ambientStrength < 0.18f || sp.ambientStrength > 0.28f)
-		ok = fail("ambient out of outdoor-balanced range [0.18, 0.28]");
-	if (sp.diffuseIntensity < 0.75f || sp.diffuseIntensity > 0.98f)
-		ok = fail("diffuse out of outdoor-balanced range [0.75, 0.98]");
+	// Re-baselined for the linear-light pipeline (issue #135): sRGB-decoded
+	// albedo is ~2.3x darker mid-tones than the old gamma-as-linear sampling.
+	// Playability-first: bright, readable nights and sunny days.
+	if (sp.ambientStrength < 0.30f || sp.ambientStrength > 0.46f)
+		ok = fail("ambient out of re-baselined linear-light range [0.30, 0.46]");
+	if (sp.diffuseIntensity < 0.80f || sp.diffuseIntensity > 1.00f)
+		ok = fail("diffuse out of re-baselined linear-light range [0.80, 1.00]");
 
 	// Mutate and re-pack to prove knobs are not hard-coded in packer
 	sp.colorBoost = 1.55f;
@@ -66,12 +69,14 @@ int main()
 		ok = fail("packFrameLightVisual does not pass through mutated knobs");
 
 	PostProcessSettings pp{};
-	if (pp.exposure < 0.88f || pp.exposure > 1.05f)
-		ok = fail("default post exposure out of balanced range [0.88, 1.05]");
+	if (pp.exposure < 1.10f || pp.exposure > 1.40f)
+		ok = fail("default post exposure out of re-baselined single-transfer range [1.10, 1.40]");
 	if (pp.postSaturation < 0.98f || pp.postSaturation > 1.08f)
 		ok = fail("default postSaturation out of balanced range [0.98, 1.08]");
 	if (pp.postContrast < 1.0f || pp.postContrast > 1.08f)
 		ok = fail("default postContrast out of balanced range [1.0, 1.08]");
+	if (std::abs(pp.gamma - 1.0f) > 1e-4f)
+		ok = fail("default gamma must be 1.0f (neutral display-linear midtone baseline)");
 
 	// --- Quality presets (shipped applyPreset; Low lighter than High/Cinematic) ---
 	{
@@ -88,6 +93,9 @@ int main()
 			ok = fail("applyPreset(Low) must set qualityPreset");
 		if (med.qualityPreset != GraphicsQualityPreset::Medium)
 			ok = fail("applyPreset(Medium) must set qualityPreset");
+		if (std::abs(low.gamma - 1.0f) > 1e-4f || std::abs(med.gamma - 1.0f) > 1e-4f ||
+			std::abs(high.gamma - 1.0f) > 1e-4f || std::abs(cine.gamma - 1.0f) > 1e-4f)
+			ok = fail("quality presets must maintain neutral gamma = 1.0f");
 		if (low.ssaoEnabled)
 			ok = fail("Low preset should disable SSAO");
 		if (!med.ssaoEnabled || !high.ssaoEnabled || !cine.ssaoEnabled)

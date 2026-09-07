@@ -91,13 +91,27 @@ void VkSwapchain::cleanupSwapchain()
 
 VkSurfaceFormatKHR VkSwapchain::chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &formats) const
 {
+	// Strict SDR/sRGB policy (issue #135): the output transfer is decided from the
+	// {format, colorSpace} pair, so only pairs the pipeline can transfer correctly
+	// are accepted. Anything else (HDR10/PQ, Display-P3, linear BT.709, …) is
+	// refused instead of silently guessing an sRGB encode.
+	// 1. Preferred: sRGB image format — the attachment write performs linear->sRGB.
 	for (const auto &format : formats)
 	{
 		if ((format.format == VK_FORMAT_B8G8R8A8_SRGB || format.format == VK_FORMAT_R8G8B8A8_SRGB) &&
 			format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
 			return format;
 	}
-	return formats.front();
+	// 2. Fallback: UNORM equivalent — composite.frag encodes linear->sRGB itself.
+	for (const auto &format : formats)
+	{
+		if ((format.format == VK_FORMAT_B8G8R8A8_UNORM || format.format == VK_FORMAT_R8G8B8A8_UNORM) &&
+			format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+			return format;
+	}
+	throw std::runtime_error(
+		"Surface exposes no SDR sRGB-compatible format {B8G8R8A8/R8G8B8A8 + SRGB_NONLINEAR}; "
+		"HDR/wide-gamut swapchains are not supported by the current color pipeline");
 }
 
 VkPresentModeKHR VkSwapchain::selectPresentMode(
@@ -204,6 +218,7 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 	vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapchain, &imageCount, m_images.data());
 
 	m_imageFormat = surfaceFormat.format;
+	m_colorSpace = surfaceFormat.colorSpace;
 	m_extent = extent;
 	m_minImageCount = createInfo.minImageCount;
 	m_presentMode = presentMode;

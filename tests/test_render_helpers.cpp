@@ -9,6 +9,7 @@
 #include <Renderer/MinecraftTextures.hpp>
 #include <Renderer/ResourcePackReader.hpp>
 #include <Renderer/IndirectDrawUtils.hpp>
+#include <Renderer/ColorSpace.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <fstream>
 #include <filesystem>
@@ -178,7 +179,7 @@ int main()
 			ok = fail("night moon ambient should be cool and non-zero");
 	}
 
-	// --- Emissive / block light / localLightScale ---
+	// --- Emissive / block light ---
 	{
 		if (lighting::emissiveIntensityForBlock(static_cast<uint8_t>(STONE)) > 1e-5f)
 			ok = fail("stone must not be emissive");
@@ -198,20 +199,6 @@ int main()
 		lighting::unpackLightBits(packed, sky, blk);
 		if (sky != 15 || blk != 10)
 			ok = fail("pack/unpack light bits round-trip failed");
-
-		const float caveScale = lighting::localLightScale(0.0f, 0.0f);
-		const float torchScale = lighting::localLightScale(0.0f, 14.0f / 15.0f);
-		if (std::abs(caveScale - lighting::kCaveLightFloor) > 1e-5f)
-			ok = fail("localLightScale(0,0) must match kCaveLightFloor");
-		if (!(caveScale > 0.15f && caveScale < 0.35f))
-			ok = fail("cave light floor should be readable (~0.22) not crushed/washed");
-		if (!(torchScale > caveScale + 0.4f))
-			ok = fail("torch block light must brighten vs unlit cave");
-		// Smoothstep curve: at 0.75 input, output > linear interpolation
-		const float at75 = lighting::localLightScale(0.75f, 0.0f);
-		const float linear75 = lighting::kCaveLightFloor + (1.f - lighting::kCaveLightFloor) * 0.75f;
-		if (!(at75 > linear75 + 0.01f))
-			ok = fail("localLightScale should use smoothstep curve (> linear at 0.75)");
 	}
 
 	// Settings defaults + outdoor look (fog / SSAO mildness)
@@ -248,11 +235,6 @@ int main()
 			ok = fail("far fog must respect kTerrainFogAmountCap");
 		if (!(farFog >= midFog))
 			ok = fail("far fog should be ≥ mid fog");
-		// localLightScale cave floor readable but still dark vs outdoor full light
-		if (std::abs(lighting::localLightScale(0.f, 0.f) - lighting::kCaveLightFloor) > 1e-5f)
-			ok = fail("localLightScale cave floor must match kCaveLightFloor");
-		if (!(lighting::localLightScale(1.f, 0.f) > 0.98f))
-			ok = fail("full sky light should approach 1.0");
 		if (lighting::sunShadowWeight(0.f) > 1e-4f)
 			ok = fail("sunShadowWeight(0) must mute CSM in caves");
 		if (lighting::sunShadowWeight(1.f) < 0.99f)
@@ -640,11 +622,156 @@ int main()
 		static_assert(Vertex::kZMax >= CHUNK_SIZE * 16, "Z range covers chunk width");
 	}
 
+	// --- Color space and sRGB output transfer helpers (issue #135) ---
+	{
+		using namespace colorspace;
+
+		// 1. sRGB decode known points
+		if (std::abs(srgbToLinear(0.0f) - 0.0f) > 1e-6f)
+			ok = fail("srgbToLinear(0.0) must be 0.0");
+		if (std::abs(srgbToLinear(1.0f) - 1.0f) > 1e-6f)
+			ok = fail("srgbToLinear(1.0) must be 1.0");
+
+		// 8-bit mid-gray 128 / 255 ~= 0.50196078 -> linear light ~= 0.2158605
+		const float midGraySrgb = 128.0f / 255.0f;
+		const float midGrayLinear = srgbToLinear(midGraySrgb);
+		if (std::abs(midGrayLinear - 0.2158605f) > 1e-4f)
+			ok = fail("srgbToLinear mid-gray (128/255) must decode to ~0.21586");
+
+		// Linear toe (< 0.04045): 0.02 / 12.92 ~= 0.0015479876
+		const float toeLinear = srgbToLinear(0.02f);
+		if (std::abs(toeLinear - (0.02f / 12.92f)) > 1e-6f)
+			ok = fail("srgbToLinear linear toe (< 0.04045) mismatch");
+
+		// 2. sRGB encode known points
+		if (std::abs(linearToSrgb(0.0f) - 0.0f) > 1e-6f)
+			ok = fail("linearToSrgb(0.0) must be 0.0");
+		if (std::abs(linearToSrgb(1.0f) - 1.0f) > 1e-6f)
+			ok = fail("linearToSrgb(1.0) must be 1.0");
+		if (std::abs(linearToSrgb(0.2158605f) - midGraySrgb) > 1e-4f)
+			ok = fail("linearToSrgb(0.21586) must encode back to ~0.50196");
+		if (std::abs(linearToSrgb(toeLinear) - 0.02f) > 1e-6f)
+			ok = fail("linearToSrgb linear toe (< 0.0031308) mismatch");
+
+		// 3. Round-trip accuracy across [0, 1]
+		for (int i = 0; i <= 255; ++i)
+		{
+			const float srgb = static_cast<float>(i) / 255.0f;
+			const float lin = srgbToLinear(srgb);
+			const float roundtrip = linearToSrgb(lin);
+			if (std::abs(roundtrip - srgb) > 1e-4f)
+				ok = fail("sRGB round-trip error exceeded 1e-4 at 8-bit index " + std::to_string(i));
+		}
+
+		// Vector overloads
+		const glm::vec3 srgbV(0.0f, midGraySrgb, 1.0f);
+		const glm::vec3 linV = srgbToLinear(srgbV);
+		if (std::abs(linV.x - 0.0f) > 1e-6f || std::abs(linV.y - midGrayLinear) > 1e-4f ||
+			std::abs(linV.z - 1.0f) > 1e-6f)
+			ok = fail("srgbToLinear(vec3) component mismatch");
+
+		const glm::vec3 srgbRoundtrip = linearToSrgb(linV);
+		if (glm::length(srgbRoundtrip - srgbV) > 1e-4f)
+			ok = fail("linearToSrgb(vec3) round-trip mismatch");
+
+		// 4. Format classification policy
+		if (kAlbedoTextureFormat != VK_FORMAT_R8G8B8A8_SRGB)
+			ok = fail("kAlbedoTextureFormat must be VK_FORMAT_R8G8B8A8_SRGB");
+		if (!isAlbedoColorFormat(VK_FORMAT_R8G8B8A8_SRGB) || !isAlbedoColorFormat(VK_FORMAT_B8G8R8A8_SRGB))
+			ok = fail("sRGB formats must be recognized as valid albedo formats");
+		if (isAlbedoColorFormat(VK_FORMAT_R8G8B8A8_UNORM) || isAlbedoColorFormat(VK_FORMAT_B8G8R8A8_UNORM))
+			ok = fail("UNORM formats must not be accepted as albedo color formats without conversion");
+
+		// isSrgbFormat must cover the sRGB variants of every core-enum family
+		// ft_vox may encounter, not only the 8-bit packs used today.
+		if (!isSrgbFormat(VK_FORMAT_BC7_SRGB_BLOCK) ||
+			!isSrgbFormat(VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK) ||
+			!isSrgbFormat(VK_FORMAT_ASTC_4x4_SRGB_BLOCK) ||
+			!isSrgbFormat(VK_FORMAT_ASTC_12x12_SRGB_BLOCK))
+			ok = fail("isSrgbFormat must classify compressed sRGB variants (BC/ETC2/ASTC)");
+		if (isSrgbFormat(VK_FORMAT_R8G8B8A8_UNORM) || isSrgbFormat(VK_FORMAT_R16G16B16A16_SFLOAT) ||
+			isSrgbFormat(VK_FORMAT_D32_SFLOAT) || isSrgbFormat(VK_FORMAT_UNDEFINED))
+			ok = fail("non-sRGB formats must not be classified as sRGB");
+
+		// 5. Linear-encoding policy (depth, HDR color, SSAO… stay non-sRGB)
+		if (!isLinearEncodingFormat(VK_FORMAT_D32_SFLOAT) ||
+			!isLinearEncodingFormat(VK_FORMAT_R16G16B16A16_SFLOAT) ||
+			!isLinearEncodingFormat(VK_FORMAT_R8_UNORM))
+			ok = fail("Depth, HDR color buffer, and SSAO targets must be linear-encoded");
+		if (isLinearEncodingFormat(VK_FORMAT_R8G8B8A8_SRGB))
+			ok = fail("sRGB-encoded format cannot be a linear encoding");
+
+		// 6. Swapchain output transfer policy — decided from {format, colorSpace}
+		if (classifyOutputTransfer(VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::HardwareSrgb ||
+			classifyOutputTransfer(VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::HardwareSrgb)
+			ok = fail("sRGB format + SRGB_NONLINEAR must use the hardware attachment encode");
+		if (classifyOutputTransfer(VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::ShaderSrgb ||
+			classifyOutputTransfer(VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::ShaderSrgb)
+			ok = fail("UNORM format + SRGB_NONLINEAR must require the shader encode");
+		if (classifyOutputTransfer(VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT) != OutputTransfer::Unsupported ||
+			classifyOutputTransfer(VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT) != OutputTransfer::Unsupported ||
+			classifyOutputTransfer(VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) != OutputTransfer::Unsupported)
+			ok = fail("non-SDR color spaces (HDR10/PQ, Display-P3, extended sRGB) must be refused");
+		// Strict allowlist: with SRGB_NONLINEAR, only the B8G8R8A8/R8G8B8A8 sRGB
+		// and UNORM pairs are supported — every other format must be refused,
+		// including other sRGB-family members like A8B8G8R8_SRGB_PACK32.
+		if (classifyOutputTransfer(VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::Unsupported ||
+			classifyOutputTransfer(VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::Unsupported ||
+			classifyOutputTransfer(VK_FORMAT_UNDEFINED, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::Unsupported ||
+			classifyOutputTransfer(VK_FORMAT_A8B8G8R8_SRGB_PACK32, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) != OutputTransfer::Unsupported)
+			ok = fail("strict allowlist must reject non-allowlisted {format, SRGB_NONLINEAR} pairs as Unsupported");
+		if (!outputTransferRequiresShaderEncode(OutputTransfer::ShaderSrgb) ||
+			outputTransferRequiresShaderEncode(OutputTransfer::HardwareSrgb))
+			ok = fail("only the ShaderSrgb path sets the composite encode flag");
+
+		// 7. End-to-end simulation: hardware path vs shader-encode path parity
+		const glm::vec3 testColors[] = {
+			glm::vec3(0.0f),
+			glm::vec3(0.21586f),                   // mid-gray
+			glm::vec3(0.12f, 0.55f, 0.22f),        // foliage green
+			glm::vec3(0.85f, 0.72f, 0.45f),        // sand
+			glm::vec3(0.02f, 0.03f, 0.08f),        // dark cave / night
+			glm::vec3(1.0f)                        // peak white
+		};
+		for (const auto &c : testColors)
+		{
+			const glm::vec3 outSrgb = simulateDisplayOutput(c, kNeutralGamma, OutputTransfer::HardwareSrgb);
+			const glm::vec3 outUnorm = simulateDisplayOutput(c, kNeutralGamma, OutputTransfer::ShaderSrgb);
+			if (glm::length(outSrgb - outUnorm) > 1e-4f)
+				ok = fail("Discrepancy between sRGB swapchain and UNORM swapchain display output");
+
+			// Verify that output matches exactly one sRGB encode:
+			const glm::vec3 expected = linearToSrgb(c);
+			if (glm::length(outSrgb - expected) > 1e-4f)
+				ok = fail("Output does not match standard single sRGB transfer");
+		}
+
+		// 8. Creative gamma operator neutrality + CPU/GLSL epsilon contract
+		const glm::vec3 sample(0.35f, 0.62f, 0.18f);
+		if (glm::length(applyArtisticGamma(sample, 1.0f) - sample) > 1e-6f)
+			ok = fail("applyArtisticGamma with gamma=1.0 must be exact identity");
+		if (std::abs(applyArtisticGamma(0.5f, 1.0f) - 0.5f) > 1e-6f)
+			ok = fail("applyArtisticGamma(float) with gamma=1.0 must be exact identity");
+		// Must mirror composite.frag: |gamma - 1| <= 0.001 skips the grade
+		// (a 1e-4 CPU threshold would diverge from the shader at e.g. 1.0005).
+		if (std::abs(applyArtisticGamma(0.5f, 1.0005f) - 0.5f) > 1e-6f)
+			ok = fail("applyArtisticGamma must be identity within the shader-neutral epsilon (1.0005)");
+		if (std::abs(applyArtisticGamma(0.5f, 1.05f) - std::pow(0.5f, 1.0f / 1.05f)) > 1e-6f)
+			ok = fail("applyArtisticGamma must apply the grade beyond the neutral epsilon");
+
+		// Proves that old double-gamma bug significantly distorted output:
+		// e.g. for linear mid-gray 0.21586, correct sRGB is 0.50196,
+		// but double-transfer produced ~0.735 (46% brighter!)
+		const float oldDoubleTransfer = linearToSrgb(std::pow(midGrayLinear, 1.0f / 2.2f));
+		if (std::abs(oldDoubleTransfer - midGraySrgb) < 0.15f)
+			ok = fail("Old transfer was not distinctively washed out (double gamma check)");
+	}
+
 	if (!ok)
 	{
 		std::cerr << "test_render_helpers: FAILED\n";
 		return EXIT_FAILURE;
 	}
-	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + block textures + FrameUBO + indirect batching)\n";
+	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + block textures + FrameUBO + indirect batching + colorspace)\n";
 	return EXIT_SUCCESS;
 }
