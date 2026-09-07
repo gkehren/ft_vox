@@ -1303,6 +1303,11 @@ void Engine::run()
 		{
 			PROFILE_SCOPE("UpdateUBO");
 			const float farPlane = static_cast<float>(renderSettings.maxRenderDistance) * 1.25f;
+			// Shadow quality tier change (issue #137): recreate the shadow map
+			// at the requested resolution before it feeds the frame UBO.
+			if (worldRenderer->postSettings().shadowMapSize > 0 &&
+				worldRenderer->activeShadowMapSize() != uint32_t(worldRenderer->postSettings().shadowMapSize))
+				worldRenderer->applyShadowMapSize(uint32_t(worldRenderer->postSettings().shadowMapSize));
 			// Visual immersion follows the eye, including water occupied by kelp.
 			bool underwater = false;
 			if (chunkManager)

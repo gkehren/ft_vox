@@ -764,14 +764,82 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (ranScenes == 0)
+	// "resize_check" is a valid selection too — only fail when some real
+	// scene name matched nothing.
+	const bool resizeRequested =
+		std::find(onlyScenes.begin(), onlyScenes.end(), "resize_check") != onlyScenes.end();
+	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested)
 	{
 		std::cerr << "FAIL: --scene";
 		for (const std::string &name : onlyScenes)
 			std::cerr << " " << name;
 		std::cerr << " matched no scene (valid names: noon_terrain, cascade_transition, cave_emissive,"
-					 " water_shore, sunset, midnight, mob_lighting, underwater)\n";
+					 " water_shore, sunset, midnight, mob_lighting, underwater, resize_check)\n";
 		++failures;
+	}
+
+	// Live shadow-map resize smoke (issue #137 review): render terrain+mobs
+	// at 1024, resize to 2048 through the production deferred path, render
+	// again — must stay deterministic and validation-clean. This is the
+	// regression gate for the stale-sampler descriptor bug found during
+	// development (the recreated sampler must reach the mob sets).
+	if (onlyScenes.empty() || resizeRequested)
+	{
+		std::cout << "[resize-check] 1024 -> 2048 with terrain + mobs\n";
+		try
+		{
+			const long before = harness.validationErrors();
+			harness.beginScene(4217);
+			harness.post() = PostProcessSettings{};
+			harness.shader() = ShaderParameters{};
+			harness.shader().dayTime = 0.30f;
+			updateAtmosphereFromDayTime(harness.shader());
+			harness.camera().setPosition(glm::vec3(8.f, 96.f, 8.f));
+			harness.camera().setYawPitch(225.f, -25.f);
+			harness.buildArea(harness.camera().getPosition(), 3);
+			std::vector<entities::MobRenderState> mobs;
+			mobs.push_back({entities::MobSpecies::Cow, glm::vec3(6.f, 90.f, 10.f), 0.f, 0.f, 0.f, 0.f, 0.f});
+			const visual::RgbaImage beforeResize = harness.renderFrame(5.f, mobs);
+			harness.post().shadowMapSize = 2048; // engine applies this deferred in the real loop
+			harness.renderer().applyShadowMapSize(2048);
+			const visual::RgbaImage after = harness.renderFrame(5.f, mobs);
+			const visual::RgbaImage after2 = harness.renderFrame(5.f, mobs);
+			if (!beforeResize.valid() || !after.valid())
+			{
+				std::cerr << "  FAIL resize-check: invalid render\n";
+				++failures;
+			}
+			else if (!std::equal(after.pixels.begin(), after.pixels.end(), after2.pixels.begin()))
+			{
+				std::cerr << "  FAIL resize-check: nondeterministic after resize\n";
+				++failures;
+			}
+			else if (beforeResize.pixels == after.pixels)
+			{
+				std::cerr << "  FAIL resize-check: 2048 render identical to 1024 (filter radius did not change)\n";
+				++failures;
+			}
+			else if (harness.lastNonFiniteSamples() > 0)
+			{
+				std::cerr << "  FAIL resize-check: non-finite HDR samples after resize\n";
+				++failures;
+			}
+			else if (harness.validationErrors() - before != 0)
+			{
+				std::cerr << "  FAIL resize-check: " << harness.validationErrors() - before
+						  << " validation error(s) during resize rendering\n";
+				++failures;
+			}
+			else
+				std::cout << "  PASS resize-check\n";
+			harness.post().shadowMapSize = 1024;
+			harness.renderer().applyShadowMapSize(1024);
+		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "  FAIL resize-check: exception: " << e.what() << "\n";
+			++failures;
+		}
 	}
 
 	const long renderValidationErrors = harness.validationErrors() - baselineValidation;

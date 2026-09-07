@@ -81,6 +81,12 @@ public:
     size_t visibleMobs() const { return m_mobs.visibleCount(); }
     MobTextureReport mobTextureReport() const { return m_mobs.textureReport(); }
 	PostProcessSettings &postSettings() { return m_postSettings; }
+	/// Shadow map resolution actually in GPU resources (issue #137). Differs
+	/// from postSettings().shadowMapSize until applyShadowMapSize runs.
+	uint32_t activeShadowMapSize() const { return m_shadow.mapSize(); }
+	/// Recreate shadow resources at a new resolution (device idles inside),
+	/// then rewrite every receiver descriptor. Deferred engine trigger.
+	void applyShadowMapSize(uint32_t size);
 	/// HDR scene target for tooling readback (visual regression). Layout is
 	/// SHADER_READ_ONLY_OPTIMAL between frames.
 	AllocatedImage &hdrColor() { return m_post.hdrColor(); }

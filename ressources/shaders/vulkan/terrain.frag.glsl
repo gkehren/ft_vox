@@ -12,6 +12,7 @@ layout(location = 8) in float vBlockLight;
 layout(location = 9) in float vViewDepth;
 
 #include "frame_ubo.inc.glsl"
+#include "csm.inc.glsl"
 #include "colorspace.inc.glsl"
 
 // x=wind, y=emissive, z=iceSpec, w=flags — materials::MaterialTableUBO
@@ -20,95 +21,13 @@ layout(set = 0, binding = 1) uniform MaterialTable {
 } materialTable;
 
 layout(set = 1, binding = 0) uniform sampler2DArray textureArray;
-layout(set = 1, binding = 1) uniform sampler2DArray shadowMap;
 
 layout(location = 0) out vec4 outColor;
-
-const vec2 POISSON[12] = vec2[](
-    vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696,  0.457),
-    vec2(-0.203,  0.621), vec2( 0.962, -0.195), vec2( 0.473, -0.480),
-    vec2( 0.519,  0.767), vec2( 0.185, -0.893), vec2( 0.507,  0.064),
-    vec2( 0.896,  0.412), vec2(-0.322, -0.932), vec2(-0.792, -0.598)
-);
 
 vec4 materialFor(float texIdx)
 {
     uint t = uint(texIdx + 0.5);
     return materialTable.mats[t];
-}
-
-mat4 cascadeMatrix(int c)
-{
-    if (c == 0) return frame.cascadeMatrix0;
-    if (c == 1) return frame.cascadeMatrix1;
-    return frame.cascadeMatrix2;
-}
-
-// Soft sample one cascade; out-of-bounds UV taps are discarded (unshadowed), not garbage.
-float sampleCascadeShadow(vec3 fragPos, vec3 normal, vec3 lightDir, int cascade)
-{
-    vec4 fragPosLS = cascadeMatrix(cascade) * vec4(fragPos, 1.0);
-    vec3 projCoords = fragPosLS.xyz / max(fragPosLS.w, 1e-6);
-    projCoords.xy = projCoords.xy * 0.5 + 0.5;
-
-    if (projCoords.z < 0.0 || projCoords.z > 1.0 ||
-        projCoords.x < 0.0 || projCoords.x > 1.0 ||
-        projCoords.y < 0.0 || projCoords.y > 1.0)
-        return 0.0;
-
-    float currentDepth = projCoords.z;
-    float nDotL = max(dot(normal, lightDir), 0.0);
-    float bias = max(0.012 * (1.0 - nDotL), 0.0035);
-    float radius = (1.5 + float(cascade) * 1.0) / 1024.0;
-
-    float shadow = 0.0;
-    float taps = 0.0;
-    for (int i = 0; i < 12; ++i)
-    {
-        vec2 uv = projCoords.xy + POISSON[i] * radius * 2.5;
-        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
-            continue;
-        float pcfDepth = texture(shadowMap, vec3(uv, float(cascade))).r;
-        shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
-        taps += 1.0;
-    }
-    if (taps < 0.5)
-        return 0.0;
-    return shadow / taps;
-}
-
-float ShadowCalculation(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
-{
-    float s0 = frame.cascadeSplits.x;
-    float s1 = frame.cascadeSplits.y;
-    float s2 = frame.cascadeSplits.z;
-
-    int cascade = 2;
-    float splitStart = s1;
-    float splitEnd = s2;
-    if (viewDepth < s0) {
-        cascade = 0;
-        splitStart = 0.1;
-        splitEnd = s0;
-    } else if (viewDepth < s1) {
-        cascade = 1;
-        splitStart = s0;
-        splitEnd = s1;
-    }
-
-    float shadow = sampleCascadeShadow(fragPos, normal, lightDir, cascade);
-
-    if (cascade < 2) {
-        float gap = max(splitEnd - splitStart, 1.0);
-        float band = gap * 0.12;
-        float edge = splitEnd - band;
-        if (viewDepth > edge) {
-            float w = clamp((viewDepth - edge) / max(band, 1e-3), 0.0, 1.0);
-            float shadowNext = sampleCascadeShadow(fragPos, normal, lightDir, cascade + 1);
-            shadow = mix(shadow, shadowNext, w);
-        }
-    }
-    return shadow;
 }
 
 void main()
@@ -156,8 +75,62 @@ void main()
     // Only direct celestial light uses the CSM; sky bounce remains in shade.
     float sky = clamp(vSkyLight, 0.0, 1.0);
     float sunReach = smoothstep(0.05, 0.45, sky);
-    float sunShadow = ShadowCalculation(vFragPos, norm, lightDir, vViewDepth);
+    float sunShadow = sampleDirectionalShadow(vFragPos, norm, lightDir, vViewDepth);
     float shadow = sunShadow * sunReach;
+
+    // Shadow debug visualization (issue #137): frame.visualParams.w selects
+    // the mode. 1 = cascade index color, 2 = cascade blend band (only
+    // cascades 0/1 blend — cascade 2 has no next), 3 = shadow texel density
+    // (relative footprint, non-periodic), 4 = receiver light-space depth.
+    // Terrain-only tool; mobs share the sampling path but not the output.
+    int shadowDebugMode = int(frame.visualParams.w + 0.5);
+    if (shadowDebugMode > 0)
+    {
+        float s0 = frame.cascadeSplits.x, s1 = frame.cascadeSplits.y, s2 = frame.cascadeSplits.z;
+        int cascade = vViewDepth < s0 ? 0 : (vViewDepth < s1 ? 1 : 2);
+        if (shadowDebugMode == 1)
+        {
+            outColor = vec4(cascade == 0 ? vec3(1.0, 0.25, 0.25)
+                          : cascade == 1 ? vec3(0.25, 1.0, 0.25)
+                                         : vec3(0.30, 0.45, 1.0),
+                            1.0);
+            return;
+        }
+        if (shadowDebugMode == 2)
+        {
+            float bandW = 0.0;
+            if (cascade < 2)
+            {
+                float splitEnd = cascade == 0 ? s0 : s1;
+                float splitStart = cascade == 0 ? 0.1 : s0;
+                float band = max(splitEnd - splitStart, 1.0) * 0.12;
+                bandW = clamp((vViewDepth - (splitEnd - band)) / max(band, 1e-3), 0.0, 1.0);
+            }
+            outColor = vec4(mix(vec3(0.05), vec3(1.0, 0.6, 0.1), bandW), 1.0);
+            return;
+        }
+        if (shadowDebugMode == 3)
+        {
+            // Real world-units-per-texel relative to cascade 0, on a log
+            // scale: 0 = same texel density as cascade 0, 1 = 16x coarser.
+            float density = frame.cascadeTexelWorldSizes[cascade] /
+                            max(frame.cascadeTexelWorldSizes.x, 1e-8);
+            float t = clamp(log2(max(density, 1.0)) / 4.0, 0.0, 1.0);
+            outColor = vec4(vec3(t), 1.0);
+            return;
+        }
+        if (shadowDebugMode == 4)
+        {
+            // Receiver depth in the light-space ortho projection — already
+            // [0,1] with GLM_FORCE_DEPTH_ZERO_TO_ONE (this is the receiver's
+            // projected depth, not the shadow-map content; reading the map
+            // back would need a separate non-comparison debug sampler).
+            vec4 ls = csmCascadeMatrix(cascade) * vec4(vFragPos, 1.0);
+            vec3 p = ls.xyz / max(ls.w, 1e-6);
+            outColor = vec4(vec3(clamp(p.z, 0.0, 1.0)), 1.0);
+            return;
+        }
+    }
     float hemisphere = 0.65 + 0.35 * clamp(norm.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 lightTint = mix(vec3(1.06, 0.98, 0.88), vec3(1.12, 0.78, 0.48), sunsetFactor * 0.72);
     lightTint = mix(lightTint, vec3(0.55, 0.68, 1.0), nightFactor);

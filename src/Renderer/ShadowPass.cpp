@@ -70,7 +70,7 @@ void ShadowPass::shutdown()
 void ShadowPass::createResources()
 {
 	m_shadowMap = createImage2DArray(
-		m_context->getAllocator(), m_context->getDevice(), kShadowMapSize, kShadowMapSize,
+		m_context->getAllocator(), m_context->getDevice(), m_mapSize, m_mapSize,
 		static_cast<uint32_t>(kCascadeCount), m_depthFormat,
 		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 		VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -84,10 +84,24 @@ void ShadowPass::createResources()
 	si.magFilter = si.minFilter = VK_FILTER_LINEAR;
 	si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-	si.compareEnable = VK_FALSE;
+	// Hardware depth comparison (issue #137): receivers sample a
+	// sampler2DArrayShadow and every PCF tap gets 2x2 percentage-closer
+	// filtering for free. LESS_OR_EQUAL + the opaque-white border keep
+	// out-of-bounds taps lit.
+	si.compareEnable = VK_TRUE;
+	si.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 	si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 	if (vkCreateSampler(m_context->getDevice(), &si, nullptr, &m_shadowSampler) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create shadow sampler");
+}
+
+void ShadowPass::resizeShadowMap(uint32_t size)
+{
+	if (!m_context || size == 0 || size == m_mapSize)
+		return;
+	m_mapSize = size;
+	destroyResources();
+	createResources();
 }
 
 void ShadowPass::destroyResources()
@@ -194,13 +208,13 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 		depthAtt.clearValue.depthStencil = {1.0f, 0};
 
 		VkRenderingInfo shadowInfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
-		shadowInfo.renderArea = {{0, 0}, {kShadowMapSize, kShadowMapSize}};
+		shadowInfo.renderArea = {{0, 0}, {m_mapSize, m_mapSize}};
 		shadowInfo.layerCount = 1;
 		shadowInfo.pDepthAttachment = &depthAtt;
 		beginRendering(cmd, &shadowInfo);
 
-		VkViewport vp{0.f, 0.f, static_cast<float>(kShadowMapSize), static_cast<float>(kShadowMapSize), 0.f, 1.f};
-		VkRect2D scissor{{0, 0}, {kShadowMapSize, kShadowMapSize}};
+		VkViewport vp{0.f, 0.f, static_cast<float>(m_mapSize), static_cast<float>(m_mapSize), 0.f, 1.f};
+		VkRect2D scissor{{0, 0}, {m_mapSize, m_mapSize}};
 		vkCmdSetViewport(cmd, 0, 1, &vp);
 		vkCmdSetScissor(cmd, 0, 1, &scissor);
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);

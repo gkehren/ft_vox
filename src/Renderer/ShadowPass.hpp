@@ -31,6 +31,12 @@ public:
 	VkImageView arrayView() const { return m_shadowMap.view; }
 	VkSampler sampler() const { return m_shadowSampler; }
 	const std::array<VkImageView, kCascadeCount> &layerViews() const { return m_shadowLayerViews; }
+	uint32_t mapSize() const { return m_mapSize; }
+
+	/// Recreate the shadow map array + layer views at a new resolution
+	/// (issue #137 quality tiers). Caller must device-idle first; receiver
+	/// descriptors must be rewritten afterwards (WorldRenderer does both).
+	void resizeShadowMap(uint32_t size);
 
 	static constexpr uint32_t kMaxIndirectCommands = 65536;
 	struct IndirectBatch
@@ -54,6 +60,7 @@ private:
 
 	VkContext *m_context{nullptr};
 	VkFormat m_depthFormat{VK_FORMAT_D32_SFLOAT};
+	uint32_t m_mapSize{kShadowMapSize};
 	AllocatedImage m_shadowMap{};
 	std::array<VkImageView, kCascadeCount> m_shadowLayerViews{};
 	VkSampler m_shadowSampler{VK_NULL_HANDLE};

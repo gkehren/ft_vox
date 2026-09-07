@@ -498,6 +498,17 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 	{
 		if (frame.render)
 			ImGui::SliderFloat("Cascade far", &frame.render->shadowCascadeFar, 64.f, 512.f);
+		// Shadow quality tier (issue #137): the engine recreates the shadow
+		// map array deferred when the requested size differs. All four CLI
+		// sizes are selectable so an override is not silently relabeled.
+		const char *shadowSizeNames[] = {"512", "1024 (Low/Medium)", "2048 (High/Cinematic)", "4096"};
+		int shadowSizeIdx = pp.shadowMapSize <= 512 ? 0 : (pp.shadowMapSize <= 1024 ? 1 : (pp.shadowMapSize <= 2048 ? 2 : 3));
+		if (ImGui::Combo("Shadow resolution", &shadowSizeIdx, shadowSizeNames, IM_ARRAYSIZE(shadowSizeNames)))
+			pp.shadowMapSize = shadowSizeIdx == 0 ? 512 : shadowSizeIdx == 1 ? 1024 : shadowSizeIdx == 2 ? 2048 : 4096;
+		const char *shadowDebugNames[] = {"Off", "Cascade index", "Blend bands", "Texel density", "Receiver depth"};
+		int shadowDebugIdx = int(sp.shadowDebug);
+		if (ImGui::Combo("Shadow debug", &shadowDebugIdx, shadowDebugNames, IM_ARRAYSIZE(shadowDebugNames)))
+			sp.shadowDebug = float(shadowDebugIdx);
 	}
 
 	if (ImGui::CollapsingHeader("Visual"))
