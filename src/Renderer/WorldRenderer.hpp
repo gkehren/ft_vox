@@ -80,7 +80,10 @@ public:
 	void setMobs(const std::vector<entities::MobRenderState> &states) { m_mobStates = states; }
     size_t visibleMobs() const { return m_mobs.visibleCount(); }
     MobTextureReport mobTextureReport() const { return m_mobs.textureReport(); }
-    PostProcessSettings &postSettings() { return m_postSettings; }
+	PostProcessSettings &postSettings() { return m_postSettings; }
+	/// HDR scene target for tooling readback (visual regression). Layout is
+	/// SHADER_READ_ONLY_OPTIMAL between frames.
+	AllocatedImage &hdrColor() { return m_post.hdrColor(); }
 	OverlayRenderer &overlays() { return m_overlays; }
 	TextureManager &getTextureManager() { return m_textures; }
 	/// Shared device-local mesh arenas every chunk suballocates from (issue #109).

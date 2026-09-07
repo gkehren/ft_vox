@@ -532,4 +532,5 @@ void WorldRenderer::recordFrameToImage(VkCommandBuffer cmd, uint32_t frameIndex,
 	recordSceneAndPost(cmd, frameIndex, extent, targetImage, targetView, chunks, shadowChunks, clearColor, gpu);
 	// Target stays in COLOR_ATTACHMENT_OPTIMAL: the caller owns any further
 	// transition (test readback to TRANSFER_SRC).
+	if (gpu) gpu->endRecording(cmd);
 }

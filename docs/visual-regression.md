@@ -29,6 +29,17 @@ guard logic.
 - The offscreen entry point is `WorldRenderer::recordFrameToImage`. The runtime
   renderer stays asynchronous; the test performs a **test-only synchronous GPU
   readback** of the composite target after the pass graph completes.
+- **Golden-image contract**: the harness requires the surface to deliver
+  exactly 640×360 and an 8-bit sRGB composite format
+  (`R8G8B8A8_SRGB`/`B8G8R8A8_SRGB`). Anything else would compare frames
+  against references produced under a different resolution/encoding, so the
+  harness **skips (exit 77)** with an explicit message instead of rendering.
+- **Validation gating**: initialization is split — device/swapchain creation
+  may carry errors from injected overlays (RTSS, see
+  `docs/vulkan-validation.md`) and is only a warned baseline. Everything from
+  `WorldRenderer::init` onward (descriptors, pipelines, internal images, the
+  offscreen target) and every scene render must be **validation-clean**;
+  any error there fails the run.
 
 ## 3. Determinism levers
 
@@ -56,22 +67,27 @@ comparison.
 | `noon_terrain` | Color space, mips/filtering, fog, CSM shadows, base post |
 | `cascade_transition` | CSM split seam across a cascade boundary |
 | `cave_emissive` | Block light, emissive blocks, bloom, dark-scene exposure |
-| `water_shore` | Refraction, absorption, foam, shoreline interaction |
+| `water_shore` | Refraction, absorption, foam and the deep → shallow → shoreline → terrain transition (camera stands in the water looking back at a low beach) |
 | `sunset` | Low sun angle, god rays, fog/horizon gradient |
 | `midnight` | Moon/stars, night exposure |
 | `mob_lighting` | Entity vs terrain lighting consistency |
 | `underwater` | Fully submerged camera |
 
 On top of the whole-frame comparison, each scene carries **targeted numeric
-invariants**: all pixels finite (no NaN/Inf), shadowed terrain darker than lit
-terrain, emissive peaks present in dark caves, night readability bounds, and an
-underwater blue-shift check. Invariants catch direction-of-change errors that
+invariants**: the HDR scene target is scanned **pre-tonemap** for non-finite
+fp16 samples (NaN/Inf — compositing quantizes them into undefined bytes, so
+they must be caught before it runs), shadowed terrain darker than lit terrain,
+emissive peaks present in dark caves, night readability bounds, and water /
+underwater blue-shift checks. Invariants catch direction-of-change errors that
 averaged pixel metrics would smooth over.
 
 ## 5. Comparison policy
 
 Comparison is **not bit-exact** — GPUs and drivers differ in rounding, and
-chasing bit-exactness across vendors is a losing game. Metrics per scene:
+chasing bit-exactness across vendors is a losing game. Metrics are computed
+per channel (alpha ignored) and **normalized to [0,1]** (1.0 = full-scale 255
+delta), so the thresholds below read directly as LSB budgets. Metrics per
+scene:
 
 - per-channel **mean absolute error**
 - **RMS** error
@@ -85,6 +101,10 @@ Default tolerances (strict mode):
 | Mean abs error | ≤ 3/255 |
 | RMS | ≤ 5/255 |
 | Hot-pixel ratio | ≤ 2% |
+
+The metric units themselves are unit-tested (`ctest -R VisualImageMetrics`):
+identical images, one-LSB shifts, at-threshold/failing deltas, hot-pixel
+counting, size mismatches and the PNG round-trip.
 
 ## 6. Reference policy
 
@@ -110,7 +130,10 @@ resolves):
 
 A reference-update PR must include the PNG diff and an explanation of *why*
 the pixels changed. "The image changed" is not a reviewable justification;
-"mip LOD bias off by one, fixed" is.
+"mip LOD bias off by one, fixed" is. Update runs also write review artifacts
+under the artifacts dir: `expected.png` holds the **previous** golden,
+`diff.png` amplifies the shift, and `metrics.txt` quantifies it — the PR
+reviewer sees exactly what moved without re-running anything.
 
 ## 7. Cross-vendor and CI policy
 
@@ -120,6 +143,13 @@ legitimately exceed the strict thresholds through FP rounding alone. Therefore:
 - `--smoke` multiplies tolerances (5× mean/RMS, hot-pixel ratio to 10%) for
   heterogeneous machines. The per-scene numeric invariants stay strict in
   smoke mode — a direction-of-change regression still fails.
+- **ctest runs in smoke mode by default** (the test environment sets
+  `FT_VOX_VISUAL_SMOKE=1`) so a full `ctest` on a non-canonical GPU does not
+  go false-red. The **strict gate** is a direct run without `--smoke` on the
+  canonical GPU — mandatory before committing reference updates. `--strict`
+  forces strict mode from the CLI (overriding the environment), and setting
+  `FT_VOX_VISUAL_SMOKE=0` in the environment enables strict ctest runs on the
+  canonical machine.
 - A software rasterizer (`lavapipe`) can run the harness in CI once a build/
   test CI exists (issue #131). **Today no CI workflow runs ctest** (CodeQL
   only), so references are validated on developer machines.
@@ -143,13 +173,9 @@ CI should upload this directory as a workflow artifact once test CI exists.
 
 ## 9. Running
 
-Via ctest (the invocation sets `FT_VOX_VALIDATION=1` and the working directory
-to the repo root so `./ressources/` resolves). Validation gating: errors raised
-while the scenes render fail the run; creation-time errors are reported as a
-warning baseline because injected overlays (RTSS, see
-`docs/vulkan-validation.md`) pollute swapchain/image-view creation for
-executables without an RTSS exclusion — add one for `ft_vox_visual_tests.exe`
-to keep the log clean:
+Via ctest (the invocation sets `FT_VOX_VALIDATION=1` and `FT_VOX_VISUAL_SMOKE=1`
+— see §7 — and the working directory to the repo root so `./ressources/`
+resolves):
 
 ```bash
 cd build && ctest -R VisualRegression --output-on-failure -C Release   # Windows
@@ -162,11 +188,19 @@ Or directly from the repo root:
 ./build/tests/Release/ft_vox_visual_tests.exe [options]
 ```
 
-CLI reference:
+CLI reference (positional args `<refs-dir> <out-dir>` are how ctest passes the
+paths):
 
 ```
-ft_vox_visual_tests [--update-references] [--smoke] [--scene NAME ...] [--refs DIR] [--out DIR]
+ft_vox_visual_tests [--update-references] [--smoke] [--strict]
+                    [--scene NAME ...] [--refs DIR] [--out DIR] [<refs-dir> [<out-dir>]]
 ```
+
+- `--strict` forces strict tolerances even when `FT_VOX_VISUAL_SMOKE=1`.
+- A `--scene` filter matching no scene is an error (exit 1), never a
+  vacuous pass.
+- Artifacts dir defaults to `build/visual-qa` (relative to the working
+  directory).
 
 | Option | Effect |
 |--------|--------|

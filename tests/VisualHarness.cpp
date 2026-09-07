@@ -1,5 +1,6 @@
 #include "VisualHarness.hpp"
 
+#include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/VkLoadLibrary.hpp"
 #include "Chunk/StreamHelpers.hpp"
 #include "utils.hpp"
@@ -9,7 +10,7 @@
 #include <cstring>
 #include <stdexcept>
 
-bool VisualHarness::init(std::ostream &log)
+bool VisualHarness::initDevice(std::ostream &log)
 {
 	if (!SDL_Init(SDL_INIT_VIDEO))
 	{
@@ -21,7 +22,7 @@ bool VisualHarness::init(std::ostream &log)
 		log << "SKIP: no Vulkan loader available\n";
 		return false;
 	}
-	m_window = SDL_CreateWindow("ft_vox visual tests", 640, 360, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN);
+	m_window = SDL_CreateWindow("ft_vox visual tests", kWidth, kHeight, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN);
 	if (!m_window)
 	{
 		log << "SKIP: window creation failed: " << SDL_GetError() << "\n";
@@ -37,11 +38,40 @@ bool VisualHarness::init(std::ostream &log)
 		return false;
 	}
 
-	m_swapchain.init(m_context, 640, 360, true);
+	m_swapchain.init(m_context, kWidth, kHeight, true);
 	m_extent = m_swapchain.getExtent();
+	m_targetFormat = m_swapchain.getImageFormat();
+
+	// Golden-image contract (review P2): fixed resolution + 8-bit sRGB
+	// composite. Anything else would compare against references produced
+	// under a different resolution/encoding.
+	if (m_extent.width != kWidth || m_extent.height != kHeight)
+	{
+		log << "SKIP: surface caps force extent " << m_extent.width << "x" << m_extent.height
+			<< ", the golden contract requires " << kWidth << "x" << kHeight << "\n";
+		return false;
+	}
+	switch (m_targetFormat)
+	{
+	case VK_FORMAT_R8G8B8A8_SRGB:
+	case VK_FORMAT_B8G8R8A8_SRGB:
+		break;
+	default:
+		log << "SKIP: swapchain chose non-sRGB8 format " << m_targetFormat
+			<< ", the golden contract requires R8G8B8A8_SRGB/B8G8R8A8_SRGB\n";
+		return false;
+	}
+
 	m_imm.init(m_context);
 	m_retire.init(m_context.getAllocator(), WorldRenderer::kMaxFramesInFlight);
+	m_deviceReady = true;
+	log << "VisualHarness device ready: " << m_extent.width << "x" << m_extent.height
+		<< " format=" << m_targetFormat << " device=" << m_context.getDeviceProperties().deviceName << "\n";
+	return true;
+}
 
+void VisualHarness::initRenderer(std::ostream &log)
+{
 	// Visual scenes never use async jobs (generateInitialArea is fully
 	// synchronous); a small pool keeps ChunkManager's contract satisfied.
 	m_threadPool = std::make_unique<ThreadPool>(2);
@@ -50,8 +80,8 @@ bool VisualHarness::init(std::ostream &log)
 
 	// Offscreen composite target: same format the swapchain chose so the
 	// bytes match what the on-screen path would present. Transfer source for
-	// the test-only readback.
-	m_targetFormat = m_swapchain.getImageFormat();
+	// the test-only readback. The HDR target is copied in the same submit
+	// for the pre-tonemap NaN/Inf scan (fp16, 8 bytes per pixel).
 	auto device = m_context.getDevice();
 	auto allocator = m_context.getAllocator();
 	m_target = createImage2D(allocator, device, m_extent.width, m_extent.height, m_targetFormat,
@@ -59,32 +89,35 @@ bool VisualHarness::init(std::ostream &log)
 	m_readback = createBuffer(allocator, size_t(m_extent.width) * m_extent.height * 4,
 							  VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO,
 							  VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
-
-	m_ready = true;
-	log << "VisualHarness ready: " << m_extent.width << "x" << m_extent.height
-		<< " format=" << m_targetFormat << " device=" << m_context.getDeviceProperties().deviceName << "\n";
-	return true;
+	m_hdrReadback =
+		createBuffer(allocator, size_t(m_extent.width) * m_extent.height * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+					 VMA_MEMORY_USAGE_AUTO,
+					 VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+	m_rendererReady = true;
+	log << "VisualHarness renderer ready (Shadow/Opaque/Water/Sky + post)\n";
 }
 
 void VisualHarness::shutdown()
 {
 	if (!m_window)
 		return;
-	if (m_ready)
+	if (m_deviceReady)
 		m_context.waitIdle();
 	m_chunkManager.reset();
 	m_terrain.reset();
-	if (m_ready)
+	if (m_rendererReady)
 		m_renderer.shutdown();
 	if (m_target.image)
 		destroyImage(m_context.getAllocator(), m_context.getDevice(), m_target);
 	if (m_readback.buffer)
 		destroyBuffer(m_context.getAllocator(), m_readback);
+	if (m_hdrReadback.buffer)
+		destroyBuffer(m_context.getAllocator(), m_hdrReadback);
 	m_retire.flush();
 	m_retire.shutdown();
 	m_threadPool.reset();
 	m_chunkPool.reset();
-	if (m_ready)
+	if (m_deviceReady)
 	{
 		m_imm.shutdown();
 		m_swapchain.shutdown();
@@ -97,7 +130,7 @@ void VisualHarness::shutdown()
 
 void VisualHarness::beginScene(int seed)
 {
-	if (m_ready)
+	if (m_deviceReady)
 		m_context.waitIdle();
 	m_retire.flush();
 	m_drawList.clear();
@@ -127,8 +160,9 @@ void VisualHarness::remeshEditedChunks()
 
 visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entities::MobRenderState> &mobs)
 {
-	if (!m_ready)
+	if (!m_rendererReady)
 		return {};
+	m_lastNonFinite = 0;
 	m_renderer.setMobs(mobs);
 	const float farPlane = m_renderSettings.maxRenderDistance * 1.25f;
 	const bool underwater = m_renderer.postSettings().underwater;
@@ -151,6 +185,7 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
 		m_renderer.recordFrameToImage(cmd, 0, m_target.image, m_target.view, m_extent, m_drawList,
 									  m_shadowList, clearColor, {}, nullptr);
+		// LDR composite readback.
 		cmdTransitionImageLayout(cmd, m_target.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 								 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 		VkBufferImageCopy region{};
@@ -158,6 +193,21 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 		region.imageExtent = {m_extent.width, m_extent.height, 1};
 		vkCmdCopyImageToBuffer(cmd, m_target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_readback.buffer, 1,
 							   &region);
+		// HDR readback for the pre-tonemap NaN/Inf scan: recordPost leaves
+		// the HDR target SHADER_READ_ONLY_OPTIMAL (PostStack composite).
+		vkbar::cmdTransitionColor(cmd, m_renderer.hdrColor().image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+								  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+								  VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+								  VK_PIPELINE_STAGE_TRANSFER_BIT);
+		VkBufferImageCopy hdrRegion{};
+		hdrRegion.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+		hdrRegion.imageExtent = {m_extent.width, m_extent.height, 1};
+		vkCmdCopyImageToBuffer(cmd, m_renderer.hdrColor().image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+							   m_hdrReadback.buffer, 1, &hdrRegion);
+		vkbar::cmdTransitionColor(cmd, m_renderer.hdrColor().image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+								  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+								  VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+								  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 		VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
 		barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 		barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -165,6 +215,17 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 							 nullptr, 0, nullptr);
 	});
 
+	auto scanNonFinite = [this](const AllocatedBuffer &buffer, size_t halfCount) {
+		vmaInvalidateAllocation(m_context.getAllocator(), buffer.allocation, 0, VK_WHOLE_SIZE);
+		auto *data = static_cast<const uint16_t *>(buffer.info.pMappedData);
+		long long bad = 0;
+		// fp16 NaN/Inf: exponent bits all set (sign ignored).
+		for (size_t i = 0; i < halfCount; ++i)
+			if ((data[i] & 0x7C00u) == 0x7C00u)
+				++bad;
+		return bad;
+	};
+	m_lastNonFinite = scanNonFinite(m_hdrReadback, size_t(m_extent.width) * m_extent.height * 4);
 	vmaInvalidateAllocation(m_context.getAllocator(), m_readback.allocation, 0, VK_WHOLE_SIZE);
 	auto *data = static_cast<uint8_t *>(m_readback.info.pMappedData);
 

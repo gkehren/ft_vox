@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -106,25 +107,39 @@ glm::ivec2 findLandColumn(TerrainGenerator &gen, int minHeight, int maxHeight, i
 	return {0, laneZ};
 }
 
-glm::ivec2 findShoreCrossing(TerrainGenerator &gen, int laneZ)
+glm::ivec2 findShoreCrossing(TerrainGenerator &gen, int &outLane)
 {
-	// Land column followed by a persistent body of water (not a one-sample
-	// inlet): the next four samples must sit below sea level and get deeper.
-	for (int x = 0; x <= 16384; x += 8)
+	// A low beach (not a cliff) followed by a persistent body of water: the
+	// next four samples must sit below sea level and get deeper. The land
+	// must ALSO stay low behind the beach, so a camera standing in the
+	// water looking at the coast sees shore + terrain, not a cliff wall.
+	// Several lanes are probed; sea shape varies wildly per lane.
+	for (int lane : {24, 40, 8, 56, 16, 48, 32, 0, 64})
 	{
-		if (gen.getTerrainSample(x, laneZ).postErosionHeight < TerrainGenerator::SEA_LEVEL + 4)
-			continue;
-		bool water = true;
-		for (int step = 1; step <= 4; ++step)
+		for (int x = 16; x <= 16384; x += 8)
 		{
-			const int h = gen.getTerrainSample(x + 8 * step, laneZ).postErosionHeight;
-			if (h > TerrainGenerator::SEA_LEVEL - 3 || (step == 4 && h > TerrainGenerator::SEA_LEVEL - 5))
-				water = false;
+			const int land = gen.getTerrainSample(x, lane).postErosionHeight;
+			if (land < TerrainGenerator::SEA_LEVEL + 2 || land > TerrainGenerator::SEA_LEVEL + 10)
+				continue;
+			const int behind1 = gen.getTerrainSample(x - 8, lane).postErosionHeight;
+			const int behind2 = gen.getTerrainSample(x - 16, lane).postErosionHeight;
+			if (behind1 > TerrainGenerator::SEA_LEVEL + 16 || behind2 > TerrainGenerator::SEA_LEVEL + 26)
+				continue;
+			bool water = true;
+			for (int step = 1; step <= 4; ++step)
+			{
+				const int h = gen.getTerrainSample(x + 8 * step, lane).postErosionHeight;
+				if (h > TerrainGenerator::SEA_LEVEL - 2 || (step == 4 && h > TerrainGenerator::SEA_LEVEL - 4))
+					water = false;
+			}
+			if (water)
+			{
+				outLane = lane;
+				return {x, lane};
+			}
 		}
-		if (water)
-			return {x, laneZ};
 	}
-	return {0, laneZ};
+	return {0, 0};
 }
 
 glm::ivec2 findDeepWaterColumn(TerrainGenerator &gen, int laneZ)
@@ -312,21 +327,43 @@ std::vector<SceneSpec> buildSceneTable()
 	shore.time = 11.0f;
 	shore.spot = [](SceneRun &run) {
 		VisualHarness &h = run.harness;
-		const glm::ivec2 shore = findShoreCrossing(h.terrain(), 24);
-		// Hover past the water edge so the near field is water, with the
-		// shoreline cliff behind the camera's back.
-		h.camera().setPosition(glm::vec3(float(shore.x + 20), float(TerrainGenerator::SEA_LEVEL) + 11.f,
-										float(shore.y)));
-		h.camera().setYawPitch(0.f, -12.f); // look out across the water
+		int lane = 0;
+		const glm::ivec2 shore = findShoreCrossing(h.terrain(), lane);
+		if (shore.x == 0)
+			throw std::runtime_error("no usable shore crossing found on any lane for seed");
+		// Stand in the water just off the low beach and look BACK at the
+		// coast so a single frame spans deep water → shallow →
+		// foam/shoreline → terrain, with the horizon beyond.
+		h.camera().setPosition(glm::vec3(float(shore.x + 12), float(TerrainGenerator::SEA_LEVEL) + 10.f,
+										float(lane)));
+		h.camera().setYawPitch(180.f, -16.f); // face the shore (-X), over the beach
 		h.shader().fogStart = 70.f;
 		h.shader().fogEnd = 150.f;
 	};
 	shore.invariants = [](const RgbaImage &actual, const RgbaImage &) {
 		std::vector<std::string> errors;
-		const RegionStats lower = rowStats(actual, actual.height * 45 / 100, actual.height);
-		const RegionStats sky = rowStats(actual, 0, actual.height * 15 / 100);
-		need(lower.meanB > lower.meanR, errors, "water band is not blue-shifted");
+		const RegionStats sky = rowStats(actual, 0, actual.height * 10 / 100);
 		need(sky.meanLuma > 80.0, errors, "sky band too dark for day scene");
+		// Water and shore share rows (the coast line runs left/right through
+		// the frame), so scan row bands: water presence = some band below
+		// the sky is blue-shifted; shore presence = some band clearly
+		// brighter than that water (beach/terrain instead of open sea).
+		bool waterFound = false;
+		double waterLuma = 255.0;
+		double landLuma = 0.0;
+		for (int pct = 30; pct <= 75; pct += 5)
+		{
+			const RegionStats band =
+				rowStats(actual, actual.height * pct / 100, actual.height * (pct + 5) / 100);
+			landLuma = std::max(landLuma, band.meanLuma);
+			if (band.meanB > band.meanR)
+			{
+				waterFound = true;
+				waterLuma = std::min(waterLuma, band.meanLuma);
+			}
+		}
+		need(waterFound, errors, "no water band (blue-shifted) found in the frame");
+		need(landLuma > waterLuma + 5.0, errors, "no terrain band brighter than the water (shore missing)");
 		return errors;
 	};
 
@@ -496,10 +533,12 @@ void writeText(const fs::path &path, const std::string &text)
 int main(int argc, char **argv)
 {
 	bool updateReferences = false;
-	bool smoke = false;
+	bool strict = false;
+	bool smoke = std::getenv("FT_VOX_VISUAL_SMOKE") != nullptr &&
+				 std::string(std::getenv("FT_VOX_VISUAL_SMOKE")) == "1";
 	std::vector<std::string> onlyScenes;
 	fs::path refsDir = "tests/visual-references";
-	fs::path outDir = "visual-qa";
+	fs::path outDir = "build/visual-qa";
 	std::vector<std::string> positional;
 	for (int i = 1; i < argc; ++i)
 	{
@@ -508,6 +547,8 @@ int main(int argc, char **argv)
 			updateReferences = true;
 		else if (arg == "--smoke")
 			smoke = true;
+		else if (arg == "--strict")
+			strict = true;
 		else if (arg == "--scene" && i + 1 < argc)
 			onlyScenes.push_back(argv[++i]);
 		else if (arg == "--refs" && i + 1 < argc)
@@ -527,32 +568,58 @@ int main(int argc, char **argv)
 		refsDir = positional[0];
 	if (positional.size() > 1)
 		outDir = positional[1];
+	// --strict overrides the FT_VOX_VISUAL_SMOKE environment default: strict
+	// mode is the canonical-GPU gate (reference updates, dev verification);
+	// ctest defaults to smoke so heterogeneous machines don't go false-red.
+	if (strict)
+		smoke = false;
 
 	VisualHarness harness;
-	if (!harness.init(std::cout))
-		return 77; // no Vulkan device/surface: explicit ctest skip
+	if (!harness.initDevice(std::cout))
+		return 77; // no Vulkan device/surface or golden contract: explicit skip
 
-	// Creation-time validation errors are the baseline: injected overlays
-	// (e.g. RTSS, see docs/vulkan-validation.md) pollute swapchain/image-view
-	// creation for unexcluded executables. Only validation errors raised
-	// while the scenes render fail the run — those are ours.
+	// Validation baseline (review P1): ONLY the device/swapchain phase may
+	// carry creation-time errors from injected overlays (RTSS — see
+	// docs/vulkan-validation.md). Everything from WorldRenderer::init onward
+	// — descriptors, pipelines, internal images, the offscreen target — must
+	// be validation-clean, plus every scene render below.
 	const long baselineValidation = harness.validationErrors();
 	if (baselineValidation > 0)
 		std::cout << "warning: " << baselineValidation
-				  << " validation error(s) during init (see docs/vulkan-validation.md if RTSS is "
-					 "loaded) — ignored by the scene gate\n";
+				  << " validation error(s) during device/swapchain init (see docs/vulkan-validation.md "
+					 "if RTSS is loaded) — tolerated as baseline\n";
+
+	try
+	{
+		harness.initRenderer(std::cout);
+	}
+	catch (const std::exception &e)
+	{
+		std::cerr << "FAIL: renderer init failed: " << e.what() << "\n";
+		harness.shutdown();
+		return 1;
+	}
+	if (harness.validationErrors() > baselineValidation)
+	{
+		std::cerr << "FAIL: " << harness.validationErrors() - baselineValidation
+				  << " Vulkan validation error(s) during renderer init\n";
+		harness.shutdown();
+		return 1;
+	}
 
 	if (smoke)
 		std::cout << "smoke mode: tolerances widened for heterogeneous GPUs\n";
 
 	int failures = 0;
 	int updated = 0;
+	int ranScenes = 0;
 	std::vector<SceneSpec> scenes = buildSceneTable();
 	for (SceneSpec &scene : scenes)
 	{
 		if (!onlyScenes.empty() &&
 			std::find(onlyScenes.begin(), onlyScenes.end(), scene.name) == onlyScenes.end())
 			continue;
+		++ranScenes;
 
 		const fs::path sceneOut = outDir / scene.name;
 		std::cout << "[scene] " << scene.name << " (seed " << scene.seed << ", dayTime " << scene.dayTime
@@ -586,6 +653,14 @@ int main(int argc, char **argv)
 			if (first.valid() && actual.valid() &&
 				!std::equal(first.pixels.begin(), first.pixels.end(), actual.pixels.begin()))
 				errors.push_back("two identical frames differ (nondeterministic render)");
+			// NaN/Inf must be caught pre-tonemap: the LDR composite already
+			// quantizes non-finite HDR values into undefined bytes. The
+			// harness scans the R16G16B16A16_SFLOAT scene target (fp16
+			// exponent-all-ones bit pattern) after every render.
+			if (harness.lastNonFiniteSamples() > 0)
+				errors.push_back("HDR target contains " +
+								 std::to_string(harness.lastNonFiniteSamples()) +
+								 " non-finite (NaN/Inf) sample(s)");
 
 			RgbaImage mobFree;
 			if (scene.mobDeltaBase && errors.empty())
@@ -602,12 +677,29 @@ int main(int argc, char **argv)
 				const RgbaImage expected = visual::readPng(refPath.string());
 				if (updateReferences)
 				{
+					// Update mode still produces review artifacts: the OLD
+					// reference and the diff against it, so the PR shows
+					// exactly what changed.
 					if (!visual::writePng(refPath.string(), actual))
 						errors.push_back("failed to write reference " + refPath.string());
 					else
 					{
 						++updated;
 						std::cout << "  [update] wrote " << refPath.string() << "\n";
+						if (expected.valid())
+						{
+							const CompareThresholds contextThresholds = scene.thresholds;
+							const ImageMetrics shift = visual::compareImages(actual, expected,
+																			 contextThresholds.hotPixelThreshold);
+							visual::writePng((sceneOut / "expected.png").string(), expected);
+							visual::writePng((sceneOut / "diff.png").string(),
+											 visual::makeDiffImage(actual, expected));
+							writeText(sceneOut / "metrics.txt",
+									  "reference UPDATE for " + std::string(scene.name) +
+										  ": actual.png is the new golden, expected.png the previous "
+										  "one; shift vs previous reference:\n" +
+										  formatMetrics(shift, contextThresholds, true));
+						}
 					}
 				}
 				else if (!expected.valid())
@@ -666,6 +758,16 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (ranScenes == 0)
+	{
+		std::cerr << "FAIL: --scene";
+		for (const std::string &name : onlyScenes)
+			std::cerr << " " << name;
+		std::cerr << " matched no scene (valid names: noon_terrain, cascade_transition, cave_emissive,"
+					 " water_shore, sunset, midnight, mob_lighting, underwater)\n";
+		++failures;
+	}
+
 	const long renderValidationErrors = harness.validationErrors() - baselineValidation;
 	if (renderValidationErrors > 0)
 	{
@@ -676,9 +778,9 @@ int main(int argc, char **argv)
 
 	if (failures == 0)
 	{
-		std::cout << "ft_vox_visual_tests: OK ("
+		std::cout << "ft_vox_visual_tests: OK (" << ranScenes << " scene(s) "
 				  << (updateReferences ? std::to_string(updated) + " reference(s) updated"
-									   : "all scenes within tolerance")
+									   : "within tolerance")
 				  << ")\n";
 		return 0;
 	}

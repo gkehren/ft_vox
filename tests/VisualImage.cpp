@@ -110,26 +110,38 @@ ImageMetrics compareImages(const RgbaImage &actual, const RgbaImage &expected, i
 		return metrics; // incomparable: caller checks comparable()
 
 	const size_t pixelCount = actual.pixelCount();
-	long long sum = 0;
-	double sumSq = 0.0;
+	long long channelSum[3] = {0, 0, 0};
+	double channelSumSq[3] = {0.0, 0.0, 0.0};
 	long long maxDelta = 0;
 	long long hot = 0;
 	for (size_t i = 0; i < pixelCount; ++i)
 	{
 		const size_t offset = i * 4;
-		const int dr = std::abs(int(actual.pixels[offset]) - int(expected.pixels[offset]));
-		const int dg = std::abs(int(actual.pixels[offset + 1]) - int(expected.pixels[offset + 1]));
-		const int db = std::abs(int(actual.pixels[offset + 2]) - int(expected.pixels[offset + 2]));
-		const int delta = std::max({dr, dg, db}); // alpha ignored
-		sum += delta;
-		sumSq += double(delta) * double(delta);
-		maxDelta = std::max<long long>(maxDelta, delta);
-		if (delta > hotPixelThreshold)
+		int maxChannelDelta = 0;
+		for (int channel = 0; channel < 3; ++channel)
+		{
+			const int delta = std::abs(int(actual.pixels[offset + channel]) - int(expected.pixels[offset + channel]));
+			channelSum[channel] += delta;
+			channelSumSq[channel] += double(delta) * double(delta);
+			maxChannelDelta = std::max(maxChannelDelta, delta);
+		}
+		maxDelta = std::max<long long>(maxDelta, maxChannelDelta);
+		if (maxChannelDelta > hotPixelThreshold)
 			++hot;
 	}
-	metrics.meanAbsError = double(sum) / double(pixelCount);
-	metrics.rmsError = std::sqrt(sumSq / double(pixelCount));
-	metrics.maxAbsError = double(maxDelta);
+	// Per-channel mean/RMS averaged over R,G,B, normalized to [0,1] so the
+	// 3/255-style thresholds read as LSB budgets (cross-vendor tolerance).
+	const double channelCount = 3.0 * double(pixelCount);
+	double mean = 0.0;
+	double sumSq = 0.0;
+	for (int channel = 0; channel < 3; ++channel)
+	{
+		mean += double(channelSum[channel]);
+		sumSq += channelSumSq[channel];
+	}
+	metrics.meanAbsError = (mean / channelCount) / 255.0;
+	metrics.rmsError = std::sqrt(sumSq / channelCount) / 255.0;
+	metrics.maxAbsError = double(maxDelta) / 255.0;
 	metrics.hotPixels = hot;
 	metrics.hotPixelRatio = double(hot) / double(pixelCount);
 	metrics.width = actual.width;

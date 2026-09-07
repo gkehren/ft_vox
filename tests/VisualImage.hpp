@@ -21,7 +21,8 @@ struct RgbaImage
 
 struct ImageMetrics
 {
-	/// Mean over pixels of the per-pixel max channel |delta| (0..255 scale).
+	/// Mean per-channel absolute error, normalized to [0,1] (3/255 = a
+	/// 3-LSB average delta per channel).
 	double meanAbsError = 0.0;
 	double rmsError = 0.0;
 	double maxAbsError = 0.0;
@@ -54,8 +55,12 @@ bool writePng(const std::string &path, const RgbaImage &image);
 /// invalid RgbaImage (valid() == false) when the file is missing/corrupt.
 RgbaImage readPng(const std::string &path);
 
-/// Compare two images: per-pixel metric = max over R,G,B of |a-b| (alpha
-/// ignored). Size mismatch or invalid input returns incomparable metrics.
+/// Compare two images and return normalized metrics:
+/// - meanAbsError / rmsError are computed per channel (R, G, B — alpha
+///   ignored) and expressed in [0,1] (1.0 = full-scale 255 delta);
+/// - maxAbsError is the largest single channel delta, also in [0,1];
+/// - hotPixels counts pixels whose max channel delta exceeds the threshold.
+/// Size mismatch or invalid input returns incomparable metrics.
 ImageMetrics compareImages(const RgbaImage &actual, const RgbaImage &expected, int hotPixelThreshold);
 
 /// True when every metric sits inside the tolerance envelope.

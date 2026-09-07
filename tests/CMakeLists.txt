@@ -655,11 +655,28 @@ set_tests_properties(MobVulkanRender PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE
 add_test(NAME MobRealTerrain COMMAND test_chunk_lifecycle --mobs-profile)
 
 # ---------------------------------------------------------------------------
+# Comparison plumbing for the visual harness: metric units, hot-pixel
+# counting, PNG round-trip (pure CPU — guards the tolerance-unit class of
+# bug found in review).
+# ---------------------------------------------------------------------------
+add_executable(test_visual_image
+    test_visual_image.cpp
+    VisualImage.cpp
+)
+target_include_directories(test_visual_image PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_visual_image PRIVATE miniz::miniz)
+add_test(NAME VisualImageMetrics COMMAND test_visual_image)
+
+# ---------------------------------------------------------------------------
 # Deterministic visual regression (issue #142): fixed scenes rendered offscreen
 # through the production WorldRenderer pass graph, tolerant comparison against
 # committed references in tests/visual-references/. References are only
 # written by the explicit --update-references developer action.
 #   ft_vox_visual_tests --update-references
+#
+# ctest runs in SMOKE mode (FT_VOX_VISUAL_SMOKE=1) so heterogeneous GPUs
+# don't go false-red; the strict canonical-GPU gate is a direct run without
+# --smoke (see docs/visual-regression.md).
 # ---------------------------------------------------------------------------
 add_executable(ft_vox_visual_tests
     test_visual_regression.cpp
@@ -717,7 +734,7 @@ add_test(NAME VisualRegression COMMAND ft_vox_visual_tests
     ${CMAKE_SOURCE_DIR}/tests/visual-references ${CMAKE_BINARY_DIR}/visual-qa)
 set_tests_properties(VisualRegression PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    ENVIRONMENT "FT_VOX_VALIDATION=1"
+    ENVIRONMENT "FT_VOX_VALIDATION=1;FT_VOX_VISUAL_SMOKE=1"
     SKIP_RETURN_CODE 77)
 
 # ---------------------------------------------------------------------------
