@@ -239,7 +239,33 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
 
 - Block **texture array** (`sampler2DArray`) for all solid/water materials (~70 layers: core blocks + wood species, climate surfaces, ice, deepslate, etc.). Uploaded as **sRGB** (`colorspace::kAlbedoTextureFormat`) — see [Color-space contract](#color-space-contract-renderercolorspacehpp-issue-135).
 - **Single layer table** `kBlockLayers` in `Renderer/MinecraftTextures.hpp`: Minecraft basename + **bundled fallback** PNG + transparency per `TextureType`. Meshing `TextureManager::isTransparent` and atlas load both use it. Face remap / foliage / ice helpers live here too (`blockTopFace`, `blockIsFoliage`, …).
-- Each PNG is decoded **once**; layer size = max frame edge; nearest-neighbor into the atlas.
+- Each PNG is decoded **once**; layer size = max frame edge normalized to a
+  power of two (min 16); nearest-neighbor into the atlas.
+- **Mip chain (CPU-generated):** each decoded RGBA8 layer also gets a full mip
+  chain built on the CPU (`Renderer/TextureMips.*`): texels are sRGB-decoded to
+  linear light before averaging, color is filtered premultiplied (no fringe),
+  and cutout alpha coverage is preserved by a per-level rescale that brings
+  each mip's coverage (fraction of texels above the canonical `0.5` threshold —
+  shared with the shaders through `ressources/shaders/vulkan/cutout.inc.glsl`
+  and `src/Renderer/TextureMips.hpp`) back to the base layer's coverage:
+  DirectXTex-style binary search plus quantized tie resolution that
+  promotes/demotes individual boundary texels until the covered texel count
+  matches the target exactly (Bayer-spread), so isolated same-alpha details
+  survive. Fully transparent texels are alpha-bleed dilated with their covered
+  neighbors' color on every level including mip 0, so LINEAR filtering never
+  darkens cutout edges. Downsampling partitions the source domain in integer
+  windows — every source texel contributes exactly once (NPOT edges are never
+  dropped), and the canonical layer size is normalized to a power of two
+  (min 16). The whole chain is staged and uploaded in one
+  `vkCmdCopyBufferToImage` (one copy region per layer × mip,
+  layer-major/mip-minor staging layout); a full chain costs ~+33% extra device
+  memory for that image.
+- **Sampler:** NEAREST magnification (keeps the pixel-art look up close), LINEAR
+  minification with LINEAR mip selection, `maxLod = VK_LOD_CLAMP_NONE`. Anisotropy
+  is enabled only when the device enabled `samplerAnisotropy`
+  (`VkContext::samplerAnisotropyEnabled`), capped at 8x and clamped to the device
+  limit; unsupported devices fall back gracefully to 1x.
+- Water and shadow passes sample through the same sampler via set1 binding 0.
 - Path resolve (explicit pack root only — no getenv in texture code):
   1. `{pack_root}/assets/minecraft/textures/block/<name>.png` when pack is non-empty and file exists
   2. Else `{RES_PATH}textures/<name>.png` when that file exists

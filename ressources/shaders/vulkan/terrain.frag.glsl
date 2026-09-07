@@ -14,6 +14,7 @@ layout(location = 9) in float vViewDepth;
 #include "frame_ubo.inc.glsl"
 #include "csm.inc.glsl"
 #include "colorspace.inc.glsl"
+#include "cutout.inc.glsl"
 
 // x=wind, y=emissive, z=iceSpec, w=flags — materials::MaterialTableUBO
 layout(set = 0, binding = 1) uniform MaterialTable {
@@ -33,7 +34,7 @@ vec4 materialFor(float texIdx)
 void main()
 {
     vec4 texColor = texture(textureArray, vec3(vTexCoord, vTextureIndex));
-    if (texColor.a < 0.01)
+    if (texColor.a < kAlphaCutoutThreshold)
         discard;
 
     vec3 color = texColor.rgb;

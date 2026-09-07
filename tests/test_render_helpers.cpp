@@ -10,11 +10,20 @@
 #include <Renderer/ResourcePackReader.hpp>
 #include <Renderer/IndirectDrawUtils.hpp>
 #include <Renderer/ColorSpace.hpp>
+#include <Renderer/TextureMips.hpp>
+// stb_image decodes bundled pack PNGs byte-exactly for the glass/ice mip
+// contract (mip block 13). This test owns the IMPLEMENTATION translation
+// unit: no other stb-using .cpp is compiled into test_render_helpers.
+#ifndef STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_IMPLEMENTATION
+#endif
+#include <stb_image/stb_image.h>
 #include <Engine/EngineDefs.hpp>
 #include <fstream>
 #include <filesystem>
 #include <utils.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -821,6 +830,834 @@ int main()
 		const float oldDoubleTransfer = linearToSrgb(std::pow(midGrayLinear, 1.0f / 2.2f));
 		if (std::abs(oldDoubleTransfer - midGraySrgb) < 0.15f)
 			ok = fail("Old transfer was not distinctively washed out (double gamma check)");
+	}
+
+	// --- Texture mip chains + cutout policy (issue #136) ---
+	{
+		using namespace texture_mips;
+
+		// Covered-texel count of one mip level (alpha/255 >= kAlphaCutoutThreshold):
+		// the quantity the quantized coverage rescale pins exactly on every
+		// generated level.
+		const auto coveredTexels = [](const uint8_t *pixels, uint32_t w) {
+			uint64_t covered = 0;
+			for (uint64_t i = 0; i < static_cast<uint64_t>(w) * w; ++i)
+			{
+				if (static_cast<float>(pixels[i * 4 + 3]) / 255.0f >= kAlphaCutoutThreshold)
+					++covered;
+			}
+			return covered;
+		};
+
+		// 1. Mip level counts: floor(log2(size)) + 1
+		{
+			const struct
+			{
+				uint32_t size;
+				uint32_t levels;
+			} countCases[] = {
+				{1, 1}, {2, 2}, {16, 5}, {64, 7}, {20, 5}, {3, 2},
+			};
+			for (const auto &c : countCases)
+			{
+				if (mipLevelCount(c.size) != c.levels)
+					ok = fail("mipLevelCount(" + std::to_string(c.size) + ") must be " +
+					          std::to_string(c.levels) + " (got " +
+					          std::to_string(mipLevelCount(c.size)) + ")");
+			}
+		}
+
+		// 2. Chain layout: 16 px -> 5 levels of (256+64+16+4+1) texels
+		if (chainBytes(16) != (256 + 64 + 16 + 4 + 1) * 4)
+			ok = fail("chainBytes(16) must be (256+64+16+4+1)*4");
+		if (chainOffset(16, 1) != 256 * 4)
+			ok = fail("chainOffset(16, 1) must be 256*4");
+		if (chainOffset(16, 4) != (256 + 64 + 16 + 4) * 4)
+			ok = fail("chainOffset(16, 4) must be (256+64+16+4)*4");
+		if (mipLevelBytes(16, 2) != 16 * 4)
+			ok = fail("mipLevelBytes(16, 2) must be 16*4");
+		if (chainOffset(16, 5) != chainBytes(16))
+			ok = fail("chainOffset past the last level must equal chainBytes");
+
+		// 3. Opaque textures stay fully opaque through every level
+		{
+			const uint32_t base = 16;
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					texel[0] = static_cast<uint8_t>((x * 17 + 11) & 0xff);
+					texel[1] = static_cast<uint8_t>((y * 29 + 7) & 0xff);
+					texel[2] = static_cast<uint8_t>((x * 7 + y * 13 + 3) & 0xff);
+					texel[3] = 255;
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+			const uint32_t levels = mipLevelCount(base);
+			for (uint32_t level = 0; level < levels; ++level)
+			{
+				const uint32_t w = std::max(base >> level, 1u);
+				const uint8_t *pixels = chain.data() + chainOffset(base, level);
+				for (uint32_t i = 0; i < w * w; ++i)
+				{
+					if (pixels[i * 4 + 3] != 255)
+					{
+						ok = fail("opaque texture must stay alpha 255 at level " +
+						          std::to_string(level));
+						break;
+					}
+				}
+			}
+		}
+
+		// 4. Fringe: half-coverage 2x2 — opaque green over transparent magenta.
+		// Premultiplied area filtering gives the transparent row zero color
+		// weight, and the coverage search keeps the level's unscaled ~0.5 alpha
+		// average (equal-error ties resolve toward the higher coverage), so the
+		// 1x1 level stays ~50% alpha, green-dominant, with no magenta bleed.
+		{
+			const uint32_t base = 2;
+			const std::vector<uint8_t> layer = {
+				// top row: two opaque green texels
+				0, 255, 0, 255, 0, 255, 0, 255,
+				// bottom row: two fully transparent magenta texels (would fringe if bled)
+				255, 0, 255, 0, 255, 0, 255, 0,
+			};
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+			const uint8_t *level1 = chain.data() + chainOffset(base, 1); // 1x1
+			const float a = static_cast<float>(level1[3]) / 255.0f;
+			if (std::abs(a - 0.5f) > 2.0f / 255.0f)
+				ok = fail("half-coverage 2x2 must keep alpha ~0.5 at level 1 (got " +
+				          std::to_string(a) + ")");
+			const float r = static_cast<float>(level1[0]) / 255.0f;
+			const float g = static_cast<float>(level1[1]) / 255.0f;
+			const float b = static_cast<float>(level1[2]) / 255.0f;
+			if (!(g > r && g > b))
+				ok = fail("fringe filter must stay green-dominant (G strictly max)");
+			if (r >= 60.0f / 255.0f || b >= 60.0f / 255.0f)
+				ok = fail("fringe filter must not bleed transparent magenta (R/B < 60/255)");
+		}
+
+		// 5. Sub-threshold soft alpha: every texel below the cutout threshold
+		// gives the layer 0 coverage, so nothing may be rescaled or dilated —
+		// the filtered level keeps the exact alpha byte and its RGB
+		{
+			const uint32_t base = 2;
+			const std::vector<uint8_t> faint = {
+				128, 0, 128, 100, 128, 0, 128, 100,
+				128, 0, 128, 100, 128, 0, 128, 100,
+			};
+			std::vector<uint8_t> faintChain(chainBytes(base), 0);
+			generateLayerChain(base, faint.data(), faintChain.data());
+			const uint8_t *faint1 = faintChain.data() + chainOffset(base, 1);
+			if (faint1[3] != 100)
+				ok = fail("sub-threshold soft alpha (coverage 0) must keep its exact byte (got " +
+				          std::to_string(faint1[3]) + ")");
+			if (std::abs(int(faint1[0]) - 128) > 1 || faint1[1] > 1 || std::abs(int(faint1[2]) - 128) > 1)
+				ok = fail("soft-alpha RGB must survive premultiplied filtering unchanged");
+		}
+
+		// 6. Coverage preservation matrix: for cutout layers (0 < coverage < 1)
+		// every generated level with w >= 2 must hold the base level's own
+		// measured covered-texel count EXACTLY: the per-level binary search only
+		// finds the alpha scale, then the quantized tie resolution promotes and
+		// demotes individual boundary texels until the covered count equals
+		// lround(baseCoverage * w * w) (all count ratios in these fixtures are
+		// dyadic, so the double math is exact). Loud magenta under the
+		// transparent texels doubles as a no-bleed probe at every depth.
+		{
+			const uint32_t base = 8;
+			struct MaskCase
+			{
+				const char *name;
+				bool opaque[8][8];
+			};
+			std::vector<MaskCase> masks;
+
+			MaskCase sparse{};
+			sparse.name = "sparse ~25%";
+			for (uint32_t y = 0; y < base; ++y)
+				for (uint32_t x = 0; x < base; ++x)
+					sparse.opaque[y][x] = ((x * 3 + y * 5) % 8) < 2;
+			masks.push_back(sparse);
+
+			MaskCase dense{};
+			dense.name = "dense ~75%";
+			for (uint32_t y = 0; y < base; ++y)
+				for (uint32_t x = 0; x < base; ++x)
+					dense.opaque[y][x] = ((x * 3 + y * 5) % 8) < 6;
+			masks.push_back(dense);
+
+			MaskCase blob{};
+			blob.name = "leaf-like blob";
+			{
+				const char *rows[8] = {
+					"00000000",
+					"00111100",
+					"01111110",
+					"01101110",
+					"01111110",
+					"00111100",
+					"00011000",
+					"00000000",
+				};
+				for (uint32_t y = 0; y < base; ++y)
+					for (uint32_t x = 0; x < base; ++x)
+						blob.opaque[y][x] = rows[y][x] == '1';
+			}
+			masks.push_back(blob);
+
+			MaskCase branches{};
+			branches.name = "isolated branches";
+			branches.opaque[1][1] = true;
+			branches.opaque[2][5] = true;
+			branches.opaque[5][3] = true;
+			branches.opaque[6][6] = true;
+			masks.push_back(branches);
+
+			for (const auto &mask : masks)
+			{
+				std::vector<uint8_t> layer(base * base * 4, 0);
+				for (uint32_t y = 0; y < base; ++y)
+				{
+					for (uint32_t x = 0; x < base; ++x)
+					{
+						uint8_t *texel = &layer[(y * base + x) * 4];
+						if (mask.opaque[y][x])
+						{
+							texel[0] = 0;
+							texel[1] = 255;
+							texel[2] = 0;
+							texel[3] = 255;
+						}
+						else
+						{
+							// Deliberately loud RGB under the transparent
+							// texel: an alpha-unaware filter would bleed
+							// magenta down the chain.
+							texel[0] = 255;
+							texel[1] = 0;
+							texel[2] = 255;
+							texel[3] = 0;
+						}
+					}
+				}
+				std::vector<uint8_t> chain(chainBytes(base), 0);
+				generateLayerChain(base, layer.data(), chain.data());
+
+				// The target is the layer's own measured mip-0 coverage, not a
+				// nominal value.
+				const uint64_t baseCovered = coveredTexels(chain.data(), base);
+				const double baseCoverage =
+					static_cast<double>(baseCovered) / static_cast<double>(base * base);
+				if (baseCoverage <= 0.0 || baseCoverage >= 1.0)
+					ok = fail(std::string("mask ") + mask.name +
+					          " must be a cutout layer (0 < coverage < 1)");
+
+				const uint32_t levels = mipLevelCount(base);
+				for (uint32_t level = 1; level < levels; ++level)
+				{
+					const uint32_t w = std::max(base >> level, 1u);
+					// A 1x1 level can only represent coverage 0 or 1 — skip it.
+					if (w < 2)
+						continue;
+					const uint8_t *pixels = chain.data() + chainOffset(base, level);
+					// The only covered color is pure green: no generated texel
+					// may see R or B exceed G (magenta bleed).
+					for (uint32_t i = 0; i < w * w; ++i)
+					{
+						if (pixels[i * 4] > pixels[i * 4 + 1] || pixels[i * 4 + 2] > pixels[i * 4 + 1])
+							ok = fail(std::string("magenta bled into mask ") + mask.name +
+							          " at level " + std::to_string(level));
+					}
+					const uint64_t coveredCount = coveredTexels(pixels, w);
+					const uint64_t expected = static_cast<uint64_t>(std::lround(
+						baseCoverage * static_cast<double>(w) * static_cast<double>(w)));
+					if (expected > 0 && coveredCount == 0)
+						ok = fail(std::string("non-zero representable cutout coverage vanished for mask ") +
+						          mask.name + " at level " + std::to_string(level));
+					if (coveredCount != expected)
+						ok = fail(std::string("coverage drifted for mask ") + mask.name +
+						          " at level " + std::to_string(level) + " (expected " +
+						          std::to_string(expected) + " of " + std::to_string(w * w) +
+						          " covered texels, got " + std::to_string(coveredCount) + ")");
+				}
+
+				// Focused regression (review P1): the isolated-branches mask is
+				// four 1-texel features (6.25% coverage) whose 4x4 window
+				// averages all land on 0 or 64/255 — a global alpha scale alone
+				// could only give the level 0% or 25% coverage. The quantized
+				// tie resolution promotes exactly one boundary texel,
+				// preserving the representable 6.25% detail: coveredCount must
+				// be exactly 1.
+				if (std::string(mask.name) == "isolated branches")
+				{
+					const uint8_t *level1 = chain.data() + chainOffset(base, 1); // 4x4
+					const uint64_t level1Covered = coveredTexels(level1, 4);
+					if (level1Covered != 1)
+						ok = fail("isolated branches must keep exactly 1 of 16 texels covered at level 1 (got " +
+						          std::to_string(level1Covered) +
+						          ") — quantized tie resolution lost the representable 6.25% detail");
+				}
+			}
+		}
+
+		// 7. Checkerboard pathology: every 2x2 window of a perfect checkerboard
+		// averages to exactly 0.5 alpha, so each filtered level is uniform — all
+		// of its texels share the single value 128/255 (just above the
+		// threshold), and a global alpha scale can only move them all together:
+		// coverage 0 or 1. The quantized tie resolution decides WHICH texels
+		// cross instead: the 4x4 Bayer spread promotes/demotes exactly half of
+		// each uniform level, so the 50% checkerboard keeps exactly 50% covered
+		// at every generated level (8/16 at 4x4, 2/4 at 2x2) instead of
+		// collapsing toward either extreme.
+		{
+			const uint32_t base = 8;
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					if ((x + y) % 2 == 0)
+					{
+						texel[0] = 0;
+						texel[1] = 255;
+						texel[2] = 0;
+						texel[3] = 255;
+					}
+					else
+					{
+						texel[0] = 255;
+						texel[1] = 0;
+						texel[2] = 255;
+						texel[3] = 0;
+					}
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+			const double baseCoverage =
+				static_cast<double>(coveredTexels(chain.data(), base)) /
+				static_cast<double>(base * base);
+			const uint32_t levels = mipLevelCount(base);
+			for (uint32_t level = 1; level < levels; ++level)
+			{
+				const uint32_t w = std::max(base >> level, 1u);
+				// A 1x1 level can only represent coverage 0 or 1 — skip it.
+				if (w < 2)
+					continue;
+				const uint8_t *pixels = chain.data() + chainOffset(base, level);
+				const uint64_t coveredCount = coveredTexels(pixels, w);
+				const uint64_t expected = static_cast<uint64_t>(std::lround(
+					baseCoverage * static_cast<double>(w) * static_cast<double>(w)));
+				if (coveredCount != expected)
+					ok = fail("checkerboard must keep exactly " + std::to_string(expected) +
+					          " of " + std::to_string(w * w) + " texels covered at level " +
+					          std::to_string(level) + " (got " + std::to_string(coveredCount) + ")");
+			}
+		}
+
+		// 8. Mip-0 edge dilation (review P1/P2): slight minification already
+		// filters mip 0 with LINEAR, so the base level itself must carry border
+		// colors — alpha-0 texels adjacent (8-neighborhood) to covered texels
+		// take their linear-light average RGB on mip 0 too, alpha stays exactly
+		// 0, and texels with no covered neighbor within one texel stay black.
+		{
+			const uint32_t base = 4;
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					if (x == 0)
+					{
+						texel[0] = 0;
+						texel[1] = 255;
+						texel[2] = 0;
+						texel[3] = 255;
+					}
+					else
+					{
+						texel[0] = 0;
+						texel[1] = 0;
+						texel[2] = 0;
+						texel[3] = 0;
+					}
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+			const uint8_t *mip0 = chain.data();
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					const uint8_t *texel = mip0 + (y * base + x) * 4;
+					// Alpha bytes are never touched by the dilation.
+					if (texel[3] != (x == 0 ? 255 : 0))
+						ok = fail("mip-0 dilation must keep alpha bytes unchanged (texel " +
+						          std::to_string(y * base + x) + ")");
+					if (x == 0)
+					{
+						// Covered texels keep their own RGB verbatim.
+						if (texel[0] != 0 || texel[1] != 255 || texel[2] != 0)
+							ok = fail("mip-0 dilation must leave covered texels' RGB unchanged (row " +
+							          std::to_string(y) + ")");
+					}
+					else if (x == 1)
+					{
+						// Adjacent to the covered green column: dilated border color.
+						const float r = static_cast<float>(texel[0]) / 255.0f;
+						const float g = static_cast<float>(texel[1]) / 255.0f;
+						const float b = static_cast<float>(texel[2]) / 255.0f;
+						if (!(g > 100.0f / 255.0f && g > r && g > b) ||
+							r >= 60.0f / 255.0f || b >= 60.0f / 255.0f)
+							ok = fail("mip-0 texels adjacent to covered texels must carry the green border color (column 1, row " +
+							          std::to_string(y) + ")");
+					}
+					else
+					{
+						// Columns 2-3 have no covered neighbor within one texel.
+						if (texel[0] != 0 || texel[1] != 0 || texel[2] != 0)
+							ok = fail("mip-0 texels without a covered neighbor must stay black (column " +
+							          std::to_string(x) + ", row " + std::to_string(y) + ")");
+					}
+				}
+			}
+		}
+
+		// 9. NPOT area sampling: on a 5x5 layer the level-1 texel (1,1) averages
+		// the whole {2,3,4}² source window — the remainder is spread across the
+		// edge texels, nothing is dropped — so the opaque red last row/column
+		// keeps contributing down to the 1x1 level
+		{
+			const uint32_t base = 5;
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					const bool border = (x == base - 1) || (y == base - 1);
+					texel[0] = border ? 255 : 0;
+					texel[1] = 0;
+					texel[2] = 0;
+					texel[3] = 255;
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+			if (mipLevelCount(base) != 3)
+				ok = fail("mipLevelCount(5) must be 3 (levels 5, 2, 1)");
+			const uint8_t *level1 = chain.data() + chainOffset(base, 1); // 2x2
+			// The layer is fully opaque: the NPOT windows must keep alpha 255 too.
+			if (level1[3] != 255 || level1[7] != 255 || level1[11] != 255 || level1[15] != 255)
+				ok = fail("NPOT opaque layer must keep alpha 255 at level 1");
+			// Texel (1,1) blends 5 red border texels of its 9-tap window.
+			if (!(level1[12] > level1[13] && level1[12] > level1[14]))
+				ok = fail("NPOT level 1 texel (1,1) must be red-dominant (R strictly max)");
+			// Texel (0,0) blends only interior black texels.
+			if (level1[0] >= 60 || level1[1] >= 60 || level1[2] >= 60)
+				ok = fail("NPOT level 1 texel (0,0) must stay black (< 60/255 per channel)");
+			// The red contribution must survive all the way to the 1x1 level.
+			const uint8_t *level2 = chain.data() + chainOffset(base, 2); // 1x1
+			if (!(level2[0] > level2[1] && level2[0] > level2[2]))
+				ok = fail("NPOT red contribution must reach the 1x1 level (R strictly max)");
+		}
+
+		// 10. Edge dilation (dark-fringe fix): generated alpha-0 texels adjacent
+		// to covered texels take the linear-light average of their covered
+		// 8-neighborhood while their alpha stays exactly 0. The mip-0 input is
+		// edge-dilated too now, but the premultiplied filter ignores alpha-0
+		// RGB, so the level-1 results are unchanged.
+		{
+			const uint32_t base = 4;
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					if (x == 0)
+					{
+						texel[0] = 0;
+						texel[1] = 255;
+						texel[2] = 0;
+						texel[3] = 255;
+					}
+					else
+					{
+						texel[0] = 0;
+						texel[1] = 0;
+						texel[2] = 0;
+						texel[3] = 0;
+					}
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+			const uint8_t *level1 = chain.data() + chainOffset(base, 1); // 2x2
+			for (uint32_t i = 0; i < 4; ++i)
+			{
+				const uint8_t *texel = level1 + i * 4;
+				if (texel[3] != 0)
+					continue;
+				const float r = static_cast<float>(texel[0]) / 255.0f;
+				const float g = static_cast<float>(texel[1]) / 255.0f;
+				const float b = static_cast<float>(texel[2]) / 255.0f;
+				if (!(g > 100.0f / 255.0f && g > r && g > b))
+					ok = fail("dilated alpha-0 texel must carry the green border color (level 1, texel " +
+					          std::to_string(i) + ")");
+			}
+		}
+
+		// 11. Multi-layer atlas: layer-major / mip-minor buffer with per-layer
+		// mip-0 copies and a spot-checked filtered value. Mip-0 contract: byte
+		// exact EXCEPT the RGB of alpha-0 texels, which mip-0 edge dilation may
+		// recolor — these test layers have no alpha-0 texels, so their mip 0
+		// stays fully byte-exact.
+		{
+			const uint32_t base = 4;
+			const uint32_t layers = 2;
+			const uint32_t mip0Bytes = base * base * 4;
+			std::vector<uint8_t> atlas(layers * mip0Bytes, 0);
+			for (uint32_t i = 0; i < mip0Bytes; ++i)
+				atlas[i] = static_cast<uint8_t>((i % 251) + 1); // layer 0 pattern
+			for (uint32_t i = 0; i < mip0Bytes; ++i)
+				atlas[mip0Bytes + i] = static_cast<uint8_t>((i * 37 + 11) & 0xff); // layer 1 differs
+
+			const std::vector<uint8_t> out = buildMipChainAtlas(base, layers, atlas);
+			if (out.size() != static_cast<size_t>(layers) * chainBytes(base))
+				ok = fail("atlas output must hold one full chain per layer (got " +
+				          std::to_string(out.size()) + " bytes)");
+			// Each layer's mip 0 must be byte-exact (no alpha-0 texels in these
+			// layers, so mip-0 edge dilation cannot recolor anything).
+			for (uint32_t i = 0; i < mip0Bytes; ++i)
+			{
+				if (out[i] != atlas[i] || out[chainBytes(base) + i] != atlas[mip0Bytes + i])
+					ok = fail("atlas layer mip-0 must be byte-exact (byte " +
+					          std::to_string(i) + ")");
+			}
+			// Layer 1's level 1 starts at chainBytes + chainOffset and fits the buffer.
+			if (chainBytes(base) + chainOffset(base, 1) + mipLevelBytes(base, 1) > out.size())
+				ok = fail("layer 1 level 1 range must fit inside the atlas buffer");
+			// Layer 0 level 1 (2x2) texel (0,0) alpha = rounded average of the
+			// mip-0 {0,1}x{0,1} alpha bytes (layer 0's coverage is 0, so the
+			// value is the plain area average, untouched by the rescale).
+			const auto mip0Alpha = [&atlas, base](uint32_t x, uint32_t y) {
+				return atlas[(y * base + x) * 4 + 3];
+			};
+			const uint32_t alphaSum =
+				mip0Alpha(0, 0) + mip0Alpha(1, 0) + mip0Alpha(0, 1) + mip0Alpha(1, 1);
+			const uint8_t *layer0Level1 = out.data() + chainOffset(base, 1);
+			const int expectedAlpha = static_cast<int>(alphaSum / 4);
+			if (std::abs(static_cast<int>(layer0Level1[3]) - expectedAlpha) > 1)
+				ok = fail("layer 0 level 1 alpha must equal the 2x2 alpha average (got " +
+				          std::to_string(static_cast<int>(layer0Level1[3])) + ", expected ~" +
+				          std::to_string(expectedAlpha) + ")");
+		}
+
+		// 12. Synthetic alpha levels (review P2): a layer mixing all six
+		// interesting alpha bytes {0, 64, 127, 128, 192, 255} with one fixed RGB
+		// per level. Mip 0 must be byte-exact for alpha and for the RGB of every
+		// alpha > 0 texel (only alpha-0 texels may be recolored by edge
+		// dilation), every generated level must hold the exact covered count,
+		// and a final alpha of 0 must always store RGB 0 (no hidden garbage
+		// under transparency).
+		{
+			const uint32_t base = 16;
+			const uint8_t alphaLevels[6] = {0, 64, 127, 128, 192, 255};
+			const uint8_t rgbLevels[6][3] = {
+				{255, 0, 0},   {0, 255, 0},   {0, 0, 255},
+				{255, 255, 0}, {255, 0, 255}, {0, 255, 255},
+			};
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					const uint32_t k = (x + 3 * y) % 6;
+					texel[0] = rgbLevels[k][0];
+					texel[1] = rgbLevels[k][1];
+					texel[2] = rgbLevels[k][2];
+					texel[3] = alphaLevels[k];
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			generateLayerChain(base, layer.data(), chain.data());
+
+			// Mip 0: alpha bytes byte-exact, RGB byte-exact wherever alpha > 0.
+			for (uint32_t i = 0; i < base * base; ++i)
+			{
+				const uint8_t *src = &layer[i * 4];
+				const uint8_t *out = &chain[i * 4];
+				if (out[3] != src[3])
+					ok = fail("synthetic alpha levels: mip-0 alpha must be byte-exact (texel " +
+					          std::to_string(i) + ")");
+				if (src[3] > 0 && (out[0] != src[0] || out[1] != src[1] || out[2] != src[2]))
+					ok = fail("synthetic alpha levels: mip-0 RGB of alpha>0 texels must be byte-exact (texel " +
+					          std::to_string(i) + ")");
+			}
+
+			const uint64_t baseCovered = coveredTexels(chain.data(), base);
+			const double baseCoverage =
+				static_cast<double>(baseCovered) / static_cast<double>(base * base);
+			const uint32_t levels = mipLevelCount(base);
+			for (uint32_t level = 1; level < levels; ++level)
+			{
+				const uint32_t w = std::max(base >> level, 1u);
+				// A 1x1 level can only represent coverage 0 or 1 — skip it.
+				if (w < 2)
+					continue;
+				const uint8_t *pixels = chain.data() + chainOffset(base, level);
+				const uint64_t coveredCount = coveredTexels(pixels, w);
+				const uint64_t expected = static_cast<uint64_t>(std::lround(
+					baseCoverage * static_cast<double>(w) * static_cast<double>(w)));
+				if (coveredCount != expected)
+					ok = fail("synthetic alpha levels: covered count must be exactly " +
+					          std::to_string(expected) + " of " + std::to_string(w * w) +
+					          " at level " + std::to_string(level) + " (got " +
+					          std::to_string(coveredCount) + ")");
+				for (uint32_t i = 0; i < w * w; ++i)
+				{
+					if (pixels[i * 4 + 3] == 0 &&
+						(pixels[i * 4] != 0 || pixels[i * 4 + 1] != 0 || pixels[i * 4 + 2] != 0))
+						ok = fail("synthetic alpha levels: final alpha 0 must store RGB 0 (level " +
+						          std::to_string(level) + ", texel " + std::to_string(i) + ")");
+				}
+			}
+		}
+
+		// 13. Bundled-pack glass/ice contract (review P2): the canonical cutout
+		// threshold (alpha/255 >= 0.5) must classify the shipped pack's
+		// translucency textures exactly as the mip generator assumes — glass is
+		// a binary cutout (the threshold is an identity for it), ice is
+		// uniformly translucent at alpha 190 (190/255 >= 0.5, so it is never
+		// discarded, and a uniform plain alpha average keeps exactly 190 through
+		// the chain), and the packed ices are fully opaque.
+		{
+			namespace fs = std::filesystem;
+			const char *candidates[] = {
+				"ressources/default-resource-pack.zip",
+				"../ressources/default-resource-pack.zip",
+				"../../ressources/default-resource-pack.zip",
+			};
+			std::string foundZip;
+			for (const char *candidate : candidates)
+			{
+				if (fs::exists(candidate))
+				{
+					foundZip = candidate;
+					break;
+				}
+			}
+			if (foundZip.empty())
+			{
+				ok = fail("default-resource-pack.zip not found (bundled glass/ice mip contract untested)");
+			}
+			else
+			{
+				ResourcePackReader reader(foundZip);
+				if (!reader.isValid())
+					ok = fail("ResourcePackReader failed to open default-resource-pack.zip");
+
+				// Decode a bundled block texture into a 16x16 RGBA8 layer.
+				const auto decodeBlockLayer = [&](const char *basename, std::vector<uint8_t> &layer) {
+					std::vector<uint8_t> png;
+					if (!reader.readBlockTexture(basename, png) || png.empty())
+					{
+						ok = fail(std::string("failed to read ") + basename +
+						          " from the default resource pack");
+						return false;
+					}
+					int w = 0;
+					int h = 0;
+					int comp = 0;
+					stbi_uc *decoded =
+						stbi_load_from_memory(png.data(), static_cast<int>(png.size()), &w, &h, &comp, 4);
+					if (!decoded)
+					{
+						ok = fail(std::string("stb_image failed to decode ") + basename);
+						return false;
+					}
+					layer.assign(decoded, decoded + static_cast<size_t>(w) * h * 4);
+					stbi_image_free(decoded);
+					if (w != 16 || h != 16)
+					{
+						ok = fail(std::string(basename) + " must decode to 16x16 (got " +
+						          std::to_string(w) + "x" + std::to_string(h) + ")");
+						return false;
+					}
+					return true;
+				};
+
+				// glass.png: binary cutout, alpha {0, 255} only.
+				std::vector<uint8_t> glass;
+				if (decodeBlockLayer("glass.png", glass))
+				{
+					for (uint32_t i = 0; i < 256; ++i)
+					{
+						const uint8_t a = glass[i * 4 + 3];
+						if (a != 0 && a != 255)
+							ok = fail("glass.png alpha must be a binary cutout {0, 255} (texel " +
+							          std::to_string(i) + " has alpha " + std::to_string(static_cast<int>(a)) + ")");
+					}
+					// The 0.5 threshold is an identity for a binary cutout, so
+					// the generated chain must hold the mip-0 covered count
+					// exactly at every level.
+					std::vector<uint8_t> chain(chainBytes(16), 0);
+					generateLayerChain(16, glass.data(), chain.data());
+					const double baseCoverage =
+						static_cast<double>(coveredTexels(chain.data(), 16)) / 256.0;
+					for (uint32_t level = 1; level < mipLevelCount(16); ++level)
+					{
+						const uint32_t w = std::max(16u >> level, 1u);
+						// A 1x1 level can only represent coverage 0 or 1 — skip it.
+						if (w < 2)
+							continue;
+						const uint64_t coveredCount =
+							coveredTexels(chain.data() + chainOffset(16, level), w);
+						const uint64_t expected = static_cast<uint64_t>(std::lround(
+							baseCoverage * static_cast<double>(w) * static_cast<double>(w)));
+						if (coveredCount != expected)
+							ok = fail("glass.png chain must hold exactly " + std::to_string(expected) +
+							          " of " + std::to_string(w * w) + " texels covered at level " +
+							          std::to_string(level) + " (got " + std::to_string(coveredCount) + ")");
+					}
+				}
+
+				// ice.png: uniformly translucent, alpha 190 everywhere —
+				// coverage 1.0 skips the rescale and the uniform plain alpha
+				// average is exact, so every texel at EVERY level stays 190.
+				std::vector<uint8_t> ice;
+				if (decodeBlockLayer("ice.png", ice))
+				{
+					for (uint32_t i = 0; i < 256; ++i)
+					{
+						if (ice[i * 4 + 3] != 190)
+							ok = fail("ice.png must be uniformly translucent alpha 190 (texel " +
+							          std::to_string(i) + " has alpha " +
+							          std::to_string(static_cast<int>(ice[i * 4 + 3])) + ")");
+					}
+					std::vector<uint8_t> chain(chainBytes(16), 0);
+					generateLayerChain(16, ice.data(), chain.data());
+					for (uint32_t level = 0; level < mipLevelCount(16); ++level)
+					{
+						const uint32_t w = std::max(16u >> level, 1u);
+						const uint8_t *pixels = chain.data() + chainOffset(16, level);
+						for (uint32_t i = 0; i < w * w; ++i)
+						{
+							if (pixels[i * 4 + 3] != 190)
+								ok = fail("ice.png alpha must stay exactly 190 through the whole chain (level " +
+								          std::to_string(level) + ", texel " + std::to_string(i) + ")");
+						}
+					}
+				}
+
+				// blue_ice.png / packed_ice.png: fully opaque.
+				for (const char *name : {"blue_ice.png", "packed_ice.png"})
+				{
+					std::vector<uint8_t> layer;
+					if (decodeBlockLayer(name, layer))
+					{
+						for (uint32_t i = 0; i < 256; ++i)
+						{
+							if (layer[i * 4 + 3] != 255)
+								ok = fail(std::string(name) + " must be fully opaque alpha 255 (texel " +
+								          std::to_string(i) + " has alpha " +
+								          std::to_string(static_cast<int>(layer[i * 4 + 3])) + ")");
+						}
+					}
+				}
+			}
+		}
+
+		// 14. Anisotropy policy: device-gated, clamped to the device limit, >= 1.0
+		{
+			const SamplerAnisotropy unsupported = resolveAnisotropy(false, 16.0f);
+			if (unsupported.enabled || unsupported.maxAnisotropy != 1.0f)
+				ok = fail("anisotropy must be disabled with maxAnisotropy 1.0 when unsupported");
+			const SamplerAnisotropy full = resolveAnisotropy(true, 16.0f);
+			if (!full.enabled || full.maxAnisotropy != 8.0f)
+				ok = fail("anisotropy must honor the 8.0 request on capable devices");
+			const SamplerAnisotropy clamp4 = resolveAnisotropy(true, 4.0f);
+			if (!clamp4.enabled || clamp4.maxAnisotropy != 4.0f)
+				ok = fail("anisotropy must clamp to the 4.0 device limit");
+			const SamplerAnisotropy clamp2 = resolveAnisotropy(true, 2.0f);
+			if (!clamp2.enabled || clamp2.maxAnisotropy != 2.0f)
+				ok = fail("anisotropy must clamp to the 2.0 device limit");
+		}
+
+		// 15. Shader cutout threshold stays in sync with the mip generator
+		{
+			namespace fs = std::filesystem;
+			const char *candidates[] = {
+				"ressources/shaders/vulkan/cutout.inc.glsl",
+				"../ressources/shaders/vulkan/cutout.inc.glsl",
+				"../../ressources/shaders/vulkan/cutout.inc.glsl",
+			};
+			std::string glsl;
+			for (const char *c : candidates)
+			{
+				std::ifstream in(c);
+				if (in)
+				{
+					glsl.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+					break;
+				}
+			}
+			if (glsl.empty())
+			{
+				ok = fail("cutout.inc.glsl not found under ressources/shaders/vulkan");
+			}
+			else
+			{
+				const std::string key = "const float kAlphaCutoutThreshold = ";
+				const auto at = glsl.find(key);
+				if (at == std::string::npos)
+					ok = fail("cutout.inc.glsl must define kAlphaCutoutThreshold = <float>");
+				else
+				{
+					const float shaderThreshold = std::strtof(glsl.c_str() + at + key.size(), nullptr);
+					if (std::abs(shaderThreshold - kAlphaCutoutThreshold) > 1e-6f)
+						ok = fail("cutout.inc.glsl threshold must equal texture_mips::kAlphaCutoutThreshold");
+				}
+			}
+		}
+
+		// 16. Informational: CPU mip generation cost (no assertion)
+		{
+			const uint32_t base = 64;
+			std::vector<uint8_t> layer(base * base * 4, 0);
+			for (uint32_t y = 0; y < base; ++y)
+			{
+				for (uint32_t x = 0; x < base; ++x)
+				{
+					uint8_t *texel = &layer[(y * base + x) * 4];
+					texel[0] = static_cast<uint8_t>(x * 4);
+					texel[1] = static_cast<uint8_t>(y * 4);
+					texel[2] = static_cast<uint8_t>((x + y) * 2);
+					texel[3] = static_cast<uint8_t>((x + y) & 0xff);
+				}
+			}
+			std::vector<uint8_t> chain(chainBytes(base), 0);
+			const auto start = std::chrono::steady_clock::now();
+			constexpr int kIterations = 1000;
+			for (int i = 0; i < kIterations; ++i)
+				generateLayerChain(base, layer.data(), chain.data());
+			const auto elapsed = std::chrono::steady_clock::now() - start;
+			const double msPerLayer =
+				std::chrono::duration<double, std::milli>(elapsed).count() / kIterations;
+			std::cout << "test_render_helpers: generateLayerChain(64) average "
+			          << msPerLayer << " ms/layer over " << kIterations << " iterations\n";
+		}
 	}
 
 	if (!ok)
