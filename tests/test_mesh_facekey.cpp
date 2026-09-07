@@ -405,6 +405,32 @@ static void testTransparencyPairs()
 			  "glass|stone: glass owns no +X face against stone");
 		m.release();
 	}
+	{
+		// GLASS x=7 | WATER x=8 (in-section): GLASS (+X, -q side) owns the
+		// interface face per legacy priority; WATER (-X) must emit nothing.
+		Scene s;
+		s.chunk.setVoxel(7, 8, 0, GLASS);
+		s.chunk.setVoxel(8, 8, 0, WATER);
+		BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
+		CHECK(findQuad(m.opaque, 0, GLASS, glm::ivec3(8, 8, 0)) != nullptr,
+			  "in-section glass|water: glass +X face exists at interface");
+		CHECK(findQuad(m.water, 1, WATER, glm::ivec3(8, 8, 0)) == nullptr,
+			  "in-section glass|water: water -X face is culled");
+		m.release();
+	}
+	{
+		// WATER x=7 | GLASS x=8 (in-section): WATER (+X, -q side) owns the
+		// interface face per legacy priority; GLASS (-X) must emit nothing.
+		Scene s;
+		s.chunk.setVoxel(7, 8, 0, WATER);
+		s.chunk.setVoxel(8, 8, 0, GLASS);
+		BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
+		CHECK(findQuad(m.water, 0, WATER, glm::ivec3(8, 8, 0)) != nullptr,
+			  "in-section water|glass: water +X face exists at interface");
+		CHECK(findQuad(m.opaque, 1, GLASS, glm::ivec3(8, 8, 0)) == nullptr,
+			  "in-section water|glass: glass -X face is culled");
+		m.release();
+	}
 }
 
 static void testWater()
@@ -419,10 +445,8 @@ static void testWater()
 		BuiltMesh m = buildWithMetadataBounds(s.chunk, s.pool);
 		CHECK(totalOpaqueVertices(*m.result) == 0 && totalOpaqueIndices(*m.result) == 0,
 			  "water box: no opaque geometry");
-		for (const SectionMeshPayload &p : m.result->sections)
-			for (const Vertex &v : p.waterVertices)
 		CHECK(totalWaterVertices(*m.result) == 24 && totalWaterIndices(*m.result) == 36,
-				  "water box: 6 quads (top, bottom, four 4x2 sides)");
+			  "water box: 6 quads (top, bottom, four 4x2 sides)");
 		const QuadView *top = findQuad(m.water, 2, WATER, glm::ivec3(0, 10, 0));
 		CHECK(top != nullptr && top->mx == glm::ivec3(4, 10, 4),
 			  "water box: top face merged 4x4");

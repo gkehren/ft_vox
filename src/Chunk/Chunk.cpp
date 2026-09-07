@@ -1577,8 +1577,12 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
     const int yLo = ownerMinY;
     const int yHi = ownerMaxY;
     const int ySize = yHi - yLo + 1;
-    if (static_cast<size_t>(CHUNK_SIZE) * ySize > workspace.waterGrid.size())
-      workspace.waterGrid.resize(static_cast<size_t>(CHUNK_SIZE) * ySize);
+    const size_t gridSize =
+        static_cast<size_t>(CHUNK_SIZE) *
+        static_cast<size_t>(ySize) *
+        static_cast<size_t>(CHUNK_SIZE);
+    if (workspace.waterGrid.size() < gridSize)
+      workspace.waterGrid.resize(gridSize);
     size_t waterCount = 0;
     for (int y = yLo; y <= yHi; ++y)
       for (int z = 0; z < CHUNK_SIZE; ++z)
@@ -1600,15 +1604,20 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
     // 0 = closed (opaque block), 1 = open air, 2 = open transparent block.
     if (waterCount != 0)
     {
-      if (static_cast<size_t>(CHUNK_SIZE) * ySize > workspace.openGrid.size())
-        workspace.openGrid.resize(static_cast<size_t>(CHUNK_SIZE) * ySize);
+      if (workspace.openGrid.size() < gridSize)
+        workspace.openGrid.resize(gridSize);
       for (int y = yLo; y <= yHi; ++y)
         for (int z = 0; z < CHUNK_SIZE; ++z)
           for (int x = 0; x < CHUNK_SIZE; ++x)
           {
+            const size_t gi = (static_cast<size_t>(y - yLo) * CHUNK_SIZE + z) * CHUNK_SIZE + x;
             const TextureType geo = getBlockGeometryForMeshing(x, y, z);
-            workspace.openGrid[(static_cast<size_t>(y - yLo) * CHUNK_SIZE + z) * CHUNK_SIZE + x] =
-                (geo == AIR || TextureManager::isTransparent(geo)) ? 1 : 0;
+            uint8_t kind = 0;
+            if (geo == AIR)
+              kind = 1;
+            else if (TextureManager::isTransparent(geo))
+              kind = 2;
+            workspace.openGrid[gi] = kind;
           }
 
       const auto waterOccupied = [&](int lx, int ly, int lz) -> bool {
