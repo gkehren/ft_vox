@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 // Independent of the CPU/GPU profilers. Gauges describe ownership; events
 // describe a capture interval. No worker-owned vector is read by the sampler.
@@ -88,6 +90,14 @@ struct Snapshot {
     std::array<uint64_t, GaugeCount> current{}, peak{};
     std::array<uint64_t, EventCount> events{};
     std::array<uint64_t, StageCount> stageNs{}, stageCalls{};
+    // Per-call durations (ms) retained alongside the stage totals: one entry
+    // per completed stage segment (MeshSample::next / StageSample scope), so
+    // the benchmark can report avg + p95 per stage. Same capture lifetime as
+    // the totals: cleared by beginCapture(), merged under the registry mutex.
+    std::array<std::vector<float>, StageCount> stageSamplesMs{};
+    // One sample per completed MeshSample (a finished full or LOD mesh build):
+    // the sum of that sample's stage-chain segments in ms.
+    std::vector<float> meshTotalSamplesMs{};
     uint64_t maskCells{}, aoVertices{}, opaqueVertices{}, opaqueIndices{}, waterVertices{}, waterIndices{};
 };
 class Registry {
@@ -152,14 +162,22 @@ public:
         if (tag != epoch) return;
         for (size_t i=0; i<StageCount; ++i) {
             data.stageNs[i] += s.stageNs[i]; data.stageCalls[i] += s.stageCalls[i];
+            data.stageSamplesMs[i].insert(data.stageSamplesMs[i].end(),
+                                          s.stageSamplesMs[i].begin(), s.stageSamplesMs[i].end());
         }
+        data.meshTotalSamplesMs.insert(data.meshTotalSamplesMs.end(),
+                                       s.meshTotalSamplesMs.begin(), s.meshTotalSamplesMs.end());
         data.maskCells += s.maskCells; data.aoVertices += s.aoVertices;
         data.opaqueVertices += s.opaqueVertices; data.opaqueIndices += s.opaqueIndices;
         data.waterVertices += s.waterVertices; data.waterIndices += s.waterIndices;
     }
+    // Terminal read for a measurement window (benchmark finalize): totals and
+    // gauges are copied, per-call samples are moved out so the registry does
+    // not keep multi-megabyte duration buffers after the report is built.
     Snapshot snapshot() {
         std::lock_guard lock(mutex);
-        auto s = data; s.enabled = enabled;
+        Snapshot s = std::move(data);
+        s.enabled = enabled;
         for (size_t i=0; i<EventCount; ++i) s.events[i] = events[i].load(std::memory_order_relaxed);
         return s;
     }
@@ -173,6 +191,9 @@ inline Registry& registry() { static Registry r; return r; }
 
 // A few clock reads per mesh, one mutex acquisition on completion. Face/AO
 // counts are local; no clock or atomic operation in the inner voxel loops.
+// Each completed stage segment pushes one ms duration into
+// data.stageSamplesMs; the destructor pushes one chain-sum ms sample into
+// data.meshTotalSamplesMs, giving one per-mesh total per completed build.
 class MeshSample {
     using Clock = std::chrono::steady_clock;
     uint64_t tag = registry().captureEpoch();
@@ -184,10 +205,20 @@ public:
     void next(Stage s) {
         if (!tag) return;
         auto now = Clock::now();
-        data.stageNs[stage] += std::chrono::duration_cast<std::chrono::nanoseconds>(now-start).count();
+        const uint64_t ns = uint64_t(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now-start).count());
+        data.stageNs[stage] += ns;
+        data.stageSamplesMs[stage].push_back(float(double(ns) / 1e6));
         ++data.stageCalls[stage]; start = now; stage = s;
     }
-    ~MeshSample() { if (tag) { next(stage); registry().worker(tag, data); } }
+    ~MeshSample() {
+        if (!tag) return;
+        next(stage);
+        uint64_t chainNs = 0;
+        for (size_t i=0; i<StageCount; ++i) chainNs += data.stageNs[i];
+        data.meshTotalSamplesMs.push_back(float(double(chainNs) / 1e6));
+        registry().worker(tag, data);
+    }
 };
 
 // Single-stage scope for timed work that sits outside MeshSample's
@@ -205,7 +236,10 @@ public:
     ~StageSample() {
         if (!tag) return;
         Snapshot s{};
-        s.stageNs[stage] = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
+        const uint64_t ns = uint64_t(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
+        s.stageNs[stage] = ns;
+        s.stageSamplesMs[stage].push_back(float(double(ns) / 1e6));
         s.stageCalls[stage] = 1;
         registry().worker(tag, s);
     }

@@ -3,6 +3,8 @@
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Camera/Camera.hpp>
 #include <Engine/Profiler.hpp>
+#include <Renderer/Lighting.hpp>
+#include <Renderer/MinecraftTextures.hpp>
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/StagingRing.hpp>
 #include <Vulkan/GpuResourceRetire.hpp>
@@ -417,6 +419,10 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		else
 		{
 			ensureShellPopulated(chunk, ci);
+			ensureLightHalo(chunk, ci);
+			// Borrowed for this job only: the worker detaches and returns
+			// it when the build ends (success, failure or retry).
+			ChunkLightHalo *halo = chunk->lightHalo();
 			m_pendingMeshJobsCount.fetch_add(1);
 			const auto captureEpoch = GetProfiler().captureEpoch();
 			const auto queuedAt = std::chrono::steady_clock::now();
@@ -432,7 +438,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			uint16_t sectionMask = chunk->takeDirtySections();
 			if (sectionMask == 0 || chunk->isLODMesh() || chunk->hasUnuploadedFullMesh())
 				sectionMask = kAllSectionMask;
-			m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, sectionMask, this, queuedAt, captureEpoch]() {
+			m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, sectionMask, halo, this, queuedAt, captureEpoch]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
@@ -465,6 +471,12 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 						result = nullptr;
 					}
 				}
+				// Detach the halo borrow while the chunk is still in transit
+				// (no main-thread hand can touch it) so the pooled block
+				// serves the next job (issue #141 review fix).
+				chunk->setLightHalo(nullptr);
+				if (halo)
+					m_lightHaloPool.release(halo);
 				const float ms = std::chrono::duration<float, std::milli>(
 									 std::chrono::steady_clock::now() - t0)
 									 .count();
@@ -569,6 +581,21 @@ void ChunkManager::processFinishedJobs()
 	{
 		if (chunk)
 			chunk->setInTransit(false);
+	}
+	// New terrain can carry emissive sources whose light reaches into the
+	// side neighbors' halo radius (issue #141 review fix): dirty the
+	// affected neighbors so their next remesh imports it.
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (Chunk *chunk : finishedGen)
+		{
+			if (!chunk)
+				continue;
+			const glm::vec3 wp = chunk->getPosition();
+			const glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
+								static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
+			dirtyNeighborsForArrivedLight(chunk, ci);
+		}
 	}
 	for (const CompletedMeshJob &job : finishedMesh)
 	{
@@ -711,8 +738,18 @@ void ChunkManager::queueOrApplyEdit(Chunk *chunk, const glm::ivec3 &chunkPos, in
 		ensureShellPopulated(chunk, chunkPos);
 	// setVoxel bumps the mesh revision; GENERATED re-arms meshing
 	// (setState also raises meshNeedsUpdate).
+	const TextureType previousType =
+		static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),
+												 static_cast<uint32_t>(y),
+												 static_cast<uint32_t>(z))
+									 .type);
 	chunk->setVoxel(x, y, z, type);
 	chunk->setState(ChunkState::GENERATED);
+	// Light-relevant edits near a border change the neighbors' propagated
+	// light too (issue #141 review fix); mirror writes are the owning
+	// chunk's edit seen from the other side and skip this.
+	if (!borderNeighbor)
+		markNeighborLightDirty(chunkPos, x, y, z, previousType, type);
 }
 
 void ChunkManager::enqueueOrApplyMirrorEdits(const glm::ivec3 &chunkPos, int x, int y,
@@ -1135,6 +1172,148 @@ void ChunkManager::ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx
 		getChunk(chunkIdx + glm::ivec3(0, 0, +1)));
 }
 
+void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx)
+{
+	if (!chunk)
+		return;
+	ChunkLightHalo *halo = chunk->lightHalo();
+	if (!halo)
+	{
+		try
+		{
+			halo = m_lightHaloPool.acquire();
+		}
+		catch (const std::bad_alloc &)
+		{
+			return; // in-chunk-only light for this build; retried next dispatch
+		}
+		chunk->setLightHalo(halo);
+	}
+	// Caller holds exclusive lock.
+	fillLightHaloFromNeighbors(
+		*halo, chunk,
+		getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),
+		getChunk(chunkIdx + glm::ivec3(+1, 0, 0)),
+		getChunk(chunkIdx + glm::ivec3(0, 0, -1)),
+		getChunk(chunkIdx + glm::ivec3(0, 0, +1)),
+		getChunk(chunkIdx + glm::ivec3(-1, 0, -1)),
+		getChunk(chunkIdx + glm::ivec3(+1, 0, -1)),
+		getChunk(chunkIdx + glm::ivec3(-1, 0, +1)),
+		getChunk(chunkIdx + glm::ivec3(+1, 0, +1)));
+}
+
+void ChunkManager::markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int y, int z,
+										  TextureType previousType, TextureType type)
+{
+	// Same light-relevance predicate as Chunk::markEditDirtySections: only
+	// emissive changes and sky-transmission flips can change a propagated
+	// light field.
+	const bool lightRelevant =
+		blockTransmitsSkyLight(previousType) != blockTransmitsSkyLight(type) ||
+		lighting::blockLightEmission(static_cast<uint8_t>(previousType)) > 0 ||
+		lighting::blockLightEmission(static_cast<uint8_t>(type)) > 0;
+	if (!lightRelevant)
+		return;
+
+	// The edit dirties every neighbor it can still reach with nonzero
+	// propagated light: those within the halo radius of that border
+	// (conservative - the 15th step carries value 0 and is included).
+	constexpr int R = ChunkLightHalo::kRadius;
+	const bool west = x + 1 <= R;
+	const bool east = CHUNK_SIZE - x <= R;
+	const bool south = z + 1 <= R;
+	const bool north = CHUNK_SIZE - z <= R;
+	const bool southWest = west && south && (x + 1) + (z + 1) <= R;
+	const bool southEast = east && south && (CHUNK_SIZE - x) + (z + 1) <= R;
+	const bool northWest = west && north && (x + 1) + (CHUNK_SIZE - z) <= R;
+	const bool northEast = east && north && (CHUNK_SIZE - x) + (CHUNK_SIZE - z) <= R;
+	if (!west && !east && !south && !north && !southWest && !southEast && !northWest && !northEast)
+		return;
+
+	uint16_t yMask = 0;
+	const int yLo = std::max(0, y - R) / Chunk::kOccupancySectionSize;
+	const int yHi = std::min(static_cast<int>(CHUNK_HEIGHT) - 1, y + R) /
+					Chunk::kOccupancySectionSize;
+	for (int s = yLo; s <= yHi; ++s)
+		yMask |= static_cast<uint16_t>(1u << s);
+
+	auto dirty = [&](const glm::ivec3 &pos) {
+		Chunk *n = getChunk(pos);
+		// In-transit neighbors are skipped: their mesh job already captured
+		// its mask, and setting GENERATED under it would be overwritten by
+		// publish (stuck dirty state). The edit path defers the target the
+		// same way.
+		if (!n || n->getState() == ChunkState::UNLOADED || n->isInTransit())
+			return;
+		n->markSectionsDirty(yMask);
+		// MESHED chunks are only re-picked by mesh dispatch in GENERATED.
+		if (n->getState() == ChunkState::MESHED)
+			n->setState(ChunkState::GENERATED);
+	};
+	if (west) dirty(chunkPos + glm::ivec3(-1, 0, 0));
+	if (east) dirty(chunkPos + glm::ivec3(+1, 0, 0));
+	if (south) dirty(chunkPos + glm::ivec3(0, 0, -1));
+	if (north) dirty(chunkPos + glm::ivec3(0, 0, +1));
+	if (southWest) dirty(chunkPos + glm::ivec3(-1, 0, -1));
+	if (southEast) dirty(chunkPos + glm::ivec3(+1, 0, -1));
+	if (northWest) dirty(chunkPos + glm::ivec3(-1, 0, +1));
+	if (northEast) dirty(chunkPos + glm::ivec3(+1, 0, +1));
+}
+
+void ChunkManager::dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 &chunkIdx)
+{
+	if (!chunk || !chunk->isVoxelBackingReadable())
+		return;
+	constexpr int R = ChunkLightHalo::kRadius;
+	// One pass over the chunk classifies every emissive cell into the side
+	// bands it can reach: a cell at local x matters to the west neighbor
+	// iff x + 1 <= R and to the east one iff CHUNK_SIZE - x <= R (same for
+	// z). ~65K cheap checks per arrival, once per chunk lifetime. A band
+	// without sources dirties nothing - the common case.
+	int bandMinY[4] = {CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT};
+	int bandMaxY[4] = {-1, -1, -1, -1};
+	auto note = [&](int side, int y) {
+		if (y < bandMinY[side])
+			bandMinY[side] = y;
+		if (y > bandMaxY[side])
+			bandMaxY[side] = y;
+	};
+	for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
+		for (uint32_t z = 0; z < CHUNK_SIZE; ++z)
+			for (uint32_t x = 0; x < CHUNK_SIZE; ++x)
+			{
+				const auto t = static_cast<TextureType>(chunk->getVoxel(x, y, z).type);
+				if (!lighting::isBlockLightSource(t))
+					continue;
+				if (static_cast<int>(x) + 1 <= R) note(0, static_cast<int>(y));
+				if (static_cast<int>(CHUNK_SIZE - x) <= R) note(1, static_cast<int>(y));
+				if (static_cast<int>(z) + 1 <= R) note(2, static_cast<int>(y));
+				if (static_cast<int>(CHUNK_SIZE - z) <= R) note(3, static_cast<int>(y));
+			}
+
+	// Same skip rules as markNeighborLightDirty.
+	auto dirty = [&](int side, const glm::ivec3 &pos) {
+		if (bandMinY[side] > bandMaxY[side])
+			return;
+		Chunk *n = getChunk(pos);
+		if (!n || n->getState() == ChunkState::UNLOADED || n->isInTransit())
+			return;
+		uint16_t yMask = 0;
+		const int yLo = std::max(0, bandMinY[side] - R) / Chunk::kOccupancySectionSize;
+		const int yHi = std::min(static_cast<int>(CHUNK_HEIGHT) - 1, bandMaxY[side] + R) /
+						Chunk::kOccupancySectionSize;
+		for (int s = yLo; s <= yHi; ++s)
+			yMask |= static_cast<uint16_t>(1u << s);
+		n->markSectionsDirty(yMask);
+		if (n->getState() == ChunkState::MESHED)
+			n->setState(ChunkState::GENERATED);
+	};
+	dirty(0, chunkIdx + glm::ivec3(-1, 0, 0));
+	dirty(1, chunkIdx + glm::ivec3(+1, 0, 0));
+	dirty(2, chunkIdx + glm::ivec3(0, 0, -1));
+	dirty(3, chunkIdx + glm::ivec3(0, 0, +1));
+}
+
 TaskPriority ChunkManager::calculateTaskPriority(float distanceSq, float lodThresholdSq) const
 {
 	if (distanceSq < lodThresholdSq * 0.25f)
@@ -1304,10 +1483,21 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 		}
 		for (const auto &p : created)
 			ensureShellPopulated(p.second, p.first);
+		// Bootstrap meshing gets cross-chunk light too: every created chunk
+		// is generated and registered by now, so the halo snapshots see the
+		// full neighborhood (issue #141 review fix).
+		for (const auto &p : created)
+			ensureLightHalo(p.second, p.first);
 	}
 
 	for (const auto &p : created)
+	{
 		p.second->generateMesh();
+		ChunkLightHalo *halo = p.second->lightHalo();
+		p.second->setLightHalo(nullptr);
+		if (halo)
+			m_lightHaloPool.release(halo);
+	}
 
 	// One-time sync upload before the first frame (nothing in flight yet).
 	for (const auto &p : created)

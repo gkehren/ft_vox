@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <vector>
 #include <thread>
@@ -62,6 +63,15 @@ struct ChunkManagerProbe
 		std::lock_guard<std::mutex> lock(m.m_completedJobsMutex);
 		m.m_completedMeshJobs.push_back({chunk, result});
 	}
+	// Test hook for the cross-chunk light invalidation tests (issue #141
+	// review fix, section 25): register an externally-owned chunk at a
+	// coordinate without running the streaming load path.
+	static void registerChunk(ChunkManager &m, const glm::ivec3 &pos, Chunk *c)
+	{
+		m.m_chunks[pos] = c;
+		m.m_activeChunks.push_back(c);
+		c->setActiveIndex(m.m_activeChunks.size() - 1);
+	}
 };
 
 // Full-quality payload lives in per-section slots since issue #107; these
@@ -90,6 +100,7 @@ static uint32_t vQuantX(const Vertex &v) { return v.packedPos & 0x1FFu; }
 static uint32_t vQuantY(const Vertex &v) { return (v.packedPos >> 9) & 0x3FFFu; }
 static uint32_t vQuantZ(const Vertex &v) { return (v.packedPos >> 23) & 0x1FFu; }
 static uint32_t vBlockR(const Vertex &v) { return (v.packedData >> 18) & 0xFu; }
+static uint32_t vBlockB(const Vertex &v) { return (v.packedData >> 26) & 0xFu; }
 
 // Friend probe declared in Chunk.hpp: verifies full private state without
 // exposing per-column generation data through the public API.
@@ -3269,6 +3280,419 @@ int main(int argc, char **argv)
 				  "rgb removal: rebuild matches a chunk that never had lava byte for byte");
 			pool.release(after);
 			pool.release(ref);
+		}
+	}
+
+	// 25) Cross-chunk RGB block light (issue #141 review): with a halo
+	// attached the block-light BFS runs on the center+15-ring domain, so
+	// emissive light crosses chunk borders, and the ChunkManager dirties the
+	// reachable neighbors when a light-relevant edit lands within the halo
+	// radius of a border. NOTE on orientation: the engine's halo/mirror
+	// convention is south = -z, north = +z (fillLightHaloFromNeighbors in
+	// Chunk.cpp), so the corner scene below keeps its helper chunks on the
+	// +z side of the center and passes them as north/northEast.
+	{
+		MeshResultPool pool;
+
+		// Gallery face planes in quantized units (voxel * 16): floor y=39,
+		// ceiling y=42, side walls z=7/z=10.
+		constexpr int kTunYLo = 39 * 16, kTunYHi = 42 * 16;
+		constexpr int kTunZLo = 7 * 16, kTunZHi = 10 * 16;
+
+		// Sealed 3x3 air gallery along +x straddling the A|B border: center
+		// line y=40, z 7..9, A-local x 8..15 continuing into B-local x 0..8.
+		// The stone shell overrides the seed content, so the gallery is dark
+		// regardless of the generated surface and holds no natural sources.
+		auto carveTunnel = [](Chunk &a, Chunk &b)
+		{
+			for (int x = 7; x <= 15; ++x)
+				for (int z = 6; z <= 10; ++z)
+					for (int y = 38; y <= 42; ++y)
+						a.setVoxel(x, y, z, STONE);
+			for (int x = 0; x <= 9; ++x)
+				for (int z = 6; z <= 10; ++z)
+					for (int y = 38; y <= 42; ++y)
+						b.setVoxel(x, y, z, STONE);
+			for (int x = 8; x <= 15; ++x)
+				for (int z = 7; z <= 9; ++z)
+					for (int y = 39; y <= 41; ++y)
+						a.setVoxel(x, y, z, AIR);
+			for (int x = 0; x <= 8; ++x)
+				for (int z = 7; z <= 9; ++z)
+					for (int y = 39; y <= 41; ++y)
+						b.setVoxel(x, y, z, AIR);
+		};
+		auto generatePair = [&](Chunk &a, Chunk &b)
+		{
+			CHECK(a.prepareVoxelStorageForGeneration(), "rgb cross: prepare A");
+			CHECK(b.prepareVoxelStorageForGeneration(), "rgb cross: prepare B");
+			a.generateTerrain(gen);
+			b.generateTerrain(gen);
+		};
+		auto buildWithHalo = [&](Chunk &chunk, ChunkLightHalo &halo) -> MeshBuildResult *
+		{
+			chunk.setLightHalo(&halo);
+			MeshBuildResult *r = pool.acquire();
+			chunk.buildMesh(*r, chunk.meshGeneration(), chunk.meshRevision());
+			pool.finishBuild(r);
+			chunk.setLightHalo(nullptr);
+			return r;
+		};
+		// Max block-light nibble among opaque vertices inside a quantized
+		// position window; *count (optional) receives the vertex count.
+		auto maxNibble = [](const MeshBuildResult &r, uint32_t (*nibble)(const Vertex &),
+							int xLo, int xHi, int yLo, int yHi, int zLo, int zHi,
+							int *count = nullptr) -> int
+		{
+			int best = 0;
+			if (count)
+				*count = 0;
+			for (const SectionMeshPayload &s : r.sections)
+				for (const Vertex &v : s.opaqueVertices)
+				{
+					const uint32_t qx = vQuantX(v);
+					const uint32_t qy = vQuantY(v);
+					const uint32_t qz = vQuantZ(v);
+					if (qx < xLo || qx > xHi || qy < yLo || qy > yHi || qz < zLo || qz > zHi)
+						continue;
+					if (count)
+						++*count;
+					best = std::max<int>(best, static_cast<int>(nibble(v)));
+				}
+			return best;
+		};
+
+		// (a) Tunnel across the border (the P1 scenario): LAVA at the border
+		// column of A must light B's gallery through the halo, brightest at
+		// the border and strictly decaying with distance.
+		{
+			Chunk a(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			Chunk b(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f), ChunkState::UNLOADED,
+					nullptr, nullptr, &pool);
+			generatePair(a, b);
+			carveTunnel(a, b);
+			// Floor bumps in B: light is sampled once per merged greedy quad
+			// at its origin cell, so a straight gallery would merge the whole
+			// floor into one quad originating at the border and carry the
+			// border brightness all the way out. The bumps split the floor so
+			// quads with far origins exist, each sampling progressively
+			// darker cells (11/9 at x=5, 8/6 at x=7).
+			b.setVoxel(5, 39, 8, STONE);
+			b.setVoxel(7, 39, 8, STONE);
+			a.setVoxel(15, 40, 8, LAVA); // the border column, in the gallery
+
+			auto haloA = std::make_unique<ChunkLightHalo>();
+			auto haloB = std::make_unique<ChunkLightHalo>();
+			haloA->resetToAir();
+			fillLightHaloFromNeighbors(*haloA, &a, nullptr, &b, nullptr, nullptr,
+									   nullptr, nullptr, nullptr, nullptr);
+			haloB->resetToAir();
+			fillLightHaloFromNeighbors(*haloB, &b, &a, nullptr, nullptr, nullptr,
+									   nullptr, nullptr, nullptr, nullptr);
+
+			MeshBuildResult *rb = buildWithHalo(b, *haloB);
+			// Near window: vertices adjacent to B-local x=0..1 cells.
+			const int nearR = maxNibble(*rb, vBlockR, 0, 16, kTunYLo, kTunYHi, kTunZLo, kTunZHi);
+			// Far window: vertices at B-local x in [6..8]. The border quad's
+			// own far corners sit at x=5 (excluded), so everything in this
+			// window originates away from the border.
+			const int farR = maxNibble(*rb, vBlockR, 6 * 16, 8 * 16, kTunYLo, kTunYHi, kTunZLo, kTunZHi);
+			CHECK(nearR > 0, "rgb tunnel: lava light from A crosses into B's mesh near the border");
+			CHECK(nearR >= 10, "rgb tunnel: B's border-adjacent vertices carry lava brightness (>= 10)");
+			CHECK(farR > 0, "rgb tunnel: far window carries geometry (decay check is non-vacuous)");
+			CHECK(nearR > farR, "rgb tunnel: block light decays with distance into B (near > far)");
+
+			// Same-halo rebuild determinism.
+			MeshBuildResult *rb2 = buildWithHalo(b, *haloB);
+			bool sameB = rb->sections.size() == rb2->sections.size();
+			for (size_t s = 0; sameB && s < rb->sections.size(); ++s)
+				sameB = rb->sections[s] == rb2->sections[s];
+			CHECK(sameB, "rgb tunnel: same-halo rebuild of B is byte-for-byte deterministic");
+
+			// Stale-source contrast: a ring with no neighbor content
+			// (missing neighbors contribute AIR) removes the crossing light
+			// entirely - the border brightness really comes from the halo.
+			auto haloStale = std::make_unique<ChunkLightHalo>();
+			haloStale->resetToAir();
+			fillLightHaloFromNeighbors(*haloStale, &b, nullptr, nullptr, nullptr,
+									   nullptr, nullptr, nullptr, nullptr, nullptr);
+			MeshBuildResult *rb3 = buildWithHalo(b, *haloStale);
+			const int staleR = maxNibble(*rb3, vBlockR, 0, 16, kTunYLo, kTunYHi, kTunZLo, kTunZHi);
+			CHECK(staleR == 0, "rgb tunnel: a sourceless ring leaves B's border dark");
+			if (std::getenv("FT_RGB_DEBUG"))
+				std::cerr << "[rgb] tunnel nearMaxR=" << nearR << " farMaxR=" << farR
+						  << " staleMaxR=" << staleR << std::endl;
+			pool.release(rb);
+			pool.release(rb2);
+			pool.release(rb3);
+		}
+
+		// (b) Manager-level invalidation on edit and removal: a light edit
+		// within the halo radius of a border dirties the reachable neighbors
+		// (markSectionsDirty + MESHED -> GENERATED), the x+1<=15 reach gate
+		// excludes the far side, removal dirties again, and a non-light edit
+		// dirties nobody.
+		{
+			ChunkPool chunkPool(8);
+			ChunkManager manager(&gen, nullptr, &chunkPool);
+			Chunk *a = chunkPool.acquire(glm::vec3(0.0f));
+			Chunk *b = chunkPool.acquire(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f));
+			Chunk *w = chunkPool.acquire(glm::vec3(float(-CHUNK_SIZE), 0.0f, 0.0f));
+			CHECK(a != nullptr && b != nullptr && w != nullptr, "rgb manager: pool acquisition");
+			if (a && b && w)
+			{
+				// m_chunks keys are CHUNK INDICES, not world positions: the
+				// chunks sit at world x 0 / 16 / -16, i.e. indices 0 / +1 / -1.
+				ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), a);
+				ChunkManagerProbe::registerChunk(manager, glm::ivec3(1, 0, 0), b);
+				ChunkManagerProbe::registerChunk(manager, glm::ivec3(-1, 0, 0), w);
+				CHECK(manager.prepareAndGenerateChunk(a, gen), "rgb manager: generate A");
+				CHECK(manager.prepareAndGenerateChunk(b, gen), "rgb manager: generate B");
+				CHECK(manager.prepareAndGenerateChunk(w, gen), "rgb manager: generate W");
+				carveTunnel(*a, *b);
+				CHECK(a->generateMesh() && b->generateMesh() && w->generateMesh(),
+					  "rgb manager: initial meshes published");
+				CHECK(a->getState() == ChunkState::MESHED &&
+						  b->getState() == ChunkState::MESHED &&
+						  w->getState() == ChunkState::MESHED,
+					  "rgb manager: chunks MESHED before the edit");
+				a->takeDirtySections();
+				b->takeDirtySections();
+				w->takeDirtySections();
+
+				// Light-relevant edit near the east border (x=14 is within
+				// 15 of it): the east neighbor must be dirtied and re-armed.
+				CHECK(manager.placeVoxel(glm::vec3(14.0f, 40.0f, 8.0f), LAVA),
+					  "rgb manager: LAVA placement near the east border accepted");
+				CHECK(b->dirtySections() != 0,
+					  "rgb manager: light edit dirties the east neighbor's sections");
+				CHECK(b->getState() == ChunkState::GENERATED,
+					  "rgb manager: dirtied east neighbor re-armed GENERATED (was MESHED)");
+
+				// Edge gating: x=15 is out of the WEST neighbor's reach
+				// (x+1 = 16 > 15) but inside the east one's (16-15 = 1).
+				w->takeDirtySections();
+				b->takeDirtySections();
+				CHECK(manager.placeVoxel(glm::vec3(15.0f, 41.0f, 8.0f), LAVA),
+					  "rgb manager: border-column LAVA placement accepted");
+				CHECK(w->dirtySections() == 0,
+					  "rgb manager: LAVA at local x=15 does not reach the west neighbor");
+				CHECK(b->dirtySections() != 0,
+					  "rgb manager: LAVA at local x=15 still dirties the east neighbor");
+
+				// Removal of the same emitter dirties the neighbor again.
+				b->takeDirtySections();
+				CHECK(manager.deleteVoxel(glm::vec3(14.0f, 40.0f, 8.0f)),
+					  "rgb manager: removal of the border LAVA accepted");
+				CHECK(b->dirtySections() != 0,
+					  "rgb manager: removal dirties the east neighbor again");
+
+				// A non-light edit (transparent placement: no emission, no
+				// sky-transmission flip) must dirty nobody, even though the
+				// cell is within the halo radius of the border.
+				b->takeDirtySections();
+				CHECK(manager.placeVoxel(glm::vec3(5.0f, 255.0f, 5.0f), GLASS),
+					  "rgb manager: non-light GLASS placement accepted");
+				CHECK(b->dirtySections() == 0,
+					  "rgb manager: non-light edit leaves the east neighbor clean");
+			}
+		}
+
+		// (c) Red/blue overlap across the border: a red source in A and a
+		// blue source in B color each other's border geometry.
+		{
+			Chunk a(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			Chunk b(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f), ChunkState::UNLOADED,
+					nullptr, nullptr, &pool);
+			generatePair(a, b);
+			carveTunnel(a, b);
+			a.setVoxel(12, 40, 8, REDSTONE_ORE); // A-local, in the gallery
+			b.setVoxel(3, 40, 8, LAPIS_ORE);	 // B-local (world x=19)
+			// Floor bump near A's border: its top face's light is sampled at
+			// the border-adjacent cell, where the lapis blue has crossed.
+			a.setVoxel(14, 39, 8, STONE);
+
+			auto haloA = std::make_unique<ChunkLightHalo>();
+			auto haloB = std::make_unique<ChunkLightHalo>();
+			haloA->resetToAir();
+			fillLightHaloFromNeighbors(*haloA, &a, nullptr, &b, nullptr, nullptr,
+									   nullptr, nullptr, nullptr, nullptr);
+			haloB->resetToAir();
+			fillLightHaloFromNeighbors(*haloB, &b, &a, nullptr, nullptr, nullptr,
+									   nullptr, nullptr, nullptr, nullptr);
+			MeshBuildResult *ra = buildWithHalo(a, *haloA);
+			MeshBuildResult *rb = buildWithHalo(b, *haloB);
+			const int bRed = maxNibble(*rb, vBlockR, 0, 4 * 16, kTunYLo, kTunYHi, kTunZLo, kTunZHi);
+			const int aBlue = maxNibble(*ra, vBlockB, 14 * 16, 15 * 16, kTunYLo, kTunYHi, kTunZLo, kTunZHi);
+			CHECK(bRed > 0, "rgb overlap: redstone light from A crosses into B near the border");
+			CHECK(aBlue > 0, "rgb overlap: lapis blue light from B crosses westward into A near the border");
+			if (std::getenv("FT_RGB_DEBUG"))
+				std::cerr << "[rgb] overlap bRed=" << bRed << " aBlue=" << aBlue << std::endl;
+			pool.release(ra);
+			pool.release(rb);
+		}
+
+		// (d) 4-chunk corner: LAVA in the diagonal chunk lights the center
+		// chunk's (maxX, maxZ) corner through the SE/NE ring quadrant. The
+		// helpers sit on the +z side, so the engine's naming calls them
+		// north/northEast (south = -z, see the section header note).
+		{
+			// Sealed stone shell + air pocket at one chunk corner.
+			auto carveCorner = [](Chunk &chunk, int shellXLo, int shellXHi,
+								  int shellZLo, int shellZHi,
+								  int airXLo, int airXHi, int airZLo, int airZHi)
+			{
+				for (int x = shellXLo; x <= shellXHi; ++x)
+					for (int z = shellZLo; z <= shellZHi; ++z)
+						for (int y = 38; y <= 42; ++y)
+							chunk.setVoxel(x, y, z, STONE);
+				for (int x = airXLo; x <= airXHi; ++x)
+					for (int z = airZLo; z <= airZHi; ++z)
+						for (int y = 39; y <= 41; ++y)
+							chunk.setVoxel(x, y, z, AIR);
+			};
+			Chunk cc(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			Chunk ec(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			Chunk nc(glm::vec3(0.0f, 0.0f, float(CHUNK_SIZE)), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			Chunk dc(glm::vec3(float(CHUNK_SIZE), 0.0f, float(CHUNK_SIZE)), ChunkState::UNLOADED,
+					 nullptr, nullptr, &pool);
+			bool prepared = true;
+			for (Chunk *ch : {&cc, &ec, &nc, &dc})
+			{
+				CHECK(ch->prepareVoxelStorageForGeneration(), "rgb corner: prepare");
+				ch->generateTerrain(gen);
+				prepared = prepared && ch->getState() == ChunkState::GENERATED;
+			}
+			CHECK(prepared, "rgb corner: corner chunks generated");
+			carveCorner(cc, 12, 15, 12, 15, 13, 15, 13, 15); // center corner room
+			carveCorner(nc, 12, 15, 0, 2, 13, 15, 0, 1);	   // gallery to the border
+			carveCorner(dc, 0, 2, 0, 2, 0, 1, 0, 1);		   // pocket around the lava
+			dc.setVoxel(1, 40, 1, LAVA); // center-relative (17,40,17), Manhattan 4
+
+			auto haloC = std::make_unique<ChunkLightHalo>();
+			haloC->resetToAir();
+			fillLightHaloFromNeighbors(*haloC, &cc, nullptr, &ec, nullptr, &nc,
+									   nullptr, nullptr, nullptr, &dc);
+			MeshBuildResult *rc = buildWithHalo(cc, *haloC);
+			int cornerCount = 0;
+			const int cornerR = maxNibble(*rc, vBlockR, 12 * 16, 16 * 16,
+										  38 * 16, 43 * 16, 12 * 16, 16 * 16, &cornerCount);
+			CHECK(cornerCount > 0, "rgb corner: C has geometry in the corner window");
+			CHECK(cornerR > 0, "rgb corner: diagonal lava light crosses into C's corner geometry");
+			if (std::getenv("FT_RGB_DEBUG"))
+				std::cerr << "[rgb] corner cornerMaxR=" << cornerR << std::endl;
+			pool.release(rc);
+		}
+
+		// (e) Swapped-source order independence: the same two cross-border
+		// sources (LAVA in A's gallery, REDSTONE_ORE in B's) placed and built
+		// in opposite orders in two fresh same-seed worlds. Each build is a
+		// pure function of its chunk + halo, so both payloads must match
+		// byte for byte regardless of placement and build order.
+		{
+			const glm::ivec3 lavaCellA(11, 40, 8); // A-local, in the gallery
+			const glm::ivec3 oreCellB(2, 40, 8);   // B-local (world x=18)
+			auto buildOrderWorld = [&](bool lavaPlacedFirst, MeshBuildResult **outA,
+									   MeshBuildResult **outB)
+			{
+				Chunk a(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+				Chunk b(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f), ChunkState::UNLOADED,
+						nullptr, nullptr, &pool);
+				CHECK(a.prepareVoxelStorageForGeneration(), "rgb order: prepare A");
+				CHECK(b.prepareVoxelStorageForGeneration(), "rgb order: prepare B");
+				a.generateTerrain(gen);
+				b.generateTerrain(gen);
+				carveTunnel(a, b);
+				if (lavaPlacedFirst)
+				{
+					a.setVoxel(lavaCellA.x, lavaCellA.y, lavaCellA.z, LAVA);
+					b.setVoxel(oreCellB.x, oreCellB.y, oreCellB.z, REDSTONE_ORE);
+				}
+				else
+				{
+					b.setVoxel(oreCellB.x, oreCellB.y, oreCellB.z, REDSTONE_ORE);
+					a.setVoxel(lavaCellA.x, lavaCellA.y, lavaCellA.z, LAVA);
+				}
+				auto haloA = std::make_unique<ChunkLightHalo>();
+				auto haloB = std::make_unique<ChunkLightHalo>();
+				haloA->resetToAir();
+				fillLightHaloFromNeighbors(*haloA, &a, nullptr, &b, nullptr, nullptr,
+										   nullptr, nullptr, nullptr, nullptr);
+				haloB->resetToAir();
+				fillLightHaloFromNeighbors(*haloB, &b, &a, nullptr, nullptr, nullptr,
+										   nullptr, nullptr, nullptr, nullptr);
+				if (lavaPlacedFirst)
+				{
+					*outA = buildWithHalo(a, *haloA);
+					*outB = buildWithHalo(b, *haloB);
+				}
+				else
+				{
+					*outB = buildWithHalo(b, *haloB);
+					*outA = buildWithHalo(a, *haloA);
+				}
+			};
+			MeshBuildResult *w1a = nullptr, *w1b = nullptr, *w2a = nullptr, *w2b = nullptr;
+			buildOrderWorld(true, &w1a, &w1b);
+			buildOrderWorld(false, &w2a, &w2b);
+			const int w1aR = maxNibble(*w1a, vBlockR, 0, 16 * 16, 0, CHUNK_HEIGHT * 16, 0, 16 * 16);
+			const int w1bR = maxNibble(*w1b, vBlockR, 0, 16 * 16, 0, CHUNK_HEIGHT * 16, 0, 16 * 16);
+			CHECK(w1aR > 0 && w1bR > 0,
+				  "rgb order: both chunks carry block light (compare is non-vacuous)");
+			bool sameA = w1a->sections.size() == w2a->sections.size();
+			bool sameB = w1b->sections.size() == w2b->sections.size();
+			for (size_t s = 0; s < w1a->sections.size(); ++s)
+			{
+				if (sameA && !(w1a->sections[s] == w2a->sections[s]))
+					sameA = false;
+				if (sameB && !(w1b->sections[s] == w2b->sections[s]))
+					sameB = false;
+			}
+			CHECK(sameA, "rgb order: swapped placement/build order yields byte-identical A payloads");
+			CHECK(sameB, "rgb order: swapped placement/build order yields byte-identical B payloads");
+			pool.release(w1a);
+			pool.release(w1b);
+			pool.release(w2a);
+			pool.release(w2b);
+		}
+
+		// (f) Border-edit remesh cost: a full halo build of A before and
+		// after a border-column LAVA edit + halo refill. Printed with
+		// FT_RGB_DEBUG (same convention as FT_PROP_DEBUG above).
+		{
+			Chunk a(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			Chunk b(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f), ChunkState::UNLOADED,
+					nullptr, nullptr, &pool);
+			generatePair(a, b);
+			carveTunnel(a, b);
+			auto haloA = std::make_unique<ChunkLightHalo>();
+			auto haloB = std::make_unique<ChunkLightHalo>();
+			haloA->resetToAir();
+			fillLightHaloFromNeighbors(*haloA, &a, nullptr, &b, nullptr, nullptr,
+									   nullptr, nullptr, nullptr, nullptr);
+			haloB->resetToAir();
+			fillLightHaloFromNeighbors(*haloB, &b, &a, nullptr, nullptr, nullptr,
+									   nullptr, nullptr, nullptr, nullptr);
+			using Clock = std::chrono::steady_clock;
+			const auto t0 = Clock::now();
+			MeshBuildResult *r1 = buildWithHalo(a, *haloA);
+			const double beforeMs = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+			a.setVoxel(15, 40, 8, LAVA);
+			haloA->resetToAir();
+			fillLightHaloFromNeighbors(*haloA, &a, nullptr, &b, nullptr, nullptr,
+									   nullptr, nullptr, nullptr, nullptr);
+			const auto t1 = Clock::now();
+			MeshBuildResult *r2 = buildWithHalo(a, *haloA);
+			const double afterMs = std::chrono::duration<double, std::milli>(Clock::now() - t1).count();
+			CHECK(totalOpaqueVertices(*r1) > 0 && totalOpaqueVertices(*r2) > 0,
+				  "rgb perf: both border builds produced geometry");
+			if (std::getenv("FT_RGB_DEBUG"))
+				std::cerr << "[rgb perf] border-edit remesh: before=" << beforeMs
+						  << " ms after=" << afterMs
+						  << " ms (tunnel scene, refill excluded from both timings)"
+						  << std::endl;
+			pool.release(r1);
+			pool.release(r2);
 		}
 	}
 

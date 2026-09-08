@@ -141,6 +141,13 @@ inline uint8_t blockLightEmission(uint8_t blockType)
 	return blockLightSourceForBlock(blockType).intensity;
 }
 
+/// Fast source-membership test for bulk scans (halo fill, neighbor-arrival
+/// band scans): true iff the block is a block-light source.
+inline bool isBlockLightSource(uint8_t blockType)
+{
+	return blockLightSourceForBlock(blockType).intensity != 0;
+}
+
 // RGB4 voxel representation: three 4-bit channels packed R in bits 0-3,
 // G in 4-7, B in 8-11 of a uint16_t (12 bits used). Matches the 16-level
 // attenuation granularity of the historical scalar light field.
@@ -225,13 +232,6 @@ inline void unpackLightBits(uint32_t packedData, uint8_t &skyLight, uint8_t &blo
 	blockR = static_cast<uint8_t>((packedData >> 18) & 0xFu);
 	blockG = static_cast<uint8_t>((packedData >> 22) & 0xFu);
 	blockB = static_cast<uint8_t>((packedData >> 26) & 0xFu);
-}
-
-inline float combinedLightFactor(uint8_t skyLight, uint8_t blockLight, float dayFactor)
-{
-	const float sky = (static_cast<float>(skyLight) / 15.0f) * std::clamp(dayFactor, 0.0f, 1.0f);
-	const float blk = static_cast<float>(blockLight) / 15.0f;
-	return std::max(sky, blk);
 }
 
 /// SSAO composite floor — safety-only clamp, the horizon-based estimator no

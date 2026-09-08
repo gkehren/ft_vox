@@ -504,8 +504,8 @@ orange/red 15, MAGMA orange 13, REDSTONE_ORE red 14, LAPIS_ORE blue 7,
 DIAMOND_ORE cyan 4, EMERALD_ORE green 3, GOLD_ORE yellow 2) — kept
 conceptually separate from material self-emission
 (`emissiveIntensityForBlock` drives the HDR glow of the surface itself).
-The mesher propagates a per-voxel RGB4 field (`uint16_t`, three 4-bit linear
-channels; `Chunk::computeLightField`): same BFS as before, −1 per channel per
+The mesher propagates three planar 4-bit channels (`uint8_t` planes;
+`Chunk::computeLightField`): same BFS as before, −1 per channel per
 6-neighbour step, frontier through air-like cells only, and overlapping
 sources combine by **per-channel max** (commutative/associative ⇒ the settled
 field is traversal-order independent). Vertex packing uses `packedData` bits
@@ -513,8 +513,23 @@ field is traversal-order independent). Vertex packing uses `packedData` bits
 `lighting::packLightBitsRGB4`; `terrain.frag` multiplies albedo by the linear
 RGB block light (replacing the old fixed warm tint) while the sky/sun/moon
 path stays untouched. Emissive edit invalidation still keys on
-`blockLightEmission(type) > 0`. Entities (issue #128) can sample the same
-field through the RGB4 pack/unpack helpers.
+`blockLightEmission(type) > 0`.
+
+**Cross-chunk propagation (issue #141 review).** The block-light BFS runs on
+a **transient halo domain**: at mesh dispatch the ChunkManager snapshots the
+15-voxel ring of neighbor voxels (4 sides + 4 diagonals — the Manhattan BFS
+cannot route light around them) into a pooled `ChunkLightHalo`, the BFS
+seeds center *and* ring sources, and only the center (+ its 1-voxel
+face-sampling shell) is sampled — border faces read the neighbor side's real
+propagated light, so there are no colored-light seams at chunk borders.
+Missing/in-transit neighbors contribute AIR (no sources ⇒ no light), and
+light lands in already-meshed neighbors through two invalidation rules: a
+light-relevant **edit** within the halo radius of a border dirties the
+reachable neighbors, and a chunk whose **arrival** carries border-band
+emissives dirties the side neighbors' affected sections. The packed RGB4
+helpers (`packBlockLightRGB4` etc.) define the representation contract issue
+#128 consumes for entities; actual runtime sampling/storage of the field for
+entities remains #128's responsibility.
 
 ### Cascades (`Renderer/ShadowCascades.hpp`, `namespace shadow`)
 
