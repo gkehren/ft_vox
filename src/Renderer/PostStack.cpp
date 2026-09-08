@@ -57,6 +57,10 @@ struct CompPC
 	glm::vec4 p5; // x=useAutoExposure, yzw unused (issue #140)
 	glm::vec4 p6; // x=waterSurfaceY (1e9 = unknown), y=causticTier, zw unused (issue #144)
 };
+struct FxaaPC
+{
+	glm::vec4 p0; // xy=1/frameSize, z=decodeSrgbOut (1.0 = hardware-sRGB swapchain), w unused (issue #143)
+};
 struct DownPC
 {
 	glm::vec4 stepUV; // xy = 1/destination size: luminance tap spread in UV
@@ -158,6 +162,9 @@ void PostStack::createTargets(uint32_t w, uint32_t h)
 	m_godRays = makeColor(hw, hh, m_hdrFormat);
 	m_ssao = makeColor(hw, hh, VK_FORMAT_R8G8B8A8_UNORM); // r = AO, gb = encoded normal
 	m_ssaoUp = makeColor(w, h, VK_FORMAT_R8_UNORM);		  // bilateral-upsampled final AO
+	// LDR AA source (issue #143): full-res, sRGB-encoded composite output the
+	// FXAA 3.11 pass samples. Written only when spatial AA is enabled.
+	m_ldr = makeColor(w, h, VK_FORMAT_R8G8B8A8_UNORM);
 
 	// Auto-exposure metering chain (issue #140). Small R32F log-luminance
 	// targets; m_lum1 carries the adapted exposure for tooling readback. The
@@ -189,6 +196,7 @@ void PostStack::createTargets(uint32_t w, uint32_t h)
 	write1(m_setBlur[0], m_bloom[0].view);
 	write1(m_setBlur[1], m_bloom[1].view);
 	write1(m_setSsao, m_sceneDepth.view, m_nearestSampler);
+	write1(m_setFxaa, m_ldr.view);
 	// R32F metering chain: NEAREST — linear filtering of 32-bit float formats
 	// is an optional format feature, while nearest always works. Stage taps
 	// land on spread texel centers, so point sampling is fine for metering.
@@ -256,6 +264,7 @@ void PostStack::destroyTargets()
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_godRays);
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_ssao);
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_ssaoUp);
+	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_ldr);
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_lum[0]);
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_lum[1]);
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_lum[2]);
@@ -343,6 +352,7 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 		alloc(m_postSetLayout, m_setLumSrc[0]);
 		alloc(m_postSetLayout, m_setLumSrc[1]);
 		alloc(m_godSetLayout, m_setGodRays);
+		alloc(m_postSetLayout, m_setFxaa);
 		for (VkDescriptorSet &set : m_setComposite)
 			alloc(m_compositeSetLayout, set);
 		for (VkDescriptorSet &set : m_exposureSets)
@@ -381,6 +391,7 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 	VkShaderModule ssaoF = load("ssao.frag.spv");
 	VkShaderModule ssaoUpF = load("ssaoUpsample.frag.spv");
 	VkShaderModule compF = load("composite.frag.spv");
+	VkShaderModule fxaaF = load("fxaa.frag.spv");
 	VkShaderModule downF = load("luminance_downsample.frag.spv");
 	// exposure_adapt.frag writes SSBOs from the fragment stage: without
 	// fragmentStoresAndAtomics the SPIR-V contract (NonWritable) would be
@@ -457,13 +468,18 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 	makeFS(ssaoF, m_ssaoLayout, ssaoFmt, m_ssaoPipe);
 	makeFS(ssaoUpF, m_ssaoUpPipeLayout, ssaoUpFmt, m_ssaoUpPipe);
 	makeFS(compF, m_compositeLayout, swapchainFormat, m_compositePipe);
+	// Issue #143: same composite shader aimed at the UNORM LDR AA-source
+	// target — a pipeline's rendering color format must match its attachment,
+	// so the AA-on path gets its own pipeline.
+	makeFS(compF, m_compositeLayout, VK_FORMAT_R8G8B8A8_UNORM, m_compositeLdrPipe);
+	makeFS(fxaaF, m_postLayout1, swapchainFormat, m_fxaaPipe);
 	const VkFormat lumFmt = VK_FORMAT_R32_SFLOAT;
 	makeFS(downF, m_postLayout1, lumFmt, m_downsamplePipe);
 	if (adaptF)
 		makeFS(adaptF, m_exposureLayout, lumFmt, m_adaptPipe);
 
 
-	for (auto m : {fsVert, extractF, blurF, godF, ssaoF, ssaoUpF, compF, downF})
+	for (auto m : {fsVert, extractF, blurF, godF, ssaoF, ssaoUpF, compF, fxaaF, downF})
 		destroyShaderModule(m_context->getDevice(), m);
 	if (adaptF)
 		destroyShaderModule(m_context->getDevice(), adaptF);
@@ -484,6 +500,8 @@ void PostStack::destroyPipelines()
 	d(m_ssaoPipe);
 	d(m_ssaoUpPipe);
 	d(m_compositePipe);
+	d(m_compositeLdrPipe);
+	d(m_fxaaPipe);
 	d(m_downsamplePipe);
 	d(m_adaptPipe);
 	auto dl = [&](VkPipelineLayout &l) {
@@ -737,14 +755,21 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 		compositeSources != m_lastCompositeSrc[frameIndex])
 		writeCompositeDescriptors(compositeSources, frameIndex);
 
-	// Composite
-	vkbar::cmdTransitionColor(cmd, swapchainImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+	// Composite + spatial AA (issue #143). With AA on, composite writes the
+	// tone-mapped/graded LDR into the full-res sRGB-encoded `m_ldr` target and
+	// the FXAA 3.11 pass renders the swapchain from it — edge detection then
+	// runs on perceptual values, never on linear HDR. With AA off, composite
+	// targets the swapchain directly (legacy path, unchanged). SSAO debug
+	// views bypass AA too: diagnostics must show the raw data unfiltered.
+	const bool aaEnabled = settings.fxaaEnabled && settings.ssaoDebugView == 0;
+	vkbar::cmdTransitionColor(cmd, aaEnabled ? m_ldr.image : swapchainImage,
+					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 					0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 	CompPC cpc{};
 	cpc.p0 = glm::vec4(settings.exposure, settings.bloomIntensity, settings.gamma,
 					   static_cast<float>(settings.toneMapper));
 	cpc.p1 = glm::vec4(settings.bloomEnabled ? 1.f : 0.f,
-					   settings.fxaaEnabled ? 1.f : 0.f,
+					   0.f, // former in-composite FXAA flag (issue #143) — AA has its own pass
 					   godRaysProduced ? 1.f : 0.f,
 					   settings.postSaturation);
 	cpc.p2 = glm::vec4(1.f / static_cast<float>(extent.width),
@@ -755,8 +780,11 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 					   settings.underwater ? 1.f : 0.f,
 					   settings.underwaterStrength,
 					   time);
+	// encodeSrgb (p4.z): the swapchain needs a shader encode on the direct
+	// UNORM path, and the AA-source target ALWAYS stores encoded values so
+	// the FXAA pass sees perceptual luma.
 	cpc.p4 = glm::vec4(settings.filmGrain, settings.vignette,
-					   m_swapchainRequiresSrgbEncode ? 1.0f : 0.0f,
+					   (m_swapchainRequiresSrgbEncode || aaEnabled) ? 1.0f : 0.0f,
 					   static_cast<float>(settings.ssaoDebugView));
 	cpc.p5 = glm::vec4(autoExposureActive(settings) ? 1.0f : 0.0f, 0.f, 0.f, 0.f);
 	// Camera-underwater medium transport (issue #144): local surface height
@@ -769,11 +797,41 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 	// frame set (FrameUBO) first, composite sources second.
 	if (profiler)
 		profiler->beginPass(cmd, GpuPass::Composite);
-	fsDraw(cmd, m_compositePipe, m_compositeLayout,
-		   frameSet0, swapchainView, extent,
-		   &cpc, sizeof(cpc), m_setComposite[frameIndex % kFramesInFlight]);
+	if (aaEnabled)
+		fsDraw(cmd, m_compositeLdrPipe, m_compositeLayout,
+			   frameSet0, m_ldr.view, extent,
+			   &cpc, sizeof(cpc), m_setComposite[frameIndex % kFramesInFlight]);
+	else
+		fsDraw(cmd, m_compositePipe, m_compositeLayout,
+			   frameSet0, swapchainView, extent,
+			   &cpc, sizeof(cpc), m_setComposite[frameIndex % kFramesInFlight]);
 	if (profiler)
 		profiler->endPass(cmd, GpuPass::Composite);
+
+	if (aaEnabled)
+	{
+		vkbar::cmdTransitionColor(cmd, m_ldr.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+						VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+		vkbar::cmdTransitionColor(cmd, swapchainImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+						0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+		// FXAA 3.11 spatial AA (issue #143), timed as its own GpuPass. For a
+		// hardware-sRGB swapchain the shader decodes its blend result back to
+		// display-linear so the attachment's fixed-function encode round-trips
+		// the same 8-bit values; for UNORM swapchains the encoded values pass
+		// through unchanged.
+		if (profiler)
+			profiler->beginPass(cmd, GpuPass::SpatialAA);
+		FxaaPC fpc{};
+		fpc.p0 = glm::vec4(1.f / static_cast<float>(extent.width),
+						   1.f / static_cast<float>(extent.height),
+						   m_swapchainRequiresSrgbEncode ? 0.0f : 1.0f, 0.f);
+		fsDraw(cmd, m_fxaaPipe, m_postLayout1, m_setFxaa, swapchainView, extent,
+			   &fpc, sizeof(fpc));
+		if (profiler)
+			profiler->endPass(cmd, GpuPass::SpatialAA);
+	}
 }
 
 

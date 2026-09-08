@@ -77,6 +77,8 @@ toggle described in §4.)
 | `underwater_deep` | Distance-based extinction falloff and world-anchored caustics at noon (submerged camera looking horizontally across open water) |
 | `auto_exposure_noon` | The `noon_terrain` inputs (same seed/viewpoint/atmosphere) through the live auto-exposure path: metering, adaptation, composite consumption |
 | `auto_exposure_cave` | Auto exposure in a sealed, unlit carved room; the adapted exposure climbs toward the max-EV clamp |
+| `aa_silhouette` | Spatial AA on (dedicated FXAA 3.11 pass, issue #143): a 32-step diagonal stone staircase with attached leaf clusters against the noon sky — diagonal voxel edges, foliage borders, hard sky contrast |
+| `aa_silhouette_off` | The identical `aa_silhouette` scene with the spatial AA pass disabled (issue #143): A/B pair locking the composite-straight-to-swapchain bypass path from the same camera |
 
 On top of the whole-frame comparison, each scene carries **targeted numeric
 invariants**: the HDR scene target is scanned **pre-tonemap** for non-finite
@@ -342,3 +344,29 @@ each tier records the Post pass together with the nested Composite pass that
 implements the depth-aware underwater model. `underwater.csv` publishes the
 median sweep means and sample counts per tier, so the underwater path cost is
 reported separately from the water pass and the whole-frame time.
+
+## AA slow-pan capture (issue #143)
+
+The spatial-AA pass's core criterion — less stair-stepping/crawling during
+camera motion — cannot be judged from a still golden, so the explicit
+`--capture-pan` mode renders the `aa_silhouette` fixture through a slow
+deterministic yaw sweep (48 steps over 6°, fixed time, manual exposure) with
+the AA pass OFF and ON rendered back-to-back per step. It writes side-by-side
+PNG frame sequences plus `summary.txt` containing the mean inter-frame luma
+delta overall and restricted to an edge ROI rebuilt per transition from the
+FXAA-off reference pair only, alongside per-pass GPU averages (Composite /
+AA / Post).
+
+```
+./build/tests/Release/ft_vox_visual_tests.exe --capture-pan --out build/visual-qa
+./build/tests/Release/ft_vox_visual_tests.exe --capture-pan --audit-1440 --out build/visual-qa
+```
+
+Both resolutions share the 640x360 golden contract's policy: new Vulkan
+validation errors and non-finite HDR samples fail the capture. With
+`--strict`, the capture additionally FAILS when the AA pass does not reduce
+the edge-band temporal delta by at least 10% versus the bypass path — the
+temporal gate for #143's central acceptance criterion (calibrated on the
+canonical GPU; heterogeneous machines run without `--strict`, like the
+golden smoke mode). Memory use is constant: only the previous OFF/ON frame
+pair is held. No golden files are read or updated in this mode.

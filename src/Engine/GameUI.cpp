@@ -425,7 +425,7 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		{
 			pp.applyPreset(static_cast<GraphicsQualityPreset>(presetIdx));
 		}
-		ImGui::TextDisabled("Packs shadow resolution / SSAO / water SSR & shadows / bloom / god rays / grain. Manual sliders below still work.");
+		ImGui::TextDisabled("Packs shadow resolution / SSAO / water SSR & shadows / bloom / god rays / grain / spatial AA (Low: off). Manual sliders below still work.");
 	}
 
 	drawResourcePackSection(frame, m_resourcePackUi, m_showGraphics);
@@ -527,7 +527,9 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			ImGui::SliderFloat("Bloom intensity", &pp.bloomIntensity, 0.f, 2.f);
 			ImGui::SliderInt("Bloom blur iters", &pp.bloomBlurIterations, 1, 5);
 		}
-		ImGui::Checkbox("FXAA", &pp.fxaaEnabled);
+		ImGui::Checkbox("Spatial AA (FXAA 3.11)", &pp.fxaaEnabled);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Dedicated FXAA 3.11 pass on the tone-mapped image (issue #143):\nimproves voxel silhouettes and foliage edges; Off keeps the direct composite path.\nThe Low preset disables AA.");
 		// True capability, not just the setting: without fragment SSBO stores
 		// the renderer runs the manual path regardless of the checkbox, so it
 		// must stay togglable and the manual slider must stay editable.

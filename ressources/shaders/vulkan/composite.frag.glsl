@@ -29,7 +29,7 @@ layout(set = 1, binding = 6) readonly buffer ExposureState
 
 layout(push_constant) uniform PC {
     vec4 p0; // x=manualExposure, y=bloomIntensity, z=gamma, w=toneMapper
-    vec4 p1; // x=bloomOn, y=fxaaOn, z=godRaysOn, w=postSaturation
+    vec4 p1; // x=bloomOn, y=unused (FXAA moved to its own pass, issue #143), z=godRaysOn, w=postSaturation
     vec4 p2; // xy=texelSize, z=postContrast, w=ssaoOn
     vec4 p3; // x=ssaoIntensity, y=underwater, z=underwaterStrength, w=time
     vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=ssaoDebugView (0=Off 1=FinalAO 2=RawAO 3=Normals)
@@ -53,58 +53,6 @@ vec3 acesFilm(vec3 x)
 vec3 reinhard(vec3 x)
 {
     return x / (x + vec3(1.0));
-}
-
-float getLDRLuminance(vec2 uv)
-{
-    float exposure = resolveExposure();
-    float gamma = max(pc.p0.z, 0.001);
-    int toneMapper = int(pc.p0.w + 0.5);
-    vec3 hdrColor = texture(hdrBuffer, uv).rgb;
-    vec3 mapped = max(hdrColor * exposure, vec3(0.0));
-    mapped = toneMapper == 0 ? acesFilm(mapped) : reinhard(mapped);
-    if (abs(gamma - 1.0) > 0.001)
-        mapped = pow(mapped, vec3(1.0 / gamma));
-    // Perceptual luminance for FXAA contrast evaluation
-    vec3 perceptual = sqrt(mapped);
-    return dot(perceptual, vec3(0.299, 0.587, 0.114));
-}
-
-vec3 applyFXAA(vec2 uv)
-{
-    vec2 texelSize = pc.p2.xy;
-    float lumC = getLDRLuminance(uv);
-    float lumN = getLDRLuminance(uv + vec2(0.0, texelSize.y));
-    float lumS = getLDRLuminance(uv + vec2(0.0, -texelSize.y));
-    float lumE = getLDRLuminance(uv + vec2(texelSize.x, 0.0));
-    float lumW = getLDRLuminance(uv + vec2(-texelSize.x, 0.0));
-    float lumMin = min(lumC, min(min(lumN, lumS), min(lumE, lumW)));
-    float lumMax = max(lumC, max(max(lumN, lumS), max(lumE, lumW)));
-    float lumRange = lumMax - lumMin;
-    if (lumRange < max(0.0312, lumMax * 0.125))
-        return texture(hdrBuffer, uv).rgb;
-
-    float lumNW = getLDRLuminance(uv + vec2(-texelSize.x, texelSize.y));
-    float lumNE = getLDRLuminance(uv + vec2(texelSize.x, texelSize.y));
-    float lumSW = getLDRLuminance(uv + vec2(-texelSize.x, -texelSize.y));
-    float lumSE = getLDRLuminance(uv + vec2(texelSize.x, -texelSize.y));
-    float edgeH = abs(-2.0 * lumW + lumNW + lumSW) + abs(-2.0 * lumC + lumN + lumS) * 2.0 + abs(-2.0 * lumE + lumNE + lumSE);
-    float edgeV = abs(-2.0 * lumN + lumNW + lumNE) + abs(-2.0 * lumC + lumW + lumE) * 2.0 + abs(-2.0 * lumS + lumSW + lumSE);
-    bool isHorizontal = edgeH >= edgeV;
-    float stepLength = isHorizontal ? texelSize.y : texelSize.x;
-    float lum1 = isHorizontal ? lumS : lumW;
-    float lum2 = isHorizontal ? lumN : lumE;
-    if (abs(lum1 - lumC) >= abs(lum2 - lumC))
-        stepLength = -stepLength;
-    float subPixFactor = clamp(abs((lumN + lumS + lumE + lumW) * 0.25 - lumC) / lumRange, 0.0, 1.0);
-    subPixFactor = smoothstep(0.0, 1.0, subPixFactor);
-    subPixFactor = subPixFactor * subPixFactor * 0.75;
-    vec2 blendUV = uv;
-    if (isHorizontal)
-        blendUV.y += stepLength * subPixFactor;
-    else
-        blendUV.x += stepLength * subPixFactor;
-    return texture(hdrBuffer, blendUV).rgb;
 }
 
 // Cheap animated film grain
@@ -132,7 +80,6 @@ void main()
     float gamma = max(pc.p0.z, 0.001);
     int toneMapper = int(pc.p0.w + 0.5);
     bool bloomEnabled = pc.p1.x > 0.5;
-    bool fxaaEnabled = pc.p1.y > 0.5;
     bool godRaysEnabled = pc.p1.z > 0.5;
     bool ssaoEnabled = pc.p2.w > 0.5;
     float ssaoIntensity = pc.p3.x;
@@ -175,7 +122,13 @@ void main()
         return;
     }
 
-    vec3 hdrColor = fxaaEnabled ? applyFXAA(vUV) : texture(hdrBuffer, vUV).rgb;
+    // Anti-aliasing note (issue #143): the former in-composite FXAA
+    // approximation (which sampled linear HDR pre-tonemap) is gone. When the
+    // spatial AA toggle is on, this pass writes tone-mapped, sRGB-encoded LDR
+    // into the full-res ldrColor target and fxaa.frag.glsl (FXAA 3.11) renders
+    // the swapchain from it; with AA off this pass targets the swapchain
+    // directly. The C++ side picks the pipeline/target and sets p4.z.
+    vec3 hdrColor = texture(hdrBuffer, vUV).rgb;
 
     if (ssaoEnabled)
     {
@@ -313,10 +266,15 @@ void main()
     mapped = clamp(mapped, 0.0, 1.0);
 
     // Format-dependent output transfer (decided CPU-side from the
-    // {VkFormat, VkColorSpaceKHR} pair — see colorspace::classifyOutputTransfer):
-    // If the swapchain image is sRGB (pc.p4.z <= 0.5), we output display-linear values;
-    // the sRGB framebuffer write performs hardware linear->sRGB conversion.
-    // If the swapchain is UNORM + SRGB_NONLINEAR (pc.p4.z > 0.5), encode explicitly.
+    // {VkFormat, VkColorSpaceKHR} pair — see colorspace::classifyOutputTransfer;
+    // issue #143 adds a second encode case: when the spatial AA pass is on,
+    // this pass always targets the UNORM ldrColor AA-source intermediate, whose
+    // stored values must be perceptual (encoded) for FXAA):
+    // If the output image is sRGB and AA is off (pc.p4.z <= 0.5), we output
+    // display-linear values; the sRGB framebuffer write performs hardware
+    // linear->sRGB conversion.
+    // If the output is UNORM + SRGB_NONLINEAR without AA, or the AA source
+    // intermediate with AA on (pc.p4.z > 0.5), encode explicitly.
     if (pc.p4.z > 0.5)
         mapped = linearToSrgb(mapped);
 

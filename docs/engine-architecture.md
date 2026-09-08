@@ -96,7 +96,7 @@ stage measurements are documented in [workload-telemetry.md](workload-telemetry.
 |---------------|---------|
 | `ShaderParameters` | Fog, sun/moon, ambient/diffuse, day cycle, water knobs, outdoor grade |
 | `RenderSettings` | Render distance (min/max blocks), `streamFrontBias`, stream rates (`load/gen/mesh/upload` per sec), shadow distance / cascade far, `maxStreamMs`, wireframe/borders/vsync |
-| `PostProcessSettings` | Bloom, SSAO, god rays, exposure/tonemap, FXAA, grain, vignette, underwater + `underwaterSurfaceY` (local water-surface scan feeds the composite submersion blend), **quality preset** |
+| `PostProcessSettings` | Bloom, SSAO, god rays, exposure/tonemap, spatial AA (dedicated FXAA 3.11 pass — Low: off, Medium+: on, issue #143), grain, vignette, underwater + `underwaterSurfaceY` (local water-surface scan feeds the composite submersion blend), **quality preset** |
 | `GraphicsQualityPreset` | Low / Medium / High / Cinematic — `applyPreset` only remaps existing post knobs |
 | `RenderTiming` | Legacy flat timings filled from hierarchical profiler |
 

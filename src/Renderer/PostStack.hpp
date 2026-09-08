@@ -16,7 +16,7 @@
 #include <cstdint>
 
 /// HDR targets + SSAO (half-res AO+normals → full-res bilateral upsample) /
-/// bloom / god rays / composite.
+/// bloom / god rays / composite + spatial AA (issue #143).
 /// Sky is owned by SkyPass; this stack only owns fullscreen post + scene HDR/depth.
 class PostStack
 {
@@ -42,8 +42,10 @@ public:
 	bool swapchainRequiresSrgbEncode() const { return m_swapchainRequiresSrgbEncode; }
 
 	/// Fullscreen post: exposure metering → SSAO → AO upsample → bloom →
-	/// depth-aware god rays → composite. frameDt drives the auto-exposure
-	/// adaptation; profiler (optional) times the Exposure sub-pass.
+	/// depth-aware god rays → composite → FXAA 3.11 spatial AA (issue #143,
+	/// when enabled: composite writes the LDR AA-source target, the FXAA pass
+	/// renders the swapchain). frameDt drives the auto-exposure adaptation;
+	/// profiler (optional) times the Exposure/Composite/SpatialAA sub-passes.
 	void recordPost(VkCommandBuffer cmd,
 					VkImage swapchainImage,
 					VkImageView swapchainView,
@@ -123,6 +125,12 @@ private:
 	AllocatedImage m_godRays{};
 	AllocatedImage m_ssao{};	  ///< Half-res RGBA8: r = raw AO, gb = encoded view normal.
 	AllocatedImage m_ssaoUp{};	 ///< Full-res R8: bilateral-upsampled final AO.
+	/// Full-res LDR AA source (issue #143): composite's tone-mapped/graded
+	/// output, sRGB-encoded so the FXAA 3.11 pass runs edge detection on
+	/// perceptual values. ALWAYS allocated (so the runtime toggle needs no
+	/// reallocation), but only rendered into / sampled when spatial AA is
+	/// enabled.
+	AllocatedImage m_ldr{};
 
 	/// Auto-exposure metering chain (issue #140): 64x64 / 16x16 / 4x4 R32F
 	/// log-luminance reduction + 1x1 adapted-exposure debug target.
@@ -163,6 +171,8 @@ private:
 	/// Luminance reduction source sets (bind m_lum[0] / m_lum[1]).
 	VkDescriptorSet m_setLumSrc[2]{};
 	VkDescriptorSet m_setComposite[kFramesInFlight]{};
+	/// FXAA 3.11 source set (issue #143): samples the sRGB-encoded LDR target.
+	VkDescriptorSet m_setFxaa{VK_NULL_HANDLE};
 	/// Adaptation sets: m_lum[2] sampler + shared history SSBO + per-slot
 	/// snapshot SSBO.
 	VkDescriptorSet m_exposureSets[kFramesInFlight]{};
@@ -180,6 +190,10 @@ private:
 	VkPipeline m_ssaoPipe{VK_NULL_HANDLE};
 	VkPipeline m_ssaoUpPipe{VK_NULL_HANDLE};
 	VkPipeline m_compositePipe{VK_NULL_HANDLE};
+	/// Same composite shader, but targeting the UNORM LDR AA-source target
+	/// (issue #143) — the pipeline's color format must match the attachment.
+	VkPipeline m_compositeLdrPipe{VK_NULL_HANDLE};
+	VkPipeline m_fxaaPipe{VK_NULL_HANDLE};
 	VkPipeline m_downsamplePipe{VK_NULL_HANDLE};
 	VkPipeline m_adaptPipe{VK_NULL_HANDLE};
 

@@ -113,7 +113,7 @@ Recorded in `WorldRenderer::recordFrame` (see `WorldRenderer.cpp`):
 | 2 | **OpaquePass** | HDR color + scene depth | Solid chunks (per-section `Chunk::collectOpaqueDraws` commands + indirect draws), then **`MobRenderer::record`** for passive mobs, then **`OverlayRenderer::record`** for highlight / borders / demo players — all inside the same dynamic-rendering scope |
 | 3 | **WaterPass** | HDR (transparent) | History color/depth for refraction; set2 scene samples |
 | 4 | **SkyPass** | HDR + god-ray source MRT, depth test | Procedural sky, sun/moon/stars/clouds |
-| 5 | **PostStack** | Swapchain | Exposure metering (auto only) → SSAO (half-res) → AO bilateral upsample → bloom → god rays → composite |
+| 5 | **PostStack** | Swapchain | Exposure metering (auto only) → SSAO (half-res) → AO bilateral upsample → bloom → god rays → composite → spatial AA (FXAA 3.11, only when enabled) |
 | 6 | **imguiDraw** callback | Swapchain (load) | ImGui after composite; not a world pass |
 
 **Overlays are not a separate post-sky pass.** They run at the end of **OpaquePass** while HDR/depth are still the color/depth attachments (`OpaquePass.cpp`).
@@ -181,7 +181,8 @@ Fullscreen chain on a unit quad (`fullscreen.vert`):
 | Exposure metering (auto, issue #140) | `luminance_downsample.frag`, `exposure_adapt.frag` | Skip all metering passes; composite uses the exact manual exposure |
 | Bloom extract + blur | `bloomExtract.frag`, `bloomBlur.frag` | Skip; composite samples **1×1 black** |
 | God rays | `godRays.frag` | Skip unless `lighting::godRaysPassActive`; black default |
-| Composite | `composite.frag` | Tonemap, grade, FXAA, grain, vignette; camera-underwater medium transport skipped |
+| Composite | `composite.frag` | Tonemap, grade, grain, vignette; camera-underwater medium transport skipped. Writes the swapchain when spatial AA is off, or the full-res sRGB-encoded LDR AA-source target (`R8G8B8A8_UNORM`) when it is on |
+| Spatial AA (issue #143) | `fxaa.frag` | Skip; composite renders straight to the swapchain (no LDR intermediate) |
 
 True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`). Selection is pure helper logic in `PostDefaults.hpp` (`postCompositeSources`) so composite never samples half-res targets that were not written this frame.
 
@@ -278,6 +279,44 @@ When `PostProcessSettings::underwater` is set, `composite.frag` applies underwat
 - **Division of responsibilities with exposure (issue #140):** underwater extinction, in-scatter and caustics are scene-medium light transport applied inside composite **before** exposure; the auto-exposure system (HDR metering + temporal adaptation) meters the raw scene HDR **before** composite and owns how the tonemapped result is mapped to display brightness. The underwater medium therefore never feeds back into its own exposure — no runaway darkening/adaptation loop. There is no separate underwater exposure multiplier — the `underwaterStrength` slider only blends the medium effect in; it does not touch exposure. Composite consumes both: `resolveExposure()` picks the adapted auto value or the exact manual setting (`p5.x`), while the medium terms travel in `p6`.
 - **Profiling:** a nested `GpuPass::Composite` interval is recorded around the composite draw inside `GpuPass::Post` (same nested pattern as `GpuPass::Ssao`/`Exposure`), so underwater/composite GPU cost is measurable separately from the metering pass.
 
+#### Spatial AA — FXAA 3.11 (issue #143)
+
+A dedicated fullscreen pass **after composite**, replacing the abbreviated
+in-composite approximation that used to run on linear HDR. When spatial AA is
+enabled, composite stops writing the swapchain and lands its tone-mapped,
+graded LDR (sRGB-encoded) in a full-res intermediate instead:
+
+```text
+composite.frag (tonemap + grade + underwater medium, sRGB-encoded)
+  -> full-res ldrColor target (R8G8B8A8_UNORM, w·h·4 bytes ≈ 8.3 MB @1080p)
+  -> fxaa.frag (FXAA 3.11 quality path) -> swapchain
+```
+
+- **Why after composite:** FXAA is designed for the final LDR image — edge
+  detection and blending run on **sRGB-encoded tone-mapped** values through
+  Rec. 601 perceptual luma, never on linear HDR (see the color-space contract
+  below). The extra target is **always allocated** (so the runtime toggle
+  needs no reallocation) but only rendered into / sampled while AA is on.
+- **Algorithm:** FXAA 3.11 "quality" preset 12 — unrolled span-search steps
+  1.0 / 1.5 / 2.0 / 4.0 / 12.0, tuning `subpix = 0.75`, `edgeThreshold =
+  0.166`, `edgeThresholdMin = 0.0833`. Ported from NVIDIA's reference
+  `FXAA3_11.h` (Fxaa3_11, © 2014 NVIDIA CORPORATION, BSD-3-Clause): the full
+  license notice is preserved at the top of `fxaa.frag.glsl` and must also be
+  reproduced in documentation accompanying any binary distribution.
+- **Debug views:** the SSAO debug views (Graphics panel) bypass the AA pass —
+  diagnostics render straight to the swapchain unfiltered.
+- **Output transfer:** the pass mirrors composite's contract — when the
+  swapchain is a hardware-sRGB attachment it decodes the sRGB-encoded input
+  back to display-linear before writing (the attachment re-encodes on write);
+  on the UNORM + shader-encode path the already-encoded values pass through
+  unchanged. Either way the frame keeps exactly one linear→sRGB encode.
+- **Presets/policy:** `PostProcessSettings::fxaaEnabled` (default on) — Low
+  drops AA entirely, Medium/High/Cinematic keep the pass on. When disabled the
+  pass is skipped and composite renders straight to the swapchain (the legacy
+  path, unchanged).
+- **Profiling:** a nested `GpuPass::SpatialAA` timestamp ("AA (FXAA)") beside
+  `GpuPass::Composite` inside `GpuPass::Post`.
+
 ### Color-space contract (`Renderer/ColorSpace.hpp`, issue #135)
 
 One explicit end-to-end contract; helpers, format policy and unit tests live in `ColorSpace.hpp`:
@@ -295,7 +334,7 @@ display
 - **Albedo textures** (block atlas + mob textures, bundled or resource-pack) are uploaded as `VK_FORMAT_R8G8B8A8_SRGB` (`colorspace::kAlbedoTextureFormat`) so Vulkan decodes sRGB→linear on sample. Alpha is untouched (sRGB affects RGB only). Non-color data (depth, AO, masks, HDR targets) stays UNORM/float — never sRGB. `test_mob_render` asserts the *actually created* GPU images are sRGB for both the atlas and mob textures.
 - **Biome tint colors are sRGB-authored**: `BiomeConfig` grass/foliage colors are display-domain values quantized to RGB8 (like texture pixels); `terrain.vert` decodes them via `srgbToLinear` before `terrain.frag` mixes the tint with the linear-decoded albedo.
 - **Output transfer is decided from the {`VkFormat`, `VkColorSpaceKHR`} pair** (`colorspace::classifyOutputTransfer`), not the format alone: the presentation engine interprets pixel values through the color space. Policy is strictly SDR — `VkSwapchain` prefers an sRGB image format + `SRGB_NONLINEAR` (hardware encode on attachment write), accepts the UNORM equivalent + `SRGB_NONLINEAR` (composite encodes via `linearToSrgb`), and *refuses* anything else (HDR10/PQ, Display-P3, extended sRGB…) instead of guessing a transfer. `PostStack::createPipelines` throws on `OutputTransfer::Unsupported` and passes the shader-encode flag to `composite.frag` as push-constant `p4.z`. No double transfer either way; both paths converge on exactly one linear→sRGB encode (asserted by `simulateDisplayOutput` parity tests).
-- **Luminance weights are per-domain**: physical luminance on *linear* RGB uses Rec. 709 weights (`kRec709Luma` — terrain saturation, scotopic night, biome tint luminance); FXAA edge detection and film grain keep the Rec. 601-on-perceptual (sqrt) convention. Shared GLSL transfers live in `colorspace.inc.glsl`.
+- **Luminance weights are per-domain**: physical luminance on *linear* RGB uses Rec. 709 weights (`kRec709Luma` — terrain saturation, scotopic night, biome tint luminance); film grain keeps the Rec. 601-on-perceptual (sqrt) convention. FXAA (issue #143) runs on the sRGB-encoded post-tonemap LDR intermediate — edge detection and blending happen in that perceptual space through Rec. 601 luma, never on linear HDR. Shared GLSL transfers live in `colorspace.inc.glsl`.
 - **`gamma` setting is a creative midtone grade** (default 1.0 = neutral display-linear), applied after tone mapping and before the final sRGB transfer — it is *not* a framebuffer transfer function and must not be used to compensate format semantics. The neutral epsilon (|γ−1| ≤ 0.001 skips the grade) is mirrored exactly between `ColorSpace.hpp` and `composite.frag`.
 
 ### OverlayRenderer (`Renderer/OverlayRenderer.*`)
@@ -462,7 +501,7 @@ Pure helpers shared with unit tests (`tests/test_render_helpers.cpp`):
 
 - Split computation, light matrices, cascade blend helpers, bias constants.
 
-Settings knobs: `ShaderParameters` and `PostProcessSettings` in `Engine/EngineDefs.hpp`, driven by **GameUI** Graphics panel and quality presets (`GraphicsQualityPreset`: Low / Medium / High / Cinematic via `PostProcessSettings::applyPreset`).
+Settings knobs: `ShaderParameters` and `PostProcessSettings` in `Engine/EngineDefs.hpp`, driven by **GameUI** Graphics panel and quality presets (`GraphicsQualityPreset`: Low / Medium / High / Cinematic via `PostProcessSettings::applyPreset`; spatial AA is off on Low and FXAA 3.11 on from Medium up — issue #143).
 
 ---
 
@@ -488,7 +527,8 @@ All under `ressources/shaders/vulkan/` (GLSL compiled to SPIR-V at build):
 | `exposure_adapt.frag.glsl` | FS | PostStack (auto-exposure adaptation; writes the per-frame state SSBO) |
 | `bloomExtract.frag.glsl` / `bloomBlur.frag.glsl` | FS | PostStack |
 | `godRays.frag.glsl` | FS | PostStack |
-| `composite.frag.glsl` | FS | PostStack (tonemap, grade, FXAA, grain, vignette, camera-underwater medium transport; set 0 = FrameUBO, set 1 = HDR/bloom/god rays/AO×2 + scene depth + exposure history) |
+| `composite.frag.glsl` | FS | PostStack (tonemap, grade, grain, vignette, camera-underwater medium transport; set 0 = FrameUBO, set 1 = HDR/bloom/god rays/AO×2 + scene depth + exposure history; writes the swapchain when spatial AA is off, the full-res LDR `ldrColor` target when it is on) |
+| `fxaa.frag.glsl` | FS | PostStack (spatial AA, issue #143: FXAA 3.11 quality preset 12 over the sRGB-encoded tone-mapped LDR target — full-res `R8G8B8A8_UNORM`, Rec. 601 perceptual luma; decodes back to display-linear on hardware-sRGB swapchains; output = swapchain) |
 | `smoke.vert.glsl` / `smoke.frag.glsl` | VS/FS | Particle / smoke path if enabled |
 
 Conventions:
@@ -514,9 +554,10 @@ What the pipeline implements **now** (not a roadmap):
 | Procedural sky, sun/moon, stars, clouds | SkyPass — cratered HDR moon, two-layer tinted stars, moon silver lining on night clouds |
 | Height + distance fog, aerial-style haze | `terrain.frag` + `lighting` helpers |
 | SSAO (GTAO-style horizon AO + bilateral upsample), bloom, depth-aware god rays | PostStack half-res AO where applicable |
-| ACES/Reinhard, auto/manual exposure, FXAA, grain, vignette | `composite.frag`; auto exposure meters the raw scene HDR (issue #140) |
+| ACES/Reinhard, auto/manual exposure, grain, vignette | `composite.frag`; auto exposure meters the raw scene HDR (issue #140) |
+| Spatial AA: FXAA 3.11 dedicated pass (Low: off, Medium+: on) | `fxaa.frag` after composite on the sRGB-encoded tone-mapped LDR target (issue #143); output = swapchain, timed as `SpatialAA` |
 | Camera-underwater medium transport | Engine voxel sample sets underwater flag + local water-surface scan; composite: scene-depth Beer–Lambert extinction/in-scatter + gated caustics before tonemap (`water_optics.inc.glsl`, issue #144) |
-| Quality presets | Low/Med/High/Cinematic — post knobs plus the water path (SSR march budget, water shadows, underwater caustic tier) |
+| Quality presets | Low/Med/High/Cinematic — post knobs (incl. spatial AA: off on Low, FXAA 3.11 on from Medium up, issue #143) plus the water path (SSR march budget, water shadows, underwater caustic tier) |
 
 ---
 
