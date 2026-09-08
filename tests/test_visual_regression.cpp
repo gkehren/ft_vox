@@ -225,6 +225,10 @@ struct SceneSpec
 	float time = 0.0f;
 	int areaRadiusChunks = 6;
 	bool underwater = false;
+	/// Render through the dedicated spatial-AA pass (issue #143): golden
+	/// scenes keep the shipping default (FXAA 3.11 on); the aa_silhouette A/B
+	/// pair opts out to pin the composite-straight-to-swapchain bypass path.
+	bool fxaa = true;
 	/// Render through the AUTO exposure path (issue #140) instead of the
 	/// fixed manual exposure the existing golden references were captured
 	/// with. See the double-render block in main for how the bit-identical
@@ -252,6 +256,68 @@ void spotNoonTerrain(SceneRun &run)
 	h.camera().setYawPitch(225.f, -28.f); // look back across the anchor column
 	h.shader().fogStart = 60.f;
 	h.shader().fogEnd = 135.f;
+}
+
+/// Shared AA-silhouette viewpoint (aa_silhouette + aa_silhouette_off, issue
+/// #143): an elevated side view of the diagonal staircase fixture below, so
+/// its top edge crosses the frame as one pronounced line against the bright
+/// noon sky while the sky keeps the upper third of the frame.
+void spotAaSilhouette(SceneRun &run)
+{
+	VisualHarness &h = run.harness;
+	const glm::ivec2 col = findLandColumn(h.terrain(), 70, 100, 8);
+	const float ground = float(h.terrain().getTerrainSample(col.x, col.y).postErosionHeight);
+	run.anchor = glm::vec3(float(col.x), ground, float(col.y));
+	// Camera sits past the high end of the staircase, looking back along the
+	// perpendicular of the (+X, -Z) ascent: near steps low in frame, far steps
+	// climbing past eye height into the sky.
+	h.camera().setPosition(glm::vec3(col.x + 36.f, ground + 12.f, col.y + 4.f));
+	h.camera().setYawPitch(-135.f, -4.f);
+	h.shader().fogStart = 80.f;
+	h.shader().fogEnd = 200.f; // keep the silhouette crisp against the sky
+}
+
+/// Shared AA-silhouette fixture (issue #143): a 32-step stone staircase
+/// climbing diagonally (+X while -Z, one block higher per step) out of a
+/// flattened grass pad, with oak-leaf clusters attached beside the silhouette.
+/// The pad makes the whole fixture independent of local terrain detail, so
+/// both A/B scenes see byte-identical geometry.
+void fixtureAaSilhouette(SceneRun &run)
+{
+	ChunkManager &chunks = run.harness.chunks();
+	const int sx = int(run.anchor.x), base = int(run.anchor.y), sz = int(run.anchor.z);
+	// Flatten a pad around the staircase: clear everything above the pad
+	// plane (vegetation included), fill hollows up to it, cap with grass.
+	for (int x = sx - 3; x <= sx + 34; ++x)
+		for (int z = sz - 34; z <= sz + 6; ++z)
+		{
+			const int ground = groundHeightAt(chunks, x, z);
+			for (int y = base + 1; y <= ground; ++y)
+				chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), AIR);
+			for (int y = ground + 1; y < base; ++y)
+				chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), DIRT);
+			chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), GRASS_TOP);
+		}
+	// One stone column per step; step i tops out at base + 1 + i, so even
+	// the first step breaks the pad line and the last clears the camera.
+	for (int i = 0; i < 32; ++i)
+		for (int y = base; y <= base + 1 + i; ++y)
+			chunks.placeVoxel(glm::vec3(float(sx + i), float(y), float(sz - i)), STONE);
+	// Leaf clusters attached beside the silhouette (face-adjacent to steps 12
+	// and 22 without eroding the steps): organic borders the FXAA span search
+	// must smooth without eating into the hard staircase line.
+	const auto leafBlob = [&](const glm::ivec3 &center) {
+		for (int dz = -1; dz <= 1; ++dz)
+			for (int dy = -1; dy <= 1; ++dy)
+				for (int dx = -1; dx <= 1; ++dx)
+					if (std::abs(dx) + std::abs(dy) + std::abs(dz) <= 2)
+						chunks.placeVoxel(glm::vec3(float(center.x + dx), float(center.y + dy),
+													float(center.z + dz)),
+										  OAK_LEAVES);
+	};
+	leafBlob(glm::ivec3(sx + 12, base + 14, sz - 10));
+	leafBlob(glm::ivec3(sx + 22, base + 24, sz - 20));
+	run.worldEdited = true;
 }
 
 std::vector<SceneSpec> buildSceneTable()
@@ -623,6 +689,37 @@ std::vector<SceneSpec> buildSceneTable()
 				 " vs near " + std::to_string(nearGap) + ")");
 		return errors;
 	};
+
+	// --- aa_silhouette -------------------------------------------------------
+	// AA-sensitive geometry (issue #143): the shared 32-step diagonal stone
+	// staircase with attached leaf clusters against the noon sky. Locks the
+	// dedicated FXAA 3.11 output on long diagonal voxel edges, foliage
+	// borders and hard sky contrast; the pass is on by default, so no
+	// settings override is needed. References are generated explicitly with
+	// `ft_vox_visual_tests --update-references --scene aa_silhouette`.
+	scenes.push_back({});
+	SceneSpec &aaSilhouette = scenes.back();
+	aaSilhouette.name = "aa_silhouette";
+	aaSilhouette.seed = 4217;
+	aaSilhouette.dayTime = 0.5f; // noon: maximum sky/ground contrast behind the edge
+	aaSilhouette.time = 13.0f;
+	aaSilhouette.spot = spotAaSilhouette;
+	aaSilhouette.fixture = fixtureAaSilhouette;
+
+	// --- aa_silhouette_off ---------------------------------------------------
+	// Exactly the aa_silhouette inputs (same seed/dayTime/camera/fixture) with
+	// the spatial-AA pass disabled through SceneSpec::fxaa (issue #143): the
+	// A/B pair locks the composite-straight-to-swapchain bypass path and makes
+	// the AA on/off delta reviewable from an identical camera.
+	scenes.push_back({});
+	SceneSpec &aaSilhouetteOff = scenes.back();
+	aaSilhouetteOff.name = "aa_silhouette_off";
+	aaSilhouetteOff.seed = 4217;
+	aaSilhouetteOff.dayTime = 0.5f;
+	aaSilhouetteOff.time = 13.0f;
+	aaSilhouetteOff.fxaa = false;
+	aaSilhouetteOff.spot = spotAaSilhouette;
+	aaSilhouetteOff.fixture = fixtureAaSilhouette;
 
 	return scenes;
 }
@@ -1579,6 +1676,7 @@ int main(int argc, char **argv)
 			// (issue #140), which opt back in below via SceneSpec::autoExposure.
 			harness.post().autoExposureEnabled = false;
 			harness.post().underwater = scene.underwater;
+			harness.post().fxaaEnabled = scene.fxaa; // dedicated spatial-AA pass (issue #143)
 			harness.shader().dayTime = scene.dayTime;
 			updateAtmosphereFromDayTime(harness.shader());
 			if (scene.spot)
@@ -1753,7 +1851,8 @@ int main(int argc, char **argv)
 		std::cerr << " matched no scene (valid names: noon_terrain, cascade_transition, cave_emissive,"
 					 " water_shore, sunset, midnight, mob_lighting, underwater, underwater_deep,"
 					 " auto_exposure_noon, auto_exposure_cave, auto_exposure_adaptation,"
-					 " auto_exposure_meter, underwater_optics, underwater_exposure, resize_check)\n";
+					 " auto_exposure_meter, underwater_optics, underwater_exposure,"
+					 " aa_silhouette, aa_silhouette_off, resize_check)\n";
 		++failures;
 	}
 

@@ -77,6 +77,8 @@ toggle described in §4.)
 | `underwater_deep` | Distance-based extinction falloff and world-anchored caustics at noon (submerged camera looking horizontally across open water) |
 | `auto_exposure_noon` | The `noon_terrain` inputs (same seed/viewpoint/atmosphere) through the live auto-exposure path: metering, adaptation, composite consumption |
 | `auto_exposure_cave` | Auto exposure in a sealed, unlit carved room; the adapted exposure climbs toward the max-EV clamp |
+| `aa_silhouette` | Spatial AA on (dedicated FXAA 3.11 pass, issue #143): a 32-step diagonal stone staircase with attached leaf clusters against the noon sky — diagonal voxel edges, foliage borders, hard sky contrast |
+| `aa_silhouette_off` | The identical `aa_silhouette` scene with the spatial AA pass disabled (issue #143): A/B pair locking the composite-straight-to-swapchain bypass path from the same camera |
 
 On top of the whole-frame comparison, each scene carries **targeted numeric
 invariants**: the HDR scene target is scanned **pre-tonemap** for non-finite

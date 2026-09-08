@@ -148,6 +148,9 @@ struct PostProcessSettings
 	float bloomIntensity{0.12f};
 	/// Horizontal+vertical pairs (3 ≈ former 5 quality, ~40% fewer fullscreen blurs).
 	int bloomBlurIterations{3};
+	/// Spatial anti-aliasing (issue #143): full FXAA 3.11 (quality preset 12)
+	/// in a dedicated post pass, running on the tone-mapped sRGB-encoded LDR
+	/// image instead of the former in-composite linear-HDR approximation.
 	bool fxaaEnabled{true};
 	bool autoExposureEnabled{true};
 	/// Re-baselined for the single sRGB output transfer (issue #135): the old
@@ -257,6 +260,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 	{
 	case GraphicsQualityPreset::Low:
 		shadowMapSize = 1024;
+		fxaaEnabled = false; // issue #143 policy: Low drops post AA entirely
 		bloomEnabled = true;
 		bloomThreshold = 1.65f;
 		bloomIntensity = 0.06f;

@@ -137,6 +137,12 @@ int main()
 			ok = fail("SSAO steps must be non-decreasing Low < Medium < High < Cinematic");
 		if (low.ssaoDebugView != 0)
 			ok = fail("applyPreset must reset the SSAO debug view to Off");
+		// Spatial AA tier (issue #143): only Low drops the FXAA 3.11 pass;
+		// Medium/High/Cinematic keep the production spatial path.
+		if (low.fxaaEnabled)
+			ok = fail("Low preset should disable spatial AA (issue #143)");
+		if (!med.fxaaEnabled || !high.fxaaEnabled || !cine.fxaaEnabled)
+			ok = fail("Medium/High/Cinematic should enable spatial AA (issue #143)");
 		// House rule: constructor defaults == Medium preset values
 		{
 			PostProcessSettings def{}, medDef{};
