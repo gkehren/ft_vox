@@ -75,6 +75,12 @@ toggle described in §4.)
 | `mob_lighting` | Entity vs terrain lighting consistency |
 | `underwater` | Fully submerged camera |
 | `underwater_deep` | Distance-based extinction falloff and world-anchored caustics at noon (submerged camera looking horizontally across open water) |
+| `water_shallow_top` | Vertical view over the audit-lake shelf ladder (104/102/98): floor readable at the shallow end, absorption monotone with depth (issue #135 rework) |
+| `water_shallow_grazing` | Natural shoreline from 0.4 m above the surface looking along the coast: contact foam band, readable floor at the rives, continuous surface (issue #135 rework) |
+| `water_deep_horizon` | Open water to the horizon from just above the surface: far field stays water (never overwritten sky) and the field is continuous toward the horizon (issue #135 rework) |
+| `water_reflect_edge` | The audit-lake cliff + oak reflected at grazing incidence with the mirrored geometry running off the frame edge: SSR edge confidence fades without black bands (issue #135 rework) |
+| `water_cave_pool` | Sealed cave room with a water puddle under an emissive magma strip: the surface mirrors the dark cave, never a fake bright sky (issue #135 rework) |
+| `water_cave_lava` | The same room with the puddle split into water (near) and lava (far): emissive lava stays visible in the water reflection under shared local lighting (issue #135 rework) |
 | `auto_exposure_noon` | The `noon_terrain` inputs (same seed/viewpoint/atmosphere) through the live auto-exposure path: metering, adaptation, composite consumption |
 | `auto_exposure_cave` | Auto exposure in a sealed, unlit carved room; the adapted exposure climbs toward the max-EV clamp |
 | `aa_silhouette` | Spatial AA on (dedicated FXAA 3.11 pass, issue #143): a 32-step diagonal stone staircase with attached leaf clusters against the noon sky — diagonal voxel edges, foliage borders, hard sky contrast |
@@ -339,10 +345,13 @@ Only this mode requests 1920x1080 or 2560x1440. Normal golden runs retain the
 640x360 contract. Timings run three interleaved preset sweeps (ascending /
 descending / ascending; 8 synchronous GPU samples per tier and sweep after 4
 warmup frames) so clock ramp and thermal drift cannot order the tiers;
-`timings.csv` publishes the median sweep means for Water and the production
-pass graph GPU frame (excluding test readback). These are fixed-fixture
-costs, not streaming or presentation benchmarks. No golden files are read or
-updated in this mode.
+`timings.csv` publishes the median sweep means for Water, the production
+pass graph GPU frame (excluding test readback) and the per-pass Shadow /
+Opaque / Sky / SSAO / Post intervals. These are fixed-fixture costs, not
+streaming or presentation benchmarks. No golden files are read or updated in
+this mode. Setting `FT_VOX_WATER_DEBUG=1|2|3|4` renders the same audit poses
+through the water pass diagnostic views (wave normal / optical path / Fresnel /
+SSR confidence) instead of the shaded surface.
 
 The underwater composite path (issue #144) gets its own timing artifact: a
 camera fixed fully below the lake surface (underwater post enabled with a
@@ -351,6 +360,17 @@ each tier records the Post pass together with the nested Composite pass that
 implements the depth-aware underwater model. `underwater.csv` publishes the
 median sweep means and sample counts per tier, so the underwater path cost is
 reported separately from the water pass and the whole-frame time.
+
+**Water surface-term diagnostics (`water-surface-terms`).** A standalone
+GPU-exercised numeric check — always part of the suite, also selectable via
+`--scene water_surface_terms` — renders the audit lake through the water
+pass's dedicated diagnostic views and asserts the reconstructed surface terms
+directly (issue #135 rework): the wave-normal view must read as mostly-up on
+top faces with bounded local gradients (fragment-level world-anchored waves
+stay continuous across greedy mesh rectangles), the optical-path view must
+grow from the steep near field toward grazing (the absorption input is a true
+reconstructed distance) and stay finite, and the Fresnel view must stay near
+F0 in the steep near field while growing monotonically toward grazing.
 
 ## AA slow-pan capture (issue #143)
 

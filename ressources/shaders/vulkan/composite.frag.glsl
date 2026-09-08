@@ -62,15 +62,18 @@ float filmNoise(vec2 uv, float time)
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
-// View-space position from screen uv + raw depth. Same convention as the
-// SSAO reconstruction (ndc = uv * 2 - 1; the negative-height production
-// viewport keeps image rows top-down, so no Y flip enters here) and the
-// same RH_ZO linearization as the water pass.
+// View-space position from screen uv + raw depth. Same RH_ZO linearization
+// as the water pass. The negative-height production viewport maps ndc.y = +1
+// to framebuffer row 0, so the inverse projection needs the vertical mirror
+// (1 - 2*uv.y) — the earlier (uv*2-1) form reconstructed a vertically
+// mirrored world, which stayed invisible while the transport only consumed
+// path lengths, but breaks any consumer that needs the true direction or
+// height (issue #135: detecting that a depth hit IS the water surface).
 vec3 underwaterViewPos(vec2 uv, float depth)
 {
     float t = frame.projection[3][2] / (depth + frame.projection[2][2]);
     return vec3((uv.x * 2.0 - 1.0) * t / frame.projection[0][0],
-                (uv.y * 2.0 - 1.0) * t / frame.projection[1][1], -t);
+                (1.0 - 2.0 * uv.y) * t / frame.projection[1][1], -t);
 }
 
 void main()
@@ -179,6 +182,13 @@ void main()
             float waterDistance = sceneDistance;
             vec3 worldDir = transpose(mat3(frame.view)) * (viewPos / sceneLength);
             vec3 worldPos = frame.viewPos.xyz + worldDir * sceneDistance;
+            // The water pass writes its surface into the depth buffer, so an
+            // upward ray's first depth hit is the water boundary itself: the
+            // extinction path ends there and such pixels are the surface
+            // (sky seen through the boundary), not floor to caustic-light.
+            // Detection keys on the reconstructed point sitting on the local
+            // surface plane (robust to surface-scan block/plane convention).
+            bool hitSurface = surfaceY < 1e8 && worldPos.y > surfaceY - 0.5;
             if (surfaceY < 1e8 && worldDir.y > 1e-4)
             {
                 float surfaceDistance = (surfaceY - frame.viewPos.y) / worldDir.y;
@@ -198,7 +208,10 @@ void main()
             // factor (depth-gradient normal on High+) and the final AO term —
             // occluded/dark cave floors must not brighten as if sunlit.
             float causticTier = pc.p6.y;
-            if (causticTier > 0.5 && !skyPixel)
+            // hitSurface excludes the water boundary itself (its depth is now
+            // in the buffer): caustics light the FLOOR, never the underside
+            // of the surface seen from a submerged camera.
+            if (causticTier > 0.5 && !skyPixel && !hitSurface)
             {
                 float sunUp = smoothstep(0.02, 0.18, frame.sunDir.y) * frame.skyParams.y;
                 float effSurfaceY = surfaceY > 1e8 ? frame.viewPos.y + 1.5 : surfaceY;
@@ -210,13 +223,14 @@ void main()
                     {
                         // Unfiltered neighbor depths: interpolation across a
                         // silhouette would fabricate normals (water-pass policy).
+                        // Cross order: with the corrected reconstruction,
+                        // screen +v runs DOWNWARD in view space, so
+                        // (pU - pC) x (pR - pC) is the camera-facing normal —
+                        // a flat floor reconstructs world +Y.
                         vec3 pR = underwaterViewPos(vUV + vec2(pc.p2.x, 0.0),
                             texelFetch(sceneDepthBuffer, clamp(texel + ivec2(1, 0), ivec2(0), depthSize - 1), 0).r);
                         vec3 pU = underwaterViewPos(vUV + vec2(0.0, pc.p2.y),
                             texelFetch(sceneDepthBuffer, clamp(texel + ivec2(0, 1), ivec2(0), depthSize - 1), 0).r);
-                        // Cross order matters: screen +v runs downward in view
-                        // space, so (pU - pC) x (pR - pC) is the camera-facing
-                        // normal — a flat floor must reconstruct world +Y.
                         vec3 nView = normalize(cross(pU - viewPos, pR - viewPos));
                         upFactor = clamp((transpose(mat3(frame.view)) * nView).y, 0.0, 1.0);
                     }

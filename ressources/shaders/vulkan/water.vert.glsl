@@ -17,10 +17,7 @@ layout(std430, set = 0, binding = 2) readonly buffer DrawDataTable {
 };
 
 layout(location = 0) out vec3 vFragPos;
-layout(location = 1) out vec3 vNormal;
 layout(location = 2) out vec2 vTexCoord;
-layout(location = 3) out vec4 vClipPos;
-layout(location = 4) out float vViewDepth;
 layout(location = 5) flat out vec3 vGeoNormal;
 layout(location = 6) out float vSkyLight;
 layout(location = 7) out vec3 vBlockLightRGB;
@@ -36,9 +33,6 @@ const vec3 NORMALS[6] = vec3[](
 
 void main()
 {
-    float time = frame.skyParams.x;
-    float wave = frame.waterParams.x;
-
     uint normalIdx = aPackedData & 0x7u;
     vSkyLight = float((aPackedData >> 14u) & 0xFu) / 15.0;
     vBlockLightRGB = vec3(float((aPackedData >> 18u) & 0xFu),
@@ -54,30 +48,17 @@ void main()
         float((aPackedPos >> 9u) & 0x3FFFu),
         float((aPackedPos >> 23u) & 0x1FFu)
     ) * (1.0 / 16.0);
+
+    // Geometrically flat water: no vertex displacement, no per-vertex normal
+    // spread. Greedy rectangles of different sizes shared the same vertices
+    // only along their edges, so the old displacement broke across rectangle
+    // boundaries and different-sized rectangles deformed as different waves.
+    // All motion is fragment-level now (see water.frag.glsl), keyed on world
+    // position so every rectangle evaluates identically at the same place.
     vec3 worldPos = vec3(chunkOrigin) + localPos;
-
-    // Animate top faces primarily
-    vec3 pos = worldPos;
-    float top = step(0.9, baseN.y);
-    float w1 = sin(pos.x * 0.35 + time * 1.6) * cos(pos.z * 0.28 + time * 1.1);
-    float w2 = sin(pos.x * 0.12 + pos.z * 0.18 + time * 0.7);
-    pos.y += top * wave * (w1 * 0.55 + w2 * 0.35);
-
-    // Perturb normal for specular / Fresnel
-    vec3 n = baseN;
-    if (top > 0.5) {
-        n.x += wave * 2.2 * cos(pos.x * 0.35 + time * 1.6);
-        n.z += wave * 2.2 * (-sin(pos.z * 0.28 + time * 1.1));
-        n = normalize(n);
-    }
-
-    vFragPos = pos;
-    vNormal = n;
+    vFragPos = worldPos;
     vGeoNormal = baseN;
-    vTexCoord = texCoord + vec2(time * 0.02, time * 0.015);
+    vTexCoord = texCoord;
 
-    vec4 viewPos4 = frame.view * vec4(pos, 1.0);
-    vViewDepth = -viewPos4.z;
-    vClipPos = frame.projection * viewPos4;
-    gl_Position = vClipPos;
+    gl_Position = frame.projection * frame.view * vec4(worldPos, 1.0);
 }

@@ -58,6 +58,11 @@ struct ShaderParameters
 	float waterRefraction = 0.012f;
 	float waterSpecular = 1.15f;
 	float waterFoamStrength = 0.55f;
+	/// Wave-normal spread for the specular lobe / SSR blur (0.04 mirror … 0.35 choppy).
+	float waterRoughness = 0.12f;
+	/// Water surface diagnostics: 0 off, 1 wave normal, 2 optical distance,
+	/// 3 Fresnel, 4 SSR confidence (renders raw values through the water pass).
+	float waterDebugView = 0.0f;
 
 	/// Shadow debug visualization (issue #137): 0 off, 1 cascade index color,
 	/// 2 cascade blend bands, 3 world-units-per-texel density, 4 raw depth.

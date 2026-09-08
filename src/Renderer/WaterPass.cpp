@@ -94,18 +94,19 @@ void WaterPass::createPipeline(VkPipelineLayout layout, const VkPipelineVertexIn
 
 	VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
 	depth.depthTestEnable = VK_TRUE;
-	depth.depthWriteEnable = VK_FALSE;
+	// Single-composition water (issue #135): the fragment outputs the fully
+	// composited surface color (refraction + absorption + reflection + foam)
+	// with alpha = 1, so blending is disabled and depth write is enabled.
+	// The depth write resolves the nearest visible water surface independent
+	// of draw order and lets the sky pass (LESS_OR_EQUAL depth test), SSAO,
+	// god-ray occlusion and the camera-underwater composite see the surface
+	// instead of the geometry behind it.
+	depth.depthWriteEnable = VK_TRUE;
 	depth.depthCompareOp = VK_COMPARE_OP_LESS;
 
 	VkPipelineColorBlendAttachmentState blendAtt{};
 	blendAtt.colorWriteMask = 0xF;
-	blendAtt.blendEnable = VK_TRUE;
-	blendAtt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-	blendAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-	blendAtt.colorBlendOp = VK_BLEND_OP_ADD;
-	blendAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-	blendAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-	blendAtt.alphaBlendOp = VK_BLEND_OP_ADD;
+	blendAtt.blendEnable = VK_FALSE;
 
 	m_pipeline = GraphicsPipelineBuilder()
 					 .setLayout(layout)

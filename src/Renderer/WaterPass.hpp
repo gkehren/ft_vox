@@ -11,7 +11,8 @@
 #include <vector>
 #include <cstdint>
 
-/// Opaque scene history + transparent water pass.
+/// Opaque scene history + single-composition water pass (no blending,
+/// depth-writing: the fragment outputs the final composited surface color).
 class WaterPass
 {
 public:

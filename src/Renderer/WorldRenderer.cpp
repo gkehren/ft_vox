@@ -431,6 +431,8 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 								underwater ? 1.0f : 0.0f);
 	ubo.waterParams = glm::vec4(params.waterWaveStrength, params.waterRefraction, params.waterSpecular,
 								params.waterFoamStrength);
+	ubo.waterSurfaceParams = glm::vec4(glm::clamp(params.waterRoughness, 0.04f, 0.35f),
+									   params.waterDebugView, 0.0f, 0.0f);
 
 	const auto waterTier = m_postSettings.qualityPreset;
 	ubo.waterQuality = glm::vec4(

@@ -25,4 +25,5 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 cascadeGridOffsets01; // xy = cascade0 absolute grid offset, zw = cascade1 (ints as floats)
     vec4 cascadeGridOffsets2; // xy = cascade2 absolute grid offset, zw unused
     vec4 waterQuality; // SSR steps, range, view thickness, directional shadows
+    vec4 waterSurfaceParams; // roughness, debug view (0 off/1 normal/2 optical dist/3 fresnel/4 SSR confidence), unused, unused
 } frame;

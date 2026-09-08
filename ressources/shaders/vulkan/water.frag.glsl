@@ -1,10 +1,6 @@
 #version 450
 
 layout(location = 0) in vec3 vFragPos;
-layout(location = 1) in vec3 vNormal;
-layout(location = 2) in vec2 vTexCoord;
-layout(location = 3) in vec4 vClipPos;
-layout(location = 4) in float vViewDepth;
 layout(location = 5) flat in vec3 vGeoNormal;
 layout(location = 6) in float vSkyLight;
 layout(location = 7) in vec3 vBlockLightRGB;
@@ -14,7 +10,6 @@ layout(location = 7) in vec3 vBlockLightRGB;
 #include "csm.inc.glsl"
 #include "water_optics.inc.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2DArray textureArray;
 // Opaque scene history (color) + depth history (real depth, not color)
 layout(set = 2, binding = 0) uniform sampler2D sceneColor;
 layout(set = 2, binding = 1) uniform sampler2D sceneDepth;
@@ -27,48 +22,146 @@ layout(push_constant) uniform PC {
 
 layout(location = 0) out vec4 outColor;
 
-// Value noise comes from water_optics.inc.glsl (shared with the
-// camera-underwater caustics).
+// ---------------------------------------------------------------------------
+// Fragment-only wave field (world-anchored, mesh-independent).
+//
+// The vertex stage no longer displaces water or perturbs normals: greedy
+// rectangles only share geometry along their edges, so vertex animation made
+// different-sized rectangles deform as different waves with visible seams.
+// Everything below is evaluated from the interpolated WORLD position, so two
+// adjacent rectangles produce exactly the same surface state at the same
+// world location. Sine derivatives are analytic; the noise detail octave uses
+// a footprint-matched finite difference. Amplitudes fade when an octave's
+// feature size approaches the pixel footprint (dFdx/dFdy of the world
+// position), which removes horizon shimmer without touching the mesh.
+// ---------------------------------------------------------------------------
 
-// Animated multi-octave water heightfield (world XZ domain)
-float waterHeight(vec2 p, float t) {
-    float h = 0.0;
-    h += wnoise(p * 0.30 + vec2(t * 0.10, t * 0.06)) * 0.55;
-    h += wnoise(p * 0.85 + vec2(-t * 0.13, t * 0.11)) * 0.30;
-    h += wnoise(p * 2.10 + vec2(t * 0.20, -t * 0.17)) * 0.15;
-    return h;
+// Sum of the two smooth directional sines + analytic XZ gradient.
+void swellField(vec2 p, float t, float amp, out float h, out vec2 grad)
+{
+    // Long gentle swell (~14 m wavelength)
+    vec2 d1 = vec2(0.809, 0.588); // normalize(0.8, 0.58..)
+    float f1 = 0.45;
+    float p1 = dot(p, d1) * f1 + t * 0.55;
+    // Cross swell (~5 m wavelength)
+    vec2 d2 = vec2(-0.514, 0.858);
+    float f2 = 1.25;
+    float p2 = dot(p, d2) * f2 + t * -0.42;
+
+    h = sin(p1) * 0.62 + sin(p2) * 0.38;
+    grad = (d1 * (f1 * cos(p1) * 0.62) + d2 * (f2 * cos(p2) * 0.38)) * 2.4;
+    h *= amp;
+    grad *= amp;
 }
 
-// Fragment-level wave normal from finite differences of the heightfield
-vec3 waveNormal(vec2 p, float t, float amp) {
-    float e = 0.08;
-    float hC = waterHeight(p, t);
-    float hX = waterHeight(p + vec2(e, 0.0), t);
-    float hZ = waterHeight(p + vec2(0.0, e), t);
-    vec2 grad = vec2(hX - hC, hZ - hC) / e;
-    return normalize(vec3(-grad.x * amp, 1.0, -grad.y * amp));
+// Feature fade: 0 when the octave's world feature size is smaller than the
+// pixel footprint (its gradient would alias), 1 when well magnified. Only
+// bounded AMPLITUDES hang on this — the derivative epsilons stay fixed so
+// the field itself never jumps between primitives.
+float octaveFade(float featureSize, float foot)
+{
+    return clamp(featureSize / (foot * 2.0), 0.0, 1.0);
+}
+
+// Complete wave state at a world XZ position: height (for foam modulation)
+// and the surface normal. waveStr 0 -> strictly geometric normal.
+//
+// Continuity contract: evaluated purely from the world position with FIXED
+// (world-unit) finite-difference epsilons, so adjacent greedy rectangles and
+// neighbouring triangles produce exactly the same normal at the same world
+// location. The three drifting octaves reuse the shipped detail texture
+// (0.30/0.85/2.10, weights 0.55/0.30/0.15) — a single octave reads as
+// bilinear value-noise cells instead of water.
+vec3 waveSurface(vec2 p, float t, float waveStr, float foot, out float h)
+{
+    // Long analytic swell (sines, exact derivatives)
+    float swellH;
+    vec2 swellG;
+    swellField(p, t, waveStr * 0.9, swellH, swellG);
+    h = swellH;
+
+    // Detail field: the old three-octave heightfield, now fragment-side.
+    const float e = 0.25; // world units; fixed for continuity
+    const float freqs[3] = float[](0.30, 0.85, 2.10);
+    const float amps[3] = float[](0.55, 0.30, 0.15);
+    const vec2 drifts[3] = vec2[](vec2(t * 0.10, t * 0.06),
+                                  vec2(-t * 0.13, t * 0.11),
+                                  vec2(t * 0.20, -t * 0.17));
+    float noiseAmp = waveStr * 1.6;
+    vec2 grad = swellG;
+    for (int i = 0; i < 3; ++i)
+    {
+        float fade = octaveFade(1.0 / freqs[i], foot);
+        if (fade < 0.001 || noiseAmp < 0.0001) continue;
+        vec2 q = p * freqs[i] + drifts[i];
+        float hC = wnoise(q);
+        float hX = wnoise(q + vec2(freqs[i] * e, 0.0));
+        float hZ = wnoise(q + vec2(0.0, freqs[i] * e));
+        // chain rule: derivative in p-space = derivative in q-space * freq
+        vec2 g = vec2(hX - hC, hZ - hC) / e * (freqs[i] * amps[i] * noiseAmp * fade);
+        grad += g;
+        h += (hC - 0.5) * (amps[i] * noiseAmp * fade);
+    }
+
+    return normalize(vec3(-grad.x, 1.0, -grad.y));
+}
+
+// ---------------------------------------------------------------------------
+// Depth reconstruction (camera space). Same RH_ZO linearization and
+// negative-height-viewport UV convention as the camera-underwater path in
+// composite.frag.glsl: uv comes straight from gl_FragCoord / screen size,
+// ndc = uv*2-1 (the negative viewport keeps image rows top-down, so no Y
+// flip enters the position reconstruction).
+// ---------------------------------------------------------------------------
+
+vec3 viewPosAt(vec2 uv, float linDepth)
+{
+    // Vulkan negative-height viewport: ndc.y = +1 lands on framebuffer row 0
+    // and gl_FragCoord.y grows top-down, so the inverse projection needs the
+    // vertical MIRROR (1 - 2*uv.y), not (uv*2-1). The sign matters here: the
+    // reconstructed world-space floor height drives the shoreline foam band —
+    // a mirrored reconstruction places the floor above the camera and paints
+    // foam over the whole surface. (composite.frag's underwaterViewPos keeps
+    // the un-mirrored form on purpose: its transport consumes only the path
+    // LENGTH (sign-independent) and conventions already tuned for it.)
+    return vec3((uv.x * 2.0 - 1.0) * linDepth / frame.projection[0][0],
+                (1.0 - 2.0 * uv.y) * linDepth / frame.projection[1][1], -linDepth);
 }
 
 // Depth is fetched without filtering: interpolation across a silhouette invents geometry.
-float opaqueViewDepth(vec2 uv) {
+float opaqueViewDepth(vec2 uv)
+{
     ivec2 size = textureSize(sceneDepth, 0);
     float d = texelFetch(sceneDepth, clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1), 0).r;
     return frame.projection[3][2] / (d + frame.projection[2][2]);
 }
 
+float rawOpaqueDepth(vec2 uv)
+{
+    ivec2 size = textureSize(sceneDepth, 0);
+    return texelFetch(sceneDepth, clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1), 0).r;
+}
+
+bool isSkyDepth(float raw) { return raw >= 0.999; }
+
 // Validate the entire bilinear color footprint, not only its nearest depth texel.
-bool refractionFootprintSafe(vec2 uv, float surface, float expected, float tolerance) {
+// All four texels must sit behind the water surface (no foreground recovery)
+// and within tolerance of `expected` (no disocclusion jumps across a silhouette).
+bool refractionFootprintSafe(vec2 uv, float surface, float expected, float tolerance)
+{
     vec2 size = vec2(textureSize(sceneDepth, 0));
     vec2 base = floor(uv * size - 0.5) + 0.5;
     for (int y = 0; y < 2; ++y)
-        for (int x = 0; x < 2; ++x) {
+        for (int x = 0; x < 2; ++x)
+        {
             float d = opaqueViewDepth((base + vec2(x, y)) / size);
             if (d <= surface + 0.02 || abs(d - expected) >= tolerance) return false;
         }
     return true;
 }
 
-bool projectWaterRay(vec3 p, out vec2 uv) {
+bool projectWaterRay(vec3 p, out vec2 uv)
+{
     vec4 clip = frame.projection * vec4(p, 1.0);
     if (clip.w <= 0.0) return false;
     vec3 ndc = clip.xyz / clip.w;
@@ -79,28 +172,41 @@ bool projectWaterRay(vec3 p, out vec2 uv) {
            all(greaterThan(uv, margin)) && all(lessThan(uv, 1.0 - margin));
 }
 
-vec3 sceneReflection(vec3 R, vec3 fallback) {
+// Screen-space reflection with validated hit + roughness-scaled neighbor blur.
+// `surfaceDepth` locates the shading point along the view ray; the origin is
+// offset along the GEOMETRIC normal (stable gating surface) while the ray
+// follows the wave normal (optical direction). Returns the reflected color
+// and its 0..1 confidence so failures can fade to the sky fallback without
+// black bands or hard switches.
+vec3 sceneReflection(vec3 R, float surfaceDepth, float roughness, vec3 fallback, out float confidence)
+{
+    confidence = 0.0;
     int steps = int(frame.waterQuality.x);
     // A top surface cannot reflect the submerged floor. Below-horizon rays
     // retain the unmodified direction and use the horizon fallback.
     if (steps == 0 || R.y <= 0.0) return fallback;
-    vec3 origin = (frame.view * vec4(vFragPos + normalize(vNormal) * 0.08, 1.0)).xyz;
+    vec3 origin = (frame.view * vec4(vFragPos + vGeoNormal * 0.08, 1.0)).xyz;
     vec3 direction = mat3(frame.view) * R;
     float previousT = 0.0;
     float previousDelta = -1.0;
     float range = frame.waterQuality.y;
     float thickness = frame.waterQuality.z; // world/view-space metres, not device depth
-    for (int i = 1; i <= 48; ++i) {
+    for (int i = 1; i <= 48; ++i)
+    {
         if (i > steps) break;
         float f = float(i) / float(steps);
         float t = 0.12 + range * f * f;
         vec3 ray = origin + direction * t;
         vec2 uv;
         if (!projectWaterRay(ray, uv)) break;
+        float raw = rawOpaqueDepth(uv);
+        if (isSkyDepth(raw)) break; // sky has no depth hit: keep the analytic fallback
         float delta = -ray.z - opaqueViewDepth(uv);
-        if (delta >= 0.0 && previousDelta < 0.0) {
+        if (delta >= 0.0 && previousDelta < 0.0)
+        {
             float lo = previousT, hi = t;
-            for (int j = 0; j < 5; ++j) {
+            for (int j = 0; j < 5; ++j)
+            {
                 float mid = (lo + hi) * 0.5;
                 vec3 probe = origin + direction * mid;
                 vec2 probeUV;
@@ -109,21 +215,68 @@ vec3 sceneReflection(vec3 R, vec3 fallback) {
             }
             ray = origin + direction * hi;
             if (!projectWaterRay(ray, uv)) return fallback;
-            delta = -ray.z - opaqueViewDepth(uv);
-            if (delta >= 0.0 && delta < thickness) {
+            if (isSkyDepth(rawOpaqueDepth(uv))) return fallback;
+            float hitDepth = opaqueViewDepth(uv);
+            delta = -ray.z - hitDepth;
+            if (delta >= 0.0 && delta < thickness)
+            {
                 vec2 edge = min(uv, 1.0 - uv);
-                float confidence = smoothstep(0.0, 0.08, min(edge.x, edge.y));
-                confidence *= 1.0 - smoothstep(range * 0.5, range, hi);
-                confidence *= 1.0 - smoothstep(thickness * 0.5, thickness, delta);
-                confidence *= smoothstep(0.15, 0.6, hi);
-                confidence *= smoothstep(0.0, 0.1, R.y);
-                return mix(fallback, texture(sceneColor, uv).rgb, confidence);
+                float conf = smoothstep(0.0, 0.08, min(edge.x, edge.y));
+                conf *= 1.0 - smoothstep(range * 0.5, range, hi);
+                conf *= 1.0 - smoothstep(thickness * 0.5, thickness, delta);
+                conf *= smoothstep(0.15, 0.6, hi);
+                conf *= smoothstep(0.0, 0.1, R.y);
+                // Silhouette guard: the bilinear neighborhood of the hit must
+                // be background-continuous. A neighbor pulled in front of the
+                // hit (object edge crossing the reflection) smears the
+                // reflected content — drop most of its weight instead.
+                float tolerance = max(0.5, (hitDepth - surfaceDepth) * 0.3);
+                conf *= refractionFootprintSafe(uv, surfaceDepth, hitDepth, tolerance) ? 1.0 : 0.35;
+
+                // Roughness-scaled 4-tap blur: only depth-validated neighbors
+                // join the average, so the blur never leaks foreground content.
+                vec3 result = texture(sceneColor, uv).rgb;
+                float weight = 1.0;
+                float radiusTexels = 1.0 + roughness * 22.0;
+                vec2 radius = radiusTexels * pc.invScreen;
+                vec2 dirs[4] = vec2[](vec2(0.707, 0.707), vec2(-0.707, 0.707),
+                                      vec2(0.707, -0.707), vec2(-0.707, -0.707));
+                for (int k = 0; k < 4; ++k)
+                {
+                    vec2 tuv = clamp(uv + dirs[k] * radius, vec2(0.0), vec2(1.0));
+                    float tRaw = rawOpaqueDepth(tuv);
+                    if (isSkyDepth(tRaw)) continue;
+                    float tDepth = opaqueViewDepth(tuv);
+                    if (tDepth <= surfaceDepth + 0.02 ||
+                        abs(tDepth - hitDepth) >= tolerance)
+                        continue;
+                    result += texture(sceneColor, tuv).rgb;
+                    weight += 1.0;
+                }
+                confidence = conf;
+                return mix(fallback, result / weight, conf);
             }
         }
         previousT = t;
         previousDelta = delta;
     }
     return fallback;
+}
+
+// GGX specular lobe with Schlick Fresnel (F0 = water 0.02): ONE roughness-
+// controlled lobe per celestial body replaces the old pair of pow() lobes,
+// so the highlight width follows the new roughness setting and distance
+// filtering instead of two fixed exponents.
+float specLobe(vec3 N, vec3 V, vec3 L, float rough)
+{
+    float a = max(rough * rough, 1e-4);
+    float a2 = a * a;
+    vec3 H = normalize(V + L);
+    float ndh = max(dot(N, H), 0.0);
+    float d = ndh * ndh * (a2 - 1.0) + 1.0;
+    float D = a2 / max(3.14159265 * d * d, 1e-7);
+    float f = 0.02 + 0.98 * pow(1.0 - max(dot(V, H), 0.0), 5.0);
+    return D * f;
 }
 
 void main()
@@ -133,45 +286,114 @@ void main()
     float refractionStr = frame.waterParams.y;
     float specularStr = frame.waterParams.z;
     float foamStr = frame.waterParams.w;
+    float roughness = frame.waterSurfaceParams.x;
+    float debugView = frame.waterSurfaceParams.y;
     float dayFactor = frame.skyParams.y;
     float sunsetFactor = frame.skyParams.z;
     float nightFactor = frame.skyParams.w;
 
     // Geometric face normal, flat from the vertex stage. Gating (top-face
-    // classification, CSM receiver bias) must key on this, not on the
-    // wave-perturbed shading normal: the shading normal oscillates with
+    // classification, SSR origin, CSM receiver bias) must key on this, not on
+    // the wave-perturbed shading normal: the shading normal oscillates with
     // wave strength and phase, which would spatially/temporally toggle SSR
     // and shadow reception on true horizontal faces.
     vec3 geoN = normalize(vGeoNormal);
     vec3 V = normalize(frame.viewPos.xyz - vFragPos);
+    float dist = length(vFragPos - frame.viewPos.xyz);
 
-    // Fragment-level wave normals on top faces only (sides stay voxel-flat)
+    // Fragment-level wave normals on top faces only (sides stay voxel-flat).
+    // The continuous pixel-footprint estimate fades the small octaves and the
+    // far field flattens toward the geometric normal — continuity across
+    // greedy rectangles and a quiet horizon instead of more SSR steps.
     float topMask = smoothstep(0.7, 0.95, geoN.y);
+    // Pixel footprint of the surface, estimated CONTINUOUSLY from the ray
+    // geometry (distance × angular pixel size ÷ ray inclination). The direct
+    // dFdx(vFragPos.xz) form is constant per primitive: at steep incidence
+    // every greedy triangle then gets its own quantised fade and the surface
+    // shatters into flat-shaded tiles (plainly visible from below). The
+    // geometric estimate varies per pixel and captures exactly the grazing
+    // stretch that makes fine octaves alias.
+    float rayInclination = clamp(abs(normalize(frame.viewPos.xyz - vFragPos).y), 0.06, 1.0);
+    float foot = dist * 0.0016 / rayInclination;
+    // Underside: a top face whose observer is below it (submerged camera).
+    // Refraction and SSR are above-water constructs — from below they sample
+    // sky/floor silhouette boundaries in the history and paint reflected
+    // patchwork over the surface. The underside keeps the background
+    // undistorted (the medium seen toward the boundary) and the sky fallback.
+    bool underside = dot(geoN, V) < 0.0;
     vec3 N = geoN;
-    if (topMask > 0.001) {
-        vec3 wN = waveNormal(vFragPos.xz, time, waveStr * 4.0);
-        N = normalize(mix(geoN, wN, topMask));
+    float waveH = 0.0;
+    if (topMask > 0.001 && waveStr > 0.0001)
+    {
+        N = waveSurface(vFragPos.xz, time, waveStr, foot, waveH);
+        float farFlatten = 0.85 * smoothstep(40.0, 200.0, dist);
+        N = normalize(mix(N, geoN, farFlatten));
     }
 
-    // Screen-space refraction of the opaque history
+    // Fresnel against a normal that faces the observer. UNDERSIDE MUST FLIP
+    // UNCONDITIONALLY: the per-pixel dot test flips between +N and -N wherever
+    // a small wave tilt overcomes the grazing view elevation, which shatters
+    // the surface Fresnel into hard-edged regions (plainly visible from a
+    // submerged camera looking along the surface).
+    vec3 Nf = underside ? -N : (dot(N, V) < 0.0 ? -N : N);
+    float F0 = 0.02;
+    float fres = F0 + (1.0 - F0) * pow(1.0 - max(dot(Nf, V), 0.0), 5.0);
+
+    // ---------------------------------------------------------------------------
+    // Camera-space refraction + true optical path.
+    // ---------------------------------------------------------------------------
     vec2 margin = pc.invScreen * 1.5;
     vec2 screenUV = clamp(gl_FragCoord.xy * pc.invScreen, margin, 1.0 - margin);
     float surfaceDepth = -(frame.view * vec4(vFragPos, 1.0)).z;
+    vec3 surfaceView = viewPosAt(screenUV, surfaceDepth);
+
+    // Distort in CAMERA space: the screen offset of a refracted ray follows
+    // the view-space normal, not the world-space one (the old world-space
+    // offset rotated wrongly with the camera).
     float linOpaque = opaqueViewDepth(screenUV);
-    float column = clamp(linOpaque - surfaceDepth, 0.0, 64.0);
+    float columnGate = clamp(linOpaque - surfaceDepth, 0.0, 64.0);
     vec2 edge = min(screenUV, 1.0 - screenUV);
     float edgeFade = smoothstep(0.0, 0.04, min(edge.x, edge.y));
-    vec2 distort = N.xz * refractionStr * 2.0 * edgeFade * smoothstep(0.0, 0.8, column);
+    vec3 Nview = mat3(frame.view) * N;
+    vec2 distort = underside
+                       ? vec2(0.0)
+                       : Nview.xy * refractionStr * 2.0 * edgeFade * smoothstep(0.0, 0.8, columnGate);
     vec2 refrUV = screenUV;
     // Reject foreground and disocclusion jumps. A bounded backoff preserves shorelines.
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 4; ++i)
+    {
         vec2 candidate = clamp(screenUV + distort, margin, 1.0 - margin);
-        if (refractionFootprintSafe(candidate, surfaceDepth, linOpaque, max(0.5, column * 0.25))) {
+        if (refractionFootprintSafe(candidate, surfaceDepth, linOpaque, max(0.5, columnGate * 0.25)))
+        {
             refrUV = candidate;
             break;
         }
         distort *= 0.5;
     }
+
+    // Optical length = distance between the water surface and the ACCEPTED
+    // background sample (both reconstructed in camera space) — not a screen-
+    // axis depth difference. Pixels with no geometry behind them (sky through
+    // the history) get the shared sky column cap so the deep-water body stays
+    // stable instead of dividing by garbage.
+    bool bgSky = isSkyDepth(rawOpaqueDepth(refrUV));
+    float column;
+    float depthBelow;
+    if (bgSky)
+    {
+        column = WATER_SKY_COLUMN;
+        depthBelow = WATER_SKY_COLUMN;
+    }
+    else
+    {
+        vec3 backgroundView = viewPosAt(refrUV, opaqueViewDepth(refrUV));
+        column = clamp(length(backgroundView - surfaceView), 0.0, 64.0);
+        // Vertical surface->floor separation (world space) drives the shoreline
+        // foam band; the optical path above drives absorption only.
+        vec3 backgroundWorld = frame.viewPos.xyz + transpose(mat3(frame.view)) * backgroundView;
+        depthBelow = vFragPos.y - backgroundWorld.y;
+    }
+
     vec3 scene = texture(sceneColor, refrUV).rgb;
     float skyReach = smoothstep(0.05, 0.45, vSkyLight);
     float directVisibility = 1.0;
@@ -190,43 +412,47 @@ void main()
     vec3 waterBody = scene * absorb + WATER_SCATTER_COLOR * scatterAmt * (vec3(scatterLight) + localLight * 0.2);
 
     // Fresnel + analytic sky reflection
-    float F0 = 0.02;
-    float fres = F0 + (1.0 - F0) * pow(1.0 - max(dot(N, V), 0.0), 5.0);
-    vec3 R = reflect(-V, N);
+    vec3 R = reflect(-V, Nf);
     vec3 refl = analyticSkyRadiance(R, dayFactor, sunsetFactor, nightFactor);
     // SSR misses must not reveal a blue outdoor sky inside a sealed cave.
     // A dim local diffuse fallback is not a mirror of offscreen geometry.
     vec3 caveReflection = vec3(0.006, 0.008, 0.012) + localLight * 0.035;
     refl = mix(caveReflection, refl, skyReach);
 
-    if (topMask > 0.95 && frame.lightingParams.w < 0.5)
-        refl = sceneReflection(R, refl);
+    float ssrConfidence = 0.0;
+    if (topMask > 0.95 && !underside && frame.lightingParams.w < 0.5)
+        refl = sceneReflection(R, surfaceDepth, roughness, refl, ssrConfidence);
     vec3 color = mix(waterBody, refl, fres);
 
-    // Sun glitter on the wave normals
+    // Sun glitter: one roughness-controlled GGX lobe (distance-filtered
+    // roughness keeps the far-field highlight from breaking up per pixel).
+    float roughEff = min(roughness + 0.30 * smoothstep(40.0, 260.0, dist), 0.6);
     float sunVis = smoothstep(-0.04, 0.08, frame.sunDir.y);
-    float RdotS = max(dot(R, frame.sunDir.xyz), 0.0);
     float sunLow = 1.0 - smoothstep(0.0, 0.35, frame.sunDir.y);
     vec3 sunTint = mix(vec3(1.0, 0.96, 0.72), vec3(1.0, 0.45, 0.12), sunLow * sunLow);
-    float sunGlitter = pow(RdotS, 700.0) * specularStr * sunVis * (0.35 + 0.65 * dayFactor);
-    float sunSheen = pow(RdotS, 64.0) * specularStr * sunVis * 0.08 * (0.3 + 0.7 * dayFactor);
-    color += sunTint * (sunGlitter * 2.2 + sunSheen) * directVisibility;
+    color += sunTint * specLobe(Nf, V, frame.sunDir.xyz, roughEff) * specularStr * 0.45 *
+             sunVis * directVisibility;
 
-    // Moon glitter (cool tint, night only)
+    // Moon glitter (cool tint, night only) — same single-lobe model.
     float moonVis = smoothstep(0.02, 0.28, frame.moonDir.y);
-    float RdotM = max(dot(R, frame.moonDir.xyz), 0.0);
-    float moonGlitter = pow(RdotM, 700.0) * specularStr * moonVis * nightFactor;
-    float moonSheen = pow(RdotM, 64.0) * specularStr * moonVis * nightFactor * 0.10;
-    color += vec3(0.55, 0.68, 1.0) * (moonGlitter * 1.4 + moonSheen) * directVisibility;
+    vec3 moonTint = vec3(0.55, 0.68, 1.0);
+    color += moonTint * specLobe(Nf, V, frame.moonDir.xyz, roughEff) * specularStr * 0.28 *
+             moonVis * nightFactor * directVisibility;
 
-    // Foam: shore band from the real water column + wave-crest whitecaps
-    float foamNoise = wnoise(vFragPos.xz * 1.8 + vec2(time * 0.35, -time * 0.25))
-                    * wnoise(vFragPos.xz * 3.7 - vec2(time * 0.22, time * 0.30)) * 2.0;
-    float shore = 1.0 - smoothstep(0.0, 1.6, column);
-    float shoreFoam = shore * smoothstep(0.30, 0.72, foamNoise + shore * 0.25);
-    float caps = smoothstep(0.80, 0.95, waterHeight(vFragPos.xz, time)) * 0.25 * topMask;
-    float sideFoam = (1.0 - abs(geoN.y)) * 0.15;
-    float foam = clamp((shoreFoam + caps + sideFoam) * foamStr, 0.0, 1.0);
+    // Foam: thin shoreline band from the reconstructed vertical separation
+    // (contacts only), modulated lightly by the wave height. No whitecaps in
+    // open water and no systematic foam on vertical faces — this style keeps
+    // a calm surface; the optical `column` is reserved for absorption.
+    float foam = 0.0;
+    if (foamStr > 0.001)
+    {
+        float foamNoise = wnoise(vFragPos.xz * 1.8 + vec2(time * 0.35, -time * 0.25))
+                        * wnoise(vFragPos.xz * 3.7 - vec2(time * 0.22, time * 0.30)) * 2.0;
+        float shoreBand = 1.0 - smoothstep(0.10, 0.90, depthBelow);
+        float breath = 0.7 + 0.3 * clamp(waveH * 2.0 + 0.5, 0.0, 1.0);
+        float shoreFoam = shoreBand * smoothstep(0.25, 0.70, foamNoise + shoreBand * 0.35) * breath;
+        foam = clamp(shoreFoam * foamStr, 0.0, 1.0);
+    }
     vec3 foamColor = vec3(0.88, 0.93, 0.96) * (0.22 + 0.78 * dayFactor);
     foamColor = mix(foamColor, vec3(1.0, 0.72, 0.50) * (0.25 + 0.75 * dayFactor), sunsetFactor * 0.45);
     foamColor *= 1.0 - nightFactor * 0.75;
@@ -234,11 +460,31 @@ void main()
     color = mix(color, foamColor, foam * 0.85);
 
     // Distance fog (same 0.45 cap as terrain)
-    float dist = length(vFragPos - frame.viewPos.xyz);
     float fogAmt = smoothstep(frame.fogParams.x, max(frame.fogParams.x + 1.0, frame.fogParams.y), dist) * 0.45 * skyReach;
     color = mix(color, frame.fogColor.rgb, fogAmt);
 
-    // Refraction is composited in-color: keep the surface nearly opaque
-    float alpha = clamp(0.90 + 0.10 * fres + foam * 0.10, 0.0, 1.0);
-    outColor = vec4(color, alpha);
+    // Diagnostic views (Graphics > Water): raw surface terms rendered
+    // through the normal pass pipeline.
+    if (debugView > 0.5)
+    {
+        vec3 dbg;
+        if (debugView < 1.5)
+            dbg = N * 0.5 + 0.5;                          // wave normal (world)
+        else if (debugView < 2.5)
+            dbg = vec3(clamp(columnGate / 64.0, 0.0, 1.0),   // old Z-axis column
+                       clamp(column / 64.0, 0.0, 1.0),       // new 3D optical path
+                       clamp(depthBelow / 8.0, 0.0, 1.0));   // vertical separation
+        else if (debugView < 3.5)
+            dbg = vec3(fres);                             // Fresnel
+        else
+            dbg = mix(vec3(1.0, 0.1, 0.1), vec3(0.1, 1.0, 0.1), ssrConfidence); // SSR confidence
+        outColor = vec4(dbg, 1.0);
+        return;
+    }
+
+    // Single composition: the color above already contains the refracted
+    // background, absorption, reflection and foam, so the pass writes opaque
+    // (blending disabled in WaterPass). Depth write keeps the nearest visible
+    // water surface and lets sky/SSAO/underwater paths see the surface.
+    outColor = vec4(color, 1.0);
 }

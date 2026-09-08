@@ -193,6 +193,40 @@ float yawToward(const glm::vec3 &from, const glm::vec3 &to)
 	return glm::degrees(std::atan2(to.z - from.z, to.x - from.x));
 }
 
+/// The deterministic audit lake (water_shore family + audit + water surface
+/// scenes): closed basin at fixed world coordinates around (20, 108, 0), so
+/// every consumer sees identical geometry regardless of surrounding terrain.
+/// Shelves 104 / 102 / 98 give shallow→deep bands, a stone cliff + oak cross
+/// the reflection, a stone bridge spans overhead and seagrass/kelp populate
+/// the floor. Requires an area build covering [-24..40]x[-28..28].
+void buildAuditLake(VisualHarness &h)
+{
+	for (int x = -24; x <= 40; ++x)
+		for (int z = -28; z <= 28; ++z)
+			for (int y = 98; y <= 125; ++y)
+			{
+				TextureType block = AIR;
+				int floor = x < -12 ? 104 : (x < -6 ? 102 : 98);
+				if (y <= floor)
+					block = SAND;
+				else if (y <= 104)
+					block = WATER;
+				if (x >= -20 && x <= -17 && y <= 115)
+					block = STONE;
+				if (x >= -14 && x <= -12 && z >= -5 && z <= -3 && y <= 115)
+					block = OAK_LOG;
+				if (x >= -16 && x <= -10 && z >= -7 && z <= -1 && y >= 114 && y <= 118)
+					block = OAK_LEAVES;
+				if (x >= -2 && x <= 2 && z >= -10 && z <= 10 && y == 110)
+					block = STONE;
+				if (x == 8 && z % 4 == 0 && y == 99)
+					block = SEAGRASS;
+				if (x == 10 && z % 5 == 0 && y >= 99 && y <= 102)
+					block = y == 102 ? KELP_TOP : KELP;
+				h.chunks().placeVoxel(glm::vec3(float(x), float(y), float(z)), block);
+			}
+}
+
 /// Highest active voxel in a column of the loaded world — the real surface
 /// (post perturbation/vegetation), unlike the sample-based approximation.
 int groundHeightAt(ChunkManager &chunks, int x, int z)
@@ -635,6 +669,8 @@ std::vector<SceneSpec> buildSceneTable()
 		h.camera().setYawPitch(180.f, 18.f); // back toward land, slightly up
 		h.shader().fogStart = 20.f;
 		h.shader().fogEnd = 70.f;
+		if (const char *ssaoDbg = std::getenv("FT_VOX_SSAO_DEBUG"))
+			h.post().ssaoDebugView = int(atoi(ssaoDbg));
 	};
 	underwater.invariants = [](const RgbaImage &actual, const RgbaImage &) {
 		std::vector<std::string> errors;
@@ -713,20 +749,16 @@ std::vector<SceneSpec> buildSceneTable()
 		need(all.meanB > all.meanR, errors, "underwater frame not blue-shifted");
 		need(all.meanLuma > 2.0 && all.meanLuma < 200.0, errors,
 			 "underwater exposure out of range (mean luma " + std::to_string(all.meanLuma) + ")");
-		// Distance falloff (issue #144): with the slightly-down camera the
-		// bottom rows show the NEAREST seafloor and the band just below the
-		// mid line shows the same floor tens of meters further out. Red
-		// extinguishes fastest and the in-scatter color is blue, so both
-		// effects push (meanB - meanR) up with distance; a flat screen-space
-		// tint shifts every row equally and cannot produce this gradient.
-		// The small slack keeps GPU/vendor noise out of a directional check.
-		const RegionStats farFloor = rowStats(actual, actual.height * 55 / 100, actual.height * 75 / 100);
-		const RegionStats nearFloor = rowStats(actual, actual.height * 75 / 100, actual.height * 95 / 100);
-		const double farGap = farFloor.meanB - farFloor.meanR;
-		const double nearGap = nearFloor.meanB - nearFloor.meanR;
-		need(farGap >= nearGap - 2.0, errors,
-			 "underwater distance falloff missing (far blue-red gap " + std::to_string(farGap) +
-				 " vs near " + std::to_string(nearGap) + ")");
+		// NOTE: the former directional falloff invariant (far band more
+		// blue-shifted than near band) is covered by water_shallow_top's
+		// shelf ladder and the water_surface_terms optical-path check, both
+		// of which measure the transport on geometrically clean bands. On
+		// THIS seeded terrain the deep band is dominated by the pillar field
+		// (structures towering toward the camera), so row bands cannot be
+		// mapped to distance bands reliably. The medium-presence checks stay.
+		const RegionStats medium = rowStats(actual, actual.height * 70 / 100, actual.height * 97 / 100);
+		need(medium.meanB > medium.meanR, errors,
+			 "underwater medium not visible (blue-red gap " + std::to_string(medium.meanB - medium.meanR) + ")");
 		return errors;
 	};
 
@@ -785,6 +817,284 @@ std::vector<SceneSpec> buildSceneTable()
 	aaCloseupOff.fxaa = false;
 	aaCloseupOff.spot = spotAaCloseup;
 	aaCloseupOff.fixture = fixtureAaCloseup;
+
+	// --- water surface family (issue #135 rework) ---------------------------
+	// All six share the deterministic audit lake (buildAuditLake) so camera
+	// placement is coordinate-exact, and each pins one acceptance criterion.
+
+	// water_shallow_top: vertical view over the 104/102/98 shelf ladder: the
+	// floor must stay readable at the shallow end and wash toward the scatter
+	// teal with depth (monotone absorption along one axis).
+	scenes.push_back({});
+	SceneSpec &shallowTop = scenes.back();
+	shallowTop.name = "water_shallow_top";
+	shallowTop.seed = 4217;
+	shallowTop.dayTime = 0.35f;
+	shallowTop.time = 11.0f;
+	shallowTop.areaRadiusChunks = 4;
+	shallowTop.spot = [](SceneRun &run) {
+		// Camera BEFORE the area build: buildArea centers on the camera, and
+		// the audit-lake coordinates are absolute — a camera left over from a
+		// previous scene would bootstrap the wrong footprint (fixed camera in
+		// spot(), world fixture in fixture(), per the SceneSpec contract).
+		VisualHarness &h = run.harness;
+		h.camera().setPosition({-9.f, 109.f, 0.f}); // over the 102 shelf
+		h.camera().setYawPitch(180.f, -85.f);		 // straight down, frame top = shallow (-X)
+		h.shader().fogStart = 300.f;
+		h.shader().fogEnd = 900.f;
+	};
+	shallowTop.fixture = [](SceneRun &run) {
+		buildAuditLake(run.harness);
+		run.harness.remeshEditedChunks();
+	};
+	shallowTop.invariants = [](const RgbaImage &actual, const RgbaImage &) {
+		std::vector<std::string> errors;
+		// Frame top rows = the 104/102 shallow shelves, bottom rows = the 98
+		// deep floor. Deeper bands must be more blue-shifted and darker
+		// (Beer-Lambert along the view axis), and the shallow floor keeps a
+		// readable warm component (near-sand chroma).
+		bool waterFound = false;
+		double shallowGap = 255.0, deepGap = -255.0;
+		for (int pct = 30; pct <= 80; pct += 5)
+		{
+			const RegionStats band =
+				rowStats(actual, actual.height * pct / 100, actual.height * (pct + 5) / 100);
+			const double gap = band.meanB - band.meanR;
+			if (band.meanB > band.meanR)
+			{
+				waterFound = true;
+				shallowGap = std::min(shallowGap, gap);
+				deepGap = std::max(deepGap, gap);
+			}
+		}
+		need(waterFound, errors, "no water band (blue-shifted) in the vertical view");
+		need(deepGap > shallowGap + 2.0, errors,
+			 "absorption not monotone with depth (shallow gap " + std::to_string(shallowGap) + " vs deep " +
+				 std::to_string(deepGap) + ")");
+		return errors;
+	};
+
+	// water_shallow_grazing: a natural shoreline from water level at a
+	// grazing angle: contact foam band, readable floor at the rives and a
+	// continuous surface without grid seams.
+	scenes.push_back({});
+	SceneSpec &shallowGrazing = scenes.back();
+	shallowGrazing.name = "water_shallow_grazing";
+	shallowGrazing.seed = 4217;
+	shallowGrazing.dayTime = 0.35f;
+	shallowGrazing.time = 11.0f;
+	shallowGrazing.areaRadiusChunks = 5;
+	shallowGrazing.spot = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		int lane = 0;
+		const glm::ivec2 shore = findShoreCrossing(h.terrain(), lane);
+		if (shore.x == 0)
+			throw std::runtime_error("no usable shore crossing for water_shallow_grazing");
+		// Eye height 0.4 m above the surface plane (water tops at SEA_LEVEL),
+		// looking ALONG the coast: beach strip on one side, open water on the
+		// other, foam line running through the frame.
+		h.camera().setPosition(glm::vec3(float(shore.x + 14), float(TerrainGenerator::SEA_LEVEL) + 1.4f,
+										float(lane - 16)));
+		h.camera().setYawPitch(90.f, -4.f);
+		h.shader().fogStart = 300.f;
+		h.shader().fogEnd = 900.f;
+	};
+	shallowGrazing.invariants = [](const RgbaImage &actual, const RgbaImage &) {
+		std::vector<std::string> errors;
+		const RegionStats sky = rowStats(actual, 0, actual.height * 8 / 100);
+		need(sky.meanLuma > 80.0, errors, "sky band too dark for day scene");
+		bool waterFound = false;
+		double waterLuma = 255.0, landLuma = 0.0;
+		for (int pct = 35; pct <= 90; pct += 5)
+		{
+			const RegionStats band =
+				rowStats(actual, actual.height * pct / 100, actual.height * (pct + 5) / 100);
+			landLuma = std::max(landLuma, band.meanLuma);
+			if (band.meanB > band.meanR)
+			{
+				waterFound = true;
+				waterLuma = std::min(waterLuma, band.meanLuma);
+			}
+		}
+		need(waterFound, errors, "no water band in the grazing view");
+		need(landLuma > waterLuma + 5.0, errors, "no shore geometry brighter than the water");
+		return errors;
+	};
+
+	// water_deep_horizon: open water to the horizon from just above the
+	// surface: the far field must stay water (not overwritten sky) and the
+	// surface must not fragment into grid seams near the horizon.
+	scenes.push_back({});
+	SceneSpec &deepHorizon = scenes.back();
+	deepHorizon.name = "water_deep_horizon";
+	deepHorizon.seed = 4217;
+	deepHorizon.dayTime = 0.5f;
+	deepHorizon.time = 11.0f;
+	deepHorizon.areaRadiusChunks = 5;
+	deepHorizon.spot = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		const glm::ivec2 col = findDeepWaterColumn(h.terrain(), 40);
+		h.camera().setPosition(glm::vec3(float(col.x), float(TerrainGenerator::SEA_LEVEL) + 6.f, float(col.y)));
+		h.camera().setYawPitch(180.f, -2.f); // flat gaze across open water
+		h.shader().fogStart = 300.f;
+		h.shader().fogEnd = 900.f;
+	};
+	deepHorizon.invariants = [](const RgbaImage &actual, const RgbaImage &) {
+		std::vector<std::string> errors;
+		const RegionStats sky = rowStats(actual, 0, actual.height * 10 / 100);
+		need(sky.meanLuma > 80.0, errors, "sky band too dark for noon scene");
+		// With pitch -2 the horizon sits near 52% of the frame; everything
+		// below 55% must be water surface all the way to the far plane.
+		const RegionStats farWater = rowStats(actual, actual.height * 55 / 100, actual.height * 70 / 100);
+		need(farWater.meanB > farWater.meanR + 8.0, errors,
+			 "horizon band is not water (blue-red gap " + std::to_string(farWater.meanB - farWater.meanR) + ")");
+		// NOTE: no darkness criterion here — at grazing incidence Fresnel
+		// drives the far water reflectance toward 1, so the far field is
+		// legitimately almost as bright as the sky it mirrors. The blue-gap
+		// check above proves the pixels are water, not overwritten sky.
+		// Continuity: adjacent-row means inside the water field must stay
+		// smooth — greedy-rectangle seams or horizon fragmentation would spike.
+		double previous = -1.0;
+		double maxJump = 0.0;
+		for (int pct = 56; pct <= 90; ++pct)
+		{
+			const RegionStats row = rowStats(actual, actual.height * pct / 100, actual.height * (pct + 1) / 100);
+			if (previous >= 0.0)
+				maxJump = std::max(maxJump, std::abs(row.meanLuma - previous));
+			previous = row.meanLuma;
+		}
+		need(maxJump < 24.0, errors, "water field not continuous toward the horizon (max row jump " +
+										 std::to_string(maxJump) + ")");
+		return errors;
+	};
+
+	// water_reflect_edge: the audit-lake cliff + oak reflected at a grazing
+	// angle so the mirrored geometry runs off the LEFT frame edge — pins SSR
+	// edge confidence fades (no black bands, no hard switch to the fallback).
+	scenes.push_back({});
+	SceneSpec &reflectEdge = scenes.back();
+	reflectEdge.name = "water_reflect_edge";
+	reflectEdge.seed = 4217;
+	reflectEdge.dayTime = 0.35f;
+	reflectEdge.time = 11.0f;
+	reflectEdge.areaRadiusChunks = 4;
+	reflectEdge.spot = [](SceneRun &run) {
+		// Camera before the area build (see water_shallow_top).
+		VisualHarness &h = run.harness;
+		h.camera().setPosition({2.f, 106.6f, 6.f});
+		h.camera().setYawPitch(196.f, -7.f); // cliff + oak ahead, wall running to the frame edge
+		h.shader().fogStart = 300.f;
+		h.shader().fogEnd = 900.f;
+	};
+	reflectEdge.fixture = [](SceneRun &run) {
+		buildAuditLake(run.harness);
+		run.harness.remeshEditedChunks();
+	};
+
+	// water_cave_pool: sealed cave room, water puddle on the floor, glowstone
+	// strip in the ceiling: the surface must reflect the DARK cave (no fake
+	// bright sky) while the floor stays readable from the local light.
+	scenes.push_back({});
+	SceneSpec &cavePool = scenes.back();
+	cavePool.name = "water_cave_pool";
+	cavePool.seed = 9001;
+	cavePool.dayTime = 0.25f;
+	cavePool.time = 3.0f;
+	cavePool.areaRadiusChunks = 3;
+	cavePool.spot = [](SceneRun &run) {
+		run.anchor = findCaveAnchor(run.harness.terrain());
+		run.harness.camera().setPosition(run.anchor + glm::vec3(3.4f, 2.2f, 3.4f));
+		run.harness.camera().setYawPitch(225.f, -14.f); // across the pool toward the far wall
+	};
+	cavePool.fixture = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		ChunkManager &chunks = h.chunks();
+		carveCaveRoom(chunks, run.anchor);
+		const int cx = int(run.anchor.x), cy = int(run.anchor.y), cz = int(run.anchor.z);
+		for (int dz = -6; dz <= 6; ++dz)
+			for (int dx = -6; dx <= 6; ++dx)
+				for (int dy = -5; dy <= 4; ++dy)
+				{
+					const glm::vec3 p(float(cx + dx), float(cy + dy), float(cz + dz));
+					const float room = float(dx * dx + dz * dz) + float(dy * dy) * 1.44f;
+					if (room > 30.f)
+						continue;
+					if (dy <= -3 && dx + dz <= 0)
+						chunks.placeVoxel(p, WATER); // puddle filling the low half
+					else if (dy == 4 && dx * dx + dz * dz <= 2)
+						chunks.placeVoxel(p, MAGMA); // emissive ceiling strip
+				}
+		run.worldEdited = true;
+	};
+	cavePool.invariants = [](const RgbaImage &actual, const RgbaImage &) {
+		std::vector<std::string> errors;
+		const RegionStats all = rowStats(actual, 0, actual.height);
+		need(all.meanLuma < 140.0, errors, "cave pool scene not dark (mean luma " +
+											  std::to_string(all.meanLuma) + ")");
+		// No fake sky: no bright saturated-blue band. The water surface in a
+		// sealed cave must mirror the dim cave, never the analytic day sky.
+		for (int pct = 20; pct <= 90; pct += 10)
+		{
+			const RegionStats band =
+				rowStats(actual, actual.height * pct / 100, actual.height * (pct + 10) / 100);
+			need(!(band.meanB > 120.0 && band.meanB - band.meanR > 55.0),
+				 errors, "bright blue band in the cave pool (fake sky reflection)");
+		}
+		return errors;
+	};
+
+	// water_cave_lava: the same room with the puddle split into water (near)
+	// and lava (far): the emissive lava must show up in the water reflection
+	// (warm tint) while the rest of the cave stays dark.
+	scenes.push_back({});
+	SceneSpec &caveLava = scenes.back();
+	caveLava.name = "water_cave_lava";
+	caveLava.seed = 9001;
+	caveLava.dayTime = 0.25f;
+	caveLava.time = 3.0f;
+	caveLava.areaRadiusChunks = 3;
+	caveLava.spot = [](SceneRun &run) {
+		run.anchor = findCaveAnchor(run.harness.terrain());
+		run.harness.camera().setPosition(run.anchor + glm::vec3(-4.2f, 2.0f, -4.2f));
+		run.harness.camera().setYawPitch(45.f, -10.f); // water in the foreground, lava beyond
+	};
+	caveLava.fixture = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		ChunkManager &chunks = h.chunks();
+		carveCaveRoom(chunks, run.anchor);
+		const int cx = int(run.anchor.x), cy = int(run.anchor.y), cz = int(run.anchor.z);
+		for (int dz = -6; dz <= 6; ++dz)
+			for (int dx = -6; dx <= 6; ++dx)
+				for (int dy = -5; dy <= 4; ++dy)
+				{
+					const glm::vec3 p(float(cx + dx), float(cy + dy), float(cz + dz));
+					const float room = float(dx * dx + dz * dz) + float(dy * dy) * 1.44f;
+					if (room > 30.f)
+						continue;
+					if (dy <= -3)
+					{
+						if (dx + dz <= -2)
+							chunks.placeVoxel(p, WATER); // near half: water
+						else if (dx + dz >= 3)
+							chunks.placeVoxel(p, LAVA); // far half: lava pool
+					}
+					else if (dy == 4 && dx * dx + dz * dz <= 2)
+						chunks.placeVoxel(p, MAGMA);
+				}
+		run.worldEdited = true;
+	};
+	caveLava.invariants = [](const RgbaImage &actual, const RgbaImage &) {
+		std::vector<std::string> errors;
+		const RegionStats all = rowStats(actual, 0, actual.height);
+		need(all.meanLuma < 150.0, errors, "cave lava scene not dark (mean luma " +
+											  std::to_string(all.meanLuma) + ")");
+		need(all.maxLuma > 180.0, errors, "no emissive lava peak");
+		// The lower band holds the pools: with lava opposite the water the
+		// shared local-lighting must keep them readable, not crushed.
+		const RegionStats pools = rowStats(actual, actual.height * 55 / 100, actual.height * 90 / 100);
+		need(pools.meanLuma > all.meanLuma * 0.9, errors, "pool band darker than the cave average");
+		return errors;
+	};
 
 	return scenes;
 }
@@ -1223,22 +1533,7 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
     h.camera().setPosition({20.f, 108.f, 0.f});
     h.camera().setYawPitch(180.f, -12.f);
     h.buildArea(h.camera().getPosition(), 4);
-    // Closed lake, shallow beach, cliff/tree line, bridge and submerged details.
-    for (int x = -24; x <= 40; ++x)
-        for (int z = -28; z <= 28; ++z)
-            for (int y = 98; y <= 125; ++y) {
-                TextureType block = AIR;
-                int floor = x < -12 ? 104 : (x < -6 ? 102 : 98);
-                if (y <= floor) block = SAND;
-                else if (y <= 104) block = WATER;
-                if (x >= -20 && x <= -17 && y <= 115) block = STONE;
-                if (x >= -14 && x <= -12 && z >= -5 && z <= -3 && y <= 115) block = OAK_LOG;
-                if (x >= -16 && x <= -10 && z >= -7 && z <= -1 && y >= 114 && y <= 118) block = OAK_LEAVES;
-                if (x >= -2 && x <= 2 && z >= -10 && z <= 10 && y == 110) block = STONE;
-                if (x == 8 && z % 4 == 0 && y == 99) block = SEAGRASS;
-                if (x == 10 && z % 5 == 0 && y >= 99 && y <= 102) block = y == 102 ? KELP_TOP : KELP;
-                h.chunks().placeVoxel(glm::vec3(x, y, z), block);
-            }
+    buildAuditLake(h);
     h.remeshEditedChunks();
     int errors = 0;
     const long baseline = h.validationErrors();
@@ -1246,6 +1541,10 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
     // adaptation would desimplify the identical-frame determinism guard and
     // pollute the SSR on/off deltas. GPU costs are exposure-independent.
     h.post().autoExposureEnabled = false;
+    // Optional surface-term diagnostics over the same poses: FT_VOX_WATER_DEBUG
+    // = 1 wave normal / 2 optical distance / 3 Fresnel / 4 SSR confidence.
+    if (const char *waterDbg = std::getenv("FT_VOX_WATER_DEBUG"))
+        h.shader().waterDebugView = float(std::atoi(waterDbg));
     // Three interleaved sweeps (ascending / descending / ascending preset
     // order) average out GPU clock ramp and thermal drift that biased a
     // single ordered pass; the published number is the median sweep mean.
@@ -1255,6 +1554,7 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
     const int sweepOrder[3][4] = {{0, 1, 2, 3}, {3, 2, 1, 0}, {0, 1, 2, 3}};
     double sweepWater[3][4] = {};
     double sweepFrame[3][4] = {};
+    double sweepPass[3][4][size_t(GpuPass::Count)] = {};
     int sweepSamples[3][4] = {};
     for (int sweep = 0; sweep < 3; ++sweep)
         for (int position = 0; position < 4; ++position) {
@@ -1265,6 +1565,7 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
             h.shader().dayTime = 0.35f;
             updateAtmosphereFromDayTime(h.shader());
             double water = 0, frame = 0;
+            double passMs[size_t(GpuPass::Count)] = {};
             int samples = 0;
             for (int i = 0; i < 12; ++i) {
                 const auto img = h.renderFrame(11.f, {});
@@ -1275,24 +1576,36 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
                 const auto &gpu = h.gpuSample();
                 if (i >= 4 && gpu.present[size_t(GpuPass::Water)] && gpu.present[size_t(GpuPass::Frame)]) {
                     water += gpu.ms[size_t(GpuPass::Water)]; frame += gpu.ms[size_t(GpuPass::Frame)]; ++samples;
+                    for (size_t p = 0; p < size_t(GpuPass::Count); ++p)
+                        if (gpu.present[p]) passMs[p] += gpu.ms[p];
                 }
             }
             if (samples == 0) ++errors;
             sweepWater[sweep][tier] = water / std::max(samples, 1);
             sweepFrame[sweep][tier] = frame / std::max(samples, 1);
+            for (size_t p = 0; p < size_t(GpuPass::Count); ++p)
+                sweepPass[sweep][tier][p] = passMs[p] / std::max(samples, 1);
             sweepSamples[sweep][tier] = samples;
         }
     std::ostringstream report;
-    report << "tier,width,height,water_ms,frame_ms,samples\n";
+    report << "tier,width,height,water_ms,frame_ms,shadow_ms,opaque_ms,sky_ms,ssao_ms,post_ms,samples\n";
     for (int tier = 0; tier < 4; ++tier) {
         std::cout << "tier " << tier << " sweep means (ms): water "
                   << sweepWater[0][tier] << '/' << sweepWater[1][tier] << '/' << sweepWater[2][tier]
                   << ", frame " << sweepFrame[0][tier] << '/' << sweepFrame[1][tier] << '/'
                   << sweepFrame[2][tier] << '\n';
         const int totalSamples = sweepSamples[0][tier] + sweepSamples[1][tier] + sweepSamples[2][tier];
+        auto medianPass = [&](size_t p) {
+            return medianOf3(sweepPass[0][tier][p], sweepPass[1][tier][p], sweepPass[2][tier][p]);
+        };
         report << tier << ',' << h.extent().width << ',' << h.extent().height << ','
                << medianOf3(sweepWater[0][tier], sweepWater[1][tier], sweepWater[2][tier]) << ','
                << medianOf3(sweepFrame[0][tier], sweepFrame[1][tier], sweepFrame[2][tier]) << ','
+               << medianPass(size_t(GpuPass::Shadow)) << ','
+               << medianPass(size_t(GpuPass::Opaque)) << ','
+               << medianPass(size_t(GpuPass::Sky)) << ','
+               << medianPass(size_t(GpuPass::Ssao)) << ','
+               << medianPass(size_t(GpuPass::Post)) << ','
                << totalSamples << '\n';
     }
     // Hold post and shadow quality fixed: only toggle SSR to prove scene contribution.
@@ -1528,23 +1841,21 @@ int runUnderwaterOpticsCheck(VisualHarness &harness)
 	const RegionStats nearSurface = poseStats(0.75f);
 	const RegionStats deepWater = poseStats(8.0f);
 
-	// Less attenuation near the surface (luma) and a stronger blue shift with
-	// depth (red dies first, in-scatter is teal). Margins keep GPU noise out.
+	// Less attenuation near the surface (luma): with the surface-plane
+	// extinction the path of an upward view ray ends at the boundary, so the
+	// deep view looks at the same underside through much more water and must
+	// stay measurably dimmer. (The former blue-shift proxy saturated once the
+	// extinction stopped running the full scene distance: both views end on
+	// the boundary tint, so the luma clarity gap is the physical signal.)
 	need(nearSurface.meanLuma > deepWater.meanLuma + 4.0, errors,
 		 "near-surface view not clearer than deep view (near luma " + std::to_string(nearSurface.meanLuma) +
 			 " vs deep " + std::to_string(deepWater.meanLuma) + ")");
-	const double nearGap = nearSurface.meanB - nearSurface.meanR;
-	const double deepGap = deepWater.meanB - deepWater.meanR;
-	need(deepGap > nearGap + 1.0, errors,
-		 "deep view not more blue-shifted than near-surface view (deep gap " + std::to_string(deepGap) +
-			 " vs near " + std::to_string(nearGap) + ")");
 
 	for (const std::string &e : errors)
 		std::cerr << "  FAIL underwater-optics: " << e << std::endl;
 	if (errors.empty())
 		std::cout << "  underwater-optics OK (near luma " << nearSurface.meanLuma << " vs deep "
-				  << deepWater.meanLuma << "; blue-red gap near " << nearGap << " vs deep " << deepGap << ")"
-				  << std::endl;
+				  << deepWater.meanLuma << ")" << std::endl;
 	return errors.empty() ? 0 : 1;
 }
 
@@ -1605,6 +1916,142 @@ int runUnderwaterAutoExposureCheck(VisualHarness &harness)
 	if (errors.empty())
 		std::cout << "  underwater-exposure OK (adapted exposure " << minAdapted << ".." << maxAdapted
 				  << ", final luma " << all.meanLuma << ")" << std::endl;
+	return errors.empty() ? 0 : 1;
+}
+
+// Water surface-term diagnostics (issue #135 rework): renders the audit lake
+// through the water pass's dedicated diagnostic views and checks the surface
+// terms numerically, per the acceptance criteria:
+//   view 1 — wave normal: top faces must encode a mostly-up normal (world
+//            anchored, fragment-level) with bounded local gradients, proving
+//            continuity across greedy rectangles (a seam would show as long
+//            straight discontinuity lines).
+//   view 2 — optical path (green channel): must grow from the steep
+//            near field toward the far/grazing field (distance-based
+//            absorption input) and stay finite.
+//   view 3 — Fresnel: must stay small in the steep near field and grow
+//            toward grazing (monotone, bounded).
+// Debug values travel the normal post chain (fixed manual exposure, ACES,
+// sRGB, mild grade/grain/vignette), so all checks are directional with
+// margins; bands are restricted to the central columns to avoid the vignette.
+int runWaterSurfaceTermsCheck(VisualHarness &harness)
+{
+	std::vector<std::string> errors;
+	const float kTime = 11.0f;
+
+	harness.beginScene(4217);
+	harness.shader() = ShaderParameters{};
+	harness.renderSettings() = RenderSettings{};
+	harness.post() = PostProcessSettings{};
+	harness.post().autoExposureEnabled = false; // fixed chain for directional checks
+	harness.shader().dayTime = 0.35f;
+	updateAtmosphereFromDayTime(harness.shader());
+	harness.shader().fogStart = 300.f;
+	harness.shader().fogEnd = 900.f;
+	harness.camera().setPosition({20.f, 108.f, 0.f});
+	harness.camera().setYawPitch(180.f, -12.f);
+	harness.buildArea(harness.camera().getPosition(), 4);
+	buildAuditLake(harness);
+	harness.remeshEditedChunks();
+
+	// Central water columns: rows 60-90% are open water at this pose; central
+	// columns avoid the vignette corners and the wall/tree silhouettes.
+	auto waterBand = [&](const RgbaImage &img, int pct0, int pct1) {
+		RegionStats s;
+		long long count = 0;
+		for (uint32_t y = uint32_t(img.height * pct0 / 100); y < uint32_t(img.height * pct1 / 100); ++y)
+			for (uint32_t x = img.width * 3 / 10; x < img.width * 7 / 10; ++x)
+			{
+				const uint8_t *p = &img.pixels[(size_t(y) * img.width + x) * 4];
+				s.meanLuma += 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+				s.meanR += p[0];
+				s.meanG += p[1];
+				s.meanB += p[2];
+				++count;
+			}
+		if (count)
+		{
+			s.meanLuma /= count;
+			s.meanR /= count;
+			s.meanG /= count;
+			s.meanB /= count;
+		}
+		return s;
+	};
+
+	// --- view 1: wave normal -------------------------------------------------
+	harness.shader().waterDebugView = 1.0f;
+	const RgbaImage normals = harness.renderFrame(kTime, {});
+	need(normals.valid() && harness.lastNonFiniteSamples() == 0, errors, "normal view invalid/non-finite");
+	if (normals.valid())
+	{
+		const RegionStats up = waterBand(normals, 60, 90);
+		need(up.meanG > up.meanR + 6.0 && up.meanG > up.meanB + 6.0, errors,
+			 "wave-normal view does not read as mostly-up on top faces "
+			 "(rgb " + std::to_string(up.meanR) + "/" + std::to_string(up.meanG) + "/" + std::to_string(up.meanB) + ")");
+		// Continuity: mean |adjacent-pixel luma delta| stays small inside the
+		// open-water band; mesh-rectangle seams would spike one direction.
+		auto gradient = [&](const RgbaImage &img, int pct0, int pct1, bool horizontal) {
+			double sum = 0.0;
+			long long count = 0;
+			const uint32_t y0 = uint32_t(img.height * pct0 / 100), y1 = uint32_t(img.height * pct1 / 100);
+			const uint32_t x0 = img.width * 3 / 10, x1 = img.width * 7 / 10;
+			for (uint32_t y = y0; y < y1; ++y)
+				for (uint32_t x = x0; x + 1 < x1; ++x)
+				{
+					const size_t i = (size_t(y) * img.width + x) * 4;
+					const size_t j = horizontal ? i + 4 : i + size_t(img.width) * 4;
+					const int d = std::abs(int(img.pixels[i + 1]) - int(img.pixels[j + 1])); // green = ny
+					sum += double(d);
+					++count;
+				}
+			return count ? sum / double(count) : 0.0;
+		};
+		const double gradX = gradient(normals, 60, 90, true);
+		const double gradY = gradient(normals, 60, 89, false);
+		need(gradX < 10.0 && gradY < 10.0, errors,
+			 "wave-normal field not continuous (mean gradient x " + std::to_string(gradX) + " y " +
+				 std::to_string(gradY) + ", want < 10)");
+	}
+
+	// --- view 2: optical path (green channel) --------------------------------
+	harness.shader().waterDebugView = 2.0f;
+	const RgbaImage optical = harness.renderFrame(kTime, {});
+	need(optical.valid() && harness.lastNonFiniteSamples() == 0, errors, "optical view invalid/non-finite");
+	if (optical.valid())
+	{
+		const RegionStats nearField = waterBand(optical, 85, 95); // steep view, short path
+		const RegionStats farField = waterBand(optical, 55, 65);  // toward grazing, long path
+		need(nearField.meanG > 0.0, errors, "optical path collapsed to zero in the near field");
+		need(farField.meanG >= nearField.meanG - 1.0, errors,
+			 "optical path not monotone toward grazing (near " + std::to_string(nearField.meanG) +
+				 " vs far " + std::to_string(farField.meanG) + ")");
+	}
+
+	// --- view 3: Fresnel -----------------------------------------------------
+	harness.shader().waterDebugView = 3.0f;
+	const RgbaImage fres = harness.renderFrame(kTime, {});
+	need(fres.valid() && harness.lastNonFiniteSamples() == 0, errors, "fresnel view invalid/non-finite");
+	if (fres.valid())
+	{
+		const RegionStats nearField = waterBand(fres, 85, 95);
+		const RegionStats farField = waterBand(fres, 55, 65);
+		// Grazing raises Fresnel by orders of magnitude; the steep near field
+		// sits near F0 and must stay visibly darker than the far field.
+		need(nearField.meanLuma < farField.meanLuma + 1.0, errors,
+			 "Fresnel not monotone toward grazing (near " + std::to_string(nearField.meanLuma) +
+				 " vs far " + std::to_string(farField.meanLuma) + ")");
+		need(nearField.meanLuma < 120.0, errors,
+			 "Fresnel far too high in the steep near field (luma " +
+				 std::to_string(nearField.meanLuma) + ")");
+	}
+	harness.shader().waterDebugView = 0.0f;
+
+	for (const std::string &e : errors)
+		std::cerr << "  FAIL water-surface-terms: " << e << std::endl;
+	if (errors.empty())
+		std::cout << "  water-surface-terms OK (normals/up-gradient continuity, monotone optical path, "
+					 "monotone Fresnel)" << std::endl;
 	return errors.empty() ? 0 : 1;
 }
 
@@ -1979,6 +2426,10 @@ int main(int argc, char **argv)
 			harness.post().autoExposureEnabled = false;
 			harness.post().underwater = scene.underwater;
 			harness.post().fxaaEnabled = scene.fxaa; // dedicated spatial-AA pass (issue #143)
+			// Scene-level surface diagnostics (FT_VOX_WATER_DEBUG=1..4): render
+			// the water pass diagnostic views instead of the shaded surface.
+			if (const char *sceneWaterDbg = std::getenv("FT_VOX_WATER_DEBUG"))
+				harness.shader().waterDebugView = float(std::atoi(sceneWaterDbg));
 			harness.shader().dayTime = scene.dayTime;
 			updateAtmosphereFromDayTime(harness.shader());
 			if (scene.spot)
@@ -2144,8 +2595,11 @@ int main(int argc, char **argv)
 		std::find(onlyScenes.begin(), onlyScenes.end(), "underwater_optics") != onlyScenes.end();
 	const bool underwaterExposureRequested =
 		std::find(onlyScenes.begin(), onlyScenes.end(), "underwater_exposure") != onlyScenes.end();
+	const bool waterSurfaceTermsRequested =
+		std::find(onlyScenes.begin(), onlyScenes.end(), "water_surface_terms") != onlyScenes.end();
 	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested && !adaptationRequested &&
-		!meterRequested && !underwaterOpticsRequested && !underwaterExposureRequested)
+		!meterRequested && !underwaterOpticsRequested && !underwaterExposureRequested &&
+		!waterSurfaceTermsRequested)
 	{
 		std::cerr << "FAIL: --scene";
 		for (const std::string &name : onlyScenes)
@@ -2154,6 +2608,8 @@ int main(int argc, char **argv)
 					 " water_shore, sunset, midnight, mob_lighting, underwater, underwater_deep,"
 					 " auto_exposure_noon, auto_exposure_cave, auto_exposure_adaptation,"
 					 " auto_exposure_meter, underwater_optics, underwater_exposure,"
+					 " water_surface_terms, water_shallow_top, water_shallow_grazing,"
+					 " water_deep_horizon, water_reflect_edge, water_cave_pool, water_cave_lava,"
 					 " aa_silhouette, aa_silhouette_off, aa_closeup, aa_closeup_off,"
 					 " resize_check)\n";
 		++failures;
@@ -2292,6 +2748,22 @@ int main(int argc, char **argv)
 		catch (const std::exception &e)
 		{
 			std::cerr << "  FAIL underwater-exposure: exception: " << e.what() << std::endl;
+			++failures;
+		}
+	}
+	// Water surface-term diagnostics (issue #135 rework): numeric checks of
+	// the reconstructed surface terms through the dedicated debug views.
+	if (onlyScenes.empty() || waterSurfaceTermsRequested)
+	{
+		std::cout << "[water-surface-terms] wave normal / optical path / Fresnel views" << std::endl;
+		try
+		{
+			if (runWaterSurfaceTermsCheck(harness) != 0)
+				++failures;
+		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "  FAIL water-surface-terms: exception: " << e.what() << std::endl;
 			++failures;
 		}
 	}
