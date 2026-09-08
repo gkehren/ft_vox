@@ -52,6 +52,24 @@ public:
         if (outType) *outType = type;
         return physics::blockCell(type);
     }
+
+    // World Y of the water surface above the given eye cell (issue #144):
+    // scan up to the first non-water cell and return its bottom plane, so the
+    // composite submersion blend ramps in over the first half metre instead
+    // of snapping with the boolean medium flag, and so the underwater optical
+    // path can intersect the surface exactly. One main-thread column scan per
+    // frame costs effectively nothing; non-water eye cells return
+    // kUnknownUnderwaterSurfaceY.
+    float waterSurfaceAbove(glm::ivec3 eye) const
+    {
+        if (sample(eye).medium != physics::Medium::Water)
+            return kUnknownUnderwaterSurfaceY;
+        int y = eye.y;
+        while (y < static_cast<int>(WORLD_HEIGHT) &&
+               sample({eye.x, y, eye.z}).medium == physics::Medium::Water)
+            ++y;
+        return static_cast<float>(y);
+    }
 private:
     static int floorChunk(int n)
     {

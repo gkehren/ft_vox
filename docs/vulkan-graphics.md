@@ -181,7 +181,7 @@ Fullscreen chain on a unit quad (`fullscreen.vert`):
 | Exposure metering (auto, issue #140) | `luminance_downsample.frag`, `exposure_adapt.frag` | Skip all metering passes; composite uses the exact manual exposure |
 | Bloom extract + blur | `bloomExtract.frag`, `bloomBlur.frag` | Skip; composite samples **1×1 black** |
 | God rays | `godRays.frag` | Skip unless `lighting::godRaysPassActive`; black default |
-| Composite | `composite.frag` | Tonemap, grade, FXAA, grain, vignette, underwater |
+| Composite | `composite.frag` | Tonemap, grade, FXAA, grain, vignette; camera-underwater medium transport skipped |
 
 True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`). Selection is pure helper logic in `PostDefaults.hpp` (`postCompositeSources`) so composite never samples half-res targets that were not written this frame.
 
@@ -240,7 +240,7 @@ HDR RGBA16F (SHADER_READ)
      exact settle only when |target - adapted| < 1e-4 (arrival, never step size)
 ```
 
-- **State model:** ONE shared 16-byte history SSBO (host-visible, persistent across resize — the metering chain has fixed resolution) holds the temporal state, plus per-frame-in-flight CPU-visible snapshots written by the same pass. The history buffer is bound as composite `set 0, binding 5` and read by `resolveExposure()` when push constant `p5.x` (useAutoExposure) is set; the manual path uses the exact `exposure` push value. Cross-frame ordering relies on the same-queue in-order execution guarantee plus a `SHADER_WRITE -> SHADER_READ` buffer barrier before the adapt pass; the same-frame composite read is ordered by a barrier after it. The CPU debug readout copies the current slot's snapshot after that slot's fence was waited (no added synchronization).
+- **State model:** ONE shared 16-byte history SSBO (host-visible, persistent across resize — the metering chain has fixed resolution) holds the temporal state, plus per-frame-in-flight CPU-visible snapshots written by the same pass. The history buffer is bound as composite `set 1, binding 6` and read by `resolveExposure()` when push constant `p5.x` (useAutoExposure) is set; the manual path uses the exact `exposure` push value. Cross-frame ordering relies on the same-queue in-order execution guarantee plus a `SHADER_WRITE -> SHADER_READ` buffer barrier before the adapt pass; the same-frame composite read is ordered by a barrier after it. The CPU debug readout copies the current slot's snapshot after that slot's fence was waited (no added synchronization).
 - **Mode transitions:** manual mode skips all metering passes (deterministic output, suspended adaptation). Re-enabling auto re-seeds the history from the current manual exposure (rising-edge detection; also forced on first use), so there is no hidden jump. A swapchain resize keeps the adaptation running seamlessly.
 - **Settings** (all reset by `applyPreset`; CPU mirror + unit tests in `Renderer/AutoExposure.hpp` — the GLSL formulas must stay in sync):
 
@@ -256,6 +256,27 @@ HDR RGBA16F (SHADER_READ)
 - **Device support:** requires `fragmentStoresAndAtomics` (queried in `VkContext`); when absent the engine stays on the manual path instead of failing.
 - **Diagnostics:** Graphics panel controls (auto toggle, compensation, middle grey, EV limits, speeds), profiler readouts (metered EV, current/target exposure, clamp state) fed by an on-demand snapshot copy (`refreshExposureReadout`, ~10 Hz while the profiler panel is visible — the only GPU->CPU traffic of the feature, zero when the panel is closed), and a dedicated `GpuPass::Exposure` timestamp row (nested inside the Post pass timing). Measured cost (RTX 4070 Ti, seed 42 benchmark, Release, base 12acedd vs head f04e564): Post pass 0.317 -> 0.383 ms — delta about +0.07 ms (0.06-0.09 ms across runs; the Post bracket includes the Exposure sub-pass), Exposure sub-pass alone reads ~0.12 ms, score unchanged. Reports: docs/benchmarks/bench_20260907_224059_12acedd27ecb (base) and bench_20260907_232825_f04e564a0975 (head). The `*` in the head report's Revision line (dirty tree at build) flags the untracked benchmark artifact itself, not source drift — the compiled sources were exactly f04e564.
 
+
+#### Camera-underwater medium transport (issue #144)
+
+When `PostProcessSettings::underwater` is set, `composite.frag` applies underwater light transport **in linear HDR, before exposure/tonemap** — replacing the old flat teal tint + screen-space UV shimmer:
+
+- **Bindings:** composite binds the frame uniform set (**set 0** — `FrameUBO`: view/projection matrices, camera position, sun/moon directions, day/sunset/night factors) plus a **set 1** holding its five texture samplers, **binding 5 = the live scene depth buffer** (D32, full resolution, already in `SHADER_READ_ONLY_OPTIMAL` during post) and **binding 6 = the auto-exposure history SSBO from #140** (the same single shared buffer the adapt pass writes — not a per-frame copy).
+- **Depth reconstruction:** per pixel, view distance is linearized from scene depth with the GLM `RH_ZO` projection terms (exactly like the water pass) and world position is rebuilt along the view ray (camera position + unprojected NDC ray rotated to world by the view basis). Sky/far-plane depth caps the reconstructed point at ~28 m, and the **optical path** is separated from the scene distance: an upward view ray ends at the local surface plane (`p6.x`), so extinction follows the true in-water path length.
+- **Extinction + in-scatter (Beer–Lambert):** `transmittance = exp(-distance * WATER_SIGMA)` with `WATER_SIGMA = vec3(0.42, 0.16, 0.10) * 0.35`, and `in-scatter = WATER_SCATTER_COLOR` (`vec3(0.015, 0.14, 0.24)`) `* (1 - exp(-distance * 0.22)) *` an ambient day/sunset term. These constants live in the shared include `ressources/shaders/vulkan/water_optics.inc.glsl`, used by **both** `water.frag.glsl` (surface water) and `composite.frag.glsl` (camera underwater) — one documented source for the medium's optical constants.
+- **Caustics:** a procedural value-noise pattern (shared helper in the same include) from the reconstructed world XZ + time, added as light before tonemap. Gates: sun elevation (smoothstep on `sunDir.y`), depth below the local water surface (exponential fade), an upward-facing factor derived from depth-buffer gradient normals, and the final SSAO term — so occluded/dark cave floors are not brightened as if sunlit.
+- **Quality tiers:**
+
+  | Preset | Underwater model |
+  |--------|------------------|
+  | Low | Extinction + in-scatter only, no caustics |
+  | Medium | + simple world-space caustics (no normal gating) |
+  | High | + depth-gradient normal gating |
+  | Cinematic | Same model, finer pattern |
+
+- **Surface blend:** `Engine` still samples the camera voxel each frame (`ChunkCollisionView`, `Medium::Water`) to set the underwater flag — unchanged — and additionally scans up the column to the local water surface. The surface Y reaches composite via push constant `p6`; the submersion factor (camera Y vs surface Y) blends the effect in over roughly the first half-metre below the surface, so crossing the boundary no longer snaps a full-screen filter on/off. The sentinel value `1e9` means "unknown surface → fully submerged" (debug toggles). When the surface is known, upward view rays also intersect that plane optically: the extinction path ends at the surface (scene distance keeps locating the geometry), so looking at the sky from just below the surface is nearly clear instead of suffering the full sky-column extinction.
+- **Division of responsibilities with exposure (issue #140):** underwater extinction, in-scatter and caustics are scene-medium light transport applied inside composite **before** exposure; the auto-exposure system (HDR metering + temporal adaptation) meters the raw scene HDR **before** composite and owns how the tonemapped result is mapped to display brightness. The underwater medium therefore never feeds back into its own exposure — no runaway darkening/adaptation loop. There is no separate underwater exposure multiplier — the `underwaterStrength` slider only blends the medium effect in; it does not touch exposure. Composite consumes both: `resolveExposure()` picks the adapted auto value or the exact manual setting (`p5.x`), while the medium terms travel in `p6`.
+- **Profiling:** a nested `GpuPass::Composite` interval is recorded around the composite draw inside `GpuPass::Post` (same nested pattern as `GpuPass::Ssao`/`Exposure`), so underwater/composite GPU cost is measurable separately from the metering pass.
 
 ### Color-space contract (`Renderer/ColorSpace.hpp`, issue #135)
 
@@ -406,9 +427,9 @@ At CMake configure time, `cmake/GenerateFrameUboGlsl.cmake` parses that header a
 ressources/shaders/vulkan/frame_ubo.inc.glsl   # generated — do not hand-edit
 ```
 
-World shaders `#include "frame_ubo.inc.glsl"` (glslc `-I` includes the generated path). Fields include view/projection, three cascade matrices, fog/light/visual params, sun/moon dirs, sky day factors, cascade splits, moon ambient, lighting params (block/emissive/fogY/underwater), and water params.
+World shaders `#include "frame_ubo.inc.glsl"` (glslc `-I` includes the generated path). Fields include view/projection, three cascade matrices, fog/light/visual params, sun/moon dirs, sky day factors, cascade splits, moon ambient, lighting params (block/emissive/fogY/underwater), and water params. The post **composite** also binds this set (set 0) for the camera-underwater medium transport (view/projection, camera position, sun/moon directions, day/sunset/night factors); the local water-surface Y used by the submersion blend travels via composite push constant `p6`, not the UBO.
 
-CPU fill: `WorldRenderer::updateFrameUBO` from `Camera`, `ShaderParameters`, cascade far (`RenderSettings::shadowCascadeFar`), underwater flag.
+CPU fill: `WorldRenderer::updateFrameUBO` from `Camera`, `ShaderParameters`, cascade far (`RenderSettings::shadowCascadeFar`), underwater flag (camera voxel sample; the local water-surface scan feeds the composite push constant instead).
 
 ---
 
@@ -452,6 +473,7 @@ All under `ressources/shaders/vulkan/` (GLSL compiled to SPIR-V at build):
 | File | Stage | Used by |
 |------|-------|---------|
 | `frame_ubo.inc.glsl` | include | Generated FrameUBO block |
+| `water_optics.inc.glsl` | include | Shared water optical constants (`WATER_SIGMA`, `WATER_SCATTER_COLOR`) + value-noise caustics helper — `water.frag.glsl` + `composite.frag.glsl` |
 | `terrain.vert.glsl` / `terrain.frag.glsl` | VS/FS | OpaquePass |
 | `shadow.vert.glsl` / `shadow.frag.glsl` | VS/FS | ShadowPass |
 | `water.vert.glsl` / `water.frag.glsl` | VS/FS | WaterPass |
@@ -466,7 +488,7 @@ All under `ressources/shaders/vulkan/` (GLSL compiled to SPIR-V at build):
 | `exposure_adapt.frag.glsl` | FS | PostStack (auto-exposure adaptation; writes the per-frame state SSBO) |
 | `bloomExtract.frag.glsl` / `bloomBlur.frag.glsl` | FS | PostStack |
 | `godRays.frag.glsl` | FS | PostStack |
-| `composite.frag.glsl` | FS | PostStack (tonemap, grade, FXAA, grain, vignette, underwater) |
+| `composite.frag.glsl` | FS | PostStack (tonemap, grade, FXAA, grain, vignette, camera-underwater medium transport; set 0 = FrameUBO, set 1 = HDR/bloom/god rays/AO×2 + scene depth + exposure history) |
 | `smoke.vert.glsl` / `smoke.frag.glsl` | VS/FS | Particle / smoke path if enabled |
 
 Conventions:
@@ -493,8 +515,8 @@ What the pipeline implements **now** (not a roadmap):
 | Height + distance fog, aerial-style haze | `terrain.frag` + `lighting` helpers |
 | SSAO (GTAO-style horizon AO + bilateral upsample), bloom, depth-aware god rays | PostStack half-res AO where applicable |
 | ACES/Reinhard, auto/manual exposure, FXAA, grain, vignette | `composite.frag`; auto exposure meters the raw scene HDR (issue #140) |
-| Underwater grade | Engine sets flag from voxel sample; composite + UBO |
-| Quality presets | Low/Med/High/Cinematic on existing post knobs only |
+| Camera-underwater medium transport | Engine voxel sample sets underwater flag + local water-surface scan; composite: scene-depth Beer–Lambert extinction/in-scatter + gated caustics before tonemap (`water_optics.inc.glsl`, issue #144) |
+| Quality presets | Low/Med/High/Cinematic — post knobs plus the water path (SSR march budget, water shadows, underwater caustic tier) |
 
 ---
 

@@ -3,16 +3,23 @@ layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 outColor;
 
 #include "colorspace.inc.glsl"
+#include "frame_ubo.inc.glsl"
+#include "water_optics.inc.glsl"
 
-layout(set = 0, binding = 0) uniform sampler2D hdrBuffer;
-layout(set = 0, binding = 1) uniform sampler2D bloomBuffer;
-layout(set = 0, binding = 2) uniform sampler2D godRaysBuffer;
-layout(set = 0, binding = 3) uniform sampler2D ssaoBuffer;     // FINAL upsampled AO (full-res R8, linear)
-layout(set = 0, binding = 4) uniform sampler2D ssaoRawBuffer;  // RAW half-res SSAO RGBA (linear: r = raw AO, gb = encoded normal)
+// Set 0 = FrameUBO (view/projection, camera position, sun/moon, day cycle),
+// bound for the camera-underwater medium transport (issue #144).
+// Set 1 = composite sources; binding 5 is the live scene depth used by that
+// transport, binding 6 the auto-exposure history (issue #140).
+layout(set = 1, binding = 0) uniform sampler2D hdrBuffer;
+layout(set = 1, binding = 1) uniform sampler2D bloomBuffer;
+layout(set = 1, binding = 2) uniform sampler2D godRaysBuffer;
+layout(set = 1, binding = 3) uniform sampler2D ssaoBuffer;     // FINAL upsampled AO (full-res R8, linear)
+layout(set = 1, binding = 4) uniform sampler2D ssaoRawBuffer;  // RAW half-res SSAO RGBA (linear: r = raw AO, gb = encoded normal)
+layout(set = 1, binding = 5) uniform sampler2D sceneDepthBuffer; // full-res D32 (nearest)
 
 // Auto-exposure state (issue #140), written by exposure_adapt.frag into the
 // single shared history buffer. Must match autoexposure::ExposureGpuState.
-layout(set = 0, binding = 5) readonly buffer ExposureState
+layout(set = 1, binding = 6) readonly buffer ExposureState
 {
     float adaptedExposure; // linear exposure multiplier
     float targetExposure;  // clamped target exposure this frame (debug)
@@ -26,7 +33,8 @@ layout(push_constant) uniform PC {
     vec4 p2; // xy=texelSize, z=postContrast, w=ssaoOn
     vec4 p3; // x=ssaoIntensity, y=underwater, z=underwaterStrength, w=time
     vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=ssaoDebugView (0=Off 1=FinalAO 2=RawAO 3=Normals)
-    vec4 p5; // x=useAutoExposure, yzw unused
+    vec4 p5; // x=useAutoExposure, yzw unused (issue #140)
+    vec4 p6; // x=waterSurfaceY (1e9 = unknown), y=causticTier (0=off 1=simple 2=normal-gated 3=finer), zw unused (issue #144)
 } pc;
 
 // Tone mapping exposure: the GPU-adapted auto value, or the exact manual
@@ -106,6 +114,17 @@ float filmNoise(vec2 uv, float time)
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
+// View-space position from screen uv + raw depth. Same convention as the
+// SSAO reconstruction (ndc = uv * 2 - 1; the negative-height production
+// viewport keeps image rows top-down, so no Y flip enters here) and the
+// same RH_ZO linearization as the water pass.
+vec3 underwaterViewPos(vec2 uv, float depth)
+{
+    float t = frame.projection[3][2] / (depth + frame.projection[2][2]);
+    return vec3((uv.x * 2.0 - 1.0) * t / frame.projection[0][0],
+                (uv.y * 2.0 - 1.0) * t / frame.projection[1][1], -t);
+}
+
 void main()
 {
     float exposure = resolveExposure();
@@ -175,6 +194,91 @@ void main()
     if (godRaysEnabled)
         hdrColor += texture(godRaysBuffer, vUV).rgb * 0.85;
 
+    // Camera-underwater medium transport (issue #144): depth-aware
+    // Beer-Lambert extinction + in-scatter + world-anchored caustics,
+    // applied to linear HDR before exposure so tonemapping stays consistent.
+    // Responsibilities stay separated from auto exposure (issue #140): the
+    // metering pass reads the raw HDR buffer before this block, so the
+    // medium never feeds back into its own exposure.
+    if (underwater)
+    {
+        // Submersion blends the medium in over roughly the first half metre
+        // below the local surface; 1e9 sentinel = unknown surface (debug
+        // toggles) -> fully submerged.
+        float surfaceY = pc.p6.x;
+        float submersion = surfaceY > 1e8 ? 1.0
+                                          : clamp((surfaceY - frame.viewPos.y) * 2.0, 0.0, 1.0);
+        float s = clamp(underwaterStrength, 0.0, 1.0) * submersion;
+        if (s > 0.001)
+        {
+            ivec2 depthSize = ivec2(vec2(textureSize(sceneDepthBuffer, 0)));
+            ivec2 texel = clamp(ivec2(vUV * vec2(depthSize)), ivec2(0), depthSize - 1);
+            float depth = texelFetch(sceneDepthBuffer, texel, 0).r;
+            bool skyPixel = depth >= 0.999;
+            vec3 viewPos = underwaterViewPos(vUV, depth);
+            float sceneLength = max(length(viewPos), 1e-4);
+            // sceneDistance locates the reconstructed geometry; waterDistance
+            // is the optical path through the medium. An upward ray leaves the
+            // water at the local surface plane, so its extinction path ends
+            // there — true for geometry hits and for sky seen through the
+            // surface (the 28 m sky cap only bounds the reconstructed point).
+            float sceneDistance = skyPixel ? WATER_SKY_COLUMN : sceneLength;
+            float waterDistance = sceneDistance;
+            vec3 worldDir = transpose(mat3(frame.view)) * (viewPos / sceneLength);
+            vec3 worldPos = frame.viewPos.xyz + worldDir * sceneDistance;
+            if (surfaceY < 1e8 && worldDir.y > 1e-4)
+            {
+                float surfaceDistance = (surfaceY - frame.viewPos.y) / worldDir.y;
+                if (surfaceDistance > 0.0)
+                    waterDistance = min(waterDistance, surfaceDistance);
+            }
+
+            float column = clamp(waterDistance, 0.0, 64.0);
+            vec3 transmittance = exp(-column * WATER_SIGMA);
+            float scatterAmt = 1.0 - exp(-column * WATER_SCATTER_RATE);
+            float ambient = waterScatterAmbient(frame.skyParams.y, frame.skyParams.z, 1.0);
+            vec3 underwaterColor = hdrColor * transmittance
+                                 + WATER_SCATTER_COLOR * scatterAmt * ambient;
+
+            // Caustics: procedural from reconstructed world XZ, gated by sun
+            // elevation, depth below the local surface, an upward-facing
+            // factor (depth-gradient normal on High+) and the final AO term —
+            // occluded/dark cave floors must not brighten as if sunlit.
+            float causticTier = pc.p6.y;
+            if (causticTier > 0.5 && !skyPixel)
+            {
+                float sunUp = smoothstep(0.02, 0.18, frame.sunDir.y) * frame.skyParams.y;
+                float effSurfaceY = surfaceY > 1e8 ? frame.viewPos.y + 1.5 : surfaceY;
+                float depthFade = exp(-max(effSurfaceY - worldPos.y, 0.0) * 0.08);
+                if (sunUp > 0.001 && depthFade > 0.004)
+                {
+                    float upFactor = 1.0;
+                    if (causticTier > 1.5)
+                    {
+                        // Unfiltered neighbor depths: interpolation across a
+                        // silhouette would fabricate normals (water-pass policy).
+                        vec3 pR = underwaterViewPos(vUV + vec2(pc.p2.x, 0.0),
+                            texelFetch(sceneDepthBuffer, clamp(texel + ivec2(1, 0), ivec2(0), depthSize - 1), 0).r);
+                        vec3 pU = underwaterViewPos(vUV + vec2(0.0, pc.p2.y),
+                            texelFetch(sceneDepthBuffer, clamp(texel + ivec2(0, 1), ivec2(0), depthSize - 1), 0).r);
+                        // Cross order matters: screen +v runs downward in view
+                        // space, so (pU - pC) x (pR - pC) is the camera-facing
+                        // normal — a flat floor must reconstruct world +Y.
+                        vec3 nView = normalize(cross(pU - viewPos, pR - viewPos));
+                        upFactor = clamp((transpose(mat3(frame.view)) * nView).y, 0.0, 1.0);
+                    }
+                    float occlusion = clamp(texture(ssaoBuffer, vUV).r, 0.0, 1.0);
+                    float pattern = causticPattern(worldPos.xz, time);
+                    if (causticTier > 2.5)
+                        pattern = mix(pattern, causticPattern(worldPos.xz * 1.7 + vec2(time * 0.05, -time * 0.04), time), 0.35);
+                    float caustic = pattern * sunUp * upFactor * depthFade * mix(0.35, 1.0, occlusion);
+                    underwaterColor += vec3(0.34, 0.36, 0.32) * caustic * 1.3;
+                }
+            }
+            hdrColor = mix(hdrColor, underwaterColor, s);
+        }
+    }
+
     vec3 mapped = max(hdrColor * exposure, vec3(0.0));
     mapped = toneMapper == 0 ? acesFilm(mapped) : reinhard(mapped);
 
@@ -196,20 +300,6 @@ void main()
         float d = length(vUV - vec2(0.5));
         float vig = 1.0 - smoothstep(0.28, 0.92, d);
         mapped *= mix(1.0, vig, vignetteStrength);
-    }
-
-    // Underwater look: teal grade, slight blur-like soft + extra vignette
-    if (underwater)
-    {
-        float s = clamp(underwaterStrength, 0.0, 1.5);
-        vec3 underTint = vec3(0.15, 0.45, 0.55);
-        mapped = mix(mapped, mapped * underTint * 1.4, 0.55 * s);
-        mapped.r *= mix(1.0, 0.65, s);
-        float vig = 1.0 - smoothstep(0.25, 0.95, length(vUV - 0.5));
-        mapped *= mix(1.0, vig, 0.35 * s);
-        // Caustic shimmer
-        float c = 0.5 + 0.5 * sin(vUV.x * 40.0 + time * 2.0) * sin(vUV.y * 35.0 - time * 1.5);
-        mapped += vec3(0.0, 0.04, 0.05) * c * s;
     }
 
     // Film grain (after grade so it stays visible) — multiplicative, so the

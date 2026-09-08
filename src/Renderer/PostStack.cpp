@@ -54,7 +54,8 @@ struct CompPC
 	glm::vec4 p2;
 	glm::vec4 p3;
 	glm::vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=ssaoDebugView (0=off,1=final,2=raw,3=normals)
-	glm::vec4 p5; // x=useAutoExposure, yzw unused
+	glm::vec4 p5; // x=useAutoExposure, yzw unused (issue #140)
+	glm::vec4 p6; // x=waterSurfaceY (1e9 = unknown), y=causticTier, zw unused (issue #144)
 };
 struct DownPC
 {
@@ -287,11 +288,16 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 		li.pBindings = gb.data();
 		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_godSetLayout);
 
-		std::array<VkDescriptorSetLayoutBinding, 6> cb{};
-		for (int i = 0; i < 5; ++i)
+		// Composite resources live on set 1; set 0 is the frame set (FrameUBO)
+		// so the underwater medium transport can reconstruct world positions
+		// and read the day-cycle terms (issue #144). Binding 5 is the live
+		// scene depth for that transport; binding 6 the auto-exposure history
+		// SSBO (issue #140, same single shared buffer the adapt pass writes).
+		std::array<VkDescriptorSetLayoutBinding, 7> cb{};
+		for (int i = 0; i < 6; ++i)
 			cb[i] = {static_cast<uint32_t>(i), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-		cb[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}; // auto-exposure history (issue #140)
-		li.bindingCount = 6;
+		cb[6] = {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}; // auto-exposure history (issue #140)
+		li.bindingCount = 7;
 		li.pBindings = cb.data();
 		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_compositeSetLayout);
 
@@ -357,10 +363,13 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 		pl.pSetLayouts = &m_ssaoUpLayout;
 		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoUpPipeLayout);
 
-		pl.pSetLayouts = &m_compositeSetLayout;
+		VkDescriptorSetLayout compositeSets[2] = {m_frameSetLayout, m_compositeSetLayout};
+		pl.pSetLayouts = compositeSets;
+		pl.setLayoutCount = 2;
 		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_compositeLayout);
 
 		pl.pSetLayouts = &m_exposureSetLayout;
+		pl.setLayoutCount = 1; // restore: the composite layout above needs two sets
 		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_exposureLayout);
 	}
 
@@ -580,15 +589,16 @@ void PostStack::writeCompositeDescriptors(const PostCompositeSources &src,
 	VkImageView godView = src.godRaysUseDefault ? m_defaultBlack.view : m_godRays.view;
 	VkImageView ssaoView = src.ssaoUseDefault ? m_defaultWhiteR8.view : m_ssaoUp.view; // final AO
 	VkImageView ssaoRawView = src.ssaoUseDefault ? m_defaultWhiteR8.view : m_ssao.view; // raw AO+normals
-	VkDescriptorImageInfo imgs[5] = {
+	VkDescriptorImageInfo imgs[6] = {
 		{m_linearSampler, m_hdr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 		{m_linearSampler, bloomView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 		{m_linearSampler, godView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 		{m_linearSampler, ssaoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 		{m_linearSampler, ssaoRawView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+		{m_nearestSampler, m_sceneDepth.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 	};
-	std::array<VkWriteDescriptorSet, 5> ws{};
-	for (int i = 0; i < 5; ++i)
+	std::array<VkWriteDescriptorSet, 6> ws{};
+	for (int i = 0; i < 6; ++i)
 	{
 		ws[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		ws[i].dstSet = m_setComposite[frameIndex];
@@ -597,14 +607,14 @@ void PostStack::writeCompositeDescriptors(const PostCompositeSources &src,
 		ws[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		ws[i].pImageInfo = &imgs[i];
 	}
-	vkUpdateDescriptorSets(m_context->getDevice(), 5, ws.data(), 0, nullptr);
+	vkUpdateDescriptorSets(m_context->getDevice(), 6, ws.data(), 0, nullptr);
 	m_lastCompositeSrc[frameIndex] = src;
 }
 
 
 void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageView swapchainView,
 						   VkExtent2D extent, uint32_t frameIndex,
-						   VkDescriptorSet /*frameSet0*/,
+						   VkDescriptorSet frameSet0,
 						   const PostProcessSettings &settings, const glm::vec2 &sunScreen,
 						   float sunVisibility, float time, const glm::mat4 &projection,
 						   float frameDt, VkGpuProfiler *profiler)
@@ -634,7 +644,6 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 	recordExposure(cmd, frameIndex, settings, frameDt);
 	if (profiler)
 		profiler->endPass(cmd, GpuPass::Exposure);
-
 
 	// --- SSAO half-res + bilateral upsample (skip both when disabled — composite
 	// treats ao=1 via flag); timed as its own GpuPass inside the Post scope ---
@@ -750,9 +759,21 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 					   m_swapchainRequiresSrgbEncode ? 1.0f : 0.0f,
 					   static_cast<float>(settings.ssaoDebugView));
 	cpc.p5 = glm::vec4(autoExposureActive(settings) ? 1.0f : 0.0f, 0.f, 0.f, 0.f);
+	// Camera-underwater medium transport (issue #144): local surface height
+	// for the submersion blend, and the caustic quality tier from the preset
+	// (Low off / Medium simple / High normal-gated / Cinematic finer).
+	cpc.p6 = glm::vec4(settings.underwaterSurfaceY,
+					   static_cast<float>(static_cast<int>(settings.qualityPreset)), 0.f, 0.f);
+	// Composite is timed as its own nested GpuPass inside Post (SSAO pattern)
+	// so the underwater/composite cost is measurable separately. Set order:
+	// frame set (FrameUBO) first, composite sources second.
+	if (profiler)
+		profiler->beginPass(cmd, GpuPass::Composite);
 	fsDraw(cmd, m_compositePipe, m_compositeLayout,
-		   m_setComposite[frameIndex % kFramesInFlight], swapchainView, extent,
-		   &cpc, sizeof(cpc));
+		   frameSet0, swapchainView, extent,
+		   &cpc, sizeof(cpc), m_setComposite[frameIndex % kFramesInFlight]);
+	if (profiler)
+		profiler->endPass(cmd, GpuPass::Composite);
 }
 
 
@@ -791,13 +812,15 @@ void PostStack::createExposureBuffers()
 		buf = createStateBuffer();
 	m_forceSeed = true;
 
-	// Composite sets bind the (persistent) history buffer once.
+	// Composite sets bind the (persistent) history buffer once. Binding 6
+	// since the underwater scene-depth sampler took binding 5 (issue #144);
+	// it stays the same single shared history the adapt pass writes.
 	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
 	{
 		VkDescriptorBufferInfo bi{m_exposureHistory.buffer, 0, sizeof(autoexposure::ExposureGpuState)};
 		VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
 		w.dstSet = m_setComposite[frame];
-		w.dstBinding = 5;
+		w.dstBinding = 6;
 		w.descriptorCount = 1;
 		w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		w.pBufferInfo = &bi;
@@ -846,7 +869,7 @@ void PostStack::writeExposureDescriptors()
 
 void PostStack::fsDraw(VkCommandBuffer cmd, VkPipeline pipe, VkPipelineLayout layout,
 					   VkDescriptorSet set, VkImageView outView, VkExtent2D outExt,
-					   const void *pc, uint32_t pcSize)
+					   const void *pc, uint32_t pcSize, VkDescriptorSet set1)
 {
 	const auto beginRendering = beginR();
 	const auto endRendering = endR();
@@ -867,7 +890,17 @@ void PostStack::fsDraw(VkCommandBuffer cmd, VkPipeline pipe, VkPipelineLayout la
 	vkCmdSetViewport(cmd, 0, 1, &vport);
 	vkCmdSetScissor(cmd, 0, 1, &sc);
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
+	if (set1 != VK_NULL_HANDLE)
+	{
+		// Composite (set 0 = FrameUBO for the underwater transport, set 1 =
+		// composite sources — issue #144).
+		VkDescriptorSet sets[2] = {set, set1};
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 2, sets, 0, nullptr);
+	}
+	else
+	{
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
+	}
 	if (pc && pcSize)
 		vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, pcSize, pc);
 	VkDeviceSize off = 0;

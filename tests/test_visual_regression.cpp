@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <numeric>
 #include <filesystem>
@@ -576,6 +577,53 @@ std::vector<SceneSpec> buildSceneTable()
 		run.worldEdited = true;
 	};
 
+	// --- underwater_deep ----------------------------------------------------
+	// Noon sun over a deep water column, camera looking horizontally across
+	// open water: per-pixel distance extinction (the nearby seafloor stays
+	// clear, the same floor further out washes toward the scatter color)
+	// and world-anchored caustics on the directly-lit floor.
+	scenes.push_back({});
+	SceneSpec &underwaterDeep = scenes.back();
+	underwaterDeep.name = "underwater_deep";
+	underwaterDeep.seed = 4217;
+	underwaterDeep.dayTime = 0.5f; // noon in this engine's day cycle: direct sun for caustics
+	underwaterDeep.time = 11.0f;
+	underwaterDeep.areaRadiusChunks = 4;
+	underwaterDeep.underwater = true;
+	underwaterDeep.spot = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		const glm::ivec2 col = findDeepWaterColumn(h.terrain(), 40);
+		h.camera().setPosition(glm::vec3(float(col.x), float(TerrainGenerator::SEA_LEVEL) - 8.f, float(col.y)));
+		// Nearly horizontal, slightly down: the seafloor fills the lower
+		// half of the frame (nearby at the bottom, tens of meters away just
+		// below the mid line) and open water the upper half.
+		h.camera().setYawPitch(180.f, -6.f);
+		h.shader().fogStart = 20.f;
+		h.shader().fogEnd = 70.f;
+	};
+	underwaterDeep.invariants = [](const RgbaImage &actual, const RgbaImage &) {
+		std::vector<std::string> errors;
+		const RegionStats all = rowStats(actual, 0, actual.height);
+		need(all.meanB > all.meanR, errors, "underwater frame not blue-shifted");
+		need(all.meanLuma > 2.0 && all.meanLuma < 200.0, errors,
+			 "underwater exposure out of range (mean luma " + std::to_string(all.meanLuma) + ")");
+		// Distance falloff (issue #144): with the slightly-down camera the
+		// bottom rows show the NEAREST seafloor and the band just below the
+		// mid line shows the same floor tens of meters further out. Red
+		// extinguishes fastest and the in-scatter color is blue, so both
+		// effects push (meanB - meanR) up with distance; a flat screen-space
+		// tint shifts every row equally and cannot produce this gradient.
+		// The small slack keeps GPU/vendor noise out of a directional check.
+		const RegionStats farFloor = rowStats(actual, actual.height * 55 / 100, actual.height * 75 / 100);
+		const RegionStats nearFloor = rowStats(actual, actual.height * 75 / 100, actual.height * 95 / 100);
+		const double farGap = farFloor.meanB - farFloor.meanR;
+		const double nearGap = nearFloor.meanB - nearFloor.meanR;
+		need(farGap >= nearGap - 2.0, errors,
+			 "underwater distance falloff missing (far blue-red gap " + std::to_string(farGap) +
+				 " vs near " + std::to_string(nearGap) + ")");
+		return errors;
+	};
+
 	return scenes;
 }
 
@@ -814,6 +862,10 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
     h.remeshEditedChunks();
     int errors = 0;
     const long baseline = h.validationErrors();
+    // Pin the deterministic manual-exposure path (issue #140): temporal
+    // adaptation would desimplify the identical-frame determinism guard and
+    // pollute the SSR on/off deltas. GPU costs are exposure-independent.
+    h.post().autoExposureEnabled = false;
     // Three interleaved sweeps (ascending / descending / ascending preset
     // order) average out GPU clock ramp and thermal drift that biased a
     // single ordered pass; the published number is the median sweep mean.
@@ -828,6 +880,7 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
         for (int position = 0; position < 4; ++position) {
             const int tier = sweepOrder[sweep][position];
             h.post().applyPreset(static_cast<GraphicsQualityPreset>(tier));
+            h.post().autoExposureEnabled = false; // applyPreset re-enables it; keep the audit deterministic
             h.renderer().applyShadowMapSize(h.post().shadowMapSize);
             h.shader().dayTime = 0.35f;
             updateAtmosphereFromDayTime(h.shader());
@@ -982,6 +1035,63 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
             if (!visual::writePng((out / (std::string(names[scene]) + "_" + std::to_string(i) + ".png")).string(), img)) ++errors;
         }
     }
+    // Underwater composite cost per quality tier (issue #144): fixed pose
+    // fully below the lake surface, same three interleaved sweeps and
+    // median-of-sweep-means methodology as the tier table above. The nested
+    // Composite pass is recorded next to Post so the underwater path cost
+    // is reported separately from the water pass.
+    h.camera().setPosition({20.f, 102.f, 0.f});
+    h.camera().setYawPitch(180.f, -12.f);
+    h.post().underwater = true;
+    h.post().underwaterSurfaceY = 105.f; // lake water tops at y = 104
+    h.shader().dayTime = 0.35f;
+    updateAtmosphereFromDayTime(h.shader());
+    double sweepPost[3][4] = {};
+    double sweepComposite[3][4] = {};
+    int sweepUnderwaterSamples[3][4] = {};
+    for (int sweep = 0; sweep < 3; ++sweep)
+        for (int position = 0; position < 4; ++position) {
+            const int tier = sweepOrder[sweep][position];
+            h.post().applyPreset(static_cast<GraphicsQualityPreset>(tier));
+            h.post().autoExposureEnabled = false; // applyPreset re-enables it; keep the audit deterministic
+            h.renderer().applyShadowMapSize(h.post().shadowMapSize);
+            double post = 0, composite = 0;
+            int samples = 0;
+            for (int i = 0; i < 12; ++i) {
+                const auto img = h.renderFrame(11.f, {});
+                if (!img.valid() || h.lastNonFiniteSamples()) ++errors;
+                if (sweep == 2 && tier == 2 && i == 11 &&
+                    !visual::writePng((out / "underwater_tier_2.png").string(), img))
+                    ++errors;
+                const auto &gpu = h.gpuSample();
+                if (i >= 4 && gpu.present[size_t(GpuPass::Post)] &&
+                    gpu.present[size_t(GpuPass::Composite)] && gpu.present[size_t(GpuPass::Frame)]) {
+                    post += gpu.ms[size_t(GpuPass::Post)]; composite += gpu.ms[size_t(GpuPass::Composite)]; ++samples;
+                }
+            }
+            if (samples == 0) ++errors;
+            sweepPost[sweep][tier] = post / std::max(samples, 1);
+            sweepComposite[sweep][tier] = composite / std::max(samples, 1);
+            sweepUnderwaterSamples[sweep][tier] = samples;
+        }
+    std::ostringstream underwaterReport;
+    underwaterReport << "tier,width,height,post_ms,composite_ms,samples\n";
+    for (int tier = 0; tier < 4; ++tier) {
+        const double medianPost = medianOf3(sweepPost[0][tier], sweepPost[1][tier], sweepPost[2][tier]);
+        const double medianComposite =
+            medianOf3(sweepComposite[0][tier], sweepComposite[1][tier], sweepComposite[2][tier]);
+        const int totalSamples = sweepUnderwaterSamples[0][tier] + sweepUnderwaterSamples[1][tier] +
+                                 sweepUnderwaterSamples[2][tier];
+        std::cout << "underwater tier " << tier << " median (ms): post " << medianPost
+                  << ", composite " << medianComposite << '\n';
+        underwaterReport << tier << ',' << h.extent().width << ',' << h.extent().height << ','
+                         << medianPost << ',' << medianComposite << ',' << totalSamples << '\n';
+    }
+    // underwater.csv is written while the underwater state is still set; the
+    // flag is restored right after because every earlier audit section runs
+    // above water.
+    writeText(out / "underwater.csv", underwaterReport.str());
+    h.post().underwater = false;
     if (h.validationErrors() != baseline) ++errors;
     writeText(out / "timings.csv", report.str());
     std::cout << report.str() << "water audit errors=" << errors << '\n';
@@ -998,6 +1108,126 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
 // debug readout explicitly after the (synchronous) render, so it observes
 // exactly the state the sampled frame produced.
 // ---------------------------------------------------------------------------
+// Underwater optical-path check (issue #144 review): two poses in the same
+// open-water column, both looking up at the surface, differing ONLY in depth
+// below it. With the water-distance fix the extinction path ends at the
+// surface plane, so the near-surface view must stay far clearer than the
+// deep one — the flat-tint or full-scene-distance models cannot produce this.
+int runUnderwaterOpticsCheck(VisualHarness &harness)
+{
+	std::vector<std::string> errors;
+	const float kTime = 11.0f;
+
+	harness.beginScene(4217);
+	harness.shader() = ShaderParameters{};
+	harness.renderSettings() = RenderSettings{};
+	harness.post() = PostProcessSettings{};
+	harness.post().autoExposureEnabled = false; // deterministic manual exposure
+	harness.shader().dayTime = 0.5f;
+	updateAtmosphereFromDayTime(harness.shader());
+	harness.shader().fogStart = 20.f;
+	harness.shader().fogEnd = 70.f;
+	harness.post().underwater = true;
+
+	const glm::ivec2 col = findDeepWaterColumn(harness.terrain(), 40);
+	harness.camera().setPosition(glm::vec3(float(col.x), float(TerrainGenerator::SEA_LEVEL) - 4.f, float(col.y)));
+	harness.camera().setYawPitch(180.f, 30.f);
+	harness.buildArea(harness.camera().getPosition(), 4);
+	harness.renderFrame(kTime, {}); // warmup + harness surface scan
+	const float surfaceY = harness.post().underwaterSurfaceY;
+	need(surfaceY < 1e8, errors, "water surface scan failed (sentinel)");
+
+	const auto poseStats = [&](float depthBelowSurface) {
+		harness.camera().setPosition(glm::vec3(float(col.x), surfaceY - depthBelowSurface, float(col.y)));
+		harness.camera().setYawPitch(180.f, 30.f);
+		const RgbaImage img = harness.renderFrame(kTime, {});
+		need(img.valid() && harness.lastNonFiniteSamples() == 0, errors,
+			 "non-finite or invalid underwater frame at depth " + std::to_string(depthBelowSurface));
+		return rowStats(img, 0, img.height);
+	};
+	const RegionStats nearSurface = poseStats(0.75f);
+	const RegionStats deepWater = poseStats(8.0f);
+
+	// Less attenuation near the surface (luma) and a stronger blue shift with
+	// depth (red dies first, in-scatter is teal). Margins keep GPU noise out.
+	need(nearSurface.meanLuma > deepWater.meanLuma + 4.0, errors,
+		 "near-surface view not clearer than deep view (near luma " + std::to_string(nearSurface.meanLuma) +
+			 " vs deep " + std::to_string(deepWater.meanLuma) + ")");
+	const double nearGap = nearSurface.meanB - nearSurface.meanR;
+	const double deepGap = deepWater.meanB - deepWater.meanR;
+	need(deepGap > nearGap + 1.0, errors,
+		 "deep view not more blue-shifted than near-surface view (deep gap " + std::to_string(deepGap) +
+			 " vs near " + std::to_string(nearGap) + ")");
+
+	for (const std::string &e : errors)
+		std::cerr << "  FAIL underwater-optics: " << e << std::endl;
+	if (errors.empty())
+		std::cout << "  underwater-optics OK (near luma " << nearSurface.meanLuma << " vs deep "
+				  << deepWater.meanLuma << "; blue-red gap near " << nearGap << " vs deep " << deepGap << ")"
+				  << std::endl;
+	return errors.empty() ? 0 : 1;
+}
+
+// Underwater + auto-exposure integration (issue #144 review): the metering
+// pass reads the raw HDR before composite, so the medium must not feed back
+// into its own exposure. Static deep-water scene, auto exposure on: the
+// adapted exposure must stay finite and bounded while the medium stays
+// visibly in effect (no runaway darkening -> brighter exposure loop).
+int runUnderwaterAutoExposureCheck(VisualHarness &harness)
+{
+	std::vector<std::string> errors;
+	const float kTime = 11.0f;
+
+	harness.beginScene(4217);
+	harness.shader() = ShaderParameters{};
+	harness.renderSettings() = RenderSettings{};
+	harness.post() = PostProcessSettings{}; // auto exposure on by default
+	harness.shader().dayTime = 0.5f;
+	updateAtmosphereFromDayTime(harness.shader());
+	harness.shader().fogStart = 20.f;
+	harness.shader().fogEnd = 70.f;
+	harness.post().underwater = true;
+
+	const glm::ivec2 col = findDeepWaterColumn(harness.terrain(), 40);
+	harness.camera().setPosition(glm::vec3(float(col.x), float(TerrainGenerator::SEA_LEVEL) - 6.f, float(col.y)));
+	harness.camera().setYawPitch(180.f, 20.f);
+	harness.buildArea(harness.camera().getPosition(), 4);
+
+	float minAdapted = std::numeric_limits<float>::max();
+	float maxAdapted = 0.f;
+	for (int i = 0; i < 40; ++i)
+	{
+		harness.renderer().setFrameDt(1.f / 60.f);
+		const RgbaImage img = harness.renderFrame(kTime, {});
+		need(img.valid() && harness.lastNonFiniteSamples() == 0, errors,
+			 "non-finite or invalid frame " + std::to_string(i) + " (underwater + auto exposure)");
+		harness.refreshExposureReadout();
+		const float adapted = harness.renderer().exposureReadout().adaptedExposure;
+		need(std::isfinite(adapted) && adapted > 0.f && adapted < 64.f, errors,
+			 "adapted exposure out of sane band at frame " + std::to_string(i) + " ("
+				 + std::to_string(adapted) + ")");
+		minAdapted = std::min(minAdapted, adapted);
+		maxAdapted = std::max(maxAdapted, adapted);
+	}
+	// Converged, no oscillation runaway: last-frame spread stays tight.
+	need(maxAdapted / std::max(minAdapted, 1e-4f) < 4.0f, errors,
+		 "adapted exposure swung too far across the sequence (ratio "
+			 + std::to_string(maxAdapted / std::max(minAdapted, 1e-4f)) + ")");
+
+	const RgbaImage finalImg = harness.renderFrame(kTime, {});
+	const RegionStats all = rowStats(finalImg, 0, finalImg.height);
+	need(all.meanB > all.meanR, errors, "underwater medium not visible under auto exposure (not blue-shifted)");
+	need(all.meanLuma > 2.0 && all.meanLuma < 200.0, errors,
+		 "final underwater luma out of range under auto exposure (mean luma " + std::to_string(all.meanLuma) + ")");
+
+	for (const std::string &e : errors)
+		std::cerr << "  FAIL underwater-exposure: " << e << std::endl;
+	if (errors.empty())
+		std::cout << "  underwater-exposure OK (adapted exposure " << minAdapted << ".." << maxAdapted
+				  << ", final luma " << all.meanLuma << ")" << std::endl;
+	return errors.empty() ? 0 : 1;
+}
+
 int runAdaptationCheck(VisualHarness &harness)
 {
 	std::vector<std::string> errors;
@@ -1510,14 +1740,20 @@ int main(int argc, char **argv)
 		std::find(onlyScenes.begin(), onlyScenes.end(), "auto_exposure_adaptation") != onlyScenes.end();
 	const bool meterRequested =
 		std::find(onlyScenes.begin(), onlyScenes.end(), "auto_exposure_meter") != onlyScenes.end();
-	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested && !adaptationRequested && !meterRequested)
+	const bool underwaterOpticsRequested =
+		std::find(onlyScenes.begin(), onlyScenes.end(), "underwater_optics") != onlyScenes.end();
+	const bool underwaterExposureRequested =
+		std::find(onlyScenes.begin(), onlyScenes.end(), "underwater_exposure") != onlyScenes.end();
+	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested && !adaptationRequested &&
+		!meterRequested && !underwaterOpticsRequested && !underwaterExposureRequested)
 	{
 		std::cerr << "FAIL: --scene";
 		for (const std::string &name : onlyScenes)
 			std::cerr << " " << name;
 		std::cerr << " matched no scene (valid names: noon_terrain, cascade_transition, cave_emissive,"
-					 " water_shore, sunset, midnight, mob_lighting, underwater, auto_exposure_noon,"
-					 " auto_exposure_cave, auto_exposure_adaptation, auto_exposure_meter, resize_check)\n";
+					 " water_shore, sunset, midnight, mob_lighting, underwater, underwater_deep,"
+					 " auto_exposure_noon, auto_exposure_cave, auto_exposure_adaptation,"
+					 " auto_exposure_meter, underwater_optics, underwater_exposure, resize_check)\n";
 		++failures;
 	}
 
@@ -1624,6 +1860,36 @@ int main(int argc, char **argv)
 		catch (const std::exception &e)
 		{
 			std::cerr << "  FAIL auto-exposure-adaptation: exception: " << e.what() << std::endl;
+			++failures;
+		}
+	}
+	// Underwater medium checks (issue #144): optical path vs depth, and the
+	// no-feedback contract with the #140 auto exposure.
+	if (onlyScenes.empty() || underwaterOpticsRequested)
+	{
+		std::cout << "[underwater-optics] near-surface vs deep upward view" << std::endl;
+		try
+		{
+			if (runUnderwaterOpticsCheck(harness) != 0)
+				++failures;
+		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "  FAIL underwater-optics: exception: " << e.what() << std::endl;
+			++failures;
+		}
+	}
+	if (onlyScenes.empty() || underwaterExposureRequested)
+	{
+		std::cout << "[underwater-exposure] medium + auto-exposure no-feedback" << std::endl;
+		try
+		{
+			if (runUnderwaterAutoExposureCheck(harness) != 0)
+				++failures;
+		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "  FAIL underwater-exposure: exception: " << e.what() << std::endl;
 			++failures;
 		}
 	}
