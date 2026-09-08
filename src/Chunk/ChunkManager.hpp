@@ -12,6 +12,7 @@
 
 #include <glm/glm.hpp>
 #include <Chunk/Chunk.hpp>
+#include <Chunk/ChunkLightHalo.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Chunk/StreamHelpers.hpp>
@@ -164,6 +165,25 @@ private:
 	void applyFootprintDiffToQueue(const FootprintDiff &diff, const glm::vec3 &camPos,
 								   const glm::vec2 &camForwardXZ, float frontBias);
 	void ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx);
+	/// Cross-chunk block-light context (issue #141 review fix): borrow (or
+	/// reuse) a pooled halo for `chunk` and snapshot the 15-voxel neighbor
+	/// ring into it. Caller holds m_mutex exclusively; same dispatch-time
+	/// contract as ensureShellPopulated. Gracefully degrades to no halo
+	/// (in-chunk-only light) when the pool allocation fails.
+	void ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx);
+	/// Light-aware cross-chunk invalidation (issue #141 review fix): when a
+	/// light-relevant edit (emission or sky-transmission flip - the same
+	/// predicate as markEditDirtySections) lands within the 15-voxel halo
+	/// radius of a border, the neighbor(s) on that side must remesh too or
+	/// their propagated light goes stale. Caller holds m_mutex exclusively.
+	void markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int y, int z,
+								TextureType previousType, TextureType type);
+	/// A chunk just finished generating: scan its halo-radius border bands
+	/// for emissive sources and dirty the side neighbors' affected sections
+	/// so their meshes pick up the newly available light. Cheap early-out
+	/// when the bands hold no sources - the common case. Caller holds
+	/// m_mutex exclusively.
+	void dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 &chunkIdx);
 
 	// --- Deferred edit subsystem (issue #114 review). Main-thread only:
 	// protected by the engine update/event sequencing, NOT by
@@ -256,6 +276,10 @@ private:
 	TerrainGenerator *m_terrainGenerator{nullptr};
 	ThreadPool *m_threadPool{nullptr};
 	ChunkPool *m_chunkPool{nullptr};
+	/// Pooled halo blocks lent to in-flight mesh jobs (issue #141 review
+	/// fix); one block is ~530 KiB, so a small pool serves the dispatch
+	/// budget + worker count and grows on demand.
+	LightHaloPool m_lightHaloPool{4};
 
 	std::vector<Chunk *> m_deferredRelease;
 	int m_deferredReleaseAge{0};

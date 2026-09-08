@@ -1,5 +1,6 @@
 #include <Engine/WorkloadTelemetry.hpp>
 #include <utils.hpp>
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -146,6 +147,41 @@ int main() {
         require(repeated.current[VoxelPoolCapacity] == 4600 &&
                 repeated.current[VoxelPoolCapacityBytes] == 4600ull * CHUNK_VOLUME,
                 "repeated captures keep retained voxel pool capacity");
+
+        // Per-call sample retention (benchmark avg/p95): MeshSample keeps one
+        // duration per completed stage segment plus one chain-sum sample per
+        // completed mesh, StageSample keeps its single stage, and a capture
+        // boundary clears the samples together with the totals.
+        {
+            Registry& g = registry();
+            g.beginCapture();
+            {
+                MeshSample mesh(Skylight);
+                mesh.next(Blocklight);
+                mesh.next(FacesGreedyAO);
+            }
+            { StageSample occupancy(Occupancy); }
+            const auto sampled = g.snapshot();
+            require(sampled.stageCalls[Skylight] == 1 && sampled.stageCalls[Blocklight] == 1 &&
+                    sampled.stageCalls[FacesGreedyAO] == 1 && sampled.stageCalls[Occupancy] == 1,
+                    "mesh chain and standalone stage calls recorded");
+            require(sampled.stageSamplesMs[Skylight].size() == 1 &&
+                    sampled.stageSamplesMs[Blocklight].size() == 1 &&
+                    sampled.stageSamplesMs[FacesGreedyAO].size() == 1 &&
+                    sampled.stageSamplesMs[Occupancy].size() == 1,
+                    "one duration sample per completed stage segment");
+            require(sampled.meshTotalSamplesMs.size() == 1,
+                    "one chain-sum sample per completed mesh");
+            const double chainMs = double(sampled.stageNs[Skylight] + sampled.stageNs[Blocklight] +
+                                          sampled.stageNs[FacesGreedyAO]) / 1e6;
+            require(std::abs(sampled.meshTotalSamplesMs[0] - chainMs) < 1e-4,
+                    "mesh total sample is the sum of the stage chain");
+            g.beginCapture();
+            const auto cleared = g.snapshot();
+            require(cleared.stageSamplesMs[Skylight].empty() && cleared.stageSamplesMs[Occupancy].empty() &&
+                    cleared.meshTotalSamplesMs.empty(),
+                    "capture boundary clears retained samples");
+        }
 
         std::cout << "PASS: telemetry concurrency, ownership, capture epochs, reset, "
                      "capture-local gauges\n";

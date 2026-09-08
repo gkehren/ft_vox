@@ -497,6 +497,49 @@ Pure helpers shared with unit tests (`tests/test_render_helpers.cpp`):
 - God-ray pass active predicate (`godRaysPassActive`)  
 - Block light packing / emissive intensities  
 
+**Colored block light (issue #141).** Propagated block light is RGB, not
+scalar. Sources are semantic block data — `lighting::BlockLightSource
+{colorLinear, intensity}` from `blockLightSourceForBlock` (LAVA warm
+orange/red 15, MAGMA orange 13, REDSTONE_ORE red 14, LAPIS_ORE blue 7,
+DIAMOND_ORE cyan 4, EMERALD_ORE green 3, GOLD_ORE yellow 2) — kept
+conceptually separate from material self-emission
+(`emissiveIntensityForBlock` drives the HDR glow of the surface itself).
+The mesher propagates three planar 4-bit channels (`uint8_t` planes;
+`Chunk::computeLightField`): same BFS as before, −1 per channel per
+6-neighbour step, frontier through air-like cells only, and overlapping
+sources combine by **per-channel max** (commutative/associative ⇒ the settled
+field is traversal-order independent). Vertex packing uses `packedData` bits
+18-21 R / 22-25 G / 26-29 B (sky stays 14-17; 30-31 spare) via
+`lighting::packLightBitsRGB4`; `terrain.frag` multiplies albedo by the linear
+RGB block light (replacing the old fixed warm tint) while the sky/sun/moon
+path stays untouched. Emissive edit invalidation still keys on
+`blockLightEmission(type) > 0`.
+
+**Cross-chunk propagation (issue #141 review).** The block-light BFS runs on
+a **transient halo domain**: at mesh dispatch the ChunkManager snapshots the
+15-voxel ring of neighbor voxels (4 sides + 4 diagonals — the Manhattan BFS
+cannot route light around them) into a pooled `ChunkLightHalo` — main-thread
+cost measured as the `mesh.haloFill` telemetry stage — and the BFS seeds
+center *and* ring sources; only the center (+ its 1-voxel face-sampling
+shell) is sampled, so border faces read the neighbor side's real propagated
+light and no colored-light seams appear at chunk borders.
+Missing or still-generating neighbors (state UNLOADED) contribute AIR (no
+sources ⇒ no light); a neighbor in transit for a **mesh** job is read
+normally — its voxels are immutable while the mesh worker owns it, so one
+batch dispatching two adjacent chunks still gives both correct halos — and
+light reaches already-meshed neighbors through two invalidation rules: a
+light-relevant **edit** within the halo radius of a border dirties the
+reachable neighbors, and a chunk **arrival** dirties the neighbors its border
+bands can reach for cells that are emissive **or** non-air-like (arriving
+blockers change BFS paths through what the halo assumed to be AIR). The
+invalidation records the atomic section mask even while the neighbor is
+mid-mesh-job; the mask persists across the in-flight build and
+`processFinishedJobs` re-arms `GENERATED` after publish, so a race between
+edits/arrivals and meshing can never silently drop an invalidation. The
+packed RGB4 helpers (`packBlockLightRGB4` etc.) define the representation
+contract issue #128 consumes for entities; actual runtime sampling/storage of
+the field for entities remains #128's responsibility.
+
 ### Cascades (`Renderer/ShadowCascades.hpp`, `namespace shadow`)
 
 - Split computation, light matrices, cascade blend helpers, bias constants.

@@ -20,6 +20,7 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Chunk/VoxelPool.hpp>
 #include <Chunk/ChunkBorders.hpp>
+#include <Chunk/ChunkLightHalo.hpp>
 #include <Vulkan/VkBuffer.hpp>
 #include <Vulkan/MeshArena.hpp>
 #include <Camera/Camera.hpp>
@@ -203,6 +204,14 @@ public:
 	void releaseGPUDeferred();
 
 	bool isShellEmpty() const { return m_borders == nullptr; }
+	/// Transient cross-chunk block-light context (issue #141 review fix).
+	/// Non-owning and main-thread-bound: attached by the ChunkManager at
+	/// mesh dispatch (like the neighbor borders), read by computeLightField
+	/// on the worker, detached and returned to the pool when the job
+	/// finishes. Null (no halo) builds keep the historical in-chunk-only
+	/// block light - tests and the LOD path never attach one.
+	void setLightHalo(ChunkLightHalo *halo) { m_lightHalo = halo; }
+	ChunkLightHalo *lightHalo() const { return m_lightHalo; }
 	/// Occupancy lifecycle (issue #115): the voxel backing holds stale pool
 	/// bytes until terrain generation initializes it. True only in the
 	/// generated/editable states (GENERATED or MESHED) - the gate every
@@ -387,6 +396,10 @@ private:
 	// upload (issue #103): no per-chunk border memory is retained.
 	ChunkNeighborBorders *m_borders{nullptr};
 	BorderPool *m_borderPool{nullptr};
+	// Borrowed from the ChunkManager's LightHaloPool for one mesh job
+	// (issue #141 review fix): neighbor ring voxels feeding the cross-chunk
+	// block-light BFS. Non-owning; null outside a job.
+	ChunkLightHalo *m_lightHalo{nullptr};
 	// Mesh build buffers are pooled too (issue #104): m_pendingResult holds
 	// a completed CPU mesh awaiting upload, borrowed from m_resultPool.
 	// Released on upload, reset, and moves - no per-chunk mesh capacity.

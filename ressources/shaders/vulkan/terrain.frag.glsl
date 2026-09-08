@@ -8,7 +8,7 @@ layout(location = 4) in float vUseBiomeColor;
 layout(location = 5) in vec3 vBiomeColor;
 layout(location = 6) in float vAO;
 layout(location = 7) in float vSkyLight;
-layout(location = 8) in float vBlockLight;
+layout(location = 8) in vec3 vBlockLightRGB;
 layout(location = 9) in float vViewDepth;
 
 #include "frame_ubo.inc.glsl"
@@ -145,12 +145,16 @@ void main()
     vec3 caveAmbient = vec3(0.085, 0.094, 0.117);
     vec3 ambient = mix(caveAmbient, outdoorAmbient, sky) * hemisphere;
     vec3 direct = lightTint * diff * dayLightFactor * sunReach * (1.0 - shadow);
-    vec3 blockFill = vec3(1.0, 0.72, 0.46) * max(vBlockLight * blockLightScale, 0.0);
+    // Colored block light (issue #141): per-source linear RGB propagated by
+    // the voxel BFS, illuminating albedo in place of the fixed warm scalar
+    // tint. Sky/sun/moon terms above stay untouched.
+    vec3 blockFill = max(vBlockLightRGB, vec3(0.0)) * blockLightScale;
     vec3 result = color * (ambient + direct + blockFill) * colorBoost;
 
     vec4 mat = materialFor(vTextureIndex);
     float em = mat.y * emissiveScale;
-    result += color * em * (1.2 + vBlockLight);
+    float blockLuma = max(vBlockLightRGB.r, max(vBlockLightRGB.g, vBlockLightRGB.b));
+    result += color * em * (1.2 + blockLuma);
 
     // Ice/snow specular from material table (IceSpec flag bit 2)
     if ((uint(mat.w + 0.5) & 4u) != 0u && mat.z > 0.0)

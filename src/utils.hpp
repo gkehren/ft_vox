@@ -59,7 +59,10 @@ struct Vertex
 	static constexpr uint32_t kZMax = kZMask;
 
 	uint32_t packedPos;        // 9 bits X (scale 16), 14 bits Y (scale 16), 9 bits Z (scale 16)
-	uint32_t packedData;       // 0-2: normal, 3-10: textureIndex, 11: useBiomeColor, 12-13: AO, 14-17: skyLight, 18-21: blockLight
+	// packedData (issue #110 layout, RGB block light #141): 0-2: normal,
+	// 3-10: textureIndex, 11: useBiomeColor, 12-13: AO, 14-17: skyLight,
+	// 18-21: blockLight R, 22-25: blockLight G, 26-29: blockLight B, 30-31: spare
+	uint32_t packedData;
 	uint16_t texCoordU;
 	uint16_t texCoordV;
 	uint32_t packedBiomeColor; // RGBA8

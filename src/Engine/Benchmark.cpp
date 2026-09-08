@@ -413,7 +413,7 @@ void Benchmark::finalize()
 
 	r.score = computeScore(r);
 	r.grade = gradeForScore(r.score);
-	m_report = r;
+	m_report = std::move(r); // per-call workload samples move, not copy
 }
 
 std::string Benchmark::formatReportText() const
@@ -519,9 +519,31 @@ std::string Benchmark::formatReportText() const
         uint64_t shadow = 0;
         for (size_t i=telemetry::Shadow0; i<=telemetry::Shadow2; ++i) shadow += r.workload.events[i];
         o << "  draws.shadow.total=" << shadow << " avgPerFrame=" << (r.frames ? double(shadow)/r.frames : 0.) << "\n";
-        for (size_t i=0; i<telemetry::StageCount; ++i)
+        for (size_t i=0; i<telemetry::StageCount; ++i) {
             o << "  mesh." << telemetry::stageNames[i] << " n=" << r.workload.stageCalls[i]
-              << " totalMs=" << double(r.workload.stageNs[i])/1e6 << "\n";
+              << " totalMs=" << double(r.workload.stageNs[i])/1e6;
+            if (r.workload.stageCalls[i])
+                o << " avgMs=" << double(r.workload.stageNs[i]) / double(r.workload.stageCalls[i]) / 1e6;
+            if (!r.workload.stageSamplesMs[i].empty()) {
+                std::vector<float> sorted = r.workload.stageSamplesMs[i];
+                o << " p95Ms=" << percentileSorted(sorted, 0.95f);
+            }
+            o << "\n";
+        }
+        {
+            // Per-mesh total: one sample per completed MeshSample (full or LOD
+            // build), the sum of its stage-chain segments.
+            const std::vector<float> &build = r.workload.meshTotalSamplesMs;
+            o << "  mesh.build(sample-sum) n=" << build.size();
+            if (!build.empty()) {
+                double sum = 0;
+                for (float v : build) sum += v;
+                std::vector<float> sorted = build;
+                o << " avgMs=" << sum / double(build.size())
+                  << " p95Ms=" << percentileSorted(sorted, 0.95f);
+            }
+            o << "\n";
+        }
         o << "  mesh.maskCells=" << r.workload.maskCells << " aoVertices=" << r.workload.aoVertices
           << " opaqueVertices=" << r.workload.opaqueVertices << " opaqueIndices=" << r.workload.opaqueIndices
           << " waterVertices=" << r.workload.waterVertices << " waterIndices=" << r.workload.waterIndices << "\n";

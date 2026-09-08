@@ -743,8 +743,14 @@ void Chunk::generateTerrain(TerrainGenerator &generator)
 // computed once per build so a section-selective rebuild samples exactly
 // the field a whole-chunk build would produce (no seams at 16-block Y
 // boundaries). Thread-local scratch like the mesh workspace.
+// Block light is RGB (issue #141): three planar 4-bit channels (64 KiB each,
+// transient). Planes keep the BFS inner loop on scalar uint8 compares like
+// the historical scalar field; the public RGB4 pack helpers stay the
+// interop format (tests, entities #128).
 static thread_local std::vector<uint8_t> s_skyLight;
-static thread_local std::vector<uint8_t> s_blockLight;
+static thread_local std::vector<uint8_t> s_blockLightR;
+static thread_local std::vector<uint8_t> s_blockLightG;
+static thread_local std::vector<uint8_t> s_blockLightB;
 
 void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
@@ -821,22 +827,119 @@ void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t 
   buildMesh(out, generation, revision, mask);
 }
 
+// Cross-chunk block-light context (issue #141 review fix): snapshot the
+// 15-voxel ring of neighbor voxels around `center` (4 sides + 4 diagonals;
+// a 6-neighbour Manhattan BFS can only route light through these). Missing
+// or unreadable neighbors (state UNLOADED - stale pool bytes while their
+// generation worker runs) contribute AIR: light is only seeded by real
+// sources, so a missing neighbor simply contributes no light, and the
+// arrival/edit light rules dirty the affected neighbors once its content
+// lands. A neighbor in transit for a MESH job is read normally - its voxels
+// are stable (edits are deferred) and skipping it would blank the halo
+// whenever two neighbors are dispatched in the same batch. Center cells
+// stay AIR in the snapshot - the light field reads them from the chunk.
+//
+// Performance note (issue #141 review round 2, P2): this runs on the main
+// thread inside the mesh-dispatch critical section, so both the source
+// reads and the halo writes walk contiguous rows (y outermost - the voxel
+// layout is y-major) and the emissive test is a table lookup. There is no
+// bulk reset: every ring cell is written exactly once below (neighbor
+// bytes or AIR), making a resetToAir() memset redundant.
+void fillLightHaloFromNeighbors(ChunkLightHalo &halo, const Chunk *center,
+                                const Chunk *west, const Chunk *east,
+                                const Chunk *south, const Chunk *north,
+                                const Chunk *southWest, const Chunk *southEast,
+                                const Chunk *northWest, const Chunk *northEast)
+{
+  (void)center;
+  halo.emissives.clear();
+  // Copy one rectangle of the ring from `src`: halo columns
+  // [hxFrom, hxFrom+cols) x halo rows [hzFrom, hzFrom+rows) map to source
+  // coordinates starting at (sxFrom, szFrom), row-major. Loop order is
+  // y -> row -> column so both the source reads and the halo writes walk
+  // contiguous bytes (both layouts are x-contiguous).
+  //
+  // Readability is the voxel-backing contract ONLY (state != UNLOADED):
+  // in-transit covers mesh jobs too, and a chunk being meshed has stable,
+  // fully readable voxels (edits targeting it are deferred). Skipping it
+  // would blank the halo whenever two neighbors are dispatched in the same
+  // batch - the second snapshot would treat the first as AIR and publish a
+  // permanent seam no invalidation would ever catch (issue #141 review
+  // round 3).
+  auto copyRegion = [&](const Chunk *src, int hxFrom, int hzFrom, int cols, int rows,
+                        uint32_t sxFrom, uint32_t szFrom)
+  {
+    const bool readable = src && src->isVoxelBackingReadable();
+    for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
+    {
+      const size_t hy = static_cast<size_t>(y) * ChunkLightHalo::kExtent;
+      for (int rr = 0; rr < rows; ++rr)
+      {
+        size_t h = static_cast<size_t>(hxFrom) + hy +
+                   static_cast<size_t>(CHUNK_HEIGHT * ChunkLightHalo::kExtent) *
+                       static_cast<size_t>(hzFrom + rr);
+        uint32_t sx = sxFrom;
+        for (int c = 0; c < cols; ++c, ++sx, ++h)
+        {
+          const uint8_t t = readable
+              ? src->getVoxel(sx, y, static_cast<uint32_t>(szFrom + rr)).type
+              : static_cast<uint8_t>(AIR);
+          halo.voxels[h] = t;
+          if (lighting::kIsBlockLightSourceTable[t])
+            halo.emissives.push_back(
+                {static_cast<uint32_t>(h), lighting::blockLightEmissionRGB4(t)});
+        }
+      }
+    }
+  };
+  constexpr int kR = ChunkLightHalo::kRadius;
+  // Region table: raw halo column/row starts (hx = x+kR, hz = z+kR), sizes,
+  // and the source chunk coordinates the rectangle maps from.
+  //   sides: 15-deep slab x a full 16-wide chunk row/column
+  //   corners: 15x15 squares (the diagonal chunks' near corner)
+  copyRegion(west, 0, kR, kR, CHUNK_SIZE, 1, 0);
+  copyRegion(east, kR + CHUNK_SIZE, kR, kR, CHUNK_SIZE, 0, 0);
+  copyRegion(south, kR, 0, CHUNK_SIZE, kR, 0, 1);
+  copyRegion(north, kR, kR + CHUNK_SIZE, CHUNK_SIZE, kR, 0, 0);
+  copyRegion(southWest, 0, 0, kR, kR, 1, 1);
+  copyRegion(southEast, kR + CHUNK_SIZE, 0, kR, kR, 0, 1);
+  copyRegion(northWest, 0, kR + CHUNK_SIZE, kR, kR, 1, 0);
+  copyRegion(northEast, kR + CHUNK_SIZE, kR + CHUNK_SIZE, kR, kR, 0, 0);
+}
+
 void Chunk::computeLightField(telemetry::MeshSample &meshSample)
 {
   auto &workspace = s_meshWorkspace;
   auto &skyLight = s_skyLight;
-  auto &blockLight = s_blockLight;
+  auto &blockLightR = s_blockLightR;
+  auto &blockLightG = s_blockLightG;
+  auto &blockLightB = s_blockLightB;
   skyLight.assign(static_cast<size_t>(CHUNK_VOLUME), 0);
-  blockLight.assign(static_cast<size_t>(CHUNK_VOLUME), 0);
+  // Block light lives on the halo domain (center + 15-voxel ring) so it
+  // crosses chunk borders (issue #141 review fix); with no halo attached
+  // the ring stays zero and the historical in-chunk-only behavior holds.
+  // Sky light stays chunk-wide (unchanged scope).
+  const ChunkLightHalo *halo = m_lightHalo;
+  const int lo = halo ? -ChunkLightHalo::kRadius : 0;
+  const int hi = halo ? CHUNK_SIZE + ChunkLightHalo::kRadius
+                      : static_cast<int>(CHUNK_SIZE);
+  blockLightR.assign(ChunkLightHalo::kVolume, 0);
+  blockLightG.assign(ChunkLightHalo::kVolume, 0);
+  blockLightB.assign(ChunkLightHalo::kVolume, 0);
   {
     auto idxOf = [](int x, int y, int z) -> size_t {
       return static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
     };
+    auto lightIdx = [](int x, int y, int z) -> size_t {
+      return ChunkLightHalo::hidx(x, y, z);
+    };
     auto isAirLike = [&](int x, int y, int z) -> bool {
-      if (x < 0 || x >= CHUNK_SIZE || y < 0 || y >= CHUNK_HEIGHT || z < 0 || z >= CHUNK_SIZE)
+      if (x >= 0 && x < CHUNK_SIZE && z >= 0 && z < CHUNK_SIZE &&
+          y >= 0 && y < CHUNK_HEIGHT)
+        return blockTransmitsSkyLight(static_cast<TextureType>(getVoxel(x, y, z).type));
+      if (!halo || y < 0 || y >= CHUNK_HEIGHT)
         return true;
-      const auto t = static_cast<TextureType>(getVoxel(x, y, z).type);
-      return blockTransmitsSkyLight(t);
+      return blockTransmitsSkyLight(static_cast<TextureType>(halo->voxelAt(x, y, z)));
     };
 
     // Sky light: per column, cast down until solid (open sky = 15)
@@ -901,66 +1004,90 @@ void Chunk::computeLightField(telemetry::MeshSample &meshSample)
     }
 
     meshSample.next(telemetry::Blocklight);
-    // Seed block light from emissive solids into neighboring air
+    // Seed block light from emissive solids into neighboring air (issue #141):
+    // each source carries its own RGB emission, colored per block type. With
+    // a halo attached, ring sources seed too and the domain bounds extend
+    // beyond the chunk so light crosses borders (review fix).
     auto &queue = workspace.blockQ;
     queue.clear();
+    auto seedCell = [&](int x, int y, int z, uint8_t emR, uint8_t emG, uint8_t emB)
+    {
+      const size_t i = lightIdx(x, y, z);
+      bool improved = false;
+      // Overlap policy: per-channel max (see propagation below).
+      if (blockLightR[i] < emR) { blockLightR[i] = emR; improved = true; }
+      if (blockLightG[i] < emG) { blockLightG[i] = emG; improved = true; }
+      if (blockLightB[i] < emB) { blockLightB[i] = emB; improved = true; }
+      if (improved)
+        queue.emplace_back(x, y, z);
+    };
+    auto seedSource = [&](int x, int y, int z, uint16_t em)
+    {
+      if (em == 0)
+        return;
+      uint8_t emR = 0, emG = 0, emB = 0;
+      lighting::unpackBlockLightRGB4(em, emR, emG, emB);
+      // Light lives in air cells around the emitter
+      const int dirs[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+      for (auto &d : dirs)
+      {
+        const int nx = x + d[0], ny = y + d[1], nz = z + d[2];
+        if (nx < lo || nx >= hi || nz < lo || nz >= hi || ny < 0 || ny >= CHUNK_HEIGHT)
+          continue;
+        seedCell(nx, ny, nz, emR, emG, emB);
+      }
+      // Also seed emitter cell for face sampling
+      seedCell(x, y, z, emR, emG, emB);
+    };
     for (int z = 0; z < CHUNK_SIZE; ++z)
       for (int y = 0; y < CHUNK_HEIGHT; ++y)
         for (int x = 0; x < CHUNK_SIZE; ++x)
-        {
-          const uint8_t em = lighting::blockLightEmission(getVoxel(x, y, z).type);
-          if (em == 0)
-            continue;
-          // Light lives in air cells around the emitter
-          const int dirs[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-          for (auto &d : dirs)
-          {
-            const int nx = x + d[0], ny = y + d[1], nz = z + d[2];
-            if (nx < 0 || nx >= CHUNK_SIZE || ny < 0 || ny >= CHUNK_HEIGHT || nz < 0 || nz >= CHUNK_SIZE)
-              continue;
-            if (!isAirLike(nx, ny, nz) && static_cast<TextureType>(getVoxel(nx, ny, nz).type) != AIR)
-            {
-              // still light the solid face later via adjacent air — also seed the solid cell
-            }
-            const size_t i = idxOf(nx, ny, nz);
-            if (blockLight[i] < em)
-            {
-              blockLight[i] = em;
-              queue.emplace_back(nx, ny, nz);
-            }
-          }
-          // Also seed emitter cell for face sampling
-          const size_t ei = idxOf(x, y, z);
-          if (blockLight[ei] < em)
-          {
-            blockLight[ei] = em;
-            queue.emplace_back(x, y, z);
-          }
-        }
+          seedSource(x, y, z, lighting::blockLightEmissionRGB4(getVoxel(x, y, z).type));
+    if (halo)
+    {
+      for (const ChunkLightHalo::Emissive &e : halo->emissives)
+      {
+        const uint32_t rest = e.hidx / ChunkLightHalo::kExtent;
+        const int x = static_cast<int>(e.hidx % ChunkLightHalo::kExtent) - ChunkLightHalo::kRadius;
+        const int z = static_cast<int>(rest / CHUNK_HEIGHT) - ChunkLightHalo::kRadius;
+        const int y = static_cast<int>(rest % CHUNK_HEIGHT);
+        seedSource(x, y, z, e.emRGB4);
+      }
+    }
 
-    // Propagate block light (coarse BFS, attenuation 1 per step)
+    // Propagate block light (coarse BFS, attenuation 1 per channel per step)
+    // over [lo, hi) x [0, CHUNK_HEIGHT) x [lo, hi). Overlapping sources
+    // combine by per-channel max (issue #141) — the plane-wise max matches
+    // lighting::maxBlockLightRGB4. Max is commutative/associative, so the
+    // settled field is independent of traversal order and equals the
+    // per-source attenuation fixed point.
     size_t head = 0;
     const int dirs[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
     while (head < queue.size())
     {
       const glm::ivec3 p = queue[head++];
-      const uint8_t cur = blockLight[idxOf(p.x, p.y, p.z)];
-      if (cur <= 1)
+      const size_t pi = lightIdx(p.x, p.y, p.z);
+      const uint8_t curR = blockLightR[pi];
+      const uint8_t curG = blockLightG[pi];
+      const uint8_t curB = blockLightB[pi];
+      if ((curR | curG | curB) <= 1u)
         continue;
-      const uint8_t next = static_cast<uint8_t>(cur - 1);
+      const uint8_t nextR = static_cast<uint8_t>(curR > 1u ? curR - 1u : 0u);
+      const uint8_t nextG = static_cast<uint8_t>(curG > 1u ? curG - 1u : 0u);
+      const uint8_t nextB = static_cast<uint8_t>(curB > 1u ? curB - 1u : 0u);
       for (auto &d : dirs)
       {
         const int nx = p.x + d[0], ny = p.y + d[1], nz = p.z + d[2];
-        if (nx < 0 || nx >= CHUNK_SIZE || ny < 0 || ny >= CHUNK_HEIGHT || nz < 0 || nz >= CHUNK_SIZE)
+        if (nx < lo || nx >= hi || nz < lo || nz >= hi || ny < 0 || ny >= CHUNK_HEIGHT)
           continue;
         // Propagate through air-like; allow into solids so faces pick up light
-        const size_t i = idxOf(nx, ny, nz);
-        if (blockLight[i] < next)
-        {
-          blockLight[i] = next;
-          if (isAirLike(nx, ny, nz))
-            queue.emplace_back(nx, ny, nz);
-        }
+        const size_t i = lightIdx(nx, ny, nz);
+        bool improved = false;
+        if (blockLightR[i] < nextR) { blockLightR[i] = nextR; improved = true; }
+        if (blockLightG[i] < nextG) { blockLightG[i] = nextG; improved = true; }
+        if (blockLightB[i] < nextB) { blockLightB[i] = nextB; improved = true; }
+        if (improved && isAirLike(nx, ny, nz))
+          queue.emplace_back(nx, ny, nz);
       }
     }
   }
@@ -991,7 +1118,9 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
   auto &waterVertices = out.sections[section].waterVertices;
   auto &waterIndices = out.sections[section].waterIndices;
   auto &skyLight = s_skyLight;
-  auto &blockLight = s_blockLight;
+  auto &blockLightR = s_blockLightR;
+  auto &blockLightG = s_blockLightG;
+  auto &blockLightB = s_blockLightB;
 
   auto &workspace = s_meshWorkspace;
   uint32_t indexCounter = 0;
@@ -1463,7 +1592,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
 
           // Sample light from air cell in front of the face (Minecraft-style)
           uint8_t faceSky = 15;
-          uint8_t faceBlock = 0;
+          uint8_t faceR = 0, faceG = 0, faceB = 0;
           {
             glm::ivec3 solid = quad_origin_voxel_coord;
             // Face sits between solid and air along normal
@@ -1484,26 +1613,37 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             sample.x += static_cast<int>(quad_normal_dir.x);
             sample.y += static_cast<int>(quad_normal_dir.y);
             sample.z += static_cast<int>(quad_normal_dir.z);
+            // Block light is stored on the halo domain (valid across the
+            // ±1 face-sampling shell), so border faces read the neighbor
+            // side's real propagated light instead of a zero fallback -
+            // no colored-light seams at chunk borders (issue #141).
+            const size_t hli = ChunkLightHalo::hidx(sample.x, sample.y, sample.z);
+            faceR = blockLightR[hli];
+            faceG = blockLightG[hli];
+            faceB = blockLightB[hli];
             if (sample.x >= 0 && sample.x < CHUNK_SIZE && sample.y >= 0 && sample.y < CHUNK_HEIGHT &&
                 sample.z >= 0 && sample.z < CHUNK_SIZE)
             {
               const size_t li = static_cast<size_t>(sample.x + CHUNK_SIZE * (sample.y + CHUNK_HEIGHT * sample.z));
               faceSky = skyLight[li];
-              faceBlock = blockLight[li];
             }
             else
             {
               faceSky = 12;
-              faceBlock = 0;
             }
-            // Emissive solid itself glows
+            // Emissive solid itself glows (its own RGB emission)
             if (solid.x >= 0 && solid.x < CHUNK_SIZE && solid.y >= 0 && solid.y < CHUNK_HEIGHT &&
                 solid.z >= 0 && solid.z < CHUNK_SIZE)
             {
-              faceBlock = std::max(faceBlock, lighting::blockLightEmission(getVoxel(solid.x, solid.y, solid.z).type));
+              uint8_t emR = 0, emG = 0, emB = 0;
+              lighting::unpackBlockLightRGB4(
+                  lighting::blockLightEmissionRGB4(getVoxel(solid.x, solid.y, solid.z).type), emR, emG, emB);
+              faceR = std::max(faceR, emR);
+              faceG = std::max(faceG, emG);
+              faceB = std::max(faceB, emB);
             }
           }
-          const uint32_t lightBits = lighting::packLightBits(faceSky, faceBlock);
+          const uint32_t lightBits = lighting::packLightBits(faceSky, faceR, faceG, faceB);
 
           for (int i = 0; i < 4; ++i)
           {
@@ -1793,25 +1933,30 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
                   const uint32_t ao = (s1 && s2) ? 0u : 3u - static_cast<uint32_t>(s1 + s2 + c);
 
                   // Light from the open neighbor cell (same policy as the
-                  // block pass); outside the chunk falls back to daylight.
+                  // block pass); block light reads the halo domain so the
+                  // ±1 shell crosses borders, sky keeps the daylight
+                  // fallback outside the chunk (pre-existing scope).
                   uint8_t faceSky = 12;
-                  uint8_t faceBlock = 0;
+                  uint8_t faceR = 0, faceG = 0, faceB = 0;
                   {
                     glm::ivec3 n{x[0], x[1], x[2]};
                     n[d] += dir;
+                    const size_t hli = ChunkLightHalo::hidx(n.x, n.y, n.z);
+                    faceR = blockLightR[hli];
+                    faceG = blockLightG[hli];
+                    faceB = blockLightB[hli];
                     if (n.x >= 0 && n.x < CHUNK_SIZE && n.y >= 0 && n.y < CHUNK_HEIGHT &&
                         n.z >= 0 && n.z < CHUNK_SIZE)
                     {
                       const size_t li = static_cast<size_t>(n.x + CHUNK_SIZE * (n.y + CHUNK_HEIGHT * n.z));
                       faceSky = skyLight[li];
-                      faceBlock = blockLight[li];
                     }
                   }
 
                   Vertex vert;
                   vert.packedPos = Vertex::packPosition(localPos);
                   vert.packedData = packedData | (ao << 12) |
-                                    lighting::packLightBits(faceSky, faceBlock);
+                                    lighting::packLightBits(faceSky, faceR, faceG, faceB);
                   vert.texCoordU = static_cast<uint16_t>(std::lround(tc[i].x));
                   vert.texCoordV = static_cast<uint16_t>(std::lround(tc[i].y));
                   vert.packedBiomeColor = WATER_COLOR;
@@ -1855,9 +2000,11 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
         if (shape == BlockShape::Cube) continue;
         const size_t li = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
         const bool tint = blockUsesGrassTint(type);
+        const size_t hli = ChunkLightHalo::hidx(x, y, z);
         const uint32_t packed = kDetailLightingNormal | (static_cast<uint32_t>(type) << 3)
             | (tint ? 1u << 11 : 0u)
-            | (3u << 12) | lighting::packLightBits(skyLight[li], blockLight[li]);
+            | (3u << 12) | lighting::packLightBits(skyLight[li], blockLightR[hli],
+                                                   blockLightG[hli], blockLightB[hli]);
         auto quad = [&](std::array<glm::vec3, 4> positions) {
           const uint32_t first = static_cast<uint32_t>(vertices.size());
           constexpr glm::vec2 uv[] = {{0.f, 1.f}, {1.f, 1.f}, {1.f, 0.f}, {0.f, 0.f}};
@@ -2011,7 +2158,7 @@ void Chunk::buildLODMeshRanged(MeshBuildResult &out, int scanTopY)
                             ((static_cast<uint32_t>(texType) & 0xFFu) << 3) |
                             (needsBiomeColoring ? (1u << 11) : 0u) |
                             (3u << 12) |
-                            lighting::packLightBits(15, 0);
+                            lighting::packLightBitsRGB4(15, 0);
 
       // Top face vertices in world space; axis mapping: d=1(Y), u=2(Z), v=0(X)
       float fy = float(topY + 1);
