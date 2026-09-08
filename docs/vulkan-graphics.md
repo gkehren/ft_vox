@@ -497,6 +497,25 @@ Pure helpers shared with unit tests (`tests/test_render_helpers.cpp`):
 - God-ray pass active predicate (`godRaysPassActive`)  
 - Block light packing / emissive intensities  
 
+**Colored block light (issue #141).** Propagated block light is RGB, not
+scalar. Sources are semantic block data — `lighting::BlockLightSource
+{colorLinear, intensity}` from `blockLightSourceForBlock` (LAVA warm
+orange/red 15, MAGMA orange 13, REDSTONE_ORE red 14, LAPIS_ORE blue 7,
+DIAMOND_ORE cyan 4, EMERALD_ORE green 3, GOLD_ORE yellow 2) — kept
+conceptually separate from material self-emission
+(`emissiveIntensityForBlock` drives the HDR glow of the surface itself).
+The mesher propagates a per-voxel RGB4 field (`uint16_t`, three 4-bit linear
+channels; `Chunk::computeLightField`): same BFS as before, −1 per channel per
+6-neighbour step, frontier through air-like cells only, and overlapping
+sources combine by **per-channel max** (commutative/associative ⇒ the settled
+field is traversal-order independent). Vertex packing uses `packedData` bits
+18-21 R / 22-25 G / 26-29 B (sky stays 14-17; 30-31 spare) via
+`lighting::packLightBitsRGB4`; `terrain.frag` multiplies albedo by the linear
+RGB block light (replacing the old fixed warm tint) while the sky/sun/moon
+path stays untouched. Emissive edit invalidation still keys on
+`blockLightEmission(type) > 0`. Entities (issue #128) can sample the same
+field through the RGB4 pack/unpack helpers.
+
 ### Cascades (`Renderer/ShadowCascades.hpp`, `namespace shadow`)
 
 - Split computation, light matrices, cascade blend helpers, bias constants.

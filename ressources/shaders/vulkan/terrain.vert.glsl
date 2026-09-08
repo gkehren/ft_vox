@@ -30,7 +30,7 @@ layout(location = 4) out float vUseBiomeColor;
 layout(location = 5) out vec3 vBiomeColor;
 layout(location = 6) out float vAO;
 layout(location = 7) out float vSkyLight;
-layout(location = 8) out float vBlockLight;
+layout(location = 8) out vec3 vBlockLightRGB;
 layout(location = 9) out float vViewDepth;
 
 const vec3 NORMALS[6] = vec3[](
@@ -56,7 +56,10 @@ void main()
     vUseBiomeColor = float((aPackedData >> 11u) & 0x1u);
     vAO = float((aPackedData >> 12u) & 0x3u) / 3.0;
     vSkyLight = float((aPackedData >> 14u) & 0xFu) / 15.0;
-    vBlockLight = float((aPackedData >> 18u) & 0xFu) / 15.0;
+    // Colored block light (issue #141): RGB4 channels at bits 18-21 / 22-25 / 26-29.
+    vBlockLightRGB = vec3(float((aPackedData >> 18u) & 0xFu),
+                          float((aPackedData >> 22u) & 0xFu),
+                          float((aPackedData >> 26u) & 0xFu)) / 15.0;
 
     float r = float(aPackedBiomeColor & 0xFFu) / 255.0;
     float g = float((aPackedBiomeColor >> 8u) & 0xFFu) / 255.0;

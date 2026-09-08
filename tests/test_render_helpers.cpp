@@ -257,11 +257,180 @@ int main()
 		if (lighting::blockLightEmission(static_cast<uint8_t>(STONE)) != 0)
 			ok = fail("stone block light emission must be 0");
 
-		const uint32_t packed = lighting::packLightBits(15, 10);
-		uint8_t sky = 0, blk = 0;
-		lighting::unpackLightBits(packed, sky, blk);
-		if (sky != 15 || blk != 10)
-			ok = fail("pack/unpack light bits round-trip failed");
+		const uint32_t packed = lighting::packLightBits(15, 10, 8, 2);
+		uint8_t sky = 0, blockR = 0, blockG = 0, blockB = 0;
+		lighting::unpackLightBits(packed, sky, blockR, blockG, blockB);
+		if (sky != 15 || blockR != 10 || blockG != 8 || blockB != 2)
+			ok = fail("pack/unpack RGB light bits round-trip failed");
+		if (lighting::packLightBitsRGB4(15, lighting::packBlockLightRGB4(10, 8, 2)) != packed)
+			ok = fail("packLightBitsRGB4 must alias the four-argument packLightBits");
+	}
+
+	// --- Colored block light (issue #141) ---
+	{
+		// Source policy: non-emissive blocks are not light sources.
+		const auto stone = lighting::blockLightSourceForBlock(static_cast<uint8_t>(STONE));
+		if (stone.intensity != 0)
+			ok = fail("stone must not be a colored block light source");
+		if (stone.colorLinear.r != 0.f || stone.colorLinear.g != 0.f || stone.colorLinear.b != 0.f)
+			ok = fail("stone block light source color must be black");
+
+		// Per-type color identity (linear-space semantic hues).
+		const auto lava = lighting::blockLightSourceForBlock(static_cast<uint8_t>(LAVA));
+		if (lava.intensity != 15)
+			ok = fail("lava must be a full-intensity (15) block light source");
+		if (!(lava.colorLinear.r > lava.colorLinear.g && lava.colorLinear.g > lava.colorLinear.b))
+			ok = fail("lava block light must be warm orange/red (r > g > b)");
+		const auto magma = lighting::blockLightSourceForBlock(static_cast<uint8_t>(MAGMA));
+		if (magma.intensity != 13)
+			ok = fail("magma must be an intensity-13 block light source");
+		if (!(magma.colorLinear.r > magma.colorLinear.g && magma.colorLinear.r > magma.colorLinear.b &&
+			  magma.colorLinear.b < magma.colorLinear.g))
+			ok = fail("magma block light must be orange (r max, b smallest)");
+		const auto redstone = lighting::blockLightSourceForBlock(static_cast<uint8_t>(REDSTONE_ORE));
+		if (!(redstone.colorLinear.r > redstone.colorLinear.g &&
+			  redstone.colorLinear.r > redstone.colorLinear.b))
+			ok = fail("redstone ore block light must be red-dominant");
+		const auto lapis = lighting::blockLightSourceForBlock(static_cast<uint8_t>(LAPIS_ORE));
+		if (!(lapis.colorLinear.b > lapis.colorLinear.g && lapis.colorLinear.g > lapis.colorLinear.r))
+			ok = fail("lapis ore block light must be blue-dominant (b > g > r)");
+		const auto diamond = lighting::blockLightSourceForBlock(static_cast<uint8_t>(DIAMOND_ORE));
+		if (!(diamond.colorLinear.b >= diamond.colorLinear.g &&
+			  diamond.colorLinear.g > diamond.colorLinear.r))
+			ok = fail("diamond ore block light must be cyan-ish (b >= g > r)");
+		const auto gold = lighting::blockLightSourceForBlock(static_cast<uint8_t>(GOLD_ORE));
+		if (!(gold.colorLinear.r > gold.colorLinear.g && gold.colorLinear.g > gold.colorLinear.b))
+			ok = fail("gold ore block light must be warm yellow (r > g > b)");
+
+		// blockLightEmission is defined as the source intensity.
+		for (const uint8_t type : {static_cast<uint8_t>(LAVA), static_cast<uint8_t>(MAGMA),
+								   static_cast<uint8_t>(REDSTONE_ORE), static_cast<uint8_t>(LAPIS_ORE),
+								   static_cast<uint8_t>(DIAMOND_ORE), static_cast<uint8_t>(EMERALD_ORE),
+								   static_cast<uint8_t>(GOLD_ORE), static_cast<uint8_t>(STONE)})
+		{
+			if (lighting::blockLightEmission(type) != lighting::blockLightSourceForBlock(type).intensity)
+				ok = fail("blockLightEmission must equal the source intensity for type " +
+						  std::to_string(static_cast<int>(type)));
+		}
+
+		// Quantized RGB4 emission: channel = clamp(lround(color * intensity), 0, 15)
+		// with round-half-away-from-zero (0.30f * 15 = 4.5 -> 5, 0.08f * 15 = 1.2 -> 1).
+		if (lighting::blockLightEmissionRGB4(static_cast<uint8_t>(LAVA)) !=
+			lighting::packBlockLightRGB4(15, 5, 1))
+			ok = fail("lava RGB4 emission must be (15, 5, 1)");
+		if (lighting::blockLightEmissionRGB4(static_cast<uint8_t>(MAGMA)) !=
+			lighting::packBlockLightRGB4(13, 6, 2))
+			ok = fail("magma RGB4 emission must be (13, 6, 2)");
+		if (lighting::blockLightEmissionRGB4(static_cast<uint8_t>(REDSTONE_ORE)) !=
+			lighting::packBlockLightRGB4(14, 2, 1))
+			ok = fail("redstone ore RGB4 emission must be (14, 2, 1)");
+		if (lighting::blockLightEmissionRGB4(static_cast<uint8_t>(LAPIS_ORE)) !=
+			lighting::packBlockLightRGB4(1, 3, 7))
+			ok = fail("lapis ore RGB4 emission must be (1, 3, 7)");
+		if (lighting::blockLightEmissionRGB4(static_cast<uint8_t>(DIAMOND_ORE)) !=
+			lighting::packBlockLightRGB4(2, 3, 4))
+			ok = fail("diamond ore RGB4 emission must be (2, 3, 4)");
+		if (lighting::blockLightEmissionRGB4(static_cast<uint8_t>(EMERALD_ORE)) !=
+			lighting::packBlockLightRGB4(1, 3, 1))
+			ok = fail("emerald ore RGB4 emission must be (1, 3, 1)");
+		// 0.25f * 2 = 0.5 exactly -> lround rounds half away from zero -> 1.
+		if (lighting::blockLightEmissionRGB4(static_cast<uint8_t>(GOLD_ORE)) !=
+			lighting::packBlockLightRGB4(2, 1, 1))
+			ok = fail("gold ore RGB4 emission must be (2, 1, 1)");
+		if (lighting::blockLightEmissionRGB4(static_cast<uint8_t>(STONE)) != 0)
+			ok = fail("stone RGB4 emission must be 0");
+		for (const uint8_t type : {static_cast<uint8_t>(LAVA), static_cast<uint8_t>(MAGMA),
+								   static_cast<uint8_t>(REDSTONE_ORE), static_cast<uint8_t>(LAPIS_ORE),
+								   static_cast<uint8_t>(DIAMOND_ORE), static_cast<uint8_t>(EMERALD_ORE),
+								   static_cast<uint8_t>(GOLD_ORE)})
+		{
+			uint8_t er = 0, eg = 0, eb = 0;
+			lighting::unpackBlockLightRGB4(lighting::blockLightEmissionRGB4(type), er, eg, eb);
+			if (er > 15 || eg > 15 || eb > 15)
+				ok = fail("RGB4 emission channels must stay within 4 bits for type " +
+						  std::to_string(static_cast<int>(type)));
+		}
+
+		// RGB4 pack/unpack round trip + 4-bit quantization bounds.
+		{
+			uint8_t r = 0, g = 0, b = 0;
+			lighting::unpackBlockLightRGB4(lighting::packBlockLightRGB4(15, 7, 0), r, g, b);
+			if (r != 15 || g != 7 || b != 0)
+				ok = fail("RGB4 pack/unpack round-trip failed for (15, 7, 0)");
+			lighting::unpackBlockLightRGB4(lighting::packBlockLightRGB4(1, 2, 3), r, g, b);
+			if (r != 1 || g != 2 || b != 3)
+				ok = fail("RGB4 pack/unpack round-trip failed for (1, 2, 3)");
+			lighting::unpackBlockLightRGB4(lighting::packBlockLightRGB4(16, 255, 0), r, g, b);
+			if (r != 0 || g != 15 || b != 0)
+				ok = fail("RGB4 pack must mask channels to 4 bits (16 -> 0, 255 -> 15)");
+		}
+
+		// Overlap combination policy: per-channel max, order-independent.
+		{
+			const uint16_t a = lighting::packBlockLightRGB4(15, 5, 1);
+			const uint16_t b = lighting::packBlockLightRGB4(3, 9, 0);
+			uint8_t r = 0, g = 0, bch = 0;
+			lighting::unpackBlockLightRGB4(lighting::maxBlockLightRGB4(a, b), r, g, bch);
+			if (r != 15 || g != 9 || bch != 1)
+				ok = fail("maxBlockLightRGB4 must combine per-channel maxima");
+			if (lighting::maxBlockLightRGB4(a, b) != lighting::maxBlockLightRGB4(b, a))
+				ok = fail("maxBlockLightRGB4 must be commutative");
+			const uint16_t c = lighting::packBlockLightRGB4(0, 15, 7);
+			if (lighting::maxBlockLightRGB4(lighting::maxBlockLightRGB4(a, b), c) !=
+				lighting::maxBlockLightRGB4(a, lighting::maxBlockLightRGB4(b, c)))
+				ok = fail("maxBlockLightRGB4 must be associative");
+			if (lighting::maxBlockLightRGB4(a, 0) != a)
+				ok = fail("maxBlockLightRGB4(v, 0) must be v");
+		}
+
+		// Attenuation: every channel decays by 1 toward 0, clamped at 0.
+		{
+			uint8_t r = 0, g = 0, b = 0;
+			const uint16_t full = lighting::packBlockLightRGB4(15, 5, 1);
+			lighting::unpackBlockLightRGB4(lighting::attenuateBlockLightRGB4(full), r, g, b);
+			if (r != 14 || g != 4 || b != 0)
+				ok = fail("attenuateBlockLightRGB4 must decay each channel by 1 toward 0");
+			uint16_t small = lighting::packBlockLightRGB4(2, 1, 0);
+			small = lighting::attenuateBlockLightRGB4(small);
+			if (small != lighting::packBlockLightRGB4(1, 0, 0))
+				ok = fail("attenuating (2, 1, 0) once must give (1, 0, 0)");
+			small = lighting::attenuateBlockLightRGB4(small);
+			if (small != 0)
+				ok = fail("attenuating (2, 1, 0) twice must reach 0");
+			if (lighting::attenuateBlockLightRGB4(small) != 0)
+				ok = fail("attenuating zero light must stay zero");
+		}
+
+		// Scalar luminance proxy = max channel.
+		{
+			if (lighting::blockLightLumaRGB4(lighting::packBlockLightRGB4(15, 5, 1)) != 15)
+				ok = fail("blockLightLumaRGB4 must return the max channel (R max)");
+			if (lighting::blockLightLumaRGB4(lighting::packBlockLightRGB4(3, 9, 7)) != 9)
+				ok = fail("blockLightLumaRGB4 must return the max channel (G max)");
+			if (lighting::blockLightLumaRGB4(lighting::packBlockLightRGB4(3, 9, 12)) != 12)
+				ok = fail("blockLightLumaRGB4 must return the max channel (B max)");
+			if (lighting::blockLightLumaRGB4(0) != 0)
+				ok = fail("blockLightLumaRGB4(0) must be 0");
+		}
+
+		// Vertex packedData bit placement (bits 14-17 sky, 18/22/26 block RGB).
+		{
+			const uint32_t raw = lighting::packLightBits(9, 1, 12, 15);
+			uint8_t sky = 0, r = 0, g = 0, b = 0;
+			lighting::unpackLightBits(raw, sky, r, g, b);
+			if (sky != 9 || r != 1 || g != 12 || b != 15)
+				ok = fail("pack/unpack light bits round-trip failed for (9, 1, 12, 15)");
+			if (((raw >> 14) & 0xFu) != 9u)
+				ok = fail("sky light nibble must sit at packedData bits 14-17");
+			if (((raw >> 18) & 0xFu) != 1u)
+				ok = fail("block R nibble must sit at packedData bits 18-21");
+			if (((raw >> 22) & 0xFu) != 12u)
+				ok = fail("block G nibble must sit at packedData bits 22-25");
+			if (((raw >> 26) & 0xFu) != 15u)
+				ok = fail("block B nibble must sit at packedData bits 26-29");
+			if (((raw >> 30) & 0x3u) != 0u)
+				ok = fail("top two packedData bits must stay spare (zero)");
+		}
 	}
 
 	// Settings defaults + outdoor look (fog / SSAO mildness)

@@ -81,6 +81,16 @@ static size_t totalOpaqueVertices(const MeshBuildResult &r)
 	return n;
 }
 
+// Vertex decode helpers for block-light scans (issue #141). packedPos is
+// 9b X / 14b Y / 9b Z quantized at 1/16 voxel units (Vertex::packPosition);
+// packedData carries sky @14, block R @18, G @22, B @26 (issue #110 layout,
+// RGB extension #141). All 4 vertices of a greedy quad share one light
+// packing, so scanning vertices is equivalent to scanning quads.
+static uint32_t vQuantX(const Vertex &v) { return v.packedPos & 0x1FFu; }
+static uint32_t vQuantY(const Vertex &v) { return (v.packedPos >> 9) & 0x3FFFu; }
+static uint32_t vQuantZ(const Vertex &v) { return (v.packedPos >> 23) & 0x1FFu; }
+static uint32_t vBlockR(const Vertex &v) { return (v.packedData >> 18) & 0xFu; }
+
 // Friend probe declared in Chunk.hpp: verifies full private state without
 // exposing per-column generation data through the public API.
 struct ChunkStateProbe
@@ -3021,6 +3031,244 @@ int main(int argc, char **argv)
 			CHECK(rebuilt->sectionsBuilt == mask,
 				  "superseded: next build stamps the merged mask");
 			pool.release(rebuilt);
+		}
+	}
+
+	// 24) RGB block light mesh equivalence (issue #141): the chunk-wide RGB4
+	// light field must honor the same section-remeshing contract as the rest
+	// of the mesher - partial rebuilds reproduce full builds byte for byte,
+	// the per-channel max overlap combination is placement-order independent,
+	// opaque blockers stop propagation, and emissive removal restores the
+	// unlit field exactly.
+	{
+		MeshResultPool pool;
+
+		// (a) Section/chunk-boundary equivalence: emitters at the 15/16
+		// section seam and next to the x border, in a deterministic stone
+		// volume. Re-placing the same edits re-arms the exact
+		// markEditDirtySections mask; a mask-restricted rebuild must
+		// reproduce the full build's sections byte for byte, because every
+		// job recomputes the light field chunk-wide (no seams).
+		{
+			TerrainGenerator bgen(4141);
+			Chunk sec(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			CHECK(sec.prepareVoxelStorageForGeneration(), "rgb boundary: prepare");
+			sec.generateTerrain(bgen);
+			sec.takeDirtySections();
+
+			// Stone volume overriding whatever the seed generated here.
+			for (int x = 2; x <= 15; ++x)
+				for (int z = 4; z <= 12; ++z)
+					for (int y = 4; y <= 28; ++y)
+						sec.setVoxel(x, y, z, STONE);
+			sec.takeDirtySections();
+
+			// Lava straddling the section 0/1 boundary, plus one near the
+			// x border deeper in the volume.
+			sec.setVoxel(8, 15, 8, LAVA);
+			sec.setVoxel(8, 16, 8, LAVA);
+			sec.setVoxel(15, 24, 8, LAVA);
+			sec.takeDirtySections();
+
+			MeshBuildResult *fullRef = pool.acquire();
+			sec.buildMesh(*fullRef, sec.meshGeneration(), sec.meshRevision());
+			pool.finishBuild(fullRef);
+			CHECK(fullRef->sectionsBuilt == kAllSectionMask,
+				  "rgb boundary: full build stamps every section");
+			CHECK(totalOpaqueVertices(*fullRef) > 0,
+				  "rgb boundary: scene produced geometry");
+
+			// Re-placing the same emissive edits re-arms the widened mask:
+			// own sections + the 15/16 seam pair + the +-15 light range.
+			sec.setVoxel(8, 15, 8, LAVA);
+			sec.setVoxel(8, 16, 8, LAVA);
+			sec.setVoxel(15, 24, 8, LAVA);
+			const uint16_t mask = sec.takeDirtySections();
+			CHECK(mask == 0b0111,
+				  "rgb boundary edits dirty sections 0..2 (seam pair + light range)");
+
+			MeshBuildResult *partial = pool.acquire();
+			sec.buildMesh(*partial, sec.meshGeneration(), sec.meshRevision(), mask);
+			pool.finishBuild(partial);
+			CHECK(partial->sectionsBuilt == mask,
+				  "rgb boundary: partial build stamps only the dirty mask");
+			bool identical = true;
+			for (size_t s = 0; s < fullRef->sections.size(); ++s)
+				if (((mask >> s) & 1u) && !(partial->sections[s] == fullRef->sections[s]))
+					identical = false;
+			CHECK(identical,
+				  "rgb boundary: mask-restricted rebuild matches the full build byte for byte");
+			size_t otherQuads = 0;
+			for (size_t s = 0; s < partial->sections.size(); ++s)
+				if (!((mask >> s) & 1u))
+					otherQuads += partial->sections[s].opaqueVertices.size();
+			CHECK(otherQuads == 0,
+				  "rgb boundary: unmasked sections hold no payload in a partial build");
+			pool.release(fullRef);
+			pool.release(partial);
+		}
+
+		// (b) Overlapping sources: LAVA + REDSTONE_ORE a few blocks apart in
+		// one air pocket, placed in opposite orders in two fresh chunk
+		// instances. The per-channel max combination is commutative and
+		// associative, so both full meshes must come out byte-identical.
+		{
+			TerrainGenerator ogen(4142);
+			const glm::ivec3 lavaCell(9, 40, 9);
+			const glm::ivec3 oreCell(11, 40, 11);
+			auto buildOverlapScene = [&](bool lavaFirst) -> MeshBuildResult *
+			{
+				Chunk c(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+				CHECK(c.prepareVoxelStorageForGeneration(), "rgb overlap: prepare");
+				c.generateTerrain(ogen);
+				c.takeDirtySections();
+				for (int x = 8; x <= 12; ++x)
+					for (int z = 8; z <= 12; ++z)
+						for (int y = 39; y <= 41; ++y)
+							c.setVoxel(x, y, z, AIR);
+				if (lavaFirst)
+				{
+					c.setVoxel(lavaCell.x, lavaCell.y, lavaCell.z, LAVA);
+					c.setVoxel(oreCell.x, oreCell.y, oreCell.z, REDSTONE_ORE);
+				}
+				else
+				{
+					c.setVoxel(oreCell.x, oreCell.y, oreCell.z, REDSTONE_ORE);
+					c.setVoxel(lavaCell.x, lavaCell.y, lavaCell.z, LAVA);
+				}
+				c.takeDirtySections();
+				MeshBuildResult *r = pool.acquire();
+				c.buildMesh(*r, c.meshGeneration(), c.meshRevision());
+				pool.finishBuild(r);
+				return r;
+			};
+			MeshBuildResult *lavaFirst = buildOverlapScene(true);
+			MeshBuildResult *oreFirst = buildOverlapScene(false);
+			bool orderIndependent = true;
+			for (size_t s = 0; s < lavaFirst->sections.size(); ++s)
+				if (!(lavaFirst->sections[s] == oreFirst->sections[s]))
+					orderIndependent = false;
+			CHECK(orderIndependent,
+				  "rgb overlap: mesh is byte-identical regardless of source placement order");
+			// Not vacuous: section 2 (y=40) carries vertices lit by the sources.
+			int maxR = 0;
+			for (const Vertex &v :
+				 lavaFirst->sections[static_cast<size_t>(lavaCell.y / 16)].opaqueVertices)
+				maxR = std::max(maxR, static_cast<int>(vBlockR(v)));
+			CHECK(maxR > 0, "rgb overlap: sources light the pocket geometry");
+			pool.release(lavaFirst);
+			pool.release(oreFirst);
+		}
+
+		// (c) Opaque blocker: LAVA pocket | 2-thick stone wall | sealed probe
+		// pocket, inside a stone box that overrides the seed's content. Faces
+		// beyond the wall sample only the sealed probe cells, whose block
+		// light is 0 - light must not cross the opaque barrier.
+		{
+			TerrainGenerator kgen(4143);
+			Chunk blk(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			CHECK(blk.prepareVoxelStorageForGeneration(), "rgb blocker: prepare");
+			blk.generateTerrain(kgen);
+			blk.takeDirtySections();
+			for (int x = 2; x <= 13; ++x)
+				for (int z = 2; z <= 13; ++z)
+					for (int y = 4; y <= 12; ++y)
+						blk.setVoxel(x, y, z, STONE);
+			blk.takeDirtySections();
+			// Lava pocket x=4..6 | wall x=7..8 (2 thick) | probe pocket x=9..11.
+			for (int x = 4; x <= 6; ++x)
+				for (int z = 8; z <= 10; ++z)
+					for (int y = 8; y <= 10; ++y)
+						blk.setVoxel(x, y, z, AIR);
+			blk.setVoxel(5, 9, 9, LAVA);
+			for (int x = 9; x <= 11; ++x)
+				for (int z = 8; z <= 10; ++z)
+					for (int y = 8; y <= 10; ++y)
+						blk.setVoxel(x, y, z, AIR);
+			blk.takeDirtySections();
+
+			MeshBuildResult *full = pool.acquire();
+			blk.buildMesh(*full, blk.meshGeneration(), blk.meshRevision());
+			pool.finishBuild(full);
+
+			// Wall faces adjacent to the lava own plane x=7 (sampling the
+			// lit pocket); faces beyond the wall own plane x=9 (sampling the
+			// unlit probe pocket). Quantized positions are voxel units * 16.
+			// Greedy quads share one light packing sampled from the seed
+			// cell, so the near side carries the pocket gradient's corner
+			// value rather than the cell closest to the emitter.
+			int nearMaxR = 0;
+			int farMaxR = 0;
+			for (const SectionMeshPayload &s : full->sections)
+				for (const Vertex &v : s.opaqueVertices)
+				{
+					const uint32_t qx = vQuantX(v);
+					const uint32_t qy = vQuantY(v);
+					const uint32_t qz = vQuantZ(v);
+					if (qy < 8u * 16u || qy > 11u * 16u || qz < 8u * 16u || qz > 11u * 16u)
+						continue;
+					if (qx == 7u * 16u)
+						nearMaxR = std::max(nearMaxR, static_cast<int>(vBlockR(v)));
+					else if (qx == 9u * 16u)
+						farMaxR = std::max(farMaxR, static_cast<int>(vBlockR(v)));
+				}
+			if (std::getenv("FT_RGB_DEBUG"))
+				std::cerr << "[rgb] blocker nearMaxR=" << nearMaxR
+				          << " farMaxR=" << farMaxR << std::endl;
+			CHECK(nearMaxR > 0,
+				  "rgb blocker: wall faces adjacent to the lava are lit");
+			CHECK(farMaxR < nearMaxR,
+				  "rgb blocker: vertices beyond the opaque wall are strictly darker");
+			CHECK(farMaxR == 0,
+				  "rgb blocker: a 2-thick opaque wall fully blocks block light");
+			pool.release(full);
+		}
+
+		// (d) Emissive removal: the add-side widened mask is already covered
+		// by the section-20 emissive test. Removing the lava must widen the
+		// dirty mask over the same +-15 light range, and the rebuild must
+		// restore the never-lit field byte for byte. A 1-cell pocket at
+		// y=40 (probe section 2) keeps removal deterministic: the fresh
+		// chunk shares the carved pocket but never held lava.
+		{
+			TerrainGenerator rgen(4144);
+			Chunk edited(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			Chunk fresh(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			CHECK(edited.prepareVoxelStorageForGeneration() &&
+					  fresh.prepareVoxelStorageForGeneration(),
+				  "rgb removal: prepare");
+			edited.generateTerrain(rgen);
+			fresh.generateTerrain(rgen);
+			edited.takeDirtySections();
+			fresh.takeDirtySections();
+
+			edited.setVoxel(5, 40, 5, AIR);
+			fresh.setVoxel(5, 40, 5, AIR);
+			edited.takeDirtySections();
+			fresh.takeDirtySections();
+
+			edited.setVoxel(5, 40, 5, LAVA); // add (mask covered by section 20)
+			edited.takeDirtySections();
+
+			edited.setVoxel(5, 40, 5, AIR); // remove
+			const uint16_t mask = edited.takeDirtySections();
+			CHECK((mask & 0b1110) == 0b1110,
+				  "rgb removal: emissive removal dirties sections 1..3 (light radius)");
+
+			MeshBuildResult *after = pool.acquire();
+			edited.buildMesh(*after, edited.meshGeneration(), edited.meshRevision());
+			pool.finishBuild(after);
+			MeshBuildResult *ref = pool.acquire();
+			fresh.buildMesh(*ref, fresh.meshGeneration(), fresh.meshRevision());
+			pool.finishBuild(ref);
+			bool restored = true;
+			for (size_t s = 0; s < after->sections.size(); ++s)
+				if (!(after->sections[s] == ref->sections[s]))
+					restored = false;
+			CHECK(restored,
+				  "rgb removal: rebuild matches a chunk that never had lava byte for byte");
+			pool.release(after);
+			pool.release(ref);
 		}
 	}
 
