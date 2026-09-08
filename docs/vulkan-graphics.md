@@ -295,10 +295,16 @@ composite.frag (tonemap + grade + underwater medium, sRGB-encoded)
 - **Why after composite:** FXAA is designed for the final LDR image — edge
   detection and blending run on **sRGB-encoded tone-mapped** values through
   Rec. 601 perceptual luma, never on linear HDR (see the color-space contract
-  below). That is why the extra target exists only while AA is on.
+  below). The extra target is **always allocated** (so the runtime toggle
+  needs no reallocation) but only rendered into / sampled while AA is on.
 - **Algorithm:** FXAA 3.11 "quality" preset 12 — unrolled span-search steps
   1.0 / 1.5 / 2.0 / 4.0 / 12.0, tuning `subpix = 0.75`, `edgeThreshold =
-  0.166`, `edgeThresholdMin = 0.0833`.
+  0.166`, `edgeThresholdMin = 0.0833`. Ported from NVIDIA's reference
+  `FXAA3_11.h` (Fxaa3_11, © 2014 NVIDIA CORPORATION, BSD-3-Clause): the full
+  license notice is preserved at the top of `fxaa.frag.glsl` and must also be
+  reproduced in documentation accompanying any binary distribution.
+- **Debug views:** the SSAO debug views (Graphics panel) bypass the AA pass —
+  diagnostics render straight to the swapchain unfiltered.
 - **Output transfer:** the pass mirrors composite's contract — when the
   swapchain is a hardware-sRGB attachment it decodes the sRGB-encoded input
   back to display-linear before writing (the attachment re-encodes on write);

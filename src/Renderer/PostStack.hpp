@@ -127,7 +127,9 @@ private:
 	AllocatedImage m_ssaoUp{};	 ///< Full-res R8: bilateral-upsampled final AO.
 	/// Full-res LDR AA source (issue #143): composite's tone-mapped/graded
 	/// output, sRGB-encoded so the FXAA 3.11 pass runs edge detection on
-	/// perceptual values. Only rendered into when spatial AA is enabled.
+	/// perceptual values. ALWAYS allocated (so the runtime toggle needs no
+	/// reallocation), but only rendered into / sampled when spatial AA is
+	/// enabled.
 	AllocatedImage m_ldr{};
 
 	/// Auto-exposure metering chain (issue #140): 64x64 / 16x16 / 4x4 R32F

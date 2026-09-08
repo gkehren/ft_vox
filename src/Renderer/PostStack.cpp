@@ -759,8 +759,9 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 	// tone-mapped/graded LDR into the full-res sRGB-encoded `m_ldr` target and
 	// the FXAA 3.11 pass renders the swapchain from it — edge detection then
 	// runs on perceptual values, never on linear HDR. With AA off, composite
-	// targets the swapchain directly (legacy path, unchanged).
-	const bool aaEnabled = settings.fxaaEnabled;
+	// targets the swapchain directly (legacy path, unchanged). SSAO debug
+	// views bypass AA too: diagnostics must show the raw data unfiltered.
+	const bool aaEnabled = settings.fxaaEnabled && settings.ssaoDebugView == 0;
 	vkbar::cmdTransitionColor(cmd, aaEnabled ? m_ldr.image : swapchainImage,
 					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 					0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
