@@ -163,15 +163,16 @@ struct PostProcessSettings
 	/// The manual path uses `exposure` exactly as set.
 	float exposureCompensation{0.0f};
 	/// Auto-exposure tuning (issue #140). middleGrey is the metered scene
-	/// luminance (linear HDR units, 1.0 ≈ lit terrain under noon sun) that
-	/// maps to exposure 1.0. minEv/maxEv clamp the TARGET exposure in EV
+	/// target luminance after exposure, before tone mapping (0.18 = middle
+	/// gray). A 2x gain ceiling preserves the darkness of nights and caves.
+	/// minEv/maxEv clamp the TARGET exposure in EV
 	/// relative to 1.0 (exposure = 2^ev). speedUp/speedDown are inverse
 	/// seconds, frame-rate independent: speedUp applies while the scene
 	/// brightens (exposure drops), speedDown while it darkens (exposure
 	/// rises, like eye dilation). Math: Renderer/AutoExposure.hpp.
-	float autoExposureMiddleGrey{1.0f};
+	float autoExposureMiddleGrey{0.18f};
 	float autoExposureMinEv{-4.0f};
-	float autoExposureMaxEv{4.0f};
+	float autoExposureMaxEv{1.0f};
 	float autoExposureSpeedUp{3.0f};
 	float autoExposureSpeedDown{1.25f};
 	int toneMapper{0}; // 0 = ACES, 1 = Reinhard
@@ -247,9 +248,9 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 	postContrast = 1.03f;
 	fxaaEnabled = true;
 	autoExposureEnabled = true;
-	autoExposureMiddleGrey = 1.0f;
+	autoExposureMiddleGrey = 0.18f;
 	autoExposureMinEv = -4.0f;
-	autoExposureMaxEv = 4.0f;
+	autoExposureMaxEv = 1.0f;
 	autoExposureSpeedUp = 3.0f;
 	autoExposureSpeedDown = 1.25f;
 	godRaysBoostPreview = false;

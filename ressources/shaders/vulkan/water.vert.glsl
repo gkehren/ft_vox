@@ -22,6 +22,8 @@ layout(location = 2) out vec2 vTexCoord;
 layout(location = 3) out vec4 vClipPos;
 layout(location = 4) out float vViewDepth;
 layout(location = 5) flat out vec3 vGeoNormal;
+layout(location = 6) out float vSkyLight;
+layout(location = 7) out vec3 vBlockLightRGB;
 
 const vec3 NORMALS[6] = vec3[](
     vec3(1.0, 0.0, 0.0),
@@ -38,6 +40,10 @@ void main()
     float wave = frame.waterParams.x;
 
     uint normalIdx = aPackedData & 0x7u;
+    vSkyLight = float((aPackedData >> 14u) & 0xFu) / 15.0;
+    vBlockLightRGB = vec3(float((aPackedData >> 18u) & 0xFu),
+                         float((aPackedData >> 22u) & 0xFu),
+                         float((aPackedData >> 26u) & 0xFu)) / 15.0;
     vec3 baseN = NORMALS[normalIdx];
 
     vec2 texCoord = vec2(aTexCoord);

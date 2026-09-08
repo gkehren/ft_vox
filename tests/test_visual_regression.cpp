@@ -663,7 +663,7 @@ std::vector<SceneSpec> buildSceneTable()
 	// --- auto_exposure_cave --------------------------------------------------
 	// The cave_emissive room positioning with the lava kept out: a sealed,
 	// unlit interior whose meter reads near the clipping floor, so the
-	// adapted exposure climbs toward the max-EV clamp (+4 EV with defaults).
+	// adapted exposure climbs toward the max-EV clamp (+1 EV with defaults).
 	scenes.push_back({});
 	SceneSpec &autoCave = scenes.back();
 	autoCave.name = "auto_exposure_cave";
@@ -1798,6 +1798,7 @@ int runExposureMeterCheck(VisualHarness &harness)
 	const VkClearColorValue grey1{{1.f, 1.f, 1.f, 1.f}};
 	const VkClearColorValue grey4{{4.f, 4.f, 4.f, 1.f}};
 	const VkClearColorValue greyQuarter{{0.25f, 0.25f, 0.25f, 1.f}};
+	const VkClearColorValue darkGrey{{0.015625f, 0.015625f, 0.015625f, 1.f}};
 	const VkClearColorValue lum16{{16.f, 16.f, 16.f, 1.f}};
 	const VkClearColorValue lumSixteenth{{1.f / 16.f, 1.f / 16.f, 1.f / 16.f, 1.f}};
 	struct Case
@@ -1811,6 +1812,7 @@ int runExposureMeterCheck(VisualHarness &harness)
 		{"grey 1.0", grey1, nullptr, 0.f},		 // log2(1) = 0
 		{"grey 4.0", grey4, nullptr, 2.f},		 // log2(4) = +2
 		{"grey 0.25", greyQuarter, nullptr, -2.f}, // log2(0.25) = -2
+		{"dark grey", darkGrey, nullptr, -6.f}, // default gain must stop at 2x
 		// left quarter at +4 EV, rest at -4 EV, blocks never straddle the
 		// boundary: the exact meter mean is (4 + 3*(-4)) / 4 = -2 EV.
 		{"quarter 25/75 split", lumSixteenth, &lum16, -2.f},
@@ -1818,6 +1820,11 @@ int runExposureMeterCheck(VisualHarness &harness)
 	for (const Case &c : cases)
 	{
 		const auto st = harness.exposureMeterProbe(c.full, c.quarter, settings);
+		// Check the GPU target too: metering alone did not catch the old
+		// white-key/16x-gain default that washed out the live game.
+		const float expectedTarget = std::exp2(autoexposure::targetLogExposure(c.wantEv, {}));
+		if (std::abs(st.targetExposure - expectedTarget) > 0.005f * expectedTarget)
+			errors.push_back(std::string(c.name) + ": GPU exposure target differs from default policy");
 		if (std::abs(st.meteredLogLum - c.wantEv) > 5e-3f)
 			errors.push_back(std::string(c.name) + ": metered " +
 							 std::to_string(st.meteredLogLum) + " EV, want " +

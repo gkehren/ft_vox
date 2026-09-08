@@ -116,6 +116,13 @@ world rendering) and validates exact meter readings: uniform greys must read
 bias would read −4 EV). Validation errors are judged as a before/after delta
 of the probe only (device/swapchain baseline excluded).
 
+The meter probe also checks the GPU target against the CPU exposure policy,
+including a uniform −6 EV frame: the default 0.18 key must respect the +1 EV
+(2x) gain ceiling. This catches correct metering paired with an excessively
+bright target. Golden auto scenes sample a seeded transition, so their image
+comparison alone is not a check of fully adapted brightness; the target and
+temporal checks cover that state without regenerating references.
+
 **Temporal adaptation check (`auto-exposure-adaptation`).** A standalone
 GPU-exercised run — always part of the suite, also selectable via
 `--scene auto_exposure_adaptation` — drives the production metering +

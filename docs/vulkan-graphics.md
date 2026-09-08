@@ -250,9 +250,15 @@ HDR RGBA16F (SHADER_READ)
   | `autoExposureEnabled` | on | Meters HDR luminance and adapts exposure over time |
   | `exposure` | 1.25 | Exact manual exposure (auto off) |
   | `exposureCompensation` | 0.0 | EV stops on the auto path (0 neutral, +1 = 2x brighter target) |
-  | `autoExposureMiddleGrey` | 1.0 | Scene luminance mapped to exposure 1.0 |
-  | `autoExposureMinEv / MaxEv` | -4 / +4 | Clamp on the target exposure (`exposure = 2^ev`) |
+  | `autoExposureMiddleGrey` | 0.18 | Target mean linear luminance after exposure, before tone mapping |
+  | `autoExposureMinEv / MaxEv` | -4 / +1 | Clamp on the target exposure (`exposure = 2^ev`) |
   | `autoExposureSpeedUp / SpeedDown` | 3.0 / 1.25 | Inverse seconds, frame-rate independent |
+
+  The 0.18 key replaces the former 1.0 key, which drove average scene
+  luminance into the ACES shoulder and washed out sky/snow. The +1 EV gain
+  ceiling (2x, formerly 16x) preserves night/cave darkness instead of lifting
+  ambient-only surfaces to daylight. These defaults apply to every quality
+  preset; manual exposure and temporal integration are unchanged.
 
 - **Device support:** requires `fragmentStoresAndAtomics` (queried in `VkContext`); when absent the engine stays on the manual path instead of failing.
 - **Diagnostics:** Graphics panel controls (auto toggle, compensation, middle grey, EV limits, speeds), profiler readouts (metered EV, current/target exposure, clamp state) fed by an on-demand snapshot copy (`refreshExposureReadout`, ~10 Hz while the profiler panel is visible — the only GPU->CPU traffic of the feature, zero when the panel is closed), and a dedicated `GpuPass::Exposure` timestamp row (nested inside the Post pass timing). Measured cost (RTX 4070 Ti, seed 42 benchmark, Release, base 12acedd vs head f04e564): Post pass 0.317 -> 0.383 ms — delta about +0.07 ms (0.06-0.09 ms across runs; the Post bracket includes the Exposure sub-pass), Exposure sub-pass alone reads ~0.12 ms, score unchanged. Reports: docs/benchmarks/bench_20260907_224059_12acedd27ecb (base) and bench_20260907_232825_f04e564a0975 (head). The `*` in the head report's Revision line (dirty tree at build) flags the untracked benchmark artifact itself, not source drift — the compiled sources were exactly f04e564.
@@ -475,6 +481,19 @@ CPU fill: `WorldRenderer::updateFrameUBO` from `Camera`, `ShaderParameters`, cas
 ## 6. Materials and lighting helpers
 
 ### MaterialTable (`Renderer/MaterialTable.hpp`)
+
+Lava has a dedicated `LavaSurface` flag: slow UV advection and bounded thermal
+emission preserve texture detail. Self-emission bypasses vertex AO, propagated
+block-light feedback and the night desaturation grade. This is an opaque
+emissive surface, not a screen-space mirror. Colored block-light irradiance
+uses the RGB peak as an additional falloff factor, localizing diffuse bounce
+without changing the packed light data or its channel ratios.
+
+Water reads packed sky/RGB block light as well. In enclosed areas its SSR
+fallback is a dim local-light approximation rather than outdoor sky; sky
+glitter, foam, scattering and fog are gated by local skylight. SSR still
+reflects visible opaque geometry (including lava), with the existing
+edge/distance confidence fade; offscreen geometry is unavailable.
 
 CPU table → GPU UBO (set0 binding 1). Per `TextureType`:
 

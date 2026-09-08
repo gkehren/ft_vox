@@ -6,6 +6,8 @@ layout(location = 2) in vec2 vTexCoord;
 layout(location = 3) in vec4 vClipPos;
 layout(location = 4) in float vViewDepth;
 layout(location = 5) flat in vec3 vGeoNormal;
+layout(location = 6) in float vSkyLight;
+layout(location = 7) in vec3 vBlockLightRGB;
 
 #include "frame_ubo.inc.glsl"
 #include "sky_radiance.inc.glsl"
@@ -171,22 +173,31 @@ void main()
         distort *= 0.5;
     }
     vec3 scene = texture(sceneColor, refrUV).rgb;
+    float skyReach = smoothstep(0.05, 0.45, vSkyLight);
     float directVisibility = 1.0;
     if (topMask > 0.001 && frame.waterQuality.w > 0.5)
         directVisibility -= sampleDirectionalShadow(vFragPos, geoN,
                             normalize(frame.lightDirection.xyz), surfaceDepth);
+    directVisibility *= skyReach;
+    vec3 localLight = max(vBlockLightRGB, vec3(0.0));
+    localLight *= max(localLight.r, max(localLight.g, localLight.b)) * frame.lightingParams.x;
 
     // Beer-Lambert absorption: red dies first -> teal body (shared constants)
     vec3 absorb = exp(-column * WATER_SIGMA);
     float scatterAmt = 1.0 - exp(-column * WATER_SCATTER_RATE);
     float scatterLight = waterScatterAmbient(dayFactor, sunsetFactor, directVisibility);
-    vec3 waterBody = scene * absorb + WATER_SCATTER_COLOR * scatterAmt * scatterLight;
+    scatterLight = mix(0.03, scatterLight, skyReach);
+    vec3 waterBody = scene * absorb + WATER_SCATTER_COLOR * scatterAmt * (vec3(scatterLight) + localLight * 0.2);
 
     // Fresnel + analytic sky reflection
     float F0 = 0.02;
     float fres = F0 + (1.0 - F0) * pow(1.0 - max(dot(N, V), 0.0), 5.0);
     vec3 R = reflect(-V, N);
     vec3 refl = analyticSkyRadiance(R, dayFactor, sunsetFactor, nightFactor);
+    // SSR misses must not reveal a blue outdoor sky inside a sealed cave.
+    // A dim local diffuse fallback is not a mirror of offscreen geometry.
+    vec3 caveReflection = vec3(0.006, 0.008, 0.012) + localLight * 0.035;
+    refl = mix(caveReflection, refl, skyReach);
 
     if (topMask > 0.95 && frame.lightingParams.w < 0.5)
         refl = sceneReflection(R, refl);
@@ -219,11 +230,12 @@ void main()
     vec3 foamColor = vec3(0.88, 0.93, 0.96) * (0.22 + 0.78 * dayFactor);
     foamColor = mix(foamColor, vec3(1.0, 0.72, 0.50) * (0.25 + 0.75 * dayFactor), sunsetFactor * 0.45);
     foamColor *= 1.0 - nightFactor * 0.75;
+    foamColor = mix(vec3(0.025) + localLight * 0.18, foamColor, skyReach);
     color = mix(color, foamColor, foam * 0.85);
 
     // Distance fog (same 0.45 cap as terrain)
     float dist = length(vFragPos - frame.viewPos.xyz);
-    float fogAmt = smoothstep(frame.fogParams.x, max(frame.fogParams.x + 1.0, frame.fogParams.y), dist) * 0.45;
+    float fogAmt = smoothstep(frame.fogParams.x, max(frame.fogParams.x + 1.0, frame.fogParams.y), dist) * 0.45 * skyReach;
     color = mix(color, frame.fogColor.rgb, fogAmt);
 
     // Refraction is composited in-color: keep the surface nearly opaque

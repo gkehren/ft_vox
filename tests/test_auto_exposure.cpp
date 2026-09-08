@@ -28,7 +28,9 @@ int main()
 
 	// --- EV semantics of the target exposure (middleGrey 1, comp 0) ---
 	{
-		const autoexposure::Params p{};
+		autoexposure::Params p{};
+		p.middleGrey = 1.0f; // explicit unit-key fixture, independent of artistic defaults
+		p.maxEv = 4.0f;
 		uint32_t state = 0xFFFFFFFFu;
 		const float zero = autoexposure::targetLogExposure(0.0f, p, &state);
 		if (std::abs(zero) > 1e-6f || state != 0u)
@@ -67,7 +69,9 @@ int main()
 
 	// --- Clamps + clampState reporting ---
 	{
-		const autoexposure::Params p{};
+		autoexposure::Params p{};
+		p.middleGrey = 1.0f; // explicit unit-key fixture, independent of artistic defaults
+		p.maxEv = 4.0f;
 		uint32_t state = 0;
 		// Very dark scene: raw target far above maxEv -> clamped high.
 		const float dark = autoexposure::targetLogExposure(-20.0f, p, &state);
@@ -205,6 +209,20 @@ int main()
 			ok = fail("seedLogExposure must clamp negative manual exposures identically");
 	}
 
+	// Default look: adaptation must not turn ambient-only rooms into daylight.
+	{
+		const autoexposure::Params p{};
+		const auto exposed = [&](float luminance) {
+			return luminance * std::exp2(autoexposure::targetLogExposure(std::log2(luminance), p));
+		};
+		if (std::abs(exposed(0.18f) - 0.18f) > 1e-5f)
+			ok = fail("middle gray must remain middle gray, not map to HDR white");
+		if (exposed(0.02f) > 0.045f || exposed(0.01f) >= exposed(0.02f))
+			ok = fail("night/cave luminance must stay dark and retain relative brightness");
+		if (exposed(0.02f) >= exposed(0.18f) * 0.3f)
+			ok = fail("auto exposure must preserve separation between dark and daylight scenes");
+	}
+
 	// --- GLSL SSBO state layout ---
 	{
 		if (sizeof(autoexposure::ExposureGpuState) != 16)
@@ -225,11 +243,11 @@ int main()
 			p.speedUp != pp.autoExposureSpeedUp || p.speedDown != pp.autoExposureSpeedDown)
 			ok = fail("Params defaults must equal the PostProcessSettings auto-exposure defaults");
 		// Pin the literal values too, so accidental dual drift is caught.
-		if (pp.exposureCompensation != 0.0f || pp.autoExposureMiddleGrey != 1.0f ||
-			pp.autoExposureMinEv != -4.0f || pp.autoExposureMaxEv != 4.0f ||
+		if (pp.exposureCompensation != 0.0f || pp.autoExposureMiddleGrey != 0.18f ||
+			pp.autoExposureMinEv != -4.0f || pp.autoExposureMaxEv != 1.0f ||
 			pp.autoExposureSpeedUp != 3.0f || pp.autoExposureSpeedDown != 1.25f)
 			ok = fail("PostProcessSettings auto-exposure defaults drifted "
-					  "(comp 0, middleGrey 1, minEv -4, maxEv +4, speedUp 3, speedDown 1.25)");
+					  "(comp 0, middleGrey 0.18, minEv -4, maxEv +1, speedUp 3, speedDown 1.25)");
 	}
 
 	if (!ok)

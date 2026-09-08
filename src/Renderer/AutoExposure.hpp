@@ -62,10 +62,10 @@ inline constexpr float kMinLuminanceEps = 1e-4f;
 /// Auto-exposure tunables (mirrors the PostProcessSettings auto* fields).
 struct Params
 {
-	float middleGrey{1.0f};	 ///< scene luminance mapped to exposure 1.0
+	float middleGrey{0.18f};	 ///< target mean luminance after exposure, before tone mapping
 	float compensationEv{0.0f}; ///< exposure compensation in EV stops (+1 = 2x brighter)
 	float minEv{-4.0f};			///< target exposure clamp, low (exposure = 2^minEv)
-	float maxEv{4.0f};			///< target exposure clamp, high
+	float maxEv{1.0f};			///< target exposure clamp, high
 	float speedUp{3.0f};		///< 1/s while the scene brightens (exposure drops)
 	float speedDown{1.25f};		///< 1/s while the scene darkens (exposure rises)
 };
