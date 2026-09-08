@@ -523,7 +523,10 @@ cost measured as the `mesh.haloFill` telemetry stage — and the BFS seeds
 center *and* ring sources; only the center (+ its 1-voxel face-sampling
 shell) is sampled, so border faces read the neighbor side's real propagated
 light and no colored-light seams appear at chunk borders.
-Missing/in-transit neighbors contribute AIR (no sources ⇒ no light), and
+Missing or still-generating neighbors (state UNLOADED) contribute AIR (no
+sources ⇒ no light); a neighbor in transit for a **mesh** job is read
+normally — its voxels are immutable while the mesh worker owns it, so one
+batch dispatching two adjacent chunks still gives both correct halos — and
 light reaches already-meshed neighbors through two invalidation rules: a
 light-relevant **edit** within the halo radius of a border dirties the
 reachable neighbors, and a chunk **arrival** dirties the neighbors its border

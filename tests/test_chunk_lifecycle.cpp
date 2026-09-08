@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -4115,6 +4116,349 @@ int main(int argc, char **argv)
 						  << " ms (halo snapshot included)" << std::endl;
 			pool.release(r1);
 			pool.release(r2);
+		}
+	}
+
+	// 27) Concurrent batch dispatch sees stable neighbors (issue #141 review
+	// round 3): halo readability in fillLightHaloFromNeighbors is the
+	// voxel-backing contract ONLY (state != UNLOADED). A neighbor in transit
+	// for a MESH job has stable, immutable voxels (edits targeting it are
+	// deferred) and MUST be read: two adjacent chunks dispatched in one
+	// meshPendingChunks batch would otherwise give the second halo snapshot
+	// an AIR view of the first - an asymmetric seam no future edit or
+	// arrival would ever invalidate. ChunkManager::meshPendingChunks also
+	// skips a dispatch (retry later) when the halo pool allocation fails
+	// instead of building without a halo.
+	{
+		MeshResultPool pool;
+
+		// Pool-first member order: the manager (which drains its jobs in its
+		// destructor) is destroyed before the pool it borrows chunks from.
+		// Static member carveTunnel because a local class's member functions
+		// cannot name block-scope lambdas (MSVC C2326).
+		struct BatchWorld
+		{
+			// Sealed 3x3 air gallery along +x straddling the A|B border (the
+			// section 25/26 scene): center line y=40, z 7..9, A-local x 8..15
+			// continuing into B-local x 0..8. The stone shell overrides the
+			// seed content, so every asserted cell below is deterministic.
+			static void carveTunnel(Chunk &a, Chunk &b)
+			{
+				for (int x = 7; x <= 15; ++x)
+					for (int z = 6; z <= 10; ++z)
+						for (int y = 38; y <= 42; ++y)
+							a.setVoxel(x, y, z, STONE);
+				for (int x = 0; x <= 9; ++x)
+					for (int z = 6; z <= 10; ++z)
+						for (int y = 38; y <= 42; ++y)
+							b.setVoxel(x, y, z, STONE);
+				for (int x = 8; x <= 15; ++x)
+					for (int z = 7; z <= 9; ++z)
+						for (int y = 39; y <= 41; ++y)
+							a.setVoxel(x, y, z, AIR);
+				for (int x = 0; x <= 8; ++x)
+					for (int z = 7; z <= 9; ++z)
+						for (int y = 39; y <= 41; ++y)
+							b.setVoxel(x, y, z, AIR);
+			}
+
+			ChunkPool chunkPool;
+			ChunkManager manager;
+			Chunk *a{nullptr};
+			Chunk *b{nullptr};
+			BatchWorld(TerrainGenerator &genRef, ThreadPool &tp)
+				: chunkPool(8), manager(&genRef, &tp, &chunkPool)
+			{
+				a = chunkPool.acquire(glm::vec3(0.0f));
+				b = chunkPool.acquire(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f));
+				if (!a || !b)
+				{
+					a = b = nullptr;
+					return;
+				}
+				// m_chunks keys are CHUNK INDICES, not world positions
+				// (section 25b): world x 0/16 -> indices 0/+1.
+				ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), a);
+				ChunkManagerProbe::registerChunk(manager, glm::ivec3(1, 0, 0), b);
+				if (!manager.prepareAndGenerateChunk(a, genRef) ||
+					!manager.prepareAndGenerateChunk(b, genRef))
+				{
+					a = b = nullptr; // failed prepare releases back to the pool
+					return;
+				}
+				carveTunnel(*a, *b);
+				a->setVoxel(14, 40, 8, LAVA);
+			}
+		};
+
+		// (A) Minimal targeted check - the exact review scenario: B
+		// snapshots its halo while A's mesh job owns A (in transit).
+		{
+			Chunk a(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+			Chunk b(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f), ChunkState::UNLOADED,
+					nullptr, nullptr, &pool);
+			const bool ok = a.prepareVoxelStorageForGeneration() &&
+							b.prepareVoxelStorageForGeneration();
+			CHECK(ok, "rgb batch: prepared the transit-scene pair");
+			if (ok)
+			{
+				a.generateTerrain(gen);
+				b.generateTerrain(gen);
+				BatchWorld::carveTunnel(a, b);
+				a.setVoxel(14, 40, 8, LAVA); // A-local border-near column (B-relative x = -2)
+
+				auto haloB = std::make_unique<ChunkLightHalo>();
+				haloB->resetToAir();
+				a.setInTransit(true); // A's mesh job in flight: voxels stable, edits deferred
+				fillLightHaloFromNeighbors(*haloB, &b, &a, nullptr, nullptr, nullptr,
+										   nullptr, nullptr, nullptr, nullptr);
+				const bool bSeesLava = haloB->voxelAt(-2, 40, 8) == static_cast<uint8_t>(LAVA);
+				const bool bSeesWall = haloB->voxelAt(-2, 38, 8) == static_cast<uint8_t>(STONE);
+				const size_t bEmissives = haloB->emissives.size();
+				CHECK(bSeesLava,
+					  "rgb batch: B's halo carries A's border LAVA while A is in transit (not AIR)");
+				CHECK(!haloB->emissives.empty(),
+					  "rgb batch: B's halo records A's emissives while A is in transit");
+				CHECK(bSeesWall,
+					  "rgb batch: B's halo carries A's tunnel wall STONE while A is in transit");
+				// Clearing the flag changes nothing: the neighbor stays
+				// readable and an identical refill is possible.
+				a.setInTransit(false);
+				haloB->resetToAir();
+				fillLightHaloFromNeighbors(*haloB, &b, &a, nullptr, nullptr, nullptr,
+										   nullptr, nullptr, nullptr, nullptr);
+				CHECK(haloB->voxelAt(-2, 40, 8) == static_cast<uint8_t>(LAVA) &&
+						  haloB->voxelAt(-2, 38, 8) == static_cast<uint8_t>(STONE) &&
+						  !haloB->emissives.empty(),
+					  "rgb batch: clearing in-transit keeps the neighbor readable (identical refill)");
+				if (std::getenv("FT_RGB_DEBUG"))
+					std::cerr << "[rgb] batch transit: bHaloLava=" << bSeesLava
+					          << " bHaloWall=" << bSeesWall
+					          << " bHaloEmissives=" << bEmissives << std::endl;
+			}
+		}
+
+		// (B) Real scheduler batch: ONE meshPendingChunks call dispatches
+		// both adjacent chunks (budget 2). Halos are filled synchronously at
+		// dispatch on the calling thread, so the post-dispatch halo
+		// inspection below is deterministic; the worker builds then run
+		// concurrently. The scene is rebuilt twice with reversed dispatch
+		// orders (camera nearer A, then nearer B) and the PUBLISHED worker
+		// payloads must match byte for byte: batch order must not decide
+		// who sees whom.
+		{
+			ThreadPool pool2(2);
+			RenderSettings settings; // defaults: both chunks far inside the full-quality band
+			constexpr int kTunYLo = 39 * 16, kTunYHi = 42 * 16;
+			constexpr int kTunZLo = 7 * 16, kTunZHi = 10 * 16;
+			// Max block-light nibble among opaque vertices inside a quantized
+			// position window (section 25 helper); *count receives vertices.
+			auto maxNibble = [](const MeshBuildResult &r, uint32_t (*nibble)(const Vertex &),
+								int xLo, int xHi, int yLo, int yHi, int zLo, int zHi,
+								int *count = nullptr) -> int
+			{
+				int best = 0;
+				if (count)
+					*count = 0;
+				for (const SectionMeshPayload &s : r.sections)
+					for (const Vertex &v : s.opaqueVertices)
+					{
+						const uint32_t qx = vQuantX(v);
+						const uint32_t qy = vQuantY(v);
+						const uint32_t qz = vQuantZ(v);
+						if (qx < xLo || qx > xHi || qy < yLo || qy > yHi || qz < zLo || qz > zHi)
+							continue;
+						if (count)
+							++*count;
+						best = std::max<int>(best, static_cast<int>(nibble(v)));
+					}
+				return best;
+			};
+
+			// Order 1: A is nearer the dispatch camera -> A dispatches first
+			// (queue is distance-sorted; camOffset x = 4-8 = -4: A distSq 16,
+			// B 400). Order 2: B is nearer -> B dispatches first, so A's halo
+			// is snapshotted while B is ALREADY in transit (the round-3 case;
+			// in order 1 it is B who sees an in-transit neighbor).
+			BatchWorld w1(gen, pool2);
+			const Camera camA(glm::vec3(4.f, 100.f, 8.f));
+			BatchWorld w2(gen, pool2);
+			const Camera camB(glm::vec3(20.f, 100.f, 8.f));
+
+			const bool worldsOk = w1.a && w1.b && w2.a && w2.b;
+			CHECK(worldsOk, "rgb batch: both scheduler worlds generated");
+			if (worldsOk)
+			{
+				// Pin both workers with LOW-priority spinners BEFORE the
+				// dispatch: near chunks enqueue as HIGH, so priority order
+				// guarantees no mesh job can start (let alone finish and
+				// detach its halo) while the gate is closed - the inspection
+				// is race-free by construction. The 2 s deadlines only guard
+				// against a hang if a worker never arrives.
+				std::atomic<int> gate{0};
+				std::atomic<int> gated{0};
+				auto gateTask = [&gate, &gated]
+				{
+					gated.fetch_add(1, std::memory_order_release);
+					const auto deadline =
+						std::chrono::steady_clock::now() + std::chrono::seconds(2);
+					while (gate.load(std::memory_order_acquire) == 0 &&
+						   std::chrono::steady_clock::now() < deadline)
+						std::this_thread::yield();
+				};
+				pool2.enqueue(TaskPriority::Low, gateTask);
+				pool2.enqueue(TaskPriority::Low, gateTask);
+				const auto pinDeadline =
+					std::chrono::steady_clock::now() + std::chrono::seconds(2);
+				while (gated.load(std::memory_order_acquire) < 2 &&
+					   std::chrono::steady_clock::now() < pinDeadline)
+					std::this_thread::yield();
+				CHECK(gated.load() == 2,
+					  "rgb batch: both workers pinned before the batch dispatch");
+
+				auto inspectBatch = [&](BatchWorld &w, const Camera &cam, const char *label)
+				{
+					const std::string prefix = std::string("rgb batch ") + label;
+					w.manager.meshPendingChunks(cam, settings, 2); // ONE batch, both chunks
+					CHECK(w.manager.pendingMeshJobs() == 2,
+						  prefix + ": both jobs dispatched in one batch");
+					CHECK(w.a->isInTransit() && w.b->isInTransit(),
+						  prefix + ": batch dispatch flagged both chunks in transit");
+					ChunkLightHalo *ha = w.a->lightHalo();
+					ChunkLightHalo *hb = w.b->lightHalo();
+					CHECK(ha != nullptr && hb != nullptr,
+						  prefix + ": dispatch attached a halo to each chunk");
+					if (ha && hb)
+					{
+						// Each halo saw its neighbor: B carries A's LAVA
+						// column + emissives across the seam (x = -2), A
+						// carries B's carved wall/gallery in the +x ring
+						// (x = 17).
+						const bool bSeesLava =
+							hb->voxelAt(-2, 40, 8) == static_cast<uint8_t>(LAVA);
+						const bool bHasEmissives = !hb->emissives.empty();
+						const bool aSeesB =
+							ha->voxelAt(17, 38, 8) == static_cast<uint8_t>(STONE) &&
+							ha->voxelAt(17, 40, 8) == static_cast<uint8_t>(AIR);
+						CHECK(bSeesLava, prefix + ": B's batch halo sees the LAVA in A across the seam");
+						CHECK(bHasEmissives,
+							  prefix + ": B's batch halo recorded A's emissives");
+						CHECK(aSeesB, prefix + ": A's batch halo sees B's tunnel wall/gallery (not AIR)");
+						if (std::getenv("FT_RGB_DEBUG"))
+							std::cerr << "[rgb] batch " << label << ": aHaloSeesB=" << aSeesB
+							          << " bHaloLava=" << bSeesLava
+							          << " bHaloEmissives=" << hb->emissives.size()
+							          << std::endl;
+					}
+				};
+				inspectBatch(w1, camA, "A-first");
+				inspectBatch(w2, camB, "B-first");
+				gate.store(1, std::memory_order_release); // workers pick up the queued HIGH jobs
+
+				auto drain = [](ChunkManager &m)
+				{
+					while (m.pendingMeshJobs() > 0)
+					{
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+						m.processFinishedJobs();
+					}
+					m.processFinishedJobs();
+				};
+				drain(w1.manager);
+				drain(w2.manager);
+				CHECK(w1.a->getState() == ChunkState::MESHED &&
+						  w1.b->getState() == ChunkState::MESHED,
+					  "rgb batch A-first: drained batch settles both chunks MESHED");
+				CHECK(w2.a->getState() == ChunkState::MESHED &&
+						  w2.b->getState() == ChunkState::MESHED,
+					  "rgb batch B-first: drained batch settles both chunks MESHED");
+				CHECK(w1.a->lightHalo() == nullptr && w1.b->lightHalo() == nullptr &&
+						  w2.a->lightHalo() == nullptr && w2.b->lightHalo() == nullptr,
+					  "rgb batch: workers detached every borrowed halo after publish");
+
+				// Determinism on the PUBLISHED worker payloads (held until
+				// GPU upload, which never runs in tests): each must equal a
+				// manual rebuild with a freshly filled halo (the settled ring
+				// holds the same stable voxels the dispatch snapshot saw -
+				// any published seam would diverge here), and the two
+				// dispatch orders must match byte for byte.
+				MeshBuildResult *pubA1 = ChunkStateProbe::pendingResult(*w1.a);
+				MeshBuildResult *pubB1 = ChunkStateProbe::pendingResult(*w1.b);
+				MeshBuildResult *pubA2 = ChunkStateProbe::pendingResult(*w2.a);
+				MeshBuildResult *pubB2 = ChunkStateProbe::pendingResult(*w2.b);
+				CHECK(pubA1 && pubB1 && pubA2 && pubB2,
+					  "rgb batch: every drained job published its payload");
+				if (pubA1 && pubB1 && pubA2 && pubB2)
+				{
+					// Manual reference rebuild (section 25 pattern): pool
+					// acquire + buildMesh with a freshly filled halo. A is
+					// the west chunk, B the east one.
+					auto canonical = [&](Chunk &chunk, Chunk &neighbor,
+										 bool neighborEast) -> MeshBuildResult *
+					{
+						auto halo = std::make_unique<ChunkLightHalo>();
+						halo->resetToAir();
+						if (neighborEast)
+							fillLightHaloFromNeighbors(*halo, &chunk, nullptr, &neighbor,
+													   nullptr, nullptr, nullptr, nullptr,
+													   nullptr, nullptr);
+						else
+							fillLightHaloFromNeighbors(*halo, &chunk, &neighbor, nullptr,
+													   nullptr, nullptr, nullptr, nullptr,
+													   nullptr, nullptr);
+						chunk.setLightHalo(halo.get());
+						MeshBuildResult *r = pool.acquire();
+						chunk.buildMesh(*r, chunk.meshGeneration(), chunk.meshRevision());
+						pool.finishBuild(r);
+						chunk.setLightHalo(nullptr);
+						return r;
+					};
+					auto sectionsEqual = [](const MeshBuildResult *x, const MeshBuildResult *y)
+					{
+						if (!x || !y || x->sections.size() != y->sections.size())
+							return false;
+						for (size_t s = 0; s < x->sections.size(); ++s)
+							if (!(x->sections[s] == y->sections[s]))
+								return false;
+						return true;
+					};
+					MeshBuildResult *refA1 = canonical(*w1.a, *w1.b, true);
+					MeshBuildResult *refB1 = canonical(*w1.b, *w1.a, false);
+					MeshBuildResult *refA2 = canonical(*w2.a, *w2.b, true);
+					MeshBuildResult *refB2 = canonical(*w2.b, *w2.a, false);
+					CHECK(sectionsEqual(pubA1, refA1),
+						  "rgb batch A-first: published A equals the canonical fresh-halo rebuild");
+					CHECK(sectionsEqual(pubB1, refB1),
+						  "rgb batch A-first: published B equals the canonical fresh-halo rebuild");
+					CHECK(sectionsEqual(pubA2, refA2),
+						  "rgb batch B-first: published A equals the canonical fresh-halo rebuild");
+					CHECK(sectionsEqual(pubB2, refB2),
+						  "rgb batch B-first: published B equals the canonical fresh-halo rebuild");
+					CHECK(sectionsEqual(pubA1, pubA2),
+						  "rgb batch: reversed dispatch order yields byte-identical published A payloads");
+					CHECK(sectionsEqual(pubB1, pubB2),
+						  "rgb batch: reversed dispatch order yields byte-identical published B payloads");
+					// Non-vacuous: the concurrent batch really carries the
+					// crossing lava light in B's border geometry.
+					const int borderR = maxNibble(*pubB1, vBlockR, 0, 16, kTunYLo, kTunYHi,
+												  kTunZLo, kTunZHi);
+					CHECK(borderR > 0,
+						  "rgb batch: B's published mesh carries A's lava light across the border");
+					if (std::getenv("FT_RGB_DEBUG"))
+						std::cerr << "[rgb] batch order-swap: canonA1="
+						          << sectionsEqual(pubA1, refA1)
+						          << " canonB1=" << sectionsEqual(pubB1, refB1)
+						          << " canonA2=" << sectionsEqual(pubA2, refA2)
+						          << " canonB2=" << sectionsEqual(pubB2, refB2)
+						          << " sameA=" << sectionsEqual(pubA1, pubA2)
+						          << " sameB=" << sectionsEqual(pubB1, pubB2)
+						          << " bBorderR=" << borderR << std::endl;
+					pool.release(refA1);
+					pool.release(refB1);
+					pool.release(refA2);
+					pool.release(refB2);
+				}
+			}
 		}
 	}
 

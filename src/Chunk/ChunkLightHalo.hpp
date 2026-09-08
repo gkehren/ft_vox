@@ -90,9 +90,14 @@ struct ChunkLightHalo
 };
 
 // Fill the ring from the (up to) 8 horizontal neighbors around `center`.
-// Defined in Chunk.cpp (needs the complete Chunk type). Missing, unreadable
-// (UNLOADED) and in-transit neighbors contribute AIR - their chunks dirty
-// this one through the arrival/edit light rules when their content lands.
+// Defined in Chunk.cpp (needs the complete Chunk type). Missing or
+// unreadable (UNLOADED - their generation worker is still filling the
+// backing) neighbors contribute AIR - their chunks dirty this one through
+// the arrival/edit light rules when their content lands. A neighbor in
+// transit for a MESH job is read normally: its voxels are immutable while
+// the mesh worker owns it (edits are deferred), and treating it as AIR
+// would blank halos whenever one batch dispatches two adjacent chunks
+// (issue #141 review round 3).
 void fillLightHaloFromNeighbors(ChunkLightHalo &halo, const Chunk *center,
 								const Chunk *west, const Chunk *east,
 								const Chunk *south, const Chunk *north,

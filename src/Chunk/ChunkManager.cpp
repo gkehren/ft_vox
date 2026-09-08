@@ -423,6 +423,17 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			// Borrowed for this job only: the worker detaches and returns
 			// it when the build ends (success, failure or retry).
 			ChunkLightHalo *halo = chunk->lightHalo();
+			if (!halo)
+			{
+				// Halo pool allocation failed: building without cross-chunk
+				// light could publish a dark seam that no future edit or
+				// arrival would ever invalidate (issue #141 review round 3,
+				// P2). The dirty mask was not consumed yet - skip this
+				// dispatch and let a later tick retry (same backpressure as
+				// the result-pool failure below).
+				chunk->setInTransit(false);
+				continue;
+			}
 			m_pendingMeshJobsCount.fetch_add(1);
 			const auto captureEpoch = GetProfiler().captureEpoch();
 			const auto queuedAt = std::chrono::steady_clock::now();
@@ -1194,7 +1205,7 @@ void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx)
 		}
 		catch (const std::bad_alloc &)
 		{
-			return; // in-chunk-only light for this build; retried next dispatch
+			return; // caller skips the dispatch; a later tick retries
 		}
 		chunk->setLightHalo(halo);
 	}

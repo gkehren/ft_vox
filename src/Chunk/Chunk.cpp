@@ -829,12 +829,15 @@ void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t 
 
 // Cross-chunk block-light context (issue #141 review fix): snapshot the
 // 15-voxel ring of neighbor voxels around `center` (4 sides + 4 diagonals;
-// a 6-neighbour Manhattan BFS can only route light through these). Missing,
-// unreadable (UNLOADED - stale pool bytes) and in-transit neighbors
-// contribute AIR: light is only seeded by real sources, so a missing
-// neighbor simply contributes no light, and the arrival/edit light rules
-// dirty the affected neighbors once its content lands. Center cells stay
-// AIR in the snapshot - the light field reads them from the chunk itself.
+// a 6-neighbour Manhattan BFS can only route light through these). Missing
+// or unreadable neighbors (state UNLOADED - stale pool bytes while their
+// generation worker runs) contribute AIR: light is only seeded by real
+// sources, so a missing neighbor simply contributes no light, and the
+// arrival/edit light rules dirty the affected neighbors once its content
+// lands. A neighbor in transit for a MESH job is read normally - its voxels
+// are stable (edits are deferred) and skipping it would blank the halo
+// whenever two neighbors are dispatched in the same batch. Center cells
+// stay AIR in the snapshot - the light field reads them from the chunk.
 //
 // Performance note (issue #141 review round 2, P2): this runs on the main
 // thread inside the mesh-dispatch critical section, so both the source
@@ -855,10 +858,18 @@ void fillLightHaloFromNeighbors(ChunkLightHalo &halo, const Chunk *center,
   // coordinates starting at (sxFrom, szFrom), row-major. Loop order is
   // y -> row -> column so both the source reads and the halo writes walk
   // contiguous bytes (both layouts are x-contiguous).
+  //
+  // Readability is the voxel-backing contract ONLY (state != UNLOADED):
+  // in-transit covers mesh jobs too, and a chunk being meshed has stable,
+  // fully readable voxels (edits targeting it are deferred). Skipping it
+  // would blank the halo whenever two neighbors are dispatched in the same
+  // batch - the second snapshot would treat the first as AIR and publish a
+  // permanent seam no invalidation would ever catch (issue #141 review
+  // round 3).
   auto copyRegion = [&](const Chunk *src, int hxFrom, int hzFrom, int cols, int rows,
                         uint32_t sxFrom, uint32_t szFrom)
   {
-    const bool readable = src && !src->isInTransit() && src->isVoxelBackingReadable();
+    const bool readable = src && src->isVoxelBackingReadable();
     for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
     {
       const size_t hy = static_cast<size_t>(y) * ChunkLightHalo::kExtent;
