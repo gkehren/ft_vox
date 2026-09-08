@@ -344,3 +344,29 @@ each tier records the Post pass together with the nested Composite pass that
 implements the depth-aware underwater model. `underwater.csv` publishes the
 median sweep means and sample counts per tier, so the underwater path cost is
 reported separately from the water pass and the whole-frame time.
+
+## AA slow-pan capture (issue #143)
+
+The spatial-AA pass's core criterion — less stair-stepping/crawling during
+camera motion — cannot be judged from a still golden, so the explicit
+`--capture-pan` mode renders the `aa_silhouette` fixture through a slow
+deterministic yaw sweep (48 steps over 6°, fixed time, manual exposure) with
+the AA pass OFF and ON rendered back-to-back per step. It writes side-by-side
+PNG frame sequences plus `summary.txt` containing the mean inter-frame luma
+delta overall and restricted to an edge ROI rebuilt per transition from the
+FXAA-off reference pair only, alongside per-pass GPU averages (Composite /
+AA / Post).
+
+```
+./build/tests/Release/ft_vox_visual_tests.exe --capture-pan --out build/visual-qa
+./build/tests/Release/ft_vox_visual_tests.exe --capture-pan --audit-1440 --out build/visual-qa
+```
+
+Both resolutions share the 640x360 golden contract's policy: new Vulkan
+validation errors and non-finite HDR samples fail the capture. With
+`--strict`, the capture additionally FAILS when the AA pass does not reduce
+the edge-band temporal delta by at least 10% versus the bypass path — the
+temporal gate for #143's central acceptance criterion (calibrated on the
+canonical GPU; heterogeneous machines run without `--strict`, like the
+golden smoke mode). Memory use is constant: only the previous OFF/ON frame
+pair is held. No golden files are read or updated in this mode.

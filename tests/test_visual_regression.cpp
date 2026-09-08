@@ -1003,32 +1003,36 @@ int runAoMotionCheck(VisualHarness &harness, const std::vector<SceneSpec> &scene
 // stair-stepping/crawling during camera motion", which a still golden cannot
 // express. This explicit diagnostic mode renders the aa_silhouette fixture
 // through a slow deterministic yaw sweep at the requested resolution with the
-// AA pass off and on, and produces:
+// AA pass OFF and ON rendered back-to-back per yaw step (identical camera
+// path), and produces:
 //   <out>/pan-<height>/fxaa_{off,on}/frame_%03d.png   (every 2nd frame, for
 //                                                     side-by-side video)
-//   <out>/pan-<height>/summary.txt                    (temporal metrics +
-//                                                     per-pass GPU averages)
-// The temporal metric is the mean |frame-to-frame luma delta| over the pan,
-// overall and restricted to edge pixels (high spatial gradient in frame 0):
-// crawling lives exactly where a texture is stable but its rasterized edge
-// jumps between texel staircases frame to frame, so AA shows up as a drop in
-// the edge-band number while the overall mean confirms no global smoothing
-// regression. Never reads or rewrites golden references.
-namespace {
-struct PanSequence
+//   <out>/pan-<height>/summary.txt                    (temporal metrics,
+//                                                     per-pass GPU averages,
+//                                                     strict-gate verdict)
+// Metric: mean |frame-to-frame luma delta|, overall and restricted to an
+// edge ROI rebuilt PER TRANSITION as edges(OFF[t-1]) OR edges(OFF[t])
+// (4-neighbour luma step > 24/255). The ROI derives ONLY from the FXAA-off
+// reference pair so it follows the silhouettes across the pan while keeping
+// OFF and ON comparable (they weight identical pixel sets). Crawling lives
+// exactly where content is stable but its rasterized edge jumps between
+// texel staircases, so AA shows up as a drop in the edge-band number while
+// the overall mean confirms no global smoothing regression.
+// Gating: in --strict mode the capture FAILS when the edge-band improvement
+// is below kMinEdgeGainPct (review P1: an AA that stops improving temporal
+// stability must fail the gate, not pass silently). Validation-error count
+// and HDR non-finite scans are checked unconditionally. Memory stays O(1)
+// frames: only the previous OFF/ON pair is held. Never reads or rewrites
+// golden references.
+int runPanCapture(VisualHarness &h, uint32_t height, const fs::path &out, bool strict)
 {
-	std::vector<visual::RgbaImage> frames; // consecutive, one per yaw step
-	std::vector<visual::RgbaImage> saved;  // every 2nd frame, written to disk
-};
-} // namespace
-
-int runPanCapture(VisualHarness &h, uint32_t height, const fs::path &out)
-{
-	constexpr int kFrames = 48;	 // yaw steps per pass (consecutive renders)
-	constexpr float kSweepDeg = 6.0f; // total yaw sweep across the sequence
+	constexpr int kFrames = 48;			 // yaw steps per pass (consecutive renders)
+	constexpr float kSweepDeg = 6.0f;	 // total yaw sweep across the sequence
+	constexpr double kMinEdgeGainPct = 10.0; // --strict gate on edge-band improvement
 	const uint32_t width = height * 16 / 9;
 	const fs::path base = out / ("pan-" + std::to_string(height));
 	fs::create_directories(base);
+	const long validationBefore = h.validationErrors();
 
 	// Same world/viewpoint as the aa_silhouette goldens (seed 4217, noon), so
 	// the capture and the golden A/B pair show the same staircase + foliage
@@ -1053,123 +1057,164 @@ int runPanCapture(VisualHarness &h, uint32_t height, const fs::path &out)
 		return baseYaw + kSweepDeg * (t - 0.5f); // sweep centered on the golden viewpoint
 	};
 
-	// Two warmup renders (pipeline creation must not pollute GPU timing).
-	for (int i = 0; i < 2; ++i)
-		h.renderFrame(13.0f, {});
-
-	// Spatial-gradient edge mask from the first rendered frame: pixels whose
-	// 4-neighbour luma step exceeds 24/255 (silhouettes, texture borders).
-	std::vector<uint8_t> edgeMask;
-	auto temporalDelta = [&](const std::vector<visual::RgbaImage> &frames) {
-		if (frames.size() < 2)
-			return std::pair<double, double>{0.0, 0.0};
-		const size_t px = size_t(frames[0].width) * frames[0].height;
-		if (edgeMask.empty())
-		{
-			edgeMask.resize(px, 0);
-			const auto &f = frames[0].pixels;
-			for (uint32_t y = 1; y + 1 < frames[0].height; ++y)
-				for (uint32_t x = 1; x + 1 < frames[0].width; ++x)
-				{
-					const size_t i = (size_t(y) * frames[0].width + x) * 4;
-					const auto lum = [&](size_t j) {
-						return (f[j] * 299 + f[j + 1] * 587 + f[j + 2] * 114) / 1000;
-					};
-					const int c = lum(i);
-					if (std::abs(c - lum(i - 4)) > 24 || std::abs(c - lum(i + 4)) > 24 ||
-						std::abs(c - lum(i - frames[0].width * 4)) > 24 ||
-						std::abs(c - lum(i + frames[0].width * 4)) > 24)
-						edgeMask[i / 4] = 1;
-				}
-		}
-		double sumAll = 0.0, sumEdge = 0.0;
-		size_t edgeCount = 0;
-		for (size_t p = 0; p < px; ++p)
-			edgeCount += edgeMask[p];
-		for (size_t fIdx = 1; fIdx < frames.size(); ++fIdx)
-		{
-			const auto &a = frames[fIdx - 1].pixels;
-			const auto &b = frames[fIdx].pixels;
-			for (size_t p = 0; p < px; ++p)
-			{
-				const size_t i = p * 4;
-				const int la = (a[i] * 299 + a[i + 1] * 587 + a[i + 2] * 114) / 1000;
-				const int lb = (b[i] * 299 + b[i + 1] * 587 + b[i + 2] * 114) / 1000;
-				const int d = std::abs(la - lb);
-				sumAll += double(d);
-				if (edgeMask[p])
-					sumEdge += double(d);
-			}
-		}
-		const double transitions = double(frames.size() - 1);
-		return std::pair<double, double>{
-			sumAll / (transitions * double(px)),
-			edgeCount ? sumEdge / (transitions * double(edgeCount)) : 0.0};
+	const auto lumaAtPx = [](const std::vector<uint8_t> &px, size_t i) {
+		return (px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000;
 	};
 
+	// Edge ROI for one transition: 4-neighbour luma step > 24/255 on EITHER
+	// reference (OFF) frame of the pair. Rebuilt per transition.
+	size_t maskCount = 0;
+	std::vector<uint8_t> edgeMask;
+	auto buildEdgeMask = [&](const visual::RgbaImage &a, const visual::RgbaImage &b) {
+		edgeMask.assign(size_t(a.width) * a.height, 0);
+		maskCount = 0;
+		auto mark = [&](const visual::RgbaImage &f) {
+			for (uint32_t y = 1; y + 1 < f.height; ++y)
+				for (uint32_t x = 1; x + 1 < f.width; ++x)
+				{
+					const size_t p = size_t(y) * f.width + x;
+					if (edgeMask[p])
+						continue;
+					const size_t i = p * 4;
+					const int c = lumaAtPx(f.pixels, i);
+					if (std::abs(c - lumaAtPx(f.pixels, i - 4)) > 24 ||
+						std::abs(c - lumaAtPx(f.pixels, i + 4)) > 24 ||
+						std::abs(c - lumaAtPx(f.pixels, i - size_t(f.width) * 4)) > 24 ||
+						std::abs(c - lumaAtPx(f.pixels, i + size_t(f.width) * 4)) > 24)
+					{
+						edgeMask[p] = 1;
+						++maskCount;
+					}
+				}
+		};
+		mark(a);
+		mark(b);
+	};
+
+	struct PassAccum
+	{
+		double sumAll = 0.0, sumEdge = 0.0;
+		double aaMs = 0.0, compositeMs = 0.0, postMs = 0.0;
+	};
+	PassAccum offAcc, onAcc;
+	double maskPixelsTotal = 0.0; // Σ_t maskCount_t — shared ROI denominator
+	long long nonFinite = 0;
+	size_t transitions = 0;
+	visual::RgbaImage prevOff, prevOn;
+	bool havePrev = false;
+
+	for (int i = 0; i < kFrames; ++i)
+	{
+		h.camera().setYawPitch(yawAt(i), pitch);
+		h.setFrameSlot(uint32_t(i) & 1u);
+
+		// Back-to-back OFF/ON renders per yaw step: no temporal renderer state
+		// is involved (manual exposure, pinned time), so interleaving keeps the
+		// two sequences pixel-comparable while the edge ROI is built from the
+		// OFF pair alone below.
+		h.post().fxaaEnabled = false;
+		visual::RgbaImage off = h.renderFrame(13.0f, {});
+		nonFinite += h.lastNonFiniteSamples();
+		const GpuFrameSample &offGpu = h.gpuSample();
+		const auto gpuMs = [&](const GpuFrameSample &g, GpuPass p) {
+			return g.present[size_t(p)] ? g.ms[size_t(p)] : 0.0f;
+		};
+		offAcc.compositeMs += gpuMs(offGpu, GpuPass::Composite);
+		offAcc.postMs += gpuMs(offGpu, GpuPass::Post);
+
+		h.post().fxaaEnabled = true;
+		visual::RgbaImage on = h.renderFrame(13.0f, {});
+		nonFinite += h.lastNonFiniteSamples();
+		const GpuFrameSample &onGpu = h.gpuSample();
+		onAcc.aaMs += gpuMs(onGpu, GpuPass::SpatialAA);
+		onAcc.compositeMs += gpuMs(onGpu, GpuPass::Composite);
+		onAcc.postMs += gpuMs(onGpu, GpuPass::Post);
+
+		if (havePrev)
+		{
+			buildEdgeMask(prevOff, off);
+			maskPixelsTotal += double(maskCount);
+			const size_t pxCount = size_t(off.width) * off.height;
+			for (size_t p = 0; p < pxCount; ++p)
+			{
+				const int dOff = std::abs(lumaAtPx(prevOff.pixels, p * 4) - lumaAtPx(off.pixels, p * 4));
+				const int dOn = std::abs(lumaAtPx(prevOn.pixels, p * 4) - lumaAtPx(on.pixels, p * 4));
+				offAcc.sumAll += double(dOff);
+				onAcc.sumAll += double(dOn);
+				if (edgeMask[p])
+				{
+					offAcc.sumEdge += double(dOff);
+					onAcc.sumEdge += double(dOn);
+				}
+			}
+			++transitions;
+		}
+		if (i % 2 == 0)
+		{
+			char name[32];
+			const fs::path offDir = base / "fxaa_off";
+			const fs::path onDir = base / "fxaa_on";
+			fs::create_directories(offDir);
+			fs::create_directories(onDir);
+			std::snprintf(name, sizeof(name), "frame_%03d.png", i / 2);
+			visual::writePng((offDir / name).string(), off);
+			visual::writePng((onDir / name).string(), on);
+		}
+		prevOff = std::move(off);
+		prevOn = std::move(on);
+		havePrev = true;
+	}
+
+	const double pxTotal = double(transitions) * double(size_t(width) * height);
+	const double offAll = offAcc.sumAll / pxTotal;
+	const double onAll = onAcc.sumAll / pxTotal;
+	const double offEdge = offAcc.sumEdge / maskPixelsTotal;
+	const double onEdge = onAcc.sumEdge / maskPixelsTotal;
+	const double allGain = 100.0 * (1.0 - onAll / offAll);
+	const double edgeGain = 100.0 * (1.0 - onEdge / offEdge);
+
+	const uint32_t timed = uint32_t(kFrames);
 	std::ostringstream report;
 	report << "slow-pan capture (issue #143): " << width << "x" << height
 		   << ", " << kFrames << " yaw steps, sweep " << kSweepDeg
 		   << " deg, seed 4217 (aa_silhouette viewpoint)\n";
-
-	struct PassResult
-	{
-		const char *name;
-		double all, edge;
-		double aaMs, compositeMs, postMs;
-	};
-	PassResult results[2] = {{"fxaa_off", 0, 0, 0, 0, 0}, {"fxaa_on", 0, 0, 0, 0, 0}};
-	for (PassResult &pass : results)
-	{
-		h.post().fxaaEnabled = std::string(pass.name) == "fxaa_on";
-		PanSequence seq;
-		double aaMs = 0.0, compositeMs = 0.0, postMs = 0.0;
-		uint32_t timed = 0;
-		for (int i = 0; i < kFrames; ++i)
-		{
-			h.camera().setYawPitch(yawAt(i), pitch);
-			h.setFrameSlot(uint32_t(i) & 1u);
-			visual::RgbaImage frame = h.renderFrame(13.0f, {});
-			const GpuFrameSample &gpu = h.gpuSample();
-			const auto presentMs = [&](GpuPass p) {
-				return gpu.present[size_t(p)] ? gpu.ms[size_t(p)] : 0.0f;
-			};
-			aaMs += presentMs(GpuPass::SpatialAA);
-			compositeMs += presentMs(GpuPass::Composite);
-			postMs += presentMs(GpuPass::Post);
-			++timed;
-			seq.frames.push_back(std::move(frame));
-			if (i % 2 == 0)
-			{
-				const fs::path dir = base / pass.name;
-				fs::create_directories(dir);
-				char name[32];
-				std::snprintf(name, sizeof(name), "frame_%03d.png", i / 2);
-				visual::writePng((dir / name).string(), seq.frames.back());
-			}
-		}
-		auto [all, edge] = temporalDelta(seq.frames);
-		pass.all = all;
-		pass.edge = edge;
-		pass.aaMs = aaMs / std::max(1u, timed);
-		pass.compositeMs = compositeMs / std::max(1u, timed);
-		pass.postMs = postMs / std::max(1u, timed);
-		report << pass.name << ": mean inter-frame luma delta all=" << all
-			   << "/255 edge-band=" << edge
-			   << "/255 | GPU ms: composite=" << pass.compositeMs
-			   << " aa=" << pass.aaMs << " post=" << pass.postMs << "\n";
-	}
-
-	const double allGain = 100.0 * (1.0 - results[1].all / std::max(results[0].all, 1e-9));
-	const double edgeGain = 100.0 * (1.0 - results[1].edge / std::max(results[0].edge, 1e-9));
+	report << "fxaa_off: mean inter-frame luma delta all=" << offAll
+		   << "/255 edge-band=" << offEdge
+		   << "/255 | GPU ms: composite=" << offAcc.compositeMs / timed
+		   << " aa=" << offAcc.aaMs / timed << " post=" << offAcc.postMs / timed << "\n";
+	report << "fxaa_on: mean inter-frame luma delta all=" << onAll
+		   << "/255 edge-band=" << onEdge
+		   << "/255 | GPU ms: composite=" << onAcc.compositeMs / timed
+		   << " aa=" << onAcc.aaMs / timed << " post=" << onAcc.postMs / timed << "\n";
 	report << "FXAA on vs off: overall temporal delta " << allGain << "% lower, "
 		   << "edge-band temporal delta " << edgeGain << "% lower\n";
+
+	int result = 0;
+	if (h.validationErrors() != validationBefore)
+	{
+		report << "FAIL: " << h.validationErrors() - validationBefore
+			   << " new Vulkan validation error(s) during the capture\n";
+		result = 1;
+	}
+	if (nonFinite > 0)
+	{
+		report << "FAIL: " << nonFinite << " non-finite (NaN/Inf) HDR sample(s)\n";
+		result = 1;
+	}
+	if (strict && result == 0 && edgeGain < kMinEdgeGainPct)
+	{
+		report << "FAIL strict gate: FXAA edge-band temporal improvement "
+			   << edgeGain << "% is below the required " << kMinEdgeGainPct << "%\n";
+		result = 1;
+	}
+	if (strict && result == 0)
+		report << "strict gate PASSED (edge-band improvement >= " << kMinEdgeGainPct << "%)\n";
+
 	const std::string text = report.str();
 	std::cout << text;
 	std::ofstream(base / "summary.txt") << text;
-	return 0;
+	return result;
 }
-
 
 // Explicit diagnostic mode: never reads or rewrites golden references.
 int runWaterAudit(VisualHarness &h, const fs::path &out) {
@@ -1890,7 +1935,7 @@ int main(int argc, char **argv)
 
 	if (panCapture) {
 		int result = 1;
-		try { result = runPanCapture(harness, auditHeight, outDir); }
+		try { result = runPanCapture(harness, auditHeight, outDir, strict); }
 		catch (const std::exception &e) { std::cerr << "pan capture failed: " << e.what() << "\n"; }
 		harness.shutdown();
 		return result;
