@@ -835,6 +835,13 @@ void Chunk::buildMeshRanged(MeshBuildResult &out, uint64_t generation, uint64_t 
 // neighbor simply contributes no light, and the arrival/edit light rules
 // dirty the affected neighbors once its content lands. Center cells stay
 // AIR in the snapshot - the light field reads them from the chunk itself.
+//
+// Performance note (issue #141 review round 2, P2): this runs on the main
+// thread inside the mesh-dispatch critical section, so both the source
+// reads and the halo writes walk contiguous rows (y outermost - the voxel
+// layout is y-major) and the emissive test is a table lookup. There is no
+// bulk reset: every ring cell is written exactly once below (neighbor
+// bytes or AIR), making a resetToAir() memset redundant.
 void fillLightHaloFromNeighbors(ChunkLightHalo &halo, const Chunk *center,
                                 const Chunk *west, const Chunk *east,
                                 const Chunk *south, const Chunk *north,
@@ -842,60 +849,51 @@ void fillLightHaloFromNeighbors(ChunkLightHalo &halo, const Chunk *center,
                                 const Chunk *northWest, const Chunk *northEast)
 {
   (void)center;
-  halo.resetToAir();
-  for (int hz = 0; hz < ChunkLightHalo::kExtent; ++hz)
+  halo.emissives.clear();
+  // Copy one rectangle of the ring from `src`: halo columns
+  // [hxFrom, hxFrom+cols) x halo rows [hzFrom, hzFrom+rows) map to source
+  // coordinates starting at (sxFrom, szFrom), row-major. Loop order is
+  // y -> row -> column so both the source reads and the halo writes walk
+  // contiguous bytes (both layouts are x-contiguous).
+  auto copyRegion = [&](const Chunk *src, int hxFrom, int hzFrom, int cols, int rows,
+                        uint32_t sxFrom, uint32_t szFrom)
   {
-    const int z = hz - ChunkLightHalo::kRadius;
-    const bool inCenterZ = z >= 0 && z < static_cast<int>(CHUNK_SIZE);
-    for (int hx = 0; hx < ChunkLightHalo::kExtent; ++hx)
+    const bool readable = src && !src->isInTransit() && src->isVoxelBackingReadable();
+    for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
     {
-      const int x = hx - ChunkLightHalo::kRadius;
-      const bool inCenterX = x >= 0 && x < static_cast<int>(CHUNK_SIZE);
-      if (inCenterX && inCenterZ)
-        continue; // center column: read from the chunk, not the snapshot
-      const Chunk *src;
-      int sx, sz;
-      if (inCenterZ)
+      const size_t hy = static_cast<size_t>(y) * ChunkLightHalo::kExtent;
+      for (int rr = 0; rr < rows; ++rr)
       {
-        if (x < 0) { src = west; sx = x + CHUNK_SIZE; sz = z; }
-        else       { src = east; sx = x - CHUNK_SIZE; sz = z; }
-      }
-      else if (inCenterX)
-      {
-        if (z < 0) { src = south; sx = x; sz = z + CHUNK_SIZE; }
-        else       { src = north; sx = x; sz = z - CHUNK_SIZE; }
-      }
-      else if (x < 0)
-      {
-        src = z < 0 ? southWest : northWest;
-        sx = x + CHUNK_SIZE;
-        sz = z < 0 ? z + CHUNK_SIZE : z - CHUNK_SIZE;
-      }
-      else
-      {
-        src = z < 0 ? southEast : northEast;
-        sx = x - CHUNK_SIZE;
-        sz = z < 0 ? z + CHUNK_SIZE : z - CHUNK_SIZE;
-      }
-      const bool readable = src && !src->isInTransit() && src->isVoxelBackingReadable();
-      const size_t hcol = static_cast<size_t>(hx) +
-                          static_cast<size_t>(ChunkLightHalo::kExtent) *
-                              (CHUNK_HEIGHT * static_cast<size_t>(hz));
-      for (int y = 0; y < static_cast<int>(CHUNK_HEIGHT); ++y)
-      {
-        const uint8_t t = readable
-            ? src->getVoxel(static_cast<uint32_t>(sx), static_cast<uint32_t>(y),
-                            static_cast<uint32_t>(sz))
-                  .type
-            : static_cast<uint8_t>(AIR);
-        const size_t hi = hcol + static_cast<size_t>(y) * ChunkLightHalo::kExtent;
-        halo.voxels[hi] = t;
-        if (lighting::isBlockLightSource(t))
-          halo.emissives.push_back(
-              {static_cast<uint32_t>(hi), lighting::blockLightEmissionRGB4(t)});
+        size_t h = static_cast<size_t>(hxFrom) + hy +
+                   static_cast<size_t>(CHUNK_HEIGHT * ChunkLightHalo::kExtent) *
+                       static_cast<size_t>(hzFrom + rr);
+        uint32_t sx = sxFrom;
+        for (int c = 0; c < cols; ++c, ++sx, ++h)
+        {
+          const uint8_t t = readable
+              ? src->getVoxel(sx, y, static_cast<uint32_t>(szFrom + rr)).type
+              : static_cast<uint8_t>(AIR);
+          halo.voxels[h] = t;
+          if (lighting::kIsBlockLightSourceTable[t])
+            halo.emissives.push_back(
+                {static_cast<uint32_t>(h), lighting::blockLightEmissionRGB4(t)});
+        }
       }
     }
-  }
+  };
+  constexpr int kR = ChunkLightHalo::kRadius;
+  // Region table: raw halo column/row starts (hx = x+kR, hz = z+kR), sizes,
+  // and the source chunk coordinates the rectangle maps from.
+  //   sides: 15-deep slab x a full 16-wide chunk row/column
+  //   corners: 15x15 squares (the diagonal chunks' near corner)
+  copyRegion(west, 0, kR, kR, CHUNK_SIZE, 1, 0);
+  copyRegion(east, kR + CHUNK_SIZE, kR, kR, CHUNK_SIZE, 0, 0);
+  copyRegion(south, kR, 0, CHUNK_SIZE, kR, 0, 1);
+  copyRegion(north, kR, kR + CHUNK_SIZE, CHUNK_SIZE, kR, 0, 0);
+  copyRegion(southWest, 0, 0, kR, kR, 1, 1);
+  copyRegion(southEast, kR + CHUNK_SIZE, 0, kR, kR, 0, 1);
+  copyRegion(northWest, 0, kR + CHUNK_SIZE, kR, kR, 1, 0);
+  copyRegion(northEast, kR + CHUNK_SIZE, kR + CHUNK_SIZE, kR, kR, 0, 0);
 }
 
 void Chunk::computeLightField(telemetry::MeshSample &meshSample)

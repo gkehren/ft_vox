@@ -518,18 +518,24 @@ path stays untouched. Emissive edit invalidation still keys on
 **Cross-chunk propagation (issue #141 review).** The block-light BFS runs on
 a **transient halo domain**: at mesh dispatch the ChunkManager snapshots the
 15-voxel ring of neighbor voxels (4 sides + 4 diagonals — the Manhattan BFS
-cannot route light around them) into a pooled `ChunkLightHalo`, the BFS
-seeds center *and* ring sources, and only the center (+ its 1-voxel
-face-sampling shell) is sampled — border faces read the neighbor side's real
-propagated light, so there are no colored-light seams at chunk borders.
+cannot route light around them) into a pooled `ChunkLightHalo` — main-thread
+cost measured as the `mesh.haloFill` telemetry stage — and the BFS seeds
+center *and* ring sources; only the center (+ its 1-voxel face-sampling
+shell) is sampled, so border faces read the neighbor side's real propagated
+light and no colored-light seams appear at chunk borders.
 Missing/in-transit neighbors contribute AIR (no sources ⇒ no light), and
-light lands in already-meshed neighbors through two invalidation rules: a
+light reaches already-meshed neighbors through two invalidation rules: a
 light-relevant **edit** within the halo radius of a border dirties the
-reachable neighbors, and a chunk whose **arrival** carries border-band
-emissives dirties the side neighbors' affected sections. The packed RGB4
-helpers (`packBlockLightRGB4` etc.) define the representation contract issue
-#128 consumes for entities; actual runtime sampling/storage of the field for
-entities remains #128's responsibility.
+reachable neighbors, and a chunk **arrival** dirties the neighbors its border
+bands can reach for cells that are emissive **or** non-air-like (arriving
+blockers change BFS paths through what the halo assumed to be AIR). The
+invalidation records the atomic section mask even while the neighbor is
+mid-mesh-job; the mask persists across the in-flight build and
+`processFinishedJobs` re-arms `GENERATED` after publish, so a race between
+edits/arrivals and meshing can never silently drop an invalidation. The
+packed RGB4 helpers (`packBlockLightRGB4` etc.) define the representation
+contract issue #128 consumes for entities; actual runtime sampling/storage of
+the field for entities remains #128's responsibility.
 
 ### Cascades (`Renderer/ShadowCascades.hpp`, `namespace shadow`)
 

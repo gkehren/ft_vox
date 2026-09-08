@@ -625,6 +625,15 @@ void ChunkManager::processFinishedJobs()
 		}
 		if (job.chunk)
 			job.chunk->setInTransit(false);
+		// Neighbor-light invalidation may land while a mesh job owns the
+		// chunk (an edit racing the build, a chunk arriving mid-mesh - issue
+		// #141 review round 2): the section mask persisted through the
+		// in-flight job, so re-arm scheduling now that publish is done.
+		// Without this the MESHED chunk would keep its stale cross-chunk
+		// light until an unrelated edit remeshed it.
+		if (job.chunk && job.chunk->getState() == ChunkState::MESHED &&
+			job.chunk->dirtySections() != 0)
+			job.chunk->setState(ChunkState::GENERATED);
 	}
 	// Apply edits that were deferred while their chunk was in transit; they
 	// bump the mesh revision and mark the chunk GENERATED for a remesh.
@@ -1190,16 +1199,22 @@ void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx)
 		chunk->setLightHalo(halo);
 	}
 	// Caller holds exclusive lock.
-	fillLightHaloFromNeighbors(
-		*halo, chunk,
-		getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),
-		getChunk(chunkIdx + glm::ivec3(+1, 0, 0)),
-		getChunk(chunkIdx + glm::ivec3(0, 0, -1)),
-		getChunk(chunkIdx + glm::ivec3(0, 0, +1)),
-		getChunk(chunkIdx + glm::ivec3(-1, 0, -1)),
-		getChunk(chunkIdx + glm::ivec3(+1, 0, -1)),
-		getChunk(chunkIdx + glm::ivec3(-1, 0, +1)),
-		getChunk(chunkIdx + glm::ivec3(+1, 0, +1)));
+	{
+		// The ring snapshot is main-thread dispatch cost (issue #141 review
+		// round 2, P2): measured as its own stage so the benchmark reports
+		// haloFill avg/p95 next to the worker-side mesh stages.
+		telemetry::StageSample haloFillSample(telemetry::HaloFill);
+		fillLightHaloFromNeighbors(
+			*halo, chunk,
+			getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),
+			getChunk(chunkIdx + glm::ivec3(+1, 0, 0)),
+			getChunk(chunkIdx + glm::ivec3(0, 0, -1)),
+			getChunk(chunkIdx + glm::ivec3(0, 0, +1)),
+			getChunk(chunkIdx + glm::ivec3(-1, 0, -1)),
+			getChunk(chunkIdx + glm::ivec3(+1, 0, -1)),
+			getChunk(chunkIdx + glm::ivec3(-1, 0, +1)),
+			getChunk(chunkIdx + glm::ivec3(+1, 0, +1)));
+	}
 }
 
 void ChunkManager::markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int y, int z,
@@ -1239,15 +1254,18 @@ void ChunkManager::markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int
 
 	auto dirty = [&](const glm::ivec3 &pos) {
 		Chunk *n = getChunk(pos);
-		// In-transit neighbors are skipped: their mesh job already captured
-		// its mask, and setting GENERATED under it would be overwritten by
-		// publish (stuck dirty state). The edit path defers the target the
-		// same way.
-		if (!n || n->getState() == ChunkState::UNLOADED || n->isInTransit())
+		// UNLOADED chunks have no mesh to invalidate (generation re-arms all
+		// sections anyway). The section mask is recorded even when the
+		// neighbor is IN TRANSIT: the atomic mask persists across the
+		// in-flight job and processFinishedJobs re-arms GENERATED after
+		// publish, so an edit racing a mesh build can never lose its
+		// invalidation (issue #141 review round 2). Only the scheduling
+		// state change is withheld while a job owns the chunk - publish
+		// would overwrite it.
+		if (!n || n->getState() == ChunkState::UNLOADED)
 			return;
 		n->markSectionsDirty(yMask);
-		// MESHED chunks are only re-picked by mesh dispatch in GENERATED.
-		if (n->getState() == ChunkState::MESHED)
+		if (!n->isInTransit() && n->getState() == ChunkState::MESHED)
 			n->setState(ChunkState::GENERATED);
 	};
 	if (west) dirty(chunkPos + glm::ivec3(-1, 0, 0));
@@ -1265,13 +1283,18 @@ void ChunkManager::dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 
 	if (!chunk || !chunk->isVoxelBackingReadable())
 		return;
 	constexpr int R = ChunkLightHalo::kRadius;
-	// One pass over the chunk classifies every emissive cell into the side
-	// bands it can reach: a cell at local x matters to the west neighbor
-	// iff x + 1 <= R and to the east one iff CHUNK_SIZE - x <= R (same for
-	// z). ~65K cheap checks per arrival, once per chunk lifetime. A band
-	// without sources dirties nothing - the common case.
-	int bandMinY[4] = {CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT};
-	int bandMaxY[4] = {-1, -1, -1, -1};
+	// One pass classifies every light-relevant cell into the neighbor bands
+	// it can reach - sides AND diagonals, with the same Manhattan reach rule
+	// as markNeighborLightDirty. Light-relevant here means emissive sources
+	// (new light) OR non-air-like content (the halo assumed AIR for this
+	// missing chunk, so arriving blockers/liquids change BFS paths even
+	// without a single emitter - issue #141 review round 2). ~65K cheap
+	// checks per arrival, once per chunk lifetime; a band without relevant
+	// cells dirties nothing.
+	constexpr int kBandCount = 8; // W E S N SW SE NW NE
+	int bandMinY[kBandCount] = {CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT,
+								CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT};
+	int bandMaxY[kBandCount] = {-1, -1, -1, -1, -1, -1, -1, -1};
 	auto note = [&](int side, int y) {
 		if (y < bandMinY[side])
 			bandMinY[side] = y;
@@ -1283,20 +1306,28 @@ void ChunkManager::dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 
 			for (uint32_t x = 0; x < CHUNK_SIZE; ++x)
 			{
 				const auto t = static_cast<TextureType>(chunk->getVoxel(x, y, z).type);
-				if (!lighting::isBlockLightSource(t))
+				const bool lightRelevant =
+					lighting::isBlockLightSource(t) || !blockTransmitsSkyLight(t);
+				if (!lightRelevant)
 					continue;
-				if (static_cast<int>(x) + 1 <= R) note(0, static_cast<int>(y));
-				if (static_cast<int>(CHUNK_SIZE - x) <= R) note(1, static_cast<int>(y));
-				if (static_cast<int>(z) + 1 <= R) note(2, static_cast<int>(y));
-				if (static_cast<int>(CHUNK_SIZE - z) <= R) note(3, static_cast<int>(y));
+				const int xi = static_cast<int>(x);
+				const int zi = static_cast<int>(z);
+				if (xi + 1 <= R) note(0, static_cast<int>(y));
+				if (CHUNK_SIZE - xi <= R) note(1, static_cast<int>(y));
+				if (zi + 1 <= R) note(2, static_cast<int>(y));
+				if (CHUNK_SIZE - zi <= R) note(3, static_cast<int>(y));
+				if (xi + 1 + zi + 1 <= R) note(4, static_cast<int>(y));
+				if (CHUNK_SIZE - xi + zi + 1 <= R) note(5, static_cast<int>(y));
+				if (xi + 1 + (CHUNK_SIZE - zi) <= R) note(6, static_cast<int>(y));
+				if (CHUNK_SIZE - xi + (CHUNK_SIZE - zi) <= R) note(7, static_cast<int>(y));
 			}
 
-	// Same skip rules as markNeighborLightDirty.
+	// Same mask-persists-through-transit rule as markNeighborLightDirty.
 	auto dirty = [&](int side, const glm::ivec3 &pos) {
 		if (bandMinY[side] > bandMaxY[side])
 			return;
 		Chunk *n = getChunk(pos);
-		if (!n || n->getState() == ChunkState::UNLOADED || n->isInTransit())
+		if (!n || n->getState() == ChunkState::UNLOADED)
 			return;
 		uint16_t yMask = 0;
 		const int yLo = std::max(0, bandMinY[side] - R) / Chunk::kOccupancySectionSize;
@@ -1305,13 +1336,17 @@ void ChunkManager::dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 
 		for (int s = yLo; s <= yHi; ++s)
 			yMask |= static_cast<uint16_t>(1u << s);
 		n->markSectionsDirty(yMask);
-		if (n->getState() == ChunkState::MESHED)
+		if (!n->isInTransit() && n->getState() == ChunkState::MESHED)
 			n->setState(ChunkState::GENERATED);
 	};
 	dirty(0, chunkIdx + glm::ivec3(-1, 0, 0));
 	dirty(1, chunkIdx + glm::ivec3(+1, 0, 0));
 	dirty(2, chunkIdx + glm::ivec3(0, 0, -1));
 	dirty(3, chunkIdx + glm::ivec3(0, 0, +1));
+	dirty(4, chunkIdx + glm::ivec3(-1, 0, -1));
+	dirty(5, chunkIdx + glm::ivec3(+1, 0, -1));
+	dirty(6, chunkIdx + glm::ivec3(-1, 0, +1));
+	dirty(7, chunkIdx + glm::ivec3(+1, 0, +1));
 }
 
 TaskPriority ChunkManager::calculateTaskPriority(float distanceSq, float lodThresholdSq) const

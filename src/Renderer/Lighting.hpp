@@ -8,6 +8,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -142,10 +143,17 @@ inline uint8_t blockLightEmission(uint8_t blockType)
 }
 
 /// Fast source-membership test for bulk scans (halo fill, neighbor-arrival
-/// band scans): true iff the block is a block-light source.
+/// band scans): true iff the block is a block-light source. Table-backed:
+/// these scans run per voxel on the mesh-dispatch critical path.
+inline const std::array<bool, 256> kIsBlockLightSourceTable = [] {
+	std::array<bool, 256> table{};
+	for (unsigned int i = 0; i < 256; ++i)
+		table[i] = blockLightSourceForBlock(static_cast<uint8_t>(i)).intensity != 0;
+	return table;
+}();
 inline bool isBlockLightSource(uint8_t blockType)
 {
-	return blockLightSourceForBlock(blockType).intensity != 0;
+	return kIsBlockLightSourceTable[blockType];
 }
 
 // RGB4 voxel representation: three 4-bit channels packed R in bits 0-3,

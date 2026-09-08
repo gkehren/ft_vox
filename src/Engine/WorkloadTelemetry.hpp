@@ -58,8 +58,8 @@ inline constexpr const char* eventNames[] = {
     "border.pool.growEvents", "mesh.pool.growEvents", "arena.binds",
     "arena.growEvents"
 };
-enum Stage : size_t { Skylight, Blocklight, Occupancy, FacesGreedyAO, Lod, StageCount };
-inline constexpr const char* stageNames[] = {"skylight", "blocklight", "occupancy", "facesGreedyAO", "LOD"};
+enum Stage : size_t { Skylight, Blocklight, Occupancy, FacesGreedyAO, Lod, HaloFill, StageCount };
+inline constexpr const char* stageNames[] = {"skylight", "blocklight", "occupancy", "facesGreedyAO", "LOD", "haloFill"};
 
 // Capture-local gauges describe transient state sampled during a capture
 // window (staging slice usage; end-of-frame chunk-manager samples; the
