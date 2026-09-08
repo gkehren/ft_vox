@@ -74,6 +74,7 @@ toggle described in §4.)
 | `midnight` | Moon/stars, night exposure |
 | `mob_lighting` | Entity vs terrain lighting consistency |
 | `underwater` | Fully submerged camera |
+| `underwater_deep` | Distance-based extinction falloff and world-anchored caustics at noon (submerged camera looking horizontally across open water) |
 | `auto_exposure_noon` | The `noon_terrain` inputs (same seed/viewpoint/atmosphere) through the live auto-exposure path: metering, adaptation, composite consumption |
 | `auto_exposure_cave` | Auto exposure in a sealed, unlit carved room; the adapted exposure climbs toward the max-EV clamp |
 
@@ -333,3 +334,11 @@ warmup frames) so clock ramp and thermal drift cannot order the tiers;
 pass graph GPU frame (excluding test readback). These are fixed-fixture
 costs, not streaming or presentation benchmarks. No golden files are read or
 updated in this mode.
+
+The underwater composite path (issue #144) gets its own timing artifact: a
+camera fixed fully below the lake surface (underwater post enabled with a
+known surface height) renders the same three interleaved preset sweeps, and
+each tier records the Post pass together with the nested Composite pass that
+implements the depth-aware underwater model. `underwater.csv` publishes the
+median sweep means and sample counts per tier, so the underwater path cost is
+reported separately from the water pass and the whole-frame time.

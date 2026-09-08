@@ -29,7 +29,9 @@ non-solid medium with half the swimming speed. A new jump press while less than
 90% immersed in water can initiate a surface jump; liquid vertical drag is
 suppressed for 250 ms to allow clearing a bank. Glass, leaves, ice, sand, gravel
 and all other current non-fluid blocks remain solid cubes. Render transparency
-does not determine collision. Underwater rendering remains an eye-level effect.
+does not determine collision. Underwater rendering remains an eye-level effect
+in the composite pass, driven by reconstructed scene depth and the local water
+surface — still not a physics or volumetric system.
 
 ## CPU interfaces and ownership
 

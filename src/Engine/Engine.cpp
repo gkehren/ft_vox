@@ -1344,12 +1344,16 @@ void Engine::run()
 				worldRenderer->applyShadowMapSize(uint32_t(worldRenderer->postSettings().shadowMapSize));
 			// Visual immersion follows the eye, including water occupied by kelp.
 			bool underwater = false;
+			float underwaterSurfaceY = kUnknownUnderwaterSurfaceY;
 			if (chunkManager)
 			{
 				ChunkCollisionView world(*chunkManager);
-				underwater = world.sample(glm::ivec3(glm::floor(camera.getPosition()))).medium == physics::Medium::Water;
+				const glm::ivec3 eye = glm::ivec3(glm::floor(camera.getPosition()));
+				underwater = world.sample(eye).medium == physics::Medium::Water;
+				underwaterSurfaceY = world.waterSurfaceAbove(eye);
 			}
 			worldRenderer->postSettings().underwater = underwater;
+			worldRenderer->postSettings().underwaterSurfaceY = underwaterSurfaceY;
 			worldRenderer->updateFrameUBO(frameIndex, camera,
 									static_cast<float>(pixelW), static_cast<float>(pixelH), farPlane,
 									static_cast<float>(currentFrame), shaderParams,

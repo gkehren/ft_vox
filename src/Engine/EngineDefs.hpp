@@ -136,6 +136,10 @@ enum class GraphicsQualityPreset
 	Cinematic = 3,
 };
 
+/// Sentinel for "no local water surface known" — renders fully submerged
+/// (issue #144). The engine replaces it with a per-frame voxel scan.
+inline constexpr float kUnknownUnderwaterSurfaceY = 1e9f;
+
 struct PostProcessSettings
 {
 	bool bloomEnabled{true};
@@ -203,6 +207,11 @@ struct PostProcessSettings
 	// Underwater look (set by engine when camera is submerged)
 	bool underwater{false};
 	float underwaterStrength{1.0f};
+	/// Local water-surface world Y for the submersion blend (issue #144):
+	/// the engine scans up from the camera voxel each frame; the sentinel
+	/// means "unknown surface" and renders fully submerged (debug toggle,
+	/// visual tests before the scan landed).
+	float underwaterSurfaceY{kUnknownUnderwaterSurfaceY};
 
 	/// Shadow map resolution tier (issue #137): 1024 (Low/Medium) or 2048
 	/// (High/Cinematic). Changing it recreates the shadow map array — the
@@ -224,6 +233,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 	// Preserve runtime submersion state
 	const bool wasUnderwater = underwater;
 	const float underStr = underwaterStrength;
+	const float underSurfaceY = underwaterSurfaceY;
 
 	// Shared grade defaults (Medium baseline)
 	exposure = 1.25f;
@@ -339,6 +349,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 
 	underwater = wasUnderwater;
 	underwaterStrength = underStr;
+	underwaterSurfaceY = underSurfaceY;
 }
 
 struct VoxelHighlight

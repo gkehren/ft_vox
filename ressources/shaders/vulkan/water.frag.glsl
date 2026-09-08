@@ -10,6 +10,7 @@ layout(location = 5) flat in vec3 vGeoNormal;
 #include "frame_ubo.inc.glsl"
 #include "sky_radiance.inc.glsl"
 #include "csm.inc.glsl"
+#include "water_optics.inc.glsl"
 
 layout(set = 1, binding = 0) uniform sampler2DArray textureArray;
 // Opaque scene history (color) + depth history (real depth, not color)
@@ -24,18 +25,8 @@ layout(push_constant) uniform PC {
 
 layout(location = 0) out vec4 outColor;
 
-// --- Value noise -----------------------------------------------------------
-float whash(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-
-float wnoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(whash(i), whash(i + vec2(1.0, 0.0)), f.x),
-               mix(whash(i + vec2(0.0, 1.0)), whash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
+// Value noise comes from water_optics.inc.glsl (shared with the
+// camera-underwater caustics).
 
 // Animated multi-octave water heightfield (world XZ domain)
 float waterHeight(vec2 p, float t) {
@@ -185,13 +176,11 @@ void main()
         directVisibility -= sampleDirectionalShadow(vFragPos, geoN,
                             normalize(frame.lightDirection.xyz), surfaceDepth);
 
-    // Beer-Lambert absorption: red dies first -> teal body
-    vec3 sigma = vec3(0.42, 0.16, 0.10) * 0.35;
-    vec3 absorb = exp(-column * sigma);
-    float scatterAmt = 1.0 - exp(-column * 0.22);
-    vec3 scatterColor = vec3(0.015, 0.14, 0.24);
-    float scatterLight = (dayFactor * 0.9 + sunsetFactor * 0.55) * (0.25 + 0.75 * directVisibility) + 0.03;
-    vec3 waterBody = scene * absorb + scatterColor * scatterAmt * scatterLight;
+    // Beer-Lambert absorption: red dies first -> teal body (shared constants)
+    vec3 absorb = exp(-column * WATER_SIGMA);
+    float scatterAmt = 1.0 - exp(-column * WATER_SCATTER_RATE);
+    float scatterLight = waterScatterAmbient(dayFactor, sunsetFactor, directVisibility);
+    vec3 waterBody = scene * absorb + WATER_SCATTER_COLOR * scatterAmt * scatterLight;
 
     // Fresnel + analytic sky reflection
     float F0 = 0.02;

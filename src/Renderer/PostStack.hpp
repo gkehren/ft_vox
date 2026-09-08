@@ -100,9 +100,11 @@ private:
 						const PostProcessSettings &settings, float frameDt);
 	bool autoExposureActive(const PostProcessSettings &settings) const;
 	/// Fullscreen quad draw used by every post pass (dynamic rendering).
+	/// set1 optionally binds a second descriptor set (composite: the frame
+	/// set goes first, composite sources second — issue #144).
 	void fsDraw(VkCommandBuffer cmd, VkPipeline pipe, VkPipelineLayout layout,
 				VkDescriptorSet set, VkImageView outView, VkExtent2D outExt,
-				const void *pc, uint32_t pcSize);
+				const void *pc, uint32_t pcSize, VkDescriptorSet set1 = VK_NULL_HANDLE);
 	void writeEffectDescriptors();
 	void writeCompositeDescriptors(const PostCompositeSources &src,
 								   uint32_t frameIndex);

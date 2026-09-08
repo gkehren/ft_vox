@@ -3,6 +3,7 @@
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/VkLoadLibrary.hpp"
 #include "Chunk/StreamHelpers.hpp"
+#include "Chunk/ChunkCollisionView.hpp"
 #include "utils.hpp"
 
 #include <SDL3/SDL.h>
@@ -233,6 +234,14 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 	m_renderer.setMobs(mobs);
 	const float farPlane = m_renderSettings.maxRenderDistance * 1.25f;
 	const bool underwater = m_renderer.postSettings().underwater;
+	if (underwater)
+	{
+		// Mirror the engine's local surface scan so scenes exercise the
+		// submersion blend without per-scene plumbing (issue #144).
+		ChunkCollisionView world(*m_chunkManager);
+		m_renderer.postSettings().underwaterSurfaceY =
+			world.waterSurfaceAbove(glm::ivec3(glm::floor(m_camera.getPosition())));
+	}
 	m_renderer.updateFrameUBO(m_frameSlot, m_camera, static_cast<float>(m_extent.width),
 							  static_cast<float>(m_extent.height), farPlane, time, m_shader,
 							  m_renderSettings.shadowCascadeFar, underwater);

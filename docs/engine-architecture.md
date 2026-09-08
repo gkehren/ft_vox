@@ -71,7 +71,7 @@ Matches `Engine.cpp` order:
 8. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer  
 9. **Retire/staging frame slots** — `resourceRetire.beginFrame`, `stagingRing.beginFrame` (fence already waited)  
 10. **ImGui UI build** — `imgui->beginFrame` / `drawUi` / `endFrame` (CPU only; draw later)  
-11. **UBO** — underwater sample + `WorldRenderer::updateFrameUBO` (which also runs `MobRenderer::prepare`: frustum masks + per-part transforms for camera and cascades)  
+11. **UBO** — underwater sample + local water-surface scan + `WorldRenderer::updateFrameUBO` (which also runs `MobRenderer::prepare`: frustum masks + per-part transforms for camera and cascades)  
 12. **Record** — `WorldRenderer::recordFrame`:  
     - **preRecord:** `uploadPendingMeshes` + transfer→vertex barrier  
     - **ShadowPass → OpaquePass** (opaque chunks + **mobs then overlays inside OpaquePass** + **mobs inside every shadow cascade**) **→ WaterPass → SkyPass → PostStack**  
@@ -96,7 +96,7 @@ stage measurements are documented in [workload-telemetry.md](workload-telemetry.
 |---------------|---------|
 | `ShaderParameters` | Fog, sun/moon, ambient/diffuse, day cycle, water knobs, outdoor grade |
 | `RenderSettings` | Render distance (min/max blocks), `streamFrontBias`, stream rates (`load/gen/mesh/upload` per sec), shadow distance / cascade far, `maxStreamMs`, wireframe/borders/vsync |
-| `PostProcessSettings` | Bloom, SSAO, god rays, exposure/tonemap, FXAA, grain, vignette, underwater, **quality preset** |
+| `PostProcessSettings` | Bloom, SSAO, god rays, exposure/tonemap, FXAA, grain, vignette, underwater + `underwaterSurfaceY` (local water-surface scan feeds the composite submersion blend), **quality preset** |
 | `GraphicsQualityPreset` | Low / Medium / High / Cinematic — `applyPreset` only remaps existing post knobs |
 | `RenderTiming` | Legacy flat timings filled from hierarchical profiler |
 
@@ -490,7 +490,7 @@ for controls, timing, thread/publication contracts and future entity integration
 | `ShaderParameters` + camera | FrameUBO (filled **before** `recordFrame`) |
 | `uploadBudgetThisFrame` | `uploadPendingMeshes` inside **preRecord** |
 | `RenderSettings::shadowCascadeFar` / shadow distance | CSM + caster radius |
-| Camera in water | `PostProcessSettings::underwater` / UBO flag |
+| Camera in water | `PostProcessSettings::underwater` / UBO flag + `underwaterSurfaceY` (scan up to the local water surface; drives the composite submersion blend, issue #144) |
 | `PostProcessSettings` | PostStack composite + effect toggles |
 | Overlay highlight / demo players | **OverlayRenderer** via OpaquePass |
 
