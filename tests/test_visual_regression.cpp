@@ -1025,7 +1025,7 @@ int runAdaptationCheck(VisualHarness &harness)
 	const auto step = [&](float dt) {
 		harness.renderer().setFrameDt(dt);
 		harness.renderFrame(kTime, {});
-		harness.renderer().refreshExposureReadout();
+		harness.refreshExposureReadout();
 		return harness.renderer().exposureReadout();
 	};
 
@@ -1080,7 +1080,6 @@ int runAdaptationCheck(VisualHarness &harness)
 		step(1.f / 60.f); // seed frame: identical start state for both splits
 		for (int i = 0; i < frames; ++i)
 			step(dt);
-		step(1.f / 60.f); // flush: readout now holds the state after the last frame
 		return harness.renderer().exposureReadout().adaptedExposure;
 	};
 	const float end30 = reseedAndRun(30, 1.f / 30.f);
@@ -1095,8 +1094,8 @@ int runAdaptationCheck(VisualHarness &harness)
 	// metered <= -1 EV, which makes the raw target (-metered) >= +1 EV and
 	// therefore guarantees the raw target rides the maxEv=+1 clamp.
 	harness.post().autoExposureMaxEv = 1.0f;
-	step(1.f / 60.f); // adapt pass runs with maxEv=+1; readout is one frame stale
-	const auto limit = step(1.f / 60.f); // readout reflects the maxEv=+1 pass
+	step(1.f / 60.f); // first pass with maxEv=+1 (state observed below)
+	const auto limit = step(1.f / 60.f); // readout reflects the maxEv=+1 state
 	if (limit.meteredLogLum > -1.0f)
 		errors.push_back("the sealed room is not dark (metered " +
 						 std::to_string(limit.meteredLogLum) + " EV) — clamp check vacuous");
@@ -1110,8 +1109,8 @@ int runAdaptationCheck(VisualHarness &harness)
 	// runs with identical dt sequences - one on a fixed slot, one alternating
 	// - must produce the same adaptation; a per-slot independent history
 	// would make the alternating run diverge (stale double-stepped state).
-	// Both runs end with one extra flush frame on their final slot so the
-	// one-frame-stale readout observes the same adaptation step count.
+	// Both runs end with one extra step so the same adaptation step count is
+	// observed regardless of the slot pattern.
 	const auto reseedRunSlots = [&](bool alternate) {
 		harness.setFrameSlot(0);
 		harness.post().autoExposureEnabled = false;
@@ -1518,7 +1517,7 @@ int main(int argc, char **argv)
 			std::cerr << " " << name;
 		std::cerr << " matched no scene (valid names: noon_terrain, cascade_transition, cave_emissive,"
 					 " water_shore, sunset, midnight, mob_lighting, underwater, auto_exposure_noon,"
-					 " auto_exposure_cave, auto_exposure_adaptation, resize_check)\n";
+					 " auto_exposure_cave, auto_exposure_adaptation, auto_exposure_meter, resize_check)\n";
 		++failures;
 	}
 
@@ -1597,25 +1596,25 @@ int main(int argc, char **argv)
 		std::find(onlyScenes.begin(), onlyScenes.end(), "noon_terrain") != onlyScenes.end())
 		failures += runAoMotionCheck(harness, scenes, outDir);
 
-	// Temporal auto-exposure adaptation check (issue #140): GPU-exercised,
-	// verified through the CPU debug readout. Runs with the full suite or
-	// when requested by name (--scene auto_exposure_adaptation).
-	if (onlyScenes.empty() || adaptationRequested || meterRequested)
+	// Auto-exposure checks (issue #140): GPU-exercised, verified through the
+	// on-demand debug readout. Each runs with the full suite or when requested
+	// by name (--scene auto_exposure_meter / --scene auto_exposure_adaptation).
+	if (onlyScenes.empty() || meterRequested)
 	{
-		if (onlyScenes.empty() || meterRequested)
+		std::cout << "[auto-exposure-meter] synthetic HDR meter values" << std::endl;
+		try
 		{
-			std::cout << "[auto-exposure-meter] synthetic HDR meter values" << std::endl;
-			try
-			{
-				if (runExposureMeterCheck(harness) != 0)
-					++failures;
-			}
-			catch (const std::exception &e)
-			{
-				std::cerr << "  FAIL auto-exposure-meter: exception: " << e.what() << std::endl;
+			if (runExposureMeterCheck(harness) != 0)
 				++failures;
-			}
 		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "  FAIL auto-exposure-meter: exception: " << e.what() << std::endl;
+			++failures;
+		}
+	}
+	if (onlyScenes.empty() || adaptationRequested)
+	{
 		std::cout << "[auto-exposure-adaptation] dark-room temporal adaptation" << std::endl;
 		try
 		{

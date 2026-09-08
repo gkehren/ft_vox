@@ -859,16 +859,18 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 	}
 
 	// Auto-exposure readout (issue #140): the ONLY GPU->CPU traffic of the
-	// feature, pulled on demand at ~10 Hz while this panel is visible (the
-	// slot's fence was already waited in beginFrame — no added stall). With
-	// the panel closed, zero readback happens.
+	// feature, pulled on demand at ~10 Hz while this panel is visible. The
+	// slot passed here is the one beginFrame just waited, so its snapshot is
+	// guaranteed complete (values are from its previous use, up to
+	// kFramesInFlight frames old — irrelevant at 10 Hz). With the panel
+	// closed, zero readback happens.
 	if (frame.worldRenderer)
 	{
 		static float s_lastRefresh = -1.0f;
 		const float now = static_cast<float>(ImGui::GetTime());
 		if (now - s_lastRefresh >= 0.1f)
 		{
-			frame.worldRenderer->refreshExposureReadout();
+			frame.worldRenderer->refreshExposureReadout(frame.frameIndex);
 			s_lastRefresh = now;
 		}
 		const auto &exp = frame.worldRenderer->exposureReadout();

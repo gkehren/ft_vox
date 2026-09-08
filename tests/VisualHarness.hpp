@@ -95,6 +95,9 @@ public:
 	/// runtime alternates slots every frame; tests can drive the same
 	/// alternation to exercise per-slot state handling.
 	void setFrameSlot(uint32_t slot) { m_frameSlot = slot & 1u; }
+	/// On-demand exposure readout refresh for the current frame slot
+	/// (synchronous submits make any slot safe here).
+	void refreshExposureReadout() { m_renderer.refreshExposureReadout(m_frameSlot); }
 	/// Synthetic-meter probe (issue #140 tooling): paints the HDR target with
 	/// a uniform color (optionally overlaid with a different color on the
 	/// left quarter of the frame) and runs ONLY the exposure metering +

@@ -88,10 +88,14 @@ public:
 	/// Debug readout of the auto-exposure state. Populated only by
 	/// refreshExposureReadout — the render path never reads GPU state back.
 	const autoexposure::ExposureGpuState &exposureReadout() const { return m_post.exposureReadout(); }
-	/// Pull the exposure snapshot of the last recorded frame slot into the
-	/// debug readout (on demand: call after the frame's fence wait, throttle
-	/// to ~10 Hz). Used by the profiler panel; no per-frame GPU->CPU traffic.
-	void refreshExposureReadout() { m_post.refreshExposureReadout(m_lastFrameIndex); }
+	/// Pull the given frame slot's exposure snapshot into the debug readout
+	/// (on demand, throttled ~10 Hz by the profiler panel). Only safe for the
+	/// slot whose fence beginFrame has already waited; no per-frame
+	/// GPU->CPU traffic.
+	void refreshExposureReadout(uint32_t safeFrameIndex)
+	{
+		m_post.refreshExposureReadout(safeFrameIndex);
+	}
 	/// 1x1 R32F adapted-exposure target for tooling readback. Layout is
 	/// SHADER_READ_ONLY_OPTIMAL between frames.
 	AllocatedImage &exposureTarget() { return m_post.exposureTarget(); }
@@ -165,8 +169,6 @@ private:
 	PostProcessSettings m_postSettings{};
 	/// Frame delta for auto-exposure adaptation (issue #140).
 	float m_frameDt{1.f / 60.f};
-	/// Slot of the last recorded frame (drives on-demand debug readout).
-	uint32_t m_lastFrameIndex{0};
 	MeshArenas m_arenas{};
 	ShadowPass m_shadow;
 	OpaquePass m_opaque;

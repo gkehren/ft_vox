@@ -1081,6 +1081,7 @@ void Engine::drawUi()
 	f.worldRenderer = worldRenderer.get();
 	f.vk = vkContext.get();
 	f.gpu = &frameCtx->gpuProfiler();
+	f.frameIndex = frameCtx->currentFrameIndex();
 	f.imm = immediate.get();
 	f.shader = &shaderParams;
 	f.render = &renderSettings;

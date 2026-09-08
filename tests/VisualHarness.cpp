@@ -191,7 +191,7 @@ autoexposure::ExposureGpuState VisualHarness::exposureMeterProbe(
 	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
 		m_renderer.recordExposureProbe(cmd, m_frameSlot, settings);
 	});
-	m_renderer.refreshExposureReadout();
+	m_renderer.refreshExposureReadout(m_frameSlot); // synchronous submit: safe
 	return m_renderer.exposureReadout();
 }
 
