@@ -50,3 +50,7 @@ CMakeSettings.json
 docs/default-resource-pack
 # Visual-regression manual-run artifacts (default --out dir)
 visual-qa/
+
+# Local ctest artifacts (Tre bah) — untracked dirs would also stamp BuildInfo's
+# dirty-tree marker at build time.
+Testing/

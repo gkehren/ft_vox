@@ -38,6 +38,9 @@ struct GameUIFrame
 	ChunkPool *pool{nullptr};
 	TerrainGenerator *generator{nullptr};
 	WorldRenderer *worldRenderer{nullptr};
+	/// Frame-in-flight slot whose fence beginFrame has already waited — the
+	/// only slot from which a CPU debug readback is safe.
+	uint32_t frameIndex{0};
 	VkContext *vk{nullptr};
 	VkGpuProfiler *gpu{nullptr};
 	ImmediateCommands *imm{nullptr};

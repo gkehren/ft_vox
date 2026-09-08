@@ -528,7 +528,42 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			ImGui::SliderInt("Bloom blur iters", &pp.bloomBlurIterations, 1, 5);
 		}
 		ImGui::Checkbox("FXAA", &pp.fxaaEnabled);
-		ImGui::SliderFloat("Exposure", &pp.exposure, 0.1f, 5.f);
+		// True capability, not just the setting: without fragment SSBO stores
+		// the renderer runs the manual path regardless of the checkbox, so it
+		// must stay togglable and the manual slider must stay editable.
+		const bool autoSupported = frame.worldRenderer->autoExposureSupported();
+		const bool autoActive = pp.autoExposureEnabled && autoSupported;
+		ImGui::BeginDisabled(!autoSupported);
+		ImGui::Checkbox("Auto exposure", &pp.autoExposureEnabled);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip(autoSupported
+								  ? "Meter HDR scene luminance and adapt exposure over time (eye adaptation)."
+								  : "Fragment SSBO stores unavailable on this GPU — the manual path is used.");
+		ImGui::EndDisabled();
+		// Greyed out while auto exposure actually drives the frame, but shows
+		// (and stays editable for) the value used as soon as auto is off.
+		ImGui::BeginDisabled(autoActive);
+		ImGui::SliderFloat("Manual exposure", &pp.exposure, 0.1f, 5.f);
+		ImGui::EndDisabled();
+		ImGui::SliderFloat("Compensation (EV)", &pp.exposureCompensation, -3.0f, 3.0f, "%.1f");
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Auto-exposure bias in stops. 0 = neutral, +1 doubles the target exposure.");
+		if (autoActive)
+		{
+			ImGui::Indent();
+			ImGui::SliderFloat("Middle grey", &pp.autoExposureMiddleGrey, 0.1f, 2.0f, "%.2f");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Scene luminance mapped to exposure 1.0.");
+			ImGui::SliderFloat("Min EV", &pp.autoExposureMinEv, -6.0f, 0.0f, "%.1f");
+			ImGui::SliderFloat("Max EV", &pp.autoExposureMaxEv, 0.0f, 6.0f, "%.1f");
+			ImGui::SliderFloat("Adapt speed (brighten)", &pp.autoExposureSpeedUp, 0.25f, 10.0f, "%.2f /s");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("How fast exposure drops when the scene brightens.");
+			ImGui::SliderFloat("Adapt speed (darken)", &pp.autoExposureSpeedDown, 0.25f, 10.0f, "%.2f /s");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("How fast exposure rises when the scene darkens (eye dilation).");
+			ImGui::Unindent();
+		}
 		ImGui::SliderFloat("Gamma", &pp.gamma, 0.5f, 2.5f);
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Artistic midtone grade (1.0 = neutral linear display)");
@@ -821,6 +856,28 @@ void GameUI::drawProfiler(GameUIFrame &frame)
 				ordered.push_back(gpu.history()[(start + i) % VkGpuProfiler::kHistorySize]);
 			ImGui::PlotLines("##gpu", ordered.data(), n, 0, nullptr, 0.f, FLT_MAX, ImVec2(-1.f, 80.f));
 		}
+	}
+
+	// Auto-exposure readout (issue #140): the ONLY GPU->CPU traffic of the
+	// feature, pulled on demand at ~10 Hz while this panel is visible. The
+	// slot passed here is the one beginFrame just waited, so its snapshot is
+	// guaranteed complete (values are from its previous use, up to
+	// kFramesInFlight frames old — irrelevant at 10 Hz). With the panel
+	// closed, zero readback happens.
+	if (frame.worldRenderer)
+	{
+		static float s_lastRefresh = -1.0f;
+		const float now = static_cast<float>(ImGui::GetTime());
+		if (now - s_lastRefresh >= 0.1f)
+		{
+			frame.worldRenderer->refreshExposureReadout(frame.frameIndex);
+			s_lastRefresh = now;
+		}
+		const auto &exp = frame.worldRenderer->exposureReadout();
+		ImGui::Text("Metered: %.2f EV", exp.meteredLogLum);
+		ImGui::Text("Exposure: %.3f (target %.3f)", exp.adaptedExposure, exp.targetExposure);
+		const char *clampTxt = exp.clampState == 1 ? "min clamp" : exp.clampState == 2 ? "max clamp" : "in range";
+		ImGui::TextDisabled("Target %s", clampTxt);
 	}
 
 	// Worker jobs

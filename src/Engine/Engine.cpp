@@ -1081,6 +1081,7 @@ void Engine::drawUi()
 	f.worldRenderer = worldRenderer.get();
 	f.vk = vkContext.get();
 	f.gpu = &frameCtx->gpuProfiler();
+	f.frameIndex = frameCtx->currentFrameIndex();
 	f.imm = immediate.get();
 	f.shader = &shaderParams;
 	f.render = &renderSettings;
@@ -1357,6 +1358,9 @@ void Engine::run()
 
 		frameCtx->gpuProfiler().syncCapture(GetProfiler().captureEpoch());
 		const int uploadBudget = uploadBudgetThisFrame;
+		// Auto-exposure adaptation runs on the GPU with the real frame delta
+		// (issue #140); clamped inside PostStack against long stalls.
+		worldRenderer->setFrameDt(static_cast<float>(deltaTime));
 		{
 			PROFILE_SCOPE("Record");
 			worldRenderer->recordFrame(

@@ -52,13 +52,15 @@ Every scene is a closed inputs → pixels function:
 - **Pinned animation `time`**: water waves, foliage wind, star twinkle and film
   grain all derive from it.
 - **Fixed `ShaderParameters` / `PostProcessSettings`** — no UI knobs, no
-  per-run autotuning.
+  per-run autotuning; golden scenes additionally pin auto exposure off
+  (`autoExposureEnabled = false`, see §4).
 - **Voxel fixtures** (carved caves, shorelines, emissive blocks…) are applied
   after bootstrap and remeshed synchronously, so geometry is identical run to run.
 
 Each scene is rendered **twice** per invocation and must produce bit-identical
 output — a self-determinism check that fails independently of any reference
-comparison.
+comparison. (Auto-exposure scenes keep this contract via the off→on re-seed
+toggle described in §4.)
 
 ## 4. Scenes
 
@@ -72,6 +74,8 @@ comparison.
 | `midnight` | Moon/stars, night exposure |
 | `mob_lighting` | Entity vs terrain lighting consistency |
 | `underwater` | Fully submerged camera |
+| `auto_exposure_noon` | The `noon_terrain` inputs (same seed/viewpoint/atmosphere) through the live auto-exposure path: metering, adaptation, composite consumption |
+| `auto_exposure_cave` | Auto exposure in a sealed, unlit carved room; the adapted exposure climbs toward the max-EV clamp |
 
 On top of the whole-frame comparison, each scene carries **targeted numeric
 invariants**: the HDR scene target is scanned **pre-tonemap** for non-finite
@@ -80,6 +84,62 @@ they must be caught before it runs), shadowed terrain darker than lit terrain,
 emissive peaks present in dark caves, night readability bounds, and water /
 underwater blue-shift checks. Invariants catch direction-of-change errors that
 averaged pixel metrics would smooth over.
+
+**Exposure pinning policy (issue #140).** Every golden scene renders with
+`PostProcessSettings::autoExposureEnabled = false`: the committed references
+were captured with the fixed manual exposure, so pinning it keeps every
+existing reference valid — none had to be regenerated. The live auto path gets
+the dedicated `auto_exposure_*` scenes above, which opt in via their scene
+spec and ship committed references of their own.
+
+**Auto-scene self-determinism (off→on re-seed toggle).** Every recorded frame
+advances the adaptation state that the composite consumes in the same frame,
+so back-to-back auto frames can never be bit-identical while adapting. The
+harness exploits the mode-transition rule instead: `PostStack::recordExposure`
+re-seeds the adaptation from the manual exposure on the auto-mode **rising
+edge**, and a seeded frame's output depends only on its push constants and the
+static scene meter. Each compared frame of an auto scene is therefore rendered
+immediately after an off→on toggle of `autoExposureEnabled`; the off frames in
+between run the manual composite and are discarded, and the two-renders
+bit-identical contract stays intact.
+
+**Synthetic meter check (`auto-exposure-meter`).** A standalone GPU-exercised
+run — always part of the suite, also selectable via
+`--scene auto_exposure_meter` — injects known HDR values directly into the
+metering chain through a tooling probe (`PostStack::recordExposureProbe`, no
+world rendering) and validates exact meter readings: uniform greys must read
+0 / +2 / −2 EV, and a block-aligned 25/75 vertical split (+4 EV quarter over
+−4 EV) must average to exactly −2 EV (the historical central-2×2 sampling
+bias would read −4 EV). Validation errors are judged as a before/after delta
+of the probe only (device/swapchain baseline excluded).
+
+**Temporal adaptation check (`auto-exposure-adaptation`).** A standalone
+GPU-exercised run — always part of the suite, also selectable via
+`--scene auto_exposure_adaptation` — drives the production metering +
+adaptation passes over many consecutive frames in a sealed dark room and
+validates the CPU debug readout (`WorldRenderer::exposureReadout`). The
+render path performs no per-frame readback: each sample refreshes the
+readout explicitly after its (synchronous) render, so it observes exactly
+the state that frame produced. It asserts:
+
+- **Monotonic, overshoot-free adaptation:** 40 observed states climbing toward
+  the target never decrease (1e-5 log2 jitter allowed per step) and never
+  overshoot the target (1e-3 log2 at the end state).
+- **Frame-split independence:** 30×1/30 s vs 60×1/60 s of identical simulated
+  time land within **5e-3 relative error** — the per-step alpha
+  `1 − exp(−speed·dt)` is the exact exponential integral, so only fp32
+  rounding may separate the two splits.
+- **Clamp-state reporting:** with `autoExposureMaxEv` forced to +1, the dark
+  room must report `clampState = 2` (max clamp); a vacuity guard requires the
+  room's metered luminance to be ≤ −1 EV first.
+- **Frame-in-flight slot alternation:** two runs with identical dt sequences —
+  one on a fixed frame slot, one alternating slots 0/1 like the runtime — must
+  land on the same adaptation (1e-3 relative). The temporal state is a single
+  logical history, not per-slot; per-slot independent state would diverge here.
+- **`dt ≤ 0` is a strict no-op:** consecutive zero-dt frames must observe
+  identical readouts — a zero step can never snap the exposure to the target
+  (the exact-settle rule fires only on arrival within 1e-4 EV).
+- No non-finite HDR samples in any of the dark-room frames.
 
 ## 5. Comparison policy
 

@@ -10,13 +10,31 @@ layout(set = 0, binding = 2) uniform sampler2D godRaysBuffer;
 layout(set = 0, binding = 3) uniform sampler2D ssaoBuffer;     // FINAL upsampled AO (full-res R8, linear)
 layout(set = 0, binding = 4) uniform sampler2D ssaoRawBuffer;  // RAW half-res SSAO RGBA (linear: r = raw AO, gb = encoded normal)
 
+// Auto-exposure state (issue #140), written by exposure_adapt.frag into the
+// single shared history buffer. Must match autoexposure::ExposureGpuState.
+layout(set = 0, binding = 5) readonly buffer ExposureState
+{
+    float adaptedExposure; // linear exposure multiplier
+    float targetExposure;  // clamped target exposure this frame (debug)
+    float meteredLogLum;   // log2 of clipped geometric-mean luminance (debug)
+    uint clampState;       // 0 in range, 1 min clamp, 2 max clamp (debug)
+} uExposure;
+
 layout(push_constant) uniform PC {
-    vec4 p0; // x=exposure, y=bloomIntensity, z=gamma, w=toneMapper
+    vec4 p0; // x=manualExposure, y=bloomIntensity, z=gamma, w=toneMapper
     vec4 p1; // x=bloomOn, y=fxaaOn, z=godRaysOn, w=postSaturation
     vec4 p2; // xy=texelSize, z=postContrast, w=ssaoOn
     vec4 p3; // x=ssaoIntensity, y=underwater, z=underwaterStrength, w=time
     vec4 p4; // x=filmGrain, y=vignette, z=encodeSrgb, w=ssaoDebugView (0=Off 1=FinalAO 2=RawAO 3=Normals)
+    vec4 p5; // x=useAutoExposure, yzw unused
 } pc;
+
+// Tone mapping exposure: the GPU-adapted auto value, or the exact manual
+// setting when auto exposure is disabled (deterministic path).
+float resolveExposure()
+{
+    return pc.p5.x > 0.5 ? uExposure.adaptedExposure : pc.p0.x;
+}
 
 vec3 acesFilm(vec3 x)
 {
@@ -31,7 +49,7 @@ vec3 reinhard(vec3 x)
 
 float getLDRLuminance(vec2 uv)
 {
-    float exposure = pc.p0.x;
+    float exposure = resolveExposure();
     float gamma = max(pc.p0.z, 0.001);
     int toneMapper = int(pc.p0.w + 0.5);
     vec3 hdrColor = texture(hdrBuffer, uv).rgb;
@@ -90,7 +108,7 @@ float filmNoise(vec2 uv, float time)
 
 void main()
 {
-    float exposure = pc.p0.x;
+    float exposure = resolveExposure();
     float bloomIntensity = pc.p0.y;
     float gamma = max(pc.p0.z, 0.001);
     int toneMapper = int(pc.p0.w + 0.5);

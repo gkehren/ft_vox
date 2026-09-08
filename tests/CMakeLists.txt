@@ -124,6 +124,29 @@ target_link_libraries(test_visual_look PRIVATE
 add_test(NAME VisualLookDefaults COMMAND test_visual_look)
 
 # ---------------------------------------------------------------------------
+# Auto exposure CPU reference math (issue #140): EV semantics, clamps,
+# frame-rate-independent adaptation, GLSL SSBO layout. Header-only.
+# ---------------------------------------------------------------------------
+add_executable(test_auto_exposure
+    test_auto_exposure.cpp
+)
+
+target_include_directories(test_auto_exposure PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(test_auto_exposure PRIVATE
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_auto_exposure PRIVATE
+    glm
+)
+
+add_test(NAME AutoExposure COMMAND test_auto_exposure)
+
+# ---------------------------------------------------------------------------
 # Render helpers (cascades / fog / lighting / post clamps)
 # ---------------------------------------------------------------------------
 add_executable(test_render_helpers

@@ -93,7 +93,7 @@ void VisualHarness::initRenderer(std::ostream &log)
 		createBuffer(allocator, size_t(m_extent.width) * m_extent.height * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 					 VMA_MEMORY_USAGE_AUTO,
 					 VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
-	m_gpu.init(m_context, 1);
+	m_gpu.init(m_context, WorldRenderer::kMaxFramesInFlight); // both FIF slots may be driven
 	m_rendererReady = true;
 	log << "VisualHarness renderer ready (Shadow/Opaque/Water/Sky + post)\n";
 }
@@ -134,6 +134,67 @@ void VisualHarness::shutdown()
 	m_window = nullptr;
 }
 
+autoexposure::ExposureGpuState VisualHarness::exposureMeterProbe(
+	const VkClearColorValue &full, const VkClearColorValue *leftQuarter,
+	const PostProcessSettings &settings)
+{
+	assert(m_rendererReady);
+	AllocatedImage &hdr = m_renderer.hdrColor();
+	VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+	// Paint pass: -> COLOR_ATTACHMENT, full-frame clear + optional left-quarter
+	// overlay via clear attachments (the HDR target has no TRANSFER_DST usage,
+	// so no transfer clears). oldLayout = UNDEFINED is legal whatever the
+	// current layout (the whole image is cleared afterwards: contents are
+	// don't-care) - also valid on a fresh, never rendered target.
+	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
+		cmdTransitionImageLayout(cmd, hdr.image, VK_IMAGE_LAYOUT_UNDEFINED,
+								 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+		ca.imageView = hdr.view;
+		ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+		ri.renderArea = {{0, 0}, m_extent};
+		ri.layerCount = 1;
+		ri.colorAttachmentCount = 1;
+		ri.pColorAttachments = &ca;
+		// volk loads core-1.3 entry points only for a 1.3 instance; the
+		// engine targets 1.2 + VK_KHR_dynamic_rendering (same fallback
+		// pattern as PostStack::beginR/endR).
+		auto beginRendering = vkCmdBeginRendering ? vkCmdBeginRendering : vkCmdBeginRenderingKHR;
+		auto endRendering = vkCmdEndRendering ? vkCmdEndRendering : vkCmdEndRenderingKHR;
+		beginRendering(cmd, &ri);
+		VkClearRect rects[2] = {
+			{{{0, 0}, {m_extent.width, m_extent.height}}, 0, 1},
+			{{{0, 0}, {m_extent.width / 4, m_extent.height}}, 0, 1},
+		};
+		VkClearAttachment att{};
+		att.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		att.colorAttachment = 0;
+		att.clearValue.color = full;
+		vkCmdClearAttachments(cmd, 1, &att, 1, rects);
+		if (leftQuarter)
+		{
+			att.clearValue.color = *leftQuarter;
+			vkCmdClearAttachments(cmd, 1, &att, 1, &rects[1]);
+		}
+		endRendering(cmd);
+		cmdTransitionImageLayout(cmd, hdr.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+									 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	});
+
+	// Probe pass (own submit, dt = 0 leaves the history untouched), then an
+	// on-demand refresh: the submit is synchronous, so the refresh observes
+	// exactly the synthetic frame's state.
+	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
+		m_renderer.recordExposureProbe(cmd, m_frameSlot, settings);
+	});
+	m_renderer.refreshExposureReadout(m_frameSlot); // synchronous submit: safe
+	return m_renderer.exposureReadout();
+}
+
 void VisualHarness::beginScene(int seed)
 {
 	if (m_deviceReady)
@@ -172,7 +233,7 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 	m_renderer.setMobs(mobs);
 	const float farPlane = m_renderSettings.maxRenderDistance * 1.25f;
 	const bool underwater = m_renderer.postSettings().underwater;
-	m_renderer.updateFrameUBO(0, m_camera, static_cast<float>(m_extent.width),
+	m_renderer.updateFrameUBO(m_frameSlot, m_camera, static_cast<float>(m_extent.width),
 							  static_cast<float>(m_extent.height), farPlane, time, m_shader,
 							  m_renderSettings.shadowCascadeFar, underwater);
 
@@ -189,7 +250,7 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 
 	const VkClearColorValue clearColor{{0.38f, 0.58f, 0.92f, 1.0f}};
 	m_imm.submitAndWait([&](VkCommandBuffer cmd) {
-		m_renderer.recordFrameToImage(cmd, 0, m_target.image, m_target.view, m_extent, m_drawList,
+		m_renderer.recordFrameToImage(cmd, m_frameSlot, m_target.image, m_target.view, m_extent, m_drawList,
 									  m_shadowList, clearColor, {}, &m_gpu);
 		// LDR composite readback.
 		cmdTransitionImageLayout(cmd, m_target.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -221,8 +282,8 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 							 nullptr, 0, nullptr);
 	});
 
-	m_gpu.markSubmitted(0);
-	m_gpu.onSlotReady(0);
+	m_gpu.markSubmitted(m_frameSlot);
+	m_gpu.onSlotReady(m_frameSlot);
 	auto scanNonFinite = [this](const AllocatedBuffer &buffer, size_t halfCount) {
 		vmaInvalidateAllocation(m_context.getAllocator(), buffer.allocation, 0, VK_WHOLE_SIZE);
 		auto *data = static_cast<const uint16_t *>(buffer.info.pMappedData);

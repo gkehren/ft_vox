@@ -81,6 +81,34 @@ public:
     size_t visibleMobs() const { return m_mobs.visibleCount(); }
     MobTextureReport mobTextureReport() const { return m_mobs.textureReport(); }
 	PostProcessSettings &postSettings() { return m_postSettings; }
+	/// Frame delta driving the auto-exposure adaptation (issue #140). The
+	/// engine sets it before recordFrame; tooling sets it before each
+	/// offscreen render so adaptation is deterministic under test.
+	void setFrameDt(float dt) { m_frameDt = dt; }
+	/// Debug readout of the auto-exposure state. Populated only by
+	/// refreshExposureReadout — the render path never reads GPU state back.
+	const autoexposure::ExposureGpuState &exposureReadout() const { return m_post.exposureReadout(); }
+	/// Pull the given frame slot's exposure snapshot into the debug readout
+	/// (on demand, throttled ~10 Hz by the profiler panel). Only safe for the
+	/// slot whose fence beginFrame has already waited; no per-frame
+	/// GPU->CPU traffic.
+	void refreshExposureReadout(uint32_t safeFrameIndex)
+	{
+		m_post.refreshExposureReadout(safeFrameIndex);
+	}
+	/// 1x1 R32F adapted-exposure target for tooling readback. Layout is
+	/// SHADER_READ_ONLY_OPTIMAL between frames.
+	AllocatedImage &exposureTarget() { return m_post.exposureTarget(); }
+	/// Whether the GPU supports the auto-exposure adaptation path
+	/// (fragmentStoresAndAtomics). When false, the renderer runs the
+	/// deterministic manual exposure path regardless of the setting.
+	bool autoExposureSupported() const { return m_context->fragmentStoresAndAtomics(); }
+	/// Tooling only — see PostStack::recordExposureProbe.
+	void recordExposureProbe(VkCommandBuffer cmd, uint32_t frameIndex,
+							 const PostProcessSettings &settings)
+	{
+		m_post.recordExposureProbe(cmd, frameIndex, settings);
+	}
 	/// Shadow map resolution actually in GPU resources (issue #137). Differs
 	/// from postSettings().shadowMapSize until applyShadowMapSize runs.
 	uint32_t activeShadowMapSize() const { return m_shadow.mapSize(); }
@@ -139,6 +167,8 @@ private:
 	PostStack m_post;
 	OverlayRenderer m_overlays;
 	PostProcessSettings m_postSettings{};
+	/// Frame delta for auto-exposure adaptation (issue #140).
+	float m_frameDt{1.f / 60.f};
 	MeshArenas m_arenas{};
 	ShadowPass m_shadow;
 	OpaquePass m_opaque;
