@@ -66,6 +66,10 @@ int main() {
         w.set(MeshPoolCapacityBytes, 20ull * 1024 * 1024);
         w.set(MeshPoolActive, 15);
         w.set(MeshPoolFree, 5);
+        w.set(LightPoolCapacity, 10);
+        w.set(LightPoolCapacityBytes, 10ull * 128 * 1024);
+        w.set(LightPoolActive, 7);
+        w.set(LightPoolFree, 3);
         w.add(AllocCreated);
         w.add(UploadChunks);
         w.add(StagingFailures);
@@ -96,6 +100,12 @@ int main() {
         require(reset.current[MeshPoolActive] == 0 && reset.peak[MeshPoolActive] == 0 &&
                 reset.current[MeshPoolFree] == 0 && reset.peak[MeshPoolFree] == 0,
                 "mesh pool active/free reset at capture boundary");
+        require(reset.current[LightPoolCapacity] == 10 && reset.peak[LightPoolCapacity] == 10 &&
+                reset.current[LightPoolCapacityBytes] == 10ull * 128 * 1024,
+                "light pool retained capacity survives capture");
+        require(reset.current[LightPoolActive] == 0 && reset.peak[LightPoolActive] == 0 &&
+                reset.current[LightPoolFree] == 0 && reset.peak[LightPoolFree] == 0,
+                "light pool active/free reset at capture boundary");
         require(!reset.events[AllocCreated] && !reset.events[UploadChunks] &&
                 !reset.events[StagingFailures] && !reset.events[OpaqueDraws],
                 "capture clears event categories");
@@ -106,6 +116,8 @@ int main() {
         w.set(VoxelPoolFree, 1100);
         w.set(MeshPoolActive, 3);
         w.set(MeshPoolFree, 17);
+        w.set(LightPoolActive, 2);
+        w.set(LightPoolFree, 8);
         const auto measured = w.snapshot();
         require(measured.current[StagingUsed] == 64 * 1024 &&
                 measured.peak[StagingUsed] == 64 * 1024,
@@ -119,6 +131,9 @@ int main() {
         require(measured.current[MeshPoolActive] == 3 && measured.peak[MeshPoolActive] == 3 &&
                 measured.current[MeshPoolFree] == 17 && measured.peak[MeshPoolFree] == 17,
                 "measured mesh pool peaks are capture-local");
+        require(measured.current[LightPoolActive] == 2 && measured.peak[LightPoolActive] == 2 &&
+                measured.current[LightPoolFree] == 8 && measured.peak[LightPoolFree] == 8,
+                "measured light pool peaks are capture-local");
 
         // Two successive captures (benchmark -> reload -> new benchmark in
         // the same process): the previous run's peaks must not contribute to

@@ -160,11 +160,13 @@ Chunk::Chunk(Chunk &&other) noexcept
       biomeFoliageColors(other.biomeFoliageColors),
       biomeTypes(other.biomeTypes),
       heightMap(other.heightMap),
-      m_isLODMesh(other.m_isLODMesh)
+      m_isLODMesh(other.m_isLODMesh),
+      m_localLightCacheWanted(other.m_localLightCacheWanted.load(std::memory_order_relaxed))
 {
   other.m_storage = nullptr;
   other.m_borders = nullptr;
   other.m_lightStorage = nullptr;
+  other.m_localLightCacheWanted.store(false, std::memory_order_relaxed);
   // Invariant: no storage => empty occupancy metadata (issue #115 review).
   other.m_sectionNonAir.fill(0);
   other.publishCpuTelemetry();
@@ -266,6 +268,9 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     meshNeedsUpdate.store(other.meshNeedsUpdate.load());
     m_isLODMesh = other.m_isLODMesh;
     m_inTransit.store(other.m_inTransit.load());
+    m_localLightCacheWanted.store(other.m_localLightCacheWanted.load(std::memory_order_relaxed),
+                                  std::memory_order_relaxed);
+    other.m_localLightCacheWanted.store(false, std::memory_order_relaxed);
 
     other.publishCpuTelemetry();
     publishCpuTelemetry();
@@ -788,6 +793,30 @@ static thread_local std::vector<uint8_t> s_blockLightR;
 static thread_local std::vector<uint8_t> s_blockLightG;
 static thread_local std::vector<uint8_t> s_blockLightB;
 
+void Chunk::populateLightStorage(MeshBuildResult &out)
+{
+  out.lightPool = m_lightPool;
+  if (!out.lightStorage && m_lightPool)
+    out.lightStorage = m_lightPool->acquire();
+  if (out.lightStorage)
+  {
+    for (int z = 0; z < CHUNK_SIZE; ++z)
+      for (int y = 0; y < CHUNK_HEIGHT; ++y)
+        for (int x = 0; x < CHUNK_SIZE; ++x)
+        {
+          const size_t vi = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
+          const size_t li = ChunkLightHalo::hidx(x, y, z);
+          out.lightStorage->voxels[vi] = lighting::packVoxelLight(
+              s_skyLight[vi], s_blockLightR[li], s_blockLightG[li], s_blockLightB[li]);
+        }
+    out.lightCacheAction = LightCacheAction::Replace;
+  }
+  else
+  {
+    out.lightCacheAction = LightCacheAction::Clear;
+  }
+}
+
 void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
   buildMesh(out, generation, revision, kAllSectionMask);
@@ -806,20 +835,51 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
   // iteration stays as tight as the old full-scan helper produced.
   int occMinY = 0;
   int occMaxY = CHUNK_HEIGHT - 1;
+  bool hasOccupancy = false;
   {
     // The prepass is real work and is measured as such (issue #115 review),
     // including for empty chunks whose build ends with the early return.
     telemetry::StageSample occupancySample(telemetry::Occupancy);
-    if (!occupiedSpanY(occMinY, occMaxY))
+    hasOccupancy = occupiedSpanY(occMinY, occMaxY);
+    if (hasOccupancy)
     {
-      // Empty occupancy: the result stays empty; publishMeshResult commits
-      // the (empty) mesh on the main thread.
-      return;
+      refineOccupiedSpanY(occMinY, occMaxY);
     }
-    refineOccupiedSpanY(occMinY, occMaxY);
   }
-  if (out.sectionsBuilt == 0)
+
+  const bool wantLight = localLightCacheWanted();
+
+  if (!hasOccupancy)
+  {
+    // Empty occupancy: if light cache is wanted, compute light field so entities in this
+    // chunk (e.g. open air or hollow cave) can sample valid skylight/blocklight.
+    if (wantLight)
+    {
+      telemetry::MeshSample meshSample(telemetry::Skylight);
+      computeLightField(meshSample);
+      populateLightStorage(out);
+    }
+    else
+    {
+      out.lightCacheAction = LightCacheAction::Clear;
+    }
     return;
+  }
+
+  if (out.sectionsBuilt == 0)
+  {
+    if (wantLight)
+    {
+      telemetry::MeshSample meshSample(telemetry::Skylight);
+      computeLightField(meshSample);
+      populateLightStorage(out);
+    }
+    else
+    {
+      out.lightCacheAction = LightCacheAction::Clear;
+    }
+    return;
+  }
 
   telemetry::MeshSample meshSample(telemetry::Skylight);
   // Lighting stays chunk-wide for every job (issue #107 lighting
@@ -827,20 +887,13 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
   // build would produce, so section boundaries cannot introduce seams.
   computeLightField(meshSample);
 
-  out.lightPool = m_lightPool;
-  if (!out.lightStorage && m_lightPool)
-    out.lightStorage = m_lightPool->acquire();
-  if (out.lightStorage)
+  if (wantLight)
   {
-    for (int z = 0; z < CHUNK_SIZE; ++z)
-      for (int y = 0; y < CHUNK_HEIGHT; ++y)
-        for (int x = 0; x < CHUNK_SIZE; ++x)
-        {
-          const size_t vi = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
-          const size_t li = ChunkLightHalo::hidx(x, y, z);
-          out.lightStorage->voxels[vi] = lighting::packVoxelLight(
-              s_skyLight[vi], s_blockLightR[li], s_blockLightG[li], s_blockLightB[li]);
-        }
+    populateLightStorage(out);
+  }
+  else
+  {
+    out.lightCacheAction = LightCacheAction::Clear;
   }
 
   meshSample.next(telemetry::FacesGreedyAO);
@@ -2130,6 +2183,19 @@ void Chunk::buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t rev
 {
   out.beginBuild(this, generation, revision);
   out.isLOD = true;
+
+  const bool wantLight = localLightCacheWanted();
+  if (wantLight)
+  {
+    telemetry::MeshSample meshSample(telemetry::Skylight);
+    computeLightField(meshSample);
+    populateLightStorage(out);
+  }
+  else
+  {
+    out.lightCacheAction = LightCacheAction::Clear;
+  }
+
   // No column holds a voxel above the last occupied section (issue #105):
   // start every column scan there instead of at CHUNK_HEIGHT - 1.
   int occMinY = 0;
@@ -2305,16 +2371,22 @@ bool Chunk::publishMeshResult(MeshBuildResult *result)
   if (m_pendingResult && m_pendingResult != result)
     m_pendingResult->homePool->release(m_pendingResult);
   m_pendingResult = result;
-  if (result->lightStorage)
+  switch (result->lightCacheAction)
   {
-    if (m_lightStorage && m_lightPool)
-      m_lightPool->release(m_lightStorage);
-    m_lightStorage = result->lightStorage;
-    result->lightStorage = nullptr;
-  }
-  else if (result->isLOD)
-  {
+  case LightCacheAction::Replace:
+    if (result->lightStorage)
+    {
+      if (m_lightStorage && m_lightPool)
+        m_lightPool->release(m_lightStorage);
+      m_lightStorage = result->lightStorage;
+      result->lightStorage = nullptr;
+    }
+    break;
+  case LightCacheAction::Clear:
     releaseLightStorage();
+    break;
+  case LightCacheAction::Unchanged:
+    break;
   }
   // Single state commit point: the mesh becomes official here, on the main
   // thread, only after validation succeeded.
@@ -3207,6 +3279,7 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
   meshNeedsUpdate.store(true);
   m_isLODMesh = false;
   m_inTransit.store(false);
+  m_localLightCacheWanted.store(false, std::memory_order_relaxed);
   m_activeIndex = SIZE_MAX;
   m_dirtySections.store(0, std::memory_order_relaxed);
 

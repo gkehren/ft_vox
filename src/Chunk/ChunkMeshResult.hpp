@@ -71,6 +71,13 @@ struct MeshResultAccounting
 	size_t waterIndexCapacity{0};
 };
 
+enum class LightCacheAction : uint8_t
+{
+	Unchanged,
+	Replace,
+	Clear
+};
+
 struct MeshBuildResult
 {
 	// Identity of the build: validated against the chunk at publish time so
@@ -99,6 +106,7 @@ struct MeshBuildResult
 	// Transient chunk light storage filled during meshing and committed at publish.
 	ChunkLightStorage *lightStorage{nullptr};
 	ChunkLightPool *lightPool{nullptr};
+	LightCacheAction lightCacheAction{LightCacheAction::Unchanged};
 
 	// Full-quality payload, one slot per vertical section (issue #107).
 	// beginBuild() drops previous content while keeping capacity - reuse

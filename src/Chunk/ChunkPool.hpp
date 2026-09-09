@@ -89,11 +89,12 @@ private:
 	VoxelPool m_voxelPool;
 	// Must also outlive m_storage Chunk destructors (issue #103).
 	BorderPool m_borderPool;
+	// Pooled chunk light storage (issue #128) - must outlive m_meshPool so that
+	// MeshBuildResult destructors can release lightStorage back to m_lightPool.
+	ChunkLightPool m_lightPool;
 	// Pooled mesh build results (issue #104) - same lifetime rule: chunks
 	// release attached results in their destructors.
 	MeshResultPool m_meshPool;
-	// Pooled chunk light storage (issue #128) - same lifetime rule.
-	ChunkLightPool m_lightPool;
 
 	/// All pool-owned chunks; unique_ptr keeps addresses stable across vector growth.
 	std::vector<std::unique_ptr<Chunk>> m_storage;

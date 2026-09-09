@@ -36,6 +36,18 @@ ChunkManager::~ChunkManager()
 		std::this_thread::yield();
 	}
 
+	std::vector<CompletedMeshJob> completed;
+	{
+		std::lock_guard<std::mutex> lock(m_completedJobsMutex);
+		completed.swap(m_completedMeshJobs);
+		m_completedGenerationChunks.clear();
+	}
+	for (auto &job : completed)
+	{
+		if (job.result && job.result->homePool)
+			job.result->homePool->release(job.result);
+	}
+
 	for (auto &[pos, chunkPtr] : m_chunks)
 	{
 		if (chunkPtr && m_chunkPool)
@@ -210,6 +222,12 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 		planeOffsets[i] = p.w + glm::dot(planeNormals[i], optOffset);
 	}
 
+	constexpr float kEntityLightCacheRadius = 128.0f;
+	constexpr float kEntityLightCacheRadiusSq = kEntityLightCacheRadius * kEntityLightCacheRadius;
+	const glm::vec3 camPos = camera.getPosition();
+	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
+
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	for (Chunk *chunk : m_activeChunks)
 	{
@@ -225,6 +243,17 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 			}
 		}
 		chunk->setVisible(visible);
+
+		const float dx = aabbMin.x - camOffsetX;
+		const float dz = aabbMin.z - camOffsetZ;
+		const float distSq = dx * dx + dz * dz;
+		const bool wanted = (distSq <= kEntityLightCacheRadiusSq);
+		const bool prevWanted = chunk->localLightCacheWanted();
+		if (prevWanted && !wanted)
+		{
+			chunk->releaseLightStorage();
+		}
+		chunk->setLocalLightCacheWanted(wanted);
 	}
 	(void)settings;
 }
@@ -321,17 +350,35 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 
 	const float lodThresh = static_cast<float>(settings.minRenderDistance) * 2.f;
 	const float lodThreshSq = lodThresh * lodThresh;
+	constexpr float kEntityLightCacheRadius = 128.0f;
+	constexpr float kEntityLightCacheRadiusSq = kEntityLightCacheRadius * kEntityLightCacheRadius;
 
 	// Promote distant LOD meshes back to full quality when close enough.
+	// Also re-arm meshed chunks entering the light radius if they lack light storage.
 	for (Chunk *chunk : m_activeChunks)
 	{
-		if (chunk->isLODMesh() && chunk->getState() == ChunkState::MESHED && !chunk->isInTransit())
+		const glm::vec3 p = chunk->getPosition();
+		const float dx = p.x - camOffsetX;
+		const float dz = p.z - camOffsetZ;
+		const float distSq = dx * dx + dz * dz;
+		const bool wanted = (distSq <= kEntityLightCacheRadiusSq);
+		const bool prevWanted = chunk->localLightCacheWanted();
+		if (prevWanted && !wanted)
 		{
-			const glm::vec3 p = chunk->getPosition();
-			const float dx = p.x - camOffsetX;
-			const float dz = p.z - camOffsetZ;
-			if (dx * dx + dz * dz < lodThreshSq)
+			chunk->releaseLightStorage();
+		}
+		chunk->setLocalLightCacheWanted(wanted);
+
+		if (chunk->getState() == ChunkState::MESHED && !chunk->isInTransit())
+		{
+			if (chunk->isLODMesh() && distSq < lodThreshSq)
+			{
 				chunk->setState(ChunkState::GENERATED);
+			}
+			else if (wanted && !chunk->hasLightStorage())
+			{
+				chunk->setState(ChunkState::GENERATED);
+			}
 		}
 	}
 
@@ -576,6 +623,11 @@ void ChunkManager::processDeferredReleases()
 	}
 	m_deferredRelease.clear();
 	m_deferredReleaseAge = 0;
+
+	if (m_chunkPool)
+	{
+		m_chunkPool->lightPool().trim(64);
+	}
 }
 
 void ChunkManager::processFinishedJobs()
@@ -1597,6 +1649,10 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 			p.second->setActiveIndex(m_activeChunks.size());
 			m_activeChunks.push_back(p.second);
 			p.second->setVisible(true);
+			const glm::vec3 pos = p.second->getPosition();
+			const float dx = pos.x - center.x;
+			const float dz = pos.z - center.z;
+			p.second->setLocalLightCacheWanted(dx * dx + dz * dz <= 128.0f * 128.0f);
 		}
 		for (const auto &p : created)
 			ensureShellPopulated(p.second, p.first);

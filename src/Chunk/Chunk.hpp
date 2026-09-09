@@ -69,6 +69,8 @@ public:
 	ChunkLightPool *getLightPool() const { return m_lightPool; }
 	const ChunkLightStorage *getLightStorage() const { return m_lightStorage; }
 	void releaseLightStorage();
+	bool localLightCacheWanted() const { return m_localLightCacheWanted.load(std::memory_order_relaxed); }
+	void setLocalLightCacheWanted(bool wanted) { m_localLightCacheWanted.store(wanted, std::memory_order_relaxed); }
 	uint16_t sampleLightRaw(int x, int y, int z) const;
 	lighting::LocalVoxelLight sampleLight(int x, int y, int z) const;
 
@@ -379,6 +381,7 @@ private:
 	// former monolithic buildMeshRanged so section-selective builds pay it
 	// exactly once).
 	void computeLightField(telemetry::MeshSample &meshSample);
+	void populateLightStorage(MeshBuildResult &out);
 	// Greedy meshing of ONE vertical section into out.sections[section]
 	// (issue #107): faces owned by voxels in [ownerMinY, ownerMaxY] only,
 	// with full one-voxel chunk/border context for faces, AO and light.
@@ -451,6 +454,7 @@ private:
 	std::atomic<bool> meshNeedsUpdate;
 	bool m_isLODMesh{false};
 	std::atomic<bool> m_inTransit{false};
+	std::atomic<bool> m_localLightCacheWanted{false};
 
 	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
 

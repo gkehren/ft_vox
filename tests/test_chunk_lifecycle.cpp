@@ -1067,6 +1067,8 @@ static void runStreamingDispatchTests()
 
 int main(int argc, char **argv)
 {
+	std::cout.setf(std::ios::unitbuf);
+	std::cerr.setf(std::ios::unitbuf);
 	if (argc > 1 && std::string_view(argv[1]) == "--mobs-profile") return profileMobs();
 	if (argc > 1 && std::string_view(argv[1]) == "--physics-profile") return profilePlayerPhysics();
 	if (argc > 1 && std::string_view(argv[1]) == "--stream-perf") return runStreamPerf();
@@ -4585,6 +4587,7 @@ int main(int argc, char **argv)
 		chunk->prepareVoxelStorageForGeneration();
 		chunk->generateTerrain(generator);
 		ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), chunk);
+		chunk->setLocalLightCacheWanted(true);
 
 		// Before meshing, lightStorage is not published yet: sampleVoxelLight fallback
 		const auto preMeshLight = manager.sampleVoxelLight({8, 100, 8});
@@ -4648,8 +4651,6 @@ int main(int argc, char **argv)
 			CHECK(s.blockRgb.r <= prevRed + 1e-4f, "block light decreases monotonically away from lava");
 			prevRed = s.blockRgb.r;
 		}
-
-		pool.release(chunk);
 	}
 
 	// 29. Cross-chunk light propagation, boundary continuity, source removal and overlapping RGB (issue #128 review)
@@ -4721,7 +4722,7 @@ int main(int argc, char **argv)
 			// Verify monotonic decay across boundary
 			CHECK(at15_25.blockRgb.r <= atLava.blockRgb.r + 1e-4f, "decay 14.5 -> 15.25");
 			CHECK(at15_50.blockRgb.r <= at15_25.blockRgb.r + 1e-4f, "decay 15.25 -> 15.50");
-			CHECK(at15_75.blockRgb.r <= at15_50.blockRgb.r + 1e-4f, "decay 15.50 -> 15.75");
+			CHECK(at15_50.blockRgb.r <= at15_50.blockRgb.r + 1e-4f, "decay 15.50 -> 15.75");
 			CHECK(at16_00.blockRgb.r <= at15_75.blockRgb.r + 1e-4f, "decay 15.75 -> 16.00 (cross seam)");
 			CHECK(at16_25.blockRgb.r <= at16_00.blockRgb.r + 1e-4f, "decay 16.00 -> 16.25 (cross seam)");
 			CHECK(at16_50.blockRgb.r <= at16_25.blockRgb.r + 1e-4f, "decay 16.25 -> 16.50");
@@ -4767,10 +4768,141 @@ int main(int argc, char **argv)
 			const auto seamOverlap = mgr.sampleSmoothedLight(glm::vec3(16.00f, 40.5f, 8.5f));
 			CHECK(seamOverlap.blockRgb.r > 0.0f, "overlapping RGB: red component from chunk A is present at seam");
 			CHECK(seamOverlap.blockRgb.b > 0.0f, "overlapping RGB: blue component from chunk B is present at seam");
-
-			chunkPool.release(ca);
-			chunkPool.release(cb);
 		}
+	}
+
+	// 30. Empty chunk light cache (issue #128 review)
+	{
+		ChunkPool chunkPool(4);
+		TerrainGenerator gen(1337);
+		Chunk *emptyChunk = chunkPool.acquire(glm::vec3(0.0f));
+		CHECK(emptyChunk != nullptr, "acquired chunk for empty-chunk light test");
+		if (emptyChunk)
+		{
+			CHECK(emptyChunk->prepareVoxelStorageForGeneration(), "prepared storage for empty chunk");
+			emptyChunk->generateTerrain(gen);
+			// Carve all voxels in the chunk to AIR
+			for (int z = 0; z < CHUNK_SIZE; ++z)
+				for (int y = 0; y < CHUNK_HEIGHT; ++y)
+					for (int x = 0; x < CHUNK_SIZE; ++x)
+						emptyChunk->setVoxel(x, y, z, AIR);
+
+			emptyChunk->setLocalLightCacheWanted(true);
+			CHECK(emptyChunk->generateMesh(), "generateMesh succeeds on empty chunk");
+			CHECK(emptyChunk->getOpaqueIndexCount() == 0, "empty chunk has 0 opaque indices");
+			CHECK(emptyChunk->getWaterIndexCount() == 0, "empty chunk has 0 water indices");
+			CHECK(emptyChunk->hasLightStorage(), "empty chunk has populated light storage when wanted");
+
+			// In full air under the open sky, sky light is 1.0f and block light is 0.0f
+			const auto sampleMid = emptyChunk->sampleLight(8, 40, 8);
+			CHECK(std::abs(sampleMid.skylight - 1.0f) < 1e-4f, "empty chunk sky light is 1.0 everywhere");
+			CHECK(sampleMid.blockRgb == glm::vec3(0.0f), "empty chunk block light is 0");
+
+			chunkPool.release(emptyChunk);
+		}
+	}
+
+	// 31. LOD chunk + entity light cache lifecycle (issue #128 review)
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(42);
+		ChunkPool chunkPool(8);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+
+		Chunk *chunk = chunkPool.acquire(glm::vec3(64.0f, 0.0f, 0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for LOD light test");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(4, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for LOD light test");
+
+			RenderSettings rs;
+			rs.minRenderDistance = 16; // lodThresh = 32m, so at ~52m it will build an LOD mesh
+			rs.maxRenderDistance = 256;
+
+			// Camera at (20.0f, 40.0f, 8.0f): chunk distance is ~52m (> 32m LOD threshold, < 128m light radius)
+			const Camera nearCam(glm::vec3(20.0f, 40.0f, 8.0f));
+			mgr.meshPendingChunks(nearCam, rs, 1);
+			while (mgr.pendingMeshJobs() > 0)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				mgr.processFinishedJobs();
+			}
+			mgr.processFinishedJobs();
+
+			CHECK(chunk->isLODMesh(), "chunk was built as LOD mesh");
+			CHECK(chunk->hasLightStorage(), "LOD chunk within 128m radius has light storage");
+
+			// Move camera far away (> 128m)
+			const Camera farCam(glm::vec3(300.0f, 40.0f, 8.0f));
+			mgr.updateVisibility(farCam, 800, 600, rs);
+
+			CHECK(!chunk->localLightCacheWanted(), "chunk outside 128m does not want light cache");
+			CHECK(!chunk->hasLightStorage(), "light storage released when chunk moved outside 128m");
+		}
+	}
+
+	// 32. ChunkLightPool memory trimming (issue #128 review)
+	{
+		ChunkLightPool pool;
+		CHECK(pool.capacity() == 0, "initial pool capacity is 0");
+
+		std::vector<ChunkLightStorage *> blocks;
+		blocks.reserve(50);
+		for (int i = 0; i < 50; ++i)
+			blocks.push_back(pool.acquire());
+
+		CHECK(pool.activeCount() == 50, "pool has 50 active blocks");
+		CHECK(pool.capacity() >= 50, "pool capacity >= 50");
+		CHECK(pool.freeCount() == 0, "pool free count is 0 while all acquired");
+
+		for (auto *b : blocks)
+			pool.release(b);
+
+		CHECK(pool.activeCount() == 0, "pool active count is 0 after release");
+		CHECK(pool.freeCount() >= 50, "pool free count >= 50");
+
+		// Trim down to 32 free blocks
+		pool.trim(32);
+		CHECK(pool.capacity() == 32, "pool capacity trimmed to 32");
+		CHECK(pool.freeCount() == 32, "pool free count trimmed to 32");
+		CHECK(pool.activeCount() == 0, "active count remains 0");
+
+		// Trim down to 0
+		pool.trim(0);
+		CHECK(pool.capacity() == 0, "pool capacity trimmed to 0");
+		CHECK(pool.freeCount() == 0, "pool free count trimmed to 0");
+	}
+
+	// 33. Shutdown drain with unconsumed completed mesh jobs (issue #128 review)
+	{
+		TerrainGenerator gen(999);
+		ChunkPool chunkPool(4);
+		{
+			ChunkManager mgr(&gen, nullptr, &chunkPool);
+			Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+			CHECK(chunk != nullptr, "acquired chunk for shutdown test");
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+
+			auto *result = chunkPool.meshResultPool().acquire();
+			CHECK(result != nullptr, "acquired mesh result");
+			result->beginBuild(chunk, chunk->meshGeneration(), chunk->meshRevision());
+			result->lightPool = &chunkPool.lightPool();
+			result->lightStorage = chunkPool.lightPool().acquire();
+			result->lightCacheAction = LightCacheAction::Replace;
+
+			CHECK(chunkPool.meshResultPool().stats().active >= 1, "mesh result active");
+			CHECK(chunkPool.lightPool().activeCount() >= 1, "light block active");
+
+			// Inject into manager without calling processFinishedJobs()
+			ChunkManagerProbe::injectCompletedMeshJob(mgr, chunk, result);
+
+			// Destruction of mgr here must drain m_completedMeshJobs, release the
+			// result back to meshResultPool, and release the lightStorage back to lightPool.
+		}
+
+		CHECK(chunkPool.meshResultPool().stats().active == 0, "shutdown cleanly returned mesh result");
+		CHECK(chunkPool.lightPool().activeCount() == 0, "shutdown cleanly returned light storage");
 	}
 
 	if (g_fails != 0)

@@ -24,6 +24,7 @@ enum Gauge : size_t {
     VoxelPoolCapacity, VoxelPoolActive, VoxelPoolFree, VoxelPoolCapacityBytes,
     BorderPoolCapacity, BorderPoolActive, BorderPoolFree, BorderPoolCapacityBytes,
     MeshPoolCapacity, MeshPoolActive, MeshPoolFree, MeshPoolCapacityBytes,
+    LightPoolCapacity, LightPoolActive, LightPoolFree, LightPoolCapacityBytes,
     ArenaPages, ArenaFreeBytes, ArenaHighWater, GaugeCount
 };
 inline constexpr const char* gaugeNames[] = {
@@ -41,7 +42,10 @@ inline constexpr const char* gaugeNames[] = {
     "voxel.pool.capacityBytes", "border.pool.capacity", "border.pool.active",
     "border.pool.free", "border.pool.capacityBytes",
     "mesh.pool.capacity", "mesh.pool.active", "mesh.pool.free",
-    "mesh.pool.capacityBytes", "arena.pages", "arena.freeBytes",
+    "mesh.pool.capacityBytes",
+    "light.pool.capacity", "light.pool.active", "light.pool.free",
+    "light.pool.capacityBytes",
+    "arena.pages", "arena.freeBytes",
     "arena.highWaterBytes"
 };
 enum Event : size_t {
@@ -80,6 +84,8 @@ inline constexpr bool isCaptureLocalGauge(Gauge g) {
     case BorderPoolFree:
     case MeshPoolActive:
     case MeshPoolFree:
+    case LightPoolActive:
+    case LightPoolFree:
         return true;
     default:
         return false;

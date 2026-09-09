@@ -1043,6 +1043,13 @@ void Engine::sampleBenchmarkFrame()
         telemetry.set(telemetry::MeshPoolActive, meshStats.active);
         telemetry.set(telemetry::MeshPoolFree, meshStats.free);
         telemetry.set(telemetry::MeshPoolCapacityBytes, meshStats.capacityBytes());
+
+        // light.pool.*: retained chunk light storage blocks (issue #128).
+        const size_t lightCap = chunkManager->getChunkPool()->lightStorageCapacity();
+        telemetry.set(telemetry::LightPoolCapacity, lightCap);
+        telemetry.set(telemetry::LightPoolActive, chunkManager->getChunkPool()->lightStorageActive());
+        telemetry.set(telemetry::LightPoolFree, chunkManager->getChunkPool()->lightStorageFree());
+        telemetry.set(telemetry::LightPoolCapacityBytes, lightCap * sizeof(ChunkLightStorage));
     }
 	m_benchmark.sampleFrame(
 		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),

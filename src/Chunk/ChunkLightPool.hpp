@@ -135,6 +135,33 @@ public:
 		}
 	}
 
+	/// Trim unused free blocks down to targetFreeBlocks to return memory to the OS.
+	void trim(size_t targetFreeBlocks)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_freeList.size() <= targetFreeBlocks)
+			return;
+
+		std::vector<ChunkLightStorage *> toRemove;
+		while (m_freeList.size() > targetFreeBlocks)
+		{
+			toRemove.push_back(m_freeList.back());
+			m_freeList.pop_back();
+		}
+
+		for (ChunkLightStorage *ptr : toRemove)
+		{
+			auto itOwned = std::find(m_owned.begin(), m_owned.end(), ptr);
+			if (itOwned != m_owned.end())
+				m_owned.erase(itOwned);
+
+			auto itStorage = std::find_if(m_storage.begin(), m_storage.end(),
+				[ptr](const std::unique_ptr<ChunkLightStorage> &b) { return b.get() == ptr; });
+			if (itStorage != m_storage.end())
+				m_storage.erase(itStorage);
+		}
+	}
+
 	static ChunkLightPool &defaultPool()
 	{
 		static ChunkLightPool pool;
