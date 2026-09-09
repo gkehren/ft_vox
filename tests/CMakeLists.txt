@@ -1,25 +1,30 @@
-add_executable(test_network
-    test_network.cpp
-    ${CMAKE_SOURCE_DIR}/src/Network/Server.cpp
-    ${CMAKE_SOURCE_DIR}/src/Network/Client.cpp
-)
+# Experimental UDP prototype: test-only target, requires Boost (optional dep).
+if(TARGET Boost::system)
+    add_executable(test_network
+        test_network.cpp
+        ${CMAKE_SOURCE_DIR}/src/Network/Server.cpp
+        ${CMAKE_SOURCE_DIR}/src/Network/Client.cpp
+    )
+
+    target_link_libraries(test_network PRIVATE
+        Boost::boost
+        Boost::system
+        Threads::Threads
+    )
+    target_include_directories(test_network PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_network PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+    add_test(NAME NetworkIntegrationTest COMMAND test_network)
+else()
+    message(STATUS "test_network disabled: Boost not found")
+endif()
 
 # CPU-only physics: no SDL, Vulkan device, meshes or terrain generation.
 add_executable(test_physics test_physics.cpp)
 target_include_directories(test_physics PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_physics PRIVATE glm)
 add_test(NAME PlayerPhysics COMMAND test_physics)
-
-target_link_libraries(test_network PRIVATE
-    Boost::boost
-    Boost::system
-    Threads::Threads
-)
-target_include_directories(test_network PRIVATE ${CMAKE_SOURCE_DIR}/src)
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_network PRIVATE ${CMAKE_DL_LIBS})
-endif()
-add_test(NAME NetworkIntegrationTest COMMAND test_network)
 
 # ---------------------------------------------------------------------------
 # Vulkan resource smoke (PR2) — real device path via shipped helpers
@@ -161,6 +166,11 @@ add_executable(test_render_helpers
     ${CMAKE_SOURCE_DIR}/src/Renderer/TextureMips.cpp
 )
 
+# The FrameUBO contract scan reads the generated frame_ubo.inc.glsl; declare
+# the dependency so an isolated `--target test_render_helpers` build still
+# generates it (the generator target is not ALL by itself through shaders).
+add_dependencies(test_render_helpers ft_vox_frame_ubo_glsl)
+
 target_include_directories(test_render_helpers PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
@@ -172,6 +182,8 @@ target_compile_definitions(test_render_helpers PRIVATE
     # Absolute source-tree anchor so the shader source-contract scans work
     # from any build directory (out-of-tree builds included), issue #165 review.
     FT_VOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    # Absolute build-tree anchor for the generated frame_ubo.inc.glsl contract.
+    FT_VOX_BINARY_DIR="${CMAKE_BINARY_DIR}"
 )
 
 target_link_libraries(test_render_helpers PRIVATE

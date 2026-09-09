@@ -18,8 +18,8 @@ $env:FT_VOX_TELEMETRY = '1' # repeat with '0'
 
 | Role | Revision | Reports |
 | --- | --- | --- |
-| Legacy performance comparison (unmodified main) | `ed13e1dd6982` | [main-baseline.txt](main-baseline.txt) |
-| **Optimization telemetry reference (current)** | `f95a5d9` clean HEAD | [telemetry-enabled.txt](telemetry-enabled.txt) / [telemetry-disabled.txt](telemetry-disabled.txt) |
+| Legacy performance comparison (unmodified main) | `ed13e1dd6982` | [main-baseline.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue101/main-baseline.txt) |
+| **Optimization telemetry reference (current)** | `f95a5d9` clean HEAD | [telemetry-enabled.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue101/telemetry-enabled.txt) / [telemetry-disabled.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue101/telemetry-disabled.txt) |
 
 The legacy baseline was built after creating the branch, before changing
 source, so its branch label is `feat/101-memory-workload-telemetry` but its
@@ -83,8 +83,8 @@ and capacity peaks are measured at publication boundaries.
 
 ## Validation
 
-The final Release build passed. [CTest passed 14/14 tests in 41.84 seconds](ctest.txt).
-[Report consistency checks](report-checks.txt) passed for all 27 gauge peaks,
+The final Release build passed. [CTest passed 14/14 tests in 41.84 seconds](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue101/ctest.txt).
+[Report consistency checks](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue101/report-checks.txt) passed for all 27 gauge peaks,
 CPU/GPU aggregate sums, pool balance, shadow cascade totals and the
 capture-local reset property. Tests cover worker concurrency and stale capture
 epochs, repeated resets, capture-local gauge exclusion (Registry unit test and

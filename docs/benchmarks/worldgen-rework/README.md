@@ -15,7 +15,9 @@ underscore before the seed marks a clean tree at build time.
 - Protocol: for each seed (42, 1337, 2026) three interleaved `main, PR`
   pairs, 30 s measurement + 3 s warmup per run, Release builds from their
   own clean trees (each binary loads its own shaders). Medians of the
-  three runs below; raw reports in this folder (`20260906_0255`-`0306`).
+  three runs below; the raw reports (`20260906_0255`-`0306`) were removed
+  from HEAD by the benchmark retention policy and live only in
+  [Git history](https://github.com/gkehren/ft_vox/tree/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/worldgen-rework).
 
 | Metric (median of 3)      | s42 main→PR | s1337 main→PR | s2026 main→PR |
 |---------------------------|-------------|---------------|---------------|
@@ -47,8 +49,8 @@ allocation churn returns with the denser world.
 
 ## Historical A/B (pre-rebase, merge-base `d677d9d9cc71`)
 
-The first A/B of this PR (before the #121 rebase, at `12085db668fa`, raw
-reports kept in this folder) showed the same shape: TerrainGen +60-75%,
+The first A/B of this PR (before the #121 rebase, at `12085db668fa`; raw
+reports retained in [Git history](https://github.com/gkehren/ft_vox/tree/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/worldgen-rework), not in HEAD) showed the same shape: TerrainGen +60-75%,
 MeshBuild +20-25%, frame p95 +0.1-0.2 ms, GPU p95 +0.06-0.11 ms,
 Streaming/Record CPU unchanged, score grade S on every seed. That
 comparison's GPU-memory column is superseded by the arena gauges above.

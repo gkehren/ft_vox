@@ -32,16 +32,16 @@ set(FT_VOX_SPV_FILES "")
 
 set(FT_VOX_FRAME_UBO_HPP ${CMAKE_SOURCE_DIR}/src/Renderer/FrameUBO.hpp)
 set(FT_VOX_FRAME_UBO_GLSL ${FT_VOX_GENERATED_SHADER_DIR}/frame_ubo.inc.glsl)
-# Also mirror into source tree for tooling/IDEs that don't use the build include path
-set(FT_VOX_FRAME_UBO_GLSL_SRC ${FT_VOX_SHADER_SRC_DIR}/frame_ubo.inc.glsl)
+# Generated into the build tree only; shaders pick it up via the
+# -I${FT_VOX_GENERATED_SHADER_DIR} include path below. The source tree is
+# never written by a build.
 
 add_custom_command(
-    OUTPUT ${FT_VOX_FRAME_UBO_GLSL} ${FT_VOX_FRAME_UBO_GLSL_SRC}
+    OUTPUT ${FT_VOX_FRAME_UBO_GLSL}
     COMMAND ${CMAKE_COMMAND}
         -DFT_VOX_FRAME_UBO_HPP=${FT_VOX_FRAME_UBO_HPP}
         -DFT_VOX_FRAME_UBO_GLSL_OUT=${FT_VOX_FRAME_UBO_GLSL}
         -P ${CMAKE_SOURCE_DIR}/cmake/GenerateFrameUboGlsl.cmake
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FT_VOX_FRAME_UBO_GLSL} ${FT_VOX_FRAME_UBO_GLSL_SRC}
     DEPENDS ${FT_VOX_FRAME_UBO_HPP} ${CMAKE_SOURCE_DIR}/cmake/GenerateFrameUboGlsl.cmake
     COMMENT "Generate frame_ubo.inc.glsl from FrameUBO.hpp"
     VERBATIM
@@ -248,14 +248,13 @@ elseif(UNIX)
     # Wayland/X11 surface creation goes through SDL; no extra platform define required.
 endif()
 
-# Common link set used by main binary and Vulkan tests
+# Common link set used by main binary and Vulkan tests.
+# Boost is intentionally absent: only test_network uses it (see tests/).
 set(FT_VOX_COMMON_LIBS
     SDL3::SDL3
     glm
     FastNoise2
     miniz::miniz
-    Boost::boost
-    Boost::system
     volk::volk
     GPUOpen::VulkanMemoryAllocator
     Threads::Threads

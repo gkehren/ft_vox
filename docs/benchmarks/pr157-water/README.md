@@ -36,15 +36,18 @@ plumbing was corrected, and re-validated after).
 
 ## Files
 
-- `1080.csv` / `1440.csv` — per-tier Water pass and full-frame GPU time plus
+Raw CSVs were removed from the tree by the retention policy; permalinks to
+the pre-retention revision:
+
+- [1080.csv](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/pr157-water/1080.csv) / [1440.csv](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/pr157-water/1440.csv) — per-tier Water pass and full-frame GPU time plus
   the per-pass Shadow / Opaque / Sky / SSAO / Post intervals (median of three
   interleaved preset sweeps, 8 samples each after 4 warmup frames).
-- `underwater-1080.csv` / `underwater-1440.csv` — Post + nested Composite
+- [underwater-1080.csv](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/pr157-water/underwater-1080.csv) / [underwater-1440.csv](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/pr157-water/underwater-1440.csv) — Post + nested Composite
   intervals with the camera fully submerged (issue #144 methodology).
 
-## Comparison against the versioned baseline
+## Comparison against the pre-retention baseline
 
-`../issue139-water/1080.csv` (main's water pipeline, same fixture/method):
+[issue139-water/1080.csv](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue139-water/1080.csv) (main's water pipeline, same fixture/method):
 
 | Tier | Water before | Water after | Frame before | Frame after |
 |---|---|---|---|---|

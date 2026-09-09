@@ -8,7 +8,7 @@ Windows, MSVC Release, Ryzen 7 9800X3D, GeForce RTX 4070 Ti.
 
 ## Correctness
 
-- Release build succeeded. Full CTest results are in [ctest.txt](ctest.txt).
+- Release build succeeded. Full CTest results are in [ctest.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/player-physics/ctest.txt).
   Full CTest suite: 20/20 passed (the 19 suites carried by `main` plus the new
   PlayerPhysics suite).
 - CPU tests cover swept collision, simultaneous contacts, coplanar seams,
@@ -37,7 +37,7 @@ Commands, from the repository root:
 The real-voxel benchmark includes the scoped adapter's lock/cache setup and
 destruction. It uses seed 42, 1200 warm-up ticks and 12000 measured ticks, with
 repeated walking/sprinting/jumping commands and bounded periodic resets.
-Latest output is in [physics-profile.txt](physics-profile.txt), rerun on the
+Latest output is in [physics-profile.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/player-physics/physics-profile.txt), rerun on the
 final rebased tree. It measures the CPU path, not rendering or large
 populations of future entities. The target is below 0.1 ms p95 per tick on
 this reference machine, not a CI timing assertion.

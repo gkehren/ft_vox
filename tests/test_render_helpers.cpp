@@ -1015,33 +1015,22 @@ int main()
 
 	// Generated FrameUBO GLSL must list C++ field names, and the production
 	// shaders must consume exactly the lanes the UI promises (issue #161).
-	// FT_VOX_SOURCE_DIR (from CMake) anchors every scan to the source tree so
-	// out-of-tree build directories cannot break it or silently scan an
-	// empty mirror (issue #165 review).
+	// FT_VOX_SOURCE_DIR (from CMake) anchors the shader scan to the source
+	// tree; FT_VOX_BINARY_DIR anchors the generated GLSL to the build tree.
+	// The CMake target depends on ft_vox_frame_ubo_glsl, so isolated target
+	// builds always have a fresh file — no cwd guessing, no source-tree
+	// fallback (builds never write there).
 	{
 		namespace fs = std::filesystem;
 		const fs::path sourceShaderDir = fs::path(FT_VOX_SOURCE_DIR) / "ressources/shaders/vulkan";
-		const std::string sourceFrameUbo = (sourceShaderDir / "frame_ubo.inc.glsl").string();
-		const char *candidates[] = {
-			sourceFrameUbo.c_str(),
-			"ressources/shaders/vulkan/frame_ubo.inc.glsl",
-			"../ressources/shaders/vulkan/frame_ubo.inc.glsl",
-			"../../ressources/shaders/vulkan/frame_ubo.inc.glsl",
-			"generated/shaders/frame_ubo.inc.glsl",
-			"../generated/shaders/frame_ubo.inc.glsl",
-		};
+		const fs::path frameUboPath = fs::path(FT_VOX_BINARY_DIR) / "generated/shaders/frame_ubo.inc.glsl";
 		std::string glsl;
-		for (const char *c : candidates)
 		{
-			std::ifstream in(c);
-			if (in)
-			{
-				glsl.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-				break;
-			}
+			std::ifstream in(frameUboPath);
+			glsl.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 		}
 		if (glsl.empty())
-			ok = fail("generated frame_ubo.inc.glsl not found (run cmake build first)");
+			ok = fail(std::string("generated frame_ubo.inc.glsl not found at ") + frameUboPath.string());
 		else
 		{
 			if (glsl.find("AUTO-GENERATED") == std::string::npos)

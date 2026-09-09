@@ -1447,7 +1447,7 @@ void Engine::run()
 		{
 			std::cout << '\n' << m_benchmark.formatReportText();
 			const std::string path =
-				m_benchmark.saveReportToFile("docs/benchmarks");
+				m_benchmark.saveReportToFile("benchmark-results");
 			if (!path.empty())
 				std::cout << "Benchmark saved: " << path << '\n';
 			running = false;

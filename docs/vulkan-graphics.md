@@ -259,7 +259,7 @@ The distance falloff is applied per sample before the side-local maximum, so far
   | High | on | 0.8 | 0.55 | 6 × 4 |
   | Cinematic | on | 1.0 | 0.62 | 8 × 4 |
 
-  GPU cost per enabled tier (RTX 4070 Ti, 1920×1080, `--seed 42 --quality <tier> --benchmark 30 --vsync off`, clean tree at the final commit; the `GpuPass::Ssao` interval covers SSAO + upsample; High/Cinematic include the #148 2048 shadow maps and #149's anisotropic atlas): **Medium 4×3 = 0.058 ms**, **High 6×4 = 0.088 ms**, **Cinematic 8×4 = 0.098 ms** (Post chain 0.176 / 0.229 / 0.249 ms respectively). Reports (each carries its `Quality:` label): `docs/benchmarks/bench_20260907_200{150,223,257}_*`. Temporal stability: the harness renders `noon_terrain` at two poses 0.125 units apart under SSAO on / SSAO off / isolated final-AO buffer; the isolated AO buffer must satisfy mean ≤ 20/255, p99 ≤ 40/255 and ≤ 1 % of pixels above 20/255 — measured **mean 1.300, p99 11.0, frac>20 0.03 %** — and the composited AO-on delta must stay within the SSAO-off parallax baseline (measured ratio 0.998).
+  GPU cost per enabled tier (RTX 4070 Ti, 1920×1080, `--seed 42 --quality <tier> --benchmark 30 --vsync off`, clean tree at the final commit; the `GpuPass::Ssao` interval covers SSAO + upsample; High/Cinematic include the #148 2048 shadow maps and #149's anisotropic atlas): **Medium 4×3 = 0.058 ms**, **High 6×4 = 0.088 ms**, **Cinematic 8×4 = 0.098 ms** (Post chain 0.176 / 0.229 / 0.249 ms respectively; raw reports are not committed — retention policy in `docs/benchmarks/README.md`). Temporal stability: the harness renders `noon_terrain` at two poses 0.125 units apart under SSAO on / SSAO off / isolated final-AO buffer; the isolated AO buffer must satisfy mean ≤ 20/255, p99 ≤ 40/255 and ≤ 1 % of pixels above 20/255 — measured **mean 1.300, p99 11.0, frac>20 0.03 %** — and the composited AO-on delta must stay within the SSAO-off parallax baseline (measured ratio 0.998).
 - **Debug views:** Graphics panel → Post-processing → **SSAO debug view** (Off / AO (final) / AO (raw) / Normals (view)); passed to composite as push constant `p4.w`. Debug output bypasses tonemap/grade but still applies the swapchain output-transfer contract (`linearToSrgb` on UNORM + SRGB_NONLINEAR). The selector resets to Off whenever SSAO is disabled; presets also reset it. The encoded normal is `gb = xy`, `a = z` (the z sign is stored, not reconstructed).
 HDR RGBA16F -> 64x64 -> 16x16 -> 4x4 R32F log-luminance   luminance_downsample.frag.glsl
 4x4 -> 1x1 R32F (debug) + 16-byte state SSBO write         exposure_adapt.frag.glsl
@@ -303,7 +303,7 @@ HDR RGBA16F (SHADER_READ)
   preset; manual exposure and temporal integration are unchanged.
 
 - **Device support:** requires `fragmentStoresAndAtomics` (queried in `VkContext`); when absent the engine stays on the manual path instead of failing.
-- **Diagnostics:** Graphics panel controls (auto toggle, compensation, middle grey, EV limits, speeds), profiler readouts (metered EV, current/target exposure, clamp state) fed by an on-demand snapshot copy (`refreshExposureReadout`, ~10 Hz while the profiler panel is visible — the only GPU->CPU traffic of the feature, zero when the panel is closed), and a dedicated `GpuPass::Exposure` timestamp row (nested inside the Post pass timing). Measured cost (RTX 4070 Ti, seed 42 benchmark, Release, base 12acedd vs head f04e564): Post pass 0.317 -> 0.383 ms — delta about +0.07 ms (0.06-0.09 ms across runs; the Post bracket includes the Exposure sub-pass), Exposure sub-pass alone reads ~0.12 ms, score unchanged. Reports: docs/benchmarks/bench_20260907_224059_12acedd27ecb (base) and bench_20260907_232825_f04e564a0975 (head). The `*` in the head report's Revision line (dirty tree at build) flags the untracked benchmark artifact itself, not source drift — the compiled sources were exactly f04e564.
+- **Diagnostics:** Graphics panel controls (auto toggle, compensation, middle grey, EV limits, speeds), profiler readouts (metered EV, current/target exposure, clamp state) fed by an on-demand snapshot copy (`refreshExposureReadout`, ~10 Hz while the profiler panel is visible — the only GPU->CPU traffic of the feature, zero when the panel is closed), and a dedicated `GpuPass::Exposure` timestamp row (nested inside the Post pass timing). Measured cost (RTX 4070 Ti, seed 42 benchmark, Release, base 12acedd vs head f04e564): Post pass 0.317 -> 0.383 ms — delta about +0.07 ms (0.06-0.09 ms across runs; the Post bracket includes the Exposure sub-pass), Exposure sub-pass alone reads ~0.12 ms, score unchanged (raw reports not committed — retention policy in `docs/benchmarks/README.md`).
 
 
 #### Camera-underwater medium transport (issue #144)
@@ -538,13 +538,13 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
 
 **Single source of truth:** `src/Renderer/FrameUBO.hpp` (`struct FrameUBO`, `sizeof` **624**, std140).
 
-At CMake configure time, `cmake/GenerateFrameUboGlsl.cmake` parses that header and writes:
+At CMake build time, `cmake/GenerateFrameUboGlsl.cmake` parses that header and writes:
 
 ```text
-ressources/shaders/vulkan/frame_ubo.inc.glsl   # generated — do not hand-edit
+<build>/generated/shaders/frame_ubo.inc.glsl   # generated — do not hand-edit
 ```
 
-World shaders `#include "frame_ubo.inc.glsl"` (glslc `-I` includes the generated path). Fields include view/projection, three cascade matrices, fog/light/visual params, sun/moon dirs, sky day factors, cascade splits, moon ambient, lighting params (block/emissive/fogY/underwater), and water params. The post **composite** also binds this set (set 0) for the camera-underwater medium transport (view/projection, camera position, sun/moon directions, day/sunset/night factors); the local water-surface Y used by the submersion blend travels via composite push constant `p6`, not the UBO.
+World shaders `#include "frame_ubo.inc.glsl"` (glslc `-I` includes the generated build directory; the source tree is never written by a build). Fields include view/projection, three cascade matrices, fog/light/visual params, sun/moon dirs, sky day factors, cascade splits, moon ambient, lighting params (block/emissive/fogY/underwater), and water params. The post **composite** also binds this set (set 0) for the camera-underwater medium transport (view/projection, camera position, sun/moon directions, day/sunset/night factors); the local water-surface Y used by the submersion blend travels via composite push constant `p6`, not the UBO.
 
 **Lane semantics (issue #161 audit):** every lane must have a production consumer or be commented `reserved` in `FrameUBO.hpp` (the generated GLSL inherits those comments). `lightParams.z` and `visualParams.z` are reserved — the former held the removed no-op "Light levels" slider, the latter a duplicate `colorBoost` copy no shader read. The material-grade knobs (`lightParams.w` colorBoost, `visualParams.x/y` saturation/contrast) are consumed **only** by the terrain and mob lit-material shaders (water and the full-frame post grade are separate — `PostProcessSettings::postSaturation`/`postContrast`); `visualParams.w` is the terrain shadow-debug selector.
 
@@ -740,4 +740,4 @@ Do not treat this section as “already shipped.” For historical feature discu
 - [`engine-architecture.md`](engine-architecture.md) — Engine loop, chunks, streaming, terrain generation  
 - Root [`README.md`](../README.md) — build, deps, controls  
 - [`AGENTS.md`](../AGENTS.md) — contributor-oriented project context  
-- `docs/benchmarks/` — captured profiling dumps (not architecture)  
+- `docs/benchmarks/` — benchmark methodology syntheses (not architecture); raw profiling dumps stay local/CI (see `docs/benchmarks/README.md`)  

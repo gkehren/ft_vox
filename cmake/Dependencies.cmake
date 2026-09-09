@@ -123,7 +123,9 @@ if(NOT _FT_VOX_SDL3_OK)
 endif()
 
 # ---------------------------------------------------------------------------
-# Boost (system for Asio)
+# Boost (system for Asio) — needed by the test_network prototype ONLY.
+# Optional: the game binary does not use Boost, so a machine without Boost
+# still configures and builds the engine (test_network is skipped).
 # Prefer CONFIG (vcpkg / modern Boost); fall back to Module for older distros.
 # ---------------------------------------------------------------------------
 if(POLICY CMP0167)
@@ -135,36 +137,43 @@ if(NOT Boost_FOUND)
     if(POLICY CMP0167)
         cmake_policy(SET CMP0167 OLD)
     endif()
-    find_package(Boost REQUIRED COMPONENTS system)
-endif()
-
-# Normalize targets across Boost CMake configs / FindBoost
-if(TARGET Boost::system)
-    # ok
-elseif(Boost_SYSTEM_LIBRARY)
-    add_library(Boost::system UNKNOWN IMPORTED)
-    set_target_properties(Boost::system PROPERTIES
-        IMPORTED_LOCATION "${Boost_SYSTEM_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
-endif()
-
-if(NOT TARGET Boost::boost AND NOT TARGET Boost::headers)
-    if(Boost_INCLUDE_DIRS)
-        add_library(Boost::headers INTERFACE IMPORTED)
-        set_target_properties(Boost::headers PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
+    find_package(Boost QUIET COMPONENTS system)
+    if(POLICY CMP0167)
+        cmake_policy(SET CMP0167 NEW)
     endif()
 endif()
 
-if(TARGET Boost::headers AND NOT TARGET Boost::boost)
-    add_library(Boost::boost ALIAS Boost::headers)
-elseif(NOT TARGET Boost::boost AND Boost_INCLUDE_DIRS)
-    add_library(Boost::boost INTERFACE IMPORTED)
-    set_target_properties(Boost::boost PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
-endif()
+if(Boost_FOUND)
+    # Normalize targets across Boost CMake configs / FindBoost
+    if(TARGET Boost::system)
+        # ok
+    elseif(Boost_SYSTEM_LIBRARY)
+        add_library(Boost::system UNKNOWN IMPORTED)
+        set_target_properties(Boost::system PROPERTIES
+            IMPORTED_LOCATION "${Boost_SYSTEM_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
+    endif()
 
-message(STATUS "Boost: found (include=${Boost_INCLUDE_DIRS})")
+    if(NOT TARGET Boost::boost AND NOT TARGET Boost::headers)
+        if(Boost_INCLUDE_DIRS)
+            add_library(Boost::headers INTERFACE IMPORTED)
+            set_target_properties(Boost::headers PROPERTIES
+                INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
+        endif()
+    endif()
+
+    if(TARGET Boost::headers AND NOT TARGET Boost::boost)
+        add_library(Boost::boost ALIAS Boost::headers)
+    elseif(NOT TARGET Boost::boost AND Boost_INCLUDE_DIRS)
+        add_library(Boost::boost INTERFACE IMPORTED)
+        set_target_properties(Boost::boost PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
+    endif()
+
+    message(STATUS "Boost: found (include=${Boost_INCLUDE_DIRS})")
+else()
+    message(STATUS "Boost: NOT found - test_network will be skipped (game binary does not need Boost)")
+endif()
 
 # ---------------------------------------------------------------------------
 # Vulkan (loader + headers via CMake FindVulkan / SDK)
