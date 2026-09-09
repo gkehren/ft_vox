@@ -75,7 +75,7 @@ cmake --build build --config Release
 | Component | Role | Linux package (examples) | vcpkg |
 |-----------|------|--------------------------|-------|
 | SDL3 | Window, input, Vulkan surface | `libsdl3-dev` / `SDL3-devel` | `sdl3[vulkan]` |
-| Boost.System / Asio | Networking (test-only prototype, `test_network`; not linked into the game) | `libboost-system-dev` | `boost-asio`, `boost-system` |
+| Boost.System / Asio | Experimental UDP networking prototype (compiled into `test_network` only; not used by the game runtime) | `libboost-system-dev` | `boost-asio`, `boost-system` |
 | Vulkan headers + loader | API | `libvulkan-dev` | `vulkan-headers`, `vulkan-loader` |
 | volk (zeux) | Dynamic Vulkan load | *FetchContent* if missing | `volk` |
 | VMA | GPU allocations | *system header or FetchContent* | `vulkan-memory-allocator` |
@@ -166,7 +166,7 @@ sudo apt install vulkan-validationlayers
 | [`docs/gpu-profiling.md`](docs/gpu-profiling.md) | GPU profiler and timing workflow |
 | [`docs/workload-telemetry.md`](docs/workload-telemetry.md) | CPU workload telemetry (`FT_VOX_TELEMETRY`) |
 | [`docs/vulkan-validation.md`](docs/vulkan-validation.md) | Validation-layer setup and error-reporting probe |
-| [`docs/benchmarks/`](docs/benchmarks/) | Benchmark methodology syntheses per issue/PR |
+| [`docs/benchmarks/`](docs/benchmarks/) | Benchmark run reports and methodology syntheses per issue/PR |
 | [`AGENTS.md`](AGENTS.md) | Contributor-oriented project map and conventions |
 
 ## Project layout
@@ -174,7 +174,7 @@ sudo apt install vulkan-validationlayers
 ```
 cmake/
   Dependencies.cmake   # multi-platform package resolution
-docs/                  # architecture docs + benchmark syntheses
+docs/                  # architecture docs, benchmark reports and syntheses
 src/
   Vulkan/              # Instance, device, swapchain, VMA, frames, shaders
   Renderer/            # WorldRenderer, Shadow/Opaque/Water/Sky, PostStack, overlays
@@ -182,7 +182,7 @@ src/
   Chunk/               # Voxels, meshing, streaming, terrain generation
   Entities/            # Passive mobs: CPU simulation + box-UV articulated models
   Physics/             # Shared voxel collision solver, player controller
-  Network/             # Experimental UDP client/server (test-only, not linked into the game)
+  Network/             # Experimental UDP client/server (test-only; the game builds none of its sources)
   Camera/
 ressources/
   shaders/vulkan/      # GLSL sources (compiled to SPIR-V at build time)
@@ -196,8 +196,5 @@ Makefile               # Unix-friendly cmake wrapper
 
 ## License
 
-Copyright (c) 2026 gkehren. All rights reserved.
-
-This repository has no open-source license yet; reuse is not permitted without
-the author's permission. Third-party components keep their own licenses — see
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+No project license file is currently provided.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party components.
