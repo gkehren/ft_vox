@@ -494,10 +494,11 @@ void main()
     // applied to the fully composed surface (refraction + column transport +
     // reflection + foam) so far water hazes toward the same horizon atmosphere
     // as the shoreline at the same world position. The Beer-Lambert column
-    // above is the WATER medium and is untouched by this air term.
-    // Underside pixels face a submerged camera: the camera-underwater
-    // composite owns camera→surface transport there, so no outdoor air fog is
-    // layered on top of the water medium.
+    // above is the WATER medium and is untouched by this air term. The shared
+    // contract self-gates to zero when the camera is submerged
+    // (frame.lightingParams.w); the underside test is then a pure early-out —
+    // underside transport belongs to the camera-underwater composite either
+    // way.
     if (!underside)
     {
         AtmosphereFog atmo = evaluateAtmosphereFog(vFragPos, skyReach);

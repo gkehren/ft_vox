@@ -16,13 +16,16 @@
 // converge toward the same atmosphere.
 //
 // The camera-underwater composite (composite.frag.glsl) remains the sole
-// authority for the medium seen by a submerged camera: callers below the
-// waterline must NOT apply this air term on top of it.
+// authority for the medium seen by a submerged camera: the contract
+// self-gates to zero via frame.lightingParams.w when the camera is
+// submerged, for every caller — no surface shader can layer this air term on
+// top of the water medium.
 //
 // Requires frame_ubo.inc.glsl to be included first. Keep in sync with
 // src/Renderer/Lighting.hpp (kAtmosphereFog* constants and
-// atmosphereFogAmount / atmosphereHazeColor / applyAerialPerspective); the
-// numeric contract is unit-tested in test_render_helpers.cpp.
+// ungatedAtmosphereFogAmount / atmosphereFogAmount / atmosphereHazeColor /
+// applyAerialPerspective); the numeric contract is unit-tested in
+// test_render_helpers.cpp.
 
 // Cap must match lighting::kAtmosphereFogAmountCap
 const float kAtmosphereFogCap = 0.45;
@@ -47,6 +50,14 @@ struct AtmosphereFog
 // smoothstep(0.05, 0.45, skyLight) (lighting::sunShadowWeight) that every
 // caller already computes for lighting; passing it keeps one evaluation per
 // fragment and pins the shared gating policy.
+//
+// Air-medium gate: frame.lightingParams.w is the camera-underwater flag
+// (Engine samples the voxel medium at the eye; WorldRenderer packs it and the
+// camera-underwater composite consumes the same state). When the camera is
+// submerged, the WATER medium owns camera-to-surface transport for every
+// material family — weighting the amount to zero here makes it impossible for
+// any caller (current or future) to layer outdoor air haze on top of the
+// underwater composite, instead of trusting each call site to remember.
 AtmosphereFog evaluateAtmosphereFog(vec3 worldPos, float skyReach)
 {
     AtmosphereFog f;
@@ -61,8 +72,9 @@ AtmosphereFog evaluateAtmosphereFog(vec3 worldPos, float skyReach)
     float heightTerm = exp(-heightFalloff * max(0.0, avgY - fogBaseY));
     float densityFog = 1.0 - exp(-max(0.0, dist - fogStart * 0.25) * fogDensity *
                                  kAtmosphereFogDensityScale * heightTerm);
+    float airMediumWeight = 1.0 - clamp(frame.lightingParams.w, 0.0, 1.0);
     f.amount = clamp(max(linearFog, densityFog), 0.0, kAtmosphereFogCap) *
-               clamp(skyReach, 0.0, 1.0);
+               clamp(skyReach, 0.0, 1.0) * airMediumWeight;
 
     // Sky aerial color: cool blue day → warm sunset → dark-blue night (lifted
     // from near-black so night fog doesn't swallow the world)

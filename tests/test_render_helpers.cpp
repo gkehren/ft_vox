@@ -547,9 +547,9 @@ int main()
 			ok = fail("default fogStart should be farther (~320) so midground stays clear");
 
 		// Mid-range fog under default outdoor params must stay well below old 0.82 wash cap
-		const float midFog = lighting::terrainFogAmount(200.f, 80.f, 80.f, sp.fogStart, sp.fogEnd,
-													 sp.fogDensity, sp.fogHeightFalloff, sp.fogBaseY);
-		const float farFog = lighting::terrainFogAmount(800.f, 80.f, 80.f, sp.fogStart, sp.fogEnd,
+		const float midFog = lighting::ungatedAtmosphereFogAmount(200.f, 80.f, 80.f, sp.fogStart, sp.fogEnd,
+														 sp.fogDensity, sp.fogHeightFalloff, sp.fogBaseY);
+		const float farFog = lighting::ungatedAtmosphereFogAmount(800.f, 80.f, 80.f, sp.fogStart, sp.fogEnd,
 													sp.fogDensity, sp.fogHeightFalloff, sp.fogBaseY);
 		if (midFog > 0.20f)
 			ok = fail(std::string("mid-range fog amount too high for outdoor chroma (got ") +
@@ -570,8 +570,14 @@ int main()
 		{
 			const float fs = sp.fogStart, fe = sp.fogEnd, fd = sp.fogDensity;
 			const float hf = sp.fogHeightFalloff, fb = sp.fogBaseY;
-			const auto amount = [&](float dist, float worldY, float camY, float reach) {
-				return lighting::atmosphereFogAmount(dist, worldY, camY, fs, fe, fd, hf, fb, reach);
+			// airMediumWeight mirrors the helper's air-medium gate:
+			// 1 above water, 0 with a submerged camera
+			// (FrameUBO::lightingParams.w, set by WorldRenderer from the
+			// Engine's voxel-medium sample at the eye).
+			const auto amount = [&](float dist, float worldY, float camY, float reach,
+									float airMediumWeight = 1.0f) {
+				return lighting::atmosphereFogAmount(dist, worldY, camY, fs, fe, fd, hf, fb,
+													 reach, airMediumWeight);
 			};
 
 			// Fog amount is monotonic (non-decreasing) with air-path distance
@@ -611,16 +617,29 @@ int main()
 			if (!(amount(900.f, 80.f, 80.f, 1.0f) > amount(900.f, 80.f, 80.f, 0.3f)))
 				ok = fail("haze must increase with local skylight reach");
 
-			// Caller independence: at an equal world position the amount, haze
-			// color and composed color are one shared evaluation — terrain,
-			// water and entity callers must produce identical numbers.
-			{
-				const float aTerrain = amount(450.f, 96.f, 80.f, 0.8f);
-				const float aWater = amount(450.f, 96.f, 80.f, 0.8f);
-				const float aEntity = amount(450.f, 96.f, 80.f, 0.8f);
-				if (std::abs(aTerrain - aWater) > 0.f || std::abs(aTerrain - aEntity) > 0.f)
-					ok = fail("fog amount at equal world position must be caller-independent");
-			}
+			// Caller independence is STRUCTURAL, not a per-call property: all
+			// three material families evaluate the same shared GLSL include,
+			// so equal world positions get equal amounts by construction. The
+			// drift guard below enforces that structure (shared helper, and no
+			// private fog model in any consumer) — it is what actually
+			// prevents future per-shader divergence like water's old legacy
+			// smoothstep.
+
+			// Air-medium gate (underwater camera): the contract must zero the
+			// outdoor air term for every material family — terrain, water or
+			// entity — at any distance, height or skylight, because the
+			// camera-underwater composite is the sole authority for
+			// camera→surface transport then.
+			if (amount(900.f, 200.f, 40.f, 1.0f, 0.0f) > 0.0f ||
+				amount(900.f, 40.f, 40.f, 0.0f, 0.0f) > 0.0f ||
+				amount(0.0f, 80.f, 80.f, 1.0f, 0.0f) > 0.0f)
+				ok = fail("submerged camera (airMediumWeight 0) must zero the air atmosphere for all callers");
+			// Above water the gate is neutral and the amount is exactly the
+			// ungated curve scaled by the skylight reach.
+			const float ungated = lighting::ungatedAtmosphereFogAmount(450.f, 96.f, 80.f,
+																	   fs, fe, fd, hf, fb);
+			if (std::abs(amount(450.f, 96.f, 80.f, 0.8f, 1.0f) - ungated * 0.8f) > 1e-6f)
+				ok = fail("above-water amount must equal ungated curve * skylight reach");
 
 			// Amount stays under the shared cap for the whole sweep.
 			for (int d = 0; d <= 2000; d += 50)
@@ -703,6 +722,24 @@ int main()
 					assertContains("dist - fogStart * 0.25", "shared density-fog onset");
 					// Shared enclosure gate (lighting::sunShadowWeight policy).
 					assertContains("clamp(skyReach, 0.0, 1.0)", "skylight gating of outdoor haze");
+					// Air-medium gate: the helper itself must consume the
+					// camera-underwater flag so every caller self-gates when
+					// the camera is submerged (issue #159 review).
+					assertContains("float airMediumWeight = 1.0 - clamp(frame.lightingParams.w, 0.0, 1.0);",
+								   "air-medium weight from frame.lightingParams.w");
+					assertContains("clamp(skyReach, 0.0, 1.0) * airMediumWeight;",
+								   "amount gated by skylight AND air-medium weight");
+					// Pin the full haze palette + composition blend constants
+					// (exact C++ mirror contract in Lighting.hpp).
+					assertContains("vec3(0.40, 0.60, 0.90)", "dayAerial palette");
+					assertContains("vec3(0.95, 0.55, 0.32)", "sunsetAerial palette");
+					assertContains("vec3(0.014, 0.022, 0.048)", "nightAerial palette");
+					assertContains("mix(frame.fogColor.rgb, aerialSky, 0.55)",
+								   "haze blend of engine fogColor with aerial sky (0.55)");
+					assertContains("vec3(1.0, 0.72, 0.42), sunsetFactor * 0.25",
+								   "warm sunset push (0.25)");
+					assertContains("aerialLit * 0.40 + f.color * 0.60, 0.22",
+								   "surface-retention fogMix blend (0.40/0.60/0.22)");
 					// Consumers: all three material families must evaluate the
 					// one contract (prevents future shader-family drift).
 					const char *consumers[] = {
@@ -739,6 +776,17 @@ int main()
 							src.find("applyAtmosphereFog") == std::string::npos)
 							ok = fail(std::string(family) +
 									  ".frag.glsl must evaluate the shared atmosphere contract (issue #159)");
+						// ...and must NOT carry a private copy of the model: no
+						// aerial palette constants, no direct fogParams reads.
+						// This is what catches real per-shader divergence (the
+						// old water.frag legacy fog would fail here).
+						for (const char *token : {"dayAerial", "sunsetAerial", "nightAerial",
+												  "frame.fogParams"})
+						{
+							if (src.find(token) != std::string::npos)
+								ok = fail(std::string(family) + ".frag.glsl must not duplicate the " +
+										  "atmosphere model (found private token: " + token + ")");
+						}
 					}
 				}
 			}
