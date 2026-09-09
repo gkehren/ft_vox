@@ -115,7 +115,7 @@ inline const std::array<uint8_t, 256> &faceColorKindTable()
 }
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state, VoxelPool *voxelPool,
-             BorderPool *borderPool, MeshResultPool *meshPool)
+             BorderPool *borderPool, MeshResultPool *meshPool, ChunkLightPool *lightPool)
     : position(position), visible(false), state(state),
       opaqueIndexCount(0), waterIndexCount(0),
       m_voxelPool(voxelPool ? voxelPool : &VoxelPool::defaultPool()),
@@ -124,6 +124,8 @@ Chunk::Chunk(const glm::vec3 &position, ChunkState state, VoxelPool *voxelPool,
       m_borders(nullptr),
       m_resultPool(meshPool ? meshPool : &MeshResultPool::defaultPool()),
       m_pendingResult(nullptr),
+      m_lightStorage(nullptr),
+      m_lightPool(lightPool ? lightPool : &ChunkLightPool::defaultPool()),
       meshNeedsUpdate(true) { publishCpuTelemetry(); }
 
 Chunk::Chunk(Chunk &&other) noexcept
@@ -148,6 +150,8 @@ Chunk::Chunk(Chunk &&other) noexcept
       m_dirtySections(other.m_dirtySections.load(std::memory_order_relaxed)),
       m_borderPool(other.m_borderPool),
       m_borders(other.m_borders),
+      m_lightPool(other.m_lightPool),
+      m_lightStorage(other.m_lightStorage),
       m_resultPool(other.m_resultPool),
       m_arenas(other.m_arenas),
       m_meshGeneration(other.m_meshGeneration),
@@ -156,10 +160,13 @@ Chunk::Chunk(Chunk &&other) noexcept
       biomeFoliageColors(other.biomeFoliageColors),
       biomeTypes(other.biomeTypes),
       heightMap(other.heightMap),
-      m_isLODMesh(other.m_isLODMesh)
+      m_isLODMesh(other.m_isLODMesh),
+      m_localLightCacheWanted(other.m_localLightCacheWanted.load(std::memory_order_relaxed))
 {
   other.m_storage = nullptr;
   other.m_borders = nullptr;
+  other.m_lightStorage = nullptr;
+  other.m_localLightCacheWanted.store(false, std::memory_order_relaxed);
   // Invariant: no storage => empty occupancy metadata (issue #115 review).
   other.m_sectionNonAir.fill(0);
   other.publishCpuTelemetry();
@@ -200,6 +207,7 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     // (issue #113 review).
     releaseNeighborBorders();
     releaseVoxelStorageOnRetire();
+    releaseLightStorage();
     releasePendingMeshResult();
     other.releasePendingMeshResult();
 
@@ -221,6 +229,11 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     m_borderPool = other.m_borderPool;
     m_borders = other.m_borders;
     other.m_borders = nullptr;
+
+    // Transfer light storage ownership together with its pool (issue #128).
+    m_lightPool = other.m_lightPool;
+    m_lightStorage = other.m_lightStorage;
+    other.m_lightStorage = nullptr;
 
     m_resultPool = other.m_resultPool;
     m_arenas = other.m_arenas;
@@ -255,6 +268,9 @@ Chunk &Chunk::operator=(Chunk &&other) noexcept
     meshNeedsUpdate.store(other.meshNeedsUpdate.load());
     m_isLODMesh = other.m_isLODMesh;
     m_inTransit.store(other.m_inTransit.load());
+    m_localLightCacheWanted.store(other.m_localLightCacheWanted.load(std::memory_order_relaxed),
+                                  std::memory_order_relaxed);
+    other.m_localLightCacheWanted.store(false, std::memory_order_relaxed);
 
     other.publishCpuTelemetry();
     publishCpuTelemetry();
@@ -284,8 +300,33 @@ Chunk::~Chunk()
   releasePendingMeshResult();
   releaseNeighborBorders();
   releaseVoxelStorageOnRetire();
+  releaseLightStorage();
   telemetry::registry().replaceCpu(m_cpuTelemetry, std::array<uint64_t, 13>{});
   releaseGPU();
+}
+
+void Chunk::releaseLightStorage()
+{
+  if (m_lightStorage && m_lightPool)
+  {
+    m_lightPool->release(m_lightStorage);
+    m_lightStorage = nullptr;
+  }
+}
+
+uint16_t Chunk::sampleLightRaw(int x, int y, int z) const
+{
+  if (!m_lightStorage || x < 0 || x >= static_cast<int>(CHUNK_SIZE) ||
+      y < 0 || y >= static_cast<int>(CHUNK_HEIGHT) ||
+      z < 0 || z >= static_cast<int>(CHUNK_SIZE))
+    return 0;
+  const size_t vi = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
+  return m_lightStorage->voxels[vi];
+}
+
+lighting::LocalVoxelLight Chunk::sampleLight(int x, int y, int z) const
+{
+  return lighting::unpackLocalVoxelLight(sampleLightRaw(x, y, z));
 }
 
 bool Chunk::prepareVoxelStorageForGeneration()
@@ -752,6 +793,30 @@ static thread_local std::vector<uint8_t> s_blockLightR;
 static thread_local std::vector<uint8_t> s_blockLightG;
 static thread_local std::vector<uint8_t> s_blockLightB;
 
+void Chunk::populateLightStorage(MeshBuildResult &out)
+{
+  out.lightPool = m_lightPool;
+  if (!out.lightStorage && m_lightPool)
+    out.lightStorage = m_lightPool->acquire();
+  if (out.lightStorage)
+  {
+    for (int z = 0; z < CHUNK_SIZE; ++z)
+      for (int y = 0; y < CHUNK_HEIGHT; ++y)
+        for (int x = 0; x < CHUNK_SIZE; ++x)
+        {
+          const size_t vi = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
+          const size_t li = ChunkLightHalo::hidx(x, y, z);
+          out.lightStorage->voxels[vi] = lighting::packVoxelLight(
+              s_skyLight[vi], s_blockLightR[li], s_blockLightG[li], s_blockLightB[li]);
+        }
+    out.lightCacheAction = LightCacheAction::Replace;
+  }
+  else
+  {
+    out.lightCacheAction = LightCacheAction::Clear;
+  }
+}
+
 void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
   buildMesh(out, generation, revision, kAllSectionMask);
@@ -764,32 +829,72 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
   // in the pooled result block, nothing on the Chunk changes ownership.
   out.beginBuild(this, generation, revision, sectionMask);
   out.isLOD = false;
+  out.lightCacheWantedAtBuild = localLightCacheWanted();
   // Occupied Y span from the per-section metadata (issue #105): no 64 KiB
   // type copy + full-buffer scan per remesh. Section-granular, then refined
   // to byte-exact layer bounds inside the two boundary sections so slice
   // iteration stays as tight as the old full-scan helper produced.
   int occMinY = 0;
   int occMaxY = CHUNK_HEIGHT - 1;
+  bool hasOccupancy = false;
   {
     // The prepass is real work and is measured as such (issue #115 review),
     // including for empty chunks whose build ends with the early return.
     telemetry::StageSample occupancySample(telemetry::Occupancy);
-    if (!occupiedSpanY(occMinY, occMaxY))
+    hasOccupancy = occupiedSpanY(occMinY, occMaxY);
+    if (hasOccupancy)
     {
-      // Empty occupancy: the result stays empty; publishMeshResult commits
-      // the (empty) mesh on the main thread.
-      return;
+      refineOccupiedSpanY(occMinY, occMaxY);
     }
-    refineOccupiedSpanY(occMinY, occMaxY);
   }
-  if (out.sectionsBuilt == 0)
+
+  if (!hasOccupancy)
+  {
+    // Empty occupancy: if light cache is wanted, compute light field so entities in this
+    // chunk (e.g. open air or hollow cave) can sample valid skylight/blocklight.
+    if (out.lightCacheWantedAtBuild)
+    {
+      telemetry::MeshSample meshSample(telemetry::Skylight);
+      computeLightField(meshSample);
+      populateLightStorage(out);
+    }
+    else
+    {
+      out.lightCacheAction = LightCacheAction::Clear;
+    }
     return;
+  }
+
+  if (out.sectionsBuilt == 0)
+  {
+    if (out.lightCacheWantedAtBuild)
+    {
+      telemetry::MeshSample meshSample(telemetry::Skylight);
+      computeLightField(meshSample);
+      populateLightStorage(out);
+    }
+    else
+    {
+      out.lightCacheAction = LightCacheAction::Clear;
+    }
+    return;
+  }
 
   telemetry::MeshSample meshSample(telemetry::Skylight);
   // Lighting stays chunk-wide for every job (issue #107 lighting
   // contract): each rebuilt section samples the same light field a whole
   // build would produce, so section boundaries cannot introduce seams.
   computeLightField(meshSample);
+
+  if (out.lightCacheWantedAtBuild)
+  {
+    populateLightStorage(out);
+  }
+  else
+  {
+    out.lightCacheAction = LightCacheAction::Clear;
+  }
+
   meshSample.next(telemetry::FacesGreedyAO);
 
   // One greedy pass per dirty section (issue #107). Empty sections are
@@ -2077,6 +2182,19 @@ void Chunk::buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t rev
 {
   out.beginBuild(this, generation, revision);
   out.isLOD = true;
+  out.lightCacheWantedAtBuild = localLightCacheWanted();
+
+  if (out.lightCacheWantedAtBuild)
+  {
+    telemetry::MeshSample meshSample(telemetry::Skylight);
+    computeLightField(meshSample);
+    populateLightStorage(out);
+  }
+  else
+  {
+    out.lightCacheAction = LightCacheAction::Clear;
+  }
+
   // No column holds a voxel above the last occupied section (issue #105):
   // start every column scan there instead of at CHUNK_HEIGHT - 1.
   int occMinY = 0;
@@ -2252,6 +2370,43 @@ bool Chunk::publishMeshResult(MeshBuildResult *result)
   if (m_pendingResult && m_pendingResult != result)
     m_pendingResult->homePool->release(m_pendingResult);
   m_pendingResult = result;
+
+  const bool wantLightNow = localLightCacheWanted();
+  if (!wantLightNow)
+  {
+    releaseLightStorage();
+    if (result->lightStorage && result->lightPool)
+    {
+      result->lightPool->release(result->lightStorage);
+      result->lightStorage = nullptr;
+    }
+    result->lightCacheAction = LightCacheAction::Unchanged;
+  }
+  else if (result->lightCacheWantedAtBuild)
+  {
+    switch (result->lightCacheAction)
+    {
+    case LightCacheAction::Replace:
+      if (result->lightStorage)
+      {
+        if (m_lightStorage && m_lightPool)
+          m_lightPool->release(m_lightStorage);
+        m_lightStorage = result->lightStorage;
+        result->lightStorage = nullptr;
+      }
+      break;
+    case LightCacheAction::Clear:
+      releaseLightStorage();
+      break;
+    case LightCacheAction::Unchanged:
+      break;
+    }
+  }
+  else
+  {
+    // Not wanted during build, but wanted now: do not apply stale Clear, keep existing cache.
+    result->lightCacheAction = LightCacheAction::Unchanged;
+  }
   // Single state commit point: the mesh becomes official here, on the main
   // thread, only after validation succeeded.
   m_isLODMesh = result->isLOD;
@@ -3143,6 +3298,7 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
   meshNeedsUpdate.store(true);
   m_isLODMesh = false;
   m_inTransit.store(false);
+  m_localLightCacheWanted.store(false, std::memory_order_relaxed);
   m_activeIndex = SIZE_MAX;
   m_dirtySections.store(0, std::memory_order_relaxed);
 
@@ -3167,6 +3323,9 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
   // Return transient neighbor-border storage to the BorderPool.
   // No border capacity remains attached to this Chunk.
   releaseNeighborBorders();
+
+  // Return chunk light storage to the ChunkLightPool (issue #128).
+  releaseLightStorage();
 
   // Reset biome colors and per-column generation state
   biomeGrassColors.fill(0);

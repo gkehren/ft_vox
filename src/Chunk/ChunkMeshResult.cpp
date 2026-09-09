@@ -1,4 +1,5 @@
 #include "ChunkMeshResult.hpp"
+#include <Chunk/ChunkLightPool.hpp>
 #include <Engine/WorkloadTelemetry.hpp>
 #include <algorithm>
 #include <cassert>
@@ -59,8 +60,21 @@ void MeshBuildResult::beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration,
 	opaqueIndices.clear();
 	waterVertices.clear();
 	waterIndices.clear();
+	if (lightStorage && lightPool)
+	{
+		lightPool->release(lightStorage);
+		lightStorage = nullptr;
+	}
+	lightPool = nullptr;
+	lightCacheAction = LightCacheAction::Unchanged;
+	lightCacheWantedAtBuild = false;
 	// `accounted` is intentionally untouched: it belongs to the pool and is
 	// only read/written under the pool mutex (finishBuild/release).
+}
+
+MeshBuildResult::~MeshBuildResult()
+{
+	detach();
 }
 
 void MeshBuildResult::detach()
@@ -70,6 +84,14 @@ void MeshBuildResult::detach()
 	revision = 0;
 	isLOD = false;
 	sectionsBuilt = 0;
+	if (lightStorage && lightPool)
+	{
+		lightPool->release(lightStorage);
+		lightStorage = nullptr;
+	}
+	lightPool = nullptr;
+	lightCacheAction = LightCacheAction::Unchanged;
+	lightCacheWantedAtBuild = false;
 	// Drop content (sizes only - capacity stays with the pool block so the
 	// next borrower does not start from zero allocations). The matching
 	// size accounting is subtracted by release() under the pool mutex.

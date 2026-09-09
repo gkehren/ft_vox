@@ -1,6 +1,7 @@
 #pragma once
 #include <Entities/MobTypes.hpp>
 #include <Physics/VoxelCollision.hpp>
+#include <Chunk/LightSample.hpp>
 #include <array>
 #include <optional>
 #include <vector>
@@ -39,6 +40,7 @@ class MobWorld : public physics::VoxelCollisionWorld
 {
   public:
     virtual std::optional<glm::dvec3> surface(int x, int z) const = 0;
+    virtual lighting::LocalVoxelLight sampleLight(const glm::vec3 &) const { return {}; }
 };
 struct Mob
 {

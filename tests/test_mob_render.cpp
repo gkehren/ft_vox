@@ -263,7 +263,9 @@ static FrameUBO frame(float aspect, bool crowded = false)
     u.viewPos = glm::vec4(eye, 1);
     u.lightDirection = glm::vec4(glm::normalize(glm::vec3(-3, 6, -4)), 0);
     u.lightParams = {0.5, 0.7, 16, 1};
+    u.visualParams = {1.0f, 1.0f, 1.0f, 0.0f};
     u.skyParams = {0, 1, 0, 0};
+    u.lightingParams = {1.0f, 1.0f, 64.0f, 0.0f};
     u.fogParams = {60, 100, 0, 0};
     u.fogColor = {0.12f, 0.17f, 0.23f, 1};
     u.cascadeMatrix0 = u.cascadeMatrix1 = u.cascadeMatrix2 =
@@ -345,6 +347,44 @@ int main(int argc, char **argv)
         f.save(output / "animated.ppm", animated);
         if (animated == image)
             throw std::runtime_error("animation did not change pixels");
+
+        // Issue #128: local lighting variations (skylight and RGB block light)
+        {
+            std::vector<entities::MobRenderState> litMob = {
+                {entities::MobSpecies::Cow, {0, 0, 0}, 0, 0, 0, 0, 0, 1.0f, glm::vec3(0.0f)}
+            };
+            std::vector<entities::MobRenderState> darkMob = {
+                {entities::MobSpecies::Cow, {0, 0, 0}, 0, 0, 0, 0, 0, 0.0f, glm::vec3(0.0f)}
+            };
+            std::vector<entities::MobRenderState> redMob = {
+                {entities::MobSpecies::Cow, {0, 0, 0}, 0, 0, 0, 0, 0, 0.0f, glm::vec3(1.0f, 0.0f, 0.0f)}
+            };
+
+            auto imgLit = f.render(litMob, u, 0);
+            auto imgDark = f.render(darkMob, u, 1);
+            auto imgRed = f.render(redMob, u, 0);
+
+            uint64_t litSum = 0, darkSum = 0, redSumR = 0, redSumG = 0;
+            size_t redMobPixels = 0;
+            for (size_t i = 0; i < imgLit.size(); i += 4)
+            {
+                if (imgLit[i] != imgLit[0] || imgLit[i + 1] != imgLit[1])
+                    litSum += imgLit[i] + imgLit[i + 1] + imgLit[i + 2];
+                if (imgDark[i] != imgDark[0] || imgDark[i + 1] != imgDark[1])
+                    darkSum += imgDark[i] + imgDark[i + 1] + imgDark[i + 2];
+                if (imgRed[i] != imgRed[0] || imgRed[i + 1] != imgRed[1])
+                {
+                    redSumR += imgRed[i];
+                    redSumG += imgRed[i + 1];
+                    ++redMobPixels;
+                }
+            }
+            if (litSum <= darkSum)
+                throw std::runtime_error("sunlit mob must be brighter than cave-dark mob");
+            if (redMobPixels == 0 || redSumR <= redSumG)
+                throw std::runtime_error("red block-lit mob must have higher red channel than green");
+        }
+
         f.resize(800, 600);
         f.render(states, frame(800.f / 600), 0);
         // Camera culling cannot suppress shadow casters behind the eye.

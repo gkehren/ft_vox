@@ -137,17 +137,18 @@ void MobRenderer::init(VkContext &context, ImmediateCommands &imm, VkDescriptorS
     std::array<VkVertexInputBindingDescription, 2> vb{
         {{0, sizeof(entities::MobVertex), VK_VERTEX_INPUT_RATE_VERTEX},
          {1, sizeof(Instance), VK_VERTEX_INPUT_RATE_INSTANCE}}};
-    std::array<VkVertexInputAttributeDescription, 8> va{
+    std::array<VkVertexInputAttributeDescription, 9> va{
         {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(entities::MobVertex, position)},
          {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(entities::MobVertex, normal)},
          {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(entities::MobVertex, uv)}}};
     for (uint32_t i = 0; i < 4; ++i)
         va[3 + i] = {3 + i, 1, VK_FORMAT_R32G32B32A32_SFLOAT, i * 16};
     va[7] = {7, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 64};
+    va[8] = {8, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 80};
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vi.vertexBindingDescriptionCount = 2;
     vi.pVertexBindingDescriptions = vb.data();
-    vi.vertexAttributeDescriptionCount = 8;
+    vi.vertexAttributeDescriptionCount = 9;
     vi.pVertexAttributeDescriptions = va.data();
     auto vert = loadShaderModule(device, resolveSpvPath("mob.vert.spv"));
     try
@@ -271,8 +272,10 @@ void MobRenderer::prepare(uint32_t frame, const FrameUBO &ubo,
                 throw std::runtime_error("Mob part capacity exceeded");
             uint32_t index = uint32_t(draws.size());
             const auto &image = m_textures->images[part.texture];
+            const float sky = (mob.localSkylight < 0.0f) ? 1.0f : std::clamp(mob.localSkylight, 0.0f, 1.0f);
             instances[index] = {entities::mobPartTransform(mob, part),
-                                {1, float(image.width) / (2 * image.height), 0, 0}};
+                                {1, float(image.width) / (2 * image.height), 0, 0},
+                                {sky, mob.localBlockRgb.r, mob.localBlockRgb.g, mob.localBlockRgb.b}};
             draws.push_back({part.firstVertex, part.vertexCount, index, part.texture, mask});
         }
     }

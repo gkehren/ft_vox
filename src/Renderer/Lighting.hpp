@@ -4,6 +4,7 @@
 /// Block light packing, cave fill, moon ambient, SSAO/god-ray clamps.
 
 #include "utils.hpp"
+#include <Chunk/LightSample.hpp>
 
 #include <glm/glm.hpp>
 
@@ -241,6 +242,7 @@ inline void unpackLightBits(uint32_t packedData, uint8_t &skyLight, uint8_t &blo
 	blockG = static_cast<uint8_t>((packedData >> 22) & 0xFu);
 	blockB = static_cast<uint8_t>((packedData >> 26) & 0xFu);
 }
+
 
 /// SSAO composite floor — safety-only clamp, the horizon-based estimator no
 /// longer needs a high global floor. Must match composite.frag.

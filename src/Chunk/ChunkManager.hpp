@@ -18,6 +18,7 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Engine/ThreadPool.hpp>
+#include <Chunk/LightSample.hpp>
 #include <utils.hpp>
 
 class Camera;
@@ -81,6 +82,12 @@ constexpr uint32_t kUnloadCheckIntervalFrames = 60;
 class ChunkManager
 {
 public:
+	// Entity local light cache retention radius around camera (issue #128).
+	// Dynamic entities spawn and wander within ~128m (kMobDespawnDist).
+	static constexpr float kEntityLightCacheRadius = 128.0f;
+	static constexpr float kEntityLightCacheRadiusSq =
+		kEntityLightCacheRadius * kEntityLightCacheRadius;
+
 	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool);
 	~ChunkManager();
 
@@ -125,6 +132,14 @@ public:
 	Chunk *getChunkAtWorldPos(const glm::vec3 &worldPos);
 	Chunk *getChunk(const glm::ivec3 &chunkPos);
 	const Chunk *getChunk(const glm::ivec3 &chunkPos) const;
+
+	/// Sample published local lighting at an integer voxel coordinate.
+	lighting::LocalVoxelLight sampleVoxelLight(const glm::ivec3 &blockPos) const;
+	/// Sample smoothed local lighting via trilinear interpolation of the 8 surrounding voxel centers.
+	lighting::LocalVoxelLight sampleSmoothedLight(const glm::vec3 &worldPos) const;
+
+	lighting::LocalVoxelLight sampleVoxelLightUnlocked(const glm::ivec3 &blockPos) const;
+	lighting::LocalVoxelLight sampleSmoothedLightUnlocked(const glm::vec3 &worldPos) const;
 
 	/// Snapshot of the streaming maintenance counters (issue #108). Main
 	/// thread writes and reads them, so no lock is taken.
@@ -230,6 +245,9 @@ private:
 
 	TaskPriority calculateTaskPriority(float distanceSq, float lodThresholdSq) const;
 	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
+
+	/// Maintain chunk local light cache desire based on distance to camera (issue #128).
+	void updateEntityLightCacheIntent(Chunk &chunk, float distSq);
 
 	// Testing hook (issue #114 review): exposes the deferred-edit queue
 	// size without making it public API.

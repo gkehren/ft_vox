@@ -29,5 +29,13 @@ struct MobRenderState
     MobSpecies species{};
     glm::vec3 position{};
     float yaw{}, gait{}, look{}, flap{}, stride{};
+    float localSkylight{-1.0f}; // < 0 means unassigned / sample from world
+    glm::vec3 localBlockRgb{0.0f};
 };
+
+inline glm::vec3 mobLightSamplePosition(const MobRenderState &mob)
+{
+    // Sample at entity body center (0.5m above feet)
+    return mob.position + glm::vec3(0.0f, 0.5f, 0.0f);
+}
 } // namespace entities

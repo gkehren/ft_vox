@@ -231,7 +231,20 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 	if (!m_rendererReady)
 		return {};
 	m_lastNonFinite = 0;
-	m_renderer.setMobs(mobs);
+	std::vector<entities::MobRenderState> resolvedMobs = mobs;
+	if (m_chunkManager)
+	{
+		for (auto &mob : resolvedMobs)
+		{
+			if (mob.localSkylight < 0.0f)
+			{
+				const auto light = m_chunkManager->sampleSmoothedLight(entities::mobLightSamplePosition(mob));
+				mob.localSkylight = light.skylight;
+				mob.localBlockRgb = light.blockRgb;
+			}
+		}
+	}
+	m_renderer.setMobs(resolvedMobs);
 	const float farPlane = m_renderSettings.maxRenderDistance * 1.25f;
 	const bool underwater = m_renderer.postSettings().underwater;
 	if (underwater)

@@ -36,6 +36,18 @@ ChunkManager::~ChunkManager()
 		std::this_thread::yield();
 	}
 
+	std::vector<CompletedMeshJob> completed;
+	{
+		std::lock_guard<std::mutex> lock(m_completedJobsMutex);
+		completed.swap(m_completedMeshJobs);
+		m_completedGenerationChunks.clear();
+	}
+	for (auto &job : completed)
+	{
+		if (job.result && job.result->homePool)
+			job.result->homePool->release(job.result);
+	}
+
 	for (auto &[pos, chunkPtr] : m_chunks)
 	{
 		if (chunkPtr && m_chunkPool)
@@ -210,6 +222,12 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 		planeOffsets[i] = p.w + glm::dot(planeNormals[i], optOffset);
 	}
 
+	constexpr float kEntityLightCacheRadius = 128.0f;
+	constexpr float kEntityLightCacheRadiusSq = kEntityLightCacheRadius * kEntityLightCacheRadius;
+	const glm::vec3 camPos = camera.getPosition();
+	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
+
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	for (Chunk *chunk : m_activeChunks)
 	{
@@ -225,8 +243,23 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 			}
 		}
 		chunk->setVisible(visible);
+
+		const float dx = aabbMin.x - camOffsetX;
+		const float dz = aabbMin.z - camOffsetZ;
+		updateEntityLightCacheIntent(*chunk, dx * dx + dz * dz);
 	}
 	(void)settings;
+}
+
+void ChunkManager::updateEntityLightCacheIntent(Chunk &chunk, float distSq)
+{
+	const bool wanted = (distSq <= kEntityLightCacheRadiusSq);
+	const bool previous = chunk.localLightCacheWanted();
+	if (previous && !wanted)
+	{
+		chunk.releaseLightStorage();
+	}
+	chunk.setLocalLightCacheWanted(wanted);
 }
 
 void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, int budget)
@@ -323,15 +356,25 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	const float lodThreshSq = lodThresh * lodThresh;
 
 	// Promote distant LOD meshes back to full quality when close enough.
+	// Also re-arm meshed chunks entering the light radius if they lack light storage.
 	for (Chunk *chunk : m_activeChunks)
 	{
-		if (chunk->isLODMesh() && chunk->getState() == ChunkState::MESHED && !chunk->isInTransit())
+		const glm::vec3 p = chunk->getPosition();
+		const float dx = p.x - camOffsetX;
+		const float dz = p.z - camOffsetZ;
+		const float distSq = dx * dx + dz * dz;
+		updateEntityLightCacheIntent(*chunk, distSq);
+
+		if (chunk->getState() == ChunkState::MESHED && !chunk->isInTransit())
 		{
-			const glm::vec3 p = chunk->getPosition();
-			const float dx = p.x - camOffsetX;
-			const float dz = p.z - camOffsetZ;
-			if (dx * dx + dz * dz < lodThreshSq)
+			if (chunk->isLODMesh() && distSq < lodThreshSq)
+			{
 				chunk->setState(ChunkState::GENERATED);
+			}
+			else if (chunk->localLightCacheWanted() && !chunk->hasLightStorage())
+			{
+				chunk->setState(ChunkState::GENERATED);
+			}
 		}
 	}
 
@@ -555,6 +598,12 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 
 void ChunkManager::processDeferredReleases()
 {
+	constexpr size_t kMaxRetainedLightBlocks = 64;
+	if (m_chunkPool && m_chunkPool->lightStorageFree() > kMaxRetainedLightBlocks)
+	{
+		m_chunkPool->lightPool().trim(kMaxRetainedLightBlocks);
+	}
+
 	if (m_deferredRelease.empty())
 	{
 		m_deferredReleaseAge = 0;
@@ -644,6 +693,9 @@ void ChunkManager::processFinishedJobs()
 		// light until an unrelated edit remeshed it.
 		if (job.chunk && job.chunk->getState() == ChunkState::MESHED &&
 			job.chunk->dirtySections() != 0)
+			job.chunk->setState(ChunkState::GENERATED);
+		if (job.chunk && job.chunk->getState() == ChunkState::MESHED &&
+			job.chunk->localLightCacheWanted() && !job.chunk->hasLightStorage())
 			job.chunk->setState(ChunkState::GENERATED);
 	}
 	// Apply edits that were deferred while their chunk was in transit; they
@@ -1434,6 +1486,77 @@ Chunk *ChunkManager::getChunkAtWorldPos(const glm::vec3 &worldPos)
 	return getChunk(worldToChunkCoord(worldPos));
 }
 
+lighting::LocalVoxelLight ChunkManager::sampleVoxelLightUnlocked(const glm::ivec3 &p) const
+{
+	if (p.y >= static_cast<int>(CHUNK_HEIGHT))
+		return {1.0f, glm::vec3(0.0f)};
+	if (p.y < 0)
+		return {0.0f, glm::vec3(0.0f)};
+	if (p.x < SHRT_MIN || p.x >= SHRT_MAX || p.z < SHRT_MIN || p.z >= SHRT_MAX)
+		return {0.0f, glm::vec3(0.0f)};
+
+	const int size = static_cast<int>(CHUNK_SIZE);
+	const int cx = p.x / size - (p.x % size < 0 ? 1 : 0);
+	const int cz = p.z / size - (p.z % size < 0 ? 1 : 0);
+	const auto it = m_chunks.find({cx, 0, cz});
+	if (it == m_chunks.end() || !it->second)
+		return {0.0f, glm::vec3(0.0f)};
+
+	const Chunk *chunk = it->second;
+	if (!chunk->hasLightStorage())
+		return {0.0f, glm::vec3(0.0f)};
+
+	const int lx = p.x - cx * size;
+	const int lz = p.z - cz * size;
+	return chunk->sampleLight(lx, p.y, lz);
+}
+
+lighting::LocalVoxelLight ChunkManager::sampleVoxelLight(const glm::ivec3 &blockPos) const
+{
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	return sampleVoxelLightUnlocked(blockPos);
+}
+
+lighting::LocalVoxelLight ChunkManager::sampleSmoothedLightUnlocked(const glm::vec3 &worldPos) const
+{
+	const glm::vec3 s = worldPos - glm::vec3(0.5f);
+	const int x0 = static_cast<int>(std::floor(s.x));
+	const int y0 = static_cast<int>(std::floor(s.y));
+	const int z0 = static_cast<int>(std::floor(s.z));
+	const int x1 = x0 + 1;
+	const int y1 = y0 + 1;
+	const int z1 = z0 + 1;
+
+	const float fx = s.x - static_cast<float>(x0);
+	const float fy = s.y - static_cast<float>(y0);
+	const float fz = s.z - static_cast<float>(z0);
+
+	const auto c000 = sampleVoxelLightUnlocked({x0, y0, z0});
+	const auto c100 = sampleVoxelLightUnlocked({x1, y0, z0});
+	const auto c010 = sampleVoxelLightUnlocked({x0, y1, z0});
+	const auto c110 = sampleVoxelLightUnlocked({x1, y1, z0});
+	const auto c001 = sampleVoxelLightUnlocked({x0, y0, z1});
+	const auto c101 = sampleVoxelLightUnlocked({x1, y0, z1});
+	const auto c011 = sampleVoxelLightUnlocked({x0, y1, z1});
+	const auto c111 = sampleVoxelLightUnlocked({x1, y1, z1});
+
+	const auto c00 = lighting::lerpLocalVoxelLight(c000, c100, fx);
+	const auto c10 = lighting::lerpLocalVoxelLight(c010, c110, fx);
+	const auto c01 = lighting::lerpLocalVoxelLight(c001, c101, fx);
+	const auto c11 = lighting::lerpLocalVoxelLight(c011, c111, fx);
+
+	const auto c0 = lighting::lerpLocalVoxelLight(c00, c10, fy);
+	const auto c1 = lighting::lerpLocalVoxelLight(c01, c11, fy);
+
+	return lighting::lerpLocalVoxelLight(c0, c1, fz);
+}
+
+lighting::LocalVoxelLight ChunkManager::sampleSmoothedLight(const glm::vec3 &worldPos) const
+{
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	return sampleSmoothedLightUnlocked(worldPos);
+}
+
 size_t ChunkManager::chunkCount() const
 {
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -1526,6 +1649,10 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 			p.second->setActiveIndex(m_activeChunks.size());
 			m_activeChunks.push_back(p.second);
 			p.second->setVisible(true);
+			const glm::vec3 pos = p.second->getPosition();
+			const float dx = pos.x - center.x;
+			const float dz = pos.z - center.z;
+			updateEntityLightCacheIntent(*p.second, dx * dx + dz * dz);
 		}
 		for (const auto &p : created)
 			ensureShellPopulated(p.second, p.first);

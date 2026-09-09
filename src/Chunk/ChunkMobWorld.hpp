@@ -32,6 +32,8 @@ class ChunkMobWorld final : public entities::MobWorld
         }
         return {};
     }
+    lighting::LocalVoxelLight sampleLight(const glm::vec3 &pos) const override { return view.sampleLight(pos); }
+
 
   private:
     ChunkCollisionView view;
