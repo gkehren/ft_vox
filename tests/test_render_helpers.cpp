@@ -1920,11 +1920,77 @@ int main()
 		}
 	}
 
+	// --- Entity local voxel lighting (issue #128) ---------------------------
+	{
+		// 1. Pack and unpack voxel light (4-bit sky, 4-bit R, 4-bit G, 4-bit B = 16-bit uint16_t)
+		for (uint8_t sky = 0; sky < 16; ++sky)
+		{
+			for (uint8_t r = 0; r < 16; ++r)
+			{
+				for (uint8_t g = 0; g < 16; ++g)
+				{
+					const uint8_t b = (sky + r + g) & 0xF;
+					const uint16_t packed = lighting::packVoxelLight(sky, r, g, b);
+					uint8_t uSky = 0, uR = 0, uG = 0, uB = 0;
+					lighting::unpackVoxelLight(packed, uSky, uR, uG, uB);
+					if (uSky != sky || uR != r || uG != g || uB != b)
+					{
+						ok = fail("packVoxelLight / unpackVoxelLight roundtrip failed");
+						break;
+					}
+
+					const uint16_t blockRGB4 = lighting::packBlockLightRGB4(r, g, b);
+					const uint16_t packed2 = lighting::packVoxelLightRGB4(sky, blockRGB4);
+					if (packed != packed2)
+					{
+						ok = fail("packVoxelLightRGB4 mismatch with packVoxelLight");
+						break;
+					}
+				}
+			}
+		}
+
+		// 2. Unpack to LocalVoxelLight float representation
+		const auto l0 = lighting::unpackLocalVoxelLight(lighting::packVoxelLight(0, 0, 0, 0));
+		if (l0.skylight != 0.0f || l0.blockRgb != glm::vec3(0.0f))
+			ok = fail("unpackLocalVoxelLight zero light failed");
+
+		const auto lFull = lighting::unpackLocalVoxelLight(lighting::packVoxelLight(15, 15, 15, 15));
+		if (lFull.skylight != 1.0f || lFull.blockRgb != glm::vec3(1.0f))
+			ok = fail("unpackLocalVoxelLight full light failed");
+
+		const auto lMixed = lighting::unpackLocalVoxelLight(lighting::packVoxelLight(15, 15, 0, 6));
+		if (std::abs(lMixed.skylight - 1.0f) > 1e-6f ||
+		    std::abs(lMixed.blockRgb.r - 1.0f) > 1e-6f ||
+		    std::abs(lMixed.blockRgb.g - 0.0f) > 1e-6f ||
+		    std::abs(lMixed.blockRgb.b - (6.0f / 15.0f)) > 1e-6f)
+			ok = fail("unpackLocalVoxelLight normalized float scale failed");
+
+		// 3. Lerp between two LocalVoxelLight samples
+		lighting::LocalVoxelLight a{0.2f, glm::vec3(1.0f, 0.0f, 0.5f)};
+		lighting::LocalVoxelLight b{0.8f, glm::vec3(0.0f, 1.0f, 0.5f)};
+
+		const auto lerp0 = lighting::lerpLocalVoxelLight(a, b, 0.0f);
+		if (std::abs(lerp0.skylight - 0.2f) > 1e-6f || lerp0.blockRgb != a.blockRgb)
+			ok = fail("lerpLocalVoxelLight at t=0 must return a");
+
+		const auto lerp1 = lighting::lerpLocalVoxelLight(a, b, 1.0f);
+		if (std::abs(lerp1.skylight - 0.8f) > 1e-6f || lerp1.blockRgb != b.blockRgb)
+			ok = fail("lerpLocalVoxelLight at t=1 must return b");
+
+		const auto lerpMid = lighting::lerpLocalVoxelLight(a, b, 0.5f);
+		if (std::abs(lerpMid.skylight - 0.5f) > 1e-6f ||
+		    std::abs(lerpMid.blockRgb.r - 0.5f) > 1e-6f ||
+		    std::abs(lerpMid.blockRgb.g - 0.5f) > 1e-6f ||
+		    std::abs(lerpMid.blockRgb.b - 0.5f) > 1e-6f)
+			ok = fail("lerpLocalVoxelLight at t=0.5 must return midpoint");
+	}
+
 	if (!ok)
 	{
 		std::cerr << "test_render_helpers: FAILED\n";
 		return EXIT_FAILURE;
 	}
-	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + block textures + FrameUBO + indirect batching + colorspace)\n";
+	std::cout << "test_render_helpers: OK (cascades + fog + lighting + materials + block textures + FrameUBO + indirect batching + colorspace + entity lighting)\n";
 	return EXIT_SUCCESS;
 }

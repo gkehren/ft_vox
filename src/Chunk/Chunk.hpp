@@ -21,6 +21,7 @@
 #include <Chunk/VoxelPool.hpp>
 #include <Chunk/ChunkBorders.hpp>
 #include <Chunk/ChunkLightHalo.hpp>
+#include <Chunk/ChunkLightPool.hpp>
 #include <Vulkan/VkBuffer.hpp>
 #include <Vulkan/MeshArena.hpp>
 #include <Camera/Camera.hpp>
@@ -42,7 +43,7 @@ class Chunk
 public:
 	Chunk(const glm::vec3 &position, ChunkState state = ChunkState::UNLOADED,
 		  VoxelPool *voxelPool = nullptr, BorderPool *borderPool = nullptr,
-		  MeshResultPool *meshPool = nullptr);
+		  MeshResultPool *meshPool = nullptr, ChunkLightPool *lightPool = nullptr);
 	Chunk(Chunk &&other) noexcept;
 	Chunk &operator=(Chunk &&other) noexcept;
 	~Chunk();
@@ -64,6 +65,12 @@ public:
 	VoxelPool *getVoxelPool() const { return m_voxelPool; }
 	bool hasBorderStorage() const { return m_borders != nullptr; }
 	BorderPool *getBorderPool() const { return m_borderPool; }
+	bool hasLightStorage() const { return m_lightStorage != nullptr; }
+	ChunkLightPool *getLightPool() const { return m_lightPool; }
+	const ChunkLightStorage *getLightStorage() const { return m_lightStorage; }
+	void releaseLightStorage();
+	uint16_t sampleLightRaw(int x, int y, int z) const;
+	lighting::LocalVoxelLight sampleLight(int x, int y, int z) const;
 
 	/// Prepare all generation backing on the calling thread:
 	/// - voxel storage
@@ -405,6 +412,8 @@ private:
 	// Released on upload, reset, and moves - no per-chunk mesh capacity.
 	MeshResultPool *m_resultPool{nullptr};
 	MeshBuildResult *m_pendingResult{nullptr};
+	ChunkLightStorage *m_lightStorage{nullptr};
+	ChunkLightPool *m_lightPool{nullptr};
 	// Non-owning handle to the WorldRenderer-owned shared arenas (issue
 	// #109): set by every upload, used to retire ranges on release/unload.
 	MeshArenas *m_arenas{nullptr};

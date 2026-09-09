@@ -649,6 +649,24 @@ std::vector<SceneSpec> buildSceneTable()
 		const ImageMetrics delta = visual::compareImages(actual, mobFree, 20);
 		need(delta.comparable() && delta.hotPixels > 400, errors,
 			 "mobs barely changed pixels (hot pixels " + std::to_string(delta.hotPixels) + ", want > 400)");
+
+		// Ensure mob pixels are properly lit by local skylight / direct sun (issue #128)
+		double mobLumaSum = 0.0;
+		size_t mobPxCount = 0;
+		for (size_t p = 0; p < actual.pixels.size(); p += 4)
+		{
+			const int dr = std::abs(int(actual.pixels[p]) - int(mobFree.pixels[p]));
+			const int dg = std::abs(int(actual.pixels[p + 1]) - int(mobFree.pixels[p + 1]));
+			const int db = std::abs(int(actual.pixels[p + 2]) - int(mobFree.pixels[p + 2]));
+			if (dr > 20 || dg > 20 || db > 20)
+			{
+				mobLumaSum += 0.2126 * actual.pixels[p] + 0.7152 * actual.pixels[p + 1] + 0.0722 * actual.pixels[p + 2];
+				++mobPxCount;
+			}
+		}
+		const double avgMobLuma = mobPxCount > 0 ? (mobLumaSum / double(mobPxCount)) : 0.0;
+		need(avgMobLuma > 25.0, errors,
+			 "sunlit mob pixels too dark: " + std::to_string(avgMobLuma) + " <= 25.0");
 		return errors;
 	};
 

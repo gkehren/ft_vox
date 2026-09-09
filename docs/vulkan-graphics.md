@@ -391,8 +391,19 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
 - **Static geometry, instanced transforms:** all four species are baked once into
   one shared vertex buffer (`Entities/MobModel`, Minecraft box-UV unfolding with
   horns / snout / fleece layers / beak / wings). Each frame, `prepare` writes one
-  `Instance {mat4 model, vec4 uvScale}` per body part into a per-frame-in-flight
+  `Instance {mat4 model, vec4 uvScale, vec4 localLight}` per body part into a per-frame-in-flight
   mapped buffer — no per-animal mesh rebuilds or uploads.
+- **Local voxel lighting (issue #128):** entities sample the continuous voxel lighting field
+  (skylight + propagated RGB4 block light from #141) with bounded trilinear interpolation
+  via `ChunkManager::sampleSmoothedLight` / `ChunkMobWorld::sampleLight`. `prepare` writes
+  `localLight = vec4(skylight, blockR, blockG, blockB)` into the instance buffer.
+  `mob.vert.glsl` forwards `vSkyLight` and `vBlockLightRGB` to `mob.frag.glsl`, which
+  faithfully matches terrain lighting semantics:
+  - Directional celestial light gated by local `sunReach * (1.0 - shadow)`
+  - Cave / outdoor ambient transition via `mix(caveAmbient, outdoorAmbient, sky) * hemisphere`
+  - Per-source colored linear RGB block light with quadratic falloff `blockFill * blockPeak * blockLightScale`
+  - Shared cascaded shadow map (CSM) sampling via `sampleDirectionalShadow`
+  - Consistent contrast / saturation / scotopic night vision and `sunReach`-gated distance fog
 - **Visibility:** one frustum test per mob against the camera matrix and the three
   cascade matrices; a per-draw visibility mask selects which pass sees which mob
   (`visibleCount` feeds the HUD). Casters behind the camera are still drawn into

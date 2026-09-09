@@ -4551,6 +4551,81 @@ int main(int argc, char **argv)
 		CHECK(physics::blockCell(LAVA).medium == physics::Medium::Lava, "lava is a separate medium");
 	}
 
+	// --- Issue #128: Dynamic entity local voxel lighting sampling ----------
+	{
+		ChunkPool pool(32);
+		TerrainGenerator generator(42);
+		ChunkManager manager(&generator, nullptr, &pool);
+
+		auto *chunk = pool.acquire(glm::vec3(0.0f));
+		chunk->prepareVoxelStorageForGeneration();
+		chunk->generateTerrain(generator);
+		ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), chunk);
+
+		// Before meshing, lightStorage is not published yet: sampleVoxelLight fallback
+		const auto preMeshLight = manager.sampleVoxelLight({8, 100, 8});
+		CHECK(preMeshLight.skylight == 0.0f && preMeshLight.blockRgb == glm::vec3(0.0f),
+		      "unmeshed chunk returns zero fallback");
+
+		// Build and publish mesh so chunk->hasLightStorage() becomes true
+		CHECK(chunk->generateMesh(), "generate mesh with light storage");
+		CHECK(chunk->hasLightStorage(), "chunk has published light storage");
+
+		// 1. Point queries on meshed chunk
+		const auto skyLight = manager.sampleVoxelLight({8, 200, 8});
+		CHECK(skyLight.skylight == 1.0f, "open sky has full skylight (1.0)");
+
+		// Out of world height queries:
+		const auto aboveWorld = manager.sampleVoxelLight({8, 260, 8});
+		CHECK(aboveWorld.skylight == 1.0f && aboveWorld.blockRgb == glm::vec3(0.0f),
+		      "above world height has full skylight");
+
+		const auto belowWorld = manager.sampleVoxelLight({8, -5, 8});
+		CHECK(belowWorld.skylight == 0.0f && belowWorld.blockRgb == glm::vec3(0.0f),
+		      "below world height returns darkness");
+
+		// Unloaded chunk coordinates
+		const auto missingChunk = manager.sampleVoxelLight({1000, 100, 1000});
+		CHECK(missingChunk.skylight == 0.0f && missingChunk.blockRgb == glm::vec3(0.0f),
+		      "missing chunk coordinate returns darkness");
+
+		// 2. Smoothed light queries (trilinear interpolation)
+		const auto smoothCenter = manager.sampleSmoothedLight(glm::vec3(8.5f, 200.5f, 8.5f));
+		CHECK(smoothCenter.skylight == 1.0f, "smoothed light at center matches open sky");
+
+		// Carve out a cave pocket and place a lava block
+		for (int z = 4; z <= 12; ++z)
+			for (int x = 4; x <= 12; ++x)
+				chunk->setVoxel(x, 150, z, STONE);
+		chunk->setVoxel(8, 140, 8, LAVA);
+		CHECK(chunk->generateMesh(), "remesh with lava inside enclosed space");
+
+		const auto lavaLight = manager.sampleVoxelLight({8, 141, 8});
+		CHECK(lavaLight.blockRgb.r > 0.5f, "block light near lava has high red component");
+
+		// Test ChunkCollisionView and ChunkMobWorld adapters
+		{
+			ChunkCollisionView view(manager);
+			const auto viewLight = view.sampleLight(glm::vec3(8.5f, 141.5f, 8.5f));
+			CHECK(viewLight.blockRgb.r > 0.5f, "ChunkCollisionView samples smoothed light");
+
+			ChunkMobWorld mobWorld(manager, generator);
+			const auto mobLight = mobWorld.sampleLight(glm::vec3(8.5f, 141.5f, 8.5f));
+			CHECK(mobLight.blockRgb.r == viewLight.blockRgb.r, "ChunkMobWorld delegates to view");
+		}
+
+		// Trilinear continuity: step along a line from (8.5, 141.5, 8.5) to (8.5, 145.5, 8.5)
+		float prevRed = 2.0f;
+		for (float y = 141.5f; y <= 145.5f; y += 0.25f)
+		{
+			const auto s = manager.sampleSmoothedLight(glm::vec3(8.5f, y, 8.5f));
+			CHECK(s.blockRgb.r <= prevRed + 1e-4f, "block light decreases monotonically away from lava");
+			prevRed = s.blockRgb.r;
+		}
+
+		pool.release(chunk);
+	}
+
 	runStreamingDispatchTests();
 
 	if (g_fails != 0)

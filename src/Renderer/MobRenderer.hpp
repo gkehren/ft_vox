@@ -46,6 +46,7 @@ class MobRenderer
     {
         glm::mat4 model;
         glm::vec4 uvScale;
+        glm::vec4 localLight;
     };
     struct Draw
     {

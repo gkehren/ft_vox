@@ -10,6 +10,7 @@
 #include <Chunk/VoxelPool.hpp>
 #include <Chunk/ChunkBorders.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
+#include <Chunk/ChunkLightPool.hpp>
 
 class Chunk;
 
@@ -71,6 +72,11 @@ public:
 	const BorderPool &borderPool() const { return m_borderPool; }
 	MeshResultPool &meshResultPool() { return m_meshPool; }
 	const MeshResultPool &meshResultPool() const { return m_meshPool; }
+	size_t lightStorageCapacity() const { return m_lightPool.capacity(); }
+	size_t lightStorageActive() const { return m_lightPool.activeCount(); }
+	size_t lightStorageFree() const { return m_lightPool.freeCount(); }
+	ChunkLightPool &lightPool() { return m_lightPool; }
+	const ChunkLightPool &lightPool() const { return m_lightPool; }
 
 private:
 	void publishTelemetry(); // caller holds m_mutex
@@ -86,6 +92,8 @@ private:
 	// Pooled mesh build results (issue #104) - same lifetime rule: chunks
 	// release attached results in their destructors.
 	MeshResultPool m_meshPool;
+	// Pooled chunk light storage (issue #128) - same lifetime rule.
+	ChunkLightPool m_lightPool;
 
 	/// All pool-owned chunks; unique_ptr keeps addresses stable across vector growth.
 	std::vector<std::unique_ptr<Chunk>> m_storage;

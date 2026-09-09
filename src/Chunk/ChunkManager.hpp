@@ -18,6 +18,7 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Engine/ThreadPool.hpp>
+#include <Renderer/Lighting.hpp>
 #include <utils.hpp>
 
 class Camera;
@@ -125,6 +126,14 @@ public:
 	Chunk *getChunkAtWorldPos(const glm::vec3 &worldPos);
 	Chunk *getChunk(const glm::ivec3 &chunkPos);
 	const Chunk *getChunk(const glm::ivec3 &chunkPos) const;
+
+	/// Sample published local lighting at an integer voxel coordinate.
+	lighting::LocalVoxelLight sampleVoxelLight(const glm::ivec3 &blockPos) const;
+	/// Sample smoothed local lighting via trilinear interpolation of the 8 surrounding voxel centers.
+	lighting::LocalVoxelLight sampleSmoothedLight(const glm::vec3 &worldPos) const;
+
+	lighting::LocalVoxelLight sampleVoxelLightUnlocked(const glm::ivec3 &blockPos) const;
+	lighting::LocalVoxelLight sampleSmoothedLightUnlocked(const glm::vec3 &worldPos) const;
 
 	/// Snapshot of the streaming maintenance counters (issue #108). Main
 	/// thread writes and reads them, so no lock is taken.

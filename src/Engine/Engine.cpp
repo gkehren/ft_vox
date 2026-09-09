@@ -1311,7 +1311,21 @@ void Engine::run()
 				const bool disabled = !mobsEnabled || m_benchmark.isActive();
 				mobs.update(deltaTime, world, glm::dvec3(camera.getPosition()),
 							renderSettings.maxRenderDistance, paused || !windowFocused || disabled);
-				if (disabled) mobStates.clear(); else mobs.renderStates(mobStates);
+				if (disabled)
+				{
+					mobStates.clear();
+				}
+				else
+				{
+					mobs.renderStates(mobStates);
+					for (auto &ms : mobStates)
+					{
+						const glm::vec3 samplePos = entities::mobLightSamplePosition(ms);
+						const auto light = world.sampleLight(samplePos);
+						ms.localSkylight = light.skylight;
+						ms.localBlockRgb = light.blockRgb;
+					}
+				}
 				worldRenderer->setMobs(mobStates);
 			}
 		}

@@ -70,6 +70,11 @@ public:
             ++y;
         return static_cast<float>(y);
     }
+
+    lighting::LocalVoxelLight sampleLight(const glm::vec3 &worldPos) const
+    {
+        return manager.sampleSmoothedLightUnlocked(worldPos);
+    }
 private:
     static int floorChunk(int n)
     {

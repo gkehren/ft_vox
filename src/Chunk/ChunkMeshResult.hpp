@@ -11,6 +11,8 @@
 
 class Chunk;
 class MeshResultPool;
+struct ChunkLightStorage;
+class ChunkLightPool;
 
 // Vertical mesh sections (issue #107): the logical chunk stays 16x256x16,
 // but its full-quality render mesh is one payload per 16x16x16 section so a
@@ -94,6 +96,10 @@ struct MeshBuildResult
 	// as voxel/border storage in #112/#113).
 	MeshResultPool *homePool{nullptr};
 
+	// Transient chunk light storage filled during meshing and committed at publish.
+	ChunkLightStorage *lightStorage{nullptr};
+	ChunkLightPool *lightPool{nullptr};
+
 	// Full-quality payload, one slot per vertical section (issue #107).
 	// beginBuild() drops previous content while keeping capacity - reuse
 	// across jobs is the point.
@@ -106,6 +112,8 @@ struct MeshBuildResult
 	// Pool-maintained byte counters (valid under the pool mutex): sizes are
 	// non-zero only between finishBuild() and release().
 	MeshResultAccounting accounted{};
+
+	~MeshBuildResult();
 
 	// Stamp identity and drop previous content (capacities are kept).
 	// `sectionMask` records which sections this build will refresh
