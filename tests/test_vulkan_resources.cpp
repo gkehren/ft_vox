@@ -6,7 +6,7 @@
 
 #include <Vulkan/VkContext.hpp>
 #include <Vulkan/VkLoadLibrary.hpp>
-#include <Vulkan/VkResourceSmoke.hpp>
+#include "VulkanResourceSmoke.hpp"
 #include <Vulkan/VkSwapchain.hpp>
 #include <Vulkan/VkGpuProfiler.hpp>
 #include <Vulkan/VkCommands.hpp>

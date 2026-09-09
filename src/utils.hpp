@@ -16,7 +16,6 @@
 #include <windows.h>
 #endif
 
-#define WORLD_SIZE 16384
 #define WORLD_HEIGHT 256
 
 #define RES_PATH "./ressources/"
@@ -142,7 +141,6 @@ struct VertexHasher
 static constexpr int CHUNK_SIZE = 16;										// Size of a chunk in voxels
 static constexpr int CHUNK_HEIGHT = 256;									// Height of a chunk in voxels
 static constexpr int CHUNK_VOLUME = CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE; // Total number of voxels in a chunk
-static constexpr int CHUNK_RADIUS = 16;										// Radius of a chunk in world units
 
 // Biome types based on temperature and humidity
 enum BiomeType
@@ -233,14 +231,6 @@ static const char *const biomeTypeString[BIOME_COUNT] = {
 
 static_assert(sizeof(biomeTypeString) / sizeof(biomeTypeString[0]) == BIOME_COUNT,
 			  "Every BiomeType needs a display name");
-
-struct TextureInfo
-{
-	unsigned int id;
-	bool hasTransparency;
-	bool hasBiomeColoring;
-	glm::vec3 defaultColor;
-};
 
 enum TextureType
 {
@@ -558,59 +548,3 @@ enum ChunkState
 	GENERATED,
 	MESHED
 };
-
-const static std::vector<std::string> skyboxFaces{
-	"skybox/right.jpg",
-	"skybox/left.jpg",
-	"skybox/top.jpg",
-	"skybox/bottom.jpg",
-	"skybox/front.jpg",
-	"skybox/back.jpg"};
-
-const static float skyboxVertices[] = {
-	-1.0f, 1.0f, -1.0f,
-	-1.0f, -1.0f, -1.0f,
-	1.0f, -1.0f, -1.0f,
-	1.0f, -1.0f, -1.0f,
-	1.0f, 1.0f, -1.0f,
-	-1.0f, 1.0f, -1.0f,
-
-	-1.0f, -1.0f, 1.0f,
-	-1.0f, -1.0f, -1.0f,
-	-1.0f, 1.0f, -1.0f,
-	-1.0f, 1.0f, -1.0f,
-	-1.0f, 1.0f, 1.0f,
-	-1.0f, -1.0f, 1.0f,
-
-	1.0f, -1.0f, -1.0f,
-	1.0f, -1.0f, 1.0f,
-	1.0f, 1.0f, 1.0f,
-	1.0f, 1.0f, 1.0f,
-	1.0f, 1.0f, -1.0f,
-	1.0f, -1.0f, -1.0f,
-
-	-1.0f, -1.0f, 1.0f,
-	-1.0f, 1.0f, 1.0f,
-	1.0f, 1.0f, 1.0f,
-	1.0f, 1.0f, 1.0f,
-	1.0f, -1.0f, 1.0f,
-	-1.0f, -1.0f, 1.0f,
-
-	-1.0f, 1.0f, -1.0f,
-	1.0f, 1.0f, -1.0f,
-	1.0f, 1.0f, 1.0f,
-	1.0f, 1.0f, 1.0f,
-	-1.0f, 1.0f, 1.0f,
-	-1.0f, 1.0f, -1.0f,
-
-	-1.0f, -1.0f, -1.0f,
-	-1.0f, -1.0f, 1.0f,
-	1.0f, -1.0f, -1.0f,
-	1.0f, -1.0f, -1.0f,
-	-1.0f, -1.0f, 1.0f,
-	1.0f, -1.0f, 1.0f};
-
-const static unsigned int indicesBoundingbox[] = {
-	0, 1, 1, 2, 2, 3, 3, 0,
-	4, 5, 5, 6, 6, 7, 7, 4,
-	0, 4, 1, 5, 2, 6, 3, 7};
