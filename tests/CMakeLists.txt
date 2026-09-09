@@ -26,6 +26,9 @@ add_test(NAME NetworkIntegrationTest COMMAND test_network)
 # ---------------------------------------------------------------------------
 add_executable(test_vulkan_resources
     test_vulkan_resources.cpp
+    # Test-only Vulkan smoke helper: sole consumer is this target; the game
+    # binary and the other device tests do not compile or ship it.
+    VulkanResourceSmoke.cpp
     ${FT_VOX_VULKAN_SOURCES}
 )
 

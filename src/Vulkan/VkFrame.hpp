@@ -34,9 +34,6 @@ public:
 	/// Returns false if present reports out-of-date / suboptimal.
 	bool submitAndPresent(VkSwapchain &swapchain, uint32_t imageIndex);
 
-	/// Legacy clear-only path (tests / smoke). Prefer record + submitAndPresent for the game.
-	bool endFrameClearAndPresent(VkSwapchain &swapchain, uint32_t imageIndex, const VkClearColorValue &clearColor);
-
 	VkGpuProfiler &gpuProfiler() { return m_gpuProfiler; }
 
 	uint32_t frameIndex() const { return m_currentFrame; }
@@ -55,8 +52,6 @@ private:
 	};
 
 	void ensureSwapchainImageSync(uint32_t imageCount);
-	void recordClearCommands(VkCommandBuffer cmd, VkSwapchain &swapchain, uint32_t imageIndex,
-							 const VkClearColorValue &clearColor);
 
 	VkGpuProfiler m_gpuProfiler;
 	VkContext *m_context{nullptr};

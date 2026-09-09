@@ -1,4 +1,4 @@
-#include "Vulkan/VkResourceSmoke.hpp"
+#include "VulkanResourceSmoke.hpp"
 
 #include "Vulkan/VkBuffer.hpp"
 #include "Vulkan/VkCommands.hpp"

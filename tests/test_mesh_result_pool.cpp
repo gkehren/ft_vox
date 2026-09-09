@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <iostream>
 #include <mutex>
 #include <set>
 #include <thread>
