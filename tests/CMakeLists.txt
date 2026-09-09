@@ -1,7 +1,3 @@
-# Vulkan smoke helpers shared by the device-backed tests below. Test-only:
-# the game binary does not compile or ship them.
-list(APPEND FT_VOX_VULKAN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/VulkanResourceSmoke.cpp)
-
 # Experimental UDP prototype: test-only target, requires Boost (optional dep).
 if(TARGET Boost::system)
     add_executable(test_network
@@ -35,6 +31,9 @@ add_test(NAME PlayerPhysics COMMAND test_physics)
 # ---------------------------------------------------------------------------
 add_executable(test_vulkan_resources
     test_vulkan_resources.cpp
+    # Test-only Vulkan smoke helper: sole consumer is this target; the game
+    # binary and the other device tests do not compile or ship it.
+    VulkanResourceSmoke.cpp
     ${FT_VOX_VULKAN_SOURCES}
 )
 
@@ -167,6 +166,11 @@ add_executable(test_render_helpers
     ${CMAKE_SOURCE_DIR}/src/Renderer/TextureMips.cpp
 )
 
+# The FrameUBO contract scan reads the generated frame_ubo.inc.glsl; declare
+# the dependency so an isolated `--target test_render_helpers` build still
+# generates it (the generator target is not ALL by itself through shaders).
+add_dependencies(test_render_helpers ft_vox_frame_ubo_glsl)
+
 target_include_directories(test_render_helpers PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
@@ -178,6 +182,8 @@ target_compile_definitions(test_render_helpers PRIVATE
     # Absolute source-tree anchor so the shader source-contract scans work
     # from any build directory (out-of-tree builds included), issue #165 review.
     FT_VOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    # Absolute build-tree anchor for the generated frame_ubo.inc.glsl contract.
+    FT_VOX_BINARY_DIR="${CMAKE_BINARY_DIR}"
 )
 
 target_link_libraries(test_render_helpers PRIVATE

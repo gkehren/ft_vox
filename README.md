@@ -75,7 +75,7 @@ cmake --build build --config Release
 | Component | Role | Linux package (examples) | vcpkg |
 |-----------|------|--------------------------|-------|
 | SDL3 | Window, input, Vulkan surface | `libsdl3-dev` / `SDL3-devel` | `sdl3[vulkan]` |
-| Boost.System / Asio | Experimental UDP networking prototype (compiled into `test_network` only; not used by the game runtime) | `libboost-system-dev` | `boost-asio`, `boost-system` |
+| Boost.System / Asio | Experimental UDP networking prototype (compiled into `test_network` only; Boost is **not linked into the game binary**) | `libboost-system-dev` | `boost-asio`, `boost-system` |
 | Vulkan headers + loader | API | `libvulkan-dev` | `vulkan-headers`, `vulkan-loader` |
 | volk (zeux) | Dynamic Vulkan load | *FetchContent* if missing | `volk` |
 | VMA | GPU allocations | *system header or FetchContent* | `vulkan-memory-allocator` |
@@ -166,7 +166,7 @@ sudo apt install vulkan-validationlayers
 | [`docs/gpu-profiling.md`](docs/gpu-profiling.md) | GPU profiler and timing workflow |
 | [`docs/workload-telemetry.md`](docs/workload-telemetry.md) | CPU workload telemetry (`FT_VOX_TELEMETRY`) |
 | [`docs/vulkan-validation.md`](docs/vulkan-validation.md) | Validation-layer setup and error-reporting probe |
-| [`docs/benchmarks/`](docs/benchmarks/) | Benchmark run reports and methodology syntheses per issue/PR |
+| [`docs/benchmarks/`](docs/benchmarks/) | Benchmark methodology syntheses (retention policy: [`docs/benchmarks/README.md`](docs/benchmarks/README.md)) |
 | [`AGENTS.md`](AGENTS.md) | Contributor-oriented project map and conventions |
 
 ## Project layout
@@ -174,7 +174,7 @@ sudo apt install vulkan-validationlayers
 ```
 cmake/
   Dependencies.cmake   # multi-platform package resolution
-docs/                  # architecture docs, benchmark reports and syntheses
+docs/                  # architecture docs + benchmark syntheses
 src/
   Vulkan/              # Instance, device, swapchain, VMA, frames, shaders
   Renderer/            # WorldRenderer, Shadow/Opaque/Water/Sky, PostStack, overlays

@@ -30,7 +30,7 @@
 - **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator — **ShadowPass → OpaquePass → WaterPass → SkyPass → PostStack** (+ `MobRenderer`, `OverlayRenderer`, `TextureManager`, `FrameUBO`, `MaterialTable`, `Lighting`, `ShadowCascades`)
 
 ### Networking (`src/Network/`) — experimental, test-only
-- **Client/Server**: Boost.Asio UDP for player position and world state. Not a shipped feature: the module is compiled into `test_network` only — the game binary builds none of its sources. Do not add new runtime dependencies on it without re-arming the build wiring first.
+- **Client/Server**: Boost.Asio UDP for player position and world state. Not a shipped feature: the module is compiled into `test_network` only and is **not linked into the game binary**. Do not add new runtime dependencies on it without re-arming the build wiring first.
 
 ## Technologies & Dependencies
 - **Language**: C++20
@@ -55,7 +55,7 @@
 | Linux apt (example) | `libsdl3-dev`, `libboost-system-dev`, `libvulkan-dev`, `glslang-tools` |
 | macOS brew | `sdl3`, `boost`, `molten-vk`, `vulkan-loader`, `glslang` |
 
-**Removed (cleanup):** OpenGL stack (GLAD, legacy GLSL, `Renderer`/`Shader`/`UIManager`/`TextRenderer`/`PostProcessing`), unused ImGui extras (OpenGL/SDLGPU backends, demo, stdlib helper), unused `InputSystem`/`EventBus`, FreeType vcpkg dep. Note: **`ImGuiFileDialog` is NOT removed** — it is vendored under `src/ImGuiFileDialog/` and used by the resource-pack browser. The Network module stays for `test_network` only (compiled into the test; the game binary builds none of its sources).
+**Removed (cleanup):** OpenGL stack (GLAD, legacy GLSL, `Renderer`/`Shader`/`UIManager`/`TextRenderer`/`PostProcessing`), unused ImGui extras (OpenGL/SDLGPU backends, demo, stdlib helper), unused `InputSystem`/`EventBus`, FreeType vcpkg dep. Note: **`ImGuiFileDialog` is NOT removed** — it is vendored under `src/ImGuiFileDialog/` and used by the resource-pack browser. The Network module stays for `test_network` only (compiled into the test; **Boost is not linked into the game binary**).
 
 ### macOS (MoltenVK)
 ```bash
