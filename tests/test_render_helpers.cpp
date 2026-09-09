@@ -794,12 +794,14 @@ int main()
 			"../generated/shaders/frame_ubo.inc.glsl",
 		};
 		std::string glsl;
+		fs::path glslPath;
 		for (const char *c : candidates)
 		{
 			std::ifstream in(c);
 			if (in)
 			{
 				glsl.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+				glslPath = c;
 				break;
 			}
 		}
@@ -820,6 +822,47 @@ int main()
 			}
 			if (glsl.find("postParams") != std::string::npos)
 				ok = fail("generated FrameUBO must not contain dead postParams");
+			// Issue #161: the two dead lanes (lightParams.z held a no-op
+			// "Light levels" slider, visualParams.z a duplicate colorBoost
+			// copy) must be documented as reserved in the contract itself,
+			// not silently re-assigned fake semantics.
+			for (const char *laneLine : {"vec4 lightParams;", "vec4 visualParams;"})
+			{
+				const auto linePos = glsl.find(laneLine);
+				if (linePos == std::string::npos)
+					ok = fail(std::string("generated FrameUBO GLSL missing field: ") + laneLine);
+				else
+				{
+					const auto end = glsl.find('\n', linePos);
+					const std::string line = glsl.substr(linePos, end - linePos);
+					if (line.find("reserved") == std::string::npos)
+						ok = fail("generated FrameUBO lane must be commented reserved (issue #161): " + line);
+				}
+			}
+
+			// Feature-live guard: no production shader may read the reserved
+			// FrameUBO lanes (lightParams.z / visualParams.z). Packing a value
+			// no shader consumes is what made the old "Light levels" slider a
+			// silent no-op.
+			std::error_code ec;
+			fs::path shaderDir = glslPath.parent_path();
+			for (const auto &entry : fs::directory_iterator(shaderDir, ec))
+			{
+				const fs::path &shaderPath = entry.path();
+				if (shaderPath.extension() != ".glsl" || shaderPath == glslPath)
+					continue;
+				std::ifstream in(shaderPath);
+				if (!in)
+					continue;
+				std::string shaderSrc{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+				for (const char *lane : {"lightParams.z", "visualParams.z"})
+					if (shaderSrc.find(lane) != std::string::npos)
+						ok = fail(shaderPath.filename().string() +
+								  " reads reserved FrameUBO lane " + lane +
+								  " — define real semantics or drop the read (issue #161)");
+			}
+			if (ec)
+				ok = fail("could not scan shader dir for reserved-lane reads: " + ec.message());
 		}
 	}
 
