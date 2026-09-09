@@ -430,18 +430,23 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
   the image aspect. **Mipmapped minification (issue #160):** every skin gets a
   full CPU-generated mip chain (`texture_mips::generateLayerChainRects`, W×H-aware
   and **UV-rect aware** — a mob skin is an atlas of independent box faces whose
-  rects are derived from the baked `MobModel` vertices, so the linear-light,
-  alpha-coverage-preserving #136 filter never blends neighboring faces across
-  odd UV boundaries, each face keeps its own alpha coverage, and unused regions
-  get alpha-0 gutters of the neighboring face color). The chain is uploaded
-  level-by-level with `uploadRgba8Image2DMipChain` (one copy, all levels resident
-  before the descriptor set is written; ~+33% device payload for the chain).
-  Sampler: NEAREST magnification (crisp close-range pixel-art texels), LINEAR
-  minification with LINEAR mip selection, clamp to edge; anisotropy stays off —
-  mostly upright box-model surfaces showed no gain to justify it. The
-  `NearestMip0` sampler policy reproduces the pre-#160 behavior for the A/B
-  temporal regression in `test_mob_render` (mip0/nearest vs mipmapped over a
-  fixed mob ROI).
+  rects come from `entities::mobTextureFaceRects` on the baked model vertices;
+  each level's texels are owned by exactly one face, the linear-light
+  alpha-coverage filter runs per face, and unused regions become alpha-0
+  gutters of the neighboring face color). Because faces sit directly adjacent
+  in the atlas, **intra-level sampling stays NEAREST** — LINEAR would blend
+  neighboring faces right at their shared border (the GPU seam/LOD regression
+  in `test_mob_render` measures exactly this: purity 0.90 vs 0.05 at LOD 2);
+  mip SELECTION stays LINEAR so minification transitions stay smooth — that is
+  where the measured temporal-stability gain comes from (mip0/nearest vs
+  mipmapped A/B over a fixed mob ROI, gate ≥ 10%). The chain is uploaded
+  level-by-level with `uploadRgba8Image2DMipChain` (one copy, all levels
+  resident before the descriptor set is written; ~+33% device payload for the
+  chain). Sampler: NEAREST magnification and minification, LINEAR mip
+  selection, clamp to edge; anisotropy stays off — mostly upright box-model
+  surfaces showed no gain to justify it. The `NearestMip0` sampler policy
+  reproduces the pre-#160 behavior for the A/B, `LinearMips` is the seam-test
+  reference.
 - **Reload:** part of the failure-atomic resource-pack path. `prepareTextures`
   stages a complete new `Textures` bundle (image, sampler, descriptor pool/sets)
   before `commitTextures` swaps it in; a GPU failure anywhere keeps the previous

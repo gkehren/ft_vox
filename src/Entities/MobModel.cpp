@@ -1,4 +1,5 @@
 #include "MobModel.hpp"
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -100,5 +101,53 @@ glm::mat4 mobPartTransform(const MobRenderState &s, const MobPart &p)
     if (p.bone == MobBone::WingLeft || p.bone == MobBone::WingRight)
         m = glm::rotate(m, s.flap * (p.bone == MobBone::WingLeft ? 1.f : -1.f), glm::vec3(0, 0, 1));
     return glm::rotate(m, pitch, glm::vec3(1, 0, 0));
+}
+std::vector<MobFaceRect> mobTextureFaceRects(const MobModels &models, uint32_t texture, uint32_t imgW,
+                                             uint32_t imgH)
+{
+    std::vector<MobFaceRect> rects;
+    const uint32_t scale = imgW / 64u;
+    for (const auto &species : models.models)
+    {
+        for (const auto &part : species.parts)
+        {
+            if (part.texture != texture)
+                continue;
+            // 6 faces x 6 vertices, baked contiguously per part; each face's
+            // 4 UV corners are exactly its rect corners in model pixels.
+            for (uint32_t face = 0; face < 6; ++face)
+            {
+                const size_t base = part.firstVertex + face * 6;
+                float u0 = 1.0f, v0 = 1.0f, u1 = 0.0f, v1 = 0.0f;
+                for (size_t v = base; v < base + 6 && v < models.vertices.size(); ++v)
+                {
+                    const glm::vec2 &uv = models.vertices[v].uv;
+                    u0 = std::min(u0, uv.x);
+                    v0 = std::min(v0, uv.y);
+                    u1 = std::max(u1, uv.x);
+                    v1 = std::max(v1, uv.y);
+                }
+                // uv corners are exact multiples of 1/64, 1/32 (powers of two).
+                const uint32_t rx = uint32_t(std::lround(u0 * 64.0f)) * scale;
+                const uint32_t ry = uint32_t(std::lround(v0 * 32.0f)) * scale;
+                const uint32_t rw = (uint32_t(std::lround(u1 * 64.0f)) - uint32_t(std::lround(u0 * 64.0f))) * scale;
+                const uint32_t rh = (uint32_t(std::lround(v1 * 32.0f)) - uint32_t(std::lround(v0 * 32.0f))) * scale;
+                if (rw == 0 || rh == 0 || rx + rw > imgW || ry + rh > imgH)
+                    continue; // defensive: never emit a rect outside the image
+                rects.push_back({rx, ry, rw, rh});
+            }
+        }
+    }
+    // Distinct faces never overlap in these layouts, but different parts can
+    // share identical rects (e.g. the two cow horns) — deduplicate.
+    std::sort(rects.begin(), rects.end(), [](const MobFaceRect &a, const MobFaceRect &b) {
+        return a.y != b.y ? a.y < b.y : a.x != b.x ? a.x < b.x : a.h != b.h ? a.h < b.h : a.w < b.w;
+    });
+    rects.erase(std::unique(rects.begin(), rects.end(),
+                            [](const MobFaceRect &a, const MobFaceRect &b) {
+                                return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+                            }),
+                rects.end());
+    return rects;
 }
 } // namespace entities

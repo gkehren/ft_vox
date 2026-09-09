@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 namespace texture_mips
@@ -554,6 +555,10 @@ void generateLayerChainRects(uint32_t baseWidth, uint32_t baseHeight, const uint
 		generateLayerChain(baseWidth, baseHeight, layerPixels, outChain);
 		return;
 	}
+	// Owners are stored one byte per texel and kNoOwner == 0xff, so both the
+	// count and the last index must stay clear of the sentinel.
+	if (rectCount >= 255)
+		throw std::runtime_error("generateLayerChainRects: at most 254 UV rects are supported");
 	const uint32_t levels = mipLevelCount(baseWidth, baseHeight);
 
 	// Level 0 keeps the source texels inside every rect; don't-care texels get

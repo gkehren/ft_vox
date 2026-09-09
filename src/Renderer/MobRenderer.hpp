@@ -16,10 +16,13 @@ class MobRenderer
 {
   public:
     /// Sampler policy for the mob albedo textures. Mipmapped is the shipping
-    /// path (NEAREST magnification, LINEAR minification over the full chain);
-    /// NearestMip0 reproduces the pre-#160 behavior and exists for the A/B
+    /// path (NEAREST magnification and minification over the full UV-rect-aware
+    /// chain, LINEAR mip SELECTION — faces are adjacent in the atlas, so
+    /// intra-level LINEAR would blend them right at their shared border).
+    /// LinearMips keeps the intra-level bilinear and exists as the seam-test
+    /// reference; NearestMip0 reproduces the pre-#160 behavior for the A/B
     /// temporal regression test.
-    enum class SamplerPolicy { Mipmapped, NearestMip0 };
+    enum class SamplerPolicy { Mipmapped, LinearMips, NearestMip0 };
     struct Textures
     {
         VkContext *context{};
@@ -43,9 +46,14 @@ class MobRenderer
     void commitTextures(std::unique_ptr<Textures> textures) { m_textures.swap(textures); }
     MobTextureReport textureReport() const { return m_textures ? m_textures->report : MobTextureReport{}; }
     VkFormat textureFormat() const { return (m_textures && m_textures->images[0].image) ? m_textures->images[0].format : VK_FORMAT_UNDEFINED; }
-    /// Mip levels of the first committed mob image (0 when none); asserts the
-    /// full-chain GPU wiring for issue #160.
-    uint32_t textureMipLevels() const { return (m_textures && m_textures->images[0].image) ? m_textures->images[0].mipLevels : 0; }
+    /// Mip levels of the committed mob image `index` (0 when unset) — the
+    /// per-texture form lets tests assert every image's chain, not just [0].
+    uint32_t textureMipLevels(size_t index) const
+    {
+        return (m_textures && index < m_textures->images.size() && m_textures->images[index].image)
+                   ? m_textures->images[index].mipLevels
+                   : 0;
+    }
     /// Logical RGBA8 texel payload across all committed mob albedo images,
     /// mip chains included. This is the texture content size, not the VMA
     /// allocation size (which adds alignment/padding).

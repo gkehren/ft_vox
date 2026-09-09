@@ -6,13 +6,52 @@
 #include <Vulkan/ImageBarrier.hpp>
 #include <SDL3/SDL.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <miniz.h>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <chrono>
+#include <map>
 #include <numeric>
 
 namespace fs = std::filesystem;
+// Minimal RGBA PNG encoder (same scheme as test_mob_textures) for synthetic
+// resource-pack skins.
+static std::vector<uint8_t> encodePng(int w, int h, const std::vector<uint8_t> &rgba)
+{
+    std::vector<uint8_t> out{137, 80, 78, 71, 13, 10, 26, 10};
+    auto be = [](std::vector<uint8_t> &v, uint32_t n) {
+        for (int s : {24, 16, 8, 0})
+            v.push_back(uint8_t(n >> s));
+    };
+    auto chunk = [&](const char *type, const std::vector<uint8_t> &payload) {
+        be(out, uint32_t(payload.size()));
+        auto start = out.size();
+        out.insert(out.end(), type, type + 4);
+        out.insert(out.end(), payload.begin(), payload.end());
+        be(out, uint32_t(mz_crc32(0, out.data() + start, out.size() - start)));
+    };
+    std::vector<uint8_t> header;
+    be(header, w);
+    be(header, h);
+    header.insert(header.end(), {8, 6, 0, 0, 0});
+    chunk("IHDR", header);
+    std::vector<uint8_t> raw(size_t(h) * (w * 4 + 1), 0);
+    for (int y = 0; y < h; ++y)
+    {
+        raw[size_t(y) * (w * 4 + 1)] = 0; // filter none
+        memcpy(&raw[size_t(y) * (w * 4 + 1) + 1], &rgba[size_t(y) * w * 4], size_t(w) * 4);
+    }
+    mz_ulong size = mz_compressBound(raw.size());
+    std::vector<uint8_t> compressed(size);
+    if (mz_compress(compressed.data(), &size, raw.data(), raw.size()) != MZ_OK)
+        throw std::runtime_error("png compress failed");
+    compressed.resize(size);
+    chunk("IDAT", compressed);
+    chunk("IEND", {});
+    return out;
+}
 static PFN_vkAllocateDescriptorSets realAllocate{};
 static int allocationCalls{};
 static VKAPI_ATTR VkResult VKAPI_CALL failAllocate(VkDevice d, const VkDescriptorSetAllocateInfo *i,
@@ -296,10 +335,13 @@ int main(int argc, char **argv)
         // the real wiring, not just the kAlbedoTextureFormat policy constant.
         if (f.renderer.textureFormat() != colorspace::kAlbedoTextureFormat)
             throw std::runtime_error("MobRenderer entity albedo textures must be created sRGB");
-        // Issue #160 integration: the 64x64 default skins must carry the full
-        // mip chain on the GPU (floor(log2(64)) + 1 = 7 levels), not mip 0 only.
-        if (f.renderer.textureMipLevels() != 7)
-            throw std::runtime_error("MobRenderer entity textures must carry a full 7-level mip chain");
+        // Issue #160 integration: every committed mob image must carry the
+        // full mip chain on the GPU (floor(log2(64)) + 1 = 7 levels for both
+        // the 64x64 and the 64x32 skins), not mip 0 only.
+        for (size_t i = 0; i < 6; ++i)
+            if (f.renderer.textureMipLevels(i) != 7)
+                throw std::runtime_error("MobRenderer entity texture " + std::to_string(i) +
+                                         " must carry a full 7-level mip chain");
         {
             TextureManager atlas;
             atlas.initialize(f.context, f.imm, "");
@@ -416,6 +458,126 @@ int main(int argc, char **argv)
                     ++farChanged;
             if (farChanged < 50)
                 throw std::runtime_error("far-distance mobs produced no pixels");
+        }
+
+        // Issue #160 (review round 2): GPU seam/LOD regression. Every cow UV
+        // face rect is painted ONE pure palette color on an aggressive
+        // synthetic skin (unused texels: transparent magenta). UV-rect-aware
+        // mip generation keeps every owned texel of every level pure, so any
+        // impure rendered pixel can only come from GPU filtering across rect
+        // borders or deep-level ownership collapse. The shipping sampler
+        // (NEAREST intra-level + LINEAR mip selection) must keep face colors
+        // dominant at every LOD and must beat the LinearMips reference, whose
+        // intra-level LINEAR blends adjacent faces right at their shared
+        // border — the failure mode this test exists to expose.
+        {
+            entities::MobModels baked;
+            const auto rects = entities::mobTextureFaceRects(baked, 0, 64, 64);
+            if (rects.size() < 20)
+                throw std::runtime_error("unexpectedly few cow face rects for the seam fixture");
+            std::vector<uint8_t> skin(64 * 64 * 4, 0);
+            for (size_t i = 0; i < 64 * 64; ++i)
+            {
+                skin[i * 4] = 255; // unused: loud magenta, alpha 0
+                skin[i * 4 + 2] = 255;
+            }
+            for (const auto &r : rects)
+            {
+                const size_t code = size_t(&r - rects.data());
+                const uint8_t c[3] = {uint8_t(code & 1 ? 240 : 15), uint8_t(code & 2 ? 240 : 15),
+                                      uint8_t(code & 4 ? 240 : 15)};
+                for (uint32_t y = r.y; y < r.y + r.h; ++y)
+                    for (uint32_t x = r.x; x < r.x + r.w; ++x)
+                        for (int ch = 0; ch < 4; ++ch)
+                            skin[(size_t(y) * 64 + x) * 4 + ch] = ch < 3 ? c[ch] : 255;
+            }
+            const fs::path pack = fs::temp_directory_path() / "ft-vox-mob-seam-pack";
+            fs::create_directories(pack / "assets/minecraft/textures/entity/cow");
+            {
+                const std::vector<uint8_t> pngData = encodePng(64, 64, skin);
+                std::ofstream pngOut(pack / "assets/minecraft/textures/entity/cow/cow_temperate.png",
+                                     std::ios::binary);
+                pngOut.write(reinterpret_cast<const char *>(pngData.data()), std::streamsize(pngData.size()));
+            }
+
+            // Flat-lighting frame: zero diffuse, ambient only, so every face
+            // renders as exactly ONE flat color and any deviation is a
+            // filtering artifact, not shading.
+            const auto seamFrame = [&](float dist) {
+                FrameUBO u = frame(float(f.width) / float(f.height));
+                const glm::vec3 eye(0.f, 1.7f, -dist);
+                u.view = glm::lookAt(eye, glm::vec3(0, 0.9f, 0), glm::vec3(0, 1, 0));
+                u.projection = glm::perspective(glm::radians(45.f), float(f.width) / float(f.height), 0.1f, 400.f);
+                u.viewPos = glm::vec4(eye, 1);
+                u.lightParams = {0.9, 0.0, 16, 1.0};
+                u.fogParams = {400.f, 800.f, 0.f, 0.f};
+                std::vector<entities::MobRenderState> mob = {
+                    {entities::MobSpecies::Cow, {0, 0, 0}, 0, 0, 0, 0, 0, 1.0f, glm::vec3(0.0f)}};
+                return f.render(mob, u, 0);
+            };
+            const auto mobPixelIdx = [&](const std::vector<uint8_t> &px) {
+                std::vector<size_t> idx;
+                for (size_t p = 0; p < px.size(); p += 4)
+                    if (std::abs(int(px[p]) - 31) + std::abs(int(px[p + 1]) - 43) + std::abs(int(px[p + 2]) - 59) > 24)
+                        idx.push_back(p);
+                return idx;
+            };
+            // Learn the flat face colors from the close (LOD ~0) render: under
+            // NEAREST magnification every mob pixel IS one face's flat color.
+            std::vector<std::array<int, 3>> flatColors;
+            f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, pack.string(),
+                                                                 MobRenderer::SamplerPolicy::Mipmapped));
+            {
+                const auto closePx = seamFrame(12.f);
+                const auto closeIdx = mobPixelIdx(closePx);
+                std::map<std::array<int, 3>, int> counts;
+                for (size_t p : closeIdx)
+                    counts[{int(closePx[p]), int(closePx[p + 1]), int(closePx[p + 2])}]++;
+                for (const auto &c : counts)
+                    if (c.second >= 2)
+                        flatColors.push_back(c.first);
+            }
+            if (flatColors.size() < 6)
+                throw std::runtime_error("seam fixture learned too few flat face colors");
+
+            const auto purityAt = [&](float dist) {
+                const auto px = seamFrame(dist);
+                const auto idx = mobPixelIdx(px);
+                size_t pure = 0;
+                for (size_t p : idx)
+                    for (const auto &c : flatColors)
+                        if (std::abs(int(px[p]) - c[0]) <= 2 && std::abs(int(px[p + 1]) - c[1]) <= 2 &&
+                            std::abs(int(px[p + 2]) - c[2]) <= 2)
+                        {
+                            ++pure;
+                            break;
+                        }
+                return idx.empty() ? 0.0 : double(pure) / double(idx.size());
+            };
+            const auto runStages = [&](MobRenderer::SamplerPolicy policy) {
+                f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, pack.string(), policy));
+                return std::array<double, 3>{purityAt(12.f), purityAt(90.f), purityAt(180.f)};
+            };
+            const auto ship = runStages(MobRenderer::SamplerPolicy::Mipmapped);
+            const auto linear = runStages(MobRenderer::SamplerPolicy::LinearMips);
+            // Restore the default pack (shipping sampling) for the rest of the suite.
+            f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, ""));
+            std::cout << "Mob seam LOD purity (close/LOD1/LOD2): shipping " << ship[0] << "/" << ship[1] << "/"
+                      << ship[2] << ", linear-intra " << linear[0] << "/" << linear[1] << "/" << linear[2] << "\n";
+            {
+                std::ofstream report(output / "seam-lod.txt", std::ios::app);
+                report << "Mob seam LOD purity (close/LOD1/LOD2): shipping " << ship[0] << "/" << ship[1] << "/"
+                       << ship[2] << ", linear-intra " << linear[0] << "/" << linear[1] << "/" << linear[2] << "\n";
+            }
+            if (ship[0] < 0.95)
+                throw std::runtime_error("close-range seam purity too low — face colors are not flat/pure");
+            if (ship[1] < 0.70 || ship[2] < 0.60)
+                throw std::runtime_error("shipping sampler leaks across UV face seams at minification");
+            // The comparative proof: intra-level LINEAR must measure strictly
+            // worse at minified stages — the test keeps exposing the seam
+            // problem the shipping sampler avoids.
+            if (linear[1] >= ship[1] || linear[2] >= ship[2])
+                throw std::runtime_error("LinearMips reference should measure worse than NEAREST intra-level");
         }
 
         // Issue #160 (review P2): a REAL A/B of the temporal benefit. The same
