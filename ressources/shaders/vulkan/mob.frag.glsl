@@ -2,6 +2,7 @@
 #include "frame_ubo.inc.glsl"
 #include "csm.inc.glsl"
 #include "colorspace.inc.glsl"
+#include "atmosphere_fog.inc.glsl"
 
 layout(location=0) in vec3 worldPosition;
 layout(location=1) in vec3 worldNormal;
@@ -27,7 +28,6 @@ void main() {
     float nightFactor = frame.skyParams.w;
     float sunsetFactor = frame.skyParams.z;
     float blockLightScale = frame.lightingParams.x;
-    float fogBaseY = frame.lightingParams.z;
 
     // Local skylight describes enclosure.
     float sky = clamp(vSkyLight, 0.0, 1.0);
@@ -58,34 +58,13 @@ void main() {
     float nightLum = dot(result, kRec709Luma);
     result = mix(result, vec3(nightLum) * vec3(0.62, 0.74, 1.05), nightFactor * 0.38);
 
-    // Fog + aerial perspective (distance desat toward sky-tinted haze)
-    float fogStart = frame.fogParams.x;
-    float fogEnd = frame.fogParams.y;
-    float fogDensity = frame.fogParams.z;
-    float heightFalloff = frame.fogParams.w;
-    float dist = length(worldPosition - frame.viewPos.xyz);
-    float linearFog = smoothstep(fogStart, max(fogStart + 1.0, fogEnd), dist);
-    float avgY = 0.5 * (worldPosition.y + frame.viewPos.y);
-    float heightTerm = exp(-heightFalloff * max(0.0, avgY - fogBaseY));
-    float densityFog = 1.0 - exp(-max(0.0, dist - fogStart * 0.25) * fogDensity * 0.0009 * heightTerm);
-    float fogAmount = clamp(max(linearFog, densityFog), 0.0, 0.45) * sunReach;
+    // Aerial perspective via the shared camera-to-surface air contract
+    // (issue #159): same amount, haze color and composition as terrain at the
+    // same world position, gated by the same local-skylight enclosure term.
+    AtmosphereFog atmo = evaluateAtmosphereFog(worldPosition, sunReach);
 
-    vec3 dayAerial = vec3(0.40, 0.60, 0.90);
-    vec3 sunsetAerial = vec3(0.95, 0.55, 0.32);
-    vec3 nightAerial = vec3(0.014, 0.022, 0.048);
-    vec3 aerialSky = mix(dayAerial, sunsetAerial, sunsetFactor);
-    aerialSky = mix(aerialSky, nightAerial, nightFactor);
-    vec3 fogCol = mix(frame.fogColor.rgb, aerialSky, 0.55);
-    fogCol = mix(fogCol, vec3(1.0, 0.72, 0.42), sunsetFactor * 0.25);
-
-    float lum = dot(result, kRec709Luma);
     result = gradeSaturation(result, saturationLevel);
-
-    float aerial = fogAmount;
-    float desat = mix(1.0, 0.72, aerial);
-    vec3 aerialLit = mix(vec3(lum), result, desat);
-    vec3 fogMix = mix(fogCol, aerialLit * 0.40 + fogCol * 0.60, 0.22);
-    result = mix(aerialLit, fogMix, aerial);
+    result = applyAtmosphereFog(result, atmo);
 
     outColor = vec4(result, 1.0);
 }

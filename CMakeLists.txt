@@ -65,6 +65,7 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
                 ${FT_VOX_SHADER_SRC_DIR}/sky_radiance.inc.glsl
                 ${FT_VOX_SHADER_SRC_DIR}/water_optics.inc.glsl
                 ${FT_VOX_SHADER_SRC_DIR}/cutout.inc.glsl
+                ${FT_VOX_SHADER_SRC_DIR}/atmosphere_fog.inc.glsl
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )
@@ -82,6 +83,7 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
                 ${FT_VOX_SHADER_SRC_DIR}/sky_radiance.inc.glsl
                 ${FT_VOX_SHADER_SRC_DIR}/water_optics.inc.glsl
                 ${FT_VOX_SHADER_SRC_DIR}/cutout.inc.glsl
+                ${FT_VOX_SHADER_SRC_DIR}/atmosphere_fog.inc.glsl
             COMMENT "SPIR-V: ${GLSL_NAME} -> ${SPV_NAME}"
             VERBATIM
         )

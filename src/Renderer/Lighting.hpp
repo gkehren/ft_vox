@@ -30,21 +30,26 @@ inline float exponentialHeightFogFactor(float distance, float worldY, float came
 
 // --- Outdoor look (fog / SSAO) — must match terrain.frag + composite defaults ---
 
-/// Density-scale used in terrain.frag for the exp height fog term (was 0.0018 = too milky).
-inline constexpr float kTerrainFogDensityScale = 0.0009f;
-/// Max fog mix toward fog color (was 0.82 → 0.55; lowered again for midground chroma).
-inline constexpr float kTerrainFogAmountCap = 0.45f;
+/// Density-scale used by the shared atmosphere helper (atmosphere_fog.inc.glsl)
+/// for the exp height fog term (was 0.0018 = too milky).
+inline constexpr float kAtmosphereFogDensityScale = 0.0009f;
+/// Max fog mix toward haze color (was 0.82 → 0.55; lowered again for midground chroma).
+inline constexpr float kAtmosphereFogAmountCap = 0.45f;
+/// Desaturation floor at full haze — shared aerial-perspective grade
+/// (atmosphere_fog.inc.glsl applyAtmosphereFog).
+inline constexpr float kAtmosphereDesatMin = 0.72f;
 /// Mild SSAO intensity ceiling used by composite clamp (game default is lower still).
 inline constexpr float kSsaoIntensityMax = 0.85f;
 inline constexpr float kSsaoIntensityDefault = 0.40f;
 
-/// Combined fog amount matching terrain.frag (linear + density, capped).
-/// Used by unit tests and documents the shipped outdoor fog curve.
-inline float terrainFogAmount(float distance, float worldY, float cameraY,
-							  float fogStart, float fogEnd, float fogDensity,
-							  float heightFalloff, float fogBaseY,
-							  float densityScale = kTerrainFogDensityScale,
-							  float amountCap = kTerrainFogAmountCap)
+/// Combined fog amount matching atmosphere_fog.inc.glsl (linear + density,
+/// capped). Ungated curve — gate via atmosphereFogAmount. Used by unit tests
+/// and documents the shipped outdoor fog curve.
+inline float ungatedAtmosphereFogAmount(float distance, float worldY, float cameraY,
+										float fogStart, float fogEnd, float fogDensity,
+										float heightFalloff, float fogBaseY,
+										float densityScale = kAtmosphereFogDensityScale,
+										float amountCap = kAtmosphereFogAmountCap)
 {
 	const float dist = std::max(distance, 0.0f);
 	const float start = fogStart;
@@ -58,6 +63,67 @@ inline float terrainFogAmount(float distance, float worldY, float cameraY,
 	const float densDist = std::max(0.0f, dist - fogStart * 0.25f);
 	const float densityFog = 1.0f - std::exp(-densDist * std::max(fogDensity, 0.0f) * densityScale * heightTerm);
 	return std::clamp(std::max(smoothLinear, densityFog), 0.0f, amountCap);
+}
+
+// --- Shared camera-to-surface aerial perspective (issue #159) ----------------
+// Mirrors of ressources/shaders/vulkan/atmosphere_fog.inc.glsl. Terrain,
+// water and dynamic entities evaluate this ONE air-medium contract in GLSL;
+// these C++ mirrors exist so unit tests can pin the numeric policy and catch
+// shader-family drift. They are exact numeric mirrors on their validated
+// input domain: like the shader path, inputs are assumed bounded (frame sky
+// factors are authored in [0, 1], surface colors non-negative, amount in
+// [0, cap]); the C++ adds no extra clamps so the formulas stay comparable
+// side by side.
+
+/// Fog amount of the shared atmosphere contract: the ungated curve gated by
+/// the caller's local skylight reach (smoothstep(0.05, 0.45, skyLight), see
+/// sunShadowWeight) and by the air-medium weight (1 - underwater, where
+/// `underwater` is the camera-underwater flag of FrameUBO::lightingParams.w).
+/// Same function for every material family: at an equal world position the
+/// amount is identical regardless of which shader evaluates it, and a
+/// submerged camera zeroes the outdoor air term for all of them.
+inline float atmosphereFogAmount(float distance, float worldY, float cameraY,
+								 float fogStart, float fogEnd, float fogDensity,
+								 float heightFalloff, float fogBaseY, float skyReach,
+								 float airMediumWeight,
+								 float densityScale = kAtmosphereFogDensityScale,
+								 float amountCap = kAtmosphereFogAmountCap)
+{
+	return ungatedAtmosphereFogAmount(distance, worldY, cameraY, fogStart, fogEnd,
+									  fogDensity, heightFalloff, fogBaseY,
+									  densityScale, amountCap) *
+		   std::clamp(skyReach, 0.0f, 1.0f) *
+		   std::clamp(airMediumWeight, 0.0f, 1.0f);
+}
+
+/// Horizon-matched haze color of the shared atmosphere contract: engine fog
+/// color blended with the day/sunset/night aerial sky, plus the warm sunset
+/// push. Exact mirror of the GLSL (unclamped factors, shader-domain inputs).
+inline glm::vec3 atmosphereHazeColor(const glm::vec3 &fogColor, float sunsetFactor,
+									 float nightFactor)
+{
+	const glm::vec3 dayAerial(0.40f, 0.60f, 0.90f);
+	const glm::vec3 sunsetAerial(0.95f, 0.55f, 0.32f);
+	const glm::vec3 nightAerial(0.014f, 0.022f, 0.048f);
+	glm::vec3 aerialSky = glm::mix(dayAerial, sunsetAerial, sunsetFactor);
+	aerialSky = glm::mix(aerialSky, nightAerial, nightFactor);
+	const glm::vec3 fogCol = glm::mix(fogColor, aerialSky, 0.55f);
+	return glm::mix(fogCol, glm::vec3(1.0f, 0.72f, 0.42f), sunsetFactor * 0.25f);
+}
+
+/// Shared aerial-perspective composition (atmosphere_fog.inc.glsl
+/// applyAtmosphereFog): desaturate toward the surface's own luminance, then
+/// lift toward the haze while retaining a little surface color so the
+/// midground stays readable. Rec. 709 luminance on linear-light RGB. Exact
+/// mirror of the GLSL (no extra clamps; shader-domain inputs).
+inline glm::vec3 applyAerialPerspective(const glm::vec3 &color, float amount,
+										const glm::vec3 &hazeColor)
+{
+	const float desat = glm::mix(1.0f, kAtmosphereDesatMin, amount);
+	const float lum = glm::dot(color, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+	const glm::vec3 aerialLit = glm::mix(glm::vec3(lum), color, desat);
+	const glm::vec3 fogMix = glm::mix(hazeColor, aerialLit * 0.40f + hazeColor * 0.60f, 0.22f);
+	return glm::mix(aerialLit, fogMix, amount);
 }
 
 /// Clamp SSAO intensity for composite (prevents full-frame milky veil when UI maxed).
