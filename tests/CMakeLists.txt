@@ -1,7 +1,3 @@
-# Vulkan smoke helpers shared by the device-backed tests below. Test-only:
-# the game binary does not compile or ship them.
-list(APPEND FT_VOX_VULKAN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/VulkanResourceSmoke.cpp)
-
 add_executable(test_network
     test_network.cpp
     ${CMAKE_SOURCE_DIR}/src/Network/Server.cpp
@@ -30,6 +26,9 @@ add_test(NAME NetworkIntegrationTest COMMAND test_network)
 # ---------------------------------------------------------------------------
 add_executable(test_vulkan_resources
     test_vulkan_resources.cpp
+    # Test-only Vulkan smoke helper: sole consumer is this target; the game
+    # binary and the other device tests do not compile or ship it.
+    VulkanResourceSmoke.cpp
     ${FT_VOX_VULKAN_SOURCES}
 )
 

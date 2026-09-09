@@ -1,15 +1,11 @@
 #pragma once
 
-#include <iostream>
-#include <vector>
 #include <array>
 #include <string_view>
-#include <tuple>
 #include <glm/glm.hpp>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
-#include <cstring>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
