@@ -560,7 +560,7 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			ImGui::Indent();
 			ImGui::SliderFloat("Middle grey", &pp.autoExposureMiddleGrey, 0.1f, 2.0f, "%.2f");
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Scene luminance mapped to exposure 1.0.");
+				ImGui::SetTooltip("Target scene luminance (pre-tonemap). 0.18 = photographic middle grey.");
 			ImGui::SliderFloat("Min EV", &pp.autoExposureMinEv, -6.0f, 0.0f, "%.1f");
 			ImGui::SliderFloat("Max EV", &pp.autoExposureMaxEv, 0.0f, 6.0f, "%.1f");
 			ImGui::SliderFloat("Adapt speed (brighten)", &pp.autoExposureSpeedUp, 0.25f, 10.0f, "%.2f /s");

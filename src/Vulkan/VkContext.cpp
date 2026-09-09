@@ -297,6 +297,24 @@ void VkContext::createInstance(SDL_Window *window)
 		debugCreateInfo.pfnUserCallback = debugCallback;
 		debugCreateInfo.pUserData = &m_validationErrors;
 		createInfo.pNext = &debugCreateInfo;
+
+		VkValidationFeaturesEXT validationFeatures{};
+		VkValidationFeatureEnableEXT syncValidation =
+			VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+		// FT_VOX_SYNC_VALIDATION=1: best-effort hazard tracking between
+		// submits and rendering scopes. Opt-in because it is noticeably
+		// slower than the default validation set; intended for targeted runs
+		// after pass-graph changes (e.g. the water -> sky depth handoff).
+		if (const char *syncEnv = std::getenv("FT_VOX_SYNC_VALIDATION");
+			syncEnv != nullptr && std::string(syncEnv) == "1")
+		{
+			validationFeatures.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+			validationFeatures.enabledValidationFeatureCount = 1;
+			validationFeatures.pEnabledValidationFeatures = &syncValidation;
+			validationFeatures.pNext = createInfo.pNext; // keep the messenger chained
+			createInfo.pNext = &validationFeatures;
+			std::cout << "Vulkan synchronization validation enabled (FT_VOX_SYNC_VALIDATION=1)\n";
+		}
 	}
 
 	const VkResult instResult = vkCreateInstance(&createInfo, nullptr, &m_instance);

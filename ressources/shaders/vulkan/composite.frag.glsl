@@ -68,7 +68,7 @@ float filmNoise(vec2 uv, float time)
 // (1 - 2*uv.y) — the earlier (uv*2-1) form reconstructed a vertically
 // mirrored world, which stayed invisible while the transport only consumed
 // path lengths, but breaks any consumer that needs the true direction or
-// height (issue #135: detecting that a depth hit IS the water surface).
+// height (water rework: detecting that a depth hit IS the water surface).
 vec3 underwaterViewPos(vec2 uv, float depth)
 {
     float t = frame.projection[3][2] / (depth + frame.projection[2][2]);

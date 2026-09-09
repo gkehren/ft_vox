@@ -818,7 +818,7 @@ std::vector<SceneSpec> buildSceneTable()
 	aaCloseupOff.spot = spotAaCloseup;
 	aaCloseupOff.fixture = fixtureAaCloseup;
 
-	// --- water surface family (issue #135 rework) ---------------------------
+	// --- water surface family (water surface rework) ---------------------------
 	// All six share the deterministic audit lake (buildAuditLake) so camera
 	// placement is coordinate-exact, and each pins one acceptance criterion.
 
@@ -1919,7 +1919,7 @@ int runUnderwaterAutoExposureCheck(VisualHarness &harness)
 	return errors.empty() ? 0 : 1;
 }
 
-// Water surface-term diagnostics (issue #135 rework): renders the audit lake
+// Water surface-term diagnostics (water surface rework): renders the audit lake
 // through the water pass's dedicated diagnostic views and checks the surface
 // terms numerically, per the acceptance criteria:
 //   view 1 — wave normal: top faces must encode a mostly-up normal (world
@@ -2751,7 +2751,7 @@ int main(int argc, char **argv)
 			++failures;
 		}
 	}
-	// Water surface-term diagnostics (issue #135 rework): numeric checks of
+	// Water surface-term diagnostics (water surface rework): numeric checks of
 	// the reconstructed surface terms through the dedicated debug views.
 	if (onlyScenes.empty() || waterSurfaceTermsRequested)
 	{

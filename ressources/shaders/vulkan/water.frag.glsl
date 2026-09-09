@@ -97,8 +97,11 @@ vec3 waveSurface(vec2 p, float t, float waveStr, float foot, out float h)
         float hC = wnoise(q);
         float hX = wnoise(q + vec2(freqs[i] * e, 0.0));
         float hZ = wnoise(q + vec2(0.0, freqs[i] * e));
-        // chain rule: derivative in p-space = derivative in q-space * freq
-        vec2 g = vec2(hX - hC, hZ - hC) / e * (freqs[i] * amps[i] * noiseAmp * fade);
+        // The offset in q-space (freq * e) already makes the finite
+        // difference a derivative in p-space; do NOT multiply by freq again
+        // or the octave gradient scales as freq² and the highest octave
+        // dominates the swell.
+        vec2 g = vec2(hX - hC, hZ - hC) / e * (amps[i] * noiseAmp * fade);
         grad += g;
         h += (hC - 0.5) * (amps[i] * noiseAmp * fade);
     }
@@ -109,9 +112,8 @@ vec3 waveSurface(vec2 p, float t, float waveStr, float foot, out float h)
 // ---------------------------------------------------------------------------
 // Depth reconstruction (camera space). Same RH_ZO linearization and
 // negative-height-viewport UV convention as the camera-underwater path in
-// composite.frag.glsl: uv comes straight from gl_FragCoord / screen size,
-// ndc = uv*2-1 (the negative viewport keeps image rows top-down, so no Y
-// flip enters the position reconstruction).
+// composite.frag.glsl: uv comes straight from gl_FragCoord / screen size and
+// the inverse projection applies the vertical mirror (see viewPosAt).
 // ---------------------------------------------------------------------------
 
 vec3 viewPosAt(vec2 uv, float linDepth)
@@ -121,9 +123,8 @@ vec3 viewPosAt(vec2 uv, float linDepth)
     // vertical MIRROR (1 - 2*uv.y), not (uv*2-1). The sign matters here: the
     // reconstructed world-space floor height drives the shoreline foam band —
     // a mirrored reconstruction places the floor above the camera and paints
-    // foam over the whole surface. (composite.frag's underwaterViewPos keeps
-    // the un-mirrored form on purpose: its transport consumes only the path
-    // LENGTH (sign-independent) and conventions already tuned for it.)
+    // foam over the whole surface. composite.frag's underwaterViewPos uses
+    // the same convention.
     return vec3((uv.x * 2.0 - 1.0) * linDepth / frame.projection[0][0],
                 (1.0 - 2.0 * uv.y) * linDepth / frame.projection[1][1], -linDepth);
 }
@@ -269,12 +270,20 @@ vec3 sceneReflection(vec3 R, float surfaceDepth, float roughness, vec3 fallback,
 // filtering instead of two fixed exponents.
 float specLobe(vec3 N, vec3 V, vec3 L, float rough)
 {
+    vec3 h = V + L;
+    float h2 = dot(h, h);
+    if (h2 < 1e-8) return 0.0; // V ≈ -L: undefined half vector
+    vec3 H = h * inversesqrt(h2);
+    // Bound the GGX alpha, not the denominator: flooring pi*d² makes the
+    // peak intensity NON-monotone at low roughness (the floor dominates the
+    // glossy end of the slider and the highlight would first grow with
+    // roughness). d >= a2 always, so with a2 >= 2.5e-6 the division stays
+    // well inside fp32 range and D_peak = 1/(pi·a2) decays monotonically.
     float a = max(rough * rough, 1e-4);
     float a2 = a * a;
-    vec3 H = normalize(V + L);
     float ndh = max(dot(N, H), 0.0);
     float d = ndh * ndh * (a2 - 1.0) + 1.0;
-    float D = a2 / max(3.14159265 * d * d, 1e-7);
+    float D = a2 / (3.14159265 * d * d);
     float f = 0.02 + 0.98 * pow(1.0 - max(dot(V, H), 0.0), 5.0);
     return D * f;
 }
@@ -302,24 +311,26 @@ void main()
     float dist = length(vFragPos - frame.viewPos.xyz);
 
     // Fragment-level wave normals on top faces only (sides stay voxel-flat).
-    // The continuous pixel-footprint estimate fades the small octaves and the
-    // far field flattens toward the geometric normal — continuity across
-    // greedy rectangles and a quiet horizon instead of more SSR steps.
+    // The pixel-footprint fade removes the fine octaves before they can alias
+    // and the far field flattens toward the geometric normal — continuity
+    // across greedy rectangles and a quiet horizon instead of more SSR steps.
     float topMask = smoothstep(0.7, 0.95, geoN.y);
-    // Pixel footprint of the surface, estimated CONTINUOUSLY from the ray
-    // geometry (distance × angular pixel size ÷ ray inclination). The direct
-    // dFdx(vFragPos.xz) form is constant per primitive: at steep incidence
-    // every greedy triangle then gets its own quantised fade and the surface
-    // shatters into flat-shaded tiles (plainly visible from below). The
-    // geometric estimate varies per pixel and captures exactly the grazing
-    // stretch that makes fine octaves alias.
-    float rayInclination = clamp(abs(normalize(frame.viewPos.xyz - vFragPos).y), 0.06, 1.0);
-    float foot = dist * 0.0016 / rayInclination;
+    // World-space footprint of one output pixel on the surface, from the
+    // actual projection and resolution (NOT a hardcoded angular size, and NOT
+    // dFdx of the world position: that one is constant per primitive and
+    // quantizes the fade per greedy triangle — visible as flat-shaded tiles
+    // from a submerged camera). Footprint ≈ pixel size at this depth divided
+    // by the ray's incidence on the plane (grazing stretch).
+    float surfaceDepth = -(frame.view * vec4(vFragPos, 1.0)).z;
+    float pixelX = 2.0 * surfaceDepth * pc.invScreen.x / abs(frame.projection[0][0]);
+    float pixelY = 2.0 * surfaceDepth * pc.invScreen.y / abs(frame.projection[1][1]);
+    float foot = max(pixelX, pixelY) / max(abs(dot(V, geoN)), 0.06);
     // Underside: a top face whose observer is below it (submerged camera).
     // Refraction and SSR are above-water constructs — from below they sample
     // sky/floor silhouette boundaries in the history and paint reflected
-    // patchwork over the surface. The underside keeps the background
-    // undistorted (the medium seen toward the boundary) and the sky fallback.
+    // patchwork over the surface. The underside renders the transmitted
+    // boundary background (analytic sky / opaque history) without medium, and
+    // the camera->surface transport belongs to the underwater composite.
     bool underside = dot(geoN, V) < 0.0;
     vec3 N = geoN;
     float waveH = 0.0;
@@ -344,7 +355,6 @@ void main()
     // ---------------------------------------------------------------------------
     vec2 margin = pc.invScreen * 1.5;
     vec2 screenUV = clamp(gl_FragCoord.xy * pc.invScreen, margin, 1.0 - margin);
-    float surfaceDepth = -(frame.view * vec4(vFragPos, 1.0)).z;
     vec3 surfaceView = viewPosAt(screenUV, surfaceDepth);
 
     // Distort in CAMERA space: the screen offset of a refracted ray follows
@@ -379,7 +389,23 @@ void main()
     bool bgSky = isSkyDepth(rawOpaqueDepth(refrUV));
     float column;
     float depthBelow;
-    if (bgSky)
+    vec3 scene = texture(sceneColor, refrUV).rgb;
+    if (underside)
+    {
+        // Seen from below, the boundary background must NOT come from the
+        // opaque history: the sky renders AFTER this pass (and can never fill
+        // these pixels anymore, since we now write depth), and the medium
+        // between the camera and the boundary is the underwater composite's
+        // job. Transmit the analytic sky without extra in-water attenuation —
+        // otherwise the boundary gets a fake 28 m teal and the composite
+        // counts the medium twice. Opaque history content along an up-ray
+        // (shore walls above the waterline) is likewise pure boundary.
+        column = 0.0;
+        depthBelow = WATER_SKY_COLUMN; // no contact foam on the underside
+        if (bgSky)
+            scene = analyticSkyRadiance(normalize(V), dayFactor, sunsetFactor, nightFactor);
+    }
+    else if (bgSky)
     {
         column = WATER_SKY_COLUMN;
         depthBelow = WATER_SKY_COLUMN;
@@ -393,8 +419,6 @@ void main()
         vec3 backgroundWorld = frame.viewPos.xyz + transpose(mat3(frame.view)) * backgroundView;
         depthBelow = vFragPos.y - backgroundWorld.y;
     }
-
-    vec3 scene = texture(sceneColor, refrUV).rgb;
     float skyReach = smoothstep(0.05, 0.45, vSkyLight);
     float directVisibility = 1.0;
     if (topMask > 0.001 && frame.waterQuality.w > 0.5)
@@ -440,18 +464,20 @@ void main()
              moonVis * nightFactor * directVisibility;
 
     // Foam: thin shoreline band from the reconstructed vertical separation
-    // (contacts only), modulated lightly by the wave height. No whitecaps in
-    // open water and no systematic foam on vertical faces — this style keeps
-    // a calm surface; the optical `column` is reserved for absorption.
+    // (contacts only), modulated lightly by the wave height. Gated on TOP
+    // faces: a vertical face rising next to similar-height terrain
+    // reconstructs depthBelow ≈ 0 and would otherwise foam. No whitecaps in
+    // open water and no foam on the underside — the optical `column` is
+    // reserved for absorption.
     float foam = 0.0;
-    if (foamStr > 0.001)
+    if (foamStr > 0.001 && topMask > 0.001 && !underside)
     {
         float foamNoise = wnoise(vFragPos.xz * 1.8 + vec2(time * 0.35, -time * 0.25))
                         * wnoise(vFragPos.xz * 3.7 - vec2(time * 0.22, time * 0.30)) * 2.0;
         float shoreBand = 1.0 - smoothstep(0.10, 0.90, depthBelow);
         float breath = 0.7 + 0.3 * clamp(waveH * 2.0 + 0.5, 0.0, 1.0);
         float shoreFoam = shoreBand * smoothstep(0.25, 0.70, foamNoise + shoreBand * 0.35) * breath;
-        foam = clamp(shoreFoam * foamStr, 0.0, 1.0);
+        foam = clamp(shoreFoam * topMask * foamStr, 0.0, 1.0);
     }
     vec3 foamColor = vec3(0.88, 0.93, 0.96) * (0.22 + 0.78 * dayFactor);
     foamColor = mix(foamColor, vec3(1.0, 0.72, 0.50) * (0.25 + 0.75 * dayFactor), sunsetFactor * 0.45);
