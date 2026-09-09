@@ -15,6 +15,7 @@ layout(location = 9) in float vViewDepth;
 #include "csm.inc.glsl"
 #include "colorspace.inc.glsl"
 #include "cutout.inc.glsl"
+#include "atmosphere_fog.inc.glsl"
 
 // x=wind, y=emissive, z=iceSpec, w=flags — materials::MaterialTableUBO
 layout(set = 0, binding = 1) uniform MaterialTable {
@@ -79,7 +80,6 @@ void main()
     float sunsetFactor = frame.skyParams.z;
     float blockLightScale = frame.lightingParams.x;
     float emissiveScale = frame.lightingParams.y;
-    float fogBaseY = frame.lightingParams.z;
 
     // Raw skylight describes enclosure, independent of the time of day.
     // Only direct celestial light uses the CSM; sky bounce remains in shade.
@@ -195,40 +195,12 @@ void main()
     result = mix(result, vec3(nightLum) * vec3(0.62, 0.74, 1.05),
                  nightFactor * 0.38 * (lavaSurface ? 0.0 : 1.0));
 
-    // Fog + aerial perspective (distance desat toward sky-tinted haze)
-    float fogStart = frame.fogParams.x;
-    float fogEnd = frame.fogParams.y;
-    float fogDensity = frame.fogParams.z;
-    float heightFalloff = frame.fogParams.w;
-    float dist = length(vFragPos - frame.viewPos.xyz);
-    float linearFog = smoothstep(fogStart, max(fogStart + 1.0, fogEnd), dist);
-    float avgY = 0.5 * (vFragPos.y + frame.viewPos.y);
-    float heightTerm = exp(-heightFalloff * max(0.0, avgY - fogBaseY));
-    float densityFog = 1.0 - exp(-max(0.0, dist - fogStart * 0.25) * fogDensity * 0.0009 * heightTerm);
-    // Cap must match lighting::kTerrainFogAmountCap
-    float fogAmount = clamp(max(linearFog, densityFog), 0.0, 0.45) * sunReach;
+    // Aerial perspective via the shared camera-to-surface air contract
+    // (issue #159): distance desat toward sky-tinted haze, gated by sunReach.
+    AtmosphereFog atmo = evaluateAtmosphereFog(vFragPos, sunReach);
 
-    // Sky aerial color: cool blue day → warm sunset → dark-blue night (lifted
-    // from near-black so night fog doesn't swallow the terrain)
-    vec3 dayAerial = vec3(0.40, 0.60, 0.90);
-    vec3 sunsetAerial = vec3(0.95, 0.55, 0.32);
-    vec3 nightAerial = vec3(0.014, 0.022, 0.048);
-    vec3 aerialSky = mix(dayAerial, sunsetAerial, sunsetFactor);
-    aerialSky = mix(aerialSky, nightAerial, nightFactor);
-    // Blend engine fogColor with aerial sky for horizon-matched haze
-    vec3 fogCol = mix(frame.fogColor.rgb, aerialSky, 0.55);
-    fogCol = mix(fogCol, vec3(1.0, 0.72, 0.42), sunsetFactor * 0.25);
-
-    float lum = dot(result, kRec709Luma);
     result = gradeSaturation(result, saturationLevel);
-
-    // Aerial perspective: desaturate + lift toward sky with distance (not pure wash)
-    float aerial = fogAmount;
-    float desat = mix(1.0, 0.72, aerial);
-    vec3 aerialLit = mix(vec3(lum), result, desat);
-    // Retain a bit of surface color so midground stays readable
-    vec3 fogMix = mix(fogCol, aerialLit * 0.40 + fogCol * 0.60, 0.22);
-    result = mix(aerialLit, fogMix, aerial);
+    result = applyAtmosphereFog(result, atmo);
 
     outColor = vec4(result, texColor.a);
 }

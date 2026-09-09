@@ -167,7 +167,7 @@ Push constants carry cascade index / shadow time for the shadow path where neede
 - Dynamic rendering into **HDR** (`R16G16B16A16_SFLOAT`) and **D32** depth owned by `PostStack`.
 - Submits opaque chunk geometry through **`vkCmdDrawIndexedIndirect`** from the shared mesh arenas (issue #109): each live section emits exactly one command - section indices are stored section-local and the command's `vertexOffset` rebases them, so commands are never merged. Commands are grouped by arena page pair at submission time, so the arenas are bound once per pair per frame instead of two binds per chunk.
 - Then calls **`OverlayRenderer::record`** on the same command buffer before ending the rendering scope (block highlight, chunk borders, demo players).
-- Shaders: `terrain.vert` / `terrain.frag` — diffuse, face bias, sky/block light, CSM + PCF (sun **and** moon), cave fill, scotopic night grade, height/distance fog, material wind/emissive/ice.
+- Shaders: `terrain.vert` / `terrain.frag` — diffuse, face bias, sky/block light, CSM + PCF (sun **and** moon), cave fill, scotopic night grade, shared aerial perspective (`atmosphere_fog.inc.glsl`), material wind/emissive/ice.
 
 ### WaterPass (`Renderer/WaterPass.*`)
 
@@ -183,6 +183,13 @@ Push constants carry cascade index / shadow time for the shadow path where neede
 - Top-face classification (SSR eligibility, wave-normal masking) and the CSM receiver normal use the flat geometric face normal passed from the vertex stage — never the wave-perturbed shading normal, which oscillates with wave strength and phase and would spatially/temporally toggle SSR and shadow reception on true horizontal faces.
 - Refraction uses unfiltered reconstructed depth and validates all four texels in the bilinear color footprint. It rejects foreground samples and depth jumps, backs off distortion up to four times, and falls back to the original UV. Distortion fades at shores and screen edges.
 - Medium and above receive the shared CSM policy on top faces. Visibility modulates direct scatter and sun/moon glitter; the refracted opaque color and ambient scatter remain independent of that multiplier.
+
+#### Shared aerial perspective (`atmosphere_fog.inc.glsl`, issue #159)
+
+- **One air-medium contract** for every world-space surface: terrain, water and dynamic entities all evaluate `evaluateAtmosphereFog` + `applyAtmosphereFog` from the shared include. At an equal world position the fog amount, haze color and aerial composition are identical regardless of the calling shader — far water, far shoreline and a far mob converge toward the same horizon atmosphere.
+- **Model** (previously duplicated by `terrain.frag`/`mob.frag`, approximated by `water.frag`): linear `smoothstep` fog over `fogParams.xy`, exponential density fog with height falloff toward `lightingParams.z` (`fogBaseY`), capped at `kAtmosphereFogAmountCap` (0.45, `Lighting.hpp`), gated by the local skylight enclosure term `smoothstep(0.05, 0.45, skyLight)` (sealed caves get no outdoor haze), and a day/sunset/night aerial haze color blended with `frame.fogColor`. Composition desaturates the lit surface toward its own luminance and lifts it toward the haze while retaining bounded surface chroma.
+- **Medium responsibilities stay separate**: the Beer–Lambert water column (`water_optics.inc.glsl`) is the *water* medium and is untouched by the air term; the camera-underwater composite (issue #144) remains the sole authority for a submerged camera — water fragments seen from below (`underside`) skip the air fog so submerged pixels never receive a second, outdoor-air attenuation.
+- **C++ mirrors** (`Lighting.hpp`: `atmosphereFogAmount`, `atmosphereHazeColor`, `applyAerialPerspective`, constants `kAtmosphereFog*`/`kAtmosphereDesatMin`) pin the numeric policy; `test_render_helpers` asserts monotonicity, height-falloff direction, skylight gating, the haze palette and that all three fragment shaders include the shared contract (drift guard).
 - Low/Medium use sky-only reflection; all tiers use depth-safe refraction. Quality is carried in the std140 `waterQuality` vector (steps, range, thickness, shadow enable); the surface model in `waterSurfaceParams` (roughness, debug view: 0 off / 1 wave normal / 2 optical path / 3 Fresnel / 4 SSR confidence — also exposed in the Graphics > Water panel and via `FT_VOX_WATER_DEBUG` in the audit). No additional images or vertex-format changes. See [issue #139 measurements](benchmarks/issue139-water/README.md).
 
 ### SkyPass (`Renderer/SkyPass.*`)
@@ -403,7 +410,7 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
   - Cave / outdoor ambient transition via `mix(caveAmbient, outdoorAmbient, sky) * hemisphere`
   - Per-source colored linear RGB block light with quadratic falloff `blockFill * blockPeak * blockLightScale`
   - Shared cascaded shadow map (CSM) sampling via `sampleDirectionalShadow`
-  - Consistent contrast / saturation / scotopic night vision and `sunReach`-gated distance fog
+  - Consistent contrast / saturation / scotopic night vision and `sunReach`-gated distance fog via the shared atmosphere contract (`atmosphere_fog.inc.glsl`, issue #159)
 - **Visibility:** one frustum test per mob against the camera matrix and the three
   cascade matrices; a per-draw visibility mask selects which pass sees which mob
   (`visibleCount` feeds the HUD). Casters behind the camera are still drawn into
@@ -621,6 +628,7 @@ All under `ressources/shaders/vulkan/` (GLSL compiled to SPIR-V at build):
 |------|-------|---------|
 | `frame_ubo.inc.glsl` | include | Generated FrameUBO block |
 | `water_optics.inc.glsl` | include | Shared water optical constants (`WATER_SIGMA`, `WATER_SCATTER_COLOR`) + value-noise caustics helper — `water.frag.glsl` + `composite.frag.glsl` |
+| `atmosphere_fog.inc.glsl` | include | Shared camera-to-surface air/aerial-perspective contract (`evaluateAtmosphereFog` / `applyAtmosphereFog`) — `terrain.frag.glsl` + `water.frag.glsl` + `mob.frag.glsl` |
 | `terrain.vert.glsl` / `terrain.frag.glsl` | VS/FS | OpaquePass |
 | `shadow.vert.glsl` / `shadow.frag.glsl` | VS/FS | ShadowPass |
 | `water.vert.glsl` / `water.frag.glsl` | VS/FS | WaterPass |
@@ -660,7 +668,7 @@ What the pipeline implements **now** (not a roadmap):
 | Sky / block light on vertices | Column sky cast + flood; block light BFS; cave fill floor in FS |
 | Water: wave normals, sky reflection, depth absorption, glitter, foam | WaterPass + history; analytic per-phase sky reflection; Beer-Lambert teal body |
 | Procedural sky, sun/moon, stars, clouds | SkyPass — cratered HDR moon, two-layer tinted stars, moon silver lining on night clouds |
-| Height + distance fog, aerial-style haze | `terrain.frag` + `lighting` helpers |
+| Height + distance fog, aerial-style haze | `atmosphere_fog.inc.glsl` (terrain/water/mob) + `lighting` helpers |
 | SSAO (GTAO-style horizon AO + bilateral upsample), bloom, depth-aware god rays | PostStack half-res AO where applicable |
 | ACES/Reinhard, auto/manual exposure, grain, vignette | `composite.frag`; auto exposure meters the raw scene HDR (issue #140) |
 | Spatial AA: FXAA 3.11 dedicated pass (Low: off, Medium+: on) | `fxaa.frag` after composite on the sRGB-encoded tone-mapped LDR target (issue #143); output = swapchain, timed as `SpatialAA` |

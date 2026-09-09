@@ -9,6 +9,7 @@ layout(location = 7) in vec3 vBlockLightRGB;
 #include "sky_radiance.inc.glsl"
 #include "csm.inc.glsl"
 #include "water_optics.inc.glsl"
+#include "atmosphere_fog.inc.glsl"
 
 // Opaque scene history (color) + depth history (real depth, not color)
 layout(set = 2, binding = 0) uniform sampler2D sceneColor;
@@ -489,9 +490,19 @@ void main()
     foamColor = mix(vec3(0.025) + localLight * 0.18, foamColor, skyReach);
     color = mix(color, foamColor, foam * 0.85);
 
-    // Distance fog (same 0.45 cap as terrain)
-    float fogAmt = smoothstep(frame.fogParams.x, max(frame.fogParams.x + 1.0, frame.fogParams.y), dist) * 0.45 * skyReach;
-    color = mix(color, frame.fogColor.rgb, fogAmt);
+    // Camera-to-surface AIR aerial perspective (shared contract, issue #159),
+    // applied to the fully composed surface (refraction + column transport +
+    // reflection + foam) so far water hazes toward the same horizon atmosphere
+    // as the shoreline at the same world position. The Beer-Lambert column
+    // above is the WATER medium and is untouched by this air term.
+    // Underside pixels face a submerged camera: the camera-underwater
+    // composite owns camera→surface transport there, so no outdoor air fog is
+    // layered on top of the water medium.
+    if (!underside)
+    {
+        AtmosphereFog atmo = evaluateAtmosphereFog(vFragPos, skyReach);
+        color = applyAtmosphereFog(color, atmo);
+    }
 
     // Diagnostic views (Graphics > Water): raw surface terms rendered
     // through the normal pass pipeline.
