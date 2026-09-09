@@ -418,6 +418,124 @@ int main(int argc, char **argv)
                 throw std::runtime_error("far-distance mobs produced no pixels");
         }
 
+        // Issue #160 (review P2): a REAL A/B of the temporal benefit. The same
+        // deterministic camera pan is rendered twice per step — once with the
+        // shipping mipmapped sampler, once with a NearestMip0 sampler that
+        // reproduces the pre-#160 behavior — and the mean |frame-to-frame
+        // luma delta| is measured over a fixed ROI covering the mobs only.
+        // The mipmapped sampler must be materially more stable; the old
+        // FXAA-only pan metric could never prove that.
+        double abNearest = 0.0, abMipped = 0.0;
+        {
+            std::vector<entities::MobRenderState> ab;
+            for (size_t i = 0; i < entities::kMobSpeciesCount; ++i)
+                ab.push_back({entities::MobSpecies(i), {(float(i) - 1.5f) * 1.5f, 0, 60.f}, 0, 0, 0, 0, 0});
+            for (size_t i = 0; i < entities::kMobSpeciesCount; ++i)
+                ab.push_back({entities::MobSpecies(i), {(float(i) - 1.5f) * 1.5f, 0, 140.f}, 0, 0, 0, 0, 0});
+            FrameUBO base = frame(2);
+            base.projection = glm::perspective(glm::radians(45.f), 2.f, 0.1f, 400.f);
+            base.fogParams = {400.f, 800.f, 0.f, 0.f}; // no distance fog on the fixture
+            const glm::vec3 eye(0.f, 3.f, -10.f);
+            constexpr int kSteps = 32;
+            constexpr float kSweepDeg = 3.0f;
+
+            int roi[4] = {0, 0, 0, 0}; // x0, y0, x1, y1 (exclusive)
+            bool haveRoi = false;
+            const auto nonBackground = [](uint8_t r, uint8_t g, uint8_t b) {
+                return std::abs(int(r) - 31) + std::abs(int(g) - 43) + std::abs(int(b) - 59) > 24;
+            };
+            const auto uboAt = [&](int i) {
+                const float a = glm::radians(kSweepDeg * (float(i) / float(kSteps - 1) - 0.5f));
+                FrameUBO u = base;
+                u.view = glm::lookAt(eye, eye + glm::vec3(std::sin(a), 0.f, std::cos(a)), glm::vec3(0, 1, 0));
+                u.viewPos = glm::vec4(eye, 1);
+                return u;
+            };
+            // One full pan with ONE sampler policy: mean |frame-to-frame luma
+            // delta| over the fixed mob ROI.
+            const auto runPan = [&](MobRenderer::SamplerPolicy policy) {
+                std::vector<uint8_t> prev;
+                double sum = 0.0;
+                int pairs = 0;
+                for (int i = 0; i < kSteps; ++i)
+                {
+                    auto px = f.render(ab, uboAt(i), policy == MobRenderer::SamplerPolicy::Mipmapped ? 0 : 1);
+                    if (!haveRoi)
+                    {
+                        int x0 = int(f.width), y0 = int(f.height), x1 = -1, y1 = -1;
+                        for (uint32_t y = 0; y < f.height; ++y)
+                            for (uint32_t x = 0; x < f.width; ++x)
+                            {
+                                const size_t p = (size_t(y) * f.width + x) * 4;
+                                if (nonBackground(px[p], px[p + 1], px[p + 2]))
+                                {
+                                    x0 = std::min(x0, int(x));
+                                    y0 = std::min(y0, int(y));
+                                    x1 = std::max(x1, int(x) + 1);
+                                    y1 = std::max(y1, int(y) + 1);
+                                }
+                            }
+                        if (x1 < 0)
+                            throw std::runtime_error("A/B fixture rendered no mobs");
+                        constexpr int kPad = 48; // > the 3 deg pan shift at any fixture distance
+                        roi[0] = std::max(0, x0 - kPad);
+                        roi[1] = std::max(0, y0 - kPad);
+                        roi[2] = std::min(int(f.width), x1 + kPad);
+                        roi[3] = std::min(int(f.height), y1 + kPad);
+                        haveRoi = true;
+                    }
+                    else
+                    {
+                        // Every frame's mob pixels must stay inside the fixed
+                        // ROI, or the metric would silently compare backdrop.
+                        for (uint32_t y = 0; y < f.height; ++y)
+                            for (uint32_t x = 0; x < f.width; ++x)
+                            {
+                                const size_t p = (size_t(y) * f.width + x) * 4;
+                                if (nonBackground(px[p], px[p + 1], px[p + 2]) &&
+                                    (int(x) < roi[0] || int(x) >= roi[2] || int(y) < roi[1] || int(y) >= roi[3]))
+                                    throw std::runtime_error("A/B mobs left the fixed ROI");
+                            }
+                    }
+                    if (!prev.empty())
+                    {
+                        for (int y = roi[1]; y < roi[3]; ++y)
+                            for (int x = roi[0]; x < roi[2]; ++x)
+                            {
+                                const size_t p = (size_t(y) * f.width + x) * 4;
+                                const int l0 = (prev[p] * 299 + prev[p + 1] * 587 + prev[p + 2] * 114) / 1000;
+                                const int l1 = (px[p] * 299 + px[p + 1] * 587 + px[p + 2] * 114) / 1000;
+                                sum += std::abs(l1 - l0);
+                            }
+                        ++pairs;
+                    }
+                    prev = std::move(px);
+                }
+                return sum / (double(pairs) * double((roi[2] - roi[0]) * (roi[3] - roi[1])));
+            };
+            abMipped = runPan(MobRenderer::SamplerPolicy::Mipmapped);
+            // Swap in the pre-#160 sampling (same mip-chained images, sampler
+            // clamped to mip 0 with NEAREST) and render the identical pan.
+            f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, "",
+                                                                 MobRenderer::SamplerPolicy::NearestMip0));
+            abNearest = runPan(MobRenderer::SamplerPolicy::NearestMip0);
+            // Restore the shipping sampling for the rest of the suite.
+            f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, ""));
+            if (abNearest <= 0.0)
+                throw std::runtime_error("A/B nearest-mip0 delta is degenerate");
+            const double improvement = 1.0 - abMipped / abNearest;
+            std::cout << "Mob temporal A/B: mip0/nearest delta " << abNearest << "/255, mipmapped "
+                      << abMipped << "/255, improvement " << improvement * 100.0 << "%\n";
+            if (improvement < 0.10)
+                throw std::runtime_error("mipmapped mob sampling is not temporally stable enough vs mip0/nearest");
+        }
+        { // keep the A/B evidence next to the profile report
+            std::ofstream report(output / "ab-temporal.txt", std::ios::app);
+            report << "Mob temporal A/B (fixed mob ROI, 32-step pan): mip0/nearest " << abNearest
+                   << "/255, mipmapped " << abMipped << "/255, improvement "
+                   << (abNearest > 0.0 ? 100.0 * (1.0 - abMipped / abNearest) : 0.0) << "%\n";
+        }
+
         f.resize(800, 600);
         f.render(states, frame(800.f / 600), 0);
         // Camera culling cannot suppress shadow casters behind the eye.
@@ -462,10 +580,10 @@ int main(int argc, char **argv)
             throw std::runtime_error("48-mob fixture not fully visible");
         std::ofstream report(output / "gpu-profile.txt");
         report << "Device: " << f.context.getDeviceProperties().deviceName << "\n";
-        // Issue #160 memory/cost evidence: mip-0 vs full-chain footprint and
+        // Issue #160 memory/cost evidence: mip-0 vs full-chain payload and
         // the whole CPU-generate + multi-level upload reload cost.
-        report << "Mob textures: mip0 bytes=" << f.renderer.textureMip0Bytes()
-               << " full-chain bytes=" << f.renderer.textureGpuBytes()
+        report << "Mob textures: mip0 texel bytes=" << f.renderer.textureMip0Bytes()
+               << " full-chain texel bytes=" << f.renderer.textureTexelBytes()
                << " reload ms=" << texReloadMs << "\n";
         if (gpuTimes.empty())
             report << "GPU timestamps unavailable\n";

@@ -23,8 +23,65 @@ MobRenderer::Textures::~Textures()
         if (i.image)
             destroyImage(context->getAllocator(), context->getDevice(), i);
 }
+namespace
+{
+// Per-texture UV face rectangles of the baked box models, in texel units
+// (issue #160 review P1): a mob skin is an atlas of independent box faces, so
+// mip generation must never blend across their boundaries. Every face's 4 UV
+// corners are integer "model pixel" coordinates (MobModel divides them by
+// 64x32 when baking), and all supported skin shapes map model pixels to texels
+// with the single scale imgW/64 (the sampler's uvScale = {1, w/(2h)} folding
+// proves texel = modelPixel * imgW/64 on both axes).
+std::vector<texture_mips::MipRect> collectTextureRects(const entities::MobModels &models, uint32_t texture,
+                                                       uint32_t imgW, uint32_t imgH)
+{
+    std::vector<texture_mips::MipRect> rects;
+    const uint32_t scale = std::max(imgW / 64u, 1u);
+    for (const auto &species : models.models)
+    {
+        for (const auto &part : species.parts)
+        {
+            if (part.texture != texture)
+                continue;
+            // 6 faces x 6 vertices, baked contiguously per part.
+            for (uint32_t face = 0; face < 6; ++face)
+            {
+                const size_t base = part.firstVertex + face * 6;
+                float u0 = 1.0f, v0 = 1.0f, u1 = 0.0f, v1 = 0.0f;
+                for (size_t v = base; v < base + 6 && v < models.vertices.size(); ++v)
+                {
+                    const glm::vec2 &uv = models.vertices[v].uv;
+                    u0 = std::min(u0, uv.x);
+                    v0 = std::min(v0, uv.y);
+                    u1 = std::max(u1, uv.x);
+                    v1 = std::max(v1, uv.y);
+                }
+                // uv corners are exact multiples of 1/64, 1/32 (powers of two).
+                const uint32_t rx = uint32_t(std::lround(u0 * 64.0f)) * scale;
+                const uint32_t ry = uint32_t(std::lround(v0 * 32.0f)) * scale;
+                const uint32_t rw = (uint32_t(std::lround(u1 * 64.0f)) - uint32_t(std::lround(u0 * 64.0f))) * scale;
+                const uint32_t rh = (uint32_t(std::lround(v1 * 32.0f)) - uint32_t(std::lround(v0 * 32.0f))) * scale;
+                if (rx + rw > imgW || ry + rh > imgH || rw == 0 || rh == 0)
+                    continue; // defensive: never emit a rect outside the image
+                rects.push_back({rx, ry, rw, rh});
+            }
+        }
+    }
+    // Distinct faces of different parts never overlap in these layouts, but
+    // different parts can share identical rects (e.g. the two cow horns).
+    std::sort(rects.begin(), rects.end(), [](const texture_mips::MipRect &a, const texture_mips::MipRect &b) {
+        return a.y != b.y ? a.y < b.y : a.x != b.x ? a.x < b.x : a.h != b.h ? a.h < b.h : a.w < b.w;
+    });
+    rects.erase(std::unique(rects.begin(), rects.end(), [](const texture_mips::MipRect &a, const texture_mips::MipRect &b) {
+                    return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+                }),
+                rects.end());
+    return rects;
+}
+} // namespace
+
 std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCommands &imm,
-                                                                    const std::string &pack)
+                                                                    const std::string &pack, SamplerPolicy policy)
 {
     const auto cpu = loadMobTextures(pack, std::string(RES_PATH) + "default-resource-pack.zip");
     auto result = std::make_unique<Textures>();
@@ -34,14 +91,23 @@ std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCom
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     // Pixel-art contract (issue #160): NEAREST magnification keeps close-range
     // texels crisp; LINEAR minification over the full CPU-generated mip chain
-    // (same linear-light, alpha-coverage-preserving generator as the terrain
-    // atlas) stabilizes distant skins. Anisotropy stays off: mostly upright
+    // stabilizes distant skins. Anisotropy stays off: mostly upright
     // box-model surfaces see no measurable gain to justify the sampler cost.
+    // NearestMip0 reproduces the pre-#160 sampling for the A/B regression test.
     si.magFilter = VK_FILTER_NEAREST;
-    si.minFilter = VK_FILTER_LINEAR;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    if (policy == SamplerPolicy::NearestMip0)
+    {
+        si.minFilter = VK_FILTER_NEAREST;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.maxLod = 0.0f; // clamp to mip 0 only
+    }
+    else
+    {
+        si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        si.maxLod = VK_LOD_CLAMP_NONE;
+    }
     si.minLod = 0.0f;
-    si.maxLod = VK_LOD_CLAMP_NONE;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (vkCreateSampler(device, &si, nullptr, &result->sampler) != VK_SUCCESS)
         throw std::runtime_error("Mob sampler failed");
@@ -58,19 +124,22 @@ std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCom
         auto &img = result->images[i];
         const uint32_t width = uint32_t(pixels.width), height = uint32_t(pixels.height);
         // Full CPU-generated mip chain (issue #160): the same linear-light,
-        // alpha-coverage-preserving filter as the terrain atlas, so the
-        // alpha-tested visible/shadow silhouettes converge with distance.
+        // alpha-coverage-preserving filter as the terrain atlas, run per UV
+        // face rectangle so neighboring box faces never blend into each other
+        // and each face keeps its own alpha coverage (review P1).
         const uint32_t mips = texture_mips::mipLevelCount(width, height);
         img = createImage2D(m_context->getAllocator(), device, width, height,
                             colorspace::kAlbedoTextureFormat,
                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                             VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, mips);
         std::vector<uint8_t> chain(texture_mips::chainBytes(width, height));
-        texture_mips::generateLayerChain(width, height, pixels.rgba.data(), chain.data());
+        const std::vector<texture_mips::MipRect> rects = collectTextureRects(m_models, uint32_t(i), width, height);
+        texture_mips::generateLayerChainRects(width, height, pixels.rgba.data(), rects.data(), rects.size(),
+                                              chain.data());
         // Every level is resident before the descriptor set is written, and a
         // failure here unwinds the whole staging Textures bundle — the live
         // set committed by commitTextures() is never touched.
-        uploadImage2DMipChain(m_context->getAllocator(), imm, img, chain.data(), VkDeviceSize(chain.size()));
+        uploadRgba8Image2DMipChain(m_context->getAllocator(), imm, img, chain.data(), VkDeviceSize(chain.size()));
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = result->pool;
         ai.descriptorSetCount = 1;
@@ -95,7 +164,7 @@ std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCom
     return result;
 }
 
-size_t MobRenderer::textureGpuBytes() const
+size_t MobRenderer::textureTexelBytes() const
 {
     size_t bytes = 0;
     if (!m_textures)

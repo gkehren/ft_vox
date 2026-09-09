@@ -428,14 +428,20 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
   ZIP or folder packs, wrapped roots for both, classic-name aliases). Both square (64×64)
   and classic (64×32) skins are supported — `uvScale` folds the box UV layout to
   the image aspect. **Mipmapped minification (issue #160):** every skin gets a
-  full CPU-generated mip chain (`texture_mips::generateLayerChain`, W×H-aware —
-  the same linear-light, alpha-coverage-preserving filter as the block atlas,
-  so visible and `mob_shadow` alpha-cut silhouettes converge with distance),
-  uploaded level-by-level with `uploadImage2DMipChain` (one copy, all levels
-  resident before the descriptor set is written; ~+33% device memory for the
-  chain). Sampler: NEAREST magnification (crisp close-range pixel-art texels),
-  LINEAR minification with LINEAR mip selection, clamp to edge; anisotropy
-  stays off — mostly upright box-model surfaces showed no gain to justify it.
+  full CPU-generated mip chain (`texture_mips::generateLayerChainRects`, W×H-aware
+  and **UV-rect aware** — a mob skin is an atlas of independent box faces whose
+  rects are derived from the baked `MobModel` vertices, so the linear-light,
+  alpha-coverage-preserving #136 filter never blends neighboring faces across
+  odd UV boundaries, each face keeps its own alpha coverage, and unused regions
+  get alpha-0 gutters of the neighboring face color). The chain is uploaded
+  level-by-level with `uploadRgba8Image2DMipChain` (one copy, all levels resident
+  before the descriptor set is written; ~+33% device payload for the chain).
+  Sampler: NEAREST magnification (crisp close-range pixel-art texels), LINEAR
+  minification with LINEAR mip selection, clamp to edge; anisotropy stays off —
+  mostly upright box-model surfaces showed no gain to justify it. The
+  `NearestMip0` sampler policy reproduces the pre-#160 behavior for the A/B
+  temporal regression in `test_mob_render` (mip0/nearest vs mipmapped over a
+  fixed mob ROI).
 - **Reload:** part of the failure-atomic resource-pack path. `prepareTextures`
   stages a complete new `Textures` bundle (image, sampler, descriptor pool/sets)
   before `commitTextures` swaps it in; a GPU failure anywhere keeps the previous

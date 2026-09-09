@@ -15,6 +15,11 @@
 class MobRenderer
 {
   public:
+    /// Sampler policy for the mob albedo textures. Mipmapped is the shipping
+    /// path (NEAREST magnification, LINEAR minification over the full chain);
+    /// NearestMip0 reproduces the pre-#160 behavior and exists for the A/B
+    /// temporal regression test.
+    enum class SamplerPolicy { Mipmapped, NearestMip0 };
     struct Textures
     {
         VkContext *context{};
@@ -33,16 +38,19 @@ class MobRenderer
     /// both the image and the sampler). Caller must device-idle first.
     void refreshShadowBinding(VkImageView shadowView, VkSampler shadowSampler);
     void shutdown();
-    std::unique_ptr<Textures> prepareTextures(ImmediateCommands &, const std::string &);
+    std::unique_ptr<Textures> prepareTextures(ImmediateCommands &, const std::string &,
+                                              SamplerPolicy policy = SamplerPolicy::Mipmapped);
     void commitTextures(std::unique_ptr<Textures> textures) { m_textures.swap(textures); }
     MobTextureReport textureReport() const { return m_textures ? m_textures->report : MobTextureReport{}; }
     VkFormat textureFormat() const { return (m_textures && m_textures->images[0].image) ? m_textures->images[0].format : VK_FORMAT_UNDEFINED; }
     /// Mip levels of the first committed mob image (0 when none); asserts the
     /// full-chain GPU wiring for issue #160.
     uint32_t textureMipLevels() const { return (m_textures && m_textures->images[0].image) ? m_textures->images[0].mipLevels : 0; }
-    /// Total GPU bytes across all committed mob albedo images (mip chains included).
-    size_t textureGpuBytes() const;
-    /// Mip 0 byte size of the same images — the pre-#160 single-level footprint.
+    /// Logical RGBA8 texel payload across all committed mob albedo images,
+    /// mip chains included. This is the texture content size, not the VMA
+    /// allocation size (which adds alignment/padding).
+    size_t textureTexelBytes() const;
+    /// Mip 0 payload of the same images — the pre-#160 single-level footprint.
     size_t textureMip0Bytes() const;
     void prepare(uint32_t frame, const FrameUBO &, const std::vector<entities::MobRenderState> &);
     void record(VkCommandBuffer, uint32_t frame, VkDescriptorSet frameSet, int cascade = -1);

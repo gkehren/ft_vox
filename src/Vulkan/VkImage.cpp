@@ -274,17 +274,19 @@ void uploadImage2D(VmaAllocator allocator,
 	destroyBuffer(allocator, staging);
 }
 
-void uploadImage2DMipChain(VmaAllocator allocator,
-						   ImmediateCommands &imm,
-						   AllocatedImage &image,
-						   const void *mips,
-						   VkDeviceSize dataSize,
-						   VkImageLayout finalLayout)
+void uploadRgba8Image2DMipChain(VmaAllocator allocator,
+								ImmediateCommands &imm,
+								AllocatedImage &image,
+								const void *mips,
+								VkDeviceSize dataSize,
+								VkImageLayout finalLayout)
 {
 	if (!mips || dataSize == 0)
-		throw std::runtime_error("uploadImage2DMipChain: empty pixel data");
-	if (image.mipLevels <= 1)
-		throw std::runtime_error("uploadImage2DMipChain: image has no mip chain");
+		throw std::runtime_error("uploadRgba8Image2DMipChain: empty pixel data");
+	// The name is the contract: one 2D layer of an RGBA8-family format
+	// (4 bytes per texel — the size check below relies on it).
+	if (image.mipLevels <= 1 || image.arrayLayers != 1)
+		throw std::runtime_error("uploadRgba8Image2DMipChain: image must be a single-layer 2D image with a mip chain");
 
 	// Reject a mismatched chain up front — before any staging buffer or
 	// command buffer exists — so a caller bug cannot abort mid-recording.
@@ -293,7 +295,7 @@ void uploadImage2DMipChain(VmaAllocator allocator,
 		chainSize += VkDeviceSize(std::max(image.width >> level, 1u)) *
 					 std::max(image.height >> level, 1u) * 4;
 	if (chainSize != dataSize)
-		throw std::runtime_error("uploadImage2DMipChain: dataSize does not match the image mip chain");
+		throw std::runtime_error("uploadRgba8Image2DMipChain: dataSize does not match the image mip chain");
 
 	// One tightly packed buffer for the whole chain; the regions below just
 	// walk it level by level.
