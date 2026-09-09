@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <functional>
 #include <string>
 
 namespace
@@ -2225,6 +2226,302 @@ int main()
 				std::chrono::duration<double, std::milli>(elapsed).count() / kIterations;
 			std::cout << "test_render_helpers: generateLayerChain(64) average "
 			          << msPerLayer << " ms/layer over " << kIterations << " iterations\n";
+		}
+		// 17. Non-square chains (issue #160, mob skins are 64x64 or classic
+		// 64x32): the chain length follows the LARGER axis and stops only when
+		// BOTH dimensions have collapsed to 1; the rect layout helpers place
+		// level L right after the levels 0..L-1.
+		{
+			const struct
+			{
+				uint32_t w, h, levels;
+			} rectCountCases[] = {
+				{1, 1, 1}, {2, 1, 2}, {64, 64, 7}, {64, 32, 7}, {256, 128, 9}, {5, 3, 3},
+			};
+			for (const auto &c : rectCountCases)
+			{
+				if (mipLevelCount(c.w, c.h) != c.levels)
+					ok = fail("mipLevelCount(" + std::to_string(c.w) + "," + std::to_string(c.h) +
+					          ") must be " + std::to_string(c.levels) + " (got " +
+					          std::to_string(mipLevelCount(c.w, c.h)) + ")");
+			}
+			// 64x32: levels (64x32) (32x16) (16x8) (8x4) (4x2) (2x1) (1x1).
+			if (chainBytes(64, 32) != (2048 + 512 + 128 + 32 + 8 + 2 + 1) * 4)
+				ok = fail("chainBytes(64,32) must be (2048+512+128+32+8+2+1)*4");
+			if (chainOffset(64, 32, 1) != 2048 * 4)
+				ok = fail("chainOffset(64,32,1) must be 2048*4");
+			if (mipLevelBytes(64, 32, 3) != 8 * 4 * 4)
+				ok = fail("mipLevelBytes(64,32,3) must be 8*4*4 (level 3 is 8x4)");
+			if (chainOffset(64, 32, 7) != chainBytes(64, 32))
+				ok = fail("rect chainOffset past the last level must equal chainBytes");
+
+			// A fully opaque 8x4 layer keeps alpha 255 at every level — the
+			// rect path must never let the shorter axis drop coverage early.
+			{
+				const uint32_t w = 8, h = 4;
+				std::vector<uint8_t> layer(w * h * 4, 0);
+				for (uint32_t y = 0; y < h; ++y)
+					for (uint32_t x = 0; x < w; ++x)
+					{
+						uint8_t *texel = &layer[(y * w + x) * 4];
+						texel[0] = static_cast<uint8_t>((x * 17 + 11) & 0xff);
+						texel[1] = static_cast<uint8_t>((y * 29 + 7) & 0xff);
+						texel[2] = static_cast<uint8_t>((x * 7 + y * 13 + 3) & 0xff);
+						texel[3] = 255;
+					}
+				std::vector<uint8_t> chain(chainBytes(w, h), 0);
+				generateLayerChain(w, h, layer.data(), chain.data());
+				for (uint32_t level = 0; level < mipLevelCount(w, h); ++level)
+				{
+					const uint32_t lw = std::max(w >> level, 1u), lh = std::max(h >> level, 1u);
+					const uint8_t *pixels = chain.data() + chainOffset(w, h, level);
+					for (uint32_t i = 0; i < lw * lh; ++i)
+					{
+						if (pixels[i * 4 + 3] != 255)
+						{
+							ok = fail("opaque 8x4 texture must stay alpha 255 at level " +
+							          std::to_string(level));
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		// 18. Linear-light 2:1 minification (issue #160): a 2x1 skin strip with
+		// sRGB black next to sRGB white must average in LINEAR light at the 1x1
+		// level — srgb(0.5) ≈ 188/255, NOT the gamma-space 128 a plain byte
+		// average would produce.
+		{
+			const uint32_t w = 2, h = 1;
+			const std::vector<uint8_t> layer = {
+				0, 0, 0, 255, 255, 255, 255, 255,
+			};
+			std::vector<uint8_t> chain(chainBytes(w, h), 0);
+			generateLayerChain(w, h, layer.data(), chain.data());
+			const uint8_t *level1 = chain.data() + chainOffset(w, h, 1); // 1x1
+			if (level1[3] != 255)
+				ok = fail("2x1 opaque strip must stay alpha 255 at level 1");
+			for (int c = 0; c < 3; ++c)
+			{
+				if (level1[c] < 183 || level1[c] > 193)
+					ok = fail("black+white strip must average in linear light (~188, got " +
+					          std::to_string(int(level1[c])) + " on channel " + std::to_string(c) +
+					          " — gamma-space average would be 128)");
+			}
+		}
+
+		// 19. Alpha coverage on a synthetic transparent skin overlay (issue
+		// #160): an 8x4 cutout layer (25% coverage, loud magenta under the
+		// transparent texels) must hold the base covered-texel count at every
+		// generated level of the rect chain and must never bleed magenta.
+		{
+			const uint32_t w = 8, h = 4;
+			std::vector<uint8_t> layer(w * h * 4, 0);
+			for (uint32_t y = 0; y < h; ++y)
+				for (uint32_t x = 0; x < w; ++x)
+				{
+					uint8_t *texel = &layer[(y * w + x) * 4];
+					if ((x % 8) < 2) // exactly 2 of 8 columns covered: 8 of 32 texels
+					{
+						texel[0] = 0;
+						texel[1] = 255;
+						texel[2] = 0;
+						texel[3] = 255;
+					}
+					else
+					{
+						texel[0] = 255;
+						texel[1] = 0;
+						texel[2] = 255;
+						texel[3] = 0;
+					}
+				}
+			std::vector<uint8_t> chain(chainBytes(w, h), 0);
+			generateLayerChain(w, h, layer.data(), chain.data());
+			const auto coveredRect = [](const uint8_t *pixels, uint32_t lw, uint32_t lh) {
+				uint64_t covered = 0;
+				for (uint64_t i = 0; i < static_cast<uint64_t>(lw) * lh; ++i)
+					if (static_cast<float>(pixels[i * 4 + 3]) / 255.0f >= kAlphaCutoutThreshold)
+						++covered;
+				return covered;
+			};
+			const double baseCoverage =
+				static_cast<double>(coveredRect(chain.data(), w, h)) / static_cast<double>(w * h);
+			if (std::abs(baseCoverage - 0.25) > 1e-9)
+				ok = fail("8x4 cutout fixture must measure 25% base coverage (got " +
+				          std::to_string(baseCoverage) + ")");
+			for (uint32_t level = 1; level < mipLevelCount(w, h); ++level)
+			{
+				const uint32_t lw = std::max(w >> level, 1u), lh = std::max(h >> level, 1u);
+				// No level is skipped (issue #160 review P3): a 2x1 level still
+				// holds two texels and can represent 0/50/100% coverage; only
+				// the exact 1x1 target (lround below) degenerates to 0 or 1,
+				// which the same comparison handles.
+				const uint8_t *pixels = chain.data() + chainOffset(w, h, level);
+				for (uint32_t i = 0; i < lw * lh; ++i)
+				{
+					if (pixels[i * 4] > pixels[i * 4 + 1] || pixels[i * 4 + 2] > pixels[i * 4 + 1])
+						ok = fail("magenta bled into the 8x4 cutout chain at level " +
+						          std::to_string(level));
+				}
+				const uint64_t coveredCount = coveredRect(pixels, lw, lh);
+				const uint64_t expected = static_cast<uint64_t>(
+					std::lround(baseCoverage * static_cast<double>(lw) * static_cast<double>(lh)));
+				if (expected > 0 && coveredCount == 0)
+					ok = fail("representable cutout coverage vanished at 8x4 level " +
+					          std::to_string(level));
+				if (coveredCount != expected)
+					ok = fail("8x4 coverage drifted at level " + std::to_string(level) +
+					          " (expected " + std::to_string(expected) + " of " +
+					          std::to_string(lw * lh) + ", got " + std::to_string(coveredCount) + ")");
+			}
+		}
+
+		// 20. UV-rect atlas awareness (issue #160 review P1): a mob skin packs
+		// the independent faces of several boxes into ONE image, so the chain
+		// must never blend neighboring faces across odd UV boundaries, must
+		// keep each face's OWN alpha coverage, and must keep unused regions
+		// from bleeding into faces.
+		{
+			const uint32_t w = 8, h = 8;
+			// Rows 0-3 hold three faces with odd boundaries at x = 3 and x = 7;
+			// rows 4-7 are unused (transparent magenta). Face C is a 1-wide
+			// cutout with 50% coverage (opaque rows 0 and 2 only).
+			std::vector<uint8_t> layer(w * h * 4, 0);
+			for (uint32_t y = 0; y < h; ++y)
+			{
+				for (uint32_t x = 0; x < w; ++x)
+				{
+					uint8_t *t = &layer[(y * w + x) * 4];
+					if (y >= 4)
+					{
+						t[0] = 255; // unused: loud magenta, alpha 0
+						t[1] = 0;
+						t[2] = 255;
+						t[3] = 0;
+					}
+					else if (x < 3)
+					{
+						t[0] = 255; // face A: opaque red
+						t[1] = 0;
+						t[2] = 0;
+						t[3] = 255;
+					}
+					else if (x < 7)
+					{
+						t[0] = 0; // face B: opaque green
+						t[1] = 255;
+						t[2] = 0;
+						t[3] = 255;
+					}
+					else
+					{
+						const bool opaque = (y % 2) == 0; // face C: blue cutout
+						t[0] = 0;
+						t[1] = 0;
+						t[2] = 255;
+						t[3] = opaque ? 255 : 0;
+					}
+				}
+			}
+			const MipRect rects[] = {{0, 0, 3, 4}, {3, 0, 4, 4}, {7, 0, 1, 4}};
+			std::vector<uint8_t> chain(chainBytes(w, h), 0);
+			generateLayerChainRects(w, h, layer.data(), rects, 3, chain.data());
+
+			// Mirror of the generator's ownership rule: the owner of a level-k
+			// texel is the previous level's owner of its window center.
+			const std::function<int(uint32_t, uint32_t, uint32_t)> ownerAt =
+				[&](uint32_t level, uint32_t x, uint32_t y) -> int {
+				if (level == 0)
+				{
+					for (int r = 0; r < 3; ++r)
+						if (x >= rects[r].x && x < rects[r].x + rects[r].w && y >= rects[r].y &&
+							y < rects[r].y + rects[r].h)
+							return r;
+					return -1;
+				}
+				const uint32_t srcW = std::max(w >> (level - 1), 1u), srcH = std::max(h >> (level - 1), 1u);
+				const uint32_t dstW = std::max(w >> level, 1u), dstH = std::max(h >> level, 1u);
+				uint32_t sx0 = x * srcW / dstW, sx1 = (x + 1) * srcW / dstW;
+				uint32_t sy0 = y * srcH / dstH, sy1 = (y + 1) * srcH / dstH;
+				if (sx1 <= sx0) sx1 = sx0 + 1;
+				if (sy1 <= sy0) sy1 = sy0 + 1;
+				return ownerAt(level - 1, (sx0 + sx1) / 2, (sy0 + sy1) / 2);
+			};
+
+			const uint32_t levels = mipLevelCount(w, h);
+			for (uint32_t level = 0; level < levels; ++level)
+			{
+				const uint32_t lw = std::max(w >> level, 1u), lh = std::max(h >> level, 1u);
+				const uint8_t *pixels = chain.data() + chainOffset(w, h, level);
+				uint32_t cCovered = 0, cOwned = 0;
+				for (uint32_t y = 0; y < lh; ++y)
+				{
+					for (uint32_t x = 0; x < lw; ++x)
+					{
+						const uint8_t *t = pixels + (y * lw + x) * 4;
+						const int r = ownerAt(level, x, y);
+						if (r < 0)
+						{
+							// Don't-care texels: never opaque, never sampled.
+							if (t[3] != 0)
+								ok = fail("unused atlas region must stay alpha 0 at level " +
+								          std::to_string(level));
+							continue;
+						}
+						const bool aCovered = static_cast<float>(t[3]) / 255.0f >= kAlphaCutoutThreshold;
+						if (r == 0)
+						{
+							if (!(t[0] >= 250 && t[1] <= 5 && t[2] <= 5))
+								ok = fail("red face texel must stay pure red at level " +
+								          std::to_string(level) + " (got " + std::to_string(int(t[0])) + "," +
+								          std::to_string(int(t[1])) + "," + std::to_string(int(t[2])) + ")");
+						}
+						else if (r == 1)
+						{
+							if (!(t[1] >= 250 && t[0] <= 5 && t[2] <= 5))
+								ok = fail("green face texel must stay pure green at level " +
+								          std::to_string(level) + " (got " + std::to_string(int(t[0])) + "," +
+								          std::to_string(int(t[1])) + "," + std::to_string(int(t[2])) + ")");
+						}
+						else
+						{
+							++cOwned;
+							if (aCovered)
+							{
+								++cCovered;
+								if (!(t[2] >= 250 && t[0] <= 5 && t[1] <= 5))
+									ok = fail("blue cutout covered texel must stay pure blue at level " +
+									          std::to_string(level));
+							}
+						}
+					}
+				}
+				if (cOwned > 0)
+				{
+					// Face C's 50% coverage must be pinned against ITS OWN
+					// base coverage at every level where it owns texels.
+					const uint64_t expectedC = static_cast<uint64_t>(
+						std::lround(0.5 * static_cast<double>(cOwned)));
+					if (cCovered != expectedC)
+						ok = fail("face C cutout coverage drifted at level " + std::to_string(level) +
+						          " (expected " + std::to_string(expectedC) + " of " +
+								  std::to_string(cOwned) + ", got " + std::to_string(cCovered) + ")");
+				}
+			}
+
+			// Sensitivity proof: the SAME fixture through the plain
+			// whole-image filter DOES blend the red/green boundary (dst texel
+			// (1,0) at level 1 averages source columns 2 and 3), so this test
+			// can detect the bleed the rect path removes.
+			{
+				std::vector<uint8_t> plain(chainBytes(w, h), 0);
+				generateLayerChain(w, h, layer.data(), plain.data());
+				const uint8_t *blend = plain.data() + chainOffset(w, h, 1); // 4x4
+				if (!(blend[(0 * 4 + 1) * 4] > 100 && blend[(0 * 4 + 1) * 4 + 1] > 100))
+					ok = fail("sensitivity check: plain filter must blend red/green at the odd boundary");
+			}
 		}
 	}
 

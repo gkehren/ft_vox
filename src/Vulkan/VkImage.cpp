@@ -1,7 +1,9 @@
 #include "Vulkan/VkImage.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 AllocatedImage createImage2D(VmaAllocator allocator,
 							 VkDevice device,
@@ -267,6 +269,83 @@ void uploadImage2D(VmaAllocator allocator,
 								 VK_IMAGE_ASPECT_COLOR_BIT, image.mipLevels, image.arrayLayers);
 	});
 
+	}
+	catch (...) { destroyBuffer(allocator, staging); throw; }
+	destroyBuffer(allocator, staging);
+}
+
+void uploadRgba8Image2DMipChain(VmaAllocator allocator,
+								ImmediateCommands &imm,
+								AllocatedImage &image,
+								const void *mips,
+								VkDeviceSize dataSize,
+								VkImageLayout finalLayout)
+{
+	if (!mips || dataSize == 0)
+		throw std::runtime_error("uploadRgba8Image2DMipChain: empty pixel data");
+	// The name is the contract: one 2D layer of an RGBA8-family format
+	// (4 bytes per texel — the size check below relies on it).
+	if (image.mipLevels <= 1 || image.arrayLayers != 1)
+		throw std::runtime_error("uploadRgba8Image2DMipChain: image must be a single-layer 2D image with a mip chain");
+
+	// Reject a mismatched chain up front — before any staging buffer or
+	// command buffer exists — so a caller bug cannot abort mid-recording.
+	VkDeviceSize chainSize = 0;
+	for (uint32_t level = 0; level < image.mipLevels; ++level)
+		chainSize += VkDeviceSize(std::max(image.width >> level, 1u)) *
+					 std::max(image.height >> level, 1u) * 4;
+	if (chainSize != dataSize)
+		throw std::runtime_error("uploadRgba8Image2DMipChain: dataSize does not match the image mip chain");
+
+	// One tightly packed buffer for the whole chain; the regions below just
+	// walk it level by level.
+	AllocatedBuffer staging = createBuffer(
+		allocator,
+		dataSize,
+		VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VMA_MEMORY_USAGE_AUTO,
+		VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+
+	try
+	{
+		void *mapped = staging.info.pMappedData;
+		if (!mapped)
+			mapped = mapBuffer(allocator, staging);
+		std::memcpy(mapped, mips, static_cast<size_t>(dataSize));
+		vmaFlushAllocation(allocator, staging.allocation, 0, dataSize);
+		if (!staging.info.pMappedData)
+			unmapBuffer(allocator, staging);
+
+		imm.submitAndWait([&](VkCommandBuffer cmd) {
+			cmdTransitionImageLayout(cmd, image.image, VK_IMAGE_LAYOUT_UNDEFINED,
+									 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+									 image.mipLevels, image.arrayLayers);
+
+			// One region per level; level L starts right after levels 0..L-1
+			// and covers max(dim >> L, 1) texels per axis.
+			std::vector<VkBufferImageCopy> regions(image.mipLevels);
+			VkDeviceSize offset = 0;
+			for (uint32_t level = 0; level < image.mipLevels; ++level)
+			{
+				VkBufferImageCopy &r = regions[level];
+				r.bufferOffset = offset;
+				r.bufferRowLength = 0;
+				r.bufferImageHeight = 0;
+				r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+				r.imageSubresource.mipLevel = level;
+				r.imageSubresource.baseArrayLayer = 0;
+				r.imageSubresource.layerCount = 1;
+				r.imageOffset = {0, 0, 0};
+				r.imageExtent = {std::max(image.width >> level, 1u), std::max(image.height >> level, 1u), 1};
+				offset += VkDeviceSize(r.imageExtent.width) * r.imageExtent.height * 4;
+			}
+
+			vkCmdCopyBufferToImage(cmd, staging.buffer, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								   static_cast<uint32_t>(regions.size()), regions.data());
+
+			cmdTransitionImageLayout(cmd, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, finalLayout,
+									 VK_IMAGE_ASPECT_COLOR_BIT, image.mipLevels, image.arrayLayers);
+		});
 	}
 	catch (...) { destroyBuffer(allocator, staging); throw; }
 	destroyBuffer(allocator, staging);

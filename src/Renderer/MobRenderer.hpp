@@ -15,6 +15,14 @@
 class MobRenderer
 {
   public:
+    /// Sampler policy for the mob albedo textures. Mipmapped is the shipping
+    /// path (NEAREST magnification and minification over the full UV-rect-aware
+    /// chain, LINEAR mip SELECTION — faces are adjacent in the atlas, so
+    /// intra-level LINEAR would blend them right at their shared border).
+    /// LinearMips keeps the intra-level bilinear and exists as the seam-test
+    /// reference; NearestMip0 reproduces the pre-#160 behavior for the A/B
+    /// temporal regression test.
+    enum class SamplerPolicy { Mipmapped, LinearMips, NearestMip0 };
     struct Textures
     {
         VkContext *context{};
@@ -33,10 +41,25 @@ class MobRenderer
     /// both the image and the sampler). Caller must device-idle first.
     void refreshShadowBinding(VkImageView shadowView, VkSampler shadowSampler);
     void shutdown();
-    std::unique_ptr<Textures> prepareTextures(ImmediateCommands &, const std::string &);
+    std::unique_ptr<Textures> prepareTextures(ImmediateCommands &, const std::string &,
+                                              SamplerPolicy policy = SamplerPolicy::Mipmapped);
     void commitTextures(std::unique_ptr<Textures> textures) { m_textures.swap(textures); }
     MobTextureReport textureReport() const { return m_textures ? m_textures->report : MobTextureReport{}; }
     VkFormat textureFormat() const { return (m_textures && m_textures->images[0].image) ? m_textures->images[0].format : VK_FORMAT_UNDEFINED; }
+    /// Mip levels of the committed mob image `index` (0 when unset) — the
+    /// per-texture form lets tests assert every image's chain, not just [0].
+    uint32_t textureMipLevels(size_t index) const
+    {
+        return (m_textures && index < m_textures->images.size() && m_textures->images[index].image)
+                   ? m_textures->images[index].mipLevels
+                   : 0;
+    }
+    /// Logical RGBA8 texel payload across all committed mob albedo images,
+    /// mip chains included. This is the texture content size, not the VMA
+    /// allocation size (which adds alignment/padding).
+    size_t textureTexelBytes() const;
+    /// Mip 0 payload of the same images — the pre-#160 single-level footprint.
+    size_t textureMip0Bytes() const;
     void prepare(uint32_t frame, const FrameUBO &, const std::vector<entities::MobRenderState> &);
     void record(VkCommandBuffer, uint32_t frame, VkDescriptorSet frameSet, int cascade = -1);
     size_t visibleCount() const { return m_visible; }

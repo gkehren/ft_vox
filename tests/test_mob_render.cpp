@@ -6,13 +6,52 @@
 #include <Vulkan/ImageBarrier.hpp>
 #include <SDL3/SDL.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <miniz.h>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <chrono>
+#include <map>
 #include <numeric>
 
 namespace fs = std::filesystem;
+// Minimal RGBA PNG encoder (same scheme as test_mob_textures) for synthetic
+// resource-pack skins.
+static std::vector<uint8_t> encodePng(int w, int h, const std::vector<uint8_t> &rgba)
+{
+    std::vector<uint8_t> out{137, 80, 78, 71, 13, 10, 26, 10};
+    auto be = [](std::vector<uint8_t> &v, uint32_t n) {
+        for (int s : {24, 16, 8, 0})
+            v.push_back(uint8_t(n >> s));
+    };
+    auto chunk = [&](const char *type, const std::vector<uint8_t> &payload) {
+        be(out, uint32_t(payload.size()));
+        auto start = out.size();
+        out.insert(out.end(), type, type + 4);
+        out.insert(out.end(), payload.begin(), payload.end());
+        be(out, uint32_t(mz_crc32(0, out.data() + start, out.size() - start)));
+    };
+    std::vector<uint8_t> header;
+    be(header, w);
+    be(header, h);
+    header.insert(header.end(), {8, 6, 0, 0, 0});
+    chunk("IHDR", header);
+    std::vector<uint8_t> raw(size_t(h) * (w * 4 + 1), 0);
+    for (int y = 0; y < h; ++y)
+    {
+        raw[size_t(y) * (w * 4 + 1)] = 0; // filter none
+        memcpy(&raw[size_t(y) * (w * 4 + 1) + 1], &rgba[size_t(y) * w * 4], size_t(w) * 4);
+    }
+    mz_ulong size = mz_compressBound(raw.size());
+    std::vector<uint8_t> compressed(size);
+    if (mz_compress(compressed.data(), &size, raw.data(), raw.size()) != MZ_OK)
+        throw std::runtime_error("png compress failed");
+    compressed.resize(size);
+    chunk("IDAT", compressed);
+    chunk("IEND", {});
+    return out;
+}
 static PFN_vkAllocateDescriptorSets realAllocate{};
 static int allocationCalls{};
 static VKAPI_ATTR VkResult VKAPI_CALL failAllocate(VkDevice d, const VkDescriptorSetAllocateInfo *i,
@@ -296,6 +335,13 @@ int main(int argc, char **argv)
         // the real wiring, not just the kAlbedoTextureFormat policy constant.
         if (f.renderer.textureFormat() != colorspace::kAlbedoTextureFormat)
             throw std::runtime_error("MobRenderer entity albedo textures must be created sRGB");
+        // Issue #160 integration: every committed mob image must carry the
+        // full mip chain on the GPU (floor(log2(64)) + 1 = 7 levels for both
+        // the 64x64 and the 64x32 skins), not mip 0 only.
+        for (size_t i = 0; i < 6; ++i)
+            if (f.renderer.textureMipLevels(i) != 7)
+                throw std::runtime_error("MobRenderer entity texture " + std::to_string(i) +
+                                         " must carry a full 7-level mip chain");
         {
             TextureManager atlas;
             atlas.initialize(f.context, f.imm, "");
@@ -333,7 +379,12 @@ int main(int argc, char **argv)
         vkAllocateDescriptorSets = realAllocate;
         if (!failed || f.render(states, u, 1) != image)
             throw std::runtime_error("failed texture reload changed live rendering");
+        // Issue #160: time the full CPU mip generation + multi-level upload.
+        const auto texReloadStart = std::chrono::steady_clock::now();
         f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, ""));
+        const double texReloadMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - texReloadStart)
+                .count();
         if (f.render(states, u, 0) != image)
             throw std::runtime_error("default reload changed result");
         for (auto &s : states)
@@ -385,6 +436,268 @@ int main(int argc, char **argv)
                 throw std::runtime_error("red block-lit mob must have higher red channel than green");
         }
 
+        // Issue #160: mobs ~65 blocks away exercise the deep mip levels of the
+        // skin chain (a 64-px skin is a few pixels tall here — the old
+        // nearest-only mip-0 path crawled exactly at this range). The scene
+        // must still produce mob pixels and stay validation-clean.
+        {
+            std::vector<entities::MobRenderState> distant;
+            for (size_t i = 0; i < entities::kMobSpeciesCount; ++i)
+                distant.push_back({entities::MobSpecies(i), {(float(i) - 1.5f) * 1.5f, 0, 60.f}, 0, 0, 0, 0, 0});
+            FrameUBO uf = frame(2);
+            const glm::vec3 eye(0.f, 3.f, -6.f);
+            uf.view = glm::lookAt(eye, glm::vec3(0, 1, 60), glm::vec3(0, 1, 0));
+            uf.projection = glm::perspective(glm::radians(45.f), 2.f, 0.1f, 200.f);
+            uf.viewPos = glm::vec4(eye, 1);
+            uf.fogParams = {200.f, 400.f, 0.f, 0.f}; // keep distance fog from erasing the fixture
+            auto farImage = f.render(distant, uf, 0);
+            f.save(output / "far-species.ppm", farImage);
+            size_t farChanged = 0;
+            for (size_t i = 0; i < farImage.size(); i += 4)
+                if (farImage[i] != farImage[0] || farImage[i + 1] != farImage[1])
+                    ++farChanged;
+            if (farChanged < 50)
+                throw std::runtime_error("far-distance mobs produced no pixels");
+        }
+
+        // Issue #160 (review round 2): GPU seam/LOD regression. Every cow UV
+        // face rect is painted ONE pure palette color on an aggressive
+        // synthetic skin (unused texels: transparent magenta). UV-rect-aware
+        // mip generation keeps every owned texel of every level pure, so any
+        // impure rendered pixel can only come from GPU filtering across rect
+        // borders or deep-level ownership collapse. The shipping sampler
+        // (NEAREST intra-level + LINEAR mip selection) must keep face colors
+        // dominant at every LOD and must beat the LinearMips reference, whose
+        // intra-level LINEAR blends adjacent faces right at their shared
+        // border — the failure mode this test exists to expose.
+        {
+            entities::MobModels baked;
+            const auto rects = entities::mobTextureFaceRects(baked, 0, 64, 64);
+            if (rects.size() < 20)
+                throw std::runtime_error("unexpectedly few cow face rects for the seam fixture");
+            std::vector<uint8_t> skin(64 * 64 * 4, 0);
+            for (size_t i = 0; i < 64 * 64; ++i)
+            {
+                skin[i * 4] = 255; // unused: loud magenta, alpha 0
+                skin[i * 4 + 2] = 255;
+            }
+            for (const auto &r : rects)
+            {
+                const size_t code = size_t(&r - rects.data());
+                const uint8_t c[3] = {uint8_t(code & 1 ? 240 : 15), uint8_t(code & 2 ? 240 : 15),
+                                      uint8_t(code & 4 ? 240 : 15)};
+                for (uint32_t y = r.y; y < r.y + r.h; ++y)
+                    for (uint32_t x = r.x; x < r.x + r.w; ++x)
+                        for (int ch = 0; ch < 4; ++ch)
+                            skin[(size_t(y) * 64 + x) * 4 + ch] = ch < 3 ? c[ch] : 255;
+            }
+            const fs::path pack = fs::temp_directory_path() / "ft-vox-mob-seam-pack";
+            fs::create_directories(pack / "assets/minecraft/textures/entity/cow");
+            {
+                const std::vector<uint8_t> pngData = encodePng(64, 64, skin);
+                std::ofstream pngOut(pack / "assets/minecraft/textures/entity/cow/cow_temperate.png",
+                                     std::ios::binary);
+                pngOut.write(reinterpret_cast<const char *>(pngData.data()), std::streamsize(pngData.size()));
+            }
+
+            // Flat-lighting frame: zero diffuse, ambient only, so every face
+            // renders as exactly ONE flat color and any deviation is a
+            // filtering artifact, not shading.
+            const auto seamFrame = [&](float dist) {
+                FrameUBO u = frame(float(f.width) / float(f.height));
+                const glm::vec3 eye(0.f, 1.7f, -dist);
+                u.view = glm::lookAt(eye, glm::vec3(0, 0.9f, 0), glm::vec3(0, 1, 0));
+                u.projection = glm::perspective(glm::radians(45.f), float(f.width) / float(f.height), 0.1f, 400.f);
+                u.viewPos = glm::vec4(eye, 1);
+                u.lightParams = {0.9, 0.0, 16, 1.0};
+                u.fogParams = {400.f, 800.f, 0.f, 0.f};
+                std::vector<entities::MobRenderState> mob = {
+                    {entities::MobSpecies::Cow, {0, 0, 0}, 0, 0, 0, 0, 0, 1.0f, glm::vec3(0.0f)}};
+                return f.render(mob, u, 0);
+            };
+            const auto mobPixelIdx = [&](const std::vector<uint8_t> &px) {
+                std::vector<size_t> idx;
+                for (size_t p = 0; p < px.size(); p += 4)
+                    if (std::abs(int(px[p]) - 31) + std::abs(int(px[p + 1]) - 43) + std::abs(int(px[p + 2]) - 59) > 24)
+                        idx.push_back(p);
+                return idx;
+            };
+            // Learn the flat face colors from the close (LOD ~0) render: under
+            // NEAREST magnification every mob pixel IS one face's flat color.
+            std::vector<std::array<int, 3>> flatColors;
+            f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, pack.string(),
+                                                                 MobRenderer::SamplerPolicy::Mipmapped));
+            {
+                const auto closePx = seamFrame(12.f);
+                const auto closeIdx = mobPixelIdx(closePx);
+                std::map<std::array<int, 3>, int> counts;
+                for (size_t p : closeIdx)
+                    counts[{int(closePx[p]), int(closePx[p + 1]), int(closePx[p + 2])}]++;
+                for (const auto &c : counts)
+                    if (c.second >= 2)
+                        flatColors.push_back(c.first);
+            }
+            if (flatColors.size() < 6)
+                throw std::runtime_error("seam fixture learned too few flat face colors");
+
+            const auto purityAt = [&](float dist) {
+                const auto px = seamFrame(dist);
+                const auto idx = mobPixelIdx(px);
+                size_t pure = 0;
+                for (size_t p : idx)
+                    for (const auto &c : flatColors)
+                        if (std::abs(int(px[p]) - c[0]) <= 2 && std::abs(int(px[p + 1]) - c[1]) <= 2 &&
+                            std::abs(int(px[p + 2]) - c[2]) <= 2)
+                        {
+                            ++pure;
+                            break;
+                        }
+                return idx.empty() ? 0.0 : double(pure) / double(idx.size());
+            };
+            const auto runStages = [&](MobRenderer::SamplerPolicy policy) {
+                f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, pack.string(), policy));
+                return std::array<double, 3>{purityAt(12.f), purityAt(90.f), purityAt(180.f)};
+            };
+            const auto ship = runStages(MobRenderer::SamplerPolicy::Mipmapped);
+            const auto linear = runStages(MobRenderer::SamplerPolicy::LinearMips);
+            // Restore the default pack (shipping sampling) for the rest of the suite.
+            f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, ""));
+            std::cout << "Mob seam LOD purity (close/LOD1/LOD2): shipping " << ship[0] << "/" << ship[1] << "/"
+                      << ship[2] << ", linear-intra " << linear[0] << "/" << linear[1] << "/" << linear[2] << "\n";
+            {
+                std::ofstream report(output / "seam-lod.txt", std::ios::app);
+                report << "Mob seam LOD purity (close/LOD1/LOD2): shipping " << ship[0] << "/" << ship[1] << "/"
+                       << ship[2] << ", linear-intra " << linear[0] << "/" << linear[1] << "/" << linear[2] << "\n";
+            }
+            if (ship[0] < 0.95)
+                throw std::runtime_error("close-range seam purity too low — face colors are not flat/pure");
+            if (ship[1] < 0.70 || ship[2] < 0.60)
+                throw std::runtime_error("shipping sampler leaks across UV face seams at minification");
+            // The comparative proof: intra-level LINEAR must measure strictly
+            // worse at minified stages — the test keeps exposing the seam
+            // problem the shipping sampler avoids.
+            if (linear[1] >= ship[1] || linear[2] >= ship[2])
+                throw std::runtime_error("LinearMips reference should measure worse than NEAREST intra-level");
+        }
+
+        // Issue #160 (review P2): a REAL A/B of the temporal benefit. The same
+        // deterministic camera pan is rendered twice per step — once with the
+        // shipping mipmapped sampler, once with a NearestMip0 sampler that
+        // reproduces the pre-#160 behavior — and the mean |frame-to-frame
+        // luma delta| is measured over a fixed ROI covering the mobs only.
+        // The mipmapped sampler must be materially more stable; the old
+        // FXAA-only pan metric could never prove that.
+        double abNearest = 0.0, abMipped = 0.0;
+        {
+            std::vector<entities::MobRenderState> ab;
+            for (size_t i = 0; i < entities::kMobSpeciesCount; ++i)
+                ab.push_back({entities::MobSpecies(i), {(float(i) - 1.5f) * 1.5f, 0, 60.f}, 0, 0, 0, 0, 0});
+            for (size_t i = 0; i < entities::kMobSpeciesCount; ++i)
+                ab.push_back({entities::MobSpecies(i), {(float(i) - 1.5f) * 1.5f, 0, 140.f}, 0, 0, 0, 0, 0});
+            FrameUBO base = frame(2);
+            base.projection = glm::perspective(glm::radians(45.f), 2.f, 0.1f, 400.f);
+            base.fogParams = {400.f, 800.f, 0.f, 0.f}; // no distance fog on the fixture
+            const glm::vec3 eye(0.f, 3.f, -10.f);
+            constexpr int kSteps = 32;
+            constexpr float kSweepDeg = 3.0f;
+
+            int roi[4] = {0, 0, 0, 0}; // x0, y0, x1, y1 (exclusive)
+            bool haveRoi = false;
+            const auto nonBackground = [](uint8_t r, uint8_t g, uint8_t b) {
+                return std::abs(int(r) - 31) + std::abs(int(g) - 43) + std::abs(int(b) - 59) > 24;
+            };
+            const auto uboAt = [&](int i) {
+                const float a = glm::radians(kSweepDeg * (float(i) / float(kSteps - 1) - 0.5f));
+                FrameUBO u = base;
+                u.view = glm::lookAt(eye, eye + glm::vec3(std::sin(a), 0.f, std::cos(a)), glm::vec3(0, 1, 0));
+                u.viewPos = glm::vec4(eye, 1);
+                return u;
+            };
+            // One full pan with ONE sampler policy: mean |frame-to-frame luma
+            // delta| over the fixed mob ROI.
+            const auto runPan = [&](MobRenderer::SamplerPolicy policy) {
+                std::vector<uint8_t> prev;
+                double sum = 0.0;
+                int pairs = 0;
+                for (int i = 0; i < kSteps; ++i)
+                {
+                    auto px = f.render(ab, uboAt(i), policy == MobRenderer::SamplerPolicy::Mipmapped ? 0 : 1);
+                    if (!haveRoi)
+                    {
+                        int x0 = int(f.width), y0 = int(f.height), x1 = -1, y1 = -1;
+                        for (uint32_t y = 0; y < f.height; ++y)
+                            for (uint32_t x = 0; x < f.width; ++x)
+                            {
+                                const size_t p = (size_t(y) * f.width + x) * 4;
+                                if (nonBackground(px[p], px[p + 1], px[p + 2]))
+                                {
+                                    x0 = std::min(x0, int(x));
+                                    y0 = std::min(y0, int(y));
+                                    x1 = std::max(x1, int(x) + 1);
+                                    y1 = std::max(y1, int(y) + 1);
+                                }
+                            }
+                        if (x1 < 0)
+                            throw std::runtime_error("A/B fixture rendered no mobs");
+                        constexpr int kPad = 48; // > the 3 deg pan shift at any fixture distance
+                        roi[0] = std::max(0, x0 - kPad);
+                        roi[1] = std::max(0, y0 - kPad);
+                        roi[2] = std::min(int(f.width), x1 + kPad);
+                        roi[3] = std::min(int(f.height), y1 + kPad);
+                        haveRoi = true;
+                    }
+                    else
+                    {
+                        // Every frame's mob pixels must stay inside the fixed
+                        // ROI, or the metric would silently compare backdrop.
+                        for (uint32_t y = 0; y < f.height; ++y)
+                            for (uint32_t x = 0; x < f.width; ++x)
+                            {
+                                const size_t p = (size_t(y) * f.width + x) * 4;
+                                if (nonBackground(px[p], px[p + 1], px[p + 2]) &&
+                                    (int(x) < roi[0] || int(x) >= roi[2] || int(y) < roi[1] || int(y) >= roi[3]))
+                                    throw std::runtime_error("A/B mobs left the fixed ROI");
+                            }
+                    }
+                    if (!prev.empty())
+                    {
+                        for (int y = roi[1]; y < roi[3]; ++y)
+                            for (int x = roi[0]; x < roi[2]; ++x)
+                            {
+                                const size_t p = (size_t(y) * f.width + x) * 4;
+                                const int l0 = (prev[p] * 299 + prev[p + 1] * 587 + prev[p + 2] * 114) / 1000;
+                                const int l1 = (px[p] * 299 + px[p + 1] * 587 + px[p + 2] * 114) / 1000;
+                                sum += std::abs(l1 - l0);
+                            }
+                        ++pairs;
+                    }
+                    prev = std::move(px);
+                }
+                return sum / (double(pairs) * double((roi[2] - roi[0]) * (roi[3] - roi[1])));
+            };
+            abMipped = runPan(MobRenderer::SamplerPolicy::Mipmapped);
+            // Swap in the pre-#160 sampling (same mip-chained images, sampler
+            // clamped to mip 0 with NEAREST) and render the identical pan.
+            f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, "",
+                                                                 MobRenderer::SamplerPolicy::NearestMip0));
+            abNearest = runPan(MobRenderer::SamplerPolicy::NearestMip0);
+            // Restore the shipping sampling for the rest of the suite.
+            f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, ""));
+            if (abNearest <= 0.0)
+                throw std::runtime_error("A/B nearest-mip0 delta is degenerate");
+            const double improvement = 1.0 - abMipped / abNearest;
+            std::cout << "Mob temporal A/B: mip0/nearest delta " << abNearest << "/255, mipmapped "
+                      << abMipped << "/255, improvement " << improvement * 100.0 << "%\n";
+            if (improvement < 0.10)
+                throw std::runtime_error("mipmapped mob sampling is not temporally stable enough vs mip0/nearest");
+        }
+        { // keep the A/B evidence next to the profile report
+            std::ofstream report(output / "ab-temporal.txt", std::ios::app);
+            report << "Mob temporal A/B (fixed mob ROI, 32-step pan): mip0/nearest " << abNearest
+                   << "/255, mipmapped " << abMipped << "/255, improvement "
+                   << (abNearest > 0.0 ? 100.0 * (1.0 - abMipped / abNearest) : 0.0) << "%\n";
+        }
+
         f.resize(800, 600);
         f.render(states, frame(800.f / 600), 0);
         // Camera culling cannot suppress shadow casters behind the eye.
@@ -429,6 +742,11 @@ int main(int argc, char **argv)
             throw std::runtime_error("48-mob fixture not fully visible");
         std::ofstream report(output / "gpu-profile.txt");
         report << "Device: " << f.context.getDeviceProperties().deviceName << "\n";
+        // Issue #160 memory/cost evidence: mip-0 vs full-chain payload and
+        // the whole CPU-generate + multi-level upload reload cost.
+        report << "Mob textures: mip0 texel bytes=" << f.renderer.textureMip0Bytes()
+               << " full-chain texel bytes=" << f.renderer.textureTexelBytes()
+               << " reload ms=" << texReloadMs << "\n";
         if (gpuTimes.empty())
             report << "GPU timestamps unavailable\n";
         else

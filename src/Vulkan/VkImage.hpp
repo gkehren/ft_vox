@@ -63,3 +63,19 @@ void uploadImage2D(VmaAllocator allocator,
 				   const void *pixels,
 				   VkDeviceSize dataSize,
 				   VkImageLayout finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+/// Stage a complete CPU-generated RGBA8 mip chain into a single-layer GPU 2D
+/// image in one submit (UNDEFINED → TRANSFER_DST → SHADER_READ). The name is
+/// the contract: RGBA8 (4 bytes per texel), one array layer — the size
+/// validation below depends on both, and any other format/layout needs its own
+/// helper. `mips` holds every level tightly packed, level 0 first (the layout
+/// texture_mips::generateLayerChain produces); one vkCmdCopyBufferToImage
+/// writes all levels, so the descriptor set only becomes usable once every
+/// level is resident. `dataSize` must equal the sum of all level byte sizes
+/// (texture_mips::chainBytes(w, h)).
+void uploadRgba8Image2DMipChain(VmaAllocator allocator,
+								ImmediateCommands &imm,
+								AllocatedImage &image,
+								const void *mips,
+								VkDeviceSize dataSize,
+								VkImageLayout finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

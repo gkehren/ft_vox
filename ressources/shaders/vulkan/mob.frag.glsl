@@ -3,6 +3,7 @@
 #include "csm.inc.glsl"
 #include "colorspace.inc.glsl"
 #include "atmosphere_fog.inc.glsl"
+#include "cutout.inc.glsl"
 
 layout(location=0) in vec3 worldPosition;
 layout(location=1) in vec3 worldNormal;
@@ -15,7 +16,7 @@ layout(location=0) out vec4 outColor;
 
 void main() {
     vec4 texel = texture(mobTexture, texCoord);
-    if (texel.a < 0.5) discard;
+    if (texel.a < kAlphaCutoutThreshold) discard;
 
     vec3 norm = normalize(worldNormal);
     vec3 lightDir = normalize(frame.lightDirection.xyz);
