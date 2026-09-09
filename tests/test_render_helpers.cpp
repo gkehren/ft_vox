@@ -1022,13 +1022,13 @@ int main()
 		namespace fs = std::filesystem;
 		const fs::path sourceShaderDir = fs::path(FT_VOX_SOURCE_DIR) / "ressources/shaders/vulkan";
 		const std::string sourceFrameUbo = (sourceShaderDir / "frame_ubo.inc.glsl").string();
+		// Prefer the freshly generated build-tree copy: the source tree is no
+		// longer written by builds, so any snapshot found there is stale.
 		const char *candidates[] = {
-			sourceFrameUbo.c_str(),
-			"ressources/shaders/vulkan/frame_ubo.inc.glsl",
-			"../ressources/shaders/vulkan/frame_ubo.inc.glsl",
-			"../../ressources/shaders/vulkan/frame_ubo.inc.glsl",
 			"generated/shaders/frame_ubo.inc.glsl",
 			"../generated/shaders/frame_ubo.inc.glsl",
+			"../../generated/shaders/frame_ubo.inc.glsl",
+			sourceFrameUbo.c_str(),
 		};
 		std::string glsl;
 		for (const char *c : candidates)

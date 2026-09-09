@@ -215,7 +215,7 @@ Small vegetation uses an explicit `BlockShape` (`Cube`, `Cross`, `Flat`) in
 # Multi-seed world report: biomes, heights, features, caves, and ores
 ./build-vk/tests/test_terrain --world-stats 16 3
 
-# Real Vulkan streaming/LOD benchmark; saves docs/benchmarks/bench_*.txt and exits
+# Real Vulkan streaming/LOD benchmark; saves benchmark-results/bench_*.txt (gitignored) and exits
 ./build-vk/ft_vox --seed 42 --benchmark 30
 ```
 

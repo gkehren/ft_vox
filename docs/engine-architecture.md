@@ -105,7 +105,7 @@ stage measurements are documented in [workload-telemetry.md](workload-telemetry.
 - **`GameUI`** — multi-panel ImGui: HUD, Graphics, Streaming, World/biome map, Help; F-key shortcuts  
 - **`ImGuiLayer`** — SDL3 + Vulkan backends, dynamic rendering  
 - **`Profiler`** — hierarchical CPU scopes (F7-style panel)  
-- **`Benchmark`** — scripted runs / reports under `docs/benchmarks/`  
+- **`Benchmark`** — scripted runs; reports written to gitignored `benchmark-results/`  
 
 Controls summary lives in root `README.md` (WASD, break/place, borders, etc.).
 

@@ -112,7 +112,8 @@ cd build-vk && ctest --output-on-failure
 ./build-vk/tests/test_terrain --profile 32 1337
 ./build-vk/tests/test_terrain --world-stats 16 3
 
-# Automated Vulkan streaming benchmark (saves a report, then exits)
+# Automated Vulkan streaming benchmark (saves a report to the gitignored
+# benchmark-results/ dir, then exits)
 ./build-vk/ft_vox --seed 42 --benchmark 30
 
 # Visual regression (offscreen golden-image comparison)

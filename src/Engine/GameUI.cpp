@@ -1150,7 +1150,7 @@ void GameUI::drawBenchmarkReport(GameUIFrame &frame)
 	ImGui::SameLine();
 	if (ImGui::Button("Save summary"))
 	{
-		const std::string path = bench.saveReportToFile("docs/benchmarks");
+		const std::string path = bench.saveReportToFile("benchmark-results");
 		if (path.empty())
 			ImGui::OpenPopup("bench_save_fail");
 		else
@@ -1170,7 +1170,7 @@ void GameUI::drawBenchmarkReport(GameUIFrame &frame)
 	}
 	if (ImGui::BeginPopup("bench_save_fail"))
 	{
-		ImGui::TextWrapped("Failed to write docs/benchmarks/… (check cwd permissions).");
+		ImGui::TextWrapped("Failed to write benchmark-results/… (check cwd permissions).");
 		if (ImGui::Button("OK"))
 			ImGui::CloseCurrentPopup();
 		ImGui::EndPopup();

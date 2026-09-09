@@ -54,3 +54,14 @@ visual-qa/
 # Local ctest artifacts (Tre bah) — untracked dirs would also stamp BuildInfo's
 # dirty-tree marker at build time.
 Testing/
+
+# Runtime / profiling outputs — commit syntheses under docs/benchmarks/ instead
+# (see docs/benchmarks/README.md); raw reports stay local or ride on CI/PRs.
+benchmark-results/
+perf-results/
+captures/
+screenshots-local/
+*.log
+*.trace
+*.prof
+*.profraw
