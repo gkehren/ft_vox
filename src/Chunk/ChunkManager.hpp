@@ -82,6 +82,12 @@ constexpr uint32_t kUnloadCheckIntervalFrames = 60;
 class ChunkManager
 {
 public:
+	// Entity local light cache retention radius around camera (issue #128).
+	// Dynamic entities spawn and wander within ~128m (kMobDespawnDist).
+	static constexpr float kEntityLightCacheRadius = 128.0f;
+	static constexpr float kEntityLightCacheRadiusSq =
+		kEntityLightCacheRadius * kEntityLightCacheRadius;
+
 	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool);
 	~ChunkManager();
 
@@ -239,6 +245,9 @@ private:
 
 	TaskPriority calculateTaskPriority(float distanceSq, float lodThresholdSq) const;
 	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
+
+	/// Maintain chunk local light cache desire based on distance to camera (issue #128).
+	void updateEntityLightCacheIntent(Chunk &chunk, float distSq);
 
 	// Testing hook (issue #114 review): exposes the deferred-edit queue
 	// size without making it public API.

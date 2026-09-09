@@ -246,16 +246,20 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 
 		const float dx = aabbMin.x - camOffsetX;
 		const float dz = aabbMin.z - camOffsetZ;
-		const float distSq = dx * dx + dz * dz;
-		const bool wanted = (distSq <= kEntityLightCacheRadiusSq);
-		const bool prevWanted = chunk->localLightCacheWanted();
-		if (prevWanted && !wanted)
-		{
-			chunk->releaseLightStorage();
-		}
-		chunk->setLocalLightCacheWanted(wanted);
+		updateEntityLightCacheIntent(*chunk, dx * dx + dz * dz);
 	}
 	(void)settings;
+}
+
+void ChunkManager::updateEntityLightCacheIntent(Chunk &chunk, float distSq)
+{
+	const bool wanted = (distSq <= kEntityLightCacheRadiusSq);
+	const bool previous = chunk.localLightCacheWanted();
+	if (previous && !wanted)
+	{
+		chunk.releaseLightStorage();
+	}
+	chunk.setLocalLightCacheWanted(wanted);
 }
 
 void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, int budget)
@@ -350,8 +354,6 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 
 	const float lodThresh = static_cast<float>(settings.minRenderDistance) * 2.f;
 	const float lodThreshSq = lodThresh * lodThresh;
-	constexpr float kEntityLightCacheRadius = 128.0f;
-	constexpr float kEntityLightCacheRadiusSq = kEntityLightCacheRadius * kEntityLightCacheRadius;
 
 	// Promote distant LOD meshes back to full quality when close enough.
 	// Also re-arm meshed chunks entering the light radius if they lack light storage.
@@ -361,13 +363,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		const float dx = p.x - camOffsetX;
 		const float dz = p.z - camOffsetZ;
 		const float distSq = dx * dx + dz * dz;
-		const bool wanted = (distSq <= kEntityLightCacheRadiusSq);
-		const bool prevWanted = chunk->localLightCacheWanted();
-		if (prevWanted && !wanted)
-		{
-			chunk->releaseLightStorage();
-		}
-		chunk->setLocalLightCacheWanted(wanted);
+		updateEntityLightCacheIntent(*chunk, distSq);
 
 		if (chunk->getState() == ChunkState::MESHED && !chunk->isInTransit())
 		{
@@ -375,7 +371,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 			{
 				chunk->setState(ChunkState::GENERATED);
 			}
-			else if (wanted && !chunk->hasLightStorage())
+			else if (chunk->localLightCacheWanted() && !chunk->hasLightStorage())
 			{
 				chunk->setState(ChunkState::GENERATED);
 			}
@@ -602,6 +598,12 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 
 void ChunkManager::processDeferredReleases()
 {
+	constexpr size_t kMaxRetainedLightBlocks = 64;
+	if (m_chunkPool && m_chunkPool->lightStorageFree() > kMaxRetainedLightBlocks)
+	{
+		m_chunkPool->lightPool().trim(kMaxRetainedLightBlocks);
+	}
+
 	if (m_deferredRelease.empty())
 	{
 		m_deferredReleaseAge = 0;
@@ -623,11 +625,6 @@ void ChunkManager::processDeferredReleases()
 	}
 	m_deferredRelease.clear();
 	m_deferredReleaseAge = 0;
-
-	if (m_chunkPool)
-	{
-		m_chunkPool->lightPool().trim(64);
-	}
 }
 
 void ChunkManager::processFinishedJobs()
@@ -696,6 +693,9 @@ void ChunkManager::processFinishedJobs()
 		// light until an unrelated edit remeshed it.
 		if (job.chunk && job.chunk->getState() == ChunkState::MESHED &&
 			job.chunk->dirtySections() != 0)
+			job.chunk->setState(ChunkState::GENERATED);
+		if (job.chunk && job.chunk->getState() == ChunkState::MESHED &&
+			job.chunk->localLightCacheWanted() && !job.chunk->hasLightStorage())
 			job.chunk->setState(ChunkState::GENERATED);
 	}
 	// Apply edits that were deferred while their chunk was in transit; they
@@ -1652,7 +1652,7 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 			const glm::vec3 pos = p.second->getPosition();
 			const float dx = pos.x - center.x;
 			const float dz = pos.z - center.z;
-			p.second->setLocalLightCacheWanted(dx * dx + dz * dz <= 128.0f * 128.0f);
+			updateEntityLightCacheIntent(*p.second, dx * dx + dz * dz);
 		}
 		for (const auto &p : created)
 			ensureShellPopulated(p.second, p.first);

@@ -107,6 +107,7 @@ struct MeshBuildResult
 	ChunkLightStorage *lightStorage{nullptr};
 	ChunkLightPool *lightPool{nullptr};
 	LightCacheAction lightCacheAction{LightCacheAction::Unchanged};
+	bool lightCacheWantedAtBuild{false};
 
 	// Full-quality payload, one slot per vertical section (issue #107).
 	// beginBuild() drops previous content while keeping capacity - reuse

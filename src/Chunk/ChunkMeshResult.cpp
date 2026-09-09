@@ -67,6 +67,7 @@ void MeshBuildResult::beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration,
 	}
 	lightPool = nullptr;
 	lightCacheAction = LightCacheAction::Unchanged;
+	lightCacheWantedAtBuild = false;
 	// `accounted` is intentionally untouched: it belongs to the pool and is
 	// only read/written under the pool mutex (finishBuild/release).
 }
@@ -90,6 +91,7 @@ void MeshBuildResult::detach()
 	}
 	lightPool = nullptr;
 	lightCacheAction = LightCacheAction::Unchanged;
+	lightCacheWantedAtBuild = false;
 	// Drop content (sizes only - capacity stays with the pool block so the
 	// next borrower does not start from zero allocations). The matching
 	// size accounting is subtracted by release() under the pool mutex.

@@ -829,6 +829,7 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
   // in the pooled result block, nothing on the Chunk changes ownership.
   out.beginBuild(this, generation, revision, sectionMask);
   out.isLOD = false;
+  out.lightCacheWantedAtBuild = localLightCacheWanted();
   // Occupied Y span from the per-section metadata (issue #105): no 64 KiB
   // type copy + full-buffer scan per remesh. Section-granular, then refined
   // to byte-exact layer bounds inside the two boundary sections so slice
@@ -847,13 +848,11 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
     }
   }
 
-  const bool wantLight = localLightCacheWanted();
-
   if (!hasOccupancy)
   {
     // Empty occupancy: if light cache is wanted, compute light field so entities in this
     // chunk (e.g. open air or hollow cave) can sample valid skylight/blocklight.
-    if (wantLight)
+    if (out.lightCacheWantedAtBuild)
     {
       telemetry::MeshSample meshSample(telemetry::Skylight);
       computeLightField(meshSample);
@@ -868,7 +867,7 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
 
   if (out.sectionsBuilt == 0)
   {
-    if (wantLight)
+    if (out.lightCacheWantedAtBuild)
     {
       telemetry::MeshSample meshSample(telemetry::Skylight);
       computeLightField(meshSample);
@@ -887,7 +886,7 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
   // build would produce, so section boundaries cannot introduce seams.
   computeLightField(meshSample);
 
-  if (wantLight)
+  if (out.lightCacheWantedAtBuild)
   {
     populateLightStorage(out);
   }
@@ -2183,9 +2182,9 @@ void Chunk::buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t rev
 {
   out.beginBuild(this, generation, revision);
   out.isLOD = true;
+  out.lightCacheWantedAtBuild = localLightCacheWanted();
 
-  const bool wantLight = localLightCacheWanted();
-  if (wantLight)
+  if (out.lightCacheWantedAtBuild)
   {
     telemetry::MeshSample meshSample(telemetry::Skylight);
     computeLightField(meshSample);
@@ -2371,22 +2370,42 @@ bool Chunk::publishMeshResult(MeshBuildResult *result)
   if (m_pendingResult && m_pendingResult != result)
     m_pendingResult->homePool->release(m_pendingResult);
   m_pendingResult = result;
-  switch (result->lightCacheAction)
+
+  const bool wantLightNow = localLightCacheWanted();
+  if (!wantLightNow)
   {
-  case LightCacheAction::Replace:
-    if (result->lightStorage)
+    releaseLightStorage();
+    if (result->lightStorage && result->lightPool)
     {
-      if (m_lightStorage && m_lightPool)
-        m_lightPool->release(m_lightStorage);
-      m_lightStorage = result->lightStorage;
+      result->lightPool->release(result->lightStorage);
       result->lightStorage = nullptr;
     }
-    break;
-  case LightCacheAction::Clear:
-    releaseLightStorage();
-    break;
-  case LightCacheAction::Unchanged:
-    break;
+    result->lightCacheAction = LightCacheAction::Unchanged;
+  }
+  else if (result->lightCacheWantedAtBuild)
+  {
+    switch (result->lightCacheAction)
+    {
+    case LightCacheAction::Replace:
+      if (result->lightStorage)
+      {
+        if (m_lightStorage && m_lightPool)
+          m_lightPool->release(m_lightStorage);
+        m_lightStorage = result->lightStorage;
+        result->lightStorage = nullptr;
+      }
+      break;
+    case LightCacheAction::Clear:
+      releaseLightStorage();
+      break;
+    case LightCacheAction::Unchanged:
+      break;
+    }
+  }
+  else
+  {
+    // Not wanted during build, but wanted now: do not apply stale Clear, keep existing cache.
+    result->lightCacheAction = LightCacheAction::Unchanged;
   }
   // Single state commit point: the mesh becomes official here, on the main
   // thread, only after validation succeeded.

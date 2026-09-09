@@ -474,10 +474,12 @@ static int profileMobs()
         << " p95_ms=" << timings[timings.size()*95/100] << " cells/tick=" << cells/timings.size()
         << " travelled=" << distance << " dropped=" << mobs.droppedSteps() << "\n";
 
-    // Measure local-light sampling CPU time for all 48 mobs (issue #128 performance validation)
+    // Measure local-light sampling CPU time for all active mobs (issue #128 performance validation)
     std::vector<double> sampleTimings; sampleTimings.reserve(6000);
     std::vector<entities::MobRenderState> states;
     mobs.renderStates(states);
+    CHECK(!states.empty(), "light benchmark has active mobs");
+    const double mobCount = static_cast<double>(states.size());
     {
         ChunkMobWorld world(manager, generator);
         for (int i = 0; i < 6000; ++i) {
@@ -494,10 +496,12 @@ static int profileMobs()
     }
     double sampleTotal = 0; for (auto ms : sampleTimings) sampleTotal += ms;
     std::sort(sampleTimings.begin(), sampleTimings.end());
-    std::cout << "48 mobs local light sampling CPU mean_ms=" << sampleTotal / sampleTimings.size()
+    const double perMobUs = (sampleTotal / sampleTimings.size() / mobCount) * 1000.0;
+    std::cout << states.size() << " mobs local light sampling CPU mean_ms=" << sampleTotal / sampleTimings.size()
               << " p95_ms=" << sampleTimings[sampleTimings.size() * 95 / 100]
-              << " per_mob_us=" << (sampleTotal / sampleTimings.size() / 48.0) * 1000.0 << "\n";
+              << " per_mob_us=" << perMobUs << "\n";
     CHECK(distance>100, "animals actually move across generated terrain");
+    CHECK(states.size() == 48, "48 mobs remain active during benchmark");
     CHECK(mobs.mobs().size()<=48, "real-world population bounded");
     return g_fails?1:0;
 }
@@ -4722,7 +4726,7 @@ int main(int argc, char **argv)
 			// Verify monotonic decay across boundary
 			CHECK(at15_25.blockRgb.r <= atLava.blockRgb.r + 1e-4f, "decay 14.5 -> 15.25");
 			CHECK(at15_50.blockRgb.r <= at15_25.blockRgb.r + 1e-4f, "decay 15.25 -> 15.50");
-			CHECK(at15_50.blockRgb.r <= at15_50.blockRgb.r + 1e-4f, "decay 15.50 -> 15.75");
+			CHECK(at15_75.blockRgb.r <= at15_50.blockRgb.r + 1e-4f, "decay 15.50 -> 15.75");
 			CHECK(at16_00.blockRgb.r <= at15_75.blockRgb.r + 1e-4f, "decay 15.75 -> 16.00 (cross seam)");
 			CHECK(at16_25.blockRgb.r <= at16_00.blockRgb.r + 1e-4f, "decay 16.00 -> 16.25 (cross seam)");
 			CHECK(at16_50.blockRgb.r <= at16_25.blockRgb.r + 1e-4f, "decay 16.25 -> 16.50");
@@ -4799,6 +4803,10 @@ int main(int argc, char **argv)
 			CHECK(sampleMid.blockRgb == glm::vec3(0.0f), "empty chunk block light is 0");
 
 			chunkPool.release(emptyChunk);
+			CHECK(chunkPool.lightPool().activeCount() == 0, "empty chunk release returns light storage");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 30");
 		}
 	}
 
@@ -4839,6 +4847,10 @@ int main(int argc, char **argv)
 
 			CHECK(!chunk->localLightCacheWanted(), "chunk outside 128m does not want light cache");
 			CHECK(!chunk->hasLightStorage(), "light storage released when chunk moved outside 128m");
+			CHECK(chunkPool.lightPool().activeCount() == 0, "active count is 0 after leaving 128m");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 31");
 		}
 	}
 
@@ -4872,6 +4884,8 @@ int main(int argc, char **argv)
 		pool.trim(0);
 		CHECK(pool.capacity() == 0, "pool capacity trimmed to 0");
 		CHECK(pool.freeCount() == 0, "pool free count trimmed to 0");
+		CHECK(pool.activeCount() + pool.freeCount() == pool.capacity(),
+		      "light pool accounting coherent in test 32");
 	}
 
 	// 33. Shutdown drain with unconsumed completed mesh jobs (issue #128 review)
@@ -4903,6 +4917,151 @@ int main(int argc, char **argv)
 
 		CHECK(chunkPool.meshResultPool().stats().active == 0, "shutdown cleanly returned mesh result");
 		CHECK(chunkPool.lightPool().activeCount() == 0, "shutdown cleanly returned light storage");
+		CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+			      chunkPool.lightPool().capacity(),
+		      "light pool accounting coherent in test 33");
+	}
+
+	// 34. Stale MeshBuildResult race: wanted true -> false before publish (issue #128 review)
+	{
+		TerrainGenerator gen(1337);
+		ChunkPool chunkPool(4);
+		ChunkManager mgr(&gen, nullptr, &chunkPool);
+		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for race test 34");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for race test 34");
+
+			// 1. Chunk initially wants light cache
+			chunk->setLocalLightCacheWanted(true);
+			auto *result = chunkPool.meshResultPool().acquire();
+			CHECK(result != nullptr, "acquired mesh result");
+			chunk->buildMesh(*result, chunk->meshGeneration(), chunk->meshRevision());
+
+			CHECK(result->lightCacheWantedAtBuild, "result recorded lightCacheWantedAtBuild == true");
+			CHECK(result->lightCacheAction == LightCacheAction::Replace, "result has Replace action");
+			CHECK(result->lightStorage != nullptr, "result holds allocated light storage");
+			CHECK(chunkPool.lightPool().activeCount() >= 1, "light storage block active before publish");
+
+			// 2. Intent changes before publish: camera moved away -> wanted becomes false
+			chunk->setLocalLightCacheWanted(false);
+			chunk->releaseLightStorage();
+
+			// 3. Publish stale result: must NOT re-introduce light storage
+			CHECK(chunk->publishMeshResult(result), "publish succeeds");
+			CHECK(!chunk->hasLightStorage(), "chunk does not retain light storage after publish");
+			CHECK(chunkPool.lightPool().activeCount() == 0, "active light blocks cleanly reclaimed to 0");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 34");
+		}
+	}
+
+	// 35. Stale MeshBuildResult race: wanted false -> true before publish (issue #128 review)
+	{
+		TerrainGenerator gen(1337);
+		ChunkPool chunkPool(4);
+		ChunkManager mgr(&gen, nullptr, &chunkPool);
+		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for race test 35");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for race test 35");
+
+			// 1. Chunk initially does NOT want light cache
+			chunk->setLocalLightCacheWanted(false);
+			auto *result = chunkPool.meshResultPool().acquire();
+			CHECK(result != nullptr, "acquired mesh result");
+			chunk->buildMesh(*result, chunk->meshGeneration(), chunk->meshRevision());
+
+			CHECK(!result->lightCacheWantedAtBuild, "result recorded lightCacheWantedAtBuild == false");
+			CHECK(result->lightCacheAction == LightCacheAction::Clear, "result has Clear action");
+			CHECK(result->lightStorage == nullptr, "no light storage allocated");
+
+			// 2. Intent changes before publish: camera moved close -> wanted becomes true
+			chunk->setLocalLightCacheWanted(true);
+
+			// 3. Inject and process through manager
+			ChunkManagerProbe::injectCompletedMeshJob(mgr, chunk, result);
+			mgr.processFinishedJobs();
+
+			// Stale Clear must NOT clobber wanted status; since chunk lacks light storage,
+			// processFinishedJobs must re-arm it to GENERATED so next scheduler builds light.
+			CHECK(!chunk->hasLightStorage(), "chunk does not yet have light storage");
+			CHECK(chunk->getState() == ChunkState::GENERATED,
+			      "chunk re-armed to GENERATED because light cache is wanted");
+			CHECK(chunkPool.lightPool().activeCount() == 0, "active light blocks count is 0");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 35");
+		}
+	}
+
+	// 36. Real streaming test around 128m radius with ThreadPool (issue #128 review)
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(777);
+		ChunkPool chunkPool(8);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+
+		// Place chunk at (100, 0, 0) - distance with chunk-center offset is ~108m (< 128m)
+		Chunk *chunk = chunkPool.acquire(glm::vec3(100.0f, 0.0f, 0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for streaming 128m test");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(6, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for streaming 128m test");
+
+			RenderSettings rs;
+			rs.minRenderDistance = 192;
+			rs.maxRenderDistance = 256;
+
+			// Step A: Camera at (0, 40, 0), distance is ~108m (< 128m).
+			// Dispatch mesh with cache wanted.
+			const Camera nearCam(glm::vec3(0.0f, 40.0f, 0.0f));
+			mgr.meshPendingChunks(nearCam, rs, 1);
+			CHECK(chunk->isInTransit(), "chunk mesh dispatched to worker");
+			CHECK(chunk->localLightCacheWanted(), "chunk inside 128m wants light cache");
+
+			// Before processing finished jobs, camera moves to (0, 40, -100) so distance is ~142m (> 128m)
+			const Camera farCam(glm::vec3(0.0f, 40.0f, -100.0f));
+			mgr.updateVisibility(farCam, 800, 600, rs);
+			CHECK(!chunk->localLightCacheWanted(), "chunk outside 128m does not want light cache");
+
+			// Wait for worker to finish
+			while (mgr.pendingMeshJobs() > 0)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				mgr.processFinishedJobs();
+			}
+			mgr.processFinishedJobs();
+
+			// Result was published while camera was far: chunk must NOT hold light storage
+			CHECK(!chunk->hasLightStorage(), "chunk finished mesh but holds no light storage due to far camera");
+			CHECK(chunkPool.lightPool().activeCount() == 0, "no light storage retained in pool");
+
+			// Step B: Camera moves back near (< 128m)
+			mgr.updateVisibility(nearCam, 800, 600, rs);
+			CHECK(chunk->localLightCacheWanted(), "camera near re-sets localLightCacheWanted");
+
+			// Next meshPendingChunks must detect wanted && !hasLightStorage and re-arm / dispatch
+			mgr.meshPendingChunks(nearCam, rs, 1);
+			while (mgr.pendingMeshJobs() > 0)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				mgr.processFinishedJobs();
+			}
+			mgr.processFinishedJobs();
+
+			CHECK(chunk->hasLightStorage(), "re-armed mesh completed with light storage populated");
+			CHECK(chunkPool.lightPool().activeCount() == 1, "exactly 1 active light storage block");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 36");
+		}
 	}
 
 	if (g_fails != 0)
