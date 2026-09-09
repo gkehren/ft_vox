@@ -5,6 +5,7 @@
 #include <set>
 #include <cstring>
 #include <array>
+#include <algorithm>
 #include <cstdlib>
 #ifdef _WIN32
 #include <windows.h>
@@ -232,6 +233,7 @@ void VkContext::createInstance(SDL_Window *window)
 
 	// Validation: on by default in Debug. Force with FT_VOX_VALIDATION=1 (or =0 to disable).
 	// Layers are discovered at runtime via VK_LAYER_PATH (not linked into the binary).
+	const char *validationLayer = "VK_LAYER_KHRONOS_validation";
 	const char *validationEnv = std::getenv("FT_VOX_VALIDATION");
 	bool requestValidation =
 #ifndef NDEBUG
@@ -269,6 +271,46 @@ void VkContext::createInstance(SDL_Window *window)
 		m_validationEnabled = false;
 	}
 
+	// FT_VOX_SYNC_VALIDATION=1: hazard tracking between submits and rendering
+	// scopes, via VK_EXT_validation_features fed to the Khronos layer. Opt-in:
+	// noticeably slower than the default validation set; intended for
+	// targeted runs after pass-graph changes (e.g. the water -> sky handoff).
+	bool syncValidationRequested = false;
+	if (const char *syncEnv = std::getenv("FT_VOX_SYNC_VALIDATION");
+		syncEnv != nullptr && std::string(syncEnv) == "1")
+	{
+		syncValidationRequested = false;
+		if (!m_validationEnabled)
+		{
+			std::cerr << "Warning: FT_VOX_SYNC_VALIDATION=1 requires validation to be enabled "
+						 "(FT_VOX_VALIDATION=1 and the Khronos layer). Standard validation continues.\n";
+		}
+		else
+		{
+			// VK_EXT_validation_features is implemented by the validation
+			// LAYER, so it only shows up when enumerating that layer's
+			// extensions (a global enumeration lists loader/driver ones).
+			uint32_t extCount = 0;
+			vkEnumerateInstanceExtensionProperties(validationLayer, &extCount, nullptr);
+			std::vector<VkExtensionProperties> available(extCount);
+			vkEnumerateInstanceExtensionProperties(validationLayer, &extCount, available.data());
+			const bool haveValidationFeatures = std::any_of(
+				available.begin(), available.end(), [](const VkExtensionProperties &e) {
+					return std::strcmp(e.extensionName, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME) == 0;
+				});
+			if (haveValidationFeatures)
+			{
+				extensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+				syncValidationRequested = true;
+			}
+			else
+			{
+				std::cerr << "Warning: FT_VOX_SYNC_VALIDATION=1 but VK_EXT_validation_features is not "
+							 "provided by VK_LAYER_KHRONOS_validation — standard validation continues.\n";
+			}
+		}
+	}
+
 	VkInstanceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
 	createInfo.pApplicationInfo = &appInfo;
@@ -279,8 +321,12 @@ void VkContext::createInstance(SDL_Window *window)
 	createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
 
-	const char *validationLayer = "VK_LAYER_KHRONOS_validation";
 	VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
+	// Kept at this scope: both structs are chained through pNext and must
+	// outlive vkCreateInstance below.
+	VkValidationFeaturesEXT validationFeatures{};
+	VkValidationFeatureEnableEXT syncValidation =
+		VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
 	if (m_validationEnabled)
 	{
 		createInfo.enabledLayerCount = 1;
@@ -298,15 +344,9 @@ void VkContext::createInstance(SDL_Window *window)
 		debugCreateInfo.pUserData = &m_validationErrors;
 		createInfo.pNext = &debugCreateInfo;
 
-		VkValidationFeaturesEXT validationFeatures{};
-		VkValidationFeatureEnableEXT syncValidation =
-			VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
-		// FT_VOX_SYNC_VALIDATION=1: best-effort hazard tracking between
-		// submits and rendering scopes. Opt-in because it is noticeably
-		// slower than the default validation set; intended for targeted runs
-		// after pass-graph changes (e.g. the water -> sky depth handoff).
-		if (const char *syncEnv = std::getenv("FT_VOX_SYNC_VALIDATION");
-			syncEnv != nullptr && std::string(syncEnv) == "1")
+		// The extension is only added to the instance when requested (see
+		// above), so the chained features are guaranteed to be understood.
+		if (syncValidationRequested)
 		{
 			validationFeatures.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
 			validationFeatures.enabledValidationFeatureCount = 1;

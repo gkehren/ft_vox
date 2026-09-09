@@ -30,10 +30,11 @@ layout(location = 0) out vec4 outColor;
 // different-sized rectangles deform as different waves with visible seams.
 // Everything below is evaluated from the interpolated WORLD position, so two
 // adjacent rectangles produce exactly the same surface state at the same
-// world location. Sine derivatives are analytic; the noise detail octave uses
-// a footprint-matched finite difference. Amplitudes fade when an octave's
-// feature size approaches the pixel footprint (dFdx/dFdy of the world
-// position), which removes horizon shimmer without touching the mesh.
+// world location. Sine derivatives are analytic; the noise detail field uses
+// fixed-world-unit finite differences. Amplitudes fade when an octave's
+// feature size approaches the pixel footprint derived from the projection,
+// resolution and ray incidence (see main), which removes horizon shimmer
+// without touching the mesh.
 // ---------------------------------------------------------------------------
 
 // Sum of the two smooth directional sines + analytic XZ gradient.
@@ -56,7 +57,7 @@ void swellField(vec2 p, float t, float amp, out float h, out vec2 grad)
 
 // Feature fade: 0 when the octave's world feature size is smaller than the
 // pixel footprint (its gradient would alias), 1 when well magnified. Only
-// bounded AMPLITUDES hang on this — the derivative epsilons stay fixed so
+// bounded amplitudes hang on this — the derivative epsilons stay fixed so
 // the field itself never jumps between primitives.
 float octaveFade(float featureSize, float foot)
 {
@@ -403,7 +404,10 @@ void main()
         column = 0.0;
         depthBelow = WATER_SKY_COLUMN; // no contact foam on the underside
         if (bgSky)
-            scene = analyticSkyRadiance(normalize(V), dayFactor, sunsetFactor, nightFactor);
+            // -V = camera -> surface -> outside. V points at the camera
+            // (downward here); sampling the sky with V would read the
+            // sub-horizon half of the gradient for every pixel.
+            scene = analyticSkyRadiance(normalize(-V), dayFactor, sunsetFactor, nightFactor);
     }
     else if (bgSky)
     {

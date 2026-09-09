@@ -13,10 +13,26 @@ $env:FT_VOX_VALIDATION = '1'
 ```
 
 Both runs reported `water audit errors=0` (valid frames, no NaN/Inf, no new
-validation errors). The same audit was additionally run once with
-synchronization validation enabled
-(`$env:FT_VOX_SYNC_VALIDATION = '1'`): no sync hazards and `water audit
-errors=0` after the explicit Water → Sky barrier was added.
+validation errors).
+
+The audit was additionally run at both resolutions with synchronization
+validation active:
+
+```powershell
+$env:FT_VOX_VALIDATION = '1'
+$env:FT_VOX_SYNC_VALIDATION = '1'
+./build/tests/Release/ft_vox_visual_tests.exe --water-audit --out build/pr157-sync
+./build/tests/Release/ft_vox_visual_tests.exe --water-audit --audit-1440 --out build/pr157-sync-1440
+```
+
+`FT_VOX_SYNC_VALIDATION=1` enables `VK_EXT_validation_features` on the
+instance (added to the extension list only when requested and supported,
+with a clear warning otherwise) and chains
+`VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT` into the
+Khronos layer. Both sync runs reported `water audit errors=0` — no hazards
+and no new validation errors — with the explicit Water → Sky barrier in
+place (the barrier was in turn validated by the run before the extension
+plumbing was corrected, and re-validated after).
 
 ## Files
 

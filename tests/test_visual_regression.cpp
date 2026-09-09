@@ -2047,11 +2047,87 @@ int runWaterSurfaceTermsCheck(VisualHarness &harness)
 	}
 	harness.shader().waterDebugView = 0.0f;
 
+	// --- underside transmitted-sky direction ---------------------------------
+	// Camera just below the surface, underwater composite OFF so the raw
+	// water-pass output is inspected directly: the boundary background is
+	// analyticSkyRadiance of the OUTGOING direction (-V, camera -> surface ->
+	// outside). Regression guard for the sign — with the wrong sign every
+	// upward ray samples the sub-horizon half of the gradient (h clamps to 0
+	// -> pure horizon radiance), so the near-zenith and grazing views return
+	// the SAME color, while the correct sign returns the ~2.6x darker zenith
+	// radiance (luma ~0.23) for the steep view and the bright horizon
+	// radiance (~0.60) for the grazing view.
+	{
+		harness.beginScene(4217);
+		harness.shader() = ShaderParameters{};
+		harness.renderSettings() = RenderSettings{};
+		harness.post() = PostProcessSettings{};
+		harness.post().autoExposureEnabled = false;
+		harness.post().underwater = false; // inspect the raw transmitted term
+		harness.shader().dayTime = 0.5f;   // noon: maximum zenith/horizon separation
+		updateAtmosphereFromDayTime(harness.shader());
+		harness.shader().fogStart = 300.f;
+		harness.shader().fogEnd = 900.f;
+		const glm::ivec2 col = findDeepWaterColumn(harness.terrain(), 40);
+		const glm::vec3 eye(float(col.x), float(TerrainGenerator::SEA_LEVEL) - 1.2f, float(col.y));
+		harness.buildArea(eye, 4); // world must exist or the check measures bare sky
+		// Band mean restricted to sky-transmitted pixels (B well above R):
+		// excludes kelp silhouettes, whose position differs between the two
+		// pitches and would pollute a plain mean.
+		const auto undersideStats = [&](float pitchDegrees) {
+			harness.camera().setPosition(eye);
+			harness.camera().setYawPitch(180.f, pitchDegrees);
+			const RgbaImage img = harness.renderFrame(kTime, {});
+			need(img.valid() && harness.lastNonFiniteSamples() == 0, errors,
+				 "underside sky view invalid/non-finite at pitch " + std::to_string(pitchDegrees));
+			RegionStats s;
+			long long count = 0, blue = 0;
+			for (uint32_t y = uint32_t(img.height * 40 / 100); y < uint32_t(img.height * 60 / 100); ++y)
+				for (uint32_t x = img.width * 3 / 10; x < img.width * 7 / 10; ++x)
+				{
+					const uint8_t *p = &img.pixels[(size_t(y) * img.width + x) * 4];
+					++count;
+					if (p[2] <= p[0] + 20)
+						continue; // kelp / structure, not transmitted sky
+					++blue;
+					s.meanLuma += 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+					s.meanR += p[0];
+					s.meanG += p[1];
+					s.meanB += p[2];
+				}
+			need(count > 0 && blue > count * 3 / 10, errors,
+				 "underside sky view: too few transmitted-sky pixels at pitch " +
+					 std::to_string(pitchDegrees));
+			if (blue)
+			{
+				s.meanLuma /= blue;
+				s.meanR /= blue;
+				s.meanG /= blue;
+				s.meanB /= blue;
+			}
+			return s;
+		};
+		const auto undersideImg = [&](float pitchDegrees) {
+			harness.camera().setPosition(eye);
+			harness.camera().setYawPitch(180.f, pitchDegrees);
+			return harness.renderFrame(kTime, {});
+		};
+		visual::writePng((fs::path("build/qa-sign") / "us_zenith.png").string(), undersideImg(50.f));
+		visual::writePng((fs::path("build/qa-sign") / "us_horizon.png").string(), undersideImg(8.f));
+		const RegionStats zenithView = undersideStats(50.f);
+		const RegionStats horizonView = undersideStats(8.f);
+		need(horizonView.meanLuma > zenithView.meanLuma + 15.0, errors,
+			 "underside transmitted sky not direction-dependent (zenith luma " +
+				 std::to_string(zenithView.meanLuma) + " vs horizon luma " +
+				 std::to_string(horizonView.meanLuma) +
+				 " — the outgoing sky direction looks inverted)");
+	}
+
 	for (const std::string &e : errors)
 		std::cerr << "  FAIL water-surface-terms: " << e << std::endl;
 	if (errors.empty())
 		std::cout << "  water-surface-terms OK (normals/up-gradient continuity, monotone optical path, "
-					 "monotone Fresnel)" << std::endl;
+					 "monotone Fresnel, underside sky direction)" << std::endl;
 	return errors.empty() ? 0 : 1;
 }
 
