@@ -94,18 +94,19 @@ void WaterPass::createPipeline(VkPipelineLayout layout, const VkPipelineVertexIn
 
 	VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
 	depth.depthTestEnable = VK_TRUE;
-	depth.depthWriteEnable = VK_FALSE;
+	// Single-composition water: the fragment outputs the fully
+	// composited surface color (refraction + absorption + reflection + foam)
+	// with alpha = 1, so blending is disabled and depth write is enabled.
+	// The depth write resolves the nearest visible water surface independent
+	// of draw order and lets the sky pass (LESS_OR_EQUAL depth test), SSAO,
+	// god-ray occlusion and the camera-underwater composite see the surface
+	// instead of the geometry behind it.
+	depth.depthWriteEnable = VK_TRUE;
 	depth.depthCompareOp = VK_COMPARE_OP_LESS;
 
 	VkPipelineColorBlendAttachmentState blendAtt{};
 	blendAtt.colorWriteMask = 0xF;
-	blendAtt.blendEnable = VK_TRUE;
-	blendAtt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-	blendAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-	blendAtt.colorBlendOp = VK_BLEND_OP_ADD;
-	blendAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-	blendAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-	blendAtt.alphaBlendOp = VK_BLEND_OP_ADD;
+	blendAtt.blendEnable = VK_FALSE;
 
 	m_pipeline = GraphicsPipelineBuilder()
 					 .setLayout(layout)
@@ -268,11 +269,12 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 								1.f / static_cast<float>(std::max(1u, extent.height)), 0.f, 0.f};
 	vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(invScreen), invScreen);
 
-	// Water draw order MUST NOT be reordered by page pair (unlike opaque /
-	// shadow): chunks are sorted back-to-front, their cached draws memcpy'd
-	// in that order, and only contiguous same-page-pair runs are split out
-	// for binding. Bucketing the whole set would break water transparency
-	// ordering — do not "optimize" this into emitGroupedIndirectDraws.
+	// Water draws are still emitted back-to-front and must not be reordered
+	// by page pair (unlike opaque / shadow): with depth write + no blending
+	// the depth test alone decides visibility, but keeping the historical
+	// order makes the depth results independent of sorting changes and lets a
+	// future transparency mode re-enable strict ordering. Only contiguous
+	// same-page-pair runs are split out for binding.
 	m_waterChunks.clear();
 	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
 	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
@@ -376,4 +378,27 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 	// pass in the frame graph (missing faces across the world).
 	endRendering(cmd);
 
+	// Water -> Sky handoff. Separate dynamic-rendering instances have no
+	// implicit ordering (vkCmdEndRendering only ends the scope), and the sky
+	// pass re-uses this same depth attachment with LESS_OR_EQUAL + loadOp
+	// LOAD — it must observe the depth the water pass just wrote, or distant
+	// water gets overwritten by sky again. Same-class hazard on the color
+	// attachment the sky keeps rendering into.
+	VkImageMemoryBarrier handoff[2] = {
+		vkbar::makeBarrier(hdr.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+						   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+						   VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+						   VK_IMAGE_ASPECT_COLOR_BIT),
+		vkbar::makeBarrier(liveDepth.image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+						   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+						   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+						   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, VK_IMAGE_ASPECT_DEPTH_BIT),
+	};
+	vkbar::cmdBarriers(cmd, handoff, 2,
+					   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+						   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+						   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+					   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+						   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+						   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
 }

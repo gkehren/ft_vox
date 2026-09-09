@@ -84,10 +84,10 @@ int main()
 		ok = fail("default exposureCompensation must be 0 EV (neutral)");
 	if (!pp.autoExposureEnabled)
 		ok = fail("auto exposure should default on");
-	if (pp.autoExposureMiddleGrey != 1.0f || pp.autoExposureMinEv != -4.0f ||
-		pp.autoExposureMaxEv != 4.0f || pp.autoExposureSpeedUp != 3.0f ||
+	if (pp.autoExposureMiddleGrey != 0.18f || pp.autoExposureMinEv != -4.0f ||
+		pp.autoExposureMaxEv != 1.0f || pp.autoExposureSpeedUp != 3.0f ||
 		pp.autoExposureSpeedDown != 1.25f)
-		ok = fail("auto-exposure defaults drifted (middleGrey 1, minEv -4, maxEv +4, speedUp 3, speedDown 1.25)");
+		ok = fail("auto-exposure defaults drifted (middleGrey 0.18, minEv -4, maxEv +1, speedUp 3, speedDown 1.25)");
 
 	// --- Quality presets (shipped applyPreset; Low lighter than High/Cinematic) ---
 	{
@@ -186,8 +186,8 @@ int main()
 				ok = fail(std::string(name) + " preset must re-enable auto exposure");
 			if (std::abs(p.exposureCompensation) > 1e-6f)
 				ok = fail(std::string(name) + " preset must reset exposureCompensation to 0 EV");
-			if (p.autoExposureMiddleGrey != 1.0f || p.autoExposureMinEv != -4.0f ||
-				p.autoExposureMaxEv != 4.0f || p.autoExposureSpeedUp != 3.0f ||
+			if (p.autoExposureMiddleGrey != 0.18f || p.autoExposureMinEv != -4.0f ||
+				p.autoExposureMaxEv != 1.0f || p.autoExposureSpeedUp != 3.0f ||
 				p.autoExposureSpeedDown != 1.25f)
 				ok = fail(std::string(name) + " preset must reset the auto-exposure tunables to defaults");
 		};

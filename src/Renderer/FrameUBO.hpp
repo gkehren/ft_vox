@@ -31,7 +31,8 @@ struct FrameUBO
 	glm::vec4 cascadeGridOffsets01;   // xy = cascade0 absolute grid offset, zw = cascade1 (ints as floats)
 	glm::vec4 cascadeGridOffsets2;	  // xy = cascade2 absolute grid offset, zw unused
 	glm::vec4 waterQuality; // SSR steps, range, view thickness, directional shadows
+	glm::vec4 waterSurfaceParams; // roughness, debug view (0 off/1 normal/2 optical dist/3 fresnel/4 SSR confidence), unused, unused
 };
 
-// 18 vec4 slots after the 5 matrices: 5*64 + 18*16 = 320+288 = 608
-static_assert(sizeof(FrameUBO) == 608, "FrameUBO std140 size must match GLSL (no dead postParams)");
+// 19 vec4 slots after the 5 matrices: 5*64 + 19*16 = 320+304 = 624
+static_assert(sizeof(FrameUBO) == 624, "FrameUBO std140 size must match GLSL (no dead postParams)");

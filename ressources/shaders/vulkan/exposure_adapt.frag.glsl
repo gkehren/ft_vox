@@ -46,7 +46,7 @@ layout(set = 0, binding = 2) buffer ExposureSnapshot
 layout(push_constant) uniform PC
 {
     vec4 p0; // x=dt (s, clamped CPU-side), y=speedUp, z=speedDown, w=useSeed
-    vec4 p1; // x=seedExposure, y=middleGrey, z=compensationEv, w=minEv
+    vec4 p1; // x=seedExposure, y=target pre-tonemap luminance, z=compensationEv, w=minEv
     vec4 p2; // x=maxEv, yzw unused
 } pc;
 
@@ -62,6 +62,9 @@ void main()
             sum += texelFetch(srcTexture, ivec2(x, y), 0).r;
     float meteredLogLum = sum * 0.0625;
 
+    // The key is a pre-tonemap luminance, not display white. The shipped
+    // 0.18 key and +1 EV ceiling arrive from PostProcessSettings; do not
+    // hard-code a second gain here or in composite (manual mode stays exact).
     float targetLogEv = log2(max(pc.p1.y, kMinLuminanceEps)) - meteredLogLum + pc.p1.z;
     uint clampState = 0;
     if (targetLogEv <= pc.p1.w)

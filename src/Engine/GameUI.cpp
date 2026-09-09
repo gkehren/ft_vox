@@ -490,6 +490,11 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 		ImGui::SliderFloat("Refraction", &sp.waterRefraction, 0.f, 0.12f);
 		ImGui::SliderFloat("Specular", &sp.waterSpecular, 0.f, 3.f);
 		ImGui::SliderFloat("Foam", &sp.waterFoamStrength, 0.f, 2.f);
+		ImGui::SliderFloat("Water roughness", &sp.waterRoughness, 0.04f, 0.35f, "%.2f");
+		const char *waterDebugNames[] = {"Off", "Wave normal", "Optical distance", "Fresnel", "SSR confidence"};
+		int waterDebugIdx = int(sp.waterDebugView);
+		if (ImGui::Combo("Water debug view", &waterDebugIdx, waterDebugNames, IM_ARRAYSIZE(waterDebugNames)))
+			sp.waterDebugView = float(waterDebugIdx);
 		ImGui::Text("Underwater: %s", pp.underwater ? "yes" : "no");
 		ImGui::SliderFloat("Underwater strength", &pp.underwaterStrength, 0.f, 1.5f);
 	}
@@ -555,7 +560,7 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			ImGui::Indent();
 			ImGui::SliderFloat("Middle grey", &pp.autoExposureMiddleGrey, 0.1f, 2.0f, "%.2f");
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Scene luminance mapped to exposure 1.0.");
+				ImGui::SetTooltip("Target scene luminance (pre-tonemap). 0.18 = photographic middle grey.");
 			ImGui::SliderFloat("Min EV", &pp.autoExposureMinEv, -6.0f, 0.0f, "%.1f");
 			ImGui::SliderFloat("Max EV", &pp.autoExposureMaxEv, 0.0f, 6.0f, "%.1f");
 			ImGui::SliderFloat("Adapt speed (brighten)", &pp.autoExposureSpeedUp, 0.25f, 10.0f, "%.2f /s");

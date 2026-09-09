@@ -19,6 +19,7 @@ enum Flags : uint32_t
 	Emissive = 1u << 1,
 	IceSpec = 1u << 2,
     RootedWind = 1u << 3,
+	LavaSurface = 1u << 4,
 };
 
 struct MaterialInfo
@@ -32,6 +33,8 @@ struct MaterialInfo
 inline MaterialInfo infoFor(TextureType t)
 {
 	MaterialInfo m{};
+	if (t == LAVA)
+		m.flags |= LavaSurface;
 	if (blockIsFoliage(t))
 	{
 		m.flags |= FoliageWind;

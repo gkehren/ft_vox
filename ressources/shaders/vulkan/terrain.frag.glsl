@@ -33,7 +33,16 @@ vec4 materialFor(float texIdx)
 
 void main()
 {
-    vec4 texColor = texture(textureArray, vec3(vTexCoord, vTextureIndex));
+    vec4 mat = materialFor(vTextureIndex);
+    bool lavaSurface = (uint(mat.w + 0.5) & 16u) != 0u;
+    vec2 surfaceUV = vTexCoord;
+    if (lavaSurface) {
+        // Slow coherent advection: molten rock, not water-speed ripples.
+        float t = frame.skyParams.x;
+        surfaceUV += vec2(t * 0.018, t * -0.012);
+        surfaceUV += 0.025 * sin(vTexCoord.yx * 3.0 + vec2(t * 0.35, -t * 0.28));
+    }
+    vec4 texColor = texture(textureArray, vec3(surfaceUV, vTextureIndex));
     if (texColor.a < kAlphaCutoutThreshold)
         discard;
 
@@ -148,13 +157,25 @@ void main()
     // Colored block light (issue #141): per-source linear RGB propagated by
     // the voxel BFS, illuminating albedo in place of the fixed warm scalar
     // tint. Sky/sun/moon terms above stay untouched.
-    vec3 blockFill = max(vBlockLightRGB, vec3(0.0)) * blockLightScale;
+    vec3 blockFill = max(vBlockLightRGB, vec3(0.0));
+    // The flood stores linearly decremented levels, not irradiance. A
+    // quadratic falloff localizes the bounce while preserving its RGB hue.
+    float blockPeak = max(blockFill.r, max(blockFill.g, blockFill.b));
+    blockFill *= blockPeak * blockLightScale;
     vec3 result = color * (ambient + direct + blockFill) * colorBoost;
 
-    vec4 mat = materialFor(vTextureIndex);
     float em = mat.y * emissiveScale;
     float blockLuma = max(vBlockLightRGB.r, max(vBlockLightRGB.g, vBlockLightRGB.b));
-    result += color * em * (1.2 + blockLuma);
+    if (lavaSurface) {
+        // Self emission is independent of AO and its own propagated light.
+        // Avoid adding that light a second time: it bleaches the hot texels.
+        float heat = smoothstep(0.15, 0.85, max(texColor.r, max(texColor.g, texColor.b)));
+        float pulse = 0.96 + 0.04 * sin(frame.skyParams.x * 0.8 + vFragPos.x * 0.7 + vFragPos.z * 0.5);
+        result = texColor.rgb * (ambient + direct) * 0.15
+               + texColor.rgb * em * mix(1.0, 1.8, heat) * pulse;
+    } else {
+        result += color * em * (1.2 + blockLuma);
+    }
 
     // Ice/snow specular from material table (IceSpec flag bit 2)
     if ((uint(mat.w + 0.5) & 4u) != 0u && mat.z > 0.0)
@@ -171,7 +192,8 @@ void main()
     // Scotopic night vision: mild desat toward cool blue — kept light so the
     // night stays colorful enough to navigate (playability-first baseline)
     float nightLum = dot(result, kRec709Luma);
-    result = mix(result, vec3(nightLum) * vec3(0.62, 0.74, 1.05), nightFactor * 0.38);
+    result = mix(result, vec3(nightLum) * vec3(0.62, 0.74, 1.05),
+                 nightFactor * 0.38 * (lavaSurface ? 0.0 : 1.0));
 
     // Fog + aerial perspective (distance desat toward sky-tinted haze)
     float fogStart = frame.fogParams.x;
