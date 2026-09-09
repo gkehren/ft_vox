@@ -9,9 +9,10 @@ Both binaries built Release from clean trees with CMake on Windows (MSVC 2022, x
 
 - `ft_vox --seed 42 --benchmark 10` (automated Vulkan streaming benchmark)
 - Device: NVIDIA GeForce RTX 4070 Ti, 1920x1080, ViewDist 512, FrontBias 0.3, VSync off
-- Raw reports archived in this directory:
-  - Baseline: `bench_20260906_174831_c8687168b7e2_s42_sc9926.txt`
-  - PR (Packed): `bench_20260906_175733_c8687168b7e2__s42_sc9861.txt`
+- Raw reports (removed from the tree by the retention policy; permalinks
+  to the pre-retention revision):
+  - Baseline: [bench_20260906_174831_c8687168b7e2_s42_sc9926.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue110/bench_20260906_174831_c8687168b7e2_s42_sc9926.txt)
+  - PR (Packed): [bench_20260906_175733_c8687168b7e2__s42_sc9861.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue110/bench_20260906_175733_c8687168b7e2__s42_sc9861.txt)
     (provenance caveat: built from a dirty tree, so the revision label shows
     the parent hash + `*`; the binary was the packed build)
 

@@ -13,14 +13,14 @@ benchmark on clean base and PR, with GPU profiling enabled or disabled.
 For #99, `VK_LOADER_DEBUG=layer` identified the active chain: AMD switchable
 graphics, NVIDIA Optimus/present, OBS, RTSS and Khronos validation. Repeating
 with `VK_LOADER_LAYERS_DISABLE=~implicit~` still produced the usage errors.
-The [first error's callback stack](rtss-stack.txt) contains RTSSHooks64.dll
+The [first error's callback stack](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue99-validation/rtss-stack.txt) contains RTSSHooks64.dll
 between test_vulkan_resources.exe and the validation DLL. The excerpt retains
 module names/offsets only. It was collected while investigating swapchain
 creation, not as a successful full resource test.
 
 After the user exited RTSS, the **same previously built game executable**
 (`b999bd881a02` plus the #98 review fix, build UTC 11:18:54) produced no VUIDs.
-See [enabled control](clean-enabled.txt) and [disabled control](clean-disabled.txt).
+See [enabled control](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue99-validation/clean-enabled.txt) and [disabled control](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue99-validation/clean-disabled.txt).
 These controls precede the new diagnostics build, so they establish that the
 fix is removing the RTSS hook, not changing rendering code. The new build was
 then checked separately below.
@@ -40,10 +40,10 @@ restarting it, as described in [the resolution guide](../../vulkan-validation.md
 | Check | Result |
 | --- | --- |
 | Windows/MSVC Release build | Passed |
-| [Full CTest](ctest.txt) | 12/12, 41.93 s |
-| [Final targeted Vulkan tests](ctest-vulkan.txt) | 2/2, 1.53 s |
-| [Profiler enabled](final-enabled.txt) | 2,425 GPU samples, mean 0.549 ms, zero VUIDs |
-| [Profiler disabled](final-disabled.txt) | GPU unavailable, zero VUIDs |
+| [Full CTest](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue99-validation/ctest.txt) | 12/12, 41.93 s |
+| [Final targeted Vulkan tests](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue99-validation/ctest-vulkan.txt) | 2/2, 1.53 s |
+| [Profiler enabled](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue99-validation/final-enabled.txt) | 2,425 GPU samples, mean 0.549 ms, zero VUIDs |
+| [Profiler disabled](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue99-validation/final-disabled.txt) | GPU unavailable, zero VUIDs |
 | git diff --check | Passed |
 
 VulkanResourceSmoke now fails on any error-severity callback, including errors

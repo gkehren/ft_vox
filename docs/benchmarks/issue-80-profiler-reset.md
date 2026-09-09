@@ -60,4 +60,4 @@ This runtime smoke exercises reload/reset and subsequent worker capture.
 The deterministic tests, rather than aggregate runtime timings, establish
 the old-epoch rejection contract.
 
-[Raw runtime report](bench_20260904_103355_b6e774db1246__s42_sc9996.txt)
+[Raw runtime report](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/bench_20260904_103355_b6e774db1246__s42_sc9996.txt)

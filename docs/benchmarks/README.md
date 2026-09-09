@@ -35,7 +35,7 @@ into `benchmark-results/` (gitignored), not here.
 - [pr157-water/](pr157-water/README.md) — water rendering
 - [worldgen-rework/](worldgen-rework/README.md) — terrain generator rework
 
-Historical raw reports removed by the retention policy remain reachable in git
-history (files deleted under `docs/benchmarks/**`). Some older syntheses still
-reference their raw runs by filename; those links resolve in the git history of
-this directory, not in the current working tree.
+Historical raw reports removed by the retention policy remain reachable in
+Git history (files deleted under `docs/benchmarks/**`). Syntheses that cited
+raw runs link them via permalinks to the pre-retention revision
+(`d7a2c9345cb8406efc6022d4d3ff462c4995b231`); the files themselves no longer exist in the working tree.

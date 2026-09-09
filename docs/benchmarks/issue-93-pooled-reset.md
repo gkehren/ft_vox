@@ -56,11 +56,11 @@ removed fill. These single runs show no end-to-end gain; a sub-microsecond
 acquisition saving is smaller than the observed run-to-run variation.
 The report's `Acquire` scope measures swapchain acquisition, not ChunkPool.
 
-Raw reports:
+Raw reports (pre-retention revision permalinks):
 
-- Before: [baseline](bench_20260904_093904_682138e5c977_s42_sc9909.txt).
-- After: [isolated comparison](bench_20260904_094249_682138e5c977__s42_sc9907.txt).
-- [Intermediate after run](bench_20260904_094127_682138e5c977__s42_sc9907.txt)
+- Before: [baseline](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/bench_20260904_093904_682138e5c977_s42_sc9909.txt).
+- After: [isolated comparison](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/bench_20260904_094249_682138e5c977__s42_sc9907.txt).
+- [Intermediate after run](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/bench_20260904_094127_682138e5c977__s42_sc9907.txt)
   overlapped with test execution and is excluded from the comparison.
 
 ## Validation

@@ -93,10 +93,10 @@ Queue metrics measure enqueue-to-worker-start, excluding the time a chunk
 spends awaiting admission by the streaming budget. No queue percentiles or
 allocator counters were collected.
 
-Raw reports:
+Raw reports (pre-retention revision permalinks):
 
-- [Sequential map](bench_20260904_101251_6f1fbd8ac7a6__s42_sc10000.txt)
-- [Scheduled map](bench_20260904_101310_6f1fbd8ac7a6__s42_sc10000.txt)
+- [Sequential map](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/bench_20260904_101251_6f1fbd8ac7a6__s42_sc10000.txt)
+- [Scheduled map](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/bench_20260904_101310_6f1fbd8ac7a6__s42_sc10000.txt)
 
 ## Validation
 

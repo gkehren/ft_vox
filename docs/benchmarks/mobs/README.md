@@ -10,9 +10,9 @@ track regressions; there are no hard thresholds yet.
 - Windows, Release, MSVC 2022 x64, NVIDIA GeForce RTX 4070 Ti
 - `test_mob_render` (offscreen, `FT_VOX_VALIDATION=1`): 48 mobs, all camera- and
   cascade-visible, 160 frames, stats from frames 40+.
-  Raw report: `gpu-profile_48mobs_rtx4070ti.txt`
+  Raw report: [gpu-profile_48mobs_rtx4070ti.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/mobs/gpu-profile_48mobs_rtx4070ti.txt) (pre-retention revision)
 - `test_mobs --profile` (synthetic flat world): 48 mobs, 6000 fixed 60 Hz ticks.
-  Raw output: `cpu-profile_48mobs.txt`
+  Raw output: [cpu-profile_48mobs.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/mobs/cpu-profile_48mobs.txt) (pre-retention revision)
 
 ## Results
 

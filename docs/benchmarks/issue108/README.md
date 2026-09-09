@@ -4,8 +4,9 @@ Fix: incremental candidate maintenance, reworked after review (anchor-driven
 intra-chunk reconciliation, centralized invalidation, dispatch counters).
 Baseline: `main` @ `1d62865` (post-#119). Both binaries built Release from
 clean trees, each run from its own worktree (branch `D:/Projects/ft_vox`,
-baseline `D:/Projects/ft_vox_main108`). Raw reports of both sides are archived
-here (`*_1d62865*` = main, `*_f2c14a8*` = first PR revision; the post-review
+baseline `D:/Projects/ft_vox_main108`). Raw reports of both sides were removed from the tree by the benchmark
+retention policy and remain in Git history
+(`*_1d62865*` = main, `*_f2c14a8*` = first PR revision; the post-review
 revision appends its own files).
 
 ## Protocol

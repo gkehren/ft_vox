@@ -23,9 +23,9 @@ $env:FT_VOX_GPU_PROFILING = '1' # ignored by base
 
 | Full output | imageFormat-01778 | usage-02275 | Other VUIDs |
 | --- | ---: | ---: | ---: |
-| [Base](base-validation.txt) | 8 | 6 | 0 |
-| [PR enabled](pr-validation.txt) | 8 | 6 | 0 |
-| [PR disabled](pr-disabled.txt) | 8 | 6 | 0 |
+| [Base](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue98-validation/base-validation.txt) | 8 | 6 | 0 |
+| [PR enabled](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue98-validation/pr-validation.txt) | 8 | 6 | 0 |
+| [PR disabled](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue98-validation/pr-disabled.txt) | 8 | 6 | 0 |
 
 The IDs are `VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
 `VUID-VkImageViewCreateInfo-usage-02275`. The same errors occur with profiling
@@ -54,7 +54,7 @@ messages establish reproduction, not the underlying cause.
 
 ## Tests and runtime checks
 
-- Full Release build passed. CTest **11/11**, 41.16 s; [output](ctest.txt).
+- Full Release build passed. CTest **11/11**, 41.16 s; [output](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue98-validation/ctest.txt).
 - `GpuProfile`: support for 36/40/48/56/64 bits, invalid widths and nonfinite,
   zero or negative periods; existing 8/64-bit wrap tests retained. The global
   guarantee is no longer an input to the tested capability helper.
@@ -68,7 +68,7 @@ messages establish reproduction, not the underlying cause.
 - Enabled benchmark: **980 GPU samples, mean 0.923 ms**, Shadow 0.049 ms,
   Opaque 0.096 ms, Post 0.278 ms, ImGui 0.010 ms. Disabled benchmark completes
   and reports `GPU timestamp queries: unavailable` with no GPU measurements.
-- [Ten-second run with two-second warmup](pr-warmup.txt) also completes with
+- [Ten-second run with two-second warmup](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue98-validation/pr-warmup.txt) also completes with
   GPU timings. Deterministic tests, rather than aggregate timing counts, prove
   exclusion of warmup samples arriving before/after measurement starts and
   old tags across successive benchmarks in one Benchmark instance.
