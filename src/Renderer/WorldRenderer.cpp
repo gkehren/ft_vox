@@ -1,5 +1,6 @@
 #include "Renderer/WorldRenderer.hpp"
 #include "Renderer/MaterialTable.hpp"
+#include "Renderer/ScreenSpace.hpp"
 #include "Engine/Profiler.hpp"
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/VkUpload.hpp"
@@ -492,7 +493,10 @@ void WorldRenderer::recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex,
 		if (sunClip.w > 0.f)
 		{
 			glm::vec3 ndc = glm::vec3(sunClip) / sunClip.w;
-			sunScreen = glm::vec2(ndc.x * 0.5f + 0.5f, ndc.y * 0.5f + 0.5f);
+			// Negative-height scene viewport: ndc.y = +1 is framebuffer row 0,
+			// so the post UV needs the vertical mirror — the positive-viewport
+			// form mirrored the god-ray scattering center (issue #158).
+			sunScreen = screenspace::ndcToFramebufferUv(glm::vec2(ndc));
 			sunVisibility = glm::smoothstep(-0.10f, 0.04f, ubo->sunDir.y);
 			if (sunScreen.x < 0.f || sunScreen.x > 1.f || sunScreen.y < 0.f || sunScreen.y > 1.f)
 				sunVisibility = 0.f;

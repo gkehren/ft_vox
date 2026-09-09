@@ -10,6 +10,7 @@
 #include <Renderer/ResourcePackReader.hpp>
 #include <Renderer/IndirectDrawUtils.hpp>
 #include <Renderer/ColorSpace.hpp>
+#include <Renderer/ScreenSpace.hpp>
 #include <Renderer/TextureMips.hpp>
 // stb_image decodes bundled pack PNGs byte-exactly for the glass/ice mip
 // contract (mip block 13). This test owns the IMPLEMENTATION translation
@@ -216,6 +217,75 @@ int main()
 			ok = fail("cascadeBlendWeight near split edge must be in (0,1)");
 		if (wPast > 1e-4f)
 			ok = fail("cascadeBlendWeight at/after split end must be 0");
+	}
+
+	// --- NDC -> framebuffer/post UV viewport convention (issue #158) ---
+	{
+		using screenspace::ndcToFramebufferUv;
+
+		// Canonical points: the negative-height production viewport puts NDC
+		// +y at the TOP of the framebuffer (post UV v = 0). The old
+		// positive-viewport form (ndc.y * 0.5 + 0.5) mapped each of these to
+		// the mirrored v and aimed the god-ray scattering center at the
+		// mirrored sun.
+		const struct
+		{
+			glm::vec2 ndc;
+			glm::vec2 uv;
+		} points[] = {
+			{{0.f, 1.f}, {0.5f, 0.0f}},  // NDC top edge -> framebuffer row 0
+			{{0.f, -1.f}, {0.5f, 1.0f}}, // NDC bottom edge -> last row
+			{{1.f, 0.f}, {1.0f, 0.5f}},  // x passes through unflipped
+			{{-1.f, 0.f}, {0.0f, 0.5f}},
+			{{0.f, 0.f}, {0.5f, 0.5f}}, // center is fixed
+		};
+		for (const auto &p : points)
+		{
+			const glm::vec2 uv = ndcToFramebufferUv(p.ndc);
+			if (glm::length(uv - p.uv) > 1e-6f)
+				ok = fail("ndcToFramebufferUv((" + std::to_string(p.ndc.x) + ", " + std::to_string(p.ndc.y) +
+						  ")) must be (" + std::to_string(p.uv.x) + ", " + std::to_string(p.uv.y) + "), got (" +
+						  std::to_string(uv.x) + ", " + std::to_string(uv.y) + ")");
+		}
+
+		// Derived from the actual viewport state (OpaquePass/WaterPass/SkyPass
+		// set {0, height, width, -height, 0, 1}): the Vulkan viewport transform
+		// is px = vpX + (ndc.x + 1) * vpW / 2, py = vpY + (ndc.y + 1) * vpH / 2,
+		// so the helper must agree with the negative-height transform exactly.
+		{
+			const float width = 640.f, height = 360.f;
+			const float vpY = height, vpH = -height;
+			for (const float ndcY : {-1.f, -0.5f, 0.f, 0.5f, 1.f})
+			{
+				const float uvY = (vpY + (ndcY + 1.f) * vpH * 0.5f) / height;
+				if (std::abs(uvY - ndcToFramebufferUv({0.f, ndcY}).y) > 1e-6f)
+					ok = fail("helper must match the negative-height viewport transform for ndc.y " +
+							  std::to_string(ndcY));
+			}
+		}
+
+		// Monotonicity / no horizontal flip: larger NDC y moves UP the
+		// framebuffer (smaller v); x is passthrough.
+		if (!(ndcToFramebufferUv({0.f, 0.5f}).y < ndcToFramebufferUv({0.f, -0.5f}).y))
+			ok = fail("larger NDC y must map to a smaller (higher) framebuffer v");
+		if (!(ndcToFramebufferUv({-0.5f, 0.f}).x < ndcToFramebufferUv({0.5f, 0.f}).x))
+			ok = fail("NDC x must map monotonically to u (no horizontal flip)");
+
+		// Tied to the real projection: a point above the view axis (world +y,
+		// horizontal camera) must land in the TOP half of the framebuffer —
+		// the same half the negative-height viewport rasterizes NDC +y into.
+		{
+			const glm::mat4 proj = glm::perspective(glm::radians(80.f), 16.f / 9.f, 0.1f, 400.f);
+			const glm::mat4 view = glm::lookAt(glm::vec3(0.f), glm::vec3(0.f, 0.f, -1.f), glm::vec3(0.f, 1.f, 0.f));
+			const glm::vec4 clip = proj * view * glm::vec4(0.f, 40.f, -80.f, 1.f);
+			const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+			const glm::vec2 uv = ndcToFramebufferUv(ndc);
+			if (!(ndc.y > 0.f) || !(uv.y < 0.5f))
+				ok = fail("a point above the view axis must project into the top framebuffer half (uv.y " +
+						  std::to_string(uv.y) + ")");
+			if (uv.x < 0.f || uv.x > 1.f || uv.y < 0.f || uv.y > 1.f)
+				ok = fail("in-frustum projection must stay inside [0, 1] post UVs");
+		}
 	}
 
 	// --- Exponential height fog ---

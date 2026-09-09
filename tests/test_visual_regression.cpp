@@ -23,6 +23,7 @@
 #include "VisualImage.hpp"
 
 #include "Chunk/TerrainGenerator.hpp"
+#include "Renderer/ScreenSpace.hpp"
 #include "utils.hpp"
 
 #include <algorithm>
@@ -1919,6 +1920,256 @@ int runUnderwaterAutoExposureCheck(VisualHarness &harness)
 	return errors.empty() ? 0 : 1;
 }
 
+// God-ray sun alignment (issue #158): the CPU-side sun projection feeding the
+// god-ray pass must follow the negative-height scene viewport convention
+// (ndc.y = +1 is framebuffer row 0), via screenspace::ndcToFramebufferUv.
+// Reuses the sunset setup with the camera pitched down so the projected sun
+// sits clearly off the vertical center, renders god rays on/off, and verifies
+// on the positive luma delta that the ray energy converges around the
+// projected sun rather than around its vertical mirror - the exact position
+// the old `ndc.y * 0.5 + 0.5` mapping produced. Also pins the off-frame
+// gating: with the sun behind the camera the pass must be bit-identical to
+// disabled rays. Purely numeric - no golden references involved. Fails under
+// the old mapping; artifacts in <out>/godray_alignment.
+int runGodRayAlignmentCheck(VisualHarness &harness, const std::vector<SceneSpec> &scenes,
+                            const fs::path &outDir)
+{
+    const SceneSpec *sunset = nullptr;
+    for (const SceneSpec &scene : scenes)
+        if (std::string(scene.name) == "sunset")
+            sunset = &scene;
+    if (!sunset)
+        return 0;
+
+    std::vector<std::string> errors;
+    const float kTime = sunset->time;
+    RgbaImage raysOn[2], raysOff[2];
+    glm::vec2 sunUv{0.5f}, mirrorUv{0.5f};
+    int variantCount = 0;
+
+    try
+    {
+        harness.beginScene(sunset->seed);
+        SceneRun run{harness, {}, false};
+        harness.shader() = ShaderParameters{};
+        harness.renderSettings() = RenderSettings{};
+        harness.post() = PostProcessSettings{};
+        harness.post().autoExposureEnabled = false; // deterministic manual exposure
+		harness.shader().dayTime = sunset->dayTime;
+		updateAtmosphereFromDayTime(harness.shader());
+		sunset->spot(run);
+		// Elevated open-sky vantage replacing the forest-floored golden
+		// viewpoint: from y=200 the sky around the sun is unoccluded in the
+		// god-ray source MRT, and pitching down 16 deg pushes the low sunset
+		// sun (elevation ~2.6 deg) to uv y ~0.30 — far from its vertical
+		// mirror, which the old mapping aimed the rays at.
+		harness.camera().setPosition(harness.camera().getPosition() + glm::vec3(0.f, 130.f, 0.f));
+		harness.camera().setYawPitch(180.f, -16.f);
+		harness.shader().fogStart = 300.f;
+		harness.shader().fogEnd = 900.f;
+		harness.buildArea(harness.camera().getPosition(), sunset->areaRadiusChunks);
+
+        // The same projection WorldRenderer::updateFrameUBO packs for this
+        // frame (VisualHarness::renderFrame uses maxRenderDistance * 1.25 and
+        // raw extent dimensions as the aspect inputs).
+        const VkExtent2D extent = harness.extent();
+        const float farPlane = harness.renderSettings().maxRenderDistance * 1.25f;
+        const glm::mat4 projection = harness.camera().getProjectionMatrix(
+            float(extent.width), float(extent.height), farPlane);
+        const glm::vec4 sunClip = projection * harness.camera().getViewMatrix() *
+                                  glm::vec4(harness.camera().getPosition() +
+                                                harness.shader().sunDirection * 500.f,
+                                            1.f);
+        need(sunClip.w > 0.f, errors, "sun behind the camera in the alignment setup");
+        if (sunClip.w <= 0.f)
+        {
+            for (const std::string &e : errors)
+                std::cerr << "  FAIL godray-alignment: " << e << std::endl;
+            return 1;
+        }
+        sunUv = screenspace::ndcToFramebufferUv(glm::vec2(sunClip) / sunClip.w);
+        mirrorUv = {sunUv.x, 1.f - sunUv.y};
+        // The discriminator needs a clearly off-center sun; otherwise the
+        // mirrored candidate collapses onto the true position.
+        need(std::abs(mirrorUv.y - sunUv.y) > 0.25f && std::abs(sunUv.x - 0.5f) < 0.45f &&
+                 sunUv.x > 0.05f && sunUv.x < 0.95f && sunUv.y > 0.05f && sunUv.y < 0.95f,
+             errors, "test setup: sun not clearly off-center (uv " + std::to_string(sunUv.x) + ", " +
+                         std::to_string(sunUv.y) + ")");
+        std::cout << "[godray-alignment] projected sun uv (" << sunUv.x << ", " << sunUv.y
+                  << "), mirrored candidate (" << mirrorUv.x << ", " << mirrorUv.y << ")" << std::endl;
+
+        // Delta measurement on the composited LDR frames (fixed exposure +
+        // pinned animation time): w = max(0, luma(on) - luma(off)) isolates
+        // the ray contribution per pixel.
+        const auto measure = [&](bool depthOcclusion, const char *label) {
+            harness.post().godRaysDepthOcclusion = depthOcclusion;
+            harness.post().godRaysEnabled = true;
+            const RgbaImage on = harness.renderFrame(kTime, {});
+            const RgbaImage onRepeat = harness.renderFrame(kTime, {});
+            harness.post().godRaysEnabled = false;
+            const RgbaImage off = harness.renderFrame(kTime, {});
+            harness.post().godRaysEnabled = true;
+
+            need(on.valid() && off.valid(), errors, std::string(label) + ": invalid render");
+            need(harness.lastNonFiniteSamples() == 0, errors,
+                 std::string(label) + ": non-finite HDR samples");
+            need(on.pixels == onRepeat.pixels, errors, std::string(label) + ": nondeterministic render");
+            if (!on.valid() || !off.valid())
+                return;
+            if (variantCount < 2)
+            {
+                raysOn[variantCount] = on;
+                raysOff[variantCount] = off;
+            }
+            ++variantCount;
+
+            const size_t pxCount = size_t(on.width) * on.height;
+            std::vector<double> weights(pxCount, 0.0);
+            double weightSum = 0.0;
+            long long energized = 0;
+            for (size_t p = 0; p < pxCount; ++p)
+            {
+                const size_t i = p * 4;
+                const double delta =
+                    (0.2126 * on.pixels[i] + 0.7152 * on.pixels[i + 1] + 0.0722 * on.pixels[i + 2]) -
+                    (0.2126 * off.pixels[i] + 0.7152 * off.pixels[i + 1] + 0.0722 * off.pixels[i + 2]);
+                if (delta <= 0.0)
+                    continue;
+                weights[p] = delta;
+                weightSum += delta;
+                if (delta > 4.0)
+                    ++energized;
+            }
+            // Vacuity guard: the rays must visibly change the frame before any
+            // centroid/band claim is meaningful.
+            need(weightSum > 0.0 && energized > static_cast<long long>(pxCount / 200), errors,
+                 std::string(label) + ": god-ray contribution too small to measure (energized pixels " +
+                     std::to_string(energized) + ")");
+            if (weightSum <= 0.0)
+                return;
+
+            // Energy-weighted centroid of the ray contribution must sit closer
+            // to the projected sun than to its vertical mirror.
+            double wx = 0.0, wy = 0.0;
+            for (size_t p = 0; p < pxCount; ++p)
+            {
+                wx += weights[p] * double(p % on.width);
+                wy += weights[p] * double(p / on.width);
+            }
+            const glm::vec2 centroidUv(float(wx / weightSum / double(on.width)),
+                                       float(wy / weightSum / double(on.height)));
+            const float dSun = glm::distance(centroidUv, sunUv);
+            const float dMirror = glm::distance(centroidUv, mirrorUv);
+            std::cout << "[godray-alignment] " << label << ": centroid (" << centroidUv.x << ", "
+                      << centroidUv.y << ") dSun=" << dSun << " dMirror=" << dMirror << std::endl;
+            need(dSun < dMirror, errors,
+                 std::string(label) +
+                     ": ray energy converges closer to the mirrored sun than to the projected sun "
+                     "(viewport-convention regression)");
+            need(dSun < 0.30f, errors,
+                 std::string(label) + ": ray centroid too far from the projected sun (dSun " +
+                     std::to_string(dSun) + ")");
+
+            // Independent signal: the horizontal band at the sun's height must
+            // hold clearly more ray energy than the band at the mirrored
+            // height (the old mapping inverted this).
+            const auto bandEnergy = [&](float vCenter) {
+                const int yCenter = int(vCenter * float(on.height));
+                const uint32_t y0 = uint32_t(std::max(0, yCenter - int(on.height) * 5 / 100));
+                const uint32_t y1 = uint32_t(std::min(int(on.height), yCenter + int(on.height) * 5 / 100));
+                double sum = 0.0;
+                for (uint32_t y = y0; y < y1; ++y)
+                    for (uint32_t x = 0; x < on.width; ++x)
+                        sum += weights[size_t(y) * on.width + x];
+                return sum;
+            };
+            const double sunBand = bandEnergy(sunUv.y);
+            const double mirrorBand = bandEnergy(mirrorUv.y);
+            need(sunBand > mirrorBand * 1.2, errors,
+                 std::string(label) + ": mirrored sun band holds more ray energy than the sun band (sun " +
+                     std::to_string(sunBand) + " vs mirror " + std::to_string(mirrorBand) + ")");
+        };
+        measure(true, "depth_occlusion");
+        measure(false, "no_depth_occlusion");
+
+        // Off-frame gating (issue #158 acceptance): camera turned away from
+        // the sun - sun behind the camera - sunVisibility must stay 0 and the
+        // pass must produce bit-identical output to disabled rays.
+        harness.post().godRaysDepthOcclusion = true;
+        harness.camera().setYawPitch(0.f, -24.f); // sunDir.x < 0: sun fully behind
+        harness.post().godRaysEnabled = true;
+        const RgbaImage awayOn = harness.renderFrame(kTime, {});
+        harness.post().godRaysEnabled = false;
+        const RgbaImage awayOff = harness.renderFrame(kTime, {});
+        harness.post().godRaysEnabled = true;
+        harness.camera().setYawPitch(180.f, -24.f);
+        need(awayOn.valid() && awayOff.valid(), errors, "away-gating: invalid render");
+        need(awayOn.pixels == awayOff.pixels, errors,
+             "away-gating: rays produced for an off-frame sun (visibility gating regression)");
+    }
+    catch (const std::exception &e)
+    {
+        errors.push_back(std::string("exception: ") + e.what());
+    }
+
+    if (!errors.empty())
+    {
+        // Failure artifacts: raw on/off frames plus a marked delta image
+        // (grayscale ray contribution; green = projected sun, red = mirrored
+        // candidate).
+        const fs::path checkOut = outDir / "godray_alignment";
+        fs::create_directories(checkOut);
+        const char *labels[2] = {"depth_occlusion", "no_depth_occlusion"};
+        const auto put = [&](RgbaImage &img, int x, int y, uint8_t r, uint8_t g, uint8_t b) {
+            if (x < 0 || y < 0 || x >= int(img.width) || y >= int(img.height))
+                return;
+            uint8_t *px = &img.pixels[(size_t(y) * img.width + x) * 4];
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+            px[3] = 255;
+        };
+        const auto marker = [&](RgbaImage &img, const glm::vec2 &uv, uint8_t r, uint8_t g, uint8_t b) {
+            const int cx = int(uv.x * float(img.width)), cy = int(uv.y * float(img.height));
+            for (int d = -5; d <= 5; ++d)
+            {
+                put(img, cx + d, cy, r, g, b);
+                put(img, cx, cy + d, r, g, b);
+            }
+        };
+        for (int v = 0; v < 2 && v < variantCount; ++v)
+        {
+            visual::writePng((checkOut / (std::string(labels[v]) + "_rays_on.png")).string(), raysOn[v]);
+            visual::writePng((checkOut / (std::string(labels[v]) + "_rays_off.png")).string(), raysOff[v]);
+            RgbaImage marked = raysOn[v];
+            double maxW = 0.0;
+            for (size_t p = 0; p + 3 < marked.pixels.size() && p + 3 < raysOff[v].pixels.size(); p += 4)
+            {
+                const double delta = double(raysOn[v].pixels[p + 1]) - double(raysOff[v].pixels[p + 1]);
+                maxW = std::max(maxW, delta);
+            }
+            for (size_t p = 0; p + 3 < marked.pixels.size() && p + 3 < raysOff[v].pixels.size(); p += 4)
+            {
+                const double delta = double(raysOn[v].pixels[p + 1]) - double(raysOff[v].pixels[p + 1]);
+                const uint8_t w = uint8_t(std::min(255.0, std::max(0.0, delta) / std::max(maxW, 1.0) * 255.0));
+                marked.pixels[p] = w;
+                marked.pixels[p + 1] = w;
+                marked.pixels[p + 2] = w;
+                marked.pixels[p + 3] = 255;
+            }
+            marker(marked, sunUv, 0, 255, 0);
+            marker(marked, mirrorUv, 255, 0, 0);
+            visual::writePng((checkOut / (std::string(labels[v]) + "_delta_marked.png")).string(), marked);
+        }
+        for (const std::string &e : errors)
+            std::cerr << "  FAIL godray-alignment: " << e << std::endl;
+        return 1;
+    }
+    std::cout << "  godray-alignment OK (ray energy centered on the projected sun, occlusion on/off,"
+                 " off-frame gating intact)" << std::endl;
+    return 0;
+}
+
 // Water surface-term diagnostics (water surface rework): renders the audit lake
 // through the water pass's dedicated diagnostic views and checks the surface
 // terms numerically, per the acceptance criteria:
@@ -2673,9 +2924,11 @@ int main(int argc, char **argv)
 		std::find(onlyScenes.begin(), onlyScenes.end(), "underwater_exposure") != onlyScenes.end();
 	const bool waterSurfaceTermsRequested =
 		std::find(onlyScenes.begin(), onlyScenes.end(), "water_surface_terms") != onlyScenes.end();
+	const bool godrayAlignmentRequested =
+		std::find(onlyScenes.begin(), onlyScenes.end(), "godray_alignment") != onlyScenes.end();
 	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested && !adaptationRequested &&
 		!meterRequested && !underwaterOpticsRequested && !underwaterExposureRequested &&
-		!waterSurfaceTermsRequested)
+		!waterSurfaceTermsRequested && !godrayAlignmentRequested)
 	{
 		std::cerr << "FAIL: --scene";
 		for (const std::string &name : onlyScenes)
@@ -2684,7 +2937,7 @@ int main(int argc, char **argv)
 					 " water_shore, sunset, midnight, mob_lighting, underwater, underwater_deep,"
 					 " auto_exposure_noon, auto_exposure_cave, auto_exposure_adaptation,"
 					 " auto_exposure_meter, underwater_optics, underwater_exposure,"
-					 " water_surface_terms, water_shallow_top, water_shallow_grazing,"
+					 " water_surface_terms, godray_alignment, water_shallow_top, water_shallow_grazing,"
 					 " water_deep_horizon, water_reflect_edge, water_cave_pool, water_cave_lava,"
 					 " aa_silhouette, aa_silhouette_off, aa_closeup, aa_closeup_off,"
 					 " resize_check)\n";
@@ -2765,6 +3018,23 @@ int main(int argc, char **argv)
 	if (onlyScenes.empty() ||
 		std::find(onlyScenes.begin(), onlyScenes.end(), "noon_terrain") != onlyScenes.end())
 		failures += runAoMotionCheck(harness, scenes, outDir);
+
+	// God-ray sun alignment (issue #158): the projected sun feeding the god
+	// ray pass must follow the negative-height scene viewport convention.
+	// Runs with the full suite or via --scene godray_alignment.
+	if (onlyScenes.empty() || godrayAlignmentRequested)
+	{
+		std::cout << "[godray-alignment] sunset ray energy vs projected/mirrored sun" << std::endl;
+		try
+		{
+			failures += runGodRayAlignmentCheck(harness, scenes, outDir);
+		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "  FAIL godray-alignment: exception: " << e.what() << std::endl;
+			++failures;
+		}
+	}
 
 	// Auto-exposure checks (issue #140): GPU-exercised, verified through the
 	// on-demand debug readout. Each runs with the full suite or when requested

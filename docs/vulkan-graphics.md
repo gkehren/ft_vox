@@ -30,6 +30,23 @@ device. On Apple, **MoltenVK** is selected via ICD (`VK_ICD_FILENAMES`). Depth
 is **zero-to-one** (`GLM_FORCE_DEPTH_ZERO_TO_ONE`); viewport Y may be flipped
 for OpenGL-style world Y without winding flip.
 
+**Viewport / UV convention (issue #158):** the scene passes (`OpaquePass` /
+`WaterPass` / `SkyPass`) rasterize with a **negative-height** viewport
+(`{0, height, width, -height, 0, 1}`), so NDC `y = +1` lands on framebuffer
+row 0. Fullscreen post passes run a positive-height viewport with top-down
+`[0, 1]` UVs that `fullscreen.vert` forwards unchanged. CPU-side projections
+that target scene-derived images — the god-ray sun position (`sunScreen`) —
+must therefore convert NDC with the vertical mirror through the shared helper
+`screenspace::ndcToFramebufferUv` (`Renderer/ScreenSpace.hpp`):
+`uv = (0.5·ndc.x + 0.5, 0.5 − 0.5·ndc.y)`. The shaders apply the same
+convention locally (water refraction `ndc.xy · vec2(0.5, −0.5) + 0.5`;
+composite depth reconstruction `1 − 2·uv.y`). The positive-viewport form
+`ndc.y·0.5 + 0.5` vertically mirrors the result — it used to aim the god-ray
+scattering center at the mirrored sun. The convention is pinned by
+`test_render_helpers` (conversion contract) and the visual-regression
+`godray_alignment` check (ray energy must converge on the projected sun, not
+its mirror).
+
 **Rendering model:** Forward-style world passes into **HDR + depth** (and god-ray source), then fullscreen post to the swapchain. No deferred G-buffer.
 
 ---
@@ -189,6 +206,20 @@ Fullscreen chain on a unit quad (`fullscreen.vert`):
 | Spatial AA (issue #143) | `fxaa.frag` | Skip; composite renders straight to the swapchain (no LDR intermediate) |
 
 True **1×1 defaults** live on `PostStack` (`m_defaultBlack`, `m_defaultWhiteR8`). Selection is pure helper logic in `PostDefaults.hpp` (`postCompositeSources`) so composite never samples half-res targets that were not written this frame.
+
+#### God rays — sun projection convention (issue #158)
+
+`WorldRenderer::recordSceneAndPost` projects the sun (`camPos + sunDir·500`)
+through the frame view/projection and converts the NDC result with
+`screenspace::ndcToFramebufferUv` (see **Viewport / UV convention** above)
+before passing it as `godRays.frag`'s `sunScreenPos` push constant — the
+fullscreen UV domain the radial march (`vUV - sunScreenPos`) samples in.
+`sunClip.w <= 0` (sun behind the camera) or a `sunScreen` outside `[0, 1]`
+forces `sunVisibility = 0`, which both gates the pass
+(`lighting::godRaysPassActive`) and scales its output. The visual-regression
+`godray_alignment` check pins the scattering center on the projected sun
+(off-center sunset, depth occlusion on/off, plus the off-frame gating
+contract).
 
 #### SSAO — GTAO-style horizon AO (issue #138)
 
