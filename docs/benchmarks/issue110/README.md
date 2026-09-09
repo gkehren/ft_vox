@@ -19,7 +19,9 @@ Both binaries built Release from clean trees with CMake on Windows (MSVC 2022, x
 ## Interleaved 30 s A/B (3 pairs, clean trees, post-review confirmation)
 
 `M,P,M,P,M,P` vs main `c868716`, same settings at 30 s duration
-(`bench_20260906_181*` files in this directory):
+(the `bench_20260906_181*` raw reports were removed from HEAD by the
+retention policy; they remain in
+[Git history](https://github.com/gkehren/ft_vox/tree/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue110)):
 
 | Metric | main | PR | Δ |
 |---|---|---|---|

@@ -38,5 +38,5 @@ seed 42, view 512, vsync off, clean-tree builds on both sides
 - Identical rendered output: Vulkan validation (indirect + bounds checks)
   0 new VUIDs; spawn-view visual check unchanged.
 
-The 7th report (`bench_20260906_200200_dacfaa7_..._sc9927`) is the 10 s
-Vulkan-validation run, kept as evidence.
+The 7th report ([bench_20260906_200200_dacfaa7a818d_s42_sc9927.txt](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue122b/bench_20260906_200200_dacfaa7a818d_s42_sc9927.txt); no longer in HEAD) is the 10 s
+Vulkan-validation run, retained in Git history as evidence.
