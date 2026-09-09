@@ -739,5 +739,5 @@ Do not treat this section as “already shipped.” For historical feature discu
 
 - [`engine-architecture.md`](engine-architecture.md) — Engine loop, chunks, streaming, terrain generation  
 - Root [`README.md`](../README.md) — build, deps, controls  
-- [`Agents.md`](../Agents.md) — contributor-oriented project context  
+- [`AGENTS.md`](../AGENTS.md) — contributor-oriented project context  
 - `docs/benchmarks/` — captured profiling dumps (not architecture)  
