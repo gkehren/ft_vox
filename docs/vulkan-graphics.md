@@ -427,7 +427,15 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
   through `ResourcePackReader::readEntityTexture` (`assets/minecraft/textures/entity/…`,
   ZIP or folder packs, wrapped roots for both, classic-name aliases). Both square (64×64)
   and classic (64×32) skins are supported — `uvScale` folds the box UV layout to
-  the image aspect. Nearest filtering, clamp to edge.
+  the image aspect. **Mipmapped minification (issue #160):** every skin gets a
+  full CPU-generated mip chain (`texture_mips::generateLayerChain`, W×H-aware —
+  the same linear-light, alpha-coverage-preserving filter as the block atlas,
+  so visible and `mob_shadow` alpha-cut silhouettes converge with distance),
+  uploaded level-by-level with `uploadImage2DMipChain` (one copy, all levels
+  resident before the descriptor set is written; ~+33% device memory for the
+  chain). Sampler: NEAREST magnification (crisp close-range pixel-art texels),
+  LINEAR minification with LINEAR mip selection, clamp to edge; anisotropy
+  stays off — mostly upright box-model surfaces showed no gain to justify it.
 - **Reload:** part of the failure-atomic resource-pack path. `prepareTextures`
   stages a complete new `Textures` bundle (image, sampler, descriptor pool/sets)
   before `commitTextures` swaps it in; a GPU failure anywhere keeps the previous

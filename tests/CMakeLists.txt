@@ -682,6 +682,13 @@ elseif(UNIX)
     target_link_libraries(test_mob_render PRIVATE ${CMAKE_DL_LIBS})
 endif()
 add_dependencies(test_mob_render ft_vox_shaders)
+# resolveSpvPath prefers the executable directory, so fresh SPIR-V must be
+# copied there — without this, stale hand-copied shaders shadow the current
+# ones (the issue #128 skylight check silently failed against Sep-6 binaries).
+add_custom_command(TARGET test_mob_render POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:test_mob_render>/ressources/shaders/spv
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FT_VOX_SPV_FILES}
+            $<TARGET_FILE_DIR:test_mob_render>/ressources/shaders/spv)
 add_test(NAME MobVulkanRender COMMAND test_mob_render ${CMAKE_BINARY_DIR}/mob-qa)
 set_tests_properties(MobVulkanRender PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} ENVIRONMENT "FT_VOX_VALIDATION=1")
 

@@ -1,11 +1,13 @@
 #include "MobRenderer.hpp"
 #include "ColorSpace.hpp"
+#include "TextureMips.hpp"
 #include <Vulkan/GraphicsPipelineBuilder.hpp>
 #include <Vulkan/VkShader.hpp>
 #include <Vulkan/VkUpload.hpp>
 #include <Engine/Profiler.hpp>
 #include <glm/gtc/matrix_access.hpp>
 #include <utils.hpp>
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -30,8 +32,16 @@ std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCom
     result->report = cpu.report;
     VkDevice device = m_context->getDevice();
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    // Pixel-art contract (issue #160): NEAREST magnification keeps close-range
+    // texels crisp; LINEAR minification over the full CPU-generated mip chain
+    // (same linear-light, alpha-coverage-preserving generator as the terrain
+    // atlas) stabilizes distant skins. Anisotropy stays off: mostly upright
+    // box-model surfaces see no measurable gain to justify the sampler cost.
+    si.magFilter = VK_FILTER_NEAREST;
+    si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    si.minLod = 0.0f;
+    si.maxLod = VK_LOD_CLAMP_NONE;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (vkCreateSampler(device, &si, nullptr, &result->sampler) != VK_SUCCESS)
         throw std::runtime_error("Mob sampler failed");
@@ -46,10 +56,21 @@ std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCom
     {
         const auto &pixels = cpu.images[i];
         auto &img = result->images[i];
-        img = createImage2D(m_context->getAllocator(), device, pixels.width, pixels.height,
+        const uint32_t width = uint32_t(pixels.width), height = uint32_t(pixels.height);
+        // Full CPU-generated mip chain (issue #160): the same linear-light,
+        // alpha-coverage-preserving filter as the terrain atlas, so the
+        // alpha-tested visible/shadow silhouettes converge with distance.
+        const uint32_t mips = texture_mips::mipLevelCount(width, height);
+        img = createImage2D(m_context->getAllocator(), device, width, height,
                             colorspace::kAlbedoTextureFormat,
-                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        uploadImage2D(m_context->getAllocator(), imm, img, pixels.rgba.data(), pixels.rgba.size());
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, mips);
+        std::vector<uint8_t> chain(texture_mips::chainBytes(width, height));
+        texture_mips::generateLayerChain(width, height, pixels.rgba.data(), chain.data());
+        // Every level is resident before the descriptor set is written, and a
+        // failure here unwinds the whole staging Textures bundle — the live
+        // set committed by commitTextures() is never touched.
+        uploadImage2DMipChain(m_context->getAllocator(), imm, img, chain.data(), VkDeviceSize(chain.size()));
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = result->pool;
         ai.descriptorSetCount = 1;
@@ -72,6 +93,32 @@ std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCom
         vkUpdateDescriptorSets(device, 2, writes.data(), 0, nullptr);
     }
     return result;
+}
+
+size_t MobRenderer::textureGpuBytes() const
+{
+    size_t bytes = 0;
+    if (!m_textures)
+        return bytes;
+    for (const auto &img : m_textures->images)
+    {
+        if (!img.image)
+            continue;
+        for (uint32_t level = 0; level < img.mipLevels; ++level)
+            bytes += size_t(std::max(img.width >> level, 1u)) * std::max(img.height >> level, 1u) * 4;
+    }
+    return bytes;
+}
+
+size_t MobRenderer::textureMip0Bytes() const
+{
+    size_t bytes = 0;
+    if (!m_textures)
+        return bytes;
+    for (const auto &img : m_textures->images)
+        if (img.image)
+            bytes += size_t(img.width) * img.height * 4;
+    return bytes;
 }
 
 void MobRenderer::refreshShadowBinding(VkImageView shadowView, VkSampler shadowSampler)

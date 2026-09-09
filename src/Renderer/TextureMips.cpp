@@ -20,11 +20,6 @@ constexpr float kAlphaEpsilon = 1e-4f;
 constexpr float kMaxCoverageScale = 8.0f;
 constexpr uint32_t kCoverageSearchIterations = 30;
 
-uint32_t mipDim(uint32_t baseSize, uint32_t level)
-{
-	return std::max(baseSize >> level, 1u);
-}
-
 // Round to nearest 8-bit byte, clamped to the representable range.
 uint8_t toByte(float value)
 {
@@ -49,9 +44,9 @@ void sourceWindow(uint32_t index, uint32_t srcSize, uint32_t dstSize, uint32_t &
 		x1 = x0 + 1;
 }
 
-float cutoutCoverage(const uint8_t *level, uint32_t w)
+float cutoutCoverage(const uint8_t *level, uint32_t w, uint32_t h)
 {
-	const uint64_t texels = static_cast<uint64_t>(w) * w;
+	const uint64_t texels = static_cast<uint64_t>(w) * h;
 	uint64_t covered = 0;
 	for (uint64_t i = 0; i < texels; ++i)
 	{
@@ -63,9 +58,9 @@ float cutoutCoverage(const uint8_t *level, uint32_t w)
 
 // Coverage the level would have if every alpha were scaled by `scale`, without
 // writing anything (binary-search probe).
-float scaledCutoutCoverage(const uint8_t *level, uint32_t w, float scale)
+float scaledCutoutCoverage(const uint8_t *level, uint32_t w, uint32_t h, float scale)
 {
-	const uint64_t texels = static_cast<uint64_t>(w) * w;
+	const uint64_t texels = static_cast<uint64_t>(w) * h;
 	uint64_t covered = 0;
 	for (uint64_t i = 0; i < texels; ++i)
 	{
@@ -101,9 +96,9 @@ constexpr float kDemotedCutoutAlpha = 127.0f / 255.0f;  // <  kAlphaCutoutThresh
 // texels are promoted/demoted individually until the level's cutout texel
 // count matches round(targetCoverage * texelCount): candidates closest to the
 // threshold first, ties spread by Bayer rank then resolved by index.
-void applyCoverageRescale(uint8_t *level, uint32_t w, float scale, float targetCoverage)
+void applyCoverageRescale(uint8_t *level, uint32_t w, uint32_t h, float scale, float targetCoverage)
 {
-	const uint64_t texels = static_cast<uint64_t>(w) * w;
+	const uint64_t texels = static_cast<uint64_t>(w) * h;
 	std::vector<float> scaled(texels);
 	uint64_t covered = 0;
 	for (uint64_t i = 0; i < texels; ++i)
@@ -159,10 +154,10 @@ void applyCoverageRescale(uint8_t *level, uint32_t w, float scale, float targetC
 // cutout edge blends toward the real border color instead of toward black
 // (dark fringe on leaves/grass). Alpha stays 0, so the premultiplied CPU
 // filter of deeper levels is unaffected.
-void dilateBorderColors(uint8_t *level, uint32_t w)
+void dilateBorderColors(uint8_t *level, uint32_t w, uint32_t h)
 {
-	std::vector<uint8_t> snapshot(level, level + static_cast<size_t>(w) * w * kBytesPerTexel);
-	for (uint32_t y = 0; y < w; ++y)
+	std::vector<uint8_t> snapshot(level, level + static_cast<size_t>(w) * h * kBytesPerTexel);
+	for (uint32_t y = 0; y < h; ++y)
 	{
 		for (uint32_t x = 0; x < w; ++x)
 		{
@@ -174,7 +169,7 @@ void dilateBorderColors(uint8_t *level, uint32_t w)
 			float b = 0.0f;
 			uint32_t contributors = 0;
 			const uint32_t ny0 = y > 0 ? y - 1 : 0;
-			const uint32_t ny1 = std::min(y + 1, w - 1);
+			const uint32_t ny1 = std::min(y + 1, h - 1);
 			const uint32_t nx0 = x > 0 ? x - 1 : 0;
 			const uint32_t nx1 = std::min(x + 1, w - 1);
 			for (uint32_t ny = ny0; ny <= ny1; ++ny)
@@ -209,52 +204,86 @@ uint32_t mipLevelCount(uint32_t size)
 	return levels;
 }
 
+uint32_t mipLevelCount(uint32_t width, uint32_t height)
+{
+	// Both dimensions halve per level, so the chain length is governed by the
+	// larger axis; it ends only when BOTH sides have reached 1 texel.
+	return mipLevelCount(std::max(width, height));
+}
+
+uint32_t mipDim(uint32_t baseSize, uint32_t level)
+{
+	return std::max(baseSize >> level, 1u);
+}
+
 uint32_t mipLevelBytes(uint32_t baseSize, uint32_t level)
 {
-	const uint32_t dim = mipDim(baseSize, level);
-	return dim * dim * kBytesPerTexel;
+	return mipLevelBytes(baseSize, baseSize, level);
+}
+
+uint32_t mipLevelBytes(uint32_t baseWidth, uint32_t baseHeight, uint32_t level)
+{
+	return mipDim(baseWidth, level) * mipDim(baseHeight, level) * kBytesPerTexel;
 }
 
 uint32_t chainOffset(uint32_t baseSize, uint32_t level)
 {
+	return chainOffset(baseSize, baseSize, level);
+}
+
+uint32_t chainOffset(uint32_t baseWidth, uint32_t baseHeight, uint32_t level)
+{
 	uint32_t offset = 0;
 	for (uint32_t l = 0; l < level; ++l)
-		offset += mipLevelBytes(baseSize, l);
+		offset += mipLevelBytes(baseWidth, baseHeight, l);
 	return offset;
 }
 
 uint32_t chainBytes(uint32_t baseSize)
 {
-	return chainOffset(baseSize, mipLevelCount(baseSize));
+	return chainOffset(baseSize, baseSize, mipLevelCount(baseSize));
+}
+
+uint32_t chainBytes(uint32_t baseWidth, uint32_t baseHeight)
+{
+	return chainOffset(baseWidth, baseHeight, mipLevelCount(baseWidth, baseHeight));
 }
 
 void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *outChain)
 {
-	const uint32_t levels = mipLevelCount(baseSize);
+	generateLayerChain(baseSize, baseSize, layerPixels, outChain);
+}
+
+void generateLayerChain(uint32_t baseWidth, uint32_t baseHeight, const uint8_t *layerPixels,
+						uint8_t *outChain)
+{
+	const uint32_t levels = mipLevelCount(baseWidth, baseHeight);
 
 	// Mip 0 keeps the source alpha and the RGB of alpha > 0 texels; only
 	// alpha-0 RGB may be edge-dilated below. Its cutout coverage is the
 	// target every generated level must preserve.
-	std::memcpy(outChain, layerPixels, mipLevelBytes(baseSize, 0));
-	const float targetCoverage = cutoutCoverage(outChain, baseSize);
+	std::memcpy(outChain, layerPixels, mipLevelBytes(baseWidth, baseHeight, 0));
+	const float targetCoverage = cutoutCoverage(outChain, baseWidth, baseHeight);
 	// The base level is served too: slight minification already filters mip 0
 	// with LINEAR, so alpha-0 texels next to cutout texels need the border
 	// color here as well (dark fringe near LOD 0 — issue #136 review).
 	if (targetCoverage > 0.0f)
-		dilateBorderColors(outChain, baseSize);
+		dilateBorderColors(outChain, baseWidth, baseHeight);
 
 	for (uint32_t level = 1; level < levels; ++level)
 	{
-		const uint32_t srcW = mipDim(baseSize, level - 1);
-		const uint32_t dstW = mipDim(baseSize, level);
-		const uint8_t *src = outChain + chainOffset(baseSize, level - 1);
-		uint8_t *dst = outChain + chainOffset(baseSize, level);
+		const uint32_t srcW = mipDim(baseWidth, level - 1);
+		const uint32_t srcH = mipDim(baseHeight, level - 1);
+		const uint32_t dstW = mipDim(baseWidth, level);
+		const uint32_t dstH = mipDim(baseHeight, level);
+		const uint8_t *src = outChain + chainOffset(baseWidth, baseHeight, level - 1);
+		uint8_t *dst = outChain + chainOffset(baseWidth, baseHeight, level);
 
-		for (uint32_t y = 0; y < dstW; ++y)
+		for (uint32_t y = 0; y < dstH; ++y)
 		{
 			uint32_t sy0 = 0;
 			uint32_t sy1 = 0;
-			sourceWindow(y, srcW, dstW, sy0, sy1);
+			sourceWindow(y, srcH, dstH, sy0, sy1);
 			for (uint32_t x = 0; x < dstW; ++x)
 			{
 				uint32_t sx0 = 0;
@@ -317,7 +346,7 @@ void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *
 		// opaque (alpha must stay exactly 255) layers skip the search.
 		if (targetCoverage > 0.0f && targetCoverage < 1.0f)
 		{
-			const float coverage = cutoutCoverage(dst, dstW);
+			const float coverage = cutoutCoverage(dst, dstW, dstH);
 			if (coverage != targetCoverage)
 			{
 				float bestScale = 1.0f;
@@ -328,7 +357,7 @@ void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *
 				for (uint32_t iteration = 0; iteration < kCoverageSearchIterations; ++iteration)
 				{
 					const float mid = 0.5f * (lo + hi);
-					const float midCoverage = scaledCutoutCoverage(dst, dstW, mid);
+					const float midCoverage = scaledCutoutCoverage(dst, dstW, dstH, mid);
 					const float error = std::abs(midCoverage - targetCoverage);
 					if (error < bestError || (error == bestError && midCoverage > bestCoverage))
 					{
@@ -343,12 +372,12 @@ void generateLayerChain(uint32_t baseSize, const uint8_t *layerPixels, uint8_t *
 					else
 						break;
 				}
-				applyCoverageRescale(dst, dstW, bestScale, targetCoverage);
+				applyCoverageRescale(dst, dstW, dstH, bestScale, targetCoverage);
 			}
 		}
 
 		if (targetCoverage > 0.0f)
-			dilateBorderColors(dst, dstW);
+			dilateBorderColors(dst, dstW, dstH);
 	}
 }
 

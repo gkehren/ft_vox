@@ -1379,6 +1379,27 @@ int runPanCapture(VisualHarness &h, uint32_t height, const fs::path &out, bool s
 	fixtureAaSilhouette(run);
 	h.remeshEditedChunks();
 
+	// Issue #160: four deterministic mobs on the flattened pad at medium/far
+	// ranges (16-52 m in front of the camera, offset off the staircase
+	// diagonal, feet on the pad plane). A 64-px skin is only a few pixels tall
+	// at the far end — exactly where the old nearest-only mip-0 path crawled —
+	// so the temporal metrics now also measure entity texel stability.
+	const float padTop = float(run.anchor.y) + 1.f;
+	const glm::vec3 eye = h.camera().getPosition();
+	constexpr float kDiag = 0.70710678f; // |cos/sin(-135 deg)| in XZ
+	std::vector<entities::MobRenderState> panMobs;
+	{
+		const float alongs[entities::kMobSpeciesCount] = {16.f, 26.f, 36.f, 52.f};
+		const float laterals[entities::kMobSpeciesCount] = {2.f, -1.5f, 1.f, 0.f};
+		for (size_t k = 0; k < entities::kMobSpeciesCount; ++k)
+		{
+			const glm::vec3 feet(eye.x - kDiag * alongs[k] + kDiag * laterals[k], padTop,
+								eye.z - kDiag * alongs[k] - kDiag * laterals[k]);
+			panMobs.push_back(
+				{entities::MobSpecies(k), feet, 25.f * float(k), 0.f, 0.f, 0.f, 0.f});
+		}
+	}
+
 	const float baseYaw = h.camera().getYaw();
 	const float pitch = -4.0f;
 	auto yawAt = [&](int i) {
@@ -1424,6 +1445,7 @@ int runPanCapture(VisualHarness &h, uint32_t height, const fs::path &out, bool s
 	{
 		double sumAll = 0.0, sumEdge = 0.0;
 		double aaMs = 0.0, compositeMs = 0.0, postMs = 0.0;
+		double mobMs = 0.0; // color + 3 cascade shadow passes (issue #160 evidence)
 	};
 	PassAccum offAcc, onAcc;
 	double maskPixelsTotal = 0.0; // Σ_t maskCount_t — shared ROI denominator
@@ -1442,22 +1464,30 @@ int runPanCapture(VisualHarness &h, uint32_t height, const fs::path &out, bool s
 		// two sequences pixel-comparable while the edge ROI is built from the
 		// OFF pair alone below.
 		h.post().fxaaEnabled = false;
-		visual::RgbaImage off = h.renderFrame(13.0f, {});
+		visual::RgbaImage off = h.renderFrame(13.0f, panMobs);
 		nonFinite += h.lastNonFiniteSamples();
 		const GpuFrameSample &offGpu = h.gpuSample();
 		const auto gpuMs = [&](const GpuFrameSample &g, GpuPass p) {
 			return g.present[size_t(p)] ? g.ms[size_t(p)] : 0.0f;
 		};
+		const auto mobGpuMs = [&](const GpuFrameSample &g) {
+			double sum = gpuMs(g, GpuPass::Mobs);
+			for (int c = 0; c < 3; ++c)
+				sum += gpuMs(g, GpuPass(uint32_t(GpuPass::MobShadow0) + c));
+			return sum;
+		};
 		offAcc.compositeMs += gpuMs(offGpu, GpuPass::Composite);
 		offAcc.postMs += gpuMs(offGpu, GpuPass::Post);
+		offAcc.mobMs += mobGpuMs(offGpu);
 
 		h.post().fxaaEnabled = true;
-		visual::RgbaImage on = h.renderFrame(13.0f, {});
+		visual::RgbaImage on = h.renderFrame(13.0f, panMobs);
 		nonFinite += h.lastNonFiniteSamples();
 		const GpuFrameSample &onGpu = h.gpuSample();
 		onAcc.aaMs += gpuMs(onGpu, GpuPass::SpatialAA);
 		onAcc.compositeMs += gpuMs(onGpu, GpuPass::Composite);
 		onAcc.postMs += gpuMs(onGpu, GpuPass::Post);
+		onAcc.mobMs += mobGpuMs(onGpu);
 
 		if (havePrev)
 		{
@@ -1506,15 +1536,18 @@ int runPanCapture(VisualHarness &h, uint32_t height, const fs::path &out, bool s
 	std::ostringstream report;
 	report << "slow-pan capture (issue #143): " << width << "x" << height
 		   << ", " << kFrames << " yaw steps, sweep " << kSweepDeg
-		   << " deg, seed 4217 (aa_silhouette viewpoint)\n";
+		   << " deg, seed 4217 (aa_silhouette viewpoint), " << panMobs.size()
+		   << " mobs at 16-52 m for entity texel stability (issue #160)\n";
 	report << "fxaa_off: mean inter-frame luma delta all=" << offAll
 		   << "/255 edge-band=" << offEdge
 		   << "/255 | GPU ms: composite=" << offAcc.compositeMs / timed
-		   << " aa=" << offAcc.aaMs / timed << " post=" << offAcc.postMs / timed << "\n";
+		   << " aa=" << offAcc.aaMs / timed << " post=" << offAcc.postMs / timed
+		   << " mobs=" << offAcc.mobMs / timed << "\n";
 	report << "fxaa_on: mean inter-frame luma delta all=" << onAll
 		   << "/255 edge-band=" << onEdge
 		   << "/255 | GPU ms: composite=" << onAcc.compositeMs / timed
-		   << " aa=" << onAcc.aaMs / timed << " post=" << onAcc.postMs / timed << "\n";
+		   << " aa=" << onAcc.aaMs / timed << " post=" << onAcc.postMs / timed
+		   << " mobs=" << onAcc.mobMs / timed << "\n";
 	report << "FXAA on vs off: overall temporal delta " << allGain << "% lower, "
 		   << "edge-band temporal delta " << edgeGain << "% lower\n";
 

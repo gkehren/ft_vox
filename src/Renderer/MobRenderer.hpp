@@ -37,6 +37,13 @@ class MobRenderer
     void commitTextures(std::unique_ptr<Textures> textures) { m_textures.swap(textures); }
     MobTextureReport textureReport() const { return m_textures ? m_textures->report : MobTextureReport{}; }
     VkFormat textureFormat() const { return (m_textures && m_textures->images[0].image) ? m_textures->images[0].format : VK_FORMAT_UNDEFINED; }
+    /// Mip levels of the first committed mob image (0 when none); asserts the
+    /// full-chain GPU wiring for issue #160.
+    uint32_t textureMipLevels() const { return (m_textures && m_textures->images[0].image) ? m_textures->images[0].mipLevels : 0; }
+    /// Total GPU bytes across all committed mob albedo images (mip chains included).
+    size_t textureGpuBytes() const;
+    /// Mip 0 byte size of the same images — the pre-#160 single-level footprint.
+    size_t textureMip0Bytes() const;
     void prepare(uint32_t frame, const FrameUBO &, const std::vector<entities::MobRenderState> &);
     void record(VkCommandBuffer, uint32_t frame, VkDescriptorSet frameSet, int cascade = -1);
     size_t visibleCount() const { return m_visible; }

@@ -63,3 +63,16 @@ void uploadImage2D(VmaAllocator allocator,
 				   const void *pixels,
 				   VkDeviceSize dataSize,
 				   VkImageLayout finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+/// Stage a complete CPU-generated mip chain into a GPU 2D image in one submit
+/// (UNDEFINED → TRANSFER_DST → SHADER_READ). `mips` holds every level tightly
+/// packed, level 0 first (the layout texture_mips::generateLayerChain
+/// produces); one vkCmdCopyBufferToImage writes all levels, so the descriptor
+/// set only becomes usable once every level is resident. `dataSize` must equal
+/// the sum of all level byte sizes (texture_mips::chainBytes(w, h)).
+void uploadImage2DMipChain(VmaAllocator allocator,
+						   ImmediateCommands &imm,
+						   AllocatedImage &image,
+						   const void *mips,
+						   VkDeviceSize dataSize,
+						   VkImageLayout finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

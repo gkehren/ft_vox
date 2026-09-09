@@ -296,6 +296,10 @@ int main(int argc, char **argv)
         // the real wiring, not just the kAlbedoTextureFormat policy constant.
         if (f.renderer.textureFormat() != colorspace::kAlbedoTextureFormat)
             throw std::runtime_error("MobRenderer entity albedo textures must be created sRGB");
+        // Issue #160 integration: the 64x64 default skins must carry the full
+        // mip chain on the GPU (floor(log2(64)) + 1 = 7 levels), not mip 0 only.
+        if (f.renderer.textureMipLevels() != 7)
+            throw std::runtime_error("MobRenderer entity textures must carry a full 7-level mip chain");
         {
             TextureManager atlas;
             atlas.initialize(f.context, f.imm, "");
@@ -333,7 +337,12 @@ int main(int argc, char **argv)
         vkAllocateDescriptorSets = realAllocate;
         if (!failed || f.render(states, u, 1) != image)
             throw std::runtime_error("failed texture reload changed live rendering");
+        // Issue #160: time the full CPU mip generation + multi-level upload.
+        const auto texReloadStart = std::chrono::steady_clock::now();
         f.renderer.commitTextures(f.renderer.prepareTextures(f.imm, ""));
+        const double texReloadMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - texReloadStart)
+                .count();
         if (f.render(states, u, 0) != image)
             throw std::runtime_error("default reload changed result");
         for (auto &s : states)
@@ -385,6 +394,30 @@ int main(int argc, char **argv)
                 throw std::runtime_error("red block-lit mob must have higher red channel than green");
         }
 
+        // Issue #160: mobs ~65 blocks away exercise the deep mip levels of the
+        // skin chain (a 64-px skin is a few pixels tall here — the old
+        // nearest-only mip-0 path crawled exactly at this range). The scene
+        // must still produce mob pixels and stay validation-clean.
+        {
+            std::vector<entities::MobRenderState> distant;
+            for (size_t i = 0; i < entities::kMobSpeciesCount; ++i)
+                distant.push_back({entities::MobSpecies(i), {(float(i) - 1.5f) * 1.5f, 0, 60.f}, 0, 0, 0, 0, 0});
+            FrameUBO uf = frame(2);
+            const glm::vec3 eye(0.f, 3.f, -6.f);
+            uf.view = glm::lookAt(eye, glm::vec3(0, 1, 60), glm::vec3(0, 1, 0));
+            uf.projection = glm::perspective(glm::radians(45.f), 2.f, 0.1f, 200.f);
+            uf.viewPos = glm::vec4(eye, 1);
+            uf.fogParams = {200.f, 400.f, 0.f, 0.f}; // keep distance fog from erasing the fixture
+            auto farImage = f.render(distant, uf, 0);
+            f.save(output / "far-species.ppm", farImage);
+            size_t farChanged = 0;
+            for (size_t i = 0; i < farImage.size(); i += 4)
+                if (farImage[i] != farImage[0] || farImage[i + 1] != farImage[1])
+                    ++farChanged;
+            if (farChanged < 50)
+                throw std::runtime_error("far-distance mobs produced no pixels");
+        }
+
         f.resize(800, 600);
         f.render(states, frame(800.f / 600), 0);
         // Camera culling cannot suppress shadow casters behind the eye.
@@ -429,6 +462,11 @@ int main(int argc, char **argv)
             throw std::runtime_error("48-mob fixture not fully visible");
         std::ofstream report(output / "gpu-profile.txt");
         report << "Device: " << f.context.getDeviceProperties().deviceName << "\n";
+        // Issue #160 memory/cost evidence: mip-0 vs full-chain footprint and
+        // the whole CPU-generate + multi-level upload reload cost.
+        report << "Mob textures: mip0 bytes=" << f.renderer.textureMip0Bytes()
+               << " full-chain bytes=" << f.renderer.textureGpuBytes()
+               << " reload ms=" << texReloadMs << "\n";
         if (gpuTimes.empty())
             report << "GPU timestamps unavailable\n";
         else
