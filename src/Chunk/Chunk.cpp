@@ -2312,6 +2312,10 @@ bool Chunk::publishMeshResult(MeshBuildResult *result)
     m_lightStorage = result->lightStorage;
     result->lightStorage = nullptr;
   }
+  else if (result->isLOD)
+  {
+    releaseLightStorage();
+  }
   // Single state commit point: the mesh becomes official here, on the main
   // thread, only after validation succeeded.
   m_isLODMesh = result->isLOD;

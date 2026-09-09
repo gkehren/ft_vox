@@ -11,7 +11,7 @@
 #include <vector>
 
 #include <utils.hpp>
-#include <Renderer/Lighting.hpp>
+#include <Chunk/LightSample.hpp>
 
 /// Decoupled voxel lighting storage for a single chunk.
 /// Size: exactly CHUNK_VOLUME * 2 bytes = 128 KiB (65,536 voxels * 16 bits).

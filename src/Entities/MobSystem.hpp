@@ -1,7 +1,7 @@
 #pragma once
 #include <Entities/MobTypes.hpp>
 #include <Physics/VoxelCollision.hpp>
-#include <Renderer/Lighting.hpp>
+#include <Chunk/LightSample.hpp>
 #include <array>
 #include <optional>
 #include <vector>

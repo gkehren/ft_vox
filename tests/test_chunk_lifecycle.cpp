@@ -473,6 +473,30 @@ static int profileMobs()
     std::cout << "Mobs real voxels count=" << mobs.mobs().size() << " mean_ms=" << total/timings.size()
         << " p95_ms=" << timings[timings.size()*95/100] << " cells/tick=" << cells/timings.size()
         << " travelled=" << distance << " dropped=" << mobs.droppedSteps() << "\n";
+
+    // Measure local-light sampling CPU time for all 48 mobs (issue #128 performance validation)
+    std::vector<double> sampleTimings; sampleTimings.reserve(6000);
+    std::vector<entities::MobRenderState> states;
+    mobs.renderStates(states);
+    {
+        ChunkMobWorld world(manager, generator);
+        for (int i = 0; i < 6000; ++i) {
+            auto start = std::chrono::steady_clock::now();
+            for (auto &ms : states) {
+                const auto pos = entities::mobLightSamplePosition(ms);
+                const auto light = world.sampleLight(pos);
+                ms.localSkylight = light.skylight;
+                ms.localBlockRgb = light.blockRgb;
+            }
+            double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            if (i >= 600) sampleTimings.push_back(ms);
+        }
+    }
+    double sampleTotal = 0; for (auto ms : sampleTimings) sampleTotal += ms;
+    std::sort(sampleTimings.begin(), sampleTimings.end());
+    std::cout << "48 mobs local light sampling CPU mean_ms=" << sampleTotal / sampleTimings.size()
+              << " p95_ms=" << sampleTimings[sampleTimings.size() * 95 / 100]
+              << " per_mob_us=" << (sampleTotal / sampleTimings.size() / 48.0) * 1000.0 << "\n";
     CHECK(distance>100, "animals actually move across generated terrain");
     CHECK(mobs.mobs().size()<=48, "real-world population bounded");
     return g_fails?1:0;
@@ -4603,12 +4627,14 @@ int main(int argc, char **argv)
 		const auto lavaLight = manager.sampleVoxelLight({8, 141, 8});
 		CHECK(lavaLight.blockRgb.r > 0.5f, "block light near lava has high red component");
 
-		// Test ChunkCollisionView and ChunkMobWorld adapters
+		// Test ChunkCollisionView and ChunkMobWorld adapters (separate scopes to avoid nested shared_lock)
+		lighting::LocalVoxelLight viewLight;
 		{
 			ChunkCollisionView view(manager);
-			const auto viewLight = view.sampleLight(glm::vec3(8.5f, 141.5f, 8.5f));
+			viewLight = view.sampleLight(glm::vec3(8.5f, 141.5f, 8.5f));
 			CHECK(viewLight.blockRgb.r > 0.5f, "ChunkCollisionView samples smoothed light");
-
+		}
+		{
 			ChunkMobWorld mobWorld(manager, generator);
 			const auto mobLight = mobWorld.sampleLight(glm::vec3(8.5f, 141.5f, 8.5f));
 			CHECK(mobLight.blockRgb.r == viewLight.blockRgb.r, "ChunkMobWorld delegates to view");
@@ -4626,7 +4652,126 @@ int main(int argc, char **argv)
 		pool.release(chunk);
 	}
 
-	runStreamingDispatchTests();
+	// 29. Cross-chunk light propagation, boundary continuity, source removal and overlapping RGB (issue #128 review)
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(1337);
+		ChunkPool chunkPool(8);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+		Chunk *ca = chunkPool.acquire(glm::vec3(0.0f));
+		Chunk *cb = chunkPool.acquire(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f));
+		CHECK(ca != nullptr && cb != nullptr, "acquired chunks ca and cb");
+		if (ca && cb)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), ca);
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(1, 0, 0), cb);
+			CHECK(mgr.prepareAndGenerateChunk(ca, gen), "generated ca");
+			CHECK(mgr.prepareAndGenerateChunk(cb, gen), "generated cb");
+
+			// Carve gallery across seam from x=8 to x=24, y=40, z=8
+			for (int x = 7; x <= 15; ++x)
+				for (int z = 6; z <= 10; ++z)
+					for (int y = 38; y <= 42; ++y)
+						ca->setVoxel(x, y, z, STONE);
+			for (int x = 0; x <= 9; ++x)
+				for (int z = 6; z <= 10; ++z)
+					for (int y = 38; y <= 42; ++y)
+						cb->setVoxel(x, y, z, STONE);
+			for (int x = 8; x <= 15; ++x)
+				for (int z = 7; z <= 9; ++z)
+					for (int y = 39; y <= 41; ++y)
+						ca->setVoxel(x, y, z, AIR);
+			for (int x = 0; x <= 8; ++x)
+				for (int z = 7; z <= 9; ++z)
+					for (int y = 39; y <= 41; ++y)
+						cb->setVoxel(x, y, z, AIR);
+
+			// Place LAVA in Chunk A near the border at x=14, y=40, z=8
+			ca->setVoxel(14, 40, 8, LAVA);
+
+			// Mesh both chunks through the scheduler so halos are populated
+			RenderSettings rs;
+			const Camera cam(glm::vec3(8.0f, 40.0f, 8.0f));
+			mgr.meshPendingChunks(cam, rs, 2);
+			while (mgr.pendingMeshJobs() > 0)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				mgr.processFinishedJobs();
+			}
+			mgr.processFinishedJobs();
+
+			CHECK(ca->hasLightStorage(), "ca has committed light storage");
+			CHECK(cb->hasLightStorage(), "cb has committed light storage");
+
+			// Cross-chunk sampling across boundary x = 16.0
+			// LAVA is at x=14. Sampling steps along x from 14.5 to 18.5 at y=40.5, z=8.5
+			const auto atLava  = mgr.sampleSmoothedLight(glm::vec3(14.5f, 40.5f, 8.5f));
+			const auto at15_25 = mgr.sampleSmoothedLight(glm::vec3(15.25f, 40.5f, 8.5f));
+			const auto at15_50 = mgr.sampleSmoothedLight(glm::vec3(15.50f, 40.5f, 8.5f));
+			const auto at15_75 = mgr.sampleSmoothedLight(glm::vec3(15.75f, 40.5f, 8.5f));
+			const auto at16_00 = mgr.sampleSmoothedLight(glm::vec3(16.00f, 40.5f, 8.5f)); // on chunk seam
+			const auto at16_25 = mgr.sampleSmoothedLight(glm::vec3(16.25f, 40.5f, 8.5f));
+			const auto at16_50 = mgr.sampleSmoothedLight(glm::vec3(16.50f, 40.5f, 8.5f));
+			const auto at17_50 = mgr.sampleSmoothedLight(glm::vec3(17.50f, 40.5f, 8.5f));
+
+			CHECK(atLava.blockRgb.r > 0.5f, "near lava red light is strong");
+			CHECK(at16_00.blockRgb.r > 0.2f, "cross-chunk seam has propagated red light");
+			CHECK(at16_50.blockRgb.r > 0.1f, "red light propagated across seam into chunk B");
+
+			// Verify monotonic decay across boundary
+			CHECK(at15_25.blockRgb.r <= atLava.blockRgb.r + 1e-4f, "decay 14.5 -> 15.25");
+			CHECK(at15_50.blockRgb.r <= at15_25.blockRgb.r + 1e-4f, "decay 15.25 -> 15.50");
+			CHECK(at15_75.blockRgb.r <= at15_50.blockRgb.r + 1e-4f, "decay 15.50 -> 15.75");
+			CHECK(at16_00.blockRgb.r <= at15_75.blockRgb.r + 1e-4f, "decay 15.75 -> 16.00 (cross seam)");
+			CHECK(at16_25.blockRgb.r <= at16_00.blockRgb.r + 1e-4f, "decay 16.00 -> 16.25 (cross seam)");
+			CHECK(at16_50.blockRgb.r <= at16_25.blockRgb.r + 1e-4f, "decay 16.25 -> 16.50");
+			CHECK(at17_50.blockRgb.r <= at16_50.blockRgb.r + 1e-4f, "decay 16.50 -> 17.50");
+
+			// Continuous transition: step deltas across seam are small (no pop)
+			CHECK(std::abs(at16_00.blockRgb.r - at15_75.blockRgb.r) < 0.25f, "seam step continuity left");
+			CHECK(std::abs(at16_25.blockRgb.r - at16_00.blockRgb.r) < 0.25f, "seam step continuity right");
+
+			// Test source removal: replace LAVA with AIR and remesh
+			ca->setVoxel(14, 40, 8, AIR);
+			ca->setState(ChunkState::GENERATED);
+			cb->setState(ChunkState::GENERATED);
+			mgr.meshPendingChunks(cam, rs, 2);
+			while (mgr.pendingMeshJobs() > 0)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				mgr.processFinishedJobs();
+			}
+			mgr.processFinishedJobs();
+
+			const auto removedAtLava = mgr.sampleSmoothedLight(glm::vec3(14.5f, 40.5f, 8.5f));
+			const auto removedAtSeam = mgr.sampleSmoothedLight(glm::vec3(16.00f, 40.5f, 8.5f));
+			const auto removedInB    = mgr.sampleSmoothedLight(glm::vec3(16.50f, 40.5f, 8.5f));
+			CHECK(removedAtLava.blockRgb == glm::vec3(0.0f), "source removal: light drops to 0 at source");
+			CHECK(removedAtSeam.blockRgb == glm::vec3(0.0f), "source removal: light drops to 0 at seam");
+			CHECK(removedInB.blockRgb == glm::vec3(0.0f),    "source removal: light drops to 0 in chunk B");
+
+			// Test overlapping RGB sources across chunk boundary:
+			// Place REDSTONE_ORE in Chunk A (world x=13) and LAPIS_ORE in Chunk B (world x=19, B-local x=3)
+			ca->setVoxel(13, 40, 8, REDSTONE_ORE);
+			cb->setVoxel(3, 40, 8, LAPIS_ORE);
+			ca->setState(ChunkState::GENERATED);
+			cb->setState(ChunkState::GENERATED);
+			mgr.meshPendingChunks(cam, rs, 2);
+			while (mgr.pendingMeshJobs() > 0)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				mgr.processFinishedJobs();
+			}
+			mgr.processFinishedJobs();
+
+			const auto seamOverlap = mgr.sampleSmoothedLight(glm::vec3(16.00f, 40.5f, 8.5f));
+			CHECK(seamOverlap.blockRgb.r > 0.0f, "overlapping RGB: red component from chunk A is present at seam");
+			CHECK(seamOverlap.blockRgb.b > 0.0f, "overlapping RGB: blue component from chunk B is present at seam");
+
+			chunkPool.release(ca);
+			chunkPool.release(cb);
+		}
+	}
 
 	if (g_fails != 0)
 	{

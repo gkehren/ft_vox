@@ -18,7 +18,7 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Engine/ThreadPool.hpp>
-#include <Renderer/Lighting.hpp>
+#include <Chunk/LightSample.hpp>
 #include <utils.hpp>
 
 class Camera;
