@@ -113,6 +113,9 @@ target_include_directories(test_visual_look PRIVATE
 target_compile_definitions(test_visual_look PRIVATE
     GLM_FORCE_DEPTH_ZERO_TO_ONE
     GLM_ENABLE_EXPERIMENTAL
+    # Absolute source-tree anchor so source-contract scans work from any
+    # build directory (out-of-tree builds included), issue #165 review.
+    FT_VOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(test_visual_look PRIVATE
@@ -163,6 +166,9 @@ target_compile_definitions(test_render_helpers PRIVATE
     GLM_FORCE_DEPTH_ZERO_TO_ONE
     GLM_ENABLE_EXPERIMENTAL
     VK_NO_PROTOTYPES
+    # Absolute source-tree anchor so the shader source-contract scans work
+    # from any build directory (out-of-tree builds included), issue #165 review.
+    FT_VOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(test_render_helpers PRIVATE

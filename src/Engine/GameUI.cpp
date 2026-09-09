@@ -478,7 +478,6 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 					sp.dayFactor, sp.sunsetFactor, sp.nightFactor);
 		ImGui::SliderFloat("Ambient", &sp.ambientStrength, 0.f, 1.f);
 		ImGui::SliderFloat("Diffuse", &sp.diffuseIntensity, 0.f, 1.5f);
-		ImGui::SliderFloat("Light levels", &sp.lightLevels, 1.f, 16.f);
 		ImGui::SliderFloat("Moon ambient", &sp.moonAmbientStrength, 0.f, 1.5f);
 		ImGui::SliderFloat("Block light scale", &sp.blockLightScale, 0.f, 2.f);
 		ImGui::SliderFloat("Emissive scale", &sp.emissiveScale, 0.f, 3.f);
@@ -516,11 +515,17 @@ void GameUI::drawGraphics(GameUIFrame &frame)
 			sp.shadowDebug = float(shadowDebugIdx);
 	}
 
-	if (ImGui::CollapsingHeader("Visual"))
+	// Issue #161: these knobs grade the terrain and mob lit-material shaders
+	// only — not water, and not the composited frame (that is the post
+	// stack's "Post saturation" / "Post contrast"). The header and tooltip
+	// must keep saying so; generic "Visual" labels proved misleading.
+	if (ImGui::CollapsingHeader("Material grading (terrain & mobs)"))
 	{
-		ImGui::SliderFloat("Saturation", &sp.saturationLevel, 0.f, 3.f);
-		ImGui::SliderFloat("Color boost", &sp.colorBoost, 0.5f, 2.5f);
-		ImGui::SliderFloat("Contrast", &sp.contrastLevel, 0.5f, 1.8f);
+		ImGui::TextDisabled("Terrain + mob materials only; water and full-frame\n"
+							"grading live under Post-processing.");
+		ImGui::SliderFloat("Material saturation", &sp.materialSaturation, 0.f, 3.f);
+		ImGui::SliderFloat("Material color boost", &sp.materialColorBoost, 0.5f, 2.5f);
+		ImGui::SliderFloat("Material contrast", &sp.materialContrast, 0.5f, 1.8f);
 	}
 
 	if (ImGui::CollapsingHeader("Post-processing", ImGuiTreeNodeFlags_DefaultOpen))

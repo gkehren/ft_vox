@@ -11,8 +11,8 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 lightDirection;
     vec4 fogColor;
     vec4 fogParams; // start, end, density, heightFalloff
-    vec4 lightParams; // ambient, diffuse, lightLevels, colorBoost
-    vec4 visualParams; // saturation, contrast, colorBoost, unused
+    vec4 lightParams; // ambient, diffuse, reserved (was dead "lightLevels", issue #161), colorBoost
+    vec4 visualParams; // material saturation, contrast, reserved (was duplicate colorBoost, issue #161), shadowDebug
     vec4 sunDir;
     vec4 moonDir;
     vec4 skyParams; // time, day, sunset, night
@@ -25,5 +25,5 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 cascadeGridOffsets01; // xy = cascade0 absolute grid offset, zw = cascade1 (ints as floats)
     vec4 cascadeGridOffsets2; // xy = cascade2 absolute grid offset, zw unused
     vec4 waterQuality; // SSR steps, range, view thickness, directional shadows
-    vec4 waterSurfaceParams; // roughness, debug view (0 off/1 normal/2 optical dist/3 fresnel/4 SSR confidence), unused, unused
+    vec4 waterSurfaceParams; // roughness, debug view (0 off/1 normal/2 optical dist/3 fresnel/4 SSR confidence), reserved, reserved
 } frame;

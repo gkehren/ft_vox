@@ -7,6 +7,8 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -36,22 +38,44 @@ int main()
 	glm::vec4 visualParams{};
 	packFrameLightVisual(sp, lightParams, visualParams);
 
-	if (std::abs(lightParams.w - sp.colorBoost) > 1e-5f)
-		ok = fail("colorBoost must pack into lightParams.w (terrain.frag samples it)");
-	if (std::abs(visualParams.x - sp.saturationLevel) > 1e-5f)
-		ok = fail("saturationLevel must pack into visualParams.x");
-	if (std::abs(visualParams.y - sp.contrastLevel) > 1e-5f)
-		ok = fail("contrastLevel must pack into visualParams.y");
-	if (std::abs(visualParams.z - sp.colorBoost) > 1e-5f)
-		ok = fail("colorBoost should also be mirrored in visualParams.z");
+	if (std::abs(lightParams.w - sp.materialColorBoost) > 1e-5f)
+		ok = fail("materialColorBoost must pack into lightParams.w (terrain/mob shaders sample it)");
+	if (std::abs(visualParams.x - sp.materialSaturation) > 1e-5f)
+		ok = fail("materialSaturation must pack into visualParams.x");
+	if (std::abs(visualParams.y - sp.materialContrast) > 1e-5f)
+		ok = fail("materialContrast must pack into visualParams.y");
+	// Issue #161: dead lanes must stay zero — lightParams.z held a "Light
+	// levels" slider no shader read; visualParams.z a duplicate colorBoost
+	// copy no shader read. Both were removed; the lanes are reserved.
+	if (std::abs(lightParams.z) > 1e-6f)
+		ok = fail("lightParams.z must stay 0 (reserved since the dead lightLevels control was removed)");
+	if (std::abs(visualParams.z) > 1e-6f)
+		ok = fail("visualParams.z must stay 0 (reserved; colorBoost lives only in lightParams.w)");
+	// There must be no UI control left for the removed field either.
+	// FT_VOX_SOURCE_DIR (from CMake) anchors the scan to the source tree so
+	// out-of-tree build directories cannot break it (issue #165 review).
+	{
+		const std::filesystem::path uiPath =
+			std::filesystem::path(FT_VOX_SOURCE_DIR) / "src/Engine/GameUI.cpp";
+		std::ifstream ui(uiPath);
+		if (!ui)
+			ok = fail("GameUI.cpp not found via FT_VOX_SOURCE_DIR (CMake misconfiguration)");
+		else
+		{
+			std::string uiSrc((std::istreambuf_iterator<char>(ui)), std::istreambuf_iterator<char>());
+			if (uiSrc.find("lightLevels") != std::string::npos ||
+				uiSrc.find("Light levels") != std::string::npos)
+				ok = fail("GameUI still exposes the removed lightLevels control (issue #161)");
+		}
+	}
 
 	// Mid-path defaults: readable chroma, not washed-out or neon
-	if (sp.colorBoost < 1.0f || sp.colorBoost > 1.08f)
-		ok = fail("default colorBoost out of balanced range [1.0, 1.08]");
-	if (sp.saturationLevel < 1.0f || sp.saturationLevel > 1.10f)
-		ok = fail("default saturationLevel out of balanced range [1.0, 1.10]");
-	if (sp.contrastLevel < 1.0f || sp.contrastLevel > 1.08f)
-		ok = fail("default contrastLevel out of balanced range [1.0, 1.08]");
+	if (sp.materialColorBoost < 1.0f || sp.materialColorBoost > 1.08f)
+		ok = fail("default materialColorBoost out of balanced range [1.0, 1.08]");
+	if (sp.materialSaturation < 1.0f || sp.materialSaturation > 1.10f)
+		ok = fail("default materialSaturation out of balanced range [1.0, 1.10]");
+	if (sp.materialContrast < 1.0f || sp.materialContrast > 1.08f)
+		ok = fail("default materialContrast out of balanced range [1.0, 1.08]");
 	// Re-baselined for the linear-light pipeline (issue #135): sRGB-decoded
 	// albedo is ~2.3x darker mid-tones than the old gamma-as-linear sampling.
 	// Playability-first: bright, readable nights and sunny days.
@@ -61,12 +85,15 @@ int main()
 		ok = fail("diffuse out of re-baselined linear-light range [0.80, 1.00]");
 
 	// Mutate and re-pack to prove knobs are not hard-coded in packer
-	sp.colorBoost = 1.55f;
-	sp.saturationLevel = 1.4f;
-	sp.contrastLevel = 1.2f;
+	sp.materialColorBoost = 1.55f;
+	sp.materialSaturation = 1.4f;
+	sp.materialContrast = 1.2f;
 	packFrameLightVisual(sp, lightParams, visualParams);
 	if (std::abs(lightParams.w - 1.55f) > 1e-5f || std::abs(visualParams.x - 1.4f) > 1e-5f)
 		ok = fail("packFrameLightVisual does not pass through mutated knobs");
+	// Reserved lanes stay dead even when the live knobs move
+	if (std::abs(lightParams.z) > 1e-6f || std::abs(visualParams.z) > 1e-6f)
+		ok = fail("reserved lightParams.z / visualParams.z must stay 0 for any input");
 
 	PostProcessSettings pp{};
 	if (pp.exposure < 1.10f || pp.exposure > 1.40f)

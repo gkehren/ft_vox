@@ -783,10 +783,17 @@ int main()
 			ok = fail("full pack must be packComplete only");
 	}
 
-	// Generated FrameUBO GLSL must list C++ field names (build artifact or source mirror)
+	// Generated FrameUBO GLSL must list C++ field names, and the production
+	// shaders must consume exactly the lanes the UI promises (issue #161).
+	// FT_VOX_SOURCE_DIR (from CMake) anchors every scan to the source tree so
+	// out-of-tree build directories cannot break it or silently scan an
+	// empty mirror (issue #165 review).
 	{
 		namespace fs = std::filesystem;
+		const fs::path sourceShaderDir = fs::path(FT_VOX_SOURCE_DIR) / "ressources/shaders/vulkan";
+		const std::string sourceFrameUbo = (sourceShaderDir / "frame_ubo.inc.glsl").string();
 		const char *candidates[] = {
+			sourceFrameUbo.c_str(),
 			"ressources/shaders/vulkan/frame_ubo.inc.glsl",
 			"../ressources/shaders/vulkan/frame_ubo.inc.glsl",
 			"../../ressources/shaders/vulkan/frame_ubo.inc.glsl",
@@ -820,6 +827,72 @@ int main()
 			}
 			if (glsl.find("postParams") != std::string::npos)
 				ok = fail("generated FrameUBO must not contain dead postParams");
+			// Issue #161: the two dead lanes (lightParams.z held a no-op
+			// "Light levels" slider, visualParams.z a duplicate colorBoost
+			// copy) must be documented as reserved in the contract itself,
+			// not silently re-assigned fake semantics.
+			for (const char *laneLine : {"vec4 lightParams;", "vec4 visualParams;"})
+			{
+				const auto linePos = glsl.find(laneLine);
+				if (linePos == std::string::npos)
+					ok = fail(std::string("generated FrameUBO GLSL missing field: ") + laneLine);
+				else
+				{
+					const auto end = glsl.find('\n', linePos);
+					const std::string line = glsl.substr(linePos, end - linePos);
+					if (line.find("reserved") == std::string::npos)
+						ok = fail("generated FrameUBO lane must be commented reserved (issue #161): " + line);
+				}
+			}
+
+			// Shader source contract (issue #161 + #165 review):
+			//  - the material grading lanes (colorBoost / saturation /
+			//    contrast) are read by EXACTLY terrain.frag and mob.frag —
+			//    that is the scope the "Material grading (terrain & mobs)"
+			//    UI panel promises. A shader gaining or losing a read must
+			//    update that panel and this list together.
+			//  - nobody reads the reserved lanes lightParams.z /
+			//    visualParams.z. Packing a value no shader consumes is what
+			//    made the old "Light levels" slider a silent no-op.
+			const auto isMaterialGradeConsumer = [](const std::string &name) {
+				return name == "terrain.frag.glsl" || name == "mob.frag.glsl";
+			};
+			const char *materialGradeLanes[] = {"frame.lightParams.w", "frame.visualParams.x", "frame.visualParams.y"};
+			const char *reservedLanes[] = {"lightParams.z", "visualParams.z"};
+			int scannedShaders = 0;
+			std::error_code ec;
+			for (const auto &entry : fs::directory_iterator(sourceShaderDir, ec))
+			{
+				const fs::path shaderPath = entry.path();
+				if (shaderPath.extension() != ".glsl" || shaderPath.filename() == "frame_ubo.inc.glsl")
+					continue;
+				std::ifstream in(shaderPath);
+				if (!in)
+					continue;
+				++scannedShaders;
+				const std::string name = shaderPath.filename().string();
+				const std::string shaderSrc{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+				const bool expectedConsumer = isMaterialGradeConsumer(name);
+				for (const char *lane : materialGradeLanes)
+				{
+					const bool reads = shaderSrc.find(lane) != std::string::npos;
+					if (reads && !expectedConsumer)
+						ok = fail(name + std::string(" reads material grading lane ") + lane +
+								  " — the UI scopes those controls to terrain & mobs (issue #161)");
+					if (!reads && expectedConsumer)
+						ok = fail(name + std::string(" must read material grading lane ") + lane +
+								  " (live consumer contract, issue #161)");
+				}
+				for (const char *lane : reservedLanes)
+					if (shaderSrc.find(lane) != std::string::npos)
+						ok = fail(name + std::string(" reads reserved FrameUBO lane ") + lane +
+								  " — define real semantics or drop the read (issue #161)");
+			}
+			if (ec)
+				ok = fail("could not scan shader dir " + sourceShaderDir.string() + ": " + ec.message());
+			else if (scannedShaders < 10)
+				ok = fail("source-contract scan saw only " + std::to_string(scannedShaders) +
+						  " shaders in " + sourceShaderDir.string() + " — FT_VOX_SOURCE_DIR misconfigured?");
 		}
 	}
 
@@ -1704,7 +1777,10 @@ int main()
 		// the chain), and the packed ices are fully opaque.
 		{
 			namespace fs = std::filesystem;
+			const std::string sourceZip =
+				(fs::path(FT_VOX_SOURCE_DIR) / "ressources/default-resource-pack.zip").string();
 			const char *candidates[] = {
+				sourceZip.c_str(),
 				"ressources/default-resource-pack.zip",
 				"../ressources/default-resource-pack.zip",
 				"../../ressources/default-resource-pack.zip",
@@ -1858,7 +1934,10 @@ int main()
 		// 15. Shader cutout threshold stays in sync with the mip generator
 		{
 			namespace fs = std::filesystem;
+			const std::string sourceCutout =
+				(fs::path(FT_VOX_SOURCE_DIR) / "ressources/shaders/vulkan/cutout.inc.glsl").string();
 			const char *candidates[] = {
+				sourceCutout.c_str(),
 				"ressources/shaders/vulkan/cutout.inc.glsl",
 				"../ressources/shaders/vulkan/cutout.inc.glsl",
 				"../../ressources/shaders/vulkan/cutout.inc.glsl",

@@ -33,7 +33,9 @@ struct ShaderParameters
 	// Playability-first: bright enough that sunlit scenes feel sunny.
 	float ambientStrength = 0.38f;
 	float diffuseIntensity = 0.92f;
-	float lightLevels = 5.0f;
+	// (lightLevels removed, issue #161: it packed into FrameUBO::lightParams.z
+	// but no production shader consumed it — the slider was a live no-op. The
+	// UBO lane stays reserved until a real lighting feature needs it.)
 	/// Cool moon fill at night (scales with nightFactor). Lifted for playability:
 	/// nights must keep silhouettes and ground detail readable (issue #135).
 	float moonAmbientStrength = 0.45f;
@@ -48,10 +50,14 @@ struct ShaderParameters
 	float dayTime = 0.5f;
 	float dayCycleSpeed = 0.002f;
 
-	// visual — gentle punch for readable sand/grass/water chroma
-	float saturationLevel = 1.08f;
-	float colorBoost = 1.03f;
-	float contrastLevel = 1.06f;
+	// Material grading (issue #161) — applied by the terrain AND mob
+	// lit-material shaders before fog (terrain.frag/mob.frag share the same
+	// lighting + grade stage). Water and the composited frame are graded by
+	// the separate full-frame post controls (PostProcessSettings::postSaturation
+	// / postContrast) — never present these as world-wide equivalents.
+	float materialSaturation = 1.08f;
+	float materialColorBoost = 1.03f;
+	float materialContrast = 1.06f;
 
 	// Water (Tier 1) — mild defaults (strong refraction caused mirrored/grid artifacts)
 	float waterWaveStrength = 0.08f;
@@ -69,13 +75,18 @@ struct ShaderParameters
 	float shadowDebug = 0.0f;
 };
 
-/// Packs light + visual knobs for FrameUBO std140 (matches terrain/sky shaders).
-/// lightParams  = (ambient, diffuse, lightLevels, colorBoost)
-/// visualParams = (saturation, contrast, colorBoost, unused)
+/// Packs light + material-grade knobs for FrameUBO std140 (matches the
+/// terrain/mob lit-material shaders).
+/// lightParams  = (ambient, diffuse, reserved, colorBoost) — .z is unused
+///   since #161 removed the dead "Light levels" lane; keep 0 until a real
+///   lighting feature defines it.
+/// visualParams = (saturation, contrast, reserved, shadowDebug) — .z held a
+///   duplicate colorBoost copy no shader read (removed, issue #161); .w is
+///   overwritten by WorldRenderer with ShaderParameters::shadowDebug.
 inline void packFrameLightVisual(const ShaderParameters &p, glm::vec4 &lightParams, glm::vec4 &visualParams)
 {
-	lightParams = glm::vec4(p.ambientStrength, p.diffuseIntensity, p.lightLevels, p.colorBoost);
-	visualParams = glm::vec4(p.saturationLevel, p.contrastLevel, p.colorBoost, 0.0f);
+	lightParams = glm::vec4(p.ambientStrength, p.diffuseIntensity, 0.0f, p.materialColorBoost);
+	visualParams = glm::vec4(p.materialSaturation, p.materialContrast, 0.0f, 0.0f);
 }
 
 struct RenderSettings

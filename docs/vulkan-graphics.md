@@ -510,7 +510,7 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
 
 ## 5. FrameUBO contract
 
-**Single source of truth:** `src/Renderer/FrameUBO.hpp` (`struct FrameUBO`, `sizeof` **528**, std140).
+**Single source of truth:** `src/Renderer/FrameUBO.hpp` (`struct FrameUBO`, `sizeof` **624**, std140).
 
 At CMake configure time, `cmake/GenerateFrameUboGlsl.cmake` parses that header and writes:
 
@@ -519,6 +519,8 @@ ressources/shaders/vulkan/frame_ubo.inc.glsl   # generated — do not hand-edit
 ```
 
 World shaders `#include "frame_ubo.inc.glsl"` (glslc `-I` includes the generated path). Fields include view/projection, three cascade matrices, fog/light/visual params, sun/moon dirs, sky day factors, cascade splits, moon ambient, lighting params (block/emissive/fogY/underwater), and water params. The post **composite** also binds this set (set 0) for the camera-underwater medium transport (view/projection, camera position, sun/moon directions, day/sunset/night factors); the local water-surface Y used by the submersion blend travels via composite push constant `p6`, not the UBO.
+
+**Lane semantics (issue #161 audit):** every lane must have a production consumer or be commented `reserved` in `FrameUBO.hpp` (the generated GLSL inherits those comments). `lightParams.z` and `visualParams.z` are reserved — the former held the removed no-op "Light levels" slider, the latter a duplicate `colorBoost` copy no shader read. The material-grade knobs (`lightParams.w` colorBoost, `visualParams.x/y` saturation/contrast) are consumed **only** by the terrain and mob lit-material shaders (water and the full-frame post grade are separate — `PostProcessSettings::postSaturation`/`postContrast`); `visualParams.w` is the terrain shadow-debug selector.
 
 CPU fill: `WorldRenderer::updateFrameUBO` from `Camera`, `ShaderParameters`, cascade far (`RenderSettings::shadowCascadeFar`), underwater flag (camera voxel sample; the local water-surface scan feeds the composite push constant instead).
 

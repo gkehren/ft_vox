@@ -5,7 +5,7 @@ layout(location = 1) in uint aPackedData;
 layout(location = 2) in uvec2 aTexCoord;
 layout(location = 3) in uint aPackedBiomeColor;
 
-// Must match src/Renderer/FrameUBO.hpp (std140, sizeof 528)
+// Layout generated from src/Renderer/FrameUBO.hpp (std140) — do not hand-edit
 #include "frame_ubo.inc.glsl"
 
 // Must match materials::MaterialTableUBO — x=wind, y=emissive, z=ice, w=flags

@@ -17,8 +17,8 @@ struct FrameUBO
 	glm::vec4 lightDirection;
 	glm::vec4 fogColor;
 	glm::vec4 fogParams;	 // start, end, density, heightFalloff
-	glm::vec4 lightParams;	 // ambient, diffuse, lightLevels, colorBoost
-	glm::vec4 visualParams;	 // saturation, contrast, colorBoost, unused
+	glm::vec4 lightParams;	 // ambient, diffuse, reserved (was dead "lightLevels", issue #161), colorBoost
+	glm::vec4 visualParams;	 // material saturation, contrast, reserved (was duplicate colorBoost, issue #161), shadowDebug
 	glm::vec4 sunDir;
 	glm::vec4 moonDir;
 	glm::vec4 skyParams;	 // time, day, sunset, night
@@ -31,7 +31,7 @@ struct FrameUBO
 	glm::vec4 cascadeGridOffsets01;   // xy = cascade0 absolute grid offset, zw = cascade1 (ints as floats)
 	glm::vec4 cascadeGridOffsets2;	  // xy = cascade2 absolute grid offset, zw unused
 	glm::vec4 waterQuality; // SSR steps, range, view thickness, directional shadows
-	glm::vec4 waterSurfaceParams; // roughness, debug view (0 off/1 normal/2 optical dist/3 fresnel/4 SSR confidence), unused, unused
+	glm::vec4 waterSurfaceParams; // roughness, debug view (0 off/1 normal/2 optical dist/3 fresnel/4 SSR confidence), reserved, reserved
 };
 
 // 19 vec4 slots after the 5 matrices: 5*64 + 19*16 = 320+304 = 624
