@@ -22,7 +22,10 @@ determinism probes stay valid; GPU cost is exposure-independent.
 
 ## GPU measurements
 
-The adjacent CSVs contain the median of three interleaved preset sweeps
+The raw CSVs were removed from HEAD by the benchmark retention policy.
+Historical copies remain available at the pre-retention revision:
+[1080.csv](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue144-underwater/1080.csv) and [1440.csv](https://github.com/gkehren/ft_vox/blob/d7a2c9345cb8406efc6022d4d3ff462c4995b231/docs/benchmarks/issue144-underwater/1440.csv).
+They contain the median of three interleaved preset sweeps
 (ascending / descending / ascending; 8 synchronous GPU samples per tier and
 sweep after 4 warmup frames). Tier 0/1/2/3 means Low/Medium/High/Cinematic.
 `post_ms` covers the whole Post scope (exposure metering, SSAO, bloom, god
