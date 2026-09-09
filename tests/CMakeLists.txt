@@ -765,6 +765,67 @@ set_tests_properties(VisualRegression PROPERTIES
     SKIP_RETURN_CODE 77)
 
 # ---------------------------------------------------------------------------
+# Issue #156 regression: PostStack::resize() across a swapchain
+# format/color-space change must keep every pipeline layout valid. Drives
+# PostStack directly through A -> B -> A output pairs (plus an extent-only
+# resize) with full post frames and a silent Vulkan validation layer.
+# ---------------------------------------------------------------------------
+add_executable(test_post_resize
+    test_post_resize.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+    ${FT_VOX_RENDERER_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp)
+
+target_include_directories(test_post_resize PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+target_compile_definitions(test_post_resize PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+if(APPLE)
+    target_compile_definitions(test_post_resize PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_post_resize PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+target_link_libraries(test_post_resize PRIVATE
+    glm
+    FastNoise2
+    SDL3::SDL3
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    miniz::miniz
+    Threads::Threads
+)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_post_resize PRIVATE ${CMAKE_DL_LIBS})
+endif()
+if(APPLE)
+    target_link_libraries(test_post_resize PRIVATE
+        "-framework Metal" "-framework Foundation" "-framework QuartzCore" "-framework IOKit" "-framework IOSurface")
+endif()
+add_dependencies(test_post_resize ft_vox_shaders)
+add_custom_command(TARGET test_post_resize POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:test_post_resize>/ressources/shaders/spv
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FT_VOX_SPV_FILES}
+            $<TARGET_FILE_DIR:test_post_resize>/ressources/shaders/spv)
+add_test(NAME PostResizeFormats COMMAND test_post_resize)
+set_tests_properties(PostResizeFormats PROPERTIES
+    ENVIRONMENT "FT_VOX_VALIDATION=1"
+    SKIP_RETURN_CODE 77)
+
+# ---------------------------------------------------------------------------
 # VSync frame pacing (PR #145): pure computePacedDeltaTime contract
 # ---------------------------------------------------------------------------
 add_executable(test_frame_pacing

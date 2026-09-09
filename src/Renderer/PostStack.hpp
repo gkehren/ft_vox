@@ -89,6 +89,13 @@ private:
 	void destroyTargets();
 	void createDefaultImages(ImmediateCommands &imm);
 	void destroyDefaultImages();
+	/// Descriptor set layouts + pool + sets + pipeline layouts (issue #156).
+	/// Nothing here depends on the swapchain format/color space, so these
+	/// objects live for the whole PostStack lifetime: created once by init(),
+	/// destroyed only by shutdown(). A swapchain format change rebuilds only
+	/// the graphics pipelines whose creation info encodes attachment formats.
+	void createLayoutsAndDescriptors();
+	void destroyLayoutsAndDescriptors();
 	void createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapchainColorSpace);
 	void destroyPipelines();
 	void createFullscreenQuad(ImmediateCommands &imm);

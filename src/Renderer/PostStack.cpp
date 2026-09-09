@@ -84,18 +84,7 @@ void PostStack::shutdown()
 	destroyPipelines();
 	destroyTargets();
 	destroyExposureBuffers();
-	if (m_postPool)
-		vkDestroyDescriptorPool(m_context->getDevice(), m_postPool, nullptr);
-	if (m_postSetLayout)
-		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_postSetLayout, nullptr);
-	if (m_godSetLayout)
-		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_godSetLayout, nullptr);
-	if (m_compositeSetLayout)
-		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_compositeSetLayout, nullptr);
-	if (m_exposureSetLayout)
-		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_exposureSetLayout, nullptr);
-	if (m_ssaoUpLayout)
-		vkDestroyDescriptorSetLayout(m_context->getDevice(), m_ssaoUpLayout, nullptr);
+	destroyLayoutsAndDescriptors();
 	if (m_linearSampler)
 		vkDestroySampler(m_context->getDevice(), m_linearSampler, nullptr);
 	if (m_nearestSampler)
@@ -103,9 +92,6 @@ void PostStack::shutdown()
 	if (m_quadVBO.buffer)
 		destroyBuffer(m_context->getAllocator(), m_quadVBO);
 	destroyDefaultImages();
-	m_postPool = VK_NULL_HANDLE;
-	m_postSetLayout = m_godSetLayout = m_compositeSetLayout = m_ssaoUpLayout = VK_NULL_HANDLE;
-	m_exposureSetLayout = VK_NULL_HANDLE;
 	m_linearSampler = m_nearestSampler = VK_NULL_HANDLE;
 	m_context = nullptr;
 }
@@ -271,6 +257,148 @@ void PostStack::destroyTargets()
 	destroyImage(m_context->getAllocator(), m_context->getDevice(), m_lum1);
 }
 
+// Issue #156: descriptor set layouts, the pool + sets and the pipeline
+// layouts are independent of the swapchain format/color space, so they are
+// created once here and destroyed only in shutdown(). A format change must
+// never rebuild pipelines against destroyed layout handles.
+void PostStack::createLayoutsAndDescriptors()
+{
+	VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+	VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+	li.bindingCount = 1;
+	li.pBindings = &b;
+	vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_postSetLayout);
+
+	std::array<VkDescriptorSetLayoutBinding, 2> gb{};
+	gb[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+	gb[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+	li.bindingCount = 2;
+	li.pBindings = gb.data();
+	vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_godSetLayout);
+
+	// Composite resources live on set 1; set 0 is the frame set (FrameUBO)
+	// so the underwater medium transport can reconstruct world positions
+	// and read the day-cycle terms (issue #144). Binding 5 is the live
+	// scene depth for that transport; binding 6 the auto-exposure history
+	// SSBO (issue #140, same single shared buffer the adapt pass writes).
+	std::array<VkDescriptorSetLayoutBinding, 7> cb{};
+	for (int i = 0; i < 6; ++i)
+		cb[i] = {static_cast<uint32_t>(i), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+	cb[6] = {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}; // auto-exposure history (issue #140)
+	li.bindingCount = 7;
+	li.pBindings = cb.data();
+	vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_compositeSetLayout);
+
+	// Exposure adaptation (issue #140): 4x4 log-lum sampler + shared
+	// history SSBO + per-frame-in-flight snapshot SSBO (CPU readout).
+	{
+		std::array<VkDescriptorSetLayoutBinding, 3> eb{};
+		eb[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+		eb[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+		eb[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+		li.bindingCount = 3;
+		li.pBindings = eb.data();
+		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_exposureSetLayout);
+	}
+
+	std::array<VkDescriptorSetLayoutBinding, 2> ub{};
+	ub[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+	ub[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+	li.bindingCount = 2;
+	li.pBindings = ub.data();
+	vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_ssaoUpLayout);
+
+	std::array<VkDescriptorPoolSize, 2> ps{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32},
+											{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6}}};
+	VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+	pi.poolSizeCount = 2;
+	pi.pPoolSizes = ps.data();
+	pi.maxSets = 20;
+	vkCreateDescriptorPool(m_context->getDevice(), &pi, nullptr, &m_postPool);
+
+	auto alloc = [&](VkDescriptorSetLayout lay, VkDescriptorSet &out) {
+		VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+		ai.descriptorPool = m_postPool;
+		ai.descriptorSetCount = 1;
+		ai.pSetLayouts = &lay;
+		vkAllocateDescriptorSets(m_context->getDevice(), &ai, &out);
+	};
+	alloc(m_postSetLayout, m_setExtract);
+	alloc(m_postSetLayout, m_setBlur[0]);
+	alloc(m_postSetLayout, m_setBlur[1]);
+	alloc(m_postSetLayout, m_setSsao);
+	alloc(m_ssaoUpLayout, m_setSsaoUp);
+	alloc(m_postSetLayout, m_setLumSrc[0]);
+	alloc(m_postSetLayout, m_setLumSrc[1]);
+	alloc(m_godSetLayout, m_setGodRays);
+	alloc(m_postSetLayout, m_setFxaa);
+	for (VkDescriptorSet &set : m_setComposite)
+		alloc(m_compositeSetLayout, set);
+	for (VkDescriptorSet &set : m_exposureSets)
+		alloc(m_exposureSetLayout, set);
+
+	VkPushConstantRange pcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128};
+	VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+	pl.setLayoutCount = 1;
+	pl.pSetLayouts = &m_postSetLayout;
+	pl.pushConstantRangeCount = 1;
+	pl.pPushConstantRanges = &pcr;
+	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_postLayout1);
+	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoLayout);
+
+	pl.pSetLayouts = &m_godSetLayout;
+	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_godLayout);
+
+	pl.pSetLayouts = &m_ssaoUpLayout;
+	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoUpPipeLayout);
+
+	VkDescriptorSetLayout compositeSets[2] = {m_frameSetLayout, m_compositeSetLayout};
+	pl.pSetLayouts = compositeSets;
+	pl.setLayoutCount = 2;
+	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_compositeLayout);
+
+	pl.pSetLayouts = &m_exposureSetLayout;
+	pl.setLayoutCount = 1; // restore: the composite layout above needs two sets
+	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_exposureLayout);
+}
+
+void PostStack::destroyLayoutsAndDescriptors()
+{
+	if (!m_context)
+		return;
+	auto dl = [&](VkPipelineLayout &l) {
+		if (l)
+			vkDestroyPipelineLayout(m_context->getDevice(), l, nullptr);
+		l = VK_NULL_HANDLE;
+	};
+	dl(m_postLayout1);
+	dl(m_godLayout);
+	dl(m_ssaoLayout);
+	dl(m_ssaoUpPipeLayout);
+	dl(m_compositeLayout);
+	dl(m_exposureLayout);
+	// Destroying the pool frees every allocated set.
+	if (m_postPool)
+		vkDestroyDescriptorPool(m_context->getDevice(), m_postPool, nullptr);
+	m_postPool = VK_NULL_HANDLE;
+	auto dsl = [&](VkDescriptorSetLayout &l) {
+		if (l)
+			vkDestroyDescriptorSetLayout(m_context->getDevice(), l, nullptr);
+		l = VK_NULL_HANDLE;
+	};
+	dsl(m_postSetLayout);
+	dsl(m_godSetLayout);
+	dsl(m_compositeSetLayout);
+	dsl(m_exposureSetLayout);
+	dsl(m_ssaoUpLayout);
+	m_setExtract = m_setSsao = m_setSsaoUp = m_setGodRays = m_setFxaa = VK_NULL_HANDLE;
+	m_setBlur[0] = m_setBlur[1] = m_setLumSrc[0] = m_setLumSrc[1] = VK_NULL_HANDLE;
+	for (VkDescriptorSet &set : m_setComposite)
+		set = VK_NULL_HANDLE;
+	for (VkDescriptorSet &set : m_exposureSets)
+		set = VK_NULL_HANDLE;
+}
+
 void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapchainColorSpace)
 {
 	m_swapchainFormat = swapchainFormat;
@@ -282,106 +410,6 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 			"(expected SRGB_NONLINEAR with an sRGB or UNORM 8-bit format)");
 	m_swapchainRequiresSrgbEncode =
 		colorspace::outputTransferRequiresShaderEncode(m_outputTransfer);
-	if (!m_postSetLayout)
-	{
-		VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-		VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-		li.bindingCount = 1;
-		li.pBindings = &b;
-		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_postSetLayout);
-
-		std::array<VkDescriptorSetLayoutBinding, 2> gb{};
-		gb[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-		gb[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-		li.bindingCount = 2;
-		li.pBindings = gb.data();
-		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_godSetLayout);
-
-		// Composite resources live on set 1; set 0 is the frame set (FrameUBO)
-		// so the underwater medium transport can reconstruct world positions
-		// and read the day-cycle terms (issue #144). Binding 5 is the live
-		// scene depth for that transport; binding 6 the auto-exposure history
-		// SSBO (issue #140, same single shared buffer the adapt pass writes).
-		std::array<VkDescriptorSetLayoutBinding, 7> cb{};
-		for (int i = 0; i < 6; ++i)
-			cb[i] = {static_cast<uint32_t>(i), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-		cb[6] = {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}; // auto-exposure history (issue #140)
-		li.bindingCount = 7;
-		li.pBindings = cb.data();
-		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_compositeSetLayout);
-
-		// Exposure adaptation (issue #140): 4x4 log-lum sampler + shared
-		// history SSBO + per-frame-in-flight snapshot SSBO (CPU readout).
-		{
-			std::array<VkDescriptorSetLayoutBinding, 3> eb{};
-			eb[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-			eb[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-			eb[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-			li.bindingCount = 3;
-			li.pBindings = eb.data();
-			vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_exposureSetLayout);
-		}
-
-		std::array<VkDescriptorSetLayoutBinding, 2> ub{};
-		ub[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-		ub[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-		li.bindingCount = 2;
-		li.pBindings = ub.data();
-		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_ssaoUpLayout);
-
-		std::array<VkDescriptorPoolSize, 2> ps{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32},
-												{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6}}};
-		VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-		pi.poolSizeCount = 2;
-		pi.pPoolSizes = ps.data();
-		pi.maxSets = 20;
-		vkCreateDescriptorPool(m_context->getDevice(), &pi, nullptr, &m_postPool);
-
-		auto alloc = [&](VkDescriptorSetLayout lay, VkDescriptorSet &out) {
-			VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-			ai.descriptorPool = m_postPool;
-			ai.descriptorSetCount = 1;
-			ai.pSetLayouts = &lay;
-			vkAllocateDescriptorSets(m_context->getDevice(), &ai, &out);
-		};
-		alloc(m_postSetLayout, m_setExtract);
-		alloc(m_postSetLayout, m_setBlur[0]);
-		alloc(m_postSetLayout, m_setBlur[1]);
-		alloc(m_postSetLayout, m_setSsao);
-		alloc(m_ssaoUpLayout, m_setSsaoUp);
-		alloc(m_postSetLayout, m_setLumSrc[0]);
-		alloc(m_postSetLayout, m_setLumSrc[1]);
-		alloc(m_godSetLayout, m_setGodRays);
-		alloc(m_postSetLayout, m_setFxaa);
-		for (VkDescriptorSet &set : m_setComposite)
-			alloc(m_compositeSetLayout, set);
-		for (VkDescriptorSet &set : m_exposureSets)
-			alloc(m_exposureSetLayout, set);
-
-		VkPushConstantRange pcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128};
-		VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-		pl.setLayoutCount = 1;
-		pl.pSetLayouts = &m_postSetLayout;
-		pl.pushConstantRangeCount = 1;
-		pl.pPushConstantRanges = &pcr;
-		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_postLayout1);
-		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoLayout);
-
-		pl.pSetLayouts = &m_godSetLayout;
-		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_godLayout);
-
-		pl.pSetLayouts = &m_ssaoUpLayout;
-		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoUpPipeLayout);
-
-		VkDescriptorSetLayout compositeSets[2] = {m_frameSetLayout, m_compositeSetLayout};
-		pl.pSetLayouts = compositeSets;
-		pl.setLayoutCount = 2;
-		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_compositeLayout);
-
-		pl.pSetLayouts = &m_exposureSetLayout;
-		pl.setLayoutCount = 1; // restore: the composite layout above needs two sets
-		vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_exposureLayout);
-	}
 
 	auto load = [&](const char *n) { return loadShaderModule(m_context->getDevice(), spvPath(n)); };
 	VkShaderModule fsVert = load("fullscreen.vert.spv");
@@ -462,27 +490,70 @@ void PostStack::createPipelines(VkFormat swapchainFormat, VkColorSpaceKHR swapch
 
 	const VkFormat ssaoFmt = VK_FORMAT_R8G8B8A8_UNORM; // half-res AO+normals
 	const VkFormat ssaoUpFmt = VK_FORMAT_R8_UNORM;	 // full-res final AO
-	makeFS(extractF, m_postLayout1, m_hdrFormat, m_extractPipe);
-	makeFS(blurF, m_postLayout1, m_hdrFormat, m_blurPipe);
-	makeFS(godF, m_godLayout, m_hdrFormat, m_godRaysPipe);
-	makeFS(ssaoF, m_ssaoLayout, ssaoFmt, m_ssaoPipe);
-	makeFS(ssaoUpF, m_ssaoUpPipeLayout, ssaoUpFmt, m_ssaoUpPipe);
-	makeFS(compF, m_compositeLayout, swapchainFormat, m_compositePipe);
-	// Issue #143: same composite shader aimed at the UNORM LDR AA-source
-	// target — a pipeline's rendering color format must match its attachment,
-	// so the AA-on path gets its own pipeline.
-	makeFS(compF, m_compositeLayout, VK_FORMAT_R8G8B8A8_UNORM, m_compositeLdrPipe);
-	makeFS(fxaaF, m_postLayout1, swapchainFormat, m_fxaaPipe);
-	const VkFormat lumFmt = VK_FORMAT_R32_SFLOAT;
-	makeFS(downF, m_postLayout1, lumFmt, m_downsamplePipe);
-	if (adaptF)
-		makeFS(adaptF, m_exposureLayout, lumFmt, m_adaptPipe);
+	// Shader modules are loaded before the creation block; every throw below
+	// (layout precondition or pipeline creation failure) must release them.
+	const std::array<VkShaderModule, 10> modules = {
+		{fsVert, extractF, blurF, godF, ssaoF, ssaoUpF, compF, fxaaF, downF, adaptF}};
+	auto destroyModules = [&]() {
+		for (VkShaderModule m : modules)
+			destroyShaderModule(m_context->getDevice(), m);
+	};
 
+	try
+	{
+		// Precondition (issue #156): every layout the fullscreen pipelines
+		// reference must exist BEFORE any vkCreateGraphicsPipelines call. A
+		// null here is a layout-lifetime bug — fail with a clear name instead
+		// of handing VK_NULL_HANDLE to the driver.
+		auto requireLayout = [](VkPipelineLayout layout, const char *name) {
+			if (layout == VK_NULL_HANDLE)
+				throw std::runtime_error(std::string("PostStack: missing pipeline layout: ") + name);
+		};
+		requireLayout(m_postLayout1, "post");
+		requireLayout(m_godLayout, "god rays");
+		requireLayout(m_ssaoLayout, "ssao");
+		requireLayout(m_ssaoUpPipeLayout, "ssao upsample");
+		requireLayout(m_compositeLayout, "composite");
+		// The adapt pipeline (and with it the exposure layout) only exists
+		// when fragment SSBO stores are available.
+		if (m_context->fragmentStoresAndAtomics())
+			requireLayout(m_exposureLayout, "exposure");
 
-	for (auto m : {fsVert, extractF, blurF, godF, ssaoF, ssaoUpF, compF, fxaaF, downF})
-		destroyShaderModule(m_context->getDevice(), m);
-	if (adaptF)
-		destroyShaderModule(m_context->getDevice(), adaptF);
+		makeFS(extractF, m_postLayout1, m_hdrFormat, m_extractPipe);
+		makeFS(blurF, m_postLayout1, m_hdrFormat, m_blurPipe);
+		makeFS(godF, m_godLayout, m_hdrFormat, m_godRaysPipe);
+		makeFS(ssaoF, m_ssaoLayout, ssaoFmt, m_ssaoPipe);
+		makeFS(ssaoUpF, m_ssaoUpPipeLayout, ssaoUpFmt, m_ssaoUpPipe);
+		makeFS(compF, m_compositeLayout, swapchainFormat, m_compositePipe);
+		// Issue #143: same composite shader aimed at the UNORM LDR AA-source
+		// target — a pipeline's rendering color format must match its
+		// attachment, so the AA-on path gets its own pipeline.
+		makeFS(compF, m_compositeLayout, VK_FORMAT_R8G8B8A8_UNORM, m_compositeLdrPipe);
+		makeFS(fxaaF, m_postLayout1, swapchainFormat, m_fxaaPipe);
+		const VkFormat lumFmt = VK_FORMAT_R32_SFLOAT;
+		makeFS(downF, m_postLayout1, lumFmt, m_downsamplePipe);
+		if (adaptF)
+			makeFS(adaptF, m_exposureLayout, lumFmt, m_adaptPipe);
+	}
+	catch (...)
+	{
+		destroyModules();
+		throw;
+	}
+	destroyModules();
+
+	// Postcondition (issue #156): every enabled post pipeline was created.
+	// Layout non-nullness is already guaranteed by the precondition above,
+	// so this only verifies the vkCreateGraphicsPipelines results.
+	for (VkPipeline pipe : {m_extractPipe, m_blurPipe, m_godRaysPipe, m_ssaoPipe,
+							m_ssaoUpPipe, m_compositePipe, m_compositeLdrPipe,
+							m_fxaaPipe, m_downsamplePipe})
+	{
+		if (!pipe)
+			throw std::runtime_error("PostStack: null pipeline after createPipelines");
+	}
+	if (m_context->fragmentStoresAndAtomics() && !m_adaptPipe)
+		throw std::runtime_error("PostStack: null exposure pipeline after createPipelines");
 }
 
 void PostStack::destroyPipelines()
@@ -504,17 +575,8 @@ void PostStack::destroyPipelines()
 	d(m_fxaaPipe);
 	d(m_downsamplePipe);
 	d(m_adaptPipe);
-	auto dl = [&](VkPipelineLayout &l) {
-		if (l)
-			vkDestroyPipelineLayout(m_context->getDevice(), l, nullptr);
-		l = VK_NULL_HANDLE;
-	};
-	dl(m_postLayout1);
-	dl(m_godLayout);
-	dl(m_ssaoLayout);
-	dl(m_ssaoUpPipeLayout);
-	dl(m_compositeLayout);
-	dl(m_exposureLayout);
+	// Pipeline layouts are owned by createLayoutsAndDescriptors and survive a
+	// pipeline rebuild (issue #156) — destroyed only via shutdown().
 }
 
 void PostStack::init(VkContext &context, ImmediateCommands &imm, VkDescriptorSetLayout frameSetLayout,
@@ -526,6 +588,7 @@ void PostStack::init(VkContext &context, ImmediateCommands &imm, VkDescriptorSet
 	createSamplers();
 	createFullscreenQuad(imm);
 	createDefaultImages(imm);
+	createLayoutsAndDescriptors();
 	createPipelines(swapchainFormat, swapchainColorSpace);
 	createExposureBuffers();
 	createTargets(width, height);
