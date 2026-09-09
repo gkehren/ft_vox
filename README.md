@@ -2,7 +2,7 @@
 
 High-performance voxel sandbox engine built from scratch with **C++20**, **SDL3**, and **Vulkan 1.2+** (MoltenVK on macOS).
 
-Features procedural infinite terrain, biomes, shadows, water, HDR post-processing (bloom, god rays, ACES), overlays, and multiplayer networking (Boost.Asio).
+Features procedural infinite terrain, biomes, passive wildlife (cow / pig / sheep / chicken), player physics, shadows, water, HDR post-processing (bloom, god rays, ACES), and overlays. An experimental UDP networking prototype lives under `src/Network/` — it is compiled into `test_network` only and is not wired into the game.
 
 ## Build requirements
 
@@ -75,7 +75,7 @@ cmake --build build --config Release
 | Component | Role | Linux package (examples) | vcpkg |
 |-----------|------|--------------------------|-------|
 | SDL3 | Window, input, Vulkan surface | `libsdl3-dev` / `SDL3-devel` | `sdl3[vulkan]` |
-| Boost.System / Asio | Networking | `libboost-system-dev` | `boost-asio`, `boost-system` |
+| Boost.System / Asio | Networking (test-only prototype, `test_network`; not linked into the game) | `libboost-system-dev` | `boost-asio`, `boost-system` |
 | Vulkan headers + loader | API | `libvulkan-dev` | `vulkan-headers`, `vulkan-loader` |
 | volk (zeux) | Dynamic Vulkan load | *FetchContent* if missing | `volk` |
 | VMA | GPU allocations | *system header or FetchContent* | `vulkan-memory-allocator` |
@@ -125,6 +125,8 @@ Windows: `.\build.ps1 -Test`
 | `VK_ICD_FILENAMES` | Path to MoltenVK (or other) ICD JSON |
 | `VK_LAYER_PATH` | Path to validation `explicit_layer.d` |
 | `FT_VOX_VALIDATION` | `1` force validation layers on; `0` disable (default: on in Debug) |
+| `FT_VOX_RESOURCE_PACK` | Resource pack root or `.zip` override (CLI `--resource-pack` wins; default: bundled `default-resource-pack.zip`) |
+| `FT_VOX_VULKAN_LIB` | Explicit path to the Vulkan loader library (else well-known loader locations) |
 | `VCPKG_ROOT` | vcpkg install root (Makefile / `build.ps1`) |
 
 ### Optional validation (Debug)
@@ -159,6 +161,12 @@ sudo apt install vulkan-validationlayers
 | [`docs/vulkan-graphics.md`](docs/vulkan-graphics.md) | Vulkan setup, frame graph, passes, shaders, lighting/post |
 | [`docs/engine-architecture.md`](docs/engine-architecture.md) | Engine loop, settings/UI, chunks, streaming, terrain gen |
 | [`docs/terrain-generation.md`](docs/terrain-generation.md) | Noise graphs, biome/block catalog, extension and calibration procedures |
+| [`docs/player-physics.md`](docs/player-physics.md) | Voxel collision solver, player controller, movement modes |
+| [`docs/visual-regression.md`](docs/visual-regression.md) | Offscreen golden-image harness: scenes, references, tolerances |
+| [`docs/gpu-profiling.md`](docs/gpu-profiling.md) | GPU profiler and timing workflow |
+| [`docs/workload-telemetry.md`](docs/workload-telemetry.md) | CPU workload telemetry (`FT_VOX_TELEMETRY`) |
+| [`docs/vulkan-validation.md`](docs/vulkan-validation.md) | Validation-layer setup and error-reporting probe |
+| [`docs/benchmarks/`](docs/benchmarks/) | Benchmark methodology syntheses per issue/PR |
 | [`AGENTS.md`](AGENTS.md) | Contributor-oriented project map and conventions |
 
 ## Project layout
@@ -166,20 +174,20 @@ sudo apt install vulkan-validationlayers
 ```
 cmake/
   Dependencies.cmake   # multi-platform package resolution
-docs/
-  vulkan-graphics.md   # graphics architecture (authoritative)
-  engine-architecture.md
-  benchmarks/          # profiler dump artifacts
+docs/                  # architecture docs + benchmark syntheses
 src/
   Vulkan/              # Instance, device, swapchain, VMA, frames, shaders
   Renderer/            # WorldRenderer, Shadow/Opaque/Water/Sky, PostStack, overlays
-  Engine/              # Main loop, ImGui layer, input, profiler
+  Engine/              # Main loop, ImGui layer, input, profiler, benchmark
   Chunk/               # Voxels, meshing, streaming, terrain generation
-  Network/             # UDP client/server (not wired into Engine UI)
+  Entities/            # Passive mobs: CPU simulation + box-UV articulated models
+  Physics/             # Shared voxel collision solver, player controller
+  Network/             # Experimental UDP client/server (test-only, not linked into the game)
   Camera/
 ressources/
   shaders/vulkan/      # GLSL sources (compiled to SPIR-V at build time)
-  textures/ fonts/ skybox/
+  textures/            # bundled fallback block textures
+tests/                 # unit + offscreen visual-regression tests, golden references
 vcpkg.json             # Windows / optional Unix vcpkg manifest
 install_dep.sh         # apt / dnf / pacman / brew helper
 build.ps1              # Windows vcpkg build helper
@@ -188,4 +196,8 @@ Makefile               # Unix-friendly cmake wrapper
 
 ## License
 
-See repository root for license terms.
+Copyright (c) 2026 gkehren. All rights reserved.
+
+This repository has no open-source license yet; reuse is not permitted without
+the author's permission. Third-party components keep their own licenses — see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

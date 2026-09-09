@@ -1,6 +1,6 @@
 # ft_vox Project Context
 
-`ft_vox` is a high-performance voxel sandbox engine and game built from scratch using C++20. It features a procedurally generated world with infinite terrain, biomes, networking, and modern rendering techniques.
+`ft_vox` is a high-performance voxel sandbox engine and game built from scratch using C++20. It features a procedurally generated world with infinite terrain, biomes, and modern rendering techniques.
 
 **Graphics:** **Vulkan 1.2+** (MoltenVK on macOS). OpenGL/GLAD path removed (PR7).
 
@@ -29,8 +29,8 @@
 - **Entities (`src/Entities/`)**: `MobSystem` — CPU fixed-step passive mobs (cow/pig/sheep/chicken): deterministic seed-based group spawning, ambient wander AI on the shared voxel collision solver; `MobModel` bakes the Minecraft box-UV articulated meshes
 - **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator — **ShadowPass → OpaquePass → WaterPass → SkyPass → PostStack** (+ `MobRenderer`, `OverlayRenderer`, `TextureManager`, `FrameUBO`, `MaterialTable`, `Lighting`, `ShadowCascades`)
 
-### Networking (`src/Network/`)
-- **Client/Server**: Boost.Asio UDP for player position and world state (not yet re-wired into Vulkan Engine UI).
+### Networking (`src/Network/`) — experimental, test-only
+- **Client/Server**: Boost.Asio UDP for player position and world state. Not a shipped feature: the module is compiled into `test_network` only and is **not linked into the game binary**. Do not add new runtime dependencies on it without re-arming the build wiring first.
 
 ## Technologies & Dependencies
 - **Language**: C++20
@@ -39,7 +39,7 @@
 - **Shaders**: GLSL → SPIR-V offline (`glslc` / `glslangValidator`) under `ressources/shaders/vulkan/`
 - **Mathematics**: GLM (`GLM_FORCE_DEPTH_ZERO_TO_ONE`)
 - **Terrain Generation**: FastNoise2
-- **Networking**: Boost.Asio
+- **Networking**: Boost.Asio (test-only prototype; see `src/Network/` note above)
 - **UI**: ImGui (vendored SDL3 + Vulkan backends; dynamic rendering)
 - **Build System**: CMake (3.16+) with platform-aware deps (`cmake/Dependencies.cmake`)
   - **Linux:** distro packages (apt/dnf/pacman) by default; vcpkg optional (`USE_VCPKG=1`)
@@ -55,7 +55,7 @@
 | Linux apt (example) | `libsdl3-dev`, `libboost-system-dev`, `libvulkan-dev`, `glslang-tools` |
 | macOS brew | `sdl3`, `boost`, `molten-vk`, `vulkan-loader`, `glslang` |
 
-**Removed (cleanup):** OpenGL stack (GLAD, legacy GLSL, `Renderer`/`Shader`/`UIManager`/`TextRenderer`/`PostProcessing`), unused ImGui extras (OpenGL/SDLGPU backends, FileDialog, demo, stdlib helper), unused `InputSystem`/`EventBus`, FreeType vcpkg dep. Network module kept for `test_network` only (not yet re-wired into Engine UI).
+**Removed (cleanup):** OpenGL stack (GLAD, legacy GLSL, `Renderer`/`Shader`/`UIManager`/`TextRenderer`/`PostProcessing`), unused ImGui extras (OpenGL/SDLGPU backends, demo, stdlib helper), unused `InputSystem`/`EventBus`, FreeType vcpkg dep. Note: **`ImGuiFileDialog` is NOT removed** — it is vendored under `src/ImGuiFileDialog/` and used by the resource-pack browser. The Network module stays for `test_network` only (compiled into the test, not linked into the game binary).
 
 ### macOS (MoltenVK)
 ```bash
@@ -132,6 +132,7 @@ ctest -R VisualRegression --output-on-failure   # from the build dir
 - **Resource-pack blocks**: bundled terrain textures live in
   `ressources/textures/` and may be sourced from the compliant
   `docs/default-resource-pack/assets/minecraft/textures/block/` fixture
+  (optional **untracked** local fixture — gitignored, not part of the repository)
 - **Vulkan**: `VK_NO_PROTOTYPES` + volk; no global OpenGL-style state
 - **Depth / Y**: `GLM_FORCE_DEPTH_ZERO_TO_ONE`; negative viewport height for OpenGL-style Y without winding flip (CCW)
 - **Descriptors**: Never `vkUpdateDescriptorSets` mid-command-buffer; use fixed sets or push constants
