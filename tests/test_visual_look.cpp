@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -51,24 +52,21 @@ int main()
 	if (std::abs(visualParams.z) > 1e-6f)
 		ok = fail("visualParams.z must stay 0 (reserved; colorBoost lives only in lightParams.w)");
 	// There must be no UI control left for the removed field either.
+	// FT_VOX_SOURCE_DIR (from CMake) anchors the scan to the source tree so
+	// out-of-tree build directories cannot break it (issue #165 review).
 	{
-		const char *uiCandidates[] = {
-			"src/Engine/GameUI.cpp", "../src/Engine/GameUI.cpp", "../../src/Engine/GameUI.cpp"};
-		std::string uiSrc;
-		for (const char *c : uiCandidates)
+		const std::filesystem::path uiPath =
+			std::filesystem::path(FT_VOX_SOURCE_DIR) / "src/Engine/GameUI.cpp";
+		std::ifstream ui(uiPath);
+		if (!ui)
+			ok = fail("GameUI.cpp not found via FT_VOX_SOURCE_DIR (CMake misconfiguration)");
+		else
 		{
-			std::ifstream in(c);
-			if (in)
-			{
-				uiSrc.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-				break;
-			}
+			std::string uiSrc((std::istreambuf_iterator<char>(ui)), std::istreambuf_iterator<char>());
+			if (uiSrc.find("lightLevels") != std::string::npos ||
+				uiSrc.find("Light levels") != std::string::npos)
+				ok = fail("GameUI still exposes the removed lightLevels control (issue #161)");
 		}
-		if (uiSrc.empty())
-			ok = fail("GameUI.cpp not found (run from the build dir)");
-		else if (uiSrc.find("lightLevels") != std::string::npos ||
-				 uiSrc.find("Light levels") != std::string::npos)
-			ok = fail("GameUI still exposes the removed lightLevels control (issue #161)");
 	}
 
 	// Mid-path defaults: readable chroma, not washed-out or neon
