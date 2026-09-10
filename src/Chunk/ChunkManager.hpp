@@ -77,6 +77,20 @@ struct PendingVoxelEdit
 	uint64_t editId{0};
 };
 
+/// Geometric commit group (PR #178 review): the chunks whose border
+/// geometry was coupled by ONE logical voxel edit - the target plus its
+/// shell-mirror neighbors. Corner edits touch several neighbors, hence the
+/// member list (capped at 3 by the border architecture: target + two
+/// sides; no diagonals). Light-only invalidated neighbors never join.
+/// All members' GPU publications are prepared, then committed, as one
+/// unit so the renderer never mixes a replaced border mesh with the
+/// still-committed mesh of the chunk on the other side.
+struct PendingMeshCommitGroup
+{
+	uint64_t editId{0};
+	std::vector<Chunk *> chunks;
+};
+
 /// What the last streaming maintenance tick did (issue #108 review): lets
 /// tests and telemetry assert the zero-work / incremental / rebuild contract.
 enum class StreamingUpdateKind
@@ -267,9 +281,12 @@ private:
 						  bool forceDefer, uint64_t editId);
 	/// Schedule the mirror border writes for an edit at local (x, z); a
 	/// corner voxel schedules both adjacent neighbors (no diagonal - the
-	/// border architecture keeps corner columns only at generation).
+	/// border architecture keeps corner columns only at generation). When
+	/// `geometricMembers` is provided, every non-null mirror chunk is
+	/// appended so the caller can register the geometric commit group.
 	void enqueueOrApplyMirrorEdits(const glm::ivec3 &chunkPos, int x, int y, int z,
-								   TextureType type, bool forceDefer, uint64_t editId);
+								   TextureType type, bool forceDefer, uint64_t editId,
+								   std::vector<Chunk *> *geometricMembers = nullptr);
 	/// Queue with coalescing: an entry for the same chunk/coordinate/kind
 	/// is overwritten (last write wins) instead of accumulating.
 	void queuePendingEdit(PendingVoxelEdit edit);
@@ -280,6 +297,18 @@ private:
 	bool hasPendingEditsFor(const Chunk *chunk) const;
 	/// Drop every pending edit targeting this chunk (unload/recycle path).
 	void erasePendingEditsFor(const Chunk *chunk);
+
+	// --- Geometric commit groups (PR #178 review) ---
+	// One entry per border edit whose shell mirrors coupled several chunks'
+	// geometry. uploadPendingMeshes() treats a group as one budget unit and
+	// publishes all members together (prepare all, then commit all), so the
+	// renderer never mixes a replaced border mesh with the still-committed
+	// mesh on the other side. Raw chunk pointers stay valid because groups
+	// are dropped in the same unload funnel that drops pending edits.
+	PendingMeshCommitGroup *commitGroupFor(Chunk *chunk);
+	void dropCommitGroupsFor(Chunk *chunk);
+	void dropCommitGroupsContaining(const std::vector<Chunk *> &members);
+	std::vector<PendingMeshCommitGroup> m_commitGroups;
 
 	TaskPriority calculateTaskPriority(float distanceSq, float lodThresholdSq) const;
 	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);

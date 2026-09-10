@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <unordered_set>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -688,7 +689,7 @@ void ChunkManager::updateEntityLightCaches(const Camera &camera, const RenderSet
 }
 
 int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-									  GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget)
+                                      GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget)
 {
 	if (!allocator || budget <= 0 || cmd == VK_NULL_HANDLE || !staging.isValid())
 		return 0;
@@ -723,16 +724,79 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 	if (queue.empty())
 		return 0;
 
-	const int n = std::min(budget, static_cast<int>(queue.size()));
-	std::partial_sort(queue.begin(), queue.begin() + n, queue.end(),
-					  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
+	std::sort(queue.begin(), queue.end(),
+			  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
 
+	// Distance-prioritized; budget counts GROUPS as one unit (PR #178
+	// review): a geometric commit group commits all-or-nothing, so the
+	// per-sec upload settings can never make an atomic border commit
+	// structurally impossible.
+	int budgetUnits = budget;
 	int uploaded = 0;
-	for (int i = 0; i < n; ++i)
+	std::unordered_set<Chunk *> committed;
+	for (size_t i = 0; i < queue.size() && budgetUnits > 0; ++i)
 	{
-		if (!queue[i].chunk->uploadToGPUAsync(allocator, staging, cmd, retire, arenas))
-			break; // staging full — remaining wait next frame
+		Chunk *chunk = queue[i].chunk;
+		if (committed.count(chunk))
+			continue;
+
+		PendingMeshCommitGroup *group = commitGroupFor(chunk);
+		if (!group)
+		{
+			if (!chunk->uploadToGPUAsync(allocator, staging, cmd, retire, arenas))
+				break; // staging full — remaining wait next frame
+			++uploaded;
+			--budgetUnits;
+			dropCommitGroupsFor(chunk); // no-op unless a group lost its last barrier
+			continue;
+		}
+
+		// Group gate: every geometric member must carry a published-able
+		// replacement. Until then the group is skipped (without consuming
+		// budget) and the renderer keeps showing old A + old B; the blocked
+		// group must not stop independent chunks further down the queue.
+		bool ready = true;
+		for (Chunk *member : group->chunks)
+		{
+			if (!member || member->getState() != ChunkState::MESHED ||
+			    !member->needsGPUUpload() || member->isInTransit() ||
+			    !member->hasPendingMeshResult())
+			{
+				ready = false;
+				break;
+			}
+		}
+		if (!ready)
+			continue;
+
+		// Prepare ALL members first (each fully rolled back on its own
+		// failure), then commit ALL. A staging shortfall on any member
+		// defers the whole group and leaves every committed mesh intact.
+		std::vector<Chunk::PreparedMeshUpload> prepared(group->chunks.size());
+		bool allPrepared = true;
+		for (size_t k = 0; k < group->chunks.size() && allPrepared; ++k)
+			allPrepared = group->chunks[k]->prepareGPUUpload(allocator, staging, cmd, retire,
+			                                                 arenas, prepared[k]);
+		if (!allPrepared)
+		{
+			// Successful plans still own fresh ranges + staging
+			// reservations; release them so the published meshes stay the
+			// only live state. The failed member already rolled itself back
+			// inside its prepare, so this is a no-op for it.
+			for (size_t k = 0; k < group->chunks.size(); ++k)
+				group->chunks[k]->rollbackGPUUpload(prepared[k]);
+			telemetry::registry().add(telemetry::UploadDeferred);
+			break; // staging/arena exhaustion — the group waits next frame
+		}
+		for (size_t k = 0; k < group->chunks.size(); ++k)
+		{
+			group->chunks[k]->commitGPUUpload(cmd, retire, prepared[k]);
+			telemetry::registry().add(telemetry::UploadChunks);
+			committed.insert(group->chunks[k]);
+		}
+		dropCommitGroupsContaining(group->chunks);
 		++uploaded;
+		--budgetUnits;
 	}
 	return uploaded;
 }
@@ -916,7 +980,14 @@ bool ChunkManager::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y,
 	const uint64_t editId = m_nextEditId++;
 	const bool deferAll = mustDeferVoxelEdit(target);
 	queueOrApplyEdit(target, chunkPos, x, y, z, type, false, deferAll, editId);
-	enqueueOrApplyMirrorEdits(chunkPos, x, y, z, type, deferAll, editId);
+	std::vector<Chunk *> geometricMembers;
+	geometricMembers.push_back(target);
+	enqueueOrApplyMirrorEdits(chunkPos, x, y, z, type, deferAll, editId, &geometricMembers);
+	// A border edit couples the geometry of the target and its mirrors:
+	// their GPU publications must commit together or not at all (PR #178
+	// review). Light-only invalidated neighbors never join.
+	if (geometricMembers.size() > 1)
+		m_commitGroups.push_back({editId, std::move(geometricMembers)});
 	return true;
 }
 
@@ -1003,27 +1074,28 @@ void ChunkManager::queueOrApplyEdit(Chunk *chunk, const glm::ivec3 &chunkPos, in
 
 void ChunkManager::enqueueOrApplyMirrorEdits(const glm::ivec3 &chunkPos, int x, int y,
 											 int z, TextureType type, bool forceDefer,
-											 uint64_t editId)
+											 uint64_t editId, std::vector<Chunk *> *geometricMembers)
 {
 	// Same mirror mapping as the historical dirtyNeighbor path: the
 	// neighbor on the -x side holds our x=0 column at its local
 	// CHUNK_SIZE, and so on for each face.
+	const auto mirror = [&](const glm::ivec3 &neighborPos, int nx, int nz)
+	{
+		Chunk *neighbor = getChunk(neighborPos);
+		if (!neighbor)
+			return;
+		if (geometricMembers)
+			geometricMembers->push_back(neighbor);
+		queueOrApplyEdit(neighbor, neighborPos, nx, y, nz, type, true, forceDefer, editId);
+	};
 	if (x == 0)
-		queueOrApplyEdit(getChunk(chunkPos + glm::ivec3(-1, 0, 0)),
-						 chunkPos + glm::ivec3(-1, 0, 0), CHUNK_SIZE, y, z,
-						 type, true, forceDefer, editId);
+		mirror(chunkPos + glm::ivec3(-1, 0, 0), CHUNK_SIZE, z);
 	if (x == CHUNK_SIZE - 1)
-		queueOrApplyEdit(getChunk(chunkPos + glm::ivec3(1, 0, 0)),
-						 chunkPos + glm::ivec3(1, 0, 0), -1, y, z,
-						 type, true, forceDefer, editId);
+		mirror(chunkPos + glm::ivec3(1, 0, 0), -1, z);
 	if (z == 0)
-		queueOrApplyEdit(getChunk(chunkPos + glm::ivec3(0, 0, -1)),
-						 chunkPos + glm::ivec3(0, 0, -1), x, y, CHUNK_SIZE,
-						 type, true, forceDefer, editId);
+		mirror(chunkPos + glm::ivec3(0, 0, -1), x, CHUNK_SIZE);
 	if (z == CHUNK_SIZE - 1)
-		queueOrApplyEdit(getChunk(chunkPos + glm::ivec3(0, 0, 1)),
-						 chunkPos + glm::ivec3(0, 0, 1), x, y, -1,
-						 type, true, forceDefer, editId);
+		mirror(chunkPos + glm::ivec3(0, 0, 1), x, -1);
 }
 
 void ChunkManager::queuePendingEdit(PendingVoxelEdit edit)
@@ -1052,6 +1124,42 @@ bool ChunkManager::hasPendingEditsFor(const Chunk *chunk) const
 			return true;
 	}
 	return false;
+}
+
+PendingMeshCommitGroup *ChunkManager::commitGroupFor(Chunk *chunk)
+{
+	for (PendingMeshCommitGroup &group : m_commitGroups)
+		for (Chunk *member : group.chunks)
+			if (member == chunk)
+				return &group;
+	return nullptr;
+}
+
+void ChunkManager::dropCommitGroupsFor(Chunk *chunk)
+{
+	m_commitGroups.erase(
+		std::remove_if(m_commitGroups.begin(), m_commitGroups.end(),
+					   [chunk](const PendingMeshCommitGroup &group) {
+						   for (Chunk *member : group.chunks)
+							   if (member == chunk)
+								   return true;
+						   return false;
+					   }),
+		m_commitGroups.end());
+}
+
+void ChunkManager::dropCommitGroupsContaining(const std::vector<Chunk *> &members)
+{
+	m_commitGroups.erase(
+		std::remove_if(m_commitGroups.begin(), m_commitGroups.end(),
+					   [&members](const PendingMeshCommitGroup &group) {
+						   for (Chunk *member : group.chunks)
+							   for (Chunk *committed : members)
+								   if (member == committed)
+									   return true;
+						   return false;
+					   }),
+		m_commitGroups.end());
 }
 
 void ChunkManager::erasePendingEditsFor(const Chunk *chunk)
@@ -1215,6 +1323,7 @@ void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSetti
 		m_chunks.erase(it);
 		m_deferredRelease.push_back(chunk);
 		erasePendingEditsFor(chunk);
+		dropCommitGroupsFor(chunk);
 	}
 	if (!toUnload.empty())
 		m_deferredReleaseAge = 0; // reset age so new unloads wait full delay
