@@ -92,6 +92,27 @@ countingBindSets(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout la
     ++setBindCalls;
     realBindSets(cb, bp, layout, first, count, sets, dynamicOffsets, pDynamicOffsets);
 }
+// Issue #130 review: capture the vertex-buffer binds so the pass-slice
+// instance offsets actually bound by record() can be verified independently
+// of the renderer's internal passBase bookkeeping.
+struct RecordedVertexBind
+{
+    VkBuffer vertexBuffer;
+    VkBuffer instanceBuffer;
+    VkDeviceSize vertexOffset;
+    VkDeviceSize instanceOffset;
+};
+static std::vector<RecordedVertexBind> recordedVertexBinds;
+static PFN_vkCmdBindVertexBuffers realBindVertexBuffers{};
+static VKAPI_ATTR void VKAPI_CALL countingBindVertexBuffers(VkCommandBuffer cb, uint32_t firstBinding,
+                                                            uint32_t bindingCount,
+                                                            const VkBuffer *buffers,
+                                                            const VkDeviceSize *offsets)
+{
+    if (firstBinding == 0 && bindingCount >= 2)
+        recordedVertexBinds.push_back({buffers[0], buffers[1], offsets[0], offsets[1]});
+    realBindVertexBuffers(cb, firstBinding, bindingCount, buffers, offsets);
+}
 // Steady-state heap-allocation counter for prepare()/record() (same scheme as
 // test_mobs' simulation profile).
 static bool countingAllocations = false;
@@ -209,6 +230,73 @@ static void verifyRecordedPassDraws(const MobRenderer &renderer, const RecordedD
     }
     if (running != expectedInstances)
         throw std::runtime_error("recorded vkCmdDraw instance sum != expected visible parts");
+}
+// Verify the instance-buffer byte offsets actually bound per pass (issue #130
+// review): record() binds one vertex-buffer pair per populated pass, in
+// command order shadow0, shadow1, shadow2, then camera, and each bind's
+// instance offset must equal the sum of all preceding pass slice sizes.
+// Expected bases come from passStats() alone, scaled by the public
+// instanceStride(), so the renderer's internal passBase bookkeeping is
+// checked independently instead of being taken on faith.
+static void verifyRecordedInstanceBinds(const MobRenderer &renderer, uint32_t frame,
+                                        const std::vector<RecordedVertexBind> &binds)
+{
+    std::array<VkDeviceSize, 4> expected{};
+    std::array<uint32_t, 4> populated{};
+    uint32_t base = 0;
+    for (uint32_t pass = 0; pass < 4; ++pass)
+    {
+        const auto st = renderer.passStats(frame, pass);
+        expected[pass] = VkDeviceSize(base) * MobRenderer::instanceStride();
+        populated[pass] = st.draws;
+        base += st.instances;
+    }
+    size_t cursor = 0;
+    for (uint32_t pass : {1u, 2u, 3u, 0u}) // command order: cascades then camera
+    {
+        if (!populated[pass])
+            continue; // record() returns before binding anything on an empty pass
+        if (cursor >= binds.size())
+            throw std::runtime_error("populated pass has no instance-buffer bind");
+        const RecordedVertexBind &b = binds[cursor++];
+        if (b.instanceOffset != expected[pass])
+            throw std::runtime_error("bound instance-buffer offset mismatch for pass " +
+                                     std::to_string(pass) + ": " + std::to_string(b.instanceOffset) +
+                                     " vs " + std::to_string(expected[pass]));
+    }
+    if (cursor != binds.size())
+        throw std::runtime_error("unexpected extra vertex-buffer binds");
+    for (const RecordedVertexBind &b : binds)
+    {
+        if (b.vertexOffset != 0)
+            throw std::runtime_error("geometry vertex buffer bound with non-zero offset");
+        if (b.vertexBuffer != binds[0].vertexBuffer || b.instanceBuffer != binds[0].instanceBuffer)
+            throw std::runtime_error("vertex-buffer binds switched buffers between passes");
+    }
+}
+// Arm/disarm the submission hooks as a unit; pre-reserved vectors keep the
+// allocation tests clean.
+static void armSubmissionHooks()
+{
+    cmdDrawCalls = setBindCalls = 0;
+    cmdDrawMinInstances = ~0u;
+    cmdDrawMaxInstances = 0;
+    recordedDraws.clear();
+    recordedDraws.reserve(256);
+    recordedVertexBinds.clear();
+    recordedVertexBinds.reserve(8);
+    realCmdDraw = vkCmdDraw;
+    realBindSets = vkCmdBindDescriptorSets;
+    realBindVertexBuffers = vkCmdBindVertexBuffers;
+    vkCmdDraw = countingCmdDraw;
+    vkCmdBindDescriptorSets = countingBindSets;
+    vkCmdBindVertexBuffers = countingBindVertexBuffers;
+}
+static void disarmSubmissionHooks()
+{
+    vkCmdDraw = realCmdDraw;
+    vkCmdBindDescriptorSets = realBindSets;
+    vkCmdBindVertexBuffers = realBindVertexBuffers;
 }
 struct Fixture
 {
@@ -877,9 +965,15 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < hidden.size(); ++i)
             hidden[i].position = hiddenPos[i];
         const FrameUBO hiddenUbo = frame(800.f / 600);
+        armSubmissionHooks();
         f.render(hidden, hiddenUbo, 1);
+        disarmSubmissionHooks();
         if (f.renderer.visibleCount() != 0)
             throw std::runtime_error("camera culling failed");
+        // The camera pass is empty here, so its bind must be skipped while the
+        // three shadow binds land at 0 / 42 / 84 instance strides — sizes that
+        // differ per pass only because off-camera casters stay shadow-visible.
+        verifyRecordedInstanceBinds(f.renderer, 1, recordedVertexBinds);
         {
             std::array<uint8_t, 4> shadowCasters{};
             for (size_t i = 0; i < hidden.size(); ++i)
@@ -954,22 +1048,20 @@ int main(int argc, char **argv)
                 sheep.push_back({entities::MobSpecies::Sheep, {(i % 8 - 3.5f) * 2.2f, 0, (i / 8) * 2.2f},
                                  0, 1, 0, 0, 1});
             const FrameUBO sheepUbo = frame(2, true);
+            uint32_t sheepBatchBegin = ~0u;
+            for (uint32_t b = 0; b < f.renderer.batchCount(); ++b)
+                if (f.renderer.batchInfo(b).species == entities::MobSpecies::Sheep)
+                {
+                    sheepBatchBegin = b;
+                    break;
+                }
             for (const auto &s : sheep)
                 if (visibilityMask(sheepUbo, s.position) != 0xF)
                     throw std::runtime_error("sheep fixture must be camera + all-cascade visible");
             const auto sheepExpect = expectedPasses(bakedModels, sheep, sheepUbo);
-            cmdDrawCalls = setBindCalls = 0;
-            cmdDrawMinInstances = ~0u;
-            cmdDrawMaxInstances = 0;
-            recordedDraws.clear();
-            recordedDraws.reserve(256); // pre-reserved: keep allocation tests clean
-            realCmdDraw = vkCmdDraw;
-            realBindSets = vkCmdBindDescriptorSets;
-            vkCmdDraw = countingCmdDraw;
-            vkCmdBindDescriptorSets = countingBindSets;
+            armSubmissionHooks();
             const auto sheepImage = f.render(sheep, sheepUbo, 0);
-            vkCmdDraw = realCmdDraw;
-            vkCmdBindDescriptorSets = realBindSets;
+            disarmSubmissionHooks();
             uint32_t sheepDraws = 0;
             std::array<uint32_t, 4> sheepPassDraws{}, sheepPassInst{};
             for (uint32_t pass = 0; pass < 4; ++pass)
@@ -989,13 +1081,6 @@ int main(int argc, char **argv)
             // the pass total.
             if (cmdDrawCalls != sheepDraws || recordedDraws.size() != sheepDraws)
                 throw std::runtime_error("recorded vkCmdDraw count differs from reported batches");
-            uint32_t sheepBatchBegin = ~0u;
-            for (uint32_t b = 0; b < f.renderer.batchCount(); ++b)
-                if (f.renderer.batchInfo(b).species == entities::MobSpecies::Sheep)
-                {
-                    sheepBatchBegin = b;
-                    break;
-                }
             {
                 size_t cursor = 0;
                 for (uint32_t pass : {1u, 2u, 3u, 0u}) // command order: cascades then color
@@ -1008,6 +1093,7 @@ int main(int argc, char **argv)
                 if (cursor != recordedDraws.size())
                     throw std::runtime_error("unexpected extra recorded draws");
             }
+            verifyRecordedInstanceBinds(f.renderer, 0, recordedVertexBinds);
             if (cmdDrawCalls != sheepDraws)
                 throw std::runtime_error("recorded vkCmdDraw count differs from reported batches");
             if (cmdDrawMinInstances < 1 || cmdDrawMaxInstances > entities::kMaxMobCount)
@@ -1047,7 +1133,9 @@ int main(int argc, char **argv)
                 throw std::runtime_error("side mob must be camera-only");
             if ((masks[2] & 1) || !(masks[2] & 0xE))
                 throw std::runtime_error("behind mob must be shadow-only");
+            armSubmissionHooks();
             f.render(mixedVis, visUbo, 0);
+            disarmSubmissionHooks();
             const auto visExpect = expectedPasses(bakedModels, mixedVis, visUbo);
             for (uint32_t pass = 0; pass < 4; ++pass)
             {
@@ -1055,6 +1143,26 @@ int main(int argc, char **argv)
                 if (st.draws != visExpect.draws[pass] || st.instances != visExpect.instances[pass])
                     throw std::runtime_error("mixed-visibility per-pass instance accounting mismatch");
             }
+            // Recorded-command and bound-offset proof on slices whose CONTENT
+            // differs per pass (camera slice carries the camera-only mob,
+            // shadow slices the shadow-only mob): two instances per batch in
+            // every populated pass, and each pass bound at the summed size of
+            // the slices before it.
+            {
+                size_t cursor = 0;
+                for (uint32_t pass : {1u, 2u, 3u, 0u})
+                {
+                    if (!visExpect.draws[pass])
+                        continue;
+                    const auto st = f.renderer.passStats(0, pass);
+                    verifyRecordedPassDraws(f.renderer, recordedDraws.data() + cursor, st.draws,
+                                            st.instances, sheepBatchBegin, 2);
+                    cursor += st.draws;
+                }
+                if (cursor != recordedDraws.size() || cmdDrawCalls != cursor)
+                    throw std::runtime_error("unexpected extra recorded draws in mixed-visibility fixture");
+            }
+            verifyRecordedInstanceBinds(f.renderer, 0, recordedVertexBinds);
             if (f.renderer.visibleCount() != 2)
                 throw std::runtime_error("visibleCount must count camera-visible mobs only");
 
@@ -1130,20 +1238,11 @@ int main(int argc, char **argv)
                     if (st.draws || st.instances)
                         throw std::runtime_error("slot 1 prepare/record disturbed empty slot 0");
                 }
-                cmdDrawCalls = setBindCalls = 0;
-                cmdDrawMinInstances = ~0u;
-                cmdDrawMaxInstances = 0;
-                recordedDraws.clear();
-                recordedDraws.reserve(8);
-                realCmdDraw = vkCmdDraw;
-                realBindSets = vkCmdBindDescriptorSets;
-                vkCmdDraw = countingCmdDraw;
-                vkCmdBindDescriptorSets = countingBindSets;
+                armSubmissionHooks();
                 const auto emptyImage = f.renderPrepared(0, sheepUbo); // record slot 0 as-is
-                vkCmdDraw = realCmdDraw;
-                vkCmdBindDescriptorSets = realBindSets;
-                if (cmdDrawCalls || !recordedDraws.empty())
-                    throw std::runtime_error("empty population emitted draws");
+                disarmSubmissionHooks();
+                if (cmdDrawCalls || !recordedDraws.empty() || !recordedVertexBinds.empty())
+                    throw std::runtime_error("empty population emitted draws or binds");
                 for (uint32_t pass = 0; pass < 4; ++pass)
                 {
                     const auto st = f.renderer.passStats(0, pass);
@@ -1223,18 +1322,9 @@ int main(int argc, char **argv)
             // continuous and ending exactly at the pass total.
             if (mixedDraws[0] != f.renderer.batchCount() || mixedInst[0] != mixedDraws[0] * 12)
                 throw std::runtime_error("mixed fixture is not fully populated; recorded proof n/a");
-            cmdDrawCalls = setBindCalls = 0;
-            cmdDrawMinInstances = ~0u;
-            cmdDrawMaxInstances = 0;
-            recordedDraws.clear();
-            recordedDraws.reserve(256);
-            realCmdDraw = vkCmdDraw;
-            realBindSets = vkCmdBindDescriptorSets;
-            vkCmdDraw = countingCmdDraw;
-            vkCmdBindDescriptorSets = countingBindSets;
+            armSubmissionHooks();
             f.render(states, frame(2, true), 0);
-            vkCmdDraw = realCmdDraw;
-            vkCmdBindDescriptorSets = realBindSets;
+            disarmSubmissionHooks();
             {
                 size_t cursor = 0;
                 for (uint32_t pass : {1u, 2u, 3u, 0u}) // command order: cascades then color
@@ -1247,6 +1337,7 @@ int main(int argc, char **argv)
                 if (cursor != recordedDraws.size() || cmdDrawCalls != cursor)
                     throw std::runtime_error("unexpected extra recorded draws in mixed fixture");
             }
+            verifyRecordedInstanceBinds(f.renderer, 0, recordedVertexBinds);
         }
         // Issue #130 instrumentation: the all-sheep worst articulation case.
         std::array<uint32_t, 4> sheepBenchDraws{};

@@ -89,6 +89,11 @@ class MobRenderer
     uint32_t batchCount() const { return uint32_t(m_batches.size()); }
     BatchInfo batchInfo(uint32_t batch) const;
     PassStats passStats(uint32_t frame, uint32_t pass) const { return m_stats[frame][pass]; }
+    /// Byte stride of one instance record in the mapped instance buffer.
+    /// Exposed so tests can verify the pass-slice offsets actually bound by
+    /// vkCmdBindVertexBuffers without duplicating the private Instance layout
+    /// (issue #130 review).
+    static constexpr size_t instanceStride() { return sizeof(Instance); }
 
   private:
     struct Instance
