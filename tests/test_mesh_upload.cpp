@@ -1552,45 +1552,134 @@ int main()
 		}
 
 		// -----------------------------------------------------------------
-		// 16. Renderable-cache invariant across pending uploads (issue #122
-		// review): while meshNeedsUpdate is set (edit published, GPU commit
-		// pending), the cached descriptors describe ranges the commit will
-		// replace — opaque, shadow and water passes must not draw them.
+		// 16. Renderable-cache invariant across pending uploads (issue
+		// #177): stale-until-replaced. A committed GPU mesh stays
+		// renderable while meshNeedsUpdate only marks a pending
+		// replacement — hiding it would blink the whole chunk for the
+		// remesh/upload window. Only a successful commit swaps the drawn
+		// mesh, upload back-pressure keeps the old mesh drawable, and a
+		// chunk with no committed mesh yet (first upload pending) stays
+		// non-renderable.
 		// -----------------------------------------------------------------
 		{
+			const auto sameDraws = [](const std::vector<Chunk::IndirectDraw> &a,
+			                          const std::vector<Chunk::IndirectDraw> &b) {
+				if (a.size() != b.size())
+					return false;
+				for (size_t i = 0; i < a.size(); ++i)
+					if (a[i].cmd.indexCount != b[i].cmd.indexCount ||
+					    a[i].cmd.firstIndex != b[i].cmd.firstIndex ||
+					    a[i].cmd.vertexOffset != b[i].cmd.vertexOffset ||
+					    a[i].vertexPage != b[i].vertexPage ||
+					    a[i].indexPage != b[i].indexPage)
+						return false;
+				return true;
+			};
+
+			// First-upload lifecycle: meshed but never uploaded - cache
+			// and index counters are still zero, so the committed-mesh
+			// predicate must not report renderability.
+			{
+				Chunk *fresh = chunkPool.acquire(glm::vec3(0.0f, 0.0f, 0.0f));
+				CHECK(manager.prepareAndGenerateChunk(fresh, gen), "first-upload: prepare+generate");
+				CHECK(fresh->generateMesh(), "first-upload: mesh publishes");
+				CHECK(fresh->needsGPUUpload(), "first-upload: mesh awaits its GPU commit");
+				CHECK(fresh->getCachedOpaqueDrawCount() == 0 && fresh->getOpaqueIndexCount() == 0,
+				      "first-upload: no committed opaque mesh yet");
+				CHECK(fresh->getCachedWaterDrawCount() == 0 && fresh->getWaterIndexCount() == 0,
+				      "first-upload: no committed water mesh yet");
+				CHECK(!fresh->hasRenderableOpaqueDraws(),
+				      "first-upload: no committed mesh is not renderable (opaque)");
+				CHECK(!fresh->hasRenderableWaterDraws(),
+				      "first-upload: no committed mesh is not renderable (water)");
+				std::vector<Chunk::IndirectDraw> freshDraws;
+				CHECK(fresh->collectOpaqueDraws(freshDraws) == 0,
+				      "first-upload: no opaque draws collected");
+				CHECK(fresh->collectWaterDraws(freshDraws) == 0,
+				      "first-upload: no water draws collected");
+				chunkPool.release(fresh);
+			}
+
 			Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f, 0.0f, 0.0f));
 			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "invariant: prepare+generate");
 			CHECK(chunk->generateMesh(), "invariant: mesh publishes");
 			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
 			CHECK(chunk->hasRenderableOpaqueDraws(), "invariant: uploaded chunk is renderable");
 
-			std::vector<Chunk::IndirectDraw> draws;
-			const size_t before = chunk->collectOpaqueDraws(draws);
+			std::vector<Chunk::IndirectDraw> committed;
+			const size_t before = chunk->collectOpaqueDraws(committed);
 			CHECK(before > 0, "invariant: committed draws collectable");
+			std::vector<Chunk::IndirectDraw> waterCommitted;
+			const size_t waterBefore = chunk->collectWaterDraws(waterCommitted);
 
-			// Edit the chunk: meshNeedsUpdate goes true while the remeshed
-			// result waits for its GPU commit.
+			// Edit the chunk: meshNeedsUpdate arms, but the committed GPU
+			// mesh stays fully renderable (stale-until-replaced).
 			CHECK(chunk->placeVoxel(glm::vec3(5.f, 140.f, 5.f), STONE),
 			      "invariant: edit accepted above surface");
 			CHECK(chunk->needsGPUUpload(), "invariant: edit raises needsGPUUpload");
-			CHECK(!chunk->hasRenderableOpaqueDraws(),
-			      "invariant: pending upload hides opaque cache");
-			CHECK(chunk->collectOpaqueDraws(draws) == 0,
-			      "invariant: no opaque draws collected while pending");
-			CHECK(!chunk->hasRenderableWaterDraws(),
-			      "invariant: pending upload hides water cache");
-			CHECK(chunk->collectWaterDraws(draws) == 0,
-			      "invariant: no water draws collected while pending");
+			CHECK(chunk->hasRenderableOpaqueDraws(),
+			      "invariant: committed opaque mesh stays renderable while replacement is pending");
+			{
+				std::vector<Chunk::IndirectDraw> pending;
+				CHECK(chunk->collectOpaqueDraws(pending) == before,
+				      "invariant: old opaque draws collectable while pending");
+				CHECK(sameDraws(pending, committed),
+				      "invariant: pending collection still describes the committed mesh");
+			}
+			if (waterBefore > 0)
+			{
+				CHECK(chunk->hasRenderableWaterDraws(),
+				      "invariant: committed water mesh stays renderable while replacement is pending");
+				std::vector<Chunk::IndirectDraw> pendingWater;
+				CHECK(chunk->collectWaterDraws(pendingWater) == waterBefore,
+				      "invariant: old water draws collectable while pending");
+				CHECK(sameDraws(pendingWater, waterCommitted),
+				      "invariant: pending water collection still describes the committed mesh");
+			}
+			else
+			{
+				CHECK(!chunk->hasRenderableWaterDraws(),
+				      "invariant: empty water cache stays excluded while pending");
+			}
 			// Raw counters stay cached (the data is stale, not gone).
 			CHECK(chunk->getCachedOpaqueDrawCount() == before,
-			      "invariant: stale cache retained behind the guard");
+			      "invariant: stale cache retained while pending");
 
-			// Commit the remesh: renderability returns with fresh draws.
+			// Replacement ready + staging full: back-pressure keeps the
+			// old mesh renderable for as many frames as it takes.
 			CHECK(chunk->generateMesh(), "invariant: remesh publishes");
-			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			CHECK(chunk->needsGPUUpload(), "invariant: replacement result awaits its commit");
+			{
+				staging.beginFrame(0);
+				VkDeviceSize off = 0;
+				void *sink = nullptr;
+				CHECK(staging.alloc(staging.sliceCapacity(), off, sink),
+				      "invariant: staging ring drained");
+				std::vector<Chunk::IndirectDraw> deferred;
+				CHECK(!chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+				      "invariant: staging-full defers the replacement upload");
+				CHECK(chunk->needsGPUUpload(), "invariant: replacement still pending after deferral");
+				CHECK(chunk->hasRenderableOpaqueDraws(),
+				      "invariant: old mesh renderable during upload back-pressure");
+				CHECK(chunk->collectOpaqueDraws(deferred) == before && sameDraws(deferred, committed),
+				      "invariant: old draws collectable during upload back-pressure");
+			}
+
+			// Successful retry commits the replacement atomically.
+			staging.beginFrame(0);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "invariant: retry commits the replacement");
 			CHECK(!chunk->needsGPUUpload(), "invariant: commit clears needsGPUUpload");
 			CHECK(chunk->hasRenderableOpaqueDraws(), "invariant: opaque renderable after commit");
-			CHECK(chunk->collectOpaqueDraws(draws) > 0, "invariant: opaque draws return after commit");
+			{
+				std::vector<Chunk::IndirectDraw> replaced;
+				CHECK(chunk->collectOpaqueDraws(replaced) > 0,
+				      "invariant: opaque draws collectable after commit");
+				CHECK(!sameDraws(replaced, committed),
+				      "invariant: committed descriptors switched to the replacement mesh");
+			}
+			CHECK(vk.flush(), "invariant: replacement submit");
+			retire.flush();
 
 			chunkPool.release(chunk);
 		}

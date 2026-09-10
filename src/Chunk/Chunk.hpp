@@ -272,19 +272,21 @@ public:
 	const IndirectDraw *cachedOpaqueDraws() const { return m_cachedOpaqueDraws.data(); }
 	const IndirectDraw *cachedWaterDraws() const { return m_cachedWaterDraws.data(); }
 
-	/// Renderable-cache contract shared by every consuming pass (issue #122
-	/// review): non-empty cache AND live indices AND no pending GPU upload.
-	/// While needsGPUUpload() is set the cached descriptors describe ranges a
-	/// commit is about to replace — drawing them would show stale geometry.
+	/// Renderable-cache contract shared by every consuming pass (issue
+	/// #177): non-empty cache AND live indices, i.e. a committed GPU mesh
+	/// exists. meshNeedsUpdate only marks a pending newer mesh — it must
+	/// not hide the committed one: the cached descriptors keep describing
+	/// valid, already-uploaded ranges until the replacement commits
+	/// (stale-until-replaced), so an edit never blanks the chunk. Chunks
+	/// with no committed GPU mesh stay non-renderable because the cache
+	/// and index counters remain zero until the first successful upload.
 	bool hasRenderableOpaqueDraws() const
 	{
-		return m_cachedOpaqueDrawCount > 0 && opaqueIndexCount > 0 &&
-			   !meshNeedsUpdate.load(std::memory_order_relaxed);
+		return m_cachedOpaqueDrawCount > 0 && opaqueIndexCount > 0;
 	}
 	bool hasRenderableWaterDraws() const
 	{
-		return m_cachedWaterDrawCount > 0 && waterIndexCount > 0 &&
-			   !meshNeedsUpdate.load(std::memory_order_relaxed);
+		return m_cachedWaterDrawCount > 0 && waterIndexCount > 0;
 	}
 
 	size_t getActiveIndex() const { return m_activeIndex; }

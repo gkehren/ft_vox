@@ -263,8 +263,9 @@ void ShadowPass::record(VkCommandBuffer cmd, uint32_t frameIndex, const std::vec
 		Chunk::IndirectDraw *outPtr = m_scratch.data();
 		for (Chunk *chunk : shadowChunks)
 		{
-			// hasRenderableOpaqueDraws() includes needsGPUUpload: a mesh
-			// pending upload must not cast shadows from its stale cache.
+			// hasRenderableOpaqueDraws() stays true while a replacement
+			// mesh is pending (issue #177): shadows keep casting from the
+			// committed geometry until the new mesh commits.
 			if (!chunk || !chunk->hasRenderableOpaqueDraws())
 				continue;
 
