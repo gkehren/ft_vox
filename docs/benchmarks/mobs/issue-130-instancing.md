@@ -14,9 +14,15 @@ baseline captured immediately before the change (the PR #126 numbers in
   grid, camera- and cascade-visible) and a 48-sheep worst-articulation fixture;
   160/80 frames respectively, stats from frame 40+/20+. Submission counters come
   from `MobRenderer::passStats` plus `vkCmdDraw` / `vkCmdBindDescriptorSets`
-  hooks, not timing inference.
+  hooks, not timing inference. The hook records every emitted command and the
+  test verifies per-pass firstInstance continuity, per-batch geometry against
+  `batchInfo()`, and instance sums; mutations (`instanceCount-1`,
+  `firstInstance+1`, dropped last batch, wrong frame slot) all fail the suite —
+  the dropped-batch mutation is caught only by the recorded-command proof.
 - Primary metric: Release run **without** validation. Validation-enabled run
   reported separately (it magnifies per-command CPU cost).
+- GPU numbers are **3 runs per side** (fresh binary per side); the table reports
+  the per-run range.
 
 ## Submission invariants (measured, not inferred)
 
@@ -39,19 +45,32 @@ every recorded draw has `1 ≤ instanceCount ≤ 48`; descriptor set-1 binds sta
 | Host submit + GPU wait, no validation | 0.173 ms | **0.142 ms** | −18% |
 | Host submit + GPU wait, validation on | 3.00 ms | **0.48 ms** | −84% |
 | `MobPrepare` CPU (new instrumentation) | not isolated | 0.029 ms mixed / 0.046 ms sheep mean | net host time still improved (rows above) |
-| GPU Mobs + MobShadow0-2, mixed 48 | 0.0250 ms mean, 0.0266 p95 | 0.0265 ms mean, 0.0276 p95 | +1.5 µs absolute (~0.01% of a 16 ms frame); geometry workload unchanged |
+| GPU Mobs + MobShadow0-2, mixed 48, 3 runs | 0.02506 / 0.02508 / 0.02519 ms mean; p95 0.0266 all runs | 0.02642 / 0.02644 / 0.02650 ms mean; p95 0.0276 all runs | **repeatable +1.4 µs mean (~+5% relative, beyond the ±0.13 µs run-to-run spread)** |
 | Validation errors | 0 | 0 | both configs |
 
-Draw calls now scale with the static part/material universe (42 baked `MobPart`
-ranges: cow 9, pig 7, sheep 18, chicken 8) instead of
-`mobs × parts × passes`. Raising `kMaxMobCount` or adding articulated species no
-longer increases submission cost.
+On the GPU delta, stated plainly: the relative change exceeds 5% and is
+direction-consistent across all three runs and both mean and p95, so it is not
+pure timestamp jitter — but it is only **+1.4 µs absolute on a 25 µs pass
+(~0.01% of a 16 ms frame)**, and the change introduces no additional geometry,
+fragment work or texture traffic (identical vertex/instance counts per pass are
+asserted by the tests). The likely cause is different GPU scheduling for 42
+multi-instance draws vs 504 single-instance draws. Accepted as the cost of the
+~12× submission reduction; re-measure if mob population caps ever rise enough
+to make the absolute delta material.
+
+Draw calls now scale with the number of populated static part/material batches —
+`O(populated static batches × passes)` instead of
+`O(mobs × parts × passes)`. Raising `kMaxMobCount` no longer increases mob draw
+count, because more instances land in the already-populated batches; adding new
+baked parts or species still adds one batch (one draw per pass) each.
 
 ## Memory
 
 Per-frame-in-flight instance buffer grew from 144 KiB (1536 instances) to 576 KiB
-(6144 = 1536 × 4 pass slices); both frame slots total ~1.1 MiB. Capacity throws
-deterministically on populations past `kMaxMobCount` or a pass past `kMaxParts`.
+(6144 = 1536 × 4 pass slices); both frame slots total ~1.1 MiB. Budgets are
+derived from the explicit `MobRenderer::kMaxPartsPerMob` contract (validated
+against every loaded model in `init()`), and capacity throws deterministically
+on populations past `kMaxMobCount` or a pass past `kMaxParts`.
 
 ## Environment notes
 
