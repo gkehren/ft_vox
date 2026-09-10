@@ -176,6 +176,21 @@ void MobRenderer::init(VkContext &context, ImmediateCommands &imm, VkDescriptorS
     m_shadowView = shadow;
     m_shadowSampler = shadowSampler;
     const auto device = context.getDevice();
+    // Static instancing batch table (issue #130): one batch per baked MobPart,
+    // in species/model/part order so record() keeps texture runs bounded.
+    for (const auto &model : m_models.models)
+        if (model.parts.size() > kMaxPartsPerMob)
+            throw std::runtime_error("Mob model exceeds renderer part capacity");
+    m_batches.clear();
+    for (size_t species = 0; species < entities::kMobSpeciesCount; ++species)
+    {
+        m_batchBegin[species] = uint32_t(m_batches.size());
+        m_batchPartCount[species] = uint32_t(m_models.models[species].parts.size());
+        for (const auto &part : m_models.models[species].parts)
+            m_batches.push_back({part.firstVertex, part.vertexCount, part.texture});
+    }
+    if (m_batches.size() > kMaxBatches)
+        throw std::runtime_error("Mob batch table exceeds compile-time capacity");
     std::array<VkDescriptorSetLayoutBinding, 2> bindings{
         {{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
          {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}}};
@@ -201,11 +216,12 @@ void MobRenderer::init(VkContext &context, ImmediateCommands &imm, VkDescriptorS
     uploadBuffer(context.getAllocator(), imm, m_vertices, m_models.vertices.data(), bytes);
     for (size_t i = 0; i < 2; ++i)
     {
-        m_instances[i] = createBuffer(context.getAllocator(), kMaxParts * sizeof(Instance),
+        m_instances[i] = createBuffer(context.getAllocator(), kMaxParts * kMobPassCount * sizeof(Instance),
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO,
                                       VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                                           VMA_ALLOCATION_CREATE_MAPPED_BIT);
-        m_draws[i].reserve(kMaxParts);
+        for (uint32_t pass = 0; pass < kMobPassCount; ++pass)
+            m_draws[i][pass].reserve(kMaxBatches);
     }
     std::array<VkVertexInputBindingDescription, 2> vb{
         {{0, sizeof(entities::MobVertex), VK_VERTEX_INPUT_RATE_VERTEX},
@@ -323,62 +339,135 @@ void MobRenderer::prepare(uint32_t frame, const FrameUBO &ubo,
                           const std::vector<entities::MobRenderState> &mobs)
 {
     PROFILE_SCOPE("MobPrepare");
+    if (mobs.size() > entities::kMaxMobCount)
+        throw std::runtime_error("Mob count exceeds renderer capacity");
     m_visible = 0;
-    auto &draws = m_draws[frame];
-    draws.clear();
     auto &matrices = m_matrices[frame];
     matrices = {ubo.projection * ubo.view, ubo.cascadeMatrix0, ubo.cascadeMatrix1, ubo.cascadeMatrix2};
-    auto *instances = static_cast<Instance *>(m_instances[frame].info.pMappedData);
-    for (auto &mob : mobs)
+    auto &passDraws = m_draws[frame];
+    for (auto &draws : passDraws)
+        draws.clear();
+
+    // Phase A — visibility once per mob, then per-pass instance counts for
+    // every static batch. Fixed scratch indexed by batchId: no allocation.
+    for (auto &counts : m_counts)
+        counts.fill(0);
+    for (size_t i = 0; i < mobs.size(); ++i)
     {
+        const auto &mob = mobs[i];
         uint8_t mask = 0;
-        for (int i = 0; i < 4; ++i)
-            if (visible(matrices[i], mob.position))
-                mask |= uint8_t(1 << i);
+        for (uint32_t pass = 0; pass < kMobPassCount; ++pass)
+            if (visible(matrices[pass], mob.position))
+                mask |= uint8_t(1 << pass);
+        m_masks[i] = mask;
         if (mask & 1)
             ++m_visible;
         if (!mask)
             continue;
-        for (auto &part : m_models.models[size_t(mob.species)].parts)
+        const uint32_t begin = m_batchBegin[size_t(mob.species)];
+        const uint32_t end = begin + m_batchPartCount[size_t(mob.species)];
+        for (uint32_t batch = begin; batch < end; ++batch)
+            for (uint32_t pass = 0; pass < kMobPassCount; ++pass)
+                if (mask & (1 << pass))
+                    ++m_counts[pass][batch];
+    }
+
+    // Prefix sums give every populated batch a contiguous instance range
+    // inside its pass slice; slices are laid out back to back in the mapped
+    // buffer as [camera][shadow0][shadow1][shadow2] and remain well below the
+    // kMaxParts-per-pass budget.
+    auto *instances = static_cast<Instance *>(m_instances[frame].info.pMappedData);
+    uint32_t passBase = 0;
+    for (uint32_t pass = 0; pass < kMobPassCount; ++pass)
+    {
+        m_passBase[frame][pass] = passBase;
+        uint32_t running = 0;
+        for (uint32_t batch = 0; batch < m_batches.size(); ++batch)
         {
-            if (draws.size() == kMaxParts)
-                throw std::runtime_error("Mob part capacity exceeded");
-            uint32_t index = uint32_t(draws.size());
-            const auto &image = m_textures->images[part.texture];
-            const float sky = (mob.localSkylight < 0.0f) ? 1.0f : std::clamp(mob.localSkylight, 0.0f, 1.0f);
-            instances[index] = {entities::mobPartTransform(mob, part),
-                                {1, float(image.width) / (2 * image.height), 0, 0},
-                                {sky, mob.localBlockRgb.r, mob.localBlockRgb.g, mob.localBlockRgb.b}};
-            draws.push_back({part.firstVertex, part.vertexCount, index, part.texture, mask});
+            m_cursor[pass][batch] = running;
+            const uint32_t count = m_counts[pass][batch];
+            if (!count)
+                continue;
+            const Batch &spec = m_batches[batch];
+            passDraws[pass].push_back({spec.firstVertex, spec.vertexCount, running, count, spec.texture});
+            running += count;
+        }
+        if (running > kMaxParts)
+            throw std::runtime_error("Mob part capacity exceeded");
+        passBase += running;
+        m_stats[frame][pass] = {uint32_t(passDraws[pass].size()), running};
+    }
+
+    // Atlas UV scale per batch, once per prepare instead of once per instance.
+    for (uint32_t batch = 0; batch < m_batches.size(); ++batch)
+    {
+        const auto &image = m_textures->images[m_batches[batch].texture];
+        m_uvScales[batch] = {1, float(image.width) / (2 * image.height), 0, 0};
+    }
+
+    // Phase B — build each mob-part instance exactly once, then scatter copies
+    // into every visible pass slice. Transforms/light/UV are computed once; the
+    // per-pass copies trade a few mapped writes for far fewer draw commands.
+    for (size_t i = 0; i < mobs.size(); ++i)
+    {
+        const auto &mob = mobs[i];
+        const uint8_t mask = m_masks[i];
+        if (!mask)
+            continue;
+        const uint32_t begin = m_batchBegin[size_t(mob.species)];
+        const float sky = (mob.localSkylight < 0.0f) ? 1.0f : std::clamp(mob.localSkylight, 0.0f, 1.0f);
+        uint32_t batch = begin;
+        for (const auto &part : m_models.models[size_t(mob.species)].parts)
+        {
+            const Instance instance{entities::mobPartTransform(mob, part), m_uvScales[batch],
+                                    {sky, mob.localBlockRgb.r, mob.localBlockRgb.g, mob.localBlockRgb.b}};
+            for (uint32_t pass = 0; pass < kMobPassCount; ++pass)
+                if (mask & (1 << pass))
+                    instances[m_passBase[frame][pass] + m_cursor[pass][batch]++] = instance;
+            ++batch;
         }
     }
-    if (!draws.empty())
+    if (passBase)
         vmaFlushAllocation(m_context->getAllocator(), m_instances[frame].allocation, 0,
-                           draws.size() * sizeof(Instance));
+                           passBase * sizeof(Instance));
 }
+
+MobRenderer::BatchInfo MobRenderer::batchInfo(uint32_t batch) const
+{
+    if (batch >= m_batches.size())
+        throw std::runtime_error("Mob batch index out of range");
+    for (size_t species = 0; species < entities::kMobSpeciesCount; ++species)
+    {
+        if (batch >= m_batchBegin[species] && batch < m_batchBegin[species] + m_batchPartCount[species])
+            return {m_batches[batch].firstVertex, m_batches[batch].vertexCount, m_batches[batch].texture,
+                    entities::MobSpecies(species), batch - m_batchBegin[species]};
+    }
+    throw std::runtime_error("Mob batch table is inconsistent");
+}
+
 void MobRenderer::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet frameSet, int cascade)
 {
-    if (m_draws[frame].empty())
+    const uint32_t pass = uint32_t(cascade + 1);
+    const auto &draws = m_draws[frame][pass];
+    if (draws.empty())
         return;
     PROFILE_SCOPE("MobDraw");
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, cascade < 0 ? m_color : m_shadow);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &frameSet, 0, nullptr);
     vkCmdPushConstants(cmd, m_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4),
-                       &m_matrices[frame][cascade + 1]);
+                       &m_matrices[frame][pass]);
     const std::array<VkBuffer, 2> buffers{m_vertices.buffer, m_instances[frame].buffer};
-    const VkDeviceSize offsets[2] = {0, 0};
+    const VkDeviceSize offsets[2] = {0, VkDeviceSize(m_passBase[frame][pass]) * sizeof(Instance)};
     vkCmdBindVertexBuffers(cmd, 0, 2, buffers.data(), offsets);
     uint32_t texture = ~0u;
-    for (auto &draw : m_draws[frame])
+    for (const BatchDraw &batch : draws)
     {
-        if (!(draw.visibility & (1 << (cascade + 1))))
-            continue;
-        if (texture != draw.texture)
+        if (texture != batch.texture)
         {
-            texture = draw.texture;
+            texture = batch.texture;
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1,
                                     &m_textures->sets[texture], 0, nullptr);
         }
-        vkCmdDraw(cmd, draw.count, 1, draw.first, draw.instance);
+        vkCmdDraw(cmd, batch.vertexCount, batch.instanceCount, batch.firstVertex, batch.firstInstance);
     }
 }

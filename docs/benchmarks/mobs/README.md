@@ -29,3 +29,8 @@ Simulation cost scales with population (cap 48) and stays well under one
  millisecond per frame; the renderer record cost is dominated by per-part
 `vkCmdDraw` submission (~860 draw calls worst case for 48 sheep) and is the
 first candidate for batching if populations grow (see PR #126 follow-ups).
+
+> **Update (issue #130):** the per-part submission path described above was
+> replaced by instanced batch draws (one draw per populated static part batch
+> per pass). See [issue-130-instancing.md](issue-130-instancing.md) for the
+> fresh same-machine A/B.

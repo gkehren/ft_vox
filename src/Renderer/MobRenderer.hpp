@@ -64,6 +64,37 @@ class MobRenderer
     void record(VkCommandBuffer, uint32_t frame, VkDescriptorSet frameSet, int cascade = -1);
     size_t visibleCount() const { return m_visible; }
 
+    /// Render passes that consume mob instances: bit 0 = camera/color pass,
+    /// bits 1-3 = shadow cascades 0-2 (issue #130).
+    static constexpr uint32_t kMobPassCount = 4;
+    /// Part-budget contract per baked model. init() validates every species
+    /// model against this limit; exceeding it is a build-time-visible renderer
+    /// capacity error, not a silent overflow (issue #130 review).
+    static constexpr size_t kMaxPartsPerMob = 32;
+    /// Static instancing batch: one baked MobPart's shared geometry range.
+    /// Every visible mob instance of this part in one render pass is drawn by
+    /// a single vkCmdDraw.
+    struct BatchInfo
+    {
+        uint32_t firstVertex{}, vertexCount{}, texture{};
+        entities::MobSpecies species{};
+        uint32_t partIndex{}; ///< index of the MobPart inside its species model
+    };
+    /// Submission accounting of the last prepare() on `frame`: draws = vkCmdDraw
+    /// calls record() issues for `pass`, instances = mob-part instances fed.
+    struct PassStats
+    {
+        uint32_t draws{}, instances{};
+    };
+    uint32_t batchCount() const { return uint32_t(m_batches.size()); }
+    BatchInfo batchInfo(uint32_t batch) const;
+    PassStats passStats(uint32_t frame, uint32_t pass) const { return m_stats[frame][pass]; }
+    /// Byte stride of one instance record in the mapped instance buffer.
+    /// Exposed so tests can verify the pass-slice offsets actually bound by
+    /// vkCmdBindVertexBuffers without duplicating the private Instance layout
+    /// (issue #130 review).
+    static constexpr size_t instanceStride() { return sizeof(Instance); }
+
   private:
     struct Instance
     {
@@ -71,12 +102,25 @@ class MobRenderer
         glm::vec4 uvScale;
         glm::vec4 localLight;
     };
-    struct Draw
+    /// One draw command: all instances of one static batch visible in one
+    /// pass. firstInstance is relative to the pass instance slice bound by
+    /// record().
+    struct BatchDraw
     {
-        uint32_t first, count, instance, texture;
-        uint8_t visibility;
+        uint32_t firstVertex, vertexCount, firstInstance, instanceCount, texture;
     };
-    static constexpr size_t kMaxParts = 32 * entities::kMaxMobCount;
+    struct Batch
+    {
+        uint32_t firstVertex, vertexCount, texture;
+    };
+    // Budgets derived from the entity contract: at most kMaxPartsPerMob parts
+    // per model (validated in init()) and kMaxMobCount mobs. Each of the
+    // kMobPassCount instance slices holds up to kMaxParts instances, so the
+    // per-frame mapped buffer is
+    // kMaxParts * kMobPassCount * sizeof(Instance) (~576 KiB per frame slot).
+    // A pass needing more instances than kMaxParts throws in prepare().
+    static constexpr size_t kMaxParts = kMaxPartsPerMob * entities::kMaxMobCount;
+    static constexpr size_t kMaxBatches = kMaxPartsPerMob * size_t(entities::kMobSpeciesCount);
     VkContext *m_context{};
     VkDescriptorSetLayout m_textureLayout{}, m_frameLayout{};
     VkPipelineLayout m_layout{};
@@ -85,7 +129,21 @@ class MobRenderer
     VkSampler m_shadowSampler{};
     AllocatedBuffer m_vertices{};
     std::array<AllocatedBuffer, 2> m_instances{};
-    std::array<std::vector<Draw>, 2> m_draws;
+    /// Per frame slot, per pass: non-empty batches in static batch order
+    /// (species/model/part order, so texture descriptor runs stay bounded).
+    std::array<std::array<std::vector<BatchDraw>, kMobPassCount>, 2> m_draws;
+    /// Per frame slot, per pass: instance index where the pass slice starts
+    /// inside the mapped instance buffer ([camera][shadow0][shadow1][shadow2]).
+    std::array<std::array<uint32_t, kMobPassCount>, 2> m_passBase{};
+    std::array<std::array<PassStats, kMobPassCount>, 2> m_stats{};
+    /// Immutable static batch table built in init(); indexed by batchId.
+    std::vector<Batch> m_batches;
+    std::array<uint32_t, size_t(entities::kMobSpeciesCount)> m_batchBegin{}, m_batchPartCount{};
+    // prepare() scratch, allocated once — steady-state prepare is allocation-free.
+    std::array<std::array<uint32_t, kMaxBatches>, kMobPassCount> m_counts{};
+    std::array<std::array<uint32_t, kMaxBatches>, kMobPassCount> m_cursor{};
+    std::array<glm::vec4, kMaxBatches> m_uvScales{};
+    std::array<uint8_t, entities::kMaxMobCount> m_masks{};
     std::array<std::array<glm::mat4, 4>, 2> m_matrices{};
     std::unique_ptr<Textures> m_textures;
     entities::MobModels m_models;

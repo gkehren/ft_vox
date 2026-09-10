@@ -29,7 +29,7 @@ into `benchmark-results/` (gitignored), not here.
 - [issue139-water/](issue139-water/README.md) — water optics
 - [issue144-underwater/](issue144-underwater/README.md) — underwater post
 - [issue98-validation/](issue98-validation/README.md) · [issue99-validation/](issue99-validation/README.md) — validation overhead
-- [mobs/](mobs/README.md) — passive entities CPU/GPU profile
+- [mobs/](mobs/README.md) — passive entities CPU/GPU profile · [issue-130 A/B](mobs/issue-130-instancing.md) — instanced batch submission
 - [player-physics/](player-physics/README.md) — physics cost
 - [pr145/](pr145/validation/README.md) — VSync pacing
 - [pr157-water/](pr157-water/README.md) — water rendering
