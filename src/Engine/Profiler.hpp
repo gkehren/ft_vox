@@ -86,7 +86,9 @@ public:
 	static constexpr int kMaxEntries = 96;
 	static constexpr int kMaxDepth = 8;
 	static constexpr int kHistorySize = 240;
-	static constexpr int kMaxWorkerBuckets = 8;
+	// Built-ins (TerrainGen/MeshBuild/MeshLOD/LightCache/queues/BiomeMap)
+	// plus headroom for test-registered dynamic names (issue #172).
+	static constexpr int kMaxWorkerBuckets = 16;
 	static constexpr int kSpikeLogSize = 8;
 	static constexpr float kSpikeThresholdMs = 20.f;
 

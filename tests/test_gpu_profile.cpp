@@ -90,6 +90,50 @@ int main()
         benchmark.tick(6., camera);
         require(benchmark.report().gpuSamples == 1 && benchmark.report().gpuAvgMs == 3.f,
                 "warmup samples excluded before and after measurement starts");
+
+        // Queue-peak reset between runs (issue #173 review follow-up):
+        // requestStart() is the authoritative reset boundary - a second run
+        // must never inherit the first run's pending peaks, whichever way
+        // the first run ended.
+        auto sampleQueues = [&benchmark](size_t load, size_t gen, size_t mesh, size_t light) {
+            benchmark.sampleFrame(16.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f,
+                                  100, 10, load, gen, mesh, light,
+                                  1, 1.f, 1, 1.f, 0, 0.f, 0, 0.f);
+        };
+        auto runToCompletion = [&benchmark, &camera]() {
+            benchmark.config().warmupSec = 0.f; // earlier sections raise it; warmup 0 = straight to Running
+            benchmark.requestStart();
+            benchmark.onWorldReady(glm::vec3(0.f));
+            benchmark.tick(.001, camera);
+        };
+
+        // Run #1: high queue peaks, completes normally.
+        runToCompletion();
+        sampleQueues(90, 8, 7, 8);
+        benchmark.tick(6., camera);
+        require(benchmark.report().peakPendingLoad == 90 && benchmark.report().peakPendingGen == 8 &&
+                    benchmark.report().peakPendingMesh == 7 && benchmark.report().peakPendingLight == 8,
+                "run #1 reports its own queue peaks");
+
+        // Run #2: far lower peaks - none of run #1's values may survive.
+        runToCompletion();
+        sampleQueues(11, 1, 2, 2);
+        benchmark.tick(6., camera);
+        require(benchmark.report().peakPendingLoad == 11 && benchmark.report().peakPendingGen == 1 &&
+                    benchmark.report().peakPendingMesh == 2 && benchmark.report().peakPendingLight == 2,
+                "run #2 resets every queue peak");
+
+        // cancel() -> requestStart(): an abandoned run must not leak either.
+        runToCompletion();
+        sampleQueues(90, 8, 7, 8);
+        benchmark.cancel();
+        runToCompletion();
+        sampleQueues(11, 1, 2, 2);
+        benchmark.tick(6., camera);
+        require(benchmark.report().peakPendingLoad == 11 && benchmark.report().peakPendingGen == 1 &&
+                    benchmark.report().peakPendingMesh == 2 && benchmark.report().peakPendingLight == 2,
+                "cancel -> restart keeps no previous peak");
+
         std::cout << "PASS: GPU conversion and benchmark capture isolation\n";
         return 0;
     }

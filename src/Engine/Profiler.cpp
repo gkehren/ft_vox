@@ -12,6 +12,8 @@ Profiler::Profiler()
 	registerWorkerName("TerrainGen");
 	registerWorkerName("MeshBuild");
 	registerWorkerName("MeshLOD");
+	registerWorkerName("LightCache");
+	registerWorkerName("LightCacheQueue");
 	registerWorkerName("TerrainQueue");
 	registerWorkerName("MeshQueue");
 	registerWorkerName("BiomeMap");

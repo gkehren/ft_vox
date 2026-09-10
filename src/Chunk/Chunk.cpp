@@ -314,6 +314,15 @@ void Chunk::releaseLightStorage()
   }
 }
 
+void Chunk::attachLightStorage(ChunkLightStorage *storage)
+{
+  if (!storage)
+    return;
+  if (m_lightStorage)
+    releaseLightStorage();
+  m_lightStorage = storage;
+}
+
 uint16_t Chunk::sampleLightRaw(int x, int y, int z) const
 {
   if (!m_lightStorage || x < 0 || x >= static_cast<int>(CHUNK_SIZE) ||
@@ -793,6 +802,19 @@ static thread_local std::vector<uint8_t> s_blockLightR;
 static thread_local std::vector<uint8_t> s_blockLightG;
 static thread_local std::vector<uint8_t> s_blockLightB;
 
+void Chunk::packLightField(ChunkLightStorage &out) const
+{
+  for (int z = 0; z < CHUNK_SIZE; ++z)
+    for (int y = 0; y < CHUNK_HEIGHT; ++y)
+      for (int x = 0; x < CHUNK_SIZE; ++x)
+      {
+        const size_t vi = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
+        const size_t li = ChunkLightHalo::hidx(x, y, z);
+        out.voxels[vi] = lighting::packVoxelLight(
+            s_skyLight[vi], s_blockLightR[li], s_blockLightG[li], s_blockLightB[li]);
+      }
+}
+
 void Chunk::populateLightStorage(MeshBuildResult &out)
 {
   out.lightPool = m_lightPool;
@@ -800,21 +822,22 @@ void Chunk::populateLightStorage(MeshBuildResult &out)
     out.lightStorage = m_lightPool->acquire();
   if (out.lightStorage)
   {
-    for (int z = 0; z < CHUNK_SIZE; ++z)
-      for (int y = 0; y < CHUNK_HEIGHT; ++y)
-        for (int x = 0; x < CHUNK_SIZE; ++x)
-        {
-          const size_t vi = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
-          const size_t li = ChunkLightHalo::hidx(x, y, z);
-          out.lightStorage->voxels[vi] = lighting::packVoxelLight(
-              s_skyLight[vi], s_blockLightR[li], s_blockLightG[li], s_blockLightB[li]);
-        }
+    packLightField(*out.lightStorage);
     out.lightCacheAction = LightCacheAction::Replace;
   }
   else
   {
     out.lightCacheAction = LightCacheAction::Clear;
   }
+}
+
+void Chunk::buildLightCache(ChunkLightStorage &out)
+{
+  // LightCache telemetry family (issue #173 review): a cache-only build
+  // never reports into mesh.skylight / mesh.blocklight / mesh.build.
+  telemetry::MeshSample meshSample(telemetry::Skylight, telemetry::LightCacheFamily);
+  computeLightField(meshSample);
+  packLightField(out);
 }
 
 void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)

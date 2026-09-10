@@ -18,7 +18,10 @@
 #include <sys/types.h>
 #endif
 
-static constexpr const char *kBackgroundNames[] = {"TerrainQueue", "MeshQueue", "BiomeMap"};
+// Must match kBackgroundWorkCount in Benchmark.hpp (static_asserted below).
+static constexpr const char *kBackgroundNames[] = {"TerrainQueue", "MeshQueue", "LightCacheQueue", "BiomeMap"};
+static_assert(std::size(kBackgroundNames) == kBackgroundWorkCount,
+			  "background work names must match kBackgroundWorkCount");
 
 void Benchmark::requestStart()
 {
@@ -38,9 +41,17 @@ void Benchmark::requestStart()
 	m_recordMs.clear();
 	m_sumStreaming = m_sumAcquire = m_sumRecord = m_sumImGui = m_sumPresent = 0;
 	m_sumVisibility = m_sumMeshUpload = 0;
-	m_terrainJobs = m_meshJobs = m_lodJobs = 0;
-	m_terrainMs = m_meshMs = m_lodMs = 0;
-	m_peakChunks = m_peakDraw = m_peakLoad = m_peakGen = m_peakMesh = 0;
+	m_terrainJobs = m_meshJobs = m_lodJobs = m_lightCacheJobs = 0;
+	m_terrainMs = m_meshMs = m_lodMs = m_lightCacheMs = 0;
+	// One peak per line: a chained assignment hid m_peakLight from the reset
+	// when it was added (issue #173 review follow-up) - keep each counter
+	// visible so a new peak cannot be forgotten here again.
+	m_peakChunks = 0;
+	m_peakDraw = 0;
+	m_peakLoad = 0;
+	m_peakGen = 0;
+	m_peakMesh = 0;
+	m_peakLight = 0;
 	m_peakIndirectCommands = 0;
 	m_over16 = m_over33 = 0;
 	// Streaming-counter window state must reset with everything else: a
@@ -155,8 +166,9 @@ void Benchmark::tick(double dt, Camera &camera)
 void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcquire, float scopeRecord,
 							float scopeImGui, float scopePresent, float scopeVisibility,
 							float scopeMeshUpload, size_t chunks, size_t drawCount, size_t pendingLoad,
-							size_t pendingGen, size_t pendingMesh, uint64_t terrainJobs, float terrainMs,
-							uint64_t meshJobs, float meshMs, uint64_t lodJobs, float lodMs)
+							size_t pendingGen, size_t pendingMesh, size_t pendingLight, uint64_t terrainJobs,
+							float terrainMs, uint64_t meshJobs, float meshMs, uint64_t lodJobs, float lodMs,
+							uint64_t lightCacheJobs, float lightCacheMs)
 {
 	if (m_phase != BenchmarkPhase::Running)
 		return;
@@ -177,12 +189,15 @@ void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcqu
 	m_meshMs += meshMs;
 	m_lodJobs += lodJobs;
 	m_lodMs += lodMs;
+	m_lightCacheJobs += lightCacheJobs;
+	m_lightCacheMs += lightCacheMs;
 
 	m_peakChunks = std::max(m_peakChunks, chunks);
 	m_peakDraw = std::max(m_peakDraw, drawCount);
 	m_peakLoad = std::max(m_peakLoad, pendingLoad);
 	m_peakGen = std::max(m_peakGen, pendingGen);
 	m_peakMesh = std::max(m_peakMesh, pendingMesh);
+	m_peakLight = std::max(m_peakLight, pendingLight);
 
 	if (frameMs > 16.7f)
 		++m_over16;
@@ -372,6 +387,9 @@ void Benchmark::finalize()
 	r.meshLodJobs = m_lodJobs;
 	r.meshLodTotalMs = static_cast<float>(m_lodMs);
 	r.meshLodAvgMs = m_lodJobs > 0 ? static_cast<float>(m_lodMs / m_lodJobs) : 0.f;
+	r.lightCacheJobs = m_lightCacheJobs;
+	r.lightCacheTotalMs = static_cast<float>(m_lightCacheMs);
+	r.lightCacheAvgMs = m_lightCacheJobs > 0 ? static_cast<float>(m_lightCacheMs / m_lightCacheJobs) : 0.f;
 
 	r.peakChunks = m_peakChunks;
 	r.peakDraw = m_peakDraw;
@@ -379,6 +397,7 @@ void Benchmark::finalize()
 	r.peakPendingLoad = m_peakLoad;
 	r.peakPendingGen = m_peakGen;
 	r.peakPendingMesh = m_peakMesh;
+	r.peakPendingLight = m_peakLight;
 	// Report the measurement window only: warmup frames must not pollute the
 	// streaming maintenance counters (issue #108 review).
 	r.streamStats = subtractStreamingStats(m_streamStatsLatest, m_streamStatsStart);
@@ -479,7 +498,9 @@ std::string Benchmark::formatReportText() const
 	o << "  MeshBuild   n=" << r.meshBuildJobs << "  avgMs=" << r.meshBuildAvgMs
 	  << "  totalMs=" << r.meshBuildTotalMs << "\n";
 	o << "  MeshLOD     n=" << r.meshLodJobs << "  avgMs=" << r.meshLodAvgMs
-	  << "  totalMs=" << r.meshLodTotalMs << "\n\n";
+	  << "  totalMs=" << r.meshLodTotalMs << "\n";
+	o << "  LightCache  n=" << r.lightCacheJobs << "  avgMs=" << r.lightCacheAvgMs
+	  << "  totalMs=" << r.lightCacheTotalMs << "\n\n";
 	o << "GPU timestamp queries: " << (r.gpuAvailable ? "available" : "unavailable") << "\n";
 	if (r.gpuAvailable)
 	{
@@ -506,8 +527,8 @@ std::string Benchmark::formatReportText() const
 	}
 	o << "Peaks: chunks=" << r.peakChunks << " draw=" << r.peakDraw
 	  << " indirect.commands.peak=" << r.peakIndirectCommands
-	  << " qLoad/Gen/Mesh=" << r.peakPendingLoad << "/" << r.peakPendingGen << "/"
-	  << r.peakPendingMesh << "\n\n";
+	  << " qLoad/Gen/Mesh/Light=" << r.peakPendingLoad << "/" << r.peakPendingGen << "/"
+	  << r.peakPendingMesh << "/" << r.peakPendingLight << "\n\n";
     o << "Memory / workload: " << (r.workload.enabled ? "enabled" : "disabled") << "\n";
     if (r.workload.enabled) {
         o << "  Ownership bytes (not process RSS); current / peak at publication boundaries\n";
@@ -519,22 +540,29 @@ std::string Benchmark::formatReportText() const
         uint64_t shadow = 0;
         for (size_t i=telemetry::Shadow0; i<=telemetry::Shadow2; ++i) shadow += r.workload.events[i];
         o << "  draws.shadow.total=" << shadow << " avgPerFrame=" << (r.frames ? double(shadow)/r.frames : 0.) << "\n";
-        for (size_t i=0; i<telemetry::StageCount; ++i) {
-            o << "  mesh." << telemetry::stageNames[i] << " n=" << r.workload.stageCalls[i]
-              << " totalMs=" << double(r.workload.stageNs[i])/1e6;
-            if (r.workload.stageCalls[i])
-                o << " avgMs=" << double(r.workload.stageNs[i]) / double(r.workload.stageCalls[i]) / 1e6;
-            if (!r.workload.stageSamplesMs[i].empty()) {
-                std::vector<float> sorted = r.workload.stageSamplesMs[i];
-                o << " p95Ms=" << percentileSorted(sorted, 0.95f);
+        for (size_t f=0; f<telemetry::FamilyCount; ++f) {
+            // Mesh stages keep the historical always-printed format; the
+            // light-cache family only prints stages it actually emits, so
+            // unused mesh-only stages never appear under lightCache.*.
+            for (size_t i=0; i<telemetry::StageCount; ++i) {
+                if (f != telemetry::MeshFamily && !r.workload.stageCalls[f][i])
+                    continue;
+                o << "  " << telemetry::familyNames[f] << "." << telemetry::stageNames[i]
+                  << " n=" << r.workload.stageCalls[f][i]
+                  << " totalMs=" << double(r.workload.stageNs[f][i])/1e6;
+                if (r.workload.stageCalls[f][i])
+                    o << " avgMs=" << double(r.workload.stageNs[f][i]) / double(r.workload.stageCalls[f][i]) / 1e6;
+                if (!r.workload.stageSamplesMs[f][i].empty()) {
+                    std::vector<float> sorted = r.workload.stageSamplesMs[f][i];
+                    o << " p95Ms=" << percentileSorted(sorted, 0.95f);
+                }
+                o << "\n";
             }
-            o << "\n";
-        }
-        {
-            // Per-mesh total: one sample per completed MeshSample (full or LOD
-            // build), the sum of its stage-chain segments.
-            const std::vector<float> &build = r.workload.meshTotalSamplesMs;
-            o << "  mesh.build(sample-sum) n=" << build.size();
+            // Per-build total: one sample per completed MeshSample of this
+            // family (full/LOD mesh build vs light-cache-only build), the
+            // sum of its stage-chain segments.
+            const std::vector<float> &build = r.workload.totalSamplesMs[f];
+            o << "  " << telemetry::familyNames[f] << ".build(sample-sum) n=" << build.size();
             if (!build.empty()) {
                 double sum = 0;
                 for (float v : build) sum += v;

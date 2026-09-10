@@ -131,6 +131,7 @@ Engine::Engine(std::string resourcePackRoot)
 	renderSettings.genPerSec = 480;
 	renderSettings.meshPerSec = 360;
 	renderSettings.uploadPerSec = 520;
+	renderSettings.lightCachePerSec = 96;
 	renderSettings.shadowDistance = 160.f;
 	renderSettings.raycastDistance = 8;
 
@@ -584,10 +585,11 @@ void Engine::tickStreaming(double dt)
 		chunkManager->updateStreaming(camera, renderSettings);
 	}
 
-	static double genAccum = 0.0, meshAccum = 0.0, uploadAccum = 0.0;
+	static double genAccum = 0.0, meshAccum = 0.0, uploadAccum = 0.0, lightCacheAccum = 0.0;
 	const int loadBudget = budgetFromRate(renderSettings.loadPerSec, frameDt, streamAccum);
 	const int genBudget = budgetFromRate(renderSettings.genPerSec, frameDt, genAccum);
 	const int meshBudget = budgetFromRate(renderSettings.meshPerSec, frameDt, meshAccum);
+	const int lightCacheBudget = budgetFromRate(renderSettings.lightCachePerSec, frameDt, lightCacheAccum);
 	uploadBudgetThisFrame = std::max(budgetFromRate(renderSettings.uploadPerSec, frameDt, uploadAccum), 1);
 
 	// Count budgets capped by shared per-frame CPU time envelope.
@@ -608,6 +610,16 @@ void Engine::tickStreaming(double dt)
 	{
 		PROFILE_SCOPE("MeshDispatch");
 		chunkManager->meshPendingChunks(camera, renderSettings, meshN);
+	}
+	// Dedicated entity light-cache dispatch (issue #172): separate budget so
+	// cache acquisition neither competes with nor degenerates into render
+	// mesh rebuilds. Unlike meshN, no forced minimum — lightCachePerSec = 0
+	// disables the dedicated path.
+	const int lightCacheN = remainingCountBudget(lightCacheBudget, streamElapsedMs(), maxStreamMs);
+	if (lightCacheN > 0)
+	{
+		PROFILE_SCOPE("LightCacheDispatch");
+		chunkManager->updateEntityLightCaches(camera, renderSettings, lightCacheN);
 	}
 	// GPU uploads are recorded inside recordFrame (after acquire) — no waitIdle.
 	{
@@ -632,7 +644,8 @@ void Engine::tickStreaming(double dt)
 				  << " q="
 				  << chunkManager->pendingLoadCount() << "/"
 				  << chunkManager->pendingGenJobs() << "/"
-				  << chunkManager->pendingMeshJobs() << "\n";
+				  << chunkManager->pendingMeshJobs() << "/"
+				  << chunkManager->pendingLightJobs() << "\n";
 		lastLoggedChunks = n;
 		lastLogTime = now;
 	}
@@ -973,8 +986,8 @@ void Engine::sampleBenchmarkFrame()
 	// A reset during reload discards the interrupted frame, even at zero warmup.
 	if (prof.historyCount() == 0)
 		return;
-	uint64_t tJobs = 0, mJobs = 0, lJobs = 0;
-	float tMs = 0.f, mMs = 0.f, lMs = 0.f;
+	uint64_t tJobs = 0, mJobs = 0, lJobs = 0, lcJobs = 0;
+	float tMs = 0.f, mMs = 0.f, lMs = 0.f, lcMs = 0.f;
 	m_benchmark.sampleGpu(frameCtx->gpuProfiler().latest());
 	const int wc = prof.workerSnapshotCount();
 	const WorkerSnapshot *ws = prof.workerSnapshots();
@@ -997,6 +1010,11 @@ void Engine::sampleBenchmarkFrame()
 		{
 			lJobs = ws[i].count;
 			lMs = ws[i].totalMs;
+		}
+		else if (std::strcmp(ws[i].name, "LightCache") == 0)
+		{
+			lcJobs = ws[i].count;
+			lcMs = ws[i].totalMs;
 		}
 	}
 
@@ -1058,7 +1076,9 @@ void Engine::sampleBenchmarkFrame()
 		chunkManager ? chunkManager->chunkCount() : 0, drawList.size(),
 		chunkManager ? chunkManager->pendingLoadCount() : 0,
 		chunkManager ? chunkManager->pendingGenJobs() : 0,
-		chunkManager ? chunkManager->pendingMeshJobs() : 0, tJobs, tMs, mJobs, mMs, lJobs, lMs);
+		chunkManager ? chunkManager->pendingMeshJobs() : 0,
+		chunkManager ? chunkManager->pendingLightJobs() : 0,
+		tJobs, tMs, mJobs, mMs, lJobs, lMs, lcJobs, lcMs);
 	m_benchmark.sampleIndirectCommands(worldRenderer ? worldRenderer->lastIndirectCommandCount() : 0);
 	if (chunkManager)
 		m_benchmark.sampleStreamingStats(chunkManager->streamingMaintenanceStats());
