@@ -644,7 +644,8 @@ void Engine::tickStreaming(double dt)
 				  << " q="
 				  << chunkManager->pendingLoadCount() << "/"
 				  << chunkManager->pendingGenJobs() << "/"
-				  << chunkManager->pendingMeshJobs() << "\n";
+				  << chunkManager->pendingMeshJobs() << "/"
+				  << chunkManager->pendingLightJobs() << "\n";
 		lastLoggedChunks = n;
 		lastLogTime = now;
 	}
@@ -1075,8 +1076,9 @@ void Engine::sampleBenchmarkFrame()
 		chunkManager ? chunkManager->chunkCount() : 0, drawList.size(),
 		chunkManager ? chunkManager->pendingLoadCount() : 0,
 		chunkManager ? chunkManager->pendingGenJobs() : 0,
-		chunkManager ? chunkManager->pendingMeshJobs() : 0, tJobs, tMs, mJobs, mMs, lJobs, lMs,
-		lcJobs, lcMs);
+		chunkManager ? chunkManager->pendingMeshJobs() : 0,
+		chunkManager ? chunkManager->pendingLightJobs() : 0,
+		tJobs, tMs, mJobs, mMs, lJobs, lMs, lcJobs, lcMs);
 	m_benchmark.sampleIndirectCommands(worldRenderer ? worldRenderer->lastIndirectCommandCount() : 0);
 	if (chunkManager)
 		m_benchmark.sampleStreamingStats(chunkManager->streamingMaintenanceStats());

@@ -22,11 +22,11 @@ int main() {
         r.add(AllocCreated, 4);
         auto oldEpoch = r.captureEpoch();
         r.beginCapture();
-        Snapshot work; work.stageCalls[Skylight] = 1; work.stageNs[Skylight] = 100;
+        Snapshot work; work.stageCalls[MeshFamily][Skylight] = 1; work.stageNs[MeshFamily][Skylight] = 100;
         r.worker(oldEpoch, work);
         auto s = r.snapshot();
         require(s.current[VoxelBytes] == 512 && s.peak[VoxelBytes] == 512, "reset preserves ownership and rebases peak");
-        require(!s.events[AllocCreated] && !s.stageCalls[Skylight], "reset excludes prior events and delayed workers");
+        require(!s.events[AllocCreated] && !s.stageCalls[MeshFamily][Skylight], "reset excludes prior events and delayed workers");
         std::vector<std::thread> threads;
         const auto epoch = r.captureEpoch();
         for (int i=0; i<4; ++i) threads.emplace_back([&] {
@@ -40,11 +40,11 @@ int main() {
         for (auto& t : threads) t.join();
         s = r.snapshot();
         require(s.current[ShellCapacity] == 0 && s.peak[ShellCapacity] <= 64, "concurrent ownership balance");
-        require(s.stageCalls[Skylight] == 4000 && s.stageNs[Skylight] == 400000, "worker aggregation");
+        require(s.stageCalls[MeshFamily][Skylight] == 4000 && s.stageNs[MeshFamily][Skylight] == 400000, "worker aggregation");
         require(s.events[AllocCreated] == 4000, "concurrent counters");
         r.beginCapture();
         s = r.snapshot();
-        require(!s.events[AllocCreated] && !s.stageCalls[Skylight], "second capture starts empty");
+        require(!s.events[AllocCreated] && !s.stageCalls[MeshFamily][Skylight], "second capture starts empty");
 
         // Capture-local vs persistent gauges (issue #111/#112 reviews):
         // warmup staging high-water, end-of-frame chunk-manager samples and
@@ -177,25 +177,52 @@ int main() {
             }
             { StageSample occupancy(Occupancy); }
             const auto sampled = g.snapshot();
-            require(sampled.stageCalls[Skylight] == 1 && sampled.stageCalls[Blocklight] == 1 &&
-                    sampled.stageCalls[FacesGreedyAO] == 1 && sampled.stageCalls[Occupancy] == 1,
+            require(sampled.stageCalls[MeshFamily][Skylight] == 1 && sampled.stageCalls[MeshFamily][Blocklight] == 1 &&
+                    sampled.stageCalls[MeshFamily][FacesGreedyAO] == 1 && sampled.stageCalls[MeshFamily][Occupancy] == 1,
                     "mesh chain and standalone stage calls recorded");
-            require(sampled.stageSamplesMs[Skylight].size() == 1 &&
-                    sampled.stageSamplesMs[Blocklight].size() == 1 &&
-                    sampled.stageSamplesMs[FacesGreedyAO].size() == 1 &&
-                    sampled.stageSamplesMs[Occupancy].size() == 1,
+            require(sampled.stageSamplesMs[MeshFamily][Skylight].size() == 1 &&
+                    sampled.stageSamplesMs[MeshFamily][Blocklight].size() == 1 &&
+                    sampled.stageSamplesMs[MeshFamily][FacesGreedyAO].size() == 1 &&
+                    sampled.stageSamplesMs[MeshFamily][Occupancy].size() == 1,
                     "one duration sample per completed stage segment");
-            require(sampled.meshTotalSamplesMs.size() == 1,
+            require(sampled.totalSamplesMs[MeshFamily].size() == 1,
                     "one chain-sum sample per completed mesh");
-            const double chainMs = double(sampled.stageNs[Skylight] + sampled.stageNs[Blocklight] +
-                                          sampled.stageNs[FacesGreedyAO]) / 1e6;
-            require(std::abs(sampled.meshTotalSamplesMs[0] - chainMs) < 1e-4,
+            const double chainMs = double(sampled.stageNs[MeshFamily][Skylight] + sampled.stageNs[MeshFamily][Blocklight] +
+                                          sampled.stageNs[MeshFamily][FacesGreedyAO]) / 1e6;
+            require(std::abs(sampled.totalSamplesMs[MeshFamily][0] - chainMs) < 1e-4,
                     "mesh total sample is the sum of the stage chain");
             g.beginCapture();
             const auto cleared = g.snapshot();
-            require(cleared.stageSamplesMs[Skylight].empty() && cleared.stageSamplesMs[Occupancy].empty() &&
-                    cleared.meshTotalSamplesMs.empty(),
+            require(cleared.stageSamplesMs[MeshFamily][Skylight].empty() && cleared.stageSamplesMs[MeshFamily][Occupancy].empty() &&
+                    cleared.totalSamplesMs[MeshFamily].empty(),
                     "capture boundary clears retained samples");
+        }
+
+        // Family isolation (issue #173 review): a LightCache-family build
+        // sample must publish only under lightCache.* and never touch the
+        // mesh.* gauges or the mesh per-build totals.
+        {
+            Registry& g = registry();
+            g.beginCapture();
+            {
+                MeshSample light(Skylight, LightCacheFamily);
+                light.next(Blocklight);
+            }
+            { StageSample halo(HaloFill, LightCacheFamily); }
+            const auto sampled = g.snapshot();
+            require(sampled.stageCalls[LightCacheFamily][Skylight] == 1 &&
+                    sampled.stageCalls[LightCacheFamily][Blocklight] == 1 &&
+                    sampled.stageCalls[LightCacheFamily][HaloFill] == 1,
+                    "light-cache chain calls recorded under lightCache.*");
+            require(sampled.totalSamplesMs[LightCacheFamily].size() == 1,
+                    "one chain-sum sample per completed light-cache build");
+            for (size_t i = 0; i < StageCount; ++i)
+                require(!sampled.stageCalls[MeshFamily][i] && sampled.totalSamplesMs[MeshFamily].empty(),
+                        "light-cache sample never contaminates mesh.* telemetry");
+            const double chainMs = double(sampled.stageNs[LightCacheFamily][Skylight] +
+                                          sampled.stageNs[LightCacheFamily][Blocklight]) / 1e6;
+            require(std::abs(sampled.totalSamplesMs[LightCacheFamily][0] - chainMs) < 1e-4,
+                    "light-cache total sample is the sum of its stage chain");
         }
 
         std::cout << "PASS: telemetry concurrency, ownership, capture epochs, reset, "

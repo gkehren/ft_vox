@@ -672,10 +672,11 @@ void GameUI::drawStreaming(GameUIFrame &frame)
 	ImGui::SeparatorText("Live stats");
 	ImGui::Text("Loaded chunks: %zu", frame.chunks->chunkCount());
 	ImGui::Text("Draw list:     %zu", frame.drawCount);
-	ImGui::Text("Queue load/gen/mesh: %zu / %zu / %zu",
+	ImGui::Text("Queue load/gen/mesh/light: %zu / %zu / %zu / %zu",
 				frame.chunks->pendingLoadCount(),
 				frame.chunks->pendingGenJobs(),
-				frame.chunks->pendingMeshJobs());
+				frame.chunks->pendingMeshJobs(),
+				frame.chunks->pendingLightJobs());
 
 	if (frame.pool)
 	{
@@ -1130,8 +1131,8 @@ void GameUI::drawBenchmarkReport(GameUIFrame &frame)
 	ImGui::Text("Built (UTC): %s", r.buildUtc.c_str());
 
 	ImGui::SeparatorText("Peaks & settings");
-	ImGui::Text("Chunks %zu  |  draw %zu  |  queues %zu / %zu / %zu", r.peakChunks, r.peakDraw,
-				r.peakPendingLoad, r.peakPendingGen, r.peakPendingMesh);
+	ImGui::Text("Chunks %zu  |  draw %zu  |  queues %zu / %zu / %zu / %zu", r.peakChunks, r.peakDraw,
+				r.peakPendingLoad, r.peakPendingGen, r.peakPendingMesh, r.peakPendingLight);
 	ImGui::Text("View %d  |  %dx%d  |  VSync %s  |  %s",
 				r.viewDistance, r.windowW, r.windowH,
 				r.vsync ? "on" : "off", r.presentMode.c_str());

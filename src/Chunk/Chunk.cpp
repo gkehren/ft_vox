@@ -833,7 +833,9 @@ void Chunk::populateLightStorage(MeshBuildResult &out)
 
 void Chunk::buildLightCache(ChunkLightStorage &out)
 {
-  telemetry::MeshSample meshSample(telemetry::Skylight);
+  // LightCache telemetry family (issue #173 review): a cache-only build
+  // never reports into mesh.skylight / mesh.blocklight / mesh.build.
+  telemetry::MeshSample meshSample(telemetry::Skylight, telemetry::LightCacheFamily);
   computeLightField(meshSample);
   packLightField(out);
 }

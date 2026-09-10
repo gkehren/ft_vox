@@ -13,6 +13,7 @@
 #include <Physics/PlayerController.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
+#include <Engine/Profiler.hpp>
 
 #include <algorithm>
 #include <array>
@@ -5199,7 +5200,8 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// 38. Light-cache equivalence: full mesh build vs light-only path (issue #172)
+	// 38. Light-cache equivalence: full mesh build vs light-only path
+	//     (issue #172; cross-chunk halo per issue #173 review)
 	{
 		ThreadPool tp(2);
 		TerrainGenerator gen(123);
@@ -5207,15 +5209,50 @@ int main(int argc, char **argv)
 		ChunkManager mgr(&gen, &tp, &chunkPool);
 
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+		// East neighbor at world x=16: its voxels feed the center chunk's
+		// light halo, so the equivalence contract covers cross-chunk
+		// propagation, not just an isolated chunk.
+		Chunk *east = chunkPool.acquire(glm::vec3(static_cast<float>(CHUNK_SIZE), 0.0f, 0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for equivalence test");
-		if (chunk)
+		CHECK(east != nullptr, "acquired east neighbor for equivalence test");
+		if (chunk && east)
 		{
 			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(1, 0, 0), east);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for equivalence test");
+			CHECK(mgr.prepareAndGenerateChunk(east, gen), "generated east neighbor for equivalence test");
 			// Emissive sources above the terrain so block light is non-trivial.
 			chunk->setVoxel(3, 100, 5, LAVA);
 			chunk->setVoxel(12, 98, 2, REDSTONE_ORE);
 			chunk->setVoxel(8, 102, 8, STONE);
+
+			// Cross-chunk halo fixture (issue #173 review): find an
+			// underground y where both sides of the x-border are solid, then
+			// carve a sealed tunnel across the border with the lava source
+			// inside the EAST chunk. The center chunk's cache can only show
+			// that light through the dispatch-time neighbor halo, so a halo
+			// mismatch between the two paths breaks the memcmp below.
+			int tunnelY = -1;
+			for (int y = 8; y < static_cast<int>(CHUNK_HEIGHT) - 8 && tunnelY < 0; ++y)
+			{
+				auto solid = [&](const Chunk *c, int lx) {
+					return c->getVoxel(static_cast<uint32_t>(lx), static_cast<uint32_t>(y), 8).type != AIR;
+				};
+				if (solid(chunk, 14) && solid(chunk, 15) && solid(east, 0) &&
+					solid(east, 1) && solid(east, 2) && solid(east, 3) && solid(east, 4))
+					tunnelY = y;
+			}
+			CHECK(tunnelY > 0, "found an underground y for the cross-chunk tunnel");
+			if (tunnelY > 0)
+			{
+				chunk->setVoxel(14, tunnelY, 8, AIR);
+				chunk->setVoxel(15, tunnelY, 8, AIR);
+				east->setVoxel(0, tunnelY, 8, AIR);
+				east->setVoxel(1, tunnelY, 8, AIR);
+				east->setVoxel(2, tunnelY, 8, AIR);
+				east->setVoxel(3, tunnelY, 8, AIR);
+				east->setVoxel(4, tunnelY, 8, LAVA);
+			}
 
 			RenderSettings rs;
 			const Camera cam(glm::vec3(8.0f, 40.0f, 8.0f));
@@ -5224,8 +5261,16 @@ int main(int argc, char **argv)
 			mgr.meshPendingChunks(cam, rs, 1);
 			drainManagerJobs(mgr);
 			CHECK(chunk->getState() == ChunkState::MESHED, "chunk meshed for equivalence test");
+			CHECK(east->getState() == ChunkState::GENERATED, "east neighbor stays GENERATED (halo source)");
 			CHECK(chunk->hasLightStorage(), "mesh build populated the cache");
 			const uint64_t meshDispatched = mgr.meshJobsDispatched();
+
+			if (tunnelY > 0)
+			{
+				const auto crossLight = chunk->sampleLight(15, tunnelY, 8);
+				CHECK(glm::length(crossLight.blockRgb) > 0.0f,
+				      "lava light from the east neighbor reached the center cache via the halo");
+			}
 
 			std::vector<uint16_t> fromMeshBuild(chunk->getLightStorage()->voxels.begin(),
 			                                    chunk->getLightStorage()->voxels.end());
@@ -5242,7 +5287,7 @@ int main(int argc, char **argv)
 
 			CHECK(std::memcmp(fromMeshBuild.data(), chunk->getLightStorage()->voxels.data(),
 			                  fromMeshBuild.size() * sizeof(uint16_t)) == 0,
-			      "light-only cache is byte-identical to the mesh-built cache");
+			      "light-only cache is byte-identical to the mesh-built cache (same voxels + same neighbor halo)");
 			CHECK(mgr.meshJobsDispatched() == meshDispatched, "equivalence used no mesh job");
 			CHECK(mgr.lightJobsDispatched() == 1, "exactly one light-only job");
 			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
@@ -5614,6 +5659,98 @@ int main(int argc, char **argv)
 			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
 				      chunkPool.lightPool().capacity(),
 			      "light pool accounting coherent in test 43");
+		}
+	}
+
+	// 44. Metrics isolation (issue #173 review): a light-cache-only job feeds
+	//     only the LightCache/LightCacheQueue worker buckets and the
+	//     lightCache.* telemetry family. Mesh buckets (MeshBuild/MeshLOD/
+	//     MeshQueue) and the mesh.* sample chains must stay untouched, so the
+	//     telemetry contamination this review fixed cannot silently return.
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(808);
+		ChunkPool chunkPool(8);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+
+		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for metrics isolation test");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for metrics isolation test");
+
+			RenderSettings rs;
+			const Camera cam(glm::vec3(8.0f, 40.0f, 8.0f));
+			// A real mesh build first: its mesh.* telemetry and MeshBuild
+			// samples land BEFORE the measurement window opened below.
+			mgr.meshPendingChunks(cam, rs, 1);
+			drainManagerJobs(mgr);
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk meshed for metrics isolation test");
+			CHECK(chunk->hasLightStorage(), "mesh build populated the cache");
+			chunk->releaseLightStorage();
+			chunk->setLocalLightCacheWanted(true);
+
+			// Open a fresh measurement window: per-bucket profiler counters
+			// reset on snapshot, and beginCapture() starts an empty telemetry
+			// capture (a terminal snapshot() read would only move the sample
+			// vectors out - scalar stage counters survive it until the next
+			// capture boundary).
+			GetProfiler().snapshotWorkers();
+			const bool telemetryEnabled = telemetry::registry().enabled;
+			if (telemetryEnabled)
+				telemetry::registry().beginCapture();
+
+			mgr.updateEntityLightCaches(cam, rs, 1);
+			CHECK(mgr.pendingLightJobs() == 1, "light-cache job dispatched for metrics test");
+			drainManagerJobs(mgr);
+
+			GetProfiler().snapshotWorkers();
+			uint64_t lightCache = 0, lightCacheQueue = 0;
+			uint64_t meshBuild = 0, meshLod = 0, meshQueue = 0;
+			const int wc = GetProfiler().workerSnapshotCount();
+			const WorkerSnapshot *ws = GetProfiler().workerSnapshots();
+			for (int i = 0; i < wc; ++i)
+			{
+				if (!ws[i].name)
+					continue;
+				if (std::strcmp(ws[i].name, "LightCache") == 0)
+					lightCache = ws[i].count;
+				else if (std::strcmp(ws[i].name, "LightCacheQueue") == 0)
+					lightCacheQueue = ws[i].count;
+				else if (std::strcmp(ws[i].name, "MeshBuild") == 0)
+					meshBuild = ws[i].count;
+				else if (std::strcmp(ws[i].name, "MeshLOD") == 0)
+					meshLod = ws[i].count;
+				else if (std::strcmp(ws[i].name, "MeshQueue") == 0)
+					meshQueue = ws[i].count;
+			}
+			CHECK(lightCache == 1, "exactly one LightCache worker sample in the window");
+			CHECK(lightCacheQueue == 1, "exactly one LightCacheQueue queue-wait sample in the window");
+			CHECK(meshBuild == 0, "MeshBuild untouched by the light-cache job");
+			CHECK(meshLod == 0, "MeshLOD untouched by the light-cache job");
+			CHECK(meshQueue == 0, "MeshQueue no longer receives light-cache jobs");
+
+			if (telemetryEnabled)
+			{
+				const auto snap = telemetry::registry().snapshot();
+				CHECK(snap.enabled, "telemetry snapshot enabled");
+				CHECK(snap.totalSamplesMs[telemetry::LightCacheFamily].size() == 1,
+				      "one lightCache.build(sample-sum) sample for the cache-only build");
+				CHECK(snap.stageCalls[telemetry::LightCacheFamily][telemetry::Skylight] == 1 &&
+				      snap.stageCalls[telemetry::LightCacheFamily][telemetry::Blocklight] == 1,
+				      "lightCache skylight/blocklight stages recorded");
+				CHECK(!snap.stageSamplesMs[telemetry::LightCacheFamily][telemetry::Skylight].empty() &&
+				      !snap.stageSamplesMs[telemetry::LightCacheFamily][telemetry::Blocklight].empty(),
+				      "lightCache stage durations retained");
+				CHECK(snap.stageCalls[telemetry::LightCacheFamily][telemetry::HaloFill] == 1,
+				      "light-cache haloFill reported under the lightCache family");
+				CHECK(snap.totalSamplesMs[telemetry::MeshFamily].empty(),
+				      "mesh.build(sample-sum) not fed by the cache-only build");
+				for (size_t s = 0; s < telemetry::StageCount; ++s)
+					CHECK(snap.stageCalls[telemetry::MeshFamily][s] == 0,
+					      "mesh.* stages untouched by the cache-only build");
+			}
 		}
 	}
 

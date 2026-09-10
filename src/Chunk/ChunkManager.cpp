@@ -614,7 +614,8 @@ void ChunkManager::updateEntityLightCaches(const Camera &camera, const RenderSet
 		// equivalence): computeLightField reads own voxels + the halo ring
 		// only, so unlike a mesh dispatch there is no neighbor shell to
 		// populate - the border layout exists for greedy face culling.
-		ensureLightHalo(chunk, ci);
+		// haloFill timing reports under lightCache.* (issue #173 review).
+		ensureLightHalo(chunk, ci, telemetry::LightCacheFamily);
 		ChunkLightHalo *halo = chunk->lightHalo();
 		if (!halo)
 		{
@@ -635,7 +636,10 @@ void ChunkManager::updateEntityLightCaches(const Camera &camera, const RenderSet
 		const uint64_t meshRevision = chunk->meshRevision();
 		m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, halo, this, queuedAt, captureEpoch]() {
 			const auto t0 = std::chrono::steady_clock::now();
-			GetProfiler().addWorkerSample("MeshQueue",
+			// Own queue bucket (issue #173 review): light-cache wait time is
+			// observable separately from real mesh jobs, so pool starvation
+			// of one pipeline cannot hide inside the other's numbers.
+			GetProfiler().addWorkerSample("LightCacheQueue",
 				std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
 			// Worker stays read-only on published chunk state (issue #172):
 			// the only products are the pooled storage block and telemetry.
@@ -1417,7 +1421,8 @@ void ChunkManager::ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx
 		getChunk(chunkIdx + glm::ivec3(0, 0, +1)));
 }
 
-void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx)
+void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx,
+								   telemetry::Family telemetryFamily)
 {
 	if (!chunk)
 		return;
@@ -1438,8 +1443,9 @@ void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx)
 	{
 		// The ring snapshot is main-thread dispatch cost (issue #141 review
 		// round 2, P2): measured as its own stage so the benchmark reports
-		// haloFill avg/p95 next to the worker-side mesh stages.
-		telemetry::StageSample haloFillSample(telemetry::HaloFill);
+		// haloFill avg/p95 next to the worker-side mesh stages. Routed to the
+		// calling pipeline's telemetry family (issue #173 review).
+		telemetry::StageSample haloFillSample(telemetry::HaloFill, telemetryFamily);
 		fillLightHaloFromNeighbors(
 			*halo, chunk,
 			getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),

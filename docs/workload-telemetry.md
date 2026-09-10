@@ -77,6 +77,23 @@ operation counts, not independent AO/mask elapsed times. There are no per-voxel
 atomics or clock reads. This preserves a low-cost reference before future
 changes separate those algorithms. Full-mesh and LOD output counts are summed.
 
+### Sample families (issue #173 review)
+
+Stage timing is parameterized by a sample **family**, and a family never
+publishes into another's gauges:
+
+- `mesh.*` — real full-quality and LOD mesh builds only:
+  `mesh.skylight`, `mesh.blocklight`, `mesh.occupancy`, `mesh.facesGreedyAO`,
+  `mesh.LOD`, `mesh.haloFill` and the per-build `mesh.build(sample-sum)` total.
+- `lightCache.*` — entity light-cache-only builds (issue #172), which compute
+  the light field without producing geometry: `lightCache.skylight`,
+  `lightCache.blocklight`, `lightCache.haloFill` (dispatch-side neighbor-ring
+  snapshot) and `lightCache.build(sample-sum)`.
+
+The worker-side queues are separated the same way: `MeshQueue` waits belong to
+real mesh jobs, `LightCacheQueue` waits to light-cache jobs, with execution
+times under `MeshBuild` / `MeshLOD` / `LightCache` respectively.
+
 ## Capture lifecycle
 
 World reload, benchmark request and the warmup-to-measurement transition reset

@@ -41,6 +41,11 @@ struct BenchmarkWorkTiming
 	double totalMs{0};
 };
 
+/// Queue-wait buckets tracked as background work (must match
+/// kBackgroundNames in Benchmark.cpp). LightCacheQueue is the entity
+/// light-cache dispatch wait (issue #173 review).
+inline constexpr size_t kBackgroundWorkCount = 4;
+
 struct BenchmarkReport
 {
 	telemetry::Snapshot workload{};
@@ -49,7 +54,7 @@ struct BenchmarkReport
 	uint64_t gpuSamples{0};
 	float gpuAvgMs{0.f}, gpuP95Ms{0.f}, gpuP99Ms{0.f};
 	std::array<BenchmarkWorkTiming, kGpuPassCount> gpuPasses{};
-	std::array<BenchmarkWorkTiming, 3> backgroundWork{};
+	std::array<BenchmarkWorkTiming, kBackgroundWorkCount> backgroundWork{};
 	float biomeMapZoom{0.f};
 	bool biomeMapSequential{false};
 
@@ -99,6 +104,7 @@ struct BenchmarkReport
 	size_t peakPendingLoad{0};
 	size_t peakPendingGen{0};
 	size_t peakPendingMesh{0};
+	size_t peakPendingLight{0}; // entity light-cache dispatch queue peak
 
 	StreamingMaintenanceStats streamStats{};
 
@@ -164,9 +170,9 @@ public:
 	void sampleFrame(float frameMs, float scopeStreaming, float scopeAcquire, float scopeRecord,
 					 float scopeImGui, float scopePresent, float scopeVisibility, float scopeMeshUpload,
 					 size_t chunks, size_t drawCount, size_t pendingLoad, size_t pendingGen,
-					 size_t pendingMesh, uint64_t terrainJobs, float terrainMs, uint64_t meshJobs,
-					 float meshMs, uint64_t lodJobs, float lodMs, uint64_t lightCacheJobs,
-					 float lightCacheMs);
+					 size_t pendingMesh, size_t pendingLight, uint64_t terrainJobs, float terrainMs,
+					 uint64_t meshJobs, float meshMs, uint64_t lodJobs, float lodMs,
+					 uint64_t lightCacheJobs, float lightCacheMs);
 
 	/// Queue waits and completed map latency from the frame's profiler snapshot.
 	void sampleBackgroundWork(const char *name, uint64_t count, double totalMs);
@@ -231,7 +237,7 @@ public:
 	void clearVsyncRestore() { m_vsyncRestorePending = false; }
 
 private:
-	std::array<BenchmarkWorkTiming, 3> m_backgroundWork{};
+	std::array<BenchmarkWorkTiming, kBackgroundWorkCount> m_backgroundWork{};
 	uint64_t m_gpuTag{0}, m_lastGpuSerial{0};
 	std::vector<float> m_gpuFrames;
 	std::array<BenchmarkWorkTiming, kGpuPassCount> m_gpuPasses{};
@@ -249,7 +255,7 @@ private:
 	uint64_t m_lightCacheJobs{0};
 	double m_lightCacheMs{0};
 
-	size_t m_peakChunks{0}, m_peakDraw{0}, m_peakLoad{0}, m_peakGen{0}, m_peakMesh{0};
+	size_t m_peakChunks{0}, m_peakDraw{0}, m_peakLoad{0}, m_peakGen{0}, m_peakMesh{0}, m_peakLight{0};
 	size_t m_peakIndirectCommands{0};
 	int m_over16{0}, m_over33{0};
 	StreamingMaintenanceStats m_streamStats{};

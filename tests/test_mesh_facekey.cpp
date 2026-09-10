@@ -1073,10 +1073,12 @@ static int runBenchCorpus(int argc, char **argv)
 	std::cout << "STAGES";
 	for (size_t s = 0; s < telemetry::StageCount; ++s)
 	{
-		const double calls = snap.stageCalls[s] ? static_cast<double>(snap.stageCalls[s]) : 1.0;
+		const double calls = snap.stageCalls[telemetry::MeshFamily][s]
+								 ? static_cast<double>(snap.stageCalls[telemetry::MeshFamily][s])
+								 : 1.0;
 		std::cout << " " << telemetry::stageNames[s] << "="
-				  << (static_cast<double>(snap.stageNs[s]) / calls / 1000.0) << "us"
-				  << "(n=" << snap.stageCalls[s] << ")";
+				  << (static_cast<double>(snap.stageNs[telemetry::MeshFamily][s]) / calls / 1000.0) << "us"
+				  << "(n=" << snap.stageCalls[telemetry::MeshFamily][s] << ")";
 	}
 	std::cout << "\nMESH overall median=" << percentile(meshMs, 0.5)
 			  << " ms p95=" << percentile(meshMs, 0.95) << " ms over " << meshMs.size()

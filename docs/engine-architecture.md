@@ -466,8 +466,10 @@ under the `Mobs` profiler scope, GPU under `GpuPass::Mobs` / `MobShadow0-2`.
 Each near-camera chunk may hold a packed 128 KiB light cache (skylight + RGB
 block light) acquired from the pooled `ChunkLightPool`. Residency is governed by
 **acquire/release hysteresis** around the camera: caches are acquired at 128 m
-(the mob spawn/wander range — mobs retire beyond 112 m) and retained until 144 m,
-so camera jitter around the edge cannot oscillate allocations.
+(the mob spawn/wander range — mobs retire beyond 112 m) and retained until
+144 m — a 16-block margin (~+12.5%) that absorbs in-chunk camera movement
+(a 16 m chunk never crosses both thresholds in one step) — so camera jitter
+around the acquire edge cannot oscillate allocations.
 
 Cache acquisition is **decoupled from meshing** (issue #172): a `MESHED` chunk
 entering the radius gets a dedicated async light-only job
@@ -477,6 +479,24 @@ the storage after generation/revision/intent validation. It never touches chunk
 state, dirty sections, mesh payloads or GPU upload flags — a valid render mesh is
 never invalidated by cache residency. Real mesh builds still populate the cache
 when it is wanted, so no light work is duplicated when a remesh was due anyway.
+
+The light-only pipeline has its **own telemetry** (issue #173 review), disjoint
+from the mesh path:
+
+```text
+updateEntityLightCaches
+  -> LightCacheQueue        (queue-wait worker sample)
+  -> LightCache worker      (job execution worker sample)
+  -> lightCache.skylight / lightCache.blocklight / lightCache.haloFill
+  -> lightCache.build(sample-sum)
+```
+
+`MeshBuild` / `MeshLOD` / `MeshQueue` and the `mesh.*` workload stages /
+`mesh.build(sample-sum)` totals therefore count **real mesh builds only**.
+Observability: the Streaming panel and `[stream]` log report the light queue
+(`load/gen/mesh/light`), and the benchmark reports `LightCache` worker jobs plus
+`LightCacheQueue` background waits and a `peakPendingLight` peak
+(`qLoad/Gen/Mesh/Light=`).
 
 ### Tests
 

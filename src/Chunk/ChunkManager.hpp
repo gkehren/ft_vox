@@ -18,6 +18,7 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Engine/ThreadPool.hpp>
+#include <Engine/WorkloadTelemetry.hpp>
 #include <Chunk/LightSample.hpp>
 #include <utils.hpp>
 
@@ -218,8 +219,11 @@ private:
 	/// reuse) a pooled halo for `chunk` and snapshot the 15-voxel neighbor
 	/// ring into it. Caller holds m_mutex exclusively; same dispatch-time
 	/// contract as ensureShellPopulated. Gracefully degrades to no halo
-	/// (in-chunk-only light) when the pool allocation fails.
-	void ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx);
+	/// (in-chunk-only light) when the pool allocation fails. The telemetry
+	/// family routes the haloFill stage timing to the calling pipeline
+	/// (mesh vs light-cache, issue #173 review).
+	void ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx,
+						 telemetry::Family telemetryFamily = telemetry::MeshFamily);
 	/// Light-aware cross-chunk invalidation (issue #141 review fix): when a
 	/// light-relevant edit (emission or sky-transmission flip - the same
 	/// predicate as markEditDirtySections) lands within the 15-voxel halo
