@@ -43,7 +43,15 @@ void Benchmark::requestStart()
 	m_sumVisibility = m_sumMeshUpload = 0;
 	m_terrainJobs = m_meshJobs = m_lodJobs = m_lightCacheJobs = 0;
 	m_terrainMs = m_meshMs = m_lodMs = m_lightCacheMs = 0;
-	m_peakChunks = m_peakDraw = m_peakLoad = m_peakGen = m_peakMesh = 0;
+	// One peak per line: a chained assignment hid m_peakLight from the reset
+	// when it was added (issue #173 review follow-up) - keep each counter
+	// visible so a new peak cannot be forgotten here again.
+	m_peakChunks = 0;
+	m_peakDraw = 0;
+	m_peakLoad = 0;
+	m_peakGen = 0;
+	m_peakMesh = 0;
+	m_peakLight = 0;
 	m_peakIndirectCommands = 0;
 	m_over16 = m_over33 = 0;
 	// Streaming-counter window state must reset with everything else: a
