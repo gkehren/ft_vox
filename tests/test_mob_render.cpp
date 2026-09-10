@@ -5,6 +5,7 @@
 #include <Vulkan/VkGpuProfiler.hpp>
 #include <Vulkan/ImageBarrier.hpp>
 #include <SDL3/SDL.h>
+#include <glm/gtc/matrix_access.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <miniz.h>
 #include <array>
@@ -61,6 +62,117 @@ static VKAPI_ATTR VkResult VKAPI_CALL failAllocate(VkDevice d, const VkDescripto
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     return realAllocate(d, i, s);
 }
+// Issue #130 submission counters: every vkCmdDraw / vkCmdBindDescriptorSets
+// issued while the hooks are armed, across all four mob render passes.
+static PFN_vkCmdDraw realCmdDraw{};
+static uint32_t cmdDrawCalls{};
+static uint32_t cmdDrawMinInstances{~0u}, cmdDrawMaxInstances{};
+static VKAPI_ATTR void VKAPI_CALL countingCmdDraw(VkCommandBuffer cb, uint32_t vertexCount,
+                                                  uint32_t instanceCount, uint32_t firstVertex,
+                                                  uint32_t firstInstance)
+{
+    ++cmdDrawCalls;
+    cmdDrawMinInstances = std::min(cmdDrawMinInstances, instanceCount);
+    cmdDrawMaxInstances = std::max(cmdDrawMaxInstances, instanceCount);
+    realCmdDraw(cb, vertexCount, instanceCount, firstVertex, firstInstance);
+}
+static PFN_vkCmdBindDescriptorSets realBindSets{};
+static uint32_t setBindCalls{};
+static VKAPI_ATTR void VKAPI_CALL
+countingBindSets(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout, uint32_t first,
+                 uint32_t count, const VkDescriptorSet *sets, uint32_t dynamicOffsets,
+                 const uint32_t *pDynamicOffsets)
+{
+    ++setBindCalls;
+    realBindSets(cb, bp, layout, first, count, sets, dynamicOffsets, pDynamicOffsets);
+}
+// Steady-state heap-allocation counter for prepare()/record() (same scheme as
+// test_mobs' simulation profile).
+static bool countingAllocations = false;
+static size_t heapAllocations = 0;
+void *operator new(size_t n)
+{
+    if (countingAllocations)
+        ++heapAllocations;
+    if (auto p = std::malloc(n ? n : 1))
+        return p;
+    throw std::bad_alloc();
+}
+void *operator new[](size_t n)
+{
+    return ::operator new(n);
+}
+void operator delete(void *p) noexcept
+{
+    std::free(p);
+}
+void operator delete[](void *p) noexcept
+{
+    std::free(p);
+}
+void operator delete(void *p, size_t) noexcept
+{
+    std::free(p);
+}
+void operator delete[](void *p, size_t) noexcept
+{
+    std::free(p);
+}
+// Mirror of MobRenderer's per-pass frustum cull so the tests can derive the
+// expected per-pass instance counts from the FrameUBO they submit.
+static bool frustumVisible(const glm::mat4 &matrix, glm::vec3 position)
+{
+    const glm::vec4 center(position + glm::vec3(0, 0.8f, 0), 1);
+    const auto r3 = glm::row(matrix, 3);
+    const std::array<glm::vec4, 6> planes{r3 + glm::row(matrix, 0), r3 - glm::row(matrix, 0),
+                                          r3 + glm::row(matrix, 1), r3 - glm::row(matrix, 1),
+                                          glm::row(matrix, 2),      r3 - glm::row(matrix, 2)};
+    for (auto &p : planes)
+        if (glm::dot(p, center) < -1.6f * glm::length(glm::vec3(p)))
+            return false;
+    return true;
+}
+static uint8_t visibilityMask(const FrameUBO &u, glm::vec3 position)
+{
+    const std::array<glm::mat4, 4> matrices{u.projection * u.view, u.cascadeMatrix0, u.cascadeMatrix1,
+                                            u.cascadeMatrix2};
+    uint8_t mask = 0;
+    for (uint32_t pass = 0; pass < 4; ++pass)
+        if (frustumVisible(matrices[pass], position))
+            mask |= uint8_t(1 << pass);
+    return mask;
+}
+// Expected per-pass submission for `states`: draws = populated static batches
+// (one per MobPart of every species with at least one visible mob), instances
+// = visible mob parts. This is the contract record() must satisfy.
+struct ExpectedPasses
+{
+    std::array<uint32_t, 4> draws{}, instances{};
+};
+static ExpectedPasses expectedPasses(const entities::MobModels &baked,
+                                     const std::vector<entities::MobRenderState> &states, const FrameUBO &u)
+{
+    std::array<std::array<uint32_t, 4>, entities::kMobSpeciesCount> mobCount{};
+    for (const auto &s : states)
+    {
+        const uint8_t mask = visibilityMask(u, s.position);
+        for (uint32_t pass = 0; pass < 4; ++pass)
+            if (mask & (1 << pass))
+                ++mobCount[size_t(s.species)][pass];
+    }
+    ExpectedPasses e;
+    for (size_t sp = 0; sp < entities::kMobSpeciesCount; ++sp)
+    {
+        const uint32_t parts = uint32_t(baked.models[sp].parts.size());
+        for (uint32_t pass = 0; pass < 4; ++pass)
+            if (mobCount[sp][pass])
+            {
+                e.draws[pass] += parts;
+                e.instances[pass] += mobCount[sp][pass] * parts;
+            }
+    }
+    return e;
+}
 struct Fixture
 {
     VkContext context;
@@ -76,6 +188,7 @@ struct Fixture
     AllocatedBuffer uniform{}, readback{};
     uint32_t width = 1200, height = 600;
     double lastRecordMs{}; // CPU command-recording cost of the last render()
+    double lastPrepareMs{}; // CPU MobPrepare cost of the last render()
     Fixture(SDL_Window *window)
     {
         context.init(window);
@@ -160,7 +273,11 @@ struct Fixture
     std::vector<uint8_t> render(const std::vector<entities::MobRenderState> &states, FrameUBO ubo,
                                 uint32_t slot, bool copy = true)
     {
+        const auto prepareStart = std::chrono::steady_clock::now();
         renderer.prepare(slot, ubo, states);
+        lastPrepareMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prepareStart)
+                .count();
         writeBuffer(context.getAllocator(), uniform, &ubo, sizeof(ubo));
         lastRecordMs = 0;
         const auto recordStart = std::chrono::steady_clock::now();
@@ -701,19 +818,246 @@ int main(int argc, char **argv)
         f.resize(800, 600);
         f.render(states, frame(800.f / 600), 0);
         // Camera culling cannot suppress shadow casters behind the eye.
+        // Issue #130: every off-camera mob must feed zero instances to the
+        // color pass while its cascade instances stay exact.
+        const entities::MobModels bakedModels;
         auto hidden = states;
-        for (auto &s : hidden)
-            s.position = {0, 0, -15};
-        f.render(hidden, frame(800.f / 600), 1);
+        const std::array<glm::vec3, 4> hiddenPos{glm::vec3(0, 0, -9), glm::vec3(0, 0, -11),
+                                                 glm::vec3(0, 0, -13), glm::vec3(0, 0, -15)};
+        for (size_t i = 0; i < hidden.size(); ++i)
+            hidden[i].position = hiddenPos[i];
+        const FrameUBO hiddenUbo = frame(800.f / 600);
+        f.render(hidden, hiddenUbo, 1);
         if (f.renderer.visibleCount() != 0)
             throw std::runtime_error("camera culling failed");
+        {
+            std::array<uint8_t, 4> shadowCasters{};
+            for (size_t i = 0; i < hidden.size(); ++i)
+            {
+                const uint8_t mask = visibilityMask(hiddenUbo, hiddenPos[i]);
+                if (mask & 1)
+                    throw std::runtime_error("hidden fixture mob unexpectedly camera-visible");
+                shadowCasters[size_t(hidden[i].species)] |= mask;
+            }
+            if (!(shadowCasters[0] & 0xE) && !(shadowCasters[1] & 0xE) && !(shadowCasters[2] & 0xE) &&
+                !(shadowCasters[3] & 0xE))
+                throw std::runtime_error("hidden fixture has no off-camera shadow caster");
+            const auto expect = expectedPasses(bakedModels, hidden, hiddenUbo);
+            if (expect.draws[0] || expect.instances[0])
+                throw std::runtime_error("hidden fixture must expect no color-pass instances");
+            for (uint32_t pass = 0; pass < 4; ++pass)
+            {
+                const auto st = f.renderer.passStats(1, pass);
+                if (st.draws != expect.draws[pass] || st.instances != expect.instances[pass])
+                    throw std::runtime_error("off-camera mob per-pass instance accounting mismatch: pass " +
+                                             std::to_string(pass) + " draws " + std::to_string(st.draws) +
+                                             " vs " + std::to_string(expect.draws[pass]) + ", instances " +
+                                             std::to_string(st.instances) + " vs " +
+                                             std::to_string(expect.instances[pass]));
+            }
+        }
         f.resize(1200, 600);
+        // ===== Issue #130: static-part instanced batch submission =====
+        {
+            // a. Batch table contract: exactly one batch per baked MobPart, in
+            // species/model/part order, every range valid.
+            std::array<uint32_t, entities::kMobSpeciesCount> speciesParts{};
+            size_t totalParts = 0;
+            for (size_t s = 0; s < entities::kMobSpeciesCount; ++s)
+            {
+                speciesParts[s] = uint32_t(bakedModels.models[s].parts.size());
+                totalParts += speciesParts[s];
+            }
+            std::cout << "Mob batches: total=" << totalParts << " cow=" << speciesParts[0]
+                      << " pig=" << speciesParts[1] << " sheep=" << speciesParts[2]
+                      << " chicken=" << speciesParts[3] << "\n";
+            if (f.renderer.batchCount() != totalParts)
+                throw std::runtime_error("batch table must hold exactly one batch per MobPart");
+            {
+                std::array<uint32_t, entities::kMobSpeciesCount> seen{}, next{};
+                for (uint32_t b = 0; b < f.renderer.batchCount(); ++b)
+                {
+                    const auto info = f.renderer.batchInfo(b);
+                    if (info.firstVertex + info.vertexCount > bakedModels.vertices.size())
+                        throw std::runtime_error("batch references vertices outside the shared buffer");
+                    if (info.vertexCount == 0 || info.vertexCount % 6)
+                        throw std::runtime_error("batch vertex range is not whole boxes");
+                    if (info.texture >= kMobTextures.size())
+                        throw std::runtime_error("batch texture index out of range");
+                    const size_t s = size_t(info.species);
+                    if (info.partIndex != next[s]++)
+                        throw std::runtime_error("batch part indices must be contiguous per species");
+                    ++seen[s];
+                }
+                for (size_t s = 0; s < entities::kMobSpeciesCount; ++s)
+                    if (seen[s] != speciesParts[s])
+                        throw std::runtime_error("batch table lost or duplicated a species range");
+            }
+
+            // b. 48-sheep worst case: <= 18 draws/pass, <= 72 total, exact
+            // per-pass instance accounting, verified against real submission
+            // via vkCmdDraw hooks.
+            std::vector<entities::MobRenderState> sheep;
+            for (int i = 0; i < 48; ++i)
+                sheep.push_back({entities::MobSpecies::Sheep, {(i % 8 - 3.5f) * 2.2f, 0, (i / 8) * 2.2f},
+                                 0, 1, 0, 0, 1});
+            const FrameUBO sheepUbo = frame(2, true);
+            for (const auto &s : sheep)
+                if (visibilityMask(sheepUbo, s.position) != 0xF)
+                    throw std::runtime_error("sheep fixture must be camera + all-cascade visible");
+            const auto sheepExpect = expectedPasses(bakedModels, sheep, sheepUbo);
+            cmdDrawCalls = setBindCalls = 0;
+            cmdDrawMinInstances = ~0u;
+            cmdDrawMaxInstances = 0;
+            realCmdDraw = vkCmdDraw;
+            realBindSets = vkCmdBindDescriptorSets;
+            vkCmdDraw = countingCmdDraw;
+            vkCmdBindDescriptorSets = countingBindSets;
+            const auto sheepImage = f.render(sheep, sheepUbo, 0);
+            vkCmdDraw = realCmdDraw;
+            vkCmdBindDescriptorSets = realBindSets;
+            uint32_t sheepDraws = 0;
+            for (uint32_t pass = 0; pass < 4; ++pass)
+            {
+                const auto st = f.renderer.passStats(0, pass);
+                if (st.draws != sheepExpect.draws[pass] || st.instances != sheepExpect.instances[pass])
+                    throw std::runtime_error("sheep fixture per-pass batch accounting mismatch");
+                sheepDraws += st.draws;
+            }
+            if (sheepDraws > 4 * speciesParts[size_t(entities::MobSpecies::Sheep)])
+                throw std::runtime_error("48 sheep exceed 18 draws/pass x 4 passes");
+            if (cmdDrawCalls != sheepDraws)
+                throw std::runtime_error("recorded vkCmdDraw count differs from reported batches");
+            if (cmdDrawMinInstances < 1 || cmdDrawMaxInstances > entities::kMaxMobCount)
+                throw std::runtime_error("a batch draw was empty or over-populated");
+            // Sheep sample 3 textures (base/wool/undercoat): at most one frame
+            // set + one texture run per texture per pass.
+            if (setBindCalls > 4 * 4)
+                throw std::runtime_error("descriptor set binds did not collapse to texture runs");
+            size_t sheepPixels = 0;
+            for (size_t i = 0; i < sheepImage.size(); i += 4)
+                if (sheepImage[i] != sheepImage[0] || sheepImage[i + 1] != sheepImage[1])
+                    ++sheepPixels;
+            if (sheepPixels < 10000)
+                throw std::runtime_error("48-sheep fixture rendered no mobs");
+
+            // c. Mixed pass visibility: one camera+all-cascade mob, one
+            // camera-only mob (outside the cascade ortho boxes), one
+            // shadow-only mob. A dedicated camera looking toward +x keeps the
+            // camera-only mob inside the frustum but laterally past the
+            // cascade boxes centered on the origin.
+            std::vector<entities::MobRenderState> mixedVis;
+            const std::array<glm::vec3, 3> visPos{glm::vec3(16, 1, 0), glm::vec3(30, 1, 0),
+                                                  glm::vec3(0, 0, -10)};
+            for (const auto &p : visPos)
+                mixedVis.push_back({entities::MobSpecies::Sheep, p, 0, 1, 0, 0, 1});
+            FrameUBO visUbo = frame(2, true);
+            const glm::vec3 visEye(0.f, 2.f, -7.f);
+            visUbo.view = glm::lookAt(visEye, glm::vec3(30, 1, 0), glm::vec3(0, 1, 0));
+            visUbo.projection = glm::perspective(glm::radians(45.f), 2.f, 0.1f, 400.f);
+            visUbo.viewPos = glm::vec4(visEye, 1);
+            const std::array<uint8_t, 3> masks{visibilityMask(visUbo, visPos[0]),
+                                               visibilityMask(visUbo, visPos[1]),
+                                               visibilityMask(visUbo, visPos[2])};
+            if (masks[0] != 0xF)
+                throw std::runtime_error("origin mob must be camera + all-cascade visible");
+            if (!(masks[1] & 1) || (masks[1] & 0xE))
+                throw std::runtime_error("side mob must be camera-only");
+            if ((masks[2] & 1) || !(masks[2] & 0xE))
+                throw std::runtime_error("behind mob must be shadow-only");
+            f.render(mixedVis, visUbo, 0);
+            const auto visExpect = expectedPasses(bakedModels, mixedVis, visUbo);
+            for (uint32_t pass = 0; pass < 4; ++pass)
+            {
+                const auto st = f.renderer.passStats(0, pass);
+                if (st.draws != visExpect.draws[pass] || st.instances != visExpect.instances[pass])
+                    throw std::runtime_error("mixed-visibility per-pass instance accounting mismatch");
+            }
+            if (f.renderer.visibleCount() != 2)
+                throw std::runtime_error("visibleCount must count camera-visible mobs only");
+
+            // d. Capacity policy: populations past kMaxMobCount are
+            // contractually invalid and fail deterministically; the renderer
+            // stays usable afterwards.
+            {
+                std::vector<entities::MobRenderState> tooMany(entities::kMaxMobCount + 1,
+                                                              entities::MobRenderState{
+                                                                  entities::MobSpecies::Cow, {0, 0, 0}});
+                bool threw = false;
+                try
+                {
+                    f.renderer.prepare(0, sheepUbo, tooMany);
+                }
+                catch (const std::exception &)
+                {
+                    threw = true;
+                }
+                if (!threw)
+                    throw std::runtime_error("over-capacity population must fail deterministically");
+                f.render(sheep, sheepUbo, 1);
+                if (f.renderer.visibleCount() != 48)
+                    throw std::runtime_error("renderer unusable after a rejected prepare");
+            }
+
+            // e. One-mob sparse population, frames-in-flight isolation and the
+            // empty population (no draws, no stale batches).
+            {
+                const std::vector<entities::MobRenderState> oneCow{
+                    entities::MobRenderState{entities::MobSpecies::Cow, {0, 0, 0}, 0, 1, 0, 0, 1}};
+                const uint32_t cowParts = uint32_t(bakedModels.models[size_t(entities::MobSpecies::Cow)].parts.size());
+                f.render(oneCow, sheepUbo, 1);
+                for (uint32_t pass = 0; pass < 4; ++pass)
+                {
+                    const auto st = f.renderer.passStats(1, pass);
+                    if (st.draws != cowParts || st.instances != cowParts)
+                        throw std::runtime_error("single-cow per-pass accounting mismatch");
+                }
+                cmdDrawCalls = 0;
+                realCmdDraw = vkCmdDraw;
+                vkCmdDraw = countingCmdDraw;
+                const auto emptyImage = f.render({}, sheepUbo, 1);
+                vkCmdDraw = realCmdDraw;
+                if (cmdDrawCalls)
+                    throw std::runtime_error("empty population emitted draws");
+                for (uint32_t pass = 0; pass < 4; ++pass)
+                {
+                    const auto st = f.renderer.passStats(1, pass);
+                    if (st.draws || st.instances)
+                        throw std::runtime_error("stale batches survived an empty prepare");
+                }
+                for (size_t i = 0; i < emptyImage.size(); i += 4)
+                    if (emptyImage[i] != emptyImage[0] || emptyImage[i + 1] != emptyImage[1])
+                        throw std::runtime_error("empty population rendered pixels");
+                // The other frame slot must be untouched by the empty frame.
+                const auto fullAgain = f.render(sheep, sheepUbo, 0);
+                if (fullAgain != sheepImage)
+                    throw std::runtime_error("frame slot interference after empty population");
+                for (uint32_t pass = 0; pass < 4; ++pass)
+                {
+                    const auto st = f.renderer.passStats(0, pass);
+                    if (st.draws != sheepExpect.draws[pass] || st.instances != sheepExpect.instances[pass])
+                        throw std::runtime_error("sheep stats drifted after slot alternation");
+                }
+            }
+
+            // f. Steady-state prepare must be heap-allocation-free.
+            {
+                countingAllocations = true;
+                heapAllocations = 0;
+                for (int i = 0; i < 64; ++i)
+                    f.renderer.prepare(uint32_t(i) % 2, sheepUbo, sheep);
+                const size_t steady = heapAllocations;
+                countingAllocations = false;
+                if (steady)
+                    throw std::runtime_error("MobRenderer::prepare allocates in steady state");
+            }
+        }
         states.clear();
         for (int i = 0; i < 48; ++i)
             states.push_back(
                 {entities::MobSpecies(i % int(entities::kMobSpeciesCount)),
                  {(i % 8 - 3.5f) * 2.2f, 0, (i / 8) * 2.2f}, 0, 1, 0, 0, 1});
-        std::vector<double> gpuTimes, cpuTimes, recordTimes;
+        std::vector<double> gpuTimes, cpuTimes, recordTimes, prepareTimes;
         size_t serial = 0;
         for (int i = 0; i < 160; ++i)
         {
@@ -726,6 +1070,7 @@ int main(int argc, char **argv)
             {
                 cpuTimes.push_back(cpu);
                 recordTimes.push_back(f.lastRecordMs);
+                prepareTimes.push_back(f.lastPrepareMs);
                 if (sample.serial != serial && sample.present[size_t(GpuPass::Mobs)])
                 {
                     double sum = sample.ms[size_t(GpuPass::Mobs)];
@@ -740,7 +1085,86 @@ int main(int argc, char **argv)
         }
         if (f.renderer.visibleCount() != 48)
             throw std::runtime_error("48-mob fixture not fully visible");
+        // Issue #130: mixed-fixture submission accounting (last prepare ran on
+        // slot 1 with the full 48-mob population).
+        std::array<uint32_t, 4> mixedDraws{}, mixedInst{};
+        {
+            const auto mixedExpect = expectedPasses(bakedModels, states, frame(2, true));
+            uint32_t totalDraws = 0;
+            for (uint32_t pass = 0; pass < 4; ++pass)
+            {
+                const auto st = f.renderer.passStats(1, pass);
+                if (st.draws != mixedExpect.draws[pass] || st.instances != mixedExpect.instances[pass])
+                    throw std::runtime_error("mixed 48-mob per-pass accounting mismatch");
+                totalDraws += st.draws;
+                mixedDraws[pass] = st.draws;
+                mixedInst[pass] = st.instances;
+            }
+            if (totalDraws > 4 * f.renderer.batchCount())
+                throw std::runtime_error("mixed fixture exceeds one draw per static batch per pass");
+        }
+        // Issue #130 instrumentation: the all-sheep worst articulation case.
+        std::array<uint32_t, 4> sheepBenchDraws{};
+        std::vector<double> sheepGpuTimes, sheepRecordTimes, sheepPrepareTimes;
+        {
+            std::vector<entities::MobRenderState> sheep;
+            for (int i = 0; i < 48; ++i)
+                sheep.push_back({entities::MobSpecies::Sheep, {(i % 8 - 3.5f) * 2.2f, 0, (i / 8) * 2.2f},
+                                 0, 1, 0, 0, 1});
+            size_t sheepSerial = 0;
+            for (int i = 0; i < 80; ++i)
+            {
+                auto pixels = f.render(sheep, frame(2, true), i % 2, i == 79);
+                const auto &sample = f.gpu.latest();
+                if (i >= 20)
+                {
+                    sheepRecordTimes.push_back(f.lastRecordMs);
+                    sheepPrepareTimes.push_back(f.lastPrepareMs);
+                    if (sample.serial != sheepSerial && sample.present[size_t(GpuPass::Mobs)])
+                    {
+                        double sum = sample.ms[size_t(GpuPass::Mobs)];
+                        for (int c = 0; c < 3; ++c)
+                            sum += sample.ms[size_t(GpuPass::MobShadow0) + c];
+                        sheepGpuTimes.push_back(sum);
+                    }
+                }
+                sheepSerial = sample.serial;
+                if (i == 79)
+                    f.save(output / "48-sheep.ppm", pixels);
+            }
+            for (uint32_t pass = 0; pass < 4; ++pass)
+                sheepBenchDraws[pass] = f.renderer.passStats(1, pass).draws;
+        }
         std::ofstream report(output / "gpu-profile.txt");
+        const auto statsLine = [&](const char *label, const std::array<uint32_t, 4> &draws,
+                                   const std::array<uint32_t, 4> &inst) {
+            report << label << " draws/pass=" << draws[0] << "/" << draws[1] << "/" << draws[2] << "/"
+                   << draws[3] << " instances/pass=" << inst[0] << "/" << inst[1] << "/" << inst[2]
+                   << "/" << inst[3] << " (camera/shadow0/shadow1/shadow2)\n";
+        };
+        statsLine("48 mobs", mixedDraws, mixedInst);
+        {
+            std::array<uint32_t, 4> sheepInst{};
+            for (uint32_t pass = 0; pass < 4; ++pass)
+                sheepInst[pass] = f.renderer.passStats(1, pass).instances;
+            statsLine("48 sheep", sheepBenchDraws, sheepInst);
+        }
+        const auto p95 = [](std::vector<double> v) {
+            std::sort(v.begin(), v.end());
+            return v.empty() ? 0.0 : v[v.size() * 95 / 100];
+        };
+        const auto mean = [](const std::vector<double> &v) {
+            return v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size();
+        };
+        report << "48 mobs MobPrepare CPU mean_ms=" << mean(prepareTimes) << " p95_ms=" << p95(prepareTimes)
+               << "\n";
+        report << "48 sheep MobPrepare CPU mean_ms=" << mean(sheepPrepareTimes)
+               << " p95_ms=" << p95(sheepPrepareTimes) << "\n";
+        report << "48 sheep command recording CPU mean_ms=" << mean(sheepRecordTimes)
+               << " p95_ms=" << p95(sheepRecordTimes) << "\n";
+        if (!sheepGpuTimes.empty())
+            report << "48 sheep color + 3 shadows GPU mean_ms=" << mean(sheepGpuTimes)
+                   << " p95_ms=" << p95(sheepGpuTimes) << " samples=" << sheepGpuTimes.size() << "\n";
         report << "Device: " << f.context.getDeviceProperties().deviceName << "\n";
         // Issue #160 memory/cost evidence: mip-0 vs full-chain payload and
         // the whole CPU-generate + multi-level upload reload cost.

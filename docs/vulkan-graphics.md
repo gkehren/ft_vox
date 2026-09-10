@@ -412,16 +412,22 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
   - Shared cascaded shadow map (CSM) sampling via `sampleDirectionalShadow`
   - Consistent contrast / saturation / scotopic night vision and `sunReach`-gated distance fog via the shared atmosphere contract (`atmosphere_fog.inc.glsl`, issue #159)
 - **Visibility:** one frustum test per mob against the camera matrix and the three
-  cascade matrices; a per-draw visibility mask selects which pass sees which mob
-  (`visibleCount` feeds the HUD). Casters behind the camera are still drawn into
-  shadow cascades.
-- **Draws:** `record` is called once inside OpaquePass (HDR color + depth, before
+  cascade matrices, producing a 4-bit per-mob mask (bit 0 camera, bits 1-3
+  cascades) that routes instances into per-pass instance slices (`visibleCount`
+  feeds the HUD and counts only bit 0). Casters behind the camera are still drawn
+  into shadow cascades.
+- **Draws (issue #130):** `record` is called once inside OpaquePass (HDR color + depth, before
   overlays) and once per shadow cascade inside ShadowPass. Push constant = the
   view-projection of the target (camera or cascade); descriptor set 0 is the frame
-  set, set 1 is the mob albedo. Per-part draw calls reuse the currently bound
-  texture descriptor when consecutive parts use the same texture, avoiding
-  redundant descriptor binds (draws are not reordered or merged); shadow pipeline
-  adds depth bias and an alpha-cut-only fragment shader.
+  set, set 1 is the mob albedo. `prepare` computes each part transform once and
+  scatters copies into one contiguous instance slice per pass
+  (`[camera][shadow0][shadow1][shadow2]` in the mapped per-frame buffer), then
+  emits one instanced `BatchDraw` per populated static part batch (at most one per
+  baked `MobPart` — 42 today — instead of one draw per visible mob part), so
+  submission scales with the static part/material universe, not mob count ×
+  parts. Batch order follows the baked model order, so set-1 binds stay at a
+  handful of texture runs per pass; the shadow pipeline adds depth bias and an
+  alpha-cut-only fragment shader.
 - **Textures (`MobTextures`):** six entity PNGs (`cow_temperate`, `pig_temperate`,
   `sheep`, `sheep_wool`, `sheep_wool_undercoat`, `chicken_temperate`) loaded
   through `ResourcePackReader::readEntityTexture` (`assets/minecraft/textures/entity/…`,

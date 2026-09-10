@@ -455,7 +455,10 @@ recreated as chunks stream in and out.
 
 `MobRenderState` (species, interpolated position/yaw/gait/stride, idle look,
 flap) is a plain CPU struct; `WorldRenderer::setMobs` copies it for the frame and
-`MobRenderer::prepare` builds per-part transforms. Each render state also carries
+`MobRenderer::prepare` builds each part transform once and scatters copies into
+per-pass contiguous instance slices for the camera pass and the three shadow
+cascades (issue #130: one instanced draw per populated static part batch). Each
+render state also carries
 `localSkylight` / `localBlockRgb` sampled per frame from the chunk light caches
 (trilinear over packed 16-bit voxel light, `ChunkManager::sampleSmoothedLight`).
 UI: HUD "Passive mobs" toggle and active/visible counters (`GameUI`); CPU time
