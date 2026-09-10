@@ -436,6 +436,43 @@ static void poseTimeAlignment()
         CHECK(std::abs(states[0].look - expected) < 1e-6);
     }
 }
+static void locomotionInterpolationNonRegression()
+{
+    // Gait/stride stay simulation-owned and keep their previous -> current
+    // interpolation contract whatever the render alpha (issue #129).
+    World w;
+    w.spawn = false;
+    std::vector<MobRenderState> states;
+    for (double alpha : {0.0, 0.25, 0.5, 0.75, 0.999})
+    {
+        MobSystem s;
+        s.reset(7);
+        CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+        // Tick until a locomotion tick separates the channels from their
+        // snapshots: the idle mob starts walking within its initial 2-6 s
+        // timer, well inside the 600-tick bound.
+        for (int i = 0; i < 600 && (s.mobs()[0].previousGait == s.mobs()[0].gait ||
+                                    s.mobs()[0].previousStride == s.mobs()[0].stride);
+             ++i)
+            s.update(s.settings.fixedStep, w, {0, 0, 0}, 112);
+        const auto &m = s.mobs()[0];
+        CHECK(m.previousGait != m.gait);
+        CHECK(m.previousStride != m.stride);
+        s.update(alpha * s.settings.fixedStep, w, {0, 0, 0}, 112);
+        s.renderStates(states);
+        const float expectedGait = float(m.previousGait + (m.gait - m.previousGait) * alpha);
+        const float expectedStride = float(m.previousStride + (m.stride - m.previousStride) * alpha);
+        CHECK(std::abs(states[0].gait - expectedGait) < 1e-6);
+        CHECK(std::abs(states[0].stride - expectedStride) < 1e-6);
+        // Rendering must not touch the locomotion channels or their snapshots.
+        const double gait = m.gait, stride = m.stride;
+        const double previousGait = m.previousGait, previousStride = m.previousStride;
+        s.renderStates(states);
+        s.renderStates(states);
+        CHECK(m.gait == gait && m.stride == stride);
+        CHECK(m.previousGait == previousGait && m.previousStride == previousStride);
+    }
+}
 static void renderCadenceInvariance()
 {
     // The same simulated interval must land on the same cosmetic phase for
@@ -545,25 +582,35 @@ static void renderHandoffReadOnly()
         CHECK(a[i].flap == b[i].flap);
         CHECK(a[i].position == b[i].position);
     }
-    // Rendering consumes simulation state without mutating it.
-    std::vector<double> before;
-    for (auto &m : s.mobs())
-        before.insert(before.end(),
-                      {m.age, m.previousAge, m.randomState * 1.0, m.body.position.x, m.body.position.y,
-                       m.body.position.z, m.yaw, m.gait, m.stride});
-    s.renderStates(a);
-    size_t k = 0;
-    for (auto &m : s.mobs())
+    // Rendering consumes simulation state without mutating it. randomState is
+    // snapshotted as uint64_t: narrowing it through double keeps only 53 bits
+    // and would hide low-bit mutations.
+    struct MobSnapshot
     {
-        CHECK(m.age == before[k++]);
-        CHECK(m.previousAge == before[k++]);
-        CHECK(double(m.randomState) == before[k++]);
-        CHECK(m.body.position.x == before[k++]);
-        CHECK(m.body.position.y == before[k++]);
-        CHECK(m.body.position.z == before[k++]);
-        CHECK(m.yaw == before[k++]);
-        CHECK(m.gait == before[k++]);
-        CHECK(m.stride == before[k++]);
+        double age;
+        double previousAge;
+        uint64_t randomState;
+        glm::dvec3 position;
+        double yaw;
+        double gait;
+        double stride;
+    };
+    std::vector<MobSnapshot> before;
+    before.reserve(s.mobs().size());
+    for (auto &m : s.mobs())
+        before.push_back({m.age, m.previousAge, m.randomState, m.body.position, m.yaw, m.gait, m.stride});
+    s.renderStates(a);
+    CHECK(s.mobs().size() == before.size());
+    for (size_t i = 0; i < before.size(); ++i)
+    {
+        const auto &m = s.mobs()[i];
+        CHECK(m.age == before[i].age);
+        CHECK(m.previousAge == before[i].previousAge);
+        CHECK(m.randomState == before[i].randomState);
+        CHECK(m.body.position == before[i].position);
+        CHECK(m.yaw == before[i].yaw);
+        CHECK(m.gait == before[i].gait);
+        CHECK(m.stride == before[i].stride);
     }
     // Steady-state rendering does not allocate.
     counting = true;
@@ -653,6 +700,7 @@ int main(int argc, char **argv)
     subTickCosmetics();
     chickenFlap();
     poseTimeAlignment();
+    locomotionInterpolationNonRegression();
     renderCadenceInvariance();
     suspensionResume();
     droppedStepPhase();
