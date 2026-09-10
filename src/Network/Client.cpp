@@ -121,7 +121,8 @@ void Client::handleReceive(const boost::system::error_code &error, std::size_t b
 {
 	if (!error && bytesTransferred > 0)
 	{
-		// ⚡ Bolt: Replace per-packet dynamic allocation with thread_local to reuse capacity.
+		// thread_local: the buffer keeps its capacity across packets instead
+		// of allocating once per receive.
 		thread_local std::vector<uint8_t> data;
 		data.assign(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
 		handleMessage(data);
@@ -178,7 +179,8 @@ void Client::handleMessage(const std::vector<uint8_t> &data)
 		if (!buf.hasMore(numPlayers * (sizeof(uint32_t) + 3 * sizeof(float))))
 			return;
 
-		// ⚡ Bolt: Use thread_local to reuse capacity and prevent per-packet dynamic heap allocations.
+		// thread_local: the vector keeps its capacity across packets instead
+		// of allocating once per world-state message.
 		thread_local std::vector<uint32_t> currentPlayers;
 		currentPlayers.clear();
 		currentPlayers.reserve(numPlayers);

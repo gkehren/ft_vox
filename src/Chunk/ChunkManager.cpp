@@ -1161,6 +1161,12 @@ void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSetti
 		static_cast<float>(settings.maxRenderDistance) * kChunkUnloadDistanceFactor;
 	const float unloadDistSq = unloadDist * unloadDist;
 
+	// Camera-relative offsets are loop-invariant: cache them once instead of
+	// rebuilding a per-chunk center vector (same pattern as collectShadowList).
+	const glm::vec3 camPos = camera.getPosition();
+	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
+
 	std::vector<glm::ivec3> toUnload;
 	{
 		std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -1168,15 +1174,17 @@ void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSetti
 		{
 			if (!chunk || chunk->isInTransit())
 				continue;
-			const glm::vec3 center = chunk->getPosition() + glm::vec3(CHUNK_SIZE * 0.5f, 0.f, CHUNK_SIZE * 0.5f);
-			const float dx = camera.getPosition().x - center.x;
-			const float dz = camera.getPosition().z - center.z;
+
+			const glm::vec3 p = chunk->getPosition();
+			const float dx = camOffsetX - p.x;
+			const float dz = camOffsetZ - p.z;
+
 			if (dx * dx + dz * dz > unloadDistSq)
 			{
 				const glm::ivec3 chunkPos(
-					static_cast<int>(std::floor(chunk->getPosition().x / static_cast<float>(CHUNK_SIZE))),
+					static_cast<int>(std::floor(p.x / static_cast<float>(CHUNK_SIZE))),
 					0,
-					static_cast<int>(std::floor(chunk->getPosition().z / static_cast<float>(CHUNK_SIZE))));
+					static_cast<int>(std::floor(p.z / static_cast<float>(CHUNK_SIZE))));
 				toUnload.push_back(chunkPos);
 			}
 		}
