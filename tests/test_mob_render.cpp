@@ -64,6 +64,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL failAllocate(VkDevice d, const VkDescripto
 }
 // Issue #130 submission counters: every vkCmdDraw / vkCmdBindDescriptorSets
 // issued while the hooks are armed, across all four mob render passes.
+struct RecordedDraw
+{
+    uint32_t vertexCount, instanceCount, firstVertex, firstInstance;
+};
+static std::vector<RecordedDraw> recordedDraws;
 static PFN_vkCmdDraw realCmdDraw{};
 static uint32_t cmdDrawCalls{};
 static uint32_t cmdDrawMinInstances{~0u}, cmdDrawMaxInstances{};
@@ -74,6 +79,7 @@ static VKAPI_ATTR void VKAPI_CALL countingCmdDraw(VkCommandBuffer cb, uint32_t v
     ++cmdDrawCalls;
     cmdDrawMinInstances = std::min(cmdDrawMinInstances, instanceCount);
     cmdDrawMaxInstances = std::max(cmdDrawMaxInstances, instanceCount);
+    recordedDraws.push_back({vertexCount, instanceCount, firstVertex, firstInstance});
     realCmdDraw(cb, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 static PFN_vkCmdBindDescriptorSets realBindSets{};
@@ -173,6 +179,37 @@ static ExpectedPasses expectedPasses(const entities::MobModels &baked,
     }
     return e;
 }
+// Proof that the vkCmdDraw commands actually recorded for one pass are the
+// expected batch stream (issue #130 review): no empty draws, no gap/overlap in
+// firstInstance, instance counts summing to the expected visible part
+// instances, and geometry matching the static batch table entry. Requires the
+// pass's populated batches to be `batchBegin .. batchBegin + count - 1` in
+// batch order (true for single-species and all-populated fixtures).
+// expectedPerBatch > 0 additionally pins every batch's instance count.
+static void verifyRecordedPassDraws(const MobRenderer &renderer, const RecordedDraw *draws,
+                                    uint32_t count, uint32_t expectedInstances, uint32_t batchBegin,
+                                    uint32_t expectedPerBatch)
+{
+    uint32_t running = 0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const RecordedDraw &d = draws[i];
+        if (d.instanceCount == 0)
+            throw std::runtime_error("recorded vkCmdDraw has instanceCount == 0");
+        if (expectedPerBatch && d.instanceCount != expectedPerBatch)
+            throw std::runtime_error("recorded vkCmdDraw instance count != populated batch size");
+        if (d.firstInstance != running)
+            throw std::runtime_error("recorded vkCmdDraw firstInstance gap/overlap");
+        running += d.instanceCount;
+        if (running > expectedInstances)
+            throw std::runtime_error("recorded vkCmdDraw instances exceed the pass slice");
+        const auto batch = renderer.batchInfo(batchBegin + i);
+        if (d.firstVertex != batch.firstVertex || d.vertexCount != batch.vertexCount)
+            throw std::runtime_error("recorded vkCmdDraw geometry does not match its static batch");
+    }
+    if (running != expectedInstances)
+        throw std::runtime_error("recorded vkCmdDraw instance sum != expected visible parts");
+}
 struct Fixture
 {
     VkContext context;
@@ -270,14 +307,21 @@ struct Fixture
             allocator, size_t(w) * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO,
             VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
     }
-    std::vector<uint8_t> render(const std::vector<entities::MobRenderState> &states, FrameUBO ubo,
-                                uint32_t slot, bool copy = true)
+    // CPU-side per-frame batching (MobRenderer::prepare) only.
+    void prepare(uint32_t slot, const FrameUBO &ubo, const std::vector<entities::MobRenderState> &states)
     {
         const auto prepareStart = std::chrono::steady_clock::now();
         renderer.prepare(slot, ubo, states);
         lastPrepareMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prepareStart)
                 .count();
+    }
+    // Records + submits the four mob passes WITHOUT re-preparing: whatever
+    // prepare() last wrote for `slot` is exactly what gets drawn. Issue #130
+    // review: frame-slot isolation must be observable without refreshing the
+    // slot under test first.
+    std::vector<uint8_t> renderPrepared(uint32_t slot, const FrameUBO &ubo, bool copy = true)
+    {
         writeBuffer(context.getAllocator(), uniform, &ubo, sizeof(ubo));
         lastRecordMs = 0;
         const auto recordStart = std::chrono::steady_clock::now();
@@ -378,6 +422,12 @@ struct Fixture
         vmaInvalidateAllocation(context.getAllocator(), readback.allocation, 0, VK_WHOLE_SIZE);
         auto *data = static_cast<uint8_t *>(readback.info.pMappedData);
         return {data, data + size_t(width) * height * 4};
+    }
+    std::vector<uint8_t> render(const std::vector<entities::MobRenderState> &states, FrameUBO ubo,
+                                uint32_t slot, bool copy = true)
+    {
+        prepare(slot, ubo, states);
+        return renderPrepared(slot, ubo, copy);
     }
     void save(const fs::path &path, const std::vector<uint8_t> &image)
     {
@@ -909,6 +959,8 @@ int main(int argc, char **argv)
             cmdDrawCalls = setBindCalls = 0;
             cmdDrawMinInstances = ~0u;
             cmdDrawMaxInstances = 0;
+            recordedDraws.clear();
+            recordedDraws.reserve(256); // pre-reserved: keep allocation tests clean
             realCmdDraw = vkCmdDraw;
             realBindSets = vkCmdBindDescriptorSets;
             vkCmdDraw = countingCmdDraw;
@@ -917,15 +969,43 @@ int main(int argc, char **argv)
             vkCmdDraw = realCmdDraw;
             vkCmdBindDescriptorSets = realBindSets;
             uint32_t sheepDraws = 0;
+            std::array<uint32_t, 4> sheepPassDraws{}, sheepPassInst{};
             for (uint32_t pass = 0; pass < 4; ++pass)
             {
                 const auto st = f.renderer.passStats(0, pass);
                 if (st.draws != sheepExpect.draws[pass] || st.instances != sheepExpect.instances[pass])
                     throw std::runtime_error("sheep fixture per-pass batch accounting mismatch");
                 sheepDraws += st.draws;
+                sheepPassDraws[pass] = st.draws;
+                sheepPassInst[pass] = st.instances;
             }
             if (sheepDraws > 4 * speciesParts[size_t(entities::MobSpecies::Sheep)])
                 throw std::runtime_error("48 sheep exceed 18 draws/pass x 4 passes");
+            // Recorded-command proof (issue #130 review): the emitted draws are
+            // the 18 sheep batches in table order, each carrying all 48
+            // instances, with gap-free firstInstance ranges that end exactly at
+            // the pass total.
+            if (cmdDrawCalls != sheepDraws || recordedDraws.size() != sheepDraws)
+                throw std::runtime_error("recorded vkCmdDraw count differs from reported batches");
+            uint32_t sheepBatchBegin = ~0u;
+            for (uint32_t b = 0; b < f.renderer.batchCount(); ++b)
+                if (f.renderer.batchInfo(b).species == entities::MobSpecies::Sheep)
+                {
+                    sheepBatchBegin = b;
+                    break;
+                }
+            {
+                size_t cursor = 0;
+                for (uint32_t pass : {1u, 2u, 3u, 0u}) // command order: cascades then color
+                {
+                    verifyRecordedPassDraws(f.renderer, recordedDraws.data() + cursor,
+                                            sheepPassDraws[pass], sheepPassInst[pass], sheepBatchBegin,
+                                            uint32_t(sheep.size()));
+                    cursor += sheepPassDraws[pass];
+                }
+                if (cursor != recordedDraws.size())
+                    throw std::runtime_error("unexpected extra recorded draws");
+            }
             if (cmdDrawCalls != sheepDraws)
                 throw std::runtime_error("recorded vkCmdDraw count differs from reported batches");
             if (cmdDrawMinInstances < 1 || cmdDrawMaxInstances > entities::kMaxMobCount)
@@ -999,8 +1079,9 @@ int main(int argc, char **argv)
                     throw std::runtime_error("renderer unusable after a rejected prepare");
             }
 
-            // e. One-mob sparse population, frames-in-flight isolation and the
-            // empty population (no draws, no stale batches).
+            // e. One-mob sparse population, frame-slot isolation without
+            // re-preparing, and the empty population (no draws, no stale
+            // batches).
             {
                 const std::vector<entities::MobRenderState> oneCow{
                     entities::MobRenderState{entities::MobSpecies::Cow, {0, 0, 0}, 0, 1, 0, 0, 1}};
@@ -1012,32 +1093,64 @@ int main(int argc, char **argv)
                     if (st.draws != cowParts || st.instances != cowParts)
                         throw std::runtime_error("single-cow per-pass accounting mismatch");
                 }
-                cmdDrawCalls = 0;
+                // Frame-slot isolation (issue #130 review): prepare slot 0,
+                // then prepare the OTHER slot empty and record slot 0 with
+                // renderPrepared() — no re-preparation — so a slot-1 prepare
+                // touching slot 0 draws/pass bases/stats/instances is caught.
+                f.renderer.prepare(0, sheepUbo, sheep);
+                const auto isolatedFull = f.renderPrepared(0, sheepUbo);
+                if (isolatedFull != sheepImage)
+                    throw std::runtime_error("prepare + renderPrepared diverges from render()");
+                f.renderer.prepare(1, sheepUbo, {});
+                for (uint32_t pass = 0; pass < 4; ++pass)
+                {
+                    const auto st = f.renderer.passStats(0, pass);
+                    if (st.draws != sheepExpect.draws[pass] || st.instances != sheepExpect.instances[pass])
+                        throw std::runtime_error("prepare on frame slot 1 corrupted slot 0 stats");
+                }
+                const auto isolatedAgain = f.renderPrepared(0, sheepUbo);
+                if (isolatedAgain != isolatedFull)
+                    throw std::runtime_error("slot 1 prepare corrupted slot 0 draws or instance buffer");
+                for (uint32_t pass = 0; pass < 4; ++pass)
+                {
+                    const auto st = f.renderer.passStats(0, pass);
+                    if (st.draws != sheepExpect.draws[pass] || st.instances != sheepExpect.instances[pass])
+                        throw std::runtime_error("slot 0 stats drifted after slot 1 prepare");
+                }
+                // Reverse direction: slot 0 empty, slot 1 full — slot 0 must
+                // stay empty even while slot 1 is prepared and recorded.
+                f.renderer.prepare(0, sheepUbo, {});
+                f.renderer.prepare(1, sheepUbo, sheep);
+                f.renderPrepared(1, sheepUbo);
+                for (uint32_t pass = 0; pass < 4; ++pass)
+                {
+                    const auto st = f.renderer.passStats(0, pass);
+                    if (st.draws || st.instances)
+                        throw std::runtime_error("slot 1 prepare/record disturbed empty slot 0");
+                }
+                cmdDrawCalls = setBindCalls = 0;
+                cmdDrawMinInstances = ~0u;
+                cmdDrawMaxInstances = 0;
+                recordedDraws.clear();
+                recordedDraws.reserve(8);
                 realCmdDraw = vkCmdDraw;
+                realBindSets = vkCmdBindDescriptorSets;
                 vkCmdDraw = countingCmdDraw;
-                const auto emptyImage = f.render({}, sheepUbo, 1);
+                vkCmdBindDescriptorSets = countingBindSets;
+                const auto emptyImage = f.renderPrepared(0, sheepUbo); // record slot 0 as-is
                 vkCmdDraw = realCmdDraw;
-                if (cmdDrawCalls)
+                vkCmdBindDescriptorSets = realBindSets;
+                if (cmdDrawCalls || !recordedDraws.empty())
                     throw std::runtime_error("empty population emitted draws");
                 for (uint32_t pass = 0; pass < 4; ++pass)
                 {
-                    const auto st = f.renderer.passStats(1, pass);
+                    const auto st = f.renderer.passStats(0, pass);
                     if (st.draws || st.instances)
                         throw std::runtime_error("stale batches survived an empty prepare");
                 }
                 for (size_t i = 0; i < emptyImage.size(); i += 4)
                     if (emptyImage[i] != emptyImage[0] || emptyImage[i + 1] != emptyImage[1])
                         throw std::runtime_error("empty population rendered pixels");
-                // The other frame slot must be untouched by the empty frame.
-                const auto fullAgain = f.render(sheep, sheepUbo, 0);
-                if (fullAgain != sheepImage)
-                    throw std::runtime_error("frame slot interference after empty population");
-                for (uint32_t pass = 0; pass < 4; ++pass)
-                {
-                    const auto st = f.renderer.passStats(0, pass);
-                    if (st.draws != sheepExpect.draws[pass] || st.instances != sheepExpect.instances[pass])
-                        throw std::runtime_error("sheep stats drifted after slot alternation");
-                }
             }
 
             // f. Steady-state prepare must be heap-allocation-free.
@@ -1102,6 +1215,36 @@ int main(int argc, char **argv)
             }
             if (totalDraws > 4 * f.renderer.batchCount())
                 throw std::runtime_error("mixed fixture exceeds one draw per static batch per pass");
+            // Recorded-command proof (issue #130 review): with every batch
+            // populated, draws map 1:1 onto batchInfo(0..41), each carrying
+            // exactly 12 instances (48 mobs / 4 species), instance ranges
+            // continuous and ending exactly at the pass total.
+            if (mixedDraws[0] != f.renderer.batchCount() || mixedInst[0] != mixedDraws[0] * 12)
+                throw std::runtime_error("mixed fixture is not fully populated; recorded proof n/a");
+            cmdDrawCalls = setBindCalls = 0;
+            cmdDrawMinInstances = ~0u;
+            cmdDrawMaxInstances = 0;
+            recordedDraws.clear();
+            recordedDraws.reserve(256);
+            realCmdDraw = vkCmdDraw;
+            realBindSets = vkCmdBindDescriptorSets;
+            vkCmdDraw = countingCmdDraw;
+            vkCmdBindDescriptorSets = countingBindSets;
+            f.render(states, frame(2, true), 0);
+            vkCmdDraw = realCmdDraw;
+            vkCmdBindDescriptorSets = realBindSets;
+            {
+                size_t cursor = 0;
+                for (uint32_t pass : {1u, 2u, 3u, 0u}) // command order: cascades then color
+                {
+                    const auto st = f.renderer.passStats(0, pass);
+                    verifyRecordedPassDraws(f.renderer, recordedDraws.data() + cursor, st.draws,
+                                            st.instances, 0, 12);
+                    cursor += st.draws;
+                }
+                if (cursor != recordedDraws.size() || cmdDrawCalls != cursor)
+                    throw std::runtime_error("unexpected extra recorded draws in mixed fixture");
+            }
         }
         // Issue #130 instrumentation: the all-sheep worst articulation case.
         std::array<uint32_t, 4> sheepBenchDraws{};
