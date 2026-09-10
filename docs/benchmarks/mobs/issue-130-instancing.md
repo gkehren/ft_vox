@@ -51,11 +51,15 @@ every recorded draw has `1 ≤ instanceCount ≤ 48`; descriptor set-1 binds sta
 On the GPU delta, stated plainly: the relative change exceeds 5% and is
 direction-consistent across all three runs and both mean and p95, so it is not
 pure timestamp jitter — but it is only **+1.4 µs absolute on a 25 µs pass
-(~0.01% of a 16 ms frame)**, and the change introduces no additional geometry,
-fragment work or texture traffic (identical vertex/instance counts per pass are
-asserted by the tests). The likely cause is different GPU scheduling for 42
-multi-instance draws vs 504 single-instance draws. Accepted as the cost of the
-~12× submission reduction; re-measure if mob population caps ever rise enough
+(~0.01% of a 16 ms frame)**. The change introduces no additional submitted
+geometry and does not change the shaders or the logical texture-sampling
+contract (identical vertex/instance counts per pass are asserted by the tests).
+Actual fragment invocation count, early-Z behaviour and cache traffic were not
+instrumented. The repeatable ~1.4 µs GPU delta may therefore come from draw
+scheduling, cache locality or depth-processing differences between many
+single-instance draws and fewer multi-instance draws. The absolute delta
+remains negligible compared with the CPU submission reduction and is accepted
+for this change; re-measure if mob population caps ever rise enough
 to make the absolute delta material.
 
 Draw calls now scale with the number of populated static part/material batches —
