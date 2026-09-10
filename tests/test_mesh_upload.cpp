@@ -1551,6 +1551,20 @@ int main()
 			chunkPool.release(chunk);
 		}
 
+		const auto sameDraws = [](const std::vector<Chunk::IndirectDraw> &a,
+		                          const std::vector<Chunk::IndirectDraw> &b) {
+			if (a.size() != b.size())
+				return false;
+			for (size_t i = 0; i < a.size(); ++i)
+				if (a[i].cmd.indexCount != b[i].cmd.indexCount ||
+				    a[i].cmd.firstIndex != b[i].cmd.firstIndex ||
+				    a[i].cmd.vertexOffset != b[i].cmd.vertexOffset ||
+				    a[i].vertexPage != b[i].vertexPage ||
+				    a[i].indexPage != b[i].indexPage)
+					return false;
+			return true;
+		};
+
 		// -----------------------------------------------------------------
 		// 16. Renderable-cache invariant across pending uploads (issue
 		// #177): stale-until-replaced. A committed GPU mesh stays
@@ -1562,20 +1576,6 @@ int main()
 		// non-renderable.
 		// -----------------------------------------------------------------
 		{
-			const auto sameDraws = [](const std::vector<Chunk::IndirectDraw> &a,
-			                          const std::vector<Chunk::IndirectDraw> &b) {
-				if (a.size() != b.size())
-					return false;
-				for (size_t i = 0; i < a.size(); ++i)
-					if (a[i].cmd.indexCount != b[i].cmd.indexCount ||
-					    a[i].cmd.firstIndex != b[i].cmd.firstIndex ||
-					    a[i].cmd.vertexOffset != b[i].cmd.vertexOffset ||
-					    a[i].vertexPage != b[i].vertexPage ||
-					    a[i].indexPage != b[i].indexPage)
-						return false;
-				return true;
-			};
-
 			// First-upload lifecycle: meshed but never uploaded - cache
 			// and index counters are still zero, so the committed-mesh
 			// predicate must not report renderability.
@@ -1609,8 +1609,6 @@ int main()
 			std::vector<Chunk::IndirectDraw> committed;
 			const size_t before = chunk->collectOpaqueDraws(committed);
 			CHECK(before > 0, "invariant: committed draws collectable");
-			std::vector<Chunk::IndirectDraw> waterCommitted;
-			const size_t waterBefore = chunk->collectWaterDraws(waterCommitted);
 
 			// Edit the chunk: meshNeedsUpdate arms, but the committed GPU
 			// mesh stays fully renderable (stale-until-replaced).
@@ -1625,21 +1623,6 @@ int main()
 				      "invariant: old opaque draws collectable while pending");
 				CHECK(sameDraws(pending, committed),
 				      "invariant: pending collection still describes the committed mesh");
-			}
-			if (waterBefore > 0)
-			{
-				CHECK(chunk->hasRenderableWaterDraws(),
-				      "invariant: committed water mesh stays renderable while replacement is pending");
-				std::vector<Chunk::IndirectDraw> pendingWater;
-				CHECK(chunk->collectWaterDraws(pendingWater) == waterBefore,
-				      "invariant: old water draws collectable while pending");
-				CHECK(sameDraws(pendingWater, waterCommitted),
-				      "invariant: pending water collection still describes the committed mesh");
-			}
-			else
-			{
-				CHECK(!chunk->hasRenderableWaterDraws(),
-				      "invariant: empty water cache stays excluded while pending");
 			}
 			// Raw counters stay cached (the data is stale, not gone).
 			CHECK(chunk->getCachedOpaqueDrawCount() == before,
@@ -1682,6 +1665,277 @@ int main()
 			retire.flush();
 
 			chunkPool.release(chunk);
+		}
+
+		// -----------------------------------------------------------------
+		// 17. Deterministic water stale-renderable (issue #177 review): the
+		// water contract must not depend on the bootstrap terrain holding
+		// water. Water geometry is built explicitly, then a second edit
+		// proves the committed water mesh stays renderable with descriptor
+		// stability through a pending remesh AND a staging-full deferral,
+		// and that the retry commits replacement water descriptors.
+		// -----------------------------------------------------------------
+		{
+			Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f, 0.0f, 0.0f));
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "water: prepare+generate");
+			CHECK(chunk->generateMesh(), "water: mesh publishes");
+			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+
+			// Build an explicit floating water voxel and commit it: this is
+			// the committed "water mesh A" the rest of the section uses (the
+			// seed's terrain may also carry natural water - it is part of
+			// the same committed snapshot either way).
+			CHECK(chunk->placeVoxel(glm::vec3(5.0f, 140.0f, 5.0f), WATER),
+			      "water: initial water voxel placed");
+			CHECK(chunk->generateMesh(), "water: water mesh A publishes");
+			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			CHECK(chunk->hasRenderableWaterDraws(), "water: committed water mesh is renderable");
+			std::vector<Chunk::IndirectDraw> waterA;
+			const size_t waterBefore = chunk->collectWaterDraws(waterA);
+			CHECK(waterBefore > 0, "water: committed water draws collectable");
+			std::vector<Chunk::IndirectDraw> opaqueA;
+			CHECK(chunk->collectOpaqueDraws(opaqueA) > 0, "water: committed opaque draws collectable");
+
+			// Second, adjacent water voxel: remesh pending, and the
+			// committed water mesh must stay renderable with the exact old
+			// descriptors (the shared water face only changes at commit).
+			CHECK(chunk->placeVoxel(glm::vec3(6.0f, 140.0f, 5.0f), WATER),
+			      "water: adjacent water voxel placed");
+			CHECK(chunk->needsGPUUpload(), "water: edit raises needsGPUUpload");
+			CHECK(chunk->hasRenderableWaterDraws(),
+			      "water: committed water mesh stays renderable while replacement is pending");
+			CHECK(chunk->hasRenderableOpaqueDraws(),
+			      "water: committed opaque mesh stays renderable while replacement is pending");
+			{
+				std::vector<Chunk::IndirectDraw> pendingWater;
+				CHECK(chunk->collectWaterDraws(pendingWater) == waterBefore,
+				      "water: old water draws collectable while pending");
+				CHECK(sameDraws(pendingWater, waterA),
+				      "water: pending collection still describes the committed water mesh");
+			}
+
+			// Publish the replacement remesh, then starve the staging ring:
+			// back-pressure keeps the committed water mesh renderable and
+			// descriptor-stable for as long as the upload cannot commit.
+			CHECK(chunk->generateMesh(), "water: replacement remesh publishes");
+			{
+				staging.beginFrame(0);
+				VkDeviceSize off = 0;
+				void *sink = nullptr;
+				CHECK(staging.alloc(staging.sliceCapacity(), off, sink),
+				      "water: staging ring drained");
+				std::vector<Chunk::IndirectDraw> deferredWater;
+				CHECK(!chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+				      "water: staging-full defers the replacement upload");
+				CHECK(chunk->hasRenderableWaterDraws(),
+				      "water: committed water mesh renderable during upload back-pressure");
+				CHECK(chunk->collectWaterDraws(deferredWater) == waterBefore &&
+				          sameDraws(deferredWater, waterA),
+				      "water: old water descriptors intact during back-pressure");
+			}
+
+			// Retry: the replacement commits and replaces the water mesh.
+			staging.beginFrame(0);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "water: retry commits the replacement");
+			CHECK(!chunk->needsGPUUpload(), "water: commit clears needsGPUUpload");
+			CHECK(chunk->hasRenderableWaterDraws(), "water: water renderable after commit");
+			{
+				std::vector<Chunk::IndirectDraw> waterB;
+				CHECK(chunk->collectWaterDraws(waterB) > 0, "water: water draws collectable after commit");
+				CHECK(!sameDraws(waterB, waterA),
+				      "water: committed descriptors switched to the replacement water mesh");
+			}
+			CHECK(vk.flush(), "water: replacement submit");
+			retire.flush();
+
+			chunkPool.release(chunk);
+		}
+
+		// -----------------------------------------------------------------
+		// 18. Cross-chunk border edit (issue #177 review): a border edit
+		// re-arms BOTH the target chunk and the shell-mirror neighbor, both
+		// keep their committed meshes renderable while remeshing, and the
+		// upload scheduler decides the commit interleaving. With a normal
+		// budget both replacements commit in the same frame; with a starved
+		// budget=1 the draw set passes through one "new A + old B" upload
+		// slot - the test quantifies exactly what that window is missing:
+		// the single exposed border face (+6 indices) B commits in the
+		// next slot.
+		// -----------------------------------------------------------------
+		{
+			ChunkPool poolX(32);
+			TerrainGenerator genX(42);
+			ChunkManager managerX(&genX, nullptr, &poolX);
+			managerX.generateInitialArea(glm::vec3(0.0f, 0.0f, 0.0f), 1,
+			                             vk.allocator.handle(), imm, arenas);
+			Chunk *A = managerX.getChunk(glm::ivec3(0, 0, 0));
+			Chunk *B = managerX.getChunk(glm::ivec3(1, 0, 0));
+			CHECK(A != nullptr && B != nullptr, "xchunk: adjacent chunks bootstrapped");
+			if (A && B)
+			{
+				CHECK(A->hasRenderableOpaqueDraws() && B->hasRenderableOpaqueDraws(),
+				      "xchunk: bootstrap meshes renderable");
+
+				// Surface height of the deepest involved column; the
+				// fixture floats above it so every target is air on both
+				// sides of the border.
+				const auto columnSurface = [](Chunk *chunk, int lx, int lz) {
+					for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+						if (chunk->getVoxel(static_cast<uint32_t>(lx),
+						                    static_cast<uint32_t>(y),
+						                    static_cast<uint32_t>(lz))
+						        .type != static_cast<uint8_t>(AIR))
+							return y;
+					return -1;
+				};
+				int hMax = -1;
+				for (int lz = 7; lz <= 9; ++lz)
+					hMax = std::max(hMax, columnSurface(A, 15, lz));
+				hMax = std::max(hMax, columnSurface(B, 0, 8));
+				CHECK(hMax > 1 && hMax + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "xchunk: border columns surfaced");
+				const int y0 = hMax + 3;
+
+				const auto worldOf = [](Chunk *chunk, int lx, int ly, int lz) {
+					const glm::vec3 p = chunk->getPosition();
+					return glm::vec3(p.x + static_cast<float>(lx) + 0.5f,
+					                 static_cast<float>(ly) + 0.5f,
+					                 p.z + static_cast<float>(lz) + 0.5f);
+				};
+				// Fixture (placed through the manager so both border shells
+				// update): the tested center voxel on A's x=15 column, the
+				// solid BRICKS across the border on B's x=0 column whose -x
+				// face the removal will expose, and four isolation stones
+				// culling every OTHER candidate face in B's border plane so
+				// the later commit delta is exactly one quad (greedy
+				// merge-proof).
+				CHECK(managerX.placeVoxel(worldOf(B, 0, y0, 8), BRICKS), "xchunk: B border brick");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0 - 1, 8), BRICKS), "xchunk: stone -y");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0 + 1, 8), BRICKS), "xchunk: stone +y");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0, 7), BRICKS), "xchunk: stone -z");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0, 9), BRICKS), "xchunk: stone +z");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0, 8), BRICKS),
+				      "xchunk: center voxel placed");
+
+				// A border edit re-arms both the target and the mirror
+				// chunk; the committed meshes stay renderable meanwhile.
+				CHECK(A->getState() == ChunkState::GENERATED &&
+				          B->getState() == ChunkState::GENERATED,
+				      "xchunk: target and mirror neighbor re-armed");
+				{
+					std::vector<Chunk::IndirectDraw> aKeep, bKeep;
+					CHECK(A->collectOpaqueDraws(aKeep) > 0 && B->collectOpaqueDraws(bKeep) > 0,
+					      "xchunk: committed meshes collectable while re-armed");
+				}
+
+				const auto remeshDirty = [](ChunkManager &mgr) {
+					for (Chunk *chunk : mgr.getActiveChunks())
+					{
+						if (!chunk || chunk->dirtySections() == 0)
+							continue;
+						const uint16_t mask = chunk->takeDirtySections();
+						MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
+						chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), mask);
+						chunk->getMeshResultPool()->finishBuild(r);
+						CHECK(chunk->publishMeshResult(r), "xchunk: remesh published");
+					}
+				};
+				remeshDirty(managerX);
+
+				// Camera near A: the distance-prioritized uploader commits
+				// A before B. With a normal budget the whole pending set -
+				// the geometric pair AND the light-halo neighbors the edit
+				// re-armed (the 15-voxel halo covers every voxel of a
+				// 16-wide chunk) - commits in this one frame, so the pair
+				// never splits.
+				const Camera camX(glm::vec3(8.0f, static_cast<float>(y0), 8.0f));
+				staging.beginFrame(0);
+				managerX.uploadPendingMeshes(vk.allocator.handle(), staging, vk.cmd,
+				                             retire, arenas, camX, 64);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
+				      "xchunk: normal budget commits both border chunks in the same frame");
+				CHECK(vk.flush(), "xchunk: fixture submit");
+				retire.flush();
+
+				std::vector<Chunk::IndirectDraw> committedA, committedB;
+				const size_t aCount = A->collectOpaqueDraws(committedA);
+				const size_t bCount = B->collectOpaqueDraws(committedB);
+				const uint32_t bIndices = B->getOpaqueIndexCount();
+				CHECK(aCount > 0 && bCount > 0, "xchunk: fixture meshes committed");
+
+				// Remove the center voxel: both chunks re-arm again and
+				// keep the committed meshes renderable and descriptor-stable
+				// while the remesh is pending.
+				CHECK(managerX.deleteVoxel(worldOf(A, 15, y0, 8)),
+				      "xchunk: border removal accepted");
+				CHECK(A->getState() == ChunkState::GENERATED &&
+				          B->getState() == ChunkState::GENERATED,
+				      "xchunk: removal re-arms both chunks");
+				CHECK(A->hasRenderableOpaqueDraws() && B->hasRenderableOpaqueDraws(),
+				      "xchunk: committed meshes renderable while replacement pending");
+				{
+					std::vector<Chunk::IndirectDraw> aPending, bPending;
+					CHECK(A->collectOpaqueDraws(aPending) == aCount &&
+					          sameDraws(aPending, committedA),
+					      "xchunk: A old descriptors intact while pending");
+					CHECK(B->collectOpaqueDraws(bPending) == bCount &&
+					          sameDraws(bPending, committedB),
+					      "xchunk: B old descriptors intact while pending");
+				}
+				remeshDirty(managerX);
+
+				// Starved scheduler: one upload slot per call. The pending
+				// set holds the geometric pair plus light-halo neighbors, so
+				// drive single-chunk slots until the pair has committed and
+				// assert the ORDER: A (nearest) commits first; while B waits,
+				// the drawn pair is "new A + old B" - A draws the removal
+				// hole while B still draws the mesh built while the center
+				// voxel existed.
+				bool aCommitted = false, bCommitted = false;
+				int aSlot = -1, bSlot = -1;
+				for (int slot = 0; slot < 32 && !bCommitted; ++slot)
+				{
+					staging.beginFrame(0);
+					managerX.uploadPendingMeshes(vk.allocator.handle(), staging, vk.cmd,
+					                             retire, arenas, camX, 1);
+					if (!aCommitted && !A->needsGPUUpload())
+					{
+						aCommitted = true;
+						aSlot = slot;
+						CHECK(B->needsGPUUpload(),
+						      "xchunk: B waits for a later slot under budget=1");
+						std::vector<Chunk::IndirectDraw> aNew, bStale;
+						CHECK(A->collectOpaqueDraws(aNew) > 0 && !sameDraws(aNew, committedA),
+						      "xchunk: frame N draws A's replacement");
+						CHECK(B->collectOpaqueDraws(bStale) == bCount &&
+						          sameDraws(bStale, committedB),
+						      "xchunk: frame N still draws B's committed mesh");
+					}
+					else if (aCommitted && !B->needsGPUUpload())
+					{
+						bCommitted = true;
+						bSlot = slot;
+					}
+				}
+				CHECK(aCommitted && bCommitted,
+				      "xchunk: starved slots commit A and then B");
+				CHECK(aSlot < bSlot,
+				      "xchunk: A commits at least one slot before B");
+
+				// B's replacement gains exactly the one exposed border face
+				// (+6 indices) that frame N was missing - the precise
+				// geometric cost of the uncoordinated commit window.
+				{
+					std::vector<Chunk::IndirectDraw> bNew;
+					CHECK(B->collectOpaqueDraws(bNew) > 0 && !sameDraws(bNew, committedB),
+					      "xchunk: B committed a replacement mesh");
+					CHECK(B->getOpaqueIndexCount() == bIndices + 6,
+					      "xchunk: B's replacement adds exactly the exposed border face");
+				}
+				CHECK(vk.flush(), "xchunk: replacement submit");
+				retire.flush();
+			}
 		}
 	}
 
