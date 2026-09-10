@@ -917,6 +917,8 @@ int main(int argc, char **argv)
             {
                 speciesParts[s] = uint32_t(bakedModels.models[s].parts.size());
                 totalParts += speciesParts[s];
+                if (speciesParts[s] > MobRenderer::kMaxPartsPerMob)
+                    throw std::runtime_error("baked model exceeds MobRenderer part capacity");
             }
             std::cout << "Mob batches: total=" << totalParts << " cow=" << speciesParts[0]
                       << " pig=" << speciesParts[1] << " sheep=" << speciesParts[2]

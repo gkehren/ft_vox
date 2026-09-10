@@ -178,6 +178,9 @@ void MobRenderer::init(VkContext &context, ImmediateCommands &imm, VkDescriptorS
     const auto device = context.getDevice();
     // Static instancing batch table (issue #130): one batch per baked MobPart,
     // in species/model/part order so record() keeps texture runs bounded.
+    for (const auto &model : m_models.models)
+        if (model.parts.size() > kMaxPartsPerMob)
+            throw std::runtime_error("Mob model exceeds renderer part capacity");
     m_batches.clear();
     for (size_t species = 0; species < entities::kMobSpeciesCount; ++species)
     {

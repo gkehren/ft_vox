@@ -67,6 +67,10 @@ class MobRenderer
     /// Render passes that consume mob instances: bit 0 = camera/color pass,
     /// bits 1-3 = shadow cascades 0-2 (issue #130).
     static constexpr uint32_t kMobPassCount = 4;
+    /// Part-budget contract per baked model. init() validates every species
+    /// model against this limit; exceeding it is a build-time-visible renderer
+    /// capacity error, not a silent overflow (issue #130 review).
+    static constexpr size_t kMaxPartsPerMob = 32;
     /// Static instancing batch: one baked MobPart's shared geometry range.
     /// Every visible mob instance of this part in one render pass is drawn by
     /// a single vkCmdDraw.
@@ -104,14 +108,14 @@ class MobRenderer
     {
         uint32_t firstVertex, vertexCount, texture;
     };
-    // Budgets derived from the entity contract: kMaxMobCount mobs with at
-    // most 32 baked parts each (kMaxBatches = worst case across all models).
-    // Each of the kMobPassCount instance slices holds up to kMaxParts
-    // instances, so the per-frame mapped buffer is
+    // Budgets derived from the entity contract: at most kMaxPartsPerMob parts
+    // per model (validated in init()) and kMaxMobCount mobs. Each of the
+    // kMobPassCount instance slices holds up to kMaxParts instances, so the
+    // per-frame mapped buffer is
     // kMaxParts * kMobPassCount * sizeof(Instance) (~576 KiB per frame slot).
     // A pass needing more instances than kMaxParts throws in prepare().
-    static constexpr size_t kMaxParts = 32 * entities::kMaxMobCount;
-    static constexpr size_t kMaxBatches = 32 * size_t(entities::kMobSpeciesCount);
+    static constexpr size_t kMaxParts = kMaxPartsPerMob * entities::kMaxMobCount;
+    static constexpr size_t kMaxBatches = kMaxPartsPerMob * size_t(entities::kMobSpeciesCount);
     VkContext *m_context{};
     VkDescriptorSetLayout m_textureLayout{}, m_frameLayout{};
     VkPipelineLayout m_layout{};
