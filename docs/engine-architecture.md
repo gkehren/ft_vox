@@ -63,6 +63,7 @@ Matches `Engine.cpp` order:
 4. **`tickStreaming`** (CPU world pipeline; **before** acquire)  
    - `processFinishedJobs` / `processDeferredReleases`  
    - `updateStreaming` → budgeted `processChunkLoading` / `generatePendingVoxels` / `meshPendingChunks` (`maxStreamMs` envelope)  
+   - `updateEntityLightCaches` — dedicated async light-cache-only jobs for meshed chunks entering the entity-light radius (issue #172; never remeshes a valid mesh)  
    - `updateVisibility` → `collectDrawList` / `collectShadowList`  
    - Computes `uploadBudgetThisFrame` (uploads are **not** done here)  
 5. **Mobs** — scoped `ChunkMobWorld` adapter over `ChunkManager` + `TerrainGenerator`; `entities::MobSystem::update` (fixed-step AI/physics, spawn/retire) then `renderStates` → `WorldRenderer::setMobs`. Suspended while paused, unfocused, mobs toggled off, or during benchmarks  
@@ -278,6 +279,7 @@ updateStreaming              → enqueue loads / mark unload
 processChunkLoading          (pool acquire)
 generatePendingVoxels        (async terrain jobs)
 meshPendingChunks            (async mesh; shell filled on main)
+updateEntityLightCaches      (async light-cache-only jobs; issue #172)
 updateVisibility + collectDrawList / collectShadowList
 ```
 
@@ -453,9 +455,28 @@ recreated as chunks stream in and out.
 
 `MobRenderState` (species, interpolated position/yaw/gait/stride, idle look,
 flap) is a plain CPU struct; `WorldRenderer::setMobs` copies it for the frame and
-`MobRenderer::prepare` builds per-part transforms. UI: HUD "Passive mobs" toggle
-and active/visible counters (`GameUI`); CPU time under the `Mobs` profiler scope,
-GPU under `GpuPass::Mobs` / `MobShadow0-2`.
+`MobRenderer::prepare` builds per-part transforms. Each render state also carries
+`localSkylight` / `localBlockRgb` sampled per frame from the chunk light caches
+(trilinear over packed 16-bit voxel light, `ChunkManager::sampleSmoothedLight`).
+UI: HUD "Passive mobs" toggle and active/visible counters (`GameUI`); CPU time
+under the `Mobs` profiler scope, GPU under `GpuPass::Mobs` / `MobShadow0-2`.
+
+### Entity light caches (`ChunkLightStorage`, issues #128/#172)
+
+Each near-camera chunk may hold a packed 128 KiB light cache (skylight + RGB
+block light) acquired from the pooled `ChunkLightPool`. Residency is governed by
+**acquire/release hysteresis** around the camera: caches are acquired at 128 m
+(the mob spawn/wander range — mobs retire beyond 112 m) and retained until 144 m,
+so camera jitter around the edge cannot oscillate allocations.
+
+Cache acquisition is **decoupled from meshing** (issue #172): a `MESHED` chunk
+entering the radius gets a dedicated async light-only job
+(`ChunkManager::updateEntityLightCaches` → `Chunk::buildLightCache`) that
+computes the same chunk-wide light field a mesh build would and publishes only
+the storage after generation/revision/intent validation. It never touches chunk
+state, dirty sections, mesh payloads or GPU upload flags — a valid render mesh is
+never invalidated by cache residency. Real mesh builds still populate the cache
+when it is wanted, so no light work is duplicated when a remesh was due anyway.
 
 ### Tests
 

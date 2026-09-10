@@ -36,6 +36,19 @@ struct CompletedMeshJob
 	MeshBuildResult *result{nullptr};
 };
 
+/// A finished async entity light-cache job (issue #172): the packed light
+/// storage (null when the pool could not provide a block) plus the identity
+/// captured at dispatch, so the main thread can reject stale results at
+/// publish time with the same lifetime safety as mesh results.
+struct CompletedLightJob
+{
+	Chunk *chunk{nullptr};
+	ChunkLightStorage *storage{nullptr};
+	ChunkLightPool *pool{nullptr}; // pool the storage was acquired from
+	uint64_t generation{0};
+	uint64_t revision{0};
+};
+
 /// A voxel edit deferred because its target chunk was in transit (its
 /// storage/borders were being read by a worker). Applied on the main thread
 /// after the in-flight job completes (issue #114 review). An edit is a
@@ -82,11 +95,19 @@ constexpr uint32_t kUnloadCheckIntervalFrames = 60;
 class ChunkManager
 {
 public:
-	// Entity local light cache retention radius around camera (issue #128).
-	// Dynamic entities spawn and wander within ~128m (kMobDespawnDist).
-	static constexpr float kEntityLightCacheRadius = 128.0f;
-	static constexpr float kEntityLightCacheRadiusSq =
-		kEntityLightCacheRadius * kEntityLightCacheRadius;
+	// Entity local light cache retention around camera (issue #128), with
+	// acquire/release hysteresis (issue #172). Dynamic entities spawn and
+	// wander within ~128m (kMobDespawnDist), so caches are acquired at that
+	// radius; the larger release radius keeps camera jitter around the
+	// acquire edge from oscillating allocate/release cycles. Cache
+	// acquisition is decoupled from meshing (issue #172): it never
+	// invalidates a valid render mesh.
+	static constexpr float kEntityLightCacheAcquireRadius = 128.0f;
+	static constexpr float kEntityLightCacheAcquireRadiusSq =
+		kEntityLightCacheAcquireRadius * kEntityLightCacheAcquireRadius;
+	static constexpr float kEntityLightCacheReleaseRadius = 144.0f;
+	static constexpr float kEntityLightCacheReleaseRadiusSq =
+		kEntityLightCacheReleaseRadius * kEntityLightCacheReleaseRadius;
 
 	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool);
 	~ChunkManager();
@@ -104,6 +125,13 @@ public:
 
 	/// Dispatch async meshing for GENERATED chunks (neighbor shell filled on main thread).
 	void meshPendingChunks(const Camera &camera, const RenderSettings &settings, int budget);
+
+	/// Dispatch async entity light-cache-only builds for MESHED chunks inside
+	/// the acquire radius that lack storage (issue #172). The worker computes
+	/// the chunk-wide light field and publishes only a ChunkLightStorage -
+	/// chunk state, dirty sections, mesh payloads, indirect draw caches and
+	/// GPU upload flags are never touched. budget = max dispatches this call.
+	void updateEntityLightCaches(const Camera &camera, const RenderSettings &settings, int budget);
 
 	/// Record mesh uploads into cmd (staging ring). No device idle. Distance-prioritized.
 	/// Returns number of chunks uploaded this call.
@@ -150,6 +178,12 @@ public:
 	size_t pendingLoadCount() const;
 	size_t pendingGenJobs() const;
 	size_t pendingMeshJobs() const;
+	size_t pendingLightJobs() const;
+	/// Cumulative dispatch counters (issue #172): let tests and benchmarks
+	/// prove that cache-radius crossings dispatch light-only jobs instead of
+	/// render mesh rebuilds.
+	uint64_t meshJobsDispatched() const { return m_meshJobsDispatched.load(std::memory_order_relaxed); }
+	uint64_t lightJobsDispatched() const { return m_lightJobsDispatched.load(std::memory_order_relaxed); }
 	ChunkPool *getChunkPool() const { return m_chunkPool; }
 	/// Test/inspection access to the active chunk set (unordered).
 	const std::vector<Chunk *> &getActiveChunks() const { return m_activeChunks; }
@@ -246,7 +280,10 @@ private:
 	TaskPriority calculateTaskPriority(float distanceSq, float lodThresholdSq) const;
 	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
 
-	/// Maintain chunk local light cache desire based on distance to camera (issue #128).
+	/// Maintain chunk local light cache desire based on distance to camera
+	/// (issue #128), with acquire/release hysteresis (issue #172): a cache is
+	/// acquired when the chunk enters the acquire radius and retained until
+	/// it leaves the (larger) release radius.
 	void updateEntityLightCacheIntent(Chunk &chunk, float distSq);
 
 	// Testing hook (issue #114 review): exposes the deferred-edit queue
@@ -280,8 +317,12 @@ private:
 	mutable std::mutex m_completedJobsMutex;
 	std::vector<Chunk *> m_completedGenerationChunks;
 	std::vector<CompletedMeshJob> m_completedMeshJobs;
+	std::vector<CompletedLightJob> m_completedLightJobs;
 	std::atomic<size_t> m_pendingGenJobsCount{0};
 	std::atomic<size_t> m_pendingMeshJobsCount{0};
+	std::atomic<size_t> m_pendingLightJobsCount{0};
+	std::atomic<uint64_t> m_meshJobsDispatched{0};
+	std::atomic<uint64_t> m_lightJobsDispatched{0};
 
 	/// Edits deferred while their target chunk was in transit (main-thread
 	/// only; user interactions are rare so a small linear queue is plenty).

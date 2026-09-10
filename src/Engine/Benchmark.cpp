@@ -38,8 +38,8 @@ void Benchmark::requestStart()
 	m_recordMs.clear();
 	m_sumStreaming = m_sumAcquire = m_sumRecord = m_sumImGui = m_sumPresent = 0;
 	m_sumVisibility = m_sumMeshUpload = 0;
-	m_terrainJobs = m_meshJobs = m_lodJobs = 0;
-	m_terrainMs = m_meshMs = m_lodMs = 0;
+	m_terrainJobs = m_meshJobs = m_lodJobs = m_lightCacheJobs = 0;
+	m_terrainMs = m_meshMs = m_lodMs = m_lightCacheMs = 0;
 	m_peakChunks = m_peakDraw = m_peakLoad = m_peakGen = m_peakMesh = 0;
 	m_peakIndirectCommands = 0;
 	m_over16 = m_over33 = 0;
@@ -156,7 +156,8 @@ void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcqu
 							float scopeImGui, float scopePresent, float scopeVisibility,
 							float scopeMeshUpload, size_t chunks, size_t drawCount, size_t pendingLoad,
 							size_t pendingGen, size_t pendingMesh, uint64_t terrainJobs, float terrainMs,
-							uint64_t meshJobs, float meshMs, uint64_t lodJobs, float lodMs)
+							uint64_t meshJobs, float meshMs, uint64_t lodJobs, float lodMs,
+							uint64_t lightCacheJobs, float lightCacheMs)
 {
 	if (m_phase != BenchmarkPhase::Running)
 		return;
@@ -177,6 +178,8 @@ void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcqu
 	m_meshMs += meshMs;
 	m_lodJobs += lodJobs;
 	m_lodMs += lodMs;
+	m_lightCacheJobs += lightCacheJobs;
+	m_lightCacheMs += lightCacheMs;
 
 	m_peakChunks = std::max(m_peakChunks, chunks);
 	m_peakDraw = std::max(m_peakDraw, drawCount);
@@ -372,6 +375,9 @@ void Benchmark::finalize()
 	r.meshLodJobs = m_lodJobs;
 	r.meshLodTotalMs = static_cast<float>(m_lodMs);
 	r.meshLodAvgMs = m_lodJobs > 0 ? static_cast<float>(m_lodMs / m_lodJobs) : 0.f;
+	r.lightCacheJobs = m_lightCacheJobs;
+	r.lightCacheTotalMs = static_cast<float>(m_lightCacheMs);
+	r.lightCacheAvgMs = m_lightCacheJobs > 0 ? static_cast<float>(m_lightCacheMs / m_lightCacheJobs) : 0.f;
 
 	r.peakChunks = m_peakChunks;
 	r.peakDraw = m_peakDraw;
@@ -479,7 +485,9 @@ std::string Benchmark::formatReportText() const
 	o << "  MeshBuild   n=" << r.meshBuildJobs << "  avgMs=" << r.meshBuildAvgMs
 	  << "  totalMs=" << r.meshBuildTotalMs << "\n";
 	o << "  MeshLOD     n=" << r.meshLodJobs << "  avgMs=" << r.meshLodAvgMs
-	  << "  totalMs=" << r.meshLodTotalMs << "\n\n";
+	  << "  totalMs=" << r.meshLodTotalMs << "\n";
+	o << "  LightCache  n=" << r.lightCacheJobs << "  avgMs=" << r.lightCacheAvgMs
+	  << "  totalMs=" << r.lightCacheTotalMs << "\n\n";
 	o << "GPU timestamp queries: " << (r.gpuAvailable ? "available" : "unavailable") << "\n";
 	if (r.gpuAvailable)
 	{

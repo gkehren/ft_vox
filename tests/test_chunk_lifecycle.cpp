@@ -64,6 +64,16 @@ struct ChunkManagerProbe
 		std::lock_guard<std::mutex> lock(m.m_completedJobsMutex);
 		m.m_completedMeshJobs.push_back({chunk, result});
 	}
+	// Test hook for the light-cache publish validation (issue #172): inject
+	// a completed light-cache job as a worker would, with explicit identity
+	// stamps, so stale results (wrong generation/revision/intent) can be
+	// driven deterministically without racing a real worker.
+	static void injectCompletedLightJob(ChunkManager &m, Chunk *chunk, ChunkLightStorage *storage,
+	                                    ChunkLightPool *pool, uint64_t generation, uint64_t revision)
+	{
+		std::lock_guard<std::mutex> lock(m.m_completedJobsMutex);
+		m.m_completedLightJobs.push_back({chunk, storage, pool, generation, revision});
+	}
 	// Test hook for the cross-chunk light arrival path (issue #141 review
 	// round 2, section 26): inject a completed generation chunk as a worker
 	// would, so processFinishedJobs() runs dirtyNeighborsForArrivedLight()
@@ -83,6 +93,18 @@ struct ChunkManagerProbe
 		c->setActiveIndex(m.m_activeChunks.size() - 1);
 	}
 };
+
+// Drain helper (issue #172): wait for both mesh and light-cache jobs and run
+// one final publish pass, mirroring the engine's per-frame sequencing.
+static void drainManagerJobs(ChunkManager &mgr)
+{
+	while (mgr.pendingMeshJobs() > 0 || mgr.pendingLightJobs() > 0)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		mgr.processFinishedJobs();
+	}
+	mgr.processFinishedJobs();
+}
 
 // Full-quality payload lives in per-section slots since issue #107; these
 // helpers keep whole-payload assertions readable.
@@ -4959,17 +4981,23 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// 35. Stale MeshBuildResult race: wanted false -> true before publish (issue #128 review)
+	// 35. Stale MeshBuildResult race: wanted false -> true before publish (issue #128 review,
+	//     updated for issue #172: the publish must keep the chunk MESHED and let the dedicated
+	//     light-cache path acquire the cache without any remesh)
 	{
+		ThreadPool tp(2);
 		TerrainGenerator gen(1337);
 		ChunkPool chunkPool(4);
-		ChunkManager mgr(&gen, nullptr, &chunkPool);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for race test 35");
 		if (chunk)
 		{
 			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for race test 35");
+			// Mirror dispatch-time dirty-mask consumption (meshPendingChunks
+			// takes the mask before building); the direct build below skips it.
+			chunk->takeDirtySections();
 
 			// 1. Chunk initially does NOT want light cache
 			chunk->setLocalLightCacheWanted(false);
@@ -4988,12 +5016,38 @@ int main(int argc, char **argv)
 			ChunkManagerProbe::injectCompletedMeshJob(mgr, chunk, result);
 			mgr.processFinishedJobs();
 
-			// Stale Clear must NOT clobber wanted status; since chunk lacks light storage,
-			// processFinishedJobs must re-arm it to GENERATED so next scheduler builds light.
+			// Stale Clear must NOT clobber wanted status; the chunk stays MESHED
+			// (issue #172: cache residency is never a mesh invalidation) and the
+			// cache is acquired by a dedicated light-only job instead.
 			CHECK(!chunk->hasLightStorage(), "chunk does not yet have light storage");
-			CHECK(chunk->getState() == ChunkState::GENERATED,
-			      "chunk re-armed to GENERATED because light cache is wanted");
+			CHECK(chunk->getState() == ChunkState::MESHED,
+			      "chunk stays MESHED; light cache no longer re-arms meshing (issue #172)");
+			CHECK(chunk->dirtySections() == 0, "no sections dirtied by cache intent");
 			CHECK(chunkPool.lightPool().activeCount() == 0, "active light blocks count is 0");
+
+			// 4. The dedicated light-cache path acquires the cache without a remesh
+			const uint64_t meshDispatched = mgr.meshJobsDispatched();
+			const bool uploadFlagBefore = chunk->needsGPUUpload();
+			const Camera cam(glm::vec3(8.0f, 40.0f, 8.0f));
+			RenderSettings rs;
+			mgr.updateEntityLightCaches(cam, rs, 2);
+			CHECK(mgr.pendingLightJobs() == 1, "dedicated light-cache job dispatched");
+			CHECK(chunk->isInTransit(), "chunk owned by the light-cache worker");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk remains MESHED while cache builds");
+			while (mgr.pendingMeshJobs() > 0 || mgr.pendingLightJobs() > 0)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				mgr.processFinishedJobs();
+			}
+			mgr.processFinishedJobs();
+
+			CHECK(chunk->hasLightStorage(), "light-only job populated the cache");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk still MESHED after cache publish");
+			CHECK(chunk->dirtySections() == 0, "no sections dirtied by cache acquisition");
+			CHECK(chunk->needsGPUUpload() == uploadFlagBefore,
+			      "cache acquisition requested no mesh upload");
+			CHECK(mgr.meshJobsDispatched() == meshDispatched, "no mesh job dispatched for the cache");
+			CHECK(chunkPool.lightPool().activeCount() == 1, "exactly one active light block");
 			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
 				      chunkPool.lightPool().capacity(),
 			      "light pool accounting coherent in test 35");
@@ -5047,20 +5101,519 @@ int main(int argc, char **argv)
 			mgr.updateVisibility(nearCam, 800, 600, rs);
 			CHECK(chunk->localLightCacheWanted(), "camera near re-sets localLightCacheWanted");
 
-			// Next meshPendingChunks must detect wanted && !hasLightStorage and re-arm / dispatch
+			// meshPendingChunks must NOT re-arm or dispatch anything for the
+			// cache (issue #172): the chunk keeps its valid mesh and a
+			// dedicated light-only job acquires the cache instead.
+			const uint64_t meshDispatched = mgr.meshJobsDispatched();
 			mgr.meshPendingChunks(nearCam, rs, 1);
-			while (mgr.pendingMeshJobs() > 0)
+			CHECK(mgr.pendingMeshJobs() == 0, "radius entry dispatches no mesh job (issue #172)");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk stays MESHED on radius entry");
+			CHECK(!chunk->isInTransit(), "no worker owns the chunk after radius entry");
+
+			mgr.updateEntityLightCaches(nearCam, rs, 1);
+			CHECK(mgr.pendingLightJobs() == 1, "dedicated light-cache job dispatched on re-entry");
+			CHECK(mgr.lightJobsDispatched() == 1, "light-cache dispatch counter incremented");
+			while (mgr.pendingMeshJobs() > 0 || mgr.pendingLightJobs() > 0)
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 				mgr.processFinishedJobs();
 			}
 			mgr.processFinishedJobs();
 
-			CHECK(chunk->hasLightStorage(), "re-armed mesh completed with light storage populated");
+			CHECK(chunk->hasLightStorage(), "light-only job populated the cache on re-entry");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk remains MESHED after re-entry");
+			CHECK(chunk->dirtySections() == 0, "no sections dirtied by cache re-acquisition");
+			CHECK(mgr.meshJobsDispatched() == meshDispatched, "no mesh job dispatched for re-entry");
 			CHECK(chunkPool.lightPool().activeCount() == 1, "exactly 1 active light storage block");
 			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
 				      chunkPool.lightPool().capacity(),
 			      "light pool accounting coherent in test 36");
+		}
+	}
+
+	// 37. Cache acquisition must preserve a valid mesh (issue #172 key regression)
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(42);
+		ChunkPool chunkPool(8);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+
+		// Chunk at world x=256 (index 16); mesh it while the camera is far
+		// outside the light-cache radius so it never gets a cache from the
+		// mesh build itself.
+		Chunk *chunk = chunkPool.acquire(glm::vec3(256.0f, 0.0f, 0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for mesh preservation test");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(16, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for mesh preservation test");
+
+			RenderSettings rs;
+			// Camera 260m away: outside acquire/release radii.
+			const Camera farCam(glm::vec3(256.0f + 8.0f + 260.0f, 40.0f, 8.0f));
+			mgr.updateVisibility(farCam, 800, 600, rs);
+			CHECK(!chunk->localLightCacheWanted(), "far camera leaves cache unwanted");
+
+			mgr.meshPendingChunks(farCam, rs, 1);
+			drainManagerJobs(mgr);
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk meshed outside cache radius");
+			CHECK(!chunk->hasLightStorage(), "chunk meshed far has no light storage");
+			CHECK(mgr.meshJobsDispatched() == 1, "exactly the initial mesh job dispatched");
+			const uint64_t meshDispatched = mgr.meshJobsDispatched();
+			const size_t meshPoolActive = chunkPool.meshResultPool().stats().active;
+			const bool uploadFlagBefore = chunk->needsGPUUpload();
+
+			// Camera crosses inside the acquire radius.
+			const Camera nearCam(glm::vec3(256.0f + 8.0f + 100.0f, 40.0f, 8.0f));
+			mgr.updateVisibility(nearCam, 800, 600, rs);
+			CHECK(chunk->localLightCacheWanted(), "crossing the acquire radius wants the cache");
+
+			// The mesh scheduler must not react at all.
+			mgr.meshPendingChunks(nearCam, rs, 4);
+			CHECK(mgr.pendingMeshJobs() == 0, "radius crossing dispatches no mesh job");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk stays MESHED across radius crossing");
+			CHECK(chunk->dirtySections() == 0, "radius crossing dirties no sections");
+
+			// The dedicated light-cache path schedules instead.
+			mgr.updateEntityLightCaches(nearCam, rs, 4);
+			CHECK(mgr.pendingLightJobs() == 1, "light-cache-only job scheduled");
+			CHECK(mgr.lightJobsDispatched() == 1, "light-cache dispatch counter incremented");
+			CHECK(chunk->isInTransit(), "light-cache worker owns the chunk");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk remains MESHED while cache builds");
+			CHECK(chunk->dirtySections() == 0, "cache-only work never touches dirty sections");
+
+			drainManagerJobs(mgr);
+
+			CHECK(chunk->hasLightStorage(), "cache eventually populated");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk still MESHED after cache publish");
+			CHECK(chunk->dirtySections() == 0, "still no dirty sections after cache publish");
+			CHECK(chunk->needsGPUUpload() == uploadFlagBefore,
+			      "cache acquisition requested no mesh upload");
+			CHECK(chunkPool.meshResultPool().stats().active == meshPoolActive,
+			      "no mesh result consumed by cache acquisition");
+			CHECK(mgr.meshJobsDispatched() == meshDispatched, "zero additional mesh builds");
+			CHECK(chunkPool.lightPool().activeCount() == 1, "one active light block");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 37");
+		}
+	}
+
+	// 38. Light-cache equivalence: full mesh build vs light-only path (issue #172)
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(123);
+		ChunkPool chunkPool(8);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+
+		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for equivalence test");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for equivalence test");
+			// Emissive sources above the terrain so block light is non-trivial.
+			chunk->setVoxel(3, 100, 5, LAVA);
+			chunk->setVoxel(12, 98, 2, REDSTONE_ORE);
+			chunk->setVoxel(8, 102, 8, STONE);
+
+			RenderSettings rs;
+			const Camera cam(glm::vec3(8.0f, 40.0f, 8.0f));
+
+			// Cache through a normal full mesh build with the cache wanted.
+			mgr.meshPendingChunks(cam, rs, 1);
+			drainManagerJobs(mgr);
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk meshed for equivalence test");
+			CHECK(chunk->hasLightStorage(), "mesh build populated the cache");
+			const uint64_t meshDispatched = mgr.meshJobsDispatched();
+
+			std::vector<uint16_t> fromMeshBuild(chunk->getLightStorage()->voxels.begin(),
+			                                    chunk->getLightStorage()->voxels.end());
+			CHECK(std::any_of(fromMeshBuild.begin(), fromMeshBuild.end(),
+			                  [](uint16_t v) { return v != 0; }),
+			      "mesh-built cache is not trivially empty");
+
+			// Cache through the dedicated light-only path.
+			chunk->releaseLightStorage();
+			CHECK(!chunk->hasLightStorage(), "storage released before light-only rebuild");
+			mgr.updateEntityLightCaches(cam, rs, 1);
+			drainManagerJobs(mgr);
+			CHECK(chunk->hasLightStorage(), "light-only path populated the cache");
+
+			CHECK(std::memcmp(fromMeshBuild.data(), chunk->getLightStorage()->voxels.data(),
+			                  fromMeshBuild.size() * sizeof(uint16_t)) == 0,
+			      "light-only cache is byte-identical to the mesh-built cache");
+			CHECK(mgr.meshJobsDispatched() == meshDispatched, "equivalence used no mesh job");
+			CHECK(mgr.lightJobsDispatched() == 1, "exactly one light-only job");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 38");
+		}
+	}
+
+	// 39. Acquire/release hysteresis around both thresholds (issue #172)
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(321);
+		ChunkPool chunkPool(8);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+
+		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for hysteresis test");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for hysteresis test");
+
+			RenderSettings rs;
+			// Camera x for distance d from this chunk's center: camPos.x = 8 + d.
+			const auto camAt = [](float d) { return Camera(glm::vec3(8.0f + d, 40.0f, 8.0f)); };
+			const auto setCam = [&](float d) { mgr.updateVisibility(camAt(d), 800, 600, rs); };
+
+			// Mesh from inside the radius: the build populates the cache.
+			setCam(100.0f);
+			mgr.meshPendingChunks(camAt(100.0f), rs, 1);
+			drainManagerJobs(mgr);
+			CHECK(chunk->hasLightStorage(), "cache populated by mesh inside radius");
+			CHECK(chunkPool.lightPool().activeCount() == 1, "one active light block after mesh");
+
+			// Inside the acquire/release band [128, 144]: retained, no churn.
+			for (int i = 0; i < 6; ++i)
+			{
+				setCam(130.0f);
+				CHECK(chunk->localLightCacheWanted(), "cache retained inside the hysteresis band");
+				CHECK(chunk->hasLightStorage(), "storage retained inside the hysteresis band");
+				setCam(100.0f);
+				CHECK(chunk->hasLightStorage(), "storage kept when moving back inside");
+			}
+			CHECK(mgr.lightJobsDispatched() == 0, "no cache churn inside the band");
+
+			// Exact edges: 128 acquires from outside, 144 retains from inside.
+			setCam(145.0f);
+			CHECK(!chunk->localLightCacheWanted(), "beyond the release radius the cache is dropped");
+			CHECK(!chunk->hasLightStorage(), "storage released beyond the release radius");
+			CHECK(chunkPool.lightPool().activeCount() == 0, "pool empty after release");
+
+			setCam(144.0f);
+			CHECK(!chunk->localLightCacheWanted(), "144m from outside does not acquire (> acquire radius)");
+			setCam(128.0f);
+			CHECK(chunk->localLightCacheWanted(), "exactly 128m acquires (inclusive edge)");
+			setCam(144.0f);
+			CHECK(chunk->localLightCacheWanted(), "exactly 144m retains (inclusive edge)");
+
+			// Re-acquisition past the band rebuilds the cache once, mesh untouched.
+			const uint64_t meshDispatched = mgr.meshJobsDispatched();
+			mgr.updateEntityLightCaches(camAt(144.0f), rs, 2);
+			drainManagerJobs(mgr);
+			CHECK(chunk->hasLightStorage(), "cache rebuilt once on re-acquisition");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk stays MESHED through hysteresis");
+			CHECK(chunk->dirtySections() == 0, "no dirty sections from hysteresis");
+			CHECK(mgr.meshJobsDispatched() == meshDispatched, "hysteresis caused no mesh rebuild");
+			CHECK(mgr.lightJobsDispatched() == 1, "exactly one light-only rebuild");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 39");
+		}
+	}
+
+	// 40. Async camera-intent race: camera leaves while a light job runs (issue #172)
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(555);
+		ChunkPool chunkPool(8);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+
+		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for camera race test");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for camera race test");
+
+			RenderSettings rs;
+			const Camera farCam(glm::vec3(8.0f + 200.0f, 40.0f, 8.0f));
+			const Camera nearCam(glm::vec3(8.0f + 100.0f, 40.0f, 8.0f));
+
+			// Mesh far away: no cache.
+			mgr.updateVisibility(farCam, 800, 600, rs);
+			mgr.meshPendingChunks(farCam, rs, 1);
+			drainManagerJobs(mgr);
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk meshed far for camera race test");
+			CHECK(!chunk->hasLightStorage(), "no cache when meshed far");
+			const uint64_t meshDispatched = mgr.meshJobsDispatched();
+
+			// Enter the radius and dispatch the light job, then leave before
+			// the main thread publishes (results publish only in
+			// processFinishedJobs, so the discard is deterministic).
+			mgr.updateVisibility(nearCam, 800, 600, rs);
+			mgr.updateEntityLightCaches(nearCam, rs, 1);
+			CHECK(mgr.pendingLightJobs() == 1, "light job in flight when camera leaves");
+			mgr.updateVisibility(farCam, 800, 600, rs);
+			CHECK(!chunk->localLightCacheWanted(), "camera left the release radius mid-job");
+
+			drainManagerJobs(mgr);
+			CHECK(!chunk->hasLightStorage(), "unwanted light result discarded, not attached");
+			CHECK(chunkPool.lightPool().activeCount() == 0, "discarded storage returned to the pool");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk stays MESHED after discard");
+			CHECK(!chunk->isInTransit(), "chunk freed after discard");
+			CHECK(chunk->dirtySections() == 0, "no dirty sections after discard");
+
+			// Leave -> re-enter: eventual successful reacquisition.
+			mgr.updateVisibility(nearCam, 800, 600, rs);
+			mgr.updateEntityLightCaches(nearCam, rs, 1);
+			drainManagerJobs(mgr);
+			CHECK(chunk->hasLightStorage(), "cache reacquired after re-entry");
+			CHECK(mgr.meshJobsDispatched() == meshDispatched, "no mesh job in the whole race test");
+			CHECK(mgr.lightJobsDispatched() == 2, "two light-only jobs: discarded + reacquired");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 40");
+		}
+	}
+
+	// 41. Stale light-result validation at publish (issue #172): identity,
+	//     intent, existing storage and pending-edit supersession.
+	{
+		TerrainGenerator gen(1337);
+		ChunkPool chunkPool(4);
+		ChunkManager mgr(&gen, nullptr, &chunkPool);
+		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for stale light test");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for stale light test");
+
+			// Meshed without cache (sync path, cache not wanted). Consume the
+			// generation-time dirty mask as dispatch would, so the chunk sits
+			// in the same post-publish state the streaming pipeline produces.
+			CHECK(chunk->generateMesh(), "meshed without cache");
+			chunk->takeDirtySections();
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk MESHED for stale light test");
+			chunk->setLocalLightCacheWanted(true);
+			ChunkLightPool &lightPool = chunkPool.lightPool();
+
+			// (a) Wrong incarnation (chunk recycled while the job ran).
+			{
+				ChunkLightStorage *st = lightPool.acquire();
+				st->voxels.fill(0x1234);
+				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				                                           chunk->meshGeneration() + 1,
+				                                           chunk->meshRevision());
+				mgr.processFinishedJobs();
+				CHECK(!chunk->hasLightStorage(), "wrong generation: result discarded");
+				CHECK(lightPool.activeCount() == 0, "wrong generation: storage returned");
+			}
+			// (b) Stale content revision (edit raced the job).
+			{
+				ChunkLightStorage *st = lightPool.acquire();
+				st->voxels.fill(0x1234);
+				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				                                           chunk->meshGeneration(),
+				                                           chunk->meshRevision() + 1);
+				mgr.processFinishedJobs();
+				CHECK(!chunk->hasLightStorage(), "wrong revision: result discarded");
+				CHECK(lightPool.activeCount() == 0, "wrong revision: storage returned");
+			}
+			// (c) Camera left the cache region while the job ran.
+			{
+				ChunkLightStorage *st = lightPool.acquire();
+				st->voxels.fill(0x1234);
+				chunk->setLocalLightCacheWanted(false);
+				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				                                           chunk->meshGeneration(),
+				                                           chunk->meshRevision());
+				mgr.processFinishedJobs();
+				CHECK(!chunk->hasLightStorage(), "cache no longer wanted: result discarded");
+				CHECK(lightPool.activeCount() == 0, "cache no longer wanted: storage returned");
+				chunk->setLocalLightCacheWanted(true);
+			}
+			// (d) Positive control: valid identity attaches exactly once.
+			{
+				ChunkLightStorage *st = lightPool.acquire();
+				st->voxels.fill(0x1234);
+				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				                                           chunk->meshGeneration(),
+				                                           chunk->meshRevision());
+				mgr.processFinishedJobs();
+				CHECK(chunk->hasLightStorage(), "valid result attaches");
+				CHECK(chunk->getLightStorage()->voxels[0] == 0x1234, "attached storage is the job's");
+				CHECK(lightPool.activeCount() == 1, "exactly one active block after attach");
+			}
+			// (e) A second valid result while storage is held is discarded.
+			{
+				ChunkLightStorage *st = lightPool.acquire();
+				st->voxels.fill(0x5678);
+				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				                                           chunk->meshGeneration(),
+				                                           chunk->meshRevision());
+				mgr.processFinishedJobs();
+				CHECK(chunk->getLightStorage()->voxels[0] == 0x1234,
+				      "held storage wins; duplicate result discarded");
+				CHECK(lightPool.activeCount() == 1, "duplicate storage returned to the pool");
+			}
+			// (f) A queued voxel edit supersedes the light result: discard,
+			//     then the edit applies (revision bump + GENERATED re-arm).
+			{
+				chunk->releaseLightStorage();
+				chunk->setInTransit(true); // edits defer while a worker owns the chunk
+				CHECK(mgr.placeVoxel(glm::vec3(4.5f, 200.5f, 4.5f), STONE),
+				      "edit queued while chunk in transit");
+				CHECK(ChunkManagerProbe::pendingEdits(mgr) == 1, "edit is pending");
+				ChunkLightStorage *st = lightPool.acquire();
+				st->voxels.fill(0x9ABC);
+				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				                                           chunk->meshGeneration(),
+				                                           chunk->meshRevision());
+				mgr.processFinishedJobs();
+				CHECK(!chunk->hasLightStorage(), "superseded-by-edit light result discarded");
+				CHECK(ChunkManagerProbe::pendingEdits(mgr) == 0, "pending edit applied after publish");
+				CHECK(chunk->getVoxel(4, 200, 4).type == STONE, "edit landed");
+				CHECK(chunk->getState() == ChunkState::GENERATED, "edit re-armed the chunk for remesh");
+				CHECK(lightPool.activeCount() == 0, "no active light blocks at end of test 41");
+			}
+			CHECK(lightPool.activeCount() + lightPool.freeCount() == lightPool.capacity(),
+			      "light pool accounting coherent in test 41");
+		}
+	}
+
+	// 42. Stationary stability: settled caches produce zero work (issue #172)
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(64);
+		ChunkPool chunkPool(8);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+
+		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
+		CHECK(chunk != nullptr, "acquired chunk for stationary test");
+		if (chunk)
+		{
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for stationary test");
+
+			RenderSettings rs;
+			const Camera cam(glm::vec3(8.0f + 100.0f, 40.0f, 8.0f));
+			mgr.updateVisibility(cam, 800, 600, rs);
+			mgr.meshPendingChunks(cam, rs, 1);
+			drainManagerJobs(mgr);
+			mgr.updateEntityLightCaches(cam, rs, 2);
+			drainManagerJobs(mgr);
+			CHECK(chunk->hasLightStorage(), "cache settled before stationary run");
+
+			const uint64_t meshDispatched = mgr.meshJobsDispatched();
+			const uint64_t lightDispatched = mgr.lightJobsDispatched();
+			for (int frame = 0; frame < 300; ++frame)
+			{
+				mgr.processFinishedJobs();
+				mgr.updateVisibility(cam, 800, 600, rs);
+				mgr.meshPendingChunks(cam, rs, 4);
+				mgr.updateEntityLightCaches(cam, rs, 4);
+			}
+			mgr.processFinishedJobs();
+
+			CHECK(mgr.pendingMeshJobs() == 0, "no mesh jobs after stationary frames");
+			CHECK(mgr.pendingLightJobs() == 0, "no light jobs after stationary frames");
+			CHECK(mgr.meshJobsDispatched() == meshDispatched, "no repeated mesh jobs");
+			CHECK(mgr.lightJobsDispatched() == lightDispatched, "no repeated light-cache jobs");
+			CHECK(chunk->hasLightStorage(), "cache ownership stable");
+			CHECK(chunkPool.lightPool().activeCount() == 1, "no allocation/release oscillation");
+			CHECK(chunk->getState() == ChunkState::MESHED, "chunk stays MESHED when stationary");
+			CHECK(chunk->dirtySections() == 0, "no dirty sections when stationary");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 42");
+		}
+	}
+
+	// 43. Moving-camera regression: sweeping across the cache boundary over
+	//     already-meshed chunks causes zero render remeshes (issue #172)
+	{
+		ThreadPool tp(2);
+		TerrainGenerator gen(77);
+		ChunkPool chunkPool(16);
+		ChunkManager mgr(&gen, &tp, &chunkPool);
+
+		constexpr int kChunkCount = 9;
+		std::array<Chunk *, kChunkCount> chunks{};
+		bool allReady = true;
+		for (int i = 0; i < kChunkCount; ++i)
+		{
+			chunks[i] = chunkPool.acquire(glm::vec3(static_cast<float>(i * CHUNK_SIZE), 0.0f, 0.0f));
+			if (!chunks[i])
+			{
+				allReady = false;
+				break;
+			}
+			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(i, 0, 0), chunks[i]);
+			if (!mgr.prepareAndGenerateChunk(chunks[i], gen))
+			{
+				allReady = false;
+				break;
+			}
+		}
+		CHECK(allReady, "generated chunk row for sweep test");
+		if (allReady)
+		{
+			RenderSettings rs;
+			// Camera helper: camPos.x = 8 + x gives chunk-center x offset (x
+			// may exceed the row; distance to chunk i is |x - 16i|).
+			const auto camAtX = [](float x) { return Camera(glm::vec3(8.0f + x, 40.0f, 8.0f)); };
+			const auto allMeshed = [&]() {
+				for (Chunk *c : chunks)
+					if (c->getState() != ChunkState::MESHED)
+						return false;
+				return true;
+			};
+
+			// Initial settle from the row center (64m to both ends < 128m).
+			const Camera centerCam = camAtX(64.0f);
+			mgr.updateVisibility(centerCam, 800, 600, rs);
+			while (!allMeshed() || mgr.pendingMeshJobs() > 0 || mgr.pendingLightJobs() > 0)
+			{
+				mgr.meshPendingChunks(centerCam, rs, 4);
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				mgr.processFinishedJobs();
+			}
+			mgr.processFinishedJobs();
+			for (Chunk *c : chunks)
+			{
+				CHECK(c->hasLightStorage(), "initial mesh populated every cache");
+				CHECK(c->getState() == ChunkState::MESHED, "initial meshes are MESHED");
+			}
+			const uint64_t meshDispatched = mgr.meshJobsDispatched();
+			CHECK(mgr.lightJobsDispatched() == 0, "initial caches came from the mesh builds");
+
+			// Sweep right past the whole row (release on the trailing edge),
+			// then back (light-only acquisitions on the leading edge). Every
+			// step asserts: zero mesh dispatches, every chunk stays MESHED.
+			const float sweepX[] = {128.0f, 256.0f, 384.0f, 512.0f, 680.0f,
+			                        512.0f, 384.0f, 256.0f, 128.0f, 64.0f};
+			for (float x : sweepX)
+			{
+				const Camera cam = camAtX(x);
+				mgr.updateVisibility(cam, 800, 600, rs);
+				mgr.meshPendingChunks(cam, rs, 4);
+				mgr.updateEntityLightCaches(cam, rs, 16);
+				drainManagerJobs(mgr);
+				CHECK(mgr.meshJobsDispatched() == meshDispatched,
+				      "sweep step dispatched no mesh job");
+				for (Chunk *c : chunks)
+					CHECK(c->getState() == ChunkState::MESHED, "sweep never un-meshes a chunk");
+			}
+
+			// Back at the center: every cache re-acquired, mesh untouched.
+			for (Chunk *c : chunks)
+			{
+				CHECK(c->hasLightStorage(), "reacquired cache after return sweep");
+				CHECK(c->dirtySections() == 0, "no dirty sections after sweep");
+			}
+			CHECK(mgr.meshJobsDispatched() == meshDispatched,
+			      "whole sweep caused zero render mesh builds");
+			CHECK(mgr.lightJobsDispatched() == 9, "sweep used only light-only acquisitions");
+			CHECK(chunkPool.lightPool().activeCount() == 9, "nine active light blocks");
+			CHECK(chunkPool.lightPool().activeCount() + chunkPool.lightPool().freeCount() ==
+				      chunkPool.lightPool().capacity(),
+			      "light pool accounting coherent in test 43");
 		}
 	}
 

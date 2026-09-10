@@ -89,6 +89,9 @@ struct BenchmarkReport
 	uint64_t meshLodJobs{0};
 	float meshLodTotalMs{0.f};
 	float meshLodAvgMs{0.f};
+	uint64_t lightCacheJobs{0}; // entity light-cache-only jobs (issue #172)
+	float lightCacheTotalMs{0.f};
+	float lightCacheAvgMs{0.f};
 
 	size_t peakChunks{0};
 	size_t peakDraw{0};
@@ -162,7 +165,8 @@ public:
 					 float scopeImGui, float scopePresent, float scopeVisibility, float scopeMeshUpload,
 					 size_t chunks, size_t drawCount, size_t pendingLoad, size_t pendingGen,
 					 size_t pendingMesh, uint64_t terrainJobs, float terrainMs, uint64_t meshJobs,
-					 float meshMs, uint64_t lodJobs, float lodMs);
+					 float meshMs, uint64_t lodJobs, float lodMs, uint64_t lightCacheJobs,
+					 float lightCacheMs);
 
 	/// Queue waits and completed map latency from the frame's profiler snapshot.
 	void sampleBackgroundWork(const char *name, uint64_t count, double totalMs);
@@ -242,6 +246,8 @@ private:
 	double m_meshMs{0};
 	uint64_t m_lodJobs{0};
 	double m_lodMs{0};
+	uint64_t m_lightCacheJobs{0};
+	double m_lightCacheMs{0};
 
 	size_t m_peakChunks{0}, m_peakDraw{0}, m_peakLoad{0}, m_peakGen{0}, m_peakMesh{0};
 	size_t m_peakIndirectCommands{0};

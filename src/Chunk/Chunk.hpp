@@ -69,6 +69,10 @@ public:
 	ChunkLightPool *getLightPool() const { return m_lightPool; }
 	const ChunkLightStorage *getLightStorage() const { return m_lightStorage; }
 	void releaseLightStorage();
+	/// Main-thread commit of a light-cache-only job result (issue #172):
+	/// takes ownership of `storage` (acquired from this chunk's light pool).
+	/// Any storage already held is released first - ownership stays exclusive.
+	void attachLightStorage(ChunkLightStorage *storage);
 	bool localLightCacheWanted() const { return m_localLightCacheWanted.load(std::memory_order_relaxed); }
 	void setLocalLightCacheWanted(bool wanted) { m_localLightCacheWanted.store(wanted, std::memory_order_relaxed); }
 	uint16_t sampleLightRaw(int x, int y, int z) const;
@@ -139,6 +143,15 @@ public:
 	void buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision,
 				   uint16_t sectionMask);
 	void buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision);
+	// Light-cache-only build (issue #172): computes the chunk-wide light field
+	// (same computeLightField + halo semantics as buildMesh) and packs it into
+	// `out` without producing any mesh geometry. Used by the dedicated
+	// light-cache worker path for already-MESHED chunks entering the entity
+	// light radius, so cache acquisition never invalidates a valid render
+	// mesh. Worker-side and read-only with respect to published chunk state;
+	// the result is committed exclusively on the main thread via
+	// attachLightStorage() after generation/revision/intent validation.
+	void buildLightCache(ChunkLightStorage &out);
 	// Ranged bodies used by buildMesh/buildLODMesh with occupancy bounds
 	// derived from the section metadata. Exposed (private, probe-tested) so
 	// tests can force a full [0, CHUNK_HEIGHT-1] range and verify the
@@ -382,6 +395,10 @@ private:
 	// exactly once).
 	void computeLightField(telemetry::MeshSample &meshSample);
 	void populateLightStorage(MeshBuildResult &out);
+	// Pack the thread-local light-field scratch into a storage block: the
+	// shared body of populateLightStorage (mesh path) and buildLightCache
+	// (light-only path, issue #172), so both produce byte-identical caches.
+	void packLightField(ChunkLightStorage &out) const;
 	// Greedy meshing of ONE vertical section into out.sections[section]
 	// (issue #107): faces owned by voxels in [ownerMinY, ownerMaxY] only,
 	// with full one-voxel chunk/border context for faces, AO and light.

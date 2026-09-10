@@ -118,6 +118,11 @@ struct RenderSettings
 	int genPerSec{480};	   // terrain-gen job dispatches / sec
 	int meshPerSec{360};   // mesh job dispatches / sec
 	int uploadPerSec{520}; // GPU mesh uploads / sec (async staging — no device idle)
+	// Entity light-cache-only worker dispatches / sec (issue #172): fills
+	// ChunkLightStorage for meshed chunks entering the ~128m mob-lighting
+	// radius without invalidating their render meshes. 0 disables the
+	// dedicated path (caches then only populate during real mesh builds).
+	int lightCachePerSec{96};
 	// Shadow casters within this XZ radius (blocks). Caps shadow pass cost.
 	float shadowDistance{160.f};
 	/// Cascade far plane used for CSM split distances (view-space).

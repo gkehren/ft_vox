@@ -31,21 +31,29 @@ ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threa
 ChunkManager::~ChunkManager()
 {
 	// Best-effort drain of async work so we don't release chunks still in workers.
-	while (m_pendingGenJobsCount.load() > 0 || m_pendingMeshJobsCount.load() > 0)
+	while (m_pendingGenJobsCount.load() > 0 || m_pendingMeshJobsCount.load() > 0 ||
+		   m_pendingLightJobsCount.load() > 0)
 	{
 		std::this_thread::yield();
 	}
 
 	std::vector<CompletedMeshJob> completed;
+	std::vector<CompletedLightJob> completedLight;
 	{
 		std::lock_guard<std::mutex> lock(m_completedJobsMutex);
 		completed.swap(m_completedMeshJobs);
+		completedLight.swap(m_completedLightJobs);
 		m_completedGenerationChunks.clear();
 	}
 	for (auto &job : completed)
 	{
 		if (job.result && job.result->homePool)
 			job.result->homePool->release(job.result);
+	}
+	for (auto &job : completedLight)
+	{
+		if (job.storage && job.pool)
+			job.pool->release(job.storage);
 	}
 
 	for (auto &[pos, chunkPtr] : m_chunks)
@@ -222,8 +230,6 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 		planeOffsets[i] = p.w + glm::dot(planeNormals[i], optOffset);
 	}
 
-	constexpr float kEntityLightCacheRadius = 128.0f;
-	constexpr float kEntityLightCacheRadiusSq = kEntityLightCacheRadius * kEntityLightCacheRadius;
 	const glm::vec3 camPos = camera.getPosition();
 	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
 	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
@@ -253,8 +259,13 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 
 void ChunkManager::updateEntityLightCacheIntent(Chunk &chunk, float distSq)
 {
-	const bool wanted = (distSq <= kEntityLightCacheRadiusSq);
+	// Acquire/release hysteresis (issue #172): outside chunks acquire at the
+	// 128m radius; held caches are retained until the chunk leaves the
+	// larger release radius, so camera movement around the acquire edge
+	// cannot oscillate allocate/free cycles of the 128 KiB blocks.
 	const bool previous = chunk.localLightCacheWanted();
+	const bool wanted = previous ? (distSq <= kEntityLightCacheReleaseRadiusSq)
+								 : (distSq <= kEntityLightCacheAcquireRadiusSq);
 	if (previous && !wanted)
 	{
 		chunk.releaseLightStorage();
@@ -356,7 +367,10 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	const float lodThreshSq = lodThresh * lodThresh;
 
 	// Promote distant LOD meshes back to full quality when close enough.
-	// Also re-arm meshed chunks entering the light radius if they lack light storage.
+	// Entity light-cache acquisition must NOT re-arm a meshed chunk
+	// (issue #172): entering the cache radius schedules a dedicated
+	// light-only job in updateEntityLightCaches() instead, so a valid render
+	// mesh is never invalidated by cache residency.
 	for (Chunk *chunk : m_activeChunks)
 	{
 		const glm::vec3 p = chunk->getPosition();
@@ -368,10 +382,6 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		if (chunk->getState() == ChunkState::MESHED && !chunk->isInTransit())
 		{
 			if (chunk->isLODMesh() && distSq < lodThreshSq)
-			{
-				chunk->setState(ChunkState::GENERATED);
-			}
-			else if (chunk->localLightCacheWanted() && !chunk->hasLightStorage())
 			{
 				chunk->setState(ChunkState::GENERATED);
 			}
@@ -409,6 +419,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		if (distSq > lodThreshSq)
 		{
 			m_pendingMeshJobsCount.fetch_add(1);
+			m_meshJobsDispatched.fetch_add(1, std::memory_order_relaxed);
 			const auto captureEpoch = GetProfiler().captureEpoch();
 			const auto queuedAt = std::chrono::steady_clock::now();
 			// Identity captured at dispatch (issue #114 review): the worker
@@ -478,6 +489,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 				continue;
 			}
 			m_pendingMeshJobsCount.fetch_add(1);
+			m_meshJobsDispatched.fetch_add(1, std::memory_order_relaxed);
 			const auto captureEpoch = GetProfiler().captureEpoch();
 			const auto queuedAt = std::chrono::steady_clock::now();
 			const uint64_t meshGeneration = chunk->meshGeneration();
@@ -543,6 +555,131 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 				m_pendingMeshJobsCount.fetch_sub(1);
 			});
 		}
+	}
+}
+
+void ChunkManager::updateEntityLightCaches(const Camera &camera, const RenderSettings &settings, int budget)
+{
+	if (!m_threadPool || budget <= 0)
+		return;
+
+	struct Item
+	{
+		Chunk *chunk;
+		float distSq;
+	};
+
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
+	thread_local std::vector<Item> queue;
+	queue.clear();
+	queue.reserve(m_activeChunks.size());
+	const glm::vec3 camPos = camera.getPosition();
+	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
+
+	// Cache acquisition is decoupled from meshing (issue #172): only
+	// already-MESHED, idle chunks enter. GENERATED chunks populate their
+	// cache from the mesh build they are already waiting for, and in-transit
+	// chunks are owned by their current worker job.
+	for (Chunk *chunk : m_activeChunks)
+	{
+		if (chunk->getState() == ChunkState::MESHED && !chunk->isInTransit() &&
+			chunk->localLightCacheWanted() && !chunk->hasLightStorage())
+		{
+			const glm::vec3 p = chunk->getPosition();
+			const float dx = p.x - camOffsetX;
+			const float dz = p.z - camOffsetZ;
+			queue.push_back({chunk, dx * dx + dz * dz});
+		}
+	}
+
+	const int n = std::min(budget, static_cast<int>(queue.size()));
+	if (n <= 0)
+		return;
+
+	std::partial_sort(queue.begin(), queue.begin() + n, queue.end(),
+					  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
+
+	const float lodThresh = static_cast<float>(settings.minRenderDistance) * 2.f;
+	const float lodThreshSq = lodThresh * lodThresh;
+
+	for (int i = 0; i < n; ++i)
+	{
+		Chunk *chunk = queue[i].chunk;
+		const glm::vec3 wp = chunk->getPosition();
+		const glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
+							static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
+		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThreshSq);
+		// Cross-chunk light context for the light field (issue #172
+		// equivalence): computeLightField reads own voxels + the halo ring
+		// only, so unlike a mesh dispatch there is no neighbor shell to
+		// populate - the border layout exists for greedy face culling.
+		ensureLightHalo(chunk, ci);
+		ChunkLightHalo *halo = chunk->lightHalo();
+		if (!halo)
+		{
+			// Halo pool exhausted: retry a later tick (same backpressure as
+			// the mesh path). The chunk keeps its valid mesh and stays
+			// MESHED - only the cache fill waits.
+			continue;
+		}
+		// inTransit doubles as the exclusive worker-ownership flag here: no
+		// mesh job, edit or unload can touch this chunk until the light
+		// result is published (or discarded) on the main thread.
+		chunk->setInTransit(true);
+		m_pendingLightJobsCount.fetch_add(1);
+		m_lightJobsDispatched.fetch_add(1, std::memory_order_relaxed);
+		const auto captureEpoch = GetProfiler().captureEpoch();
+		const auto queuedAt = std::chrono::steady_clock::now();
+		const uint64_t meshGeneration = chunk->meshGeneration();
+		const uint64_t meshRevision = chunk->meshRevision();
+		m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, halo, this, queuedAt, captureEpoch]() {
+			const auto t0 = std::chrono::steady_clock::now();
+			GetProfiler().addWorkerSample("MeshQueue",
+				std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
+			// Worker stays read-only on published chunk state (issue #172):
+			// the only products are the pooled storage block and telemetry.
+			ChunkLightPool *pool = chunk->getLightPool();
+			ChunkLightStorage *storage = nullptr;
+			if (pool)
+			{
+				try
+				{
+					storage = pool->acquire();
+				}
+				catch (const std::bad_alloc &)
+				{
+					storage = nullptr; // retry a later tick once published
+				}
+			}
+			if (storage)
+			{
+				try
+				{
+					chunk->buildLightCache(*storage);
+				}
+				catch (const std::bad_alloc &)
+				{
+					pool->release(storage);
+					storage = nullptr;
+				}
+			}
+			// Detach the halo borrow while the chunk is still in transit (no
+			// main-thread hand can touch it), same contract as mesh jobs.
+			chunk->setLightHalo(nullptr);
+			if (halo)
+				m_lightHaloPool.release(halo);
+			const float ms = std::chrono::duration<float, std::milli>(
+								 std::chrono::steady_clock::now() - t0)
+								 .count();
+			GetProfiler().addWorkerSample("LightCache", ms, captureEpoch);
+
+			{
+				std::lock_guard<std::mutex> lk(m_completedJobsMutex);
+				m_completedLightJobs.push_back({chunk, storage, pool, meshGeneration, meshRevision});
+			}
+			m_pendingLightJobsCount.fetch_sub(1);
+		});
 	}
 }
 
@@ -631,10 +768,12 @@ void ChunkManager::processFinishedJobs()
 {
 	std::vector<Chunk *> finishedGen;
 	std::vector<CompletedMeshJob> finishedMesh;
+	std::vector<CompletedLightJob> finishedLight;
 	{
 		std::lock_guard<std::mutex> lock(m_completedJobsMutex);
 		finishedGen.swap(m_completedGenerationChunks);
 		finishedMesh.swap(m_completedMeshJobs);
+		finishedLight.swap(m_completedLightJobs);
 	}
 
 	for (Chunk *chunk : finishedGen)
@@ -694,8 +833,42 @@ void ChunkManager::processFinishedJobs()
 		if (job.chunk && job.chunk->getState() == ChunkState::MESHED &&
 			job.chunk->dirtySections() != 0)
 			job.chunk->setState(ChunkState::GENERATED);
-		if (job.chunk && job.chunk->getState() == ChunkState::MESHED &&
-			job.chunk->localLightCacheWanted() && !job.chunk->hasLightStorage())
+		// Entity light-cache residency is no longer a mesh invalidation
+		// (issue #172): a MESHED chunk that still lacks its cache is served
+		// by updateEntityLightCaches()'s dedicated light-only job, never by
+		// a GENERATED re-arm here.
+	}
+	// Publish completed entity light-cache jobs (issue #172). Same identity
+	// contract as mesh results: storage built for a retired incarnation,
+	// from older voxel/border content, or superseded by a queued edit is
+	// discarded; the block returns to its pool and the chunk keeps its
+	// valid mesh untouched.
+	for (const CompletedLightJob &job : finishedLight)
+	{
+		if (!job.chunk)
+		{
+			if (job.storage && job.pool)
+				job.pool->release(job.storage);
+			continue;
+		}
+		if (job.storage)
+		{
+			const bool valid = job.chunk->meshGeneration() == job.generation &&
+							   job.chunk->meshRevision() == job.revision &&
+							   job.chunk->localLightCacheWanted() &&
+							   !job.chunk->hasLightStorage() &&
+							   !hasPendingEditsFor(job.chunk);
+			if (valid)
+				job.chunk->attachLightStorage(job.storage);
+			else
+				job.pool->release(job.storage);
+		}
+		job.chunk->setInTransit(false);
+		// An edit may have dirtied sections while this job owned the chunk:
+		// the mask persisted through transit, so re-arm scheduling now that
+		// the chunk is free again (same rule as the mesh path above).
+		if (job.chunk->getState() == ChunkState::MESHED &&
+			job.chunk->dirtySections() != 0)
 			job.chunk->setState(ChunkState::GENERATED);
 	}
 	// Apply edits that were deferred while their chunk was in transit; they
@@ -1577,6 +1750,11 @@ size_t ChunkManager::pendingGenJobs() const
 size_t ChunkManager::pendingMeshJobs() const
 {
 	return m_pendingMeshJobsCount.load();
+}
+
+size_t ChunkManager::pendingLightJobs() const
+{
+	return m_pendingLightJobsCount.load();
 }
 
 bool ChunkManager::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator)
