@@ -72,15 +72,31 @@ struct ChunkStateProbe
 };
 
 // Friend probe declared in ChunkManager.hpp: exposes the geometric commit
-// group bookkeeping so group lifetime (created per border edit, consumed by
-// the atomic commit) is observable without public API.
+// group bookkeeping so group lifetime, fusion and member sets are
+// observable without public API.
 struct ChunkManagerProbe
 {
 	static size_t commitGroups(const ChunkManager &m) { return m.m_commitGroups.size(); }
+	static const std::vector<Chunk *> &groupChunks(const ChunkManager &m, size_t index)
+	{
+		return m.m_commitGroups[index].chunks;
+	}
+	static void registerGroup(ChunkManager &m, std::vector<Chunk *> members)
+	{
+		m.registerCommitGroup(0, std::move(members));
+	}
 };
 
 namespace
 {
+
+bool groupContains(const std::vector<Chunk *> &chunks, Chunk *chunk)
+{
+	for (Chunk *member : chunks)
+		if (member == chunk)
+			return true;
+	return false;
+}
 
 VkPhysicalDevice pickPhysicalDevice(VkInstance instance)
 {
@@ -1914,48 +1930,53 @@ int main()
 				}
 				submitFrame();
 
-				// --- B becomes ready; staging leaves room for exactly B ---
-				// Camera at B: the uploader prepares B first, A's prepare
-				// then fails on the drained ring, and the whole group rolls
-				// back - no committed mesh moves.
+				// --- B becomes ready; staging leaves room for exactly the
+				// FIRST registered member (A) --- Prepare order follows the
+				// group's registration order (target A, then mirror B): A's
+				// prepare succeeds, B's preflight fails on the drained ring,
+				// and the whole group rolls back - no committed mesh moves.
+				// The failure injection is exact-fit staging, not camera
+				// ordering.
 				remeshOne(B);
-				const Camera camB(glm::vec3(24.0f, static_cast<float>(y0), 8.0f));
-				VkDeviceSize needB = 0;
+				VkDeviceSize needFirst = 0;
 				{
-					MeshBuildResult *rb = ChunkStateProbe::pending(*B);
-					CHECK(rb != nullptr, "xchunk: B result attached");
-					if (rb)
+					Chunk *firstMember = ChunkManagerProbe::groupChunks(managerX, 0).front();
+					CHECK(firstMember == A,
+					      "xchunk: group registration order starts with the target");
+					MeshBuildResult *rf = ChunkStateProbe::pending(*firstMember);
+					CHECK(rf != nullptr, "xchunk: first member result attached");
+					if (rf)
 						for (int s = 0; s < 16; ++s)
-							if ((rb->sectionsBuilt >> s) & 1u)
+							if ((rf->sectionsBuilt >> s) & 1u)
 							{
 								const auto align = [](size_t bytes) {
 									return static_cast<VkDeviceSize>(
 										(bytes + StagingRing::kAlignment - 1) /
 										StagingRing::kAlignment * StagingRing::kAlignment);
 								};
-								needB += align(rb->sections[static_cast<size_t>(s)].opaqueVertices.size() *
-								               sizeof(Vertex));
-								needB += align(rb->sections[static_cast<size_t>(s)].opaqueIndices.size() *
-								               sizeof(uint32_t));
-								needB += align(rb->sections[static_cast<size_t>(s)].waterVertices.size() *
-								               sizeof(Vertex));
-								needB += align(rb->sections[static_cast<size_t>(s)].waterIndices.size() *
-								               sizeof(uint32_t));
+								needFirst += align(rf->sections[static_cast<size_t>(s)].opaqueVertices.size() *
+								                   sizeof(Vertex));
+								needFirst += align(rf->sections[static_cast<size_t>(s)].opaqueIndices.size() *
+								                   sizeof(uint32_t));
+								needFirst += align(rf->sections[static_cast<size_t>(s)].waterVertices.size() *
+								                   sizeof(Vertex));
+								needFirst += align(rf->sections[static_cast<size_t>(s)].waterIndices.size() *
+								                   sizeof(uint32_t));
 							}
 				}
-				CHECK(needB > 0, "xchunk: B needs staging");
+				CHECK(needFirst > 0, "xchunk: first member needs staging");
 				beginFrame();
 				{
 					VkDeviceSize off = 0;
 					void *sink = nullptr;
-					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needB, off, sink),
-					      "xchunk: ring leaves exactly B's staging room");
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needFirst, off, sink),
+					      "xchunk: ring leaves exactly the first member's staging room");
 				}
 				const uint32_t pagesBefore =
 					arenas.opaqueVertex.metrics().pages + arenas.opaqueIndex.metrics().pages +
 					arenas.waterVertex.metrics().pages + arenas.waterIndex.metrics().pages;
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
-				                             retire, arenas, camB, 4);
+				                             retire, arenas, camX, 4);
 				CHECK(A->needsGPUUpload() && B->needsGPUUpload(),
 				      "xchunk: staging shortfall defers the whole group");
 				{
@@ -1978,7 +1999,7 @@ int main()
 				// "new A + old B" can no longer exist in any frame.
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
-				                             retire, arenas, camB, 1);
+				                             retire, arenas, camX, 1);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
 				      "xchunk: retry commits the whole group together");
 				{
@@ -2037,6 +2058,97 @@ int main()
 				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
 				      "corner: group consumed");
 				submitFrame();
+
+				// --- Overlapping edits fuse into one group (PR #178 review
+				// round 3): an east border edit and a south border edit of
+				// the SAME target chunk share A, so {A,B} + {A,S} must fuse
+				// into {A,B,S} BEFORE the scheduler can see them - otherwise
+				// committing {A,B} alone could publish "new A + new B + old
+				// S" or "new A + old B + new S".
+				int hOverlap = std::max(columnSurface(A, 15, 3),
+				                        columnSurface(A, 8, 15));
+				CHECK(hOverlap > 1 && hOverlap + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "overlap: border columns surfaced");
+				const int y1 = hOverlap + 3;
+
+				// East edit: {A,B} registers; A publishes its result, B is
+				// still remeshing.
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y1, 3), BRICKS),
+				      "overlap: east border edit accepted");
+				MeshBuildResult *eastOnly = A->getMeshResultPool()->acquire();
+				{
+					const uint16_t mask = A->takeDirtySections();
+					A->buildMesh(*eastOnly, A->meshGeneration(), A->meshRevision(), mask);
+					A->getMeshResultPool()->finishBuild(eastOnly);
+				}
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(A->needsGPUUpload(),
+				      "overlap: the ready member waits for its fused group");
+				submitFrame();
+
+				// South edit lands BEFORE any commit: it shares A, so the
+				// registration must fuse {A,B} + {A,S} into one {A,B,S}.
+				CHECK(managerX.placeVoxel(worldOf(A, 8, y1, 15), BRICKS),
+				      "overlap: south border edit accepted");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				      "overlap: overlapping groups fused into one");
+				{
+					const std::vector<Chunk *> &fused =
+						ChunkManagerProbe::groupChunks(managerX, 0);
+					const bool allThere = fused.size() == 3 &&
+					                      groupContains(fused, A) &&
+					                      groupContains(fused, B) &&
+					                      groupContains(fused, S);
+					CHECK(allThere, "overlap: fused group is exactly {A,B,S}");
+				}
+
+				// The east-only result built before the south edit is now
+				// stale: revision validation must reject it (the A publish
+				// below then carries BOTH edits).
+				CHECK(!A->publishMeshResult(eastOnly),
+				      "overlap: superseded east-only result rejected");
+				remeshOne(A);
+				remeshOne(B);
+				remeshOne(S);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload() && !S->needsGPUUpload(),
+				      "overlap: budget=1 commits the fused three-chunk group together");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "overlap: fused group consumed");
+				submitFrame();
+
+				// --- Transitive fusion of the registration helper itself
+				// (probe-level): {A,B} + {B,S} + {S,W} must collapse into a
+				// single {A,B,S,W} group, exercising the fixed-point merge
+				// without staging four real edits.
+				{
+					Chunk *W = managerX.getChunk(glm::ivec3(-1, 0, 0));
+					CHECK(W != nullptr, "transitive: west chunk bootstrapped");
+					if (W)
+					{
+						ChunkManagerProbe::registerGroup(managerX, {A, B});
+						ChunkManagerProbe::registerGroup(managerX, {B, S});
+						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
+						          ChunkManagerProbe::groupChunks(managerX, 0).size() == 3,
+						      "transitive: {A,B} and {B,S} fuse to {A,B,S}");
+						ChunkManagerProbe::registerGroup(managerX, {S, W});
+						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+						      "transitive: one group remains");
+						const std::vector<Chunk *> &chain =
+							ChunkManagerProbe::groupChunks(managerX, 0);
+						const bool chainOk = chain.size() == 4 &&
+						                     groupContains(chain, A) &&
+						                     groupContains(chain, B) &&
+						                     groupContains(chain, S) &&
+						                     groupContains(chain, W);
+						CHECK(chainOk,
+						      "transitive: {A,B}+{B,S}+{S,W} collapse to {A,B,S,W}");
+					}
+				}
 			}
 			stagingX.shutdown();
 		}

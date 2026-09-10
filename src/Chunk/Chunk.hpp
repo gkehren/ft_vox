@@ -116,8 +116,10 @@ public:
 		glm::ivec3 chunkOrigin{0};
 	};
 	/// Appends one IndirectDraw per live opaque section (or the single LOD
-	/// range). Returns the number appended. Skips chunks whose upload is
-	/// still pending (same rule as the former drawShadow path).
+	/// range). Returns the number appended. Stale-until-replaced (issue
+	/// #177): while a replacement upload is pending the committed draw
+	/// cache stays collectable and drawable - only chunks with no
+	/// committed mesh at all are skipped.
 	size_t collectOpaqueDraws(std::vector<IndirectDraw> &out) const;
 	size_t collectWaterDraws(std::vector<IndirectDraw> &out) const;
 

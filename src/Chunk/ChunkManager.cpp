@@ -745,18 +745,23 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 		{
 			if (!chunk->uploadToGPUAsync(allocator, staging, cmd, retire, arenas))
 				break; // staging full — remaining wait next frame
-			++uploaded;
+			uploaded += 1;
 			--budgetUnits;
-			dropCommitGroupsFor(chunk); // no-op unless a group lost its last barrier
 			continue;
 		}
+
+		// Snapshot the group identity and members up front: nothing below
+		// dereferences `group` once commits (and therefore the group erase)
+		// have started (PR #178 review round 3).
+		const std::vector<Chunk *> members = group->chunks;
+		const uint64_t groupId = group->groupId;
 
 		// Group gate: every geometric member must carry a published-able
 		// replacement. Until then the group is skipped (without consuming
 		// budget) and the renderer keeps showing old A + old B; the blocked
 		// group must not stop independent chunks further down the queue.
 		bool ready = true;
-		for (Chunk *member : group->chunks)
+		for (Chunk *member : members)
 		{
 			if (!member || member->getState() != ChunkState::MESHED ||
 			    !member->needsGPUUpload() || member->isInTransit() ||
@@ -772,30 +777,32 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 		// Prepare ALL members first (each fully rolled back on its own
 		// failure), then commit ALL. A staging shortfall on any member
 		// defers the whole group and leaves every committed mesh intact.
-		std::vector<Chunk::PreparedMeshUpload> prepared(group->chunks.size());
+		std::vector<Chunk::PreparedMeshUpload> prepared(members.size());
 		bool allPrepared = true;
-		for (size_t k = 0; k < group->chunks.size() && allPrepared; ++k)
-			allPrepared = group->chunks[k]->prepareGPUUpload(allocator, staging, cmd, retire,
-			                                                 arenas, prepared[k]);
+		for (size_t k = 0; k < members.size() && allPrepared; ++k)
+			allPrepared = members[k]->prepareGPUUpload(allocator, staging, cmd, retire,
+			                                           arenas, prepared[k]);
 		if (!allPrepared)
 		{
 			// Successful plans still own fresh ranges + staging
 			// reservations; release them so the published meshes stay the
 			// only live state. The failed member already rolled itself back
 			// inside its prepare, so this is a no-op for it.
-			for (size_t k = 0; k < group->chunks.size(); ++k)
-				group->chunks[k]->rollbackGPUUpload(prepared[k]);
+			for (size_t k = 0; k < members.size(); ++k)
+				members[k]->rollbackGPUUpload(prepared[k]);
 			telemetry::registry().add(telemetry::UploadDeferred);
 			break; // staging/arena exhaustion — the group waits next frame
 		}
-		for (size_t k = 0; k < group->chunks.size(); ++k)
+		for (size_t k = 0; k < members.size(); ++k)
 		{
-			group->chunks[k]->commitGPUUpload(cmd, retire, prepared[k]);
+			members[k]->commitGPUUpload(cmd, retire, prepared[k]);
 			telemetry::registry().add(telemetry::UploadChunks);
-			committed.insert(group->chunks[k]);
+			committed.insert(members[k]);
 		}
-		dropCommitGroupsContaining(group->chunks);
-		++uploaded;
+		// The fused-group invariant makes this exact: no other active group
+		// shares a member with the one just committed.
+		eraseCommitGroup(groupId);
+		uploaded += static_cast<int>(members.size());
 		--budgetUnits;
 	}
 	return uploaded;
@@ -985,9 +992,11 @@ bool ChunkManager::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y,
 	enqueueOrApplyMirrorEdits(chunkPos, x, y, z, type, deferAll, editId, &geometricMembers);
 	// A border edit couples the geometry of the target and its mirrors:
 	// their GPU publications must commit together or not at all (PR #178
-	// review). Light-only invalidated neighbors never join.
+	// review). Light-only invalidated neighbors never join. Overlapping
+	// groups (edits sharing chunks) are fused here before the scheduler
+	// can ever see them.
 	if (geometricMembers.size() > 1)
-		m_commitGroups.push_back({editId, std::move(geometricMembers)});
+		registerCommitGroup(editId, std::move(geometricMembers));
 	return true;
 }
 
@@ -1126,13 +1135,97 @@ bool ChunkManager::hasPendingEditsFor(const Chunk *chunk) const
 	return false;
 }
 
+namespace
+{
+bool groupContainsChunk(const std::vector<Chunk *> &chunks, Chunk *chunk)
+{
+	for (Chunk *member : chunks)
+		if (member == chunk)
+			return true;
+	return false;
+}
+
+bool groupsIntersect(const std::vector<Chunk *> &a, const std::vector<Chunk *> &b)
+{
+	for (Chunk *member : a)
+		if (groupContainsChunk(b, member))
+			return true;
+	return false;
+}
+
+void appendUnique(std::vector<Chunk *> &dst, Chunk *chunk)
+{
+	if (!groupContainsChunk(dst, chunk))
+		dst.push_back(chunk);
+}
+} // namespace
+
+// Registers the geometric members of one border edit as a commit group.
+// Overlapping active groups are fused transitively (a group sharing any
+// chunk with the new member set is absorbed, and absorption repeats until
+// a full pass merges nothing more), so the active groups always form
+// disjoint chunk sets: a chunk belongs to at most one group, which is what
+// makes the per-group atomic commit exact.
+void ChunkManager::registerCommitGroup(uint64_t editId, std::vector<Chunk *> members)
+{
+	std::vector<Chunk *> merged;
+	std::vector<uint64_t> editIds{editId};
+	for (Chunk *member : members)
+		appendUnique(merged, member);
+
+	bool changed = false;
+	do
+	{
+		changed = false;
+		for (auto it = m_commitGroups.begin(); it != m_commitGroups.end();)
+		{
+			if (groupsIntersect(merged, it->chunks))
+			{
+				for (Chunk *member : it->chunks)
+					appendUnique(merged, member);
+				editIds.push_back(it->groupId);
+				it = m_commitGroups.erase(it);
+				changed = true;
+			}
+			else
+			{
+				++it;
+			}
+		}
+	} while (changed);
+
+	m_commitGroups.push_back({m_nextGroupId++, std::move(merged), std::move(editIds)});
+}
+
 PendingMeshCommitGroup *ChunkManager::commitGroupFor(Chunk *chunk)
 {
+	PendingMeshCommitGroup *found = nullptr;
+#ifndef NDEBUG
+	size_t matches = 0;
+#endif
 	for (PendingMeshCommitGroup &group : m_commitGroups)
-		for (Chunk *member : group.chunks)
-			if (member == chunk)
-				return &group;
-	return nullptr;
+	{
+		if (groupContainsChunk(group.chunks, chunk))
+		{
+			found = &group;
+#ifndef NDEBUG
+			++matches;
+#endif
+		}
+	}
+	// Registration fuses overlapping groups, so a chunk can never belong to
+	// two active groups at once.
+	assert(matches <= 1 && "active commit groups must form disjoint chunk sets");
+	return found;
+}
+
+void ChunkManager::eraseCommitGroup(uint64_t groupId)
+{
+	m_commitGroups.erase(std::remove_if(m_commitGroups.begin(), m_commitGroups.end(),
+										[groupId](const PendingMeshCommitGroup &group) {
+											return group.groupId == groupId;
+										}),
+						 m_commitGroups.end());
 }
 
 void ChunkManager::dropCommitGroupsFor(Chunk *chunk)
@@ -1140,24 +1233,7 @@ void ChunkManager::dropCommitGroupsFor(Chunk *chunk)
 	m_commitGroups.erase(
 		std::remove_if(m_commitGroups.begin(), m_commitGroups.end(),
 					   [chunk](const PendingMeshCommitGroup &group) {
-						   for (Chunk *member : group.chunks)
-							   if (member == chunk)
-								   return true;
-						   return false;
-					   }),
-		m_commitGroups.end());
-}
-
-void ChunkManager::dropCommitGroupsContaining(const std::vector<Chunk *> &members)
-{
-	m_commitGroups.erase(
-		std::remove_if(m_commitGroups.begin(), m_commitGroups.end(),
-					   [&members](const PendingMeshCommitGroup &group) {
-						   for (Chunk *member : group.chunks)
-							   for (Chunk *committed : members)
-								   if (member == committed)
-									   return true;
-						   return false;
+						   return groupContainsChunk(group.chunks, chunk);
 					   }),
 		m_commitGroups.end());
 }
