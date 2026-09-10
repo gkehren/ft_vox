@@ -50,7 +50,7 @@ struct Mob
     MobSpecies species{};
     physics::Body body;
     glm::dvec3 previous{};
-    double yaw{}, previousYaw{}, targetYaw{}, timer{}, gait{}, previousGait{}, age{};
+    double yaw{}, previousYaw{}, targetYaw{}, timer{}, gait{}, previousGait{}, age{}, previousAge{};
     double stride{}, previousStride{}, shoreTimer{};
     bool walking{};
 };

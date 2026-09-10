@@ -173,6 +173,7 @@ void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
     m.previousYaw = m.yaw;
     m.previousGait = m.gait;
     m.previousStride = m.stride;
+    m.previousAge = m.age;
     m.age += dt;
     m.timer -= dt;
     if (m.timer <= 0)
@@ -313,6 +314,7 @@ void MobSystem::update(double dt, const MobWorld &world, glm::dvec3 observer, do
             m.previousYaw = m.yaw;
             m.previousGait = m.gait;
             m.previousStride = m.stride;
+            m.previousAge = m.age;
         }
         return;
     }
@@ -352,11 +354,17 @@ void MobSystem::renderStates(std::vector<MobRenderState> &out) const
     out.clear();
     const double a = std::clamp(m_accumulator / settings.fixedStep, 0.0, 1.0);
     for (auto &m : m_mobs)
+    {
+        // Cosmetic phases sample the same previous -> current timeline as the
+        // interpolated pose, so they stay smooth at render rates above the
+        // fixed step instead of quantizing to it.
+        const double renderAge = std::lerp(m.previousAge, m.age, a);
         out.push_back({m.species, glm::vec3(glm::mix(m.previous, m.body.position, a)),
                        float(m.previousYaw + angle(m.yaw - m.previousYaw) * a),
                        float(m.previousGait + (m.gait - m.previousGait) * a),
-                       float(std::sin(m.age * 0.7 + double(m.id % 100)) * 0.25),
-                       m.body.grounded ? 0.f : float(std::sin(m.age * 25) * 0.7 + 0.8),
+                       float(std::sin(renderAge * 0.7 + double(m.id % 100)) * 0.25),
+                       m.body.grounded ? 0.f : float(std::sin(renderAge * 25) * 0.7 + 0.8),
                        float(m.previousStride + (m.stride - m.previousStride) * a)});
+    }
 }
 } // namespace entities

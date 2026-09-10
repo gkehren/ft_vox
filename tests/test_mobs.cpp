@@ -335,6 +335,263 @@ static void models()
             CHECK(part.firstVertex + part.vertexCount <= models.vertices.size());
         }
 }
+static void animationTimeline()
+{
+    // Cosmetic animation time follows the same previous/current snapshot
+    // contract as pose channels (issue #129).
+    World w;
+    auto m = walker();
+    physics::QueryStats q;
+    tickMob(m, w, 1.0 / 60, {}, q);
+    CHECK(m.previousAge == 0);
+    CHECK(std::abs(m.age - 1.0 / 60) < 1e-12);
+    tickMob(m, w, 1.0 / 60, {}, q);
+    CHECK(std::abs(m.previousAge - 1.0 / 60) < 1e-12);
+    CHECK(std::abs(m.age - 2.0 / 60) < 1e-12);
+}
+static void subTickCosmetics()
+{
+    // At a 240 Hz render cadence the idle look phase must advance on
+    // sub-tick frames instead of holding one value per 60 Hz tick.
+    World w;
+    w.spawn = false;
+    MobSystem s;
+    s.reset(7);
+    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+    std::vector<MobRenderState> states;
+    for (int i = 0; i < 8; ++i) // two completed fixed ticks
+        s.update(1.0 / 240, w, {0, 0, 0}, 112);
+    int changes = 0;
+    float last = 0;
+    for (int i = 0; i < 16; ++i) // four fixed ticks of sub-tick samples
+    {
+        s.update(1.0 / 240, w, {0, 0, 0}, 112);
+        s.renderStates(states);
+        CHECK(states.size() == 1);
+        CHECK(std::isfinite(states[0].look));
+        CHECK(std::abs(states[0].look) <= 0.25f + 1e-6f);
+        if (i && states[0].look != last)
+            ++changes;
+        last = states[0].look;
+    }
+    // Quantized sampling would repeat each tick's phase four times.
+    CHECK(changes >= 12);
+}
+static void chickenFlap()
+{
+    World w;
+    w.spawn = false;
+    MobSystem s;
+    s.reset(7);
+    CHECK(s.add(MobSpecies::Chicken, {0.5, 0.001, 0.5}, 1, 1, w));
+    std::vector<MobRenderState> states;
+    // Grounded chickens never flap, whatever the render phase.
+    for (int i = 0; i < 12; ++i)
+    {
+        s.update(1.0 / 240, w, {0, 0, 0}, 112);
+        s.renderStates(states);
+        CHECK(s.mobs()[0].body.grounded);
+        CHECK(states[0].flap == 0.0f);
+    }
+    // Remove every solid cell: the chicken falls and stays airborne, so the
+    // wing-flap phase is exposed at sub-tick cadence.
+    w.ledge = -10000;
+    w.hole = true;
+    for (int i = 0; i < 4; ++i) // one fixed tick to leave the ground
+        s.update(1.0 / 240, w, {0, 0, 0}, 112);
+    int changes = 0;
+    float last = 0;
+    for (int i = 0; i < 16; ++i)
+    {
+        s.update(1.0 / 240, w, {0, 0, 0}, 112);
+        s.renderStates(states);
+        CHECK(!s.mobs()[0].body.grounded);
+        CHECK(std::isfinite(states[0].flap));
+        CHECK(states[0].flap > 0.099f && states[0].flap < 1.501f);
+        if (i && states[0].flap != last)
+            ++changes;
+        last = states[0].flap;
+    }
+    CHECK(changes >= 12);
+}
+static void poseTimeAlignment()
+{
+    // The cosmetic phase must sample lerp(previousAge, age, alpha), not the
+    // current tick's age and not age + alpha * fixedStep.
+    World w;
+    w.spawn = false;
+    std::vector<MobRenderState> states;
+    for (double alpha : {0.0, 0.25, 0.5, 0.75, 0.999})
+    {
+        MobSystem s;
+        s.reset(7);
+        CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+        for (int i = 0; i < 5; ++i) // complete fixed ticks leave alpha at 0
+            s.update(s.settings.fixedStep, w, {0, 0, 0}, 112);
+        s.update(alpha * s.settings.fixedStep, w, {0, 0, 0}, 112);
+        s.renderStates(states);
+        const auto &m = s.mobs()[0];
+        const double renderAge = m.previousAge + (m.age - m.previousAge) * alpha;
+        const float expected = float(std::sin(renderAge * 0.7 + double(m.id % 100)) * 0.25);
+        CHECK(std::abs(states[0].look - expected) < 1e-6);
+    }
+}
+static void renderCadenceInvariance()
+{
+    // The same simulated interval must land on the same cosmetic phase for
+    // any render cadence: frame rate changes sampling density, not the
+    // animation timeline.
+    World w;
+    w.spawn = false;
+    std::vector<MobRenderState> states;
+    std::vector<float> looks;
+    for (int fps : {30, 60, 120, 144, 240})
+    {
+        MobSystem s;
+        s.reset(123);
+        CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+        for (int i = 0; i < fps * 12; ++i) // 12 s = 720 exact fixed ticks
+            s.update(1.0 / fps, w, {0, 0, 0}, 112);
+        CHECK(s.droppedSteps() == 0);
+        s.renderStates(states);
+        CHECK(std::abs(s.mobs()[0].age - 12.0) < 1e-9);
+        looks.push_back(states[0].look);
+    }
+    for (auto f : looks)
+        CHECK(std::abs(f - looks[0]) < 1e-6);
+}
+static void suspensionResume()
+{
+    World w;
+    w.spawn = false;
+    MobSystem s;
+    s.reset(7);
+    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+    for (int i = 0; i < 30; ++i)
+        s.update(s.settings.fixedStep, w, {0, 0, 0}, 112);
+    s.update(1.0 / 240, w, {0, 0, 0}, 112, true); // collapse interpolation
+    std::vector<MobRenderState> states;
+    s.renderStates(states);
+    const float frozenLook = states[0].look;
+    const double frozenAge = s.mobs()[0].age;
+    for (int i = 0; i < 240; ++i) // one suspended second at 240 Hz
+    {
+        s.update(1.0 / 240, w, {0, 0, 0}, 112, true);
+        s.renderStates(states);
+        CHECK(states[0].look == frozenLook);
+        CHECK(states[0].flap == 0.0f);
+        CHECK(s.mobs()[0].age == frozenAge);
+        CHECK(s.mobs()[0].previousAge == frozenAge);
+    }
+    // Resume: the phase continues from the frozen timeline with no
+    // wall-clock-sized jump.
+    s.update(1.0 / 240, w, {0, 0, 0}, 112);
+    s.renderStates(states);
+    CHECK(std::abs(states[0].look - frozenLook) < 1e-6);
+    float advanced = states[0].look;
+    for (int i = 0; i < 8; ++i)
+    {
+        s.update(1.0 / 240, w, {0, 0, 0}, 112);
+        s.renderStates(states);
+        advanced = states[0].look;
+    }
+    CHECK(advanced != frozenLook);
+}
+static void droppedStepPhase()
+{
+    // A stall longer than maxSteps drops whole ticks; cosmetic phase must
+    // follow the retained simulation timeline, not the dropped wall clock.
+    World w;
+    w.spawn = false;
+    MobSystem s;
+    s.reset(7);
+    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+    s.update(0.2, w, {0, 0, 0}, 112); // requests 12 ticks, maxSteps=8
+    CHECK(s.droppedSteps() == 4);
+    std::vector<MobRenderState> states;
+    s.renderStates(states);
+    const auto &m = s.mobs()[0];
+    CHECK(std::isfinite(states[0].look) && std::isfinite(states[0].flap));
+    // Only the eight retained ticks advanced; the dropped four never reach
+    // the animation clock.
+    CHECK(std::abs(m.age - 8.0 / 60) < 1e-9);
+    // The drained accumulator renders at alpha ~ 0, i.e. at previousAge.
+    const float expected = float(std::sin(m.previousAge * 0.7 + double(m.id % 100)) * 0.25);
+    CHECK(std::abs(states[0].look - expected) < 1e-6);
+    for (int i = 0; i < 8; ++i) // normal frames resume smooth interpolation
+    {
+        s.update(1.0 / 240, w, {0, 0, 0}, 112);
+        s.renderStates(states);
+        CHECK(std::isfinite(states[0].look));
+    }
+}
+static void renderHandoffReadOnly()
+{
+    World w;
+    w.spawn = false;
+    MobSystem s;
+    s.reset(7);
+    for (size_t i = 0; i < 4; ++i)
+        CHECK(s.add(MobSpecies(i), {0.5 + i * 2.0, 0.001, 0.5}, i + 1, i + 1, w));
+    for (int i = 0; i < 30; ++i)
+        s.update(1.0 / 60, w, {2, 0, 0}, 112);
+    std::vector<MobRenderState> a, b;
+    s.renderStates(a);
+    s.renderStates(b);
+    CHECK(a.size() == b.size());
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        CHECK(a[i].look == b[i].look);
+        CHECK(a[i].flap == b[i].flap);
+        CHECK(a[i].position == b[i].position);
+    }
+    // Rendering consumes simulation state without mutating it.
+    std::vector<double> before;
+    for (auto &m : s.mobs())
+        before.insert(before.end(),
+                      {m.age, m.previousAge, m.randomState * 1.0, m.body.position.x, m.body.position.y,
+                       m.body.position.z, m.yaw, m.gait, m.stride});
+    s.renderStates(a);
+    size_t k = 0;
+    for (auto &m : s.mobs())
+    {
+        CHECK(m.age == before[k++]);
+        CHECK(m.previousAge == before[k++]);
+        CHECK(double(m.randomState) == before[k++]);
+        CHECK(m.body.position.x == before[k++]);
+        CHECK(m.body.position.y == before[k++]);
+        CHECK(m.body.position.z == before[k++]);
+        CHECK(m.yaw == before[k++]);
+        CHECK(m.gait == before[k++]);
+        CHECK(m.stride == before[k++]);
+    }
+    // Steady-state rendering does not allocate.
+    counting = true;
+    for (int i = 0; i < 100; ++i)
+        s.renderStates(a);
+    counting = false;
+    CHECK(allocations == 0);
+}
+static void longRunPrecision()
+{
+    // One simulated hour: animation channels stay finite and bounded.
+    World w;
+    w.spawn = false;
+    MobSystem s;
+    s.reset(7);
+    s.settings.maxSteps = 1000000;
+    CHECK(s.add(MobSpecies::Chicken, {0.5, 0.001, 0.5}, 1, 1, w));
+    w.ledge = -10000; // fall forever: flap phase active the whole run
+    w.hole = true;
+    s.update(3600, w, {0, 0, 0}, 112);
+    std::vector<MobRenderState> states;
+    s.renderStates(states);
+    CHECK(std::isfinite(s.mobs()[0].age));
+    CHECK(std::isfinite(states[0].look));
+    CHECK(std::isfinite(states[0].flap));
+    CHECK(std::abs(states[0].look) <= 0.25f + 1e-6f);
+    CHECK(states[0].flap > 0.099f && states[0].flap < 1.501f);
+}
 static void profile()
 {
     World w;
@@ -392,6 +649,15 @@ int main(int argc, char **argv)
     }
     controller();
     contracts();
+    animationTimeline();
+    subTickCosmetics();
+    chickenFlap();
+    poseTimeAlignment();
+    renderCadenceInvariance();
+    suspensionResume();
+    droppedStepPhase();
+    renderHandoffReadOnly();
+    longRunPrecision();
     finiteSteering();
     population();
     timing();
