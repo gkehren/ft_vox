@@ -217,8 +217,8 @@ public:
 	uint64_t currentWorldGenId() const { return m_currentWorldGenId; }
 	uint64_t currentMapRequestId() const { return m_mapRequestId; }
 
-	bool hasPendingBiomeMapUpload() const { return !m_pendingUpload.rgba.empty(); }
-	const BiomeMapUpload &pendingBiomeMapUpload() const { return m_pendingUpload; }
+	bool hasPendingBiomeMapUpload() const { return m_mapPresentation.hasPending(); }
+	const BiomeMapUpload &pendingBiomeMapUpload() const { return m_mapPresentation.pending; }
 	void recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing);
 
 private:
@@ -271,7 +271,7 @@ private:
 		// Drops the pending upload (pixels + its grid). The PUBLISHED grid is
 		// intentionally untouched: the older texture remains displayed and
 		// must keep its own mapping (issue #191 review).
-		m_pendingUpload = {};
+		m_mapPresentation.dropPending();
 		m_mapNeedsUpdate = true;
 	}
 
@@ -299,18 +299,20 @@ private:
 	uint64_t m_currentWorldGenId{0};
 	int m_currentSeed{0};
 	uint64_t m_mapRequestId{0};
-	/// Grid of the PUBLISHED map texture (issue #191 review): the single
-	/// source for world -> screen overlay mapping. It only switches in
-	/// recordPendingBiomeMapUpload, together with the GPU recording of those
-	/// exact pixels, so at any instant it describes exactly what is shown.
-	BiomeRegionGrid m_mapGrid{};
+	/// Published texture + staged upload for the World panel (issue #191
+	/// review round 2): publishedGrid/hasTexture describe exactly what ImGui
+	/// samples in the current frame (overlays read them during the UI
+	/// build); a freshly accepted result waits in `pending` and is published
+	/// — pixels and grid together — by recordPendingBiomeMapUpload, which
+	/// Engine records AFTER the ImGui pass. No double buffering: each frame
+	/// builds from the last publication.
+	BiomeMapPresentationState m_mapPresentation{};
 	/// World-panel overlay toggles (issue #186 §8).
 	bool m_mapShowViewDistance{true};
 	bool m_mapShowChunkMarker{true};
 
 	BiomeMapJob m_mapJob{};
 	uint64_t m_mapCaptureEpoch{0};
-	BiomeMapUpload m_pendingUpload{};
 	// Owner scratch for sequential/small maps. Parallel tiles use separate
 	// bounded thread-local scratch; this retention cap allows dense reuse so
 	// refreshes do not re-allocate the dense peak, while retention stays
@@ -329,5 +331,4 @@ private:
 	VkSampler m_mapSampler{VK_NULL_HANDLE};
 	VkDescriptorSet m_mapDesc{VK_NULL_HANDLE};
 	int m_mapImageSize{0};
-	bool m_mapHasTexture{false};
 };

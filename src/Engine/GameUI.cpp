@@ -70,7 +70,7 @@ void GameUI::shutdown()
 		m_mapJob.future.wait();
 
 	m_mapJob.reset();
-	m_pendingUpload = {};
+	m_mapPresentation.dropPending();
 
 	if (m_vk && m_vk->getDevice() != VK_NULL_HANDLE)
 	{
@@ -88,7 +88,7 @@ void GameUI::shutdown()
 		if (m_mapImage.image)
 			destroyImage(m_vk->getAllocator(), m_vk->getDevice(), m_mapImage);
 	}
-	m_mapHasTexture = false;
+	m_mapPresentation.hasTexture = false;
 	m_mapImageSize = 0;
 	m_mapImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	m_vk = nullptr;
@@ -103,9 +103,7 @@ void GameUI::invalidateBiomeMap()
 	// The backing Vulkan texture remains allocated on the GPU for reuse,
 	// but is marked inactive so the UI will not display stale world terrain.
 	// It will be updated in-place when the next valid map completes.
-	m_mapHasTexture = false;
-	m_mapGrid = {};
-	m_pendingUpload = {};
+	m_mapPresentation.invalidate();
 }
 
 void GameUI::onImGuiVulkanBackendRecreate()
@@ -117,7 +115,7 @@ void GameUI::onImGuiVulkanBackendRecreate()
 		m_mapDesc = ImGui_ImplVulkan_AddTexture(
 			m_mapSampler, m_mapImage.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	if (m_mapDesc == VK_NULL_HANDLE)
-		m_mapHasTexture = false;
+		m_mapPresentation.hasTexture = false;
 }
 
 bool GameUI::handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame)
@@ -467,7 +465,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	// available width, keep the square aspect, and reserve the same height
 	// while the first map generates so the layout does not jump.
 	const float mapSizePx = std::max(ImGui::GetContentRegionAvail().x, ui::scaled(160.f, scale));
-	const bool hasTexture = m_mapHasTexture && m_mapDesc != VK_NULL_HANDLE;
+	const bool hasTexture = m_mapPresentation.hasTexture && m_mapDesc != VK_NULL_HANDLE;
 	ImVec2 mapMin{0.f, 0.f}, mapMax{0.f, 0.f};
 	bool mapDrawn = false;
 	if (hasTexture)
@@ -507,16 +505,17 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		}
 	}
 
-	if (mapDrawn && m_mapGrid.valid())
+	if (mapDrawn && m_mapPresentation.publishedGrid.valid())
 	{
 		// Cheap draw-list overlays (issue #186 §8), mapped through the grid
 		// of the PUBLISHED texture so markers stay glued to the shown pixels
 		// even while a newer request with different zoom/center is in flight.
+		const BiomeRegionGrid &grid = m_mapPresentation.publishedGrid;
 		ImDrawList *draw = ImGui::GetWindowDrawList();
 		draw->PushClipRect(mapMin, mapMax, true);
-		const float pxPerMapPx = (mapMax.x - mapMin.x) / static_cast<float>(m_mapGrid.width);
+		const float pxPerMapPx = (mapMax.x - mapMin.x) / static_cast<float>(grid.width);
 		const auto toScreen = [&](glm::vec2 world) {
-			const glm::vec2 pixel = biomeMapContinuousPixel(m_mapGrid, world);
+			const glm::vec2 pixel = biomeMapContinuousPixel(grid, world);
 			return ImVec2(mapMin.x + pixel.x * pxPerMapPx, mapMin.y + pixel.y * pxPerMapPx);
 		};
 		const ImVec2 playerPx = toScreen(playerXZ);
@@ -527,7 +526,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		if (m_mapShowViewDistance && frame.render)
 		{
 			const float radiusPx =
-				static_cast<float>(frame.render->maxRenderDistance) / m_mapGrid.step * pxPerMapPx;
+				static_cast<float>(frame.render->maxRenderDistance) / grid.step * pxPerMapPx;
 			draw->AddCircle(playerPx, radiusPx, IM_COL32(255, 255, 255, 90), 0, 1.4f);
 		}
 
@@ -538,7 +537,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 									   static_cast<float>(frame.player.chunkZ) * CHUNK_SIZE);
 			const ImVec2 chunkMin = toScreen(chunkWorld);
 			const float chunkPx =
-				static_cast<float>(CHUNK_SIZE) / m_mapGrid.step * pxPerMapPx;
+				static_cast<float>(CHUNK_SIZE) / grid.step * pxPerMapPx;
 			draw->AddRect(chunkMin, ImVec2(chunkMin.x + chunkPx, chunkMin.y + chunkPx),
 						  IM_COL32(255, 230, 120, 110), 0.f, 0.f, 1.2f);
 		}
@@ -773,20 +772,20 @@ void GameUI::ensureBiomeTexture(int size)
 
 void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing)
 {
-	if (m_pendingUpload.rgba.empty() || m_mapImage.image == VK_NULL_HANDLE)
+	if (m_mapPresentation.pending.rgba.empty() || m_mapImage.image == VK_NULL_HANDLE)
 		return;
 
 	// Drop deferred uploads that have been superseded while they waited for
 	// staging space. Only the pending upload (pixels + its grid) is dropped;
 	// the published grid is untouched so the older texture keeps its own
 	// mapping (issue #191 review).
-	if (isBiomeMapUploadSuperseded(m_pendingUpload, m_mapRequestId))
+	if (isBiomeMapUploadSuperseded(m_mapPresentation.pending, m_mapRequestId))
 	{
-		m_pendingUpload = {};
+		m_mapPresentation.dropPending();
 		return;
 	}
 
-	const VkDeviceSize dataSize = m_pendingUpload.rgba.size() * sizeof(uint8_t);
+	const VkDeviceSize dataSize = m_mapPresentation.pending.rgba.size() * sizeof(uint8_t);
 	VkDeviceSize stagingOffset = 0;
 	void *stagingPtr = nullptr;
 	if (!stagingRing.alloc(dataSize, stagingOffset, stagingPtr))
@@ -795,7 +794,7 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 		return;
 	}
 
-	std::memcpy(stagingPtr, m_pendingUpload.rgba.data(), dataSize);
+	std::memcpy(stagingPtr, m_mapPresentation.pending.rgba.data(), dataSize);
 
 	cmdTransitionImageLayout(cmd, m_mapImage.image, m_mapImageLayout,
 							 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -810,7 +809,7 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 	region.imageSubresource.baseArrayLayer = 0;
 	region.imageSubresource.layerCount = 1;
 	region.imageOffset = {0, 0, 0};
-	region.imageExtent = {m_pendingUpload.width, m_pendingUpload.height, 1};
+	region.imageExtent = {m_mapPresentation.pending.width, m_mapPresentation.pending.height, 1};
 
 	vkCmdCopyBufferToImage(cmd, stagingRing.buffer(), m_mapImage.image,
 						   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -820,17 +819,13 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 							 m_mapImage.mipLevels, m_mapImage.arrayLayers);
 
 	m_mapImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	// The GPU recording just committed THESE pixels: publish their grid with
-	// them, atomically (issue #191 review). At any instant m_mapGrid
-	// describes exactly the texture currently displayed.
-	m_mapGrid = m_pendingUpload.grid;
-	m_mapHasTexture = true;
+	// The GPU recording just committed THESE pixels (recorded AFTER this
+	// frame's ImGui pass): publish pixels + grid together, atomically
+	// (issue #191 review round 2). At any instant publishedGrid describes
+	// exactly the texture currently displayed; the new pair becomes visible
+	// to the NEXT frame's UI build.
+	m_mapPresentation.publishPending();
 	m_mapLastPublishedAt = SDL_GetTicks() / 1000.0;
-	m_pendingUpload.rgba.clear();
-	m_pendingUpload.width = 0;
-	m_pendingUpload.height = 0;
-	m_pendingUpload.requestId = 0;
-	m_pendingUpload.grid = {};
 }
 
 void GameUI::tickBiomeMap(GameUIFrame &frame)
@@ -870,14 +865,15 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 			m_mapCenter = res.center;
 			// Stage the pixels AND their grid together (issue #191 review):
 			// the published grid only switches when the GPU recording of
-			// THIS upload commits, never at CPU-accept time.
-			m_pendingUpload = BiomeMapUpload{
+			// THIS upload commits (after this frame's ImGui pass), never at
+			// CPU-accept time.
+			m_mapPresentation.stage(BiomeMapUpload{
 				.rgba = std::move(res.rgba),
 				.width = static_cast<uint32_t>(res.size),
 				.height = static_cast<uint32_t>(res.size),
 				.requestId = res.requestId,
 				.grid = res.grid
-			};
+			});
 			ensureBiomeTexture(res.size);
 		}
 		else

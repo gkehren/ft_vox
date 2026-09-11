@@ -112,14 +112,67 @@ inline bool isBiomeMapUploadSuperseded(const BiomeMapUpload &pending, uint64_t c
 	return pending.requestId != 0 && pending.requestId != currentRequestId;
 }
 
-/// Validate that a biome map upload request contains well-formed pixel data.
+/// Validate that a biome map upload request contains well-formed pixel data
+/// AND a matching canonical grid: pixels and their mapping are one atomic
+/// logical unit (issue #191 review round 2) — an upload without a valid,
+/// dimension-matching grid can never be published.
 inline bool isBiomeMapUploadValid(const BiomeMapUpload &upload)
 {
 	return upload.width > 0 &&
 		   upload.height > 0 &&
 		   upload.requestId > 0 &&
+		   upload.grid.valid() &&
+		   upload.grid.width == static_cast<int>(upload.width) &&
+		   upload.grid.height == static_cast<int>(upload.height) &&
 		   upload.rgba.size() == static_cast<size_t>(upload.width) * static_cast<size_t>(upload.height) * 4;
 }
+
+/// Frame-order-safe presentation state for the biome map (issue #191 review
+/// round 2). Captures the two moments that must never desync:
+///  - `publishedGrid`/`hasTexture` describe what ImGui samples in the
+///    CURRENT frame — the UI build (drawWorld) reads them;
+///  - `pending` carries a freshly accepted result until its GPU upload is
+///    recorded AFTER the ImGui pass (postImGuiRecord). Publication therefore
+///    lands between frames: the next UI build reads the new grid with the
+///    new pixels. No double buffering needed — each frame builds from the
+///    last publication.
+struct BiomeMapPresentationState
+{
+	BiomeRegionGrid publishedGrid{};
+	bool hasTexture{false};
+	BiomeMapUpload pending{};
+
+	/// True while an upload waits for its post-ImGui recording.
+	bool hasPending() const { return !pending.rgba.empty(); }
+
+	/// Stage a freshly accepted CPU result (pixels + grid atomically).
+	void stage(BiomeMapUpload upload) { pending = std::move(upload); }
+
+	/// Supersede: drop the pending upload; the published pair is untouched
+	/// (the older texture remains on screen with its own mapping).
+	void dropPending() { pending = {}; }
+
+	/// World/seed invalidation: nothing on screen stays semantically valid.
+	void invalidate()
+	{
+		pending = {};
+		publishedGrid = {};
+		hasTexture = false;
+	}
+
+	/// Called after the copy commands for `pending` were recorded (post-ImGui):
+	/// publishes pixels + grid together for the NEXT frame. Returns false when
+	/// there was nothing publishable (no pending upload or invalid grid).
+	bool publishPending()
+	{
+		if (pending.rgba.empty() || !pending.grid.valid())
+			return false;
+		publishedGrid = pending.grid;
+		hasTexture = true;
+		pending = {};
+		return true;
+	}
+};
 
 /// Check if a biome map result matches active world generation, seed, request ID,
 /// and internal invariant checks before GPU publication.

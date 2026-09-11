@@ -1541,15 +1541,23 @@ void Engine::run()
 												 0, nullptr);
 						}
 					}
+				},
+				[&](VkCommandBuffer cmd) {
+					if (imgui)
+						imgui->recordDraw(cmd);
+				},
+				// Biome-map upload AFTER the ImGui pass (issue #191 review
+				// round 2): ImGui samples this texture directly, so this
+				// frame's draw lists must record against the previous
+				// publication; the new pixels+grid become visible to the
+				// next frame's UI build. Mesh uploads stay in preRecord —
+				// nothing in ImGui samples them in the same frame.
+				[&](VkCommandBuffer cmd) {
 					if (gameUi && gameUi->hasPendingBiomeMapUpload())
 					{
 						PROFILE_SCOPE("BiomeMapUpload");
 						gameUi->recordPendingBiomeMapUpload(cmd, stagingRing);
 					}
-				},
-				[&](VkCommandBuffer cmd) {
-					if (imgui)
-						imgui->recordDraw(cmd);
 				}, &frameCtx->gpuProfiler(), m_benchmark.gpuCaptureTag());
 		}
 
