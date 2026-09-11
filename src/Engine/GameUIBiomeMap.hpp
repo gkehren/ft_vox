@@ -88,14 +88,29 @@ struct BiomeMapResult
 	double elapsedMs{0.0}; // scheduled request to completed CPU result, including queue time
 };
 
-/// Pending GPU upload request for streamed biome map data.
+/// Pending GPU upload request for streamed biome map data. The grid travels
+/// with the pixels ON PURPOSE (issue #191 review): pixels and their mapping
+/// are one atomic logical unit, so the World panel's published grid can only
+/// ever describe the texture that was actually recorded to the GPU.
 struct BiomeMapUpload
 {
 	std::vector<uint8_t> rgba;
 	uint32_t width{0};
 	uint32_t height{0};
 	uint64_t requestId{0};
+	/// Canonical grid of these pixels (validated upstream by
+	/// isBiomeMapResultAcceptable before staging). Invalid while empty.
+	BiomeRegionGrid grid;
 };
+
+/// True when a staged upload must be dropped because a newer request
+/// superseded it while it waited for staging space (issue #191 review).
+/// Dropping must never touch the PUBLISHED grid: the older texture stays on
+/// screen and keeps its own mapping.
+inline bool isBiomeMapUploadSuperseded(const BiomeMapUpload &pending, uint64_t currentRequestId)
+{
+	return pending.requestId != 0 && pending.requestId != currentRequestId;
+}
 
 /// Validate that a biome map upload request contains well-formed pixel data.
 inline bool isBiomeMapUploadValid(const BiomeMapUpload &upload)

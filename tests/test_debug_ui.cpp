@@ -485,6 +485,20 @@ void testStreamingHealthSubset()
 			  !state.health.retiredBacklog.active(),
 		  "memory/frame monitors stay untouched by the streaming subset");
 
+	// Overview + Streaming open together (issue #191 review): the monitors
+	// must advance exactly once per sample — the sampler's overview branch
+	// is exclusive with the streaming subset, so a double advance would show
+	// ~2x the nominal first-sample dt (16 ms).
+	debugui::UiState both;
+	both.panels.overview = true;
+	both.panels.streaming = true;
+	both.streaming.pendingMesh = 128;
+	GameUIFrame frame{};
+	debugui::updateDebugUiState(both, frame, 1000.0);
+	CHECK(both.health.meshBacklog.conditionSeconds() > 0.f &&
+			  both.health.meshBacklog.conditionSeconds() <= 0.02f,
+		  "monitors advance exactly once per sample with Overview and Streaming both open");
+
 	std::cout << "PASS\n";
 }
 

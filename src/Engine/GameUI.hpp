@@ -268,6 +268,9 @@ private:
 		if (m_mapJob.cancel)
 			m_mapJob.cancel->store(true, std::memory_order_relaxed);
 
+		// Drops the pending upload (pixels + its grid). The PUBLISHED grid is
+		// intentionally untouched: the older texture remains displayed and
+		// must keep its own mapping (issue #191 review).
 		m_pendingUpload = {};
 		m_mapNeedsUpdate = true;
 	}
@@ -296,10 +299,10 @@ private:
 	uint64_t m_currentWorldGenId{0};
 	int m_currentSeed{0};
 	uint64_t m_mapRequestId{0};
-	/// Grid of the PUBLISHED map texture (consumed acceptable result only;
-	/// issue #186): the single source for world -> screen overlay mapping,
-	/// so markers stay consistent with the pixels even while a newer
-	/// request with different zoom/center is still in flight.
+	/// Grid of the PUBLISHED map texture (issue #191 review): the single
+	/// source for world -> screen overlay mapping. It only switches in
+	/// recordPendingBiomeMapUpload, together with the GPU recording of those
+	/// exact pixels, so at any instant it describes exactly what is shown.
 	BiomeRegionGrid m_mapGrid{};
 	/// World-panel overlay toggles (issue #186 §8).
 	bool m_mapShowViewDistance{true};

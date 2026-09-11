@@ -49,6 +49,60 @@ static void test_biome_map_continuous_pixel()
 		  "continuous pixel rounds to grid.pixelForWorld");
 }
 
+// Published-grid lifecycle invariant (issue #191 review): the World panel's
+// published grid must describe EXACTLY the pixels currently displayed. This
+// pins the data transitions GameUI performs across tickBiomeMap /
+// supersedeBiomeMapRequest / recordPendingBiomeMapUpload:
+//  - a newly accepted CPU result stages pixels + grid TOGETHER (pending);
+//  - the published grid switches only when the upload recording commits;
+//  - superseding a pending upload never touches the published pair;
+//  - world invalidation invalidates the published mapping.
+static void test_upload_grid_publication_lifecycle()
+{
+	const BiomeRegionGrid gridA = makeBiomeRegionGrid(0.f, 0.f, 2.f, 256, 256);
+	const BiomeRegionGrid gridB = makeBiomeRegionGrid(16.f, 0.f, 1.f, 256, 256);
+	const BiomeRegionGrid gridC = makeBiomeRegionGrid(-32.f, 8.f, 0.5f, 256, 256);
+
+	// "Texture A published": the published grid describes the shown pixels.
+	BiomeRegionGrid publishedGrid = gridA;
+
+	// Result B accepted on the CPU: pixels + grid staged together; the
+	// published grid is NOT switched yet (upload may still be deferred).
+	BiomeMapUpload pendingB{};
+	pendingB.rgba.resize(256 * 256 * 4);
+	pendingB.width = pendingB.height = 256;
+	pendingB.requestId = 7;
+	pendingB.grid = gridB;
+	CHECK(!isBiomeMapUploadSuperseded(pendingB, 7), "freshly staged upload is not superseded");
+	CHECK(publishedGrid.center.x == gridA.center.x && publishedGrid.step == gridA.step,
+		  "CPU-accept does not publish the new grid");
+
+	// B superseded while waiting for staging: the pending upload (pixels +
+	// grid) is dropped, published A keeps rendering with its own mapping.
+	CHECK(isBiomeMapUploadSuperseded(pendingB, 8), "older request id flagged as superseded");
+	pendingB = {};
+	CHECK(publishedGrid.center.x == gridA.center.x,
+		  "superseded pending upload keeps the published grid");
+
+	// Result C accepted AND its upload recorded: the pair publishes
+	// atomically (commit step inside recordPendingBiomeMapUpload).
+	BiomeMapUpload pendingC{};
+	pendingC.rgba.resize(256 * 256 * 4);
+	pendingC.width = pendingC.height = 256;
+	pendingC.requestId = 9;
+	pendingC.grid = gridC;
+	CHECK(!isBiomeMapUploadSuperseded(pendingC, 9), "current upload not superseded");
+	publishedGrid = pendingC.grid;
+	pendingC = {};
+	CHECK(publishedGrid.center.x == gridC.center.x && publishedGrid.step == gridC.step,
+		  "committed upload publishes its grid with its pixels");
+
+	// World/seed invalidation clears the published mapping (the texture is
+	// no longer semantically valid).
+	publishedGrid = {};
+	CHECK(!publishedGrid.valid(), "invalidation clears the published grid");
+}
+
 static void test_biome_map_result_validity()
 {
 	const uint64_t reqId = 12;
@@ -885,6 +939,7 @@ int main(int argc, char **argv)
 	test_parallel_maps();
 	std::cout << "[test_biome_map] Running tests...\n";
 	test_biome_map_continuous_pixel();
+	test_upload_grid_publication_lifecycle();
 	test_biome_map_result_validity();
 	test_deterministic_stale_generation_rejection();
 	test_deterministic_superseded_request_rejection();

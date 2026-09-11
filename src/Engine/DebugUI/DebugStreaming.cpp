@@ -84,7 +84,8 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 	rs.minRenderDistance = clampedNearRenderDistance(rs.minRenderDistance, rs.maxRenderDistance);
 	ImGui::SliderInt("Full-quality distance", &rs.minRenderDistance, 32, rs.maxRenderDistance,
 					 "%d blocks");
-	ImGui::SliderFloat("Front bias", &rs.streamFrontBias, 0.f, kSafeMaxStreamFrontBias, "%.2f×");
+	ImGui::SliderFloat("Directional front bias", &rs.streamFrontBias, 0.f, kSafeMaxStreamFrontBias,
+					   "%.2f");
 	ImGui::TextDisabled("Streams farther ahead than behind (ahead ~×%.2f, behind ~×%.2f)",
 						1.0f / std::sqrt(1.0f - normalizedStreamFrontBias(rs.streamFrontBias)),
 						1.0f / std::sqrt(1.0f + normalizedStreamFrontBias(rs.streamFrontBias)));
@@ -106,12 +107,9 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 	ImGui::SliderFloat("CPU streaming budget", &rs.maxStreamMs, 0.f, 16.f, "%.1f ms/frame");
 	ImGui::TextDisabled("Main-thread streaming work cap per frame (0 = unlimited)");
 
+	// Buttons first, THEN detection, THEN badge (issue #191 review): the
+	// badge must reflect the same frame's click, never lag one frame behind.
 	ImGui::Spacing();
-	const char *activePreset =
-		matchesStreamingPreset(rs, StreamingQualityPreset::Conservative)   ? "Conservative"
-		: matchesStreamingPreset(rs, StreamingQualityPreset::Balanced)	   ? "Balanced"
-		: matchesStreamingPreset(rs, StreamingQualityPreset::Aggressive)   ? "Aggressive"
-																		   : nullptr;
 	if (ImGui::Button("Conservative"))
 		applyStreamingPreset(rs, StreamingQualityPreset::Conservative);
 	ImGui::SameLine();
@@ -121,8 +119,13 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 	if (ImGui::Button("Aggressive"))
 		applyStreamingPreset(rs, StreamingQualityPreset::Aggressive);
 	ImGui::SameLine();
-	if (activePreset)
-		ui::statusBadge(activePreset, ui::StatusKind::Ok);
+	if (const std::optional<StreamingQualityPreset> active = matchingStreamingPreset(rs))
+	{
+		const char *name = *active == StreamingQualityPreset::Conservative ? "Conservative"
+						   : *active == StreamingQualityPreset::Balanced   ? "Balanced"
+																		   : "Aggressive";
+		ui::statusBadge(name, ui::StatusKind::Ok);
+	}
 	else
 	{
 		ui::statusBadge("Custom", ui::StatusKind::Info);

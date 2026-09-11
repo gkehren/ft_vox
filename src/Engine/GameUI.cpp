@@ -776,8 +776,11 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 	if (m_pendingUpload.rgba.empty() || m_mapImage.image == VK_NULL_HANDLE)
 		return;
 
-	// Drop deferred uploads that have been superseded
-	if (m_pendingUpload.requestId != m_mapRequestId)
+	// Drop deferred uploads that have been superseded while they waited for
+	// staging space. Only the pending upload (pixels + its grid) is dropped;
+	// the published grid is untouched so the older texture keeps its own
+	// mapping (issue #191 review).
+	if (isBiomeMapUploadSuperseded(m_pendingUpload, m_mapRequestId))
 	{
 		m_pendingUpload = {};
 		return;
@@ -817,12 +820,17 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 							 m_mapImage.mipLevels, m_mapImage.arrayLayers);
 
 	m_mapImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	// The GPU recording just committed THESE pixels: publish their grid with
+	// them, atomically (issue #191 review). At any instant m_mapGrid
+	// describes exactly the texture currently displayed.
+	m_mapGrid = m_pendingUpload.grid;
 	m_mapHasTexture = true;
 	m_mapLastPublishedAt = SDL_GetTicks() / 1000.0;
 	m_pendingUpload.rgba.clear();
 	m_pendingUpload.width = 0;
 	m_pendingUpload.height = 0;
 	m_pendingUpload.requestId = 0;
+	m_pendingUpload.grid = {};
 }
 
 void GameUI::tickBiomeMap(GameUIFrame &frame)
@@ -860,18 +868,17 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 			GetProfiler().addWorkerSample("BiomeMap", static_cast<float>(res.elapsedMs), m_mapCaptureEpoch);
 			paintBiomeMapPlayerDot(res.rgba, res.grid, playerXZ);
 			m_mapCenter = res.center;
-			// Keep the published grid: World-panel overlays map world ->
-			// screen through it, so markers stay consistent with the pixels
-			// even while a newer request (different zoom/center) is in
-			// flight (issue #186 §8).
-			m_mapGrid = res.grid;
-			ensureBiomeTexture(res.size);
+			// Stage the pixels AND their grid together (issue #191 review):
+			// the published grid only switches when the GPU recording of
+			// THIS upload commits, never at CPU-accept time.
 			m_pendingUpload = BiomeMapUpload{
 				.rgba = std::move(res.rgba),
 				.width = static_cast<uint32_t>(res.size),
 				.height = static_cast<uint32_t>(res.size),
-				.requestId = res.requestId
+				.requestId = res.requestId,
+				.grid = res.grid
 			};
+			ensureBiomeTexture(res.size);
 		}
 		else
 		{

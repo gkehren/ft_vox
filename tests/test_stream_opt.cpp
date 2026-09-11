@@ -756,6 +756,29 @@ static void testClampedNearRenderDistance()
 	CHECK(clampedNearRenderDistance(-5, 100) == -5, "no extra floors: only min>max clamps");
 }
 
+// matchingStreamingPreset (issue #191 review): the UI badge helper must
+// report the exact matched preset, and nullopt for hand-edited settings.
+static void testMatchingStreamingPreset()
+{
+	RenderSettings rs{};
+	const auto balanced = matchingStreamingPreset(rs);
+	CHECK(balanced.has_value() && *balanced == StreamingQualityPreset::Balanced,
+		  "default settings match the Balanced preset");
+
+	applyStreamingPreset(rs, StreamingQualityPreset::Aggressive);
+	const auto aggressive = matchingStreamingPreset(rs);
+	CHECK(aggressive.has_value() && *aggressive == StreamingQualityPreset::Aggressive,
+		  "applied preset is detected");
+
+	rs.meshPerSec += 1;
+	CHECK(!matchingStreamingPreset(rs).has_value(), "single hand edit yields Custom (nullopt)");
+
+	applyStreamingPreset(rs, StreamingQualityPreset::Conservative);
+	const auto conservative = matchingStreamingPreset(rs);
+	CHECK(conservative.has_value() && *conservative == StreamingQualityPreset::Conservative,
+		  "restored preset is detected again");
+}
+
 int main()
 {
 	testLoadPriorityNearestFirst();
@@ -776,6 +799,7 @@ int main()
 	testSubtractStreamingStats();
 	testMinimalRenderDistanceFootprints();
 	testStreamingPresets();
+	testMatchingStreamingPreset();
 	testClampedNearRenderDistance();
 
 	if (g_fails != 0)

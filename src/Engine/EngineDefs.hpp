@@ -4,6 +4,7 @@
 #include <utils.hpp>
 
 #include <cmath>
+#include <optional>
 
 struct ShaderParameters
 {
@@ -202,6 +203,20 @@ inline bool matchesStreamingPreset(const RenderSettings &rs, StreamingQualityPre
 		   rs.genPerSec == v.genPerSec && rs.meshPerSec == v.meshPerSec &&
 		   rs.lightCachePerSec == v.lightCachePerSec && rs.uploadPerSec == v.uploadPerSec &&
 		   rs.maxStreamMs == v.maxStreamMs;
+}
+
+/// The preset currently matched exactly, or nullopt for hand-edited
+/// ("Custom") settings. UI surfaces must call this AFTER applying any click
+/// so badges reflect the same frame's state (issue #191 review).
+inline std::optional<StreamingQualityPreset> matchingStreamingPreset(const RenderSettings &rs)
+{
+	if (matchesStreamingPreset(rs, StreamingQualityPreset::Conservative))
+		return StreamingQualityPreset::Conservative;
+	if (matchesStreamingPreset(rs, StreamingQualityPreset::Balanced))
+		return StreamingQualityPreset::Balanced;
+	if (matchesStreamingPreset(rs, StreamingQualityPreset::Aggressive))
+		return StreamingQualityPreset::Aggressive;
+	return std::nullopt;
 }
 
 /// Legacy flat timings filled from the hierarchical Profiler each frame.
