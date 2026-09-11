@@ -441,12 +441,19 @@ void Engine::reloadWorld(int newSeed)
 
 	vkContext->waitIdle();
 	resourceRetire.flush();
+	// Carry the opt-in chunk lifecycle trace across the reload (issue #179
+	// review round 2): re-apply it to the new manager BEFORE
+	// generateInitialArea() so bootstrap events are not lost — the UI-side
+	// sync in updateDebugUiState only runs later in the frame.
+	const bool chunkTraceEnabled =
+		chunkManager && chunkManager->chunkEventTraceEnabled();
 	chunkManager.reset();
 	mobs.reset(seed);
     mobStates.reserve(entities::MobSettings::capacity);
 	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
 	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
 												  chunkPool.get());
+	chunkManager->setChunkEventTraceEnabled(chunkTraceEnabled);
 
 	camera.setMode(CameraMode::PERSPECTIVE);
 	camera.setPosition(glm::vec3(0.f, 100.f, 0.f));

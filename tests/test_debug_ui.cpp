@@ -249,6 +249,24 @@ void testUpdateDebugUiState()
 	debugui::updateDebugUiState(state, f, t0 + 10.01);
 	CHECK(reloaded.chunkEventTraceEnabled(), "trace flag re-applied to a recreated manager with F9 closed");
 
+	// reloadWorld() (issue #179 review round 2): the dying manager's flag is
+	// captured and re-applied to the replacement BEFORE generateInitialArea()
+	// — bootstrap lifecycle events must land before any updateDebugUiState
+	// call, not just once the UI has re-synced the flag.
+	const bool carried = reloaded.chunkEventTraceEnabled();
+	CHECK(carried, "dying manager's trace flag captured for the reload");
+	ChunkManager rebootstrap(&generator, nullptr, &pool);
+	rebootstrap.setChunkEventTraceEnabled(carried);
+	Chunk *bootstrapped = pool.acquire(glm::vec3(0.f, 0.f, 0.f));
+	CHECK(bootstrapped != nullptr, "pool provides a chunk for the reload bootstrap");
+	if (bootstrapped)
+	{
+		ChunkManagerProbe::registerChunk(rebootstrap, {0, 0, 0}, bootstrapped);
+		ChunkManagerProbe::recordEvent(rebootstrap, bootstrapped, "load");
+		CHECK(!rebootstrap.chunkDebugEvents().empty(),
+			  "bootstrap events recorded on the reloaded manager before any UI sample");
+	}
+
 	std::cout << "PASS\n";
 }
 void testScopeStatsLifecycle()
