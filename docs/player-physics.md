@@ -2,8 +2,9 @@
 
 The normal perspective mode now controls a physical player. `V` switches to
 debug flight; isometric inspection always uses flight. Walking can only be
-enabled when the whole body fits inside available, non-solid terrain. The HUD
-reports an invalid transition rather than moving the player into a wall.
+enabled when the whole body fits inside available, non-solid terrain. The
+Player / Gameplay panel reports an invalid transition rather than moving the
+player into a wall (issue #184).
 
 ## Controls and defaults
 
@@ -80,7 +81,8 @@ storage, meshes, upload or retirement behavior.
 
 Spawn searches the already bootstrapped area for support and a clear body volume,
 including aquatic positions. If no safe spawn exists, debug flight remains
-active with a HUD explanation. Reload resets position, velocity and timers.
+active with an explanation in the Player / Gameplay panel (issue #184). Reload
+resets position, velocity and timers.
 Existing streaming benchmarks retain their original center, height and scripted
 camera path; physics is suspended throughout the benchmark. On completion or
 cancellation, the previous movement mode is restored only if the current body
@@ -118,5 +120,6 @@ The standalone real-voxel profile generates seed 42 without rendering, warms up
 scoped query adapter. It reports mean/p95 CPU time, cells/tick, distance travelled,
 terrain waits and dropped steps. It is distinct from the existing fly-through
 renderer benchmark. Timing is diagnostic, not a hardware-dependent CI assertion.
-The in-game profiler exposes the `Input/Physics` scope and the HUD exposes step,
-query and dropped-step counters.
+The in-game profiler exposes the `Input/Physics` scope and the Player
+Diagnostics console window exposes step, query and dropped-step counters
+(issue #184).

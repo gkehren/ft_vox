@@ -92,8 +92,9 @@ acquired by the current frame.
   sleep, frame limiter, `MAILBOX`, `FIFO_RELAXED`, or `FIFO` fallback.
 
 If a surface does not expose `IMMEDIATE`, disabling VSync is rejected explicitly
-instead of silently retaining refresh-paced presentation. F10 and the HUD
-checkbox recreate the swapchain immediately and display the active Vulkan mode.
+instead of silently retaining refresh-paced presentation. F10 and the Graphics
+panel checkbox (Display / Present section, issue #184) recreate the swapchain
+immediately and display the active Vulkan mode.
 The same path is reproducible from the CLI with `--vsync on|off`; combining it
 with `--benchmark <seconds>` measures either mode without changing the requested
 setting.
@@ -414,7 +415,7 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
 - **Visibility:** one frustum test per mob against the camera matrix and the three
   cascade matrices, producing a 4-bit per-mob mask (bit 0 camera, bits 1-3
   cascades) that routes instances into per-pass instance slices (`visibleCount`
-  feeds the HUD and counts only bit 0). Casters behind the camera are still drawn
+  feeds the Overview console panel and counts only bit 0). Casters behind the camera are still drawn
   into shadow cascades.
 - **Draws (issue #130):** `record` is called once inside OpaquePass (HDR color + depth, before
   overlays) and once per shadow cascade inside ShadowPass. Push constant = the

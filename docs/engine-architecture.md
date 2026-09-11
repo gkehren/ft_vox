@@ -111,19 +111,28 @@ stage measurements are documented in [workload-telemetry.md](workload-telemetry.
 - **`UiTheme` / `UiScale` / `UiShortcuts` / `UiStatus`** — centralized theme
   (`ui::applyStyle(scale)`, no-drift rebuild), 100–200% UI scaling persisted
   in `imgui.ini`, shared presentation helpers, shortcut display metadata
-- **`GameUI`** — ImGui shell: main menu bar, gameplay HUD, World/biome map, Help,
-  on-screen hints, F-key shortcut routing and biome-map plumbing
+- **`GameUI`** — ImGui shell: main menu bar, read-only Status Overlay (F1,
+  density Off/Minimal/Detailed), interactive Player / Gameplay panel
+  (Movement/Camera/Interaction/World toggles), World/biome map, Help,
+  on-screen hints, F-key shortcut routing and biome-map plumbing (issue #184).
+  The player reaches UI surfaces only as the read-only `playerui::PlayerSnapshot`
+  value carried by `GameUIFrame`
 - **`DebugUI/` (`src/Engine/DebugUI/`)** — developer console panels (issue #179),
   one domain per translation unit, all consuming read-only snapshots in
   `debugui::UiState` instead of reaching into engine subsystems:
   - **Overview (F8)** — frame/streaming/memory summary plus sustained health
     warnings (hysteresis-based, no one-frame-transient alarms)
-  - **Graphics (F2)** — settings only; **Render Debug (F12)** — diagnostic
+  - **Graphics (F2)** — settings only, including the Display/Present section
+    (VSync + present-mode readout, moved out of the old HUD in issue #184);
+    **Render Debug (F12)** — diagnostic
     views (shadow/water/SSAO debug, exposure readout, per-pass GPU cost) writing
     the same `shadowDebug`/`waterDebugView`/`ssaoDebugView` state as before
   - **Streaming (F3)** — budgets + queue/pool telemetry with bounded histories
   - **Performance (F7)** — CPU hierarchy + flat sortable scope table
     (last/avg/peak + click-to-plot), GPU pass view, worker jobs, spikes
+  - **Player Diagnostics** (Developer menu) — raw physics solver counters
+    (steps, queried cells, dropped fixed steps), motion flags and camera
+    readout removed from the gameplay surfaces (issue #184)
   - **Chunk inspector (F9)** — per-chunk lifecycle/mesh/light-cache/upload
     state for the chunk under the player/target or manual coordinates, plus an
     opt-in, bounded (`ChunkManager::kChunkEventRingSize`) main-thread event
@@ -500,7 +509,8 @@ cascades (issue #130: one instanced draw per populated static part batch). Each
 render state also carries
 `localSkylight` / `localBlockRgb` sampled per frame from the chunk light caches
 (trilinear over packed 16-bit voxel light, `ChunkManager::sampleSmoothedLight`).
-UI: HUD "Passive mobs" toggle and active/visible counters (`GameUI`); CPU time
+UI: Player/Gameplay panel "Passive mobs" toggle (`GameUI`, issue #184) with
+active/visible counters in the Overview console; CPU time
 under the `Mobs` profiler scope, GPU under `GpuPass::Mobs` / `MobShadow0-2`.
 
 ### Entity light caches (`ChunkLightStorage`, issues #128/#172)

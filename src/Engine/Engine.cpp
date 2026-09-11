@@ -103,8 +103,9 @@ Engine::Engine(std::string resourcePackRoot)
 		pixelH = windowHeight;
 	}
 	// Single size semantics: windowWidth/Height track the framebuffer/swapchain
-	// pixel extent (projection aspect, frustum visibility, HUD Viewport readout
-	// all want device pixels). Logical SDL sizes are not needed anywhere else.
+	// pixel extent (projection aspect, frustum visibility, the Overview
+	// viewport readout all want device pixels). Logical SDL sizes are not
+	// needed anywhere else.
 	windowWidth = pixelW;
 	windowHeight = pixelH;
 
@@ -1130,15 +1131,66 @@ void Engine::drawUi()
 
 	GameUIFrame f{};
 	f.camera = &camera;
-	f.player = &player;
-	f.playerFlight = playerFlight;
-	f.playerStatus = playerStatus;
+	// Read-only player snapshot for the UI (issue #184): biome/chunk resolved
+	// here via the canonical queries so panels never touch the generator or
+	// physics::PlayerController directly.
+	f.player.position = camera.getPosition();
+	f.player.yaw = camera.getYaw();
+	f.player.pitch = camera.getPitch();
+	{
+		const glm::ivec2 chunk = playerui::worldToChunkCoord(f.player.position.x,
+															 f.player.position.z);
+		f.player.chunkX = chunk.x;
+		f.player.chunkZ = chunk.y;
+	}
+	// Biome: only the Detailed overlay displays it (issue #184 review), so
+	// skip the query in every other UI state — and even then re-sample only
+	// when the voxel column or the world generation changed (the player can
+	// spend many frames inside one column).
+	f.player.biome = -1;
+	if (terrainGenerator && gameUi->needsPlayerBiome())
+	{
+		const glm::ivec2 column =
+			worldToVoxelColumn(glm::vec2(f.player.position.x, f.player.position.z));
+		if (column != m_uiBiomeColumn || m_uiBiomeWorldGen != m_worldGenerationId)
+		{
+			m_uiBiomeColumn = column;
+			m_uiBiomeWorldGen = m_worldGenerationId;
+			// Single canonical world -> voxel-column convention (floor).
+			const BiomeType biome = terrainGenerator->getBiomeAt(column.x, column.y);
+			m_uiBiome = (biome >= 0 && biome < BIOME_COUNT) ? static_cast<int>(biome) : -1;
+		}
+		f.player.biome = m_uiBiome;
+	}
+	f.player.flight = playerFlight;
+	f.player.grounded = player.body.grounded;
+	f.player.swimming = player.submerged.water + player.submerged.lava > 0;
+	f.player.waitingForTerrain = player.body.waitingForTerrain;
+	f.player.speed = static_cast<float>(glm::length(player.body.velocity));
+	f.player.status = playerStatus;
+	f.player.physicsSteps = player.metrics.steps;
+	f.player.queriedCells = player.metrics.queries.cells;
+	f.player.queryIterations = player.metrics.queries.iterations;
+	f.player.droppedSteps = player.metrics.droppedSteps;
+	f.player.submergedWater = player.submerged.water > 0;
+	f.player.submergedLava = player.submerged.lava > 0;
+	// Camera view state travels through the snapshot (issue #184 review):
+	// panels display these values and mutate through the commands below.
+	f.player.cameraViewMode = camera.getMode() == CameraMode::ISOMETRIC
+								  ? playerui::CameraViewMode::Isometric
+								  : playerui::CameraViewMode::Perspective;
+	f.player.cameraMovementSpeed = camera.getMovementSpeed();
+	f.player.mouseSensitivity = camera.getMouseSensitivity();
+	f.player.isometricZoom = camera.getIsometricZoom();
 	f.setPlayerFlight = [this](bool enabled) { setPlayerFlight(enabled); };
 	f.setCameraMode = [this](CameraMode mode) {
 		if (m_benchmark.isActive()) return;
 		if (mode == CameraMode::ISOMETRIC && !playerFlight) setPlayerFlight(true);
 		camera.setMode(mode);
 	};
+	f.setCameraMovementSpeed = [this](float value) { camera.setMovementSpeed(value); };
+	f.setMouseSensitivity = [this](float value) { camera.setMouseSensitivity(value); };
+	f.setIsometricZoom = [this](float value) { camera.setIsometricZoom(value); };
 	f.chunks = chunkManager.get();
 	f.pool = chunkPool.get();
 	f.generator = terrainGenerator.get();

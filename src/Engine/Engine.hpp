@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <limits>
 #include <thread>
 
 #include <Vulkan/VkContext.hpp>
@@ -150,6 +151,16 @@ private:
 
 	int seed{0};
 	uint64_t m_worldGenerationId{1};
+	/// UI biome cache (issue #184 review): the Detailed overlay is the only
+	/// biome consumer, and the player can stay in one voxel column for many
+	/// frames — so drawUi samples getBiomeAt() only when the column or the
+	/// world generation changes instead of every frame. Keying on the
+	/// generation id makes reloads/seed changes invalidate the cache without
+	/// a dedicated reset path.
+	glm::ivec2 m_uiBiomeColumn{std::numeric_limits<int>::min(),
+							   std::numeric_limits<int>::min()};
+	uint64_t m_uiBiomeWorldGen{0};
+	int m_uiBiome{-1};
 	std::string m_resourcePackRoot;
 	TextureType selectedTexture{STONE};
 

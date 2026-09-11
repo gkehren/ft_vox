@@ -1,12 +1,13 @@
 #pragma once
 
+#include <Engine/PlayerUi.hpp>
 #include <imgui/imgui.h>
 
 // Application-level ImGui shell (issue #183): persistent dockspace with a
 // passthru central region, main menu / navigation structure, right-side
-// status strip and layout actions. Panel contents live in GameUI (HUD,
-// World, Help, hints) and in the DebugUI developer panels (issue #179);
-// the shell owns only chrome and navigation.
+// status strip and layout actions. Panel contents live in GameUI (Status
+// Overlay, Player/Gameplay, World, Help, hints) and in the DebugUI developer
+// panels (issue #179); the shell owns only chrome and navigation.
 struct GameUIFrame;
 
 namespace ui
@@ -25,26 +26,38 @@ enum class HelpTabRequest
 /// (GameUI + DebugUI).
 namespace windows
 {
-inline constexpr const char *kHud = "HUD";
 inline constexpr const char *kGraphics = "Graphics";
 inline constexpr const char *kStreaming = "Streaming";
 inline constexpr const char *kPerformance = "Performance";
 inline constexpr const char *kOverview = "Overview";
 inline constexpr const char *kRenderDebug = "Render Debug";
+inline constexpr const char *kPlayerDiagnostics = "Player Diagnostics";
 inline constexpr const char *kChunkInspector = "Chunk Inspector";
 inline constexpr const char *kMemory = "Memory";
 inline constexpr const char *kBenchmark = "Benchmark";
 inline constexpr const char *kBenchmarkReport = "Benchmark Report";
 inline constexpr const char *kWorld = "World";
 inline constexpr const char *kHelp = "Help";
+inline constexpr const char *kPlayer = "Player / Gameplay";
 } // namespace windows
 
+/// Screen-space rectangle of the central game-view area. Used to anchor
+/// gameplay overlays so they stay over the 3D render even when side docks
+/// are open (issue #184 review).
+struct UiRect
+{
+	ImVec2 pos{0.f, 0.f};
+	ImVec2 size{0.f, 0.f};
+};
+
 /// Panel visibility toggles (GameUI + DebugUI PanelState), mirrored into the
-/// shell menus.
+/// shell menus. The Status Overlay carries its density instead of a bool:
+/// Off is hidden, Minimal/Detailed are the two shown densities (issue #184).
 struct ShellToggles
 {
 	// GameUI-owned surfaces.
-	bool *hud;
+	playerui::StatusOverlayDensity *statusOverlay;
+	bool *playerPanel; // interactive "Player / Gameplay" panel
 	bool *graphics;	  // DebugUI rendering panel ("Graphics", settings)
 	bool *streaming;
 	bool *world;
@@ -54,6 +67,7 @@ struct ShellToggles
 	// DebugUI developer surfaces.
 	bool *overview;
 	bool *performance;
+	bool *playerDiagnostics;
 	bool *renderDebug;
 	bool *chunkInspector;
 	bool *memory;
@@ -73,6 +87,12 @@ public:
 	/// status strip with graceful degradation at narrow widths.
 	void drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles);
 
+	/// Screen-space rectangle of the central passthru dock node (the game
+	/// view). Falls back to the main viewport work area while the dockspace
+	/// has not been built yet or has no usable central node. Gameplay
+	/// overlays anchor here so side/bottom docks never cover them.
+	ui::UiRect gameViewRect() const;
+
 	/// Undock everything and recreate an empty dockspace (predictable reset
 	/// without deleting imgui.ini).
 	void queueResetLayout() { m_resetLayoutQueued = true; }
@@ -84,6 +104,10 @@ public:
 private:
 	void resetLayout(ImGuiID dockspaceId);
 	void applyDefaultDeveloperLayout(ImGuiID dockspaceId);
+
+	/// Live dockspace id (recreated from the main viewport every frame;
+	/// reset/default layouts rebuild the same node id).
+	ImGuiID m_dockspaceId{0};
 
 	bool m_defaultLayoutQueued{false};
 	bool m_resetLayoutQueued{false};

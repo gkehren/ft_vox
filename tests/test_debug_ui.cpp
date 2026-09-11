@@ -384,6 +384,65 @@ void testScopeStatsLifecycle()
 }
 } // namespace
 
+void testPlayerDiagnosticsSnapshot()
+{
+	std::cout << "[PlayerDiagnostics snapshot] ";
+	debugui::UiState state;
+	GameUIFrame f{};
+
+	// Closed panel: the snapshot stays untouched (no hidden per-frame cost).
+	debugui::updateDebugUiState(state, f, 500.0);
+	CHECK(!state.player.valid, "player snapshot not sampled while the panel is closed");
+
+	// Open panel: the solver counters and motion flags are copied from the
+	// frame's read-only player snapshot (issue #184).
+	state.panels.playerDiagnostics = true;
+	f.player.flight = true;
+	f.player.grounded = false;
+	f.player.swimming = true;
+	f.player.waitingForTerrain = false;
+	f.player.speed = 42.5f;
+	f.player.position = glm::vec3(1.f, 2.f, 3.f);
+	f.player.yaw = 91.f;
+	f.player.pitch = -17.f;
+	f.player.physicsSteps = 7;
+	f.player.queriedCells = 1234;
+	f.player.queryIterations = 99;
+	f.player.droppedSteps = 3;
+	f.player.submergedWater = true;
+	// Camera view state is snapshot-only (issue #184 review): the panel must
+	// be able to render it without a direct Camera path.
+	f.player.cameraViewMode = playerui::CameraViewMode::Isometric;
+	f.player.cameraMovementSpeed = 125.f;
+	f.player.mouseSensitivity = 0.123f;
+	f.player.isometricZoom = 64.f;
+	debugui::updateDebugUiState(state, f, 500.01);
+	CHECK(state.player.valid, "player snapshot sampled once the panel opens");
+	CHECK(state.player.flight && state.player.swimming && !state.player.grounded &&
+			  !state.player.waitingForTerrain,
+		  "motion flags copied");
+	CHECK(state.player.speed == 42.5f, "speed copied");
+	CHECK(state.player.position.x == 1.f && state.player.position.y == 2.f &&
+			  state.player.position.z == 3.f,
+		  "position copied");
+	CHECK(state.player.physicsSteps == 7 && state.player.queriedCells == 1234 &&
+			  state.player.queryIterations == 99 && state.player.droppedSteps == 3,
+		  "solver counters copied");
+	CHECK(state.player.submergedWater && !state.player.submergedLava, "immersion flags copied");
+	CHECK(state.player.cameraViewMode == playerui::CameraViewMode::Isometric,
+		  "camera view mode copied");
+	CHECK(state.player.cameraMovementSpeed == 125.f && state.player.mouseSensitivity == 0.123f &&
+			  state.player.isometricZoom == 64.f,
+		  "camera tuning values copied");
+
+	// Values refresh on later frames (not a one-shot latch).
+	f.player.queriedCells = 2000;
+	debugui::updateDebugUiState(state, f, 500.02);
+	CHECK(state.player.queriedCells == 2000, "player snapshot refreshes per frame");
+
+	std::cout << "PASS\n";
+}
+
 int main()
 {
 	try
@@ -395,6 +454,7 @@ int main()
 		testChunkSnapshotAndTrace();
 		testUpdateDebugUiState();
 		testScopeStatsLifecycle();
+		testPlayerDiagnosticsSnapshot();
 	}
 	catch (const std::exception &e)
 	{
