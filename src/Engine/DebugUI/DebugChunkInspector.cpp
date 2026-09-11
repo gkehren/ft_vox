@@ -163,33 +163,34 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 		ImGui::TableSetupColumn("dist");
 		ImGui::TableSetupColumn("flags");
 		ImGui::TableHeadersRow();
-		for (const Chunk *chunk : frame.chunks->getActiveChunks())
+		// Direct 5x5 lookups instead of scanning the whole active set:
+		// O(25) map probes vs O(activeChunks) per frame (issue #179 review).
+		for (int dz = -2; dz <= 2; ++dz)
 		{
-			if (!chunk)
-				continue;
-			const glm::vec3 wp = chunk->getPosition();
-			const glm::ivec3 ci(int(std::round(wp.x)) / CHUNK_SIZE, 0,
-								int(std::round(wp.z)) / CHUNK_SIZE);
-			const glm::ivec3 d = ci - s.inspectCoord;
-			if (std::abs(d.x) > 2 || std::abs(d.z) > 2)
-				continue;
-			const ChunkDebugSnapshot n = makeChunkDebugSnapshot(chunks, ci, camPos);
-			ImGui::TableNextRow();
-			ImGui::TableNextColumn();
-			char coordLabel[32];
-			std::snprintf(coordLabel, sizeof(coordLabel), "(%d, %d)", ci.x, ci.z);
-			if (ImGui::Selectable(coordLabel, ci == s.inspectCoord))
-				s.inspectCoord = ci;
-			ImGui::TableNextColumn();
-			ImGui::TextUnformatted(chunkStateName(n.state));
-			ImGui::TableNextColumn();
-			ImGui::Text("%llu", static_cast<unsigned long long>(n.meshRevision));
-			ImGui::TableNextColumn();
-			ImGui::Text("%.0f", n.distance);
-			ImGui::TableNextColumn();
-			ImGui::Text("%s%s%s", n.uploadPending ? "up" : "",
-						n.dirtySections ? " dirty" : "",
-						n.lightCachePresent ? " lc" : "");
+			for (int dx = -2; dx <= 2; ++dx)
+			{
+				const glm::ivec3 ci = s.inspectCoord + glm::ivec3(dx, 0, dz);
+				const Chunk *chunk = chunks.getChunk(ci);
+				if (!chunk)
+					continue;
+				const ChunkDebugSnapshot n = makeChunkDebugSnapshot(chunks, ci, camPos);
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn();
+				char coordLabel[32];
+				std::snprintf(coordLabel, sizeof(coordLabel), "(%d, %d)", ci.x, ci.z);
+				if (ImGui::Selectable(coordLabel, ci == s.inspectCoord))
+					s.inspectCoord = ci;
+				ImGui::TableNextColumn();
+				ImGui::TextUnformatted(chunkStateName(n.state));
+				ImGui::TableNextColumn();
+				ImGui::Text("%llu", static_cast<unsigned long long>(n.meshRevision));
+				ImGui::TableNextColumn();
+				ImGui::Text("%.0f", n.distance);
+				ImGui::TableNextColumn();
+				ImGui::Text("%s%s%s", n.uploadPending ? "up" : "",
+							n.dirtySections ? " dirty" : "",
+							n.lightCachePresent ? " lc" : "");
+			}
 		}
 		ImGui::EndTable();
 	}
