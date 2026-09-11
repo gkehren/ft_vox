@@ -180,9 +180,10 @@ public:
 	void updateEntityLightCaches(const Camera &camera, const RenderSettings &settings, int budget);
 
 	/// Record mesh uploads into cmd (staging ring). No device idle. Distance-prioritized.
-	/// Geometric commit groups are prepared and committed atomically as one
-	/// budget unit. Returns the number of chunks uploaded this call (a
-	/// committed group contributes all its members).
+	/// Geometric commit groups publish atomically, while each member COPY
+	/// consumes one upload-budget unit and may be recorded across frames.
+	/// Publication consumes no budget. Returns the number of chunks published
+	/// this call (a committed group contributes all its members).
 	int uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
 							GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget);
 
@@ -347,6 +348,7 @@ private:
 	PendingMeshCommitGroup *commitGroupFor(Chunk *chunk);
 	void eraseCommitGroup(uint64_t groupId);
 	void removeChunkFromCommitGroups(Chunk *chunk);
+	void discardAllCommitGroups();
 	std::vector<PendingMeshCommitGroup> m_commitGroups;
 	uint64_t m_nextGroupId{1};
 

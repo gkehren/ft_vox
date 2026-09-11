@@ -95,6 +95,13 @@ struct ChunkManagerProbe
 				return member.replacement.recorded;
 		return false;
 	}
+	static bool replacementValid(const ChunkManager &m, size_t index, const Chunk *chunk)
+	{
+		for (const PendingGroupMember &member : m.m_commitGroups[index].members)
+			if (member.chunk == chunk)
+				return member.replacement.valid;
+		return false;
+	}
 	static void registerGroup(ChunkManager &m, std::vector<Chunk *> members)
 	{
 		std::vector<PendingGroupMember> converted;
@@ -1876,8 +1883,8 @@ int main()
 				uint32_t frameSlot = 0;
 				const auto beginFrame = [&]() {
 					const uint64_t frameNumber = 10000u + frameSlot;
-					arenas.beginFrame(frameNumber);
 					retire.beginFrame(frameNumber);
+					arenas.beginFrame(frameNumber);
 					stagingX.beginFrame(frameSlot % 2);
 				};
 				const auto submitFrame = [&]() {
@@ -2416,6 +2423,186 @@ int main()
 				}
 			}
 			stagingX.shutdown();
+		}
+
+		// -----------------------------------------------------------------
+		// 19. Commit-group teardown ownership (issue #177 review): the
+		// manager owns prepared-but-unpublished replacements and must discard
+		// them before returning their chunks to the pool. Cover both the
+		// immediate-free and submitted-copy retirement paths, then recreate a
+		// manager against the same arenas (the reloadWorld ownership contract).
+		// -----------------------------------------------------------------
+		{
+			GpuResourceRetire teardownRetire;
+			teardownRetire.init(vk.allocator.handle(), 2);
+			MeshArenas teardownArenas;
+			teardownArenas.init(vk.allocator.handle(), teardownRetire, sizeof(Vertex), 2,
+			                    2ull * 1024ull * 1024ull, 1ull * 1024ull * 1024ull);
+			StagingRing teardownStaging;
+			teardownStaging.init(vk.allocator.handle(), 2);
+			ChunkPool teardownPool(32);
+			TerrainGenerator teardownGen(177);
+			Camera teardownCamera(glm::vec3(8.0f, 100.0f, 8.0f));
+			uint64_t teardownFrame = 30000;
+
+			const auto snapshotMetrics = [&]() {
+				return std::make_tuple(teardownArenas.opaqueVertex.metrics(),
+				                       teardownArenas.opaqueIndex.metrics(),
+				                       teardownArenas.waterVertex.metrics(),
+				                       teardownArenas.waterIndex.metrics());
+			};
+			const auto baseline = snapshotMetrics();
+			const auto metricsMatch = [](const MeshArena::Metrics &a,
+			                             const MeshArena::Metrics &b) {
+				return a.liveBlocks == b.liveBlocks && a.liveBytes == b.liveBytes;
+			};
+			const auto checkBaseline = [&](const char *stage) {
+				const auto [ov0, oi0, wv0, wi0] = baseline;
+				const auto [ov1, oi1, wv1, wi1] = snapshotMetrics();
+				CHECK(metricsMatch(ov0, ov1),
+				      std::string(stage) + ": opaque vertex live blocks/bytes recovered");
+				CHECK(metricsMatch(oi0, oi1),
+				      std::string(stage) + ": opaque index live blocks/bytes recovered");
+				CHECK(metricsMatch(wv0, wv1),
+				      std::string(stage) + ": water vertex live blocks/bytes recovered");
+				CHECK(metricsMatch(wi0, wi1),
+				      std::string(stage) + ": water index live blocks/bytes recovered");
+			};
+			const auto beginTeardownFrame = [&]() {
+				teardownRetire.beginFrame(teardownFrame);
+				teardownArenas.beginFrame(teardownFrame);
+				teardownStaging.beginFrame(static_cast<uint32_t>(teardownFrame % 2));
+				++teardownFrame;
+			};
+			const auto drainTeardownRetirement = [&]() {
+				for (int i = 0; i < 6; ++i)
+				{
+					teardownRetire.beginFrame(teardownFrame);
+					teardownArenas.beginFrame(teardownFrame);
+					++teardownFrame;
+				}
+			};
+			const auto createUploadingPair = [&](ChunkManager &teardownManager) {
+				teardownManager.generateInitialArea(glm::vec3(0.0f, 0.0f, 0.0f), 1,
+				                                    vk.allocator.handle(), imm, teardownArenas);
+				Chunk *a = teardownManager.getChunk(glm::ivec3(0, 0, 0));
+				Chunk *b = teardownManager.getChunk(glm::ivec3(1, 0, 0));
+				CHECK(a != nullptr && b != nullptr, "teardown: adjacent chunks bootstrapped");
+				if (!a || !b)
+					return std::make_pair(a, b);
+
+				int surface = -1;
+				for (Chunk *chunk : {a, b})
+				{
+					const uint32_t x = chunk == a ? CHUNK_SIZE - 1 : 0;
+					for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+					{
+						if (chunk->getVoxel(x, static_cast<uint32_t>(y), 5).type !=
+						    static_cast<uint8_t>(AIR))
+						{
+							surface = std::max(surface, y);
+							break;
+						}
+					}
+				}
+				CHECK(surface > 1 && surface + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "teardown: border columns surfaced");
+				const glm::vec3 p = a->getPosition();
+				CHECK(teardownManager.placeVoxel(
+				          glm::vec3(p.x + static_cast<float>(CHUNK_SIZE) - 0.5f,
+				                    static_cast<float>(surface + 3) + 0.5f, p.z + 5.5f),
+				          BRICKS),
+				      "teardown: border edit accepted");
+
+				for (Chunk *chunk : {a, b})
+				{
+					const uint16_t mask = chunk->takeDirtySections();
+					MeshBuildResult *result = chunk->getMeshResultPool()->acquire();
+					chunk->buildMesh(*result, chunk->meshGeneration(), chunk->meshRevision(), mask);
+					chunk->getMeshResultPool()->finishBuild(result);
+					CHECK(chunk->publishMeshResult(result), "teardown: remesh published");
+				}
+				return std::make_pair(a, b);
+			};
+
+			// A. Both replacements are prepared, but staging prevents COPY.
+			{
+				ChunkManager teardownManager(&teardownGen, nullptr, &teardownPool);
+				const auto [a, b] = createUploadingPair(teardownManager);
+				if (a && b)
+				{
+					beginTeardownFrame();
+					VkDeviceSize offset = 0;
+					void *sink = nullptr;
+					CHECK(teardownStaging.alloc(teardownStaging.sliceCapacity(), offset, sink),
+					      "teardown-unrecorded: staging slice exhausted");
+					teardownManager.uploadPendingMeshes(
+					    vk.allocator.handle(), teardownStaging, vk.cmd, teardownRetire,
+					    teardownArenas, teardownCamera, 1);
+					CHECK(ChunkManagerProbe::commitGroups(teardownManager) == 1,
+					      "teardown-unrecorded: fixture owns an unfinished group");
+					CHECK(ChunkManagerProbe::groupState(teardownManager, 0) ==
+					          CommitGroupState::Uploading,
+					      "teardown-unrecorded: group remains Uploading");
+					CHECK(ChunkManagerProbe::replacementValid(teardownManager, 0, a) &&
+					          ChunkManagerProbe::replacementValid(teardownManager, 0, b),
+					      "teardown-unrecorded: both replacements are prepared");
+					CHECK(!ChunkManagerProbe::replacementRecorded(teardownManager, 0, a) &&
+					          !ChunkManagerProbe::replacementRecorded(teardownManager, 0, b),
+					      "teardown-unrecorded: neither replacement recorded COPY");
+				}
+			}
+			drainTeardownRetirement();
+			checkBaseline("teardown-unrecorded");
+
+			// B. Exactly one member COPY is submitted; the manager destroys the
+			// recorded replacement through retire() and the other immediately.
+			{
+				ChunkManager teardownManager(&teardownGen, nullptr, &teardownPool);
+				const auto [a, b] = createUploadingPair(teardownManager);
+				if (a && b)
+				{
+					beginTeardownFrame();
+					teardownManager.uploadPendingMeshes(
+					    vk.allocator.handle(), teardownStaging, vk.cmd, teardownRetire,
+					    teardownArenas, teardownCamera, 1);
+					CHECK(ChunkManagerProbe::commitGroups(teardownManager) == 1,
+					      "teardown-recorded: fixture owns an unfinished group");
+					CHECK(ChunkManagerProbe::groupState(teardownManager, 0) ==
+					          CommitGroupState::Uploading,
+					      "teardown-recorded: group remains Uploading");
+					CHECK(ChunkManagerProbe::replacementValid(teardownManager, 0, a) &&
+					          ChunkManagerProbe::replacementValid(teardownManager, 0, b),
+					      "teardown-recorded: both replacements remain owned");
+					CHECK(ChunkManagerProbe::replacementRecorded(teardownManager, 0, a) !=
+					          ChunkManagerProbe::replacementRecorded(teardownManager, 0, b),
+					      "teardown-recorded: exactly one member COPY recorded");
+					CHECK(vk.flush(), "teardown-recorded: submitted member COPY");
+				}
+			}
+			drainTeardownRetirement();
+			checkBaseline("teardown-recorded");
+
+			// Recreate a manager against the same arenas, matching reloadWorld's
+			// resource lifetime without requiring a full Engine fixture.
+			{
+				ChunkManager recreated(&teardownGen, nullptr, &teardownPool);
+				recreated.generateInitialArea(glm::vec3(0.0f, 0.0f, 0.0f), 1,
+				                                vk.allocator.handle(), imm, teardownArenas);
+				Chunk *center = recreated.getChunk(glm::ivec3(0, 0, 0));
+				CHECK(center && center->hasRenderableOpaqueDraws(),
+				      "teardown-recreate: replacement manager reuses arenas");
+				CHECK(vkQueueWaitIdle(vk.queue) == VK_SUCCESS,
+				      "teardown-recreate: queue idle before manager destruction");
+			}
+			drainTeardownRetirement();
+			checkBaseline("teardown-recreate");
+
+			CHECK(vkQueueWaitIdle(vk.queue) == VK_SUCCESS,
+			      "teardown: queue idle before resource shutdown");
+			teardownStaging.shutdown();
+			teardownArenas.shutdown();
+			teardownRetire.shutdown();
 		}
 	}
 

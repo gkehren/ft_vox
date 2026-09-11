@@ -57,6 +57,11 @@ ChunkManager::~ChunkManager()
 			job.pool->release(job.storage);
 	}
 
+	// PendingGroupMember owns every prepared-but-unpublished replacement.
+	// Release those ranges while the chunks (and their arena pointers) are
+	// still intact; Chunk::reset owns only already-published ranges.
+	discardAllCommitGroups();
+
 	for (auto &[pos, chunkPtr] : m_chunks)
 	{
 		if (chunkPtr && m_chunkPool)
@@ -1339,6 +1344,20 @@ void ChunkManager::eraseCommitGroup(uint64_t groupId)
 											return group.groupId == groupId;
 										}),
 						 m_commitGroups.end());
+}
+
+void ChunkManager::discardAllCommitGroups()
+{
+	for (PendingMeshCommitGroup &group : m_commitGroups)
+	{
+		for (PendingGroupMember &member : group.members)
+		{
+			if (member.chunk)
+				member.chunk->discardGPUUpload(member.replacement);
+		}
+	}
+	m_commitGroups.clear();
+	assert(m_commitGroups.empty());
 }
 
 // A member chunk is unloading: drop it from its group (discarding any
