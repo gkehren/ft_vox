@@ -315,6 +315,22 @@ int main()
 	ImmediateCommands imm;
 	imm.init(vk.device, vk.queue, vk.queueFamily);
 
+	// lastFrameUsed() (issue #179 review): beginFrame() resets the slice
+	// cursor, but must first capture the completed frame's consumption so
+	// mid-frame debug/UI reads (after the reset, before this frame's copies)
+	// still see meaningful staging traffic.
+	{
+		staging.beginFrame(0);
+		CHECK(staging.usedThisFrame() == 0, "slice cursor resets at beginFrame");
+		VkDeviceSize off = 0;
+		void *sink = nullptr;
+		CHECK(staging.alloc(4096, off, sink), "staging alloc recorded in frame A");
+		CHECK(staging.usedThisFrame() >= 4096, "consumption visible within the frame");
+		staging.beginFrame(0);
+		CHECK(staging.usedThisFrame() == 0, "cursor reset for the next frame");
+		CHECK(staging.lastFrameUsed() >= 4096, "lastFrameUsed holds the completed frame's usage");
+	}
+
 	{
 		ChunkPool chunkPool(16);
 		TerrainGenerator gen(42);

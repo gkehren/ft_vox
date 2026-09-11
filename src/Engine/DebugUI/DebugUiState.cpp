@@ -216,7 +216,9 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 		m.arenaHighWaterBytes = m.live.current[telemetry::ArenaHighWater];
 		if (frame.staging)
 		{
-			m.stagingUsedBytes = frame.staging->usedThisFrame();
+			// The sampler runs mid-frame (after beginFrame reset, before this
+			// frame's copies): report the completed frame's staging traffic.
+			m.stagingUsedBytes = frame.staging->lastFrameUsed();
 			m.stagingCapacityBytes = frame.staging->sliceCapacity();
 		}
 		else
