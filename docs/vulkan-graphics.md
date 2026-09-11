@@ -93,8 +93,8 @@ acquired by the current frame.
 
 If a surface does not expose `IMMEDIATE`, disabling VSync is rejected explicitly
 instead of silently retaining refresh-paced presentation. F10 and the Graphics
-panel checkbox (Display / Present section, issue #184) recreate the swapchain
-immediately and display the active Vulkan mode.
+panel (Display category, issue #185) recreate the swapchain immediately and
+display the active Vulkan mode.
 The same path is reproducible from the CLI with `--vsync on|off`; combining it
 with `--benchmark <seconds>` measures either mode without changing the requested
 setting.
