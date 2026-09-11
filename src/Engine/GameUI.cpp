@@ -298,7 +298,10 @@ void GameUI::drawHud(GameUIFrame &frame)
 		}
 	}
 
-	ui::metric("FPS", "%.1f  (%.2f ms)", frame.fps, frame.frameMs);
+	// The ms value is the hierarchical-profiler CPU frame time — the same
+	// quantity the shell status strip and Performance panel show — not the
+	// paced simulation delta (issue #179 separation, issue #183 review).
+	ui::metric("FPS", "%.1f  (%.2f ms)", frame.fps, frame.cpuFrameMs);
 	ui::metric("Seed", "%d", frame.seed);
 	ui::metric("Viewport", "%d × %d", frame.windowW, frame.windowH);
 

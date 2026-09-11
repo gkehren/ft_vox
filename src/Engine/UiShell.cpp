@@ -164,6 +164,17 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		ImGui::MenuItem("Chunk inspector", shortcutKeyName(SDLK_F9), toggles.chunkInspector);
 		ImGui::MenuItem("Render debug", shortcutKeyName(SDLK_F12), toggles.renderDebug);
 		ImGui::MenuItem("Benchmark", nullptr, toggles.benchmark);
+		ImGui::Separator();
+		// Runtime/debug toggles previously reachable from the pre-shell menu
+		// bar; Developer is their coherent home now that Graphics lives in
+		// View as settings.
+		if (frame.showChunkBorders)
+			ImGui::MenuItem("Chunk borders", shortcutKeyName(SDLK_B), frame.showChunkBorders);
+		if (frame.render && frame.setVSync)
+		{
+			if (ImGui::MenuItem("VSync", shortcutKeyName(SDLK_F10), &frame.render->vsyncEnabled))
+				frame.setVSync(frame.render->vsyncEnabled);
+		}
 		ImGui::EndMenu();
 	}
 

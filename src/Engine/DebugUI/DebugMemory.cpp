@@ -28,7 +28,7 @@ void bytesRow(const char *label, uint64_t current, uint64_t peak, uint64_t capac
 	if (capacity > 0)
 	{
 		ImGui::ProgressBar(capacity ? float(current) / float(capacity) : 0.f,
-						   ImVec2(-1.f, 12.f), "");
+						   ImVec2(-1.f, ImGui::GetFrameHeight()), "");
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("capacity %s", formatBytes(capacity).c_str());
 	}
@@ -123,9 +123,9 @@ void drawMemory(UiState &s, GameUIFrame &frame)
 		if (ImGui::BeginTable("cpu", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 		{
 			ImGui::TableSetupColumn("CPU voxel / pools", ImGuiTableColumnFlags_WidthStretch);
-			ImGui::TableSetupColumn("current", ImGuiTableColumnFlags_WidthFixed, 84.f);
-			ImGui::TableSetupColumn("peak", ImGuiTableColumnFlags_WidthFixed, 84.f);
-			ImGui::TableSetupColumn("fill", ImGuiTableColumnFlags_WidthFixed, 110.f);
+			ImGui::TableSetupColumn("current", ImGuiTableColumnFlags_WidthFixed, ui::scaled(84.f, scale));
+			ImGui::TableSetupColumn("peak", ImGuiTableColumnFlags_WidthFixed, ui::scaled(84.f, scale));
+			ImGui::TableSetupColumn("fill", ImGuiTableColumnFlags_WidthFixed, ui::scaled(110.f, scale));
 			ImGui::TableHeadersRow();
 
 			bytesRow("Voxels (active chunks)", g[telemetry::VoxelBytes], pk[telemetry::VoxelBytes]);
@@ -152,9 +152,9 @@ void drawMemory(UiState &s, GameUIFrame &frame)
 		if (ImGui::BeginTable("cpumesh", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 		{
 			ImGui::TableSetupColumn("CPU mesh", ImGuiTableColumnFlags_WidthStretch);
-			ImGui::TableSetupColumn("current", ImGuiTableColumnFlags_WidthFixed, 84.f);
-			ImGui::TableSetupColumn("peak", ImGuiTableColumnFlags_WidthFixed, 84.f);
-			ImGui::TableSetupColumn("fill", ImGuiTableColumnFlags_WidthFixed, 110.f);
+			ImGui::TableSetupColumn("current", ImGuiTableColumnFlags_WidthFixed, ui::scaled(84.f, scale));
+			ImGui::TableSetupColumn("peak", ImGuiTableColumnFlags_WidthFixed, ui::scaled(84.f, scale));
+			ImGui::TableSetupColumn("fill", ImGuiTableColumnFlags_WidthFixed, ui::scaled(110.f, scale));
 			ImGui::TableHeadersRow();
 			bytesRow("Opaque vertices", g[telemetry::OpaqueVertexBytes], pk[telemetry::OpaqueVertexBytes],
 					 g[telemetry::OpaqueVertexCapacity]);
@@ -180,9 +180,9 @@ void drawMemory(UiState &s, GameUIFrame &frame)
 		if (ImGui::BeginTable("gpu", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 		{
 			ImGui::TableSetupColumn("GPU mesh", ImGuiTableColumnFlags_WidthStretch);
-			ImGui::TableSetupColumn("current", ImGuiTableColumnFlags_WidthFixed, 84.f);
-			ImGui::TableSetupColumn("peak", ImGuiTableColumnFlags_WidthFixed, 84.f);
-			ImGui::TableSetupColumn("fill", ImGuiTableColumnFlags_WidthFixed, 110.f);
+			ImGui::TableSetupColumn("current", ImGuiTableColumnFlags_WidthFixed, ui::scaled(84.f, scale));
+			ImGui::TableSetupColumn("peak", ImGuiTableColumnFlags_WidthFixed, ui::scaled(84.f, scale));
+			ImGui::TableSetupColumn("fill", ImGuiTableColumnFlags_WidthFixed, ui::scaled(110.f, scale));
 			ImGui::TableHeadersRow();
 			bytesRow("Opaque vertices", g[telemetry::GpuOpaqueVertex], pk[telemetry::GpuOpaqueVertex]);
 			bytesRow("Opaque indices", g[telemetry::GpuOpaqueIndex], pk[telemetry::GpuOpaqueIndex]);
@@ -227,7 +227,7 @@ void drawMemory(UiState &s, GameUIFrame &frame)
 		{
 			ImGui::TableSetupColumn("Event (since world load)", ImGuiTableColumnFlags_WidthStretch);
 			ImGui::TableSetupColumn("total", ImGuiTableColumnFlags_WidthFixed, ui::scaled(90.f, scale));
-			ImGui::TableSetupColumn("per refresh", ImGuiTableColumnFlags_WidthFixed, 90.f);
+			ImGui::TableSetupColumn("per refresh", ImGuiTableColumnFlags_WidthFixed, ui::scaled(90.f, scale));
 			ImGui::TableHeadersRow();
 			eventRow("Chunks uploaded", m.live.events[telemetry::UploadChunks],
 					 d[telemetry::UploadChunks]);
@@ -249,8 +249,8 @@ void drawMemory(UiState &s, GameUIFrame &frame)
 		if (ImGui::BeginTable("wlevents", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 		{
 			ImGui::TableSetupColumn("Event (since world load)", ImGuiTableColumnFlags_WidthStretch);
-			ImGui::TableSetupColumn("total", ImGuiTableColumnFlags_WidthFixed, 90.f);
-			ImGui::TableSetupColumn("per refresh", ImGuiTableColumnFlags_WidthFixed, 90.f);
+			ImGui::TableSetupColumn("total", ImGuiTableColumnFlags_WidthFixed, ui::scaled(90.f, scale));
+			ImGui::TableSetupColumn("per refresh", ImGuiTableColumnFlags_WidthFixed, ui::scaled(90.f, scale));
 			ImGui::TableHeadersRow();
 			eventRow("Opaque draws", m.live.events[telemetry::OpaqueDraws], d[telemetry::OpaqueDraws]);
 			eventRow("Water draws", m.live.events[telemetry::WaterDraws], d[telemetry::WaterDraws]);

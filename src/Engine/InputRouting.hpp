@@ -23,7 +23,7 @@
 
 enum class KeyRoute
 {
-	GlobalShortcut,	   // F1-F7 panel toggles, F10 VSync
+		GlobalShortcut,    // F1-F12 application/developer shortcuts
 	GameplayShortcut,  // P pause; C/B/T are Engine-owned gameplay keys
 	NotGameUIShortcut  // not handled by GameUI shortcut routing
 };
