@@ -294,11 +294,15 @@ void drawPost(debugui::UiState &s, GameUIFrame &frame)
 	const bool autoActive = pp.autoExposureEnabled && autoSupported;
 	ImGui::BeginDisabled(!autoSupported);
 	ImGui::Checkbox("Auto exposure", &pp.autoExposureEnabled);
-	if (ImGui::IsItemHovered())
+	// Disabled widgets eat hover by default — AllowWhenDisabled keeps the
+	// capability explanation reachable on unsupported GPUs (issue #185 review).
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 		ImGui::SetTooltip(autoSupported
 							  ? "Meter HDR scene luminance and adapt exposure over time (eye adaptation)."
 							  : "Fragment SSBO stores unavailable on this GPU — the manual path is used.");
 	ImGui::EndDisabled();
+	if (!autoSupported)
+		ImGui::TextDisabled("Auto exposure unavailable on this GPU.");
 	// Greyed out while auto exposure actually drives the frame, but shows
 	// (and stays editable for) the value used as soon as auto is off.
 	ImGui::BeginDisabled(autoActive);
