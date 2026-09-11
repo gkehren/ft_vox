@@ -105,12 +105,12 @@ struct PendingGroupMember
 
 /// Geometric commit group (PR #178 review): the chunks whose border
 /// geometry was coupled by border voxel edits - the target plus its
-/// shell-mirror neighbors. Corner edits touch several neighbors, hence the
-/// member list (capped at 3 by the border architecture: target + two
-/// sides; no diagonals). Light-only invalidated neighbors never join.
-/// Overlapping groups are fused at registration (transitively), so active
-/// groups always form disjoint chunk sets: one chunk belongs to at most
-/// one group.
+/// shell-mirror neighbors. One edit contributes at most three members
+/// (target + two sides; no diagonals), but transitive fusion can grow the
+/// resulting group beyond three chunks. Light-only invalidated neighbors
+/// never join. Overlapping groups are fused at registration (transitively),
+/// so active groups always form disjoint chunk sets: one chunk belongs to
+/// at most one group.
 struct PendingMeshCommitGroup
 {
 	// Stable group identity: distinct from editId because a fused group

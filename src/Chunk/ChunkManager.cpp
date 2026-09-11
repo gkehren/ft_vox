@@ -729,8 +729,21 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 	if (queue.empty())
 		return 0;
 
-	std::sort(queue.begin(), queue.end(),
-			  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
+	// Select only the nearest candidates needed to spend this frame's COPY
+	// budget. Group members are added as an allowance because several queue
+	// entries may collapse to one group, or a not-ready group may be skipped;
+	// they must not prevent an independent chunk just beyond the base budget
+	// from progressing. This restores the bounded historical partial sort
+	// without weakening the Round 4 non-blocking group scheduler.
+	size_t candidateCount = std::min(queue.size(), static_cast<size_t>(budget));
+	for (const PendingMeshCommitGroup &group : m_commitGroups)
+	{
+		candidateCount += std::min(group.members.size(), queue.size() - candidateCount);
+		if (candidateCount == queue.size())
+			break;
+	}
+	std::partial_sort(queue.begin(), queue.begin() + candidateCount, queue.end(),
+	                  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
 
 	// Distance-prioritized. Budget units gate GPU COPY work: a group's
 	// members record their copies progressively across frames (one member
@@ -742,7 +755,7 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 	int uploaded = 0;
 	std::unordered_set<Chunk *> published;
 	std::unordered_set<uint64_t> processedGroups;
-	for (size_t i = 0; i < queue.size(); ++i)
+	for (size_t i = 0; i < candidateCount; ++i)
 	{
 		Chunk *chunk = queue[i].chunk;
 		if (published.count(chunk))
