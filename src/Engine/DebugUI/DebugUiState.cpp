@@ -62,16 +62,23 @@ void DebugHealth::update(const UiState &state, float dt)
 static void updateScopeStats(UiState &state)
 {
 	Profiler &prof = GetProfiler();
+	// Never aggregate a frozen last-frame buffer: with capture disabled the
+	// previous frame's entries would otherwise be re-folded into the
+	// averages indefinitely (issue #179 review).
+	if (!prof.enabled())
+		return;
+
 	// Aggregate duplicate names within the frame (summed durations), then
 	// fold into running averages. Keyed on the profiler's static name
 	// pointers; a strcmp fallback keeps the table correct across reloads.
 	const int count = prof.lastEntryCount();
 	const ProfileEntry *entries = prof.lastEntries();
 
+	constexpr uint32_t kDepthUnknown = UINT32_MAX;
 	thread_local std::array<float, 128> frameTotals{};
 	thread_local std::array<uint32_t, 128> frameDepth{};
 	frameTotals.fill(0.f);
-	frameDepth.fill(0);
+	frameDepth.fill(kDepthUnknown);
 
 	for (int i = 0; i < count; ++i)
 	{
@@ -109,7 +116,8 @@ static void updateScopeStats(UiState &state)
 	{
 		ScopeStats &st = state.scopeStats[k];
 		st.lastMs = frameTotals[k];
-		st.depth = frameDepth[k];
+		if (frameDepth[k] != kDepthUnknown)
+			st.depth = frameDepth[k]; // keep the last known depth otherwise
 		if (st.lastMs > st.peakMs)
 			st.peakMs = st.lastMs;
 		++st.frames;
@@ -151,9 +159,6 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 							 state.panels.memory || state.panels.streaming ||
 							 state.panels.chunkInspector;
 
-	if (state.panels.performance)
-		updateScopeStats(state);
-
 	if (!anyConsumer)
 		return;
 
@@ -166,6 +171,24 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 						 : float(std::min(nowSeconds - state.lastTelemetrySample, 1.0));
 	state.dtSinceLastSample = dt;
 	state.lastTelemetrySample = nowSeconds;
+
+	// --- CPU scope stats (Performance panel), aligned with the profiler
+	// capture lifecycle (issue #179 review): sampled at the UI rate (so the
+	// per-scope histories really are 10 Hz ≈ 25.6 s windows), skipped while
+	// capture is off, and reset whenever the profiler capture epoch changes
+	// (Clear history button, world reload) so avg/peak/history never blend
+	// two capture windows.
+	{
+		Profiler &prof = GetProfiler();
+		const uint64_t epoch = prof.captureEpoch();
+		if (epoch != state.lastProfilerEpoch)
+		{
+			resetScopeStats(state);
+			state.lastProfilerEpoch = epoch;
+		}
+		if (state.panels.performance)
+			updateScopeStats(state);
+	}
 
 	// --- Streaming snapshot ---
 	{

@@ -253,6 +253,11 @@ public:
 	std::array<ScopeStats, kMaxScopeStats> scopeStats{};
 	size_t scopeStatCount{0};
 	int selectedScopeGraph{-1}; // row highlighted/plotted, -1 = none
+	/// Profiler capture epoch at the last scope-stat sample. A change
+	/// (Clear history button, world reload, any Profiler::clearHistory)
+	/// resets the accumulated table so avg/peak/history never blend two
+	/// capture windows.
+	uint64_t lastProfilerEpoch{0};
 
 	// Chunk inspector selection (chunk coordinates; Y is always 0 today).
 	glm::ivec3 inspectCoord{0, 0, 0};
@@ -275,5 +280,14 @@ public:
 	// Resource-pack browser state (Graphics panel section + file dialog).
 	ResourcePackUiState resourcePackUi{};
 };
+
+/// Drop the accumulated CPU scope table (call on a profiler capture-epoch
+/// change: Clear history, world reload). Also clears the plot selection.
+inline void resetScopeStats(UiState &state)
+{
+	state.scopeStats = {};
+	state.scopeStatCount = 0;
+	state.selectedScopeGraph = -1;
+}
 
 } // namespace debugui

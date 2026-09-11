@@ -241,6 +241,69 @@ void testUpdateDebugUiState()
 
 	std::cout << "PASS\n";
 }
+void testScopeStatsLifecycle()
+{
+	std::cout << "[ScopeStats lifecycle] ";
+	GameUIFrame f{};
+	debugui::UiState state;
+	state.panels.performance = true;
+	Profiler &prof = GetProfiler();
+
+	// Capture one frame with nested scopes.
+	prof.setEnabled(true);
+	prof.beginFrame();
+	prof.push("TestOuter");
+	prof.push("TestInner");
+	prof.pop();
+	prof.pop();
+	prof.endFrame();
+
+	const double t0 = 300.0;
+	debugui::updateDebugUiState(state, f, t0);
+	CHECK(state.scopeStatCount == 2, "both scopes enter the table");
+	const debugui::ScopeStats *outer = nullptr;
+	const debugui::ScopeStats *inner = nullptr;
+	for (size_t i = 0; i < state.scopeStatCount; ++i)
+	{
+		if (std::string(state.scopeStats[i].name) == "TestOuter")
+			outer = &state.scopeStats[i];
+		if (std::string(state.scopeStats[i].name) == "TestInner")
+			inner = &state.scopeStats[i];
+	}
+	CHECK(outer && inner, "both test scopes found");
+	CHECK(outer->frames == 1 && inner->frames == 1, "one sample each");
+	CHECK(inner->depth == 1 && outer->depth == 0, "scope depth tracked");
+
+	// Capture a second frame, sample >100 ms later: nested depth must
+	// survive multi-sample aggregation (sentinel, not zero-fill).
+	prof.beginFrame();
+	prof.push("TestOuter");
+	prof.push("TestInner");
+	prof.pop();
+	prof.pop();
+	prof.endFrame();
+	debugui::updateDebugUiState(state, f, t0 + 0.2);
+	CHECK(inner->depth == 1 && outer->depth == 0, "depth survives multi-sample aggregation");
+	CHECK(outer->frames == 2, "second sample aggregated");
+
+	// Throttle: a sample <100 ms later must not re-aggregate.
+	debugui::updateDebugUiState(state, f, t0 + 0.25);
+	CHECK(outer->frames == 2, "throttled sample does not re-aggregate");
+
+	// Capture off: the frozen last frame must not be re-folded forever.
+	prof.setEnabled(false);
+	debugui::updateDebugUiState(state, f, t0 + 0.4);
+	CHECK(outer->frames == 2, "capture off: stale frame not re-aggregated");
+
+	// Capture-epoch change (Clear history / world reload) resets the table.
+	state.selectedScopeGraph = 3;
+	prof.setEnabled(true);
+	prof.clearHistory();
+	debugui::updateDebugUiState(state, f, t0 + 0.6);
+	CHECK(state.scopeStatCount == 0, "epoch change resets the scope table");
+	CHECK(state.selectedScopeGraph == -1, "plot selection cleared on epoch change");
+	std::cout << "PASS\n";
+}
 } // namespace
 
 int main()
@@ -253,6 +316,7 @@ int main()
 		testHealthMonitor();
 		testChunkSnapshotAndTrace();
 		testUpdateDebugUiState();
+		testScopeStatsLifecycle();
 	}
 	catch (const std::exception &e)
 	{
