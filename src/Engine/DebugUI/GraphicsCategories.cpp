@@ -12,6 +12,7 @@
 
 #include <imgui/imgui.h>
 
+#include <cfloat>
 #include <cstdio>
 
 namespace graphics
@@ -75,21 +76,22 @@ void drawGeneral(debugui::UiState &s, GameUIFrame &frame)
 
 	// Issue #185: surface drift from the selected pack instead of hiding it —
 	// matchesPreset ignores the runtime underwater state + debug views.
+	// Stacked vertically (no SameLine chain) so the reset button stays
+	// visible at 360 px docked width.
 	const bool custom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset);
-	ImGui::Text("Preset:");
-	ImGui::SameLine();
 	if (custom)
 	{
-		ImGui::Text("Custom (based on %s)", presetName(pp.qualityPreset));
+		ImGui::Text("Preset: Custom (based on %s)", presetName(pp.qualityPreset));
 		char resetLabel[48];
 		std::snprintf(resetLabel, sizeof(resetLabel), "Reset to %s",
 					  presetName(pp.qualityPreset));
-		ImGui::SameLine();
 		if (ImGui::Button(resetLabel))
 			pp.applyPreset(pp.qualityPreset);
 	}
 	else
 	{
+		ImGui::TextUnformatted("Preset:");
+		ImGui::SameLine();
 		ui::statusBadge(presetName(pp.qualityPreset), ui::StatusKind::Ok);
 	}
 	ui::helpMarker("Presets control shadow resolution, FXAA, bloom, SSAO, god rays, film "
@@ -156,17 +158,24 @@ void drawLighting(debugui::UiState &s, GameUIFrame &frame)
 	};
 	// Preset values match the actual sun curve in updateAtmosphereFromDayTime
 	// (sunAngle = dayTime*2π − π/2): noon peaks at 0.5, midnight is 0.0.
-	if (ImGui::Button("Sunrise"))
-		preset(0.25f);
-	ImGui::SameLine();
-	if (ImGui::Button("Noon"))
-		preset(0.5f);
-	ImGui::SameLine();
-	if (ImGui::Button("Sunset"))
-		preset(0.75f);
-	ImGui::SameLine();
-	if (ImGui::Button("Midnight"))
-		preset(0.0f);
+	// 2×2 grid instead of one SameLine row: full column width keeps the
+	// buttons readable at 360 px docked width (issue #185 review).
+	if (ImGui::BeginTable("##day_presets", 2))
+	{
+		ImGui::TableNextColumn();
+		if (ImGui::Button("Sunrise", ImVec2(-FLT_MIN, 0)))
+			preset(0.25f);
+		ImGui::TableNextColumn();
+		if (ImGui::Button("Noon", ImVec2(-FLT_MIN, 0)))
+			preset(0.5f);
+		ImGui::TableNextColumn();
+		if (ImGui::Button("Sunset", ImVec2(-FLT_MIN, 0)))
+			preset(0.75f);
+		ImGui::TableNextColumn();
+		if (ImGui::Button("Midnight", ImVec2(-FLT_MIN, 0)))
+			preset(0.0f);
+		ImGui::EndTable();
+	}
 
 	ImGui::SeparatorText("Lighting");
 	// Automatic atmosphere overwrites ambient/diffuse every frame — the
