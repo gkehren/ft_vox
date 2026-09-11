@@ -5,6 +5,7 @@
 // between the 10 Hz UI samples (not benchmark capture windows).
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/UiScale.hpp>
 #include <Engine/GameUI.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 
@@ -63,15 +64,15 @@ void eventRow(const char *label, uint64_t total, uint64_t delta, bool bytes = fa
 	ImGui::TextDisabled("—");
 }
 
-void stageTable(const char *familyLabel, const telemetry::Registry::LiveSnapshot &live, size_t family)
+void stageTable(const char *familyLabel, const telemetry::Registry::LiveSnapshot &live, size_t family, float scale)
 {
 	if (!ImGui::CollapsingHeader(familyLabel))
 		return;
 	if (ImGui::BeginTable("stages", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 	{
 		ImGui::TableSetupColumn("Stage");
-		ImGui::TableSetupColumn("calls", ImGuiTableColumnFlags_WidthFixed, 90.f);
-		ImGui::TableSetupColumn("avg us/call", ImGuiTableColumnFlags_WidthFixed, 100.f);
+		ImGui::TableSetupColumn("calls", ImGuiTableColumnFlags_WidthFixed, ui::scaled(90.f, scale));
+		ImGui::TableSetupColumn("avg us/call", ImGuiTableColumnFlags_WidthFixed, ui::scaled(100.f, scale));
 		ImGui::TableHeadersRow();
 		for (size_t i = 0; i < telemetry::StageCount; ++i)
 		{
@@ -96,8 +97,9 @@ void stageTable(const char *familyLabel, const telemetry::Registry::LiveSnapshot
 
 void drawMemory(UiState &s, GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(560, 660), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Memory", &s.panels.memory))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(560.f, scale), ui::scaled(660.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kMemory, &s.panels.memory))
 	{
 		ImGui::End();
 		return;
@@ -200,7 +202,7 @@ void drawMemory(UiState &s, GameUIFrame &frame)
 		if (arenaTotal > 0)
 			ImGui::ProgressBar(float(m.arenaLiveBytes) / float(arenaTotal), ImVec2(-1.f, 0.f), "");
 		ImGui::TextDisabled("Arena utilization (live / live+free), 10 Hz");
-		plotHistory("##mem_arena", s.arenaUtilization, 0.f, ImVec2(-1.f, 44.f));
+		plotHistory("##mem_arena", s.arenaUtilization, 0.f, ImVec2(-1.f, ui::scaled(44.f, scale)));
 	}
 
 	// --- Upload / staging ---
@@ -219,12 +221,12 @@ void drawMemory(UiState &s, GameUIFrame &frame)
 			ImGui::Text("Staging slice used: %s", formatBytes(m.stagingUsedBytes).c_str());
 		}
 		ImGui::TextDisabled("Staging usage history (10 Hz)");
-		plotHistory("##mem_staging", s.stagingUsed, 0.f, ImVec2(-1.f, 44.f));
+		plotHistory("##mem_staging", s.stagingUsed, 0.f, ImVec2(-1.f, ui::scaled(44.f, scale)));
 
 		if (ImGui::BeginTable("updevents", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 		{
 			ImGui::TableSetupColumn("Event (since world load)", ImGuiTableColumnFlags_WidthStretch);
-			ImGui::TableSetupColumn("total", ImGuiTableColumnFlags_WidthFixed, 90.f);
+			ImGui::TableSetupColumn("total", ImGuiTableColumnFlags_WidthFixed, ui::scaled(90.f, scale));
 			ImGui::TableSetupColumn("per refresh", ImGuiTableColumnFlags_WidthFixed, 90.f);
 			ImGui::TableHeadersRow();
 			eventRow("Chunks uploaded", m.live.events[telemetry::UploadChunks],
@@ -277,8 +279,8 @@ void drawMemory(UiState &s, GameUIFrame &frame)
 	// --- Mesh stage timings ---
 	if (ImGui::CollapsingHeader("Mesh / light-cache stage timings", ImGuiTreeNodeFlags_DefaultOpen))
 	{
-		stageTable("Mesh builds (skylight/blocklight/occupancy/faces/LOD)", m.live, telemetry::MeshFamily);
-		stageTable("Light-cache-only builds", m.live, telemetry::LightCacheFamily);
+		stageTable("Mesh builds (skylight/blocklight/occupancy/faces/LOD)", m.live, telemetry::MeshFamily, scale);
+		stageTable("Light-cache-only builds", m.live, telemetry::LightCacheFamily, scale);
 	}
 
 	ImGui::End();

@@ -4,6 +4,7 @@
 // RenderSettings directly (the engine's settings API).
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/UiScale.hpp>
 #include <Engine/GameUI.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/Profiler.hpp>
@@ -17,8 +18,9 @@ namespace debugui
 
 void drawStreaming(UiState &s, GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(420, 560), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Streaming", &s.panels.streaming))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(420.f, scale), ui::scaled(560.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kStreaming, &s.panels.streaming))
 	{
 		ImGui::End();
 		return;
@@ -71,8 +73,8 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 				formatCount(s.streaming.meshJobsDispatched).c_str(),
 				formatCount(s.streaming.lightJobsDispatched).c_str());
 	ImGui::TextDisabled("Queue depths (10 Hz): mesh / light");
-	plotHistory("##st_mesh", s.pendingMesh, 0.f, ImVec2(-1.f, 44.f));
-	plotHistory("##st_light", s.pendingLight, 0.f, ImVec2(-1.f, 44.f));
+	plotHistory("##st_mesh", s.pendingMesh, 0.f, ImVec2(-1.f, ui::scaled(44.f, scale)));
+	plotHistory("##st_light", s.pendingLight, 0.f, ImVec2(-1.f, ui::scaled(44.f, scale)));
 
 	if (frame.pool)
 	{

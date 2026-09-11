@@ -33,7 +33,11 @@ int main()
 	checkRoute(SDLK_F5, KeyRoute::GlobalShortcut, "F5 global");
 	checkRoute(SDLK_F6, KeyRoute::GlobalShortcut, "F6 global");
 	checkRoute(SDLK_F7, KeyRoute::GlobalShortcut, "F7 global");
+	checkRoute(SDLK_F8, KeyRoute::GlobalShortcut, "F8 global (Overview)");
+	checkRoute(SDLK_F9, KeyRoute::GlobalShortcut, "F9 global (Chunk inspector)");
 	checkRoute(SDLK_F10, KeyRoute::GlobalShortcut, "F10 global (explicit VSync policy)");
+	checkRoute(SDLK_F11, KeyRoute::GlobalShortcut, "F11 global (Memory)");
+	checkRoute(SDLK_F12, KeyRoute::GlobalShortcut, "F12 global (Render debug)");
 
 	// Gameplay shortcuts must be routed behind !wantCaptureKeyboard. P is
 	// executed by GameUI; C/B/T are Engine-owned gameplay keys classified

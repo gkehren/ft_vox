@@ -1,8 +1,11 @@
 #include "Engine/GameUI.hpp"
 
+#include <Engine/BuildInfo.hpp>
 #include <Engine/DebugUI/DebugUiEngine.hpp>
 #include <Engine/DebugUI/DebugPanels.hpp>
 #include <Engine/Profiler.hpp>
+#include <Engine/UiShortcuts.hpp>
+#include <Engine/UiTheme.hpp>
 #include <Vulkan/StagingRing.hpp>
 #include <ImGuiFileDialog.h>
 #include <imgui/imgui.h>
@@ -190,7 +193,15 @@ void GameUI::draw(GameUIFrame &frame)
 	// internally; heavy sampling only runs while a consumer panel is open.
 	debugui::updateDebugUiState(m_debug, frame, ImGui::GetTime());
 
-	drawMenuBar(frame);
+	const ui::ShellToggles toggles{
+		&m_debug.panels.hud, &m_debug.panels.rendering, &m_debug.panels.streaming,
+		&m_debug.panels.world, &m_debug.panels.help, &m_debug.panels.overlayHints,
+		&m_debug.panels.overview, &m_debug.panels.performance, &m_debug.panels.renderDebug,
+		&m_debug.panels.chunkInspector, &m_debug.panels.memory, &m_debug.panels.benchmark,
+		&m_helpTabRequest};
+
+	m_shell.beginFrame();
+	m_shell.drawMainMenuBar(frame, toggles);
 
 	if (m_debug.panels.hud)
 		drawHud(frame);
@@ -205,7 +216,7 @@ void GameUI::draw(GameUIFrame &frame)
 	if (m_debug.panels.world)
 		drawWorld(frame);
 	if (m_debug.panels.help)
-		drawHelp();
+		drawHelp(frame);
 
 	// Report can stay open even if the panels that opened it are closed.
 	if (frame.benchmark && frame.benchmark->showReport() && frame.benchmark->report().valid)
@@ -218,93 +229,88 @@ void GameUI::draw(GameUIFrame &frame)
 	displayResourcePackFileDialog(m_debug.resourcePackUi, m_debug.panels.rendering);
 }
 
-void GameUI::drawMenuBar(GameUIFrame &frame)
-{
-	if (ImGui::BeginMainMenuBar())
-	{
-		if (ImGui::BeginMenu("View"))
-		{
-			ImGui::MenuItem("HUD (F1)", "F1", &m_debug.panels.hud);
-			ImGui::MenuItem("World / Biome (F4)", "F4", &m_debug.panels.world);
-			ImGui::MenuItem("Help / Keys (F5)", "F5", &m_debug.panels.help);
-			ImGui::MenuItem("On-screen hints (F6)", "F6", &m_debug.panels.overlayHints);
-			ImGui::Separator();
-			if (frame.mouseCaptured)
-			{
-				if (ImGui::MenuItem(*frame.mouseCaptured ? "Release mouse" : "Capture mouse", "C"))
-					*frame.mouseCaptured = !*frame.mouseCaptured;
-			}
-			if (frame.paused)
-				ImGui::MenuItem("Pause world tick", "P", frame.paused);
-			ImGui::EndMenu();
-		}
-		if (ImGui::BeginMenu("Developer"))
-		{
-			ImGui::MenuItem("Overview (F8)", "F8", &m_debug.panels.overview);
-			ImGui::Separator();
-			ImGui::MenuItem("Performance (F7)", "F7", &m_debug.panels.performance);
-			ImGui::MenuItem("Streaming (F3)", "F3", &m_debug.panels.streaming);
-			ImGui::MenuItem("Memory (F11)", "F11", &m_debug.panels.memory);
-			ImGui::MenuItem("Chunk inspector (F9)", "F9", &m_debug.panels.chunkInspector);
-			ImGui::MenuItem("Render debug (F12)", "F12", &m_debug.panels.renderDebug);
-			ImGui::MenuItem("Benchmark", nullptr, &m_debug.panels.benchmark);
-			ImGui::EndMenu();
-		}
-		if (ImGui::BeginMenu("Graphics"))
-		{
-			ImGui::MenuItem("Open panel", "F2", &m_debug.panels.rendering);
-			if (frame.render && frame.setVSync)
-			{
-				if (ImGui::MenuItem("VSync", "F10", &frame.render->vsyncEnabled))
-					frame.setVSync(frame.render->vsyncEnabled);
-			}
-			if (frame.showChunkBorders)
-				ImGui::MenuItem("Chunk borders", "B", frame.showChunkBorders);
-			ImGui::EndMenu();
-		}
-		if (ImGui::BeginMenu("Help"))
-		{
-			ImGui::MenuItem("Keyboard reference", "F5", &m_debug.panels.help);
-			ImGui::EndMenu();
-		}
-
-		// Status strip on the right
-		const float w = ImGui::GetWindowWidth();
-		char status[160];
-		std::snprintf(status, sizeof(status), "%.0f FPS  |  seed %d  |  %s",
-					  frame.fps, frame.seed,
-					  (frame.paused && *frame.paused) ? "PAUSED" : "live");
-		const float tw = ImGui::CalcTextSize(status).x;
-		ImGui::SetCursorPosX(w - tw - 16.f);
-		ImGui::TextUnformatted(status);
-
-		ImGui::EndMainMenuBar();
-	}
-}
-
 void GameUI::drawHud(GameUIFrame &frame)
 {
-	ImGui::SetNextWindowPos(ImVec2(12, 28), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("HUD", &m_debug.panels.hud, ImGuiWindowFlags_AlwaysAutoResize))
+	// Anchor below the menu bar via the viewport work area (WorkPos already
+	// excludes the main menu bar) and scale the offset/size with the UI
+	// scale so the whole HUD geometry follows it (issue #183 review).
+	const ImGuiViewport *viewport = ImGui::GetMainViewport();
+	const float scale = ui::effectiveScale(frame.uiScale);
+	if (std::fabs(scale - m_lastHudScale) > 0.001f)
+	{
+		m_lastHudScale = scale;
+		// ~1 s budget: the OS window resize, AlwaysAutoResize and the
+		// menu-bar work inset all settle asynchronously after the change.
+		m_hudClampGrace = 60;
+	}
+
+	// Work-rect stability probe (two identical consecutive frames).
+	const bool workStable =
+		std::fabs(viewport->WorkSize.x - m_lastWorkSize.x) < 0.5f &&
+		std::fabs(viewport->WorkSize.y - m_lastWorkSize.y) < 0.5f;
+	m_lastWorkSize = viewport->WorkSize;
+
+	ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + ui::scaled(12.f, scale),
+								   viewport->WorkPos.y + ui::scaled(12.f, scale)),
+							ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(360.f, scale), 0.f), ImGuiCond_FirstUseEver);
+	// The HUD is a floating status overlay; it never participates in docking
+	// or the default developer layout (issue #183).
+	if (!ImGui::Begin(ui::windows::kHud, &m_debug.panels.hud,
+					  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking))
 	{
 		ImGui::End();
 		return;
 	}
 
-	ImGui::Text("%.1f FPS  (%.2f ms)", frame.fps, frame.frameMs);
-	ImGui::Text("Seed: %d", frame.seed);
-	ImGui::Text("Viewport: %d × %d", frame.windowW, frame.windowH);
+	// After a UI-scale change, keep the user-placed HUD position but clamp
+	// it fully inside the viewport work area (all four edges, with margin).
+	// Deferred until the work rect settled (see above), skipped every other
+	// frame so the user can place the HUD freely, and the no-op SetWindowPos
+	// guard avoids needless imgui.ini writes. std::max(min, max) guards a
+	// HUD larger than the available area.
+	if (m_hudClampGrace > 0)
+	{
+		const bool settled = workStable && m_hudClampGrace <= 58; // >= 2 frames
+		--m_hudClampGrace;
+		if (settled || m_hudClampGrace == 0)
+		{
+			m_hudClampGrace = 0;
+
+			const float margin = ui::scaled(12.f, scale);
+
+			const ImVec2 pos = ImGui::GetWindowPos();
+			const ImVec2 size = ImGui::GetWindowSize();
+
+			const float minX = viewport->WorkPos.x + margin;
+			const float minY = viewport->WorkPos.y + margin;
+
+			const float maxX =
+				viewport->WorkPos.x + viewport->WorkSize.x - size.x - margin;
+			const float maxY =
+				viewport->WorkPos.y + viewport->WorkSize.y - size.y - margin;
+
+			const ImVec2 clamped(std::clamp(pos.x, minX, std::max(minX, maxX)),
+								 std::clamp(pos.y, minY, std::max(minY, maxY)));
+
+			if (clamped.x != pos.x || clamped.y != pos.y)
+				ImGui::SetWindowPos(clamped);
+		}
+	}
+
+	ui::metric("FPS", "%.1f  (%.2f ms)", frame.fps, frame.frameMs);
+	ui::metric("Seed", "%d", frame.seed);
+	ui::metric("Viewport", "%d × %d", frame.windowW, frame.windowH);
 
 	if (frame.camera)
 	{
 		const glm::vec3 p = frame.camera->getPosition();
-		ImGui::SeparatorText("Player");
+		ui::sectionHeader("Player");
 		ImGui::Text("Pos  %.1f  %.1f  %.1f", p.x, p.y, p.z);
 		ImGui::Text("Look yaw %.0f°  pitch %.0f°", frame.camera->getYaw(), frame.camera->getPitch());
 		const int cx = static_cast<int>(std::floor(p.x / CHUNK_SIZE));
 		const int cz = static_cast<int>(std::floor(p.z / CHUNK_SIZE));
-		ImGui::Text("Chunk (%d, %d)", cx, cz);
+		ui::metric("Chunk", "(%d, %d)", cx, cz);
 
 		if (frame.generator)
 		{
@@ -312,7 +318,7 @@ void GameUI::drawHud(GameUIFrame &frame)
 			const glm::ivec2 column = worldToVoxelColumn(glm::vec2(p.x, p.z));
 			const BiomeType biome = frame.generator->getBiomeAt(column.x, column.y);
 			if (biome >= 0 && biome < BIOME_COUNT)
-				ImGui::Text("Biome: %s", biomeTypeString[biome]);
+				ui::metric("Biome", "%s", biomeTypeString[biome]);
 		}
 
 		if (frame.player)
@@ -353,7 +359,7 @@ void GameUI::drawHud(GameUIFrame &frame)
 		}
 	}
 
-	ImGui::SeparatorText("Interaction");
+	ui::sectionHeader("Interaction");
 	if (frame.selectedTexture)
 	{
 		// Build sorted name list once per frame (cheap — COUNT is small).
@@ -395,7 +401,7 @@ void GameUI::drawHud(GameUIFrame &frame)
 			ImGui::TextDisabled("Target: —");
 	}
 
-	ImGui::SeparatorText("Toggles");
+	ui::sectionHeader("Toggles");
 	if (frame.showChunkBorders)
 		ImGui::Checkbox("Chunk borders [B]", frame.showChunkBorders);
 	if (frame.showDemoPlayers)
@@ -429,8 +435,9 @@ void GameUI::drawHud(GameUIFrame &frame)
 
 void GameUI::drawWorld(GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(320, 520), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("World", &m_debug.panels.world))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(320.f, scale), ui::scaled(520.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kWorld, &m_debug.panels.world))
 	{
 		ImGui::End();
 		return;
@@ -463,7 +470,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 
 	if (m_mapHasTexture && m_mapDesc != VK_NULL_HANDLE)
 	{
-		const float display = 256.f;
+		const float display = ui::scaled(256.f, scale);
 		ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_mapDesc)),
 					 ImVec2(display, display));
 	}
@@ -474,7 +481,7 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	ImGui::Text("Center: (%.0f, %.0f)", m_mapCenter.x, m_mapCenter.y);
 
 	ImGui::SeparatorText("Legend");
-	if (ImGui::BeginChild("BiomeLegend", ImVec2(0.f, 170.f),
+	if (ImGui::BeginChild("BiomeLegend", ImVec2(0.f, ui::scaled(170.f, scale)),
 						  ImGuiChildFlags_Borders))
 	{
 		const int cols = 2;
@@ -488,7 +495,8 @@ void GameUI::drawWorld(GameUIFrame &frame)
 								kBiomeColors[i][1] / 255.f,
 								kBiomeColors[i][2] / 255.f, 1.f);
 				ImGui::ColorButton(biomeTypeString[i], col,
-								   ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
+								   ImGuiColorEditFlags_NoTooltip,
+								   ImVec2(ui::scaled(12.f, scale), ui::scaled(12.f, scale)));
 				ImGui::SameLine();
 				ImGui::TextUnformatted(biomeTypeString[i]);
 			}
@@ -505,56 +513,103 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	ImGui::End();
 }
 
-void GameUI::drawHelp()
+void GameUI::drawHelp(GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(420, 480), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Help / Shortcuts", &m_debug.panels.help))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(560.f, scale), ui::scaled(500.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kHelp, &m_debug.panels.help))
 	{
 		ImGui::End();
 		return;
 	}
 
-	ImGui::TextWrapped("ft_vox — Vulkan voxel engine. Release the mouse with C to use the UI freely.");
+	// One-shot tab request (Help > Controls / Help > About / ft_vox > About):
+	// opening the window selects the requested tab; consumed once.
+	const ui::HelpTabRequest tabRequest = m_helpTabRequest;
+	m_helpTabRequest = ui::HelpTabRequest::None;
 
-	if (ImGui::BeginTable("keys", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+	if (ImGui::BeginTabBar("HelpTabs"))
 	{
-		ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, 140.f);
-		ImGui::TableSetupColumn("Action");
-		ImGui::TableHeadersRow();
+		if (ImGui::BeginTabItem("Controls", nullptr,
+								tabRequest == ui::HelpTabRequest::Controls
+									? ImGuiTabItemFlags_SetSelected
+									: ImGuiTabItemFlags_None))
+		{
+			ImGui::TextWrapped("ft_vox — Vulkan voxel sandbox engine. Press C to free the mouse and use the UI.");
+			ImGui::Spacing();
 
-		helpRow("W A S D", "Move");
-		helpRow("Space", "Jump / swim up / fly up");
-		helpRow("Shift", "Sprint / swim down / fly down");
-		helpRow("V", "Toggle walk / debug flight");
-		helpRow("Mouse", "Look");
-		helpRow("LMB / RMB", "Break / place block");
-		helpRow("T", "Cycle selected block");
-		helpRow("B", "Toggle chunk borders");
-		helpRow("C", "Capture / free mouse");
-		helpRow("P", "Pause world tick");
-		helpRow("Esc", "Quit");
-		helpRow("F1", "Toggle HUD");
-		helpRow("F2", "Graphics panel (settings)");
-		helpRow("F3", "Streaming panel");
-		helpRow("F4", "World / biome map");
-		helpRow("F5", "This help");
-		helpRow("F6", "On-screen hints");
-		helpRow("F7", "Performance (CPU/GPU profiler)");
-		helpRow("F8", "Overview dashboard");
-		helpRow("F9", "Chunk inspector");
-		helpRow("F10", "Toggle VSync");
-		helpRow("F11", "Memory / workload");
-		helpRow("F12", "Render debug views");
-		helpRow("X (flight)", "Toggle flight speed boost");
+			ui::sectionHeader("Movement");
+			if (ImGui::BeginTable("keys_move", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+			{
+				ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, ui::scaled(140.f, scale));
+				ImGui::TableSetupColumn("Action");
+				ImGui::TableHeadersRow();
+				helpRow("W A S D", "Move");
+				helpRow("Space", "Jump / swim up / fly up");
+				helpRow("Shift", "Sprint / swim down / fly down");
+				helpRow("Mouse", "Look");
+				ImGui::EndTable();
+			}
 
-		ImGui::EndTable();
+			ui::sectionHeader("Interaction");
+			if (ImGui::BeginTable("keys_gameplay", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+			{
+				ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, ui::scaled(140.f, scale));
+				ImGui::TableSetupColumn("Action");
+				ImGui::TableHeadersRow();
+				helpRow("LMB / RMB", "Break / place block");
+				for (const ui::ShortcutRef &ref : ui::kShortcuts)
+					if (!ref.global)
+						helpRow(ref.key, ref.action);
+				helpRow("Esc", "Quit");
+				ImGui::EndTable();
+			}
+
+			ui::sectionHeader("UI / debug shortcuts");
+			if (ImGui::BeginTable("keys_ui", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+			{
+				ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, ui::scaled(140.f, scale));
+				ImGui::TableSetupColumn("Action");
+				ImGui::TableHeadersRow();
+				for (const ui::ShortcutRef &ref : ui::kShortcuts)
+					if (ref.global)
+						helpRow(ref.key, ref.action);
+				ImGui::EndTable();
+			}
+			ImGui::TextDisabled("Gameplay keys are inert while typing in a text field.");
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("About", nullptr,
+								tabRequest == ui::HelpTabRequest::About
+									? ImGuiTabItemFlags_SetSelected
+									: ImGuiTabItemFlags_None))
+		{
+			ImGui::TextUnformatted("ft_vox — Vulkan voxel sandbox engine");
+			ImGui::TextWrapped("Procedural infinite terrain, greedy meshing, cascaded shadows, HDR post.");
+
+			ui::sectionHeader("Build");
+			static const std::string sRevision = BuildInfo::revisionLabel();
+			static const std::string sBranch = BuildInfo::gitBranch();
+			ui::metric("Revision", "%s", sRevision.c_str());
+			ui::metric("Branch", "%s", sBranch.c_str());
+			ui::metric("Built (UTC)", "%s", BuildInfo::buildUtc());
+#ifdef NDEBUG
+			ui::metric("Build type", "Release");
+#else
+			ui::metric("Build type", "Debug");
+#endif
+
+			ui::sectionHeader("Runtime");
+			ui::metric("Renderer", "Vulkan %u.%u",
+					   VK_VERSION_MAJOR(frame.vkApiVersion), VK_VERSION_MINOR(frame.vkApiVersion));
+			if (frame.deviceName)
+				ui::metric("Device", "%s", frame.deviceName);
+			ui::metric("Validation", frame.validation ? "on" : "off");
+			ImGui::EndTabItem();
+		}
+		ImGui::EndTabBar();
 	}
-
-	ImGui::Separator();
-	ImGui::TextDisabled("Removed / unavailable");
-	ImGui::BulletText("Wireframe mode (no Vulkan pipeline yet)");
-	ImGui::BulletText("Multiplayer network panel (not re-wired)");
-	ImGui::BulletText("OpenGL shader hot-reload / FreeType HUD text");
 
 	ImGui::End();
 }
@@ -562,12 +617,14 @@ void GameUI::drawHelp()
 void GameUI::drawOverlayHints(GameUIFrame &frame)
 {
 	const ImGuiIO &io = ImGui::GetIO();
-	ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - 36.f),
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - ui::scaled(36.f, scale)),
 							ImGuiCond_Always, ImVec2(0.5f, 1.f));
 	ImGui::SetNextWindowBgAlpha(0.35f);
 	ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
 							 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-							 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+							 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
+							 ImGuiWindowFlags_NoDocking;
 	if (ImGui::Begin("##hints", nullptr, flags))
 	{
 		const char *block = frame.selectedTexture ? textureName(*frame.selectedTexture) : "?";

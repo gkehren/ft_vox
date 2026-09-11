@@ -3,6 +3,7 @@
 // report window is unchanged in content and behavior.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/UiScale.hpp>
 #include <Engine/GameUI.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/Benchmark.hpp>
@@ -15,8 +16,9 @@ namespace debugui
 
 void drawBenchmarkPanel(UiState &s, GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(360, 380), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Benchmark", &s.panels.benchmark))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(360.f, scale), ui::scaled(380.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kBenchmark, &s.panels.benchmark))
 	{
 		ImGui::End();
 		return;
@@ -90,13 +92,14 @@ void drawBenchmarkPanel(UiState &s, GameUIFrame &frame)
 
 void drawBenchmarkReport(UiState &s, GameUIFrame &frame)
 {
+	const float scale = ui::effectiveScale(frame.uiScale);
 	if (!frame.benchmark)
 		return;
 	Benchmark &bench = *frame.benchmark;
 	const BenchmarkReport &r = bench.report();
 	bool open = true;
-	ImGui::SetNextWindowSize(ImVec2(440, 520), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Benchmark Report", &open))
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(440.f, scale), ui::scaled(520.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kBenchmarkReport, &open))
 	{
 		ImGui::End();
 		if (!open)

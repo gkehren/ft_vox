@@ -68,7 +68,8 @@ Engine::Engine(std::string resourcePackRoot)
 	windowWidth = 1920;
 	windowHeight = 1080;
 
-	Uint32 windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
+	Uint32 windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE |
+						 SDL_WINDOW_HIGH_PIXEL_DENSITY;
 	if (FULLSCREEN == 0)
 	{
 		const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
@@ -90,6 +91,23 @@ Engine::Engine(std::string resourcePackRoot)
 
 	SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 
+	// The swapchain must match the framebuffer, not the logical window size:
+	// with SDL_WINDOW_HIGH_PIXEL_DENSITY the two differ on high-DPI displays
+	// (macOS Retina, fractional Wayland). The run loop re-queries pixels each
+	// frame for resize handling; this seeds the initial swapchain (issue #183).
+	int pixelW = 0, pixelH = 0;
+	SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
+	if (pixelW <= 0 || pixelH <= 0)
+	{
+		pixelW = windowWidth;
+		pixelH = windowHeight;
+	}
+	// Single size semantics: windowWidth/Height track the framebuffer/swapchain
+	// pixel extent (projection aspect, frustum visibility, HUD Viewport readout
+	// all want device pixels). Logical SDL sizes are not needed anywhere else.
+	windowWidth = pixelW;
+	windowHeight = pixelH;
+
 	m_perfFrequency = SDL_GetPerformanceFrequency();
 	updateDisplayRefreshRate();
 
@@ -97,7 +115,7 @@ Engine::Engine(std::string resourcePackRoot)
 	vkContext->init(window);
 
 	swapchain = std::make_unique<VkSwapchain>();
-	swapchain->init(*vkContext, static_cast<uint32_t>(windowWidth), static_cast<uint32_t>(windowHeight),
+	swapchain->init(*vkContext, static_cast<uint32_t>(pixelW), static_cast<uint32_t>(pixelH),
 					renderSettings.vsyncEnabled);
 
 	immediate = std::make_unique<ImmediateCommands>();
@@ -1146,6 +1164,9 @@ void Engine::drawUi()
 	f.worldGenerationId = m_worldGenerationId;
 	f.fps = static_cast<float>(fps > 0.0 ? fps : ImGui::GetIO().Framerate);
 	f.frameMs = static_cast<float>(deltaTime * 1000.0);
+	// Hierarchical-profiler CPU frame time for the shell status strip (issue
+	// #183/#179): distinct from the paced simulation delta above.
+	f.cpuFrameMs = GetProfiler().lastFrameMs();
 	f.drawCount = drawList.size();
 	f.windowW = windowWidth;
 	f.windowH = windowHeight;
@@ -1160,6 +1181,12 @@ void Engine::drawUi()
 		f.validation = vkContext->isValidationEnabled();
 	}
 	f.setVSync = [this](bool v) { setVSync(v); };
+	if (imgui)
+	{
+		f.uiScale = imgui->uiScale();
+		f.setUiScale = [this](float scale) { imgui->requestUiScale(scale); };
+	}
+	f.requestExit = [this]() { running = false; };
 	f.resourcePackRoot = &m_resourcePackRoot;
 	f.applyResourcePack = [this](const std::string &path) -> GameUIFrame::ResourcePackUiResult {
 		const ResourcePackApplyResult r = applyResourcePack(path);
@@ -1243,6 +1270,15 @@ void Engine::run()
 	const double inspectionStart = lastFrame;
 
 	const VkClearColorValue clearColor = {{0.38f, 0.58f, 0.92f, 1.0f}};
+
+	// First run on this machine (no imgui.ini yet): start with the default
+	// developer layout instead of an empty workspace. Benchmark runs keep the
+	// stock UI closed so open panels cannot perturb scores (issue #183).
+	if (imgui && gameUi && !imgui->hadExistingIni() && !m_exitAfterBenchmark)
+	{
+		gameUi->shell().queueDefaultLayout();
+		gameUi->enableDefaultDeveloperPanels();
+	}
 
 	while (running)
 	{

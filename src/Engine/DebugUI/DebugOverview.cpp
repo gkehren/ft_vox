@@ -5,6 +5,7 @@
 // throttled to 10 Hz in updateDebugUiState and skipped when closed.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/UiScale.hpp>
 #include <Engine/GameUI.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 
@@ -17,8 +18,9 @@ namespace debugui
 
 void drawOverview(UiState &s, GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(440, 560), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Overview", &s.panels.overview))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(440.f, scale), ui::scaled(560.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kOverview, &s.panels.overview))
 	{
 		ImGui::End();
 		return;
@@ -38,7 +40,7 @@ void drawOverview(UiState &s, GameUIFrame &frame)
 				s.frame.avgMs, s.frame.onePercentLowMs,
 				s.frame.vsync ? "on" : "off", s.frame.presentMode);
 	ImGui::TextDisabled("CPU frame history (10 Hz, 25 s window)");
-	plotHistory("##ov_cpu", s.cpuMs, 0.f, ImVec2(-1.f, 56.f));
+	plotHistory("##ov_cpu", s.cpuMs, 0.f, ImVec2(-1.f, ui::scaled(56.f, scale)));
 
 	// --- Streaming ---
 	ImGui::SeparatorText("Streaming");
@@ -53,7 +55,7 @@ void drawOverview(UiState &s, GameUIFrame &frame)
 	if (frame.mobCount || frame.mobVisible)
 		ImGui::Text("Mobs: %zu active / %zu visible", frame.mobCount, frame.mobVisible);
 	ImGui::TextDisabled("Mesh queue depth (10 Hz)");
-	plotHistory("##ov_mesh", s.pendingMesh, 0.f, ImVec2(-1.f, 48.f));
+	plotHistory("##ov_mesh", s.pendingMesh, 0.f, ImVec2(-1.f, ui::scaled(48.f, scale)));
 
 	// --- Memory / resources ---
 	ImGui::SeparatorText("Memory");
