@@ -71,8 +71,60 @@ struct ChunkStateProbe
 	static MeshArena::Range lodWaterI(const Chunk &c) { return c.m_lodWaterIndices; }
 };
 
+// Friend probe declared in ChunkManager.hpp: exposes the geometric commit
+// group bookkeeping so group lifetime, lifecycle state, fusion and member
+// sets are observable without public API.
+struct ChunkManagerProbe
+{
+	static size_t commitGroups(const ChunkManager &m) { return m.m_commitGroups.size(); }
+	static CommitGroupState groupState(const ChunkManager &m, size_t index)
+	{
+		return m.m_commitGroups[index].state;
+	}
+	static std::vector<Chunk *> groupChunks(const ChunkManager &m, size_t index)
+	{
+		std::vector<Chunk *> out;
+		for (const PendingGroupMember &member : m.m_commitGroups[index].members)
+			out.push_back(member.chunk);
+		return out;
+	}
+	static bool replacementRecorded(const ChunkManager &m, size_t index, const Chunk *chunk)
+	{
+		for (const PendingGroupMember &member : m.m_commitGroups[index].members)
+			if (member.chunk == chunk)
+				return member.replacement.recorded;
+		return false;
+	}
+	static bool replacementValid(const ChunkManager &m, size_t index, const Chunk *chunk)
+	{
+		for (const PendingGroupMember &member : m.m_commitGroups[index].members)
+			if (member.chunk == chunk)
+				return member.replacement.valid;
+		return false;
+	}
+	static void registerGroup(ChunkManager &m, std::vector<Chunk *> members)
+	{
+		std::vector<PendingGroupMember> converted;
+		for (Chunk *chunk : members)
+			converted.push_back({chunk, {}});
+		m.registerCommitGroup(0, std::move(converted));
+	}
+	static void removeFromGroups(ChunkManager &m, Chunk *chunk)
+	{
+		m.removeChunkFromCommitGroups(chunk);
+	}
+};
+
 namespace
 {
+
+bool groupContains(const std::vector<Chunk *> &chunks, Chunk *chunk)
+{
+	for (Chunk *member : chunks)
+		if (member == chunk)
+			return true;
+	return false;
+}
 
 VkPhysicalDevice pickPhysicalDevice(VkInstance instance)
 {
@@ -185,16 +237,28 @@ struct HeadlessDevice
 	// GPU buffer contents become observable (readback checks).
 	bool flush()
 	{
-		if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
+		VkResult endR = vkEndCommandBuffer(cmd);
+		if (endR != VK_SUCCESS)
+		{
+			std::cerr << "flush: end=" << int(endR) << std::endl;
 			return false;
+		}
 		VkSubmitInfo si{};
 		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		si.commandBufferCount = 1;
 		si.pCommandBuffers = &cmd;
-		if (vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
+		VkResult subR = vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+		if (subR != VK_SUCCESS)
+		{
+			std::cerr << "flush: submit=" << int(subR) << std::endl;
 			return false;
-		if (vkQueueWaitIdle(queue) != VK_SUCCESS)
+		}
+		VkResult waitR = vkQueueWaitIdle(queue);
+		if (waitR != VK_SUCCESS)
+		{
+			std::cerr << "flush: wait=" << int(waitR) << std::endl;
 			return false;
+		}
 		// Reset before re-recording (never between end and submit: a reset
 		// wipes the recorded commands and the submission would be empty).
 		vkResetCommandBuffer(cmd, 0);
@@ -1551,48 +1615,994 @@ int main()
 			chunkPool.release(chunk);
 		}
 
+		const auto sameDraws = [](const std::vector<Chunk::IndirectDraw> &a,
+		                          const std::vector<Chunk::IndirectDraw> &b) {
+			if (a.size() != b.size())
+				return false;
+			for (size_t i = 0; i < a.size(); ++i)
+				if (a[i].cmd.indexCount != b[i].cmd.indexCount ||
+				    a[i].cmd.firstIndex != b[i].cmd.firstIndex ||
+				    a[i].cmd.vertexOffset != b[i].cmd.vertexOffset ||
+				    a[i].vertexPage != b[i].vertexPage ||
+				    a[i].indexPage != b[i].indexPage)
+					return false;
+			return true;
+		};
+
 		// -----------------------------------------------------------------
-		// 16. Renderable-cache invariant across pending uploads (issue #122
-		// review): while meshNeedsUpdate is set (edit published, GPU commit
-		// pending), the cached descriptors describe ranges the commit will
-		// replace — opaque, shadow and water passes must not draw them.
+		// 16. Renderable-cache invariant across pending uploads (issue
+		// #177): stale-until-replaced. A committed GPU mesh stays
+		// renderable while meshNeedsUpdate only marks a pending
+		// replacement — hiding it would blink the whole chunk for the
+		// remesh/upload window. Only a successful commit swaps the drawn
+		// mesh, upload back-pressure keeps the old mesh drawable, and a
+		// chunk with no committed mesh yet (first upload pending) stays
+		// non-renderable.
 		// -----------------------------------------------------------------
 		{
+			// First-upload lifecycle: meshed but never uploaded - cache
+			// and index counters are still zero, so the committed-mesh
+			// predicate must not report renderability.
+			{
+				Chunk *fresh = chunkPool.acquire(glm::vec3(0.0f, 0.0f, 0.0f));
+				CHECK(manager.prepareAndGenerateChunk(fresh, gen), "first-upload: prepare+generate");
+				CHECK(fresh->generateMesh(), "first-upload: mesh publishes");
+				CHECK(fresh->needsGPUUpload(), "first-upload: mesh awaits its GPU commit");
+				CHECK(fresh->getCachedOpaqueDrawCount() == 0 && fresh->getOpaqueIndexCount() == 0,
+				      "first-upload: no committed opaque mesh yet");
+				CHECK(fresh->getCachedWaterDrawCount() == 0 && fresh->getWaterIndexCount() == 0,
+				      "first-upload: no committed water mesh yet");
+				CHECK(!fresh->hasRenderableOpaqueDraws(),
+				      "first-upload: no committed mesh is not renderable (opaque)");
+				CHECK(!fresh->hasRenderableWaterDraws(),
+				      "first-upload: no committed mesh is not renderable (water)");
+				std::vector<Chunk::IndirectDraw> freshDraws;
+				CHECK(fresh->collectOpaqueDraws(freshDraws) == 0,
+				      "first-upload: no opaque draws collected");
+				CHECK(fresh->collectWaterDraws(freshDraws) == 0,
+				      "first-upload: no water draws collected");
+				chunkPool.release(fresh);
+			}
+
 			Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f, 0.0f, 0.0f));
 			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "invariant: prepare+generate");
 			CHECK(chunk->generateMesh(), "invariant: mesh publishes");
 			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
 			CHECK(chunk->hasRenderableOpaqueDraws(), "invariant: uploaded chunk is renderable");
 
-			std::vector<Chunk::IndirectDraw> draws;
-			const size_t before = chunk->collectOpaqueDraws(draws);
+			std::vector<Chunk::IndirectDraw> committed;
+			const size_t before = chunk->collectOpaqueDraws(committed);
 			CHECK(before > 0, "invariant: committed draws collectable");
 
-			// Edit the chunk: meshNeedsUpdate goes true while the remeshed
-			// result waits for its GPU commit.
+			// Edit the chunk: meshNeedsUpdate arms, but the committed GPU
+			// mesh stays fully renderable (stale-until-replaced).
 			CHECK(chunk->placeVoxel(glm::vec3(5.f, 140.f, 5.f), STONE),
 			      "invariant: edit accepted above surface");
 			CHECK(chunk->needsGPUUpload(), "invariant: edit raises needsGPUUpload");
-			CHECK(!chunk->hasRenderableOpaqueDraws(),
-			      "invariant: pending upload hides opaque cache");
-			CHECK(chunk->collectOpaqueDraws(draws) == 0,
-			      "invariant: no opaque draws collected while pending");
-			CHECK(!chunk->hasRenderableWaterDraws(),
-			      "invariant: pending upload hides water cache");
-			CHECK(chunk->collectWaterDraws(draws) == 0,
-			      "invariant: no water draws collected while pending");
+			CHECK(chunk->hasRenderableOpaqueDraws(),
+			      "invariant: committed opaque mesh stays renderable while replacement is pending");
+			{
+				std::vector<Chunk::IndirectDraw> pending;
+				CHECK(chunk->collectOpaqueDraws(pending) == before,
+				      "invariant: old opaque draws collectable while pending");
+				CHECK(sameDraws(pending, committed),
+				      "invariant: pending collection still describes the committed mesh");
+			}
 			// Raw counters stay cached (the data is stale, not gone).
 			CHECK(chunk->getCachedOpaqueDrawCount() == before,
-			      "invariant: stale cache retained behind the guard");
+			      "invariant: stale cache retained while pending");
 
-			// Commit the remesh: renderability returns with fresh draws.
+			// Replacement ready + staging full: back-pressure keeps the
+			// old mesh renderable for as many frames as it takes.
 			CHECK(chunk->generateMesh(), "invariant: remesh publishes");
-			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			CHECK(chunk->needsGPUUpload(), "invariant: replacement result awaits its commit");
+			{
+				staging.beginFrame(0);
+				VkDeviceSize off = 0;
+				void *sink = nullptr;
+				CHECK(staging.alloc(staging.sliceCapacity(), off, sink),
+				      "invariant: staging ring drained");
+				std::vector<Chunk::IndirectDraw> deferred;
+				CHECK(!chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+				      "invariant: staging-full defers the replacement upload");
+				CHECK(chunk->needsGPUUpload(), "invariant: replacement still pending after deferral");
+				CHECK(chunk->hasRenderableOpaqueDraws(),
+				      "invariant: old mesh renderable during upload back-pressure");
+				CHECK(chunk->collectOpaqueDraws(deferred) == before && sameDraws(deferred, committed),
+				      "invariant: old draws collectable during upload back-pressure");
+			}
+
+			// Successful retry commits the replacement atomically.
+			staging.beginFrame(0);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "invariant: retry commits the replacement");
 			CHECK(!chunk->needsGPUUpload(), "invariant: commit clears needsGPUUpload");
 			CHECK(chunk->hasRenderableOpaqueDraws(), "invariant: opaque renderable after commit");
-			CHECK(chunk->collectOpaqueDraws(draws) > 0, "invariant: opaque draws return after commit");
+			{
+				std::vector<Chunk::IndirectDraw> replaced;
+				CHECK(chunk->collectOpaqueDraws(replaced) > 0,
+				      "invariant: opaque draws collectable after commit");
+				CHECK(!sameDraws(replaced, committed),
+				      "invariant: committed descriptors switched to the replacement mesh");
+			}
+			CHECK(vk.flush(), "invariant: replacement submit");
+			retire.flush();
 
 			chunkPool.release(chunk);
+		}
+
+		// -----------------------------------------------------------------
+		// 17. Deterministic water stale-renderable (issue #177 review): the
+		// water contract must not depend on the bootstrap terrain holding
+		// water. Water geometry is built explicitly, then a second edit
+		// proves the committed water mesh stays renderable with descriptor
+		// stability through a pending remesh AND a staging-full deferral,
+		// and that the retry commits replacement water descriptors.
+		// -----------------------------------------------------------------
+		{
+			Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f, 0.0f, 0.0f));
+			CHECK(manager.prepareAndGenerateChunk(chunk, gen), "water: prepare+generate");
+			CHECK(chunk->generateMesh(), "water: mesh publishes");
+			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+
+			// Build an explicit floating water voxel and commit it: this is
+			// the committed "water mesh A" the rest of the section uses (the
+			// seed's terrain may also carry natural water - it is part of
+			// the same committed snapshot either way).
+			CHECK(chunk->placeVoxel(glm::vec3(5.0f, 140.0f, 5.0f), WATER),
+			      "water: initial water voxel placed");
+			CHECK(chunk->generateMesh(), "water: water mesh A publishes");
+			chunk->uploadToGPU(vk.allocator.handle(), imm, arenas);
+			CHECK(chunk->hasRenderableWaterDraws(), "water: committed water mesh is renderable");
+			std::vector<Chunk::IndirectDraw> waterA;
+			const size_t waterBefore = chunk->collectWaterDraws(waterA);
+			CHECK(waterBefore > 0, "water: committed water draws collectable");
+			std::vector<Chunk::IndirectDraw> opaqueA;
+			CHECK(chunk->collectOpaqueDraws(opaqueA) > 0, "water: committed opaque draws collectable");
+
+			// Second, adjacent water voxel: remesh pending, and the
+			// committed water mesh must stay renderable with the exact old
+			// descriptors (the shared water face only changes at commit).
+			CHECK(chunk->placeVoxel(glm::vec3(6.0f, 140.0f, 5.0f), WATER),
+			      "water: adjacent water voxel placed");
+			CHECK(chunk->needsGPUUpload(), "water: edit raises needsGPUUpload");
+			CHECK(chunk->hasRenderableWaterDraws(),
+			      "water: committed water mesh stays renderable while replacement is pending");
+			CHECK(chunk->hasRenderableOpaqueDraws(),
+			      "water: committed opaque mesh stays renderable while replacement is pending");
+			{
+				std::vector<Chunk::IndirectDraw> pendingWater;
+				CHECK(chunk->collectWaterDraws(pendingWater) == waterBefore,
+				      "water: old water draws collectable while pending");
+				CHECK(sameDraws(pendingWater, waterA),
+				      "water: pending collection still describes the committed water mesh");
+			}
+
+			// Publish the replacement remesh, then starve the staging ring:
+			// back-pressure keeps the committed water mesh renderable and
+			// descriptor-stable for as long as the upload cannot commit.
+			CHECK(chunk->generateMesh(), "water: replacement remesh publishes");
+			{
+				staging.beginFrame(0);
+				VkDeviceSize off = 0;
+				void *sink = nullptr;
+				CHECK(staging.alloc(staging.sliceCapacity(), off, sink),
+				      "water: staging ring drained");
+				std::vector<Chunk::IndirectDraw> deferredWater;
+				CHECK(!chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+				      "water: staging-full defers the replacement upload");
+				CHECK(chunk->hasRenderableWaterDraws(),
+				      "water: committed water mesh renderable during upload back-pressure");
+				CHECK(chunk->collectWaterDraws(deferredWater) == waterBefore &&
+				          sameDraws(deferredWater, waterA),
+				      "water: old water descriptors intact during back-pressure");
+			}
+
+			// Retry: the replacement commits and replaces the water mesh.
+			staging.beginFrame(0);
+			CHECK(chunk->uploadToGPUAsync(vk.allocator.handle(), staging, vk.cmd, retire, arenas),
+			      "water: retry commits the replacement");
+			CHECK(!chunk->needsGPUUpload(), "water: commit clears needsGPUUpload");
+			CHECK(chunk->hasRenderableWaterDraws(), "water: water renderable after commit");
+			{
+				std::vector<Chunk::IndirectDraw> waterB;
+				CHECK(chunk->collectWaterDraws(waterB) > 0, "water: water draws collectable after commit");
+				CHECK(!sameDraws(waterB, waterA),
+				      "water: committed descriptors switched to the replacement water mesh");
+			}
+			CHECK(vk.flush(), "water: replacement submit");
+			retire.flush();
+
+			chunkPool.release(chunk);
+		}
+
+		// -----------------------------------------------------------------
+		// 18. Cross-chunk border edit with geometric commit groups (issue
+		// #177 review round 2): a border edit re-arms BOTH the target and
+		// the shell-mirror neighbor, and their GPU publications now commit
+		// ATOMICALLY - the group prepares all members, then commits all.
+		// Each member COPY consumes one budget unit. "new A + old B" (the seam the
+		// round-1 test demonstrated) is therefore impossible. The harness
+		// simulates real frames: every upload call is preceded by
+		// beginFrame(slot % framesInFlight) and followed by a submit, so
+		// staged data is never overwritten before its command buffer runs.
+		// -----------------------------------------------------------------
+		{
+			ChunkPool poolX(32);
+			TerrainGenerator genX(42);
+			ChunkManager managerX(&genX, nullptr, &poolX);
+			managerX.generateInitialArea(glm::vec3(0.0f, 0.0f, 0.0f), 1,
+			                             vk.allocator.handle(), imm, arenas);
+			StagingRing stagingX;
+			stagingX.init(vk.allocator.handle(), 2); // frames-in-flight slices
+			Chunk *A = managerX.getChunk(glm::ivec3(0, 0, 0));
+			Chunk *B = managerX.getChunk(glm::ivec3(1, 0, 0));
+			Chunk *S = managerX.getChunk(glm::ivec3(0, 0, 1)); // south: corner-edit member
+			CHECK(A != nullptr && B != nullptr && S != nullptr,
+			      "xchunk: adjacent chunks bootstrapped");
+			if (A && B && S)
+			{
+				CHECK(A->hasRenderableOpaqueDraws() && B->hasRenderableOpaqueDraws(),
+				      "xchunk: bootstrap meshes renderable");
+
+				// Surface height of the deepest involved column; the
+				// fixture floats above it so every target is air on both
+				// sides of the border.
+				const auto columnSurface = [](Chunk *chunk, int lx, int lz) {
+					for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+						if (chunk->getVoxel(static_cast<uint32_t>(lx),
+						                    static_cast<uint32_t>(y),
+						                    static_cast<uint32_t>(lz))
+						        .type != static_cast<uint8_t>(AIR))
+							return y;
+					return -1;
+				};
+				int hMax = -1;
+				for (int lz = 7; lz <= 9; ++lz)
+					hMax = std::max(hMax, columnSurface(A, 15, lz));
+				hMax = std::max(hMax, columnSurface(B, 0, 8));
+				CHECK(hMax > 1 && hMax + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "xchunk: border columns surfaced");
+				const int y0 = hMax + 3;
+
+				const auto worldOf = [](Chunk *chunk, int lx, int ly, int lz) {
+					const glm::vec3 p = chunk->getPosition();
+					return glm::vec3(p.x + static_cast<float>(lx) + 0.5f,
+					                 static_cast<float>(ly) + 0.5f,
+					                 p.z + static_cast<float>(lz) + 0.5f);
+				};
+				const auto remeshOne = [](Chunk *chunk) {
+					const uint16_t mask = chunk->takeDirtySections();
+					if (mask == 0)
+						return;
+					MeshBuildResult *r = chunk->getMeshResultPool()->acquire();
+					chunk->buildMesh(*r, chunk->meshGeneration(), chunk->meshRevision(), mask);
+					chunk->getMeshResultPool()->finishBuild(r);
+					CHECK(chunk->publishMeshResult(r), "xchunk: remesh published");
+				};
+				uint32_t frameSlot = 0;
+				const auto beginFrame = [&]() {
+					const uint64_t frameNumber = 10000u + frameSlot;
+					retire.beginFrame(frameNumber);
+					arenas.beginFrame(frameNumber);
+					stagingX.beginFrame(frameSlot % 2);
+				};
+				const auto submitFrame = [&]() {
+					if (!vk.flush())
+					{
+						std::cerr << "FLUSHFAIL slot=" << frameSlot << std::endl;
+					}
+					retire.flush();
+					++frameSlot;
+				};
+
+				// Fixture (placed through the manager so both border shells
+				// update): the tested center voxel on A's x=15 column, the
+				// solid BRICKS across the border on B's x=0 column whose -x
+				// face the removal will expose, and four isolation stones
+				// culling every OTHER candidate face in B's border plane so
+				// the later commit delta is exactly one quad (greedy
+				// merge-proof). Every placement is a border edit: each
+				// registers its own commit group.
+				CHECK(managerX.placeVoxel(worldOf(B, 0, y0, 8), BRICKS), "xchunk: B border brick");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0 - 1, 8), BRICKS), "xchunk: stone -y");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0 + 1, 8), BRICKS), "xchunk: stone +y");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0, 7), BRICKS), "xchunk: stone -z");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0, 9), BRICKS), "xchunk: stone +z");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0, 8), BRICKS),
+				      "xchunk: center voxel placed");
+
+				// A border edit re-arms both the target and the mirror
+				// chunk; the committed meshes stay renderable meanwhile.
+				CHECK(A->getState() == ChunkState::GENERATED &&
+				          B->getState() == ChunkState::GENERATED,
+				      "xchunk: target and mirror neighbor re-armed");
+				{
+					std::vector<Chunk::IndirectDraw> aKeep, bKeep;
+					CHECK(A->collectOpaqueDraws(aKeep) > 0 && B->collectOpaqueDraws(bKeep) > 0,
+					      "xchunk: committed meshes collectable while re-armed");
+				}
+
+				// Both members published -> the group is ready, but one budget
+				// unit records exactly one member even when both fit staging.
+				remeshOne(A);
+				remeshOne(B);
+				const Camera camX(glm::vec3(8.0f, static_cast<float>(y0), 8.0f));
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(A->needsGPUUpload() && B->needsGPUUpload() &&
+				          ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "xchunk: budget=1 records only one member COPY");
+				submitFrame();
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
+				      "xchunk: second budget unit completes the atomic border commit");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "xchunk: fixture groups consumed by the commit");
+				submitFrame();
+
+				// The light-halo neighbors the same edits re-armed are still
+				// un-remeshed (GENERATED): they never joined the group and
+				// did not block it.
+				{
+					size_t generated = 0;
+					for (Chunk *chunk : managerX.getActiveChunks())
+						if (chunk && chunk->getState() == ChunkState::GENERATED)
+							++generated;
+					CHECK(generated > 0, "xchunk: light-only neighbors stay out of the group");
+				}
+
+				std::vector<Chunk::IndirectDraw> committedA, committedB;
+				const size_t aCount = A->collectOpaqueDraws(committedA);
+				const size_t bCount = B->collectOpaqueDraws(committedB);
+				const uint32_t bIndices = B->getOpaqueIndexCount();
+				CHECK(aCount > 0 && bCount > 0, "xchunk: fixture meshes committed");
+
+				// --- Removal: A ready / B not ready -> NEITHER commits ---
+				CHECK(managerX.deleteVoxel(worldOf(A, 15, y0, 8)),
+				      "xchunk: border removal accepted");
+				remeshOne(A); // A publishes its replacement; B is still remeshing
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(A->needsGPUUpload(),
+				      "xchunk: blocked group does not commit the ready member");
+				CHECK(B->getState() == ChunkState::GENERATED && B->dirtySections() != 0,
+				      "xchunk: blocked group waits for the remeshing member");
+				{
+					std::vector<Chunk::IndirectDraw> aPending, bPending;
+					CHECK(A->collectOpaqueDraws(aPending) == aCount &&
+					          sameDraws(aPending, committedA),
+					      "xchunk: blocked group keeps old A drawn");
+					CHECK(B->collectOpaqueDraws(bPending) == bCount &&
+					          sameDraws(bPending, committedB),
+					      "xchunk: blocked group keeps old B drawn");
+				}
+				submitFrame();
+
+				// --- Round 4: ALLOCATE failure at the Waiting->Uploading
+				// transition --- the group rolls back and stays
+				// WaitingForMeshes with every arena counter exactly as
+				// before (no leaked suballocation).
+				remeshOne(B);
+				const auto stagingNeedOf = [](Chunk *chunk) {
+					VkDeviceSize need = 0;
+					MeshBuildResult *r = ChunkStateProbe::pending(*chunk);
+					CHECK(r != nullptr, "xchunk: result attached for staging accounting");
+					if (r)
+						for (int s = 0; s < 16; ++s)
+							if ((r->sectionsBuilt >> s) & 1u)
+							{
+								const auto align = [](size_t bytes) {
+									return static_cast<VkDeviceSize>(
+										(bytes + StagingRing::kAlignment - 1) /
+										StagingRing::kAlignment * StagingRing::kAlignment);
+								};
+								need += align(r->sections[static_cast<size_t>(s)].opaqueVertices.size() *
+								              sizeof(Vertex));
+								need += align(r->sections[static_cast<size_t>(s)].opaqueIndices.size() *
+								              sizeof(uint32_t));
+								need += align(r->sections[static_cast<size_t>(s)].waterVertices.size() *
+								              sizeof(Vertex));
+								need += align(r->sections[static_cast<size_t>(s)].waterIndices.size() *
+								              sizeof(uint32_t));
+							}
+					return need;
+				};
+				const VkDeviceSize needA = stagingNeedOf(A);
+				const VkDeviceSize needB = stagingNeedOf(B);
+				CHECK(needA > 0 && needB > 0, "xchunk: both members need staging");
+				CHECK(needA < stagingX.sliceCapacity() && needB < stagingX.sliceCapacity(),
+				      "xchunk: each member individually fits one staging slice");
+
+				const auto metricsEqual = [](const MeshArena::Metrics &a,
+				                             const MeshArena::Metrics &b) {
+					return a.pages == b.pages && a.liveBlocks == b.liveBlocks &&
+					       a.liveBytes == b.liveBytes && a.freeBytes == b.freeBytes;
+				};
+				const auto arenaSnapshot = [&]() {
+					return std::make_tuple(arenas.opaqueVertex.metrics(),
+					                       arenas.opaqueIndex.metrics(),
+					                       arenas.waterVertex.metrics(),
+					                       arenas.waterIndex.metrics());
+				};
+				const auto beforeFailedAllocate = arenaSnapshot();
+				// Opaque vertex allocation succeeds first; opaque index then
+				// fails, exercising rollback of an already-owned range.
+				arenas.opaqueIndex.setFailNextAllocations(1);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 2);
+				arenas.opaqueIndex.setFailNextAllocations(0);
+				{
+					const auto [ov, oi, wv, wi] = beforeFailedAllocate;
+					CHECK(metricsEqual(ov, arenas.opaqueVertex.metrics()) &&
+					          metricsEqual(oi, arenas.opaqueIndex.metrics()) &&
+					          metricsEqual(wv, arenas.waterVertex.metrics()) &&
+					          metricsEqual(wi, arenas.waterIndex.metrics()),
+					      "xchunk: failed ALLOCATE leaks nothing (live blocks/bytes/pages)");
+				}
+				CHECK(A->needsGPUUpload() && B->needsGPUUpload(),
+				      "xchunk: failed ALLOCATE defers the group");
+				{
+					std::vector<Chunk::IndirectDraw> aPending, bPending;
+					CHECK(A->collectOpaqueDraws(aPending) == aCount &&
+					          sameDraws(aPending, committedA),
+					      "xchunk: failed ALLOCATE keeps old A drawn");
+					CHECK(B->collectOpaqueDraws(bPending) == bCount &&
+					          sameDraws(bPending, committedB),
+					      "xchunk: failed ALLOCATE keeps old B drawn");
+				}
+				submitFrame();
+
+				// --- Liveness (round 4, items 6-7/13): the group's combined
+				// staging need exceeds one frame's available room, so the
+				// members record PROGRESSIVELY across frames while both old
+				// meshes keep rendering; publication happens atomically in
+				// the frame the last member lands.
+				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needA, off, sink),
+					      "xchunk: frame 1 leaves room for exactly A");
+				}
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
+				          ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "xchunk: group uploads progressively across frames");
+				CHECK(A->needsGPUUpload() && B->needsGPUUpload(),
+				      "xchunk: no member publishes while the group is incomplete");
+				{
+					std::vector<Chunk::IndirectDraw> aPending, bPending;
+					CHECK(A->collectOpaqueDraws(aPending) == aCount &&
+					          sameDraws(aPending, committedA),
+					      "xchunk: frame N keeps old A drawn");
+					CHECK(B->collectOpaqueDraws(bPending) == bCount &&
+					          sameDraws(bPending, committedB),
+					      "xchunk: frame N keeps old B drawn");
+				}
+				submitFrame();
+
+				// Frame 2: room for exactly B -> B records -> the whole group
+				// publishes atomically this frame.
+				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needB, off, sink),
+					      "xchunk: frame 2 leaves room for exactly B");
+				}
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
+				      "xchunk: the group publishes atomically when the last member lands");
+				{
+					std::vector<Chunk::IndirectDraw> aNew, bNew;
+					CHECK(A->collectOpaqueDraws(aNew) > 0 && !sameDraws(aNew, committedA),
+					      "xchunk: A committed the removal");
+					CHECK(B->collectOpaqueDraws(bNew) > 0 && !sameDraws(bNew, committedB),
+					      "xchunk: B committed in the SAME slot as A");
+					CHECK(B->getOpaqueIndexCount() == bIndices + 6,
+					      "xchunk: B's replacement adds exactly the exposed border face");
+				}
+				submitFrame();
+
+				// --- Supersession before commit: stale result rejected ---
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y0 + 2, 8), BRICKS),
+				      "supersession: border edit #1 accepted");
+				MeshBuildResult *stale = A->getMeshResultPool()->acquire();
+				{
+					const uint16_t mask = A->takeDirtySections();
+					A->buildMesh(*stale, A->meshGeneration(), A->meshRevision(), mask);
+					A->getMeshResultPool()->finishBuild(stale);
+				}
+				CHECK(managerX.placeVoxel(worldOf(A, 10, y0 + 2, 8), BRICKS),
+				      "supersession: later edit supersedes the in-flight result");
+				CHECK(!A->publishMeshResult(stale),
+				      "supersession: stale result rejected by revision validation");
+				remeshOne(A);
+				remeshOne(B);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 2);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
+				      "supersession: the newest results commit together");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "supersession: no group leaks after commit");
+				submitFrame();
+
+				// --- Corner edit: target + BOTH side neighbors (3 chunks)
+				// commit atomically after three COPY budget units ---
+				int hCorner = std::max(std::max(columnSurface(A, 15, 15),
+				                                columnSurface(B, 0, 15)),
+				                       columnSurface(S, 15, 0));
+				CHECK(hCorner > 1 && hCorner + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "corner: border columns surfaced");
+				const int yC = hCorner + 3;
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yC, 15), BRICKS),
+				      "corner: corner voxel placed");
+				remeshOne(A);
+				remeshOne(B);
+				remeshOne(S);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 3);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload() && !S->needsGPUUpload(),
+				      "corner: three COPY units commit all linked chunks together");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "corner: group consumed");
+				submitFrame();
+
+				// --- Overlapping edits fuse into one group (PR #178 review
+				// round 3): an east border edit and a south border edit of
+				// the SAME target chunk share A, so {A,B} + {A,S} must fuse
+				// into {A,B,S} BEFORE the scheduler can see them - otherwise
+				// committing {A,B} alone could publish "new A + new B + old
+				// S" or "new A + old B + new S".
+				int hOverlap = std::max(columnSurface(A, 15, 3),
+				                        columnSurface(A, 8, 15));
+				CHECK(hOverlap > 1 && hOverlap + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "overlap: border columns surfaced");
+				const int y1 = hOverlap + 3;
+
+				// East edit: {A,B} registers; A publishes its result, B is
+				// still remeshing.
+				CHECK(managerX.placeVoxel(worldOf(A, 15, y1, 3), BRICKS),
+				      "overlap: east border edit accepted");
+				MeshBuildResult *eastOnly = A->getMeshResultPool()->acquire();
+				{
+					const uint16_t mask = A->takeDirtySections();
+					A->buildMesh(*eastOnly, A->meshGeneration(), A->meshRevision(), mask);
+					A->getMeshResultPool()->finishBuild(eastOnly);
+				}
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(A->needsGPUUpload(),
+				      "overlap: the ready member waits for its fused group");
+				submitFrame();
+
+				// South edit lands BEFORE any commit: it shares A, so the
+				// registration must fuse {A,B} + {A,S} into one {A,B,S}.
+				CHECK(managerX.placeVoxel(worldOf(A, 8, y1, 15), BRICKS),
+				      "overlap: south border edit accepted");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				      "overlap: overlapping groups fused into one");
+				{
+					const std::vector<Chunk *> &fused =
+						ChunkManagerProbe::groupChunks(managerX, 0);
+					const bool allThere = fused.size() == 3 &&
+					                      groupContains(fused, A) &&
+					                      groupContains(fused, B) &&
+					                      groupContains(fused, S);
+					CHECK(allThere, "overlap: fused group is exactly {A,B,S}");
+				}
+
+				// The east-only result built before the south edit is now
+				// stale: revision validation must reject it (the A publish
+				// below then carries BOTH edits).
+				CHECK(!A->publishMeshResult(eastOnly),
+				      "overlap: superseded east-only result rejected");
+				remeshOne(A);
+				remeshOne(B);
+				remeshOne(S);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 3);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload() && !S->needsGPUUpload(),
+				      "overlap: three COPY units commit the fused group together");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "overlap: fused group consumed");
+				submitFrame();
+
+				// --- Partial unload (round 4, items 1-2): a 3-member group
+				// losing one member keeps the remaining atomic dependency
+				// {A,SS}; a 2-member group losing one member dissolves. ---
+				int hU = columnSurface(A, 15, 15);
+				CHECK(hU > 1 && hU + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "unload: border columns surfaced");
+				const int yU = hU + 3;
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yU, 15), BRICKS),
+				      "unload: corner edit accepted");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
+				          ChunkManagerProbe::groupChunks(managerX, 0).size() == 3,
+				      "unload: three-member group registered");
+				ChunkManagerProbe::removeFromGroups(managerX, B); // B unloads
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				      "unload: group survives with two members");
+				{
+					const std::vector<Chunk *> survivors =
+						ChunkManagerProbe::groupChunks(managerX, 0);
+					CHECK(survivors.size() == 2 && groupContains(survivors, A) &&
+					          groupContains(survivors, S),
+					      "unload: group is now exactly {A,SS}");
+				}
+				remeshOne(A);
+				remeshOne(S);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 2);
+				CHECK(!A->needsGPUUpload() && !S->needsGPUUpload(),
+				      "unload: the surviving pair commits together (old S impossible)");
+				submitFrame();
+
+				// B is gone from the group: it remeshes and uploads on its own.
+				remeshOne(B);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(!B->needsGPUUpload(), "unload: removed member uploads independently");
+				submitFrame();
+
+				// A 2-member group losing one member has no coupling left.
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yU, 12), BRICKS),
+				      "unload2: east edit accepted");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				      "unload2: pair group registered");
+				ChunkManagerProbe::removeFromGroups(managerX, B);
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "unload2: pair group dissolved");
+				remeshOne(A);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 2);
+				CHECK(!A->needsGPUUpload(), "unload2: A uploads solo after the dissolve");
+				submitFrame();
+
+				// --- Uploaded-but-unpublished member superseded (round 4,
+				// item 8/13): A records in frame 1, is re-edited before
+				// publication, its stale replacement is discarded, and the
+				// newest result joins B for the atomic publish. ---
+				int hS = -1;
+				for (int lz : {5, 6, 10, 12, 13})
+					hS = std::max(hS, columnSurface(A, 15, lz));
+				CHECK(hS > 1 && hS + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "supersession2: border columns surfaced");
+				const int yS = hS + 3;
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 5), BRICKS),
+				      "supersession2: border edit accepted");
+				remeshOne(A);
+				remeshOne(B);
+				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					const VkDeviceSize needA = stagingNeedOf(A);
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needA, off, sink),
+					      "supersession2: ring leaves room for exactly A");
+				}
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "supersession2: A recorded, B deferred by exact-fit staging");
+				submitFrame();
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 6), BRICKS),
+				      "supersession2: A re-edited while uploaded but unpublished");
+				remeshOne(A);
+				remeshOne(B);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
+				      "supersession2: stale replacement discarded, newest results published");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "supersession2: group consumed");
+				submitFrame();
+
+				// --- Unload of the recorded member (round 4, item 13): the
+				// unpublished replacement is discarded and the surviving
+				// member falls back to a solo upload. ---
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 13), BRICKS),
+				      "unload-recorded: border edit accepted");
+				remeshOne(A);
+				remeshOne(B);
+				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					const VkDeviceSize needA = stagingNeedOf(A);
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needA, off, sink),
+					      "unload-recorded: ring leaves room for exactly A");
+				}
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "unload-recorded: A recorded, B deferred by exact-fit staging");
+				const auto liveBlocksBeforeDissolve = [&]() {
+					return arenas.opaqueVertex.metrics().liveBlocks +
+					       arenas.opaqueIndex.metrics().liveBlocks +
+					       arenas.waterVertex.metrics().liveBlocks +
+					       arenas.waterIndex.metrics().liveBlocks;
+				}();
+				submitFrame();
+				ChunkManagerProbe::removeFromGroups(managerX, A); // A unloads
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "unload-recorded: pair group dissolved");
+				const auto liveBlocksAfterDissolve =
+				    arenas.opaqueVertex.metrics().liveBlocks + arenas.opaqueIndex.metrics().liveBlocks +
+				    arenas.waterVertex.metrics().liveBlocks + arenas.waterIndex.metrics().liveBlocks;
+				CHECK(liveBlocksAfterDissolve < liveBlocksBeforeDissolve,
+				      "unload-recorded: unrecorded survivor replacement ranges freed");
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(!B->needsGPUUpload(),
+				      "unload-recorded: remaining member falls back to solo upload");
+				submitFrame();
+
+				// --- New border edit fused into a partially-uploaded group
+				// (round 4, item 13): the recorded-but-stale replacement of
+				// the shared member is discarded, the fresh one is recorded,
+				// and the whole group publishes together. ---
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 10), BRICKS),
+				      "fuse-live: border edit accepted");
+				remeshOne(A);
+				remeshOne(B);
+				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					const VkDeviceSize needA = stagingNeedOf(A);
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needA, off, sink),
+					      "fuse-live: ring leaves room for exactly A");
+				}
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "fuse-live: A recorded, B deferred by exact-fit staging");
+				submitFrame();
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 12), BRICKS),
+				      "fuse-live: second border edit fuses into the uploading group");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				      "fuse-live: still one fused group");
+				CHECK(ChunkManagerProbe::replacementRecorded(managerX, 0, A),
+				      "fuse-live: fusion preserves the existing recorded replacement owner");
+				remeshOne(A);
+				remeshOne(B);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
+				      "fuse-live: fused group publishes together");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "fuse-live: group consumed");
+				submitFrame();
+
+				// --- Transitive fusion of the registration helper itself
+				// (probe-level): {A,B} + {B,S} + {S,W} must collapse into a
+				// single {A,B,S,W} group, exercising the fixed-point merge
+				// without staging four real edits.
+				{
+					Chunk *W = managerX.getChunk(glm::ivec3(-1, 0, 0));
+					CHECK(W != nullptr, "transitive: west chunk bootstrapped");
+					if (W)
+					{
+						ChunkManagerProbe::registerGroup(managerX, {A, B});
+						ChunkManagerProbe::registerGroup(managerX, {B, S});
+						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
+						          ChunkManagerProbe::groupChunks(managerX, 0).size() == 3,
+						      "transitive: {A,B} and {B,S} fuse to {A,B,S}");
+						ChunkManagerProbe::registerGroup(managerX, {S, W});
+						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+						      "transitive: one group remains");
+						const std::vector<Chunk *> &chain =
+							ChunkManagerProbe::groupChunks(managerX, 0);
+						const bool chainOk = chain.size() == 4 &&
+						                     groupContains(chain, A) &&
+						                     groupContains(chain, B) &&
+						                     groupContains(chain, S) &&
+						                     groupContains(chain, W);
+						CHECK(chainOk,
+						      "transitive: {A,B}+{B,S}+{S,W} collapse to {A,B,S,W}");
+					}
+				}
+			}
+			stagingX.shutdown();
+		}
+
+		// -----------------------------------------------------------------
+		// 19. Commit-group teardown ownership (issue #177 review): the
+		// manager owns prepared-but-unpublished replacements and must discard
+		// them before returning their chunks to the pool. Cover both the
+		// immediate-free and submitted-copy retirement paths, then recreate a
+		// manager against the same arenas (the reloadWorld ownership contract).
+		// -----------------------------------------------------------------
+		{
+			GpuResourceRetire teardownRetire;
+			teardownRetire.init(vk.allocator.handle(), 2);
+			MeshArenas teardownArenas;
+			teardownArenas.init(vk.allocator.handle(), teardownRetire, sizeof(Vertex), 2,
+			                    2ull * 1024ull * 1024ull, 1ull * 1024ull * 1024ull);
+			StagingRing teardownStaging;
+			teardownStaging.init(vk.allocator.handle(), 2);
+			ChunkPool teardownPool(32);
+			TerrainGenerator teardownGen(177);
+			Camera teardownCamera(glm::vec3(8.0f, 100.0f, 8.0f));
+			uint64_t teardownFrame = 30000;
+
+			const auto snapshotMetrics = [&]() {
+				return std::make_tuple(teardownArenas.opaqueVertex.metrics(),
+				                       teardownArenas.opaqueIndex.metrics(),
+				                       teardownArenas.waterVertex.metrics(),
+				                       teardownArenas.waterIndex.metrics());
+			};
+			const auto baseline = snapshotMetrics();
+			const auto metricsMatch = [](const MeshArena::Metrics &a,
+			                             const MeshArena::Metrics &b) {
+				return a.liveBlocks == b.liveBlocks && a.liveBytes == b.liveBytes;
+			};
+			const auto checkBaseline = [&](const char *stage) {
+				const auto [ov0, oi0, wv0, wi0] = baseline;
+				const auto [ov1, oi1, wv1, wi1] = snapshotMetrics();
+				CHECK(metricsMatch(ov0, ov1),
+				      std::string(stage) + ": opaque vertex live blocks/bytes recovered");
+				CHECK(metricsMatch(oi0, oi1),
+				      std::string(stage) + ": opaque index live blocks/bytes recovered");
+				CHECK(metricsMatch(wv0, wv1),
+				      std::string(stage) + ": water vertex live blocks/bytes recovered");
+				CHECK(metricsMatch(wi0, wi1),
+				      std::string(stage) + ": water index live blocks/bytes recovered");
+			};
+			const auto beginTeardownFrame = [&]() {
+				teardownRetire.beginFrame(teardownFrame);
+				teardownArenas.beginFrame(teardownFrame);
+				teardownStaging.beginFrame(static_cast<uint32_t>(teardownFrame % 2));
+				++teardownFrame;
+			};
+			const auto drainTeardownRetirement = [&]() {
+				for (int i = 0; i < 6; ++i)
+				{
+					teardownRetire.beginFrame(teardownFrame);
+					teardownArenas.beginFrame(teardownFrame);
+					++teardownFrame;
+				}
+			};
+			const auto createUploadingPair = [&](ChunkManager &teardownManager) {
+				teardownManager.generateInitialArea(glm::vec3(0.0f, 0.0f, 0.0f), 1,
+				                                    vk.allocator.handle(), imm, teardownArenas);
+				Chunk *a = teardownManager.getChunk(glm::ivec3(0, 0, 0));
+				Chunk *b = teardownManager.getChunk(glm::ivec3(1, 0, 0));
+				CHECK(a != nullptr && b != nullptr, "teardown: adjacent chunks bootstrapped");
+				if (!a || !b)
+					return std::make_pair(a, b);
+
+				int surface = -1;
+				for (Chunk *chunk : {a, b})
+				{
+					const uint32_t x = chunk == a ? CHUNK_SIZE - 1 : 0;
+					for (int y = static_cast<int>(CHUNK_HEIGHT) - 1; y >= 0; --y)
+					{
+						if (chunk->getVoxel(x, static_cast<uint32_t>(y), 5).type !=
+						    static_cast<uint8_t>(AIR))
+						{
+							surface = std::max(surface, y);
+							break;
+						}
+					}
+				}
+				CHECK(surface > 1 && surface + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "teardown: border columns surfaced");
+				const glm::vec3 p = a->getPosition();
+				CHECK(teardownManager.placeVoxel(
+				          glm::vec3(p.x + static_cast<float>(CHUNK_SIZE) - 0.5f,
+				                    static_cast<float>(surface + 3) + 0.5f, p.z + 5.5f),
+				          BRICKS),
+				      "teardown: border edit accepted");
+
+				for (Chunk *chunk : {a, b})
+				{
+					const uint16_t mask = chunk->takeDirtySections();
+					MeshBuildResult *result = chunk->getMeshResultPool()->acquire();
+					chunk->buildMesh(*result, chunk->meshGeneration(), chunk->meshRevision(), mask);
+					chunk->getMeshResultPool()->finishBuild(result);
+					CHECK(chunk->publishMeshResult(result), "teardown: remesh published");
+				}
+				return std::make_pair(a, b);
+			};
+
+			// A. Both replacements are prepared, but staging prevents COPY.
+			{
+				ChunkManager teardownManager(&teardownGen, nullptr, &teardownPool);
+				const auto [a, b] = createUploadingPair(teardownManager);
+				if (a && b)
+				{
+					beginTeardownFrame();
+					VkDeviceSize offset = 0;
+					void *sink = nullptr;
+					CHECK(teardownStaging.alloc(teardownStaging.sliceCapacity(), offset, sink),
+					      "teardown-unrecorded: staging slice exhausted");
+					teardownManager.uploadPendingMeshes(
+					    vk.allocator.handle(), teardownStaging, vk.cmd, teardownRetire,
+					    teardownArenas, teardownCamera, 1);
+					CHECK(ChunkManagerProbe::commitGroups(teardownManager) == 1,
+					      "teardown-unrecorded: fixture owns an unfinished group");
+					CHECK(ChunkManagerProbe::groupState(teardownManager, 0) ==
+					          CommitGroupState::Uploading,
+					      "teardown-unrecorded: group remains Uploading");
+					CHECK(ChunkManagerProbe::replacementValid(teardownManager, 0, a) &&
+					          ChunkManagerProbe::replacementValid(teardownManager, 0, b),
+					      "teardown-unrecorded: both replacements are prepared");
+					CHECK(!ChunkManagerProbe::replacementRecorded(teardownManager, 0, a) &&
+					          !ChunkManagerProbe::replacementRecorded(teardownManager, 0, b),
+					      "teardown-unrecorded: neither replacement recorded COPY");
+				}
+			}
+			drainTeardownRetirement();
+			checkBaseline("teardown-unrecorded");
+
+			// B. Exactly one member COPY is submitted; the manager destroys the
+			// recorded replacement through retire() and the other immediately.
+			{
+				ChunkManager teardownManager(&teardownGen, nullptr, &teardownPool);
+				const auto [a, b] = createUploadingPair(teardownManager);
+				if (a && b)
+				{
+					beginTeardownFrame();
+					teardownManager.uploadPendingMeshes(
+					    vk.allocator.handle(), teardownStaging, vk.cmd, teardownRetire,
+					    teardownArenas, teardownCamera, 1);
+					CHECK(ChunkManagerProbe::commitGroups(teardownManager) == 1,
+					      "teardown-recorded: fixture owns an unfinished group");
+					CHECK(ChunkManagerProbe::groupState(teardownManager, 0) ==
+					          CommitGroupState::Uploading,
+					      "teardown-recorded: group remains Uploading");
+					CHECK(ChunkManagerProbe::replacementValid(teardownManager, 0, a) &&
+					          ChunkManagerProbe::replacementValid(teardownManager, 0, b),
+					      "teardown-recorded: both replacements remain owned");
+					CHECK(ChunkManagerProbe::replacementRecorded(teardownManager, 0, a) !=
+					          ChunkManagerProbe::replacementRecorded(teardownManager, 0, b),
+					      "teardown-recorded: exactly one member COPY recorded");
+					CHECK(vk.flush(), "teardown-recorded: submitted member COPY");
+				}
+			}
+			drainTeardownRetirement();
+			checkBaseline("teardown-recorded");
+
+			// Recreate a manager against the same arenas, matching reloadWorld's
+			// resource lifetime without requiring a full Engine fixture.
+			{
+				ChunkManager recreated(&teardownGen, nullptr, &teardownPool);
+				recreated.generateInitialArea(glm::vec3(0.0f, 0.0f, 0.0f), 1,
+				                                vk.allocator.handle(), imm, teardownArenas);
+				Chunk *center = recreated.getChunk(glm::ivec3(0, 0, 0));
+				CHECK(center && center->hasRenderableOpaqueDraws(),
+				      "teardown-recreate: replacement manager reuses arenas");
+				CHECK(vkQueueWaitIdle(vk.queue) == VK_SUCCESS,
+				      "teardown-recreate: queue idle before manager destruction");
+			}
+			drainTeardownRetirement();
+			checkBaseline("teardown-recreate");
+
+			CHECK(vkQueueWaitIdle(vk.queue) == VK_SUCCESS,
+			      "teardown: queue idle before resource shutdown");
+			teardownStaging.shutdown();
+			teardownArenas.shutdown();
+			teardownRetire.shutdown();
 		}
 	}
 

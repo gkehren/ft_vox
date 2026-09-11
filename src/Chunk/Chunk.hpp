@@ -116,8 +116,10 @@ public:
 		glm::ivec3 chunkOrigin{0};
 	};
 	/// Appends one IndirectDraw per live opaque section (or the single LOD
-	/// range). Returns the number appended. Skips chunks whose upload is
-	/// still pending (same rule as the former drawShadow path).
+	/// range). Returns the number appended. Stale-until-replaced (issue
+	/// #177): while a replacement upload is pending the committed draw
+	/// cache stays collectable and drawable - only chunks with no
+	/// committed mesh at all are skipped.
 	size_t collectOpaqueDraws(std::vector<IndirectDraw> &out) const;
 	size_t collectWaterDraws(std::vector<IndirectDraw> &out) const;
 
@@ -218,7 +220,91 @@ public:
 	/// required range (CPU mesh kept; try again next frame). On failure no
 	/// arena range, slot or draw count is modified.
 	bool uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-						  GpuResourceRetire &retire, MeshArenas &arenas);
+	                      GpuResourceRetire &retire, MeshArenas &arenas);
+
+	/// Published per-section GPU ranges (issue #107/#109). Immutable once
+	/// published: a rebuilt section allocates fresh ranges and swaps the
+	/// replacement slot in atomically.
+	struct SectionGpuSlot
+	{
+		uint32_t vertexPage{MeshArena::kNoPage};
+		uint32_t vertexOffset{0}; // bytes within its arena page
+		uint32_t vertexSlotBytes{0};
+		uint32_t vertexUsedBytes{0};
+		uint32_t vertexBase{0}; // vertexOffset / sizeof(Vertex)
+		uint32_t indexPage{MeshArena::kNoPage};
+		uint32_t indexOffset{0}; // bytes within its arena page
+		uint32_t indexSlotBytes{0};
+		uint32_t indexUsedBytes{0};
+		uint32_t indexCount{0}; // live indices (0 = empty section)
+
+		bool empty() const
+		{
+			return vertexPage == MeshArena::kNoPage && indexPage == MeshArena::kNoPage;
+		}
+		bool hasVertexRange() const { return vertexPage != MeshArena::kNoPage; }
+		bool hasIndexRange() const { return indexPage != MeshArena::kNoPage; }
+	};
+
+	/// Prepared-but-unpublished GPU replacement for one chunk (PR #178
+	/// review round 4): fresh arena ranges are allocated once and survive
+	/// frames inside a commit group until every member's replacement is
+	/// resident on the GPU; only then are the published slots swapped
+	/// atomically. Staging scratch is frame-bound and never stored here.
+	struct GpuReplacement
+	{
+		bool valid{false};
+		bool lod{false};
+		MeshBuildResult *result{nullptr}; // attached payload, still Chunk-owned
+		uint64_t generation{0};           // chunk identity at prepare time
+		uint64_t revision{0};
+		bool recorded{false};             // copy commands recorded for submission
+		// Sectioned plan (issue #107/#109): future slots are precomputed;
+		// the currently published slots stay live until publish.
+		struct SectionPlan
+		{
+			bool touched{false};
+			bool active{false};
+			uint32_t vertexBytes{0};
+			uint32_t indexBytes{0};
+			uint32_t vertexBase{0};
+			SectionGpuSlot future{};
+			MeshArena::Range newV{}, newI{};
+		};
+		struct StreamPlan
+		{
+			SectionPlan sections[kOccupancySections]{};
+		};
+		StreamPlan opaque, water;
+		// Whole-chunk LOD plan (issue #109).
+		bool needOpaque{false};
+		bool needWater{false};
+		MeshArena::Range newOV{}, newOI{}, newWV{}, newWI{};
+	};
+
+	/// ALLOCATE phase (frame-independent, failure-capable): plan and
+	/// allocate every fresh arena range the attached pending result needs.
+	/// Fully rolled back on failure; on success the replacement stays
+	/// private to the caller - the published mesh is untouched and keeps
+	/// rendering.
+	bool prepareGPUUpload(MeshArenas &arenas, GpuReplacement &out);
+	/// COPY phase (frame-bound): preflight + reserve staging, memcpy and
+	/// record the copies into cmd. Returns false when the ring lacks room
+	/// this frame - the caller retries next frame; the allocated
+	/// replacement is untouched and stays private. Nothing here survives
+	/// the frame: after the submit, the fresh ranges hold the payload.
+	bool recordGPUUpload(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+	                     MeshArenas &arenas, GpuReplacement &replacement);
+	/// PUBLISH phase (cannot fail, CPU-only): swap every prepared slot in,
+	/// retire the replaced ranges frame-aware, rebuild draw caches and
+	/// consume the pending result. Requires a successful prepare (and, for
+	/// frame-path uploads, a matching record).
+	void publishGPUUpload(GpuResourceRetire &retire, MeshArenas &arenas, GpuReplacement &replacement);
+	/// Release a replacement's fresh ranges without publishing (group
+	/// rollback, supersession, unload). Ranges whose copies were already
+	/// submitted retire frame-aware; never-recorded ranges free
+	/// immediately.
+	void discardGPUUpload(GpuReplacement &replacement);
 
 	/// Immediate destroy (shutdown / destructor only — not while frames may reference buffers).
 	void releaseGPU();
@@ -272,19 +358,21 @@ public:
 	const IndirectDraw *cachedOpaqueDraws() const { return m_cachedOpaqueDraws.data(); }
 	const IndirectDraw *cachedWaterDraws() const { return m_cachedWaterDraws.data(); }
 
-	/// Renderable-cache contract shared by every consuming pass (issue #122
-	/// review): non-empty cache AND live indices AND no pending GPU upload.
-	/// While needsGPUUpload() is set the cached descriptors describe ranges a
-	/// commit is about to replace — drawing them would show stale geometry.
+	/// Renderable-cache contract shared by every consuming pass (issue
+	/// #177): non-empty cache AND live indices, i.e. a committed GPU mesh
+	/// exists. meshNeedsUpdate only marks a pending newer mesh — it must
+	/// not hide the committed one: the cached descriptors keep describing
+	/// valid, already-uploaded ranges until the replacement commits
+	/// (stale-until-replaced), so an edit never blanks the chunk. Chunks
+	/// with no committed GPU mesh stay non-renderable because the cache
+	/// and index counters remain zero until the first successful upload.
 	bool hasRenderableOpaqueDraws() const
 	{
-		return m_cachedOpaqueDrawCount > 0 && opaqueIndexCount > 0 &&
-			   !meshNeedsUpdate.load(std::memory_order_relaxed);
+		return m_cachedOpaqueDrawCount > 0 && opaqueIndexCount > 0;
 	}
 	bool hasRenderableWaterDraws() const
 	{
-		return m_cachedWaterDrawCount > 0 && waterIndexCount > 0 &&
-			   !meshNeedsUpdate.load(std::memory_order_relaxed);
+		return m_cachedWaterDrawCount > 0 && waterIndexCount > 0;
 	}
 
 	size_t getActiveIndex() const { return m_activeIndex; }
@@ -318,26 +406,7 @@ private:
 	// frame-aware. A rebuilt empty section retires its old ranges and
 	// becomes slotless - no stale range is ever referenced. Index ranges
 	// need no gap-zeroing here: indirect draws reference live ranges only.
-	struct SectionGpuSlot
-	{
-		uint32_t vertexPage{MeshArena::kNoPage};
-		uint32_t vertexOffset{0}; // bytes within its arena page
-		uint32_t vertexSlotBytes{0};
-		uint32_t vertexUsedBytes{0};
-		uint32_t vertexBase{0}; // vertexOffset / sizeof(Vertex)
-		uint32_t indexPage{MeshArena::kNoPage};
-		uint32_t indexOffset{0}; // bytes within its arena page
-		uint32_t indexSlotBytes{0};
-		uint32_t indexUsedBytes{0};
-		uint32_t indexCount{0}; // live indices (0 = empty section)
-
-		bool empty() const
-		{
-			return vertexPage == MeshArena::kNoPage && indexPage == MeshArena::kNoPage;
-		}
-		bool hasVertexRange() const { return vertexPage != MeshArena::kNoPage; }
-		bool hasIndexRange() const { return indexPage != MeshArena::kNoPage; }
-	};
+	// (SectionGpuSlot itself is public: it appears in PreparedMeshUpload.)
 	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpu{};
 	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpuWater{};
 	// Live byte extent of the sectioned layout is gone (issue #109): the
@@ -411,6 +480,25 @@ private:
 							StagingRing *staging, VkCommandBuffer cmd,
 							GpuResourceRetire *retire, ImmediateCommands *imm,
 							MeshArenas &arenas);
+	// ALLOCATE / COPY / PUBLISH / discard phases of the two upload paths
+	// (see GpuReplacement): ALLOCATE plans and reserves fresh arena ranges
+	// with full rollback; COPY reserves staging, memcpys and records the
+	// frame's copies; PUBLISH swaps slots, retires replaced ranges and
+	// rebuilds draw caches without any failure path.
+	bool prepareLodReplacement(MeshBuildResult &result, MeshArenas &arenas,
+	                           GpuReplacement &out);
+	bool prepareSectionReplacement(MeshBuildResult &result, MeshArenas &arenas,
+	                               GpuReplacement &out);
+	bool recordLodReplacement(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+	                          MeshArenas &arenas, GpuReplacement &replacement);
+	bool recordSectionUpload(VmaAllocator allocator, StagingRing *staging, VkCommandBuffer cmd,
+	                         ImmediateCommands *imm, MeshArenas &arenas,
+	                         GpuReplacement &replacement);
+	void publishLodReplacement(MeshArenas &arenas, GpuReplacement &replacement);
+	void publishSectionUpload(GpuResourceRetire *retire, MeshArenas &arenas,
+	                          GpuReplacement &replacement);
+	void discardLodReplacement(MeshArenas &arenas, GpuReplacement &replacement);
+	void discardSectionReplacement(MeshArenas &arenas, GpuReplacement &replacement);
 	// Retire every range described by a section slot table and reset the
 	// slots (issue #109 review: single retirement path for full->LOD and
 	// unload transitions). immediate=true for bootstrap/shutdown paths.
