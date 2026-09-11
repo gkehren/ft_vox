@@ -1373,12 +1373,6 @@ void Engine::run()
 			PROFILE_SCOPE("Highlight");
 			updateHighlight();
 		}
-		{
-			// Live memory/workload gauges for the developer console (issue
-			// #179). Profiled so the debug-tool overhead stays visible.
-			PROFILE_SCOPE("TelemetryPublish");
-			publishFrameTelemetry();
-		}
 
 		const uint32_t frameIndex = frameCtx->frameIndex();
 		// Frame slot is free (fence waited): recycle retired GPU buffers + reset staging slice.
@@ -1465,6 +1459,18 @@ void Engine::run()
 			PROFILE_SCOPE("Present");
 			if (!frameCtx->submitAndPresent(*swapchain, imageIndex))
 				requestSwapchainRecreate();
+		}
+
+		{
+			// Live memory/workload gauges for the developer console (issue
+			// #179). Published AFTER this frame's record/upload work so the
+			// CPU pool gauges reflect the uploads already executed and the
+			// next UI refresh reads the last completed frame; the benchmark
+			// sampler (below) then observes the same coherent values as
+			// before the console existed. Profiled so the debug-tool
+			// overhead stays visible.
+			PROFILE_SCOPE("TelemetryPublish");
+			publishFrameTelemetry();
 		}
 
 		++frameNumber;
