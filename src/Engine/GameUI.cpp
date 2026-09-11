@@ -566,7 +566,11 @@ void GameUI::drawWorld(GameUIFrame &frame)
 
 	// Pending state (issue #186 §9): visible while a job or upload is in
 	// flight; the previous map stays on screen meanwhile.
-	if (m_mapJob.isRunning() || hasPendingBiomeMapUpload())
+	// Covers the supersede -> next-dispatch window too: while a zoom/follow
+	// change already demands a new refresh, the indicator must not blink off
+	// for a frame (issue #191 review round 3).
+	if (biomeMapUpdatePending(m_mapJob.isRunning(), hasPendingBiomeMapUpload(),
+							  m_mapNeedsUpdate))
 		ImGui::TextDisabled("Updating map…");
 
 	float prevZoom = m_mapZoom;
@@ -772,8 +776,17 @@ void GameUI::ensureBiomeTexture(int size)
 
 void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing)
 {
-	if (m_mapPresentation.pending.rgba.empty() || m_mapImage.image == VK_NULL_HANDLE)
+	if (m_mapImage.image == VK_NULL_HANDLE)
 		return;
+
+	// Full validation before anything reaches Vulkan (issue #191 review
+	// round 3): an invalid upload can never reach vkCmdCopyBufferToImage()
+	// nor publishPending().
+	if (!isBiomeMapUploadValid(m_mapPresentation.pending))
+	{
+		m_mapPresentation.dropPending();
+		return;
+	}
 
 	// Drop deferred uploads that have been superseded while they waited for
 	// staging space. Only the pending upload (pixels + its grid) is dropped;

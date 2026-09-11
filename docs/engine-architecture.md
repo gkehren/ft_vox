@@ -76,7 +76,8 @@ Matches `Engine.cpp` order:
 12. **Record** — `WorldRenderer::recordFrame`:  
     - **preRecord:** `uploadPendingMeshes` + transfer→vertex barrier  
     - **ShadowPass → OpaquePass** (opaque chunks + **mobs then overlays inside OpaquePass** + **mobs inside every shadow cascade**) **→ WaterPass → SkyPass → PostStack**  
-    - **imguiDraw:** `imgui->recordDraw` onto swapchain after composite  
+    - **imguiDraw:** `imgui->recordDraw` onto swapchain after composite; ImGui samples the **currently published** biome-map texture  
+    - **postImGuiRecord:** pending biome-map texture upload + publication of the matching `BiomeRegionGrid` for the **next** UI frame. Biome-map uploads intentionally occur after ImGui so a frame never samples new map pixels with overlays built from the previous map grid (architectural invariant, issue #186/#191)  
 13. **Submit / present** — `VkFrameContext::submitAndPresent`  
 14. **Profiler end** + copy scopes into `RenderTiming` / benchmark sample  
 

@@ -162,10 +162,13 @@ struct BiomeMapPresentationState
 
 	/// Called after the copy commands for `pending` were recorded (post-ImGui):
 	/// publishes pixels + grid together for the NEXT frame. Returns false when
-	/// there was nothing publishable (no pending upload or invalid grid).
+	/// there was nothing publishable. Last safety barrier: the FULL upload
+	/// validity is re-checked here, so an invalid pending can never mutate the
+	/// published state even if a caller skipped the earlier validation
+	/// (issue #191 review round 3).
 	bool publishPending()
 	{
-		if (pending.rgba.empty() || !pending.grid.valid())
+		if (!isBiomeMapUploadValid(pending))
 			return false;
 		publishedGrid = pending.grid;
 		hasTexture = true;
@@ -211,6 +214,16 @@ inline bool shouldSupersedeBiomeMap(glm::vec2 player,
 	if (!follow)
 		return false;
 	return glm::length(player - lastPlayer) > 8.0f;
+}
+
+/// Whether the World panel should show its "Updating map..." indicator
+/// (issue #191 review round 3): a job in flight, an upload awaiting its
+/// post-ImGui recording, or a refresh already requested for the next tick
+/// (the small window between supersede and the next dispatch). Pure so the
+/// indicator rule is testable without ImGui.
+inline bool biomeMapUpdatePending(bool jobRunning, bool uploadPending, bool needsUpdate)
+{
+	return jobRunning || uploadPending || needsUpdate;
 }
 
 /// Continuous (float) map-pixel coordinates for a world position on a

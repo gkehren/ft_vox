@@ -129,6 +129,82 @@ static void test_upload_grid_publication_lifecycle()
 		  "invalidation clears the published pair and any pending upload");
 }
 
+// Round-3 robustness (issue #191 review): an invalid pending upload can
+// never mutate the published state (publishPending is the last barrier), and
+// the "Updating map..." indicator rule covers the supersede -> next-dispatch
+// window through the pure biomeMapUpdatePending helper.
+static void test_invalid_pending_never_publishes()
+{
+	const BiomeRegionGrid gridA = makeBiomeRegionGrid(0.f, 0.f, 2.f, 256, 256);
+	BiomeMapPresentationState state;
+	state.publishedGrid = gridA;
+	state.hasTexture = true;
+
+	auto staged = [&](BiomeMapUpload upload) { state.stage(std::move(upload)); };
+
+	// Invalid grid (default BiomeRegionGrid) -> rejected.
+	{
+		BiomeMapUpload bad;
+		bad.rgba.resize(256 * 256 * 4);
+		bad.width = bad.height = 256;
+		bad.requestId = 3; // grid left default/invalid
+		staged(std::move(bad));
+		CHECK(!state.publishPending(), "invalid-grid pending must not publish");
+		CHECK(state.hasPending(),
+			  "rejected publish is transactional: pending is left for the caller to drop");
+		CHECK(state.publishedGrid.center == gridA.center &&
+				  state.publishedGrid.step == gridA.step,
+			  "invalid pending never mutates publishedGrid");
+		CHECK(state.hasTexture, "invalid pending never touches hasTexture");
+	}
+
+	// Grid/pixel dimension mismatch -> rejected.
+	{
+		BiomeMapUpload bad;
+		bad.rgba.resize(256 * 256 * 4);
+		bad.width = bad.height = 256;
+		bad.requestId = 4;
+		bad.grid = makeBiomeRegionGrid(0.f, 0.f, 1.f, 128, 128);
+		staged(std::move(bad));
+		CHECK(!state.publishPending(), "dimension-mismatch pending must not publish");
+		CHECK(state.publishedGrid.center == gridA.center && state.hasTexture,
+			  "dimension-mismatch pending never mutates the published state");
+	}
+
+	// Wrong RGBA size -> rejected.
+	{
+		BiomeMapUpload bad;
+		bad.rgba.resize(256 * 256 * 3);
+		bad.width = bad.height = 256;
+		bad.requestId = 5;
+		bad.grid = makeBiomeRegionGrid(0.f, 0.f, 1.f, 256, 256);
+		staged(std::move(bad));
+		CHECK(!state.publishPending(), "wrong-size pending must not publish");
+		CHECK(state.hasTexture && state.publishedGrid.center == gridA.center,
+			  "wrong-size pending never mutates the published state");
+	}
+
+	// Control: a valid pending still publishes.
+	{
+		BiomeMapUpload good;
+		good.rgba.resize(256 * 256 * 4);
+		good.width = good.height = 256;
+		good.requestId = 6;
+		good.grid = makeBiomeRegionGrid(8.f, 8.f, 1.f, 256, 256);
+		staged(std::move(good));
+		CHECK(state.publishPending(), "valid pending publishes");
+		CHECK(state.publishedGrid.center.x == 8.f && !state.hasPending(),
+			  "valid publication switches the grid and clears pending");
+	}
+
+	// "Updating map..." rule: idle -> off; each signal alone -> on.
+	CHECK(!biomeMapUpdatePending(false, false, false), "idle world shows no updating indicator");
+	CHECK(biomeMapUpdatePending(true, false, false), "running job shows the indicator");
+	CHECK(biomeMapUpdatePending(false, true, false), "pending upload shows the indicator");
+	CHECK(biomeMapUpdatePending(false, false, true),
+		  "requested refresh (supersede window) shows the indicator");
+}
+
 static void test_biome_map_result_validity()
 {
 	const uint64_t reqId = 12;
@@ -989,6 +1065,7 @@ int main(int argc, char **argv)
 	std::cout << "[test_biome_map] Running tests...\n";
 	test_biome_map_continuous_pixel();
 	test_upload_grid_publication_lifecycle();
+	test_invalid_pending_never_publishes();
 	test_biome_map_result_validity();
 	test_deterministic_stale_generation_rejection();
 	test_deterministic_superseded_request_rejection();
