@@ -59,7 +59,11 @@ void DebugHealth::update(const UiState &state, float dt)
 
 // --- CPU scope table (bounded by kMaxScopeStats) ---
 
-static void updateScopeStats(UiState &state)
+// Frame-resolution aggregation of the profiler's last-frame buffer: lastMs,
+// avgMs, peakMs, frames and depth. Runs every frame while the Performance
+// panel is open and capture is enabled; never touches the 10 Hz histories
+// (issue #179 review round 2).
+static void updateScopeFrameStats(UiState &state)
 {
 	Profiler &prof = GetProfiler();
 	// Never aggregate a frozen last-frame buffer: with capture disabled the
@@ -122,8 +126,18 @@ static void updateScopeStats(UiState &state)
 			st.peakMs = st.lastMs;
 		++st.frames;
 		st.avgMs += (st.lastMs - st.avgMs) / float(st.frames);
-		st.history.push(st.lastMs);
 	}
+}
+
+// 10 Hz resolution: fold the current per-scope last values into the bounded
+// histories. Runs only inside the throttled block, and only while capture is
+// on — with capture off nothing new is measured, so nothing new is sampled.
+static void sampleScopeHistories(UiState &state)
+{
+	if (!GetProfiler().enabled())
+		return;
+	for (size_t i = 0; i < state.scopeStatCount; ++i)
+		state.scopeStats[i].history.push(state.scopeStats[i].lastMs);
 }
 
 // --- Per-frame state refresh ---
@@ -162,6 +176,21 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 		}
 	}
 
+	// Profiler capture lifecycle precedes the throttle: the epoch check and
+	// the frame-resolution scope aggregation must see every frame, while
+	// only the histories are sampled at 10 Hz (issue #179 review round 2).
+	{
+		Profiler &prof = GetProfiler();
+		const uint64_t epoch = prof.captureEpoch();
+		if (epoch != state.lastProfilerEpoch)
+		{
+			resetScopeStats(state);
+			state.lastProfilerEpoch = epoch;
+		}
+		if (state.panels.performance)
+			updateScopeFrameStats(state);
+	}
+
 	const bool anyConsumer = state.panels.overview || state.panels.performance ||
 							 state.panels.memory || state.panels.streaming ||
 							 state.panels.chunkInspector;
@@ -179,23 +208,8 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 	state.dtSinceLastSample = dt;
 	state.lastTelemetrySample = nowSeconds;
 
-	// --- CPU scope stats (Performance panel), aligned with the profiler
-	// capture lifecycle (issue #179 review): sampled at the UI rate (so the
-	// per-scope histories really are 10 Hz ≈ 25.6 s windows), skipped while
-	// capture is off, and reset whenever the profiler capture epoch changes
-	// (Clear history button, world reload) so avg/peak/history never blend
-	// two capture windows.
-	{
-		Profiler &prof = GetProfiler();
-		const uint64_t epoch = prof.captureEpoch();
-		if (epoch != state.lastProfilerEpoch)
-		{
-			resetScopeStats(state);
-			state.lastProfilerEpoch = epoch;
-		}
-		if (state.panels.performance)
-			updateScopeStats(state);
-	}
+	if (state.panels.performance)
+		sampleScopeHistories(state);
 
 	// --- Streaming snapshot ---
 	{

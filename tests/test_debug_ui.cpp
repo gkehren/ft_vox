@@ -12,6 +12,7 @@
 #include <Engine/Profiler.hpp>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -258,17 +259,38 @@ void testScopeStatsLifecycle()
 	state.panels.performance = true;
 	Profiler &prof = GetProfiler();
 
-	// Capture one frame with nested scopes.
-	prof.setEnabled(true);
-	prof.beginFrame();
-	prof.push("TestOuter");
-	prof.push("TestInner");
-	prof.pop();
-	prof.pop();
-	prof.endFrame();
+	// Deterministic scope durations via a busy wait (real elapsed time).
+	auto busyMs = [](float ms) {
+		const auto start = std::chrono::steady_clock::now();
+		while (std::chrono::duration<float, std::milli>(
+				   std::chrono::steady_clock::now() - start)
+				   .count() < ms)
+		{
+		}
+	};
+	// One captured frame: TestOuter (busy ~outerMs) containing TestInner.
+	auto captureFrame = [&](float outerMs) {
+		prof.setEnabled(true);
+		prof.beginFrame();
+		prof.push("TestOuter");
+		busyMs(outerMs);
+		prof.push("TestInner");
+		prof.pop();
+		prof.pop();
+		prof.endFrame();
+	};
 
-	const double t0 = 300.0;
-	debugui::updateDebugUiState(state, f, t0);
+	// 10 captured frames, each followed by a sampler call exactly as the
+	// engine loop does (once per rendered frame), all inside the first
+	// 10 Hz window: frame-resolution columns must fold ALL frames, while
+	// the history keeps one sample per UI tick (issue #179 review round 2).
+	double t = 400.0;
+	for (int i = 0; i < 10; ++i)
+	{
+		captureFrame(1.f);
+		debugui::updateDebugUiState(state, f, t);
+		t += 0.001;
+	}
 	CHECK(state.scopeStatCount == 2, "both scopes enter the table");
 	const debugui::ScopeStats *outer = nullptr;
 	const debugui::ScopeStats *inner = nullptr;
@@ -280,35 +302,52 @@ void testScopeStatsLifecycle()
 			inner = &state.scopeStats[i];
 	}
 	CHECK(outer && inner, "both test scopes found");
-	CHECK(outer->frames == 1 && inner->frames == 1, "one sample each");
+	CHECK(outer->frames == 10, "frame-resolution stats fold every frame");
+	CHECK(outer->history.count() == 1, "history stays at UI (10 Hz) resolution");
 	CHECK(inner->depth == 1 && outer->depth == 0, "scope depth tracked");
 
-	// Capture a second frame, sample >100 ms later: nested depth must
-	// survive multi-sample aggregation (sentinel, not zero-fill).
-	prof.beginFrame();
-	prof.push("TestOuter");
-	prof.push("TestInner");
-	prof.pop();
-	prof.pop();
-	prof.endFrame();
-	debugui::updateDebugUiState(state, f, t0 + 0.2);
-	CHECK(inner->depth == 1 && outer->depth == 0, "depth survives multi-sample aggregation");
-	CHECK(outer->frames == 2, "second sample aggregated");
+	// Spike detection across frames: 1 ms, 15 ms, 1 ms between two history
+	// samples must surface in peak even though the spike frame was not the
+	// last aggregated one.
+	captureFrame(1.f);
+	debugui::updateDebugUiState(state, f, t);
+	t += 0.001;
+	captureFrame(15.f);
+	debugui::updateDebugUiState(state, f, t);
+	t += 0.001;
+	captureFrame(1.f);
+	debugui::updateDebugUiState(state, f, t);
+	t += 0.001;
+	CHECK(outer->frames == 13, "frames count every captured frame");
+	CHECK(outer->peakMs >= 15.f, "mid-window spike captured by peak");
 
-	// Throttle: a sample <100 ms later must not re-aggregate.
-	debugui::updateDebugUiState(state, f, t0 + 0.25);
-	CHECK(outer->frames == 2, "throttled sample does not re-aggregate");
+	// Sampling beyond the 10 Hz window finally pushes one history sample.
+	// The engine calls the sampler once per captured frame (1:1), so this
+	// tick also aggregates one new frame.
+	captureFrame(1.f);
+	debugui::updateDebugUiState(state, f, t + 0.2);
+	t += 0.2;
+	CHECK(outer->frames == 14, "frames advance with captured frames");
+	CHECK(outer->history.count() == 2, "history sampled once per UI tick");
 
-	// Capture off: the frozen last frame must not be re-folded forever.
+	// Throttled tick: histories pause, frame columns keep advancing.
+	captureFrame(1.f);
+	debugui::updateDebugUiState(state, f, t + 0.01);
+	CHECK(outer->frames == 15, "frame stats update even when history is throttled");
+	CHECK(outer->history.count() == 2, "history unchanged inside the 10 Hz window");
+
+	// Capture off: the frozen last frame must not be re-folded forever, and
+	// no stale history sample is pushed either.
 	prof.setEnabled(false);
-	debugui::updateDebugUiState(state, f, t0 + 0.4);
-	CHECK(outer->frames == 2, "capture off: stale frame not re-aggregated");
+	debugui::updateDebugUiState(state, f, t + 0.4);
+	CHECK(outer->frames == 15, "capture off: stale frame not re-aggregated");
+	CHECK(outer->history.count() == 2, "capture off: no stale history sample");
 
 	// Capture-epoch change (Clear history / world reload) resets the table.
 	state.selectedScopeGraph = 3;
 	prof.setEnabled(true);
 	prof.clearHistory();
-	debugui::updateDebugUiState(state, f, t0 + 0.6);
+	debugui::updateDebugUiState(state, f, t + 0.6);
 	CHECK(state.scopeStatCount == 0, "epoch change resets the scope table");
 	CHECK(state.selectedScopeGraph == -1, "plot selection cleared on epoch change");
 	std::cout << "PASS\n";
