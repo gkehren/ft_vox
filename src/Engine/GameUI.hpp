@@ -90,6 +90,9 @@ struct GameUIFrame
 	bool validation{false};
 
 	std::function<void(bool)> setVSync;
+	/// True while a VSync change awaits the deferred swapchain recreate
+	/// (Graphics ▸ Display marks the present mode "(applying)").
+	bool vsyncPending{false};
 
 	// Application shell wiring (issue #183): current UI scale plus callbacks
 	// into Engine / ImGuiLayer. setUiScale applies at the next frame boundary

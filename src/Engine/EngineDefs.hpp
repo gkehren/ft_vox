@@ -227,7 +227,11 @@ struct PostProcessSettings
 	float ssaoIntensity{0.40f};
 	int ssaoDirections{4};   // horizon directions (4..8)
 	int ssaoSteps{3};        // march steps per direction (1..4)
-	int ssaoDebugView{0};    // 0=Off 1=FinalAO 2=RawAO 3=Normals
+	/// SSAO debug view: 0=Off 1=FinalAO 2=RawAO 3=Normals. Owned by Render
+	/// Debug (F12): presets and post resets never write it (issue #185); the
+	/// renderer consumes effectiveSsaoDebugView() so a stale view can never
+	/// outlive the SSAO pass it visualizes.
+	int ssaoDebugView{0};
 
 	// Underwater look (set by engine when camera is submerged)
 	bool underwater{false};
@@ -243,12 +247,189 @@ struct PostProcessSettings
 	/// engine applies the change deferred, before the next frame.
 	int shadowMapSize{1024};
 
-	/// Last preset applied via applyPreset (UI combo). Manual tweaks do not clear this.
+	/// Last preset applied via applyPreset (UI combo). Manual tweaks do not
+	/// clear it: UI Custom detection is `!matchesPreset(*this, qualityPreset)`
+	/// (issue #185) so the label never claims a pack the values no longer are.
 	GraphicsQualityPreset qualityPreset{GraphicsQualityPreset::Medium};
 
 	/// Apply a named quality pack. Does not change underwater (runtime state).
 	void applyPreset(GraphicsQualityPreset preset);
+	/// Canonical settings produced by `preset` applied to fresh defaults
+	/// (issue #185): source of truth for Custom-state detection and resets.
+	/// A canonical object is complete — values AND the qualityPreset tag.
+	[[nodiscard]] static PostProcessSettings presetValues(GraphicsQualityPreset preset);
+	/// True when every preset-controlled field of `current` equals the canonical
+	/// pack values (issue #185 Custom detection). Deliberately ignores
+	/// ssaoDebugView and underwater runtime state: debug views and submersion are
+	/// not part of quality-pack semantics.
+	[[nodiscard]] static bool matchesPreset(const PostProcessSettings &current, GraphicsQualityPreset preset);
 };
+
+/// Effective SSAO debug view for the renderer: with SSAO off there is no AO
+/// buffer to visualize, and the composite checks the debug flag before
+/// ssaoEnabled — so a stale non-zero view must resolve to Off here rather
+/// than by having presets or resets mutate Render Debug state (issue #185).
+inline int effectiveSsaoDebugView(const PostProcessSettings &pp)
+{
+	return pp.ssaoEnabled ? pp.ssaoDebugView : 0;
+}
+
+/// Shared implementation: writes every preset-controlled field to the pack's
+/// canonical value. Does not touch qualityPreset or underwater runtime state.
+inline void applyPresetBody(PostProcessSettings &pp, GraphicsQualityPreset preset)
+{
+	// Shared grade defaults (Medium baseline)
+	pp.exposure = 1.25f;
+	pp.exposureCompensation = 0.0f; // EV stops: 0 is neutral
+	pp.toneMapper = 0;
+	pp.gamma = 1.0f;
+	pp.postSaturation = 1.02f;
+	pp.postContrast = 1.03f;
+	pp.fxaaEnabled = true;
+	pp.autoExposureEnabled = true;
+	pp.autoExposureMiddleGrey = 0.18f;
+	pp.autoExposureMinEv = -4.0f;
+	pp.autoExposureMaxEv = 1.0f;
+	pp.autoExposureSpeedUp = 3.0f;
+	pp.autoExposureSpeedDown = 1.25f;
+	pp.godRaysBoostPreview = false;
+	pp.godRaysDepthOcclusion = true;
+	// ssaoDebugView deliberately NOT written: debug views belong to Render
+	// Debug; the renderer gates them via effectiveSsaoDebugView (issue #185).
+
+	switch (preset)
+	{
+	case GraphicsQualityPreset::Low:
+		pp.shadowMapSize = 1024;
+		pp.fxaaEnabled = false; // issue #143 policy: Low drops post AA entirely
+		pp.bloomEnabled = true;
+		pp.bloomThreshold = 1.65f;
+		pp.bloomIntensity = 0.06f;
+		pp.bloomBlurIterations = 1;
+		pp.ssaoEnabled = false;
+		pp.ssaoRadius = 0.4f;
+		pp.ssaoIntensity = 0.25f;
+		pp.ssaoDirections = 4;
+		pp.ssaoSteps = 2;
+		pp.godRaysEnabled = false;
+		pp.godRaysDensity = 0.70f;
+		pp.godRaysWeight = 0.015f;
+		pp.godRaysDecay = 0.97f;
+		pp.godRaysExposure = 0.40f;
+		pp.godRaysDynamicBoostEnabled = false;
+		pp.godRaysDramaticBoost = 1.5f;
+		pp.filmGrain = 0.012f;
+		pp.vignette = 0.12f;
+		break;
+	case GraphicsQualityPreset::Medium:
+		// Match constructor defaults (current balanced path)
+		pp.shadowMapSize = 1024;
+		pp.bloomEnabled = true;
+		pp.bloomThreshold = 1.45f;
+		pp.bloomIntensity = 0.12f;
+		pp.bloomBlurIterations = 3;
+		pp.ssaoEnabled = true;
+		pp.ssaoRadius = 0.6f;
+		pp.ssaoIntensity = 0.40f;
+		pp.ssaoDirections = 4;
+		pp.ssaoSteps = 3;
+		pp.godRaysEnabled = true;
+		pp.godRaysDensity = 0.85f;
+		pp.godRaysWeight = 0.022f;
+		pp.godRaysDecay = 0.965f;
+		pp.godRaysExposure = 0.55f;
+		pp.godRaysDynamicBoostEnabled = true;
+		pp.godRaysDramaticBoost = 2.2f;
+		pp.filmGrain = 0.028f;
+		pp.vignette = 0.22f;
+		break;
+	case GraphicsQualityPreset::High:
+		pp.shadowMapSize = 2048; // higher near-cascade resolution tier
+		pp.bloomEnabled = true;
+		pp.bloomThreshold = 1.30f;
+		pp.bloomIntensity = 0.16f;
+		pp.bloomBlurIterations = 4;
+		pp.ssaoEnabled = true;
+		pp.ssaoRadius = 0.8f;
+		pp.ssaoIntensity = 0.55f;
+		pp.ssaoDirections = 6;
+		pp.ssaoSteps = 4;
+		pp.godRaysEnabled = true;
+		pp.godRaysDensity = 0.95f;
+		pp.godRaysWeight = 0.028f;
+		pp.godRaysDecay = 0.960f;
+		pp.godRaysExposure = 0.62f;
+		pp.godRaysDynamicBoostEnabled = true;
+		pp.godRaysDramaticBoost = 2.6f;
+		pp.filmGrain = 0.032f;
+		pp.vignette = 0.28f;
+		pp.postSaturation = 1.04f;
+		pp.postContrast = 1.04f;
+		break;
+	case GraphicsQualityPreset::Cinematic:
+		pp.shadowMapSize = 2048;
+		pp.bloomEnabled = true;
+		pp.bloomThreshold = 1.35f; // sun/emissive peaks only — no midtone wash
+		pp.bloomIntensity = 0.20f;
+		pp.bloomBlurIterations = 5;
+		pp.ssaoEnabled = true;
+		pp.ssaoRadius = 1.0f;
+		pp.ssaoIntensity = 0.62f;
+		pp.ssaoDirections = 8;
+		pp.ssaoSteps = 4;
+		pp.godRaysEnabled = true;
+		pp.godRaysDensity = 1.05f;
+		pp.godRaysWeight = 0.032f;
+		pp.godRaysDecay = 0.955f;
+		pp.godRaysExposure = 0.70f;
+		pp.godRaysDynamicBoostEnabled = true;
+		pp.godRaysDramaticBoost = 3.0f;
+		pp.filmGrain = 0.036f;
+		pp.vignette = 0.38f;
+		pp.postSaturation = 1.10f; // counter ACES highlight desaturation
+		pp.postContrast = 1.08f;
+		pp.exposure = 1.20f; // keeps the cinematic slightly-dimmer offset vs Medium
+		break;
+	}
+}
+
+inline PostProcessSettings PostProcessSettings::presetValues(GraphicsQualityPreset preset)
+{
+	PostProcessSettings pp{};
+	pp.applyPreset(preset);
+	return pp;
+}
+
+inline bool PostProcessSettings::matchesPreset(const PostProcessSettings &current, GraphicsQualityPreset preset)
+{
+	// Exact == on floats is correct: canonical values come from the very
+	// literals applyPresetBody writes, so any hand-edited field diverges
+	// (issue #185 Custom detection must not hide a stale pack behind epsilon).
+	const PostProcessSettings canon = presetValues(preset);
+	return current.shadowMapSize == canon.shadowMapSize && current.fxaaEnabled == canon.fxaaEnabled &&
+		   current.bloomEnabled == canon.bloomEnabled && current.bloomThreshold == canon.bloomThreshold &&
+		   current.bloomIntensity == canon.bloomIntensity &&
+		   current.bloomBlurIterations == canon.bloomBlurIterations && current.ssaoEnabled == canon.ssaoEnabled &&
+		   current.ssaoRadius == canon.ssaoRadius && current.ssaoIntensity == canon.ssaoIntensity &&
+		   current.ssaoDirections == canon.ssaoDirections && current.ssaoSteps == canon.ssaoSteps &&
+		   current.godRaysEnabled == canon.godRaysEnabled && current.godRaysDensity == canon.godRaysDensity &&
+		   current.godRaysWeight == canon.godRaysWeight && current.godRaysDecay == canon.godRaysDecay &&
+		   current.godRaysExposure == canon.godRaysExposure &&
+		   current.godRaysDynamicBoostEnabled == canon.godRaysDynamicBoostEnabled &&
+		   current.godRaysBoostPreview == canon.godRaysBoostPreview &&
+		   current.godRaysDramaticBoost == canon.godRaysDramaticBoost &&
+		   current.godRaysDepthOcclusion == canon.godRaysDepthOcclusion && current.filmGrain == canon.filmGrain &&
+		   current.vignette == canon.vignette && current.postSaturation == canon.postSaturation &&
+		   current.postContrast == canon.postContrast && current.exposure == canon.exposure &&
+		   current.exposureCompensation == canon.exposureCompensation &&
+		   current.toneMapper == canon.toneMapper && current.gamma == canon.gamma &&
+		   current.autoExposureEnabled == canon.autoExposureEnabled &&
+		   current.autoExposureMiddleGrey == canon.autoExposureMiddleGrey &&
+		   current.autoExposureMinEv == canon.autoExposureMinEv &&
+		   current.autoExposureMaxEv == canon.autoExposureMaxEv &&
+		   current.autoExposureSpeedUp == canon.autoExposureSpeedUp &&
+		   current.autoExposureSpeedDown == canon.autoExposureSpeedDown;
+}
 
 /// Apply Low / Medium / High / Cinematic packs (post knobs plus the water
 /// SSR / shadow scaling described above).
@@ -259,120 +440,7 @@ inline void PostProcessSettings::applyPreset(GraphicsQualityPreset preset)
 	const bool wasUnderwater = underwater;
 	const float underStr = underwaterStrength;
 	const float underSurfaceY = underwaterSurfaceY;
-
-	// Shared grade defaults (Medium baseline)
-	exposure = 1.25f;
-	exposureCompensation = 0.0f; // EV stops: 0 is neutral
-	toneMapper = 0;
-	gamma = 1.0f;
-	postSaturation = 1.02f;
-	postContrast = 1.03f;
-	fxaaEnabled = true;
-	autoExposureEnabled = true;
-	autoExposureMiddleGrey = 0.18f;
-	autoExposureMinEv = -4.0f;
-	autoExposureMaxEv = 1.0f;
-	autoExposureSpeedUp = 3.0f;
-	autoExposureSpeedDown = 1.25f;
-	godRaysBoostPreview = false;
-	godRaysDepthOcclusion = true;
-	ssaoDebugView = 0;  // diagnostics never persist across presets
-
-	switch (preset)
-	{
-	case GraphicsQualityPreset::Low:
-		shadowMapSize = 1024;
-		fxaaEnabled = false; // issue #143 policy: Low drops post AA entirely
-		bloomEnabled = true;
-		bloomThreshold = 1.65f;
-		bloomIntensity = 0.06f;
-		bloomBlurIterations = 1;
-		ssaoEnabled = false;
-		ssaoRadius = 0.4f;
-		ssaoIntensity = 0.25f;
-		ssaoDirections = 4;
-		ssaoSteps = 2;
-		godRaysEnabled = false;
-		godRaysDensity = 0.70f;
-		godRaysWeight = 0.015f;
-		godRaysDecay = 0.97f;
-		godRaysExposure = 0.40f;
-		godRaysDynamicBoostEnabled = false;
-		godRaysDramaticBoost = 1.5f;
-		filmGrain = 0.012f;
-		vignette = 0.12f;
-		break;
-	case GraphicsQualityPreset::Medium:
-		// Match constructor defaults (current balanced path)
-		shadowMapSize = 1024;
-		bloomEnabled = true;
-		bloomThreshold = 1.45f;
-		bloomIntensity = 0.12f;
-		bloomBlurIterations = 3;
-		ssaoEnabled = true;
-		ssaoRadius = 0.6f;
-		ssaoIntensity = 0.40f;
-		ssaoDirections = 4;
-		ssaoSteps = 3;
-		godRaysEnabled = true;
-		godRaysDensity = 0.85f;
-		godRaysWeight = 0.022f;
-		godRaysDecay = 0.965f;
-		godRaysExposure = 0.55f;
-		godRaysDynamicBoostEnabled = true;
-		godRaysDramaticBoost = 2.2f;
-		filmGrain = 0.028f;
-		vignette = 0.22f;
-		break;
-	case GraphicsQualityPreset::High:
-		shadowMapSize = 2048; // higher near-cascade resolution tier
-		bloomEnabled = true;
-		bloomThreshold = 1.30f;
-		bloomIntensity = 0.16f;
-		bloomBlurIterations = 4;
-		ssaoEnabled = true;
-		ssaoRadius = 0.8f;
-		ssaoIntensity = 0.55f;
-		ssaoDirections = 6;
-		ssaoSteps = 4;
-		godRaysEnabled = true;
-		godRaysDensity = 0.95f;
-		godRaysWeight = 0.028f;
-		godRaysDecay = 0.960f;
-		godRaysExposure = 0.62f;
-		godRaysDynamicBoostEnabled = true;
-		godRaysDramaticBoost = 2.6f;
-		filmGrain = 0.032f;
-		vignette = 0.28f;
-		postSaturation = 1.04f;
-		postContrast = 1.04f;
-		break;
-	case GraphicsQualityPreset::Cinematic:
-		shadowMapSize = 2048;
-		bloomEnabled = true;
-		bloomThreshold = 1.35f; // sun/emissive peaks only — no midtone wash
-		bloomIntensity = 0.20f;
-		bloomBlurIterations = 5;
-		ssaoEnabled = true;
-		ssaoRadius = 1.0f;
-		ssaoIntensity = 0.62f;
-		ssaoDirections = 8;
-		ssaoSteps = 4;
-		godRaysEnabled = true;
-		godRaysDensity = 1.05f;
-		godRaysWeight = 0.032f;
-		godRaysDecay = 0.955f;
-		godRaysExposure = 0.70f;
-		godRaysDynamicBoostEnabled = true;
-		godRaysDramaticBoost = 3.0f;
-		filmGrain = 0.036f;
-		vignette = 0.38f;
-		postSaturation = 1.10f; // counter ACES highlight desaturation
-		postContrast = 1.08f;
-		exposure = 1.20f; // keeps the cinematic slightly-dimmer offset vs Medium
-		break;
-	}
-
+	applyPresetBody(*this, preset);
 	underwater = wasUnderwater;
 	underwaterStrength = underStr;
 	underwaterSurfaceY = underSurfaceY;
@@ -424,4 +492,82 @@ inline void updateAtmosphereFromDayTime(ShaderParameters &sp)
 	// Approximate sun world position for debug display.
 	sp.sunPosition = sp.celestialOrbitCenter + sunDir * sp.celestialOrbitRadius;
 	sp.moonPosition = sp.celestialOrbitCenter - sunDir * sp.celestialOrbitRadius;
+}
+
+/// Graphics-panel scoped resets (issue #185): restore the Lighting category
+/// (day cycle + lighting scales + material grading) to constructor defaults.
+/// Fog/atmosphere fields are untouched (separate category), as are derived
+/// day/sunset/night factors and all debug views. Derived from a fresh
+/// default-constructed struct so the panel never duplicates default literals.
+inline void resetGraphicsLighting(ShaderParameters &sp)
+{
+	const ShaderParameters def{};
+	sp.dayCycleEnabled = def.dayCycleEnabled;
+	sp.dayTime = def.dayTime;
+	sp.dayCycleSpeed = def.dayCycleSpeed;
+	sp.ambientStrength = def.ambientStrength;
+	sp.diffuseIntensity = def.diffuseIntensity;
+	sp.moonAmbientStrength = def.moonAmbientStrength;
+	sp.blockLightScale = def.blockLightScale;
+	sp.emissiveScale = def.emissiveScale;
+	sp.materialSaturation = def.materialSaturation;
+	sp.materialColorBoost = def.materialColorBoost;
+	sp.materialContrast = def.materialContrast;
+}
+
+/// Restores the Water category: the five water appearance sliders plus the
+/// underwater post strength. waterDebugView (diagnostic) is untouched.
+/// Defaults come from fresh default-constructed structs (issue #185).
+inline void resetGraphicsWater(ShaderParameters &sp, PostProcessSettings &pp)
+{
+	const ShaderParameters def{};
+	sp.waterWaveStrength = def.waterWaveStrength;
+	sp.waterRefraction = def.waterRefraction;
+	sp.waterSpecular = def.waterSpecular;
+	sp.waterFoamStrength = def.waterFoamStrength;
+	sp.waterRoughness = def.waterRoughness;
+	const PostProcessSettings defPp{};
+	pp.underwaterStrength = defPp.underwaterStrength;
+}
+
+/// Restores the Post category to the CURRENT pack's canonical values without
+/// re-applying the whole preset (issue #185): shadowMapSize belongs to the
+/// Shadows category, ssaoDebugView belongs to Render Debug, and the
+/// underwater runtime state plus the qualityPreset tag are not post settings.
+inline void resetGraphicsPost(PostProcessSettings &pp)
+{
+	const PostProcessSettings preset = PostProcessSettings::presetValues(pp.qualityPreset);
+	pp.fxaaEnabled = preset.fxaaEnabled;
+	pp.bloomEnabled = preset.bloomEnabled;
+	pp.bloomThreshold = preset.bloomThreshold;
+	pp.bloomIntensity = preset.bloomIntensity;
+	pp.bloomBlurIterations = preset.bloomBlurIterations;
+	pp.ssaoEnabled = preset.ssaoEnabled;
+	pp.ssaoRadius = preset.ssaoRadius;
+	pp.ssaoIntensity = preset.ssaoIntensity;
+	pp.ssaoDirections = preset.ssaoDirections;
+	pp.ssaoSteps = preset.ssaoSteps;
+	pp.godRaysEnabled = preset.godRaysEnabled;
+	pp.godRaysDensity = preset.godRaysDensity;
+	pp.godRaysWeight = preset.godRaysWeight;
+	pp.godRaysDecay = preset.godRaysDecay;
+	pp.godRaysExposure = preset.godRaysExposure;
+	pp.godRaysDynamicBoostEnabled = preset.godRaysDynamicBoostEnabled;
+	pp.godRaysBoostPreview = preset.godRaysBoostPreview;
+	pp.godRaysDramaticBoost = preset.godRaysDramaticBoost;
+	pp.godRaysDepthOcclusion = preset.godRaysDepthOcclusion;
+	pp.filmGrain = preset.filmGrain;
+	pp.vignette = preset.vignette;
+	pp.postSaturation = preset.postSaturation;
+	pp.postContrast = preset.postContrast;
+	pp.exposure = preset.exposure;
+	pp.exposureCompensation = preset.exposureCompensation;
+	pp.toneMapper = preset.toneMapper;
+	pp.gamma = preset.gamma;
+	pp.autoExposureEnabled = preset.autoExposureEnabled;
+	pp.autoExposureMiddleGrey = preset.autoExposureMiddleGrey;
+	pp.autoExposureMinEv = preset.autoExposureMinEv;
+	pp.autoExposureMaxEv = preset.autoExposureMaxEv;
+	pp.autoExposureSpeedUp = preset.autoExposureSpeedUp;
+	pp.autoExposureSpeedDown = preset.autoExposureSpeedDown;
 }

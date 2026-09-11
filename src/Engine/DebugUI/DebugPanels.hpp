@@ -18,9 +18,10 @@ namespace debugui
 /// health-warning indicators (F8).
 void drawOverview(UiState &state, GameUIFrame &frame);
 
-/// Graphics tuning (F2, "Graphics"): quality preset, resource pack,
-/// atmosphere, lighting, water/shadow/post settings. Settings only —
-/// diagnostic views live in drawRenderDebug.
+/// Graphics tuning (F2, "Graphics"): category navigation (General / Display /
+/// Lighting / Atmosphere / Shadows / Water / Post / Resources, issue #185)
+/// over quality preset, resource pack, atmosphere, lighting, water/shadow/
+/// post settings. Settings only — diagnostic views live in drawRenderDebug.
 void drawRendering(UiState &state, GameUIFrame &frame);
 
 /// Rendering diagnostics (F12): debug views (shadow/water/SSAO), exposure

@@ -122,10 +122,12 @@ stage measurements are documented in [workload-telemetry.md](workload-telemetry.
   `debugui::UiState` instead of reaching into engine subsystems:
   - **Overview (F8)** — frame/streaming/memory summary plus sustained health
     warnings (hysteresis-based, no one-frame-transient alarms)
-  - **Graphics (F2)** — settings only, including the Display/Present section
-    (VSync + present-mode readout, moved out of the old HUD in issue #184);
-    **Render Debug (F12)** — diagnostic
-    views (shadow/water/SSAO debug, exposure readout, per-pass GPU cost) writing
+  - **Graphics (F2)** — settings only, organized as category navigation
+    (General / Display / Lighting / Atmosphere / Shadows / Water / Post /
+    Resources, issue #185): Display owns VSync + present mode, Shadows owns
+    shadow distance / cascade far; **Render Debug (F12)** — diagnostic views
+    (shadow/water/SSAO debug), environment readouts (day factors, underwater),
+    exposure readout, per-pass GPU cost, writing
     the same `shadowDebug`/`waterDebugView`/`ssaoDebugView` state as before
   - **Streaming (F3)** — budgets + queue/pool telemetry with bounded histories
   - **Performance (F7)** — CPU hierarchy + flat sortable scope table

@@ -59,7 +59,7 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 	ImGui::SliderInt("Light cache/s", &rs.lightCachePerSec, 0, 256);
 	ImGui::SliderInt("Upload/s", &rs.uploadPerSec, 5, 800);
 	ImGui::SliderFloat("Stream ms/frame", &rs.maxStreamMs, 0.f, 16.f, "%.1f");
-	ImGui::SliderFloat("Shadow dist", &rs.shadowDistance, 64.f, 320.f, "%.0f");
+	// Shadow distance moved to Graphics ▸ Shadows (issue #185).
 
 	ImGui::SeparatorText("Live stats");
 	ImGui::Text("Loaded chunks: %zu", s.streaming.loadedChunks);
