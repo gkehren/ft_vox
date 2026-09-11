@@ -258,6 +258,11 @@ public:
 	void setChunkEventTraceEnabled(bool enabled) { m_chunkTraceEnabled = enabled; }
 	bool chunkEventTraceEnabled() const { return m_chunkTraceEnabled; }
 	/// Chronological copy of the recorded events (oldest first). Main thread.
+	/// Returns a vector by design for now: the ring is capped at
+	/// kChunkEventRingSize entries so the per-call copy is bounded and
+	/// cheap; a span/callback iteration would shave the allocation if the
+	/// inspector ever samples this more than at UI rate (known debt,
+	/// issue #179 review).
 	std::vector<ChunkDebugEvent> chunkDebugEvents() const;
 
 	/// Synchronous bootstrap near spawn so the first frame has terrain.
