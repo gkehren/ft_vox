@@ -226,6 +226,8 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${FT_VOX_RENDERER_SOURCES}
     ${FT_VOX_IMGUI_SOURCES}
     ${FT_VOX_VULKAN_SOURCES}

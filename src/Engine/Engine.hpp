@@ -43,6 +43,14 @@ public:
 
 	void run();
 	void initializeNoiseGenerator(int seed);
+
+	/// Request a persistent world save (issue #180): `<cwd>/saves/<name>/` is
+	/// opened (or created) inside initializeNoiseGenerator, edits stream to
+	/// disk, and the player state is restored/saved around the session.
+	/// Setter only — call BEFORE initializeNoiseGenerator. Empty name (the
+	/// default) keeps the classic transient procedural world.
+	void requestOpenWorld(const std::string &name) { m_openWorldName = name; }
+
 	void setVSync(bool enabled);
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
@@ -151,6 +159,11 @@ private:
 
 	int seed{0};
 	uint64_t m_worldGenerationId{1};
+	/// Requested world-save name (issue #180); empty = transient session.
+	std::string m_openWorldName;
+	/// Why persistence is off for this session despite a requested world
+	/// (seed mismatch / open failure); surfaced in the World UI panel.
+	std::string m_openWorldError;
 	/// UI biome cache (issue #184 review): the Detailed overlay is the only
 	/// biome consumer, and the player can stay in one voxel column for many
 	/// frames — so drawUi samples getBiomeAt() only when the column or the

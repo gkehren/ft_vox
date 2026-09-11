@@ -27,6 +27,25 @@
 
 class StagingRing;
 
+/// Plain-copy world-save snapshot for the World panel (issue #180, Phase 5).
+/// Filled by Engine::drawUi from ChunkManager::worldPersistence()->status();
+/// deliberately value-only so GameUI keeps no dependency on the save layer.
+struct WorldSaveUiState
+{
+	bool active{false}; ///< persistence running for this session
+	bool error{false};  ///< lastError non-empty
+	std::string worldName;
+	int seed{0};
+	size_t queueDepth{0};
+	uint64_t enqueued{0};
+	uint64_t completed{0};  ///< chunk files written
+	uint64_t superseded{0}; ///< pending writes dropped for a newer revision
+	uint64_t failed{0};
+	uint64_t deleted{0}; ///< chunk files removed (overrides reverted)
+	uint64_t bytesWritten{0};
+	std::string lastError;
+};
+
 /// Frame snapshot for ImGui panels (pointers owned by Engine).
 /// Debug/telemetry data reaches panels through debugui::UiState snapshots
 /// (issue #179); the raw pointers here are the explicit settings structs and
@@ -76,6 +95,8 @@ struct GameUIFrame
 
 	int seed{0};
 	uint64_t worldGenerationId{0};
+	/// World-save state (issue #180, Phase 5); see WorldSaveUiState above.
+	WorldSaveUiState worldSave;
 	float fps{0.f};
 	float frameMs{0.f};
 	/// Hierarchical-profiler CPU frame time (events -> present), used by

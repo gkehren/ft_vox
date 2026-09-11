@@ -22,11 +22,15 @@
 #include <Chunk/LightSample.hpp>
 #include <utils.hpp>
 
+#include <memory>
+
 class Camera;
 class ImmediateCommands;
 class StagingRing;
 class GpuResourceRetire;
 struct MeshBuildResult;
+class MeshResultPool;
+class WorldPersistence;
 
 /// A finished async mesh job: the built payload (may be null when the
 /// result block could not be acquired) plus the chunk it was built for, so
@@ -275,6 +279,26 @@ public:
 	/// storage allocation fails, so no slot is leaked.
 	bool prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator);
 
+	// --- Persistent world lifecycle (issue #180, Phase 3+4) ---
+	// persistence stays DISABLED unless openWorld succeeds — benchmark /
+	// transient worlds (Engine::reloadWorld) never construct it, so they can
+	// never create files. openWorld() seeds the save from the live terrain
+	// generator (seed + kGeneratorVersion) and arms persistent-edit tracking
+	// on every loaded chunk; closeWorld() is the durable teardown.
+	/// Open (or create) `<savesRoot>/<worldName>/` for the running world.
+	/// On success returns true; on failure `outError` carries a user-facing
+	/// reason (seed mismatch, generator version mismatch, corrupt meta, ...).
+	bool openWorld(const std::string &savesRoot, const std::string &worldName, std::string &outError);
+	/// Capture every chunk with edits, flush the save service, shut it down
+	/// and release the persistence facade. Returns the flush success. After
+	/// closeWorld() the manager behaves exactly like a never-opened one.
+	bool closeWorld();
+	/// Capture all dirty loaded chunks + flush (no close). False on I/O failure.
+	bool flushWorld();
+	bool isWorldOpen() const { return m_persistence != nullptr; }
+	/// For UI/status; may be null (no world open).
+	const WorldPersistence *worldPersistence() const { return m_persistence.get(); }
+
 private:
 	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);
 	StreamingUpdateKind loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
@@ -397,6 +421,23 @@ private:
 	friend struct ChunkManagerProbe;
 	friend struct ChunkManagerStreamProbe;
 	friend class ChunkCollisionView;
+
+	// --- Persistence (issue #180, Phase 3+4) ---
+	/// Re-apply saved overrides after deterministic generation. Called with
+	/// exclusive ownership of `chunk` (bootstrap on the main thread, or the
+	/// async gen job while the chunk is in transit); overrides come from a
+	/// mutex-guarded snapshot of the persistence index. Zero work when no
+	/// world is open or the chunk has no saved overrides.
+	void applyPersistentOverrides(Chunk *chunk);
+	/// Main-thread capture of one chunk's persistent edits into the save
+	/// pipeline (unload path and captureAllChunkEdits).
+	void captureChunkEditsForUnload(Chunk *chunk);
+	/// Capture every chunk holding edits: loaded chunks (in-transit ones are
+	/// skipped - their gen/mesh job is mid-flight; they are captured on their
+	/// own unload or a later flush) plus chunks parked in m_deferredRelease.
+	void captureAllChunkEdits();
+
+	std::unique_ptr<WorldPersistence> m_persistence;
 
 	struct StreamState
 	{

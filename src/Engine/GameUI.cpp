@@ -439,11 +439,26 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	const glm::vec2 playerXZ(frame.player.position.x, frame.player.position.z);
 
 	// World identity header (issue #186 §10): high-level facts only. The
-	// persistence/save-status slot is deliberately left to #180 — until then
-	// the wording stays neutral instead of advertising a product limitation.
+	// persistence/save-status slot is filled by #180: one compact "Save"
+	// row while a world is open, detailed counters in the collapsible at
+	// the bottom of the panel.
+	if (frame.worldSave.active)
+		ui::metric("World", "%s", frame.worldSave.worldName.c_str());
 	ui::metric("Seed", "%d", frame.seed);
 	ui::metric("Player", "%.0f, %.0f", playerXZ.x, playerXZ.y);
 	ImGui::TextDisabled("Chunk %d, %d", frame.player.chunkX, frame.player.chunkZ);
+	if (frame.worldSave.active)
+	{
+		const char *saveState = "Saved";
+		if (frame.worldSave.failed > 0)
+			saveState = "Failed";
+		else if (frame.worldSave.queueDepth > 0)
+			saveState = "Saving…";
+		ImGui::Text("Save %s", saveState);
+	}
+	if (!frame.worldSave.lastError.empty())
+		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+						   frame.worldSave.lastError.c_str());
 
 	ImGui::Spacing();
 	bool prevFollow = m_mapFollow;
@@ -605,6 +620,24 @@ void GameUI::drawWorld(GameUIFrame &frame)
 			}
 		}
 		ImGui::EndChild();
+	}
+
+	if (frame.worldSave.active)
+	{
+		// Detailed save counters (issue #180): operational detail lives in a
+		// collapsed surface so the #186 layout keeps the map dominant.
+		if (ImGui::CollapsingHeader("World save details"))
+		{
+			ImGui::Text("Saved chunks: %llu written, %llu reverted",
+						(unsigned long long)frame.worldSave.completed,
+						(unsigned long long)frame.worldSave.deleted);
+			ImGui::Text("Queue: %llu superseded, %llu failed, %zu pending",
+						(unsigned long long)frame.worldSave.superseded,
+						(unsigned long long)frame.worldSave.failed,
+						frame.worldSave.queueDepth);
+			ImGui::Text("Written: %.2f MiB",
+						static_cast<double>(frame.worldSave.bytesWritten) / (1024.0 * 1024.0));
+		}
 	}
 
 	ImGui::End();

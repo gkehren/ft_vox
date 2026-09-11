@@ -8,13 +8,29 @@
 #include <optional>
 #include <string>
 
+/// Persistent world names become a directory under saves/: allow only
+/// filesystem-safe names — no path separators, no reserved Windows
+/// characters, no ".." traversal.
+static bool isValidWorldName(const std::string &name)
+{
+	if (name.empty() || name.find("..") != std::string::npos)
+		return false;
+	constexpr std::string_view kForbidden = "/\\:*?\"<>|";
+	for (const char c : name)
+		if (kForbidden.find(c) != std::string_view::npos)
+			return false;
+	return true;
+}
+
 static void printUsage(const char *argv0)
 {
-	std::cout << "Usage: " << argv0 << " [--seed <value>] [--resource-pack <path.zip>]"
+	std::cout << "Usage: " << argv0 << " [--seed <value>] [--world <name>] [--resource-pack <path.zip>]"
 			  << " [--vsync <on|off>] [--benchmark <seconds>]\n"
 			  << "\n"
 			  << "Options:\n"
 			  << "  --seed <value>              World seed (integer)\n"
+			  << "  --world <name>              Open (or create) the persistent save saves/<name>\n"
+			  << "                              (player state + block edits survive restarts)\n"
 			  << "  --resource-pack <path>      Minecraft resource pack archive (.zip) or folder\n"
 			  << "                              (defaults to ressources/default-resource-pack.zip)\n"
 			  << "  --vsync <on|off>            FIFO when on; strict IMMEDIATE and uncapped when off\n"
@@ -45,6 +61,7 @@ static std::string resolveResourcePackRoot(const std::string &cliPack)
 int main(int argc, char **argv)
 {
 	unsigned int seed_to_use = 0;
+	std::string worldName;
 	std::string resourcePackCli;
 	std::optional<bool> vsyncOverride;
 	float benchmarkDuration = 0.0f;
@@ -116,6 +133,24 @@ int main(int argc, char **argv)
 				return EXIT_FAILURE;
 			}
 			seed_to_use = static_cast<unsigned int>(val);
+			continue;
+		}
+		if (arg == "--world")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --world requires a name.\n";
+				printUsage(argv[0]);
+				return EXIT_FAILURE;
+			}
+			worldName = argv[++i];
+			if (!isValidWorldName(worldName))
+			{
+				std::cerr << "Error: --world name must be non-empty and must not contain "
+				          << "any of / \\ : * ? \" < > | or \"..\".\n";
+				printUsage(argv[0]);
+				return EXIT_FAILURE;
+			}
 			continue;
 		}
 		if (arg == "--resource-pack")
@@ -271,6 +306,8 @@ int main(int argc, char **argv)
 	try
 	{
 		Engine engine(resourcePack);
+		if (!worldName.empty())
+			engine.requestOpenWorld(worldName);
 		engine.initializeNoiseGenerator(static_cast<int>(seed_to_use));
         if (inspection)
         {

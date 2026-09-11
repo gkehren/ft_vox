@@ -108,6 +108,11 @@ class TerrainGenerator
 {
 public:
   // Terrain generation constants
+  // Identifies terrain-generation semantics for save compatibility (issue
+  // #180): stored in `world.meta` and validated when opening a saved world.
+  // Bump whenever a worldgen change would alter what an unmodified voxel is
+  // for the same seed.
+  static constexpr uint32_t kGeneratorVersion = 1;
   static constexpr int SEA_LEVEL = 64;
   static constexpr int BEDROCK_LEVEL = 5;
   // Max horizontal reach of any vegetation feature from its trunk/center column.

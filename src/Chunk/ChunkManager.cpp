@@ -8,6 +8,8 @@
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/StagingRing.hpp>
 #include <Vulkan/GpuResourceRetire.hpp>
+#include <World/WorldPersistence.hpp>
+#include <World/WorldSave.hpp>
 
 #include <glm/gtc/matrix_access.hpp>
 
@@ -22,7 +24,18 @@
 namespace
 {
 constexpr int kDeferredReleaseFrames = 3; // >= frames-in-flight
+
+// Canonical chunk-coordinate conversion for a chunk's stored origin — the
+// exact expression meshPendingChunks()/processFinishedJobs() already use for
+// world->chunk mapping (round to integer blocks, then divide by CHUNK_SIZE).
+// All persistence code goes through this one helper so saved coordinates can
+// never disagree with the manager's own addressing.
+glm::ivec3 chunkCoordOfPosition(const glm::vec3 &worldPos)
+{
+	return {static_cast<int>(std::round(worldPos.x)) / CHUNK_SIZE, 0,
+	        static_cast<int>(std::round(worldPos.z)) / CHUNK_SIZE};
 }
+} // namespace
 
 ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool)
 	: m_terrainGenerator(terrainGenerator), m_threadPool(threadPool), m_chunkPool(chunkPool)
@@ -56,6 +69,13 @@ ChunkManager::~ChunkManager()
 		if (job.storage && job.pool)
 			job.pool->release(job.storage);
 	}
+
+	// Persistent-world safety net (issue #180): if the world is still open
+	// here, a bug elsewhere skipped closeWorld() - run the exact same path so
+	// recorded edits are flushed and the I/O worker joins before the pool
+	// tears chunks down. Deliberately silent.
+	if (m_persistence)
+		closeWorld();
 
 	// PendingGroupMember owns every prepared-but-unpublished replacement.
 	// Release those ranges while the chunks (and their arena pointers) are
@@ -165,7 +185,12 @@ void ChunkManager::processChunkLoading(int budget)
 			static_cast<float>(chunkPos.x * CHUNK_SIZE), 0.0f,
 			static_cast<float>(chunkPos.z * CHUNK_SIZE)));
 		if (chunk)
+		{
+			// Persistent-edit tracking (issue #180): arm while a world is
+			// open so every in-chunk edit is recorded for the save pipeline.
+			chunk->setTrackPersistentEdits(isWorldOpen());
 			acquired.emplace_back(chunkPos, chunk);
+		}
 		else
 			rejected.push_back(chunkPos); // free list raced empty — re-queue below
 	}
@@ -338,6 +363,11 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 				std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
 			TerrainGenerator &localGen = TerrainGenerator::getThreadLocal(seed);
 			chunk->generateTerrain(localGen);
+			// Saved overrides re-apply deterministically right after
+			// generation (issue #180): the job owns the chunk (in transit,
+			// unpublished) and the first mesh after generation covers every
+			// touched section, so this is race-free and meshes correctly.
+			applyPersistentOverrides(chunk);
 			const float ms = std::chrono::duration<float, std::milli>(
 								 std::chrono::steady_clock::now() - t0)
 								 .count();
@@ -952,6 +982,10 @@ void ChunkManager::processDeferredReleases()
 		if (!c)
 			continue;
 		recordChunkEvent(c, "unload");
+		// Capture recorded edits BEFORE the pool's Full reset wipes the
+		// chunk's edit map (issue #180): the immutable payload is queued for
+		// the save worker, so recycling the Chunk object is safe.
+		captureChunkEditsForUnload(c);
 		c->releaseGPUDeferred();
 		if (m_chunkPool)
 			m_chunkPool->release(c);
@@ -2185,6 +2219,9 @@ bool ChunkManager::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &gener
 		return false;
 	}
 	chunk->generateTerrain(generator);
+	// Bootstrap path (issue #180): same override contract as the async gen
+	// job - generation is deterministic, saved edits re-apply on top.
+	applyPersistentOverrides(chunk);
 	return true;
 }
 
@@ -2225,6 +2262,9 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 				if (!chunk)
 					continue;
 			}
+			// Bootstrap acquisition (issue #180): arm persistent-edit
+			// tracking exactly like processChunkLoading does.
+			chunk->setTrackPersistentEdits(isWorldOpen());
 			if (!prepareAndGenerateChunk(chunk, *m_terrainGenerator))
 				continue;
 			created.emplace_back(pos, chunk);
@@ -2268,4 +2308,146 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 		p.second->uploadToGPU(allocator, imm, arenas);
 
 	std::cout << "Bootstrap: " << created.size() << " chunks around spawn\n";
+}
+
+// ---------------------------------------------------------------------------
+// Persistent world lifecycle (issue #180, Phase 3+4)
+// ---------------------------------------------------------------------------
+
+bool ChunkManager::openWorld(const std::string &savesRoot, const std::string &worldName,
+                             std::string &outError)
+{
+	outError.clear();
+	if (!m_terrainGenerator)
+	{
+		outError = "no terrain generator";
+		return false;
+	}
+	if (m_persistence)
+	{
+		outError = "a world is already open";
+		return false;
+	}
+
+	auto persistence = std::make_unique<WorldPersistence>();
+	const WorldPersistence::OpenInfo info = persistence->openOrCreate(
+		savesRoot, worldName, m_terrainGenerator->getSeed(), TerrainGenerator::kGeneratorVersion);
+	if (!info.ok)
+	{
+		outError = info.error;
+		return false;
+	}
+	m_persistence = std::move(persistence);
+
+	// Arm tracking on every already-loaded chunk so edits from this point on
+	// are recorded (chunks acquired later arm in processChunkLoading and the
+	// bootstrap path).
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (auto &[pos, chunk] : m_chunks)
+			if (chunk)
+				chunk->setTrackPersistentEdits(true);
+	}
+	return true;
+}
+
+bool ChunkManager::closeWorld()
+{
+	if (!m_persistence)
+		return true;
+	const bool flushed = flushWorld();
+	// In-flight gen jobs dereference m_persistence (override application);
+	// let them finish before the facade is destroyed (same drain contract as
+	// the destructor - workers decrement the counter themselves, so this
+	// cannot deadlock on main-thread publish steps).
+	while (m_pendingGenJobsCount.load() > 0)
+		std::this_thread::yield();
+	m_persistence->shutdown();
+	// Disarm tracking on the loaded set: after closeWorld() the manager must
+	// behave exactly like a never-opened one (no maps filling up for a save
+	// pipeline that no longer exists).
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (auto &[pos, chunk] : m_chunks)
+			if (chunk)
+				chunk->setTrackPersistentEdits(false);
+	}
+	m_persistence.reset();
+	return flushed;
+}
+
+bool ChunkManager::flushWorld()
+{
+	if (!m_persistence)
+		return true;
+	captureAllChunkEdits();
+	return m_persistence->flush();
+}
+
+void ChunkManager::applyPersistentOverrides(Chunk *chunk)
+{
+	if (!m_persistence || !m_persistence->enabled() || !chunk)
+		return;
+	const glm::ivec3 cc = chunkCoordOfPosition(chunk->getPosition());
+	// Copy under the persistence mutex: the worker must not iterate a vector
+	// that the save pipeline may refine concurrently.
+	const std::vector<worldsave::ChunkEdit> overrides = m_persistence->overridesSnapshot(cc.x, cc.z);
+	if (overrides.empty())
+		return;
+	for (const worldsave::ChunkEdit &edit : overrides)
+	{
+		// Guard against corrupt on-disk payloads: localIndex is the canonical
+		// y-major index (y*256 + z*16 + x), so localIndex < CHUNK_VOLUME is
+		// exactly "x/z < 16 and y < CHUNK_HEIGHT".
+		if (edit.localIndex >= static_cast<uint32_t>(CHUNK_VOLUME))
+		{
+			std::cerr << "WorldPersistence: ignoring out-of-range localIndex "
+			          << edit.localIndex << " in chunk (" << cc.x << ", " << cc.z << ")\n";
+			continue;
+		}
+		const int x = static_cast<int>(edit.localIndex & 15u);
+		const int z = static_cast<int>((edit.localIndex >> 4) & 15u);
+		const int y = static_cast<int>(edit.localIndex >> 8);
+		chunk->setVoxel(x, y, z, static_cast<TextureType>(edit.blockType));
+	}
+}
+
+void ChunkManager::captureChunkEditsForUnload(Chunk *chunk)
+{
+	if (!m_persistence || !m_persistence->enabled() || !chunk || !chunk->hasPersistentEdits())
+		return;
+	Chunk::ChunkEditMap edits = chunk->takePersistentEdits();
+	std::vector<worldsave::ChunkEdit> values;
+	values.reserve(edits.size());
+	for (const auto &[localIndex, type] : edits)
+		values.push_back({localIndex, type});
+	std::sort(values.begin(), values.end(),
+	          [](const worldsave::ChunkEdit &a, const worldsave::ChunkEdit &b)
+	          { return a.localIndex < b.localIndex; });
+	const glm::ivec3 cc = chunkCoordOfPosition(chunk->getPosition());
+	m_persistence->captureChunkEdits(cc.x, cc.z, std::move(values));
+}
+
+void ChunkManager::captureAllChunkEdits()
+{
+	if (!m_persistence || !m_persistence->enabled())
+		return;
+	// Main thread; edits only ever happen on the main thread, so the edit
+	// maps of non-transit chunks are stable. In-transit chunks are skipped:
+	// their gen/mesh job is mid-flight (the gen job itself re-applies the
+	// stored overrides after generation), and they are captured on their own
+	// unload or a later flush.
+	std::vector<Chunk *> capture;
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		capture.reserve(m_chunks.size() + m_deferredRelease.size());
+		for (auto &[pos, chunk] : m_chunks)
+			if (chunk && !chunk->isInTransit() && chunk->hasPersistentEdits())
+				capture.push_back(chunk);
+		for (Chunk *chunk : m_deferredRelease)
+			if (chunk && chunk->hasPersistentEdits())
+				capture.push_back(chunk);
+	}
+	for (Chunk *chunk : capture)
+		captureChunkEditsForUnload(chunk);
 }
