@@ -208,7 +208,7 @@ void drawMemory(UiState &s, GameUIFrame &frame)
 	{
 		if (m.stagingCapacityBytes > 0)
 		{
-			ImGui::Text("Staging slice: %s of %s this frame",
+			ImGui::Text("Staging slice: %s of %s (last completed frame)",
 						formatBytes(m.stagingUsedBytes).c_str(),
 						formatBytes(m.stagingCapacityBytes).c_str());
 			ImGui::ProgressBar(float(m.stagingUsedBytes) / float(m.stagingCapacityBytes),

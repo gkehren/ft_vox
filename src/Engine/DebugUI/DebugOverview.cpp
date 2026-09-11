@@ -91,7 +91,7 @@ void drawOverview(UiState &s, GameUIFrame &frame)
 							   ImVec2(-1.f, 0.f),
 							   formatBytes(s.memory.stagingUsedBytes).c_str());
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Staging ring slice: %s of %s this frame",
+				ImGui::SetTooltip("Staging ring slice: %s of %s (last completed frame)",
 								  formatBytes(s.memory.stagingUsedBytes).c_str(),
 								  formatBytes(s.memory.stagingCapacityBytes).c_str());
 		}
