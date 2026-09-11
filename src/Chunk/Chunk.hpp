@@ -378,6 +378,17 @@ public:
 	size_t getActiveIndex() const { return m_activeIndex; }
 	void setActiveIndex(size_t index) { m_activeIndex = index; }
 
+	/// Number of 16^3 sections with a live committed opaque GPU range
+	/// (issue #179 chunk inspector). Main-thread read of published slots.
+	uint32_t liveGpuSections() const
+	{
+		uint32_t n = 0;
+		for (const SectionGpuSlot &s : m_sectionGpu)
+			if (!s.empty())
+				++n;
+		return n;
+	}
+
 private:
     // Published by the exclusive chunk owner at mutation boundaries.
     std::array<uint64_t, 13> m_cpuTelemetry{};

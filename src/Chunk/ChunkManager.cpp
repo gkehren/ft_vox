@@ -180,6 +180,7 @@ void ChunkManager::processChunkLoading(int budget)
 			m_activeChunks.push_back(pair.second);
 			// Generate even before frustum test so the world fills around the player.
 			pair.second->setVisible(true);
+			recordChunkEvent(pair.second, "load");
 		}
 		else
 		{
@@ -327,6 +328,7 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 			continue; // Allocation failed (e.g. OOM), retry next tick
 		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThreshSq);
 		chunk->setInTransit(true);
+		recordChunkEvent(chunk, "genQueued");
 		m_pendingGenJobsCount.fetch_add(1);
 		const auto captureEpoch = GetProfiler().captureEpoch();
 		const auto queuedAt = std::chrono::steady_clock::now();
@@ -421,6 +423,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 							static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
 		const TaskPriority prio = calculateTaskPriority(distSq, lodThreshSq);
 		chunk->setInTransit(true);
+		recordChunkEvent(chunk, "meshQueued", chunk->dirtySections());
 
 		if (distSq > lodThreshSq)
 		{
@@ -768,6 +771,7 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 				continue; // budget exhausted: remaining independents wait next frame
 			if (!chunk->uploadToGPUAsync(allocator, staging, cmd, retire, arenas))
 				break; // staging full — remaining wait next frame
+			recordChunkEvent(chunk, "gpuCommit");
 			uploaded += 1;
 			--budgetUnits;
 			continue;
@@ -881,6 +885,7 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 		for (PendingGroupMember &member : members)
 		{
 			member.chunk->publishGPUUpload(retire, arenas, member.replacement);
+			recordChunkEvent(member.chunk, "gpuCommit");
 			telemetry::registry().add(telemetry::UploadChunks);
 			published.insert(member.chunk);
 		}
@@ -891,6 +896,36 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 		uploaded += publishedCount;
 	}
 	return uploaded;
+}
+
+void ChunkManager::recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sections)
+{
+	if (!m_chunkTraceEnabled || !chunk)
+		return;
+
+	ChunkDebugEvent &e = m_chunkEventRing[m_chunkEventWrite];
+	e.timeSec = std::chrono::duration<double>(
+					std::chrono::steady_clock::now().time_since_epoch())
+					.count();
+	const glm::vec3 wp = chunk->getPosition();
+	e.chunk = glm::ivec3(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
+						 static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
+	e.kind = kind;
+	e.revision = chunk->meshRevision();
+	e.sections = sections;
+	m_chunkEventWrite = (m_chunkEventWrite + 1) % kChunkEventRingSize;
+	if (m_chunkEventCount < kChunkEventRingSize)
+		++m_chunkEventCount;
+}
+
+std::vector<ChunkDebugEvent> ChunkManager::chunkDebugEvents() const
+{
+	std::vector<ChunkDebugEvent> out;
+	out.reserve(m_chunkEventCount);
+	const size_t start = (m_chunkEventCount < kChunkEventRingSize) ? 0 : m_chunkEventWrite;
+	for (size_t i = 0; i < m_chunkEventCount; ++i)
+		out.push_back(m_chunkEventRing[(start + i) % kChunkEventRingSize]);
+	return out;
 }
 
 void ChunkManager::processDeferredReleases()
@@ -916,6 +951,7 @@ void ChunkManager::processDeferredReleases()
 	{
 		if (!c)
 			continue;
+		recordChunkEvent(c, "unload");
 		c->releaseGPUDeferred();
 		if (m_chunkPool)
 			m_chunkPool->release(c);
@@ -939,7 +975,10 @@ void ChunkManager::processFinishedJobs()
 	for (Chunk *chunk : finishedGen)
 	{
 		if (chunk)
+		{
 			chunk->setInTransit(false);
+			recordChunkEvent(chunk, "genDone");
+		}
 	}
 	// New terrain can carry emissive sources whose light reaches into the
 	// side neighbors' halo radius (issue #141 review fix): dirty the
@@ -969,6 +1008,7 @@ void ChunkManager::processFinishedJobs()
 			if (job.chunk && !supersededByEdit)
 			{
 				job.chunk->publishMeshResult(job.result);
+				recordChunkEvent(job.chunk, "meshDone");
 			}
 			else
 			{
@@ -1011,18 +1051,21 @@ void ChunkManager::processFinishedJobs()
 				job.pool->release(job.storage);
 			continue;
 		}
-		if (job.storage)
-		{
-			const bool valid = job.chunk->meshGeneration() == job.generation &&
-							   job.chunk->meshRevision() == job.revision &&
-							   job.chunk->localLightCacheWanted() &&
-							   !job.chunk->hasLightStorage() &&
-							   !hasPendingEditsFor(job.chunk);
-			if (valid)
-				job.chunk->attachLightStorage(job.storage);
-			else
-				job.pool->release(job.storage);
-		}
+			if (job.storage)
+			{
+				const bool valid = job.chunk->meshGeneration() == job.generation &&
+								   job.chunk->meshRevision() == job.revision &&
+								   job.chunk->localLightCacheWanted() &&
+								   !job.chunk->hasLightStorage() &&
+								   !hasPendingEditsFor(job.chunk);
+				if (valid)
+				{
+					job.chunk->attachLightStorage(job.storage);
+					recordChunkEvent(job.chunk, "lightCacheDone");
+				}
+				else
+					job.pool->release(job.storage);
+			}
 		job.chunk->setInTransit(false);
 		// An edit may have dirtied sections while this job owned the chunk:
 		// the mask persisted through transit, so re-arm scheduling now that
@@ -1164,6 +1207,8 @@ void ChunkManager::queueOrApplyEdit(Chunk *chunk, const glm::ivec3 &chunkPos, in
 									 .type);
 	chunk->setVoxel(x, y, z, type);
 	chunk->setState(ChunkState::GENERATED);
+	recordChunkEvent(chunk, borderNeighbor ? "editMirror" : "edit",
+					 chunk->dirtySections());
 	// Light-relevant edits near a border change the neighbors' propagated
 	// light too (issue #141 review fix); mirror writes are the owning
 	// chunk's edit seen from the other side and skip this.

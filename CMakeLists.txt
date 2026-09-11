@@ -201,6 +201,15 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUI.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIResourcePack.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIBiomeMap.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiCore.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiState.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugOverview.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugPerformance.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugRendering.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugStreaming.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugChunkInspector.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugMemory.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugBenchmark.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Benchmark.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/BuildInfo.cpp

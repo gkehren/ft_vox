@@ -137,6 +137,18 @@ enum class StreamingUpdateKind
 /// least every this many frames otherwise.
 constexpr uint32_t kUnloadCheckIntervalFrames = 60;
 
+/// One chunk lifecycle debug event (issue #179 chunk inspector). Recorded
+/// on the main thread into a globally bounded ring, only while tracing is
+/// enabled; `kind` points at a static string literal.
+struct ChunkDebugEvent
+{
+	double timeSec{0.0};
+	glm::ivec3 chunk{0, 0, 0};
+	const char *kind{nullptr};
+	uint64_t revision{0};
+	uint32_t sections{0}; // section mask / count context, event-dependent
+};
+
 /// Streams chunks around the player: load → async terrain → async mesh → main-thread GPU upload.
 class ChunkManager
 {
@@ -236,6 +248,17 @@ public:
 	ChunkPool *getChunkPool() const { return m_chunkPool; }
 	/// Test/inspection access to the active chunk set (unordered).
 	const std::vector<Chunk *> &getActiveChunks() const { return m_activeChunks; }
+
+	/// Opt-in, globally bounded chunk lifecycle trace (issue #179): records
+	/// load / gen / mesh / edit / upload / retire events for the chunk
+	/// inspector. Main-thread recording only; disabled by default (zero
+	/// cost beyond one branch at the event sites) and never grows beyond
+	/// kChunkEventRingSize entries.
+	static constexpr size_t kChunkEventRingSize = 256;
+	void setChunkEventTraceEnabled(bool enabled) { m_chunkTraceEnabled = enabled; }
+	bool chunkEventTraceEnabled() const { return m_chunkTraceEnabled; }
+	/// Chronological copy of the recorded events (oldest first). Main thread.
+	std::vector<ChunkDebugEvent> chunkDebugEvents() const;
 
 	/// Synchronous bootstrap near spawn so the first frame has terrain.
 	void generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
@@ -355,6 +378,9 @@ private:
 	TaskPriority calculateTaskPriority(float distanceSq, float lodThresholdSq) const;
 	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
 
+	/// Bounded trace write (no-op while tracing is disabled). Main thread.
+	void recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sections = 0);
+
 	/// Maintain chunk local light cache desire based on distance to camera
 	/// (issue #128), with acquire/release hysteresis (issue #172): a cache is
 	/// acquired when the chunk enters the acquire radius and retained until
@@ -417,4 +443,10 @@ private:
 
 	std::vector<Chunk *> m_deferredRelease;
 	int m_deferredReleaseAge{0};
+
+	// Chunk lifecycle event trace (issue #179). Main-thread only.
+	bool m_chunkTraceEnabled{false};
+	std::array<ChunkDebugEvent, kChunkEventRingSize> m_chunkEventRing{};
+	size_t m_chunkEventWrite{0};
+	size_t m_chunkEventCount{0};
 };

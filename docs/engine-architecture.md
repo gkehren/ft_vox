@@ -103,10 +103,41 @@ stage measurements are documented in [workload-telemetry.md](workload-telemetry.
 
 ### UI
 
-- **`GameUI`** — multi-panel ImGui: HUD, Graphics, Streaming, World/biome map, Help; F-key shortcuts  
+- **`GameUI`** — ImGui shell: main menu bar, gameplay HUD, World/biome map, Help,
+  on-screen hints, F-key shortcut routing and biome-map plumbing
+- **`DebugUI/` (`src/Engine/DebugUI/`)** — developer console panels (issue #179),
+  one domain per translation unit, all consuming read-only snapshots in
+  `debugui::UiState` instead of reaching into engine subsystems:
+  - **Overview (F8)** — frame/streaming/memory summary plus sustained health
+    warnings (hysteresis-based, no one-frame-transient alarms)
+  - **Graphics (F2)** — settings only; **Render Debug (F12)** — diagnostic
+    views (shadow/water/SSAO debug, exposure readout, per-pass GPU cost) writing
+    the same `shadowDebug`/`waterDebugView`/`ssaoDebugView` state as before
+  - **Streaming (F3)** — budgets + queue/pool telemetry with bounded histories
+  - **Performance (F7)** — CPU hierarchy + flat sortable scope table
+    (last/avg/peak + click-to-plot), GPU pass view, worker jobs, spikes
+  - **Chunk inspector (F9)** — per-chunk lifecycle/mesh/light-cache/upload
+    state for the chunk under the player/target or manual coordinates, plus an
+    opt-in, bounded (`ChunkManager::kChunkEventRingSize`) main-thread event
+    trace (`load/genQueued/genDone/meshQueued/meshDone/edit/gpuCommit/unload`)
+  - **Memory (F11)** — CPU pools, GPU mesh resources, mesh arena, staging /
+    retire queues, workload events and mesh stage timings
+  - **Benchmark** — scored-run controls (report window unchanged)
+  - Pure logic (formatting, `MetricHistory` ring, `HealthMonitor`, snapshot
+    structs) lives in `DebugUiCore` and is unit-tested headlessly
+    (`tests/test_debug_ui.cpp`)
 - **`ImGuiLayer`** — SDL3 + Vulkan backends, dynamic rendering  
 - **`Profiler`** — hierarchical CPU scopes (F7-style panel)  
 - **`Benchmark`** — scripted runs; reports written to gitignored `benchmark-results/`  
+
+Telemetry: `telemetry::Registry::snapshot()` stays the destructive,
+capture-terminal read for benchmark finalize. The UI never calls it; panels
+read `sampleLive()`, a non-destructive bounded copy of gauges/peaks/events/
+stage totals that does not touch capture epochs or benchmark samples. The
+main-thread memory gauges are published every frame by
+`Engine::publishFrameTelemetry()` (profiled as `TelemetryPublish`), so the
+console works without running a benchmark. Console sampling is throttled to
+10 Hz and only runs while a consumer panel is open.
 
 Controls summary lives in root `README.md` (WASD, break/place, borders, etc.).
 

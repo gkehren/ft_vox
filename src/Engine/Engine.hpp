@@ -107,6 +107,9 @@ private:
 	void drawUi();
 	void tickBenchmark(double dt);
 	void sampleBenchmarkFrame();
+	/// Publish main-thread memory/workload gauges every frame (issue #179):
+	/// live, read-only data source for the developer console.
+	void publishFrameTelemetry();
 	void placeCameraOnSurface();
 	void setPlayerFlight(bool enabled);
 	void resetPlayerAtCamera();
