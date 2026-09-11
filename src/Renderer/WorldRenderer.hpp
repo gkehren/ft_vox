@@ -57,11 +57,16 @@ public:
 						bool underwater = false);
 
 	/// Record full frame into an already-reset command buffer (from VkFrameContext).
+	/// postImGuiRecord (issue #191 review round 2) runs after the ImGui pass
+	/// is recorded but before the command buffer ends: uploads whose textures
+	/// ImGui samples directly (biome map) commit here so the UI never samples
+	/// pixels newer than the state its draw lists were built from.
 	void recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t imageIndex, VkSwapchain &swapchain,
 					 const std::vector<Chunk *> &chunks, const std::vector<Chunk *> &shadowChunks,
 					 const VkClearColorValue &clearColor,
 					 const std::function<void(VkCommandBuffer)> &preRecord = {},
 					 const std::function<void(VkCommandBuffer)> &imguiDraw = {},
+					 const std::function<void(VkCommandBuffer)> &postImGuiRecord = {},
                      VkGpuProfiler *gpu = nullptr, uint64_t benchmarkTag = 0);
 
 	/// Offscreen variant for tooling (visual-regression tests): identical pass

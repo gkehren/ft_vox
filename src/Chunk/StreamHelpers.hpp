@@ -216,6 +216,14 @@ inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 	return needed;
 }
 
+/// Full-mesh near range clamped to the view distance (issue #186): the UI
+/// enforces min <= max when the view-distance slider moves; this is the
+/// same rule, pure and testable.
+inline int clampedNearRenderDistance(int minRenderDistance, int maxRenderDistance)
+{
+	return minRenderDistance > maxRenderDistance ? maxRenderDistance : minRenderDistance;
+}
+
 // -----------------------------------------------------------------------------
 // Incremental streaming structures & helpers (issue #108)
 // -----------------------------------------------------------------------------

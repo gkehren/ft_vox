@@ -88,23 +88,94 @@ struct BiomeMapResult
 	double elapsedMs{0.0}; // scheduled request to completed CPU result, including queue time
 };
 
-/// Pending GPU upload request for streamed biome map data.
+/// Pending GPU upload request for streamed biome map data. The grid travels
+/// with the pixels ON PURPOSE (issue #191 review): pixels and their mapping
+/// are one atomic logical unit, so the World panel's published grid can only
+/// ever describe the texture that was actually recorded to the GPU.
 struct BiomeMapUpload
 {
 	std::vector<uint8_t> rgba;
 	uint32_t width{0};
 	uint32_t height{0};
 	uint64_t requestId{0};
+	/// Canonical grid of these pixels (validated upstream by
+	/// isBiomeMapResultAcceptable before staging). Invalid while empty.
+	BiomeRegionGrid grid;
 };
 
-/// Validate that a biome map upload request contains well-formed pixel data.
+/// True when a staged upload must be dropped because a newer request
+/// superseded it while it waited for staging space (issue #191 review).
+/// Dropping must never touch the PUBLISHED grid: the older texture stays on
+/// screen and keeps its own mapping.
+inline bool isBiomeMapUploadSuperseded(const BiomeMapUpload &pending, uint64_t currentRequestId)
+{
+	return pending.requestId != 0 && pending.requestId != currentRequestId;
+}
+
+/// Validate that a biome map upload request contains well-formed pixel data
+/// AND a matching canonical grid: pixels and their mapping are one atomic
+/// logical unit (issue #191 review round 2) — an upload without a valid,
+/// dimension-matching grid can never be published.
 inline bool isBiomeMapUploadValid(const BiomeMapUpload &upload)
 {
 	return upload.width > 0 &&
 		   upload.height > 0 &&
 		   upload.requestId > 0 &&
+		   upload.grid.valid() &&
+		   upload.grid.width == static_cast<int>(upload.width) &&
+		   upload.grid.height == static_cast<int>(upload.height) &&
 		   upload.rgba.size() == static_cast<size_t>(upload.width) * static_cast<size_t>(upload.height) * 4;
 }
+
+/// Frame-order-safe presentation state for the biome map (issue #191 review
+/// round 2). Captures the two moments that must never desync:
+///  - `publishedGrid`/`hasTexture` describe what ImGui samples in the
+///    CURRENT frame — the UI build (drawWorld) reads them;
+///  - `pending` carries a freshly accepted result until its GPU upload is
+///    recorded AFTER the ImGui pass (postImGuiRecord). Publication therefore
+///    lands between frames: the next UI build reads the new grid with the
+///    new pixels. No double buffering needed — each frame builds from the
+///    last publication.
+struct BiomeMapPresentationState
+{
+	BiomeRegionGrid publishedGrid{};
+	bool hasTexture{false};
+	BiomeMapUpload pending{};
+
+	/// True while an upload waits for its post-ImGui recording.
+	bool hasPending() const { return !pending.rgba.empty(); }
+
+	/// Stage a freshly accepted CPU result (pixels + grid atomically).
+	void stage(BiomeMapUpload upload) { pending = std::move(upload); }
+
+	/// Supersede: drop the pending upload; the published pair is untouched
+	/// (the older texture remains on screen with its own mapping).
+	void dropPending() { pending = {}; }
+
+	/// World/seed invalidation: nothing on screen stays semantically valid.
+	void invalidate()
+	{
+		pending = {};
+		publishedGrid = {};
+		hasTexture = false;
+	}
+
+	/// Called after the copy commands for `pending` were recorded (post-ImGui):
+	/// publishes pixels + grid together for the NEXT frame. Returns false when
+	/// there was nothing publishable. Last safety barrier: the FULL upload
+	/// validity is re-checked here, so an invalid pending can never mutate the
+	/// published state even if a caller skipped the earlier validation
+	/// (issue #191 review round 3).
+	bool publishPending()
+	{
+		if (!isBiomeMapUploadValid(pending))
+			return false;
+		publishedGrid = pending.grid;
+		hasTexture = true;
+		pending = {};
+		return true;
+	}
+};
 
 /// Check if a biome map result matches active world generation, seed, request ID,
 /// and internal invariant checks before GPU publication.
@@ -143,6 +214,28 @@ inline bool shouldSupersedeBiomeMap(glm::vec2 player,
 	if (!follow)
 		return false;
 	return glm::length(player - lastPlayer) > 8.0f;
+}
+
+/// Whether the World panel should show its "Updating map..." indicator
+/// (issue #191 review round 3): a job in flight, an upload awaiting its
+/// post-ImGui recording, or a refresh already requested for the next tick
+/// (the small window between supersede and the next dispatch). Pure so the
+/// indicator rule is testable without ImGui.
+inline bool biomeMapUpdatePending(bool jobRunning, bool uploadPending, bool needsUpdate)
+{
+	return jobRunning || uploadPending || needsUpdate;
+}
+
+/// Continuous (float) map-pixel coordinates for a world position on a
+/// published biome grid — the pixel-center convention of BiomeRegionGrid
+/// without the display rounding: row 0 is the min-Z edge, `center` falls at
+/// pixel size*0.5 (even sizes). Pure so tests and the World-panel draw-list
+/// overlays share one mapping (issue #186); callers map this into screen
+/// space with the drawn image rect.
+inline glm::vec2 biomeMapContinuousPixel(const BiomeRegionGrid &grid, glm::vec2 world)
+{
+	return {(world.x - grid.center.x) / grid.step + static_cast<float>(grid.width) * 0.5f,
+			(world.y - grid.center.y) / grid.step + static_cast<float>(grid.height) * 0.5f};
 }
 
 /// Paint the player indicator dot (black outline with white center) into the

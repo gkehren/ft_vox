@@ -515,6 +515,7 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 								  const std::vector<Chunk *> &shadowChunks, const VkClearColorValue &clearColor,
 								  const std::function<void(VkCommandBuffer)> &preRecord,
 								  const std::function<void(VkCommandBuffer)> &imguiDraw,
+								  const std::function<void(VkCommandBuffer)> &postImGuiRecord,
 								  VkGpuProfiler *gpu, uint64_t benchmarkTag)
 {
 	const VkExtent2D extent = swapchain.getExtent();
@@ -559,6 +560,15 @@ void WorldRenderer::recordFrame(VkCommandBuffer cmd, uint32_t frameIndex, uint32
 		endRendering(cmd);
 		if (gpu) gpu->endPass(cmd, GpuPass::ImGui);
 	}
+
+	// Post-ImGui recording (issue #191 review round 2): uploads whose
+	// textures ImGui samples directly (biome map) commit here, so this
+	// frame's ImGui pass recorded against the previous publication and the
+	// new pixels+grid become visible to the NEXT UI build. Recorded outside
+	// named GPU profiler passes: the copy is tiny and not worth reopening
+	// the Upload pass after ImGui.
+	if (postImGuiRecord)
+		postImGuiRecord(cmd);
 
 	vkbar::cmdTransitionColor(cmd, swapchain.getImages()[imageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 							  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0,

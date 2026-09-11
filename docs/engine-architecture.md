@@ -76,7 +76,8 @@ Matches `Engine.cpp` order:
 12. **Record** — `WorldRenderer::recordFrame`:  
     - **preRecord:** `uploadPendingMeshes` + transfer→vertex barrier  
     - **ShadowPass → OpaquePass** (opaque chunks + **mobs then overlays inside OpaquePass** + **mobs inside every shadow cascade**) **→ WaterPass → SkyPass → PostStack**  
-    - **imguiDraw:** `imgui->recordDraw` onto swapchain after composite  
+    - **imguiDraw:** `imgui->recordDraw` onto swapchain after composite; ImGui samples the **currently published** biome-map texture  
+    - **postImGuiRecord:** pending biome-map texture upload + publication of the matching `BiomeRegionGrid` for the **next** UI frame. Biome-map uploads intentionally occur after ImGui so a frame never samples new map pixels with overlays built from the previous map grid (architectural invariant, issue #186/#191)  
 13. **Submit / present** — `VkFrameContext::submitAndPresent`  
 14. **Profiler end** + copy scopes into `RenderTiming` / benchmark sample  
 
@@ -129,7 +130,14 @@ stage measurements are documented in [workload-telemetry.md](workload-telemetry.
     (shadow/water/SSAO debug), environment readouts (day factors, underwater),
     exposure readout, per-pass GPU cost, writing
     the same `shadowDebug`/`waterDebugView`/`ssaoDebugView` state as before
-  - **Streaming (F3)** — budgets + queue/pool telemetry with bounded histories
+  - **Streaming (F3)** — operational streaming control (issue #186):
+    Distance (view/full-quality/front-bias + estimated resident capacity),
+    Pipeline (first-class CPU budget, documented Conservative/Balanced/
+    Aggressive presets with truthful Custom detection, advanced stage
+    rates) and compact read-only live health whose warnings follow the
+    sustained DebugHealth monitors (never one-frame spikes). Deep pool,
+    timing, device and history diagnostics stay in Overview, Performance,
+    Memory and Help ▸ About
   - **Performance (F7)** — CPU hierarchy + flat sortable scope table
     (last/avg/peak + click-to-plot), GPU pass view, worker jobs, spikes
   - **Player Diagnostics** (Developer menu) — raw physics solver counters

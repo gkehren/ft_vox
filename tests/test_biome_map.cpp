@@ -27,6 +27,184 @@ static int g_fails = 0;
 		}                                                                      \
 	} while (0)
 
+// World -> continuous map-pixel mapping used by the World-panel draw-list
+// overlays (issue #186): must agree with the grid parity contract and with
+// grid.pixelForWorld after display rounding.
+static void test_biome_map_continuous_pixel()
+{
+	const BiomeRegionGrid grid = makeBiomeRegionGrid(100.f, -40.f, 2.f, 256, 256);
+
+	// Even-size parity: the center samples exactly at pixel size/2.
+	const glm::vec2 centerPx = biomeMapContinuousPixel(grid, glm::vec2(100.f, -40.f));
+	CHECK(centerPx.x == 128.f && centerPx.y == 128.f, "grid center maps to the central pixel");
+
+	// World offset scales by 1/step: +8 blocks at step 2 -> +4 pixels.
+	const glm::vec2 eastPx = biomeMapContinuousPixel(grid, glm::vec2(108.f, -40.f));
+	CHECK(eastPx.x == 132.f && eastPx.y == 128.f, "world offset scales by 1/step");
+
+	// Rounding the continuous pixel reproduces the display-pixel mapping.
+	const glm::vec2 q = biomeMapContinuousPixel(grid, glm::vec2(37.f, 91.f));
+	const glm::ivec2 rounded = grid.pixelForWorld(glm::vec2(37.f, 91.f));
+	CHECK(int(std::lround(q.x)) == rounded.x && int(std::lround(q.y)) == rounded.y,
+		  "continuous pixel rounds to grid.pixelForWorld");
+}
+
+// Published-grid lifecycle invariant (issue #191 review round 2), tested as
+// FRAME PHASES through the exact pure state GameUI owns
+// (BiomeMapPresentationState): the UI build (drawWorld) always reads
+// publishedGrid, while a freshly accepted result waits in `pending` and is
+// published by the post-ImGui GPU recording. At every point:
+//   overlays/frame N  ==  publishedGrid  ==  pixels ImGui samples in frame N.
+// Covers: normal publication, supersede before post-ImGui, staging-full
+// deferral (B stays pending, frame stays A/A), and invalidation.
+static void test_upload_grid_publication_lifecycle()
+{
+	const BiomeRegionGrid gridA = makeBiomeRegionGrid(0.f, 0.f, 2.f, 256, 256);
+	const BiomeRegionGrid gridB = makeBiomeRegionGrid(16.f, 0.f, 1.f, 256, 256);
+
+	BiomeMapPresentationState state;
+	state.publishedGrid = gridA;
+	state.hasTexture = true;
+
+	uint64_t uploadId = 7;
+	auto stageB = [&]() {
+		BiomeMapUpload upload;
+		upload.rgba.resize(256 * 256 * 4);
+		upload.width = upload.height = 256;
+		upload.requestId = ++uploadId;
+		upload.grid = gridB;
+		return upload;
+	};
+
+	// --- Frame N: result B accepted during the UI tick (tickBiomeMap).
+	state.stage(stageB());
+	CHECK(state.hasPending(), "accepted result is staged pending");
+
+	// UI build of frame N (drawWorld) reads the PUBLISHED pair only.
+	CHECK(state.publishedGrid.center == gridA.center && state.publishedGrid.step == gridA.step,
+		  "frame N UI build overlays grid A while B is only staged");
+
+	// --- post-ImGui of frame N: supersede before the upload records
+	// (rapid wheel zoom). Frame N stays A/A; publishedGrid stays A.
+	state.dropPending();
+	CHECK(!state.hasPending(), "supersede drops the pending upload");
+	CHECK(state.publishedGrid.center == gridA.center && state.hasTexture,
+		  "superseded pending keeps published A (frame N remains A/A)");
+
+	// --- Frame N+1: still A/A.
+	CHECK(state.publishedGrid.center == gridA.center, "frame N+1 UI build still reads A");
+
+	// --- Frame N+1: B staged again, but staging is full in post-ImGui:
+	// publishPending() is not invoked, B stays pending.
+	state.stage(stageB());
+	CHECK(state.hasPending() && state.publishedGrid.center == gridA.center,
+		  "staging-full keeps B pending and the frame at A/A");
+
+	// --- Frame N+2 post-ImGui: staging OK -> upload recorded after ImGui.
+	const bool published = state.publishPending();
+	CHECK(published, "committed upload reports publication");
+	CHECK(state.publishedGrid.center == gridB.center && state.publishedGrid.step == gridB.step &&
+			  state.hasTexture,
+		  "publication switches pixels+grid together");
+	CHECK(!state.hasPending(), "publication clears the pending upload");
+
+	// --- Frame N+2 UI build happens BEFORE that publication: still A.
+	// (Order check: publishPending() runs post-ImGui, so the UI build of the
+	// publishing frame must have used the OLD grid. Modeled by re-simulating
+	// the sequence explicitly:)
+	BiomeMapPresentationState ordered;
+	ordered.publishedGrid = gridA;
+	ordered.hasTexture = true;
+	ordered.stage(stageB());
+	const BiomeRegionGrid uiBuildGrid = ordered.publishedGrid; // drawWorld frame M
+	const bool publishedThisFrame = ordered.publishPending();  // post-ImGui frame M
+	CHECK(uiBuildGrid.center == gridA.center,
+		  "the publishing frame's UI build still used grid A");
+	CHECK(publishedThisFrame && ordered.publishedGrid.center == gridB.center,
+		  "frame M+1 UI build reads grid B");
+
+	// --- World/seed invalidation clears the published pair and any pending.
+	state.invalidate();
+	CHECK(!state.hasTexture && !state.publishedGrid.valid() && !state.hasPending(),
+		  "invalidation clears the published pair and any pending upload");
+}
+
+// Round-3 robustness (issue #191 review): an invalid pending upload can
+// never mutate the published state (publishPending is the last barrier), and
+// the "Updating map..." indicator rule covers the supersede -> next-dispatch
+// window through the pure biomeMapUpdatePending helper.
+static void test_invalid_pending_never_publishes()
+{
+	const BiomeRegionGrid gridA = makeBiomeRegionGrid(0.f, 0.f, 2.f, 256, 256);
+	BiomeMapPresentationState state;
+	state.publishedGrid = gridA;
+	state.hasTexture = true;
+
+	auto staged = [&](BiomeMapUpload upload) { state.stage(std::move(upload)); };
+
+	// Invalid grid (default BiomeRegionGrid) -> rejected.
+	{
+		BiomeMapUpload bad;
+		bad.rgba.resize(256 * 256 * 4);
+		bad.width = bad.height = 256;
+		bad.requestId = 3; // grid left default/invalid
+		staged(std::move(bad));
+		CHECK(!state.publishPending(), "invalid-grid pending must not publish");
+		CHECK(state.hasPending(),
+			  "rejected publish is transactional: pending is left for the caller to drop");
+		CHECK(state.publishedGrid.center == gridA.center &&
+				  state.publishedGrid.step == gridA.step,
+			  "invalid pending never mutates publishedGrid");
+		CHECK(state.hasTexture, "invalid pending never touches hasTexture");
+	}
+
+	// Grid/pixel dimension mismatch -> rejected.
+	{
+		BiomeMapUpload bad;
+		bad.rgba.resize(256 * 256 * 4);
+		bad.width = bad.height = 256;
+		bad.requestId = 4;
+		bad.grid = makeBiomeRegionGrid(0.f, 0.f, 1.f, 128, 128);
+		staged(std::move(bad));
+		CHECK(!state.publishPending(), "dimension-mismatch pending must not publish");
+		CHECK(state.publishedGrid.center == gridA.center && state.hasTexture,
+			  "dimension-mismatch pending never mutates the published state");
+	}
+
+	// Wrong RGBA size -> rejected.
+	{
+		BiomeMapUpload bad;
+		bad.rgba.resize(256 * 256 * 3);
+		bad.width = bad.height = 256;
+		bad.requestId = 5;
+		bad.grid = makeBiomeRegionGrid(0.f, 0.f, 1.f, 256, 256);
+		staged(std::move(bad));
+		CHECK(!state.publishPending(), "wrong-size pending must not publish");
+		CHECK(state.hasTexture && state.publishedGrid.center == gridA.center,
+			  "wrong-size pending never mutates the published state");
+	}
+
+	// Control: a valid pending still publishes.
+	{
+		BiomeMapUpload good;
+		good.rgba.resize(256 * 256 * 4);
+		good.width = good.height = 256;
+		good.requestId = 6;
+		good.grid = makeBiomeRegionGrid(8.f, 8.f, 1.f, 256, 256);
+		staged(std::move(good));
+		CHECK(state.publishPending(), "valid pending publishes");
+		CHECK(state.publishedGrid.center.x == 8.f && !state.hasPending(),
+			  "valid publication switches the grid and clears pending");
+	}
+
+	// "Updating map..." rule: idle -> off; each signal alone -> on.
+	CHECK(!biomeMapUpdatePending(false, false, false), "idle world shows no updating indicator");
+	CHECK(biomeMapUpdatePending(true, false, false), "running job shows the indicator");
+	CHECK(biomeMapUpdatePending(false, true, false), "pending upload shows the indicator");
+	CHECK(biomeMapUpdatePending(false, false, true),
+		  "requested refresh (supersede window) shows the indicator");
+}
+
 static void test_biome_map_result_validity()
 {
 	const uint64_t reqId = 12;
@@ -378,11 +556,14 @@ static void test_biome_map_upload_validation()
 	BiomeMapUpload emptyUpload{};
 	CHECK(!isBiomeMapUploadValid(emptyUpload), "Empty upload must be invalid");
 
+	// Pixels and their grid are one atomic unit (issue #191 review round 2):
+	// a well-formed upload carries a valid, dimension-matching grid.
 	BiomeMapUpload validUpload{
 		.rgba = std::vector<uint8_t>(256 * 256 * 4, 128),
 		.width = 256,
 		.height = 256,
-		.requestId = 1
+		.requestId = 1,
+		.grid = makeBiomeRegionGrid(0.f, 0.f, 1.f, 256, 256)
 	};
 	CHECK(isBiomeMapUploadValid(validUpload), "Well-formed 256x256 RGBA upload must be valid");
 
@@ -390,7 +571,8 @@ static void test_biome_map_upload_validation()
 		.rgba = std::vector<uint8_t>(256 * 256 * 3, 128),
 		.width = 256,
 		.height = 256,
-		.requestId = 1
+		.requestId = 1,
+		.grid = makeBiomeRegionGrid(0.f, 0.f, 1.f, 256, 256)
 	};
 	CHECK(!isBiomeMapUploadValid(sizeMismatch), "RGB sized upload must be rejected");
 
@@ -401,6 +583,24 @@ static void test_biome_map_upload_validation()
 		.requestId = 1
 	};
 	CHECK(!isBiomeMapUploadValid(zeroDim), "Zero dimension upload must be rejected");
+
+	BiomeMapUpload missingGrid{
+		.rgba = std::vector<uint8_t>(256 * 256 * 4, 128),
+		.width = 256,
+		.height = 256,
+		.requestId = 1
+	};
+	CHECK(!isBiomeMapUploadValid(missingGrid), "Upload without a valid grid must be rejected");
+
+	BiomeMapUpload gridDimMismatch{
+		.rgba = std::vector<uint8_t>(256 * 256 * 4, 128),
+		.width = 256,
+		.height = 256,
+		.requestId = 1,
+		.grid = makeBiomeRegionGrid(0.f, 0.f, 1.f, 128, 128)
+	};
+	CHECK(!isBiomeMapUploadValid(gridDimMismatch),
+		  "Grid dimensions must match the upload dimensions");
 }
 
 static void test_deferred_upload_superseded_rejection()
@@ -411,7 +611,8 @@ static void test_deferred_upload_superseded_rejection()
 		.rgba = std::vector<uint8_t>(16 * 16 * 4, 255),
 		.width = 16,
 		.height = 16,
-		.requestId = currentRequestId
+		.requestId = currentRequestId,
+		.grid = makeBiomeRegionGrid(0.f, 0.f, 1.f, 16, 16)
 	};
 	CHECK(isBiomeMapUploadValid(upload), "Upload matching currentRequestId must be valid");
 
@@ -862,6 +1063,9 @@ int main(int argc, char **argv)
 	test_global_priority();
 	test_parallel_maps();
 	std::cout << "[test_biome_map] Running tests...\n";
+	test_biome_map_continuous_pixel();
+	test_upload_grid_publication_lifecycle();
+	test_invalid_pending_never_publishes();
 	test_biome_map_result_validity();
 	test_deterministic_stale_generation_rejection();
 	test_deterministic_superseded_request_rejection();
