@@ -9,6 +9,7 @@
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
+#include <Engine/Profiler.hpp>
 
 #include <array>
 #include <cmath>
@@ -208,11 +209,22 @@ void testUpdateDebugUiState()
 	f.chunks = &manager;
 	f.pool = &pool;
 
+	// CPU frame time must come from the profiler, not the paced simulation
+	// delta (issue #179 review): feed a deliberately divergent dt and check
+	// the snapshot keeps the two apart.
+	Profiler &prof = GetProfiler();
+	f.frameMs = 12345.6f;
+
 	debugui::UiState state;
 	state.panels.streaming = true; // consumer panel open
 
 	const double t0 = 100.0;
 	debugui::updateDebugUiState(state, f, t0);
+	CHECK(state.frame.cpuFrameMs == prof.lastFrameMs(),
+		  "snapshot CPU frame time sourced from the profiler");
+	CHECK(state.frame.cpuFrameMs != 12345.6f || prof.lastFrameMs() == 12345.6f,
+		  "paced simulation dt is not reported as CPU frame time");
+	CHECK(state.frame.simulationDtMs == 12345.6f, "simulation dt kept in its own field");
 	CHECK(state.streaming.loadedChunks == 0, "streaming snapshot sampled (no chunks yet)");
 	CHECK(state.activeChunks.count() == 1, "history pushed on first sample");
 	CHECK(std::abs(state.memory.sampledAt - t0) < 1e-9, "sample timestamp recorded");

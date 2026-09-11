@@ -89,7 +89,13 @@ private:
 struct FrameDebugSnapshot
 {
 	float fps{0.f};
-	float frameMs{0.f};
+	/// Hierarchical-profiler frame time (events → present), NOT the paced
+	/// simulation delta — they diverge whenever pacing clamps dt or a stall
+	/// is absorbed by the frame clock (issue #179 review).
+	float cpuFrameMs{0.f};
+	/// Paced simulation delta fed to gameplay ticks, kept separate so the
+	/// two can never be conflated again.
+	float simulationDtMs{0.f};
 	float avgMs{0.f};
 	float onePercentLowMs{0.f};
 	float gpuFrameMs{0.f};

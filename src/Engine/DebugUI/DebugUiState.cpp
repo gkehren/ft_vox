@@ -126,7 +126,11 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 	{
 		Profiler &prof = GetProfiler();
 		state.frame.fps = frame.fps;
-		state.frame.frameMs = frame.frameMs;
+		// CPU frame time comes from the profiler's full-frame scope, not the
+		// paced simulation delta (GameUIFrame::frameMs): vsync pacing and
+		// stall absorption make the two diverge (issue #179 review).
+		state.frame.cpuFrameMs = prof.lastFrameMs();
+		state.frame.simulationDtMs = frame.frameMs;
 		state.frame.avgMs = prof.avgFrameMs();
 		state.frame.onePercentLowMs = prof.onePercentLowMs();
 		state.frame.vsync = frame.render ? frame.render->vsyncEnabled : false;

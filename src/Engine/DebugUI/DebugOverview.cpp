@@ -10,6 +10,8 @@
 
 #include <imgui/imgui.h>
 
+#include <cmath>
+
 namespace debugui
 {
 
@@ -24,7 +26,10 @@ void drawOverview(UiState &s, GameUIFrame &frame)
 
 	// --- Frame ---
 	ImGui::SeparatorText("Frame");
-	ImGui::Text("%.1f FPS   |   %.2f ms CPU", s.frame.fps, s.frame.frameMs);
+	ImGui::Text("%.1f FPS   |   CPU frame %.2f ms", s.frame.fps, s.frame.cpuFrameMs);
+	if (std::abs(s.frame.simulationDtMs - s.frame.cpuFrameMs) > 0.5f)
+		ImGui::TextDisabled("Simulation tick %.2f ms (paced dt diverges from frame time)",
+							s.frame.simulationDtMs);
 	if (s.frame.gpuValid)
 		ImGui::Text("GPU frame: %.2f ms (pass intervals overlap)", s.frame.gpuFrameMs);
 	else
