@@ -209,6 +209,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugPerformance.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugPlayer.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugRendering.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/GraphicsCategories.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugStreaming.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugChunkInspector.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugMemory.cpp

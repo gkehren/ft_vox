@@ -158,6 +158,29 @@ target_link_libraries(test_auto_exposure PRIVATE
 add_test(NAME AutoExposure COMMAND test_auto_exposure)
 
 # ---------------------------------------------------------------------------
+# Graphics settings core (issue #185): canonical presetValues, truthful
+# Custom detection via matchesPreset, scoped panel resets. Header-only.
+# ---------------------------------------------------------------------------
+add_executable(test_graphics_settings
+    test_graphics_settings.cpp
+)
+
+target_include_directories(test_graphics_settings PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(test_graphics_settings PRIVATE
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_graphics_settings PRIVATE
+    glm
+)
+
+add_test(NAME GraphicsSettings COMMAND test_graphics_settings)
+
+# ---------------------------------------------------------------------------
 # Render helpers (cascades / fog / lighting / post clamps)
 # ---------------------------------------------------------------------------
 add_executable(test_render_helpers

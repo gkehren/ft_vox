@@ -1233,6 +1233,9 @@ void Engine::drawUi()
 		f.validation = vkContext->isValidationEnabled();
 	}
 	f.setVSync = [this](bool v) { setVSync(v); };
+	// Graphics ▸ Display "(applying)" marker (issue #185): true until the
+	// deferred swapchain recreate consumed the pending toggle.
+	f.vsyncPending = m_pendingVSync.has_value();
 	if (imgui)
 	{
 		f.uiScale = imgui->uiScale();

@@ -1,13 +1,16 @@
-// Rendering panels (issue #179):
-//  - drawRendering ("Graphics", F2): user-facing tuning only — quality
-//    preset, resource pack, atmosphere, lighting, water/shadow/post knobs.
+// Rendering panels (issue #179, category navigation issue #185):
+//  - drawRendering ("Graphics", F2): settings shell — left category rail,
+//    right content pane filled by graphics::drawCategory
+//    (GraphicsCategories.cpp). Settings only.
 //  - drawRenderDebug ("Render Debug", F12): the single discoverable surface
-//    for diagnostic views. All debug selectors write the SAME state the old
-//    Graphics combos did (ShaderParameters::shadowDebug / waterDebugView,
+//    for diagnostic views + environment readouts. All debug selectors write
+//    the SAME state the old Graphics combos did
+//    (ShaderParameters::shadowDebug / waterDebugView,
 //    PostProcessSettings::ssaoDebugView) — no second state path. A setting
 //    changes behavior; a debug view explains it.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/DebugUI/GraphicsUi.hpp>
 #include <Engine/UiScale.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/GameUI.hpp>
@@ -23,7 +26,9 @@ namespace debugui
 void drawRendering(UiState &s, GameUIFrame &frame)
 {
 	const float scale = ui::effectiveScale(frame.uiScale);
-	ImGui::SetNextWindowSize(ImVec2(ui::scaled(400.f, scale), ui::scaled(520.f, scale)), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(430.f, scale), ui::scaled(540.f, scale)), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSizeConstraints(ImVec2(ui::scaled(360.f, scale), ui::scaled(320.f, scale)),
+										ImVec2(600.f, 900.f));
 	if (!ImGui::Begin(ui::windows::kGraphics, &s.panels.rendering))
 	{
 		ImGui::End();
@@ -37,220 +42,21 @@ void drawRendering(UiState &s, GameUIFrame &frame)
 		return;
 	}
 
-	auto &sp = *frame.shader;
-	auto &pp = frame.worldRenderer->postSettings();
+	// Category navigation (issue #185): short names so the rail never scrolls
+	// at the default height; the selection persists for the session in UiState.
+	if (s.graphicsCategory < 0 || s.graphicsCategory >= graphics::kCategoryCount)
+		s.graphicsCategory = 0;
+	ImGui::BeginChild("##nav", ImVec2(ui::scaled(108.f, scale), 0.f), ImGuiChildFlags_Borders);
+	for (int i = 0; i < graphics::kCategoryCount; ++i)
+		if (ImGui::Selectable(graphics::categoryName(static_cast<graphics::Category>(i)),
+							  s.graphicsCategory == i))
+			s.graphicsCategory = i;
+	ImGui::EndChild();
 
-	if (ImGui::CollapsingHeader("Quality preset", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		const char *presetNames[] = {"Low", "Medium", "High", "Cinematic"};
-		int presetIdx = static_cast<int>(pp.qualityPreset);
-		if (ImGui::Combo("Graphics quality", &presetIdx, presetNames, IM_ARRAYSIZE(presetNames)))
-		{
-			pp.applyPreset(static_cast<GraphicsQualityPreset>(presetIdx));
-		}
-		ImGui::TextDisabled("Packs shadow resolution / SSAO / water SSR & shadows / bloom / god rays / grain / spatial AA (Low: off). Manual sliders below still work.");
-	}
-
-	// Display/present ownership (issue #184): VSync is a display setting and
-	// moved here out of the old HUD; F10 remains its quick action.
-	if (frame.render && frame.setVSync &&
-		ImGui::CollapsingHeader("Display / Present", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		if (ImGui::Checkbox("VSync [F10]", &frame.render->vsyncEnabled))
-			frame.setVSync(frame.render->vsyncEnabled);
-		if (frame.presentModeName)
-			ImGui::TextDisabled("Vulkan present mode: %s%s",
-								frame.presentModeName,
-								frame.render->vsyncEnabled
-									? ""
-									: " (no refresh pacing / no FPS cap)");
-	}
-
-	drawResourcePackSection(frame, s.resourcePackUi, s.panels.rendering);
-	if (ImGui::CollapsingHeader("Atmosphere / Fog", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		ImGui::Checkbox("Automatic atmosphere", &sp.automaticAtmosphere);
-		if (sp.automaticAtmosphere)
-		{
-			ImGui::Text("Fog start/end: %.0f / %.0f", sp.fogStart, sp.fogEnd);
-			ImGui::Text("Density: %.2f", sp.fogDensity);
-			ImGui::ColorEdit3("Fog color", &sp.fogColor.x, ImGuiColorEditFlags_NoInputs);
-		}
-		else
-		{
-			ImGui::SliderFloat("Fog start", &sp.fogStart, 0.f, 1000.f);
-			ImGui::SliderFloat("Fog end", &sp.fogEnd, sp.fogStart + 1.f, 1400.f);
-			ImGui::SliderFloat("Fog density", &sp.fogDensity, 0.f, 1.f);
-			ImGui::ColorEdit3("Fog color", &sp.fogColor.x);
-		}
-		ImGui::SliderFloat("Height falloff", &sp.fogHeightFalloff, 0.f, 0.05f, "%.4f");
-		ImGui::SliderFloat("Fog base Y", &sp.fogBaseY, 0.f, 200.f);
-	}
-
-	if (ImGui::CollapsingHeader("Lighting / Day cycle", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		ImGui::Checkbox("Day/night cycle", &sp.dayCycleEnabled);
-		ImGui::SliderFloat("Day time", &sp.dayTime, 0.f, 1.f, "%.3f");
-		ImGui::SliderFloat("Cycle speed", &sp.dayCycleSpeed, 0.f, 0.05f, "%.5f");
-
-		auto preset = [&](float t) {
-			sp.dayCycleEnabled = false;
-			sp.dayTime = t;
-		};
-		// Preset values match the actual sun curve in updateAtmosphereFromDayTime
-		// (sunAngle = dayTime*2π − π/2): noon peaks at 0.5, midnight is 0.0.
-		if (ImGui::Button("Sunrise"))
-			preset(0.25f);
-		ImGui::SameLine();
-		if (ImGui::Button("Noon"))
-			preset(0.5f);
-		ImGui::SameLine();
-		if (ImGui::Button("Sunset"))
-			preset(0.75f);
-		ImGui::SameLine();
-		if (ImGui::Button("Midnight"))
-			preset(0.0f);
-
-		ImGui::Text("Day / sunset / night: %.2f / %.2f / %.2f",
-					sp.dayFactor, sp.sunsetFactor, sp.nightFactor);
-		ImGui::SliderFloat("Ambient", &sp.ambientStrength, 0.f, 1.f);
-		ImGui::SliderFloat("Diffuse", &sp.diffuseIntensity, 0.f, 1.5f);
-		ImGui::SliderFloat("Moon ambient", &sp.moonAmbientStrength, 0.f, 1.5f);
-		ImGui::SliderFloat("Block light scale", &sp.blockLightScale, 0.f, 2.f);
-		ImGui::SliderFloat("Emissive scale", &sp.emissiveScale, 0.f, 3.f);
-	}
-
-	if (ImGui::CollapsingHeader("Water (Tier 1)", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		ImGui::SliderFloat("Wave strength", &sp.waterWaveStrength, 0.f, 0.5f);
-		ImGui::SliderFloat("Refraction", &sp.waterRefraction, 0.f, 0.12f);
-		ImGui::SliderFloat("Specular", &sp.waterSpecular, 0.f, 3.f);
-		ImGui::SliderFloat("Foam", &sp.waterFoamStrength, 0.f, 2.f);
-		ImGui::SliderFloat("Water roughness", &sp.waterRoughness, 0.04f, 0.35f, "%.2f");
-		ImGui::Text("Underwater: %s", pp.underwater ? "yes" : "no");
-		ImGui::SliderFloat("Underwater strength", &pp.underwaterStrength, 0.f, 1.5f);
-		ImGui::TextDisabled("Diagnostic water views: Render Debug (F12).");
-	}
-
-	if (ImGui::CollapsingHeader("Shadows (CSM)"))
-	{
-		if (frame.render)
-			ImGui::SliderFloat("Cascade far", &frame.render->shadowCascadeFar, 64.f, 512.f);
-		// Shadow quality tier (issue #137): the engine recreates the shadow
-		// map array deferred when the requested size differs. All four CLI
-		// sizes are selectable so an override is not silently relabeled.
-		const char *shadowSizeNames[] = {"512", "1024 (Low/Medium)", "2048 (High/Cinematic)", "4096"};
-		int shadowSizeIdx = pp.shadowMapSize <= 512 ? 0 : (pp.shadowMapSize <= 1024 ? 1 : (pp.shadowMapSize <= 2048 ? 2 : 3));
-		if (ImGui::Combo("Shadow resolution", &shadowSizeIdx, shadowSizeNames, IM_ARRAYSIZE(shadowSizeNames)))
-			pp.shadowMapSize = shadowSizeIdx == 0 ? 512 : shadowSizeIdx == 1 ? 1024 : shadowSizeIdx == 2 ? 2048 : 4096;
-		ImGui::TextDisabled("Diagnostic shadow views: Render Debug (F12).");
-	}
-
-	// Issue #161: these knobs grade the terrain and mob lit-material shaders
-	// only — not water, and not the composited frame (that is the post
-	// stack's "Post saturation" / "Post contrast"). The header and tooltip
-	// must keep saying so; generic "Visual" labels proved misleading.
-	if (ImGui::CollapsingHeader("Material grading (terrain & mobs)"))
-	{
-		ImGui::TextDisabled("Terrain + mob materials only; water and full-frame\n"
-							"grading live under Post-processing.");
-		ImGui::SliderFloat("Material saturation", &sp.materialSaturation, 0.f, 3.f);
-		ImGui::SliderFloat("Material color boost", &sp.materialColorBoost, 0.5f, 2.5f);
-		ImGui::SliderFloat("Material contrast", &sp.materialContrast, 0.5f, 1.8f);
-	}
-
-	if (ImGui::CollapsingHeader("Post-processing", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		ImGui::Checkbox("Bloom", &pp.bloomEnabled);
-		if (pp.bloomEnabled)
-		{
-			ImGui::SliderFloat("Bloom threshold", &pp.bloomThreshold, 0.f, 5.f);
-			ImGui::SliderFloat("Bloom intensity", &pp.bloomIntensity, 0.f, 2.f);
-			ImGui::SliderInt("Bloom blur iters", &pp.bloomBlurIterations, 1, 5);
-		}
-		ImGui::Checkbox("Spatial AA (FXAA 3.11)", &pp.fxaaEnabled);
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Dedicated FXAA 3.11 pass on the tone-mapped image (issue #143):\nimproves voxel silhouettes and foliage edges; Off keeps the direct composite path.\nThe Low preset disables AA.");
-		// True capability, not just the setting: without fragment SSBO stores
-		// the renderer runs the manual path regardless of the checkbox, so it
-		// must stay togglable and the manual slider must stay editable.
-		const bool autoSupported = frame.worldRenderer->autoExposureSupported();
-		const bool autoActive = pp.autoExposureEnabled && autoSupported;
-		ImGui::BeginDisabled(!autoSupported);
-		ImGui::Checkbox("Auto exposure", &pp.autoExposureEnabled);
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip(autoSupported
-								  ? "Meter HDR scene luminance and adapt exposure over time (eye adaptation)."
-								  : "Fragment SSBO stores unavailable on this GPU — the manual path is used.");
-		ImGui::EndDisabled();
-		// Greyed out while auto exposure actually drives the frame, but shows
-		// (and stays editable for) the value used as soon as auto is off.
-		ImGui::BeginDisabled(autoActive);
-		ImGui::SliderFloat("Manual exposure", &pp.exposure, 0.1f, 5.f);
-		ImGui::EndDisabled();
-		ImGui::SliderFloat("Compensation (EV)", &pp.exposureCompensation, -3.0f, 3.0f, "%.1f");
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Auto-exposure bias in stops. 0 = neutral, +1 doubles the target exposure.");
-		if (autoActive)
-		{
-			ImGui::Indent();
-			ImGui::SliderFloat("Middle grey", &pp.autoExposureMiddleGrey, 0.1f, 2.0f, "%.2f");
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Target scene luminance (pre-tonemap). 0.18 = photographic middle grey.");
-			ImGui::SliderFloat("Min EV", &pp.autoExposureMinEv, -6.0f, 0.0f, "%.1f");
-			ImGui::SliderFloat("Max EV", &pp.autoExposureMaxEv, 0.0f, 6.0f, "%.1f");
-			ImGui::SliderFloat("Adapt speed (brighten)", &pp.autoExposureSpeedUp, 0.25f, 10.0f, "%.2f /s");
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("How fast exposure drops when the scene brightens.");
-			ImGui::SliderFloat("Adapt speed (darken)", &pp.autoExposureSpeedDown, 0.25f, 10.0f, "%.2f /s");
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("How fast exposure rises when the scene darkens (eye dilation).");
-			ImGui::Unindent();
-		}
-		ImGui::SliderFloat("Gamma", &pp.gamma, 0.5f, 2.5f);
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Artistic midtone grade (1.0 = neutral linear display)");
-		ImGui::SliderFloat("Post saturation", &pp.postSaturation, 0.5f, 2.f);
-		ImGui::SliderFloat("Post contrast", &pp.postContrast, 0.5f, 1.8f);
-		ImGui::SliderFloat("Film grain", &pp.filmGrain, 0.f, 0.12f, "%.3f");
-		ImGui::SliderFloat("Vignette", &pp.vignette, 0.f, 1.f);
-		const char *toneMappers[] = {"ACES Filmic", "Reinhard"};
-		ImGui::Combo("Tone mapper", &pp.toneMapper, toneMappers, IM_ARRAYSIZE(toneMappers));
-
-		ImGui::Separator();
-		// Leaving SSAO off while a debug view is selected would freeze the
-		// frame on that debug output (composite checks the debug flag before
-		// ssaoEnabled) with the selector hidden — reset it on disable.
-		if (ImGui::Checkbox("SSAO", &pp.ssaoEnabled) && !pp.ssaoEnabled)
-			pp.ssaoDebugView = 0;
-		if (pp.ssaoEnabled)
-		{
-			ImGui::SliderFloat("SSAO radius (m)", &pp.ssaoRadius, 0.05f, 3.0f);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Occluder search radius in view-space meters at the pixel's depth (isotropic)");
-			ImGui::SliderFloat("SSAO intensity", &pp.ssaoIntensity, 0.f, 2.f);
-			ImGui::SliderInt("SSAO directions", &pp.ssaoDirections, 4, 8);
-			ImGui::SliderInt("SSAO steps", &pp.ssaoSteps, 1, 4);
-		}
-
-		ImGui::Separator();
-		ImGui::Checkbox("God rays", &pp.godRaysEnabled);
-		if (pp.godRaysEnabled)
-		{
-			ImGui::SliderFloat("Density", &pp.godRaysDensity, 0.1f, 3.f);
-			ImGui::SliderFloat("Weight", &pp.godRaysWeight, 0.001f, 0.05f, "%.4f");
-			ImGui::SliderFloat("Decay", &pp.godRaysDecay, 0.9f, 1.f, "%.3f");
-			ImGui::SliderFloat("GR exposure", &pp.godRaysExposure, 0.f, 1.f);
-			ImGui::Checkbox("Depth occlusion", &pp.godRaysDepthOcclusion);
-			ImGui::Checkbox("Dynamic boost", &pp.godRaysDynamicBoostEnabled);
-			if (pp.godRaysDynamicBoostEnabled)
-			{
-				ImGui::SliderFloat("Dramatic boost", &pp.godRaysDramaticBoost, 1.f, 4.f, "%.2fx");
-				ImGui::Checkbox("Boost preview", &pp.godRaysBoostPreview);
-			}
-		}
-		ImGui::TextDisabled("Diagnostic views (shadow / water / SSAO / exposure):\nRender Debug (F12).");
-	}
+	ImGui::SameLine();
+	ImGui::BeginChild("##content", ImVec2(0.f, 0.f), ImGuiChildFlags_Borders);
+	graphics::drawCategory(static_cast<graphics::Category>(s.graphicsCategory), s, frame);
+	ImGui::EndChild();
 
 	ImGui::End();
 }
@@ -297,6 +103,13 @@ void drawRenderDebug(UiState &s, GameUIFrame &frame)
 		if (!pp.ssaoEnabled && ImGui::IsItemHovered())
 			ImGui::SetTooltip("Enable SSAO in Graphics (F2) first.");
 	}
+
+	// Environment readouts (issue #185): moved out of the Graphics categories
+	// — diagnostics live here, settings live in the categories.
+	ImGui::SeparatorText("Environment");
+	ImGui::Text("Day / sunset / night: %.2f / %.2f / %.2f",
+				sp.dayFactor, sp.sunsetFactor, sp.nightFactor);
+	ImGui::Text("Underwater: %s", pp.underwater ? "yes" : "no");
 
 	// Exposure state: the ONLY GPU->CPU traffic here, pulled on demand at
 	// ~10 Hz while this panel is visible on the fence-waited frame slot.

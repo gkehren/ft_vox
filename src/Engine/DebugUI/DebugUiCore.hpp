@@ -312,6 +312,10 @@ public:
 	double lastPoolRejectIncrease{-100.0};
 	double lastStagingFailureAt{-100.0};
 
+	// Graphics panel navigation (issue #185): selected category; persists for
+	// the session.
+	int graphicsCategory{0};
+
 	// Resource-pack browser state (Graphics panel section + file dialog).
 	ResourcePackUiState resourcePackUi{};
 };
