@@ -727,22 +727,26 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 	std::sort(queue.begin(), queue.end(),
 			  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
 
-	// Distance-prioritized; budget counts GROUPS as one unit (PR #178
-	// review): a geometric commit group commits all-or-nothing, so the
-	// per-sec upload settings can never make an atomic border commit
-	// structurally impossible.
+	// Distance-prioritized. Budget units gate GPU COPY work: a group's
+	// members record their copies progressively across frames (one member
+	// per unit, as staging allows), and the publication itself is CPU-only
+	// and free, so per-sec upload settings can neither make an atomic
+	// border commit structurally impossible nor starve it once every
+	// replacement is resident (PR #178 review round 4).
 	int budgetUnits = budget;
 	int uploaded = 0;
-	std::unordered_set<Chunk *> committed;
-	for (size_t i = 0; i < queue.size() && budgetUnits > 0; ++i)
+	std::unordered_set<Chunk *> published;
+	for (size_t i = 0; i < queue.size(); ++i)
 	{
 		Chunk *chunk = queue[i].chunk;
-		if (committed.count(chunk))
+		if (published.count(chunk))
 			continue;
 
 		PendingMeshCommitGroup *group = commitGroupFor(chunk);
 		if (!group)
 		{
+			if (budgetUnits <= 0)
+				continue; // budget exhausted: remaining independents wait next frame
 			if (!chunk->uploadToGPUAsync(allocator, staging, cmd, retire, arenas))
 				break; // staging full — remaining wait next frame
 			uploaded += 1;
@@ -750,60 +754,118 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 			continue;
 		}
 
-		// Snapshot the group identity and members up front: nothing below
-		// dereferences `group` once commits (and therefore the group erase)
-		// have started (PR #178 review round 3).
-		const std::vector<Chunk *> members = group->chunks;
+		// Only the stable group identity is snapshotted: the state machine
+		// mutates the live member entries (record flags, replacements), and
+		// nothing below touches `group` after the publish (and therefore
+		// the group erase) has run.
+		std::vector<PendingGroupMember> &members = group->members;
 		const uint64_t groupId = group->groupId;
 
-		// Group gate: every geometric member must carry a published-able
-		// replacement. Until then the group is skipped (without consuming
-		// budget) and the renderer keeps showing old A + old B; the blocked
-		// group must not stop independent chunks further down the queue.
-		bool ready = true;
-		for (Chunk *member : members)
+		// Supersession (round 4, item 8): a member re-edited after its
+		// replacement was prepared invalidates that replacement. Discard it
+		// and drop the group back to WaitingForMeshes - the newest result
+		// will prepare, upload and publish in its place.
+		bool superseded = false;
+		for (PendingGroupMember &member : members)
 		{
-			if (!member || member->getState() != ChunkState::MESHED ||
-			    !member->needsGPUUpload() || member->isInTransit() ||
-			    !member->hasPendingMeshResult())
+			if (member.replacement.valid &&
+			    (member.chunk->meshGeneration() != member.replacement.generation ||
+			     member.chunk->meshRevision() != member.replacement.revision ||
+			     member.chunk->getState() != ChunkState::MESHED))
 			{
-				ready = false;
-				break;
+				member.chunk->discardGPUUpload(member.replacement);
+				member.recorded = false;
+				superseded = true;
 			}
 		}
-		if (!ready)
-			continue;
+		if (superseded)
+			group->state = CommitGroupState::WaitingForMeshes;
 
-		// Prepare ALL members first (each fully rolled back on its own
-		// failure), then commit ALL. A staging shortfall on any member
-		// defers the whole group and leaves every committed mesh intact.
-		std::vector<Chunk::PreparedMeshUpload> prepared(members.size());
-		bool allPrepared = true;
-		for (size_t k = 0; k < members.size() && allPrepared; ++k)
-			allPrepared = members[k]->prepareGPUUpload(allocator, staging, cmd, retire,
-			                                           arenas, prepared[k]);
-		if (!allPrepared)
+		if (group->state == CommitGroupState::WaitingForMeshes)
 		{
-			// Successful plans still own fresh ranges + staging
-			// reservations; release them so the published meshes stay the
-			// only live state. The failed member already rolled itself back
-			// inside its prepare, so this is a no-op for it.
-			for (size_t k = 0; k < members.size(); ++k)
-				members[k]->rollbackGPUUpload(prepared[k]);
-			telemetry::registry().add(telemetry::UploadDeferred);
-			break; // staging/arena exhaustion — the group waits next frame
+			// Gate: every geometric member must carry a publishable newest
+			// result. Until then the group is skipped (without consuming
+			// budget) and the renderer keeps showing old A + old B; the
+			// blocked group never stops independent chunks.
+			bool ready = true;
+			for (const PendingGroupMember &member : members)
+			{
+				if (!member.chunk || member.chunk->getState() != ChunkState::MESHED ||
+				    !member.chunk->needsGPUUpload() || member.chunk->isInTransit() ||
+				    !member.chunk->hasPendingMeshResult())
+				{
+					ready = false;
+					break;
+				}
+			}
+			if (!ready)
+				continue;
+
+			// ALLOCATE for every member without a live replacement (each
+			// fully rolled back on its own failure; members that already hold
+			// a valid replacement keep it).
+			std::vector<size_t> freshlyPrepared;
+			bool allPrepared = true;
+			for (size_t k = 0; k < members.size() && allPrepared; ++k)
+			{
+				if (!members[k].replacement.valid)
+				{
+					if (members[k].chunk->prepareGPUUpload(arenas, members[k].replacement))
+						freshlyPrepared.push_back(k);
+					else
+						allPrepared = false;
+				}
+			}
+			if (!allPrepared)
+			{
+				for (size_t k : freshlyPrepared)
+					members[k].chunk->discardGPUUpload(members[k].replacement);
+				telemetry::registry().add(telemetry::UploadDeferred);
+				continue; // arena exhaustion — the group waits next frame
+			}
+			group->state = CommitGroupState::Uploading;
 		}
-		for (size_t k = 0; k < members.size(); ++k)
+
+		if (group->state == CommitGroupState::Uploading)
 		{
-			members[k]->commitGPUUpload(cmd, retire, prepared[k]);
+			// COPY: one budget unit authorizes this frame's recording pass
+			// for the whole group - as many unrecorded members as staging
+			// allows. Members that do not fit stay for a later frame while
+			// old meshes render everywhere.
+			if (budgetUnits > 0)
+			{
+				--budgetUnits;
+				bool allRecorded = true;
+				for (PendingGroupMember &member : members)
+				{
+					if (member.recorded)
+						continue;
+					if (!member.chunk->recordGPUUpload(allocator, staging, cmd, arenas,
+					                                   member.replacement))
+					{
+						allRecorded = false; // no staging room for this member yet
+					}
+				}
+				if (allRecorded)
+					group->state = CommitGroupState::ReadyToPublish;
+			}
+			if (group->state != CommitGroupState::ReadyToPublish)
+				continue; // still uploading — old meshes render everywhere
+		}
+
+		// ReadyToPublish: CPU-only, consumes no budget, atomic across all
+		// members - the previous frame drew old A..E, this frame draws
+		// new A..E, with no mixed state in between.
+		for (PendingGroupMember &member : members)
+		{
+			member.chunk->publishGPUUpload(retire, arenas, member.replacement);
 			telemetry::registry().add(telemetry::UploadChunks);
-			committed.insert(members[k]);
+			published.insert(member.chunk);
 		}
 		// The fused-group invariant makes this exact: no other active group
-		// shares a member with the one just committed.
+		// shares a member with the one just published.
 		eraseCommitGroup(groupId);
 		uploaded += static_cast<int>(members.size());
-		--budgetUnits;
 	}
 	return uploaded;
 }
@@ -987,16 +1049,21 @@ bool ChunkManager::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y,
 	const uint64_t editId = m_nextEditId++;
 	const bool deferAll = mustDeferVoxelEdit(target);
 	queueOrApplyEdit(target, chunkPos, x, y, z, type, false, deferAll, editId);
-	std::vector<Chunk *> geometricMembers;
-	geometricMembers.push_back(target);
-	enqueueOrApplyMirrorEdits(chunkPos, x, y, z, type, deferAll, editId, &geometricMembers);
+	std::vector<Chunk *> geometricChunks;
+	geometricChunks.push_back(target);
+	enqueueOrApplyMirrorEdits(chunkPos, x, y, z, type, deferAll, editId, &geometricChunks);
 	// A border edit couples the geometry of the target and its mirrors:
 	// their GPU publications must commit together or not at all (PR #178
 	// review). Light-only invalidated neighbors never join. Overlapping
 	// groups (edits sharing chunks) are fused here before the scheduler
 	// can ever see them.
-	if (geometricMembers.size() > 1)
-		registerCommitGroup(editId, std::move(geometricMembers));
+	if (geometricChunks.size() > 1)
+	{
+		std::vector<PendingGroupMember> members;
+		for (Chunk *member : geometricChunks)
+			members.push_back({member, false, {}});
+		registerCommitGroup(editId, std::move(members));
+	}
 	return true;
 }
 
@@ -1137,26 +1204,39 @@ bool ChunkManager::hasPendingEditsFor(const Chunk *chunk) const
 
 namespace
 {
-bool groupContainsChunk(const std::vector<Chunk *> &chunks, Chunk *chunk)
+bool memberListContains(const std::vector<PendingGroupMember> &members, Chunk *chunk)
 {
-	for (Chunk *member : chunks)
-		if (member == chunk)
+	for (const PendingGroupMember &member : members)
+		if (member.chunk == chunk)
 			return true;
 	return false;
 }
 
-bool groupsIntersect(const std::vector<Chunk *> &a, const std::vector<Chunk *> &b)
+bool groupsIntersect(const std::vector<PendingGroupMember> &a,
+	                 const std::vector<PendingGroupMember> &b)
 {
-	for (Chunk *member : a)
-		if (groupContainsChunk(b, member))
+	for (const PendingGroupMember &member : a)
+		if (memberListContains(b, member.chunk))
 			return true;
 	return false;
 }
 
-void appendUnique(std::vector<Chunk *> &dst, Chunk *chunk)
+// Fusion dedup: when a chunk is already in the merged set, its EXISTING
+// member entry wins - an in-flight recorded replacement must survive the
+// fusion (a later revision check discards it if the new edit made it
+// stale).
+void appendMemberUnique(std::vector<PendingGroupMember> &dst, PendingGroupMember member)
 {
-	if (!groupContainsChunk(dst, chunk))
-		dst.push_back(chunk);
+	if (!memberListContains(dst, member.chunk))
+		dst.push_back(std::move(member));
+}
+
+void appendUnique(std::vector<uint64_t> &dst, uint64_t id)
+{
+	for (uint64_t existing : dst)
+		if (existing == id)
+			return;
+	dst.push_back(id);
 }
 } // namespace
 
@@ -1166,24 +1246,30 @@ void appendUnique(std::vector<Chunk *> &dst, Chunk *chunk)
 // a full pass merges nothing more), so the active groups always form
 // disjoint chunk sets: a chunk belongs to at most one group, which is what
 // makes the per-group atomic commit exact.
-void ChunkManager::registerCommitGroup(uint64_t editId, std::vector<Chunk *> members)
+void ChunkManager::registerCommitGroup(uint64_t editId, std::vector<PendingGroupMember> members)
 {
-	std::vector<Chunk *> merged;
+	std::vector<PendingGroupMember> merged;
 	std::vector<uint64_t> editIds{editId};
-	for (Chunk *member : members)
-		appendUnique(merged, member);
+	for (PendingGroupMember &member : members)
+		appendMemberUnique(merged, std::move(member));
 
+	// Transitive fusion: absorb every active group sharing a chunk with the
+	// merged set, repeating until a full pass merges nothing more. Shared
+	// chunks keep their existing member entry (an in-flight recorded
+	// replacement survives the fusion; the per-frame revision check
+	// discards it if the new edit made it stale).
 	bool changed = false;
 	do
 	{
 		changed = false;
 		for (auto it = m_commitGroups.begin(); it != m_commitGroups.end();)
 		{
-			if (groupsIntersect(merged, it->chunks))
+			if (groupsIntersect(merged, it->members))
 			{
-				for (Chunk *member : it->chunks)
-					appendUnique(merged, member);
-				editIds.push_back(it->groupId);
+				for (PendingGroupMember &member : it->members)
+					appendMemberUnique(merged, std::move(member));
+				for (uint64_t absorbed : it->editIds)
+					appendUnique(editIds, absorbed);
 				it = m_commitGroups.erase(it);
 				changed = true;
 			}
@@ -1194,7 +1280,9 @@ void ChunkManager::registerCommitGroup(uint64_t editId, std::vector<Chunk *> mem
 		}
 	} while (changed);
 
-	m_commitGroups.push_back({m_nextGroupId++, std::move(merged), std::move(editIds)});
+	m_commitGroups.push_back(
+		{m_nextGroupId++, CommitGroupState::WaitingForMeshes, std::move(merged),
+		 std::move(editIds)});
 }
 
 PendingMeshCommitGroup *ChunkManager::commitGroupFor(Chunk *chunk)
@@ -1205,12 +1293,15 @@ PendingMeshCommitGroup *ChunkManager::commitGroupFor(Chunk *chunk)
 #endif
 	for (PendingMeshCommitGroup &group : m_commitGroups)
 	{
-		if (groupContainsChunk(group.chunks, chunk))
+		for (PendingGroupMember &member : group.members)
 		{
-			found = &group;
+			if (member.chunk == chunk)
+			{
+				found = &group;
 #ifndef NDEBUG
-			++matches;
+				++matches;
 #endif
+			}
 		}
 	}
 	// Registration fuses overlapping groups, so a chunk can never belong to
@@ -1228,14 +1319,33 @@ void ChunkManager::eraseCommitGroup(uint64_t groupId)
 						 m_commitGroups.end());
 }
 
-void ChunkManager::dropCommitGroupsFor(Chunk *chunk)
+// A member chunk is unloading: drop it from its group (discarding any
+// unpublished replacement it still owns) and keep the remaining atomic
+// dependency alive while at least two chunks remain. A group falling to a
+// single member has no coupling left to protect and dissolves - the
+// remaining chunk reverts to normal independent uploads.
+void ChunkManager::removeChunkFromCommitGroups(Chunk *chunk)
 {
-	m_commitGroups.erase(
-		std::remove_if(m_commitGroups.begin(), m_commitGroups.end(),
-					   [chunk](const PendingMeshCommitGroup &group) {
-						   return groupContainsChunk(group.chunks, chunk);
-					   }),
-		m_commitGroups.end());
+	for (auto it = m_commitGroups.begin(); it != m_commitGroups.end();)
+	{
+		std::vector<PendingGroupMember> &members = it->members;
+		for (auto memberIt = members.begin(); memberIt != members.end();)
+		{
+			if (memberIt->chunk == chunk)
+			{
+				chunk->discardGPUUpload(memberIt->replacement);
+				memberIt = members.erase(memberIt);
+			}
+			else
+			{
+				++memberIt;
+			}
+		}
+		if (members.size() < 2)
+			it = m_commitGroups.erase(it);
+		else
+			++it;
+	}
 }
 
 void ChunkManager::erasePendingEditsFor(const Chunk *chunk)
@@ -1399,7 +1509,7 @@ void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSetti
 		m_chunks.erase(it);
 		m_deferredRelease.push_back(chunk);
 		erasePendingEditsFor(chunk);
-		dropCommitGroupsFor(chunk);
+		removeChunkFromCommitGroups(chunk);
 	}
 	if (!toUnload.empty())
 		m_deferredReleaseAge = 0; // reset age so new unloads wait full delay

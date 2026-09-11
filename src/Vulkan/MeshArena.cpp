@@ -230,11 +230,14 @@ void MeshArena::beginFrame(uint64_t frameNumber)
 	}
 	// Pages whose whole capacity is back in one free block have no live
 	// range left; hand the buffer to the frame-aware retire queue.
-	for (Page &p : m_pages)
+	for (size_t pi = 0; pi < m_pages.size(); ++pi)
 	{
+		Page &p = m_pages[pi];
 		if (p.alive && p.freeList.size() == 1 &&
 			p.freeList.front() == std::make_pair(0u, static_cast<uint32_t>(p.buf.size)))
+		{
 			releasePage(p);
+		}
 	}
 
 	// Per-arena gauges are published by MeshArenas::beginFrame as a single

@@ -77,6 +77,33 @@ struct PendingVoxelEdit
 	uint64_t editId{0};
 };
 
+/// Lifecycle of a geometric commit group (PR #178 review round 4):
+///
+///   WaitingForMeshes  some member has no publishable newest result yet;
+///                     old meshes keep rendering for every member
+///   Uploading         every member's replacement is allocated; members
+///                     record their GPU copies progressively across frames
+///                     as staging room allows
+///   ReadyToPublish    every replacement is resident: all members publish
+///                     atomically in one CPU frame, then the group erases
+enum class CommitGroupState
+{
+	WaitingForMeshes,
+	Uploading,
+	ReadyToPublish
+};
+
+/// One chunk inside a geometric commit group. `replacement` survives
+/// frames (fresh arena ranges, future slot values, identity stamps) so a
+/// member can upload in one frame and publish several frames later;
+/// staging scratch never survives the frame that recorded the copies.
+struct PendingGroupMember
+{
+	Chunk *chunk{nullptr};
+	bool recorded{false}; // replacement copies are submitted and resident
+	Chunk::GpuReplacement replacement{};
+};
+
 /// Geometric commit group (PR #178 review): the chunks whose border
 /// geometry was coupled by border voxel edits - the target plus its
 /// shell-mirror neighbors. Corner edits touch several neighbors, hence the
@@ -84,15 +111,14 @@ struct PendingVoxelEdit
 /// sides; no diagonals). Light-only invalidated neighbors never join.
 /// Overlapping groups are fused at registration (transitively), so active
 /// groups always form disjoint chunk sets: one chunk belongs to at most
-/// one group. All members' GPU publications are prepared, then committed,
-/// as one unit so the renderer never mixes a replaced border mesh with
-/// the still-committed mesh of the chunk on the other side.
+/// one group.
 struct PendingMeshCommitGroup
 {
 	// Stable group identity: distinct from editId because a fused group
 	// represents several logical edits. 0 is reserved (no group).
 	uint64_t groupId{0};
-	std::vector<Chunk *> chunks;
+	CommitGroupState state{CommitGroupState::WaitingForMeshes};
+	std::vector<PendingGroupMember> members;
 	// Debug provenance: the logical edits absorbed into this group.
 	std::vector<uint64_t> editIds;
 };
@@ -310,14 +336,18 @@ private:
 	// One entry per set of chunks whose border geometry was coupled by
 	// border edits. Overlapping groups are fused transitively at
 	// registration, so the active groups always form disjoint chunk sets
-	// and commitGroupFor() can only ever find one group per chunk. Groups
-	// are erased by their stable groupId exactly when their atomic commit
-	// succeeds, and dropped wholesale in the unload funnel that drops
-	// pending edits (the only place a member chunk can be recycled).
-	void registerCommitGroup(uint64_t editId, std::vector<Chunk *> members);
+	// and commitGroupFor() can only ever find one group per chunk. A group
+	// walks WaitingForMeshes -> Uploading (members record their GPU copies
+	// progressively across frames) -> ReadyToPublish (atomic publication
+	// of every member), then erases by its groupId. Member chunks that
+	// unload are removed from their group; a group falling below two
+	// members loses its atomic dependency and dissolves (the remaining
+	// member reverts to normal independent uploads). Member replacements
+	// that were already recorded are discarded with the member.
+	void registerCommitGroup(uint64_t editId, std::vector<PendingGroupMember> members);
 	PendingMeshCommitGroup *commitGroupFor(Chunk *chunk);
 	void eraseCommitGroup(uint64_t groupId);
-	void dropCommitGroupsFor(Chunk *chunk);
+	void removeChunkFromCommitGroups(Chunk *chunk);
 	std::vector<PendingMeshCommitGroup> m_commitGroups;
 	uint64_t m_nextGroupId{1};
 

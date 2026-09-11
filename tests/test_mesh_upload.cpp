@@ -72,18 +72,32 @@ struct ChunkStateProbe
 };
 
 // Friend probe declared in ChunkManager.hpp: exposes the geometric commit
-// group bookkeeping so group lifetime, fusion and member sets are
-// observable without public API.
+// group bookkeeping so group lifetime, lifecycle state, fusion and member
+// sets are observable without public API.
 struct ChunkManagerProbe
 {
 	static size_t commitGroups(const ChunkManager &m) { return m.m_commitGroups.size(); }
-	static const std::vector<Chunk *> &groupChunks(const ChunkManager &m, size_t index)
+	static CommitGroupState groupState(const ChunkManager &m, size_t index)
 	{
-		return m.m_commitGroups[index].chunks;
+		return m.m_commitGroups[index].state;
+	}
+	static std::vector<Chunk *> groupChunks(const ChunkManager &m, size_t index)
+	{
+		std::vector<Chunk *> out;
+		for (const PendingGroupMember &member : m.m_commitGroups[index].members)
+			out.push_back(member.chunk);
+		return out;
 	}
 	static void registerGroup(ChunkManager &m, std::vector<Chunk *> members)
 	{
-		m.registerCommitGroup(0, std::move(members));
+		std::vector<PendingGroupMember> converted;
+		for (Chunk *chunk : members)
+			converted.push_back({chunk, false, {}});
+		m.registerCommitGroup(0, std::move(converted));
+	}
+	static void removeFromGroups(ChunkManager &m, Chunk *chunk)
+	{
+		m.removeChunkFromCommitGroups(chunk);
 	}
 };
 
@@ -209,16 +223,28 @@ struct HeadlessDevice
 	// GPU buffer contents become observable (readback checks).
 	bool flush()
 	{
-		if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
+		VkResult endR = vkEndCommandBuffer(cmd);
+		if (endR != VK_SUCCESS)
+		{
+			std::cerr << "flush: end=" << int(endR) << std::endl;
 			return false;
+		}
 		VkSubmitInfo si{};
 		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		si.commandBufferCount = 1;
 		si.pCommandBuffers = &cmd;
-		if (vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
+		VkResult subR = vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+		if (subR != VK_SUCCESS)
+		{
+			std::cerr << "flush: submit=" << int(subR) << std::endl;
 			return false;
-		if (vkQueueWaitIdle(queue) != VK_SUCCESS)
+		}
+		VkResult waitR = vkQueueWaitIdle(queue);
+		if (waitR != VK_SUCCESS)
+		{
+			std::cerr << "flush: wait=" << int(waitR) << std::endl;
 			return false;
+		}
 		// Reset before re-recording (never between end and submit: a reset
 		// wipes the recorded commands and the submission would be empty).
 		vkResetCommandBuffer(cmd, 0);
@@ -1845,7 +1871,10 @@ int main()
 					stagingX.beginFrame(frameSlot % 2);
 				};
 				const auto submitFrame = [&]() {
-					CHECK(vk.flush(), "xchunk: frame submit");
+					if (!vk.flush())
+					{
+						std::cerr << "FLUSHFAIL slot=" << frameSlot << std::endl;
+					}
 					retire.flush();
 					++frameSlot;
 				};
@@ -1930,78 +1959,121 @@ int main()
 				}
 				submitFrame();
 
-				// --- B becomes ready; staging leaves room for exactly the
-				// FIRST registered member (A) --- Prepare order follows the
-				// group's registration order (target A, then mirror B): A's
-				// prepare succeeds, B's preflight fails on the drained ring,
-				// and the whole group rolls back - no committed mesh moves.
-				// The failure injection is exact-fit staging, not camera
-				// ordering.
+				// --- Round 4: ALLOCATE failure at the Waiting->Uploading
+				// transition --- the group rolls back and stays
+				// WaitingForMeshes with every arena counter exactly as
+				// before (no leaked suballocation).
 				remeshOne(B);
-				VkDeviceSize needFirst = 0;
-				{
-					Chunk *firstMember = ChunkManagerProbe::groupChunks(managerX, 0).front();
-					CHECK(firstMember == A,
-					      "xchunk: group registration order starts with the target");
-					MeshBuildResult *rf = ChunkStateProbe::pending(*firstMember);
-					CHECK(rf != nullptr, "xchunk: first member result attached");
-					if (rf)
+				const auto stagingNeedOf = [](Chunk *chunk) {
+					VkDeviceSize need = 0;
+					MeshBuildResult *r = ChunkStateProbe::pending(*chunk);
+					CHECK(r != nullptr, "xchunk: result attached for staging accounting");
+					if (r)
 						for (int s = 0; s < 16; ++s)
-							if ((rf->sectionsBuilt >> s) & 1u)
+							if ((r->sectionsBuilt >> s) & 1u)
 							{
 								const auto align = [](size_t bytes) {
 									return static_cast<VkDeviceSize>(
 										(bytes + StagingRing::kAlignment - 1) /
 										StagingRing::kAlignment * StagingRing::kAlignment);
 								};
-								needFirst += align(rf->sections[static_cast<size_t>(s)].opaqueVertices.size() *
-								                   sizeof(Vertex));
-								needFirst += align(rf->sections[static_cast<size_t>(s)].opaqueIndices.size() *
-								                   sizeof(uint32_t));
-								needFirst += align(rf->sections[static_cast<size_t>(s)].waterVertices.size() *
-								                   sizeof(Vertex));
-								needFirst += align(rf->sections[static_cast<size_t>(s)].waterIndices.size() *
-								                   sizeof(uint32_t));
+								need += align(r->sections[static_cast<size_t>(s)].opaqueVertices.size() *
+								              sizeof(Vertex));
+								need += align(r->sections[static_cast<size_t>(s)].opaqueIndices.size() *
+								              sizeof(uint32_t));
+								need += align(r->sections[static_cast<size_t>(s)].waterVertices.size() *
+								              sizeof(Vertex));
+								need += align(r->sections[static_cast<size_t>(s)].waterIndices.size() *
+								              sizeof(uint32_t));
 							}
-				}
-				CHECK(needFirst > 0, "xchunk: first member needs staging");
+					return need;
+				};
+				const VkDeviceSize needA = stagingNeedOf(A);
+				const VkDeviceSize needB = stagingNeedOf(B);
+				CHECK(needA > 0 && needB > 0, "xchunk: both members need staging");
+				CHECK(needA < stagingX.sliceCapacity() && needB < stagingX.sliceCapacity(),
+				      "xchunk: each member individually fits one staging slice");
+
+				const auto metricsEqual = [](const MeshArena::Metrics &a,
+				                             const MeshArena::Metrics &b) {
+					return a.pages == b.pages && a.liveBlocks == b.liveBlocks &&
+					       a.liveBytes == b.liveBytes && a.freeBytes == b.freeBytes;
+				};
+				const auto arenaSnapshot = [&]() {
+					return std::make_tuple(arenas.opaqueVertex.metrics(),
+					                       arenas.opaqueIndex.metrics(),
+					                       arenas.waterVertex.metrics(),
+					                       arenas.waterIndex.metrics());
+				};
+				arenas.opaqueVertex.setFailNextAllocations(4);
 				beginFrame();
-				{
-					VkDeviceSize off = 0;
-					void *sink = nullptr;
-					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needFirst, off, sink),
-					      "xchunk: ring leaves exactly the first member's staging room");
-				}
-				const uint32_t pagesBefore =
-					arenas.opaqueVertex.metrics().pages + arenas.opaqueIndex.metrics().pages +
-					arenas.waterVertex.metrics().pages + arenas.waterIndex.metrics().pages;
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
-				                             retire, arenas, camX, 4);
+				                             retire, arenas, camX, 2);
+				arenas.opaqueVertex.setFailNextAllocations(0);
+				{
+					const auto [ov, oi, wv, wi] = arenaSnapshot();
+					CHECK(metricsEqual(ov, arenas.opaqueVertex.metrics()) &&
+					          metricsEqual(oi, arenas.opaqueIndex.metrics()) &&
+					          metricsEqual(wv, arenas.waterVertex.metrics()) &&
+					          metricsEqual(wi, arenas.waterIndex.metrics()),
+					      "xchunk: failed ALLOCATE leaks nothing (live blocks/bytes/pages)");
+				}
 				CHECK(A->needsGPUUpload() && B->needsGPUUpload(),
-				      "xchunk: staging shortfall defers the whole group");
+				      "xchunk: failed ALLOCATE defers the group");
 				{
 					std::vector<Chunk::IndirectDraw> aPending, bPending;
 					CHECK(A->collectOpaqueDraws(aPending) == aCount &&
 					          sameDraws(aPending, committedA),
-					      "xchunk: failed group prepare keeps old A drawn");
+					      "xchunk: failed ALLOCATE keeps old A drawn");
 					CHECK(B->collectOpaqueDraws(bPending) == bCount &&
 					          sameDraws(bPending, committedB),
-					      "xchunk: failed group prepare keeps old B drawn");
-					const uint32_t pagesAfter =
-						arenas.opaqueVertex.metrics().pages + arenas.opaqueIndex.metrics().pages +
-						arenas.waterVertex.metrics().pages + arenas.waterIndex.metrics().pages;
-					CHECK(pagesAfter == pagesBefore,
-					      "xchunk: failed group prepare consumes no arena page");
+					      "xchunk: failed ALLOCATE keeps old B drawn");
 				}
 				submitFrame();
 
-				// --- Fresh frame, fresh slice: retry commits A AND B ---
-				// "new A + old B" can no longer exist in any frame.
+				// --- Liveness (round 4, items 6-7/13): the group's combined
+				// staging need exceeds one frame's available room, so the
+				// members record PROGRESSIVELY across frames while both old
+				// meshes keep rendering; publication happens atomically in
+				// the frame the last member lands.
 				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needA, off, sink),
+					      "xchunk: frame 1 leaves room for exactly A");
+				}
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
+				          ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "xchunk: group uploads progressively across frames");
+				CHECK(A->needsGPUUpload() && B->needsGPUUpload(),
+				      "xchunk: no member publishes while the group is incomplete");
+				{
+					std::vector<Chunk::IndirectDraw> aPending, bPending;
+					CHECK(A->collectOpaqueDraws(aPending) == aCount &&
+					          sameDraws(aPending, committedA),
+					      "xchunk: frame N keeps old A drawn");
+					CHECK(B->collectOpaqueDraws(bPending) == bCount &&
+					          sameDraws(bPending, committedB),
+					      "xchunk: frame N keeps old B drawn");
+				}
+				submitFrame();
+
+				// Frame 2: room for exactly B -> B records -> the whole group
+				// publishes atomically this frame.
+				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needB, off, sink),
+					      "xchunk: frame 2 leaves room for exactly B");
+				}
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 1);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
-				      "xchunk: retry commits the whole group together");
+				      "xchunk: the group publishes atomically when the last member lands");
 				{
 					std::vector<Chunk::IndirectDraw> aNew, bNew;
 					CHECK(A->collectOpaqueDraws(aNew) > 0 && !sameDraws(aNew, committedA),
@@ -2121,6 +2193,162 @@ int main()
 				      "overlap: fused group consumed");
 				submitFrame();
 
+				// --- Partial unload (round 4, items 1-2): a 3-member group
+				// losing one member keeps the remaining atomic dependency
+				// {A,SS}; a 2-member group losing one member dissolves. ---
+				int hU = columnSurface(A, 15, 0);
+				CHECK(hU > 1 && hU + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "unload: border columns surfaced");
+				const int yU = hU + 3;
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yU, 0), BRICKS),
+				      "unload: corner edit accepted");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
+				          ChunkManagerProbe::groupChunks(managerX, 0).size() == 3,
+				      "unload: three-member group registered");
+				ChunkManagerProbe::removeFromGroups(managerX, B); // B unloads
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				      "unload: group survives with two members");
+				{
+					const std::vector<Chunk *> survivors =
+						ChunkManagerProbe::groupChunks(managerX, 0);
+					CHECK(survivors.size() == 2 && groupContains(survivors, A) &&
+					          groupContains(survivors, S),
+					      "unload: group is now exactly {A,SS}");
+				}
+				remeshOne(A);
+				remeshOne(S);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(!A->needsGPUUpload() && !S->needsGPUUpload(),
+				      "unload: the surviving pair commits together (old S impossible)");
+				submitFrame();
+
+				// B is gone from the group: it remeshes and uploads on its own.
+				remeshOne(B);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(!B->needsGPUUpload(), "unload: removed member uploads independently");
+				submitFrame();
+
+				// A 2-member group losing one member has no coupling left.
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yU, 12), BRICKS),
+				      "unload2: east edit accepted");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				      "unload2: pair group registered");
+				ChunkManagerProbe::removeFromGroups(managerX, B);
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "unload2: pair group dissolved");
+				remeshOne(A);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 2);
+				CHECK(!A->needsGPUUpload(), "unload2: A uploads solo after the dissolve");
+				submitFrame();
+
+				// --- Uploaded-but-unpublished member superseded (round 4,
+				// item 8/13): A records in frame 1, is re-edited before
+				// publication, its stale replacement is discarded, and the
+				// newest result joins B for the atomic publish. ---
+				int hS = -1;
+				for (int lz : {5, 6, 10, 12, 13})
+					hS = std::max(hS, columnSurface(A, 15, lz));
+				CHECK(hS > 1 && hS + 5 < static_cast<int>(CHUNK_HEIGHT),
+				      "supersession2: border columns surfaced");
+				const int yS = hS + 3;
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 5), BRICKS),
+				      "supersession2: border edit accepted");
+				remeshOne(A);
+				remeshOne(B);
+				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					const VkDeviceSize needA = stagingNeedOf(A);
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needA, off, sink),
+					      "supersession2: ring leaves room for exactly A");
+				}
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "supersession2: A recorded, B deferred by exact-fit staging");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 6), BRICKS),
+				      "supersession2: A re-edited while uploaded but unpublished");
+				remeshOne(A);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
+				      "supersession2: stale replacement discarded, newest results published");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "supersession2: group consumed");
+				submitFrame();
+
+				// --- Unload of the recorded member (round 4, item 13): the
+				// unpublished replacement is discarded and the surviving
+				// member falls back to a solo upload. ---
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 13), BRICKS),
+				      "unload-recorded: border edit accepted");
+				remeshOne(A);
+				remeshOne(B);
+				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					const VkDeviceSize needA = stagingNeedOf(A);
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needA, off, sink),
+					      "unload-recorded: ring leaves room for exactly A");
+				}
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "unload-recorded: A recorded, B deferred by exact-fit staging");
+				ChunkManagerProbe::removeFromGroups(managerX, A); // A unloads
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "unload-recorded: pair group dissolved");
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(!B->needsGPUUpload(),
+				      "unload-recorded: remaining member falls back to solo upload");
+				submitFrame();
+
+				// --- New border edit fused into a partially-uploaded group
+				// (round 4, item 13): the recorded-but-stale replacement of
+				// the shared member is discarded, the fresh one is recorded,
+				// and the whole group publishes together. ---
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 10), BRICKS),
+				      "fuse-live: border edit accepted");
+				remeshOne(A);
+				remeshOne(B);
+				beginFrame();
+				{
+					VkDeviceSize off = 0;
+					void *sink = nullptr;
+					const VkDeviceSize needA = stagingNeedOf(A);
+					CHECK(stagingX.alloc(stagingX.sliceCapacity() - needA, off, sink),
+					      "fuse-live: ring leaves room for exactly A");
+				}
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
+				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "fuse-live: A recorded, B deferred by exact-fit staging");
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 12), BRICKS),
+				      "fuse-live: second border edit fuses into the uploading group");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				      "fuse-live: still one fused group");
+				remeshOne(A);
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 4);
+				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
+				      "fuse-live: fused group publishes together");
+				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				      "fuse-live: group consumed");
+				submitFrame();
+
+				std::cerr << "T0" << std::endl;
 				// --- Transitive fusion of the registration helper itself
 				// (probe-level): {A,B} + {B,S} + {S,W} must collapse into a
 				// single {A,B,S,W} group, exercising the fixed-point merge
@@ -2131,11 +2359,14 @@ int main()
 					if (W)
 					{
 						ChunkManagerProbe::registerGroup(managerX, {A, B});
+					std::cerr << "T1" << std::endl;
 						ChunkManagerProbe::registerGroup(managerX, {B, S});
+					std::cerr << "T2" << std::endl;
 						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
 						          ChunkManagerProbe::groupChunks(managerX, 0).size() == 3,
 						      "transitive: {A,B} and {B,S} fuse to {A,B,S}");
 						ChunkManagerProbe::registerGroup(managerX, {S, W});
+					std::cerr << "T3" << std::endl;
 						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
 						      "transitive: one group remains");
 						const std::vector<Chunk *> &chain =
@@ -2150,6 +2381,7 @@ int main()
 					}
 				}
 			}
+			std::cerr << "TS" << std::endl;
 			stagingX.shutdown();
 		}
 	}

@@ -2627,16 +2627,16 @@ void Chunk::retireLodRanges(MeshArena &vertexArena, MeshArena &indexArena,
   indices = {};
 }
 
-// Failure-capable phase of the sectioned transaction: PLAN + RESERVE
-// STAGING + ALLOCATE. Nothing is published and no copy command is recorded;
-// any failure frees every range the plan created and leaves staging as the
-// only trace (frame-scoped, reclaimed by the next beginFrame).
-bool Chunk::prepareSectionUpload(MeshBuildResult &result, StagingRing *staging,
-                                 MeshArenas &arenas, PreparedMeshUpload &out)
+// ALLOCATE phase of the sectioned transaction (PR #178 review round 4):
+// PLAN + ALLOCATE. Nothing is published, nothing touches staging and no
+// copy command is recorded; any failure frees every range the plan created
+// and leaves the published mesh exactly as it is. The plan survives frames
+// inside a commit group until publication.
+bool Chunk::prepareSectionReplacement(MeshBuildResult &result, MeshArenas &arenas,
+                                      GpuReplacement &out)
 {
   out.result = &result;
   out.lod = false;
-  out.staging = staging;
 
   auto opaquePayload = [&result](int s)
   {
@@ -2650,85 +2650,38 @@ bool Chunk::prepareSectionUpload(MeshBuildResult &result, StagingRing *staging,
   };
 
   auto planStream = [&](auto payloadSel, std::array<SectionGpuSlot, kOccupancySections> &slots,
-                        PreparedMeshUpload::StreamPlan &plan)
+                        GpuReplacement::StreamPlan &plan)
   {
     for (int s = 0; s < kOccupancySections; ++s)
     {
       if (((result.sectionsBuilt >> s) & 1u) == 0)
         continue; // untouched: the published slot is preserved as-is
-      PreparedMeshUpload::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
+      GpuReplacement::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
       p.touched = true;
-      p.old = slots[static_cast<size_t>(s)];
       const auto [verts, idxs] = payloadSel(s);
       p.vertexBytes = static_cast<uint32_t>(verts->size() * sizeof(Vertex));
       p.indexBytes = static_cast<uint32_t>(idxs->size() * sizeof(uint32_t));
       if (p.vertexBytes != 0 || p.indexBytes != 0)
-      {
         p.active = true;
-      }
     }
-  };
-
-  auto totalStaging = [&](const PreparedMeshUpload::StreamPlan &a,
-                          const PreparedMeshUpload::StreamPlan &b)
-  {
-    VkDeviceSize total = 0;
-    for (const PreparedMeshUpload::StreamPlan *plan : {&a, &b})
-      for (int s = 0; s < kOccupancySections; ++s)
-      {
-        const PreparedMeshUpload::SectionPlan &p = plan->sections[static_cast<size_t>(s)];
-        if (!p.active)
-          continue;
-        total += static_cast<VkDeviceSize>(alignUpBytes(p.vertexBytes, StagingRing::kAlignment)) +
-                 alignUpBytes(p.indexBytes, StagingRing::kAlignment);
-      }
-    return total;
-  };
-
-  auto reserveStream = [&](auto payloadSel, PreparedMeshUpload::StreamPlan &plan) -> bool
-  {
-    if (!staging)
-      return true;
-    for (int s = 0; s < kOccupancySections; ++s)
-    {
-      PreparedMeshUpload::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
-      if (!p.active)
-        continue;
-      const auto [verts, idxs] = payloadSel(s);
-      if (p.vertexBytes != 0)
-      {
-        if (!staging->alloc(p.vertexBytes, p.stageVOff, p.stageVPtr))
-          return false;
-        std::memcpy(p.stageVPtr, verts->data(), p.vertexBytes);
-      }
-      if (p.indexBytes != 0)
-      {
-        if (!staging->alloc(p.indexBytes, p.stageIOff, p.stageIPtr))
-          return false;
-        // Indices are stored section-local: the indirect draw's
-        // vertexOffset rebases them on the GPU (issue #109).
-        std::memcpy(p.stageIPtr, idxs->data(), p.indexBytes);
-      }
-    }
-    return true;
   };
 
   // Allocate every fresh range of BOTH streams. Pure CPU bookkeeping: if
   // anything fails, every range this transaction created is freed here and
   // no slot, LOD handle or draw count has been touched.
-  auto allocateAll = [&](PreparedMeshUpload::StreamPlan &opaquePlan,
-                         PreparedMeshUpload::StreamPlan &waterPlan) -> bool
+  auto allocateAll = [&](GpuReplacement::StreamPlan &opaquePlan,
+                         GpuReplacement::StreamPlan &waterPlan) -> bool
   {
     bool ok = true;
-    PreparedMeshUpload::StreamPlan *plans[2] = {&opaquePlan, &waterPlan};
+    GpuReplacement::StreamPlan *plans[2] = {&opaquePlan, &waterPlan};
     for (int pi = 0; pi < 2 && ok; ++pi)
     {
-      PreparedMeshUpload::StreamPlan &plan = *plans[pi];
+      GpuReplacement::StreamPlan &plan = *plans[pi];
       MeshArena &vA = (pi == 0) ? arenas.opaqueVertex : arenas.waterVertex;
       MeshArena &iA = (pi == 0) ? arenas.opaqueIndex : arenas.waterIndex;
       for (int s = 0; s < kOccupancySections && ok; ++s)
       {
-        PreparedMeshUpload::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
+        GpuReplacement::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
         if (!p.active)
           continue;
         ok = vA.allocate(p.vertexBytes, p.newV) &&
@@ -2736,6 +2689,19 @@ bool Chunk::prepareSectionUpload(MeshBuildResult &result, StagingRing *staging,
         if (ok)
         {
           p.vertexBase = p.newV.offset / sizeof(Vertex);
+          // Precompute the future published slot: the swap itself happens
+          // at publish time and cannot fail.
+          SectionGpuSlot &ns = p.future;
+          ns.vertexPage = p.newV.page;
+          ns.vertexOffset = p.newV.offset;
+          ns.vertexSlotBytes = p.newV.bytes;
+          ns.vertexUsedBytes = p.vertexBytes;
+          ns.vertexBase = p.vertexBase;
+          ns.indexPage = p.newI.page;
+          ns.indexOffset = p.newI.offset;
+          ns.indexSlotBytes = p.newI.bytes;
+          ns.indexUsedBytes = p.indexBytes;
+          ns.indexCount = p.indexBytes / sizeof(uint32_t);
         }
       }
     }
@@ -2743,15 +2709,15 @@ bool Chunk::prepareSectionUpload(MeshBuildResult &result, StagingRing *staging,
     {
       // Free every fresh range this transaction created (V and I
       // separately: a section can have only one of the two).
-      PreparedMeshUpload::StreamPlan *rollbackPlans[2] = {&opaquePlan, &waterPlan};
+      GpuReplacement::StreamPlan *rollbackPlans[2] = {&opaquePlan, &waterPlan};
       for (int pi = 0; pi < 2; ++pi)
       {
-        PreparedMeshUpload::StreamPlan &plan = *rollbackPlans[pi];
+        GpuReplacement::StreamPlan &plan = *rollbackPlans[pi];
         MeshArena &vA = (&plan == &opaquePlan) ? arenas.opaqueVertex : arenas.waterVertex;
         MeshArena &iA = (&plan == &opaquePlan) ? arenas.opaqueIndex : arenas.waterIndex;
         for (int s = 0; s < kOccupancySections; ++s)
         {
-          PreparedMeshUpload::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
+          GpuReplacement::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
           if (!p.newV.empty())
           {
             vA.freeImmediate(p.newV);
@@ -2771,28 +2737,22 @@ bool Chunk::prepareSectionUpload(MeshBuildResult &result, StagingRing *staging,
 
   planStream(opaquePayload, m_sectionGpu, out.opaque);
   planStream(waterPayload, m_sectionGpuWater, out.water);
-
-  if (staging &&
-      totalStaging(out.opaque, out.water) >
-          staging->sliceCapacity() - staging->usedThisFrame())
-    return false;
-  if (!reserveStream(opaquePayload, out.opaque) ||
-      !reserveStream(waterPayload, out.water))
-    return false; // unreachable after the exact preflight; nothing mutated
-  if (!allocateAll(out.opaque, out.water))
-    return false;
-  return true;
+  const bool allocOk = allocateAll(out.opaque, out.water);
+  return allocOk;
+  return allocOk;
 }
 
-// Cannot-fail phase of the sectioned transaction: RECORD + COMMIT + RETIRE.
-void Chunk::commitSectionUpload(VmaAllocator allocator, VkCommandBuffer cmd,
-                                GpuResourceRetire *retire, ImmediateCommands *imm,
-                                MeshArenas &arenas, PreparedMeshUpload &prepared)
+// COPY phase of the sectioned transaction: preflight the exact staging
+// requirement, reserve it, memcpy the payloads and record the copies.
+// Frame-bound: the reservations and the recorded commands belong to the
+// current frame only - the fresh ranges keep the payload once the submit
+// completes. Returns false when the ring lacks room this frame (nothing
+// was mutated; the caller retries next frame).
+bool Chunk::recordSectionUpload(VmaAllocator allocator, StagingRing *staging,
+                                VkCommandBuffer cmd, ImmediateCommands *imm,
+                                MeshArenas &arenas, GpuReplacement &replacement)
 {
-  MeshBuildResult &result = *prepared.result;
-  StagingRing *staging = prepared.staging;
-  const bool frameAware = retire != nullptr;
-
+  MeshBuildResult &result = *replacement.result;
   auto opaquePayload = [&result](int s)
   {
     return std::make_pair(&result.sections[s].opaqueVertices,
@@ -2804,12 +2764,73 @@ void Chunk::commitSectionUpload(VmaAllocator allocator, VkCommandBuffer cmd,
                           &result.sections[s].waterIndices);
   };
 
-  auto recordStream = [&](auto payloadSel, PreparedMeshUpload::StreamPlan &plan, MeshArena &vArena,
+  auto totalStaging = [&](const GpuReplacement::StreamPlan &a,
+                          const GpuReplacement::StreamPlan &b)
+  {
+    VkDeviceSize total = 0;
+    for (const GpuReplacement::StreamPlan *plan : {&a, &b})
+      for (int s = 0; s < kOccupancySections; ++s)
+      {
+        const GpuReplacement::SectionPlan &p = plan->sections[static_cast<size_t>(s)];
+        if (!p.active)
+          continue;
+        total += static_cast<VkDeviceSize>(alignUpBytes(p.vertexBytes, StagingRing::kAlignment)) +
+                 alignUpBytes(p.indexBytes, StagingRing::kAlignment);
+      }
+    return total;
+  };
+
+  // Frame-bound staging scratch, indexed per section: nothing here
+  // survives the submit.
+  std::array<VkDeviceSize, kOccupancySections> stageVOff{};
+  std::array<VkDeviceSize, kOccupancySections> stageIOff{};
+  std::array<void *, kOccupancySections> stageVPtr{};
+  std::array<void *, kOccupancySections> stageIPtr{};
+
+  auto reserveStream = [&](auto payloadSel, GpuReplacement::StreamPlan &plan) -> bool
+  {
+    if (!staging)
+      return true;
+    for (int s = 0; s < kOccupancySections; ++s)
+    {
+      GpuReplacement::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
+      if (!p.active)
+        continue;
+      const auto [verts, idxs] = payloadSel(s);
+      if (p.vertexBytes != 0)
+      {
+        if (!staging->alloc(p.vertexBytes, stageVOff[static_cast<size_t>(s)],
+                            stageVPtr[static_cast<size_t>(s)]))
+          return false;
+        std::memcpy(stageVPtr[static_cast<size_t>(s)], verts->data(), p.vertexBytes);
+      }
+      if (p.indexBytes != 0)
+      {
+        if (!staging->alloc(p.indexBytes, stageIOff[static_cast<size_t>(s)],
+                            stageIPtr[static_cast<size_t>(s)]))
+          return false;
+        // Indices are stored section-local: the indirect draw's
+        // vertexOffset rebases them on the GPU (issue #109).
+        std::memcpy(stageIPtr[static_cast<size_t>(s)], idxs->data(), p.indexBytes);
+      }
+    }
+    return true;
+  };
+
+  if (staging &&
+      totalStaging(replacement.opaque, replacement.water) >
+          staging->sliceCapacity() - staging->usedThisFrame())
+    return false;
+  if (!reserveStream(opaquePayload, replacement.opaque) ||
+      !reserveStream(waterPayload, replacement.water))
+    return false; // unreachable after the exact preflight
+
+  auto recordStream = [&](auto payloadSel, GpuReplacement::StreamPlan &plan, MeshArena &vArena,
                           MeshArena &iArena)
   {
     for (int s = 0; s < kOccupancySections; ++s)
     {
-      PreparedMeshUpload::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
+      GpuReplacement::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
       if (!p.active)
         continue;
       if (staging)
@@ -2817,7 +2838,7 @@ void Chunk::commitSectionUpload(VmaAllocator allocator, VkCommandBuffer cmd,
         if (p.vertexBytes != 0)
         {
           VkBufferCopy copy{};
-          copy.srcOffset = p.stageVOff;
+          copy.srcOffset = stageVOff[static_cast<size_t>(s)];
           copy.dstOffset = p.newV.offset;
           copy.size = p.vertexBytes;
           vkCmdCopyBuffer(cmd, staging->buffer(), vArena.pageBuffer(p.newV.page), 1, &copy);
@@ -2825,7 +2846,7 @@ void Chunk::commitSectionUpload(VmaAllocator allocator, VkCommandBuffer cmd,
         if (p.indexBytes != 0)
         {
           VkBufferCopy copy{};
-          copy.srcOffset = p.stageIOff;
+          copy.srcOffset = stageIOff[static_cast<size_t>(s)];
           copy.dstOffset = p.newI.offset;
           copy.size = p.indexBytes;
           vkCmdCopyBuffer(cmd, staging->buffer(), iArena.pageBuffer(p.newI.page), 1, &copy);
@@ -2844,8 +2865,25 @@ void Chunk::commitSectionUpload(VmaAllocator allocator, VkCommandBuffer cmd,
     }
   };
 
+  recordStream(opaquePayload, replacement.opaque, arenas.opaqueVertex, arenas.opaqueIndex);
+  recordStream(waterPayload, replacement.water, arenas.waterVertex, arenas.waterIndex);
+  replacement.recorded = true;
+  return true;
+}
+
+// PUBLISH phase of the sectioned transaction: swap the prepared slot
+// tables in, retire the replaced ranges frame-aware, update the draw
+// counts and rebuild the indirect draw cache. Cannot fail.
+void Chunk::publishSectionUpload(GpuResourceRetire *retire, MeshArenas &arenas,
+                                 GpuReplacement &replacement)
+{
+  const bool frameAware = retire != nullptr;
+
   auto retireOldSlot = [&](const SectionGpuSlot &old, MeshArena &vArena, MeshArena &iArena)
   {
+    // The published slots are read live: nothing else mutates them between
+    // ALLOCATE and PUBLISH, so they still describe the ranges the
+    // renderer has been drawing all along.
     if (old.hasVertexRange())
     {
       const MeshArena::Range r{old.vertexPage, old.vertexOffset, old.vertexSlotBytes};
@@ -2864,40 +2902,23 @@ void Chunk::commitSectionUpload(VmaAllocator allocator, VkCommandBuffer cmd,
     }
   };
 
-  auto commitStream = [&](PreparedMeshUpload::StreamPlan &plan, MeshArena &vArena,
-                          MeshArena &iArena,
+  auto commitStream = [&](GpuReplacement::StreamPlan &plan, MeshArena &vArena, MeshArena &iArena,
                           std::array<SectionGpuSlot, kOccupancySections> &slots)
   {
     auto newSlots = slots; // transactional commit: build aside, swap in
     for (int s = 0; s < kOccupancySections; ++s)
     {
-      PreparedMeshUpload::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
+      GpuReplacement::SectionPlan &p = plan.sections[static_cast<size_t>(s)];
       if (!p.touched)
         continue;
-      retireOldSlot(p.old, vArena, iArena);
-      SectionGpuSlot ns{};
-      if (p.active)
-      {
-        ns.vertexPage = p.newV.page;
-        ns.vertexOffset = p.newV.offset;
-        ns.vertexSlotBytes = p.newV.bytes;
-        ns.vertexUsedBytes = p.vertexBytes;
-        ns.vertexBase = p.vertexBase;
-        ns.indexPage = p.newI.page;
-        ns.indexOffset = p.newI.offset;
-        ns.indexSlotBytes = p.newI.bytes;
-        ns.indexUsedBytes = p.indexBytes;
-        ns.indexCount = p.indexBytes / sizeof(uint32_t);
-      }
-      newSlots[static_cast<size_t>(s)] = ns;
+      retireOldSlot(slots[static_cast<size_t>(s)], vArena, iArena);
+      newSlots[static_cast<size_t>(s)] = p.active ? p.future : SectionGpuSlot{};
     }
     slots = newSlots;
   };
 
-  recordStream(opaquePayload, prepared.opaque, arenas.opaqueVertex, arenas.opaqueIndex);
-  recordStream(waterPayload, prepared.water, arenas.waterVertex, arenas.waterIndex);
-  commitStream(prepared.opaque, arenas.opaqueVertex, arenas.opaqueIndex, m_sectionGpu);
-  commitStream(prepared.water, arenas.waterVertex, arenas.waterIndex, m_sectionGpuWater);
+  commitStream(replacement.opaque, arenas.opaqueVertex, arenas.opaqueIndex, m_sectionGpu);
+  commitStream(replacement.water, arenas.waterVertex, arenas.waterIndex, m_sectionGpuWater);
 
   // Draw counts derive from the per-section ranges.
   opaqueIndexCount = 0;
@@ -2921,7 +2942,7 @@ void Chunk::commitSectionUpload(VmaAllocator allocator, VkCommandBuffer cmd,
 
   uint64_t stagedVertexBytes = 0;
   uint64_t stagedIndexBytes = 0;
-  for (PreparedMeshUpload::StreamPlan *plan : {&prepared.opaque, &prepared.water})
+  for (GpuReplacement::StreamPlan *plan : {&replacement.opaque, &replacement.water})
     for (int s = 0; s < kOccupancySections; ++s)
     {
       stagedVertexBytes += plan->sections[static_cast<size_t>(s)].active
@@ -2937,39 +2958,33 @@ void Chunk::commitSectionUpload(VmaAllocator allocator, VkCommandBuffer cmd,
 
 // Shared sectioned-upload core (issue #107/#109). Every upload is a
 // TRANSACTION built on fresh arena ranges - a published range is never
-// rewritten in place:
-//
-//   PLAN            capture the touched sections' current slots (pure CPU)
-//   RESERVE STAGING preflight the exact requirement, then reserve
-//   ALLOCATE        fresh arena ranges for every touched+active section,
-//                   opaque and water together; any failure frees every
-//                   range this transaction created and defers
-//   RECORD          staging -> fresh range copies
-//   COMMIT          slot tables are built as copies and swapped in
-//   RETIRE          every replaced range is retired frame-aware
-//
-// Stored indices stay section-local: each indirect command carries its
-// section's vertexOffset, so uploads are plain copies (no CPU rebase).
-// An emptied section retires its range and its slot becomes {} - with the
-// free-list arena there is no reason to keep empty reservations alive.
-//
-// staging/cmd/retire carry the async frame path; imm carries the
-// bootstrap/test path (which frees replaced ranges immediately: nothing is
-// in flight). Returns false only when staging space or an arena range
-// cannot be obtained: the result stays attached and the upload retries
-// next frame with every slot, range and draw count untouched.
+// rewritten in place - run here as one ALLOCATE -> COPY -> PUBLISH
+// sequence (the bootstrap/imm path frees replaced ranges immediately:
+// nothing is in flight). Returns false only when staging space or an
+// arena range cannot be obtained: the result stays attached and the
+// upload retries next frame with every slot, range and draw count
+// untouched.
 bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
                                StagingRing *staging, VkCommandBuffer cmd,
                                GpuResourceRetire *retire, ImmediateCommands *imm,
                                MeshArenas &arenas)
 {
   m_arenas = &arenas;
-  PreparedMeshUpload prepared;
-  if (!prepareSectionUpload(result, staging, arenas, prepared))
+  GpuReplacement replacement;
+  if (!prepareSectionReplacement(result, arenas, replacement))
     return false;
-  commitSectionUpload(allocator, cmd, retire, imm, arenas, prepared);
+  if (!recordSectionUpload(allocator, staging, cmd, imm, arenas, replacement))
+  {
+    discardSectionReplacement(arenas, replacement);
+    return false;
+  }
+  publishSectionUpload(retire, arenas, replacement);
   return true;
 }
+
+// ALLOCATE phase of the whole-chunk LOD replacement (issue #109): all four
+// ranges (opaque + water) are reserved before anything else; any failure
+// frees every fresh range and leaves the old LOD untouched.
 
 void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshArenas &arenas)
 {
@@ -2991,9 +3006,6 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
   MeshBuildResult *result = m_pendingResult;
   if (result && result->isLOD)
   {
-    // Whole-chunk LOD mesh: one range pair per stream in the shared arenas.
-    // The whole upload is one transaction: opaque succeeding does not survive
-    // a water failure.
     const bool needOpaque = !result->opaqueVertices.empty() && !result->opaqueIndices.empty();
     const bool needWater = !result->waterVertices.empty() && !result->waterIndices.empty();
     auto rollbackLodRanges = [&]()
@@ -3087,14 +3099,10 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
   meshNeedsUpdate = false;
 }
 
-bool Chunk::prepareLodUpload(MeshBuildResult &result, StagingRing &staging,
-                             MeshArenas &arenas, PreparedMeshUpload &out)
+bool Chunk::prepareLodReplacement(MeshBuildResult &result, MeshArenas &arenas,
+                                  GpuReplacement &out)
 {
   out.lod = true;
-  // Whole-chunk LOD mesh: one range pair per stream in the shared arenas.
-  // Transaction (issue #109 review phase 18): allocate ALL new ranges
-  // (opaque + water) and reserve all staging before anything is recorded;
-  // any failure frees every fresh range and leaves the old LOD untouched.
   out.needOpaque =
       !result.opaqueVertices.empty() && !result.opaqueIndices.empty();
   out.needWater =
@@ -3132,204 +3140,267 @@ bool Chunk::prepareLodUpload(MeshBuildResult &result, StagingRing &staging,
     rollback();
     return false;
   }
-
-  if (out.needOpaque &&
-      (!staging.alloc(out.newOV.bytes, out.stageVOff, out.stageVPtr) ||
-       !staging.alloc(out.newOI.bytes, out.stageIOff, out.stageIPtr)))
-  {
-    rollback();
-    return false;
-  }
-  if (out.needWater &&
-      (!staging.alloc(out.newWV.bytes, out.stageWVOff, out.stageWVPtr) ||
-       !staging.alloc(out.newWI.bytes, out.stageWIOff, out.stageWIPtr)))
-  {
-    rollback();
-    return false;
-  }
-
-  if (out.needOpaque)
-  {
-    std::memcpy(out.stageVPtr, result.opaqueVertices.data(), out.newOV.bytes);
-    std::memcpy(out.stageIPtr, result.opaqueIndices.data(), out.newOI.bytes);
-  }
-  if (out.needWater)
-  {
-    std::memcpy(out.stageWVPtr, result.waterVertices.data(), out.newWV.bytes);
-    std::memcpy(out.stageWIPtr, result.waterIndices.data(), out.newWI.bytes);
-  }
   return true;
 }
 
-void Chunk::commitLodUpload(VkCommandBuffer cmd, PreparedMeshUpload &prepared)
+// COPY phase of the LOD replacement: reserve staging, memcpy and record
+// the copies. Frame-bound: nothing here survives the submit.
+bool Chunk::recordLodReplacement(VmaAllocator allocator, StagingRing &staging,
+                                 VkCommandBuffer cmd, MeshArenas &arenas,
+                                 GpuReplacement &replacement)
 {
-  MeshBuildResult &result = *prepared.result;
-  StagingRing &staging = *prepared.staging;
-  MeshArenas &arenas = *m_arenas;
+  MeshBuildResult &result = *replacement.result;
+  (void)allocator;
+  // Staging scratch is frame-bound: the offsets and mapped pointers live
+  // only inside this function and never in the persistent replacement.
+  VkDeviceSize offV = 0, offI = 0, offWV = 0, offWI = 0;
+  void *ptrV = nullptr, *ptrI = nullptr, *ptrWV = nullptr, *ptrWI = nullptr;
+  if (replacement.needOpaque &&
+      (!staging.alloc(replacement.newOV.bytes, offV, ptrV) ||
+       !staging.alloc(replacement.newOI.bytes, offI, ptrI)))
+    return false;
+  if (replacement.needWater &&
+      (!staging.alloc(replacement.newWV.bytes, offWV, ptrWV) ||
+       !staging.alloc(replacement.newWI.bytes, offWI, ptrWI)))
+    return false;
 
-  if (prepared.needOpaque)
+  if (replacement.needOpaque)
   {
-    VkBufferCopy c{};
-    c.srcOffset = prepared.stageVOff;
-    c.dstOffset = prepared.newOV.offset;
-    c.size = prepared.newOV.bytes;
-    vkCmdCopyBuffer(cmd, staging.buffer(), arenas.opaqueVertex.pageBuffer(prepared.newOV.page), 1, &c);
-    c.srcOffset = prepared.stageIOff;
-    c.dstOffset = prepared.newOI.offset;
-    c.size = prepared.newOI.bytes;
-    vkCmdCopyBuffer(cmd, staging.buffer(), arenas.opaqueIndex.pageBuffer(prepared.newOI.page), 1, &c);
+    std::memcpy(ptrV, result.opaqueVertices.data(), replacement.newOV.bytes);
+    std::memcpy(ptrI, result.opaqueIndices.data(), replacement.newOI.bytes);
   }
-  if (prepared.needWater)
+  if (replacement.needWater)
   {
-    VkBufferCopy c{};
-    c.srcOffset = prepared.stageWVOff;
-    c.dstOffset = prepared.newWV.offset;
-    c.size = prepared.newWV.bytes;
-    vkCmdCopyBuffer(cmd, staging.buffer(), arenas.waterVertex.pageBuffer(prepared.newWV.page), 1, &c);
-    c.srcOffset = prepared.stageWIOff;
-    c.dstOffset = prepared.newWI.offset;
-    c.size = prepared.newWI.bytes;
-    vkCmdCopyBuffer(cmd, staging.buffer(), arenas.waterIndex.pageBuffer(prepared.newWI.page), 1, &c);
+    std::memcpy(ptrWV, result.waterVertices.data(), replacement.newWV.bytes);
+    std::memcpy(ptrWI, result.waterIndices.data(), replacement.newWI.bytes);
   }
 
-  // COMMIT: retire every old range, then swap in the new handles.
+  if (replacement.needOpaque)
+  {
+    VkBufferCopy c{};
+    c.srcOffset = offV;
+    c.dstOffset = replacement.newOV.offset;
+    c.size = replacement.newOV.bytes;
+    vkCmdCopyBuffer(cmd, staging.buffer(), arenas.opaqueVertex.pageBuffer(replacement.newOV.page), 1, &c);
+    c.srcOffset = offI;
+    c.dstOffset = replacement.newOI.offset;
+    c.size = replacement.newOI.bytes;
+    vkCmdCopyBuffer(cmd, staging.buffer(), arenas.opaqueIndex.pageBuffer(replacement.newOI.page), 1, &c);
+  }
+  if (replacement.needWater)
+  {
+    VkBufferCopy c{};
+    c.srcOffset = offWV;
+    c.dstOffset = replacement.newWV.offset;
+    c.size = replacement.newWV.bytes;
+    vkCmdCopyBuffer(cmd, staging.buffer(), arenas.waterVertex.pageBuffer(replacement.newWV.page), 1, &c);
+    c.srcOffset = offWI;
+    c.dstOffset = replacement.newWI.offset;
+    c.size = replacement.newWI.bytes;
+    vkCmdCopyBuffer(cmd, staging.buffer(), arenas.waterIndex.pageBuffer(replacement.newWI.page), 1, &c);
+  }
+  replacement.recorded = true;
+  return true;
+}
+
+// PUBLISH phase of the LOD replacement: retire every old range, swap in
+// the new handles and rebuild the draw cache. Cannot fail.
+void Chunk::publishLodReplacement(MeshArenas &arenas, GpuReplacement &replacement)
+{
+  MeshBuildResult &result = *replacement.result;
+
   if (!m_lodOpaqueVertices.empty())
     arenas.opaqueVertex.retire(m_lodOpaqueVertices);
   if (!m_lodOpaqueIndices.empty())
     arenas.opaqueIndex.retire(m_lodOpaqueIndices);
-  m_lodOpaqueVertices = prepared.needOpaque ? prepared.newOV : MeshArena::Range{};
-  m_lodOpaqueIndices = prepared.needOpaque ? prepared.newOI : MeshArena::Range{};
+  m_lodOpaqueVertices = replacement.needOpaque ? replacement.newOV : MeshArena::Range{};
+  m_lodOpaqueIndices = replacement.needOpaque ? replacement.newOI : MeshArena::Range{};
   if (!m_lodWaterVertices.empty())
     arenas.waterVertex.retire(m_lodWaterVertices);
   if (!m_lodWaterIndices.empty())
     arenas.waterIndex.retire(m_lodWaterIndices);
-  m_lodWaterVertices = prepared.needWater ? prepared.newWV : MeshArena::Range{};
-  m_lodWaterIndices = prepared.needWater ? prepared.newWI : MeshArena::Range{};
+  m_lodWaterVertices = replacement.needWater ? replacement.newWV : MeshArena::Range{};
+  m_lodWaterIndices = replacement.needWater ? replacement.newWI : MeshArena::Range{};
   // A sectioned layout never survives a LOD replacement: its ranges were
   // retired when the full build was replaced (or there were none).
   retireSectionSlots(m_sectionGpu, arenas.opaqueVertex, arenas.opaqueIndex, false);
   retireSectionSlots(m_sectionGpuWater, arenas.waterVertex, arenas.waterIndex, false);
-  opaqueIndexCount = prepared.needOpaque
+  opaqueIndexCount = replacement.needOpaque
                          ? static_cast<uint32_t>(result.opaqueIndices.size())
                          : 0;
-  waterIndexCount = prepared.needWater
+  waterIndexCount = replacement.needWater
                         ? static_cast<uint32_t>(result.waterIndices.size())
                         : 0;
   m_isLODMesh = true;
   rebuildIndirectDrawCache();
 }
 
-bool Chunk::prepareGPUUpload(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-                             GpuResourceRetire &retire, MeshArenas &arenas,
-                             PreparedMeshUpload &out)
+// Releases a replacement's fresh ranges without publishing. Ranges whose
+// copies were already submitted retire frame-aware; never-recorded ranges
+// free immediately (no command references them).
+void Chunk::discardLodReplacement(MeshArenas &arenas, GpuReplacement &replacement)
 {
-  if (allocator == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE || !staging.isValid())
-    return false;
-
-  MemoryPublication memoryPublication{*this};
-  m_allocator = allocator;
-  m_arenas = &arenas;
-
-  out = PreparedMeshUpload{};
-  out.staging = &staging;
-  // The CPU payload lives in the attached build result (issue #104). When
-  // staging or an arena allocation fails, the result stays attached - the
-  // completed mesh is neither lost nor copied - and the upload retries next
-  // frame with every range, slot and draw count untouched.
-  out.result = m_pendingResult;
-  if (!out.result)
-    return true; // nothing pending: the commit just clears the draw counters
-
-  if (out.result->isLOD)
-    return prepareLodUpload(*out.result, staging, arenas, out);
-  return prepareSectionUpload(*out.result, &staging, arenas, out);
+  const bool inFlight = replacement.recorded;
+  auto freeOne = [&](MeshArena &arena, MeshArena::Range &range)
+  {
+    if (!range.empty())
+    {
+      if (inFlight)
+        arena.retire(range);
+      else
+        arena.freeImmediate(range);
+      range = {};
+    }
+  };
+  freeOne(arenas.opaqueVertex, replacement.newOV);
+  freeOne(arenas.opaqueIndex, replacement.newOI);
+  freeOne(arenas.waterVertex, replacement.newWV);
+  freeOne(arenas.waterIndex, replacement.newWI);
 }
 
-void Chunk::commitGPUUpload(VkCommandBuffer cmd, GpuResourceRetire &retire,
-                            PreparedMeshUpload &prepared)
+void Chunk::discardSectionReplacement(MeshArenas &arenas, GpuReplacement &replacement)
+{
+  const bool inFlight = replacement.recorded;
+  auto freeOne = [&](MeshArena &arena, MeshArena::Range &range)
+  {
+    if (!range.empty())
+    {
+      if (inFlight)
+        arena.retire(range);
+      else
+        arena.freeImmediate(range);
+      range = {};
+    }
+  };
+  for (GpuReplacement::StreamPlan *plan : {&replacement.opaque, &replacement.water})
+  {
+    MeshArena &vA = (plan == &replacement.opaque) ? arenas.opaqueVertex : arenas.waterVertex;
+    MeshArena &iA = (plan == &replacement.opaque) ? arenas.opaqueIndex : arenas.waterIndex;
+    for (int s = 0; s < kOccupancySections; ++s)
+    {
+      GpuReplacement::SectionPlan &p = plan->sections[static_cast<size_t>(s)];
+      freeOne(vA, p.newV);
+      freeOne(iA, p.newI);
+    }
+  }
+}
+
+// ALLOCATE phase (frame-independent, failure-capable): plans and reserves
+// every fresh arena range the attached pending result needs. On failure
+// everything is rolled back; on success the replacement stays private to
+// the caller until publishGPUUpload() swaps it in.
+bool Chunk::prepareGPUUpload(MeshArenas &arenas, GpuReplacement &out)
 {
   MemoryPublication memoryPublication{*this};
-  if (!prepared.result)
+  m_arenas = &arenas;
+
+  out = GpuReplacement{};
+  out.result = m_pendingResult;
+  if (!out.result)
+    return true; // nothing pending: publish will just clear the draw counters
+  out.valid = true;
+
+  out.generation = m_meshGeneration;
+  out.revision = m_meshRevision.load(std::memory_order_relaxed);
+  const bool prepared = out.result->isLOD
+                            ? prepareLodReplacement(*out.result, arenas, out)
+                            : prepareSectionReplacement(*out.result, arenas, out);
+  if (!prepared)
+  {
+    // A failed ALLOCATE must never leave a half-valid replacement behind:
+    // the group gate skips re-preparing members whose replacement claims
+    // to be valid, so a stale flag here would record from empty ranges.
+    out = GpuReplacement{};
+    return false;
+  }
+  return true;
+}
+
+// COPY phase (frame-bound): reserves staging and records the copies.
+// Returns false only when the ring lacks room this frame; the allocated
+// replacement stays private and the caller retries next frame.
+bool Chunk::recordGPUUpload(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+                            MeshArenas &arenas, GpuReplacement &replacement)
+{
+  if (!replacement.valid || replacement.recorded)
+    return true; // nothing pending or already resident
+  if (replacement.lod)
+    return recordLodReplacement(allocator, staging, cmd, arenas, replacement);
+  return recordSectionUpload(allocator, &staging, cmd, nullptr, arenas, replacement);
+}
+
+// PUBLISH phase (cannot fail, CPU-only): swaps the prepared slots in,
+// retires the replaced ranges frame-aware, rebuilds the draw caches and
+// consumes the pending result. Atomic from the renderer's perspective: the
+// previous line drew the old mesh, the next line draws the new one.
+void Chunk::publishGPUUpload(GpuResourceRetire &retire, MeshArenas &arenas,
+                             GpuReplacement &replacement)
+{
+  MemoryPublication memoryPublication{*this};
+  if (!replacement.valid)
   {
     opaqueIndexCount = 0;
     waterIndexCount = 0;
     m_cachedOpaqueDrawCount = 0;
     m_cachedWaterDrawCount = 0;
   }
-  else if (prepared.lod)
+  else if (replacement.lod)
   {
-    commitLodUpload(cmd, prepared);
+    publishLodReplacement(arenas, replacement);
   }
   else
   {
-    commitSectionUpload(m_allocator, cmd, &retire, nullptr, *m_arenas, prepared);
+    publishSectionUpload(&retire, arenas, replacement);
   }
 
   releasePendingMeshResult();
 
   releaseNeighborBorders();
   meshNeedsUpdate = false;
+  replacement = GpuReplacement{};
 }
 
-void Chunk::rollbackGPUUpload(PreparedMeshUpload &prepared)
+// Releases a replacement's fresh ranges without publishing (group
+// rollback, supersession, unload of a member). Recorded replacements
+// retire frame-aware - their copies may still be executing - while
+// never-recorded ranges free immediately.
+void Chunk::discardGPUUpload(GpuReplacement &replacement)
 {
-  if (!prepared.result)
+  if (!replacement.valid)
     return;
-  // A prepared plan owns only fresh arena ranges plus frame-scoped staging
-  // reservations; no copy command references the ranges until commit runs,
-  // so immediate free is safe and the published mesh is untouched.
-  MeshArenas &arenas = *m_arenas;
-  if (prepared.lod)
-  {
-    if (!prepared.newOV.empty())
-      arenas.opaqueVertex.freeImmediate(prepared.newOV);
-    if (!prepared.newOI.empty())
-      arenas.opaqueIndex.freeImmediate(prepared.newOI);
-    if (!prepared.newWV.empty())
-      arenas.waterVertex.freeImmediate(prepared.newWV);
-    if (!prepared.newWI.empty())
-      arenas.waterIndex.freeImmediate(prepared.newWI);
-  }
+  if (replacement.lod)
+    discardLodReplacement(*m_arenas, replacement);
   else
-  {
-    for (PreparedMeshUpload::StreamPlan *plan : {&prepared.opaque, &prepared.water})
-    {
-      MeshArena &vA = (plan == &prepared.opaque) ? arenas.opaqueVertex : arenas.waterVertex;
-      MeshArena &iA = (plan == &prepared.opaque) ? arenas.opaqueIndex : arenas.waterIndex;
-      for (int s = 0; s < kOccupancySections; ++s)
-      {
-        PreparedMeshUpload::SectionPlan &p = plan->sections[static_cast<size_t>(s)];
-        if (!p.newV.empty())
-        {
-          vA.freeImmediate(p.newV);
-          p.newV = {};
-        }
-        if (!p.newI.empty())
-        {
-          iA.freeImmediate(p.newI);
-          p.newI = {};
-        }
-      }
-    }
-  }
-  prepared = PreparedMeshUpload{};
+    discardSectionReplacement(*m_arenas, replacement);
+  replacement = GpuReplacement{};
 }
 
 bool Chunk::uploadToGPUAsync(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
                              GpuResourceRetire &retire, MeshArenas &arenas)
 {
-  PreparedMeshUpload prepared;
-  if (!prepareGPUUpload(allocator, staging, cmd, retire, arenas, prepared))
+  const bool hadResult = m_pendingResult != nullptr;
+
+  GpuReplacement replacement;
+  if (!prepareGPUUpload(arenas, replacement))
   {
     telemetry::registry().add(telemetry::UploadDeferred);
     return false;
   }
-  commitGPUUpload(cmd, retire, prepared);
-  if (prepared.result)
+  if (!recordGPUUpload(allocator, staging, cmd, arenas, replacement))
+  {
+    // The ring lacks room this frame: release the prepared ranges (they
+    // were never recorded, so immediate free is safe) and retry next
+    // frame. The CPU result stays attached and every published slot,
+    // range and draw count is untouched.
+    discardGPUUpload(replacement);
+    telemetry::registry().add(telemetry::UploadDeferred);
+    return false;
+  }
+  publishGPUUpload(retire, arenas, replacement);
+  if (hadResult)
     telemetry::registry().add(telemetry::UploadChunks);
   return true;
 }
-
 void Chunk::releaseNeighborBorders()
 {
   if (!m_borders)

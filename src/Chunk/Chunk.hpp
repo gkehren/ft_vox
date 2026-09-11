@@ -246,65 +246,65 @@ public:
 		bool hasIndexRange() const { return indexPage != MeshArena::kNoPage; }
 	};
 
-	/// Prepared-but-uncommitted GPU upload transaction (PR #178 review):
-	/// every failure-capable step of an upload (staging reservation, arena
-	/// allocation) runs in prepareGPUUpload() and is fully rolled back on
-	/// failure; commitGPUUpload() then applies the plan with no failure
-	/// path. A geometric commit group prepares ALL its members before
-	/// committing ANY of them, so a staging shortfall on one chunk can
-	/// never publish a replacement whose border-coupled neighbor stays
-	/// stale.
-	struct PreparedMeshUpload
+	/// Prepared-but-unpublished GPU replacement for one chunk (PR #178
+	/// review round 4): fresh arena ranges are allocated once and survive
+	/// frames inside a commit group until every member's replacement is
+	/// resident on the GPU; only then are the published slots swapped
+	/// atomically. Staging scratch is frame-bound and never stored here.
+	struct GpuReplacement
 	{
-		MeshBuildResult *result{nullptr}; // attached payload, still Chunk-owned
-		StagingRing *staging{nullptr};    // frame path (null on the imm path)
+		bool valid{false};
 		bool lod{false};
-		// Whole-chunk LOD plan (issue #109).
-		bool needOpaque{false};
-		bool needWater{false};
-		MeshArena::Range newOV{}, newOI{}, newWV{}, newWI{};
-		VkDeviceSize stageVOff{0}, stageIOff{0}, stageWVOff{0}, stageWIOff{0};
-		void *stageVPtr{nullptr}, *stageIPtr{nullptr}, *stageWVPtr{nullptr}, *stageWIPtr{nullptr};
-		// Sectioned plan (issue #107/#109 section transaction).
+		MeshBuildResult *result{nullptr}; // attached payload, still Chunk-owned
+		uint64_t generation{0};           // chunk identity at prepare time
+		uint64_t revision{0};
+		bool recorded{false};             // copies submitted: data is resident
+		// Sectioned plan (issue #107/#109): future slots are precomputed;
+		// the currently published slots stay live until publish.
 		struct SectionPlan
 		{
-			bool touched{false}; // present in sectionsBuilt
-			bool active{false};  // payload is non-empty
+			bool touched{false};
+			bool active{false};
 			uint32_t vertexBytes{0};
 			uint32_t indexBytes{0};
-			SectionGpuSlot old{}; // the slot as currently published
-			MeshArena::Range newV{};
-			MeshArena::Range newI{};
 			uint32_t vertexBase{0};
-			VkDeviceSize stageVOff{0};
-			void *stageVPtr{nullptr};
-			VkDeviceSize stageIOff{0};
-			void *stageIPtr{nullptr};
+			SectionGpuSlot future{};
+			MeshArena::Range newV{}, newI{};
 		};
 		struct StreamPlan
 		{
 			SectionPlan sections[kOccupancySections]{};
 		};
 		StreamPlan opaque, water;
+		// Whole-chunk LOD plan (issue #109).
+		bool needOpaque{false};
+		bool needWater{false};
+		MeshArena::Range newOV{}, newOI{}, newWV{}, newWI{};
 	};
 
-	/// Failure-capable upload phase: staging reservation + fresh arena
-	/// allocation for the attached pending result. Fully rolled back on
-	/// failure - every published slot, range and draw count stays exactly
-	/// as published and the result stays attached. On success only
-	/// commitGPUUpload() remains.
-	bool prepareGPUUpload(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-	                      GpuResourceRetire &retire, MeshArenas &arenas, PreparedMeshUpload &out);
-	/// Cannot-fail commit phase: record the staging copies, swap the
-	/// prepared plan in, retire replaced ranges frame-aware and consume the
-	/// pending result. Requires a successful prepareGPUUpload() with the
-	/// same arguments; the prepared plan is consumed.
-	void commitGPUUpload(VkCommandBuffer cmd, GpuResourceRetire &retire, PreparedMeshUpload &prepared);
-	/// Release the fresh arena ranges of a prepared-but-uncommitted plan
-	/// (group rollback: another member failed its prepare). No copy command
-	/// references these ranges until commit runs, so immediate free is safe
-	/// and the published mesh is untouched.
-	void rollbackGPUUpload(PreparedMeshUpload &prepared);
+	/// ALLOCATE phase (frame-independent, failure-capable): plan and
+	/// allocate every fresh arena range the attached pending result needs.
+	/// Fully rolled back on failure; on success the replacement stays
+	/// private to the caller - the published mesh is untouched and keeps
+	/// rendering.
+	bool prepareGPUUpload(MeshArenas &arenas, GpuReplacement &out);
+	/// COPY phase (frame-bound): preflight + reserve staging, memcpy and
+	/// record the copies into cmd. Returns false when the ring lacks room
+	/// this frame - the caller retries next frame; the allocated
+	/// replacement is untouched and stays private. Nothing here survives
+	/// the frame: after the submit, the fresh ranges hold the payload.
+	bool recordGPUUpload(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+	                     MeshArenas &arenas, GpuReplacement &replacement);
+	/// PUBLISH phase (cannot fail, CPU-only): swap every prepared slot in,
+	/// retire the replaced ranges frame-aware, rebuild draw caches and
+	/// consume the pending result. Requires a successful prepare (and, for
+	/// frame-path uploads, a matching record).
+	void publishGPUUpload(GpuResourceRetire &retire, MeshArenas &arenas, GpuReplacement &replacement);
+	/// Release a replacement's fresh ranges without publishing (group
+	/// rollback, supersession, unload). Ranges whose copies were already
+	/// submitted retire frame-aware; never-recorded ranges free
+	/// immediately.
+	void discardGPUUpload(GpuReplacement &replacement);
 
 	/// Immediate destroy (shutdown / destructor only — not while frames may reference buffers).
 	void releaseGPU();
@@ -480,17 +480,25 @@ private:
 							StagingRing *staging, VkCommandBuffer cmd,
 							GpuResourceRetire *retire, ImmediateCommands *imm,
 							MeshArenas &arenas);
-	// Failure-capable phases of the two upload paths (see
-	// PreparedMeshUpload): staging reservation + fresh arena allocation
-	// with full rollback; then the cannot-fail slot swap / copy recording /
-	// retirement.
-	bool prepareLodUpload(MeshBuildResult &result, StagingRing &staging, MeshArenas &arenas,
-	                      PreparedMeshUpload &out);
-	void commitLodUpload(VkCommandBuffer cmd, PreparedMeshUpload &prepared);
-	bool prepareSectionUpload(MeshBuildResult &result, StagingRing *staging, MeshArenas &arenas,
-	                          PreparedMeshUpload &out);
-	void commitSectionUpload(VmaAllocator allocator, VkCommandBuffer cmd, GpuResourceRetire *retire,
-	                         ImmediateCommands *imm, MeshArenas &arenas, PreparedMeshUpload &prepared);
+	// ALLOCATE / COPY / PUBLISH / discard phases of the two upload paths
+	// (see GpuReplacement): ALLOCATE plans and reserves fresh arena ranges
+	// with full rollback; COPY reserves staging, memcpys and records the
+	// frame's copies; PUBLISH swaps slots, retires replaced ranges and
+	// rebuilds draw caches without any failure path.
+	bool prepareLodReplacement(MeshBuildResult &result, MeshArenas &arenas,
+	                           GpuReplacement &out);
+	bool prepareSectionReplacement(MeshBuildResult &result, MeshArenas &arenas,
+	                               GpuReplacement &out);
+	bool recordLodReplacement(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+	                          MeshArenas &arenas, GpuReplacement &replacement);
+	bool recordSectionUpload(VmaAllocator allocator, StagingRing *staging, VkCommandBuffer cmd,
+	                         ImmediateCommands *imm, MeshArenas &arenas,
+	                         GpuReplacement &replacement);
+	void publishLodReplacement(MeshArenas &arenas, GpuReplacement &replacement);
+	void publishSectionUpload(GpuResourceRetire *retire, MeshArenas &arenas,
+	                          GpuReplacement &replacement);
+	void discardLodReplacement(MeshArenas &arenas, GpuReplacement &replacement);
+	void discardSectionReplacement(MeshArenas &arenas, GpuReplacement &replacement);
 	// Retire every range described by a section slot table and reset the
 	// slots (issue #109 review: single retirement path for full->LOD and
 	// unload transitions). immediate=true for bootstrap/shutdown paths.
