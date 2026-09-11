@@ -93,10 +93,10 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 	s.inspectCoord.z = std::clamp(s.inspectCoord.z, -4096, 4096);
 
 	// Opt-in bounded trace. The flag lives in UiState (it survives world
-	// reloads) and is re-applied every frame, so a recreated ChunkManager
-	// inherits it.
+	// reloads); updateDebugUiState re-applies it to the ChunkManager every
+	// frame — even with this panel closed — so a recreated manager inherits
+	// it. This checkbox only flips the UI-owned flag.
 	ImGui::Checkbox("Trace lifecycle events (bounded ring of 256)", &s.eventTraceEnabled);
-	chunks.setChunkEventTraceEnabled(s.eventTraceEnabled);
 
 	// --- Selected chunk state ---
 	ImGui::SeparatorText("State");

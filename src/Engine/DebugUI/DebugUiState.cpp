@@ -132,6 +132,13 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 {
 	// Cheap frame-level snapshot: every frame, main-thread scalar reads.
 	{
+		// Keep the opt-in chunk lifecycle trace alive across world reloads:
+		// the flag lives in UiState and is re-applied every frame, even with
+		// the inspector closed, so a recreated ChunkManager inherits it
+		// (issue #179 review). Idempotent one-bool store.
+		if (frame.chunks)
+			frame.chunks->setChunkEventTraceEnabled(state.eventTraceEnabled);
+
 		Profiler &prof = GetProfiler();
 		state.frame.fps = frame.fps;
 		// CPU frame time comes from the profiler's full-frame scope, not the

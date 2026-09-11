@@ -239,6 +239,15 @@ void testUpdateDebugUiState()
 	debugui::updateDebugUiState(state, f, t0 + 10.0);
 	CHECK(state.activeChunks.count() == 1, "closed panels stop sampling");
 
+	// The opt-in chunk trace flag is propagated to a fresh ChunkManager by
+	// the sampler itself — even with the inspector panel closed — so it
+	// survives world reloads (issue #179 review).
+	ChunkManager reloaded(&generator, nullptr, &pool);
+	state.eventTraceEnabled = true;
+	f.chunks = &reloaded;
+	debugui::updateDebugUiState(state, f, t0 + 10.01);
+	CHECK(reloaded.chunkEventTraceEnabled(), "trace flag re-applied to a recreated manager with F9 closed");
+
 	std::cout << "PASS\n";
 }
 void testScopeStatsLifecycle()
