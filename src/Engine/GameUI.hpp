@@ -2,8 +2,8 @@
 
 #include <Engine/EngineDefs.hpp>
 #include <Engine/Benchmark.hpp>
+#include <Engine/PlayerUi.hpp>
 #include <Camera/Camera.hpp>
-#include <Physics/PlayerController.hpp>
 #include <Chunk/ChunkManager.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
@@ -30,13 +30,15 @@ class StagingRing;
 /// Frame snapshot for ImGui panels (pointers owned by Engine).
 /// Debug/telemetry data reaches panels through debugui::UiState snapshots
 /// (issue #179); the raw pointers here are the explicit settings structs and
-/// the callbacks for actions that need engine coordination.
+/// the callbacks for actions that need engine coordination. The player is
+/// carried as the read-only playerui::PlayerSnapshot value (issue #184), so
+/// UI surfaces never touch physics::PlayerController directly.
 struct GameUIFrame
 {
 	Camera *camera{nullptr};
-	const physics::PlayerController *player{nullptr};
-	bool playerFlight{false};
-	const char *playerStatus{""};
+	/// Read-only player view (position/motion/selection context + raw physics
+	/// counters for the developer console). Filled by Engine::drawUi.
+	playerui::PlayerSnapshot player{};
 	std::function<void(bool)> setPlayerFlight;
 	std::function<void(CameraMode)> setCameraMode;
 	ChunkManager *chunks{nullptr};
@@ -113,11 +115,13 @@ struct GameUIFrame
 
 /// Multi-panel ImGui surface for the Vulkan engine.
 ///
-/// GameUI itself is only the shell: main menu bar, gameplay HUD, biome-map
-/// window, help, on-screen hints, input shortcuts and biome-map plumbing.
+/// GameUI itself is only the shell: main menu bar, read-only Status Overlay
+/// (F1), the interactive Player / Gameplay panel, biome-map window, help,
+/// on-screen hints, input shortcuts and biome-map plumbing (issue #184).
 /// Every developer-tool panel (Overview, Performance, Rendering, Streaming,
-/// Chunk inspector, Memory, Benchmark) lives in src/Engine/DebugUI/ and
-/// consumes the read-only snapshots in debugui::UiState (issue #179).
+/// Player Diagnostics, Chunk inspector, Memory, Benchmark) lives in
+/// src/Engine/DebugUI/ and consumes the read-only snapshots in
+/// debugui::UiState (issue #179).
 class GameUI
 {
 public:
@@ -147,8 +151,12 @@ public:
 	/// Escape itself (ImGuiFileDialog cancels via IGFD_EXIT_KEY).
 	bool isFileDialogOpen() const;
 
-	bool showHud() const { return m_debug.panels.hud; }
+	bool showStatusOverlay() const
+	{
+		return m_debug.panels.statusOverlay != playerui::StatusOverlayDensity::Off;
+	}
 	bool showGraphics() const { return m_debug.panels.rendering; }
+	bool showPlayerPanel() const { return m_debug.panels.playerPanel; }
 	bool showStreaming() const { return m_debug.panels.streaming; }
 	bool showWorld() const { return m_debug.panels.world; }
 	bool showHelp() const { return m_debug.panels.help; }
@@ -163,7 +171,11 @@ public:
 		invalidateBiomeMap();
 	}
 
-	void setShowHud(bool v) { m_debug.panels.hud = v; }
+	void setShowStatusOverlay(bool v)
+	{
+		m_debug.panels.statusOverlay = v ? playerui::StatusOverlayDensity::Detailed
+										 : playerui::StatusOverlayDensity::Off;
+	}
 
 	/// Application shell (dockspace, menus, layout actions). Engine queues the
 	/// default developer layout here on first run.
@@ -221,7 +233,8 @@ private:
 		}
 	};
 
-	void drawHud(GameUIFrame &frame);
+	void drawStatusOverlay(GameUIFrame &frame);
+	void drawPlayerPanel(GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
 	void drawOverlayHints(GameUIFrame &frame);
@@ -251,15 +264,6 @@ private:
 
 	/// One-shot: Help window opens with the requested tab selected.
 	ui::HelpTabRequest m_helpTabRequest{ui::HelpTabRequest::None};
-
-	/// HUD scale tracking (issue #183): after a UI-scale change the
-	/// user-placed HUD position is kept but clamped fully inside the viewport
-	/// work area. The clamp is deferred until the work rect has held still
-	/// for two consecutive frames (the OS window resize, AlwaysAutoResize and
-	/// the menu-bar work inset all settle asynchronously), bounded to ~1 s.
-	float m_lastHudScale{0.f};
-	int m_hudClampGrace{0};
-	ImVec2 m_lastWorkSize{0.f, 0.f};
 
 	/// Application shell (dockspace, main menu, status strip, layout).
 	ui::UiShell m_shell{};

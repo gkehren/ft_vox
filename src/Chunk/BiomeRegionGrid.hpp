@@ -5,7 +5,8 @@
 #include <glm/glm.hpp>
 
 /// Continuous world position -> voxel column (canonical convention).
-/// This is THE single convention shared by the HUD, getBiomeAt(),
+/// This is THE single convention shared by the UI player snapshot
+/// (playerui::worldToChunkCoord), getBiomeAt(),
 /// getBiomeRegion(), the biome map, and the player marker: a world
 /// coordinate belongs to the voxel column at its floor(). Non-finite or
 /// int-unrepresentable inputs clamp to the nearest representable column

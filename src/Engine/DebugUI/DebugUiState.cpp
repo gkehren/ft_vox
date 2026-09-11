@@ -269,6 +269,29 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 				state.frame.gpuValid = true;
 			}
 		}
+
+		// Player/physics diagnostics (issue #184): plain scalar copies from
+		// the frame's read-only snapshot — cheap enough to refresh every
+		// frame, but only paid while the console panel consumes them.
+		if (state.panels.playerDiagnostics)
+		{
+			const playerui::PlayerSnapshot &p = frame.player;
+			state.player.valid = true;
+			state.player.flight = p.flight;
+			state.player.grounded = p.grounded;
+			state.player.swimming = p.swimming;
+			state.player.submergedWater = p.submergedWater;
+			state.player.submergedLava = p.submergedLava;
+			state.player.waitingForTerrain = p.waitingForTerrain;
+			state.player.speed = p.speed;
+			state.player.position = p.position;
+			state.player.yaw = p.yaw;
+			state.player.pitch = p.pitch;
+			state.player.physicsSteps = p.physicsSteps;
+			state.player.queriedCells = p.queriedCells;
+			state.player.queryIterations = p.queryIterations;
+			state.player.droppedSteps = p.droppedSteps;
+		}
 	}
 
 	// Profiler capture lifecycle precedes the throttle: the epoch check and

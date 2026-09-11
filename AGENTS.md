@@ -14,7 +14,7 @@
 
 ### Core Engine
 - **Engine (`src/Engine/`)**: Main loop, SDL3 window (`SDL_WINDOW_VULKAN`), input, high-level systems.
-  - **`GameUI`**: multi-panel ImGui (HUD, Graphics, Streaming, World/biome map, Help) + F-key shortcuts
+  - **`GameUI`**: multi-panel ImGui (Status Overlay, Player/Gameplay, Graphics, Streaming, World/biome map, Help) + F-key shortcuts (issue #184: the old catch-all HUD was split into the read-only Status Overlay and the Player/Gameplay panel; VSync lives in Graphics, physics counters in the Player Diagnostics console)
 - **Vulkan backend (`src/Vulkan/`)**:
   - `VkContext`: instance, surface, physical/logical device, queues, feature detection, **VMA**
   - `VkAllocator` / `VkBuffer` / `VkImage` / `VkUpload` / `VkCommands`: GPU resources + staging

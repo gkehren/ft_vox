@@ -51,6 +51,21 @@ void drawRendering(UiState &s, GameUIFrame &frame)
 		ImGui::TextDisabled("Packs shadow resolution / SSAO / water SSR & shadows / bloom / god rays / grain / spatial AA (Low: off). Manual sliders below still work.");
 	}
 
+	// Display/present ownership (issue #184): VSync is a display setting and
+	// moved here out of the old HUD; F10 remains its quick action.
+	if (frame.render && frame.setVSync &&
+		ImGui::CollapsingHeader("Display / Present", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		if (ImGui::Checkbox("VSync [F10]", &frame.render->vsyncEnabled))
+			frame.setVSync(frame.render->vsyncEnabled);
+		if (frame.presentModeName)
+			ImGui::TextDisabled("Vulkan present mode: %s%s",
+								frame.presentModeName,
+								frame.render->vsyncEnabled
+									? ""
+									: " (no refresh pacing / no FPS cap)");
+	}
+
 	drawResourcePackSection(frame, s.resourcePackUi, s.panels.rendering);
 	if (ImGui::CollapsingHeader("Atmosphere / Fog", ImGuiTreeNodeFlags_DefaultOpen))
 	{

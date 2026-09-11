@@ -1,7 +1,15 @@
-// UI shell pure logic (issue #183): scale normalization, status-strip
-// degradation, and shortcut metadata consistency with the InputRouting
-// binding policy. No ImGui and no rendering involved.
+// UI shell pure logic (issues #183/#184): scale normalization, status-strip
+// degradation, shortcut metadata consistency with the InputRouting binding
+// policy, and the player/status-overlay UI model (motion labels, chunk
+// display math, block palette ordering, overlay density). No ImGui and no
+// rendering involved.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX // utils.hpp (via PlayerUi.hpp) includes <windows.h>
+#endif
+#endif
 #include <Engine/InputRouting.hpp>
+#include <Engine/PlayerUi.hpp>
 #include <Engine/UiScale.hpp>
 #include <Engine/UiShortcuts.hpp>
 #include <Engine/UiStatus.hpp>
@@ -9,6 +17,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <string>
 
 static int g_fails = 0;
 
@@ -171,12 +180,79 @@ static void checkShortcutMetadata()
 	CHECK(ui::findShortcut(SDLK_ESCAPE) == nullptr, "escape not listed as a shortcut");
 }
 
+static void checkPlayerUi()
+{
+	using namespace playerui;
+
+	// Motion-state display mapping: priority flight > waiting for terrain >
+	// swimming > grounded > airborne (matches the pre-#184 HUD semantics).
+	CHECK(playerMotionLabel(true, false, false, false) == "Flight", "flight wins");
+	CHECK(playerMotionLabel(true, true, true, true) == "Flight", "flight beats every other state");
+	CHECK(playerMotionLabel(false, true, true, true) == "Waiting for terrain",
+		  "waiting beats swimming/grounded");
+	CHECK(playerMotionLabel(false, false, true, true) == "Swimming", "swimming beats grounded");
+	CHECK(playerMotionLabel(false, false, false, true) == "Grounded", "grounded label");
+	CHECK(playerMotionLabel(false, false, false, false) == "Airborne", "airborne label");
+
+	// World -> chunk display consistency: floor semantics, negative-safe
+	// (example from issue #184: 147.2 / -384.7 -> chunk 9 / -25).
+	const glm::ivec2 issueExample = worldToChunkCoord(147.2f, -384.7f);
+	CHECK(issueExample.x == 9 && issueExample.y == -25, "issue example chunk coords");
+	const glm::ivec2 origin = worldToChunkCoord(0.f, 0.f);
+	CHECK(origin.x == 0 && origin.y == 0, "origin resolves to chunk 0/0");
+	const glm::ivec2 subChunk = worldToChunkCoord(15.99f, -0.01f);
+	CHECK(subChunk.x == 0 && subChunk.y == -1, "sub-chunk positions floor down");
+	const glm::ivec2 boundary = worldToChunkCoord(16.f, -16.f);
+	CHECK(boundary.x == 1 && boundary.y == -1, "exact boundaries stay floor-consistent");
+	const glm::ivec2 farChunk = worldToChunkCoord(-16.f, 480.f);
+	CHECK(farChunk.x == -1 && farChunk.y == 30, "large mixed-sign positions");
+
+	// Block palette: complete, self-consistent, alphabetical, deterministic.
+	const std::vector<BlockPaletteEntry> palette = buildBlockPalette();
+	CHECK(palette.size() == textureTypeString.size(), "palette covers every TextureType");
+	for (std::size_t i = 0; i < palette.size(); ++i)
+	{
+		const int id = palette[i].id;
+		CHECK(id >= 0 && static_cast<std::size_t>(id) < textureTypeString.size(),
+			  "palette id in range");
+		CHECK(palette[i].name == textureTypeString[static_cast<std::size_t>(id)],
+			  "palette entry name matches its TextureType id");
+		if (i + 1 < palette.size())
+			CHECK(palette[i].name <= palette[i + 1].name, "palette is alphabetically ordered");
+	}
+	const std::vector<BlockPaletteEntry> rebuilt = buildBlockPalette();
+	CHECK(rebuilt.size() == palette.size(), "palette rebuild is stable");
+	for (std::size_t i = 0; i < palette.size(); ++i)
+		CHECK(rebuilt[i].id == palette[i].id && rebuilt[i].name == palette[i].name,
+			  "palette rebuild is identical");
+
+	// Overlay density: F1 cycle covers every state exactly once, and the
+	// field-selection policy only adds world context at Detailed.
+	CHECK(nextStatusOverlayDensity(StatusOverlayDensity::Off) == StatusOverlayDensity::Minimal,
+		  "cycle Off -> Minimal");
+	CHECK(nextStatusOverlayDensity(StatusOverlayDensity::Minimal) == StatusOverlayDensity::Detailed,
+		  "cycle Minimal -> Detailed");
+	CHECK(nextStatusOverlayDensity(StatusOverlayDensity::Detailed) == StatusOverlayDensity::Off,
+		  "cycle Detailed -> Off");
+	CHECK(!statusOverlayShowsWorld(StatusOverlayDensity::Off), "Off shows nothing");
+	CHECK(!statusOverlayShowsWorld(StatusOverlayDensity::Minimal),
+		  "Minimal stays frame-health only");
+	CHECK(statusOverlayShowsWorld(StatusOverlayDensity::Detailed),
+		  "Detailed adds world/player context");
+
+	// Biome display: unresolved snapshot ordinal renders as "?".
+	CHECK(std::string_view(biomeDisplayName(-1)) == "?", "unresolved biome displays ?");
+	CHECK(std::string_view(biomeDisplayName(BIOME_COUNT)) == "?", "out-of-range biome displays ?");
+	CHECK(biomeDisplayName(0) != nullptr, "valid biome resolves to a name");
+}
+
 int main()
 {
 	checkScale();
 	checkStatusRegion();
 	checkStatusStrip();
 	checkShortcutMetadata();
+	checkPlayerUi();
 
 	if (g_fails != 0)
 	{

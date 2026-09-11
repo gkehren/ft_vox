@@ -39,6 +39,9 @@ void drawOverview(UiState &s, GameUIFrame &frame)
 	ImGui::Text("avg %.2f ms   |   1%% low %.2f ms   |   VSync %s (%s)",
 				s.frame.avgMs, s.frame.onePercentLowMs,
 				s.frame.vsync ? "on" : "off", s.frame.presentMode);
+	// World identity readouts that lost their old HUD home (issue #184).
+	ImGui::TextDisabled("Seed %d   |   viewport %d × %d",
+						frame.seed, frame.windowW, frame.windowH);
 	ImGui::TextDisabled("CPU frame history (10 Hz, 25 s window)");
 	plotHistory("##ov_cpu", s.cpuMs, 0.f, ImVec2(-1.f, ui::scaled(56.f, scale)));
 

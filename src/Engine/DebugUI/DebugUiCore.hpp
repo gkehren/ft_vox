@@ -15,6 +15,7 @@
 
 #include <Engine/WorkloadTelemetry.hpp>
 #include <Engine/GameUIResourcePack.hpp>
+#include <Engine/PlayerUi.hpp>
 
 #include <array>
 #include <cstddef>
@@ -170,16 +171,43 @@ struct ChunkDebugSnapshot
 	uint32_t activeIndex{0};
 };
 
+/// Player/physics diagnostics (issue #184): the raw solver counters and
+/// motion flags removed from the gameplay surfaces. Copied from the frame's
+/// playerui::PlayerSnapshot while the Player Diagnostics window is open.
+struct PlayerDebugSnapshot
+{
+	bool valid{false};
+	bool flight{false};
+	bool grounded{false};
+	bool swimming{false};
+	bool submergedWater{false};
+	bool submergedLava{false};
+	bool waitingForTerrain{false};
+	float speed{0.f};
+	glm::vec3 position{0.f};
+	float yaw{0.f};
+	float pitch{0.f};
+	uint32_t physicsSteps{0};
+	uint64_t queriedCells{0};
+	uint64_t queryIterations{0};
+	uint64_t droppedSteps{0};
+};
+
 // --- Console state owned by GameUI ---
 
 struct PanelState
 {
-	bool hud{true};
+	/// Read-only Status Overlay density (issue #184): F1 cycles, the View
+	/// menu offers the same three states. Replaces the old catch-all HUD.
+	playerui::StatusOverlayDensity statusOverlay{playerui::StatusOverlayDensity::Detailed};
+	/// Interactive Player / Gameplay panel (View menu).
+	bool playerPanel{false};
 	bool overview{false};
 	bool rendering{false};	   // settings ("Graphics")
 	bool renderDebug{false};   // diagnostic views
 	bool streaming{false};
 	bool performance{false};   // CPU/GPU profiler (was "Profiler")
+	bool playerDiagnostics{false}; // raw player/physics solver counters
 	bool chunkInspector{false};
 	bool memory{false};
 	bool benchmark{false};
@@ -232,6 +260,7 @@ public:
 	FrameDebugSnapshot frame;
 	StreamingDebugSnapshot streaming;
 	MemoryDebugSnapshot memory;
+	PlayerDebugSnapshot player;
 
 	// 10 Hz bounded histories (sampled only while a consumer panel is open).
 	MetricHistory cpuMs;

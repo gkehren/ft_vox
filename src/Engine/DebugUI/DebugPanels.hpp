@@ -34,6 +34,10 @@ void drawStreaming(UiState &state, GameUIFrame &frame);
 /// current/avg/peak + per-scope graphs, GPU pass view, worker jobs, spikes.
 void drawPerformance(UiState &state, GameUIFrame &frame);
 
+/// Player/physics diagnostics (Developer menu): raw solver counters, motion
+/// flags and camera readout removed from the gameplay surfaces (issue #184).
+void drawPlayerDiagnostics(UiState &state, GameUIFrame &frame);
+
 /// Chunk-centric inspector (F9): lifecycle/mesh/light-cache/upload state
 /// for the chunk under the player/target or manual coordinates, plus the
 /// opt-in bounded lifecycle event trace.

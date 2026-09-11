@@ -118,7 +118,10 @@ bool GameUI::handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame)
 	switch (sdlKeycode)
 	{
 	case SDLK_F1:
-		m_debug.panels.hud = !m_debug.panels.hud;
+		// Issue #184: F1 owns the Status Overlay density — cycling through
+		// Off / Minimal / Detailed replaces the old catch-all HUD toggle.
+		m_debug.panels.statusOverlay =
+			playerui::nextStatusOverlayDensity(m_debug.panels.statusOverlay);
 		return true;
 	case SDLK_F2:
 		m_debug.panels.rendering = !m_debug.panels.rendering;
@@ -194,22 +197,27 @@ void GameUI::draw(GameUIFrame &frame)
 	debugui::updateDebugUiState(m_debug, frame, ImGui::GetTime());
 
 	const ui::ShellToggles toggles{
-		&m_debug.panels.hud, &m_debug.panels.rendering, &m_debug.panels.streaming,
+		&m_debug.panels.statusOverlay, &m_debug.panels.playerPanel,
+		&m_debug.panels.rendering, &m_debug.panels.streaming,
 		&m_debug.panels.world, &m_debug.panels.help, &m_debug.panels.overlayHints,
-		&m_debug.panels.overview, &m_debug.panels.performance, &m_debug.panels.renderDebug,
+		&m_debug.panels.overview, &m_debug.panels.performance, &m_debug.panels.playerDiagnostics,
+		&m_debug.panels.renderDebug,
 		&m_debug.panels.chunkInspector, &m_debug.panels.memory, &m_debug.panels.benchmark,
 		&m_helpTabRequest};
 
 	m_shell.beginFrame();
 	m_shell.drawMainMenuBar(frame, toggles);
 
-	if (m_debug.panels.hud)
-		drawHud(frame);
+	if (m_debug.panels.statusOverlay != playerui::StatusOverlayDensity::Off)
+		drawStatusOverlay(frame);
+	if (m_debug.panels.playerPanel)
+		drawPlayerPanel(frame);
 	debugui::drawOverview(m_debug, frame);
 	debugui::drawRendering(m_debug, frame);
 	debugui::drawRenderDebug(m_debug, frame);
 	debugui::drawStreaming(m_debug, frame);
 	debugui::drawPerformance(m_debug, frame);
+	debugui::drawPlayerDiagnostics(m_debug, frame);
 	debugui::drawChunkInspector(m_debug, frame);
 	debugui::drawMemory(m_debug, frame);
 	debugui::drawBenchmarkPanel(m_debug, frame);
@@ -229,209 +237,179 @@ void GameUI::draw(GameUIFrame &frame)
 	displayResourcePackFileDialog(m_debug.resourcePackUi, m_debug.panels.rendering);
 }
 
-void GameUI::drawHud(GameUIFrame &frame)
+void GameUI::drawStatusOverlay(GameUIFrame &frame)
 {
-	// Anchor below the menu bar via the viewport work area (WorkPos already
-	// excludes the main menu bar) and scale the offset/size with the UI
-	// scale so the whole HUD geometry follows it (issue #183 review).
+	// True gameplay overlay (issue #184): compact, read-only, semi-
+	// transparent and non-interactive — it never steals gameplay mouse or
+	// keyboard input. Anchored below the menu bar via the viewport work area
+	// (WorkPos already excludes the main menu bar); offsets follow the UI
+	// scale (issue #183). Not user-movable, so the old HUD scale-clamp
+	// machinery is gone.
 	const ImGuiViewport *viewport = ImGui::GetMainViewport();
 	const float scale = ui::effectiveScale(frame.uiScale);
-	if (std::fabs(scale - m_lastHudScale) > 0.001f)
-	{
-		m_lastHudScale = scale;
-		// ~1 s budget: the OS window resize, AlwaysAutoResize and the
-		// menu-bar work inset all settle asynchronously after the change.
-		m_hudClampGrace = 60;
-	}
-
-	// Work-rect stability probe (two identical consecutive frames).
-	const bool workStable =
-		std::fabs(viewport->WorkSize.x - m_lastWorkSize.x) < 0.5f &&
-		std::fabs(viewport->WorkSize.y - m_lastWorkSize.y) < 0.5f;
-	m_lastWorkSize = viewport->WorkSize;
-
 	ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + ui::scaled(12.f, scale),
 								   viewport->WorkPos.y + ui::scaled(12.f, scale)),
-							ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowSize(ImVec2(ui::scaled(360.f, scale), 0.f), ImGuiCond_FirstUseEver);
-	// The HUD is a floating status overlay; it never participates in docking
-	// or the default developer layout (issue #183).
-	if (!ImGui::Begin(ui::windows::kHud, &m_debug.panels.hud,
-					  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking))
+							ImGuiCond_Always);
+	ImGui::SetNextWindowBgAlpha(0.55f);
+	constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+									   ImGuiWindowFlags_AlwaysAutoResize |
+									   ImGuiWindowFlags_NoSavedSettings |
+									   ImGuiWindowFlags_NoFocusOnAppearing |
+									   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
+									   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking;
+	if (!ImGui::Begin("##statusOverlay", nullptr, flags))
 	{
 		ImGui::End();
 		return;
 	}
 
-	// After a UI-scale change, keep the user-placed HUD position but clamp
-	// it fully inside the viewport work area (all four edges, with margin).
-	// Deferred until the work rect settled (see above), skipped every other
-	// frame so the user can place the HUD freely, and the no-op SetWindowPos
-	// guard avoids needless imgui.ini writes. std::max(min, max) guards a
-	// HUD larger than the available area.
-	if (m_hudClampGrace > 0)
+	// Frame health line is the whole Minimal density; the ms value is the
+	// hierarchical-profiler CPU frame time — the same quantity the shell
+	// status strip and Performance panel show, not the paced sim delta.
+	ImGui::Text("%.0f FPS · %.1f ms", frame.fps, frame.cpuFrameMs);
+
+	if (playerui::statusOverlayShowsWorld(m_debug.panels.statusOverlay))
 	{
-		const bool settled = workStable && m_hudClampGrace <= 58; // >= 2 frames
-		--m_hudClampGrace;
-		if (settled || m_hudClampGrace == 0)
-		{
-			m_hudClampGrace = 0;
-
-			const float margin = ui::scaled(12.f, scale);
-
-			const ImVec2 pos = ImGui::GetWindowPos();
-			const ImVec2 size = ImGui::GetWindowSize();
-
-			const float minX = viewport->WorkPos.x + margin;
-			const float minY = viewport->WorkPos.y + margin;
-
-			const float maxX =
-				viewport->WorkPos.x + viewport->WorkSize.x - size.x - margin;
-			const float maxY =
-				viewport->WorkPos.y + viewport->WorkSize.y - size.y - margin;
-
-			const ImVec2 clamped(std::clamp(pos.x, minX, std::max(minX, maxX)),
-								 std::clamp(pos.y, minY, std::max(minY, maxY)));
-
-			if (clamped.x != pos.x || clamped.y != pos.y)
-				ImGui::SetWindowPos(clamped);
-		}
+		const playerui::PlayerSnapshot &p = frame.player;
+		ImGui::Text("XYZ %.1f / %.1f / %.1f", p.position.x, p.position.y, p.position.z);
+		ImGui::Text("Chunk %d / %d · %s", p.chunkX, p.chunkZ,
+					playerui::biomeDisplayName(p.biome));
+		if (frame.selectedTexture)
+			ImGui::Text("Selected: %s", textureName(*frame.selectedTexture));
+		if (frame.highlight && frame.highlight->active)
+			ImGui::Text("Target: %d / %d / %d",
+						static_cast<int>(std::floor(frame.highlight->position.x)),
+						static_cast<int>(std::floor(frame.highlight->position.y)),
+						static_cast<int>(std::floor(frame.highlight->position.z)));
 	}
 
-	// The ms value is the hierarchical-profiler CPU frame time — the same
-	// quantity the shell status strip and Performance panel show — not the
-	// paced simulation delta (issue #179 separation, issue #183 review).
-	ui::metric("FPS", "%.1f  (%.2f ms)", frame.fps, frame.cpuFrameMs);
-	ui::metric("Seed", "%d", frame.seed);
-	ui::metric("Viewport", "%d × %d", frame.windowW, frame.windowH);
+	// State badges only while meaningful (issue #184) — never a permanent
+	// wall of flags.
+	const playerui::PlayerSnapshot &p = frame.player;
+	const struct
+	{
+		const char *label;
+		ui::StatusKind kind;
+		bool active;
+	} badges[] = {
+		{"PAUSED", ui::StatusKind::Warn, frame.paused && *frame.paused},
+		{"FLIGHT", ui::StatusKind::Info, p.flight},
+		{"WAITING FOR TERRAIN", ui::StatusKind::Warn, p.waitingForTerrain},
+		{"SWIMMING", ui::StatusKind::Info, p.swimming},
+	};
+	bool first = true;
+	for (const auto &badge : badges)
+	{
+		if (!badge.active)
+			continue;
+		if (!first)
+			ImGui::SameLine(0.f, ui::scaled(6.f, scale));
+		ui::statusBadge(badge.label, badge.kind);
+		first = false;
+	}
 
+	ImGui::End();
+}
+
+void GameUI::drawPlayerPanel(GameUIFrame &frame)
+{
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(360.f, scale), ui::scaled(440.f, scale)),
+							 ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kPlayer, &m_debug.panels.playerPanel))
+	{
+		ImGui::End();
+		return;
+	}
+
+	const playerui::PlayerSnapshot &p = frame.player;
+	const bool benchmarkActive = frame.benchmark && frame.benchmark->isActive();
+
+	// Interactive locomotion controls (issue #184 §2). Raw physics counters
+	// live in the developer console's Player Diagnostics window now.
+	ui::sectionHeader("Movement");
 	if (frame.camera)
 	{
-		const glm::vec3 p = frame.camera->getPosition();
-		ui::sectionHeader("Player");
-		ImGui::Text("Pos  %.1f  %.1f  %.1f", p.x, p.y, p.z);
-		ImGui::Text("Look yaw %.0f°  pitch %.0f°", frame.camera->getYaw(), frame.camera->getPitch());
-		const int cx = static_cast<int>(std::floor(p.x / CHUNK_SIZE));
-		const int cz = static_cast<int>(std::floor(p.z / CHUNK_SIZE));
-		ui::metric("Chunk", "(%d, %d)", cx, cz);
-
-		if (frame.generator)
-		{
-			// Single canonical world -> voxel-column convention (floor).
-			const glm::ivec2 column = worldToVoxelColumn(glm::vec2(p.x, p.z));
-			const BiomeType biome = frame.generator->getBiomeAt(column.x, column.y);
-			if (biome >= 0 && biome < BIOME_COUNT)
-				ui::metric("Biome", "%s", biomeTypeString[biome]);
-		}
-
-		if (frame.player)
-		{
-			bool flight = frame.playerFlight;
-			ImGui::BeginDisabled(frame.benchmark && frame.benchmark->isActive());
-			if (ImGui::Checkbox("Debug flight [V]", &flight) && frame.setPlayerFlight)
-				frame.setPlayerFlight(flight);
-			ImGui::EndDisabled();
-			const auto &p = *frame.player;
-			ImGui::Text("%s | %.2f blocks/s", frame.playerFlight ? "Flying" :
-				p.body.waitingForTerrain ? "Waiting for terrain" :
-				p.submerged.water + p.submerged.lava > 0 ? "Swimming" :
-				p.body.grounded ? "Grounded" : "Airborne", glm::length(p.body.velocity));
-			ImGui::TextDisabled("Physics: %u steps, %llu cells, %llu dropped steps",
-				p.metrics.steps, static_cast<unsigned long long>(p.metrics.queries.cells),
-				static_cast<unsigned long long>(p.metrics.droppedSteps));
-			if (frame.playerStatus && *frame.playerStatus) ImGui::TextWrapped("%s", frame.playerStatus);
-		}
+		ImGui::BeginDisabled(benchmarkActive);
+		bool flight = p.flight;
+		if (ImGui::Checkbox("Debug flight [V]", &flight) && frame.setPlayerFlight)
+			frame.setPlayerFlight(flight);
+		ImGui::EndDisabled();
 		float speed = frame.camera->getMovementSpeed();
-		ImGui::BeginDisabled(!frame.playerFlight);
+		ImGui::BeginDisabled(!p.flight);
 		if (ImGui::SliderFloat("Fly speed", &speed, 1.f, 200.f, "%.1f"))
 			frame.camera->setMovementSpeed(speed);
 		ImGui::EndDisabled();
-		float sens = frame.camera->getMouseSensitivity();
-		if (ImGui::SliderFloat("Mouse sens", &sens, 0.02f, 0.5f, "%.3f"))
-			frame.camera->setMouseSensitivity(sens);
+		// Label is a string literal -> data() is null-terminated (printf-safe,
+		// no per-frame allocation; issue #184 §7).
+		ImGui::Text("%s · %.2f blocks/s", playerui::playerMotionLabel(p).data(), p.speed);
+		if (p.status && *p.status)
+			ImGui::TextWrapped("%s", p.status);
+	}
 
+	// Camera behavior controls; isometric zoom only while relevant.
+	ui::sectionHeader("Camera");
+	if (frame.camera)
+	{
 		const char *modes[] = {"Perspective", "Isometric"};
 		int mode = frame.camera->getMode() == CameraMode::ISOMETRIC ? 1 : 0;
-		if (ImGui::Combo("Camera", &mode, modes, 2) && frame.setCameraMode)
+		if (ImGui::Combo("Camera mode", &mode, modes, 2) && frame.setCameraMode)
 			frame.setCameraMode(mode == 1 ? CameraMode::ISOMETRIC : CameraMode::PERSPECTIVE);
 		if (frame.camera->getMode() == CameraMode::ISOMETRIC)
 		{
-			float z = frame.camera->getIsometricZoom();
-			if (ImGui::SliderFloat("Iso zoom", &z, 16.f, 256.f))
-				frame.camera->setIsometricZoom(z);
+			float zoom = frame.camera->getIsometricZoom();
+			if (ImGui::SliderFloat("Zoom", &zoom, 16.f, 256.f))
+				frame.camera->setIsometricZoom(zoom);
 		}
+		float sensitivity = frame.camera->getMouseSensitivity();
+		if (ImGui::SliderFloat("Sensitivity", &sensitivity, 0.02f, 0.5f, "%.3f"))
+			frame.camera->setMouseSensitivity(sensitivity);
 	}
 
 	ui::sectionHeader("Interaction");
 	if (frame.selectedTexture)
 	{
-		// Build sorted name list once per frame (cheap — COUNT is small).
-		static std::vector<std::pair<int, std::string>> names;
-		if (names.empty())
+		// Stable alphabetical palette built once per process (issue #184 §7:
+		// no per-frame sorting or allocation for static names).
+		static const std::vector<playerui::BlockPaletteEntry> palette =
+			playerui::buildBlockPalette();
+		const int current = static_cast<int>(*frame.selectedTexture);
+		if (ImGui::BeginCombo("Block [T]", textureName(*frame.selectedTexture)))
 		{
-			for (std::size_t i = 0; i < textureTypeString.size(); ++i)
+			for (const playerui::BlockPaletteEntry &entry : palette)
 			{
-				names.emplace_back(static_cast<int>(i), std::string{textureTypeString[i]});
-			}
-			std::sort(names.begin(), names.end(),
-					  [](const auto &a, const auto &b) { return a.second < b.second; });
-		}
-		int cur = static_cast<int>(*frame.selectedTexture);
-		std::string preview = textureName(*frame.selectedTexture);
-		if (ImGui::BeginCombo("Block [T]", preview.c_str()))
-		{
-			for (const auto &n : names)
-			{
-				const bool sel = (n.first == cur);
-				if (ImGui::Selectable(n.second.c_str(), sel))
-					*frame.selectedTexture = static_cast<TextureType>(n.first);
-				if (sel)
+				const bool selected = (entry.id == current);
+				if (ImGui::Selectable(entry.name.c_str(), selected))
+					*frame.selectedTexture = static_cast<TextureType>(entry.id);
+				if (selected)
 					ImGui::SetItemDefaultFocus();
 			}
 			ImGui::EndCombo();
 		}
 	}
 	if (frame.render)
-		ImGui::SliderInt("Raycast dist", &frame.render->raycastDistance, 2, 32);
-
+		ImGui::SliderInt("Raycast distance", &frame.render->raycastDistance, 2, 32);
 	if (frame.highlight)
 	{
 		if (frame.highlight->active)
-			ImGui::Text("Target: %.0f %.0f %.0f",
-						frame.highlight->position.x, frame.highlight->position.y,
-						frame.highlight->position.z);
+			ImGui::Text("Target: %d / %d / %d",
+						static_cast<int>(std::floor(frame.highlight->position.x)),
+						static_cast<int>(std::floor(frame.highlight->position.y)),
+						static_cast<int>(std::floor(frame.highlight->position.z)));
 		else
 			ImGui::TextDisabled("Target: —");
 	}
 
-	ui::sectionHeader("Toggles");
+	// Only toggles that are frequently useful mid-gameplay (issue #184 §2).
+	// Pause / mouse capture stay in the World menu + shortcuts; VSync moved
+	// to the Graphics panel; mob/physics counters moved to the console.
+	ui::sectionHeader("World toggles");
 	if (frame.showChunkBorders)
 		ImGui::Checkbox("Chunk borders [B]", frame.showChunkBorders);
 	if (frame.showDemoPlayers)
 		ImGui::Checkbox("Demo players", frame.showDemoPlayers);
-    if (frame.mobsEnabled) {
-        ImGui::Checkbox("Passive mobs", frame.mobsEnabled);
-        ImGui::Text("Mobs: %zu active / %zu visible", frame.mobCount, frame.mobVisible);
-    }
-	if (frame.mouseCaptured)
-	{
-		if (ImGui::Checkbox("Capture mouse [C]", frame.mouseCaptured))
-		{ /* Engine applies relative mode */
-		}
-	}
-	if (frame.paused)
-		ImGui::Checkbox("Pause [P]", frame.paused);
-	if (frame.render && frame.setVSync)
-	{
-		if (ImGui::Checkbox("VSync [F10]", &frame.render->vsyncEnabled))
-			frame.setVSync(frame.render->vsyncEnabled);
-		if (frame.presentModeName)
-			ImGui::TextDisabled("Vulkan present mode: %s%s",
-								frame.presentModeName,
-								frame.render->vsyncEnabled
-									? ""
-									: " (no refresh pacing / no FPS cap)");
-	}
+	if (frame.mobsEnabled)
+		ImGui::Checkbox("Passive mobs", frame.mobsEnabled);
 
 	ImGui::End();
 }

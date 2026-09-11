@@ -22,7 +22,7 @@ struct ShortcutRef
 // Globals first (F1-F12), then gameplay keys. Gameplay entries stay gated
 // behind !wantCaptureKeyboard at their call sites (InputRouting policy).
 inline constexpr ShortcutRef kShortcuts[] = {
-	{SDLK_F1, "F1", "Status overlay (HUD)", true},
+	{SDLK_F1, "F1", "Status overlay density", true},
 	{SDLK_F2, "F2", "Graphics", true},
 	{SDLK_F3, "F3", "Streaming", true},
 	{SDLK_F4, "F4", "World / biome map", true},

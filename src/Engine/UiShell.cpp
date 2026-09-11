@@ -69,6 +69,7 @@ void UiShell::applyDefaultDeveloperLayout(ImGuiID dockspaceId)
 	ImGui::DockBuilderDockWindow(windows::kGraphics, dockLeft);
 	ImGui::DockBuilderDockWindow(windows::kStreaming, dockLeft);
 	ImGui::DockBuilderDockWindow(windows::kWorld, dockLeft);
+	ImGui::DockBuilderDockWindow(windows::kPlayer, dockLeft);
 
 	ImGui::DockBuilderDockWindow(windows::kHelp, dockRight);
 	ImGui::DockBuilderDockWindow(windows::kOverview, dockRight);
@@ -121,7 +122,27 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 
 	if (ImGui::BeginMenu("View"))
 	{
-		ImGui::MenuItem("Status overlay (HUD)", shortcutKeyName(SDLK_F1), toggles.hud);
+		if (ImGui::BeginMenu("Status overlay"))
+		{
+			// Single state home (issue #184): the density. F1 cycles through
+			// the same three states from anywhere.
+			const char *densityNames[] = {"Off", "Minimal", "Detailed"};
+			static_assert(IM_ARRAYSIZE(densityNames) ==
+							  static_cast<int>(playerui::StatusOverlayDensity::Detailed) + 1);
+			for (int d = 0; d <= static_cast<int>(playerui::StatusOverlayDensity::Detailed); ++d)
+			{
+				const bool selected =
+					static_cast<int>(*toggles.statusOverlay) == d;
+				if (ImGui::MenuItem(densityNames[d], nullptr, selected))
+					*toggles.statusOverlay = static_cast<playerui::StatusOverlayDensity>(d);
+			}
+			ImGui::Separator();
+			if (ImGui::MenuItem("Cycle density", shortcutKeyName(SDLK_F1)))
+				*toggles.statusOverlay =
+					playerui::nextStatusOverlayDensity(*toggles.statusOverlay);
+			ImGui::EndMenu();
+		}
+		ImGui::MenuItem("Player / Gameplay", nullptr, toggles.playerPanel);
 		ImGui::MenuItem("Graphics", shortcutKeyName(SDLK_F2), toggles.graphics);
 		ImGui::MenuItem("Streaming", shortcutKeyName(SDLK_F3), toggles.streaming);
 		ImGui::MenuItem("World / biome map", shortcutKeyName(SDLK_F4), toggles.world);
@@ -160,6 +181,7 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		ImGui::MenuItem("Overview", shortcutKeyName(SDLK_F8), toggles.overview);
 		ImGui::Separator();
 		ImGui::MenuItem("Performance", shortcutKeyName(SDLK_F7), toggles.performance);
+		ImGui::MenuItem("Player diagnostics", nullptr, toggles.playerDiagnostics);
 		ImGui::MenuItem("Memory", shortcutKeyName(SDLK_F11), toggles.memory);
 		ImGui::MenuItem("Chunk inspector", shortcutKeyName(SDLK_F9), toggles.chunkInspector);
 		ImGui::MenuItem("Render debug", shortcutKeyName(SDLK_F12), toggles.renderDebug);
@@ -167,14 +189,10 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		ImGui::Separator();
 		// Runtime/debug toggles previously reachable from the pre-shell menu
 		// bar; Developer is their coherent home now that Graphics lives in
-		// View as settings.
+		// View as settings. VSync moved to the Graphics panel (issue #184);
+		// F10 stays its quick action.
 		if (frame.showChunkBorders)
 			ImGui::MenuItem("Chunk borders", shortcutKeyName(SDLK_B), frame.showChunkBorders);
-		if (frame.render && frame.setVSync)
-		{
-			if (ImGui::MenuItem("VSync", shortcutKeyName(SDLK_F10), &frame.render->vsyncEnabled))
-				frame.setVSync(frame.render->vsyncEnabled);
-		}
 		ImGui::EndMenu();
 	}
 
