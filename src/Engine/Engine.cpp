@@ -441,12 +441,19 @@ void Engine::reloadWorld(int newSeed)
 
 	vkContext->waitIdle();
 	resourceRetire.flush();
+	// Carry the opt-in chunk lifecycle trace across the reload (issue #179
+	// review round 2): re-apply it to the new manager BEFORE
+	// generateInitialArea() so bootstrap events are not lost — the UI-side
+	// sync in updateDebugUiState only runs later in the frame.
+	const bool chunkTraceEnabled =
+		chunkManager && chunkManager->chunkEventTraceEnabled();
 	chunkManager.reset();
 	mobs.reset(seed);
     mobStates.reserve(entities::MobSettings::capacity);
 	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
 	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
 												  chunkPool.get());
+	chunkManager->setChunkEventTraceEnabled(chunkTraceEnabled);
 
 	camera.setMode(CameraMode::PERSPECTIVE);
 	camera.setPosition(glm::vec3(0.f, 100.f, 0.f));
@@ -977,11 +984,72 @@ void Engine::tickBenchmark(double dt)
 	}
 }
 
+// Publish the main-thread memory/workload gauges every frame (issue #179):
+// the developer console reads them live via telemetry::sampleLive(), outside
+// any benchmark capture. Pure publication — set() only writes current/peak
+// gauges and touches no capture state. The chunk-manager frame samples
+// (issue #112 review) are main-thread coherent snapshots; the VoxelPool
+// itself stays a low-level thread-safe component without telemetry in its
+// hot path. capacityBytes covers blocks retained by the pool including the
+// free list, i.e. the high-water reuse footprint.
+void Engine::publishFrameTelemetry()
+{
+	auto &telemetry = telemetry::registry();
+	if (!telemetry.enabled)
+		return;
+
+	telemetry.set(telemetry::ActiveChunks, chunkManager ? chunkManager->chunkCount() : 0);
+	telemetry.set(telemetry::DeferredChunks, chunkManager ? chunkManager->deferredReleaseCount() : 0);
+
+	if (!chunkManager || !chunkManager->getChunkPool())
+		return;
+	ChunkPool *pool = chunkManager->getChunkPool();
+
+	// voxel.pool.*
+	const size_t voxelCap = pool->voxelStorageCapacity();
+	telemetry.set(telemetry::VoxelPoolCapacity, voxelCap);
+	telemetry.set(telemetry::VoxelPoolActive, pool->voxelStorageActive());
+	telemetry.set(telemetry::VoxelPoolFree, pool->voxelStorageFree());
+	telemetry.set(telemetry::VoxelPoolCapacityBytes, voxelCap * sizeof(VoxelStorage));
+
+	// border.pool.*: retained neighbor-border blocks (issue #103/#113).
+	const size_t borderCap = pool->borderStorageCapacity();
+	telemetry.set(telemetry::BorderPoolCapacity, borderCap);
+	telemetry.set(telemetry::BorderPoolActive, pool->borderStorageActive());
+	telemetry.set(telemetry::BorderPoolFree, pool->borderStorageFree());
+	telemetry.set(telemetry::BorderPoolCapacityBytes, borderCap * sizeof(ChunkNeighborBorders));
+
+	// mesh.pool.* + cpu.opaque/water.*: mesh build buffers live in
+	// pooled transient results, not on chunks (issue #104). The cpu.*
+	// gauges describe the in-flight/pending payloads while capacityBytes
+	// reflects retained pool capacity (active + free list).
+	const auto meshStats = pool->meshResultPool().stats();
+	telemetry.set(telemetry::OpaqueVertexBytes, meshStats.opaqueVertexSize);
+	telemetry.set(telemetry::OpaqueVertexCapacity, meshStats.opaqueVertexCapacity);
+	telemetry.set(telemetry::OpaqueIndexBytes, meshStats.opaqueIndexSize);
+	telemetry.set(telemetry::OpaqueIndexCapacity, meshStats.opaqueIndexCapacity);
+	telemetry.set(telemetry::WaterVertexBytes, meshStats.waterVertexSize);
+	telemetry.set(telemetry::WaterVertexCapacity, meshStats.waterVertexCapacity);
+	telemetry.set(telemetry::WaterIndexBytes, meshStats.waterIndexSize);
+	telemetry.set(telemetry::WaterIndexCapacity, meshStats.waterIndexCapacity);
+	telemetry.set(telemetry::CpuMeshCapacity, meshStats.capacityBytes());
+	telemetry.set(telemetry::MeshPoolCapacity, meshStats.capacity);
+	telemetry.set(telemetry::MeshPoolActive, meshStats.active);
+	telemetry.set(telemetry::MeshPoolFree, meshStats.free);
+	telemetry.set(telemetry::MeshPoolCapacityBytes, meshStats.capacityBytes());
+
+	// light.pool.*: retained chunk light storage blocks (issue #128).
+	const size_t lightCap = pool->lightStorageCapacity();
+	telemetry.set(telemetry::LightPoolCapacity, lightCap);
+	telemetry.set(telemetry::LightPoolActive, pool->lightStorageActive());
+	telemetry.set(telemetry::LightPoolFree, pool->lightStorageFree());
+	telemetry.set(telemetry::LightPoolCapacityBytes, lightCap * sizeof(ChunkLightStorage));
+}
+
 void Engine::sampleBenchmarkFrame()
 {
 	if (m_benchmark.phase() != BenchmarkPhase::Running)
 		return;
-
 	Profiler &prof = GetProfiler();
 	// A reset during reload discards the interrupted frame, even at zero warmup.
 	if (prof.historyCount() == 0)
@@ -1018,57 +1086,8 @@ void Engine::sampleBenchmarkFrame()
 		}
 	}
 
-    auto& telemetry = telemetry::registry();
-    telemetry.set(telemetry::ActiveChunks, chunkManager ? chunkManager->chunkCount() : 0);
-    telemetry.set(telemetry::DeferredChunks, chunkManager ? chunkManager->deferredReleaseCount() : 0);
-    // voxel.pool.* gauges are published here on the main thread as a
-    // coherent per-frame snapshot (issue #112 review): the VoxelPool itself
-    // stays a low-level thread-safe component without telemetry in its
-    // hot path. capacityBytes covers blocks retained by the pool including
-    // the free list, i.e. the high-water reuse footprint.
-    if (chunkManager && chunkManager->getChunkPool())
-    {
-        const size_t voxelCap = chunkManager->getChunkPool()->voxelStorageCapacity();
-        telemetry.set(telemetry::VoxelPoolCapacity, voxelCap);
-        telemetry.set(telemetry::VoxelPoolActive, chunkManager->getChunkPool()->voxelStorageActive());
-        telemetry.set(telemetry::VoxelPoolFree, chunkManager->getChunkPool()->voxelStorageFree());
-        telemetry.set(telemetry::VoxelPoolCapacityBytes, voxelCap * sizeof(VoxelStorage));
-
-        // border.pool.*: retained neighbor-border blocks (issue #103/#113).
-        const size_t borderCap = chunkManager->getChunkPool()->borderStorageCapacity();
-        telemetry.set(telemetry::BorderPoolCapacity, borderCap);
-        telemetry.set(telemetry::BorderPoolActive, chunkManager->getChunkPool()->borderStorageActive());
-        telemetry.set(telemetry::BorderPoolFree, chunkManager->getChunkPool()->borderStorageFree());
-        telemetry.set(telemetry::BorderPoolCapacityBytes, borderCap * sizeof(ChunkNeighborBorders));
-
-        // mesh.pool.* + cpu.opaque/water.*: mesh build buffers live in
-        // pooled transient results, not on chunks (issue #104). The cpu.*
-        // gauges now describe the in-flight/pending payloads while
-        // capacityBytes reflects retained pool capacity (active + free
-        // list) - the high-water reuse footprint that used to sit on every
-        // pooled chunk.
-        const auto meshStats = chunkManager->getChunkPool()->meshResultPool().stats();
-        telemetry.set(telemetry::OpaqueVertexBytes, meshStats.opaqueVertexSize);
-        telemetry.set(telemetry::OpaqueVertexCapacity, meshStats.opaqueVertexCapacity);
-        telemetry.set(telemetry::OpaqueIndexBytes, meshStats.opaqueIndexSize);
-        telemetry.set(telemetry::OpaqueIndexCapacity, meshStats.opaqueIndexCapacity);
-        telemetry.set(telemetry::WaterVertexBytes, meshStats.waterVertexSize);
-        telemetry.set(telemetry::WaterVertexCapacity, meshStats.waterVertexCapacity);
-        telemetry.set(telemetry::WaterIndexBytes, meshStats.waterIndexSize);
-        telemetry.set(telemetry::WaterIndexCapacity, meshStats.waterIndexCapacity);
-        telemetry.set(telemetry::CpuMeshCapacity, meshStats.capacityBytes());
-        telemetry.set(telemetry::MeshPoolCapacity, meshStats.capacity);
-        telemetry.set(telemetry::MeshPoolActive, meshStats.active);
-        telemetry.set(telemetry::MeshPoolFree, meshStats.free);
-        telemetry.set(telemetry::MeshPoolCapacityBytes, meshStats.capacityBytes());
-
-        // light.pool.*: retained chunk light storage blocks (issue #128).
-        const size_t lightCap = chunkManager->getChunkPool()->lightStorageCapacity();
-        telemetry.set(telemetry::LightPoolCapacity, lightCap);
-        telemetry.set(telemetry::LightPoolActive, chunkManager->getChunkPool()->lightStorageActive());
-        telemetry.set(telemetry::LightPoolFree, chunkManager->getChunkPool()->lightStorageFree());
-        telemetry.set(telemetry::LightPoolCapacityBytes, lightCap * sizeof(ChunkLightStorage));
-    }
+	// Main-thread memory/workload gauges are published every frame by
+	// publishFrameTelemetry() (issue #179); no per-sample work needed here.
 	m_benchmark.sampleFrame(
 		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),
 		prof.lastScopeMs("Record"), prof.lastScopeMs("ImGui"), prof.lastScopeMs("Present"),
@@ -1113,6 +1132,7 @@ void Engine::drawUi()
 	f.shader = &shaderParams;
 	f.render = &renderSettings;
 	f.timing = &renderTiming;
+	f.staging = &stagingRing;
 	f.selectedTexture = &selectedTexture;
 	f.highlight = &highlight;
 	f.mouseCaptured = &mouseCaptured;
@@ -1446,6 +1466,18 @@ void Engine::run()
 			PROFILE_SCOPE("Present");
 			if (!frameCtx->submitAndPresent(*swapchain, imageIndex))
 				requestSwapchainRecreate();
+		}
+
+		{
+			// Live memory/workload gauges for the developer console (issue
+			// #179). Published AFTER this frame's record/upload work so the
+			// CPU pool gauges reflect the uploads already executed and the
+			// next UI refresh reads the last completed frame; the benchmark
+			// sampler (below) then observes the same coherent values as
+			// before the console existed. Profiled so the debug-tool
+			// overhead stays visible.
+			PROFILE_SCOPE("TelemetryPublish");
+			publishFrameTelemetry();
 		}
 
 		++frameNumber;

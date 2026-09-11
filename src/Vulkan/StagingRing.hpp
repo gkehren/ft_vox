@@ -26,6 +26,11 @@ public:
 	bool isValid() const { return m_buffer.buffer != VK_NULL_HANDLE; }
 
 	VkDeviceSize usedThisFrame() const { return m_head - m_sliceStart; }
+	/// Consumption of the frame that just completed, captured in beginFrame()
+	/// before the cursor reset. Debug/UI readers run mid-frame (after the
+	/// reset, before this frame's uploads) and must read this instead of
+	/// usedThisFrame() to see the last completed frame's staging traffic.
+	VkDeviceSize lastFrameUsed() const { return m_lastFrameUsed; }
 	VkDeviceSize sliceCapacity() const { return m_sliceSize; }
 
 private:
@@ -37,4 +42,5 @@ private:
 	VkDeviceSize m_sliceSize{0};
 	VkDeviceSize m_sliceStart{0};
 	VkDeviceSize m_head{0};
+	VkDeviceSize m_lastFrameUsed{0};
 };

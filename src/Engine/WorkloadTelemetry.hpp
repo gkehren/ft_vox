@@ -196,6 +196,31 @@ public:
         for (size_t i=0; i<EventCount; ++i) s.events[i] = events[i].load(std::memory_order_relaxed);
         return s;
     }
+    // Non-destructive live view for the developer UI (issue #179): copies the
+    // current gauges, peaks, event totals and per-stage cumulative totals
+    // without touching data, peaks, samples, or the capture epoch, so a UI
+    // panel can read at its own refresh rate while a benchmark capture is
+    // running without consuming or resetting anything snapshot() would
+    // report. The copy cost is bounded (fixed arrays, no per-call sample
+    // vectors); call at UI refresh rate (5-10 Hz), not per rendered frame.
+    struct LiveSnapshot {
+        bool enabled{false};
+        std::array<uint64_t, GaugeCount> current{}, peak{};
+        std::array<uint64_t, EventCount> events{};
+        std::array<std::array<uint64_t, StageCount>, FamilyCount> stageNs{}, stageCalls{};
+    };
+    LiveSnapshot sampleLive() {
+        LiveSnapshot s;
+        if (!enabled) return s;
+        std::lock_guard lock(mutex);
+        s.enabled = true;
+        s.current = data.current;
+        s.peak = data.peak;
+        s.stageNs = data.stageNs;
+        s.stageCalls = data.stageCalls;
+        for (size_t i=0; i<EventCount; ++i) s.events[i] = events[i].load(std::memory_order_relaxed);
+        return s;
+    }
 private:
     std::mutex mutex;
     Snapshot data{};

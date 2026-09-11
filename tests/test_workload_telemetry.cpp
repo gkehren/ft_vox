@@ -225,7 +225,50 @@ int main() {
                     "light-cache total sample is the sum of its stage chain");
         }
 
+        // Live read semantics (issue #179): sampleLive() backs the developer
+        // console. It must not reset capture epochs, must not consume
+        // benchmark capture data, must be repeatable, and must stay coherent
+        // while workers publish into the same registry.
+        {
+            Registry& g = registry();
+            g.beginCapture();
+            const uint64_t epoch = g.captureEpoch();
+            g.replace(VoxelBytes, 0, 4096);
+            g.set(ActiveChunks, 77);
+            g.add(UploadChunks, 3);
+            auto live1 = g.sampleLive();
+            require(live1.enabled && live1.current[VoxelBytes] == 4096 &&
+                        live1.current[ActiveChunks] == 77 && live1.events[UploadChunks] == 3,
+                    "live read sees current gauges and events");
+            auto live2 = g.sampleLive();
+            require(live2.current[VoxelBytes] == 4096 && live2.events[UploadChunks] == 3,
+                    "live reads are repeatable (non-destructive)");
+            require(g.captureEpoch() == epoch, "live read does not touch the capture epoch");
+            auto afterLive = g.snapshot();
+            require(afterLive.current[VoxelBytes] == 4096 &&
+                        afterLive.current[ActiveChunks] == 77 && afterLive.events[UploadChunks] == 3,
+                    "benchmark snapshot after live reads still holds the full capture");
+
+            g.beginCapture();
+            const auto e2 = g.captureEpoch();
+            Snapshot work;
+            work.stageCalls[MeshFamily][Skylight] = 1;
+            work.stageNs[MeshFamily][Skylight] = 125;
+            std::thread liveReader([&] {
+                for (int i = 0; i < 2000; ++i) (void)g.sampleLive();
+            });
+            for (int i = 0; i < 1000; ++i) g.worker(e2, work);
+            liveReader.join();
+            auto live3 = g.sampleLive();
+            require(live3.stageCalls[MeshFamily][Skylight] == 1000 &&
+                        live3.stageNs[MeshFamily][Skylight] == 125000,
+                    "live view coherent with concurrent worker publication");
+            auto post = g.snapshot();
+            require(post.stageCalls[MeshFamily][Skylight] == 1000,
+                    "benchmark capture intact after concurrent live reads");
+        }
+
         std::cout << "PASS: telemetry concurrency, ownership, capture epochs, reset, "
-                     "capture-local gauges\n";
+                     "capture-local gauges, live reads\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

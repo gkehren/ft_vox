@@ -14,6 +14,9 @@
 #include <Vulkan/VkImage.hpp>
 #include <utils.hpp>
 
+#include <Engine/DebugUI/DebugUiCore.hpp>
+#include <Engine/GameUIBiomeMap.hpp>
+
 #include <future>
 #include <atomic>
 #include <vector>
@@ -21,11 +24,12 @@
 #include <cstdint>
 #include <string>
 
-#include <Engine/GameUIBiomeMap.hpp>
-
 class StagingRing;
 
 /// Frame snapshot for ImGui panels (pointers owned by Engine).
+/// Debug/telemetry data reaches panels through debugui::UiState snapshots
+/// (issue #179); the raw pointers here are the explicit settings structs and
+/// the callbacks for actions that need engine coordination.
 struct GameUIFrame
 {
 	Camera *camera{nullptr};
@@ -48,6 +52,9 @@ struct GameUIFrame
 	ShaderParameters *shader{nullptr};
 	RenderSettings *render{nullptr};
 	RenderTiming *timing{nullptr};
+	/// Frame staging ring (Engine-owned): live slice usage/capacity for the
+	/// memory panel. Never used by the UI for allocation.
+	StagingRing *staging{nullptr};
 	TextureType *selectedTexture{nullptr};
 	OverlayHighlight *highlight{nullptr};
 
@@ -93,8 +100,13 @@ struct GameUIFrame
 
 #include <Engine/GameUIResourcePack.hpp>
 
-/// Multi-panel ImGui HUD for the Vulkan engine.
-/// Restores prior OpenGL UI features (adapted), with cleaner layout + shortcuts.
+/// Multi-panel ImGui surface for the Vulkan engine.
+///
+/// GameUI itself is only the shell: main menu bar, gameplay HUD, biome-map
+/// window, help, on-screen hints, input shortcuts and biome-map plumbing.
+/// Every developer-tool panel (Overview, Performance, Rendering, Streaming,
+/// Chunk inspector, Memory, Benchmark) lives in src/Engine/DebugUI/ and
+/// consumes the read-only snapshots in debugui::UiState (issue #179).
 class GameUI
 {
 public:
@@ -111,7 +123,7 @@ public:
 
 	/// Keyboard shortcut handling, split by input-routing policy (issue #76):
 	/// - handleGlobalShortcut: intentional global non-text shortcuts
-	///   (F1-F7 panel toggles, F10 VSync) - honored even while ImGui
+	///   (F1-F12 panel toggles, F10 VSync) - honored even while ImGui
 	///   captures the keyboard.
 	/// - handleGameplayShortcut: gameplay state changes (P pause) - the
 	///   caller must only invoke these while ImGui does NOT capture the
@@ -124,23 +136,23 @@ public:
 	/// Escape itself (ImGuiFileDialog cancels via IGFD_EXIT_KEY).
 	bool isFileDialogOpen() const;
 
-	bool showHud() const { return m_showHud; }
-	bool showGraphics() const { return m_showGraphics; }
-	bool showStreaming() const { return m_showStreaming; }
-	bool showWorld() const { return m_showWorld; }
-	bool showHelp() const { return m_showHelp; }
-	bool showProfiler() const { return m_showProfiler; }
+	bool showHud() const { return m_debug.panels.hud; }
+	bool showGraphics() const { return m_debug.panels.rendering; }
+	bool showStreaming() const { return m_debug.panels.streaming; }
+	bool showWorld() const { return m_debug.panels.world; }
+	bool showHelp() const { return m_debug.panels.help; }
+	bool showProfiler() const { return m_debug.panels.performance; }
 
 	/// Reproducible streaming benchmark: map stays open at a fixed center.
 	void configureBenchmarkMap(float zoom)
 	{
-		m_showWorld = true;
+		m_debug.panels.world = true;
 		m_mapZoom = zoom;
 		m_mapFollow = false;
 		invalidateBiomeMap();
 	}
 
-	void setShowHud(bool v) { m_showHud = v; }
+	void setShowHud(bool v) { m_debug.panels.hud = v; }
 
 	/// Invalidate any active or in-flight biome map task and clear current texture.
 	/// Supersedes existing request ID and marks backing texture as inactive.
@@ -184,10 +196,6 @@ private:
 
 	void drawMenuBar(GameUIFrame &frame);
 	void drawHud(GameUIFrame &frame);
-	void drawGraphics(GameUIFrame &frame);
-	void drawStreaming(GameUIFrame &frame);
-	void drawProfiler(GameUIFrame &frame);
-	void drawBenchmarkReport(GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp();
 	void drawOverlayHints(GameUIFrame &frame);
@@ -211,13 +219,9 @@ private:
 	void tickBiomeMap(GameUIFrame &frame);
 	void ensureBiomeTexture(int size);
 
-	bool m_showHud{true};
-	bool m_showGraphics{false};
-	bool m_showStreaming{false};
-	bool m_showProfiler{false};
-	bool m_showWorld{false};
-	bool m_showHelp{false};
-	bool m_showOverlayHints{true};
+	/// Developer-console state: panel visibility + debug snapshots + bounded
+	/// histories (issue #179). Refreshed once per draw by updateDebugUiState.
+	debugui::UiState m_debug{};
 
 	// Biome map
 	int m_mapSize{256};
@@ -253,6 +257,4 @@ private:
 	VkDescriptorSet m_mapDesc{VK_NULL_HANDLE};
 	int m_mapImageSize{0};
 	bool m_mapHasTexture{false};
-
-	ResourcePackUiState m_resourcePackUi{};
 };

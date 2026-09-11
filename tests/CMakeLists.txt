@@ -629,6 +629,57 @@ add_test(NAME WorkloadTelemetryDisabled COMMAND test_workload_telemetry)
 set_tests_properties(WorkloadTelemetryDisabled PROPERTIES ENVIRONMENT "FT_VOX_TELEMETRY=0")
 
 # ---------------------------------------------------------------------------
+# Developer-console core logic (issue #179): formatting, ring histories,
+# health hysteresis, chunk debug snapshot extraction, bounded event trace
+# and the throttled UI-state sampler. No ImGui, no window, no GPU work.
+# ---------------------------------------------------------------------------
+add_executable(test_debug_ui
+    test_debug_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiCore.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiState.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+)
+target_include_directories(test_debug_ui PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+target_compile_definitions(test_debug_ui PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+if(APPLE)
+    target_compile_definitions(test_debug_ui PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_debug_ui PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+target_link_libraries(test_debug_ui PRIVATE
+    glm
+    FastNoise2
+    SDL3::SDL3
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
+)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_debug_ui PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+add_test(NAME DebugUiCore COMMAND test_debug_ui)
+
+# ---------------------------------------------------------------------------
 # MeshArena allocator unit tests (issue #109): aligned suballocation,
 # first-fit reuse, frame-aware retirement, page growth and exhaustion.
 # Headless Vulkan device; skips quietly when no loader/device is available.

@@ -48,6 +48,7 @@ void StagingRing::shutdown()
 	m_sliceSize = 0;
 	m_sliceStart = 0;
 	m_head = 0;
+	m_lastFrameUsed = 0;
 }
 
 void StagingRing::beginFrame(uint32_t frameIndex)
@@ -55,6 +56,7 @@ void StagingRing::beginFrame(uint32_t frameIndex)
 	if (!isValid())
 		return;
 	const uint32_t idx = m_framesInFlight > 0 ? (frameIndex % m_framesInFlight) : 0;
+	m_lastFrameUsed = m_head - m_sliceStart;
 	m_sliceStart = static_cast<VkDeviceSize>(idx) * m_sliceSize;
 	m_head = m_sliceStart;
 	telemetry::registry().set(telemetry::StagingUsed, 0);
