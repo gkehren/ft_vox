@@ -140,6 +140,101 @@ static void sampleScopeHistories(UiState &state)
 		state.scopeStats[i].history.push(state.scopeStats[i].lastMs);
 }
 
+// --- Per-domain heavy snapshots (10 Hz, sampled independently) ---
+
+static void sampleStreamingDomain(UiState &state, const GameUIFrame &frame, double nowSeconds)
+{
+	auto &s = state.streaming;
+	if (frame.chunks)
+	{
+		const ChunkManager &cm = *frame.chunks;
+		s.loadedChunks = cm.chunkCount();
+		s.pendingLoad = cm.pendingLoadCount();
+		s.pendingGen = cm.pendingGenJobs();
+		s.pendingMesh = cm.pendingMeshJobs();
+		s.pendingLight = cm.pendingLightJobs();
+		s.deferredReleases = cm.deferredReleaseCount();
+		s.meshJobsDispatched = cm.meshJobsDispatched();
+		s.lightJobsDispatched = cm.lightJobsDispatched();
+		s.uploadBacklog = 0;
+		for (const Chunk *chunk : cm.getActiveChunks())
+			if (chunk && chunk->needsGPUUpload())
+				++s.uploadBacklog;
+	}
+	s.drawCount = frame.drawCount;
+	s.viewDistance = frame.render ? frame.render->maxRenderDistance : 0;
+	s.nearRange = frame.render ? frame.render->minRenderDistance : 0;
+	if (frame.pool)
+	{
+		const ChunkPool &pool = *frame.pool;
+		s.poolCapacity = pool.capacity();
+		s.poolFree = pool.freeCount();
+		s.poolAcquired = pool.acquiredCount();
+		s.poolRejects = pool.rejectCount();
+		s.poolGrows = pool.growEvents();
+		if (s.poolRejects > state.prevPoolRejects)
+			state.lastPoolRejectIncrease = nowSeconds;
+		state.prevPoolRejects = s.poolRejects;
+	}
+
+	state.pendingMesh.push(float(s.pendingMesh));
+	state.pendingLoad.push(float(s.pendingLoad));
+	state.pendingGen.push(float(s.pendingGen));
+	state.pendingLight.push(float(s.pendingLight));
+	state.uploadBacklog.push(float(s.uploadBacklog));
+	state.activeChunks.push(float(s.loadedChunks));
+}
+
+static void sampleMemoryDomain(UiState &state, const GameUIFrame &frame, double nowSeconds)
+{
+	auto &m = state.memory;
+	m.sampledAt = nowSeconds;
+	m.live = telemetry::registry().sampleLive();
+	m.telemetryEnabled = m.live.enabled;
+	if (frame.worldRenderer)
+	{
+		const MeshArenas &arenas = frame.worldRenderer->arenas();
+		m.arenaLiveBytes = arenas.opaqueVertex.liveBytes() + arenas.opaqueIndex.liveBytes() +
+						   arenas.waterVertex.liveBytes() + arenas.waterIndex.liveBytes();
+	}
+	m.arenaPages = m.live.current[telemetry::ArenaPages];
+	m.arenaFreeBytes = m.live.current[telemetry::ArenaFreeBytes];
+	m.arenaHighWaterBytes = m.live.current[telemetry::ArenaHighWater];
+	if (frame.staging)
+	{
+		// The sampler runs mid-frame (after beginFrame reset, before this
+		// frame's copies): report the completed frame's staging traffic.
+		m.stagingUsedBytes = frame.staging->lastFrameUsed();
+		m.stagingCapacityBytes = frame.staging->sliceCapacity();
+	}
+	else
+	{
+		m.stagingUsedBytes = m.live.current[telemetry::StagingUsed];
+	}
+
+	// Event deltas since the previous sample ("recent rate" data).
+	if (state.hasPrevEvents)
+	{
+		for (size_t i = 0; i < telemetry::EventCount; ++i)
+		{
+			const uint64_t now = m.live.events[i];
+			const uint64_t prev = state.prevEvents[i];
+			state.eventDelta[i] = now >= prev ? now - prev : now;
+		}
+	}
+	state.hasPrevEvents = true;
+	state.prevEvents = m.live.events;
+	if (state.eventDelta[telemetry::StagingFailures] > 0)
+		state.lastStagingFailureAt = nowSeconds;
+
+	state.gpuLiveBytes.push(float(m.live.current[telemetry::GpuLiveBytes]));
+	state.retiredBytes.push(float(m.live.current[telemetry::RetiredBytes]));
+	state.stagingUsed.push(float(m.stagingUsedBytes));
+	const uint64_t capacity = m.arenaLiveBytes + m.arenaFreeBytes;
+	const float util = capacity ? float(m.arenaLiveBytes) / float(capacity) : 0.f;
+	state.arenaUtilization.push(util);
+}
+
 // --- Per-frame state refresh ---
 
 void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeconds)
@@ -191,14 +286,18 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 			updateScopeFrameStats(state);
 	}
 
-	const bool anyConsumer = state.panels.overview || state.panels.performance ||
-							 state.panels.memory || state.panels.streaming ||
-							 state.panels.chunkInspector;
+	const bool needStreaming = state.panels.overview || state.panels.streaming;
+	const bool needMemory = state.panels.overview || state.panels.memory;
+	const bool needPerformance = state.panels.performance;
 
-	if (!anyConsumer)
+	if (!(needStreaming || needMemory || needPerformance))
 		return;
 
-	// Heavy snapshot: throttled to 10 Hz (issue #179 performance rules).
+	// Heavy snapshots, throttled to 10 Hz (issue #179 performance rules) and
+	// sampled per domain (issue #179 review round 2): Performance alone must
+	// not pay for the streaming walk or the telemetry read. The chunk
+	// inspector needs no sampler work — it extracts its own snapshot at draw
+	// time.
 	if (state.lastTelemetrySample >= 0.0 && nowSeconds - state.lastTelemetrySample < 0.1)
 		return;
 
@@ -208,117 +307,33 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 	state.dtSinceLastSample = dt;
 	state.lastTelemetrySample = nowSeconds;
 
-	if (state.panels.performance)
+	if (needPerformance)
 		sampleScopeHistories(state);
 
-	// --- Streaming snapshot ---
-	{
-		auto &s = state.streaming;
-		if (frame.chunks)
-		{
-			const ChunkManager &cm = *frame.chunks;
-			s.loadedChunks = cm.chunkCount();
-			s.pendingLoad = cm.pendingLoadCount();
-			s.pendingGen = cm.pendingGenJobs();
-			s.pendingMesh = cm.pendingMeshJobs();
-			s.pendingLight = cm.pendingLightJobs();
-			s.deferredReleases = cm.deferredReleaseCount();
-			s.meshJobsDispatched = cm.meshJobsDispatched();
-			s.lightJobsDispatched = cm.lightJobsDispatched();
-			s.uploadBacklog = 0;
-			for (const Chunk *chunk : cm.getActiveChunks())
-				if (chunk && chunk->needsGPUUpload())
-					++s.uploadBacklog;
-		}
-		s.drawCount = frame.drawCount;
-		s.viewDistance = frame.render ? frame.render->maxRenderDistance : 0;
-		s.nearRange = frame.render ? frame.render->minRenderDistance : 0;
-		if (frame.pool)
-		{
-			const ChunkPool &pool = *frame.pool;
-			s.poolCapacity = pool.capacity();
-			s.poolFree = pool.freeCount();
-			s.poolAcquired = pool.acquiredCount();
-			s.poolRejects = pool.rejectCount();
-			s.poolGrows = pool.growEvents();
-			if (s.poolRejects > state.prevPoolRejects)
-				state.lastPoolRejectIncrease = nowSeconds;
-			state.prevPoolRejects = s.poolRejects;
-		}
-	}
+	if (needStreaming)
+		sampleStreamingDomain(state, frame, nowSeconds);
 
-	// --- Memory snapshot (non-destructive telemetry live read) ---
+	if (needMemory)
+		sampleMemoryDomain(state, frame, nowSeconds);
+
+	// Frame-time histories are Overview consumers; the health monitors read
+	// both domains, so they only run when both were freshly sampled.
+	if (state.panels.overview)
 	{
-		auto &m = state.memory;
-		m.sampledAt = nowSeconds;
-		m.live = telemetry::registry().sampleLive();
-		m.telemetryEnabled = m.live.enabled;
-		if (frame.worldRenderer)
+		state.cpuMs.push(GetProfiler().lastFrameMs());
+		if (frame.gpu)
 		{
-			const MeshArenas &arenas = frame.worldRenderer->arenas();
-			m.arenaLiveBytes = arenas.opaqueVertex.liveBytes() + arenas.opaqueIndex.liveBytes() +
-							   arenas.waterVertex.liveBytes() + arenas.waterIndex.liveBytes();
-		}
-		m.arenaPages = m.live.current[telemetry::ArenaPages];
-		m.arenaFreeBytes = m.live.current[telemetry::ArenaFreeBytes];
-		m.arenaHighWaterBytes = m.live.current[telemetry::ArenaHighWater];
-		if (frame.staging)
-		{
-			// The sampler runs mid-frame (after beginFrame reset, before this
-			// frame's copies): report the completed frame's staging traffic.
-			m.stagingUsedBytes = frame.staging->lastFrameUsed();
-			m.stagingCapacityBytes = frame.staging->sliceCapacity();
+			const GpuFrameSample &gpu = frame.gpu->latest();
+			state.gpuMs.push(gpu.serial && gpu.present[size_t(GpuPass::Frame)]
+								 ? gpu.ms[size_t(GpuPass::Frame)]
+								 : 0.f);
 		}
 		else
 		{
-			m.stagingUsedBytes = m.live.current[telemetry::StagingUsed];
+			state.gpuMs.push(0.f);
 		}
-
-		// Event deltas since the previous sample ("recent rate" data).
-		if (state.hasPrevEvents)
-		{
-			for (size_t i = 0; i < telemetry::EventCount; ++i)
-			{
-				const uint64_t now = m.live.events[i];
-				const uint64_t prev = state.prevEvents[i];
-				state.eventDelta[i] = now >= prev ? now - prev : now;
-			}
-		}
-		state.hasPrevEvents = true;
-		state.prevEvents = m.live.events;
-		if (state.eventDelta[telemetry::StagingFailures] > 0)
-			state.lastStagingFailureAt = nowSeconds;
+		state.health.update(state, dt);
 	}
-
-	// --- Histories (bounded ring pushes, 10 Hz) ---
-	state.cpuMs.push(GetProfiler().lastFrameMs());
-	if (frame.gpu)
-	{
-		const GpuFrameSample &gpu = frame.gpu->latest();
-		state.gpuMs.push(gpu.serial && gpu.present[size_t(GpuPass::Frame)]
-							 ? gpu.ms[size_t(GpuPass::Frame)]
-							 : 0.f);
-	}
-	else
-	{
-		state.gpuMs.push(0.f);
-	}
-	state.pendingMesh.push(float(state.streaming.pendingMesh));
-	state.pendingLoad.push(float(state.streaming.pendingLoad));
-	state.pendingGen.push(float(state.streaming.pendingGen));
-	state.pendingLight.push(float(state.streaming.pendingLight));
-	state.uploadBacklog.push(float(state.streaming.uploadBacklog));
-	state.activeChunks.push(float(state.streaming.loadedChunks));
-	state.gpuLiveBytes.push(float(state.memory.live.current[telemetry::GpuLiveBytes]));
-	state.retiredBytes.push(float(state.memory.live.current[telemetry::RetiredBytes]));
-	state.stagingUsed.push(float(state.memory.stagingUsedBytes));
-	{
-		const uint64_t capacity = state.memory.arenaLiveBytes + state.memory.arenaFreeBytes;
-		const float util = capacity ? float(state.memory.arenaLiveBytes) / float(capacity) : 0.f;
-		state.arenaUtilization.push(util);
-	}
-
-	state.health.update(state, dt);
 }
 
 // --- Chunk inspector snapshot ---

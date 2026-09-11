@@ -228,17 +228,29 @@ void testUpdateDebugUiState()
 	CHECK(state.frame.simulationDtMs == 12345.6f, "simulation dt kept in its own field");
 	CHECK(state.streaming.loadedChunks == 0, "streaming snapshot sampled (no chunks yet)");
 	CHECK(state.activeChunks.count() == 1, "history pushed on first sample");
-	CHECK(std::abs(state.memory.sampledAt - t0) < 1e-9, "sample timestamp recorded");
+	// Domain separation (issue #179 review round 2): with only Streaming
+	// open, the memory domain (telemetry read + timestamps) stays untouched.
+	CHECK(state.memory.sampledAt == 0.0, "memory domain not sampled while only Streaming is open");
+	CHECK(std::abs(state.lastTelemetrySample - t0) < 1e-9, "sample timestamp recorded");
+
+	// Opening Overview pulls in the memory domain as well (beyond the 10 Hz
+	// window so the throttle allows a fresh sample).
+	state.panels.overview = true;
+	debugui::updateDebugUiState(state, f, t0 + 0.2);
+	CHECK(std::abs(state.memory.sampledAt - (t0 + 0.2)) < 1e-9,
+		  "Overview samples the memory domain");
+	CHECK(state.activeChunks.count() == 2, "overview sample pushed");
 
 	// Heavy sampling is throttled to 10 Hz: an immediate second call must
 	// not re-sample.
-	debugui::updateDebugUiState(state, f, t0 + 0.01);
-	CHECK(state.activeChunks.count() == 1, "throttled call does not re-sample");
+	debugui::updateDebugUiState(state, f, t0 + 0.21);
+	CHECK(state.activeChunks.count() == 2, "throttled call does not re-sample");
 
 	// With every consumer closed the snapshot is not refreshed at all.
+	state.panels.overview = false;
 	state.panels.streaming = false;
 	debugui::updateDebugUiState(state, f, t0 + 10.0);
-	CHECK(state.activeChunks.count() == 1, "closed panels stop sampling");
+	CHECK(state.activeChunks.count() == 2, "closed panels stop sampling");
 
 	// The opt-in chunk trace flag is propagated to a fresh ChunkManager by
 	// the sampler itself — even with the inspector panel closed — so it
