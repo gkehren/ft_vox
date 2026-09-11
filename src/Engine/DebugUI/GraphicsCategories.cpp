@@ -93,10 +93,12 @@ void drawGeneral(debugui::UiState &s, GameUIFrame &frame)
 		ui::statusBadge(presetName(pp.qualityPreset), ui::StatusKind::Ok);
 	}
 	ui::helpMarker("Presets control shadow resolution, FXAA, bloom, SSAO, god rays, film "
-				   "grain, vignette, post grade and the exposure/tonemap baseline. "
-				   "Lighting, atmosphere, water appearance, display, resource packs, UI "
-				   "scale and debug views are never touched.");
-	ImGui::TextDisabled("Packs shadow resolution / SSAO / bloom / god rays / grain / spatial AA (Low: off).");
+				   "grain, vignette, post grade and the exposure/tonemap baseline. The pack "
+				   "also drives runtime water tiers in the renderer (SSR march budget, "
+				   "water shadows / caustics). Lighting, atmosphere, water appearance, "
+				   "display, resource packs, UI scale and debug views are never touched.");
+	ImGui::TextDisabled("Packs shadow resolution / SSAO / bloom / god rays / grain / spatial AA "
+						"(Low: off) plus the runtime water quality tier.");
 }
 
 void drawDisplay(debugui::UiState &s, GameUIFrame &frame)
@@ -113,8 +115,15 @@ void drawDisplay(debugui::UiState &s, GameUIFrame &frame)
 	// Single settings home for VSync (issue #185): the HUD checkbox is gone;
 	// F10 and the Developer menu item keep working.
 	bool vsync = rs.vsyncEnabled;
+	// "(applying)" must also cover the frame where the toggle just happened:
+	// vsyncPending is filled by drawUi before the panel draws, so a fresh
+	// toggle would otherwise show stale feedback for one frame.
+	bool applying = frame.vsyncPending;
 	if (ImGui::Checkbox("VSync", &vsync) && frame.setVSync)
+	{
 		frame.setVSync(vsync);
+		applying = true;
+	}
 	if (!rs.vsyncEnabled)
 	{
 		ImGui::SameLine();
@@ -127,7 +136,7 @@ void drawDisplay(debugui::UiState &s, GameUIFrame &frame)
 	std::snprintf(present, sizeof(present), "%s%s",
 				  frame.presentModeName ? frame.presentModeName
 										: (rs.vsyncEnabled ? "FIFO" : "Immediate"),
-				  frame.vsyncPending ? " (applying)" : "");
+				  applying ? " (applying)" : "");
 	ui::metric("Present mode", "%s", present);
 }
 
