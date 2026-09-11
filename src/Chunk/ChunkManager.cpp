@@ -736,6 +736,7 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 	int budgetUnits = budget;
 	int uploaded = 0;
 	std::unordered_set<Chunk *> published;
+	std::unordered_set<uint64_t> processedGroups;
 	for (size_t i = 0; i < queue.size(); ++i)
 	{
 		Chunk *chunk = queue[i].chunk;
@@ -753,9 +754,11 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 			--budgetUnits;
 			continue;
 		}
+		if (!processedGroups.insert(group->groupId).second)
+			continue; // every group state machine advances at most once per frame
 
-		// Only the stable group identity is snapshotted: the state machine
-		// mutates the live member entries (record flags, replacements), and
+		// Only stable values needed after publication are snapshotted: the
+		// state machine mutates the live member entries (replacements), and
 		// nothing below touches `group` after the publish (and therefore
 		// the group erase) has run.
 		std::vector<PendingGroupMember> &members = group->members;
@@ -774,7 +777,6 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 			     member.chunk->getState() != ChunkState::MESHED))
 			{
 				member.chunk->discardGPUUpload(member.replacement);
-				member.recorded = false;
 				superseded = true;
 			}
 		}
@@ -828,27 +830,29 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 
 		if (group->state == CommitGroupState::Uploading)
 		{
-			// COPY: one budget unit authorizes this frame's recording pass
-			// for the whole group - as many unrecorded members as staging
-			// allows. Members that do not fit stay for a later frame while
-			// old meshes render everywhere.
-			if (budgetUnits > 0)
+			// COPY: each successfully recorded member consumes one budget
+			// unit. Members that do not fit, or for which the per-frame budget
+			// is exhausted, stay for a later frame while old meshes render.
+			bool allRecorded = true;
+			for (PendingGroupMember &member : members)
 			{
-				--budgetUnits;
-				bool allRecorded = true;
-				for (PendingGroupMember &member : members)
+				if (member.replacement.recorded)
+					continue;
+				if (budgetUnits <= 0)
 				{
-					if (member.recorded)
-						continue;
-					if (!member.chunk->recordGPUUpload(allocator, staging, cmd, arenas,
-					                                   member.replacement))
-					{
-						allRecorded = false; // no staging room for this member yet
-					}
+					allRecorded = false;
+					continue;
 				}
-				if (allRecorded)
-					group->state = CommitGroupState::ReadyToPublish;
+				if (!member.chunk->recordGPUUpload(allocator, staging, cmd, arenas,
+				                                   member.replacement))
+				{
+					allRecorded = false; // no staging room for this member yet
+					continue;
+				}
+				--budgetUnits;
 			}
+			if (allRecorded)
+				group->state = CommitGroupState::ReadyToPublish;
 			if (group->state != CommitGroupState::ReadyToPublish)
 				continue; // still uploading — old meshes render everywhere
 		}
@@ -864,8 +868,9 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 		}
 		// The fused-group invariant makes this exact: no other active group
 		// shares a member with the one just published.
+		const int publishedCount = static_cast<int>(members.size());
 		eraseCommitGroup(groupId);
-		uploaded += static_cast<int>(members.size());
+		uploaded += publishedCount;
 	}
 	return uploaded;
 }
@@ -1061,7 +1066,7 @@ bool ChunkManager::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y,
 	{
 		std::vector<PendingGroupMember> members;
 		for (Chunk *member : geometricChunks)
-			members.push_back({member, false, {}});
+		members.push_back({member, {}});
 		registerCommitGroup(editId, std::move(members));
 	}
 	return true;
@@ -1221,14 +1226,31 @@ bool groupsIntersect(const std::vector<PendingGroupMember> &a,
 	return false;
 }
 
-// Fusion dedup: when a chunk is already in the merged set, its EXISTING
-// member entry wins - an in-flight recorded replacement must survive the
-// fusion (a later revision check discards it if the new edit made it
-// stale).
+// Add a newly registered member. New edit registrations carry no prepared
+// replacement; ownership from an already active group is transferred later.
 void appendMemberUnique(std::vector<PendingGroupMember> &dst, PendingGroupMember member)
 {
 	if (!memberListContains(dst, member.chunk))
 		dst.push_back(std::move(member));
+}
+
+// Fusion dedup: the member from the EXISTING active group wins. It may own
+// allocated or already-recorded ranges which must survive the container
+// erase; a later revision check discards them if the new edit made them stale.
+void absorbExistingMember(std::vector<PendingGroupMember> &dst, PendingGroupMember &member)
+{
+	for (PendingGroupMember &existing : dst)
+	{
+		if (existing.chunk != member.chunk)
+			continue;
+		if (existing.replacement.valid && existing.chunk)
+			existing.chunk->discardGPUUpload(existing.replacement);
+		existing = std::move(member);
+		member.replacement = {};
+		return;
+	}
+	dst.push_back(std::move(member));
+	member.replacement = {};
 }
 
 void appendUnique(std::vector<uint64_t> &dst, uint64_t id)
@@ -1267,7 +1289,7 @@ void ChunkManager::registerCommitGroup(uint64_t editId, std::vector<PendingGroup
 			if (groupsIntersect(merged, it->members))
 			{
 				for (PendingGroupMember &member : it->members)
-					appendMemberUnique(merged, std::move(member));
+					absorbExistingMember(merged, member);
 				for (uint64_t absorbed : it->editIds)
 					appendUnique(editIds, absorbed);
 				it = m_commitGroups.erase(it);
@@ -1342,7 +1364,12 @@ void ChunkManager::removeChunkFromCommitGroups(Chunk *chunk)
 			}
 		}
 		if (members.size() < 2)
+		{
+			for (PendingGroupMember &survivor : members)
+				if (survivor.chunk)
+					survivor.chunk->discardGPUUpload(survivor.replacement);
 			it = m_commitGroups.erase(it);
+		}
 		else
 			++it;
 	}

@@ -95,12 +95,11 @@ enum class CommitGroupState
 
 /// One chunk inside a geometric commit group. `replacement` survives
 /// frames (fresh arena ranges, future slot values, identity stamps) so a
-/// member can upload in one frame and publish several frames later;
+/// member can record in one frame and publish several frames later;
 /// staging scratch never survives the frame that recorded the copies.
 struct PendingGroupMember
 {
 	Chunk *chunk{nullptr};
-	bool recorded{false}; // replacement copies are submitted and resident
 	Chunk::GpuReplacement replacement{};
 };
 

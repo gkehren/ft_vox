@@ -88,11 +88,18 @@ struct ChunkManagerProbe
 			out.push_back(member.chunk);
 		return out;
 	}
+	static bool replacementRecorded(const ChunkManager &m, size_t index, const Chunk *chunk)
+	{
+		for (const PendingGroupMember &member : m.m_commitGroups[index].members)
+			if (member.chunk == chunk)
+				return member.replacement.recorded;
+		return false;
+	}
 	static void registerGroup(ChunkManager &m, std::vector<Chunk *> members)
 	{
 		std::vector<PendingGroupMember> converted;
 		for (Chunk *chunk : members)
-			converted.push_back({chunk, false, {}});
+			converted.push_back({chunk, {}});
 		m.registerCommitGroup(0, std::move(converted));
 	}
 	static void removeFromGroups(ChunkManager &m, Chunk *chunk)
@@ -1806,8 +1813,8 @@ int main()
 		// 18. Cross-chunk border edit with geometric commit groups (issue
 		// #177 review round 2): a border edit re-arms BOTH the target and
 		// the shell-mirror neighbor, and their GPU publications now commit
-		// ATOMICALLY - the group prepares all members, then commits all,
-		// and counts as ONE budget unit. "new A + old B" (the seam the
+		// ATOMICALLY - the group prepares all members, then commits all.
+		// Each member COPY consumes one budget unit. "new A + old B" (the seam the
 		// round-1 test demonstrated) is therefore impossible. The harness
 		// simulates real frames: every upload call is preceded by
 		// beginFrame(slot % framesInFlight) and followed by a submit, so
@@ -1868,6 +1875,9 @@ int main()
 				};
 				uint32_t frameSlot = 0;
 				const auto beginFrame = [&]() {
+					const uint64_t frameNumber = 10000u + frameSlot;
+					arenas.beginFrame(frameNumber);
+					retire.beginFrame(frameNumber);
 					stagingX.beginFrame(frameSlot % 2);
 				};
 				const auto submitFrame = [&]() {
@@ -1906,16 +1916,23 @@ int main()
 					      "xchunk: committed meshes collectable while re-armed");
 				}
 
-				// Both members published -> the group is ready -> ONE budget
-				// unit commits BOTH chunks in this frame.
+				// Both members published -> the group is ready, but one budget
+				// unit records exactly one member even when both fit staging.
 				remeshOne(A);
 				remeshOne(B);
 				const Camera camX(glm::vec3(8.0f, static_cast<float>(y0), 8.0f));
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 1);
+				CHECK(A->needsGPUUpload() && B->needsGPUUpload() &&
+				          ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				      "xchunk: budget=1 records only one member COPY");
+				submitFrame();
+				beginFrame();
+				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
+				                             retire, arenas, camX, 1);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
-				      "xchunk: budget=1 commits the whole border group atomically");
+				      "xchunk: second budget unit completes the atomic border commit");
 				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
 				      "xchunk: fixture groups consumed by the commit");
 				submitFrame();
@@ -2005,13 +2022,16 @@ int main()
 					                       arenas.waterVertex.metrics(),
 					                       arenas.waterIndex.metrics());
 				};
-				arenas.opaqueVertex.setFailNextAllocations(4);
+				const auto beforeFailedAllocate = arenaSnapshot();
+				// Opaque vertex allocation succeeds first; opaque index then
+				// fails, exercising rollback of an already-owned range.
+				arenas.opaqueIndex.setFailNextAllocations(1);
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 2);
-				arenas.opaqueVertex.setFailNextAllocations(0);
+				arenas.opaqueIndex.setFailNextAllocations(0);
 				{
-					const auto [ov, oi, wv, wi] = arenaSnapshot();
+					const auto [ov, oi, wv, wi] = beforeFailedAllocate;
 					CHECK(metricsEqual(ov, arenas.opaqueVertex.metrics()) &&
 					          metricsEqual(oi, arenas.opaqueIndex.metrics()) &&
 					          metricsEqual(wv, arenas.waterVertex.metrics()) &&
@@ -2102,7 +2122,7 @@ int main()
 				remeshOne(B);
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
-				                             retire, arenas, camX, 1);
+				                             retire, arenas, camX, 2);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
 				      "supersession: the newest results commit together");
 				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
@@ -2110,7 +2130,7 @@ int main()
 				submitFrame();
 
 				// --- Corner edit: target + BOTH side neighbors (3 chunks)
-				// commit as one budget unit ---
+				// commit atomically after three COPY budget units ---
 				int hCorner = std::max(std::max(columnSurface(A, 15, 15),
 				                                columnSurface(B, 0, 15)),
 				                       columnSurface(S, 15, 0));
@@ -2124,9 +2144,9 @@ int main()
 				remeshOne(S);
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
-				                             retire, arenas, camX, 1);
+				                             retire, arenas, camX, 3);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload() && !S->needsGPUUpload(),
-				      "corner: budget=1 commits all three linked chunks together");
+				      "corner: three COPY units commit all linked chunks together");
 				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
 				      "corner: group consumed");
 				submitFrame();
@@ -2186,9 +2206,9 @@ int main()
 				remeshOne(S);
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
-				                             retire, arenas, camX, 1);
+				                             retire, arenas, camX, 3);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload() && !S->needsGPUUpload(),
-				      "overlap: budget=1 commits the fused three-chunk group together");
+				      "overlap: three COPY units commit the fused group together");
 				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
 				      "overlap: fused group consumed");
 				submitFrame();
@@ -2196,11 +2216,11 @@ int main()
 				// --- Partial unload (round 4, items 1-2): a 3-member group
 				// losing one member keeps the remaining atomic dependency
 				// {A,SS}; a 2-member group losing one member dissolves. ---
-				int hU = columnSurface(A, 15, 0);
+				int hU = columnSurface(A, 15, 15);
 				CHECK(hU > 1 && hU + 5 < static_cast<int>(CHUNK_HEIGHT),
 				      "unload: border columns surfaced");
 				const int yU = hU + 3;
-				CHECK(managerX.placeVoxel(worldOf(A, 15, yU, 0), BRICKS),
+				CHECK(managerX.placeVoxel(worldOf(A, 15, yU, 15), BRICKS),
 				      "unload: corner edit accepted");
 				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
 				          ChunkManagerProbe::groupChunks(managerX, 0).size() == 3,
@@ -2219,7 +2239,7 @@ int main()
 				remeshOne(S);
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
-				                             retire, arenas, camX, 1);
+				                             retire, arenas, camX, 2);
 				CHECK(!A->needsGPUUpload() && !S->needsGPUUpload(),
 				      "unload: the surviving pair commits together (old S impossible)");
 				submitFrame();
@@ -2273,9 +2293,11 @@ int main()
 				                             retire, arenas, camX, 1);
 				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
 				      "supersession2: A recorded, B deferred by exact-fit staging");
+				submitFrame();
 				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 6), BRICKS),
 				      "supersession2: A re-edited while uploaded but unpublished");
 				remeshOne(A);
+				remeshOne(B);
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 4);
@@ -2304,9 +2326,21 @@ int main()
 				                             retire, arenas, camX, 1);
 				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
 				      "unload-recorded: A recorded, B deferred by exact-fit staging");
+				const auto liveBlocksBeforeDissolve = [&]() {
+					return arenas.opaqueVertex.metrics().liveBlocks +
+					       arenas.opaqueIndex.metrics().liveBlocks +
+					       arenas.waterVertex.metrics().liveBlocks +
+					       arenas.waterIndex.metrics().liveBlocks;
+				}();
+				submitFrame();
 				ChunkManagerProbe::removeFromGroups(managerX, A); // A unloads
 				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
 				      "unload-recorded: pair group dissolved");
+				const auto liveBlocksAfterDissolve =
+				    arenas.opaqueVertex.metrics().liveBlocks + arenas.opaqueIndex.metrics().liveBlocks +
+				    arenas.waterVertex.metrics().liveBlocks + arenas.waterIndex.metrics().liveBlocks;
+				CHECK(liveBlocksAfterDissolve < liveBlocksBeforeDissolve,
+				      "unload-recorded: unrecorded survivor replacement ranges freed");
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 4);
@@ -2334,11 +2368,15 @@ int main()
 				                             retire, arenas, camX, 1);
 				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
 				      "fuse-live: A recorded, B deferred by exact-fit staging");
+				submitFrame();
 				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 12), BRICKS),
 				      "fuse-live: second border edit fuses into the uploading group");
 				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
 				      "fuse-live: still one fused group");
+				CHECK(ChunkManagerProbe::replacementRecorded(managerX, 0, A),
+				      "fuse-live: fusion preserves the existing recorded replacement owner");
 				remeshOne(A);
+				remeshOne(B);
 				beginFrame();
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 4);
@@ -2348,7 +2386,6 @@ int main()
 				      "fuse-live: group consumed");
 				submitFrame();
 
-				std::cerr << "T0" << std::endl;
 				// --- Transitive fusion of the registration helper itself
 				// (probe-level): {A,B} + {B,S} + {S,W} must collapse into a
 				// single {A,B,S,W} group, exercising the fixed-point merge
@@ -2359,14 +2396,11 @@ int main()
 					if (W)
 					{
 						ChunkManagerProbe::registerGroup(managerX, {A, B});
-					std::cerr << "T1" << std::endl;
 						ChunkManagerProbe::registerGroup(managerX, {B, S});
-					std::cerr << "T2" << std::endl;
 						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
 						          ChunkManagerProbe::groupChunks(managerX, 0).size() == 3,
 						      "transitive: {A,B} and {B,S} fuse to {A,B,S}");
 						ChunkManagerProbe::registerGroup(managerX, {S, W});
-					std::cerr << "T3" << std::endl;
 						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
 						      "transitive: one group remains");
 						const std::vector<Chunk *> &chain =
@@ -2381,7 +2415,6 @@ int main()
 					}
 				}
 			}
-			std::cerr << "TS" << std::endl;
 			stagingX.shutdown();
 		}
 	}

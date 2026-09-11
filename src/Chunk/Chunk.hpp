@@ -258,7 +258,7 @@ public:
 		MeshBuildResult *result{nullptr}; // attached payload, still Chunk-owned
 		uint64_t generation{0};           // chunk identity at prepare time
 		uint64_t revision{0};
-		bool recorded{false};             // copies submitted: data is resident
+		bool recorded{false};             // copy commands recorded for submission
 		// Sectioned plan (issue #107/#109): future slots are precomputed;
 		// the currently published slots stay live until publish.
 		struct SectionPlan

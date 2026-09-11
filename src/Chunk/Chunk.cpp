@@ -2737,9 +2737,7 @@ bool Chunk::prepareSectionReplacement(MeshBuildResult &result, MeshArenas &arena
 
   planStream(opaquePayload, m_sectionGpu, out.opaque);
   planStream(waterPayload, m_sectionGpuWater, out.water);
-  const bool allocOk = allocateAll(out.opaque, out.water);
-  return allocOk;
-  return allocOk;
+  return allocateAll(out.opaque, out.water);
 }
 
 // COPY phase of the sectioned transaction: preflight the exact staging
@@ -2780,14 +2778,21 @@ bool Chunk::recordSectionUpload(VmaAllocator allocator, StagingRing *staging,
     return total;
   };
 
-  // Frame-bound staging scratch, indexed per section: nothing here
-  // survives the submit.
-  std::array<VkDeviceSize, kOccupancySections> stageVOff{};
-  std::array<VkDeviceSize, kOccupancySections> stageIOff{};
-  std::array<void *, kOccupancySections> stageVPtr{};
-  std::array<void *, kOccupancySections> stageIPtr{};
+  // Frame-bound staging scratch, indexed per stream and section: opaque
+  // and water reservations must remain distinct until both copy passes
+  // have consumed them.
+  struct StreamStagingScratch
+  {
+    std::array<VkDeviceSize, kOccupancySections> vertexOffsets{};
+    std::array<VkDeviceSize, kOccupancySections> indexOffsets{};
+    std::array<void *, kOccupancySections> vertexPointers{};
+    std::array<void *, kOccupancySections> indexPointers{};
+  };
+  StreamStagingScratch opaqueScratch{};
+  StreamStagingScratch waterScratch{};
 
-  auto reserveStream = [&](auto payloadSel, GpuReplacement::StreamPlan &plan) -> bool
+  auto reserveStream = [&](auto payloadSel, GpuReplacement::StreamPlan &plan,
+                           StreamStagingScratch &scratch) -> bool
   {
     if (!staging)
       return true;
@@ -2799,19 +2804,19 @@ bool Chunk::recordSectionUpload(VmaAllocator allocator, StagingRing *staging,
       const auto [verts, idxs] = payloadSel(s);
       if (p.vertexBytes != 0)
       {
-        if (!staging->alloc(p.vertexBytes, stageVOff[static_cast<size_t>(s)],
-                            stageVPtr[static_cast<size_t>(s)]))
+        if (!staging->alloc(p.vertexBytes, scratch.vertexOffsets[static_cast<size_t>(s)],
+                            scratch.vertexPointers[static_cast<size_t>(s)]))
           return false;
-        std::memcpy(stageVPtr[static_cast<size_t>(s)], verts->data(), p.vertexBytes);
+        std::memcpy(scratch.vertexPointers[static_cast<size_t>(s)], verts->data(), p.vertexBytes);
       }
       if (p.indexBytes != 0)
       {
-        if (!staging->alloc(p.indexBytes, stageIOff[static_cast<size_t>(s)],
-                            stageIPtr[static_cast<size_t>(s)]))
+        if (!staging->alloc(p.indexBytes, scratch.indexOffsets[static_cast<size_t>(s)],
+                            scratch.indexPointers[static_cast<size_t>(s)]))
           return false;
         // Indices are stored section-local: the indirect draw's
         // vertexOffset rebases them on the GPU (issue #109).
-        std::memcpy(stageIPtr[static_cast<size_t>(s)], idxs->data(), p.indexBytes);
+        std::memcpy(scratch.indexPointers[static_cast<size_t>(s)], idxs->data(), p.indexBytes);
       }
     }
     return true;
@@ -2821,12 +2826,12 @@ bool Chunk::recordSectionUpload(VmaAllocator allocator, StagingRing *staging,
       totalStaging(replacement.opaque, replacement.water) >
           staging->sliceCapacity() - staging->usedThisFrame())
     return false;
-  if (!reserveStream(opaquePayload, replacement.opaque) ||
-      !reserveStream(waterPayload, replacement.water))
+  if (!reserveStream(opaquePayload, replacement.opaque, opaqueScratch) ||
+      !reserveStream(waterPayload, replacement.water, waterScratch))
     return false; // unreachable after the exact preflight
 
   auto recordStream = [&](auto payloadSel, GpuReplacement::StreamPlan &plan, MeshArena &vArena,
-                          MeshArena &iArena)
+                          MeshArena &iArena, const StreamStagingScratch &scratch)
   {
     for (int s = 0; s < kOccupancySections; ++s)
     {
@@ -2838,7 +2843,7 @@ bool Chunk::recordSectionUpload(VmaAllocator allocator, StagingRing *staging,
         if (p.vertexBytes != 0)
         {
           VkBufferCopy copy{};
-          copy.srcOffset = stageVOff[static_cast<size_t>(s)];
+          copy.srcOffset = scratch.vertexOffsets[static_cast<size_t>(s)];
           copy.dstOffset = p.newV.offset;
           copy.size = p.vertexBytes;
           vkCmdCopyBuffer(cmd, staging->buffer(), vArena.pageBuffer(p.newV.page), 1, &copy);
@@ -2846,7 +2851,7 @@ bool Chunk::recordSectionUpload(VmaAllocator allocator, StagingRing *staging,
         if (p.indexBytes != 0)
         {
           VkBufferCopy copy{};
-          copy.srcOffset = stageIOff[static_cast<size_t>(s)];
+          copy.srcOffset = scratch.indexOffsets[static_cast<size_t>(s)];
           copy.dstOffset = p.newI.offset;
           copy.size = p.indexBytes;
           vkCmdCopyBuffer(cmd, staging->buffer(), iArena.pageBuffer(p.newI.page), 1, &copy);
@@ -2865,8 +2870,10 @@ bool Chunk::recordSectionUpload(VmaAllocator allocator, StagingRing *staging,
     }
   };
 
-  recordStream(opaquePayload, replacement.opaque, arenas.opaqueVertex, arenas.opaqueIndex);
-  recordStream(waterPayload, replacement.water, arenas.waterVertex, arenas.waterIndex);
+  recordStream(opaquePayload, replacement.opaque, arenas.opaqueVertex, arenas.opaqueIndex,
+               opaqueScratch);
+  recordStream(waterPayload, replacement.water, arenas.waterVertex, arenas.waterIndex,
+               waterScratch);
   replacement.recorded = true;
   return true;
 }
