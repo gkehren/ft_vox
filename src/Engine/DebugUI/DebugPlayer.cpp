@@ -70,16 +70,15 @@ void drawPlayerDiagnostics(UiState &s, GameUIFrame &frame)
 							p.submergedLava ? "lava" : "");
 
 	ImGui::SeparatorText("Camera");
-	if (frame.camera)
-	{
-		ImGui::Text("Mode  %s",
-					frame.camera->getMode() == CameraMode::ISOMETRIC ? "Isometric"
-																	 : "Perspective");
-		ImGui::Text("Movement speed  %.1f", frame.camera->getMovementSpeed());
-		ImGui::Text("Mouse sensitivity  %.3f", frame.camera->getMouseSensitivity());
-		if (frame.camera->getMode() == CameraMode::ISOMETRIC)
-			ImGui::Text("Isometric zoom  %.0f", frame.camera->getIsometricZoom());
-	}
+	// Snapshot-only (issue #184 review): camera view state arrives through
+	// the player snapshot like every other value — no direct Camera access.
+	ImGui::Text("Mode  %s",
+				p.cameraViewMode == playerui::CameraViewMode::Isometric ? "Isometric"
+																		: "Perspective");
+	ImGui::Text("Movement speed  %.1f", p.cameraMovementSpeed);
+	ImGui::Text("Mouse sensitivity  %.3f", p.mouseSensitivity);
+	if (p.cameraViewMode == playerui::CameraViewMode::Isometric)
+		ImGui::Text("Isometric zoom  %.0f", p.isometricZoom);
 
 	ImGui::End();
 }

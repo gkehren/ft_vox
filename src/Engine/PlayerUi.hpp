@@ -13,6 +13,8 @@
 #include <utils.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -43,6 +45,26 @@ inline constexpr bool statusOverlayShowsWorld(StatusOverlayDensity d)
 {
 	return d == StatusOverlayDensity::Detailed;
 }
+
+/// True when a visible surface samples the player biome this frame. Kept
+/// next to the density policy so the engine depends on this explicit rule
+/// instead of a presentation detail (issue #184 review): only the Detailed
+/// overlay shows the biome today, so every other state skips the query.
+inline constexpr bool statusOverlayNeedsBiome(StatusOverlayDensity d)
+{
+	return d == StatusOverlayDensity::Detailed;
+}
+
+// --- Player snapshot --------------------------------------------------------
+
+/// UI-facing camera view mode. Kept separate from Camera/CameraMode so this
+/// header stays engine-decoupled (issue #184 review): Engine maps between
+/// the two when filling the snapshot.
+enum class CameraViewMode
+{
+	Perspective,
+	Isometric
+};
 
 // --- Player snapshot --------------------------------------------------------
 
@@ -76,6 +98,14 @@ struct PlayerSnapshot
 	uint64_t droppedSteps{0};
 	bool submergedWater{false};
 	bool submergedLava{false};
+
+	// Camera view state, snapshot-only (issue #184 review): UI surfaces
+	// display these values and mutate through GameUIFrame commands instead
+	// of reading/writing Camera directly.
+	CameraViewMode cameraViewMode{CameraViewMode::Perspective};
+	float cameraMovementSpeed{0.f};
+	float mouseSensitivity{0.f};
+	float isometricZoom{0.f};
 };
 
 /// Motion-state display label. Priority resolves meaningful overlaps the same
@@ -101,12 +131,31 @@ inline std::string_view playerMotionLabel(const PlayerSnapshot &p)
 	return playerMotionLabel(p.flight, p.waitingForTerrain, p.swimming, p.grounded);
 }
 
+/// One-axis world -> chunk display coordinate: floor division by CHUNK_SIZE,
+/// mirroring the worldToVoxelColumn contract — floor in double, non-finite
+/// inputs map to INT_MIN, and out-of-int-range results clamp instead of
+/// invoking UB in the float->int conversion (issue #184 review).
+inline int worldToChunkAxis(float world)
+{
+	if (!std::isfinite(world))
+		return std::numeric_limits<int>::min();
+
+	const double chunk = std::floor(static_cast<double>(world) /
+									static_cast<double>(CHUNK_SIZE));
+	constexpr double kIntMin = static_cast<double>(std::numeric_limits<int>::min());
+	constexpr double kIntMax = static_cast<double>(std::numeric_limits<int>::max());
+	if (chunk <= kIntMin)
+		return std::numeric_limits<int>::min();
+	if (chunk >= kIntMax)
+		return std::numeric_limits<int>::max();
+	return static_cast<int>(chunk);
+}
+
 /// Display chunk coordinates for a world position: floor division by
 /// CHUNK_SIZE (negative-safe; matches the streaming grid convention).
 inline glm::ivec2 worldToChunkCoord(float worldX, float worldZ)
 {
-	return {static_cast<int>(std::floor(worldX / static_cast<float>(CHUNK_SIZE))),
-			static_cast<int>(std::floor(worldZ / static_cast<float>(CHUNK_SIZE)))};
+	return {worldToChunkAxis(worldX), worldToChunkAxis(worldZ)};
 }
 
 /// Biome display name for a snapshot ordinal ("?" for the unresolved case).

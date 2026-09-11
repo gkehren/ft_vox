@@ -207,6 +207,28 @@ static void checkPlayerUi()
 	const glm::ivec2 farChunk = worldToChunkCoord(-16.f, 480.f);
 	CHECK(farChunk.x == -1 && farChunk.y == 30, "large mixed-sign positions");
 
+	// Robustness (issue #184 review): non-finite and out-of-int-range inputs
+	// clamp instead of invoking UB — same contract as worldToVoxelColumn.
+	constexpr int kIntMin = std::numeric_limits<int>::min();
+	constexpr int kIntMax = std::numeric_limits<int>::max();
+	const glm::ivec2 nanChunk = worldToChunkCoord(std::numeric_limits<float>::quiet_NaN(),
+												  std::numeric_limits<float>::quiet_NaN());
+	CHECK(nanChunk.x == kIntMin && nanChunk.y == kIntMin, "NaN clamps to INT_MIN");
+	const glm::ivec2 infChunk = worldToChunkCoord(std::numeric_limits<float>::infinity(),
+												  -std::numeric_limits<float>::infinity());
+	CHECK(infChunk.x == kIntMin && infChunk.y == kIntMin,
+		  "infinities clamp to INT_MIN (worldToVoxelColumn contract)");
+	const glm::ivec2 hugeChunk = worldToChunkCoord(std::numeric_limits<float>::max(),
+												  -std::numeric_limits<float>::max());
+	CHECK(hugeChunk.x == kIntMax && hugeChunk.y == kIntMin,
+		  "huge magnitudes clamp to the int range without UB");
+	// 2^32 is exact in float; /16 = 2^28 stays exact through the double floor.
+	const glm::ivec2 bigChunk = worldToChunkCoord(4294967296.f, 0.f);
+	CHECK(bigChunk.x == 268435456, "large in-range chunk stays exact");
+	const glm::ivec2 boundaryLow = worldToChunkCoord(-16.001f, 16.f);
+	CHECK(boundaryLow.x == -2 && boundaryLow.y == 1,
+		  "negative near-boundary floors across the edge");
+
 	// Block palette: complete, self-consistent, alphabetical, deterministic.
 	const std::vector<BlockPaletteEntry> palette = buildBlockPalette();
 	CHECK(palette.size() == textureTypeString.size(), "palette covers every TextureType");
@@ -239,6 +261,15 @@ static void checkPlayerUi()
 		  "Minimal stays frame-health only");
 	CHECK(statusOverlayShowsWorld(StatusOverlayDensity::Detailed),
 		  "Detailed adds world/player context");
+
+	// Biome sampling policy (issue #184 review): only Detailed pays the
+	// getBiomeAt query, so Off/Minimal never trigger a world access.
+	CHECK(statusOverlayNeedsBiome(StatusOverlayDensity::Detailed),
+		  "Detailed needs the player biome");
+	CHECK(!statusOverlayNeedsBiome(StatusOverlayDensity::Minimal),
+		  "Minimal needs no biome query");
+	CHECK(!statusOverlayNeedsBiome(StatusOverlayDensity::Off),
+		  "Off needs no biome query");
 
 	// Biome display: unresolved snapshot ordinal renders as "?".
 	CHECK(std::string_view(biomeDisplayName(-1)) == "?", "unresolved biome displays ?");

@@ -241,14 +241,13 @@ void GameUI::drawStatusOverlay(GameUIFrame &frame)
 {
 	// True gameplay overlay (issue #184): compact, read-only, semi-
 	// transparent and non-interactive — it never steals gameplay mouse or
-	// keyboard input. Anchored below the menu bar via the viewport work area
-	// (WorkPos already excludes the main menu bar); offsets follow the UI
-	// scale (issue #183). Not user-movable, so the old HUD scale-clamp
-	// machinery is gone.
-	const ImGuiViewport *viewport = ImGui::GetMainViewport();
+	// keyboard input. Anchored inside the shell's central game-view rect
+	// (the passthru dock node), so side/bottom docks never cover it; offsets
+	// follow the UI scale (issue #183).
+	const ui::UiRect gameRect = m_shell.gameViewRect();
 	const float scale = ui::effectiveScale(frame.uiScale);
-	ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + ui::scaled(12.f, scale),
-								   viewport->WorkPos.y + ui::scaled(12.f, scale)),
+	ImGui::SetNextWindowPos(ImVec2(gameRect.pos.x + ui::scaled(12.f, scale),
+								   gameRect.pos.y + ui::scaled(12.f, scale)),
 							ImGuiCond_Always);
 	ImGui::SetNextWindowBgAlpha(0.55f);
 	constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
@@ -325,46 +324,45 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 	const playerui::PlayerSnapshot &p = frame.player;
 	const bool benchmarkActive = frame.benchmark && frame.benchmark->isActive();
 
-	// Interactive locomotion controls (issue #184 §2). Raw physics counters
-	// live in the developer console's Player Diagnostics window now.
+	// Interactive locomotion controls (issue #184 §2). All display values
+	// come from the snapshot and all mutations go through the frame commands
+	// — the panel never touches the Camera or player controller directly.
+	// Raw physics counters live in the developer console's Player
+	// Diagnostics window now.
 	ui::sectionHeader("Movement");
-	if (frame.camera)
-	{
-		ImGui::BeginDisabled(benchmarkActive);
-		bool flight = p.flight;
-		if (ImGui::Checkbox("Debug flight [V]", &flight) && frame.setPlayerFlight)
-			frame.setPlayerFlight(flight);
-		ImGui::EndDisabled();
-		float speed = frame.camera->getMovementSpeed();
-		ImGui::BeginDisabled(!p.flight);
-		if (ImGui::SliderFloat("Fly speed", &speed, 1.f, 200.f, "%.1f"))
-			frame.camera->setMovementSpeed(speed);
-		ImGui::EndDisabled();
-		// Label is a string literal -> data() is null-terminated (printf-safe,
-		// no per-frame allocation; issue #184 §7).
-		ImGui::Text("%s · %.2f blocks/s", playerui::playerMotionLabel(p).data(), p.speed);
-		if (p.status && *p.status)
-			ImGui::TextWrapped("%s", p.status);
-	}
+	ImGui::BeginDisabled(benchmarkActive);
+	bool flight = p.flight;
+	if (ImGui::Checkbox("Debug flight [V]", &flight) && frame.setPlayerFlight)
+		frame.setPlayerFlight(flight);
+	ImGui::EndDisabled();
+	float speed = p.cameraMovementSpeed;
+	ImGui::BeginDisabled(!p.flight);
+	if (ImGui::SliderFloat("Fly speed", &speed, 1.f, 200.f, "%.1f") &&
+		frame.setCameraMovementSpeed)
+		frame.setCameraMovementSpeed(speed);
+	ImGui::EndDisabled();
+	// Label is a string literal -> data() is null-terminated (printf-safe,
+	// no per-frame allocation; issue #184 §7).
+	ImGui::Text("%s · %.2f blocks/s", playerui::playerMotionLabel(p).data(), p.speed);
+	if (p.status && *p.status)
+		ImGui::TextWrapped("%s", p.status);
 
 	// Camera behavior controls; isometric zoom only while relevant.
 	ui::sectionHeader("Camera");
-	if (frame.camera)
+	const char *modes[] = {"Perspective", "Isometric"};
+	int mode = p.cameraViewMode == playerui::CameraViewMode::Isometric ? 1 : 0;
+	if (ImGui::Combo("Camera mode", &mode, modes, 2) && frame.setCameraMode)
+		frame.setCameraMode(mode == 1 ? CameraMode::ISOMETRIC : CameraMode::PERSPECTIVE);
+	if (p.cameraViewMode == playerui::CameraViewMode::Isometric)
 	{
-		const char *modes[] = {"Perspective", "Isometric"};
-		int mode = frame.camera->getMode() == CameraMode::ISOMETRIC ? 1 : 0;
-		if (ImGui::Combo("Camera mode", &mode, modes, 2) && frame.setCameraMode)
-			frame.setCameraMode(mode == 1 ? CameraMode::ISOMETRIC : CameraMode::PERSPECTIVE);
-		if (frame.camera->getMode() == CameraMode::ISOMETRIC)
-		{
-			float zoom = frame.camera->getIsometricZoom();
-			if (ImGui::SliderFloat("Zoom", &zoom, 16.f, 256.f))
-				frame.camera->setIsometricZoom(zoom);
-		}
-		float sensitivity = frame.camera->getMouseSensitivity();
-		if (ImGui::SliderFloat("Sensitivity", &sensitivity, 0.02f, 0.5f, "%.3f"))
-			frame.camera->setMouseSensitivity(sensitivity);
+		float zoom = p.isometricZoom;
+		if (ImGui::SliderFloat("Zoom", &zoom, 16.f, 256.f) && frame.setIsometricZoom)
+			frame.setIsometricZoom(zoom);
 	}
+	float sensitivity = p.mouseSensitivity;
+	if (ImGui::SliderFloat("Sensitivity", &sensitivity, 0.02f, 0.5f, "%.3f") &&
+		frame.setMouseSensitivity)
+		frame.setMouseSensitivity(sensitivity);
 
 	ui::sectionHeader("Interaction");
 	if (frame.selectedTexture)

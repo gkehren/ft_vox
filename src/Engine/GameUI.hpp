@@ -41,6 +41,12 @@ struct GameUIFrame
 	playerui::PlayerSnapshot player{};
 	std::function<void(bool)> setPlayerFlight;
 	std::function<void(CameraMode)> setCameraMode;
+	/// Camera tuning commands (issue #184 review): the panel adjusts these
+	/// through Engine instead of writing the Camera directly, keeping the
+	/// UI surfaces snapshot-only for display data.
+	std::function<void(float)> setCameraMovementSpeed;
+	std::function<void(float)> setMouseSensitivity;
+	std::function<void(float)> setIsometricZoom;
 	ChunkManager *chunks{nullptr};
 	ChunkPool *pool{nullptr};
 	TerrainGenerator *generator{nullptr};
@@ -175,6 +181,14 @@ public:
 	{
 		m_debug.panels.statusOverlay = v ? playerui::StatusOverlayDensity::Detailed
 										 : playerui::StatusOverlayDensity::Off;
+	}
+
+	/// True when a visible UI surface needs the player biome sampled this
+	/// frame (issue #184 review): only the Detailed overlay displays it, so
+	/// Engine::drawUi can skip the query entirely in every other state.
+	bool needsPlayerBiome() const
+	{
+		return playerui::statusOverlayNeedsBiome(m_debug.panels.statusOverlay);
 	}
 
 	/// Application shell (dockspace, menus, layout actions). Engine queues the

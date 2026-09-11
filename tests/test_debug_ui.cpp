@@ -410,6 +410,12 @@ void testPlayerDiagnosticsSnapshot()
 	f.player.queryIterations = 99;
 	f.player.droppedSteps = 3;
 	f.player.submergedWater = true;
+	// Camera view state is snapshot-only (issue #184 review): the panel must
+	// be able to render it without a direct Camera path.
+	f.player.cameraViewMode = playerui::CameraViewMode::Isometric;
+	f.player.cameraMovementSpeed = 125.f;
+	f.player.mouseSensitivity = 0.123f;
+	f.player.isometricZoom = 64.f;
 	debugui::updateDebugUiState(state, f, 500.01);
 	CHECK(state.player.valid, "player snapshot sampled once the panel opens");
 	CHECK(state.player.flight && state.player.swimming && !state.player.grounded &&
@@ -423,6 +429,11 @@ void testPlayerDiagnosticsSnapshot()
 			  state.player.queryIterations == 99 && state.player.droppedSteps == 3,
 		  "solver counters copied");
 	CHECK(state.player.submergedWater && !state.player.submergedLava, "immersion flags copied");
+	CHECK(state.player.cameraViewMode == playerui::CameraViewMode::Isometric,
+		  "camera view mode copied");
+	CHECK(state.player.cameraMovementSpeed == 125.f && state.player.mouseSensitivity == 0.123f &&
+			  state.player.isometricZoom == 64.f,
+		  "camera tuning values copied");
 
 	// Values refresh on later frames (not a one-shot latch).
 	f.player.queriedCells = 2000;

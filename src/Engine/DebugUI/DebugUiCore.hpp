@@ -173,7 +173,9 @@ struct ChunkDebugSnapshot
 
 /// Player/physics diagnostics (issue #184): the raw solver counters and
 /// motion flags removed from the gameplay surfaces. Copied from the frame's
-/// playerui::PlayerSnapshot while the Player Diagnostics window is open.
+/// playerui::PlayerSnapshot while the Player Diagnostics window is open —
+/// including the camera view state, so the panel stays snapshot-only (issue
+/// #184 review) and never reads the Camera directly.
 struct PlayerDebugSnapshot
 {
 	bool valid{false};
@@ -191,6 +193,10 @@ struct PlayerDebugSnapshot
 	uint64_t queriedCells{0};
 	uint64_t queryIterations{0};
 	uint64_t droppedSteps{0};
+	playerui::CameraViewMode cameraViewMode{playerui::CameraViewMode::Perspective};
+	float cameraMovementSpeed{0.f};
+	float mouseSensitivity{0.f};
+	float isometricZoom{0.f};
 };
 
 // --- Console state owned by GameUI ---

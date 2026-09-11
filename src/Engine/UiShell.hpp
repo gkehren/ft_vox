@@ -41,6 +41,15 @@ inline constexpr const char *kHelp = "Help";
 inline constexpr const char *kPlayer = "Player / Gameplay";
 } // namespace windows
 
+/// Screen-space rectangle of the central game-view area. Used to anchor
+/// gameplay overlays so they stay over the 3D render even when side docks
+/// are open (issue #184 review).
+struct UiRect
+{
+	ImVec2 pos{0.f, 0.f};
+	ImVec2 size{0.f, 0.f};
+};
+
 /// Panel visibility toggles (GameUI + DebugUI PanelState), mirrored into the
 /// shell menus. The Status Overlay carries its density instead of a bool:
 /// Off is hidden, Minimal/Detailed are the two shown densities (issue #184).
@@ -78,6 +87,12 @@ public:
 	/// status strip with graceful degradation at narrow widths.
 	void drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles);
 
+	/// Screen-space rectangle of the central passthru dock node (the game
+	/// view). Falls back to the main viewport work area while the dockspace
+	/// has not been built yet or has no usable central node. Gameplay
+	/// overlays anchor here so side/bottom docks never cover them.
+	ui::UiRect gameViewRect() const;
+
 	/// Undock everything and recreate an empty dockspace (predictable reset
 	/// without deleting imgui.ini).
 	void queueResetLayout() { m_resetLayoutQueued = true; }
@@ -89,6 +104,10 @@ public:
 private:
 	void resetLayout(ImGuiID dockspaceId);
 	void applyDefaultDeveloperLayout(ImGuiID dockspaceId);
+
+	/// Live dockspace id (recreated from the main viewport every frame;
+	/// reset/default layouts rebuild the same node id).
+	ImGuiID m_dockspaceId{0};
 
 	bool m_defaultLayoutQueued{false};
 	bool m_resetLayoutQueued{false};

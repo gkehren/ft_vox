@@ -291,6 +291,10 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 			state.player.queriedCells = p.queriedCells;
 			state.player.queryIterations = p.queryIterations;
 			state.player.droppedSteps = p.droppedSteps;
+			state.player.cameraViewMode = p.cameraViewMode;
+			state.player.cameraMovementSpeed = p.cameraMovementSpeed;
+			state.player.mouseSensitivity = p.mouseSensitivity;
+			state.player.isometricZoom = p.isometricZoom;
 		}
 	}
 

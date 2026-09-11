@@ -1143,13 +1143,24 @@ void Engine::drawUi()
 		f.player.chunkX = chunk.x;
 		f.player.chunkZ = chunk.y;
 	}
-	if (terrainGenerator)
+	// Biome: only the Detailed overlay displays it (issue #184 review), so
+	// skip the query in every other UI state — and even then re-sample only
+	// when the voxel column or the world generation changed (the player can
+	// spend many frames inside one column).
+	f.player.biome = -1;
+	if (terrainGenerator && gameUi->needsPlayerBiome())
 	{
-		// Single canonical world -> voxel-column convention (floor).
 		const glm::ivec2 column =
 			worldToVoxelColumn(glm::vec2(f.player.position.x, f.player.position.z));
-		const BiomeType biome = terrainGenerator->getBiomeAt(column.x, column.y);
-		f.player.biome = (biome >= 0 && biome < BIOME_COUNT) ? static_cast<int>(biome) : -1;
+		if (column != m_uiBiomeColumn || m_uiBiomeWorldGen != m_worldGenerationId)
+		{
+			m_uiBiomeColumn = column;
+			m_uiBiomeWorldGen = m_worldGenerationId;
+			// Single canonical world -> voxel-column convention (floor).
+			const BiomeType biome = terrainGenerator->getBiomeAt(column.x, column.y);
+			m_uiBiome = (biome >= 0 && biome < BIOME_COUNT) ? static_cast<int>(biome) : -1;
+		}
+		f.player.biome = m_uiBiome;
 	}
 	f.player.flight = playerFlight;
 	f.player.grounded = player.body.grounded;
@@ -1163,12 +1174,23 @@ void Engine::drawUi()
 	f.player.droppedSteps = player.metrics.droppedSteps;
 	f.player.submergedWater = player.submerged.water > 0;
 	f.player.submergedLava = player.submerged.lava > 0;
+	// Camera view state travels through the snapshot (issue #184 review):
+	// panels display these values and mutate through the commands below.
+	f.player.cameraViewMode = camera.getMode() == CameraMode::ISOMETRIC
+								  ? playerui::CameraViewMode::Isometric
+								  : playerui::CameraViewMode::Perspective;
+	f.player.cameraMovementSpeed = camera.getMovementSpeed();
+	f.player.mouseSensitivity = camera.getMouseSensitivity();
+	f.player.isometricZoom = camera.getIsometricZoom();
 	f.setPlayerFlight = [this](bool enabled) { setPlayerFlight(enabled); };
 	f.setCameraMode = [this](CameraMode mode) {
 		if (m_benchmark.isActive()) return;
 		if (mode == CameraMode::ISOMETRIC && !playerFlight) setPlayerFlight(true);
 		camera.setMode(mode);
 	};
+	f.setCameraMovementSpeed = [this](float value) { camera.setMovementSpeed(value); };
+	f.setMouseSensitivity = [this](float value) { camera.setMouseSensitivity(value); };
+	f.setIsometricZoom = [this](float value) { camera.setIsometricZoom(value); };
 	f.chunks = chunkManager.get();
 	f.pool = chunkPool.get();
 	f.generator = terrainGenerator.get();

@@ -23,6 +23,7 @@ void UiShell::beginFrame()
 	// docking state persists through the normal imgui.ini settings.
 	const ImGuiID dockspaceId = ImGui::DockSpaceOverViewport(
 		0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
+	m_dockspaceId = dockspaceId;
 
 	// Dock-builder operations must run while the dockspace node exists, so
 	// menu actions apply next frame; startup queuing applies on the first.
@@ -36,6 +37,26 @@ void UiShell::beginFrame()
 		m_defaultLayoutQueued = false;
 		applyDefaultDeveloperLayout(dockspaceId);
 	}
+}
+
+ui::UiRect UiShell::gameViewRect() const
+{
+	// The central passthru node is exactly the region not claimed by docked
+	// panels, so gameplay overlays anchored there always sit over the 3D
+	// render. Requires imgui_internal (dock builder API); fall back to the
+	// viewport work area while the dockspace/central node is not usable
+	// (first frame, no node, degenerate size).
+	if (m_dockspaceId != 0)
+	{
+		if (const ImGuiDockNode *central = ImGui::DockBuilderGetCentralNode(m_dockspaceId))
+		{
+			if (central->Size.x > 1.f && central->Size.y > 1.f)
+				return {central->Pos, central->Size};
+		}
+	}
+
+	const ImGuiViewport *viewport = ImGui::GetMainViewport();
+	return {viewport->WorkPos, viewport->WorkSize};
 }
 
 void UiShell::resetLayout(ImGuiID dockspaceId)
@@ -74,6 +95,7 @@ void UiShell::applyDefaultDeveloperLayout(ImGuiID dockspaceId)
 	ImGui::DockBuilderDockWindow(windows::kHelp, dockRight);
 	ImGui::DockBuilderDockWindow(windows::kOverview, dockRight);
 	ImGui::DockBuilderDockWindow(windows::kRenderDebug, dockRight);
+	ImGui::DockBuilderDockWindow(windows::kPlayerDiagnostics, dockRight);
 	ImGui::DockBuilderDockWindow(windows::kChunkInspector, dockRight);
 	ImGui::DockBuilderDockWindow(windows::kMemory, dockRight);
 
