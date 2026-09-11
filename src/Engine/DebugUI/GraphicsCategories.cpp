@@ -114,8 +114,8 @@ void drawDisplay(debugui::UiState &s, GameUIFrame &frame)
 	auto &rs = *frame.render;
 
 	ImGui::SeparatorText("Presentation");
-	// Single settings home for VSync (issue #185): the HUD checkbox is gone;
-	// F10 and the Developer menu item keep working.
+	// Single settings home for VSync (issue #185).
+	// F10 remains the global quick action.
 	bool vsync = rs.vsyncEnabled;
 	// "(applying)" must also cover the frame where the toggle just happened:
 	// vsyncPending is filled by drawUi before the panel draws, so a fresh

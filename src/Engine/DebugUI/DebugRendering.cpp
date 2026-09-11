@@ -104,7 +104,9 @@ void drawRenderDebug(UiState &s, GameUIFrame &frame)
 		if (ImGui::Combo("SSAO view", &ssaoIdx, ssaoDebugViews, IM_ARRAYSIZE(ssaoDebugViews)))
 			pp.ssaoDebugView = ssaoIdx;
 		ImGui::EndDisabled();
-		if (!pp.ssaoEnabled && ImGui::IsItemHovered())
+		// Disabled widgets eat hover by default — AllowWhenDisabled keeps the
+		// cross-panel hint reachable (mirrors Graphics ▸ Post auto exposure).
+		if (!pp.ssaoEnabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Enable SSAO in Graphics (F2) first.");
 	}
 
