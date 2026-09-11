@@ -95,17 +95,34 @@ int main()
 			ok = fail("dirtyPresetFields fixture must perturb at least one preset-controlled field");
 	}
 
-	// --- applyPreset preserves runtime submersion state ---
+	// --- applyPreset preserves runtime submersion + Render Debug state ---
 	{
 		PostProcessSettings pp{};
 		pp.underwater = true;
 		pp.underwaterStrength = 0.7f;
 		pp.underwaterSurfaceY = 42.0f;
+		pp.ssaoDebugView = 2;
 		pp.applyPreset(GraphicsQualityPreset::High);
 		if (!pp.underwater || pp.underwaterStrength != 0.7f || pp.underwaterSurfaceY != 42.0f)
 			ok = fail("applyPreset must preserve underwater / underwaterStrength / underwaterSurfaceY");
+		if (pp.ssaoDebugView != 2)
+			ok = fail("applyPreset must never touch ssaoDebugView (Render Debug owns it, issue #185)");
 		if (PostProcessSettings::presetValues(GraphicsQualityPreset::High).underwater)
 			ok = fail("presetValues starts from fresh defaults, so underwater must be false");
+	}
+
+	// --- effectiveSsaoDebugView: a stale view can never outlive SSAO ---
+	{
+		PostProcessSettings live{};
+		live.ssaoEnabled = true;
+		live.ssaoDebugView = 3;
+		if (effectiveSsaoDebugView(live) != 3)
+			ok = fail("effectiveSsaoDebugView must pass the view through while SSAO is on");
+		PostProcessSettings dead{};
+		dead.ssaoEnabled = false;
+		dead.ssaoDebugView = 3;
+		if (effectiveSsaoDebugView(dead) != 0)
+			ok = fail("effectiveSsaoDebugView must resolve to Off when SSAO is disabled");
 	}
 
 	// --- matchesPreset: truthful Custom detection (issue #185) ---

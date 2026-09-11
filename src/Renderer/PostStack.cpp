@@ -824,7 +824,8 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 	// runs on perceptual values, never on linear HDR. With AA off, composite
 	// targets the swapchain directly (legacy path, unchanged). SSAO debug
 	// views bypass AA too: diagnostics must show the raw data unfiltered.
-	const bool aaEnabled = settings.fxaaEnabled && settings.ssaoDebugView == 0;
+	const int ssaoDebugView = effectiveSsaoDebugView(settings);
+	const bool aaEnabled = settings.fxaaEnabled && ssaoDebugView == 0;
 	vkbar::cmdTransitionColor(cmd, aaEnabled ? m_ldr.image : swapchainImage,
 					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 					0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
@@ -848,7 +849,7 @@ void PostStack::recordPost(VkCommandBuffer cmd, VkImage swapchainImage, VkImageV
 	// the FXAA pass sees perceptual luma.
 	cpc.p4 = glm::vec4(settings.filmGrain, settings.vignette,
 					   (m_swapchainRequiresSrgbEncode || aaEnabled) ? 1.0f : 0.0f,
-					   static_cast<float>(settings.ssaoDebugView));
+					   static_cast<float>(ssaoDebugView));
 	cpc.p5 = glm::vec4(autoExposureActive(settings) ? 1.0f : 0.0f, 0.f, 0.f, 0.f);
 	// Camera-underwater medium transport (issue #144): local surface height
 	// for the submersion blend, and the caustic quality tier from the preset

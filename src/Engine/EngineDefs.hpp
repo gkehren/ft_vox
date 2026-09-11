@@ -227,7 +227,11 @@ struct PostProcessSettings
 	float ssaoIntensity{0.40f};
 	int ssaoDirections{4};   // horizon directions (4..8)
 	int ssaoSteps{3};        // march steps per direction (1..4)
-	int ssaoDebugView{0};    // 0=Off 1=FinalAO 2=RawAO 3=Normals
+	/// SSAO debug view: 0=Off 1=FinalAO 2=RawAO 3=Normals. Owned by Render
+	/// Debug (F12): presets and post resets never write it (issue #185); the
+	/// renderer consumes effectiveSsaoDebugView() so a stale view can never
+	/// outlive the SSAO pass it visualizes.
+	int ssaoDebugView{0};
 
 	// Underwater look (set by engine when camera is submerged)
 	bool underwater{false};
@@ -260,6 +264,15 @@ struct PostProcessSettings
 	[[nodiscard]] static bool matchesPreset(const PostProcessSettings &current, GraphicsQualityPreset preset);
 };
 
+/// Effective SSAO debug view for the renderer: with SSAO off there is no AO
+/// buffer to visualize, and the composite checks the debug flag before
+/// ssaoEnabled — so a stale non-zero view must resolve to Off here rather
+/// than by having presets or resets mutate Render Debug state (issue #185).
+inline int effectiveSsaoDebugView(const PostProcessSettings &pp)
+{
+	return pp.ssaoEnabled ? pp.ssaoDebugView : 0;
+}
+
 /// Shared implementation: writes every preset-controlled field to the pack's
 /// canonical value. Does not touch qualityPreset or underwater runtime state.
 inline void applyPresetBody(PostProcessSettings &pp, GraphicsQualityPreset preset)
@@ -280,7 +293,8 @@ inline void applyPresetBody(PostProcessSettings &pp, GraphicsQualityPreset prese
 	pp.autoExposureSpeedDown = 1.25f;
 	pp.godRaysBoostPreview = false;
 	pp.godRaysDepthOcclusion = true;
-	pp.ssaoDebugView = 0; // diagnostics never persist across presets
+	// ssaoDebugView deliberately NOT written: debug views belong to Render
+	// Debug; the renderer gates them via effectiveSsaoDebugView (issue #185).
 
 	switch (preset)
 	{

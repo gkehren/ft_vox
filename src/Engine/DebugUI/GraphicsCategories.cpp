@@ -328,9 +328,10 @@ void drawPost(debugui::UiState &s, GameUIFrame &frame)
 	ImGui::Checkbox("Spatial AA (FXAA 3.11)", &pp.fxaaEnabled);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Dedicated FXAA 3.11 pass on the tone-mapped image (issue #143):\nimproves voxel silhouettes and foliage edges; Off keeps the direct composite path.\nThe Low preset disables AA.");
-	// Leaving SSAO off while a debug view is selected would freeze the
-	// frame on that debug output (composite checks the debug flag before
-	// ssaoEnabled) with the selector hidden — reset it on disable.
+	// Presets and post resets never touch ssaoDebugView (Render Debug owns
+	// it, and the renderer gates stale views via effectiveSsaoDebugView).
+	// Clearing it here is deliberate UX: an explicit SSAO disable also
+	// dismisses the AO debug view the user was looking at.
 	if (ImGui::Checkbox("SSAO", &pp.ssaoEnabled) && !pp.ssaoEnabled)
 		pp.ssaoDebugView = 0;
 	if (pp.ssaoEnabled)

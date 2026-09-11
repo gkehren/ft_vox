@@ -162,8 +162,10 @@ int main()
 		if (!(low.ssaoSteps <= med.ssaoSteps && med.ssaoSteps <= high.ssaoSteps &&
 			  high.ssaoSteps <= cine.ssaoSteps))
 			ok = fail("SSAO steps must be non-decreasing Low < Medium < High < Cinematic");
-		if (low.ssaoDebugView != 0)
-			ok = fail("applyPreset must reset the SSAO debug view to Off");
+		// Issue #185: debug views belong to Render Debug — presets never
+		// touch ssaoDebugView (the renderer gates stale views instead).
+		if (low.ssaoDebugView != 3)
+			ok = fail("applyPreset must preserve the SSAO debug view (issue #185)");
 		// Spatial AA tier (issue #143): only Low drops the FXAA 3.11 pass;
 		// Medium/High/Cinematic keep the production spatial path.
 		if (low.fxaaEnabled)
@@ -178,8 +180,7 @@ int main()
 				std::abs(def.ssaoRadius - medDef.ssaoRadius) > 1e-5f ||
 				std::abs(def.ssaoIntensity - medDef.ssaoIntensity) > 1e-5f ||
 				def.ssaoDirections != medDef.ssaoDirections ||
-				def.ssaoSteps != medDef.ssaoSteps ||
-				def.ssaoDebugView != medDef.ssaoDebugView)
+				def.ssaoSteps != medDef.ssaoSteps)
 				ok = fail("SSAO defaults must equal the Medium preset (house rule: Medium = constructor defaults)");
 		}
 		if (!(low.bloomBlurIterations < med.bloomBlurIterations &&
