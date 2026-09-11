@@ -16,19 +16,19 @@ bool fail(const std::string &msg)
 	return false;
 }
 
-// Full field comparison of two packs except qualityPreset: applyPreset stamps
-// the tag but presetValues deliberately leaves it at the constructor default.
-bool sameSettingsExceptPresetTag(const PostProcessSettings &a, const PostProcessSettings &b)
+// Full comparison of two packs INCLUDING the qualityPreset tag: a canonical
+// preset object must be complete — values AND tag (issue #185 review).
+bool sameCanonicalSettings(const PostProcessSettings &a, const PostProcessSettings &b)
 {
-	return a.shadowMapSize == b.shadowMapSize && a.fxaaEnabled == b.fxaaEnabled &&
-		   a.bloomEnabled == b.bloomEnabled && a.bloomThreshold == b.bloomThreshold &&
-		   a.bloomIntensity == b.bloomIntensity && a.bloomBlurIterations == b.bloomBlurIterations &&
-		   a.ssaoEnabled == b.ssaoEnabled && a.ssaoRadius == b.ssaoRadius &&
-		   a.ssaoIntensity == b.ssaoIntensity && a.ssaoDirections == b.ssaoDirections &&
-		   a.ssaoSteps == b.ssaoSteps && a.ssaoDebugView == b.ssaoDebugView &&
-		   a.godRaysEnabled == b.godRaysEnabled && a.godRaysDensity == b.godRaysDensity &&
-		   a.godRaysWeight == b.godRaysWeight && a.godRaysDecay == b.godRaysDecay &&
-		   a.godRaysExposure == b.godRaysExposure &&
+	return a.qualityPreset == b.qualityPreset && a.shadowMapSize == b.shadowMapSize &&
+		   a.fxaaEnabled == b.fxaaEnabled && a.bloomEnabled == b.bloomEnabled &&
+		   a.bloomThreshold == b.bloomThreshold && a.bloomIntensity == b.bloomIntensity &&
+		   a.bloomBlurIterations == b.bloomBlurIterations && a.ssaoEnabled == b.ssaoEnabled &&
+		   a.ssaoRadius == b.ssaoRadius && a.ssaoIntensity == b.ssaoIntensity &&
+		   a.ssaoDirections == b.ssaoDirections && a.ssaoSteps == b.ssaoSteps &&
+		   a.ssaoDebugView == b.ssaoDebugView && a.godRaysEnabled == b.godRaysEnabled &&
+		   a.godRaysDensity == b.godRaysDensity && a.godRaysWeight == b.godRaysWeight &&
+		   a.godRaysDecay == b.godRaysDecay && a.godRaysExposure == b.godRaysExposure &&
 		   a.godRaysDynamicBoostEnabled == b.godRaysDynamicBoostEnabled &&
 		   a.godRaysBoostPreview == b.godRaysBoostPreview &&
 		   a.godRaysDramaticBoost == b.godRaysDramaticBoost &&
@@ -82,16 +82,18 @@ int main()
 			PostProcessSettings applied = junk;
 			applied.applyPreset(preset);
 			const PostProcessSettings canonical = PostProcessSettings::presetValues(preset);
-			if (!sameSettingsExceptPresetTag(applied, canonical))
+			if (!sameCanonicalSettings(applied, canonical))
 				ok = fail("applyPreset output must equal presetValues for every field (issue #185)");
 			if (applied.qualityPreset != preset)
 				ok = fail("applyPreset must stamp qualityPreset");
+			if (canonical.qualityPreset != preset)
+				ok = fail("presetValues must stamp qualityPreset (canonical object is complete)");
 		}
 		// Fixture sanity: the junk writes must actually perturb fields
 		// matchesPreset compares, or the equality above proves nothing.
 		PostProcessSettings dirtied{};
 		dirtyPresetFields(dirtied);
-		if (sameSettingsExceptPresetTag(dirtied, PostProcessSettings{}))
+		if (sameCanonicalSettings(dirtied, PostProcessSettings{}))
 			ok = fail("dirtyPresetFields fixture must perturb at least one preset-controlled field");
 	}
 
@@ -237,11 +239,9 @@ int main()
 
 	// --- resetGraphicsPost: Post category only, everything else preserved ---
 	{
-		// Base pack High; junk out-of-category state, dirty every post group.
-		// The tag models real UI state, where the last applyPreset set it
-		// (presetValues leaves the constructor default until it stamps tags).
+		// Base pack High (presetValues stamps the tag); junk out-of-category
+		// state, dirty every post group.
 		PostProcessSettings pp = PostProcessSettings::presetValues(GraphicsQualityPreset::High);
-		pp.qualityPreset = GraphicsQualityPreset::High;
 		pp.shadowMapSize = 4096;
 		pp.ssaoDebugView = 3;
 		pp.underwater = true;

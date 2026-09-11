@@ -256,6 +256,7 @@ struct PostProcessSettings
 	void applyPreset(GraphicsQualityPreset preset);
 	/// Canonical settings produced by `preset` applied to fresh defaults
 	/// (issue #185): source of truth for Custom-state detection and resets.
+	/// A canonical object is complete — values AND the qualityPreset tag.
 	[[nodiscard]] static PostProcessSettings presetValues(GraphicsQualityPreset preset);
 	/// True when every preset-controlled field of `current` equals the canonical
 	/// pack values (issue #185 Custom detection). Deliberately ignores
@@ -395,7 +396,7 @@ inline void applyPresetBody(PostProcessSettings &pp, GraphicsQualityPreset prese
 inline PostProcessSettings PostProcessSettings::presetValues(GraphicsQualityPreset preset)
 {
 	PostProcessSettings pp{};
-	applyPresetBody(pp, preset);
+	pp.applyPreset(preset);
 	return pp;
 }
 

@@ -142,7 +142,12 @@ void drawRenderDebug(UiState &s, GameUIFrame &frame)
 	// Pipeline summary: what is active and what it costs.
 	ImGui::SeparatorText("Pipeline");
 	const char *presetNames[] = {"Low", "Medium", "High", "Cinematic"};
-	ImGui::Text("Quality: %s   |   shadow map %u (active %u)",
+	// qualityPreset still drives runtime tiers (water SSR budget, caustics)
+	// even after the post knobs drift — so a Custom state names the BASE
+	// pack instead of claiming the values are the pack's (issue #185).
+	const bool presetCustom = !PostProcessSettings::matchesPreset(pp, pp.qualityPreset);
+	ImGui::Text("%s: %s   |   shadow map %u (active %u)",
+				presetCustom ? "Base quality pack" : "Quality",
 				presetNames[int(pp.qualityPreset)], uint32_t(pp.shadowMapSize),
 				frame.worldRenderer->activeShadowMapSize());
 	ImGui::Text("Bloom %s  |  FXAA %s  |  SSAO %s  |  God rays %s",
