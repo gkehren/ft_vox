@@ -21,16 +21,12 @@ namespace debugui
 
 // --- Health aggregation (thresholds rooted in engine constants) ---
 
-void DebugHealth::update(const UiState &state, float dt)
+void DebugHealth::updateStreaming(const UiState &state, float dt)
 {
-	const double now = state.memory.sampledAt;
 	const auto &s = state.streaming;
-	const auto &live = state.memory.live;
 
 	// Chunk-pool back-pressure: the pool had to refuse an acquire recently.
-	poolRejects.update((now - state.lastPoolRejectIncrease) < 2.0, dt);
-	// Staging ring could not fit a copy within the last two seconds.
-	stagingFailures.update((now - state.lastStagingFailureAt) < 2.0, dt);
+	poolRejects.update((state.lastTelemetrySample - state.lastPoolRejectIncrease) < 2.0, dt);
 	// Persistent job backlogs. 64 sections ~= a full chunk: a healthy
 	// pipeline (360 meshes/s, 96 light caches/s default) drains that in a
 	// fraction of the 3 s enter window, so only real starvation trips.
@@ -39,6 +35,18 @@ void DebugHealth::update(const UiState &state, float dt)
 	// Uploads drain every frame under normal budgets; a non-empty backlog
 	// persisting 5 s means the copy path is staging- or budget-starved.
 	uploadBacklog.update(s.uploadBacklog > 0, dt);
+}
+
+void DebugHealth::update(const UiState &state, float dt)
+{
+	updateStreaming(state, dt);
+
+	const auto &live = state.memory.live;
+
+	// Staging ring could not fit a copy within the last two seconds; the
+	// failure timestamp comes from the memory-domain sample (issue #186:
+	// not advanced by the streaming-only health path).
+	stagingFailures.update((state.memory.sampledAt - state.lastStagingFailureAt) < 2.0, dt);
 	// Retired GPU resources complete within frames-in-flight; 64 MiB held
 	// for 3 s means the retire queue is wedged or churning.
 	retiredBacklog.update(live.current[telemetry::RetiredBytes] > (64ull << 20), dt);
@@ -343,8 +351,11 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 	if (needMemory)
 		sampleMemoryDomain(state, frame, nowSeconds);
 
-	// Frame-time histories are Overview consumers; the health monitors read
-	// both domains, so they only run when both were freshly sampled.
+	// Frame-time histories are Overview consumers; the full health set reads
+	// both domains, so it only runs when both were freshly sampled. With
+	// only the primary Streaming panel open, the streaming-sourced monitors
+	// still advance so the panel can show sustained warnings (issue #186);
+	// memory-derived monitors freeze instead of advancing on stale data.
 	if (state.panels.overview)
 	{
 		state.cpuMs.push(GetProfiler().lastFrameMs());
@@ -360,6 +371,10 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 			state.gpuMs.push(0.f);
 		}
 		state.health.update(state, dt);
+	}
+	else if (state.panels.streaming)
+	{
+		state.health.updateStreaming(state, dt);
 	}
 }
 

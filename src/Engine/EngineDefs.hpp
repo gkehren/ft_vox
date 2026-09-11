@@ -131,6 +131,79 @@ struct RenderSettings
 	float maxStreamMs{6.0f};
 };
 
+/// Streaming tuning presets (issue #186). Values are documented and
+/// reproducible: Balanced is exactly the engine-default streaming
+/// configuration (RenderSettings member initializers); Conservative halves
+/// the view radius/area pressure and tightens the CPU budget; Aggressive
+/// pushes the view to the UI slider ceiling (640) and relaxes it.
+enum class StreamingQualityPreset
+{
+	Conservative,
+	Balanced,
+	Aggressive
+};
+
+/// Canonical streaming settings for one preset. Exactly the fields a preset
+/// owns; everything else in RenderSettings is untouched.
+struct StreamingPresetValues
+{
+	int maxRenderDistance;   // blocks
+	int minRenderDistance;   // blocks (full-quality near range)
+	float streamFrontBias;   // 0..kSafeMaxStreamFrontBias
+	int loadPerSec;
+	int genPerSec;
+	int meshPerSec;
+	int lightCachePerSec;
+	int uploadPerSec;
+	float maxStreamMs;       // CPU streaming budget per frame
+};
+
+/// Canonical values for a preset. Balanced must stay identical to the
+/// RenderSettings default member initializers; update both together.
+inline StreamingPresetValues streamingPresetValues(StreamingQualityPreset preset)
+{
+	switch (preset)
+	{
+	case StreamingQualityPreset::Conservative:
+		return {256, 128, 0.15f, 320, 240, 240, 64, 320, 4.0f};
+	case StreamingQualityPreset::Aggressive:
+		return {640, 320, 0.45f, 960, 720, 480, 128, 720, 10.0f};
+	case StreamingQualityPreset::Balanced:
+	default:
+		return {512, 192, 0.30f, 640, 480, 360, 96, 520, 6.0f};
+	}
+}
+
+/// Stamp a preset onto the streaming settings. Writes exactly the nine
+/// preset-owned fields; no other RenderSettings field is touched.
+inline void applyStreamingPreset(RenderSettings &rs, StreamingQualityPreset preset)
+{
+	const StreamingPresetValues v = streamingPresetValues(preset);
+	rs.maxRenderDistance = v.maxRenderDistance;
+	rs.minRenderDistance = v.minRenderDistance;
+	rs.streamFrontBias = v.streamFrontBias;
+	rs.loadPerSec = v.loadPerSec;
+	rs.genPerSec = v.genPerSec;
+	rs.meshPerSec = v.meshPerSec;
+	rs.lightCachePerSec = v.lightCachePerSec;
+	rs.uploadPerSec = v.uploadPerSec;
+	rs.maxStreamMs = v.maxStreamMs;
+}
+
+/// True when the streaming settings equal the canonical preset values.
+/// Exact == on ints/floats is correct for the same reason as the graphics
+/// preset Custom detection: canonical values come from the very literals
+/// above, so any hand-edited field must diverge.
+inline bool matchesStreamingPreset(const RenderSettings &rs, StreamingQualityPreset preset)
+{
+	const StreamingPresetValues v = streamingPresetValues(preset);
+	return rs.maxRenderDistance == v.maxRenderDistance && rs.minRenderDistance == v.minRenderDistance &&
+		   rs.streamFrontBias == v.streamFrontBias && rs.loadPerSec == v.loadPerSec &&
+		   rs.genPerSec == v.genPerSec && rs.meshPerSec == v.meshPerSec &&
+		   rs.lightCachePerSec == v.lightCachePerSec && rs.uploadPerSec == v.uploadPerSec &&
+		   rs.maxStreamMs == v.maxStreamMs;
+}
+
 /// Legacy flat timings filled from the hierarchical Profiler each frame.
 /// Prefer GetProfiler() / F7 panel for new UI. Field meanings (main-thread ms):
 /// frustumCulling = Visibility, chunkGeneration = GenDispatch,

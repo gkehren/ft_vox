@@ -1,3 +1,10 @@
+// ImGuiFileDialog (reached through GameUI.hpp) defines
+// IMGUI_DEFINE_MATH_OPERATORS after imgui.h has already been included,
+// which makes a later imgui_internal.h include fail its guard. Defining it
+// here first lets imgui.h implement the operators and satisfies both.
+#ifndef IMGUI_DEFINE_MATH_OPERATORS
+#define IMGUI_DEFINE_MATH_OPERATORS
+#endif
 #include "Engine/GameUI.hpp"
 
 #include <Engine/BuildInfo.hpp>
@@ -10,6 +17,7 @@
 #include <ImGuiFileDialog.h>
 #include <imgui/imgui.h>
 #include <imgui/imgui_impl_vulkan.h>
+#include <imgui/imgui_internal.h>
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -96,6 +104,7 @@ void GameUI::invalidateBiomeMap()
 	// but is marked inactive so the UI will not display stale world terrain.
 	// It will be updated in-place when the next valid map completes.
 	m_mapHasTexture = false;
+	m_mapGrid = {};
 	m_pendingUpload = {};
 }
 
@@ -415,79 +424,185 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 void GameUI::drawWorld(GameUIFrame &frame)
 {
 	const float scale = ui::effectiveScale(frame.uiScale);
-	ImGui::SetNextWindowSize(ImVec2(ui::scaled(320.f, scale), ui::scaled(520.f, scale)), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(380.f, scale), ui::scaled(560.f, scale)),
+							 ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin(ui::windows::kWorld, &m_debug.panels.world))
 	{
 		ImGui::End();
 		return;
 	}
 
-	ImGui::Text("Seed: %d", frame.seed);
-	ImGui::TextWrapped("Procedural infinite terrain (FastNoise2). "
-					   "Chunks stream around the player; no world save yet.");
-
-	ImGui::SeparatorText("Biome map");
+	// Drive the async biome-map pipeline first so the pending indicator and
+	// overlays reflect this frame's state. The tick only consumes accepted
+	// results and (re)dispatches superseded requests — no synchronous
+	// generation or GPU work here (issue #186 §12).
 	tickBiomeMap(frame);
 
-	float prevZoom = m_mapZoom;
-	if (ImGui::SliderFloat("Zoom", &m_mapZoom, 0.1f, 8.f, "%.2f"))
-	{
-		if (m_mapZoom != prevZoom)
-			supersedeBiomeMapRequest();
-	}
+	const glm::vec2 playerXZ(frame.player.position.x, frame.player.position.z);
+
+	// World identity header (issue #186 §10): high-level facts only. The
+	// persistence/save-status slot is deliberately left to #180 — until then
+	// the wording stays neutral instead of advertising a product limitation.
+	ui::metric("Seed", "%d", frame.seed);
+	ui::metric("Player", "%.0f, %.0f", playerXZ.x, playerXZ.y);
+	ImGui::TextDisabled("Chunk %d, %d", frame.player.chunkX, frame.player.chunkZ);
+
+	ImGui::Spacing();
 	bool prevFollow = m_mapFollow;
 	ImGui::Checkbox("Follow player", &m_mapFollow);
 	if (m_mapFollow && !prevFollow)
 		supersedeBiomeMapRequest();
-
-	if (frame.camera && ImGui::Button("Center on player"))
+	ImGui::SameLine();
+	if (ImGui::Button("Center"))
 	{
-		const auto p = frame.camera->getPosition();
-		m_mapCenter = {p.x, p.z};
+		m_mapCenter = playerXZ;
 		supersedeBiomeMapRequest();
 	}
+	ImGui::SameLine();
+	ImGui::Checkbox("View dist", &m_mapShowViewDistance);
+	ImGui::SameLine();
+	ImGui::Checkbox("Chunk", &m_mapShowChunkMarker);
 
-	if (m_mapHasTexture && m_mapDesc != VK_NULL_HANDLE)
+	// The biome map is the dominant surface (issue #186 §7): fill the
+	// available width, keep the square aspect, and reserve the same height
+	// while the first map generates so the layout does not jump.
+	const float mapSizePx = std::max(ImGui::GetContentRegionAvail().x, ui::scaled(160.f, scale));
+	const bool hasTexture = m_mapHasTexture && m_mapDesc != VK_NULL_HANDLE;
+	ImVec2 mapMin{0.f, 0.f}, mapMax{0.f, 0.f};
+	bool mapDrawn = false;
+	if (hasTexture)
 	{
-		const float display = ui::scaled(256.f, scale);
 		ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_mapDesc)),
-					 ImVec2(display, display));
+					 ImVec2(mapSizePx, mapSizePx));
+		mapMin = ImGui::GetItemRectMin();
+		mapMax = ImGui::GetItemRectMax();
+		mapDrawn = true;
 	}
 	else
 	{
-		ImGui::TextDisabled("Generating biome map…");
+		ImGui::Dummy(ImVec2(mapSizePx, mapSizePx));
+		const ImVec2 rMin = ImGui::GetItemRectMin();
+		const ImVec2 rMax = ImGui::GetItemRectMax();
+		const char *label = "Generating biome map…";
+		const ImVec2 ts = ImGui::CalcTextSize(label);
+		ImGui::GetWindowDrawList()->AddText(
+			ImVec2((rMin.x + rMax.x - ts.x) * 0.5f, (rMin.y + rMax.y - ts.y) * 0.5f),
+			ImGui::GetColorU32(ImGuiCol_TextDisabled), label);
 	}
-	ImGui::Text("Center: (%.0f, %.0f)", m_mapCenter.x, m_mapCenter.y);
 
-	ImGui::SeparatorText("Legend");
-	if (ImGui::BeginChild("BiomeLegend", ImVec2(0.f, ui::scaled(170.f, scale)),
-						  ImGuiChildFlags_Borders))
+	// Mouse-wheel zoom while hovering the map (issue #186 §9): exponential
+	// steps feel equal per notch; the wheel key is claimed so hovering the
+	// map does not scroll the panel. Supersede semantics are identical to
+	// the slider: every change bumps the request id and cancels the old job.
+	if (mapDrawn && ImGui::IsItemHovered())
 	{
-		const int cols = 2;
-		if (ImGui::BeginTable("legend", cols,
-							  ImGuiTableFlags_SizingStretchSame))
+		const float wheel = ImGui::GetIO().MouseWheel;
+		if (wheel != 0.f)
 		{
-			for (int i = 0; i < BIOME_COUNT; ++i)
-			{
-				ImGui::TableNextColumn();
-				const ImVec4 col(kBiomeColors[i][0] / 255.f,
-								kBiomeColors[i][1] / 255.f,
-								kBiomeColors[i][2] / 255.f, 1.f);
-				ImGui::ColorButton(biomeTypeString[i], col,
-								   ImGuiColorEditFlags_NoTooltip,
-								   ImVec2(ui::scaled(12.f, scale), ui::scaled(12.f, scale)));
-				ImGui::SameLine();
-				ImGui::TextUnformatted(biomeTypeString[i]);
-			}
-			ImGui::EndTable();
+			const float prev = m_mapZoom;
+			m_mapZoom = std::clamp(m_mapZoom * std::pow(1.15f, wheel), 0.1f, 8.f);
+			if (m_mapZoom != prev)
+				supersedeBiomeMapRequest();
+			ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
 		}
 	}
-	ImGui::EndChild();
 
-	ImGui::SeparatorText("Diagnostics");
-	ImGui::TextWrapped(
-		"CLI: test_terrain --world-stats / --profile. "
-		"Runtime: ft_vox --seed N --benchmark seconds.");
+	if (mapDrawn && m_mapGrid.valid())
+	{
+		// Cheap draw-list overlays (issue #186 §8), mapped through the grid
+		// of the PUBLISHED texture so markers stay glued to the shown pixels
+		// even while a newer request with different zoom/center is in flight.
+		ImDrawList *draw = ImGui::GetWindowDrawList();
+		draw->PushClipRect(mapMin, mapMax, true);
+		const float pxPerMapPx = (mapMax.x - mapMin.x) / static_cast<float>(m_mapGrid.width);
+		const auto toScreen = [&](glm::vec2 world) {
+			const glm::vec2 pixel = biomeMapContinuousPixel(m_mapGrid, world);
+			return ImVec2(mapMin.x + pixel.x * pxPerMapPx, mapMin.y + pixel.y * pxPerMapPx);
+		};
+		const ImVec2 playerPx = toScreen(playerXZ);
+
+		// View-distance circle: reflects the configured radius at the shown
+		// scale. Labelled as view distance — front bias/unload hysteresis
+		// make residency asymmetric, so this is not "loaded chunks".
+		if (m_mapShowViewDistance && frame.render)
+		{
+			const float radiusPx =
+				static_cast<float>(frame.render->maxRenderDistance) / m_mapGrid.step * pxPerMapPx;
+			draw->AddCircle(playerPx, radiusPx, IM_COL32(255, 255, 255, 90), 0, 1.4f);
+		}
+
+		// Current-chunk footprint marker (16 blocks per side).
+		if (m_mapShowChunkMarker)
+		{
+			const glm::vec2 chunkWorld(static_cast<float>(frame.player.chunkX) * CHUNK_SIZE,
+									   static_cast<float>(frame.player.chunkZ) * CHUNK_SIZE);
+			const ImVec2 chunkMin = toScreen(chunkWorld);
+			const float chunkPx =
+				static_cast<float>(CHUNK_SIZE) / m_mapGrid.step * pxPerMapPx;
+			draw->AddRect(chunkMin, ImVec2(chunkMin.x + chunkPx, chunkMin.y + chunkPx),
+						  IM_COL32(255, 230, 120, 110), 0.f, 0.f, 1.2f);
+		}
+
+		// Live player marker (the baked dot from the last accepted result
+		// can trail the player between refreshes).
+		const float markerR = ui::scaled(4.f, scale);
+		draw->AddCircleFilled(playerPx, markerR, IM_COL32(255, 255, 255, 230));
+		draw->AddCircle(playerPx, markerR + 1.5f, IM_COL32(0, 0, 0, 200), 0, 2.0f);
+
+		// Map-center marker while navigation is detached from the player.
+		if (!m_mapFollow)
+		{
+			const ImVec2 centerPx = toScreen(m_mapCenter);
+			const float arm = ui::scaled(5.f, scale);
+			draw->AddLine(ImVec2(centerPx.x - arm, centerPx.y),
+						  ImVec2(centerPx.x + arm, centerPx.y), IM_COL32(255, 255, 255, 140), 1.2f);
+			draw->AddLine(ImVec2(centerPx.x, centerPx.y - arm),
+						  ImVec2(centerPx.x, centerPx.y + arm), IM_COL32(255, 255, 255, 140), 1.2f);
+		}
+		draw->PopClipRect();
+
+		if (m_mapShowViewDistance && frame.render && ImGui::IsItemHovered())
+			ImGui::SetTooltip("View distance: %d blocks", frame.render->maxRenderDistance);
+	}
+
+	// Pending state (issue #186 §9): visible while a job or upload is in
+	// flight; the previous map stays on screen meanwhile.
+	if (m_mapJob.isRunning() || hasPendingBiomeMapUpload())
+		ImGui::TextDisabled("Updating map…");
+
+	float prevZoom = m_mapZoom;
+	if (ImGui::SliderFloat("Zoom", &m_mapZoom, 0.1f, 8.f, "%.2f×"))
+	{
+		if (m_mapZoom != prevZoom)
+			supersedeBiomeMapRequest();
+	}
+
+	if (ImGui::CollapsingHeader("Legend"))
+	{
+		if (ImGui::BeginChild("BiomeLegend", ImVec2(0.f, ui::scaled(170.f, scale)),
+							  ImGuiChildFlags_Borders))
+		{
+			const int cols = 2;
+			if (ImGui::BeginTable("legend", cols,
+								  ImGuiTableFlags_SizingStretchSame))
+			{
+				for (int i = 0; i < BIOME_COUNT; ++i)
+				{
+					ImGui::TableNextColumn();
+					const ImVec4 col(kBiomeColors[i][0] / 255.f,
+									 kBiomeColors[i][1] / 255.f,
+									 kBiomeColors[i][2] / 255.f, 1.f);
+					ImGui::ColorButton(biomeTypeString[i], col,
+									   ImGuiColorEditFlags_NoTooltip,
+									   ImVec2(ui::scaled(12.f, scale), ui::scaled(12.f, scale)));
+					ImGui::SameLine();
+					ImGui::TextUnformatted(biomeTypeString[i]);
+				}
+				ImGui::EndTable();
+			}
+		}
+		ImGui::EndChild();
+	}
 
 	ImGui::End();
 }
@@ -712,9 +827,6 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 
 void GameUI::tickBiomeMap(GameUIFrame &frame)
 {
-	if (!frame.camera)
-		return;
-
 	// Invalidate if active world generation or seed changed
 	if (frame.worldGenerationId != m_currentWorldGenId || frame.seed != m_currentSeed)
 	{
@@ -724,8 +836,10 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 	}
 
 	const double now = SDL_GetTicks() / 1000.0;
-	const glm::vec3 cam = frame.camera->getPosition();
-	const glm::vec2 playerXZ(cam.x, cam.z);
+	// Player position comes from the read-only frame snapshot (issue #186
+	// architecture note): the map pipeline reads it like any other UI
+	// consumer instead of reaching into the Camera.
+	const glm::vec2 playerXZ(frame.player.position.x, frame.player.position.z);
 
 	// Detect player movement BEFORE consuming a finished result
 	const bool playerMoved = shouldSupersedeBiomeMap(playerXZ, m_mapLastPlayer, m_mapFollow);
@@ -746,6 +860,11 @@ void GameUI::tickBiomeMap(GameUIFrame &frame)
 			GetProfiler().addWorkerSample("BiomeMap", static_cast<float>(res.elapsedMs), m_mapCaptureEpoch);
 			paintBiomeMapPlayerDot(res.rgba, res.grid, playerXZ);
 			m_mapCenter = res.center;
+			// Keep the published grid: World-panel overlays map world ->
+			// screen through it, so markers stay consistent with the pixels
+			// even while a newer request (different zoom/center) is in
+			// flight (issue #186 §8).
+			m_mapGrid = res.grid;
 			ensureBiomeTexture(res.size);
 			m_pendingUpload = BiomeMapUpload{
 				.rgba = std::move(res.rgba),

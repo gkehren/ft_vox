@@ -145,6 +145,18 @@ inline bool shouldSupersedeBiomeMap(glm::vec2 player,
 	return glm::length(player - lastPlayer) > 8.0f;
 }
 
+/// Continuous (float) map-pixel coordinates for a world position on a
+/// published biome grid — the pixel-center convention of BiomeRegionGrid
+/// without the display rounding: row 0 is the min-Z edge, `center` falls at
+/// pixel size*0.5 (even sizes). Pure so tests and the World-panel draw-list
+/// overlays share one mapping (issue #186); callers map this into screen
+/// space with the drawn image rect.
+inline glm::vec2 biomeMapContinuousPixel(const BiomeRegionGrid &grid, glm::vec2 world)
+{
+	return {(world.x - grid.center.x) / grid.step + static_cast<float>(grid.width) * 0.5f,
+			(world.y - grid.center.y) / grid.step + static_cast<float>(grid.height) * 0.5f};
+}
+
 /// Paint the player indicator dot (black outline with white center) into the
 /// RGBA buffer. The dot pixel is grid.pixelForWorld(playerXZ) (nearest display
 /// pixel); when it falls outside the grid nothing is painted.

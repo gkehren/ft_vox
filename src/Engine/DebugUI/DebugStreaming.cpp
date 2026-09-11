@@ -1,25 +1,68 @@
-// Streaming panel (issue #179): distance/budget settings plus live
-// queue-depth, pool and upload telemetry with bounded histories. Console
-// values come from the StreamingDebugSnapshot; the settings sliders mutate
-// RenderSettings directly (the engine's settings API).
+// Streaming panel (issues #179/#186): configure and quickly assess world
+// streaming — Distance / Pipeline (first-class CPU budget, presets with
+// truthful Custom semantics, advanced stage rates) / compact read-only Live
+// health. Console values come from the StreamingDebugSnapshot; the settings
+// sliders mutate RenderSettings directly (the engine's settings API).
+// Deep pool/timing/device diagnostics deliberately live elsewhere in the
+// developer console (Overview, Performance, Memory, Help > About) instead
+// of being duplicated here.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
 #include <Engine/UiScale.hpp>
+#include <Engine/UiTheme.hpp>
 #include <Engine/GameUI.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
-#include <Engine/Profiler.hpp>
 
 #include <imgui/imgui.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace debugui
 {
+namespace
+{
+// Queue-bar display caps (issue #186 §4): a full bar is 2x the sustained
+// backlog threshold used by DebugHealth (64 sections ~= one chunk), so the
+// scale is meaningful instead of an arbitrary percentage. Upload counts
+// chunks rather than sections; its cap is a display reference only.
+constexpr float kQueueBarCap = 128.f;
+constexpr float kUploadBarCap = 64.f;
+
+/// Horizontal queue bar with a fixed, labelled display cap. The bar turns
+/// warn-tinted only while the corresponding SUSTAINED health monitor is
+/// active (issue #186 §6): ordinary one-frame bursts while moving fast stay
+/// neutral — a healthy system naturally creates short queues.
+void queueBar(const char *label, size_t pending, float displayCap, bool sustainedWarn, float scale)
+{
+	ImGui::TextUnformatted(label);
+	ImGui::SameLine(ui::scaled(96.f, scale));
+	char overlay[32];
+	std::snprintf(overlay, sizeof(overlay), "%zu", pending);
+	const float fraction = std::clamp(static_cast<float>(pending) / displayCap, 0.f, 1.f);
+	if (sustainedWarn)
+		ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ui::statusColor(ui::StatusKind::Warn));
+	ImGui::ProgressBar(fraction, ImVec2(-1.f, 0.f), overlay);
+	if (sustainedWarn)
+		ImGui::PopStyleColor();
+}
+
+/// One sustained-warning row: warn-tinted bullet + details on hover. The
+/// hints point at the developer-console surfaces that own the deep data.
+void warningRow(const char *label, const char *hint)
+{
+	ImGui::TextColored(ui::statusColor(ui::StatusKind::Warn), "•  %s", label);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("%s", hint);
+}
+} // namespace
 
 void drawStreaming(UiState &s, GameUIFrame &frame)
 {
 	const float scale = ui::effectiveScale(frame.uiScale);
-	ImGui::SetNextWindowSize(ImVec2(ui::scaled(420.f, scale), ui::scaled(560.f, scale)), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(420.f, scale), ui::scaled(560.f, scale)),
+							 ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin(ui::windows::kStreaming, &s.panels.streaming))
 	{
 		ImGui::End();
@@ -34,62 +77,103 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 	}
 
 	auto &rs = *frame.render;
+
+	// --- Distance (issue #186 §1): how far / how aggressively to stream. ---
 	ImGui::SeparatorText("Distance");
-	const int prevMaxRd = rs.maxRenderDistance;
-	ImGui::SliderInt("View distance (blocks)", &rs.maxRenderDistance, 64, 640);
-	if (rs.minRenderDistance > rs.maxRenderDistance)
-		rs.minRenderDistance = rs.maxRenderDistance;
-	ImGui::SliderInt("Full-mesh near range", &rs.minRenderDistance, 32, rs.maxRenderDistance);
-	ImGui::SliderFloat("Front load bias", &rs.streamFrontBias, 0.f, kSafeMaxStreamFrontBias, "%.2f");
-	ImGui::TextDisabled("Ahead reach ~ ×%.2f, behind ~ ×%.2f",
+	ImGui::SliderInt("View distance", &rs.maxRenderDistance, 64, 640, "%d blocks");
+	rs.minRenderDistance = clampedNearRenderDistance(rs.minRenderDistance, rs.maxRenderDistance);
+	ImGui::SliderInt("Full-quality distance", &rs.minRenderDistance, 32, rs.maxRenderDistance,
+					 "%d blocks");
+	ImGui::SliderFloat("Front bias", &rs.streamFrontBias, 0.f, kSafeMaxStreamFrontBias, "%.2f×");
+	ImGui::TextDisabled("Streams farther ahead than behind (ahead ~×%.2f, behind ~×%.2f)",
 						1.0f / std::sqrt(1.0f - normalizedStreamFrontBias(rs.streamFrontBias)),
 						1.0f / std::sqrt(1.0f + normalizedStreamFrontBias(rs.streamFrontBias)));
-	ImGui::TextDisabled("Unload at ~%.2f× view distance; bias capped so ahead reach stays inside it",
-						kChunkUnloadDistanceFactor);
 
+	// The consequence of raising the view distance, made explicit (issue
+	// #186 §1). The engine itself grows the pool per frame
+	// (Engine::tickStreaming — a cheap no-op once large enough); the panel
+	// only surfaces the estimate, it does not mutate the pool.
 	const size_t poolNeed = estimateChunkPoolCapacity(rs.maxRenderDistance);
-	if (frame.pool && rs.maxRenderDistance != prevMaxRd)
-		frame.pool->ensureCapacity(poolNeed);
-	ImGui::TextDisabled("Pool need for this view: ~%zu chunks", poolNeed);
+	ImGui::TextDisabled("Estimated resident capacity: ~%s chunks",
+						formatCount(poolNeed).c_str());
 
-	ImGui::SeparatorText("Pipeline budgets (ops / sec)");
-	ImGui::SliderInt("Load/s", &rs.loadPerSec, 10, 1000);
-	ImGui::SliderInt("Gen/s", &rs.genPerSec, 5, 800);
-	ImGui::SliderInt("Mesh/s", &rs.meshPerSec, 5, 600);
-	ImGui::SliderInt("Light cache/s", &rs.lightCachePerSec, 0, 256);
-	ImGui::SliderInt("Upload/s", &rs.uploadPerSec, 5, 800);
-	ImGui::SliderFloat("Stream ms/frame", &rs.maxStreamMs, 0.f, 16.f, "%.1f");
-	// Shadow distance moved to Graphics ▸ Shadows (issue #185).
+	// --- Pipeline (issue #186 §2): the main-thread CPU budget stays
+	// first-class; per-stage rates move to the Advanced disclosure;
+	// optional presets with the same truthful Custom semantics as the
+	// Graphics panel (#185): exact equality against documented, reproducible
+	// values (Balanced == engine defaults). ---
+	ImGui::SeparatorText("Pipeline");
+	ImGui::SliderFloat("CPU streaming budget", &rs.maxStreamMs, 0.f, 16.f, "%.1f ms/frame");
+	ImGui::TextDisabled("Main-thread streaming work cap per frame (0 = unlimited)");
 
-	ImGui::SeparatorText("Live stats");
-	ImGui::Text("Loaded chunks: %zu", s.streaming.loadedChunks);
-	ImGui::Text("Draw list:     %zu", s.streaming.drawCount);
-	ImGui::Text("Queues load/gen/mesh/light: %zu / %zu / %zu / %zu",
-				s.streaming.pendingLoad, s.streaming.pendingGen,
-				s.streaming.pendingMesh, s.streaming.pendingLight);
-	ImGui::Text("Upload backlog: %zu   |   deferred releases: %zu",
-				s.streaming.uploadBacklog, s.streaming.deferredReleases);
-	ImGui::Text("Dispatched: %s mesh   |   %s light-cache jobs",
-				formatCount(s.streaming.meshJobsDispatched).c_str(),
-				formatCount(s.streaming.lightJobsDispatched).c_str());
-	ImGui::TextDisabled("Queue depths (10 Hz): mesh / light");
-	plotHistory("##st_mesh", s.pendingMesh, 0.f, ImVec2(-1.f, ui::scaled(44.f, scale)));
-	plotHistory("##st_light", s.pendingLight, 0.f, ImVec2(-1.f, ui::scaled(44.f, scale)));
-
-	if (frame.pool)
+	ImGui::Spacing();
+	const char *activePreset =
+		matchesStreamingPreset(rs, StreamingQualityPreset::Conservative)   ? "Conservative"
+		: matchesStreamingPreset(rs, StreamingQualityPreset::Balanced)	   ? "Balanced"
+		: matchesStreamingPreset(rs, StreamingQualityPreset::Aggressive)   ? "Aggressive"
+																		   : nullptr;
+	if (ImGui::Button("Conservative"))
+		applyStreamingPreset(rs, StreamingQualityPreset::Conservative);
+	ImGui::SameLine();
+	if (ImGui::Button("Balanced"))
+		applyStreamingPreset(rs, StreamingQualityPreset::Balanced);
+	ImGui::SameLine();
+	if (ImGui::Button("Aggressive"))
+		applyStreamingPreset(rs, StreamingQualityPreset::Aggressive);
+	ImGui::SameLine();
+	if (activePreset)
+		ui::statusBadge(activePreset, ui::StatusKind::Ok);
+	else
 	{
-		ImGui::SeparatorText("Chunk pool");
-		ImGui::Text("Capacity %zu  |  free %zu  |  acquired %zu",
-					s.streaming.poolCapacity, s.streaming.poolFree, s.streaming.poolAcquired);
-		ImGui::Text("Need ~%zu for view %d  |  grows: %zu",
-					poolNeed, s.streaming.viewDistance, s.streaming.poolGrows);
-		if (s.streaming.poolFree == 0)
-			ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f),
-							   "Pool full — load back-pressure active");
-		if (s.streaming.poolRejects > 0)
-			ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f), "Acquire rejects: %zu",
-							   s.streaming.poolRejects);
+		ui::statusBadge("Custom", ui::StatusKind::Info);
+		ImGui::SetItemTooltip("Hand-edited streaming settings; click a preset to restore it.");
 	}
+
+	if (ImGui::CollapsingHeader("Advanced stage rates"))
+	{
+		ImGui::SliderInt("Load /s", &rs.loadPerSec, 10, 1000);
+		ImGui::SliderInt("Generate /s", &rs.genPerSec, 5, 800);
+		ImGui::SliderInt("Mesh /s", &rs.meshPerSec, 5, 600);
+		ImGui::SliderInt("Light cache /s", &rs.lightCachePerSec, 0, 256);
+		ImGui::SliderInt("Upload /s", &rs.uploadPerSec, 5, 800);
+	}
+	// Renderer-specific coverage is owned by Graphics > Shadows since
+	// #185 (shadowDistance): this panel owns residency + scheduling only.
+
+	// --- Live health (issue #186 §4/§6): compact read-only summary from the
+	// 10 Hz console snapshot. Bars have a fixed meaningful scale (2x the
+	// sustained backlog threshold); warn tinting follows the sustained
+	// DebugHealth monitors, never single-frame spikes. Detailed histories
+	// remain in Overview (F8) / Performance (F7). ---
+	ImGui::SeparatorText("Live health");
+	ImGui::Text("Loaded %zu   |   Visible (draw list) %zu",
+				s.streaming.loadedChunks, s.streaming.drawCount);
+	queueBar("Load", s.streaming.pendingLoad, kQueueBarCap, false, scale);
+	queueBar("Generate", s.streaming.pendingGen, kQueueBarCap, false, scale);
+	queueBar("Mesh", s.streaming.pendingMesh, kQueueBarCap, s.health.meshBacklog.active(), scale);
+	queueBar("Light", s.streaming.pendingLight, kQueueBarCap, s.health.lightBacklog.active(), scale);
+	queueBar("Upload", s.streaming.uploadBacklog, kUploadBarCap, s.health.uploadBacklog.active(),
+			 scale);
+
+	ImGui::Spacing();
+	if (s.health.poolRejects.active())
+		warningRow("Pool pressure",
+				   "Chunk acquires were refused recently — the pool is too small for this "
+				   "view distance. Details: Memory (F11) / Overview (F8).");
+	if (s.health.meshBacklog.active())
+		warningRow("Mesh queue backlog",
+				   "The mesh queue stayed deep for several seconds; workers cannot keep up "
+				   "or the budget is too low. Details: Overview (F8) / Performance (F7).");
+	if (s.health.lightBacklog.active())
+		warningRow("Light-cache backlog",
+				   "The light-cache queue stayed deep for several seconds. Details: Overview (F8).");
+	if (s.health.uploadBacklog.active())
+		warningRow("Upload pressure",
+				   "Chunks kept staged meshes awaiting GPU copies for several seconds. "
+				   "Details: Memory (F11).");
+	if (!(s.health.poolRejects.active() || s.health.meshBacklog.active() ||
+		  s.health.lightBacklog.active() || s.health.uploadBacklog.active()))
+		ImGui::TextColored(ui::statusColor(ui::StatusKind::Ok), "Streaming nominal");
 
 	if (frame.camera && ImGui::Button("Inspect chunk under player (F9)"))
 	{
@@ -98,44 +182,6 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 									int(std::floor(p.z / CHUNK_SIZE)));
 		s.inspectHasTarget = true;
 		s.panels.chunkInspector = true;
-	}
-
-	{
-		ImGui::SeparatorText("CPU timings (ms)");
-		Profiler &prof = GetProfiler();
-		if (ImGui::BeginTable("perf", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
-		{
-			ImGui::TableSetupColumn("Stage");
-			ImGui::TableSetupColumn("ms");
-			ImGui::TableHeadersRow();
-			auto row = [](const char *name, float v) {
-				ImGui::TableNextRow();
-				ImGui::TableNextColumn();
-				ImGui::TextUnformatted(name);
-				ImGui::TableNextColumn();
-				ImGui::Text("%.2f", v);
-			};
-			row("Visibility", prof.lastScopeMs("Visibility"));
-			row("Gen dispatch", prof.lastScopeMs("GenDispatch"));
-			row("Mesh dispatch", prof.lastScopeMs("MeshDispatch"));
-			row("Mesh upload", prof.lastScopeMs("MeshUpload"));
-			row("Streaming", prof.lastScopeMs("Streaming"));
-			row("Acquire (fence)", prof.lastScopeMs("Acquire"));
-			row("Record", prof.lastScopeMs("Record"));
-			row("Frame total", prof.lastFrameMs());
-			ImGui::EndTable();
-		}
-		ImGui::TextDisabled("Full hierarchy + graphs: Performance (F7)");
-	}
-
-	if (frame.deviceName)
-	{
-		ImGui::SeparatorText("Device");
-		ImGui::TextWrapped("%s", frame.deviceName);
-		ImGui::Text("Vulkan %u.%u  |  validation %s",
-					VK_VERSION_MAJOR(frame.vkApiVersion),
-					VK_VERSION_MINOR(frame.vkApiVersion),
-					frame.validation ? "on" : "off");
 	}
 
 	ImGui::End();

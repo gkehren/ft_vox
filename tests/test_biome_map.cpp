@@ -27,6 +27,28 @@ static int g_fails = 0;
 		}                                                                      \
 	} while (0)
 
+// World -> continuous map-pixel mapping used by the World-panel draw-list
+// overlays (issue #186): must agree with the grid parity contract and with
+// grid.pixelForWorld after display rounding.
+static void test_biome_map_continuous_pixel()
+{
+	const BiomeRegionGrid grid = makeBiomeRegionGrid(100.f, -40.f, 2.f, 256, 256);
+
+	// Even-size parity: the center samples exactly at pixel size/2.
+	const glm::vec2 centerPx = biomeMapContinuousPixel(grid, glm::vec2(100.f, -40.f));
+	CHECK(centerPx.x == 128.f && centerPx.y == 128.f, "grid center maps to the central pixel");
+
+	// World offset scales by 1/step: +8 blocks at step 2 -> +4 pixels.
+	const glm::vec2 eastPx = biomeMapContinuousPixel(grid, glm::vec2(108.f, -40.f));
+	CHECK(eastPx.x == 132.f && eastPx.y == 128.f, "world offset scales by 1/step");
+
+	// Rounding the continuous pixel reproduces the display-pixel mapping.
+	const glm::vec2 q = biomeMapContinuousPixel(grid, glm::vec2(37.f, 91.f));
+	const glm::ivec2 rounded = grid.pixelForWorld(glm::vec2(37.f, 91.f));
+	CHECK(int(std::lround(q.x)) == rounded.x && int(std::lround(q.y)) == rounded.y,
+		  "continuous pixel rounds to grid.pixelForWorld");
+}
+
 static void test_biome_map_result_validity()
 {
 	const uint64_t reqId = 12;
@@ -862,6 +884,7 @@ int main(int argc, char **argv)
 	test_global_priority();
 	test_parallel_maps();
 	std::cout << "[test_biome_map] Running tests...\n";
+	test_biome_map_continuous_pixel();
 	test_biome_map_result_validity();
 	test_deterministic_stale_generation_rejection();
 	test_deterministic_superseded_request_rejection();

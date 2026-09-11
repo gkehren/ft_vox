@@ -1,6 +1,7 @@
 // Phase D streaming helpers + terrain occupancy — drives shipped free functions.
 #include <Chunk/StreamHelpers.hpp>
 #include <Chunk/TerrainGenerator.hpp>
+#include <Engine/EngineDefs.hpp>
 
 #include <cassert>
 #include <cmath>
@@ -640,6 +641,121 @@ static void testMinimalRenderDistanceFootprints()
 	}
 }
 
+static bool streamingPresetValuesEqual(const StreamingPresetValues &a, const StreamingPresetValues &b)
+{
+	return a.maxRenderDistance == b.maxRenderDistance && a.minRenderDistance == b.minRenderDistance &&
+		   a.streamFrontBias == b.streamFrontBias && a.loadPerSec == b.loadPerSec &&
+		   a.genPerSec == b.genPerSec && a.meshPerSec == b.meshPerSec &&
+		   a.lightCachePerSec == b.lightCachePerSec && a.uploadPerSec == b.uploadPerSec &&
+		   a.maxStreamMs == b.maxStreamMs;
+}
+
+static void testStreamingPresets()
+{
+	// Load-bearing invariant (issue #186): Balanced is EXACTLY the
+	// RenderSettings default member initializers, field by field. If a
+	// RenderSettings default changes, the Balanced literals must follow.
+	{
+		const RenderSettings def{};
+		const StreamingPresetValues b = streamingPresetValues(StreamingQualityPreset::Balanced);
+		CHECK(def.maxRenderDistance == b.maxRenderDistance, "Balanced maxRenderDistance == default");
+		CHECK(def.minRenderDistance == b.minRenderDistance, "Balanced minRenderDistance == default");
+		CHECK(def.streamFrontBias == b.streamFrontBias, "Balanced streamFrontBias == default");
+		CHECK(def.loadPerSec == b.loadPerSec, "Balanced loadPerSec == default");
+		CHECK(def.genPerSec == b.genPerSec, "Balanced genPerSec == default");
+		CHECK(def.meshPerSec == b.meshPerSec, "Balanced meshPerSec == default");
+		CHECK(def.lightCachePerSec == b.lightCachePerSec, "Balanced lightCachePerSec == default");
+		CHECK(def.uploadPerSec == b.uploadPerSec, "Balanced uploadPerSec == default");
+		CHECK(def.maxStreamMs == b.maxStreamMs, "Balanced maxStreamMs == default");
+	}
+
+	// The three presets must be pairwise distinct.
+	const StreamingPresetValues con = streamingPresetValues(StreamingQualityPreset::Conservative);
+	const StreamingPresetValues bal = streamingPresetValues(StreamingQualityPreset::Balanced);
+	const StreamingPresetValues agg = streamingPresetValues(StreamingQualityPreset::Aggressive);
+	CHECK(!streamingPresetValuesEqual(con, bal), "Conservative != Balanced");
+	CHECK(!streamingPresetValuesEqual(con, agg), "Conservative != Aggressive");
+	CHECK(!streamingPresetValuesEqual(bal, agg), "Balanced != Aggressive");
+
+	const StreamingQualityPreset presets[] = {
+		StreamingQualityPreset::Conservative,
+		StreamingQualityPreset::Balanced,
+		StreamingQualityPreset::Aggressive,
+	};
+
+	// Apply + truthful Custom detection: after apply the preset matches; a
+	// single-field hand edit must break the match (exact ==, no epsilon).
+	for (const StreamingQualityPreset p : presets)
+	{
+		RenderSettings rs{};
+		applyStreamingPreset(rs, p);
+		CHECK(matchesStreamingPreset(rs, p), "freshly applied preset matches itself");
+
+		rs.maxRenderDistance += 1;
+		CHECK(!matchesStreamingPreset(rs, p), "hand-edited maxRenderDistance trips Custom");
+		applyStreamingPreset(rs, p);
+
+		rs.minRenderDistance += 1;
+		CHECK(!matchesStreamingPreset(rs, p), "hand-edited minRenderDistance trips Custom");
+		applyStreamingPreset(rs, p);
+
+		rs.streamFrontBias += 0.01f;
+		CHECK(!matchesStreamingPreset(rs, p), "hand-edited streamFrontBias trips Custom");
+		applyStreamingPreset(rs, p);
+
+		rs.loadPerSec += 1;
+		CHECK(!matchesStreamingPreset(rs, p), "hand-edited loadPerSec trips Custom");
+		applyStreamingPreset(rs, p);
+
+		rs.genPerSec += 1;
+		CHECK(!matchesStreamingPreset(rs, p), "hand-edited genPerSec trips Custom");
+		applyStreamingPreset(rs, p);
+
+		rs.meshPerSec += 1;
+		CHECK(!matchesStreamingPreset(rs, p), "hand-edited meshPerSec trips Custom");
+		applyStreamingPreset(rs, p);
+
+		rs.lightCachePerSec += 1;
+		CHECK(!matchesStreamingPreset(rs, p), "hand-edited lightCachePerSec trips Custom");
+		applyStreamingPreset(rs, p);
+
+		rs.uploadPerSec += 1;
+		CHECK(!matchesStreamingPreset(rs, p), "hand-edited uploadPerSec trips Custom");
+		applyStreamingPreset(rs, p);
+
+		rs.maxStreamMs += 0.01f;
+		CHECK(!matchesStreamingPreset(rs, p), "hand-edited maxStreamMs trips Custom");
+		applyStreamingPreset(rs, p);
+
+		CHECK(matchesStreamingPreset(rs, p), "re-applying restores the exact preset");
+	}
+
+	// Every preset value must sit inside the documented UI slider ranges;
+	// a preset outside its range would be un-representable in the UI.
+	for (const StreamingQualityPreset p : presets)
+	{
+		const StreamingPresetValues v = streamingPresetValues(p);
+		CHECK(v.maxRenderDistance >= 64 && v.maxRenderDistance <= 640, "view distance within slider 64..640");
+		CHECK(v.minRenderDistance >= 32 && v.minRenderDistance <= 640, "near range within slider 32..640");
+		CHECK(v.streamFrontBias >= 0.0f && v.streamFrontBias <= 0.55f, "front bias within slider 0..0.55");
+		CHECK(v.loadPerSec >= 10 && v.loadPerSec <= 1000, "loadPerSec within slider 10..1000");
+		CHECK(v.genPerSec >= 5 && v.genPerSec <= 800, "genPerSec within slider 5..800");
+		CHECK(v.meshPerSec >= 5 && v.meshPerSec <= 600, "meshPerSec within slider 5..600");
+		CHECK(v.lightCachePerSec >= 0 && v.lightCachePerSec <= 256, "lightCachePerSec within slider 0..256");
+		CHECK(v.uploadPerSec >= 5 && v.uploadPerSec <= 800, "uploadPerSec within slider 5..800");
+		CHECK(v.maxStreamMs >= 0.0f && v.maxStreamMs <= 16.0f, "maxStreamMs within slider 0..16");
+	}
+}
+
+static void testClampedNearRenderDistance()
+{
+	CHECK(clampedNearRenderDistance(192, 512) == 192, "min <= max passes through");
+	CHECK(clampedNearRenderDistance(600, 512) == 512, "min > max clamps to max");
+	CHECK(clampedNearRenderDistance(512, 512) == 512, "min == max passes through");
+	CHECK(clampedNearRenderDistance(32, 640) == 32, "small near range passes through");
+	CHECK(clampedNearRenderDistance(-5, 100) == -5, "no extra floors: only min>max clamps");
+}
+
 int main()
 {
 	testLoadPriorityNearestFirst();
@@ -659,6 +775,8 @@ int main()
 	testFrontBiasFitsUnloadRadius();
 	testSubtractStreamingStats();
 	testMinimalRenderDistanceFootprints();
+	testStreamingPresets();
+	testClampedNearRenderDistance();
 
 	if (g_fails != 0)
 	{

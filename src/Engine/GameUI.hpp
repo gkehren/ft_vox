@@ -296,6 +296,14 @@ private:
 	uint64_t m_currentWorldGenId{0};
 	int m_currentSeed{0};
 	uint64_t m_mapRequestId{0};
+	/// Grid of the PUBLISHED map texture (consumed acceptable result only;
+	/// issue #186): the single source for world -> screen overlay mapping,
+	/// so markers stay consistent with the pixels even while a newer
+	/// request with different zoom/center is still in flight.
+	BiomeRegionGrid m_mapGrid{};
+	/// World-panel overlay toggles (issue #186 §8).
+	bool m_mapShowViewDistance{true};
+	bool m_mapShowChunkMarker{true};
 
 	BiomeMapJob m_mapJob{};
 	uint64_t m_mapCaptureEpoch{0};

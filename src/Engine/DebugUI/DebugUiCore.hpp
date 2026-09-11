@@ -253,6 +253,18 @@ struct DebugHealth
 	HealthMonitor gpuMemoryGrowth{5.0f, 10.0f};
 	HealthMonitor slowFrames{2.0f, 8.0f};
 
+	/// Advance only the monitors fed by the streaming-domain snapshot (pool
+	/// rejects + queue backlogs; issue #186). Called from the throttled
+	/// sampler when the primary Streaming panel is open without Overview, so
+	/// it can show sustained warnings without sampling the memory domain.
+	/// Memory-derived monitors (staging failures, retired backlog, GPU
+	/// growth) are deliberately NOT touched here: their timestamps/histories
+	/// come from the memory sample and would advance on stale data.
+	void updateStreaming(const class UiState &state, float dt);
+
+	/// Full refresh: streaming monitors + memory/frame monitors (Overview
+	/// path). The streaming monitors are advanced exactly once here too, so
+	/// callers must not run both entries on the same sample.
 	void update(const class UiState &state, float dt);
 };
 
