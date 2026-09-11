@@ -218,6 +218,91 @@ int main()
 			ok = fail("waterDebugView is a diagnostic and must survive resetGraphicsWater");
 	}
 
+	// --- resetGraphicsPost: Post category only, everything else preserved ---
+	{
+		// Base pack High; junk out-of-category state, dirty every post group.
+		// The tag models real UI state, where the last applyPreset set it
+		// (presetValues leaves the constructor default until it stamps tags).
+		PostProcessSettings pp = PostProcessSettings::presetValues(GraphicsQualityPreset::High);
+		pp.qualityPreset = GraphicsQualityPreset::High;
+		pp.shadowMapSize = 4096;
+		pp.ssaoDebugView = 3;
+		pp.underwater = true;
+		pp.underwaterStrength = 0.7f;
+		pp.underwaterSurfaceY = 42.0f;
+		pp.fxaaEnabled = true;
+		pp.bloomEnabled = false;
+		pp.bloomThreshold = 9.0f;
+		pp.bloomIntensity = 9.0f;
+		pp.bloomBlurIterations = 1;
+		pp.ssaoEnabled = false;
+		pp.ssaoRadius = 9.0f;
+		pp.ssaoIntensity = 9.0f;
+		pp.ssaoDirections = 4;
+		pp.ssaoSteps = 1;
+		pp.godRaysEnabled = false;
+		pp.godRaysDensity = 9.0f;
+		pp.godRaysWeight = 9.0f;
+		pp.godRaysDecay = 0.1f;
+		pp.godRaysExposure = 9.0f;
+		pp.godRaysDynamicBoostEnabled = false;
+		pp.godRaysBoostPreview = true;
+		pp.godRaysDramaticBoost = 1.0f;
+		pp.godRaysDepthOcclusion = false;
+		pp.filmGrain = 0.0f;
+		pp.vignette = 0.0f;
+		pp.postSaturation = 0.5f;
+		pp.postContrast = 0.5f;
+		pp.exposure = 5.0f;
+		pp.exposureCompensation = 3.0f;
+		pp.toneMapper = 1;
+		pp.gamma = 2.5f;
+		pp.autoExposureEnabled = false;
+		pp.autoExposureMiddleGrey = 2.0f;
+		pp.autoExposureMinEv = -6.0f;
+		pp.autoExposureMaxEv = 6.0f;
+		pp.autoExposureSpeedUp = 10.0f;
+		pp.autoExposureSpeedDown = 10.0f;
+
+		resetGraphicsPost(pp);
+
+		const PostProcessSettings canon = PostProcessSettings::presetValues(GraphicsQualityPreset::High);
+		// Out-of-category / runtime state must survive untouched (issue #185):
+		// shadow resolution is the Shadows category, the SSAO debug view is a
+		// Render Debug diagnostic, submersion is engine runtime state.
+		if (pp.shadowMapSize != 4096)
+			ok = fail("resetGraphicsPost must not touch shadowMapSize (Shadows category)");
+		if (pp.qualityPreset != GraphicsQualityPreset::High)
+			ok = fail("resetGraphicsPost must not change the qualityPreset tag");
+		if (pp.ssaoDebugView != 3)
+			ok = fail("resetGraphicsPost must not touch ssaoDebugView (Render Debug owns it)");
+		if (!pp.underwater || pp.underwaterStrength != 0.7f || pp.underwaterSurfaceY != 42.0f)
+			ok = fail("resetGraphicsPost must preserve underwater runtime state");
+		// Every post-owned field must be back at the pack's canonical value:
+		if (pp.fxaaEnabled != canon.fxaaEnabled || pp.bloomEnabled != canon.bloomEnabled ||
+			pp.bloomThreshold != canon.bloomThreshold || pp.bloomIntensity != canon.bloomIntensity ||
+			pp.bloomBlurIterations != canon.bloomBlurIterations || pp.ssaoEnabled != canon.ssaoEnabled ||
+			pp.ssaoRadius != canon.ssaoRadius || pp.ssaoIntensity != canon.ssaoIntensity ||
+			pp.ssaoDirections != canon.ssaoDirections || pp.ssaoSteps != canon.ssaoSteps ||
+			pp.godRaysEnabled != canon.godRaysEnabled || pp.godRaysDensity != canon.godRaysDensity ||
+			pp.godRaysWeight != canon.godRaysWeight || pp.godRaysDecay != canon.godRaysDecay ||
+			pp.godRaysExposure != canon.godRaysExposure ||
+			pp.godRaysDynamicBoostEnabled != canon.godRaysDynamicBoostEnabled ||
+			pp.godRaysBoostPreview != canon.godRaysBoostPreview ||
+			pp.godRaysDramaticBoost != canon.godRaysDramaticBoost ||
+			pp.godRaysDepthOcclusion != canon.godRaysDepthOcclusion ||
+			pp.filmGrain != canon.filmGrain || pp.vignette != canon.vignette ||
+			pp.postSaturation != canon.postSaturation || pp.postContrast != canon.postContrast ||
+			pp.exposure != canon.exposure || pp.exposureCompensation != canon.exposureCompensation ||
+			pp.toneMapper != canon.toneMapper || pp.gamma != canon.gamma ||
+			pp.autoExposureEnabled != canon.autoExposureEnabled ||
+			pp.autoExposureMiddleGrey != canon.autoExposureMiddleGrey ||
+			pp.autoExposureMinEv != canon.autoExposureMinEv || pp.autoExposureMaxEv != canon.autoExposureMaxEv ||
+			pp.autoExposureSpeedUp != canon.autoExposureSpeedUp ||
+			pp.autoExposureSpeedDown != canon.autoExposureSpeedDown)
+			ok = fail("resetGraphicsPost must restore every post field to the current pack (issue #185)");
+	}
+
 	// --- Atmosphere semantics pin the disabled-control rationale (#185) ---
 	{
 		// automaticAtmosphere=true: the six derived atmosphere fields are

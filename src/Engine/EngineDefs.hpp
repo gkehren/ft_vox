@@ -514,3 +514,45 @@ inline void resetGraphicsWater(ShaderParameters &sp, PostProcessSettings &pp)
 	const PostProcessSettings defPp{};
 	pp.underwaterStrength = defPp.underwaterStrength;
 }
+
+/// Restores the Post category to the CURRENT pack's canonical values without
+/// re-applying the whole preset (issue #185): shadowMapSize belongs to the
+/// Shadows category, ssaoDebugView belongs to Render Debug, and the
+/// underwater runtime state plus the qualityPreset tag are not post settings.
+inline void resetGraphicsPost(PostProcessSettings &pp)
+{
+	const PostProcessSettings preset = PostProcessSettings::presetValues(pp.qualityPreset);
+	pp.fxaaEnabled = preset.fxaaEnabled;
+	pp.bloomEnabled = preset.bloomEnabled;
+	pp.bloomThreshold = preset.bloomThreshold;
+	pp.bloomIntensity = preset.bloomIntensity;
+	pp.bloomBlurIterations = preset.bloomBlurIterations;
+	pp.ssaoEnabled = preset.ssaoEnabled;
+	pp.ssaoRadius = preset.ssaoRadius;
+	pp.ssaoIntensity = preset.ssaoIntensity;
+	pp.ssaoDirections = preset.ssaoDirections;
+	pp.ssaoSteps = preset.ssaoSteps;
+	pp.godRaysEnabled = preset.godRaysEnabled;
+	pp.godRaysDensity = preset.godRaysDensity;
+	pp.godRaysWeight = preset.godRaysWeight;
+	pp.godRaysDecay = preset.godRaysDecay;
+	pp.godRaysExposure = preset.godRaysExposure;
+	pp.godRaysDynamicBoostEnabled = preset.godRaysDynamicBoostEnabled;
+	pp.godRaysBoostPreview = preset.godRaysBoostPreview;
+	pp.godRaysDramaticBoost = preset.godRaysDramaticBoost;
+	pp.godRaysDepthOcclusion = preset.godRaysDepthOcclusion;
+	pp.filmGrain = preset.filmGrain;
+	pp.vignette = preset.vignette;
+	pp.postSaturation = preset.postSaturation;
+	pp.postContrast = preset.postContrast;
+	pp.exposure = preset.exposure;
+	pp.exposureCompensation = preset.exposureCompensation;
+	pp.toneMapper = preset.toneMapper;
+	pp.gamma = preset.gamma;
+	pp.autoExposureEnabled = preset.autoExposureEnabled;
+	pp.autoExposureMiddleGrey = preset.autoExposureMiddleGrey;
+	pp.autoExposureMinEv = preset.autoExposureMinEv;
+	pp.autoExposureMaxEv = preset.autoExposureMaxEv;
+	pp.autoExposureSpeedUp = preset.autoExposureSpeedUp;
+	pp.autoExposureSpeedDown = preset.autoExposureSpeedDown;
+}

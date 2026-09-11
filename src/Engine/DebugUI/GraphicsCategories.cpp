@@ -365,8 +365,9 @@ void drawPost(debugui::UiState &s, GameUIFrame &frame)
 
 	ImGui::Separator();
 	if (ImGui::Button("Reset post"))
-		pp.applyPreset(pp.qualityPreset);
-	ui::helpMarker("Restores the current quality pack's post-processing values.");
+		resetGraphicsPost(pp);
+	ui::helpMarker("Restores the current quality pack's post-processing values. "
+				   "Shadow resolution (Shadows category) and debug views are untouched.");
 }
 
 void drawResources(debugui::UiState &s, GameUIFrame &frame)
