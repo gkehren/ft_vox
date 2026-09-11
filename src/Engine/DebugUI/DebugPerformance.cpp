@@ -128,10 +128,19 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 				{
 					const auto col = sortSpecs->Specs[0].ColumnUserID;
 					const bool asc = sortSpecs->Specs[0].SortDirection == ImGuiSortDirection_Ascending;
+					const auto nameOf = [](const ScopeStats &st) {
+						return std::string_view(st.name ? st.name : "");
+					};
 					std::stable_sort(order.begin(), order.begin() + ptrdiff_t(orderSize),
 									 [&](int a, int b) {
 										 const ScopeStats &sa = s.scopeStats[size_t(a)];
 										 const ScopeStats &sb = s.scopeStats[size_t(b)];
+										 // Column 0 is the scope name: sort it
+										 // too, honoring the clicked direction
+										 // (issue #179 review).
+										 if (col == 0)
+											 return asc ? nameOf(sa) < nameOf(sb)
+														: nameOf(sa) > nameOf(sb);
 										 float va = 0.f, vb = 0.f;
 										 switch (col)
 										 {
@@ -139,12 +148,11 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 										 case 2: va = sa.avgMs; vb = sb.avgMs; break;
 										 case 3: va = sa.peakMs; vb = sb.peakMs; break;
 										 case 4: va = float(sa.frames); vb = float(sb.frames); break;
-										 default: return false; // name sort below
+										 default: return nameOf(sa) < nameOf(sb);
 										 }
 										 if (va != vb)
 											 return asc ? va < vb : va > vb;
-										 return std::string_view(sa.name ? sa.name : "") <
-												std::string_view(sb.name ? sb.name : "");
+										 return nameOf(sa) < nameOf(sb);
 									 });
 				}
 			}
