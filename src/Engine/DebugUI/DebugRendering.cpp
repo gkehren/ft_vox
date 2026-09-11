@@ -20,6 +20,8 @@
 #include <imgui/imgui.h>
 #include <imgui/imgui_impl_vulkan.h>
 
+#include <cfloat>
+
 namespace debugui
 {
 
@@ -27,8 +29,10 @@ void drawRendering(UiState &s, GameUIFrame &frame)
 {
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(430.f, scale), ui::scaled(540.f, scale)), ImGuiCond_FirstUseEver);
+	// Only the minimum is scaled (usability floor at any UI scale); no
+	// arbitrary maximum — a device-pixel cap broke resizing at 175/200%.
 	ImGui::SetNextWindowSizeConstraints(ImVec2(ui::scaled(360.f, scale), ui::scaled(320.f, scale)),
-										ImVec2(600.f, 900.f));
+										ImVec2(FLT_MAX, FLT_MAX));
 	if (!ImGui::Begin(ui::windows::kGraphics, &s.panels.rendering))
 	{
 		ImGui::End();
