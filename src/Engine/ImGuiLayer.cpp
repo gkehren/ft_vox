@@ -1,10 +1,17 @@
 #include "Engine/ImGuiLayer.hpp"
 
+#include <Engine/UiTheme.hpp>
+
 #include <imgui/imgui.h>
 #include <imgui/imgui_impl_sdl3.h>
 #include <imgui/imgui_impl_vulkan.h>
+#include <imgui/imgui_internal.h> // settings-handler registration
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 
@@ -25,6 +32,37 @@ PFN_vkVoidFunction imguiVulkanLoader(const char *function_name, void *user_data)
 		fn = vkGetInstanceProcAddr(ctx->getInstance(), function_name);
 	return fn;
 }
+
+/// Logical-size -> pixel-size ratio (1 on Windows where screen coordinates
+/// are physical, 2 on Retina / fractional-density Wayland), from SDL3's
+/// dedicated window-pixel-density query.
+float queryFramebufferScale(SDL_Window *window)
+{
+	if (!window)
+		return 1.f;
+	const float density = SDL_GetWindowPixelDensity(window);
+	return density > 0.f ? density : 1.f;
+}
+
+constexpr const char *kUiSettingsTypeName = "FtVoxUi";
+
+void *uiSettingsReadOpen(ImGuiContext *, ImGuiSettingsHandler *, const char *name)
+{
+	return std::strcmp(name, "Scale") == 0 ? const_cast<char *>(name) : nullptr;
+}void uiSettingsReadLine(ImGuiContext *, ImGuiSettingsHandler *handler, void *, const char *line)
+{
+	float value = 0.f;
+	if (std::sscanf(line, "ui_scale=%f", &value) == 1 && handler->UserData)
+		*static_cast<float *>(handler->UserData) = ui::snapScale(ui::clampScale(value));
+}
+
+void uiSettingsWriteAll(ImGuiContext *, ImGuiSettingsHandler *handler, ImGuiTextBuffer *buf)
+{
+	if (!handler->UserData)
+		return;
+	buf->appendf("[%s][Scale]\nui_scale=%.3f\n\n", handler->TypeName,
+				 *static_cast<const float *>(handler->UserData));
+}
 } // namespace
 
 ImGuiLayer::~ImGuiLayer()
@@ -39,13 +77,34 @@ void ImGuiLayer::init(SDL_Window *window, VkContext &context, VkSwapchain &swapc
 
 	m_device = context.getDevice();
 	m_context = &context;
+	m_window = window;
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGuiIO &io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-	ImGui::StyleColorsDark();
+	// Docked windows must be moved by their title bar, not their body: the
+	// central viewport region stays a click-through game view (issue #183).
+	io.ConfigWindowsMoveFromTitleBarOnly = true;
+
+	// Initial UI scale from the display content scale; a persisted override
+	// in imgui.ini wins when present (issue #183). The display scale is
+	// divided by the framebuffer scale so platforms where the logical window
+	// size already differs from the pixel size (macOS, Wayland) do not
+	// double-scale — there the OS scaling is the framebuffer ratio itself.
+	m_framebufferScale = queryFramebufferScale(window);
+	m_uiScale = ui::snapScale(ui::clampScale(SDL_GetWindowDisplayScale(window) / m_framebufferScale));
+	registerScaleSettingsHandler();
+	{
+		std::error_code ec;
+		m_hadIniAtStartup = io.IniFilename && std::filesystem::exists(io.IniFilename, ec);
+	}
+	if (m_hadIniAtStartup)
+		ImGui::LoadIniSettingsFromDisk(io.IniFilename); // docking layout + persisted UI scale
+
+	ui::applyStyle(m_uiScale);
+	ui::rebuildFontAtlas(m_uiScale, m_framebufferScale);
 
 	if (!ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_2, imguiVulkanLoader, &context))
 		throw std::runtime_error("ImGui_ImplVulkan_LoadFunctions failed");
@@ -55,6 +114,24 @@ void ImGuiLayer::init(SDL_Window *window, VkContext &context, VkSwapchain &swapc
 	m_initialized = true;
 	(void)imm;
 	initVulkanBackend(context, swapchain);
+}
+
+void ImGuiLayer::registerScaleSettingsHandler()
+{
+	ImGuiSettingsHandler handler{};
+	handler.TypeName = kUiSettingsTypeName;
+	handler.TypeHash = ImHashStr(kUiSettingsTypeName);
+	handler.ReadOpenFn = uiSettingsReadOpen;
+	handler.ReadLineFn = uiSettingsReadLine;
+	handler.WriteAllFn = uiSettingsWriteAll;
+	handler.UserData = &m_uiScale;
+	ImGui::AddSettingsHandler(&handler);
+}
+
+void ImGuiLayer::requestUiScale(float scale)
+{
+	if (scale > 0.f)
+		m_pendingUiScale = scale;
 }
 
 void ImGuiLayer::initVulkanBackend(VkContext &context, VkSwapchain &swapchain)
@@ -145,9 +222,11 @@ void ImGuiLayer::shutdown()
 	m_initialized = false;
 	m_device = VK_NULL_HANDLE;
 	m_context = nullptr;
+	m_window = nullptr;
 	m_colorFormat = VK_FORMAT_UNDEFINED;
 	m_swapchainImageCount = 0;
 	m_minImageCount = 0;
+	m_framebufferScale = 1.f;
 }
 
 void ImGuiLayer::processEvent(const SDL_Event &event)
@@ -160,6 +239,40 @@ void ImGuiLayer::beginFrame()
 {
 	if (!m_initialized)
 		return;
+
+	// Apply queued UI-scale changes before NewFrame: rebuild the style and
+	// font atlas, then recreate the backend font texture. Both start from
+	// their canonical base, so repeated changes never drift.
+	if (m_pendingUiScale > 0.f)
+	{
+		const float nextScale = ui::snapScale(ui::clampScale(m_pendingUiScale));
+		m_pendingUiScale = 0.f;
+		if (nextScale != m_uiScale)
+		{
+			m_uiScale = nextScale;
+			ui::applyStyle(m_uiScale);
+			ui::rebuildFontAtlas(m_uiScale, m_framebufferScale);
+			if (m_vulkanInitialized)
+				ImGui_ImplVulkan_CreateFontsTexture();
+			ImGui::MarkIniSettingsDirty();
+		}
+	}
+
+	// Follow framebuffer-density changes (window moved to another display):
+	// the backend stretches UI by the framebuffer scale, so fonts must be
+	// re-rasterized at the new device size to stay crisp.
+	if (m_window)
+	{
+		const float fbScale = queryFramebufferScale(m_window);
+		if (std::fabs(fbScale - m_framebufferScale) > 0.001f)
+		{
+			m_framebufferScale = fbScale;
+			ui::rebuildFontAtlas(m_uiScale, m_framebufferScale);
+			if (m_vulkanInitialized)
+				ImGui_ImplVulkan_CreateFontsTexture();
+		}
+	}
+
 	ImGui_ImplVulkan_NewFrame();
 	ImGui_ImplSDL3_NewFrame();
 	ImGui::NewFrame();

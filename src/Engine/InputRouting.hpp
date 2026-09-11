@@ -1,11 +1,12 @@
 #pragma once
 
 // Input routing policy for keyboard events while ImGui may own the keyboard
-// (issue #76). Pure and header-only so the policy stays unit-testable
+// (issue #76; F8/F9/F11/F12 added with the developer console, issue #179).
+// Pure and header-only so the policy stays unit-testable
 // without ImGui or the engine.
 //
 // Policy summary:
-// - F1-F7 (panel toggles) and F10 (VSync) are intentional GLOBAL shortcuts:
+// - F1-F12 (panel toggles, F10 = VSync) are intentional GLOBAL shortcuts:
 //   they are function keys no text field can produce, so they keep working
 //   even while ImGui captures the keyboard.
 // - Gameplay keys (P = pause, C = mouse capture, B = chunk borders,
@@ -22,7 +23,7 @@
 
 enum class KeyRoute
 {
-	GlobalShortcut,	   // F1-F7 panel toggles, F10 VSync
+		GlobalShortcut,    // F1-F12 application/developer shortcuts
 	GameplayShortcut,  // P pause; C/B/T are Engine-owned gameplay keys
 	NotGameUIShortcut  // not handled by GameUI shortcut routing
 };
@@ -38,7 +39,11 @@ inline KeyRoute classifyKeyRoute(int sdlKeycode)
 	case SDLK_F5:
 	case SDLK_F6:
 	case SDLK_F7:
+	case SDLK_F8:  // Overview dashboard (issue #179)
+	case SDLK_F9:  // Chunk inspector (issue #179)
 	case SDLK_F10: // VSync toggle: explicit global policy (non-text key)
+	case SDLK_F11: // Memory / workload (issue #179)
+	case SDLK_F12: // Render debug views (issue #179)
 		return KeyRoute::GlobalShortcut;
 	case SDLK_P:
 	case SDLK_C:

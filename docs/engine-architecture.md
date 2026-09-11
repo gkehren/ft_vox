@@ -103,6 +103,14 @@ stage measurements are documented in [workload-telemetry.md](workload-telemetry.
 
 ### UI
 
+- **`UiShell`** — application dockspace with passthru central game view,
+  `ft_vox / World / View / Developer / Help` menu bar, right-side status strip
+  (narrow-width degradation, unit-tested planner), default developer layout +
+  reset action; canonical `ui::windows` titles shared with every `Begin()`
+  call (issue #183)
+- **`UiTheme` / `UiScale` / `UiShortcuts` / `UiStatus`** — centralized theme
+  (`ui::applyStyle(scale)`, no-drift rebuild), 100–200% UI scaling persisted
+  in `imgui.ini`, shared presentation helpers, shortcut display metadata
 - **`GameUI`** — ImGui shell: main menu bar, gameplay HUD, World/biome map, Help,
   on-screen hints, F-key shortcut routing and biome-map plumbing
 - **`DebugUI/` (`src/Engine/DebugUI/`)** — developer console panels (issue #179),

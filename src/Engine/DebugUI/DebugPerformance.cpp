@@ -6,6 +6,7 @@
 // controls moved to the dedicated Benchmark panel.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/UiScale.hpp>
 #include <Engine/GameUI.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/Profiler.hpp>
@@ -32,8 +33,9 @@ float historyMax(const MetricHistory &h, float floorMax)
 
 void drawPerformance(UiState &s, GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(520, 620), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Performance", &s.panels.performance))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(520.f, scale), ui::scaled(620.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kPerformance, &s.panels.performance))
 	{
 		ImGui::End();
 		return;
@@ -89,7 +91,7 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 		maxY = std::max(maxY, 33.3f);
 
 		ImGui::PlotLines("##ft", ordered.data(), static_cast<int>(ordered.size()), 0,
-						 nullptr, 0.f, maxY, ImVec2(-1.f, 80.f));
+						 nullptr, 0.f, maxY, ImVec2(-1.f, ui::scaled(80.f, scale)));
 		ImGui::TextDisabled("Graph scale 0–%.0f ms  (16.7 = 60 FPS, 33.3 = 30 FPS)", maxY);
 	}
 
@@ -104,13 +106,13 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 		if (ImGui::BeginTable("scopestats", 5,
 							  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
 								  ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY,
-							  ImVec2(0.f, 200.f)))
+							  ImVec2(0.f, ui::scaled(200.f, scale))))
 		{
 			ImGui::TableSetupColumn("Scope", ImGuiTableColumnFlags_WidthStretch, 0.f, 0);
-			ImGui::TableSetupColumn("last ms", ImGuiTableColumnFlags_WidthFixed, 60.f, 1);
-			ImGui::TableSetupColumn("avg ms", ImGuiTableColumnFlags_WidthFixed, 60.f, 2);
-			ImGui::TableSetupColumn("peak ms", ImGuiTableColumnFlags_WidthFixed, 60.f, 3);
-			ImGui::TableSetupColumn("frames", ImGuiTableColumnFlags_WidthFixed, 56.f, 4);
+			ImGui::TableSetupColumn("last ms", ImGuiTableColumnFlags_WidthFixed, ui::scaled(60.f, scale), 1);
+			ImGui::TableSetupColumn("avg ms", ImGuiTableColumnFlags_WidthFixed, ui::scaled(60.f, scale), 2);
+			ImGui::TableSetupColumn("peak ms", ImGuiTableColumnFlags_WidthFixed, ui::scaled(60.f, scale), 3);
+			ImGui::TableSetupColumn("frames", ImGuiTableColumnFlags_WidthFixed, ui::scaled(56.f, scale), 4);
 			ImGui::TableHeadersRow();
 
 			// Sort a bounded index array per frame (<= kMaxScopeStats rows).
@@ -193,7 +195,7 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 		{
 			const ScopeStats &st = s.scopeStats[size_t(s.selectedScopeGraph)];
 			ImGui::Text("%s — 10 Hz history (ms)", st.name ? st.name : "?");
-			plotHistory("##scope_hist", st.history, 0.f, ImVec2(-1.f, 64.f));
+			plotHistory("##scope_hist", st.history, 0.f, ImVec2(-1.f, ui::scaled(64.f, scale)));
 		}
 
 		// Hierarchy (per-frame tree, unchanged)
@@ -202,12 +204,12 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 			const float denom = frameMs > 1e-4f ? frameMs : 1.f;
 			if (ImGui::BeginTable("scopes", 4,
 								  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
-								  ImVec2(0.f, 220.f)))
+								  ImVec2(0.f, ui::scaled(220.f, scale))))
 			{
 				ImGui::TableSetupColumn("Scope", ImGuiTableColumnFlags_WidthStretch);
-				ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 56.f);
-				ImGui::TableSetupColumn("%", ImGuiTableColumnFlags_WidthFixed, 48.f);
-				ImGui::TableSetupColumn("bar", ImGuiTableColumnFlags_WidthFixed, 100.f);
+				ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, ui::scaled(56.f, scale));
+				ImGui::TableSetupColumn("%", ImGuiTableColumnFlags_WidthFixed, ui::scaled(48.f, scale));
+				ImGui::TableSetupColumn("bar", ImGuiTableColumnFlags_WidthFixed, ui::scaled(100.f, scale));
 				ImGui::TableHeadersRow();
 
 				const int count = prof.lastEntryCount();
@@ -219,7 +221,7 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 					ImGui::TableNextColumn();
 					if (e.depth > 0)
 					{
-						ImGui::Dummy(ImVec2(static_cast<float>(e.depth) * 12.f, 0.f));
+						ImGui::Dummy(ImVec2(static_cast<float>(e.depth) * ui::scaled(12.f, scale), 0.f));
 						ImGui::SameLine(0.f, 0.f);
 					}
 					ImGui::TextUnformatted(e.name ? e.name : "?");
@@ -283,7 +285,7 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 				const int start = n < VkGpuProfiler::kHistorySize ? 0 : gpu.historyWrite();
 				for (int i = 0; i < n; ++i)
 					ordered.push_back(gpu.history()[(start + i) % VkGpuProfiler::kHistorySize]);
-				ImGui::PlotLines("##gpu", ordered.data(), n, 0, nullptr, 0.f, FLT_MAX, ImVec2(-1.f, 80.f));
+				ImGui::PlotLines("##gpu", ordered.data(), n, 0, nullptr, 0.f, FLT_MAX, ImVec2(-1.f, ui::scaled(80.f, scale)));
 			}
 		}
 	}

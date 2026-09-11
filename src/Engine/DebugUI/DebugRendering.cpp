@@ -8,6 +8,7 @@
 //    changes behavior; a debug view explains it.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/UiScale.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/GameUI.hpp>
 #include <Engine/GpuProfile.hpp>
@@ -21,8 +22,9 @@ namespace debugui
 
 void drawRendering(UiState &s, GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(400, 520), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Graphics", &s.panels.rendering))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(400.f, scale), ui::scaled(520.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kGraphics, &s.panels.rendering))
 	{
 		ImGui::End();
 		return;
@@ -240,8 +242,9 @@ void drawRendering(UiState &s, GameUIFrame &frame)
 
 void drawRenderDebug(UiState &s, GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(380, 520), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Render Debug", &s.panels.renderDebug))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(380.f, scale), ui::scaled(520.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kRenderDebug, &s.panels.renderDebug))
 	{
 		ImGui::End();
 		return;

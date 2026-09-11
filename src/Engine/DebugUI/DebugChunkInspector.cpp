@@ -5,6 +5,7 @@
 // when enabled it never grows beyond ChunkManager::kChunkEventRingSize.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
+#include <Engine/UiScale.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/DebugUI/DebugUiEngine.hpp>
 #include <Chunk/ChunkManager.hpp>
@@ -39,8 +40,9 @@ const char *eventKindName(const char *kind)
 
 void drawChunkInspector(UiState &s, GameUIFrame &frame)
 {
-	ImGui::SetNextWindowSize(ImVec2(460, 560), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Chunk Inspector", &s.panels.chunkInspector))
+	const float scale = ui::effectiveScale(frame.uiScale);
+	ImGui::SetNextWindowSize(ImVec2(ui::scaled(460.f, scale), ui::scaled(560.f, scale)), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin(ui::windows::kChunkInspector, &s.panels.chunkInspector))
 	{
 		ImGui::End();
 		return;
@@ -114,7 +116,7 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 							  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
 								  ImGuiTableFlags_SizingStretchProp))
 		{
-			ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 170.f);
+			ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, ui::scaled(170.f, scale));
 			ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
 			ImGui::TableHeadersRow();
 
@@ -155,7 +157,7 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 	ImGui::SeparatorText("Nearby chunks");
 	if (ImGui::BeginTable("nearby", 5,
 						  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
-						  ImVec2(0.f, 160.f)))
+						  ImVec2(0.f, ui::scaled(160.f, scale))))
 	{
 		ImGui::TableSetupColumn("chunk");
 		ImGui::TableSetupColumn("state");

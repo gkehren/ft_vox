@@ -15,6 +15,7 @@
 #include <utils.hpp>
 
 #include <Engine/DebugUI/DebugUiCore.hpp>
+#include <Engine/UiShell.hpp>
 #include <Engine/GameUIBiomeMap.hpp>
 
 #include <future>
@@ -69,6 +70,9 @@ struct GameUIFrame
 	uint64_t worldGenerationId{0};
 	float fps{0.f};
 	float frameMs{0.f};
+	/// Hierarchical-profiler CPU frame time (events -> present), used by
+	/// the shell status strip; frameMs is the paced simulation delta.
+	float cpuFrameMs{0.f};
 	size_t drawCount{0};
 	int windowW{0};
 	int windowH{0};
@@ -78,6 +82,13 @@ struct GameUIFrame
 	bool validation{false};
 
 	std::function<void(bool)> setVSync;
+
+	// Application shell wiring (issue #183): current UI scale plus callbacks
+	// into Engine / ImGuiLayer. setUiScale applies at the next frame boundary
+	// (never mid-frame); requestExit mirrors the Escape quit path.
+	float uiScale{1.f};
+	std::function<void(float)> setUiScale;
+	std::function<void()> requestExit;
 
 	/// Active pack root (empty = bundled). Owned by Engine.
 	const std::string *resourcePackRoot{nullptr};
@@ -154,6 +165,22 @@ public:
 
 	void setShowHud(bool v) { m_debug.panels.hud = v; }
 
+	/// Application shell (dockspace, menus, layout actions). Engine queues the
+	/// default developer layout here on first run.
+	ui::UiShell &shell() { return m_shell; }
+
+	/// Open the primary panels used by the default developer layout so the
+	/// docked slots materialize on the first frame. Overview stays closed to
+	/// limit DebugUI consumers on first launch.
+	void enableDefaultDeveloperPanels()
+	{
+		m_debug.panels.rendering = true;
+		m_debug.panels.streaming = true;
+		m_debug.panels.world = true;
+		m_debug.panels.performance = true;
+		m_debug.panels.help = true;
+	}
+
 	/// Invalidate any active or in-flight biome map task and clear current texture.
 	/// Supersedes existing request ID and marks backing texture as inactive.
 	void invalidateBiomeMap();
@@ -194,10 +221,9 @@ private:
 		}
 	};
 
-	void drawMenuBar(GameUIFrame &frame);
 	void drawHud(GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
-	void drawHelp();
+	void drawHelp(GameUIFrame &frame);
 	void drawOverlayHints(GameUIFrame &frame);
 
 	void requestBiomeMapRefresh()
@@ -222,6 +248,21 @@ private:
 	/// Developer-console state: panel visibility + debug snapshots + bounded
 	/// histories (issue #179). Refreshed once per draw by updateDebugUiState.
 	debugui::UiState m_debug{};
+
+	/// One-shot: Help window opens with the requested tab selected.
+	ui::HelpTabRequest m_helpTabRequest{ui::HelpTabRequest::None};
+
+	/// HUD scale tracking (issue #183): after a UI-scale change the
+	/// user-placed HUD position is kept but clamped fully inside the viewport
+	/// work area. The clamp is deferred until the work rect has held still
+	/// for two consecutive frames (the OS window resize, AlwaysAutoResize and
+	/// the menu-bar work inset all settle asynchronously), bounded to ~1 s.
+	float m_lastHudScale{0.f};
+	int m_hudClampGrace{0};
+	ImVec2 m_lastWorkSize{0.f, 0.f};
+
+	/// Application shell (dockspace, main menu, status strip, layout).
+	ui::UiShell m_shell{};
 
 	// Biome map
 	int m_mapSize{256};

@@ -325,6 +325,24 @@ target_link_libraries(test_input_routing PRIVATE
 add_test(NAME InputRouting COMMAND test_input_routing)
 
 # ---------------------------------------------------------------------------
+# UI shell pure logic (issue #183): scale normalization, status-strip
+# degradation, shortcut metadata consistency with InputRouting
+# ---------------------------------------------------------------------------
+add_executable(test_ui_shell
+    test_ui_shell.cpp
+)
+
+target_include_directories(test_ui_shell PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(test_ui_shell PRIVATE
+    SDL3::SDL3
+)
+
+add_test(NAME UiShell COMMAND test_ui_shell)
+
+# ---------------------------------------------------------------------------
 # Chunk lifecycle (issue #78 review): move semantics + direct pooled
 # generation via Chunk::generateTerrain. Links the Vulkan buffer helpers
 # Chunk.cpp depends on; never touches a real device.
