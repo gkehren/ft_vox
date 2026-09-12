@@ -385,10 +385,11 @@ private:
 	float m_mapZoom{0.5f};
 	glm::vec2 m_mapCenter{0.f, 0.f};
 	bool m_mapFollow{true};
-	/// RMB/MMB drag-pan while follow is off (issue #192): latched on press
-	/// over the map so the pan survives the cursor leaving the rect, cleared
-	/// on release or when follow takes the center back.
-	bool m_mapPanning{false};
+	/// RMB/MMB drag-pan state machine while follow is off (issue #192):
+	/// Idle -> Pressed -> Dragging, threshold-gated so a plain click is a
+	/// strict no-op. Owns the initiating button and the preview offset the
+	/// shown texture keeps until a publication represents the current view.
+	BiomeMapPan m_mapPan{};
 	bool m_mapNeedsUpdate{true};
 	double m_mapLastPublishedAt{0.0};
 	glm::vec2 m_mapLastPlayer{0.f, 0.f};

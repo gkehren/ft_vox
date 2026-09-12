@@ -255,6 +255,174 @@ inline glm::vec2 biomeMapPanCenter(const BiomeRegionGrid &grid,
 	return {center.x - dragPx.x * worldPerPx, center.y - dragPx.y * worldPerPx};
 }
 
+// ---------------------------------------------------------------------------
+// Drag-pan state machine (issue #192 review): Idle -> Pressed -> Dragging.
+//
+// A plain RMB/MMB press must be a STRICT no-op (no center change, no request
+// supersede), so the pan only arms on the press and starts translating once
+// ImGui's drag threshold is exceeded. The initiating button stays sticky: a
+// pan started with RMB ends when RMB is released, even if MMB is still held.
+// Nothing here touches ImGui — drawWorld() translates io state into
+// BiomeMapPanInput and applies the returned translation — so every
+// transition is unit-testable.
+
+/// Pan-initiating mouse buttons in priority order (RMB wins a simultaneous
+/// press). Values mirror ImGuiMouseButton_Right / _Middle; kept as plain
+/// ints so this header stays ImGui-free. LMB is deliberately excluded for
+/// future map interactions.
+inline constexpr int kBiomeMapPanButtons[2] = {1, 2};
+/// Sentinel: no initiating button.
+inline constexpr int kBiomeMapPanButtonNone = -1;
+
+enum class BiomeMapPanState
+{
+	Idle,	 ///< Not panning; may still carry a preview offset from a
+			 ///< finished drag that the shown texture does not reflect yet.
+	Pressed, ///< Initiating button down over the map, below the drag
+			 ///< threshold. Translates nothing.
+	Dragging ///< Past the drag threshold: every frame's mouse delta moves
+			 ///< the view center and the preview offset.
+};
+
+/// Per-button ImGui snapshot for one frame.
+struct BiomeMapPanButtonInput
+{
+	bool clicked{false};  ///< Pressed this frame.
+	bool down{false};	  ///< Currently held.
+	bool dragging{false}; ///< ImGui::IsMouseDragging(button, threshold).
+};
+
+struct BiomeMapPanInput
+{
+	bool mapActive{false}; ///< Map drawn with a valid published grid.
+	bool hovered{false};   ///< Cursor over the map this frame.
+	bool follow{false};	 ///< Follow player enabled: pan disabled, state resets.
+	BiomeMapPanButtonInput buttons[2]; ///< Parallel to kBiomeMapPanButtons.
+	glm::vec2 mouseDelta{0.f}; ///< io.MouseDelta for this frame.
+};
+
+/// Pan controller state owned by GameUI across frames.
+struct BiomeMapPan
+{
+	BiomeMapPanState state{BiomeMapPanState::Idle};
+	int button{kBiomeMapPanButtonNone}; ///< Initiating button while armed.
+	/// Screen px the SHOWN texture stays shifted by while the async
+	/// generation catches up with m_mapCenter. Accumulates while dragging,
+	/// survives the drag (the texture must not snap back), and is cleared
+	/// only when a publication represents the current view, on follow
+	/// re-enable, or on map invalidation.
+	glm::vec2 previewOffset{0.f, 0.f};
+};
+
+/// One step's outcome: the new controller state plus what the caller must
+/// apply this frame.
+struct BiomeMapPanStep
+{
+	BiomeMapPan pan;			///< New controller state.
+	glm::vec2 dragDelta{0.f};   ///< NEW screen-px translation this frame
+								/// (non-zero only while dragging).
+	bool dragStarted{false};	///< Pressed -> Dragging this frame.
+	bool dragEnded{false};		///< Dragging -> Idle this frame (button release).
+};
+
+inline const BiomeMapPanButtonInput &biomeMapPanButtonInput(const BiomeMapPanInput &in,
+															int button)
+{
+	return in.buttons[button == kBiomeMapPanButtons[1] ? 1 : 0];
+}
+
+/// Advance the pan state machine by one frame. Pure.
+inline BiomeMapPanStep stepBiomeMapPan(const BiomeMapPan &pan, const BiomeMapPanInput &in)
+{
+	BiomeMapPanStep out;
+	out.pan = pan;
+
+	// Hard resets: follow owns the center again, or there is no map to pan
+	// (invalidation / world change). The preview goes with it — there is
+	// nothing on screen left to bridge.
+	if (in.follow || !in.mapActive)
+	{
+		out.pan = BiomeMapPan{};
+		return out;
+	}
+
+	switch (pan.state)
+	{
+	case BiomeMapPanState::Idle:
+		// Arm only on a press OVER the map. No translation, no supersede.
+		if (in.hovered)
+		{
+			for (int i = 0; i < 2; ++i)
+			{
+				if (in.buttons[i].clicked)
+				{
+					out.pan.state = BiomeMapPanState::Pressed;
+					out.pan.button = kBiomeMapPanButtons[i];
+					break;
+				}
+			}
+		}
+		break;
+
+	case BiomeMapPanState::Pressed:
+	{
+		const BiomeMapPanButtonInput &init = biomeMapPanButtonInput(in, pan.button);
+		if (!init.down)
+		{
+			// Released before the threshold: a plain click, strictly a
+			// no-op (the preview offset from any EARLIER drag is kept —
+			// the shown texture is still offset until its replacement
+			// publishes).
+			out.pan.state = BiomeMapPanState::Idle;
+			out.pan.button = kBiomeMapPanButtonNone;
+			break;
+		}
+		if (init.dragging)
+		{
+			// Threshold exceeded: the drag becomes real and the WHOLE
+			// movement so far translates at once.
+			out.pan.state = BiomeMapPanState::Dragging;
+			out.pan.button = pan.button;
+			out.dragStarted = true;
+			out.dragDelta = in.mouseDelta;
+			out.pan.previewOffset += in.mouseDelta;
+		}
+		break;
+	}
+
+	case BiomeMapPanState::Dragging:
+	{
+		const BiomeMapPanButtonInput &init = biomeMapPanButtonInput(in, pan.button);
+		if (!init.down)
+		{
+			// Initiating button released (even with the other button still
+			// held). The drag ends; the preview offset PERSISTS until the
+			// texture for the dragged-to view is published.
+			out.pan.state = BiomeMapPanState::Idle;
+			out.pan.button = kBiomeMapPanButtonNone;
+			out.dragEnded = true;
+			break;
+		}
+		// Dragging continues regardless of hover: the cursor may leave the
+		// map rect mid-drag without aborting the pan.
+		out.dragDelta = in.mouseDelta;
+		out.pan.previewOffset += in.mouseDelta;
+		break;
+	}
+	}
+	return out;
+}
+
+/// Clear the pan preview once the published texture represents the CURRENT
+/// view (accepted result actually published). Called ONLY from the
+/// publication path — never when a stale result is rejected: a rejection
+/// means the screen still shows the old view and the offset is what keeps
+/// it visually aligned with m_mapCenter.
+inline void clearBiomeMapPanPreview(BiomeMapPan &pan)
+{
+	pan.previewOffset = {0.f, 0.f};
+}
+
 /// Paint the player indicator dot (black outline with white center) into the
 /// RGBA buffer. The dot pixel is grid.pixelForWorld(playerXZ) (nearest display
 /// pixel); when it falls outside the grid nothing is painted.

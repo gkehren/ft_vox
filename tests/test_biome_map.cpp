@@ -84,6 +84,160 @@ static void test_biome_map_pan_navigation()
 		  "Non-positive screen scale leaves the center unchanged");
 }
 
+// Drag-pan state machine (issue #192 review): Idle -> Pressed -> Dragging,
+// threshold-gated so a plain RMB/MMB click is a STRICT no-op (no translation
+// -> no supersede in the World panel), with a sticky initiating button and a
+// preview offset that survives the drag until the current view publishes.
+static void test_biome_map_pan_state_machine()
+{
+	const auto btn = [](bool clicked, bool down, bool dragging) {
+		return BiomeMapPanButtonInput{clicked, down, dragging};
+	};
+	const auto input = [&](bool mapActive, bool hovered, bool follow, glm::vec2 delta,
+						   BiomeMapPanButtonInput r, BiomeMapPanButtonInput m) {
+		BiomeMapPanInput in;
+		in.mapActive = mapActive;
+		in.hovered = hovered;
+		in.follow = follow;
+		in.mouseDelta = delta;
+		in.buttons[0] = r;
+		in.buttons[1] = m;
+		return in;
+	};
+	const auto none = btn(false, false, false);
+	const glm::vec2 zero{0.f, 0.f};
+
+	// RMB press over the map arms the pan without translating anything.
+	BiomeMapPan pan{};
+	BiomeMapPanStep s = stepBiomeMapPan(pan, input(true, true, false, zero,
+												   btn(true, true, false), none));
+	CHECK(s.pan.state == BiomeMapPanState::Pressed && s.pan.button == 1 &&
+			  s.dragDelta == zero && s.pan.previewOffset == zero,
+		  "RMB press over the map arms Pressed without translating");
+
+	// RMB click without movement: release below the threshold -> Idle,
+	// nothing translated, no offset created.
+	pan = s.pan;
+	s = stepBiomeMapPan(pan, input(true, true, false, zero,
+								   btn(false, false, false), none));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.button == -1 &&
+			  s.dragDelta == zero && s.pan.previewOffset == zero,
+		  "RMB click without movement is a strict no-op");
+
+	// MMB click without movement: same strict no-op through button 2.
+	pan = BiomeMapPan{};
+	s = stepBiomeMapPan(pan, input(true, true, false, zero,
+								   none, btn(true, true, false)));
+	CHECK(s.pan.state == BiomeMapPanState::Pressed && s.pan.button == 2,
+		  "MMB press arms the pan on button 2");
+	pan = s.pan;
+	s = stepBiomeMapPan(pan, input(true, true, false, zero,
+								   none, btn(false, false, false)));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.dragDelta == zero &&
+			  s.pan.previewOffset == zero,
+		  "MMB click without movement is a strict no-op");
+
+	// Movement below the threshold translates nothing while Pressed.
+	pan = BiomeMapPan{};
+	pan.state = BiomeMapPanState::Pressed;
+	pan.button = 1;
+	s = stepBiomeMapPan(pan, input(true, true, false, {2.f, 1.f},
+								   btn(false, true, false), none));
+	CHECK(s.pan.state == BiomeMapPanState::Pressed && s.dragDelta == zero &&
+			  s.pan.previewOffset == zero,
+		  "Movement below the drag threshold is a no-op");
+
+	// Exceeding the threshold starts the drag and applies the WHOLE movement.
+	s = stepBiomeMapPan(s.pan, input(true, true, false, {6.f, 3.f},
+									 btn(false, true, true), none));
+	CHECK(s.pan.state == BiomeMapPanState::Dragging && s.dragStarted &&
+			  s.dragDelta == glm::vec2(6.f, 3.f) &&
+			  s.pan.previewOffset == glm::vec2(6.f, 3.f),
+		  "Crossing the threshold starts Dragging with the accumulated movement");
+
+	// The initiating button is sticky: RMB armed (Pressed, below the
+	// threshold), MMB dragging changes nothing while RMB stays the
+	// initiating button.
+	pan = BiomeMapPan{};
+	pan.state = BiomeMapPanState::Pressed;
+	pan.button = 1;
+	s = stepBiomeMapPan(pan, input(true, true, false, zero,
+								   btn(false, true, false), btn(true, true, true)));
+	CHECK(s.pan.state == BiomeMapPanState::Pressed && s.pan.button == 1 &&
+			  s.dragDelta == zero,
+		  "Initiating button stays sticky against the other button's drag");
+
+	// RMB drag, then MMB press, then RMB release: the pan ENDS even though
+	// MMB is still held (offset persists — the texture is still offset).
+	pan.state = BiomeMapPanState::Dragging;
+	pan.button = 1;
+	pan.previewOffset = {4.f, 0.f};
+	s = stepBiomeMapPan(pan, input(true, true, false, {2.f, 0.f},
+								   btn(false, false, false), btn(true, true, true)));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.dragEnded &&
+			  s.dragDelta == zero && s.pan.previewOffset == glm::vec2(4.f, 0.f),
+		  "RMB release ends the pan despite MMB still held, keeping the offset");
+
+	// Dragging continues with the cursor OUTSIDE the map rect.
+	pan.state = BiomeMapPanState::Dragging;
+	pan.button = 2;
+	pan.previewOffset = {1.f, 1.f};
+	s = stepBiomeMapPan(pan, input(true, false, false, {3.f, -2.f},
+								   none, btn(false, true, true)));
+	CHECK(s.pan.state == BiomeMapPanState::Dragging &&
+			  s.dragDelta == glm::vec2(3.f, -2.f) &&
+			  s.pan.previewOffset == glm::vec2(4.f, -1.f),
+		  "Drag outside the map rect keeps translating and accumulating");
+
+	// Release outside the rect stops the pan, offset intact.
+	s = stepBiomeMapPan(s.pan, input(true, false, false, zero,
+									 none, btn(false, false, false)));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.dragEnded &&
+			  s.pan.previewOffset == glm::vec2(4.f, -1.f),
+		  "Release outside the rect stops the pan and keeps the offset");
+
+	// A motionless dragging frame translates nothing (no supersede).
+	pan.state = BiomeMapPanState::Dragging;
+	pan.button = 1;
+	s = stepBiomeMapPan(pan, input(true, true, false, zero,
+								   btn(false, true, true), none));
+	CHECK(s.pan.state == BiomeMapPanState::Dragging && s.dragDelta == zero,
+		  "Motionless dragging frame produces no translation");
+
+	// Follow player re-enabled mid-pan: full reset, preview offset included.
+	pan.state = BiomeMapPanState::Dragging;
+	pan.button = 1;
+	pan.previewOffset = {8.f, 4.f};
+	s = stepBiomeMapPan(pan, input(true, true, true, {5.f, 5.f},
+								   btn(false, true, true), none));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.button == -1 &&
+			  s.pan.previewOffset == zero && s.dragDelta == zero,
+		  "Follow player re-enable resets the whole pan state");
+
+	// Map invalidation (world/seed change): same full reset.
+	s = stepBiomeMapPan(pan, input(false, true, false, {5.f, 5.f},
+								   btn(false, true, true), none));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.button == -1 &&
+			  s.pan.previewOffset == zero,
+		  "Map invalidation resets the whole pan state");
+
+	// Idle ignores presses that did not happen over the map.
+	pan = BiomeMapPan{};
+	s = stepBiomeMapPan(pan, input(true, false, false, zero,
+								   btn(true, true, false), none));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.button == -1,
+		  "Press outside the map rect never arms the pan");
+
+	// Publication of the current view clears ONLY the preview offset.
+	pan.state = BiomeMapPanState::Dragging;
+	pan.button = 1;
+	pan.previewOffset = {7.f, 9.f};
+	clearBiomeMapPanPreview(pan);
+	CHECK(pan.previewOffset == zero && pan.state == BiomeMapPanState::Dragging &&
+			  pan.button == 1,
+		  "clearBiomeMapPanPreview drops the offset but keeps the drag state");
+}
+
 // Published-grid lifecycle invariant (issue #191 review round 2), tested as
 // FRAME PHASES through the exact pure state GameUI owns
 // (BiomeMapPresentationState): the UI build (drawWorld) always reads
@@ -1100,6 +1254,7 @@ int main(int argc, char **argv)
 	std::cout << "[test_biome_map] Running tests...\n";
 	test_biome_map_continuous_pixel();
 	test_biome_map_pan_navigation();
+	test_biome_map_pan_state_machine();
 	test_upload_grid_publication_lifecycle();
 	test_invalid_pending_never_publishes();
 	test_biome_map_result_validity();
