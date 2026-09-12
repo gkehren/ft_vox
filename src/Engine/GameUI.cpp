@@ -526,6 +526,39 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		}
 	}
 
+	// Drag-pan while follow is off (issue #192): RMB/MMB moves the view
+	// center, the content follows the cursor, and the mapping goes through
+	// the PUBLISHED grid so it matches what is on screen. Supersede
+	// semantics are identical to zoom: one flag bump coalesces the whole
+	// drag — tickBiomeMap dispatches at most one single-flight job per frame
+	// and only while nothing is running, never per pixel of movement.
+	const bool panHeld = ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
+						 ImGui::IsMouseDown(ImGuiMouseButton_Middle);
+	if (m_mapPanning && (!mapDrawn || m_mapFollow || !panHeld))
+		m_mapPanning = false;
+	if (mapDrawn && !m_mapFollow)
+	{
+		if (!m_mapPanning && ImGui::IsItemHovered() &&
+			(ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+			 ImGui::IsMouseClicked(ImGuiMouseButton_Middle)))
+			m_mapPanning = true;
+		if (m_mapPanning)
+		{
+			ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+			const ImVec2 drag = ImGui::GetIO().MouseDelta;
+			const BiomeRegionGrid &grid = m_mapPresentation.publishedGrid;
+			const float screenPxPerMapPx =
+				(mapMax.x - mapMin.x) / static_cast<float>(grid.width);
+			const glm::vec2 panned =
+				biomeMapPanCenter(grid, m_mapCenter, {drag.x, drag.y}, screenPxPerMapPx);
+			if (panned != m_mapCenter)
+			{
+				m_mapCenter = panned;
+				supersedeBiomeMapRequest();
+			}
+		}
+	}
+
 	if (mapDrawn && m_mapPresentation.publishedGrid.valid())
 	{
 		// Cheap draw-list overlays (issue #186 §8), mapped through the grid

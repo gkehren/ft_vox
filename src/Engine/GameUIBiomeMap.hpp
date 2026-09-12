@@ -238,6 +238,23 @@ inline glm::vec2 biomeMapContinuousPixel(const BiomeRegionGrid &grid, glm::vec2 
 			(world.y - grid.center.y) / grid.step + static_cast<float>(grid.height) * 0.5f};
 }
 
+/// View center after panning the map by a drag delta in screen pixels
+/// (issue #192): the content follows the cursor, so the center moves the
+/// OPPOSITE way — screen +X is world +X, but screen +Y (down) is world -Y.
+/// `screenPxPerMapPx` converts drag pixels into map pixels through the
+/// drawn image rect; an invalid grid or non-positive scale is a no-op.
+/// Pure so tests and the World-panel drag handler share one mapping.
+inline glm::vec2 biomeMapPanCenter(const BiomeRegionGrid &grid,
+								   glm::vec2 center,
+								   glm::vec2 dragPx,
+								   float screenPxPerMapPx)
+{
+	if (!grid.valid() || !(screenPxPerMapPx > 0.f))
+		return center;
+	const float worldPerPx = grid.step / screenPxPerMapPx;
+	return {center.x - dragPx.x * worldPerPx, center.y - dragPx.y * worldPerPx};
+}
+
 /// Paint the player indicator dot (black outline with white center) into the
 /// RGBA buffer. The dot pixel is grid.pixelForWorld(playerXZ) (nearest display
 /// pixel); when it falls outside the grid nothing is painted.

@@ -49,6 +49,41 @@ static void test_biome_map_continuous_pixel()
 		  "continuous pixel rounds to grid.pixelForWorld");
 }
 
+// Drag-pan navigation (issue #192): the pure center update shared by the
+// World-panel drag handler. The content follows the cursor, so the view
+// center moves OPPOSITE the drag; screen Y is down while the grid's world Y
+// points up through biomeMapContinuousPixel (row 0 = min Z).
+static void test_biome_map_pan_navigation()
+{
+	// 128x128 map at step 0.5 (zoom 2x), centered at the origin.
+	const BiomeRegionGrid grid = makeBiomeRegionGrid(0.f, 0.f, 0.5f, 128, 128);
+
+	const glm::vec2 rightDrag = biomeMapPanCenter(grid, {0.f, 0.f}, {20.f, 0.f}, 1.0f);
+	CHECK(rightDrag.x == -10.f && rightDrag.y == 0.f,
+		  "Dragging right pans the center west, by drag * step per screen pixel");
+
+	const glm::vec2 downDrag = biomeMapPanCenter(grid, {0.f, 0.f}, {0.f, 20.f}, 1.0f);
+	CHECK(downDrag.x == 0.f && downDrag.y == -10.f,
+		  "Dragging down (screen +Y) pans the center to negative world Y");
+
+	// A drawn image that doubles map pixels on screen halves the world
+	// distance per screen pixel.
+	const glm::vec2 scaled = biomeMapPanCenter(grid, {0.f, 0.f}, {20.f, 0.f}, 2.0f);
+	CHECK(scaled.x == -5.f && scaled.y == 0.f,
+		  "Pan distance divides by the on-screen map-pixel scale");
+
+	const glm::vec2 shifted = biomeMapPanCenter(grid, {64.f, -32.f}, {-8.f, 4.f}, 1.0f);
+	CHECK(shifted.x == 68.f && shifted.y == -34.f,
+		  "Panning is relative to the current view center");
+
+	// Degenerate inputs are a no-op rather than NaN-ing the center.
+	const BiomeRegionGrid invalid{};
+	CHECK(biomeMapPanCenter(invalid, {3.f, 4.f}, {10.f, 10.f}, 1.0f) == glm::vec2(3.f, 4.f),
+		  "Invalid grid leaves the center unchanged");
+	CHECK(biomeMapPanCenter(grid, {3.f, 4.f}, {10.f, 10.f}, 0.f) == glm::vec2(3.f, 4.f),
+		  "Non-positive screen scale leaves the center unchanged");
+}
+
 // Published-grid lifecycle invariant (issue #191 review round 2), tested as
 // FRAME PHASES through the exact pure state GameUI owns
 // (BiomeMapPresentationState): the UI build (drawWorld) always reads
@@ -1064,6 +1099,7 @@ int main(int argc, char **argv)
 	test_parallel_maps();
 	std::cout << "[test_biome_map] Running tests...\n";
 	test_biome_map_continuous_pixel();
+	test_biome_map_pan_navigation();
 	test_upload_grid_publication_lifecycle();
 	test_invalid_pending_never_publishes();
 	test_biome_map_result_validity();
