@@ -5,6 +5,7 @@
 #endif
 
 #include <vector>
+#include <cassert>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -609,7 +610,13 @@ private:
 	std::atomic<bool> m_inTransit{false};
 	std::atomic<bool> m_localLightCacheWanted{false};
 
-	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const;
+	// Hot inner-loop arithmetic (meshing/lighting/editing all call it);
+	// inline so the implementation split (issue #181) keeps it inlinable
+	// in every consumer TU.
+	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const
+	{
+		return y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x;
+	}
 
 private:
 	size_t m_activeIndex{SIZE_MAX};
@@ -636,4 +643,21 @@ inline size_t Chunk::collectWaterDraws(std::vector<IndirectDraw> &out) const
 	out.insert(out.end(), m_cachedWaterDraws.data(),
 	           m_cachedWaterDraws.data() + m_cachedWaterDrawCount);
 	return m_cachedWaterDrawCount;
+}
+
+// Strict internal accessor (issue #114 final review): out-of-range
+// coordinates would index past the voxel storage. Callers that can
+// see outside the chunk must use sampleForMeshing()/isVoxelActive(),
+// which answer AIR/false for the padded neighborhood. Defined inline so
+// the hot meshing/lighting/editing paths keep it inlined in every TU of
+// the split implementation (issue #181).
+inline const Voxel &Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
+{
+	assert(x < CHUNK_SIZE && y < CHUNK_HEIGHT && z < CHUNK_SIZE);
+	if (!m_storage)
+	{
+		static constexpr Voxel s_air{static_cast<uint8_t>(AIR)};
+		return s_air;
+	}
+	return m_storage->voxels[getIndex(x, y, z)];
 }

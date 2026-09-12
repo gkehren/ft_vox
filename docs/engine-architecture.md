@@ -211,7 +211,17 @@ Reproduce that path with `ft_vox --seed 42 --benchmark 5 --benchmark-warmup 0`.
 
 ## 5. Chunk (`Chunk`)
 
-File: `src/Chunk/Chunk.hpp` / `Chunk.cpp`.
+Files: `src/Chunk/Chunk.hpp` plus an implementation partitioned by
+responsibility (issue #181): `Chunk.cpp` (construction/moves, storage
+lifecycle, occupancy metadata, border-shell borrow/release, terrain
+generation, reset, CPU telemetry), `ChunkEditing.cpp` (voxel edits + dirty
+section marking), `ChunkLighting.cpp` (light sampling, chunk-wide light
+field, light-cache packing, neighbor light halo), `ChunkMeshing.cpp`
+(full/LOD greedy builds, mesh-space sampling), and `ChunkGpu.cpp` (mesh
+result publication, arena replacement phases, indirect draw cache,
+retirement). The worker-side translation units share the thread-local
+scratch buffers declared in the internal `ChunkMeshScratch.hpp`. These files
+implement one class — every build target compiling one must link them all.
 
 ### Data
 
