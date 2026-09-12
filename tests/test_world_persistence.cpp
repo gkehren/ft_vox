@@ -14,6 +14,7 @@
 #include <World/WorldSave.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -471,97 +472,132 @@ static void testBarrierOrderingIndependentOfRevisions()
 	auto root = makeTempDir("barrier");
 	const auto chunks = root / "w" / "chunks";
 	std::filesystem::create_directories(chunks);
-	const std::vector<Voxel> baseB = gen.generateChunk(0, 0).voxels;
-	const std::vector<Voxel> baseA = gen.generateChunk(1, 0).voxels;
+	const std::vector<Voxel> baseX = gen.generateChunk(0, 0).voxels;
+	const std::vector<Voxel> baseB = gen.generateChunk(1, 0).voxels;
+	const std::vector<Voxel> baseC = gen.generateChunk(2, 0).voxels;
 
+	const uint32_t ix = idxOf(3, 50, 3);
 	const uint32_t ib = idxOf(2, 60, 4);
-	const uint32_t ia = idxOf(7, 80, 9);
+	const uint32_t ic = idxOf(7, 80, 9);
+	const uint8_t vx = pickNonBase(baseX[ix].type);
 	const uint8_t vb = pickNonBase(baseB[ib].type);
-	const uint8_t vb2 = pickNonBase(baseB[ib].type) == vb
-	                        ? static_cast<uint8_t>(BRICKS)
-	                        : pickNonBase(baseB[ib].type);
-	const uint8_t va = pickNonBase(baseA[ia].type);
+	const uint8_t vb2 = (vb == static_cast<uint8_t>(BRICKS)) ? static_cast<uint8_t>(GLASS)
+	                                                         : static_cast<uint8_t>(BRICKS);
+	const uint8_t vc = pickNonBase(baseC[ic].type);
 
 	SaveService svc(chunks, 42);
 
-	// Block coordinate (1,0)'s first job inside the serialize seam.
+	// Block the FIRST serialize call of X and of C; B runs through.
 	std::mutex m;
 	std::condition_variable cv;
-	bool aBlocked = false;
-	bool releaseA = false;
-	int aSerializeCalls = 0;
+	bool xBlocked = false;
+	bool cBlocked = false;
+	bool releaseX = false;
+	bool releaseC = false;
 	svc.setSerializeFnForTests(
 		[&](int32_t cx, int32_t cz, const std::vector<worldsave::ChunkEdit> &currentValues)
 		{
-			if (cx == 1 && cz == 0)
+			if (cx == 0 && cz == 0)
 			{
 				std::unique_lock<std::mutex> lock(m);
-				if (++aSerializeCalls == 1)
+				if (!xBlocked)
 				{
-					aBlocked = true;
+					xBlocked = true;
 					cv.notify_all();
-					cv.wait(lock, [&] { return releaseA; });
+					cv.wait(lock, [&] { return releaseX; });
+				}
+			}
+			else if (cx == 2 && cz == 0)
+			{
+				std::unique_lock<std::mutex> lock(m);
+				if (!cBlocked)
+				{
+					cBlocked = true;
+					cv.notify_all();
+					cv.wait(lock, [&] { return releaseC; });
 				}
 			}
 			return currentValues;
 		});
 
-	// rev2 = coord B (ticket 1); rev3 = coord A (ticket 2, blocks); rev4 =
-	// coord B (ticket 3) REPLACES rev2 in the queue, resolving ticket 1.
-	ChunkSaveRequest r2;
-	r2.chunkX = 0;
-	r2.chunkZ = 0;
-	r2.revision = 2;
-	r2.currentValues = {{ib, vb}};
-	CHECK(svc.enqueue(std::move(r2)), "enqueue rev2 (B)");
-
-	ChunkSaveRequest r3;
-	r3.chunkX = 1;
-	r3.chunkZ = 0;
-	r3.revision = 3;
-	r3.currentValues = {{ia, va}};
-	CHECK(svc.enqueue(std::move(r3)), "enqueue rev3 (A)");
-
+	// ticket1: X/rev1 - the worker pops it and blocks in serialize.
+	ChunkSaveRequest rx;
+	rx.chunkX = 0;
+	rx.chunkZ = 0;
+	rx.revision = 1;
+	rx.currentValues = {{ix, vx}};
+	CHECK(svc.enqueue(std::move(rx)), "enqueue X (ticket1)");
 	{
 		std::unique_lock<std::mutex> lock(m);
-		cv.wait(lock, [&] { return aBlocked; });
+		cv.wait(lock, [&] { return xBlocked; });
 	}
 
-	ChunkSaveRequest r4;
-	r4.chunkX = 0;
-	r4.chunkZ = 0;
-	r4.revision = 4;
-	r4.currentValues = {{ib, vb2}};
-	CHECK(svc.enqueue(std::move(r4)), "enqueue rev4 (B) replaces rev2");
+	// ticket2: B/rev2, ticket3: C/rev3, ticket4: B/rev4 REPLACES ticket2.
+	ChunkSaveRequest rb2;
+	rb2.chunkX = 1;
+	rb2.chunkZ = 0;
+	rb2.revision = 2;
+	rb2.currentValues = {{ib, vb}};
+	CHECK(svc.enqueue(std::move(rb2)), "enqueue B rev2 (ticket2)");
 
-	// rev4 (newer) completes while rev3 (older) is still in flight.
-	while (svc.stats().completed < 1)
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	ChunkSaveRequest rc;
+	rc.chunkX = 2;
+	rc.chunkZ = 0;
+	rc.revision = 3;
+	rc.currentValues = {{ic, vc}};
+	CHECK(svc.enqueue(std::move(rc)), "enqueue C rev3 (ticket3)");
 
-	// A flush sampled NOW must wait for rev3's ticket even though rev4 -
-	// with a HIGHER revision - already finished. Regression: the old
-	// revision-ordered barrier passed here while rev3 was still queued.
-	bool flushReturned = false;
-	std::thread flusher([&]
-	                    {
-		                    svc.flush();
-		                    flushReturned = true;
-	});
-	std::this_thread::sleep_for(std::chrono::milliseconds(150));
-	CHECK(!flushReturned, "flush waits for the older ticket despite a newer finished revision");
+	ChunkSaveRequest rb4;
+	rb4.chunkX = 1;
+	rb4.chunkZ = 0;
+	rb4.revision = 4;
+	rb4.currentValues = {{ib, vb2}};
+	CHECK(svc.enqueue(std::move(rb4)), "enqueue B rev4 (ticket4 replaces ticket2)");
+
+	// Release X. The single worker then: finishes X, finishes B/rev4 (a
+	// HIGHER revision than C/rev3, which is still queued), then pops C/rev3
+	// and blocks again. Exactly the reordering that broke the old
+	// revision-ordered barrier.
 	{
 		std::lock_guard<std::mutex> lock(m);
-		releaseA = true;
+		releaseX = true;
+		cv.notify_all();
+	}
+	while (svc.stats().completed < 2)
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	{
+		std::unique_lock<std::mutex> lock(m);
+		cv.wait(lock, [&] { return cBlocked; });
+	}
+
+	// Old barrier: lastFinishedRevision(rev4) >= highestEnqueued(rev4) =>
+	// flush returned HERE while rev3 was still pending. New ticket barrier:
+	// unfinished ticket3 <= target ticket4 => flush must stay blocked.
+	std::atomic<bool> flushReturned{false};
+	std::thread flusher(
+		[&]
+		{
+			svc.flush();
+			flushReturned.store(true, std::memory_order_release);
+		});
+	std::this_thread::sleep_for(std::chrono::milliseconds(150));
+	CHECK(!flushReturned.load(std::memory_order_acquire),
+	      "flush waits for the older ticket although a newer revision already finished");
+	{
+		std::lock_guard<std::mutex> lock(m);
+		releaseC = true;
 		cv.notify_all();
 	}
 	flusher.join();
-	CHECK(flushReturned, "flush returns once the older ticket resolves");
+	CHECK(flushReturned.load(std::memory_order_acquire), "flush returns once ticket3 resolves");
 
-	std::vector<worldsave::ChunkEdit> diskB, diskA;
-	CHECK(readChunk(chunks, 0, 0, diskB), "B file written");
-	CHECK(readChunk(chunks, 1, 0, diskA), "A file written");
+	std::vector<worldsave::ChunkEdit> diskX, diskB, diskC;
+	CHECK(readChunk(chunks, 0, 0, diskX), "X file written");
+	CHECK(readChunk(chunks, 1, 0, diskB), "B file written");
+	CHECK(readChunk(chunks, 2, 0, diskC), "C file written");
+	CHECK(sameEdits(diskX, {{ix, vx}}), "X reflects its revision");
 	CHECK(sameEdits(diskB, {{ib, vb2}}), "B reflects the replacing revision");
-	CHECK(sameEdits(diskA, {{ia, va}}), "A reflects the blocked revision");
+	CHECK(sameEdits(diskC, {{ic, vc}}), "C reflects the revision the barrier waited for");
 
 	svc.shutdown();
 	removeDir(root);
@@ -1512,6 +1548,115 @@ static void testCloseWorldRefusesWhenEditsStranded()
 }
 
 // ---------------------------------------------------------------------------
+// 8c-ter. Destructor lifecycle (issue #180 review round 3, item 11): the
+// destructor itself must publish completions, apply deferred edits and save
+// - WITHOUT any manual processFinishedJobs() call.
+// ---------------------------------------------------------------------------
+
+static void testDestructorDrainsCompletionsBeforeTeardown()
+{
+	auto root = makeTempDir("dtordrain");
+	const std::string savesRoot = (root / "saves").string();
+	const int seed = 42;
+	// Chunk (1,1); local (5,150,5).
+	const glm::vec3 editPos(1.0f * CHUNK_SIZE + 5.0f, 150.0f, 1.0f * CHUNK_SIZE + 5.0f);
+	const uint32_t editIdx = idxOf(5, 150, 5);
+
+	{
+		TerrainGenerator gen(seed);
+		ThreadPool threads(2);
+		ChunkPool pool(64);
+		ChunkManager mgr(&gen, &threads, &pool);
+		std::string err;
+		CHECK(mgr.openWorld(savesRoot, "dtordrain", err), ("openWorld failed: " + err).c_str());
+
+		Camera camera(glm::vec3(1.0f * CHUNK_SIZE + 8.0f, 100.0f, 1.0f * CHUNK_SIZE + 8.0f));
+		RenderSettings settings;
+		settings.minRenderDistance = 32;
+		settings.maxRenderDistance = 48;
+		mgr.updateStreaming(camera, settings);
+		mgr.processChunkLoading(64);
+		// Gen dispatched but NOT drained: chunk (1,1) is in transit when the
+		// edit lands, so the edit is deferred as a PendingVoxelEdit.
+		mgr.generatePendingVoxels(camera, settings, 16);
+		CHECK(mgr.placeVoxel(editPos, BRICKS), "edit accepted while the gen job is in flight");
+
+		// Deliberately NO processFinishedJobs, NO closeWorld, NO flush.
+	} // ~ChunkManager: forceCloseWorldForShutdown must do all of it.
+
+	WorldPersistence verify;
+	const WorldPersistence::OpenInfo info =
+		verify.openOrCreate(savesRoot, "dtordrain", seed, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok, "world reopens after the destructor");
+	const std::vector<worldsave::ChunkEdit> saved = verify.overridesSnapshot(1, 1);
+	bool found = false;
+	for (const worldsave::ChunkEdit &e : saved)
+		if (e.localIndex == editIdx && e.blockType == static_cast<uint8_t>(BRICKS))
+			found = true;
+	CHECK(found, "the edit accepted against an in-flight gen job was saved by the destructor");
+	verify.shutdown();
+
+	removeDir(root);
+}
+
+static void testDestructorPublishesUnpublishedMeshCompletions()
+{
+	auto root = makeTempDir("dtormesh");
+	const std::string savesRoot = (root / "saves").string();
+	const int seed = 42;
+	// Chunk (0,0); local (6,160,3).
+	const glm::vec3 editPos(6.0f, 160.0f, 3.0f);
+	const uint32_t editIdx = idxOf(6, 160, 3);
+
+	{
+		TerrainGenerator gen(seed);
+		ThreadPool threads(2);
+		ChunkPool pool(64);
+		ChunkManager mgr(&gen, &threads, &pool);
+		std::string err;
+		CHECK(mgr.openWorld(savesRoot, "dtormesh", err), ("openWorld failed: " + err).c_str());
+
+		Camera camera(glm::vec3(8.0f, 100.0f, 8.0f));
+		RenderSettings settings;
+		settings.minRenderDistance = 32;
+		settings.maxRenderDistance = 48;
+		mgr.updateStreaming(camera, settings);
+		mgr.processChunkLoading(64);
+		mgr.generatePendingVoxels(camera, settings, 16);
+		while (mgr.pendingGenJobs() > 0)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		mgr.processFinishedJobs(); // publish generation (only this once)
+
+		// Dispatch the mesh job and wait for the worker to finish WITHOUT
+		// publishing: the completion sits in m_completedMeshJobs when the
+		// destructor runs.
+		mgr.meshPendingChunks(camera, settings, 16);
+		while (mgr.pendingMeshJobs() > 0)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		CHECK(mgr.placeVoxel(editPos, GLASS), "edit accepted against an unpublished mesh completion");
+
+		// Deliberately NO processFinishedJobs: the destructor must publish
+		// the mesh completion, apply the deferred edit and save.
+	} // ~ChunkManager
+
+	WorldPersistence verify;
+	const WorldPersistence::OpenInfo info =
+		verify.openOrCreate(savesRoot, "dtormesh", seed, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok, "world reopens after the destructor");
+	const std::vector<worldsave::ChunkEdit> saved = verify.overridesSnapshot(0, 0);
+	bool found = false;
+	for (const worldsave::ChunkEdit &e : saved)
+		if (e.localIndex == editIdx && e.blockType == static_cast<uint8_t>(GLASS))
+			found = true;
+	CHECK(found, "the edit accepted against an unpublished mesh completion was saved");
+	verify.shutdown();
+
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
 // 8. Player state (issue #180, Phase 5): <world>/player.state
 // ---------------------------------------------------------------------------
 
@@ -1673,6 +1818,8 @@ int main()
 	std::cout << "== Destructor safety net ==\n";
 	testCloseWorldDrainsPendingEdits();
 	testCloseWorldRefusesWhenEditsStranded();
+	testDestructorDrainsCompletionsBeforeTeardown();
+	testDestructorPublishesUnpublishedMeshCompletions();
 	testQueueCoalescingAndBusy();
 	testScanErrorRefusesOpen();
 	testDestructorSafetyNet();

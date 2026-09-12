@@ -1065,3 +1065,50 @@ target_link_libraries(test_world_save PRIVATE
 )
 
 add_test(NAME WorldSave COMMAND test_world_save)
+
+# ---------------------------------------------------------------------------
+# Engine-level lifecycle: persistent world x reloadWorld (issue #180 review
+# round 3, item 12). Compiles the full engine minus main.cpp; needs a
+# GPU/window so it skips (77) when the engine cannot be constructed.
+# ---------------------------------------------------------------------------
+set(FT_VOX_ENGINE_TEST_SOURCES ${FT_VOX_SOURCES})
+list(REMOVE_ITEM FT_VOX_ENGINE_TEST_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
+
+add_executable(test_engine_reload
+    test_engine_reload.cpp
+    ${FT_VOX_ENGINE_TEST_SOURCES}
+)
+
+add_dependencies(test_engine_reload ft_vox_shaders ft_vox_build_info)
+
+target_include_directories(test_engine_reload PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/imgui
+    ${CMAKE_SOURCE_DIR}/src/ImGuiFileDialog
+    ${FT_VOX_GENERATED_DIR}
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_engine_reload PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+if(APPLE)
+    target_compile_definitions(test_engine_reload PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_engine_reload PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+target_link_libraries(test_engine_reload PRIVATE
+    ${FT_VOX_COMMON_LIBS}
+)
+
+add_test(NAME EngineReload COMMAND test_engine_reload)
+set_tests_properties(EngineReload PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "FT_VOX_VALIDATION=1"
+)
+
