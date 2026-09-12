@@ -288,13 +288,24 @@ namespace worldsave
 
 	SaveStatus removeChunkFile(const std::filesystem::path &chunksDir, int32_t chunkX, int32_t chunkZ);
 
+	// Scan outcome with an explicit status (issue #180 review): a missing
+	// directory is Ok (a fresh world simply has no saves), but a permission
+	// error or a non-directory path is IoError - an I/O error must never be
+	// misread by callers as "no overrides saved".
+	struct ScanResult
+	{
+		SaveStatus status{SaveStatus::Ok};
+		std::vector<std::filesystem::path> files;
+	};
+
 	// Regular files matching "<x>_<z>.chunk" (parseChunkFileName-strict);
-	// everything else - including ".tmp" sidecars - is ignored. Empty when
-	// the directory does not exist. Deterministic (lexicographic) order.
-	std::vector<std::filesystem::path> scanChunkFiles(const std::filesystem::path &chunksDir);
+	// everything else - including ".tmp" sidecars - is ignored.
+	// Deterministic (lexicographic) order.
+	ScanResult scanChunkFiles(const std::filesystem::path &chunksDir);
 
 	// Removes "*.chunk.tmp" leftovers from interrupted writes. Ok when the
-	// directory is missing or nothing needed removing.
+	// directory is missing or nothing needed removing; IoError when a
+	// leftover could not be removed (callers should refuse to open).
 	SaveStatus cleanTempFiles(const std::filesystem::path &chunksDir);
 
 	// Pure diff used by the future save worker and tests: from

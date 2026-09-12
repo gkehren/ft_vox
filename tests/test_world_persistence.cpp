@@ -435,11 +435,13 @@ static void testWriteFailureRetry()
 		CHECK(st.dirtyCoordinates >= 1, "failed coordinate stays dirty");
 	}
 	CHECK(!fileExists(root / "w" / "chunks" / "0_0.chunk"), "no file created by the failed write");
+	// The flush's bounded retry rounds re-attempted the write internally
+	// (kMaxFlushRounds rounds => the seam saw several failing attempts).
+	CHECK(writeCalls.load() >= 2, "flush retried the failure within its rounds");
 
 	// Retry: clear the seam and flush again - the dirty coordinate is
 	// re-enqueued by flush itself and the real writer now succeeds (the seam
 	// counter stays at the one failed attempt).
-	CHECK(writeCalls.load() == 1, "exactly one (failed) seam write before retry");
 	wp.setWriteTmpFnForTests(nullptr);
 	CHECK(wp.flush(), "retry flush succeeds");
 	CHECK(wp.status().completed >= 1, "retry completed a real write");
@@ -934,7 +936,7 @@ static void testManyChunksNoCrossContamination()
 	      "never-edited chunk has no overrides");
 	CHECK(!fileExists(chunkPath(chunksDir, untouched.x, untouched.z)),
 	      "never-edited chunk has no file");
-	CHECK(worldsave::scanChunkFiles(chunksDir).size() == edited.size(),
+	CHECK(worldsave::scanChunkFiles(chunksDir).files.size() == edited.size(),
 	      "one file per edited chunk, nothing else");
 
 	fresh.shutdown();
@@ -975,7 +977,7 @@ static void testDisabledPersistence()
 
 	CHECK(mgr.flushWorld(), "flushWorld is a no-op success without a world");
 	CHECK(!std::filesystem::exists(savesRoot), "no saves root was created");
-	CHECK(worldsave::scanChunkFiles(root).empty(), "no chunk files anywhere");
+	CHECK(worldsave::scanChunkFiles(root).files.empty(), "no chunk files anywhere");
 	removeDir(root);
 }
 
@@ -1103,6 +1105,111 @@ static void testDestructorSafetyNet()
 	          o[0].blockType == static_cast<uint8_t>(BRICKS),
 	      "destructor flushed the recorded edit");
 	verify.shutdown();
+
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
+// 8c. Queue bounds: heavy same-coordinate captures coalesce (never blocked),
+// and more distinct coordinates than the bound stay dirty until flushed.
+// ---------------------------------------------------------------------------
+
+static void testQueueCoalescingAndBusy()
+{
+	TerrainGenerator gen(42);
+	auto root = makeTempDir("queue");
+
+	WorldPersistence wp;
+	const WorldPersistence::OpenInfo info =
+		wp.openOrCreate(root, "w", 42, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok, "world opened");
+
+	// Stub the serialize step: a real base regeneration per request costs
+	// seconds (full chunk gen), which is pointless for queue-behavior
+	// coverage. The stub echoes the payload as the minimal diff.
+	wp.setSerializeFnForTests(
+		[](int32_t, int32_t, const std::vector<worldsave::ChunkEdit> &currentValues)
+		{ return currentValues; });
+
+	const std::vector<Voxel> base = gen.generateChunk(0, 0).voxels;
+	const uint32_t ia = idxOf(3, 40, 5);
+	const uint8_t va = pickNonBase(base[ia].type);
+
+	// (a) Thousands of captures for ONE coordinate coalesce into at most one
+	// pending job; the capture path never blocks on the queue.
+	const auto t0 = std::chrono::steady_clock::now();
+	for (int i = 0; i < 5000; ++i)
+		wp.captureChunkEdits(0, 0, {{ia, static_cast<uint8_t>(va + (i % 2))}});
+	const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                           std::chrono::steady_clock::now() - t0)
+	                           .count();
+	CHECK(elapsedMs < 2000, "5000 same-coordinate captures never block the caller");
+	CHECK(wp.flush(), "coalesced flush succeeds");
+	{
+		const WorldPersistence::Status st = wp.status();
+		CHECK(st.queueDepth == 0, "queue drained after flush");
+		CHECK(st.dirtyCoordinates == 0, "coordinate durable after flush");
+		CHECK(st.completed >= 1, "the coalesced coordinate was written");
+	}
+
+	// (b) More DISTINCT coordinates than the queue bound: the overload is
+	// rejected with Busy and stays dirty; flush retries until all durable.
+	constexpr int kDistinct = 1100; // bound is 1024
+	for (int i = 0; i < kDistinct; ++i)
+	{
+		const int32_t cx = static_cast<int32_t>(i % 50);
+		const int32_t cz = static_cast<int32_t>(i / 50) - 20;
+		wp.captureChunkEdits(cx, cz, {{static_cast<uint32_t>(ia + static_cast<uint32_t>(i)), va}});
+	}
+	{
+		const WorldPersistence::Status st = wp.status();
+		CHECK(st.queueDepth <= 1024, "queue bound holds (distinct coordinates)");
+		CHECK(st.dirtyCoordinates > 0, "overflow coordinates stay dirty for retry");
+	}
+	CHECK(wp.flush(), "flush retries the Busy-rejected coordinates to completion");
+	{
+		const WorldPersistence::Status st = wp.status();
+		CHECK(st.dirtyCoordinates == 0, "all coordinates durable after flush");
+		CHECK(st.queueDepth == 0, "queue empty after flush");
+	}
+
+	wp.shutdown();
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
+// 8d. A chunk-directory scan error must REFUSE the open instead of being
+// misread as "no overrides saved" (issue #180 review).
+// ---------------------------------------------------------------------------
+
+static void testScanErrorRefusesOpen()
+{
+	auto root = makeTempDir("scanerr");
+	const uint32_t genVersion = TerrainGenerator::kGeneratorVersion;
+
+	{
+		WorldPersistence writer;
+		const WorldPersistence::OpenInfo created =
+			writer.openOrCreate(root, "w", 42, genVersion);
+		CHECK(created.ok, "world created");
+		writer.shutdown();
+	}
+
+	// Replace the chunks directory with a regular file: scanning it is a
+	// real filesystem error, not an empty save set.
+	const auto chunksDir = root / "w" / "chunks";
+	std::error_code ec;
+	std::filesystem::remove_all(chunksDir, ec);
+	{
+		std::ofstream file(chunksDir, std::ios::binary | std::ios::trunc);
+		file.put(static_cast<char>(0x01));
+		CHECK(!file.fail(), "chunks path replaced by a file");
+	}
+
+	WorldPersistence wp;
+	const WorldPersistence::OpenInfo info = wp.openOrCreate(root, "w", 42, genVersion);
+	CHECK(!info.ok, "open refused when the chunk directory cannot be scanned");
+	CHECK(info.error.find("not readable") != std::string::npos, "scan error message");
 
 	removeDir(root);
 }
@@ -1265,6 +1372,8 @@ int main()
 	testDisabledPersistence();
 	std::cout << "== Destructor safety net ==\n";
 	testCloseWorldDrainsPendingEdits();
+	testQueueCoalescingAndBusy();
+	testScanErrorRefusesOpen();
 	testDestructorSafetyNet();
 	std::cout << "== Player state ==\n";
 	testPlayerStatePersistence();

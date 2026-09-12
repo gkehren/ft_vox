@@ -145,7 +145,9 @@ namespace worldsave
 			return SaveStatus::Corrupt;
 		if (std::memcmp(magic, kWorldMetaMagic, sizeof(magic)) != 0)
 			return SaveStatus::BadMagic;
-		if (outMeta.formatVersion > kWorldSaveFormatVersion)
+		// Save format v1 has no migrations: anything that is not the exact
+		// supported version (older OR newer) is rejected (issue #180 review).
+		if (outMeta.formatVersion != kWorldSaveFormatVersion)
 			return SaveStatus::UnsupportedVersion;
 		return SaveStatus::Ok;
 	}
@@ -201,6 +203,9 @@ namespace worldsave
 			// Out-of-range indices are a caller bug: refuse to persist them
 			// instead of writing a payload every future read would reject.
 			if (edit.localIndex >= CHUNK_VOLUME)
+				return {};
+			// Same for block types that no voxel can ever store.
+			if (static_cast<int>(edit.blockType) > static_cast<int>(AIR))
 				return {};
 			records.u32(edit.localIndex);
 			records.u8(edit.blockType);
@@ -309,10 +314,17 @@ namespace worldsave
 			return SaveStatus::Corrupt;
 		if (std::memcmp(magic, kChunkFileMagic, sizeof(magic)) != 0)
 			return SaveStatus::BadMagic;
-		if (version > kWorldSaveFormatVersion)
+		// Save format v1 has no migrations: exact version or reject.
+		if (version != kWorldSaveFormatVersion)
 			return SaveStatus::UnsupportedVersion;
 		if (chunkX != expectedChunkX || chunkZ != expectedChunkZ)
 			return SaveStatus::CoordinateMismatch;
+
+		// Structural sanity (issue #180 review): a chunk cannot carry more
+		// overrides than it has voxels, and a zero-record payload is not
+		// producible by the writer (reverted chunks delete the file).
+		if (editCount == 0 || editCount > static_cast<uint32_t>(CHUNK_VOLUME))
+			return SaveStatus::Corrupt;
 
 		// Exact size: the record region must hold exactly editCount records
 		// (catches truncation and a tampered count in one check).
@@ -333,12 +345,21 @@ namespace worldsave
 				return SaveStatus::Corrupt;
 			if (localIndex >= CHUNK_VOLUME)
 				return SaveStatus::Corrupt;
+			// blockType must be an encodable voxel value: anything above AIR
+			// (COUNT + 1, a legitimate stored value) is corruption.
+			if (static_cast<int>(blockType) > static_cast<int>(AIR))
+				return SaveStatus::Corrupt;
 			edits.push_back(ChunkEdit{localIndex, blockType});
 		}
 
 		// Stored order is arbitrary by contract; normalize to ascending.
 		std::sort(edits.begin(), edits.end(), [](const ChunkEdit &a, const ChunkEdit &b)
 		          { return a.localIndex < b.localIndex; });
+		// Duplicate localIndex values are corruption: the writer collapses
+		// per-voxel state, so two records for one voxel cannot be produced.
+		for (size_t i = 0; i + 1 < edits.size(); ++i)
+			if (edits[i].localIndex == edits[i + 1].localIndex)
+				return SaveStatus::Corrupt;
 		outEdits = std::move(edits);
 		return SaveStatus::Ok;
 	}
@@ -364,13 +385,21 @@ namespace worldsave
 		return SaveStatus::IoError;
 	}
 
-	std::vector<std::filesystem::path> scanChunkFiles(const std::filesystem::path &chunksDir)
+	ScanResult scanChunkFiles(const std::filesystem::path &chunksDir)
 	{
-		std::vector<std::filesystem::path> out;
+		ScanResult result;
 		std::error_code ec;
 		std::filesystem::directory_iterator it(chunksDir, ec);
 		if (ec)
-			return out; // missing/inaccessible directory: nothing to scan
+		{
+			// A missing directory is simply "no saves yet" (a fresh world);
+			// any other iteration failure is a real I/O problem and must be
+			// surfaced, never flattened into an empty listing.
+			result.status = std::filesystem::exists(chunksDir, ec) && !ec
+			                    ? SaveStatus::IoError
+			                    : SaveStatus::Ok;
+			return result;
+		}
 		for (const std::filesystem::directory_entry &entry : it)
 		{
 			std::error_code entryEc;
@@ -380,10 +409,10 @@ namespace worldsave
 			int32_t chunkZ = 0;
 			if (!parseChunkFileName(entry.path().filename().string(), chunkX, chunkZ))
 				continue; // ignores non-chunk names and ".tmp" sidecars
-			out.push_back(entry.path());
+			result.files.push_back(entry.path());
 		}
-		std::sort(out.begin(), out.end());
-		return out;
+		std::sort(result.files.begin(), result.files.end());
+		return result;
 	}
 
 	SaveStatus cleanTempFiles(const std::filesystem::path &chunksDir)

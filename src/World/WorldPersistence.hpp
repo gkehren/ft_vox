@@ -95,6 +95,13 @@ public:
 		const std::filesystem::path &chunksDir, int32_t chunkX, int32_t chunkZ,
 		const std::vector<worldsave::ChunkEdit> &overrides, std::filesystem::path &outTmpPath)>;
 
+	/// Test seam: replaces the "regenerate deterministic base + diff"
+	/// serialize step (a full chunk generation per request - far too slow
+	/// for queue-behavior tests). Null = real serialize. Invoked from the
+	/// worker thread before the write step.
+	using SerializeFn = std::function<std::vector<worldsave::ChunkEdit>(
+		int32_t chunkX, int32_t chunkZ, const std::vector<worldsave::ChunkEdit> &currentValues)>;
+
 	struct Stats
 	{
 		uint64_t enqueued{0};
@@ -122,6 +129,7 @@ public:
 
 	void setCompletionCallback(CompletionCallback callback);
 	void setWriteTmpFnForTests(WriteTmpFn fn);
+	void setSerializeFnForTests(SerializeFn fn);
 
 	/// Takes ownership of the request. Coalescing is per COORDINATE: if a
 	/// request for the same chunk is already queued, its payload and revision
@@ -163,6 +171,7 @@ private:
 	int m_seed{0};
 	CompletionCallback m_completion; // guarded by m_mutex
 	WriteTmpFn m_writeTmp;           // guarded by m_mutex (test seam)
+	SerializeFn m_serialize;         // guarded by m_mutex (test seam)
 
 	mutable std::mutex m_mutex;
 	std::condition_variable m_queueCv; // worker wakes on enqueue / shutdown
@@ -340,6 +349,7 @@ public:
 	/// supersede windows must be deterministic in tests). No-op when no
 	/// world is open.
 	void setWriteTmpFnForTests(SaveService::WriteTmpFn fn);
+	void setSerializeFnForTests(SaveService::SerializeFn fn);
 
 private:
 	/// Per-coordinate desired/durable state (issue #180 review): `desired`

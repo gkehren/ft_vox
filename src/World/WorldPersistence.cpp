@@ -159,6 +159,12 @@ void SaveService::setWriteTmpFnForTests(WriteTmpFn fn)
 	m_writeTmp = std::move(fn);
 }
 
+void SaveService::setSerializeFnForTests(SerializeFn fn)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_serialize = std::move(fn);
+}
+
 bool SaveService::enqueue(ChunkSaveRequest &&request)
 {
 	if (request.revision == 0)
@@ -169,21 +175,26 @@ bool SaveService::enqueue(ChunkSaveRequest &&request)
 		return false;
 
 	const uint64_t key = coordKey(request.chunkX, request.chunkZ);
-	m_latestRevision[key] = request.revision;
-	m_highestEnqueuedRevision = std::max(m_highestEnqueuedRevision, request.revision);
 
 	// Per-coordinate coalescing (issue #180 review): a newer capture REPLACES
 	// the queued payload in place, so one coordinate is at most one pending
 	// job and the bound below counts distinct chunks - the main thread is
 	// never blocked waiting for disk I/O.
 	const auto existing = m_pendingByCoord.find(key);
+	if (existing == m_pendingByCoord.end() && m_pendingByCoord.size() >= kMaxPendingCoords)
+		return false; // Busy: caller keeps the state dirty and retries later.
+		              // Revision bookkeeping MUST NOT happen for a rejected
+		              // request: the flush barrier waits for the highest
+		              // ENQUEUED revision, and a rejected revision would
+		              // never finish -> deadlock.
+
+	m_latestRevision[key] = request.revision;
+	m_highestEnqueuedRevision = std::max(m_highestEnqueuedRevision, request.revision);
 	if (existing != m_pendingByCoord.end())
 	{
 		existing->second = std::move(request);
 		return true;
 	}
-	if (m_pendingByCoord.size() >= kMaxPendingCoords)
-		return false; // Busy: caller keeps the state dirty and retries later
 
 	m_pendingByCoord.emplace(key, std::move(request));
 	m_order.push_back(key);
@@ -327,14 +338,26 @@ void SaveService::processJob(Job &job)
 	{
 		// (1) Regenerate the deterministic base (serialize time = base regen
 		// + diff). The payload is immutable, so the source chunk was free to
-		// recycle the moment it was captured.
+		// recycle the moment it was captured. The serialize step is
+		// injectable for tests (a full chunk generation per request is far
+		// too slow for queue-behavior coverage).
 		const Clock::time_point t0 = Clock::now();
-		auto base = TerrainGenerator::getThreadLocal(m_seed).generateChunk(chunkX, chunkZ);
-		if (base.voxels.size() < static_cast<size_t>(CHUNK_VOLUME))
-			throw std::runtime_error("regenerated base has wrong voxel count");
-		static_assert(sizeof(Voxel) == 1, "diff walks the voxel bytes as u8");
-		overrides = worldsave::diffEditsAgainstBase(
-			reinterpret_cast<const uint8_t *>(base.voxels.data()), job.request.currentValues);
+		SerializeFn serialize;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			serialize = m_serialize;
+		}
+		if (serialize)
+			overrides = serialize(chunkX, chunkZ, job.request.currentValues);
+		else
+		{
+			auto base = TerrainGenerator::getThreadLocal(m_seed).generateChunk(chunkX, chunkZ);
+			if (base.voxels.size() < static_cast<size_t>(CHUNK_VOLUME))
+				throw std::runtime_error("regenerated base has wrong voxel count");
+			static_assert(sizeof(Voxel) == 1, "diff walks the voxel bytes as u8");
+			overrides = worldsave::diffEditsAgainstBase(
+				reinterpret_cast<const uint8_t *>(base.voxels.data()), job.request.currentValues);
+		}
 		serializeMs = elapsedMs(t0);
 
 		// (2) Stale check AFTER regeneration and BEFORE any file system
@@ -639,8 +662,13 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 		return info;
 	}
 
-	// Interrupted atomic writes are never authoritative.
-	worldsave::cleanTempFiles(chunksDir);
+	// Interrupted atomic writes are never authoritative. A failure to clean
+	// them is a writable-directory problem: refuse rather than save into it.
+	if (worldsave::cleanTempFiles(chunksDir) != worldsave::SaveStatus::Ok)
+	{
+		info.error = "world '" + name + "' chunk directory could not be cleaned (I/O error)";
+		return info;
+	}
 
 	// Load every chunk file as the DURABLE baseline of the per-coordinate
 	// state machine. A file that fails to read is loudly reported and
@@ -648,10 +676,17 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 	// (permission denied, path is a file, ...) refuses the open instead - an
 	// I/O error must never be misread as "no overrides saved".
 	{
+		const worldsave::ScanResult scan = worldsave::scanChunkFiles(chunksDir);
+		if (scan.status != worldsave::SaveStatus::Ok)
+		{
+			info.error = "world '" + name + "' chunk directory is not readable (I/O error); "
+			             "refusing to open rather than treating saves as absent";
+			return info;
+		}
 		std::lock_guard<std::mutex> lock(m_indexMutex);
 		m_states.clear();
 		m_errorLog.clear();
-		for (const std::filesystem::path &path : worldsave::scanChunkFiles(chunksDir))
+		for (const std::filesystem::path &path : scan.files)
 		{
 			int32_t cx = 0;
 			int32_t cz = 0;
@@ -794,8 +829,9 @@ void WorldPersistence::captureChunkEdits(int32_t chunkX, int32_t chunkZ,
 		const auto it = m_states.find(coordKey(chunkX, chunkZ));
 		if (it != m_states.end())
 			it->second.pending = false;
-		recordError("save service queue rejected capture for chunk (" + std::to_string(chunkX) +
-		            ", " + std::to_string(chunkZ) + "); retrying on the next capture/flush");
+		recordErrorLocked("save service queue rejected capture for chunk (" +
+		                  std::to_string(chunkX) + ", " + std::to_string(chunkZ) +
+		                  "); retrying on the next capture/flush");
 	}
 }
 
@@ -805,66 +841,88 @@ void WorldPersistence::setWriteTmpFnForTests(SaveService::WriteTmpFn fn)
 		m_service->setWriteTmpFnForTests(std::move(fn));
 }
 
+void WorldPersistence::setSerializeFnForTests(SaveService::SerializeFn fn)
+{
+	if (m_service)
+		m_service->setSerializeFnForTests(std::move(fn));
+}
+
 bool WorldPersistence::flush()
 {
 	if (!m_service)
-		return !m_enabled; // never opened: trivially consistent; open+shut: reported by shutdown	// Retry sweep (issue #180 review): every coordinate whose desired
-	// content is not durable and not pending - failed writes and captures
-	// the queue rejected - is re-enqueued here, so flush is THE retry point.
-	std::vector<ChunkSaveRequest> retries;
+		return !m_enabled; // never opened: trivially consistent; open+shut: reported by shutdown
+
+	// Bounded retry loop (issue #180 review): each round re-enqueues every
+	// coordinate whose desired content is not durable and not pending
+	// (failed writes, captures the queue rejected with Busy), then barrier-
+	// waits for the service. Rounds repeat while progress is made, so a
+	// queue-full overload drains across rounds; a genuine I/O failure stops
+	// making progress and the loop exits with the failure reported.
+	constexpr int kMaxFlushRounds = 8;
+	bool ok = true;
+	for (int round = 0; round < kMaxFlushRounds; ++round)
 	{
-		std::lock_guard<std::mutex> lock(m_indexMutex);
-		for (auto &[key, state] : m_states)
+		std::vector<ChunkSaveRequest> retries;
 		{
-			(void)key;
-			if (state.pending || state.desiredRevision == 0)
-				continue;
-			if (!state.dirty())
-				continue;
-			// Fresh revision for the retried attempt: the service's flush
-			// barrier tracks progress by revision, so a retry must not reuse
-			// a revision the barrier already saw finished.
-			state.pending = true;
-			state.failed = false;
-			state.desiredRevision = m_nextCaptureRevision++;
-			ChunkSaveRequest request;
-			request.chunkX = state.chunkX;
-			request.chunkZ = state.chunkZ;
-			request.revision = state.desiredRevision;
-			request.currentValues = state.desired;
-			retries.push_back(std::move(request));
-		}
-	}
-	for (ChunkSaveRequest &request : retries)
-	{
-		if (!m_service->enqueue(std::move(request)))
-		{
-			// Busy/shutdown: leave the state dirty for the next retry point.
 			std::lock_guard<std::mutex> lock(m_indexMutex);
-			const auto it = m_states.find(coordKey(request.chunkX, request.chunkZ));
-			if (it != m_states.end())
-				it->second.pending = false;
-		}
-	}
-
-	const bool ok = m_service->flush();
-
-	// Anything still dirty after the barrier means durability was not
-	// reached (its request failed, or the queue kept rejecting it).
-	bool allDurable = true;
-	{
-		std::lock_guard<std::mutex> lock(m_indexMutex);
-		for (auto &[key, state] : m_states)
-		{
-			(void)key;
-			if (state.dirty())
+			for (auto &[key, state] : m_states)
 			{
-				allDurable = false;
-				break;
+				(void)key;
+				if (state.pending || state.desiredRevision == 0 || !state.dirty())
+					continue;
+				// Fresh revision for the retried attempt: the service's flush
+				// barrier tracks progress by revision, so a retry must not
+				// reuse a revision the barrier already saw finished.
+				state.pending = true;
+				state.failed = false;
+				state.desiredRevision = m_nextCaptureRevision++;
+				ChunkSaveRequest request;
+				request.chunkX = state.chunkX;
+				request.chunkZ = state.chunkZ;
+				request.revision = state.desiredRevision;
+				request.currentValues = state.desired;
+				retries.push_back(std::move(request));
 			}
 		}
+		for (ChunkSaveRequest &request : retries)
+		{
+			if (!m_service->enqueue(std::move(request)))
+			{
+				// Busy/shutdown: leave the state dirty for the next round.
+				std::lock_guard<std::mutex> lock(m_indexMutex);
+				const auto it = m_states.find(coordKey(request.chunkX, request.chunkZ));
+				if (it != m_states.end())
+				{
+					it->second.pending = false;
+					recordErrorLocked("save service queue rejected retry for chunk (" +
+					                  std::to_string(request.chunkX) + ", " +
+					                  std::to_string(request.chunkZ) + ")");
+				}
+			}
+		}
+
+		if (!m_service->flush())
+			ok = false; // barrier range reported failures; keep sweeping/re-checking
+
+		bool anyDirty = false;
+		{
+			std::lock_guard<std::mutex> lock(m_indexMutex);
+			for (auto &[key, state] : m_states)
+			{
+				(void)key;
+				if (state.dirty())
+				{
+					anyDirty = true;
+					break;
+				}
+			}
+		}
+		if (!anyDirty)
+			return ok;
 	}
-	return ok && allDurable;
+	// Still dirty after kMaxFlushRounds: report failure (the error log and
+	// status() carry the offending coordinates).
+	return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -936,7 +994,7 @@ bool WorldPersistence::readPlayerState(PlayerPersistState &out) const
 		recordError("player.state has a bad magic");
 		return false;
 	}
-	if (version > worldsave::kPlayerStateFormatVersion)
+	if (version != worldsave::kPlayerStateFormatVersion)
 	{
 		recordError("player.state uses unsupported version " + std::to_string(version) +
 		            " (this build supports up to " +

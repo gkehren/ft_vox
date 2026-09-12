@@ -174,6 +174,18 @@ static void testWorldMetaErrors(const fs::path &dir)
 	      "newer formatVersion -> UnsupportedVersion");
 	CHECK(out.formatVersion == futureVersion, "UnsupportedVersion still reports the encountered version");
 
+	// OLDER format version: v1 has no migrations, so version 0 is rejected
+	// exactly like a future one (issue #180 review).
+	const fs::path older = dir / "older_version.meta";
+	bytes = {'F', 'T', 'V', 'W'};
+	pushU32(bytes, 0);
+	pushU32(bytes, static_cast<uint32_t>(1337));
+	pushU32(bytes, 1);
+	CHECK(writeRawBytes(older, bytes), "older-version fixture written");
+	out = {};
+	CHECK(worldsave::readWorldMeta(older, out) == SaveStatus::UnsupportedVersion,
+	      "version 0 -> UnsupportedVersion");
+
 	// Truncated file (first 10 bytes of a valid one) and empty file.
 	const fs::path truncated = dir / "truncated.meta";
 	CHECK(writeRawBytes(truncated, std::vector<uint8_t>(bytes.begin(), bytes.begin() + 10)),
@@ -271,9 +283,10 @@ static void testChunkRoundTripBoundaries(const fs::path &dir)
 	      "wrong expected chunkX -> CoordinateMismatch");
 
 	// scanChunkFiles lists exactly the written files (5 loop chunks + (0,0)).
-	const std::vector<fs::path> scanned = worldsave::scanChunkFiles(chunks);
-	CHECK(scanned.size() == 1 + sizeof(coords) / sizeof(coords[0]), "scan lists every chunk file once");
-	for (const fs::path &p : scanned)
+	const worldsave::ScanResult scanned = worldsave::scanChunkFiles(chunks);
+	CHECK(scanned.status == SaveStatus::Ok, "scan status Ok");
+	CHECK(scanned.files.size() == 1 + sizeof(coords) / sizeof(coords[0]), "scan lists every chunk file once");
+	for (const fs::path &p : scanned.files)
 	{
 		int32_t sx = 0;
 		int32_t sz = 0;
@@ -405,6 +418,81 @@ static void testCorruptionDetection(const fs::path &dir)
 	CHECK(worldsave::readChunkFile(file, 10, 20, out) == SaveStatus::UnsupportedVersion,
 	      "chunk newer version -> UnsupportedVersion");
 
+	// OLDER chunk-file version: v1 has no migrations, version 0 is rejected
+	// exactly like a future one (issue #180 review).
+	std::vector<uint8_t> older = bytes;
+	patchU32(older, 4, 0);
+	CHECK(writeRawBytes(file, older), "older-version chunk fixture written");
+	CHECK(worldsave::readChunkFile(file, 10, 20, out) == SaveStatus::UnsupportedVersion,
+	      "chunk version 0 -> UnsupportedVersion");
+
+	// blockType above AIR (COUNT + 1 is the last encodable value) is
+	// corruption: it can never be produced by an authoritative edit.
+	{
+		const fs::path file3040 = chunks / "30_40.chunk";
+		const std::vector<ChunkEdit> badType = {{voxelIndex(1, 1, 1), 255}};
+		CHECK(worldsave::writeChunkFile(chunks, 30, 40, badType) == SaveStatus::Corrupt,
+		      "write refuses blockType > AIR");
+		// Hand-patch a valid payload's blockType to an invalid value.
+		const std::vector<ChunkEdit> one = {{voxelIndex(1, 1, 1), 1}};
+		CHECK(worldsave::writeChunkFile(chunks, 30, 40, one) == SaveStatus::Ok, "valid single written");
+		std::vector<uint8_t> tampered = readRawBytes(file3040);
+		tampered[28 + 4] = 255; // blockType byte of the first record
+		CHECK(writeRawBytes(file3040, tampered), "tampered blockType fixture written");
+		CHECK(worldsave::readChunkFile(file3040, 30, 40, out) == SaveStatus::Corrupt,
+		      "blockType > AIR -> Corrupt");
+	}
+
+	// Duplicate localIndex records cannot be produced by the writer.
+	{
+		// Encode two records with the same index via the tmp writer is not
+		// possible (it collapses nothing at this layer but the writer sorts
+		// real edits) - hand-assemble the record region instead.
+		worldsave::ByteWriter records;
+		const uint32_t dup = voxelIndex(2, 2, 2);
+		records.u32(dup);
+		records.u8(1);
+		records.u32(dup);
+		records.u8(2);
+		const std::vector<uint8_t> recordBytes = records.take();
+		worldsave::ByteWriter w;
+		for (const char c : worldsave::kChunkFileMagic)
+			w.u8(static_cast<uint8_t>(c));
+		w.u32(worldsave::kWorldSaveFormatVersion);
+		w.i32(30);
+		w.i32(40);
+		w.u32(2);
+		w.u64(worldsave::fnv1a64(recordBytes.data(), recordBytes.size()));
+		w.raw(recordBytes.data(), recordBytes.size());
+		const fs::path file3040b = chunks / "30_40.chunk";
+		CHECK(writeRawBytes(file3040b, w.take()), "duplicate-index fixture written");
+		CHECK(worldsave::readChunkFile(file3040b, 30, 40, out) == SaveStatus::Corrupt,
+		      "duplicate localIndex -> Corrupt");
+	}
+
+	// Zero records and an over-volume count are both corruption.
+	{
+		worldsave::ByteWriter w;
+		for (const char c : worldsave::kChunkFileMagic)
+			w.u8(static_cast<uint8_t>(c));
+		w.u32(worldsave::kWorldSaveFormatVersion);
+		w.i32(30);
+		w.i32(40);
+		w.u32(0);
+		w.u64(worldsave::fnv1a64(nullptr, 0));
+		const fs::path file3040c = chunks / "30_40.chunk";
+		const std::vector<uint8_t> zeroBytes = w.take();
+		CHECK(writeRawBytes(file3040c, zeroBytes), "zero-record fixture written");
+				CHECK(worldsave::readChunkFile(file3040c, 30, 40, out) == SaveStatus::Corrupt,
+		      "editCount 0 -> Corrupt");
+
+		std::vector<uint8_t> huge = zeroBytes;
+		patchU32(huge, 16, CHUNK_VOLUME + 1);
+		CHECK(writeRawBytes(file3040c, huge), "over-volume count fixture written");
+				CHECK(worldsave::readChunkFile(file3040c, 30, 40, out) == SaveStatus::Corrupt,
+		      "editCount > CHUNK_VOLUME -> Corrupt");
+	}
+
 	// Wrong stored coordinates vs expected (file itself fully intact).
 	CHECK(worldsave::writeChunkFile(chunks, 10, 20, edits) == SaveStatus::Ok, "valid file restored");
 	CHECK(worldsave::readChunkFile(file, 10, 21, out) == SaveStatus::CoordinateMismatch,
@@ -426,7 +514,7 @@ static void testAtomicReplaceAndTmpFiles(const fs::path &dir)
 		{voxelIndex(2, 0, 0), 102},
 		{voxelIndex(3, 0, 0), 103},
 	};
-	const std::vector<ChunkEdit> payloadB = {{voxelIndex(15, 255, 15), 200}, {voxelIndex(0, 16, 3), 201}};
+	const std::vector<ChunkEdit> payloadB = {{voxelIndex(15, 255, 15), 104}, {voxelIndex(0, 16, 3), 103}};
 
 	CHECK(worldsave::writeChunkFile(chunks, 5, 9, payloadA) == SaveStatus::Ok, "payload A written");
 	std::vector<ChunkEdit> out;
@@ -447,8 +535,10 @@ static void testAtomicReplaceAndTmpFiles(const fs::path &dir)
 	const fs::path tmp = worldsave::chunkTmpPath(chunks, 5, 9);
 	CHECK(tmp.filename() == "5_9.chunk.tmp", "tmp-path helper name");
 	CHECK(writeRawBytes(tmp, {0xDE, 0xAD, 0xBE, 0xEF}), "junk .tmp sidecar written");
-	const std::vector<fs::path> scanned = worldsave::scanChunkFiles(chunks);
-	CHECK(scanned.size() == 1 && scanned[0].filename() == "5_9.chunk", "scan ignores the .tmp sidecar");
+	const worldsave::ScanResult scanned = worldsave::scanChunkFiles(chunks);
+	CHECK(scanned.status == SaveStatus::Ok, "scan status Ok");
+	CHECK(scanned.files.size() == 1 && scanned.files[0].filename() == "5_9.chunk",
+	      "scan ignores the .tmp sidecar");
 	CHECK(worldsave::cleanTempFiles(chunks) == SaveStatus::Ok, "cleanTempFiles returns Ok");
 	CHECK(!fs::exists(tmp), ".tmp sidecar removed by cleanup");
 	out.clear();
@@ -456,9 +546,25 @@ static void testAtomicReplaceAndTmpFiles(const fs::path &dir)
 	          editsEqual(out, sortedByIndex(payloadB)),
 	      "valid file still reads after cleanup");
 
-	// Missing-directory behavior: empty scan, nothing to clean.
-	CHECK(worldsave::scanChunkFiles(dir / "no_such_dir").empty(), "scan of missing dir -> empty");
-	CHECK(worldsave::cleanTempFiles(dir / "no_such_dir") == SaveStatus::Ok, "clean of missing dir -> Ok");
+	// Missing-directory behavior: Ok with no files (a fresh world simply has
+	// no saves yet), nothing to clean.
+	{
+		const worldsave::ScanResult missing = worldsave::scanChunkFiles(dir / "no_such_dir");
+		CHECK(missing.status == SaveStatus::Ok && missing.files.empty(),
+		      "scan of missing dir -> Ok + empty");
+		CHECK(worldsave::cleanTempFiles(dir / "no_such_dir") == SaveStatus::Ok,
+		      "clean of missing dir -> Ok");
+	}
+
+	// A chunks path that exists but is NOT a directory is a real I/O error,
+	// never "no overrides" (issue #180 review).
+	{
+		const fs::path asFile = dir / "chunks_as_file";
+		CHECK(writeRawBytes(asFile, {0x01}), "file fixture written");
+		const worldsave::ScanResult blocked = worldsave::scanChunkFiles(asFile);
+		CHECK(blocked.status == SaveStatus::IoError && blocked.files.empty(),
+		      "scan of a non-directory -> IoError");
+	}
 }
 
 // ---------------------------------------------------------------------------

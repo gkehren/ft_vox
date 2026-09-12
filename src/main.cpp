@@ -1,4 +1,5 @@
 #include <Engine/Engine.hpp>
+#include <World/WorldPersistence.hpp>
 #include <Chunk/StreamHelpers.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 #include <algorithm>
@@ -7,20 +8,6 @@
 #include <iostream>
 #include <optional>
 #include <string>
-
-/// Persistent world names become a directory under saves/: allow only
-/// filesystem-safe names — no path separators, no reserved Windows
-/// characters, no ".." traversal.
-static bool isValidWorldName(const std::string &name)
-{
-	if (name.empty() || name.find("..") != std::string::npos)
-		return false;
-	constexpr std::string_view kForbidden = "/\\:*?\"<>|";
-	for (const char c : name)
-		if (kForbidden.find(c) != std::string_view::npos)
-			return false;
-	return true;
-}
 
 static void printUsage(const char *argv0)
 {
@@ -144,7 +131,9 @@ int main(int argc, char **argv)
 				return EXIT_FAILURE;
 			}
 			worldName = argv[++i];
-			if (!isValidWorldName(worldName))
+			// Validation lives in the persistence layer (issue #180 review):
+			// the same rule guards openOrCreate/worldExists/peekStoredSeed.
+			if (!WorldPersistence::isValidWorldName(worldName))
 			{
 				std::cerr << "Error: --world name must be non-empty and must not contain "
 				          << "any of / \\ : * ? \" < > | or \"..\".\n";
@@ -302,6 +291,15 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 	const std::string resourcePack = resolveResourcePackRoot(resourcePackCli);
+
+	if (!worldName.empty() && benchmarkDuration > 0.0f)
+	{
+		// Benchmark worlds are transient by contract (issue #180): they must
+		// never open a persistent save. Fail fast instead of silently
+		// ignoring one of the two flags.
+		std::cerr << "Error: --world and --benchmark cannot be combined." << std::endl;
+		return EXIT_FAILURE;
+	}
 
 	try
 	{

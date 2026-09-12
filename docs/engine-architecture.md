@@ -670,7 +670,9 @@ untouched) do not require a bump.
   flush.
 - **Transient / benchmark worlds run persistence-disabled**: `reloadWorld`
   closes any open world first, so a benchmark can never write into a user
-  save. Sessions without `--world` never create files.
+  save. Sessions without `--world` never create files. Combining
+  `--world` with `--benchmark` is a CLI error (fail-fast) rather than a
+  silently ignored flag.
 
 ### Failure policy
 
