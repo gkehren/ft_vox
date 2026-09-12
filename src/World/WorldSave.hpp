@@ -79,6 +79,15 @@
 
 #include <utils.hpp>
 
+// A voxel can only ever store a real texture ordinal or AIR. COUNT is the
+// enum's size sentinel sitting BETWEEN the last texture and AIR, so a plain
+// "<= AIR" range check would wrongly accept it (issue #180 review round 2).
+inline bool isPersistableBlockType(uint8_t value)
+{
+	return value < static_cast<uint8_t>(TextureType::COUNT) ||
+	       value == static_cast<uint8_t>(TextureType::AIR);
+}
+
 namespace worldsave
 {
 	inline constexpr char kWorldMetaMagic[4] = {'F', 'T', 'V', 'W'};

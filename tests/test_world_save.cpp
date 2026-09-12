@@ -443,6 +443,26 @@ static void testCorruptionDetection(const fs::path &dir)
 		      "blockType > AIR -> Corrupt");
 	}
 
+	// AIR is a legitimate stored override (deletion); COUNT is the enum's
+	// size sentinel sitting between the last texture and AIR and is never
+	// storable (issue #180 review round 2).
+	{
+		const fs::path fileBT = chunks / "50_60.chunk";
+		const std::vector<ChunkEdit> airPayload = {{voxelIndex(1, 1, 1), static_cast<uint8_t>(AIR)}};
+		CHECK(worldsave::writeChunkFile(chunks, 50, 60, airPayload) == SaveStatus::Ok,
+		      "AIR is a persistable block type");
+		CHECK(worldsave::readChunkFile(fileBT, 50, 60, out) == SaveStatus::Ok, "AIR payload reads back");
+		const std::vector<ChunkEdit> countPayload = {{voxelIndex(1, 1, 1), static_cast<uint8_t>(COUNT)}};
+		CHECK(worldsave::writeChunkFile(chunks, 50, 60, countPayload) == SaveStatus::Corrupt,
+		      "COUNT is rejected");
+		const std::vector<ChunkEdit> lastTexture = {{voxelIndex(1, 1, 1), static_cast<uint8_t>(COUNT - 1)}};
+		CHECK(worldsave::writeChunkFile(chunks, 50, 60, lastTexture) == SaveStatus::Ok,
+		      "COUNT-1 (last real texture) is persistable");
+		const std::vector<ChunkEdit> beyond = {{voxelIndex(1, 1, 1), 255}};
+		CHECK(worldsave::writeChunkFile(chunks, 50, 60, beyond) == SaveStatus::Corrupt,
+		      "values above AIR are rejected");
+	}
+
 	// Duplicate localIndex records cannot be produced by the writer.
 	{
 		// Encode two records with the same index via the tmp writer is not

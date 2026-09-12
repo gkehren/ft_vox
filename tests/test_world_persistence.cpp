@@ -459,6 +459,238 @@ static void testWriteFailureRetry()
 }
 
 // ---------------------------------------------------------------------------
+// 1c. Barrier ordering is independent from content revisions (issue #180
+// review round 2): a replaced revision is never "finished", so flush must
+// wait for TICKETS, not revisions.
+// ---------------------------------------------------------------------------
+
+static void testBarrierOrderingIndependentOfRevisions()
+{
+	std::cout << "== Barrier ordering (tickets vs revisions) ==" << std::endl;
+	TerrainGenerator gen(42);
+	auto root = makeTempDir("barrier");
+	const auto chunks = root / "w" / "chunks";
+	std::filesystem::create_directories(chunks);
+	const std::vector<Voxel> baseB = gen.generateChunk(0, 0).voxels;
+	const std::vector<Voxel> baseA = gen.generateChunk(1, 0).voxels;
+
+	const uint32_t ib = idxOf(2, 60, 4);
+	const uint32_t ia = idxOf(7, 80, 9);
+	const uint8_t vb = pickNonBase(baseB[ib].type);
+	const uint8_t vb2 = pickNonBase(baseB[ib].type) == vb
+	                        ? static_cast<uint8_t>(BRICKS)
+	                        : pickNonBase(baseB[ib].type);
+	const uint8_t va = pickNonBase(baseA[ia].type);
+
+	SaveService svc(chunks, 42);
+
+	// Block coordinate (1,0)'s first job inside the serialize seam.
+	std::mutex m;
+	std::condition_variable cv;
+	bool aBlocked = false;
+	bool releaseA = false;
+	int aSerializeCalls = 0;
+	svc.setSerializeFnForTests(
+		[&](int32_t cx, int32_t cz, const std::vector<worldsave::ChunkEdit> &currentValues)
+		{
+			if (cx == 1 && cz == 0)
+			{
+				std::unique_lock<std::mutex> lock(m);
+				if (++aSerializeCalls == 1)
+				{
+					aBlocked = true;
+					cv.notify_all();
+					cv.wait(lock, [&] { return releaseA; });
+				}
+			}
+			return currentValues;
+		});
+
+	// rev2 = coord B (ticket 1); rev3 = coord A (ticket 2, blocks); rev4 =
+	// coord B (ticket 3) REPLACES rev2 in the queue, resolving ticket 1.
+	ChunkSaveRequest r2;
+	r2.chunkX = 0;
+	r2.chunkZ = 0;
+	r2.revision = 2;
+	r2.currentValues = {{ib, vb}};
+	CHECK(svc.enqueue(std::move(r2)), "enqueue rev2 (B)");
+
+	ChunkSaveRequest r3;
+	r3.chunkX = 1;
+	r3.chunkZ = 0;
+	r3.revision = 3;
+	r3.currentValues = {{ia, va}};
+	CHECK(svc.enqueue(std::move(r3)), "enqueue rev3 (A)");
+
+	{
+		std::unique_lock<std::mutex> lock(m);
+		cv.wait(lock, [&] { return aBlocked; });
+	}
+
+	ChunkSaveRequest r4;
+	r4.chunkX = 0;
+	r4.chunkZ = 0;
+	r4.revision = 4;
+	r4.currentValues = {{ib, vb2}};
+	CHECK(svc.enqueue(std::move(r4)), "enqueue rev4 (B) replaces rev2");
+
+	// rev4 (newer) completes while rev3 (older) is still in flight.
+	while (svc.stats().completed < 1)
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+	// A flush sampled NOW must wait for rev3's ticket even though rev4 -
+	// with a HIGHER revision - already finished. Regression: the old
+	// revision-ordered barrier passed here while rev3 was still queued.
+	bool flushReturned = false;
+	std::thread flusher([&]
+	                    {
+		                    svc.flush();
+		                    flushReturned = true;
+	});
+	std::this_thread::sleep_for(std::chrono::milliseconds(150));
+	CHECK(!flushReturned, "flush waits for the older ticket despite a newer finished revision");
+	{
+		std::lock_guard<std::mutex> lock(m);
+		releaseA = true;
+		cv.notify_all();
+	}
+	flusher.join();
+	CHECK(flushReturned, "flush returns once the older ticket resolves");
+
+	std::vector<worldsave::ChunkEdit> diskB, diskA;
+	CHECK(readChunk(chunks, 0, 0, diskB), "B file written");
+	CHECK(readChunk(chunks, 1, 0, diskA), "A file written");
+	CHECK(sameEdits(diskB, {{ib, vb2}}), "B reflects the replacing revision");
+	CHECK(sameEdits(diskA, {{ia, va}}), "A reflects the blocked revision");
+
+	svc.shutdown();
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
+// 1d. Failure checkpoint (issue #180 review round 2): a failure that
+// COMPLETED before flush() is called must be reported by that flush.
+// ---------------------------------------------------------------------------
+
+static void testFlushFailureCheckpoint()
+{
+	std::cout << "== Flush failure checkpoint ==" << std::endl;
+	TerrainGenerator gen(42);
+	auto root = makeTempDir("ckpt");
+	const auto chunks = root / "w" / "chunks";
+	std::filesystem::create_directories(chunks);
+	const std::vector<Voxel> base = gen.generateChunk(0, 0).voxels;
+	const uint32_t ia = idxOf(5, 55, 5);
+	const uint8_t va = pickNonBase(base[ia].type);
+
+	SaveService svc(chunks, 42);
+	svc.setWriteTmpFnForTests(
+		[](const std::filesystem::path &, int32_t, int32_t,
+		   const std::vector<worldsave::ChunkEdit> &, std::filesystem::path &)
+		{ return worldsave::SaveStatus::IoError; });
+
+	ChunkSaveRequest bad;
+	bad.chunkX = 0;
+	bad.chunkZ = 0;
+	bad.revision = 1;
+	bad.currentValues = {{ia, va}};
+	CHECK(svc.enqueue(std::move(bad)), "enqueue failing request");
+
+	// Wait for the completion WITHOUT calling flush first.
+	while (svc.stats().failed < 1)
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	CHECK(svc.flush() == false, "flush reports a failure that completed before the call");
+
+	// A retry that succeeds without a NEW failure reports true.
+	svc.setWriteTmpFnForTests(nullptr);
+	ChunkSaveRequest good;
+	good.chunkX = 0;
+	good.chunkZ = 0;
+	good.revision = 2;
+	good.currentValues = {{ia, va}};
+	CHECK(svc.enqueue(std::move(good)), "enqueue succeeding request");
+	CHECK(svc.flush(), "flush after a successful retry is true");
+
+	std::vector<worldsave::ChunkEdit> disk;
+	CHECK(readChunk(chunks, 0, 0, disk), "retry wrote the file");
+	CHECK(sameEdits(disk, diffAgainstBase(base, {{ia, va}})), "retry payload correct");
+
+	svc.shutdown();
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
+// 1e. Stale DELETE commit (issue #180 review round 2): a delete is as
+// authoritative as a rename - a job superseded before its commit must never
+// remove the authoritative file.
+// ---------------------------------------------------------------------------
+
+static void testStaleDeleteNeverRemovesAuthoritativeFile()
+{
+	std::cout << "== Stale delete commit ==" << std::endl;
+	TerrainGenerator gen(42);
+	auto root = makeTempDir("staledel");
+	WorldPersistence wp;
+	const WorldPersistence::OpenInfo info =
+		wp.openOrCreate(root, "w", 42, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok, "world opened");
+	const auto chunks = root / "w" / "chunks";
+
+	const std::vector<Voxel> base = gen.generateChunk(0, 0).voxels;
+	const uint32_t ia = idxOf(4, 70, 6);
+	const uint32_t ib = idxOf(9, 90, 2);
+	const uint8_t va = pickNonBase(base[ia].type);
+
+	// X on disk.
+	wp.captureChunkEdits(0, 0, {{ia, va}});
+	CHECK(wp.flush(), "initial payload written");
+
+	// A = revert/delete job; block it at the beforeCommit seam.
+	std::mutex m;
+	std::condition_variable cv;
+	bool deleteBlocked = false;
+	bool releaseDelete = false;
+	wp.setBeforeCommitFnForTests(
+		[&](int32_t cx, int32_t cz, uint64_t)
+		{
+			if (cx != 0 || cz != 0)
+				return;
+			std::unique_lock<std::mutex> lock(m);
+			if (!deleteBlocked)
+			{
+				deleteBlocked = true;
+				cv.notify_all();
+				cv.wait(lock, [&] { return releaseDelete; });
+			}
+		});
+	wp.captureChunkEdits(0, 0, {}); // enqueue the delete
+	{
+		std::unique_lock<std::mutex> lock(m);
+		cv.wait(lock, [&] { return deleteBlocked; });
+	}
+
+	// B = a newer capture for the same coordinate, enqueued while the delete
+	// is blocked right before its authoritative commit.
+	const std::vector<worldsave::ChunkEdit> bValues = {{ia, va}, {ib, static_cast<uint8_t>(BRICKS)}};
+	wp.captureChunkEdits(0, 0, bValues);
+	wp.setBeforeCommitFnForTests(nullptr); // future jobs must not block
+	{
+		std::lock_guard<std::mutex> lock(m);
+		releaseDelete = true;
+		cv.notify_all();
+	}
+
+	CHECK(wp.flush(), "flush after the stale delete");
+	std::vector<worldsave::ChunkEdit> disk;
+	CHECK(readChunk(chunks, 0, 0, disk), "authoritative file still present");
+	CHECK(sameEdits(disk, diffAgainstBase(base, bValues)),
+	      "final disk state is the newer capture, the delete never won");
+
+	wp.shutdown();
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
 // 2. Recycled-chunk race: the worker must use the immutable captured payload
 // ---------------------------------------------------------------------------
 
@@ -1209,7 +1441,72 @@ static void testScanErrorRefusesOpen()
 	WorldPersistence wp;
 	const WorldPersistence::OpenInfo info = wp.openOrCreate(root, "w", 42, genVersion);
 	CHECK(!info.ok, "open refused when the chunk directory cannot be scanned");
-	CHECK(info.error.find("not readable") != std::string::npos, "scan error message");
+	// The refusal can come from the temp-clean pass or the scan pass; both
+	// must name the I/O error rather than claim an empty save set.
+	CHECK(info.error.find("I/O error") != std::string::npos, "scan error message");
+
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
+// 8c-bis. closeWorld refuses to destroy persistence while accepted edits are
+// stranded outside authoritative voxel state (issue #180 review round 2).
+// ---------------------------------------------------------------------------
+
+static void testCloseWorldRefusesWhenEditsStranded()
+{
+	std::cout << "== Close refuses stranded edits ==" << std::endl;
+	auto root = makeTempDir("stranded");
+	const std::string savesRoot = (root / "saves").string();
+	const int seed = 42;
+
+	TerrainGenerator gen(seed);
+	ThreadPool threads(2);
+	ChunkPool pool(64);
+	ChunkManager mgr(&gen, &threads, &pool);
+	std::string err;
+	CHECK(mgr.openWorld(savesRoot, "stranded", err), ("openWorld failed: " + err).c_str());
+
+	Camera camera(glm::vec3(8.0f, 100.0f, 8.0f));
+	RenderSettings settings;
+	settings.minRenderDistance = 32;
+	settings.maxRenderDistance = 48;
+	mgr.updateStreaming(camera, settings);
+	mgr.processChunkLoading(16);
+	// Budget 0: chunks are acquired but NOTHING is dispatched - they stay
+	// UNLOADED.
+	mgr.generatePendingVoxels(camera, settings, 0);
+
+	const glm::vec3 editPos(4.0f, 140.0f, 4.0f); // inside chunk (0,0)
+	CHECK(mgr.placeVoxel(editPos, BRICKS), "edit accepted while chunk is unloaded");
+	CHECK(mgr.hasPendingLogicalEdits(), "edit deferred as a PendingVoxelEdit");
+
+	CHECK(!mgr.closeWorld(), "close refuses while accepted edits are stranded");
+	CHECK(mgr.isWorldOpen(), "persistence stays open for a later retry");
+
+	// Resolve: dispatch generation, let the deferred edit apply, then close.
+	mgr.generatePendingVoxels(camera, settings, 16);
+	while (mgr.pendingGenJobs() > 0)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		mgr.processFinishedJobs();
+	}
+	mgr.processFinishedJobs();
+	CHECK(!mgr.hasPendingLogicalEdits(), "deferred edit applied after generation");
+	CHECK(mgr.closeWorld(), "close succeeds once the stranded edit resolved");
+
+	WorldPersistence verify;
+	const WorldPersistence::OpenInfo info =
+		verify.openOrCreate(savesRoot, "stranded", seed, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok, "world reopens");
+	const uint32_t editIdx = idxOf(4, 140, 4);
+	const std::vector<worldsave::ChunkEdit> saved = verify.overridesSnapshot(0, 0);
+	bool found = false;
+	for (const worldsave::ChunkEdit &e : saved)
+		if (e.localIndex == editIdx)
+			found = true;
+	CHECK(found, "the stranded edit landed in the save after the retry");
+	verify.shutdown();
 
 	removeDir(root);
 }
@@ -1358,6 +1655,9 @@ int main()
 	std::cout << "== SaveService ordering ==\n";
 	testSaveServiceOrdering();
 	testWriteFailureRetry();
+	testBarrierOrderingIndependentOfRevisions();
+	testFlushFailureCheckpoint();
+	testStaleDeleteNeverRemovesAuthoritativeFile();
 	std::cout << "== Recycled-chunk isolation ==\n";
 	testRecycledChunkIsolation();
 	std::cout << "== Open/create semantics ==\n";
@@ -1372,6 +1672,7 @@ int main()
 	testDisabledPersistence();
 	std::cout << "== Destructor safety net ==\n";
 	testCloseWorldDrainsPendingEdits();
+	testCloseWorldRefusesWhenEditsStranded();
 	testQueueCoalescingAndBusy();
 	testScanErrorRefusesOpen();
 	testDestructorSafetyNet();

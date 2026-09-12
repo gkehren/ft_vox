@@ -977,8 +977,27 @@ bool WorldPersistence::flush()
 		if (!anyDirty)
 			return ok;
 	}
-	// Still dirty after kMaxFlushRounds: report failure (the error log and
-	// status() carry the offending coordinates).
+	// Still dirty after kMaxFlushRounds: report failure and record WHICH
+	// coordinates stayed dirty so the error log/debug UI points at them.
+	{
+		std::lock_guard<std::mutex> lock(m_indexMutex);
+		std::string coords;
+		int listed = 0;
+		for (const auto &[key, state] : m_states)
+		{
+			(void)key;
+			if (!state.dirty())
+				continue;
+			coords += " (" + std::to_string(state.chunkX) + "," + std::to_string(state.chunkZ) + ")";
+			if (++listed >= 8)
+			{
+				coords += " ...";
+				break;
+			}
+		}
+		if (!coords.empty())
+			recordErrorLocked("flush exhausted retries, still dirty:" + coords);
+	}
 	return false;
 }
 

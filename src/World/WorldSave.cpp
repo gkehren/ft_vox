@@ -205,7 +205,7 @@ namespace worldsave
 			if (edit.localIndex >= CHUNK_VOLUME)
 				return {};
 			// Same for block types that no voxel can ever store.
-			if (static_cast<int>(edit.blockType) > static_cast<int>(AIR))
+			if (!isPersistableBlockType(edit.blockType))
 				return {};
 			records.u32(edit.localIndex);
 			records.u8(edit.blockType);
@@ -345,9 +345,9 @@ namespace worldsave
 				return SaveStatus::Corrupt;
 			if (localIndex >= CHUNK_VOLUME)
 				return SaveStatus::Corrupt;
-			// blockType must be an encodable voxel value: anything above AIR
-			// (COUNT + 1, a legitimate stored value) is corruption.
-			if (static_cast<int>(blockType) > static_cast<int>(AIR))
+			// blockType must be an encodable voxel value (real texture
+			// ordinal or AIR; COUNT itself is never storable).
+			if (!isPersistableBlockType(blockType))
 				return SaveStatus::Corrupt;
 			edits.push_back(ChunkEdit{localIndex, blockType});
 		}
@@ -389,15 +389,28 @@ namespace worldsave
 	{
 		ScanResult result;
 		std::error_code ec;
+		// Explicit status probe (issue #180 review round 2): never use
+		// exists()==false as a synonym for "absent" - with a non-zero ec it
+		// means "unknown", which must surface as IoError, not as an empty
+		// listing.
+		const std::filesystem::file_status st = std::filesystem::status(chunksDir, ec);
+		// not_found is classified by the file_status, NOT by ec: this STL
+		// sets ec (ENOENT) even when it successfully reports not_found.
+		// A genuine probe failure reports file_type::none with ec set.
+		if (st.type() == std::filesystem::file_type::not_found)
+		{
+			result.status = SaveStatus::Ok; // fresh world: no saves yet
+			return result;
+		}
+		if (ec || st.type() != std::filesystem::file_type::directory)
+		{
+			result.status = SaveStatus::IoError;
+			return result;
+		}
 		std::filesystem::directory_iterator it(chunksDir, ec);
 		if (ec)
 		{
-			// A missing directory is simply "no saves yet" (a fresh world);
-			// any other iteration failure is a real I/O problem and must be
-			// surfaced, never flattened into an empty listing.
-			result.status = std::filesystem::exists(chunksDir, ec) && !ec
-			                    ? SaveStatus::IoError
-			                    : SaveStatus::Ok;
+			result.status = SaveStatus::IoError;
 			return result;
 		}
 		for (const std::filesystem::directory_entry &entry : it)
@@ -418,9 +431,17 @@ namespace worldsave
 	SaveStatus cleanTempFiles(const std::filesystem::path &chunksDir)
 	{
 		std::error_code ec;
+		// Same explicit status discipline as scanChunkFiles (issue #180
+		// review round 2): missing directory = Ok/no-op; anything else that
+		// cannot be iterated is a real I/O error.
+		const std::filesystem::file_status st = std::filesystem::status(chunksDir, ec);
+		if (st.type() == std::filesystem::file_type::not_found)
+			return SaveStatus::Ok;
+		if (ec || st.type() != std::filesystem::file_type::directory)
+			return SaveStatus::IoError;
 		std::filesystem::directory_iterator it(chunksDir, ec);
 		if (ec)
-			return SaveStatus::Ok; // nothing to clean when the directory is absent
+			return SaveStatus::IoError;
 		SaveStatus status = SaveStatus::Ok;
 		for (const std::filesystem::directory_entry &entry : it)
 		{
