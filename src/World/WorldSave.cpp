@@ -184,16 +184,11 @@ namespace worldsave
 		return path;
 	}
 
-	SaveStatus writeChunkFile(const std::filesystem::path &chunksDir, int32_t chunkX, int32_t chunkZ,
-	                          const std::vector<ChunkEdit> &edits)
+	// Shared encoder: exact header + sorted records, or an empty vector when
+	// an out-of-range localIndex refuses the payload (Corrupt).
+	std::vector<uint8_t> encodeChunkFileBytes(int32_t chunkX, int32_t chunkZ,
+	                                          const std::vector<ChunkEdit> &edits)
 	{
-		if (edits.empty())
-		{
-			// All overrides reverted => the chunk has no payload: the file
-			// must not exist (removal is a no-op Ok when it never did).
-			return removeChunkFile(chunksDir, chunkX, chunkZ);
-		}
-
 		// Records are stored in ascending localIndex order; callers may pass
 		// any order, so sort a local copy.
 		std::vector<ChunkEdit> sorted = edits;
@@ -206,7 +201,7 @@ namespace worldsave
 			// Out-of-range indices are a caller bug: refuse to persist them
 			// instead of writing a payload every future read would reject.
 			if (edit.localIndex >= CHUNK_VOLUME)
-				return SaveStatus::Corrupt;
+				return {};
 			records.u32(edit.localIndex);
 			records.u8(edit.blockType);
 		}
@@ -220,9 +215,77 @@ namespace worldsave
 		w.u32(static_cast<uint32_t>(sorted.size()));
 		w.u64(fnv1a64(recordBytes.data(), recordBytes.size()));
 		w.raw(recordBytes.data(), recordBytes.size());
+		return w.take();
+	}
 
-		return writeFileAtomic(chunksDir / chunkFileName(chunkX, chunkZ), w.take()) ? SaveStatus::Ok
-		                                                                            : SaveStatus::IoError;
+	SaveStatus writeChunkFileTmp(const std::filesystem::path &chunksDir, int32_t chunkX,
+	                             int32_t chunkZ, const std::vector<ChunkEdit> &edits,
+	                             std::filesystem::path &outTmpPath)
+	{
+		outTmpPath.clear();
+		if (edits.empty())
+			return SaveStatus::Corrupt; // deletion is a decision, not an encoding
+		const std::vector<uint8_t> bytes = encodeChunkFileBytes(chunkX, chunkZ, edits);
+		if (bytes.empty())
+			return SaveStatus::Corrupt;
+
+		const std::filesystem::path tmpPath = chunkTmpPath(chunksDir, chunkX, chunkZ);
+		std::error_code ec;
+		if (!chunksDir.empty())
+		{
+			std::filesystem::create_directories(chunksDir, ec);
+			if (ec)
+				return SaveStatus::IoError;
+		}
+		{
+			std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+			if (!out)
+				return SaveStatus::IoError;
+			out.write(reinterpret_cast<const char *>(bytes.data()),
+			          static_cast<std::streamsize>(bytes.size()));
+			out.flush();
+			if (!out.good())
+			{
+				out.close();
+				std::error_code removeEc;
+				std::filesystem::remove(tmpPath, removeEc);
+				return SaveStatus::IoError;
+			}
+		}
+		outTmpPath = tmpPath;
+		return SaveStatus::Ok;
+	}
+
+	SaveStatus commitChunkFile(const std::filesystem::path &tmpPath)
+	{
+		std::filesystem::path finalPath = tmpPath;
+		finalPath.replace_extension(); // "<x>_<z>.chunk.tmp" -> "<x>_<z>.chunk"
+		std::error_code ec;
+		std::filesystem::rename(tmpPath, finalPath, ec);
+		if (ec)
+		{
+			std::error_code removeEc;
+			std::filesystem::remove(tmpPath, removeEc);
+			return SaveStatus::IoError;
+		}
+		return SaveStatus::Ok;
+	}
+
+	SaveStatus writeChunkFile(const std::filesystem::path &chunksDir, int32_t chunkX, int32_t chunkZ,
+	                          const std::vector<ChunkEdit> &edits)
+	{
+		if (edits.empty())
+		{
+			// All overrides reverted => the chunk has no payload: the file
+			// must not exist (removal is a no-op Ok when it never did).
+			return removeChunkFile(chunksDir, chunkX, chunkZ);
+		}
+
+		std::filesystem::path tmpPath;
+		const SaveStatus write = writeChunkFileTmp(chunksDir, chunkX, chunkZ, edits, tmpPath);
+		if (write != SaveStatus::Ok)
+			return write;
+		return commitChunkFile(tmpPath);
 	}
 
 	SaveStatus readChunkFile(const std::filesystem::path &filePath, int32_t expectedChunkX, int32_t expectedChunkZ,

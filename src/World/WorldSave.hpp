@@ -268,6 +268,18 @@ namespace worldsave
 	SaveStatus writeChunkFile(const std::filesystem::path &chunksDir, int32_t chunkX, int32_t chunkZ,
 	                          const std::vector<ChunkEdit> &edits);
 
+	// Two-phase variant of writeChunkFile for save workers that must re-check
+	// a revision between writing and replacing the authoritative file
+	// (issue #180 review): writeChunkFileTmp encodes and writes ONLY the
+	// transient .tmp sidecar (final file untouched, outTmpPath carries its
+	// path on Ok); commitChunkFile then atomically renames it over the final
+	// name. Same empty-edits/out-of-range rules as writeChunkFile, except an
+	// empty list still resolves to "remove final file" at the COMMIT step.
+	SaveStatus writeChunkFileTmp(const std::filesystem::path &chunksDir, int32_t chunkX,
+	                             int32_t chunkZ, const std::vector<ChunkEdit> &edits,
+	                             std::filesystem::path &outTmpPath);
+	SaveStatus commitChunkFile(const std::filesystem::path &tmpPath);
+
 	// Validates magic, version, checksum, exact size, localIndex < CHUNK_VOLUME
 	// and the header coordinates (CoordinateMismatch otherwise). Tolerates any
 	// record order; returns records sorted ascending by localIndex.

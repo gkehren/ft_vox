@@ -40,6 +40,10 @@ std::string statusName(worldsave::SaveStatus status)
 	return "unknown";
 }
 
+// Thrown by processJob when the revision check finds the job superseded
+// mid-flight; unwinds before any file system mutation happened.
+struct StaleJobException {};
+
 // ChunkEdit is a plain aggregate (no operator==); both vectors are kept in
 // ascending localIndex order by every producer, so a zip compare is exact.
 bool sameEditList(const std::vector<worldsave::ChunkEdit> &a,
@@ -51,6 +55,25 @@ bool sameEditList(const std::vector<worldsave::ChunkEdit> &a,
 		if (a[i].localIndex != b[i].localIndex || a[i].blockType != b[i].blockType)
 			return false;
 	return true;
+}
+
+// Canonical capture order: ascending localIndex with duplicates collapsing to
+// the LAST value (true last-write-wins, issue #180 review - a stable_sort
+// followed by keep-first would preserve a stale value).
+std::vector<worldsave::ChunkEdit> collapseAndSort(std::vector<worldsave::ChunkEdit> edits)
+{
+	std::unordered_map<uint32_t, uint8_t> collapsed;
+	collapsed.reserve(edits.size());
+	for (const worldsave::ChunkEdit &edit : edits)
+		collapsed[edit.localIndex] = edit.blockType;
+	edits.clear();
+	edits.reserve(collapsed.size());
+	for (const auto &[localIndex, blockType] : collapsed)
+		edits.push_back({localIndex, blockType});
+	std::sort(edits.begin(), edits.end(),
+	          [](const worldsave::ChunkEdit &a, const worldsave::ChunkEdit &b)
+	          { return a.localIndex < b.localIndex; });
+	return edits;
 }
 
 #ifdef _WIN32
@@ -89,6 +112,17 @@ void nameCurrentThread(const char *) {}
 #endif
 } // namespace
 
+// Dirty means "the durable copy does not yet reflect desired": pending work,
+// a failed attempt, or revisions that moved ahead with differing content.
+// Content-equal-but-revision-behind is NOT dirty: the file on disk already
+// carries exactly these overrides.
+bool WorldPersistence::ChunkPersistenceState::dirty() const
+{
+	if (pending || failed)
+		return true;
+	return desiredRevision > durableRevision && !sameEditList(desired, durable);
+}
+
 // ---------------------------------------------------------------------------
 // SaveService
 // ---------------------------------------------------------------------------
@@ -119,22 +153,40 @@ void SaveService::setCompletionCallback(CompletionCallback callback)
 	m_completion = std::move(callback);
 }
 
+void SaveService::setWriteTmpFnForTests(WriteTmpFn fn)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_writeTmp = std::move(fn);
+}
+
 bool SaveService::enqueue(ChunkSaveRequest &&request)
 {
-	std::unique_lock<std::mutex> lock(m_mutex);
+	if (request.revision == 0)
+		return false; // revisions are owned by WorldPersistence and start at 1
+
+	std::lock_guard<std::mutex> lock(m_mutex);
 	if (m_shuttingDown)
 		return false;
-	// Bounded FIFO back-pressure: >1024 DISTINCT modified chunks pending is
-	// the only way to get here; blocking the capturer is the safe policy
-	// (edits stay recorded on their chunks until space frees up).
-	m_queueCv.wait(lock, [&] { return m_shuttingDown || m_queue.size() < kMaxPendingRequests; });
-	if (m_shuttingDown)
-		return false;
-	Job job;
-	job.request = std::move(request);
-	job.revision = m_nextRevision++;
-	m_latestRevision[coordKey(job.request.chunkX, job.request.chunkZ)] = job.revision;
-	m_queue.push_back(std::move(job));
+
+	const uint64_t key = coordKey(request.chunkX, request.chunkZ);
+	m_latestRevision[key] = request.revision;
+	m_highestEnqueuedRevision = std::max(m_highestEnqueuedRevision, request.revision);
+
+	// Per-coordinate coalescing (issue #180 review): a newer capture REPLACES
+	// the queued payload in place, so one coordinate is at most one pending
+	// job and the bound below counts distinct chunks - the main thread is
+	// never blocked waiting for disk I/O.
+	const auto existing = m_pendingByCoord.find(key);
+	if (existing != m_pendingByCoord.end())
+	{
+		existing->second = std::move(request);
+		return true;
+	}
+	if (m_pendingByCoord.size() >= kMaxPendingCoords)
+		return false; // Busy: caller keeps the state dirty and retries later
+
+	m_pendingByCoord.emplace(key, std::move(request));
+	m_order.push_back(key);
 	++m_enqueued;
 	m_queueCv.notify_one();
 	return true;
@@ -145,16 +197,23 @@ bool SaveService::flush()
 	std::unique_lock<std::mutex> lock(m_mutex);
 	if (m_shuttingDown)
 		return false;
-	// Failure state is sampled at flush start: this return value describes
-	// exactly the requests covered by this barrier.
-	m_anyFailed = false;
-	// Everything enqueued so far carries a revision < m_nextRevision; wait
-	// until the worker has popped (processed or superseded) all of them.
-	const uint64_t target = m_nextRevision;
-	m_doneCv.wait(lock, [&] { return m_shuttingDown || m_lastFinishedRevision + 1 >= target; });
+	// Revision barrier: everything enqueued so far carries a revision
+	// <= m_highestEnqueuedRevision; wait until the worker has popped
+	// (processed or superseded) all of them. Completion callbacks run before
+	// the revision progress is published, so state machine updates are
+	// visible to the waiter.
+	const uint64_t target = m_highestEnqueuedRevision;
+	const uint64_t observedFailures = m_failureCount;
+	m_doneCv.wait(lock, [&] { return m_shuttingDown || m_lastFinishedRevision >= target; });
 	if (m_shuttingDown)
 		return false;
-	return !m_anyFailed;
+	// Failure accounting per barrier range (issue #180 review): the
+	// checkpoint only advances when a flush has OBSERVED the counter, so
+	// each flush reports exactly the failures since the previous flush -
+	// and a retry that succeeds without a new failure reports success.
+	const bool ok = m_failureCount == observedFailures;
+	m_failureCheckpoint = m_failureCount;
+	return ok;
 }
 
 void SaveService::shutdown()
@@ -169,7 +228,8 @@ void SaveService::shutdown()
 		else
 		{
 			m_shuttingDown = true;
-			m_queue.clear();
+			m_pendingByCoord.clear();
+			m_order.clear();
 			m_latestRevision.clear();
 			m_queueCv.notify_all();
 			m_doneCv.notify_all();
@@ -192,7 +252,7 @@ SaveService::Stats SaveService::stats() const
 	s.failed = m_failed;
 	s.deleted = m_deleted;
 	s.bytesWritten = m_bytesWritten;
-	s.queueDepth = m_queue.size();
+	s.queueDepth = m_pendingByCoord.size();
 	const uint64_t processed = m_completed + m_deleted;
 	s.avgSerializeMs = processed ? m_serializeTotalMs / static_cast<double>(processed) : 0.0;
 	s.maxSerializeMs = m_serializeMaxMs;
@@ -214,34 +274,37 @@ void SaveService::workerLoop(std::stop_token stop)
 		Job job;
 		{
 			std::unique_lock<std::mutex> lock(m_mutex);
-			m_queueCv.wait(lock, [&] { return stop.stop_requested() || !m_queue.empty(); });
+			m_queueCv.wait(lock, [&] { return stop.stop_requested() || !m_order.empty(); });
 			if (stop.stop_requested())
 			{
 				// Shutdown discards pending work by contract (flush() first
 				// for durability).
-				m_queue.clear();
+				m_pendingByCoord.clear();
+				m_order.clear();
 				m_latestRevision.clear();
 				m_doneCv.notify_all();
 				return;
 			}
-			job = std::move(m_queue.front());
-			m_queue.pop_front();
+			// The FIFO holds coordinates; the payload lives in the coalescing
+			// map and is always the newest one captured for that coordinate.
+			const uint64_t key = m_order.front();
+			m_order.pop_front();
+			const auto it = m_pendingByCoord.find(key);
+			if (it == m_pendingByCoord.end())
+				continue; // defensive: cannot happen (one slot per coordinate)
+			job.request = std::move(it->second);
+			m_pendingByCoord.erase(it);
 		}
 
 		processJob(job);
 
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		m_lastFinishedRevision = job.revision;
-		// Converge the supersede map: erase only when no newer request
-		// for this coordinate was enqueued while this one ran.
-		const auto it = m_latestRevision.find(coordKey(job.request.chunkX, job.request.chunkZ));
-		if (it != m_latestRevision.end() && it->second == job.revision)
-			m_latestRevision.erase(it);
-	}
-	// Both the flush waiter and any enqueue blocked on the queue bound wake.
-	m_queueCv.notify_all();
-	m_doneCv.notify_all();
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_lastFinishedRevision = job.request.revision;
+		}
+		// Both the flush waiter and any enqueue blocked on the queue bound wake.
+		m_queueCv.notify_all();
+		m_doneCv.notify_all();
 	}
 }
 
@@ -249,21 +312,11 @@ void SaveService::processJob(Job &job)
 {
 	const int32_t chunkX = job.request.chunkX;
 	const int32_t chunkZ = job.request.chunkZ;
-
-	// (1) Supersede check at pop time: a newer revision was enqueued for this
-	// coordinate after this job -> drop without any I/O. Serialize time is
-	// deliberately NOT spent on doomed work.
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		const auto it = m_latestRevision.find(coordKey(chunkX, chunkZ));
-		if (it != m_latestRevision.end() && it->second != job.revision)
-		{
-			++m_superseded;
-			return;
-		}
-	}
+	const uint64_t revision = job.request.revision;
+	const uint64_t key = coordKey(chunkX, chunkZ);
 
 	bool ok = false;
+	bool stale = false;
 	bool deleted = false;
 	std::string error;
 	std::vector<worldsave::ChunkEdit> overrides;
@@ -272,7 +325,7 @@ void SaveService::processJob(Job &job)
 
 	try
 	{
-		// (2) Regenerate the deterministic base (serialize time = base regen
+		// (1) Regenerate the deterministic base (serialize time = base regen
 		// + diff). The payload is immutable, so the source chunk was free to
 		// recycle the moment it was captured.
 		const Clock::time_point t0 = Clock::now();
@@ -284,7 +337,23 @@ void SaveService::processJob(Job &job)
 			reinterpret_cast<const uint8_t *>(base.voxels.data()), job.request.currentValues);
 		serializeMs = elapsedMs(t0);
 
+		// (2) Stale check AFTER regeneration and BEFORE any file system
+		// operation (issue #180 review): a job that was superseded while its
+		// base was regenerating must never touch the authoritative file - a
+		// newer capture owns the coordinate and its own job will write.
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			const auto it = m_latestRevision.find(key);
+			stale = it != m_latestRevision.end() && it->second != revision;
+		}
+		if (stale)
+			throw StaleJobException{};
+
 		// (3) Persist: empty diff = all overrides reverted -> remove the file.
+		// Writes go through the two-phase worldsave split so the revision can
+		// be re-checked AFTER the .tmp exists but BEFORE the authoritative
+		// file is replaced (issue #180 review): a job superseded while its
+		// base was regenerating or its tmp was written must never win.
 		const Clock::time_point t1 = Clock::now();
 		if (overrides.empty())
 		{
@@ -299,13 +368,47 @@ void SaveService::processJob(Job &job)
 		}
 		else
 		{
-			const worldsave::SaveStatus st =
-				worldsave::writeChunkFile(m_chunksDir, chunkX, chunkZ, overrides);
-			ok = (st == worldsave::SaveStatus::Ok);
-			if (!ok)
-				error = "writeChunkFile failed (" + statusName(st) + ")";
+			std::filesystem::path tmpPath;
+			worldsave::SaveStatus st;
+			// The seam callback runs WITHOUT the service mutex: a test seam
+			// may block mid-write while other threads enqueue.
+			WriteTmpFn writeTmp;
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				writeTmp = m_writeTmp;
+			}
+			st = writeTmp ? writeTmp(m_chunksDir, chunkX, chunkZ, overrides, tmpPath)
+			              : worldsave::writeChunkFileTmp(m_chunksDir, chunkX, chunkZ, overrides,
+			                                             tmpPath);
+			if (st != worldsave::SaveStatus::Ok)
+			{
+				ok = false;
+				error = "writeChunkFileTmp failed (" + statusName(st) + ")";
+			}
+			else
+			{
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					const auto it = m_latestRevision.find(key);
+					stale = it != m_latestRevision.end() && it->second != revision;
+				}
+				if (stale)
+				{
+					std::error_code removeEc;
+					std::filesystem::remove(tmpPath, removeEc);
+					throw StaleJobException{};
+				}
+				st = worldsave::commitChunkFile(tmpPath);
+				ok = (st == worldsave::SaveStatus::Ok);
+				if (!ok)
+					error = "commitChunkFile failed (" + statusName(st) + ")";
+			}
 		}
 		writeMs = elapsedMs(t1);
+	}
+	catch (const StaleJobException &)
+	{
+		stale = true;
 	}
 	catch (const std::exception &e)
 	{
@@ -316,11 +419,16 @@ void SaveService::processJob(Job &job)
 	// (4) Commit accounting under the mutex (failure bookkeeping is atomic
 	// with the revision progress flush() waits on), then run the completion
 	// callback WITHOUT holding the service mutex (it locks the persistence
-	// index; no lock-order cycle).
+	// state; no lock-order cycle). Stale jobs are neither a completion nor a
+	// failure: the newer revision owns the coordinate and reports for it.
 	CompletionCallback completion;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		if (ok)
+		if (stale)
+		{
+			++m_superseded;
+		}
+		else if (ok)
 		{
 			if (deleted)
 				++m_deleted;
@@ -338,22 +446,22 @@ void SaveService::processJob(Job &job)
 		else
 		{
 			++m_failed;
-			m_anyFailed = true;
+			++m_failureCount;
 			m_lastError = "chunk (" + std::to_string(chunkX) + ", " + std::to_string(chunkZ) +
 			              "): " + error;
 		}
 		completion = m_completion;
 	}
-	if (ok && completion)
+	if (!stale && completion)
 	{
 		if (deleted)
 		{
 			static const std::vector<worldsave::ChunkEdit> kEmpty;
-			completion(chunkX, chunkZ, kEmpty);
+			completion(chunkX, chunkZ, revision, ok, kEmpty, error);
 		}
 		else
 		{
-			completion(chunkX, chunkZ, overrides);
+			completion(chunkX, chunkZ, revision, ok, overrides, error);
 		}
 	}
 }
@@ -373,9 +481,25 @@ uint64_t WorldPersistence::coordKey(int32_t chunkX, int32_t chunkZ)
 	       static_cast<uint64_t>(static_cast<uint32_t>(chunkZ));
 }
 
+bool WorldPersistence::isValidWorldName(std::string_view name)
+{
+	if (name.empty() || name.find("..") != std::string_view::npos)
+		return false;
+	constexpr std::string_view kForbidden = "/\\:*?\"<>|";
+	for (const char c : name)
+		if (kForbidden.find(c) != std::string_view::npos)
+			return false;
+	return true;
+}
+
 void WorldPersistence::recordError(const std::string &error) const
 {
 	std::lock_guard<std::mutex> lock(m_indexMutex);
+	recordErrorLocked(error);
+}
+
+void WorldPersistence::recordErrorLocked(const std::string &error) const
+{
 	if (!m_errorLog.empty())
 		m_errorLog += "\n";
 	m_errorLog += error;
@@ -385,8 +509,19 @@ void WorldPersistence::recordError(const std::string &error) const
 		m_errorLog.erase(0, m_errorLog.size() - kMaxErrorLogBytes);
 }
 
+const std::vector<worldsave::ChunkEdit> &
+WorldPersistence::applicableLocked(const ChunkPersistenceState &state) const
+{
+	// A capture this session makes `desired` authoritative (an override
+	// superset is always safe to re-apply); before the first capture the
+	// durable baseline loaded from disk is what a reload applies.
+	return state.desiredRevision != 0 ? state.desired : state.durable;
+}
+
 bool WorldPersistence::worldExists(const std::filesystem::path &savesRoot, const std::string &name)
 {
+	if (!isValidWorldName(name))
+		return false;
 	std::error_code ec;
 	return std::filesystem::exists(savesRoot / name / "world.meta", ec) && !ec;
 }
@@ -394,6 +529,11 @@ bool WorldPersistence::worldExists(const std::filesystem::path &savesRoot, const
 bool WorldPersistence::peekStoredSeed(const std::filesystem::path &savesRoot,
                                       const std::string &name, int &outSeed, std::string &error)
 {
+	if (!isValidWorldName(name))
+	{
+		error = "invalid world name";
+		return false;
+	}
 	worldsave::WorldMeta meta;
 	const worldsave::SaveStatus st =
 		worldsave::readWorldMeta(savesRoot / name / "world.meta", meta);
@@ -429,6 +569,12 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 	shutdown();
 
 	OpenInfo info;
+	if (!isValidWorldName(name))
+	{
+		info.error = "invalid world name (must be non-empty and free of path separators)";
+		return info;
+	}
+
 	const std::filesystem::path worldDir = savesRoot / name;
 	const std::filesystem::path metaPath = worldDir / "world.meta";
 	const std::filesystem::path chunksDir = worldDir / "chunks";
@@ -496,12 +642,14 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 	// Interrupted atomic writes are never authoritative.
 	worldsave::cleanTempFiles(chunksDir);
 
-	// Load every chunk file into the in-memory override index. A file that
-	// fails to read is loudly reported and SKIPPED (procedural fallback for
-	// that chunk); opening continues.
+	// Load every chunk file as the DURABLE baseline of the per-coordinate
+	// state machine. A file that fails to read is loudly reported and
+	// SKIPPED (procedural fallback for that chunk); a directory SCAN error
+	// (permission denied, path is a file, ...) refuses the open instead - an
+	// I/O error must never be misread as "no overrides saved".
 	{
 		std::lock_guard<std::mutex> lock(m_indexMutex);
-		m_overrides.clear();
+		m_states.clear();
 		m_errorLog.clear();
 		for (const std::filesystem::path &path : worldsave::scanChunkFiles(chunksDir))
 		{
@@ -511,15 +659,19 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 			std::vector<worldsave::ChunkEdit> edits;
 			const worldsave::SaveStatus st = worldsave::readChunkFile(path, cx, cz, edits);
 			if (st == worldsave::SaveStatus::Ok)
-				m_overrides[coordKey(cx, cz)] = std::move(edits);
+			{
+				ChunkPersistenceState state;
+				state.chunkX = cx;
+				state.chunkZ = cz;
+				state.durable = std::move(edits);
+				m_states.emplace(coordKey(cx, cz), std::move(state));
+			}
 			else
 			{
 				const std::string message = "chunk file " + path.filename().string() +
 				                            " failed to load (" + statusName(st) +
 				                            "); using procedural fallback for that chunk";
-				if (!m_errorLog.empty())
-					m_errorLog += "\n";
-				m_errorLog += message;
+				recordErrorLocked(message);
 			}
 		}
 	}
@@ -529,16 +681,34 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 	m_name = name;
 	m_seed = currentSeed;
 	m_service = std::make_unique<SaveService>(chunksDir, currentSeed);
-	// Completion refinement: after a successful write/delete the index
-	// converges to the true minimal override set (the captured entry is a
-	// superset until the worker diffs it). Called from the worker thread.
+	// Completion handling (issue #180 review): a completion only commits when
+	// its revision is still the coordinate's desired one. A job superseded
+	// in flight by a newer capture can never overwrite the newer state in
+	// memory. Called from the worker thread.
 	m_service->setCompletionCallback(
-		[this](int32_t cx, int32_t cz, const std::vector<worldsave::ChunkEdit> &finalOverrides) {
+		[this](int32_t cx, int32_t cz, uint64_t revision, bool ok,
+		       const std::vector<worldsave::ChunkEdit> &finalOverrides, const std::string &error) {
 			std::lock_guard<std::mutex> lock(m_indexMutex);
-			if (finalOverrides.empty())
-				m_overrides.erase(coordKey(cx, cz));
-			else
-				m_overrides[coordKey(cx, cz)] = finalOverrides;
+			const auto key = coordKey(cx, cz);
+			const auto it = m_states.find(key);
+			if (it == m_states.end())
+				return;
+			ChunkPersistenceState &state = it->second;
+			if (revision != state.desiredRevision)
+				return; // stale completion: a newer capture owns this coordinate
+			state.pending = false;
+			if (!ok)
+			{
+				// desiredRevision stays > durableRevision: the next capture,
+				// flush or close retries the write (never dropped silently).
+				state.failed = true;
+				recordErrorLocked("chunk (" + std::to_string(cx) + ", " + std::to_string(cz) +
+				                  ") save failed: " + error);
+				return;
+			}
+			state.durable = finalOverrides;
+			state.durableRevision = revision;
+			state.failed = false;
 		});
 	m_enabled = true;
 
@@ -549,74 +719,26 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 bool WorldPersistence::hasOverrides(int32_t chunkX, int32_t chunkZ) const
 {
 	std::lock_guard<std::mutex> lock(m_indexMutex);
-	return m_overrides.find(coordKey(chunkX, chunkZ)) != m_overrides.end();
-}
-
-const std::vector<worldsave::ChunkEdit> *WorldPersistence::overridesFor(int32_t chunkX,
-                                                                        int32_t chunkZ) const
-{
-	std::lock_guard<std::mutex> lock(m_indexMutex);
-	const auto it = m_overrides.find(coordKey(chunkX, chunkZ));
-	return it != m_overrides.end() ? &it->second : nullptr;
+	const auto it = m_states.find(coordKey(chunkX, chunkZ));
+	return it != m_states.end() && !applicableLocked(it->second).empty();
 }
 
 std::vector<worldsave::ChunkEdit> WorldPersistence::overridesSnapshot(int32_t chunkX,
                                                                       int32_t chunkZ) const
 {
 	std::lock_guard<std::mutex> lock(m_indexMutex);
-	const auto it = m_overrides.find(coordKey(chunkX, chunkZ));
-	return it != m_overrides.end() ? it->second : std::vector<worldsave::ChunkEdit>{};
+	const auto it = m_states.find(coordKey(chunkX, chunkZ));
+	return it != m_states.end() ? applicableLocked(it->second)
+	                            : std::vector<worldsave::ChunkEdit>{};
 }
 
 void WorldPersistence::captureChunkEdits(int32_t chunkX, int32_t chunkZ,
                                          std::vector<worldsave::ChunkEdit> currentValues)
 {
-	// Canonical order: ascending localIndex; repeated writes to one voxel
-	// collapse to the last value (defensive - captures from Chunk edit maps
-	// already hold unique indices).
-	std::stable_sort(currentValues.begin(), currentValues.end(),
-	                 [](const worldsave::ChunkEdit &a, const worldsave::ChunkEdit &b) {
-		                 return a.localIndex < b.localIndex;
-	                 });
-	for (size_t i = 0; i + 1 < currentValues.size();)
-	{
-		if (currentValues[i].localIndex == currentValues[i + 1].localIndex)
-			currentValues.erase(currentValues.begin() + static_cast<std::ptrdiff_t>(i) + 1);
-		else
-			++i;
-	}
-
-	bool enqueue = true;
-	{
-		std::lock_guard<std::mutex> lock(m_indexMutex);
-		const auto key = coordKey(chunkX, chunkZ);
-		const auto it = m_overrides.find(key);
-		const bool hadOverrides = it != m_overrides.end() && !it->second.empty();
-		if (currentValues.empty() && !hadOverrides)
-		{
-			// Nothing captured and nothing recorded: no override state
-			// exists anywhere, so no file can be stale. Skip entirely.
-			enqueue = false;
-		}
-		else if (hadOverrides && sameEditList(it->second, currentValues))
-		{
-			// Identical to the recorded entry: the index already carries
-			// these values and the last persisted write produced exactly
-			// this diff (or is still queued / superseded-safe). Skip.
-			enqueue = false;
-		}
-		else if (currentValues.empty())
-		{
-			m_overrides.erase(key);
-		}
-		else
-		{
-			m_overrides[key] = currentValues;
-		}
-	}
-
-	if (!enqueue)
-		return;
+	// Canonical capture payload: ascending localIndex, duplicates collapsed
+	// last-write-wins (defensive - captures from Chunk edit maps already
+	// hold unique indices).
+	currentValues = collapseAndSort(std::move(currentValues));
 
 	if (!m_enabled || !m_service)
 	{
@@ -625,18 +747,124 @@ void WorldPersistence::captureChunkEdits(int32_t chunkX, int32_t chunkZ,
 		return;
 	}
 
+	uint64_t revision = 0;
+	std::vector<worldsave::ChunkEdit> payload;
+	{
+		std::lock_guard<std::mutex> lock(m_indexMutex);
+		const uint64_t key = coordKey(chunkX, chunkZ);
+		ChunkPersistenceState &state = m_states[key];
+		state.chunkX = chunkX;
+		state.chunkZ = chunkZ;
+
+		// Enqueue decision (issue #180 review): work is only needed when the
+		// desired content is not already durable, not pending, and the last
+		// attempt did not fail. A re-capture of identical content on a clean
+		// coordinate skips; a FAILED coordinate retries even for identical
+		// content (its durable copy is not confirmed).
+		const bool newCapture = state.desiredRevision == 0 ||
+		                        !sameEditList(state.desired, currentValues);
+		if (newCapture)
+			state.desired = currentValues;
+		const bool clean =
+			sameEditList(state.desired, state.durable) && !state.failed && !state.pending;
+		if (clean)
+			return;
+
+		// (Re)enqueue with a FRESH revision: the service's flush barrier
+		// tracks progress by revision, so a retry that reused the already
+		// finished revision of the failed attempt would not be waited for.
+		state.pending = true; // completion or rejection clears it
+		state.failed = false;
+		state.desiredRevision = m_nextCaptureRevision++;
+		revision = state.desiredRevision;
+		payload = state.desired;
+	}
+
 	ChunkSaveRequest request;
 	request.chunkX = chunkX;
 	request.chunkZ = chunkZ;
-	request.currentValues = currentValues; // index keeps the superset copy
+	request.revision = revision;
+	request.currentValues = std::move(payload);
 	if (!m_service->enqueue(std::move(request)))
-		recordError("save service rejected capture for chunk (" + std::to_string(chunkX) + ", " +
-		            std::to_string(chunkZ) + ") because it is shutting down");
+	{
+		// Busy (distinct-coordinate bound reached) or shutting down: the
+		// state stays dirty (desiredRevision > durableRevision) and is
+		// retried by the next capture or flush - never dropped silently.
+		std::lock_guard<std::mutex> lock(m_indexMutex);
+		const auto it = m_states.find(coordKey(chunkX, chunkZ));
+		if (it != m_states.end())
+			it->second.pending = false;
+		recordError("save service queue rejected capture for chunk (" + std::to_string(chunkX) +
+		            ", " + std::to_string(chunkZ) + "); retrying on the next capture/flush");
+	}
+}
+
+void WorldPersistence::setWriteTmpFnForTests(SaveService::WriteTmpFn fn)
+{
+	if (m_service)
+		m_service->setWriteTmpFnForTests(std::move(fn));
 }
 
 bool WorldPersistence::flush()
 {
-	return m_service ? m_service->flush() : true;
+	if (!m_service)
+		return !m_enabled; // never opened: trivially consistent; open+shut: reported by shutdown	// Retry sweep (issue #180 review): every coordinate whose desired
+	// content is not durable and not pending - failed writes and captures
+	// the queue rejected - is re-enqueued here, so flush is THE retry point.
+	std::vector<ChunkSaveRequest> retries;
+	{
+		std::lock_guard<std::mutex> lock(m_indexMutex);
+		for (auto &[key, state] : m_states)
+		{
+			(void)key;
+			if (state.pending || state.desiredRevision == 0)
+				continue;
+			if (!state.dirty())
+				continue;
+			// Fresh revision for the retried attempt: the service's flush
+			// barrier tracks progress by revision, so a retry must not reuse
+			// a revision the barrier already saw finished.
+			state.pending = true;
+			state.failed = false;
+			state.desiredRevision = m_nextCaptureRevision++;
+			ChunkSaveRequest request;
+			request.chunkX = state.chunkX;
+			request.chunkZ = state.chunkZ;
+			request.revision = state.desiredRevision;
+			request.currentValues = state.desired;
+			retries.push_back(std::move(request));
+		}
+	}
+	for (ChunkSaveRequest &request : retries)
+	{
+		if (!m_service->enqueue(std::move(request)))
+		{
+			// Busy/shutdown: leave the state dirty for the next retry point.
+			std::lock_guard<std::mutex> lock(m_indexMutex);
+			const auto it = m_states.find(coordKey(request.chunkX, request.chunkZ));
+			if (it != m_states.end())
+				it->second.pending = false;
+		}
+	}
+
+	const bool ok = m_service->flush();
+
+	// Anything still dirty after the barrier means durability was not
+	// reached (its request failed, or the queue kept rejecting it).
+	bool allDurable = true;
+	{
+		std::lock_guard<std::mutex> lock(m_indexMutex);
+		for (auto &[key, state] : m_states)
+		{
+			(void)key;
+			if (state.dirty())
+			{
+				allDurable = false;
+				break;
+			}
+		}
+	}
+	return ok && allDurable;
 }
 
 // ---------------------------------------------------------------------------
@@ -740,7 +968,7 @@ void WorldPersistence::shutdown()
 		m_enabled = false;
 		return;
 	}
-	if (!m_service->flush())
+	if (!flush())
 		recordError("world save flush during shutdown reported failures (see save stats)");
 	m_service->shutdown();
 	m_service.reset();
@@ -765,9 +993,19 @@ WorldPersistence::Status WorldPersistence::status() const
 		if (!st.lastError.empty())
 			s.lastError = st.lastError;
 	}
-	std::lock_guard<std::mutex> lock(m_indexMutex);
-	s.pendingCaptureEntries = m_overrides.size();
-	if (!m_errorLog.empty())
-		s.lastError = s.lastError.empty() ? m_errorLog : (s.lastError + "\n" + m_errorLog);
+	uint64_t dirty = 0;
+	{
+		std::lock_guard<std::mutex> lock(m_indexMutex);
+		s.pendingCaptureEntries = m_states.size();
+		for (const auto &[key, state] : m_states)
+		{
+			(void)key;
+			if (state.dirty())
+				++dirty;
+		}
+		if (!m_errorLog.empty())
+			s.lastError = s.lastError.empty() ? m_errorLog : (s.lastError + "\n" + m_errorLog);
+	}
+	s.dirtyCoordinates = dirty;
 	return s;
 }

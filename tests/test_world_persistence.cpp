@@ -221,16 +221,22 @@ static void testSaveServiceOrdering()
 
 	SaveService svc(chunks, 42);
 	int completions = 0;
+	uint64_t lastCompletionRevision = 0;
 	std::vector<worldsave::ChunkEdit> completionEdits;
 	svc.setCompletionCallback(
-		[&](int32_t, int32_t, const std::vector<worldsave::ChunkEdit> &finalOverrides)
+		[&](int32_t, int32_t, uint64_t revision, bool ok,
+		    const std::vector<worldsave::ChunkEdit> &finalOverrides, const std::string &error)
 		{
+			(void)error;
+			CHECK(ok, "service-level completion succeeds");
 			++completions;
+			lastCompletionRevision = revision;
 			completionEdits = finalOverrides;
 		});
 
-	// A then B for the same coordinate: B (last enqueued) must win, A must be
-	// dropped without I/O.
+	// A then B for the same coordinate: B REPLACES A's queued payload in
+	// place (per-coordinate coalescing), so A performs no I/O at all and B
+	// is the only completion.
 	{
 		const std::vector<worldsave::ChunkEdit> valuesA = {{ia, va}, {ib, static_cast<uint8_t>(BRICKS)}};
 		const std::vector<worldsave::ChunkEdit> valuesB = {{ia, va}, {ib, vb}};
@@ -238,54 +244,123 @@ static void testSaveServiceOrdering()
 		ChunkSaveRequest a;
 		a.chunkX = 0;
 		a.chunkZ = 0;
+		a.revision = 1;
 		a.currentValues = valuesA;
 		ChunkSaveRequest b;
 		b.chunkX = 0;
 		b.chunkZ = 0;
+		b.revision = 2;
 		b.currentValues = valuesB;
 		CHECK(svc.enqueue(std::move(a)), "enqueue A");
 		CHECK(svc.enqueue(std::move(b)), "enqueue B");
 		CHECK(svc.flush(), "flush A/B");
 
 		const SaveService::Stats st = svc.stats();
-		CHECK(st.superseded >= 1, "older pending request superseded");
+		CHECK(st.superseded == 0, "in-queue replacement costs no supersede");
 		CHECK(st.completed == 1, "exactly one request written");
-		CHECK(st.queueDepth == 0, "queue drained");
+		CHECK(st.queueDepth == 0, "queue drained (one slot per coordinate)");
 
 		std::vector<worldsave::ChunkEdit> disk;
 		CHECK(readChunk(chunks, 0, 0, disk), "chunk file exists after flush");
 		CHECK(sameEdits(disk, diffAgainstBase(base, valuesB)),
 		      "disk reflects the newest payload only");
 		CHECK(completions == 1, "completion callback fired once");
+		CHECK(lastCompletionRevision == 2, "completion carries B's revision");
 		CHECK(sameEdits(completionEdits, diffAgainstBase(base, valuesB)),
 		      "completion carries the minimal persisted diff");
 	}
 
-	// An older payload enqueued after a newer one for the same coordinate: the
-	// LAST-ENQUEUED revision still wins, the earlier request is dropped
-	// without I/O (ordering is by enqueue revision, never by disk timing).
+	// Older payload enqueued after a newer one for the same coordinate: the
+	// payload is replaced in place regardless of capture order, so the
+	// newest content always owns the single queue slot.
 	{
-		const uint64_t supersededBefore = svc.stats().superseded;
 		const std::vector<worldsave::ChunkEdit> valuesC = {{ia, vb}};
 		const std::vector<worldsave::ChunkEdit> valuesD = {{ia, va}, {ib, vb}};
 
 		ChunkSaveRequest c;
 		c.chunkX = 0;
 		c.chunkZ = 0;
+		c.revision = 3;
 		c.currentValues = valuesC;
 		ChunkSaveRequest d;
 		d.chunkX = 0;
 		d.chunkZ = 0;
+		d.revision = 4;
 		d.currentValues = valuesD;
 		CHECK(svc.enqueue(std::move(c)), "enqueue C");
 		CHECK(svc.enqueue(std::move(d)), "enqueue D");
 		CHECK(svc.flush(), "flush C/D");
 
-		CHECK(svc.stats().superseded >= supersededBefore + 1, "earlier request dropped");
 		std::vector<worldsave::ChunkEdit> disk;
 		CHECK(readChunk(chunks, 0, 0, disk), "file readable after second flush");
 		CHECK(sameEdits(disk, diffAgainstBase(base, valuesD)),
 		      "disk reflects the last-enqueued payload");
+		CHECK(completions == 2 && lastCompletionRevision == 4, "only D completed");
+	}
+
+	// In-flight supersede (issue #180 review): a job that already POPPED and
+	// wrote its .tmp while a newer capture arrives must never replace the
+	// authoritative file. The seam blocks A between tmp-write and commit,
+	// the test enqueues B in that window, and A must be discarded with its
+	// tmp removed.
+	{
+		std::mutex m;
+		std::condition_variable cv;
+		bool aReachedCommit = false;
+		bool releaseA = false;
+		int aTmpWrites = 0;
+		svc.setWriteTmpFnForTests(
+			[&](const std::filesystem::path &dir, int32_t cx, int32_t cz,
+			    const std::vector<worldsave::ChunkEdit> &edits, std::filesystem::path &tmpPath)
+			{
+				const worldsave::SaveStatus st =
+					worldsave::writeChunkFileTmp(dir, cx, cz, edits, tmpPath);
+				if (st == worldsave::SaveStatus::Ok && cx == 0 && cz == 0)
+				{
+					// First call is A: park between tmp and commit until B
+					// has been enqueued.
+					std::unique_lock<std::mutex> lock(m);
+					if (++aTmpWrites == 1)
+					{
+						aReachedCommit = true;
+						cv.notify_all();
+						cv.wait(lock, [&] { return releaseA; });
+					}
+				}
+				return st;
+			});
+
+		std::thread enqueuer([&]
+		                     {
+			                     std::unique_lock<std::mutex> lock(m);
+			                     cv.wait(lock, [&] { return aReachedCommit; });
+			                     ChunkSaveRequest b2;
+			                     b2.chunkX = 0;
+			                     b2.chunkZ = 0;
+			                     b2.revision = 6;
+			                     b2.currentValues = {{ia, vb}};
+			                     CHECK(svc.enqueue(std::move(b2)), "enqueue B while A is mid-write");
+			                     releaseA = true;
+			                     cv.notify_all();
+		                     });
+
+		ChunkSaveRequest a2;
+		a2.chunkX = 0;
+		a2.chunkZ = 0;
+		a2.revision = 5;
+		a2.currentValues = {{ia, va}, {ib, vb}};
+		CHECK(svc.enqueue(std::move(a2)), "enqueue A (in-flight supersede scenario)");
+		enqueuer.join();
+		CHECK(svc.flush(), "flush after in-flight supersede");
+		svc.setWriteTmpFnForTests(nullptr);
+
+		const SaveService::Stats st = svc.stats();
+		CHECK(st.superseded >= 1, "in-flight stale job counted as superseded");
+		CHECK(!fileExists(chunks / "0_0.chunk.tmp"), "stale job's tmp file was removed");
+		std::vector<worldsave::ChunkEdit> disk;
+		CHECK(readChunk(chunks, 0, 0, disk), "authoritative file readable");
+		CHECK(sameEdits(disk, diffAgainstBase(base, {{ia, vb}})),
+		      "final disk state is the newer revision's payload");
 	}
 
 	// Two different chunks: both files exist with correct coordinates and no
@@ -299,10 +374,12 @@ static void testSaveServiceOrdering()
 		ChunkSaveRequest e;
 		e.chunkX = 2;
 		e.chunkZ = -1;
+		e.revision = 7;
 		e.currentValues = valuesE;
 		ChunkSaveRequest f;
 		f.chunkX = -3;
 		f.chunkZ = 4;
+		f.revision = 8;
 		f.currentValues = valuesF;
 		CHECK(svc.enqueue(std::move(e)), "enqueue chunk (2,-1)");
 		CHECK(svc.enqueue(std::move(f)), "enqueue chunk (-3,4)");
@@ -318,6 +395,64 @@ static void testSaveServiceOrdering()
 	svc.shutdown();
 	ChunkSaveRequest rejected;
 	CHECK(svc.enqueue(std::move(rejected)) == false, "enqueue rejected after shutdown");
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Write failure -> flush() false -> retry succeeds (issue #180 review)
+// ---------------------------------------------------------------------------
+
+static void testWriteFailureRetry()
+{
+	TerrainGenerator gen(42);
+	auto root = makeTempDir("failretry");
+	TerrainGenerator gen2(42);
+	const std::vector<Voxel> base = gen.generateChunk(0, 0).voxels;
+
+	WorldPersistence wp;
+	const WorldPersistence::OpenInfo info =
+		wp.openOrCreate(root, "w", 42, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok, "world opened");
+
+	const uint32_t ia = idxOf(5, 50, 5);
+	const uint8_t va = pickNonBase(base[ia].type);
+	const std::vector<worldsave::ChunkEdit> values = {{ia, va}};
+
+	// First attempt fails deterministically at the tmp-write step.
+	std::atomic<int> writeCalls{0};
+	wp.setWriteTmpFnForTests(
+		[&](const std::filesystem::path &, int32_t, int32_t,
+		    const std::vector<worldsave::ChunkEdit> &, std::filesystem::path &)
+		{
+			++writeCalls;
+			return worldsave::SaveStatus::IoError;
+		});
+	wp.captureChunkEdits(0, 0, values);
+	CHECK(!wp.flush(), "flush reports the failed write");
+	{
+		const WorldPersistence::Status st = wp.status();
+		CHECK(st.failed >= 1, "failure counted");
+		CHECK(st.dirtyCoordinates >= 1, "failed coordinate stays dirty");
+	}
+	CHECK(!fileExists(root / "w" / "chunks" / "0_0.chunk"), "no file created by the failed write");
+
+	// Retry: clear the seam and flush again - the dirty coordinate is
+	// re-enqueued by flush itself and the real writer now succeeds (the seam
+	// counter stays at the one failed attempt).
+	CHECK(writeCalls.load() == 1, "exactly one (failed) seam write before retry");
+	wp.setWriteTmpFnForTests(nullptr);
+	CHECK(wp.flush(), "retry flush succeeds");
+	CHECK(wp.status().completed >= 1, "retry completed a real write");
+
+	std::vector<worldsave::ChunkEdit> disk;
+	const auto chunks = root / "w" / "chunks";
+	CHECK(readChunk(chunks, 0, 0, disk), "retry wrote the chunk file");
+	CHECK(sameEdits(disk, diffAgainstBase(base, values)), "retry payload correct");
+
+	// A follow-up flush with nothing new stays true (checkpoint semantics).
+	CHECK(wp.flush(), "idempotent flush stays true");
+
+	wp.shutdown();
 	removeDir(root);
 }
 
@@ -497,10 +632,9 @@ static void testOpenCreateSemantics()
 		const WorldPersistence::Status st = wp.status();
 		CHECK(st.lastError.find("0_0.chunk") != std::string::npos,
 		      "corrupt file named in status().lastError");
-		CHECK(wp.overridesFor(0, 0) == nullptr, "corrupt chunk falls back to procedural");
-		const std::vector<worldsave::ChunkEdit> *healthy = wp.overridesFor(1, 0);
-		CHECK(healthy != nullptr && healthy->size() == 1 &&
-		          (*healthy)[0].localIndex == idxOf(2, 205, 2),
+		CHECK(wp.overridesSnapshot(0, 0).empty(), "corrupt chunk falls back to procedural");
+		const std::vector<worldsave::ChunkEdit> healthy = wp.overridesSnapshot(1, 0);
+		CHECK(healthy.size() == 1 && healthy[0].localIndex == idxOf(2, 205, 2),
 		      "healthy chunk overrides loaded");
 	}
 
@@ -570,7 +704,7 @@ static void testSparseSaveBehavior()
 	CHECK(wp.flush(), "flush revert");
 	CHECK(!fileExists(chunkPath(chunks, 0, 0)), "fully reverted chunk file deleted");
 	CHECK(wp.status().deleted >= deletedBefore + 1, "deletion counted");
-	CHECK(wp.overridesFor(0, 0) == nullptr, "index entry refined away after delete");
+	CHECK(wp.overridesSnapshot(0, 0).empty(), "index entry refined away after delete");
 
 	wp.shutdown();
 	removeDir(root);
@@ -782,20 +916,21 @@ static void testManyChunksNoCrossContamination()
 
 	for (const EditedChunk &e : edited)
 	{
-		const std::vector<worldsave::ChunkEdit> *o = fresh.overridesFor(e.coord.x, e.coord.z);
+		const std::vector<worldsave::ChunkEdit> o =
+			fresh.overridesSnapshot(e.coord.x, e.coord.z);
 		const std::string label = "chunk " + std::to_string(e.coord.x) + "_" +
 		                          std::to_string(e.coord.z);
-		CHECK(o != nullptr, ("overrides exist for edited " + label).c_str());
-		if (!o)
+		CHECK(!o.empty(), ("overrides exist for edited " + label).c_str());
+		if (o.empty())
 			continue;
-		CHECK(o->size() == 2, ("exactly the two edits persisted for " + label).c_str());
-		CHECK(containsEdit(*o, idxOf(3, 200, 3), e.firstValue),
+		CHECK(o.size() == 2, ("exactly the two edits persisted for " + label).c_str());
+		CHECK(containsEdit(o, idxOf(3, 200, 3), e.firstValue),
 		      ("right first edit value for " + label).c_str());
-		CHECK(containsEdit(*o, idxOf(9, 210, 9), e.secondValue),
+		CHECK(containsEdit(o, idxOf(9, 210, 9), e.secondValue),
 		      ("right second edit value for " + label).c_str());
 	}
 
-	CHECK(fresh.overridesFor(untouched.x, untouched.z) == nullptr,
+	CHECK(fresh.overridesSnapshot(untouched.x, untouched.z).empty(),
 	      "never-edited chunk has no overrides");
 	CHECK(!fileExists(chunkPath(chunksDir, untouched.x, untouched.z)),
 	      "never-edited chunk has no file");
@@ -879,9 +1014,9 @@ static void testDestructorSafetyNet()
 	const WorldPersistence::OpenInfo info =
 		verify.openOrCreate(savesRoot, "w", 42, TerrainGenerator::kGeneratorVersion);
 	CHECK(info.ok, "world readable after unclosed manager destruction");
-	const std::vector<worldsave::ChunkEdit> *o = verify.overridesFor(0, 0);
-	CHECK(o != nullptr && o->size() == 1 && (*o)[0].localIndex == idxOf(8, 130, 8) &&
-	          (*o)[0].blockType == static_cast<uint8_t>(BRICKS),
+	const std::vector<worldsave::ChunkEdit> o = verify.overridesSnapshot(0, 0);
+	CHECK(o.size() == 1 && o[0].localIndex == idxOf(8, 130, 8) &&
+	          o[0].blockType == static_cast<uint8_t>(BRICKS),
 	      "destructor flushed the recorded edit");
 	verify.shutdown();
 
@@ -1031,6 +1166,7 @@ int main()
 {
 	std::cout << "== SaveService ordering ==\n";
 	testSaveServiceOrdering();
+	testWriteFailureRetry();
 	std::cout << "== Recycled-chunk isolation ==\n";
 	testRecycledChunkIsolation();
 	std::cout << "== Open/create semantics ==\n";
