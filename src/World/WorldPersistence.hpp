@@ -52,6 +52,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -69,7 +70,16 @@ struct ChunkSaveRequest
 {
 	int32_t chunkX{0};
 	int32_t chunkZ{0};
+	// Logical content revision (WorldPersistence-owned; used ONLY for
+	// per-chunk stale detection).
 	uint64_t revision{0};
+	// Barrier ticket: assigned by SaveService on ACCEPTED enqueue, in strict
+	// acceptance order. flush() waits for all tickets <= its sampled target.
+	// Independent from `revision` because coalescing can replace a queued
+	// payload in place - a replaced revision is never "finished" by the
+	// worker, so revision order must never be used as completion order
+	// (issue #180 review round 2).
+	uint64_t barrierTicket{0};
 	std::vector<worldsave::ChunkEdit> currentValues;
 };
 
@@ -102,6 +112,14 @@ public:
 	using SerializeFn = std::function<std::vector<worldsave::ChunkEdit>(
 		int32_t chunkX, int32_t chunkZ, const std::vector<worldsave::ChunkEdit> &currentValues)>;
 
+	/// Test seam: invoked from the worker IMMEDIATELY BEFORE the
+	/// authoritative-commit critical section (rename over the final file, or
+	/// authoritative delete) and WITHOUT holding the service mutex, so a
+	/// test can block the worker there while another thread enqueues a newer
+	/// revision for the same coordinate. Covers the exact
+	/// stale-check/commit window (issue #180 review round 2).
+	using BeforeCommitFn = std::function<void(int32_t chunkX, int32_t chunkZ, uint64_t revision)>;
+
 	struct Stats
 	{
 		uint64_t enqueued{0};
@@ -130,6 +148,7 @@ public:
 	void setCompletionCallback(CompletionCallback callback);
 	void setWriteTmpFnForTests(WriteTmpFn fn);
 	void setSerializeFnForTests(SerializeFn fn);
+	void setBeforeCommitFnForTests(BeforeCommitFn fn);
 
 	/// Takes ownership of the request. Coalescing is per COORDINATE: if a
 	/// request for the same chunk is already queued, its payload and revision
@@ -166,12 +185,17 @@ private:
 	void workerLoop(std::stop_token stop);
 	void processJob(Job &job);
 	static uint64_t coordKey(int32_t chunkX, int32_t chunkZ);
+	/// Marks an accepted ticket as no longer pending (completed, failed,
+	/// superseded, or replaced in the queue) and wakes flush() waiters.
+	/// Caller holds m_mutex.
+	void resolveTicketLocked(uint64_t ticket);
 
 	std::filesystem::path m_chunksDir;
 	int m_seed{0};
 	CompletionCallback m_completion; // guarded by m_mutex
 	WriteTmpFn m_writeTmp;           // guarded by m_mutex (test seam)
 	SerializeFn m_serialize;         // guarded by m_mutex (test seam)
+	BeforeCommitFn m_beforeCommit;   // guarded by m_mutex (test seam)
 
 	mutable std::mutex m_mutex;
 	std::condition_variable m_queueCv; // worker wakes on enqueue / shutdown
@@ -187,13 +211,20 @@ private:
 	std::unordered_map<uint64_t, uint64_t> m_latestRevision;
 	static constexpr size_t kMaxPendingCoords = 1024;
 
-	// Failures are a monotone counter; flush() compares against a checkpoint
-	// of the last OBSERVED value so each barrier covers exactly the failure
-	// range since the previous flush (issue #180 review).
+	// Barrier tickets (acceptance order, independent of content revisions).
+	uint64_t m_nextBarrierTicket{1};
+	uint64_t m_lastAcceptedTicket{0};
+	// Ordered set of accepted-but-unresolved tickets. flush() waits until no
+	// ticket <= its sampled target remains; the ordered begin() makes that
+	// check O(1) instead of a scan.
+	std::set<uint64_t> m_unfinishedTickets;
+
+	// Failures are a monotone counter; flush() compares against the checkpoint
+	// of the last OBSERVED value so a failure that completed after the
+	// previous flush but before this one is reported by THIS flush
+	// (issue #180 review round 2).
 	uint64_t m_failureCount{0};
 	uint64_t m_failureCheckpoint{0};
-	uint64_t m_highestEnqueuedRevision{0};
-	uint64_t m_lastFinishedRevision{0}; // every popped job (incl. superseded) advances it
 	bool m_shuttingDown{false};
 
 	// Counters / timings, all guarded by m_mutex.
@@ -350,6 +381,7 @@ public:
 	/// world is open.
 	void setWriteTmpFnForTests(SaveService::WriteTmpFn fn);
 	void setSerializeFnForTests(SaveService::SerializeFn fn);
+	void setBeforeCommitFnForTests(SaveService::BeforeCommitFn fn);
 
 private:
 	/// Per-coordinate desired/durable state (issue #180 review): `desired`

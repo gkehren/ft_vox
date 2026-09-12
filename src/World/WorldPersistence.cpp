@@ -165,6 +165,12 @@ void SaveService::setSerializeFnForTests(SerializeFn fn)
 	m_serialize = std::move(fn);
 }
 
+void SaveService::setBeforeCommitFnForTests(BeforeCommitFn fn)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_beforeCommit = std::move(fn);
+}
+
 bool SaveService::enqueue(ChunkSaveRequest &&request)
 {
 	if (request.revision == 0)
@@ -183,14 +189,28 @@ bool SaveService::enqueue(ChunkSaveRequest &&request)
 	const auto existing = m_pendingByCoord.find(key);
 	if (existing == m_pendingByCoord.end() && m_pendingByCoord.size() >= kMaxPendingCoords)
 		return false; // Busy: caller keeps the state dirty and retries later.
-		              // Revision bookkeeping MUST NOT happen for a rejected
-		              // request: the flush barrier waits for the highest
-		              // ENQUEUED revision, and a rejected revision would
-		              // never finish -> deadlock.
+		              // Ticket/revision bookkeeping MUST NOT happen for a
+		              // rejected request: the flush barrier waits for
+		              // accepted tickets only, and a rejected ticket would
+		              // never resolve -> deadlock.
 
+	// In-place replacement resolves the replaced request's ticket as
+	// SUPERSEDED (issue #180 review round 2): it will never be popped, and a
+	// flush waiting on it must not block forever. The new ticket becomes the
+	// only pending one for this coordinate.
+	const bool replaced = existing != m_pendingByCoord.end();
+	if (replaced)
+	{
+		resolveTicketLocked(existing->second.barrierTicket);
+		++m_superseded;
+	}
+
+	request.barrierTicket = m_nextBarrierTicket++;
+	m_lastAcceptedTicket = request.barrierTicket;
+	m_unfinishedTickets.insert(request.barrierTicket);
 	m_latestRevision[key] = request.revision;
-	m_highestEnqueuedRevision = std::max(m_highestEnqueuedRevision, request.revision);
-	if (existing != m_pendingByCoord.end())
+
+	if (replaced)
 	{
 		existing->second = std::move(request);
 		return true;
@@ -208,21 +228,24 @@ bool SaveService::flush()
 	std::unique_lock<std::mutex> lock(m_mutex);
 	if (m_shuttingDown)
 		return false;
-	// Revision barrier: everything enqueued so far carries a revision
-	// <= m_highestEnqueuedRevision; wait until the worker has popped
-	// (processed or superseded) all of them. Completion callbacks run before
-	// the revision progress is published, so state machine updates are
-	// visible to the waiter.
-	const uint64_t target = m_highestEnqueuedRevision;
-	const uint64_t observedFailures = m_failureCount;
-	m_doneCv.wait(lock, [&] { return m_shuttingDown || m_lastFinishedRevision >= target; });
+	// Ticket barrier (issue #180 review round 2): completion order is NOT
+	// revision order under per-coordinate coalescing (a replaced revision is
+	// never finished), so the barrier tracks ACCEPTANCE tickets: wait until
+	// no ticket <= the sampled target remains. The ordered set makes the
+	// predicate O(1).
+	const uint64_t target = m_lastAcceptedTicket;
+	const uint64_t failuresBeforeBarrier = m_failureCheckpoint;
+	m_doneCv.wait(lock, [&] {
+		return m_shuttingDown || m_unfinishedTickets.empty() ||
+		       *m_unfinishedTickets.begin() > target;
+	});
 	if (m_shuttingDown)
 		return false;
-	// Failure accounting per barrier range (issue #180 review): the
-	// checkpoint only advances when a flush has OBSERVED the counter, so
-	// each flush reports exactly the failures since the previous flush -
-	// and a retry that succeeds without a new failure reports success.
-	const bool ok = m_failureCount == observedFailures;
+	// Failure accounting per barrier range: the baseline is the checkpoint of
+	// the last OBSERVED flush (not the counter at call time), so a failure
+	// that completed after the previous flush but before this call is
+	// reported by THIS flush. The checkpoint advances only once observed.
+	const bool ok = m_failureCount == failuresBeforeBarrier;
 	m_failureCheckpoint = m_failureCount;
 	return ok;
 }
@@ -242,6 +265,7 @@ void SaveService::shutdown()
 			m_pendingByCoord.clear();
 			m_order.clear();
 			m_latestRevision.clear();
+			m_unfinishedTickets.clear();
 			m_queueCv.notify_all();
 			m_doneCv.notify_all();
 		}
@@ -293,6 +317,7 @@ void SaveService::workerLoop(std::stop_token stop)
 				m_pendingByCoord.clear();
 				m_order.clear();
 				m_latestRevision.clear();
+				m_unfinishedTickets.clear();
 				m_doneCv.notify_all();
 				return;
 			}
@@ -309,14 +334,21 @@ void SaveService::workerLoop(std::stop_token stop)
 
 		processJob(job);
 
+		// The ticket is resolved for EVERY outcome (written, deleted,
+		// superseded, failed): it represents "this accepted enqueue is no
+		// longer pending in the service".
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
-			m_lastFinishedRevision = job.request.revision;
+			resolveTicketLocked(job.request.barrierTicket);
 		}
-		// Both the flush waiter and any enqueue blocked on the queue bound wake.
-		m_queueCv.notify_all();
 		m_doneCv.notify_all();
 	}
+}
+
+void SaveService::resolveTicketLocked(uint64_t ticket)
+{
+	m_unfinishedTickets.erase(ticket);
+	m_doneCv.notify_all();
 }
 
 void SaveService::processJob(Job &job)
@@ -334,6 +366,18 @@ void SaveService::processJob(Job &job)
 	double serializeMs = 0.0;
 	double writeMs = 0.0;
 
+	// Test seams are copied out and invoked WITHOUT the service mutex so a
+	// test can block the worker while the main thread enqueues.
+	SerializeFn serialize;
+	WriteTmpFn writeTmp;
+	BeforeCommitFn beforeCommit;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		serialize = m_serialize;
+		writeTmp = m_writeTmp;
+		beforeCommit = m_beforeCommit;
+	}
+
 	try
 	{
 		// (1) Regenerate the deterministic base (serialize time = base regen
@@ -342,11 +386,6 @@ void SaveService::processJob(Job &job)
 		// injectable for tests (a full chunk generation per request is far
 		// too slow for queue-behavior coverage).
 		const Clock::time_point t0 = Clock::now();
-		SerializeFn serialize;
-		{
-			std::lock_guard<std::mutex> lock(m_mutex);
-			serialize = m_serialize;
-		}
 		if (serialize)
 			overrides = serialize(chunkX, chunkZ, job.request.currentValues);
 		else
@@ -360,10 +399,10 @@ void SaveService::processJob(Job &job)
 		}
 		serializeMs = elapsedMs(t0);
 
-		// (2) Stale check AFTER regeneration and BEFORE any file system
-		// operation (issue #180 review): a job that was superseded while its
-		// base was regenerating must never touch the authoritative file - a
-		// newer capture owns the coordinate and its own job will write.
+		// (2) Optimistic stale check before ANY file system work: a job
+		// superseded while its base was regenerating is dropped without
+		// spending a tmp write. This check is NOT the authority - step (4)
+		// re-checks atomically with the commit.
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			const auto it = m_latestRevision.find(key);
@@ -372,37 +411,17 @@ void SaveService::processJob(Job &job)
 		if (stale)
 			throw StaleJobException{};
 
-		// (3) Persist: empty diff = all overrides reverted -> remove the file.
-		// Writes go through the two-phase worldsave split so the revision can
-		// be re-checked AFTER the .tmp exists but BEFORE the authoritative
-		// file is replaced (issue #180 review): a job superseded while its
-		// base was regenerating or its tmp was written must never win.
+		// (3) Build the payload on disk but OUTSIDE the service mutex: the
+		// tmp sidecar is transient and never authoritative.
 		const Clock::time_point t1 = Clock::now();
-		if (overrides.empty())
+		std::filesystem::path tmpPath;
+		bool haveTmp = false;
+		if (!overrides.empty())
 		{
-			deleted = true;
 			const worldsave::SaveStatus st =
-				worldsave::removeChunkFile(m_chunksDir, chunkX, chunkZ);
-			// removeChunkFile is Ok for both "removed" and "was already
-			// absent" (idempotent delete).
-			ok = (st == worldsave::SaveStatus::Ok);
-			if (!ok)
-				error = "removeChunkFile failed (" + statusName(st) + ")";
-		}
-		else
-		{
-			std::filesystem::path tmpPath;
-			worldsave::SaveStatus st;
-			// The seam callback runs WITHOUT the service mutex: a test seam
-			// may block mid-write while other threads enqueue.
-			WriteTmpFn writeTmp;
-			{
-				std::lock_guard<std::mutex> lock(m_mutex);
-				writeTmp = m_writeTmp;
-			}
-			st = writeTmp ? writeTmp(m_chunksDir, chunkX, chunkZ, overrides, tmpPath)
-			              : worldsave::writeChunkFileTmp(m_chunksDir, chunkX, chunkZ, overrides,
-			                                             tmpPath);
+				writeTmp ? writeTmp(m_chunksDir, chunkX, chunkZ, overrides, tmpPath)
+			             : worldsave::writeChunkFileTmp(m_chunksDir, chunkX, chunkZ, overrides,
+			                                            tmpPath);
 			if (st != worldsave::SaveStatus::Ok)
 			{
 				ok = false;
@@ -410,22 +429,54 @@ void SaveService::processJob(Job &job)
 			}
 			else
 			{
-				{
-					std::lock_guard<std::mutex> lock(m_mutex);
-					const auto it = m_latestRevision.find(key);
-					stale = it != m_latestRevision.end() && it->second != revision;
-				}
-				if (stale)
-				{
-					std::error_code removeEc;
-					std::filesystem::remove(tmpPath, removeEc);
-					throw StaleJobException{};
-				}
-				st = worldsave::commitChunkFile(tmpPath);
-				ok = (st == worldsave::SaveStatus::Ok);
-				if (!ok)
-					error = "commitChunkFile failed (" + statusName(st) + ")";
+				haveTmp = true;
 			}
+		}
+
+		// (4) Authoritative commit, ATOMIC with the revision check
+		// (issue #180 review round 2): no enqueue for this coordinate can
+		// slip between the stale check and the rename/delete, so the
+		// invariant "only the coordinate's latestRevision may modify its
+		// authoritative file" holds exactly. The lock covers only the fast
+		// rename/delete - the tmp write stays outside. Applies to BOTH
+		// commits: a delete (empty diff) is as authoritative as a rename.
+		if (haveTmp || overrides.empty())
+		{
+			if (beforeCommit)
+				beforeCommit(chunkX, chunkZ, revision);
+			std::lock_guard<std::mutex> lock(m_mutex);
+			const auto it = m_latestRevision.find(key);
+			stale = it != m_latestRevision.end() && it->second != revision;
+			if (!stale)
+			{
+				if (overrides.empty())
+				{
+					deleted = true;
+					const worldsave::SaveStatus st =
+						worldsave::removeChunkFile(m_chunksDir, chunkX, chunkZ);
+					// removeChunkFile is Ok for both "removed" and "was
+					// already absent" (idempotent delete).
+					ok = (st == worldsave::SaveStatus::Ok);
+					if (!ok)
+						error = "removeChunkFile failed (" + statusName(st) + ")";
+				}
+				else
+				{
+					const worldsave::SaveStatus st = worldsave::commitChunkFile(tmpPath);
+					ok = (st == worldsave::SaveStatus::Ok);
+					if (ok)
+						haveTmp = false; // renamed over the final file
+					else
+						error = "commitChunkFile failed (" + statusName(st) + ")";
+				}
+			}
+		}
+		if (stale && haveTmp)
+		{
+			// A stale job's tmp sidecar is garbage: it must never linger.
+			std::error_code removeEc;
+			std::filesystem::remove(tmpPath, removeEc);
+			haveTmp = false;
 		}
 		writeMs = elapsedMs(t1);
 	}
@@ -845,6 +896,12 @@ void WorldPersistence::setSerializeFnForTests(SaveService::SerializeFn fn)
 {
 	if (m_service)
 		m_service->setSerializeFnForTests(std::move(fn));
+}
+
+void WorldPersistence::setBeforeCommitFnForTests(SaveService::BeforeCommitFn fn)
+{
+	if (m_service)
+		m_service->setBeforeCommitFnForTests(std::move(fn));
 }
 
 bool WorldPersistence::flush()

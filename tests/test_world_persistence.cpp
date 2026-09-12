@@ -256,7 +256,7 @@ static void testSaveServiceOrdering()
 		CHECK(svc.flush(), "flush A/B");
 
 		const SaveService::Stats st = svc.stats();
-		CHECK(st.superseded == 0, "in-queue replacement costs no supersede");
+		CHECK(st.superseded >= 1, "in-queue replacement resolves the replaced ticket as superseded");
 		CHECK(st.completed == 1, "exactly one request written");
 		CHECK(st.queueDepth == 0, "queue drained (one slot per coordinate)");
 
