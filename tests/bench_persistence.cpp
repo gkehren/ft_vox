@@ -241,8 +241,15 @@ int runSession(bool persistence, double durationSec, double editsPerSec, int see
 		if (outStats)
 			outStats->closeMs = closeMs;
 		if (!flushed)
-			std::printf("  WARNING: final flush reported failures\n");
-		(void)closed;
+		{
+			std::cerr << "benchmark invalid: final persistence flush failed" << std::endl;
+			return 1;
+		}
+		if (!closed)
+		{
+			std::cerr << "benchmark invalid: persistent world close failed" << std::endl;
+			return 1;
+		}
 	}
 
 	const FrameStats fs = summarize(frameMs);
@@ -307,16 +314,14 @@ int main(int argc, char **argv)
 	// not during the final flush. A soft warning on the queue peak stays a
 	// warning - a fast worker can legitimately never be observed non-empty.
 	const WorldPersistence::Status &steady = stats.steadyState;
-	if (steady.enqueued == 0 || (steady.completed + steady.deleted) == 0)
+	if (steady.enqueued == 0)
 	{
-		std::cerr << "benchmark invalid: no asynchronous persistence work completed during "
-		             "the measured window\n";
+		std::cerr << "benchmark invalid: no async saves were enqueued\n";
 		return 1;
 	}
-	if (steady.dirtyCoordinates > 0 && steady.queueDepth == 0 &&
-	    steady.completed + steady.deleted == 0)
+	if (steady.completed + steady.deleted == 0)
 	{
-		std::cerr << "benchmark invalid: dirty coordinates with no processed saves\n";
+		std::cerr << "benchmark invalid: no async saves completed during the measured window\n";
 		return 1;
 	}
 	if (steady.queueDepthPeak == 0)
@@ -324,7 +329,7 @@ int main(int argc, char **argv)
 
 	std::printf("\nSteady-state save worker (before the final flush):\n");
 	printSaveStats(steady);
-	std::printf("\nAfter final flush:\n");
+	std::printf("\nAfter explicit final flush:\n");
 	std::printf("  completed=%llu deleted=%llu failed=%llu remainingDirty=%llu\n",
 	            (unsigned long long)stats.final.completed,
 	            (unsigned long long)stats.final.deleted,
