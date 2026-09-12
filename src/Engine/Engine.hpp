@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -55,6 +56,10 @@ public:
 	/// The seed of the currently generated world (tests/tools; the World
 	/// panel shows the same value through the UI frame).
 	int worldSeed() const { return seed; }
+	/// Override the persistent-save root (tests/tools). Must be called
+	/// BEFORE requestOpenWorld/initializeNoiseGenerator; the runtime default
+	/// stays "<cwd>/saves" (issue #180 review round 4).
+	void setSavesRootForTests(std::filesystem::path root) { m_savesRoot = std::move(root); }
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
 	/// Override the streaming front load bias (clamped to the unload-safe
@@ -84,7 +89,12 @@ public:
 	const Benchmark &benchmark() const { return m_benchmark; }
 
 	/// Recreate terrain for seed (device idle). Used by benchmark and tools.
-	void reloadWorld(int newSeed);
+	/// Rebuild the world (benchmark/tools). Returns FALSE and leaves the
+	/// previous world authoritative when the reload cannot run safely
+	/// (missing engine subsystems, or the persistent world refused to close
+	/// - stranded logical edits). Callers must not continue with a
+	/// destructive transition on false (issue #180 review round 4).
+	bool reloadWorld(int newSeed);
 
 	/// Monotonically increasing world generation / reload version counter.
 	uint64_t worldGenerationId() const { return m_worldGenerationId; }
@@ -164,6 +174,9 @@ private:
 	uint64_t m_worldGenerationId{1};
 	/// Requested world-save name (issue #180); empty = transient session.
 	std::string m_openWorldName;
+	/// Root directory of persistent saves (issue #180 review round 4):
+	/// "<cwd>/saves" at runtime, injected for tests/tools.
+	std::filesystem::path m_savesRoot{"saves"};
 	/// Why persistence is off for this session despite a requested world
 	/// (seed mismatch / open failure); surfaced in the World UI panel.
 	std::string m_openWorldError;

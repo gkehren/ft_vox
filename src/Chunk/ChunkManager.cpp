@@ -51,8 +51,12 @@ ChunkManager::~ChunkManager()
 	// BEFORE any teardown discards state. The old order (drain counters ->
 	// swap out and discard the completion queues -> close) starved the
 	// close path and silently lost edits accepted against in-flight work.
-	if (m_persistence)
-		forceCloseWorldForShutdown();
+	if (m_persistence && !forceCloseWorldForShutdown())
+	{
+		// Destruction cannot be undone, but a partial save must never be
+		// reported as success (issue #180 review round 4).
+		std::cerr << "[world] final shutdown did not persist all accepted edits" << std::endl;
+	}
 
 	// Generic teardown: best-effort drain of async work so we don't release
 	// chunks still in workers. After the force-close above the completion
@@ -2479,7 +2483,17 @@ bool ChunkManager::forceCloseWorldForShutdown()
 		return true;
 
 	resolvePendingEditsForPersistenceShutdown();
-	drainAsyncJobsForPersistence();
+
+	const bool drained = drainAsyncJobsForPersistence();
+	if (!drained)
+	{
+		// Accepted logical edits could not be made authoritative (their
+		// chunk never generated). The shutdown continues - destruction has
+		// no retry point - but the loss is REPORTED, never silent, and the
+		// return value tells the caller the save may be incomplete.
+		std::cerr << "[world] final shutdown: accepted logical edits could not be made authoritative"
+		          << std::endl;
+	}
 
 	captureAllChunkEdits();
 	const bool flushed = m_persistence->flush();
@@ -2494,7 +2508,7 @@ bool ChunkManager::forceCloseWorldForShutdown()
 				chunk->setTrackPersistentEdits(false);
 	}
 	m_persistence.reset();
-	return flushed;
+	return drained && flushed;
 }
 
 bool ChunkManager::closeWorld()

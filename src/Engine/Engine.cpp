@@ -29,10 +29,6 @@
 
 namespace
 {
-// CWD-relative saves root (same convention as benchmark-results/); matches
-// the --world usage text in main.cpp.
-constexpr const char *kSavesRoot = "saves";
-
 int budgetFromRate(int perSec, double dt, double &accum)
 {
 	accum += static_cast<double>(perSec) * dt;
@@ -258,7 +254,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	{
 		int storedSeed = 0;
 		std::string seedError;
-		if (WorldPersistence::peekStoredSeed(kSavesRoot, m_openWorldName, storedSeed, seedError))
+		if (WorldPersistence::peekStoredSeed(m_savesRoot.string(), m_openWorldName, storedSeed, seedError))
 		{
 			if (seed_val > 0 && storedSeed != seed_val)
 			{
@@ -297,7 +293,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	if (wantPersistence)
 	{
 		std::string error;
-		if (chunkManager->openWorld(kSavesRoot, m_openWorldName, error))
+		if (chunkManager->openWorld(m_savesRoot.string(), m_openWorldName, error))
 		{
 			std::cout << "[world] opened '" << m_openWorldName << "' (seed " << seed << ")\n";
 		}
@@ -545,10 +541,10 @@ void Engine::setPlayerFlight(bool enabled)
 	resetPlayerAtCamera();
 }
 
-void Engine::reloadWorld(int newSeed)
+bool Engine::reloadWorld(int newSeed)
 {
 	if (!vkContext || !threadPool || !chunkPool || !immediate)
-		return;
+		return false;
 
 	// Deliberate (issue #180): benchmark / reload worlds are transient —
 	// close (and flush) any world opened for interactive play so the run can
@@ -563,7 +559,7 @@ void Engine::reloadWorld(int newSeed)
 		{
 			std::cerr << "[world] reload aborted: persistent world could not be closed safely"
 			          << std::endl;
-			return;
+			return false;
 		}
 	}
 
@@ -627,6 +623,7 @@ void Engine::reloadWorld(int newSeed)
 
 	std::cout << "[bench] World reloaded seed=" << seed
 			  << " chunks=" << chunkManager->chunkCount() << "\n";
+	return true;
 }
 
 void Engine::onResize(int width, int height)
@@ -1088,7 +1085,17 @@ void Engine::tickBenchmark(double dt)
 			vkContext ? vkContext->maxDrawIndirectCount() : 0,
 			renderSettings.streamFrontBias);
 
-		reloadWorld(cfg.seed);
+	if (!reloadWorld(cfg.seed))
+	{
+		// Never continue Warmup/Running against the OLD persistent world
+		// (issue #180 review round 4): a benchmark measures a fresh
+		// transient world or nothing. cancel() moves the benchmark back to
+		// Idle; the regular post-benchmark restore block (this tick and the
+		// next) returns the player/camera/vsync to their prior state.
+		std::cerr << "[benchmark] world reload failed; benchmark cancelled" << std::endl;
+		m_benchmark.cancel();
+		return;
+	}
 		m_benchmark.onWorldReady(camera.getPosition());
 		// Place camera on first path point
 		m_benchmark.tick(0.0, camera);
