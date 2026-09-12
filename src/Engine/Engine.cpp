@@ -231,6 +231,63 @@ Engine::~Engine()
 	SDL_Quit();
 }
 
+std::optional<PlayerPersistState> Engine::loadPendingPlayerState()
+{
+	if (!chunkManager || !chunkManager->isWorldOpen() || !chunkManager->worldPersistence())
+		return std::nullopt;
+	PlayerPersistState saved;
+	if (!chunkManager->worldPersistence()->readPlayerState(saved))
+		return std::nullopt; // fresh world, or already reported as corrupt
+	return saved;
+}
+
+bool Engine::restorePlayerState(const PlayerPersistState &saved)
+{
+	// Terrain validation (issue #180 review round 6): the saved file is
+	// structurally valid, but the position itself must be usable against the
+	// freshly bootstrapped terrain.
+	ChunkCollisionView world(*chunkManager);
+	physics::QueryStats queries;
+	physics::Body candidate;
+	candidate.position = glm::dvec3(saved.x, saved.y, saved.z);
+	glm::dvec3 restoredFeet = candidate.position;
+	bool waitingForTerrain = false;
+	if (physics::recover(world, candidate, queries))
+	{
+		// Valid as-is or embedded by at most one block (recover() corrected
+		// it) - use the (possibly corrected) feet position.
+		restoredFeet = candidate.position;
+	}
+	else if (candidate.waitingForTerrain)
+	{
+		// Terrain not fully available around the saved spot: keep the
+		// position verbatim and let the solver hold the body until the
+		// terrain streams in - never an aggressive fallback because one
+		// neighbor is not loaded yet.
+		waitingForTerrain = true;
+	}
+	else
+	{
+		// Clearly invalid (embedded deeper than recover() can fix): fall
+		// back to the surface spawn.
+		std::cout << "[world] saved player position is not usable; falling back to the surface spawn\n";
+		return false;
+	}
+
+	player.reset(restoredFeet);
+	if (waitingForTerrain)
+		player.body.waitingForTerrain = true;
+	camera.setYawPitch(saved.yaw, saved.pitch);
+	camera.setPosition(glm::vec3(player.renderEye()));
+	playerFlight = saved.flight;
+	if (saved.selectedBlock >= 0 && saved.selectedBlock < static_cast<int32_t>(COUNT))
+		selectedTexture = static_cast<TextureType>(saved.selectedBlock);
+	std::cout << "[world] restored player at (" << restoredFeet.x << ", " << restoredFeet.y
+	          << ", " << restoredFeet.z << ")" << (waitingForTerrain ? " (waiting for terrain)" : "")
+	          << "\n";
+	return true;
+}
+
 void Engine::initializeNoiseGenerator(int seed_val)
 {
 	if (seed_val <= 0)
@@ -304,29 +361,26 @@ void Engine::initializeNoiseGenerator(int seed_val)
 		}
 	}
 
-	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
+	// Restored-player bootstrap (issue #180 review round 6): player.state is
+	// read BEFORE the terrain bootstrap so the initial area generates around
+	// the SAVED position - a player who logged out at chunk (100, -80) must
+	// not bootstrap around the default origin and wait for streaming to walk
+	// the whole distance.
+	const std::optional<PlayerPersistState> savedPlayer = loadPendingPlayerState();
+	glm::vec3 bootstrapCenter = camera.getPosition();
+	if (savedPlayer)
+	{
+		bootstrapCenter = glm::vec3(static_cast<float>(savedPlayer->x),
+		                            static_cast<float>(savedPlayer->y + player.settings.eyeHeight),
+		                            static_cast<float>(savedPlayer->z));
+		camera.setPosition(bootstrapCenter);
+	}
+
+	chunkManager->generateInitialArea(bootstrapCenter, kBootstrapRadius,
 									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 
-	// Spawn: restore the saved player state when present (position is kept
-	// verbatim — no surface snap), otherwise the usual surface bootstrap.
-	bool restoredPlayer = false;
-	if (chunkManager->isWorldOpen())
-	{
-		PlayerPersistState saved;
-		if (chunkManager->worldPersistence()->readPlayerState(saved))
-		{
-			player.reset(glm::dvec3(saved.x, saved.y, saved.z));
-			camera.setYawPitch(saved.yaw, saved.pitch);
-			camera.setPosition(glm::vec3(player.renderEye()));
-			playerFlight = saved.flight;
-			if (saved.selectedBlock >= 0 && saved.selectedBlock < static_cast<int32_t>(COUNT))
-				selectedTexture = static_cast<TextureType>(saved.selectedBlock);
-			restoredPlayer = true;
-			std::cout << "[world] restored player at (" << saved.x << ", " << saved.y << ", "
-			          << saved.z << ")\n";
-		}
-	}
-	if (!restoredPlayer)
+	// Restore the validated player state, or fall back to the surface spawn.
+	if (!savedPlayer || !restorePlayerState(*savedPlayer))
 		placeCameraOnSurface();
 
 	demoPlayers = {

@@ -30,6 +30,7 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
 #include <Physics/PlayerController.hpp>
+#include <World/WorldPersistence.hpp>
 #include <Entities/MobSystem.hpp>
 #include <utils.hpp>
 
@@ -60,6 +61,12 @@ public:
 	/// BEFORE requestOpenWorld/initializeNoiseGenerator; the runtime default
 	/// stays "<cwd>/saves" (issue #180 review round 4).
 	void setSavesRootForTests(std::filesystem::path root) { m_savesRoot = std::move(root); }
+	/// Read-only test accessors (issue #180 review round 6): restored-player
+	/// bootstrap coverage needs to observe the live player and the loaded
+	/// chunk set after initializeNoiseGenerator.
+	glm::dvec3 playerPositionForTests() const { return player.body.position; }
+	bool playerWaitingForTerrainForTests() const { return player.body.waitingForTerrain; }
+	const ChunkManager *chunksForTests() const { return chunkManager.get(); }
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
 	/// Override the streaming front load bias (clamped to the unload-safe
@@ -133,6 +140,17 @@ private:
 	/// live, read-only data source for the developer console.
 	void publishFrameTelemetry();
 	void placeCameraOnSurface();
+	/// Read <world>/player.state when a world is open (issue #180 review
+	/// round 6). Called BEFORE the terrain bootstrap so the initial area can
+	/// be generated around the restored position. Nullopt for a fresh world
+	/// or an unusable save (already reported through the error log).
+	std::optional<PlayerPersistState> loadPendingPlayerState();
+	/// Restore the saved player AFTER the terrain bootstrap: exact position
+	/// when usable, physics::recover() fixes embedding up to one block, a
+	/// waitingForTerrain result keeps the position (the solver holds until
+	/// the terrain streams in), and a clearly-invalid position falls back to
+	/// the surface spawn. Returns false only for the fallback case.
+	bool restorePlayerState(const PlayerPersistState &saved);
 	void setPlayerFlight(bool enabled);
 	void resetPlayerAtCamera();
 	void updateDisplayRefreshRate();
