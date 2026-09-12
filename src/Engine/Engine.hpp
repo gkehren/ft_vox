@@ -52,6 +52,9 @@ public:
 	void requestOpenWorld(const std::string &name) { m_openWorldName = name; }
 
 	void setVSync(bool enabled);
+	/// The seed of the currently generated world (tests/tools; the World
+	/// panel shows the same value through the UI frame).
+	int worldSeed() const { return seed; }
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
 	/// Override the streaming front load bias (clamped to the unload-safe

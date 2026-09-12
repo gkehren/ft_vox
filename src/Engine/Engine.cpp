@@ -553,8 +553,19 @@ void Engine::reloadWorld(int newSeed)
 	// Deliberate (issue #180): benchmark / reload worlds are transient —
 	// close (and flush) any world opened for interactive play so the run can
 	// never write into the user's save. Persistence stays off afterwards.
+	// The close can be REFUSED (stranded logical edits - issue #180 review
+	// round 3): aborting the reload keeps the manager/world intact, so a
+	// debug/benchmark action can never destroy the manager after a refused
+	// close.
 	if (chunkManager && chunkManager->isWorldOpen())
-		chunkManager->closeWorld();
+	{
+		if (!chunkManager->closeWorld())
+		{
+			std::cerr << "[world] reload aborted: persistent world could not be closed safely"
+			          << std::endl;
+			return;
+		}
+	}
 
 	seed = newSeed > 0 ? newSeed : 42;
 	++m_worldGenerationId;
