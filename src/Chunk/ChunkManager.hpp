@@ -441,6 +441,15 @@ private:
 	/// skipped - their gen/mesh job is mid-flight; they are captured on their
 	/// own unload or a later flush) plus chunks parked in m_deferredRelease.
 	void captureAllChunkEdits();
+	/// Final-shutdown resolution of stranded PendingVoxelEdits: synchronously
+	/// generate authoritative terrain for UNLOADED chunks that still hold
+	/// accepted edits, then let applyPendingEdits() land them. Destructor
+	/// path only.
+	void resolvePendingEditsForPersistenceShutdown();
+	/// Destructor-only close: resolve stranded edits, then capture/flush/
+	/// shutdown UNCONDITIONALLY (no retry semantics - destruction has no
+	/// later retry point). Returns the flush success.
+	bool forceCloseWorldForShutdown();
 	/// Quiesce the async lifecycle before the final persistence capture
 	/// (closeWorld): publish finished gen/mesh/light jobs, apply deferred
 	/// voxel edits, age deferred releases. Deliberately NO timeout - closing
