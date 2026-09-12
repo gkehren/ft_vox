@@ -13,6 +13,7 @@
 #include <Camera/Camera.hpp>
 #include <Engine/ThreadPool.hpp>
 #include <World/WorldPersistence.hpp>
+#include <Engine/GameUI.hpp>
 #include <World/WorldSave.hpp>
 
 #include <algorithm>
@@ -1997,6 +1998,78 @@ static void testRestorePolicyWaitingForTerrain()
 	removeDir(root);
 }
 
+static void testSaveStatusAfterRetry()
+{
+	std::cout << "== Save status after retry ==" << std::endl;
+	TerrainGenerator gen(42);
+	auto root = makeTempDir("uistatus");
+	const auto chunks = root / "w" / "chunks";
+	std::filesystem::create_directories(chunks);
+	const std::vector<Voxel> base = gen.generateChunk(0, 0).voxels;
+	const uint32_t ia = idxOf(6, 75, 6);
+	const uint8_t va = pickNonBase(base[ia].type);
+
+	WorldPersistence wp;
+	const WorldPersistence::OpenInfo info =
+		wp.openOrCreate(root, "w", 42, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok, "world opened");
+
+	// Save fails deterministically: only the FIRST attempt (the flush's
+	// bounded retry rounds would otherwise each fail and inflate the
+	// historical counter).
+	// Failing write, observed WITHOUT flush: flush() is the retry point, so
+	// the active-failure window must be sampled from status() directly.
+	std::atomic<int> writeAttempts{0};
+	wp.setWriteTmpFnForTests(
+		[&writeAttempts](const std::filesystem::path &, int32_t, int32_t,
+		                 const std::vector<worldsave::ChunkEdit> &,
+		                 std::filesystem::path &)
+		{ return worldsave::SaveStatus::IoError; });
+	wp.captureChunkEdits(0, 0, {{ia, va}});
+	{
+		const WorldPersistence::Status *observed = nullptr;
+		WorldPersistence::Status st;
+		for (int i = 0; i < 5000; ++i)
+		{
+			st = wp.status();
+			if (st.failedCoordinates == 1)
+			{
+				observed = &st;
+				break;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		CHECK(observed != nullptr, "active failure observed via status()");
+		CHECK(st.failed == 1, "historical failed counter == 1");
+		CHECK(st.dirtyCoordinates == 1, "the coordinate stays dirty");
+	}
+
+	// Clear the failure: flush() is THE retry point. Its FIRST barrier
+	// accounts the never-flushed failure (returns false by contract) while
+	// the bounded retry rounds inside it already re-write the coordinate.
+	wp.setWriteTmpFnForTests(nullptr);
+	CHECK(!wp.flush(), "first flush accounts the failure range");
+	{
+		const WorldPersistence::Status st = wp.status();
+		CHECK(st.failedCoordinates == 0, "failedCoordinates cleared by the retry");
+		CHECK(st.dirtyCoordinates == 0, "coordinate durable after the retry");
+		CHECK(st.failed == 1, "historical failed counter kept");
+	}
+	CHECK(wp.flush(), "subsequent flush is true");
+
+	// Pure UI-health matrix (issue #180 review round 7, item 1).
+	CHECK(computeSaveUiHealth(0, 0, 0) == SaveUiHealth::Saved, "0/0/0 -> Saved");
+	CHECK(computeSaveUiHealth(1, 0, 0) == SaveUiHealth::Saving, "dirty -> Saving");
+	CHECK(computeSaveUiHealth(0, 0, 3) == SaveUiHealth::Saving, "queue -> Saving");
+	CHECK(computeSaveUiHealth(1, 1, 0) == SaveUiHealth::Failed, "active failure -> Failed");
+	// Historical failure alone must NOT keep the label Failed.
+	CHECK(computeSaveUiHealth(0, 0, 0) == SaveUiHealth::Saved,
+	      "historical failure only -> Saved");
+
+	wp.shutdown();
+	removeDir(root);
+}
+
 // ---------------------------------------------------------------------------
 // 8. Player state (issue #180, Phase 5): <world>/player.state
 // ---------------------------------------------------------------------------
@@ -2164,6 +2237,7 @@ int main()
 	testRevertAcrossFlushes();
 	testUnloadReloadAfterMultipleFlushes();
 	testRestorePolicyWaitingForTerrain();
+	testSaveStatusAfterRetry();
 	testDestructorDrainsCompletionsBeforeTeardown();
 	testDestructorPublishesUnpublishedMeshCompletions();
 	testQueueCoalescingAndBusy();

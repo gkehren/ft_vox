@@ -301,6 +301,11 @@ public:
 		// Coordinates whose desired content is not yet durable (queued,
 		// in flight or failed) - the "dirty save" set the UI can show.
 		uint64_t dirtyCoordinates{0};
+		// Coordinates whose CURRENT save attempt failed - the instant
+		// "Failed" state. Distinct from the cumulative `failed` counter,
+		// which stays as history: a retry clears failedCoordinates while
+		// `failed` keeps counting (issue #180 review round 7, item 1).
+		uint64_t failedCoordinates{0};
 		// Queue high-water mark + Busy rejections (issue #180 review round
 		// 6, items 10-11): bounded-queue validation without sampling luck.
 		size_t queueDepthPeak{0};

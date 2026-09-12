@@ -37,6 +37,17 @@ struct WorldSaveUiState
 	std::string worldName;
 	int seed{0};
 	size_t queueDepth{0};
+	size_t queueDepthPeak{0};
+	double avgSerializeMs{0.0}, maxSerializeMs{0.0};
+	double avgWriteMs{0.0}, maxWriteMs{0.0};
+	uint64_t rejectedBusyQueueFull{0};
+	uint64_t rejectedBusyCommitGate{0};
+	// Instant state (issue #180 review round 7): coordinates currently dirty
+	// or whose CURRENT attempt failed. Drives the Saved/Saving/Failed label;
+	// a retry clears them while the historical counters below keep counting.
+	uint64_t dirtyCoordinates{0};
+	uint64_t failedCoordinates{0};
+	// History (lifetime counters).
 	uint64_t enqueued{0};
 	uint64_t completed{0};  ///< chunk files written
 	uint64_t superseded{0}; ///< pending writes dropped for a newer revision
@@ -45,6 +56,26 @@ struct WorldSaveUiState
 	uint64_t bytesWritten{0};
 	std::string lastError;
 };
+
+/// Instant save health for the World panel label (issue #180 review round
+/// 7, item 1): active coordinate failures win over queued work; an old
+/// historical failure never keeps the label at "Failed" once the retry
+/// cleared the coordinate. Pure function - unit-tested headlessly.
+enum class SaveUiHealth
+{
+	Saved,
+	Saving,
+	Failed
+};
+inline SaveUiHealth computeSaveUiHealth(uint64_t dirtyCoordinates,
+                                        uint64_t failedCoordinates, size_t queueDepth)
+{
+	if (failedCoordinates > 0)
+		return SaveUiHealth::Failed;
+	if (dirtyCoordinates > 0 || queueDepth > 0)
+		return SaveUiHealth::Saving;
+	return SaveUiHealth::Saved;
+}
 
 /// Frame snapshot for ImGui panels (pointers owned by Engine).
 /// Debug/telemetry data reaches panels through debugui::UiState snapshots

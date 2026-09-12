@@ -1401,6 +1401,15 @@ void Engine::drawUi()
 		f.worldSave.worldName = st.name;
 		f.worldSave.seed = st.seed;
 		f.worldSave.queueDepth = st.queueDepth;
+		f.worldSave.queueDepthPeak = st.queueDepthPeak;
+		f.worldSave.dirtyCoordinates = st.dirtyCoordinates;
+		f.worldSave.failedCoordinates = st.failedCoordinates;
+		f.worldSave.avgSerializeMs = st.avgSerializeMs;
+		f.worldSave.maxSerializeMs = st.maxSerializeMs;
+		f.worldSave.avgWriteMs = st.avgWriteMs;
+		f.worldSave.maxWriteMs = st.maxWriteMs;
+		f.worldSave.rejectedBusyQueueFull = st.rejectedBusyQueueFull;
+		f.worldSave.rejectedBusyCommitGate = st.rejectedBusyCommitGate;
 		f.worldSave.enqueued = st.enqueued;
 		f.worldSave.completed = st.completed;
 		f.worldSave.superseded = st.superseded;

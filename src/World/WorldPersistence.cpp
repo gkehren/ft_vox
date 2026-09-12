@@ -1216,6 +1216,7 @@ WorldPersistence::Status WorldPersistence::status() const
 			s.lastError = st.lastError;
 	}
 	uint64_t dirty = 0;
+	uint64_t failedCoords = 0;
 	{
 		std::lock_guard<std::mutex> lock(m_indexMutex);
 		s.pendingCaptureEntries = m_states.size();
@@ -1224,10 +1225,13 @@ WorldPersistence::Status WorldPersistence::status() const
 			(void)key;
 			if (state.dirty())
 				++dirty;
+			if (state.failed)
+				++failedCoords;
 		}
 		if (!m_errorLog.empty())
 			s.lastError = s.lastError.empty() ? m_errorLog : (s.lastError + "\n" + m_errorLog);
 	}
 	s.dirtyCoordinates = dirty;
+	s.failedCoordinates = failedCoords;
 	return s;
 }

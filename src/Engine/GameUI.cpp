@@ -449,11 +449,17 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	ImGui::TextDisabled("Chunk %d, %d", frame.player.chunkX, frame.player.chunkZ);
 	if (frame.worldSave.active)
 	{
+		// Instant state via the pure helper (issue #180 review round 7):
+		// historical `failed` stays in the details block below.
 		const char *saveState = "Saved";
-		if (frame.worldSave.failed > 0)
-			saveState = "Failed";
-		else if (frame.worldSave.queueDepth > 0)
-			saveState = "Saving…";
+		switch (computeSaveUiHealth(frame.worldSave.dirtyCoordinates,
+		                            frame.worldSave.failedCoordinates,
+		                            frame.worldSave.queueDepth))
+		{
+		case SaveUiHealth::Failed: saveState = "Failed"; break;
+		case SaveUiHealth::Saving: saveState = "Saving…"; break;
+		case SaveUiHealth::Saved: break;
+		}
 		ImGui::Text("Save %s", saveState);
 	}
 	if (!frame.worldSave.lastError.empty())
@@ -631,10 +637,20 @@ void GameUI::drawWorld(GameUIFrame &frame)
 			ImGui::Text("Saved chunks: %llu written, %llu reverted",
 						(unsigned long long)frame.worldSave.completed,
 						(unsigned long long)frame.worldSave.deleted);
-			ImGui::Text("Queue: %llu superseded, %llu failed, %zu pending",
+			ImGui::Text("Queue: %llu superseded, %zu pending (peak %llu)",
 						(unsigned long long)frame.worldSave.superseded,
-						(unsigned long long)frame.worldSave.failed,
-						frame.worldSave.queueDepth);
+						frame.worldSave.queueDepth,
+						(unsigned long long)frame.worldSave.queueDepthPeak);
+			ImGui::Text("Dirty: %llu / failed now: %llu (historical: %llu)",
+						(unsigned long long)frame.worldSave.dirtyCoordinates,
+						(unsigned long long)frame.worldSave.failedCoordinates,
+						(unsigned long long)frame.worldSave.failed);
+			ImGui::Text("Serialize: %.2f ms avg / %.2f max | Write: %.2f avg / %.2f max",
+						frame.worldSave.avgSerializeMs, frame.worldSave.maxSerializeMs,
+						frame.worldSave.avgWriteMs, frame.worldSave.maxWriteMs);
+			ImGui::Text("Busy rejections: %llu queue / %llu commit",
+						(unsigned long long)frame.worldSave.rejectedBusyQueueFull,
+						(unsigned long long)frame.worldSave.rejectedBusyCommitGate);
 			ImGui::Text("Written: %.2f MiB",
 						static_cast<double>(frame.worldSave.bytesWritten) / (1024.0 * 1024.0));
 		}
