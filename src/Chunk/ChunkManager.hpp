@@ -298,11 +298,21 @@ public:
 	/// behind accepted input. Main-thread view (edits and this accessor are
 	/// main-thread only); used by the close-world drain and tests.
 	bool hasPendingLogicalEdits() const { return !m_pendingEdits.empty(); }
+	/// Test/benchmark accessor: snapshot of the active chunk set.
+	std::vector<Chunk *> activeChunksSnapshot() const
+	{
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
+		return m_activeChunks;
+	}
 	/// Capture all dirty loaded chunks + flush (no close). False on I/O failure.
 	bool flushWorld();
 	bool isWorldOpen() const { return m_persistence != nullptr; }
 	/// For UI/status; may be null (no world open).
-	WorldPersistence *worldPersistence() const { return m_persistence.get(); }
+	/// Const-correct pair (issue #180 review round 6): mutable access is for
+	/// test seams on a non-const manager; a const manager only exposes a
+	/// const facade (UI/status reads).
+	WorldPersistence *worldPersistence() { return m_persistence.get(); }
+	const WorldPersistence *worldPersistence() const { return m_persistence.get(); }
 
 private:
 	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);
