@@ -59,6 +59,8 @@ Testing/
 # (see docs/benchmarks/README.md); raw reports stay local or ride on CI/PRs.
 benchmark-results/
 perf-results/
+# Persistent world saves (issue #180) — runtime output dir
+saves/
 captures/
 screenshots-local/
 *.log

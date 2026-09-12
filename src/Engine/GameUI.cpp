@@ -439,11 +439,32 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	const glm::vec2 playerXZ(frame.player.position.x, frame.player.position.z);
 
 	// World identity header (issue #186 §10): high-level facts only. The
-	// persistence/save-status slot is deliberately left to #180 — until then
-	// the wording stays neutral instead of advertising a product limitation.
+	// persistence/save-status slot is filled by #180: one compact "Save"
+	// row while a world is open, detailed counters in the collapsible at
+	// the bottom of the panel.
+	// Presentation decisions come from the pure helper (issue #180 review
+	// round 9): an open-world refusal (active == false, lastError set) must
+	// surface its error here even though there is no status row to show.
+	const SaveUiPresentation presentation = computeSaveUiPresentation(frame.worldSave);
+	if (presentation.showStatus)
+		ui::metric("World", "%s", frame.worldSave.worldName.c_str());
 	ui::metric("Seed", "%d", frame.seed);
 	ui::metric("Player", "%.0f, %.0f", playerXZ.x, playerXZ.y);
 	ImGui::TextDisabled("Chunk %d, %d", frame.player.chunkX, frame.player.chunkZ);
+	if (presentation.showStatus)
+	{
+		const char *saveState = "Saved";
+		switch (presentation.health)
+		{
+		case SaveUiHealth::Failed: saveState = "Failed"; break;
+		case SaveUiHealth::Saving: saveState = "Saving…"; break;
+		case SaveUiHealth::Saved: break;
+		}
+		ImGui::Text("Save %s", saveState);
+	}
+	if (presentation.showProminentError)
+		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+						   frame.worldSave.lastError.c_str());
 
 	ImGui::Spacing();
 	bool prevFollow = m_mapFollow;
@@ -605,6 +626,42 @@ void GameUI::drawWorld(GameUIFrame &frame)
 			}
 		}
 		ImGui::EndChild();
+	}
+
+	if (frame.worldSave.active)
+	{
+		// Detailed save counters (issue #180): operational detail lives in a
+		// collapsed surface so the #186 layout keeps the map dominant.
+		if (ImGui::CollapsingHeader("World save details"))
+		{
+			ImGui::Text("Saved chunks: %llu written, %llu reverted",
+						(unsigned long long)frame.worldSave.completed,
+						(unsigned long long)frame.worldSave.deleted);
+			ImGui::Text("Queue: %llu superseded, %zu pending (peak %llu)",
+						(unsigned long long)frame.worldSave.superseded,
+						frame.worldSave.queueDepth,
+						(unsigned long long)frame.worldSave.queueDepthPeak);
+			ImGui::Text("Dirty: %llu / failed now: %llu (historical: %llu)",
+						(unsigned long long)frame.worldSave.dirtyCoordinates,
+						(unsigned long long)frame.worldSave.failedCoordinates,
+						(unsigned long long)frame.worldSave.failed);
+			ImGui::Text("Serialize: %.2f ms avg / %.2f max | Write: %.2f avg / %.2f max",
+						frame.worldSave.avgSerializeMs, frame.worldSave.maxSerializeMs,
+						frame.worldSave.avgWriteMs, frame.worldSave.maxWriteMs);
+			ImGui::Text("Busy rejections: %llu queue / %llu commit",
+						(unsigned long long)frame.worldSave.rejectedBusyQueueFull,
+						(unsigned long long)frame.worldSave.rejectedBusyCommitGate);
+			ImGui::Text("Written: %.2f MiB",
+						static_cast<double>(frame.worldSave.bytesWritten) / (1024.0 * 1024.0));
+			if (!frame.worldSave.lastError.empty())
+			{
+				ImGui::Spacing();
+				ImGui::TextDisabled("Last error:");
+				ImGui::PushTextWrapPos();
+				ImGui::TextWrapped("%s", frame.worldSave.lastError.c_str());
+				ImGui::PopTextWrapPos();
+			}
+		}
 	}
 
 	ImGui::End();

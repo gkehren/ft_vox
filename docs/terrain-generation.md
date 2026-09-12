@@ -20,6 +20,14 @@ Phases 0–5. High-level engine ownership remains documented in
   pipeline with halo >= 2.
 - GPU upload and destruction are not part of terrain generation and remain on
   the main thread.
+- **Generator version (`TerrainGenerator::kGeneratorVersion`)**: persistent
+  worlds store only the seed plus a sparse diff of player edits, so saved-world
+  override compatibility depends on the generator reproducing byte-identical
+  terrain for an existing seed. Any change that would alter generated voxels
+  for a seed must bump `kGeneratorVersion` — worlds saved with a different
+  version are refused on open (see "World persistence" in
+  [`engine-architecture.md`](engine-architecture.md)). Additive biome/block
+  entries that leave existing seeds' output untouched do not require a bump.
 
 ## Pipeline
 

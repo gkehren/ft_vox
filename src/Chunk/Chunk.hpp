@@ -58,6 +58,32 @@ public:
 	bool isVoxelActive(int x, int y, int z) const;
 	void setVoxel(int x, int y, int z, TextureType type);
 
+	// Persistent-edit tracking (issue #180): while armed, every in-chunk
+	// setVoxel() write that actually changes the stored voxel records the
+	// canonical local index (y*256 + z*16 + x) and the new block type.
+	// Border-shell writes and no-op rewrites never record. The map holds the
+	// CURRENT value per edited voxel (not an operation log): the save layer
+	// diffs it against regenerated terrain via
+	// worldsave::diffEditsAgainstBase().
+	using ChunkEditMap = std::unordered_map<uint32_t, uint8_t>;
+	/// Disarming also discards any recorded edits.
+	void setTrackPersistentEdits(bool on)
+	{
+		m_trackPersistentEdits = on;
+		if (!on)
+			m_persistentEdits.clear();
+	}
+	bool hasPersistentEdits() const { return !m_persistentEdits.empty(); }
+	const ChunkEditMap &persistentEdits() const { return m_persistentEdits; }
+	/// Moves the recorded edits out and leaves the chunk with an empty map.
+	ChunkEditMap takePersistentEdits()
+	{
+		ChunkEditMap out = std::move(m_persistentEdits);
+		m_persistentEdits.clear();
+		return out;
+	}
+	void clearPersistentEdits() { m_persistentEdits.clear(); }
+
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
 
@@ -554,6 +580,17 @@ private:
 	// worker tasks, same rule as m_meshRevision.
 	std::atomic<uint16_t> m_dirtySections{0};
 	void releasePendingMeshResult();
+
+	// Persistent-edit tracking (issue #180): current value per edited voxel,
+	// keyed by canonical local index. Recorded by setVoxel() while armed;
+	// never leaks across recycled chunks (reset() clears it). Cleared on
+	// ForGeneration recycles too - the manager re-applies the recorded
+	// edits after generation if it still owns them - while the tracking
+	// flag stays armed because ChunkPool::acquire() reuses the same Chunk
+	// object while a world is open; only the Full reset on pool release
+	// disarms it.
+	ChunkEditMap m_persistentEdits;
+	bool m_trackPersistentEdits{false};
 
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeGrassColors{};
 	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeFoliageColors{};

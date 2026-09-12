@@ -456,6 +456,11 @@ void Chunk::setVoxel(int x, int y, int z, TextureType type)
       if (m_storage)
         m_storage->voxels[index].type = static_cast<uint8_t>(AIR);
     }
+    // Persistent-edit capture (issue #180): only authoritative in-chunk
+    // writes that actually change the voxel are recorded; border-shell
+    // writes (the else branch below) and no-op rewrites never record.
+    if (m_trackPersistentEdits && previousType != type)
+      m_persistentEdits[static_cast<uint32_t>(index)] = static_cast<uint8_t>(type);
     // Incremental occupancy (issue #105): a cell moved in or out of its
     // vertical section; type->type rewrites leave the count untouched.
     // Explicit +/- with Debug range asserts: a desync shows up as a
@@ -3506,6 +3511,17 @@ void Chunk::reset(const glm::vec3 &newPosition, ResetMode mode)
   {
     releaseVoxelStorageOnRetire();
   }
+
+  // Persistent-edit bookkeeping (issue #180): the edit map never leaks
+  // across recycled chunks - capturing it is the owner's job before the
+  // chunk is released. The asymmetry between the two modes is deliberate:
+  // ForGeneration keeps tracking armed because ChunkPool::acquire() reuses
+  // the same Chunk object for the next generation while a world is open and
+  // the manager wants tracking to continue for it, while the Full reset
+  // (ChunkPool::release, retirement) disarms tracking entirely.
+  m_persistentEdits.clear();
+  if (mode == ResetMode::Full)
+    m_trackPersistentEdits = false;
 
   // Empty occupancy metadata for the recycled incarnation; generation
   // recounts it (issue #105).

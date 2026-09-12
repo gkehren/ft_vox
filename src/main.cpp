@@ -1,4 +1,5 @@
 #include <Engine/Engine.hpp>
+#include <World/WorldPersistence.hpp>
 #include <Chunk/StreamHelpers.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 #include <algorithm>
@@ -10,11 +11,13 @@
 
 static void printUsage(const char *argv0)
 {
-	std::cout << "Usage: " << argv0 << " [--seed <value>] [--resource-pack <path.zip>]"
+	std::cout << "Usage: " << argv0 << " [--seed <value>] [--world <name>] [--resource-pack <path.zip>]"
 			  << " [--vsync <on|off>] [--benchmark <seconds>]\n"
 			  << "\n"
 			  << "Options:\n"
 			  << "  --seed <value>              World seed (integer)\n"
+			  << "  --world <name>              Open (or create) the persistent save saves/<name>\n"
+			  << "                              (player state + block edits survive restarts)\n"
 			  << "  --resource-pack <path>      Minecraft resource pack archive (.zip) or folder\n"
 			  << "                              (defaults to ressources/default-resource-pack.zip)\n"
 			  << "  --vsync <on|off>            FIFO when on; strict IMMEDIATE and uncapped when off\n"
@@ -45,6 +48,7 @@ static std::string resolveResourcePackRoot(const std::string &cliPack)
 int main(int argc, char **argv)
 {
 	unsigned int seed_to_use = 0;
+	std::string worldName;
 	std::string resourcePackCli;
 	std::optional<bool> vsyncOverride;
 	float benchmarkDuration = 0.0f;
@@ -116,6 +120,26 @@ int main(int argc, char **argv)
 				return EXIT_FAILURE;
 			}
 			seed_to_use = static_cast<unsigned int>(val);
+			continue;
+		}
+		if (arg == "--world")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --world requires a name.\n";
+				printUsage(argv[0]);
+				return EXIT_FAILURE;
+			}
+			worldName = argv[++i];
+			// Validation lives in the persistence layer (issue #180 review):
+			// the same rule guards openOrCreate/worldExists/peekStoredSeed.
+			if (!WorldPersistence::isValidWorldName(worldName))
+			{
+				std::cerr << "Error: --world name must be non-empty and must not contain "
+				          << "any of / \\ : * ? \" < > | or \"..\".\n";
+				printUsage(argv[0]);
+				return EXIT_FAILURE;
+			}
 			continue;
 		}
 		if (arg == "--resource-pack")
@@ -268,9 +292,20 @@ int main(int argc, char **argv)
 	}
 	const std::string resourcePack = resolveResourcePackRoot(resourcePackCli);
 
+	if (!worldName.empty() && benchmarkDuration > 0.0f)
+	{
+		// Benchmark worlds are transient by contract (issue #180): they must
+		// never open a persistent save. Fail fast instead of silently
+		// ignoring one of the two flags.
+		std::cerr << "Error: --world and --benchmark cannot be combined." << std::endl;
+		return EXIT_FAILURE;
+	}
+
 	try
 	{
 		Engine engine(resourcePack);
+		if (!worldName.empty())
+			engine.requestOpenWorld(worldName);
 		engine.initializeNoiseGenerator(static_cast<int>(seed_to_use));
         if (inspection)
         {

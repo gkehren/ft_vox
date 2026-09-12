@@ -378,6 +378,8 @@ add_executable(test_chunk_lifecycle
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
@@ -432,6 +434,73 @@ endif()
 add_test(NAME ChunkLifecycle COMMAND test_chunk_lifecycle)
 
 # ---------------------------------------------------------------------------
+# World persistence (issue #180 Phase 3+4): SaveService ordering/superseding,
+# WorldPersistence open/create identity semantics, sparse-save diffing against
+# regenerated terrain, recycled-chunk payload isolation, and the ChunkManager
+# unload/reload integration. Real Chunk/ChunkManager/TerrainGenerator, no
+# Vulkan device (same headless setup as test_chunk_lifecycle).
+# ---------------------------------------------------------------------------
+add_executable(test_world_persistence
+    test_world_persistence.cpp
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+)
+
+target_include_directories(test_world_persistence PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_world_persistence PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+if(APPLE)
+    target_compile_definitions(test_world_persistence PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_world_persistence PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+target_link_libraries(test_world_persistence PRIVATE
+    glm
+    FastNoise2
+    SDL3::SDL3
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
+)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_world_persistence PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+if(APPLE)
+    target_link_libraries(test_world_persistence PRIVATE
+        "-framework Metal"
+        "-framework Foundation"
+        "-framework QuartzCore"
+        "-framework IOKit"
+        "-framework IOSurface"
+    )
+endif()
+
+add_test(NAME WorldPersistence COMMAND test_world_persistence)
+
+# ---------------------------------------------------------------------------
 # Greedy mesher face-key contract (issue #106): merge/non-merge boundaries
 # (block types, transparency pairs, water, biome tint, chunk borders), key
 # path vs forced full-range byte equality, multi-worker determinism. Also
@@ -443,6 +512,8 @@ add_executable(test_mesh_facekey
     test_mesh_facekey.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
@@ -506,6 +577,8 @@ add_executable(test_mesh_upload
     test_mesh_upload.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
@@ -683,6 +756,8 @@ add_executable(test_debug_ui
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiState.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
@@ -836,6 +911,8 @@ add_executable(ft_vox_visual_tests
     ${FT_VOX_RENDERER_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
@@ -899,6 +976,8 @@ add_executable(test_post_resize
     ${FT_VOX_RENDERER_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
@@ -960,3 +1039,125 @@ target_include_directories(test_frame_pacing PRIVATE
 )
 
 add_test(NAME FramePacing COMMAND test_frame_pacing)
+
+# ---------------------------------------------------------------------------
+# World-save format layer (issue #180 Phases 1+2): world.meta / chunk-file
+# round trips, corruption taxonomy, sparse-diff semantics, atomic replace and
+# ".tmp" hygiene. CPU-only: compiles the format layer directly.
+# ---------------------------------------------------------------------------
+add_executable(test_world_save
+    test_world_save.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+)
+
+target_include_directories(test_world_save PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(test_world_save PRIVATE
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+target_link_libraries(test_world_save PRIVATE
+    glm
+    Threads::Threads
+)
+
+add_test(NAME WorldSave COMMAND test_world_save)
+
+# ---------------------------------------------------------------------------
+# Engine-level lifecycle: persistent world x reloadWorld (issue #180 review
+# round 3, item 12). Compiles the full engine minus main.cpp; needs a
+# GPU/window so it skips (77) when the engine cannot be constructed.
+# ---------------------------------------------------------------------------
+set(FT_VOX_ENGINE_TEST_SOURCES ${FT_VOX_SOURCES})
+list(REMOVE_ITEM FT_VOX_ENGINE_TEST_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
+
+add_executable(test_engine_reload
+    test_engine_reload.cpp
+    ${FT_VOX_ENGINE_TEST_SOURCES}
+)
+
+add_dependencies(test_engine_reload ft_vox_shaders ft_vox_build_info)
+
+target_include_directories(test_engine_reload PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/imgui
+    ${CMAKE_SOURCE_DIR}/src/ImGuiFileDialog
+    ${FT_VOX_GENERATED_DIR}
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_engine_reload PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+if(APPLE)
+    target_compile_definitions(test_engine_reload PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_engine_reload PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+target_link_libraries(test_engine_reload PRIVATE
+    ${FT_VOX_COMMON_LIBS}
+)
+
+
+add_test(NAME EngineReload COMMAND test_engine_reload)
+set_tests_properties(EngineReload PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "FT_VOX_VALIDATION=1"
+)
+
+# ---------------------------------------------------------------------------
+# Persistence stress benchmark (issue #180 review round 6, item 8). Manual
+# benchmark - deliberately NOT registered with ctest: it runs ~2x the given
+# duration with real disk writes.
+# ---------------------------------------------------------------------------
+add_executable(bench_persistence
+    bench_persistence.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+)
+
+target_include_directories(bench_persistence PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_compile_definitions(bench_persistence PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+if(APPLE)
+    target_compile_definitions(bench_persistence PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(bench_persistence PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+target_link_libraries(bench_persistence PRIVATE
+    glm
+    FastNoise2
+    SDL3::SDL3
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
+)
+

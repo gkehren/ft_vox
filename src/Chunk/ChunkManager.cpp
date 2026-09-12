@@ -8,6 +8,8 @@
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/StagingRing.hpp>
 #include <Vulkan/GpuResourceRetire.hpp>
+#include <World/WorldPersistence.hpp>
+#include <World/WorldSave.hpp>
 
 #include <glm/gtc/matrix_access.hpp>
 
@@ -22,7 +24,8 @@
 namespace
 {
 constexpr int kDeferredReleaseFrames = 3; // >= frames-in-flight
-}
+
+} // namespace
 
 ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool)
 	: m_terrainGenerator(terrainGenerator), m_threadPool(threadPool), m_chunkPool(chunkPool)
@@ -31,7 +34,24 @@ ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threa
 
 ChunkManager::~ChunkManager()
 {
-	// Best-effort drain of async work so we don't release chunks still in workers.
+	// Persistent-world durability comes FIRST (issue #180 review round 3):
+	// while persistence is open, processFinishedJobs() must still own every
+	// completion, so the close path can publish finished gen/mesh/light
+	// jobs, clear inTransit, apply PendingVoxelEdits and capture edits
+	// BEFORE any teardown discards state. The old order (drain counters ->
+	// swap out and discard the completion queues -> close) starved the
+	// close path and silently lost edits accepted against in-flight work.
+	if (m_persistence && !forceCloseWorldForShutdown())
+	{
+		// Destruction cannot be undone, but a partial save must never be
+		// reported as success (issue #180 review round 4).
+		std::cerr << "[world] final shutdown did not persist all accepted edits" << std::endl;
+	}
+
+	// Generic teardown: best-effort drain of async work so we don't release
+	// chunks still in workers. After the force-close above the completion
+	// queues are normally empty; this only sweeps stragglers from a world
+	// that was never opened.
 	while (m_pendingGenJobsCount.load() > 0 || m_pendingMeshJobsCount.load() > 0 ||
 		   m_pendingLightJobsCount.load() > 0)
 	{
@@ -165,7 +185,12 @@ void ChunkManager::processChunkLoading(int budget)
 			static_cast<float>(chunkPos.x * CHUNK_SIZE), 0.0f,
 			static_cast<float>(chunkPos.z * CHUNK_SIZE)));
 		if (chunk)
+		{
+			// Persistent-edit tracking (issue #180): arm while a world is
+			// open so every in-chunk edit is recorded for the save pipeline.
+			chunk->setTrackPersistentEdits(isWorldOpen());
 			acquired.emplace_back(chunkPos, chunk);
+		}
 		else
 			rejected.push_back(chunkPos); // free list raced empty — re-queue below
 	}
@@ -338,6 +363,11 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 				std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
 			TerrainGenerator &localGen = TerrainGenerator::getThreadLocal(seed);
 			chunk->generateTerrain(localGen);
+			// Saved overrides re-apply deterministically right after
+			// generation (issue #180): the job owns the chunk (in transit,
+			// unpublished) and the first mesh after generation covers every
+			// touched section, so this is race-free and meshes correctly.
+			applyPersistentOverrides(chunk);
 			const float ms = std::chrono::duration<float, std::milli>(
 								 std::chrono::steady_clock::now() - t0)
 								 .count();
@@ -952,6 +982,10 @@ void ChunkManager::processDeferredReleases()
 		if (!c)
 			continue;
 		recordChunkEvent(c, "unload");
+		// Capture recorded edits BEFORE the pool's Full reset wipes the
+		// chunk's edit map (issue #180): the immutable payload is queued for
+		// the save worker, so recycling the Chunk object is safe.
+		captureChunkEditsForUnload(c);
 		c->releaseGPUDeferred();
 		if (m_chunkPool)
 			m_chunkPool->release(c);
@@ -2185,6 +2219,9 @@ bool ChunkManager::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &gener
 		return false;
 	}
 	chunk->generateTerrain(generator);
+	// Bootstrap path (issue #180): same override contract as the async gen
+	// job - generation is deterministic, saved edits re-apply on top.
+	applyPersistentOverrides(chunk);
 	return true;
 }
 
@@ -2225,6 +2262,9 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 				if (!chunk)
 					continue;
 			}
+			// Bootstrap acquisition (issue #180): arm persistent-edit
+			// tracking exactly like processChunkLoading does.
+			chunk->setTrackPersistentEdits(isWorldOpen());
 			if (!prepareAndGenerateChunk(chunk, *m_terrainGenerator))
 				continue;
 			created.emplace_back(pos, chunk);
@@ -2268,4 +2308,319 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 		p.second->uploadToGPU(allocator, imm, arenas);
 
 	std::cout << "Bootstrap: " << created.size() << " chunks around spawn\n";
+}
+
+// ---------------------------------------------------------------------------
+// Persistent world lifecycle (issue #180, Phase 3+4)
+// ---------------------------------------------------------------------------
+
+bool ChunkManager::openWorld(const std::string &savesRoot, const std::string &worldName,
+                             std::string &outError)
+{
+	outError.clear();
+	if (!m_terrainGenerator)
+	{
+		outError = "no terrain generator";
+		return false;
+	}
+	if (m_persistence)
+	{
+		outError = "a world is already open";
+		return false;
+	}
+
+	auto persistence = std::make_unique<WorldPersistence>();
+	const WorldPersistence::OpenInfo info = persistence->openOrCreate(
+		savesRoot, worldName, m_terrainGenerator->getSeed(), TerrainGenerator::kGeneratorVersion);
+	if (!info.ok)
+	{
+		outError = info.error;
+		return false;
+	}
+	m_persistence = std::move(persistence);
+
+	// Arm tracking on every already-loaded chunk so edits from this point on
+	// are recorded (chunks acquired later arm in processChunkLoading and the
+	// bootstrap path).
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (auto &[pos, chunk] : m_chunks)
+			if (chunk)
+				chunk->setTrackPersistentEdits(true);
+	}
+	return true;
+}
+
+// Quiesce the async lifecycle for persistence (issue #180 review round 2):
+// publish every finished gen/mesh/light job, apply every deferred voxel edit
+// and age deferred releases, so the final persistence capture sees the
+// complete authoritative voxel state and no worker can dereference the
+// persistence facade after it is released.
+//
+// Closing a persistent world is a durability barrier: there is deliberately
+// NO timeout here - waiting is strictly better than losing a save. The loop
+// cannot spin forever on the JOB side (the close path does not feed the
+// queues; workers always finish), but a PendingVoxelEdit whose target chunk
+// never leaves UNLOADED (gen budget starved) can stay deferred forever, so
+// that condition is CHECKED afterwards instead of waited on.
+bool ChunkManager::drainAsyncJobsForPersistence()
+{
+	for (;;)
+	{
+		processFinishedJobs();     // publishes gen/mesh/light + applyPendingEdits
+		processDeferredReleases(); // ages deferred releases (capturing their edits)
+		const bool busy = m_pendingGenJobsCount.load() > 0 ||
+		                  m_pendingMeshJobsCount.load() > 0 ||
+		                  m_pendingLightJobsCount.load() > 0 || anyChunkInTransitForPersistence();
+		if (!busy)
+			break;
+		std::this_thread::sleep_for(std::chrono::microseconds(500));
+	}
+	// One final publish pass so edits deferred until the very last job land.
+	processFinishedJobs();
+
+	// Every edit accepted by gameplay must have reached authoritative voxel
+	// state before the capture runs (issue #180 review round 2).
+	if (hasPendingLogicalEdits())
+		return false;
+	return true;
+}
+
+bool ChunkManager::anyChunkInTransitForPersistence() const
+{
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	for (const auto &[pos, chunk] : m_chunks)
+		if (chunk && chunk->isInTransit())
+			return true;
+	return false;
+}
+
+// Final-shutdown resolution of stranded PendingVoxelEdits (issue #180
+// review round 3): an edit accepted against a chunk that was acquired but
+// never dispatched for generation cannot be waited on (no job exists), so
+// the shutdown path RESOLVES it instead: synchronously generate the chunk's
+// authoritative terrain, re-apply saved overrides, and let
+// applyPendingEdits() land the accepted edits. Mesh/GPU work is not needed
+// to make voxel state authoritative. Chunks with an in-flight job are
+// skipped here - their gen job will generate them, and the drain below
+// publishes it and applies the edits.
+void ChunkManager::resolvePendingEditsForPersistenceShutdown()
+{
+	// Snapshot the distinct coordinates that still hold accepted edits.
+	std::vector<glm::ivec3> coords;
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		coords.reserve(m_pendingEdits.size());
+		for (const PendingVoxelEdit &edit : m_pendingEdits)
+			if (edit.chunk)
+				coords.push_back(edit.chunkPos);
+	}
+	const auto coordLess = [](const glm::ivec3 &a, const glm::ivec3 &b)
+	{
+		if (a.x != b.x)
+			return a.x < b.x;
+		if (a.z != b.z)
+			return a.z < b.z;
+		return a.y < b.y;
+	};
+	std::sort(coords.begin(), coords.end(), coordLess);
+	coords.erase(std::unique(coords.begin(), coords.end(),
+	                         [](const glm::ivec3 &a, const glm::ivec3 &b)
+	                         { return a.x == b.x && a.y == b.y && a.z == b.z; }),
+	             coords.end());
+
+	for (const glm::ivec3 &coord : coords)
+	{
+		Chunk *chunk = nullptr;
+		{
+			std::lock_guard<std::shared_mutex> lock(m_mutex);
+			const auto it = m_chunks.find(coord);
+			chunk = it != m_chunks.end() ? it->second : nullptr;
+		}
+		if (!chunk || chunk->isInTransit() || chunk->getState() != ChunkState::UNLOADED)
+			continue;
+
+		// Deliberately NOT prepareAndGenerateChunk(): its allocation-failure
+		// path releases the chunk to the pool, which would leave m_chunks
+		// holding a recycled slot. On failure the chunk stays UNLOADED and
+		// the edit is lost as the documented last resort of a forced
+		// shutdown (stderr says so).
+		if (!chunk->prepareVoxelStorageForGeneration())
+		{
+			std::cerr << "[world] shutdown resolve: voxel storage allocation failed for chunk ("
+			          << coord.x << ", " << coord.z << "); its accepted edits cannot be saved"
+			          << std::endl;
+			continue;
+		}
+		if (m_terrainGenerator)
+			chunk->generateTerrain(*m_terrainGenerator);
+		applyPersistentOverrides(chunk);
+	}
+
+	// Land every edit whose chunk is now readable.
+	processFinishedJobs();
+}
+
+// Destructor-only close (issue #180 review round 3): unlike the retryable
+// closeWorld(), a final shutdown must RESOLVE everything resolvable before
+// destruction instead of refusing - there is no later retry point. Stranded
+// PendingVoxelEdits are synchronously resolved, then the usual
+// capture -> flush -> shutdown runs. Returns the flush success (the caller
+// is destructing either way; the result is only for logging/tests).
+bool ChunkManager::forceCloseWorldForShutdown()
+{
+	if (!m_persistence)
+		return true;
+
+	resolvePendingEditsForPersistenceShutdown();
+
+	const bool drained = drainAsyncJobsForPersistence();
+	if (!drained)
+	{
+		// Accepted logical edits could not be made authoritative (their
+		// chunk never generated). The shutdown continues - destruction has
+		// no retry point - but the loss is REPORTED, never silent, and the
+		// return value tells the caller the save may be incomplete.
+		std::cerr << "[world] final shutdown: accepted logical edits could not be made authoritative"
+		          << std::endl;
+	}
+
+	captureAllChunkEdits();
+	const bool flushed = m_persistence->flush();
+	m_persistence->shutdown();
+	// Disarm tracking on the loaded set: after closeWorld() the manager must
+	// behave exactly like a never-opened one (no maps filling up for a save
+	// pipeline that no longer exists).
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (auto &[pos, chunk] : m_chunks)
+			if (chunk)
+				chunk->setTrackPersistentEdits(false);
+	}
+	m_persistence.reset();
+	return drained && flushed;
+}
+
+bool ChunkManager::closeWorld()
+{
+	if (!m_persistence)
+		return true;
+
+	// Quiesce BEFORE the final capture (issue #180 review): the old order
+	// (capture, then wait for gen) lost edits that were deferred while their
+	// chunk was mid-job - PendingVoxelEdits had not been applied when the
+	// capture ran, and in-transit chunks were skipped by captureAll. With
+	// the drain first, the capture below sees every authoritative edit and
+	// no worker can touch m_persistence after shutdown/release.
+	if (!drainAsyncJobsForPersistence())
+	{
+		// Accepted edits are still stranded outside authoritative voxel
+		// state (their chunk never generated). Persistence stays OPEN: a
+		// later flushWorld()/closeWorld() retries once the situation
+		// resolves. Destroying the facade here would silently drop them.
+		std::cerr << "[world] close deferred: logical edits still pending after drain" << std::endl;
+		return false;
+	}
+
+	captureAllChunkEdits();
+
+	// Retryable close (issue #180 review round 5): a flush failure must NOT
+	// tear the persistence down - the desired/durable state machine keeps
+	// every failed coordinate dirty, tracking stays armed and the save
+	// service is still usable, so the next capture/flush/close retries.
+	// Invariant: closeWorld() == false => m_persistence alive and usable.
+	if (!m_persistence->flush())
+	{
+		std::cerr << "[world] close deferred: persistence flush failed" << std::endl;
+		return false;
+	}
+
+	m_persistence->shutdown();
+	// Disarm tracking on the loaded set: after closeWorld() the manager must
+	// behave exactly like a never-opened one (no maps filling up for a save
+	// pipeline that no longer exists).
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (auto &[pos, chunk] : m_chunks)
+			if (chunk)
+				chunk->setTrackPersistentEdits(false);
+	}
+	m_persistence.reset();
+	return true;
+}
+
+bool ChunkManager::flushWorld()
+{
+	if (!m_persistence)
+		return true;
+	captureAllChunkEdits();
+	return m_persistence->flush();
+}
+
+void ChunkManager::applyPersistentOverrides(Chunk *chunk)
+{
+	if (!m_persistence || !m_persistence->enabled() || !chunk)
+		return;
+	const glm::ivec3 cc = worldToChunkCoord(chunk->getPosition());
+	// Copy under the persistence mutex: the worker must not iterate a vector
+	// that the save pipeline may refine concurrently.
+	const std::vector<worldsave::ChunkEdit> overrides = m_persistence->overridesSnapshot(cc.x, cc.z);
+	if (overrides.empty())
+		return;
+	for (const worldsave::ChunkEdit &edit : overrides)
+	{
+		// Guard against corrupt on-disk payloads: localIndex is the canonical
+		// y-major index (y*256 + z*16 + x), so localIndex < CHUNK_VOLUME is
+		// exactly "x/z < 16 and y < CHUNK_HEIGHT".
+		if (edit.localIndex >= static_cast<uint32_t>(CHUNK_VOLUME))
+		{
+			std::cerr << "WorldPersistence: ignoring out-of-range localIndex "
+			          << edit.localIndex << " in chunk (" << cc.x << ", " << cc.z << ")\n";
+			continue;
+		}
+		const int x = static_cast<int>(edit.localIndex & 15u);
+		const int z = static_cast<int>((edit.localIndex >> 4) & 15u);
+		const int y = static_cast<int>(edit.localIndex >> 8);
+		chunk->setVoxel(x, y, z, static_cast<TextureType>(edit.blockType));
+	}
+}
+
+void ChunkManager::captureChunkEditsForUnload(Chunk *chunk)
+{
+	if (!m_persistence || !m_persistence->enabled() || !chunk || !chunk->hasPersistentEdits())
+		return;
+	Chunk::ChunkEditMap edits = chunk->takePersistentEdits();
+	std::vector<worldsave::ChunkEdit> values;
+	values.reserve(edits.size());
+	for (const auto &[localIndex, type] : edits)
+		values.push_back({localIndex, type});
+	std::sort(values.begin(), values.end(),
+	          [](const worldsave::ChunkEdit &a, const worldsave::ChunkEdit &b)
+	          { return a.localIndex < b.localIndex; });
+	const glm::ivec3 cc = worldToChunkCoord(chunk->getPosition());
+	m_persistence->captureChunkEdits(cc.x, cc.z, std::move(values));
+}
+
+void ChunkManager::captureAllChunkEdits()
+{
+	if (!m_persistence || !m_persistence->enabled())
+		return;
+	// Main thread; edits only ever happen on the main thread, so the edit
+	// maps of non-transit chunks are stable. In-transit chunks are skipped:
+	// their gen/mesh job is mid-flight (the gen job itself re-applies the
+	// stored overrides after generation), and they are captured on their own
+	// unload or a later flush.
+	std::vector<Chunk *> capture;
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		capture.reserve(m_chunks.size() + m_deferredRelease.size());
+		for (auto &[pos, chunk] : m_chunks)
+			if (chunk && !chunk->isInTransit() && chunk->hasPersistentEdits())
+				capture.push_back(chunk);
+		for (Chunk *chunk : m_deferredRelease)
+			if (chunk && chunk->hasPersistentEdits())
+				capture.push_back(chunk);
+	}
+	for (Chunk *chunk : capture)
+		captureChunkEditsForUnload(chunk);
 }

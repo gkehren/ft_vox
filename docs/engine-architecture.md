@@ -601,7 +601,96 @@ for controls, timing, thread/publication contracts and future entity integration
 
 ---
 
-## 12. Networking (status)
+## 12. World persistence (`src/World/`, issue #180)
+
+Persistent world saves: a **seed + sparse-override** model. The deterministic
+terrain generator is always the source of truth; a save stores only the world
+identity (seed) plus the voxels the player actually changed. A fresh install of
+the engine can therefore reproduce any saved world from `seed +
+TerrainGenerator::kGeneratorVersion` and re-apply the stored diff on top.
+
+### Directory layout
+
+```text
+saves/<name>/world.meta        16-byte identity: magic 'FTVW', format version, seed, generator version
+saves/<name>/chunks/<x>_<z>.chunk   one sparse override table per edited chunk ('FTVC', checksummed)
+saves/<name>/player.state      45-byte player snapshot ('FTVP'): feet position, yaw/pitch, flight, selected block
+```
+
+All files are little-endian byte-level formats (no struct dumps) — exact
+layouts are documented in `src/World/WorldSave.hpp`. Chunk `localIndex` is the
+canonical y-major index (`y*256 + z*16 + x`) and `blockType` is the final
+authoritative value for that voxel (an override table, not an operation log).
+
+### Format versioning + generator compatibility
+
+`world.meta` carries both a save **format version** (`kWorldSaveFormatVersion`)
+and the **generator version** stored at create time. On open, a stored
+generator version different from the running `TerrainGenerator::kGeneratorVersion`
+is refused (no migration in v1). Consequence: **any terrain change that would
+alter generated voxels for an existing seed must bump
+`TerrainGenerator::kGeneratorVersion`** — otherwise saved-world overrides would
+be re-diffed against a different base and silently corrupt the restored terrain.
+Pure additive changes (new biomes/blocks that leave existing seeds' voxels
+untouched) do not require a bump.
+
+### Lifecycle integration (`ChunkManager`)
+
+- **Open** (`ChunkManager::openWorld` → `WorldPersistence::openOrCreate`,
+  called from `Engine::initializeNoiseGenerator` before any generation):
+  validates/creates `world.meta`, cleans leftover `.tmp` files (an interrupted
+  atomic write is never authoritative), then loads every chunk file into an
+  in-memory override index.
+- **Apply**: freshly generated chunks get the stored overrides re-applied after
+  deterministic generation (async gen jobs + the synchronous bootstrap path),
+  so procedural output and saved edits compose deterministically.
+- **Capture**: edited chunks are captured **before pool release on unload** —
+  the current value of every edited voxel is copied out and the chunk can be
+  recycled immediately.
+- **Write**: a dedicated `SaveService` `std::jthread` does all disk I/O (never
+  the shared gen/mesh `ThreadPool` — disk stalls must not starve worldgen).
+  Requests are superseded per chunk coordinate (the last enqueued request
+  wins; doomed older requests are dropped without I/O), the true minimal diff
+  is computed inside the worker by regenerating the chunk's deterministic base,
+  and every file is written tmp + rename (crash leaves the previous file or the
+  complete new one, never a mixture).
+- **Close** (`closeWorld`): capture-all + flush + service shutdown; the
+  manager then behaves exactly like a never-opened one. `~ChunkManager` runs
+  the same path as a safety net.
+
+### Engine wiring (Phase 5)
+
+- `--world <name>` (CLI) → `Engine::requestOpenWorld` → opened in
+  `initializeNoiseGenerator` before generation. If the stored seed differs from
+  an explicitly requested `--seed`, the open is **refused** and the session
+  runs transient (identity is never overwritten); without an explicit seed the
+  stored seed recreates the `TerrainGenerator`.
+- Player state (`player.state`) is restored on open when present (position is
+  kept verbatim — no surface snap) and written in `~Engine` before the final
+  flush.
+- **Transient / benchmark worlds run persistence-disabled**: `reloadWorld`
+  closes any open world first, so a benchmark can never write into a user
+  save. Sessions without `--world` never create files. Combining
+  `--world` with `--benchmark` is a CLI error (fail-fast) rather than a
+  silently ignored flag.
+
+### Failure policy
+
+- Last known-good data is preserved: writes are atomic, and a failed open
+  never overwrites identity.
+- Corrupt chunk files are loudly reported (`status().lastError`, World UI
+  panel) and **skipped** — that chunk falls back to procedural generation.
+- Seed / generator-version mismatch = refuse to open; the session continues
+  without persistence rather than exiting.
+- Corrupt `player.state` is reported and ignored (fresh spawn) — never
+  teleports the player.
+
+Tests: `tests/test_world_save.cpp` (format layer), `tests/test_world_persistence.cpp`
+(service, facade, ChunkManager integration, player state).
+
+---
+
+## 13. Networking (status)
 
 `src/Network/` — Boost.Asio UDP client/server for position/world state.
 
@@ -612,7 +701,7 @@ Document presence only; do not assume multiplayer is live in the main binary UX.
 
 ---
 
-## 13. Related docs
+## 14. Related docs
 
 - [`vulkan-graphics.md`](vulkan-graphics.md) — Vulkan device, pass graph, shaders, post  
 - [`terrain-generation.md`](terrain-generation.md) — noise graphs, biome/block catalog, extension procedures, calibration

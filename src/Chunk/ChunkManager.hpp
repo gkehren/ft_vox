@@ -22,11 +22,15 @@
 #include <Chunk/LightSample.hpp>
 #include <utils.hpp>
 
+#include <memory>
+
 class Camera;
 class ImmediateCommands;
 class StagingRing;
 class GpuResourceRetire;
 struct MeshBuildResult;
+class MeshResultPool;
+class WorldPersistence;
 
 /// A finished async mesh job: the built payload (may be null when the
 /// result block could not be acquired) plus the chunk it was built for, so
@@ -275,6 +279,45 @@ public:
 	/// storage allocation fails, so no slot is leaked.
 	bool prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator);
 
+	// --- Persistent world lifecycle (issue #180, Phase 3+4) ---
+	// persistence stays DISABLED unless openWorld succeeds — benchmark /
+	// transient worlds (Engine::reloadWorld) never construct it, so they can
+	// never create files. openWorld() seeds the save from the live terrain
+	// generator (seed + kGeneratorVersion) and arms persistent-edit tracking
+	// on every loaded chunk; closeWorld() is the durable teardown.
+	/// Open (or create) `<savesRoot>/<worldName>/` for the running world.
+	/// On success returns true; on failure `outError` carries a user-facing
+	/// reason (seed mismatch, generator version mismatch, corrupt meta, ...).
+	bool openWorld(const std::string &savesRoot, const std::string &worldName, std::string &outError);
+	/// Capture every chunk with edits, flush the save service, shut it down
+	/// and release the persistence facade. Returns the flush success. After
+	/// closeWorld() the manager behaves exactly like a never-opened one.
+	bool closeWorld();
+	/// True while gameplay edits accepted against not-yet-readable chunks are
+	/// still queued as PendingVoxelEdits - authoritative voxel state is
+	/// behind accepted input. Main-thread view (edits and this accessor are
+	/// main-thread only); used by the close-world drain and tests.
+	bool hasPendingLogicalEdits() const { return !m_pendingEdits.empty(); }
+	/// Canonical world->chunk mapping (floor division; correct for negative
+	/// coordinates). Public so tools/benchmarks use the runtime convention
+	/// (issue #180 review round 7, item 4).
+	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
+	/// Test/benchmark accessor: snapshot of the active chunk set.
+	std::vector<Chunk *> activeChunksSnapshot() const
+	{
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
+		return m_activeChunks;
+	}
+	/// Capture all dirty loaded chunks + flush (no close). False on I/O failure.
+	bool flushWorld();
+	bool isWorldOpen() const { return m_persistence != nullptr; }
+	/// For UI/status; may be null (no world open).
+	/// Const-correct pair (issue #180 review round 6): mutable access is for
+	/// test seams on a non-const manager; a const manager only exposes a
+	/// const facade (UI/status reads).
+	WorldPersistence *worldPersistence() { return m_persistence.get(); }
+	const WorldPersistence *worldPersistence() const { return m_persistence.get(); }
+
 private:
 	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);
 	StreamingUpdateKind loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
@@ -381,7 +424,6 @@ private:
 	uint64_t m_nextGroupId{1};
 
 	TaskPriority calculateTaskPriority(float distanceSq, float lodThresholdSq) const;
-	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
 
 	/// Bounded trace write (no-op while tracing is disabled). Main thread.
 	void recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sections = 0);
@@ -397,6 +439,40 @@ private:
 	friend struct ChunkManagerProbe;
 	friend struct ChunkManagerStreamProbe;
 	friend class ChunkCollisionView;
+
+	// --- Persistence (issue #180, Phase 3+4) ---
+	/// Re-apply saved overrides after deterministic generation. Called with
+	/// exclusive ownership of `chunk` (bootstrap on the main thread, or the
+	/// async gen job while the chunk is in transit); overrides come from a
+	/// mutex-guarded snapshot of the persistence index. Zero work when no
+	/// world is open or the chunk has no saved overrides.
+	void applyPersistentOverrides(Chunk *chunk);
+	/// Main-thread capture of one chunk's persistent edits into the save
+	/// pipeline (unload path and captureAllChunkEdits).
+	void captureChunkEditsForUnload(Chunk *chunk);
+	/// Capture every chunk holding edits: loaded chunks (in-transit ones are
+	/// skipped - their gen/mesh job is mid-flight; they are captured on their
+	/// own unload or a later flush) plus chunks parked in m_deferredRelease.
+	void captureAllChunkEdits();
+	/// Final-shutdown resolution of stranded PendingVoxelEdits: synchronously
+	/// generate authoritative terrain for UNLOADED chunks that still hold
+	/// accepted edits, then let applyPendingEdits() land them. Destructor
+	/// path only.
+	void resolvePendingEditsForPersistenceShutdown();
+	/// Destructor-only close: resolve stranded edits, then capture/flush/
+	/// shutdown UNCONDITIONALLY (no retry semantics - destruction has no
+	/// later retry point). Returns the flush success.
+	bool forceCloseWorldForShutdown();
+	/// Quiesce the async lifecycle before the final persistence capture
+	/// (closeWorld): publish finished gen/mesh/light jobs, apply deferred
+	/// voxel edits, age deferred releases. Deliberately NO timeout - closing
+	/// a persistent world is a durability barrier. Returns false when
+	/// accepted logical edits are still pending afterwards (their chunk
+	/// never left UNLOADED): the caller must then NOT capture/shutdown.
+	bool drainAsyncJobsForPersistence();
+	bool anyChunkInTransitForPersistence() const;
+
+	std::unique_ptr<WorldPersistence> m_persistence;
 
 	struct StreamState
 	{

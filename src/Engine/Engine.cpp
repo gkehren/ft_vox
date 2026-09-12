@@ -13,6 +13,7 @@
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Engine/InputRouting.hpp>
+#include <World/WorldPersistence.hpp>
 #include <imgui/imgui.h>
 
 #include <cstdio>
@@ -175,6 +176,31 @@ Engine::~Engine()
 	if (vkContext)
 		vkContext->waitIdle();
 
+	// Durable shutdown (issue #180, Phase 5): persist the player state, then
+	// flush the save queue while the manager is still alive. ~ChunkManager
+	// holds a safety net for chunk edits, but only this path writes
+	// player.state, so the explicit flush stays.
+	if (chunkManager && chunkManager->isWorldOpen())
+	{
+		PlayerPersistState playerState;
+		playerState.x = player.body.position.x;
+		playerState.y = player.body.position.y;
+		playerState.z = player.body.position.z;
+		playerState.yaw = camera.getYaw();
+		playerState.pitch = camera.getPitch();
+		playerState.flight = playerFlight;
+		playerState.selectedBlock = static_cast<int32_t>(selectedTexture);
+		const WorldPersistence *persistence = chunkManager->worldPersistence();
+		if (!persistence || !persistence->writePlayerState(playerState))
+			std::cout << "[world] player state save failed\n";
+		if (!chunkManager->flushWorld())
+		{
+			const std::string error =
+				persistence ? persistence->status().lastError : std::string("(no status)");
+			std::cout << "[world] flush failed: " << error << "\n";
+		}
+	}
+
 	// Reset order matters (issue #109): chunk/world teardown returns arena
 	// ranges, which can retire whole arena pages into the retire queue.
 	// The queue must outlive them and be flushed last.
@@ -205,6 +231,63 @@ Engine::~Engine()
 	SDL_Quit();
 }
 
+std::optional<PlayerPersistState> Engine::loadPendingPlayerState()
+{
+	if (!chunkManager || !chunkManager->isWorldOpen() || !chunkManager->worldPersistence())
+		return std::nullopt;
+	PlayerPersistState saved;
+	if (!chunkManager->worldPersistence()->readPlayerState(saved))
+		return std::nullopt; // fresh world, or already reported as corrupt
+	return saved;
+}
+
+bool Engine::restorePlayerState(const PlayerPersistState &saved)
+{
+	// Terrain validation (issue #180 review round 6): the saved file is
+	// structurally valid, but the position itself must be usable against the
+	// freshly bootstrapped terrain.
+	ChunkCollisionView world(*chunkManager);
+	physics::QueryStats queries;
+	physics::Body candidate;
+	candidate.position = glm::dvec3(saved.x, saved.y, saved.z);
+	glm::dvec3 restoredFeet = candidate.position;
+	bool waitingForTerrain = false;
+	if (physics::recover(world, candidate, queries))
+	{
+		// Valid as-is or embedded by at most one block (recover() corrected
+		// it) - use the (possibly corrected) feet position.
+		restoredFeet = candidate.position;
+	}
+	else if (candidate.waitingForTerrain)
+	{
+		// Terrain not fully available around the saved spot: keep the
+		// position verbatim and let the solver hold the body until the
+		// terrain streams in - never an aggressive fallback because one
+		// neighbor is not loaded yet.
+		waitingForTerrain = true;
+	}
+	else
+	{
+		// Clearly invalid (embedded deeper than recover() can fix): fall
+		// back to the surface spawn.
+		std::cout << "[world] saved player position is not usable; falling back to the surface spawn\n";
+		return false;
+	}
+
+	player.reset(restoredFeet);
+	if (waitingForTerrain)
+		player.body.waitingForTerrain = true;
+	camera.setYawPitch(saved.yaw, saved.pitch);
+	camera.setPosition(glm::vec3(player.renderEye()));
+	playerFlight = saved.flight;
+	if (saved.selectedBlock >= 0 && saved.selectedBlock < static_cast<int32_t>(COUNT))
+		selectedTexture = static_cast<TextureType>(saved.selectedBlock);
+	std::cout << "[world] restored player at (" << restoredFeet.x << ", " << restoredFeet.y
+	          << ", " << restoredFeet.z << ")" << (waitingForTerrain ? " (waiting for terrain)" : "")
+	          << "\n";
+	return true;
+}
+
 void Engine::initializeNoiseGenerator(int seed_val)
 {
 	if (seed_val <= 0)
@@ -219,6 +302,38 @@ void Engine::initializeNoiseGenerator(int seed_val)
 		seed = seed_val;
 	}
 
+	// Persistent-world seed resolution (issue #180, Phase 5): must run
+	// BEFORE the generator and mobs consume `seed`. An existing world keeps
+	// its stored identity; the rolled seed is only a default for new worlds.
+	bool wantPersistence = !m_openWorldName.empty();
+	m_openWorldError.clear();
+	if (wantPersistence)
+	{
+		int storedSeed = 0;
+		std::string seedError;
+		if (WorldPersistence::peekStoredSeed(m_savesRoot.string(), m_openWorldName, storedSeed, seedError))
+		{
+			if (seed_val > 0 && storedSeed != seed_val)
+			{
+				// Explicit --seed contradicts the save: never overwrite
+				// identity — run this session transient instead.
+				m_openWorldError = "stored seed " + std::to_string(storedSeed) +
+				                   " != requested seed " + std::to_string(seed_val) +
+				                   " (running this session without persistence)";
+				std::cout << "[world] refusing to open '" << m_openWorldName << "': "
+				          << m_openWorldError << "\n";
+				wantPersistence = false;
+			}
+			else
+			{
+				seed = storedSeed;
+			}
+		}
+		// else: the world does not exist yet (created with the current seed
+		// below) or its meta is unreadable — openWorld() reports the exact
+		// reason either way; the session keeps the current seed.
+	}
+
 	++m_worldGenerationId;
 	if (gameUi)
 		gameUi->invalidateBiomeMap();
@@ -229,9 +344,44 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
 												  chunkPool.get());
 
-	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
+	// Open (or create) the save AFTER the manager exists but BEFORE any
+	// generation, so chunk edits from the first frame are already tracked.
+	// Failure is not fatal: the session continues without persistence.
+	if (wantPersistence)
+	{
+		std::string error;
+		if (chunkManager->openWorld(m_savesRoot.string(), m_openWorldName, error))
+		{
+			std::cout << "[world] opened '" << m_openWorldName << "' (seed " << seed << ")\n";
+		}
+		else
+		{
+			m_openWorldError = error;
+			std::cout << "[world] failed to open '" << m_openWorldName << "': " << error << "\n";
+		}
+	}
+
+	// Restored-player bootstrap (issue #180 review round 6): player.state is
+	// read BEFORE the terrain bootstrap so the initial area generates around
+	// the SAVED position - a player who logged out at chunk (100, -80) must
+	// not bootstrap around the default origin and wait for streaming to walk
+	// the whole distance.
+	const std::optional<PlayerPersistState> savedPlayer = loadPendingPlayerState();
+	glm::vec3 bootstrapCenter = camera.getPosition();
+	if (savedPlayer)
+	{
+		bootstrapCenter = glm::vec3(static_cast<float>(savedPlayer->x),
+		                            static_cast<float>(savedPlayer->y + player.settings.eyeHeight),
+		                            static_cast<float>(savedPlayer->z));
+		camera.setPosition(bootstrapCenter);
+	}
+
+	chunkManager->generateInitialArea(bootstrapCenter, kBootstrapRadius,
 									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
-	placeCameraOnSurface();
+
+	// Restore the validated player state, or fall back to the surface spawn.
+	if (!savedPlayer || !restorePlayerState(*savedPlayer))
+		placeCameraOnSurface();
 
 	demoPlayers = {
 		{{4.f, 80.f, 4.f}, 1},
@@ -445,10 +595,27 @@ void Engine::setPlayerFlight(bool enabled)
 	resetPlayerAtCamera();
 }
 
-void Engine::reloadWorld(int newSeed)
+bool Engine::reloadWorld(int newSeed)
 {
 	if (!vkContext || !threadPool || !chunkPool || !immediate)
-		return;
+		return false;
+
+	// Deliberate (issue #180): benchmark / reload worlds are transient —
+	// close (and flush) any world opened for interactive play so the run can
+	// never write into the user's save. Persistence stays off afterwards.
+	// The close can be REFUSED (stranded logical edits - issue #180 review
+	// round 3): aborting the reload keeps the manager/world intact, so a
+	// debug/benchmark action can never destroy the manager after a refused
+	// close.
+	if (chunkManager && chunkManager->isWorldOpen())
+	{
+		if (!chunkManager->closeWorld())
+		{
+			std::cerr << "[world] reload aborted: persistent world could not be closed safely"
+			          << std::endl;
+			return false;
+		}
+	}
 
 	seed = newSeed > 0 ? newSeed : 42;
 	++m_worldGenerationId;
@@ -510,6 +677,7 @@ void Engine::reloadWorld(int newSeed)
 
 	std::cout << "[bench] World reloaded seed=" << seed
 			  << " chunks=" << chunkManager->chunkCount() << "\n";
+	return true;
 }
 
 void Engine::onResize(int width, int height)
@@ -971,7 +1139,17 @@ void Engine::tickBenchmark(double dt)
 			vkContext ? vkContext->maxDrawIndirectCount() : 0,
 			renderSettings.streamFrontBias);
 
-		reloadWorld(cfg.seed);
+	if (!reloadWorld(cfg.seed))
+	{
+		// Never continue Warmup/Running against the OLD persistent world
+		// (issue #180 review round 4): a benchmark measures a fresh
+		// transient world or nothing. cancel() moves the benchmark back to
+		// Idle; the regular post-benchmark restore block (this tick and the
+		// next) returns the player/camera/vsync to their prior state.
+		std::cerr << "[benchmark] world reload failed; benchmark cancelled" << std::endl;
+		m_benchmark.cancel();
+		return;
+	}
 		m_benchmark.onWorldReady(camera.getPosition());
 		// Place camera on first path point
 		m_benchmark.tick(0.0, camera);
@@ -1214,6 +1392,38 @@ void Engine::drawUi()
 	f.paused = &paused;
 	f.seed = seed;
 	f.worldGenerationId = m_worldGenerationId;
+	// World-save snapshot (issue #180, Phase 5): a plain-copy of the
+	// persistence status — the UI frame never holds WorldPersistence types.
+	f.worldSave.active = chunkManager && chunkManager->isWorldOpen();
+	if (f.worldSave.active && chunkManager->worldPersistence())
+	{
+		const WorldPersistence::Status st = chunkManager->worldPersistence()->status();
+		f.worldSave.worldName = st.name;
+		f.worldSave.seed = st.seed;
+		f.worldSave.queueDepth = st.queueDepth;
+		f.worldSave.queueDepthPeak = st.queueDepthPeak;
+		f.worldSave.dirtyCoordinates = st.dirtyCoordinates;
+		f.worldSave.failedCoordinates = st.failedCoordinates;
+		f.worldSave.avgSerializeMs = st.avgSerializeMs;
+		f.worldSave.maxSerializeMs = st.maxSerializeMs;
+		f.worldSave.avgWriteMs = st.avgWriteMs;
+		f.worldSave.maxWriteMs = st.maxWriteMs;
+		f.worldSave.rejectedBusyQueueFull = st.rejectedBusyQueueFull;
+		f.worldSave.rejectedBusyCommitGate = st.rejectedBusyCommitGate;
+		f.worldSave.enqueued = st.enqueued;
+		f.worldSave.completed = st.completed;
+		f.worldSave.superseded = st.superseded;
+		f.worldSave.failed = st.failed;
+		f.worldSave.deleted = st.deleted;
+		f.worldSave.bytesWritten = st.bytesWritten;
+		f.worldSave.lastError = st.lastError;
+	}
+	else if (!m_openWorldError.empty())
+	{
+		// A world was requested but this session runs transient: surface why.
+		f.worldSave.lastError = m_openWorldError;
+	}
+	f.worldSave.error = !f.worldSave.lastError.empty();
 	f.fps = static_cast<float>(fps > 0.0 ? fps : ImGui::GetIO().Framerate);
 	f.frameMs = static_cast<float>(deltaTime * 1000.0);
 	// Hierarchical-profiler CPU frame time for the shell status strip (issue
