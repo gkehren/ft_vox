@@ -2533,7 +2533,18 @@ bool ChunkManager::closeWorld()
 	}
 
 	captureAllChunkEdits();
-	const bool flushed = m_persistence->flush();
+
+	// Retryable close (issue #180 review round 5): a flush failure must NOT
+	// tear the persistence down - the desired/durable state machine keeps
+	// every failed coordinate dirty, tracking stays armed and the save
+	// service is still usable, so the next capture/flush/close retries.
+	// Invariant: closeWorld() == false => m_persistence alive and usable.
+	if (!m_persistence->flush())
+	{
+		std::cerr << "[world] close deferred: persistence flush failed" << std::endl;
+		return false;
+	}
+
 	m_persistence->shutdown();
 	// Disarm tracking on the loaded set: after closeWorld() the manager must
 	// behave exactly like a never-opened one (no maps filling up for a save
@@ -2545,7 +2556,7 @@ bool ChunkManager::closeWorld()
 				chunk->setTrackPersistentEdits(false);
 	}
 	m_persistence.reset();
-	return flushed;
+	return true;
 }
 
 bool ChunkManager::flushWorld()

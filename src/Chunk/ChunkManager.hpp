@@ -302,7 +302,7 @@ public:
 	bool flushWorld();
 	bool isWorldOpen() const { return m_persistence != nullptr; }
 	/// For UI/status; may be null (no world open).
-	const WorldPersistence *worldPersistence() const { return m_persistence.get(); }
+	WorldPersistence *worldPersistence() const { return m_persistence.get(); }
 
 private:
 	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);
