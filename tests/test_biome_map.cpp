@@ -88,10 +88,14 @@ static void test_biome_map_pan_navigation()
 // threshold-gated so a plain RMB/MMB click is a STRICT no-op (no translation
 // -> no supersede in the World panel), with a sticky initiating button and a
 // preview offset that survives the drag until the current view publishes.
+// The first drag frame applies ImGui's GetMouseDragDelta (movement since the
+// mouse-down, single source of truth) — including a same-frame flick where
+// clicked and dragging land together and Idle jumps straight to Dragging.
 static void test_biome_map_pan_state_machine()
 {
-	const auto btn = [](bool clicked, bool down, bool dragging) {
-		return BiomeMapPanButtonInput{clicked, down, dragging};
+	const auto btn = [](bool clicked, bool down, bool dragging,
+						glm::vec2 fromClick = {0.f, 0.f}) {
+		return BiomeMapPanButtonInput{clicked, down, dragging, fromClick};
 	};
 	const auto input = [&](bool mapActive, bool hovered, bool follow, glm::vec2 delta,
 						   BiomeMapPanButtonInput r, BiomeMapPanButtonInput m) {
@@ -124,36 +128,32 @@ static void test_biome_map_pan_state_machine()
 			  s.dragDelta == zero && s.pan.previewOffset == zero,
 		  "RMB click without movement is a strict no-op");
 
-	// Release after sub-threshold movement: the accumulated movement is
-	// DISCARDED (it never translated), any earlier preview offset is kept.
+	// Release after sub-threshold movement: nothing was ever applied (the
+	// movement only ever lived in ImGui's drag delta), any earlier preview
+	// offset is kept.
 	pan = BiomeMapPan{};
 	pan.state = BiomeMapPanState::Pressed;
 	pan.button = 1;
-	pan.pendingDelta = {3.f, 2.f};
 	pan.previewOffset = {4.f, 0.f};
 	s = stepBiomeMapPan(pan, input(true, true, false, zero,
 								   btn(false, false, false), none));
-	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.pendingDelta == zero &&
+	CHECK(s.pan.state == BiomeMapPanState::Idle &&
 			  s.pan.previewOffset == glm::vec2(4.f, 0.f),
-		  "Release below the threshold drops pendingDelta and keeps the offset");
+		  "Release below the threshold is a no-op and keeps the offset");
 
-	// Follow player re-enable with pending sub-threshold movement: full
-	// reset including pendingDelta.
+	// Follow player re-enable while armed: full reset.
 	pan = BiomeMapPan{};
 	pan.state = BiomeMapPanState::Pressed;
 	pan.button = 2;
-	pan.pendingDelta = {3.f, 2.f};
 	s = stepBiomeMapPan(pan, input(true, true, true, zero, none, btn(false, true, false)));
-	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.pendingDelta == zero &&
-			  s.pan.previewOffset == zero,
-		  "Follow player re-enable drops pendingDelta too");
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.previewOffset == zero,
+		  "Follow player re-enable resets an armed pan");
 
-	// Map invalidation with pending sub-threshold movement: same full reset.
+	// Map invalidation while armed: same full reset.
 	s = stepBiomeMapPan(pan, input(false, true, false, zero,
 								   none, btn(false, true, false)));
-	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.pendingDelta == zero &&
-			  s.pan.previewOffset == zero,
-		  "Map invalidation drops pendingDelta too");
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.previewOffset == zero,
+		  "Map invalidation resets an armed pan");
 
 	// MMB click without movement: same strict no-op through button 2.
 	pan = BiomeMapPan{};
@@ -168,37 +168,47 @@ static void test_biome_map_pan_state_machine()
 			  s.pan.previewOffset == zero,
 		  "MMB click without movement is a strict no-op");
 
-	// Sub-threshold movement ACCUMULATES across frames while Pressed but
-	// translates nothing (no dragDelta, no previewOffset, no supersede).
+	// Sub-threshold movement translates nothing while Pressed: ImGui tracks
+	// it in dragFromClick (movement since the mouse-down), and the FSM
+	// applies nothing until the threshold is crossed. Frames: press, then
+	// dragFromClick +2+1, then +3+2 — still below the threshold.
 	pan = BiomeMapPan{};
 	pan.state = BiomeMapPanState::Pressed;
 	pan.button = 1;
 	s = stepBiomeMapPan(pan, input(true, true, false, {2.f, 1.f},
 								   btn(false, true, false), none));
 	CHECK(s.pan.state == BiomeMapPanState::Pressed && s.dragDelta == zero &&
-			  s.pan.previewOffset == zero &&
-			  s.pan.pendingDelta == glm::vec2(2.f, 1.f),
-		  "Movement below the drag threshold accumulates without translating");
+			  s.pan.previewOffset == zero,
+		  "Movement below the drag threshold translates nothing");
 	pan = s.pan;
 	s = stepBiomeMapPan(pan, input(true, true, false, {1.f, 1.f},
 								   btn(false, true, false), none));
 	CHECK(s.pan.state == BiomeMapPanState::Pressed && s.dragDelta == zero &&
-			  s.pan.previewOffset == zero &&
-			  s.pan.pendingDelta == glm::vec2(3.f, 2.f),
-		  "Sub-threshold movement keeps accumulating frame by frame");
+			  s.pan.previewOffset == zero,
+		  "Sub-threshold frames keep translating nothing");
 
-	// Crossing the threshold flushes the WHOLE accumulated movement in one
-	// piece (press, +2+1, +1+1, then +4+2 crosses): the first translated
-	// delta is +7+4, not just the crossing frame's delta — the map lands
-	// exactly under the cursor with no catch-up jump.
+	// Crossing the threshold applies dragFromClick WHOLE: the movement real
+	// since the click is {7,4} (+2+1, +1+1, then +4+2 crosses), so the
+	// first translated delta is exactly {7,4} — the map lands exactly under
+	// the cursor with no catch-up jump.
 	pan = s.pan;
 	s = stepBiomeMapPan(pan, input(true, true, false, {4.f, 2.f},
-								   btn(false, true, true), none));
+								   btn(false, true, true, {7.f, 4.f}), none));
 	CHECK(s.pan.state == BiomeMapPanState::Dragging && s.dragStarted &&
 			  s.dragDelta == glm::vec2(7.f, 4.f) &&
-			  s.pan.previewOffset == glm::vec2(7.f, 4.f) &&
-			  s.pan.pendingDelta == zero,
-		  "Crossing the threshold flushes the accumulated movement at once");
+			  s.pan.previewOffset == glm::vec2(7.f, 4.f),
+		  "Crossing the threshold applies the full movement since the click");
+
+	// Fast flick: clicked and past-the-threshold land in the SAME frame —
+	// the FSM goes Idle -> Dragging directly (never a Pressed frame) and
+	// applies the whole movement since the mouse-down immediately.
+	pan = BiomeMapPan{};
+	s = stepBiomeMapPan(pan, input(true, true, false, {12.f, 5.f},
+								   btn(true, true, true, {12.f, 5.f}), none));
+	CHECK(s.pan.state == BiomeMapPanState::Dragging && s.pan.button == 1 &&
+			  s.dragStarted && s.dragDelta == glm::vec2(12.f, 5.f) &&
+			  s.pan.previewOffset == glm::vec2(12.f, 5.f),
+		  "Same-frame click+drag starts Dragging with the full movement");
 
 	// The initiating button is sticky: RMB armed (Pressed, below the
 	// threshold), MMB dragging changes nothing while RMB stays the
@@ -325,19 +335,18 @@ static void test_biome_map_center_preview_reanchor()
 	BiomeMapPan pan{};
 	reanchorBiomeMapPanForCenter(pan, grid, C, pxPerMapPx);
 	CHECK(pan.state == BiomeMapPanState::Idle && pan.button == -1 &&
-			  pan.pendingDelta == zero && pan.previewOffset == offsetC,
+			  pan.previewOffset == offsetC,
 		  "Center from Idle re-anchors the preview to the new target");
 
-	// Re-anchor while Pressed: interaction cancelled (pendingDelta gone),
-	// only the new preview offset is kept.
+	// Re-anchor while Pressed: interaction cancelled, only the new preview
+	// offset is kept.
 	pan = BiomeMapPan{};
 	pan.state = BiomeMapPanState::Pressed;
 	pan.button = 1;
-	pan.pendingDelta = {3.f, 2.f};
 	pan.previewOffset = glm::vec2(8.f, 0.f);
 	reanchorBiomeMapPanForCenter(pan, grid, C, pxPerMapPx);
 	CHECK(pan.state == BiomeMapPanState::Idle && pan.button == -1 &&
-			  pan.pendingDelta == zero && pan.previewOffset == offsetC,
+			  pan.previewOffset == offsetC,
 		  "Center while Pressed cancels the interaction and re-anchors");
 
 	// Re-anchor while Dragging: same cancellation, a still-held button

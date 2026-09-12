@@ -565,8 +565,15 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		{
 			const ImGuiMouseButton btn =
 				static_cast<ImGuiMouseButton>(kBiomeMapPanButtons[i]);
+			// dragFromClick (movement since the mouse-down, threshold-free)
+			// is the single source of truth for the FIRST drag frame —
+			// ImGui tracks it whether the threshold is crossed one frame or
+			// ten frames after the press, including a same-frame flick.
+			// io.MouseDelta only drives frames AFTER Dragging is active.
+			const ImVec2 fromClick = ImGui::GetMouseDragDelta(btn, 0.f);
 			panIn.buttons[i] = {ImGui::IsMouseClicked(btn), ImGui::IsMouseDown(btn),
-								ImGui::IsMouseDragging(btn, dragThreshold)};
+								ImGui::IsMouseDragging(btn, dragThreshold),
+								{fromClick.x, fromClick.y}};
 		}
 
 		const BiomeMapPanStep panStep = stepBiomeMapPan(m_mapPan, panIn);

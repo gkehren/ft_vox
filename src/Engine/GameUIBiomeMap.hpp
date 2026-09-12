@@ -290,6 +290,12 @@ struct BiomeMapPanButtonInput
 	bool clicked{false};  ///< Pressed this frame.
 	bool down{false};	  ///< Currently held.
 	bool dragging{false}; ///< ImGui::IsMouseDragging(button, threshold).
+	/// ImGui::GetMouseDragDelta(button, 0.f): movement since the mouse-down
+	/// position, regardless of the threshold. SINGLE SOURCE OF TRUTH for the
+	/// first drag frame — whether the threshold was crossed one frame or ten
+	/// frames after the press, this is exactly everything that must be
+	/// applied, because nothing is ever translated before Dragging.
+	glm::vec2 dragFromClick{0.f, 0.f};
 };
 
 struct BiomeMapPanInput
@@ -306,11 +312,6 @@ struct BiomeMapPan
 {
 	BiomeMapPanState state{BiomeMapPanState::Idle};
 	int button{kBiomeMapPanButtonNone}; ///< Initiating button while armed.
-	/// Sub-threshold movement accumulated while Pressed, flushed in one
-	/// piece when the drag starts. Keeps the map exactly under the cursor
-	/// at the crossing frame — no catch-up jump, and nothing below the
-	/// threshold ever translates or supersedes.
-	glm::vec2 pendingDelta{0.f, 0.f};
 	/// Screen px the SHOWN texture stays shifted by while the async
 	/// generation catches up with m_mapCenter. Accumulates while dragging,
 	/// survives the drag (the texture must not snap back), and is cleared
@@ -354,17 +355,30 @@ inline BiomeMapPanStep stepBiomeMapPan(const BiomeMapPan &pan, const BiomeMapPan
 	switch (pan.state)
 	{
 	case BiomeMapPanState::Idle:
-		// Arm only on a press OVER the map. No translation, no supersede.
+		// Arm only on a press OVER the map. No translation, no supersede —
+		// except a fast flick where clicked and past-the-threshold land in
+		// the SAME frame: the whole movement since the mouse-down is then
+		// applied immediately, straight to Dragging (never a lost Pressed
+		// frame, never a rebuilt delta).
 		if (in.hovered)
 		{
 			for (int i = 0; i < 2; ++i)
 			{
-				if (in.buttons[i].clicked)
+				if (!in.buttons[i].clicked)
+					continue;
+				out.pan.button = kBiomeMapPanButtons[i];
+				if (in.buttons[i].dragging)
+				{
+					out.pan.state = BiomeMapPanState::Dragging;
+					out.dragStarted = true;
+					out.dragDelta = in.buttons[i].dragFromClick;
+					out.pan.previewOffset += out.dragDelta;
+				}
+				else
 				{
 					out.pan.state = BiomeMapPanState::Pressed;
-					out.pan.button = kBiomeMapPanButtons[i];
-					break;
 				}
+				break;
 			}
 		}
 		break;
@@ -375,29 +389,24 @@ inline BiomeMapPanStep stepBiomeMapPan(const BiomeMapPan &pan, const BiomeMapPan
 		if (!init.down)
 		{
 			// Released before the threshold: a plain click, strictly a
-			// no-op. The accumulated sub-threshold movement is discarded
-			// (it never translated); the preview offset from any EARLIER
-			// drag is kept — the shown texture is still offset until its
-			// replacement publishes.
+			// no-op. Any sub-threshold movement was never applied (it only
+			// ever lived in ImGui's drag delta); the preview offset from an
+			// EARLIER drag is kept — the shown texture is still offset
+			// until its replacement publishes.
 			out.pan.state = BiomeMapPanState::Idle;
 			out.pan.button = kBiomeMapPanButtonNone;
-			out.pan.pendingDelta = {0.f, 0.f};
 			break;
 		}
-		// Below the threshold, movement only ACCUMULATES: nothing
-		// translates, nothing supersedes.
-		out.pan.pendingDelta += in.mouseDelta;
 		if (init.dragging)
 		{
-			// Threshold crossed: the drag becomes real and flushes the
-			// WHOLE accumulated movement in one piece, so the map lands
-			// exactly under the cursor with no catch-up jump.
+			// Threshold crossed: the drag becomes real. dragFromClick is
+			// the WHOLE movement since the mouse-down — exactly everything
+			// to apply, since nothing was translated before Dragging — so
+			// the map lands exactly under the cursor with no catch-up jump.
 			out.pan.state = BiomeMapPanState::Dragging;
-			out.pan.button = pan.button;
 			out.dragStarted = true;
-			out.dragDelta = out.pan.pendingDelta;
-			out.pan.previewOffset += out.pan.pendingDelta;
-			out.pan.pendingDelta = {0.f, 0.f};
+			out.dragDelta = init.dragFromClick;
+			out.pan.previewOffset += out.dragDelta;
 		}
 		break;
 	}
@@ -464,7 +473,6 @@ inline void reanchorBiomeMapPanForCenter(BiomeMapPan &pan,
 {
 	pan.state = BiomeMapPanState::Idle;
 	pan.button = kBiomeMapPanButtonNone;
-	pan.pendingDelta = {0.f, 0.f};
 	pan.previewOffset = biomeMapPreviewOffsetForCenter(publishedGrid, targetCenter,
 													   screenPxPerMapPx);
 }
