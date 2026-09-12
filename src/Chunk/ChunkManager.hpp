@@ -436,6 +436,11 @@ private:
 	/// skipped - their gen/mesh job is mid-flight; they are captured on their
 	/// own unload or a later flush) plus chunks parked in m_deferredRelease.
 	void captureAllChunkEdits();
+	/// Quiesce the async lifecycle before the final persistence capture
+	/// (closeWorld): publish finished gen/mesh/light jobs, apply deferred
+	/// voxel edits, age deferred releases (issue #180 review).
+	void drainAsyncJobsForPersistence();
+	bool anyChunkInTransitForPersistence() const;
 
 	std::unique_ptr<WorldPersistence> m_persistence;
 

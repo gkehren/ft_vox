@@ -980,6 +980,90 @@ static void testDisabledPersistence()
 }
 
 // ---------------------------------------------------------------------------
+// 8b. closeWorld quiesce: an edit deferred while its chunk is mid-job must
+// land in the save (issue #180 review - the old capture-then-wait order
+// lost it)
+// ---------------------------------------------------------------------------
+
+// Friend probe (same name-based access as test_chunk_lifecycle): lets the
+// drain test observe whether the edit actually took the PendingVoxelEdit
+// deferred path.
+struct ChunkManagerStreamProbe
+{
+	static const std::vector<PendingVoxelEdit> &pendingEdits(const ChunkManager &m)
+	{
+		return m.m_pendingEdits;
+	}
+};
+
+static void testCloseWorldDrainsPendingEdits()
+{
+	auto root = makeTempDir("drain");
+	const std::string savesRoot = (root / "saves").string();
+	const auto chunksDir = root / "saves" / "drain" / "chunks";
+	const int seed = 42;
+
+	TerrainGenerator gen(seed);
+	ThreadPool threads(2);
+	ChunkPool pool(64);
+	ChunkManager mgr(&gen, &threads, &pool);
+	std::string err;
+	CHECK(mgr.openWorld(savesRoot, "drain", err), ("openWorld failed: " + err).c_str());
+
+	const glm::ivec3 target(1, 0, 1);
+	const glm::vec3 homePos(1.0f * CHUNK_SIZE + 8.0f, 100.0f, 1.0f * CHUNK_SIZE + 8.0f);
+	Camera camera(homePos);
+	RenderSettings settings;
+	settings.minRenderDistance = 32;
+	settings.maxRenderDistance = 48;
+	mgr.updateStreaming(camera, settings);
+	mgr.processChunkLoading(64);
+	// Dispatch generation but do NOT drain: the target chunk is in transit.
+	mgr.generatePendingVoxels(camera, settings, 16);
+
+	// The edit races the in-flight job: it must be deferred as a
+	// PendingVoxelEdit (or applied directly if the job already finished -
+	// both paths must survive the close).
+	const glm::vec3 editPos(1.0f * CHUNK_SIZE + 5.0f, 140.0f, 1.0f * CHUNK_SIZE + 5.0f);
+	CHECK(mgr.placeVoxel(editPos, BRICKS), "edit accepted while chunk may be in transit");
+	// Coverage note: fast machines can finish generation before the edit, in
+	// which case it applies directly (still durable). Whichever path ran, the
+	// close below must persist the edit.
+	const bool deferredEdit = !ChunkManagerStreamProbe::pendingEdits(mgr).empty();
+	if (!deferredEdit)
+		CHECK(mgr.pendingGenJobs() == 0, "direct apply only valid when no job is in flight");
+
+	// closeWorld must quiesce (drain gen jobs, apply the deferred edit) and
+	// THEN capture, so the deferred edit lands in the save.
+	CHECK(mgr.closeWorld(), "closeWorld drained and flushed");
+
+	// Reopen the world the way the next process would: a fresh facade on the
+	// same directory must carry the edit.
+	WorldPersistence verify;
+	const WorldPersistence::OpenInfo info =
+		verify.openOrCreate(savesRoot, "drain", seed, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok && !info.created, "world reopens after close");
+
+	const int cx = target.x, cz = target.z;
+	const std::vector<Voxel> base = gen.generateChunk(cx, cz).voxels;
+	const uint32_t editIdx = idxOf(5, 140, 5);
+	std::vector<worldsave::ChunkEdit> saved = verify.overridesSnapshot(cx, cz);
+	CHECK(!saved.empty(), "deferred edit was captured by closeWorld");
+	bool found = false;
+	for (const worldsave::ChunkEdit &e : saved)
+		if (e.localIndex == editIdx)
+		{
+			found = true;
+			const uint8_t expected = diffAgainstBase(base, {{editIdx, static_cast<uint8_t>(BRICKS)}})[0].blockType;
+			CHECK(e.blockType == expected, "deferred edit value correct");
+		}
+	CHECK(found, "deferred edit index present in the saved overrides");
+	verify.shutdown();
+
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
 // 8. Destructor safety net: an unclosed world is flushed by ~ChunkManager
 // ---------------------------------------------------------------------------
 
@@ -1180,6 +1264,7 @@ int main()
 	std::cout << "== Disabled persistence ==\n";
 	testDisabledPersistence();
 	std::cout << "== Destructor safety net ==\n";
+	testCloseWorldDrainsPendingEdits();
 	testDestructorSafetyNet();
 	std::cout << "== Player state ==\n";
 	testPlayerStatePersistence();
