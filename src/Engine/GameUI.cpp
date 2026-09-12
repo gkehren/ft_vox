@@ -104,6 +104,10 @@ void GameUI::invalidateBiomeMap()
 	// but is marked inactive so the UI will not display stale world terrain.
 	// It will be updated in-place when the next valid map completes.
 	m_mapPresentation.invalidate();
+	// World identity changed (this can run with the World panel closed, so
+	// the pan state machine is not being stepped): the drag state and the
+	// preview offset describe the OLD world and must not survive (issue #192).
+	m_mapPan = {};
 }
 
 void GameUI::onImGuiVulkanBackendRecreate()
@@ -474,7 +478,17 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	ImGui::SameLine();
 	if (ImGui::Button("Center"))
 	{
+		// Re-target the view center at the player (issue #192 review): the
+		// pan preview is RE-ANCHORED against the published grid, so the
+		// shown map jumps straight to the player — even while a pending
+		// pan preview toward an older target is on screen (published A,
+		// preview toward B, Center toward C -> immediate A -> C, never a
+		// visual pass through B) — and any armed/dragging interaction is
+		// cancelled so a still-held button cannot keep moving the center.
+		// With no published grid yet there is nothing to bridge: zero.
 		m_mapCenter = playerXZ;
+		reanchorBiomeMapPanForCenter(m_mapPan, m_mapPresentation.publishedGrid,
+									 m_mapCenter, m_mapScreenPxPerMapPx);
 		supersedeBiomeMapRequest();
 	}
 	ImGui::SameLine();
@@ -484,17 +498,22 @@ void GameUI::drawWorld(GameUIFrame &frame)
 
 	// The biome map is the dominant surface (issue #186 §7): fill the
 	// available width, keep the square aspect, and reserve the same height
-	// while the first map generates so the layout does not jump.
+	// while the first map generates so the layout does not jump. The Dummy
+	// is the interaction item (hover/zoom/pan); the texture itself is drawn
+	// through the draw list AFTER the pan step below so a drag shifts the
+	// pixels by THIS frame's preview offset, clipped to the reserved rect
+	// (issue #192 review).
 	const float mapSizePx = std::max(ImGui::GetContentRegionAvail().x, ui::scaled(160.f, scale));
 	const bool hasTexture = m_mapPresentation.hasTexture && m_mapDesc != VK_NULL_HANDLE;
 	ImVec2 mapMin{0.f, 0.f}, mapMax{0.f, 0.f};
 	bool mapDrawn = false;
 	if (hasTexture)
 	{
-		ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_mapDesc)),
-					 ImVec2(mapSizePx, mapSizePx));
+		ImGui::Dummy(ImVec2(mapSizePx, mapSizePx));
 		mapMin = ImGui::GetItemRectMin();
 		mapMax = ImGui::GetItemRectMax();
+		m_mapScreenPxPerMapPx =
+			(mapMax.x - mapMin.x) / static_cast<float>(m_mapPresentation.publishedGrid.width);
 		mapDrawn = true;
 	}
 	else
@@ -526,6 +545,74 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		}
 	}
 
+	// Drag-pan while follow is off (issue #192): a threshold-gated state
+	// machine (Idle -> Pressed -> Dragging) keeps a plain RMB/MMB click a
+	// strict no-op — no center change, no supersede — and the initiating
+	// button sticky. The step only produces a screen-space delta; here it
+	// is converted through the PUBLISHED grid with the zoom supersede
+	// semantics: one flag bump coalesces the whole drag, tickBiomeMap
+	// dispatches at most one single-flight job per frame and only while
+	// nothing is running — never per pixel of movement.
+	if (mapDrawn)
+	{
+		BiomeMapPanInput panIn;
+		panIn.mapActive = m_mapPresentation.publishedGrid.valid();
+		panIn.hovered = ImGui::IsItemHovered();
+		panIn.follow = m_mapFollow;
+		panIn.mouseDelta = {ImGui::GetIO().MouseDelta.x, ImGui::GetIO().MouseDelta.y};
+		const float dragThreshold = ImGui::GetIO().MouseDragThreshold;
+		for (int i = 0; i < 2; ++i)
+		{
+			const ImGuiMouseButton btn =
+				static_cast<ImGuiMouseButton>(kBiomeMapPanButtons[i]);
+			// dragFromClick (movement since the mouse-down, threshold-free)
+			// is the single source of truth for the FIRST drag frame —
+			// ImGui tracks it whether the threshold is crossed one frame or
+			// ten frames after the press, including a same-frame flick.
+			// io.MouseDelta only drives frames AFTER Dragging is active.
+			const ImVec2 fromClick = ImGui::GetMouseDragDelta(btn, 0.f);
+			panIn.buttons[i] = {ImGui::IsMouseClicked(btn), ImGui::IsMouseDown(btn),
+								ImGui::IsMouseDragging(btn, dragThreshold),
+								{fromClick.x, fromClick.y},
+								ImGui::IsMouseReleased(btn)};
+		}
+
+		const BiomeMapPanStep panStep = stepBiomeMapPan(m_mapPan, panIn);
+		const bool panning =
+			panStep.pan.state == BiomeMapPanState::Pressed ||
+			panStep.pan.state == BiomeMapPanState::Dragging;
+		m_mapPan = panStep.pan;
+		if (panning)
+			ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+		if (panStep.dragDelta != glm::vec2(0.f, 0.f) && panIn.mapActive)
+		{
+			const BiomeRegionGrid &panGrid = m_mapPresentation.publishedGrid;
+			const float screenPxPerMapPx =
+				(mapMax.x - mapMin.x) / static_cast<float>(panGrid.width);
+			m_mapCenter = biomeMapPanCenter(panGrid, m_mapCenter, panStep.dragDelta,
+											screenPxPerMapPx);
+			supersedeBiomeMapRequest();
+		}
+	}
+
+	// Draw the map pixels, shifted by the pan preview offset while the async
+	// generation catches up with m_mapCenter (issue #192 review): the
+	// content follows the cursor immediately and is clipped to the reserved
+	// rect. The offset persists after the drag until the publication of the
+	// dragged-to view (recordPendingBiomeMapUpload) so the map never snaps
+	// back between drag and publication.
+	if (hasTexture)
+	{
+		ImDrawList *mapDraw = ImGui::GetWindowDrawList();
+		const ImVec2 panOffset(m_mapPan.previewOffset.x, m_mapPan.previewOffset.y);
+		mapDraw->PushClipRect(mapMin, mapMax, true);
+		mapDraw->AddImage(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_mapDesc)),
+						  ImVec2(mapMin.x + panOffset.x, mapMin.y + panOffset.y),
+						  ImVec2(mapMax.x + panOffset.x, mapMax.y + panOffset.y));
+		mapDraw->PopClipRect();
+	}
+
 	if (mapDrawn && m_mapPresentation.publishedGrid.valid())
 	{
 		// Cheap draw-list overlays (issue #186 §8), mapped through the grid
@@ -535,9 +622,16 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		ImDrawList *draw = ImGui::GetWindowDrawList();
 		draw->PushClipRect(mapMin, mapMax, true);
 		const float pxPerMapPx = (mapMax.x - mapMin.x) / static_cast<float>(grid.width);
+		// Overlays ride the same pan preview offset as the texture (issue
+		// #192 review): markers stay glued to the world points the SHOWN
+		// pixels depict, and while the pan is synced the center crosshair
+		// lands exactly on the viewport center instead of drifting through
+		// the stale grid.
+		const ImVec2 panOffset(m_mapPan.previewOffset.x, m_mapPan.previewOffset.y);
 		const auto toScreen = [&](glm::vec2 world) {
 			const glm::vec2 pixel = biomeMapContinuousPixel(grid, world);
-			return ImVec2(mapMin.x + pixel.x * pxPerMapPx, mapMin.y + pixel.y * pxPerMapPx);
+			return ImVec2(mapMin.x + panOffset.x + pixel.x * pxPerMapPx,
+						  mapMin.y + panOffset.y + pixel.y * pxPerMapPx);
 		};
 		const ImVec2 playerPx = toScreen(playerXZ);
 
@@ -570,6 +664,9 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		draw->AddCircle(playerPx, markerR + 1.5f, IM_COL32(0, 0, 0, 200), 0, 2.0f);
 
 		// Map-center marker while navigation is detached from the player.
+		// During a synced pan it sits on the viewport center: the texture
+		// and every overlay shift by the same preview offset, so the world
+		// point m_mapCenter is exactly what the middle of the rect shows.
 		if (!m_mapFollow)
 		{
 			const ImVec2 centerPx = toScreen(m_mapCenter);
@@ -894,7 +991,16 @@ void GameUI::recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagi
 	// (issue #191 review round 2). At any instant publishedGrid describes
 	// exactly the texture currently displayed; the new pair becomes visible
 	// to the NEXT frame's UI build.
-	m_mapPresentation.publishPending();
+	if (m_mapPresentation.publishPending())
+	{
+		// The published texture now represents the CURRENT view: a pending
+		// upload only survives to publication while no supersede touched
+		// it, so its grid matches m_mapCenter. The pan preview has nothing
+		// left to bridge — drop it. Never done on rejected/superseded
+		// results: there the screen still shows the old view, and the
+		// offset is what keeps it aligned with m_mapCenter (issue #192).
+		clearBiomeMapPanPreview(m_mapPan);
+	}
 	m_mapLastPublishedAt = SDL_GetTicks() / 1000.0;
 }
 
