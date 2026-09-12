@@ -36,6 +36,19 @@ struct FrameStats
 	double avg = 0.0, p50 = 0.0, p95 = 0.0, p99 = 0.0, max = 0.0;
 };
 
+// Split save statistics for one run (issue #180 review round 8, item 1):
+// `steadyState` is sampled at the exact end of the measured window (async
+// unload-capture work only) and must never be rewritten afterwards;
+// `final` is sampled after the explicit flush; flush/close latencies are
+// measured separately.
+struct PersistenceRunStats
+{
+	WorldPersistence::Status steadyState;
+	WorldPersistence::Status final;
+	double flushMs{0.0};
+	double closeMs{0.0};
+};
+
 FrameStats summarize(std::vector<double> &samples)
 {
 	FrameStats s;
@@ -67,8 +80,7 @@ int budgetFromRate(int perSec, double dt, double &accum)
 }
 
 int runSession(bool persistence, double durationSec, double editsPerSec, int seed,
-               const std::filesystem::path &savesRoot, WorldPersistence::Status *outStatus,
-               double *outFinalFlushMs)
+               const std::filesystem::path &savesRoot, PersistenceRunStats *outStats)
 {
 	TerrainGenerator gen(seed);
 	const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
@@ -199,24 +211,38 @@ int runSession(bool persistence, double durationSec, double editsPerSec, int see
 		std::printf("  session: chunks=%d generated=%d\n", mgr.chunkCount(), generated);
 	}
 
-	// Explicit final flush OUTSIDE the measured window (issue #180 review
-	// round 7, item 2): the steady-state numbers above cover only the async
-	// unload-capture path; the Save-and-Quit latency is reported separately.
+	// Steady-state snapshot FIRST, at the exact end of the measured window
+	// (issue #180 review round 8, item 1): it covers only async
+	// unload-capture work and is never rewritten afterwards.
+	if (persistence && outStats)
+		outStats->steadyState = mgr.worldPersistence()->status();
+
+	// Explicit flush + close OUTSIDE the measured window, timed separately
+	// (issue #180 review round 8, item 3): flushWorld drains the remaining
+	// dirty coordinates; the closeWorld after it is NOT a cold Save & Quit
+	// (everything is already durable) - the pair is reported as an
+	// "explicit flush + close sequence".
 	if (persistence)
 	{
-		if (outStatus)
-			*outStatus = mgr.worldPersistence()->status();
 		const Clock::time_point flushStart = Clock::now();
 		const bool flushed = mgr.flushWorld();
 		const double flushMs =
 			std::chrono::duration<double, std::milli>(Clock::now() - flushStart).count();
-		if (outStatus)
-			*outStatus = mgr.worldPersistence()->status();
-		mgr.closeWorld();
-		if (outFinalFlushMs)
-			*outFinalFlushMs = flushMs;
+		if (outStats)
+		{
+			outStats->flushMs = flushMs;
+			outStats->final = mgr.worldPersistence()->status();
+		}
+
+		const Clock::time_point closeStart = Clock::now();
+		const bool closed = mgr.closeWorld();
+		const double closeMs =
+			std::chrono::duration<double, std::milli>(Clock::now() - closeStart).count();
+		if (outStats)
+			outStats->closeMs = closeMs;
 		if (!flushed)
 			std::printf("  WARNING: final flush reported failures\n");
+		(void)closed;
 	}
 
 	const FrameStats fs = summarize(frameMs);
@@ -267,27 +293,47 @@ int main(int argc, char **argv)
 	            seed, durationSec, editsPerSec);
 
 	std::printf("A. baseline steady-state (persistence off, same edits/streaming):\n");
-	if (runSession(false, durationSec, editsPerSec, seed, root, nullptr, nullptr) != 0)
+	if (runSession(false, durationSec, editsPerSec, seed, root, nullptr) != 0)
 		return 1;
 
-	WorldPersistence::Status st;
-	double finalFlushMs = 0.0;
+	PersistenceRunStats stats;
 	std::printf("B. persistence async steady-state (same edits/streaming, no forced flush):\n");
-	if (runSession(true, durationSec, editsPerSec, seed, root, &st, &finalFlushMs) != 0)
+	if (runSession(true, durationSec, editsPerSec, seed, root, &stats) != 0)
 		return 1;
-	printSaveStats(st);
-	std::printf("  explicit final flush (Save/Quit latency): %.1f ms\n", finalFlushMs);
 
-	// Validity gate (issue #180 review round 7, item 5): a run whose
-	// trajectory never unloaded a dirty chunk would print a beautiful empty
-	// result - refuse it.
-	if (st.enqueued == 0 || (st.completed + st.deleted) == 0)
+	// Validity gate on the STEADY-STATE snapshot only (issue #180 review
+	// round 8, item 2): it proves dirty chunk -> unload -> capture ->
+	// enqueue -> SaveService -> disk happened DURING the measured window,
+	// not during the final flush. A soft warning on the queue peak stays a
+	// warning - a fast worker can legitimately never be observed non-empty.
+	const WorldPersistence::Status &steady = stats.steadyState;
+	if (steady.enqueued == 0 || (steady.completed + steady.deleted) == 0)
 	{
-		std::cerr << "benchmark invalid: no persistence work occurred\n";
+		std::cerr << "benchmark invalid: no asynchronous persistence work completed during "
+		             "the measured window\n";
 		return 1;
 	}
-	if (st.queueDepthPeak == 0)
+	if (steady.dirtyCoordinates > 0 && steady.queueDepth == 0 &&
+	    steady.completed + steady.deleted == 0)
+	{
+		std::cerr << "benchmark invalid: dirty coordinates with no processed saves\n";
+		return 1;
+	}
+	if (steady.queueDepthPeak == 0)
 		std::printf("  WARNING: queue peak == 0 (saves never overlapped)\n");
+
+	std::printf("\nSteady-state save worker (before the final flush):\n");
+	printSaveStats(steady);
+	std::printf("\nAfter final flush:\n");
+	std::printf("  completed=%llu deleted=%llu failed=%llu remainingDirty=%llu\n",
+	            (unsigned long long)stats.final.completed,
+	            (unsigned long long)stats.final.deleted,
+	            (unsigned long long)stats.final.failed,
+	            (unsigned long long)stats.final.dirtyCoordinates);
+	std::printf("\nExplicit flush + close sequence:\n");
+	std::printf("  explicit flush latency: %.1f ms\n", stats.flushMs);
+	std::printf("  close-after-flush latency: %.1f ms\n", stats.closeMs);
+	std::printf("  total shutdown latency: %.1f ms\n", stats.flushMs + stats.closeMs);
 
 	std::error_code ec;
 	std::filesystem::remove_all(root, ec);
