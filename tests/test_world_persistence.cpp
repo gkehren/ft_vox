@@ -699,7 +699,11 @@ static void testStaleDeleteNeverRemovesAuthoritativeFile()
 				cv.wait(lock, [&] { return releaseDelete; });
 			}
 		});
-	wp.captureChunkEdits(0, 0, {}); // enqueue the delete
+	// Revert is expressed by capturing the PROCEDURAL value (delta model,
+	// issue #180 review round 5): the worker regenerates the base and drops
+	// the entry, producing an empty diff -> authoritative delete.
+	const uint8_t baseA = base[ia].type;
+	wp.captureChunkEdits(0, 0, {{ia, baseA}});
 	{
 		std::unique_lock<std::mutex> lock(m);
 		cv.wait(lock, [&] { return deleteBlocked; });
@@ -707,7 +711,7 @@ static void testStaleDeleteNeverRemovesAuthoritativeFile()
 
 	// B = a newer capture for the same coordinate, enqueued while the delete
 	// is blocked right before its authoritative commit.
-	const std::vector<worldsave::ChunkEdit> bValues = {{ia, va}, {ib, static_cast<uint8_t>(BRICKS)}};
+	const std::vector<worldsave::ChunkEdit> bValues = {{ia, baseA}, {ib, static_cast<uint8_t>(BRICKS)}};
 	wp.captureChunkEdits(0, 0, bValues);
 	wp.setBeforeCommitFnForTests(nullptr); // future jobs must not block
 	{
@@ -968,9 +972,13 @@ static void testSparseSaveBehavior()
 	CHECK(wp.flush(), "flush empty capture");
 	CHECK(!fileExists(chunkPath(chunks, 9, 9)), "empty capture creates no file");
 
-	// Capture of all-edits-reverted for the saved chunk: the file is deleted.
+	// Capture of all-edits-reverted for the saved chunk: the revert is
+	// expressed by capturing the PROCEDURAL values (delta model); the
+	// worker's diff produces an empty override set and the file is deleted.
 	const uint64_t deletedBefore = wp.status().deleted;
-	wp.captureChunkEdits(0, 0, {});
+	// Revert BOTH persisted edits to their procedural values; i3 already
+	// holds its base value in desired.
+	wp.captureChunkEdits(0, 0, {{i1, base[i1].type}, {i2, base[i2].type}});
 	CHECK(wp.flush(), "flush revert");
 	CHECK(!fileExists(chunkPath(chunks, 0, 0)), "fully reverted chunk file deleted");
 	CHECK(wp.status().deleted >= deletedBefore + 1, "deletion counted");
@@ -1657,6 +1665,278 @@ static void testDestructorPublishesUnpublishedMeshCompletions()
 }
 
 // ---------------------------------------------------------------------------
+// 8d-ter. Delta captures (issue #180 review round 5): takePersistentEdits()
+// empties the chunk map at every capture, so payloads are DELTAS - the
+// facade must merge them into desired, or the second flush loses the first
+// edit.
+// ---------------------------------------------------------------------------
+
+static void testMultiFlushEditsAccumulate()
+{
+	std::cout << "== Multi-flush edits accumulate ==" << std::endl;
+	TerrainGenerator gen(42);
+	auto root = makeTempDir("multiflush");
+	const auto chunks = root / "w" / "chunks";
+	const std::vector<Voxel> base = gen.generateChunk(0, 0).voxels;
+
+	const uint32_t ia = idxOf(3, 70, 3);
+	const uint32_t ib = idxOf(9, 90, 6);
+	const uint8_t va = static_cast<uint8_t>(BRICKS);
+	const uint8_t vb = static_cast<uint8_t>(GLASS);
+	// Sanity: both must be real changes (non-base) so the test is meaningful.
+	CHECK(va != base[ia].type && vb != base[ib].type, "test edits differ from the procedural base");
+
+	WorldPersistence wp;
+	const WorldPersistence::OpenInfo info =
+		wp.openOrCreate(root, "w", 42, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok, "world opened");
+
+	// Save boundary 1: only A is known.
+	wp.captureChunkEdits(0, 0, {{ia, va}});
+	CHECK(wp.flush(), "first flush");
+	{
+		const WorldPersistence::Status st = wp.status();
+		CHECK(st.dirtyCoordinates == 0, "coordinate durable after the first flush");
+	}
+	// Save boundary 2: only B is captured (A's map entry was taken at the
+	// first capture - the payload is a DELTA).
+	wp.captureChunkEdits(0, 0, {{ib, vb}});
+	CHECK(wp.flush(), "second flush");
+	{
+		const WorldPersistence::Status st = wp.status();
+		CHECK(st.dirtyCoordinates == 0, "coordinate durable after the second flush");
+	}
+	wp.shutdown();
+
+	// Restart: a fresh facade must see A AND B.
+	WorldPersistence verify;
+	const WorldPersistence::OpenInfo reopen =
+		verify.openOrCreate(root, "w", 42, TerrainGenerator::kGeneratorVersion);
+	CHECK(reopen.ok && !reopen.created, "world reopens");
+	const std::vector<worldsave::ChunkEdit> saved = verify.overridesSnapshot(0, 0);
+	CHECK(saved.size() == 2, "BOTH edits survived the two flush boundaries");
+	CHECK(containsEdit(saved, ia, va), "the first edit survived the second flush");
+	CHECK(containsEdit(saved, ib, vb), "the second edit persisted");
+	verify.shutdown();
+
+	removeDir(root);
+}
+
+static void testRevertAcrossFlushes()
+{
+	std::cout << "== Revert across flushes ==" << std::endl;
+	TerrainGenerator gen(42);
+	auto root = makeTempDir("reverts");
+	const auto chunks = root / "w" / "chunks";
+	const std::vector<Voxel> base = gen.generateChunk(0, 0).voxels;
+	const uint32_t ia = idxOf(2, 80, 2);
+	const uint32_t ib = idxOf(11, 100, 7);
+	const uint32_t ic = idxOf(6, 130, 13);
+	const uint8_t baseA = base[ia].type;
+	const uint8_t baseB = base[ib].type;
+	const uint8_t va = static_cast<uint8_t>(BRICKS);
+	const uint8_t vb = static_cast<uint8_t>(GLASS);
+	const uint8_t vc = static_cast<uint8_t>(STONE);
+
+	// Case 1: edit A -> flush -> revert A to procedural -> flush => empty.
+	{
+		WorldPersistence wp;
+		CHECK(wp.openOrCreate(root, "case1", 42, TerrainGenerator::kGeneratorVersion).ok,
+		      "case1 opened");
+		wp.captureChunkEdits(0, 0, {{ia, va}});
+		CHECK(wp.flush(), "case1 first flush");
+		wp.captureChunkEdits(0, 0, {{ia, baseA}});
+		CHECK(wp.flush(), "case1 revert flush");
+		CHECK(wp.status().dirtyCoordinates == 0, "case1 clean after revert");
+		CHECK(wp.overridesSnapshot(0, 0).empty(), "case1 override refined away");
+		CHECK(!fileExists(chunkPath(chunks, 0, 0)), "case1 chunk file deleted");
+		wp.shutdown();
+	}
+
+	// Case 2: edit A -> flush -> edit B -> flush -> revert A -> flush => B only.
+	{
+		WorldPersistence wp;
+		CHECK(wp.openOrCreate(root, "case2", 42, TerrainGenerator::kGeneratorVersion).ok,
+		      "case2 opened");
+		wp.captureChunkEdits(0, 0, {{ia, va}});
+		CHECK(wp.flush(), "case2 flush A");
+		wp.captureChunkEdits(0, 0, {{ib, vb}});
+		CHECK(wp.flush(), "case2 flush B");
+		wp.captureChunkEdits(0, 0, {{ia, baseA}});
+		CHECK(wp.flush(), "case2 revert flush");
+		const std::vector<worldsave::ChunkEdit> saved = wp.overridesSnapshot(0, 0);
+		CHECK(saved.size() == 1 && containsEdit(saved, ib, vb),
+		      "case2 B present, A reverted away");
+		CHECK(fileExists(root / "case2" / "chunks" / "0_0.chunk"), "case2 file still exists");
+		wp.shutdown();
+	}
+
+	// Case 3: A+B -> flush -> revert B -> flush -> edit C -> flush => A + C.
+	{
+		WorldPersistence wp;
+		CHECK(wp.openOrCreate(root, "case3", 42, TerrainGenerator::kGeneratorVersion).ok,
+		      "case3 opened");
+		wp.captureChunkEdits(0, 0, {{ia, va}, {ib, vb}});
+		CHECK(wp.flush(), "case3 flush A+B");
+		wp.captureChunkEdits(0, 0, {{ib, baseB}});
+		CHECK(wp.flush(), "case3 revert B flush");
+		CHECK(wp.overridesSnapshot(0, 0).size() == 1, "case3 only A after the revert");
+		wp.captureChunkEdits(0, 0, {{ic, vc}});
+		CHECK(wp.flush(), "case3 flush C");
+		const std::vector<worldsave::ChunkEdit> saved = wp.overridesSnapshot(0, 0);
+		CHECK(saved.size() == 2 && containsEdit(saved, ia, va) && containsEdit(saved, ic, vc),
+		      "case3 A + C after revert and re-edit");
+		CHECK(wp.status().dirtyCoordinates == 0, "case3 fully durable at the end");
+		wp.shutdown();
+	}
+
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
+// 8d-quater. closeWorld retryability (issue #180 review round 5, item 3):
+// a flush failure must keep the world open, tracking armed, and let a later
+// close retry succeed.
+// ---------------------------------------------------------------------------
+
+static void testCloseWorldRetriesAfterFlushFailure()
+{
+	std::cout << "== CloseWorld retries after flush failure ==" << std::endl;
+	auto root = makeTempDir("retryclose");
+	const std::string savesRoot = (root / "saves").string();
+	const int seed = 42;
+	const glm::vec3 posA(8.0f, 140.0f, 8.0f);  // chunk (0,0), local (8,140,8)
+	const glm::vec3 posB(10.0f, 145.0f, 10.0f);
+	const uint32_t idxA = idxOf(8, 140, 8);
+	const uint32_t idxB = idxOf(10, 145, 10);
+
+	TerrainGenerator gen(seed);
+	ThreadPool threads(2);
+	ChunkPool pool(64);
+	ChunkManager mgr(&gen, &threads, &pool);
+	std::string err;
+	CHECK(mgr.openWorld(savesRoot, "retry", err), ("openWorld failed: " + err).c_str());
+
+	Camera camera(glm::vec3(8.0f, 100.0f, 8.0f));
+	RenderSettings settings;
+	settings.minRenderDistance = 32;
+	settings.maxRenderDistance = 48;
+	mgr.updateStreaming(camera, settings);
+	mgr.processChunkLoading(64);
+	mgr.generatePendingVoxels(camera, settings, 16);
+	drainManagerJobs(mgr);
+	CHECK(mgr.placeVoxel(posA, BRICKS), "edit A accepted");
+
+	// Force every tmp write to fail, then close: the close must be REFUSED
+	// and the world must stay fully usable.
+	mgr.worldPersistence()->setWriteTmpFnForTests(
+		[](const std::filesystem::path &, int32_t, int32_t,
+		   const std::vector<worldsave::ChunkEdit> &, std::filesystem::path &)
+		{ return worldsave::SaveStatus::IoError; });
+	CHECK(!mgr.closeWorld(), "close refused on flush failure");
+	CHECK(mgr.isWorldOpen(), "persistence stays open after the refused close");
+	CHECK(mgr.worldPersistence() != nullptr, "save service still reachable");
+	CHECK(mgr.worldPersistence()->status().dirtyCoordinates >= 1, "failed coordinate stays dirty");
+
+	// Edit B AFTER the refused close: proves tracking was not disarmed.
+	CHECK(mgr.placeVoxel(posB, GLASS), "tracking still armed after the refused close");
+
+	// Clear the failure and close again: the retry must flush A (merged in
+	// desired) plus the fresh B.
+	mgr.worldPersistence()->setWriteTmpFnForTests(nullptr);
+	CHECK(mgr.closeWorld(), "close succeeds after the failure is cleared");
+	CHECK(!mgr.isWorldOpen(), "world closed on the retry");
+
+	// Reopen: A AND B must be present.
+	WorldPersistence verify;
+	const WorldPersistence::OpenInfo info =
+		verify.openOrCreate(savesRoot, "retry", seed, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok && !info.created, "world reopens after the retry close");
+	const std::vector<worldsave::ChunkEdit> saved = verify.overridesSnapshot(0, 0);
+	CHECK(saved.size() == 2, "both edits persisted across the refused close");
+	CHECK(containsEdit(saved, idxA, static_cast<uint8_t>(BRICKS)), "edit A survived");
+	CHECK(containsEdit(saved, idxB, static_cast<uint8_t>(GLASS)), "edit B (post-refusal) survived");
+	verify.shutdown();
+
+	removeDir(root);
+}
+
+static void testUnloadReloadAfterMultipleFlushes()
+{
+	std::cout << "== Unload/reload after multiple flushes ==" << std::endl;
+	auto root = makeTempDir("multiflushmgr");
+	const std::string savesRoot = (root / "saves").string();
+	const int seed = 42;
+
+	TerrainGenerator gen(seed);
+	ThreadPool threads(2);
+	ChunkPool pool(128);
+	ChunkManager mgr(&gen, &threads, &pool);
+	std::string err;
+	CHECK(mgr.openWorld(savesRoot, "mfmgr", err), ("openWorld failed: " + err).c_str());
+
+	const glm::vec3 homePos(8.0f, 100.0f, 8.0f);
+	const glm::vec3 posA(4.0f, 140.0f, 4.0f);  // local (4,140,4)
+	const glm::vec3 posB(6.0f, 145.0f, 6.0f);  // local (6,145,6)
+	const uint32_t idxA = idxOf(4, 140, 4);
+	const uint32_t idxB = idxOf(6, 145, 6);
+	Camera camera(homePos);
+	RenderSettings settings;
+	settings.minRenderDistance = 32;
+	settings.maxRenderDistance = 96;
+
+	mgr.updateStreaming(camera, settings);
+	mgr.processChunkLoading(64);
+	mgr.generatePendingVoxels(camera, settings, 8);
+	drainManagerJobs(mgr);
+
+	// Save boundary 1: edit A, explicit flushWorld (the chunk edit map is
+	// taken - afterwards the chunk map no longer knows A).
+	CHECK(mgr.placeVoxel(posA, BRICKS), "edit A accepted");
+	CHECK(mgr.flushWorld(), "first flushWorld");
+
+	// Save boundary 2: edit B on the SAME live chunk, then the real UNLOAD
+	// captures it as a delta.
+	CHECK(mgr.placeVoxel(posB, GLASS), "edit B accepted after the first flush");
+
+	camera.setPosition(glm::vec3(homePos.x + 4.0f * settings.maxRenderDistance, 100.0f,
+	                             homePos.z + 4.0f * settings.maxRenderDistance));
+	mgr.updateStreaming(camera, settings);
+	drainDeferredReleases(mgr);
+	CHECK(mgr.getChunk(glm::ivec3(0, 0, 0)) == nullptr, "chunk unloaded");
+	{
+		const WorldPersistence::Status st = mgr.worldPersistence()->status();
+		CHECK(st.dirtyCoordinates == 0, "both edits durable after the unload capture");
+	}
+
+	// Reload the chunk: A AND B must come back from the save.
+	camera.setPosition(homePos);
+	mgr.updateStreaming(camera, settings);
+	mgr.processChunkLoading(64);
+	mgr.generatePendingVoxels(camera, settings, 8);
+	drainManagerJobs(mgr);
+	Chunk *chunk = mgr.getChunk(glm::ivec3(0, 0, 0));
+	CHECK(chunk != nullptr && chunk->getState() >= ChunkState::GENERATED, "chunk reloaded");
+	CHECK(chunk->getVoxel(4, 140, 4).getTextureType() == BRICKS, "A restored after unload/reload");
+	CHECK(chunk->getVoxel(6, 145, 6).getTextureType() == GLASS, "B restored after unload/reload");
+
+	CHECK(mgr.closeWorld(), "close");
+
+	// Restart: a fresh facade sees both edits.
+	WorldPersistence verify;
+	const WorldPersistence::OpenInfo info =
+		verify.openOrCreate(savesRoot, "mfmgr", seed, TerrainGenerator::kGeneratorVersion);
+	CHECK(info.ok && !info.created, "world reopens after restart");
+	const std::vector<worldsave::ChunkEdit> saved = verify.overridesSnapshot(0, 0);
+	CHECK(saved.size() == 2, "A and B both persisted across flush + unload + restart");
+	CHECK(containsEdit(saved, idxA, static_cast<uint8_t>(BRICKS)), "A in the save");
+	CHECK(containsEdit(saved, idxB, static_cast<uint8_t>(GLASS)), "B in the save");
+	verify.shutdown();
+
+	removeDir(root);
+}
+
+// ---------------------------------------------------------------------------
 // 8. Player state (issue #180, Phase 5): <world>/player.state
 // ---------------------------------------------------------------------------
 
@@ -1818,6 +2098,10 @@ int main()
 	std::cout << "== Destructor safety net ==\n";
 	testCloseWorldDrainsPendingEdits();
 	testCloseWorldRefusesWhenEditsStranded();
+	testCloseWorldRetriesAfterFlushFailure();
+	testMultiFlushEditsAccumulate();
+	testRevertAcrossFlushes();
+	testUnloadReloadAfterMultipleFlushes();
 	testDestructorDrainsCompletionsBeforeTeardown();
 	testDestructorPublishesUnpublishedMeshCompletions();
 	testQueueCoalescingAndBusy();
