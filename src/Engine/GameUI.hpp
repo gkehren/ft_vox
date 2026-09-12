@@ -390,6 +390,11 @@ private:
 	/// strict no-op. Owns the initiating button and the preview offset the
 	/// shown texture keeps until a publication represents the current view.
 	BiomeMapPan m_mapPan{};
+	/// Screen px per map pixel of the last drawn map rect (issue #192):
+	/// captured while the map is measured, because the Center button row is
+	/// built BEFORE the map rect exists in the same frame and the pan
+	/// preview re-anchor needs the shown scale.
+	float m_mapScreenPxPerMapPx{0.f};
 	bool m_mapNeedsUpdate{true};
 	double m_mapLastPublishedAt{0.0};
 	glm::vec2 m_mapLastPlayer{0.f, 0.f};

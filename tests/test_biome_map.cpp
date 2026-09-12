@@ -124,6 +124,37 @@ static void test_biome_map_pan_state_machine()
 			  s.dragDelta == zero && s.pan.previewOffset == zero,
 		  "RMB click without movement is a strict no-op");
 
+	// Release after sub-threshold movement: the accumulated movement is
+	// DISCARDED (it never translated), any earlier preview offset is kept.
+	pan = BiomeMapPan{};
+	pan.state = BiomeMapPanState::Pressed;
+	pan.button = 1;
+	pan.pendingDelta = {3.f, 2.f};
+	pan.previewOffset = {4.f, 0.f};
+	s = stepBiomeMapPan(pan, input(true, true, false, zero,
+								   btn(false, false, false), none));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.pendingDelta == zero &&
+			  s.pan.previewOffset == glm::vec2(4.f, 0.f),
+		  "Release below the threshold drops pendingDelta and keeps the offset");
+
+	// Follow player re-enable with pending sub-threshold movement: full
+	// reset including pendingDelta.
+	pan = BiomeMapPan{};
+	pan.state = BiomeMapPanState::Pressed;
+	pan.button = 2;
+	pan.pendingDelta = {3.f, 2.f};
+	s = stepBiomeMapPan(pan, input(true, true, true, zero, none, btn(false, true, false)));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.pendingDelta == zero &&
+			  s.pan.previewOffset == zero,
+		  "Follow player re-enable drops pendingDelta too");
+
+	// Map invalidation with pending sub-threshold movement: same full reset.
+	s = stepBiomeMapPan(pan, input(false, true, false, zero,
+								   none, btn(false, true, false)));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.pendingDelta == zero &&
+			  s.pan.previewOffset == zero,
+		  "Map invalidation drops pendingDelta too");
+
 	// MMB click without movement: same strict no-op through button 2.
 	pan = BiomeMapPan{};
 	s = stepBiomeMapPan(pan, input(true, true, false, zero,
@@ -137,23 +168,37 @@ static void test_biome_map_pan_state_machine()
 			  s.pan.previewOffset == zero,
 		  "MMB click without movement is a strict no-op");
 
-	// Movement below the threshold translates nothing while Pressed.
+	// Sub-threshold movement ACCUMULATES across frames while Pressed but
+	// translates nothing (no dragDelta, no previewOffset, no supersede).
 	pan = BiomeMapPan{};
 	pan.state = BiomeMapPanState::Pressed;
 	pan.button = 1;
 	s = stepBiomeMapPan(pan, input(true, true, false, {2.f, 1.f},
 								   btn(false, true, false), none));
 	CHECK(s.pan.state == BiomeMapPanState::Pressed && s.dragDelta == zero &&
-			  s.pan.previewOffset == zero,
-		  "Movement below the drag threshold is a no-op");
+			  s.pan.previewOffset == zero &&
+			  s.pan.pendingDelta == glm::vec2(2.f, 1.f),
+		  "Movement below the drag threshold accumulates without translating");
+	pan = s.pan;
+	s = stepBiomeMapPan(pan, input(true, true, false, {1.f, 1.f},
+								   btn(false, true, false), none));
+	CHECK(s.pan.state == BiomeMapPanState::Pressed && s.dragDelta == zero &&
+			  s.pan.previewOffset == zero &&
+			  s.pan.pendingDelta == glm::vec2(3.f, 2.f),
+		  "Sub-threshold movement keeps accumulating frame by frame");
 
-	// Exceeding the threshold starts the drag and applies the WHOLE movement.
-	s = stepBiomeMapPan(s.pan, input(true, true, false, {6.f, 3.f},
-									 btn(false, true, true), none));
+	// Crossing the threshold flushes the WHOLE accumulated movement in one
+	// piece (press, +2+1, +1+1, then +4+2 crosses): the first translated
+	// delta is +7+4, not just the crossing frame's delta — the map lands
+	// exactly under the cursor with no catch-up jump.
+	pan = s.pan;
+	s = stepBiomeMapPan(pan, input(true, true, false, {4.f, 2.f},
+								   btn(false, true, true), none));
 	CHECK(s.pan.state == BiomeMapPanState::Dragging && s.dragStarted &&
-			  s.dragDelta == glm::vec2(6.f, 3.f) &&
-			  s.pan.previewOffset == glm::vec2(6.f, 3.f),
-		  "Crossing the threshold starts Dragging with the accumulated movement");
+			  s.dragDelta == glm::vec2(7.f, 4.f) &&
+			  s.pan.previewOffset == glm::vec2(7.f, 4.f) &&
+			  s.pan.pendingDelta == zero,
+		  "Crossing the threshold flushes the accumulated movement at once");
 
 	// The initiating button is sticky: RMB armed (Pressed, below the
 	// threshold), MMB dragging changes nothing while RMB stays the
@@ -236,6 +281,90 @@ static void test_biome_map_pan_state_machine()
 	CHECK(pan.previewOffset == zero && pan.state == BiomeMapPanState::Dragging &&
 			  pan.button == 1,
 		  "clearBiomeMapPanPreview drops the offset but keeps the drag state");
+}
+
+// Center-button preview re-anchor (issue #192 review): the shown map must
+// jump straight to the re-targeted center, never visually passing through a
+// previous pan target, and an ongoing interaction must be cancelled.
+static void test_biome_map_center_preview_reanchor()
+{
+	const glm::vec2 zero{0.f, 0.f};
+
+	// Published grid centered at A = (100, -40), step 2, drawn 1:1.
+	const BiomeRegionGrid grid = makeBiomeRegionGrid(100.f, -40.f, 2.f, 256, 256);
+	const float pxPerMapPx = 1.0f;
+
+	// Sign conventions match biomeMapPanCenter: panning by drag delta D
+	// from a grid-centered view moves the center by -D*step, and the
+	// recalculated offset for that new center gives exactly D back.
+	const glm::vec2 drag{7.f, 4.f};
+	const glm::vec2 panned =
+		biomeMapPanCenter(grid, grid.center, drag, pxPerMapPx);
+	CHECK(biomeMapPreviewOffsetForCenter(grid, panned, pxPerMapPx) == drag,
+		  "Preview offset for a panned center equals the drag delta");
+
+	// Existing preview A -> B (B = (84, -40) => offset +8 on X).
+	const glm::vec2 B{84.f, -40.f};
+	CHECK(biomeMapPreviewOffsetForCenter(grid, B, pxPerMapPx) == glm::vec2(8.f, 0.f),
+		  "Preview offset A->B places B at the viewport center");
+
+	// Center to C = (130, -50): the recalculated preview is A -> C
+	// directly — offset = -(C - A)/step * scale = (-15, +5).
+	const glm::vec2 C{130.f, -50.f};
+	const glm::vec2 offsetC = biomeMapPreviewOffsetForCenter(grid, C, pxPerMapPx);
+	CHECK(offsetC == glm::vec2(-15.f, 5.f),
+		  "Preview offset is recomputed A->C, not through the previous target B");
+
+	// toScreen(C) + offset == viewport center: pixel (143, 123) at 1:1.
+	const glm::vec2 pixel = biomeMapContinuousPixel(grid, C);
+	const float rectHalf = grid.width * pxPerMapPx * 0.5f;
+	CHECK(pixel.x + offsetC.x == rectHalf && pixel.y + offsetC.y == rectHalf,
+		  "toScreen(targetCenter) + previewOffset == viewport center");
+
+	// Re-anchor from Idle: state stays idle, offset becomes A -> C.
+	BiomeMapPan pan{};
+	reanchorBiomeMapPanForCenter(pan, grid, C, pxPerMapPx);
+	CHECK(pan.state == BiomeMapPanState::Idle && pan.button == -1 &&
+			  pan.pendingDelta == zero && pan.previewOffset == offsetC,
+		  "Center from Idle re-anchors the preview to the new target");
+
+	// Re-anchor while Pressed: interaction cancelled (pendingDelta gone),
+	// only the new preview offset is kept.
+	pan = BiomeMapPan{};
+	pan.state = BiomeMapPanState::Pressed;
+	pan.button = 1;
+	pan.pendingDelta = {3.f, 2.f};
+	pan.previewOffset = glm::vec2(8.f, 0.f);
+	reanchorBiomeMapPanForCenter(pan, grid, C, pxPerMapPx);
+	CHECK(pan.state == BiomeMapPanState::Idle && pan.button == -1 &&
+			  pan.pendingDelta == zero && pan.previewOffset == offsetC,
+		  "Center while Pressed cancels the interaction and re-anchors");
+
+	// Re-anchor while Dragging: same cancellation, a still-held button
+	// cannot keep moving the center afterwards.
+	pan = BiomeMapPan{};
+	pan.state = BiomeMapPanState::Dragging;
+	pan.button = 2;
+	pan.previewOffset = glm::vec2(4.f, -1.f);
+	reanchorBiomeMapPanForCenter(pan, grid, C, pxPerMapPx);
+	CHECK(pan.state == BiomeMapPanState::Idle && pan.button == -1 &&
+			  pan.previewOffset == offsetC,
+		  "Center while Dragging cancels the interaction and re-anchors");
+
+	// Invalid grid or scale: zero offset, interaction still cancelled.
+	const BiomeRegionGrid bad{};
+	reanchorBiomeMapPanForCenter(pan, bad, C, pxPerMapPx);
+	CHECK(pan.previewOffset == zero && pan.state == BiomeMapPanState::Idle,
+		  "Center with an invalid published grid zeroes the preview");
+	reanchorBiomeMapPanForCenter(pan, grid, C, 0.f);
+	CHECK(pan.previewOffset == zero,
+		  "Center with a non-positive screen scale zeroes the preview");
+
+	// The next publication of the current view resets the re-anchored
+	// preview (publication path only).
+	clearBiomeMapPanPreview(pan);
+	CHECK(pan.previewOffset == zero && pan.state == BiomeMapPanState::Idle,
+		  "Next publication clears the re-anchored preview");
 }
 
 // Published-grid lifecycle invariant (issue #191 review round 2), tested as
@@ -1255,6 +1384,7 @@ int main(int argc, char **argv)
 	test_biome_map_continuous_pixel();
 	test_biome_map_pan_navigation();
 	test_biome_map_pan_state_machine();
+	test_biome_map_center_preview_reanchor();
 	test_upload_grid_publication_lifecycle();
 	test_invalid_pending_never_publishes();
 	test_biome_map_result_validity();

@@ -478,7 +478,17 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	ImGui::SameLine();
 	if (ImGui::Button("Center"))
 	{
+		// Re-target the view center at the player (issue #192 review): the
+		// pan preview is RE-ANCHORED against the published grid, so the
+		// shown map jumps straight to the player — even while a pending
+		// pan preview toward an older target is on screen (published A,
+		// preview toward B, Center toward C -> immediate A -> C, never a
+		// visual pass through B) — and any armed/dragging interaction is
+		// cancelled so a still-held button cannot keep moving the center.
+		// With no published grid yet there is nothing to bridge: zero.
 		m_mapCenter = playerXZ;
+		reanchorBiomeMapPanForCenter(m_mapPan, m_mapPresentation.publishedGrid,
+									 m_mapCenter, m_mapScreenPxPerMapPx);
 		supersedeBiomeMapRequest();
 	}
 	ImGui::SameLine();
@@ -502,6 +512,8 @@ void GameUI::drawWorld(GameUIFrame &frame)
 		ImGui::Dummy(ImVec2(mapSizePx, mapSizePx));
 		mapMin = ImGui::GetItemRectMin();
 		mapMax = ImGui::GetItemRectMax();
+		m_mapScreenPxPerMapPx =
+			(mapMax.x - mapMin.x) / static_cast<float>(m_mapPresentation.publishedGrid.width);
 		mapDrawn = true;
 	}
 	else
