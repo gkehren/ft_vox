@@ -51,7 +51,8 @@ void Chunk::packLightField(ChunkLightStorage &out) const
         const size_t vi = static_cast<size_t>(x + CHUNK_SIZE * (y + CHUNK_HEIGHT * z));
         const size_t li = ChunkLightHalo::hidx(x, y, z);
         out.voxels[vi] = lighting::packVoxelLight(
-            s_skyLight[vi], s_blockLightR[li], s_blockLightG[li], s_blockLightB[li]);
+            chunk_detail::s_skyLight[vi], chunk_detail::s_blockLightR[li],
+            chunk_detail::s_blockLightG[li], chunk_detail::s_blockLightB[li]);
       }
 }
 
@@ -162,11 +163,11 @@ void fillLightHaloFromNeighbors(ChunkLightHalo &halo, const Chunk *center,
 
 void Chunk::computeLightField(telemetry::MeshSample &meshSample)
 {
-  auto &workspace = s_meshWorkspace;
-  auto &skyLight = s_skyLight;
-  auto &blockLightR = s_blockLightR;
-  auto &blockLightG = s_blockLightG;
-  auto &blockLightB = s_blockLightB;
+  auto &workspace = chunk_detail::s_meshWorkspace;
+  auto &skyLight = chunk_detail::s_skyLight;
+  auto &blockLightR = chunk_detail::s_blockLightR;
+  auto &blockLightG = chunk_detail::s_blockLightG;
+  auto &blockLightB = chunk_detail::s_blockLightB;
   skyLight.assign(static_cast<size_t>(CHUNK_VOLUME), 0);
   // Block light lives on the halo domain (center + 15-voxel ring) so it
   // crosses chunk borders (issue #141 review fix); with no halo attached

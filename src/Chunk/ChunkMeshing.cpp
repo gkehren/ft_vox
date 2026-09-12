@@ -8,7 +8,10 @@
 #include <Engine/WorkloadTelemetry.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <cmath>
+#include <new>
 
 // Packed ABGR water tint colour shared by the full mesh and LOD mesh generators.
 static constexpr uint32_t WATER_COLOR = 0xFF'E6804D;
@@ -239,12 +242,12 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
   auto &indices = out.sections[section].opaqueIndices;
   auto &waterVertices = out.sections[section].waterVertices;
   auto &waterIndices = out.sections[section].waterIndices;
-  auto &skyLight = s_skyLight;
-  auto &blockLightR = s_blockLightR;
-  auto &blockLightG = s_blockLightG;
-  auto &blockLightB = s_blockLightB;
+  auto &skyLight = chunk_detail::s_skyLight;
+  auto &blockLightR = chunk_detail::s_blockLightR;
+  auto &blockLightG = chunk_detail::s_blockLightG;
+  auto &blockLightB = chunk_detail::s_blockLightB;
 
-  auto &workspace = s_meshWorkspace;
+  auto &workspace = chunk_detail::s_meshWorkspace;
   uint32_t indexCounter = 0;
   uint32_t waterIndexCounter = 0;
 

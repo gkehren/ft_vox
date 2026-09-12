@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <new>
 #include <stdexcept>
 
 Chunk::Chunk(const glm::vec3 &position, ChunkState state, VoxelPool *voxelPool,

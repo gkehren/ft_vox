@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <new>
 
 void Chunk::setVoxel(int x, int y, int z, TextureType type)
 {

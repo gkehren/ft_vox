@@ -151,6 +151,18 @@ add_custom_target(ft_vox_build_info ALL
 # ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
+# The Chunk implementation split (issue #181): these five translation units
+# implement ONE class. Every target that compiles any of them must link all
+# five (missing ones fail at link time). ChunkBorders.cpp is NOT part of this
+# list: it is the standalone BorderPool implementation (see test_border_pool).
+set(FT_VOX_CHUNK_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+)
+
 set(FT_VOX_VULKAN_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkContext.cpp
     ${CMAKE_SOURCE_DIR}/src/Vulkan/VkSwapchain.cpp
@@ -218,11 +230,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/Benchmark.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/BuildInfo.cpp
     ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+    ${FT_VOX_CHUNK_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp

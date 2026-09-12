@@ -376,11 +376,7 @@ add_test(NAME UiShell COMMAND test_ui_shell)
 add_executable(test_chunk_lifecycle
     test_chunk_lifecycle.cpp
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+    ${FT_VOX_CHUNK_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -447,11 +443,7 @@ add_test(NAME ChunkLifecycle COMMAND test_chunk_lifecycle)
 add_executable(test_world_persistence
     test_world_persistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+    ${FT_VOX_CHUNK_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
@@ -518,11 +510,7 @@ add_test(NAME WorldPersistence COMMAND test_world_persistence)
 # ---------------------------------------------------------------------------
 add_executable(test_mesh_facekey
     test_mesh_facekey.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+    ${FT_VOX_CHUNK_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -587,11 +575,7 @@ add_test(NAME MeshFaceKey COMMAND test_mesh_facekey)
 # ---------------------------------------------------------------------------
 add_executable(test_mesh_upload
     test_mesh_upload.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+    ${FT_VOX_CHUNK_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -770,11 +754,7 @@ add_executable(test_debug_ui
     test_debug_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiCore.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiState.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+    ${FT_VOX_CHUNK_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -929,11 +909,7 @@ add_executable(ft_vox_visual_tests
     VisualImage.cpp
     ${FT_VOX_VULKAN_SOURCES}
     ${FT_VOX_RENDERER_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+    ${FT_VOX_CHUNK_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -998,11 +974,7 @@ add_executable(test_post_resize
     test_post_resize.cpp
     ${FT_VOX_VULKAN_SOURCES}
     ${FT_VOX_RENDERER_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+    ${FT_VOX_CHUNK_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -1148,11 +1120,7 @@ set_tests_properties(EngineReload PROPERTIES
 # ---------------------------------------------------------------------------
 add_executable(bench_persistence
     bench_persistence.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
+    ${FT_VOX_CHUNK_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp

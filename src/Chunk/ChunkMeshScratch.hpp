@@ -3,6 +3,8 @@
 // Internal scratch buffers shared by the Chunk implementation's worker-side
 // translation units (ChunkLighting.cpp / ChunkMeshing.cpp, issue #181 split).
 // NOT a public Chunk header: it must not be included outside src/Chunk.
+// Everything lives in the chunk_detail namespace to keep these internals out
+// of the global namespace.
 //
 // Chunk-wide sky/block light fields for one mesh job (issue #107):
 // computed once per build so a section-selective rebuild samples exactly
@@ -13,6 +15,13 @@
 #include <vector>
 #include <glm/glm.hpp>
 #include <utils.hpp>
+
+namespace chunk_detail
+{
+
+// The instances MUST stay `inline thread_local`: `static` or an anonymous
+// namespace here would give every including TU its own scratch, breaking
+// the per-worker reuse the reserves exist for.
 
 struct MeshWorkspace
 {
@@ -59,3 +68,5 @@ inline thread_local std::vector<uint8_t> s_skyLight;
 inline thread_local std::vector<uint8_t> s_blockLightR;
 inline thread_local std::vector<uint8_t> s_blockLightG;
 inline thread_local std::vector<uint8_t> s_blockLightB;
+
+} // namespace chunk_detail

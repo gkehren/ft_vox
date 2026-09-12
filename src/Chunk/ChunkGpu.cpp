@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <stdexcept>
+#include <utility>
 
 bool Chunk::hasUnuploadedFullMesh() const
 {
