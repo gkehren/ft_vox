@@ -25,6 +25,8 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -2251,6 +2253,64 @@ static void testPlayerStatePersistence()
 // main
 // ---------------------------------------------------------------------------
 
+static void testWorldToChunkCoordTable()
+{
+	std::cout << "== worldToChunkCoord conversion table ==" << std::endl;
+
+	// Single-axis table (issue #180 review round 10, item 4): floor
+	// semantics - negative positions map to NEGATIVE chunks, never back
+	// toward zero.
+	const glm::ivec3 cases[] = {
+		{0, 0, 0},
+		{CHUNK_SIZE - 1, 0, 0},
+		{CHUNK_SIZE, 0, 0},
+		{-1, 0, 0},
+		{-CHUNK_SIZE, 0, 0},
+		{-CHUNK_SIZE - 1, 0, 0},
+	};
+	const glm::ivec3 expected[] = {
+		{0, 0, 0},
+		{0, 0, 0},
+		{1, 0, 0},
+		{-1, 0, 0},
+		{-1, 0, 0},
+		{-2, 0, 0},
+	};
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+	{
+		const glm::ivec3 got = ChunkManager::worldToChunkCoord(
+			glm::vec3(static_cast<float>(cases[i].x), 0.0f, 0.0f));
+		CHECK(got == expected[i], ("axis table case " + std::to_string(i)).c_str());
+	}
+
+	// Exact aligned origins round-trip on every axis, positive and negative.
+	for (const int v : {0, 16, 160, -16, -160})
+	{
+		const glm::ivec3 got = ChunkManager::worldToChunkCoord(
+			glm::vec3(static_cast<float>(v), 0.0f, static_cast<float>(v)));
+		CHECK(got.x == v / 16 && got.z == v / 16, "aligned origin maps to its own chunk");
+	}
+
+	// Three-axis combinations: positive/positive/positive and
+	// negative/positive/negative, plus per-axis boundary mixes.
+	{
+		const glm::ivec3 got = ChunkManager::worldToChunkCoord(glm::vec3(100.0f, 0.0f, 100.0f));
+		CHECK(got == glm::ivec3(6, 0, 6), "positive/positive");
+	}
+	{
+		const glm::ivec3 got = ChunkManager::worldToChunkCoord(glm::vec3(-100.0f, 0.0f, 100.0f));
+		CHECK(got == glm::ivec3(-7, 0, 6), "negative/positive boundary");
+	}
+	{
+		const glm::ivec3 got = ChunkManager::worldToChunkCoord(glm::vec3(100.0f, 0.0f, -100.0f));
+		CHECK(got == glm::ivec3(6, 0, -7), "positive/negative boundary");
+	}
+	{
+		const glm::ivec3 got = ChunkManager::worldToChunkCoord(glm::vec3(-33.0f, 0.0f, -33.0f));
+		CHECK(got == glm::ivec3(-3, 0, -3), "just past -CHUNK_SIZE*2 boundary");
+	}
+}
+
 int main()
 {
 	std::cout << "== SaveService ordering ==\n";
@@ -2280,6 +2340,7 @@ int main()
 	testUnloadReloadAfterMultipleFlushes();
 	testRestorePolicyWaitingForTerrain();
 	testSaveStatusAfterRetry();
+	testWorldToChunkCoordTable();
 	testDestructorDrainsCompletionsBeforeTeardown();
 	testDestructorPublishesUnpublishedMeshCompletions();
 	testQueueCoalescingAndBusy();

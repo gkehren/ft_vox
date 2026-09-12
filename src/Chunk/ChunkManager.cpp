@@ -25,16 +25,6 @@ namespace
 {
 constexpr int kDeferredReleaseFrames = 3; // >= frames-in-flight
 
-// Canonical chunk-coordinate conversion for a chunk's stored origin — the
-// exact expression meshPendingChunks()/processFinishedJobs() already use for
-// world->chunk mapping (round to integer blocks, then divide by CHUNK_SIZE).
-// All persistence code goes through this one helper so saved coordinates can
-// never disagree with the manager's own addressing.
-glm::ivec3 chunkCoordOfPosition(const glm::vec3 &worldPos)
-{
-	return {static_cast<int>(std::round(worldPos.x)) / CHUNK_SIZE, 0,
-	        static_cast<int>(std::round(worldPos.z)) / CHUNK_SIZE};
-}
 } // namespace
 
 ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool)
@@ -2571,7 +2561,7 @@ void ChunkManager::applyPersistentOverrides(Chunk *chunk)
 {
 	if (!m_persistence || !m_persistence->enabled() || !chunk)
 		return;
-	const glm::ivec3 cc = chunkCoordOfPosition(chunk->getPosition());
+	const glm::ivec3 cc = worldToChunkCoord(chunk->getPosition());
 	// Copy under the persistence mutex: the worker must not iterate a vector
 	// that the save pipeline may refine concurrently.
 	const std::vector<worldsave::ChunkEdit> overrides = m_persistence->overridesSnapshot(cc.x, cc.z);
@@ -2607,7 +2597,7 @@ void ChunkManager::captureChunkEditsForUnload(Chunk *chunk)
 	std::sort(values.begin(), values.end(),
 	          [](const worldsave::ChunkEdit &a, const worldsave::ChunkEdit &b)
 	          { return a.localIndex < b.localIndex; });
-	const glm::ivec3 cc = chunkCoordOfPosition(chunk->getPosition());
+	const glm::ivec3 cc = worldToChunkCoord(chunk->getPosition());
 	m_persistence->captureChunkEdits(cc.x, cc.z, std::move(values));
 }
 

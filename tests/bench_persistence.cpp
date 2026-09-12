@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -35,6 +36,36 @@ struct FrameStats
 	size_t count = 0;
 	double avg = 0.0, p50 = 0.0, p95 = 0.0, p99 = 0.0, max = 0.0;
 };
+
+// RAII cleanup (issue #180 review round 10, item 1): every exit path -
+// failed flush, failed close, invalid metrics - leaves the temp root
+// removed. Removal is silent when the directory is already gone and never
+// masks the original error.
+class TempDirGuard
+{
+public:
+	explicit TempDirGuard(std::filesystem::path path)
+		: path_(std::move(path)) {}
+
+	~TempDirGuard()
+	{
+		std::error_code ec;
+		std::filesystem::remove_all(path_, ec);
+	}
+
+	TempDirGuard(const TempDirGuard &) = delete;
+	TempDirGuard &operator=(const TempDirGuard &) = delete;
+
+private:
+	std::filesystem::path path_;
+};
+
+std::filesystem::path createUniqueTempRoot()
+{
+	return std::filesystem::temp_directory_path() /
+	       ("ft-vox-bench-persistence-" +
+	        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+}
 
 // Split save statistics for one run (issue #180 review round 8, item 1):
 // `steadyState` is sampled at the exact end of the measured window (async
@@ -290,11 +321,8 @@ int main(int argc, char **argv)
 	if (argc > 3)
 		seed = std::atoi(argv[3]);
 
-	std::filesystem::path root = std::filesystem::temp_directory_path() /
-	                             ("ft-vox-bench-persistence-" +
-	                              std::to_string(std::chrono::steady_clock::now()
-	                                                 .time_since_epoch()
-	                                                 .count()));
+	const std::filesystem::path root = createUniqueTempRoot();
+	TempDirGuard cleanup(root);
 
 	std::printf("Persistence stress benchmark (seed %d, %.0fs per run, %.0f edits/s target)\n",
 	            seed, durationSec, editsPerSec);
@@ -340,7 +368,5 @@ int main(int argc, char **argv)
 	std::printf("  close-after-flush latency: %.1f ms\n", stats.closeMs);
 	std::printf("  total shutdown latency: %.1f ms\n", stats.flushMs + stats.closeMs);
 
-	std::error_code ec;
-	std::filesystem::remove_all(root, ec);
 	return 0;
 }
