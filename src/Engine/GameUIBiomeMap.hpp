@@ -296,6 +296,11 @@ struct BiomeMapPanButtonInput
 	/// frames after the press, this is exactly everything that must be
 	/// applied, because nothing is ever translated before Dragging.
 	glm::vec2 dragFromClick{0.f, 0.f};
+	/// Released this frame (ImGui::IsMouseReleased). Lets a Dragging state
+	/// consume the FINAL frame's mouse delta on a clean release instead of
+	/// dropping it; a !down && !released ending applies nothing, so no
+	/// spurious movement can sneak in on an incoherent/reset path.
+	bool released{false};
 };
 
 struct BiomeMapPanInput
@@ -416,16 +421,27 @@ inline BiomeMapPanStep stepBiomeMapPan(const BiomeMapPan &pan, const BiomeMapPan
 		const BiomeMapPanButtonInput &init = biomeMapPanButtonInput(in, pan.button);
 		if (!init.down)
 		{
-			// Initiating button released (even with the other button still
-			// held). The drag ends; the preview offset PERSISTS until the
-			// texture for the dragged-to view is published.
+			// Initiating button no longer held (even with the other button
+			// still down). A CLEAN release still consumes the final frame's
+			// mouse delta: the movement between the previous frame and the
+			// release is real and must not be lost. An ABNORMAL ending
+			// (down lost without a release event — focus steal, reset,
+			// incoherent ImGui state) applies NOTHING, so no spurious
+			// movement can sneak in. Either way the preview offset
+			// PERSISTS until the dragged-to view is published.
+			if (init.released)
+			{
+				out.dragDelta = in.mouseDelta;
+				out.pan.previewOffset += in.mouseDelta;
+			}
 			out.pan.state = BiomeMapPanState::Idle;
 			out.pan.button = kBiomeMapPanButtonNone;
 			out.dragEnded = true;
 			break;
 		}
 		// Dragging continues regardless of hover: the cursor may leave the
-		// map rect mid-drag without aborting the pan.
+		// map rect mid-drag without aborting the pan. dragFromClick stays
+		// reserved for the first drag frame only.
 		out.dragDelta = in.mouseDelta;
 		out.pan.previewOffset += in.mouseDelta;
 		break;

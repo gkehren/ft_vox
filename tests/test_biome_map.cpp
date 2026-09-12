@@ -94,8 +94,8 @@ static void test_biome_map_pan_navigation()
 static void test_biome_map_pan_state_machine()
 {
 	const auto btn = [](bool clicked, bool down, bool dragging,
-						glm::vec2 fromClick = {0.f, 0.f}) {
-		return BiomeMapPanButtonInput{clicked, down, dragging, fromClick};
+						glm::vec2 fromClick = {0.f, 0.f}, bool released = false) {
+		return BiomeMapPanButtonInput{clicked, down, dragging, fromClick, released};
 	};
 	const auto input = [&](bool mapActive, bool hovered, bool follow, glm::vec2 delta,
 						   BiomeMapPanButtonInput r, BiomeMapPanButtonInput m) {
@@ -123,7 +123,7 @@ static void test_biome_map_pan_state_machine()
 	// nothing translated, no offset created.
 	pan = s.pan;
 	s = stepBiomeMapPan(pan, input(true, true, false, zero,
-								   btn(false, false, false), none));
+								   btn(false, false, false, zero, true), none));
 	CHECK(s.pan.state == BiomeMapPanState::Idle && s.pan.button == -1 &&
 			  s.dragDelta == zero && s.pan.previewOffset == zero,
 		  "RMB click without movement is a strict no-op");
@@ -136,7 +136,7 @@ static void test_biome_map_pan_state_machine()
 	pan.button = 1;
 	pan.previewOffset = {4.f, 0.f};
 	s = stepBiomeMapPan(pan, input(true, true, false, zero,
-								   btn(false, false, false), none));
+								   btn(false, false, false, zero, true), none));
 	CHECK(s.pan.state == BiomeMapPanState::Idle &&
 			  s.pan.previewOffset == glm::vec2(4.f, 0.f),
 		  "Release below the threshold is a no-op and keeps the offset");
@@ -163,7 +163,7 @@ static void test_biome_map_pan_state_machine()
 		  "MMB press arms the pan on button 2");
 	pan = s.pan;
 	s = stepBiomeMapPan(pan, input(true, true, false, zero,
-								   none, btn(false, false, false)));
+								   none, btn(false, false, false, zero, true)));
 	CHECK(s.pan.state == BiomeMapPanState::Idle && s.dragDelta == zero &&
 			  s.pan.previewOffset == zero,
 		  "MMB click without movement is a strict no-op");
@@ -223,15 +223,18 @@ static void test_biome_map_pan_state_machine()
 		  "Initiating button stays sticky against the other button's drag");
 
 	// RMB drag, then MMB press, then RMB release: the pan ENDS even though
-	// MMB is still held (offset persists — the texture is still offset).
+	// MMB is still held — and the release frame's own movement is CONSUMED
+	// before the drag ends (nothing between the last two frames is lost).
 	pan.state = BiomeMapPanState::Dragging;
 	pan.button = 1;
 	pan.previewOffset = {4.f, 0.f};
 	s = stepBiomeMapPan(pan, input(true, true, false, {2.f, 0.f},
-								   btn(false, false, false), btn(true, true, true)));
+								   btn(false, false, false, zero, true),
+								   btn(true, true, true)));
 	CHECK(s.pan.state == BiomeMapPanState::Idle && s.dragEnded &&
-			  s.dragDelta == zero && s.pan.previewOffset == glm::vec2(4.f, 0.f),
-		  "RMB release ends the pan despite MMB still held, keeping the offset");
+			  s.dragDelta == glm::vec2(2.f, 0.f) &&
+			  s.pan.previewOffset == glm::vec2(6.f, 0.f),
+		  "RMB release ends the pan, consuming the final frame's movement");
 
 	// Dragging continues with the cursor OUTSIDE the map rect.
 	pan.state = BiomeMapPanState::Dragging;
@@ -246,10 +249,33 @@ static void test_biome_map_pan_state_machine()
 
 	// Release outside the rect stops the pan, offset intact.
 	s = stepBiomeMapPan(s.pan, input(true, false, false, zero,
-									 none, btn(false, false, false)));
+									 none, btn(false, false, false, zero, true)));
 	CHECK(s.pan.state == BiomeMapPanState::Idle && s.dragEnded &&
-			  s.pan.previewOffset == glm::vec2(4.f, -1.f),
+			  s.dragDelta == zero && s.pan.previewOffset == glm::vec2(4.f, -1.f),
 		  "Release outside the rect stops the pan and keeps the offset");
+
+	// Clean release WITH movement: the last mouse delta is consumed before
+	// the drag ends (point 5 of the review plan).
+	pan.state = BiomeMapPanState::Dragging;
+	pan.button = 1;
+	pan.previewOffset = {20.f, 0.f};
+	s = stepBiomeMapPan(pan, input(true, true, false, {8.f, -3.f},
+								   btn(false, false, false, zero, true), none));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.dragEnded &&
+			  s.dragDelta == glm::vec2(8.f, -3.f) &&
+			  s.pan.previewOffset == glm::vec2(28.f, -3.f),
+		  "Clean release consumes the final movement into the preview offset");
+
+	// Abnormal termination (down lost WITHOUT a release event): the drag
+	// ends but applies NOTHING — no spurious movement (point 6).
+	pan.state = BiomeMapPanState::Dragging;
+	pan.button = 2;
+	pan.previewOffset = {20.f, 0.f};
+	s = stepBiomeMapPan(pan, input(true, true, false, {8.f, -3.f},
+								   none, btn(false, false, false)));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.dragEnded &&
+			  s.dragDelta == zero && s.pan.previewOffset == glm::vec2(20.f, 0.f),
+		  "Abnormal termination ends the drag without applying movement");
 
 	// A motionless dragging frame translates nothing (no supersede).
 	pan.state = BiomeMapPanState::Dragging;
@@ -291,6 +317,65 @@ static void test_biome_map_pan_state_machine()
 	CHECK(pan.previewOffset == zero && pan.state == BiomeMapPanState::Dragging &&
 			  pan.button == 1,
 		  "clearBiomeMapPanPreview drops the offset but keeps the drag state");
+}
+
+// End-to-end drag (issue #192 review): click -> Pressed -> threshold ->
+// Dragging -> MouseDelta frames -> final movement + release -> Idle. The
+// final preview offset must equal dragFromClick + EVERY intermediate
+// MouseDelta + the release MouseDelta: not a single pixel of movement lost
+// between the mouse-down and the mouse-up.
+static void test_biome_map_pan_end_to_end()
+{
+	const auto btn = [](bool clicked, bool down, bool dragging,
+						glm::vec2 fromClick = {0.f, 0.f}, bool released = false) {
+		return BiomeMapPanButtonInput{clicked, down, dragging, fromClick, released};
+	};
+	const auto input = [&](bool hovered, glm::vec2 delta, BiomeMapPanButtonInput r) {
+		BiomeMapPanInput in;
+		in.mapActive = true;
+		in.hovered = hovered;
+		in.buttons[0] = r;
+		in.buttons[1] = btn(false, false, false);
+		in.mouseDelta = delta;
+		return in;
+	};
+	const glm::vec2 zero{0.f, 0.f};
+
+	BiomeMapPan pan{};
+	BiomeMapPanStep s = stepBiomeMapPan(pan, input(true, zero, btn(true, true, false)));
+	CHECK(s.pan.state == BiomeMapPanState::Pressed && s.dragDelta == zero,
+		  "e2e: click arms Pressed");
+	pan = s.pan;
+
+	// Threshold crossed: dragFromClick {7,4} is the whole movement so far.
+	s = stepBiomeMapPan(pan, input(true, {4.f, 2.f}, btn(false, true, true, {7.f, 4.f})));
+	CHECK(s.pan.state == BiomeMapPanState::Dragging && s.dragStarted &&
+			  s.dragDelta == glm::vec2(7.f, 4.f) &&
+			  s.pan.previewOffset == glm::vec2(7.f, 4.f),
+		  "e2e: threshold crossed applies dragFromClick");
+	pan = s.pan;
+
+	// Intermediate dragging frames.
+	s = stepBiomeMapPan(pan, input(true, {3.f, 1.f}, btn(false, true, true)));
+	CHECK(s.pan.previewOffset == glm::vec2(10.f, 5.f), "e2e: first dragging frame");
+	pan = s.pan;
+	s = stepBiomeMapPan(pan, input(true, {2.f, -1.f}, btn(false, true, true)));
+	CHECK(s.pan.previewOffset == glm::vec2(12.f, 4.f), "e2e: second dragging frame");
+	pan = s.pan;
+
+	// Final movement + release in the same frame.
+	s = stepBiomeMapPan(pan, input(true, {5.f, 2.f},
+								   btn(false, false, false, zero, true)));
+	CHECK(s.pan.state == BiomeMapPanState::Idle && s.dragEnded &&
+			  s.dragDelta == glm::vec2(5.f, 2.f) &&
+			  s.pan.previewOffset == glm::vec2(17.f, 6.f),
+		  "e2e: release consumes the final movement");
+
+	// {7,4} + {3,1} + {2,-1} + {5,2} — every pixel from down to up.
+	const glm::vec2 total = glm::vec2(7.f, 4.f) + glm::vec2(3.f, 1.f) +
+							glm::vec2(2.f, -1.f) + glm::vec2(5.f, 2.f);
+	CHECK(s.pan.previewOffset == total,
+		  "e2e: no movement lost between mouse-down and mouse-up");
 }
 
 // Center-button preview re-anchor (issue #192 review): the shown map must
@@ -1393,6 +1478,7 @@ int main(int argc, char **argv)
 	test_biome_map_continuous_pixel();
 	test_biome_map_pan_navigation();
 	test_biome_map_pan_state_machine();
+	test_biome_map_pan_end_to_end();
 	test_biome_map_center_preview_reanchor();
 	test_upload_grid_publication_lifecycle();
 	test_invalid_pending_never_publishes();

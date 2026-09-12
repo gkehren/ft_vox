@@ -573,7 +573,8 @@ void GameUI::drawWorld(GameUIFrame &frame)
 			const ImVec2 fromClick = ImGui::GetMouseDragDelta(btn, 0.f);
 			panIn.buttons[i] = {ImGui::IsMouseClicked(btn), ImGui::IsMouseDown(btn),
 								ImGui::IsMouseDragging(btn, dragThreshold),
-								{fromClick.x, fromClick.y}};
+								{fromClick.x, fromClick.y},
+								ImGui::IsMouseReleased(btn)};
 		}
 
 		const BiomeMapPanStep panStep = stepBiomeMapPan(m_mapPan, panIn);
