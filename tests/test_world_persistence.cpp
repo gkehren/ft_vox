@@ -2066,6 +2066,26 @@ static void testSaveStatusAfterRetry()
 	CHECK(computeSaveUiHealth(0, 0, 0) == SaveUiHealth::Saved,
 	      "historical failure only -> Saved");
 
+	// Error prominence (issue #180 review round 7, item 7): a recovered
+	// failure's lastError moves out of the main surface; an open error with
+	// no active persistence stays prominent.
+	{
+		const WorldPersistence::Status after = wp.status();
+		const SaveUiHealth health = computeSaveUiHealth(
+			after.dirtyCoordinates, after.failedCoordinates, after.queueDepth);
+		CHECK(health == SaveUiHealth::Saved, "recovered save shows Saved");
+		CHECK(!after.lastError.empty(),
+		      "lastError stays populated (history is preserved)");
+		CHECK(!shouldShowSaveErrorProminently(true, health, !after.lastError.empty()),
+		      "historical lastError is not shown as an active failure");
+		CHECK(shouldShowSaveErrorProminently(false, health, true),
+		      "open-world error without persistence stays prominent");
+		CHECK(shouldShowSaveErrorProminently(true, SaveUiHealth::Failed, true),
+		      "active failure stays prominent");
+		CHECK(!shouldShowSaveErrorProminently(true, SaveUiHealth::Saving, true),
+		      "saving state hides the historical error");
+	}
+
 	wp.shutdown();
 	removeDir(root);
 }

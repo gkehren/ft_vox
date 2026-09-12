@@ -77,6 +77,22 @@ inline SaveUiHealth computeSaveUiHealth(uint64_t dirtyCoordinates,
 	return SaveUiHealth::Saved;
 }
 
+/// Whether lastError belongs on the MAIN panel surface (issue #180 review
+/// round 7, item 7): yes while persistence is off (an open-world error is
+/// still current) or while the health is actively Failed; a RECOVERED
+/// failure's error text moves to the details block - history must stay
+/// accessible without polluting the main surface. Pure - unit-tested
+/// headlessly.
+inline bool shouldShowSaveErrorProminently(bool persistenceActive,
+                                           SaveUiHealth health, bool hasError)
+{
+	if (!hasError)
+		return false;
+	if (!persistenceActive)
+		return true;
+	return health == SaveUiHealth::Failed;
+}
+
 /// Frame snapshot for ImGui panels (pointers owned by Engine).
 /// Debug/telemetry data reaches panels through debugui::UiState snapshots
 /// (issue #179); the raw pointers here are the explicit settings structs and

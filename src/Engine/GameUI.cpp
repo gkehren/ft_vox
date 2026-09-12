@@ -451,20 +451,28 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	{
 		// Instant state via the pure helper (issue #180 review round 7):
 		// historical `failed` stays in the details block below.
+		const SaveUiHealth health = computeSaveUiHealth(
+			frame.worldSave.dirtyCoordinates, frame.worldSave.failedCoordinates,
+			frame.worldSave.queueDepth);
 		const char *saveState = "Saved";
-		switch (computeSaveUiHealth(frame.worldSave.dirtyCoordinates,
-		                            frame.worldSave.failedCoordinates,
-		                            frame.worldSave.queueDepth))
+		switch (health)
 		{
 		case SaveUiHealth::Failed: saveState = "Failed"; break;
 		case SaveUiHealth::Saving: saveState = "Saving…"; break;
 		case SaveUiHealth::Saved: break;
 		}
 		ImGui::Text("Save %s", saveState);
+
+		// Error prominence (issue #180 review round 7, items 4-6): a red
+		// error on the main surface is CURRENT - either the persistence
+		// refused to open (no active persistence) or a save attempt is
+		// failing right now. A RECOVERED failure's error text lives in the
+		// details block below.
+		if (shouldShowSaveErrorProminently(frame.worldSave.active, health,
+		                                   !frame.worldSave.lastError.empty()))
+			ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+							   frame.worldSave.lastError.c_str());
 	}
-	if (!frame.worldSave.lastError.empty())
-		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
-						   frame.worldSave.lastError.c_str());
 
 	ImGui::Spacing();
 	bool prevFollow = m_mapFollow;
@@ -653,6 +661,14 @@ void GameUI::drawWorld(GameUIFrame &frame)
 						(unsigned long long)frame.worldSave.rejectedBusyCommitGate);
 			ImGui::Text("Written: %.2f MiB",
 						static_cast<double>(frame.worldSave.bytesWritten) / (1024.0 * 1024.0));
+			if (!frame.worldSave.lastError.empty())
+			{
+				ImGui::Spacing();
+				ImGui::TextDisabled("Last error:");
+				ImGui::PushTextWrapPos();
+				ImGui::TextWrapped("%s", frame.worldSave.lastError.c_str());
+				ImGui::PopTextWrapPos();
+			}
 		}
 	}
 
