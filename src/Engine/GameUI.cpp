@@ -442,37 +442,29 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	// persistence/save-status slot is filled by #180: one compact "Save"
 	// row while a world is open, detailed counters in the collapsible at
 	// the bottom of the panel.
-	if (frame.worldSave.active)
+	// Presentation decisions come from the pure helper (issue #180 review
+	// round 9): an open-world refusal (active == false, lastError set) must
+	// surface its error here even though there is no status row to show.
+	const SaveUiPresentation presentation = computeSaveUiPresentation(frame.worldSave);
+	if (presentation.showStatus)
 		ui::metric("World", "%s", frame.worldSave.worldName.c_str());
 	ui::metric("Seed", "%d", frame.seed);
 	ui::metric("Player", "%.0f, %.0f", playerXZ.x, playerXZ.y);
 	ImGui::TextDisabled("Chunk %d, %d", frame.player.chunkX, frame.player.chunkZ);
-	if (frame.worldSave.active)
+	if (presentation.showStatus)
 	{
-		// Instant state via the pure helper (issue #180 review round 7):
-		// historical `failed` stays in the details block below.
-		const SaveUiHealth health = computeSaveUiHealth(
-			frame.worldSave.dirtyCoordinates, frame.worldSave.failedCoordinates,
-			frame.worldSave.queueDepth);
 		const char *saveState = "Saved";
-		switch (health)
+		switch (presentation.health)
 		{
 		case SaveUiHealth::Failed: saveState = "Failed"; break;
 		case SaveUiHealth::Saving: saveState = "Saving…"; break;
 		case SaveUiHealth::Saved: break;
 		}
 		ImGui::Text("Save %s", saveState);
-
-		// Error prominence (issue #180 review round 7, items 4-6): a red
-		// error on the main surface is CURRENT - either the persistence
-		// refused to open (no active persistence) or a save attempt is
-		// failing right now. A RECOVERED failure's error text lives in the
-		// details block below.
-		if (shouldShowSaveErrorProminently(frame.worldSave.active, health,
-		                                   !frame.worldSave.lastError.empty()))
-			ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
-							   frame.worldSave.lastError.c_str());
 	}
+	if (presentation.showProminentError)
+		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+						   frame.worldSave.lastError.c_str());
 
 	ImGui::Spacing();
 	bool prevFollow = m_mapFollow;

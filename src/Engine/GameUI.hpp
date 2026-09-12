@@ -93,6 +93,30 @@ inline bool shouldShowSaveErrorProminently(bool persistenceActive,
 	return health == SaveUiHealth::Failed;
 }
 
+/// Presentation decisions for the World panel, derived ONCE from the frame
+/// state (issue #180 review round 9): callers render from this struct so the
+/// active/open-failure branching cannot be accidentally coupled to the
+/// wrong block again. Pure - unit-tested headlessly.
+struct SaveUiPresentation
+{
+	bool showStatus{false};        ///< "Save Saved/Saving…/Failed" row
+	bool showProminentError{false}; ///< red error on the main surface
+	SaveUiHealth health{SaveUiHealth::Saved};
+};
+inline SaveUiPresentation computeSaveUiPresentation(const WorldSaveUiState &state)
+{
+	SaveUiPresentation out;
+	out.showStatus = state.active;
+	if (state.active)
+	{
+		out.health = computeSaveUiHealth(state.dirtyCoordinates,
+		                                 state.failedCoordinates, state.queueDepth);
+	}
+	out.showProminentError = shouldShowSaveErrorProminently(
+		state.active, out.health, !state.lastError.empty());
+	return out;
+}
+
 /// Frame snapshot for ImGui panels (pointers owned by Engine).
 /// Debug/telemetry data reaches panels through debugui::UiState snapshots
 /// (issue #179); the raw pointers here are the explicit settings structs and

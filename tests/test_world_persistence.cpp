@@ -2086,6 +2086,28 @@ static void testSaveStatusAfterRetry()
 		      "saving state hides the historical error");
 	}
 
+	// Presentation decisions (issue #180 review round 9, item 4): the
+	// original bug lived in the CALLER - an open-world refusal (active ==
+	// false, lastError set) must surface the error without a status row.
+	{
+		WorldSaveUiState state;
+		state.active = false;
+		state.lastError = "generator version mismatch";
+		const SaveUiPresentation presentation = computeSaveUiPresentation(state);
+		CHECK(!presentation.showStatus,
+		      "no save status when persistence failed to open");
+		CHECK(presentation.showProminentError,
+		      "open-world error remains visible");
+		CHECK(presentation.health == SaveUiHealth::Saved,
+		      "inactive session has no active health");
+
+		WorldSaveUiState ok;
+		ok.active = true;
+		const SaveUiPresentation healthy = computeSaveUiPresentation(ok);
+		CHECK(healthy.showStatus && !healthy.showProminentError,
+		      "active clean world shows status, no error");
+	}
+
 	wp.shutdown();
 	removeDir(root);
 }
