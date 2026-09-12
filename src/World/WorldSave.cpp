@@ -191,11 +191,22 @@ namespace worldsave
 	std::vector<uint8_t> encodeChunkFileBytes(int32_t chunkX, int32_t chunkZ,
 	                                          const std::vector<ChunkEdit> &edits)
 	{
+		// Writer/reader symmetry (issue #180 review round 3): anything the
+		// reader would reject as Corrupt is refused HERE, so every payload
+		// this API persists reads back Ok.
+		if (edits.empty() || edits.size() > static_cast<size_t>(CHUNK_VOLUME))
+			return {};
 		// Records are stored in ascending localIndex order; callers may pass
 		// any order, so sort a local copy.
 		std::vector<ChunkEdit> sorted = edits;
 		std::sort(sorted.begin(), sorted.end(), [](const ChunkEdit &a, const ChunkEdit &b)
 		          { return a.localIndex < b.localIndex; });
+		// Duplicate localIndex values cannot be produced by the capture path
+		// (the chunk edit map is unique-keyed) and the reader treats them as
+		// corruption.
+		for (size_t i = 1; i < sorted.size(); ++i)
+			if (sorted[i - 1].localIndex == sorted[i].localIndex)
+				return {};
 
 		ByteWriter records;
 		for (const ChunkEdit &edit : sorted)
