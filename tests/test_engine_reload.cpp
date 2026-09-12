@@ -8,6 +8,10 @@
 // FAIL, not a skip.
 #include <Engine/Engine.hpp>
 #include <World/WorldPersistence.hpp>
+#include <Chunk/Chunk.hpp>
+#include <utils.hpp>
+
+#include <cmath>
 
 #include <atomic>
 #include <chrono>
@@ -153,6 +157,67 @@ int main()
 		// item 7).
 		std::cerr << "FAIL: unexpected exception: " << e.what() << std::endl;
 		return 1;
+	}
+
+	// ---- Restored-player bootstrap at distance (issue #180 review round 6,
+	// item 4): the initial area must generate around the SAVED position, not
+	// the default origin.
+	{
+		const std::filesystem::path farRoot =
+			std::filesystem::temp_directory_path() /
+			("ft-vox-engine-far-" + uniqueSuffix());
+		TempDirGuard farGuard{farRoot};
+		constexpr const char *kFarWorld = "far-player";
+		// Feet position at chunk (100, -80), high enough to be clear air
+		// after generation (terrain validation policy: exact restore).
+		const double savedX = 100.0 * 16 + 8.5;
+		const double savedZ = -80.0 * 16 + 4.5;
+		const double savedY = 240.0;
+
+		{
+			WorldPersistence writer;
+			CHECK(writer.openOrCreate(farRoot, kFarWorld, 42, 1).ok, "far world created");
+			PlayerPersistState state;
+			state.x = savedX;
+			state.y = savedY;
+			state.z = savedZ;
+			state.yaw = 30.0f;
+			state.pitch = -10.0f;
+			state.flight = true;
+			state.selectedBlock = 3;
+			CHECK(writer.writePlayerState(state), "far player.state written");
+			writer.shutdown();
+		}
+
+		// Single live Engine per process: the ImGui Vulkan backend keeps
+		// process-global state, so two simultaneous Engine instances would
+		// double-free backend device objects at shutdown.
+		engine.reset();
+
+		{
+			Engine farEngine("ressources");
+			farEngine.setSavesRootForTests(farRoot);
+			farEngine.requestOpenWorld(kFarWorld);
+			farEngine.initializeNoiseGenerator(0); // adopts the stored seed
+
+			CHECK(farEngine.worldSeed() == 42, "far world adopts the stored seed");
+
+			// The bootstrap must have generated the SAVED chunk, not only the
+			// origin area: chunk (100, -80) present and generated.
+			const ChunkManager *chunks = farEngine.chunksForTests();
+			const Chunk *savedChunk = chunks ? chunks->getChunk(glm::ivec3(100, 0, -80)) : nullptr;
+			CHECK(savedChunk != nullptr && savedChunk->getState() >= ChunkState::GENERATED,
+			      "saved-position chunk bootstrapped (100, -80)");
+			const Chunk *originChunk = chunks ? chunks->getChunk(glm::ivec3(0, 0, 0)) : nullptr;
+			CHECK(originChunk == nullptr || originChunk->getState() < ChunkState::GENERATED,
+			      "origin area NOT the bootstrap center for a far saved player");
+
+			// Player restored at the saved spot (not snapped to any surface).
+			const glm::dvec3 feet = farEngine.playerPositionForTests();
+			CHECK(std::abs(feet.x - savedX) < 0.5 && std::abs(feet.z - savedZ) < 0.5 &&
+			          std::abs(feet.y - savedY) < 1.5,
+			      "player restored at the saved far position");
+		}
 	}
 
 	if (g_fails != 0)

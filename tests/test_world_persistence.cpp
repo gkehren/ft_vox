@@ -6,6 +6,8 @@
 // ThreadPool for the async paths, but never a Vulkan device).
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkManager.hpp>
+#include <Chunk/ChunkCollisionView.hpp>
+#include <Physics/PlayerController.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
@@ -1737,6 +1739,11 @@ static void testRevertAcrossFlushes()
 	const uint8_t va = static_cast<uint8_t>(BRICKS);
 	const uint8_t vb = static_cast<uint8_t>(GLASS);
 	const uint8_t vc = static_cast<uint8_t>(STONE);
+	// Per-world chunk-file path: each case opens its own world directory, so
+	// assertions must never look at a shared/foreign "chunks" root
+	// (issue #180 review round 6, item 6).
+	const auto chunkPathFor = [&](std::string_view world)
+	{ return root / world / "chunks" / "0_0.chunk"; };
 
 	// Case 1: edit A -> flush -> revert A to procedural -> flush => empty.
 	{
@@ -1749,7 +1756,7 @@ static void testRevertAcrossFlushes()
 		CHECK(wp.flush(), "case1 revert flush");
 		CHECK(wp.status().dirtyCoordinates == 0, "case1 clean after revert");
 		CHECK(wp.overridesSnapshot(0, 0).empty(), "case1 override refined away");
-		CHECK(!fileExists(chunkPath(chunks, 0, 0)), "case1 chunk file deleted");
+		CHECK(!fileExists(chunkPathFor("case1")), "case1 chunk file deleted");
 		wp.shutdown();
 	}
 
@@ -1767,7 +1774,7 @@ static void testRevertAcrossFlushes()
 		const std::vector<worldsave::ChunkEdit> saved = wp.overridesSnapshot(0, 0);
 		CHECK(saved.size() == 1 && containsEdit(saved, ib, vb),
 		      "case2 B present, A reverted away");
-		CHECK(fileExists(root / "case2" / "chunks" / "0_0.chunk"), "case2 file still exists");
+		CHECK(fileExists(chunkPathFor("case2")), "case2 file still exists");
 		wp.shutdown();
 	}
 
@@ -1933,6 +1940,60 @@ static void testUnloadReloadAfterMultipleFlushes()
 	CHECK(containsEdit(saved, idxB, static_cast<uint8_t>(GLASS)), "B in the save");
 	verify.shutdown();
 
+	removeDir(root);
+}
+
+static void testRestorePolicyWaitingForTerrain()
+{
+	std::cout << "== Restore policy: waitingForTerrain ==" << std::endl;
+	auto root = makeTempDir("restorewait");
+	const int seed = 42;
+
+	TerrainGenerator gen(seed);
+	ThreadPool threads(2);
+	ChunkPool pool(64);
+	ChunkManager mgr(&gen, &threads, &pool);
+	std::string err;
+	CHECK(mgr.openWorld((root / "saves").string(), "rw", err),
+	      ("openWorld failed: " + err).c_str());
+
+	Camera camera(glm::vec3(8.0f, 100.0f, 8.0f));
+	RenderSettings settings;
+	settings.minRenderDistance = 32;
+	settings.maxRenderDistance = 48;
+	mgr.updateStreaming(camera, settings);
+	mgr.processChunkLoading(16);
+	// Deliberately NO generatePendingVoxels: the acquired chunks stay
+	// UNLOADED, so collision queries around them report unknown cells - the
+	// exact "terrain unavailable at restore" situation.
+
+	// The restore policy (Engine::restorePlayerState) is: ChunkCollisionView
+	// + physics::recover on a candidate body. Same calls here - the
+	// semantics under test are the shared ones, not an Engine private.
+	// NB: the view holds the manager's shared lock for its LIFETIME - scope
+	// it tightly so closeWorld() (exclusive lock) below cannot deadlock.
+	{
+		ChunkCollisionView world(mgr);
+		physics::QueryStats queries;
+		physics::Body candidate;
+		candidate.position = glm::dvec3(8.0, 120.0, 8.0); // inside an UNLOADED chunk
+		const glm::dvec3 original = candidate.position;
+		const bool cleared = physics::recover(world, candidate, queries);
+		CHECK(!cleared, "restore over unavailable terrain does not clear");
+		CHECK(candidate.waitingForTerrain, "restore flags waitingForTerrain");
+		CHECK(glm::length(candidate.position - original) < 1e-9,
+		      "no speculative teleport: position kept verbatim");
+
+		// A distant generated-free position behaves the same (no chunk at all).
+		// NB: "far" is a legacy macro on Windows - use distantBody.
+		physics::Body distantBody;
+		distantBody.position = glm::dvec3(5000.0, 120.0, 5000.0);
+		const bool distantCleared = physics::recover(world, distantBody, queries);
+		CHECK(!distantCleared && distantBody.waitingForTerrain,
+		      "absent chunk also waits, never teleports");
+	}
+
+	CHECK(mgr.closeWorld(), "close");
 	removeDir(root);
 }
 
@@ -2102,6 +2163,7 @@ int main()
 	testMultiFlushEditsAccumulate();
 	testRevertAcrossFlushes();
 	testUnloadReloadAfterMultipleFlushes();
+	testRestorePolicyWaitingForTerrain();
 	testDestructorDrainsCompletionsBeforeTeardown();
 	testDestructorPublishesUnpublishedMeshCompletions();
 	testQueueCoalescingAndBusy();
