@@ -219,6 +219,10 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/BuildInfo.cpp
     ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/Chunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkEditing.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkLighting.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshing.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkGpu.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
