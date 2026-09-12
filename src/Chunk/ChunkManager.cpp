@@ -2351,17 +2351,20 @@ bool ChunkManager::openWorld(const std::string &savesRoot, const std::string &wo
 	return true;
 }
 
-// Quiesce the async lifecycle for persistence (issue #180 review): publish
-// every finished gen/mesh/light job, apply every deferred voxel edit and age
-// deferred releases, so the final persistence capture sees the complete
-// authoritative voxel state and no worker can dereference the persistence
-// facade after it is released. Bounded: the close path does not feed the
-// queues (streaming is not driven), so the loop converges; the cap only
-// guards a pathological edit whose target chunk never leaves UNLOADED.
-void ChunkManager::drainAsyncJobsForPersistence()
+// Quiesce the async lifecycle for persistence (issue #180 review round 2):
+// publish every finished gen/mesh/light job, apply every deferred voxel edit
+// and age deferred releases, so the final persistence capture sees the
+// complete authoritative voxel state and no worker can dereference the
+// persistence facade after it is released.
+//
+// Closing a persistent world is a durability barrier: there is deliberately
+// NO timeout here - waiting is strictly better than losing a save. The loop
+// cannot spin forever on the JOB side (the close path does not feed the
+// queues; workers always finish), but a PendingVoxelEdit whose target chunk
+// never leaves UNLOADED (gen budget starved) can stay deferred forever, so
+// that condition is CHECKED afterwards instead of waited on.
+bool ChunkManager::drainAsyncJobsForPersistence()
 {
-	constexpr int kMaxDrainSpins = 4000; // ~2s worst case at 500us per spin
-	int spins = 0;
 	for (;;)
 	{
 		processFinishedJobs();     // publishes gen/mesh/light + applyPendingEdits
@@ -2369,12 +2372,18 @@ void ChunkManager::drainAsyncJobsForPersistence()
 		const bool busy = m_pendingGenJobsCount.load() > 0 ||
 		                  m_pendingMeshJobsCount.load() > 0 ||
 		                  m_pendingLightJobsCount.load() > 0 || anyChunkInTransitForPersistence();
-		if (!busy || ++spins >= kMaxDrainSpins)
+		if (!busy)
 			break;
 		std::this_thread::sleep_for(std::chrono::microseconds(500));
 	}
 	// One final publish pass so edits deferred until the very last job land.
 	processFinishedJobs();
+
+	// Every edit accepted by gameplay must have reached authoritative voxel
+	// state before the capture runs (issue #180 review round 2).
+	if (hasPendingLogicalEdits())
+		return false;
+	return true;
 }
 
 bool ChunkManager::anyChunkInTransitForPersistence() const
@@ -2397,7 +2406,15 @@ bool ChunkManager::closeWorld()
 	// capture ran, and in-transit chunks were skipped by captureAll. With
 	// the drain first, the capture below sees every authoritative edit and
 	// no worker can touch m_persistence after shutdown/release.
-	drainAsyncJobsForPersistence();
+	if (!drainAsyncJobsForPersistence())
+	{
+		// Accepted edits are still stranded outside authoritative voxel
+		// state (their chunk never generated). Persistence stays OPEN: a
+		// later flushWorld()/closeWorld() retries once the situation
+		// resolves. Destroying the facade here would silently drop them.
+		std::cerr << "[world] close deferred: logical edits still pending after drain" << std::endl;
+		return false;
+	}
 
 	captureAllChunkEdits();
 	const bool flushed = m_persistence->flush();

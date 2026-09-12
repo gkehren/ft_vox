@@ -293,6 +293,11 @@ public:
 	/// and release the persistence facade. Returns the flush success. After
 	/// closeWorld() the manager behaves exactly like a never-opened one.
 	bool closeWorld();
+	/// True while gameplay edits accepted against not-yet-readable chunks are
+	/// still queued as PendingVoxelEdits - authoritative voxel state is
+	/// behind accepted input. Main-thread view (edits and this accessor are
+	/// main-thread only); used by the close-world drain and tests.
+	bool hasPendingLogicalEdits() const { return !m_pendingEdits.empty(); }
 	/// Capture all dirty loaded chunks + flush (no close). False on I/O failure.
 	bool flushWorld();
 	bool isWorldOpen() const { return m_persistence != nullptr; }
@@ -438,8 +443,11 @@ private:
 	void captureAllChunkEdits();
 	/// Quiesce the async lifecycle before the final persistence capture
 	/// (closeWorld): publish finished gen/mesh/light jobs, apply deferred
-	/// voxel edits, age deferred releases (issue #180 review).
-	void drainAsyncJobsForPersistence();
+	/// voxel edits, age deferred releases. Deliberately NO timeout - closing
+	/// a persistent world is a durability barrier. Returns false when
+	/// accepted logical edits are still pending afterwards (their chunk
+	/// never left UNLOADED): the caller must then NOT capture/shutdown.
+	bool drainAsyncJobsForPersistence();
 	bool anyChunkInTransitForPersistence() const;
 
 	std::unique_ptr<WorldPersistence> m_persistence;
