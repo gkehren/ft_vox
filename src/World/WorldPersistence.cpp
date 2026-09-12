@@ -182,6 +182,16 @@ bool SaveService::enqueue(ChunkSaveRequest &&request)
 
 	const uint64_t key = coordKey(request.chunkX, request.chunkZ);
 
+	// Commit gate (issue #180 review round 3): the coordinate's rename/
+	// delete is in flight outside the mutex. Refuse with Busy and NO
+	// bookkeeping (no ticket, no latestRevision, no queue entry) exactly
+	// like the queue-bound case - a ticket created here could never be
+	// resolved before the flush barrier sampled it, recreating the
+	// revision-barrier deadlock in ticket form. The caller keeps the state
+	// dirty and retries.
+	if (m_committingCoords.count(key) != 0)
+		return false;
+
 	// Per-coordinate coalescing (issue #180 review): a newer capture REPLACES
 	// the queued payload in place, so one coordinate is at most one pending
 	// job and the bound below counts distinct chunks - the main thread is
@@ -434,21 +444,44 @@ void SaveService::processJob(Job &job)
 		}
 
 		// (4) Authoritative commit, ATOMIC with the revision check
-		// (issue #180 review round 2): no enqueue for this coordinate can
-		// slip between the stale check and the rename/delete, so the
-		// invariant "only the coordinate's latestRevision may modify its
-		// authoritative file" holds exactly. The lock covers only the fast
-		// rename/delete - the tmp write stays outside. Applies to BOTH
+		// (issue #180 review round 2) WITHOUT holding the mutex during the
+		// filesystem mutation (issue #180 review round 3): the check+mark
+		// runs under the mutex, the rename/delete runs outside it, and
+		// enqueue() refuses marked coordinates - so no newer revision can
+		// slip between the check and the mutation, and enqueue() is never
+		// blocked by disk I/O. Invariant: only the coordinate's
+		// latestRevision may modify its authoritative file. Applies to BOTH
 		// commits: a delete (empty diff) is as authoritative as a rename.
 		if (haveTmp || overrides.empty())
 		{
 			if (beforeCommit)
 				beforeCommit(chunkX, chunkZ, revision);
-			std::lock_guard<std::mutex> lock(m_mutex);
-			const auto it = m_latestRevision.find(key);
-			stale = it != m_latestRevision.end() && it->second != revision;
-			if (!stale)
+			bool marked = false;
 			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				const auto it = m_latestRevision.find(key);
+				stale = it != m_latestRevision.end() && it->second != revision;
+				if (!stale)
+				{
+					m_committingCoords.insert(key);
+					marked = true;
+				}
+			}
+			if (marked)
+			{
+				// Scope guard: the coordinate is un-marked on every path,
+				// including exceptions from the filesystem layer.
+				struct CommitGateGuard
+				{
+					SaveService *service;
+					uint64_t key;
+					~CommitGateGuard()
+					{
+						std::lock_guard<std::mutex> lock(service->m_mutex);
+						service->m_committingCoords.erase(key);
+					}
+				} gate{this, key};
+
 				if (overrides.empty())
 				{
 					deleted = true;

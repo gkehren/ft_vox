@@ -53,6 +53,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <unordered_set>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -209,6 +210,13 @@ private:
 	// A job whose revision no longer matches at I/O time has been superseded
 	// in flight and must not touch the authoritative file.
 	std::unordered_map<uint64_t, uint64_t> m_latestRevision;
+	// Authoritative-commit gate: coordinates whose rename/delete is being
+	// executed WITHOUT the mutex held. While marked, enqueue() refuses the
+	// coordinate (Busy) so a newer revision can never slip between the
+	// revision check and the authoritative filesystem mutation - the
+	// check+commit stays logically atomic without blocking enqueue() on the
+	// rename (issue #180 review round 3).
+	std::unordered_set<uint64_t> m_committingCoords;
 	static constexpr size_t kMaxPendingCoords = 1024;
 
 	// Barrier tickets (acceptance order, independent of content revisions).
