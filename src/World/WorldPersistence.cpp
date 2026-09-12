@@ -57,6 +57,31 @@ bool sameEditList(const std::vector<worldsave::ChunkEdit> &a,
 	return true;
 }
 
+// Merge a captured DELTA into the coordinate's desired state (issue #180
+// review round 5): base entries win first, delta entries overwrite, the
+// result is canonical (ascending localIndex, unique). Sizes are small (a
+// chunk's edit count); an ordered merge of two sorted vectors would be a
+// later optimization if profiling ever demands it.
+void mergeEdits(std::vector<worldsave::ChunkEdit> &base,
+                const std::vector<worldsave::ChunkEdit> &delta)
+{
+	if (delta.empty())
+		return;
+	std::unordered_map<uint32_t, uint8_t> merged;
+	merged.reserve(base.size() + delta.size());
+	for (const worldsave::ChunkEdit &edit : base)
+		merged[edit.localIndex] = edit.blockType;
+	for (const worldsave::ChunkEdit &edit : delta)
+		merged[edit.localIndex] = edit.blockType;
+	base.clear();
+	base.reserve(merged.size());
+	for (const auto &[localIndex, blockType] : merged)
+		base.push_back({localIndex, blockType});
+	std::sort(base.begin(), base.end(),
+	          [](const worldsave::ChunkEdit &a, const worldsave::ChunkEdit &b)
+	          { return a.localIndex < b.localIndex; });
+}
+
 // Canonical capture order: ascending localIndex with duplicates collapsing to
 // the LAST value (true last-write-wins, issue #180 review - a stable_sort
 // followed by keep-first would preserve a stale value).
@@ -815,6 +840,8 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 			ChunkPersistenceState &state = it->second;
 			if (revision != state.desiredRevision)
 				return; // stale completion: a newer capture owns this coordinate
+			            // (and must NOT canonicalize desired - issue #180
+			            // review round 5, item 8)
 			state.pending = false;
 			if (!ok)
 			{
@@ -827,6 +854,10 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 			}
 			state.durable = finalOverrides;
 			state.durableRevision = revision;
+			// Canonicalize desired to the true minimal override set: entries
+			// that reverted to procedural terrain are dropped here - the
+			// worker is the only layer that knows the regenerated base.
+			state.desired = finalOverrides;
 			state.failed = false;
 		});
 	m_enabled = true;
@@ -875,15 +906,22 @@ void WorldPersistence::captureChunkEdits(int32_t chunkX, int32_t chunkZ,
 		state.chunkX = chunkX;
 		state.chunkZ = chunkZ;
 
+		// Delta merge (issue #180 review round 5): the payload carries only
+		// the edits since the chunk's edit map was last taken, so it is
+		// MERGED into desired (seeded from the durable baseline on the first
+		// capture of the session) instead of replacing it. The procedural
+		// base is unknown here - reverts capture the base VALUE and the save
+		// worker's diff drops them from the persisted file.
+		std::vector<worldsave::ChunkEdit> merged =
+			state.desiredRevision != 0 ? state.desired : state.durable;
+		mergeEdits(merged, currentValues);
+		state.desired = std::move(merged);
+
 		// Enqueue decision (issue #180 review): work is only needed when the
 		// desired content is not already durable, not pending, and the last
 		// attempt did not fail. A re-capture of identical content on a clean
 		// coordinate skips; a FAILED coordinate retries even for identical
 		// content (its durable copy is not confirmed).
-		const bool newCapture = state.desiredRevision == 0 ||
-		                        !sameEditList(state.desired, currentValues);
-		if (newCapture)
-			state.desired = currentValues;
 		const bool clean =
 			sameEditList(state.desired, state.durable) && !state.failed && !state.pending;
 		if (clean)

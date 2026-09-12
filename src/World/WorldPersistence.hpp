@@ -350,14 +350,26 @@ public:
 	/// state machine mutates.
 	std::vector<worldsave::ChunkEdit> overridesSnapshot(int32_t chunkX, int32_t chunkZ) const;
 
-	/// Capture the current edited-voxel values for one chunk (main thread;
-	/// values are final/authoritative and carry one entry per edited voxel,
-	/// duplicates collapsing last-write-wins). Stamps a new desiredRevision
-	/// and (re)enqueues unless `desired == durable && !failed && !pending`.
-	/// Never blocks: when the service queue is full the state stays dirty
-	/// (desiredRevision > durableRevision) and is retried by the next
-	/// capture or flush. If the service is not running the capture is NOT
-	/// silently dropped: the error log records it.
+	/// Capture edited-voxel values for one chunk (main thread).
+	///
+	/// DELTA semantics (issue #180 review round 5): the chunk's edit map is
+	/// taken (emptied) at every capture, so `currentValues` carries only the
+	/// authoritative values of the voxels edited SINCE the last capture -
+	/// NOT a full snapshot. The facade MERGES the delta into the
+	/// coordinate's desired state (seeded from the durable baseline on the
+	/// first capture of the session), so `edit A -> flush -> edit B ->
+	/// flush` persists A+B.
+	///
+	/// Reverts are expressed by capturing the PROCEDURAL value of the voxel
+	/// (this layer does not know it); the save worker regenerates the base
+	/// and diffEditsAgainstBase drops the entry from the persisted file.
+	/// An EMPTY delta changes nothing (it can never express "revert all").
+	///
+	/// Stamps a new desiredRevision and (re)enqueues unless the merge left
+	/// `desired == durable && !failed && !pending`. Never blocks: when the
+	/// service queue is full the state stays dirty and is retried by the
+	/// next capture or flush. If the service is not running the capture is
+	/// NOT silently dropped: the error log records it.
 	void captureChunkEdits(int32_t chunkX, int32_t chunkZ,
 	                       std::vector<worldsave::ChunkEdit> currentValues);
 
