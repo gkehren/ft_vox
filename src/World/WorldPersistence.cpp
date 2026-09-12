@@ -215,7 +215,10 @@ bool SaveService::enqueue(ChunkSaveRequest &&request)
 	// revision-barrier deadlock in ticket form. The caller keeps the state
 	// dirty and retries.
 	if (m_committingCoords.count(key) != 0)
+	{
+		++m_rejectedBusyCommitGate;
 		return false;
+	}
 
 	// Per-coordinate coalescing (issue #180 review): a newer capture REPLACES
 	// the queued payload in place, so one coordinate is at most one pending
@@ -223,7 +226,10 @@ bool SaveService::enqueue(ChunkSaveRequest &&request)
 	// never blocked waiting for disk I/O.
 	const auto existing = m_pendingByCoord.find(key);
 	if (existing == m_pendingByCoord.end() && m_pendingByCoord.size() >= kMaxPendingCoords)
+	{
+		++m_rejectedBusyQueueFull;
 		return false; // Busy: caller keeps the state dirty and retries later.
+	}
 		              // Ticket/revision bookkeeping MUST NOT happen for a
 		              // rejected request: the flush barrier waits for
 		              // accepted tickets only, and a rejected ticket would
@@ -254,6 +260,7 @@ bool SaveService::enqueue(ChunkSaveRequest &&request)
 	m_pendingByCoord.emplace(key, std::move(request));
 	m_order.push_back(key);
 	++m_enqueued;
+	m_queueDepthPeak = std::max(m_queueDepthPeak, m_pendingByCoord.size());
 	m_queueCv.notify_one();
 	return true;
 }
@@ -323,6 +330,9 @@ SaveService::Stats SaveService::stats() const
 	s.deleted = m_deleted;
 	s.bytesWritten = m_bytesWritten;
 	s.queueDepth = m_pendingByCoord.size();
+	s.queueDepthPeak = m_queueDepthPeak;
+	s.rejectedBusyQueueFull = m_rejectedBusyQueueFull;
+	s.rejectedBusyCommitGate = m_rejectedBusyCommitGate;
 	const uint64_t processed = m_completed + m_deleted;
 	s.avgSerializeMs = processed ? m_serializeTotalMs / static_cast<double>(processed) : 0.0;
 	s.maxSerializeMs = m_serializeMaxMs;
@@ -1189,12 +1199,19 @@ WorldPersistence::Status WorldPersistence::status() const
 	{
 		const SaveService::Stats st = m_service->stats();
 		s.queueDepth = st.queueDepth;
+		s.queueDepthPeak = st.queueDepthPeak;
+		s.rejectedBusyQueueFull = st.rejectedBusyQueueFull;
+		s.rejectedBusyCommitGate = st.rejectedBusyCommitGate;
 		s.enqueued = st.enqueued;
 		s.completed = st.completed;
 		s.superseded = st.superseded;
 		s.failed = st.failed;
 		s.deleted = st.deleted;
 		s.bytesWritten = st.bytesWritten;
+		s.avgSerializeMs = st.avgSerializeMs;
+		s.maxSerializeMs = st.maxSerializeMs;
+		s.avgWriteMs = st.avgWriteMs;
+		s.maxWriteMs = st.maxWriteMs;
 		if (!st.lastError.empty())
 			s.lastError = st.lastError;
 	}

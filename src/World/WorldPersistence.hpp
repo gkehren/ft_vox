@@ -130,6 +130,17 @@ public:
 		uint64_t deleted{0}; // chunk files removed (all overrides reverted)
 		uint64_t bytesWritten{0};
 		size_t queueDepth{0}; // DISTINCT coordinates pending (coalesced)
+		// High-water mark of queueDepth since construction (issue #180
+		// review round 6): validates that save memory/queue growth stays
+		// bounded under sustained edits instead of sampling an arbitrary
+		// instant.
+		size_t queueDepthPeak{0};
+		// Captures rejected because the distinct-coordinate queue was full
+		// vs. because the coordinate was mid authoritative commit (both
+		// retry later; sustained busyCommitGate growth would hint at commit
+		// I/O becoming a bottleneck).
+		uint64_t rejectedBusyQueueFull{0};
+		uint64_t rejectedBusyCommitGate{0};
 		// Serialize = deterministic base regeneration + diff; write = the
 		// chunk file I/O. Averages are over processed (completed+deleted).
 		double avgSerializeMs{0.0};
@@ -222,6 +233,9 @@ private:
 	// Barrier tickets (acceptance order, independent of content revisions).
 	uint64_t m_nextBarrierTicket{1};
 	uint64_t m_lastAcceptedTicket{0};
+	size_t m_queueDepthPeak{0};
+	uint64_t m_rejectedBusyQueueFull{0};
+	uint64_t m_rejectedBusyCommitGate{0};
 	// Ordered set of accepted-but-unresolved tickets. flush() waits until no
 	// ticket <= its sampled target remains; the ordered begin() makes that
 	// check O(1) instead of a scan.
@@ -287,12 +301,23 @@ public:
 		// Coordinates whose desired content is not yet durable (queued,
 		// in flight or failed) - the "dirty save" set the UI can show.
 		uint64_t dirtyCoordinates{0};
+		// Queue high-water mark + Busy rejections (issue #180 review round
+		// 6, items 10-11): bounded-queue validation without sampling luck.
+		size_t queueDepthPeak{0};
+		uint64_t rejectedBusyQueueFull{0};
+		uint64_t rejectedBusyCommitGate{0};
 		uint64_t enqueued{0};
 		uint64_t completed{0};
 		uint64_t superseded{0};
 		uint64_t failed{0};
 		uint64_t deleted{0};
 		uint64_t bytesWritten{0};
+		// Serialize = base regen + diff; write = chunk-file I/O (issue #180
+		// review round 6: surfaced for the persistence benchmark).
+		double avgSerializeMs{0.0};
+		double maxSerializeMs{0.0};
+		double avgWriteMs{0.0};
+		double maxWriteMs{0.0};
 		std::string lastError;
 	};
 
