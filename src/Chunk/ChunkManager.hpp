@@ -298,6 +298,10 @@ public:
 	/// behind accepted input. Main-thread view (edits and this accessor are
 	/// main-thread only); used by the close-world drain and tests.
 	bool hasPendingLogicalEdits() const { return !m_pendingEdits.empty(); }
+	/// Canonical world->chunk mapping (floor division; correct for negative
+	/// coordinates). Public so tools/benchmarks use the runtime convention
+	/// (issue #180 review round 7, item 4).
+	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
 	/// Test/benchmark accessor: snapshot of the active chunk set.
 	std::vector<Chunk *> activeChunksSnapshot() const
 	{
@@ -420,7 +424,6 @@ private:
 	uint64_t m_nextGroupId{1};
 
 	TaskPriority calculateTaskPriority(float distanceSq, float lodThresholdSq) const;
-	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
 
 	/// Bounded trace write (no-op while tracing is disabled). Main thread.
 	void recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sections = 0);
