@@ -1,0 +1,3 @@
+## 2024-05-10 - Avoiding `std::unordered_set` overhead in Render Loop
+**Learning:** In `ChunkManager::uploadPendingMeshes`, `std::unordered_set` was used for local cycle tracking (`published`, `processedGroups`) but this allocates multiple hash nodes dynamically per frame on the hot path, causing cache-misses and memory allocator overhead.
+**Action:** When collections bounded tightly by rendering budget are cleared per frame, allocate `std::vector` combined with `std::find()` for cache-friendly contiguous memory access instead of `unordered_set`. While lookup becomes O(N), for small collections it out-performs O(1) hash maps due to avoiding allocator overhead and pointer chasing.
