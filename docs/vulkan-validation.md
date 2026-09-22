@@ -1,5 +1,18 @@
 # Vulkan validation and injected overlays
 
+## Enabling the layers
+
+Validation is on by default in Debug builds; override with `FT_VOX_VALIDATION=0|1`. The loader discovers the layers at runtime — they are never linked into the binary:
+
+```bash
+# macOS
+brew install vulkan-validationlayers
+export VK_LAYER_PATH=/opt/homebrew/opt/vulkan-validationlayers/share/vulkan/explicit_layer.d
+
+# Linux (Debian/Ubuntu)
+sudo apt install vulkan-validationlayers
+```
+
 ## SRGB/STORAGE errors from RTSS (issue #99)
 
 On the investigated Windows machine, RivaTuner Statistics Server (RTSS)

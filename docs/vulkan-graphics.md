@@ -745,6 +745,6 @@ Do not treat this section as “already shipped.” For historical feature discu
 - [`gpu-profiling.md`](gpu-profiling.md) — GPU timestamp lifecycle, UI, benchmark metrics and validation
 
 - [`engine-architecture.md`](engine-architecture.md) — Engine loop, chunks, streaming, terrain generation  
-- Root [`README.md`](../README.md) — build, deps, controls  
+- Root [`README.md`](../README.md) — project landing page, controls · [`building.md`](building.md) — build, deps  
 - [`AGENTS.md`](../AGENTS.md) — contributor-oriented project context  
 - `docs/benchmarks/` — benchmark methodology syntheses (not architecture); raw profiling dumps stay local/CI (see `docs/benchmarks/README.md`)  

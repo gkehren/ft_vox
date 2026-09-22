@@ -1,200 +1,140 @@
 # ft_vox
 
-High-performance voxel sandbox engine built from scratch with **C++20**, **SDL3**, and **Vulkan 1.2+** (MoltenVK on macOS).
+Cross-platform voxel sandbox engine built from scratch in **C++20**, **Vulkan** and **SDL3**.
 
-Features procedural infinite terrain, biomes, passive wildlife (cow / pig / sheep / chicken), player physics, shadows, water, HDR post-processing (bloom, god rays, ACES), and overlays. An experimental UDP networking prototype lives under `src/Network/` — it is compiled into `test_network` only and is not wired into the game.
+<p align="center">
+  <img src="docs/images/noon.webp" alt="ft_vox — procedural voxel world at noon: terrain, water, forests and wildlife" width="900">
+</p>
 
-## Build requirements
+![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
+![Vulkan 1.2+](https://img.shields.io/badge/Vulkan-1.2%2B-ac162c?logo=vulkan&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-MSVC%202022-0078D6?logo=windows&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-GCC%20%2F%20Clang-FCC624?logo=linux&logoColor=black)
+![macOS](https://img.shields.io/badge/macOS-MoltenVK-000000?logo=apple&logoColor=white)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 
-| | Windows | Linux | macOS |
-|--|---------|-------|-------|
-| CMake | 3.16+ | 3.16+ | 3.16+ |
-| Compiler | MSVC 2022 / clang-cl | g++ / clang++ (C++20) | Apple Clang (C++20) |
-| Deps | **vcpkg** (recommended) | **apt / dnf / pacman** | **Homebrew** and/or vcpkg |
-| Vulkan | GPU driver | mesa / vendor ICD | MoltenVK |
-| Shaders | `glslc` or `glslangValidator` | `glslang-tools` | `brew install glslang` |
+ft_vox is a voxel sandbox engine focused on real-time rendering, procedural
+terrain generation and engine architecture.
 
-**Policy:** Linux prefers distro packages. Windows uses vcpkg for almost everything. macOS uses Homebrew for the Vulkan stack; C++ libraries may come from Homebrew or vcpkg.
+It features infinite terrain, biome generation, player physics, dynamic
+lighting, water, HDR post-processing, passive wildlife, persistent world
+saves, profiling and automated visual-regression testing.
+
+## Features
+
+### World
+- Infinite procedural terrain with biomes, caves and rivers
+- Distance-based chunk streaming with LOD meshing
+- Persistent world saves for voxel edits and world state
+- Resource-pack support for block textures
+
+### Rendering
+- Vulkan 1.2 renderer with dedicated shadow, opaque, water, sky and post passes
+- Dynamic cascade shadows with PCF filtering
+- HDR post stack: bloom, god rays, ACES tonemapping, optional FXAA
+- Full day/night cycle
+
+### Engine
+- Player controller on a shared voxel collision solver
+- Passive wildlife (cow, pig, sheep, chicken) with ambient wander AI
+- ImGui tooling: graphics, streaming, world map and chunk inspector panels
+- CPU workload telemetry and GPU frame profiling
+- Automated offscreen visual-regression tests
+
+## Screenshots
+
+| Sunset | Night |
+|--------|-------|
+| ![Sunset over the ocean with god rays](docs/images/sunset.webp) | ![Moonlit night with glowing lava](docs/images/night.webp) |
+
+**Long render distance**
+
+![Long render distance](docs/images/render_distance.webp)
+
+## Technical highlights
+
+ft_vox is also an experimentation ground for modern C++ and real-time
+graphics engineering.
+
+- Modular Vulkan renderer with an explicit pass graph
+- GPU memory management with VMA; texture arrays and greedy meshing
+- Asynchronous chunk streaming: thread-pool generation and meshing, staged uploads
+- Procedural terrain generation with FastNoise2 noise and biome graphs
+- One voxel collision solver shared by the player and passive mobs
+- CPU workload telemetry (`FT_VOX_TELEMETRY`) and GPU timestamp profiling
+- Automated offscreen visual-regression harness with golden references
+- Cross-platform dependency management: vcpkg, system packages and FetchContent
+
+![Development UI](docs/images/dev_layout.webp)
 
 ## Quick start
 
-### Linux (system packages)
+### Linux
 
 ```bash
-./install_dep.sh          # apt, dnf, or pacman
-make                      # no vcpkg toolchain
+./install_dep.sh
+make
 ./build-vk/ft_vox
 ```
 
-If your distro is too old for `libsdl3-dev` / `SDL3-devel`:
-
-```bash
-# Option A — fetch SDL3 via CMake
-cmake -B build-vk -DFT_VOX_DEP_MODE=system -DFT_VOX_FETCH_SDL3=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-vk -j
-
-# Option B — full vcpkg
-make USE_VCPKG=1 VCPKG_ROOT=$HOME/vcpkg
-```
-
-### macOS (Homebrew + optional vcpkg)
-
-```bash
-./install_dep.sh          # molten-vk, sdl3, boost, glslang, …
-export VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
-
-make                      # uses vcpkg automatically if ~/vcpkg exists
-# or force system/Homebrew only:
-make USE_VCPKG=0
-
-./build-vk/ft_vox
-```
-
-### Windows (vcpkg)
+### Windows
 
 ```powershell
-# Once: clone + bootstrap vcpkg, install VS C++ tools
-git clone https://github.com/microsoft/vcpkg C:\vcpkg
-C:\vcpkg\bootstrap-vcpkg.bat
-$env:VCPKG_ROOT = "C:\vcpkg"
-
 .\build.ps1
-.\build.ps1 -Test
 .\build\Release\ft_vox.exe
 ```
 
-Or plain CMake:
-
-```powershell
-cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
-cmake --build build --config Release
-```
-
-## Dependencies
-
-| Component | Role | Linux package (examples) | vcpkg |
-|-----------|------|--------------------------|-------|
-| SDL3 | Window, input, Vulkan surface | `libsdl3-dev` / `SDL3-devel` | `sdl3[vulkan]` |
-| Boost.System / Asio | Experimental UDP networking prototype (compiled into `test_network` only; Boost is **not linked into the game binary**) | `libboost-system-dev` | `boost-asio`, `boost-system` |
-| Vulkan headers + loader | API | `libvulkan-dev` | `vulkan-headers`, `vulkan-loader` |
-| volk (zeux) | Dynamic Vulkan load | *FetchContent* if missing | `volk` |
-| VMA | GPU allocations | *system header or FetchContent* | `vulkan-memory-allocator` |
-| glslang / glslc | GLSL → SPIR-V | `glslang-tools` | `glslang` |
-| GLM, FastNoise2 | Math / noise | *FetchContent* | — |
-| ImGui | UI | vendored `src/imgui/` | — |
-
-CMake resolves this in `cmake/Dependencies.cmake`:
-
-1. CONFIG packages (vcpkg) when a vcpkg toolchain is active  
-2. System / pkg-config (`find_package`, `pkg-config`)  
-3. FetchContent for volk, VMA, GLM, FastNoise2 (and optional SDL3)
+### macOS
 
 ```bash
-# Force modes
-cmake -B build-vk -DFT_VOX_DEP_MODE=system …
-cmake -B build-vk -DFT_VOX_DEP_MODE=vcpkg -DCMAKE_TOOLCHAIN_FILE=…/vcpkg.cmake …
+./install_dep.sh
+make
+make run
 ```
 
-## Makefile targets
+For complete build instructions and dependency configuration, see
+[Building ft_vox](docs/building.md).
 
-```text
-make deps          # ./install_dep.sh
-make configure     # cmake -B build-vk
-make / make build  # compile
-make test          # ctest
-make run ARGS=…    # launch (sets MoltenVK ICD on macOS)
-make USE_VCPKG=1   # force vcpkg on Linux/macOS
-make USE_VCPKG=0   # force system packages
-make print-config  # show resolved toolchain flags
-```
-
-## Tests
-
-```bash
-make test
-# or
-cd build-vk && ctest --output-on-failure
-```
-
-Windows: `.\build.ps1 -Test`
-
-## Environment variables
-
-| Variable | Purpose |
-|----------|---------|
-| `VK_ICD_FILENAMES` | Path to MoltenVK (or other) ICD JSON |
-| `VK_LAYER_PATH` | Path to validation `explicit_layer.d` |
-| `FT_VOX_VALIDATION` | `1` force validation layers on; `0` disable (default: on in Debug) |
-| `FT_VOX_RESOURCE_PACK` | Resource pack root or `.zip` override (CLI `--resource-pack` wins; default: bundled `default-resource-pack.zip`) |
-| `FT_VOX_VULKAN_LIB` | Explicit path to the Vulkan loader library (else well-known loader locations) |
-| `VCPKG_ROOT` | vcpkg install root (Makefile / `build.ps1`) |
-
-### Optional validation (Debug)
-
-```bash
-# macOS
-brew install vulkan-validationlayers
-export VK_LAYER_PATH=/opt/homebrew/opt/vulkan-validationlayers/share/vulkan/explicit_layer.d
-
-# Linux (Debian/Ubuntu)
-sudo apt install vulkan-validationlayers
-```
-
-## Controls (in-game)
+## Controls
 
 | Input | Action |
 |-------|--------|
 | WASD / mouse | Move / look |
-| Space | Jump / swim up / fly up |
-| Shift | Sprint / swim down / fly down |
-| V | Switch walking / debug flight (requires a clear, loaded body volume) |
-| X (flight) | Toggle flight speed boost |
+| Space / Shift | Jump / sprint (up / down while swimming or flying) |
 | LMB / RMB | Break / place block |
 | T | Cycle selected block |
+| V | Toggle walking / debug flight |
 | B | Toggle chunk borders |
-| Esc | Release mouse (ImGui) |
+| Esc | Release mouse |
+
+Flight boost, swimming and all movement modes are detailed in
+[player-physics.md](docs/player-physics.md).
 
 ## Documentation
 
-| Doc | Contents |
-|-----|----------|
-| [`docs/vulkan-graphics.md`](docs/vulkan-graphics.md) | Vulkan setup, frame graph, passes, shaders, lighting/post |
-| [`docs/engine-architecture.md`](docs/engine-architecture.md) | Engine loop, settings/UI, chunks, streaming, terrain gen |
-| [`docs/terrain-generation.md`](docs/terrain-generation.md) | Noise graphs, biome/block catalog, extension and calibration procedures |
-| [`docs/player-physics.md`](docs/player-physics.md) | Voxel collision solver, player controller, movement modes |
-| [`docs/visual-regression.md`](docs/visual-regression.md) | Offscreen golden-image harness: scenes, references, tolerances |
-| [`docs/gpu-profiling.md`](docs/gpu-profiling.md) | GPU profiler and timing workflow |
-| [`docs/workload-telemetry.md`](docs/workload-telemetry.md) | CPU workload telemetry (`FT_VOX_TELEMETRY`) |
-| [`docs/vulkan-validation.md`](docs/vulkan-validation.md) | Validation-layer setup and error-reporting probe |
-| [`docs/benchmarks/`](docs/benchmarks/) | Benchmark methodology syntheses (retention policy: [`docs/benchmarks/README.md`](docs/benchmarks/README.md)) |
-| [`AGENTS.md`](AGENTS.md) | Contributor-oriented project map and conventions |
+Detailed technical documentation lives under [`docs/`](docs/):
 
-## Project layout
+- [Engine architecture](docs/engine-architecture.md)
+- [Vulkan renderer](docs/vulkan-graphics.md)
+- [Terrain generation](docs/terrain-generation.md)
+- [Player physics](docs/player-physics.md)
+- [GPU profiling](docs/gpu-profiling.md)
+- [Visual regression](docs/visual-regression.md)
+- [Workload telemetry](docs/workload-telemetry.md)
+- [Building ft_vox](docs/building.md)
 
-```
-cmake/
-  Dependencies.cmake   # multi-platform package resolution
-docs/                  # architecture docs + benchmark syntheses
-src/
-  Vulkan/              # Instance, device, swapchain, VMA, frames, shaders
-  Renderer/            # WorldRenderer, Shadow/Opaque/Water/Sky, PostStack, overlays
-  Engine/              # Main loop, ImGui layer, input, profiler, benchmark
-  Chunk/               # Voxels, meshing, streaming, terrain generation
-  Entities/            # Passive mobs: CPU simulation + box-UV articulated models
-  Physics/             # Shared voxel collision solver, player controller
-  Network/             # Experimental UDP client/server (test-only; the game builds none of its sources)
-  Camera/
-ressources/
-  shaders/vulkan/      # GLSL sources (compiled to SPIR-V at build time)
-  textures/            # bundled fallback block textures
-tests/                 # unit + offscreen visual-regression tests, golden references
-vcpkg.json             # Windows / optional Unix vcpkg manifest
-install_dep.sh         # apt / dnf / pacman / brew helper
-build.ps1              # Windows vcpkg build helper
-Makefile               # Unix-friendly cmake wrapper
-```
+## Project status
+
+ft_vox is under active development. The core rendering, terrain, physics and
+tooling systems are functional, but APIs, gameplay systems and asset formats
+may still change.
+
+An experimental UDP networking prototype lives under `src/Network/`; it is
+compiled into `test_network` only and is not part of the game.
 
 ## License
 
-No project license file is currently provided.
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party components.
+ft_vox is licensed under the [Apache License 2.0](LICENSE).
+
+Third-party components and assets remain subject to their respective
+licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
