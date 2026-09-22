@@ -44,6 +44,7 @@ void Benchmark::requestStart()
 	m_sumVisibility = m_sumMeshUpload = 0;
 	m_sumPoolGrow = 0.0;
 	m_viewSwitchFired = false;
+	m_appliedViewDistanceSwitch = 0;
 	m_terrainJobs = m_meshJobs = m_lodJobs = m_lightCacheJobs = 0;
 	m_terrainMs = m_meshMs = m_lodMs = m_lightCacheMs = 0;
 	// One peak per line: a chained assignment hid m_peakLight from the reset
@@ -376,7 +377,10 @@ void Benchmark::finalize()
 
 	// PoolGrow stats describe ACTIVE growth steps only; the frame
 	// contribution averages over every measured frame (review round 3).
-	r.viewDistanceSwitch = m_config.viewDistanceSwitch;
+	// The reported switch is the APPLIED one (consumeViewDistanceSwitch
+	// fired), never the merely configured value (review round 5): a switch
+	// set up but never reached must not be reported as one.
+	r.viewDistanceSwitch = m_appliedViewDistanceSwitch;
 	r.poolGrowSteps = static_cast<int>(m_poolGrowMs.size());
 	summarizePoolGrowSamples(m_poolGrowMs, r.avgPoolGrow, r.p95PoolGrow, r.maxPoolGrow);
 	r.avgPoolGrowFrameMs = r.frames > 0

@@ -127,7 +127,10 @@ struct BenchmarkReport
 	int framesOver33ms{0};
 
 	int viewDistance{0};
-	int viewDistanceSwitch{0}; // >0: measurement switched here partway (PoolGrow exercise)
+	/// >0 only if the scripted switch was actually consumed/applied by the
+	/// engine during the measurement; 0 when absent, never fired, or the run
+	/// ended before the switch point.
+	int viewDistanceSwitch{0};
 	int windowW{0};
 	int windowH{0};
 	bool vsync{false};
@@ -322,6 +325,9 @@ private:
 	bool m_streamStatsStarted{false};
 	bool m_streamWindowStartPending{false};
 	bool m_viewSwitchFired{false};
+	/// Target of the scripted switch actually handed to Engine.
+	/// 0 means the configured switch never fired during this run.
+	int m_appliedViewDistanceSwitch{0};
 
 	// Settings snapshotted at start of measurement
 	int m_viewDistance{0};
@@ -371,7 +377,11 @@ public:
 	/// One-shot view-distance switch (config.viewDistanceSwitch > 0): fires
 	/// true once 25% into the measurement, handing the target view distance
 	/// to the engine so the rest of the run exercises incremental pool
-	/// growth (PoolGrow). Reset by requestStart.
+	/// growth (PoolGrow). Reset by requestStart. The moment this returns
+	/// true is the benchmark's point of truth that the switch happened —
+	/// the report is built from m_appliedViewDistanceSwitch, never from the
+	/// configured value, so a switch that was set up but never fired (run
+	/// too short, cancelled) is not reported as one.
 	bool consumeViewDistanceSwitch(int &outViewDistance)
 	{
 		if (m_phase != BenchmarkPhase::Running || m_config.viewDistanceSwitch <= 0 || m_viewSwitchFired)
@@ -380,6 +390,7 @@ public:
 			return false;
 		m_viewSwitchFired = true;
 		outViewDistance = m_config.viewDistanceSwitch;
+		m_appliedViewDistanceSwitch = outViewDistance;
 		return true;
 	}
 	void markForceVsync(bool prevVsync)
