@@ -159,7 +159,7 @@ Engine::Engine(std::string resourcePackRoot)
 	camera.setMovementSpeed(20.f);
 	SDL_SetWindowRelativeMouseMode(window, true);
 
-	updateAtmosphereFromDayTime(shaderParams);
+	updateAutomaticAtmosphere(shaderParams, renderSettings.maxRenderDistance);
 
 	SDL_ShowWindow(window);
 
@@ -723,15 +723,17 @@ void Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 
 void Engine::tickDayCycle(double dt)
 {
-	if (paused)
-		return;
-	if (shaderParams.dayCycleEnabled)
+	// Pause gates ONLY time progression. The derived atmosphere parameters
+	// must still track dayTime and the current view distance every frame:
+	// otherwise a view-distance change (or atmosphere edit) made while
+	// paused would leave stale fog values until the world unpauses.
+	if (!paused && shaderParams.dayCycleEnabled)
 	{
 		shaderParams.dayTime = std::fmod(shaderParams.dayTime + static_cast<float>(dt) * shaderParams.dayCycleSpeed, 1.0f);
 		if (shaderParams.dayTime < 0.f)
 			shaderParams.dayTime += 1.f;
 	}
-	updateAtmosphereFromDayTime(shaderParams);
+	updateAutomaticAtmosphere(shaderParams, renderSettings.maxRenderDistance);
 }
 
 void Engine::tickStreaming(double dt)
@@ -754,17 +756,32 @@ void Engine::tickStreaming(double dt)
 		return;
 	}
 
-	// Grow pool when the view-distance slider (or other settings) outgrows the free list.
-	// Cheap no-op when already large enough; pointer-stable so loaded chunks stay valid.
-	if (chunkPool)
-		chunkPool->ensureCapacity(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
-
+	// Grow pool when the view-distance slider (or other settings) outgrows the
+	// free list. Incremental (kChunkPoolMaxGrowPerCall per tick, converge over
+	// several frames) and issued inside the measured streaming section so the
+	// allocation work shares the per-frame streaming budget; pointer-stable so
+	// loaded chunks stay valid.
 	const double frameDt = std::min(dt, 0.05);
 	const auto streamT0 = std::chrono::steady_clock::now();
 	const auto streamElapsedMs = [&]() {
 		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - streamT0).count();
 	};
 	const double maxStreamMs = static_cast<double>(renderSettings.maxStreamMs);
+
+	// Incremental pool growth (no single-frame hitch when the slider jumps):
+	// each tick adds at most kChunkPoolMaxGrowPerCall slots until the estimate
+	// for the view distance is reached, inside the measured streaming section
+	// so the allocation work shares the per-frame streaming budget;
+	// pointer-stable so loaded chunks stay valid. The PoolGrow scope exists
+	// only while capacity is actually below target — below it every call is
+	// guaranteed to grow — so the benchmark's PoolGrow samples are real
+	// growth steps, never no-op scope timings.
+	const size_t poolTarget = estimateChunkPoolCapacity(renderSettings.maxRenderDistance);
+	if (chunkPool && chunkPool->capacity() < poolTarget)
+	{
+		PROFILE_SCOPE("PoolGrow");
+		chunkPool->ensureCapacity(poolTarget, kChunkPoolMaxGrowPerCall);
+	}
 
 	{
 		PROFILE_SCOPE("FinishedJobs");
@@ -1164,6 +1181,18 @@ void Engine::tickBenchmark(double dt)
 		// so warmup work stays outside the reported counters (issue #108).
 		if (m_benchmark.consumeStreamingWindowStart() && chunkManager)
 			m_benchmark.beginStreamingMeasurement(chunkManager->streamingMaintenanceStats());
+		// One-shot scripted view-distance switch (--benchmark-view-switch):
+		// fires 25% into the measurement so the rest of the run exercises
+		// the incremental ChunkPool growth the report's PoolGrow stats
+		// describe. Applied before this frame's tickStreaming (tickStreaming
+		// runs later in the frame), and the near range follows the slider rule.
+		if (int switchTo = 0; m_benchmark.consumeViewDistanceSwitch(switchTo))
+		{
+			renderSettings.maxRenderDistance = switchTo;
+			renderSettings.minRenderDistance =
+				clampedNearRenderDistance(renderSettings.minRenderDistance, switchTo);
+			std::cout << "[benchmark] view distance -> " << switchTo << " blocks" << std::endl;
+		}
 	}
 
 	// Restore VSync after done/cancel if we forced it off
@@ -1289,6 +1318,7 @@ void Engine::sampleBenchmarkFrame()
 		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),
 		prof.lastScopeMs("Record"), prof.lastScopeMs("ImGui"), prof.lastScopeMs("Present"),
 		prof.lastScopeMs("Visibility"), prof.lastScopeMs("MeshUpload"),
+		prof.lastScopeMs("PoolGrow"),
 		chunkManager ? chunkManager->chunkCount() : 0, drawList.size(),
 		chunkManager ? chunkManager->pendingLoadCount() : 0,
 		chunkManager ? chunkManager->pendingGenJobs() : 0,
@@ -1698,7 +1728,7 @@ void Engine::run()
 
 		{
 			PROFILE_SCOPE("UpdateUBO");
-			const float farPlane = static_cast<float>(renderSettings.maxRenderDistance) * 1.25f;
+			const float farPlane = computeCameraFarPlane(renderSettings.maxRenderDistance);
 			// Shadow quality tier change (issue #137): recreate the shadow map
 			// at the requested resolution before it feeds the frame UBO.
 			if (worldRenderer->postSettings().shadowMapSize > 0 &&

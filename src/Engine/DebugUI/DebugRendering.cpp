@@ -27,6 +27,8 @@ namespace debugui
 
 void drawRendering(UiState &s, GameUIFrame &frame)
 {
+	if (!s.panels.rendering)
+		return;
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(430.f, scale), ui::scaled(540.f, scale)), ImGuiCond_FirstUseEver);
 	// Only the minimum is scaled (usability floor at any UI scale); no
@@ -67,6 +69,8 @@ void drawRendering(UiState &s, GameUIFrame &frame)
 
 void drawRenderDebug(UiState &s, GameUIFrame &frame)
 {
+	if (!s.panels.renderDebug)
+		return;
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(380.f, scale), ui::scaled(520.f, scale)), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin(ui::windows::kRenderDebug, &s.panels.renderDebug))

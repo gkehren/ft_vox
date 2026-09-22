@@ -3,6 +3,8 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Engine/EngineDefs.hpp>
 
+#include <glm/gtc/matrix_transform.hpp>
+
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -261,9 +263,71 @@ static void testPoolCapacityEstimate()
 	CHECK(c128 >= 64, "min capacity floor");
 	CHECK(c256 > c128, "higher view distance needs more pool");
 	CHECK(c512 > c256, "512 blocks needs more than 256");
-	// Unload disk ~1.5×512/16 → r≈49 → πr² > 7000 before headroom; clamp at 16384.
+	// Unload disk ~1.5×512/16 → r≈49 → πr² > 7000 before headroom; clamp at kMaxChunkPoolCapacity.
 	CHECK(c512 > 4000, "512-block view needs several thousand slots");
-	CHECK(c512 <= 16384, "soft cap");
+	const size_t c1024 = estimateChunkPoolCapacity(1024);
+	CHECK(c1024 > c512, "1024 blocks needs more than 512");
+
+	// Estimator and the real hard cap must stay synchronized: absurd view
+	// distances clamp exactly to the shared kMaxChunkPoolCapacity constant.
+	CHECK(c512 <= kMaxChunkPoolCapacity, "512-block estimate within cap");
+	CHECK(c1024 <= kMaxChunkPoolCapacity, "1024 blocks capacity within cap");
+	CHECK(estimateChunkPoolCapacity(1 << 20) == kMaxChunkPoolCapacity,
+		  "estimator clamps to the shared hard cap");
+
+	// Memory guardrail: full-residency voxel backing is capacity × 64 KiB
+	// (one CHUNK_VOLUME-byte VoxelStorage per slot). At the shipped 1024-block
+	// maximum the estimate stays in the low GiB, not "a slider can ask for
+	// unbounded RAM".
+	CHECK(kChunkVoxelBackingBytes == size_t(CHUNK_VOLUME), "voxel backing per slot is CHUNK_VOLUME bytes");
+	CHECK(estimateChunkPoolVoxelBackingBytes(c1024) == c1024 * size_t(CHUNK_VOLUME),
+		  "voxel backing estimate is capacity × CHUNK_VOLUME");
+	CHECK(estimateChunkPoolVoxelBackingBytes(kMaxChunkPoolCapacity) <= size_t(5) << 30,
+		  "hard cap bounds worst-case voxel backing (~4 GiB)");
+}
+
+/// Incremental pool growth contract (chunkPoolGrowStep, pure): a 512 → 1024
+/// target must NOT be reached in one massive allocation; capacity moves in
+/// bounded, monotone steps, never crosses the hard cap, and converges.
+static void testChunkPoolGrowStep()
+{
+	const size_t start = estimateChunkPoolCapacity(512);
+	const size_t target = estimateChunkPoolCapacity(1024);
+	CHECK(target > start, "test setup: 1024 target exceeds 512 steady state");
+
+	size_t capacity = start;
+	size_t steps = 0;
+	size_t lastStep = 0;
+	while (capacity < target && steps < 1000)
+	{
+		const size_t add = chunkPoolGrowStep(capacity, target, kChunkPoolMaxGrowPerCall);
+		CHECK(add > 0, "growth step is positive while below target");
+		CHECK(add <= kChunkPoolMaxGrowPerCall, "one call never adds more than the per-call cap");
+		CHECK(capacity + add >= capacity, "growth is monotone (no overflow)");
+		lastStep = add;
+		capacity += add;
+		++steps;
+	}
+	CHECK(capacity >= target, "incremental growth converges to the target");
+	CHECK(capacity <= target + kChunkPoolMaxGrowPerCall + kChunkPoolGrowSlabMin,
+		  "convergence does not overshoot the target by more than one step");
+	CHECK(steps > 1 && lastStep <= kChunkPoolMaxGrowPerCall,
+		  "512 -> 1024 is spread over multiple bounded steps (no single massive growth)");
+
+	// Edge cases: no growth at/above target, and the hard cap is never crossed
+	// even for absurd requests.
+	CHECK(chunkPoolGrowStep(target, target, kChunkPoolMaxGrowPerCall) == 0, "at target: no growth");
+	CHECK(chunkPoolGrowStep(target + 10, target, kChunkPoolMaxGrowPerCall) == 0, "above target: no growth");
+	CHECK(chunkPoolGrowStep(0, 0, kChunkPoolMaxGrowPerCall) == 0, "zero target: no growth");
+	CHECK(chunkPoolGrowStep(kMaxChunkPoolCapacity, kMaxChunkPoolCapacity * 2, kChunkPoolMaxGrowPerCall) == 0,
+		  "at hard cap: no growth");
+	CHECK(chunkPoolGrowStep(kMaxChunkPoolCapacity - 5, kMaxChunkPoolCapacity * 2, 0) == 5,
+		  "unlimited request still stops exactly at the hard cap");
+	CHECK(chunkPoolGrowStep(0, kMaxChunkPoolCapacity * 4, 64) == 64,
+		  "per-call cap is honored even for huge targets");
+	CHECK(chunkPoolGrowStep(0, 10, 0) >= 10, "tiny requests amortize up to the slab minimum");
+	CHECK(chunkPoolGrowStep(0, 10, kChunkPoolMaxGrowPerCall) >= 10,
+		  "default incremental path also amortizes tiny requests");
 }
 
 /// Ice spikes use treeDensity=0 and hasCacti=false; generateVegetation must still run
@@ -735,8 +799,8 @@ static void testStreamingPresets()
 	for (const StreamingQualityPreset p : presets)
 	{
 		const StreamingPresetValues v = streamingPresetValues(p);
-		CHECK(v.maxRenderDistance >= 64 && v.maxRenderDistance <= 640, "view distance within slider 64..640");
-		CHECK(v.minRenderDistance >= 32 && v.minRenderDistance <= 640, "near range within slider 32..640");
+		CHECK(v.maxRenderDistance >= 64 && v.maxRenderDistance <= 1024, "view distance within slider 64..1024");
+		CHECK(v.minRenderDistance >= 32 && v.minRenderDistance <= 1024, "near range within slider 32..1024");
 		CHECK(v.streamFrontBias >= 0.0f && v.streamFrontBias <= 0.55f, "front bias within slider 0..0.55");
 		CHECK(v.loadPerSec >= 10 && v.loadPerSec <= 1000, "loadPerSec within slider 10..1000");
 		CHECK(v.genPerSec >= 5 && v.genPerSec <= 800, "genPerSec within slider 5..800");
@@ -754,6 +818,79 @@ static void testClampedNearRenderDistance()
 	CHECK(clampedNearRenderDistance(512, 512) == 512, "min == max passes through");
 	CHECK(clampedNearRenderDistance(32, 640) == 32, "small near range passes through");
 	CHECK(clampedNearRenderDistance(-5, 100) == -5, "no extra floors: only min>max clamps");
+}
+
+static void testComputeCameraFarPlane()
+{
+	// Absolute floor: every view distance the UI supports (64..1024) resolves
+	// below it, and degenerate inputs (0, negative) land on it too.
+	for (const int d : {-100, -1, 0, 16, 64, 256, 512, 640, 1024})
+		CHECK(computeCameraFarPlane(d) >= 4000.0f, "far plane keeps a >= 4000 floor for supported/degenerate distances");
+
+	// Streaming invariant: the far plane must cover the unload reach plus the
+	// chunk AABB diagonal plus the safety margin — terrain straight ahead is
+	// never clipped before its chunk would unload, from any viewing angle.
+	const float diag = std::sqrt(static_cast<float>(
+		CHUNK_SIZE * CHUNK_SIZE + CHUNK_HEIGHT * CHUNK_HEIGHT + CHUNK_SIZE * CHUNK_SIZE));
+	for (const int d : {64, 256, 512, 640, 1024, 2048, 4096, 8192})
+	{
+		const float reach = static_cast<float>(d) * kChunkUnloadDistanceFactor;
+		CHECK(computeCameraFarPlane(d) > reach, "far plane exceeds the unload reach");
+		if (computeCameraFarPlane(d) > 4000.0f)
+			CHECK(computeCameraFarPlane(d) >= reach + diag + 127.9f,
+				  "far plane above the floor covers unload reach + chunk AABB diagonal + safety");
+	}
+
+	// Monotone in the view distance; handles abnormal inputs cleanly (finite).
+	float prev = -1.0f;
+	for (int d = 0; d <= 8192; d = d == 0 ? 64 : d * 2)
+	{
+		const float fp = computeCameraFarPlane(d);
+		CHECK(std::isfinite(fp), "far plane is finite");
+		CHECK(fp >= prev, "far plane is monotonic in the view distance");
+		prev = fp;
+	}
+}
+
+/// Non-regression for the original far-plane clipping bug: a chunk sitting
+/// between the OLD per-caller estimate (maxRenderDistance * 1.25) and the
+/// unload reach must survive the projection that uses computeCameraFarPlane.
+/// The projection below mirrors Camera::getProjectionMatrix's perspective
+/// branch (glm::perspective, 80° FOV, near 0.1, GLM_FORCE_DEPTH_ZERO_TO_ONE).
+static void testFarPlaneCoversBeyondLegacyEstimate()
+{
+	const int viewDistance = 512;
+	const float legacyFar = static_cast<float>(viewDistance) * 1.25f; // 640 — the old ad-hoc estimate
+	const float unifiedFar = computeCameraFarPlane(viewDistance);
+	CHECK(unifiedFar > legacyFar, "unified far plane exceeds the old per-caller estimate");
+
+	// Chunk straight ahead on the view axis, past the legacy estimate but
+	// comfortably inside the streaming/unload reach (1.5 × 512 = 768) — the
+	// exact geometry of the original bug (forward terrain vanishing before
+	// peripheral terrain).
+	const float chunkDist = 700.0f;
+	CHECK(chunkDist > legacyFar && chunkDist < static_cast<float>(viewDistance) * kChunkUnloadDistanceFactor,
+		  "test setup: chunk sits between the legacy far plane and the unload reach");
+
+	const glm::vec3 eye(0.0f, 128.0f, 0.0f);
+	const glm::mat4 view = glm::lookAt(eye, glm::vec3(0.0f, 128.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	const float aspect = 16.0f / 9.0f;
+	const glm::vec4 world(0.0f, 128.0f, -chunkDist, 1.0f); // straight ahead at eye height
+
+	// OLD behavior: clipped by the far plane (NDC z past the depth range).
+	{
+		const glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.1f, legacyFar);
+		const glm::vec4 clip = proj * view * world;
+		CHECK(clip.w > 0.0f, "legacy probe stays in front of the camera");
+		CHECK(clip.z / clip.w > 1.0f, "legacy estimate would clip the chunk (regression target)");
+	}
+	// NEW behavior: fully inside the frustum.
+	{
+		const glm::mat4 proj = glm::perspective(glm::radians(80.0f), aspect, 0.1f, unifiedFar);
+		const glm::vec3 ndc = glm::vec3(proj * view * world) / (proj * view * world).w;
+		CHECK(ndc.z >= 0.0f && ndc.z <= 1.0f, "chunk survives the unified far plane (ZERO_TO_ONE depth)");
+		CHECK(std::abs(ndc.x) <= 1.0f && std::abs(ndc.y) <= 1.0f, "chunk is inside the side frustum planes");
+	}
 }
 
 // matchingStreamingPreset (issue #191 review): the UI badge helper must
@@ -789,7 +926,6 @@ int main()
 	testRemainingBudget();
 	testTerrainBoundedGeneration();
 	testOceanWaterNotClippedByCaveYBound();
-	testPoolCapacityEstimate();
 	testIceSpikeVegetationReachable();
 	testDeterministicIncrementalFootprintAgainstBruteForce();
 	testIncrementalQueueMaintenance();
@@ -801,12 +937,16 @@ int main()
 	testStreamingPresets();
 	testMatchingStreamingPreset();
 	testClampedNearRenderDistance();
+	testPoolCapacityEstimate();
+	testChunkPoolGrowStep();
+	testComputeCameraFarPlane();
+	testFarPlaneCoversBeyondLegacyEstimate();
 
 	if (g_fails != 0)
 	{
 		std::cerr << g_fails << " check(s) failed\n";
 		return 1;
 	}
-	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate + ice spikes + incremental footprint vs brute force\n";
+	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate/growth + ice spikes + incremental footprint vs brute force\n";
 	return 0;
 }

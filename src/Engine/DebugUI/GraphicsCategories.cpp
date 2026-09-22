@@ -12,6 +12,7 @@
 
 #include <imgui/imgui.h>
 
+#include <algorithm>
 #include <cfloat>
 #include <cstdio>
 
@@ -215,10 +216,11 @@ void drawAtmosphere(debugui::UiState &s, GameUIFrame &frame)
 
 	ImGui::SeparatorText("Fog");
 	// While automatic the engine overwrites fog each frame — show the live
-	// engine-computed values but disabled so the state is truthful (#185).
+	const float maxStart = frame.render ? std::max(1000.f, static_cast<float>(frame.render->maxRenderDistance) * 1.5f) : 1000.f;
+	const float maxEnd = frame.render ? std::max(1400.f, static_cast<float>(frame.render->maxRenderDistance) * 2.5f) : 1400.f;
 	ImGui::BeginDisabled(sp.automaticAtmosphere);
-	ImGui::SliderFloat("Start", &sp.fogStart, 0.f, 1000.f);
-	ImGui::SliderFloat("End", &sp.fogEnd, sp.automaticAtmosphere ? 0.f : sp.fogStart + 1.f, 1400.f);
+	ImGui::SliderFloat("Start", &sp.fogStart, 0.f, maxStart);
+	ImGui::SliderFloat("End", &sp.fogEnd, sp.automaticAtmosphere ? 0.f : sp.fogStart + 1.f, maxEnd);
 	ImGui::SliderFloat("Density", &sp.fogDensity, 0.f, 1.f);
 	if (sp.automaticAtmosphere)
 		ImGui::ColorEdit3("Color", &sp.fogColor.x, ImGuiColorEditFlags_NoInputs);

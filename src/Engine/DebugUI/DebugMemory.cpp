@@ -97,6 +97,8 @@ void stageTable(const char *familyLabel, const telemetry::Registry::LiveSnapshot
 
 void drawMemory(UiState &s, GameUIFrame &frame)
 {
+	if (!s.panels.memory)
+		return;
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(560.f, scale), ui::scaled(660.f, scale)), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin(ui::windows::kMemory, &s.panels.memory))

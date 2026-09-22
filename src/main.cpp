@@ -28,6 +28,9 @@ static void printUsage(const char *argv0)
 			  << "  --benchmark-warmup <secs>   Override warmup (0 disables it)\n"
 			  << "  --benchmark-map <zoom>      Open fixed-center biome map (zoom 0.1..8)\n"
 			  << "  --benchmark-map-sequential  Compare the previous one-job map path\n"
+			  << "  --benchmark-view-switch <n> Switch view distance (64..1024) at 25% of the\n"
+			  << "                              measurement; reports PoolGrow metrics when\n"
+			  << "                              additional pool capacity is required\n"
 			  << "  --shadow-size <n>           Shadow map resolution tier (512, 1024, 2048, 4096)\n"
               << "  --view x y z yaw pitch secs Fixed daylight view for terrain review (secs 0 = no timeout)\n"
 			  << "  --help                      Show this help\n"
@@ -57,6 +60,7 @@ int main(int argc, char **argv)
 	std::optional<int> qualityPreset;
 	float benchmarkMapZoom = 0.0f;
 	bool benchmarkMapSequential = false;
+	int benchmarkViewSwitch = 0;
 	int shadowMapSizeOverride = 0;
     std::optional<std::array<float, 6>> inspection;
 
@@ -210,6 +214,23 @@ int main(int argc, char **argv)
 			}
 			continue;
 		}
+		if (arg == "--benchmark-view-switch")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --benchmark-view-switch requires a view distance in blocks.\n";
+				return EXIT_FAILURE;
+			}
+			char *endptr = nullptr;
+			const long val = std::strtol(argv[++i], &endptr, 10);
+			if (*endptr != '\0' || endptr == argv[i] || val < 64 || val > 1024)
+			{
+				std::cerr << "Error: --benchmark-view-switch must be between 64 and 1024 blocks.\n";
+				return EXIT_FAILURE;
+			}
+			benchmarkViewSwitch = static_cast<int>(val);
+			continue;
+		}
 		if (arg == "--front-bias")
 		{
 			if (i + 1 >= argc)
@@ -290,6 +311,11 @@ int main(int argc, char **argv)
 		std::cerr << "Error: map benchmark options require --benchmark and --benchmark-map.\n";
 		return EXIT_FAILURE;
 	}
+	if (benchmarkViewSwitch > 0 && benchmarkDuration == 0.0f)
+	{
+		std::cerr << "Error: --benchmark-view-switch requires --benchmark.\n";
+		return EXIT_FAILURE;
+	}
 	const std::string resourcePack = resolveResourcePackRoot(resourcePackCli);
 
 	if (!worldName.empty() && benchmarkDuration > 0.0f)
@@ -327,6 +353,7 @@ int main(int argc, char **argv)
 			config.durationSec = benchmarkDuration;
 			config.biomeMapZoom = benchmarkMapZoom;
 			config.biomeMapSequential = benchmarkMapSequential;
+			config.viewDistanceSwitch = benchmarkViewSwitch;
 			config.warmupSec = benchmarkWarmup.value_or(std::min(2.0f, benchmarkDuration * 0.2f));
 			config.pathOrbits = 2;
 			config.pathRadius = 512.0f;

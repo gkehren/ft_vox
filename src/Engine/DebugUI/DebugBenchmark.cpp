@@ -16,6 +16,8 @@ namespace debugui
 
 void drawBenchmarkPanel(UiState &s, GameUIFrame &frame)
 {
+	if (!s.panels.benchmark)
+		return;
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(360.f, scale), ui::scaled(380.f, scale)), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin(ui::windows::kBenchmark, &s.panels.benchmark))

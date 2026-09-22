@@ -17,6 +17,8 @@ namespace debugui
 
 void drawPlayerDiagnostics(UiState &s, GameUIFrame &frame)
 {
+	if (!s.panels.playerDiagnostics)
+		return;
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(340.f, scale), ui::scaled(320.f, scale)),
 							 ImGuiCond_FirstUseEver);

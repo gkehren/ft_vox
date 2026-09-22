@@ -21,6 +21,74 @@ struct LoadCandidate
 /// maxRenderDistance * this (must stay in sync with the load reach below).
 constexpr float kChunkUnloadDistanceFactor = 1.5f;
 
+// --- ChunkPool sizing constants (shared with ChunkPool.cpp and the UI) ---
+
+/// Hard upper bound for the ChunkPool capacity. The view-distance slider can
+/// ask for a large footprint (front bias stretches the load reach beyond the
+/// plain disk), so this backstop — not a UI range — is what keeps a mis-set
+/// slider from committing unbounded RAM: at the cap, full residency costs at
+/// most kMaxChunkPoolCapacity × kChunkVoxelBackingBytes ≈ 4 GiB of voxel
+/// backing plus the chunk objects themselves. See
+/// estimateChunkPoolCapacity / estimateChunkPoolVoxelBackingBytes.
+inline constexpr size_t kMaxChunkPoolCapacity = 65536;
+
+/// Smallest useful pool (the estimator's floor and ensureCapacity's clamp).
+inline constexpr size_t kMinChunkPoolCapacity = 64;
+
+/// CPU voxel backing one resident chunk slot can hold: the pooled
+/// VoxelStorage is a flat CHUNK_VOLUME-byte array (1 byte per voxel).
+inline constexpr size_t kChunkVoxelBackingBytes = CHUNK_VOLUME;
+
+/// Worst-case voxel backing of a fully resident pool of `capacityChunks`
+/// slots (every slot holding live voxel storage). The Streaming panel
+/// surfaces this as "voxel backing at full residency" — actual residency is
+/// usually far below it, because free pool slots carry no storage.
+inline size_t estimateChunkPoolVoxelBackingBytes(size_t capacityChunks)
+{
+	return capacityChunks * kChunkVoxelBackingBytes;
+}
+
+/// Amortization slab for pool growth: requests smaller than this still
+/// allocate a slab so repeated small top-ups do not thrash the allocator.
+inline constexpr size_t kChunkPoolGrowSlabMin = 128;
+
+/// Largest number of slots a single ChunkPool::ensureCapacity() call may
+/// allocate while catching up to a raised view distance (0 = unlimited, used
+/// only by the synchronous bootstrap path). Growth is incremental: the engine
+/// re-invokes ensureCapacity() every streaming tick under the PoolGrow
+/// profiler scope, so a 512 → 1024 slider jump converges over a bounded
+/// number of frames instead of one multi-thousand-slot allocation hitch.
+/// 256 slots is a measured compromise — clean per-step timings (timed region
+/// contains only the ensureCapacity call; test_chunk_lifecycle [pool-grow],
+/// Release, three runs on the reference system):
+///   1024-slot steps: avg 2.1-2.3 ms, p95 2.4-2.8 ms (repeated multi-ms hitches)
+///   512-slot steps:  avg 1.1-1.2 ms, p95 1.3-1.5 ms (above the ~1 ms budget)
+///   256-slot steps:  avg 0.6-0.8 ms, p95 0.8-1.2 ms, ~100-frame convergence,
+///                    which the load path's existing back-pressure covers
+///                    comfortably (the new ring does not need to fill
+///                    instantly). Indicative measurements, not a per-machine
+///                    guarantee — re-run the [pool-grow] report before
+///                    changing this value.
+inline constexpr size_t kChunkPoolMaxGrowPerCall = 256;
+
+/// One growth decision for ChunkPool::ensureCapacity(): how many slots to
+/// allocate right now when `targetCapacity` is wanted and `currentCapacity`
+/// slots exist. Amortizes tiny requests up to kChunkPoolGrowSlabMin, caps
+/// the step at maxGrowPerCall (0 = unlimited) and never allocates past the
+/// hard cap. Pure so the incremental-growth contract is unit-testable
+/// without allocating chunks; ChunkPool applies it under its mutex.
+inline size_t chunkPoolGrowStep(size_t currentCapacity, size_t targetCapacity,
+								size_t maxGrowPerCall)
+{
+	if (targetCapacity <= currentCapacity || currentCapacity >= kMaxChunkPoolCapacity)
+		return 0;
+	const size_t need = std::min(targetCapacity, kMaxChunkPoolCapacity) - currentCapacity;
+	size_t add = std::max(need, kChunkPoolGrowSlabMin);
+	if (maxGrowPerCall > 0)
+		add = std::min(add, maxGrowPerCall);
+	return std::min(add, kMaxChunkPoolCapacity - currentCapacity);
+}
+
 /// Largest streamFrontBias that keeps the invariant
 /// `desired load footprint ⊆ unload hysteresis radius`: the ahead reach is
 /// maxRenderDistance / sqrt(1 - bias), so bias must satisfy
@@ -197,8 +265,6 @@ inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 										float unloadFactor = kChunkUnloadDistanceFactor,
 										float margin = 1.15f)
 {
-	constexpr size_t kMin = 64;
-	constexpr size_t kMax = 16384;
 	const int maxRd = maxRenderDistanceBlocks < 16 ? 16 : maxRenderDistanceBlocks;
 	const float uf = unloadFactor < 1.f ? 1.f : unloadFactor;
 	const float mg = margin < 1.f ? 1.f : margin;
@@ -209,10 +275,10 @@ inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 	const size_t disk = static_cast<size_t>(std::ceil(area * static_cast<double>(mg)));
 	const size_t headroom = 96 + static_cast<size_t>(std::ceil(radiusChunks * 2.5f));
 	size_t needed = disk + headroom;
-	if (needed < kMin)
-		needed = kMin;
-	if (needed > kMax)
-		needed = kMax;
+	if (needed < kMinChunkPoolCapacity)
+		needed = kMinChunkPoolCapacity;
+	if (needed > kMaxChunkPoolCapacity)
+		needed = kMaxChunkPoolCapacity;
 	return needed;
 }
 
@@ -222,6 +288,39 @@ inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 inline int clampedNearRenderDistance(int minRenderDistance, int maxRenderDistance)
 {
 	return minRenderDistance > maxRenderDistance ? maxRenderDistance : minRenderDistance;
+}
+
+/// Camera far-plane distance — the single source of truth for the
+/// perspective projection and frustum culling. Engine (UpdateUBO),
+/// ChunkManager::updateVisibility, VisualHarness::renderFrame and the
+/// projection regression tests all call this; nothing else may derive a far
+/// plane from maxRenderDistance by hand.
+///
+/// Built from streaming invariants instead of a bare multiple of the view
+/// distance:
+///  - unload reach: chunks legitimately exist out to
+///    kChunkUnloadDistanceFactor * maxRenderDistance, so terrain straight
+///    ahead must survive the far plane at least that far (never clipped
+///    before its chunk would unload);
+///  - chunk bounds: the farthest visible point of a chunk sitting at the
+///    reach is its AABB corner, so the full 3D chunk diagonal is added;
+///  - a constant safety margin absorbs float noise and LOD/impostor fade;
+///  - a 4000-block minimum keeps all currently supported UI view distances
+///    on one conservative projection range while preserving headroom for
+///    unload hysteresis and chunk bounds.
+inline float computeCameraFarPlane(int maxRenderDistanceBlocks)
+{
+	const float maxDist = std::max(0.f, static_cast<float>(maxRenderDistanceBlocks));
+	const float unloadReach = maxDist * kChunkUnloadDistanceFactor;
+	const float chunkBoundDiagonal =
+		std::sqrt(static_cast<float>(CHUNK_SIZE * CHUNK_SIZE + CHUNK_HEIGHT * CHUNK_HEIGHT +
+									 CHUNK_SIZE * CHUNK_SIZE));
+	constexpr float kFarPlaneSafetyBlocks = 128.0f;
+	// A 4000-block minimum keeps all currently supported UI view distances
+	// on one conservative projection range while preserving headroom for
+	// unload hysteresis and chunk bounds.
+	constexpr float kMinCameraFarPlane = 4000.0f;
+	return std::max(unloadReach + chunkBoundDiagonal + kFarPlaneSafetyBlocks, kMinCameraFarPlane);
 }
 
 // -----------------------------------------------------------------------------

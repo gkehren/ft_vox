@@ -39,8 +39,12 @@ void Benchmark::requestStart()
 	m_backgroundWork = {};
 	m_frameMs.clear();
 	m_recordMs.clear();
+	m_poolGrowMs.clear();
 	m_sumStreaming = m_sumAcquire = m_sumRecord = m_sumImGui = m_sumPresent = 0;
 	m_sumVisibility = m_sumMeshUpload = 0;
+	m_sumPoolGrow = 0.0;
+	m_viewSwitchFired = false;
+	m_appliedViewDistanceSwitch = 0;
 	m_terrainJobs = m_meshJobs = m_lodJobs = m_lightCacheJobs = 0;
 	m_terrainMs = m_meshMs = m_lodMs = m_lightCacheMs = 0;
 	// One peak per line: a chained assignment hid m_peakLight from the reset
@@ -165,10 +169,10 @@ void Benchmark::tick(double dt, Camera &camera)
 
 void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcquire, float scopeRecord,
 							float scopeImGui, float scopePresent, float scopeVisibility,
-							float scopeMeshUpload, size_t chunks, size_t drawCount, size_t pendingLoad,
-							size_t pendingGen, size_t pendingMesh, size_t pendingLight, uint64_t terrainJobs,
-							float terrainMs, uint64_t meshJobs, float meshMs, uint64_t lodJobs, float lodMs,
-							uint64_t lightCacheJobs, float lightCacheMs)
+							float scopeMeshUpload, float scopePoolGrow, size_t chunks, size_t drawCount,
+							size_t pendingLoad, size_t pendingGen, size_t pendingMesh, size_t pendingLight,
+							uint64_t terrainJobs, float terrainMs, uint64_t meshJobs, float meshMs,
+							uint64_t lodJobs, float lodMs, uint64_t lightCacheJobs, float lightCacheMs)
 {
 	if (m_phase != BenchmarkPhase::Running)
 		return;
@@ -182,6 +186,13 @@ void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcqu
 	m_sumPresent += scopePresent;
 	m_sumVisibility += scopeVisibility;
 	m_sumMeshUpload += scopeMeshUpload;
+	// PoolGrow: keep the raw sum for the per-frame contribution average, but
+	// only push ACTIVE steps (a frame with no growth contributes nothing) so
+	// avg/p95/max describe one real growth operation, not a sea of zeros
+	// masking an occasional hitch.
+	m_sumPoolGrow += scopePoolGrow;
+	if (scopePoolGrow > 0.0f)
+		m_poolGrowMs.push_back(scopePoolGrow);
 
 	m_terrainJobs += terrainJobs;
 	m_terrainMs += terrainMs;
@@ -257,18 +268,7 @@ float Benchmark::remainingMeasureSec() const
 
 float Benchmark::percentileSorted(std::vector<float> &sorted, float p01)
 {
-	if (sorted.empty())
-		return 0.f;
-	const float p = std::clamp(p01, 0.f, 1.f);
-	const size_t n = sorted.size();
-	const size_t idx = std::min(n - 1, static_cast<size_t>(std::ceil(p * static_cast<float>(n)) - 1.f));
-	// For p=0 use first; for p=1 use last
-	if (p <= 0.f)
-		return sorted.front();
-	if (p >= 1.f)
-		return sorted.back();
-	const size_t i = static_cast<size_t>(p * static_cast<float>(n - 1));
-	return sorted[i];
+	return percentileOfSorted(sorted, p01);
 }
 
 int Benchmark::computeScore(const BenchmarkReport &r)
@@ -375,6 +375,18 @@ void Benchmark::finalize()
 		r.p99RecordMs = percentileSorted(sortedRecord, 0.99f);
 	}
 
+	// PoolGrow stats describe ACTIVE growth steps only; the frame
+	// contribution averages over every measured frame (review round 3).
+	// The reported switch is the APPLIED one (consumeViewDistanceSwitch
+	// fired), never the merely configured value (review round 5): a switch
+	// set up but never reached must not be reported as one.
+	r.viewDistanceSwitch = m_appliedViewDistanceSwitch;
+	r.poolGrowSteps = static_cast<int>(m_poolGrowMs.size());
+	summarizePoolGrowSamples(m_poolGrowMs, r.avgPoolGrow, r.p95PoolGrow, r.maxPoolGrow);
+	r.avgPoolGrowFrameMs = r.frames > 0
+							   ? static_cast<float>(m_sumPoolGrow / static_cast<double>(r.frames))
+							   : 0.f;
+
 	r.backgroundWork = m_backgroundWork;
 	r.biomeMapZoom = m_config.biomeMapZoom;
 	r.biomeMapSequential = m_config.biomeMapSequential;
@@ -459,6 +471,13 @@ std::string Benchmark::formatReportText() const
 	  << "  FrontBias: " << r.streamFrontBias
 	  << "  VSync: " << (r.vsync ? "on" : "off")
 	  << "  PresentMode: " << r.presentMode << "\n";
+	if (r.viewDistanceSwitch > 0)
+	{
+		o << "  View switch -> " << r.viewDistanceSwitch
+		  << " blocks at 25% of measurement\n";
+		if (r.poolGrowSteps == 0)
+			o << "  No ChunkPool growth observed after the view-distance switch\n";
+	}
 	if (!r.qualityLabel.empty())
 		o << "Quality: " << r.qualityLabel << "\n";
 	o << "Indirect: multiDrawIndirect=" << (r.multiDrawIndirect ? "yes" : "no")
@@ -491,7 +510,16 @@ std::string Benchmark::formatReportText() const
 	  << r.avgMeshUpload << "\n";
 	o << "  Record p50 " << r.p50RecordMs << "  p95 " << r.p95RecordMs << "  p99 "
 	  << r.p99RecordMs << "\n";
-	o << "  ImGui " << r.avgImGui << "  Present " << r.avgPresent << "\n\n";
+	o << "  ImGui " << r.avgImGui << "  Present " << r.avgPresent << "\n";
+	if (r.poolGrowSteps > 0)
+	{
+		// A plain average would dilute the growth cost across every frame;
+		// the active-step percentiles are what expose a one-frame hitch.
+		o << "  PoolGrow avg " << r.avgPoolGrow << "  p95 " << r.p95PoolGrow << "  max "
+		  << r.maxPoolGrow << " ms over " << r.poolGrowSteps
+		  << " active steps (frame avg " << r.avgPoolGrowFrameMs << ")\n";
+	}
+	o << "\n";
 	o << "Worker jobs\n";
 	o << "  TerrainGen  n=" << r.terrainGenJobs << "  avgMs=" << r.terrainGenAvgMs
 	  << "  totalMs=" << r.terrainGenTotalMs << "\n";

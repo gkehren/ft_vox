@@ -60,6 +60,8 @@ void warningRow(const char *label, const char *hint)
 
 void drawStreaming(UiState &s, GameUIFrame &frame)
 {
+	if (!s.panels.streaming)
+		return;
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(420.f, scale), ui::scaled(560.f, scale)),
 							 ImGuiCond_FirstUseEver);
@@ -80,7 +82,7 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 
 	// --- Distance (issue #186 §1): how far / how aggressively to stream. ---
 	ImGui::SeparatorText("Distance");
-	ImGui::SliderInt("View distance", &rs.maxRenderDistance, 64, 640, "%d blocks");
+	ImGui::SliderInt("View distance", &rs.maxRenderDistance, 64, 1024, "%d blocks");
 	rs.minRenderDistance = clampedNearRenderDistance(rs.minRenderDistance, rs.maxRenderDistance);
 	ImGui::SliderInt("Full-quality distance", &rs.minRenderDistance, 32, rs.maxRenderDistance,
 					 "%d blocks");
@@ -91,12 +93,17 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 						1.0f / std::sqrt(1.0f + normalizedStreamFrontBias(rs.streamFrontBias)));
 
 	// The consequence of raising the view distance, made explicit (issue
-	// #186 §1). The engine itself grows the pool per frame
+	// #186 §1). The engine itself grows the pool incrementally per frame
 	// (Engine::tickStreaming — a cheap no-op once large enough); the panel
-	// only surfaces the estimate, it does not mutate the pool.
+	// only surfaces the estimate, it does not mutate the pool. The voxel
+	// backing line is the worst case at FULL residency (every pool slot
+	// holding live storage) so the memory footprint of the slider is honest;
+	// steady-state residency sits well below it.
 	const size_t poolNeed = estimateChunkPoolCapacity(rs.maxRenderDistance);
 	ImGui::TextDisabled("Estimated resident capacity: ~%s chunks",
 						formatCount(poolNeed).c_str());
+	ImGui::TextDisabled("Estimated voxel backing at full residency: ~%s",
+						formatBytes(estimateChunkPoolVoxelBackingBytes(poolNeed)).c_str());
 
 	// --- Pipeline (issue #186 §2): the main-thread CPU budget stays
 	// first-class; per-stage rates move to the Advanced disclosure;

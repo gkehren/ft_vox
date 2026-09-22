@@ -24,6 +24,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <vector>
 #include <thread>
@@ -1092,6 +1093,75 @@ static void runStreamingDispatchTests()
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Incremental ChunkPool growth: ensureCapacity() must NOT allocate a whole
+// 512 -> 1024 view-distance jump in one massive call. Capacity moves in
+// bounded (kChunkPoolMaxGrowPerCall), monotone per-call steps without ever
+// crossing the shared hard cap, while the unlimited bootstrap path
+// (maxGrowPerCall = 0) still reaches a legal target in a single call.
+// ---------------------------------------------------------------------------
+static void testChunkPoolIncrementalGrowth()
+{
+	const size_t target = estimateChunkPoolCapacity(1024);
+	CHECK(target <= kMaxChunkPoolCapacity, "1024-block target within the hard cap");
+
+	{
+		ChunkPool pool(estimateChunkPoolCapacity(512));
+		const size_t start = pool.capacity();
+		CHECK(start < target, "test setup: 512 steady-state pool is below the 1024 target");
+
+		// Controlled growth-cost measurement (review P3): time every bounded
+		// ensureCapacity() step the engine would take while converging
+		// 512 -> 1024. The timed region contains ONLY the ensureCapacity
+		// call — no logging, no CHECK — and the report prints after the
+		// loop, so the numbers reflect allocation cost alone. Print-only:
+		// CI boxes are too noisy for a timing assert (same policy as
+		// runStreamPerf); assertions below stay structural.
+		size_t steps = 0;
+		std::vector<double> stepMs;
+		stepMs.reserve(1024);
+		while (pool.capacity() < target && steps < 1000)
+		{
+			const size_t before = pool.capacity();
+			const auto stepStart = std::chrono::steady_clock::now();
+			const bool grew = pool.ensureCapacity(target, kChunkPoolMaxGrowPerCall);
+			stepMs.push_back(
+				std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stepStart)
+					.count());
+			const size_t after = pool.capacity();
+			CHECK(grew, "catch-up call allocates");
+			CHECK(after > before, "capacity grows monotonically");
+			CHECK(after - before <= kChunkPoolMaxGrowPerCall,
+				  "one call adds at most kChunkPoolMaxGrowPerCall slots");
+			CHECK(after <= kMaxChunkPoolCapacity, "capacity never crosses the hard cap");
+			if (steps == 0)
+				CHECK(after < target, "512 -> 1024 is NOT reached in one massive growth");
+			++steps;
+		}
+		CHECK(pool.capacity() >= target, "incremental growth converges to the 1024 target");
+		// The constructor's initial pre-allocation counts as one grow event.
+		CHECK(pool.growEvents() == steps + 1, "each growth is published exactly once");
+		CHECK(pool.voxelStorageCapacity() == 0,
+			  "pool growth allocates no voxel backing (lazy per-chunk storage)");
+
+		// Informative report AFTER the timed loop (never inside it).
+		std::sort(stepMs.begin(), stepMs.end());
+		const double sumMs = std::accumulate(stepMs.begin(), stepMs.end(), 0.0);
+		const double avgMs = sumMs / static_cast<double>(stepMs.size());
+		const size_t p95Idx =
+			std::min(stepMs.size() - 1, static_cast<size_t>(0.95 * static_cast<double>(stepMs.size() - 1)));
+		std::cout << "[pool-grow] " << steps << " steps x " << kChunkPoolMaxGrowPerCall
+				  << " slots (512->1024 convergence): avg " << avgMs << " ms, p95 "
+				  << stepMs[p95Idx] << " ms, max " << stepMs.back() << " ms\n";
+	}
+	{
+		ChunkPool pool(64);
+		CHECK(pool.ensureCapacity(target, 0), "bootstrap growth allocates");
+		CHECK(pool.capacity() >= target, "unlimited (maxGrowPerCall = 0) reaches the target in one call");
+		CHECK(!pool.ensureCapacity(target, 0), "second call at target is a no-op");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	std::cout.setf(std::ios::unitbuf);
@@ -1099,6 +1169,7 @@ int main(int argc, char **argv)
 	if (argc > 1 && std::string_view(argv[1]) == "--mobs-profile") return profileMobs();
 	if (argc > 1 && std::string_view(argv[1]) == "--physics-profile") return profilePlayerPhysics();
 	if (argc > 1 && std::string_view(argv[1]) == "--stream-perf") return runStreamPerf();
+	testChunkPoolIncrementalGrowth();
     // Published memory includes free pool storage and survives ownership moves.
     if (telemetry::registry().enabled) {
         using namespace telemetry;
