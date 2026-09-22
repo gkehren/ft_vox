@@ -58,12 +58,17 @@ inline constexpr size_t kChunkPoolGrowSlabMin = 128;
 /// re-invokes ensureCapacity() every streaming tick under the PoolGrow
 /// profiler scope, so a 512 → 1024 slider jump converges over a bounded
 /// number of frames instead of one multi-thousand-slot allocation hitch.
-/// 256 is a measured compromise (test_chunk_lifecycle [pool-grow], Release):
-/// 1024-slot steps cost avg 2.3 / max 2.9 ms — repeated multi-ms hitches;
-/// 512-slot steps avg 1.27 / max 1.66 ms — still above the sub-millisecond
-/// growth budget; 256-slot steps avg 0.72 / max 1.28 ms over ~100 frames,
-/// which the load path's existing back-pressure covers comfortably (the new
-/// ring does not need to fill instantly).
+/// 256 slots is a measured compromise — clean per-step timings (timed region
+/// contains only the ensureCapacity call; test_chunk_lifecycle [pool-grow],
+/// Release, three runs on the reference system):
+///   1024-slot steps: avg 2.1-2.3 ms, p95 2.4-2.8 ms (repeated multi-ms hitches)
+///   512-slot steps:  avg 1.1-1.2 ms, p95 1.3-1.5 ms (above the ~1 ms budget)
+///   256-slot steps:  avg 0.6-0.8 ms, p95 0.8-1.2 ms, ~100-frame convergence,
+///                    which the load path's existing back-pressure covers
+///                    comfortably (the new ring does not need to fill
+///                    instantly). Indicative measurements, not a per-machine
+///                    guarantee — re-run the [pool-grow] report before
+///                    changing this value.
 inline constexpr size_t kChunkPoolMaxGrowPerCall = 256;
 
 /// One growth decision for ChunkPool::ensureCapacity(): how many slots to

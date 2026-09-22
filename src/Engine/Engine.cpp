@@ -768,14 +768,19 @@ void Engine::tickStreaming(double dt)
 	};
 	const double maxStreamMs = static_cast<double>(renderSettings.maxStreamMs);
 
-	if (chunkPool)
+	// Incremental pool growth (no single-frame hitch when the slider jumps):
+	// each tick adds at most kChunkPoolMaxGrowPerCall slots until the estimate
+	// for the view distance is reached, inside the measured streaming section
+	// so the allocation work shares the per-frame streaming budget;
+	// pointer-stable so loaded chunks stay valid. The PoolGrow scope exists
+	// only while capacity is actually below target — below it every call is
+	// guaranteed to grow — so the benchmark's PoolGrow samples are real
+	// growth steps, never no-op scope timings.
+	const size_t poolTarget = estimateChunkPoolCapacity(renderSettings.maxRenderDistance);
+	if (chunkPool && chunkPool->capacity() < poolTarget)
 	{
-		// Own profiler scope so benchmarks can isolate the incremental
-		// growth cost (PoolGrow) from the streaming stages it shares the
-		// per-frame budget with.
 		PROFILE_SCOPE("PoolGrow");
-		chunkPool->ensureCapacity(estimateChunkPoolCapacity(renderSettings.maxRenderDistance),
-								  kChunkPoolMaxGrowPerCall);
+		chunkPool->ensureCapacity(poolTarget, kChunkPoolMaxGrowPerCall);
 	}
 
 	{
@@ -1176,6 +1181,18 @@ void Engine::tickBenchmark(double dt)
 		// so warmup work stays outside the reported counters (issue #108).
 		if (m_benchmark.consumeStreamingWindowStart() && chunkManager)
 			m_benchmark.beginStreamingMeasurement(chunkManager->streamingMaintenanceStats());
+		// One-shot scripted view-distance switch (--benchmark-view-switch):
+		// fires 25% into the measurement so the rest of the run exercises
+		// the incremental ChunkPool growth the report's PoolGrow stats
+		// describe. Applied before this frame's tickStreaming (tickStreaming
+		// runs later in the frame), and the near range follows the slider rule.
+		if (int switchTo = 0; m_benchmark.consumeViewDistanceSwitch(switchTo))
+		{
+			renderSettings.maxRenderDistance = switchTo;
+			renderSettings.minRenderDistance =
+				clampedNearRenderDistance(renderSettings.minRenderDistance, switchTo);
+			std::cout << "[benchmark] view distance -> " << switchTo << " blocks" << std::endl;
+		}
 	}
 
 	// Restore VSync after done/cancel if we forced it off
@@ -1301,6 +1318,7 @@ void Engine::sampleBenchmarkFrame()
 		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),
 		prof.lastScopeMs("Record"), prof.lastScopeMs("ImGui"), prof.lastScopeMs("Present"),
 		prof.lastScopeMs("Visibility"), prof.lastScopeMs("MeshUpload"),
+		prof.lastScopeMs("PoolGrow"),
 		chunkManager ? chunkManager->chunkCount() : 0, drawList.size(),
 		chunkManager ? chunkManager->pendingLoadCount() : 0,
 		chunkManager ? chunkManager->pendingGenJobs() : 0,

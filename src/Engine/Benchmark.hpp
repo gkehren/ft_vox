@@ -33,6 +33,10 @@ struct BenchmarkConfig
 	float biomeMapZoom{0.f}; // >0 opens a fixed-center map during the benchmark
 	bool biomeMapSequential{false}; // control measurement of the previous path
 	std::string qualityLabel; // graphics preset name ("low"/"medium"/"high"/"cinematic"); empty = unset
+	/// >0: partway through the measurement the engine switches maxRenderDistance
+	/// to this value (from the starting view distance) so the run exercises the
+	/// incremental ChunkPool growth and reports its PoolGrow cost.
+	int viewDistanceSwitch{0};
 };
 
 struct BenchmarkWorkTiming
@@ -85,6 +89,17 @@ struct BenchmarkReport
 	float avgVisibility{0.f};
 	float avgMeshUpload{0.f};
 
+	// Incremental ChunkPool growth (PoolGrow profiler scope). Stats are over
+	// ACTIVE steps only — frames without growth contribute nothing — so
+	// avg/p95/max describe the real cost of one growth operation; the frame
+	// contribution is the mean cost over every measured frame. Zero steps
+	// means the run never grew the pool.
+	float avgPoolGrow{0.f};
+	float p95PoolGrow{0.f};
+	float maxPoolGrow{0.f};
+	float avgPoolGrowFrameMs{0.f};
+	int poolGrowSteps{0};
+
 	uint64_t terrainGenJobs{0};
 	float terrainGenTotalMs{0.f};
 	float terrainGenAvgMs{0.f};
@@ -112,6 +127,7 @@ struct BenchmarkReport
 	int framesOver33ms{0};
 
 	int viewDistance{0};
+	int viewDistanceSwitch{0}; // >0: measurement switched here partway (PoolGrow exercise)
 	int windowW{0};
 	int windowH{0};
 	bool vsync{false};
@@ -134,11 +150,46 @@ struct BenchmarkReport
 	char grade{'F'};
 };
 
+/// Percentile (0..1) of an ASCENDING-SORTED sample vector — nearest-index
+/// rule, no interpolation. Header-level so Benchmark::finalize and the
+/// benchmark telemetry test (test_gpu_profile) pin the same rule.
+inline float percentileOfSorted(std::vector<float> &sorted, float p01)
+{
+	if (sorted.empty())
+		return 0.f;
+	const float p = std::clamp(p01, 0.f, 1.f);
+	const size_t n = sorted.size();
+	if (p <= 0.f)
+		return sorted.front();
+	if (p >= 1.f)
+		return sorted.back();
+	const size_t i = static_cast<size_t>(p * static_cast<float>(n - 1));
+	return sorted[i];
+}
+
+/// Avg / p95 / max over the ACTIVE pool-growth samples (frames without
+/// growth are excluded by the sampler before they get here, so the stats
+/// describe the real cost of one growth step). Pure — unit-tested.
+inline void summarizePoolGrowSamples(const std::vector<float> &samples,
+									 float &outAvg, float &outP95, float &outMax)
+{
+	outAvg = outP95 = outMax = 0.f;
+	if (samples.empty())
+		return;
+	double sum = 0.0;
+	for (float v : samples)
+		sum += v;
+	outAvg = static_cast<float>(sum / static_cast<double>(samples.size()));
+	outMax = *std::max_element(samples.begin(), samples.end());
+	std::vector<float> sorted = samples;
+	std::sort(sorted.begin(), sorted.end());
+	outP95 = percentileOfSorted(sorted, 0.95f);
+}
+
 /// Scripted orbit benchmark: reload world, fly path, aggregate metrics, score.
 class Benchmark
 {
-public:
-	BenchmarkConfig &config() { return m_config; }
+public:	BenchmarkConfig &config() { return m_config; }
 	const BenchmarkConfig &config() const { return m_config; }
 
 	BenchmarkPhase phase() const { return m_phase; }
@@ -169,6 +220,7 @@ public:
 	/// After profiler endFrame: record sample if in Running (post-warmup).
 	void sampleFrame(float frameMs, float scopeStreaming, float scopeAcquire, float scopeRecord,
 					 float scopeImGui, float scopePresent, float scopeVisibility, float scopeMeshUpload,
+					 float scopePoolGrow,
 					 size_t chunks, size_t drawCount, size_t pendingLoad, size_t pendingGen,
 					 size_t pendingMesh, size_t pendingLight, uint64_t terrainJobs, float terrainMs,
 					 uint64_t meshJobs, float meshMs, uint64_t lodJobs, float lodMs,
@@ -245,6 +297,11 @@ private:
 	std::vector<float> m_recordMs;
 	double m_sumStreaming{0}, m_sumAcquire{0}, m_sumRecord{0}, m_sumImGui{0}, m_sumPresent{0};
 	double m_sumVisibility{0}, m_sumMeshUpload{0};
+	/// PoolGrow samples of frames that actually grew the pool (zero-cost
+	/// frames excluded — see summarizePoolGrowSamples) plus the raw sum over
+	/// all measured frames for the per-frame contribution average.
+	std::vector<float> m_poolGrowMs;
+	double m_sumPoolGrow{0.0};
 
 	uint64_t m_terrainJobs{0};
 	double m_terrainMs{0};
@@ -263,6 +320,7 @@ private:
 	StreamingMaintenanceStats m_streamStatsLatest{};
 	bool m_streamStatsStarted{false};
 	bool m_streamWindowStartPending{false};
+	bool m_viewSwitchFired{false};
 
 	// Settings snapshotted at start of measurement
 	int m_viewDistance{0};
@@ -308,6 +366,20 @@ public:
 		const bool v = m_streamWindowStartPending;
 		m_streamWindowStartPending = false;
 		return v;
+	}
+	/// One-shot view-distance switch (config.viewDistanceSwitch > 0): fires
+	/// true once 25% into the measurement, handing the target view distance
+	/// to the engine so the rest of the run exercises incremental pool
+	/// growth (PoolGrow). Reset by requestStart.
+	bool consumeViewDistanceSwitch(int &outViewDistance)
+	{
+		if (m_phase != BenchmarkPhase::Running || m_config.viewDistanceSwitch <= 0 || m_viewSwitchFired)
+			return false;
+		if (measureProgress() < 0.25f)
+			return false;
+		m_viewSwitchFired = true;
+		outViewDistance = m_config.viewDistanceSwitch;
+		return true;
 	}
 	void markForceVsync(bool prevVsync)
 	{

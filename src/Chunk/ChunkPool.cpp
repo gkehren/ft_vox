@@ -78,16 +78,14 @@ bool ChunkPool::ensureCapacity(size_t minCapacity, size_t maxGrowPerCall)
 	// Incremental growth (chunkPoolGrowStep contract): slab-amortized, but
 	// capped per call so a slider jump converges over several streaming
 	// ticks instead of one massive allocation. Callers re-invoke each tick.
+	// No per-step logging: growth is observable via growEvents(), the pool
+	// telemetry gauges and the Engine's PoolGrow profiler scope — a console
+	// line per increment would both spam convergences and pollute the very
+	// timing the PoolGrow scope is meant to measure.
 	const size_t add = chunkPoolGrowStep(m_storage.size(), minCapacity, maxGrowPerCall);
 	const size_t before = m_storage.size();
 	growUnlocked(add);
-	const size_t after = m_storage.size();
-	if (after > before)
-	{
-		std::cout << "ChunkPool: grew " << before << " -> " << after
-				  << " (target >= " << minCapacity << ")\n";
-	}
-	return after > before;
+	return m_storage.size() > before;
 }
 
 Chunk *ChunkPool::acquire(const glm::vec3 &worldPosition)

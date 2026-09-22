@@ -96,7 +96,7 @@ int main()
         // must never inherit the first run's pending peaks, whichever way
         // the first run ended.
         auto sampleQueues = [&benchmark](size_t load, size_t gen, size_t mesh, size_t light) {
-            benchmark.sampleFrame(16.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f,
+            benchmark.sampleFrame(16.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 0.f,
                                   100, 10, load, gen, mesh, light,
                                   1, 1.f, 1, 1.f, 0, 0.f, 0, 0.f);
         };
@@ -133,6 +133,49 @@ int main()
         require(benchmark.report().peakPendingLoad == 11 && benchmark.report().peakPendingGen == 1 &&
                     benchmark.report().peakPendingMesh == 2 && benchmark.report().peakPendingLight == 2,
                 "cancel -> restart keeps no previous peak");
+
+        // PoolGrow telemetry (review round 3): frames without growth are not
+        // samples, active-step stats describe one growth operation, and the
+        // frame contribution averages over EVERY measured frame.
+        {
+            auto sampleGrow = [&benchmark](float poolGrow) {
+                benchmark.sampleFrame(16.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, poolGrow,
+                                      1, 1, 0, 0, 0, 0, 0, 0.f, 0, 0.f, 0, 0.f, 0, 0.f);
+            };
+            auto runBenchmark = [&benchmark, &camera]() {
+                benchmark.config().warmupSec = 0.f;
+                benchmark.config().viewDistanceSwitch = 0;
+                benchmark.requestStart();
+                benchmark.onWorldReady(glm::vec3(0.f));
+                benchmark.tick(.001, camera);
+            };
+
+            runBenchmark();
+            sampleGrow(0.f); // a no-growth frame must not become a sample
+            for (float grow : {0.4f, 0.6f, 0.8f, 1.2f})
+                sampleGrow(grow);
+            benchmark.tick(6., camera);
+            const BenchmarkReport &r = benchmark.report();
+            require(r.poolGrowSteps == 4, "zero-cost frames excluded from PoolGrow samples");
+            require(std::abs(r.avgPoolGrow - 0.75f) < 1e-5f, "PoolGrow active average (0.4+0.6+0.8+1.2)/4");
+            // percentileOfSorted nearest-index rule: sorted[ (size_t)(0.95*3) ] = 0.8.
+            require(std::abs(r.p95PoolGrow - 0.8f) < 1e-5f, "PoolGrow active p95");
+            require(std::abs(r.maxPoolGrow - 1.2f) < 1e-5f, "PoolGrow active max");
+            require(std::abs(r.avgPoolGrowFrameMs - 3.0f / 5.f) < 1e-5f,
+                    "PoolGrow frame contribution averages over all 5 frames");
+            require(benchmark.formatReportText().find("PoolGrow") != std::string::npos,
+                    "report surfaces the PoolGrow line when growth happened");
+
+            // A run with zero growth reports no steps and no PoolGrow line —
+            // all-zero averages must not masquerade as measurements.
+            runBenchmark();
+            sampleGrow(0.f);
+            benchmark.tick(6., camera);
+            require(benchmark.report().poolGrowSteps == 0 && benchmark.report().avgPoolGrow == 0.f,
+                    "growth-free run reports no PoolGrow steps");
+            require(benchmark.formatReportText().find("PoolGrow") == std::string::npos,
+                    "growth-free report omits the PoolGrow line");
+        }
 
         std::cout << "PASS: GPU conversion and benchmark capture isolation\n";
         return 0;

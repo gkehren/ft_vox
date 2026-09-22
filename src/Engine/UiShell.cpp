@@ -1,5 +1,8 @@
 #include "Engine/UiShell.hpp"
 
+// Direct dependency: the menu items below call ui::toggleLayoutTile /
+// ui::openLayoutTile; do not rely on the transitive include via GameUI.hpp.
+#include <Engine/LayoutTiles.hpp>
 #include <Engine/GameUI.hpp>
 #include <Engine/UiShortcuts.hpp>
 #include <Engine/UiStatus.hpp>

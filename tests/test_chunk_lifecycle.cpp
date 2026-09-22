@@ -24,6 +24,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <vector>
 #include <thread>
@@ -1109,33 +1110,32 @@ static void testChunkPoolIncrementalGrowth()
 		const size_t start = pool.capacity();
 		CHECK(start < target, "test setup: 512 steady-state pool is below the 1024 target");
 
-		// Controlled growth-cost measurement (review P3): time every
-		// bounded ensureCapacity() step the engine would take while
-		// converging 512 -> 1024, so a per-call cap change is judged on
-		// measured per-frame cost rather than by feel. Print-only: CI boxes
-		// are too noisy for a timing assert (same policy as runStreamPerf).
+		// Controlled growth-cost measurement (review P3): time every bounded
+		// ensureCapacity() step the engine would take while converging
+		// 512 -> 1024. The timed region contains ONLY the ensureCapacity
+		// call — no logging, no CHECK — and the report prints after the
+		// loop, so the numbers reflect allocation cost alone. Print-only:
+		// CI boxes are too noisy for a timing assert (same policy as
+		// runStreamPerf); assertions below stay structural.
 		size_t steps = 0;
-		double totalMs = 0.0, maxMs = 0.0, firstMs = 0.0;
+		std::vector<double> stepMs;
+		stepMs.reserve(1024);
 		while (pool.capacity() < target && steps < 1000)
 		{
 			const size_t before = pool.capacity();
 			const auto stepStart = std::chrono::steady_clock::now();
-			CHECK(pool.ensureCapacity(target, kChunkPoolMaxGrowPerCall), "catch-up call allocates");
-			const double stepMs =
+			const bool grew = pool.ensureCapacity(target, kChunkPoolMaxGrowPerCall);
+			stepMs.push_back(
 				std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stepStart)
-					.count();
+					.count());
 			const size_t after = pool.capacity();
+			CHECK(grew, "catch-up call allocates");
 			CHECK(after > before, "capacity grows monotonically");
 			CHECK(after - before <= kChunkPoolMaxGrowPerCall,
 				  "one call adds at most kChunkPoolMaxGrowPerCall slots");
 			CHECK(after <= kMaxChunkPoolCapacity, "capacity never crosses the hard cap");
 			if (steps == 0)
-			{
 				CHECK(after < target, "512 -> 1024 is NOT reached in one massive growth");
-				firstMs = stepMs;
-			}
-			totalMs += stepMs;
-			maxMs = std::max(maxMs, stepMs);
 			++steps;
 		}
 		CHECK(pool.capacity() >= target, "incremental growth converges to the 1024 target");
@@ -1143,9 +1143,16 @@ static void testChunkPoolIncrementalGrowth()
 		CHECK(pool.growEvents() == steps + 1, "each growth is published exactly once");
 		CHECK(pool.voxelStorageCapacity() == 0,
 			  "pool growth allocates no voxel backing (lazy per-chunk storage)");
+
+		// Informative report AFTER the timed loop (never inside it).
+		std::sort(stepMs.begin(), stepMs.end());
+		const double sumMs = std::accumulate(stepMs.begin(), stepMs.end(), 0.0);
+		const double avgMs = sumMs / static_cast<double>(stepMs.size());
+		const size_t p95Idx =
+			std::min(stepMs.size() - 1, static_cast<size_t>(0.95 * static_cast<double>(stepMs.size() - 1)));
 		std::cout << "[pool-grow] " << steps << " steps x " << kChunkPoolMaxGrowPerCall
-				  << " slots (512->1024 convergence): avg " << totalMs / steps << " ms, max "
-				  << maxMs << " ms, first " << firstMs << " ms\n";
+				  << " slots (512->1024 convergence): avg " << avgMs << " ms, p95 "
+				  << stepMs[p95Idx] << " ms, max " << stepMs.back() << " ms\n";
 	}
 	{
 		ChunkPool pool(64);
