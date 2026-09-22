@@ -93,12 +93,17 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 						1.0f / std::sqrt(1.0f + normalizedStreamFrontBias(rs.streamFrontBias)));
 
 	// The consequence of raising the view distance, made explicit (issue
-	// #186 §1). The engine itself grows the pool per frame
+	// #186 §1). The engine itself grows the pool incrementally per frame
 	// (Engine::tickStreaming — a cheap no-op once large enough); the panel
-	// only surfaces the estimate, it does not mutate the pool.
+	// only surfaces the estimate, it does not mutate the pool. The voxel
+	// backing line is the worst case at FULL residency (every pool slot
+	// holding live storage) so the memory footprint of the slider is honest;
+	// steady-state residency sits well below it.
 	const size_t poolNeed = estimateChunkPoolCapacity(rs.maxRenderDistance);
 	ImGui::TextDisabled("Estimated resident capacity: ~%s chunks",
 						formatCount(poolNeed).c_str());
+	ImGui::TextDisabled("Estimated voxel backing at full residency: ~%s",
+						formatBytes(estimateChunkPoolVoxelBackingBytes(poolNeed)).c_str());
 
 	// --- Pipeline (issue #186 §2): the main-thread CPU budget stays
 	// first-class; per-stage rates move to the Advanced disclosure;

@@ -48,6 +48,18 @@ using visual::RgbaImage;
 namespace
 {
 
+/// Derive a scene's atmosphere exactly like the engine does every frame
+/// (Engine::tickDayCycle): the day-time derivation followed by the view-
+/// distance fog scaling. Scenes must pin the same shader parameters the
+/// runtime renders with for the same settings — deriving only from dayTime
+/// here would silently diverge from the engine whenever the automatic
+/// atmosphere scales with the view distance.
+void deriveSceneAtmosphere(ShaderParameters &shader, int maxRenderDistance)
+{
+	updateAtmosphereFromDayTime(shader);
+	scaleAtmosphereForViewDistance(shader, maxRenderDistance);
+}
+
 // ---------------------------------------------------------------------------
 // Small image-stat helpers for targeted per-scene invariants (issue #142 §6).
 // ---------------------------------------------------------------------------
@@ -1176,7 +1188,7 @@ int runAoMotionCheck(VisualHarness &harness, const std::vector<SceneSpec> &scene
 		harness.post().autoExposureEnabled = false;
 		harness.post().underwater = motionScene->underwater;
 		harness.shader().dayTime = motionScene->dayTime;
-		updateAtmosphereFromDayTime(harness.shader());
+		deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
 		if (motionScene->spot)
 			motionScene->spot(run);
 		harness.buildArea(harness.camera().getPosition(), motionScene->areaRadiusChunks);
@@ -1373,7 +1385,7 @@ int runPanCapture(VisualHarness &h, uint32_t height, const fs::path &out, bool s
 	h.post() = PostProcessSettings{};
 	h.post().autoExposureEnabled = false; // fixed exposure: temporal deltas come from geometry only
 	h.shader().dayTime = 0.5f;
-	updateAtmosphereFromDayTime(h.shader());
+	deriveSceneAtmosphere(h.shader(), h.renderSettings().maxRenderDistance);
 	spotAaSilhouette(run);
 	h.buildArea(h.camera().getPosition(), 8);
 	fixtureAaSilhouette(run);
@@ -1615,7 +1627,7 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
             h.post().autoExposureEnabled = false; // applyPreset re-enables it; keep the audit deterministic
             h.renderer().applyShadowMapSize(h.post().shadowMapSize);
             h.shader().dayTime = 0.35f;
-            updateAtmosphereFromDayTime(h.shader());
+            deriveSceneAtmosphere(h.shader(), h.renderSettings().maxRenderDistance);
             double water = 0, frame = 0;
             double passMs[size_t(GpuPass::Count)] = {};
             int samples = 0;
@@ -1767,7 +1779,7 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
     const char *names[] = {"lake", "river_edge", "bridge", "shore", "foreground", "sunset", "moon", "surface_crossing", "kelp"};
     for (int scene = 0; scene < 9; ++scene) {
         h.shader().dayTime = scene == 5 ? 0.77f : scene == 6 ? 0.0f : 0.35f;
-        updateAtmosphereFromDayTime(h.shader());
+        deriveSceneAtmosphere(h.shader(), h.renderSettings().maxRenderDistance);
         for (int i = 0; i < 12; ++i) {
             float y = scene == 7 ? 104.5f + float(i - 6) * 0.15f : scene == 8 ? 102.f : 108.f;
             float x = scene == 2 ? 5.f : scene == 3 ? 0.f : 20.f;
@@ -1790,7 +1802,7 @@ int runWaterAudit(VisualHarness &h, const fs::path &out) {
     h.post().underwater = true;
     h.post().underwaterSurfaceY = 105.f; // lake water tops at y = 104
     h.shader().dayTime = 0.35f;
-    updateAtmosphereFromDayTime(h.shader());
+    deriveSceneAtmosphere(h.shader(), h.renderSettings().maxRenderDistance);
     double sweepPost[3][4] = {};
     double sweepComposite[3][4] = {};
     int sweepUnderwaterSamples[3][4] = {};
@@ -1869,7 +1881,7 @@ int runUnderwaterOpticsCheck(VisualHarness &harness)
 	harness.post() = PostProcessSettings{};
 	harness.post().autoExposureEnabled = false; // deterministic manual exposure
 	harness.shader().dayTime = 0.5f;
-	updateAtmosphereFromDayTime(harness.shader());
+	deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
 	harness.shader().fogStart = 20.f;
 	harness.shader().fogEnd = 70.f;
 	harness.post().underwater = true;
@@ -1926,7 +1938,7 @@ int runUnderwaterAutoExposureCheck(VisualHarness &harness)
 	harness.renderSettings() = RenderSettings{};
 	harness.post() = PostProcessSettings{}; // auto exposure on by default
 	harness.shader().dayTime = 0.5f;
-	updateAtmosphereFromDayTime(harness.shader());
+	deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
 	harness.shader().fogStart = 20.f;
 	harness.shader().fogEnd = 70.f;
 	harness.post().underwater = true;
@@ -2007,7 +2019,7 @@ int runGodRayAlignmentCheck(VisualHarness &harness, const std::vector<SceneSpec>
         harness.post() = PostProcessSettings{};
         harness.post().autoExposureEnabled = false; // deterministic manual exposure
 		harness.shader().dayTime = sunset->dayTime;
-		updateAtmosphereFromDayTime(harness.shader());
+		deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
 		sunset->spot(run);
 		// Elevated open-sky vantage replacing the forest-floored golden
 		// viewpoint: from y=200 the sky around the sun is unoccluded in the
@@ -2021,10 +2033,10 @@ int runGodRayAlignmentCheck(VisualHarness &harness, const std::vector<SceneSpec>
 		harness.buildArea(harness.camera().getPosition(), sunset->areaRadiusChunks);
 
         // The same projection WorldRenderer::updateFrameUBO packs for this
-        // frame (VisualHarness::renderFrame uses maxRenderDistance * 1.25 and
+        // frame (VisualHarness::renderFrame uses computeCameraFarPlane and
         // raw extent dimensions as the aspect inputs).
         const VkExtent2D extent = harness.extent();
-        const float farPlane = harness.renderSettings().maxRenderDistance * 1.25f;
+        const float farPlane = computeCameraFarPlane(harness.renderSettings().maxRenderDistance);
         const glm::mat4 projection = harness.camera().getProjectionMatrix(
             float(extent.width), float(extent.height), farPlane);
         const glm::vec4 sunClip = projection * harness.camera().getViewMatrix() *
@@ -2247,7 +2259,7 @@ int runWaterSurfaceTermsCheck(VisualHarness &harness)
 	harness.post() = PostProcessSettings{};
 	harness.post().autoExposureEnabled = false; // fixed chain for directional checks
 	harness.shader().dayTime = 0.35f;
-	updateAtmosphereFromDayTime(harness.shader());
+	deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
 	harness.shader().fogStart = 300.f;
 	harness.shader().fogEnd = 900.f;
 	harness.camera().setPosition({20.f, 108.f, 0.f});
@@ -2367,7 +2379,7 @@ int runWaterSurfaceTermsCheck(VisualHarness &harness)
 		harness.post().autoExposureEnabled = false;
 		harness.post().underwater = false; // inspect the raw transmitted term
 		harness.shader().dayTime = 0.5f;   // noon: maximum zenith/horizon separation
-		updateAtmosphereFromDayTime(harness.shader());
+		deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
 		harness.shader().fogStart = 300.f;
 		harness.shader().fogEnd = 900.f;
 		const glm::ivec2 col = findDeepWaterColumn(harness.terrain(), 40);
@@ -2443,7 +2455,7 @@ int runAdaptationCheck(VisualHarness &harness)
 	harness.renderSettings() = RenderSettings{};
 	harness.post() = PostProcessSettings{}; // auto exposure on (defaults)
 	harness.shader().dayTime = 0.25f;		// irrelevant inside the sealed room
-	updateAtmosphereFromDayTime(harness.shader());
+	deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
 
 	// cave_emissive positioning, no light sources: the meter sits far below
 	// middle grey, so exposure must climb toward the max-EV clamp.
@@ -2809,7 +2821,7 @@ int main(int argc, char **argv)
 			if (const char *sceneWaterDbg = std::getenv("FT_VOX_WATER_DEBUG"))
 				harness.shader().waterDebugView = float(std::atoi(sceneWaterDbg));
 			harness.shader().dayTime = scene.dayTime;
-			updateAtmosphereFromDayTime(harness.shader());
+			deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
 			if (scene.spot)
 				scene.spot(run);
 			harness.buildArea(harness.camera().getPosition(), scene.areaRadiusChunks);
@@ -3015,7 +3027,7 @@ int main(int argc, char **argv)
 			harness.post().autoExposureEnabled = false;
 			harness.shader() = ShaderParameters{};
 			harness.shader().dayTime = 0.30f;
-			updateAtmosphereFromDayTime(harness.shader());
+			deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
 			harness.camera().setPosition(glm::vec3(8.f, 96.f, 8.f));
 			harness.camera().setYawPitch(225.f, -25.f);
 			harness.buildArea(harness.camera().getPosition(), 3);

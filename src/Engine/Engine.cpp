@@ -159,7 +159,7 @@ Engine::Engine(std::string resourcePackRoot)
 	camera.setMovementSpeed(20.f);
 	SDL_SetWindowRelativeMouseMode(window, true);
 
-	updateAtmosphereFromDayTime(shaderParams);
+	updateAutomaticAtmosphere(shaderParams, renderSettings.maxRenderDistance);
 
 	SDL_ShowWindow(window);
 
@@ -723,26 +723,17 @@ void Engine::recreateSwapchainIfNeeded(uint32_t width, uint32_t height)
 
 void Engine::tickDayCycle(double dt)
 {
-	if (paused)
-		return;
-	if (shaderParams.dayCycleEnabled)
+	// Pause gates ONLY time progression. The derived atmosphere parameters
+	// must still track dayTime and the current view distance every frame:
+	// otherwise a view-distance change (or atmosphere edit) made while
+	// paused would leave stale fog values until the world unpauses.
+	if (!paused && shaderParams.dayCycleEnabled)
 	{
 		shaderParams.dayTime = std::fmod(shaderParams.dayTime + static_cast<float>(dt) * shaderParams.dayCycleSpeed, 1.0f);
 		if (shaderParams.dayTime < 0.f)
 			shaderParams.dayTime += 1.f;
 	}
-	updateAtmosphereFromDayTime(shaderParams);
-	if (shaderParams.automaticAtmosphere && renderSettings.maxRenderDistance > 0)
-	{
-		const float viewScale = static_cast<float>(renderSettings.maxRenderDistance) / 512.0f;
-		if (std::abs(viewScale - 1.0f) > 1e-4f)
-		{
-			shaderParams.fogStart *= viewScale;
-			shaderParams.fogEnd *= viewScale;
-			if (viewScale > 1e-4f)
-				shaderParams.fogDensity /= viewScale;
-		}
-	}
+	updateAutomaticAtmosphere(shaderParams, renderSettings.maxRenderDistance);
 }
 
 void Engine::tickStreaming(double dt)
@@ -765,17 +756,21 @@ void Engine::tickStreaming(double dt)
 		return;
 	}
 
-	// Grow pool when the view-distance slider (or other settings) outgrows the free list.
-	// Cheap no-op when already large enough; pointer-stable so loaded chunks stay valid.
-	if (chunkPool)
-		chunkPool->ensureCapacity(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
-
+	// Grow pool when the view-distance slider (or other settings) outgrows the
+	// free list. Incremental (kChunkPoolMaxGrowPerCall per tick, converge over
+	// several frames) and issued inside the measured streaming section so the
+	// allocation work shares the per-frame streaming budget; pointer-stable so
+	// loaded chunks stay valid.
 	const double frameDt = std::min(dt, 0.05);
 	const auto streamT0 = std::chrono::steady_clock::now();
 	const auto streamElapsedMs = [&]() {
 		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - streamT0).count();
 	};
 	const double maxStreamMs = static_cast<double>(renderSettings.maxStreamMs);
+
+	if (chunkPool)
+		chunkPool->ensureCapacity(estimateChunkPoolCapacity(renderSettings.maxRenderDistance),
+								  kChunkPoolMaxGrowPerCall);
 
 	{
 		PROFILE_SCOPE("FinishedJobs");

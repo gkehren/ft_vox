@@ -1,5 +1,10 @@
 #pragma once
 
+// Included FIRST: the pool sizing/growth constants (kChunkPoolMaxGrowPerCall
+// default argument below) and estimateChunkPoolCapacity() live there, shared
+// with ChunkManager / the UI / the tests.
+#include <Chunk/StreamHelpers.hpp>
+
 #include <vector>
 #include <mutex>
 #include <memory>
@@ -34,8 +39,13 @@ public:
 	ChunkPool &operator=(const ChunkPool &) = delete;
 
 	/// Grow pool so capacity() >= minCapacity. Never shrinks. Thread-safe.
-	/// Returns true if new chunks were allocated.
-	bool ensureCapacity(size_t minCapacity);
+	/// Growth is incremental: at most maxGrowPerCall slots are allocated per
+	/// call (0 = unlimited — synchronous bootstrap only), so callers must
+	/// re-invoke every streaming tick until the target is reached. The step
+	/// never crosses kMaxChunkPoolCapacity. Returns true if new chunks were
+	/// allocated.
+	bool ensureCapacity(size_t minCapacity,
+						size_t maxGrowPerCall = kChunkPoolMaxGrowPerCall);
 
 	/// Obtain a chunk reset to worldPosition, or nullptr if the free list is empty.
 	/// Must call generateTerrain() before consuming voxel data.
@@ -107,6 +117,3 @@ private:
 	std::atomic<size_t> m_rejectCount{0};
 	std::atomic<size_t> m_growEvents{0};
 };
-
-// estimateChunkPoolCapacity() lives in StreamHelpers.hpp (shared with tests / UI).
-#include <Chunk/StreamHelpers.hpp>

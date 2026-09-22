@@ -79,7 +79,10 @@ struct ShellToggles
 
 	// Layout tiles toggle action (H shortcut).
 	std::function<void()> toggleLayoutTiles;
-	bool layoutTilesVisible{false};
+	/// Explicit hidden-mode flag (GameUI::isLayoutTilesHidden): true after H
+	/// hid the tiles, restored by the next H. Never derived from panel
+	/// visibility — a closed layout is not necessarily a hidden one.
+	bool layoutTilesHidden{false};
 };
 
 class UiShell

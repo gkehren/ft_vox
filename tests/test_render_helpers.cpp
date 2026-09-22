@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <utils.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -301,6 +302,73 @@ int main()
 		const float highY = lighting::exponentialHeightFogFactor(150.f, 180.f, 180.f, dens, hf, 64.f);
 		if (!(lowY > highY))
 			ok = fail("fog factor must decrease with height above fog base");
+	}
+
+	// --- Automatic atmosphere: day-time derivation + view-distance scaling ---
+	// Engine::tickDayCycle derives the parameters every frame via
+	// updateAutomaticAtmosphere (day-time derivation, then fog scaling for the
+	// view distance; 512 blocks is the unscaled baseline). Pause must only
+	// stop time progression — the derivation itself is call-count independent,
+	// so the same (dayTime, view distance) always yields the same values.
+	{
+		const int distances[] = {64, 256, 512, 640, 1024};
+		ShaderParameters baseline{};
+		updateAtmosphereFromDayTime(baseline); // default dayTime, 512 baseline
+
+		for (const int d : distances)
+		{
+			ShaderParameters sp{};
+			updateAutomaticAtmosphere(sp, d);
+			if (d == 512)
+			{
+				if (sp.fogStart != baseline.fogStart || sp.fogEnd != baseline.fogEnd ||
+					sp.fogDensity != baseline.fogDensity)
+					ok = fail("512-block view distance must leave the baseline fog bit-identical");
+			}
+			else
+			{
+				const float s = static_cast<float>(d) / 512.0f;
+				const auto near1 = [](float a, float b) { return std::abs(a - b) <= 1e-5f * std::max(1.f, std::abs(b)); };
+				if (!near1(sp.fogStart, baseline.fogStart * s))
+					ok = fail("fogStart must scale proportionally with the view distance");
+				if (!near1(sp.fogEnd, baseline.fogEnd * s))
+					ok = fail("fogEnd must scale proportionally with the view distance");
+				if (!near1(sp.fogDensity, baseline.fogDensity / s))
+					ok = fail("fogDensity must scale inversely with the view distance");
+				// Scaling touches only the fog envelope: the day-time
+				// derivation output stays exactly the baseline's.
+				if (sp.sunDirection != baseline.sunDirection || sp.dayFactor != baseline.dayFactor ||
+					sp.nightFactor != baseline.nightFactor || sp.sunsetFactor != baseline.sunsetFactor ||
+					sp.fogColor != baseline.fogColor)
+					ok = fail("view-distance scaling must not touch day-time derived fields");
+			}
+			// Derivation is pure with respect to call count (pause contract).
+			ShaderParameters again = sp;
+			updateAutomaticAtmosphere(again, d);
+			if (again.fogStart != sp.fogStart || again.fogEnd != sp.fogEnd ||
+				again.fogDensity != sp.fogDensity)
+				ok = fail("re-deriving at the same inputs must be idempotent (pause contract)");
+		}
+
+		// Manual atmospheres are never touched by the view-distance scaling.
+		ShaderParameters manual{};
+		manual.automaticAtmosphere = false;
+		manual.fogStart = 123.0f;
+		manual.fogEnd = 456.0f;
+		manual.fogDensity = 0.01f;
+		updateAutomaticAtmosphere(manual, 1024);
+		if (manual.fogStart != 123.0f || manual.fogEnd != 456.0f || manual.fogDensity != 0.01f)
+			ok = fail("manual atmosphere values must survive view-distance scaling");
+
+		// Non-positive view distances are a clean no-op.
+		ShaderParameters guard{};
+		updateAtmosphereFromDayTime(guard);
+		ShaderParameters guardCopy = guard;
+		scaleAtmosphereForViewDistance(guard, 0);
+		scaleAtmosphereForViewDistance(guard, -512);
+		if (guard.fogStart != guardCopy.fogStart || guard.fogEnd != guardCopy.fogEnd ||
+			guard.fogDensity != guardCopy.fogDensity)
+			ok = fail("non-positive view distance must not rescale the fog");
 	}
 
 	// --- Moon ambient ---

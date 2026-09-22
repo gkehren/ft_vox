@@ -9,6 +9,7 @@
 #endif
 #endif
 #include <Engine/InputRouting.hpp>
+#include <Engine/LayoutTiles.hpp>
 #include <Engine/PlayerUi.hpp>
 #include <Engine/UiScale.hpp>
 #include <Engine/UiShortcuts.hpp>
@@ -277,6 +278,125 @@ static void checkPlayerUi()
 	CHECK(biomeDisplayName(0) != nullptr, "valid biome resolves to a name");
 }
 
+// Layout tiles H-mode (pure model in Engine/LayoutTiles.hpp, driven by
+// GameUI::toggleLayoutTiles exactly as below): hidden mode is an explicit
+// flag with a frozen snapshot — never derived from "some panel is visible".
+static void checkLayoutTiles()
+{
+	using debugui::PanelState;
+
+	// Case 1: initial layout {Graphics, Streaming, Performance}: H hides
+	// everything, H again restores EXACTLY those three panels.
+	{
+		PanelState panels{};
+		panels.rendering = true;
+		panels.streaming = true;
+		panels.performance = true;
+		CHECK(ui::anyLayoutTileVisible(panels), "initial layout has visible tiles");
+
+		const ui::LayoutTilesSnapshot snapshot = ui::captureLayoutTiles(panels);
+		ui::setAllLayoutTiles(panels, false);
+		const bool hidden = true;
+		CHECK(hidden, "H entered hidden mode");
+		CHECK(!ui::anyLayoutTileVisible(panels), "H hides every tile");
+		// Not tiles: Status Overlay density and on-screen hints survive H.
+		CHECK(panels.overlayHints, "overlay hints are not a tile and stay untouched");
+
+		ui::restoreLayoutTiles(panels, snapshot);
+		CHECK(panels.rendering && panels.streaming && panels.performance,
+			  "second H restores the three open panels exactly");
+		CHECK(!panels.world && !panels.help && !panels.overview && !panels.playerPanel &&
+				  !panels.playerDiagnostics && !panels.chunkInspector && !panels.memory &&
+				  !panels.renderDebug && !panels.benchmark,
+			  "closed panels stay closed after restore");
+	}
+
+	// Case 2: a single open panel round-trips identically.
+	{
+		PanelState panels{};
+		panels.chunkInspector = true;
+		const ui::LayoutTilesSnapshot snapshot = ui::captureLayoutTiles(panels);
+		ui::setAllLayoutTiles(panels, false);
+		CHECK(!ui::anyLayoutTileVisible(panels), "single-panel layout hides to nothing");
+		ui::restoreLayoutTiles(panels, snapshot);
+		CHECK(panels.chunkInspector && ui::anyLayoutTileVisible(panels) &&
+				  !panels.rendering && !panels.performance,
+			  "single-panel layout restores exactly");
+	}
+
+	// Case 3: every panel closed manually — H semantics stay deterministic:
+	// the all-closed snapshot is captured and restored verbatim (no surprise
+	// default layout appears).
+	{
+		PanelState panels{};
+		CHECK(!ui::anyLayoutTileVisible(panels), "all closed manually");
+		const ui::LayoutTilesSnapshot snapshot = ui::captureLayoutTiles(panels);
+		ui::setAllLayoutTiles(panels, false);
+		ui::restoreLayoutTiles(panels, snapshot);
+		CHECK(!ui::anyLayoutTileVisible(panels), "all-closed snapshot restores to all closed");
+	}
+
+	// Case 4: F-key while hidden — leave hidden mode, abandon the snapshot,
+	// open the panel. The pre-hidden layout must never reappear: the next H
+	// captures the CURRENT state, and that snapshot is never overwritten
+	// while hidden.
+	{
+		PanelState panels{};
+		panels.rendering = panels.streaming = panels.help = true;
+		ui::LayoutTilesSnapshot savedByH = ui::captureLayoutTiles(panels);
+		ui::setAllLayoutTiles(panels, false);
+		bool hidden = true;
+
+		// F2 (Graphics) pressed while hidden: leaveLayoutTilesHidden() first…
+		hidden = false; // no restore, no re-capture — snapshot abandoned
+		panels.rendering = !panels.rendering;
+		CHECK(panels.rendering && !panels.streaming && !panels.help,
+			  "F-key opens only its own panel on the current visible state");
+		CHECK(!hidden, "F-key leaves hidden mode");
+
+		// …then the next H captures {Graphics} — the abandoned 3-panel
+		// snapshot is gone for good.
+		savedByH = ui::captureLayoutTiles(panels);
+		ui::setAllLayoutTiles(panels, false);
+		hidden = true;
+		ui::restoreLayoutTiles(panels, savedByH);
+		hidden = false;
+		CHECK(panels.rendering && !panels.streaming && !panels.help,
+			  "H cycle after an F-key restore reflects the state at capture time");
+	}
+
+	// Case 5: Benchmark Report with no other panel — the report is NOT a
+	// panel flag: it is gated by the explicit hidden flag alone, and an
+	// F-key that leaves hidden mode brings it back without touching panels.
+	{
+		PanelState panels{};
+		bool reportVisible = true;
+		bool hidden = false;
+		CHECK(reportVisible && !hidden, "report shows with zero panels open");
+
+		const ui::LayoutTilesSnapshot snapshot = ui::captureLayoutTiles(panels);
+		ui::setAllLayoutTiles(panels, false);
+		hidden = true;
+		const bool reportDrawn = !hidden && reportVisible;
+		CHECK(!reportDrawn, "H suppresses the benchmark report");
+		CHECK(!ui::anyLayoutTileVisible(panels), "and hides the (already closed) panels");
+
+		hidden = false; // any tile-opening path leaves hidden mode
+		CHECK((!hidden && reportVisible) == true, "report returns once hidden mode ends");
+		ui::restoreLayoutTiles(panels, snapshot); // H again restores all-closed
+		CHECK(!ui::anyLayoutTileVisible(panels), "panels stay closed through the cycle");
+	}
+
+	// Scope contract: hidden mode and visibility never derive from each other.
+	{
+		PanelState panels{};
+		panels.statusOverlay = playerui::StatusOverlayDensity::Detailed;
+		panels.overlayHints = true;
+		CHECK(!ui::anyLayoutTileVisible(panels),
+			  "Status Overlay + hints are not tiles: an all-closed layout has no visible tiles");
+	}
+}
+
 int main()
 {
 	checkScale();
@@ -284,6 +404,7 @@ int main()
 	checkStatusStrip();
 	checkShortcutMetadata();
 	checkPlayerUi();
+	checkLayoutTiles();
 
 	if (g_fails != 0)
 	{

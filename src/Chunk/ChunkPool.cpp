@@ -8,10 +8,9 @@
 
 namespace
 {
-constexpr size_t kMinPoolCapacity = 64;
-constexpr size_t kGrowSlabMin = 128;
-// Soft cap so a mis-set slider cannot allocate unbounded RAM in one go.
-constexpr size_t kMaxPoolCapacity = 65536;
+// Sizing bounds and growth rules live in StreamHelpers.hpp so the pool,
+// the estimator and the UI read one set of constants.
+constexpr size_t kMinPoolCapacity = kMinChunkPoolCapacity;
 } // namespace
 
 ChunkPool::ChunkPool(size_t initialCapacity)
@@ -45,10 +44,10 @@ void ChunkPool::growUnlocked(size_t addCount)
 		return;
 
 	const size_t cur = m_storage.size();
-	if (cur >= kMaxPoolCapacity)
+	if (cur >= kMaxChunkPoolCapacity)
 		return;
 
-	const size_t canAdd = std::min(addCount, kMaxPoolCapacity - cur);
+	const size_t canAdd = std::min(addCount, kMaxChunkPoolCapacity - cur);
 	m_storage.reserve(cur + canAdd);
 	m_freeList.reserve(m_freeList.size() + canAdd);
 	m_owned.reserve(cur + canAdd);
@@ -68,17 +67,18 @@ void ChunkPool::growUnlocked(size_t addCount)
 	publishTelemetry();
 }
 
-bool ChunkPool::ensureCapacity(size_t minCapacity)
+bool ChunkPool::ensureCapacity(size_t minCapacity, size_t maxGrowPerCall)
 {
-	minCapacity = std::min(std::max(minCapacity, kMinPoolCapacity), kMaxPoolCapacity);
+	minCapacity = std::min(std::max(minCapacity, kMinPoolCapacity), kMaxChunkPoolCapacity);
 
 	std::lock_guard<std::mutex> lock(m_mutex);
 	if (m_storage.size() >= minCapacity)
 		return false;
 
-	const size_t need = minCapacity - m_storage.size();
-	// Grow in slabs to amortize lock + allocation cost when the slider jumps.
-	const size_t add = std::max(need, kGrowSlabMin);
+	// Incremental growth (chunkPoolGrowStep contract): slab-amortized, but
+	// capped per call so a slider jump converges over several streaming
+	// ticks instead of one massive allocation. Callers re-invoke each tick.
+	const size_t add = chunkPoolGrowStep(m_storage.size(), minCapacity, maxGrowPerCall);
 	const size_t before = m_storage.size();
 	growUnlocked(add);
 	const size_t after = m_storage.size();

@@ -582,6 +582,36 @@ inline void updateAtmosphereFromDayTime(ShaderParameters &sp)
 	sp.moonPosition = sp.celestialOrbitCenter - sunDir * sp.celestialOrbitRadius;
 }
 
+/// Scale the automatic-atmosphere fog envelope for the current view distance.
+/// The day-time derivation above targets the 512-block baseline; farther
+/// views push fog start/end out proportionally and thin the density so the
+/// extended world stays visible, nearer views tighten it. Manual
+/// (non-automatic) atmospheres are never touched, and neither is a view
+/// distance at the 512-block baseline (viewScale 1).
+inline void scaleAtmosphereForViewDistance(ShaderParameters &sp, int maxRenderDistanceBlocks)
+{
+	if (!sp.automaticAtmosphere || maxRenderDistanceBlocks <= 0)
+		return;
+	const float viewScale = static_cast<float>(maxRenderDistanceBlocks) / 512.0f;
+	if (std::abs(viewScale - 1.0f) <= 1e-4f)
+		return;
+	sp.fogStart *= viewScale;
+	sp.fogEnd *= viewScale;
+	if (viewScale > 1e-4f)
+		sp.fogDensity /= viewScale;
+}
+
+/// Derive the CURRENT graphics parameters from their inputs: day-time
+/// atmosphere followed by the view-distance scaling. Time progression
+/// (advancing dayTime) is a separate concern — callers must run this every
+/// frame even while time is paused, so view-distance and atmosphere-setting
+/// changes re-derive immediately instead of waiting for the unpause.
+inline void updateAutomaticAtmosphere(ShaderParameters &sp, int maxRenderDistanceBlocks)
+{
+	updateAtmosphereFromDayTime(sp);
+	scaleAtmosphereForViewDistance(sp, maxRenderDistanceBlocks);
+}
+
 /// Graphics-panel scoped resets (issue #185): restore the Lighting category
 /// (day cycle + lighting scales + material grading) to constructor defaults.
 /// Fog/atmosphere fields are untouched (separate category), as are derived

@@ -131,34 +131,45 @@ bool GameUI::handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame)
 	case SDLK_F1:
 		// Issue #184: F1 owns the Status Overlay density — cycling through
 		// Off / Minimal / Detailed replaces the old catch-all HUD toggle.
+		// The overlay is gameplay HUD, not a layout tile: it does not leave
+		// hidden mode.
 		m_debug.panels.statusOverlay =
 			playerui::nextStatusOverlayDensity(m_debug.panels.statusOverlay);
 		return true;
 	case SDLK_F2:
+		leaveLayoutTilesHidden();
 		m_debug.panels.rendering = !m_debug.panels.rendering;
 		return true;
 	case SDLK_F3:
+		leaveLayoutTilesHidden();
 		m_debug.panels.streaming = !m_debug.panels.streaming;
 		return true;
 	case SDLK_F4:
+		leaveLayoutTilesHidden();
 		m_debug.panels.world = !m_debug.panels.world;
 		return true;
 	case SDLK_F5:
+		leaveLayoutTilesHidden();
 		m_debug.panels.help = !m_debug.panels.help;
 		return true;
 	case SDLK_F6:
+		// Hints are gameplay overlay, not a layout tile: no hidden-mode exit.
 		m_debug.panels.overlayHints = !m_debug.panels.overlayHints;
 		return true;
 	case SDLK_F7:
+		leaveLayoutTilesHidden();
 		m_debug.panels.performance = !m_debug.panels.performance;
 		return true;
 	case SDLK_F8:
+		leaveLayoutTilesHidden();
 		m_debug.panels.overview = !m_debug.panels.overview;
 		return true;
 	case SDLK_F9:
+		leaveLayoutTilesHidden();
 		m_debug.panels.chunkInspector = !m_debug.panels.chunkInspector;
 		return true;
 	case SDLK_F10:
+		// VSync is a device setting, not a tile: no hidden-mode exit.
 		if (frame.render && frame.setVSync)
 		{
 			frame.render->vsyncEnabled = !frame.render->vsyncEnabled;
@@ -166,9 +177,11 @@ bool GameUI::handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame)
 		}
 		return true;
 	case SDLK_F11:
+		leaveLayoutTilesHidden();
 		m_debug.panels.memory = !m_debug.panels.memory;
 		return true;
 	case SDLK_F12:
+		leaveLayoutTilesHidden();
 		m_debug.panels.renderDebug = !m_debug.panels.renderDebug;
 		return true;
 	default:
@@ -177,82 +190,22 @@ bool GameUI::handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame)
 	return false;
 }
 
-bool GameUI::areLayoutTilesVisible() const
-{
-	return m_debug.panels.rendering ||
-		   m_debug.panels.streaming ||
-		   m_debug.panels.world ||
-		   m_debug.panels.playerPanel ||
-		   m_debug.panels.help ||
-		   m_debug.panels.overview ||
-		   m_debug.panels.performance ||
-		   m_debug.panels.playerDiagnostics ||
-		   m_debug.panels.chunkInspector ||
-		   m_debug.panels.memory ||
-		   m_debug.panels.renderDebug ||
-		   m_debug.panels.benchmark;
-}
-
 void GameUI::toggleLayoutTiles()
 {
-	if (areLayoutTilesVisible())
+	if (!m_layoutTilesHidden)
 	{
-		m_savedTilesState.saved = true;
-		m_savedTilesState.rendering = m_debug.panels.rendering;
-		m_savedTilesState.streaming = m_debug.panels.streaming;
-		m_savedTilesState.world = m_debug.panels.world;
-		m_savedTilesState.playerPanel = m_debug.panels.playerPanel;
-		m_savedTilesState.help = m_debug.panels.help;
-		m_savedTilesState.overview = m_debug.panels.overview;
-		m_savedTilesState.performance = m_debug.panels.performance;
-		m_savedTilesState.playerDiagnostics = m_debug.panels.playerDiagnostics;
-		m_savedTilesState.chunkInspector = m_debug.panels.chunkInspector;
-		m_savedTilesState.memory = m_debug.panels.memory;
-		m_savedTilesState.renderDebug = m_debug.panels.renderDebug;
-		m_savedTilesState.benchmark = m_debug.panels.benchmark;
-
-		m_debug.panels.rendering = false;
-		m_debug.panels.streaming = false;
-		m_debug.panels.world = false;
-		m_debug.panels.playerPanel = false;
-		m_debug.panels.help = false;
-		m_debug.panels.overview = false;
-		m_debug.panels.performance = false;
-		m_debug.panels.playerDiagnostics = false;
-		m_debug.panels.chunkInspector = false;
-		m_debug.panels.memory = false;
-		m_debug.panels.renderDebug = false;
-		m_debug.panels.benchmark = false;
+		// Enter hidden mode: capture once, hide everything. The snapshot is
+		// frozen until the next H restores it.
+		m_savedTilesState = ui::captureLayoutTiles(m_debug.panels);
+		ui::setAllLayoutTiles(m_debug.panels, false);
+		m_layoutTilesHidden = true;
 	}
 	else
 	{
-		const bool anySaved = m_savedTilesState.saved && (
-			m_savedTilesState.rendering || m_savedTilesState.streaming ||
-			m_savedTilesState.world || m_savedTilesState.playerPanel ||
-			m_savedTilesState.help || m_savedTilesState.overview ||
-			m_savedTilesState.performance || m_savedTilesState.playerDiagnostics ||
-			m_savedTilesState.chunkInspector || m_savedTilesState.memory ||
-			m_savedTilesState.renderDebug || m_savedTilesState.benchmark);
-
-		if (anySaved)
-		{
-			m_debug.panels.rendering = m_savedTilesState.rendering;
-			m_debug.panels.streaming = m_savedTilesState.streaming;
-			m_debug.panels.world = m_savedTilesState.world;
-			m_debug.panels.playerPanel = m_savedTilesState.playerPanel;
-			m_debug.panels.help = m_savedTilesState.help;
-			m_debug.panels.overview = m_savedTilesState.overview;
-			m_debug.panels.performance = m_savedTilesState.performance;
-			m_debug.panels.playerDiagnostics = m_savedTilesState.playerDiagnostics;
-			m_debug.panels.chunkInspector = m_savedTilesState.chunkInspector;
-			m_debug.panels.memory = m_savedTilesState.memory;
-			m_debug.panels.renderDebug = m_savedTilesState.renderDebug;
-			m_debug.panels.benchmark = m_savedTilesState.benchmark;
-		}
-		else
-		{
-			enableDefaultDeveloperPanels();
-		}
+		// Leave hidden mode: restore the captured layout exactly. An
+		// all-closed snapshot restores to all closed — deterministic.
+		ui::restoreLayoutTiles(m_debug.panels, m_savedTilesState);
+		m_layoutTilesHidden = false;
 	}
 }
 
@@ -298,40 +251,37 @@ void GameUI::draw(GameUIFrame &frame)
 		&m_debug.panels.chunkInspector, &m_debug.panels.memory, &m_debug.panels.benchmark,
 		&m_helpTabRequest,
 		[this]() { toggleLayoutTiles(); },
-		areLayoutTilesVisible()};
+		m_layoutTilesHidden};
 
 	m_shell.beginFrame();
 	m_shell.drawMainMenuBar(frame, toggles);
 
+	// The GameUI-owned windows below have no internal visibility guard; every
+	// debugui:: panel self-guards on its own flag (see DebugPanels.hpp), so
+	// draw() submits them unconditionally and cannot drift out of sync.
 	if (m_debug.panels.statusOverlay != playerui::StatusOverlayDensity::Off)
 		drawStatusOverlay(frame);
 	if (m_debug.panels.playerPanel)
 		drawPlayerPanel(frame);
-	if (m_debug.panels.overview)
-		debugui::drawOverview(m_debug, frame);
-	if (m_debug.panels.rendering)
-		debugui::drawRendering(m_debug, frame);
-	if (m_debug.panels.renderDebug)
-		debugui::drawRenderDebug(m_debug, frame);
-	if (m_debug.panels.streaming)
-		debugui::drawStreaming(m_debug, frame);
-	if (m_debug.panels.performance)
-		debugui::drawPerformance(m_debug, frame);
-	if (m_debug.panels.playerDiagnostics)
-		debugui::drawPlayerDiagnostics(m_debug, frame);
-	if (m_debug.panels.chunkInspector)
-		debugui::drawChunkInspector(m_debug, frame);
-	if (m_debug.panels.memory)
-		debugui::drawMemory(m_debug, frame);
-	if (m_debug.panels.benchmark)
-		debugui::drawBenchmarkPanel(m_debug, frame);
+	debugui::drawOverview(m_debug, frame);
+	debugui::drawRendering(m_debug, frame);
+	debugui::drawRenderDebug(m_debug, frame);
+	debugui::drawStreaming(m_debug, frame);
+	debugui::drawPerformance(m_debug, frame);
+	debugui::drawPlayerDiagnostics(m_debug, frame);
+	debugui::drawChunkInspector(m_debug, frame);
+	debugui::drawMemory(m_debug, frame);
+	debugui::drawBenchmarkPanel(m_debug, frame);
 	if (m_debug.panels.world)
 		drawWorld(frame);
 	if (m_debug.panels.help)
 		drawHelp(frame);
 
-	// Report can stay open even if the panels that opened it are closed, unless all tiles are hidden.
-	if (areLayoutTilesVisible() && frame.benchmark && frame.benchmark->showReport() && frame.benchmark->report().valid)
+	// Report can stay open even if the panels that opened it are closed; only
+	// the explicit H hidden mode suppresses it — never derived from "some
+	// panel is visible" (closing every panel manually must not close it).
+	if (!m_layoutTilesHidden && frame.benchmark && frame.benchmark->showReport() &&
+		frame.benchmark->report().valid)
 		debugui::drawBenchmarkReport(m_debug, frame);
 
 	if (m_debug.panels.overlayHints && frame.mouseCaptured && *frame.mouseCaptured)

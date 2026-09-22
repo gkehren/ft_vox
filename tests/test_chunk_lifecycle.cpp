@@ -1092,6 +1092,51 @@ static void runStreamingDispatchTests()
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Incremental ChunkPool growth: ensureCapacity() must NOT allocate a whole
+// 512 -> 1024 view-distance jump in one massive call. Capacity moves in
+// bounded (kChunkPoolMaxGrowPerCall), monotone per-call steps without ever
+// crossing the shared hard cap, while the unlimited bootstrap path
+// (maxGrowPerCall = 0) still reaches a legal target in a single call.
+// ---------------------------------------------------------------------------
+static void testChunkPoolIncrementalGrowth()
+{
+	const size_t target = estimateChunkPoolCapacity(1024);
+	CHECK(target <= kMaxChunkPoolCapacity, "1024-block target within the hard cap");
+
+	{
+		ChunkPool pool(estimateChunkPoolCapacity(512));
+		const size_t start = pool.capacity();
+		CHECK(start < target, "test setup: 512 steady-state pool is below the 1024 target");
+
+		size_t steps = 0;
+		while (pool.capacity() < target && steps < 1000)
+		{
+			const size_t before = pool.capacity();
+			CHECK(pool.ensureCapacity(target, kChunkPoolMaxGrowPerCall), "catch-up call allocates");
+			const size_t after = pool.capacity();
+			CHECK(after > before, "capacity grows monotonically");
+			CHECK(after - before <= kChunkPoolMaxGrowPerCall,
+				  "one call adds at most kChunkPoolMaxGrowPerCall slots");
+			CHECK(after <= kMaxChunkPoolCapacity, "capacity never crosses the hard cap");
+			if (steps == 0)
+				CHECK(after < target, "512 -> 1024 is NOT reached in one massive growth");
+			++steps;
+		}
+		CHECK(pool.capacity() >= target, "incremental growth converges to the 1024 target");
+		// The constructor's initial pre-allocation counts as one grow event.
+		CHECK(pool.growEvents() == steps + 1, "each growth is published exactly once");
+		CHECK(pool.voxelStorageCapacity() == 0,
+			  "pool growth allocates no voxel backing (lazy per-chunk storage)");
+	}
+	{
+		ChunkPool pool(64);
+		CHECK(pool.ensureCapacity(target, 0), "bootstrap growth allocates");
+		CHECK(pool.capacity() >= target, "unlimited (maxGrowPerCall = 0) reaches the target in one call");
+		CHECK(!pool.ensureCapacity(target, 0), "second call at target is a no-op");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	std::cout.setf(std::ios::unitbuf);
@@ -1099,6 +1144,7 @@ int main(int argc, char **argv)
 	if (argc > 1 && std::string_view(argv[1]) == "--mobs-profile") return profileMobs();
 	if (argc > 1 && std::string_view(argv[1]) == "--physics-profile") return profilePlayerPhysics();
 	if (argc > 1 && std::string_view(argv[1]) == "--stream-perf") return runStreamPerf();
+	testChunkPoolIncrementalGrowth();
     // Published memory includes free pool storage and survives ownership moves.
     if (telemetry::registry().enabled) {
         using namespace telemetry;

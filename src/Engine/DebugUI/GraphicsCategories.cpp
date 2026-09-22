@@ -12,6 +12,7 @@
 
 #include <imgui/imgui.h>
 
+#include <algorithm>
 #include <cfloat>
 #include <cstdio>
 

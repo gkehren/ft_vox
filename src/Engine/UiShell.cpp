@@ -184,7 +184,7 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 			ImGui::EndMenu();
 		}
 		ImGui::Separator();
-		if (ImGui::MenuItem(toggles.layoutTilesVisible ? "Hide layout tiles" : "Show layout tiles",
+		if (ImGui::MenuItem(toggles.layoutTilesHidden ? "Show layout tiles" : "Hide layout tiles",
 							shortcutKeyName(SDLK_H)))
 		{
 			if (toggles.toggleLayoutTiles)

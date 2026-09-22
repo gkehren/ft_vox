@@ -245,7 +245,9 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 		}
 	}
 	m_renderer.setMobs(resolvedMobs);
-	const float farPlane = m_renderSettings.maxRenderDistance * 1.25f;
+	// Single source of truth: the same far plane Engine / ChunkManager use,
+	// so golden frames are projected exactly like the shipped game.
+	const float farPlane = computeCameraFarPlane(m_renderSettings.maxRenderDistance);
 	const bool underwater = m_renderer.postSettings().underwater;
 	if (underwater)
 	{

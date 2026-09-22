@@ -15,6 +15,7 @@
 #include <utils.hpp>
 
 #include <Engine/DebugUI/DebugUiCore.hpp>
+#include <Engine/LayoutTiles.hpp>
 #include <Engine/UiShell.hpp>
 #include <Engine/GameUIBiomeMap.hpp>
 
@@ -264,8 +265,11 @@ public:
 	bool showProfiler() const { return m_debug.panels.performance; }
 
 	/// Reproducible streaming benchmark: map stays open at a fixed center.
+	/// Benchmark owns the UI state while it runs: leave H hidden mode so the
+	/// World panel and the report window it drives are actually shown.
 	void configureBenchmarkMap(float zoom)
 	{
+		m_layoutTilesHidden = false;
 		m_debug.panels.world = true;
 		m_mapZoom = zoom;
 		m_mapFollow = false;
@@ -303,8 +307,19 @@ public:
 	}
 
 	/// Toggle visibility of all docked layout tiles/panels on/off (H shortcut).
+	/// Backed by an explicit hidden-mode flag: H captures the current tile
+	/// state once, hides everything, and the next H restores that exact
+	/// snapshot. Manual open/close of a panel is never interpreted as a
+	/// hidden-mode transition — a panel opened by any other path while hidden
+	/// (F-key, menu) simply leaves hidden mode via leaveLayoutTilesHidden().
 	void toggleLayoutTiles();
-	bool areLayoutTilesVisible() const;
+	bool isLayoutTilesHidden() const { return m_layoutTilesHidden; }
+
+	/// A tile is being toggled through another path while the layout is
+	/// hidden (F-key / menu): leave hidden mode WITHOUT restoring or
+	/// re-capturing. The saved snapshot is abandoned and the panel opens on
+	/// the current visible state.
+	void leaveLayoutTilesHidden() { m_layoutTilesHidden = false; }
 
 	/// Invalidate any active or in-flight biome map task and clear current texture.
 	/// Supersedes existing request ID and marks backing texture as inactive.
@@ -378,24 +393,14 @@ private:
 	/// histories (issue #179). Refreshed once per draw by updateDebugUiState.
 	debugui::UiState m_debug{};
 
-	/// Saved state of layout tiles when toggled off with the H shortcut.
-	struct SavedLayoutTilesState
-	{
-		bool saved{false};
-		bool rendering{false};
-		bool streaming{false};
-		bool world{false};
-		bool playerPanel{false};
-		bool help{false};
-		bool overview{false};
-		bool performance{false};
-		bool playerDiagnostics{false};
-		bool chunkInspector{false};
-		bool memory{false};
-		bool renderDebug{false};
-		bool benchmark{false};
-	};
-	SavedLayoutTilesState m_savedTilesState{};
+	/// Explicit hidden-mode flag for the H shortcut (never derived from panel
+	/// visibility: a layout is hidden because H was pressed, not because
+	/// every panel happens to be closed).
+	bool m_layoutTilesHidden{false};
+	/// Tile flags captured when hidden mode was entered; restored verbatim on
+	/// the next H. Never written while the layout is hidden — manual panel
+	/// opens abandon the snapshot via leaveLayoutTilesHidden() instead.
+	ui::LayoutTilesSnapshot m_savedTilesState{};
 
 	/// One-shot: Help window opens with the requested tab selected.
 	ui::HelpTabRequest m_helpTabRequest{ui::HelpTabRequest::None};

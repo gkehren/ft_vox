@@ -2231,10 +2231,12 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 	if (!m_terrainGenerator || !m_chunkPool || !allocator)
 		return;
 
-	// Square footprint (2r+1)^2 plus a little margin for safety.
+	// Square footprint (2r+1)^2 plus a little margin for safety. Bootstrap is
+	// a one-shot synchronous setup: grow in a single call (maxGrowPerCall = 0)
+	// instead of the incremental per-tick cap the streaming path uses.
 	const size_t bootstrapNeed =
 		static_cast<size_t>(2 * radiusChunks + 1) * static_cast<size_t>(2 * radiusChunks + 1) + 16;
-	m_chunkPool->ensureCapacity(bootstrapNeed);
+	m_chunkPool->ensureCapacity(bootstrapNeed, 0);
 
 	const glm::ivec3 camChunk = worldToChunkCoord(center);
 	std::vector<std::pair<glm::ivec3, Chunk *>> created;
