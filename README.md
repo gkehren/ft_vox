@@ -11,6 +11,7 @@ Cross-platform voxel sandbox engine built from scratch in **C++20**, **Vulkan** 
 ![Windows](https://img.shields.io/badge/Windows-MSVC%202022-0078D6?logo=windows&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-GCC%20%2F%20Clang-FCC624?logo=linux&logoColor=black)
 ![macOS](https://img.shields.io/badge/macOS-MoltenVK-000000?logo=apple&logoColor=white)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 
 ft_vox is a voxel sandbox engine focused on real-time rendering, procedural
 terrain generation and engine architecture.
@@ -133,5 +134,7 @@ compiled into `test_network` only and is not part of the game.
 
 ## License
 
-No project license file is currently provided.
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party components.
+ft_vox is licensed under the [Apache License 2.0](LICENSE).
+
+Third-party components and assets remain subject to their respective
+licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
