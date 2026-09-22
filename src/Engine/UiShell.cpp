@@ -113,11 +113,23 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 
 	const bool paused = frame.paused && *frame.paused;
 
+	// Layout-tile menu item: toggling an H-managed tile from the menus must
+	// leave hidden mode first (ui::toggleLayoutTile). Overlay-only items
+	// (Status Overlay, on-screen hints) are NOT drawn through this — they
+	// are not tiles and keep plain flag writes.
+	const auto layoutTileMenuItem = [&](const char *label, const char *shortcut, bool *visible)
+	{
+		if (ImGui::MenuItem(label, shortcut, visible ? *visible : false))
+			toggleLayoutTile(toggles.leaveLayoutTilesHidden, visible);
+	};
+
 	if (ImGui::BeginMenu("ft_vox"))
 	{
 		if (ImGui::MenuItem("About ft_vox"))
 		{
-			*toggles.help = true;
+			// Opens the Help window (an H-managed tile): leave hidden mode
+			// first so the About tab is actually visible.
+			openLayoutTile(toggles.leaveLayoutTilesHidden, toggles.help);
 			*toggles.helpTabRequest = HelpTabRequest::About;
 		}
 		ImGui::Separator();
@@ -164,10 +176,10 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 					playerui::nextStatusOverlayDensity(*toggles.statusOverlay);
 			ImGui::EndMenu();
 		}
-		ImGui::MenuItem("Player / Gameplay", nullptr, toggles.playerPanel);
-		ImGui::MenuItem("Graphics", shortcutKeyName(SDLK_F2), toggles.graphics);
-		ImGui::MenuItem("Streaming", shortcutKeyName(SDLK_F3), toggles.streaming);
-		ImGui::MenuItem("World / biome map", shortcutKeyName(SDLK_F4), toggles.world);
+		layoutTileMenuItem("Player / Gameplay", nullptr, toggles.playerPanel);
+		layoutTileMenuItem("Graphics", shortcutKeyName(SDLK_F2), toggles.graphics);
+		layoutTileMenuItem("Streaming", shortcutKeyName(SDLK_F3), toggles.streaming);
+		layoutTileMenuItem("World / biome map", shortcutKeyName(SDLK_F4), toggles.world);
 		ImGui::MenuItem("On-screen hints", shortcutKeyName(SDLK_F6), toggles.overlayHints);
 		ImGui::Separator();
 		if (ImGui::BeginMenu("UI scale"))
@@ -194,6 +206,10 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 			queueResetLayout();
 		if (ImGui::MenuItem("Apply default developer layout"))
 		{
+			// Opens five H-managed tiles: leave hidden mode first so the
+			// default panels are actually shown.
+			if (toggles.leaveLayoutTilesHidden)
+				toggles.leaveLayoutTilesHidden();
 			queueDefaultLayout();
 			*toggles.graphics = true;
 			*toggles.streaming = true;
@@ -206,14 +222,14 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 
 	if (ImGui::BeginMenu("Developer"))
 	{
-		ImGui::MenuItem("Overview", shortcutKeyName(SDLK_F8), toggles.overview);
+		layoutTileMenuItem("Overview", shortcutKeyName(SDLK_F8), toggles.overview);
 		ImGui::Separator();
-		ImGui::MenuItem("Performance", shortcutKeyName(SDLK_F7), toggles.performance);
-		ImGui::MenuItem("Player diagnostics", nullptr, toggles.playerDiagnostics);
-		ImGui::MenuItem("Memory", shortcutKeyName(SDLK_F11), toggles.memory);
-		ImGui::MenuItem("Chunk inspector", shortcutKeyName(SDLK_F9), toggles.chunkInspector);
-		ImGui::MenuItem("Render debug", shortcutKeyName(SDLK_F12), toggles.renderDebug);
-		ImGui::MenuItem("Benchmark", nullptr, toggles.benchmark);
+		layoutTileMenuItem("Performance", shortcutKeyName(SDLK_F7), toggles.performance);
+		layoutTileMenuItem("Player diagnostics", nullptr, toggles.playerDiagnostics);
+		layoutTileMenuItem("Memory", shortcutKeyName(SDLK_F11), toggles.memory);
+		layoutTileMenuItem("Chunk inspector", shortcutKeyName(SDLK_F9), toggles.chunkInspector);
+		layoutTileMenuItem("Render debug", shortcutKeyName(SDLK_F12), toggles.renderDebug);
+		layoutTileMenuItem("Benchmark", nullptr, toggles.benchmark);
 		ImGui::Separator();
 		// Runtime/debug toggles previously reachable from the pre-shell menu
 		// bar; Developer is their coherent home now that Graphics lives in
@@ -228,12 +244,13 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 	{
 		if (ImGui::MenuItem("Controls", shortcutKeyName(SDLK_F5)))
 		{
-			*toggles.help = true;
+			// Help is an H-managed tile: leave hidden mode first.
+			openLayoutTile(toggles.leaveLayoutTilesHidden, toggles.help);
 			*toggles.helpTabRequest = HelpTabRequest::Controls;
 		}
 		if (ImGui::MenuItem("About ft_vox"))
 		{
-			*toggles.help = true;
+			openLayoutTile(toggles.leaveLayoutTilesHidden, toggles.help);
 			*toggles.helpTabRequest = HelpTabRequest::About;
 		}
 		ImGui::EndMenu();

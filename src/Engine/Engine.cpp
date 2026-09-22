@@ -769,8 +769,14 @@ void Engine::tickStreaming(double dt)
 	const double maxStreamMs = static_cast<double>(renderSettings.maxStreamMs);
 
 	if (chunkPool)
+	{
+		// Own profiler scope so benchmarks can isolate the incremental
+		// growth cost (PoolGrow) from the streaming stages it shares the
+		// per-frame budget with.
+		PROFILE_SCOPE("PoolGrow");
 		chunkPool->ensureCapacity(estimateChunkPoolCapacity(renderSettings.maxRenderDistance),
 								  kChunkPoolMaxGrowPerCall);
+	}
 
 	{
 		PROFILE_SCOPE("FinishedJobs");

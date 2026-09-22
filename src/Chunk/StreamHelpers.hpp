@@ -55,10 +55,16 @@ inline constexpr size_t kChunkPoolGrowSlabMin = 128;
 /// Largest number of slots a single ChunkPool::ensureCapacity() call may
 /// allocate while catching up to a raised view distance (0 = unlimited, used
 /// only by the synchronous bootstrap path). Growth is incremental: the engine
-/// re-invokes ensureCapacity() every streaming tick, so a 512 → 1024 slider
-/// jump converges over a few dozen frames instead of one multi-thousand-slot
-/// allocation hitch.
-inline constexpr size_t kChunkPoolMaxGrowPerCall = 1024;
+/// re-invokes ensureCapacity() every streaming tick under the PoolGrow
+/// profiler scope, so a 512 → 1024 slider jump converges over a bounded
+/// number of frames instead of one multi-thousand-slot allocation hitch.
+/// 256 is a measured compromise (test_chunk_lifecycle [pool-grow], Release):
+/// 1024-slot steps cost avg 2.3 / max 2.9 ms — repeated multi-ms hitches;
+/// 512-slot steps avg 1.27 / max 1.66 ms — still above the sub-millisecond
+/// growth budget; 256-slot steps avg 0.72 / max 1.28 ms over ~100 frames,
+/// which the load path's existing back-pressure covers comfortably (the new
+/// ring does not need to fill instantly).
+inline constexpr size_t kChunkPoolMaxGrowPerCall = 256;
 
 /// One growth decision for ChunkPool::ensureCapacity(): how many slots to
 /// allocate right now when `targetCapacity` is wanted and `currentCapacity`
@@ -294,10 +300,9 @@ inline int clampedNearRenderDistance(int minRenderDistance, int maxRenderDistanc
 ///  - chunk bounds: the farthest visible point of a chunk sitting at the
 ///    reach is its AABB corner, so the full 3D chunk diagonal is added;
 ///  - a constant safety margin absorbs float noise and LOD/impostor fade;
-///  - an absolute floor keeps the projection usable at tiny/zero view
-///    distances. Every view distance the UI supports (64..1024 blocks)
-///    resolves below it, so the shipped far plane stays exactly the 4000
-///    blocks the engine has always used across the slider range.
+///  - a 4000-block minimum keeps all currently supported UI view distances
+///    on one conservative projection range while preserving headroom for
+///    unload hysteresis and chunk bounds.
 inline float computeCameraFarPlane(int maxRenderDistanceBlocks)
 {
 	const float maxDist = std::max(0.f, static_cast<float>(maxRenderDistanceBlocks));
@@ -306,6 +311,9 @@ inline float computeCameraFarPlane(int maxRenderDistanceBlocks)
 		std::sqrt(static_cast<float>(CHUNK_SIZE * CHUNK_SIZE + CHUNK_HEIGHT * CHUNK_HEIGHT +
 									 CHUNK_SIZE * CHUNK_SIZE));
 	constexpr float kFarPlaneSafetyBlocks = 128.0f;
+	// A 4000-block minimum keeps all currently supported UI view distances
+	// on one conservative projection range while preserving headroom for
+	// unload hysteresis and chunk bounds.
 	constexpr float kMinCameraFarPlane = 4000.0f;
 	return std::max(unloadReach + chunkBoundDiagonal + kFarPlaneSafetyBlocks, kMinCameraFarPlane);
 }

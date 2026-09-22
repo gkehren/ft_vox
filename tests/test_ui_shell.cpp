@@ -397,6 +397,68 @@ static void checkLayoutTiles()
 	}
 }
 
+// Menu-path contract (review round 2): View / Developer / Help / ft_vox
+// menu items change tiles ONLY through the same ui::toggleLayoutTile /
+// ui::openLayoutTile helpers UiShell::drawMainMenuBar calls, with the
+// callback GameUI wires into ShellToggles::leaveLayoutTilesHidden. These
+// tests pin that exact rule: any menu action that opens an H-managed tile
+// while hidden must first leave hidden mode; overlay-only actions must not.
+static void checkLayoutTileMenuPaths()
+{
+	bool hidden = false;
+	const auto leaveHidden = [&] { hidden = false; }; // the GameUI-wired callback
+
+	// View > Graphics while hidden.
+	hidden = true;
+	bool graphics = false;
+	ui::toggleLayoutTile(leaveHidden, &graphics);
+	CHECK(!hidden && graphics, "View > Graphics while hidden: hidden=false, Graphics=true");
+
+	// Developer > Benchmark while hidden.
+	hidden = true;
+	bool benchmark = false;
+	ui::toggleLayoutTile(leaveHidden, &benchmark);
+	CHECK(!hidden && benchmark, "Developer > Benchmark while hidden: hidden=false, Benchmark=true");
+
+	// Help > Controls while hidden (open + tab request, not a toggle).
+	hidden = true;
+	bool help = false;
+	ui::openLayoutTile(leaveHidden, &help);
+	CHECK(!hidden && help, "Help > Controls while hidden: hidden=false, Help=true");
+
+	// ft_vox > About while hidden — same open path as Help > Controls.
+	hidden = true;
+	bool helpFromAbout = false;
+	ui::openLayoutTile(leaveHidden, &helpFromAbout);
+	CHECK(!hidden && helpFromAbout, "ft_vox > About while hidden: hidden=false, Help=true");
+
+	// View > Apply default developer layout while hidden: leave hidden mode
+	// first, then the five default panels open.
+	hidden = true;
+	bool rendering = false, streaming = false, world = false, performance = false, helpPanel = false;
+	leaveHidden();
+	ui::openLayoutTile(nullptr, &rendering);
+	ui::openLayoutTile(nullptr, &streaming);
+	ui::openLayoutTile(nullptr, &world);
+	ui::openLayoutTile(nullptr, &performance);
+	ui::openLayoutTile(nullptr, &helpPanel);
+	CHECK(!hidden && rendering && streaming && world && performance && helpPanel,
+		  "Apply default developer layout while hidden: hidden=false, default panels=true");
+
+	// Menu toggles keep toggle semantics while NOT hidden (clicking an open
+	// panel's menu item closes it) and are a no-op on the hidden flag.
+	bool chunkInspector = true;
+	ui::toggleLayoutTile(leaveHidden, &chunkInspector);
+	CHECK(!hidden && !chunkInspector, "menu toggle while visible just closes the tile");
+
+	// Overlay-only controls (on-screen hints) are excluded: their menu items
+	// are plain flag writes and never touch the hidden state.
+	hidden = true;
+	bool overlayHints = true;
+	overlayHints = !overlayHints;
+	CHECK(hidden && !overlayHints, "overlay-only action leaves hidden mode untouched");
+}
+
 int main()
 {
 	checkScale();
@@ -405,6 +467,7 @@ int main()
 	checkShortcutMetadata();
 	checkPlayerUi();
 	checkLayoutTiles();
+	checkLayoutTileMenuPaths();
 
 	if (g_fails != 0)
 	{

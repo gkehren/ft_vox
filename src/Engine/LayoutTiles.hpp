@@ -8,6 +8,8 @@
 
 #include <Engine/DebugUI/DebugUiCore.hpp>
 
+#include <functional>
+
 namespace ui
 {
 /// Snapshot of every tile flag the H shortcut manages. Deliberately NOT a
@@ -80,5 +82,34 @@ inline void restoreLayoutTiles(debugui::PanelState &panels, const LayoutTilesSna
 	panels.memory = snapshot.memory;
 	panels.renderDebug = snapshot.renderDebug;
 	panels.benchmark = snapshot.benchmark;
+}
+
+// --- Menu-path primitives (review round 2) ---------------------------------
+//
+// The ONLY sanctioned ways for shell/menu code to change an H-managed tile
+// flag, so the shell menus (UiShell::drawMainMenuBar) and the headless
+// shell tests exercise the same rule: any user action that changes an
+// H-managed tile while hidden must leave hidden mode first (abandoning the
+// saved snapshot). `leaveHidden` is ShellToggles::leaveLayoutTilesHidden —
+// the callback GameUI wires to GameUI::leaveLayoutTilesHidden(). Overlay-
+// only controls (Status Overlay, on-screen hints, VSync, chunk borders)
+// are excluded and keep plain flag writes.
+
+/// Toggle a tile from a menu checkbox item.
+inline void toggleLayoutTile(const std::function<void()> &leaveHidden, bool *tileVisible)
+{
+	if (leaveHidden)
+		leaveHidden();
+	if (tileVisible)
+		*tileVisible = !*tileVisible;
+}
+
+/// Open a tile unconditionally (Help > Controls, About, default layout…).
+inline void openLayoutTile(const std::function<void()> &leaveHidden, bool *tileVisible)
+{
+	if (leaveHidden)
+		leaveHidden();
+	if (tileVisible)
+		*tileVisible = true;
 }
 } // namespace ui

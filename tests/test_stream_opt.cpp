@@ -864,15 +864,18 @@ static void testFarPlaneCoversBeyondLegacyEstimate()
 	const float unifiedFar = computeCameraFarPlane(viewDistance);
 	CHECK(unifiedFar > legacyFar, "unified far plane exceeds the old per-caller estimate");
 
-	// Chunk center straight ahead, past the legacy estimate but comfortably
-	// inside the streaming/unload reach (1.5 × 512 = 768).
+	// Chunk straight ahead on the view axis, past the legacy estimate but
+	// comfortably inside the streaming/unload reach (1.5 × 512 = 768) — the
+	// exact geometry of the original bug (forward terrain vanishing before
+	// peripheral terrain).
 	const float chunkDist = 700.0f;
 	CHECK(chunkDist > legacyFar && chunkDist < static_cast<float>(viewDistance) * kChunkUnloadDistanceFactor,
 		  "test setup: chunk sits between the legacy far plane and the unload reach");
 
-	const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::vec3 eye(0.0f, 128.0f, 0.0f);
+	const glm::mat4 view = glm::lookAt(eye, glm::vec3(0.0f, 128.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 	const float aspect = 16.0f / 9.0f;
-	const glm::vec4 world(chunkDist, 128.0f, -chunkDist, 1.0f); // straight ahead at eye height ~128
+	const glm::vec4 world(0.0f, 128.0f, -chunkDist, 1.0f); // straight ahead at eye height
 
 	// OLD behavior: clipped by the far plane (NDC z past the depth range).
 	{

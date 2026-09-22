@@ -79,6 +79,11 @@ struct ShellToggles
 
 	// Layout tiles toggle action (H shortcut).
 	std::function<void()> toggleLayoutTiles;
+	/// Leaves H hidden mode before a menu action changes an H-managed tile.
+	/// Any user action that changes an H-managed tile while hidden must
+	/// leave hidden mode first (ui::toggleLayoutTile / ui::openLayoutTile
+	/// in Engine/LayoutTiles.hpp); overlay-only controls are excluded.
+	std::function<void()> leaveLayoutTilesHidden;
 	/// Explicit hidden-mode flag (GameUI::isLayoutTilesHidden): true after H
 	/// hid the tiles, restored by the next H. Never derived from panel
 	/// visibility — a closed layout is not necessarily a hidden one.

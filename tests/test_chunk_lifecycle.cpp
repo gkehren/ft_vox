@@ -1109,18 +1109,33 @@ static void testChunkPoolIncrementalGrowth()
 		const size_t start = pool.capacity();
 		CHECK(start < target, "test setup: 512 steady-state pool is below the 1024 target");
 
+		// Controlled growth-cost measurement (review P3): time every
+		// bounded ensureCapacity() step the engine would take while
+		// converging 512 -> 1024, so a per-call cap change is judged on
+		// measured per-frame cost rather than by feel. Print-only: CI boxes
+		// are too noisy for a timing assert (same policy as runStreamPerf).
 		size_t steps = 0;
+		double totalMs = 0.0, maxMs = 0.0, firstMs = 0.0;
 		while (pool.capacity() < target && steps < 1000)
 		{
 			const size_t before = pool.capacity();
+			const auto stepStart = std::chrono::steady_clock::now();
 			CHECK(pool.ensureCapacity(target, kChunkPoolMaxGrowPerCall), "catch-up call allocates");
+			const double stepMs =
+				std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stepStart)
+					.count();
 			const size_t after = pool.capacity();
 			CHECK(after > before, "capacity grows monotonically");
 			CHECK(after - before <= kChunkPoolMaxGrowPerCall,
 				  "one call adds at most kChunkPoolMaxGrowPerCall slots");
 			CHECK(after <= kMaxChunkPoolCapacity, "capacity never crosses the hard cap");
 			if (steps == 0)
+			{
 				CHECK(after < target, "512 -> 1024 is NOT reached in one massive growth");
+				firstMs = stepMs;
+			}
+			totalMs += stepMs;
+			maxMs = std::max(maxMs, stepMs);
 			++steps;
 		}
 		CHECK(pool.capacity() >= target, "incremental growth converges to the 1024 target");
@@ -1128,6 +1143,9 @@ static void testChunkPoolIncrementalGrowth()
 		CHECK(pool.growEvents() == steps + 1, "each growth is published exactly once");
 		CHECK(pool.voxelStorageCapacity() == 0,
 			  "pool growth allocates no voxel backing (lazy per-chunk storage)");
+		std::cout << "[pool-grow] " << steps << " steps x " << kChunkPoolMaxGrowPerCall
+				  << " slots (512->1024 convergence): avg " << totalMs / steps << " ms, max "
+				  << maxMs << " ms, first " << firstMs << " ms\n";
 	}
 	{
 		ChunkPool pool(64);

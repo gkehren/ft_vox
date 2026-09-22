@@ -251,6 +251,7 @@ void GameUI::draw(GameUIFrame &frame)
 		&m_debug.panels.chunkInspector, &m_debug.panels.memory, &m_debug.panels.benchmark,
 		&m_helpTabRequest,
 		[this]() { toggleLayoutTiles(); },
+		[this]() { leaveLayoutTilesHidden(); },
 		m_layoutTilesHidden};
 
 	m_shell.beginFrame();
