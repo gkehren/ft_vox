@@ -41,14 +41,23 @@ make USE_VCPKG=1 VCPKG_ROOT=$HOME/vcpkg
 
 ```bash
 ./install_dep.sh          # molten-vk, sdl3, boost, glslang, …
-export VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
 
 make                      # uses vcpkg automatically if ~/vcpkg exists
 # or force system/Homebrew only:
 make USE_VCPKG=0
 
-./build-vk/ft_vox
+make run                  # launches with MoltenVK ICD set up automatically
 ```
+
+`make run` exports `VK_ICD_FILENAMES` for you, trying the Homebrew
+MoltenVK ICD locations in order:
+
+```text
+Apple Silicon: /opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
+Intel:         /usr/local/etc/vulkan/icd.d/MoltenVK_icd.json
+```
+
+Set your own `VK_ICD_FILENAMES` beforehand to override both.
 
 ### Windows (vcpkg)
 

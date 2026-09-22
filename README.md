@@ -59,7 +59,7 @@ graphics engineering.
 - GPU memory management with VMA; texture arrays and greedy meshing
 - Asynchronous chunk streaming: thread-pool generation and meshing, staged uploads
 - Procedural terrain generation with FastNoise2 noise and biome graphs
-- One voxel collision solver shared by the player, mobs and tooling
+- One voxel collision solver shared by the player and passive mobs
 - CPU workload telemetry (`FT_VOX_TELEMETRY`) and GPU timestamp profiling
 - Automated offscreen visual-regression harness with golden references
 - Cross-platform dependency management: vcpkg, system packages and FetchContent
@@ -87,9 +87,8 @@ make
 
 ```bash
 ./install_dep.sh
-export VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
 make
-./build-vk/ft_vox
+make run
 ```
 
 For complete build instructions and dependency configuration, see
