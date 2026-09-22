@@ -198,7 +198,7 @@ inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 										float margin = 1.15f)
 {
 	constexpr size_t kMin = 64;
-	constexpr size_t kMax = 16384;
+	constexpr size_t kMax = 65536;
 	const int maxRd = maxRenderDistanceBlocks < 16 ? 16 : maxRenderDistanceBlocks;
 	const float uf = unloadFactor < 1.f ? 1.f : unloadFactor;
 	const float mg = margin < 1.f ? 1.f : margin;
@@ -222,6 +222,16 @@ inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 inline int clampedNearRenderDistance(int minRenderDistance, int maxRenderDistance)
 {
 	return minRenderDistance > maxRenderDistance ? maxRenderDistance : minRenderDistance;
+}
+
+/// Camera far-plane distance for perspective projection and frustum culling.
+/// Must comfortably exceed the chunk unload distance (kChunkUnloadDistanceFactor * maxRenderDistance)
+/// plus chunk bounds across all viewing angles, so that terrain straight ahead is never
+/// prematurely clipped relative to the periphery.
+inline float computeCameraFarPlane(int maxRenderDistanceBlocks)
+{
+	const float maxDist = static_cast<float>(maxRenderDistanceBlocks);
+	return std::max(maxDist * 2.5f + 256.0f, 4000.0f);
 }
 
 // -----------------------------------------------------------------------------

@@ -184,6 +184,12 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 			ImGui::EndMenu();
 		}
 		ImGui::Separator();
+		if (ImGui::MenuItem(toggles.layoutTilesVisible ? "Hide layout tiles" : "Show layout tiles",
+							shortcutKeyName(SDLK_H)))
+		{
+			if (toggles.toggleLayoutTiles)
+				toggles.toggleLayoutTiles();
+		}
 		if (ImGui::MenuItem("Reset layout"))
 			queueResetLayout();
 		if (ImGui::MenuItem("Apply default developer layout"))

@@ -60,6 +60,8 @@ void warningRow(const char *label, const char *hint)
 
 void drawStreaming(UiState &s, GameUIFrame &frame)
 {
+	if (!s.panels.streaming)
+		return;
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(420.f, scale), ui::scaled(560.f, scale)),
 							 ImGuiCond_FirstUseEver);
@@ -80,7 +82,7 @@ void drawStreaming(UiState &s, GameUIFrame &frame)
 
 	// --- Distance (issue #186 §1): how far / how aggressively to stream. ---
 	ImGui::SeparatorText("Distance");
-	ImGui::SliderInt("View distance", &rs.maxRenderDistance, 64, 640, "%d blocks");
+	ImGui::SliderInt("View distance", &rs.maxRenderDistance, 64, 1024, "%d blocks");
 	rs.minRenderDistance = clampedNearRenderDistance(rs.minRenderDistance, rs.maxRenderDistance);
 	ImGui::SliderInt("Full-quality distance", &rs.minRenderDistance, 32, rs.maxRenderDistance,
 					 "%d blocks");

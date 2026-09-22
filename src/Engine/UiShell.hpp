@@ -3,6 +3,8 @@
 #include <Engine/PlayerUi.hpp>
 #include <imgui/imgui.h>
 
+#include <functional>
+
 // Application-level ImGui shell (issue #183): persistent dockspace with a
 // passthru central region, main menu / navigation structure, right-side
 // status strip and layout actions. Panel contents live in GameUI (Status
@@ -74,6 +76,10 @@ struct ShellToggles
 	bool *benchmark;
 
 	HelpTabRequest *helpTabRequest;
+
+	// Layout tiles toggle action (H shortcut).
+	std::function<void()> toggleLayoutTiles;
+	bool layoutTilesVisible{false};
 };
 
 class UiShell

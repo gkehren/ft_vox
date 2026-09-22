@@ -11,7 +11,7 @@ namespace
 constexpr size_t kMinPoolCapacity = 64;
 constexpr size_t kGrowSlabMin = 128;
 // Soft cap so a mis-set slider cannot allocate unbounded RAM in one go.
-constexpr size_t kMaxPoolCapacity = 16384;
+constexpr size_t kMaxPoolCapacity = 65536;
 } // namespace
 
 ChunkPool::ChunkPool(size_t initialCapacity)

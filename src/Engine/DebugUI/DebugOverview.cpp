@@ -18,6 +18,8 @@ namespace debugui
 
 void drawOverview(UiState &s, GameUIFrame &frame)
 {
+	if (!s.panels.overview)
+		return;
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(440.f, scale), ui::scaled(560.f, scale)), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin(ui::windows::kOverview, &s.panels.overview))

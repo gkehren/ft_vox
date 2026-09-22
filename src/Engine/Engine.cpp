@@ -732,6 +732,17 @@ void Engine::tickDayCycle(double dt)
 			shaderParams.dayTime += 1.f;
 	}
 	updateAtmosphereFromDayTime(shaderParams);
+	if (shaderParams.automaticAtmosphere && renderSettings.maxRenderDistance > 0)
+	{
+		const float viewScale = static_cast<float>(renderSettings.maxRenderDistance) / 512.0f;
+		if (std::abs(viewScale - 1.0f) > 1e-4f)
+		{
+			shaderParams.fogStart *= viewScale;
+			shaderParams.fogEnd *= viewScale;
+			if (viewScale > 1e-4f)
+				shaderParams.fogDensity /= viewScale;
+		}
+	}
 }
 
 void Engine::tickStreaming(double dt)
@@ -1698,7 +1709,7 @@ void Engine::run()
 
 		{
 			PROFILE_SCOPE("UpdateUBO");
-			const float farPlane = static_cast<float>(renderSettings.maxRenderDistance) * 1.25f;
+			const float farPlane = computeCameraFarPlane(renderSettings.maxRenderDistance);
 			// Shadow quality tier change (issue #137): recreate the shadow map
 			// at the requested resolution before it feeds the frame UBO.
 			if (worldRenderer->postSettings().shadowMapSize > 0 &&

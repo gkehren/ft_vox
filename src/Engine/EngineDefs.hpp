@@ -136,7 +136,7 @@ struct RenderSettings
 /// reproducible: Balanced is exactly the engine-default streaming
 /// configuration (RenderSettings member initializers); Conservative halves
 /// the view radius/area pressure and tightens the CPU budget; Aggressive
-/// pushes the view to the UI slider ceiling (640) and relaxes it.
+/// pushes the view distance to 640 blocks and relaxes the CPU budget.
 enum class StreamingQualityPreset
 {
 	Conservative,

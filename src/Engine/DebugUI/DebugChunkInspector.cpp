@@ -40,6 +40,8 @@ const char *eventKindName(const char *kind)
 
 void drawChunkInspector(UiState &s, GameUIFrame &frame)
 {
+	if (!s.panels.chunkInspector)
+		return;
 	const float scale = ui::effectiveScale(frame.uiScale);
 	ImGui::SetNextWindowSize(ImVec2(ui::scaled(460.f, scale), ui::scaled(560.f, scale)), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin(ui::windows::kChunkInspector, &s.panels.chunkInspector))

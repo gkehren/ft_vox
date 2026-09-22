@@ -302,6 +302,10 @@ public:
 		m_debug.panels.help = true;
 	}
 
+	/// Toggle visibility of all docked layout tiles/panels on/off (H shortcut).
+	void toggleLayoutTiles();
+	bool areLayoutTilesVisible() const;
+
 	/// Invalidate any active or in-flight biome map task and clear current texture.
 	/// Supersedes existing request ID and marks backing texture as inactive.
 	void invalidateBiomeMap();
@@ -373,6 +377,25 @@ private:
 	/// Developer-console state: panel visibility + debug snapshots + bounded
 	/// histories (issue #179). Refreshed once per draw by updateDebugUiState.
 	debugui::UiState m_debug{};
+
+	/// Saved state of layout tiles when toggled off with the H shortcut.
+	struct SavedLayoutTilesState
+	{
+		bool saved{false};
+		bool rendering{false};
+		bool streaming{false};
+		bool world{false};
+		bool playerPanel{false};
+		bool help{false};
+		bool overview{false};
+		bool performance{false};
+		bool playerDiagnostics{false};
+		bool chunkInspector{false};
+		bool memory{false};
+		bool renderDebug{false};
+		bool benchmark{false};
+	};
+	SavedLayoutTilesState m_savedTilesState{};
 
 	/// One-shot: Help window opens with the requested tab selected.
 	ui::HelpTabRequest m_helpTabRequest{ui::HelpTabRequest::None};

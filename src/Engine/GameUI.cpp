@@ -177,6 +177,85 @@ bool GameUI::handleGlobalShortcut(int sdlKeycode, GameUIFrame &frame)
 	return false;
 }
 
+bool GameUI::areLayoutTilesVisible() const
+{
+	return m_debug.panels.rendering ||
+		   m_debug.panels.streaming ||
+		   m_debug.panels.world ||
+		   m_debug.panels.playerPanel ||
+		   m_debug.panels.help ||
+		   m_debug.panels.overview ||
+		   m_debug.panels.performance ||
+		   m_debug.panels.playerDiagnostics ||
+		   m_debug.panels.chunkInspector ||
+		   m_debug.panels.memory ||
+		   m_debug.panels.renderDebug ||
+		   m_debug.panels.benchmark;
+}
+
+void GameUI::toggleLayoutTiles()
+{
+	if (areLayoutTilesVisible())
+	{
+		m_savedTilesState.saved = true;
+		m_savedTilesState.rendering = m_debug.panels.rendering;
+		m_savedTilesState.streaming = m_debug.panels.streaming;
+		m_savedTilesState.world = m_debug.panels.world;
+		m_savedTilesState.playerPanel = m_debug.panels.playerPanel;
+		m_savedTilesState.help = m_debug.panels.help;
+		m_savedTilesState.overview = m_debug.panels.overview;
+		m_savedTilesState.performance = m_debug.panels.performance;
+		m_savedTilesState.playerDiagnostics = m_debug.panels.playerDiagnostics;
+		m_savedTilesState.chunkInspector = m_debug.panels.chunkInspector;
+		m_savedTilesState.memory = m_debug.panels.memory;
+		m_savedTilesState.renderDebug = m_debug.panels.renderDebug;
+		m_savedTilesState.benchmark = m_debug.panels.benchmark;
+
+		m_debug.panels.rendering = false;
+		m_debug.panels.streaming = false;
+		m_debug.panels.world = false;
+		m_debug.panels.playerPanel = false;
+		m_debug.panels.help = false;
+		m_debug.panels.overview = false;
+		m_debug.panels.performance = false;
+		m_debug.panels.playerDiagnostics = false;
+		m_debug.panels.chunkInspector = false;
+		m_debug.panels.memory = false;
+		m_debug.panels.renderDebug = false;
+		m_debug.panels.benchmark = false;
+	}
+	else
+	{
+		const bool anySaved = m_savedTilesState.saved && (
+			m_savedTilesState.rendering || m_savedTilesState.streaming ||
+			m_savedTilesState.world || m_savedTilesState.playerPanel ||
+			m_savedTilesState.help || m_savedTilesState.overview ||
+			m_savedTilesState.performance || m_savedTilesState.playerDiagnostics ||
+			m_savedTilesState.chunkInspector || m_savedTilesState.memory ||
+			m_savedTilesState.renderDebug || m_savedTilesState.benchmark);
+
+		if (anySaved)
+		{
+			m_debug.panels.rendering = m_savedTilesState.rendering;
+			m_debug.panels.streaming = m_savedTilesState.streaming;
+			m_debug.panels.world = m_savedTilesState.world;
+			m_debug.panels.playerPanel = m_savedTilesState.playerPanel;
+			m_debug.panels.help = m_savedTilesState.help;
+			m_debug.panels.overview = m_savedTilesState.overview;
+			m_debug.panels.performance = m_savedTilesState.performance;
+			m_debug.panels.playerDiagnostics = m_savedTilesState.playerDiagnostics;
+			m_debug.panels.chunkInspector = m_savedTilesState.chunkInspector;
+			m_debug.panels.memory = m_savedTilesState.memory;
+			m_debug.panels.renderDebug = m_savedTilesState.renderDebug;
+			m_debug.panels.benchmark = m_savedTilesState.benchmark;
+		}
+		else
+		{
+			enableDefaultDeveloperPanels();
+		}
+	}
+}
+
 bool GameUI::handleGameplayShortcut(int sdlKeycode, GameUIFrame &frame)
 {
 	// Gameplay state changes (issue #76): the caller gates these behind
@@ -190,6 +269,9 @@ bool GameUI::handleGameplayShortcut(int sdlKeycode, GameUIFrame &frame)
 			return true;
 		}
 		break;
+	case SDLK_H:
+		toggleLayoutTiles();
+		return true;
 	default:
 		break;
 	}
@@ -214,7 +296,9 @@ void GameUI::draw(GameUIFrame &frame)
 		&m_debug.panels.overview, &m_debug.panels.performance, &m_debug.panels.playerDiagnostics,
 		&m_debug.panels.renderDebug,
 		&m_debug.panels.chunkInspector, &m_debug.panels.memory, &m_debug.panels.benchmark,
-		&m_helpTabRequest};
+		&m_helpTabRequest,
+		[this]() { toggleLayoutTiles(); },
+		areLayoutTilesVisible()};
 
 	m_shell.beginFrame();
 	m_shell.drawMainMenuBar(frame, toggles);
@@ -223,22 +307,31 @@ void GameUI::draw(GameUIFrame &frame)
 		drawStatusOverlay(frame);
 	if (m_debug.panels.playerPanel)
 		drawPlayerPanel(frame);
-	debugui::drawOverview(m_debug, frame);
-	debugui::drawRendering(m_debug, frame);
-	debugui::drawRenderDebug(m_debug, frame);
-	debugui::drawStreaming(m_debug, frame);
-	debugui::drawPerformance(m_debug, frame);
-	debugui::drawPlayerDiagnostics(m_debug, frame);
-	debugui::drawChunkInspector(m_debug, frame);
-	debugui::drawMemory(m_debug, frame);
-	debugui::drawBenchmarkPanel(m_debug, frame);
+	if (m_debug.panels.overview)
+		debugui::drawOverview(m_debug, frame);
+	if (m_debug.panels.rendering)
+		debugui::drawRendering(m_debug, frame);
+	if (m_debug.panels.renderDebug)
+		debugui::drawRenderDebug(m_debug, frame);
+	if (m_debug.panels.streaming)
+		debugui::drawStreaming(m_debug, frame);
+	if (m_debug.panels.performance)
+		debugui::drawPerformance(m_debug, frame);
+	if (m_debug.panels.playerDiagnostics)
+		debugui::drawPlayerDiagnostics(m_debug, frame);
+	if (m_debug.panels.chunkInspector)
+		debugui::drawChunkInspector(m_debug, frame);
+	if (m_debug.panels.memory)
+		debugui::drawMemory(m_debug, frame);
+	if (m_debug.panels.benchmark)
+		debugui::drawBenchmarkPanel(m_debug, frame);
 	if (m_debug.panels.world)
 		drawWorld(frame);
 	if (m_debug.panels.help)
 		drawHelp(frame);
 
-	// Report can stay open even if the panels that opened it are closed.
-	if (frame.benchmark && frame.benchmark->showReport() && frame.benchmark->report().valid)
+	// Report can stay open even if the panels that opened it are closed, unless all tiles are hidden.
+	if (areLayoutTilesVisible() && frame.benchmark && frame.benchmark->showReport() && frame.benchmark->report().valid)
 		debugui::drawBenchmarkReport(m_debug, frame);
 
 	if (m_debug.panels.overlayHints && frame.mouseCaptured && *frame.mouseCaptured)

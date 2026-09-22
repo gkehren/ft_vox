@@ -40,6 +40,7 @@ inline constexpr ShortcutRef kShortcuts[] = {
 	{SDLK_T, "T", "Cycle selected block", false},
 	{SDLK_V, "V", "Toggle walk / debug flight", false},
 	{SDLK_X, "X", "Toggle flight speed boost", false},
+	{SDLK_H, "H", "Toggle layout tiles", false},
 };
 
 inline const ShortcutRef *findShortcut(int keycode)

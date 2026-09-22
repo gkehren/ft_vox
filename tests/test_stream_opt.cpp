@@ -261,9 +261,12 @@ static void testPoolCapacityEstimate()
 	CHECK(c128 >= 64, "min capacity floor");
 	CHECK(c256 > c128, "higher view distance needs more pool");
 	CHECK(c512 > c256, "512 blocks needs more than 256");
-	// Unload disk ~1.5×512/16 → r≈49 → πr² > 7000 before headroom; clamp at 16384.
+	// Unload disk ~1.5×512/16 → r≈49 → πr² > 7000 before headroom; clamp at 65536.
 	CHECK(c512 > 4000, "512-block view needs several thousand slots");
-	CHECK(c512 <= 16384, "soft cap");
+	CHECK(c512 <= 65536, "soft cap");
+	const size_t c1024 = estimateChunkPoolCapacity(1024);
+	CHECK(c1024 > c512, "1024 blocks needs more than 512");
+	CHECK(c1024 <= 65536, "1024 blocks capacity within cap");
 }
 
 /// Ice spikes use treeDensity=0 and hasCacti=false; generateVegetation must still run
@@ -735,8 +738,8 @@ static void testStreamingPresets()
 	for (const StreamingQualityPreset p : presets)
 	{
 		const StreamingPresetValues v = streamingPresetValues(p);
-		CHECK(v.maxRenderDistance >= 64 && v.maxRenderDistance <= 640, "view distance within slider 64..640");
-		CHECK(v.minRenderDistance >= 32 && v.minRenderDistance <= 640, "near range within slider 32..640");
+		CHECK(v.maxRenderDistance >= 64 && v.maxRenderDistance <= 1024, "view distance within slider 64..1024");
+		CHECK(v.minRenderDistance >= 32 && v.minRenderDistance <= 1024, "near range within slider 32..1024");
 		CHECK(v.streamFrontBias >= 0.0f && v.streamFrontBias <= 0.55f, "front bias within slider 0..0.55");
 		CHECK(v.loadPerSec >= 10 && v.loadPerSec <= 1000, "loadPerSec within slider 10..1000");
 		CHECK(v.genPerSec >= 5 && v.genPerSec <= 800, "genPerSec within slider 5..800");
@@ -754,6 +757,15 @@ static void testClampedNearRenderDistance()
 	CHECK(clampedNearRenderDistance(512, 512) == 512, "min == max passes through");
 	CHECK(clampedNearRenderDistance(32, 640) == 32, "small near range passes through");
 	CHECK(clampedNearRenderDistance(-5, 100) == -5, "no extra floors: only min>max clamps");
+}
+
+static void testComputeCameraFarPlane()
+{
+	CHECK(computeCameraFarPlane(512) >= 4000.0f, "far plane has minimum safety floor (>= 4000)");
+	CHECK(computeCameraFarPlane(512) > 512.0f * kChunkUnloadDistanceFactor, "far plane comfortably exceeds unload reach at 512");
+	CHECK(computeCameraFarPlane(1024) > 1024.0f * kChunkUnloadDistanceFactor, "far plane comfortably exceeds unload reach at 1024");
+	CHECK(computeCameraFarPlane(2048) > 2048.0f * 2.0f, "far plane scales for large view distances");
+	CHECK(computeCameraFarPlane(512) <= computeCameraFarPlane(1024), "far plane is monotonic");
 }
 
 // matchingStreamingPreset (issue #191 review): the UI badge helper must
@@ -801,6 +813,7 @@ int main()
 	testStreamingPresets();
 	testMatchingStreamingPreset();
 	testClampedNearRenderDistance();
+	testComputeCameraFarPlane();
 
 	if (g_fails != 0)
 	{

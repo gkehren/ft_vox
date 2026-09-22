@@ -231,9 +231,10 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 {
 	// Timed by Engine PROFILE_SCOPE("Visibility") — keep body lean.
 
+	const float farPlane = computeCameraFarPlane(settings.maxRenderDistance);
 	const glm::mat4 clipMatrix =
 		camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight),
-								   static_cast<float>(settings.maxRenderDistance)) *
+								   farPlane) *
 		camera.getViewMatrix();
 
 	std::array<glm::vec4, 6> planes{};
@@ -286,7 +287,6 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 		const float dz = aabbMin.z - camOffsetZ;
 		updateEntityLightCacheIntent(*chunk, dx * dx + dz * dz);
 	}
-	(void)settings;
 }
 
 void ChunkManager::updateEntityLightCacheIntent(Chunk &chunk, float distSq)

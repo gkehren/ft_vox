@@ -48,6 +48,7 @@ int main()
 	checkRoute(SDLK_T, KeyRoute::GameplayShortcut, "T gameplay");
 	checkRoute(SDLK_V, KeyRoute::GameplayShortcut, "V flight toggle gameplay");
 	checkRoute(SDLK_X, KeyRoute::GameplayShortcut, "X flight speed gameplay");
+	checkRoute(SDLK_H, KeyRoute::GameplayShortcut, "H toggle layout tiles gameplay");
 
 	// Escape is special (UI/modal routing first, then possibly quit) and
 	// must never enter the shortcut routes.
