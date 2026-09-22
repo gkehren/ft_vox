@@ -1,0 +1,3 @@
+## 2024-05-24 - Optimize Set Lookups in Hot Loop
+**Learning:** In hot loops where collections are small and bounded (e.g., `ChunkManager::uploadPendingMeshes` bounded by upload budget), per-frame heap allocations for `std::unordered_set` incur significant overhead. For small $N$, an $O(N)$ linear scan on a contiguous `std::vector` (using `std::find()`) is drastically faster than $O(1)$ hash map lookups due to cache locality and zero dynamic node allocations.
+**Action:** When tracking small numbers of elements locally within a function (especially render/upload loops), prefer `std::vector` with `reserve()` and `std::find()` over `std::unordered_set`.

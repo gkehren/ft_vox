@@ -56,7 +56,7 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
             OUTPUT ${SPV_PATH}
             COMMAND ${GLSLC} -fshader-stage=${STAGE}
                 -I${FT_VOX_GENERATED_SHADER_DIR}
-                -I${FT_VOX_SHADER_SRC_DIR}
+                -I${FT_VOX_SHADER_SRC_DIR} --extension GL_GOOGLE_include_directive
                 ${GLSL_PATH} -o ${SPV_PATH}
             DEPENDS ${GLSL_PATH} ${FT_VOX_FRAME_UBO_GLSL}
                 ${FT_VOX_SHADER_SRC_DIR}/foliage_wind.inc.glsl
@@ -74,7 +74,7 @@ function(ft_vox_compile_shader STAGE GLSL_NAME SPV_NAME)
             OUTPUT ${SPV_PATH}
             COMMAND ${GLSLANG_VALIDATOR} -V -S ${STAGE}
                 -I${FT_VOX_GENERATED_SHADER_DIR}
-                -I${FT_VOX_SHADER_SRC_DIR}
+                -I${FT_VOX_SHADER_SRC_DIR} --extension GL_GOOGLE_include_directive
                 ${GLSL_PATH} -o ${SPV_PATH}
             DEPENDS ${GLSL_PATH} ${FT_VOX_FRAME_UBO_GLSL}
                 ${FT_VOX_SHADER_SRC_DIR}/foliage_wind.inc.glsl
