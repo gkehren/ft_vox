@@ -468,8 +468,12 @@ std::string Benchmark::formatReportText() const
 	  << "  VSync: " << (r.vsync ? "on" : "off")
 	  << "  PresentMode: " << r.presentMode << "\n";
 	if (r.viewDistanceSwitch > 0)
+	{
 		o << "  View switch -> " << r.viewDistanceSwitch
-		  << " blocks at 25% of measurement (exercises incremental pool growth)\n";
+		  << " blocks at 25% of measurement\n";
+		if (r.poolGrowSteps == 0)
+			o << "  No ChunkPool growth observed after the view-distance switch\n";
+	}
 	if (!r.qualityLabel.empty())
 		o << "Quality: " << r.qualityLabel << "\n";
 	o << "Indirect: multiDrawIndirect=" << (r.multiDrawIndirect ? "yes" : "no")

@@ -189,7 +189,8 @@ inline void summarizePoolGrowSamples(const std::vector<float> &samples,
 /// Scripted orbit benchmark: reload world, fly path, aggregate metrics, score.
 class Benchmark
 {
-public:	BenchmarkConfig &config() { return m_config; }
+public:
+	BenchmarkConfig &config() { return m_config; }
 	const BenchmarkConfig &config() const { return m_config; }
 
 	BenchmarkPhase phase() const { return m_phase; }

@@ -175,6 +175,25 @@ int main()
                     "growth-free run reports no PoolGrow steps");
             require(benchmark.formatReportText().find("PoolGrow") == std::string::npos,
                     "growth-free report omits the PoolGrow line");
+
+            // View-distance switch WITHOUT growth (512 -> 256 target, or a
+            // pool already at/above target): the report must say the switch
+            // happened and that no growth followed — never a fabricated
+            // PoolGrow measurement.
+            runBenchmark();
+            benchmark.config().viewDistanceSwitch = 256;
+            sampleGrow(0.f);
+            benchmark.tick(6., camera);
+            const BenchmarkReport &s = benchmark.report();
+            require(s.viewDistanceSwitch == 256 && s.poolGrowSteps == 0,
+                    "switch-only run records the switch but no growth steps");
+            const std::string text = benchmark.formatReportText();
+            require(text.find("View switch -> 256") != std::string::npos,
+                    "report names the view switch");
+            require(text.find("No ChunkPool growth observed") != std::string::npos,
+                    "switch-without-growth report says no growth was observed");
+            require(text.find("PoolGrow avg") == std::string::npos,
+                    "switch-without-growth report fabricates no PoolGrow stats");
         }
 
         std::cout << "PASS: GPU conversion and benchmark capture isolation\n";
