@@ -786,20 +786,12 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 	// replacement is resident (PR #178 review round 4).
 	int budgetUnits = budget;
 	int uploaded = 0;
-
-	// Optimization: Use contiguous std::vector instead of std::unordered_set for
-	// iteration and lookup in the render hot path. This improves cache locality and
-	// completely avoids per-element dynamic heap allocations for hash nodes. Lookup
-	// becomes O(N), but for small render budgets, cache locality makes it faster.
-	std::vector<Chunk *> published;
-	std::vector<uint64_t> processedGroups;
-	published.reserve(candidateCount);
-	processedGroups.reserve(candidateCount);
-
+	std::unordered_set<Chunk *> published;
+	std::unordered_set<uint64_t> processedGroups;
 	for (size_t i = 0; i < candidateCount; ++i)
 	{
 		Chunk *chunk = queue[i].chunk;
-		if (std::find(published.begin(), published.end(), chunk) != published.end())
+		if (published.count(chunk))
 			continue;
 
 		PendingMeshCommitGroup *group = commitGroupFor(chunk);
@@ -814,10 +806,8 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 			--budgetUnits;
 			continue;
 		}
-
-		if (std::find(processedGroups.begin(), processedGroups.end(), group->groupId) != processedGroups.end())
+		if (!processedGroups.insert(group->groupId).second)
 			continue; // every group state machine advances at most once per frame
-		processedGroups.push_back(group->groupId);
 
 		// Only stable values needed after publication are snapshotted: the
 		// state machine mutates the live member entries (replacements), and
@@ -927,7 +917,7 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 			member.chunk->publishGPUUpload(retire, arenas, member.replacement);
 			recordChunkEvent(member.chunk, "gpuCommit");
 			telemetry::registry().add(telemetry::UploadChunks);
-			published.push_back(member.chunk);
+			published.insert(member.chunk);
 		}
 		// The fused-group invariant makes this exact: no other active group
 		// shares a member with the one just published.
