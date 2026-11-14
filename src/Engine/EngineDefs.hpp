@@ -2,6 +2,7 @@
 
 #include <glm/glm.hpp>
 #include <utils.hpp>
+#include <Physics/VoxelCollision.hpp>
 
 #include <cmath>
 #include <optional>
@@ -245,9 +246,9 @@ enum class GraphicsQualityPreset
 	Cinematic = 3,
 };
 
-/// Sentinel for "no local water surface known" — renders fully submerged
-/// (issue #144). The engine replaces it with a per-frame voxel scan.
-inline constexpr float kUnknownUnderwaterSurfaceY = 1e9f;
+/// kUnknownUnderwaterSurfaceY moved to Physics/VoxelCollision.hpp (issue
+/// #206): the world-query sentinel is part of the CPU contract; EngineDefs
+/// includes it above so existing consumers are unchanged.
 
 struct PostProcessSettings
 {

@@ -4,7 +4,7 @@
 // wrong-pool/double release refusal (Release-safe), growth events and stale
 // block reuse.
 #include <Chunk/ChunkBorders.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 
 #include <algorithm>
 #include <cstdio>

@@ -43,7 +43,7 @@ static int g_fails = 0;
 struct ChunkStateProbe
 {
 	static MeshBuildResult *pending(const Chunk &c) { return c.m_pendingResult; }
-	static uint64_t meshGeneration(const Chunk &c) { return c.m_meshGeneration; }
+	static uint64_t meshGeneration(const Chunk &c) { return c.worldChunk() ? c.worldChunk()->generation() : 0; }
 	// Section range layout (scalar getters only: SectionGpuSlot is private).
 	static uint32_t slotVPage(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].vertexPage; }
 	static uint32_t slotVOff(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].vertexOffset; }
@@ -64,7 +64,7 @@ struct ChunkStateProbe
 	static uint32_t slotWISz(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].indexSlotBytes; }
 	static bool slotEmpty(const Chunk &c, int s) { return c.m_sectionGpu[static_cast<size_t>(s)].empty(); }
 	static bool slotWaterEmpty(const Chunk &c, int s) { return c.m_sectionGpuWater[static_cast<size_t>(s)].empty(); }
-	static uint16_t sectionNonAir(const Chunk &c, int s) { return c.m_sectionNonAir[static_cast<size_t>(s)]; }
+	static uint16_t sectionNonAir(const Chunk &c, int s) { return c.worldChunk() ? c.worldChunk()->sectionNonAir()[static_cast<size_t>(s)] : 0; }
 	static MeshArena::Range lodOpaqueV(const Chunk &c) { return c.m_lodOpaqueVertices; }
 	static MeshArena::Range lodOpaqueI(const Chunk &c) { return c.m_lodOpaqueIndices; }
 	static MeshArena::Range lodWaterV(const Chunk &c) { return c.m_lodWaterVertices; }
@@ -1100,8 +1100,7 @@ int main()
 				MeshBuildResult *lod = chunk->getMeshResultPool()->acquire();
 				lod->isLOD = true;
 				lod->owner = chunk;
-				lod->generation = chunk->meshGeneration();
-				lod->revision = chunk->meshRevision();
+				lod->identity = chunk->chunkIdentity();
 				Vertex v{};
 				lod->opaqueVertices.assign(128, v);
 				lod->opaqueIndices.assign(192, 0u);
@@ -1147,8 +1146,7 @@ int main()
 				MeshBuildResult *lodNonEmpty = chunk->getMeshResultPool()->acquire();
 				lodNonEmpty->isLOD = true;
 				lodNonEmpty->owner = chunk;
-				lodNonEmpty->generation = chunk->meshGeneration();
-				lodNonEmpty->revision = chunk->meshRevision();
+				lodNonEmpty->identity = chunk->chunkIdentity();
 				Vertex v{};
 				lodNonEmpty->opaqueVertices.assign(64, v);
 				lodNonEmpty->opaqueIndices.assign(96, 0u);
@@ -1167,8 +1165,7 @@ int main()
 				MeshBuildResult *lodEmpty = chunk->getMeshResultPool()->acquire();
 				lodEmpty->isLOD = true; // empty vertices & indices
 				lodEmpty->owner = chunk;
-				lodEmpty->generation = chunk->meshGeneration();
-				lodEmpty->revision = chunk->meshRevision();
+				lodEmpty->identity = chunk->chunkIdentity();
 				chunk->getMeshResultPool()->finishBuild(lodEmpty);
 				CHECK(chunk->publishMeshResult(lodEmpty), "lod: publish empty LOD");
 				staging.beginFrame(0);
@@ -1194,8 +1191,7 @@ int main()
 					MeshBuildResult *lod = chunk->getMeshResultPool()->acquire();
 					lod->isLOD = true;
 					lod->owner = chunk;
-					lod->generation = chunk->meshGeneration();
-					lod->revision = chunk->meshRevision();
+					lod->identity = chunk->chunkIdentity();
 					Vertex v{};
 					lod->opaqueVertices.assign(128, v);
 					lod->opaqueIndices.assign(192, 0u);
@@ -1431,8 +1427,7 @@ int main()
 			MeshBuildResult *lod = chunk->getMeshResultPool()->acquire();
 			lod->isLOD = true;
 			lod->owner = chunk;
-			lod->generation = chunk->meshGeneration();
-			lod->revision = chunk->meshRevision();
+			lod->identity = chunk->chunkIdentity();
 			Vertex v{};
 			lod->opaqueVertices.assign(128, v);
 			lod->opaqueIndices.assign(192, 0u);
@@ -1511,8 +1506,7 @@ int main()
 			MeshBuildResult *lod = chunk->getMeshResultPool()->acquire();
 			lod->isLOD = true;
 			lod->owner = chunk;
-			lod->generation = chunk->meshGeneration();
-			lod->revision = chunk->meshRevision();
+			lod->identity = chunk->chunkIdentity();
 			Vertex v{};
 			lod->opaqueVertices.assign(96, v);
 			lod->opaqueIndices.assign(144, 0u);

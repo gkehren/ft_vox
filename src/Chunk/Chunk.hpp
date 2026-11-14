@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <glm/gtx/hash.hpp>
@@ -23,12 +24,14 @@
 #include <Chunk/ChunkBorders.hpp>
 #include <Chunk/ChunkLightHalo.hpp>
 #include <Chunk/ChunkLightPool.hpp>
+#include <Chunk/ChunkMeshResult.hpp>
 #include <Vulkan/VkBuffer.hpp>
 #include <Vulkan/MeshArena.hpp>
 #include <Camera/Camera.hpp>
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
+#include <World/WorldChunk.hpp>
 
 // TextureManager only for static isTransparent — no GL dependency in mesh gen.
 #include <Renderer/TextureManager.hpp>
@@ -39,6 +42,25 @@ class GpuResourceRetire;
 struct MeshBuildResult;
 class MeshResultPool;
 
+/// Render-side chunk handle (issue #206, Epic #204 Phase B).
+///
+/// The AUTHORITATIVE voxel state (backing, occupancy, borders, persistent
+/// edits, identity, lifecycle) lives in a WorldChunk owned by VoxelWorld.
+/// This class keeps only DERIVED render state — GPU arena ranges, indirect
+/// draw caches, pending mesh payloads, entity light caches, visibility and
+/// mesh scheduling — and forwards every voxel read/write to its bound record.
+///
+/// Binding:
+///   * In the game, ChunkManager acquires a render Chunk from ChunkPool and
+///     binds it to the world's record for the same coordinate. The world owns
+///     the record's lifetime; the generation stamp rejects any stale access.
+///   * Standalone (tests / tools), a Chunk owns a private WorldChunk created
+///     with the pools passed to the constructor, so the full historical
+///     single-object API keeps working without a world.
+///
+/// A bound Chunk must never be moved or reset through ChunkPool — the world
+/// drives its record's lifecycle. Pool acquire/release only ever see unbound
+/// chunks.
 class Chunk
 {
 public:
@@ -49,49 +71,164 @@ public:
 	Chunk &operator=(Chunk &&other) noexcept;
 	~Chunk();
 
-	const glm::vec3 &getPosition() const;
-	bool isVisible() const;
-	void setVisible(bool visible);
-	void setState(ChunkState state);
-	ChunkState getState() const;
+	// --- Authoritative record binding (issue #206) ---------------------------
+	/// The record this chunk reads/writes voxels through: the bound world
+	/// record, or the privately owned one for standalone chunks. Null on a
+	/// moved-from chunk OR a freshly constructed handle that has not been
+	/// bound or used standalone yet (the owned record is allocated lazily —
+	/// see recordForWrite — so idle pool handles carry no per-column backing).
+	WorldChunk *worldChunk() const { return m_active; }
+	/// Mutable record access for standalone tools/tests that edit per-column
+	/// state directly (e.g. biome tint fixtures). Lazily creates the owned
+	/// record for an unbound handle. Do NOT use this to mutate a bound
+	/// handle's world record outside the world's edit path.
+	WorldChunk *mutableWorldChunk() { return recordForWrite(); }
+	/// Bind to a world-owned record. Any privately owned record must be
+	/// retired (no voxel storage) — pool chunks always are.
+	void bindWorldChunk(WorldChunk *record)
+	{
+		assert(record != nullptr);
+		assert(!m_ownedWorld || !m_ownedWorld->hasVoxelStorage());
+		m_world = record;
+		m_active = record;
+	}
+	/// Drop the world binding (unload path); voxel access falls back to the
+	/// owned record (created lazily on next standalone use). The render state
+	/// (GPU ranges awaiting retirement) is untouched.
+	void unbindWorldChunk()
+	{
+		if (m_active)
+			m_position = m_active->getPosition();
+		m_world = nullptr;
+		m_active = m_ownedWorld.get();
+	}
+	bool isWorldBound() const { return m_world != nullptr; }
 
-	const Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
-	bool isVoxelActive(int x, int y, int z) const;
+	// --- Forwarded authoritative state ---------------------------------------
+	const glm::vec3 &getPosition() const
+	{
+		return m_active ? m_active->getPosition() : m_position;
+	}
+	void setState(ChunkState state)
+	{
+		// Render scheduling side effect of the lifecycle transition (the
+		// pre-split behavior): GENERATED/UNLOADED re-arm meshing.
+		if (state == ChunkState::GENERATED || state == ChunkState::UNLOADED)
+			meshNeedsUpdate = true;
+		recordForWrite()->setState(state);
+	}
+	ChunkState getState() const
+	{
+		return m_active ? m_active->getState() : ChunkState::UNLOADED;
+	}
+	bool isVoxelBackingReadable() const { return m_active && m_active->isVoxelBackingReadable(); }
+	bool isInTransit() const { return m_active && m_active->isInTransit(); }
+	void setInTransit(bool val)
+	{
+		recordForWrite()->setInTransit(val);
+	}
+
+	const Voxel &getVoxel(uint32_t x, uint32_t y, uint32_t z) const
+	{
+		assert(x < CHUNK_SIZE && y < CHUNK_HEIGHT && z < CHUNK_SIZE);
+		if (!m_active)
+		{
+			static constexpr Voxel s_air{static_cast<uint8_t>(AIR)};
+			return s_air;
+		}
+		return m_active->getVoxel(x, y, z);
+	}
+	bool isVoxelActive(int x, int y, int z) const
+	{
+		return m_active && m_active->isVoxelActive(x, y, z);
+	}
+	/// Authoritative write + render section invalidation. The world's edit
+	/// path calls WorldChunk::setVoxel directly and invalidates through the
+	/// edit event stream instead (same net effect, one owner per side).
 	void setVoxel(int x, int y, int z, TextureType type);
 
-	// Persistent-edit tracking (issue #180): while armed, every in-chunk
-	// setVoxel() write that actually changes the stored voxel records the
-	// canonical local index (y*256 + z*16 + x) and the new block type.
-	// Border-shell writes and no-op rewrites never record. The map holds the
-	// CURRENT value per edited voxel (not an operation log): the save layer
-	// diffs it against regenerated terrain via
-	// worldsave::diffEditsAgainstBase().
-	using ChunkEditMap = std::unordered_map<uint32_t, uint8_t>;
-	/// Disarming also discards any recorded edits.
+	bool hasVoxelStorage() const { return m_active && m_active->hasVoxelStorage(); }
+	VoxelPool *getVoxelPool() const { return m_active ? m_active->getVoxelPool() : nullptr; }
+	bool hasBorderStorage() const { return m_active && m_active->hasBorderStorage(); }
+	BorderPool *getBorderPool() const { return m_active ? m_active->getBorderPool() : nullptr; }
+	bool isShellEmpty() const { return !m_active || m_active->isShellEmpty(); }
+	TextureType sampleForMeshing(int x, int y, int z) const
+	{
+		return m_active ? m_active->sampleForMeshing(x, y, z) : AIR;
+	}
+	bool prepareVoxelStorageForGeneration()
+	{
+		return recordForWrite()->prepareVoxelStorageForGeneration();
+	}
+	void releaseVoxelStorageOnRetire()
+	{
+		if (m_active)
+			m_active->releaseVoxelStorageOnRetire();
+	}
+	void releaseNeighborBorders()
+	{
+		if (m_active)
+			m_active->releaseNeighborBorders();
+	}
+	void rebuildBordersFromNeighbors(const Chunk *west, const Chunk *east,
+									 const Chunk *south, const Chunk *north);
+	/// Deterministic generation + render re-arm (bootstrap / standalone path).
+	/// The world's async path generates the record directly and publishes the
+	/// render flags when it drains the generation completion event.
+	void generateTerrain(TerrainGenerator &generator);
+
+	// --- Render-side publication of authoritative world events (issue #206) --
+	/// The world's async generation completed for the bound record: re-arm
+	/// meshing exactly as the pre-split generateTerrain() did inline.
+	void notifyTerrainGenerated()
+	{
+		meshNeedsUpdate = true;
+		m_dirtySections.store(kAllSectionMask, std::memory_order_relaxed);
+	}
+	/// One authoritative edit piece landed in the bound record (world edit
+	/// event stream): section invalidation + GENERATED re-arm, matching the
+	/// pre-split queueOrApplyEdit() render side effects.
+	void notifyEditApplied(int x, int y, int z, TextureType type,
+						   TextureType previousType, bool borderWrite)
+	{
+		markEditDirtySections(x, y, z, type, previousType, borderWrite);
+		setState(ChunkState::GENERATED);
+	}
+
+	// Persistent-edit tracking (issue #180) — forwarded to the record.
+	using ChunkEditMap = WorldChunk::ChunkEditMap;
 	void setTrackPersistentEdits(bool on)
 	{
-		m_trackPersistentEdits = on;
-		if (!on)
-			m_persistentEdits.clear();
+		recordForWrite()->setTrackPersistentEdits(on);
 	}
-	bool hasPersistentEdits() const { return !m_persistentEdits.empty(); }
-	const ChunkEditMap &persistentEdits() const { return m_persistentEdits; }
-	/// Moves the recorded edits out and leaves the chunk with an empty map.
+	bool hasPersistentEdits() const { return m_active && m_active->hasPersistentEdits(); }
+	const ChunkEditMap &persistentEdits() const
+	{
+		static const ChunkEditMap s_empty{};
+		return m_active ? m_active->persistentEdits() : s_empty;
+	}
 	ChunkEditMap takePersistentEdits()
 	{
-		ChunkEditMap out = std::move(m_persistentEdits);
-		m_persistentEdits.clear();
-		return out;
+		return m_active ? m_active->takePersistentEdits() : ChunkEditMap{};
 	}
-	void clearPersistentEdits() { m_persistentEdits.clear(); }
+	void clearPersistentEdits()
+	{
+		if (m_active)
+			m_active->clearPersistentEdits();
+	}
 
 	bool deleteVoxel(const glm::vec3 &position);
 	bool placeVoxel(const glm::vec3 &position, TextureType type);
 
-	bool hasVoxelStorage() const { return m_storage != nullptr; }
-	VoxelPool *getVoxelPool() const { return m_voxelPool; }
-	bool hasBorderStorage() const { return m_borders != nullptr; }
-	BorderPool *getBorderPool() const { return m_borderPool; }
+	// --- Identity (issue #206: single source = the WorldChunk record) --------
+	uint64_t meshGeneration() const { return m_active ? m_active->generation() : 0; }
+	uint64_t meshRevision() const { return m_active ? m_active->revision() : 0; }
+	sim::ChunkIdentity chunkIdentity() const
+	{
+		return m_active ? m_active->identity() : sim::ChunkIdentity{};
+	}
+
+	// --- Light caches (derived, render-owned) --------------------------------
 	bool hasLightStorage() const { return m_lightStorage != nullptr; }
 	ChunkLightPool *getLightPool() const { return m_lightPool; }
 	const ChunkLightStorage *getLightStorage() const { return m_lightStorage; }
@@ -104,32 +241,6 @@ public:
 	void setLocalLightCacheWanted(bool wanted) { m_localLightCacheWanted.store(wanted, std::memory_order_relaxed); }
 	uint16_t sampleLightRaw(int x, int y, int z) const;
 	lighting::LocalVoxelLight sampleLight(int x, int y, int z) const;
-
-	/// Prepare all generation backing on the calling thread:
-	/// - voxel storage
-	/// - transient neighbor borders
-	/// Ownership only: a freshly acquired voxel block is NOT cleared - its
-	/// bytes stay stale/unspecified until generateTerrain() initializes
-	/// them. Returns false if an allocation fails (e.g. std::bad_alloc); any
-	/// partially acquired backing is returned to its pool first.
-	///
-	/// Occupancy lifecycle contract (issue #115 review), the three states a
-	/// chunk moves through:
-	///   1. No storage              - m_storage == nullptr, occupancy
-	///                                metadata == 0.
-	///   2. Prepared for generation - m_storage != nullptr, backing contents
-	///                                stale/unspecified, occupancy metadata
-	///                                == 0. No consumer may inspect voxel
-	///                                contents in this state (edits targeting
-	///                                the chunk are deferred while it is in
-	///                                transit, and answer "logically empty").
-	///   3. Generated/editable      - backing valid, occupancy metadata
-	///                                exactly matches the backing; edits
-	///                                keep them in lockstep.
-	bool prepareVoxelStorageForGeneration();
-
-	/// Release voxel storage upon chunk retirement.
-	void releaseVoxelStorageOnRetire();
 
 	// Draw command collection (issue #109): the passes bind the shared mesh
 	// arenas once per page pair and submit one indirect draw per live
@@ -150,15 +261,13 @@ public:
 	size_t collectOpaqueDraws(std::vector<IndirectDraw> &out) const;
 	size_t collectWaterDraws(std::vector<IndirectDraw> &out) const;
 
-	void generateTerrain(TerrainGenerator &generator);
-
-	// Mesh building (issue #104): the CPU mesh payload no longer lives on
-	// the Chunk. Workers build into a pooled MeshBuildResult and publish it
+	// Mesh building (issue #104): the CPU mesh payload no longer lives on the
+	// Chunk. Workers build into a pooled MeshBuildResult and publish it
 	// for upload; the Chunk keeps only GPU handles/counts.
 	//
 	// Worker contract (issue #114 review): buildMesh/buildLODMesh may READ
-	// Chunk generation data (voxels, borders, biome metadata, position) but
-	// must not mutate any Chunk lifecycle/render state. The completed result
+	// the authoritative record (voxels, borders, biome metadata, position)
+	// but must not mutate any lifecycle/render state. The completed result
 	// is committed exclusively by publishMeshResult() on the main thread.
 	// `generation`/`revision` must be captured at dispatch time on the main
 	// thread (see meshPendingChunks) and are stamped into the result.
@@ -211,33 +320,23 @@ public:
 	// the unuploaded sections, so dispatch expands its mask to all sections
 	// (issue #107).
 	bool hasUnuploadedFullMesh() const;
-	uint64_t meshGeneration() const { return m_meshGeneration; }
-	uint64_t meshRevision() const { return m_meshRevision.load(std::memory_order_relaxed); }
 	MeshResultPool *getMeshResultPool() const { return m_resultPool; }
 
 	// Section dirty tracking (issue #107): bit s set => section s needs a
 	// mesh rebuild. Edits mark the affected sections (own + Y-boundary
 	// neighbors + a conservative light range); mesh dispatch takes and
-	// clears the mask, and a rejected publish re-arms it.
+	// clears the mask, and a rejected publish re-arms it. Render scheduling
+	// state: stays on the render side of the issue #206 boundary.
 	void markSectionsDirty(uint16_t mask) { m_dirtySections.fetch_or(mask, std::memory_order_relaxed); }
 	uint16_t takeDirtySections() { return m_dirtySections.exchange(0, std::memory_order_relaxed); }
 	uint16_t dirtySections() const { return m_dirtySections.load(std::memory_order_relaxed); }
 
-	// Vertical occupancy granularity (issue #105): 16 sections of 16 voxels.
-	static constexpr int kOccupancySectionSize = 16;
-	static constexpr int kOccupancySections = CHUNK_HEIGHT / kOccupancySectionSize;
-	static_assert(CHUNK_HEIGHT % kOccupancySectionSize == 0,
-				  "occupancy sections must tile the chunk height exactly");
-	static_assert(kOccupancySections <= 16,
-				  "the derived occupied-section mask must fit in uint16_t");
-	static_assert(static_cast<long>(kOccupancySectionSize) * CHUNK_SIZE * CHUNK_SIZE <=
-					  std::numeric_limits<uint16_t>::max(),
-				  "a per-section non-air count must fit uint16_t");
+	// Vertical occupancy granularity (issue #105) — forwarded constants.
+	static constexpr int kOccupancySectionSize = WorldChunk::kOccupancySectionSize;
+	static constexpr int kOccupancySections = WorldChunk::kOccupancySections;
 	bool hasWaterMesh() const { return waterIndexCount > 0; }
 	bool isLODMesh() const { return m_isLODMesh; }
 	bool needsGPUUpload() const { return meshNeedsUpdate.load(); }
-	bool isInTransit() const { return m_inTransit.load(); }
-	void setInTransit(bool val) { m_inTransit.store(val); }
 
 	/// Synchronous upload (bootstrap / tests). Prefer uploadToGPUAsync on the hot path.
 	void uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshArenas &arenas);
@@ -338,7 +437,6 @@ public:
 	/// Frame-aware release of every arena range (safe during streaming).
 	void releaseGPUDeferred();
 
-	bool isShellEmpty() const { return m_borders == nullptr; }
 	/// Transient cross-chunk block-light context (issue #141 review fix).
 	/// Non-owning and main-thread-bound: attached by the ChunkManager at
 	/// mesh dispatch (like the neighbor borders), read by computeLightField
@@ -347,35 +445,16 @@ public:
 	/// block light - tests and the LOD path never attach one.
 	void setLightHalo(ChunkLightHalo *halo) { m_lightHalo = halo; }
 	ChunkLightHalo *lightHalo() const { return m_lightHalo; }
-	/// Occupancy lifecycle (issue #115): the voxel backing holds stale pool
-	/// bytes until terrain generation initializes it. True only in the
-	/// generated/editable states (GENERATED or MESHED) - the gate every
-	/// direct voxel read/write must pass.
-	bool isVoxelBackingReadable() const
-	{
-		return state.load() != ChunkState::UNLOADED;
-	}
-
-	/// Layout-independent border sampling for meshing (issue #103).
-	/// Accepts the full padded range used by the greedy mesher: in-chunk
-	/// coordinates read local voxels, x/z = -1 / CHUNK_SIZE read neighbor
-	/// faces, diagonal coordinates read corner columns, and everything else
-	/// (including vertical padding) reads as AIR. Missing borders - freed
-	/// after upload or never built - also read as AIR.
-	TextureType sampleForMeshing(int x, int y, int z) const;
-	void releaseNeighborBorders();
-	void rebuildBordersFromNeighbors(const Chunk *west, const Chunk *east,
-								   const Chunk *south, const Chunk *north);
 
 	enum class ResetMode { Full, ForGeneration };
-	/// ForGeneration retains voxel storage (if any) until generateTerrain()
-	/// overwrites it, avoiding deallocation/reallocation during pool recycling.
-	/// Do not read/mesh voxels in this chunk before generation completes.
-	/// Full (the default) releases voxel storage back to the pool, for retirement without regeneration.
-	/// Both modes reset the occupancy metadata to 0: after a ForGeneration
-	/// reset the chunk sits in the "prepared for generation" state of the
-	/// prepareVoxelStorageForGeneration() lifecycle contract (backing may be
-	/// stale, metadata empty, contents unreadable).
+	/// Render-side reset + (standalone or in-place bound) record reset.
+	/// ForGeneration retains voxel storage until generateTerrain() overwrites
+	/// it; Full releases it. Pool acquire/release only ever see unbound
+	/// chunks; a world-bound reset must keep the coordinate (the record is
+	/// keyed by it in VoxelWorld::m_chunks — asserted) and is only legitimate
+	/// as an explicit recycle-in-place. The world's own unload path captures
+	/// edits and resets the record itself, so a Full reset of a LIVE bound
+	/// record bypasses that capture and discards its persistent edits.
 	void reset(const glm::vec3 &newPosition, ResetMode mode = ResetMode::Full);
 
 	uint32_t getOpaqueIndexCount() const { return opaqueIndexCount; }
@@ -416,17 +495,67 @@ public:
 		return n;
 	}
 
+	bool isVisible() const { return visible; }
+	void setVisible(bool visible) { this->visible = visible; }
+
 private:
-    // Published by the exclusive chunk owner at mutation boundaries.
-    std::array<uint64_t, 13> m_cpuTelemetry{};
-    void publishCpuTelemetry();
-    struct MemoryPublication {
-        Chunk& chunk;
-        ~MemoryPublication() { chunk.publishCpuTelemetry(); }
-    };
-	glm::vec3 position;
+	// --- Authoritative record binding (issue #206) ---------------------------
+	// World-bound chunks point at the VoxelWorld-owned record; standalone
+	// chunks own a private record. m_active is the single dereference target
+	// for every voxel access (bound record or owned record). The owned record
+	// is allocated LAZILY (recordForWrite) so an idle pool handle — which is
+	// always bound before use in the game — carries no per-column backing and
+	// does not double-count column.bytes/occupancy.bytes telemetry. m_position
+	// holds the construction/reset position until a record exists. The pool
+	// pointers survive moves so a recycled handle can re-create its record.
+	std::unique_ptr<WorldChunk> m_ownedWorld;
+	WorldChunk *m_world{nullptr};
+	WorldChunk *m_active{nullptr};
+	glm::vec3 m_position{0.0f};
+	VoxelPool *m_voxelPool{nullptr};
+	BorderPool *m_borderPool{nullptr};
+
+	/// Lazily create the privately owned record at the current fallback
+	/// position (standalone use only; never called for a bound handle).
+	WorldChunk *ensureOwnedRecord()
+	{
+		if (!m_ownedWorld)
+			m_ownedWorld = std::make_unique<WorldChunk>(m_position, m_voxelPool, m_borderPool);
+		return m_ownedWorld.get();
+	}
+	/// The record a write targets: the bound world record, or the lazily
+	/// created owned record for a standalone handle. Keeps m_active cached so
+	/// the read hot path stays a single dereference.
+	WorldChunk *recordForWrite()
+	{
+		if (m_world)
+			return m_world;
+		WorldChunk *record = ensureOwnedRecord();
+		m_active = record;
+		return record;
+	}
+
+	// Occupancy helpers forwarded to the record (meshing + probes).
+	bool occupiedSpanY(int &outMinY, int &outMaxY) const
+	{
+		return m_active && m_active->occupiedSpanY(outMinY, outMaxY);
+	}
+	void refineOccupiedSpanY(int &occMinY, int &occMaxY) const
+	{
+		if (m_active)
+			m_active->refineOccupiedSpanY(occMinY, occMaxY);
+	}
+	uint16_t occupiedSectionMask() const
+	{
+		return m_active ? m_active->occupiedSectionMask() : 0;
+	}
+	void recountOccupancy()
+	{
+		if (m_active)
+			m_active->recountOccupancy();
+	}
+
 	bool visible;
-	std::atomic<ChunkState> state;
 
 	VmaAllocator m_allocator{VK_NULL_HANDLE};
 
@@ -447,8 +576,6 @@ private:
 	// (SectionGpuSlot itself is public: it appears in PreparedMeshUpload.)
 	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpu{};
 	std::array<SectionGpuSlot, kOccupancySections> m_sectionGpuWater{};
-	// Live byte extent of the sectioned layout is gone (issue #109): the
-	// arenas own their pages; per-section ranges above are the only state.
 
 	// Whole-chunk LOD ranges (issue #109): the simplified LOD mesh lives in
 	// the same shared arenas as the sectioned meshes.
@@ -467,34 +594,10 @@ private:
 	std::array<IndirectDraw, kOccupancySections> m_cachedOpaqueDraws{};
 	std::array<IndirectDraw, kOccupancySections> m_cachedWaterDraws{};
 
-	VoxelPool *m_voxelPool{nullptr};
-	VoxelStorage *m_storage{nullptr};
-	void ensureVoxelStorageForEdit();
-	// Compact occupancy metadata (issue #105). The raw voxel type is the
-	// canonical per-cell occupancy source (`type != AIR`); this one array
-	// replaces the former 8 KiB activeVoxels bitset duplicate. It counts
-	// non-air voxels per vertical section (16 sections of 16 voxels), so
-	// generation/meshing can skip empty slabs without touching the whole
-	// volume. Maintained by generateTerrain() (one canonical recount) and
-	// setVoxel() (incremental delta); verified against brute force by the
-	// chunk lifecycle tests.
-	std::array<uint16_t, kOccupancySections> m_sectionNonAir{};
-	void recountOccupancy();
-	/// Derived Y span [outMinY, outMaxY] covering every section that holds
-	/// at least one non-air voxel (section-granular). Returns false when the
-	/// chunk holds no voxels at all.
-	bool occupiedSpanY(int &outMinY, int &outMaxY) const;
-	/// Narrow a section-granular span to the first/last layers that hold a
-	/// non-air voxel (at most the two boundary sections are scanned).
-	void refineOccupiedSpanY(int &occMinY, int &occMaxY) const;
-	/// Debug-only sanity check of the counters (no silent desync can hide
-	/// behind an out-of-range count); compiled out in Release.
-	void validateOccupancyMetadata() const;
-	/// Bit S set <=> section S holds at least one non-air voxel (derived).
-	uint16_t occupiedSectionMask() const;
 	// Section dirtying for one voxel edit (issue #107): own section,
 	// Y-boundary neighbors, a conservative light-dirty Y range for in-chunk
 	// edits, and exactly the y/16 section for border (mirror) writes.
+	// Render scheduling: consumes the authoritative write's previous type.
 	void markEditDirtySections(int x, int y, int z, TextureType type,
 							   TextureType previousType, bool borderWrite);
 	// Chunk-wide sky/block light field for one mesh job (extracted from the
@@ -545,10 +648,6 @@ private:
 	// Retire LOD stream ranges and reset them to empty.
 	void retireLodRanges(MeshArena &vertexArena, MeshArena &indexArena,
 						 MeshArena::Range &vertices, MeshArena::Range &indices, bool immediate);
-	// Borrowed from a BorderPool for generation/meshing and returned after
-	// upload (issue #103): no per-chunk border memory is retained.
-	ChunkNeighborBorders *m_borders{nullptr};
-	BorderPool *m_borderPool{nullptr};
 	// Borrowed from the ChunkManager's LightHaloPool for one mesh job
 	// (issue #141 review fix): neighbor ring voxels feeding the cross-chunk
 	// block-light BFS. Non-owning; null outside a job.
@@ -563,59 +662,26 @@ private:
 	// Non-owning handle to the WorldRenderer-owned shared arenas (issue
 	// #109): set by every upload, used to retire ranges on release/unload.
 	MeshArenas *m_arenas{nullptr};
-	// Identity of the meshable content (issue #114 review):
-	//   m_meshGeneration - physical chunk incarnation; bumped on reset so a
-	//     result built for a recycled chunk pointer can never publish.
-	//   m_meshRevision   - logical voxel/border content revision; bumped on
-	//     every content invalidation (generation, successful voxel/border
-	//     edit, border rebuild) so an in-flight result built from older
-	//     content is rejected at publish instead of overwriting newer data.
-	// A build result must match BOTH to be published. Mutated only on the
-	// main thread; atomic because dispatch-time captures observe it around
-	// worker tasks.
-	uint64_t m_meshGeneration{0};
-	std::atomic<uint64_t> m_meshRevision{0};
 	// Section dirty mask (issue #107): bit s set => section s needs a mesh
 	// rebuild. Mutated from the main thread only (edits, dispatch, publish
 	// rejection); atomic because dispatch-time captures observe it around
-	// worker tasks, same rule as m_meshRevision.
+	// worker tasks.
 	std::atomic<uint16_t> m_dirtySections{0};
 	void releasePendingMeshResult();
-
-	// Persistent-edit tracking (issue #180): current value per edited voxel,
-	// keyed by canonical local index. Recorded by setVoxel() while armed;
-	// never leaks across recycled chunks (reset() clears it). Cleared on
-	// ForGeneration recycles too - the manager re-applies the recorded
-	// edits after generation if it still owns them - while the tracking
-	// flag stays armed because ChunkPool::acquire() reuses the same Chunk
-	// object while a world is open; only the Full reset on pool release
-	// disarms it.
-	ChunkEditMap m_persistentEdits;
-	bool m_trackPersistentEdits{false};
-
-	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeGrassColors{};
-	std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> biomeFoliageColors{};
-
-	// Per-column generation state, filled by generateTerrain() (biomes feed
-	// vegetation/border passes; heightMap mirrors ChunkData::heightMap).
-	// Fully reset on every generation and pool recycle.
-	std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> biomeTypes{};
-	std::array<int, CHUNK_SIZE * CHUNK_SIZE> heightMap{};
 
 	uint32_t opaqueIndexCount{0};
 	uint32_t waterIndexCount{0};
 
 	std::atomic<bool> meshNeedsUpdate;
 	bool m_isLODMesh{false};
-	std::atomic<bool> m_inTransit{false};
 	std::atomic<bool> m_localLightCacheWanted{false};
 
 	// Hot inner-loop arithmetic (meshing/lighting/editing all call it);
 	// inline so the implementation split (issue #181) keeps it inlinable
-	// in every consumer TU.
+	// in every consumer TU. Delegates to the canonical record layout.
 	size_t getIndex(uint32_t x, uint32_t y, uint32_t z) const
 	{
-		return y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x;
+		return WorldChunk::index(x, y, z);
 	}
 
 private:
@@ -643,21 +709,4 @@ inline size_t Chunk::collectWaterDraws(std::vector<IndirectDraw> &out) const
 	out.insert(out.end(), m_cachedWaterDraws.data(),
 	           m_cachedWaterDraws.data() + m_cachedWaterDrawCount);
 	return m_cachedWaterDrawCount;
-}
-
-// Strict internal accessor (issue #114 final review): out-of-range
-// coordinates would index past the voxel storage. Callers that can
-// see outside the chunk must use sampleForMeshing()/isVoxelActive(),
-// which answer AIR/false for the padded neighborhood. Defined inline so
-// the hot meshing/lighting/editing paths keep it inlined in every TU of
-// the split implementation (issue #181).
-inline const Voxel &Chunk::getVoxel(uint32_t x, uint32_t y, uint32_t z) const
-{
-	assert(x < CHUNK_SIZE && y < CHUNK_HEIGHT && z < CHUNK_SIZE);
-	if (!m_storage)
-	{
-		static constexpr Voxel s_air{static_cast<uint8_t>(AIR)};
-		return s_air;
-	}
-	return m_storage->voxels[getIndex(x, y, z)];
 }

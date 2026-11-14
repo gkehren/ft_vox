@@ -1,5 +1,5 @@
 #include "ChunkBorders.hpp"
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 #include <cassert>
 
 BorderPool::BorderPool(size_t initialCapacity)

@@ -4,7 +4,7 @@
 #include "ChunkMeshScratch.hpp"
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Renderer/Lighting.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 
 #include <algorithm>
 #include <cassert>

@@ -1,5 +1,8 @@
 // Chunk implementation - voxel editing: setVoxel, place/delete and
 // edit-driven section dirty marking (issue #181 split; class Chunk, see Chunk.hpp).
+// Issue #206 (Epic #204 B): the authoritative write (storage, occupancy,
+// persistent-edit capture, revision) lives in WorldChunk::setVoxel; this unit
+// keeps the render-side section invalidation that consumes it.
 #include "Chunk.hpp"
 #include <Renderer/Lighting.hpp>
 
@@ -9,91 +12,25 @@
 
 void Chunk::setVoxel(int x, int y, int z, TextureType type)
 {
-  if (static_cast<uint32_t>(x) < CHUNK_SIZE && static_cast<uint32_t>(y) < CHUNK_HEIGHT &&
-      static_cast<uint32_t>(z) < CHUNK_SIZE)
-  {
-    size_t index = getIndex(x, y, z);
-    const TextureType previousType =
-        m_storage ? static_cast<TextureType>(m_storage->voxels[index].type) : AIR;
-    const bool wasAir = !m_storage ||
-                        m_storage->voxels[index].type == static_cast<uint8_t>(AIR);
-    if (type != AIR)
-    {
-      ensureVoxelStorageForEdit();
-      m_storage->voxels[index].type = static_cast<uint8_t>(type);
-    }
-    else
-    {
-      if (m_storage)
-        m_storage->voxels[index].type = static_cast<uint8_t>(AIR);
-    }
-    // Persistent-edit capture (issue #180): only authoritative in-chunk
-    // writes that actually change the voxel are recorded; border-shell
-    // writes (the else branch below) and no-op rewrites never record.
-    if (m_trackPersistentEdits && previousType != type)
-      m_persistentEdits[static_cast<uint32_t>(index)] = static_cast<uint8_t>(type);
-    // Incremental occupancy (issue #105): a cell moved in or out of its
-    // vertical section; type->type rewrites leave the count untouched.
-    // Explicit +/- with Debug range asserts: a desync shows up as a
-    // hard failure instead of a silent uint16 wraparound.
-    const bool nowAir = (type == AIR);
-    if (wasAir != nowAir)
-    {
-      constexpr uint16_t kSectionVolume =
-          static_cast<uint16_t>(kOccupancySectionSize) * CHUNK_SIZE * CHUNK_SIZE;
-      const int section = y / kOccupancySectionSize;
-      uint16_t &count = m_sectionNonAir[section];
-      if (nowAir)
-      {
-        assert(count > 0 && "occupancy section underflow");
-        --count;
-      }
-      else
-      {
-        assert(count < kSectionVolume && "occupancy section overflow");
-        ++count;
-      }
-    }
-    // Section-local remeshing (issue #107): dirty only the affected
-    // vertical sections instead of the whole chunk.
-    markEditDirtySections(x, y, z, type, previousType, false);
-    // Content invalidation (issue #114 review): any in-flight mesh built
-    // from the previous content is rejected at publish time.
-    m_meshRevision.fetch_add(1, std::memory_order_relaxed);
-  }
-    else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE &&
-             y >= 0 && y < static_cast<int>(CHUNK_HEIGHT))
-    {
-        // Lazily re-borrow borders if they were freed after a previous GPU
-        // upload. Vertical padding (y = -1 / CHUNK_HEIGHT) is not representable
-        // in the compact storage and was never written by generation either.
-        // Lazily re-borrow border storage if it was freed after a previous GPU
-        // upload. Acquisition may throw on OOM; a failed edit write is not
-        // fatal, so ignore it (the block itself is unchanged).
-        if (!m_borders)
-        {
-            try
-            {
-                m_borders = m_borderPool->acquire();
-                // A freshly acquired pool block holds stale bytes: initialize it so
-                // every other sampled border coordinate reads AIR (issue #113).
-                m_borders->resetToAir();
-                publishCpuTelemetry();
-            }
-            catch (const std::bad_alloc &)
-            {
-                return;
-            }
-        }
-        m_borders->mutableAt(x, y, z) = static_cast<uint8_t>(type);
-        // Border content invalidation (issue #114 review): mirror
-        // writes from a neighbor's boundary edit must invalidate in-flight
-        // meshes of THIS chunk just like in-chunk edits do.
-        // Section-local dirtying too (issue #107): the neighbor's border
-        // strip face ownership lives in exactly the y/16 section.
-        markEditDirtySections(x, y, z, type, AIR, true);
-        m_meshRevision.fetch_add(1, std::memory_order_relaxed);
-    }
+  // Authoritative write first; the previous type feeds the render-side
+  // light/section invalidation below (same net effect as the pre-split
+  // inline write + markEditDirtySections sequence). recordForWrite lazily
+  // creates the owned record for a standalone handle (bound handles use the
+  // world record).
+  WorldChunk *record = recordForWrite();
+  const TextureType previousType = record->setVoxel(x, y, z, type);
+  const bool inChunk = static_cast<uint32_t>(x) < CHUNK_SIZE &&
+                       static_cast<uint32_t>(y) < CHUNK_HEIGHT &&
+                       static_cast<uint32_t>(z) < CHUNK_SIZE;
+  const bool onBorder = !inChunk && x >= -1 && x <= CHUNK_SIZE &&
+                        z >= -1 && z <= CHUNK_SIZE &&
+                        y >= 0 && y < static_cast<int>(CHUNK_HEIGHT);
+  if (!inChunk && !onBorder)
+    return;
+  // Section-local remeshing (issue #107): dirty only the affected vertical
+  // sections instead of the whole chunk. Border (mirror) writes dirty
+  // exactly the written voxel's y/16 section.
+  markEditDirtySections(x, y, z, type, previousType, !inChunk);
 }
 
 // Section dirtying for one voxel edit (issue #107, PR #117 review). The
@@ -171,12 +108,13 @@ void Chunk::markEditDirtySections(int x, int y, int z, TextureType type,
 
 bool Chunk::deleteVoxel(const glm::vec3 &position)
 {
-  if (!m_storage)
+  if (!hasVoxelStorage())
     return false;
 
-  int x = static_cast<int>(position.x - this->position.x);
-  int y = static_cast<int>(position.y - this->position.y);
-  int z = static_cast<int>(position.z - this->position.z);
+  const glm::vec3 &origin = getPosition();
+  int x = static_cast<int>(position.x - origin.x);
+  int y = static_cast<int>(position.y - origin.y);
+  int z = static_cast<int>(position.z - origin.z);
   if (x < 0)
     x += CHUNK_SIZE;
   if (z < 0)
@@ -186,7 +124,7 @@ bool Chunk::deleteVoxel(const glm::vec3 &position)
   {
     setVoxel(x, y, z, AIR);
     meshNeedsUpdate = true;
-    state = ChunkState::GENERATED;
+    setState(ChunkState::GENERATED);
     return true;
   }
   return false;
@@ -194,9 +132,10 @@ bool Chunk::deleteVoxel(const glm::vec3 &position)
 
 bool Chunk::placeVoxel(const glm::vec3 &position, TextureType type)
 {
-  int x = static_cast<int>(position.x - this->position.x);
-  int y = static_cast<int>(position.y - this->position.y);
-  int z = static_cast<int>(position.z - this->position.z);
+  const glm::vec3 &origin = getPosition();
+  int x = static_cast<int>(position.x - origin.x);
+  int y = static_cast<int>(position.y - origin.y);
+  int z = static_cast<int>(position.z - origin.z);
   if (x < 0)
     x += CHUNK_SIZE;
   if (z < 0)
@@ -206,7 +145,7 @@ bool Chunk::placeVoxel(const glm::vec3 &position, TextureType type)
   {
     setVoxel(x, y, z, type);
     meshNeedsUpdate = true;
-    state = ChunkState::GENERATED;
+    setState(ChunkState::GENERATED);
     return true;
   }
   return false;

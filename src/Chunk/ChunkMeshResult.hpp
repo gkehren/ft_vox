@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <Core/SimContracts.hpp>
 #include <utils.hpp>
 
 class Chunk;
@@ -80,15 +81,18 @@ enum class LightCacheAction : uint8_t
 
 struct MeshBuildResult
 {
-	// Identity of the build: validated against the chunk at publish time so
-	// a superseded build can never land on a recycled/new-generation chunk
-	// or on newer voxel/border content (issue #114 review):
+	// Identity of the build: validated against the chunk's authoritative
+	// record at publish time so a superseded build can never land on a
+	// recycled/new-generation chunk or on newer voxel/border content
+	// (issue #114 review). Issue #206 (Epic #204 B): this is the
+	// sim::ChunkIdentity value contract stamped from the WorldChunk record —
+	// the SINGLE source of the (generation, revision) pair; the former
+	// duplicate fields were removed here.
 	//   generation -> physical chunk incarnation (recycle/reset ID)
 	//   revision   -> logical voxel/border content revision
 	// A result must match BOTH to be published.
 	Chunk *owner{nullptr};
-	uint64_t generation{0};
-	uint64_t revision{0};
+	sim::ChunkIdentity identity{};
 	// True when built by buildLODMesh(); committed to the chunk by
 	// publishMeshResult() on the main thread.
 	bool isLOD{false};
@@ -127,9 +131,18 @@ struct MeshBuildResult
 	// Stamp identity and drop previous content (capacities are kept).
 	// `sectionMask` records which sections this build will refresh
 	// (kAllSectionMask for whole-chunk builds). Called by the builder; must
-	// not touch `accounted` (pool-owned).
-	void beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration, uint64_t chunkRevision,
+	// not touch `accounted` (pool-owned). The identity is captured at
+	// dispatch time from the authoritative WorldChunk record.
+	void beginBuild(Chunk *chunkOwner, const sim::ChunkIdentity &chunkIdentity,
 					uint16_t sectionMask = 0);
+	// Convenience stamp from a dispatch-time (generation, revision) capture
+	// (tests / tools). The pair is packed into the sim::ChunkIdentity value;
+	// the WorldChunk record remains the single source of the pair.
+	void beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration, uint64_t chunkRevision,
+					uint16_t sectionMask = 0)
+	{
+		beginBuild(chunkOwner, sim::ChunkIdentity{0, 0, chunkGeneration, chunkRevision}, sectionMask);
+	}
 	// Detach identity and content without freeing capacity (release path).
 	void detach();
 };

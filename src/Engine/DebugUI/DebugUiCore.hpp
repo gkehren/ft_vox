@@ -13,7 +13,7 @@
 // PostProcessSettings) for mutable tuning controls — those are the engine's
 // settings API, not debug state.
 
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 #include <Engine/GameUIResourcePack.hpp>
 #include <Engine/PlayerUi.hpp>
 

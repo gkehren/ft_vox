@@ -26,7 +26,7 @@
 #include "Chunk/ChunkPool.hpp"
 #include "Chunk/TerrainGenerator.hpp"
 #include "Engine/EngineDefs.hpp"
-#include "Engine/ThreadPool.hpp"
+#include "Core/ThreadPool.hpp"
 #include "Camera/Camera.hpp"
 #include "Entities/MobTypes.hpp"
 

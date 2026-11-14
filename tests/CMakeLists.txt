@@ -37,6 +37,21 @@ add_executable(test_core_contracts test_core_contracts.cpp)
 target_link_libraries(test_core_contracts PRIVATE ft_vox_core)
 add_test(NAME CoreContracts COMMAND test_core_contracts)
 
+# ---------------------------------------------------------------------------
+# CPU-only authoritative world acceptance (issue #206, Epic #204 Phase B).
+# Links ONLY ft_vox_core: constructs, generates, samples, edits, unloads,
+# reloads and persists a world with NO graphics runtime (no SDL / Vulkan /
+# ImGui / render chunk handles). Covers the issue #206 acceptance list:
+# determinism, border/corner mirrors, deferred + coalesced edits, negative
+# coordinates, unknown terrain, safe recycling, out-of-order generation
+# completion, stale revision rejection, and the issue #180 save contracts
+# (restart, sparse normalization, identity guards, close failure/retry,
+# concurrent edits during pending async I/O).
+# ---------------------------------------------------------------------------
+add_executable(test_voxel_world test_voxel_world.cpp)
+target_link_libraries(test_voxel_world PRIVATE ft_vox_core)
+add_test(NAME VoxelWorld COMMAND test_voxel_world)
+
 # Forbidden-include-chain guard (issue #205 acceptance criterion #3): the
 # CPU-only public headers must never transitively include Renderer/, Vulkan/,
 # Camera/, SDL3, ImGui, or the render-coupled / not-yet-migrated Chunk headers.
@@ -398,6 +413,7 @@ add_executable(test_chunk_lifecycle
     test_chunk_lifecycle.cpp
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
     ${FT_VOX_CHUNK_SOURCES}
+    ${FT_VOX_WORLD_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -465,6 +481,7 @@ add_executable(test_world_persistence
     test_world_persistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
     ${FT_VOX_CHUNK_SOURCES}
+    ${FT_VOX_WORLD_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
@@ -532,6 +549,7 @@ add_test(NAME WorldPersistence COMMAND test_world_persistence)
 add_executable(test_mesh_facekey
     test_mesh_facekey.cpp
     ${FT_VOX_CHUNK_SOURCES}
+    ${FT_VOX_WORLD_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -597,6 +615,7 @@ add_test(NAME MeshFaceKey COMMAND test_mesh_facekey)
 add_executable(test_mesh_upload
     test_mesh_upload.cpp
     ${FT_VOX_CHUNK_SOURCES}
+    ${FT_VOX_WORLD_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -776,6 +795,7 @@ add_executable(test_debug_ui
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiCore.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiState.cpp
     ${FT_VOX_CHUNK_SOURCES}
+    ${FT_VOX_WORLD_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -931,6 +951,7 @@ add_executable(ft_vox_visual_tests
     ${FT_VOX_VULKAN_SOURCES}
     ${FT_VOX_RENDERER_SOURCES}
     ${FT_VOX_CHUNK_SOURCES}
+    ${FT_VOX_WORLD_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -996,6 +1017,7 @@ add_executable(test_post_resize
     ${FT_VOX_VULKAN_SOURCES}
     ${FT_VOX_RENDERER_SOURCES}
     ${FT_VOX_CHUNK_SOURCES}
+    ${FT_VOX_WORLD_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
@@ -1142,6 +1164,7 @@ set_tests_properties(EngineReload PROPERTIES
 add_executable(bench_persistence
     bench_persistence.cpp
     ${FT_VOX_CHUNK_SOURCES}
+    ${FT_VOX_WORLD_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp

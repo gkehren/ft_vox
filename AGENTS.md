@@ -8,6 +8,7 @@
 
 - [`docs/vulkan-graphics.md`](docs/vulkan-graphics.md) — Vulkan device path, pass graph, shaders, post
 - [`docs/engine-architecture.md`](docs/engine-architecture.md) — Engine loop, chunks, streaming, terrain gen
+- [`docs/simulation-render-contracts.md`](docs/simulation-render-contracts.md) — authoritative CPU world vs derived render boundary (Epic #204), ownership, migration checkpoints
 - [`docs/visual-regression.md`](docs/visual-regression.md) — Visual-regression harness: scenes, references, tolerances
 
 ## Architecture Overview
@@ -22,12 +23,18 @@
   - `VkSwapchain`: surface formats, present modes, resize
   - `VkFrameContext`: frames-in-flight, command buffers, WSI sync (sole acquire/submit/present owner)
   - `ImageBarrier` / `GraphicsPipelineBuilder`: shared helpers
+- **Authoritative world (`src/World/` + `src/Core/`, CPU-only `ft_vox_core`)** — issue #206 / Epic #204 Phase B:
+  - **`VoxelWorld`**: single owner of chunk residency/streaming, serialized logical edits (coalescing + neighbor-border mirrors), terrain worker publication, and `WorldPersistence`. Render-free public API; emits the `WorldEvent` change stream consumed by the render adapter
+  - **`WorldChunk`**: authoritative chunk record — voxel backing, occupancy, border shell, persistent edits, `sim::ChunkIdentity` (generation + revision, the single source of the pair), lifecycle state
+  - **`WorldCollisionView`**: CPU-only collision/query seam with the exact historical `ChunkCollisionView` semantics
+  - `WorldSave` / `WorldPersistence`: seed+sparse-override saves (`saves/<name>/`), async crash-safe I/O (issue #180 contracts)
+  - `Core/SimContracts.hpp`, `Core/ThreadPool.hpp`, `Core/WorkloadTelemetry.hpp`: render-independent contracts + CPU utilities
 - **Chunk Management (`src/Chunk/`)**: 16×256×16 voxels, greedy meshing, VMA GPU upload, terrain gen
-  - **`ChunkManager`**: distance streaming (load → async gen → async mesh → main-thread upload), unload + pool recycle
-  - **`ChunkPool`** + **`ThreadPool`**: preallocated chunks and work-stealing workers
+  - **`ChunkManager`**: **temporary render adapter** over `VoxelWorld` (removal plan: `docs/simulation-render-contracts.md` §10) — mesh/light dispatch, GPU upload, visibility, commit groups, deferred GPU retirement; delegates all authoritative ops to the world
+  - **`Chunk`**: render handle bound to a `WorldChunk` (forwards voxel reads/writes; keeps GPU ranges, draw caches, mesh payloads, light caches)
+  - **`ChunkPool`** + **`ThreadPool`**: preallocated render handles and work-stealing workers
   - **`TerrainGenerator`**: FastNoise2 biomes / height / caves
 - **Entities (`src/Entities/`)**: `MobSystem` — CPU fixed-step passive mobs (cow/pig/sheep/chicken): deterministic seed-based group spawning, ambient wander AI on the shared voxel collision solver; `MobModel` bakes the Minecraft box-UV articulated meshes
-- **World persistence (`src/World/`)**: seed+sparse-override world saves (`saves/<name>/`), async crash-safe I/O service, ChunkManager lifecycle integration (issue #180)
 - **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator — **ShadowPass → OpaquePass → WaterPass → SkyPass → PostStack** (+ `MobRenderer`, `OverlayRenderer`, `TextureManager`, `FrameUBO`, `MaterialTable`, `Lighting`, `ShadowCascades`)
 
 ### Networking (`src/Network/`) — experimental, test-only
@@ -125,7 +132,8 @@ ctest -R VisualRegression --output-on-failure   # from the build dir
 ```
 
 ### Key Conventions
-- **Voxel Data**: Flat `uint8_t` array per `Chunk`
+- **Voxel Data**: Flat `uint8_t` array per authoritative `WorldChunk` record (`src/World/`); the render `Chunk` handle forwards to it
+- **Sim/render boundary (Epic #204)**: authoritative state (voxels, edits, residency, persistence) lives in the CPU-only `ft_vox_core` (`VoxelWorld`/`WorldChunk`); render state (meshes, light caches, GPU, visibility) is derived. Core headers must never include `Renderer/`, `Vulkan/`, `Camera/`, `Engine/`, SDL3 or ImGui — enforced by `tests/check_core_includes.py` (CTest `CoreIncludeGuard`). `sim::ChunkIdentity` is the single source of the (generation, revision) pair
 - **World Constants**: `src/utils.hpp` (`CHUNK_SIZE`, `WORLD_HEIGHT`)
 - **Resources**: `ressources/`; runtime expects `RES_PATH` next to the binary
 - **Biome/block enums**: `BiomeType` and `TextureType` are append-only; keep

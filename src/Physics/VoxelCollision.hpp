@@ -7,6 +7,13 @@
 #include <limits>
 
 // This module deliberately knows neither Chunk nor a rendering/material API.
+
+/// Sentinel for "no local water surface known" — renders fully submerged
+/// (issue #144). The engine replaces it with a per-frame voxel scan.
+/// Lives with the world-query contract (issue #206): the CPU collision view
+/// returns it without any render dependency.
+inline constexpr float kUnknownUnderwaterSurfaceY = 1e9f;
+
 namespace physics
 {
 constexpr double skin = 0.001;

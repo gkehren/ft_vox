@@ -10,7 +10,7 @@
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Renderer/MinecraftTextures.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 
 #include <algorithm>
 #include <functional>
@@ -47,15 +47,16 @@ struct ChunkStateProbe
 {
 	static std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> &grassMut(Chunk &c)
 	{
-		return c.biomeGrassColors;
+		return c.mutableWorldChunk()->biomeGrassColors;
 	}
 	static std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> &foliageMut(Chunk &c)
 	{
-		return c.biomeFoliageColors;
+		return c.mutableWorldChunk()->biomeFoliageColors;
 	}
 	static const std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> &biomes(const Chunk &c)
 	{
-		return c.biomeTypes;
+		static const std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> s_empty{};
+		return c.worldChunk() ? c.worldChunk()->biomeTypes : s_empty;
 	}
 	static void buildMeshRanged(Chunk &c, MeshBuildResult &out, uint64_t generation,
 								uint64_t revision, int minY, int maxY)

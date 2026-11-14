@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 #include <Camera/Camera.hpp>
 #include <Engine/GpuProfile.hpp>
 #include <Chunk/StreamHelpers.hpp>

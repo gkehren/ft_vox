@@ -1227,23 +1227,34 @@ void Engine::publishFrameTelemetry()
 	telemetry.set(telemetry::ActiveChunks, chunkManager ? chunkManager->chunkCount() : 0);
 	telemetry.set(telemetry::DeferredChunks, chunkManager ? chunkManager->deferredReleaseCount() : 0);
 
-	if (!chunkManager || !chunkManager->getChunkPool())
+	if (!chunkManager)
 		return;
-	ChunkPool *pool = chunkManager->getChunkPool();
 
-	// voxel.pool.*
-	const size_t voxelCap = pool->voxelStorageCapacity();
+	// voxel.pool.* / border.pool.*: the AUTHORITATIVE backing pools live in
+	// VoxelWorld (issue #206) — bound render handles write through world
+	// records, so ChunkPool's own voxel/border pools are unused in the game
+	// path. Read the world's pools so the retained-backing memory gauges
+	// (docs/workload-telemetry.md) describe the live backing. These depend
+	// only on the world, not the render pool, so they are published before
+	// the ChunkPool guard below (issue #206 review).
+	const VoxelPool &voxelPool = chunkManager->world().voxelPool();
+	const size_t voxelCap = voxelPool.capacity();
 	telemetry.set(telemetry::VoxelPoolCapacity, voxelCap);
-	telemetry.set(telemetry::VoxelPoolActive, pool->voxelStorageActive());
-	telemetry.set(telemetry::VoxelPoolFree, pool->voxelStorageFree());
+	telemetry.set(telemetry::VoxelPoolActive, voxelPool.activeCount());
+	telemetry.set(telemetry::VoxelPoolFree, voxelPool.freeCount());
 	telemetry.set(telemetry::VoxelPoolCapacityBytes, voxelCap * sizeof(VoxelStorage));
 
 	// border.pool.*: retained neighbor-border blocks (issue #103/#113).
-	const size_t borderCap = pool->borderStorageCapacity();
+	const BorderPool &borderPool = chunkManager->world().borderPool();
+	const size_t borderCap = borderPool.capacity();
 	telemetry.set(telemetry::BorderPoolCapacity, borderCap);
-	telemetry.set(telemetry::BorderPoolActive, pool->borderStorageActive());
-	telemetry.set(telemetry::BorderPoolFree, pool->borderStorageFree());
+	telemetry.set(telemetry::BorderPoolActive, borderPool.activeCount());
+	telemetry.set(telemetry::BorderPoolFree, borderPool.freeCount());
 	telemetry.set(telemetry::BorderPoolCapacityBytes, borderCap * sizeof(ChunkNeighborBorders));
+
+	if (!chunkManager->getChunkPool())
+		return;
+	ChunkPool *pool = chunkManager->getChunkPool();
 
 	// mesh.pool.* + cpu.opaque/water.*: mesh build buffers live in
 	// pooled transient results, not on chunks (issue #104). The cpu.*

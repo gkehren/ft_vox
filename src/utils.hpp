@@ -140,6 +140,18 @@ static constexpr int CHUNK_SIZE = 16;										// Size of a chunk in voxels
 static constexpr int CHUNK_HEIGHT = 256;									// Height of a chunk in voxels
 static constexpr int CHUNK_VOLUME = CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE; // Total number of voxels in a chunk
 
+/// Canonical world->chunk mapping (floor division; correct for negative
+/// coordinates). The SINGLE definition of this convention (issue #206
+/// review): VoxelWorld::worldToChunkCoord, WorldChunk::coord() and the
+/// render-side reset guard all delegate here so the copies cannot drift.
+inline glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos)
+{
+	return {
+		static_cast<int>(std::floor(worldPos.x / static_cast<float>(CHUNK_SIZE))),
+		0,
+		static_cast<int>(std::floor(worldPos.z / static_cast<float>(CHUNK_SIZE)))};
+}
+
 // Biome types based on temperature and humidity
 enum BiomeType
 {

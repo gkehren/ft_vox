@@ -211,6 +211,11 @@ set(FT_VOX_IMGUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/ImGuiFileDialog/ImGuiFileDialog.cpp
 )
 
+set(FT_VOX_WORLD_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/World/WorldChunk.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/VoxelWorld.cpp
+)
+
 set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/main.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Engine.cpp
@@ -245,6 +250,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
+    ${FT_VOX_WORLD_SOURCES}
     ${FT_VOX_RENDERER_SOURCES}
     ${FT_VOX_IMGUI_SOURCES}
     ${FT_VOX_VULKAN_SOURCES}
@@ -252,11 +258,12 @@ set(FT_VOX_SOURCES
 
 # ---------------------------------------------------------------------------
 # ft_vox_core — CPU-only simulation/persistence static library (issue #205,
-# Epic #204 Phase A). Render-independent: links ONLY glm + FastNoise2 + Threads,
-# never SDL3 / Vulkan / ImGui. These six translation units are already compiled
-# independently by the CPU-only tests (test_world_save, test_mobs, test_terrain,
-# test_stream_opt, ...); naming them as a library makes the boundary explicit
-# without moving any GPU-coupled class. See docs/simulation-render-contracts.md.
+# Epic #204 Phase A; issue #206 Phase B adds the authoritative world).
+# Render-independent: links ONLY glm + FastNoise2 + Threads, never SDL3 /
+# Vulkan / ImGui. Phase A extracted the six already-independent translation
+# units; Phase B adds the authoritative voxel world (WorldChunk + VoxelWorld)
+# and the CPU backing pools they own (VoxelPool, BorderPool). See
+# docs/simulation-render-contracts.md.
 #
 # The public headers of these units (and Core/SimContracts.hpp) are guarded
 # against forbidden include chains by tests/check_core_includes.py.
@@ -268,6 +275,9 @@ set(FT_VOX_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
     ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp
+    ${FT_VOX_WORLD_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
 )
 
 add_library(ft_vox_core STATIC ${FT_VOX_CORE_SOURCES})

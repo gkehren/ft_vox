@@ -15,6 +15,8 @@ main.cpp
         ├── VkContext / VkSwapchain / VkFrameContext
         ├── WorldRenderer (+ passes, post, overlays, mobs)
         ├── TerrainGenerator + ThreadPool + ChunkPool + ChunkManager
+        │     └── VoxelWorld (authoritative CPU world: WorldChunk records,
+        │         edits, generation, WorldPersistence)   [issue #206]
         ├── StagingRing + GpuResourceRetire
         ├── Camera
         ├── entities::MobSystem (passive mobs)
@@ -23,14 +25,24 @@ main.cpp
 
 | Area | Directory | Primary types |
 |------|-----------|---------------|
-| App / loop | `src/Engine/` | `Engine`, `EngineDefs`, `GameUI`, `ImGuiLayer`, `ThreadPool`, `Profiler`, `Benchmark` |
-| World data | `src/Chunk/` | `Chunk`, `ChunkManager`, `ChunkPool`, `TerrainGenerator`, `StreamHelpers` |
+| App / loop | `src/Engine/` | `Engine`, `EngineDefs`, `GameUI`, `ImGuiLayer`, `Profiler`, `Benchmark` |
+| Authoritative world (CPU-only) | `src/World/`, `src/Core/` | `VoxelWorld`, `WorldChunk`, `WorldCollisionView`, `WorldPersistence`, `WorldSave`, `SimContracts`, `ThreadPool`, `WorkloadTelemetry` |
+| Render chunk side | `src/Chunk/` | `Chunk` (render handle), `ChunkManager` (render adapter), `ChunkPool`, `TerrainGenerator`, `StreamHelpers` |
 | Entities | `src/Entities/` | `MobSystem`, `MobModel` (passive mobs) |
 | Camera | `src/Camera/` | `Camera` |
 | Rendering | `src/Renderer/` | `WorldRenderer`, passes, `PostStack`, … |
 | Vulkan glue | `src/Vulkan/` | Context, frames, staging, retire |
 | Shared constants | `src/utils.hpp` | Chunk size, voxels, biomes, textures, states |
 | Network (optional) | `src/Network/` | Client/Server — **not re-wired into Engine UI** |
+
+**Ownership boundary (Epic #204, issue #206):** the authoritative voxel world
+(`VoxelWorld` + `WorldChunk`, in the CPU-only `ft_vox_core` library) owns chunk
+residency, logical edits, terrain publication and persistence. `ChunkManager`
+is a temporary render adapter that owns it and keeps only derived render work
+(mesh/light dispatch, GPU uploads, visibility); `Chunk` is a render handle
+bound to a `WorldChunk`. See
+[`simulation-render-contracts.md`](simulation-render-contracts.md) for the full
+boundary, the world event stream and the adapter removal plan.
 
 ---
 
@@ -209,40 +221,57 @@ Reproduce that path with `ft_vox --seed 42 --benchmark 5 --benchmark-warmup 0`.
 
 ---
 
-## 5. Chunk (`Chunk`)
+## 5. Chunk (`Chunk`) and the authoritative record (`WorldChunk`)
 
 Files: `src/Chunk/Chunk.hpp` plus an implementation partitioned by
-responsibility (issue #181): `Chunk.cpp` (construction/moves, storage
-lifecycle, occupancy metadata, border-shell borrow/release, terrain
-generation, reset, CPU telemetry), `ChunkEditing.cpp` (voxel edits + dirty
-section marking), `ChunkLighting.cpp` (light sampling, chunk-wide light
-field, light-cache packing, neighbor light halo), `ChunkMeshing.cpp`
-(full/LOD greedy builds, mesh-space sampling), and `ChunkGpu.cpp` (mesh
-result publication, arena replacement phases, indirect draw cache,
-retirement). The worker-side translation units share the thread-local
-scratch buffers declared in the internal `ChunkMeshScratch.hpp`. These files
-implement one class — every build target compiling one must link them all.
+responsibility (issue #181): `Chunk.cpp` (construction/moves, record binding,
+render reset, generation wrapper), `ChunkEditing.cpp` (render-side edit
+invalidation), `ChunkLighting.cpp` (light sampling, chunk-wide light field,
+light-cache packing, neighbor light halo), `ChunkMeshing.cpp` (full/LOD greedy
+builds), and `ChunkGpu.cpp` (mesh result publication, arena replacement
+phases, indirect draw cache, retirement). The worker-side translation units
+share the thread-local scratch buffers declared in the internal
+`ChunkMeshScratch.hpp`. These files implement one class — every build target
+compiling one must link them all.
+
+**Issue #206 (Epic #204 Phase B) split the authoritative voxel state out of
+`Chunk` into `World/WorldChunk.hpp/.cpp`** (CPU-only, in `ft_vox_core`).
+`WorldChunk` owns the voxel backing, occupancy metadata, border shell,
+persistent-edit map, `sim::ChunkIdentity` (generation + revision), lifecycle
+state, in-transit flag and per-column generation outputs, and implements the
+authoritative operations (`setVoxel`, `generateTerrain`, storage lifecycle,
+border rebuild, reset/recycle). `Chunk` is now a **render handle**: it binds to
+a `WorldChunk` (world-owned in game; privately owned for standalone
+tests/tools) and forwards every voxel read/write, keeping only derived render
+state. See [`simulation-render-contracts.md`](simulation-render-contracts.md)
+§10 for the ownership table and event stream.
 
 ### Data
 
+Render handle (`Chunk`):
+- GPU: shared-arena vertex/index ranges per section + whole-chunk LOD ranges,
+  indirect draw caches, deferred release
+- Pending CPU mesh payload (pooled `MeshBuildResult`), entity light cache
+  (pooled `ChunkLightStorage`), dirty-section mask, visibility
+
+Authoritative record (`WorldChunk`):
 - Flat voxel array (the canonical occupancy source: `type != AIR`) + compact
   per-section non-air counters for empty-slab skipping (issue #105)
-- Neighbor **shell** voxels for correct greedy meshing at borders  
-- Biome grass/foliage colors per column  
-- CPU meshes: opaque vertices/indices + water mesh  
-- GPU: VMA vertex/index buffers (opaque + water), deferred release  
+- Neighbor **shell** voxels for correct greedy meshing at borders
+- Biome grass/foliage colors + biome/height per column
+- Persistent-edit map, identity counters, lifecycle state
 
 ### Operations
 
 | Method | Role |
 |--------|------|
-| `generateTerrain` | Fill voxels via `TerrainGenerator` |
+| `generateTerrain` | Fill voxels via `TerrainGenerator` (record) + render re-arm |
 | `generateMesh` / `generateLODMesh` | Greedy meshing; far chunks may use LOD mesh |
 | `uploadToGPU` | Sync upload (bootstrap/tests) |
 | `uploadToGPUAsync` | Staging ring + fresh arena ranges, frame-aware retire of replaced ranges (hot path) |
 | `collectOpaqueDraws` / `collectWaterDraws` | Append cached `VkDrawIndexedIndirectCommand` descriptors per live section (rebuilt at upload-commit, issue #109 / #122) |
-| `deleteVoxel` / `placeVoxel` | Edit + remesh flags |
-| `rebuildShellFromNeighbors` | Face correctness across chunk edges |
+| `deleteVoxel` / `placeVoxel` | Edit + remesh flags (forwarded to the record; the manager's edit API goes through `VoxelWorld`) |
+| `rebuildBordersFromNeighbors` | Face correctness across chunk edges (record) |
 
 ### Lighting on mesh
 
@@ -307,22 +336,34 @@ a boundary is split — a small, measured quad increase).
 
 ---
 
-## 6. ChunkPool and ThreadPool
+## 6. ChunkPool, record pool and ThreadPool
 
-### `ChunkPool` (`ChunkPool.hpp`)
+### `ChunkPool` (`ChunkPool.hpp`) — render handles
 
-- Preallocated / recycled `Chunk` objects  
-- Avoids allocator thrash when streaming  
+- Preallocated / recycled `Chunk` render handles
+- Avoids allocator thrash when streaming
 - Acquisition uses `Chunk::ResetMode::ForGeneration`: lifecycle, mesh, and
   cache state is reset, but voxel clearing is deferred to `generateTerrain()`.
   Consumers must wait for generation before reading voxel data. Release uses
-  the default full reset, including AIR fill, even if generation was cancelled.
-- Grows with view distance / pressure (see git history for pool growth fixes)  
+  the default full reset. Pool acquire/release only ever see **unbound**
+  handles (the adapter unbinds before releasing).
+- Grows with view distance / pressure (see git history for pool growth fixes)
 
-### `ThreadPool` (`Engine/ThreadPool.hpp`)
+### `VoxelWorld` record pool — authoritative backing (issue #206)
 
-- Work-stealing workers for **terrain generation** and **meshing**  
-- Priorities via task priority helpers (near camera first)  
+- Pointer-stable `WorldChunk` records with the same back-pressure contract as
+  `ChunkPool` (acquire returns null when the free list is empty; incremental
+  growth via `chunkPoolGrowStep`, hard cap `kMaxChunkPoolCapacity`). The world
+  grows it toward `estimateChunkPoolCapacity(maxRenderDistance)` inside
+  `updateStreaming`, so a headless consumer needs no external growth.
+- Owns the `VoxelPool` (64 KiB voxel blocks) and `BorderPool` (17 KiB border
+  blocks) the records borrow from; both are CPU-only and live in `ft_vox_core`.
+
+### `ThreadPool` (`Core/ThreadPool.hpp`, relocated from `Engine/` in #206)
+
+- Work-stealing workers for **terrain generation** (world side) and
+  **meshing / light caches** (render side)
+- Priorities via task priority helpers (near camera first)
 - Biome maps use up to eight Low-priority tile lanes, yielding back to the pool
   after each tile. High/Normal work is searched across all queues first. The
   final tile publishes via an atomic completion count; workers never wait for
@@ -332,22 +373,31 @@ a boundary is split — a small, measured quad increase).
 
 ---
 
-## 7. ChunkManager (streaming)
+## 7. ChunkManager (render adapter) + VoxelWorld (streaming)
 
-File: `src/Chunk/ChunkManager.hpp` / `ChunkManager.cpp`.
+Files: `src/Chunk/ChunkManager.hpp` / `ChunkManager.cpp` (render adapter),
+`src/World/VoxelWorld.hpp` / `VoxelWorld.cpp` (authoritative world).
+
+**Issue #206:** streaming residency, terrain publication, logical edits and
+persistence now live in `VoxelWorld` (CPU-only). `ChunkManager` keeps the
+historical Engine call surface as a **temporary render adapter** (removal plan:
+[`simulation-render-contracts.md`](simulation-render-contracts.md) §10): it
+converts `Camera` + `RenderSettings` into plain world inputs, drains the world
+event stream to keep its render handle map in sync, and runs the derived
+render pipeline. The per-frame sequence is unchanged:
 
 ### Pipeline
 
 CPU work in `Engine::tickStreaming` (before swapchain acquire):
 
 ```text
-processFinishedJobs
-processDeferredReleases      (retire GPU → pool recycle)
-updateStreaming              → enqueue loads / mark unload
-processChunkLoading          (pool acquire)
-generatePendingVoxels        (async terrain jobs)
-meshPendingChunks            (async mesh; shell filled on main)
-updateEntityLightCaches      (async light-cache-only jobs; issue #172)
+processFinishedJobs          (world gen publish → render mesh/light publish → deferred edits)
+processDeferredReleases      (retire GPU → render pool recycle)
+updateStreaming              → world: enqueue loads / mark unload; adapter: bind/unbind handles
+processChunkLoading          (world record acquire + render handle bind)
+generatePendingVoxels        (world: async terrain jobs)
+meshPendingChunks            (render: async mesh; shell filled via world on main)
+updateEntityLightCaches      (render: async light-cache-only jobs; issue #172)
 updateVisibility + collectDrawList / collectShadowList
 ```
 
