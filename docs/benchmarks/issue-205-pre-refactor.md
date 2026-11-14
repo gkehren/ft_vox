@@ -159,7 +159,8 @@ Per the reference policy ([`../visual-regression.md`](../visual-regression.md)),
 references are regenerated **only** explicitly via `--update-references` with
 reviewable justification. Regenerating them is out of scope for Phase A and was
 **not** done. The mismatch is recorded here transparently as the pre-refactor
-visual baseline.
+visual baseline and tracked in
+[#213](https://github.com/gkehren/ft_vox/issues/213) so it is not lost.
 
 ## CPU test suites (all PASS)
 
@@ -230,10 +231,17 @@ input/UI source, this does not affect the no-behavior-change guarantee.
 
 ## Conclusion
 
-Phase A is a pure build extraction: the six core TUs are byte-identical, compiled
-once into `ft_vox_core` with the same Release codegen (`/O2`) and GLM defines as
-the previous monolithic build. No source behavior changed, so these baselines
-are expected to hold across the extraction. The only visual delta
-(`cave_emissive`) is a pre-existing driver-vs-golden mismatch, documented above
-and not introduced by this phase. Later phases compare against these numbers to
-prove the simulation/render split is behavior-neutral.
+Phase A is a pure build extraction: the six core TUs are **source-identical**
+(zero `.cpp`/`.hpp` diff), compiled once into `ft_vox_core` with the same
+Release codegen (`/O2` on this MSVC build) and GLM defines as the game target.
+All numbers in this document were measured **on this branch, after the
+extraction**; because the measured units are source-identical to the
+pre-refactor build, they serve as the pre-refactor baseline that later phases
+compare against. (Cross-target bit-identity is not claimed — see
+[`../simulation-render-contracts.md`](../simulation-render-contracts.md) §4.)
+No source behavior changed, so these baselines are expected to hold across the
+extraction. The only visual delta (`cave_emissive`) is a pre-existing
+driver-vs-golden mismatch, documented above and tracked in
+[#213](https://github.com/gkehren/ft_vox/issues/213); it was not introduced by
+this phase. Later phases compare against these numbers to prove the
+simulation/render split is behavior-neutral.

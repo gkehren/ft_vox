@@ -11,8 +11,9 @@
 // evolve in later phases; the dependency direction may not.
 //
 // Dependency rule (enforced by tests/check_core_includes.py):
-//   Core / Physics / Entities / World  ->  glm + std only.
-//   NEVER  ->  Renderer/, Vulkan/, Camera/, SDL3, ImGui.
+//   Core / Physics / Entities / World  ->  glm + FastNoise2 + std + platform
+//   headers only (e.g. WorldPersistence.cpp uses <windows.h>).
+//   NEVER  ->  Renderer/, Vulkan/, Camera/, SDL3, ImGui, miniz.
 // The render side depends on these contracts; the simulation never depends on
 // the render side. See docs/simulation-render-contracts.md for the ownership
 // diagram and the B-G migration checkpoints.
@@ -85,6 +86,10 @@ using QueryStats = physics::QueryStats;
 // can stamp/validate content without including GPU-coupled Chunk headers.
 //   generation -> physical chunk incarnation (recycle / reset id)
 //   revision   -> logical voxel/border content revision
+// KNOWN DUPLICATION: MeshBuildResult still carries its own generation/revision
+// pair. Phase A keeps both (zero-source-diff guarantee); #206/#207 MUST make
+// sim::ChunkIdentity the single source of the pair and delete that copy
+// (docs/simulation-render-contracts.md §7 checkpoint).
 struct ChunkIdentity
 {
     int32_t chunkX{0};

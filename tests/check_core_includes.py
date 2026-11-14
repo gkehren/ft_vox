@@ -8,8 +8,11 @@ NEVER on the render / platform side (Renderer/, Vulkan/, Camera/, Engine/,
 ImGui/, SDL3, volk, VMA, ...).
 
 This script walks the transitive #include closure of the core public headers and
-translation units and fails if any forbidden header is reachable. It is wired as
-the CTest `CoreIncludeGuard` so the boundary cannot silently regress.
+translation units and fails if any forbidden header is reachable. Chunk/ headers
+are classified by an explicit allowlist: CPU-only allowed, render-coupled never,
+not-yet-migrated forbidden until Phase B/C lifts them; any unclassified Chunk/
+header fails closed. It is wired as the CTest `CoreIncludeGuard` so the boundary
+cannot silently regress.
 
 Usage:
     python tests/check_core_includes.py [--verbose]
@@ -62,21 +65,42 @@ FORBIDDEN_DIRS = {
     "Network",
 }
 
-# GPU-coupled Chunk headers: the Chunk/ directory also holds CPU-only headers
-# (TerrainGenerator, ChunkBorders, StreamHelpers, LightSample, ...), so we cannot
-# forbid the whole directory. These specific headers pull Vulkan/VMA/Renderer
-# and must never be reached from the core. Listed explicitly so the guard still
-# fires if their own includes are ever temporarily refactored.
-FORBIDDEN_BASENAMES = {
-    "Chunk.hpp",
-    "ChunkManager.hpp",
-    "ChunkGpu.hpp",
-    "ChunkMeshResult.hpp",
-    "ChunkCollisionView.hpp",
-    "ChunkMobWorld.hpp",
-    "ChunkPool.hpp",
+# Chunk/ mixes CPU-only and render-side headers, so it is classified by an
+# explicit ALLOWLIST (fail-closed): any Chunk/ header not listed below is a
+# violation until someone classifies it. A denylist would let a future
+# render-coupled header (e.g. ChunkRenderBridge.hpp) slip through unnoticed.
+
+# CPU-only headers (std / glm / utils.hpp includes only) the core closure may
+# reach. ChunkBorders is already included by TerrainGenerator.hpp.
+CHUNK_CPU_ALLOWED = {
+    "LightSample.hpp",
+    "ChunkBorders.hpp",
+    "StreamHelpers.hpp",
+    "BiomeRegionGrid.hpp",
+    "TerrainGenerator.hpp",
+    "TerrainProfiles.hpp",
+}
+
+# Render-coupled — NEVER allowed from the core, in any phase: these pull
+# Vulkan/VMA/Camera/Engine/Renderer headers (transitively).
+CHUNK_RENDER_COUPLED = {
+    "Chunk.hpp",               # Vulkan/VkBuffer, Vulkan/MeshArena, Camera, Engine, Renderer
+    "ChunkManager.hpp",        # Chunk.hpp + Engine/
+    "ChunkCollisionView.hpp",  # ChunkManager.hpp
+    "ChunkMobWorld.hpp",       # ChunkCollisionView.hpp
+}
+
+# Not yet migrated — CPU-only, but still owned by the render-side chunk/mesh
+# system. Forbidden TODAY because the migration has not happened, NOT because
+# of GPU coupling: Phase B (#206) lifts the authoritative storage into the sim
+# world and Phase C (#207) re-homes the derived mesh/light payloads.
+CHUNK_NOT_YET_MIGRATED = {
     "VoxelPool.hpp",
     "ChunkLightPool.hpp",
+    "ChunkLightHalo.hpp",
+    "ChunkPool.hpp",
+    "ChunkMeshResult.hpp",
+    "ChunkMeshScratch.hpp",
 }
 
 # External (non-project) headers that signal a render / platform dependency.
@@ -91,6 +115,7 @@ FORBIDDEN_EXTERNAL = [
     re.compile(r"(^|/)GL/"),
     re.compile(r"(^|/)GLFW/"),
     re.compile(r"(^|/)boost/"),
+    re.compile(r"(^|/)miniz"),
 ]
 
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]+)[>"]', re.MULTILINE)
@@ -106,8 +131,16 @@ def project_violation(path: Path) -> str | None:
     parts = rel.parts
     if parts and parts[0] in FORBIDDEN_DIRS:
         return f"render/platform directory '{parts[0]}/'"
-    if path.name in FORBIDDEN_BASENAMES:
-        return f"GPU-coupled header '{path.name}'"
+    if parts and parts[0] == "Chunk":
+        name = path.name
+        if name in CHUNK_CPU_ALLOWED:
+            return None
+        if name in CHUNK_RENDER_COUPLED:
+            return f"render-coupled Chunk header '{name}' (never allowed from the core)"
+        if name in CHUNK_NOT_YET_MIGRATED:
+            return (f"not-yet-migrated Chunk header '{name}' "
+                    "(CPU-only but render-side; Phase B/C will lift it)")
+        return f"unclassified Chunk header '{name}' (classify it in check_core_includes.py)"
     return None
 
 

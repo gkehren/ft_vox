@@ -186,15 +186,19 @@ void testMobDeterminism()
     };
     const std::vector<sim::MobSnapshot> a = run();
     const std::vector<sim::MobSnapshot> b = run();
-    check(a.size() == b.size(), "mob snapshot count is deterministic");
+    const bool sameCount = a.size() == b.size();
+    check(sameCount, "mob snapshot count is deterministic");
     check(!a.empty(), "mob simulation spawned passive mobs on the flat world");
-    bool identical = a.size() == b.size();
-    for (size_t i = 0; identical && i < a.size(); ++i)
+    if (sameCount)
     {
-        identical = a[i].position == b[i].position && a[i].yaw == b[i].yaw &&
-                    a[i].species == b[i].species && a[i].gait == b[i].gait;
+        bool identical = true;
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            identical = identical && a[i].position == b[i].position && a[i].yaw == b[i].yaw &&
+                        a[i].species == b[i].species && a[i].gait == b[i].gait;
+        }
+        check(identical, "mob fixed-step render snapshots are deterministic for a fixed seed");
     }
-    check(identical, "mob fixed-step render snapshots are deterministic for a fixed seed");
 }
 
 void testMobModelBake()

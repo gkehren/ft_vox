@@ -115,6 +115,7 @@ Flight boost, swimming and all movement modes are detailed in
 Detailed technical documentation lives under [`docs/`](docs/):
 
 - [Engine architecture](docs/engine-architecture.md)
+- [Simulation / render contracts](docs/simulation-render-contracts.md)
 - [Vulkan renderer](docs/vulkan-graphics.md)
 - [Terrain generation](docs/terrain-generation.md)
 - [Player physics](docs/player-physics.md)

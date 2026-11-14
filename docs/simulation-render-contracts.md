@@ -160,9 +160,12 @@ Public properties (propagate to every consumer):
 - `target_include_directories(... PUBLIC src/)`
 - `target_compile_definitions(... PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE GLM_ENABLE_EXPERIMENTAL)`
 - `target_link_libraries(... PUBLIC glm FastNoise2 Threads::Threads)`
-- Release codegen matches the game (`/O2` MSVC, `-O3` elsewhere, `-march=native`
-  on non-Apple) so extracted objects are byte-identical to the previous
-  monolithic build.
+- Release codegen matches the **game target** (`/O2` MSVC, `-O3` elsewhere,
+  `-march=native` on non-Apple), so the extracted units compile exactly as they
+  did in the monolithic game build. This is a **same-target** claim: the CPU
+  test targets compile these sources with their own flags (no `-march=native`),
+  so cross-target bit-identity is **not** guaranteed — FMA contraction can
+  differ on Linux. A canonical shared flag set is deferred to #210.
 
 The game executable compiles `FT_VOX_GAME_SOURCES = FT_VOX_SOURCES −
 FT_VOX_CORE_SOURCES` and links `ft_vox_core` **first**, followed by the existing
@@ -170,13 +173,26 @@ FT_VOX_CORE_SOURCES` and links `ft_vox_core` **first**, followed by the existing
 core TUs are therefore compiled exactly once (in the library), with no duplicate
 symbols.
 
-**Deliberately excluded** (GPU-coupled; do not move prematurely):
-`Chunk`, `ChunkManager`, `ChunkPool`, `VoxelPool`, `ChunkLightPool`,
-`ChunkGpu`, `ChunkMeshResult`, `ChunkCollisionView`, `ChunkMobWorld`,
-`ChunkBorders`, everything under `Renderer/`, `Vulkan/`, `Camera/`, `Engine/`,
-`ImGui*/`, `Network/`. The Vulkan/visual test targets still compile the core
-sources directly and do **not** link `ft_vox_core`, so their build wiring is
-unchanged.
+**Deliberately excluded** — two distinct categories (the include guard, §6,
+enforces both):
+
+- **Render-coupled — never:** `Chunk`, `ChunkManager`, `ChunkCollisionView`,
+  `ChunkMobWorld`, `ChunkGpu`, and everything under `Renderer/`, `Vulkan/`,
+  `Camera/`, `Engine/`, `ImGui*/`, `Network/`. These pull
+  Vulkan/VMA/Camera/Engine/Renderer headers and must never enter the core, in
+  any phase.
+- **Not yet migrated — Phase B/C will lift:** `VoxelPool`, `ChunkLightPool`,
+  `ChunkLightHalo`, `ChunkPool`, `ChunkMeshResult`, `ChunkMeshScratch`. These
+  are **CPU-only** (std/glm/`utils.hpp` includes only) but still owned by the
+  render-side chunk/mesh system. Phase B (#206) lifts the authoritative storage
+  into the sim world; Phase C (#207) re-homes the derived mesh/light payloads.
+  They are excluded today because the migration has not happened — **not**
+  because of GPU coupling.
+
+`ChunkBorders` is CPU-only and already inside the core closure
+(`TerrainGenerator.hpp` includes it); it is **not** excluded. The Vulkan/visual
+test targets still compile the core sources directly and do **not** link
+`ft_vox_core`, so their build wiring is unchanged.
 
 ### `EngineDefs.hpp` — split deferred (not needed in Phase A)
 
@@ -213,9 +229,11 @@ initializing a GPU or SDL window. Registered as CTest `CoreContracts`.
 
 ## 5. Value contracts: `src/Core/SimContracts.hpp`
 
-A small, render-independent header in namespace `sim` defining **plain-value**
-contracts only where the next phases require them. Names may evolve in later
-phases; this header introduces no services, no `std::function` DI, no event bus.
+A small, render-independent header in namespace `sim` defining **plain values
+plus the existing abstract sampling seam** (`WorldQuery` =
+`physics::VoxelCollisionWorld`), only where the next phases require them. Names
+may evolve in later phases; this header introduces no services, no
+`std::function` DI, no event bus.
 
 | Contract | Alias / definition | Backing type |
 |---|---|---|
@@ -241,6 +259,12 @@ later phases can reject stale edits/snapshots after a chunk is recycled. This
 mirrors the existing `meshGeneration()` / pending-edit matching in
 `ChunkCollisionView`.
 
+**Known duplication (reconciliation checkpoint):** `MeshBuildResult`
+(`Chunk/ChunkMeshResult.hpp`) still carries its own `generation` / `revision`
+pair with identical semantics. Phase A keeps both to preserve the
+zero-source-diff guarantee; **#206/#207 must make `sim::ChunkIdentity` the
+single source of the pair and delete the `MeshBuildResult` copy** (§7).
+
 ---
 
 ## 6. Include-chain guard (criterion #3)
@@ -251,16 +275,26 @@ fails on any forbidden edge:
 
 - **Forbidden directories:** `Renderer/`, `Vulkan/`, `Camera/`, `Engine/`,
   `ImGui/`, `ImGuiFileDialog/`, `Network/`.
-- **Forbidden basenames (GPU-coupled chunk headers):** `Chunk.hpp`,
-  `ChunkManager.hpp`, `ChunkGpu.hpp`, `ChunkMeshResult.hpp`,
-  `ChunkCollisionView.hpp`, `ChunkMobWorld.hpp`, `ChunkPool.hpp`,
-  `VoxelPool.hpp`, `ChunkLightPool.hpp`.
+- **Chunk/ allowlist (fail-closed):** only the known CPU-only headers
+  `LightSample.hpp`, `ChunkBorders.hpp`, `StreamHelpers.hpp`,
+  `BiomeRegionGrid.hpp`, `TerrainGenerator.hpp`, `TerrainProfiles.hpp` may be
+  reached. Every other Chunk/ header is a violation, in one of two categories:
+  - **Render-coupled — never:** `Chunk.hpp`, `ChunkManager.hpp`,
+    `ChunkCollisionView.hpp`, `ChunkMobWorld.hpp` (pull
+    Vulkan/VMA/Camera/Engine/Renderer transitively).
+  - **Not yet migrated — Phase B/C will lift:** `VoxelPool.hpp`,
+    `ChunkLightPool.hpp`, `ChunkLightHalo.hpp`, `ChunkPool.hpp`,
+    `ChunkMeshResult.hpp`, `ChunkMeshScratch.hpp` (CPU-only but render-side).
+
+  An unlisted Chunk/ header fails as **unclassified** until someone classifies
+  it, so a future `ChunkRenderBridge.hpp` cannot slip through unnoticed.
 - **Forbidden external headers:** SDL/SDL3, `vulkan/`, `volk.h`,
-  `vk_mem_alloc.h`, imgui, glad/GL/GLFW, boost.
+  `vk_mem_alloc.h`, imgui, glad/GL/GLFW, boost, miniz.
 
 On violation it prints the full include chain and exits non-zero. Registered as
-CTest `CoreIncludeGuard` (skipped with a status message if no Python 3
-interpreter is found). Run manually:
+CTest `CoreIncludeGuard`; Python 3 is **REQUIRED** whenever `BUILD_TESTING` is
+ON, so the gate cannot silently disappear on a machine without an interpreter.
+Run manually:
 
 ```bash
 python3 tests/check_core_includes.py --verbose
@@ -281,8 +315,8 @@ boundary before migrating behavior."
 | Phase | Issue | Checkpoint | Gate |
 |---|---|---|---|
 | **A** | **#205 (this)** | `ft_vox_core` + `SimContracts.hpp` + include guard + baselines + this doc. No behavior change. | CPU-only target builds/links/passes without GPU/SDL; guard green; game + tests unchanged |
-| B | #206 | Authoritative world owns voxels, edits, **and `WorldPersistence`**; adapters re-point off `ChunkManager`. | Headless world load/edit/save without renderer; save identity stable |
-| C | #207 | `RenderWorldBridge` produces derived meshes/lighting/uploads from authoritative state. | Render output unchanged; bridge consumes snapshots, never owns sim |
+| B | #206 | Authoritative world owns voxels, edits, **and `WorldPersistence`**; adapters re-point off `ChunkManager`. **`sim::ChunkIdentity` becomes the single source of the (generation, revision) pair — delete the `MeshBuildResult` copy (#206/#207).** | Headless world load/edit/save without renderer; save identity stable; no duplicate identity pair |
+| C | #207 | `RenderWorldBridge` produces derived meshes/lighting/uploads from authoritative state; mesh publish validates against `sim::ChunkIdentity` (no duplicate pair). | Render output unchanged; bridge consumes snapshots, never owns sim |
 | D | #208 | `GameSimulation` facade owns `PlayerController` (120 Hz) + `MobSystem` (60 Hz) + authoritative world. | Fixed-step determinism preserved; no render includes |
 | E | #209 | Graphical runtime / SDL3-ImGui-Vulkan adapter drives `GameSimulation` via commands + snapshots. | Game behaves identically; input/UI unchanged |
 | F | #210 | `ft_vox_headless` executable links `ft_vox_core` (+ sim) with **no** SDL/Vulkan. | Headless run + save round-trip; remove top-level GPU configure requirement |
