@@ -245,7 +245,51 @@ set(FT_VOX_SOURCES
     ${FT_VOX_VULKAN_SOURCES}
 )
 
-add_executable(${PROJECT_NAME} ${FT_VOX_SOURCES})
+# ---------------------------------------------------------------------------
+# ft_vox_core — CPU-only simulation/persistence static library (issue #205,
+# Epic #204 Phase A). Render-independent: links ONLY glm + FastNoise2 + Threads,
+# never SDL3 / Vulkan / ImGui. These six translation units are already compiled
+# independently by the CPU-only tests (test_world_save, test_mobs, test_terrain,
+# test_stream_opt, ...); naming them as a library makes the boundary explicit
+# without moving any GPU-coupled class. See docs/simulation-render-contracts.md.
+#
+# The public headers of these units (and Core/SimContracts.hpp) are guarded
+# against forbidden include chains by tests/check_core_includes.py.
+# ---------------------------------------------------------------------------
+set(FT_VOX_CORE_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp
+)
+
+add_library(ft_vox_core STATIC ${FT_VOX_CORE_SOURCES})
+target_include_directories(ft_vox_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(ft_vox_core PUBLIC
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+target_link_libraries(ft_vox_core PUBLIC glm FastNoise2 Threads::Threads)
+# Match the game's Release codegen exactly so terrain/physics determinism is
+# bit-identical whether a unit is compiled here or directly in a test target.
+if(MSVC)
+    target_compile_options(ft_vox_core PRIVATE $<$<CONFIG:Release>:/O2>)
+else()
+    target_compile_options(ft_vox_core PRIVATE $<$<CONFIG:Release>:-O3>)
+    if(NOT APPLE)
+        target_compile_options(ft_vox_core PRIVATE $<$<CONFIG:Release>:-march=native>)
+    endif()
+endif()
+
+# The game consumes ft_vox_core instead of recompiling its sources. Existing
+# tests keep compiling the sources directly (unchanged); because the game no
+# longer compiles them there are no duplicate symbols.
+set(FT_VOX_GAME_SOURCES ${FT_VOX_SOURCES})
+list(REMOVE_ITEM FT_VOX_GAME_SOURCES ${FT_VOX_CORE_SOURCES})
+
+add_executable(${PROJECT_NAME} ${FT_VOX_GAME_SOURCES})
 add_dependencies(${PROJECT_NAME} ft_vox_shaders ft_vox_build_info)
 # Rebuild BuildInfo.cpp when the generated revision header changes.
 set_source_files_properties(
@@ -287,7 +331,9 @@ set(FT_VOX_COMMON_LIBS
     Threads::Threads
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE ${FT_VOX_COMMON_LIBS})
+# ft_vox_core first so its transitive glm/FastNoise2/Threads land after it on
+# order-sensitive linkers (GNU ld); the game objects reference its symbols.
+target_link_libraries(${PROJECT_NAME} PRIVATE ft_vox_core ${FT_VOX_COMMON_LIBS})
 
 # Linux: libdl for dynamic loader helpers; Vulkan loader when not using pure volk bootstrap
 if(UNIX AND NOT APPLE)
