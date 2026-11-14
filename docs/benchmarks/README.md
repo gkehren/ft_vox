@@ -31,6 +31,7 @@ into `benchmark-results/` (gitignored), not here.
 - [issue98-validation/](issue98-validation/README.md) · [issue99-validation/](issue99-validation/README.md) — validation overhead
 - [mobs/](mobs/README.md) — passive entities CPU/GPU profile · [issue-130 A/B](mobs/issue-130-instancing.md) — instanced batch submission
 - [player-physics/](player-physics/README.md) — physics cost
+- [issue-205-pre-refactor.md](issue-205-pre-refactor.md) — Epic #204 Phase A pre-refactor baselines
 - [pr145/](pr145/validation/README.md) — VSync pacing
 - [pr157-water/](pr157-water/README.md) — water rendering
 - [worldgen-rework/](worldgen-rework/README.md) — terrain generator rework

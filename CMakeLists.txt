@@ -180,6 +180,11 @@ set(FT_VOX_VULKAN_SOURCES
 )
 
 set(FT_VOX_RENDERER_SOURCES
+    # MobSystem.cpp / MobModel.cpp ALSO appear in FT_VOX_CORE_SOURCES below.
+    # That is intentional: ft_vox_visual_tests and test_post_resize compile
+    # this list directly (they do not link ft_vox_core), so the mob units must
+    # stay here. The GAME subtracts the core units via list(REMOVE_ITEM) and
+    # links ft_vox_core instead. Do not "de-duplicate" by deleting them here.
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
     ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/MobTextures.cpp
@@ -245,7 +250,69 @@ set(FT_VOX_SOURCES
     ${FT_VOX_VULKAN_SOURCES}
 )
 
-add_executable(${PROJECT_NAME} ${FT_VOX_SOURCES})
+# ---------------------------------------------------------------------------
+# ft_vox_core — CPU-only simulation/persistence static library (issue #205,
+# Epic #204 Phase A). Render-independent: links ONLY glm + FastNoise2 + Threads,
+# never SDL3 / Vulkan / ImGui. These six translation units are already compiled
+# independently by the CPU-only tests (test_world_save, test_mobs, test_terrain,
+# test_stream_opt, ...); naming them as a library makes the boundary explicit
+# without moving any GPU-coupled class. See docs/simulation-render-contracts.md.
+#
+# The public headers of these units (and Core/SimContracts.hpp) are guarded
+# against forbidden include chains by tests/check_core_includes.py.
+# ---------------------------------------------------------------------------
+set(FT_VOX_CORE_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
+    ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp
+)
+
+add_library(ft_vox_core STATIC ${FT_VOX_CORE_SOURCES})
+target_include_directories(ft_vox_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(ft_vox_core PUBLIC
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+target_link_libraries(ft_vox_core PUBLIC glm FastNoise2 Threads::Threads)
+# Same Release codegen as the GAME target (/O2 MSVC; -O3, -march=native on
+# non-Apple elsewhere), so the extracted units compile exactly as they did in
+# the monolithic game build. This is a same-target claim only: CPU test targets
+# compile these sources with their own flags (no -march=native), so cross-target
+# bit-identity is NOT guaranteed (FMA contraction can differ on Linux). A
+# canonical shared flag set is deferred to #210.
+if(MSVC)
+    target_compile_options(ft_vox_core PRIVATE $<$<CONFIG:Release>:/O2>)
+else()
+    target_compile_options(ft_vox_core PRIVATE $<$<CONFIG:Release>:-O3>)
+    if(NOT APPLE)
+        target_compile_options(ft_vox_core PRIVATE $<$<CONFIG:Release>:-march=native>)
+    endif()
+endif()
+
+# The game consumes ft_vox_core instead of recompiling its sources. Existing
+# tests keep compiling the sources directly (unchanged); because the game no
+# longer compiles them there are no duplicate symbols.
+set(FT_VOX_GAME_SOURCES ${FT_VOX_SOURCES})
+# REMOVE_ITEM matches exact path spellings; a mismatch would silently leave a
+# core unit in the game list and dual-compile it (duplicate symbols, LNK2005).
+# Assert the full core list was actually removed.
+list(LENGTH FT_VOX_GAME_SOURCES FT_VOX_GAME_COUNT_BEFORE)
+list(REMOVE_ITEM FT_VOX_GAME_SOURCES ${FT_VOX_CORE_SOURCES})
+list(LENGTH FT_VOX_GAME_SOURCES FT_VOX_GAME_COUNT_AFTER)
+list(LENGTH FT_VOX_CORE_SOURCES FT_VOX_CORE_COUNT)
+math(EXPR FT_VOX_GAME_COUNT_EXPECTED "${FT_VOX_GAME_COUNT_BEFORE} - ${FT_VOX_CORE_COUNT}")
+if(NOT FT_VOX_GAME_COUNT_AFTER EQUAL FT_VOX_GAME_COUNT_EXPECTED)
+    message(FATAL_ERROR
+        "ft_vox_core extraction: expected ${FT_VOX_CORE_COUNT} sources removed from "
+        "FT_VOX_SOURCES (${FT_VOX_GAME_COUNT_BEFORE} -> ${FT_VOX_GAME_COUNT_AFTER}, "
+        "expected ${FT_VOX_GAME_COUNT_EXPECTED}). Path spellings in FT_VOX_CORE_SOURCES "
+        "must match FT_VOX_SOURCES exactly; a partial removal dual-compiles core units.")
+endif()
+
+add_executable(${PROJECT_NAME} ${FT_VOX_GAME_SOURCES})
 add_dependencies(${PROJECT_NAME} ft_vox_shaders ft_vox_build_info)
 # Rebuild BuildInfo.cpp when the generated revision header changes.
 set_source_files_properties(
@@ -287,7 +354,11 @@ set(FT_VOX_COMMON_LIBS
     Threads::Threads
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE ${FT_VOX_COMMON_LIBS})
+# The game objects reference ft_vox_core's symbols, so on order-sensitive
+# linkers (GNU ld) the library must appear AFTER the objects — listing it first
+# among the libraries achieves that. CMake appends its transitive
+# glm/FastNoise2/Threads after it automatically.
+target_link_libraries(${PROJECT_NAME} PRIVATE ft_vox_core ${FT_VOX_COMMON_LIBS})
 
 # Linux: libdl for dynamic loader helpers; Vulkan loader when not using pure volk bootstrap
 if(UNIX AND NOT APPLE)

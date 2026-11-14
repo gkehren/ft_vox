@@ -67,3 +67,7 @@ screenshots-local/
 *.trace
 *.prof
 *.profraw
+
+# Python bytecode (tests/check_core_includes.py include-chain guard, issue #205)
+__pycache__/
+*.pyc

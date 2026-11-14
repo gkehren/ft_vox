@@ -27,6 +27,27 @@ target_link_libraries(test_physics PRIVATE glm)
 add_test(NAME PlayerPhysics COMMAND test_physics)
 
 # ---------------------------------------------------------------------------
+# CPU-only simulation/render contracts (issue #205, Epic #204 Phase A).
+# Links ONLY ft_vox_core (transitively glm + FastNoise2 + Threads): no SDL,
+# no Vulkan device, no ImGui. Exercises a symbol from every core translation
+# unit and pins the 120 Hz player / 60 Hz mob tick rates + fixed-step
+# determinism. ft_vox_core's PUBLIC include dir / GLM defs propagate here.
+# ---------------------------------------------------------------------------
+add_executable(test_core_contracts test_core_contracts.cpp)
+target_link_libraries(test_core_contracts PRIVATE ft_vox_core)
+add_test(NAME CoreContracts COMMAND test_core_contracts)
+
+# Forbidden-include-chain guard (issue #205 acceptance criterion #3): the
+# CPU-only public headers must never transitively include Renderer/, Vulkan/,
+# Camera/, SDL3, ImGui, or the render-coupled / not-yet-migrated Chunk headers.
+# Scripted, stdlib-only. Python3 is REQUIRED whenever tests are enabled
+# (BUILD_TESTING): the guard is an acceptance gate and must not silently
+# disappear on a machine without an interpreter.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME CoreIncludeGuard
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/check_core_includes.py)
+
+# ---------------------------------------------------------------------------
 # Vulkan resource smoke (PR2) — real device path via shipped helpers
 # ---------------------------------------------------------------------------
 add_executable(test_vulkan_resources
