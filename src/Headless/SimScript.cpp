@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -47,7 +48,7 @@ bool parseDouble(const std::string &token, double &out)
 		return false;
 	char *end = nullptr;
 	const double value = std::strtod(token.c_str(), &end);
-	if (end == token.c_str() || *end != '\0')
+	if (end == token.c_str() || *end != '\0' || !std::isfinite(value))
 		return false;
 	out = value;
 	return true;

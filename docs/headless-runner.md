@@ -84,8 +84,10 @@ ctest --test-dir build-cpu --output-on-failure
 The `CpuOnlyBuild` CTest (label `cpu-only`) automates exactly this as a
 **separate clean configure + build + test run** in `<build>/cpu-only-check`,
 reusing the parent build's FetchContent sources when present (offline-safe).
-It is registered by default; disable with `-DFT_VOX_CPU_ONLY_BUILD_CHECK=OFF`
-or skip with `ctest -E CpuOnlyBuild`.
+It is **opt-in** (`-DFT_VOX_CPU_ONLY_BUILD_CHECK=ON`) because it adds a full
+nested configure/build (~150 s); the always-on `HeadlessDeps` guard is the
+default scripted dependency check. Enable the gate in CI, or run it locally
+with `ctest -L cpu-only` once enabled.
 
 ### Portable floating-point codegen (`FT_VOX_PORTABLE_FP`)
 
@@ -102,7 +104,10 @@ from Phase A.
 
 ```text
 ft_vox_headless [options]
-  --seed N              world seed (default 42; an existing save keeps its stored seed)
+  --seed N              world seed, 1..2147483647 (default 42; an existing save keeps
+                        its stored seed). 0/negative is rejected (exit 2): the runner
+                        requires an explicit positive seed for reproducibility, unlike
+                        the game which rolls a random seed for <= 0.
   --ticks N             host frames to simulate at fixed dt = 1/60 (default 600, max 1000000)
   --script PATH         deterministic action script (§4)
   --world NAME          open/create a persistent world under --saves-root
@@ -160,10 +165,23 @@ SUMMARY status=ok exit_code=0 seed=42 generator=1 ticks=600 workers=0 interest_r
 `--json` emits the same fields as a single JSON object. Fields: world
 identity (`seed`, `generator`), executed `ticks`, `workers`,
 `interest_radius`, residency (`chunks`), `edits` (accepted place/delete),
-`refused` (player-aware placement refusals), `edit_revision` (next logical
-edit id), `mobs`, authoritative `player` feet position, observed `area`,
-canonical `digest` (§5) and `save` status (`none` transient / `ok` /
-`failed` / `skipped` when the run errored before save-on-exit).
+`refused` (player-aware `canPlaceVoxel` refusals), `rejected` (world-level
+edit rejections, e.g. an unloaded/in-transit target — also logged to stderr),
+`edit_revision` (next logical edit id), `mobs`, authoritative `player` feet
+position, observed `area`, canonical `digest` (§5) and `save` status:
+
+- `none` — transient session (no `--world`), nothing to persist.
+- `ok` — explicit save-on-exit succeeded (player state captured + flushed +
+  closed).
+- `failed` — the explicit save-on-exit (capture / flush / refusable close)
+  failed; reported as exit 4.
+- `skipped` — the run errored before save-on-exit, so the **explicit**
+  `savePlayerState` + close was skipped. Note this does **not** mean nothing
+  was written: the unconditional `shutdown()` safety net
+  (`forceCloseWorldForShutdown`) still resolves stranded edits and flushes
+  accepted chunk edits to disk (issue #180 contract). Only the explicit
+  `player.state` capture is skipped, so a `skipped` run may persist chunk
+  edits but no player state.
 
 ## 4. Action scripts
 
@@ -275,9 +293,9 @@ are presentation; the runner pins them to 0 in the saved player state.
 | CTest | What it proves |
 |---|---|
 | `HeadlessSmoke` | plain fixed-seed run exits 0 with a canonical summary |
-| `HeadlessRunner` | full acceptance driver (`tests/test_headless_runner.py`): sync + async determinism, save→exit→reload→edit verification across 3 processes in an isolated temp dir, every failure exit code, timeout teardown, JSON summary |
-| `HeadlessDeps` | include closure + real link artifacts + no graphics discovery in CPU-only caches (`tests/check_headless_deps.py`) |
-| `CpuOnlyBuild` | separate clean `FT_VOX_GRAPHICS=OFF` configure/build/test run (label `cpu-only`) |
+| `HeadlessRunner` | full acceptance driver (`tests/test_headless_runner.py`): sync + async determinism, save→exit→reload→edit verification across 3 processes in an isolated temp dir, interest load/unload/reload residency assertions, every failure exit code (incl. NaN/malformed options + world-rejection diagnostics), timeout teardown, JSON summary |
+| `HeadlessDeps` | include closure + real link artifacts + no graphics discovery in CPU-only caches (`tests/check_headless_deps.py`); always-on |
+| `CpuOnlyBuild` | separate clean `FT_VOX_GRAPHICS=OFF` configure/build/test run (label `cpu-only`); **opt-in** via `-DFT_VOX_CPU_ONLY_BUILD_CHECK=ON`, recommended for CI |
 
 All integration tests have wall-clock timeouts and deterministic end
 conditions; none needs a GPU, window or shader asset. The existing CPU-only

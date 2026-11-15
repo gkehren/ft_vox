@@ -103,14 +103,13 @@ window or shader asset.
 ### Windows — headless acceptance driver
 
 `python tests/test_headless_runner.py --runner build/Release/ft_vox_headless.exe
---fixtures tests/fixtures` → **31 checks, 0 failures** (smoke, sync/async
+--fixtures tests/fixtures` → **37 checks, 0 failures** (smoke, sync/async
 determinism, expect-digest gate, 3-process save/reload, all failure exit
-codes, timeout, JSON, interest churn sync+async).
+codes incl. NaN/malformed options, world-rejection diagnostics, timeout, JSON,
+interest load/unload/reload residency assertions sync+async).
 
 `python tests/check_headless_deps.py --build-dir build` → **OK** (graphics-free).
 `python tests/check_core_includes.py` → **OK** (core boundary intact).
-
-<!-- FULL-SUITE-RESULTS -->
 
 ### Windows — full CTest suite (graphical configuration, Release)
 
@@ -130,8 +129,6 @@ other scene passes. Phase F touches **no** renderer, shader, camera or
 render-bridge code (the only core change is the new, game-uncalled
 `VoxelWorld::generatePendingVoxelsSync`), so the rendered output is unchanged
 from the base commit; this is not a Phase F regression.
-
-<!-- WSL-CPU-RESULTS -->
 
 ### WSL2 Debian (GCC 14) — clean CPU-only configure/build/test
 
@@ -156,24 +153,75 @@ shader toolchain discovered**: the runner, the CPU tests and the dependency
 guards all build and pass, and the `CpuOnlyBuild` gate independently
 re-configures/builds/tests a fresh CPU-only tree.
 
-<!-- CPU-ONLY-GATE-RESULTS -->
-
 ### Clean CPU-only configure/build gate (`CpuOnlyBuild`)
 
 The gate performs a **separate fresh** `FT_VOX_GRAPHICS=OFF` configure (no
 vcpkg toolchain), builds every CPU target, and runs the nested CPU-only CTest
 suite — independently of the parent build:
 
-| Platform | Result | Time |
-|---|---|---|
-| Windows / MSVC (no vcpkg) | **Passed** | 148.30 s |
-| WSL2 Debian / GCC 14 / Ninja | **Passed** | 91.67 s |
+| Platform | Result | Gate time | Nested suite |
+|---|---|---|---|
+| Windows / MSVC (no vcpkg) | **Passed** | 148.30 s | 23/23 |
+| WSL2 Debian / GCC 14 / Ninja | **Passed** | 91.67 s | 24/24 |
+
+The nested test count is platform-dependent: the optional `test_network`
+prototype (`NetworkIntegrationTest`) is only registered when Boost is
+discovered — present on the WSL system, absent in the no-vcpkg Windows nested
+configure — which accounts for the 23 vs 24 difference. All registered CPU
+tests pass on both platforms. (The top-level WSL run reported 25/25 because it
+also includes the `CpuOnlyBuild` gate itself, which is disabled inside the
+nested configure to avoid recursion.)
 
 Both nested caches carry `FT_VOX_GRAPHICS:BOOL=OFF` and **zero** graphics
 discovery entries. The Windows nested runner (built without vcpkg) reproduces
 the exact digest `3a068dd4be8ab57e` from the full-config build — the package
 manager and graphics stack have no influence on authoritative simulation
 output.
+
+> The gate was recorded with `-DFT_VOX_CPU_ONLY_BUILD_CHECK=ON`. Following
+> review it is **opt-in by default** (it adds a full nested configure/build,
+> ~150 s); the always-on `HeadlessDeps` guard remains the default scripted
+> dependency check. Enable the gate in CI or with the option above.
+
+## Review round 1 — fixes
+
+Addressed reviewer findings (all Low/Nit):
+
+- **NaN/inf option hardening:** `parseDoubleArg` (CLI) and `parseDouble`
+  (script) now reject non-finite values (`std::isfinite`). `--timeout nan`
+  previously slipped past the range check and silently disabled the
+  wall-clock safety net; `--interest nan,…` likewise. Both now exit 2.
+- **`--digest-area` integer parsing:** parsed as integers (`parseIntList`)
+  instead of double→int truncation/UB; fractional (`10.9`) and out-of-range
+  (`1e10`) values now exit 2 cleanly, consistent with `--ticks`.
+- **`save=skipped` semantics clarified:** docs + code comment now state that
+  `skipped` only skips the *explicit* `savePlayerState` + close; the
+  unconditional `shutdown()` safety net still flushes accepted chunk edits
+  (issue #180), so chunk edits may persist without `player.state`.
+- **64-bit wait accumulator:** `SimScript::totalWaitFrames` is now `int64_t`
+  (a long script's sum can no longer overflow before the `> --ticks` check).
+- **Script grammar doc fixed:** the header now documents single-token
+  underscore block names (`OAK_LEAVES`), matching the tokenizer (the old
+  `"Oak Leaves"` example was unparseable).
+- **World-level edit rejections surfaced:** `place`/`delete` rejected by the
+  world (e.g. outside residency) now increment a `rejected` counter (added to
+  SUMMARY/JSON) and emit a stderr diagnostic, instead of being silent.
+- **Churn test strengthened:** the interest load/unload/reload test now
+  *asserts* residency (`expect voxel … unknown` after unload, `… air` after
+  reload) rather than only checking exit 0.
+- **`HeadlessDeps` fail-closed:** a configured tree (CMakeCache present) with
+  no runner link artifacts now fails instead of silently skipping.
+- **`CpuOnlyBuild` opt-in:** default OFF to keep the everyday suite fast;
+  recommended for CI (see above).
+- **Nits:** `--seed` range documented (1..2147483647, 0/negative → exit 2);
+  leftover template markers removed; nested test count stated per platform
+  (23 Windows / 24 WSL, the `test_network`/Boost difference). `--saves-root`
+  keeps its documented `saves` default (a temp-dir default would surprise
+  interactive `--world` use); the docs already require a temp dir in tests.
+
+Driver grew 31 → **37 checks** (NaN/malformed options, world-rejection
+count + diagnostic, residency assertions); all pass, canonical digest
+unchanged (`3a068dd4be8ab57e`).
 
 ## Conclusion
 

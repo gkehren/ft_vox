@@ -1346,8 +1346,12 @@ set_tests_properties(HeadlessDeps PROPERTIES TIMEOUT 120)
 # CMake configure + build with FT_VOX_GRAPHICS=OFF, no vcpkg toolchain and no
 # graphics discovery, producing the runner + CPU tests and running them.
 # Reuses the parent build's FetchContent sources when present (offline-safe).
-# Opt-out: cmake -DFT_VOX_CPU_ONLY_BUILD_CHECK=OFF, or ctest -E CpuOnlyBuild.
-option(FT_VOX_CPU_ONLY_BUILD_CHECK "Register the clean CPU-only configure/build gate as a CTest" ON)
+# Opt-IN (issue #210 review): it adds a full nested configure/build (~150 s),
+# so it is OFF by default to keep the everyday suite fast. The always-on
+# HeadlessDeps guard is the default scripted dependency check; enable this
+# heavier gate in CI or explicitly with -DFT_VOX_CPU_ONLY_BUILD_CHECK=ON
+# (or run `ctest -L cpu-only` once enabled).
+option(FT_VOX_CPU_ONLY_BUILD_CHECK "Register the clean CPU-only configure/build gate as a CTest (heavier; recommended for CI)" OFF)
 if(FT_VOX_CPU_ONLY_BUILD_CHECK)
     add_test(NAME CpuOnlyBuild
         COMMAND ${CMAKE_COMMAND}

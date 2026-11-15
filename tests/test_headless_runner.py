@@ -184,6 +184,27 @@ def main() -> int:
         p = run_runner(runner, ["--no-such-flag"], work)
         check(p.returncode == 2, f"unknown option exits 2 (got {p.returncode})")
 
+        # Non-finite / malformed numeric options must be rejected (a NaN
+        # --timeout would otherwise silently disable the wall-clock safety
+        # net; issue #210 review).
+        p = run_runner(runner, ["--ticks", "10", "--timeout", "nan"], work)
+        check(p.returncode == 2, f"--timeout nan exits 2 (got {p.returncode})")
+        p = run_runner(runner, ["--ticks", "10", "--interest", "nan,0,0"], work)
+        check(p.returncode == 2, f"--interest nan exits 2 (got {p.returncode})")
+        p = run_runner(runner, ["--ticks", "10", "--digest-area", "0,0,0,10.9,10,10"], work)
+        check(p.returncode == 2, f"fractional --digest-area exits 2 (got {p.returncode})")
+        p = run_runner(runner, ["--ticks", "10", "--digest-area", "0,0,0,1e10,10,10"], work)
+        check(p.returncode == 2, f"out-of-range --digest-area exits 2 (got {p.returncode})")
+
+        # World-level edit rejection (target outside residency) is counted and
+        # diagnosed, not silent (issue #210 review).
+        reject = write_script(work / "reject.txt", "place 50000 220 50000 Stone\nwait 10\n")
+        p = run_runner(runner, ["--seed", "42", "--ticks", "30", "--script", reject], work)
+        rf = summary(p)
+        check(p.returncode == 0 and rf.get("rejected") == "1" and rf.get("edits") == "0",
+              "out-of-residency place is counted as rejected, not committed")
+        check("rejected by world" in p.stderr, "world rejection emits a stderr diagnostic")
+
         # --- 7. Timeout: bounded teardown, exit 6 -----------------------------
         p = run_runner(runner, ["--seed", "42", "--ticks", "1000000", "--timeout", "1"], work)
         check(p.returncode == 6, f"run timeout exits 6 (got {p.returncode})")
@@ -195,19 +216,24 @@ def main() -> int:
 
         # --- 9. Chunk load/unload/reload cycle via the interest source --------
         # Pin the interest probe far away (unloads the spawn region), then
-        # follow the player again (reloads it). Exercises residency churn +
-        # safe teardown with no leak/stall; the run must still exit 0.
+        # follow the player again (reloads it). The script ASSERTS residency
+        # churn rather than just exiting 0: a loaded air cell becomes
+        # `unknown` once unloaded, then `air` again once reloaded — so the test
+        # fails if streaming did nothing (issue #210 review).
         churn = write_script(work / "churn.txt",
                              "wait 30\n"
+                             "expect voxel 8 220 8 air\n"
                              "interest 5000 100 5000\n"
-                             "wait 90\n"
+                             "wait 120\n"
+                             "expect voxel 8 220 8 unknown\n"
                              "interest follow\n"
-                             "wait 90\n")
-        p = run_runner(runner, ["--seed", "42", "--ticks", "240", "--script", churn], work)
-        check(p.returncode == 0, f"interest load/unload/reload cycle exits 0 (got {p.returncode})")
+                             "wait 120\n"
+                             "expect voxel 8 220 8 air\n")
+        p = run_runner(runner, ["--seed", "42", "--ticks", "300", "--script", churn], work)
+        check(p.returncode == 0, f"interest load/unload/reload cycle asserts residency (got {p.returncode})")
         # Same cycle with async workers: pending gen jobs across the churn.
-        p = run_runner(runner, ["--seed", "42", "--ticks", "240", "--script", churn, "--workers", "2"], work)
-        check(p.returncode == 0, f"async interest churn exits 0 (got {p.returncode})")
+        p = run_runner(runner, ["--seed", "42", "--ticks", "300", "--script", churn, "--workers", "2"], work)
+        check(p.returncode == 0, f"async interest churn asserts residency (got {p.returncode})")
 
     print(f"\n{CHECKS} checks, {FAILS} failures")
     return 1 if FAILS else 0

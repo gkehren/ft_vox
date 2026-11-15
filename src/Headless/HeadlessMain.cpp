@@ -15,6 +15,7 @@
 
 #include <charconv>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -33,7 +34,7 @@ void printUsage(std::ostream &os)
 		"ft_vox_headless — standalone CPU simulation runner (no SDL3/Vulkan/ImGui)\n"
 		"\n"
 		"Usage: ft_vox_headless [options]\n"
-		"  --seed N              world seed (default 42; an existing save keeps its stored seed)\n"
+		"  --seed N              world seed, 1..2147483647 (default 42; an existing save keeps its stored seed)\n"
 		"  --ticks N             host frames to simulate at fixed dt=1/60 (default 600)\n"
 		"  --script PATH         deterministic action script (see docs/headless-runner.md)\n"
 		"  --world NAME          open/create a persistent world under --saves-root\n"
@@ -68,10 +69,13 @@ bool parseDoubleArg(const std::string &text, double &out)
 		return false;
 	char *end = nullptr;
 	out = std::strtod(text.c_str(), &end);
-	return end != text.c_str() && *end == '\0';
+	// Reject NaN/inf: a non-finite --timeout would silently disable the
+	// wall-clock safety net (NaN comparisons are always false), and non-finite
+	// interest/teleport coordinates are never meaningful (issue #210 review).
+	return end != text.c_str() && *end == '\0' && std::isfinite(out);
 }
 
-/// Split "a,b,c" into exactly `count` numeric components.
+/// Split "a,b,c" into exactly `count` finite numeric components.
 bool parseList(const std::string &text, size_t count, std::vector<double> &out)
 {
 	out.clear();
@@ -84,6 +88,28 @@ bool parseList(const std::string &text, size_t count, std::vector<double> &out)
 		if (!parseDoubleArg(part, value))
 			return false;
 		out.push_back(value);
+		if (comma == std::string::npos)
+			break;
+		start = comma + 1;
+	}
+	return out.size() == count;
+}
+
+/// Split "a,b,c" into exactly `count` INTEGER components (cell coordinates).
+/// Rejects fractional/out-of-range values cleanly instead of truncating or
+/// invoking UB on a double->int cast (issue #210 review).
+bool parseIntList(const std::string &text, size_t count, std::vector<int> &out)
+{
+	out.clear();
+	size_t start = 0;
+	while (start <= text.size())
+	{
+		const size_t comma = text.find(',', start);
+		const std::string part = text.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+		long long value = 0;
+		if (!parseIntArg(part, value) || value < -2147483647LL || value > 2147483647LL)
+			return false;
+		out.push_back(static_cast<int>(value));
 		if (comma == std::string::npos)
 			break;
 		start = comma + 1;
@@ -130,6 +156,7 @@ void printSummary(const headless::RunOutcome &out, bool json)
 				  << ",\"chunks\":" << out.chunkCount
 				  << ",\"edits\":" << out.committedEdits
 				  << ",\"refused\":" << out.refusedEdits
+				  << ",\"rejected\":" << out.rejectedEdits
 				  << ",\"edit_revision\":" << out.editRevision
 				  << ",\"mobs\":" << out.mobCount
 				  << ",\"player\":{\"x\":" << formatDouble(out.playerPos.x)
@@ -154,6 +181,7 @@ void printSummary(const headless::RunOutcome &out, bool json)
 			  << " chunks=" << out.chunkCount
 			  << " edits=" << out.committedEdits
 			  << " refused=" << out.refusedEdits
+			  << " rejected=" << out.rejectedEdits
 			  << " edit_revision=" << out.editRevision
 			  << " mobs=" << out.mobCount
 			  << " player=" << formatVec3(out.playerPos)
@@ -262,17 +290,15 @@ int main(int argc, char **argv)
 			const char *value = needValue(i);
 			if (!value)
 				break;
-			std::vector<double> bounds;
-			if (!parseList(value, 6, bounds))
+			std::vector<int> bounds;
+			if (!parseIntList(value, 6, bounds))
 			{
-				error = "--digest-area expects X0,Y0,Z0,X1,Y1,Z1";
+				error = "--digest-area expects six integer cell coordinates X0,Y0,Z0,X1,Y1,Z1";
 				break;
 			}
 			options.hasDigestArea = true;
-			options.digestArea.min = glm::ivec3(static_cast<int>(bounds[0]), static_cast<int>(bounds[1]),
-												static_cast<int>(bounds[2]));
-			options.digestArea.max = glm::ivec3(static_cast<int>(bounds[3]), static_cast<int>(bounds[4]),
-												static_cast<int>(bounds[5]));
+			options.digestArea.min = glm::ivec3(bounds[0], bounds[1], bounds[2]);
+			options.digestArea.max = glm::ivec3(bounds[3], bounds[4], bounds[5]);
 			std::string areaError;
 			if (!headless::validateDigestArea(options.digestArea, areaError))
 			{

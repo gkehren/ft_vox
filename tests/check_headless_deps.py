@@ -136,8 +136,18 @@ def check_link_artifacts(build_dir: Path) -> list[str]:
     violations: list[str] = []
     inputs = find_link_inputs(build_dir)
     if not inputs:
-        print("NOTE: no ft_vox_headless link artifacts found in "
-              f"{build_dir} (build the target first); link scan skipped")
+        # Fail-CLOSED on a configured tree: if CMakeCache.txt exists the
+        # runner target should have build artifacts, and a silent skip would
+        # let the guard go quiet (issue #210 review). Only a genuinely
+        # unconfigured tree (no cache) is allowed to skip.
+        if (build_dir / "CMakeCache.txt").is_file():
+            violations.append(
+                "configured build tree has no ft_vox_headless link artifacts "
+                "(build.ninja / link.txt / .vcxproj) — build the target before "
+                "running the guard; refusing to skip the link scan")
+        else:
+            print("NOTE: no CMakeCache.txt and no ft_vox_headless link artifacts in "
+                  f"{build_dir} (unconfigured tree); link scan skipped")
         return violations
     for kind, text in inputs:
         lowered = text.lower()

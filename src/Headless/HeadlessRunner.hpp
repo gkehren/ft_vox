@@ -87,7 +87,8 @@ struct RunOutcome
 	int interestRadius{0};
 	size_t chunkCount{0};
 	uint64_t committedEdits{0};
-	uint64_t refusedEdits{0};
+	uint64_t refusedEdits{0};	// player-aware canPlaceVoxel refusals
+	uint64_t rejectedEdits{0};	// world-level rejections (e.g. outside residency)
 	uint64_t editRevision{0};
 	size_t mobCount{0};
 	glm::dvec3 playerPos{0.0};

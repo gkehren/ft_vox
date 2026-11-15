@@ -109,8 +109,10 @@ ctest --test-dir build-cpu -C Release --output-on-failure
 
 GLM and FastNoise2 still come from FetchContent (network on first configure,
 or reuse an existing build's `_deps` sources via `FETCHCONTENT_SOURCE_DIR_*`).
-The `CpuOnlyBuild` CTest automates a clean CPU-only configure/build/test run
-as the acceptance gate. Full reference: [`headless-runner.md`](headless-runner.md).
+The opt-in `CpuOnlyBuild` CTest (`-DFT_VOX_CPU_ONLY_BUILD_CHECK=ON`, label
+`cpu-only`) automates a clean CPU-only configure/build/test run as the
+acceptance gate; the always-on `HeadlessDeps` guard is the default dependency
+check. Full reference: [`headless-runner.md`](headless-runner.md).
 
 ## Dependencies
 

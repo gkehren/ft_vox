@@ -252,6 +252,15 @@ RunOutcome runHeadless(const RunnerOptions &options)
 			const WorldEditResult result = sim.placeVoxel(pos, action.block);
 			if (result.accepted)
 				++out.committedEdits;
+			else
+			{
+				// World-level rejection (e.g. target outside residency / not
+				// editable): surface it so a script author gets a diagnostic
+				// instead of a silent edits=0 (issue #210 review).
+				++out.rejectedEdits;
+				std::cerr << "[headless] line " << action.line << ": place rejected by world at "
+						  << cellToString(action.cell) << " (unloaded/in-transit target?)\n";
+			}
 			break;
 		}
 		case ScriptOp::Delete:
@@ -259,6 +268,12 @@ RunOutcome runHeadless(const RunnerOptions &options)
 			const WorldEditResult result = sim.deleteVoxel(editCenter(action.cell));
 			if (result.accepted)
 				++out.committedEdits;
+			else
+			{
+				++out.rejectedEdits;
+				std::cerr << "[headless] line " << action.line << ": delete rejected by world at "
+						  << cellToString(action.cell) << " (unloaded/in-transit target?)\n";
+			}
 			break;
 		}
 		case ScriptOp::Interest:
@@ -345,6 +360,11 @@ RunOutcome runHeadless(const RunnerOptions &options)
 	{
 		if (failed)
 		{
+			// "skipped" = the EXPLICIT savePlayerState + close was skipped
+			// because the run errored. It does NOT mean nothing was persisted:
+			// sim.shutdown() below still force-closes (resolves stranded edits
+			// + flushes accepted chunk edits, issue #180). Only the explicit
+			// player.state capture is skipped. See docs/headless-runner.md §3.
 			out.saveStatus = "skipped";
 		}
 		else

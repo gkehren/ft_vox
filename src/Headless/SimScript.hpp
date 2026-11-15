@@ -27,11 +27,14 @@
 //   expect voxel <x> <y> <z> <block|air|unknown>   immediate assertion
 //   expect digest <hex>               final-digest assertion (checked at end)
 //
-// <block> is a TextureType display name (case-insensitive, spaces or
-// underscores, e.g. "Oak Leaves" / OAK_LEAVES) or a numeric ordinal.
+// <block> is a SINGLE token: a TextureType name with underscores
+// (case-insensitive, e.g. Stone / OAK_LEAVES / oak_leaves), a numeric
+// ordinal, or "air". Spaces are not token separators inside a name, so use
+// the underscore form ("Oak Leaves" must be written OAK_LEAVES).
 // Cell coordinates are integers; edits target the cell center.
 // =============================================================================
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -84,7 +87,10 @@ struct ScriptAction
 struct SimScript
 {
 	std::vector<ScriptAction> actions;
-	int totalWaitFrames{0};
+	// 64-bit: each `wait` is capped at kMaxWaitFrames, but a long script's
+	// SUM must not overflow before the runner's > --ticks check (issue #210
+	// review).
+	int64_t totalWaitFrames{0};
 };
 
 /// Parse a script file. Returns false and fills `error` (with the offending
@@ -92,8 +98,10 @@ struct SimScript
 /// kMaxScriptActions actions, each `wait` at most kMaxWaitFrames frames.
 bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::string &error);
 
-/// Case-insensitive block-name lookup (display names with spaces or
-/// underscores, enum-style identifiers, numeric ordinals, "air").
+/// Case-insensitive block-name lookup: enum-style identifiers / display
+/// names (spaces are normalized to underscores), numeric ordinals, "air".
+/// NOTE: the script tokenizer splits on whitespace, so a multi-word display
+/// name must be written as a single underscore token (OAK_LEAVES) in scripts.
 /// Returns false when the token names no block.
 bool parseBlockName(const std::string &token, TextureType &out);
 
