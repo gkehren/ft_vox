@@ -9,6 +9,7 @@
 - [`docs/vulkan-graphics.md`](docs/vulkan-graphics.md) — Vulkan device path, pass graph, shaders, post
 - [`docs/engine-architecture.md`](docs/engine-architecture.md) — Engine loop, chunks, streaming, terrain gen
 - [`docs/simulation-render-contracts.md`](docs/simulation-render-contracts.md) — authoritative CPU world vs derived render boundary (Epic #204), ownership, migration checkpoints
+- [`docs/headless-runner.md`](docs/headless-runner.md) — `ft_vox_headless` standalone CPU simulation runner: CLI, scripts, canonical digest, CPU-only build (issue #210)
 - [`docs/visual-regression.md`](docs/visual-regression.md) — Visual-regression harness: scenes, references, tolerances
 
 ## Architecture Overview
@@ -25,6 +26,8 @@
   - `ImageBarrier` / `GraphicsPipelineBuilder`: shared helpers
 - **Simulation facade (`src/Sim/`, CPU-only `ft_vox_core`)** — issue #208 / Epic #204 Phase D:
   - **`GameSimulation`**: single owner of the authoritative gameplay state — `TerrainGenerator`, `VoxelWorld`, `PlayerController` (120 Hz), `MobSystem` (60 Hz), flight mode, block selection, spawn/restore, reload counter, player-aware placement query (`canPlaceVoxel`, hosts gate edits with it). Explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown), per-frame advance with plain values (dt, commands, observer point), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`). No Camera/RenderSettings/SDL/Vulkan/ImGui types; runs headless (`test_game_simulation`)
+- **Headless runner (`src/Headless/`, CPU-only)** — issue #210 / Epic #204 Phase F:
+  - **`ft_vox_headless`**: standalone deterministic simulation runner hosting the SAME `GameSimulation` facade with **no SDL3/Vulkan/ImGui/camera/renderer/GPU pool**; links only `ft_vox_core`. Explicit headless interest source (plain point + radius) drives residency; fixed per-frame streaming budgets; synchronous (`--workers 0`, `VoxelWorld::generatePendingVoxelsSync`) or async (`--workers N`, per-frame quiesce) generation — both yield the same canonical state digest. Scripted actions (`--script`), save/reload round-trips (`--world`/`--saves-root`), machine-readable SUMMARY + distinct error exit codes. `-DFT_VOX_GRAPHICS=OFF` builds the CPU slice with the graphics stack **not discovered at all**; `FT_VOX_PORTABLE_FP` selects canonical FP codegen. See `docs/headless-runner.md`
 - **Authoritative world (`src/World/` + `src/Core/`, CPU-only `ft_vox_core`)** — issue #206 / Epic #204 Phase B:
   - **`VoxelWorld`**: single owner of chunk residency/streaming, serialized logical edits (coalescing + neighbor-border mirrors), terrain worker publication, and `WorldPersistence`. Render-free public API; emits the `WorldEvent` change stream consumed by the `RenderWorldBridge`. Runs headless with no bridge registered; owned by `GameSimulation` in game
   - **`WorldChunk`**: authoritative chunk record — voxel backing, occupancy, border shell, persistent edits, `sim::ChunkIdentity` (generation + revision, the single source of the pair), lifecycle state
@@ -132,11 +135,23 @@ ctest -R VisualRegression --output-on-failure   # from the build dir
 # References are committed in tests/visual-references/ and regenerated ONLY
 # explicitly via `ft_vox_visual_tests --update-references`. Details:
 # docs/visual-regression.md
+
+# Headless simulation runner (issue #210) — CPU-only, no GPU/window needed
+./build-vk/ft_vox_headless --seed 42 --ticks 600 --script tests/fixtures/sim-actions.txt
+ctest -R Headless --output-on-failure   # from the build dir (always-on guards)
+# Heavier clean CPU-only configure/build gate is OPT-IN (label cpu-only):
+#   cmake -B build-cpu -DFT_VOX_GRAPHICS=OFF -DFT_VOX_CPU_ONLY_BUILD_CHECK=ON
+#   ctest --test-dir build-cpu -L cpu-only --output-on-failure
+# CPU-only configure (no SDL3/Vulkan SDK/shader toolchain discovered at all):
+cmake -B build-cpu -DFT_VOX_GRAPHICS=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cpu -j && ctest --test-dir build-cpu --output-on-failure
+# Details: docs/headless-runner.md
 ```
 
 ### Key Conventions
 - **Voxel Data**: Flat `uint8_t` array per authoritative `WorldChunk` record (`src/World/`); the render `Chunk` handle forwards to it
 - **Sim/render boundary (Epic #204)**: authoritative state (voxels, edits, residency, persistence, player, mobs) lives in the CPU-only `ft_vox_core` (`GameSimulation` owns `VoxelWorld`/`WorldChunk` + `PlayerController` + `MobSystem`); render state (meshes, light caches, GPU, visibility) is derived. Core headers must never include `Renderer/`, `Vulkan/`, `Camera/`, `Engine/`, SDL3 or ImGui — enforced by `tests/check_core_includes.py` (CTest `CoreIncludeGuard`). `sim::ChunkIdentity` is the single source of the (generation, revision) pair
+- **Headless boundary (issue #210)**: `ft_vox_headless` (`src/Headless/`) links only `ft_vox_core` and must stay graphics-free — enforced by `tests/check_headless_deps.py` (CTest `HeadlessDeps`) + the configure-time link-closure assertion. `FT_VOX_GRAPHICS=OFF` is the CPU-only configure path (graphics stack not discovered); keep new CPU tests outside the `if(FT_VOX_GRAPHICS)` guards in `tests/CMakeLists.txt`
 - **World Constants**: `src/utils.hpp` (`CHUNK_SIZE`, `WORLD_HEIGHT`)
 - **Resources**: `ressources/`; runtime expects `RES_PATH` next to the binary
 - **Biome/block enums**: `BiomeType` and `TextureType` are append-only; keep

@@ -78,7 +78,9 @@ add_test(NAME CoreIncludeGuard
 
 # ---------------------------------------------------------------------------
 # Vulkan resource smoke (PR2) — real device path via shipped helpers
+# GRAPHICAL (FT_VOX_GRAPHICS): needs SDL3 + volk + VMA + SPIR-V.
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 add_executable(test_vulkan_resources
     test_vulkan_resources.cpp
     # Test-only Vulkan smoke helper: sole consumer is this target; the game
@@ -154,9 +156,12 @@ endif()
 set_tests_properties(VulkanResourceSmoke VulkanValidationErrorReporting PROPERTIES
     WORKING_DIRECTORY $<TARGET_FILE_DIR:test_vulkan_resources>
 )
+endif() # FT_VOX_GRAPHICS (Vulkan resource smoke)
 
 # ---------------------------------------------------------------------------
 # Visual look: FrameUBO packing of colorBoost/sat + lively biome defaults
+# CPU-only: compiles the terrain generator and scans shader SOURCE text; no
+# Vulkan/SDL/shader-compiler dependency (links glm + FastNoise2 + Threads).
 # ---------------------------------------------------------------------------
 add_executable(test_visual_look
     test_visual_look.cpp
@@ -232,7 +237,9 @@ add_test(NAME GraphicsSettings COMMAND test_graphics_settings)
 
 # ---------------------------------------------------------------------------
 # Render helpers (cascades / fog / lighting / post clamps)
+# GRAPHICAL (FT_VOX_GRAPHICS): links miniz + volk.
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 add_executable(test_render_helpers
     test_render_helpers.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp
@@ -299,6 +306,7 @@ target_link_libraries(test_indirect_draw_emit PRIVATE
 )
 
 add_test(NAME IndirectDrawEmit COMMAND test_indirect_draw_emit)
+endif() # FT_VOX_GRAPHICS (render helpers + indirect draw emit)
 
 # ---------------------------------------------------------------------------
 # Phase D stream CPU helpers (load priority, occupancy, cave Y bounds)
@@ -382,7 +390,10 @@ add_test(NAME BiomeMapGeneration COMMAND test_biome_map)
 
 # ---------------------------------------------------------------------------
 # Input routing policy (issue #76): global vs gameplay shortcuts, Escape
+# GRAPHICAL (FT_VOX_GRAPHICS): this region runs through test_mesh_upload —
+# every target here links SDL3 and/or the Vulkan stack.
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 add_executable(test_input_routing
     test_input_routing.cpp
 )
@@ -753,6 +764,7 @@ if(APPLE)
 endif()
 
 add_test(NAME MeshUploadLifecycle COMMAND test_mesh_upload)
+endif() # FT_VOX_GRAPHICS (input routing .. mesh upload)
 
 # ---------------------------------------------------------------------------
 # VoxelPool contract (issue #112 review): ownership, high-water reuse,
@@ -848,6 +860,8 @@ target_link_libraries(test_profiler PRIVATE
 
 add_test(NAME ProfilerWorkerConsistency COMMAND test_profiler)
 
+# GRAPHICAL (FT_VOX_GRAPHICS): links SDL3 + the Engine benchmark units.
+if(FT_VOX_GRAPHICS)
 add_executable(test_gpu_profile
     test_gpu_profile.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Benchmark.cpp
@@ -858,6 +872,7 @@ add_dependencies(test_gpu_profile ft_vox_build_info)
 target_include_directories(test_gpu_profile PRIVATE ${CMAKE_SOURCE_DIR}/src ${FT_VOX_GENERATED_DIR})
 target_link_libraries(test_gpu_profile PRIVATE glm SDL3::SDL3)
 add_test(NAME GpuProfile COMMAND test_gpu_profile)
+endif() # FT_VOX_GRAPHICS (GPU profile)
 
 add_executable(test_workload_telemetry test_workload_telemetry.cpp)
 target_include_directories(test_workload_telemetry PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -871,7 +886,9 @@ set_tests_properties(WorkloadTelemetryDisabled PROPERTIES ENVIRONMENT "FT_VOX_TE
 # Developer-console core logic (issue #179): formatting, ring histories,
 # health hysteresis, chunk debug snapshot extraction, bounded event trace
 # and the throttled UI-state sampler. No ImGui, no window, no GPU work.
+# GRAPHICAL (FT_VOX_GRAPHICS): compiles the render bridge + Vulkan units.
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 add_executable(test_debug_ui
     test_debug_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiCore.cpp
@@ -952,6 +969,7 @@ target_link_libraries(test_mesh_arena PRIVATE
     Threads::Threads
 )
 add_test(NAME MeshArena COMMAND test_mesh_arena)
+endif() # FT_VOX_GRAPHICS (debug UI + mesh arena)
 
 # Passive entities: CPU simulation/model contracts, no graphics device.
 add_executable(test_mobs test_mobs.cpp
@@ -961,6 +979,9 @@ target_include_directories(test_mobs PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_mobs PRIVATE glm)
 add_test(NAME PassiveMobs COMMAND test_mobs)
 
+# GRAPHICAL (FT_VOX_GRAPHICS): this region runs through test_post_resize —
+# miniz resource packs, real Vulkan pipelines and the visual harness.
+if(FT_VOX_GRAPHICS)
 add_executable(test_mob_textures test_mob_textures.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/MobTextures.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp)
@@ -1151,6 +1172,7 @@ add_test(NAME PostResizeFormats COMMAND test_post_resize)
 set_tests_properties(PostResizeFormats PROPERTIES
     ENVIRONMENT "FT_VOX_VALIDATION=1"
     SKIP_RETURN_CODE 77)
+endif() # FT_VOX_GRAPHICS (mob textures .. post resize)
 
 # ---------------------------------------------------------------------------
 # VSync frame pacing (PR #145): pure computePacedDeltaTime contract
@@ -1195,7 +1217,9 @@ add_test(NAME WorldSave COMMAND test_world_save)
 # Engine-level lifecycle: persistent world x reloadWorld (issue #180 review
 # round 3, item 12). Compiles the full engine minus main.cpp; needs a
 # GPU/window so it skips (77) when the engine cannot be constructed.
+# GRAPHICAL (FT_VOX_GRAPHICS): full engine + bench_persistence to EOF.
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 set(FT_VOX_ENGINE_TEST_SOURCES ${FT_VOX_SOURCES})
 list(REMOVE_ITEM FT_VOX_ENGINE_TEST_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 
@@ -1286,4 +1310,58 @@ target_link_libraries(bench_persistence PRIVATE
     GPUOpen::VulkanMemoryAllocator
     Threads::Threads
 )
+endif() # FT_VOX_GRAPHICS (engine reload + bench persistence)
+
+# ---------------------------------------------------------------------------
+# Headless simulation runner (issue #210, Epic #204 Phase F). CPU-only: the
+# runner links ONLY ft_vox_core, and every test below runs without a GPU,
+# window or shader asset. All integration tests have bounded wall-clock
+# timeouts and deterministic end conditions (fixed tick budgets).
+# ---------------------------------------------------------------------------
+
+# Smoke: a plain fixed-seed run must exit 0 and print the SUMMARY line.
+add_test(NAME HeadlessSmoke COMMAND ft_vox_headless --seed 42 --ticks 120)
+set_tests_properties(HeadlessSmoke PROPERTIES TIMEOUT 120)
+
+# Full acceptance driver: scripted determinism (sync + async workers),
+# save -> process exit -> reload -> edit verification in an isolated temp
+# directory, invalid-script / assertion / world-open failure exit codes, and
+# bounded teardown. Python3 stdlib only (already REQUIRED above).
+add_test(NAME HeadlessRunner
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_headless_runner.py
+        --runner $<TARGET_FILE:ft_vox_headless>
+        --fixtures ${CMAKE_SOURCE_DIR}/tests/fixtures)
+set_tests_properties(HeadlessRunner PROPERTIES TIMEOUT 600)
+
+# Dependency guard: the runner's include closure must stay render-free, its
+# actual link artifacts must contain no graphical library, and a
+# FT_VOX_GRAPHICS=OFF cache must show no graphics discovery (issue #210
+# acceptance criterion 1).
+add_test(NAME HeadlessDeps
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/check_headless_deps.py
+        --build-dir ${CMAKE_BINARY_DIR})
+set_tests_properties(HeadlessDeps PROPERTIES TIMEOUT 120)
+
+# Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh
+# CMake configure + build with FT_VOX_GRAPHICS=OFF, no vcpkg toolchain and no
+# graphics discovery, producing the runner + CPU tests and running them.
+# Reuses the parent build's FetchContent sources when present (offline-safe).
+# Opt-IN (issue #210 review): it adds a full nested configure/build (~150 s),
+# so it is OFF by default to keep the everyday suite fast. The always-on
+# HeadlessDeps guard is the default scripted dependency check; enable this
+# heavier gate in CI or explicitly with -DFT_VOX_CPU_ONLY_BUILD_CHECK=ON
+# (or run `ctest -L cpu-only` once enabled).
+option(FT_VOX_CPU_ONLY_BUILD_CHECK "Register the clean CPU-only configure/build gate as a CTest (heavier; recommended for CI)" OFF)
+if(FT_VOX_CPU_ONLY_BUILD_CHECK)
+    add_test(NAME CpuOnlyBuild
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+            -DPARENT_BINARY_DIR=${CMAKE_BINARY_DIR}
+            "-DGENERATOR=${CMAKE_GENERATOR}"
+            "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+            "-DTOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+            -DBUILD_CONFIG=$<CONFIG>
+            -P ${CMAKE_SOURCE_DIR}/cmake/CheckCpuOnlyBuild.cmake)
+    set_tests_properties(CpuOnlyBuild PROPERTIES TIMEOUT 1200 LABELS "cpu-only")
+endif()
 

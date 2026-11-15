@@ -31,6 +31,7 @@ main.cpp
 |------|-----------|---------------|
 | App / loop | `src/Engine/` | `Engine`, `EngineDefs`, `GameUI`, `ImGuiLayer`, `Profiler`, `Benchmark` |
 | Simulation facade (CPU-only) | `src/Sim/` | `GameSimulation` (owns world + player + mobs; commands, lifecycle, snapshots) |
+| Headless runner (CPU-only) | `src/Headless/` | `ft_vox_headless` host of `GameSimulation` — no SDL/Vulkan/ImGui (issue #210); see [`headless-runner.md`](headless-runner.md) |
 | Authoritative world (CPU-only) | `src/World/`, `src/Core/` | `VoxelWorld`, `WorldChunk`, `WorldCollisionView`, `WorldMobView`, `WorldPersistence`, `WorldSave`, `SimContracts`, `ThreadPool`, `WorkloadTelemetry` |
 | Render chunk side | `src/Chunk/` | `Chunk` (render handle), `ChunkPool`, `TerrainGenerator`, `StreamHelpers` |
 | Entities | `src/Entities/` | `MobSystem`, `MobModel` (passive mobs) |
@@ -53,9 +54,15 @@ ImGui, camera, input→command mapping, the suspension policy and the
 world-epoch barrier — no authoritative gameplay state. The temporary
 `ChunkManager` adapter and `ChunkCollisionView` wrapper were removed in
 Phase C; the temporary `ChunkMobWorld` mob adapter was removed in Phase D
-(CPU mob seam: `WorldMobView`). See
+(CPU mob seam: `WorldMobView`). The same facade is hosted headlessly by
+`ft_vox_headless` (issue #210, `src/Headless/`) — a standalone process with
+no SDL/Vulkan/ImGui that proves the CPU simulation is reusable without the
+graphical runtime; `-DFT_VOX_GRAPHICS=OFF` builds it plus the CPU tests with
+the graphics stack not discovered at all. See
 [`simulation-render-contracts.md`](simulation-render-contracts.md) for the full
-boundary, the world event stream and the adapter removal status.
+boundary, the world event stream and the adapter removal status, and
+[`headless-runner.md`](headless-runner.md) for the runner CLI, scripts and
+canonical digest.
 
 ---
 

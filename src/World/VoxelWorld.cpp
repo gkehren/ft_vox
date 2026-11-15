@@ -640,6 +640,76 @@ void VoxelWorld::generatePendingVoxels(const glm::vec3 &center, float lodThresho
 	}
 }
 
+int VoxelWorld::generatePendingVoxelsSync(const glm::vec3 &center, int budget)
+{
+	if (!m_terrainGenerator || budget <= 0)
+		return 0;
+
+	struct Item
+	{
+		WorldChunk *chunk;
+		float distSq;
+	};
+
+	// Main-thread-only, like every lifecycle entry point: the exclusive lock
+	// covers selection AND generation (no worker ever sees these records —
+	// inTransit stays false, so asyncBusy() remains the async-path signal).
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
+	thread_local std::vector<Item> queue;
+	queue.clear();
+	queue.reserve(m_activeChunks.size());
+	const float camOffsetX = center.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = center.z - CHUNK_SIZE * 0.5f;
+
+	for (WorldChunk *chunk : m_activeChunks)
+	{
+		if (chunk->getState() == ChunkState::UNLOADED && !chunk->isInTransit())
+		{
+			const glm::vec3 p = chunk->getPosition();
+			const float dx = p.x - camOffsetX;
+			const float dz = p.z - camOffsetZ;
+			queue.push_back({chunk, dx * dx + dz * dz});
+		}
+	}
+
+	const int n = std::min(budget, static_cast<int>(queue.size()));
+	if (n <= 0)
+		return 0;
+
+	std::partial_sort(queue.begin(), queue.begin() + n, queue.end(),
+					  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
+
+	int generated = 0;
+	for (int i = 0; i < n; ++i)
+	{
+		WorldChunk *chunk = queue[i].chunk;
+		// Unlike the pre-registration bootstrap path, these records are
+		// already resident: on allocation failure keep the slot UNLOADED and
+		// retry on a later tick instead of recycling a registered record.
+		if (!chunk->prepareVoxelStorageForGeneration())
+			continue;
+		WorldEvent queued;
+		queued.kind = WorldEventKind::GenQueued;
+		queued.coord = chunk->coord();
+		queued.generation = chunk->generation();
+		queued.revision = chunk->revision();
+		emitEvent(queued);
+		if (!chunk->generateTerrain(*m_terrainGenerator))
+			continue;
+		// Same override contract as the async gen job and the bootstrap:
+		// generation is deterministic, saved edits re-apply on top.
+		applyPersistentOverrides(chunk);
+		WorldEvent done;
+		done.kind = WorldEventKind::Generated;
+		done.coord = chunk->coord();
+		done.generation = chunk->generation();
+		done.revision = chunk->revision();
+		emitEvent(done);
+		++generated;
+	}
+	return generated;
+}
+
 void VoxelWorld::publishFinishedGeneration()
 {
 	std::vector<CompletedGenJob> finishedGen;

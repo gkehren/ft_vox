@@ -16,6 +16,10 @@ runtime environment variables.
 
 **Policy:** Linux prefers distro packages. Windows uses vcpkg for almost everything. macOS uses Homebrew for the Vulkan stack; C++ libraries may come from Homebrew or vcpkg.
 
+**CPU-only builds need none of the graphics rows:** see
+[CPU-only configuration](#cpu-only-configuration-headless-runner) below and
+[`headless-runner.md`](headless-runner.md).
+
 ## Per-platform builds
 
 ### Linux (system packages)
@@ -78,6 +82,37 @@ Or plain CMake:
 cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
 ```
+
+## CPU-only configuration (headless runner)
+
+Issue #210 (Epic #204 Phase F): `-DFT_VOX_GRAPHICS=OFF` builds **only** the
+CPU simulation library (`ft_vox_core`), the standalone `ft_vox_headless`
+simulation runner and the CPU-only tests. SDL3, the Vulkan SDK/loader, volk,
+VMA, miniz and the SPIR-V compilers are **not discovered at all** — no
+GPU, window, shader toolchain or vcpkg toolchain is required.
+
+```bash
+# Linux / macOS
+cmake -B build-cpu -DFT_VOX_GRAPHICS=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cpu -j
+ctest --test-dir build-cpu --output-on-failure
+./build-cpu/ft_vox_headless --seed 42 --ticks 600 --script tests/fixtures/sim-actions.txt
+```
+
+```powershell
+# Windows (plain CMake, no vcpkg)
+cmake -B build-cpu -DFT_VOX_GRAPHICS=OFF
+cmake --build build-cpu --config Release
+ctest --test-dir build-cpu -C Release --output-on-failure
+.\build-cpu\Release\ft_vox_headless.exe --seed 42 --ticks 600 --script tests\fixtures\sim-actions.txt
+```
+
+GLM and FastNoise2 still come from FetchContent (network on first configure,
+or reuse an existing build's `_deps` sources via `FETCHCONTENT_SOURCE_DIR_*`).
+The opt-in `CpuOnlyBuild` CTest (`-DFT_VOX_CPU_ONLY_BUILD_CHECK=ON`, label
+`cpu-only`) automates a clean CPU-only configure/build/test run as the
+acceptance gate; the always-on `HeadlessDeps` guard is the default dependency
+check. Full reference: [`headless-runner.md`](headless-runner.md).
 
 ## Dependencies
 
