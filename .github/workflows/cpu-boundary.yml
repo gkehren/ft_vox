@@ -1,0 +1,64 @@
+# Epic #204 CPU/GPU boundary gate (issues #210 / #211).
+#
+# The CPU-only boundary checks run WITHOUT a GPU, so they are exercised
+# automatically here on every push / PR — making the epic's enforcement durable
+# even though the heavier CpuOnlyBuild clean-configure gate is opt-in for local
+# everyday runs (FT_VOX_CPU_ONLY_BUILD_CHECK=ON enables it; this workflow sets it).
+#
+# Jobs:
+#   cpu-linux   — FT_VOX_GRAPHICS=OFF configure/build/test on Ubuntu (GCC, Ninja).
+#   cpu-windows — FT_VOX_GRAPHICS=OFF configure/build/test on Windows (MSVC).
+# Both run the include/link guards (CoreIncludeGuard, HeadlessDeps), the headless
+# acceptance driver (HeadlessRunner) and the nested clean-configure gate
+# (CpuOnlyBuild). No Vulkan SDK / SDL3 / shader toolchain is required or discovered.
+
+name: cpu-boundary
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  cpu-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ ninja-build python3 git
+
+      - name: Configure (CPU-only, graphics not discovered)
+        run: >
+          cmake -S . -B build-cpu -G Ninja
+          -DFT_VOX_GRAPHICS=OFF
+          -DFT_VOX_DEP_MODE=system
+          -DFT_VOX_CPU_ONLY_BUILD_CHECK=ON
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-cpu -j
+
+      - name: Test (CPU-only suite + clean-configure gate)
+        run: ctest --test-dir build-cpu --output-on-failure --timeout 600
+
+  cpu-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure (CPU-only, no vcpkg toolchain)
+        run: >
+          cmake -S . -B build-cpu
+          -DFT_VOX_GRAPHICS=OFF
+          -DFT_VOX_DEP_MODE=system
+          -DFT_VOX_CPU_ONLY_BUILD_CHECK=ON
+
+      - name: Build
+        run: cmake --build build-cpu --config Release --parallel
+
+      - name: Test (CPU-only suite + clean-configure gate)
+        run: ctest --test-dir build-cpu -C Release --output-on-failure --timeout 600

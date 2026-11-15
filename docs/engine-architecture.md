@@ -64,6 +64,47 @@ boundary, the world event stream and the adapter removal status, and
 [`headless-runner.md`](headless-runner.md) for the runner CLI, scripts and
 canonical digest.
 
+### Executable / module graph (Epic #204 closure, issue #211)
+
+```text
+                 ┌──────────────────────────────────────────────┐
+                 │  ft_vox_core  (CPU-only static library)       │
+                 │  GameSimulation · VoxelWorld · WorldChunk ·   │
+                 │  PlayerController(120Hz) · MobSystem(60Hz) ·  │
+                 │  TerrainGenerator · WorldPersistence ·        │
+                 │  WorldCollisionView · WorldMobView · pools    │
+                 │  links ONLY: glm + FastNoise2 + Threads       │
+                 └───────────────┬──────────────────┬───────────┘
+                                 │                  │
+              commands in /      │                  │  commands in /
+              snapshots out      ▼                  ▼  snapshots out
+                 ┌───────────────────────┐   ┌──────────────────────────┐
+                 │  ft_vox (graphical)   │   │  ft_vox_headless (CPU)   │
+                 │  Engine host:         │   │  HeadlessRunner host:    │
+                 │  SDL3 + Vulkan + ImGui│   │  interest source + fixed │
+                 │  Camera · RenderWorld │   │  budgets · sync/async gen│
+                 │  Bridge (derived) ·   │   │  canonical digest ·      │
+                 │  RenderSettings · UI  │   │  scripts · save/reload   │
+                 └───────────────────────┘   └──────────────────────────┘
+```
+
+Both executables consume the **same** world/physics/mob algorithms through
+`GameSimulation` — no copied or duplicated simulation path. The render side
+(`RenderWorldBridge`, `Chunk`, passes, GPU) depends on the simulation; the
+simulation never depends on the render side.
+
+**The boundary is enforced by repeatable automated checks, not comments:**
+
+| Gate | What it enforces | When |
+|---|---|---|
+| `ft_vox_assert_cpu_link_closure` (CMake) | transitive **link** closure of `ft_vox_core`, `ft_vox_headless` and every CPU-only test contains no SDL3/Vulkan/volk/VMA/miniz/ImGui — the authoritative link gate (incl. MSVC, where a static lib has no link step) | every configure |
+| `CoreIncludeGuard` (`check_core_includes.py`) | transitive **include** closure of the **core** public headers/TUs is render-free (Chunk/ allowlist fail-closed) | CTest |
+| `HeadlessDeps` (`check_headless_deps.py`) | **runner** include closure + core/runner **link artifacts** (MSVC core static-lib scan reads `ProjectReference`) + no graphics discovery in a CPU-only cache | CTest |
+| `FT_VOX_GRAPHICS=OFF` + `CpuOnlyBuild` | clean CPU-only configure/build/test with the graphics stack **not discovered at all** | configure / opt-in CTest + CI |
+
+(`FT_VOX_PORTABLE_FP` is a codegen *option* for cross-machine digest comparison,
+not an enforcement gate.)
+
 ---
 
 ## 2. Engine loop (`Engine`)
