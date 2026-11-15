@@ -73,6 +73,16 @@ public:
 	size_t drawListSizeForTests() const { return drawList.size(); }
 	size_t shadowListSizeForTests() const { return shadowList.size(); }
 	size_t mobStateCountForTests() const { return mobStates.size(); }
+	/// Drive one real derived-projection frame step (streaming + mobs) so the
+	/// per-frame containers hold genuine data before a reload — this makes the
+	/// epoch barrier's "derived state dropped" checks non-vacuous (they fail if
+	/// resetWorldProjection's clears are removed). The bootstrapped chunks are
+	/// meshed + GPU-uploaded, so the streaming step fills the draw/shadow lists.
+	/// Natural mob spawning needs streamed terrain beyond the bootstrap radius
+	/// (spawn ring 24–80 blocks vs ~32 bootstrapped), so a presentation state is
+	/// seeded when the step produced none — the barrier's mobStates clear is
+	/// independent of how the snapshot was produced.
+	void stepDerivedProjectionForTests(double dt);
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
 	/// Override the streaming front load bias (clamped to the unload-safe
@@ -184,7 +194,10 @@ private:
 	///   * benchmark: player suspended (camera is benchmark-owned), mobs
 	///     disabled; input locked.
 	///   * inspection view (--view): processInput skipped entirely (fixed
-	///     daylight camera), mobs suspended, UI hidden.
+	///     daylight camera), UI hidden, day cycle pinned. Mobs are NOT
+	///     suspended by inspection itself — they keep advancing unless the
+	///     window is unfocused, a benchmark is active, or the mobs toggle is
+	///     off (m_inspectionView is not part of simulationSuspended()).
 	bool simulationSuspended() const { return paused || !windowFocused || m_benchmark.isActive(); }
 
 	/// World-generation epoch barrier (issue #209, Epic #204 Phase E).

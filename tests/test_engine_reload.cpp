@@ -108,6 +108,16 @@ int main()
 			CHECK(engine->bridgeWorldGenerationForTests() == genAfterInit,
 			      "bridge stamped with the simulation's world epoch at initialize");
 
+			// Drive one real derived-projection step so the per-frame containers
+			// are genuinely populated BEFORE the reload. Without this the
+			// "drops the stale ..." checks below would be vacuous (the lists are
+			// empty before the reload too). With it, each check fails if the
+			// corresponding resetWorldProjection clear is removed.
+			engine->stepDerivedProjectionForTests(1.0 / 60.0);
+			CHECK(engine->drawListSizeForTests() > 0, "streaming step populated the draw list before reload");
+			CHECK(engine->shadowListSizeForTests() > 0, "streaming step populated the shadow list before reload");
+			CHECK(engine->mobStateCountForTests() > 0, "mob presentation state present before reload");
+
 			// Reload with an OPEN persistent world: the close must succeed
 			// here (no stranded edits in this deterministic path) and the
 			// reload proceeds transiently. The save identity must survive

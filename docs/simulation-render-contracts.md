@@ -24,8 +24,9 @@ commands/lifecycle and read-only value snapshots; the temporary
 consumed by the host after the mob snapshot). Phase E (issue #209)
 **completed the graphical host integration**: `Engine` is a pure
 SDL3/Vulkan/ImGui host of `GameSimulation` — documented frame orchestration,
-a single host suspension policy, the shared player-aware placement rule in
-the simulation, and an explicit world-generation epoch barrier
+a single host suspension policy, the player-aware placement query in
+the simulation (`canPlaceVoxel`, which hosts gate edits with), and an explicit
+world-generation epoch barrier
 (`Engine::resetWorldProjection` + the bridge's epoch stamp) so no stale
 render snapshot or async job survives a world reload. The bridge only
 *references* the simulation-owned world — it never owns simulation state —
@@ -178,7 +179,7 @@ existed); the headless runner (#210) consumes the same facade directly.
 | Component | Location | Side | Current coupling | Migrating phase |
 |---|---|---|---|---|
 | `Engine` | `src/Engine/Engine.cpp/.hpp` | Graphical host / adapter | Owns SDL window, Vulkan device/swapchain/frame, `WorldRenderer`, `GameUI`, `ImGuiLayer`, `Camera`, `RenderSettings`, `ThreadPool`, `ChunkPool`, **and** `sim::GameSimulation` + `RenderWorldBridge` (the bridge references the sim's world). Maps SDL input to commands, owns the single suspension policy (`simulationSuspended`), the day-cycle presentation parameter and the world-epoch barrier (`resetWorldProjection`); `run()` is the documented 16-step frame orchestration. No authoritative gameplay state lives here. | E (#209) — **landed** |
-| `GameSimulation` | `src/Sim/GameSimulation.hpp/.cpp` | **Authoritative (CPU-only)** | The Phase D facade: owns `TerrainGenerator`, `VoxelWorld`, `PlayerController` (120 Hz), `MobSystem` (60 Hz), flight mode, block selection, spawn/restore, reload counter. Explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown), per-frame advance with plain values (dt, commands, observer), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`). Phase E added the shared player-aware placement rule (`canPlaceVoxel`). Render-free; in `ft_vox_core`. | D (#208) — **landed**; E (#209) placement rule |
+| `GameSimulation` | `src/Sim/GameSimulation.hpp/.cpp` | **Authoritative (CPU-only)** | The Phase D facade: owns `TerrainGenerator`, `VoxelWorld`, `PlayerController` (120 Hz), `MobSystem` (60 Hz), flight mode, block selection, spawn/restore, reload counter. Explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown), per-frame advance with plain values (dt, commands, observer), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`). Phase E added the player-aware placement query (`canPlaceVoxel`; hosts gate edits with it, `placeVoxel` does not call it). Render-free; in `ft_vox_core`. | D (#208) — **landed**; E (#209) placement query |
 | `VoxelWorld` | `src/World/VoxelWorld.hpp/.cpp` | **Authoritative (CPU-only)** | Single owner of chunk residency/streaming, the deferred/coalesced logical-edit queue with border mirrors, generation worker publication, `WorldPersistence`, and the voxel/border backing pools. Render-free public API (plain position/forward/settings values); publishes the `WorldEvent` change stream. In `ft_vox_core`; owned by `GameSimulation` since Phase D. | B (#206) — **landed** |
 | `WorldChunk` | `src/World/WorldChunk.hpp/.cpp` | **Authoritative (CPU-only)** | The chunk record: voxel backing, occupancy metadata, border shell, persistent-edit map, `sim::ChunkIdentity` (generation + revision — the single source of the pair), lifecycle state, in-transit flag, per-column generation outputs. In `ft_vox_core`. | B (#206) — **landed** |
 | `RenderWorldBridge` | `src/Renderer/RenderWorldBridge.hpp/.cpp` | Derived (renderer-owned projection) | **References** the simulation-owned `VoxelWorld` (`world()`), never owns sim. Keeps render handle map, mesh/light dispatch, GPU uploads, commit groups, visibility, light-cache intent + sampling, deferred GPU retirement, debug trace. Drains the world event stream and projects already-resident records on attach. Stamped with the host's world epoch (`worldGenerationId()`) at attach. Replaces the removed `ChunkManager` adapter. | C (#207) — **landed**; E (#209) epoch stamp + host attach |
@@ -447,8 +448,8 @@ boundary before migrating behavior."
 | **A** | **#205** | `ft_vox_core` + `SimContracts.hpp` + include guard + baselines + this doc. No behavior change. | CPU-only target builds/links/passes without GPU/SDL; guard green; game + tests unchanged — **landed (PR #212)** |
 | **B** | **#206** | `VoxelWorld` + `WorldChunk` own voxels, residency, edits, generation publication **and `WorldPersistence`**; `WorldCollisionView` carries the collision semantics; `sim::ChunkIdentity` is the single (generation, revision) source (`MeshBuildResult` copy deleted); `Chunk`/`ChunkManager` were derived render adapters (§10). | Headless world load/edit/save without renderer (`VoxelWorld` suite, 211 checks); save identity stable; per-seed fixtures byte-identical; full suite + visual goldens hold — **landed (PR #214)** |
 | **C** | **#207** | `RenderWorldBridge` (renderer-owned) produces derived meshes/lighting/uploads from authoritative state and **references** the host-owned world; mesh publish validates against `sim::ChunkIdentity` (no duplicate pair). **Removed** the `ChunkManager` render adapter and the `ChunkCollisionView` light wrapper; the bridge attaches to a live world and the world runs headless without it. | Render output unchanged (visual goldens identical); bridge consumes the event stream + resident snapshots, never owns sim; `RenderBridge` boundary suite + full suite + goldens hold — **landed (PR #215)** |
-| **D** | **#208 (this)** | `sim::GameSimulation` facade (CPU-only, in `ft_vox_core`) owns `TerrainGenerator` + `VoxelWorld` + `PlayerController` (120 Hz) + `MobSystem` (60 Hz); explicit lifecycle/commands, plain-value observer, read-only bounded snapshots. **Removed** the `ChunkMobWorld` mob adapter (CPU seam: `WorldMobView`; entity light stays bridge-derived, sampled by the host after the snapshot). | Fixed-step determinism preserved; no render includes; headless `GameSimulation` suite (scripted determinism, physics/mob edges, reload/restore, rates) + full suite + goldens hold — **landed** |
-| **E** | **#209 (this)** | Graphical `Engine` host drives `GameSimulation` via commands + snapshots: documented 16-step `run()` orchestration, single `simulationSuspended()` policy, shared player-aware placement rule (`canPlaceVoxel`), world-epoch barrier (`resetWorldProjection` + bridge epoch stamp). No authoritative gameplay state in the host; all temporary adapters removed. | Game behaves identically; input/UI unchanged; epoch monotonicity + derived-state reset covered by `EngineReload`, placement rule by `GameSimulation`, epoch stamp by `RenderBridge`; full suite + goldens hold — **landed** |
+| **D** | **#208** | `sim::GameSimulation` facade (CPU-only, in `ft_vox_core`) owns `TerrainGenerator` + `VoxelWorld` + `PlayerController` (120 Hz) + `MobSystem` (60 Hz); explicit lifecycle/commands, plain-value observer, read-only bounded snapshots. **Removed** the `ChunkMobWorld` mob adapter (CPU seam: `WorldMobView`; entity light stays bridge-derived, sampled by the host after the snapshot). | Fixed-step determinism preserved; no render includes; headless `GameSimulation` suite (scripted determinism, physics/mob edges, reload/restore, rates) + full suite + goldens hold — **landed** |
+| **E** | **#209 (this)** | Graphical `Engine` host drives `GameSimulation` via commands + snapshots: documented 16-step `run()` orchestration, single `simulationSuspended()` policy, player-aware placement query (`canPlaceVoxel`, hosts gate edits with it), world-epoch barrier (`resetWorldProjection` + bridge epoch stamp). No authoritative gameplay state in the host; all temporary adapters removed. | Game behaves identically; input/UI unchanged; epoch monotonicity + derived-state reset covered by `EngineReload` (real derived-projection step before reload, so the reset checks are non-vacuous), placement query by `GameSimulation`, epoch stamp by `RenderBridge`; full suite + goldens hold — **landed** |
 | F | #210 | `ft_vox_headless` executable links `ft_vox_core` (+ sim) with **no** SDL/Vulkan. | Headless run + save round-trip; remove top-level GPU configure requirement |
 | G | #211 | Closure gate: full epic verification. | All invariants hold; baselines compared |
 
@@ -583,8 +584,8 @@ entity light from the bridge (`sampleSmoothedLight`, render lock only) AFTER
 the mob snapshot returns. Mesh dispatch still acquires render → world (via
 `ensureShellPopulated`). Every acquisition remains main-thread-only; workers
 take only the completion-queue and pool mutexes, so the two map locks never
-contend across threads. Phase E must revisit this before threading either
-path.
+contend across threads. Phase E (#209) kept both paths main-thread-only;
+revisit the lock order before threading either path.
 
 ### Temporary adapters — removal status
 
@@ -679,10 +680,13 @@ host contract explicit and closed the remaining gaps.
 - **No gameplay logic in the host.** The player-aware placement rule (a
   solid block may not overlap the authoritative body unless flying or
   non-solid) moved from the Engine's mouse handler into
-  `GameSimulation::canPlaceVoxel` — a pure query shared by graphical and
-  headless hosts. The graphical host still publishes the accepted edit
-  through the bridge (event drain + commit groups); headless hosts use
-  `placeVoxel`. Block raycast/selection, mouse capture, flight toggle and
+  `GameSimulation::canPlaceVoxel` — a **pure query, not enforcement**:
+  `placeVoxel` does not call it, so a host that wants player-aware placement
+  must gate its edit with `canPlaceVoxel` first (the graphical host does;
+  headless hosts/tests may place inside the body deliberately). The rule is
+  defined once in the facade instead of copied into the host. The graphical
+  host still publishes the accepted edit through the bridge (event drain +
+  commit groups). Block raycast/selection, mouse capture, flight toggle and
   jump semantics are unchanged.
 - **World-epoch barrier.** Every authoritative world transition
   (`initializeNoiseGenerator`, `reloadWorld`) runs
@@ -714,11 +718,13 @@ suite, the `VoxelWorld`, `RenderBridge` and `GameSimulation` CPU-only suites,
 per-seed byte identity, persistence/streaming/mob/physics benchmarks, the
 in-game benchmark smoke run, and the visual golden comparison (only the
 pre-existing `cave_emissive` driver mismatch, #213, with identical metrics).
-Phase E additionally verified the **Linux build** (WSL2 Debian, GCC 14): two
-behavior-neutral portability fixes were required (a missing `<memory>`
-include in `ChunkBorders.hpp`; `glslc` instead of the `glslangValidator`
-fallback for the shaders' `#include` directives). The two Linux test
-failures (`WorldPersistence` sparse-diff terrain determinism under GCC,
+Phase E additionally verified the **Linux build** (WSL2 Debian, GCC 14): one
+behavior-neutral portability fix was required (a missing `<memory>` include in
+`ChunkBorders.hpp`), and the verification was **run with `glslc`** — the
+`glslangValidator` fallback rejects the shaders' `#include` directives without
+`GL_GOOGLE_include_directive`, and making that fallback (or `install_dep.sh`)
+work is a follow-up outside #209's wiring scope. The two Linux test failures
+(`WorldPersistence` sparse-diff terrain determinism under GCC,
 `VisualRegression` on the llvmpipe software rasterizer) were **verified
 identical on the base commit** — pre-existing platform issues for #210/#211,
 not Phase E regressions.

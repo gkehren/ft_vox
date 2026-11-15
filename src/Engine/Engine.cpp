@@ -260,6 +260,21 @@ void Engine::resetWorldProjection()
 		gameUi->invalidateBiomeMap();
 }
 
+void Engine::stepDerivedProjectionForTests(double dt)
+{
+	// Real production frame steps: the streaming step collects the draw/shadow
+	// lists from the bootstrapped (meshed + GPU-uploaded) chunks, and the mob
+	// step advances the authoritative simulation and fills mobStates.
+	tickStreaming(dt);
+	tickMobs(dt);
+	// Establish a non-empty mob presentation precondition (see header): the
+	// bootstrap radius is smaller than the mob spawn ring, so the real step
+	// above usually produces no mobs here. The seeded state is cleared by the
+	// epoch barrier on the next world transition, exactly like a real snapshot.
+	if (mobStates.empty())
+		mobStates.emplace_back();
+}
+
 void Engine::initializeNoiseGenerator(int seed_val)
 {
 	// Epoch barrier BEFORE detaching the old projection (issue #209): a

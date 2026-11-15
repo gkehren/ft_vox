@@ -83,33 +83,34 @@ File: `src/Engine/Engine.hpp` / `Engine.cpp`.
 `run()` is the documented frame orchestrator (issue #209, Epic #204 Phase E):
 sixteen numbered steps, with the cohesive blocks extracted into named methods
 (`tickMobs`, `updateFrameUniforms`, `recordFrame`, `updateWindowTitle`).
-Matches `Engine.cpp` order:
+Each frame is wrapped by `GetProfiler().beginFrame()` / `endFrame()` (outside
+the numbered steps). The numbering matches `Engine.cpp`'s own step list:
 
-1. **Profiler begin** — `GetProfiler().beginFrame()`  
-2. **Events** — `handleEvents`: SDL poll → ImGui routing + simulation commands (placement validation is `sim->canPlaceVoxel`; the accepted edit publishes through the bridge)  
-3. **Viewport** — minimized/hidden windows skip the whole frame (sleep + frame-clock resync); deferred swapchain recreation (resize / VSync / WSI invalidation) refreshes frame synchronization, `WorldRenderer` and ImGui before acquisition  
-4. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer. A failed acquire resyncs the frame clock (the blocked stretch is never simulated)  
-5. **Frame clock** — paced dt sampled acquire-to-acquire (`frame_pacing::computePacedDeltaTime`), so WSI stalls never feed gameplay; once-per-second window title update  
-6. **Benchmark** — `tickBenchmark` (policy; may reload the world through the epoch barrier)  
-7. **Simulation** — `processInput`: SDL → `sim::PlayerCommand`; walking physics steps inside `sim->advancePlayer`, flight follows the camera via `sim->setPlayerPosition`; the camera follows the interpolated render eye  
-8. **Day cycle** — `tickDayCycle` updates `ShaderParameters` sun/moon/day factors (a **presentation** parameter, not authoritative world time; pause gates it here, issue #208)  
-9. **`tickStreaming`** (derived world projection; CPU only, no GPU work)  
+1. **Events** — `handleEvents`: SDL poll → ImGui routing + simulation commands (placement validation is `sim->canPlaceVoxel`; the accepted edit publishes through the bridge)  
+2. **Viewport** — minimized/hidden windows skip the whole frame (sleep + frame-clock resync); deferred swapchain recreation (resize / VSync / WSI invalidation) refreshes frame synchronization, `WorldRenderer` and ImGui before acquisition  
+3. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer. A failed acquire resyncs the frame clock (the blocked stretch is never simulated)  
+4. **Frame clock** — paced dt sampled acquire-to-acquire (`frame_pacing::computePacedDeltaTime`), so WSI stalls never feed gameplay; once-per-second window title update  
+5. **Benchmark** — `tickBenchmark` (policy; may reload the world through the epoch barrier)  
+6. **Simulation** — `processInput`: SDL → `sim::PlayerCommand`; walking physics steps inside `sim->advancePlayer`, flight follows the camera via `sim->setPlayerPosition`; the camera follows the interpolated render eye  
+7. **Day cycle** — `tickDayCycle` updates `ShaderParameters` sun/moon/day factors (a **presentation** parameter, not authoritative world time; pause gates it here, issue #208)  
+8. **Streaming** — `tickStreaming` (derived world projection; CPU only, no GPU work)  
    - `processFinishedJobs` / `processDeferredReleases`  
    - `updateStreaming` → budgeted `processChunkLoading` / `generatePendingVoxels` / `meshPendingChunks` (`maxStreamMs` envelope)  
    - `updateEntityLightCaches` — dedicated async light-cache-only jobs for meshed chunks entering the entity-light radius (issue #172; never remeshes a valid mesh)  
    - `updateVisibility` → `collectDrawList` / `collectShadowList`  
    - Computes `uploadBudgetThisFrame` (uploads are **not** done here)  
-10. **Mobs** — `tickMobs`: `sim->advanceMobs` (fixed-step AI/physics, spawn/retire over the CPU-only `WorldMobView`), then `sim->mobSnapshots(mobStates)` (filled in place) + per-mob entity light from `RenderWorldBridge::sampleSmoothedLight` → `WorldRenderer::setMobs`  
-11. **Highlight** — raycast block under cursor (`updateHighlight`)  
-12. **Frame slots** — `resourceRetire.beginFrame`, `arenas.beginFrame`, `stagingRing.beginFrame` (fence already waited)  
-13. **ImGui UI build** — `imgui->beginFrame` / `drawUi` / `endFrame` (CPU only; draw later)  
-14. **UBO** — `updateFrameUniforms`: underwater sample + local water-surface scan + `WorldRenderer::updateFrameUBO` (which also runs `MobRenderer::prepare`: frustum masks + per-part transforms for camera and cascades)  
-15. **Record** — `recordFrame` → `WorldRenderer::recordFrame`:  
+9. **Mobs** — `tickMobs`: `sim->advanceMobs` (fixed-step AI/physics, spawn/retire over the CPU-only `WorldMobView`), then `sim->mobSnapshots(mobStates)` (filled in place) + per-mob entity light from `RenderWorldBridge::sampleSmoothedLight` → `WorldRenderer::setMobs`  
+10. **Highlight** — raycast block under cursor (`updateHighlight`)  
+11. **Frame slots** — `resourceRetire.beginFrame`, `arenas.beginFrame`, `stagingRing.beginFrame` (fence already waited)  
+12. **ImGui** — UI build: `imgui->beginFrame` / `drawUi` / `endFrame` (CPU only; draw later)  
+13. **UBO** — `updateFrameUniforms`: underwater sample + local water-surface scan + `WorldRenderer::updateFrameUBO` (which also runs `MobRenderer::prepare`: frustum masks + per-part transforms for camera and cascades)  
+14. **Record** — `recordFrame` → `WorldRenderer::recordFrame`:  
     - **preRecord:** `uploadPendingMeshes` + transfer→vertex barrier — the **only** GPU upload point, inside frame recording (no device idle)  
     - **ShadowPass → OpaquePass** (opaque chunks + **mobs then overlays inside OpaquePass** + **mobs inside every shadow cascade**) **→ WaterPass → SkyPass → PostStack**  
     - **imguiDraw:** `imgui->recordDraw` onto swapchain after composite; ImGui samples the **currently published** biome-map texture  
     - **postImGuiRecord:** pending biome-map texture upload + publication of the matching `BiomeRegionGrid` for the **next** UI frame. Biome-map uploads intentionally occur after ImGui so a frame never samples new map pixels with overlays built from the previous map grid (architectural invariant, issue #186/#191)  
-16. **Submit / present + telemetry** — `VkFrameContext::submitAndPresent`, `publishFrameTelemetry`, profiler end, copy scopes into `RenderTiming`, benchmark sample  
+15. **Present** — `VkFrameContext::submitAndPresent`  
+16. **Telemetry** — `publishFrameTelemetry`, profiler end, copy scopes into `RenderTiming`, benchmark sample  
 
 Bootstrap: `generateInitialArea` fills a small radius around spawn synchronously so the first frames are not empty.
 
@@ -128,7 +129,7 @@ unfocused || benchmark-active):
 | Focus lost / gained | suspended on BOTH transitions, buffered input dropped | suspended while unfocused | unchanged | unchanged |
 | Minimized / hidden | whole frames skipped; frame clock resyncs AFTER the sleep so the skipped stretch never feeds a timestep | — | — | — |
 | Benchmark | suspended (camera benchmark-owned), input locked | disabled | normal streaming (the measured workload) | normal |
-| Inspection (`--view`) | `processInput` skipped (fixed daylight camera) | suspended | normal streaming | frozen at the fixed daylight value |
+| Inspection (`--view`) | `processInput` skipped (fixed daylight camera) | **not** suspended by inspection — advance unless unfocused / benchmark / mobs toggle off | normal streaming | pinned at the fixed daylight value |
 
 ### World-epoch barrier (issue #209)
 

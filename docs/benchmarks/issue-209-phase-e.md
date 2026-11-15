@@ -26,8 +26,10 @@ See [`../simulation-render-contracts.md`](../simulation-render-contracts.md)
   `docs/engine-architecture.md`. Semantics unchanged.
 - The player-aware placement rule moved from the Engine's right-mouse
   handler into `sim::GameSimulation::canPlaceVoxel` (pure query, verbatim
-  rule): graphical and headless hosts now share the same gameplay
-  validation; the accepted edit still publishes through the bridge.
+  rule). It is **not enforcement**: `placeVoxel` does not call it, so a host
+  that wants player-aware placement gates its edit with `canPlaceVoxel` first
+  (the graphical host does). The accepted edit still publishes through the
+  bridge.
 - **World-epoch barrier**: `Engine::resetWorldProjection()` runs on every
   world transition before the old bridge is detached — draw/shadow lists,
   mob presentation states (also pushed empty to `WorldRenderer::setMobs`),
@@ -38,13 +40,18 @@ See [`../simulation-render-contracts.md`](../simulation-render-contracts.md)
   bridge destructor; the persistent close stays refusable.
 - No temporary adapters remain (all removed in Phases C/D); no UI design
   changes; no new GPU waits (uploads stay inside frame recording).
-- **Linux build fixes (behavior-neutral portability):**
-  `Chunk/ChunkBorders.hpp` now includes `<memory>` (it used `std::unique_ptr`
-  relying on MSVC's transitive includes; GCC 14 does not provide them — the
-  base commit does not compile on Linux without this). The Linux verify
-  build uses `glslc` (the CMake `GLSLC` path, same compiler family as the
-  Windows reference build); the `glslangValidator` fallback rejects the
-  shaders' `#include` directives without `GL_GOOGLE_include_directive`.
+- **Linux portability:** one repository fix — `Chunk/ChunkBorders.hpp` now
+  includes `<memory>` (it used `std::unique_ptr` relying on MSVC's transitive
+  includes; GCC 14 does not provide them — the base commit does not compile on
+  Linux without this). The Linux verification was **run with `glslc`** (the
+  CMake `GLSLC` path, same compiler family as the Windows reference build).
+  This is a workflow choice, not a repo fix: `cmake/Dependencies.cmake` still
+  prefers `glslc` and falls back to `glslangValidator`, and `install_dep.sh`
+  installs `glslang-tools` (no `glslc` on Debian/Ubuntu), so that documented
+  fresh setup still selects the fallback, which rejects the shaders'
+  `#include` directives without `GL_GOOGLE_include_directive`. Making the
+  fallback work (pass the include extension) or installing `glslc`/`shaderc`
+  in `install_dep.sh` is a **follow-up outside #209's wiring scope**.
 
 ## Environment
 
@@ -77,7 +84,7 @@ All other visual scenes pass. New/changed suites:
 | Suite | Result | Notes |
 |---|---|---|
 | **GameSimulation** (CPU-only) | PASS, 112 checks (+10) | new player-aware placement-rule fixture (`canPlaceVoxel`: walking refusal, non-solid/flying allowance, pure-query, authoritative publication) |
-| **EngineReload** (GPU) | PASS, 27 checks (+10) | epoch barrier: generation monotonic across initialize/reload, bridge epoch == sim epoch at every attach, draw/shadow/mob derived state dropped on reload |
+| **EngineReload** (GPU) | PASS, 30 checks (+13) | epoch barrier: generation monotonic across initialize/reload, bridge epoch == sim epoch at every attach; a real derived-projection step populates draw/shadow/mob containers first, so the "dropped on reload" checks are non-vacuous (verified to fail if the barrier clears are removed) |
 | **RenderBridge** | PASS, 32 checks (+3) | bridge epoch stamp at attach/reattach; standalone default 0 |
 | CoreContracts / CoreIncludeGuard | PASS | `Physics/BlockPhysics.hpp` already in the core closure; no forbidden edge |
 | VoxelWorld | PASS, 211 checks | unchanged |
@@ -87,7 +94,9 @@ All other visual scenes pass. New/changed suites:
 ### Linux cross-check (WSL2 Debian, g++ 14.2)
 
 The full graphical target **and all test targets build clean** on Linux
-(`cmake --build -j16`, Release) with the two portability fixes above.
+(`cmake --build -j16`, Release) with the `<memory>` include fix, **using
+`glslc`** as the SPIR-V compiler (see the portability note above — the
+`glslangValidator` fallback is a separate follow-up).
 `ctest`: **40 / 42 pass**, 2 skipped (no physical GPU: the WSL Vulkan device
 is **llvmpipe**, a software rasterizer). `EngineReload` — including the new
 epoch-barrier checks — **passes on Linux** too. The two failures are
@@ -155,7 +164,9 @@ warmup peak of 6).
 Additional graphical smokes (both exit 0):
 
 - `ft_vox --seed 42 --view 8 100 8 -90 0 3` — inspection camera (flight via
-  `sim->setPlayerFlight`, suspended player/mobs, clean shutdown).
+  `sim->setPlayerFlight`, player input skipped, day cycle pinned, clean
+  shutdown). Mobs are not suspended by inspection itself (see the suspension
+  matrix); the smoke only asserts a clean run, not mob freeze.
 - `ft_vox --seed 42 --world phase-e-smoke --view …` then
   `ft_vox --world phase-e-smoke --view …` — persistent save/restore through
   the real binary: session 2 adopts the stored seed and logs
@@ -180,10 +191,41 @@ Additional graphical smokes (both exit 0):
 
 Phase E completes the graphical host integration with **no behavior change**
 (deterministic fixtures bit-identical, full Windows suite green except the
-pre-existing #213 visual mismatch with identical metrics, Linux build fixed
-and its two test failures verified pre-existing on the base commit) and
-**no performance or memory regression** (mob/physics within noise, in-game
-benchmark Grade S at parity, zero staging failures, no persistent pool
-growth). The Engine is a pure graphical host: commands in, snapshots out,
-one suspension policy, and an explicit world-epoch barrier guaranteeing no
-stale render snapshot or async job survives a world reload.
+pre-existing #213 visual mismatch with identical metrics; Linux builds with
+the `<memory>` include fix and was verified with `glslc`, its two test
+failures verified pre-existing on the base commit) and **no performance or
+memory regression** (mob/physics within noise, in-game benchmark Grade S at
+parity, zero staging failures, no persistent pool growth). The Engine is a
+pure graphical host: commands in, snapshots out, one suspension policy, and an
+explicit world-epoch barrier guaranteeing no stale render snapshot or async
+job survives a world reload.
+
+## Review round 1
+
+Six review findings were addressed:
+
+- **Medium — vacuous derived-state checks.** `EngineReload` now drives a real
+  derived-projection step (`stepDerivedProjectionForTests`: `tickStreaming` +
+  `tickMobs`) before the reload and asserts the draw/shadow/mob containers are
+  non-empty, so the "dropped on reload" checks are non-vacuous. Verified by
+  mutation: commenting out the three `resetWorldProjection` clears makes all
+  three checks fail. (Natural mob spawning needs terrain beyond the bootstrap
+  radius, so a presentation state is seeded when the step produced none — the
+  clear is independent of how the snapshot was produced.)
+- **Low — `--view` does not suspend mobs.** Corrected the suspension matrix in
+  `Engine.hpp`, `engine-architecture.md` and this doc: inspection skips player
+  input and pins the day cycle but does not itself suspend mobs
+  (`m_inspectionView` is not in `simulationSuspended()`). No behavior change.
+- **Low — stale §10 Locks sentence.** Aligned with `RenderWorldBridge.hpp`:
+  Phase E kept both paths main-thread-only; revisit before threading.
+- **Low — step numbering.** `engine-architecture.md` now matches `Engine.cpp`'s
+  16-step list (Events…Telemetry), with profiler begin/end documented as
+  wrapping the frame rather than as step 1.
+- **Low — "Linux build fixes" overclaim.** Reworded: only the `<memory>` include
+  is a repository fix; `glslc` is how the verification was run. The
+  `glslangValidator` fallback / `install_dep.sh` gap is noted as a follow-up
+  outside #209's wiring scope.
+- **Low — placement rule is a query, not enforcement.** Clarified in
+  `GameSimulation.hpp`, `player-physics.md`, the contracts doc and this doc:
+  `placeVoxel` does not call `canPlaceVoxel`; hosts that want player-aware
+  placement must gate edits with it (the graphical host does).

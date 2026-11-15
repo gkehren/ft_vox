@@ -269,9 +269,11 @@ public:
     /// Player-aware placement rule (issue #209, Epic #204 Phase E): a SOLID
     /// block may not be placed where it would overlap the authoritative
     /// player body — unless the player is flying or the block is non-solid.
-    /// This is gameplay validation, shared by the graphical host (which
-    /// still publishes the accepted edit through the bridge) and headless
-    /// hosts (placeVoxel below); it lives here so neither copies the rule.
+    /// This is a PURE QUERY, not enforcement: placeVoxel() below does NOT call
+    /// it, so a host that wants player-aware placement MUST gate its edit with
+    /// canPlaceVoxel() first (the graphical host does; headless hosts/tests may
+    /// deliberately place inside the body by calling placeVoxel() directly).
+    /// It lives here so the rule is defined once and shared, not copied.
     /// Pure query: it never edits the world.
     bool canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) const;
 
