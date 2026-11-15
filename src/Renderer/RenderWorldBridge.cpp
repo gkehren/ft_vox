@@ -231,11 +231,15 @@ void RenderWorldBridge::drainWorldEvents()
 				  << " event(s) — render consumer fell behind the authoritative world\n";
 		m_lastDroppedEvents = dropped;
 	}
-	std::vector<WorldEvent> events = m_world->takeEvents();
-	if (events.empty())
+	// Reuse one persistent buffer across the several drains per frame instead
+	// of allocating a fresh vector each time (issue #219). clear() keeps the
+	// capacity; takeEvents() appends into it under the world lock.
+	m_eventDrainBuffer.clear();
+	m_world->takeEvents(m_eventDrainBuffer);
+	if (m_eventDrainBuffer.empty())
 		return;
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	for (const WorldEvent &e : events)
+	for (const WorldEvent &e : m_eventDrainBuffer)
 	{
 		switch (e.kind)
 		{

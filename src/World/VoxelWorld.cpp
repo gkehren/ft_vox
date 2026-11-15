@@ -156,10 +156,21 @@ void VoxelWorld::emitEvent(const WorldEvent &event)
 
 std::vector<WorldEvent> VoxelWorld::takeEvents()
 {
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	std::vector<WorldEvent> out(m_events.begin(), m_events.end());
-	m_events.clear();
+	std::vector<WorldEvent> out;
+	takeEvents(out);
 	return out;
+}
+
+void VoxelWorld::takeEvents(std::vector<WorldEvent> &out)
+{
+	// Buffer-reuse drain (issue #219): the render adapter drains several times
+	// per frame, so appending into a caller-owned vector lets it keep one
+	// persistent buffer and avoid a fresh heap allocation on every drain. The
+	// events and their order are identical to the return-by-value overload;
+	// the stream is emptied under the same exclusive lock.
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
+	out.insert(out.end(), m_events.begin(), m_events.end());
+	m_events.clear();
 }
 
 // ---------------------------------------------------------------------------

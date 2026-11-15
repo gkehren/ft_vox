@@ -180,6 +180,11 @@ public:
 
 	/// Drain the main-thread event stream (render adapter / tests).
 	std::vector<WorldEvent> takeEvents();
+	/// Buffer-reuse drain (issue #219): append the pending events into `out`
+	/// (keeping its capacity) and empty the stream. Same events/order as the
+	/// return-by-value overload; lets a consumer that drains several times per
+	/// frame reuse one persistent buffer instead of allocating per drain.
+	void takeEvents(std::vector<WorldEvent> &out);
 	/// Events dropped at the stream cap because a consumer fell behind
 	/// (zero while draining at frame cadence). Main thread only, like the
 	/// stream itself. Surfaced by RenderWorldBridge::drainWorldEvents as a

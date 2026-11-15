@@ -406,6 +406,10 @@ private:
 	uint64_t m_worldGenerationId{0};
 	/// Last observed world event-drop count (one-shot warning on change).
 	uint64_t m_lastDroppedEvents{0};
+	/// Persistent event-drain scratch (issue #219): reused across the several
+	/// drainWorldEvents() calls per frame so the stream copy allocates only
+	/// until the buffer reaches its steady-state capacity. Main-thread only.
+	std::vector<WorldEvent> m_eventDrainBuffer;
 
 	// --- Render handle map (derived; mirrors world residency) ---
 	std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> m_chunks;
