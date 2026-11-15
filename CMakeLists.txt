@@ -15,6 +15,26 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ---------------------------------------------------------------------------
+# Build scope (issue #210, Epic #204 Phase F)
+#
+# FT_VOX_GRAPHICS=ON  (default): the full game + renderer + every test.
+# FT_VOX_GRAPHICS=OFF: CPU-only configuration — ft_vox_core, the
+#   ft_vox_headless simulation runner and the CPU-only tests. The graphical
+#   dependency stack (SDL3, Vulkan, volk, VMA, miniz, SPIR-V compilers) is
+#   NOT discovered at all, so this configures on a machine with no Vulkan
+#   SDK / SDL3 / shader toolchain. See docs/headless-runner.md.
+# ---------------------------------------------------------------------------
+option(FT_VOX_GRAPHICS "Build the graphical game (SDL3/Vulkan/ImGui); OFF = CPU-only core + headless runner" ON)
+
+# Canonical floating-point codegen for the CPU simulation (issue #210):
+# OFF keeps the historical game codegen (-march=native on non-Apple, FMA
+# contraction allowed) — digests are reproducible per binary. ON compiles
+# ft_vox_core + ft_vox_headless without -march=native and with contraction
+# disabled, so authoritative-state digests compare across machines of the
+# same platform family (docs/headless-runner.md, "Determinism").
+option(FT_VOX_PORTABLE_FP "Portable FP codegen for ft_vox_core/headless (no -march=native, no FMA contraction)" OFF)
+
+# ---------------------------------------------------------------------------
 # Dependencies (system packages / vcpkg / FetchContent)
 # ---------------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
@@ -22,7 +42,9 @@ include(Dependencies)
 
 # ---------------------------------------------------------------------------
 # SPIR-V compile (+ auto-generated FrameUBO GLSL from C++ contract)
+# Graphical only: the CPU-only configuration has no shader targets/assets.
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 set(FT_VOX_SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/ressources/shaders/vulkan)
 set(FT_VOX_SPV_OUT_DIR ${CMAKE_BINARY_DIR}/ressources/shaders/spv)
 set(FT_VOX_GENERATED_SHADER_DIR ${CMAKE_BINARY_DIR}/generated/shaders)
@@ -121,7 +143,7 @@ add_custom_target(ft_vox_shaders ALL DEPENDS ${FT_VOX_SPV_FILES} ft_vox_frame_ub
 add_dependencies(ft_vox_shaders ft_vox_frame_ubo_glsl)
 
 # ---------------------------------------------------------------------------
-# Build-time git revision (regenerated every build)
+# Build-time git revision (regenerated every build) — graphical targets only
 # ---------------------------------------------------------------------------
 set(FT_VOX_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 set(FT_VOX_BUILD_INFO_INC ${FT_VOX_GENERATED_DIR}/BuildInfo.inc)
@@ -147,6 +169,7 @@ add_custom_target(ft_vox_build_info ALL
     COMMENT "Generating BuildInfo.inc (git revision)"
     VERBATIM
 )
+endif() # FT_VOX_GRAPHICS (shaders + build info)
 
 # ---------------------------------------------------------------------------
 # Sources
@@ -294,17 +317,105 @@ target_link_libraries(ft_vox_core PUBLIC glm FastNoise2 Threads::Threads)
 # non-Apple elsewhere), so the extracted units compile exactly as they did in
 # the monolithic game build. This is a same-target claim only: CPU test targets
 # compile these sources with their own flags (no -march=native), so cross-target
-# bit-identity is NOT guaranteed (FMA contraction can differ on Linux). A
-# canonical shared flag set is deferred to #210.
+# bit-identity is NOT guaranteed (FMA contraction can differ on Linux).
+# Issue #210 (Phase F): FT_VOX_PORTABLE_FP=ON selects the canonical shared
+# flag set for cross-machine digest comparison — no -march=native, FMA
+# contraction disabled (GCC/Clang), precise FP (MSVC). The default stays
+# byte-identical to the historical game codegen. See docs/headless-runner.md.
 if(MSVC)
     target_compile_options(ft_vox_core PRIVATE $<$<CONFIG:Release>:/O2>)
+    if(FT_VOX_PORTABLE_FP)
+        target_compile_options(ft_vox_core PRIVATE /fp:precise)
+    endif()
 else()
     target_compile_options(ft_vox_core PRIVATE $<$<CONFIG:Release>:-O3>)
-    if(NOT APPLE)
+    if(FT_VOX_PORTABLE_FP)
+        target_compile_options(ft_vox_core PRIVATE -ffp-contract=off)
+    elseif(NOT APPLE)
         target_compile_options(ft_vox_core PRIVATE $<$<CONFIG:Release>:-march=native>)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# ft_vox_headless — standalone CPU simulation runner (issue #210, Epic #204
+# Phase F). The graphical-free host of sim::GameSimulation: links ONLY
+# ft_vox_core (transitively glm + FastNoise2 + Threads). Built in BOTH
+# configurations; with FT_VOX_GRAPHICS=OFF it is the only executable besides
+# the CPU tests. No SDL3/Vulkan/ImGui/shader/resource dependency is reachable
+# (configure-time link-closure guard below + tests/check_headless_deps.py).
+# ---------------------------------------------------------------------------
+set(FT_VOX_HEADLESS_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/Headless/HeadlessMain.cpp
+    ${CMAKE_SOURCE_DIR}/src/Headless/HeadlessRunner.cpp
+    ${CMAKE_SOURCE_DIR}/src/Headless/SimScript.cpp
+    ${CMAKE_SOURCE_DIR}/src/Headless/SimDigest.cpp
+)
+
+add_executable(ft_vox_headless ${FT_VOX_HEADLESS_SOURCES})
+target_link_libraries(ft_vox_headless PRIVATE ft_vox_core)
+if(MSVC)
+    target_compile_options(ft_vox_headless PRIVATE $<$<CONFIG:Release>:/O2>)
+    if(FT_VOX_PORTABLE_FP)
+        target_compile_options(ft_vox_headless PRIVATE /fp:precise)
+    endif()
+else()
+    target_compile_options(ft_vox_headless PRIVATE $<$<CONFIG:Release>:-O3>)
+    if(FT_VOX_PORTABLE_FP)
+        target_compile_options(ft_vox_headless PRIVATE -ffp-contract=off)
+    elseif(NOT APPLE)
+        target_compile_options(ft_vox_headless PRIVATE $<$<CONFIG:Release>:-march=native>)
+    endif()
+endif()
+
+# Configure-time dependency guard (issue #210 acceptance criterion 1): walk
+# the TRANSITIVE link closure of ft_vox_headless and fail on any graphical
+# library, in either configuration. Generator-independent (declared targets,
+# not link lines); tests/check_headless_deps.py additionally verifies the
+# include closure and the actual build artifacts.
+function(ft_vox_assert_headless_link_closure target)
+    set(_visited "")
+    set(_pending "${target}")
+    while(_pending)
+        list(POP_FRONT _pending _current)
+        if(_current IN_LIST _visited)
+            continue()
+        endif()
+        list(APPEND _visited "${_current}")
+        if(_current MATCHES "(SDL3|SDL2|volk|VulkanMemoryAllocator|Vulkan::|miniz|imgui|glfw|glad)")
+            message(FATAL_ERROR
+                "ft_vox_headless link closure contains graphical dependency '${_current}' "
+                "(issue #210: the headless runner must link only ft_vox_core).")
+        endif()
+        if(TARGET "${_current}")
+            get_target_property(_iface "${_current}" INTERFACE_LINK_LIBRARIES)
+            if(_iface)
+                list(APPEND _pending ${_iface})
+            endif()
+            get_target_property(_direct "${_current}" LINK_LIBRARIES)
+            if(_direct)
+                list(APPEND _pending ${_direct})
+            endif()
+        endif()
+    endwhile()
+endfunction()
+ft_vox_assert_headless_link_closure(ft_vox_headless)
+
+# CPU-only configuration: the graphical stack must not even have been
+# DISCOVERED (no targets created by Dependencies.cmake).
+if(NOT FT_VOX_GRAPHICS)
+    foreach(_forbidden IN ITEMS SDL3::SDL3 volk::volk GPUOpen::VulkanMemoryAllocator miniz::miniz Vulkan::Vulkan)
+        if(TARGET ${_forbidden})
+            message(FATAL_ERROR
+                "FT_VOX_GRAPHICS=OFF but graphical target '${_forbidden}' exists — "
+                "dependency discovery leaked into the CPU-only configuration (issue #210).")
+        endif()
+    endforeach()
+endif()
+
+# ---------------------------------------------------------------------------
+# The graphical game (FT_VOX_GRAPHICS=ON only)
+# ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 # The game consumes ft_vox_core instead of recompiling its sources. Existing
 # tests keep compiling the sources directly (unchanged); because the game no
 # longer compiles them there are no duplicate symbols.
@@ -407,6 +518,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         ${FT_VOX_SPV_FILES}
         $<TARGET_FILE_DIR:${PROJECT_NAME}>/ressources/shaders/spv
 )
+endif() # FT_VOX_GRAPHICS (game target)
 
 include(CTest)
 if(BUILD_TESTING)

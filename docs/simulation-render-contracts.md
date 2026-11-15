@@ -1,4 +1,4 @@
-# Simulation / render contracts (Epic #204, Phases A–E — issues #205 / #206 / #207 / #208 / #209)
+# Simulation / render contracts (Epic #204, Phases A–F — issues #205 / #206 / #207 / #208 / #209 / #210)
 
 This is the authoritative design note for the boundary between the
 **CPU-owned simulation** (authoritative world + entities + player) and the
@@ -30,14 +30,22 @@ world-generation epoch barrier
 (`Engine::resetWorldProjection` + the bridge's epoch stamp) so no stale
 render snapshot or async job survives a world reload. The bridge only
 *references* the simulation-owned world — it never owns simulation state —
-and the simulation runs headless with no bridge registered. No gameplay,
+and the simulation runs headless with no bridge registered. Phase F
+(issue #210) **proved the boundary with a standalone executable**:
+`ft_vox_headless` hosts the same `GameSimulation` facade with no SDL3,
+Vulkan, ImGui, camera or renderer, and a `FT_VOX_GRAPHICS=OFF` CMake
+configuration builds the CPU library + runner + CPU tests with the graphics
+stack **not discovered at all** (see [`headless-runner.md`](headless-runner.md)).
+No gameplay,
 terrain, save-format, input or UI behavior changed: the full test suite and
 the visual golden comparisons hold (§10,
 `benchmarks/issue-206-phase-b.md`, `benchmarks/issue-207-phase-c.md`,
-`benchmarks/issue-208-phase-d.md`, `benchmarks/issue-209-phase-e.md`).
+`benchmarks/issue-208-phase-d.md`, `benchmarks/issue-209-phase-e.md`,
+`benchmarks/issue-210-phase-f.md`).
 
 Related documents:
 
+- [`headless-runner.md`](headless-runner.md) — the Phase F standalone simulation runner (CLI, scripts, digest, CPU-only build)
 - [`engine-architecture.md`](engine-architecture.md) — engine loop, chunks, streaming, terrain gen
 - [`vulkan-graphics.md`](vulkan-graphics.md) — Vulkan device path, pass graph, shaders
 - [`terrain-generation.md`](terrain-generation.md) — noise graphs, biome/block catalog
@@ -161,7 +169,7 @@ snapshots — no path nests the world and render locks anymore.
    (#208 facade, #206 world)
           │
           ▼
-   ft_vox_core  ──►  ft_vox_headless runner            (#210, phase F)
+   ft_vox_core  ──►  ft_vox_headless runner            (#210, phase F — landed)
 ```
 
 The arrow that matters: **render depends on simulation, never the reverse.**
@@ -170,7 +178,10 @@ phases B–E move the authoritative world, the bridge, the simulation facade and
 the graphical runtime across it. The epic's suggested `GameRuntime` layer is
 realized by the `Engine` host itself (issue #209 kept the wiring in one host
 object — no extra adapter indirection was needed once the facade and bridge
-existed); the headless runner (#210) consumes the same facade directly.
+existed); the headless runner (#210) consumes the same facade directly —
+**landed**: `ft_vox_headless` links only `ft_vox_core`, and the
+`FT_VOX_GRAPHICS=OFF` configuration builds it without discovering the
+graphics stack at all ([`headless-runner.md`](headless-runner.md)).
 
 ---
 
@@ -250,7 +261,10 @@ Public properties (propagate to every consumer):
   did in the monolithic game build. This is a **same-target** claim: the CPU
   test targets compile these sources with their own flags (no `-march=native`),
   so cross-target bit-identity is **not** guaranteed — FMA contraction can
-  differ on Linux. A canonical shared flag set is deferred to #210.
+  differ on Linux. Phase F (#210) added the canonical shared flag set as the
+  `FT_VOX_PORTABLE_FP` option (no `-march=native`, `-ffp-contract=off` /
+  `/fp:precise`) for cross-machine digest comparison; the default codegen is
+  unchanged. See [`headless-runner.md`](headless-runner.md) §2/§5.
 
 The game executable compiles `FT_VOX_GAME_SOURCES = FT_VOX_SOURCES −
 FT_VOX_CORE_SOURCES` and links `ft_vox_core` **first**, followed by the existing
@@ -450,7 +464,7 @@ boundary before migrating behavior."
 | **C** | **#207** | `RenderWorldBridge` (renderer-owned) produces derived meshes/lighting/uploads from authoritative state and **references** the host-owned world; mesh publish validates against `sim::ChunkIdentity` (no duplicate pair). **Removed** the `ChunkManager` render adapter and the `ChunkCollisionView` light wrapper; the bridge attaches to a live world and the world runs headless without it. | Render output unchanged (visual goldens identical); bridge consumes the event stream + resident snapshots, never owns sim; `RenderBridge` boundary suite + full suite + goldens hold — **landed (PR #215)** |
 | **D** | **#208** | `sim::GameSimulation` facade (CPU-only, in `ft_vox_core`) owns `TerrainGenerator` + `VoxelWorld` + `PlayerController` (120 Hz) + `MobSystem` (60 Hz); explicit lifecycle/commands, plain-value observer, read-only bounded snapshots. **Removed** the `ChunkMobWorld` mob adapter (CPU seam: `WorldMobView`; entity light stays bridge-derived, sampled by the host after the snapshot). | Fixed-step determinism preserved; no render includes; headless `GameSimulation` suite (scripted determinism, physics/mob edges, reload/restore, rates) + full suite + goldens hold — **landed** |
 | **E** | **#209 (this)** | Graphical `Engine` host drives `GameSimulation` via commands + snapshots: documented 16-step `run()` orchestration, single `simulationSuspended()` policy, player-aware placement query (`canPlaceVoxel`, hosts gate edits with it), world-epoch barrier (`resetWorldProjection` + bridge epoch stamp). No authoritative gameplay state in the host; all temporary adapters removed. | Game behaves identically; input/UI unchanged; epoch monotonicity + derived-state reset covered by `EngineReload` (real derived-projection step before reload, so the reset checks are non-vacuous), placement query by `GameSimulation`, epoch stamp by `RenderBridge`; full suite + goldens hold — **landed** |
-| F | #210 | `ft_vox_headless` executable links `ft_vox_core` (+ sim) with **no** SDL/Vulkan. | Headless run + save round-trip; remove top-level GPU configure requirement |
+| **F** | **#210** | `ft_vox_headless` executable links `ft_vox_core` only — no SDL/Vulkan/ImGui, no camera/renderer/GPU pool. `FT_VOX_GRAPHICS=OFF` configure path: the graphics stack is **not discovered at all**; CPU library + runner + CPU tests build on a machine with no Vulkan SDK/SDL3/shader toolchain. Explicit headless interest source drives residency; deterministic sync + async generation; canonical state digest; save/reload round-trip. | Headless run + save round-trip + scripted determinism (`HeadlessSmoke`, `HeadlessRunner`); dependency guard (`HeadlessDeps`); clean CPU-only configure/build gate (`CpuOnlyBuild`); top-level GPU configure requirement removed — **landed** |
 | G | #211 | Closure gate: full epic verification. | All invariants hold; baselines compared |
 
 C (#207) and D (#208) may proceed in parallel after B; E (#209) follows both;
@@ -458,30 +472,30 @@ F (#210) follows D; G (#211) is last.
 
 ---
 
-## 8. Remaining build-system dependency (for Phase F)
+## 8. Build-system dependency — RESOLVED in Phase F (#210)
 
 The `ft_vox_core` library itself needs only GLM, FastNoise2 and
-`Threads::Threads`. However, the **top-level configure** still hard-requires the
-graphical stack for *every* configuration — including one that only wants the
-CPU library/tests. The remaining dependencies to remove/guard in Phase F are all
-in `cmake/Dependencies.cmake`:
+`Threads::Threads`. Before Phase F, the **top-level configure** hard-required
+the graphical stack for *every* configuration — including one that only wants
+the CPU library/tests. Phase F (#210) removed that requirement: the
+`FT_VOX_GRAPHICS` option (default ON) now scopes every graphical discovery in
+`cmake/Dependencies.cmake`, and with `FT_VOX_GRAPHICS=OFF` **none of the
+calls below runs at all**:
 
-| Dependency | Call | Failure mode | Needed by `ft_vox_core`? |
-|---|---|---|---|
-| Vulkan loader/headers | `find_package(Vulkan REQUIRED)` (line 181) | **fatal** at configure | No |
-| volk | CONFIG / FetchContent, `FATAL_ERROR` (line 214) | **fatal** at configure | No |
-| SDL3 | CONFIG / pkg-config / FetchContent, `FATAL_ERROR` (line 117) | **fatal** at configure | No |
-| Shader compiler (`glslc` / `glslangValidator`) | probe, `FATAL_ERROR` (line 344) | **fatal** at configure | No |
-| Vulkan Memory Allocator | CONFIG / header / FetchContent (always resolves) | non-fatal | No |
-| miniz | CONFIG / FetchContent | non-fatal | No |
+| Dependency | Call | Failure mode (pre-#210) | Needed by `ft_vox_core`? | Phase F status |
+|---|---|---|---|---|
+| Vulkan loader/headers | `find_package(Vulkan REQUIRED)` | **fatal** at configure | No | guarded by `FT_VOX_GRAPHICS` |
+| volk | CONFIG / FetchContent, `FATAL_ERROR` | **fatal** at configure | No | guarded by `FT_VOX_GRAPHICS` |
+| SDL3 | CONFIG / pkg-config / FetchContent, `FATAL_ERROR` | **fatal** at configure | No | guarded by `FT_VOX_GRAPHICS` |
+| Shader compiler (`glslc` / `glslangValidator`) | probe, `FATAL_ERROR` | **fatal** at configure | No | guarded by `FT_VOX_GRAPHICS` |
+| Vulkan Memory Allocator | CONFIG / header / FetchContent | non-fatal | No | guarded by `FT_VOX_GRAPHICS` |
+| miniz | CONFIG / FetchContent | non-fatal | No | guarded by `FT_VOX_GRAPHICS` |
 
-Phase F (#210) must make the four **fatal** discoveries (Vulkan, volk, SDL3,
-shader compiler) optional — or scope them to the graphical targets — so
-`ft_vox_headless` and the CPU-only tests can configure and build on a machine
-with no Vulkan SDK / SDL3 / shader toolchain. VMA and miniz are graphical-only
-too but already resolve without a hard failure. These are the **only remaining
-build-system dependencies to remove**; they are intentionally left in place in
-Phase A to keep the normal configuration unchanged (criterion #4).
+The shader targets, the game executable and every graphical test target are
+likewise wrapped in `if(FT_VOX_GRAPHICS)`. The CPU-only configuration is
+verified by the `CpuOnlyBuild` CTest (a separate clean configure/build/test
+run) and the `HeadlessDeps` guard (include closure + link artifacts + cache
+discovery check). See [`headless-runner.md`](headless-runner.md) §2.
 
 ---
 
@@ -709,6 +723,45 @@ host contract explicit and closed the remaining gaps.
   + seed, and the barrier's `invalidateBiomeMap()` resets the pan/preview
   state with the epoch. No new design work.
 
+### The Phase F headless runner contract (issue #210)
+
+Phase F added the standalone consumer that proves the boundary — no
+simulation behavior changed:
+
+- **`ft_vox_headless`** (`src/Headless/`) links **only `ft_vox_core`**. It
+  hosts `sim::GameSimulation` exactly like the graphical Engine — commands
+  in, snapshots out — and owns nothing authoritative itself. No SDL window,
+  Vulkan context, ImGui, Camera, RenderWorldBridge, render handle or GPU
+  pool is ever constructed (include guard: `tests/check_headless_deps.py`;
+  configure-time transitive link-closure assertion in `CMakeLists.txt`).
+- **Explicit headless interest source.** Residency/streaming is driven by a
+  plain point + radius (`--interest`, `--interest-radius`), converted to the
+  render-free `WorldStreamSettings` — never a Camera or GPU render distance.
+  Per-frame budgets are fixed counts (8 loads / 8 generations), never
+  wall-clock derived, so the workload is reproducible.
+- **Deterministic generation, both paths.** `--workers 0` uses the new
+  `VoxelWorld::generatePendingVoxelsSync` (the synchronous counterpart of
+  `generatePendingVoxels`: same nearest-first selection, saved-override
+  re-application and GenQueued/Generated events, main-thread only).
+  `--workers N` dispatches through the real ThreadPool and **quiesces every
+  frame** (bounded by `--timeout`), so worker scheduling never leaks into
+  authoritative state: both modes produce the same canonical digest.
+- **Canonical digest.** `src/Headless/SimDigest.cpp` hashes documented
+  canonical fields only (world identity, observed-area occupancy, player
+  body, id-sorted mob population, edit counters) — no pointers, unordered
+  iteration, padding or GPU state. Format and determinism scope:
+  [`headless-runner.md`](headless-runner.md) §5.
+- **Persistence contracts unchanged.** Open/create, sparse edits, flush,
+  refusable close, reload and player restore all go through the same
+  `GameSimulation`/`WorldPersistence` seams the game uses (issue #180). A
+  requested world that fails to open is an error exit (the runner never
+  silently falls back to a transient session). Save-on-exit captures the
+  player with pinned yaw/pitch 0 (orientation is presentation).
+- **CPU-only build slice.** `FT_VOX_GRAPHICS=OFF` skips every graphical
+  discovery and target (§8); `FT_VOX_PORTABLE_FP=ON` selects the canonical
+  shared FP flag set deferred from Phase A. The `CpuOnlyBuild` CTest runs a
+  separate clean configure/build/test as the acceptance gate.
+
 ### Verification
 
 `benchmarks/issue-206-phase-b.md`, `benchmarks/issue-207-phase-c.md`,
@@ -730,3 +783,8 @@ sparse-diff terrain determinism under GCC, `VisualRegression` on the llvmpipe
 software rasterizer) were **verified identical on the base commit** —
 pre-existing platform issues for #210/#211, not Phase E regressions. See
 `benchmarks/issue-209-phase-e.md` for the exact reproduction steps.
+Phase F verification (`benchmarks/issue-210-phase-f.md`): the headless
+acceptance driver (sync + async determinism, 3-process save/reload/edit
+round-trip, every failure exit code), the dependency guard, and the clean
+`FT_VOX_GRAPHICS=OFF` configure/build/test gate — on Windows/MSVC and on
+WSL2 Debian (GCC, no Vulkan SDK / SDL3 / shader toolchain discovered).

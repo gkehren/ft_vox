@@ -1,0 +1,45 @@
+# ft_vox_headless canonical scripted fixture (issue #210, Epic #204 Phase F).
+#
+# Deterministic by construction: fixed seed (--seed 42), fixed host dt
+# (1/60), fixed per-frame streaming budgets, synchronous generation by
+# default. Run it twice and compare the SUMMARY digest:
+#
+#   ft_vox_headless --seed 42 --ticks 600 --script tests/fixtures/sim-actions.txt
+#
+# Edits target y=220: guaranteed air above any generated terrain, far from
+# the player body (the player-aware placement rule never refuses them).
+# Block names are single tokens (underscores, case-insensitive).
+
+# --- locomotion legs (world-XZ movement, sprint, jump) ---------------------
+wait 30
+move 1 0
+wait 60
+sprint on
+move 0 1
+wait 60
+jump
+wait 30
+sprint off
+move -1 0
+wait 60
+move 0 -1
+wait 60
+
+# --- authoritative local edits (cell coordinates) --------------------------
+place 8 220 8 Stone
+place 9 220 8 Dirt
+place 10 220 8 Glass
+expect voxel 8 220 8 Stone
+expect voxel 9 220 8 Dirt
+expect voxel 10 220 8 Glass
+delete 9 220 8
+expect voxel 9 220 8 air
+
+# --- settle, then re-verify the surviving edits -----------------------------
+wait 120
+expect voxel 8 220 8 Stone
+expect voxel 10 220 8 Glass
+expect voxel 9 220 8 air
+
+# Total scripted frames: 420. With --ticks 600 the runner idle-fills the
+# remaining 180 frames (deterministic end condition).

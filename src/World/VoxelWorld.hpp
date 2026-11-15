@@ -153,6 +153,15 @@ public:
 	/// Dispatch async terrain generation for nearby UNLOADED records.
 	/// lodThresholdSq = (2 * fullQualityRange)^2, computed by the host.
 	void generatePendingVoxels(const glm::vec3 &center, float lodThresholdSq, int budget);
+	/// Synchronous counterpart for headless hosts without a worker pool
+	/// (issue #210, Epic #204 Phase F): generates up to `budget` UNLOADED
+	/// records nearest-first on the calling thread, with the same selection,
+	/// saved-override re-application and GenQueued/Generated event vocabulary
+	/// as the async path. Deterministic by construction — no worker schedule
+	/// participates. Storage allocation failures leave the record UNLOADED
+	/// for a later tick (registered records are never recycled here, unlike
+	/// the pre-registration bootstrap path). Returns the number generated.
+	int generatePendingVoxelsSync(const glm::vec3 &center, int budget);
 	/// Grow the record pool toward minCapacity (incremental, capped per call;
 	/// same growth contract as ChunkPool).
 	bool ensureRecordCapacity(size_t minCapacity, size_t maxGrowPerCall = kChunkPoolMaxGrowPerCall);

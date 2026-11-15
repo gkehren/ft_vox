@@ -9,6 +9,14 @@
 # When CMAKE_TOOLCHAIN_FILE points at vcpkg, CONFIG packages resolve as usual.
 # Without a toolchain, we probe system/pkg-config and fall back to FetchContent
 # for small deps that are rarely packaged correctly (zeux/volk, VMA).
+#
+# CPU-only configuration (issue #210, Epic #204 Phase F): with
+# -DFT_VOX_GRAPHICS=OFF the graphical stack (SDL3, Vulkan loader/headers,
+# volk, VMA, miniz, SPIR-V compilers) is NOT DISCOVERED AT ALL — no
+# find_package / FetchContent call runs for it — so ft_vox_core,
+# ft_vox_headless and the CPU-only tests configure and build on a machine
+# with no Vulkan SDK, SDL3 or shader toolchain. Only Threads, the optional
+# Boost probe (test_network) and GLM/FastNoise2 remain.
 # =============================================================================
 
 include(FetchContent)
@@ -57,8 +65,9 @@ endfunction()
 find_package(Threads REQUIRED)
 
 # ---------------------------------------------------------------------------
-# SDL3
+# SDL3 (graphical only — not discovered at all with FT_VOX_GRAPHICS=OFF)
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 set(_FT_VOX_SDL3_OK FALSE)
 
 if(_FT_VOX_MODE STREQUAL "vcpkg" OR _FT_VOX_USING_VCPKG)
@@ -119,8 +128,10 @@ if(NOT _FT_VOX_SDL3_OK)
         "  Linux:   sudo apt install libsdl3-dev   OR   sudo dnf install SDL3-devel\n"
         "  macOS:   brew install sdl3   OR use vcpkg (see Makefile USE_VCPKG=1)\n"
         "  Windows: use vcpkg with vcpkg.json (sdl3[vulkan])\n"
-        "  Optional: cmake -DFT_VOX_FETCH_SDL3=ON to build SDL3 from source")
+        "  Optional: cmake -DFT_VOX_FETCH_SDL3=ON to build SDL3 from source\n"
+        "  CPU-only: cmake -DFT_VOX_GRAPHICS=OFF skips SDL3 entirely (issue #210)")
 endif()
+endif() # FT_VOX_GRAPHICS (SDL3)
 
 # ---------------------------------------------------------------------------
 # Boost (system for Asio) — needed by the test_network prototype ONLY.
@@ -176,8 +187,11 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# Vulkan (loader + headers via CMake FindVulkan / SDK)
+# Vulkan (loader + headers via CMake FindVulkan / SDK) — graphical only.
+# Vulkan, volk and VMA are wrapped in ONE FT_VOX_GRAPHICS guard: none of them
+# is discovered when the CPU-only configuration is selected (issue #210).
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 find_package(Vulkan REQUIRED)
 message(STATUS "Vulkan: ${Vulkan_LIBRARIES} (headers ${Vulkan_INCLUDE_DIRS})")
 
@@ -271,6 +285,7 @@ if(NOT _FT_VOX_VMA_OK)
     endif()
     set(_FT_VOX_VMA_OK TRUE)
 endif()
+endif() # FT_VOX_GRAPHICS (Vulkan / volk / VMA)
 
 # ---------------------------------------------------------------------------
 # GLM + FastNoise2 (always FetchContent — not reliable as system packages)
@@ -295,8 +310,9 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(FastNoise2)
 
 # ---------------------------------------------------------------------------
-# miniz (ZIP archive reader)
+# miniz (ZIP archive reader) — graphical only (resource packs / mob textures)
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 set(_FT_VOX_MINIZ_OK FALSE)
 find_package(miniz CONFIG QUIET)
 if(TARGET miniz::miniz OR TARGET miniz)
@@ -321,10 +337,12 @@ endif()
 if(TARGET miniz AND NOT TARGET miniz::miniz)
     add_library(miniz::miniz ALIAS miniz)
 endif()
+endif() # FT_VOX_GRAPHICS (miniz)
 
 # ---------------------------------------------------------------------------
-# SPIR-V compilers
+# SPIR-V compilers — graphical only (no shader assets in the CPU-only build)
 # ---------------------------------------------------------------------------
+if(FT_VOX_GRAPHICS)
 find_program(GLSLANG_VALIDATOR glslangValidator
     HINTS ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}
     PATHS
@@ -345,11 +363,19 @@ if(NOT GLSLC AND NOT GLSLANG_VALIDATOR)
         "Neither glslc nor glslangValidator found.\n"
         "  Linux:   sudo apt install glslang-tools   OR   sudo dnf install glslang\n"
         "  macOS:   brew install glslang   OR shaderc\n"
-        "  Windows: vcpkg glslang / LunarG Vulkan SDK")
+        "  Windows: vcpkg glslang / LunarG Vulkan SDK\n"
+        "  CPU-only: cmake -DFT_VOX_GRAPHICS=OFF skips shader compilers (issue #210)")
 endif()
 
 if(GLSLC)
     message(STATUS "SPIR-V compiler: glslc (${GLSLC})")
 else()
     message(STATUS "SPIR-V compiler: glslangValidator (${GLSLANG_VALIDATOR})")
+endif()
+endif() # FT_VOX_GRAPHICS (SPIR-V compilers)
+
+if(NOT FT_VOX_GRAPHICS)
+    message(STATUS "ft_vox: CPU-only configuration (FT_VOX_GRAPHICS=OFF) — "
+                   "SDL3/Vulkan/volk/VMA/miniz/shader compilers NOT discovered; "
+                   "building ft_vox_core + ft_vox_headless + CPU tests only (issue #210)")
 endif()
