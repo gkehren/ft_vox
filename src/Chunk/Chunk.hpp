@@ -692,6 +692,10 @@ private:
 	// full move semantics - including per-column generation state - without
 	// exposing that state in the public API.
 	friend struct ChunkStateProbe;
+	// Testing hook (issue #207 review): lets the render-bridge boundary test
+	// assert the pending mesh payload actually carries geometry (sectionsBuilt),
+	// not merely that a result was published.
+	friend struct RenderBridgeProbe;
 };
 
 inline size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const

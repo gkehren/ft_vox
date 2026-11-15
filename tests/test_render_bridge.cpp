@@ -44,8 +44,9 @@ static int g_checks = 0;
 		}                                                                      \
 	} while (0)
 
-// Friend probe declared in RenderWorldBridge.hpp / VoxelWorld.hpp: exposes the
-// commit-group set and the completed-job injection seam without public API.
+// Friend probe declared in RenderWorldBridge.hpp / VoxelWorld.hpp / Chunk.hpp:
+// exposes the commit-group set, the completed-job injection seam, the render
+// handle count and the pending mesh's section mask without public API.
 struct RenderBridgeProbe
 {
 	static size_t commitGroups(const RenderWorldBridge &b) { return b.m_commitGroups.size(); }
@@ -53,6 +54,19 @@ struct RenderBridgeProbe
 	{
 		std::lock_guard<std::mutex> lk(b.m_completedJobsMutex);
 		b.m_completedMeshJobs.push_back({c, r});
+	}
+	// The bridge's OWN handle map size (chunkCount() forwards to the world, so
+	// comparing it to world.chunkCount() would be vacuous).
+	static size_t renderHandleCount(const RenderWorldBridge &b) { return b.m_chunks.size(); }
+	// Sections the pending mesh payload actually rebuilt (0 = no geometry).
+	static uint16_t pendingSectionsBuilt(const Chunk *c)
+	{
+		return c->m_pendingResult ? c->m_pendingResult->sectionsBuilt : 0;
+	}
+	// Re-run the shared bind helper for an already-bound coord (idempotency).
+	static Chunk *rebindRecord(RenderWorldBridge &b, const glm::ivec3 &coord)
+	{
+		return b.bindRecord(coord, b.world().getChunk(coord));
 	}
 };
 
@@ -143,8 +157,17 @@ int main()
 		RenderWorldBridge bridge(&world, &tp, &pool);
 		CHECK(&bridge.world() == &world, "bridge references the host world (no duplicate truth)");
 		populate(bridge, {0.f, 100.f, 0.f});
-		CHECK(bridge.chunkCount() == world.chunkCount(), "render handles mirror world residency");
+		CHECK(RenderBridgeProbe::renderHandleCount(bridge) == world.chunkCount(), "render handles mirror world residency");
 		CHECK(bridge.getChunk({0, 0, 0}) != nullptr, "render handle bound at origin");
+		// Idempotent bind (issue #207 review): re-binding an already-bound coord
+		// returns the same handle and never orphans a second one in the active list.
+		{
+			const size_t handlesBefore = RenderBridgeProbe::renderHandleCount(bridge);
+			Chunk *orig = bridge.getChunk({0, 0, 0});
+			Chunk *again = RenderBridgeProbe::rebindRecord(bridge, {0, 0, 0});
+			CHECK(again == orig, "bindRecord returns the existing handle on re-bind");
+			CHECK(RenderBridgeProbe::renderHandleCount(bridge) == handlesBefore, "re-bind does not orphan a handle");
+		}
 		const bool ok = bridge.placeVoxel({8.5f, 200.5f, 8.5f}, STONE);
 		bridge.processFinishedJobs();
 		CHECK(ok, "bridge edit accepted");
@@ -220,7 +243,7 @@ int main()
 		CHECK(ok && world.isVoxelActive({8.5f, 200.5f, 8.5f}), "world edits after bridge detach");
 
 		RenderWorldBridge bridge2(&world, &tp, &pool);
-		CHECK(bridge2.chunkCount() == world.chunkCount(), "reattached bridge binds existing residents");
+		CHECK(RenderBridgeProbe::renderHandleCount(bridge2) == world.chunkCount(), "reattached bridge binds existing residents");
 		CHECK(bridge2.getChunk({0, 0, 0}) != nullptr, "reattached handle at origin");
 		CHECK(bridge2.placeVoxel({8.5f, 201.5f, 8.5f}, STONE), "reattached edit accepted");
 		meshAll(bridge2, {0.f, 100.f, 0.f});
@@ -230,9 +253,14 @@ int main()
 		// Regression (issue #207 review): a previously-MESHED chunk that is NOT
 		// edited must still be re-armed on attach and remeshed — the fresh handle
 		// has no geometry, so a stale MESHED claim would leave it invisible.
+		// Assert sectionsBuilt != 0 (real geometry), not merely that a result was
+		// published: the re-arm leaves dirtySections()==0 and relies on the
+		// sectionMask==0 full-rebuild fallback in meshPendingChunks.
 		Chunk *farChunk = bridge2.getChunk({2, 0, 0});
 		CHECK(farChunk && farChunk->getState() == ChunkState::MESHED && farChunk->hasPendingMeshResult(),
 			  "reattached bridge remeshes a non-edited previously-MESHED chunk");
+		CHECK(farChunk && RenderBridgeProbe::pendingSectionsBuilt(farChunk) != 0,
+			  "reattached remesh carries geometry (sectionsBuilt != 0)");
 	}
 
 	if (g_fails != 0)

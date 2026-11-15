@@ -157,6 +157,11 @@ glm::ivec3 RenderWorldBridge::worldToChunkCoord(const glm::vec3 &worldPos)
 
 Chunk *RenderWorldBridge::bindRecord(const glm::ivec3 &coord, WorldChunk *record)
 {
+	// Idempotent: a duplicate bind for an already-registered coord returns the
+	// existing handle instead of acquiring a second one and orphaning the first
+	// in m_activeChunks (issue #207 review). Callers may still pre-check.
+	if (auto it = m_chunks.find(coord); it != m_chunks.end())
+		return it->second;
 	if (!m_chunkPool)
 		return nullptr;
 	Chunk *chunk = m_chunkPool->acquire(glm::vec3(
@@ -170,7 +175,10 @@ Chunk *RenderWorldBridge::bindRecord(const glm::ivec3 &coord, WorldChunk *record
 	// GPU ranges — that claim is stale: re-arm for a rebuild so mesh dispatch
 	// picks it up instead of leaving it resident-but-invisible until an unrelated
 	// invalidation (issue #207 review). Fresh loads are UNLOADED/GENERATED here,
-	// so this is a no-op on the streaming and bootstrap paths.
+	// so this is a no-op on the streaming and bootstrap paths. setState leaves
+	// dirtySections()==0, so the rebuild is a FULL mesh via the sectionMask==0
+	// fallback in meshPendingChunks — the boundary test asserts sectionsBuilt!=0
+	// to catch that fallback ever being tightened.
 	if (chunk->getState() == ChunkState::MESHED)
 		chunk->setState(ChunkState::GENERATED);
 	m_chunks[coord] = chunk;
@@ -198,6 +206,8 @@ void RenderWorldBridge::attachToWorld()
 			const glm::ivec3 coord = record->coord();
 			if (m_chunks.find(coord) != m_chunks.end())
 				continue;
+			if (!m_chunkPool)
+				break; // no pool: nothing can bind; don't park every resident
 			if (!bindRecord(coord, record))
 				m_pendingBinds.push_back(coord);
 		}
@@ -265,6 +275,8 @@ void RenderWorldBridge::retryPendingBinds()
 {
 	if (m_pendingBinds.empty())
 		return;
+	if (!m_chunkPool)
+		return; // no pool: binds can never succeed; don't rescan every tick
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
 	std::vector<glm::ivec3> stillPending;
 	for (const glm::ivec3 &coord : m_pendingBinds)

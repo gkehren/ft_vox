@@ -55,7 +55,7 @@ All other visual scenes pass. New/changed suites:
 
 | Suite | Result | Notes |
 |---|---|---|
-| **RenderBridge** (new, CPU-only) | PASS, 26 checks, 0.73 s | Phase C boundary acceptance (below) |
+| **RenderBridge** (new, CPU-only) | PASS, 29 checks, 0.73 s | Phase C boundary acceptance (below) |
 | CoreContracts | PASS, 31 checks | unchanged |
 | CoreIncludeGuard | PASS | deleted headers dropped; mesh/light pools reclassified render-derived |
 | VoxelWorld | PASS, 211 checks | headless world with no bridge (unchanged) |
@@ -195,6 +195,33 @@ except the pre-existing #213 mismatch; visual metrics unchanged):
   (park / grow-retry / skip).
 - **P3 — initializer shadowing.** `ChunkMobWorld` ctor parameters renamed
   `*Ref` so no member initializer can silently shadow a member.
+
+## Review fixes (round 2)
+
+Six further findings were addressed and re-verified (full suite green except
+the pre-existing #213 mismatch; visual metrics unchanged):
+
+- **Geometry, not just publication.** The attach regression now asserts
+  `sectionsBuilt != 0` on the rebuilt payload (via a `Chunk`-friend probe), not
+  merely that a result was published. The re-arm leaves `dirtySections()==0`
+  and relies on the `sectionMask==0` full-rebuild fallback in
+  `meshPendingChunks`; confirmed that tightening that fallback makes the new
+  assertion fail while the publication assertion still passes.
+- **Idempotent `bindRecord`.** The helper early-returns the existing handle for
+  an already-bound coord, so a duplicate bind can never acquire a second handle
+  and orphan the first in `m_activeChunks`. A re-bind check asserts the same
+  handle is returned and the handle count is unchanged.
+- **Null-pool guard.** Restored the `!m_chunkPool` break in `attachToWorld`
+  (don't park every resident when nothing can bind) and added a `!m_chunkPool`
+  early-out in `retryPendingBinds` (no unbounded per-tick rescan).
+- **Stale comments.** `test_world_persistence` destructor-safety-net comments
+  now credit `~VoxelWorld` (the bridge only quiesces), matching the round-1
+  ownership change.
+- **Non-vacuous residency check.** `bridge.chunkCount()` forwards to the world,
+  so comparing it to `world.chunkCount()` could never fail; the assertions now
+  compare the bridge's own `m_chunks.size()` (via the probe) to world residency.
+- **Benchmarks index.** `docs/benchmarks/README.md` now lists
+  `issue-207-phase-c.md`.
 
 ## Conclusion
 

@@ -1347,7 +1347,8 @@ static void testCloseWorldDrainsPendingEdits()
 }
 
 // ---------------------------------------------------------------------------
-// 8. Destructor safety net: an unclosed world is flushed by ~RenderWorldBridge
+// 8. Destructor safety net: an unclosed world is flushed by ~VoxelWorld
+//    (the bridge only quiesces derived work; the host/world owns the close).
 // ---------------------------------------------------------------------------
 
 static void testDestructorSafetyNet()
@@ -1595,7 +1596,7 @@ static void testDestructorDrainsCompletionsBeforeTeardown()
 		CHECK(mgr.placeVoxel(editPos, BRICKS), "edit accepted while the gen job is in flight");
 
 		// Deliberately NO processFinishedJobs, NO closeWorld, NO flush.
-	} // ~RenderWorldBridge: forceCloseWorldForShutdown must do all of it.
+	} // ~VoxelWorld: forceCloseWorldForShutdown must do all of it (the bridge only quiesced).
 
 	WorldPersistence verify;
 	const WorldPersistence::OpenInfo info =
@@ -1652,7 +1653,7 @@ static void testDestructorPublishesUnpublishedMeshCompletions()
 
 		// Deliberately NO processFinishedJobs: the destructor must publish
 		// the mesh completion, apply the deferred edit and save.
-	} // ~RenderWorldBridge
+	} // ~VoxelWorld (safety net; the bridge only quiesced derived work)
 
 	WorldPersistence verify;
 	const WorldPersistence::OpenInfo info =
