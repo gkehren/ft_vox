@@ -156,6 +156,7 @@ int main()
 		VoxelWorld world(&gen, &tp);
 		RenderWorldBridge bridge(&world, &tp, &pool);
 		CHECK(&bridge.world() == &world, "bridge references the host world (no duplicate truth)");
+		CHECK(bridge.worldGenerationId() == 0, "standalone bridge defaults to epoch 0 (issue #209)");
 		populate(bridge, {0.f, 100.f, 0.f});
 		CHECK(RenderBridgeProbe::renderHandleCount(bridge) == world.chunkCount(), "render handles mirror world residency");
 		CHECK(bridge.getChunk({0, 0, 0}) != nullptr, "render handle bound at origin");
@@ -227,7 +228,8 @@ int main()
 		ChunkPool pool(256);
 		VoxelWorld world(&gen, &tp);
 		{
-			RenderWorldBridge bridge(&world, &tp, &pool);
+			RenderWorldBridge bridge(&world, &tp, &pool, 7);
+			CHECK(bridge.worldGenerationId() == 7, "bridge carries the host's world epoch (issue #209)");
 			populate(bridge, {0.f, 100.f, 0.f});
 			meshAll(bridge, {0.f, 100.f, 0.f});
 			CHECK(world.chunkCount() > 0, "world populated before detach");
@@ -242,7 +244,8 @@ int main()
 		world.pump();
 		CHECK(ok && world.isVoxelActive({8.5f, 200.5f, 8.5f}), "world edits after bridge detach");
 
-		RenderWorldBridge bridge2(&world, &tp, &pool);
+		RenderWorldBridge bridge2(&world, &tp, &pool, 8);
+		CHECK(bridge2.worldGenerationId() == 8, "reattached bridge carries the new world epoch (issue #209)");
 		CHECK(RenderBridgeProbe::renderHandleCount(bridge2) == world.chunkCount(), "reattached bridge binds existing residents");
 		CHECK(bridge2.getChunk({0, 0, 0}) != nullptr, "reattached handle at origin");
 		CHECK(bridge2.placeVoxel({8.5f, 201.5f, 8.5f}, STONE), "reattached edit accepted");

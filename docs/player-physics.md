@@ -86,10 +86,15 @@ is retained.
 
 Pending logical voxel edits overlay published backing, ignoring mirror writes
 and edits stamped for a previous chunk incarnation. Placement into the current
-physical player is refused. An accepted queued placement blocks movement before
-its mesh is ready, so the player cannot enter it during a delayed remesh. A
-queued deletion removes collision immediately. Physics does not modify chunk
-storage, meshes, upload or retirement behavior.
+physical player is refused by the player-aware rule
+`sim::GameSimulation::canPlaceVoxel` (issue #209). That rule is a **pure query,
+not enforcement**: `placeVoxel` does not call it, so a host that wants
+player-aware placement must gate its edit with `canPlaceVoxel` first (the
+graphical host does; headless hosts/tests may place inside the body
+deliberately). An accepted queued placement blocks movement before its mesh is
+ready, so the player cannot enter it during a delayed remesh. A queued deletion
+removes collision immediately. Physics does not modify chunk storage, meshes,
+upload or retirement behavior.
 
 Spawn searches the already bootstrapped area for support and a clear body volume,
 including aquatic positions. If no safe spawn exists, debug flight remains

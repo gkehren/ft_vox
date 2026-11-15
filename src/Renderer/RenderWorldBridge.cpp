@@ -65,8 +65,10 @@ WorldStreamSettings worldStreamSettings(const RenderSettings &settings)
 }
 } // namespace
 
-RenderWorldBridge::RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, ChunkPool *chunkPool)
-	: m_world(world), m_threadPool(threadPool), m_chunkPool(chunkPool)
+RenderWorldBridge::RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, ChunkPool *chunkPool,
+									 uint64_t worldGenerationId)
+	: m_world(world), m_worldGenerationId(worldGenerationId),
+	  m_threadPool(threadPool), m_chunkPool(chunkPool)
 {
 	assert(m_world != nullptr && "RenderWorldBridge requires a host-owned VoxelWorld");
 	// Render-side worker profiling seam: the world itself is profiler-free
@@ -194,9 +196,9 @@ void RenderWorldBridge::attachToWorld()
 {
 	// Bind handles to records already resident in the world. The world does
 	// not re-emit Loaded events for them, so a bridge attached to a live world
-	// (Phase E) must project the current residency itself. bindRecord re-arms
-	// any stale MESHED claim; pool-exhaustion parks the coord for
-	// retryPendingBinds.
+	// (the host's post-transition attach, issue #209) must project the current
+	// residency itself. bindRecord re-arms any stale MESHED claim;
+	// pool-exhaustion parks the coord for retryPendingBinds.
 	{
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
 		for (WorldChunk *record : m_world->activeChunksSnapshot())

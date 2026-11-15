@@ -6,6 +6,7 @@
 // ownership / policy boundaries and docs/simulation-render-contracts.md.
 #include "Sim/GameSimulation.hpp"
 
+#include <Physics/BlockPhysics.hpp>
 #include <World/WorldCollisionView.hpp>
 #include <World/WorldMobView.hpp>
 
@@ -412,6 +413,22 @@ WorldEditResult GameSimulation::deleteVoxel(const glm::vec3 &worldPos)
 bool GameSimulation::isVoxelActive(const glm::vec3 &worldPos) const
 {
     return m_world && m_world->isVoxelActive(worldPos);
+}
+
+bool GameSimulation::canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) const
+{
+    // Historical Engine placement rule, moved verbatim behind the facade
+    // (issue #209): flying players and non-solid blocks never collide with
+    // the body; a solid block is refused when it overlaps the authoritative
+    // player body, so the body cannot be entombed by its own edit. Logical
+    // pending solids immediately participate in subsequent collision
+    // queries, so the body cannot enter before publication either.
+    if (m_playerFlight || !physics::blockCell(type).solid)
+        return true;
+    physics::Body playerBody;
+    playerBody.position = m_player.body.position;
+    return !physics::overlaps(playerBody.bounds(),
+                              physics::voxelBounds(glm::ivec3(glm::floor(worldPos))));
 }
 
 // ---------------------------------------------------------------------------

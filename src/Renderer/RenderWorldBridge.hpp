@@ -43,8 +43,9 @@
 // nesting lived in the removed ChunkMobWorld adapter; mob queries now hold
 // ONLY the world lock (WorldMobView) and the host samples entity light from
 // this bridge AFTER the mob snapshot, so no path holds both map locks at
-// once. Mesh dispatch still acquires render -> world (ensureShellPopulated);
-// revisit before threading either path (Phase E).
+// once. Mesh dispatch still acquires render -> world (ensureShellPopulated).
+// Phase E (#209) kept both paths main-thread-only; revisit the lock order
+// before threading either path.
 // =============================================================================
 
 #include <unordered_map>
@@ -182,7 +183,15 @@ public:
 	/// since Phase D #208) keeps its lifetime and must outlive the bridge.
 	/// The bridge installs the render-side worker profiling seam on the world
 	/// (headless worlds run without one).
-	RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, ChunkPool *chunkPool);
+	/// `worldGenerationId` is the host's world epoch (the simulation's
+	/// session reload counter, issue #209): it stamps WHICH authoritative
+	/// world incarnation this projection belongs to. The host's epoch
+	/// barrier (Engine::resetWorldProjection) destroys the bridge before the
+	/// world is replaced, so a projection never outlives its epoch; the
+	/// stamp makes the pairing explicit for tests and diagnostics.
+	/// Standalone worlds/tests may leave it 0.
+	RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, ChunkPool *chunkPool,
+					  uint64_t worldGenerationId = 0);
 	~RenderWorldBridge();
 
 	RenderWorldBridge(const RenderWorldBridge &) = delete;
@@ -193,6 +202,11 @@ public:
 	/// scheduling, UI telemetry and tests.
 	VoxelWorld &world() { return *m_world; }
 	const VoxelWorld &world() const { return *m_world; }
+
+	/// The world epoch this projection was attached at (issue #209). Equal
+	/// to sim::GameSimulation::worldGenerationId() for the live projection;
+	/// 0 for standalone/test bridges.
+	uint64_t worldGenerationId() const { return m_worldGenerationId; }
 
 	/// Enqueue loads / mark far chunks for unload based on camera position.
 	/// Returns what the load-side maintenance did this tick (the out-of-range
@@ -341,8 +355,9 @@ private:
 	/// Attach to a possibly-live world: bind render handles to records already
 	/// resident (no Loaded event is re-emitted for them) and drain any queued
 	/// change events, so the projection reflects current authoritative state
-	/// even when attached after loading began (issue #207; Phase E attaches
-	/// the bridge to a running GameSimulation). Main thread, constructor only.
+	/// even when attached after loading began (issue #207; the graphical host
+	/// attaches a fresh bridge to the running GameSimulation after every
+	/// world transition, issue #209). Main thread, constructor only.
 	void attachToWorld();
 	void onWorldLoaded(const WorldEvent &e);
 	void onWorldUnloaded(const WorldEvent &e);
@@ -387,6 +402,8 @@ private:
 
 	// --- The authoritative world (REFERENCED, host-owned; issue #207) ---
 	VoxelWorld *m_world{nullptr};
+	/// Host world epoch at attach (issue #209); 0 for standalone/test use.
+	uint64_t m_worldGenerationId{0};
 	/// Last observed world event-drop count (one-shot warning on change).
 	uint64_t m_lastDroppedEvents{0};
 

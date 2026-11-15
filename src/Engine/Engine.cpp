@@ -28,6 +28,9 @@
 
 namespace
 {
+/// Sky fallback clear (issue #209): shared by every recorded frame.
+constexpr VkClearColorValue kClearColor = {{0.38f, 0.58f, 0.92f, 1.0f}};
+
 int budgetFromRate(int perSec, double dt, double &accum)
 {
 	accum += static_cast<double>(perSec) * dt;
@@ -224,11 +227,69 @@ Engine::~Engine()
 	SDL_Quit();
 }
 
+void Engine::resetWorldProjection()
+{
+	// World-generation epoch barrier (issue #209, Epic #204 Phase E). Runs
+	// on every authoritative world transition BEFORE the old bridge is
+	// detached: the derived lists below reference its handles, and every
+	// per-world CPU snapshot must be dropped so nothing stale can feed the
+	// replacement projection. The simulation bumps worldGenerationId()
+	// across the transition; the new bridge is stamped with that epoch at
+	// attach, and the UI biome cache revalidates against it. Async jobs are
+	// quiesced by the bridge destructor against the still-live old world —
+	// this barrier owns the CPU-side derived state only.
+	drawList.clear();
+	shadowList.clear();
+	mobStates.clear();
+	if (worldRenderer)
+	{
+		// Drop the renderer's mob presentation too: setMobs is otherwise
+		// only refreshed by the next Mobs frame step.
+		worldRenderer->setMobs(mobStates);
+		worldRenderer->overlays().setHighlight(OverlayHighlight{});
+	}
+	highlight = OverlayHighlight{};
+	uploadBudgetThisFrame = 0;
+	// UI biome cache (issue #184): keyed on the world generation as well,
+	// but reset explicitly so a refused/aborted transition cannot keep a
+	// stale column sample either.
+	m_uiBiomeColumn = {std::numeric_limits<int>::min(), std::numeric_limits<int>::min()};
+	m_uiBiomeWorldGen = 0;
+	m_uiBiome = -1;
+	if (gameUi)
+		gameUi->invalidateBiomeMap();
+}
+
+void Engine::stepDerivedProjectionForTests(double dt)
+{
+	// Real production frame steps: the streaming step collects the draw/shadow
+	// lists from the bootstrapped (meshed + GPU-uploaded) chunks, and the mob
+	// step advances the authoritative simulation and fills mobStates.
+	tickStreaming(dt);
+	tickMobs(dt);
+	// Establish a non-empty mob presentation precondition (see header): the
+	// bootstrap radius is smaller than the mob spawn ring, so the real step
+	// above usually produces no mobs here. The seeded state is cleared by the
+	// epoch barrier on the next world transition, exactly like a real snapshot.
+	if (mobStates.empty())
+	{
+		// Sentinel parked far below the world (playable Y is [0,256]) so it
+		// cannot appear as a phantom mob if a future test renders between the
+		// seed and the reload; it is not pushed to WorldRenderer here (tickMobs
+		// already published the — empty — real snapshot above).
+		entities::MobRenderState sentinel;
+		sentinel.position = glm::vec3(0.0f, -10000.0f, 0.0f);
+		mobStates.push_back(sentinel);
+	}
+}
+
 void Engine::initializeNoiseGenerator(int seed_val)
 {
-	// Detach the derived projection BEFORE the simulation replaces the world
-	// (a re-initialize must never leave the bridge referencing a destroyed
-	// world; the bridge destructor quiesces against the still-live old one).
+	// Epoch barrier BEFORE detaching the old projection (issue #209): a
+	// re-initialize must never leave stale derived state — or a bridge
+	// referencing a destroyed world — behind. The bridge destructor quiesces
+	// against the still-live old world.
+	resetWorldProjection();
 	renderBridge.reset();
 
 	// The simulation owns the authoritative transition (issue #208): seed
@@ -241,12 +302,9 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	config.savesRoot = m_savesRoot;
 	const glm::dvec3 bootstrapCenter = sim->initialize(config, glm::dvec3(camera.getPosition()));
 
-	if (gameUi)
-		gameUi->invalidateBiomeMap();
-
 	camera.setPosition(glm::vec3(bootstrapCenter));
 	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
-												  chunkPool.get());
+												  chunkPool.get(), sim->worldGenerationId());
 
 	// Synchronous terrain bootstrap: authoritative voxels + render binding,
 	// meshing and upload in one step (the bridge drains the world's Loaded
@@ -465,11 +523,10 @@ bool Engine::reloadWorld(int newSeed)
 		}
 	}
 
-	if (gameUi)
-		gameUi->invalidateBiomeMap();
-
-	drawList.clear();
-	shadowList.clear();
+	// Epoch barrier (issue #209): drop every derived per-world CPU snapshot
+	// BEFORE the old bridge is detached (the lists reference its handles).
+	// A refused close above leaves the world AND its projection intact.
+	resetWorldProjection();
 
 	vkContext->waitIdle();
 	resourceRetire.flush();
@@ -489,7 +546,7 @@ bool Engine::reloadWorld(int newSeed)
 	// onto it so the aborted reload leaves a renderable session.
 	const bool reloaded = sim->reload(newSeed);
 	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
-												  chunkPool.get());
+												  chunkPool.get(), sim->worldGenerationId());
 	renderBridge->setChunkEventTraceEnabled(chunkTraceEnabled);
 	if (!reloaded)
 		return false;
@@ -911,13 +968,11 @@ void Engine::handleEvents()
 					renderBridge->deleteVoxel(block);
 				else if (event.button.button == SDL_BUTTON_RIGHT)
 				{
-					// Logical pending solids immediately participate in subsequent
-					// collision queries, so the body cannot enter before publication.
-					physics::Body playerBody;
-					playerBody.position = sim->playerFeet();
+					// Player-aware placement validation is authoritative gameplay
+					// state (issue #209): the simulation owns the rule, the bridge
+					// publishes the accepted edit (event drain + commit groups).
 					const TextureType selected = sim->selectedBlock();
-					if (sim->playerFlight() || !physics::blockCell(selected).solid ||
-						!physics::overlaps(playerBody.bounds(), physics::voxelBounds(glm::ivec3(glm::floor(prev)))))
+					if (sim->canPlaceVoxel(prev, selected))
 						renderBridge->placeVoxel(prev, selected);
 				}
 			}
@@ -938,7 +993,10 @@ void Engine::handleEvents()
 void Engine::processInput(double dt)
 {
     if (m_inspectionView) return;
-	if (m_benchmark.isActive() || paused || !windowFocused)
+	// Host suspension policy (issue #209): pause/focus/benchmark freeze the
+	// authoritative player; the simulation clears accumulators + buffered
+	// input so nothing accumulated is replayed on resume.
+	if (simulationSuspended())
 	{
 		sim->suspendPlayer();
 		jumpPressed = false;
@@ -975,6 +1033,41 @@ void Engine::processInput(double dt)
 		sim->advancePlayer(dt, input, false);
 		camera.setPosition(glm::vec3(sim->playerRenderEye()));
 	}
+}
+
+void Engine::tickMobs(double dt)
+{
+	PROFILE_SCOPE("Mobs");
+	if (!renderBridge || !sim->isInitialized())
+		return;
+	const bool disabled = !sim->mobsEnabled() || m_benchmark.isActive();
+	// Authoritative fixed-step mob simulation behind the CPU facade (issue
+	// #208): the scoped WorldMobView holds only the world lock; spawn/retire/
+	// interest are plain sim values. Suspension is host policy (issue #209):
+	// pause/focus/benchmark plus the authoritative mobs toggle.
+	sim->advanceMobs(dt, glm::dvec3(camera.getPosition()),
+					 renderSettings.maxRenderDistance,
+					 simulationSuspended() || !sim->mobsEnabled());
+	if (disabled)
+	{
+		mobStates.clear();
+	}
+	else
+	{
+		sim->mobSnapshots(mobStates);
+		// Derived entity light: sampled from the render bridge's caches
+		// AFTER the mob snapshot (presentation-side; the removed
+		// ChunkMobWorld adapter used to nest the world and render locks
+		// here — issue #208).
+		for (auto &ms : mobStates)
+		{
+			const glm::vec3 samplePos = entities::mobLightSamplePosition(ms);
+			const auto light = renderBridge->sampleSmoothedLight(samplePos);
+			ms.localSkylight = light.skylight;
+			ms.localBlockRgb = light.blockRgb;
+		}
+	}
+	worldRenderer->setMobs(mobStates);
 }
 
 void Engine::tickBenchmark(double dt)
@@ -1417,6 +1510,136 @@ void Engine::resetFrameClock()
 	}
 }
 
+void Engine::updateWindowTitle(double currentFrame)
+{
+	frameCount++;
+	if (currentFrame - lastTime < 1.0)
+		return;
+	fps = frameCount;
+	frameCount = 0;
+	lastTime = currentFrame;
+	char title[192];
+	char benchTag[48]{};
+	if (m_benchmark.isActive())
+	{
+		std::snprintf(benchTag, sizeof(benchTag), " [BENCH %.0fs]",
+					  m_benchmark.remainingMeasureSec());
+	}
+	std::snprintf(title, sizeof(title),
+				  "ft_vox — %.0f FPS | chunks %zu | draw %zu | seed %d%s%s",
+				  fps,
+				  renderBridge ? renderBridge->chunkCount() : 0,
+				  drawList.size(), sim->seed(),
+				  paused ? " [PAUSED]" : "", benchTag);
+	SDL_SetWindowTitle(window, title);
+}
+
+void Engine::updateFrameUniforms(uint32_t frameIndex, int pixelW, int pixelH, double currentFrame)
+{
+	PROFILE_SCOPE("UpdateUBO");
+	const float farPlane = computeCameraFarPlane(renderSettings.maxRenderDistance);
+	// Shadow quality tier change (issue #137): recreate the shadow map
+	// at the requested resolution before it feeds the frame UBO.
+	if (worldRenderer->postSettings().shadowMapSize > 0 &&
+		worldRenderer->activeShadowMapSize() != uint32_t(worldRenderer->postSettings().shadowMapSize))
+		worldRenderer->applyShadowMapSize(uint32_t(worldRenderer->postSettings().shadowMapSize));
+	// Visual immersion follows the eye, including water occupied by kelp.
+	bool underwater = false;
+	float underwaterSurfaceY = kUnknownUnderwaterSurfaceY;
+	if (renderBridge)
+	{
+		WorldCollisionView world(*sim->world());
+		const glm::ivec3 eye = glm::ivec3(glm::floor(camera.getPosition()));
+		underwater = world.sample(eye).medium == physics::Medium::Water;
+		underwaterSurfaceY = world.waterSurfaceAbove(eye);
+	}
+	worldRenderer->postSettings().underwater = underwater;
+	worldRenderer->postSettings().underwaterSurfaceY = underwaterSurfaceY;
+	worldRenderer->updateFrameUBO(frameIndex, camera,
+							static_cast<float>(pixelW), static_cast<float>(pixelH), farPlane,
+							static_cast<float>(currentFrame), shaderParams,
+							renderSettings.shadowCascadeFar, underwater);
+}
+
+void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget)
+{
+	PROFILE_SCOPE("Record");
+	worldRenderer->recordFrame(
+		frameCtx->commandBuffer(), frameIndex, imageIndex, *swapchain, drawList, shadowList, kClearColor,
+		[&](VkCommandBuffer cmd) {
+			if (renderBridge && uploadBudget > 0 && !paused)
+			{
+				PROFILE_SCOPE("MeshUpload");
+				const int n = renderBridge->uploadPendingMeshes(
+					vkContext->getAllocator(), stagingRing, cmd, resourceRetire,
+					worldRenderer->arenas(), camera, uploadBudget);
+				if (n > 0)
+				{
+					// Make staged mesh data visible to vertex/index fetch in later passes.
+					VkMemoryBarrier barrier{};
+					barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+					barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+					barrier.dstAccessMask =
+						VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
+					vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+										 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &barrier, 0, nullptr,
+										 0, nullptr);
+				}
+			}
+		},
+		[&](VkCommandBuffer cmd) {
+			if (imgui)
+				imgui->recordDraw(cmd);
+		},
+		// Biome-map upload AFTER the ImGui pass (issue #191 review
+		// round 2): ImGui samples this texture directly, so this
+		// frame's draw lists must record against the previous
+		// publication; the new pixels+grid become visible to the
+		// next frame's UI build. Mesh uploads stay in preRecord —
+		// nothing in ImGui samples them in the same frame.
+		[&](VkCommandBuffer cmd) {
+			if (gameUi && gameUi->hasPendingBiomeMapUpload())
+			{
+				PROFILE_SCOPE("BiomeMapUpload");
+				gameUi->recordPendingBiomeMapUpload(cmd, stagingRing);
+			}
+		}, &frameCtx->gpuProfiler(), m_benchmark.gpuCaptureTag());
+}
+
+// ===========================================================================
+// Frame orchestration (issue #209, Epic #204 Phase E). The Engine is the
+// graphical host: it owns SDL/Vulkan/ImGui and the presentation camera,
+// drives the CPU simulation through plain commands, and projects the sim's
+// read-only snapshots through the renderer-owned bridge. One frame runs in
+// this fixed order (the numbered steps below):
+//
+//   1. Events       SDL poll -> UI routing + sim commands (handleEvents)
+//   2. Viewport     minimized guard + deferred swapchain recreate
+//   3. Acquire      VkFrameContext::beginFrame (WSI; may block on present)
+//   4. Frame clock  paced dt sampled AFTER acquire so WSI stalls never feed
+//                   the simulation; failed acquire / minimize resync it
+//   5. Benchmark    benchmark policy; may reload the world (epoch barrier)
+//   6. Simulation   SDL -> PlayerCommand -> sim->advancePlayer; the camera
+//                   follows the interpolated render eye (flight: camera
+//                   drives the body via sim->setPlayerPosition)
+//   7. Day cycle    presentation-only ShaderParameters (pause-gated here)
+//   8. Streaming    bridge: publish jobs, dispatch gen/mesh/light, visibility,
+//                   draw/shadow lists, upload budget — NO GPU work here
+//   9. Mobs         sim->advanceMobs + snapshots + bridge entity light ->
+//                   WorldRenderer::setMobs
+//  10. Highlight    block raycast -> overlay
+//  11. Frame slots  retire/arena/staging beginFrame (fence already waited)
+//  12. ImGui        UI build from sim/render snapshots (CPU only)
+//  13. UBO          underwater sample + frame uniforms
+//  14. Record       passes + mesh uploads — the ONLY GPU upload point
+//  15. Present      submit + present
+//  16. Telemetry    gauges, profiler end, RenderTiming, benchmark sample
+//
+// The simulation never sees SDL/ImGui/Vulkan; the bridge never owns sim
+// state. World transitions (initializeNoiseGenerator / reloadWorld) go
+// through the epoch barrier (resetWorldProjection) so no stale derived
+// snapshot or async job survives a reload.
+// ===========================================================================
 void Engine::run()
 {
 	running = true;
@@ -1434,8 +1657,6 @@ void Engine::run()
 	lastTime = lastFrame;
 	const double inspectionStart = lastFrame;
 
-	const VkClearColorValue clearColor = {{0.38f, 0.58f, 0.92f, 1.0f}};
-
 	// First run on this machine (no imgui.ini yet): start with the default
 	// developer layout instead of an empty workspace. Benchmark runs keep the
 	// stock UI closed so open panels cannot perturb scores (issue #183).
@@ -1449,6 +1670,7 @@ void Engine::run()
 	{
 		GetProfiler().beginFrame();
 
+		// (1) Events: SDL -> UI routing + simulation commands.
 		{
 			PROFILE_SCOPE("Events");
 			handleEvents();
@@ -1459,15 +1681,15 @@ void Engine::run()
 			break;
 		}
 
+		// (2) Viewport: a minimized/hidden window skips the whole frame; the
+		// clock resync AFTER the sleep keeps the skipped stretch out of the
+		// next gameplay timestep (restore = rawDt of a normal frame).
 		int pixelW = 0, pixelH = 0;
 		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
 		if (pixelW == 0 || pixelH == 0)
 		{
 			GetProfiler().endFrame();
 			SDL_Delay(16);
-			// The window is minimized/hidden: re-synchronize the frame clock
-			// AFTER the sleep so the whole skipped stretch never feeds the
-			// next gameplay timestep (restore = rawDt of a normal frame).
 			resetFrameClock();
 			continue;
 		}
@@ -1488,6 +1710,9 @@ void Engine::run()
 			break;
 		}
 
+		// (3) Acquire: WSI image + frame slot. A failed acquire can block on
+		// presentation for a long time; that stretch is not simulated, so the
+		// frame clock is re-synchronized instead of feeding it to gameplay.
 		uint32_t imageIndex = 0;
 		{
 			PROFILE_SCOPE("Acquire");
@@ -1495,14 +1720,12 @@ void Engine::run()
 			{
 				requestSwapchainRecreate();
 				GetProfiler().endFrame();
-				// A failed acquire can block on presentation for a long
-				// time: that stretch is not simulated, so the frame clock
-				// is re-synchronized instead of feeding it to gameplay.
 				resetFrameClock();
 				continue;
 			}
 		}
 
+		// (4) Frame clock: paced dt from the acquire-to-acquire interval.
 		const uint64_t currentPerfCounter = SDL_GetPerformanceCounter();
 		const double currentFrame = static_cast<double>(currentPerfCounter) / static_cast<double>(m_perfFrequency);
 
@@ -1517,28 +1740,11 @@ void Engine::run()
 			swapchain ? swapchain->isVSync() : renderSettings.vsyncEnabled,
 			static_cast<double>(m_displayRefreshRate));
 
-		frameCount++;
-		if (currentFrame - lastTime >= 1.0)
-		{
-			fps = frameCount;
-			frameCount = 0;
-			lastTime = currentFrame;
-			char title[192];
-			char benchTag[48]{};
-			if (m_benchmark.isActive())
-			{
-				std::snprintf(benchTag, sizeof(benchTag), " [BENCH %.0fs]",
-							  m_benchmark.remainingMeasureSec());
-			}
-			std::snprintf(title, sizeof(title),
-						  "ft_vox — %.0f FPS | chunks %zu | draw %zu | seed %d%s%s",
-						  fps,
-						  renderBridge ? renderBridge->chunkCount() : 0,
-						  drawList.size(), sim->seed(),
-						  paused ? " [PAUSED]" : "", benchTag);
-			SDL_SetWindowTitle(window, title);
-		}
+		updateWindowTitle(currentFrame);
 
+		// (5) Benchmark policy (may reload the world through the epoch
+		// barrier), then (6) the authoritative player step, then (7) the
+		// presentation day cycle.
 		{
 			PROFILE_SCOPE("Benchmark");
 			tickBenchmark(deltaTime);
@@ -1551,49 +1757,23 @@ void Engine::run()
 			PROFILE_SCOPE("DayCycle");
 			tickDayCycle(deltaTime);
 		}
+		// (8) Derived world projection: streaming, visibility, draw lists.
 		tickStreaming(deltaTime);
-		{
-			PROFILE_SCOPE("Mobs");
-			if (renderBridge && sim->isInitialized()) {
-				const bool disabled = !sim->mobsEnabled() || m_benchmark.isActive();
-				// Authoritative fixed-step mob simulation behind the CPU
-				// facade (issue #208): the scoped WorldMobView holds only the
-				// world lock; spawn/retire/interest are plain sim values.
-				sim->advanceMobs(deltaTime, glm::dvec3(camera.getPosition()),
-								 renderSettings.maxRenderDistance, paused || !windowFocused || disabled);
-				if (disabled)
-				{
-					mobStates.clear();
-				}
-				else
-				{
-					sim->mobSnapshots(mobStates);
-					// Derived entity light: sampled from the render bridge's
-					// caches AFTER the mob snapshot (presentation-side; the
-					// removed ChunkMobWorld adapter used to nest the world and
-					// render locks here — issue #208).
-					for (auto &ms : mobStates)
-					{
-						const glm::vec3 samplePos = entities::mobLightSamplePosition(ms);
-						const auto light = renderBridge->sampleSmoothedLight(samplePos);
-						ms.localSkylight = light.skylight;
-						ms.localBlockRgb = light.blockRgb;
-					}
-				}
-				worldRenderer->setMobs(mobStates);
-			}
-		}
+		// (9) Mob simulation + derived presentation, (10) block highlight.
+		tickMobs(deltaTime);
 		{
 			PROFILE_SCOPE("Highlight");
 			updateHighlight();
 		}
 
+		// (11) Frame slot is free (fence waited): recycle retired GPU buffers
+		// + reset staging slice.
 		const uint32_t frameIndex = frameCtx->frameIndex();
-		// Frame slot is free (fence waited): recycle retired GPU buffers + reset staging slice.
 		resourceRetire.beginFrame(frameNumber);
 		worldRenderer->arenas().beginFrame(frameNumber);
 		stagingRing.beginFrame(frameIndex);
 
+		// (12) ImGui build from sim/render snapshots (CPU only; draw later).
 		if (imgui)
 		{
 			PROFILE_SCOPE("ImGui");
@@ -1602,95 +1782,32 @@ void Engine::run()
 			imgui->endFrame();
 		}
 
-		{
-			PROFILE_SCOPE("UpdateUBO");
-			const float farPlane = computeCameraFarPlane(renderSettings.maxRenderDistance);
-			// Shadow quality tier change (issue #137): recreate the shadow map
-			// at the requested resolution before it feeds the frame UBO.
-			if (worldRenderer->postSettings().shadowMapSize > 0 &&
-				worldRenderer->activeShadowMapSize() != uint32_t(worldRenderer->postSettings().shadowMapSize))
-				worldRenderer->applyShadowMapSize(uint32_t(worldRenderer->postSettings().shadowMapSize));
-			// Visual immersion follows the eye, including water occupied by kelp.
-			bool underwater = false;
-			float underwaterSurfaceY = kUnknownUnderwaterSurfaceY;
-			if (renderBridge)
-			{
-				WorldCollisionView world(*sim->world());
-				const glm::ivec3 eye = glm::ivec3(glm::floor(camera.getPosition()));
-				underwater = world.sample(eye).medium == physics::Medium::Water;
-				underwaterSurfaceY = world.waterSurfaceAbove(eye);
-			}
-			worldRenderer->postSettings().underwater = underwater;
-			worldRenderer->postSettings().underwaterSurfaceY = underwaterSurfaceY;
-			worldRenderer->updateFrameUBO(frameIndex, camera,
-									static_cast<float>(pixelW), static_cast<float>(pixelH), farPlane,
-									static_cast<float>(currentFrame), shaderParams,
-									renderSettings.shadowCascadeFar, underwater);
-		}
+		// (13) Presentation uniforms (underwater sample + frame UBO).
+		updateFrameUniforms(frameIndex, pixelW, pixelH, currentFrame);
 
 		frameCtx->gpuProfiler().syncCapture(GetProfiler().captureEpoch());
 		const int uploadBudget = uploadBudgetThisFrame;
 		// Auto-exposure adaptation runs on the GPU with the real frame delta
 		// (issue #140); clamped inside PostStack against long stalls.
 		worldRenderer->setFrameDt(static_cast<float>(deltaTime));
-		{
-			PROFILE_SCOPE("Record");
-			worldRenderer->recordFrame(
-				frameCtx->commandBuffer(), frameIndex, imageIndex, *swapchain, drawList, shadowList, clearColor,
-				[&](VkCommandBuffer cmd) {
-					if (renderBridge && uploadBudget > 0 && !paused)
-					{
-						PROFILE_SCOPE("MeshUpload");
-						const int n = renderBridge->uploadPendingMeshes(
-							vkContext->getAllocator(), stagingRing, cmd, resourceRetire,
-							worldRenderer->arenas(), camera, uploadBudget);
-						if (n > 0)
-						{
-							// Make staged mesh data visible to vertex/index fetch in later passes.
-							VkMemoryBarrier barrier{};
-							barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-							barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-							barrier.dstAccessMask =
-								VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
-							vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-												 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &barrier, 0, nullptr,
-												 0, nullptr);
-						}
-					}
-				},
-				[&](VkCommandBuffer cmd) {
-					if (imgui)
-						imgui->recordDraw(cmd);
-				},
-				// Biome-map upload AFTER the ImGui pass (issue #191 review
-				// round 2): ImGui samples this texture directly, so this
-				// frame's draw lists must record against the previous
-				// publication; the new pixels+grid become visible to the
-				// next frame's UI build. Mesh uploads stay in preRecord —
-				// nothing in ImGui samples them in the same frame.
-				[&](VkCommandBuffer cmd) {
-					if (gameUi && gameUi->hasPendingBiomeMapUpload())
-					{
-						PROFILE_SCOPE("BiomeMapUpload");
-						gameUi->recordPendingBiomeMapUpload(cmd, stagingRing);
-					}
-				}, &frameCtx->gpuProfiler(), m_benchmark.gpuCaptureTag());
-		}
+		// (14) Record: passes + the frame's mesh uploads (no device idle).
+		recordFrame(frameIndex, imageIndex, uploadBudget);
 
+		// (15) Submit / present.
 		{
 			PROFILE_SCOPE("Present");
 			if (!frameCtx->submitAndPresent(*swapchain, imageIndex))
 				requestSwapchainRecreate();
 		}
 
+		// (16) Live memory/workload gauges for the developer console (issue
+		// #179). Published AFTER this frame's record/upload work so the
+		// CPU pool gauges reflect the uploads already executed and the
+		// next UI refresh reads the last completed frame; the benchmark
+		// sampler (below) then observes the same coherent values as
+		// before the console existed. Profiled so the debug-tool
+		// overhead stays visible.
 		{
-			// Live memory/workload gauges for the developer console (issue
-			// #179). Published AFTER this frame's record/upload work so the
-			// CPU pool gauges reflect the uploads already executed and the
-			// next UI refresh reads the last completed frame; the benchmark
-			// sampler (below) then observes the same coherent values as
-			// before the console existed. Profiled so the debug-tool
-			// overhead stays visible.
 			PROFILE_SCOPE("TelemetryPublish");
 			publishFrameTelemetry();
 		}
