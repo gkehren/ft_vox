@@ -144,6 +144,7 @@ Engine::Engine(std::string resourcePackRoot)
 	// player and mobs. The render bridge attaches to sim->world() later, in
 	// initializeNoiseGenerator / reloadWorld.
 	sim = std::make_unique<sim::GameSimulation>(threadPool.get());
+	mobStates.reserve(entities::MobSettings::capacity);
 
 	renderSettings.minRenderDistance = 192;
 	renderSettings.maxRenderDistance = 512;
@@ -479,10 +480,13 @@ bool Engine::reloadWorld(int newSeed)
 	const bool chunkTraceEnabled =
 		renderBridge && renderBridge->chunkEventTraceEnabled();
 	renderBridge.reset();
-	// The simulation owns the authoritative transition (issue #208): the
-	// persistent world is already closed above, so this recreates the world
-	// for the new seed. A refusal (headless-style stranded edits) keeps the
-	// OLD world authoritative — re-attach the bridge and abort.
+	// The simulation owns the authoritative transition (issue #208). The
+	// persistent world was already closed through the bridge above (or none
+	// was open), so the simulation's world-side close cannot refuse here: in
+	// the graphical flow the reload always proceeds. The refusal branch below
+	// is a defensive headless-style guard — if it ever fires, the OLD world
+	// stays authoritative and the fresh bridge is deliberately re-projected
+	// onto it so the aborted reload leaves a renderable session.
 	const bool reloaded = sim->reload(newSeed);
 	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
 												  chunkPool.get());
@@ -1563,7 +1567,7 @@ void Engine::run()
 				}
 				else
 				{
-					mobStates = sim->mobSnapshots();
+					sim->mobSnapshots(mobStates);
 					// Derived entity light: sampled from the render bridge's
 					// caches AFTER the mob snapshot (presentation-side; the
 					// removed ChunkMobWorld adapter used to nest the world and

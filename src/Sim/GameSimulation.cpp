@@ -20,7 +20,6 @@ namespace sim
 GameSimulation::GameSimulation(ThreadPool *threadPool)
     : m_threadPool(threadPool)
 {
-    m_mobStates.reserve(entities::MobSettings::capacity);
 }
 
 GameSimulation::~GameSimulation()
@@ -81,7 +80,6 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     m_seed = seed;
     m_savedPlayer.reset();
     m_mobs.reset(static_cast<uint64_t>(seed));
-    m_mobStates.reserve(entities::MobSettings::capacity);
     // Tear the old world down BEFORE replacing the generator it references
     // (~VoxelWorld's shutdown safety net can still generate stranded-edit
     // records through the generator).
@@ -175,7 +173,6 @@ bool GameSimulation::reload(int newSeed)
     m_world.reset();
     m_terrainGenerator.reset();
     m_mobs.reset(static_cast<uint64_t>(seed));
-    m_mobStates.reserve(entities::MobSettings::capacity);
     m_terrainGenerator = std::make_unique<TerrainGenerator>(seed);
     m_world = std::make_unique<VoxelWorld>(m_terrainGenerator.get(), m_threadPool);
     return true;
@@ -435,12 +432,6 @@ PlayerSnapshot GameSimulation::playerSnapshot() const
     s.selectedBlock = m_selectedBlock;
     s.status = m_playerStatus;
     return s;
-}
-
-const std::vector<MobSnapshot> &GameSimulation::mobSnapshots()
-{
-    m_mobs.renderStates(m_mobStates);
-    return m_mobStates;
 }
 
 WorldSnapshot GameSimulation::worldSnapshot() const

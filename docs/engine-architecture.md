@@ -88,7 +88,7 @@ Matches `Engine.cpp` order:
    - `updateEntityLightCaches` — dedicated async light-cache-only jobs for meshed chunks entering the entity-light radius (issue #172; never remeshes a valid mesh)  
    - `updateVisibility` → `collectDrawList` / `collectShadowList`  
    - Computes `uploadBudgetThisFrame` (uploads are **not** done here)  
-5. **Mobs** — `sim->advanceMobs` (fixed-step AI/physics, spawn/retire over the CPU-only `WorldMobView`: `WorldCollisionView` + `TerrainGenerator`), then `sim->mobSnapshots()` (`renderStates`) + per-mob entity light from `RenderWorldBridge::sampleSmoothedLight` → `WorldRenderer::setMobs`. Suspended while paused, unfocused, mobs toggled off, or during benchmarks (host policy; the sim implements the freeze)  
+5. **Mobs** — `sim->advanceMobs` (fixed-step AI/physics, spawn/retire over the CPU-only `WorldMobView`: `WorldCollisionView` + `TerrainGenerator`), then `sim->mobSnapshots(mobStates)` (`renderStates`, filled in place) + per-mob entity light from `RenderWorldBridge::sampleSmoothedLight` → `WorldRenderer::setMobs`. Suspended while paused, unfocused, mobs toggled off, or during benchmarks (host policy; the sim implements the freeze)  
 6. **Highlight** — raycast block under cursor (`updateHighlight`)  
 7. **Deferred swapchain recreation** if needed — resize, VSync, or WSI invalidation follows one Engine-owned path that refreshes frame synchronization, `WorldRenderer`, and ImGui before acquisition
 8. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer  
@@ -586,9 +586,9 @@ recreated as chunks stream in and out.
 
 `MobRenderState` (species, interpolated position/yaw/gait/stride, idle look,
 flap) is a plain CPU struct produced by the simulation's bounded snapshot
-(`sim::GameSimulation::mobSnapshots`); the Engine copies it for the frame,
-samples each mob's entity light from the bridge, and `WorldRenderer::setMobs`
-takes the result. `MobRenderer::prepare` builds each part transform once and
+(`sim::GameSimulation::mobSnapshots`, filled in place like
+`MobSystem::renderStates`); the Engine samples each mob's entity light from
+the bridge, and `WorldRenderer::setMobs` takes the result. `MobRenderer::prepare` builds each part transform once and
 scatters copies into per-pass contiguous instance slices for the camera pass
 and the three shadow cascades (issue #130: one instanced draw per populated
 static part batch). Each render state also carries

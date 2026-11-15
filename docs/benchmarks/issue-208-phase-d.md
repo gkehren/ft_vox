@@ -64,7 +64,7 @@ All other visual scenes pass. New/changed suites:
 
 | Suite | Result | Notes |
 |---|---|---|
-| **GameSimulation** (new, CPU-only) | PASS, 100 checks, ~1.1 s | Phase D acceptance (below) |
+| **GameSimulation** (new, CPU-only) | PASS, 102 checks, ~1.1 s | Phase D acceptance (below) |
 | CoreContracts | PASS | unchanged |
 | CoreIncludeGuard | PASS | `Sim/GameSimulation.*` + `World/WorldMobView.hpp` rooted; deleted `ChunkMobWorld.hpp` dropped |
 | VoxelWorld | PASS, 211 checks | headless world (unchanged) |
@@ -120,18 +120,24 @@ runtime (`ft_vox_visual_tests`).
 | Mob update mean (ms, 48 mobs) | 0.03753 | 0.03831 | +0.8 µs (noise) |
 | Mob update p95 (ms) | 0.0544 | 0.0551 | sub-0.01 ms |
 | Mob cells/tick · travelled · dropped | 1596 · 2753.91 · 0 | 1596 · 2753.91 · 0 | **identical** |
-| Local light sampling mean (ms) | 0.003838 | 0.004431 | +0.6 µs (noise) |
+| Local light sampling mean (ms) | 0.003838 | 0.004431 | +0.6 µs (per-mob lock, below) |
 | Player physics avg (ms, real voxels) | 0.000661 | 0.000621 | −0.04 µs (noise) |
 | Player physics p95 (ms) | 0.001 | 0.001 | identical |
 | Physics cells/tick · travelled · dropped | 39.9123 · 682 · 0 | 39.9123 · 682 · 0 | **identical** |
 
 Deterministic outputs (cells sampled, distance travelled, dropped steps) are
-**bit-identical**, and the timing deltas are sub-microsecond-to-few-microsecond
-absolute — within run-to-run machine noise, not a refactor cost. Both stay far
-below the documented < 0.1 ms p95/tick physics target. The mob profile now
-samples entity light through `RenderWorldBridge::sampleSmoothedLight` directly
-(the exact call the Engine makes after the snapshot); the removed adapter's
-nested lock held no measurable cost.
+**bit-identical**. The mob/physics update deltas are sub-microsecond absolute —
+within run-to-run machine noise, not a refactor cost; both stay far below the
+documented < 0.1 ms p95/tick physics target.
+
+The light-sampling delta is **attributable, not noise**: the removed
+`ChunkMobWorld` adapter held ONE render shared_lock for the whole per-frame
+block and sampled through the `Unlocked` seam, while the new path (the exact
+call the Engine now makes after the snapshot) acquires
+`RenderWorldBridge::sampleSmoothedLight`'s shared_lock **per mob**. The
+~0.6 µs/frame at 48 mobs (~0.01 µs/mob) is the cost of those per-mob
+acquisitions — negligible (~0.1 % of a frame), and the price of removing the
+nested world → render lock hold.
 
 ## Persistence / streaming workload
 
@@ -176,7 +182,8 @@ flight suspension/restore, mob advance + snapshots + bridge light sampling:
 | TerrainGen (ms/chunk) | 2.50 | 2.49 |
 | Frames > 33.3 ms | 0 | **0** |
 | `staging.failures` / `upload.deferred` / `pool.rejected` | 0 | **0 / 0 / 0** |
-| `mesh.allocations` created / destroyed | 3 / 3 | **2 / 2** (no leak) |
+| `mesh.pool.growEvents` | 0 | **0** (no persistent pool growth) |
+| `mesh.allocations` created / destroyed (sample instant) | 3 / 3 | 2 / 2 (see leak note below) |
 
 Absolute FPS varies with machine state (the Phase B/C docs record the same
 caveat); the grade is **S** in both and the loop is clean. Draw/mesh workload
@@ -195,8 +202,14 @@ Additional graphical smokes (both exit 0):
 
 ## Resource-leak / spike check
 
-- `mesh.allocations.created == destroyed` (2/2) and `mesh.pool.growEvents=0`
-  over the measured window: no persistent mesh-pool growth.
+- **No persistent pool growth**: `mesh.pool.growEvents=0` over the measured
+  window and a stable arena page count (`arena.pages` settles at 4 after the
+  warmup peak of 6; the two `arena.growEvents` are one-time warmup growth).
+  Note: `mesh.allocations.created == destroyed` at an arbitrary sample instant
+  is **not** a leak invariant — arena pages retire on a frame delay, so a
+  sample can legitimately show one page still live (review runs observed 3/2
+  and 4/3; this doc's run sampled 2/2). The sound evidence is the zero
+  pool-grow counter plus the stable page count, both of which hold.
 - `staging.failures=0`, `upload.deferred=0`: no staging exhaustion regression.
 - `voxel.pool` / `border.pool` gauges read the authoritative world pools via
   `sim->world()` and track the live backing (unchanged semantics).
@@ -208,6 +221,39 @@ Additional graphical smokes (both exit 0):
 - `GameSimulation`'s destructor is the final persistence safety net
   (`shutdown()` → `forceCloseWorldForShutdown`), mirroring `~VoxelWorld`.
 
+## Review fixes (round 1)
+
+Six review findings were addressed (full suite re-run green except the
+pre-existing #213 mismatch; visual metrics unchanged):
+
+- **P3 — leak evidence.** `mesh.allocations.created == destroyed` at an
+  arbitrary sample instant is not a leak invariant (arena pages retire on a
+  frame delay; review runs legitimately sampled 3/2 and 4/3). The doc now
+  cites the sound evidence — `mesh.pool.growEvents=0` plus a stable arena
+  page count — and labels the allocation counters as a sample instant.
+- **P3 — check count.** The suite table said 100 checks; the actual total is
+  102 (the sim-owned `mobsEnabled` toggle checks were added after the first
+  doc draft).
+- **P3 — light-sampling attribution.** The +0.6 µs/frame delta is not noise:
+  the removed adapter held one render shared_lock per frame block and sampled
+  through the `Unlocked` seam; the new path acquires
+  `sampleSmoothedLight`'s shared_lock per mob. The doc now attributes the
+  delta to those per-mob acquisitions (negligible, ~0.1 % of a frame).
+- **P3 — snapshot copy.** `mobSnapshots()` returned a reference to an internal
+  cache, forcing a per-frame vector copy in the Engine. It is now a const
+  out-param (`mobSnapshots(std::vector<MobSnapshot>&)`, exactly
+  `MobSystem::renderStates`' shape): the Engine fills its pre-reserved frame
+  vector in place, and the sim cache was removed.
+- **P3 — lifecycle hygiene docs.** `initialize()` documents that flight mode /
+  block selection / status carry over until the spawn step sets them
+  (historical Engine behavior); `reload()` documents that the player body is
+  left to the host's spawn step — a headless host that reloads without
+  re-spawning keeps the previous body (possibly in an unloaded region).
+- **P4 — reload refusal path.** `Engine::reloadWorld`'s post-close refusal
+  branch is unreachable in the graphical flow (the bridge close already
+  succeeded); the comment now states this explicitly and that the defensive
+  re-attach deliberately keeps the retained old world renderable.
+
 ## Conclusion
 
 Phase D moves the player/mob simulation and the authoritative world behind
@@ -215,8 +261,9 @@ the CPU-only `sim::GameSimulation` facade and removes the temporary
 `ChunkMobWorld` adapter with **no behavior change** (deterministic fixtures
 bit-identical, scripted headless runs reproducible, full suite green except
 the pre-existing #213 visual mismatch with identical metrics) and **no
-performance or memory regression** (mob/physics within noise, in-game
-benchmark Grade S, zero staging failures, no mesh-pool leak). The simulation
+performance or memory regression** (mob/physics within noise, the per-mob
+light-lock cost identified and negligible, in-game benchmark Grade S, zero
+staging failures, no persistent pool growth). The simulation
 runs headless — create, advance, edit, save, reload, restore — with no camera,
 renderer, SDL or Vulkan involved, and the graphical host consumes it through
 plain commands and bounded value snapshots.

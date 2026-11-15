@@ -150,6 +150,9 @@ public:
     /// bootstraps through RenderWorldBridge::generateInitialArea (voxels +
     /// render binding/meshing/upload in one step), a headless host calls
     /// bootstrapTerrain(). Follow with finalizePlayerSpawn().
+    /// Player flight mode, block selection and status carry over from a
+    /// previous session until finalizePlayerSpawn (restore/spawn) sets them —
+    /// the historical Engine behavior.
     glm::dvec3 initialize(const Config &config, glm::dvec3 fallbackCenter);
 
     /// Headless synchronous voxel bootstrap: the world half of the bridge's
@@ -171,6 +174,10 @@ public:
     /// destroys the bridge before calling this. Terrain bootstrap and player
     /// spawn are separate steps (the benchmark host uses its own placement).
     /// Reloaded worlds are transient: persistence stays off afterwards.
+    /// The player body is intentionally LEFT to the host's spawn step: a
+    /// headless host that reloads without re-spawning keeps the previous body
+    /// (possibly in an unloaded region) until it calls finalizePlayerSpawn /
+    /// spawnPlayerOnSurface.
     bool reload(int newSeed);
 
     /// Durable player-state capture + flush (no close). The host supplies the
@@ -262,12 +269,13 @@ public:
     // --- Read-only bounded snapshots -------------------------------------------
 
     PlayerSnapshot playerSnapshot() const;
-    /// Derived mob presentation snapshots (bounded by entities::kMaxMobCount).
-    /// previous/current interpolation and the #129 animation fields are
-    /// produced by MobSystem::renderStates; localSkylight stays UNASSIGNED
-    /// (< 0) — the graphical host samples the bridge light caches afterwards,
-    /// headless consumers ignore it.
-    const std::vector<MobSnapshot> &mobSnapshots();
+    /// Derived mob presentation snapshots (bounded by entities::kMaxMobCount),
+    /// filled IN PLACE like MobSystem::renderStates — no intermediate cache or
+    /// per-frame vector copy. previous/current interpolation and the #129
+    /// animation fields are produced by MobSystem::renderStates; localSkylight
+    /// stays UNASSIGNED (< 0) — the graphical host samples the bridge light
+    /// caches afterwards, headless consumers ignore it.
+    void mobSnapshots(std::vector<MobSnapshot> &out) const { m_mobs.renderStates(out); }
     WorldSnapshot worldSnapshot() const;
 
     // --- Identity / accessors ----------------------------------------------------
@@ -321,7 +329,6 @@ private:
 
     physics::PlayerController m_player;
     entities::MobSystem m_mobs;
-    std::vector<MobSnapshot> m_mobStates;
 
     bool m_playerFlight{false};
     bool m_mobsEnabled{true};

@@ -161,7 +161,7 @@ ScriptedRun scriptedRun(ThreadPool &pool)
 	const auto world = sim.worldSnapshot();
 	out.editRevision = world.editRevision;
 	out.chunkCount = world.chunkCount;
-	out.mobs = sim.mobSnapshots();
+	sim.mobSnapshots(out.mobs);
 	out.mobCount = sim.mobs().mobs().size();
 	WorldCollisionView view(*sim.world());
 	TextureType type = AIR;
@@ -451,7 +451,8 @@ MobRun mobRun(ThreadPool &pool)
 		const glm::dvec3 previous = m.previous;
 		const glm::dvec3 current = m.body.position;
 		sim.advanceMobs(1.0 / 120.0, obs, 112.0, false);
-		const auto &snaps = sim.mobSnapshots();
+		std::vector<sim::MobSnapshot> snaps;
+		sim.mobSnapshots(snaps);
 		if (!snaps.empty())
 		{
 			const glm::vec3 expected(glm::mix(previous, current, 0.5));
@@ -459,7 +460,7 @@ MobRun mobRun(ThreadPool &pool)
 		}
 	}
 
-	out.snapshots = sim.mobSnapshots();
+	sim.mobSnapshots(out.snapshots);
 	for (const auto &m : sim.mobs().mobs())
 	{
 		out.positions.push_back(m.body.position);
