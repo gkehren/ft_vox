@@ -14,7 +14,7 @@
 ## Architecture Overview
 
 ### Core Engine
-- **Engine (`src/Engine/`)**: Main loop, SDL3 window (`SDL_WINDOW_VULKAN`), input, high-level systems.
+- **Engine (`src/Engine/`)**: Main loop, SDL3 window (`SDL_WINDOW_VULKAN`), input, high-level systems. Hosts `sim::GameSimulation` (authoritative) + `RenderWorldBridge` (derived); maps SDL input to sim commands and owns pause/focus/benchmark policy (issue #208)
   - **`GameUI`**: multi-panel ImGui (Status Overlay, Player/Gameplay, Graphics, Streaming, World/biome map, Help) + F-key shortcuts (issue #184: the old catch-all HUD was split into the read-only Status Overlay and the Player/Gameplay panel; VSync lives in Graphics, physics counters in the Player Diagnostics console)
 - **Vulkan backend (`src/Vulkan/`)**:
   - `VkContext`: instance, surface, physical/logical device, queues, feature detection, **VMA**
@@ -23,17 +23,20 @@
   - `VkSwapchain`: surface formats, present modes, resize
   - `VkFrameContext`: frames-in-flight, command buffers, WSI sync (sole acquire/submit/present owner)
   - `ImageBarrier` / `GraphicsPipelineBuilder`: shared helpers
+- **Simulation facade (`src/Sim/`, CPU-only `ft_vox_core`)** — issue #208 / Epic #204 Phase D:
+  - **`GameSimulation`**: single owner of the authoritative gameplay state — `TerrainGenerator`, `VoxelWorld`, `PlayerController` (120 Hz), `MobSystem` (60 Hz), flight mode, block selection, spawn/restore, reload counter. Explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown), per-frame advance with plain values (dt, commands, observer point), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`). No Camera/RenderSettings/SDL/Vulkan/ImGui types; runs headless (`test_game_simulation`)
 - **Authoritative world (`src/World/` + `src/Core/`, CPU-only `ft_vox_core`)** — issue #206 / Epic #204 Phase B:
-  - **`VoxelWorld`**: single owner of chunk residency/streaming, serialized logical edits (coalescing + neighbor-border mirrors), terrain worker publication, and `WorldPersistence`. Render-free public API; emits the `WorldEvent` change stream consumed by the `RenderWorldBridge`. Runs headless with no bridge registered
+  - **`VoxelWorld`**: single owner of chunk residency/streaming, serialized logical edits (coalescing + neighbor-border mirrors), terrain worker publication, and `WorldPersistence`. Render-free public API; emits the `WorldEvent` change stream consumed by the `RenderWorldBridge`. Runs headless with no bridge registered; owned by `GameSimulation` in game
   - **`WorldChunk`**: authoritative chunk record — voxel backing, occupancy, border shell, persistent edits, `sim::ChunkIdentity` (generation + revision, the single source of the pair), lifecycle state
   - **`WorldCollisionView`**: CPU-only collision/query seam with the exact historical collision semantics (physics/mobs consume it directly)
+  - **`WorldMobView`**: CPU-only mob seam (`entities::MobWorld`) — collision + biome/grass surface scan; replaced the removed `ChunkMobWorld` adapter (issue #208). Derived entity light sampling stays on the bridge, sampled by the host after the mob snapshot
   - `WorldSave` / `WorldPersistence`: seed+sparse-override saves (`saves/<name>/`), async crash-safe I/O (issue #180 contracts)
   - `Core/SimContracts.hpp`, `Core/ThreadPool.hpp`, `Core/WorkloadTelemetry.hpp`: render-independent contracts + CPU utilities
 - **Chunk Management (`src/Chunk/`)**: 16×256×16 voxels, greedy meshing, VMA GPU upload, terrain gen
   - **`Chunk`**: render handle bound to a `WorldChunk` (forwards voxel reads/writes; keeps GPU ranges, draw caches, mesh payloads, light caches) — the bridge's per-chunk render record
   - **`ChunkPool`** + **`ThreadPool`**: preallocated render handles and work-stealing workers
   - **`TerrainGenerator`**: FastNoise2 biomes / height / caves
-- **Entities (`src/Entities/`)**: `MobSystem` — CPU fixed-step passive mobs (cow/pig/sheep/chicken): deterministic seed-based group spawning, ambient wander AI on the shared voxel collision solver; `MobModel` bakes the Minecraft box-UV articulated meshes
+- **Entities (`src/Entities/`)**: `MobSystem` — CPU fixed-step passive mobs (cow/pig/sheep/chicken): deterministic seed-based group spawning, ambient wander AI on the shared voxel collision solver; owned and advanced by `GameSimulation` (issue #208). `MobModel` bakes the Minecraft box-UV articulated meshes
 - **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator — **ShadowPass → OpaquePass → WaterPass → SkyPass → PostStack** (+ `MobRenderer`, `OverlayRenderer`, `TextureManager`, `FrameUBO`, `MaterialTable`, `Lighting`, `ShadowCascades`)
   - **`RenderWorldBridge`** (issue #207 / Epic #204 Phase C): renderer-owned **derived projection** of `VoxelWorld` — mesh/light dispatch, GPU upload, visibility, commit groups, deferred GPU retirement, light-cache sampling; references (never owns) the host-owned world. Replaced the removed `ChunkManager` adapter / `ChunkCollisionView` wrapper (see `docs/simulation-render-contracts.md` §10)
 
@@ -133,7 +136,7 @@ ctest -R VisualRegression --output-on-failure   # from the build dir
 
 ### Key Conventions
 - **Voxel Data**: Flat `uint8_t` array per authoritative `WorldChunk` record (`src/World/`); the render `Chunk` handle forwards to it
-- **Sim/render boundary (Epic #204)**: authoritative state (voxels, edits, residency, persistence) lives in the CPU-only `ft_vox_core` (`VoxelWorld`/`WorldChunk`); render state (meshes, light caches, GPU, visibility) is derived. Core headers must never include `Renderer/`, `Vulkan/`, `Camera/`, `Engine/`, SDL3 or ImGui — enforced by `tests/check_core_includes.py` (CTest `CoreIncludeGuard`). `sim::ChunkIdentity` is the single source of the (generation, revision) pair
+- **Sim/render boundary (Epic #204)**: authoritative state (voxels, edits, residency, persistence, player, mobs) lives in the CPU-only `ft_vox_core` (`GameSimulation` owns `VoxelWorld`/`WorldChunk` + `PlayerController` + `MobSystem`); render state (meshes, light caches, GPU, visibility) is derived. Core headers must never include `Renderer/`, `Vulkan/`, `Camera/`, `Engine/`, SDL3 or ImGui — enforced by `tests/check_core_includes.py` (CTest `CoreIncludeGuard`). `sim::ChunkIdentity` is the single source of the (generation, revision) pair
 - **World Constants**: `src/utils.hpp` (`CHUNK_SIZE`, `WORLD_HEIGHT`)
 - **Resources**: `ressources/`; runtime expects `RES_PATH` next to the binary
 - **Biome/block enums**: `BiomeType` and `TextureType` are append-only; keep

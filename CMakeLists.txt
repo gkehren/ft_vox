@@ -248,6 +248,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Sim/GameSimulation.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${FT_VOX_WORLD_SOURCES}
@@ -258,7 +259,8 @@ set(FT_VOX_SOURCES
 
 # ---------------------------------------------------------------------------
 # ft_vox_core — CPU-only simulation/persistence static library (issue #205,
-# Epic #204 Phase A; issue #206 Phase B adds the authoritative world).
+# Epic #204 Phase A; issue #206 Phase B adds the authoritative world; issue
+# #208 Phase D adds the GameSimulation facade owning player + mobs + world).
 # Render-independent: links ONLY glm + FastNoise2 + Threads, never SDL3 /
 # Vulkan / ImGui. Phase A extracted the six already-independent translation
 # units; Phase B adds the authoritative voxel world (WorldChunk + VoxelWorld)
@@ -275,6 +277,7 @@ set(FT_VOX_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
     ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/Sim/GameSimulation.cpp
     ${FT_VOX_WORLD_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp

@@ -14,21 +14,24 @@ main.cpp
         ├── SDL window (Vulkan)
         ├── VkContext / VkSwapchain / VkFrameContext
         ├── WorldRenderer (+ passes, post, overlays, mobs)
-        ├── TerrainGenerator + ThreadPool + ChunkPool
-        │     ├── VoxelWorld (authoritative CPU world: WorldChunk records,
-        │     │     edits, generation, WorldPersistence)   [issue #206]
-        │     └── RenderWorldBridge (derived render projection: mesh/light
-        │           dispatch, GPU upload, visibility)      [issue #207]
+        ├── ThreadPool + ChunkPool
+        ├── sim::GameSimulation (authoritative CPU simulation)  [issue #208]
+        │     ├── TerrainGenerator + VoxelWorld (WorldChunk records,
+        │     │     edits, generation, WorldPersistence)         [issue #206]
+        │     ├── physics::PlayerController (120 Hz)
+        │     └── entities::MobSystem (60 Hz, passive mobs)
+        ├── RenderWorldBridge (derived render projection: mesh/light
+        │     dispatch, GPU upload, visibility; references sim->world()) [issue #207]
         ├── StagingRing + GpuResourceRetire
         ├── Camera
-        ├── entities::MobSystem (passive mobs)
         └── ImGuiLayer + GameUI
 ```
 
 | Area | Directory | Primary types |
 |------|-----------|---------------|
 | App / loop | `src/Engine/` | `Engine`, `EngineDefs`, `GameUI`, `ImGuiLayer`, `Profiler`, `Benchmark` |
-| Authoritative world (CPU-only) | `src/World/`, `src/Core/` | `VoxelWorld`, `WorldChunk`, `WorldCollisionView`, `WorldPersistence`, `WorldSave`, `SimContracts`, `ThreadPool`, `WorkloadTelemetry` |
+| Simulation facade (CPU-only) | `src/Sim/` | `GameSimulation` (owns world + player + mobs; commands, lifecycle, snapshots) |
+| Authoritative world (CPU-only) | `src/World/`, `src/Core/` | `VoxelWorld`, `WorldChunk`, `WorldCollisionView`, `WorldMobView`, `WorldPersistence`, `WorldSave`, `SimContracts`, `ThreadPool`, `WorkloadTelemetry` |
 | Render chunk side | `src/Chunk/` | `Chunk` (render handle), `ChunkPool`, `TerrainGenerator`, `StreamHelpers` |
 | Entities | `src/Entities/` | `MobSystem`, `MobModel` (passive mobs) |
 | Camera | `src/Camera/` | `Camera` |
@@ -37,14 +40,17 @@ main.cpp
 | Shared constants | `src/utils.hpp` | Chunk size, voxels, biomes, textures, states |
 | Network (optional) | `src/Network/` | Client/Server — **not re-wired into Engine UI** |
 
-**Ownership boundary (Epic #204, issues #206 / #207):** the authoritative voxel
-world (`VoxelWorld` + `WorldChunk`, in the CPU-only `ft_vox_core` library) owns
-chunk residency, logical edits, terrain publication and persistence. The
-renderer-owned `RenderWorldBridge` is a **derived projection** that references
-the world (never owns it) and keeps only derived render work (mesh/light
+**Ownership boundary (Epic #204, issues #206 / #207 / #208):** the CPU-only
+`sim::GameSimulation` facade (in `ft_vox_core`) is the single owner of
+authoritative gameplay state: the `VoxelWorld` + `WorldChunk` voxel world
+(chunk residency, logical edits, terrain publication, persistence), the
+120 Hz `PlayerController` and the 60 Hz `MobSystem`. The renderer-owned
+`RenderWorldBridge` is a **derived projection** that references the sim's
+world (never owns it) and keeps only derived render work (mesh/light
 dispatch, GPU uploads, visibility); `Chunk` is a render handle bound to a
 `WorldChunk`. The temporary `ChunkManager` adapter and `ChunkCollisionView`
-wrapper were removed in Phase C. See
+wrapper were removed in Phase C; the temporary `ChunkMobWorld` mob adapter
+was removed in Phase D (CPU mob seam: `WorldMobView`). See
 [`simulation-render-contracts.md`](simulation-render-contracts.md) for the full
 boundary, the world event stream and the adapter removal status.
 
@@ -61,12 +67,12 @@ File: `src/Engine/Engine.hpp` / `Engine.cpp`.
 - **Windowing:** `SDL_Window *`, size, mouse capture, pause  
 - **Vulkan:** `VkContext`, `VkSwapchain`, `VkFrameContext`, `ImmediateCommands`  
 - **Render:** `WorldRenderer`, ImGui layer, `GameUI`  
-- **World:** `TerrainGenerator`, `ThreadPool`, `ChunkPool`, `VoxelWorld` (authoritative) + `RenderWorldBridge` (derived projection referencing the world)  
+- **Simulation:** `sim::GameSimulation` (authoritative: `TerrainGenerator`, `VoxelWorld`, `PlayerController`, `MobSystem`) + `ThreadPool`, `ChunkPool`, `RenderWorldBridge` (derived projection referencing `sim->world()`)  
 - **GPU streaming helpers:** `StagingRing`, `GpuResourceRetire`  
 - **View:** `Camera`  
-- **Player:** `physics::PlayerController` — fixed-step CPU body, gravity, collision and swimming; camera follows interpolated eyes in walking mode
-- **Entities:** `entities::MobSystem` — CPU-only passive mob simulation (see §9); render states are pushed to `WorldRenderer::setMobs` each frame
-- **Settings:** `RenderSettings`, `ShaderParameters`, `RenderTiming`, seed  
+- **Player:** owned by the simulation — fixed-step CPU body, gravity, collision and swimming; the Engine maps SDL input to `sim::PlayerCommand` and the camera follows the interpolated eyes in walking mode (issue #208)
+- **Entities:** owned by the simulation — CPU-only passive mob simulation (see §9); the Engine takes mob snapshots, samples their entity light from the bridge and pushes them to `WorldRenderer::setMobs` each frame
+- **Settings:** `RenderSettings`, `ShaderParameters`, `RenderTiming` (the seed lives in the simulation)  
 - **Benchmark:** `Benchmark`  
 
 ### Per-frame outline (`Engine::run`)
@@ -74,15 +80,15 @@ File: `src/Engine/Engine.hpp` / `Engine.cpp`.
 Matches `Engine.cpp` order:
 
 1. **Profiler begin** — `GetProfiler().beginFrame()`  
-2. **Events / input / benchmark** — `handleEvents`, `tickBenchmark`, `processInput`  
-3. **Day cycle** — `tickDayCycle` updates `ShaderParameters` sun/moon/day factors  
+2. **Events / input / benchmark** — `handleEvents`, `tickBenchmark`, `processInput` (SDL → `sim::PlayerCommand`; walking physics steps inside `sim->advancePlayer`, flight follows the camera via `sim->setPlayerPosition`)  
+3. **Day cycle** — `tickDayCycle` updates `ShaderParameters` sun/moon/day factors (a **presentation** parameter, not authoritative world time; pause gates it here, issue #208)  
 4. **`tickStreaming`** (CPU world pipeline; **before** acquire)  
    - `processFinishedJobs` / `processDeferredReleases`  
    - `updateStreaming` → budgeted `processChunkLoading` / `generatePendingVoxels` / `meshPendingChunks` (`maxStreamMs` envelope)  
    - `updateEntityLightCaches` — dedicated async light-cache-only jobs for meshed chunks entering the entity-light radius (issue #172; never remeshes a valid mesh)  
    - `updateVisibility` → `collectDrawList` / `collectShadowList`  
    - Computes `uploadBudgetThisFrame` (uploads are **not** done here)  
-5. **Mobs** — scoped `ChunkMobWorld` adapter over `WorldCollisionView` + the `RenderWorldBridge` light seam + `TerrainGenerator`; `entities::MobSystem::update` (fixed-step AI/physics, spawn/retire) then `renderStates` → `WorldRenderer::setMobs`. Suspended while paused, unfocused, mobs toggled off, or during benchmarks  
+5. **Mobs** — `sim->advanceMobs` (fixed-step AI/physics, spawn/retire over the CPU-only `WorldMobView`: `WorldCollisionView` + `TerrainGenerator`), then `sim->mobSnapshots()` (`renderStates`) + per-mob entity light from `RenderWorldBridge::sampleSmoothedLight` → `WorldRenderer::setMobs`. Suspended while paused, unfocused, mobs toggled off, or during benchmarks (host policy; the sim implements the freeze)  
 6. **Highlight** — raycast block under cursor (`updateHighlight`)  
 7. **Deferred swapchain recreation** if needed — resize, VSync, or WSI invalidation follows one Engine-owned path that refreshes frame synchronization, `WorldRenderer`, and ImGui before acquisition
 8. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer  
@@ -532,7 +538,7 @@ Generation is **horizontal infinite** in practice (chunk X/Z); vertical extent i
 
 ## 9. Passive mobs (`Entities/`)
 
-Files: `src/Entities/MobSystem.*` (simulation), `src/Entities/MobModel.*` (articulated box models), `src/Chunk/ChunkMobWorld.hpp` (world adapter). Rendering side: `MobRenderer` — see [`vulkan-graphics.md`](vulkan-graphics.md).
+Files: `src/Entities/MobSystem.*` (simulation), `src/Entities/MobModel.*` (articulated box models), `src/World/WorldMobView.hpp` (CPU world seam), `src/Sim/GameSimulation.*` (owner/advance). Rendering side: `MobRenderer` — see [`vulkan-graphics.md`](vulkan-graphics.md).
 
 Four passive species (`MobSpecies`: Cow, Pig, Sheep, Chicken) live in the world with a
 simple ambient AI. There is intentionally **no** combat, health, breeding, babies,
@@ -548,8 +554,8 @@ recreated as chunks stream in and out.
   off, or benchmarking.
 - **Reuse of player physics:** mobs are `physics::Body` volumes moved through the
   same `VoxelCollisionWorld` solve as the player, sampled via `WorldCollisionView`.
-  No chunk pointer survives an update: the adapter is scoped per frame and must be
-  destroyed before streaming/edit publication.
+  No chunk pointer survives an update: the `WorldMobView` seam is scoped per frame
+  and must be destroyed before streaming/edit publication.
 - **`tickMob`** is a free function (one fixed-step controller) so tests drive it
   without an engine: walk/idle cycles (3–8 s / 2–6 s), progressive yaw turns,
   neighbor separation, cliff/water probes one body-width ahead, one-block steps
@@ -571,7 +577,7 @@ recreated as chunks stream in and out.
   processed group cannot duplicate while it stays in the active zone. The exact
   active population may still vary with terrain publication order and observer
   streaming state (capacity, spawn band and scan budget decide the rest).
-- `ChunkMobWorld::surface` only accepts feet positions on **grass with a fully
+- `WorldMobView::surface` only accepts feet positions on **grass with a fully
   air column above**, in temperate biomes (plains, flower meadow, forest, birch,
   autumn forest, cherry grove), read from **published voxels** — never inferred
   from procedural height.
@@ -579,13 +585,17 @@ recreated as chunks stream in and out.
 ### Render handoff
 
 `MobRenderState` (species, interpolated position/yaw/gait/stride, idle look,
-flap) is a plain CPU struct; `WorldRenderer::setMobs` copies it for the frame and
-`MobRenderer::prepare` builds each part transform once and scatters copies into
-per-pass contiguous instance slices for the camera pass and the three shadow
-cascades (issue #130: one instanced draw per populated static part batch). Each
-render state also carries
+flap) is a plain CPU struct produced by the simulation's bounded snapshot
+(`sim::GameSimulation::mobSnapshots`); the Engine copies it for the frame,
+samples each mob's entity light from the bridge, and `WorldRenderer::setMobs`
+takes the result. `MobRenderer::prepare` builds each part transform once and
+scatters copies into per-pass contiguous instance slices for the camera pass
+and the three shadow cascades (issue #130: one instanced draw per populated
+static part batch). Each render state also carries
 `localSkylight` / `localBlockRgb` sampled per frame from the chunk light caches
-(trilinear over packed 16-bit voxel light, `RenderWorldBridge::sampleSmoothedLight`).
+(trilinear over packed 16-bit voxel light, `RenderWorldBridge::sampleSmoothedLight`)
+— a derived presentation step OUTSIDE the simulation (issue #208; headless
+snapshots leave the light unassigned).
 UI: Player/Gameplay panel "Passive mobs" toggle (`GameUI`, issue #184) with
 active/visible counters in the Overview console; CPU time
 under the `Mobs` profiler scope, GPU under `GpuPass::Mobs` / `MobShadow0-2`.
@@ -641,12 +651,13 @@ File: `src/Camera/Camera.hpp` / `Camera.cpp`.
 
 - First-person physical player by default, with explicit debug flight and isometric inspection
 - Supplies view matrix, position, and frustum data for culling  
-- Engine finds a clear, supported player spawn (`placeCameraOnSurface`); unavailable spawn falls back to debug flight
+- Engine finds a clear, supported player spawn (`sim::GameSimulation::spawnPlayerOnSurface`, driven by `placeCameraOnSurface`); unavailable spawn falls back to debug flight
 - Raycast against voxels for highlight and dig/place (`Engine::raycastVoxel`)  
 
-Player motion is owned by `PlayerController`, not the camera. The CPU-only
-solver queries published voxel data through a scoped `WorldCollisionView`,
-independently of render meshes and LOD. See [player-physics.md](player-physics.md)
+Player motion is owned by the simulation's `PlayerController`
+(`sim::GameSimulation`), not the camera. The CPU-only solver queries published
+voxel data through a scoped `WorldCollisionView`, independently of render
+meshes and LOD. See [player-physics.md](player-physics.md)
 for controls, timing, thread/publication contracts and future entity integration.
 
 ---

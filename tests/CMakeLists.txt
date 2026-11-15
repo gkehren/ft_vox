@@ -52,6 +52,20 @@ add_executable(test_voxel_world test_voxel_world.cpp)
 target_link_libraries(test_voxel_world PRIVATE ft_vox_core)
 add_test(NAME VoxelWorld COMMAND test_voxel_world)
 
+# ---------------------------------------------------------------------------
+# CPU-only simulation facade acceptance (issue #208, Epic #204 Phase D).
+# Links ONLY ft_vox_core: creates a GameSimulation for a fixed seed and
+# advances it with scripted inputs/edits with NO graphics runtime, camera or
+# window. Covers the issue #208 acceptance list: scripted determinism,
+# physics edge fixtures (jump/coyote/swim/flight, unknown terrain, recovery,
+# dropped-step cap, suspension), mob spawn/retire/interpolation fixtures,
+# reload + save/player restore (failures keep the old world alive), and the
+# independent 120 Hz / 60 Hz update rates + bounded value snapshots.
+# ---------------------------------------------------------------------------
+add_executable(test_game_simulation test_game_simulation.cpp)
+target_link_libraries(test_game_simulation PRIVATE ft_vox_core)
+add_test(NAME GameSimulation COMMAND test_game_simulation)
+
 # Forbidden-include-chain guard (issue #205 acceptance criterion #3): the
 # CPU-only public headers must never transitively include Renderer/, Vulkan/,
 # Camera/, SDL3, ImGui, or the render-coupled / not-yet-migrated Chunk headers.

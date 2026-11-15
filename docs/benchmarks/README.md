@@ -34,6 +34,7 @@ into `benchmark-results/` (gitignored), not here.
 - [issue-205-pre-refactor.md](issue-205-pre-refactor.md) — Epic #204 Phase A pre-refactor baselines
 - [issue-206-phase-b.md](issue-206-phase-b.md) — Epic #204 Phase B authoritative-world verification (A/B + acceptance)
 - [issue-207-phase-c.md](issue-207-phase-c.md) — Epic #204 Phase C render-bridge verification (acceptance + review fixes)
+- [issue-208-phase-d.md](issue-208-phase-d.md) — Epic #204 Phase D GameSimulation verification (acceptance + host rewiring)
 - [pr145/](pr145/validation/README.md) — VSync pacing
 - [pr157-water/](pr157-water/README.md) — water rendering
 - [worldgen-rework/](worldgen-rework/README.md) — terrain generator rework

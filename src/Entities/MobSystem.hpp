@@ -1,7 +1,6 @@
 #pragma once
 #include <Entities/MobTypes.hpp>
 #include <Physics/VoxelCollision.hpp>
-#include <Chunk/LightSample.hpp>
 #include <array>
 #include <optional>
 #include <vector>
@@ -36,11 +35,14 @@ struct MobSettings
 };
 // Surface returns feet on grass in an eligible biome, or no candidate. Unknown
 // terrain is never inferred from procedural height: actual voxels are required.
+// Entity LIGHT sampling is deliberately NOT part of this CPU seam (issue #208,
+// Phase D): light caches are derived render state. The graphical host samples
+// them from the RenderWorldBridge after taking the mob snapshots; headless
+// simulations leave MobRenderState.localSkylight unassigned (< 0).
 class MobWorld : public physics::VoxelCollisionWorld
 {
   public:
     virtual std::optional<glm::dvec3> surface(int x, int z) const = 0;
-    virtual lighting::LocalVoxelLight sampleLight(const glm::vec3 &) const { return {}; }
 };
 struct Mob
 {

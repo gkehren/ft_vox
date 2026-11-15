@@ -9,7 +9,6 @@
 #include <Chunk/ChunkBorders.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
 #include <World/WorldCollisionView.hpp>
-#include <Chunk/ChunkMobWorld.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Engine/InputRouting.hpp>
@@ -141,6 +140,11 @@ Engine::Engine(std::string resourcePackRoot)
 	const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
 	threadPool = std::make_unique<ThreadPool>(hw);
 
+	// CPU simulation facade (issue #208): owns the authoritative world,
+	// player and mobs. The render bridge attaches to sim->world() later, in
+	// initializeNoiseGenerator / reloadWorld.
+	sim = std::make_unique<sim::GameSimulation>(threadPool.get());
+
 	renderSettings.minRenderDistance = 192;
 	renderSettings.maxRenderDistance = 512;
 	renderSettings.streamFrontBias = 0.30f; // may be overridden by setStreamFrontBias before run()
@@ -177,50 +181,26 @@ Engine::~Engine()
 		vkContext->waitIdle();
 
 	// Durable shutdown (issue #180, Phase 5): persist the player state, then
-	// flush the save queue while the world is still alive. ~VoxelWorld holds a
-	// safety net for chunk edits, but only this path writes player.state, so
-	// the explicit flush stays.
-	if (renderBridge && renderBridge->isWorldOpen())
-	{
-		PlayerPersistState playerState;
-		playerState.x = player.body.position.x;
-		playerState.y = player.body.position.y;
-		playerState.z = player.body.position.z;
-		playerState.yaw = camera.getYaw();
-		playerState.pitch = camera.getPitch();
-		playerState.flight = playerFlight;
-		playerState.selectedBlock = static_cast<int32_t>(selectedTexture);
-		const WorldPersistence *persistence = renderBridge->worldPersistence();
-		if (!persistence || !persistence->writePlayerState(playerState))
-			std::cout << "[world] player state save failed\n";
-		if (!renderBridge->flushWorld())
-		{
-			const std::string error =
-				persistence ? persistence->status().lastError : std::string("(no status)");
-			std::cout << "[world] flush failed: " << error << "\n";
-		}
-	}
+	// flush the save queue while the world is still alive. The simulation
+	// captures the authoritative state; the host supplies the camera
+	// orientation (presentation). ~VoxelWorld holds a safety net for chunk
+	// edits, but only this path writes player.state, so the explicit flush
+	// stays.
+	if (sim->isWorldOpen())
+		sim->savePlayerState(camera.getYaw(), camera.getPitch());
 
 	// Reset order matters (issue #109): chunk/world teardown returns arena
 	// ranges, which can retire whole arena pages into the retire queue.
 	// The queue must outlive them and be flushed last. The render bridge
 	// quiesces its derived jobs and releases its handles first; it never closes
 	// the world's persistence (issue #207 review) — the host closes the
-	// authoritative world exactly once, here, before the world tears down.
+	// authoritative simulation exactly once, here, before it tears down.
 	gameUi.reset();
 	renderBridge.reset();
-	if (voxelWorld && voxelWorld->isWorldOpen())
-	{
-		// Unconditional destructor-only close: resolve stranded edits, capture,
-		// flush, shutdown. Destruction has no retry point; a partial save must
-		// never be reported as success (issue #180 review round 4).
-		if (!voxelWorld->forceCloseWorldForShutdown())
-			std::cerr << "[world] final shutdown did not persist all accepted edits" << std::endl;
-	}
-	voxelWorld.reset();
+	sim->shutdown();
+	sim.reset();
 	chunkPool.reset();
 	threadPool.reset();
-	terrainGenerator.reset();
 
 	imgui.reset();
 	worldRenderer.reset();
@@ -243,158 +223,45 @@ Engine::~Engine()
 	SDL_Quit();
 }
 
-std::optional<PlayerPersistState> Engine::loadPendingPlayerState()
-{
-	if (!renderBridge || !renderBridge->isWorldOpen() || !renderBridge->worldPersistence())
-		return std::nullopt;
-	PlayerPersistState saved;
-	if (!renderBridge->worldPersistence()->readPlayerState(saved))
-		return std::nullopt; // fresh world, or already reported as corrupt
-	return saved;
-}
-
-bool Engine::restorePlayerState(const PlayerPersistState &saved)
-{
-	// Terrain validation (issue #180 review round 6): the saved file is
-	// structurally valid, but the position itself must be usable against the
-	// freshly bootstrapped terrain.
-	WorldCollisionView world(*voxelWorld);
-	physics::QueryStats queries;
-	physics::Body candidate;
-	candidate.position = glm::dvec3(saved.x, saved.y, saved.z);
-	glm::dvec3 restoredFeet = candidate.position;
-	bool waitingForTerrain = false;
-	if (physics::recover(world, candidate, queries))
-	{
-		// Valid as-is or embedded by at most one block (recover() corrected
-		// it) - use the (possibly corrected) feet position.
-		restoredFeet = candidate.position;
-	}
-	else if (candidate.waitingForTerrain)
-	{
-		// Terrain not fully available around the saved spot: keep the
-		// position verbatim and let the solver hold the body until the
-		// terrain streams in - never an aggressive fallback because one
-		// neighbor is not loaded yet.
-		waitingForTerrain = true;
-	}
-	else
-	{
-		// Clearly invalid (embedded deeper than recover() can fix): fall
-		// back to the surface spawn.
-		std::cout << "[world] saved player position is not usable; falling back to the surface spawn\n";
-		return false;
-	}
-
-	player.reset(restoredFeet);
-	if (waitingForTerrain)
-		player.body.waitingForTerrain = true;
-	camera.setYawPitch(saved.yaw, saved.pitch);
-	camera.setPosition(glm::vec3(player.renderEye()));
-	playerFlight = saved.flight;
-	if (saved.selectedBlock >= 0 && saved.selectedBlock < static_cast<int32_t>(COUNT))
-		selectedTexture = static_cast<TextureType>(saved.selectedBlock);
-	std::cout << "[world] restored player at (" << restoredFeet.x << ", " << restoredFeet.y
-	          << ", " << restoredFeet.z << ")" << (waitingForTerrain ? " (waiting for terrain)" : "")
-	          << "\n";
-	return true;
-}
-
 void Engine::initializeNoiseGenerator(int seed_val)
 {
-	if (seed_val <= 0)
-	{
-		std::random_device rd;
-		std::mt19937 gen(rd());
-		std::uniform_int_distribution<> dis(100000, 999999);
-		seed = dis(gen);
-	}
-	else
-	{
-		seed = seed_val;
-	}
+	// Detach the derived projection BEFORE the simulation replaces the world
+	// (a re-initialize must never leave the bridge referencing a destroyed
+	// world; the bridge destructor quiesces against the still-live old one).
+	renderBridge.reset();
 
-	// Persistent-world seed resolution (issue #180, Phase 5): must run
-	// BEFORE the generator and mobs consume `seed`. An existing world keeps
-	// its stored identity; the rolled seed is only a default for new worlds.
-	bool wantPersistence = !m_openWorldName.empty();
-	m_openWorldError.clear();
-	if (wantPersistence)
-	{
-		int storedSeed = 0;
-		std::string seedError;
-		if (WorldPersistence::peekStoredSeed(m_savesRoot.string(), m_openWorldName, storedSeed, seedError))
-		{
-			if (seed_val > 0 && storedSeed != seed_val)
-			{
-				// Explicit --seed contradicts the save: never overwrite
-				// identity — run this session transient instead.
-				m_openWorldError = "stored seed " + std::to_string(storedSeed) +
-				                   " != requested seed " + std::to_string(seed_val) +
-				                   " (running this session without persistence)";
-				std::cout << "[world] refusing to open '" << m_openWorldName << "': "
-				          << m_openWorldError << "\n";
-				wantPersistence = false;
-			}
-			else
-			{
-				seed = storedSeed;
-			}
-		}
-		// else: the world does not exist yet (created with the current seed
-		// below) or its meta is unreadable — openWorld() reports the exact
-		// reason either way; the session keeps the current seed.
-	}
+	// The simulation owns the authoritative transition (issue #208): seed
+	// resolution (stored identity wins), world creation, persistence open and
+	// the saved-player read. The returned center is the SAVED position when
+	// one exists, so the bootstrap generates around it (issue #180 round 6).
+	sim::GameSimulation::Config config;
+	config.seed = seed_val;
+	config.worldName = m_openWorldName;
+	config.savesRoot = m_savesRoot;
+	const glm::dvec3 bootstrapCenter = sim->initialize(config, glm::dvec3(camera.getPosition()));
 
-	++m_worldGenerationId;
 	if (gameUi)
 		gameUi->invalidateBiomeMap();
 
-	mobs.reset(seed);
-    mobStates.reserve(entities::MobSettings::capacity);
-	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
-	voxelWorld = std::make_unique<VoxelWorld>(terrainGenerator.get(), threadPool.get());
-	renderBridge = std::make_unique<RenderWorldBridge>(voxelWorld.get(), threadPool.get(),
+	camera.setPosition(glm::vec3(bootstrapCenter));
+	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
 												  chunkPool.get());
 
-	// Open (or create) the save AFTER the world exists but BEFORE any
-	// generation, so chunk edits from the first frame are already tracked.
-	// Failure is not fatal: the session continues without persistence.
-	if (wantPersistence)
-	{
-		std::string error;
-		if (renderBridge->openWorld(m_savesRoot.string(), m_openWorldName, error))
-		{
-			std::cout << "[world] opened '" << m_openWorldName << "' (seed " << seed << ")\n";
-		}
-		else
-		{
-			m_openWorldError = error;
-			std::cout << "[world] failed to open '" << m_openWorldName << "': " << error << "\n";
-		}
-	}
-
-	// Restored-player bootstrap (issue #180 review round 6): player.state is
-	// read BEFORE the terrain bootstrap so the initial area generates around
-	// the SAVED position - a player who logged out at chunk (100, -80) must
-	// not bootstrap around the default origin and wait for streaming to walk
-	// the whole distance.
-	const std::optional<PlayerPersistState> savedPlayer = loadPendingPlayerState();
-	glm::vec3 bootstrapCenter = camera.getPosition();
-	if (savedPlayer)
-	{
-		bootstrapCenter = glm::vec3(static_cast<float>(savedPlayer->x),
-		                            static_cast<float>(savedPlayer->y + player.settings.eyeHeight),
-		                            static_cast<float>(savedPlayer->z));
-		camera.setPosition(bootstrapCenter);
-	}
-
-	renderBridge->generateInitialArea(bootstrapCenter, kBootstrapRadius,
+	// Synchronous terrain bootstrap: authoritative voxels + render binding,
+	// meshing and upload in one step (the bridge drains the world's Loaded
+	// events itself). The headless path is sim->bootstrapTerrain().
+	renderBridge->generateInitialArea(glm::vec3(bootstrapCenter),
+									  sim::GameSimulation::kBootstrapRadiusChunks,
 									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 
-	// Restore the validated player state, or fall back to the surface spawn.
-	if (!savedPlayer || !restorePlayerState(*savedPlayer))
-		placeCameraOnSurface();
+	// Restore the validated player state, or fall back to the surface spawn
+	// around the camera position (the historical scan anchor). Camera
+	// orientation is presentation: apply the saved yaw/pitch here.
+	const sim::GameSimulation::SpawnOutcome spawn =
+		sim->finalizePlayerSpawn(glm::dvec3(camera.getPosition()));
+	camera.setPosition(glm::vec3(spawn.eye));
+	if (spawn.restored)
+		camera.setYawPitch(spawn.yaw, spawn.pitch);
 
 	demoPlayers = {
 		{{4.f, 80.f, 4.f}, 1},
@@ -405,7 +272,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	{
 		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
 		{
-			if (renderBridge->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
+			if (sim->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
 			{
 				p.position.y = static_cast<float>(y + 1);
 				break;
@@ -415,7 +282,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	if (showDemoPlayers && worldRenderer)
 		worldRenderer->overlays().setPlayers(demoPlayers);
 
-	std::cout << "World seed: " << seed
+	std::cout << "World seed: " << sim->seed()
 			  << " chunks=" << renderBridge->chunkCount()
 			  << " view=" << renderSettings.maxRenderDistance << "\n";
 }
@@ -516,8 +383,9 @@ void Engine::setInspectionView(glm::vec3 position, float yaw, float pitch, float
     m_inspectionSeconds = seconds;
     camera.setPosition(position);
     camera.setYawPitch(yaw, pitch);
-    playerFlight = true;
-    resetPlayerAtCamera();
+    sim->setPlayerFlight(true, glm::dvec3(camera.getPosition()) -
+                                   glm::dvec3(0, sim->playerSettings().eyeHeight, 0));
+    jumpPressed = false;
     mouseCaptured = false;
     SDL_SetWindowRelativeMouseMode(window, false);
     shaderParams.dayCycleEnabled = false;
@@ -537,7 +405,7 @@ void Engine::placeCameraOnSurface()
 	if (m_benchmark.isActive())
 	{
 		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
-			if (renderBridge->isVoxelActive({pos.x, float(y), pos.z}))
+			if (sim->isVoxelActive({pos.x, float(y), pos.z}))
 			{
 				camera.setPosition({pos.x, float(y + 3), pos.z});
 				resetPlayerAtCamera();
@@ -547,65 +415,30 @@ void Engine::placeCameraOnSurface()
 		resetPlayerAtCamera();
 		return;
 	}
-	WorldCollisionView world(*voxelWorld);
-	physics::QueryStats queries;
-	// Closest columns first, bounded by the already bootstrapped region.
-	for (int radius = 0; radius < kBootstrapRadius * int(CHUNK_SIZE); ++radius)
-	for (int dx = -radius; dx <= radius; ++dx)
-	for (int dz = -radius; dz <= radius; ++dz)
-	{
-		if (std::max(std::abs(dx), std::abs(dz)) != radius) continue;
-		const int x = static_cast<int>(std::floor(pos.x)) + dx;
-		const int z = static_cast<int>(std::floor(pos.z)) + dz;
-		for (int y = CHUNK_HEIGHT - 1; y >= 0; --y)
-		{
-			const auto cell = world.sample({x, y, z});
-			if (!cell.available) break;
-			if (!cell.solid) continue;
-			physics::Body candidate;
-			candidate.position = {x + 0.5, y + 1.0 + physics::skin, z + 0.5};
-			if (physics::clear(world, candidate.bounds(), queries))
-			{
-				player.reset(candidate.position);
-				playerFlight = false;
-				playerStatus = "";
-				camera.setPosition(glm::vec3(player.eye()));
-				return;
-			}
-		}
-	}
-	camera.setPosition(glm::vec3(pos.x, 100.f, pos.z));
-	resetPlayerAtCamera();
-	playerFlight = true;
-	playerStatus = "No safe spawn in loaded terrain: fly to an open area.";
+	// The simulation owns the spawn scan + player reset (issue #208); the
+	// camera follows the resulting eye.
+	camera.setPosition(glm::vec3(sim->spawnPlayerOnSurface(glm::dvec3(pos))));
 }
 
 void Engine::resetPlayerAtCamera()
 {
-	player.reset(glm::dvec3(camera.getPosition()) - glm::dvec3(0, player.settings.eyeHeight, 0));
+	sim->setPlayerPosition(glm::dvec3(camera.getPosition()) -
+						   glm::dvec3(0, sim->playerSettings().eyeHeight, 0));
 	jumpPressed = false;
 }
 
 void Engine::setPlayerFlight(bool enabled)
 {
 	if (m_benchmark.isActive()) return;
+	const glm::dvec3 feet = glm::dvec3(camera.getPosition()) -
+							glm::dvec3(0, sim->playerSettings().eyeHeight, 0);
+	// Disabling flight validates clearance at the camera feet and refuses
+	// when blocked (the simulation sets the status message).
+	if (!sim->setPlayerFlight(enabled, feet))
+		return;
 	if (!enabled)
-	{
-		if (!renderBridge) return;
-		WorldCollisionView world(*voxelWorld);
-		physics::Body candidate = player.body;
-		candidate.position = glm::dvec3(camera.getPosition()) - glm::dvec3(0, player.settings.eyeHeight, 0);
-		physics::QueryStats queries;
-		if (!physics::clear(world, candidate.bounds(), queries))
-		{
-			playerStatus = "Walk unavailable: body overlaps solid or unloaded terrain.";
-			return;
-		}
 		camera.setMode(CameraMode::PERSPECTIVE);
-	}
-	playerFlight = enabled;
-	playerStatus = "";
-	resetPlayerAtCamera();
+	jumpPressed = false;
 }
 
 bool Engine::reloadWorld(int newSeed)
@@ -619,7 +452,8 @@ bool Engine::reloadWorld(int newSeed)
 	// The close can be REFUSED (stranded logical edits - issue #180 review
 	// round 3): aborting the reload keeps the bridge/world intact, so a
 	// debug/benchmark action can never destroy the world after a refused
-	// close.
+	// close. The bridge quiesces its render jobs around the world's
+	// durability barrier (render jobs hold record leases).
 	if (renderBridge && renderBridge->isWorldOpen())
 	{
 		if (!renderBridge->closeWorld())
@@ -630,8 +464,6 @@ bool Engine::reloadWorld(int newSeed)
 		}
 	}
 
-	seed = newSeed > 0 ? newSeed : 42;
-	++m_worldGenerationId;
 	if (gameUi)
 		gameUi->invalidateBiomeMap();
 
@@ -647,20 +479,23 @@ bool Engine::reloadWorld(int newSeed)
 	const bool chunkTraceEnabled =
 		renderBridge && renderBridge->chunkEventTraceEnabled();
 	renderBridge.reset();
-	voxelWorld.reset();
-	mobs.reset(seed);
-    mobStates.reserve(entities::MobSettings::capacity);
-	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
-	voxelWorld = std::make_unique<VoxelWorld>(terrainGenerator.get(), threadPool.get());
-	renderBridge = std::make_unique<RenderWorldBridge>(voxelWorld.get(), threadPool.get(),
+	// The simulation owns the authoritative transition (issue #208): the
+	// persistent world is already closed above, so this recreates the world
+	// for the new seed. A refusal (headless-style stranded edits) keeps the
+	// OLD world authoritative — re-attach the bridge and abort.
+	const bool reloaded = sim->reload(newSeed);
+	renderBridge = std::make_unique<RenderWorldBridge>(sim->world(), threadPool.get(),
 												  chunkPool.get());
 	renderBridge->setChunkEventTraceEnabled(chunkTraceEnabled);
+	if (!reloaded)
+		return false;
 
 	camera.setMode(CameraMode::PERSPECTIVE);
 	camera.setPosition(glm::vec3(0.f, 100.f, 0.f));
 	camera.setMovementSpeed(20.f);
 
-	renderBridge->generateInitialArea(camera.getPosition(), kBootstrapRadius,
+	renderBridge->generateInitialArea(camera.getPosition(),
+									  sim::GameSimulation::kBootstrapRadiusChunks,
 									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 	placeCameraOnSurface();
 
@@ -673,7 +508,7 @@ bool Engine::reloadWorld(int newSeed)
 	{
 		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
 		{
-			if (renderBridge->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
+			if (sim->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
 			{
 				p.position.y = static_cast<float>(y + 1);
 				break;
@@ -690,7 +525,7 @@ bool Engine::reloadWorld(int newSeed)
 	// zeroed by beginCapture() and re-published by the first measured frame.
 	telemetry::registry().beginCapture();
 
-	std::cout << "[bench] World reloaded seed=" << seed
+	std::cout << "[bench] World reloaded seed=" << sim->seed()
 			  << " chunks=" << renderBridge->chunkCount() << "\n";
 	return true;
 }
@@ -941,12 +776,12 @@ void Engine::handleEvents()
 		case SDL_EVENT_WINDOW_FOCUS_LOST:
 			windowFocused = false;
 			jumpPressed = false;
-			player.suspend();
+			sim->suspendPlayer();
 			break;
 		case SDL_EVENT_WINDOW_FOCUS_GAINED:
 			windowFocused = true;
 			jumpPressed = false;
-			player.suspend();
+			sim->suspendPlayer();
 			break;
 		case SDL_EVENT_WINDOW_RESIZED:
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -1002,10 +837,10 @@ void Engine::handleEvents()
 				jumpPressed = true;
 			if (key == SDLK_V && !paused)
 			{
-				setPlayerFlight(!playerFlight);
+				setPlayerFlight(!sim->playerFlight());
 				break;
 			}
-			if (key == SDLK_X && playerFlight && !paused)
+			if (key == SDLK_X && sim->playerFlight() && !paused)
 			{
 				camera.setMovementSpeed(camera.getMovementSpeed() < 100.f ? 125.f : 20.f);
 				break;
@@ -1018,8 +853,8 @@ void Engine::handleEvents()
 
 				// Engine-owned gameplay keys (C/B/T) fall through here:
 				// classified by the policy, executed by Engine because
-				// their state (mouseCaptured, overlays, selectedTexture)
-				// lives here.
+				// their host state (mouseCaptured, overlays) lives here;
+				// T cycles the simulation's authoritative block selection.
 			}
 
 			if (key == SDLK_C)
@@ -1037,13 +872,13 @@ void Engine::handleEvents()
 			}
 			if (key == SDLK_T)
 			{
-				int next = static_cast<int>(selectedTexture) + 1;
+				int next = static_cast<int>(sim->selectedBlock()) + 1;
 				if (next >= static_cast<int>(COUNT))
 					next = 0;
 				// Skip AIR
 				if (static_cast<TextureType>(next) == AIR)
 					next = 1;
-				selectedTexture = static_cast<TextureType>(next);
+				sim->selectedBlock() = static_cast<TextureType>(next);
 				break;
 			}
 			break;
@@ -1074,9 +909,12 @@ void Engine::handleEvents()
 				{
 					// Logical pending solids immediately participate in subsequent
 					// collision queries, so the body cannot enter before publication.
-					if (playerFlight || !physics::blockCell(selectedTexture).solid ||
-						!physics::overlaps(player.body.bounds(), physics::voxelBounds(glm::ivec3(glm::floor(prev)))))
-						renderBridge->placeVoxel(prev, selectedTexture);
+					physics::Body playerBody;
+					playerBody.position = sim->playerFeet();
+					const TextureType selected = sim->selectedBlock();
+					if (sim->playerFlight() || !physics::blockCell(selected).solid ||
+						!physics::overlaps(playerBody.bounds(), physics::voxelBounds(glm::ivec3(glm::floor(prev)))))
+						renderBridge->placeVoxel(prev, selected);
 				}
 			}
 			break;
@@ -1098,16 +936,16 @@ void Engine::processInput(double dt)
     if (m_inspectionView) return;
 	if (m_benchmark.isActive() || paused || !windowFocused)
 	{
-		player.suspend();
+		sim->suspendPlayer();
 		jumpPressed = false;
 		return;
 	}
 	// Isometric is an inspection mode; it must never move a physical body.
-	if (camera.getMode() == CameraMode::ISOMETRIC && !playerFlight)
+	if (camera.getMode() == CameraMode::ISOMETRIC && !sim->playerFlight())
 		setPlayerFlight(true);
 	const bool captured = imgui && imgui->wantCaptureKeyboard();
 	const bool *keys = SDL_GetKeyboardState(nullptr);
-	if (playerFlight)
+	if (sim->playerFlight())
 	{
 		if (!captured) camera.processKeyboard(std::min(dt, 0.05), keys);
 		resetPlayerAtCamera();
@@ -1126,14 +964,12 @@ void Engine::processInput(double dt)
 		input.swimUp = keys[SDL_SCANCODE_SPACE];
 		input.swimDown = keys[SDL_SCANCODE_LSHIFT];
 	}
-	else player.clearInput();
+	else sim->clearPlayerInput();
 	jumpPressed = false;
-	if (renderBridge)
 	{
 		PROFILE_SCOPE("Physics");
-		WorldCollisionView world(*voxelWorld);
-		player.advance(dt, input, world);
-		camera.setPosition(glm::vec3(player.renderEye()));
+		sim->advancePlayer(dt, input, false);
+		camera.setPosition(glm::vec3(sim->playerRenderEye()));
 	}
 }
 
@@ -1142,8 +978,8 @@ void Engine::tickBenchmark(double dt)
 	if (m_benchmark.isActive() && !benchmarkOwnedCamera)
 	{
 		benchmarkOwnedCamera = true;
-		flightBeforeBenchmark = playerFlight;
-		player.suspend();
+		flightBeforeBenchmark = sim->playerFlight();
+		sim->suspendPlayer();
 		jumpPressed = false;
 	}
 	if (m_benchmark.phase() == BenchmarkPhase::Reloading)
@@ -1214,8 +1050,9 @@ void Engine::tickBenchmark(double dt)
 	if (!m_benchmark.isActive() && benchmarkOwnedCamera)
 	{
 		benchmarkOwnedCamera = false;
-		playerFlight = true;
-		resetPlayerAtCamera();
+		sim->setPlayerFlight(true, glm::dvec3(camera.getPosition()) -
+		                           glm::dvec3(0, sim->playerSettings().eyeHeight, 0));
+		jumpPressed = false;
 		setPlayerFlight(flightBeforeBenchmark);
 	}
 	if (!m_benchmark.isActive() && m_benchmark.needsVsyncRestore())
@@ -1246,13 +1083,14 @@ void Engine::publishFrameTelemetry()
 		return;
 
 	// voxel.pool.* / border.pool.*: the AUTHORITATIVE backing pools live in
-	// VoxelWorld (issue #206) — bound render handles write through world
-	// records, so ChunkPool's own voxel/border pools are unused in the game
-	// path. Read the world's pools so the retained-backing memory gauges
-	// (docs/workload-telemetry.md) describe the live backing. These depend
-	// only on the world, not the render pool, so they are published before
-	// the ChunkPool guard below (issue #206 review).
-	const VoxelPool &voxelPool = voxelWorld->voxelPool();
+	// VoxelWorld (issue #206), owned by the simulation (issue #208) — bound
+	// render handles write through world records, so ChunkPool's own
+	// voxel/border pools are unused in the game path. Read the world's pools
+	// so the retained-backing memory gauges (docs/workload-telemetry.md)
+	// describe the live backing. These depend only on the world, not the
+	// render pool, so they are published before the ChunkPool guard below
+	// (issue #206 review).
+	const VoxelPool &voxelPool = sim->world()->voxelPool();
 	const size_t voxelCap = voxelPool.capacity();
 	telemetry.set(telemetry::VoxelPoolCapacity, voxelCap);
 	telemetry.set(telemetry::VoxelPoolActive, voxelPool.activeCount());
@@ -1260,7 +1098,7 @@ void Engine::publishFrameTelemetry()
 	telemetry.set(telemetry::VoxelPoolCapacityBytes, voxelCap * sizeof(VoxelStorage));
 
 	// border.pool.*: retained neighbor-border blocks (issue #103/#113).
-	const BorderPool &borderPool = voxelWorld->borderPool();
+	const BorderPool &borderPool = sim->world()->borderPool();
 	const size_t borderCap = borderPool.capacity();
 	telemetry.set(telemetry::BorderPoolCapacity, borderCap);
 	telemetry.set(telemetry::BorderPoolActive, borderPool.activeCount());
@@ -1367,7 +1205,9 @@ void Engine::drawUi()
 	f.camera = &camera;
 	// Read-only player snapshot for the UI (issue #184): biome/chunk resolved
 	// here via the canonical queries so panels never touch the generator or
-	// physics::PlayerController directly.
+	// the simulation's player controller directly. The kinematic/diagnostic
+	// fields come from the simulation's value snapshot (issue #208).
+	const sim::PlayerSnapshot playerView = sim->playerSnapshot();
 	f.player.position = camera.getPosition();
 	f.player.yaw = camera.getYaw();
 	f.player.pitch = camera.getPitch();
@@ -1382,32 +1222,32 @@ void Engine::drawUi()
 	// when the voxel column or the world generation changed (the player can
 	// spend many frames inside one column).
 	f.player.biome = -1;
-	if (terrainGenerator && gameUi->needsPlayerBiome())
+	if (sim->terrainGenerator() && gameUi->needsPlayerBiome())
 	{
 		const glm::ivec2 column =
 			worldToVoxelColumn(glm::vec2(f.player.position.x, f.player.position.z));
-		if (column != m_uiBiomeColumn || m_uiBiomeWorldGen != m_worldGenerationId)
+		if (column != m_uiBiomeColumn || m_uiBiomeWorldGen != sim->worldGenerationId())
 		{
 			m_uiBiomeColumn = column;
-			m_uiBiomeWorldGen = m_worldGenerationId;
+			m_uiBiomeWorldGen = sim->worldGenerationId();
 			// Single canonical world -> voxel-column convention (floor).
-			const BiomeType biome = terrainGenerator->getBiomeAt(column.x, column.y);
+			const BiomeType biome = sim->terrainGenerator()->getBiomeAt(column.x, column.y);
 			m_uiBiome = (biome >= 0 && biome < BIOME_COUNT) ? static_cast<int>(biome) : -1;
 		}
 		f.player.biome = m_uiBiome;
 	}
-	f.player.flight = playerFlight;
-	f.player.grounded = player.body.grounded;
-	f.player.swimming = player.submerged.water + player.submerged.lava > 0;
-	f.player.waitingForTerrain = player.body.waitingForTerrain;
-	f.player.speed = static_cast<float>(glm::length(player.body.velocity));
-	f.player.status = playerStatus;
-	f.player.physicsSteps = player.metrics.steps;
-	f.player.queriedCells = player.metrics.queries.cells;
-	f.player.queryIterations = player.metrics.queries.iterations;
-	f.player.droppedSteps = player.metrics.droppedSteps;
-	f.player.submergedWater = player.submerged.water > 0;
-	f.player.submergedLava = player.submerged.lava > 0;
+	f.player.flight = playerView.flight;
+	f.player.grounded = playerView.grounded;
+	f.player.swimming = playerView.submerged.water + playerView.submerged.lava > 0;
+	f.player.waitingForTerrain = playerView.waitingForTerrain;
+	f.player.speed = static_cast<float>(glm::length(playerView.velocity));
+	f.player.status = playerView.status;
+	f.player.physicsSteps = playerView.metrics.steps;
+	f.player.queriedCells = playerView.metrics.queries.cells;
+	f.player.queryIterations = playerView.metrics.queries.iterations;
+	f.player.droppedSteps = playerView.metrics.droppedSteps;
+	f.player.submergedWater = playerView.submerged.water > 0;
+	f.player.submergedLava = playerView.submerged.lava > 0;
 	// Camera view state travels through the snapshot (issue #184 review):
 	// panels display these values and mutate through the commands below.
 	f.player.cameraViewMode = camera.getMode() == CameraMode::ISOMETRIC
@@ -1419,7 +1259,7 @@ void Engine::drawUi()
 	f.setPlayerFlight = [this](bool enabled) { setPlayerFlight(enabled); };
 	f.setCameraMode = [this](CameraMode mode) {
 		if (m_benchmark.isActive()) return;
-		if (mode == CameraMode::ISOMETRIC && !playerFlight) setPlayerFlight(true);
+		if (mode == CameraMode::ISOMETRIC && !sim->playerFlight()) setPlayerFlight(true);
 		camera.setMode(mode);
 	};
 	f.setCameraMovementSpeed = [this](float value) { camera.setMovementSpeed(value); };
@@ -1427,7 +1267,7 @@ void Engine::drawUi()
 	f.setIsometricZoom = [this](float value) { camera.setIsometricZoom(value); };
 	f.chunks = renderBridge.get();
 	f.pool = chunkPool.get();
-	f.generator = terrainGenerator.get();
+	f.generator = sim->terrainGenerator();
 	f.worldRenderer = worldRenderer.get();
 	f.vk = vkContext.get();
 	f.gpu = &frameCtx->gpuProfiler();
@@ -1437,17 +1277,17 @@ void Engine::drawUi()
 	f.render = &renderSettings;
 	f.timing = &renderTiming;
 	f.staging = &stagingRing;
-	f.selectedTexture = &selectedTexture;
+	f.selectedTexture = &sim->selectedBlock();
 	f.highlight = &highlight;
 	f.mouseCaptured = &mouseCaptured;
 	f.showChunkBorders = &showChunkBorders;
 	f.showDemoPlayers = &showDemoPlayers;
-    f.mobsEnabled = &mobsEnabled;
-    f.mobCount = mobStates.size();
-    f.mobVisible = worldRenderer->visibleMobs();
+	f.mobsEnabled = &sim->mobsEnabled();
+	f.mobCount = mobStates.size();
+	f.mobVisible = worldRenderer->visibleMobs();
 	f.paused = &paused;
-	f.seed = seed;
-	f.worldGenerationId = m_worldGenerationId;
+	f.seed = sim->seed();
+	f.worldGenerationId = sim->worldGenerationId();
 	// World-save snapshot (issue #180, Phase 5): a plain-copy of the
 	// persistence status — the UI frame never holds WorldPersistence types.
 	f.worldSave.active = renderBridge && renderBridge->isWorldOpen();
@@ -1474,10 +1314,10 @@ void Engine::drawUi()
 		f.worldSave.bytesWritten = st.bytesWritten;
 		f.worldSave.lastError = st.lastError;
 	}
-	else if (!m_openWorldError.empty())
+	else if (!sim->openWorldError().empty())
 	{
 		// A world was requested but this session runs transient: surface why.
-		f.worldSave.lastError = m_openWorldError;
+		f.worldSave.lastError = sim->openWorldError();
 	}
 	f.worldSave.error = !f.worldSave.lastError.empty();
 	f.fps = static_cast<float>(fps > 0.0 ? fps : ImGui::GetIO().Framerate);
@@ -1690,7 +1530,7 @@ void Engine::run()
 						  "ft_vox — %.0f FPS | chunks %zu | draw %zu | seed %d%s%s",
 						  fps,
 						  renderBridge ? renderBridge->chunkCount() : 0,
-						  drawList.size(), seed,
+						  drawList.size(), sim->seed(),
 						  paused ? " [PAUSED]" : "", benchTag);
 			SDL_SetWindowTitle(window, title);
 		}
@@ -1710,22 +1550,28 @@ void Engine::run()
 		tickStreaming(deltaTime);
 		{
 			PROFILE_SCOPE("Mobs");
-			if (renderBridge && terrainGenerator) {
-				ChunkMobWorld world(*voxelWorld, *renderBridge, *terrainGenerator);
-				const bool disabled = !mobsEnabled || m_benchmark.isActive();
-				mobs.update(deltaTime, world, glm::dvec3(camera.getPosition()),
-							renderSettings.maxRenderDistance, paused || !windowFocused || disabled);
+			if (renderBridge && sim->isInitialized()) {
+				const bool disabled = !sim->mobsEnabled() || m_benchmark.isActive();
+				// Authoritative fixed-step mob simulation behind the CPU
+				// facade (issue #208): the scoped WorldMobView holds only the
+				// world lock; spawn/retire/interest are plain sim values.
+				sim->advanceMobs(deltaTime, glm::dvec3(camera.getPosition()),
+								 renderSettings.maxRenderDistance, paused || !windowFocused || disabled);
 				if (disabled)
 				{
 					mobStates.clear();
 				}
 				else
 				{
-					mobs.renderStates(mobStates);
+					mobStates = sim->mobSnapshots();
+					// Derived entity light: sampled from the render bridge's
+					// caches AFTER the mob snapshot (presentation-side; the
+					// removed ChunkMobWorld adapter used to nest the world and
+					// render locks here — issue #208).
 					for (auto &ms : mobStates)
 					{
 						const glm::vec3 samplePos = entities::mobLightSamplePosition(ms);
-						const auto light = world.sampleLight(samplePos);
+						const auto light = renderBridge->sampleSmoothedLight(samplePos);
 						ms.localSkylight = light.skylight;
 						ms.localBlockRgb = light.blockRgb;
 					}
@@ -1765,7 +1611,7 @@ void Engine::run()
 			float underwaterSurfaceY = kUnknownUnderwaterSurfaceY;
 			if (renderBridge)
 			{
-				WorldCollisionView world(*voxelWorld);
+				WorldCollisionView world(*sim->world());
 				const glm::ivec3 eye = glm::ivec3(glm::floor(camera.getPosition()));
 				underwater = world.sample(eye).medium == physics::Medium::Water;
 				underwaterSurfaceY = world.waterSurfaceAbove(eye);

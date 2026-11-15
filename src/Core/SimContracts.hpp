@@ -106,6 +106,12 @@ using WorldIdentity = worldsave::WorldMeta;
 // --- Render snapshot (derived, simulation -> render) ------------------------
 // Per-mob derived presentation state produced by MobSystem::renderStates().
 // Re-exported so the render bridge consumes one plain-value snapshot type.
+// Phase D (#208): the simulation facade (Sim/GameSimulation.hpp) owns the
+// producers and adds the companion bounded value snapshots —
+// sim::PlayerSnapshot (kinematics + mode + diagnostics) and sim::WorldSnapshot
+// (identity + edit revision + residency/persistence state). Entity light
+// sampling is presentation-side: the host fills MobRenderState.localSkylight
+// from the render bridge AFTER taking the snapshot (headless: unassigned).
 using MobSnapshot = entities::MobRenderState;
 using EntityId = entities::EntityId;
 
