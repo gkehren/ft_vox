@@ -12,7 +12,7 @@
 // Filesystem note (item 13): every worldsave::writeChunkFileTmp /
 // commitChunkFile / removeChunkFile call site lives in SaveService's worker
 // thread; the main thread only ever samples immutable stats snapshots.
-#include <Chunk/ChunkManager.hpp>
+#include <Renderer/RenderWorldBridge.hpp>
 #include <World/WorldPersistence.hpp>
 #include <Engine/Profiler.hpp>
 
@@ -117,7 +117,7 @@ int runSession(bool persistence, double durationSec, double editsPerSec, int see
 	const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
 	ThreadPool threads(hw);
 	ChunkPool pool(256);
-	ChunkManager mgr(&gen, &threads, &pool);
+	VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 
 	std::string err;
 	if (persistence)
@@ -194,7 +194,7 @@ int runSession(bool persistence, double durationSec, double editsPerSec, int see
 		{
 			editAccum -= 1.0;
 			++attempted;
-			const glm::ivec3 cameraChunk = ChunkManager::worldToChunkCoord(pos);
+			const glm::ivec3 cameraChunk = RenderWorldBridge::worldToChunkCoord(pos);
 			const int ecx = cameraChunk.x + (editColumn % 3) - 1;
 			const int ecz = cameraChunk.z + (editColumn / 3 % 3) - 1;
 			if (Chunk *chunk = mgr.getChunk(glm::ivec3(ecx, 0, ecz));

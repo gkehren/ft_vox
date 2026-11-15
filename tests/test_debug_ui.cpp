@@ -5,7 +5,7 @@
 // test_workload_telemetry.cpp.
 #include <Engine/DebugUI/DebugUiCore.hpp>
 #include <Engine/DebugUI/DebugUiEngine.hpp>
-#include <Chunk/ChunkManager.hpp>
+#include <Renderer/RenderWorldBridge.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
@@ -33,15 +33,15 @@ static int g_fails = 0;
 
 // Friend probe (same pattern as test_chunk_lifecycle): test-only access to
 // the main-thread trace writer and chunk registration without streaming.
-struct ChunkManagerProbe
+struct RenderBridgeProbe
 {
-	static void registerChunk(ChunkManager &m, const glm::ivec3 &pos, Chunk *c)
+	static void registerChunk(RenderWorldBridge &m, const glm::ivec3 &pos, Chunk *c)
 	{
 		m.m_chunks[pos] = c;
 		m.m_activeChunks.push_back(c);
 		c->setActiveIndex(m.m_activeChunks.size() - 1);
 	}
-	static void recordEvent(ChunkManager &m, Chunk *c, const char *kind, uint32_t sections = 0)
+	static void recordEvent(RenderWorldBridge &m, Chunk *c, const char *kind, uint32_t sections = 0)
 	{
 		m.recordChunkEvent(c, kind, sections);
 	}
@@ -134,7 +134,7 @@ void testChunkSnapshotAndTrace()
 	std::cout << "[ChunkDebugSnapshot/trace] ";
 	TerrainGenerator generator(42);
 	ChunkPool pool(8);
-	ChunkManager manager(&generator, nullptr, &pool);
+	VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 
 	const glm::ivec3 coord{10, 0, 10};
 	Chunk *chunk = pool.acquire(glm::vec3(float(coord.x * CHUNK_SIZE), 0.f,
@@ -145,7 +145,7 @@ void testChunkSnapshotAndTrace()
 		std::cout << "SKIP (pool exhausted)\n";
 		return;
 	}
-	ChunkManagerProbe::registerChunk(manager, coord, chunk);
+	RenderBridgeProbe::registerChunk(manager, coord, chunk);
 
 	// Unknown coordinates report an unloaded snapshot with distance.
 	const glm::vec3 camPos(float(coord.x * CHUNK_SIZE + 8), 90.f,
@@ -171,9 +171,9 @@ void testChunkSnapshotAndTrace()
 	CHECK(!manager.chunkEventTraceEnabled(), "trace disabled by default");
 	CHECK(manager.chunkDebugEvents().empty(), "no events recorded while disabled");
 	manager.setChunkEventTraceEnabled(true);
-	ChunkManagerProbe::recordEvent(manager, chunk, "load");
-	ChunkManagerProbe::recordEvent(manager, chunk, "genDone");
-	ChunkManagerProbe::recordEvent(manager, chunk, "meshDone", 0x5);
+	RenderBridgeProbe::recordEvent(manager, chunk, "load");
+	RenderBridgeProbe::recordEvent(manager, chunk, "genDone");
+	RenderBridgeProbe::recordEvent(manager, chunk, "meshDone", 0x5);
 	std::vector<ChunkDebugEvent> events = manager.chunkDebugEvents();
 	CHECK(events.size() == 3, "events recorded while enabled");
 	CHECK(events[0].kind && std::string(events[0].kind) == "load" &&
@@ -184,14 +184,14 @@ void testChunkSnapshotAndTrace()
 	CHECK(events[2].sections == 0x5, "event carries section context");
 
 	// Bounded: overflow evicts the oldest instead of growing.
-	for (int i = 0; i < int(ChunkManager::kChunkEventRingSize) + 10; ++i)
-		ChunkManagerProbe::recordEvent(manager, chunk, "meshQueued", unsigned(i));
+	for (int i = 0; i < int(RenderWorldBridge::kChunkEventRingSize) + 10; ++i)
+		RenderBridgeProbe::recordEvent(manager, chunk, "meshQueued", unsigned(i));
 	events = manager.chunkDebugEvents();
-	CHECK(events.size() == ChunkManager::kChunkEventRingSize, "ring stays bounded");
+	CHECK(events.size() == RenderWorldBridge::kChunkEventRingSize, "ring stays bounded");
 	CHECK(std::string(events.front().kind) == "meshQueued" && events.front().sections == 10,
 		  "oldest events evicted in order");
 	CHECK(std::string(events.back().kind) == "meshQueued" &&
-			  events.back().sections == unsigned(ChunkManager::kChunkEventRingSize + 10 - 1),
+			  events.back().sections == unsigned(RenderWorldBridge::kChunkEventRingSize + 10 - 1),
 		  "newest event retained");
 	std::cout << "PASS\n";
 }
@@ -201,7 +201,7 @@ void testUpdateDebugUiState()
 	std::cout << "[updateDebugUiState] ";
 	TerrainGenerator generator(42);
 	ChunkPool pool(8);
-	ChunkManager manager(&generator, nullptr, &pool);
+	VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 	Camera camera;
 	camera.setPosition(glm::vec3(160.f, 90.f, 200.f));
 
@@ -252,10 +252,10 @@ void testUpdateDebugUiState()
 	debugui::updateDebugUiState(state, f, t0 + 10.0);
 	CHECK(state.activeChunks.count() == 2, "closed panels stop sampling");
 
-	// The opt-in chunk trace flag is propagated to a fresh ChunkManager by
+	// The opt-in chunk trace flag is propagated to a fresh RenderWorldBridge by
 	// the sampler itself — even with the inspector panel closed — so it
 	// survives world reloads (issue #179 review).
-	ChunkManager reloaded(&generator, nullptr, &pool);
+	VoxelWorld reloadedWorld(&generator, nullptr); RenderWorldBridge reloaded(&reloadedWorld, nullptr, &pool);
 	state.eventTraceEnabled = true;
 	f.chunks = &reloaded;
 	debugui::updateDebugUiState(state, f, t0 + 10.01);
@@ -267,14 +267,14 @@ void testUpdateDebugUiState()
 	// call, not just once the UI has re-synced the flag.
 	const bool carried = reloaded.chunkEventTraceEnabled();
 	CHECK(carried, "dying manager's trace flag captured for the reload");
-	ChunkManager rebootstrap(&generator, nullptr, &pool);
+	VoxelWorld rebootstrapWorld(&generator, nullptr); RenderWorldBridge rebootstrap(&rebootstrapWorld, nullptr, &pool);
 	rebootstrap.setChunkEventTraceEnabled(carried);
 	Chunk *bootstrapped = pool.acquire(glm::vec3(0.f, 0.f, 0.f));
 	CHECK(bootstrapped != nullptr, "pool provides a chunk for the reload bootstrap");
 	if (bootstrapped)
 	{
-		ChunkManagerProbe::registerChunk(rebootstrap, {0, 0, 0}, bootstrapped);
-		ChunkManagerProbe::recordEvent(rebootstrap, bootstrapped, "load");
+		RenderBridgeProbe::registerChunk(rebootstrap, {0, 0, 0}, bootstrapped);
+		RenderBridgeProbe::recordEvent(rebootstrap, bootstrapped, "load");
 		CHECK(!rebootstrap.chunkDebugEvents().empty(),
 			  "bootstrap events recorded on the reloaded manager before any UI sample");
 	}

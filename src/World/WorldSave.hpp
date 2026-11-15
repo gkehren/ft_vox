@@ -1,7 +1,7 @@
 #pragma once
 
 // Persistent world-save format layer (issue #180, Phase 1). Pure std-only
-// format code: no Chunk/ChunkManager/Engine/Vulkan dependency, no exceptions
+// format code: no render-side Chunk/Engine/Vulkan dependency, no exceptions
 // across the API (every read/write returns a SaveStatus).
 //
 // ---------------------------------------------------------------------------

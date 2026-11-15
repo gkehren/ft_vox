@@ -4,7 +4,7 @@
 #include <Engine/Benchmark.hpp>
 #include <Engine/PlayerUi.hpp>
 #include <Camera/Camera.hpp>
-#include <Chunk/ChunkManager.hpp>
+#include <Renderer/RenderWorldBridge.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Renderer/OverlayRenderer.hpp>
@@ -29,7 +29,7 @@
 class StagingRing;
 
 /// Plain-copy world-save snapshot for the World panel (issue #180, Phase 5).
-/// Filled by Engine::drawUi from ChunkManager::worldPersistence()->status();
+/// Filled by Engine::drawUi from RenderWorldBridge::worldPersistence()->status();
 /// deliberately value-only so GameUI keeps no dependency on the save layer.
 struct WorldSaveUiState
 {
@@ -138,7 +138,7 @@ struct GameUIFrame
 	std::function<void(float)> setCameraMovementSpeed;
 	std::function<void(float)> setMouseSensitivity;
 	std::function<void(float)> setIsometricZoom;
-	ChunkManager *chunks{nullptr};
+	RenderWorldBridge *chunks{nullptr};
 	ChunkPool *pool{nullptr};
 	TerrainGenerator *generator{nullptr};
 	WorldRenderer *worldRenderer{nullptr};

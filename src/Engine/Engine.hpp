@@ -26,7 +26,8 @@
 #include <Engine/Benchmark.hpp>
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkPool.hpp>
-#include <Chunk/ChunkManager.hpp>
+#include <Renderer/RenderWorldBridge.hpp>
+#include <World/VoxelWorld.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
 #include <Physics/PlayerController.hpp>
@@ -66,7 +67,7 @@ public:
 	/// chunk set after initializeNoiseGenerator.
 	glm::dvec3 playerPositionForTests() const { return player.body.position; }
 	bool playerWaitingForTerrainForTests() const { return player.body.waitingForTerrain; }
-	const ChunkManager *chunksForTests() const { return chunkManager.get(); }
+	const RenderWorldBridge *chunksForTests() const { return renderBridge.get(); }
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
 	/// Override the streaming front load bias (clamped to the unload-safe
@@ -227,7 +228,13 @@ private:
 	std::unique_ptr<TerrainGenerator> terrainGenerator;
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;
-	std::unique_ptr<ChunkManager> chunkManager;
+	// Authoritative world + derived render projection (issue #207, Epic #204
+	// Phase C). Declaration order is destruction order reversed: the bridge
+	// drains its render jobs and releases its handles BEFORE the world (and
+	// the pools/workers it references) tear down. Phase E (#209) lifts the
+	// world ownership into GameSimulation.
+	std::unique_ptr<VoxelWorld> voxelWorld;
+	std::unique_ptr<RenderWorldBridge> renderBridge;
 
 	StagingRing stagingRing;
 	GpuResourceRetire resourceRetire;

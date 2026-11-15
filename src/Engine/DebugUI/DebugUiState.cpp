@@ -2,13 +2,13 @@
 // Everything here is read-only with respect to the engine: chunk counters
 // are atomic or main-thread-only state, telemetry uses the non-destructive
 // sampleLive() path, and the only cross-thread writer touched is
-// ChunkManager's opt-in event-trace enable flag.
+// RenderWorldBridge's opt-in event-trace enable flag.
 
 #include <Engine/DebugUI/DebugUiEngine.hpp>
 
 #include <Engine/Profiler.hpp>
 #include <Engine/GpuProfile.hpp>
-#include <Chunk/ChunkManager.hpp>
+#include <Renderer/RenderWorldBridge.hpp>
 #include <Vulkan/MeshArena.hpp>
 #include <Vulkan/StagingRing.hpp>
 #include <Vulkan/VkGpuProfiler.hpp>
@@ -155,7 +155,7 @@ static void sampleStreamingDomain(UiState &state, const GameUIFrame &frame, doub
 	auto &s = state.streaming;
 	if (frame.chunks)
 	{
-		const ChunkManager &cm = *frame.chunks;
+		const RenderWorldBridge &cm = *frame.chunks;
 		s.loadedChunks = cm.chunkCount();
 		s.pendingLoad = cm.pendingLoadCount();
 		s.pendingGen = cm.pendingGenJobs();
@@ -251,7 +251,7 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 	{
 		// Keep the opt-in chunk lifecycle trace alive across world reloads:
 		// the flag lives in UiState and is re-applied every frame, even with
-		// the inspector closed, so a recreated ChunkManager inherits it
+		// the inspector closed, so a recreated RenderWorldBridge inherits it
 		// (issue #179 review). Idempotent one-bool store.
 		if (frame.chunks)
 			frame.chunks->setChunkEventTraceEnabled(state.eventTraceEnabled);
@@ -380,7 +380,7 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 
 // --- Chunk inspector snapshot ---
 
-ChunkDebugSnapshot makeChunkDebugSnapshot(const ChunkManager &chunks,
+ChunkDebugSnapshot makeChunkDebugSnapshot(const RenderWorldBridge &chunks,
 										  const glm::ivec3 &coord,
 										  const glm::vec3 &cameraPos)
 {

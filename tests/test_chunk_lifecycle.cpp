@@ -5,10 +5,10 @@
 // pooled-style storage across reset/regenerate cycles - with the compact
 // occupancy metadata staying in sync and no capacity churn.
 #include <Chunk/Chunk.hpp>
-#include <Chunk/ChunkManager.hpp>
+#include <Renderer/RenderWorldBridge.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/ChunkPool.hpp>
-#include <Chunk/ChunkCollisionView.hpp>
+#include <World/WorldCollisionView.hpp>
 #include <Chunk/ChunkMobWorld.hpp>
 #include <Physics/PlayerController.hpp>
 #include <Chunk/TerrainGenerator.hpp>
@@ -48,21 +48,21 @@ struct VoxelView : std::span<const Voxel>
 	size_t capacity() const { return size(); }
 };
 
-// Friend probe declared in ChunkManager.hpp / VoxelWorld.hpp: exposes the
+// Friend probe declared in RenderWorldBridge.hpp / VoxelWorld.hpp: exposes the
 // deferred-edit queue size so coalescing behavior is observable without
 // public API, and the effective-voxel decision helper for the UNLOADED-backing
 // contract. Issue #206: the authoritative seams live on VoxelWorld.
-struct ChunkManagerProbe
+struct RenderBridgeProbe
 {
-	static size_t pendingEdits(const ChunkManager &m) { return m.world().m_pendingEdits.size(); }
-	static TextureType effective(const ChunkManager &m, const Chunk *chunk, int x, int y, int z)
+	static size_t pendingEdits(const RenderWorldBridge &m) { return m.world().m_pendingEdits.size(); }
+	static TextureType effective(const RenderWorldBridge &m, const Chunk *chunk, int x, int y, int z)
 	{
 		return m.world().effectiveVoxelType(chunk->worldChunk(), x, y, z);
 	}
 	// Test hook for the superseded-result drop path (PR #117 review phases
 	// 11-12): inject a completed mesh job as a worker would, without
 	// running the async machinery.
-	static void injectCompletedMeshJob(ChunkManager &m, Chunk *chunk, MeshBuildResult *result)
+	static void injectCompletedMeshJob(RenderWorldBridge &m, Chunk *chunk, MeshBuildResult *result)
 	{
 		std::lock_guard<std::mutex> lock(m.m_completedJobsMutex);
 		m.m_completedMeshJobs.push_back({chunk, result});
@@ -71,7 +71,7 @@ struct ChunkManagerProbe
 	// a completed light-cache job as a worker would, with explicit identity
 	// stamps, so stale results (wrong generation/revision/intent) can be
 	// driven deterministically without racing a real worker.
-	static void injectCompletedLightJob(ChunkManager &m, Chunk *chunk, ChunkLightStorage *storage,
+	static void injectCompletedLightJob(RenderWorldBridge &m, Chunk *chunk, ChunkLightStorage *storage,
 	                                    ChunkLightPool *pool, uint64_t generation, uint64_t revision)
 	{
 		std::lock_guard<std::mutex> lock(m.m_completedJobsMutex);
@@ -81,7 +81,7 @@ struct ChunkManagerProbe
 	// round 2, section 26): inject a completed generation chunk as a worker
 	// would, so processFinishedJobs() runs dirtyNeighborsForArrivedLight()
 	// under its lock without the async machinery.
-	static void injectCompletedGenChunk(ChunkManager &m, Chunk *c)
+	static void injectCompletedGenChunk(RenderWorldBridge &m, Chunk *c)
 	{
 		VoxelWorld &w = m.world();
 		std::lock_guard<std::mutex> lock(w.m_completedJobsMutex);
@@ -92,7 +92,7 @@ struct ChunkManagerProbe
 	// coordinate without running the streaming load path. Issue #206: the
 	// record is adopted by the world (non-owning) and the render handle is
 	// registered with the adapter, mirroring the production bind.
-	static void registerChunk(ChunkManager &m, const glm::ivec3 &pos, Chunk *c)
+	static void registerChunk(RenderWorldBridge &m, const glm::ivec3 &pos, Chunk *c)
 	{
 		m.world().registerExternalChunk(pos, c->mutableWorldChunk());
 		m.m_chunks[pos] = c;
@@ -104,20 +104,20 @@ struct ChunkManagerProbe
 	// two budgets can disagree, so a Loaded event may arrive with no free
 	// render handle. onWorldLoaded parks it in m_pendingBinds; retryPendingBinds
 	// binds it once a slot frees.
-	static void simulateLoaded(ChunkManager &m, const glm::ivec3 &coord)
+	static void simulateLoaded(RenderWorldBridge &m, const glm::ivec3 &coord)
 	{
 		WorldEvent e;
 		e.kind = WorldEventKind::Loaded;
 		e.coord = coord;
 		m.onWorldLoaded(e);
 	}
-	static size_t pendingBinds(const ChunkManager &m) { return m.m_pendingBinds.size(); }
-	static void retryBinds(ChunkManager &m) { m.retryPendingBinds(); }
+	static size_t pendingBinds(const RenderWorldBridge &m) { return m.m_pendingBinds.size(); }
+	static void retryBinds(RenderWorldBridge &m) { m.retryPendingBinds(); }
 };
 
 // Drain helper (issue #172): wait for both mesh and light-cache jobs and run
 // one final publish pass, mirroring the engine's per-frame sequencing.
-static void drainManagerJobs(ChunkManager &mgr)
+static void drainManagerJobs(RenderWorldBridge &mgr)
 {
 	while (mgr.pendingMeshJobs() > 0 || mgr.pendingLightJobs() > 0)
 	{
@@ -414,7 +414,7 @@ static int runResetPerf()
 }
 
 // Streaming maintenance cost, isolated from chunk loading (issue #108): a
-// full ChunkManager runs its updateStreaming dispatch with an empty queue
+// full RenderWorldBridge runs its updateStreaming dispatch with an empty queue
 // region per regime — stationary (zero-work path) and forced incremental
 // (anchor crossing every call). No chunks are acquired, so the number IS the
 // maintenance cost, not masked by allocation/gen/mesh work.
@@ -423,7 +423,7 @@ static int runStreamPerf()
 	using Clock = std::chrono::steady_clock;
 	TerrainGenerator generator(42);
 	ChunkPool pool(64);
-	ChunkManager manager(&generator, nullptr, &pool);
+	VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 	RenderSettings settings;
 	settings.streamFrontBias = 0.3f;
 	settings.maxRenderDistance = 512;
@@ -472,14 +472,14 @@ static int profileMobs()
     }
     if (!found) { std::cerr << "No meadow fixture found\n"; return 1; }
     ChunkPool pool(512);
-    ChunkManager manager(&generator, nullptr, &pool);
+    VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
     Camera camera({float(center.x), 100.f, float(center.y)});
     RenderSettings settings;
     settings.minRenderDistance = 112; settings.maxRenderDistance = 112;
     manager.updateStreaming(camera, settings);
     manager.processChunkLoading(512);
     {
-        ChunkMobWorld world(manager, generator);
+        ChunkMobWorld world(managerWorld, manager, generator);
         CHECK(!world.surface(center.x, center.y), "unpublished terrain cannot spawn mobs");
     }
     for (auto *chunk : manager.getActiveChunks())
@@ -487,13 +487,13 @@ static int profileMobs()
     entities::MobSystem mobs;
     mobs.reset(42);
     for (int i = 0; i < 600; ++i) {
-        ChunkMobWorld world(manager, generator);
+        ChunkMobWorld world(managerWorld, manager, generator);
         mobs.update(1.0/60, world, {center.x,100,center.y},112);
     }
     const auto natural = mobs.mobs().size();
     CHECK(natural > 0, "natural mobs spawn on generated meadow voxels");
     {
-        ChunkMobWorld world(manager, generator);
+        ChunkMobWorld world(managerWorld, manager, generator);
         for (int z = -72; z <= 72 && mobs.mobs().size() < 48; z += 3)
         for (int x = -72; x <= 72 && mobs.mobs().size() < 48; x += 3) {
             auto feet = world.surface(center.x+x,center.y+z);
@@ -511,7 +511,7 @@ static int profileMobs()
         for(size_t j=0;j<mobs.mobs().size();++j) before[j]=mobs.mobs()[j].body.position;
         auto start=std::chrono::steady_clock::now();
         {
-            ChunkMobWorld world(manager,generator);
+            ChunkMobWorld world(managerWorld, manager, generator);
             mobs.update(1.0/60,world,{center.x,100,center.y},112);
         }
         double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
@@ -532,7 +532,7 @@ static int profileMobs()
     CHECK(!states.empty(), "light benchmark has active mobs");
     const double mobCount = static_cast<double>(states.size());
     {
-        ChunkMobWorld world(manager, generator);
+        ChunkMobWorld world(managerWorld, manager, generator);
         for (int i = 0; i < 6000; ++i) {
             auto start = std::chrono::steady_clock::now();
             for (auto &ms : states) {
@@ -563,7 +563,7 @@ static int profilePlayerPhysics()
 	// No rendering/GPU work is included; the scoped adapter cost IS included.
 	ChunkPool pool(64);
 	TerrainGenerator generator(42);
-	ChunkManager manager(&generator, nullptr, &pool);
+	VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 	Camera camera({0.f, 100.f, 0.f});
 	RenderSettings settings;
 	manager.updateStreaming(camera, settings);
@@ -576,7 +576,7 @@ static int profilePlayerPhysics()
 	}
 	glm::dvec3 spawn(0.5, 255, 0.5);
 	{
-		ChunkCollisionView view(manager);
+		WorldCollisionView view(managerWorld);
 		for (int y = 255; y >= 0; --y)
 			if (view.sample({0, y, 0}).solid) { spawn.y = y + 1.0 + physics::skin; break; }
 	}
@@ -597,7 +597,7 @@ static int profilePlayerPhysics()
 		const auto before = player.body.position;
 		const auto start = std::chrono::steady_clock::now();
 		{
-			ChunkCollisionView view(manager);
+			WorldCollisionView view(managerWorld);
 			player.advance(physics::PlayerController::fixedStep, input, view);
 		}
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -651,18 +651,18 @@ static glm::ivec2 locateInlandChunkOrigin(TerrainGenerator &gen)
 }
 
 // -----------------------------------------------------------------------------
-// Streaming dispatch contract (issue #108 review): drive a real ChunkManager
+// Streaming dispatch contract (issue #108 review): drive a real RenderWorldBridge
 // through updateStreaming and validate the desired footprint and the load
 // queue against the brute-force oracle at every reconciliation boundary.
 // -----------------------------------------------------------------------------
-struct ChunkManagerStreamProbe
+struct RenderBridgeStreamProbe
 {
-	static const ChunkDesiredFootprint &footprint(const ChunkManager &m) { return m.world().m_desiredFootprint; }
-	static const std::unordered_set<glm::ivec3, IVec3Hash> &enqueued(const ChunkManager &m) { return m.world().m_enqueuedLoads; }
-	static size_t queueHead(const ChunkManager &m) { return m.world().m_loadQueueHead; }
-	static const std::vector<LoadCandidate> &queue(const ChunkManager &m) { return m.world().m_loadQueue; }
-	static const VoxelWorld::StreamState &state(const ChunkManager &m) { return m.world().m_streamState; }
-	static const std::unordered_map<glm::ivec3, WorldChunk *, IVec3Hash> &chunks(const ChunkManager &m) { return m.world().m_chunks; }
+	static const ChunkDesiredFootprint &footprint(const RenderWorldBridge &m) { return m.world().m_desiredFootprint; }
+	static const std::unordered_set<glm::ivec3, IVec3Hash> &enqueued(const RenderWorldBridge &m) { return m.world().m_enqueuedLoads; }
+	static size_t queueHead(const RenderWorldBridge &m) { return m.world().m_loadQueueHead; }
+	static const std::vector<LoadCandidate> &queue(const RenderWorldBridge &m) { return m.world().m_loadQueue; }
+	static const VoxelWorld::StreamState &state(const RenderWorldBridge &m) { return m.world().m_streamState; }
+	static const std::unordered_map<glm::ivec3, WorldChunk *, IVec3Hash> &chunks(const RenderWorldBridge &m) { return m.world().m_chunks; }
 };
 
 struct StreamIVec3Less
@@ -686,13 +686,13 @@ static glm::ivec3 chunkOfPosition(const glm::vec3 &p)
 			static_cast<int>(std::floor(p.z / static_cast<float>(CHUNK_SIZE)))};
 }
 
-static std::set<glm::ivec3, StreamIVec3Less> managerDesiredSet(const ChunkManager &manager)
+static std::set<glm::ivec3, StreamIVec3Less> managerDesiredSet(const RenderWorldBridge &manager)
 {
-	const auto &list = footprintToCoordList(ChunkManagerStreamProbe::footprint(manager));
+	const auto &list = footprintToCoordList(RenderBridgeStreamProbe::footprint(manager));
 	return std::set<glm::ivec3, StreamIVec3Less>(list.begin(), list.end());
 }
 
-static void checkManagerDesiredMatchesBrute(const ChunkManager &manager, const Camera &camera,
+static void checkManagerDesiredMatchesBrute(const RenderWorldBridge &manager, const Camera &camera,
 											float bias, int viewDist, const char *what)
 {
 	const glm::vec3 pos = camera.getPosition();
@@ -720,11 +720,11 @@ static void checkManagerDesiredMatchesBrute(const ChunkManager &manager, const C
 /// is marked enqueued and the enqueued set holds exactly the distinct live
 /// entries; nothing queued is already loaded; queued set == desired
 /// footprint minus loaded chunks.
-static void checkStreamingQueueInvariants(const ChunkManager &manager, const char *what)
+static void checkStreamingQueueInvariants(const RenderWorldBridge &manager, const char *what)
 {
-	const auto &q = ChunkManagerStreamProbe::queue(manager);
-	const size_t head = ChunkManagerStreamProbe::queueHead(manager);
-	const auto &enq = ChunkManagerStreamProbe::enqueued(manager);
+	const auto &q = RenderBridgeStreamProbe::queue(manager);
+	const size_t head = RenderBridgeStreamProbe::queueHead(manager);
+	const auto &enq = RenderBridgeStreamProbe::enqueued(manager);
 
 	CHECK(head <= q.size(), "queue head within bounds");
 	std::set<glm::ivec3, StreamIVec3Less> live;
@@ -737,11 +737,11 @@ static void checkStreamingQueueInvariants(const ChunkManager &manager, const cha
 	CHECK(live.size() == q.size() - head, "no duplicate coordinates in the live queue");
 
 	for (const auto &c : live)
-		CHECK(ChunkManagerStreamProbe::chunks(manager).count(c) == 0,
+		CHECK(RenderBridgeStreamProbe::chunks(manager).count(c) == 0,
 			  "queued coordinate is not already loaded");
 
 	std::set<glm::ivec3, StreamIVec3Less> desiredMinusLoaded = managerDesiredSet(manager);
-	for (const auto &c : ChunkManagerStreamProbe::chunks(manager))
+	for (const auto &c : RenderBridgeStreamProbe::chunks(manager))
 		desiredMinusLoaded.erase(c.first);
 	CHECK(live == desiredMinusLoaded, "queued set equals desired footprint minus loaded chunks");
 }
@@ -753,7 +753,7 @@ static void runStreamingDispatchTests()
 	ChunkPool pool(64);
 
 	{
-		ChunkManager manager(&generator, nullptr, &pool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 		RenderSettings settings;
 		settings.streamFrontBias = bias;
 		settings.maxRenderDistance = 256;
@@ -764,10 +764,10 @@ static void runStreamingDispatchTests()
 			  "startup takes the full-rebuild path");
 		checkManagerDesiredMatchesBrute(manager, camera, bias, 256, "startup footprint matches brute force");
 		checkStreamingQueueInvariants(manager, "startup queue invariants");
-		CHECK(ChunkManagerStreamProbe::queueHead(manager) == 0, "full rebuild resets the queue head");
+		CHECK(RenderBridgeStreamProbe::queueHead(manager) == 0, "full rebuild resets the queue head");
 
 		// Steady state: same spot → zero work, queue untouched.
-		const size_t queueSizeBefore = ChunkManagerStreamProbe::queue(manager).size();
+		const size_t queueSizeBefore = RenderBridgeStreamProbe::queue(manager).size();
 		const auto statsBefore = manager.streamingMaintenanceStats();
 		for (int i = 0; i < 100; ++i)
 			CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::None,
@@ -777,7 +777,7 @@ static void runStreamingDispatchTests()
 			  "100 stationary frames count as 100 zero-work ticks");
 		CHECK(statsAfter.unloadScans - statsBefore.unloadScans <= 1,
 			  "stationary frames do not spam unload scans (60-frame floor)");
-		CHECK(ChunkManagerStreamProbe::queue(manager).size() == queueSizeBefore,
+		CHECK(RenderBridgeStreamProbe::queue(manager).size() == queueSizeBefore,
 			  "stationary frames leave the queue untouched");
 
 		// Sub-anchor movement (< 4 blocks): still zero work.
@@ -797,7 +797,7 @@ static void runStreamingDispatchTests()
 	// each movement-anchor transition (x = 4, 8, 12) must reconcile and keep
 	// the desired set exact — this is the stale-footprint blocker scenario.
 	{
-		ChunkManager manager(&generator, nullptr, &pool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 		RenderSettings settings;
 		settings.streamFrontBias = bias;
 		settings.maxRenderDistance = 256;
@@ -827,7 +827,7 @@ static void runStreamingDispatchTests()
 	// Chunk crossings in every direction + diagonal; then movement + a big
 	// rotation in the SAME frame (heading has dispatch priority).
 	{
-		ChunkManager manager(&generator, nullptr, &pool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 		RenderSettings settings;
 		settings.streamFrontBias = bias;
 		settings.maxRenderDistance = 256;
@@ -845,7 +845,7 @@ static void runStreamingDispatchTests()
 			camera.setPosition(p);
 			CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::Incremental,
 				  "chunk crossing reconciles incrementally");
-			CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == chunkOfPosition(p),
+			CHECK(RenderBridgeStreamProbe::state(manager).lastCamChunk == chunkOfPosition(p),
 				  "chunk crossing publishes the new camera chunk");
 			checkManagerDesiredMatchesBrute(manager, camera, bias, 256, "chunk-cross footprint matches brute force");
 			checkStreamingQueueInvariants(manager, "chunk-cross queue invariants");
@@ -859,7 +859,7 @@ static void runStreamingDispatchTests()
 			  "movement + large rotation takes the heading path");
 		checkManagerDesiredMatchesBrute(manager, camera, bias, 256, "heading-rebuild footprint matches brute force");
 		checkStreamingQueueInvariants(manager, "heading-rebuild queue invariants");
-		CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == chunkOfPosition(camera.getPosition()),
+		CHECK(RenderBridgeStreamProbe::state(manager).lastCamChunk == chunkOfPosition(camera.getPosition()),
 			  "heading path publishes the camera chunk on combined movement");
 
 		// Small rotation (~5°) with an anchor-crossing move → plain
@@ -882,7 +882,7 @@ static void runStreamingDispatchTests()
 	// real change rebuilds exactly once, and clamped settings compare on the
 	// normalized value actually used by the algorithm.
 	{
-		ChunkManager manager(&generator, nullptr, &pool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 		RenderSettings settings;
 		settings.streamFrontBias = 0.30f;
 		settings.maxRenderDistance = 256;
@@ -910,7 +910,7 @@ static void runStreamingDispatchTests()
 
 	// Render-distance changes rebuild and converge; teleports rebuild.
 	{
-		ChunkManager manager(&generator, nullptr, &pool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 		RenderSettings settings;
 		settings.streamFrontBias = bias;
 		settings.maxRenderDistance = 512;
@@ -930,9 +930,9 @@ static void runStreamingDispatchTests()
 
 		camera.setPosition(glm::vec3(50 * 16 + 8.f, 100.f, -30 * 16 + 3.f));
 		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild, "teleport rebuilds");
-		CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == chunkOfPosition(camera.getPosition()),
+		CHECK(RenderBridgeStreamProbe::state(manager).lastCamChunk == chunkOfPosition(camera.getPosition()),
 			  "teleport publishes the new camera chunk");
-		CHECK(ChunkManagerStreamProbe::queueHead(manager) == 0, "teleport resets the queue head");
+		CHECK(RenderBridgeStreamProbe::queueHead(manager) == 0, "teleport resets the queue head");
 		checkManagerDesiredMatchesBrute(manager, camera, bias, 384, "post-teleport footprint matches brute force");
 		checkStreamingQueueInvariants(manager, "post-teleport queue invariants");
 	}
@@ -952,7 +952,7 @@ static void runStreamingDispatchTests()
 		};
 		for (const glm::vec2 &fwd : headings)
 		{
-			ChunkManager manager(&generator, nullptr, &pool);
+			VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 			RenderSettings settings;
 			settings.streamFrontBias = 0.9f; // raw, above the safe cap on purpose
 			settings.maxRenderDistance = view;
@@ -982,7 +982,7 @@ static void runStreamingDispatchTests()
 	// cadence fires several times — the chunk must survive all of them.
 	{
 		ChunkPool bigPool(512);
-		ChunkManager manager(&generator, nullptr, &bigPool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &bigPool);
 		RenderSettings settings;
 		settings.streamFrontBias = 0.9f;
 		settings.maxRenderDistance = 64;
@@ -1007,7 +1007,7 @@ static void runStreamingDispatchTests()
 			}
 		}
 		CHECK(bestDist > 0.f, "found desired chunks ahead of the camera");
-		CHECK(ChunkManagerStreamProbe::chunks(manager).count(farAhead) == 1,
+		CHECK(RenderBridgeStreamProbe::chunks(manager).count(farAhead) == 1,
 			  "farthest ahead chunk got loaded");
 
 		const auto before = manager.streamingMaintenanceStats();
@@ -1015,11 +1015,11 @@ static void runStreamingDispatchTests()
 			manager.updateStreaming(camera, settings);
 		const auto after = manager.streamingMaintenanceStats();
 		CHECK(after.unloadScans > before.unloadScans, "unload cadence fired during the stationary window");
-		CHECK(ChunkManagerStreamProbe::chunks(manager).count(farAhead) == 1,
+		CHECK(RenderBridgeStreamProbe::chunks(manager).count(farAhead) == 1,
 			  "still-desired ahead chunk survives every unload scan");
 		// Full invariant: every desired coordinate is loaded — none was evicted.
 		for (const auto &c : managerDesiredSet(manager))
-			CHECK(ChunkManagerStreamProbe::chunks(manager).count(c) == 1,
+			CHECK(RenderBridgeStreamProbe::chunks(manager).count(c) == 1,
 				  "desired chunk remains loaded after unload scans (no thrash)");
 	}
 
@@ -1027,14 +1027,14 @@ static void runStreamingDispatchTests()
 	// across zero and negative boundaries (-0.1 walks to -16.1, crossing the
 	// chunk -1 → -2 boundary).
 	{
-		ChunkManager manager(&generator, nullptr, &pool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 		RenderSettings settings;
 		settings.streamFrontBias = bias;
 		settings.maxRenderDistance = 128;
 		Camera camera(glm::vec3(-0.1f, 100.f, -0.1f));
 		CHECK(manager.updateStreaming(camera, settings) == StreamingUpdateKind::FullRebuild,
 			  "negative startup rebuild");
-		CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == glm::ivec3(-1, 0, -1),
+		CHECK(RenderBridgeStreamProbe::state(manager).lastCamChunk == glm::ivec3(-1, 0, -1),
 			  "negative coords floor into chunk (-1,-1)");
 		for (float x = -1.1f; x >= -16.2f; x -= 1.0f)
 		{
@@ -1046,7 +1046,7 @@ static void runStreamingDispatchTests()
 				checkStreamingQueueInvariants(manager, "negative walk queue invariants");
 			}
 		}
-		CHECK(ChunkManagerStreamProbe::state(manager).lastCamChunk == glm::ivec3(-2, 0, -1),
+		CHECK(RenderBridgeStreamProbe::state(manager).lastCamChunk == glm::ivec3(-2, 0, -1),
 			  "negative walk crossed into chunk (-2,-1)");
 	}
 
@@ -1055,7 +1055,7 @@ static void runStreamingDispatchTests()
 	// queue must satisfy its invariants. None frames are allowed to be stale
 	// by up to one anchor cell (that is the documented quantization).
 	{
-		ChunkManager manager(&generator, nullptr, &pool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 		RenderSettings settings;
 		settings.streamFrontBias = 0.3f;
 		settings.maxRenderDistance = 256;
@@ -1196,7 +1196,7 @@ static void testPendingBindRetry()
 {
 	TerrainGenerator gen(31337);
 	ChunkPool pool(64); // clamped to kMinChunkPoolCapacity
-	ChunkManager manager(&gen, nullptr, &pool);
+	VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 
 	// Exhaust the render pool with directly-held (unbound) handles.
 	std::vector<Chunk *> held;
@@ -1217,15 +1217,15 @@ static void testPendingBindRetry()
 	CHECK(manager.getChunk({0, 0, 0}) == nullptr, "bind-retry: no render handle yet");
 
 	// Loaded event with a full render pool -> parked, not lost.
-	ChunkManagerProbe::simulateLoaded(manager, {0, 0, 0});
-	CHECK(ChunkManagerProbe::pendingBinds(manager) == 1, "bind-retry: load parked when pool full");
+	RenderBridgeProbe::simulateLoaded(manager, {0, 0, 0});
+	CHECK(RenderBridgeProbe::pendingBinds(manager) == 1, "bind-retry: load parked when pool full");
 	CHECK(manager.getChunk({0, 0, 0}) == nullptr, "bind-retry: still unbound while parked");
 
 	// Free one render slot and retry -> the parked load binds.
 	pool.release(held.back());
 	held.pop_back();
-	ChunkManagerProbe::retryBinds(manager);
-	CHECK(ChunkManagerProbe::pendingBinds(manager) == 0, "bind-retry: retry drains the parked load");
+	RenderBridgeProbe::retryBinds(manager);
+	CHECK(RenderBridgeProbe::pendingBinds(manager) == 0, "bind-retry: retry drains the parked load");
 	Chunk *bound = manager.getChunk({0, 0, 0});
 	CHECK(bound != nullptr, "bind-retry: handle bound after retry");
 	CHECK(bound && bound->isWorldBound(), "bind-retry: handle is world-bound");
@@ -1542,12 +1542,12 @@ int main(int argc, char **argv)
 		CHECK(vp.capacity() <= static_cast<size_t>(kThreads), "capacity bounded by thread count");
 	}
 
-	// 9) Synchronous bootstrap contract (issue #112): the ChunkManager
+	// 9) Synchronous bootstrap contract (issue #112): the RenderWorldBridge
 	// helper prepares storage on the calling thread, generates, and returns
 	// the chunk to the pool when preparation fails.
 	{
 		ChunkPool pool(4);
-		ChunkManager manager(&gen, nullptr, &pool);
+		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 		Chunk *chunk = pool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "bootstrap acquisition succeeds");
 		CHECK(manager.prepareAndGenerateChunk(chunk, gen), "bootstrap prepare+generate succeeds");
@@ -1943,7 +1943,7 @@ int main(int argc, char **argv)
 	{
 		ChunkPool pool(16);
 		TerrainGenerator mgen(2468);
-		ChunkManager manager(&mgen, nullptr, &pool);
+		VoxelWorld managerWorld(&mgen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
@@ -1978,7 +1978,7 @@ int main(int argc, char **argv)
 			// voxel backing access, with no state change of any kind.
 			{
 				const uint64_t revisionBefore = origin->meshRevision();
-				const size_t pendingBefore = ChunkManagerProbe::pendingEdits(manager);
+				const size_t pendingBefore = RenderBridgeProbe::pendingEdits(manager);
 				CHECK(!manager.placeVoxel(glm::vec3(4.0f, -1.0f, 4.0f), STONE),
 					  "placing below world height is refused");
 				CHECK(!manager.placeVoxel(glm::vec3(4.0f, static_cast<float>(CHUNK_HEIGHT), 4.0f), STONE),
@@ -1989,7 +1989,7 @@ int main(int argc, char **argv)
 					  "deleting above world height is refused");
 				CHECK(origin->meshRevision() == revisionBefore,
 					  "invalid edits do not bump mesh revision");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == pendingBefore,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == pendingBefore,
 					  "invalid edits do not queue anything");
 
 				// Off-by-one lock: the top valid voxel coordinate is usable.
@@ -2031,7 +2031,7 @@ int main(int argc, char **argv)
 			const glm::vec3 insidePos(4.0f, static_cast<float>(yIn), 4.0f);
 			CHECK(manager.placeVoxel(insidePos, STONE),
 				  "deferred interior edit reports success");
-			CHECK(ChunkManagerProbe::pendingEdits(manager) == 1,
+			CHECK(RenderBridgeProbe::pendingEdits(manager) == 1,
 				  "interior edit queues exactly one entry");
 			CHECK(origin->getVoxel(4, yIn, 4).type != static_cast<uint8_t>(STONE),
 				  "deferred edit does not write while in transit");
@@ -2041,7 +2041,7 @@ int main(int argc, char **argv)
 				  "queued interior edit applied after transit clears");
 			CHECK(origin->getState() == ChunkState::GENERATED,
 				  "applied edit marks the chunk GENERATED");
-			CHECK(ChunkManagerProbe::pendingEdits(manager) == 0,
+			CHECK(RenderBridgeProbe::pendingEdits(manager) == 0,
 				  "queue empty after apply");
 
 			// (b) BLOCKER regression (item 1/11): boundary edit while the
@@ -2055,7 +2055,7 @@ int main(int argc, char **argv)
 				origin->setInTransit(true);
 				CHECK(manager.placeVoxel(boundaryPos, STONE),
 					  "in-transit boundary edit reports success");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == 2,
 					  "target and mirror are both queued (mirror never lost)");
 				CHECK(origin->getVoxel(CHUNK_SIZE - 1, yE8, 8).type !=
 						  static_cast<uint8_t>(STONE),
@@ -2096,7 +2096,7 @@ int main(int argc, char **argv)
 				origin->setInTransit(true);
 				CHECK(manager.deleteVoxel(boundaryPos),
 					  "in-transit boundary delete reports success");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == 2,
 					  "delete queues target and mirror");
 				origin->setInTransit(false);
 				manager.processFinishedJobs();
@@ -2119,7 +2119,7 @@ int main(int argc, char **argv)
 				origin->setInTransit(true);
 				north->setInTransit(true);
 				CHECK(manager.placeVoxel(boundaryPos, STONE), "both-transit edit accepted");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == 2,
 					  "both entries queued");
 				origin->setInTransit(false);
 				manager.processFinishedJobs();
@@ -2128,7 +2128,7 @@ int main(int argc, char **argv)
 					  "target applied while neighbor still in transit");
 				CHECK(north->sampleForMeshing(6, yN6, -1) == AIR,
 					  "mirror waits for the neighbor");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == 1,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == 1,
 					  "mirror remains queued");
 				north->setInTransit(false);
 				manager.processFinishedJobs();
@@ -2187,7 +2187,7 @@ int main(int argc, char **argv)
 				const uint64_t southRev = south->meshRevision();
 				origin->setInTransit(true);
 				CHECK(manager.placeVoxel(cornerPos, BRICKS), "corner edit accepted");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == 3,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == 3,
 					  "corner queues target plus two face mirrors");
 				origin->setInTransit(false);
 				manager.processFinishedJobs();
@@ -2229,7 +2229,7 @@ int main(int argc, char **argv)
 				CHECK(manager.placeVoxel(boundaryPos, STONE), "boundary place");
 				CHECK(manager.deleteVoxel(boundaryPos), "boundary delete");
 				CHECK(manager.placeVoxel(boundaryPos, DIRT), "boundary re-place");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == 2,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == 2,
 					  "successive boundary edits coalesce to target + mirror");
 				origin->setInTransit(false);
 				manager.processFinishedJobs();
@@ -2253,14 +2253,14 @@ int main(int argc, char **argv)
 				manager.processFinishedJobs();
 				CHECK(origin->getVoxel(9, yI9, 9).type == static_cast<uint8_t>(AIR),
 					  "stale queued edit dropped after recycle");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == 0,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == 0,
 					  "stale entry removed from the queue");
 			}
 		}
 	}
 
 	// 14) Two-sided boundary edit data path (issue #113): the
-	// ChunkManager::dirtyNeighbor routing is unchanged by #103; this
+	// RenderWorldBridge::dirtyNeighbor routing is unchanged by #103; this
 	// validates the operations it drives - the mirror write lands in the
 	// neighbor's west-facing border at x = -1 and marks it GENERATED, and
 	// the edited chunk's own east face reflects the placed block.
@@ -2502,8 +2502,8 @@ int main(int argc, char **argv)
 		}
 		ungen.setInTransit(true); // generation in flight
 		{
-			ChunkManager probeHolder(&pgen, nullptr, &cpool);
-			CHECK(ChunkManagerProbe::effective(probeHolder, &ungen, 4, 40, 4) == AIR,
+			VoxelWorld probeHolderWorld(&pgen, nullptr); RenderWorldBridge probeHolder(&probeHolderWorld, nullptr, &cpool);
+			CHECK(RenderBridgeProbe::effective(probeHolder, &ungen, 4, 40, 4) == AIR,
 				  "UNLOADED backing is not read for edit decisions");
 		}
 		ungen.setInTransit(false);
@@ -2615,7 +2615,7 @@ int main(int argc, char **argv)
 	{
 		ChunkPool pool(32);
 		TerrainGenerator wgen(4711);
-		ChunkManager manager(&wgen, nullptr, &pool);
+		VoxelWorld managerWorld(&wgen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
@@ -2633,13 +2633,13 @@ int main(int argc, char **argv)
 			CHECK(waiting->getState() == ChunkState::UNLOADED,
 				  "chunk loaded but not yet generated");
 			CHECK(!waiting->isInTransit(), "no generation dispatched yet");
-			const size_t queuedBefore = ChunkManagerProbe::pendingEdits(manager);
+			const size_t queuedBefore = RenderBridgeProbe::pendingEdits(manager);
 
 			// Delete on a logically-empty UNLOADED chunk: refused, nothing
 			// queued, backing untouched.
 			CHECK(!manager.deleteVoxel(glm::vec3(4.0f, 80.0f, 4.0f)),
 				  "delete on UNLOADED chunk is refused (logical AIR)");
-			CHECK(ChunkManagerProbe::pendingEdits(manager) == queuedBefore,
+			CHECK(RenderBridgeProbe::pendingEdits(manager) == queuedBefore,
 				  "refused delete queues nothing");
 
 			// Place: logical acceptance, physical deferral.
@@ -2649,7 +2649,7 @@ int main(int argc, char **argv)
 				  "queued edit does not change the chunk state");
 			CHECK(!waiting->isVoxelActive(4, 80, 4),
 				  "queued edit does not touch the stale backing");
-			CHECK(ChunkManagerProbe::pendingEdits(manager) == queuedBefore + 1,
+			CHECK(RenderBridgeProbe::pendingEdits(manager) == queuedBefore + 1,
 				  "accepted place queues exactly one target entry");
 
 			// (b) Coalescing while waiting for generation: place, delete
@@ -2659,7 +2659,7 @@ int main(int argc, char **argv)
 				  "delete of the queued stone is accepted (overlay sees STONE)");
 			CHECK(manager.placeVoxel(glm::vec3(4.0f, 80.0f, 4.0f), BRICKS),
 				  "re-place on the queued coordinate is accepted");
-			CHECK(ChunkManagerProbe::pendingEdits(manager) == queuedBefore + 1,
+			CHECK(RenderBridgeProbe::pendingEdits(manager) == queuedBefore + 1,
 				  "successive edits coalesce to one pending entry");
 
 			// (c) UNLOADED + inTransit defers exactly like UNLOADED alone.
@@ -2669,7 +2669,7 @@ int main(int argc, char **argv)
 			waiting->setInTransit(false);
 			CHECK(!waiting->isVoxelActive(5, 80, 4),
 				  "transit deferral also skips the stale backing");
-			CHECK(ChunkManagerProbe::pendingEdits(manager) == queuedBefore + 2,
+			CHECK(RenderBridgeProbe::pendingEdits(manager) == queuedBefore + 2,
 				  "second coordinate queues a second entry");
 
 			// (d) Generation is not short-circuited: the terrain lands in
@@ -2716,7 +2716,7 @@ int main(int argc, char **argv)
 				  "mirror neighbor is still UNLOADED");
 			CHECK(eastAgain->sampleForMeshing(-1, yEdge, 8) == AIR,
 				  "mirror write does not touch the UNLOADED neighbor");
-			CHECK(ChunkManagerProbe::pendingEdits(manager) == 1,
+			CHECK(RenderBridgeProbe::pendingEdits(manager) == 1,
 				  "exactly the neighbor mirror stays queued");
 
 			const uint64_t revAfterGen = eastAgain->meshRevision();
@@ -3191,7 +3191,7 @@ int main(int argc, char **argv)
 		MeshResultPool pool;
 		ChunkPool chunkPool(8);
 		TerrainGenerator mgen(1337);
-		ChunkManager manager(&mgen, nullptr, &chunkPool);
+		VoxelWorld managerWorld(&mgen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
@@ -3227,7 +3227,7 @@ int main(int argc, char **argv)
 			CHECK(chunk->dirtySections() == 0,
 				  "superseded: mask empty while the job is out");
 
-			ChunkManagerProbe::injectCompletedMeshJob(manager, chunk, stale);
+			RenderBridgeProbe::injectCompletedMeshJob(manager, chunk, stale);
 			manager.processFinishedJobs();
 
 			// The queued edit arms its own sections (plus the conservative
@@ -3237,7 +3237,7 @@ int main(int argc, char **argv)
 			    static_cast<uint16_t>((1u << 2) | (1u << (editY / 16)));
 			CHECK((chunk->dirtySections() & expectedMask) == expectedMask,
 				  "superseded build re-arms its sections next to the edit's");
-			CHECK(ChunkManagerProbe::pendingEdits(manager) == 0,
+			CHECK(RenderBridgeProbe::pendingEdits(manager) == 0,
 				  "superseded: queued edit applied");
 			CHECK(pool.activeCount() == 0, "superseded: dropped result back in pool");
 
@@ -3494,7 +3494,7 @@ int main(int argc, char **argv)
 
 	// 25) Cross-chunk RGB block light (issue #141 review): with a halo
 	// attached the block-light BFS runs on the center+15-ring domain, so
-	// emissive light crosses chunk borders, and the ChunkManager dirties the
+	// emissive light crosses chunk borders, and the RenderWorldBridge dirties the
 	// reachable neighbors when a light-relevant edit lands within the halo
 	// radius of a border. NOTE on orientation: the engine's halo/mirror
 	// convention is south = -z, north = +z (fillLightHaloFromNeighbors in
@@ -3643,7 +3643,7 @@ int main(int argc, char **argv)
 		// dirties nobody.
 		{
 			ChunkPool chunkPool(8);
-			ChunkManager manager(&gen, nullptr, &chunkPool);
+			VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 			Chunk *a = chunkPool.acquire(glm::vec3(0.0f));
 			Chunk *b = chunkPool.acquire(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f));
 			Chunk *w = chunkPool.acquire(glm::vec3(float(-CHUNK_SIZE), 0.0f, 0.0f));
@@ -3652,9 +3652,9 @@ int main(int argc, char **argv)
 			{
 				// m_chunks keys are CHUNK INDICES, not world positions: the
 				// chunks sit at world x 0 / 16 / -16, i.e. indices 0 / +1 / -1.
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), a);
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(1, 0, 0), b);
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(-1, 0, 0), w);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(0, 0, 0), a);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(1, 0, 0), b);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(-1, 0, 0), w);
 				CHECK(manager.prepareAndGenerateChunk(a, gen), "rgb manager: generate A");
 				CHECK(manager.prepareAndGenerateChunk(b, gen), "rgb manager: generate B");
 				CHECK(manager.prepareAndGenerateChunk(w, gen), "rgb manager: generate W");
@@ -3998,15 +3998,15 @@ int main(int argc, char **argv)
 		// a halo-aware rebuild must carry the new light across the border.
 		{
 			ChunkPool chunkPool(8);
-			ChunkManager manager(&gen, nullptr, &chunkPool);
+			VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 			Chunk *a = chunkPool.acquire(glm::vec3(0.0f));
 			Chunk *b = chunkPool.acquire(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f));
 			CHECK(a != nullptr && b != nullptr, "rgb life: pool acquisition");
 			if (a && b)
 			{
 				// m_chunks keys are CHUNK INDICES (section 25b): world x 0/16.
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), a);
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(1, 0, 0), b);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(0, 0, 0), a);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(1, 0, 0), b);
 				CHECK(manager.prepareAndGenerateChunk(a, gen) &&
 						  manager.prepareAndGenerateChunk(b, gen),
 					  "rgb life: generate A and B");
@@ -4032,7 +4032,7 @@ int main(int argc, char **argv)
 					  "rgb life A: dirty mask persists DESPITE the neighbor being in transit");
 				CHECK(b->getState() == ChunkState::MESHED,
 					  "rgb life A: scheduling withheld in transit (B still MESHED)");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == 1,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == 1,
 					  "rgb life A: the x=15 mirror edit deferred with the in-transit neighbor");
 
 				// The job finishes with the stale pre-edit halo.
@@ -4045,13 +4045,13 @@ int main(int argc, char **argv)
 											 kTunZLo, kTunZHi);
 				CHECK(staleR == 0,
 					  "rgb life A: the in-flight mesh really predates the edit (no crossing light)");
-				ChunkManagerProbe::injectCompletedMeshJob(manager, b, stale);
+				RenderBridgeProbe::injectCompletedMeshJob(manager, b, stale);
 				manager.processFinishedJobs();
 				CHECK(!b->isInTransit(),
 					  "rgb life A: in-transit cleared with the finished job");
 				CHECK(b->getState() == ChunkState::GENERATED,
 					  "rgb life A: chunk dirtied mid-flight re-armed GENERATED after its job completed");
-				CHECK(ChunkManagerProbe::pendingEdits(manager) == 0,
+				CHECK(RenderBridgeProbe::pendingEdits(manager) == 0,
 					  "rgb life A: the deferred mirror edit applied with the finished job");
 
 				// Publish-branch isolation: the x=15 edit above goes through
@@ -4075,7 +4075,7 @@ int main(int argc, char **argv)
 				b->buildMesh(*stale2, b->meshGeneration(), b->meshRevision());
 				pool.finishBuild(stale2);
 				b->setLightHalo(nullptr);
-				ChunkManagerProbe::injectCompletedMeshJob(manager, b, stale2);
+				RenderBridgeProbe::injectCompletedMeshJob(manager, b, stale2);
 				manager.processFinishedJobs();
 				CHECK(!b->isInTransit(), "rgb life B: in-transit cleared");
 				CHECK(b->getState() == ChunkState::GENERATED,
@@ -4098,7 +4098,7 @@ int main(int argc, char **argv)
 				if (std::getenv("FT_RGB_DEBUG"))
 					std::cerr << "[rgb] race nearR=" << nearR
 							  << " staleR=" << staleR << std::endl;
-				ChunkManagerProbe::injectCompletedMeshJob(manager, b, fresh);
+				RenderBridgeProbe::injectCompletedMeshJob(manager, b, fresh);
 				manager.processFinishedJobs();
 				CHECK(b->getState() == ChunkState::MESHED,
 					  "rgb life: clean republish stays MESHED (no spurious re-arm at zero mask)");
@@ -4111,7 +4111,7 @@ int main(int argc, char **argv)
 		// rebuilt C must carry the diagonal lava light in its corner.
 		{
 			ChunkPool chunkPool(8);
-			ChunkManager manager(&gen, nullptr, &chunkPool);
+			VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 			Chunk *cc = chunkPool.acquire(glm::vec3(0.0f));
 			Chunk *dc = chunkPool.acquire(glm::vec3(float(CHUNK_SIZE), 0.0f, float(CHUNK_SIZE)));
 			CHECK(cc != nullptr && dc != nullptr, "rgb diag: pool acquisition");
@@ -4133,7 +4133,7 @@ int main(int argc, char **argv)
 								chunk.setVoxel(x, y, z, AIR);
 				};
 
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), cc);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(0, 0, 0), cc);
 				CHECK(manager.prepareAndGenerateChunk(cc, gen), "rgb diag: generate C");
 				// Shell spans 10..15 so the scan window (x,z >= 12) sits
 				// strictly inside deterministic stone (no seed ore noise).
@@ -4160,9 +4160,9 @@ int main(int argc, char **argv)
 				carveCorner(*dc, 0, 2, 0, 2, 0, 1, 0, 1); // pocket around the lava
 				dc->setVoxel(1, 40, 1, LAVA); // corner nearest C (world 17,40,17)
 				CHECK(!dc->isInTransit(), "rgb diag: D not in transit at the arrival");
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(1, 0, 1), dc);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(1, 0, 1), dc);
 				cc->takeDirtySections(); // arrival must own the dirty mask
-				ChunkManagerProbe::injectCompletedGenChunk(manager, dc);
+				RenderBridgeProbe::injectCompletedGenChunk(manager, dc);
 				manager.processFinishedJobs();
 
 				CHECK(cc->dirtySections() != 0,
@@ -4194,7 +4194,7 @@ int main(int argc, char **argv)
 		// through the NE halo region; D's arrival seals that detour.
 		{
 			ChunkPool chunkPool(8);
-			ChunkManager manager(&gen, nullptr, &chunkPool);
+			VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 			Chunk *cc = chunkPool.acquire(glm::vec3(0.0f));
 			Chunk *dc = chunkPool.acquire(glm::vec3(float(CHUNK_SIZE), 0.0f, float(CHUNK_SIZE)));
 			CHECK(cc != nullptr && dc != nullptr, "rgb block: pool acquisition");
@@ -4214,7 +4214,7 @@ int main(int argc, char **argv)
 				// (16,y,16), so D's stone corner (D-local 0..3, 38..42,
 				// 0..3 = halo 16..19, 38..42, 16..19) overwrites the hinge
 				// and every alternative route is >= 18 steps (dark).
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), cc);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(0, 0, 0), cc);
 				CHECK(manager.prepareAndGenerateChunk(cc, gen), "rgb block: generate C");
 				for (int x = 11; x <= 15; ++x)
 					for (int z = 11; z <= 15; ++z)
@@ -4252,10 +4252,10 @@ int main(int argc, char **argv)
 					for (int z = 0; z <= 3; ++z)
 						for (int y = 38; y <= 42; ++y)
 							dc->setVoxel(x, y, z, STONE);
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(1, 0, 1), dc);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(1, 0, 1), dc);
 				CHECK(!dc->isInTransit(), "rgb block: D not in transit at the arrival");
 				cc->takeDirtySections();
-				ChunkManagerProbe::injectCompletedGenChunk(manager, dc);
+				RenderBridgeProbe::injectCompletedGenChunk(manager, dc);
 				manager.processFinishedJobs();
 
 				CHECK(cc->dirtySections() != 0,
@@ -4325,7 +4325,7 @@ int main(int argc, char **argv)
 	// deferred) and MUST be read: two adjacent chunks dispatched in one
 	// meshPendingChunks batch would otherwise give the second halo snapshot
 	// an AIR view of the first - an asymmetric seam no future edit or
-	// arrival would ever invalidate. ChunkManager::meshPendingChunks also
+	// arrival would ever invalidate. RenderWorldBridge::meshPendingChunks also
 	// skips a dispatch (retry later) when the halo pool allocation fails
 	// instead of building without a halo.
 	{
@@ -4362,11 +4362,12 @@ int main(int argc, char **argv)
 			}
 
 			ChunkPool chunkPool;
-			ChunkManager manager;
+			VoxelWorld managerWorld;
+			RenderWorldBridge manager;
 			Chunk *a{nullptr};
 			Chunk *b{nullptr};
 			BatchWorld(TerrainGenerator &genRef, ThreadPool &tp)
-				: chunkPool(8), manager(&genRef, &tp, &chunkPool)
+				: chunkPool(8), managerWorld(&genRef, &tp), manager(&managerWorld, &tp, &chunkPool)
 			{
 				a = chunkPool.acquire(glm::vec3(0.0f));
 				b = chunkPool.acquire(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f));
@@ -4377,8 +4378,8 @@ int main(int argc, char **argv)
 				}
 				// m_chunks keys are CHUNK INDICES, not world positions
 				// (section 25b): world x 0/16 -> indices 0/+1.
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), a);
-				ChunkManagerProbe::registerChunk(manager, glm::ivec3(1, 0, 0), b);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(0, 0, 0), a);
+				RenderBridgeProbe::registerChunk(manager, glm::ivec3(1, 0, 0), b);
 				if (!manager.prepareAndGenerateChunk(a, genRef) ||
 					!manager.prepareAndGenerateChunk(b, genRef))
 				{
@@ -4554,7 +4555,7 @@ int main(int argc, char **argv)
 				inspectBatch(w2, camB, "B-first");
 				gate.store(1, std::memory_order_release); // workers pick up the queued HIGH jobs
 
-				auto drain = [](ChunkManager &m)
+				auto drain = [](RenderWorldBridge &m)
 				{
 					while (m.pendingMeshJobs() > 0)
 					{
@@ -4665,7 +4666,7 @@ int main(int argc, char **argv)
 	{
 		ChunkPool pool(32);
 		TerrainGenerator generator(42);
-		ChunkManager manager(&generator, nullptr, &pool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 		Camera cam({0.f, 100.f, 0.f});
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
@@ -4676,7 +4677,7 @@ int main(int argc, char **argv)
 		if (chunk && west)
 		{
 			{
-				ChunkCollisionView view(manager);
+				WorldCollisionView view(managerWorld);
 				CHECK(!view.sample({4, 220, 4}).available, "unprepared is unknown, not air");
 				CHECK(!view.sample({10000, 220, 4}).available, "missing chunk is unknown");
 				CHECK(view.sample({4, -1, 4}).solid, "solid lower world boundary");
@@ -4684,7 +4685,7 @@ int main(int argc, char **argv)
 			}
 			CHECK(chunk->prepareVoxelStorageForGeneration(), "prepare collision chunk");
 			{
-				ChunkCollisionView view(manager);
+				WorldCollisionView view(managerWorld);
 				CHECK(!view.sample({4, 220, 4}).available, "prepared stale backing remains unknown");
 			}
 			// Actual generation runs concurrently with repeated query views.
@@ -4692,7 +4693,7 @@ int main(int argc, char **argv)
 			std::thread generation([&] { chunk->generateTerrain(generator); });
 			for (int i = 0; i < 1000; ++i)
 			{
-				ChunkCollisionView view(manager);
+				WorldCollisionView view(managerWorld);
 				const auto sample = view.sample({4, 0, 4});
 				CHECK(!sample.available || sample.solid, "generation never exposes stale bedrock bytes");
 			}
@@ -4702,14 +4703,14 @@ int main(int argc, char **argv)
 			chunk->setVoxel(4, 220, 4, AIR);
 			west->setVoxel(15, 220, 4, GLASS);
 			{
-				ChunkCollisionView view(manager);
+				WorldCollisionView view(managerWorld);
 				CHECK(view.sample({4, 220, 4}).available, "generated before mesh is collidable");
 				CHECK(view.sample({-1, 220, 4}).solid, "negative floor mapping and glass solidity");
 			}
 			chunk->setInTransit(true); // read-only remesh: existing voxels stay queryable
 			CHECK(manager.placeVoxel({4.f, 220.f, 4.f}, STONE), "queue physical obstacle");
 			{
-				ChunkCollisionView view(manager);
+				WorldCollisionView view(managerWorld);
 				CHECK(view.sample({4, 220, 4}).solid, "pending placement blocks before apply");
 				CHECK(view.sample({5, 220, 4}).available, "remeshing does not turn chunk unknown");
 				physics::Body body; body.position = {2, 220, 4.5};
@@ -4719,14 +4720,14 @@ int main(int argc, char **argv)
 			}
 			CHECK(manager.deleteVoxel({4.f, 220.f, 4.f}), "queue logical deletion");
 			{
-				ChunkCollisionView view(manager);
+				WorldCollisionView view(managerWorld);
 				CHECK(!view.sample({4, 220, 4}).solid, "coalesced pending deletion removes collision");
 			}
 			CHECK(manager.placeVoxel({4.f, 220.f, 4.f}, STONE), "replace pending deletion");
 			chunk->setInTransit(false);
 			manager.processFinishedJobs();
 			{
-				ChunkCollisionView view(manager);
+				WorldCollisionView view(managerWorld);
 				CHECK(view.sample({4, 220, 4}).solid, "applied collision matches logical state");
 			}
 			chunk->setVoxel(4, 220, 4, AIR);
@@ -4738,7 +4739,7 @@ int main(int argc, char **argv)
 			chunk->generateTerrain(generator);
 			chunk->setVoxel(4, 220, 4, AIR);
 			{
-				ChunkCollisionView view(manager);
+				WorldCollisionView view(managerWorld);
 				CHECK(!view.sample({4, 220, 4}).solid, "stale queued solid ignored after recycling");
 			}
 			manager.processFinishedJobs();
@@ -4754,12 +4755,12 @@ int main(int argc, char **argv)
 	{
 		ChunkPool pool(32);
 		TerrainGenerator generator(42);
-		ChunkManager manager(&generator, nullptr, &pool);
+		VoxelWorld managerWorld(&generator, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
 
 		auto *chunk = pool.acquire(glm::vec3(0.0f));
 		chunk->prepareVoxelStorageForGeneration();
 		chunk->generateTerrain(generator);
-		ChunkManagerProbe::registerChunk(manager, glm::ivec3(0, 0, 0), chunk);
+		RenderBridgeProbe::registerChunk(manager, glm::ivec3(0, 0, 0), chunk);
 		chunk->setLocalLightCacheWanted(true);
 
 		// Before meshing, lightStorage is not published yet: sampleVoxelLight fallback
@@ -4803,17 +4804,17 @@ int main(int argc, char **argv)
 		const auto lavaLight = manager.sampleVoxelLight({8, 141, 8});
 		CHECK(lavaLight.blockRgb.r > 0.5f, "block light near lava has high red component");
 
-		// Test ChunkCollisionView and ChunkMobWorld adapters (separate scopes to avoid nested shared_lock)
+		// Test the bridge light seam and the ChunkMobWorld adapter (separate
+		// scopes to avoid nested shared_lock).
 		lighting::LocalVoxelLight viewLight;
 		{
-			ChunkCollisionView view(manager);
-			viewLight = view.sampleLight(glm::vec3(8.5f, 141.5f, 8.5f));
-			CHECK(viewLight.blockRgb.r > 0.5f, "ChunkCollisionView samples smoothed light");
+			viewLight = manager.sampleSmoothedLight(glm::vec3(8.5f, 141.5f, 8.5f));
+			CHECK(viewLight.blockRgb.r > 0.5f, "bridge samples smoothed light");
 		}
 		{
-			ChunkMobWorld mobWorld(manager, generator);
+			ChunkMobWorld mobWorld(managerWorld, manager, generator);
 			const auto mobLight = mobWorld.sampleLight(glm::vec3(8.5f, 141.5f, 8.5f));
-			CHECK(mobLight.blockRgb.r == viewLight.blockRgb.r, "ChunkMobWorld delegates to view");
+			CHECK(mobLight.blockRgb.r == viewLight.blockRgb.r, "ChunkMobWorld delegates to bridge light seam");
 		}
 
 		// Trilinear continuity: step along a line from (8.5, 141.5, 8.5) to (8.5, 145.5, 8.5)
@@ -4831,14 +4832,14 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(1337);
 		ChunkPool chunkPool(8);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 		Chunk *ca = chunkPool.acquire(glm::vec3(0.0f));
 		Chunk *cb = chunkPool.acquire(glm::vec3(float(CHUNK_SIZE), 0.0f, 0.0f));
 		CHECK(ca != nullptr && cb != nullptr, "acquired chunks ca and cb");
 		if (ca && cb)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), ca);
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(1, 0, 0), cb);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), ca);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(1, 0, 0), cb);
 			CHECK(mgr.prepareAndGenerateChunk(ca, gen), "generated ca");
 			CHECK(mgr.prepareAndGenerateChunk(cb, gen), "generated cb");
 
@@ -4984,13 +4985,13 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(42);
 		ChunkPool chunkPool(8);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 
 		Chunk *chunk = chunkPool.acquire(glm::vec3(64.0f, 0.0f, 0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for LOD light test");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(4, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(4, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for LOD light test");
 
 			RenderSettings rs;
@@ -5062,10 +5063,10 @@ int main(int argc, char **argv)
 		TerrainGenerator gen(999);
 		ChunkPool chunkPool(4);
 		{
-			ChunkManager mgr(&gen, nullptr, &chunkPool);
+			VoxelWorld mgrWorld(&gen, nullptr); RenderWorldBridge mgr(&mgrWorld, nullptr, &chunkPool);
 			Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 			CHECK(chunk != nullptr, "acquired chunk for shutdown test");
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
 
 			auto *result = chunkPool.meshResultPool().acquire();
 			CHECK(result != nullptr, "acquired mesh result");
@@ -5078,7 +5079,7 @@ int main(int argc, char **argv)
 			CHECK(chunkPool.lightPool().activeCount() >= 1, "light block active");
 
 			// Inject into manager without calling processFinishedJobs()
-			ChunkManagerProbe::injectCompletedMeshJob(mgr, chunk, result);
+			RenderBridgeProbe::injectCompletedMeshJob(mgr, chunk, result);
 
 			// Destruction of mgr here must drain m_completedMeshJobs, release the
 			// result back to meshResultPool, and release the lightStorage back to lightPool.
@@ -5095,12 +5096,12 @@ int main(int argc, char **argv)
 	{
 		TerrainGenerator gen(1337);
 		ChunkPool chunkPool(4);
-		ChunkManager mgr(&gen, nullptr, &chunkPool);
+		VoxelWorld mgrWorld(&gen, nullptr); RenderWorldBridge mgr(&mgrWorld, nullptr, &chunkPool);
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for race test 34");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for race test 34");
 
 			// 1. Chunk initially wants light cache
@@ -5135,12 +5136,12 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(1337);
 		ChunkPool chunkPool(4);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for race test 35");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for race test 35");
 			// Mirror dispatch-time dirty-mask consumption (meshPendingChunks
 			// takes the mask before building); the direct build below skips it.
@@ -5160,7 +5161,7 @@ int main(int argc, char **argv)
 			chunk->setLocalLightCacheWanted(true);
 
 			// 3. Inject and process through manager
-			ChunkManagerProbe::injectCompletedMeshJob(mgr, chunk, result);
+			RenderBridgeProbe::injectCompletedMeshJob(mgr, chunk, result);
 			mgr.processFinishedJobs();
 
 			// Stale Clear must NOT clobber wanted status; the chunk stays MESHED
@@ -5206,14 +5207,14 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(777);
 		ChunkPool chunkPool(8);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 
 		// Place chunk at (100, 0, 0) - distance with chunk-center offset is ~108m (< 128m)
 		Chunk *chunk = chunkPool.acquire(glm::vec3(100.0f, 0.0f, 0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for streaming 128m test");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(6, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(6, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for streaming 128m test");
 
 			RenderSettings rs;
@@ -5283,7 +5284,7 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(42);
 		ChunkPool chunkPool(8);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 
 		// Chunk at world x=256 (index 16); mesh it while the camera is far
 		// outside the light-cache radius so it never gets a cache from the
@@ -5292,7 +5293,7 @@ int main(int argc, char **argv)
 		CHECK(chunk != nullptr, "acquired chunk for mesh preservation test");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(16, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(16, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for mesh preservation test");
 
 			RenderSettings rs;
@@ -5352,7 +5353,7 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(123);
 		ChunkPool chunkPool(8);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 		// East neighbor at world x=16: its voxels feed the center chunk's
@@ -5363,8 +5364,8 @@ int main(int argc, char **argv)
 		CHECK(east != nullptr, "acquired east neighbor for equivalence test");
 		if (chunk && east)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(1, 0, 0), east);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(1, 0, 0), east);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for equivalence test");
 			CHECK(mgr.prepareAndGenerateChunk(east, gen), "generated east neighbor for equivalence test");
 			// Emissive sources above the terrain so block light is non-trivial.
@@ -5447,13 +5448,13 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(321);
 		ChunkPool chunkPool(8);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for hysteresis test");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for hysteresis test");
 
 			RenderSettings rs;
@@ -5512,13 +5513,13 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(555);
 		ChunkPool chunkPool(8);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for camera race test");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for camera race test");
 
 			RenderSettings rs;
@@ -5567,12 +5568,12 @@ int main(int argc, char **argv)
 	{
 		TerrainGenerator gen(1337);
 		ChunkPool chunkPool(4);
-		ChunkManager mgr(&gen, nullptr, &chunkPool);
+		VoxelWorld mgrWorld(&gen, nullptr); RenderWorldBridge mgr(&mgrWorld, nullptr, &chunkPool);
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for stale light test");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for stale light test");
 
 			// Meshed without cache (sync path, cache not wanted). Consume the
@@ -5588,7 +5589,7 @@ int main(int argc, char **argv)
 			{
 				ChunkLightStorage *st = lightPool.acquire();
 				st->voxels.fill(0x1234);
-				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				RenderBridgeProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
 				                                           chunk->meshGeneration() + 1,
 				                                           chunk->meshRevision());
 				mgr.processFinishedJobs();
@@ -5599,7 +5600,7 @@ int main(int argc, char **argv)
 			{
 				ChunkLightStorage *st = lightPool.acquire();
 				st->voxels.fill(0x1234);
-				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				RenderBridgeProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
 				                                           chunk->meshGeneration(),
 				                                           chunk->meshRevision() + 1);
 				mgr.processFinishedJobs();
@@ -5611,7 +5612,7 @@ int main(int argc, char **argv)
 				ChunkLightStorage *st = lightPool.acquire();
 				st->voxels.fill(0x1234);
 				chunk->setLocalLightCacheWanted(false);
-				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				RenderBridgeProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
 				                                           chunk->meshGeneration(),
 				                                           chunk->meshRevision());
 				mgr.processFinishedJobs();
@@ -5623,7 +5624,7 @@ int main(int argc, char **argv)
 			{
 				ChunkLightStorage *st = lightPool.acquire();
 				st->voxels.fill(0x1234);
-				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				RenderBridgeProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
 				                                           chunk->meshGeneration(),
 				                                           chunk->meshRevision());
 				mgr.processFinishedJobs();
@@ -5635,7 +5636,7 @@ int main(int argc, char **argv)
 			{
 				ChunkLightStorage *st = lightPool.acquire();
 				st->voxels.fill(0x5678);
-				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				RenderBridgeProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
 				                                           chunk->meshGeneration(),
 				                                           chunk->meshRevision());
 				mgr.processFinishedJobs();
@@ -5650,15 +5651,15 @@ int main(int argc, char **argv)
 				chunk->setInTransit(true); // edits defer while a worker owns the chunk
 				CHECK(mgr.placeVoxel(glm::vec3(4.5f, 200.5f, 4.5f), STONE),
 				      "edit queued while chunk in transit");
-				CHECK(ChunkManagerProbe::pendingEdits(mgr) == 1, "edit is pending");
+				CHECK(RenderBridgeProbe::pendingEdits(mgr) == 1, "edit is pending");
 				ChunkLightStorage *st = lightPool.acquire();
 				st->voxels.fill(0x9ABC);
-				ChunkManagerProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
+				RenderBridgeProbe::injectCompletedLightJob(mgr, chunk, st, &lightPool,
 				                                           chunk->meshGeneration(),
 				                                           chunk->meshRevision());
 				mgr.processFinishedJobs();
 				CHECK(!chunk->hasLightStorage(), "superseded-by-edit light result discarded");
-				CHECK(ChunkManagerProbe::pendingEdits(mgr) == 0, "pending edit applied after publish");
+				CHECK(RenderBridgeProbe::pendingEdits(mgr) == 0, "pending edit applied after publish");
 				CHECK(chunk->getVoxel(4, 200, 4).type == STONE, "edit landed");
 				CHECK(chunk->getState() == ChunkState::GENERATED, "edit re-armed the chunk for remesh");
 				CHECK(lightPool.activeCount() == 0, "no active light blocks at end of test 41");
@@ -5673,13 +5674,13 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(64);
 		ChunkPool chunkPool(8);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for stationary test");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for stationary test");
 
 			RenderSettings rs;
@@ -5722,7 +5723,7 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(77);
 		ChunkPool chunkPool(16);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 
 		constexpr int kChunkCount = 9;
 		std::array<Chunk *, kChunkCount> chunks{};
@@ -5735,7 +5736,7 @@ int main(int argc, char **argv)
 				allReady = false;
 				break;
 			}
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(i, 0, 0), chunks[i]);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(i, 0, 0), chunks[i]);
 			if (!mgr.prepareAndGenerateChunk(chunks[i], gen))
 			{
 				allReady = false;
@@ -5817,13 +5818,13 @@ int main(int argc, char **argv)
 		ThreadPool tp(2);
 		TerrainGenerator gen(808);
 		ChunkPool chunkPool(8);
-		ChunkManager mgr(&gen, &tp, &chunkPool);
+		VoxelWorld mgrWorld(&gen, &tp); RenderWorldBridge mgr(&mgrWorld, &tp, &chunkPool);
 
 		Chunk *chunk = chunkPool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "acquired chunk for metrics isolation test");
 		if (chunk)
 		{
-			ChunkManagerProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
+			RenderBridgeProbe::registerChunk(mgr, glm::ivec3(0, 0, 0), chunk);
 			CHECK(mgr.prepareAndGenerateChunk(chunk, gen), "generated chunk for metrics isolation test");
 
 			RenderSettings rs;

@@ -12,7 +12,7 @@
 //   - indirect draw command collection groups by arena page pair.
 // Skips quietly when no Vulkan loader/device is available (CI containers).
 #include <Chunk/Chunk.hpp>
-#include <Chunk/ChunkManager.hpp>
+#include <Renderer/RenderWorldBridge.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
@@ -71,45 +71,45 @@ struct ChunkStateProbe
 	static MeshArena::Range lodWaterI(const Chunk &c) { return c.m_lodWaterIndices; }
 };
 
-// Friend probe declared in ChunkManager.hpp: exposes the geometric commit
+// Friend probe declared in RenderWorldBridge.hpp: exposes the geometric commit
 // group bookkeeping so group lifetime, lifecycle state, fusion and member
 // sets are observable without public API.
-struct ChunkManagerProbe
+struct RenderBridgeProbe
 {
-	static size_t commitGroups(const ChunkManager &m) { return m.m_commitGroups.size(); }
-	static CommitGroupState groupState(const ChunkManager &m, size_t index)
+	static size_t commitGroups(const RenderWorldBridge &m) { return m.m_commitGroups.size(); }
+	static CommitGroupState groupState(const RenderWorldBridge &m, size_t index)
 	{
 		return m.m_commitGroups[index].state;
 	}
-	static std::vector<Chunk *> groupChunks(const ChunkManager &m, size_t index)
+	static std::vector<Chunk *> groupChunks(const RenderWorldBridge &m, size_t index)
 	{
 		std::vector<Chunk *> out;
 		for (const PendingGroupMember &member : m.m_commitGroups[index].members)
 			out.push_back(member.chunk);
 		return out;
 	}
-	static bool replacementRecorded(const ChunkManager &m, size_t index, const Chunk *chunk)
+	static bool replacementRecorded(const RenderWorldBridge &m, size_t index, const Chunk *chunk)
 	{
 		for (const PendingGroupMember &member : m.m_commitGroups[index].members)
 			if (member.chunk == chunk)
 				return member.replacement.recorded;
 		return false;
 	}
-	static bool replacementValid(const ChunkManager &m, size_t index, const Chunk *chunk)
+	static bool replacementValid(const RenderWorldBridge &m, size_t index, const Chunk *chunk)
 	{
 		for (const PendingGroupMember &member : m.m_commitGroups[index].members)
 			if (member.chunk == chunk)
 				return member.replacement.valid;
 		return false;
 	}
-	static void registerGroup(ChunkManager &m, std::vector<Chunk *> members)
+	static void registerGroup(RenderWorldBridge &m, std::vector<Chunk *> members)
 	{
 		std::vector<PendingGroupMember> converted;
 		for (Chunk *chunk : members)
 			converted.push_back({chunk, {}});
 		m.registerCommitGroup(0, std::move(converted));
 	}
-	static void removeFromGroups(ChunkManager &m, Chunk *chunk)
+	static void removeFromGroups(RenderWorldBridge &m, Chunk *chunk)
 	{
 		m.removeChunkFromCommitGroups(chunk);
 	}
@@ -334,7 +334,7 @@ int main()
 	{
 		ChunkPool chunkPool(16);
 		TerrainGenerator gen(42);
-		ChunkManager manager(&gen, nullptr, &chunkPool);
+		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
@@ -509,7 +509,7 @@ int main()
 	{
 		ChunkPool chunkPool2(16);
 		TerrainGenerator gen2(77);
-		ChunkManager manager2(&gen2, nullptr, &chunkPool2);
+		VoxelWorld manager2World(&gen2, nullptr); RenderWorldBridge manager2(&manager2World, nullptr, &chunkPool2);
 		Camera cam2(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings2;
 		manager2.updateStreaming(cam2, settings2);
@@ -653,7 +653,7 @@ int main()
 	{
 		ChunkPool chunkPool3(8);
 		TerrainGenerator gen3(42);
-		ChunkManager manager3(&gen3, nullptr, &chunkPool3);
+		VoxelWorld manager3World(&gen3, nullptr); RenderWorldBridge manager3(&manager3World, nullptr, &chunkPool3);
 		Camera cam3(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings3;
 		manager3.updateStreaming(cam3, settings3);
@@ -812,7 +812,7 @@ int main()
 	{
 		ChunkPool chunkPool4(64);
 		TerrainGenerator gen4(42);
-		ChunkManager manager4(&gen4, nullptr, &chunkPool4);
+		VoxelWorld manager4World(&gen4, nullptr); RenderWorldBridge manager4(&manager4World, nullptr, &chunkPool4);
 		manager4.generateInitialArea(glm::vec3(0.0f), 2, vk.allocator.handle(), imm, arenas);
 
 		uint32_t totalChunks = 0, totalCmds = 0, totalIndices = 0;
@@ -983,7 +983,7 @@ int main()
 	{
 		ChunkPool chunkPool(8);
 		TerrainGenerator gen(101);
-		ChunkManager manager(&gen, nullptr, &chunkPool);
+		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
@@ -1077,7 +1077,7 @@ int main()
 	{
 		ChunkPool chunkPool(8);
 		TerrainGenerator gen(202);
-		ChunkManager manager(&gen, nullptr, &chunkPool);
+		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
@@ -1234,7 +1234,7 @@ int main()
 	{
 		ChunkPool chunkPool(8);
 		TerrainGenerator gen(303);
-		ChunkManager manager(&gen, nullptr, &chunkPool);
+		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
@@ -1345,7 +1345,7 @@ int main()
 	{
 		ChunkPool chunkPool(8);
 		TerrainGenerator gen(404);
-		ChunkManager manager(&gen, nullptr, &chunkPool);
+		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
@@ -1412,7 +1412,7 @@ int main()
 	{
 		ChunkPool chunkPool(8);
 		TerrainGenerator gen(505);
-		ChunkManager manager(&gen, nullptr, &chunkPool);
+		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
@@ -1493,7 +1493,7 @@ int main()
 	{
 		ChunkPool chunkPool(8);
 		TerrainGenerator gen(606);
-		ChunkManager manager(&gen, nullptr, &chunkPool);
+		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &chunkPool);
 		Camera cam(glm::vec3(0.0f, 100.0f, 0.0f));
 		RenderSettings settings;
 		manager.updateStreaming(cam, settings);
@@ -1840,7 +1840,7 @@ int main()
 		{
 			ChunkPool poolX(32);
 			TerrainGenerator genX(42);
-			ChunkManager managerX(&genX, nullptr, &poolX);
+			VoxelWorld managerXWorld(&genX, nullptr); RenderWorldBridge managerX(&managerXWorld, nullptr, &poolX);
 			managerX.generateInitialArea(glm::vec3(0.0f, 0.0f, 0.0f), 1,
 			                             vk.allocator.handle(), imm, arenas);
 			StagingRing stagingX;
@@ -1942,7 +1942,7 @@ int main()
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 1);
 				CHECK(A->needsGPUUpload() && B->needsGPUUpload() &&
-				          ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				          RenderBridgeProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
 				      "xchunk: budget=1 records only one member COPY");
 				submitFrame();
 				beginFrame();
@@ -1950,7 +1950,7 @@ int main()
 				                             retire, arenas, camX, 1);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
 				      "xchunk: second budget unit completes the atomic border commit");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 0,
 				      "xchunk: fixture groups consumed by the commit");
 				submitFrame();
 
@@ -2082,8 +2082,8 @@ int main()
 				}
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 1);
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
-				          ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 1 &&
+				          RenderBridgeProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
 				      "xchunk: group uploads progressively across frames");
 				CHECK(A->needsGPUUpload() && B->needsGPUUpload(),
 				      "xchunk: no member publishes while the group is incomplete");
@@ -2142,7 +2142,7 @@ int main()
 				                             retire, arenas, camX, 2);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
 				      "supersession: the newest results commit together");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 0,
 				      "supersession: no group leaks after commit");
 				submitFrame();
 
@@ -2164,7 +2164,7 @@ int main()
 				                             retire, arenas, camX, 3);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload() && !S->needsGPUUpload(),
 				      "corner: three COPY units commit all linked chunks together");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 0,
 				      "corner: group consumed");
 				submitFrame();
 
@@ -2201,11 +2201,11 @@ int main()
 				// registration must fuse {A,B} + {A,S} into one {A,B,S}.
 				CHECK(managerX.placeVoxel(worldOf(A, 8, y1, 15), BRICKS),
 				      "overlap: south border edit accepted");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 1,
 				      "overlap: overlapping groups fused into one");
 				{
 					const std::vector<Chunk *> &fused =
-						ChunkManagerProbe::groupChunks(managerX, 0);
+						RenderBridgeProbe::groupChunks(managerX, 0);
 					const bool allThere = fused.size() == 3 &&
 					                      groupContains(fused, A) &&
 					                      groupContains(fused, B) &&
@@ -2226,7 +2226,7 @@ int main()
 				                             retire, arenas, camX, 3);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload() && !S->needsGPUUpload(),
 				      "overlap: three COPY units commit the fused group together");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 0,
 				      "overlap: fused group consumed");
 				submitFrame();
 
@@ -2239,15 +2239,15 @@ int main()
 				const int yU = hU + 3;
 				CHECK(managerX.placeVoxel(worldOf(A, 15, yU, 15), BRICKS),
 				      "unload: corner edit accepted");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
-				          ChunkManagerProbe::groupChunks(managerX, 0).size() == 3,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 1 &&
+				          RenderBridgeProbe::groupChunks(managerX, 0).size() == 3,
 				      "unload: three-member group registered");
-				ChunkManagerProbe::removeFromGroups(managerX, B); // B unloads
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				RenderBridgeProbe::removeFromGroups(managerX, B); // B unloads
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 1,
 				      "unload: group survives with two members");
 				{
 					const std::vector<Chunk *> survivors =
-						ChunkManagerProbe::groupChunks(managerX, 0);
+						RenderBridgeProbe::groupChunks(managerX, 0);
 					CHECK(survivors.size() == 2 && groupContains(survivors, A) &&
 					          groupContains(survivors, S),
 					      "unload: group is now exactly {A,SS}");
@@ -2272,10 +2272,10 @@ int main()
 				// A 2-member group losing one member has no coupling left.
 				CHECK(managerX.placeVoxel(worldOf(A, 15, yU, 12), BRICKS),
 				      "unload2: east edit accepted");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 1,
 				      "unload2: pair group registered");
-				ChunkManagerProbe::removeFromGroups(managerX, B);
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				RenderBridgeProbe::removeFromGroups(managerX, B);
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 0,
 				      "unload2: pair group dissolved");
 				remeshOne(A);
 				beginFrame();
@@ -2308,7 +2308,7 @@ int main()
 				}
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 1);
-				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				CHECK(RenderBridgeProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
 				      "supersession2: A recorded, B deferred by exact-fit staging");
 				submitFrame();
 				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 6), BRICKS),
@@ -2320,7 +2320,7 @@ int main()
 				                             retire, arenas, camX, 4);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
 				      "supersession2: stale replacement discarded, newest results published");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 0,
 				      "supersession2: group consumed");
 				submitFrame();
 
@@ -2341,7 +2341,7 @@ int main()
 				}
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 1);
-				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				CHECK(RenderBridgeProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
 				      "unload-recorded: A recorded, B deferred by exact-fit staging");
 				const auto liveBlocksBeforeDissolve = [&]() {
 					return arenas.opaqueVertex.metrics().liveBlocks +
@@ -2350,8 +2350,8 @@ int main()
 					       arenas.waterIndex.metrics().liveBlocks;
 				}();
 				submitFrame();
-				ChunkManagerProbe::removeFromGroups(managerX, A); // A unloads
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				RenderBridgeProbe::removeFromGroups(managerX, A); // A unloads
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 0,
 				      "unload-recorded: pair group dissolved");
 				const auto liveBlocksAfterDissolve =
 				    arenas.opaqueVertex.metrics().liveBlocks + arenas.opaqueIndex.metrics().liveBlocks +
@@ -2383,14 +2383,14 @@ int main()
 				}
 				managerX.uploadPendingMeshes(vk.allocator.handle(), stagingX, vk.cmd,
 				                             retire, arenas, camX, 1);
-				CHECK(ChunkManagerProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
+				CHECK(RenderBridgeProbe::groupState(managerX, 0) == CommitGroupState::Uploading,
 				      "fuse-live: A recorded, B deferred by exact-fit staging");
 				submitFrame();
 				CHECK(managerX.placeVoxel(worldOf(A, 15, yS, 12), BRICKS),
 				      "fuse-live: second border edit fuses into the uploading group");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 1,
 				      "fuse-live: still one fused group");
-				CHECK(ChunkManagerProbe::replacementRecorded(managerX, 0, A),
+				CHECK(RenderBridgeProbe::replacementRecorded(managerX, 0, A),
 				      "fuse-live: fusion preserves the existing recorded replacement owner");
 				remeshOne(A);
 				remeshOne(B);
@@ -2399,7 +2399,7 @@ int main()
 				                             retire, arenas, camX, 4);
 				CHECK(!A->needsGPUUpload() && !B->needsGPUUpload(),
 				      "fuse-live: fused group publishes together");
-				CHECK(ChunkManagerProbe::commitGroups(managerX) == 0,
+				CHECK(RenderBridgeProbe::commitGroups(managerX) == 0,
 				      "fuse-live: group consumed");
 				submitFrame();
 
@@ -2412,16 +2412,16 @@ int main()
 					CHECK(W != nullptr, "transitive: west chunk bootstrapped");
 					if (W)
 					{
-						ChunkManagerProbe::registerGroup(managerX, {A, B});
-						ChunkManagerProbe::registerGroup(managerX, {B, S});
-						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1 &&
-						          ChunkManagerProbe::groupChunks(managerX, 0).size() == 3,
+						RenderBridgeProbe::registerGroup(managerX, {A, B});
+						RenderBridgeProbe::registerGroup(managerX, {B, S});
+						CHECK(RenderBridgeProbe::commitGroups(managerX) == 1 &&
+						          RenderBridgeProbe::groupChunks(managerX, 0).size() == 3,
 						      "transitive: {A,B} and {B,S} fuse to {A,B,S}");
-						ChunkManagerProbe::registerGroup(managerX, {S, W});
-						CHECK(ChunkManagerProbe::commitGroups(managerX) == 1,
+						RenderBridgeProbe::registerGroup(managerX, {S, W});
+						CHECK(RenderBridgeProbe::commitGroups(managerX) == 1,
 						      "transitive: one group remains");
 						const std::vector<Chunk *> &chain =
-							ChunkManagerProbe::groupChunks(managerX, 0);
+							RenderBridgeProbe::groupChunks(managerX, 0);
 						const bool chainOk = chain.size() == 4 &&
 						                     groupContains(chain, A) &&
 						                     groupContains(chain, B) &&
@@ -2492,7 +2492,7 @@ int main()
 					++teardownFrame;
 				}
 			};
-			const auto createUploadingPair = [&](ChunkManager &teardownManager) {
+			const auto createUploadingPair = [&](RenderWorldBridge &teardownManager) {
 				teardownManager.generateInitialArea(glm::vec3(0.0f, 0.0f, 0.0f), 1,
 				                                    vk.allocator.handle(), imm, teardownArenas);
 				Chunk *a = teardownManager.getChunk(glm::ivec3(0, 0, 0));
@@ -2537,7 +2537,7 @@ int main()
 
 			// A. Both replacements are prepared, but staging prevents COPY.
 			{
-				ChunkManager teardownManager(&teardownGen, nullptr, &teardownPool);
+				VoxelWorld teardownManagerWorld(&teardownGen, nullptr); RenderWorldBridge teardownManager(&teardownManagerWorld, nullptr, &teardownPool);
 				const auto [a, b] = createUploadingPair(teardownManager);
 				if (a && b)
 				{
@@ -2549,16 +2549,16 @@ int main()
 					teardownManager.uploadPendingMeshes(
 					    vk.allocator.handle(), teardownStaging, vk.cmd, teardownRetire,
 					    teardownArenas, teardownCamera, 1);
-					CHECK(ChunkManagerProbe::commitGroups(teardownManager) == 1,
+					CHECK(RenderBridgeProbe::commitGroups(teardownManager) == 1,
 					      "teardown-unrecorded: fixture owns an unfinished group");
-					CHECK(ChunkManagerProbe::groupState(teardownManager, 0) ==
+					CHECK(RenderBridgeProbe::groupState(teardownManager, 0) ==
 					          CommitGroupState::Uploading,
 					      "teardown-unrecorded: group remains Uploading");
-					CHECK(ChunkManagerProbe::replacementValid(teardownManager, 0, a) &&
-					          ChunkManagerProbe::replacementValid(teardownManager, 0, b),
+					CHECK(RenderBridgeProbe::replacementValid(teardownManager, 0, a) &&
+					          RenderBridgeProbe::replacementValid(teardownManager, 0, b),
 					      "teardown-unrecorded: both replacements are prepared");
-					CHECK(!ChunkManagerProbe::replacementRecorded(teardownManager, 0, a) &&
-					          !ChunkManagerProbe::replacementRecorded(teardownManager, 0, b),
+					CHECK(!RenderBridgeProbe::replacementRecorded(teardownManager, 0, a) &&
+					          !RenderBridgeProbe::replacementRecorded(teardownManager, 0, b),
 					      "teardown-unrecorded: neither replacement recorded COPY");
 				}
 			}
@@ -2568,7 +2568,7 @@ int main()
 			// B. Exactly one member COPY is submitted; the manager destroys the
 			// recorded replacement through retire() and the other immediately.
 			{
-				ChunkManager teardownManager(&teardownGen, nullptr, &teardownPool);
+				VoxelWorld teardownManagerWorld(&teardownGen, nullptr); RenderWorldBridge teardownManager(&teardownManagerWorld, nullptr, &teardownPool);
 				const auto [a, b] = createUploadingPair(teardownManager);
 				if (a && b)
 				{
@@ -2576,16 +2576,16 @@ int main()
 					teardownManager.uploadPendingMeshes(
 					    vk.allocator.handle(), teardownStaging, vk.cmd, teardownRetire,
 					    teardownArenas, teardownCamera, 1);
-					CHECK(ChunkManagerProbe::commitGroups(teardownManager) == 1,
+					CHECK(RenderBridgeProbe::commitGroups(teardownManager) == 1,
 					      "teardown-recorded: fixture owns an unfinished group");
-					CHECK(ChunkManagerProbe::groupState(teardownManager, 0) ==
+					CHECK(RenderBridgeProbe::groupState(teardownManager, 0) ==
 					          CommitGroupState::Uploading,
 					      "teardown-recorded: group remains Uploading");
-					CHECK(ChunkManagerProbe::replacementValid(teardownManager, 0, a) &&
-					          ChunkManagerProbe::replacementValid(teardownManager, 0, b),
+					CHECK(RenderBridgeProbe::replacementValid(teardownManager, 0, a) &&
+					          RenderBridgeProbe::replacementValid(teardownManager, 0, b),
 					      "teardown-recorded: both replacements remain owned");
-					CHECK(ChunkManagerProbe::replacementRecorded(teardownManager, 0, a) !=
-					          ChunkManagerProbe::replacementRecorded(teardownManager, 0, b),
+					CHECK(RenderBridgeProbe::replacementRecorded(teardownManager, 0, a) !=
+					          RenderBridgeProbe::replacementRecorded(teardownManager, 0, b),
 					      "teardown-recorded: exactly one member COPY recorded");
 					CHECK(vk.flush(), "teardown-recorded: submitted member COPY");
 				}
@@ -2596,7 +2596,7 @@ int main()
 			// Recreate a manager against the same arenas, matching reloadWorld's
 			// resource lifetime without requiring a full Engine fixture.
 			{
-				ChunkManager recreated(&teardownGen, nullptr, &teardownPool);
+				VoxelWorld recreatedWorld(&teardownGen, nullptr); RenderWorldBridge recreated(&recreatedWorld, nullptr, &teardownPool);
 				recreated.generateInitialArea(glm::vec3(0.0f, 0.0f, 0.0f), 1,
 				                                vk.allocator.handle(), imm, teardownArenas);
 				Chunk *center = recreated.getChunk(glm::ivec3(0, 0, 0));

@@ -278,7 +278,7 @@ struct PlayerPersistState
 
 /// World-save facade: world directory + identity (world.meta) + per-chunk
 /// desired/durable persistence state + the async SaveService. Chunk-free: no
-/// Chunk/ChunkManager dependency, so it is unit-testable headlessly.
+/// Chunk/RenderWorldBridge dependency, so it is unit-testable headlessly.
 class WorldPersistence
 {
 public:

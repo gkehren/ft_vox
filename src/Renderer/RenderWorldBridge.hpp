@@ -1,28 +1,47 @@
 #pragma once
 
 // =============================================================================
-// ChunkManager — TEMPORARY render adapter over the authoritative VoxelWorld
-// (issue #206, Epic #204 Phase B).
+// RenderWorldBridge — the renderer-owned DERIVED projection of the
+// authoritative CPU voxel world (issue #207, Epic #204 Phase C).
 //
-// Ownership after Phase B:
-//   * VoxelWorld (owned here, exposed via world()) is the SINGLE owner of
-//     authoritative voxel state: chunk records, residency/streaming, logical
-//     edits, generation workers and WorldPersistence.
-//   * ChunkManager keeps only DERIVED render work: render chunk handles bound
-//     to world records, mesh/light job dispatch, GPU uploads, commit groups,
-//     visibility, entity light-cache intent, deferred GPU retirement and the
-//     chunk lifecycle debug trace.
+// Ownership (the Phase C inversion):
+//   * VoxelWorld (owned by the host — the Engine today, GameSimulation in
+//     Phase E) is the SINGLE owner of authoritative voxel state: chunk
+//     records, residency/streaming, logical edits, generation workers and
+//     WorldPersistence. The bridge only REFERENCES it (world()) and never
+//     owns, moves or destroys simulation state.
+//   * RenderWorldBridge owns everything DERIVED: render chunk handles bound
+//     to world records, mesh/light job dispatch, GPU uploads, geometric
+//     commit groups, visibility, entity light-cache intent + sampling,
+//     deferred GPU retirement and the chunk lifecycle debug trace.
 //
-// This facade exists so the graphical Engine keeps its historical call
-// surface while Phase C (#207, render world bridge) and Phase E (#209,
-// graphical runtime) land. Per the issue's architectural constraints it is
-// DOCUMENTED and must be REMOVED before epic completion: the render pipeline
-// below moves to the RenderWorldBridge, world ownership to GameSimulation.
+// This replaces the temporary ChunkManager render adapter (issue #206 §10):
+// the render pipeline moved here unchanged, and the authoritative world
+// moved OUT to the host. A headless process constructs VoxelWorld alone —
+// no bridge is registered and no visual-only job (mesh, GPU cache, draw
+// visibility) is ever scheduled.
 //
-// Synchronization: the world event stream (load/unload/gen/edit) is drained
-// on the main thread immediately after each world call, so the render handle
-// map never observes a recycled record. The render mutex guards only render
-// state; the world mutex guards authoritative state (see VoxelWorld).
+// Change channel: the bridge drains the world's bounded main-thread event
+// stream (Loaded / Unloaded / GenQueued / Generated / EditApplied) right
+// after each world call, so the render handle map never observes a recycled
+// record.
+//
+// Worker lease contract (the "safe read-only chunk snapshots/leases" of the
+// epic): dispatch captures the record's sim::ChunkIdentity (generation +
+// revision, the single source on WorldChunk) and takes the exclusive
+// in-transit lease on the record. While the lease is held the world defers
+// edits and unloads targeting the record, so the worker reads a stable
+// read-only snapshot of the voxel/border content; every async result is
+// re-validated against the identity at publish time and late results from
+// unloaded/reused chunks are discarded back to their pools.
+//
+// Synchronization: the render mutex guards only render state (handle map,
+// light caches); the world mutex guards authoritative state. Both are
+// main-thread-only today (workers take completion-queue and pool mutexes
+// only). Lock order note: the collision/mob views acquire world -> render;
+// mesh dispatch acquires render -> world (ensureShellPopulated). The two
+// orders are safe ONLY because both paths run exclusively on the main
+// thread; revisit before threading either path (Phase D/E).
 // =============================================================================
 
 #include <unordered_map>
@@ -136,8 +155,10 @@ struct ChunkDebugEvent
 	uint32_t sections{0}; // section mask / count context, event-dependent
 };
 
-/// Streams chunks around the player: load → async terrain → async mesh → main-thread GPU upload.
-class ChunkManager
+/// Renderer-owned derived world projection: consumes the authoritative
+/// world's change stream and produces meshes, lighting caches, GPU uploads
+/// and draw/shadow lists for WorldRenderer. Never owns simulation state.
+class RenderWorldBridge
 {
 public:
 	// Entity local light cache retention around camera (issue #128), with
@@ -154,12 +175,19 @@ public:
 	static constexpr float kEntityLightCacheReleaseRadiusSq =
 		kEntityLightCacheReleaseRadius * kEntityLightCacheReleaseRadius;
 
-	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool);
-	~ChunkManager();
+	/// The world is REFERENCED, not owned: the host (Engine today,
+	/// GameSimulation in Phase E) keeps its lifetime and must outlive the
+	/// bridge. The bridge installs the render-side worker profiling seam on
+	/// the world (headless worlds run without one).
+	RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, ChunkPool *chunkPool);
+	~RenderWorldBridge();
 
-	/// The authoritative world (issue #206). Temporary adapter exposure:
-	/// Phase C/E re-home the render pipeline and lift world ownership into
-	/// GameSimulation; this accessor is the documented migration seam.
+	RenderWorldBridge(const RenderWorldBridge &) = delete;
+	RenderWorldBridge &operator=(const RenderWorldBridge &) = delete;
+
+	/// The authoritative world this bridge projects (issue #207). The
+	/// bridge never owns it; the accessor is the read seam for derived
+	/// scheduling, UI telemetry and tests.
 	VoxelWorld &world() { return *m_world; }
 	const VoxelWorld &world() const { return *m_world; }
 
@@ -265,9 +293,10 @@ public:
 	bool prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator);
 
 	// --- Persistent world lifecycle (issue #180, Phase 3+4) ---
-	// Delegated to VoxelWorld, the authoritative owner (issue #206). The
-	// adapter orchestrates the render-side quiesce around close so the
-	// durability barrier sees every in-flight job.
+	// Authoritative state lives in VoxelWorld; these are convenience
+	// forwards so the graphical host keeps one call surface. closeWorld()
+	// additionally orchestrates the render-side quiesce around the world's
+	// durability barrier (render jobs hold record leases).
 	bool openWorld(const std::string &savesRoot, const std::string &worldName, std::string &outError);
 	bool closeWorld();
 	/// True while gameplay edits accepted against not-yet-readable chunks
@@ -301,16 +330,28 @@ private:
 	/// for emissive sources and dirty the side neighbors' affected sections.
 	void dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 &chunkIdx);
 
-	// --- World event stream consumption (issue #206) -------------------------
+	// --- World event stream consumption (issue #206/#207) --------------------
 	/// Drain the authoritative event stream and keep the render handle map
 	/// in sync: bind/unbind handles, publish generation render flags, apply
 	/// edit invalidation. Main thread, immediately after each world call.
 	void drainWorldEvents();
+	/// Attach to a possibly-live world: bind render handles to records already
+	/// resident (no Loaded event is re-emitted for them) and drain any queued
+	/// change events, so the projection reflects current authoritative state
+	/// even when attached after loading began (issue #207; Phase E attaches
+	/// the bridge to a running GameSimulation). Main thread, constructor only.
+	void attachToWorld();
 	void onWorldLoaded(const WorldEvent &e);
 	void onWorldUnloaded(const WorldEvent &e);
 	void onWorldGenerated(const WorldEvent &e);
 	void onWorldEditApplied(const WorldEvent &e);
 	void retryPendingBinds();
+	/// Single bind contract shared by every handle-registration path (attach,
+	/// Loaded event, bind retry, bootstrap): acquire a render handle, bind it
+	/// to the record, re-arm a stale MESHED claim, and register it in the
+	/// render map. Returns nullptr when the pool is exhausted — the caller
+	/// decides whether to park / grow / skip. Caller holds m_mutex.
+	Chunk *bindRecord(const glm::ivec3 &coord, WorldChunk *record);
 
 	// --- Geometric commit groups (PR #178 review) ---
 	void registerCommitGroup(uint64_t editId, std::vector<PendingGroupMember> members);
@@ -336,14 +377,16 @@ private:
 	void drainAsyncJobsForPersistence();
 	bool renderJobsBusy() const;
 
-	// Testing hook (issue #114 review): exposes render internals to the
+	// Testing hooks (issue #114 review): expose render internals to the
 	// lifecycle tests; authoritative seams live on VoxelWorld's friends.
-	friend struct ChunkManagerProbe;
-	friend struct ChunkManagerStreamProbe;
-	friend class ChunkCollisionView;
+	friend struct RenderBridgeProbe;
+	friend struct RenderBridgeStreamProbe;
+	// Derived light-sampling seam for the temporary mob adapter (Phase D
+	// removes it): holds the render lock while sampling the caches.
+	friend class ChunkMobWorld;
 
-	// --- The authoritative world (issue #206) ---
-	std::unique_ptr<VoxelWorld> m_world;
+	// --- The authoritative world (REFERENCED, host-owned; issue #207) ---
+	VoxelWorld *m_world{nullptr};
 	/// Last observed world event-drop count (one-shot warning on change).
 	uint64_t m_lastDroppedEvents{0};
 

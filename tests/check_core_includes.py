@@ -10,9 +10,9 @@ ImGui/, SDL3, volk, VMA, ...).
 This script walks the transitive #include closure of the core public headers and
 translation units and fails if any forbidden header is reachable. Chunk/ headers
 are classified by an explicit allowlist: CPU-only allowed, render-coupled never,
-not-yet-migrated forbidden until Phase B/C lifts them; any unclassified Chunk/
-header fails closed. It is wired as the CTest `CoreIncludeGuard` so the boundary
-cannot silently regress.
+render-derived (bridge-owned visual work) never; any unclassified Chunk/ header
+fails closed. It is wired as the CTest `CoreIncludeGuard` so the boundary cannot
+silently regress.
 
 Usage:
     python tests/check_core_includes.py [--verbose]
@@ -97,16 +97,17 @@ CHUNK_CPU_ALLOWED = {
 # Vulkan/VMA/Camera/Engine/Renderer headers (transitively).
 CHUNK_RENDER_COUPLED = {
     "Chunk.hpp",               # Vulkan/VkBuffer, Vulkan/MeshArena, Camera, Engine, Renderer
-    "ChunkManager.hpp",        # Chunk.hpp + Engine/
-    "ChunkCollisionView.hpp",  # ChunkManager.hpp
-    "ChunkMobWorld.hpp",       # ChunkCollisionView.hpp
+    "ChunkMobWorld.hpp",       # RenderWorldBridge.hpp + WorldCollisionView.hpp
 }
 
-# Not yet migrated — CPU-only, but still owned by the render-side chunk/mesh
-# system. Forbidden TODAY because the migration has not happened, NOT because
-# of GPU coupling: Phase B (#206) lifted the authoritative storage (VoxelPool)
-# into the sim world; Phase C (#207) re-homes the derived mesh/light payloads.
-CHUNK_NOT_YET_MIGRATED = {
+# Derived render payloads — CPU-only (std / glm / utils.hpp includes only) but
+# owned by the render-side RenderWorldBridge (issue #207, Phase C). Forbidden
+# from the core NOT because of GPU coupling but because meshing / light caches
+# / draw visibility are visual-only work: a headless world never schedules
+# them. Phase B (#206) lifted the authoritative storage (VoxelPool) into the
+# sim world; Phase C (#207) re-homed these derived payloads under the bridge,
+# so they are classified here permanently rather than "not yet migrated".
+CHUNK_RENDER_DERIVED = {
     "ChunkLightPool.hpp",
     "ChunkLightHalo.hpp",
     "ChunkPool.hpp",
@@ -148,9 +149,9 @@ def project_violation(path: Path) -> str | None:
             return None
         if name in CHUNK_RENDER_COUPLED:
             return f"render-coupled Chunk header '{name}' (never allowed from the core)"
-        if name in CHUNK_NOT_YET_MIGRATED:
-            return (f"not-yet-migrated Chunk header '{name}' "
-                    "(CPU-only but render-side; Phase B/C will lift it)")
+        if name in CHUNK_RENDER_DERIVED:
+            return (f"render-derived Chunk header '{name}' "
+                    "(CPU-only but bridge-owned visual work; never allowed from the core)")
         return f"unclassified Chunk header '{name}' (classify it in check_core_includes.py)"
     return None
 

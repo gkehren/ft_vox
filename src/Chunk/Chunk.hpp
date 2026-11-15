@@ -51,9 +51,10 @@ class MeshResultPool;
 /// mesh scheduling — and forwards every voxel read/write to its bound record.
 ///
 /// Binding:
-///   * In the game, ChunkManager acquires a render Chunk from ChunkPool and
-///     binds it to the world's record for the same coordinate. The world owns
-///     the record's lifetime; the generation stamp rejects any stale access.
+///   * In the game, the RenderWorldBridge acquires a render Chunk from
+///     ChunkPool and binds it to the world's record for the same coordinate.
+///     The world owns the record's lifetime; the generation stamp rejects any
+///     stale access.
 ///   * Standalone (tests / tools), a Chunk owns a private WorldChunk created
 ///     with the pools passed to the constructor, so the full historical
 ///     single-object API keeps working without a world.
@@ -438,7 +439,7 @@ public:
 	void releaseGPUDeferred();
 
 	/// Transient cross-chunk block-light context (issue #141 review fix).
-	/// Non-owning and main-thread-bound: attached by the ChunkManager at
+	/// Non-owning and main-thread-bound: attached by the RenderWorldBridge at
 	/// mesh dispatch (like the neighbor borders), read by computeLightField
 	/// on the worker, detached and returned to the pool when the job
 	/// finishes. Null (no halo) builds keep the historical in-chunk-only
@@ -648,7 +649,7 @@ private:
 	// Retire LOD stream ranges and reset them to empty.
 	void retireLodRanges(MeshArena &vertexArena, MeshArena &indexArena,
 						 MeshArena::Range &vertices, MeshArena::Range &indices, bool immediate);
-	// Borrowed from the ChunkManager's LightHaloPool for one mesh job
+	// Borrowed from the RenderWorldBridge's LightHaloPool for one mesh job
 	// (issue #141 review fix): neighbor ring voxels feeding the cross-chunk
 	// block-light BFS. Non-owning; null outside a job.
 	ChunkLightHalo *m_lightHalo{nullptr};
@@ -691,6 +692,10 @@ private:
 	// full move semantics - including per-column generation state - without
 	// exposing that state in the public API.
 	friend struct ChunkStateProbe;
+	// Testing hook (issue #207 review): lets the render-bridge boundary test
+	// assert the pending mesh payload actually carries geometry (sectionsBuilt),
+	// not merely that a result was published.
+	friend struct RenderBridgeProbe;
 };
 
 inline size_t Chunk::collectOpaqueDraws(std::vector<IndirectDraw> &out) const

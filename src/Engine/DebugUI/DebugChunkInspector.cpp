@@ -2,13 +2,13 @@
 // upload state for a single chunk — under the player, under the voxel
 // highlight, or manual coordinates. Includes the opt-in, globally bounded
 // lifecycle event trace: when disabled it costs one branch per event site;
-// when enabled it never grows beyond ChunkManager::kChunkEventRingSize.
+// when enabled it never grows beyond RenderWorldBridge::kChunkEventRingSize.
 
 #include <Engine/DebugUI/DebugPanels.hpp>
 #include <Engine/UiScale.hpp>
 #include <Engine/DebugUI/DebugPanelUtil.hpp>
 #include <Engine/DebugUI/DebugUiEngine.hpp>
-#include <Chunk/ChunkManager.hpp>
+#include <Renderer/RenderWorldBridge.hpp>
 
 #include <imgui/imgui.h>
 
@@ -56,7 +56,7 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 		ImGui::End();
 		return;
 	}
-	ChunkManager &chunks = *frame.chunks;
+	RenderWorldBridge &chunks = *frame.chunks;
 	const glm::vec3 camPos = frame.camera->getPosition();
 
 	// Selection: chunk under the player by default.
@@ -97,7 +97,7 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 	s.inspectCoord.z = std::clamp(s.inspectCoord.z, -4096, 4096);
 
 	// Opt-in bounded trace. The flag lives in UiState (it survives world
-	// reloads); updateDebugUiState re-applies it to the ChunkManager every
+	// reloads); updateDebugUiState re-applies it to the RenderWorldBridge every
 	// frame — even with this panel closed — so a recreated manager inherits
 	// it. This checkbox only flips the UI-owned flag.
 	ImGui::Checkbox("Trace lifecycle events (bounded ring of 256)", &s.eventTraceEnabled);

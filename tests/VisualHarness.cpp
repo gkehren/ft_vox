@@ -3,7 +3,7 @@
 #include "Vulkan/ImageBarrier.hpp"
 #include "Vulkan/VkLoadLibrary.hpp"
 #include "Chunk/StreamHelpers.hpp"
-#include "Chunk/ChunkCollisionView.hpp"
+#include "World/WorldCollisionView.hpp"
 #include "utils.hpp"
 
 #include <SDL3/SDL.h>
@@ -74,7 +74,7 @@ bool VisualHarness::initDevice(std::ostream &log, uint32_t width, uint32_t heigh
 void VisualHarness::initRenderer(std::ostream &log)
 {
 	// Visual scenes never use async jobs (generateInitialArea is fully
-	// synchronous); a small pool keeps ChunkManager's contract satisfied.
+	// synchronous); a small pool keeps RenderWorldBridge's contract satisfied.
 	m_threadPool = std::make_unique<ThreadPool>(2);
 	m_chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(512));
 	m_renderer.init(m_context, m_swapchain, m_imm, m_retire, "");
@@ -107,6 +107,7 @@ void VisualHarness::shutdown()
 		m_context.waitIdle();
 	m_gpu.shutdown();
 	m_chunkManager.reset();
+	m_world.reset();
 	m_terrain.reset();
 	if (m_rendererReady)
 		m_renderer.shutdown();
@@ -204,8 +205,10 @@ void VisualHarness::beginScene(int seed)
 	m_drawList.clear();
 	m_shadowList.clear();
 	m_chunkManager.reset();
+	m_world.reset();
 	m_terrain = std::make_unique<TerrainGenerator>(seed);
-	m_chunkManager = std::make_unique<ChunkManager>(m_terrain.get(), m_threadPool.get(), m_chunkPool.get());
+	m_world = std::make_unique<VoxelWorld>(m_terrain.get(), m_threadPool.get());
+	m_chunkManager = std::make_unique<RenderWorldBridge>(m_world.get(), m_threadPool.get(), m_chunkPool.get());
 }
 
 void VisualHarness::buildArea(const glm::vec3 &center, int radiusChunks)
@@ -245,7 +248,7 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 		}
 	}
 	m_renderer.setMobs(resolvedMobs);
-	// Single source of truth: the same far plane Engine / ChunkManager use,
+	// Single source of truth: the same far plane Engine / RenderWorldBridge use,
 	// so golden frames are projected exactly like the shipped game.
 	const float farPlane = computeCameraFarPlane(m_renderSettings.maxRenderDistance);
 	const bool underwater = m_renderer.postSettings().underwater;
@@ -253,7 +256,7 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 	{
 		// Mirror the engine's local surface scan so scenes exercise the
 		// submersion blend without per-scene plumbing (issue #144).
-		ChunkCollisionView world(*m_chunkManager);
+		WorldCollisionView world(*m_world);
 		m_renderer.postSettings().underwaterSurfaceY =
 			world.waterSurfaceAbove(glm::ivec3(glm::floor(m_camera.getPosition())));
 	}

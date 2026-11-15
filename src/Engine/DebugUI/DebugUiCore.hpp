@@ -149,7 +149,7 @@ struct ChunkDebugSnapshot
 	bool valid{false};
 	glm::ivec3 coord{0, 0, 0};
 	float distance{0.f};
-	bool loaded{false}; // present in the ChunkManager map
+	bool loaded{false}; // present in the RenderWorldBridge map
 	// Chunk state (valid when loaded).
 	int state{0}; // ChunkState ordinal
 	uint64_t meshGeneration{0};
@@ -309,7 +309,7 @@ public:
 	// Chunk inspector selection (chunk coordinates; Y is always 0 today).
 	glm::ivec3 inspectCoord{0, 0, 0};
 	bool inspectHasTarget{false};
-	bool eventTraceEnabled{false}; // mirrors ChunkManager's opt-in trace
+	bool eventTraceEnabled{false}; // mirrors RenderWorldBridge's opt-in trace
 
 	// Previous telemetry sample, for "since last refresh" event deltas.
 	bool hasPrevEvents{false};
