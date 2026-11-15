@@ -73,15 +73,17 @@ public:
 	size_t drawListSizeForTests() const { return drawList.size(); }
 	size_t shadowListSizeForTests() const { return shadowList.size(); }
 	size_t mobStateCountForTests() const { return mobStates.size(); }
-	/// Drive one real derived-projection frame step (streaming + mobs) so the
-	/// per-frame containers hold genuine data before a reload — this makes the
-	/// epoch barrier's "derived state dropped" checks non-vacuous (they fail if
-	/// resetWorldProjection's clears are removed). The bootstrapped chunks are
-	/// meshed + GPU-uploaded, so the streaming step fills the draw/shadow lists.
-	/// Natural mob spawning needs streamed terrain beyond the bootstrap radius
-	/// (spawn ring 24–80 blocks vs ~32 bootstrapped), so a presentation state is
-	/// seeded when the step produced none — the barrier's mobStates clear is
-	/// independent of how the snapshot was produced.
+	/// Test-only mutator (like setSavesRootForTests / the WorldPersistence
+	/// *ForTests hooks): drive one real derived-projection frame step
+	/// (streaming + mobs) so the per-frame containers hold genuine data before
+	/// a reload — this makes the epoch barrier's "derived state dropped" checks
+	/// non-vacuous (they fail if resetWorldProjection's clears are removed). The
+	/// bootstrapped chunks are meshed + GPU-uploaded, so the streaming step fills
+	/// the draw/shadow lists. Natural mob spawning needs streamed terrain beyond
+	/// the bootstrap radius (spawn ring 24–80 blocks vs ~32 bootstrapped), so a
+	/// sentinel presentation state — parked far below the world so it cannot
+	/// render as a phantom — is seeded when the step produced none; the barrier's
+	/// mobStates clear is independent of how the snapshot was produced.
 	void stepDerivedProjectionForTests(double dt);
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 

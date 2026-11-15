@@ -272,7 +272,15 @@ void Engine::stepDerivedProjectionForTests(double dt)
 	// above usually produces no mobs here. The seeded state is cleared by the
 	// epoch barrier on the next world transition, exactly like a real snapshot.
 	if (mobStates.empty())
-		mobStates.emplace_back();
+	{
+		// Sentinel parked far below the world (playable Y is [0,256]) so it
+		// cannot appear as a phantom mob if a future test renders between the
+		// seed and the reload; it is not pushed to WorldRenderer here (tickMobs
+		// already published the — empty — real snapshot above).
+		entities::MobRenderState sentinel;
+		sentinel.position = glm::vec3(0.0f, -10000.0f, 0.0f);
+		mobStates.push_back(sentinel);
+	}
 }
 
 void Engine::initializeNoiseGenerator(int seed_val)

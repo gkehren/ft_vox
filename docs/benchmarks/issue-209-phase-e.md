@@ -91,16 +91,41 @@ All other visual scenes pass. New/changed suites:
 | ChunkLifecycle / WorldPersistence / MeshUploadLifecycle / MeshFaceKey | PASS | unchanged |
 | TerrainGeneration | PASS | per-seed determinism fixtures byte-identical |
 
-### Linux cross-check (WSL2 Debian, g++ 14.2)
+### Linux cross-check (author-verified on WSL2 Debian, g++ 14.2 — not a CI result)
 
-The full graphical target **and all test targets build clean** on Linux
-(`cmake --build -j16`, Release) with the `<memory>` include fix, **using
-`glslc`** as the SPIR-V compiler (see the portability note above — the
-`glslangValidator` fallback is a separate follow-up).
-`ctest`: **40 / 42 pass**, 2 skipped (no physical GPU: the WSL Vulkan device
-is **llvmpipe**, a software rasterizer). `EngineReload` — including the new
-epoch-barrier checks — **passes on Linux** too. The two failures are
-**pre-existing platform issues, verified identical on the base commit**:
+The full graphical target **and all test targets build clean** on the author's
+WSL2 Debian environment (`cmake --build -j16`, Release) with the `<memory>`
+include fix, **using `glslc`** as the SPIR-V compiler. `ctest`: **40 / 42
+pass**, 2 skipped. `EngineReload` — including the new epoch-barrier checks —
+**passes there** (31 checks). This is an **author-verified result on a specific
+environment, not a reproducible-by-default CI gate**; two setup requirements
+explain why a fresh Linux box may not reproduce it:
+
+1. **SPIR-V compiler:** the build must use `glslc`. The documented
+   `install_dep.sh` path installs `glslang-tools`, whose `glslangValidator`
+   fallback rejects the shaders' `#include` without
+   `GL_GOOGLE_include_directive`, so a default setup fails at shader
+   compilation before any test runs (pre-existing gap; follow-up outside
+   #209's scope). The author extracted the Debian `glslc`/`libshaderc1`
+   packages to userspace and configured with `-DGLSLC=<path>/glslc`.
+2. **A Vulkan device:** `EngineReload` constructs a real `Engine` (SDL window +
+   Vulkan device). WSL2 exposes **llvmpipe** (a software rasterizer), which is
+   enough for the lifecycle test. On a headless Linux box with **no** Vulkan
+   device the test **skips (return 77)** rather than passes.
+
+Reproduction (WSL2 Debian with a Vulkan ICD, e.g. llvmpipe):
+
+```bash
+# userspace glslc (no root): apt-get download glslc libshaderc1 && dpkg -x ...
+cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DFT_VOX_DEP_MODE=system \
+      -DGLSLC="$HOME/glslc-local/usr/bin/glslc"
+LD_LIBRARY_PATH="$HOME/glslc-local/usr/lib/x86_64-linux-gnu" \
+      cmake --build build-linux -j16 --target test_engine_reload
+cd build-linux && ./tests/test_engine_reload   # PASS (31 checks) with a Vulkan device
+```
+
+The two `ctest` failures are **pre-existing platform issues, verified identical
+on the base commit**:
 
 - `WorldPersistence`: 15 sparse-diff checks fail because the SaveService
   worker's regenerated terrain base diverges from load-time generation under
@@ -192,7 +217,8 @@ Additional graphical smokes (both exit 0):
 Phase E completes the graphical host integration with **no behavior change**
 (deterministic fixtures bit-identical, full Windows suite green except the
 pre-existing #213 visual mismatch with identical metrics; Linux builds with
-the `<memory>` include fix and was verified with `glslc`, its two test
+the `<memory>` include fix and was **author-verified on WSL2 with `glslc`** —
+not a default-reproducible CI gate, see the Linux cross-check — its two test
 failures verified pre-existing on the base commit) and **no performance or
 memory regression** (mob/physics within noise, in-game benchmark Grade S at
 parity, zero staging failures, no persistent pool growth). The Engine is a
@@ -229,3 +255,28 @@ Six review findings were addressed:
   `GameSimulation.hpp`, `player-physics.md`, the contracts doc and this doc:
   `placeVoxel` does not call `canPlaceVoxel`; hosts that want player-aware
   placement must gate edits with it (the graphical host does).
+
+## Review round 2
+
+Three follow-up observations were addressed:
+
+- **Public test hook.** `stepDerivedProjectionForTests` is kept consistent with
+  the repo's established public `*ForTests` convention, which already includes
+  unguarded **mutators** (`Engine::setSavesRootForTests`,
+  `WorldPersistence::setWriteTmpFnForTests` / `setSerializeFnForTests` /
+  `setBeforeCommitFnForTests`). There is no `#ifdef` test-macro infrastructure
+  in the project's own code, so guarding only this hook would be inconsistent;
+  a future cleanup could guard all test hooks together. The header now labels
+  it explicitly as a test-only mutator.
+- **Phantom mob from the seeded precondition.** The seeded `MobRenderState` is
+  no longer a default at the origin: it is a sentinel parked at `y = -10000`
+  (far below the playable `[0,256]` range) so it cannot appear as a phantom mob
+  if a future test renders between the seed and the reload. It is also never
+  pushed to `WorldRenderer` by the seam (`tickMobs` already published the empty
+  real snapshot). The non-vacuous mobStates clear check is unchanged.
+- **"EngineReload passes on Linux" is author-verified only.** The Linux
+  cross-check section is rewritten to state this explicitly (WSL2 + llvmpipe +
+  userspace `glslc`, not a CI gate) and to give the two reasons a fresh Linux
+  box may not reproduce it — the default `glslang-tools` shader fallback fails
+  at `#include`, and a headless box with no Vulkan device makes `EngineReload`
+  skip (77) — plus exact reproduction commands.

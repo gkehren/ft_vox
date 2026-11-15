@@ -718,13 +718,15 @@ suite, the `VoxelWorld`, `RenderBridge` and `GameSimulation` CPU-only suites,
 per-seed byte identity, persistence/streaming/mob/physics benchmarks, the
 in-game benchmark smoke run, and the visual golden comparison (only the
 pre-existing `cave_emissive` driver mismatch, #213, with identical metrics).
-Phase E additionally verified the **Linux build** (WSL2 Debian, GCC 14): one
+Phase E additionally **author-verified the Linux build on WSL2 Debian (GCC 14,
+llvmpipe, userspace `glslc`)** — not a default-reproducible CI gate. One
 behavior-neutral portability fix was required (a missing `<memory>` include in
-`ChunkBorders.hpp`), and the verification was **run with `glslc`** — the
-`glslangValidator` fallback rejects the shaders' `#include` directives without
-`GL_GOOGLE_include_directive`, and making that fallback (or `install_dep.sh`)
-work is a follow-up outside #209's wiring scope. The two Linux test failures
-(`WorldPersistence` sparse-diff terrain determinism under GCC,
-`VisualRegression` on the llvmpipe software rasterizer) were **verified
-identical on the base commit** — pre-existing platform issues for #210/#211,
-not Phase E regressions.
+`ChunkBorders.hpp`); the `glslangValidator` fallback rejects the shaders'
+`#include` directives without `GL_GOOGLE_include_directive`, and making that
+fallback (or `install_dep.sh`) work is a follow-up outside #209's wiring scope.
+`EngineReload` passes in that environment but needs a Vulkan device (on a
+headless box it skips, 77). The two Linux test failures (`WorldPersistence`
+sparse-diff terrain determinism under GCC, `VisualRegression` on the llvmpipe
+software rasterizer) were **verified identical on the base commit** —
+pre-existing platform issues for #210/#211, not Phase E regressions. See
+`benchmarks/issue-209-phase-e.md` for the exact reproduction steps.
