@@ -1,7 +1,7 @@
 #pragma once
 
 /// Pure helpers for Phase D streaming CPU optimizations (no Vulkan).
-/// Used by ChunkManager / Chunk / TerrainGenerator and unit-tested in isolation.
+/// Used by RenderWorldBridge / Chunk / TerrainGenerator and unit-tested in isolation.
 
 #include <algorithm>
 #include <cmath>
@@ -120,7 +120,7 @@ inline bool streamFrontBiasChanged(float a, float b)
 
 /// Cheap main-thread streaming maintenance counters (issue #108): how frames
 /// split between the zero-work fast path and the reconciliation paths, plus
-/// queue churn. Published via ChunkManager::streamingMaintenanceStats() for
+/// queue churn. Published via RenderWorldBridge::streamingMaintenanceStats() for
 /// benchmarks and tests; the pure helpers above stay un-instrumented.
 struct StreamingMaintenanceStats
 {
@@ -260,7 +260,7 @@ inline int remainingCountBudget(int requested, double elapsedMs, double maxStrea
 }
 
 /// Steady-state + headroom ChunkPool size for a view distance.
-/// Matches ChunkManager unload radius = unloadFactor * maxRenderDistance.
+/// Matches RenderWorldBridge unload radius = unloadFactor * maxRenderDistance.
 inline size_t estimateChunkPoolCapacity(int maxRenderDistanceBlocks,
 										float unloadFactor = kChunkUnloadDistanceFactor,
 										float margin = 1.15f)
@@ -292,7 +292,7 @@ inline int clampedNearRenderDistance(int minRenderDistance, int maxRenderDistanc
 
 /// Camera far-plane distance — the single source of truth for the
 /// perspective projection and frustum culling. Engine (UpdateUBO),
-/// ChunkManager::updateVisibility, VisualHarness::renderFrame and the
+/// RenderWorldBridge::updateVisibility, VisualHarness::renderFrame and the
 /// projection regression tests all call this; nothing else may derive a far
 /// plane from maxRenderDistance by hand.
 ///

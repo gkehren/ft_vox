@@ -3,8 +3,9 @@
 // =============================================================================
 // WorldCollisionView — CPU-only scoped collision/query view over VoxelWorld
 // (issue #206, Epic #204 Phase B). Carries the EXACT semantics of the former
-// ChunkCollisionView (which now wraps this view and adds the derived render
-// light sampling):
+// ChunkCollisionView (removed in Phase C #207: physics/mobs consume this
+// view directly; the derived render light sampling lives on the
+// RenderWorldBridge):
 //
 //   * main-thread scoped view: holds the world map lock once, caches chunk
 //     lookups only for this view's lifetime, never stores a pointer in the

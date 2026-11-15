@@ -564,7 +564,7 @@ static void testIncrementalQueueMaintenance()
 	CHECK(enqueued.count({0, 0, 0}) == 0, "popped item no longer in enqueued set");
 	CHECK(enqueued.count({5, 0, 0}) == 1, "unpopped item remains in enqueued set");
 	// Full diff application (entering/exiting/prune/sort) is covered by the
-	// ChunkManager production tests in test_chunk_lifecycle.
+	// RenderWorldBridge production tests in test_chunk_lifecycle.
 }
 
 static ChunkDesiredFootprint makeSingleRowFootprint(int z, int minX, int maxX)

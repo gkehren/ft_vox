@@ -1,11 +1,13 @@
-// ChunkManager — render adapter over VoxelWorld (issue #206, Epic #204 B).
+// RenderWorldBridge — renderer-owned derived projection of VoxelWorld
+// (issue #207, Epic #204 Phase C; replaces the ChunkManager render adapter).
 // The authoritative side (streaming residency, terrain publication, logical
-// edits, persistence) lives in World/VoxelWorld.cpp; this unit keeps the
-// derived render pipeline: mesh/light dispatch, GPU uploads, commit groups,
-// visibility, light-cache intent, deferred GPU retirement and the debug
-// trace. World events are drained on the main thread right after each world
-// call so render handles never observe a recycled record.
-#include "ChunkManager.hpp"
+// edits, persistence) lives in World/VoxelWorld.cpp and is owned by the
+// host; this unit keeps the derived render pipeline: mesh/light dispatch,
+// GPU uploads, commit groups, visibility, light-cache intent, deferred GPU
+// retirement and the debug trace. World events are drained on the main
+// thread right after each world call so render handles never observe a
+// recycled record.
+#include "RenderWorldBridge.hpp"
 
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Camera/Camera.hpp>
@@ -63,14 +65,19 @@ WorldStreamSettings worldStreamSettings(const RenderSettings &settings)
 }
 } // namespace
 
-ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool)
-	: m_world(std::make_unique<VoxelWorld>(terrainGenerator, threadPool)),
-	  m_threadPool(threadPool), m_chunkPool(chunkPool)
+RenderWorldBridge::RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, ChunkPool *chunkPool)
+	: m_world(world), m_threadPool(threadPool), m_chunkPool(chunkPool)
 {
+	assert(m_world != nullptr && "RenderWorldBridge requires a host-owned VoxelWorld");
+	// Render-side worker profiling seam: the world itself is profiler-free
+	// and headless worlds run without an observer.
 	m_world->setWorkerObserver(&g_profilerWorkerObserver);
+	// Project the world's current state: bind handles to already-resident
+	// records and drain queued change events (issue #207).
+	attachToWorld();
 }
 
-ChunkManager::~ChunkManager()
+RenderWorldBridge::~RenderWorldBridge()
 {
 	// Persistent-world durability comes FIRST (issue #180 review round 3):
 	// while persistence is open, the close path must still own every
@@ -142,20 +149,60 @@ ChunkManager::~ChunkManager()
 			m_chunkPool->release(c);
 	}
 	m_deferredRelease.clear();
-	// m_world destructs last (member order): its records return their
-	// backing to the world pools after every render handle is gone.
+	// The world is host-owned and outlives the bridge: restore it to its
+	// render-free state (no profiling seam) so it can keep running headless.
+	// Its records return their backing to the world pools on ITS destruction,
+	// after every render handle is gone.
+	m_world->setWorkerObserver(nullptr);
 }
 
-glm::ivec3 ChunkManager::worldToChunkCoord(const glm::vec3 &worldPos)
+glm::ivec3 RenderWorldBridge::worldToChunkCoord(const glm::vec3 &worldPos)
 {
 	return VoxelWorld::worldToChunkCoord(worldPos);
 }
 
 // ---------------------------------------------------------------------------
-// World event stream → render handle synchronization (issue #206)
+// World event stream → render handle synchronization (issue #206/#207)
 // ---------------------------------------------------------------------------
 
-void ChunkManager::drainWorldEvents()
+void RenderWorldBridge::attachToWorld()
+{
+	// Bind handles to records already resident in the world. The world does
+	// not re-emit Loaded events for them, so a bridge attached to a live world
+	// (Phase E) must project the current residency itself. Same bind contract
+	// as onWorldLoaded; pool-exhaustion parks the coord for retryPendingBinds.
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (WorldChunk *record : m_world->activeChunksSnapshot())
+		{
+			if (!record)
+				continue;
+			const glm::ivec3 coord = record->coord();
+			if (m_chunks.find(coord) != m_chunks.end())
+				continue;
+			if (!m_chunkPool)
+				break;
+			Chunk *chunk = m_chunkPool->acquire(glm::vec3(
+				static_cast<float>(coord.x * CHUNK_SIZE), 0.0f,
+				static_cast<float>(coord.z * CHUNK_SIZE)));
+			if (!chunk)
+			{
+				m_pendingBinds.push_back(coord);
+				continue;
+			}
+			chunk->bindWorldChunk(record);
+			m_chunks[coord] = chunk;
+			chunk->setActiveIndex(m_activeChunks.size());
+			m_activeChunks.push_back(chunk);
+			chunk->setVisible(true);
+			recordChunkEvent(chunk, "load");
+		}
+	}
+	// Publish any queued generation/edit render flags for the bound handles.
+	drainWorldEvents();
+}
+
+void RenderWorldBridge::drainWorldEvents()
 {
 	// Observability (issue #206 review): the world bounds its event stream and
 	// drops the oldest events if a consumer falls behind. Surface that loss
@@ -195,7 +242,7 @@ void ChunkManager::drainWorldEvents()
 	}
 }
 
-void ChunkManager::onWorldLoaded(const WorldEvent &e)
+void RenderWorldBridge::onWorldLoaded(const WorldEvent &e)
 {
 	if (m_chunks.find(e.coord) != m_chunks.end())
 		return;
@@ -223,7 +270,7 @@ void ChunkManager::onWorldLoaded(const WorldEvent &e)
 	recordChunkEvent(chunk, "load");
 }
 
-void ChunkManager::retryPendingBinds()
+void RenderWorldBridge::retryPendingBinds()
 {
 	if (m_pendingBinds.empty())
 		return;
@@ -255,7 +302,7 @@ void ChunkManager::retryPendingBinds()
 	m_pendingBinds.swap(stillPending);
 }
 
-void ChunkManager::onWorldUnloaded(const WorldEvent &e)
+void RenderWorldBridge::onWorldUnloaded(const WorldEvent &e)
 {
 	auto it = m_chunks.find(e.coord);
 	if (it == m_chunks.end())
@@ -289,7 +336,7 @@ void ChunkManager::onWorldUnloaded(const WorldEvent &e)
 	// reference only.
 }
 
-void ChunkManager::onWorldGenerated(const WorldEvent &e)
+void RenderWorldBridge::onWorldGenerated(const WorldEvent &e)
 {
 	auto it = m_chunks.find(e.coord);
 	if (it == m_chunks.end() || !it->second)
@@ -304,7 +351,7 @@ void ChunkManager::onWorldGenerated(const WorldEvent &e)
 	dirtyNeighborsForArrivedLight(chunk, e.coord);
 }
 
-void ChunkManager::onWorldEditApplied(const WorldEvent &e)
+void RenderWorldBridge::onWorldEditApplied(const WorldEvent &e)
 {
 	auto it = m_chunks.find(e.coord);
 	if (it == m_chunks.end() || !it->second)
@@ -326,7 +373,7 @@ void ChunkManager::onWorldEditApplied(const WorldEvent &e)
 // Streaming / loading / generation (delegated to the authoritative world)
 // ---------------------------------------------------------------------------
 
-StreamingUpdateKind ChunkManager::updateStreaming(const Camera &camera, const RenderSettings &settings)
+StreamingUpdateKind RenderWorldBridge::updateStreaming(const Camera &camera, const RenderSettings &settings)
 {
 	// The world grows its own record pool inside updateStreaming (issue
 	// #206); the Engine grows the render ChunkPool on the same estimate.
@@ -337,7 +384,7 @@ StreamingUpdateKind ChunkManager::updateStreaming(const Camera &camera, const Re
 	return kind;
 }
 
-void ChunkManager::processChunkLoading(int budget)
+void RenderWorldBridge::processChunkLoading(int budget)
 {
 	if (budget <= 0 || !m_chunkPool)
 		return;
@@ -351,7 +398,7 @@ void ChunkManager::processChunkLoading(int budget)
 	retryPendingBinds();
 }
 
-void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, int budget)
+void RenderWorldBridge::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, int budget)
 {
 	const float lodThresh = static_cast<float>(settings.minRenderDistance) * 2.f;
 	m_world->generatePendingVoxels(camera.getPosition(), lodThresh * lodThresh, budget);
@@ -362,7 +409,7 @@ void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSetti
 // Render mesh / light dispatch (derived; unchanged contracts)
 // ---------------------------------------------------------------------------
 
-void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings &settings, int budget)
+void RenderWorldBridge::meshPendingChunks(const Camera &camera, const RenderSettings &settings, int budget)
 {
 	if (!m_threadPool || budget <= 0)
 		return;
@@ -492,11 +539,11 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		else
 		{
 			// LOCK ORDER: render lock (held by this method) -> world lock
-			// (inside ensureShellPopulated). The reverse order exists in
-			// ChunkCollisionView (world -> render); both are main-thread-only
+			// (inside ensureShellPopulated). The reverse order exists in the
+			// collision/mob views (world -> render); both are main-thread-only
 			// today so neither lock is cross-thread contended. See the lock
-			// order note in ChunkCollisionView.hpp before threading either
-			// path in Phase C/E (issue #206 review).
+			// order note in RenderWorldBridge.hpp before threading either
+			// path in Phase D/E (issue #206/#207 review).
 			m_world->ensureShellPopulated(chunk->worldChunk());
 			ensureLightHalo(chunk, ci);
 			// Borrowed for this job only: the worker detaches and returns
@@ -583,7 +630,7 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 	}
 }
 
-void ChunkManager::updateEntityLightCaches(const Camera &camera, const RenderSettings &settings, int budget)
+void RenderWorldBridge::updateEntityLightCaches(const Camera &camera, const RenderSettings &settings, int budget)
 {
 	if (!m_threadPool || budget <= 0)
 		return;
@@ -715,7 +762,7 @@ void ChunkManager::updateEntityLightCaches(const Camera &camera, const RenderSet
 // GPU uploads (derived; unchanged)
 // ---------------------------------------------------------------------------
 
-int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
+int RenderWorldBridge::uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
                                       GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget)
 {
 	if (!allocator || budget <= 0 || cmd == VK_NULL_HANDLE || !staging.isValid())
@@ -926,7 +973,7 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 // Deferred GPU retirement (render-only; edit capture moved to world unload)
 // ---------------------------------------------------------------------------
 
-void ChunkManager::processDeferredReleases()
+void RenderWorldBridge::processDeferredReleases()
 {
 	constexpr size_t kMaxRetainedLightBlocks = 64;
 	if (m_chunkPool && m_chunkPool->lightStorageFree() > kMaxRetainedLightBlocks)
@@ -966,7 +1013,7 @@ void ChunkManager::processDeferredReleases()
 // queue BEFORE applyPendingEdits lands the edits)
 // ---------------------------------------------------------------------------
 
-void ChunkManager::processFinishedJobs()
+void RenderWorldBridge::processFinishedJobs()
 {
 	// Stage 1: authoritative generation publication (+ Generated events →
 	// render flags and cross-chunk light arrival invalidation).
@@ -1071,7 +1118,7 @@ void ChunkManager::processFinishedJobs()
 // Visibility / draw lists (derived; unchanged)
 // ---------------------------------------------------------------------------
 
-void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int windowHeight,
+void RenderWorldBridge::updateVisibility(const Camera &camera, int windowWidth, int windowHeight,
 									const RenderSettings &settings)
 {
 	// Timed by Engine PROFILE_SCOPE("Visibility") — keep body lean.
@@ -1134,7 +1181,7 @@ void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int w
 	}
 }
 
-void ChunkManager::updateEntityLightCacheIntent(Chunk &chunk, float distSq)
+void RenderWorldBridge::updateEntityLightCacheIntent(Chunk &chunk, float distSq)
 {
 	// Acquire/release hysteresis (issue #172): outside chunks acquire at the
 	// 128m radius; held caches are retained until the chunk leaves the
@@ -1150,7 +1197,7 @@ void ChunkManager::updateEntityLightCacheIntent(Chunk &chunk, float distSq)
 	chunk.setLocalLightCacheWanted(wanted);
 }
 
-void ChunkManager::collectDrawList(std::vector<Chunk *> &out) const
+void RenderWorldBridge::collectDrawList(std::vector<Chunk *> &out) const
 {
 	out.clear();
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -1169,7 +1216,7 @@ void ChunkManager::collectDrawList(std::vector<Chunk *> &out) const
 	}
 }
 
-void ChunkManager::collectShadowList(std::vector<Chunk *> &out, const Camera &camera,
+void RenderWorldBridge::collectShadowList(std::vector<Chunk *> &out, const Camera &camera,
 									 float shadowRadius) const
 {
 	out.clear();
@@ -1198,7 +1245,7 @@ void ChunkManager::collectShadowList(std::vector<Chunk *> &out, const Camera &ca
 // Logical edits (delegated; commit groups stay render-side)
 // ---------------------------------------------------------------------------
 
-bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
+bool RenderWorldBridge::deleteVoxel(const glm::vec3 &worldPos)
 {
 	const WorldEditResult result = m_world->deleteVoxel(worldPos);
 	drainWorldEvents();
@@ -1217,7 +1264,7 @@ bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
 	return result.accepted;
 }
 
-bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
+bool RenderWorldBridge::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 {
 	const WorldEditResult result = m_world->placeVoxel(worldPos, type);
 	drainWorldEvents();
@@ -1240,25 +1287,25 @@ bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 	return result.accepted;
 }
 
-bool ChunkManager::isVoxelActive(const glm::vec3 &worldPos) const
+bool RenderWorldBridge::isVoxelActive(const glm::vec3 &worldPos) const
 {
 	return m_world->isVoxelActive(worldPos);
 }
 
-Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos)
+Chunk *RenderWorldBridge::getChunk(const glm::ivec3 &chunkPos)
 {
 	auto it = m_chunks.find(chunkPos);
 	return it != m_chunks.end() ? it->second : nullptr;
 }
 
-const Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos) const
+const Chunk *RenderWorldBridge::getChunk(const glm::ivec3 &chunkPos) const
 {
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	auto it = m_chunks.find(chunkPos);
 	return it != m_chunks.end() ? it->second : nullptr;
 }
 
-Chunk *ChunkManager::getChunkAtWorldPos(const glm::vec3 &worldPos)
+Chunk *RenderWorldBridge::getChunkAtWorldPos(const glm::vec3 &worldPos)
 {
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	return getChunk(worldToChunkCoord(worldPos));
@@ -1268,7 +1315,7 @@ Chunk *ChunkManager::getChunkAtWorldPos(const glm::vec3 &worldPos)
 // Entity light sampling (derived caches; unchanged)
 // ---------------------------------------------------------------------------
 
-lighting::LocalVoxelLight ChunkManager::sampleVoxelLightUnlocked(const glm::ivec3 &p) const
+lighting::LocalVoxelLight RenderWorldBridge::sampleVoxelLightUnlocked(const glm::ivec3 &p) const
 {
 	if (p.y >= static_cast<int>(CHUNK_HEIGHT))
 		return {1.0f, glm::vec3(0.0f)};
@@ -1293,13 +1340,13 @@ lighting::LocalVoxelLight ChunkManager::sampleVoxelLightUnlocked(const glm::ivec
 	return chunk->sampleLight(lx, p.y, lz);
 }
 
-lighting::LocalVoxelLight ChunkManager::sampleVoxelLight(const glm::ivec3 &blockPos) const
+lighting::LocalVoxelLight RenderWorldBridge::sampleVoxelLight(const glm::ivec3 &blockPos) const
 {
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	return sampleVoxelLightUnlocked(blockPos);
 }
 
-lighting::LocalVoxelLight ChunkManager::sampleSmoothedLightUnlocked(const glm::vec3 &worldPos) const
+lighting::LocalVoxelLight RenderWorldBridge::sampleSmoothedLightUnlocked(const glm::vec3 &worldPos) const
 {
 	const glm::vec3 s = worldPos - glm::vec3(0.5f);
 	const int x0 = static_cast<int>(std::floor(s.x));
@@ -1333,7 +1380,7 @@ lighting::LocalVoxelLight ChunkManager::sampleSmoothedLightUnlocked(const glm::v
 	return lighting::lerpLocalVoxelLight(c0, c1, fz);
 }
 
-lighting::LocalVoxelLight ChunkManager::sampleSmoothedLight(const glm::vec3 &worldPos) const
+lighting::LocalVoxelLight RenderWorldBridge::sampleSmoothedLight(const glm::vec3 &worldPos) const
 {
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	return sampleSmoothedLightUnlocked(worldPos);
@@ -1343,27 +1390,27 @@ lighting::LocalVoxelLight ChunkManager::sampleSmoothedLight(const glm::vec3 &wor
 // Counters / inspection
 // ---------------------------------------------------------------------------
 
-size_t ChunkManager::chunkCount() const
+size_t RenderWorldBridge::chunkCount() const
 {
 	return m_world->chunkCount();
 }
 
-size_t ChunkManager::pendingLoadCount() const
+size_t RenderWorldBridge::pendingLoadCount() const
 {
 	return m_world->pendingLoadCount();
 }
 
-size_t ChunkManager::pendingGenJobs() const
+size_t RenderWorldBridge::pendingGenJobs() const
 {
 	return m_world->pendingGenJobs();
 }
 
-size_t ChunkManager::pendingMeshJobs() const
+size_t RenderWorldBridge::pendingMeshJobs() const
 {
 	return m_pendingMeshJobsCount.load();
 }
 
-size_t ChunkManager::pendingLightJobs() const
+size_t RenderWorldBridge::pendingLightJobs() const
 {
 	return m_pendingLightJobsCount.load();
 }
@@ -1372,7 +1419,7 @@ size_t ChunkManager::pendingLightJobs() const
 // Bootstrap
 // ---------------------------------------------------------------------------
 
-bool ChunkManager::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator)
+bool RenderWorldBridge::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator)
 {
 	if (!chunk)
 		return false;
@@ -1406,7 +1453,7 @@ bool ChunkManager::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &gener
 	return true;
 }
 
-void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
+void RenderWorldBridge::generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
 						 ImmediateCommands &imm, MeshArenas &arenas)
 {
 	if (!m_chunkPool || !allocator)
@@ -1488,18 +1535,18 @@ void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks
 // Persistent world lifecycle (delegated; issue #180 contracts preserved)
 // ---------------------------------------------------------------------------
 
-bool ChunkManager::openWorld(const std::string &savesRoot, const std::string &worldName,
+bool RenderWorldBridge::openWorld(const std::string &savesRoot, const std::string &worldName,
                              std::string &outError)
 {
 	return m_world->openWorld(savesRoot, worldName, outError);
 }
 
-bool ChunkManager::renderJobsBusy() const
+bool RenderWorldBridge::renderJobsBusy() const
 {
 	return m_pendingMeshJobsCount.load() > 0 || m_pendingLightJobsCount.load() > 0;
 }
 
-void ChunkManager::drainAsyncJobsForPersistence()
+void RenderWorldBridge::drainAsyncJobsForPersistence()
 {
 	// Combined durability barrier (issue #180 review round 2): publish every
 	// finished gen/mesh/light job, apply every deferred voxel edit and age
@@ -1519,7 +1566,7 @@ void ChunkManager::drainAsyncJobsForPersistence()
 	processFinishedJobs();
 }
 
-bool ChunkManager::closeWorld()
+bool RenderWorldBridge::closeWorld()
 {
 	if (!m_world->isWorldOpen())
 		return true;
@@ -1528,7 +1575,7 @@ bool ChunkManager::closeWorld()
 	return m_world->closeWorld();
 }
 
-bool ChunkManager::flushWorld()
+bool RenderWorldBridge::flushWorld()
 {
 	return m_world->flushWorld();
 }
@@ -1537,7 +1584,7 @@ bool ChunkManager::flushWorld()
 // Cross-chunk light invalidation (derived render scheduling; unchanged)
 // ---------------------------------------------------------------------------
 
-void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx,
+void RenderWorldBridge::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx,
 								   telemetry::Family telemetryFamily)
 {
 	if (!chunk)
@@ -1575,7 +1622,7 @@ void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx,
 	}
 }
 
-void ChunkManager::markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int y, int z,
+void RenderWorldBridge::markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int y, int z,
 										  TextureType previousType, TextureType type)
 {
 	// Same light-relevance predicate as Chunk::markEditDirtySections: only
@@ -1636,7 +1683,7 @@ void ChunkManager::markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int
 	if (northEast) dirty(chunkPos + glm::ivec3(+1, 0, +1));
 }
 
-void ChunkManager::dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 &chunkIdx)
+void RenderWorldBridge::dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 &chunkIdx)
 {
 	if (!chunk || !chunk->isVoxelBackingReadable())
 		return;
@@ -1707,7 +1754,7 @@ void ChunkManager::dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 
 	dirty(7, chunkIdx + glm::ivec3(+1, 0, +1));
 }
 
-TaskPriority ChunkManager::calculateTaskPriority(float distanceSq, float lodThresholdSq) const
+TaskPriority RenderWorldBridge::calculateTaskPriority(float distanceSq, float lodThresholdSq) const
 {
 	if (distanceSq < lodThresholdSq * 0.25f)
 		return TaskPriority::High;
@@ -1781,7 +1828,7 @@ void appendUnique(std::vector<uint64_t> &dst, uint64_t id)
 // a full pass merges nothing more), so the active groups always form
 // disjoint chunk sets: a chunk belongs to at most one group, which is what
 // makes the per-group atomic commit exact.
-void ChunkManager::registerCommitGroup(uint64_t editId, std::vector<PendingGroupMember> members)
+void RenderWorldBridge::registerCommitGroup(uint64_t editId, std::vector<PendingGroupMember> members)
 {
 	std::vector<PendingGroupMember> merged;
 	std::vector<uint64_t> editIds{editId};
@@ -1820,7 +1867,7 @@ void ChunkManager::registerCommitGroup(uint64_t editId, std::vector<PendingGroup
 		 std::move(editIds)});
 }
 
-PendingMeshCommitGroup *ChunkManager::commitGroupFor(Chunk *chunk)
+PendingMeshCommitGroup *RenderWorldBridge::commitGroupFor(Chunk *chunk)
 {
 	PendingMeshCommitGroup *found = nullptr;
 #ifndef NDEBUG
@@ -1845,7 +1892,7 @@ PendingMeshCommitGroup *ChunkManager::commitGroupFor(Chunk *chunk)
 	return found;
 }
 
-void ChunkManager::eraseCommitGroup(uint64_t groupId)
+void RenderWorldBridge::eraseCommitGroup(uint64_t groupId)
 {
 	m_commitGroups.erase(std::remove_if(m_commitGroups.begin(), m_commitGroups.end(),
 										[groupId](const PendingMeshCommitGroup &group) {
@@ -1854,7 +1901,7 @@ void ChunkManager::eraseCommitGroup(uint64_t groupId)
 						 m_commitGroups.end());
 }
 
-void ChunkManager::discardAllCommitGroups()
+void RenderWorldBridge::discardAllCommitGroups()
 {
 	for (PendingMeshCommitGroup &group : m_commitGroups)
 	{
@@ -1873,7 +1920,7 @@ void ChunkManager::discardAllCommitGroups()
 // dependency alive while at least two chunks remain. A group falling to a
 // single member has no coupling left to protect and dissolves - the
 // remaining chunk reverts to normal independent uploads.
-void ChunkManager::removeChunkFromCommitGroups(Chunk *chunk)
+void RenderWorldBridge::removeChunkFromCommitGroups(Chunk *chunk)
 {
 	for (auto it = m_commitGroups.begin(); it != m_commitGroups.end();)
 	{
@@ -1906,7 +1953,7 @@ void ChunkManager::removeChunkFromCommitGroups(Chunk *chunk)
 // Chunk lifecycle debug trace (issue #179; unchanged ring contract)
 // ---------------------------------------------------------------------------
 
-void ChunkManager::recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sections)
+void RenderWorldBridge::recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sections)
 {
 	if (!m_chunkTraceEnabled || !chunk)
 		return;
@@ -1916,7 +1963,7 @@ void ChunkManager::recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sec
 					 chunk->meshRevision(), kind, sections);
 }
 
-void ChunkManager::recordWorldEvent(const glm::ivec3 &coord, uint64_t revision, const char *kind,
+void RenderWorldBridge::recordWorldEvent(const glm::ivec3 &coord, uint64_t revision, const char *kind,
 									uint32_t sections)
 {
 	if (!m_chunkTraceEnabled)
@@ -1934,7 +1981,7 @@ void ChunkManager::recordWorldEvent(const glm::ivec3 &coord, uint64_t revision, 
 		++m_chunkEventCount;
 }
 
-std::vector<ChunkDebugEvent> ChunkManager::chunkDebugEvents() const
+std::vector<ChunkDebugEvent> RenderWorldBridge::chunkDebugEvents() const
 {
 	std::vector<ChunkDebugEvent> out;
 	out.reserve(m_chunkEventCount);

@@ -8,7 +8,7 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Chunk/ChunkBorders.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
-#include <Chunk/ChunkCollisionView.hpp>
+#include <World/WorldCollisionView.hpp>
 #include <Chunk/ChunkMobWorld.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
@@ -177,10 +177,10 @@ Engine::~Engine()
 		vkContext->waitIdle();
 
 	// Durable shutdown (issue #180, Phase 5): persist the player state, then
-	// flush the save queue while the manager is still alive. ~ChunkManager
+	// flush the save queue while the world is still alive. ~RenderWorldBridge
 	// holds a safety net for chunk edits, but only this path writes
 	// player.state, so the explicit flush stays.
-	if (chunkManager && chunkManager->isWorldOpen())
+	if (renderBridge && renderBridge->isWorldOpen())
 	{
 		PlayerPersistState playerState;
 		playerState.x = player.body.position.x;
@@ -190,10 +190,10 @@ Engine::~Engine()
 		playerState.pitch = camera.getPitch();
 		playerState.flight = playerFlight;
 		playerState.selectedBlock = static_cast<int32_t>(selectedTexture);
-		const WorldPersistence *persistence = chunkManager->worldPersistence();
+		const WorldPersistence *persistence = renderBridge->worldPersistence();
 		if (!persistence || !persistence->writePlayerState(playerState))
 			std::cout << "[world] player state save failed\n";
-		if (!chunkManager->flushWorld())
+		if (!renderBridge->flushWorld())
 		{
 			const std::string error =
 				persistence ? persistence->status().lastError : std::string("(no status)");
@@ -203,9 +203,12 @@ Engine::~Engine()
 
 	// Reset order matters (issue #109): chunk/world teardown returns arena
 	// ranges, which can retire whole arena pages into the retire queue.
-	// The queue must outlive them and be flushed last.
+	// The queue must outlive them and be flushed last. The render bridge
+	// drains its jobs and releases its handles before the authoritative
+	// world tears down (issue #207).
 	gameUi.reset();
-	chunkManager.reset();
+	renderBridge.reset();
+	voxelWorld.reset();
 	chunkPool.reset();
 	threadPool.reset();
 	terrainGenerator.reset();
@@ -233,10 +236,10 @@ Engine::~Engine()
 
 std::optional<PlayerPersistState> Engine::loadPendingPlayerState()
 {
-	if (!chunkManager || !chunkManager->isWorldOpen() || !chunkManager->worldPersistence())
+	if (!renderBridge || !renderBridge->isWorldOpen() || !renderBridge->worldPersistence())
 		return std::nullopt;
 	PlayerPersistState saved;
-	if (!chunkManager->worldPersistence()->readPlayerState(saved))
+	if (!renderBridge->worldPersistence()->readPlayerState(saved))
 		return std::nullopt; // fresh world, or already reported as corrupt
 	return saved;
 }
@@ -246,7 +249,7 @@ bool Engine::restorePlayerState(const PlayerPersistState &saved)
 	// Terrain validation (issue #180 review round 6): the saved file is
 	// structurally valid, but the position itself must be usable against the
 	// freshly bootstrapped terrain.
-	ChunkCollisionView world(*chunkManager);
+	WorldCollisionView world(*voxelWorld);
 	physics::QueryStats queries;
 	physics::Body candidate;
 	candidate.position = glm::dvec3(saved.x, saved.y, saved.z);
@@ -341,16 +344,17 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	mobs.reset(seed);
     mobStates.reserve(entities::MobSettings::capacity);
 	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
-	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
+	voxelWorld = std::make_unique<VoxelWorld>(terrainGenerator.get(), threadPool.get());
+	renderBridge = std::make_unique<RenderWorldBridge>(voxelWorld.get(), threadPool.get(),
 												  chunkPool.get());
 
-	// Open (or create) the save AFTER the manager exists but BEFORE any
+	// Open (or create) the save AFTER the world exists but BEFORE any
 	// generation, so chunk edits from the first frame are already tracked.
 	// Failure is not fatal: the session continues without persistence.
 	if (wantPersistence)
 	{
 		std::string error;
-		if (chunkManager->openWorld(m_savesRoot.string(), m_openWorldName, error))
+		if (renderBridge->openWorld(m_savesRoot.string(), m_openWorldName, error))
 		{
 			std::cout << "[world] opened '" << m_openWorldName << "' (seed " << seed << ")\n";
 		}
@@ -376,7 +380,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 		camera.setPosition(bootstrapCenter);
 	}
 
-	chunkManager->generateInitialArea(bootstrapCenter, kBootstrapRadius,
+	renderBridge->generateInitialArea(bootstrapCenter, kBootstrapRadius,
 									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 
 	// Restore the validated player state, or fall back to the surface spawn.
@@ -392,7 +396,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 	{
 		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
 		{
-			if (chunkManager->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
+			if (renderBridge->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
 			{
 				p.position.y = static_cast<float>(y + 1);
 				break;
@@ -403,7 +407,7 @@ void Engine::initializeNoiseGenerator(int seed_val)
 		worldRenderer->overlays().setPlayers(demoPlayers);
 
 	std::cout << "World seed: " << seed
-			  << " chunks=" << chunkManager->chunkCount()
+			  << " chunks=" << renderBridge->chunkCount()
 			  << " view=" << renderSettings.maxRenderDistance << "\n";
 }
 
@@ -518,13 +522,13 @@ void Engine::setInspectionView(glm::vec3 position, float yaw, float pitch, float
 void Engine::placeCameraOnSurface()
 {
 	const glm::vec3 pos = camera.getPosition();
-	if (!chunkManager) return;
+	if (!renderBridge) return;
 	// Keep the established benchmark's center/altitude byte-for-byte: changing
 	// gameplay spawn must not silently change the renderer comparison workload.
 	if (m_benchmark.isActive())
 	{
 		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
-			if (chunkManager->isVoxelActive({pos.x, float(y), pos.z}))
+			if (renderBridge->isVoxelActive({pos.x, float(y), pos.z}))
 			{
 				camera.setPosition({pos.x, float(y + 3), pos.z});
 				resetPlayerAtCamera();
@@ -534,7 +538,7 @@ void Engine::placeCameraOnSurface()
 		resetPlayerAtCamera();
 		return;
 	}
-	ChunkCollisionView world(*chunkManager);
+	WorldCollisionView world(*voxelWorld);
 	physics::QueryStats queries;
 	// Closest columns first, bounded by the already bootstrapped region.
 	for (int radius = 0; radius < kBootstrapRadius * int(CHUNK_SIZE); ++radius)
@@ -578,8 +582,8 @@ void Engine::setPlayerFlight(bool enabled)
 	if (m_benchmark.isActive()) return;
 	if (!enabled)
 	{
-		if (!chunkManager) return;
-		ChunkCollisionView world(*chunkManager);
+		if (!renderBridge) return;
+		WorldCollisionView world(*voxelWorld);
 		physics::Body candidate = player.body;
 		candidate.position = glm::dvec3(camera.getPosition()) - glm::dvec3(0, player.settings.eyeHeight, 0);
 		physics::QueryStats queries;
@@ -604,12 +608,12 @@ bool Engine::reloadWorld(int newSeed)
 	// close (and flush) any world opened for interactive play so the run can
 	// never write into the user's save. Persistence stays off afterwards.
 	// The close can be REFUSED (stranded logical edits - issue #180 review
-	// round 3): aborting the reload keeps the manager/world intact, so a
-	// debug/benchmark action can never destroy the manager after a refused
+	// round 3): aborting the reload keeps the bridge/world intact, so a
+	// debug/benchmark action can never destroy the world after a refused
 	// close.
-	if (chunkManager && chunkManager->isWorldOpen())
+	if (renderBridge && renderBridge->isWorldOpen())
 	{
-		if (!chunkManager->closeWorld())
+		if (!renderBridge->closeWorld())
 		{
 			std::cerr << "[world] reload aborted: persistent world could not be closed safely"
 			          << std::endl;
@@ -628,24 +632,26 @@ bool Engine::reloadWorld(int newSeed)
 	vkContext->waitIdle();
 	resourceRetire.flush();
 	// Carry the opt-in chunk lifecycle trace across the reload (issue #179
-	// review round 2): re-apply it to the new manager BEFORE
+	// review round 2): re-apply it to the new bridge BEFORE
 	// generateInitialArea() so bootstrap events are not lost — the UI-side
 	// sync in updateDebugUiState only runs later in the frame.
 	const bool chunkTraceEnabled =
-		chunkManager && chunkManager->chunkEventTraceEnabled();
-	chunkManager.reset();
+		renderBridge && renderBridge->chunkEventTraceEnabled();
+	renderBridge.reset();
+	voxelWorld.reset();
 	mobs.reset(seed);
     mobStates.reserve(entities::MobSettings::capacity);
 	terrainGenerator = std::make_unique<TerrainGenerator>(seed);
-	chunkManager = std::make_unique<ChunkManager>(terrainGenerator.get(), threadPool.get(),
+	voxelWorld = std::make_unique<VoxelWorld>(terrainGenerator.get(), threadPool.get());
+	renderBridge = std::make_unique<RenderWorldBridge>(voxelWorld.get(), threadPool.get(),
 												  chunkPool.get());
-	chunkManager->setChunkEventTraceEnabled(chunkTraceEnabled);
+	renderBridge->setChunkEventTraceEnabled(chunkTraceEnabled);
 
 	camera.setMode(CameraMode::PERSPECTIVE);
 	camera.setPosition(glm::vec3(0.f, 100.f, 0.f));
 	camera.setMovementSpeed(20.f);
 
-	chunkManager->generateInitialArea(camera.getPosition(), kBootstrapRadius,
+	renderBridge->generateInitialArea(camera.getPosition(), kBootstrapRadius,
 									  vkContext->getAllocator(), *immediate, worldRenderer->arenas());
 	placeCameraOnSurface();
 
@@ -658,7 +664,7 @@ bool Engine::reloadWorld(int newSeed)
 	{
 		for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
 		{
-			if (chunkManager->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
+			if (renderBridge->isVoxelActive(glm::vec3(p.position.x, static_cast<float>(y), p.position.z)))
 			{
 				p.position.y = static_cast<float>(y + 1);
 				break;
@@ -676,7 +682,7 @@ bool Engine::reloadWorld(int newSeed)
 	telemetry::registry().beginCapture();
 
 	std::cout << "[bench] World reloaded seed=" << seed
-			  << " chunks=" << chunkManager->chunkCount() << "\n";
+			  << " chunks=" << renderBridge->chunkCount() << "\n";
 	return true;
 }
 
@@ -739,18 +745,18 @@ void Engine::tickDayCycle(double dt)
 void Engine::tickStreaming(double dt)
 {
 	PROFILE_SCOPE("Streaming");
-	if (!chunkManager)
+	if (!renderBridge)
 		return;
 	if (paused)
 	{
 		{
 			PROFILE_SCOPE("Visibility");
-			chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
+			renderBridge->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
 		}
 		{
 			PROFILE_SCOPE("CollectLists");
-			chunkManager->collectDrawList(drawList);
-			chunkManager->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
+			renderBridge->collectDrawList(drawList);
+			renderBridge->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
 		}
 		uploadBudgetThisFrame = 0;
 		return;
@@ -785,15 +791,15 @@ void Engine::tickStreaming(double dt)
 
 	{
 		PROFILE_SCOPE("FinishedJobs");
-		chunkManager->processFinishedJobs();
+		renderBridge->processFinishedJobs();
 	}
 	{
 		PROFILE_SCOPE("DeferredRelease");
-		chunkManager->processDeferredReleases();
+		renderBridge->processDeferredReleases();
 	}
 	{
 		PROFILE_SCOPE("UpdateStreaming");
-		chunkManager->updateStreaming(camera, renderSettings);
+		renderBridge->updateStreaming(camera, renderSettings);
 	}
 
 	static double genAccum = 0.0, meshAccum = 0.0, uploadAccum = 0.0, lightCacheAccum = 0.0;
@@ -808,19 +814,19 @@ void Engine::tickStreaming(double dt)
 	if (loadN > 0)
 	{
 		PROFILE_SCOPE("Load");
-		chunkManager->processChunkLoading(loadN);
+		renderBridge->processChunkLoading(loadN);
 	}
 	const int genN = remainingCountBudget(std::max(genBudget, 1), streamElapsedMs(), maxStreamMs);
 	if (genN > 0)
 	{
 		PROFILE_SCOPE("GenDispatch");
-		chunkManager->generatePendingVoxels(camera, renderSettings, genN);
+		renderBridge->generatePendingVoxels(camera, renderSettings, genN);
 	}
 	const int meshN = remainingCountBudget(std::max(meshBudget, 1), streamElapsedMs(), maxStreamMs);
 	if (meshN > 0)
 	{
 		PROFILE_SCOPE("MeshDispatch");
-		chunkManager->meshPendingChunks(camera, renderSettings, meshN);
+		renderBridge->meshPendingChunks(camera, renderSettings, meshN);
 	}
 	// Dedicated entity light-cache dispatch (issue #172): separate budget so
 	// cache acquisition neither competes with nor degenerates into render
@@ -830,33 +836,33 @@ void Engine::tickStreaming(double dt)
 	if (lightCacheN > 0)
 	{
 		PROFILE_SCOPE("LightCacheDispatch");
-		chunkManager->updateEntityLightCaches(camera, renderSettings, lightCacheN);
+		renderBridge->updateEntityLightCaches(camera, renderSettings, lightCacheN);
 	}
 	// GPU uploads are recorded inside recordFrame (after acquire) — no waitIdle.
 	{
 		PROFILE_SCOPE("Visibility");
-		chunkManager->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
+		renderBridge->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
 	}
 	{
 		PROFILE_SCOPE("CollectLists");
-		chunkManager->collectDrawList(drawList);
-		chunkManager->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
+		renderBridge->collectDrawList(drawList);
+		renderBridge->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
 	}
 
 	static size_t lastLoggedChunks = 0;
 	static double lastLogTime = 0.0;
 	const double now = SDL_GetTicks() / 1000.0;
-	const size_t n = chunkManager->chunkCount();
+	const size_t n = renderBridge->chunkCount();
 	if (n != lastLoggedChunks && now - lastLogTime > 1.0)
 	{
 		std::cout << "[stream] chunks=" << n
 				  << " draw=" << drawList.size()
 				  << " shadow=" << shadowList.size()
 				  << " q="
-				  << chunkManager->pendingLoadCount() << "/"
-				  << chunkManager->pendingGenJobs() << "/"
-				  << chunkManager->pendingMeshJobs() << "/"
-				  << chunkManager->pendingLightJobs() << "\n";
+				  << renderBridge->pendingLoadCount() << "/"
+				  << renderBridge->pendingGenJobs() << "/"
+				  << renderBridge->pendingMeshJobs() << "/"
+				  << renderBridge->pendingLightJobs() << "\n";
 		lastLoggedChunks = n;
 		lastLogTime = now;
 	}
@@ -864,7 +870,7 @@ void Engine::tickStreaming(double dt)
 
 bool Engine::raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious)
 {
-	if (!chunkManager)
+	if (!renderBridge)
 		return false;
 
 	const glm::vec3 origin = camera.getPosition();
@@ -878,7 +884,7 @@ bool Engine::raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious)
 		const glm::vec3 p = origin + dir * t;
 		const glm::vec3 block(std::floor(p.x), std::floor(p.y), std::floor(p.z));
 
-		if (chunkManager->isVoxelActive(block))
+		if (renderBridge->isVoxelActive(block))
 		{
 			outBlock = block;
 			outPrevious = glm::vec3(std::floor(prev.x), std::floor(prev.y), std::floor(prev.z));
@@ -1047,21 +1053,21 @@ void Engine::handleEvents()
 				break;
 			if (m_benchmark.locksInput())
 				break;
-			if (!mouseCaptured || !chunkManager || paused)
+			if (!mouseCaptured || !renderBridge || paused)
 				break;
 			{
 				glm::vec3 block, prev;
 				if (!raycastVoxel(block, prev))
 					break;
 				if (event.button.button == SDL_BUTTON_LEFT)
-					chunkManager->deleteVoxel(block);
+					renderBridge->deleteVoxel(block);
 				else if (event.button.button == SDL_BUTTON_RIGHT)
 				{
 					// Logical pending solids immediately participate in subsequent
 					// collision queries, so the body cannot enter before publication.
 					if (playerFlight || !physics::blockCell(selectedTexture).solid ||
 						!physics::overlaps(player.body.bounds(), physics::voxelBounds(glm::ivec3(glm::floor(prev)))))
-						chunkManager->placeVoxel(prev, selectedTexture);
+						renderBridge->placeVoxel(prev, selectedTexture);
 				}
 			}
 			break;
@@ -1113,10 +1119,10 @@ void Engine::processInput(double dt)
 	}
 	else player.clearInput();
 	jumpPressed = false;
-	if (chunkManager)
+	if (renderBridge)
 	{
 		PROFILE_SCOPE("Physics");
-		ChunkCollisionView world(*chunkManager);
+		WorldCollisionView world(*voxelWorld);
 		player.advance(dt, input, world);
 		camera.setPosition(glm::vec3(player.renderEye()));
 	}
@@ -1179,8 +1185,8 @@ void Engine::tickBenchmark(double dt)
 		m_benchmark.tick(dt, camera);
 		// Open the streaming-counter window before this frame's tickStreaming
 		// so warmup work stays outside the reported counters (issue #108).
-		if (m_benchmark.consumeStreamingWindowStart() && chunkManager)
-			m_benchmark.beginStreamingMeasurement(chunkManager->streamingMaintenanceStats());
+		if (m_benchmark.consumeStreamingWindowStart() && renderBridge)
+			m_benchmark.beginStreamingMeasurement(renderBridge->streamingMaintenanceStats());
 		// One-shot scripted view-distance switch (--benchmark-view-switch):
 		// fires 25% into the measurement so the rest of the run exercises
 		// the incremental ChunkPool growth the report's PoolGrow stats
@@ -1213,7 +1219,7 @@ void Engine::tickBenchmark(double dt)
 // Publish the main-thread memory/workload gauges every frame (issue #179):
 // the developer console reads them live via telemetry::sampleLive(), outside
 // any benchmark capture. Pure publication — set() only writes current/peak
-// gauges and touches no capture state. The chunk-manager frame samples
+// gauges and touches no capture state. The render-bridge frame samples
 // (issue #112 review) are main-thread coherent snapshots; the VoxelPool
 // itself stays a low-level thread-safe component without telemetry in its
 // hot path. capacityBytes covers blocks retained by the pool including the
@@ -1224,10 +1230,10 @@ void Engine::publishFrameTelemetry()
 	if (!telemetry.enabled)
 		return;
 
-	telemetry.set(telemetry::ActiveChunks, chunkManager ? chunkManager->chunkCount() : 0);
-	telemetry.set(telemetry::DeferredChunks, chunkManager ? chunkManager->deferredReleaseCount() : 0);
+	telemetry.set(telemetry::ActiveChunks, renderBridge ? renderBridge->chunkCount() : 0);
+	telemetry.set(telemetry::DeferredChunks, renderBridge ? renderBridge->deferredReleaseCount() : 0);
 
-	if (!chunkManager)
+	if (!renderBridge)
 		return;
 
 	// voxel.pool.* / border.pool.*: the AUTHORITATIVE backing pools live in
@@ -1237,7 +1243,7 @@ void Engine::publishFrameTelemetry()
 	// (docs/workload-telemetry.md) describe the live backing. These depend
 	// only on the world, not the render pool, so they are published before
 	// the ChunkPool guard below (issue #206 review).
-	const VoxelPool &voxelPool = chunkManager->world().voxelPool();
+	const VoxelPool &voxelPool = voxelWorld->voxelPool();
 	const size_t voxelCap = voxelPool.capacity();
 	telemetry.set(telemetry::VoxelPoolCapacity, voxelCap);
 	telemetry.set(telemetry::VoxelPoolActive, voxelPool.activeCount());
@@ -1245,16 +1251,16 @@ void Engine::publishFrameTelemetry()
 	telemetry.set(telemetry::VoxelPoolCapacityBytes, voxelCap * sizeof(VoxelStorage));
 
 	// border.pool.*: retained neighbor-border blocks (issue #103/#113).
-	const BorderPool &borderPool = chunkManager->world().borderPool();
+	const BorderPool &borderPool = voxelWorld->borderPool();
 	const size_t borderCap = borderPool.capacity();
 	telemetry.set(telemetry::BorderPoolCapacity, borderCap);
 	telemetry.set(telemetry::BorderPoolActive, borderPool.activeCount());
 	telemetry.set(telemetry::BorderPoolFree, borderPool.freeCount());
 	telemetry.set(telemetry::BorderPoolCapacityBytes, borderCap * sizeof(ChunkNeighborBorders));
 
-	if (!chunkManager->getChunkPool())
+	if (!renderBridge->getChunkPool())
 		return;
-	ChunkPool *pool = chunkManager->getChunkPool();
+	ChunkPool *pool = renderBridge->getChunkPool();
 
 	// mesh.pool.* + cpu.opaque/water.*: mesh build buffers live in
 	// pooled transient results, not on chunks (issue #104). The cpu.*
@@ -1330,15 +1336,15 @@ void Engine::sampleBenchmarkFrame()
 		prof.lastScopeMs("Record"), prof.lastScopeMs("ImGui"), prof.lastScopeMs("Present"),
 		prof.lastScopeMs("Visibility"), prof.lastScopeMs("MeshUpload"),
 		prof.lastScopeMs("PoolGrow"),
-		chunkManager ? chunkManager->chunkCount() : 0, drawList.size(),
-		chunkManager ? chunkManager->pendingLoadCount() : 0,
-		chunkManager ? chunkManager->pendingGenJobs() : 0,
-		chunkManager ? chunkManager->pendingMeshJobs() : 0,
-		chunkManager ? chunkManager->pendingLightJobs() : 0,
+		renderBridge ? renderBridge->chunkCount() : 0, drawList.size(),
+		renderBridge ? renderBridge->pendingLoadCount() : 0,
+		renderBridge ? renderBridge->pendingGenJobs() : 0,
+		renderBridge ? renderBridge->pendingMeshJobs() : 0,
+		renderBridge ? renderBridge->pendingLightJobs() : 0,
 		tJobs, tMs, mJobs, mMs, lJobs, lMs, lcJobs, lcMs);
 	m_benchmark.sampleIndirectCommands(worldRenderer ? worldRenderer->lastIndirectCommandCount() : 0);
-	if (chunkManager)
-		m_benchmark.sampleStreamingStats(chunkManager->streamingMaintenanceStats());
+	if (renderBridge)
+		m_benchmark.sampleStreamingStats(renderBridge->streamingMaintenanceStats());
 }
 
 void Engine::drawUi()
@@ -1410,7 +1416,7 @@ void Engine::drawUi()
 	f.setCameraMovementSpeed = [this](float value) { camera.setMovementSpeed(value); };
 	f.setMouseSensitivity = [this](float value) { camera.setMouseSensitivity(value); };
 	f.setIsometricZoom = [this](float value) { camera.setIsometricZoom(value); };
-	f.chunks = chunkManager.get();
+	f.chunks = renderBridge.get();
 	f.pool = chunkPool.get();
 	f.generator = terrainGenerator.get();
 	f.worldRenderer = worldRenderer.get();
@@ -1435,10 +1441,10 @@ void Engine::drawUi()
 	f.worldGenerationId = m_worldGenerationId;
 	// World-save snapshot (issue #180, Phase 5): a plain-copy of the
 	// persistence status — the UI frame never holds WorldPersistence types.
-	f.worldSave.active = chunkManager && chunkManager->isWorldOpen();
-	if (f.worldSave.active && chunkManager->worldPersistence())
+	f.worldSave.active = renderBridge && renderBridge->isWorldOpen();
+	if (f.worldSave.active && renderBridge->worldPersistence())
 	{
-		const WorldPersistence::Status st = chunkManager->worldPersistence()->status();
+		const WorldPersistence::Status st = renderBridge->worldPersistence()->status();
 		f.worldSave.worldName = st.name;
 		f.worldSave.seed = st.seed;
 		f.worldSave.queueDepth = st.queueDepth;
@@ -1674,7 +1680,7 @@ void Engine::run()
 			std::snprintf(title, sizeof(title),
 						  "ft_vox — %.0f FPS | chunks %zu | draw %zu | seed %d%s%s",
 						  fps,
-						  chunkManager ? chunkManager->chunkCount() : 0,
+						  renderBridge ? renderBridge->chunkCount() : 0,
 						  drawList.size(), seed,
 						  paused ? " [PAUSED]" : "", benchTag);
 			SDL_SetWindowTitle(window, title);
@@ -1695,8 +1701,8 @@ void Engine::run()
 		tickStreaming(deltaTime);
 		{
 			PROFILE_SCOPE("Mobs");
-			if (chunkManager && terrainGenerator) {
-				ChunkMobWorld world(*chunkManager, *terrainGenerator);
+			if (renderBridge && terrainGenerator) {
+				ChunkMobWorld world(*voxelWorld, *renderBridge, *terrainGenerator);
 				const bool disabled = !mobsEnabled || m_benchmark.isActive();
 				mobs.update(deltaTime, world, glm::dvec3(camera.getPosition()),
 							renderSettings.maxRenderDistance, paused || !windowFocused || disabled);
@@ -1748,9 +1754,9 @@ void Engine::run()
 			// Visual immersion follows the eye, including water occupied by kelp.
 			bool underwater = false;
 			float underwaterSurfaceY = kUnknownUnderwaterSurfaceY;
-			if (chunkManager)
+			if (renderBridge)
 			{
-				ChunkCollisionView world(*chunkManager);
+				WorldCollisionView world(*voxelWorld);
 				const glm::ivec3 eye = glm::ivec3(glm::floor(camera.getPosition()));
 				underwater = world.sample(eye).medium == physics::Medium::Water;
 				underwaterSurfaceY = world.waterSurfaceAbove(eye);
@@ -1773,10 +1779,10 @@ void Engine::run()
 			worldRenderer->recordFrame(
 				frameCtx->commandBuffer(), frameIndex, imageIndex, *swapchain, drawList, shadowList, clearColor,
 				[&](VkCommandBuffer cmd) {
-					if (chunkManager && uploadBudget > 0 && !paused)
+					if (renderBridge && uploadBudget > 0 && !paused)
 					{
 						PROFILE_SCOPE("MeshUpload");
-						const int n = chunkManager->uploadPendingMeshes(
+						const int n = renderBridge->uploadPendingMeshes(
 							vkContext->getAllocator(), stagingRing, cmd, resourceRetire,
 							worldRenderer->arenas(), camera, uploadBudget);
 						if (n > 0)

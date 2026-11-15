@@ -1,12 +1,12 @@
 // World persistence (issue #180, Phase 3+4): SaveService ordering and
 // superseding, WorldPersistence open/create identity semantics, sparse-save
 // diffing against regenerated terrain, recycled-chunk payload isolation, and
-// the ChunkManager unload/reload integration. Headless setup copied from
-// test_chunk_lifecycle.cpp (real Chunk/ChunkManager/TerrainGenerator + a real
+// the RenderWorldBridge unload/reload integration. Headless setup copied from
+// test_chunk_lifecycle.cpp (real Chunk/RenderWorldBridge/TerrainGenerator + a real
 // ThreadPool for the async paths, but never a Vulkan device).
 #include <Chunk/Chunk.hpp>
-#include <Chunk/ChunkManager.hpp>
-#include <Chunk/ChunkCollisionView.hpp>
+#include <Renderer/RenderWorldBridge.hpp>
+#include <World/WorldCollisionView.hpp>
 #include <Physics/PlayerController.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
@@ -139,7 +139,7 @@ static std::vector<worldsave::ChunkEdit> diffAgainstBase(const std::vector<Voxel
 
 // Wait for all in-flight gen/mesh jobs, mirroring the engine's per-frame
 // processFinishedJobs() publish pass.
-static void drainManagerJobs(ChunkManager &mgr)
+static void drainManagerJobs(RenderWorldBridge &mgr)
 {
 	int spins = 0;
 	while ((mgr.pendingGenJobs() > 0 || mgr.pendingMeshJobs() > 0) && spins++ < 30000)
@@ -152,7 +152,7 @@ static void drainManagerJobs(ChunkManager &mgr)
 
 // Drives the real unload path to completion (queueUnloadOutOfRange must have
 // run; the deferred release needs kDeferredReleaseFrames calls to age).
-static void drainDeferredReleases(ChunkManager &mgr)
+static void drainDeferredReleases(RenderWorldBridge &mgr)
 {
 	int spins = 0;
 	while (mgr.deferredReleaseCount() > 0 && spins++ < 1000)
@@ -994,7 +994,7 @@ static void testSparseSaveBehavior()
 }
 
 // ---------------------------------------------------------------------------
-// 5. ChunkManager unload/reload integration (async gen path + real unload)
+// 5. RenderWorldBridge unload/reload integration (async gen path + real unload)
 // ---------------------------------------------------------------------------
 
 static void testManagerUnloadReload()
@@ -1007,7 +1007,7 @@ static void testManagerUnloadReload()
 	TerrainGenerator gen(seed);
 	ThreadPool threads(2);
 	ChunkPool pool(128);
-	ChunkManager mgr(&gen, &threads, &pool);
+	VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 
 	std::string err;
 	CHECK(mgr.openWorld(savesRoot, "it", err), ("openWorld failed: " + err).c_str());
@@ -1132,7 +1132,7 @@ static void testManyChunksNoCrossContamination()
 	TerrainGenerator gen(seed);
 	ThreadPool threads(2);
 	ChunkPool pool(256);
-	ChunkManager mgr(&gen, &threads, &pool);
+	VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 
 	std::string err;
 	CHECK(mgr.openWorld(savesRoot, "w", err), ("openWorld failed: " + err).c_str());
@@ -1236,7 +1236,7 @@ static void testDisabledPersistence()
 	TerrainGenerator gen(42);
 	ThreadPool threads(2);
 	ChunkPool pool(64);
-	ChunkManager mgr(&gen, &threads, &pool);
+	VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 	CHECK(!mgr.isWorldOpen() && mgr.worldPersistence() == nullptr, "no world open");
 
 	Camera camera(glm::vec3(8.0f, 100.0f, 8.0f));
@@ -1271,9 +1271,9 @@ static void testDisabledPersistence()
 // Friend probe (same name-based access as test_chunk_lifecycle): lets the
 // drain test observe whether the edit actually took the deferred path.
 // Issue #206: the pending-edit queue lives in VoxelWorld.
-struct ChunkManagerStreamProbe
+struct RenderBridgeStreamProbe
 {
-	static bool hasPendingEdits(const ChunkManager &m)
+	static bool hasPendingEdits(const RenderWorldBridge &m)
 	{
 		return !m.world().m_pendingEdits.empty();
 	}
@@ -1289,7 +1289,7 @@ static void testCloseWorldDrainsPendingEdits()
 	TerrainGenerator gen(seed);
 	ThreadPool threads(2);
 	ChunkPool pool(64);
-	ChunkManager mgr(&gen, &threads, &pool);
+	VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 	std::string err;
 	CHECK(mgr.openWorld(savesRoot, "drain", err), ("openWorld failed: " + err).c_str());
 
@@ -1312,7 +1312,7 @@ static void testCloseWorldDrainsPendingEdits()
 	// Coverage note: fast machines can finish generation before the edit, in
 	// which case it applies directly (still durable). Whichever path ran, the
 	// close below must persist the edit.
-	const bool deferredEdit = ChunkManagerStreamProbe::hasPendingEdits(mgr);
+	const bool deferredEdit = RenderBridgeStreamProbe::hasPendingEdits(mgr);
 	if (!deferredEdit)
 		CHECK(mgr.pendingGenJobs() == 0, "direct apply only valid when no job is in flight");
 
@@ -1347,7 +1347,7 @@ static void testCloseWorldDrainsPendingEdits()
 }
 
 // ---------------------------------------------------------------------------
-// 8. Destructor safety net: an unclosed world is flushed by ~ChunkManager
+// 8. Destructor safety net: an unclosed world is flushed by ~RenderWorldBridge
 // ---------------------------------------------------------------------------
 
 static void testDestructorSafetyNet()
@@ -1360,7 +1360,7 @@ static void testDestructorSafetyNet()
 		TerrainGenerator gen(42);
 		ThreadPool threads(2);
 		ChunkPool pool(64);
-		ChunkManager mgr(&gen, &threads, &pool);
+		VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 		std::string err;
 		CHECK(mgr.openWorld(savesRoot, "w", err), ("openWorld failed: " + err).c_str());
 
@@ -1512,7 +1512,7 @@ static void testCloseWorldRefusesWhenEditsStranded()
 	TerrainGenerator gen(seed);
 	ThreadPool threads(2);
 	ChunkPool pool(64);
-	ChunkManager mgr(&gen, &threads, &pool);
+	VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 	std::string err;
 	CHECK(mgr.openWorld(savesRoot, "stranded", err), ("openWorld failed: " + err).c_str());
 
@@ -1579,7 +1579,7 @@ static void testDestructorDrainsCompletionsBeforeTeardown()
 		TerrainGenerator gen(seed);
 		ThreadPool threads(2);
 		ChunkPool pool(64);
-		ChunkManager mgr(&gen, &threads, &pool);
+		VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 		std::string err;
 		CHECK(mgr.openWorld(savesRoot, "dtordrain", err), ("openWorld failed: " + err).c_str());
 
@@ -1595,7 +1595,7 @@ static void testDestructorDrainsCompletionsBeforeTeardown()
 		CHECK(mgr.placeVoxel(editPos, BRICKS), "edit accepted while the gen job is in flight");
 
 		// Deliberately NO processFinishedJobs, NO closeWorld, NO flush.
-	} // ~ChunkManager: forceCloseWorldForShutdown must do all of it.
+	} // ~RenderWorldBridge: forceCloseWorldForShutdown must do all of it.
 
 	WorldPersistence verify;
 	const WorldPersistence::OpenInfo info =
@@ -1625,7 +1625,7 @@ static void testDestructorPublishesUnpublishedMeshCompletions()
 		TerrainGenerator gen(seed);
 		ThreadPool threads(2);
 		ChunkPool pool(64);
-		ChunkManager mgr(&gen, &threads, &pool);
+		VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 		std::string err;
 		CHECK(mgr.openWorld(savesRoot, "dtormesh", err), ("openWorld failed: " + err).c_str());
 
@@ -1652,7 +1652,7 @@ static void testDestructorPublishesUnpublishedMeshCompletions()
 
 		// Deliberately NO processFinishedJobs: the destructor must publish
 		// the mesh completion, apply the deferred edit and save.
-	} // ~ChunkManager
+	} // ~RenderWorldBridge
 
 	WorldPersistence verify;
 	const WorldPersistence::OpenInfo info =
@@ -1823,7 +1823,7 @@ static void testCloseWorldRetriesAfterFlushFailure()
 	TerrainGenerator gen(seed);
 	ThreadPool threads(2);
 	ChunkPool pool(64);
-	ChunkManager mgr(&gen, &threads, &pool);
+	VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 	std::string err;
 	CHECK(mgr.openWorld(savesRoot, "retry", err), ("openWorld failed: " + err).c_str());
 
@@ -1881,7 +1881,7 @@ static void testUnloadReloadAfterMultipleFlushes()
 	TerrainGenerator gen(seed);
 	ThreadPool threads(2);
 	ChunkPool pool(128);
-	ChunkManager mgr(&gen, &threads, &pool);
+	VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 	std::string err;
 	CHECK(mgr.openWorld(savesRoot, "mfmgr", err), ("openWorld failed: " + err).c_str());
 
@@ -1955,7 +1955,7 @@ static void testRestorePolicyWaitingForTerrain()
 	TerrainGenerator gen(seed);
 	ThreadPool threads(2);
 	ChunkPool pool(64);
-	ChunkManager mgr(&gen, &threads, &pool);
+	VoxelWorld mgrWorld(&gen, &threads); RenderWorldBridge mgr(&mgrWorld, &threads, &pool);
 	std::string err;
 	CHECK(mgr.openWorld((root / "saves").string(), "rw", err),
 	      ("openWorld failed: " + err).c_str());
@@ -1970,13 +1970,13 @@ static void testRestorePolicyWaitingForTerrain()
 	// UNLOADED, so collision queries around them report unknown cells - the
 	// exact "terrain unavailable at restore" situation.
 
-	// The restore policy (Engine::restorePlayerState) is: ChunkCollisionView
+	// The restore policy (Engine::restorePlayerState) is: WorldCollisionView
 	// + physics::recover on a candidate body. Same calls here - the
 	// semantics under test are the shared ones, not an Engine private.
-	// NB: the view holds the manager's shared lock for its LIFETIME - scope
+	// NB: the view holds the world's shared lock for its LIFETIME - scope
 	// it tightly so closeWorld() (exclusive lock) below cannot deadlock.
 	{
-		ChunkCollisionView world(mgr);
+		WorldCollisionView world(mgrWorld);
 		physics::QueryStats queries;
 		physics::Body candidate;
 		candidate.position = glm::dvec3(8.0, 120.0, 8.0); // inside an UNLOADED chunk
@@ -2278,7 +2278,7 @@ static void testWorldToChunkCoordTable()
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
 	{
-		const glm::ivec3 got = ChunkManager::worldToChunkCoord(
+		const glm::ivec3 got = RenderWorldBridge::worldToChunkCoord(
 			glm::vec3(static_cast<float>(cases[i].x), 0.0f, 0.0f));
 		CHECK(got == expected[i], ("axis table case " + std::to_string(i)).c_str());
 	}
@@ -2286,7 +2286,7 @@ static void testWorldToChunkCoordTable()
 	// Exact aligned origins round-trip on every axis, positive and negative.
 	for (const int v : {0, 16, 160, -16, -160})
 	{
-		const glm::ivec3 got = ChunkManager::worldToChunkCoord(
+		const glm::ivec3 got = RenderWorldBridge::worldToChunkCoord(
 			glm::vec3(static_cast<float>(v), 0.0f, static_cast<float>(v)));
 		CHECK(got.x == v / 16 && got.z == v / 16, "aligned origin maps to its own chunk");
 	}
@@ -2294,19 +2294,19 @@ static void testWorldToChunkCoordTable()
 	// Three-axis combinations: positive/positive/positive and
 	// negative/positive/negative, plus per-axis boundary mixes.
 	{
-		const glm::ivec3 got = ChunkManager::worldToChunkCoord(glm::vec3(100.0f, 0.0f, 100.0f));
+		const glm::ivec3 got = RenderWorldBridge::worldToChunkCoord(glm::vec3(100.0f, 0.0f, 100.0f));
 		CHECK(got == glm::ivec3(6, 0, 6), "positive/positive");
 	}
 	{
-		const glm::ivec3 got = ChunkManager::worldToChunkCoord(glm::vec3(-100.0f, 0.0f, 100.0f));
+		const glm::ivec3 got = RenderWorldBridge::worldToChunkCoord(glm::vec3(-100.0f, 0.0f, 100.0f));
 		CHECK(got == glm::ivec3(-7, 0, 6), "negative/positive boundary");
 	}
 	{
-		const glm::ivec3 got = ChunkManager::worldToChunkCoord(glm::vec3(100.0f, 0.0f, -100.0f));
+		const glm::ivec3 got = RenderWorldBridge::worldToChunkCoord(glm::vec3(100.0f, 0.0f, -100.0f));
 		CHECK(got == glm::ivec3(6, 0, -7), "positive/negative boundary");
 	}
 	{
-		const glm::ivec3 got = ChunkManager::worldToChunkCoord(glm::vec3(-33.0f, 0.0f, -33.0f));
+		const glm::ivec3 got = RenderWorldBridge::worldToChunkCoord(glm::vec3(-33.0f, 0.0f, -33.0f));
 		CHECK(got == glm::ivec3(-3, 0, -3), "just past -CHUNK_SIZE*2 boundary");
 	}
 }

@@ -188,7 +188,7 @@ glm::vec3 findCaveAnchor(TerrainGenerator &gen)
 /// Carve the squashed-sphere cavity (dy weighted 1.2): the floor ends up
 /// around y = 34 near the center, stepping up towards the rim. Light-source
 /// fixtures (lava/magma) are added by the caller, if any.
-void carveCaveRoom(ChunkManager &chunks, const glm::vec3 &anchor)
+void carveCaveRoom(RenderWorldBridge &chunks, const glm::vec3 &anchor)
 {
 	const int cx = int(anchor.x), cy = int(anchor.y), cz = int(anchor.z);
 	for (int dz = -6; dz <= 6; ++dz)
@@ -242,7 +242,7 @@ void buildAuditLake(VisualHarness &h)
 
 /// Highest active voxel in a column of the loaded world — the real surface
 /// (post perturbation/vegetation), unlike the sample-based approximation.
-int groundHeightAt(ChunkManager &chunks, int x, int z)
+int groundHeightAt(RenderWorldBridge &chunks, int x, int z)
 {
 	for (int y = CHUNK_HEIGHT - 1; y > 0; --y)
 		if (chunks.isVoxelActive(glm::vec3(float(x), float(y), float(z))))
@@ -331,7 +331,7 @@ void spotAaSilhouette(SceneRun &run)
 /// both A/B scenes see byte-identical geometry.
 void fixtureAaSilhouette(SceneRun &run)
 {
-	ChunkManager &chunks = run.harness.chunks();
+	RenderWorldBridge &chunks = run.harness.chunks();
 	const int sx = int(run.anchor.x), base = int(run.anchor.y), sz = int(run.anchor.z);
 	// Flatten a pad around the staircase: clear everything above the pad
 	// plane (vegetation included), fill hollows up to it, cap with grass.
@@ -390,7 +390,7 @@ void spotAaCloseup(SceneRun &run)
 /// texels and an organic leaf border against the sky.
 void fixtureAaCloseup(SceneRun &run)
 {
-	ChunkManager &chunks = run.harness.chunks();
+	RenderWorldBridge &chunks = run.harness.chunks();
 	const int sx = int(run.anchor.x), base = int(run.anchor.y), sz = int(run.anchor.z);
 	// Clear a corridor between camera and wall (vegetation would occlude).
 	for (int x = sx + 1; x <= sx + 3; ++x)
@@ -480,7 +480,7 @@ std::vector<SceneSpec> buildSceneTable()
 		h.camera().setYawPitch(45.f, -12.f); // look across the lava pool
 	};
 	cave.fixture = [](SceneRun &run) {
-		ChunkManager &chunks = run.harness.chunks();
+		RenderWorldBridge &chunks = run.harness.chunks();
 		carveCaveRoom(chunks, run.anchor);
 		// Lava pool embedded in the center floor (top face exposed by the
 		// y=34 cavity), magma ring on the first carved step around it.
@@ -634,7 +634,7 @@ std::vector<SceneSpec> buildSceneTable()
 	};
 	mob.fixture = [](SceneRun &run) {
 		VisualHarness &h = run.harness;
-		ChunkManager &chunks = h.chunks();
+		RenderWorldBridge &chunks = h.chunks();
 		const int z = int(run.anchor.z);
 		glm::vec3 mobCenter(0.f);
 		float topGround = 0.f;
@@ -1039,7 +1039,7 @@ std::vector<SceneSpec> buildSceneTable()
 	};
 	cavePool.fixture = [](SceneRun &run) {
 		VisualHarness &h = run.harness;
-		ChunkManager &chunks = h.chunks();
+		RenderWorldBridge &chunks = h.chunks();
 		carveCaveRoom(chunks, run.anchor);
 		const int cx = int(run.anchor.x), cy = int(run.anchor.y), cz = int(run.anchor.z);
 		for (int dz = -6; dz <= 6; ++dz)
@@ -1091,7 +1091,7 @@ std::vector<SceneSpec> buildSceneTable()
 	};
 	caveLava.fixture = [](SceneRun &run) {
 		VisualHarness &h = run.harness;
-		ChunkManager &chunks = h.chunks();
+		RenderWorldBridge &chunks = h.chunks();
 		carveCaveRoom(chunks, run.anchor);
 		const int cx = int(run.anchor.x), cy = int(run.anchor.y), cz = int(run.anchor.z);
 		for (int dz = -6; dz <= 6; ++dz)

@@ -3,8 +3,8 @@
 // residency, async terrain publication, the deferred/coalesced logical-edit
 // subsystem with border mirrors, and the issue #180 persistence lifecycle.
 // Render scheduling (mesh/light dispatch, GPU upload, visibility, commit
-// groups, light invalidation) stays in the ChunkManager adapter, which
-// consumes the world event stream.
+// groups, light invalidation) stays in the RenderWorldBridge (issue #207),
+// which consumes the world event stream.
 #include "VoxelWorld.hpp"
 
 #include <World/WorldSave.hpp>

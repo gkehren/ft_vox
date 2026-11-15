@@ -14,9 +14,11 @@ main.cpp
         ├── SDL window (Vulkan)
         ├── VkContext / VkSwapchain / VkFrameContext
         ├── WorldRenderer (+ passes, post, overlays, mobs)
-        ├── TerrainGenerator + ThreadPool + ChunkPool + ChunkManager
-        │     └── VoxelWorld (authoritative CPU world: WorldChunk records,
-        │         edits, generation, WorldPersistence)   [issue #206]
+        ├── TerrainGenerator + ThreadPool + ChunkPool
+        │     ├── VoxelWorld (authoritative CPU world: WorldChunk records,
+        │     │     edits, generation, WorldPersistence)   [issue #206]
+        │     └── RenderWorldBridge (derived render projection: mesh/light
+        │           dispatch, GPU upload, visibility)      [issue #207]
         ├── StagingRing + GpuResourceRetire
         ├── Camera
         ├── entities::MobSystem (passive mobs)
@@ -27,22 +29,24 @@ main.cpp
 |------|-----------|---------------|
 | App / loop | `src/Engine/` | `Engine`, `EngineDefs`, `GameUI`, `ImGuiLayer`, `Profiler`, `Benchmark` |
 | Authoritative world (CPU-only) | `src/World/`, `src/Core/` | `VoxelWorld`, `WorldChunk`, `WorldCollisionView`, `WorldPersistence`, `WorldSave`, `SimContracts`, `ThreadPool`, `WorkloadTelemetry` |
-| Render chunk side | `src/Chunk/` | `Chunk` (render handle), `ChunkManager` (render adapter), `ChunkPool`, `TerrainGenerator`, `StreamHelpers` |
+| Render chunk side | `src/Chunk/` | `Chunk` (render handle), `ChunkPool`, `TerrainGenerator`, `StreamHelpers` |
 | Entities | `src/Entities/` | `MobSystem`, `MobModel` (passive mobs) |
 | Camera | `src/Camera/` | `Camera` |
-| Rendering | `src/Renderer/` | `WorldRenderer`, passes, `PostStack`, … |
+| Rendering | `src/Renderer/` | `WorldRenderer`, `RenderWorldBridge` (derived world projection), passes, `PostStack`, … |
 | Vulkan glue | `src/Vulkan/` | Context, frames, staging, retire |
 | Shared constants | `src/utils.hpp` | Chunk size, voxels, biomes, textures, states |
 | Network (optional) | `src/Network/` | Client/Server — **not re-wired into Engine UI** |
 
-**Ownership boundary (Epic #204, issue #206):** the authoritative voxel world
-(`VoxelWorld` + `WorldChunk`, in the CPU-only `ft_vox_core` library) owns chunk
-residency, logical edits, terrain publication and persistence. `ChunkManager`
-is a temporary render adapter that owns it and keeps only derived render work
-(mesh/light dispatch, GPU uploads, visibility); `Chunk` is a render handle
-bound to a `WorldChunk`. See
+**Ownership boundary (Epic #204, issues #206 / #207):** the authoritative voxel
+world (`VoxelWorld` + `WorldChunk`, in the CPU-only `ft_vox_core` library) owns
+chunk residency, logical edits, terrain publication and persistence. The
+renderer-owned `RenderWorldBridge` is a **derived projection** that references
+the world (never owns it) and keeps only derived render work (mesh/light
+dispatch, GPU uploads, visibility); `Chunk` is a render handle bound to a
+`WorldChunk`. The temporary `ChunkManager` adapter and `ChunkCollisionView`
+wrapper were removed in Phase C. See
 [`simulation-render-contracts.md`](simulation-render-contracts.md) for the full
-boundary, the world event stream and the adapter removal plan.
+boundary, the world event stream and the adapter removal status.
 
 ---
 
@@ -57,7 +61,7 @@ File: `src/Engine/Engine.hpp` / `Engine.cpp`.
 - **Windowing:** `SDL_Window *`, size, mouse capture, pause  
 - **Vulkan:** `VkContext`, `VkSwapchain`, `VkFrameContext`, `ImmediateCommands`  
 - **Render:** `WorldRenderer`, ImGui layer, `GameUI`  
-- **World:** `TerrainGenerator`, `ThreadPool`, `ChunkPool`, `ChunkManager`  
+- **World:** `TerrainGenerator`, `ThreadPool`, `ChunkPool`, `VoxelWorld` (authoritative) + `RenderWorldBridge` (derived projection referencing the world)  
 - **GPU streaming helpers:** `StagingRing`, `GpuResourceRetire`  
 - **View:** `Camera`  
 - **Player:** `physics::PlayerController` — fixed-step CPU body, gravity, collision and swimming; camera follows interpolated eyes in walking mode
@@ -78,7 +82,7 @@ Matches `Engine.cpp` order:
    - `updateEntityLightCaches` — dedicated async light-cache-only jobs for meshed chunks entering the entity-light radius (issue #172; never remeshes a valid mesh)  
    - `updateVisibility` → `collectDrawList` / `collectShadowList`  
    - Computes `uploadBudgetThisFrame` (uploads are **not** done here)  
-5. **Mobs** — scoped `ChunkMobWorld` adapter over `ChunkManager` + `TerrainGenerator`; `entities::MobSystem::update` (fixed-step AI/physics, spawn/retire) then `renderStates` → `WorldRenderer::setMobs`. Suspended while paused, unfocused, mobs toggled off, or during benchmarks  
+5. **Mobs** — scoped `ChunkMobWorld` adapter over `WorldCollisionView` + the `RenderWorldBridge` light seam + `TerrainGenerator`; `entities::MobSystem::update` (fixed-step AI/physics, spawn/retire) then `renderStates` → `WorldRenderer::setMobs`. Suspended while paused, unfocused, mobs toggled off, or during benchmarks  
 6. **Highlight** — raycast block under cursor (`updateHighlight`)  
 7. **Deferred swapchain recreation** if needed — resize, VSync, or WSI invalidation follows one Engine-owned path that refreshes frame synchronization, `WorldRenderer`, and ImGui before acquisition
 8. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer  
@@ -157,7 +161,7 @@ stage measurements are documented in [workload-telemetry.md](workload-telemetry.
     readout removed from the gameplay surfaces (issue #184)
   - **Chunk inspector (F9)** — per-chunk lifecycle/mesh/light-cache/upload
     state for the chunk under the player/target or manual coordinates, plus an
-    opt-in, bounded (`ChunkManager::kChunkEventRingSize`) main-thread event
+    opt-in, bounded (`RenderWorldBridge::kChunkEventRingSize`) main-thread event
     trace (`load/genQueued/genDone/meshQueued/meshDone/edit/gpuCommit/unload`)
   - **Memory (F11)** — CPU pools, GPU mesh resources, mesh arena, staging /
     retire queues, workload events and mesh stage timings
@@ -373,18 +377,21 @@ a boundary is split — a small, measured quad increase).
 
 ---
 
-## 7. ChunkManager (render adapter) + VoxelWorld (streaming)
+## 7. RenderWorldBridge (derived projection) + VoxelWorld (streaming)
 
-Files: `src/Chunk/ChunkManager.hpp` / `ChunkManager.cpp` (render adapter),
-`src/World/VoxelWorld.hpp` / `VoxelWorld.cpp` (authoritative world).
+Files: `src/Renderer/RenderWorldBridge.hpp` / `RenderWorldBridge.cpp` (derived
+render projection), `src/World/VoxelWorld.hpp` / `VoxelWorld.cpp` (authoritative
+world).
 
-**Issue #206:** streaming residency, terrain publication, logical edits and
-persistence now live in `VoxelWorld` (CPU-only). `ChunkManager` keeps the
-historical Engine call surface as a **temporary render adapter** (removal plan:
-[`simulation-render-contracts.md`](simulation-render-contracts.md) §10): it
+**Issues #206 / #207:** streaming residency, terrain publication, logical edits
+and persistence live in `VoxelWorld` (CPU-only). The renderer-owned
+`RenderWorldBridge` **references** the host-owned world (never owns it) and runs
+the derived render pipeline; it replaced the temporary `ChunkManager` adapter
+(removal status:
+[`simulation-render-contracts.md`](simulation-render-contracts.md) §10). It
 converts `Camera` + `RenderSettings` into plain world inputs, drains the world
-event stream to keep its render handle map in sync, and runs the derived
-render pipeline. The per-frame sequence is unchanged:
+event stream to keep its render handle map in sync (and projects already-resident
+records on attach). The per-frame sequence is unchanged:
 
 ### Pipeline
 
@@ -393,7 +400,7 @@ CPU work in `Engine::tickStreaming` (before swapchain acquire):
 ```text
 processFinishedJobs          (world gen publish → render mesh/light publish → deferred edits)
 processDeferredReleases      (retire GPU → render pool recycle)
-updateStreaming              → world: enqueue loads / mark unload; adapter: bind/unbind handles
+updateStreaming              → world: enqueue loads / mark unload; bridge: bind/unbind handles
 processChunkLoading          (world record acquire + render handle bind)
 generatePendingVoxels        (world: async terrain jobs)
 meshPendingChunks            (render: async mesh; shell filled via world on main)
@@ -540,7 +547,7 @@ recreated as chunks stream in and out.
   (positions frozen, accumulator cleared) while paused, unfocused, mobs toggled
   off, or benchmarking.
 - **Reuse of player physics:** mobs are `physics::Body` volumes moved through the
-  same `VoxelCollisionWorld` solve as the player, sampled via `ChunkCollisionView`.
+  same `VoxelCollisionWorld` solve as the player, sampled via `WorldCollisionView`.
   No chunk pointer survives an update: the adapter is scoped per frame and must be
   destroyed before streaming/edit publication.
 - **`tickMob`** is a free function (one fixed-step controller) so tests drive it
@@ -578,7 +585,7 @@ per-pass contiguous instance slices for the camera pass and the three shadow
 cascades (issue #130: one instanced draw per populated static part batch). Each
 render state also carries
 `localSkylight` / `localBlockRgb` sampled per frame from the chunk light caches
-(trilinear over packed 16-bit voxel light, `ChunkManager::sampleSmoothedLight`).
+(trilinear over packed 16-bit voxel light, `RenderWorldBridge::sampleSmoothedLight`).
 UI: Player/Gameplay panel "Passive mobs" toggle (`GameUI`, issue #184) with
 active/visible counters in the Overview console; CPU time
 under the `Mobs` profiler scope, GPU under `GpuPass::Mobs` / `MobShadow0-2`.
@@ -595,7 +602,7 @@ around the acquire edge cannot oscillate allocations.
 
 Cache acquisition is **decoupled from meshing** (issue #172): a `MESHED` chunk
 entering the radius gets a dedicated async light-only job
-(`ChunkManager::updateEntityLightCaches` → `Chunk::buildLightCache`) that
+(`RenderWorldBridge::updateEntityLightCaches` → `Chunk::buildLightCache`) that
 computes the same chunk-wide light field a mesh build would and publishes only
 the storage after generation/revision/intent validation. It never touches chunk
 state, dirty sections, mesh payloads or GPU upload flags — a valid render mesh is
@@ -638,7 +645,7 @@ File: `src/Camera/Camera.hpp` / `Camera.cpp`.
 - Raycast against voxels for highlight and dig/place (`Engine::raycastVoxel`)  
 
 Player motion is owned by `PlayerController`, not the camera. The CPU-only
-solver queries published voxel data through a scoped `ChunkCollisionView`,
+solver queries published voxel data through a scoped `WorldCollisionView`,
 independently of render meshes and LOD. See [player-physics.md](player-physics.md)
 for controls, timing, thread/publication contracts and future entity integration.
 
@@ -694,9 +701,9 @@ be re-diffed against a different base and silently corrupt the restored terrain.
 Pure additive changes (new biomes/blocks that leave existing seeds' voxels
 untouched) do not require a bump.
 
-### Lifecycle integration (`ChunkManager`)
+### Lifecycle integration (`VoxelWorld` / `RenderWorldBridge`)
 
-- **Open** (`ChunkManager::openWorld` → `WorldPersistence::openOrCreate`,
+- **Open** (`VoxelWorld::openWorld` → `WorldPersistence::openOrCreate`,
   called from `Engine::initializeNoiseGenerator` before any generation):
   validates/creates `world.meta`, cleans leftover `.tmp` files (an interrupted
   atomic write is never authoritative), then loads every chunk file into an
@@ -715,8 +722,8 @@ untouched) do not require a bump.
   and every file is written tmp + rename (crash leaves the previous file or the
   complete new one, never a mixture).
 - **Close** (`closeWorld`): capture-all + flush + service shutdown; the
-  manager then behaves exactly like a never-opened one. `~ChunkManager` runs
-  the same path as a safety net.
+  world then behaves exactly like a never-opened one. `~VoxelWorld` runs
+  the same path as a safety net (the bridge quiesces its render jobs first).
 
 ### Engine wiring (Phase 5)
 
@@ -746,7 +753,7 @@ untouched) do not require a bump.
   teleports the player.
 
 Tests: `tests/test_world_save.cpp` (format layer), `tests/test_world_persistence.cpp`
-(service, facade, ChunkManager integration, player state).
+(service, facade, RenderWorldBridge integration, player state).
 
 ---
 

@@ -19,8 +19,8 @@
 // The public API and include graph are render-free (enforced by
 // tests/check_core_includes.py): no Vulkan/VMA/MeshArena/draw-command/Camera
 // types. Streaming takes plain position/forward/settings values; the
-// graphical adapter (ChunkManager, temporary until Phase C/E) converts
-// Camera + RenderSettings into them.
+// graphical adapter (RenderWorldBridge, issue #207) converts Camera +
+// RenderSettings into them.
 //
 // Derived render state (meshes, light caches, GPU uploads, visibility) stays
 // on the render side. The world publishes a small main-thread EVENT STREAM
@@ -173,8 +173,9 @@ public:
 	std::vector<WorldEvent> takeEvents();
 	/// Events dropped at the stream cap because a consumer fell behind
 	/// (zero while draining at frame cadence). Main thread only, like the
-	/// stream itself. Surfaced by ChunkManager::drainWorldEvents as a one-shot
-	/// warning on change, so the loss is observable rather than test-only.
+	/// stream itself. Surfaced by RenderWorldBridge::drainWorldEvents as a
+	/// one-shot warning on change, so the loss is observable rather than
+	/// test-only.
 	uint64_t droppedEventCount() const { return m_droppedEvents; }
 
 	// --- Logical edits ---------------------------------------------------------
@@ -256,8 +257,8 @@ public:
 	void setWorkerObserver(WorldWorkerObserver *observer) { m_workerObserver = observer; }
 
 	// Testing hooks (issue #114 review seams, re-pointed at the world).
-	friend struct ChunkManagerProbe;
-	friend struct ChunkManagerStreamProbe;
+	friend struct RenderBridgeProbe;
+	friend struct RenderBridgeStreamProbe;
 	friend struct VoxelWorldProbe;
 	friend class WorldCollisionView;
 

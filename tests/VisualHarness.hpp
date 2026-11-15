@@ -22,7 +22,8 @@
 #include "Vulkan/VkImage.hpp"
 #include "Vulkan/GpuResourceRetire.hpp"
 #include "Renderer/WorldRenderer.hpp"
-#include "Chunk/ChunkManager.hpp"
+#include "Renderer/RenderWorldBridge.hpp"
+#include "World/VoxelWorld.hpp"
 #include "Chunk/ChunkPool.hpp"
 #include "Chunk/TerrainGenerator.hpp"
 #include "Engine/EngineDefs.hpp"
@@ -61,7 +62,8 @@ public:
 
 	VkExtent2D extent() const { return m_extent; }
 	WorldRenderer &renderer() { return m_renderer; }
-	ChunkManager &chunks() { return *m_chunkManager; }
+	RenderWorldBridge &chunks() { return *m_chunkManager; }
+	VoxelWorld &world() { return *m_world; }
 	TerrainGenerator &terrain() { return *m_terrain; }
 	Camera &camera() { return m_camera; }
 	ShaderParameters &shader() { return m_shader; }
@@ -129,7 +131,10 @@ public:
 	std::unique_ptr<ThreadPool> m_threadPool;
 	std::unique_ptr<ChunkPool> m_chunkPool;
 	std::unique_ptr<TerrainGenerator> m_terrain;
-	std::unique_ptr<ChunkManager> m_chunkManager;
+	// Host-owned authoritative world + the render bridge that references it
+	// (issue #207). Declaration order: the bridge is destroyed before the world.
+	std::unique_ptr<VoxelWorld> m_world;
+	std::unique_ptr<RenderWorldBridge> m_chunkManager;
 
 	Camera m_camera{glm::vec3(0.0f, 100.0f, 0.0f)};
 	ShaderParameters m_shader{};

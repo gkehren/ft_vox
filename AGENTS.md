@@ -24,18 +24,18 @@
   - `VkFrameContext`: frames-in-flight, command buffers, WSI sync (sole acquire/submit/present owner)
   - `ImageBarrier` / `GraphicsPipelineBuilder`: shared helpers
 - **Authoritative world (`src/World/` + `src/Core/`, CPU-only `ft_vox_core`)** — issue #206 / Epic #204 Phase B:
-  - **`VoxelWorld`**: single owner of chunk residency/streaming, serialized logical edits (coalescing + neighbor-border mirrors), terrain worker publication, and `WorldPersistence`. Render-free public API; emits the `WorldEvent` change stream consumed by the render adapter
+  - **`VoxelWorld`**: single owner of chunk residency/streaming, serialized logical edits (coalescing + neighbor-border mirrors), terrain worker publication, and `WorldPersistence`. Render-free public API; emits the `WorldEvent` change stream consumed by the `RenderWorldBridge`. Runs headless with no bridge registered
   - **`WorldChunk`**: authoritative chunk record — voxel backing, occupancy, border shell, persistent edits, `sim::ChunkIdentity` (generation + revision, the single source of the pair), lifecycle state
-  - **`WorldCollisionView`**: CPU-only collision/query seam with the exact historical `ChunkCollisionView` semantics
+  - **`WorldCollisionView`**: CPU-only collision/query seam with the exact historical collision semantics (physics/mobs consume it directly)
   - `WorldSave` / `WorldPersistence`: seed+sparse-override saves (`saves/<name>/`), async crash-safe I/O (issue #180 contracts)
   - `Core/SimContracts.hpp`, `Core/ThreadPool.hpp`, `Core/WorkloadTelemetry.hpp`: render-independent contracts + CPU utilities
 - **Chunk Management (`src/Chunk/`)**: 16×256×16 voxels, greedy meshing, VMA GPU upload, terrain gen
-  - **`ChunkManager`**: **temporary render adapter** over `VoxelWorld` (removal plan: `docs/simulation-render-contracts.md` §10) — mesh/light dispatch, GPU upload, visibility, commit groups, deferred GPU retirement; delegates all authoritative ops to the world
-  - **`Chunk`**: render handle bound to a `WorldChunk` (forwards voxel reads/writes; keeps GPU ranges, draw caches, mesh payloads, light caches)
+  - **`Chunk`**: render handle bound to a `WorldChunk` (forwards voxel reads/writes; keeps GPU ranges, draw caches, mesh payloads, light caches) — the bridge's per-chunk render record
   - **`ChunkPool`** + **`ThreadPool`**: preallocated render handles and work-stealing workers
   - **`TerrainGenerator`**: FastNoise2 biomes / height / caves
 - **Entities (`src/Entities/`)**: `MobSystem` — CPU fixed-step passive mobs (cow/pig/sheep/chicken): deterministic seed-based group spawning, ambient wander AI on the shared voxel collision solver; `MobModel` bakes the Minecraft box-UV articulated meshes
 - **Rendering (`src/Renderer/`)**: `WorldRenderer` orchestrator — **ShadowPass → OpaquePass → WaterPass → SkyPass → PostStack** (+ `MobRenderer`, `OverlayRenderer`, `TextureManager`, `FrameUBO`, `MaterialTable`, `Lighting`, `ShadowCascades`)
+  - **`RenderWorldBridge`** (issue #207 / Epic #204 Phase C): renderer-owned **derived projection** of `VoxelWorld` — mesh/light dispatch, GPU upload, visibility, commit groups, deferred GPU retirement, light-cache sampling; references (never owns) the host-owned world. Replaced the removed `ChunkManager` adapter / `ChunkCollisionView` wrapper (see `docs/simulation-render-contracts.md` §10)
 
 ### Networking (`src/Network/`) — experimental, test-only
 - **Client/Server**: Boost.Asio UDP for player position and world state. Not a shipped feature: the module is compiled into `test_network` only and is **not linked into the game binary**. Do not add new runtime dependencies on it without re-arming the build wiring first.

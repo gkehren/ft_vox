@@ -46,7 +46,7 @@ not mesh bytes. No global VMA allocation walk is performed.
 
 CPU gauges are ownership accounting, **not** process RSS. They exclude allocator
 overhead, vector control objects, worker-local scratch vectors, terrain-generator
-temporary data and container overhead in ChunkManager/ChunkPool. Fixed per-column
+temporary data and container overhead in RenderWorldBridge/ChunkPool. Fixed per-column
 and occupancy storage is reported separately from vector allocations.
 
 The authoritative `WorldChunk` record publishes voxel/border/column ownership at

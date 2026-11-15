@@ -60,7 +60,7 @@ void Benchmark::requestStart()
 	m_over16 = m_over33 = 0;
 	// Streaming-counter window state must reset with everything else: a
 	// second benchmark in the same process would otherwise subtract fresh
-	// ChunkManager counters from stale ones (uint64 underflow), and a new run
+	// world streaming counters from stale ones (uint64 underflow), and a new run
 	// must reopen its own window at the Warmup->Running flip (issue #108).
 	m_streamStats = {};
 	m_streamStatsStart = {};
@@ -154,7 +154,7 @@ void Benchmark::tick(double dt, Camera &camera)
 		telemetry::registry().beginCapture();
 		m_phase = BenchmarkPhase::Running;
 		// Open the streaming-counter window: the engine snapshots the
-		// ChunkManager counters before this frame's tickStreaming (issue #108).
+		// world's streaming counters before this frame's tickStreaming (issue #108).
 		m_streamWindowStartPending = true;
 	}
 

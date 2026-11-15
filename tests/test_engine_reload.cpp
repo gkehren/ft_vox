@@ -204,7 +204,7 @@ int main()
 
 			// The bootstrap must have generated the SAVED chunk, not only the
 			// origin area: chunk (100, -80) present and generated.
-			const ChunkManager *chunks = farEngine.chunksForTests();
+			const RenderWorldBridge *chunks = farEngine.chunksForTests();
 			const Chunk *savedChunk = chunks ? chunks->getChunk(glm::ivec3(100, 0, -80)) : nullptr;
 			CHECK(savedChunk != nullptr && savedChunk->getState() >= ChunkState::GENERATED,
 			      "saved-position chunk bootstrapped (100, -80)");

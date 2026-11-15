@@ -414,7 +414,7 @@ add_executable(test_chunk_lifecycle
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
     ${FT_VOX_CHUNK_SOURCES}
     ${FT_VOX_WORLD_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
@@ -471,10 +471,78 @@ endif()
 add_test(NAME ChunkLifecycle COMMAND test_chunk_lifecycle)
 
 # ---------------------------------------------------------------------------
+# Render bridge boundary (issue #207, Epic #204 Phase C): the CPU world runs
+# with no bridge; the bridge is a derived projection referencing the host-owned
+# world; the world outlives the bridge and a fresh bridge re-attaches; mesh
+# publish validates sim::ChunkIdentity; border edits form atomic commit groups.
+# Real Chunk/RenderWorldBridge/TerrainGenerator, no Vulkan device (same headless
+# setup as test_chunk_lifecycle).
+# ---------------------------------------------------------------------------
+add_executable(test_render_bridge
+    test_render_bridge.cpp
+    ${FT_VOX_CHUNK_SOURCES}
+    ${FT_VOX_WORLD_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkMeshResult.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
+    ${FT_VOX_VULKAN_SOURCES}
+)
+
+target_include_directories(test_render_bridge PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_render_bridge PRIVATE
+    VK_NO_PROTOTYPES
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_ENABLE_EXPERIMENTAL
+)
+
+if(APPLE)
+    target_compile_definitions(test_render_bridge PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif(WIN32)
+    target_compile_definitions(test_render_bridge PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+target_link_libraries(test_render_bridge PRIVATE
+    glm
+    FastNoise2
+    SDL3::SDL3
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    Threads::Threads
+)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_render_bridge PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+if(APPLE)
+    target_link_libraries(test_render_bridge PRIVATE
+        "-framework Metal"
+        "-framework Foundation"
+        "-framework QuartzCore"
+        "-framework IOKit"
+        "-framework IOSurface"
+    )
+endif()
+
+add_test(NAME RenderBridge COMMAND test_render_bridge)
+
+# ---------------------------------------------------------------------------
 # World persistence (issue #180 Phase 3+4): SaveService ordering/superseding,
 # WorldPersistence open/create identity semantics, sparse-save diffing against
-# regenerated terrain, recycled-chunk payload isolation, and the ChunkManager
-# unload/reload integration. Real Chunk/ChunkManager/TerrainGenerator, no
+# regenerated terrain, recycled-chunk payload isolation, and the RenderWorldBridge
+# unload/reload integration. Real Chunk/RenderWorldBridge/TerrainGenerator, no
 # Vulkan device (same headless setup as test_chunk_lifecycle).
 # ---------------------------------------------------------------------------
 add_executable(test_world_persistence
@@ -482,7 +550,7 @@ add_executable(test_world_persistence
     ${CMAKE_SOURCE_DIR}/src/Entities/MobSystem.cpp
     ${FT_VOX_CHUNK_SOURCES}
     ${FT_VOX_WORLD_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
@@ -550,7 +618,7 @@ add_executable(test_mesh_facekey
     test_mesh_facekey.cpp
     ${FT_VOX_CHUNK_SOURCES}
     ${FT_VOX_WORLD_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
@@ -616,7 +684,7 @@ add_executable(test_mesh_upload
     test_mesh_upload.cpp
     ${FT_VOX_CHUNK_SOURCES}
     ${FT_VOX_WORLD_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
@@ -796,7 +864,7 @@ add_executable(test_debug_ui
     ${CMAKE_SOURCE_DIR}/src/Engine/DebugUI/DebugUiState.cpp
     ${FT_VOX_CHUNK_SOURCES}
     ${FT_VOX_WORLD_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
@@ -952,7 +1020,7 @@ add_executable(ft_vox_visual_tests
     ${FT_VOX_RENDERER_SOURCES}
     ${FT_VOX_CHUNK_SOURCES}
     ${FT_VOX_WORLD_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
@@ -1018,7 +1086,7 @@ add_executable(test_post_resize
     ${FT_VOX_RENDERER_SOURCES}
     ${FT_VOX_CHUNK_SOURCES}
     ${FT_VOX_WORLD_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
@@ -1165,7 +1233,7 @@ add_executable(bench_persistence
     bench_persistence.cpp
     ${FT_VOX_CHUNK_SOURCES}
     ${FT_VOX_WORLD_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp

@@ -2,7 +2,7 @@
 
 // Included FIRST: the pool sizing/growth constants (kChunkPoolMaxGrowPerCall
 // default argument below) and estimateChunkPoolCapacity() live there, shared
-// with ChunkManager / the UI / the tests.
+// with RenderWorldBridge / the UI / the tests.
 #include <Chunk/StreamHelpers.hpp>
 
 #include <vector>
@@ -23,7 +23,7 @@ class Chunk;
 ///
 /// Storage is a list of heap-owned Chunks (`unique_ptr`), so capacity can grow
 /// via ensureCapacity() without invalidating existing Chunk* handles held by
-/// ChunkManager.
+/// RenderWorldBridge.
 ///
 /// When the free list is empty, acquire() returns nullptr (no heap spam).
 /// Callers should ensureCapacity() from the stream distance settings and apply

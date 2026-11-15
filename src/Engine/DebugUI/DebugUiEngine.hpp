@@ -3,7 +3,7 @@
 // Engine-facing bridge for the developer console (issue #179): builds the
 // read-only debug snapshots in UiState from the per-frame GameUIFrame and
 // engine getters. Panels (DebugPanels.hpp) only consume UiState + the
-// explicit settings structs; they never reach into ChunkManager/telemetry
+// explicit settings structs; they never reach into RenderWorldBridge/telemetry
 // internals directly.
 
 #include <Engine/DebugUI/DebugUiCore.hpp>
@@ -21,7 +21,7 @@ void updateDebugUiState(UiState &state, const GameUIFrame &frame, double nowSeco
 
 /// Extract the inspector view of one chunk (main-thread read of atomics and
 /// main-thread-only chunk state; `loaded` is false for unknown coordinates).
-ChunkDebugSnapshot makeChunkDebugSnapshot(const class ChunkManager &chunks,
+ChunkDebugSnapshot makeChunkDebugSnapshot(const class RenderWorldBridge &chunks,
 										  const glm::ivec3 &coord,
 										  const glm::vec3 &cameraPos);
 

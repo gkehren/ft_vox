@@ -161,7 +161,7 @@ Push constants carry cascade index / shadow time for the shadow path where neede
 - **Receiver sampling is shared** by terrain and mobs through `ressources/shaders/vulkan/csm.inc.glsl` (`sampleDirectionalShadow`): footprint-scaled receiver bias + raster depth bias documented together, 12-tap Poisson rotated by a **world-stable absolute light-grid texel hash** (local shadow-map texel + the cascade's absolute grid origin `FrameUBO::cascadeGridOffsets01/2` — invariant across cascade recentering; no fixed banding), radius derived from `textureSize` (no hardcoded map size), cascade blend band preserved.
 - **Quality tier** (issue #137): `PostProcessSettings::shadowMapSize` (1024 Low/Medium, 2048 High/Cinematic presets) recreates the shadow array deferred (`WorldRenderer::applyShadowMapSize` → device idle, rebuild, rewrite receiver descriptors incl. mob sets); CLI override `--shadow-size N`. Debug visualization modes (cascade index / blend bands / texel density / receiver depth) via `ShaderParameters::shadowDebug` → `FrameUBO::visualParams.w`, read by `terrain.frag.glsl`.
 - Pipeline: `shadow.vert` / `shadow.frag` (depth-only style).
-- Caster list comes from `ChunkManager::collectShadowList` (XZ radius = `RenderSettings::shadowDistance`).
+- Caster list comes from `RenderWorldBridge::collectShadowList` (XZ radius = `RenderSettings::shadowDistance`).
 
 ### OpaquePass (`Renderer/OpaquePass.*`)
 
@@ -324,7 +324,7 @@ When `PostProcessSettings::underwater` is set, `composite.frag` applies underwat
   | High | + depth-gradient normal gating |
   | Cinematic | Same model, finer pattern |
 
-- **Surface blend:** `Engine` still samples the camera voxel each frame (`ChunkCollisionView`, `Medium::Water`) to set the underwater flag — unchanged — and additionally scans up the column to the local water surface. The surface Y reaches composite via push constant `p6`; the submersion factor (camera Y vs surface Y) blends the effect in over roughly the first half-metre below the surface, so crossing the boundary no longer snaps a full-screen filter on/off. The sentinel value `1e9` means "unknown surface → fully submerged" (debug toggles). When the surface is known, upward view rays also intersect that plane optically: the extinction path ends at the surface (scene distance keeps locating the geometry), so looking at the sky from just below the surface is nearly clear instead of suffering the full sky-column extinction.
+- **Surface blend:** `Engine` still samples the camera voxel each frame (`WorldCollisionView`, `Medium::Water`) to set the underwater flag — unchanged — and additionally scans up the column to the local water surface. The surface Y reaches composite via push constant `p6`; the submersion factor (camera Y vs surface Y) blends the effect in over roughly the first half-metre below the surface, so crossing the boundary no longer snaps a full-screen filter on/off. The sentinel value `1e9` means "unknown surface → fully submerged" (debug toggles). When the surface is known, upward view rays also intersect that plane optically: the extinction path ends at the surface (scene distance keeps locating the geometry), so looking at the sky from just below the surface is nearly clear instead of suffering the full sky-column extinction.
 - **Division of responsibilities with exposure (issue #140):** underwater extinction, in-scatter and caustics are scene-medium light transport applied inside composite **before** exposure; the auto-exposure system (HDR metering + temporal adaptation) meters the raw scene HDR **before** composite and owns how the tonemapped result is mapped to display brightness. The underwater medium therefore never feeds back into its own exposure — no runaway darkening/adaptation loop. There is no separate underwater exposure multiplier — the `underwaterStrength` slider only blends the medium effect in; it does not touch exposure. Composite consumes both: `resolveExposure()` picks the adapted auto value or the exact manual setting (`p5.x`), while the medium terms travel in `p6`.
 - **Profiling:** a nested `GpuPass::Composite` interval is recorded around the composite draw inside `GpuPass::Post` (same nested pattern as `GpuPass::Ssao`/`Exposure`), so underwater/composite GPU cost is measurable separately from the metering pass.
 
@@ -403,7 +403,7 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
   mapped buffer — no per-animal mesh rebuilds or uploads.
 - **Local voxel lighting (issue #128):** entities sample the continuous voxel lighting field
   (skylight + propagated RGB4 block light from #141) with bounded trilinear interpolation
-  via `ChunkManager::sampleSmoothedLight` / `ChunkMobWorld::sampleLight`. `prepare` writes
+  via `RenderWorldBridge::sampleSmoothedLight` / `ChunkMobWorld::sampleLight`. `prepare` writes
   `localLight = vec4(skylight, blockR, blockG, blockB)` into the instance buffer.
   `mob.vert.glsl` forwards `vSkyLight` and `vBlockLightRGB` to `mob.frag.glsl`, which
   faithfully matches terrain lighting semantics:
@@ -616,7 +616,7 @@ path stays untouched. Emissive edit invalidation still keys on
 `blockLightEmission(type) > 0`.
 
 **Cross-chunk propagation (issue #141 review).** The block-light BFS runs on
-a **transient halo domain**: at mesh dispatch the ChunkManager snapshots the
+a **transient halo domain**: at mesh dispatch the RenderWorldBridge snapshots the
 15-voxel ring of neighbor voxels (4 sides + 4 diagonals — the Manhattan BFS
 cannot route light around them) into a pooled `ChunkLightHalo` — main-thread
 cost measured as the `mesh.haloFill` telemetry stage — and the BFS seeds
