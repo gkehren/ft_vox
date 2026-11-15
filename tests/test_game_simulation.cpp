@@ -8,6 +8,8 @@
 //   * physics edges: jump / coyote / swimming / flight toggle, unknown and
 //     unloaded voxel collision, spawn recovery, dropped-step cap, frame
 //     delta spikes, suspension without catch-up burst;
+//   * player-aware placement rule shared with the graphical host (issue
+//     #209): solid blocks cannot entomb the authoritative body;
 //   * mobs: fixed-step wandering, group spawn/retire, no NaN, correct
 //     previous/current interpolation fields, reproducible per-seed
 //     decisions with controlled residency and clock;
@@ -378,6 +380,57 @@ void testPlayerPhysicsEdges(ThreadPool &pool)
 }
 
 // ---------------------------------------------------------------------------
+// 3b. Player-aware placement rule (issue #209, Epic #204 Phase E): the
+//     graphical host and headless hosts share the SAME validation through
+//     the facade — a solid block cannot entomb the authoritative body.
+// ---------------------------------------------------------------------------
+void testPlacementRule(ThreadPool &pool)
+{
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 1337;
+	const glm::dvec3 boot = sim.initialize(cfg, glm::dvec3(8.0, 100.0, 8.0));
+	sim.bootstrapTerrain(boot);
+	sim.finalizePlayerSpawn(boot);
+	CHECK(!sim.playerFlight(), "placement fixture starts walking");
+
+	const glm::dvec3 feet = sim.playerFeet();
+	const glm::ivec3 bodyCell(glm::floor(feet)); // cell containing the feet
+	const glm::vec3 insideBody(bodyCell.x + 0.5f, bodyCell.y + 0.5f, bodyCell.z + 0.5f);
+	// A guaranteed-air target away from the body (above the local terrain).
+	const int px = bodyCell.x;
+	const int pz = bodyCell.z;
+	const int awayY = topOccupiedY(*sim.world(), px + 4, pz + 4) + 2;
+	const glm::vec3 awayFromBody(px + 4.5f, awayY + 0.5f, pz + 4.5f);
+
+	// Walking: a solid block overlapping the body is refused; the same
+	// block away from the body is allowed.
+	CHECK(!sim.canPlaceVoxel(insideBody, STONE), "solid placement inside the walking body refused");
+	CHECK(sim.canPlaceVoxel(awayFromBody, STONE), "solid placement away from the body allowed");
+	// Non-solid blocks never collide with the body.
+	CHECK(sim.canPlaceVoxel(insideBody, WATER), "non-solid (water) placement inside the body allowed");
+	CHECK(sim.canPlaceVoxel(insideBody, SHORT_GRASS), "non-solid (grass) placement inside the body allowed");
+
+	// The rule is a pure query: it never edits the world.
+	const uint64_t revisionBefore = sim.worldSnapshot().editRevision;
+	(void)sim.canPlaceVoxel(insideBody, STONE);
+	(void)sim.canPlaceVoxel(awayFromBody, STONE);
+	CHECK(sim.worldSnapshot().editRevision == revisionBefore, "placement query does not edit the world");
+
+	// Flight: the body no longer constrains placement.
+	CHECK(sim.setPlayerFlight(true, feet), "flight enabled for the placement fixture");
+	CHECK(sim.canPlaceVoxel(insideBody, STONE), "flying player may place a solid inside the body");
+
+	// Accepted placements still publish through the render-free world seam.
+	CHECK(sim.placeVoxel(awayFromBody, STONE).accepted, "accepted placement is authoritative");
+	sim.pumpWorld();
+	WorldCollisionView view(*sim.world());
+	TextureType placed = AIR;
+	view.sampleWithType(glm::ivec3(glm::floor(awayFromBody)), &placed);
+	CHECK(placed == STONE, "accepted placement lands in the authoritative world");
+}
+
+// ---------------------------------------------------------------------------
 // 4. Mob fixtures: real-terrain group spawn/retire, fixed-step wandering,
 //    interpolation fields, no NaN, per-seed reproducibility with controlled
 //    residency (streamed once, quiesced) and clock.
@@ -702,6 +755,7 @@ int main()
 	testScriptedDeterminism(pool);
 	testFixedRates(pool);
 	testPlayerPhysicsEdges(pool);
+	testPlacementRule(pool);
 	testMobSimulation(pool);
 	testReloadAndPersistence(pool);
 	testSnapshotContract(pool);

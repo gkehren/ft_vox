@@ -14,7 +14,7 @@
 ## Architecture Overview
 
 ### Core Engine
-- **Engine (`src/Engine/`)**: Main loop, SDL3 window (`SDL_WINDOW_VULKAN`), input, high-level systems. Hosts `sim::GameSimulation` (authoritative) + `RenderWorldBridge` (derived); maps SDL input to sim commands and owns pause/focus/benchmark policy (issue #208)
+- **Engine (`src/Engine/`)**: Main loop, SDL3 window (`SDL_WINDOW_VULKAN`), input, high-level systems. Graphical host of `sim::GameSimulation` (authoritative) + `RenderWorldBridge` (derived): maps SDL input to sim commands, owns the single suspension policy, the day-cycle presentation parameter and the world-epoch barrier (`resetWorldProjection`); `run()` is the documented 16-step frame orchestration (issue #209)
   - **`GameUI`**: multi-panel ImGui (Status Overlay, Player/Gameplay, Graphics, Streaming, World/biome map, Help) + F-key shortcuts (issue #184: the old catch-all HUD was split into the read-only Status Overlay and the Player/Gameplay panel; VSync lives in Graphics, physics counters in the Player Diagnostics console)
 - **Vulkan backend (`src/Vulkan/`)**:
   - `VkContext`: instance, surface, physical/logical device, queues, feature detection, **VMA**
@@ -24,7 +24,7 @@
   - `VkFrameContext`: frames-in-flight, command buffers, WSI sync (sole acquire/submit/present owner)
   - `ImageBarrier` / `GraphicsPipelineBuilder`: shared helpers
 - **Simulation facade (`src/Sim/`, CPU-only `ft_vox_core`)** — issue #208 / Epic #204 Phase D:
-  - **`GameSimulation`**: single owner of the authoritative gameplay state — `TerrainGenerator`, `VoxelWorld`, `PlayerController` (120 Hz), `MobSystem` (60 Hz), flight mode, block selection, spawn/restore, reload counter. Explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown), per-frame advance with plain values (dt, commands, observer point), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`). No Camera/RenderSettings/SDL/Vulkan/ImGui types; runs headless (`test_game_simulation`)
+  - **`GameSimulation`**: single owner of the authoritative gameplay state — `TerrainGenerator`, `VoxelWorld`, `PlayerController` (120 Hz), `MobSystem` (60 Hz), flight mode, block selection, spawn/restore, reload counter, player-aware placement rule (`canPlaceVoxel`). Explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown), per-frame advance with plain values (dt, commands, observer point), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`). No Camera/RenderSettings/SDL/Vulkan/ImGui types; runs headless (`test_game_simulation`)
 - **Authoritative world (`src/World/` + `src/Core/`, CPU-only `ft_vox_core`)** — issue #206 / Epic #204 Phase B:
   - **`VoxelWorld`**: single owner of chunk residency/streaming, serialized logical edits (coalescing + neighbor-border mirrors), terrain worker publication, and `WorldPersistence`. Render-free public API; emits the `WorldEvent` change stream consumed by the `RenderWorldBridge`. Runs headless with no bridge registered; owned by `GameSimulation` in game
   - **`WorldChunk`**: authoritative chunk record — voxel backing, occupancy, border shell, persistent edits, `sim::ChunkIdentity` (generation + revision, the single source of the pair), lifecycle state

@@ -66,6 +66,13 @@ public:
 	glm::dvec3 playerPositionForTests() const { return sim ? sim->playerFeet() : glm::dvec3(0.0); }
 	bool playerWaitingForTerrainForTests() const { return sim && sim->playerSnapshot().waitingForTerrain; }
 	const RenderWorldBridge *chunksForTests() const { return renderBridge.get(); }
+	/// Epoch-barrier accessors (issue #209): the live projection must carry
+	/// the simulation's world generation, and a world transition must drop
+	/// every derived per-world snapshot before the next frame.
+	uint64_t bridgeWorldGenerationForTests() const { return renderBridge ? renderBridge->worldGenerationId() : 0; }
+	size_t drawListSizeForTests() const { return drawList.size(); }
+	size_t shadowListSizeForTests() const { return shadowList.size(); }
+	size_t mobStateCountForTests() const { return mobStates.size(); }
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
 	/// Override the streaming front load bias (clamped to the unload-safe
@@ -130,6 +137,11 @@ private:
 	void tickStreaming(double dt);
 	void tickDayCycle(double dt);
 	void processInput(double dt);
+	/// Mob simulation + derived presentation (issue #209 frame step):
+	/// sim->advanceMobs, mob snapshots, bridge entity-light sampling and
+	/// WorldRenderer::setMobs. The authoritative step never sees the camera
+	/// beyond a plain observer point.
+	void tickMobs(double dt);
 	void updateHighlight();
 	bool raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious);
 	void drawUi();
@@ -138,6 +150,15 @@ private:
 	/// Publish main-thread memory/workload gauges every frame (issue #179):
 	/// live, read-only data source for the developer console.
 	void publishFrameTelemetry();
+	/// Per-frame presentation uniforms (issue #209 frame step): underwater
+	/// sample at the camera eye + WorldRenderer::updateFrameUBO.
+	void updateFrameUniforms(uint32_t frameIndex, int pixelW, int pixelH, double currentFrame);
+	/// Record the frame's passes (issue #209 frame step). Mesh uploads are
+	/// recorded HERE (after acquire) — the only GPU upload point; no device
+	/// idle. ImGui draws and the biome-map upload keep their pass ordering.
+	void recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBudget);
+	/// FPS / world-state window title, once per second of frame clock.
+	void updateWindowTitle(double currentFrame);
 	void placeCameraOnSurface();
 	void setPlayerFlight(bool enabled);
 	void resetPlayerAtCamera();
@@ -146,6 +167,38 @@ private:
 	/// non-simulated stretch — minimized window, failed acquire, UI stall —
 	/// must never feed its elapsed time into the next gameplay timestep).
 	void resetFrameClock();
+
+	/// Host suspension policy (issue #209, Epic #204 Phase E). The POLICY of
+	/// when gameplay freezes lives here; the simulation implements the freeze
+	/// semantics (accumulators cleared, previous/current synced, no catch-up
+	/// burst on resume). Player and mobs suspend while paused, unfocused or
+	/// during an active benchmark. The full viewport-freeze matrix:
+	///   * pause (P / UI toggle): player + mobs frozen, day cycle frozen,
+	///     streaming keeps visibility/draw lists live but dispatches no jobs
+	///     and records no uploads; atmosphere still tracks settings edits.
+	///   * focus lost / gained: player suspended on BOTH transitions (buffered
+	///     input dropped); mobs suspended while unfocused.
+	///   * minimized / hidden window: whole frames skipped; the frame clock
+	///     resyncs AFTER the sleep so the skipped stretch never feeds a
+	///     gameplay timestep on restore.
+	///   * benchmark: player suspended (camera is benchmark-owned), mobs
+	///     disabled; input locked.
+	///   * inspection view (--view): processInput skipped entirely (fixed
+	///     daylight camera), mobs suspended, UI hidden.
+	bool simulationSuspended() const { return paused || !windowFocused || m_benchmark.isActive(); }
+
+	/// World-generation epoch barrier (issue #209, Epic #204 Phase E).
+	/// Called on EVERY authoritative world transition (initialize / reload),
+	/// BEFORE the old render bridge is detached: the derived lists reference
+	/// its handles, and every per-world CPU snapshot (draw/shadow lists, mob
+	/// presentation states, block highlight, upload budget, UI biome caches,
+	/// biome map) must be dropped so nothing stale can feed the new
+	/// projection. The simulation's worldGenerationId() is the epoch token;
+	/// the replacement bridge is stamped with it at attach. Async safety is
+	/// owned by the bridge destructor (quiesces every in-flight job against
+	/// the still-live old world) — this barrier clears the CPU-side derived
+	/// state that outlives the bridge handles.
+	void resetWorldProjection();
 
 	SDL_Window *window{nullptr};
 	int windowWidth{1920};
@@ -209,13 +262,16 @@ private:
 	std::unique_ptr<GameUI> gameUi;
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;
-	// Authoritative simulation + derived render projection (issue #208, Epic
-	// #204 Phase D). GameSimulation owns the TerrainGenerator, VoxelWorld,
-	// PlayerController and MobSystem (CPU-only ft_vox_core); the bridge only
-	// references sim->world(). Declaration order is destruction order
+	// Authoritative simulation + derived render projection (Epic #204,
+	// issues #208/#209). GameSimulation owns the TerrainGenerator,
+	// VoxelWorld, PlayerController and MobSystem (CPU-only ft_vox_core); the
+	// bridge only references sim->world() and is stamped with the sim's
+	// world generation at attach. Declaration order is destruction order
 	// reversed: the bridge drains its render jobs and releases its handles
 	// BEFORE the simulation (and the pools/workers it references) tear down.
-	// Phase E (#209) splits the graphical runtime from this host wiring.
+	// The Engine is the graphical host: SDL/Vulkan/ImGui, camera, pause /
+	// focus / benchmark policy and the epoch barrier — no authoritative
+	// gameplay state lives here.
 	std::unique_ptr<sim::GameSimulation> sim;
 	std::unique_ptr<RenderWorldBridge> renderBridge;
 

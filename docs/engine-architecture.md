@@ -40,7 +40,7 @@ main.cpp
 | Shared constants | `src/utils.hpp` | Chunk size, voxels, biomes, textures, states |
 | Network (optional) | `src/Network/` | Client/Server — **not re-wired into Engine UI** |
 
-**Ownership boundary (Epic #204, issues #206 / #207 / #208):** the CPU-only
+**Ownership boundary (Epic #204, issues #206 / #207 / #208 / #209):** the CPU-only
 `sim::GameSimulation` facade (in `ft_vox_core`) is the single owner of
 authoritative gameplay state: the `VoxelWorld` + `WorldChunk` voxel world
 (chunk residency, logical edits, terrain publication, persistence), the
@@ -48,9 +48,12 @@ authoritative gameplay state: the `VoxelWorld` + `WorldChunk` voxel world
 `RenderWorldBridge` is a **derived projection** that references the sim's
 world (never owns it) and keeps only derived render work (mesh/light
 dispatch, GPU uploads, visibility); `Chunk` is a render handle bound to a
-`WorldChunk`. The temporary `ChunkManager` adapter and `ChunkCollisionView`
-wrapper were removed in Phase C; the temporary `ChunkMobWorld` mob adapter
-was removed in Phase D (CPU mob seam: `WorldMobView`). See
+`WorldChunk`. The `Engine` is the graphical host (issue #209): SDL/Vulkan/
+ImGui, camera, input→command mapping, the suspension policy and the
+world-epoch barrier — no authoritative gameplay state. The temporary
+`ChunkManager` adapter and `ChunkCollisionView` wrapper were removed in
+Phase C; the temporary `ChunkMobWorld` mob adapter was removed in Phase D
+(CPU mob seam: `WorldMobView`). See
 [`simulation-render-contracts.md`](simulation-render-contracts.md) for the full
 boundary, the world event stream and the adapter removal status.
 
@@ -77,35 +80,71 @@ File: `src/Engine/Engine.hpp` / `Engine.cpp`.
 
 ### Per-frame outline (`Engine::run`)
 
+`run()` is the documented frame orchestrator (issue #209, Epic #204 Phase E):
+sixteen numbered steps, with the cohesive blocks extracted into named methods
+(`tickMobs`, `updateFrameUniforms`, `recordFrame`, `updateWindowTitle`).
 Matches `Engine.cpp` order:
 
 1. **Profiler begin** — `GetProfiler().beginFrame()`  
-2. **Events / input / benchmark** — `handleEvents`, `tickBenchmark`, `processInput` (SDL → `sim::PlayerCommand`; walking physics steps inside `sim->advancePlayer`, flight follows the camera via `sim->setPlayerPosition`)  
-3. **Day cycle** — `tickDayCycle` updates `ShaderParameters` sun/moon/day factors (a **presentation** parameter, not authoritative world time; pause gates it here, issue #208)  
-4. **`tickStreaming`** (CPU world pipeline; **before** acquire)  
+2. **Events** — `handleEvents`: SDL poll → ImGui routing + simulation commands (placement validation is `sim->canPlaceVoxel`; the accepted edit publishes through the bridge)  
+3. **Viewport** — minimized/hidden windows skip the whole frame (sleep + frame-clock resync); deferred swapchain recreation (resize / VSync / WSI invalidation) refreshes frame synchronization, `WorldRenderer` and ImGui before acquisition  
+4. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer. A failed acquire resyncs the frame clock (the blocked stretch is never simulated)  
+5. **Frame clock** — paced dt sampled acquire-to-acquire (`frame_pacing::computePacedDeltaTime`), so WSI stalls never feed gameplay; once-per-second window title update  
+6. **Benchmark** — `tickBenchmark` (policy; may reload the world through the epoch barrier)  
+7. **Simulation** — `processInput`: SDL → `sim::PlayerCommand`; walking physics steps inside `sim->advancePlayer`, flight follows the camera via `sim->setPlayerPosition`; the camera follows the interpolated render eye  
+8. **Day cycle** — `tickDayCycle` updates `ShaderParameters` sun/moon/day factors (a **presentation** parameter, not authoritative world time; pause gates it here, issue #208)  
+9. **`tickStreaming`** (derived world projection; CPU only, no GPU work)  
    - `processFinishedJobs` / `processDeferredReleases`  
    - `updateStreaming` → budgeted `processChunkLoading` / `generatePendingVoxels` / `meshPendingChunks` (`maxStreamMs` envelope)  
    - `updateEntityLightCaches` — dedicated async light-cache-only jobs for meshed chunks entering the entity-light radius (issue #172; never remeshes a valid mesh)  
    - `updateVisibility` → `collectDrawList` / `collectShadowList`  
    - Computes `uploadBudgetThisFrame` (uploads are **not** done here)  
-5. **Mobs** — `sim->advanceMobs` (fixed-step AI/physics, spawn/retire over the CPU-only `WorldMobView`: `WorldCollisionView` + `TerrainGenerator`), then `sim->mobSnapshots(mobStates)` (`renderStates`, filled in place) + per-mob entity light from `RenderWorldBridge::sampleSmoothedLight` → `WorldRenderer::setMobs`. Suspended while paused, unfocused, mobs toggled off, or during benchmarks (host policy; the sim implements the freeze)  
-6. **Highlight** — raycast block under cursor (`updateHighlight`)  
-7. **Deferred swapchain recreation** if needed — resize, VSync, or WSI invalidation follows one Engine-owned path that refreshes frame synchronization, `WorldRenderer`, and ImGui before acquisition
-8. **Acquire** — `VkFrameContext::beginFrame` → image index + command buffer  
-9. **Retire/staging frame slots** — `resourceRetire.beginFrame`, `stagingRing.beginFrame` (fence already waited)  
-10. **ImGui UI build** — `imgui->beginFrame` / `drawUi` / `endFrame` (CPU only; draw later)  
-11. **UBO** — underwater sample + local water-surface scan + `WorldRenderer::updateFrameUBO` (which also runs `MobRenderer::prepare`: frustum masks + per-part transforms for camera and cascades)  
-12. **Record** — `WorldRenderer::recordFrame`:  
-    - **preRecord:** `uploadPendingMeshes` + transfer→vertex barrier  
+10. **Mobs** — `tickMobs`: `sim->advanceMobs` (fixed-step AI/physics, spawn/retire over the CPU-only `WorldMobView`), then `sim->mobSnapshots(mobStates)` (filled in place) + per-mob entity light from `RenderWorldBridge::sampleSmoothedLight` → `WorldRenderer::setMobs`  
+11. **Highlight** — raycast block under cursor (`updateHighlight`)  
+12. **Frame slots** — `resourceRetire.beginFrame`, `arenas.beginFrame`, `stagingRing.beginFrame` (fence already waited)  
+13. **ImGui UI build** — `imgui->beginFrame` / `drawUi` / `endFrame` (CPU only; draw later)  
+14. **UBO** — `updateFrameUniforms`: underwater sample + local water-surface scan + `WorldRenderer::updateFrameUBO` (which also runs `MobRenderer::prepare`: frustum masks + per-part transforms for camera and cascades)  
+15. **Record** — `recordFrame` → `WorldRenderer::recordFrame`:  
+    - **preRecord:** `uploadPendingMeshes` + transfer→vertex barrier — the **only** GPU upload point, inside frame recording (no device idle)  
     - **ShadowPass → OpaquePass** (opaque chunks + **mobs then overlays inside OpaquePass** + **mobs inside every shadow cascade**) **→ WaterPass → SkyPass → PostStack**  
     - **imguiDraw:** `imgui->recordDraw` onto swapchain after composite; ImGui samples the **currently published** biome-map texture  
     - **postImGuiRecord:** pending biome-map texture upload + publication of the matching `BiomeRegionGrid` for the **next** UI frame. Biome-map uploads intentionally occur after ImGui so a frame never samples new map pixels with overlays built from the previous map grid (architectural invariant, issue #186/#191)  
-13. **Submit / present** — `VkFrameContext::submitAndPresent`  
-14. **Profiler end** + copy scopes into `RenderTiming` / benchmark sample  
+16. **Submit / present + telemetry** — `VkFrameContext::submitAndPresent`, `publishFrameTelemetry`, profiler end, copy scopes into `RenderTiming`, benchmark sample  
 
 Bootstrap: `generateInitialArea` fills a small radius around spawn synchronously so the first frames are not empty.
 
 `reloadWorld(seed)` rebuilds terrain generation state (device idle) for tools/benchmarks.
+
+### Suspension policy (host-owned, issue #209)
+
+The simulation implements freeze semantics only (accumulators cleared,
+previous/current synced, **no catch-up burst** on resume); the Engine decides
+WHEN through the single `simulationSuspended()` predicate (paused ||
+unfocused || benchmark-active):
+
+| State | Player | Mobs | Streaming / uploads | Day cycle |
+|---|---|---|---|---|
+| Pause (P / UI) | suspended | suspended | visibility + draw lists stay live; no job dispatch, no uploads | frozen (atmosphere still tracks settings) |
+| Focus lost / gained | suspended on BOTH transitions, buffered input dropped | suspended while unfocused | unchanged | unchanged |
+| Minimized / hidden | whole frames skipped; frame clock resyncs AFTER the sleep so the skipped stretch never feeds a timestep | — | — | — |
+| Benchmark | suspended (camera benchmark-owned), input locked | disabled | normal streaming (the measured workload) | normal |
+| Inspection (`--view`) | `processInput` skipped (fixed daylight camera) | suspended | normal streaming | frozen at the fixed daylight value |
+
+### World-epoch barrier (issue #209)
+
+Every authoritative world transition (`initializeNoiseGenerator`,
+`reloadWorld`) runs `Engine::resetWorldProjection()` BEFORE detaching the old
+render bridge: draw/shadow lists (they reference the old bridge's handles),
+mob presentation states (also pushed empty to `WorldRenderer::setMobs`), the
+block highlight, the upload budget, the UI biome cache and the biome map are
+dropped so no stale derived snapshot survives the transition. The simulation
+bumps `worldGenerationId()` across the transition; the replacement bridge is
+stamped with that epoch at attach (`RenderWorldBridge::worldGenerationId()`).
+Async jobs are quiesced by the bridge destructor against the still-live old
+world; a refused persistent close aborts the reload with the old world
+authoritative and renderable (issue #180 contracts). GPU lifetime stays
+graphical: device-idle + retire flush around the transition, uploads only
+inside frame recording.
 
 Benchmark memory ownership, mesh allocation/retirement, draw workload and worker
 stage measurements are documented in [workload-telemetry.md](workload-telemetry.md).
@@ -736,21 +775,30 @@ untouched) do not require a bump.
   world then behaves exactly like a never-opened one. `~VoxelWorld` runs
   the same path as a safety net (the bridge quiesces its render jobs first).
 
-### Engine wiring (Phase 5)
+### Engine wiring (Phase 5; facade host since issues #208/#209)
 
-- `--world <name>` (CLI) → `Engine::requestOpenWorld` → opened in
-  `initializeNoiseGenerator` before generation. If the stored seed differs from
-  an explicitly requested `--seed`, the open is **refused** and the session
-  runs transient (identity is never overwritten); without an explicit seed the
-  stored seed recreates the `TerrainGenerator`.
+- `--world <name>` (CLI) → `Engine::requestOpenWorld` → consumed by
+  `sim::GameSimulation::initialize` inside `initializeNoiseGenerator` before
+  generation. If the stored seed differs from an explicitly requested
+  `--seed`, the open is **refused** and the session runs transient (identity
+  is never overwritten, `openWorldError()` surfaces why in the World panel);
+  without an explicit seed the stored seed recreates the `TerrainGenerator`.
 - Player state (`player.state`) is restored on open when present (position is
-  kept verbatim — no surface snap) and written in `~Engine` before the final
-  flush.
+  kept verbatim — no surface snap) via `sim->finalizePlayerSpawn`, and written
+  in `~Engine` through `sim->savePlayerState(camera yaw, pitch)` (the
+  authoritative body + the host-supplied presentation orientation) before the
+  final flush; `sim->shutdown()` then force-closes the world unconditionally.
 - **Transient / benchmark worlds run persistence-disabled**: `reloadWorld`
-  closes any open world first, so a benchmark can never write into a user
-  save. Sessions without `--world` never create files. Combining
-  `--world` with `--benchmark` is a CLI error (fail-fast) rather than a
-  silently ignored flag.
+  closes any open world first (through the bridge's quiesce + the world's
+  refusable close), so a benchmark can never write into a user save. Sessions
+  without `--world` never create files. Combining `--world` with `--benchmark`
+  is a CLI error (fail-fast) rather than a silently ignored flag.
+- **World transitions never recreate Vulkan objects for CPU state**: the
+  simulation swaps only CPU world/generator/player/mob state; the Engine
+  keeps the device, swapchain, renderer and ImGui alive across
+  initialize/reload (the epoch barrier resets the derived projection, and
+  `reloadWorld` waits device-idle + flushes the retire queue around the
+  bridge swap — issue #209).
 
 ### Failure policy
 

@@ -266,6 +266,15 @@ public:
     WorldEditResult deleteVoxel(const glm::vec3 &worldPos);
     bool isVoxelActive(const glm::vec3 &worldPos) const;
 
+    /// Player-aware placement rule (issue #209, Epic #204 Phase E): a SOLID
+    /// block may not be placed where it would overlap the authoritative
+    /// player body — unless the player is flying or the block is non-solid.
+    /// This is gameplay validation, shared by the graphical host (which
+    /// still publishes the accepted edit through the bridge) and headless
+    /// hosts (placeVoxel below); it lives here so neither copies the rule.
+    /// Pure query: it never edits the world.
+    bool canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) const;
+
     // --- Read-only bounded snapshots -------------------------------------------
 
     PlayerSnapshot playerSnapshot() const;

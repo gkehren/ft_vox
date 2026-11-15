@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <vector>
 #include <utils.hpp>

@@ -101,6 +101,13 @@ int main()
 			CHECK(engine->worldSeed() == 42, "world opened with the requested seed");
 			checkIdentity(42, "save created");
 
+			// Epoch barrier (issue #209): the live projection carries the
+			// simulation's world generation from the first attach.
+			const uint64_t genAfterInit = engine->worldGenerationId();
+			CHECK(genAfterInit > 0, "world generation id assigned at initialize");
+			CHECK(engine->bridgeWorldGenerationForTests() == genAfterInit,
+			      "bridge stamped with the simulation's world epoch at initialize");
+
 			// Reload with an OPEN persistent world: the close must succeed
 			// here (no stranded edits in this deterministic path) and the
 			// reload proceeds transiently. The save identity must survive
@@ -108,6 +115,17 @@ int main()
 			CHECK(engine->reloadWorld(43), "persistent world closes and reload succeeds");
 			CHECK(engine->worldSeed() == 43, "new transient seed active");
 			checkIdentity(42, "save identity untouched by the reload");
+
+			// Epoch barrier (issue #209): the reload bumps the epoch, the
+			// replacement bridge is stamped with it, and every derived
+			// per-world CPU snapshot was dropped before the next frame.
+			CHECK(engine->worldGenerationId() > genAfterInit,
+			      "reload advances the world generation id");
+			CHECK(engine->bridgeWorldGenerationForTests() == engine->worldGenerationId(),
+			      "reloaded bridge stamped with the new world epoch");
+			CHECK(engine->drawListSizeForTests() == 0, "reload drops the stale draw list");
+			CHECK(engine->shadowListSizeForTests() == 0, "reload drops the stale shadow list");
+			CHECK(engine->mobStateCountForTests() == 0, "reload drops stale mob presentation states");
 		} // ~Engine: world was closed by the reload - no player-state write.
 
 		// Session 2: reopen WITHOUT an explicit seed - the stored seed must
@@ -117,8 +135,14 @@ int main()
 			engine->requestOpenWorld(kWorldName);
 			engine->initializeNoiseGenerator(0);
 			CHECK(engine->worldSeed() == 42, "stored seed adopted when no explicit seed is given");
+			// Re-initialize is a world transition too: fresh epoch, matching
+			// bridge stamp (issue #209).
+			CHECK(engine->bridgeWorldGenerationForTests() == engine->worldGenerationId(),
+			      "re-initialized bridge stamped with the current world epoch");
 			CHECK(engine->reloadWorld(44), "second reload proceeds");
 			CHECK(engine->worldSeed() == 44, "second transient seed active");
+			CHECK(engine->bridgeWorldGenerationForTests() == engine->worldGenerationId(),
+			      "second reload keeps bridge and simulation epochs aligned");
 		}
 
 		// The save is still intact and openable after both sessions.
