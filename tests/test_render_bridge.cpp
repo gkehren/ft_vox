@@ -208,7 +208,12 @@ int main()
 			populate(bridge, {0.f, 100.f, 0.f});
 			meshAll(bridge, {0.f, 100.f, 0.f});
 			CHECK(world.chunkCount() > 0, "world populated before detach");
-		} // ~RenderWorldBridge: releases handles, never owns the world.
+			// A chunk two chunks out is MESHED before detach and is NOT touched
+			// by any edit below (the edits' light halo only reaches immediate
+			// neighbors of {0,0,0}), so it isolates the attach re-arm path.
+			Chunk *farChunk = bridge.getChunk({2, 0, 0});
+			CHECK(farChunk && farChunk->getState() == ChunkState::MESHED, "non-edited chunk meshed before detach");
+		} // ~RenderWorldBridge: releases handles + their GPU geometry, never owns the world.
 		CHECK(world.chunkCount() > 0, "world residency survives bridge destruction");
 		const bool ok = world.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted;
 		world.pump();
@@ -222,6 +227,12 @@ int main()
 		Chunk *c = bridge2.getChunk({0, 0, 0});
 		CHECK(c && c->getState() == ChunkState::MESHED && c->hasPendingMeshResult(),
 			  "reattached bridge rebuilds the derived mesh");
+		// Regression (issue #207 review): a previously-MESHED chunk that is NOT
+		// edited must still be re-armed on attach and remeshed — the fresh handle
+		// has no geometry, so a stale MESHED claim would leave it invisible.
+		Chunk *farChunk = bridge2.getChunk({2, 0, 0});
+		CHECK(farChunk && farChunk->getState() == ChunkState::MESHED && farChunk->hasPendingMeshResult(),
+			  "reattached bridge remeshes a non-edited previously-MESHED chunk");
 	}
 
 	if (g_fails != 0)

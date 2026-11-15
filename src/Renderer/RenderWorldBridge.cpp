@@ -79,29 +79,19 @@ RenderWorldBridge::RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, 
 
 RenderWorldBridge::~RenderWorldBridge()
 {
-	// Persistent-world durability comes FIRST (issue #180 review round 3):
-	// while persistence is open, the close path must still own every
-	// completion, so publish finished gen/mesh/light jobs, clear inTransit,
-	// apply deferred edits and capture edits BEFORE any teardown discards
-	// state.
+	// Quiesce DERIVED render work before releasing any handle. When a world is
+	// open this is the render half of the durability barrier (issue #180 review
+	// round 3): publish finished gen/mesh/light jobs, clear inTransit and apply
+	// deferred edits so the host's subsequent close sees complete authoritative
+	// state. The bridge does NOT close the world's persistence — it only
+	// references the world; the host owns that shutdown (issue #207 review).
 	if (m_world->isWorldOpen())
-	{
-		// Combined quiesce (render + world), then the unconditional
-		// destructor-only close: resolve stranded edits, capture, flush,
-		// shutdown. Destruction has no retry point.
 		drainAsyncJobsForPersistence();
-		if (!m_world->forceCloseWorldForShutdown())
-		{
-			// Destruction cannot be undone, but a partial save must never be
-			// reported as success (issue #180 review round 4).
-			std::cerr << "[world] final shutdown did not persist all accepted edits" << std::endl;
-		}
-	}
 
 	// Generic teardown: best-effort drain of async work so we don't release
-	// chunks still in workers. After the force-close above the completion
-	// queues are normally empty; this only sweeps stragglers from a world
-	// that was never opened.
+	// chunks still in workers. After the quiesce above the completion queues
+	// are normally empty; this only sweeps stragglers from a world that was
+	// never opened.
 	while (m_world->pendingGenJobs() > 0 || m_pendingMeshJobsCount.load() > 0 ||
 		   m_pendingLightJobsCount.load() > 0)
 	{
@@ -165,12 +155,40 @@ glm::ivec3 RenderWorldBridge::worldToChunkCoord(const glm::vec3 &worldPos)
 // World event stream → render handle synchronization (issue #206/#207)
 // ---------------------------------------------------------------------------
 
+Chunk *RenderWorldBridge::bindRecord(const glm::ivec3 &coord, WorldChunk *record)
+{
+	if (!m_chunkPool)
+		return nullptr;
+	Chunk *chunk = m_chunkPool->acquire(glm::vec3(
+		static_cast<float>(coord.x * CHUNK_SIZE), 0.0f,
+		static_cast<float>(coord.z * CHUNK_SIZE)));
+	if (!chunk)
+		return nullptr;
+	chunk->bindWorldChunk(record);
+	// A freshly bound handle carries no derived geometry. If the record already
+	// claims MESHED — a live-world projection whose previous bridge released its
+	// GPU ranges — that claim is stale: re-arm for a rebuild so mesh dispatch
+	// picks it up instead of leaving it resident-but-invisible until an unrelated
+	// invalidation (issue #207 review). Fresh loads are UNLOADED/GENERATED here,
+	// so this is a no-op on the streaming and bootstrap paths.
+	if (chunk->getState() == ChunkState::MESHED)
+		chunk->setState(ChunkState::GENERATED);
+	m_chunks[coord] = chunk;
+	chunk->setActiveIndex(m_activeChunks.size());
+	m_activeChunks.push_back(chunk);
+	// Generate even before frustum test so the world fills around the player.
+	chunk->setVisible(true);
+	recordChunkEvent(chunk, "load");
+	return chunk;
+}
+
 void RenderWorldBridge::attachToWorld()
 {
 	// Bind handles to records already resident in the world. The world does
 	// not re-emit Loaded events for them, so a bridge attached to a live world
-	// (Phase E) must project the current residency itself. Same bind contract
-	// as onWorldLoaded; pool-exhaustion parks the coord for retryPendingBinds.
+	// (Phase E) must project the current residency itself. bindRecord re-arms
+	// any stale MESHED claim; pool-exhaustion parks the coord for
+	// retryPendingBinds.
 	{
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
 		for (WorldChunk *record : m_world->activeChunksSnapshot())
@@ -180,22 +198,8 @@ void RenderWorldBridge::attachToWorld()
 			const glm::ivec3 coord = record->coord();
 			if (m_chunks.find(coord) != m_chunks.end())
 				continue;
-			if (!m_chunkPool)
-				break;
-			Chunk *chunk = m_chunkPool->acquire(glm::vec3(
-				static_cast<float>(coord.x * CHUNK_SIZE), 0.0f,
-				static_cast<float>(coord.z * CHUNK_SIZE)));
-			if (!chunk)
-			{
+			if (!bindRecord(coord, record))
 				m_pendingBinds.push_back(coord);
-				continue;
-			}
-			chunk->bindWorldChunk(record);
-			m_chunks[coord] = chunk;
-			chunk->setActiveIndex(m_activeChunks.size());
-			m_activeChunks.push_back(chunk);
-			chunk->setVisible(true);
-			recordChunkEvent(chunk, "load");
 		}
 	}
 	// Publish any queued generation/edit render flags for the bound handles.
@@ -249,25 +253,12 @@ void RenderWorldBridge::onWorldLoaded(const WorldEvent &e)
 	WorldChunk *record = m_world->getChunk(e.coord);
 	if (!record)
 		return;
-	if (!m_chunkPool)
-		return;
-	Chunk *chunk = m_chunkPool->acquire(glm::vec3(
-		static_cast<float>(e.coord.x * CHUNK_SIZE), 0.0f,
-		static_cast<float>(e.coord.z * CHUNK_SIZE)));
-	if (!chunk)
+	if (!bindRecord(e.coord, record))
 	{
 		// Defensive: the load budget is clamped by the render pool free
 		// count, so this only fires on an unexpected race. Retry next tick.
 		m_pendingBinds.push_back(e.coord);
-		return;
 	}
-	chunk->bindWorldChunk(record);
-	m_chunks[e.coord] = chunk;
-	chunk->setActiveIndex(m_activeChunks.size());
-	m_activeChunks.push_back(chunk);
-	// Generate even before frustum test so the world fills around the player.
-	chunk->setVisible(true);
-	recordChunkEvent(chunk, "load");
 }
 
 void RenderWorldBridge::retryPendingBinds()
@@ -283,21 +274,8 @@ void RenderWorldBridge::retryPendingBinds()
 		WorldChunk *record = m_world->getChunk(coord);
 		if (!record)
 			continue; // unloaded meanwhile
-		Chunk *chunk = m_chunkPool ? m_chunkPool->acquire(glm::vec3(
-										  static_cast<float>(coord.x * CHUNK_SIZE), 0.0f,
-										  static_cast<float>(coord.z * CHUNK_SIZE)))
-									: nullptr;
-		if (!chunk)
-		{
+		if (!bindRecord(coord, record))
 			stillPending.push_back(coord);
-			continue;
-		}
-		chunk->bindWorldChunk(record);
-		m_chunks[coord] = chunk;
-		chunk->setActiveIndex(m_activeChunks.size());
-		m_activeChunks.push_back(chunk);
-		chunk->setVisible(true);
-		recordChunkEvent(chunk, "load");
 	}
 	m_pendingBinds.swap(stillPending);
 }
@@ -1478,24 +1456,15 @@ void RenderWorldBridge::generateInitialArea(const glm::vec3 &center, int radiusC
 			WorldChunk *record = m_world->getChunk(pos);
 			if (!record)
 				continue;
-			Chunk *chunk = m_chunkPool->acquire(glm::vec3(
-				static_cast<float>(pos.x * CHUNK_SIZE), 0.f,
-				static_cast<float>(pos.z * CHUNK_SIZE)));
+			Chunk *chunk = bindRecord(pos, record);
 			if (!chunk)
 			{
 				// Grow once more and retry (should be rare if ensureCapacity above is correct).
 				m_chunkPool->ensureCapacity(m_chunkPool->capacity() + 64);
-				chunk = m_chunkPool->acquire(glm::vec3(
-					static_cast<float>(pos.x * CHUNK_SIZE), 0.f,
-					static_cast<float>(pos.z * CHUNK_SIZE)));
+				chunk = bindRecord(pos, record);
 				if (!chunk)
 					continue;
 			}
-			chunk->bindWorldChunk(record);
-			m_chunks[pos] = chunk;
-			chunk->setActiveIndex(m_activeChunks.size());
-			m_activeChunks.push_back(chunk);
-			chunk->setVisible(true);
 			const glm::vec3 p = chunk->getPosition();
 			const float dx = p.x - center.x;
 			const float dz = p.z - center.z;

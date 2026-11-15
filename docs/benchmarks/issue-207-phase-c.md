@@ -55,7 +55,7 @@ All other visual scenes pass. New/changed suites:
 
 | Suite | Result | Notes |
 |---|---|---|
-| **RenderBridge** (new, CPU-only) | PASS, 24 checks, 0.73 s | Phase C boundary acceptance (below) |
+| **RenderBridge** (new, CPU-only) | PASS, 26 checks, 0.73 s | Phase C boundary acceptance (below) |
 | CoreContracts | PASS, 31 checks | unchanged |
 | CoreIncludeGuard | PASS | deleted headers dropped; mesh/light pools reclassified render-derived |
 | VoxelWorld | PASS, 211 checks | headless world with no bridge (unchanged) |
@@ -170,6 +170,31 @@ persistent-world close/reopen identity path.
 - The bridge destructor drains render jobs, releases handles to the pool and
   detaches the worker observer, leaving the world render-free; the
   `RenderBridge` detach/reattach checks confirm no handle or record leak.
+
+## Review fixes (round 1)
+
+Four review findings were addressed and re-verified (full suite re-run green
+except the pre-existing #213 mismatch; visual metrics unchanged):
+
+- **P2 — attach re-arm.** `attachToWorld` bound resident records but left a
+  stale `MESHED` lifecycle claim on the `WorldChunk`; a fresh handle has no
+  geometry, and mesh dispatch only queues `GENERATED`, so those chunks were
+  resident-but-invisible after a re-attach. The shared `bindRecord` helper now
+  re-arms any projected `MESHED` record to `GENERATED` (no-op on the startup /
+  streaming / bootstrap paths, where records are `UNLOADED`/`GENERATED`).
+  `test_render_bridge` §5 gained a regression check on a **non-edited**
+  previously-MESHED chunk; it was confirmed to fail with the re-arm disabled.
+- **P2 — shutdown ownership.** `~RenderWorldBridge` no longer calls
+  `forceCloseWorldForShutdown` on the world it only references. It keeps the
+  derived-work quiesce; the **host** closes persistence (`Engine::~Engine`
+  calls `VoxelWorld::forceCloseWorldForShutdown`; `~VoxelWorld` remains the
+  final safety net, so the destructor-persistence tests still pass).
+- **P3 — bind duplication.** The four acquire→bind→register copies
+  (attach / Loaded event / bind retry / bootstrap) were consolidated into
+  `bindRecord`, each caller keeping its own pool-exhaustion policy
+  (park / grow-retry / skip).
+- **P3 — initializer shadowing.** `ChunkMobWorld` ctor parameters renamed
+  `*Ref` so no member initializer can silently shadow a member.
 
 ## Conclusion
 

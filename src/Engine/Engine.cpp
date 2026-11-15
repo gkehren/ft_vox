@@ -177,9 +177,9 @@ Engine::~Engine()
 		vkContext->waitIdle();
 
 	// Durable shutdown (issue #180, Phase 5): persist the player state, then
-	// flush the save queue while the world is still alive. ~RenderWorldBridge
-	// holds a safety net for chunk edits, but only this path writes
-	// player.state, so the explicit flush stays.
+	// flush the save queue while the world is still alive. ~VoxelWorld holds a
+	// safety net for chunk edits, but only this path writes player.state, so
+	// the explicit flush stays.
 	if (renderBridge && renderBridge->isWorldOpen())
 	{
 		PlayerPersistState playerState;
@@ -204,10 +204,19 @@ Engine::~Engine()
 	// Reset order matters (issue #109): chunk/world teardown returns arena
 	// ranges, which can retire whole arena pages into the retire queue.
 	// The queue must outlive them and be flushed last. The render bridge
-	// drains its jobs and releases its handles before the authoritative
-	// world tears down (issue #207).
+	// quiesces its derived jobs and releases its handles first; it never closes
+	// the world's persistence (issue #207 review) — the host closes the
+	// authoritative world exactly once, here, before the world tears down.
 	gameUi.reset();
 	renderBridge.reset();
+	if (voxelWorld && voxelWorld->isWorldOpen())
+	{
+		// Unconditional destructor-only close: resolve stranded edits, capture,
+		// flush, shutdown. Destruction has no retry point; a partial save must
+		// never be reported as success (issue #180 review round 4).
+		if (!voxelWorld->forceCloseWorldForShutdown())
+			std::cerr << "[world] final shutdown did not persist all accepted edits" << std::endl;
+	}
 	voxelWorld.reset();
 	chunkPool.reset();
 	threadPool.reset();

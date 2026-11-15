@@ -346,6 +346,12 @@ private:
 	void onWorldGenerated(const WorldEvent &e);
 	void onWorldEditApplied(const WorldEvent &e);
 	void retryPendingBinds();
+	/// Single bind contract shared by every handle-registration path (attach,
+	/// Loaded event, bind retry, bootstrap): acquire a render handle, bind it
+	/// to the record, re-arm a stale MESHED claim, and register it in the
+	/// render map. Returns nullptr when the pool is exhausted — the caller
+	/// decides whether to park / grow / skip. Caller holds m_mutex.
+	Chunk *bindRecord(const glm::ivec3 &coord, WorldChunk *record);
 
 	// --- Geometric commit groups (PR #178 review) ---
 	void registerCommitGroup(uint64_t editId, std::vector<PendingGroupMember> members);

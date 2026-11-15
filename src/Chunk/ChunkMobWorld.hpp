@@ -25,9 +25,11 @@
 class ChunkMobWorld final : public entities::MobWorld
 {
   public:
-    ChunkMobWorld(const VoxelWorld &world, const RenderWorldBridge &bridge,
-                  const TerrainGenerator &generator)
-        : view(world), renderLock(bridge.m_mutex), bridge(bridge), generator(generator)
+    // Parameters are named *Ref so no initializer can silently shadow a member
+    // (the render lock must read the bridge parameter, not the member).
+    ChunkMobWorld(const VoxelWorld &worldRef, const RenderWorldBridge &bridgeRef,
+                  const TerrainGenerator &generatorRef)
+        : view(worldRef), renderLock(bridgeRef.m_mutex), bridge(bridgeRef), generator(generatorRef)
     {
     }
     physics::Cell sample(glm::ivec3 p) const override { return view.sample(p); }

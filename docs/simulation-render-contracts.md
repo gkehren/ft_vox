@@ -494,10 +494,18 @@ world — the seam Phase E uses to attach a bridge to a running `GameSimulation`
 ordering holds: **(1)** world generation publication → **(2)** render
 mesh/light publication (the superseded-by-edit checks still see the pending
 queue) → **(3)** `applyPendingEdits()` → render edit invalidation. The
-persistence durability barrier (`closeWorld`/destructor) quiesces render and
-world jobs together before the world captures/flushes/shuts down; a failed
-flush or stranded edits keep persistence OPEN and retryable (issue #180
-contracts unchanged).
+persistence durability barrier quiesces render and world jobs together before
+the world captures/flushes/shuts down; a failed flush or stranded edits keep
+persistence OPEN and retryable (issue #180 contracts unchanged). Ownership of
+the close itself is split (issue #207 review): the bridge destructor and
+`closeWorld()` only **quiesce derived work** (publish jobs, clear in-transit,
+apply deferred edits); the **host** closes authoritative persistence
+(`Engine::~Engine` calls `VoxelWorld::forceCloseWorldForShutdown`, and
+`~VoxelWorld` is the final safety net). The bridge never closes a world it only
+references. On attach, `bindRecord` also **re-arms a stale `MESHED` claim** to
+`GENERATED`: a projected record's geometry lived on the previous bridge's
+handles, so a fresh handle must rebuild it rather than stay resident-but-
+invisible.
 
 ### Locks
 
