@@ -1365,3 +1365,21 @@ if(FT_VOX_CPU_ONLY_BUILD_CHECK)
     set_tests_properties(CpuOnlyBuild PROPERTIES TIMEOUT 1200 LABELS "cpu-only")
 endif()
 
+# ---------------------------------------------------------------------------
+# Dependency-direction enforcement (issue #211, Epic #204 Phase G): every
+# CPU-only test target must link the render stack nowhere in its transitive
+# closure. The configure-time assertion (ft_vox_assert_cpu_link_closure, defined
+# in the top-level CMakeLists) makes the boundary a repeatable build gate, not
+# just a comment. Graphical test targets are intentionally NOT checked here.
+# ---------------------------------------------------------------------------
+foreach(_cpu_test IN ITEMS
+    test_physics test_core_contracts test_voxel_world test_game_simulation
+    test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
+    test_terrain test_biome_map test_voxel_pool test_border_pool
+    test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
+    test_frame_pacing test_world_save test_network)
+    if(TARGET ${_cpu_test})
+        ft_vox_assert_cpu_link_closure(${_cpu_test})
+    endif()
+endforeach()
+

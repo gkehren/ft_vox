@@ -367,12 +367,15 @@ else()
     endif()
 endif()
 
-# Configure-time dependency guard (issue #210 acceptance criterion 1): walk
-# the TRANSITIVE link closure of ft_vox_headless and fail on any graphical
-# library, in either configuration. Generator-independent (declared targets,
-# not link lines); tests/check_headless_deps.py additionally verifies the
-# include closure and the actual build artifacts.
-function(ft_vox_assert_headless_link_closure target)
+# Configure-time dependency-direction guard (issue #210 criterion 1, hardened
+# in issue #211 / Epic #204 Phase G): walk the TRANSITIVE link closure of a
+# CPU-only target and fail on any graphical library, in either configuration.
+# Applied to ft_vox_core ITSELF (the simulation library must never link
+# SDL3/Vulkan/volk/VMA/miniz/ImGui transitively) and to ft_vox_headless, plus
+# the CPU-only test targets (tests/CMakeLists.txt). Generator-independent
+# (declared targets, not link lines); tests/check_headless_deps.py additionally
+# verifies the include closure and the actual build artifacts.
+function(ft_vox_assert_cpu_link_closure target)
     set(_visited "")
     set(_pending "${target}")
     while(_pending)
@@ -383,8 +386,8 @@ function(ft_vox_assert_headless_link_closure target)
         list(APPEND _visited "${_current}")
         if(_current MATCHES "(SDL3|SDL2|volk|VulkanMemoryAllocator|Vulkan::|miniz|imgui|glfw|glad)")
             message(FATAL_ERROR
-                "ft_vox_headless link closure contains graphical dependency '${_current}' "
-                "(issue #210: the headless runner must link only ft_vox_core).")
+                "CPU-only target '${target}' link closure contains graphical dependency "
+                "'${_current}' (Epic #204: the CPU simulation must not link the render stack).")
         endif()
         if(TARGET "${_current}")
             get_target_property(_iface "${_current}" INTERFACE_LINK_LIBRARIES)
@@ -398,7 +401,8 @@ function(ft_vox_assert_headless_link_closure target)
         endif()
     endwhile()
 endfunction()
-ft_vox_assert_headless_link_closure(ft_vox_headless)
+ft_vox_assert_cpu_link_closure(ft_vox_core)
+ft_vox_assert_cpu_link_closure(ft_vox_headless)
 
 # CPU-only configuration: the graphical stack must not even have been
 # DISCOVERED (no targets created by Dependencies.cmake).

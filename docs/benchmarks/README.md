@@ -35,6 +35,10 @@ into `benchmark-results/` (gitignored), not here.
 - [issue-206-phase-b.md](issue-206-phase-b.md) — Epic #204 Phase B authoritative-world verification (A/B + acceptance)
 - [issue-207-phase-c.md](issue-207-phase-c.md) — Epic #204 Phase C render-bridge verification (acceptance + review fixes)
 - [issue-208-phase-d.md](issue-208-phase-d.md) — Epic #204 Phase D GameSimulation verification (acceptance + host rewiring)
+- [issue-209-phase-e.md](issue-209-phase-e.md) — Epic #204 Phase E graphical-host verification (epoch barrier + parity)
+- [issue-210-phase-f.md](issue-210-phase-f.md) — Epic #204 Phase F headless runner verification (CPU-only + determinism)
+- [issue-211-phase-g.md](issue-211-phase-g.md) — Epic #204 Phase G closure gate (enforcement + parity protocol + cleanup)
+- [issue-211-parity.md](issue-211-parity.md) — Phase G interleaved in-game benchmark parity (5 trials, per-trial appendix)
 - [pr145/](pr145/validation/README.md) — VSync pacing
 - [pr157-water/](pr157-water/README.md) — water rendering
 - [worldgen-rework/](worldgen-rework/README.md) — terrain generator rework

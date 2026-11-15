@@ -96,26 +96,34 @@ def check_includes(verbose: bool) -> list[str]:
     return violations
 
 
-def find_link_inputs(build_dir: Path) -> list[tuple[str, str]]:
-    """Return (kind, text) pairs describing the runner's real link inputs."""
-    found: list[tuple[str, str]] = []
+def find_link_inputs(build_dir: Path, target: str) -> list[tuple[str, str]]:
+    """Return (kind, text) pairs describing a target's real link inputs.
 
-    # Ninja: the executable link edge carries a LINK_LIBRARIES variable.
+    Covers executables (ft_vox_headless) and static libraries (ft_vox_core):
+    the dependency-direction guard applies to the whole CPU slice (issue #211).
+    """
+    found: list[tuple[str, str]] = []
+    name = re.escape(target)
+    out_name = rf"(?:lib)?{name}(?:\.exe|\.a|\.lib)?"
+
+    # Ninja: the link edge (executable or static library) carries LINK_LIBRARIES.
     ninja = build_dir / "build.ninja"
     if ninja.is_file():
         text = ninja.read_text(encoding="utf-8", errors="replace")
         pattern = re.compile(
-            r"^build\s+(?:\./)?ft_vox_headless(?:\.exe)?\s*:\s*CXX_EXECUTABLE_LINKER[^\n]*\n"
+            rf"^build\s+(?:\./)?{out_name}\s*:\s*CXX_(?:EXECUTABLE|STATIC_LIBRARY)_LINKER[^\n]*\n"
             r"((?:[ \t]+[^\n]*\n)*)",
             re.MULTILINE)
         for match in pattern.finditer(text):
-            block = match.group(1)
-            libs = re.search(r"LINK_LIBRARIES\s*=\s*([^\n]*)", block)
-            if libs:
-                found.append(("build.ninja LINK_LIBRARIES", libs.group(1)))
+            # The build statement lists implicit/order-only deps (a static
+            # library archives objects and carries NO LINK_LIBRARIES variable;
+            # its dependencies appear on the build line, e.g. `|| libFastNoise.a`).
+            # The indented block carries LINK_LIBRARIES for executables. Scan
+            # the whole edge (build line + block) so both forms are covered.
+            found.append((f"build.ninja link edge [{target}]", match.group(0)))
 
     # Makefiles: one link.txt per target.
-    for link_txt in build_dir.glob("CMakeFiles/ft_vox_headless.dir/link.txt"):
+    for link_txt in build_dir.glob(f"CMakeFiles/{target}.dir/link.txt"):
         found.append((str(link_txt.relative_to(build_dir)),
                       link_txt.read_text(encoding="utf-8", errors="replace")))
 
@@ -123,7 +131,7 @@ def find_link_inputs(build_dir: Path) -> list[tuple[str, str]]:
     # project references. (The whole vcxproj also lists ZERO_CHECK reconfigure
     # inputs, whose CMake-module paths may mention graphics packages without
     # anything being linked.)
-    for vcxproj in build_dir.glob("ft_vox_headless.vcxproj"):
+    for vcxproj in build_dir.glob(f"{target}.vcxproj"):
         text = vcxproj.read_text(encoding="utf-8", errors="replace")
         fields = re.findall(r"<AdditionalDependencies>([^<]*)</AdditionalDependencies>", text)
         fields += re.findall(r'<ProjectReference\s+Include="([^"]*)"', text)
@@ -134,26 +142,29 @@ def find_link_inputs(build_dir: Path) -> list[tuple[str, str]]:
 
 def check_link_artifacts(build_dir: Path) -> list[str]:
     violations: list[str] = []
-    inputs = find_link_inputs(build_dir)
-    if not inputs:
-        # Fail-CLOSED on a configured tree: if CMakeCache.txt exists the
-        # runner target should have build artifacts, and a silent skip would
-        # let the guard go quiet (issue #210 review). Only a genuinely
-        # unconfigured tree (no cache) is allowed to skip.
-        if (build_dir / "CMakeCache.txt").is_file():
-            violations.append(
-                "configured build tree has no ft_vox_headless link artifacts "
-                "(build.ninja / link.txt / .vcxproj) — build the target before "
-                "running the guard; refusing to skip the link scan")
-        else:
-            print("NOTE: no CMakeCache.txt and no ft_vox_headless link artifacts in "
-                  f"{build_dir} (unconfigured tree); link scan skipped")
-        return violations
-    for kind, text in inputs:
-        lowered = text.lower()
-        for token in FORBIDDEN_LINK_TOKENS:
-            if token in lowered:
-                violations.append(f"graphical dependency '{token}' in link inputs ({kind})")
+    configured = (build_dir / "CMakeCache.txt").is_file()
+    # The whole CPU slice must stay graphics-free: the runner executable AND
+    # the simulation static library (issue #211 dependency-direction gate).
+    for target in ("ft_vox_headless", "ft_vox_core"):
+        inputs = find_link_inputs(build_dir, target)
+        if not inputs:
+            # Fail-CLOSED on a configured tree: the target should have build
+            # artifacts, and a silent skip would let the guard go quiet
+            # (issue #210 review). Only an unconfigured tree may skip.
+            if configured:
+                violations.append(
+                    f"configured build tree has no {target} link artifacts "
+                    "(build.ninja / link.txt / .vcxproj) — build the target before "
+                    "running the guard; refusing to skip the link scan")
+            else:
+                print(f"NOTE: no CMakeCache.txt and no {target} link artifacts in "
+                      f"{build_dir} (unconfigured tree); link scan skipped")
+            continue
+        for kind, text in inputs:
+            lowered = text.lower()
+            for token in FORBIDDEN_LINK_TOKENS:
+                if token in lowered:
+                    violations.append(f"graphical dependency '{token}' in {target} link inputs ({kind})")
     return violations
 
 
