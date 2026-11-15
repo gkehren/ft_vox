@@ -52,13 +52,16 @@ No simulation, terrain, save-format, renderer or gameplay behavior changed.
 
 | Gate | Enforces | Repeatability |
 |---|---|---|
-| `ft_vox_assert_cpu_link_closure` (CMake) | transitive link closure of `ft_vox_core`, `ft_vox_headless`, all CPU tests is graphics-free | every configure |
-| `CoreIncludeGuard` | core public-header/TU include closure render-free (Chunk/ allowlist fail-closed) | CTest |
-| `HeadlessDeps` | core **and** runner include closure + real link artifacts + CPU-only cache discovery | CTest |
-| `FT_VOX_GRAPHICS=OFF` / `CpuOnlyBuild` | clean CPU-only configure/build/test, graphics stack not discovered | configure / opt-in CTest |
+| `ft_vox_assert_cpu_link_closure` (CMake) | transitive link closure of `ft_vox_core`, `ft_vox_headless`, all CPU tests is graphics-free — the authoritative link gate (incl. MSVC, where a static lib has no link step) | every configure |
+| `CoreIncludeGuard` | **core** public-header/TU include closure render-free (Chunk/ allowlist fail-closed) | CTest |
+| `HeadlessDeps` | **runner** include closure + core/runner **link artifacts** (MSVC core static-lib scan reads `ProjectReference`) + CPU-only cache discovery | CTest |
+| `FT_VOX_GRAPHICS=OFF` / `CpuOnlyBuild` | clean CPU-only configure/build/test, graphics stack not discovered | configure / opt-in CTest + CI workflow |
 
 All green on Windows/MSVC and WSL2 GCC. The graphical target depends on the
-simulation; the simulation never depends on the render side.
+simulation; the simulation never depends on the render side. The CPU-only
+boundary gate (`CpuOnlyBuild` + guards) is exercised automatically by the CI
+workflow (`.github/workflows/cpu-boundary.yml`) so the enforcement is durable
+even though `CpuOnlyBuild` is opt-in for local everyday runs.
 
 ## 2. Headless + graphical consume the same algorithms
 
@@ -255,11 +258,12 @@ Makefile / MSVC. Verified green on both Windows/MSVC and WSL2/Ninja.
 
 Phase G closes Epic #204. The CPU/GPU boundary is **enforced by repeatable
 automated checks** (configure-time transitive link-closure assertion on the
-core, the runner and every CPU test; `CoreIncludeGuard`; `HeadlessDeps` scanning
-core + runner include closure and real link artifacts; the `FT_VOX_GRAPHICS=OFF`
-clean-configure gate) — not merely documented. The graphical and headless
-executables consume the **same** world/physics/mob algorithms (one
-`GameSimulation` facade; CPU profiles bit-identical).
+core, the runner and every CPU test — the authoritative link gate;
+`CoreIncludeGuard` for the core include closure; `HeadlessDeps` for the runner
+include closure + core/runner link artifacts; the `FT_VOX_GRAPHICS=OFF`
+clean-configure gate, exercised automatically by CI) — not merely documented.
+The graphical and headless executables consume the **same** world/physics/mob
+algorithms (one `GameSimulation` facade; CPU profiles bit-identical).
 
 **Performance:** the in-game benchmark is at parity (Grade **S**, 5 interleaved
 trials; frame tail / GPU / resident memory parity-or-better). The CPU simulation

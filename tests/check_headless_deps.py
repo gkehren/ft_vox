@@ -10,11 +10,15 @@ graphics-free:
      vulkan / volk / VMA / imgui / boost / miniz external headers, and the
      Chunk/ allowlist stays fail-closed.
 
-  2. LINK artifacts: the actual generated link inputs for ft_vox_headless in
-     the build tree (Ninja build.ninja LINK_LIBRARIES, Makefile link.txt, or
-     MSVC .vcxproj AdditionalDependencies) must contain no graphical library.
-     This complements the configure-time transitive link-closure assertion in
-     the top-level CMakeLists.txt.
+  2. LINK artifacts: the actual generated link inputs for ft_vox_headless AND
+     ft_vox_core in the build tree (Ninja build.ninja link edge, Makefile
+     link.txt, or MSVC .vcxproj link fields) must contain no graphical library.
+     A Ninja static-library edge carries no LINK_LIBRARIES variable (deps are on
+     the build statement line), so the whole edge is scanned. On MSVC a static
+     library has no link step, so the ft_vox_core scan reads only its
+     <ProjectReference> entries — the authoritative MSVC link gate is the
+     configure-time transitive link-closure assertion in the top-level
+     CMakeLists.txt, which this check complements.
 
   3. DISCOVERY: when the build cache says FT_VOX_GRAPHICS=OFF, no graphics
      discovery may have happened at all — the cache must carry no Vulkan /

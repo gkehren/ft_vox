@@ -97,11 +97,13 @@ simulation never depends on the render side.
 
 | Gate | What it enforces | When |
 |---|---|---|
-| `ft_vox_assert_cpu_link_closure` (CMake) | transitive **link** closure of `ft_vox_core`, `ft_vox_headless` and every CPU-only test contains no SDL3/Vulkan/volk/VMA/miniz/ImGui | every configure |
-| `CoreIncludeGuard` (`check_core_includes.py`) | transitive **include** closure of the core public headers/TUs is render-free (Chunk/ allowlist fail-closed) | CTest |
-| `HeadlessDeps` (`check_headless_deps.py`) | runner include closure + real link artifacts (core **and** headless) + no graphics discovery in a CPU-only cache | CTest |
-| `FT_VOX_GRAPHICS=OFF` + `CpuOnlyBuild` | clean CPU-only configure/build/test with the graphics stack **not discovered at all** | configure / opt-in CTest |
-| `FT_VOX_PORTABLE_FP` | canonical FP codegen for cross-machine digest comparison | option |
+| `ft_vox_assert_cpu_link_closure` (CMake) | transitive **link** closure of `ft_vox_core`, `ft_vox_headless` and every CPU-only test contains no SDL3/Vulkan/volk/VMA/miniz/ImGui — the authoritative link gate (incl. MSVC, where a static lib has no link step) | every configure |
+| `CoreIncludeGuard` (`check_core_includes.py`) | transitive **include** closure of the **core** public headers/TUs is render-free (Chunk/ allowlist fail-closed) | CTest |
+| `HeadlessDeps` (`check_headless_deps.py`) | **runner** include closure + core/runner **link artifacts** (MSVC core static-lib scan reads `ProjectReference`) + no graphics discovery in a CPU-only cache | CTest |
+| `FT_VOX_GRAPHICS=OFF` + `CpuOnlyBuild` | clean CPU-only configure/build/test with the graphics stack **not discovered at all** | configure / opt-in CTest + CI |
+
+(`FT_VOX_PORTABLE_FP` is a codegen *option* for cross-machine digest comparison,
+not an enforcement gate.)
 
 ---
 

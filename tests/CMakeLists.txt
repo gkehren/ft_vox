@@ -1371,15 +1371,28 @@ endif()
 # closure. The configure-time assertion (ft_vox_assert_cpu_link_closure, defined
 # in the top-level CMakeLists) makes the boundary a repeatable build gate, not
 # just a comment. Graphical test targets are intentionally NOT checked here.
+#
+# These CPU test targets are defined UNCONDITIONALLY above, so a listed name
+# that does not exist is a stale-list error (e.g. after a rename), NOT a silent
+# skip (review #220). test_network is the one exception: it is only defined when
+# Boost is found, so it is checked conditionally.
 # ---------------------------------------------------------------------------
 foreach(_cpu_test IN ITEMS
     test_physics test_core_contracts test_voxel_world test_game_simulation
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
-    test_frame_pacing test_world_save test_network)
-    if(TARGET ${_cpu_test})
-        ft_vox_assert_cpu_link_closure(${_cpu_test})
+    test_frame_pacing test_world_save)
+    if(NOT TARGET ${_cpu_test})
+        message(FATAL_ERROR
+            "CPU-only dependency guard lists '${_cpu_test}' but no such target exists "
+            "(renamed/removed?). Update the guard list in tests/CMakeLists.txt — the "
+            "boundary gate must not go quiet (issue #211).")
     endif()
+    ft_vox_assert_cpu_link_closure(${_cpu_test})
 endforeach()
+# test_network is Boost-conditional (defined only when Boost::system exists).
+if(TARGET test_network)
+    ft_vox_assert_cpu_link_closure(test_network)
+endif()
 

@@ -2,10 +2,19 @@
 
 - trials per binary: **5** (interleaved baseline/current)
 - benchmark: `--seed 42 --benchmark 20` (same device/flags/settings)
-- baseline: `D:\Projects\ft_vox_baseline_204\build\Release\ft_vox.exe`
-- current: `build\Release\ft_vox.exe`
+- baseline: `ft_vox` (pre-epic git `4f931d6`)
+- current: `ft_vox` (post-refactor Phase G tree)
 
-| Metric | Unit | Baseline (median) | Current (median) | Delta | Consistent regression? |
+> Recorded with the protocol driver before review #220 hardened it. The driver
+> now (a) validates the two binaries are **different builds** via the report
+> `Revision:` git hash, (b) shows unmatched metrics as explicit `n/a` rows and
+> errors if a metric is missing from every trial, and (c) surfaces a **median**
+> regression beyond the noise band as "investigate" without requiring per-trial
+> unanimity. Under that rule the `streaming` row below (+11.4% median) is an
+> "investigate (median; not all trials)" — it is disclosed in
+> [`issue-211-phase-g.md`](issue-211-phase-g.md) and tracked in #219, not hidden.
+
+| Metric | Unit | Baseline (median) | Current (median) | Delta | Investigate? |
 |---|---|---:|---:|---:|---|
 | score | score | 9902 | 9904 | +0.0% | no |
 | frame_avg | ms | 1.885 | 1.859 | -1.4% | no |
@@ -15,7 +24,7 @@
 | avg_fps | fps | 530.6 | 537.9 | +1.4% | no |
 | fps_1low | fps | 212.4 | 212.6 | +0.1% | no |
 | over33 | frames | 0 | 0 | +0.0% | no |
-| streaming | ms | 1.054 | 1.174 | +11.4% | no |
+| streaming | ms | 1.054 | 1.174 | +11.4% | **INVESTIGATE** (median; not all trials) |
 | record | ms | 0.2848 | 0.2805 | -1.5% | no |
 | terraingen | ms/chunk | 2.469 | 2.469 | -0.0% | no |
 | meshbuild | ms/mesh | 4.058 | 4.096 | +1.0% | no |
@@ -29,7 +38,13 @@
 
 Grade: baseline S / current S
 
-**No consistent regression above the 5.0% noise band across 5 interleaved trials.** Per-trial spread is machine noise; deterministic workload character (chunks drawn, meshes built, queue peaks, resident bytes) is unchanged.
+**No frame-time/GPU/memory regression above the 5.0% noise band across 5
+interleaved trials** (frame p95/p99/avg/FPS/1%-low/GPU/resident bytes all
+parity-or-better). The `streaming` CPU-scope median (+11.4%) is flagged
+"investigate": it is the event-boundary cost, present in 4/5 trials (trial 4
+current faster), disclosed in the closure record and tracked in #219.
+Deterministic workload character (chunks drawn, meshes built, queue peaks,
+resident bytes) is unchanged.
 
 ## Per-trial values (interleaved)
 
