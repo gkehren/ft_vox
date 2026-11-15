@@ -1,5 +1,5 @@
 #include "VoxelPool.hpp"
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 #include <algorithm>
 #include <cassert>
 

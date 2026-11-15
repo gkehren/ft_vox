@@ -3,7 +3,7 @@
 // high-water behavior, concurrency, foreign release and double release
 // refusal (Release-safe), and pool growth events.
 #include <Chunk/VoxelPool.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 
 #include <algorithm>
 #include <atomic>

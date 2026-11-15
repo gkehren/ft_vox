@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forbidden-include-chain guard for the CPU-only core (issue #205, Epic #204 A).
+"""Forbidden-include-chain guard for the CPU-only core (issues #205/#206, Epic #204 A/B).
 
 The authoritative simulation / persistence library `ft_vox_core` and its public
 contracts (src/Core/SimContracts.hpp) must stay render-independent: they may
@@ -35,10 +35,19 @@ SRC = REPO_ROOT / "src"
 # .cpp files also catches a direct forbidden include added to an implementation.
 ROOTS = [
     "Core/SimContracts.hpp",
+    "Core/ThreadPool.hpp",
+    "Core/WorkloadTelemetry.hpp",
     "World/WorldSave.cpp",
     "World/WorldPersistence.cpp",
+    "World/WorldChunk.cpp",
+    "World/VoxelWorld.cpp",
+    "World/WorldChunk.hpp",
+    "World/VoxelWorld.hpp",
+    "World/WorldCollisionView.hpp",
     "Chunk/TerrainGenerator.cpp",
     "Chunk/TerrainVegetation.cpp",
+    "Chunk/VoxelPool.cpp",
+    "Chunk/ChunkBorders.cpp",
     "Entities/MobSystem.cpp",
     "Entities/MobModel.cpp",
     "Physics/VoxelCollision.hpp",
@@ -71,10 +80,13 @@ FORBIDDEN_DIRS = {
 # render-coupled header (e.g. ChunkRenderBridge.hpp) slip through unnoticed.
 
 # CPU-only headers (std / glm / utils.hpp includes only) the core closure may
-# reach. ChunkBorders is already included by TerrainGenerator.hpp.
+# reach. ChunkBorders is already included by TerrainGenerator.hpp. VoxelPool
+# was lifted into the core by Phase B (#206): the authoritative world owns
+# the voxel backing pools.
 CHUNK_CPU_ALLOWED = {
     "LightSample.hpp",
     "ChunkBorders.hpp",
+    "VoxelPool.hpp",
     "StreamHelpers.hpp",
     "BiomeRegionGrid.hpp",
     "TerrainGenerator.hpp",
@@ -92,10 +104,9 @@ CHUNK_RENDER_COUPLED = {
 
 # Not yet migrated — CPU-only, but still owned by the render-side chunk/mesh
 # system. Forbidden TODAY because the migration has not happened, NOT because
-# of GPU coupling: Phase B (#206) lifts the authoritative storage into the sim
-# world and Phase C (#207) re-homes the derived mesh/light payloads.
+# of GPU coupling: Phase B (#206) lifted the authoritative storage (VoxelPool)
+# into the sim world; Phase C (#207) re-homes the derived mesh/light payloads.
 CHUNK_NOT_YET_MIGRATED = {
-    "VoxelPool.hpp",
     "ChunkLightPool.hpp",
     "ChunkLightHalo.hpp",
     "ChunkPool.hpp",

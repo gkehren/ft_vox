@@ -3,7 +3,8 @@
 Issue #101 adds an independent, process-local telemetry registry. It does not
 change CPU scope sampling, worker profiler epochs, GPU timestamps or scoring.
 `BenchmarkReport::workload` provides structured arrays with the enum keys and
-stable text labels in `Engine/WorkloadTelemetry.hpp`. Saved reports and clipboard
+stable text labels in `Core/WorkloadTelemetry.hpp` (relocated from `Engine/` in
+issue #206). Saved reports and clipboard
 output include the same snapshot in a **Memory / workload** section.
 
 Set `FT_VOX_TELEMETRY=0` before launching to disable publications, event atomics
@@ -19,9 +20,9 @@ and peak values. Events expose interval totals and averages per measured frame.
 | Fields | Meaning |
 | --- | --- |
 | `voxel.bytes` | Resident voxel storage capacity owned by active, voxel-backed chunks (free pool slots carry 0) |
-| `voxel.pool.*` | VoxelStoragePool state. **Persistent:** `capacity` and `capacityBytes` describe retained backing memory (64 KiB blocks including the free list) and survive capture boundaries. **Capture-local:** `active` and `free` are sampled during measured frames and reset at the beginning of each capture, so previous runs cannot contribute their peaks. `voxel.pool.growEvents` counts allocations beyond the free list in the interval (steady-state streaming should be near zero) |
+| `voxel.pool.*` | The authoritative `VoxelWorld` voxel pool state (issue #206: bound render handles write through world records, so these gauges read `VoxelWorld::voxelPool()`, not `ChunkPool`). **Persistent:** `capacity` and `capacityBytes` describe retained backing memory (64 KiB blocks including the free list) and survive capture boundaries. **Capture-local:** `active` and `free` are sampled during measured frames and reset at the beginning of each capture, so previous runs cannot contribute their peaks. `voxel.pool.growEvents` counts allocations beyond the free list in the interval (steady-state streaming should be near zero) |
 | `shell.sizeBytes`, `shell.capacityBytes` | Legacy names kept for #101 compatibility: the currently borrowed compact border bytes (17,408 per meshing chunk), 0 once returned after upload. The true retained metric is `border.pool.capacityBytes` |
-| `border.pool.*` | BorderPool state sampled once per measured frame. **Persistent:** `capacity`, `capacityBytes` (retained blocks including the free list). **Capture-local:** `active`, `free`. `border.pool.growEvents` counts allocations beyond the free list in the interval |
+| `border.pool.*` | The authoritative `VoxelWorld` border pool state (`VoxelWorld::borderPool()`, issue #206), sampled once per measured frame. **Persistent:** `capacity`, `capacityBytes` (retained blocks including the free list). **Capture-local:** `active`, `free`. `border.pool.growEvents` counts allocations beyond the free list in the interval |
 | `cpu.{opaque,water}.{vertex,index}.*` | Since #104 these describe the pooled mesh build results (issue #104), not per-chunk vectors: `sizeBytes` is the live payload of results in flight or attached to chunks awaiting upload, `capacityBytes` is retained capacity across the whole pool (active + free list). Chunks no longer own mesh build buffers. Counters are maintained by pool bookkeeping under the pool mutex (`finishBuild`/`release`), never by reading vectors a worker may be mutating |
 | `cpu.mesh.capacityBytes` | Combined retained mesh build capacity across the `MeshResultPool`, with its own simultaneous peak. Scales with concurrent meshing/upload work, not with the number of pooled chunks |
 | `mesh.pool.*` | MeshResultPool state sampled once per measured frame. **Persistent:** `capacity`, `capacityBytes` (retained build-result blocks including the free list). **Capture-local:** `active` (blocks in flight or attached pending upload), `free`. `mesh.pool.growEvents` counts allocations beyond the free list in the interval. The pool is a high-water reusable pool whose capacity follows the observed in-flight/backlogged working set - not a hard-bounded pool; these gauges expose any growth |
@@ -48,9 +49,11 @@ overhead, vector control objects, worker-local scratch vectors, terrain-generato
 temporary data and container overhead in ChunkManager/ChunkPool. Fixed per-column
 and occupancy storage is reported separately from vector allocations.
 
-The exclusive chunk owner publishes voxel/border/column ownership at the end of
-construction, generation, meshing, upload, reset and shell mutation. Move and
-destruction update ownership as well. The sampler never reads vectors while a
+The authoritative `WorldChunk` record publishes voxel/border/column ownership at
+the end of construction, generation, reset and shell mutation; move and
+destruction update ownership as well (issue #206: render handles allocate their
+private record lazily, so idle bound handles contribute no column/occupancy
+bytes). The sampler never reads vectors while a
 worker modifies them. Published peaks capture those boundaries, not transient
 vector reallocation overlap or a partially completed mesh. Already allocated
 free-pool memory remains included even when active chunk count drops.

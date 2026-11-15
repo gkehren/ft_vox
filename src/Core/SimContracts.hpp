@@ -80,16 +80,16 @@ using SimBody = physics::Body;
 using QueryStats = physics::QueryStats;
 
 // --- Revision / identity (authoritative content versioning) -----------------
-// Render-independent mirror of the (generation, revision) pair that a mesh
-// build must match at publish time (see Chunk/ChunkMeshResult.hpp). Kept here
-// as a plain value so phase B (authoritative world) and phase C (render bridge)
-// can stamp/validate content without including GPU-coupled Chunk headers.
+// The render-independent (generation, revision) pair that a mesh build must
+// match at publish time. Kept here as a plain value so the authoritative
+// world (phase B) and the render bridge (phase C) can stamp/validate content
+// without including GPU-coupled Chunk headers.
 //   generation -> physical chunk incarnation (recycle / reset id)
 //   revision   -> logical voxel/border content revision
-// KNOWN DUPLICATION: MeshBuildResult still carries its own generation/revision
-// pair. Phase A keeps both (zero-source-diff guarantee); #206/#207 MUST make
-// sim::ChunkIdentity the single source of the pair and delete that copy
-// (docs/simulation-render-contracts.md §7 checkpoint).
+// SINGLE SOURCE (issue #206, Phase B): the authoritative WorldChunk record
+// owns this pair; MeshBuildResult carries a sim::ChunkIdentity stamped from
+// the record at dispatch (its former duplicate generation/revision fields
+// were deleted). Publish validates the result's identity against the record.
 struct ChunkIdentity
 {
     int32_t chunkX{0};

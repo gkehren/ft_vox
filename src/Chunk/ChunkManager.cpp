@@ -1,3 +1,10 @@
+// ChunkManager — render adapter over VoxelWorld (issue #206, Epic #204 B).
+// The authoritative side (streaming residency, terrain publication, logical
+// edits, persistence) lives in World/VoxelWorld.cpp; this unit keeps the
+// derived render pipeline: mesh/light dispatch, GPU uploads, commit groups,
+// visibility, light-cache intent, deferred GPU retirement and the debug
+// trace. World events are drained on the main thread right after each world
+// call so render handles never observe a recycled record.
 #include "ChunkManager.hpp"
 
 #include <Chunk/ChunkMeshResult.hpp>
@@ -25,34 +32,70 @@ namespace
 {
 constexpr int kDeferredReleaseFrames = 3; // >= frames-in-flight
 
+/// Worker-profiling seam implementation: forwards the world's generation
+/// job samples to the engine Profiler (the world itself is profiler-free).
+struct ProfilerWorkerObserver final : WorldWorkerObserver
+{
+	uint64_t workerCaptureEpoch() const override { return GetProfiler().captureEpoch(); }
+	void addWorkerSample(const char *stage, float ms, uint64_t epoch) override
+	{
+		GetProfiler().addWorkerSample(stage, ms, epoch);
+	}
+};
+ProfilerWorkerObserver g_profilerWorkerObserver;
+
+/// Normalized XZ camera forward (fallback +Z when the forward is vertical).
+glm::vec2 normalizedForwardXZ(const Camera &camera)
+{
+	glm::vec2 fwd(camera.getFront().x, camera.getFront().z);
+	if (glm::dot(fwd, fwd) < 1e-6f)
+		fwd = glm::vec2(0.f, 1.f);
+	return glm::normalize(fwd);
+}
+
+WorldStreamSettings worldStreamSettings(const RenderSettings &settings)
+{
+	WorldStreamSettings ws;
+	ws.maxRenderDistance = settings.maxRenderDistance;
+	ws.minRenderDistance = settings.minRenderDistance;
+	ws.streamFrontBias = settings.streamFrontBias;
+	return ws;
+}
 } // namespace
 
 ChunkManager::ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool)
-	: m_terrainGenerator(terrainGenerator), m_threadPool(threadPool), m_chunkPool(chunkPool)
+	: m_world(std::make_unique<VoxelWorld>(terrainGenerator, threadPool)),
+	  m_threadPool(threadPool), m_chunkPool(chunkPool)
 {
+	m_world->setWorkerObserver(&g_profilerWorkerObserver);
 }
 
 ChunkManager::~ChunkManager()
 {
 	// Persistent-world durability comes FIRST (issue #180 review round 3):
-	// while persistence is open, processFinishedJobs() must still own every
-	// completion, so the close path can publish finished gen/mesh/light
-	// jobs, clear inTransit, apply PendingVoxelEdits and capture edits
-	// BEFORE any teardown discards state. The old order (drain counters ->
-	// swap out and discard the completion queues -> close) starved the
-	// close path and silently lost edits accepted against in-flight work.
-	if (m_persistence && !forceCloseWorldForShutdown())
+	// while persistence is open, the close path must still own every
+	// completion, so publish finished gen/mesh/light jobs, clear inTransit,
+	// apply deferred edits and capture edits BEFORE any teardown discards
+	// state.
+	if (m_world->isWorldOpen())
 	{
-		// Destruction cannot be undone, but a partial save must never be
-		// reported as success (issue #180 review round 4).
-		std::cerr << "[world] final shutdown did not persist all accepted edits" << std::endl;
+		// Combined quiesce (render + world), then the unconditional
+		// destructor-only close: resolve stranded edits, capture, flush,
+		// shutdown. Destruction has no retry point.
+		drainAsyncJobsForPersistence();
+		if (!m_world->forceCloseWorldForShutdown())
+		{
+			// Destruction cannot be undone, but a partial save must never be
+			// reported as success (issue #180 review round 4).
+			std::cerr << "[world] final shutdown did not persist all accepted edits" << std::endl;
+		}
 	}
 
 	// Generic teardown: best-effort drain of async work so we don't release
 	// chunks still in workers. After the force-close above the completion
 	// queues are normally empty; this only sweeps stragglers from a world
 	// that was never opened.
-	while (m_pendingGenJobsCount.load() > 0 || m_pendingMeshJobsCount.load() > 0 ||
+	while (m_world->pendingGenJobs() > 0 || m_pendingMeshJobsCount.load() > 0 ||
 		   m_pendingLightJobsCount.load() > 0)
 	{
 		std::this_thread::yield();
@@ -64,7 +107,6 @@ ChunkManager::~ChunkManager()
 		std::lock_guard<std::mutex> lock(m_completedJobsMutex);
 		completed.swap(m_completedMeshJobs);
 		completedLight.swap(m_completedLightJobs);
-		m_completedGenerationChunks.clear();
 	}
 	for (auto &job : completed)
 	{
@@ -84,8 +126,12 @@ ChunkManager::~ChunkManager()
 
 	for (auto &[pos, chunkPtr] : m_chunks)
 	{
-		if (chunkPtr && m_chunkPool)
-			m_chunkPool->release(chunkPtr);
+		if (chunkPtr)
+		{
+			chunkPtr->unbindWorldChunk();
+			if (m_chunkPool)
+				m_chunkPool->release(chunkPtr);
+		}
 	}
 	m_chunks.clear();
 	m_activeChunks.clear();
@@ -96,291 +142,225 @@ ChunkManager::~ChunkManager()
 			m_chunkPool->release(c);
 	}
 	m_deferredRelease.clear();
+	// m_world destructs last (member order): its records return their
+	// backing to the world pools after every render handle is gone.
 }
 
 glm::ivec3 ChunkManager::worldToChunkCoord(const glm::vec3 &worldPos)
 {
-	return {
-		static_cast<int>(std::floor(worldPos.x / static_cast<float>(CHUNK_SIZE))),
-		0,
-		static_cast<int>(std::floor(worldPos.z / static_cast<float>(CHUNK_SIZE)))};
+	return VoxelWorld::worldToChunkCoord(worldPos);
 }
+
+// ---------------------------------------------------------------------------
+// World event stream → render handle synchronization (issue #206)
+// ---------------------------------------------------------------------------
+
+void ChunkManager::drainWorldEvents()
+{
+	// Observability (issue #206 review): the world bounds its event stream and
+	// drops the oldest events if a consumer falls behind. Surface that loss
+	// once per change instead of leaving droppedEventCount() test-only. At
+	// frame cadence this never fires.
+	const uint64_t dropped = m_world->droppedEventCount();
+	if (dropped != m_lastDroppedEvents)
+	{
+		std::cerr << "[world] event stream dropped " << dropped
+				  << " event(s) — render consumer fell behind the authoritative world\n";
+		m_lastDroppedEvents = dropped;
+	}
+	std::vector<WorldEvent> events = m_world->takeEvents();
+	if (events.empty())
+		return;
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
+	for (const WorldEvent &e : events)
+	{
+		switch (e.kind)
+		{
+		case WorldEventKind::Loaded:
+			onWorldLoaded(e);
+			break;
+		case WorldEventKind::Unloaded:
+			onWorldUnloaded(e);
+			break;
+		case WorldEventKind::GenQueued:
+			recordWorldEvent(e.coord, e.revision, "genQueued");
+			break;
+		case WorldEventKind::Generated:
+			onWorldGenerated(e);
+			break;
+		case WorldEventKind::EditApplied:
+			onWorldEditApplied(e);
+			break;
+		}
+	}
+}
+
+void ChunkManager::onWorldLoaded(const WorldEvent &e)
+{
+	if (m_chunks.find(e.coord) != m_chunks.end())
+		return;
+	WorldChunk *record = m_world->getChunk(e.coord);
+	if (!record)
+		return;
+	if (!m_chunkPool)
+		return;
+	Chunk *chunk = m_chunkPool->acquire(glm::vec3(
+		static_cast<float>(e.coord.x * CHUNK_SIZE), 0.0f,
+		static_cast<float>(e.coord.z * CHUNK_SIZE)));
+	if (!chunk)
+	{
+		// Defensive: the load budget is clamped by the render pool free
+		// count, so this only fires on an unexpected race. Retry next tick.
+		m_pendingBinds.push_back(e.coord);
+		return;
+	}
+	chunk->bindWorldChunk(record);
+	m_chunks[e.coord] = chunk;
+	chunk->setActiveIndex(m_activeChunks.size());
+	m_activeChunks.push_back(chunk);
+	// Generate even before frustum test so the world fills around the player.
+	chunk->setVisible(true);
+	recordChunkEvent(chunk, "load");
+}
+
+void ChunkManager::retryPendingBinds()
+{
+	if (m_pendingBinds.empty())
+		return;
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
+	std::vector<glm::ivec3> stillPending;
+	for (const glm::ivec3 &coord : m_pendingBinds)
+	{
+		if (m_chunks.find(coord) != m_chunks.end())
+			continue;
+		WorldChunk *record = m_world->getChunk(coord);
+		if (!record)
+			continue; // unloaded meanwhile
+		Chunk *chunk = m_chunkPool ? m_chunkPool->acquire(glm::vec3(
+										  static_cast<float>(coord.x * CHUNK_SIZE), 0.0f,
+										  static_cast<float>(coord.z * CHUNK_SIZE)))
+									: nullptr;
+		if (!chunk)
+		{
+			stillPending.push_back(coord);
+			continue;
+		}
+		chunk->bindWorldChunk(record);
+		m_chunks[coord] = chunk;
+		chunk->setActiveIndex(m_activeChunks.size());
+		m_activeChunks.push_back(chunk);
+		chunk->setVisible(true);
+		recordChunkEvent(chunk, "load");
+	}
+	m_pendingBinds.swap(stillPending);
+}
+
+void ChunkManager::onWorldUnloaded(const WorldEvent &e)
+{
+	auto it = m_chunks.find(e.coord);
+	if (it == m_chunks.end())
+		return;
+	Chunk *chunk = it->second;
+	if (!chunk)
+	{
+		m_chunks.erase(it);
+		return;
+	}
+	const size_t activeIdx = chunk->getActiveIndex();
+	if (activeIdx < m_activeChunks.size() && m_activeChunks[activeIdx] == chunk)
+	{
+		Chunk *lastChunk = m_activeChunks.back();
+		m_activeChunks[activeIdx] = lastChunk;
+		lastChunk->setActiveIndex(activeIdx);
+		m_activeChunks.pop_back();
+		chunk->setActiveIndex(SIZE_MAX);
+	}
+	m_chunks.erase(it);
+	removeChunkFromCommitGroups(chunk);
+	// The authoritative record is already retired by the world; drop the
+	// binding so the parked render handle never reads a recycled record.
+	chunk->unbindWorldChunk();
+	if (!e.external)
+	{
+		m_deferredRelease.push_back(chunk);
+		m_deferredReleaseAge = 0; // reset age so new unloads wait full delay
+	}
+	// External (test-registered) handles are owned by the test: drop the
+	// reference only.
+}
+
+void ChunkManager::onWorldGenerated(const WorldEvent &e)
+{
+	auto it = m_chunks.find(e.coord);
+	if (it == m_chunks.end() || !it->second)
+		return;
+	Chunk *chunk = it->second;
+	// Publish the render flags the pre-split generateTerrain() set inline
+	// (the worker only touches authoritative state now).
+	chunk->notifyTerrainGenerated();
+	recordChunkEvent(chunk, "genDone");
+	// New terrain can carry emissive sources whose light reaches into the
+	// side neighbors' halo radius (issue #141 review fix).
+	dirtyNeighborsForArrivedLight(chunk, e.coord);
+}
+
+void ChunkManager::onWorldEditApplied(const WorldEvent &e)
+{
+	auto it = m_chunks.find(e.coord);
+	if (it == m_chunks.end() || !it->second)
+		return;
+	Chunk *chunk = it->second;
+	// Identity guard: the event must describe the bound incarnation.
+	if (chunk->worldChunk() == nullptr || chunk->meshGeneration() != e.generation)
+		return;
+	chunk->notifyEditApplied(e.x, e.y, e.z, e.type, e.previousType, e.borderNeighbor);
+	recordChunkEvent(chunk, e.borderNeighbor ? "editMirror" : "edit", chunk->dirtySections());
+	// Light-relevant edits near a border change the neighbors' propagated
+	// light too (issue #141 review fix); mirror writes are the owning
+	// chunk's edit seen from the other side and skip this.
+	if (!e.borderNeighbor)
+		markNeighborLightDirty(e.coord, e.x, e.y, e.z, e.previousType, e.type);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming / loading / generation (delegated to the authoritative world)
+// ---------------------------------------------------------------------------
 
 StreamingUpdateKind ChunkManager::updateStreaming(const Camera &camera, const RenderSettings &settings)
 {
-	const glm::ivec3 camChunk = worldToChunkCoord(camera.getPosition());
-
-	// Unload triggers mirror the load-side reconciliation triggers minus
-	// intra-chunk anchor moves: the 1.5x unload hysteresis makes 4-block
-	// precision worthless and the m_activeChunks scan is the expensive part.
-	// Read BEFORE loadChunksAroundPlayer publishes the new camera state
-	// (issue #108 review: one trigger definition, no duplicated logic).
-	const bool unloadRelevant = !m_streamState.initialized ||
-								camChunk != m_streamState.lastCamChunk ||
-								settings.maxRenderDistance != m_streamState.lastMaxRenderDistance ||
-								streamFrontBiasChanged(settings.streamFrontBias, m_streamState.lastStreamFrontBias);
-
-	++m_streamFramesSinceUnloadCheck;
-	if (unloadRelevant || m_streamFramesSinceUnloadCheck >= kUnloadCheckIntervalFrames)
-	{
-		queueUnloadOutOfRange(camera, settings);
-		++m_streamStats.unloadScans;
-		m_streamFramesSinceUnloadCheck = 0;
-	}
-
-	return loadChunksAroundPlayer(camChunk, camera, settings);
+	// The world grows its own record pool inside updateStreaming (issue
+	// #206); the Engine grows the render ChunkPool on the same estimate.
+	const StreamingUpdateKind kind =
+		m_world->updateStreaming(camera.getPosition(), normalizedForwardXZ(camera),
+								 worldStreamSettings(settings));
+	drainWorldEvents();
+	return kind;
 }
 
 void ChunkManager::processChunkLoading(int budget)
 {
 	if (budget <= 0 || !m_chunkPool)
 		return;
-
-	// Back-pressure: never pull more candidates than free pool slots.
-	const size_t freeSlots = m_chunkPool->freeCount();
-	if (freeSlots == 0)
+	// Back-pressure on BOTH pools: a world record without a render handle
+	// cannot mesh, so never load more records than render slots available.
+	budget = std::min(budget, static_cast<int>(m_chunkPool->freeCount()));
+	if (budget <= 0)
 		return;
-	budget = std::min(budget, static_cast<int>(freeSlots));
-
-	std::vector<glm::ivec3> toLoad;
-	{
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		if (m_queueNeedsSort)
-		{
-			if (m_loadQueueHead > 0)
-			{
-				m_loadQueue.erase(m_loadQueue.begin(), m_loadQueue.begin() + m_loadQueueHead);
-				m_loadQueueHead = 0;
-			}
-			sortLoadCandidatesNearestFirst(m_loadQueue);
-			++m_streamStats.queueSorts;
-			m_queueNeedsSort = false;
-		}
-
-		const size_t available = (m_loadQueue.size() >= m_loadQueueHead) ? (m_loadQueue.size() - m_loadQueueHead) : 0;
-		const int n = std::min(budget, static_cast<int>(available));
-		toLoad.reserve(static_cast<size_t>(n));
-		for (int i = 0; i < n; ++i)
-		{
-			const glm::ivec3 pos = m_loadQueue[m_loadQueueHead + static_cast<size_t>(i)].pos;
-			m_enqueuedLoads.erase(pos);
-			toLoad.push_back(pos);
-		}
-		m_loadQueueHead += static_cast<size_t>(n);
-		if (m_loadQueueHead == m_loadQueue.size())
-		{
-			m_loadQueue.clear();
-			m_loadQueueHead = 0;
-		}
-	}
-	if (toLoad.empty())
-		return;
-
-	std::vector<std::pair<glm::ivec3, Chunk *>> acquired;
-	std::vector<glm::ivec3> rejected;
-	acquired.reserve(toLoad.size());
-	for (const auto &chunkPos : toLoad)
-	{
-		Chunk *chunk = m_chunkPool->acquire(glm::vec3(
-			static_cast<float>(chunkPos.x * CHUNK_SIZE), 0.0f,
-			static_cast<float>(chunkPos.z * CHUNK_SIZE)));
-		if (chunk)
-		{
-			// Persistent-edit tracking (issue #180): arm while a world is
-			// open so every in-chunk edit is recorded for the save pipeline.
-			chunk->setTrackPersistentEdits(isWorldOpen());
-			acquired.emplace_back(chunkPos, chunk);
-		}
-		else
-			rejected.push_back(chunkPos); // free list raced empty — re-queue below
-	}
-
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	for (const auto &pair : acquired)
-	{
-		if (m_chunks.find(pair.first) == m_chunks.end())
-		{
-			m_chunks[pair.first] = pair.second;
-			pair.second->setActiveIndex(m_activeChunks.size());
-			m_activeChunks.push_back(pair.second);
-			// Generate even before frustum test so the world fills around the player.
-			pair.second->setVisible(true);
-			recordChunkEvent(pair.second, "load");
-		}
-		else
-		{
-			m_chunkPool->release(pair.second);
-		}
-	}
-
-	// Put rejected loads back (nearest-first will re-sort next tick).
-	for (const glm::ivec3 &pos : rejected)
-	{
-		if (m_chunks.find(pos) != m_chunks.end())
-			continue;
-		if (m_enqueuedLoads.count(pos) != 0)
-			continue;
-		m_loadQueue.push_back({pos, 0.f});
-		m_enqueuedLoads.insert(pos);
-		m_queueNeedsSort = true;
-	}
-}
-
-void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int windowHeight,
-									const RenderSettings &settings)
-{
-	// Timed by Engine PROFILE_SCOPE("Visibility") — keep body lean.
-
-	const float farPlane = computeCameraFarPlane(settings.maxRenderDistance);
-	const glm::mat4 clipMatrix =
-		camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight),
-								   farPlane) *
-		camera.getViewMatrix();
-
-	std::array<glm::vec4, 6> planes{};
-	planes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0);
-	planes[1] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 0);
-	planes[2] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 1);
-	planes[3] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 1);
-	planes[4] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 2);
-	planes[5] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 2);
-
-	std::array<glm::vec3, 6> planeNormals;
-	std::array<float, 6> planeOffsets;
-	for (size_t i = 0; i < 6; ++i)
-	{
-		auto &p = planes[i];
-		const float len = glm::length(glm::vec3(p));
-		if (len > 1e-6f)
-			p /= len;
-
-		planeNormals[i] = glm::vec3(p);
-		const glm::vec3 optOffset(
-			p.x >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f,
-			p.y >= 0.f ? static_cast<float>(CHUNK_HEIGHT) : 0.f,
-			p.z >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f
-		);
-		planeOffsets[i] = p.w + glm::dot(planeNormals[i], optOffset);
-	}
-
-	const glm::vec3 camPos = camera.getPosition();
-	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
-	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
-
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	for (Chunk *chunk : m_activeChunks)
-	{
-		const glm::vec3 aabbMin = chunk->getPosition();
-
-		bool visible = true;
-		for (size_t i = 0; i < 6; ++i)
-		{
-			if (glm::dot(planeNormals[i], aabbMin) + planeOffsets[i] < 0.f)
-			{
-				visible = false;
-				break;
-			}
-		}
-		chunk->setVisible(visible);
-
-		const float dx = aabbMin.x - camOffsetX;
-		const float dz = aabbMin.z - camOffsetZ;
-		updateEntityLightCacheIntent(*chunk, dx * dx + dz * dz);
-	}
-}
-
-void ChunkManager::updateEntityLightCacheIntent(Chunk &chunk, float distSq)
-{
-	// Acquire/release hysteresis (issue #172): outside chunks acquire at the
-	// 128m radius; held caches are retained until the chunk leaves the
-	// larger release radius, so camera movement around the acquire edge
-	// cannot oscillate allocate/free cycles of the 128 KiB blocks.
-	const bool previous = chunk.localLightCacheWanted();
-	const bool wanted = previous ? (distSq <= kEntityLightCacheReleaseRadiusSq)
-								 : (distSq <= kEntityLightCacheAcquireRadiusSq);
-	if (previous && !wanted)
-	{
-		chunk.releaseLightStorage();
-	}
-	chunk.setLocalLightCacheWanted(wanted);
+	m_world->processChunkLoading(budget);
+	drainWorldEvents();
+	retryPendingBinds();
 }
 
 void ChunkManager::generatePendingVoxels(const Camera &camera, const RenderSettings &settings, int budget)
 {
-	if (!m_terrainGenerator || !m_threadPool || budget <= 0)
-		return;
-
-	struct Item
-	{
-		Chunk *chunk;
-		float distSq;
-	};
-
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	thread_local std::vector<Item> queue;
-	queue.clear();
-	queue.reserve(m_activeChunks.size());
-	const glm::vec3 camPos = camera.getPosition();
-	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
-	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
-
-	for (Chunk *chunk : m_activeChunks)
-	{
-		if (chunk->getState() == ChunkState::UNLOADED && !chunk->isInTransit())
-		{
-			const glm::vec3 p = chunk->getPosition();
-			const float dx = p.x - camOffsetX;
-			const float dz = p.z - camOffsetZ;
-			queue.push_back({chunk, dx * dx + dz * dz});
-		}
-	}
-
-	const int n = std::min(budget, static_cast<int>(queue.size()));
-	if (n <= 0)
-		return;
-
-	std::partial_sort(queue.begin(), queue.begin() + n, queue.end(),
-					  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
-
-	const int seed = m_terrainGenerator->getSeed();
 	const float lodThresh = static_cast<float>(settings.minRenderDistance) * 2.f;
-	const float lodThreshSq = lodThresh * lodThresh;
-
-	for (int i = 0; i < n; ++i)
-	{
-		Chunk *chunk = queue[i].chunk;
-		if (!chunk->prepareVoxelStorageForGeneration())
-			continue; // Allocation failed (e.g. OOM), retry next tick
-		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThreshSq);
-		chunk->setInTransit(true);
-		recordChunkEvent(chunk, "genQueued");
-		m_pendingGenJobsCount.fetch_add(1);
-		const auto captureEpoch = GetProfiler().captureEpoch();
-		const auto queuedAt = std::chrono::steady_clock::now();
-		m_threadPool->enqueue(prio, [chunk, seed, this, queuedAt, captureEpoch]() {
-			const auto t0 = std::chrono::steady_clock::now();
-			GetProfiler().addWorkerSample("TerrainQueue",
-				std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
-			TerrainGenerator &localGen = TerrainGenerator::getThreadLocal(seed);
-			chunk->generateTerrain(localGen);
-			// Saved overrides re-apply deterministically right after
-			// generation (issue #180): the job owns the chunk (in transit,
-			// unpublished) and the first mesh after generation covers every
-			// touched section, so this is race-free and meshes correctly.
-			applyPersistentOverrides(chunk);
-			const float ms = std::chrono::duration<float, std::milli>(
-								 std::chrono::steady_clock::now() - t0)
-								 .count();
-			GetProfiler().addWorkerSample("TerrainGen", ms, captureEpoch);
-
-			{
-				std::lock_guard<std::mutex> lk(m_completedJobsMutex);
-				m_completedGenerationChunks.push_back(chunk);
-			}
-			m_pendingGenJobsCount.fetch_sub(1);
-		});
-	}
+	m_world->generatePendingVoxels(camera.getPosition(), lodThresh * lodThresh, budget);
+	drainWorldEvents();
 }
+
+// ---------------------------------------------------------------------------
+// Render mesh / light dispatch (derived; unchanged contracts)
+// ---------------------------------------------------------------------------
 
 void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings &settings, int budget)
 {
@@ -511,7 +491,13 @@ void ChunkManager::meshPendingChunks(const Camera &camera, const RenderSettings 
 		}
 		else
 		{
-			ensureShellPopulated(chunk, ci);
+			// LOCK ORDER: render lock (held by this method) -> world lock
+			// (inside ensureShellPopulated). The reverse order exists in
+			// ChunkCollisionView (world -> render); both are main-thread-only
+			// today so neither lock is cross-thread contended. See the lock
+			// order note in ChunkCollisionView.hpp before threading either
+			// path in Phase C/E (issue #206 review).
+			m_world->ensureShellPopulated(chunk->worldChunk());
 			ensureLightHalo(chunk, ci);
 			// Borrowed for this job only: the worker detaches and returns
 			// it when the build ends (success, failure or retry).
@@ -671,9 +657,8 @@ void ChunkManager::updateEntityLightCaches(const Camera &camera, const RenderSet
 		m_lightJobsDispatched.fetch_add(1, std::memory_order_relaxed);
 		const auto captureEpoch = GetProfiler().captureEpoch();
 		const auto queuedAt = std::chrono::steady_clock::now();
-		const uint64_t meshGeneration = chunk->meshGeneration();
-		const uint64_t meshRevision = chunk->meshRevision();
-		m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, halo, this, queuedAt, captureEpoch]() {
+		const sim::ChunkIdentity identity = chunk->chunkIdentity();
+		m_threadPool->enqueue(prio, [chunk, identity, halo, this, queuedAt, captureEpoch]() {
 			const auto t0 = std::chrono::steady_clock::now();
 			// Own queue bucket (issue #173 review): light-cache wait time is
 			// observable separately from real mesh jobs, so pool starvation
@@ -707,8 +692,8 @@ void ChunkManager::updateEntityLightCaches(const Camera &camera, const RenderSet
 					storage = nullptr;
 				}
 			}
-			// Detach the halo borrow while the chunk is still in transit (no
-			// main-thread hand can touch it), same contract as mesh jobs.
+			// Detach the halo borrow while the chunk is still in transit
+			// (no main-thread hand can touch it), same contract as mesh jobs.
 			chunk->setLightHalo(nullptr);
 			if (halo)
 				m_lightHaloPool.release(halo);
@@ -719,12 +704,16 @@ void ChunkManager::updateEntityLightCaches(const Camera &camera, const RenderSet
 
 			{
 				std::lock_guard<std::mutex> lk(m_completedJobsMutex);
-				m_completedLightJobs.push_back({chunk, storage, pool, meshGeneration, meshRevision});
+				m_completedLightJobs.push_back({chunk, storage, pool, identity});
 			}
 			m_pendingLightJobsCount.fetch_sub(1);
 		});
 	}
 }
+
+// ---------------------------------------------------------------------------
+// GPU uploads (derived; unchanged)
+// ---------------------------------------------------------------------------
 
 int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
                                       GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget)
@@ -933,35 +922,9 @@ int ChunkManager::uploadPendingMeshes(VmaAllocator allocator, StagingRing &stagi
 	return uploaded;
 }
 
-void ChunkManager::recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sections)
-{
-	if (!m_chunkTraceEnabled || !chunk)
-		return;
-
-	ChunkDebugEvent &e = m_chunkEventRing[m_chunkEventWrite];
-	e.timeSec = std::chrono::duration<double>(
-					std::chrono::steady_clock::now().time_since_epoch())
-					.count();
-	const glm::vec3 wp = chunk->getPosition();
-	e.chunk = glm::ivec3(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
-						 static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
-	e.kind = kind;
-	e.revision = chunk->meshRevision();
-	e.sections = sections;
-	m_chunkEventWrite = (m_chunkEventWrite + 1) % kChunkEventRingSize;
-	if (m_chunkEventCount < kChunkEventRingSize)
-		++m_chunkEventCount;
-}
-
-std::vector<ChunkDebugEvent> ChunkManager::chunkDebugEvents() const
-{
-	std::vector<ChunkDebugEvent> out;
-	out.reserve(m_chunkEventCount);
-	const size_t start = (m_chunkEventCount < kChunkEventRingSize) ? 0 : m_chunkEventWrite;
-	for (size_t i = 0; i < m_chunkEventCount; ++i)
-		out.push_back(m_chunkEventRing[(start + i) % kChunkEventRingSize]);
-	return out;
-}
+// ---------------------------------------------------------------------------
+// Deferred GPU retirement (render-only; edit capture moved to world unload)
+// ---------------------------------------------------------------------------
 
 void ChunkManager::processDeferredReleases()
 {
@@ -981,16 +944,14 @@ void ChunkManager::processDeferredReleases()
 	if (m_deferredReleaseAge < kDeferredReleaseFrames)
 		return;
 
-	// No device idle: hand GPU buffers to the retire queue, then recycle CPU chunk.
+	// No device idle: hand GPU buffers to the retire queue, then recycle the
+	// render handle. The authoritative edits were captured by the world at
+	// unload (issue #206); the record is already recycled.
 	for (Chunk *c : m_deferredRelease)
 	{
 		if (!c)
 			continue;
 		recordChunkEvent(c, "unload");
-		// Capture recorded edits BEFORE the pool's Full reset wipes the
-		// chunk's edit map (issue #180): the immutable payload is queued for
-		// the save worker, so recycling the Chunk object is safe.
-		captureChunkEditsForUnload(c);
 		c->releaseGPUDeferred();
 		if (m_chunkPool)
 			m_chunkPool->release(c);
@@ -999,41 +960,28 @@ void ChunkManager::processDeferredReleases()
 	m_deferredReleaseAge = 0;
 }
 
+// ---------------------------------------------------------------------------
+// Job publication: world generation → render mesh/light → deferred edits
+// (the issue #114 ordering is preserved: mesh publish sees the pending-edit
+// queue BEFORE applyPendingEdits lands the edits)
+// ---------------------------------------------------------------------------
+
 void ChunkManager::processFinishedJobs()
 {
-	std::vector<Chunk *> finishedGen;
+	// Stage 1: authoritative generation publication (+ Generated events →
+	// render flags and cross-chunk light arrival invalidation).
+	m_world->publishFinishedGeneration();
+	drainWorldEvents();
+
+	// Stage 2: render mesh/light publication.
 	std::vector<CompletedMeshJob> finishedMesh;
 	std::vector<CompletedLightJob> finishedLight;
 	{
 		std::lock_guard<std::mutex> lock(m_completedJobsMutex);
-		finishedGen.swap(m_completedGenerationChunks);
 		finishedMesh.swap(m_completedMeshJobs);
 		finishedLight.swap(m_completedLightJobs);
 	}
 
-	for (Chunk *chunk : finishedGen)
-	{
-		if (chunk)
-		{
-			chunk->setInTransit(false);
-			recordChunkEvent(chunk, "genDone");
-		}
-	}
-	// New terrain can carry emissive sources whose light reaches into the
-	// side neighbors' halo radius (issue #141 review fix): dirty the
-	// affected neighbors so their next remesh imports it.
-	{
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		for (Chunk *chunk : finishedGen)
-		{
-			if (!chunk)
-				continue;
-			const glm::vec3 wp = chunk->getPosition();
-			const glm::ivec3 ci(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
-								static_cast<int>(std::round(wp.z)) / CHUNK_SIZE);
-			dirtyNeighborsForArrivedLight(chunk, ci);
-		}
-	}
 	for (const CompletedMeshJob &job : finishedMesh)
 	{
 		// Publish before clearing in-transit so a recycled chunk can never
@@ -1041,7 +989,8 @@ void ChunkManager::processFinishedJobs()
 		// returned to their pool; a null result just unsticks the chunk.
 		// A queued edit made while this job ran supersedes the result
 		// outright: the mesh was built from pre-edit content (issue #114).
-		const bool supersededByEdit = job.chunk && hasPendingEditsFor(job.chunk);
+		const bool supersededByEdit =
+			job.chunk && m_world->hasPendingEditsFor(job.chunk->worldChunk());
 		if (job.result)
 		{
 			if (job.chunk && !supersededByEdit)
@@ -1067,8 +1016,6 @@ void ChunkManager::processFinishedJobs()
 		// chunk (an edit racing the build, a chunk arriving mid-mesh - issue
 		// #141 review round 2): the section mask persisted through the
 		// in-flight job, so re-arm scheduling now that publish is done.
-		// Without this the MESHED chunk would keep its stale cross-chunk
-		// light until an unrelated edit remeshed it.
 		if (job.chunk && job.chunk->getState() == ChunkState::MESHED &&
 			job.chunk->dirtySections() != 0)
 			job.chunk->setState(ChunkState::GENERATED);
@@ -1090,21 +1037,21 @@ void ChunkManager::processFinishedJobs()
 				job.pool->release(job.storage);
 			continue;
 		}
-			if (job.storage)
+		if (job.storage)
+		{
+			const bool valid = job.chunk->meshGeneration() == job.identity.generation &&
+							   job.chunk->meshRevision() == job.identity.revision &&
+							   job.chunk->localLightCacheWanted() &&
+							   !job.chunk->hasLightStorage() &&
+							   !m_world->hasPendingEditsFor(job.chunk->worldChunk());
+			if (valid)
 			{
-				const bool valid = job.chunk->meshGeneration() == job.generation &&
-								   job.chunk->meshRevision() == job.revision &&
-								   job.chunk->localLightCacheWanted() &&
-								   !job.chunk->hasLightStorage() &&
-								   !hasPendingEditsFor(job.chunk);
-				if (valid)
-				{
-					job.chunk->attachLightStorage(job.storage);
-					recordChunkEvent(job.chunk, "lightCacheDone");
-				}
-				else
-					job.pool->release(job.storage);
+				job.chunk->attachLightStorage(job.storage);
+				recordChunkEvent(job.chunk, "lightCacheDone");
 			}
+			else
+				job.pool->release(job.storage);
+		}
 		job.chunk->setInTransit(false);
 		// An edit may have dirtied sections while this job owned the chunk:
 		// the mask persisted through transit, so re-arm scheduling now that
@@ -1113,201 +1060,665 @@ void ChunkManager::processFinishedJobs()
 			job.chunk->dirtySections() != 0)
 			job.chunk->setState(ChunkState::GENERATED);
 	}
-	// Apply edits that were deferred while their chunk was in transit; they
-	// bump the mesh revision and mark the chunk GENERATED for a remesh.
-	applyPendingEdits();
+
+	// Stage 3: land deferred authoritative edits (+ EditApplied events →
+	// render section/light invalidation and the GENERATED re-arm).
+	m_world->applyPendingEdits();
+	drainWorldEvents();
 }
 
-bool ChunkManager::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y, int z,
-									   TextureType type)
+// ---------------------------------------------------------------------------
+// Visibility / draw lists (derived; unchanged)
+// ---------------------------------------------------------------------------
+
+void ChunkManager::updateVisibility(const Camera &camera, int windowWidth, int windowHeight,
+									const RenderSettings &settings)
 {
-	// Coordinate validation FIRST (issue #114 final review): effectiveVoxelType()
-	// reads the voxel backing and must never see an out-of-range coordinate -
-	// a raycast hit on the top face of a y = CHUNK_HEIGHT-1 voxel produces
-	// exactly y = CHUNK_HEIGHT here. Local x/z stay in [0, CHUNK_SIZE) by
-	// construction of the world-to-chunk mapping; y has no such wrap.
-	if (x < 0 || x >= static_cast<int>(CHUNK_SIZE) ||
-		y < 0 || y >= static_cast<int>(CHUNK_HEIGHT) ||
-		z < 0 || z >= static_cast<int>(CHUNK_SIZE))
-		return false;
+	// Timed by Engine PROFILE_SCOPE("Visibility") — keep body lean.
 
-	// Caller holds m_mutex exclusively.
-	auto it = m_chunks.find(chunkPos);
-	if (it == m_chunks.end())
-		return false;
-	Chunk *target = it->second;
+	const float farPlane = computeCameraFarPlane(settings.maxRenderDistance);
+	const glm::mat4 clipMatrix =
+		camera.getProjectionMatrix(static_cast<float>(windowWidth), static_cast<float>(windowHeight),
+								   farPlane) *
+		camera.getViewMatrix();
 
-	// Logical no-op refusal against the EFFECTIVE state (storage overlaid
-	// with pending edits), so place-after-pending-delete is not wrongly
-	// refused (issue #114 review items 15-17).
-	const TextureType effective = effectiveVoxelType(target, x, y, z);
-	if (type == AIR ? effective == AIR : effective != AIR)
-		return false;
+	std::array<glm::vec4, 6> planes{};
+	planes[0] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 0);
+	planes[1] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 0);
+	planes[2] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 1);
+	planes[3] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 1);
+	planes[4] = glm::row(clipMatrix, 3) + glm::row(clipMatrix, 2);
+	planes[5] = glm::row(clipMatrix, 3) - glm::row(clipMatrix, 2);
 
-	// One user interaction = one logical group: the target edit plus every
-	// neighbor mirror. If the target must defer (in transit, or UNLOADED
-	// and waiting for terrain generation - issue #115 blocker), its mirrors
-	// defer with it so the whole group lands in one apply phase
-	// (transaction semantics, issue #114 review item 6). When the target
-	// applies immediately, each mirror still decides on its own chunk's
-	// state inside queueOrApplyEdit.
-	const uint64_t editId = m_nextEditId++;
-	const bool deferAll = mustDeferVoxelEdit(target);
-	queueOrApplyEdit(target, chunkPos, x, y, z, type, false, deferAll, editId);
-	std::vector<Chunk *> geometricChunks;
-	geometricChunks.push_back(target);
-	enqueueOrApplyMirrorEdits(chunkPos, x, y, z, type, deferAll, editId, &geometricChunks);
+	std::array<glm::vec3, 6> planeNormals;
+	std::array<float, 6> planeOffsets;
+	for (size_t i = 0; i < 6; ++i)
+	{
+		auto &p = planes[i];
+		const float len = glm::length(glm::vec3(p));
+		if (len > 1e-6f)
+			p /= len;
+
+		planeNormals[i] = glm::vec3(p);
+		const glm::vec3 optOffset(
+			p.x >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f,
+			p.y >= 0.f ? static_cast<float>(CHUNK_HEIGHT) : 0.f,
+			p.z >= 0.f ? static_cast<float>(CHUNK_SIZE) : 0.f
+		);
+		planeOffsets[i] = p.w + glm::dot(planeNormals[i], optOffset);
+	}
+
+	const glm::vec3 camPos = camera.getPosition();
+	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
+
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	for (Chunk *chunk : m_activeChunks)
+	{
+		const glm::vec3 aabbMin = chunk->getPosition();
+
+		bool visible = true;
+		for (size_t i = 0; i < 6; ++i)
+		{
+			if (glm::dot(planeNormals[i], aabbMin) + planeOffsets[i] < 0.f)
+			{
+				visible = false;
+				break;
+			}
+		}
+		chunk->setVisible(visible);
+
+		const float dx = aabbMin.x - camOffsetX;
+		const float dz = aabbMin.z - camOffsetZ;
+		updateEntityLightCacheIntent(*chunk, dx * dx + dz * dz);
+	}
+}
+
+void ChunkManager::updateEntityLightCacheIntent(Chunk &chunk, float distSq)
+{
+	// Acquire/release hysteresis (issue #172): outside chunks acquire at the
+	// 128m radius; held caches are retained until the chunk leaves the
+	// larger release radius, so camera movement around the acquire edge
+	// cannot oscillate allocate/free cycles of the 128 KiB blocks.
+	const bool previous = chunk.localLightCacheWanted();
+	const bool wanted = previous ? (distSq <= kEntityLightCacheReleaseRadiusSq)
+								 : (distSq <= kEntityLightCacheAcquireRadiusSq);
+	if (previous && !wanted)
+	{
+		chunk.releaseLightStorage();
+	}
+	chunk.setLocalLightCacheWanted(wanted);
+}
+
+void ChunkManager::collectDrawList(std::vector<Chunk *> &out) const
+{
+	out.clear();
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	out.reserve(m_activeChunks.size());
+	for (Chunk *chunk : m_activeChunks)
+	{
+		if (!chunk)
+			continue;
+		// Keep drawing the last GPU mesh while a remesh/upload is pending so
+		// break/place doesn't make the chunk pop out of existence.
+		if (chunk->getOpaqueIndexCount() == 0 && !chunk->hasWaterMesh())
+			continue;
+		if (!chunk->isVisible())
+			continue;
+		out.push_back(chunk);
+	}
+}
+
+void ChunkManager::collectShadowList(std::vector<Chunk *> &out, const Camera &camera,
+									 float shadowRadius) const
+{
+	out.clear();
+	const float r2 = shadowRadius * shadowRadius;
+	const glm::vec3 cam = camera.getPosition();
+	const float camOffsetX = cam.x - CHUNK_SIZE * 0.5f;
+	const float camOffsetZ = cam.z - CHUNK_SIZE * 0.5f;
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	out.reserve(m_activeChunks.size() / 2 + 8);
+	for (Chunk *chunk : m_activeChunks)
+	{
+		if (!chunk)
+			continue;
+		if (chunk->getOpaqueIndexCount() == 0)
+			continue;
+		const glm::vec3 p = chunk->getPosition();
+		const float dx = p.x - camOffsetX;
+		const float dz = p.z - camOffsetZ;
+		if (dx * dx + dz * dz > r2)
+			continue;
+		out.push_back(chunk);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Logical edits (delegated; commit groups stay render-side)
+// ---------------------------------------------------------------------------
+
+bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
+{
+	const WorldEditResult result = m_world->deleteVoxel(worldPos);
+	drainWorldEvents();
+	if (result.accepted && result.geometricMembers.size() > 1)
+	{
+		std::vector<PendingGroupMember> members;
+		for (const glm::ivec3 &coord : result.geometricMembers)
+		{
+			Chunk *member = getChunk(coord);
+			if (member)
+				members.push_back({member, {}});
+		}
+		if (members.size() > 1)
+			registerCommitGroup(result.editId, std::move(members));
+	}
+	return result.accepted;
+}
+
+bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
+{
+	const WorldEditResult result = m_world->placeVoxel(worldPos, type);
+	drainWorldEvents();
 	// A border edit couples the geometry of the target and its mirrors:
 	// their GPU publications must commit together or not at all (PR #178
 	// review). Light-only invalidated neighbors never join. Overlapping
-	// groups (edits sharing chunks) are fused here before the scheduler
-	// can ever see them.
-	if (geometricChunks.size() > 1)
+	// groups (edits sharing chunks) are fused at registration.
+	if (result.accepted && result.geometricMembers.size() > 1)
 	{
 		std::vector<PendingGroupMember> members;
-		for (Chunk *member : geometricChunks)
-		members.push_back({member, {}});
-		registerCommitGroup(editId, std::move(members));
+		for (const glm::ivec3 &coord : result.geometricMembers)
+		{
+			Chunk *member = getChunk(coord);
+			if (member)
+				members.push_back({member, {}});
+		}
+		if (members.size() > 1)
+			registerCommitGroup(result.editId, std::move(members));
 	}
+	return result.accepted;
+}
+
+bool ChunkManager::isVoxelActive(const glm::vec3 &worldPos) const
+{
+	return m_world->isVoxelActive(worldPos);
+}
+
+Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos)
+{
+	auto it = m_chunks.find(chunkPos);
+	return it != m_chunks.end() ? it->second : nullptr;
+}
+
+const Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos) const
+{
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	auto it = m_chunks.find(chunkPos);
+	return it != m_chunks.end() ? it->second : nullptr;
+}
+
+Chunk *ChunkManager::getChunkAtWorldPos(const glm::vec3 &worldPos)
+{
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	return getChunk(worldToChunkCoord(worldPos));
+}
+
+// ---------------------------------------------------------------------------
+// Entity light sampling (derived caches; unchanged)
+// ---------------------------------------------------------------------------
+
+lighting::LocalVoxelLight ChunkManager::sampleVoxelLightUnlocked(const glm::ivec3 &p) const
+{
+	if (p.y >= static_cast<int>(CHUNK_HEIGHT))
+		return {1.0f, glm::vec3(0.0f)};
+	if (p.y < 0)
+		return {0.0f, glm::vec3(0.0f)};
+	if (p.x < SHRT_MIN || p.x >= SHRT_MAX || p.z < SHRT_MIN || p.z >= SHRT_MAX)
+		return {0.0f, glm::vec3(0.0f)};
+
+	const int size = static_cast<int>(CHUNK_SIZE);
+	const int cx = p.x / size - (p.x % size < 0 ? 1 : 0);
+	const int cz = p.z / size - (p.z % size < 0 ? 1 : 0);
+	const auto it = m_chunks.find({cx, 0, cz});
+	if (it == m_chunks.end() || !it->second)
+		return {0.0f, glm::vec3(0.0f)};
+
+	const Chunk *chunk = it->second;
+	if (!chunk->hasLightStorage())
+		return {0.0f, glm::vec3(0.0f)};
+
+	const int lx = p.x - cx * size;
+	const int lz = p.z - cz * size;
+	return chunk->sampleLight(lx, p.y, lz);
+}
+
+lighting::LocalVoxelLight ChunkManager::sampleVoxelLight(const glm::ivec3 &blockPos) const
+{
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	return sampleVoxelLightUnlocked(blockPos);
+}
+
+lighting::LocalVoxelLight ChunkManager::sampleSmoothedLightUnlocked(const glm::vec3 &worldPos) const
+{
+	const glm::vec3 s = worldPos - glm::vec3(0.5f);
+	const int x0 = static_cast<int>(std::floor(s.x));
+	const int y0 = static_cast<int>(std::floor(s.y));
+	const int z0 = static_cast<int>(std::floor(s.z));
+	const int x1 = x0 + 1;
+	const int y1 = y0 + 1;
+	const int z1 = z0 + 1;
+
+	const float fx = s.x - static_cast<float>(x0);
+	const float fy = s.y - static_cast<float>(y0);
+	const float fz = s.z - static_cast<float>(z0);
+
+	const auto c000 = sampleVoxelLightUnlocked({x0, y0, z0});
+	const auto c100 = sampleVoxelLightUnlocked({x1, y0, z0});
+	const auto c010 = sampleVoxelLightUnlocked({x0, y1, z0});
+	const auto c110 = sampleVoxelLightUnlocked({x1, y1, z0});
+	const auto c001 = sampleVoxelLightUnlocked({x0, y0, z1});
+	const auto c101 = sampleVoxelLightUnlocked({x1, y0, z1});
+	const auto c011 = sampleVoxelLightUnlocked({x0, y1, z1});
+	const auto c111 = sampleVoxelLightUnlocked({x1, y1, z1});
+
+	const auto c00 = lighting::lerpLocalVoxelLight(c000, c100, fx);
+	const auto c10 = lighting::lerpLocalVoxelLight(c010, c110, fx);
+	const auto c01 = lighting::lerpLocalVoxelLight(c001, c101, fx);
+	const auto c11 = lighting::lerpLocalVoxelLight(c011, c111, fx);
+
+	const auto c0 = lighting::lerpLocalVoxelLight(c00, c10, fy);
+	const auto c1 = lighting::lerpLocalVoxelLight(c01, c11, fy);
+
+	return lighting::lerpLocalVoxelLight(c0, c1, fz);
+}
+
+lighting::LocalVoxelLight ChunkManager::sampleSmoothedLight(const glm::vec3 &worldPos) const
+{
+	std::shared_lock<std::shared_mutex> lock(m_mutex);
+	return sampleSmoothedLightUnlocked(worldPos);
+}
+
+// ---------------------------------------------------------------------------
+// Counters / inspection
+// ---------------------------------------------------------------------------
+
+size_t ChunkManager::chunkCount() const
+{
+	return m_world->chunkCount();
+}
+
+size_t ChunkManager::pendingLoadCount() const
+{
+	return m_world->pendingLoadCount();
+}
+
+size_t ChunkManager::pendingGenJobs() const
+{
+	return m_world->pendingGenJobs();
+}
+
+size_t ChunkManager::pendingMeshJobs() const
+{
+	return m_pendingMeshJobsCount.load();
+}
+
+size_t ChunkManager::pendingLightJobs() const
+{
+	return m_pendingLightJobsCount.load();
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------------
+
+bool ChunkManager::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator)
+{
+	if (!chunk)
+		return false;
+	WorldChunk *record = chunk->worldChunk();
+	// World-resident records (bound handles AND adopted test records) use
+	// the authoritative contract: prepare + generate + saved overrides.
+	const bool worldResident = record && m_world->getChunk(record->coord()) == record;
+	if (worldResident)
+	{
+		if (!m_world->prepareAndGenerateChunk(record, generator))
+		{
+			// Allocation failure: the world recycled the record; return the
+			// render handle to the pool so no slot is leaked (issue #112).
+			chunk->unbindWorldChunk();
+			if (m_chunkPool)
+				m_chunkPool->release(chunk);
+			return false;
+		}
+		chunk->notifyTerrainGenerated();
+		return true;
+	}
+	// Standalone (tests/tools): shared synchronous bootstrap contract
+	// (issue #112) on the privately owned record; no persistence.
+	if (!chunk->prepareVoxelStorageForGeneration())
+	{
+		if (m_chunkPool)
+			m_chunkPool->release(chunk);
+		return false;
+	}
+	chunk->generateTerrain(generator);
 	return true;
 }
 
-TextureType ChunkManager::effectiveVoxelType(const Chunk *chunk, int x, int y, int z) const
+void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
+						 ImmediateCommands &imm, MeshArenas &arenas)
 {
-	// Strict contract: scheduleLogicalEdit() validates coordinates before
-	// this helper runs. Debug asserts make any future caller violation
-	// immediately visible; no silent AIR fallback, which would make an
-	// invalid coordinate look legitimately placeable.
-	assert(chunk != nullptr);
-	assert(x >= 0 && x < static_cast<int>(CHUNK_SIZE));
-	assert(y >= 0 && y < static_cast<int>(CHUNK_HEIGHT));
-	assert(z >= 0 && z < static_cast<int>(CHUNK_SIZE));
+	if (!m_chunkPool || !allocator)
+		return;
 
-	// Occupancy lifecycle (issue #115 review): an UNLOADED chunk is
-	// prepared-for-generation - its backing holds stale pool bytes and is
-	// not readable. It is logically empty: a placement defers (the chunk is
-	// in transit while generation runs), a deletion is the no-op it claims
-	// to be. The pending-edit overlay still applies so a second edit racing
-	// an already-queued one sees the queued state.
-	TextureType effective = AIR;
-	if (chunk->isVoxelBackingReadable())
+	// Square footprint (2r+1)^2 plus a little margin for safety. Bootstrap is
+	// a one-shot synchronous setup: grow in a single call (maxGrowPerCall = 0)
+	// instead of the incremental per-tick cap the streaming path uses.
+	const size_t bootstrapNeed =
+		static_cast<size_t>(2 * radiusChunks + 1) * static_cast<size_t>(2 * radiusChunks + 1) + 16;
+	m_chunkPool->ensureCapacity(bootstrapNeed, 0);
+
+	// Authoritative voxel bootstrap (world-owned), then render binding.
+	const std::vector<glm::ivec3> created = m_world->generateInitialAreaVoxels(center, radiusChunks);
+	std::vector<std::pair<glm::ivec3, Chunk *>> bound;
 	{
-		// getVoxel is read-only and answers AIR without storage, so this is
-		// safe to evaluate while the chunk is being meshed/generated.
-		effective = static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),
-															static_cast<uint32_t>(y),
-															static_cast<uint32_t>(z))
-												 .type);
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (const glm::ivec3 &pos : created)
+		{
+			if (m_chunks.find(pos) != m_chunks.end())
+				continue;
+			WorldChunk *record = m_world->getChunk(pos);
+			if (!record)
+				continue;
+			Chunk *chunk = m_chunkPool->acquire(glm::vec3(
+				static_cast<float>(pos.x * CHUNK_SIZE), 0.f,
+				static_cast<float>(pos.z * CHUNK_SIZE)));
+			if (!chunk)
+			{
+				// Grow once more and retry (should be rare if ensureCapacity above is correct).
+				m_chunkPool->ensureCapacity(m_chunkPool->capacity() + 64);
+				chunk = m_chunkPool->acquire(glm::vec3(
+					static_cast<float>(pos.x * CHUNK_SIZE), 0.f,
+					static_cast<float>(pos.z * CHUNK_SIZE)));
+				if (!chunk)
+					continue;
+			}
+			chunk->bindWorldChunk(record);
+			m_chunks[pos] = chunk;
+			chunk->setActiveIndex(m_activeChunks.size());
+			m_activeChunks.push_back(chunk);
+			chunk->setVisible(true);
+			const glm::vec3 p = chunk->getPosition();
+			const float dx = p.x - center.x;
+			const float dz = p.z - center.z;
+			updateEntityLightCacheIntent(*chunk, dx * dx + dz * dz);
+			bound.emplace_back(pos, chunk);
+		}
+		for (const auto &p : bound)
+			m_world->ensureShellPopulated(p.second->worldChunk());
+		// Bootstrap meshing gets cross-chunk light too: every created chunk
+		// is generated and registered by now, so the halo snapshots see the
+		// full neighborhood (issue #141 review fix).
+		for (const auto &p : bound)
+			ensureLightHalo(p.second, p.first);
 	}
-	for (const PendingVoxelEdit &edit : m_pendingEdits)
+	// Consume the Loaded events emitted by the world bootstrap (the handles
+	// are already bound above; drain keeps the stream empty and records the
+	// lifecycle trace).
+	drainWorldEvents();
+
+	for (const auto &p : bound)
 	{
-		if (edit.chunk == chunk && !edit.borderNeighbor &&
-			edit.x == x && edit.y == y && edit.z == z)
-			effective = edit.type; // last pending write wins
+		p.second->generateMesh();
+		ChunkLightHalo *halo = p.second->lightHalo();
+		p.second->setLightHalo(nullptr);
+		if (halo)
+			m_lightHaloPool.release(halo);
 	}
-	return effective;
+
+	// One-time sync upload before the first frame (nothing in flight yet).
+	for (const auto &p : bound)
+		p.second->uploadToGPU(allocator, imm, arenas);
+
+	std::cout << "Bootstrap: " << bound.size() << " chunks around spawn\n";
 }
 
-bool ChunkManager::mustDeferVoxelEdit(const Chunk *chunk) const
+// ---------------------------------------------------------------------------
+// Persistent world lifecycle (delegated; issue #180 contracts preserved)
+// ---------------------------------------------------------------------------
+
+bool ChunkManager::openWorld(const std::string &savesRoot, const std::string &worldName,
+                             std::string &outError)
 {
-	// UNLOADED defers regardless of transit state: the backing is stale
-	// pool bytes until terrain generation initializes it (issue #115).
-	return !chunk ||
-	       chunk->getState() == ChunkState::UNLOADED ||
-	       chunk->isInTransit();
+	return m_world->openWorld(savesRoot, worldName, outError);
 }
 
-void ChunkManager::queueOrApplyEdit(Chunk *chunk, const glm::ivec3 &chunkPos, int x,
-									int y, int z, TextureType type, bool borderNeighbor,
-									bool forceDefer, uint64_t editId)
+bool ChunkManager::renderJobsBusy() const
+{
+	return m_pendingMeshJobsCount.load() > 0 || m_pendingLightJobsCount.load() > 0;
+}
+
+void ChunkManager::drainAsyncJobsForPersistence()
+{
+	// Combined durability barrier (issue #180 review round 2): publish every
+	// finished gen/mesh/light job, apply every deferred voxel edit and age
+	// deferred GPU releases, so the final persistence capture sees the
+	// complete authoritative voxel state and no worker can dereference the
+	// persistence facade after it is released. Deliberately NO timeout —
+	// closing a persistent world is a durability barrier.
+	for (;;)
+	{
+		processFinishedJobs();     // world gen + render mesh/light + deferred edits
+		processDeferredReleases(); // ages deferred GPU releases
+		if (!renderJobsBusy() && !m_world->asyncBusy())
+			break;
+		std::this_thread::sleep_for(std::chrono::microseconds(500));
+	}
+	// One final publish pass so edits deferred until the very last job land.
+	processFinishedJobs();
+}
+
+bool ChunkManager::closeWorld()
+{
+	if (!m_world->isWorldOpen())
+		return true;
+	// Quiesce render + world BEFORE the world's capture/flush/shutdown.
+	drainAsyncJobsForPersistence();
+	return m_world->closeWorld();
+}
+
+bool ChunkManager::flushWorld()
+{
+	return m_world->flushWorld();
+}
+
+// ---------------------------------------------------------------------------
+// Cross-chunk light invalidation (derived render scheduling; unchanged)
+// ---------------------------------------------------------------------------
+
+void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx,
+								   telemetry::Family telemetryFamily)
 {
 	if (!chunk)
 		return;
-	// One gate for every deferral reason (issue #115 blocker): in transit
-	// for any job, or still UNLOADED - stale backing is never edited, even
-	// when no job currently owns the chunk.
-	if (forceDefer || mustDeferVoxelEdit(chunk))
+	ChunkLightHalo *halo = chunk->lightHalo();
+	if (!halo)
 	{
-		queuePendingEdit({chunk, chunk->meshGeneration(), chunkPos, x, y, z,
-						  type, borderNeighbor, editId});
-		return;
-	}
-	// Apply path: the backing is readable and nothing owns the chunk.
-	assert(!chunk->isInTransit() && chunk->isVoxelBackingReadable() &&
-		   "edit reached the apply path on unreadable backing");
-	if (borderNeighbor)
-		ensureShellPopulated(chunk, chunkPos);
-	// setVoxel bumps the mesh revision; GENERATED re-arms meshing
-	// (setState also raises meshNeedsUpdate).
-	const TextureType previousType =
-		static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),
-												 static_cast<uint32_t>(y),
-												 static_cast<uint32_t>(z))
-									 .type);
-	chunk->setVoxel(x, y, z, type);
-	chunk->setState(ChunkState::GENERATED);
-	recordChunkEvent(chunk, borderNeighbor ? "editMirror" : "edit",
-					 chunk->dirtySections());
-	// Light-relevant edits near a border change the neighbors' propagated
-	// light too (issue #141 review fix); mirror writes are the owning
-	// chunk's edit seen from the other side and skip this.
-	if (!borderNeighbor)
-		markNeighborLightDirty(chunkPos, x, y, z, previousType, type);
-}
-
-void ChunkManager::enqueueOrApplyMirrorEdits(const glm::ivec3 &chunkPos, int x, int y,
-											 int z, TextureType type, bool forceDefer,
-											 uint64_t editId, std::vector<Chunk *> *geometricMembers)
-{
-	// Same mirror mapping as the historical dirtyNeighbor path: the
-	// neighbor on the -x side holds our x=0 column at its local
-	// CHUNK_SIZE, and so on for each face.
-	const auto mirror = [&](const glm::ivec3 &neighborPos, int nx, int nz)
-	{
-		Chunk *neighbor = getChunk(neighborPos);
-		if (!neighbor)
-			return;
-		if (geometricMembers)
-			geometricMembers->push_back(neighbor);
-		queueOrApplyEdit(neighbor, neighborPos, nx, y, nz, type, true, forceDefer, editId);
-	};
-	if (x == 0)
-		mirror(chunkPos + glm::ivec3(-1, 0, 0), CHUNK_SIZE, z);
-	if (x == CHUNK_SIZE - 1)
-		mirror(chunkPos + glm::ivec3(1, 0, 0), -1, z);
-	if (z == 0)
-		mirror(chunkPos + glm::ivec3(0, 0, -1), x, CHUNK_SIZE);
-	if (z == CHUNK_SIZE - 1)
-		mirror(chunkPos + glm::ivec3(0, 0, 1), x, -1);
-}
-
-void ChunkManager::queuePendingEdit(PendingVoxelEdit edit)
-{
-	// Coalesce: the last logical write per (chunk, coordinate, kind) wins,
-	// so place->delete->place during one transit collapses into one entry.
-	for (PendingVoxelEdit &existing : m_pendingEdits)
-	{
-		if (existing.chunk == edit.chunk && !existing.borderNeighbor == !edit.borderNeighbor &&
-			existing.x == edit.x && existing.y == edit.y && existing.z == edit.z)
+		try
 		{
-			existing.type = edit.type;
-			existing.generation = edit.generation;
-			existing.editId = edit.editId;
-			return;
+			halo = m_lightHaloPool.acquire();
 		}
+		catch (const std::bad_alloc &)
+		{
+			return; // caller skips the dispatch; a later tick retries
+		}
+		chunk->setLightHalo(halo);
 	}
-	m_pendingEdits.push_back(edit);
+	// Caller holds exclusive lock.
+	{
+		// The ring snapshot is main-thread dispatch cost (issue #141 review
+		// round 2, P2): measured as its own stage so the benchmark reports
+		// haloFill avg/p95 next to the worker-side mesh stages. Routed to the
+		// calling pipeline's telemetry family (issue #173 review).
+		telemetry::StageSample haloFillSample(telemetry::HaloFill, telemetryFamily);
+		fillLightHaloFromNeighbors(
+			*halo, chunk,
+			getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),
+			getChunk(chunkIdx + glm::ivec3(+1, 0, 0)),
+			getChunk(chunkIdx + glm::ivec3(0, 0, -1)),
+			getChunk(chunkIdx + glm::ivec3(0, 0, +1)),
+			getChunk(chunkIdx + glm::ivec3(-1, 0, -1)),
+			getChunk(chunkIdx + glm::ivec3(+1, 0, -1)),
+			getChunk(chunkIdx + glm::ivec3(-1, 0, +1)),
+			getChunk(chunkIdx + glm::ivec3(+1, 0, +1)));
+	}
 }
 
-bool ChunkManager::hasPendingEditsFor(const Chunk *chunk) const
+void ChunkManager::markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int y, int z,
+										  TextureType previousType, TextureType type)
 {
-	for (const PendingVoxelEdit &edit : m_pendingEdits)
-	{
-		if (edit.chunk == chunk)
-			return true;
-	}
-	return false;
+	// Same light-relevance predicate as Chunk::markEditDirtySections: only
+	// emissive changes and sky-transmission flips can change a propagated
+	// light field.
+	const bool lightRelevant =
+		blockTransmitsSkyLight(previousType) != blockTransmitsSkyLight(type) ||
+		lighting::blockLightEmission(static_cast<uint8_t>(previousType)) > 0 ||
+		lighting::blockLightEmission(static_cast<uint8_t>(type)) > 0;
+	if (!lightRelevant)
+		return;
+
+	// The edit dirties every neighbor it can still reach with nonzero
+	// propagated light: those within the halo radius of that border
+	// (conservative - the 15th step carries value 0 and is included).
+	constexpr int R = ChunkLightHalo::kRadius;
+	const bool west = x + 1 <= R;
+	const bool east = CHUNK_SIZE - x <= R;
+	const bool south = z + 1 <= R;
+	const bool north = CHUNK_SIZE - z <= R;
+	const bool southWest = west && south && (x + 1) + (z + 1) <= R;
+	const bool southEast = east && south && (CHUNK_SIZE - x) + (z + 1) <= R;
+	const bool northWest = west && north && (x + 1) + (CHUNK_SIZE - z) <= R;
+	const bool northEast = east && north && (CHUNK_SIZE - x) + (CHUNK_SIZE - z) <= R;
+	if (!west && !east && !south && !north && !southWest && !southEast && !northWest && !northEast)
+		return;
+
+	uint16_t yMask = 0;
+	const int yLo = std::max(0, y - R) / Chunk::kOccupancySectionSize;
+	const int yHi = std::min(static_cast<int>(CHUNK_HEIGHT) - 1, y + R) /
+					Chunk::kOccupancySectionSize;
+	for (int s = yLo; s <= yHi; ++s)
+		yMask |= static_cast<uint16_t>(1u << s);
+
+	auto dirty = [&](const glm::ivec3 &pos) {
+		Chunk *n = getChunk(pos);
+		// UNLOADED chunks have no mesh to invalidate (generation re-arms all
+		// sections anyway). The section mask is recorded even when the
+		// neighbor is IN TRANSIT: the atomic mask persists across the
+		// in-flight job and processFinishedJobs re-arms GENERATED after
+		// publish, so an edit racing a mesh build can never lose its
+		// invalidation (issue #141 review round 2). Only the scheduling
+		// state change is withheld while a job owns the chunk - publish
+		// would overwrite it.
+		if (!n || n->getState() == ChunkState::UNLOADED)
+			return;
+		n->markSectionsDirty(yMask);
+		if (!n->isInTransit() && n->getState() == ChunkState::MESHED)
+			n->setState(ChunkState::GENERATED);
+	};
+	if (west) dirty(chunkPos + glm::ivec3(-1, 0, 0));
+	if (east) dirty(chunkPos + glm::ivec3(+1, 0, 0));
+	if (south) dirty(chunkPos + glm::ivec3(0, 0, -1));
+	if (north) dirty(chunkPos + glm::ivec3(0, 0, +1));
+	if (southWest) dirty(chunkPos + glm::ivec3(-1, 0, -1));
+	if (southEast) dirty(chunkPos + glm::ivec3(+1, 0, -1));
+	if (northWest) dirty(chunkPos + glm::ivec3(-1, 0, +1));
+	if (northEast) dirty(chunkPos + glm::ivec3(+1, 0, +1));
 }
+
+void ChunkManager::dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 &chunkIdx)
+{
+	if (!chunk || !chunk->isVoxelBackingReadable())
+		return;
+	constexpr int R = ChunkLightHalo::kRadius;
+	// One pass classifies every light-relevant cell into the neighbor bands
+	// it can reach - sides AND diagonals, with the same Manhattan reach rule
+	// as markNeighborLightDirty. Light-relevant here means emissive sources
+	// (new light) OR non-air-like content (the halo assumed AIR for this
+	// missing chunk, so arriving blockers/liquids change BFS paths even
+	// without a single emitter - issue #141 review round 2). ~65K cheap
+	// checks per arrival, once per chunk lifetime; a band without relevant
+	// cells dirties nothing.
+	constexpr int kBandCount = 8; // W E S N SW SE NW NE
+	int bandMinY[kBandCount] = {CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT,
+								CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT};
+	int bandMaxY[kBandCount] = {-1, -1, -1, -1, -1, -1, -1, -1};
+	auto note = [&](int side, int y) {
+		if (y < bandMinY[side])
+			bandMinY[side] = y;
+		if (y > bandMaxY[side])
+			bandMaxY[side] = y;
+	};
+	for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
+		for (uint32_t z = 0; z < CHUNK_SIZE; ++z)
+			for (uint32_t x = 0; x < CHUNK_SIZE; ++x)
+			{
+				const auto t = static_cast<TextureType>(chunk->getVoxel(x, y, z).type);
+				const bool lightRelevant =
+					lighting::isBlockLightSource(t) || !blockTransmitsSkyLight(t);
+				if (!lightRelevant)
+					continue;
+				const int xi = static_cast<int>(x);
+				const int zi = static_cast<int>(z);
+				if (xi + 1 <= R) note(0, static_cast<int>(y));
+				if (CHUNK_SIZE - xi <= R) note(1, static_cast<int>(y));
+				if (zi + 1 <= R) note(2, static_cast<int>(y));
+				if (CHUNK_SIZE - zi <= R) note(3, static_cast<int>(y));
+				if (xi + 1 + zi + 1 <= R) note(4, static_cast<int>(y));
+				if (CHUNK_SIZE - xi + zi + 1 <= R) note(5, static_cast<int>(y));
+				if (xi + 1 + (CHUNK_SIZE - zi) <= R) note(6, static_cast<int>(y));
+				if (CHUNK_SIZE - xi + (CHUNK_SIZE - zi) <= R) note(7, static_cast<int>(y));
+			}
+
+	// Same mask-persists-through-transit rule as markNeighborLightDirty.
+	auto dirty = [&](int side, const glm::ivec3 &pos) {
+		if (bandMinY[side] > bandMaxY[side])
+			return;
+		Chunk *n = getChunk(pos);
+		if (!n || n->getState() == ChunkState::UNLOADED)
+			return;
+		uint16_t yMask = 0;
+		const int yLo = std::max(0, bandMinY[side] - R) / Chunk::kOccupancySectionSize;
+		const int yHi = std::min(static_cast<int>(CHUNK_HEIGHT) - 1, bandMaxY[side] + R) /
+						Chunk::kOccupancySectionSize;
+		for (int s = yLo; s <= yHi; ++s)
+			yMask |= static_cast<uint16_t>(1u << s);
+		n->markSectionsDirty(yMask);
+		if (!n->isInTransit() && n->getState() == ChunkState::MESHED)
+			n->setState(ChunkState::GENERATED);
+	};
+	dirty(0, chunkIdx + glm::ivec3(-1, 0, 0));
+	dirty(1, chunkIdx + glm::ivec3(+1, 0, 0));
+	dirty(2, chunkIdx + glm::ivec3(0, 0, -1));
+	dirty(3, chunkIdx + glm::ivec3(0, 0, +1));
+	dirty(4, chunkIdx + glm::ivec3(-1, 0, -1));
+	dirty(5, chunkIdx + glm::ivec3(+1, 0, -1));
+	dirty(6, chunkIdx + glm::ivec3(-1, 0, +1));
+	dirty(7, chunkIdx + glm::ivec3(+1, 0, +1));
+}
+
+TaskPriority ChunkManager::calculateTaskPriority(float distanceSq, float lodThresholdSq) const
+{
+	if (distanceSq < lodThresholdSq * 0.25f)
+		return TaskPriority::High;
+	if (distanceSq > lodThresholdSq)
+		return TaskPriority::Low;
+	return TaskPriority::Normal;
+}
+
+// ---------------------------------------------------------------------------
+// Geometric commit groups (PR #178 review; unchanged)
+// ---------------------------------------------------------------------------
 
 namespace
 {
@@ -1491,1143 +1902,44 @@ void ChunkManager::removeChunkFromCommitGroups(Chunk *chunk)
 	}
 }
 
-void ChunkManager::erasePendingEditsFor(const Chunk *chunk)
-{
-	m_pendingEdits.erase(
-		std::remove_if(m_pendingEdits.begin(), m_pendingEdits.end(),
-					   [chunk](const PendingVoxelEdit &edit) { return edit.chunk == chunk; }),
-		m_pendingEdits.end());
-}
-
-void ChunkManager::applyPendingEdits()
-{
-	if (m_pendingEdits.empty())
-		return;
-
-	std::vector<PendingVoxelEdit> remaining;
-	{
-		// ensureShellPopulated expects the exclusive lock (same contract as
-		// the direct edit path).
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		// Two passes for a deterministic order: target voxel edits first,
-		// then mirror border writes (issue #114 review item 8). Target and
-		// mirrors complete independently: each entry waits only on its own
-		// chunk's transit state (item 10).
-		for (int pass = 0; pass < 2; ++pass)
-		{
-			const bool mirrorPass = pass == 1;
-			for (const PendingVoxelEdit &edit : m_pendingEdits)
-			{
-				if (edit.borderNeighbor != mirrorPass)
-					continue;
-				if (!edit.chunk)
-					continue; // dangling entry: drop
-				// Staleness first: a recycled incarnation must never
-				// receive the queued edit, even though it now sits in the
-				// UNLOADED state.
-				if (edit.chunk->meshGeneration() != edit.generation)
-					continue; // chunk recycled since queueing: stale, drop
-				// Not readable yet: in transit for a job, or still waiting
-				// for terrain generation (issue #115 blocker - do not
-				// apply onto stale backing just because no job owns the
-				// chunk right now). Keep waiting.
-				if (mustDeferVoxelEdit(edit.chunk))
-				{
-					remaining.push_back(edit);
-					continue;
-				}
-				// The shell rebuild inside a mirror write also bumps the
-				// revision (before setVoxel bumps it again): revision
-				// monotonicity is what matters, not exact +1 semantics.
-				queueOrApplyEdit(edit.chunk, edit.chunkPos, edit.x, edit.y,
-								 edit.z, edit.type, edit.borderNeighbor,
-								 /*forceDefer=*/false, edit.editId);
-			}
-		}
-	}
-	m_pendingEdits.swap(remaining);
-}
-
-void ChunkManager::collectDrawList(std::vector<Chunk *> &out) const
-{
-	out.clear();
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	out.reserve(m_activeChunks.size());
-	for (Chunk *chunk : m_activeChunks)
-	{
-		if (!chunk)
-			continue;
-		// Keep drawing the last GPU mesh while a remesh/upload is pending so
-		// break/place doesn't make the chunk pop out of existence.
-		if (chunk->getOpaqueIndexCount() == 0 && !chunk->hasWaterMesh())
-			continue;
-		if (!chunk->isVisible())
-			continue;
-		out.push_back(chunk);
-	}
-}
-
-void ChunkManager::collectShadowList(std::vector<Chunk *> &out, const Camera &camera,
-									 float shadowRadius) const
-{
-	out.clear();
-	const float r2 = shadowRadius * shadowRadius;
-	const glm::vec3 cam = camera.getPosition();
-	const float camOffsetX = cam.x - CHUNK_SIZE * 0.5f;
-	const float camOffsetZ = cam.z - CHUNK_SIZE * 0.5f;
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	out.reserve(m_activeChunks.size() / 2 + 8);
-	for (Chunk *chunk : m_activeChunks)
-	{
-		if (!chunk)
-			continue;
-		if (chunk->getOpaqueIndexCount() == 0)
-			continue;
-		const glm::vec3 p = chunk->getPosition();
-		const float dx = p.x - camOffsetX;
-		const float dz = p.z - camOffsetZ;
-		if (dx * dx + dz * dz > r2)
-			continue;
-		out.push_back(chunk);
-	}
-}
-
-void ChunkManager::queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings)
-{
-	const float unloadDist =
-		static_cast<float>(settings.maxRenderDistance) * kChunkUnloadDistanceFactor;
-	const float unloadDistSq = unloadDist * unloadDist;
-
-	// Camera-relative offsets are loop-invariant: cache them once instead of
-	// rebuilding a per-chunk center vector (same pattern as collectShadowList).
-	const glm::vec3 camPos = camera.getPosition();
-	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
-	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
-
-	std::vector<glm::ivec3> toUnload;
-	{
-		std::shared_lock<std::shared_mutex> lock(m_mutex);
-		for (Chunk *chunk : m_activeChunks)
-		{
-			if (!chunk || chunk->isInTransit())
-				continue;
-
-			const glm::vec3 p = chunk->getPosition();
-			const float dx = camOffsetX - p.x;
-			const float dz = camOffsetZ - p.z;
-
-			if (dx * dx + dz * dz > unloadDistSq)
-			{
-				const glm::ivec3 chunkPos(
-					static_cast<int>(std::floor(p.x / static_cast<float>(CHUNK_SIZE))),
-					0,
-					static_cast<int>(std::floor(p.z / static_cast<float>(CHUNK_SIZE))));
-				toUnload.push_back(chunkPos);
-			}
-		}
-	}
-
-	if (toUnload.empty())
-		return;
-
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	for (const auto &pos : toUnload)
-	{
-		auto it = m_chunks.find(pos);
-		if (it == m_chunks.end())
-			continue;
-		Chunk *chunk = it->second;
-		if (!chunk || chunk->isInTransit())
-			continue;
-
-		const size_t activeIdx = chunk->getActiveIndex();
-		if (activeIdx < m_activeChunks.size() && m_activeChunks[activeIdx] == chunk)
-		{
-			Chunk *lastChunk = m_activeChunks.back();
-			m_activeChunks[activeIdx] = lastChunk;
-			lastChunk->setActiveIndex(activeIdx);
-			m_activeChunks.pop_back();
-			chunk->setActiveIndex(SIZE_MAX);
-		}
-		m_chunks.erase(it);
-		m_deferredRelease.push_back(chunk);
-		erasePendingEditsFor(chunk);
-		removeChunkFromCommitGroups(chunk);
-	}
-	if (!toUnload.empty())
-		m_deferredReleaseAge = 0; // reset age so new unloads wait full delay
-}
-
-namespace
-{
-/// Normalized XZ camera forward (fallback +Z when the forward is vertical).
-glm::vec2 normalizedForwardXZ(const Camera &camera)
-{
-	glm::vec2 fwd(camera.getFront().x, camera.getFront().z);
-	if (glm::dot(fwd, fwd) < 1e-6f)
-		fwd = glm::vec2(0.f, 1.f);
-	return glm::normalize(fwd);
-}
-} // namespace
-
-StreamingUpdateKind ChunkManager::rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-															const RenderSettings &settings)
-{
-	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
-	const glm::vec3 camPos = camera.getPosition();
-	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
-
-	m_desiredFootprint = computeDesiredFootprintFull(cameraChunkPos, camPos, camForwardXZ, frontBias,
-													settings.maxRenderDistance);
-	m_streamStats.footprintRowsVisited +=
-		static_cast<uint64_t>(m_desiredFootprint.maxZ - m_desiredFootprint.minZ + 1);
-
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	m_loadQueue.clear();
-	m_loadQueueHead = 0;
-	m_enqueuedLoads.clear();
-
-	for (int z = m_desiredFootprint.minZ; z <= m_desiredFootprint.maxZ; ++z)
-	{
-		const ChunkRowSpan *s = m_desiredFootprint.spanForZ(z);
-		if (!s || s->empty())
-			continue;
-		for (int x = s->minX; x <= s->maxX; ++x)
-		{
-			const glm::ivec3 pos(x, 0, z);
-			if (m_chunks.find(pos) != m_chunks.end())
-				continue;
-			const glm::vec3 center(
-				pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
-				pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
-			const float distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
-			m_loadQueue.push_back({pos, distSq});
-			m_enqueuedLoads.insert(pos);
-		}
-	}
-	sortLoadCandidatesNearestFirst(m_loadQueue);
-	++m_streamStats.queueSorts;
-	m_queueNeedsSort = false;
-
-	m_streamState.lastCamChunk = cameraChunkPos;
-	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
-	m_streamState.lastCamForwardXZ = camForwardXZ;
-	m_streamState.lastMaxRenderDistance = settings.maxRenderDistance;
-	m_streamState.lastStreamFrontBias = normalizedStreamFrontBias(settings.streamFrontBias);
-	m_streamState.initialized = true;
-	++m_streamStats.fullRebuilds;
-	return StreamingUpdateKind::FullRebuild;
-}
-
-void ChunkManager::applyFootprintDiffToQueue(const FootprintDiff &diff, const glm::vec3 &camPos,
-											 const glm::vec2 &camForwardXZ, float frontBias)
-{
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-
-	for (const glm::ivec3 &pos : diff.exiting)
-	{
-		m_enqueuedLoads.erase(pos);
-	}
-
-	for (const glm::ivec3 &pos : diff.entering)
-	{
-		if (m_chunks.find(pos) != m_chunks.end())
-			continue;
-		if (m_enqueuedLoads.count(pos) != 0)
-			continue;
-		const glm::vec3 center(
-			pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
-			pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
-		const float distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
-		m_loadQueue.push_back({pos, distSq});
-		m_enqueuedLoads.insert(pos);
-	}
-
-	if (m_loadQueueHead > 0)
-	{
-		m_loadQueue.erase(m_loadQueue.begin(), m_loadQueue.begin() + m_loadQueueHead);
-		m_loadQueueHead = 0;
-	}
-	m_loadQueue.erase(std::remove_if(m_loadQueue.begin(), m_loadQueue.end(),
-									 [&](const LoadCandidate &c) {
-										 return m_enqueuedLoads.count(c.pos) == 0;
-									 }),
-					  m_loadQueue.end());
-
-	for (auto &c : m_loadQueue)
-	{
-		const glm::vec3 center(
-			c.pos.x * CHUNK_SIZE + CHUNK_SIZE * 0.5f, 0.f,
-			c.pos.z * CHUNK_SIZE + CHUNK_SIZE * 0.5f);
-		c.distSq = biasedLoadDistSq(camPos, center, camForwardXZ, frontBias);
-	}
-	sortLoadCandidatesNearestFirst(m_loadQueue);
-	++m_streamStats.queueSorts;
-	m_streamStats.enteringCandidates += diff.entering.size();
-	m_streamStats.exitingCandidates += diff.exiting.size();
-	m_queueNeedsSort = false;
-	m_streamState.lastCamForwardXZ = camForwardXZ;
-}
-
-StreamingUpdateKind ChunkManager::reconcileStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-																const RenderSettings &settings)
-{
-	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
-	const glm::vec3 camPos = camera.getPosition();
-	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
-
-	ChunkDesiredFootprint newFootprint =
-		computeDesiredFootprintIncremental(m_desiredFootprint, cameraChunkPos, camPos, camForwardXZ,
-										   frontBias, settings.maxRenderDistance);
-	m_streamStats.footprintRowsVisited +=
-		static_cast<uint64_t>(newFootprint.maxZ - newFootprint.minZ + 1);
-	FootprintDiff diff = computeFootprintDiff(m_desiredFootprint, newFootprint);
-	m_desiredFootprint = std::move(newFootprint);
-
-	applyFootprintDiffToQueue(diff, camPos, camForwardXZ, frontBias);
-	m_streamState.lastCamChunk = cameraChunkPos;
-	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
-	++m_streamStats.incrementalUpdates;
-	return StreamingUpdateKind::Incremental;
-}
-
-StreamingUpdateKind ChunkManager::reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-															const RenderSettings &settings)
-{
-	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
-	const glm::vec3 camPos = camera.getPosition();
-	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
-
-	ChunkDesiredFootprint newFootprint =
-		computeDesiredFootprintFull(cameraChunkPos, camPos, camForwardXZ, frontBias,
-									settings.maxRenderDistance);
-	m_streamStats.footprintRowsVisited +=
-		static_cast<uint64_t>(newFootprint.maxZ - newFootprint.minZ + 1);
-	FootprintDiff diff = computeFootprintDiff(m_desiredFootprint, newFootprint);
-	m_desiredFootprint = std::move(newFootprint);
-
-	applyFootprintDiffToQueue(diff, camPos, camForwardXZ, frontBias);
-	// The heading path also serves chunk-cross frames (heading has dispatch
-	// priority), so it must publish the full camera state.
-	m_streamState.lastCamChunk = cameraChunkPos;
-	m_streamState.lastMovementAnchor = streamingMovementAnchor(camPos);
-	++m_streamStats.headingRebuilds;
-	return StreamingUpdateKind::HeadingRebuild;
-}
-
-StreamingUpdateKind ChunkManager::loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-														 const RenderSettings &settings)
-{
-	const float frontBias = normalizedStreamFrontBias(settings.streamFrontBias);
-	const glm::vec2 camForwardXZ = normalizedForwardXZ(camera);
-
-	if (!m_streamState.initialized ||
-		settings.maxRenderDistance != m_streamState.lastMaxRenderDistance ||
-		streamFrontBiasChanged(settings.streamFrontBias, m_streamState.lastStreamFrontBias))
-	{
-		return rebuildStreamingQueueFull(cameraChunkPos, camera, settings);
-	}
-
-	const glm::ivec3 chunkDelta = cameraChunkPos - m_streamState.lastCamChunk;
-	if (std::abs(chunkDelta.x) > 1 || std::abs(chunkDelta.z) > 1)
-		return rebuildStreamingQueueFull(cameraChunkPos, camera, settings); // teleport
-
-	// A heading change beyond the threshold reshapes the whole footprint, so
-	// it supersedes a simultaneous chunk-cross/anchor move (explicit priority:
-	// settings > teleport > heading > movement — issue #108 review).
-	if (frontBias > kStreamBiasEpsilon &&
-		glm::dot(camForwardXZ, m_streamState.lastCamForwardXZ) < kStreamHeadingCosThreshold)
-	{
-		return reconcileStreamingHeading(cameraChunkPos, camera, settings);
-	}
-
-	if (chunkDelta.x != 0 || chunkDelta.z != 0)
-		return reconcileStreamingIncremental(cameraChunkPos, camera, settings);
-
-	// Intra-chunk movement: the footprint is a function of the exact camera
-	// position, so reconcile at movement-anchor granularity instead of letting
-	// it go stale for up to a full 16-block chunk (issue #108 review).
-	const glm::ivec2 anchor = streamingMovementAnchor(camera.getPosition());
-	if (anchor != m_streamState.lastMovementAnchor)
-		return reconcileStreamingIncremental(cameraChunkPos, camera, settings);
-
-	++m_streamStats.zeroWork;
-	return StreamingUpdateKind::None; // exact zero-work steady state
-}
-
-void ChunkManager::ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx)
-{
-	if (!chunk || !chunk->isShellEmpty())
-		return;
-	// Caller holds exclusive lock.
-	chunk->rebuildBordersFromNeighbors(
-		getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),
-		getChunk(chunkIdx + glm::ivec3(+1, 0, 0)),
-		getChunk(chunkIdx + glm::ivec3(0, 0, -1)),
-		getChunk(chunkIdx + glm::ivec3(0, 0, +1)));
-}
-
-void ChunkManager::ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx,
-								   telemetry::Family telemetryFamily)
-{
-	if (!chunk)
-		return;
-	ChunkLightHalo *halo = chunk->lightHalo();
-	if (!halo)
-	{
-		try
-		{
-			halo = m_lightHaloPool.acquire();
-		}
-		catch (const std::bad_alloc &)
-		{
-			return; // caller skips the dispatch; a later tick retries
-		}
-		chunk->setLightHalo(halo);
-	}
-	// Caller holds exclusive lock.
-	{
-		// The ring snapshot is main-thread dispatch cost (issue #141 review
-		// round 2, P2): measured as its own stage so the benchmark reports
-		// haloFill avg/p95 next to the worker-side mesh stages. Routed to the
-		// calling pipeline's telemetry family (issue #173 review).
-		telemetry::StageSample haloFillSample(telemetry::HaloFill, telemetryFamily);
-		fillLightHaloFromNeighbors(
-			*halo, chunk,
-			getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),
-			getChunk(chunkIdx + glm::ivec3(+1, 0, 0)),
-			getChunk(chunkIdx + glm::ivec3(0, 0, -1)),
-			getChunk(chunkIdx + glm::ivec3(0, 0, +1)),
-			getChunk(chunkIdx + glm::ivec3(-1, 0, -1)),
-			getChunk(chunkIdx + glm::ivec3(+1, 0, -1)),
-			getChunk(chunkIdx + glm::ivec3(-1, 0, +1)),
-			getChunk(chunkIdx + glm::ivec3(+1, 0, +1)));
-	}
-}
-
-void ChunkManager::markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int y, int z,
-										  TextureType previousType, TextureType type)
-{
-	// Same light-relevance predicate as Chunk::markEditDirtySections: only
-	// emissive changes and sky-transmission flips can change a propagated
-	// light field.
-	const bool lightRelevant =
-		blockTransmitsSkyLight(previousType) != blockTransmitsSkyLight(type) ||
-		lighting::blockLightEmission(static_cast<uint8_t>(previousType)) > 0 ||
-		lighting::blockLightEmission(static_cast<uint8_t>(type)) > 0;
-	if (!lightRelevant)
-		return;
-
-	// The edit dirties every neighbor it can still reach with nonzero
-	// propagated light: those within the halo radius of that border
-	// (conservative - the 15th step carries value 0 and is included).
-	constexpr int R = ChunkLightHalo::kRadius;
-	const bool west = x + 1 <= R;
-	const bool east = CHUNK_SIZE - x <= R;
-	const bool south = z + 1 <= R;
-	const bool north = CHUNK_SIZE - z <= R;
-	const bool southWest = west && south && (x + 1) + (z + 1) <= R;
-	const bool southEast = east && south && (CHUNK_SIZE - x) + (z + 1) <= R;
-	const bool northWest = west && north && (x + 1) + (CHUNK_SIZE - z) <= R;
-	const bool northEast = east && north && (CHUNK_SIZE - x) + (CHUNK_SIZE - z) <= R;
-	if (!west && !east && !south && !north && !southWest && !southEast && !northWest && !northEast)
-		return;
-
-	uint16_t yMask = 0;
-	const int yLo = std::max(0, y - R) / Chunk::kOccupancySectionSize;
-	const int yHi = std::min(static_cast<int>(CHUNK_HEIGHT) - 1, y + R) /
-					Chunk::kOccupancySectionSize;
-	for (int s = yLo; s <= yHi; ++s)
-		yMask |= static_cast<uint16_t>(1u << s);
-
-	auto dirty = [&](const glm::ivec3 &pos) {
-		Chunk *n = getChunk(pos);
-		// UNLOADED chunks have no mesh to invalidate (generation re-arms all
-		// sections anyway). The section mask is recorded even when the
-		// neighbor is IN TRANSIT: the atomic mask persists across the
-		// in-flight job and processFinishedJobs re-arms GENERATED after
-		// publish, so an edit racing a mesh build can never lose its
-		// invalidation (issue #141 review round 2). Only the scheduling
-		// state change is withheld while a job owns the chunk - publish
-		// would overwrite it.
-		if (!n || n->getState() == ChunkState::UNLOADED)
-			return;
-		n->markSectionsDirty(yMask);
-		if (!n->isInTransit() && n->getState() == ChunkState::MESHED)
-			n->setState(ChunkState::GENERATED);
-	};
-	if (west) dirty(chunkPos + glm::ivec3(-1, 0, 0));
-	if (east) dirty(chunkPos + glm::ivec3(+1, 0, 0));
-	if (south) dirty(chunkPos + glm::ivec3(0, 0, -1));
-	if (north) dirty(chunkPos + glm::ivec3(0, 0, +1));
-	if (southWest) dirty(chunkPos + glm::ivec3(-1, 0, -1));
-	if (southEast) dirty(chunkPos + glm::ivec3(+1, 0, -1));
-	if (northWest) dirty(chunkPos + glm::ivec3(-1, 0, +1));
-	if (northEast) dirty(chunkPos + glm::ivec3(+1, 0, +1));
-}
-
-void ChunkManager::dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 &chunkIdx)
-{
-	if (!chunk || !chunk->isVoxelBackingReadable())
-		return;
-	constexpr int R = ChunkLightHalo::kRadius;
-	// One pass classifies every light-relevant cell into the neighbor bands
-	// it can reach - sides AND diagonals, with the same Manhattan reach rule
-	// as markNeighborLightDirty. Light-relevant here means emissive sources
-	// (new light) OR non-air-like content (the halo assumed AIR for this
-	// missing chunk, so arriving blockers/liquids change BFS paths even
-	// without a single emitter - issue #141 review round 2). ~65K cheap
-	// checks per arrival, once per chunk lifetime; a band without relevant
-	// cells dirties nothing.
-	constexpr int kBandCount = 8; // W E S N SW SE NW NE
-	int bandMinY[kBandCount] = {CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT,
-								CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT, CHUNK_HEIGHT};
-	int bandMaxY[kBandCount] = {-1, -1, -1, -1, -1, -1, -1, -1};
-	auto note = [&](int side, int y) {
-		if (y < bandMinY[side])
-			bandMinY[side] = y;
-		if (y > bandMaxY[side])
-			bandMaxY[side] = y;
-	};
-	for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
-		for (uint32_t z = 0; z < CHUNK_SIZE; ++z)
-			for (uint32_t x = 0; x < CHUNK_SIZE; ++x)
-			{
-				const auto t = static_cast<TextureType>(chunk->getVoxel(x, y, z).type);
-				const bool lightRelevant =
-					lighting::isBlockLightSource(t) || !blockTransmitsSkyLight(t);
-				if (!lightRelevant)
-					continue;
-				const int xi = static_cast<int>(x);
-				const int zi = static_cast<int>(z);
-				if (xi + 1 <= R) note(0, static_cast<int>(y));
-				if (CHUNK_SIZE - xi <= R) note(1, static_cast<int>(y));
-				if (zi + 1 <= R) note(2, static_cast<int>(y));
-				if (CHUNK_SIZE - zi <= R) note(3, static_cast<int>(y));
-				if (xi + 1 + zi + 1 <= R) note(4, static_cast<int>(y));
-				if (CHUNK_SIZE - xi + zi + 1 <= R) note(5, static_cast<int>(y));
-				if (xi + 1 + (CHUNK_SIZE - zi) <= R) note(6, static_cast<int>(y));
-				if (CHUNK_SIZE - xi + (CHUNK_SIZE - zi) <= R) note(7, static_cast<int>(y));
-			}
-
-	// Same mask-persists-through-transit rule as markNeighborLightDirty.
-	auto dirty = [&](int side, const glm::ivec3 &pos) {
-		if (bandMinY[side] > bandMaxY[side])
-			return;
-		Chunk *n = getChunk(pos);
-		if (!n || n->getState() == ChunkState::UNLOADED)
-			return;
-		uint16_t yMask = 0;
-		const int yLo = std::max(0, bandMinY[side] - R) / Chunk::kOccupancySectionSize;
-		const int yHi = std::min(static_cast<int>(CHUNK_HEIGHT) - 1, bandMaxY[side] + R) /
-						Chunk::kOccupancySectionSize;
-		for (int s = yLo; s <= yHi; ++s)
-			yMask |= static_cast<uint16_t>(1u << s);
-		n->markSectionsDirty(yMask);
-		if (!n->isInTransit() && n->getState() == ChunkState::MESHED)
-			n->setState(ChunkState::GENERATED);
-	};
-	dirty(0, chunkIdx + glm::ivec3(-1, 0, 0));
-	dirty(1, chunkIdx + glm::ivec3(+1, 0, 0));
-	dirty(2, chunkIdx + glm::ivec3(0, 0, -1));
-	dirty(3, chunkIdx + glm::ivec3(0, 0, +1));
-	dirty(4, chunkIdx + glm::ivec3(-1, 0, -1));
-	dirty(5, chunkIdx + glm::ivec3(+1, 0, -1));
-	dirty(6, chunkIdx + glm::ivec3(-1, 0, +1));
-	dirty(7, chunkIdx + glm::ivec3(+1, 0, +1));
-}
-
-TaskPriority ChunkManager::calculateTaskPriority(float distanceSq, float lodThresholdSq) const
-{
-	if (distanceSq < lodThresholdSq * 0.25f)
-		return TaskPriority::High;
-	if (distanceSq > lodThresholdSq)
-		return TaskPriority::Low;
-	return TaskPriority::Normal;
-}
-
-bool ChunkManager::deleteVoxel(const glm::vec3 &worldPos)
-{
-	const int chunkX = static_cast<int>(std::floor(worldPos.x / CHUNK_SIZE));
-	const int chunkZ = static_cast<int>(std::floor(worldPos.z / CHUNK_SIZE));
-	const glm::ivec3 chunkPos(chunkX, 0, chunkZ);
-	const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
-	const int localY = static_cast<int>(std::floor(worldPos.y));
-	const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
-
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	return scheduleLogicalEdit(chunkPos, localX, localY, localZ, AIR);
-}
-
-bool ChunkManager::placeVoxel(const glm::vec3 &worldPos, TextureType type)
-{
-	const int chunkX = static_cast<int>(std::floor(worldPos.x / CHUNK_SIZE));
-	const int chunkZ = static_cast<int>(std::floor(worldPos.z / CHUNK_SIZE));
-	const glm::ivec3 chunkPos(chunkX, 0, chunkZ);
-	const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
-	const int localY = static_cast<int>(std::floor(worldPos.y));
-	const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
-
-	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	return scheduleLogicalEdit(chunkPos, localX, localY, localZ, type);
-}
-
-bool ChunkManager::isVoxelActive(const glm::vec3 &worldPos) const
-{
-	if (worldPos.y < 0.f || worldPos.y >= static_cast<float>(CHUNK_HEIGHT))
-		return false;
-
-	const int chunkX = static_cast<int>(std::floor(worldPos.x / CHUNK_SIZE));
-	const int chunkZ = static_cast<int>(std::floor(worldPos.z / CHUNK_SIZE));
-	const glm::ivec3 chunkPos(chunkX, 0, chunkZ);
-
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	auto it = m_chunks.find(chunkPos);
-	if (it == m_chunks.end() || it->second->getState() < ChunkState::GENERATED)
-		return false;
-
-	const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
-	const int localY = static_cast<int>(std::floor(worldPos.y));
-	const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
-	return it->second->getVoxel(localX, localY, localZ).type != AIR;
-}
-
-Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos)
-{
-	auto it = m_chunks.find(chunkPos);
-	return it != m_chunks.end() ? it->second : nullptr;
-}
-
-const Chunk *ChunkManager::getChunk(const glm::ivec3 &chunkPos) const
-{
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	auto it = m_chunks.find(chunkPos);
-	return it != m_chunks.end() ? it->second : nullptr;
-}
-
-Chunk *ChunkManager::getChunkAtWorldPos(const glm::vec3 &worldPos)
-{
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	return getChunk(worldToChunkCoord(worldPos));
-}
-
-lighting::LocalVoxelLight ChunkManager::sampleVoxelLightUnlocked(const glm::ivec3 &p) const
-{
-	if (p.y >= static_cast<int>(CHUNK_HEIGHT))
-		return {1.0f, glm::vec3(0.0f)};
-	if (p.y < 0)
-		return {0.0f, glm::vec3(0.0f)};
-	if (p.x < SHRT_MIN || p.x >= SHRT_MAX || p.z < SHRT_MIN || p.z >= SHRT_MAX)
-		return {0.0f, glm::vec3(0.0f)};
-
-	const int size = static_cast<int>(CHUNK_SIZE);
-	const int cx = p.x / size - (p.x % size < 0 ? 1 : 0);
-	const int cz = p.z / size - (p.z % size < 0 ? 1 : 0);
-	const auto it = m_chunks.find({cx, 0, cz});
-	if (it == m_chunks.end() || !it->second)
-		return {0.0f, glm::vec3(0.0f)};
-
-	const Chunk *chunk = it->second;
-	if (!chunk->hasLightStorage())
-		return {0.0f, glm::vec3(0.0f)};
-
-	const int lx = p.x - cx * size;
-	const int lz = p.z - cz * size;
-	return chunk->sampleLight(lx, p.y, lz);
-}
-
-lighting::LocalVoxelLight ChunkManager::sampleVoxelLight(const glm::ivec3 &blockPos) const
-{
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	return sampleVoxelLightUnlocked(blockPos);
-}
-
-lighting::LocalVoxelLight ChunkManager::sampleSmoothedLightUnlocked(const glm::vec3 &worldPos) const
-{
-	const glm::vec3 s = worldPos - glm::vec3(0.5f);
-	const int x0 = static_cast<int>(std::floor(s.x));
-	const int y0 = static_cast<int>(std::floor(s.y));
-	const int z0 = static_cast<int>(std::floor(s.z));
-	const int x1 = x0 + 1;
-	const int y1 = y0 + 1;
-	const int z1 = z0 + 1;
-
-	const float fx = s.x - static_cast<float>(x0);
-	const float fy = s.y - static_cast<float>(y0);
-	const float fz = s.z - static_cast<float>(z0);
-
-	const auto c000 = sampleVoxelLightUnlocked({x0, y0, z0});
-	const auto c100 = sampleVoxelLightUnlocked({x1, y0, z0});
-	const auto c010 = sampleVoxelLightUnlocked({x0, y1, z0});
-	const auto c110 = sampleVoxelLightUnlocked({x1, y1, z0});
-	const auto c001 = sampleVoxelLightUnlocked({x0, y0, z1});
-	const auto c101 = sampleVoxelLightUnlocked({x1, y0, z1});
-	const auto c011 = sampleVoxelLightUnlocked({x0, y1, z1});
-	const auto c111 = sampleVoxelLightUnlocked({x1, y1, z1});
-
-	const auto c00 = lighting::lerpLocalVoxelLight(c000, c100, fx);
-	const auto c10 = lighting::lerpLocalVoxelLight(c010, c110, fx);
-	const auto c01 = lighting::lerpLocalVoxelLight(c001, c101, fx);
-	const auto c11 = lighting::lerpLocalVoxelLight(c011, c111, fx);
-
-	const auto c0 = lighting::lerpLocalVoxelLight(c00, c10, fy);
-	const auto c1 = lighting::lerpLocalVoxelLight(c01, c11, fy);
-
-	return lighting::lerpLocalVoxelLight(c0, c1, fz);
-}
-
-lighting::LocalVoxelLight ChunkManager::sampleSmoothedLight(const glm::vec3 &worldPos) const
-{
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	return sampleSmoothedLightUnlocked(worldPos);
-}
-
-size_t ChunkManager::chunkCount() const
-{
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	return m_chunks.size();
-}
-
-size_t ChunkManager::pendingLoadCount() const
-{
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	return (m_loadQueue.size() >= m_loadQueueHead) ? (m_loadQueue.size() - m_loadQueueHead) : 0;
-}
-
-size_t ChunkManager::pendingGenJobs() const
-{
-	return m_pendingGenJobsCount.load();
-}
-
-size_t ChunkManager::pendingMeshJobs() const
-{
-	return m_pendingMeshJobsCount.load();
-}
-
-size_t ChunkManager::pendingLightJobs() const
-{
-	return m_pendingLightJobsCount.load();
-}
-
-bool ChunkManager::prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator)
-{
-	if (!chunk)
-		return false;
-	// Shared synchronous bootstrap contract (issue #112): voxel storage is
-	// prepared on the calling thread immediately before generation; workers
-	// never acquire or release voxel backing. On allocation failure the
-	// chunk is returned to the pool so the slot is not leaked.
-	if (!chunk->prepareVoxelStorageForGeneration())
-	{
-		if (m_chunkPool)
-			m_chunkPool->release(chunk);
-		return false;
-	}
-	chunk->generateTerrain(generator);
-	// Bootstrap path (issue #180): same override contract as the async gen
-	// job - generation is deterministic, saved edits re-apply on top.
-	applyPersistentOverrides(chunk);
-	return true;
-}
-
-void ChunkManager::generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,
-						 ImmediateCommands &imm, MeshArenas &arenas)
-{
-	if (!m_terrainGenerator || !m_chunkPool || !allocator)
-		return;
-
-	// Square footprint (2r+1)^2 plus a little margin for safety. Bootstrap is
-	// a one-shot synchronous setup: grow in a single call (maxGrowPerCall = 0)
-	// instead of the incremental per-tick cap the streaming path uses.
-	const size_t bootstrapNeed =
-		static_cast<size_t>(2 * radiusChunks + 1) * static_cast<size_t>(2 * radiusChunks + 1) + 16;
-	m_chunkPool->ensureCapacity(bootstrapNeed, 0);
-
-	const glm::ivec3 camChunk = worldToChunkCoord(center);
-	std::vector<std::pair<glm::ivec3, Chunk *>> created;
-
-	for (int z = -radiusChunks; z <= radiusChunks; ++z)
-	{
-		for (int x = -radiusChunks; x <= radiusChunks; ++x)
-		{
-			const glm::ivec3 pos = camChunk + glm::ivec3(x, 0, z);
-			{
-				std::lock_guard<std::shared_mutex> lock(m_mutex);
-				if (m_chunks.find(pos) != m_chunks.end())
-					continue;
-			}
-			Chunk *chunk = m_chunkPool->acquire(glm::vec3(
-				static_cast<float>(pos.x * CHUNK_SIZE), 0.f,
-				static_cast<float>(pos.z * CHUNK_SIZE)));
-			if (!chunk)
-			{
-				// Grow once more and retry (should be rare if ensureCapacity above is correct).
-				m_chunkPool->ensureCapacity(m_chunkPool->capacity() + 64);
-				chunk = m_chunkPool->acquire(glm::vec3(
-					static_cast<float>(pos.x * CHUNK_SIZE), 0.f,
-					static_cast<float>(pos.z * CHUNK_SIZE)));
-				if (!chunk)
-					continue;
-			}
-			// Bootstrap acquisition (issue #180): arm persistent-edit
-			// tracking exactly like processChunkLoading does.
-			chunk->setTrackPersistentEdits(isWorldOpen());
-			if (!prepareAndGenerateChunk(chunk, *m_terrainGenerator))
-				continue;
-			created.emplace_back(pos, chunk);
-		}
-	}
-
-	// Shell + mesh on main thread for bootstrap quality.
-	{
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		for (const auto &p : created)
-		{
-			m_chunks[p.first] = p.second;
-			p.second->setActiveIndex(m_activeChunks.size());
-			m_activeChunks.push_back(p.second);
-			p.second->setVisible(true);
-			const glm::vec3 pos = p.second->getPosition();
-			const float dx = pos.x - center.x;
-			const float dz = pos.z - center.z;
-			updateEntityLightCacheIntent(*p.second, dx * dx + dz * dz);
-		}
-		for (const auto &p : created)
-			ensureShellPopulated(p.second, p.first);
-		// Bootstrap meshing gets cross-chunk light too: every created chunk
-		// is generated and registered by now, so the halo snapshots see the
-		// full neighborhood (issue #141 review fix).
-		for (const auto &p : created)
-			ensureLightHalo(p.second, p.first);
-	}
-
-	for (const auto &p : created)
-	{
-		p.second->generateMesh();
-		ChunkLightHalo *halo = p.second->lightHalo();
-		p.second->setLightHalo(nullptr);
-		if (halo)
-			m_lightHaloPool.release(halo);
-	}
-
-	// One-time sync upload before the first frame (nothing in flight yet).
-	for (const auto &p : created)
-		p.second->uploadToGPU(allocator, imm, arenas);
-
-	std::cout << "Bootstrap: " << created.size() << " chunks around spawn\n";
-}
-
 // ---------------------------------------------------------------------------
-// Persistent world lifecycle (issue #180, Phase 3+4)
+// Chunk lifecycle debug trace (issue #179; unchanged ring contract)
 // ---------------------------------------------------------------------------
 
-bool ChunkManager::openWorld(const std::string &savesRoot, const std::string &worldName,
-                             std::string &outError)
+void ChunkManager::recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sections)
 {
-	outError.clear();
-	if (!m_terrainGenerator)
-	{
-		outError = "no terrain generator";
-		return false;
-	}
-	if (m_persistence)
-	{
-		outError = "a world is already open";
-		return false;
-	}
-
-	auto persistence = std::make_unique<WorldPersistence>();
-	const WorldPersistence::OpenInfo info = persistence->openOrCreate(
-		savesRoot, worldName, m_terrainGenerator->getSeed(), TerrainGenerator::kGeneratorVersion);
-	if (!info.ok)
-	{
-		outError = info.error;
-		return false;
-	}
-	m_persistence = std::move(persistence);
-
-	// Arm tracking on every already-loaded chunk so edits from this point on
-	// are recorded (chunks acquired later arm in processChunkLoading and the
-	// bootstrap path).
-	{
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		for (auto &[pos, chunk] : m_chunks)
-			if (chunk)
-				chunk->setTrackPersistentEdits(true);
-	}
-	return true;
-}
-
-// Quiesce the async lifecycle for persistence (issue #180 review round 2):
-// publish every finished gen/mesh/light job, apply every deferred voxel edit
-// and age deferred releases, so the final persistence capture sees the
-// complete authoritative voxel state and no worker can dereference the
-// persistence facade after it is released.
-//
-// Closing a persistent world is a durability barrier: there is deliberately
-// NO timeout here - waiting is strictly better than losing a save. The loop
-// cannot spin forever on the JOB side (the close path does not feed the
-// queues; workers always finish), but a PendingVoxelEdit whose target chunk
-// never leaves UNLOADED (gen budget starved) can stay deferred forever, so
-// that condition is CHECKED afterwards instead of waited on.
-bool ChunkManager::drainAsyncJobsForPersistence()
-{
-	for (;;)
-	{
-		processFinishedJobs();     // publishes gen/mesh/light + applyPendingEdits
-		processDeferredReleases(); // ages deferred releases (capturing their edits)
-		const bool busy = m_pendingGenJobsCount.load() > 0 ||
-		                  m_pendingMeshJobsCount.load() > 0 ||
-		                  m_pendingLightJobsCount.load() > 0 || anyChunkInTransitForPersistence();
-		if (!busy)
-			break;
-		std::this_thread::sleep_for(std::chrono::microseconds(500));
-	}
-	// One final publish pass so edits deferred until the very last job land.
-	processFinishedJobs();
-
-	// Every edit accepted by gameplay must have reached authoritative voxel
-	// state before the capture runs (issue #180 review round 2).
-	if (hasPendingLogicalEdits())
-		return false;
-	return true;
-}
-
-bool ChunkManager::anyChunkInTransitForPersistence() const
-{
-	std::shared_lock<std::shared_mutex> lock(m_mutex);
-	for (const auto &[pos, chunk] : m_chunks)
-		if (chunk && chunk->isInTransit())
-			return true;
-	return false;
-}
-
-// Final-shutdown resolution of stranded PendingVoxelEdits (issue #180
-// review round 3): an edit accepted against a chunk that was acquired but
-// never dispatched for generation cannot be waited on (no job exists), so
-// the shutdown path RESOLVES it instead: synchronously generate the chunk's
-// authoritative terrain, re-apply saved overrides, and let
-// applyPendingEdits() land the accepted edits. Mesh/GPU work is not needed
-// to make voxel state authoritative. Chunks with an in-flight job are
-// skipped here - their gen job will generate them, and the drain below
-// publishes it and applies the edits.
-void ChunkManager::resolvePendingEditsForPersistenceShutdown()
-{
-	// Snapshot the distinct coordinates that still hold accepted edits.
-	std::vector<glm::ivec3> coords;
-	{
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		coords.reserve(m_pendingEdits.size());
-		for (const PendingVoxelEdit &edit : m_pendingEdits)
-			if (edit.chunk)
-				coords.push_back(edit.chunkPos);
-	}
-	const auto coordLess = [](const glm::ivec3 &a, const glm::ivec3 &b)
-	{
-		if (a.x != b.x)
-			return a.x < b.x;
-		if (a.z != b.z)
-			return a.z < b.z;
-		return a.y < b.y;
-	};
-	std::sort(coords.begin(), coords.end(), coordLess);
-	coords.erase(std::unique(coords.begin(), coords.end(),
-	                         [](const glm::ivec3 &a, const glm::ivec3 &b)
-	                         { return a.x == b.x && a.y == b.y && a.z == b.z; }),
-	             coords.end());
-
-	for (const glm::ivec3 &coord : coords)
-	{
-		Chunk *chunk = nullptr;
-		{
-			std::lock_guard<std::shared_mutex> lock(m_mutex);
-			const auto it = m_chunks.find(coord);
-			chunk = it != m_chunks.end() ? it->second : nullptr;
-		}
-		if (!chunk || chunk->isInTransit() || chunk->getState() != ChunkState::UNLOADED)
-			continue;
-
-		// Deliberately NOT prepareAndGenerateChunk(): its allocation-failure
-		// path releases the chunk to the pool, which would leave m_chunks
-		// holding a recycled slot. On failure the chunk stays UNLOADED and
-		// the edit is lost as the documented last resort of a forced
-		// shutdown (stderr says so).
-		if (!chunk->prepareVoxelStorageForGeneration())
-		{
-			std::cerr << "[world] shutdown resolve: voxel storage allocation failed for chunk ("
-			          << coord.x << ", " << coord.z << "); its accepted edits cannot be saved"
-			          << std::endl;
-			continue;
-		}
-		if (m_terrainGenerator)
-			chunk->generateTerrain(*m_terrainGenerator);
-		applyPersistentOverrides(chunk);
-	}
-
-	// Land every edit whose chunk is now readable.
-	processFinishedJobs();
-}
-
-// Destructor-only close (issue #180 review round 3): unlike the retryable
-// closeWorld(), a final shutdown must RESOLVE everything resolvable before
-// destruction instead of refusing - there is no later retry point. Stranded
-// PendingVoxelEdits are synchronously resolved, then the usual
-// capture -> flush -> shutdown runs. Returns the flush success (the caller
-// is destructing either way; the result is only for logging/tests).
-bool ChunkManager::forceCloseWorldForShutdown()
-{
-	if (!m_persistence)
-		return true;
-
-	resolvePendingEditsForPersistenceShutdown();
-
-	const bool drained = drainAsyncJobsForPersistence();
-	if (!drained)
-	{
-		// Accepted logical edits could not be made authoritative (their
-		// chunk never generated). The shutdown continues - destruction has
-		// no retry point - but the loss is REPORTED, never silent, and the
-		// return value tells the caller the save may be incomplete.
-		std::cerr << "[world] final shutdown: accepted logical edits could not be made authoritative"
-		          << std::endl;
-	}
-
-	captureAllChunkEdits();
-	const bool flushed = m_persistence->flush();
-	m_persistence->shutdown();
-	// Disarm tracking on the loaded set: after closeWorld() the manager must
-	// behave exactly like a never-opened one (no maps filling up for a save
-	// pipeline that no longer exists).
-	{
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		for (auto &[pos, chunk] : m_chunks)
-			if (chunk)
-				chunk->setTrackPersistentEdits(false);
-	}
-	m_persistence.reset();
-	return drained && flushed;
-}
-
-bool ChunkManager::closeWorld()
-{
-	if (!m_persistence)
-		return true;
-
-	// Quiesce BEFORE the final capture (issue #180 review): the old order
-	// (capture, then wait for gen) lost edits that were deferred while their
-	// chunk was mid-job - PendingVoxelEdits had not been applied when the
-	// capture ran, and in-transit chunks were skipped by captureAll. With
-	// the drain first, the capture below sees every authoritative edit and
-	// no worker can touch m_persistence after shutdown/release.
-	if (!drainAsyncJobsForPersistence())
-	{
-		// Accepted edits are still stranded outside authoritative voxel
-		// state (their chunk never generated). Persistence stays OPEN: a
-		// later flushWorld()/closeWorld() retries once the situation
-		// resolves. Destroying the facade here would silently drop them.
-		std::cerr << "[world] close deferred: logical edits still pending after drain" << std::endl;
-		return false;
-	}
-
-	captureAllChunkEdits();
-
-	// Retryable close (issue #180 review round 5): a flush failure must NOT
-	// tear the persistence down - the desired/durable state machine keeps
-	// every failed coordinate dirty, tracking stays armed and the save
-	// service is still usable, so the next capture/flush/close retries.
-	// Invariant: closeWorld() == false => m_persistence alive and usable.
-	if (!m_persistence->flush())
-	{
-		std::cerr << "[world] close deferred: persistence flush failed" << std::endl;
-		return false;
-	}
-
-	m_persistence->shutdown();
-	// Disarm tracking on the loaded set: after closeWorld() the manager must
-	// behave exactly like a never-opened one (no maps filling up for a save
-	// pipeline that no longer exists).
-	{
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		for (auto &[pos, chunk] : m_chunks)
-			if (chunk)
-				chunk->setTrackPersistentEdits(false);
-	}
-	m_persistence.reset();
-	return true;
-}
-
-bool ChunkManager::flushWorld()
-{
-	if (!m_persistence)
-		return true;
-	captureAllChunkEdits();
-	return m_persistence->flush();
-}
-
-void ChunkManager::applyPersistentOverrides(Chunk *chunk)
-{
-	if (!m_persistence || !m_persistence->enabled() || !chunk)
+	if (!m_chunkTraceEnabled || !chunk)
 		return;
-	const glm::ivec3 cc = worldToChunkCoord(chunk->getPosition());
-	// Copy under the persistence mutex: the worker must not iterate a vector
-	// that the save pipeline may refine concurrently.
-	const std::vector<worldsave::ChunkEdit> overrides = m_persistence->overridesSnapshot(cc.x, cc.z);
-	if (overrides.empty())
-		return;
-	for (const worldsave::ChunkEdit &edit : overrides)
-	{
-		// Guard against corrupt on-disk payloads: localIndex is the canonical
-		// y-major index (y*256 + z*16 + x), so localIndex < CHUNK_VOLUME is
-		// exactly "x/z < 16 and y < CHUNK_HEIGHT".
-		if (edit.localIndex >= static_cast<uint32_t>(CHUNK_VOLUME))
-		{
-			std::cerr << "WorldPersistence: ignoring out-of-range localIndex "
-			          << edit.localIndex << " in chunk (" << cc.x << ", " << cc.z << ")\n";
-			continue;
-		}
-		const int x = static_cast<int>(edit.localIndex & 15u);
-		const int z = static_cast<int>((edit.localIndex >> 4) & 15u);
-		const int y = static_cast<int>(edit.localIndex >> 8);
-		chunk->setVoxel(x, y, z, static_cast<TextureType>(edit.blockType));
-	}
+	const glm::vec3 wp = chunk->getPosition();
+	recordWorldEvent(glm::ivec3(static_cast<int>(std::round(wp.x)) / CHUNK_SIZE, 0,
+								static_cast<int>(std::round(wp.z)) / CHUNK_SIZE),
+					 chunk->meshRevision(), kind, sections);
 }
 
-void ChunkManager::captureChunkEditsForUnload(Chunk *chunk)
+void ChunkManager::recordWorldEvent(const glm::ivec3 &coord, uint64_t revision, const char *kind,
+									uint32_t sections)
 {
-	if (!m_persistence || !m_persistence->enabled() || !chunk || !chunk->hasPersistentEdits())
+	if (!m_chunkTraceEnabled)
 		return;
-	Chunk::ChunkEditMap edits = chunk->takePersistentEdits();
-	std::vector<worldsave::ChunkEdit> values;
-	values.reserve(edits.size());
-	for (const auto &[localIndex, type] : edits)
-		values.push_back({localIndex, type});
-	std::sort(values.begin(), values.end(),
-	          [](const worldsave::ChunkEdit &a, const worldsave::ChunkEdit &b)
-	          { return a.localIndex < b.localIndex; });
-	const glm::ivec3 cc = worldToChunkCoord(chunk->getPosition());
-	m_persistence->captureChunkEdits(cc.x, cc.z, std::move(values));
+	ChunkDebugEvent &e = m_chunkEventRing[m_chunkEventWrite];
+	e.timeSec = std::chrono::duration<double>(
+					std::chrono::steady_clock::now().time_since_epoch())
+					.count();
+	e.chunk = coord;
+	e.kind = kind;
+	e.revision = revision;
+	e.sections = sections;
+	m_chunkEventWrite = (m_chunkEventWrite + 1) % kChunkEventRingSize;
+	if (m_chunkEventCount < kChunkEventRingSize)
+		++m_chunkEventCount;
 }
 
-void ChunkManager::captureAllChunkEdits()
+std::vector<ChunkDebugEvent> ChunkManager::chunkDebugEvents() const
 {
-	if (!m_persistence || !m_persistence->enabled())
-		return;
-	// Main thread; edits only ever happen on the main thread, so the edit
-	// maps of non-transit chunks are stable. In-transit chunks are skipped:
-	// their gen/mesh job is mid-flight (the gen job itself re-applies the
-	// stored overrides after generation), and they are captured on their own
-	// unload or a later flush.
-	std::vector<Chunk *> capture;
-	{
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		capture.reserve(m_chunks.size() + m_deferredRelease.size());
-		for (auto &[pos, chunk] : m_chunks)
-			if (chunk && !chunk->isInTransit() && chunk->hasPersistentEdits())
-				capture.push_back(chunk);
-		for (Chunk *chunk : m_deferredRelease)
-			if (chunk && chunk->hasPersistentEdits())
-				capture.push_back(chunk);
-	}
-	for (Chunk *chunk : capture)
-		captureChunkEditsForUnload(chunk);
+	std::vector<ChunkDebugEvent> out;
+	out.reserve(m_chunkEventCount);
+	const size_t start = (m_chunkEventCount < kChunkEventRingSize) ? 0 : m_chunkEventWrite;
+	for (size_t i = 0; i < m_chunkEventCount; ++i)
+		out.push_back(m_chunkEventRing[(start + i) % kChunkEventRingSize]);
+	return out;
 }

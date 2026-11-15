@@ -2,7 +2,7 @@
 
 #include "Vulkan/VkAllocator.hpp"
 
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 #include <cstddef>
 #include <cstdint>
 

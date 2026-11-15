@@ -42,9 +42,14 @@ surface — still not a physics or volumetric system.
 - `Physics/PlayerController.hpp`: input intentions in world X/Z, velocity and
   jump/swim rules, fixed-step accumulator and interpolated eye position.
 - `Physics/BlockPhysics.hpp`: physical block policy, independent of rendering.
-- `Chunk/ChunkCollisionView.hpp`: main-thread scoped adapter. Holds the chunk
-  map's shared lock once, with a bounded lookup cache destroyed at scope exit.
-  No chunk/storage pointer escapes into the player or survives across frames.
+- `World/WorldCollisionView.hpp`: CPU-only scoped query view over `VoxelWorld`.
+  Holds the world map's shared lock once, with a bounded lookup cache destroyed
+  at scope exit. No chunk/storage pointer escapes into the player or survives
+  across frames.
+- `Chunk/ChunkCollisionView.hpp`: thin render-side wrapper around
+  `WorldCollisionView` that adds derived light-cache sampling; it additionally
+  holds the render map's shared lock for those reads (issue #206). Both locks
+  are main-thread-only — see the lock-order note in its header.
 
 The engine samples SDL input then advances the controller before streaming and
 rendering. Simulation uses double precision at 120 Hz, with up to eight steps

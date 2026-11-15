@@ -1,0 +1,101 @@
+#pragma once
+
+// =============================================================================
+// WorldCollisionView — CPU-only scoped collision/query view over VoxelWorld
+// (issue #206, Epic #204 Phase B). Carries the EXACT semantics of the former
+// ChunkCollisionView (which now wraps this view and adds the derived render
+// light sampling):
+//
+//   * main-thread scoped view: holds the world map lock once, caches chunk
+//     lookups only for this view's lifetime, never stores a pointer in the
+//     player/physics;
+//   * fixed vertical world: solid lower boundary (y < 0), open sky
+//     (y >= WORLD_HEIGHT), finite SHRT_MIN/SHRT_MAX horizontal envelope;
+//   * unloaded / unreadable / storageless records answer UNKNOWN
+//     (Cell.available == false) — never inferred solidity;
+//   * effective pending (non-mirror) edits overlay the stored voxel, matched
+//     by incarnation generation so a recycled record never resurrects an
+//     edit. Mirrors affect meshing only, not canonical occupancy.
+//
+// Generation publishes readable backing via the atomic record state; mesh
+// workers only read it. Main-thread edits/unload cannot run during this view.
+// =============================================================================
+
+#include <algorithm>
+#include <array>
+#include <climits>
+#include <shared_mutex>
+
+#include <Physics/BlockPhysics.hpp>
+#include <World/VoxelWorld.hpp>
+
+class WorldCollisionView final : public physics::VoxelCollisionWorld
+{
+public:
+    explicit WorldCollisionView(const VoxelWorld &world)
+        : world(world), lock(world.m_mutex) {}
+
+    physics::Cell sample(glm::ivec3 p) const override { return sampleWithType(p, nullptr); }
+
+    physics::Cell sampleWithType(glm::ivec3 p, TextureType *outType) const
+    {
+        // Fixed vertical world, with a solid lower boundary and open sky.
+        if (p.y < 0) return {true, true};
+        if (p.y >= WORLD_HEIGHT) return {true, false};
+        // Preserve the engine's existing finite camera-coordinate envelope.
+        if (p.x < SHRT_MIN || p.x >= SHRT_MAX || p.z < SHRT_MIN || p.z >= SHRT_MAX)
+            return {true, true};
+        const int cx = floorChunk(p.x), cz = floorChunk(p.z);
+        const glm::ivec3 key(cx, 0, cz);
+        const WorldChunk *chunk = nullptr;
+        bool found = false;
+        for (unsigned i = 0; i < count; ++i)
+            if (cache[i].key == key) { chunk = cache[i].chunk; found = true; break; }
+        if (!found)
+        {
+            const auto it = world.m_chunks.find(key);
+            chunk = it == world.m_chunks.end() ? nullptr : it->second;
+            cache[next] = {key, chunk};
+            next = (next + 1) % cache.size();
+            count = std::min<unsigned>(count + 1, static_cast<unsigned>(cache.size()));
+        }
+        if (!chunk || !chunk->isVoxelBackingReadable() || !chunk->hasVoxelStorage()) return {};
+        const int x = p.x - cx * int(CHUNK_SIZE), z = p.z - cz * int(CHUNK_SIZE);
+        TextureType type = static_cast<TextureType>(chunk->getVoxel(x, p.y, z).type);
+        // Match the logical edit state; never resurrect an edit from a recycled
+        // incarnation. Mirrors affect meshing only, not canonical occupancy.
+        for (const auto &edit : world.m_pendingEdits)
+            if (!edit.borderNeighbor && edit.chunk == chunk &&
+                edit.generation == chunk->generation() && edit.x == x && edit.y == p.y && edit.z == z)
+                type = edit.type;
+        if (outType) *outType = type;
+        return physics::blockCell(type);
+    }
+
+    // World Y of the water surface above the given eye cell (issue #144):
+    // scan up to the first non-water cell and return its bottom plane. One
+    // main-thread column scan per frame; non-water eye cells return
+    // kUnknownUnderwaterSurfaceY.
+    float waterSurfaceAbove(glm::ivec3 eye) const
+    {
+        if (sample(eye).medium != physics::Medium::Water)
+            return kUnknownUnderwaterSurfaceY;
+        int y = eye.y;
+        while (y < static_cast<int>(WORLD_HEIGHT) &&
+               sample({eye.x, y, eye.z}).medium == physics::Medium::Water)
+            ++y;
+        return static_cast<float>(y);
+    }
+
+private:
+    static int floorChunk(int n)
+    {
+        const int size = static_cast<int>(CHUNK_SIZE);
+        return n / size - (n % size < 0 ? 1 : 0);
+    }
+    const VoxelWorld &world;
+    std::shared_lock<std::shared_mutex> lock;
+    struct Entry { glm::ivec3 key{}; const WorldChunk *chunk{nullptr}; };
+    mutable std::array<Entry, 16> cache{};
+    mutable unsigned count{0}, next{0};
+};

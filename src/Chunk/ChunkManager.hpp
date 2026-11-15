@@ -1,5 +1,30 @@
 #pragma once
 
+// =============================================================================
+// ChunkManager — TEMPORARY render adapter over the authoritative VoxelWorld
+// (issue #206, Epic #204 Phase B).
+//
+// Ownership after Phase B:
+//   * VoxelWorld (owned here, exposed via world()) is the SINGLE owner of
+//     authoritative voxel state: chunk records, residency/streaming, logical
+//     edits, generation workers and WorldPersistence.
+//   * ChunkManager keeps only DERIVED render work: render chunk handles bound
+//     to world records, mesh/light job dispatch, GPU uploads, commit groups,
+//     visibility, entity light-cache intent, deferred GPU retirement and the
+//     chunk lifecycle debug trace.
+//
+// This facade exists so the graphical Engine keeps its historical call
+// surface while Phase C (#207, render world bridge) and Phase E (#209,
+// graphical runtime) land. Per the issue's architectural constraints it is
+// DOCUMENTED and must be REMOVED before epic completion: the render pipeline
+// below moves to the RenderWorldBridge, world ownership to GameSimulation.
+//
+// Synchronization: the world event stream (load/unload/gen/edit) is drained
+// on the main thread immediately after each world call, so the render handle
+// map never observes a recycled record. The render mutex guards only render
+// state; the world mutex guards authoritative state (see VoxelWorld).
+// =============================================================================
+
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
@@ -17,9 +42,10 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Chunk/StreamHelpers.hpp>
 #include <Engine/EngineDefs.hpp>
-#include <Engine/ThreadPool.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/ThreadPool.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 #include <Chunk/LightSample.hpp>
+#include <World/VoxelWorld.hpp>
 #include <utils.hpp>
 
 #include <memory>
@@ -50,35 +76,7 @@ struct CompletedLightJob
 	Chunk *chunk{nullptr};
 	ChunkLightStorage *storage{nullptr};
 	ChunkLightPool *pool{nullptr}; // pool the storage was acquired from
-	uint64_t generation{0};
-	uint64_t revision{0};
-};
-
-/// A voxel edit deferred because its target chunk was in transit (its
-/// storage/borders were being read by a worker). Applied on the main thread
-/// after the in-flight job completes (issue #114 review). An edit is a
-/// logical operation: one target entry plus one mirror entry per adjacent
-/// neighbor, grouped by editId and coalesced per coordinate.
-struct PendingVoxelEdit
-{
-	Chunk *chunk{nullptr};
-	// Incarnation stamp at queue time: a queued edit whose chunk was
-	// recycled (generation moved on) is dropped at apply time instead of
-	// writing into the new incarnation (issue #114 review item 26).
-	uint64_t generation{0};
-	// Chunk map index at queue time: needed by ensureShellPopulated for
-	// mirror writes, and robust against recycling.
-	glm::ivec3 chunkPos{0};
-	int x{0};
-	int y{0};
-	int z{0};
-	TextureType type{AIR};
-	// True for neighbor mirror writes: the shell is rebuilt before the
-	// write (same order as the direct path).
-	bool borderNeighbor{false};
-	// Logical edit group: one user interaction = one id shared by the
-	// target entry and its mirrors.
-	uint64_t editId{0};
+	sim::ChunkIdentity identity{};
 };
 
 /// Lifecycle of a geometric commit group (PR #178 review round 4):
@@ -126,21 +124,6 @@ struct PendingMeshCommitGroup
 	std::vector<uint64_t> editIds;
 };
 
-/// What the last streaming maintenance tick did (issue #108 review): lets
-/// tests and telemetry assert the zero-work / incremental / rebuild contract.
-enum class StreamingUpdateKind
-{
-	None,			// steady state: camera inside the same chunk, anchor and heading
-	Incremental,	// chunk-cross or movement-anchor change: O(r) footprint diff
-	HeadingRebuild, // heading threshold exceeded: full footprint recompute + diff
-	FullRebuild		// startup / teleport / settings change: queue rebuilt from scratch
-};
-
-/// Hard cadence floor between out-of-range unload scans (issue #108 review):
-/// unload checks run on chunk-cross/teleport or settings changes, and at
-/// least every this many frames otherwise.
-constexpr uint32_t kUnloadCheckIntervalFrames = 60;
-
 /// One chunk lifecycle debug event (issue #179 chunk inspector). Recorded
 /// on the main thread into a globally bounded ring, only while tracing is
 /// enabled; `kind` points at a static string literal.
@@ -174,6 +157,12 @@ public:
 	ChunkManager(TerrainGenerator *terrainGenerator, ThreadPool *threadPool, ChunkPool *chunkPool);
 	~ChunkManager();
 
+	/// The authoritative world (issue #206). Temporary adapter exposure:
+	/// Phase C/E re-home the render pipeline and lift world ownership into
+	/// GameSimulation; this accessor is the documented migration seam.
+	VoxelWorld &world() { return *m_world; }
+	const VoxelWorld &world() const { return *m_world; }
+
 	/// Enqueue loads / mark far chunks for unload based on camera position.
 	/// Returns what the load-side maintenance did this tick (the out-of-range
 	/// unload scan is a separate concern driven by the same triggers).
@@ -206,7 +195,8 @@ public:
 	/// After frames-in-flight delay, retire arena ranges and return chunks to the pool.
 	void processDeferredReleases();
 
-	/// Join finished worker jobs and clear in-transit flags.
+	/// Join finished worker jobs and clear in-transit flags (world generation
+	/// + render mesh/light), then apply deferred authoritative edits.
 	void processFinishedJobs();
 
 	/// Pure frustum visibility (used by collectDrawList).
@@ -236,7 +226,7 @@ public:
 
 	/// Snapshot of the streaming maintenance counters (issue #108). Main
 	/// thread writes and reads them, so no lock is taken.
-	StreamingMaintenanceStats streamingMaintenanceStats() const { return m_streamStats; }
+	StreamingMaintenanceStats streamingMaintenanceStats() const { return m_world->streamingMaintenanceStats(); }
 
 	size_t deferredReleaseCount() const { return m_deferredRelease.size(); }
 	size_t chunkCount() const;
@@ -262,11 +252,6 @@ public:
 	void setChunkEventTraceEnabled(bool enabled) { m_chunkTraceEnabled = enabled; }
 	bool chunkEventTraceEnabled() const { return m_chunkTraceEnabled; }
 	/// Chronological copy of the recorded events (oldest first). Main thread.
-	/// Returns a vector by design for now: the ring is capped at
-	/// kChunkEventRingSize entries so the per-call copy is bounded and
-	/// cheap; a span/callback iteration would shave the allocation if the
-	/// inspector ever samples this more than at UI rate (known debt,
-	/// issue #179 review).
 	std::vector<ChunkDebugEvent> chunkDebugEvents() const;
 
 	/// Synchronous bootstrap near spawn so the first frame has terrain.
@@ -280,29 +265,18 @@ public:
 	bool prepareAndGenerateChunk(Chunk *chunk, TerrainGenerator &generator);
 
 	// --- Persistent world lifecycle (issue #180, Phase 3+4) ---
-	// persistence stays DISABLED unless openWorld succeeds — benchmark /
-	// transient worlds (Engine::reloadWorld) never construct it, so they can
-	// never create files. openWorld() seeds the save from the live terrain
-	// generator (seed + kGeneratorVersion) and arms persistent-edit tracking
-	// on every loaded chunk; closeWorld() is the durable teardown.
-	/// Open (or create) `<savesRoot>/<worldName>/` for the running world.
-	/// On success returns true; on failure `outError` carries a user-facing
-	/// reason (seed mismatch, generator version mismatch, corrupt meta, ...).
+	// Delegated to VoxelWorld, the authoritative owner (issue #206). The
+	// adapter orchestrates the render-side quiesce around close so the
+	// durability barrier sees every in-flight job.
 	bool openWorld(const std::string &savesRoot, const std::string &worldName, std::string &outError);
-	/// Capture every chunk with edits, flush the save service, shut it down
-	/// and release the persistence facade. Returns the flush success. After
-	/// closeWorld() the manager behaves exactly like a never-opened one.
 	bool closeWorld();
-	/// True while gameplay edits accepted against not-yet-readable chunks are
-	/// still queued as PendingVoxelEdits - authoritative voxel state is
-	/// behind accepted input. Main-thread view (edits and this accessor are
-	/// main-thread only); used by the close-world drain and tests.
-	bool hasPendingLogicalEdits() const { return !m_pendingEdits.empty(); }
+	/// True while gameplay edits accepted against not-yet-readable chunks
+	/// are still queued - authoritative voxel state is behind accepted input.
+	bool hasPendingLogicalEdits() const { return m_world->hasPendingLogicalEdits(); }
 	/// Canonical world->chunk mapping (floor division; correct for negative
-	/// coordinates). Public so tools/benchmarks use the runtime convention
-	/// (issue #180 review round 7, item 4).
+	/// coordinates). Public so tools/benchmarks use the runtime convention.
 	static glm::ivec3 worldToChunkCoord(const glm::vec3 &worldPos);
-	/// Test/benchmark accessor: snapshot of the active chunk set.
+	/// Test/benchmark accessor: snapshot of the active render chunk set.
 	std::vector<Chunk *> activeChunksSnapshot() const
 	{
 		std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -310,111 +284,35 @@ public:
 	}
 	/// Capture all dirty loaded chunks + flush (no close). False on I/O failure.
 	bool flushWorld();
-	bool isWorldOpen() const { return m_persistence != nullptr; }
-	/// For UI/status; may be null (no world open).
-	/// Const-correct pair (issue #180 review round 6): mutable access is for
-	/// test seams on a non-const manager; a const manager only exposes a
-	/// const facade (UI/status reads).
-	WorldPersistence *worldPersistence() { return m_persistence.get(); }
-	const WorldPersistence *worldPersistence() const { return m_persistence.get(); }
+	bool isWorldOpen() const { return m_world->isWorldOpen(); }
+	/// For UI/status; may be null (no world open). Const-correct pair.
+	WorldPersistence *worldPersistence() { return m_world->worldPersistence(); }
+	const WorldPersistence *worldPersistence() const { return m_world->worldPersistence(); }
 
 private:
-	void queueUnloadOutOfRange(const Camera &camera, const RenderSettings &settings);
-	StreamingUpdateKind loadChunksAroundPlayer(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-											   const RenderSettings &settings);
-	StreamingUpdateKind rebuildStreamingQueueFull(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-												  const RenderSettings &settings);
-	StreamingUpdateKind reconcileStreamingIncremental(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-													  const RenderSettings &settings);
-	StreamingUpdateKind reconcileStreamingHeading(const glm::ivec3 &cameraChunkPos, const Camera &camera,
-												  const RenderSettings &settings);
-	/// Shared tail of the incremental streaming updates: apply a footprint
-	/// diff to the load queue (enqueue entering coords, purge exiting ones,
-	/// compact consumed entries, refresh biased distances, re-sort).
-	void applyFootprintDiffToQueue(const FootprintDiff &diff, const glm::vec3 &camPos,
-								   const glm::vec2 &camForwardXZ, float frontBias);
-	void ensureShellPopulated(Chunk *chunk, const glm::ivec3 &chunkIdx);
-	/// Cross-chunk block-light context (issue #141 review fix): borrow (or
-	/// reuse) a pooled halo for `chunk` and snapshot the 15-voxel neighbor
-	/// ring into it. Caller holds m_mutex exclusively; same dispatch-time
-	/// contract as ensureShellPopulated. Gracefully degrades to no halo
-	/// (in-chunk-only light) when the pool allocation fails. The telemetry
-	/// family routes the haloFill stage timing to the calling pipeline
-	/// (mesh vs light-cache, issue #173 review).
 	void ensureLightHalo(Chunk *chunk, const glm::ivec3 &chunkIdx,
 						 telemetry::Family telemetryFamily = telemetry::MeshFamily);
 	/// Light-aware cross-chunk invalidation (issue #141 review fix): when a
-	/// light-relevant edit (emission or sky-transmission flip - the same
-	/// predicate as markEditDirtySections) lands within the 15-voxel halo
-	/// radius of a border, the neighbor(s) on that side must remesh too or
-	/// their propagated light goes stale. Caller holds m_mutex exclusively.
+	/// light-relevant edit lands within the 15-voxel halo radius of a border,
+	/// the neighbor(s) on that side must remesh too. Derived render state.
 	void markNeighborLightDirty(const glm::ivec3 &chunkPos, int x, int y, int z,
 								TextureType previousType, TextureType type);
 	/// A chunk just finished generating: scan its halo-radius border bands
-	/// for emissive sources and dirty the side neighbors' affected sections
-	/// so their meshes pick up the newly available light. Cheap early-out
-	/// when the bands hold no sources - the common case. Caller holds
-	/// m_mutex exclusively.
+	/// for emissive sources and dirty the side neighbors' affected sections.
 	void dirtyNeighborsForArrivedLight(Chunk *chunk, const glm::ivec3 &chunkIdx);
 
-	// --- Deferred edit subsystem (issue #114 review). Main-thread only:
-	// protected by the engine update/event sequencing, NOT by
-	// m_completedJobsMutex. placeVoxel/deleteVoxel, processFinishedJobs and
-	// chunk unload all run on the main thread.
-	//
-	/// Unified entry point (caller holds m_mutex exclusively): resolves the
-	/// effective voxel state (storage + pending edits), refuses logical
-	/// no-ops, then schedules the target edit and every neighbor mirror as
-	/// one logical group. Each piece is applied immediately when its chunk
-	/// is free, or queued for the apply phase when it is in transit — so an
-	/// in-transit target defers its mirrors too (transaction semantics).
-	bool scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y, int z,
-							 TextureType type);
-	/// Occupancy lifecycle gate (issue #115 blocker): a voxel edit must be
-	/// deferred whenever the chunk is missing, still UNLOADED (backing is
-	/// stale pool bytes until terrain generation initializes it), or in
-	/// transit for any job. UNLOADED defers regardless of transit state.
-	bool mustDeferVoxelEdit(const Chunk *chunk) const;
-	/// Storage type overlaid with the pending (non-mirror) edits for that
-	/// voxel: the state the next apply phase would produce. Read-only, so
-	/// safe to evaluate while the chunk is in transit.
-	TextureType effectiveVoxelType(const Chunk *chunk, int x, int y, int z) const;
-	/// Apply immediately or queue, depending on mustDeferVoxelEdit (and the
-	/// group-level forceDefer): never writes into unreadable backing.
-	void queueOrApplyEdit(Chunk *chunk, const glm::ivec3 &chunkPos, int x, int y,
-						  int z, TextureType type, bool borderNeighbor,
-						  bool forceDefer, uint64_t editId);
-	/// Schedule the mirror border writes for an edit at local (x, z); a
-	/// corner voxel schedules both adjacent neighbors (no diagonal - the
-	/// border architecture keeps corner columns only at generation). When
-	/// `geometricMembers` is provided, every non-null mirror chunk is
-	/// appended so the caller can register the geometric commit group.
-	void enqueueOrApplyMirrorEdits(const glm::ivec3 &chunkPos, int x, int y, int z,
-								   TextureType type, bool forceDefer, uint64_t editId,
-								   std::vector<Chunk *> *geometricMembers = nullptr);
-	/// Queue with coalescing: an entry for the same chunk/coordinate/kind
-	/// is overwritten (last write wins) instead of accumulating.
-	void queuePendingEdit(PendingVoxelEdit edit);
-	/// Apply queued edits whose chunk is editable now (backing readable and
-	/// not in transit; main thread), targets before mirrors; entries whose
-	/// chunk generation has moved on are dropped.
-	void applyPendingEdits();
-	bool hasPendingEditsFor(const Chunk *chunk) const;
-	/// Drop every pending edit targeting this chunk (unload/recycle path).
-	void erasePendingEditsFor(const Chunk *chunk);
+	// --- World event stream consumption (issue #206) -------------------------
+	/// Drain the authoritative event stream and keep the render handle map
+	/// in sync: bind/unbind handles, publish generation render flags, apply
+	/// edit invalidation. Main thread, immediately after each world call.
+	void drainWorldEvents();
+	void onWorldLoaded(const WorldEvent &e);
+	void onWorldUnloaded(const WorldEvent &e);
+	void onWorldGenerated(const WorldEvent &e);
+	void onWorldEditApplied(const WorldEvent &e);
+	void retryPendingBinds();
 
 	// --- Geometric commit groups (PR #178 review) ---
-	// One entry per set of chunks whose border geometry was coupled by
-	// border edits. Overlapping groups are fused transitively at
-	// registration, so the active groups always form disjoint chunk sets
-	// and commitGroupFor() can only ever find one group per chunk. A group
-	// walks WaitingForMeshes -> Uploading (members record their GPU copies
-	// progressively across frames) -> ReadyToPublish (atomic publication
-	// of every member), then erases by its groupId. Member chunks that
-	// unload are removed from their group; a group falling below two
-	// members loses its atomic dependency and dissolves (the remaining
-	// member reverts to normal independent uploads). Member replacements
-	// that were already recorded are discarded with the member.
 	void registerCommitGroup(uint64_t editId, std::vector<PendingGroupMember> members);
 	PendingMeshCommitGroup *commitGroupFor(Chunk *chunk);
 	void eraseCommitGroup(uint64_t groupId);
@@ -427,94 +325,44 @@ private:
 
 	/// Bounded trace write (no-op while tracing is disabled). Main thread.
 	void recordChunkEvent(Chunk *chunk, const char *kind, uint32_t sections = 0);
+	void recordWorldEvent(const glm::ivec3 &coord, uint64_t revision, const char *kind,
+						  uint32_t sections = 0);
 
 	/// Maintain chunk local light cache desire based on distance to camera
-	/// (issue #128), with acquire/release hysteresis (issue #172): a cache is
-	/// acquired when the chunk enters the acquire radius and retained until
-	/// it leaves the (larger) release radius.
+	/// (issue #128), with acquire/release hysteresis (issue #172).
 	void updateEntityLightCacheIntent(Chunk &chunk, float distSq);
 
-	// Testing hook (issue #114 review): exposes the deferred-edit queue
-	// size without making it public API.
+	/// Combined render+world quiesce for the persistence durability barrier.
+	void drainAsyncJobsForPersistence();
+	bool renderJobsBusy() const;
+
+	// Testing hook (issue #114 review): exposes render internals to the
+	// lifecycle tests; authoritative seams live on VoxelWorld's friends.
 	friend struct ChunkManagerProbe;
 	friend struct ChunkManagerStreamProbe;
 	friend class ChunkCollisionView;
 
-	// --- Persistence (issue #180, Phase 3+4) ---
-	/// Re-apply saved overrides after deterministic generation. Called with
-	/// exclusive ownership of `chunk` (bootstrap on the main thread, or the
-	/// async gen job while the chunk is in transit); overrides come from a
-	/// mutex-guarded snapshot of the persistence index. Zero work when no
-	/// world is open or the chunk has no saved overrides.
-	void applyPersistentOverrides(Chunk *chunk);
-	/// Main-thread capture of one chunk's persistent edits into the save
-	/// pipeline (unload path and captureAllChunkEdits).
-	void captureChunkEditsForUnload(Chunk *chunk);
-	/// Capture every chunk holding edits: loaded chunks (in-transit ones are
-	/// skipped - their gen/mesh job is mid-flight; they are captured on their
-	/// own unload or a later flush) plus chunks parked in m_deferredRelease.
-	void captureAllChunkEdits();
-	/// Final-shutdown resolution of stranded PendingVoxelEdits: synchronously
-	/// generate authoritative terrain for UNLOADED chunks that still hold
-	/// accepted edits, then let applyPendingEdits() land them. Destructor
-	/// path only.
-	void resolvePendingEditsForPersistenceShutdown();
-	/// Destructor-only close: resolve stranded edits, then capture/flush/
-	/// shutdown UNCONDITIONALLY (no retry semantics - destruction has no
-	/// later retry point). Returns the flush success.
-	bool forceCloseWorldForShutdown();
-	/// Quiesce the async lifecycle before the final persistence capture
-	/// (closeWorld): publish finished gen/mesh/light jobs, apply deferred
-	/// voxel edits, age deferred releases. Deliberately NO timeout - closing
-	/// a persistent world is a durability barrier. Returns false when
-	/// accepted logical edits are still pending afterwards (their chunk
-	/// never left UNLOADED): the caller must then NOT capture/shutdown.
-	bool drainAsyncJobsForPersistence();
-	bool anyChunkInTransitForPersistence() const;
+	// --- The authoritative world (issue #206) ---
+	std::unique_ptr<VoxelWorld> m_world;
+	/// Last observed world event-drop count (one-shot warning on change).
+	uint64_t m_lastDroppedEvents{0};
 
-	std::unique_ptr<WorldPersistence> m_persistence;
-
-	struct StreamState
-	{
-		glm::ivec3 lastCamChunk{std::numeric_limits<int>::max(), 0, std::numeric_limits<int>::max()};
-		glm::ivec2 lastMovementAnchor{std::numeric_limits<int>::max(), std::numeric_limits<int>::max()};
-		glm::vec2 lastCamForwardXZ{0.f, 1.f};
-		int lastMaxRenderDistance{-1};
-		float lastStreamFrontBias{-1.f};
-		bool initialized{false};
-	};
-
+	// --- Render handle map (derived; mirrors world residency) ---
 	std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> m_chunks;
 	std::vector<Chunk *> m_activeChunks;
-	/// Distance-prioritized load queue (not FIFO — re-sorted / pruned each stream tick).
-	std::vector<LoadCandidate> m_loadQueue;
-	std::unordered_set<glm::ivec3, IVec3Hash> m_enqueuedLoads;
-	StreamState m_streamState;
-	ChunkDesiredFootprint m_desiredFootprint;
-	size_t m_loadQueueHead{0};
-	bool m_queueNeedsSort{false};
-	uint32_t m_streamFramesSinceUnloadCheck{0};
-	StreamingMaintenanceStats m_streamStats;
+	mutable std::shared_mutex m_mutex;
+	/// Defensive: world records whose render handle acquire failed (pool
+	/// exhaustion race). Retried on the next load tick; normally empty.
+	std::vector<glm::ivec3> m_pendingBinds;
 
 	mutable std::mutex m_completedJobsMutex;
-	std::vector<Chunk *> m_completedGenerationChunks;
 	std::vector<CompletedMeshJob> m_completedMeshJobs;
 	std::vector<CompletedLightJob> m_completedLightJobs;
-	std::atomic<size_t> m_pendingGenJobsCount{0};
 	std::atomic<size_t> m_pendingMeshJobsCount{0};
 	std::atomic<size_t> m_pendingLightJobsCount{0};
 	std::atomic<uint64_t> m_meshJobsDispatched{0};
 	std::atomic<uint64_t> m_lightJobsDispatched{0};
 
-	/// Edits deferred while their target chunk was in transit (main-thread
-	/// only; user interactions are rare so a small linear queue is plenty).
-	std::vector<PendingVoxelEdit> m_pendingEdits;
-	/// Logical edit group counter, main-thread only.
-	uint64_t m_nextEditId{1};
-
-	mutable std::shared_mutex m_mutex;
-
-	TerrainGenerator *m_terrainGenerator{nullptr};
 	ThreadPool *m_threadPool{nullptr};
 	ChunkPool *m_chunkPool{nullptr};
 	/// Pooled halo blocks lent to in-flight mesh jobs (issue #141 review

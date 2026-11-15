@@ -5,7 +5,7 @@
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Renderer/Lighting.hpp>
 #include <Renderer/MinecraftTextures.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 
 #include <algorithm>
 #include <array>
@@ -76,37 +76,6 @@ inline const std::array<uint8_t, 256> &faceColorKindTable()
   return table;
 }
 
-TextureType Chunk::sampleForMeshing(int x, int y, int z) const
-{
-  if (static_cast<uint32_t>(x) < CHUNK_SIZE && static_cast<uint32_t>(y) < CHUNK_HEIGHT &&
-      static_cast<uint32_t>(z) < CHUNK_SIZE)
-  {
-    return static_cast<TextureType>(getVoxel(x, y, z).type);
-  }
-  if (x < -1 || x > CHUNK_SIZE || z < -1 || z > CHUNK_SIZE)
-    return AIR; // outside the padded neighborhood
-  if (!m_borders)
-    return AIR; // borders freed after upload or never built (documented default)
-  return static_cast<TextureType>(m_borders->at(x, y, z));
-}
-
-bool Chunk::isVoxelActive(int x, int y, int z) const
-{
-  if (static_cast<uint32_t>(x) < CHUNK_SIZE && static_cast<uint32_t>(y) < CHUNK_HEIGHT &&
-      static_cast<uint32_t>(z) < CHUNK_SIZE)
-  {
-    if (!m_storage)
-      return false;
-    // Canonical occupancy (issue #105): the voxel type itself, no bitset.
-    return m_storage->voxels[getIndex(x, y, z)].type != static_cast<uint8_t>(AIR);
-  }
-  else if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE)
-  {
-    return m_borders && m_borders->at(x, y, z) != static_cast<uint8_t>(AIR);
-  }
-  return false; // Outside known boundaries
-}
-
 void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
   buildMesh(out, generation, revision, kAllSectionMask);
@@ -117,7 +86,12 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
 {
   // Mesh timing must exclude pool/publication overhead: the payload lands
   // in the pooled result block, nothing on the Chunk changes ownership.
-  out.beginBuild(this, generation, revision, sectionMask);
+  // Stamp the dispatch-time capture into the sim::ChunkIdentity contract
+  // (issue #206: the WorldChunk record is the single identity source).
+  sim::ChunkIdentity buildId = chunkIdentity();
+  buildId.generation = generation;
+  buildId.revision = revision;
+  out.beginBuild(this, buildId, sectionMask);
   out.isLOD = false;
   out.lightCacheWantedAtBuild = localLightCacheWanted();
   // Occupied Y span from the per-section metadata (issue #105): no 64 KiB
@@ -195,7 +169,7 @@ void Chunk::buildMesh(MeshBuildResult &out, uint64_t generation, uint64_t revisi
   {
     if (((out.sectionsBuilt >> section) & 1u) == 0)
       continue;
-    if (m_sectionNonAir[section] == 0)
+    if (m_active->sectionNonAir()[section] == 0)
       continue; // empty section: no mesh work, empty payload
     const int ownerMinY =
         std::max(section * kOccupancySectionSize, occMinY);
@@ -312,8 +286,8 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
       // a Y face between slices s and s+1 needs a voxel in section(s) or
       // section(s+1), and there are no vertical neighbor borders.
       if (d == 1 &&
-          m_sectionNonAir[std::max(x[d], 0) / kOccupancySectionSize] == 0 &&
-          m_sectionNonAir[std::min(x[d] + 1, CHUNK_HEIGHT - 1) / kOccupancySectionSize] == 0)
+          m_active->sectionNonAir()[std::max(x[d], 0) / kOccupancySectionSize] == 0 &&
+          m_active->sectionNonAir()[std::min(x[d] + 1, CHUNK_HEIGHT - 1) / kOccupancySectionSize] == 0)
         continue;
       meshSample.data.maskCells += dims[u] * dims[v];
       // Bound Y when it is a plane axis: owners must stay inside the
@@ -372,9 +346,9 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
         switch (faceColorKindTable()[static_cast<size_t>(t)])
         {
         case kColorGrass:
-          return biomeGrassColors[ownerCoord[2] * CHUNK_SIZE + ownerCoord[0]];
+          return m_active->biomeGrassColors[ownerCoord[2] * CHUNK_SIZE + ownerCoord[0]];
         case kColorFoliage:
-          return biomeFoliageColors[ownerCoord[2] * CHUNK_SIZE + ownerCoord[0]];
+          return m_active->biomeFoliageColors[ownerCoord[2] * CHUNK_SIZE + ownerCoord[0]];
         case kColorWater:
           return WATER_COLOR;
         default:
@@ -1141,7 +1115,7 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             v.texCoordU = static_cast<uint16_t>(uv[k].x);
             v.texCoordV = static_cast<uint16_t>(uv[k].y);
             v.packedData = packed;
-            v.packedBiomeColor = tint ? biomeGrassColors[z * CHUNK_SIZE + x] : 0u;
+            v.packedBiomeColor = tint ? m_active->biomeGrassColors[z * CHUNK_SIZE + x] : 0u;
             vertices.push_back(v);
           }
           constexpr uint32_t winding[] = {0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0};
@@ -1178,8 +1152,8 @@ bool Chunk::generateMesh()
   try
   {
     result = m_resultPool->acquire();
-    const uint64_t generation = m_meshGeneration;
-    const uint64_t revision = m_meshRevision.load(std::memory_order_relaxed);
+    const uint64_t generation = m_active->generation();
+    const uint64_t revision = m_active->revision();
     buildMesh(*result, generation, revision);
     m_resultPool->finishBuild(result);
   }
@@ -1200,7 +1174,10 @@ bool Chunk::generateMesh()
 // Max 256 opaque + 256 water quads vs thousands for a full greedy mesh.
 void Chunk::buildLODMesh(MeshBuildResult &out, uint64_t generation, uint64_t revision)
 {
-  out.beginBuild(this, generation, revision);
+  sim::ChunkIdentity buildId = chunkIdentity();
+  buildId.generation = generation;
+  buildId.revision = revision;
+  out.beginBuild(this, buildId);
   out.isLOD = true;
   out.lightCacheWantedAtBuild = localLightCacheWanted();
 
@@ -1283,9 +1260,9 @@ void Chunk::buildLODMeshRanged(MeshBuildResult &out, int scanTopY)
       if (needsBiomeColoring)
       {
         if (topType == GRASS_TOP || topType == GRASS_SIDE)
-          packedColor = biomeGrassColors[colIdx];
+          packedColor = m_active->biomeGrassColors[colIdx];
         else if (blockIsFoliage(topType))
-          packedColor = biomeFoliageColors[colIdx];
+          packedColor = m_active->biomeFoliageColors[colIdx];
         else
           packedColor = WATER_COLOR;
       }
@@ -1352,8 +1329,8 @@ bool Chunk::generateLODMesh()
   try
   {
     result = m_resultPool->acquire();
-    const uint64_t generation = m_meshGeneration;
-    const uint64_t revision = m_meshRevision.load(std::memory_order_relaxed);
+    const uint64_t generation = m_active->generation();
+    const uint64_t revision = m_active->revision();
     buildLODMesh(*result, generation, revision);
     m_resultPool->finishBuild(result);
   }

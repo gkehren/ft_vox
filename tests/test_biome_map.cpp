@@ -1,6 +1,6 @@
 // Biome map generation lifetime, concurrency safety, cancellation, and stale/superseded rejection tests.
 #include <Engine/GameUIBiomeMap.hpp>
-#include <Engine/ThreadPool.hpp>
+#include <Core/ThreadPool.hpp>
 #include <chrono>
 #include <algorithm>
 #include <cstring>

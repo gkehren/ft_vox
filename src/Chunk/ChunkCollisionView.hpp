@@ -1,89 +1,60 @@
 #pragma once
-#include <algorithm>
-#include <array>
-#include <climits>
-#include <shared_mutex>
+
+// =============================================================================
+// ChunkCollisionView — render-side collision adapter (issue #206, Epic #204
+// Phase B). The authoritative collision/query semantics now live in the
+// CPU-only WorldCollisionView over VoxelWorld; this thin wrapper keeps the
+// historical constructor (const ChunkManager&) and adds the DERIVED entity
+// light sampling from the render light caches.
+//
+// Temporary adapter per the issue's architectural constraints: Phase C/E
+// re-home the light seam (the bridge owns the caches) and remove this
+// wrapper. Physics behavior is unchanged: same scoped-lock contract, same
+// cache, same unknown/solid/medium vocabulary, same pending-edit overlay.
+// =============================================================================
 
 #include <Chunk/ChunkManager.hpp>
-#include <Physics/BlockPhysics.hpp>
+#include <World/WorldCollisionView.hpp>
 
-// Main-thread scoped view. Holds the map lock once, caches chunk lookups only
+// Main-thread scoped view. Holds the world map lock once (via the CPU view)
+// plus the render map lock for light-cache reads, caches chunk lookups only
 // for this view's lifetime, and never stores a pointer in the player/physics.
-// Generation publishes readable backing via the atomic Chunk state; mesh
+// Generation publishes readable backing via the atomic record state; mesh
 // workers only read it. Main-thread edits/unload cannot run during this view.
+//
+// LOCK ORDER (issue #206 review): this view acquires world -> render. The
+// mesh dispatch path acquires render -> world (ChunkManager::meshPendingChunks
+// holds the render lock, then VoxelWorld::ensureShellPopulated takes the world
+// lock). The two orders are only safe because BOTH paths run exclusively on
+// the main thread today — neither map lock is ever contended across threads
+// (workers take only the completion-queue and pool mutexes). When Phase C/E
+// separates these across threads, this inversion MUST be resolved (e.g. a
+// single lock ordering or a lock-free light snapshot); do not introduce a
+// second thread that takes both locks without revisiting this.
 class ChunkCollisionView final : public physics::VoxelCollisionWorld
 {
 public:
     explicit ChunkCollisionView(const ChunkManager &manager)
-        : manager(manager), lock(manager.m_mutex) {}
+        : view(manager.world()), renderLock(manager.m_mutex), manager(manager) {}
 
-    physics::Cell sample(glm::ivec3 p) const override { return sampleWithType(p, nullptr); }
+    physics::Cell sample(glm::ivec3 p) const override { return view.sample(p); }
     physics::Cell sampleWithType(glm::ivec3 p, TextureType *outType) const
     {
-        // Fixed vertical world, with a solid lower boundary and open sky.
-        if (p.y < 0) return {true, true};
-        if (p.y >= WORLD_HEIGHT) return {true, false};
-        // Preserve the engine's existing finite camera-coordinate envelope.
-        if (p.x < SHRT_MIN || p.x >= SHRT_MAX || p.z < SHRT_MIN || p.z >= SHRT_MAX)
-            return {true, true};
-        const int cx = floorChunk(p.x), cz = floorChunk(p.z);
-        const glm::ivec3 key(cx, 0, cz);
-        const Chunk *chunk = nullptr;
-        bool found = false;
-        for (unsigned i = 0; i < count; ++i)
-            if (cache[i].key == key) { chunk = cache[i].chunk; found = true; break; }
-        if (!found)
-        {
-            const auto it = manager.m_chunks.find(key);
-            chunk = it == manager.m_chunks.end() ? nullptr : it->second;
-            cache[next] = {key, chunk};
-            next = (next + 1) % cache.size();
-            count = std::min<unsigned>(count + 1, static_cast<unsigned>(cache.size()));
-        }
-        if (!chunk || !chunk->isVoxelBackingReadable() || !chunk->hasVoxelStorage()) return {};
-        const int x = p.x - cx * int(CHUNK_SIZE), z = p.z - cz * int(CHUNK_SIZE);
-        TextureType type = static_cast<TextureType>(chunk->getVoxel(x, p.y, z).type);
-        // Match the logical edit state; never resurrect an edit from a recycled
-        // incarnation. Mirrors affect meshing only, not canonical occupancy.
-        for (const auto &edit : manager.m_pendingEdits)
-            if (!edit.borderNeighbor && edit.chunk == chunk &&
-                edit.generation == chunk->meshGeneration() && edit.x == x && edit.y == p.y && edit.z == z)
-                type = edit.type;
-        if (outType) *outType = type;
-        return physics::blockCell(type);
+        return view.sampleWithType(p, outType);
     }
 
-    // World Y of the water surface above the given eye cell (issue #144):
-    // scan up to the first non-water cell and return its bottom plane, so the
-    // composite submersion blend ramps in over the first half metre instead
-    // of snapping with the boolean medium flag, and so the underwater optical
-    // path can intersect the surface exactly. One main-thread column scan per
-    // frame costs effectively nothing; non-water eye cells return
-    // kUnknownUnderwaterSurfaceY.
-    float waterSurfaceAbove(glm::ivec3 eye) const
-    {
-        if (sample(eye).medium != physics::Medium::Water)
-            return kUnknownUnderwaterSurfaceY;
-        int y = eye.y;
-        while (y < static_cast<int>(WORLD_HEIGHT) &&
-               sample({eye.x, y, eye.z}).medium == physics::Medium::Water)
-            ++y;
-        return static_cast<float>(y);
-    }
+    // World Y of the water surface above the given eye cell (issue #144).
+    float waterSurfaceAbove(glm::ivec3 eye) const { return view.waterSurfaceAbove(eye); }
 
     lighting::LocalVoxelLight sampleLight(const glm::vec3 &worldPos) const
     {
+        // Derived render light caches: the render lock is held for the
+        // view's lifetime, so the Unlocked sampling contract is satisfied.
         return manager.sampleSmoothedLightUnlocked(worldPos);
     }
+
 private:
-    static int floorChunk(int n)
-    {
-        const int size = static_cast<int>(CHUNK_SIZE);
-        return n / size - (n % size < 0 ? 1 : 0);
-    }
+    WorldCollisionView view;
+    std::shared_lock<std::shared_mutex> renderLock;
     const ChunkManager &manager;
-    std::shared_lock<std::shared_mutex> lock;
-    struct Entry { glm::ivec3 key{}; const Chunk *chunk{nullptr}; };
-    mutable std::array<Entry, 16> cache{};
-    mutable unsigned count{0}, next{0};
 };

@@ -1,6 +1,6 @@
 #include "ChunkMeshResult.hpp"
 #include <Chunk/ChunkLightPool.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 #include <algorithm>
 #include <cassert>
 
@@ -42,12 +42,11 @@ PayloadTotals payloadTotals(const MeshBuildResult &r)
 }
 } // namespace
 
-void MeshBuildResult::beginBuild(Chunk *chunkOwner, uint64_t chunkGeneration,
-								 uint64_t chunkRevision, uint16_t sectionMask)
+void MeshBuildResult::beginBuild(Chunk *chunkOwner, const sim::ChunkIdentity &chunkIdentity,
+								 uint16_t sectionMask)
 {
 	owner = chunkOwner;
-	generation = chunkGeneration;
-	revision = chunkRevision;
+	identity = chunkIdentity;
 	sectionsBuilt = sectionMask;
 	for (SectionMeshPayload &s : sections)
 	{
@@ -80,8 +79,7 @@ MeshBuildResult::~MeshBuildResult()
 void MeshBuildResult::detach()
 {
 	owner = nullptr;
-	generation = 0;
-	revision = 0;
+	identity = {};
 	isLOD = false;
 	sectionsBuilt = 0;
 	if (lightStorage && lightPool)

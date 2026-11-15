@@ -2,7 +2,7 @@
 
 #include "Vulkan/VkBuffer.hpp"
 #include "Vulkan/GpuResourceRetire.hpp"
-#include "Engine/WorkloadTelemetry.hpp"
+#include "Core/WorkloadTelemetry.hpp"
 
 #include <cstdint>
 #include <utility>

@@ -21,7 +21,7 @@
 #include <Renderer/OverlayRenderer.hpp>
 #include <Engine/ImGuiLayer.hpp>
 #include <Engine/GameUI.hpp>
-#include <Engine/ThreadPool.hpp>
+#include <Core/ThreadPool.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Chunk/Chunk.hpp>

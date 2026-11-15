@@ -7,7 +7,7 @@
 // active builders), wrong-pool/double release refusal (Release-safe),
 // growth events and stats() invariants.
 #include <Chunk/ChunkMeshResult.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -92,7 +92,7 @@ int main()
 		pool.release(r);
 		CHECK(r->opaqueVertices.empty(), "detach drops opaque sizes");
 		CHECK(r->waterIndices.empty(), "detach drops water sizes");
-		CHECK(r->owner == nullptr && r->generation == 0 && r->revision == 0,
+		CHECK(r->owner == nullptr && r->identity.generation == 0 && r->identity.revision == 0,
 			  "detach clears identity");
 		CHECK(r->opaqueVertices.capacity() == opaqueCap, "detach retains opaque capacity");
 		CHECK(r->waterVertices.capacity() == waterCap, "detach retains water capacity");
@@ -112,7 +112,7 @@ int main()
 		MeshBuildResult *r2 = pool.acquire();
 		CHECK(r2 == r, "reuse after release");
 		r2->beginBuild(nullptr, 7, 9);
-		CHECK(r2->generation == 7 && r2->revision == 9, "beginBuild stamps generation and revision");
+		CHECK(r2->identity.generation == 7 && r2->identity.revision == 9, "beginBuild stamps generation and revision");
 		fillJunk(*r2);
 		pool.finishBuild(r2);
 		stats = pool.stats();
@@ -142,7 +142,7 @@ int main()
 			  "beginBuild clears all four vectors");
 		CHECK(r->opaqueIndices.capacity() == capBefore,
 			  "beginBuild keeps capacity for reuse (no allocator churn)");
-		CHECK(r->generation == 42 && r->revision == 43, "beginBuild stamps identity");
+		CHECK(r->identity.generation == 42 && r->identity.revision == 43, "beginBuild stamps identity");
 		pool.release(r);
 	}
 

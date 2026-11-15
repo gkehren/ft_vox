@@ -48,15 +48,16 @@ struct VoxelView : std::span<const Voxel>
 	size_t capacity() const { return size(); }
 };
 
-// Friend probe declared in ChunkManager.hpp: exposes the deferred-edit
-// queue size so coalescing behavior is observable without public API, and
-// the effective-voxel decision helper for the UNLOADED-backing contract.
+// Friend probe declared in ChunkManager.hpp / VoxelWorld.hpp: exposes the
+// deferred-edit queue size so coalescing behavior is observable without
+// public API, and the effective-voxel decision helper for the UNLOADED-backing
+// contract. Issue #206: the authoritative seams live on VoxelWorld.
 struct ChunkManagerProbe
 {
-	static size_t pendingEdits(const ChunkManager &m) { return m.m_pendingEdits.size(); }
+	static size_t pendingEdits(const ChunkManager &m) { return m.world().m_pendingEdits.size(); }
 	static TextureType effective(const ChunkManager &m, const Chunk *chunk, int x, int y, int z)
 	{
-		return m.effectiveVoxelType(chunk, x, y, z);
+		return m.world().effectiveVoxelType(chunk->worldChunk(), x, y, z);
 	}
 	// Test hook for the superseded-result drop path (PR #117 review phases
 	// 11-12): inject a completed mesh job as a worker would, without
@@ -74,7 +75,7 @@ struct ChunkManagerProbe
 	                                    ChunkLightPool *pool, uint64_t generation, uint64_t revision)
 	{
 		std::lock_guard<std::mutex> lock(m.m_completedJobsMutex);
-		m.m_completedLightJobs.push_back({chunk, storage, pool, generation, revision});
+		m.m_completedLightJobs.push_back({chunk, storage, pool, {0, 0, generation, revision}});
 	}
 	// Test hook for the cross-chunk light arrival path (issue #141 review
 	// round 2, section 26): inject a completed generation chunk as a worker
@@ -82,18 +83,36 @@ struct ChunkManagerProbe
 	// under its lock without the async machinery.
 	static void injectCompletedGenChunk(ChunkManager &m, Chunk *c)
 	{
-		std::lock_guard<std::mutex> lock(m.m_completedJobsMutex);
-		m.m_completedGenerationChunks.push_back(c);
+		VoxelWorld &w = m.world();
+		std::lock_guard<std::mutex> lock(w.m_completedJobsMutex);
+		w.m_completedGenerationChunks.push_back({c->mutableWorldChunk(), c->mutableWorldChunk()->generation()});
 	}
 	// Test hook for the cross-chunk light invalidation tests (issue #141
 	// review fix, section 25): register an externally-owned chunk at a
-	// coordinate without running the streaming load path.
+	// coordinate without running the streaming load path. Issue #206: the
+	// record is adopted by the world (non-owning) and the render handle is
+	// registered with the adapter, mirroring the production bind.
 	static void registerChunk(ChunkManager &m, const glm::ivec3 &pos, Chunk *c)
 	{
+		m.world().registerExternalChunk(pos, c->mutableWorldChunk());
 		m.m_chunks[pos] = c;
 		m.m_activeChunks.push_back(c);
 		c->setActiveIndex(m.m_activeChunks.size() - 1);
 	}
+	// Issue #206 review: exercise the render-pool-exhaustion retry path. The
+	// world clamps loads by record slots and the adapter by render slots; the
+	// two budgets can disagree, so a Loaded event may arrive with no free
+	// render handle. onWorldLoaded parks it in m_pendingBinds; retryPendingBinds
+	// binds it once a slot frees.
+	static void simulateLoaded(ChunkManager &m, const glm::ivec3 &coord)
+	{
+		WorldEvent e;
+		e.kind = WorldEventKind::Loaded;
+		e.coord = coord;
+		m.onWorldLoaded(e);
+	}
+	static size_t pendingBinds(const ChunkManager &m) { return m.m_pendingBinds.size(); }
+	static void retryBinds(ChunkManager &m) { m.retryPendingBinds(); }
 };
 
 // Drain helper (issue #172): wait for both mesh and light-cache jobs and run
@@ -137,45 +156,53 @@ static uint32_t vBlockR(const Vertex &v) { return (v.packedData >> 18) & 0xFu; }
 static uint32_t vBlockB(const Vertex &v) { return (v.packedData >> 26) & 0xFu; }
 
 // Friend probe declared in Chunk.hpp: verifies full private state without
-// exposing per-column generation data through the public API.
+// exposing per-column generation data through the public API. Issue #206:
+// the authoritative fields live in the bound/owned WorldChunk record.
 struct ChunkStateProbe
 {
 	static bool hasStorage(const Chunk &c) { return c.hasVoxelStorage(); }
 	static VoxelView voxels(const Chunk &c)
 	{
-		if (c.m_storage)
-			return VoxelView(c.m_storage->voxels.data(), CHUNK_VOLUME);
+		const WorldChunk *r = c.worldChunk();
+		if (r && r->voxelStorage())
+			return VoxelView(r->voxelStorage()->voxels.data(), CHUNK_VOLUME);
 		return VoxelView();
 	}
 	// Mutable backing access for poison/fill tests of the lifecycle
 	// contract (read-only VoxelView cannot express them).
 	static Voxel *voxelsMut(Chunk &c)
 	{
-		return c.m_storage ? c.m_storage->voxels.data() : nullptr;
+		WorldChunk *r = c.worldChunk();
+		return (r && r->voxelStorage()) ? r->voxelStorage()->voxels.data() : nullptr;
 	}
 	static const ChunkNeighborBorders *borders(const Chunk &c)
 	{
-		return c.m_borders;
+		return c.worldChunk() ? c.worldChunk()->borders() : nullptr;
 	}
 	static const std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> &grass(const Chunk &c)
 	{
-		return c.biomeGrassColors;
+		static const std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> s_empty{};
+		return c.worldChunk() ? c.worldChunk()->biomeGrassColors : s_empty;
 	}
 	static const std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> &foliage(const Chunk &c)
 	{
-		return c.biomeFoliageColors;
+		static const std::array<uint32_t, CHUNK_SIZE * CHUNK_SIZE> s_empty{};
+		return c.worldChunk() ? c.worldChunk()->biomeFoliageColors : s_empty;
 	}
 	static const std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> &biomes(const Chunk &c)
 	{
-		return c.biomeTypes;
+		static const std::array<BiomeType, CHUNK_SIZE * CHUNK_SIZE> s_empty{};
+		return c.worldChunk() ? c.worldChunk()->biomeTypes : s_empty;
 	}
 	static const std::array<int, CHUNK_SIZE * CHUNK_SIZE> &heights(const Chunk &c)
 	{
-		return c.heightMap;
+		static const std::array<int, CHUNK_SIZE * CHUNK_SIZE> s_empty{};
+		return c.worldChunk() ? c.worldChunk()->heightMap : s_empty;
 	}
 	static const std::array<uint16_t, Chunk::kOccupancySections> &sections(const Chunk &c)
 	{
-		return c.m_sectionNonAir;
+		static const std::array<uint16_t, Chunk::kOccupancySections> s_empty{};
+		return c.worldChunk() ? c.worldChunk()->sectionNonAir() : s_empty;
 	}
 	static bool occupiedSpan(const Chunk &c, int &minY, int &maxY)
 	{
@@ -218,7 +245,7 @@ struct ChunkStateProbe
 	}
 	static uint64_t meshGeneration(const Chunk &c)
 	{
-		return c.m_meshGeneration;
+		return c.worldChunk() ? c.worldChunk()->generation() : 0;
 	}
 };
 
@@ -630,12 +657,12 @@ static glm::ivec2 locateInlandChunkOrigin(TerrainGenerator &gen)
 // -----------------------------------------------------------------------------
 struct ChunkManagerStreamProbe
 {
-	static const ChunkDesiredFootprint &footprint(const ChunkManager &m) { return m.m_desiredFootprint; }
-	static const std::unordered_set<glm::ivec3, IVec3Hash> &enqueued(const ChunkManager &m) { return m.m_enqueuedLoads; }
-	static size_t queueHead(const ChunkManager &m) { return m.m_loadQueueHead; }
-	static const std::vector<LoadCandidate> &queue(const ChunkManager &m) { return m.m_loadQueue; }
-	static const ChunkManager::StreamState &state(const ChunkManager &m) { return m.m_streamState; }
-	static const std::unordered_map<glm::ivec3, Chunk *, IVec3Hash> &chunks(const ChunkManager &m) { return m.m_chunks; }
+	static const ChunkDesiredFootprint &footprint(const ChunkManager &m) { return m.world().m_desiredFootprint; }
+	static const std::unordered_set<glm::ivec3, IVec3Hash> &enqueued(const ChunkManager &m) { return m.world().m_enqueuedLoads; }
+	static size_t queueHead(const ChunkManager &m) { return m.world().m_loadQueueHead; }
+	static const std::vector<LoadCandidate> &queue(const ChunkManager &m) { return m.world().m_loadQueue; }
+	static const VoxelWorld::StreamState &state(const ChunkManager &m) { return m.world().m_streamState; }
+	static const std::unordered_map<glm::ivec3, WorldChunk *, IVec3Hash> &chunks(const ChunkManager &m) { return m.world().m_chunks; }
 };
 
 struct StreamIVec3Less
@@ -1162,6 +1189,53 @@ static void testChunkPoolIncrementalGrowth()
 	}
 }
 
+// Issue #206 review: a Loaded event arriving while the render pool is full
+// must not lose the load — it parks in m_pendingBinds and binds on retry once
+// a render slot frees (the world/adapter budgets can disagree).
+static void testPendingBindRetry()
+{
+	TerrainGenerator gen(31337);
+	ChunkPool pool(64); // clamped to kMinChunkPoolCapacity
+	ChunkManager manager(&gen, nullptr, &pool);
+
+	// Exhaust the render pool with directly-held (unbound) handles.
+	std::vector<Chunk *> held;
+	for (size_t i = 0; i < pool.capacity(); ++i)
+	{
+		Chunk *c = pool.acquire(glm::vec3(static_cast<float>(i) * CHUNK_SIZE, 0.f, 0.f));
+		CHECK(c != nullptr, "bind-retry: fill render pool");
+		if (c)
+			held.push_back(c);
+	}
+	CHECK(pool.freeCount() == 0, "bind-retry: render pool exhausted");
+
+	// Create a world record without binding a render handle (bootstrap emits
+	// a Loaded event but does not itself bind).
+	manager.world().generateInitialAreaVoxels(glm::vec3(8.f, 100.f, 8.f), 0);
+	manager.world().takeEvents(); // discard the bootstrap event; drive it manually
+	CHECK(manager.world().getChunk({0, 0, 0}) != nullptr, "bind-retry: world record exists");
+	CHECK(manager.getChunk({0, 0, 0}) == nullptr, "bind-retry: no render handle yet");
+
+	// Loaded event with a full render pool -> parked, not lost.
+	ChunkManagerProbe::simulateLoaded(manager, {0, 0, 0});
+	CHECK(ChunkManagerProbe::pendingBinds(manager) == 1, "bind-retry: load parked when pool full");
+	CHECK(manager.getChunk({0, 0, 0}) == nullptr, "bind-retry: still unbound while parked");
+
+	// Free one render slot and retry -> the parked load binds.
+	pool.release(held.back());
+	held.pop_back();
+	ChunkManagerProbe::retryBinds(manager);
+	CHECK(ChunkManagerProbe::pendingBinds(manager) == 0, "bind-retry: retry drains the parked load");
+	Chunk *bound = manager.getChunk({0, 0, 0});
+	CHECK(bound != nullptr, "bind-retry: handle bound after retry");
+	CHECK(bound && bound->isWorldBound(), "bind-retry: handle is world-bound");
+	CHECK(bound && bound->worldChunk() == manager.world().getChunk({0, 0, 0}),
+		  "bind-retry: handle bound to the correct record");
+
+	for (Chunk *c : held)
+		pool.release(c);
+}
+
 int main(int argc, char **argv)
 {
 	std::cout.setf(std::ios::unitbuf);
@@ -1170,6 +1244,7 @@ int main(int argc, char **argv)
 	if (argc > 1 && std::string_view(argv[1]) == "--physics-profile") return profilePlayerPhysics();
 	if (argc > 1 && std::string_view(argv[1]) == "--stream-perf") return runStreamPerf();
 	testChunkPoolIncrementalGrowth();
+	testPendingBindRetry();
     // Published memory includes free pool storage and survives ownership moves.
     if (telemetry::registry().enabled) {
         using namespace telemetry;

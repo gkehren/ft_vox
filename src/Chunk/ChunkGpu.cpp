@@ -3,7 +3,7 @@
 // cache maintenance and range retirement (issue #181 split).
 #include "Chunk.hpp"
 #include <Chunk/ChunkMeshResult.hpp>
-#include <Engine/WorkloadTelemetry.hpp>
+#include <Core/WorkloadTelemetry.hpp>
 #include <Vulkan/VkUpload.hpp>
 #include <Vulkan/VkCommands.hpp>
 #include <Vulkan/StagingRing.hpp>
@@ -32,8 +32,8 @@ bool Chunk::publishMeshResult(MeshBuildResult *result)
   // The built sections are re-armed so the superseded geometry is rebuilt
   // (issue #107: a rejected section build must not leave its mask empty).
   if (result->owner != this ||
-      result->generation != m_meshGeneration ||
-      result->revision != m_meshRevision.load(std::memory_order_relaxed))
+      result->identity.generation != m_active->generation() ||
+      result->identity.revision != m_active->revision())
   {
     m_dirtySections.fetch_or(result->sectionsBuilt, std::memory_order_relaxed);
     result->homePool->release(result);
@@ -84,7 +84,7 @@ bool Chunk::publishMeshResult(MeshBuildResult *result)
   // Single state commit point: the mesh becomes official here, on the main
   // thread, only after validation succeeded.
   m_isLODMesh = result->isLOD;
-  state = ChunkState::MESHED;
+  m_active->setState(ChunkState::MESHED);
   meshNeedsUpdate.store(true);
   return true;
 }
@@ -120,7 +120,7 @@ void Chunk::rebuildIndirectDrawCache()
                static_cast<int32_t>(m_lodOpaqueVertices.offset / sizeof(Vertex)), 0};
       d.vertexPage = m_lodOpaqueVertices.page;
       d.indexPage = m_lodOpaqueIndices.page;
-      d.chunkOrigin = glm::ivec3(this->position);
+      d.chunkOrigin = glm::ivec3(getPosition());
       m_cachedOpaqueDrawCount = 1;
     }
 
@@ -132,7 +132,7 @@ void Chunk::rebuildIndirectDrawCache()
                static_cast<int32_t>(m_lodWaterVertices.offset / sizeof(Vertex)), 0};
       d.vertexPage = m_lodWaterVertices.page;
       d.indexPage = m_lodWaterIndices.page;
-      d.chunkOrigin = glm::ivec3(this->position);
+      d.chunkOrigin = glm::ivec3(getPosition());
       m_cachedWaterDrawCount = 1;
     }
     return;
@@ -157,7 +157,7 @@ void Chunk::rebuildIndirectDrawCache()
                static_cast<int32_t>(slot.vertexBase), 0};
       d.vertexPage = slot.vertexPage;
       d.indexPage = slot.indexPage;
-      d.chunkOrigin = glm::ivec3(this->position);
+      d.chunkOrigin = glm::ivec3(getPosition());
     }
   }
 
@@ -176,7 +176,7 @@ void Chunk::rebuildIndirectDrawCache()
                static_cast<int32_t>(slot.vertexBase), 0};
       d.vertexPage = slot.vertexPage;
       d.indexPage = slot.indexPage;
-      d.chunkOrigin = glm::ivec3(this->position);
+      d.chunkOrigin = glm::ivec3(getPosition());
     }
   }
 }
@@ -646,7 +646,6 @@ bool Chunk::uploadSectionSlots(MeshBuildResult &result, VmaAllocator allocator,
 
 void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshArenas &arenas)
 {
-  MemoryPublication memoryPublication{*this};
   if (allocator == VK_NULL_HANDLE)
     throw std::runtime_error("Chunk::uploadToGPU: null allocator");
 
@@ -949,7 +948,6 @@ void Chunk::discardSectionReplacement(MeshArenas &arenas, GpuReplacement &replac
 // the caller until publishGPUUpload() swaps it in.
 bool Chunk::prepareGPUUpload(MeshArenas &arenas, GpuReplacement &out)
 {
-  MemoryPublication memoryPublication{*this};
   m_arenas = &arenas;
 
   out = GpuReplacement{};
@@ -958,8 +956,8 @@ bool Chunk::prepareGPUUpload(MeshArenas &arenas, GpuReplacement &out)
     return true; // nothing pending: publish will just clear the draw counters
   out.valid = true;
 
-  out.generation = m_meshGeneration;
-  out.revision = m_meshRevision.load(std::memory_order_relaxed);
+  out.generation = m_active->generation();
+  out.revision = m_active->revision();
   const bool prepared = out.result->isLOD
                             ? prepareLodReplacement(*out.result, arenas, out)
                             : prepareSectionReplacement(*out.result, arenas, out);
@@ -994,7 +992,6 @@ bool Chunk::recordGPUUpload(VmaAllocator allocator, StagingRing &staging, VkComm
 void Chunk::publishGPUUpload(GpuResourceRetire &retire, MeshArenas &arenas,
                              GpuReplacement &replacement)
 {
-  MemoryPublication memoryPublication{*this};
   if (!replacement.valid)
   {
     opaqueIndexCount = 0;

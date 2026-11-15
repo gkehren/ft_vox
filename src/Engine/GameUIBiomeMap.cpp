@@ -3,7 +3,7 @@
 
 #include <cmath>
 #include <algorithm>
-#include <Engine/ThreadPool.hpp>
+#include <Core/ThreadPool.hpp>
 #include <chrono>
 
 void paintBiomeMapPlayerDot(std::vector<unsigned char> &rgba,

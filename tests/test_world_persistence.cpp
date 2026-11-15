@@ -11,7 +11,7 @@
 #include <Chunk/ChunkPool.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
-#include <Engine/ThreadPool.hpp>
+#include <Core/ThreadPool.hpp>
 #include <World/WorldPersistence.hpp>
 #include <Engine/GameUI.hpp>
 #include <World/WorldSave.hpp>
@@ -1269,13 +1269,13 @@ static void testDisabledPersistence()
 // ---------------------------------------------------------------------------
 
 // Friend probe (same name-based access as test_chunk_lifecycle): lets the
-// drain test observe whether the edit actually took the PendingVoxelEdit
-// deferred path.
+// drain test observe whether the edit actually took the deferred path.
+// Issue #206: the pending-edit queue lives in VoxelWorld.
 struct ChunkManagerStreamProbe
 {
-	static const std::vector<PendingVoxelEdit> &pendingEdits(const ChunkManager &m)
+	static bool hasPendingEdits(const ChunkManager &m)
 	{
-		return m.m_pendingEdits;
+		return !m.world().m_pendingEdits.empty();
 	}
 };
 
@@ -1312,7 +1312,7 @@ static void testCloseWorldDrainsPendingEdits()
 	// Coverage note: fast machines can finish generation before the edit, in
 	// which case it applies directly (still durable). Whichever path ran, the
 	// close below must persist the edit.
-	const bool deferredEdit = !ChunkManagerStreamProbe::pendingEdits(mgr).empty();
+	const bool deferredEdit = ChunkManagerStreamProbe::hasPendingEdits(mgr);
 	if (!deferredEdit)
 		CHECK(mgr.pendingGenJobs() == 0, "direct apply only valid when no job is in flight");
 
