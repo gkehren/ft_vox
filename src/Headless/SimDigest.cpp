@@ -187,10 +187,25 @@ bool validateDigestArea(const DigestArea &area, std::string &error)
 		error = "digest area y must be inside [0, " + std::to_string(WORLD_HEIGHT - 1) + "]";
 		return false;
 	}
-	const uint64_t dx = static_cast<uint64_t>(area.max.x - area.min.x) + 1;
-	const uint64_t dy = static_cast<uint64_t>(area.max.y - area.min.y) + 1;
-	const uint64_t dz = static_cast<uint64_t>(area.max.z - area.min.z) + 1;
-	if (dx * dy * dz > kMaxDigestCells)
+	// Spans in 64-bit BEFORE subtracting: the bounds are int-range, so
+	// max - min can reach ~2^32 and would overflow int32 (UB) if done in int.
+	const uint64_t dx = static_cast<uint64_t>(static_cast<int64_t>(area.max.x) - static_cast<int64_t>(area.min.x)) + 1;
+	const uint64_t dy = static_cast<uint64_t>(static_cast<int64_t>(area.max.y) - static_cast<int64_t>(area.min.y)) + 1;
+	const uint64_t dz = static_cast<uint64_t>(static_cast<int64_t>(area.max.z) - static_cast<int64_t>(area.min.z)) + 1;
+	// Per-axis clamp first: a single axis beyond the cell cap already exceeds
+	// the volume cap, and clamping keeps the pairwise product well inside
+	// uint64 range (kMaxDigestCells^2 ~ 6.4e13). Without this, extreme bounds
+	// could wrap the uint64 product BELOW the cap and admit a digest loop
+	// spanning billions of cells (issue #210 review round 2).
+	if (dx > kMaxDigestCells || dy > kMaxDigestCells || dz > kMaxDigestCells)
+	{
+		error = "digest area exceeds " + std::to_string(kMaxDigestCells) + " cells (per-axis span too large)";
+		return false;
+	}
+	// Exact, overflow-safe volume check: dx*dy fits uint64 after the clamp;
+	// dx*dy*dz > cap  <=>  dx*dy > cap/dz  (dz >= 1, integer division).
+	const uint64_t base = dx * dy;
+	if (base > kMaxDigestCells / dz)
 	{
 		error = "digest area exceeds " + std::to_string(kMaxDigestCells) + " cells";
 		return false;

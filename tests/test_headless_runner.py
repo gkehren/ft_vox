@@ -195,6 +195,12 @@ def main() -> int:
         check(p.returncode == 2, f"fractional --digest-area exits 2 (got {p.returncode})")
         p = run_runner(runner, ["--ticks", "10", "--digest-area", "0,0,0,1e10,10,10"], work)
         check(p.returncode == 2, f"out-of-range --digest-area exits 2 (got {p.returncode})")
+        # Extreme int-range bounds must be rejected by the volume clamp, not
+        # overflow int32/uint64 and admit a billions-of-cells digest loop that
+        # burns the wall-clock budget (issue #210 review round 2).
+        p = run_runner(runner, ["--ticks", "10", "--timeout", "5",
+                                "--digest-area", "-2147483647,0,-2147483647,2147483647,255,2147483647"], work)
+        check(p.returncode == 2, f"extreme --digest-area span exits 2, no overflow stall (got {p.returncode})")
 
         # World-level edit rejection (target outside residency) is counted and
         # diagnosed, not silent (issue #210 review).

@@ -138,7 +138,10 @@ ctest -R VisualRegression --output-on-failure   # from the build dir
 
 # Headless simulation runner (issue #210) — CPU-only, no GPU/window needed
 ./build-vk/ft_vox_headless --seed 42 --ticks 600 --script tests/fixtures/sim-actions.txt
-ctest -R "Headless|CpuOnlyBuild" --output-on-failure   # from the build dir
+ctest -R Headless --output-on-failure   # from the build dir (always-on guards)
+# Heavier clean CPU-only configure/build gate is OPT-IN (label cpu-only):
+#   cmake -B build-cpu -DFT_VOX_GRAPHICS=OFF -DFT_VOX_CPU_ONLY_BUILD_CHECK=ON
+#   ctest --test-dir build-cpu -L cpu-only --output-on-failure
 # CPU-only configure (no SDL3/Vulkan SDK/shader toolchain discovered at all):
 cmake -B build-cpu -DFT_VOX_GRAPHICS=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build-cpu -j && ctest --test-dir build-cpu --output-on-failure

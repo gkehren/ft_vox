@@ -116,8 +116,10 @@ ft_vox_headless [options]
   --interest-radius N   streaming radius in blocks, 32..1024 (default 96)
   --workers N           generation worker threads, 0..64 (default 0 = synchronous)
   --digest-area X0,Y0,Z0,X1,Y1,Z1
-                        inclusive observed-area cell bounds for the digest
-                        (default: 32x32 columns around the bootstrap chunk, full height)
+                        inclusive observed-area INTEGER cell bounds for the digest
+                        (default: 32x32 columns around the bootstrap chunk, full height).
+                        y inside [0,255]; volume capped at 8,000,000 cells (per-axis
+                        span clamp + overflow-safe volume check; bad bounds exit 2).
   --expect-digest HEX   fail (exit 5) unless the final digest equals HEX
   --timeout SEC         wall-clock budget, 1..3600 (default 120)
   --json                emit the summary as JSON instead of key=value
@@ -159,7 +161,7 @@ One machine-readable line on stdout (the facade's own `[world] …` log lines
 may precede it; parse the line starting with `SUMMARY `):
 
 ```text
-SUMMARY status=ok exit_code=0 seed=42 generator=1 ticks=600 workers=0 interest_radius=96 chunks=129 edits=4 refused=0 edit_revision=5 mobs=15 player=(8.301,63.001,1.301) area=(-16,0,-16)-(15,255,15) digest=3a068dd4be8ab57e save=none
+SUMMARY status=ok exit_code=0 seed=42 generator=1 ticks=600 workers=0 interest_radius=96 chunks=129 edits=4 refused=0 rejected=0 edit_revision=5 mobs=15 player=(8.301,63.001,1.301) area=(-16,0,-16)-(15,255,15) digest=3a068dd4be8ab57e save=none
 ```
 
 `--json` emits the same fields as a single JSON object. Fields: world

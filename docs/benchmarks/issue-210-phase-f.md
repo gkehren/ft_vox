@@ -103,7 +103,7 @@ window or shader asset.
 ### Windows — headless acceptance driver
 
 `python tests/test_headless_runner.py --runner build/Release/ft_vox_headless.exe
---fixtures tests/fixtures` → **37 checks, 0 failures** (smoke, sync/async
+--fixtures tests/fixtures` → **38 checks, 0 failures** (smoke, sync/async
 determinism, expect-digest gate, 3-process save/reload, all failure exit
 codes incl. NaN/malformed options, world-rejection diagnostics, timeout, JSON,
 interest load/unload/reload residency assertions sync+async).
@@ -119,7 +119,7 @@ and ran: `EngineReload`, `RenderBridge`, `WorldPersistence`, `ChunkLifecycle`,
 `MeshUploadLifecycle`, `PostResizeFormats`, `MobVulkanRender`, the Vulkan
 resource/validation probes, etc. The new headless tests pass in the full
 configuration too: `HeadlessSmoke` (0.29 s), `HeadlessRunner` (7.29 s,
-31 checks), `HeadlessDeps` (0.13 s).
+38 checks), `HeadlessDeps` (0.13 s).
 
 The single failure is `VisualRegression` → scene **`cave_emissive`**:
 `reference mismatch: mean_abs=0.041943 rms=0.070555 hot=0.800885`. This is the
@@ -222,6 +222,28 @@ Addressed reviewer findings (all Low/Nit):
 Driver grew 31 → **37 checks** (NaN/malformed options, world-rejection
 count + diagnostic, residency assertions); all pass, canonical digest
 unchanged (`3a068dd4be8ab57e`).
+
+## Review round 2 — fixes
+
+- **`validateDigestArea` overflow (UB + stall):** the span was computed as
+  `max - min` in `int` before casting, so the now-accepted ±2147483647 bounds
+  overflowed int32 (UB), and the `uint64` product could wrap *below*
+  `kMaxDigestCells` (measured wrapping to 1024), admitting a digest loop over
+  billions of cells that burned the wall-clock budget (exit 6 at the timeout).
+  Fixed: spans computed in `int64_t` before subtraction, a **per-axis span
+  clamp** (any axis > cap rejects), then an **overflow-safe exact volume check**
+  (`dx*dy > cap/dz`, pairwise product fits uint64 after the clamp). The extreme
+  input `--digest-area -2147483647,0,-2147483647,2147483647,255,2147483647` now
+  exits 2 in <0.1 s. Added a driver check; also verified a product-over-cap
+  area (each axis < cap) rejects and a valid 262144-cell area passes.
+- **Stale docs:** `AGENTS.md` no longer suggests `ctest -R "Headless|CpuOnlyBuild"`
+  (the gate is opt-in) — split into always-on `ctest -R Headless` + the opt-in
+  `cpu-only` label recipe; the full-suite note here updated 31 → 38 checks; the
+  `headless-runner.md` SUMMARY example now includes `rejected=`; the
+  `--digest-area` CLI doc notes integer bounds + the 8M-cell cap.
+
+Driver grew 37 → **38 checks**; all pass on Windows/MSVC, canonical digest
+unchanged (`3a068dd4be8ab57e`), core include guard green.
 
 ## Conclusion
 
