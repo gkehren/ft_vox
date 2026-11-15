@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forbidden-include-chain guard for the CPU-only core (issues #205/#206, Epic #204 A/B).
+"""Forbidden-include-chain guard for the CPU-only core (issues #205/#206/#208, Epic #204 A/B/D).
 
 The authoritative simulation / persistence library `ft_vox_core` and its public
 contracts (src/Core/SimContracts.hpp) must stay render-independent: they may
@@ -37,6 +37,8 @@ ROOTS = [
     "Core/SimContracts.hpp",
     "Core/ThreadPool.hpp",
     "Core/WorkloadTelemetry.hpp",
+    "Sim/GameSimulation.hpp",
+    "Sim/GameSimulation.cpp",
     "World/WorldSave.cpp",
     "World/WorldPersistence.cpp",
     "World/WorldChunk.cpp",
@@ -44,6 +46,7 @@ ROOTS = [
     "World/WorldChunk.hpp",
     "World/VoxelWorld.hpp",
     "World/WorldCollisionView.hpp",
+    "World/WorldMobView.hpp",
     "Chunk/TerrainGenerator.cpp",
     "Chunk/TerrainVegetation.cpp",
     "Chunk/VoxelPool.cpp",
@@ -94,10 +97,11 @@ CHUNK_CPU_ALLOWED = {
 }
 
 # Render-coupled — NEVER allowed from the core, in any phase: these pull
-# Vulkan/VMA/Camera/Engine/Renderer headers (transitively).
+# Vulkan/VMA/Camera/Engine/Renderer headers (transitively). Phase D (#208)
+# removed ChunkMobWorld.hpp entirely (mobs moved behind GameSimulation; the
+# CPU seam is World/WorldMobView.hpp).
 CHUNK_RENDER_COUPLED = {
     "Chunk.hpp",               # Vulkan/VkBuffer, Vulkan/MeshArena, Camera, Engine, Renderer
-    "ChunkMobWorld.hpp",       # RenderWorldBridge.hpp + WorldCollisionView.hpp
 }
 
 # Derived render payloads — CPU-only (std / glm / utils.hpp includes only) but

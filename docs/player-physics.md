@@ -49,18 +49,23 @@ surface — still not a physics or volumetric system.
 - Derived entity light sampling lives on the `RenderWorldBridge`
   (`sampleSmoothedLight`), not on the collision view: physics consumes
   `WorldCollisionView` directly (issue #207 removed the former
-  `ChunkCollisionView` wrapper). The temporary `ChunkMobWorld` adapter holds the
-  render map's shared lock for those light reads; both locks are main-thread-only
-  — see the lock-order note in its header.
+  `ChunkCollisionView` wrapper). Issue #208 removed the temporary
+  `ChunkMobWorld` adapter too: mobs run behind `sim::GameSimulation` over the
+  CPU-only `WorldMobView`, and the graphical host samples entity light from
+  the bridge AFTER the mob snapshot — no path holds the world and render map
+  locks at once anymore (both remain main-thread-only).
 
-The engine samples SDL input then advances the controller before streaming and
+The engine samples SDL input, maps it to a `sim::PlayerCommand`, then advances
+the controller inside `sim::GameSimulation::advancePlayer` before streaming and
 rendering. Simulation uses double precision at 120 Hz, with up to eight steps
 per frame. Excess whole steps are dropped and counted; the fractional remainder
 is retained. Position is interpolated between completed simulation steps, while
 mouse look is immediate. Input edges are preserved until a physics step, consumed
 once, and cleared when ImGui captures the keyboard. UI capture leaves gravity
 running. Pause and focus loss suspend simulation and discard accumulated time
-and jump timers; resuming cannot replay a long stall.
+and jump timers; resuming cannot replay a long stall. The pause/focus/benchmark
+POLICY is the graphical host's; the simulation implements the suspension
+semantics (issue #208).
 
 Collision sweeps only inspect the swept AABB's local voxel range. Slab tests find
 the first time of impact and combine simultaneous normals; up to four slide

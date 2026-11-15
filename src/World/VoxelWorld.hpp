@@ -133,9 +133,9 @@ struct WorldWorkerObserver
 class VoxelWorld
 {
 public:
-	/// The generator is referenced, not owned: the host (Engine today,
-	/// GameSimulation in Phase D) keeps its lifetime. The world owns the
-	/// world identity derived from it (seed + generator version) and every
+	/// The generator is referenced, not owned: the host (sim::GameSimulation
+	/// since Phase D #208) keeps its lifetime. The world owns the world
+	/// identity derived from it (seed + generator version) and every
 	/// authoritative chunk/edit/persistence decision.
 	VoxelWorld(TerrainGenerator *terrainGenerator, ThreadPool *threadPool);
 	~VoxelWorld();
@@ -185,6 +185,9 @@ public:
 	/// True while accepted edits are still queued against not-yet-readable
 	/// records (authoritative state behind accepted input). Main-thread view.
 	bool hasPendingLogicalEdits() const;
+	/// Monotonic logical edit counter: the id the NEXT accepted edit will
+	/// carry (issue #208 world snapshot seam). Main-thread view.
+	uint64_t nextEditId() const { return m_nextEditId; }
 	bool hasPendingEditsFor(const WorldChunk *chunk) const;
 
 	// --- Queries ---------------------------------------------------------------

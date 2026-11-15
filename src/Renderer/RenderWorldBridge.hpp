@@ -5,11 +5,12 @@
 // authoritative CPU voxel world (issue #207, Epic #204 Phase C).
 //
 // Ownership (the Phase C inversion):
-//   * VoxelWorld (owned by the host — the Engine today, GameSimulation in
-//     Phase E) is the SINGLE owner of authoritative voxel state: chunk
-//     records, residency/streaming, logical edits, generation workers and
-//     WorldPersistence. The bridge only REFERENCES it (world()) and never
-//     owns, moves or destroys simulation state.
+//   * VoxelWorld (owned by sim::GameSimulation since Phase D #208; the
+//     graphical Engine hosts the simulation) is the SINGLE owner of
+//     authoritative voxel state: chunk records, residency/streaming, logical
+//     edits, generation workers and WorldPersistence. The bridge only
+//     REFERENCES it (world()) and never owns, moves or destroys simulation
+//     state.
 //   * RenderWorldBridge owns everything DERIVED: render chunk handles bound
 //     to world records, mesh/light job dispatch, GPU uploads, geometric
 //     commit groups, visibility, entity light-cache intent + sampling,
@@ -38,10 +39,12 @@
 // Synchronization: the render mutex guards only render state (handle map,
 // light caches); the world mutex guards authoritative state. Both are
 // main-thread-only today (workers take completion-queue and pool mutexes
-// only). Lock order note: the collision/mob views acquire world -> render;
-// mesh dispatch acquires render -> world (ensureShellPopulated). The two
-// orders are safe ONLY because both paths run exclusively on the main
-// thread; revisit before threading either path (Phase D/E).
+// only). Lock order note (issue #208, Phase D): the former world -> render
+// nesting lived in the removed ChunkMobWorld adapter; mob queries now hold
+// ONLY the world lock (WorldMobView) and the host samples entity light from
+// this bridge AFTER the mob snapshot, so no path holds both map locks at
+// once. Mesh dispatch still acquires render -> world (ensureShellPopulated);
+// revisit before threading either path (Phase E).
 // =============================================================================
 
 #include <unordered_map>
@@ -175,10 +178,10 @@ public:
 	static constexpr float kEntityLightCacheReleaseRadiusSq =
 		kEntityLightCacheReleaseRadius * kEntityLightCacheReleaseRadius;
 
-	/// The world is REFERENCED, not owned: the host (Engine today,
-	/// GameSimulation in Phase E) keeps its lifetime and must outlive the
-	/// bridge. The bridge installs the render-side worker profiling seam on
-	/// the world (headless worlds run without one).
+	/// The world is REFERENCED, not owned: the host (sim::GameSimulation
+	/// since Phase D #208) keeps its lifetime and must outlive the bridge.
+	/// The bridge installs the render-side worker profiling seam on the world
+	/// (headless worlds run without one).
 	RenderWorldBridge(VoxelWorld *world, ThreadPool *threadPool, ChunkPool *chunkPool);
 	~RenderWorldBridge();
 
@@ -381,9 +384,6 @@ private:
 	// lifecycle tests; authoritative seams live on VoxelWorld's friends.
 	friend struct RenderBridgeProbe;
 	friend struct RenderBridgeStreamProbe;
-	// Derived light-sampling seam for the temporary mob adapter (Phase D
-	// removes it): holds the render lock while sampling the caches.
-	friend class ChunkMobWorld;
 
 	// --- The authoritative world (REFERENCED, host-owned; issue #207) ---
 	VoxelWorld *m_world{nullptr};

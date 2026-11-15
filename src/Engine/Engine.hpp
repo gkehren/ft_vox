@@ -27,10 +27,8 @@
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <Renderer/RenderWorldBridge.hpp>
-#include <World/VoxelWorld.hpp>
-#include <Chunk/TerrainGenerator.hpp>
+#include <Sim/GameSimulation.hpp>
 #include <Camera/Camera.hpp>
-#include <Physics/PlayerController.hpp>
 #include <World/WorldPersistence.hpp>
 #include <Entities/MobSystem.hpp>
 #include <utils.hpp>
@@ -57,7 +55,7 @@ public:
 	void setVSync(bool enabled);
 	/// The seed of the currently generated world (tests/tools; the World
 	/// panel shows the same value through the UI frame).
-	int worldSeed() const { return seed; }
+	int worldSeed() const { return sim ? sim->seed() : 0; }
 	/// Override the persistent-save root (tests/tools). Must be called
 	/// BEFORE requestOpenWorld/initializeNoiseGenerator; the runtime default
 	/// stays "<cwd>/saves" (issue #180 review round 4).
@@ -65,8 +63,8 @@ public:
 	/// Read-only test accessors (issue #180 review round 6): restored-player
 	/// bootstrap coverage needs to observe the live player and the loaded
 	/// chunk set after initializeNoiseGenerator.
-	glm::dvec3 playerPositionForTests() const { return player.body.position; }
-	bool playerWaitingForTerrainForTests() const { return player.body.waitingForTerrain; }
+	glm::dvec3 playerPositionForTests() const { return sim ? sim->playerFeet() : glm::dvec3(0.0); }
+	bool playerWaitingForTerrainForTests() const { return sim && sim->playerSnapshot().waitingForTerrain; }
 	const RenderWorldBridge *chunksForTests() const { return renderBridge.get(); }
 	void setExitAfterBenchmark(bool enabled) { m_exitAfterBenchmark = enabled; }
 
@@ -105,7 +103,7 @@ public:
 	bool reloadWorld(int newSeed);
 
 	/// Monotonically increasing world generation / reload version counter.
-	uint64_t worldGenerationId() const { return m_worldGenerationId; }
+	uint64_t worldGenerationId() const { return sim ? sim->worldGenerationId() : 0; }
 
 	/// Result of applying a pack (atlas is still usable when pack is invalid — bundled used).
 	struct ResourcePackApplyResult
@@ -141,17 +139,6 @@ private:
 	/// live, read-only data source for the developer console.
 	void publishFrameTelemetry();
 	void placeCameraOnSurface();
-	/// Read <world>/player.state when a world is open (issue #180 review
-	/// round 6). Called BEFORE the terrain bootstrap so the initial area can
-	/// be generated around the restored position. Nullopt for a fresh world
-	/// or an unusable save (already reported through the error log).
-	std::optional<PlayerPersistState> loadPendingPlayerState();
-	/// Restore the saved player AFTER the terrain bootstrap: exact position
-	/// when usable, physics::recover() fixes embedding up to one block, a
-	/// waitingForTerrain result keeps the position (the solver holds until
-	/// the terrain streams in), and a clearly-invalid position falls back to
-	/// the surface spawn. Returns false only for the fallback case.
-	bool restorePlayerState(const PlayerPersistState &saved);
 	void setPlayerFlight(bool enabled);
 	void resetPlayerAtCamera();
 	void updateDisplayRefreshRate();
@@ -170,9 +157,10 @@ private:
 	std::optional<bool> m_pendingVSync;
 	bool showChunkBorders{false};
 	bool showDemoPlayers{true};
-    bool mobsEnabled{true};
-    entities::MobSystem mobs;
-    std::vector<entities::MobRenderState> mobStates;
+	/// Derived per-frame mob presentation states (sim snapshots + the
+	/// bridge's entity light samples). The authoritative mob simulation lives
+	/// in sim::GameSimulation (issue #208).
+	std::vector<entities::MobRenderState> mobStates;
 	bool paused{false};
     bool m_inspectionView{false};
     float m_inspectionSeconds{0.f};
@@ -189,16 +177,13 @@ private:
 
 	double streamAccum{0.0};
 
-	int seed{0};
-	uint64_t m_worldGenerationId{1};
 	/// Requested world-save name (issue #180); empty = transient session.
+	/// Consumed by sim::GameSimulation::initialize (the seed, the world
+	/// generation id and the open error live in the simulation, issue #208).
 	std::string m_openWorldName;
 	/// Root directory of persistent saves (issue #180 review round 4):
 	/// "<cwd>/saves" at runtime, injected for tests/tools.
 	std::filesystem::path m_savesRoot{"saves"};
-	/// Why persistence is off for this session despite a requested world
-	/// (seed mismatch / open failure); surfaced in the World UI panel.
-	std::string m_openWorldError;
 	/// UI biome cache (issue #184 review): the Detailed overlay is the only
 	/// biome consumer, and the player can stay in one voxel column for many
 	/// frames — so drawUi samples getBiomeAt() only when the column or the
@@ -210,9 +195,6 @@ private:
 	uint64_t m_uiBiomeWorldGen{0};
 	int m_uiBiome{-1};
 	std::string m_resourcePackRoot;
-	TextureType selectedTexture{STONE};
-
-	static constexpr int kBootstrapRadius = 2;
 
 	RenderSettings renderSettings{};
 	RenderTiming renderTiming{};
@@ -225,15 +207,16 @@ private:
 	std::unique_ptr<WorldRenderer> worldRenderer;
 	std::unique_ptr<ImGuiLayer> imgui;
 	std::unique_ptr<GameUI> gameUi;
-	std::unique_ptr<TerrainGenerator> terrainGenerator;
 	std::unique_ptr<ThreadPool> threadPool;
 	std::unique_ptr<ChunkPool> chunkPool;
-	// Authoritative world + derived render projection (issue #207, Epic #204
-	// Phase C). Declaration order is destruction order reversed: the bridge
-	// drains its render jobs and releases its handles BEFORE the world (and
-	// the pools/workers it references) tear down. Phase E (#209) lifts the
-	// world ownership into GameSimulation.
-	std::unique_ptr<VoxelWorld> voxelWorld;
+	// Authoritative simulation + derived render projection (issue #208, Epic
+	// #204 Phase D). GameSimulation owns the TerrainGenerator, VoxelWorld,
+	// PlayerController and MobSystem (CPU-only ft_vox_core); the bridge only
+	// references sim->world(). Declaration order is destruction order
+	// reversed: the bridge drains its render jobs and releases its handles
+	// BEFORE the simulation (and the pools/workers it references) tear down.
+	// Phase E (#209) splits the graphical runtime from this host wiring.
+	std::unique_ptr<sim::GameSimulation> sim;
 	std::unique_ptr<RenderWorldBridge> renderBridge;
 
 	StagingRing stagingRing;
@@ -244,13 +227,10 @@ private:
 	std::vector<Chunk *> shadowList;
 	int uploadBudgetThisFrame{0};
 	Camera camera;
-	physics::PlayerController player;
-	bool playerFlight{false};
 	bool windowFocused{true};
 	bool jumpPressed{false};
 	bool benchmarkOwnedCamera{false};
 	bool flightBeforeBenchmark{false};
-	const char *playerStatus{""};
 
 	OverlayHighlight highlight{};
 	std::vector<OverlayPlayer> demoPlayers;

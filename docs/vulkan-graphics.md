@@ -403,7 +403,9 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
   mapped buffer — no per-animal mesh rebuilds or uploads.
 - **Local voxel lighting (issue #128):** entities sample the continuous voxel lighting field
   (skylight + propagated RGB4 block light from #141) with bounded trilinear interpolation
-  via `RenderWorldBridge::sampleSmoothedLight` / `ChunkMobWorld::sampleLight`. `prepare` writes
+  via `RenderWorldBridge::sampleSmoothedLight` (the Engine samples it per mob after taking
+  the simulation's mob snapshots — issue #208 removed the former `ChunkMobWorld` light seam).
+  `prepare` writes
   `localLight = vec4(skylight, blockR, blockG, blockB)` into the instance buffer.
   `mob.vert.glsl` forwards `vSkyLight` and `vBlockLightRGB` to `mob.frag.glsl`, which
   faithfully matches terrain lighting semantics:

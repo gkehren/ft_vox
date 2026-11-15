@@ -9,7 +9,7 @@
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Chunk/ChunkPool.hpp>
 #include <World/WorldCollisionView.hpp>
-#include <Chunk/ChunkMobWorld.hpp>
+#include <World/WorldMobView.hpp>
 #include <Physics/PlayerController.hpp>
 #include <Chunk/TerrainGenerator.hpp>
 #include <Camera/Camera.hpp>
@@ -479,7 +479,7 @@ static int profileMobs()
     manager.updateStreaming(camera, settings);
     manager.processChunkLoading(512);
     {
-        ChunkMobWorld world(managerWorld, manager, generator);
+        WorldMobView world(managerWorld, generator);
         CHECK(!world.surface(center.x, center.y), "unpublished terrain cannot spawn mobs");
     }
     for (auto *chunk : manager.getActiveChunks())
@@ -487,13 +487,13 @@ static int profileMobs()
     entities::MobSystem mobs;
     mobs.reset(42);
     for (int i = 0; i < 600; ++i) {
-        ChunkMobWorld world(managerWorld, manager, generator);
+        WorldMobView world(managerWorld, generator);
         mobs.update(1.0/60, world, {center.x,100,center.y},112);
     }
     const auto natural = mobs.mobs().size();
     CHECK(natural > 0, "natural mobs spawn on generated meadow voxels");
     {
-        ChunkMobWorld world(managerWorld, manager, generator);
+        WorldMobView world(managerWorld, generator);
         for (int z = -72; z <= 72 && mobs.mobs().size() < 48; z += 3)
         for (int x = -72; x <= 72 && mobs.mobs().size() < 48; x += 3) {
             auto feet = world.surface(center.x+x,center.y+z);
@@ -511,7 +511,7 @@ static int profileMobs()
         for(size_t j=0;j<mobs.mobs().size();++j) before[j]=mobs.mobs()[j].body.position;
         auto start=std::chrono::steady_clock::now();
         {
-            ChunkMobWorld world(managerWorld, manager, generator);
+            WorldMobView world(managerWorld, generator);
             mobs.update(1.0/60,world,{center.x,100,center.y},112);
         }
         double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
@@ -532,12 +532,13 @@ static int profileMobs()
     CHECK(!states.empty(), "light benchmark has active mobs");
     const double mobCount = static_cast<double>(states.size());
     {
-        ChunkMobWorld world(managerWorld, manager, generator);
+        // Entity light is sampled from the bridge's derived caches AFTER the
+        // mob snapshot (issue #208: the CPU mob view no longer wraps light).
         for (int i = 0; i < 6000; ++i) {
             auto start = std::chrono::steady_clock::now();
             for (auto &ms : states) {
                 const auto pos = entities::mobLightSamplePosition(ms);
-                const auto light = world.sampleLight(pos);
+                const auto light = manager.sampleSmoothedLight(pos);
                 ms.localSkylight = light.skylight;
                 ms.localBlockRgb = light.blockRgb;
             }
@@ -4804,17 +4805,22 @@ int main(int argc, char **argv)
 		const auto lavaLight = manager.sampleVoxelLight({8, 141, 8});
 		CHECK(lavaLight.blockRgb.r > 0.5f, "block light near lava has high red component");
 
-		// Test the bridge light seam and the ChunkMobWorld adapter (separate
-		// scopes to avoid nested shared_lock).
+		// Test the bridge light seam and the CPU mob view (separate scopes:
+		// the mob view holds the world lock; entity light sampling takes the
+		// render lock — issue #208 removed the nested ChunkMobWorld adapter).
 		lighting::LocalVoxelLight viewLight;
 		{
 			viewLight = manager.sampleSmoothedLight(glm::vec3(8.5f, 141.5f, 8.5f));
 			CHECK(viewLight.blockRgb.r > 0.5f, "bridge samples smoothed light");
 		}
 		{
-			ChunkMobWorld mobWorld(managerWorld, manager, generator);
-			const auto mobLight = mobWorld.sampleLight(glm::vec3(8.5f, 141.5f, 8.5f));
-			CHECK(mobLight.blockRgb.r == viewLight.blockRgb.r, "ChunkMobWorld delegates to bridge light seam");
+			WorldMobView mobWorld(managerWorld, generator);
+			WorldCollisionView collisionView(managerWorld);
+			const glm::ivec3 probe(8, 141, 8);
+			const auto mobCell = mobWorld.sample(probe);
+			const auto collisionCell = collisionView.sample(probe);
+			CHECK(mobCell.available == collisionCell.available && mobCell.solid == collisionCell.solid,
+			      "WorldMobView delegates collision to WorldCollisionView");
 		}
 
 		// Trilinear continuity: step along a line from (8.5, 141.5, 8.5) to (8.5, 145.5, 8.5)
