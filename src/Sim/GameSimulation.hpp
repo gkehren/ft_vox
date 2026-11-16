@@ -15,6 +15,10 @@
 //   * inventory: items::Inventory (36 slots, hotbar 0..8) with explicit
 //     gameplay commands + a bounded value snapshot (issue #225, Epic #223
 //     Phase B; the item domain contracts are issue #224 / src/Items/);
+//   * dropped items: items::ItemEntitySystem at the fixed 60 Hz step
+//     (issue #226, Epic #223 Phase C) — break/drop commands, deterministic
+//     auto-pickup into the inventory, id-sorted bounded snapshots + a
+//     spawn/remove event stream;
 //   * session identity: the world generation / reload counter.
 //
 // The facade is render-free (enforced by tests/check_core_includes.py): no
@@ -66,6 +70,7 @@
 #include <Core/ThreadPool.hpp>
 #include <Entities/MobSystem.hpp>
 #include <Items/Inventory.hpp>
+#include <Items/ItemEntitySystem.hpp>
 #include <Physics/PlayerController.hpp>
 #include <World/VoxelWorld.hpp>
 #include <World/WorldPersistence.hpp>
@@ -125,6 +130,24 @@ struct InventorySnapshot
     constexpr friend bool operator==(const InventorySnapshot &, const InventorySnapshot &) = default;
 };
 
+/// Derived dropped-item presentation state (issue #226, Epic #223 Phase C):
+/// the items::ItemEntitySystem snapshot, re-exported under the sim contract
+/// namespace exactly like sim::MobSnapshot. Bounded by the population cap,
+/// ID-SORTED, previous/current for interpolation (mix with
+/// itemInterpolationAlpha()), item + count + age. No render types.
+using ItemEntitySnapshot = items::ItemEntitySnapshot;
+
+/// Result of breakBlock (issue #226): the interaction rejection vocabulary,
+/// distinct from the item-operation codes (items::ItemResult).
+enum class BreakResult : uint8_t
+{
+    Ok,             // block deleted (world edit semantics) + registry drop spawned
+    Unbreakable,    // BEDROCK / fluids — not breakable by hand in v1
+    UnknownTerrain, // cell unloaded / not generated (never inferred)
+    WorldRejected   // nothing to break (AIR / out of bounds) or the world
+                    // refused the edit (no-op / invalid target)
+};
+
 class GameSimulation
 {
 public:
@@ -174,7 +197,9 @@ public:
     /// Player flight mode, block selection and status carry over from a
     /// previous session until finalizePlayerSpawn (restore/spawn) sets them —
     /// the historical Engine behavior. The inventory resets to EMPTY here
-    /// (issue #225; the inventory.state restore hook lands in #228).
+    /// (issue #225; the inventory.state restore hook lands in #228) and the
+    /// dropped-item population + id allocator reset with the session
+    /// (issue #226; the items.state hook lands in #228).
     glm::dvec3 initialize(const Config &config, glm::dvec3 fallbackCenter);
 
     /// Headless synchronous voxel bootstrap: the world half of the bridge's
@@ -196,8 +221,9 @@ public:
     /// destroys the bridge before calling this. Terrain bootstrap and player
     /// spawn are separate steps (the benchmark host uses its own placement).
     /// Reloaded worlds are transient: persistence stays off afterwards.
-    /// A SUCCESSFUL reload resets the inventory to empty (issue #225); a
-    /// REFUSED reload keeps the old world AND the old inventory authoritative.
+    /// A SUCCESSFUL reload resets the inventory to empty (issue #225) and
+    /// the dropped-item population + id allocator (issue #226); a REFUSED
+    /// reload keeps the old world, inventory AND items authoritative.
     /// The player body is intentionally LEFT to the host's spawn step: a
     /// headless host that reloads without re-spawning keeps the previous body
     /// (possibly in an unloaded region) until it calls finalizePlayerSpawn /
@@ -232,6 +258,16 @@ public:
     /// population and syncs previous/current for interpolation; the
     /// sim-owned mobsEnabled() toggle suspends it as well.
     void advanceMobs(double dt, glm::dvec3 observer, double availableRadius, bool suspended);
+
+    /// One host frame of dropped item entities (fixed 60 Hz internally,
+    /// issue #226). The host calls it NEXT TO advanceMobs (the #227 rewiring
+    /// adds the call site; until then only headless hosts/tests drive it).
+    /// Pickup proximity uses the authoritative player feet; pickups merge
+    /// into the owned inventory hotbar-first. Suspension freezes the
+    /// population and syncs previous/current (no catch-up burst). The world
+    /// is NOT pumped here — the issue #114 publication ordering stays with
+    /// the bridge / pumpWorld().
+    void advanceItems(double dt, bool suspended);
 
     /// Headless world publication: publish finished generation jobs + apply
     /// deferred logical edits. The graphical host does NOT call this — the
@@ -352,6 +388,28 @@ public:
     /// slots. Not a gameplay rule — walking-mode survival never grants.
     items::AddResult grantItems(items::ItemId item, uint16_t count);
 
+    // --- World interaction commands (issue #226, Epic #223 Phase C) -----------
+    // The survival-lite break/drop half of the loop; place-from-hotbar and
+    // the sim raycast arrive in #227. The creative/editor placeVoxel /
+    // deleteVoxel seams above stay unchanged (infinite-block semantics).
+
+    /// Break a voxel by hand: validates the cell against the item registry
+    /// (BEDROCK / fluids refused, unloaded cells never inferred), deletes
+    /// through the EXISTING world edit semantics (issue #114 deferred-edit
+    /// ordering preserved) and spawns the registry drop at the cell center
+    /// with deterministic id/edit-revision jitter. BreakResult distinguishes
+    /// Ok / Unbreakable / UnknownTerrain / WorldRejected.
+    BreakResult breakBlock(glm::ivec3 cell);
+
+    /// Drop items from an inventory slot: removes up to `count` (clamped,
+    /// the removeCount semantics) and spawns one entity at the player eye
+    /// with a host-supplied plain direction (presentation input, the
+    /// savePlayerState(yaw, pitch) pattern) and deterministic speed. A
+    /// degenerate OR non-finite direction falls back to +Y. count 0 is an Ok
+    /// no-op; invalid slot / empty slot answer InvalidSlot / EmptyStack.
+    /// Manual drops carry the longer pickup delay (no instant re-pickup).
+    items::ItemResult dropFromSlot(int slot, uint16_t count, glm::dvec3 dir);
+
     // --- Read-only bounded snapshots -------------------------------------------
 
     PlayerSnapshot playerSnapshot() const;
@@ -367,6 +425,17 @@ public:
     /// items::Inventory. No allocation, no registry strings — the UI resolves
     /// ItemId display names itself.
     void inventorySnapshot(InventorySnapshot &out) const;
+    /// Id-sorted bounded dropped-item snapshots, filled IN PLACE (issue
+    /// #226, the mobSnapshots pattern). Interpolate previous -> current with
+    /// itemInterpolationAlpha(); counts/ages are authoritative tick values.
+    void itemSnapshots(std::vector<ItemEntitySnapshot> &out) const { m_items.snapshots(out); }
+    /// Drain the bounded spawn/remove lifecycle stream (the WorldEvent
+    /// takeEvents pattern): appends into `out`, empties the stream. Partial
+    /// pickups are not events — snapshot counts carry them.
+    void takeItemEvents(std::vector<items::ItemEntityEvent> &out) { m_items.takeEvents(out); }
+    /// Render interpolation fraction for the item snapshots (accumulator /
+    /// fixed step, clamped 0..1).
+    double itemInterpolationAlpha() const { return m_items.interpolationAlpha(); }
     WorldSnapshot worldSnapshot() const;
 
     // --- Identity / accessors ----------------------------------------------------
@@ -411,6 +480,16 @@ public:
     /// Read-only inventory seam (issue #225): queries/inspection only —
     /// every mutation goes through the gameplay commands above.
     const items::Inventory &inventory() const { return m_inventory; }
+    /// Read-only dropped-item diagnostics seam (issue #226, the mobs()
+    /// pattern): population, dropped steps/events, id-sorted entities.
+    const items::ItemEntitySystem &itemEntities() const { return m_items; }
+    /// Dropped-item tunables — plain values, no Camera/RenderSettings (the
+    /// mobSettings() pattern). Tests tune them for bounded fixtures.
+    items::ItemEntitySettings &itemSettings() { return m_items.settings; }
+    const items::ItemEntitySettings &itemSettings() const { return m_items.settings; }
+    /// Monotonic entity-id high-water mark (issue #226): the #228 persistence
+    /// hook captures/restores it so ids are never reused across save/reload.
+    uint64_t itemIdHighWater() const { return m_items.idHighWater(); }
 
     // --- Persistence passthrough (issue #180 contracts; world-owned) -------------
 
@@ -434,6 +513,12 @@ private:
     // initialize/reload; the #228 restore hook will refill it from
     // inventory.state on the same lifecycle seams as player.state.
     items::Inventory m_inventory;
+    // Dropped item entities (issue #226): owns the monotonic id allocator,
+    // the fixed-step accumulator and the bounded event stream. Plain values
+    // + owning containers, no references — destruction-order independent.
+    // initialize/reload reset it (session boundary); #228 persists the
+    // id high-water mark and the population.
+    items::ItemEntitySystem m_items;
 
     bool m_playerFlight{false};
     bool m_mobsEnabled{true};

@@ -40,9 +40,13 @@ namespace sim
 // 60 Hz; both must survive the refactor unchanged (Epic #204 invariant). The
 // player rate is tied to the controller at compile time; the mob rate mirrors
 // entities::MobSettings::fixedStep's default and is verified at runtime by
-// test_core_contracts (MobSettings stores it as a tunable member).
+// test_core_contracts (MobSettings stores it as a tunable member). Dropped
+// items run at 60 Hz as well (Epic #223 invariant, issue #226): the rate
+// mirrors items::ItemEntitySettings::fixedStep's default and is verified at
+// runtime by test_gameplay (same tunable-member pattern).
 inline constexpr double kPlayerTickHz = 120.0;
 inline constexpr double kMobTickHz = 60.0;
+inline constexpr double kItemTickHz = 60.0;
 static_assert(physics::PlayerController::fixedStep == 1.0 / kPlayerTickHz,
               "player tick rate must match PlayerController::fixedStep");
 
