@@ -137,6 +137,8 @@ ft_vox_compile_shader(frag exposure_adapt.frag.glsl exposure_adapt.frag.spv)
 ft_vox_compile_shader(vert mob.vert.glsl mob.vert.spv)
 ft_vox_compile_shader(frag mob.frag.glsl mob.frag.spv)
 ft_vox_compile_shader(frag mob_shadow.frag.glsl mob_shadow.frag.spv)
+ft_vox_compile_shader(vert item.vert.glsl item.vert.spv)
+ft_vox_compile_shader(frag item.frag.glsl item.frag.spv)
 ft_vox_compile_shader(vert overlay.vert.glsl overlay.vert.spv)
 ft_vox_compile_shader(frag overlay.frag.glsl overlay.frag.spv)
 add_custom_target(ft_vox_shaders ALL DEPENDS ${FT_VOX_SPV_FILES} ft_vox_frame_ubo_glsl)
@@ -212,6 +214,7 @@ set(FT_VOX_RENDERER_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/MobTextures.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/MobRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/Renderer/ItemEntityRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/ResourcePackReader.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/TextureMips.cpp
     ${CMAKE_SOURCE_DIR}/src/Renderer/TextureManager.cpp
@@ -255,6 +258,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/Engine.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/ImGuiLayer.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUI.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/GameUIInventory.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIResourcePack.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/UiTheme.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/UiShell.cpp

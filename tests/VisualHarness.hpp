@@ -92,7 +92,10 @@ public:
 	/// target back as RGBA8 (BGRA readback is swizzled). The frame UBO uses
 	/// slot 0 — submitAndWait guarantees the GPU is idle between frames.
 	/// Also copies the HDR scene target and counts non-finite fp16 samples.
-	visual::RgbaImage renderFrame(float time, const std::vector<entities::MobRenderState> &mobs);
+	/// `items` (issue #229) feeds the derived dropped-item renderer; unassigned
+	/// local light is resolved from the bridge exactly like the mob path.
+	visual::RgbaImage renderFrame(float time, const std::vector<entities::MobRenderState> &mobs,
+								  const std::vector<ItemRenderState> &items = {});
 	/// Frame-in-flight slot (0/1) used by the next renderFrame calls. The
 	/// runtime alternates slots every frame; tests can drive the same
 	/// alternation to exercise per-slot state handling.

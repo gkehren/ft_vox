@@ -118,6 +118,14 @@ int main()
 			CHECK(engine->shadowListSizeForTests() > 0, "streaming step populated the shadow list before reload");
 			CHECK(engine->mobStateCountForTests() > 0, "mob presentation state present before reload");
 
+			// Dropped-item presentation (issue #229): spawn gameplay state and
+			// drive a real step so the item render states are genuinely
+			// populated before the barrier (the mobStates discipline).
+			engine->simForTests().grantItems(items::ItemId::Stone, 5);
+			engine->simForTests().dropFromSlot(0, 3, glm::dvec3(0.0, 1.0, 0.0));
+			engine->stepDerivedProjectionForTests(1.0 / 60.0);
+			CHECK(engine->itemStateCountForTests() > 0, "item presentation state present before reload");
+
 			// Reload with an OPEN persistent world: the close must succeed
 			// here (no stranded edits in this deterministic path) and the
 			// reload proceeds transiently. The save identity must survive
@@ -136,6 +144,7 @@ int main()
 			CHECK(engine->drawListSizeForTests() == 0, "reload drops the stale draw list");
 			CHECK(engine->shadowListSizeForTests() == 0, "reload drops the stale shadow list");
 			CHECK(engine->mobStateCountForTests() == 0, "reload drops stale mob presentation states");
+			CHECK(engine->itemStateCountForTests() == 0, "reload drops stale item presentation states");
 		} // ~Engine: world was closed by the reload - no player-state write.
 
 		// Session 2: reopen WITHOUT an explicit seed - the stored seed must

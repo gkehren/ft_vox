@@ -73,6 +73,7 @@ toggle described in §4.)
 | `sunset` | Low sun angle, god rays, fog/horizon gradient |
 | `midnight` | Moon/stars, night exposure |
 | `mob_lighting` | Entity vs terrain lighting consistency |
+| `item_entities` | Dropped-item mini-cubes (issue #229): per-instance block-atlas layers, derived local light, presentation spin on a flattened grass pad; an entity-free base frame proves the items contribute pixels |
 | `underwater` | Fully submerged camera |
 | `underwater_deep` | Distance-based extinction falloff and world-anchored caustics at noon (submerged camera looking horizontally across open water) |
 | `water_shallow_top` | Vertical view over the audit-lake shelf ladder (104/102/98): floor readable at the shallow end, absorption monotone with depth (water surface rework) |

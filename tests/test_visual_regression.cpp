@@ -261,6 +261,9 @@ struct SceneRun
 	bool worldEdited = false;
 	/// Free-form anchor a spot() lambda can leave for its fixture().
 	glm::vec3 anchor{0.0f};
+	/// Derived dropped-item presentation (issue #229): the item_entities
+	/// scene fills this; every other scene renders with no items.
+	std::vector<ItemRenderState> items{};
 };
 
 struct SceneSpec
@@ -679,6 +682,97 @@ std::vector<SceneSpec> buildSceneTable()
 		const double avgMobLuma = mobPxCount > 0 ? (mobLumaSum / double(mobPxCount)) : 0.0;
 		need(avgMobLuma > 25.0, errors,
 			 "sunlit mob pixels too dark: " + std::to_string(avgMobLuma) + " <= 25.0");
+		return errors;
+	};
+
+	// --- item_entities ------------------------------------------------------
+	// Dropped item mini-cubes on lit terrain (issue #229, Epic #223 Phase F):
+	// per-instance block-atlas layers, derived local light, presentation
+	// spin. An entity-free base frame proves the items contribute pixels.
+	scenes.push_back({});
+	SceneSpec &itemScene = scenes.back();
+	itemScene.name = "item_entities";
+	itemScene.seed = 4217;
+	itemScene.dayTime = 0.33f;
+	itemScene.time = 5.0f;
+	itemScene.areaRadiusChunks = 4;
+	itemScene.mobDeltaBase = true; // entity-free base (no mobs AND no items)
+	itemScene.spot = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		const glm::ivec2 col = findLandColumn(h.terrain(), 70, 100, 8);
+		const float ground = float(h.terrain().getTerrainSample(col.x, col.y).postErosionHeight);
+		run.anchor = glm::vec3(float(col.x), ground, float(col.y));
+		// Rough pre-build placement; the fixture flattens a pad and re-seats
+		// camera + items on it (terrain-independent, the aa_silhouette pattern).
+		h.camera().setPosition(glm::vec3(float(col.x - 4), ground + 3.f, float(col.y)));
+		h.camera().setYawPitch(0.f, -10.f);
+		h.shader().fogStart = 60.f;
+		h.shader().fogEnd = 135.f;
+	};
+	itemScene.fixture = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		RenderWorldBridge &chunks = h.chunks();
+		const int sx = int(run.anchor.x), base = int(run.anchor.y), sz = int(run.anchor.z);
+		// Flatten a grass pad: clear above the plane, fill hollows, cap grass.
+		// The cap must clear the base cell first: placeVoxel into a non-AIR
+		// cell is a no-op, so columns whose natural top == base would keep
+		// their natural texture (patchy ground).
+		for (int x = sx - 6; x <= sx + 12; ++x)
+			for (int z = sz - 6; z <= sz + 6; ++z)
+			{
+				const int ground = groundHeightAt(chunks, x, z);
+				for (int y = base + 1; y <= ground; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), AIR);
+				for (int y = ground + 1; y < base; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), DIRT);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), AIR);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), GRASS_TOP);
+			}
+		run.worldEdited = true;
+		// Eight block items in a 4x2 cluster on the pad, close to the camera
+		// so the 0.25-block cubes read clearly.
+		const TextureType blocks[8] = {STONE, COBBLESTONE, DIRT, OAK_LOG,
+									   SAND,  BRICKS,      GRAVEL, OAK_PLANKS};
+		for (int k = 0; k < 8; ++k)
+		{
+			ItemRenderState st;
+			st.position = glm::vec3(float(sx + 2 + (k % 4)) + 0.5f, float(base) + 1.0f,
+									float(sz - 1 + (k / 4) * 2) + 0.5f);
+			st.atlasLayer = static_cast<uint32_t>(blocks[k]);
+			st.rotation = 0.6f * float(k); // pinned presentation spin
+			st.bob = 0.0f;
+			st.localSkylight = -1.f; // harness resolves from the bridge
+			run.items.push_back(st);
+		}
+		// Close camera on the cluster: near cubes ~40 px, far row recedes
+		// (perspective + frustum culling exercised).
+		h.camera().setPosition(glm::vec3(float(sx) + 0.75f, float(base) + 1.1f, float(sz) + 0.5f));
+		h.camera().setYawPitch(0.f, -6.f);
+	};
+	itemScene.invariants = [](const RgbaImage &actual, const RgbaImage &entityFree) {
+		std::vector<std::string> errors;
+		need(entityFree.valid(), errors, "entity-free base frame missing");
+		if (!entityFree.valid())
+			return errors;
+		const ImageMetrics delta = visual::compareImages(actual, entityFree, 20);
+		need(delta.comparable() && delta.hotPixels > 150, errors,
+			 "items barely changed pixels (hot pixels " + std::to_string(delta.hotPixels) + ", want > 150)");
+		double itemLumaSum = 0.0;
+		size_t itemPxCount = 0;
+		for (size_t p = 0; p < actual.pixels.size(); p += 4)
+		{
+			const int dr = std::abs(int(actual.pixels[p]) - int(entityFree.pixels[p]));
+			const int dg = std::abs(int(actual.pixels[p + 1]) - int(entityFree.pixels[p + 1]));
+			const int db = std::abs(int(actual.pixels[p + 2]) - int(entityFree.pixels[p + 2]));
+			if (dr > 20 || dg > 20 || db > 20)
+			{
+				itemLumaSum += 0.2126 * actual.pixels[p] + 0.7152 * actual.pixels[p + 1] + 0.0722 * actual.pixels[p + 2];
+				++itemPxCount;
+			}
+		}
+		const double avgItemLuma = itemPxCount > 0 ? (itemLumaSum / double(itemPxCount)) : 0.0;
+		need(avgItemLuma > 20.0, errors,
+			 "sunlit item pixels too dark: " + std::to_string(avgItemLuma) + " <= 20.0");
 		return errors;
 	};
 
@@ -2850,10 +2944,10 @@ int main(int argc, char **argv)
 				if (autoScene)
 				{
 					harness.post().autoExposureEnabled = false;
-					harness.renderFrame(scene.time, run.mobs); // discarded: re-arm the rising edge
+					harness.renderFrame(scene.time, run.mobs, run.items); // discarded: re-arm the rising edge
 					harness.post().autoExposureEnabled = true;
 				}
-				return harness.renderFrame(scene.time, run.mobs);
+				return harness.renderFrame(scene.time, run.mobs, run.items);
 			};
 			const RgbaImage first = renderComparedFrame();
 			const RgbaImage actual = renderComparedFrame();

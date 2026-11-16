@@ -62,7 +62,10 @@ bridge publication path (§10, "Phase D interaction contract"). Phase E
 (issue #228) **persisted the loop**: `inventory.state` + `items.state`
 (the exact `WorldSave` discipline), full gameplay capture/restore on the
 `player.state` lifecycle seams, and entity-id allocator durability
-(§10, "Phase E gameplay-persistence contract").
+(§10, "Phase E gameplay-persistence contract"). Phase F (issue #229) added the
+**derived presentation**: hotbar HUD, inventory panel and the
+`ItemEntityRenderer` (snapshot-driven, command-only mutations, epoch-barrier
+reset; §10, "Phase F gameplay-presentation contract").
 
 Related documents:
 
@@ -426,6 +429,12 @@ net captures gameplay state. Registered as CTest `GameplayLoop`.
 format-layer coverage: inventory.state / items.state round trips,
 exact-size checks, the full corruption taxonomy (magic/version/payload/
 id-ordering/allocator/cap) and atomic-write hygiene.
+`tests/test_ui_shell.cpp` → CTest `UiShell` gained the inventory presentation
+logic (issue #229): panel/hotbar slot layout math, drag-cursor display
+(whole/half) and the click→command planning matrix (move/swap/split/cancel).
+`tests/test_engine_reload.cpp` → CTest `EngineReload` pins the item
+presentation epoch reset; `tests/test_visual_regression.cpp` gained the
+`item_entities` offscreen scene (committed reference).
 
 ---
 
@@ -987,6 +996,51 @@ unchanged (missing file = fresh, quiet; no migration machinery).
 - **Out of scope**: UI (#229), runner grammar / multi-process round-trips
   (#230 — this phase proves round-trips at the facade level), no
   `world.meta`/`player.state` version bump.
+
+### The Epic #223 Phase F gameplay-presentation contract (issue #229)
+
+Phase F added the **derived presentation** of the loop: hotbar HUD, inventory
+panel and dropped-item rendering. Strict boundary (epic §5): these surfaces
+consume bounded snapshots and issue explicit commands through callbacks —
+**no gameplay rule in `GameUI`, `Engine` or the renderer**.
+
+- **`GameUIFrame` extensions**: a `sim::InventorySnapshot` value (filled by
+  `Engine::drawUi`), `std::function` command callbacks (`selectHotbarSlot`,
+  `moveStack`, `swapStacks`, `splitStack`, `dropFromSlot`), the host-owned
+  inventory-panel flag (`E`, from #227) and an `atlasVersion` counter for icon
+  revalidation. Display names resolve through the registry on the UI side.
+- **Hotbar HUD** (`GameUIInventory.cpp`): always visible in the gameplay view
+  (benchmarks keep the stock UI closed); 9 slots, selection highlight, stack
+  counts, icons = registry `ItemId → placeableBlock → block-atlas layer` via
+  per-layer 2D views registered with ImGui (no new texture assets). Read-only.
+- **Inventory panel** (`E`): 27 main + 9 hotbar grid; click-to-move/swap and
+  right-click-to-split **through command callbacks only**. The drag cursor is
+  UI-local presentation (a VIEW of the source slot via `InventoryUi.hpp`),
+  discarded on close — authoritative moves happen only through commands, so
+  closing mid-drag never duplicates items. Pure layout/cursor/click logic is
+  headless-testable (`test_ui_shell`).
+- **`ItemEntityRenderer`** (`src/Renderer/`, derived): fed by the host from the
+  id-sorted `sim::ItemEntitySnapshot`s after the sim advance (the mob snapshot
+  pattern): interpolated position, registry atlas layer, presentation spin/bob
+  from the authoritative age, bridge-sampled local light. One shared unit cube,
+  ONE instanced indexed draw for the visible population, frustum-culled,
+  bounded by the population cap; receives directional shadows, **casts none**
+  (no shadow-pass pipeline). Integrated in the opaque pass after mobs (shares
+  the Mobs GPU profiler scope; the pass layout stays stable). Samples the SAME
+  set-1 descriptors as terrain, so pack reloads / shadow resizes rebind it.
+- **Epoch barrier**: `Engine::resetWorldProjection` drops the item snapshots +
+  render states and pushes the empty set to the renderer (the mobStates
+  discipline); the renderer holds no authoritative state and survives reload
+  by re-reading snapshots. `Engine::tickItems` also drains the item lifecycle
+  stream at frame cadence (v1 discards drained events — presentation is
+  snapshot-driven — keeping `droppedEventCount` at 0 in real play).
+- **Visual regression**: one new offscreen scene `item_entities` (flattened
+  grass pad + 8 block-item mini-cubes, entity-free base frame); reference
+  generated explicitly via `--update-references --scene item_entities` and
+  committed. Existing scenes/goldens unchanged (the harness draws no ImGui;
+  reference scenes contain no items).
+- **Out of scope**: gameplay rules (already in the sim), command/snapshot
+  semantics, persistence (#228), runner grammar (#230), new item textures.
 
 ### The Phase E graphical host contract (issue #209)
 

@@ -75,6 +75,7 @@ void GameUI::shutdown()
 	if (m_vk && m_vk->getDevice() != VK_NULL_HANDLE)
 	{
 		m_vk->waitIdle();
+		invalidateItemIcons();
 		if (m_mapDesc != VK_NULL_HANDLE)
 		{
 			ImGui_ImplVulkan_RemoveTexture(m_mapDesc);
@@ -115,6 +116,9 @@ void GameUI::onImGuiVulkanBackendRecreate()
 	// The old descriptor belonged to the backend pool destroyed during reinit.
 	// The sampled image and sampler are application-owned and remain valid.
 	m_mapDesc = VK_NULL_HANDLE;
+	// Item icon descriptors (issue #229) lived in the same destroyed pool;
+	// the application-owned layer views stay valid and re-register lazily.
+	m_iconDescs.fill(VK_NULL_HANDLE);
 	if (m_mapSampler != VK_NULL_HANDLE && m_mapImage.image != VK_NULL_HANDLE)
 		m_mapDesc = ImGui_ImplVulkan_AddTexture(
 			m_mapSampler, m_mapImage.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -287,6 +291,20 @@ void GameUI::draw(GameUIFrame &frame)
 
 	if (m_debug.panels.overlayHints && frame.mouseCaptured && *frame.mouseCaptured)
 		drawOverlayHints(frame);
+
+	// Gameplay surfaces (issue #229): the hotbar HUD is always visible in
+	// the gameplay view (benchmarks keep the stock UI closed); the inventory
+	// panel follows the host-owned E flag. Closing the panel discards the
+	// UI-local drag cursor — authoritative state is untouched.
+	const bool benchmarkActive = frame.benchmark && frame.benchmark->isActive();
+	if (!benchmarkActive)
+	{
+		drawHotbarHud(frame);
+		if (frame.inventoryPanelOpen && *frame.inventoryPanelOpen)
+			drawInventoryPanel(frame);
+		else
+			m_drag = {};
+	}
 
 	// File dialog can outlive the Graphics panel; always process while open.
 	displayResourcePackFileDialog(m_debug.resourcePackUi, m_debug.panels.rendering);
@@ -914,7 +932,11 @@ void GameUI::drawOverlayHints(GameUIFrame &frame)
 {
 	const ImGuiIO &io = ImGui::GetIO();
 	const float scale = ui::effectiveScale(frame.uiScale);
-	ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - ui::scaled(36.f, scale)),
+	// Sit ABOVE the hotbar HUD (issue #229 review): the bar's top edge is
+	// kHotbarTopOffset from the bottom; add a small gap so the hint line never
+	// overlaps the slots.
+	const float hintsBottom = ui::scaled(inventoryui::kHotbarTopOffset + 8.f, scale);
+	ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - hintsBottom),
 							ImGuiCond_Always, ImVec2(0.5f, 1.f));
 	ImGui::SetNextWindowBgAlpha(0.35f);
 	ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |

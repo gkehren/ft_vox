@@ -9,6 +9,7 @@
 #include "Vulkan/MeshArena.hpp"
 #include "Renderer/TextureManager.hpp"
 #include "Renderer/MobRenderer.hpp"
+#include "Renderer/ItemEntityRenderer.hpp"
 #include "Renderer/PostStack.hpp"
 #include "Renderer/OverlayRenderer.hpp"
 #include "Renderer/ShadowCascades.hpp"
@@ -85,6 +86,11 @@ public:
 	void setMobs(const std::vector<entities::MobRenderState> &states) { m_mobStates = states; }
     size_t visibleMobs() const { return m_mobs.visibleCount(); }
     MobTextureReport mobTextureReport() const { return m_mobs.textureReport(); }
+	/// Derived dropped-item presentation (issue #229, the setMobs pattern):
+	/// host-filled from the sim snapshots + bridge light; the renderer holds
+	/// no authoritative state and is dropped by the epoch barrier on reload.
+	void setItemEntities(const std::vector<ItemRenderState> &states) { m_itemStates = states; }
+	size_t visibleItems() const { return m_items.visibleCount(); }
 	PostProcessSettings &postSettings() { return m_postSettings; }
 	/// Frame delta driving the auto-exposure adaptation (issue #140). The
 	/// engine sets it before recordFrame; tooling sets it before each
@@ -169,6 +175,8 @@ private:
 	TextureManager m_textures;
     MobRenderer m_mobs;
     std::vector<entities::MobRenderState> m_mobStates;
+	ItemEntityRenderer m_items;
+	std::vector<ItemRenderState> m_itemStates;
 	PostStack m_post;
 	OverlayRenderer m_overlays;
 	PostProcessSettings m_postSettings{};

@@ -73,6 +73,11 @@ public:
 	size_t drawListSizeForTests() const { return drawList.size(); }
 	size_t shadowListSizeForTests() const { return shadowList.size(); }
 	size_t mobStateCountForTests() const { return mobStates.size(); }
+	/// Derived dropped-item presentation count (issue #229 epoch test).
+	size_t itemStateCountForTests() const { return m_itemStates.size(); }
+	/// Test-only simulation access (the *ForTests hook pattern): lets the
+	/// reload test spawn gameplay state before the epoch barrier check.
+	sim::GameSimulation &simForTests() { return *sim; }
 	/// Test-only mutator (like setSavesRootForTests / the WorldPersistence
 	/// *ForTests hooks): drive one real derived-projection frame step
 	/// (streaming + mobs) so the per-frame containers hold genuine data before
@@ -242,6 +247,18 @@ private:
 	/// bridge's entity light samples). The authoritative mob simulation lives
 	/// in sim::GameSimulation (issue #208).
 	std::vector<entities::MobRenderState> mobStates;
+	/// Derived per-frame dropped-item presentation (issue #229, the mobStates
+	/// pattern): id-sorted sim snapshots + interpolated render states fed to
+	/// WorldRenderer::setItemEntities. Dropped by the epoch barrier on world
+	/// transitions; the authoritative entities live in sim::GameSimulation.
+	std::vector<sim::ItemEntitySnapshot> m_itemSnapshots;
+	std::vector<ItemRenderState> m_itemStates;
+	/// Frame-cadence drain scratch for the item lifecycle stream (reused
+	/// buffer; v1 discards drained events — presentation is snapshot-driven).
+	std::vector<items::ItemEntityEvent> m_itemEventsScratch;
+	/// Bumped on every block-atlas (re)load so the UI icon descriptors
+	/// revalidate against the live atlas (issue #229).
+	uint64_t m_atlasVersion{1};
 	bool paused{false};
     bool m_inspectionView{false};
     float m_inspectionSeconds{0.f};

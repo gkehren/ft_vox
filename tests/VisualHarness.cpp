@@ -229,7 +229,8 @@ void VisualHarness::remeshEditedChunks()
 	}
 }
 
-visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entities::MobRenderState> &mobs)
+visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entities::MobRenderState> &mobs,
+											 const std::vector<ItemRenderState> &items)
 {
 	if (!m_rendererReady)
 		return {};
@@ -248,6 +249,21 @@ visual::RgbaImage VisualHarness::renderFrame(float time, const std::vector<entit
 		}
 	}
 	m_renderer.setMobs(resolvedMobs);
+	// Dropped items (issue #229): the same derived-light resolution as mobs.
+	std::vector<ItemRenderState> resolvedItems = items;
+	if (m_chunkManager)
+	{
+		for (auto &item : resolvedItems)
+		{
+			if (item.localSkylight < 0.0f)
+			{
+				const auto light = m_chunkManager->sampleSmoothedLight(item.position + glm::vec3(0.0f, 0.125f, 0.0f));
+				item.localSkylight = light.skylight;
+				item.localBlockRgb = light.blockRgb;
+			}
+		}
+	}
+	m_renderer.setItemEntities(resolvedItems);
 	// Single source of truth: the same far plane Engine / RenderWorldBridge use,
 	// so golden frames are projected exactly like the shipped game.
 	const float farPlane = computeCameraFarPlane(m_renderSettings.maxRenderDistance);

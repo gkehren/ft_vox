@@ -435,10 +435,14 @@ add_test(NAME InputRouting COMMAND test_input_routing)
 # UI shell pure logic (issues #183/#184): scale normalization, status-strip
 # degradation, shortcut metadata consistency with InputRouting, and the
 # player/status-overlay UI model (motion labels, chunk math, block palette,
-# overlay density)
+# overlay density). Issue #229 adds the inventory presentation logic
+# (InventoryUi.hpp layout/cursor/click planning; the Items stack-math TUs
+# provide splitHalf/maxStackOf).
 # ---------------------------------------------------------------------------
 add_executable(test_ui_shell
     test_ui_shell.cpp
+    ${CMAKE_SOURCE_DIR}/src/Items/ItemStack.cpp
+    ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
 )
 
 target_include_directories(test_ui_shell PRIVATE
