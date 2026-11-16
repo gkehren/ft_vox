@@ -211,6 +211,31 @@ under the artifacts dir: `expected.png` holds the **previous** golden,
 `diff.png` amplifies the shift, and `metrics.txt` quantifies it — the PR
 reviewer sees exactly what moved without re-running anything.
 
+### Reference refresh log
+
+- **`cave_emissive` — issue #213 (driver refresh).** The golden committed in
+  `99c05d5` (2026-09-08, issue #141, blob `4b80cd0a`) was captured on an older
+  NVIDIA driver; on the canonical RTX 4070 Ti at driver `32.0.16.2114` /
+  Vulkan `1.4.357` the scene renders a stable bloom/emissive shift vs that
+  golden (blob `86b4dd9e` after refresh). This is a **driver-vs-golden FP
+  difference, not a code regression**, evidenced by:
+  - the scene's **self-determinism check passes** (two renders bit-identical)
+    and its **emissive-peak invariant passes**; the render is validation-clean;
+  - the geometry is identical — the amplified `diff.png` follows the
+    **bloom-lit wall/ceiling surfaces and the emissive magma cores**, while
+    dark unlit areas match exactly (no structural/edge difference);
+  - the mismatch metrics (`mean_abs=0.0419435`, `rms=0.0705545`,
+    `max_abs=0.690196`, hot-pixel ratio `0.800885`) were **stable across every
+    Epic #204 phase (A–G) and the #219 streaming optimization** — a code
+    regression would have moved them at the offending change.
+  Resolution: option 1 of #213 — explicit `--update-references --scene
+  cave_emissive` on the canonical GPU. The **strict gate** (§7) was run before
+  (only `cave_emissive` failed; all other scenes/checks passed strict) and
+  after (all 21 scenes + standalone checks pass strict; `ctest -R
+  VisualRegression` green). **Only `cave_emissive.png` changed**; every other
+  reference is untouched. No renderer/shader/code change accompanied the
+  refresh.
+
 ## 7. Cross-vendor and CI policy
 
 Committed references come from the canonical GPU. Other GPUs or drivers may
