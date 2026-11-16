@@ -66,6 +66,17 @@ add_executable(test_game_simulation test_game_simulation.cpp)
 target_link_libraries(test_game_simulation PRIVATE ft_vox_core)
 add_test(NAME GameSimulation COMMAND test_game_simulation)
 
+# ---------------------------------------------------------------------------
+# CPU-only item domain acceptance (issue #224, Epic #223 Phase A). Links ONLY
+# ft_vox_core: registry invariants (unique ids/names, append-only ordinals,
+# placeable round-trips, drop-table totality, name parsing), pure stack math
+# edges and the deterministic 36-slot inventory operation matrix — no GPU,
+# window or simulation integration (nothing consumes the module yet).
+# ---------------------------------------------------------------------------
+add_executable(test_items test_items.cpp)
+target_link_libraries(test_items PRIVATE ft_vox_core)
+add_test(NAME Items COMMAND test_items)
+
 # Forbidden-include-chain guard (issue #205 acceptance criterion #3): the
 # CPU-only public headers must never transitively include Renderer/, Vulkan/,
 # Camera/, SDL3, ImGui, or the render-coupled / not-yet-migrated Chunk headers.
@@ -1379,6 +1390,7 @@ endif()
 # ---------------------------------------------------------------------------
 foreach(_cpu_test IN ITEMS
     test_physics test_core_contracts test_voxel_world test_game_simulation
+    test_items
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs

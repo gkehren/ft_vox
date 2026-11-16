@@ -239,6 +239,16 @@ set(FT_VOX_WORLD_SOURCES
     ${CMAKE_SOURCE_DIR}/src/World/VoxelWorld.cpp
 )
 
+# Item domain contracts (issue #224, Epic #223 Phase A): CPU-only module,
+# part of ft_vox_core. Expanded into BOTH FT_VOX_SOURCES and
+# FT_VOX_CORE_SOURCES (identical spellings) so the game subtracts these units
+# below and links them from the core library instead of dual-compiling them.
+set(FT_VOX_ITEM_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/Items/ItemStack.cpp
+    ${CMAKE_SOURCE_DIR}/src/Items/Inventory.cpp
+)
+
 set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/main.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Engine.cpp
@@ -275,6 +285,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${FT_VOX_WORLD_SOURCES}
+    ${FT_VOX_ITEM_SOURCES}
     ${FT_VOX_RENDERER_SOURCES}
     ${FT_VOX_IMGUI_SOURCES}
     ${FT_VOX_VULKAN_SOURCES}
@@ -283,7 +294,8 @@ set(FT_VOX_SOURCES
 # ---------------------------------------------------------------------------
 # ft_vox_core — CPU-only simulation/persistence static library (issue #205,
 # Epic #204 Phase A; issue #206 Phase B adds the authoritative world; issue
-# #208 Phase D adds the GameSimulation facade owning player + mobs + world).
+# #208 Phase D adds the GameSimulation facade owning player + mobs + world;
+# issue #224 / Epic #223 Phase A adds the item domain contracts).
 # Render-independent: links ONLY glm + FastNoise2 + Threads, never SDL3 /
 # Vulkan / ImGui. Phase A extracted the six already-independent translation
 # units; Phase B adds the authoritative voxel world (WorldChunk + VoxelWorld)
@@ -302,6 +314,7 @@ set(FT_VOX_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Entities/MobModel.cpp
     ${CMAKE_SOURCE_DIR}/src/Sim/GameSimulation.cpp
     ${FT_VOX_WORLD_SOURCES}
+    ${FT_VOX_ITEM_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkBorders.cpp
 )
