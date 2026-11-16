@@ -47,16 +47,20 @@ TransferResult transferStack(ItemStack source, ItemStack destination, uint16_t c
 MergeResult mergeStacks(ItemStack destination, ItemStack source)
 {
     // A merge is a whole-source transfer; reuse the one capacity arithmetic.
+    // NOTE the deliberate argument-order flip: mergeStacks is destination-
+    // first ("merge into"), transferStack is source-first ("transfer from").
     const TransferResult transferred = transferStack(source, destination, source.count);
     return {transferred.result, transferred.destination, transferred.source};
 }
 
 SplitResult splitStack(ItemStack stack, uint16_t count)
 {
+    // Error-path convention (shared with transferStack): nothing is taken and
+    // the input value is returned UNCHANGED as the remainder.
     if (stack.isEmpty())
-        return {ItemResult::EmptyStack, {}, {}};
+        return {ItemResult::EmptyStack, {}, stack};
     if (maxStackOf(stack.item) == 0)
-        return {ItemResult::InvalidItem, {}, {}};
+        return {ItemResult::InvalidItem, {}, stack};
     const uint16_t taken = count < stack.count ? count : stack.count;
     return {ItemResult::Ok,
             makeStack(stack.item, taken),
@@ -66,7 +70,7 @@ SplitResult splitStack(ItemStack stack, uint16_t count)
 SplitResult splitHalf(ItemStack stack)
 {
     if (stack.isEmpty())
-        return {ItemResult::EmptyStack, {}, {}};
+        return {ItemResult::EmptyStack, {}, stack};
     // Odd counts: the TAKEN half is the larger (ceil), the source keeps floor.
     const uint16_t half = static_cast<uint16_t>((static_cast<uint32_t>(stack.count) + 1u) / 2u);
     return splitStack(stack, half);

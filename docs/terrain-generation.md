@@ -198,12 +198,20 @@ Small vegetation uses an explicit `BlockShape` (`Cube`, `Cross`, `Flat`) in
 1. Append the value immediately before `TextureType::COUNT`.
 2. Append its `textureTypeString` display name.
 3. Append the matching `kBlockLayers` row in the same ordinal position.
-4. Copy a compliant PNG into `ressources/textures/` and configure a guaranteed
+4. Append the item-domain rows in `src/Items/` (issue #224): the `ItemId`
+   ordinal (bump `kItemCount`), its `ItemDefinition` row and the explicit
+   block→drop entry — the alignment `static_assert`s fail closed on a missing
+   or misaligned row. A new **per-face variant** (never stored as a voxel)
+   needs no item of its own, but must update all three pinned mappings
+   together: `canonicalBlock` (`Items/ItemRegistry.cpp`), the render face
+   remap (`blockTopFace`/`blockBottomFace`, `Renderer/MinecraftTextures.hpp`)
+   and the `kFaceVariants` pin table in `tests/test_items.cpp`.
+5. Copy a compliant PNG into `ressources/textures/` and configure a guaranteed
    bundled fallback.
-5. Update transparency, face remapping, foliage/ice/host, collision, and
+6. Update transparency, face remapping, foliage/ice/host, collision, and
    emissive policy helpers as applicable.
-6. Update generation and the bundled-resource audit.
-7. Build the runtime and verify the reported texture-array layer count.
+7. Update generation and the bundled-resource audit.
+8. Build the runtime and verify the reported texture-array layer count.
 
 ## Calibration and validation tools
 

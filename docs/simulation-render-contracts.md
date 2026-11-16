@@ -447,8 +447,14 @@ consumes it yet (simulation integration #225, drops/pickup #226, persistence
 Dependency rule: `ItemTypes.hpp` is std-only; the rest of the module includes
 `utils.hpp` (the `TextureType` catalog) + std. The render-side face remapping
 (`Renderer/MinecraftTextures.hpp`) is deliberately **not** included — the
-registry owns its own variant→canonical mapping, pinned row by row by
-`test_items`. The headers/TUs are guarded roots of `CoreIncludeGuard` (§6).
+registry owns its own variant→canonical mapping (`canonicalBlock`), pinned
+row by row by `test_items` (`kFaceVariants`). The two mappings cannot be
+cross-checked automatically (dependency rule), so a new per-face atlas
+variant must update **all three together**: `canonicalBlock`, the render
+`blockTopFace`/`blockBottomFace` remap, and the `kFaceVariants` pin table
+(the `AGENTS.md` item-registry convention and the terrain-generation
+block-addition procedure name them). The headers/TUs are guarded roots of
+`CoreIncludeGuard` (§6).
 
 ---
 

@@ -25,6 +25,7 @@
 
 #include <Items/ItemRegistry.hpp>
 
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdlib>
@@ -418,6 +419,22 @@ std::string upperUnderscore(std::string_view token)
     return out;
 }
 
+// One-time normalized-name table (thread-safe magic static): parseItemId
+// compares against precomputed UPPER_UNDERSCORE tokens instead of
+// re-normalizing every catalog name on each call (PR #231 review: keep the
+// grammar seam near-allocation-free before #230 wires it into script
+// parsing). Per call this leaves only the input copy + normalized token.
+const std::array<std::string, kItemCount> &normalizedItemNames()
+{
+    static const std::array<std::string, kItemCount> table = [] {
+        std::array<std::string, kItemCount> names{};
+        for (std::size_t i = 0; i < kItemCount; ++i)
+            names[i] = upperUnderscore(kDefinitions[i].name);
+        return names;
+    }();
+    return table;
+}
+
 } // namespace
 
 // --- Registry access -------------------------------------------------------------
@@ -504,10 +521,11 @@ std::optional<ItemId> parseItemId(std::string_view token)
     }
 
     const std::string normalized = upperUnderscore(token);
-    for (const ItemDefinition &def : kDefinitions)
+    const std::array<std::string, kItemCount> &names = normalizedItemNames();
+    for (std::size_t i = 0; i < names.size(); ++i)
     {
-        if (normalized == upperUnderscore(def.name))
-            return def.id;
+        if (normalized == names[i])
+            return kDefinitions[i].id;
     }
     return std::nullopt;
 }

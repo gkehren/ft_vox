@@ -392,7 +392,10 @@ void testSplitEdges()
     check(zero.result == ItemResult::Ok && zero.taken == kEmpty && zero.remainder == S(ItemId::Stone, 5),
           "splitStack count 0 is an Ok no-op");
 
-    check(items::splitStack(kEmpty, 1).result == ItemResult::EmptyStack, "split of empty is EmptyStack");
+    const items::SplitResult emptySplit = items::splitStack(kEmpty, 1);
+    check(emptySplit.result == ItemResult::EmptyStack && emptySplit.taken == kEmpty &&
+              emptySplit.remainder == kEmpty,
+          "split of empty is EmptyStack (input echoed unchanged)");
     check(items::splitStack(S(ItemId::Stone, 1), 1).remainder == kEmpty,
           "splitting the last item canonicalizes the remainder");
 
@@ -459,8 +462,10 @@ void testTransferEdges()
           "transfer into an unknown-item stack is InvalidItem");
     check(items::mergeStacks(kEmpty, invalid).result == ItemResult::InvalidItem,
           "merge of an unknown item is InvalidItem");
-    check(items::splitStack(invalid, 1).result == ItemResult::InvalidItem,
-          "split of an unknown item is InvalidItem");
+    const items::SplitResult invalidSplit = items::splitStack(invalid, 1);
+    check(invalidSplit.result == ItemResult::InvalidItem && invalidSplit.taken == kEmpty &&
+              invalidSplit.remainder == invalid,
+          "split of an unknown item is InvalidItem (error-path convention: input echoed unchanged)");
 }
 
 // --- Inventory -------------------------------------------------------------------
@@ -475,6 +480,9 @@ void testFreshInventory()
     check(inv.selectedSlot() == 0, "fresh inventory selects hotbar slot 0");
     check(inv.selectedStack() == kEmpty, "fresh selected stack is empty");
     check(inv.totalCount(ItemId::Stone) == 0, "fresh inventory holds nothing");
+    check(inv.stack(-1) == kEmpty && inv.stack(items::kInventorySize) == kEmpty &&
+              inv.stack(999) == kEmpty,
+          "out-of-range stack() reads answer canonical empty in every configuration");
 }
 
 void testAddHotbarFirst()

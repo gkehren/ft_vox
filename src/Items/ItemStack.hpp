@@ -17,8 +17,17 @@
 //     than the source holds moves all available items;
 //   * capacity-limited moves are Partial (remainder returned) or Full
 //     (nothing moved);
+//   * ERROR-PATH VALUES: on EmptyStack / InvalidItem / ItemMismatch / Full
+//     the input values are returned UNCHANGED (nothing taken/moved; a split
+//     answers with an empty `taken` and the untouched source as `remainder`).
+//     Rejected invalid inputs are echoed verbatim — the canonical-empty
+//     guarantee applies to well-formed inputs and produced/stored state;
 //   * odd half-split: the TAKEN half is the larger — ceil(count / 2) leaves
-//     the source, floor(count / 2) stays (a 5-stack splits 3 + 2).
+//     the source, floor(count / 2) stays (a 5-stack splits 3 + 2);
+//   * ARGUMENT ORDER: mergeStacks(DESTINATION, source) reads "merge into",
+//     transferStack(SOURCE, destination, count) reads "transfer from". The
+//     asymmetry is deliberate (each reads naturally at its call sites) and
+//     pinned by tests — double-check the order when composing them (#226).
 // =============================================================================
 
 #include <Items/ItemTypes.hpp>
@@ -41,11 +50,14 @@ MergeResult mergeStacks(ItemStack destination, ItemStack source);
 
 /// Take up to `count` items out of `stack` (clamped to the available count —
 /// requesting more than holds is Ok and takes everything). `taken` is the
-/// removed part, `remainder` what stays. count 0 is an Ok no-op.
+/// removed part, `remainder` what stays. count 0 is an Ok no-op. On
+/// EmptyStack / InvalidItem nothing is taken: `taken` is empty and
+/// `remainder` echoes the input unchanged.
 SplitResult splitStack(ItemStack stack, uint16_t count);
 
 /// Split `stack` in half: taken = ceil(count / 2) (the LARGER half on odd
-/// counts), remainder = floor(count / 2). Empty source -> EmptyStack.
+/// counts), remainder = floor(count / 2). Empty source -> EmptyStack (input
+/// echoed unchanged).
 SplitResult splitHalf(ItemStack stack);
 
 /// Move up to `count` items from `source` into `destination` (merge

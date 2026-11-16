@@ -102,8 +102,10 @@ ItemStack dropForBlock(TextureType block);
 /// hyphens normalize to underscores ("Grass Block" / "grass-block" /
 /// "GRASS_BLOCK" all match), or a numeric registry ordinal in [1, kItemCount].
 /// std::nullopt for unknown tokens, the None sentinel ("0" / "none") and
-/// out-of-range ordinals. Pure lookup — no allocation beyond the normalized
-/// token, no simulation state.
+/// out-of-range ordinals. Pure lookup, no simulation state: the catalog's
+/// normalized names are precomputed ONCE (magic static), so a call allocates
+/// only the input copy + normalized token — near-allocation-free for the
+/// #230 script-parsing seam.
 std::optional<ItemId> parseItemId(std::string_view token);
 
 } // namespace items

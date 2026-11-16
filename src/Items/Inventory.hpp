@@ -40,8 +40,10 @@ class Inventory
 
     const std::array<ItemStack, kInventorySize> &slots() const { return m_slots; }
 
-    /// Slot contents (bounds-checked in debug; use slots() for iteration).
-    const ItemStack &stack(int slot) const;
+    /// Slot contents as a plain value. Bounds-checked in EVERY configuration:
+    /// an out-of-range slot answers the canonical empty stack (mutations
+    /// answer InvalidSlot). Use slots() for iteration.
+    ItemStack stack(int slot) const;
 
     int selectedSlot() const { return m_selectedSlot; }
     ItemStack selectedStack() const { return m_slots[static_cast<std::size_t>(m_selectedSlot)]; }
@@ -55,8 +57,10 @@ class Inventory
     /// Add a stack: merge into same-item slots hotbar-first (0..8, then
     /// 9..35), then fill empty slots in the same order. Ok = everything
     /// added; Partial = remainder returned; Full = nothing added (remainder
-    /// == input); InvalidItem = unknown item (nothing added). An empty input
-    /// is an Ok no-op. Input counts above maxStack are distributed.
+    /// == input); InvalidItem = unknown item (nothing added; the invalid
+    /// input is echoed verbatim in the remainder — it never enters storage).
+    /// An empty input is an Ok no-op. Input counts above maxStack are
+    /// distributed.
     AddResult addStack(ItemStack stack);
 
     /// Take up to `count` items from `slot` (clamped to what holds; taking

@@ -8,16 +8,16 @@
 #include <Items/ItemStack.hpp>
 
 #include <algorithm>
-#include <cassert>
 #include <cstddef>
 #include <utility>
 
 namespace items
 {
 
-const ItemStack &Inventory::stack(int slot) const
+ItemStack Inventory::stack(int slot) const
 {
-    assert(slot >= 0 && slot < kInventorySize);
+    if (slot < 0 || slot >= kInventorySize)
+        return {};
     return m_slots[static_cast<std::size_t>(slot)];
 }
 

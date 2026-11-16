@@ -165,7 +165,11 @@ cmake --build build-cpu -j && ctest --test-dir build-cpu --output-on-failure
 - **Item registry**: `items::ItemId` ordinals are append-only and save/wire
   stable (saves reference `ItemId`, never `TextureType`); keep the
   `ItemDefinition` table, the block→item/block→drop tables and their
-  `static_assert`s aligned when adding blocks (issue #224, epic #223)
+  `static_assert`s aligned when adding blocks (issue #224, epic #223).
+  A new per-face atlas variant must update **all three pinned mappings
+  together**: `canonicalBlock` (`Items/ItemRegistry.cpp`), the render face
+  remap (`blockTopFace`/`blockBottomFace`, `Renderer/MinecraftTextures.hpp`),
+  and the `kFaceVariants` pin table in `tests/test_items.cpp`
 - **Resource-pack blocks**: bundled terrain textures live in
   `ressources/textures/` and may be sourced from the compliant
   `docs/default-resource-pack/assets/minecraft/textures/block/` fixture

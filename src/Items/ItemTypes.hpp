@@ -201,6 +201,10 @@ enum class ItemResult : uint8_t
 /// normalizes a stack whose count reaches 0 to that exact value, so equal
 /// gameplay histories always produce byte-equal state (deterministic digests,
 /// save round-trips and future replication compare values, not histories).
+/// The guarantee applies to WELL-FORMED inputs and to all produced/stored
+/// state: a rejected INVALID input (unknown item id with count > 0) is
+/// echoed verbatim in the result remainder — it is the caller's error and
+/// never enters storage.
 /// Well-formed stored stacks satisfy 1 <= count <= maxStackOf(item); counts
 /// above maxStack are legal only as transient operation inputs (e.g. a bulk
 /// addStack distributes them across slots).
