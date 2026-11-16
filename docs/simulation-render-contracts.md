@@ -46,9 +46,11 @@ the visual golden comparisons hold (§10,
 Epic #223 (persistent gameplay loop) builds on these contracts. Its Phase A
 (issue #224) **extended the CPU core with the item domain** — `src/Items/`
 (`ItemId` / `ItemStack` / `ItemRegistry` / `Inventory` + pure stack math),
-again contracts-only with no behavior change: nothing consumes the module
-yet, exactly like Phase A of Epic #204 created the boundary before migrating
-behavior (§5, "Item domain").
+contracts-only with no behavior change, exactly like Phase A of Epic #204
+created the boundary before migrating behavior (§5, "Item domain"). Phase B
+(issue #225) **integrated it into the simulation**: `GameSimulation` owns the
+inventory and exposes the first gameplay commands + `InventorySnapshot`,
+still with no host behavior change (§10, "Phase B inventory contract").
 
 Related documents:
 
@@ -380,6 +382,17 @@ edges (overflow at maxStack, partial merge, odd split, empty stacks,
 hotbar-first ordering, selection bounds, the move/swap/split result matrix,
 4000-step deterministic repeated sequences). Registered as CTest `Items`.
 
+`tests/test_gameplay.cpp` → `test_gameplay` (Epic #223 Phase B, issue #225)
+also links **only** `ft_vox_core` and proves the facade integration without a
+graphics runtime: the command result matrix (invalid slots, empty stacks,
+full inventory, mismatches, partial moves/splits), the logged `grantItems`
+admin seam with partial semantics, 2000-step deterministic
+grant→move→split→swap sequences (step-identical across simulations + seeded
+replay), `InventorySnapshot` boundedness + in-place fill, `initialize`/
+`reload` resets (incl. the refused-reload contract and save/reopen with an
+empty inventory until #228), suspension without command replay, and the
+gameplay/creative selection duality. Registered as CTest `GameplayLoop`.
+
 ---
 
 ## 5. Value contracts: `src/Core/SimContracts.hpp`
@@ -429,9 +442,10 @@ discarded back to its pool.
 The gameplay loop (break → drop → pickup → inventory → place) needs an item
 vocabulary that is **stable for saves and future replication**, independent
 of the render-atlas `TextureType` enum (per-face variants, append-only for
-rendering reasons). The module is contracts-only in this phase — nothing
-consumes it yet (simulation integration #225, drops/pickup #226, persistence
-#228, UI #229, headless grammar #230):
+rendering reasons). Phase A was contracts-only; **Phase B (issue #225) made
+`sim::GameSimulation` the single owner of the inventory** and added the
+gameplay commands + `InventorySnapshot` (§10). Still ahead: drops/pickup
+#226, targeting/place #227, persistence #228, UI #229, headless grammar #230:
 
 | Contract | Definition | Notes |
 |---|---|---|
@@ -692,7 +706,8 @@ must be removed before Epic #204 completes**:
 
 `sim::GameSimulation` (`src/Sim/GameSimulation.hpp/.cpp`, in `ft_vox_core`)
 is the single owner of authoritative gameplay state: `TerrainGenerator` +
-`VoxelWorld` + `PlayerController` (120 Hz) + `MobSystem` (60 Hz), flight mode,
+`VoxelWorld` + `PlayerController` (120 Hz) + `MobSystem` (60 Hz) +
+`items::Inventory` (Epic #223 Phase B, issue #225), flight mode,
 block selection, spawn/restore and the session reload counter. Its contract:
 
 - **Commands in, snapshots out.** The host supplies plain values — elapsed
@@ -730,6 +745,46 @@ block selection, spawn/restore and the session reload counter. Its contract:
   as before (pause gates it host-side); it is NOT authoritative world time.
   The simulation owns no wall clock beyond the fixed-step accumulators, so
   headless runs never advance it and the visuals are unchanged.
+
+### The Epic #223 Phase B inventory contract (issue #225)
+
+Phase B of the gameplay-loop epic made the facade the **single owner of the
+player inventory** (`items::Inventory`, the issue #224 item domain) and added
+the first explicit gameplay commands + snapshot. No entities, no world
+interaction yet — the loop closes in C/D (#226/#227).
+
+- **Commands in, snapshots out — unchanged.** `selectHotbarSlot(index)`,
+  `moveStack(from, to)`, `swapStacks(a, b)`, `splitStack(from, to)` answer
+  with `items::ItemResult`; `grantItems(ItemId, count)` is the **test/admin
+  seam** (epic §3): every call is explicitly logged (`[items] grant …`) and
+  answers `items::AddResult` with the partial-pickup remainder semantics.
+  Plain-value arguments only — no Camera/RenderSettings/SDL/ImGui type
+  enters the API (`CoreIncludeGuard` walks the `Items/` closure).
+- **Instantaneous application, no fixed-step work.** Commands apply at the
+  call itself (the host frame boundary), BEFORE the next
+  `advancePlayer`/`advanceMobs` step. There is no command buffer, so
+  suspension never replays or reorders anything — a command issued while
+  suspended applies exactly once, at call time. Inventory commands are
+  world-independent (they work before `initialize`).
+- **Bounded snapshot.** `sim::InventorySnapshot` = the fixed 36-slot array +
+  selected hotbar index, filled IN PLACE like `mobSnapshots` (no per-frame
+  allocation). Display names resolve through the registry on the UI side
+  (#229); the snapshot carries stable `ItemId`s, never strings.
+  `inventory()` is a read-only seam — mutations go through commands only.
+- **Lifecycle.** `initialize` and a SUCCESSFUL `reload` reset the inventory
+  to empty (selection 0); a REFUSED reload keeps the old world AND the old
+  inventory authoritative. The `inventory.state` restore hook lands in #228
+  on the `player.state` seams — until then, reopening a save restores the
+  player but starts with an empty inventory (old saves load unchanged).
+- **Selection duality (deliberate, documented).** The hotbar selection is
+  the GAMEPLAY selection; `selectedBlock()` stays the CREATIVE/EDITOR seam
+  (flight mode, benchmarks, the `T` cycle, headless place/delete scripts)
+  until #227 wires the host. The two never synchronize in this phase;
+  `player.state` `selectedBlock` persistence is untouched (#228 migrates).
+- **No behavior change.** The graphical host still uses `selectedBlock()`
+  and issues no inventory commands yet; the full suite + visual goldens
+  hold. Acceptance: `tests/test_gameplay.cpp` → CTest `GameplayLoop`
+  (links only `ft_vox_core`).
 
 ### The Phase E graphical host contract (issue #209)
 
