@@ -29,6 +29,7 @@ public:
     void swap(TextureManager &other) noexcept;
 
 	VkImageView getImageView() const { return m_image.view; }
+	VkImage getImage() const { return m_image.image; }
 	VkSampler getSampler() const { return m_sampler; }
 	VkFormat getFormat() const { return m_image.format; }
 	bool isValid() const { return m_image.image != VK_NULL_HANDLE; }

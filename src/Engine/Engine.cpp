@@ -9,6 +9,7 @@
 #include <Chunk/ChunkBorders.hpp>
 #include <Chunk/ChunkMeshResult.hpp>
 #include <World/WorldCollisionView.hpp>
+#include <Items/ItemRegistry.hpp>
 #include <Engine/Profiler.hpp>
 #include <Engine/Benchmark.hpp>
 #include <Engine/InputRouting.hpp>
@@ -241,11 +242,16 @@ void Engine::resetWorldProjection()
 	drawList.clear();
 	shadowList.clear();
 	mobStates.clear();
+	m_itemSnapshots.clear();
+	m_itemStates.clear();
 	if (worldRenderer)
 	{
 		// Drop the renderer's mob presentation too: setMobs is otherwise
 		// only refreshed by the next Mobs frame step.
 		worldRenderer->setMobs(mobStates);
+		// Same discipline for dropped items (issue #229): no stale entity
+		// presentation survives a world transition.
+		worldRenderer->setItemEntities(m_itemStates);
 		worldRenderer->overlays().setHighlight(OverlayHighlight{});
 	}
 	highlight = OverlayHighlight{};
@@ -267,6 +273,7 @@ void Engine::stepDerivedProjectionForTests(double dt)
 	// step advances the authoritative simulation and fills mobStates.
 	tickStreaming(dt);
 	tickMobs(dt);
+	tickItems(dt);
 	// Establish a non-empty mob presentation precondition (see header): the
 	// bootstrap radius is smaller than the mob spawn ring, so the real step
 	// above usually produces no mobs here. The seeded state is cleared by the
@@ -388,6 +395,7 @@ Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &res
 	{
 		vkContext->waitIdle();
 		const TextureAtlasLoadReport report = worldRenderer->reloadResourcePack(path);
+		++m_atlasVersion; // UI icon descriptors revalidate against the new atlas
 		out.atlasOk = true;
 		out.packHits = report.packHits;
 		out.packMisses = report.packMisses;
@@ -1130,14 +1138,38 @@ void Engine::tickItems(double dt)
 	if (!renderBridge || !sim->isInitialized())
 		return;
 	// Dropped-item simulation (issue #227 completes the #226 loop in-game):
-	// the same host suspension policy as the player/mobs. No presentation
-	// consumer yet — #229 renders the id-sorted snapshots and drains the
-	// lifecycle stream. Until then the bounded event stream is undrained in
-	// real play: long walking sessions reach the 4096 cap and drop the OLDEST
-	// events (observable via itemEntities().droppedEventCount(), the
-	// WorldEvent contract — functional events are never lost at frame
-	// cadence once #229 drains).
+	// the same host suspension policy as the player/mobs.
 	sim->advanceItems(dt, simulationSuspended());
+	// Derived presentation (issue #229, the mob snapshot pattern): id-sorted
+	// snapshots -> interpolated render states. The registry resolves the
+	// atlas layer (ItemId -> placeableBlock), spin/bob derive from the
+	// authoritative age + interpolation fraction (presentation-only), and
+	// local light is sampled from the bridge AFTER the snapshot.
+	sim->itemSnapshots(m_itemSnapshots);
+	const float alpha = static_cast<float>(sim->itemInterpolationAlpha());
+	m_itemStates.clear();
+	for (const sim::ItemEntitySnapshot &s : m_itemSnapshots)
+	{
+		ItemRenderState st;
+		st.position = glm::vec3(glm::mix(s.previous, s.current, double(alpha)));
+		const std::optional<TextureType> block = items::placeableBlockOf(s.stack.item);
+		st.atlasLayer = block ? static_cast<uint32_t>(*block) : 0u;
+		const float age = static_cast<float>(s.ageTicks) + alpha;
+		st.rotation = age * 0.05f;
+		st.bob = std::sin(age * 0.1f) * 0.05f;
+		const auto light = renderBridge->sampleSmoothedLight(st.position);
+		st.localSkylight = light.skylight;
+		st.localBlockRgb = light.blockRgb;
+		m_itemStates.push_back(st);
+	}
+	if (worldRenderer)
+		worldRenderer->setItemEntities(m_itemStates);
+	// Drain the lifecycle stream at frame cadence (the WorldEvent contract):
+	// v1 presentation is snapshot-driven (no spawn/despawn effects yet), so
+	// drained events are discarded — draining keeps the bounded stream
+	// healthy (droppedEventCount stays 0 in real play).
+	sim->takeItemEvents(m_itemEventsScratch);
+	m_itemEventsScratch.clear();
 }
 
 void Engine::tickBenchmark(double dt)
@@ -1453,6 +1485,17 @@ void Engine::drawUi()
 	f.mobCount = mobStates.size();
 	f.mobVisible = worldRenderer->visibleMobs();
 	f.paused = &paused;
+	// Gameplay inventory (issue #229): bounded read-only snapshot + explicit
+	// command callbacks (the setPlayerFlight pattern). The UI is snapshot-only
+	// for display data; every mutation goes through the simulation commands.
+	sim->inventorySnapshot(f.inventory);
+	f.selectHotbarSlot = [this](int slot) { sim->selectHotbarSlot(slot); };
+	f.moveStack = [this](int from, int to) { sim->moveStack(from, to); };
+	f.swapStacks = [this](int a, int b) { sim->swapStacks(a, b); };
+	f.splitStack = [this](int from, int to) { sim->splitStack(from, to); };
+	f.dropFromSlot = [this](int slot, uint16_t count, glm::dvec3 dir) { sim->dropFromSlot(slot, count, dir); };
+	f.inventoryPanelOpen = &m_inventoryPanelOpen;
+	f.atlasVersion = m_atlasVersion;
 	f.seed = sim->seed();
 	f.worldGenerationId = sim->worldGenerationId();
 	// World-save snapshot (issue #180, Phase 5): a plain-copy of the

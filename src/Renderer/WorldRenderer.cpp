@@ -51,6 +51,7 @@ void WorldRenderer::shutdown()
 	m_water.shutdown();
 	m_opaque.shutdown();
 	m_mobs.shutdown();
+	m_items.shutdown();
 	m_shadow.shutdown();
 	m_overlays.shutdown();
 	m_post.shutdown();
@@ -346,6 +347,11 @@ void WorldRenderer::init(VkContext &context, VkSwapchain &swapchain, ImmediateCo
     m_mobs.init(context, imm, m_setLayout0, m_shadow.arrayView(), m_shadow.sampler(),
                 m_post.hdrFormat(), m_post.depthFormat(), resourcePackRoot);
     m_mobStates.reserve(entities::kMaxMobCount);
+	// Dropped items (issue #229): sample the SAME set-1 descriptors as the
+	// terrain (block atlas + shadow array), so pack reloads / shadow resizes
+	// rebind items automatically.
+	m_items.init(context, imm, m_setLayout0, m_setLayout1, m_post.hdrFormat(), m_post.depthFormat());
+	m_itemStates.reserve(ItemEntityRenderer::kMaxItems);
 	createPipelines();
 	createFrameUbos();
 	writeSet1Descriptors();
@@ -443,6 +449,7 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 
 	std::memcpy(m_frameUbos[frameIndex].uboMapped, &ubo, sizeof(FrameUBO));
     m_mobs.prepare(frameIndex, ubo, m_mobStates);
+	m_items.prepare(frameIndex, ubo, m_itemStates);
 }
 
 void WorldRenderer::recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D extent,
@@ -464,7 +471,8 @@ void WorldRenderer::recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex,
 	{
 		PROFILE_SCOPE("Scene");
 		m_opaque.record(cmd, extent, set0, m_set1, m_pipelineLayout, m_post.hdrColor(), m_post.sceneDepth(), chunks,
-						m_overlays, clearColor, frameIndex, m_arenas, drawDataMapped, drawDataBuffer, gpu, &m_mobs);
+						m_overlays, clearColor, frameIndex, m_arenas, drawDataMapped, drawDataBuffer, gpu, &m_mobs,
+						&m_items);
 	}
 	{
 		PROFILE_SCOPE("Water");

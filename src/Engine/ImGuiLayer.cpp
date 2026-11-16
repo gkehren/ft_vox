@@ -148,7 +148,10 @@ void ImGuiLayer::initVulkanBackend(VkContext &context, VkSwapchain &swapchain)
 	initInfo.QueueFamily = context.getGraphicsQueueFamily();
 	initInfo.Queue = context.getGraphicsQueue();
 	initInfo.DescriptorPool = VK_NULL_HANDLE;
-	initInfo.DescriptorPoolSize = 64; // let backend create pool
+	// Backend-created pool sized for the font + biome map + the per-block
+	// item icon descriptors (issue #229: up to COUNT lazily-created atlas
+	// layer views for the hotbar/inventory icons).
+	initInfo.DescriptorPoolSize = 256;
 	initInfo.MinImageCount = minImageCount;
 	initInfo.ImageCount = imageCount;
 	initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;

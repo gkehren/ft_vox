@@ -18,9 +18,12 @@
 #include <Engine/LayoutTiles.hpp>
 #include <Engine/UiShell.hpp>
 #include <Engine/GameUIBiomeMap.hpp>
+#include <Engine/InventoryUi.hpp>
+#include <Sim/GameSimulation.hpp>
 
 #include <future>
 #include <atomic>
+#include <array>
 #include <vector>
 #include <functional>
 #include <cstdint>
@@ -164,6 +167,24 @@ struct GameUIFrame
     bool *mobsEnabled{nullptr};
     size_t mobCount{}, mobVisible{};
 	bool *paused{nullptr};
+
+	/// Gameplay inventory presentation (issue #229, Epic #223 Phase F):
+	/// read-only bounded snapshot filled by Engine::drawUi + explicit command
+	/// callbacks (the setPlayerFlight pattern). The UI issues commands; the
+	/// simulation is the only truth. Display names resolve through the item
+	/// registry on this side — the snapshot carries stable ItemIds only.
+	sim::InventorySnapshot inventory{};
+	std::function<void(int)> selectHotbarSlot;
+	std::function<void(int, int)> moveStack;
+	std::function<void(int, int)> swapStacks;
+	std::function<void(int, int)> splitStack;
+	std::function<void(int, uint16_t, glm::dvec3)> dropFromSlot;
+	/// Host-owned inventory-panel UI flag (E toggles it, issue #227); the
+	/// panel itself is drawn by GameUI. Presentation-local, never persisted.
+	bool *inventoryPanelOpen{nullptr};
+	/// Block-atlas (re)load counter: item icon descriptors revalidate against
+	/// it (a resource-pack apply recreates the atlas image).
+	uint64_t atlasVersion{0};
 
 	int seed{0};
 	uint64_t worldGenerationId{0};
@@ -366,6 +387,11 @@ private:
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
 	void drawOverlayHints(GameUIFrame &frame);
+	/// Gameplay surfaces (issue #229, Epic #223 Phase F), implemented in
+	/// GameUIInventory.cpp: the always-on hotbar HUD and the E inventory
+	/// panel. Both are snapshot-only displays issuing command callbacks.
+	void drawHotbarHud(GameUIFrame &frame);
+	void drawInventoryPanel(GameUIFrame &frame);
 
 	void requestBiomeMapRefresh()
 	{
@@ -461,4 +487,16 @@ private:
 	VkSampler m_mapSampler{VK_NULL_HANDLE};
 	VkDescriptorSet m_mapDesc{VK_NULL_HANDLE};
 	int m_mapImageSize{0};
+
+	/// Inventory presentation state (issue #229). The drag cursor is
+	/// UI-LOCAL: a view of the source slot, discarded when the panel closes
+	/// (authoritative moves happen only through command callbacks). Item
+	/// icons are per-atlas-layer ImGui descriptors over the block atlas,
+	/// lazily created and invalidated on atlas reload (m_iconAtlasVersion).
+	inventoryui::DragState m_drag{};
+	uint64_t m_iconAtlasVersion{0};
+	std::array<VkDescriptorSet, size_t(COUNT)> m_iconDescs{};
+	std::array<VkImageView, size_t(COUNT)> m_iconViews{};
+	void invalidateItemIcons();
+	VkDescriptorSet itemIconDesc(GameUIFrame &frame, TextureType type);
 };

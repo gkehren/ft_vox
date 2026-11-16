@@ -1,5 +1,6 @@
 #include "Renderer/OpaquePass.hpp"
 #include "Renderer/MobRenderer.hpp"
+#include "Renderer/ItemEntityRenderer.hpp"
 #include "Renderer/IndirectDrawEmit.hpp"
 #include "Renderer/VoxelDrawDataLayout.hpp"
 #include "Vulkan/MeshArena.hpp"
@@ -108,7 +109,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 						const std::vector<Chunk *> &chunks, OverlayRenderer &overlays,
 						const VkClearColorValue &clearColor, uint32_t frameIndex, const MeshArenas &arenas,
 						VoxelDrawData *drawDataOut, AllocatedBuffer &drawDataBuffer,
-						VkGpuProfiler *gpu, MobRenderer *mobs)
+						VkGpuProfiler *gpu, MobRenderer *mobs, ItemEntityRenderer *items)
 {
 	if (gpu) gpu->beginPass(cmd, GpuPass::Opaque);
 	const auto beginRendering = beginR();
@@ -301,6 +302,10 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 	if (gpu) gpu->endPass(cmd, GpuPass::Opaque);
 	if (gpu) gpu->beginPass(cmd, GpuPass::Mobs);
     if (mobs) mobs->record(cmd, frameIndex, set0);
+	// Dropped items AFTER mobs (issue #229): derived entity presentation in
+	// the same opaque rendering scope; no shadow casting in v1. Shares the
+	// Mobs GPU profiler scope (entity category; the pass layout stays stable).
+	if (items) items->record(cmd, frameIndex, set0, set1);
     if (gpu) gpu->endPass(cmd, GpuPass::Mobs);
 	if (gpu) gpu->beginPass(cmd, GpuPass::Overlays);
 	overlays.record(cmd, set0, chunks);

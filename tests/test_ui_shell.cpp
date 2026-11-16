@@ -9,6 +9,7 @@
 #endif
 #endif
 #include <Engine/InputRouting.hpp>
+#include <Engine/InventoryUi.hpp>
 #include <Engine/LayoutTiles.hpp>
 #include <Engine/PlayerUi.hpp>
 #include <Engine/UiScale.hpp>
@@ -460,6 +461,87 @@ static void checkLayoutTileMenuPaths()
 	CHECK(hidden && !overlayHints, "overlay-only action leaves hidden mode untouched");
 }
 
+// Inventory presentation logic (issue #229, Epic #223 Phase F): slot layout
+// math, drag-cursor display and click planning — pure, headless, no ImGui.
+static void checkInventoryUi()
+{
+	using namespace inventoryui;
+	const float size = 40.f, gap = 4.f;
+
+	// Panel grid: main 9..35 = three rows of nine on top; hotbar 0..8 below
+	// with an extra gap. Column wrap at nine; rows ascend with slot index.
+	const SlotRect mainFirst = panelSlotRect(9, 100.f, 50.f, size, gap);
+	CHECK(mainFirst.x == 100.f && mainFirst.y == 50.f, "main slot 9 is the grid origin");
+	const SlotRect mainLast = panelSlotRect(35, 100.f, 50.f, size, gap);
+	CHECK(mainLast.x == 100.f + 8.f * (size + gap) && mainLast.y == 50.f + 2.f * (size + gap),
+	      "main slot 35 is bottom-right of the main grid");
+	const SlotRect hotbarFirst = panelSlotRect(0, 100.f, 50.f, size, gap);
+	CHECK(hotbarFirst.x == 100.f && hotbarFirst.y > mainLast.y + size,
+	      "hotbar row sits below the main grid with a gap");
+	const SlotRect hotbarLast = panelSlotRect(8, 100.f, 50.f, size, gap);
+	CHECK(hotbarLast.x == mainLast.x && hotbarLast.y == hotbarFirst.y, "hotbar spans the same columns");
+	CHECK(panelWidth(size, gap) == 9.f * size + 8.f * gap, "panel width spans nine columns");
+	CHECK(panelHeight(size, gap) > 4.f * size, "panel height covers four rows plus gaps");
+
+	// Hotbar HUD: centered along the screen bottom, nine slots.
+	const SlotRect hud0 = hotbarSlotRect(0, 800.f, 600.f, size, gap, 10.f);
+	const SlotRect hud8 = hotbarSlotRect(8, 800.f, 600.f, size, gap, 10.f);
+	CHECK(hud0.y == 600.f - 10.f - size && hud8.y == hud0.y, "HUD hugs the bottom margin");
+	CHECK(std::abs((hud0.x + (hud8.x + size)) - 800.f) < 0.01f, "HUD is horizontally centered");
+	CHECK(hud8.x - hud0.x == 8.f * (size + gap), "HUD slots are evenly pitched");
+
+	// Cursor display: a VIEW of the source slot, never authoritative data.
+	SlotArray slots{};
+	slots[0] = items::makeStack(items::ItemId::Stone, 10);
+	slots[5] = items::makeStack(items::ItemId::Dirt, 5);
+	const DragState none{};
+	CHECK(!none.active() && cursorStack(none, slots).isEmpty(), "no drag: empty cursor");
+	CHECK(displayedSlotStack(0, none, slots) == slots[0], "no drag: slots display the snapshot");
+
+	const DragState whole{0, DragMode::Whole};
+	CHECK(cursorStack(whole, slots) == items::makeStack(items::ItemId::Stone, 10), "whole drag displays the full stack");
+	CHECK(displayedSlotStack(0, whole, slots).isEmpty(), "whole drag: source displays empty");
+	CHECK(displayedSlotStack(5, whole, slots) == slots[5], "whole drag: other slots unchanged");
+
+	const DragState half{5, DragMode::Half};
+	CHECK(cursorStack(half, slots) == items::makeStack(items::ItemId::Dirt, 3), "half drag displays the ceil half (5 -> 3)");
+	CHECK(displayedSlotStack(5, half, slots) == items::makeStack(items::ItemId::Dirt, 2), "half drag: source displays the floor half");
+	SlotArray single{};
+	single[2] = items::makeStack(items::ItemId::Stone, 1);
+	const DragState halfOne{2, DragMode::Half};
+	CHECK(cursorStack(halfOne, single) == items::makeStack(items::ItemId::Stone, 1), "half of 1 takes the item");
+	CHECK(displayedSlotStack(2, halfOne, single).isEmpty(), "half of 1 leaves the source empty");
+
+	// Pickup planning: occupied slot only; left = whole, right = half.
+	CHECK(!planPickup(1, false, slots).active(), "pickup from an empty slot does nothing");
+	CHECK(planPickup(0, false, slots).mode == DragMode::Whole, "left pickup is whole");
+	CHECK(planPickup(0, true, slots).mode == DragMode::Half, "right pickup is half");
+	CHECK(planPickup(0, false, slots).sourceSlot == 0, "pickup records the source slot");
+	CHECK(!planPickup(-1, false, slots).active() && !planPickup(36, false, slots).active(),
+	      "pickup bounds are enforced");
+
+	// Drop planning: the whole command vocabulary, cancel paths included.
+	const ClickPlan toEmpty = planDrop(whole, 1, false, slots);
+	CHECK(toEmpty.command == ClickCommand::Move && toEmpty.from == 0 && toEmpty.to == 1,
+	      "whole drop into empty -> moveStack");
+	SlotArray same = slots;
+	same[1] = items::makeStack(items::ItemId::Stone, 3);
+	CHECK(planDrop(whole, 1, false, same).command == ClickCommand::Move, "whole drop onto same item -> moveStack (merge)");
+	CHECK(planDrop(whole, 5, false, slots).command == ClickCommand::Swap, "whole drop onto different item -> swapStacks");
+	CHECK(planDrop(half, 1, false, slots).command == ClickCommand::Split, "half drop into empty -> splitStack");
+	SlotArray sameHalf = slots;
+	sameHalf[1] = items::makeStack(items::ItemId::Dirt, 3);
+	CHECK(planDrop(half, 1, false, sameHalf).command == ClickCommand::Split, "half drop onto same item -> splitStack");
+	CHECK(planDrop(half, 0, false, slots).command == ClickCommand::None, "half drop onto different item cancels");
+	CHECK(planDrop(whole, 0, false, slots).command == ClickCommand::None, "re-clicking the source cancels");
+	CHECK(planDrop(whole, 1, true, slots).command == ClickCommand::None, "right-click drop cancels");
+	CHECK(planDrop(none, 1, false, slots).command == ClickCommand::None, "drop without a drag does nothing");
+	CHECK(planDrop(whole, 36, false, slots).command == ClickCommand::None, "drop bounds are enforced");
+	SlotArray drained = slots;
+	drained[0] = {};
+	CHECK(planDrop(whole, 1, false, drained).command == ClickCommand::None, "drop from a drained source cancels");
+}
+
 int main()
 {
 	checkScale();
@@ -469,6 +551,7 @@ int main()
 	checkPlayerUi();
 	checkLayoutTiles();
 	checkLayoutTileMenuPaths();
+	checkInventoryUi();
 
 	if (g_fails != 0)
 	{
