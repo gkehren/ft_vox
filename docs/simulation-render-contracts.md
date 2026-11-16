@@ -54,7 +54,11 @@ still with no host behavior change (§10, "Phase B inventory contract").
 Phase C (issue #226) **closed the survival-lite loop inside the simulation**:
 `ItemEntitySystem` (dropped items, 60 Hz), `breakBlock`/`dropFromSlot`
 commands, deterministic auto-pickup, id-sorted snapshots + a spawn/remove
-event stream (§10, "Phase C item-entity contract").
+event stream (§10, "Phase C item-entity contract"). Phase D (issue #227)
+**moved the last interaction rules into the simulation and rewired the
+host**: `sim::raycastVoxel` (the historical march, verbatim),
+`placeSelectedBlock` (consume-on-success), Engine input → commands, one
+bridge publication path (§10, "Phase D interaction contract").
 
 Related documents:
 
@@ -387,24 +391,29 @@ edges (overflow at maxStack, partial merge, odd split, empty stacks,
 hotbar-first ordering, selection bounds, the move/swap/split result matrix,
 4000-step deterministic repeated sequences). Registered as CTest `Items`.
 
-`tests/test_gameplay.cpp` → `test_gameplay` (Epic #223 Phases B/C, issues
-#225/#226) also links **only** `ft_vox_core` and proves the facade integration
-without a graphics runtime. Phase B: the command result matrix (invalid
-slots, empty stacks, full inventory, mismatches, partial moves/splits), the
-logged `grantItems` admin seam with partial semantics, 2000-step deterministic
-grant→move→split→swap sequences (step-identical across simulations + seeded
-replay), `InventorySnapshot` boundedness + in-place fill, `initialize`/
-`reload` resets (incl. the refused-reload contract and save/reopen with an
-empty inventory until #228), suspension without command replay, and the
-gameplay/creative selection duality. Phase C: break→drop→pickup→inventory
-end-to-end, pickup-delay/partial-pickup/full-inventory rules, the `breakBlock`
-result matrix (bedrock/fluids/unknown/AIR/double-break), age despawn + the
-deterministic oldest-first cap overflow, monotonic never-reused ids with the
-exposed high-water, two fixed-seed runs with identical per-frame populations/
-trajectories/events, 60 Hz rate independence (bit-identical across host dt
-patterns, dropped-step cap, delta spikes), suspension freeze without replay,
-id-sorted bounded snapshots and the bounded spawn/remove event stream.
-Registered as CTest `GameplayLoop`.
+`tests/test_gameplay.cpp` → `test_gameplay` (Epic #223 Phases B/C/D, issues
+#225/#226/#227) also links **only** `ft_vox_core` and proves the facade
+integration without a graphics runtime. Phase B: the command result matrix
+(invalid slots, empty stacks, full inventory, mismatches, partial
+moves/splits), the logged `grantItems` admin seam with partial semantics,
+2000-step deterministic grant→move→split→swap sequences (step-identical
+across simulations + seeded replay), `InventorySnapshot` boundedness +
+in-place fill, `initialize`/`reload` resets (incl. the refused-reload
+contract and save/reopen with an empty inventory until #228), suspension
+without command replay, and the gameplay/creative selection duality.
+Phase C: break→drop→pickup→inventory end-to-end, pickup-delay/partial-
+pickup/full-inventory rules, the `breakBlock` result matrix (bedrock/fluids/
+unknown/AIR/double-break), age despawn + the deterministic oldest-first cap
+overflow, monotonic never-reused ids with the exposed high-water, two
+fixed-seed runs with identical per-frame populations/trajectories/events,
+60 Hz rate independence (bit-identical across host dt patterns, dropped-step
+cap, delta spikes), suspension freeze without replay, id-sorted bounded
+snapshots and the bounded spawn/remove event stream. Phase D: raycast
+parity fixtures against the verbatim historical Engine march (hit/miss/
+adjacent-fallback/unknown/max-distance), the `placeSelectedBlock` result
+matrix + consume-on-success-only + edit-result exposure, and the full
+walking loop (break→drop→pickup→select→place consumes) with the world edit
+verified at every stage. Registered as CTest `GameplayLoop`.
 
 ---
 
@@ -847,12 +856,66 @@ and designed for replication (§2/§6).
   cap drops): `Spawned` / `Removed{PickedUp, Aged, Overflow}`; partial
   pickups are snapshot count changes, not events.
 - **Frame sequencing**: `advanceItems(dt, suspended)` is a separate facade
-  step the host calls next to `advanceMobs` (the #227 rewiring adds the call
-  site); the world is NOT pumped inside it. Until then only headless
-  hosts/tests drive it — **no host behavior change**, goldens hold.
+  step the host calls next to `advanceMobs` (the call site landed in #227,
+  `Engine::tickItems`); the world is NOT pumped inside it.
 - **Out of scope**: place-from-hotbar/raycast/Engine rewiring (#227),
   entity/allocator persistence (#228), rendering/UI (#229), runner
   grammar/digest (#230).
+
+### The Epic #223 Phase D interaction contract (issue #227)
+
+Phase D moved the **last interaction rules into the simulation** and made
+the Engine a pure command issuer for interactions, completing the #209 host
+contract ("no gameplay logic in the host") and the in-game loop
+break → drop → pickup → **place (consumes)**.
+
+- **Sim-owned targeting**: `GameSimulation::raycastVoxel(origin, dir,
+  maxDist)` is the historical `Engine::raycastVoxel` march moved VERBATIM
+  (0.05 float step, first active cell via `VoxelWorld::isVoxelActive` — the
+  exact seam the bridge forwarded to — adjacent-cell fallback when the ray
+  starts inside a block, unknown cells never hit). Returns the plain
+  `sim::RaycastHit{hit, block, adjacent}`. `Engine::raycastVoxel` is a thin
+  forward passing camera origin/front + `renderSettings.raycastDistance` as
+  plain values; the highlight keeps consuming the result (presentation).
+  CPU parity fixtures compare the query against the verbatim historical
+  march bit for bit.
+- **`placeSelectedBlock(cell)`**: selected hotbar stack must hold a
+  placeable item (registry `placeableBlock`); gates with the existing
+  `canPlaceVoxel` player-aware rule (#209); edits through the existing world
+  semantics; **consumes exactly 1 item on success only**.
+  `PlaceResult::Ok / EmptySlot / NotPlaceable / PlayerOverlap /
+  UnknownTerrain / WorldRejected` (NotPlaceable is future vocabulary — every
+  v1 catalog item is placeable; gameplay refuses unknown targets, unlike the
+  creative seam which may defer into registered-but-unloaded records).
+- **One edit publication path**: `breakBlock`/`placeSelectedBlock` take an
+  optional `WorldEditResult *outEdit`; on acceptance the result (edit id +
+  geometric members) moves out and the host calls
+  `RenderWorldBridge::publishEditResult` — the SAME event drain +
+  commit-group registration the creative `placeVoxel`/`deleteVoxel` use
+  (they now share that helper). No second edit path exists.
+- **Engine input mapping (host policy stays host-side)**: LMB →
+  `breakBlock` walking / creative `deleteVoxel` flight; RMB →
+  `placeSelectedBlock` walking / creative `canPlaceVoxel` + bridge place
+  flight; `1..9` → `selectHotbarSlot`; wheel → hotbar cycle (captured, not
+  isometric-zoom); `Q` → `dropFromSlot(selected, 1, cameraFront)`; `E` →
+  inventory-panel UI flag (the panel renders in #229); `T` legacy block
+  cycle is FLIGHT/creative only. Capture/pause/benchmark gating unchanged;
+  the new keys classify as `GameplayShortcut` (inert while ImGui owns the
+  keyboard — `test_input_routing`/`test_ui_shell` pin the policy/metadata).
+  `Engine::tickItems` runs `advanceItems` next to `tickMobs` under the same
+  suspension policy (frame step 9b).
+- **Host-contract checklist (no gameplay rule left in the host)**:
+  targeting → `sim::raycastVoxel`; break/drop rules → `sim::breakBlock` +
+  registry; consumption → `sim::placeSelectedBlock`; pickup →
+  `ItemEntitySystem`; placement validation → `sim::canPlaceVoxel`. The
+  Engine/bridge keep ONLY input mapping, presentation (highlight, camera),
+  publication (event drain + commit groups) and host policy
+  (capture/pause/benchmark, `raycastDistance`).
+- **Behavior change is the point**: WALKING mode now plays the survival-lite
+  loop; FLIGHT behaves exactly as before (creative infinite blocks).
+  Visual goldens hold — reference scenes use the creative/bridge path.
+  Persistence (#228), UI/HUD + item rendering (#229) and the runner grammar
+  (#230) stay out of scope.
 
 ### The Phase E graphical host contract (issue #209)
 
@@ -886,8 +949,11 @@ host contract explicit and closed the remaining gaps.
   headless hosts/tests may place inside the body deliberately). The rule is
   defined once in the facade instead of copied into the host. The graphical
   host still publishes the accepted edit through the bridge (event drain +
-  commit groups). Block raycast/selection, mouse capture, flight toggle and
-  jump semantics are unchanged.
+  commit groups). **Epic #223 Phase D (#227) completed this for interactions**:
+  the targeting march (`sim::raycastVoxel`), break/drop rules, hotbar
+  consumption and pickup all live in the simulation; the Engine mouse/keys
+  only map input to commands (walking) or keep the creative path (flight).
+  Mouse capture, flight toggle and jump semantics are unchanged.
 - **World-epoch barrier.** Every authoritative world transition
   (`initializeNoiseGenerator`, `reloadWorld`) runs
   `Engine::resetWorldProjection()` BEFORE detaching the old bridge: it drops

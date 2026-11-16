@@ -1244,25 +1244,19 @@ void RenderWorldBridge::collectShadowList(std::vector<Chunk *> &out, const Camer
 bool RenderWorldBridge::deleteVoxel(const glm::vec3 &worldPos)
 {
 	const WorldEditResult result = m_world->deleteVoxel(worldPos);
-	drainWorldEvents();
-	if (result.accepted && result.geometricMembers.size() > 1)
-	{
-		std::vector<PendingGroupMember> members;
-		for (const glm::ivec3 &coord : result.geometricMembers)
-		{
-			Chunk *member = getChunk(coord);
-			if (member)
-				members.push_back({member, {}});
-		}
-		if (members.size() > 1)
-			registerCommitGroup(result.editId, std::move(members));
-	}
+	publishEditResult(result);
 	return result.accepted;
 }
 
 bool RenderWorldBridge::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 {
 	const WorldEditResult result = m_world->placeVoxel(worldPos, type);
+	publishEditResult(result);
+	return result.accepted;
+}
+
+void RenderWorldBridge::publishEditResult(const WorldEditResult &result)
+{
 	drainWorldEvents();
 	// A border edit couples the geometry of the target and its mirrors:
 	// their GPU publications must commit together or not at all (PR #178
@@ -1280,7 +1274,6 @@ bool RenderWorldBridge::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 		if (members.size() > 1)
 			registerCommitGroup(result.editId, std::move(members));
 	}
-	return result.accepted;
 }
 
 bool RenderWorldBridge::isVoxelActive(const glm::vec3 &worldPos) const

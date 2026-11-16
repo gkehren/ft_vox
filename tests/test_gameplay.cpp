@@ -1,6 +1,6 @@
-// test_gameplay — CPU-only gameplay acceptance (issues #225/#226, Epic #223
-// Phases B/C). Links ONLY ft_vox_core: no SDL, no Vulkan device, no ImGui,
-// no camera. Proves the issues' acceptance lists end-to-end:
+// test_gameplay — CPU-only gameplay acceptance (issues #225/#226/#227, Epic
+// #223 Phases B/C/D). Links ONLY ft_vox_core: no SDL, no Vulkan device, no
+// ImGui, no camera. Proves the issues' acceptance lists end-to-end:
 //
 // Phase B (#225):
 //   * command result matrix through the facade (invalid slots, empty
@@ -34,6 +34,16 @@
 //     event stream with observable cap drops;
 //   * initialize/reload reset the population + id allocator; refused reload
 //     keeps them.
+//
+// Phase D (#227):
+//   * raycast parity fixtures vs the verbatim historical Engine march:
+//     hit / miss / adjacent-fallback / unknown-terrain / max-distance;
+//   * placeSelectedBlock result matrix (EmptySlot, PlayerOverlap,
+//     UnknownTerrain, WorldRejected, Ok; NotPlaceable is future vocabulary —
+//     every v1 item is placeable) + consume-on-success-only + edit-result
+//     exposure for the bridge publication path;
+//   * the full walking loop: break -> drop -> pickup -> select -> place
+//     consumes, with the world edit verified at every stage.
 //
 // Style mirrors test_game_simulation: a CHECK macro, plain main().
 
@@ -1229,6 +1239,267 @@ void testItemLifecycleResets(ThreadPool &pool)
 		sim.shutdown();
 	}
 }
+
+// ===========================================================================
+// Phase D (issue #227): targeting + place-from-hotbar + the walking loop
+// ===========================================================================
+
+static_assert(std::is_trivially_copyable_v<sim::RaycastHit>,
+			  "RaycastHit is a plain value");
+
+// The HISTORICAL Engine::raycastVoxel march (pre-#227), verbatim except for
+// the active-cell seam: the render bridge forwarded to
+// VoxelWorld::isVoxelActive, so querying the world directly answers
+// identically by construction. The parity fixtures compare the sim query
+// against this reference bit for bit.
+bool historicalRaycast(const VoxelWorld &world, glm::vec3 origin, glm::vec3 front, float maxDist,
+					   glm::vec3 &outBlock, glm::vec3 &outPrevious)
+{
+	const glm::vec3 dir = glm::normalize(front);
+	const float step = 0.05f;
+	glm::vec3 prev = origin;
+	for (float t = 0.f; t <= maxDist; t += step)
+	{
+		const glm::vec3 p = origin + dir * t;
+		const glm::vec3 block(std::floor(p.x), std::floor(p.y), std::floor(p.z));
+		if (world.isVoxelActive(block))
+		{
+			outBlock = block;
+			outPrevious = glm::vec3(std::floor(prev.x), std::floor(prev.y), std::floor(prev.z));
+			if (outPrevious == outBlock)
+				outPrevious = block - glm::vec3(dir.x > 0 ? 1.f : (dir.x < 0 ? -1.f : 0.f),
+												dir.y > 0 ? 1.f : (dir.y < 0 ? -1.f : 0.f),
+												dir.z > 0 ? 1.f : (dir.z < 0 ? -1.f : 0.f));
+			return true;
+		}
+		prev = p;
+	}
+	return false;
+}
+
+void checkRaycastParity(const sim::GameSimulation &sim, const VoxelWorld &world, glm::vec3 origin,
+						glm::vec3 front, float maxDist, const char *msg)
+{
+	glm::vec3 refBlock{}, refPrev{};
+	const bool refHit = historicalRaycast(world, origin, front, maxDist, refBlock, refPrev);
+	const sim::RaycastHit hit = sim.raycastVoxel(origin, front, maxDist);
+	CHECK(hit.hit == refHit, msg);
+	if (refHit)
+	{
+		CHECK(hit.block == refBlock, "raycast parity: hit block identical");
+		CHECK(hit.adjacent == refPrev, "raycast parity: adjacent cell identical");
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 16. Raycast parity fixtures: hit / miss / adjacent-fallback / unknown /
+//     max-distance, identical to the historical Engine behavior.
+// ---------------------------------------------------------------------------
+void testRaycastParity(ThreadPool &pool)
+{
+	{
+		sim::GameSimulation none(nullptr);
+		const sim::RaycastHit miss = none.raycastVoxel({0, 100, 0}, {0, -1, 0}, 10.f);
+		CHECK(!miss.hit, "raycast without a world answers miss");
+	}
+
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::dvec3 boot = sim.initialize(cfg, center);
+	sim.bootstrapTerrain(boot);
+	const VoxelWorld &world = *sim.world();
+
+	const int bx = static_cast<int>(std::floor(boot.x));
+	const int bz = static_cast<int>(std::floor(boot.z));
+	glm::ivec3 cell{};
+	TextureType type = AIR;
+	CHECK(findLandCell(world, bx, bz, cell, type), "parity fixture: land cell found");
+	const glm::vec3 above(cell.x + 0.5f, cell.y + 3.5f, cell.z + 0.5f);
+
+	// Hit straight down; adjacent is the cell above the hit.
+	checkRaycastParity(sim, world, above, {0, -1, 0}, 10.f, "parity: downward hit");
+	const sim::RaycastHit down = sim.raycastVoxel(above, {0, -1, 0}, 10.f);
+	CHECK(down.hit && down.block == glm::vec3(cell) &&
+			  down.adjacent == glm::vec3(cell.x, cell.y + 1, cell.z),
+		  "downward ray hits the surface with the cell above as adjacent");
+
+	// Miss into the sky.
+	checkRaycastParity(sim, world, above, {0, 1, 0}, 50.f, "parity: sky miss");
+
+	// Adjacent fallback: the ray STARTS inside the hit block (prev == hit).
+	const glm::vec3 embedded(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
+	checkRaycastParity(sim, world, embedded, {0, -1, 0}, 10.f, "parity: embedded-origin fallback");
+	const sim::RaycastHit emb = sim.raycastVoxel(embedded, {0, -1, 0}, 10.f);
+	CHECK(emb.hit && emb.block == glm::vec3(cell) &&
+			  emb.adjacent == glm::vec3(cell.x, cell.y + 1, cell.z),
+		  "embedded origin falls back to hit minus direction signs");
+
+	// Diagonal (unnormalized front: both sides normalize identically).
+	checkRaycastParity(sim, world, {cell.x + 0.5f, cell.y + 2.5f, cell.z + 0.5f},
+					   {0.3f, -1.f, 0.2f}, 10.f, "parity: diagonal ray");
+	// Horizontal toward neighboring terrain.
+	checkRaycastParity(sim, world, {cell.x + 3.5f, cell.y + 0.5f, cell.z + 0.5f},
+					   {-1, 0, 0}, 10.f, "parity: horizontal ray");
+
+	// Max-distance boundary: the surface is first sampled at t = 0.1.
+	const glm::vec3 nearAbove(cell.x + 0.5f, cell.y + 1.05f, cell.z + 0.5f);
+	checkRaycastParity(sim, world, nearAbove, {0, -1, 0}, 0.04f, "parity: just short of maxDist");
+	checkRaycastParity(sim, world, nearAbove, {0, -1, 0}, 0.1f, "parity: exactly at maxDist");
+	CHECK(!sim.raycastVoxel(nearAbove, {0, -1, 0}, 0.04f).hit, "maxDist excludes the hit");
+	CHECK(sim.raycastVoxel(nearAbove, {0, -1, 0}, 0.1f).hit, "maxDist includes the hit");
+
+	// Unknown terrain: start FAR outside the bootstrapped region so every
+	// marched cell is unloaded — the march passes through, never hits.
+	checkRaycastParity(sim, world, {bx + 200.5f, 100.f, bz + 0.5f}, {1, 0, 0}, 100.f,
+					   "parity: ray through unloaded region misses");
+	CHECK(!sim.raycastVoxel({bx + 200.5f, 100.f, bz + 0.5f}, {1, 0, 0}, 100.f).hit,
+		  "unknown cells are never hit");
+	sim.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 17. placeSelectedBlock result matrix + consume-on-success-only.
+// ---------------------------------------------------------------------------
+void testPlaceSelectedBlockMatrix(ThreadPool &pool)
+{
+	{
+		sim::GameSimulation none(nullptr);
+		CHECK(none.placeSelectedBlock({0, 64, 0}) == sim::PlaceResult::EmptySlot,
+			  "empty hotbar answers EmptySlot");
+	}
+
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::dvec3 boot = sim.initialize(cfg, center);
+	sim.bootstrapTerrain(boot);
+	sim.finalizePlayerSpawn(boot); // WALKING mode: the player-aware rule applies
+	CHECK(!sim.playerFlight(), "fixture player is walking");
+
+	glm::ivec3 cell{};
+	TextureType type = AIR;
+	CHECK(findLandCell(*sim.world(), static_cast<int>(std::floor(boot.x)),
+					   static_cast<int>(std::floor(boot.z)), cell, type),
+		  "place fixture: land cell found");
+
+	CoutSilencer silence;
+	CHECK(sim.grantItems(ItemId::Stone, 10).result == ItemResult::Ok, "grant placeable items");
+
+	// UnknownTerrain: unloaded target (items present, slot selected).
+	CHECK(sim.placeSelectedBlock({1000, 100, 1000}) == sim::PlaceResult::UnknownTerrain,
+		  "unloaded target answers UnknownTerrain");
+	CHECK(sim.inventory().stack(0).count == 10, "UnknownTerrain consumes nothing");
+
+	// PlayerOverlap: a solid placement overlapping the walking body.
+	const glm::dvec3 feet = sim.playerFeet();
+	const glm::ivec3 bodyCell(static_cast<int>(std::floor(feet.x)),
+							  static_cast<int>(std::floor(feet.y)),
+							  static_cast<int>(std::floor(feet.z)));
+	CHECK(sim.placeSelectedBlock(bodyCell) == sim::PlaceResult::PlayerOverlap,
+		  "walking body overlap answers PlayerOverlap");
+	CHECK(sim.inventory().stack(0).count == 10, "PlayerOverlap consumes nothing");
+
+	// WorldRejected: occupied target (the surface cell itself).
+	CHECK(sim.placeSelectedBlock(cell) == sim::PlaceResult::WorldRejected,
+		  "occupied target answers WorldRejected");
+	CHECK(sim.inventory().stack(0).count == 10, "WorldRejected consumes nothing");
+	CHECK(sim.placeSelectedBlock({cell.x, WORLD_HEIGHT + 2, cell.z}) == sim::PlaceResult::WorldRejected,
+		  "out-of-bounds target answers WorldRejected");
+
+	// Ok: the AIR cell above the surface; the edit result moves out for the
+	// bridge publication path; exactly 1 item consumed.
+	const glm::ivec3 target(cell.x, cell.y + 1, cell.z);
+	WorldEditResult edit;
+	CHECK(sim.placeSelectedBlock(target, &edit) == sim::PlaceResult::Ok, "air target places Ok");
+	CHECK(edit.accepted && edit.editId > 0 && !edit.geometricMembers.empty(),
+		  "accepted edit result exposed for bridge publication");
+	CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 9), "consume exactly 1 on success");
+	{
+		WorldCollisionView view(*sim.world());
+		TextureType placed = AIR;
+		view.sampleWithType(target, &placed);
+		CHECK(placed == STONE, "world cell holds the placed block");
+	}
+	CHECK(sim.placeSelectedBlock(target) == sim::PlaceResult::WorldRejected,
+		  "re-placing the occupied cell is refused");
+	CHECK(sim.inventory().stack(0).count == 9, "refused placement consumes nothing");
+
+	// EmptySlot after draining the stack.
+	CHECK(sim.dropFromSlot(0, 9, {0, 1, 0}) == ItemResult::Ok, "drain the stack");
+	CHECK(sim.placeSelectedBlock({cell.x, cell.y + 2, cell.z}) == sim::PlaceResult::EmptySlot,
+		  "drained hotbar answers EmptySlot");
+	// NotPlaceable is future vocabulary: every v1 catalog item is placeable,
+	// so no public API path can store a non-placeable item (pinned by the
+	// registry static_asserts in ItemRegistry.cpp).
+
+	// Flight: the creative overlap rule allows placement inside the body.
+	// Hover over the fixture land cell (findLandCell guarantees four AIR
+	// cells of headroom): the body at feet level +1 overlaps cells +1/+2;
+	// +2 is still AIR (the earlier Ok placement took +1).
+	CHECK(sim.grantItems(ItemId::Stone, 1).result == ItemResult::Ok, "grant one more");
+	sim.setPlayerFlight(true, {cell.x + 0.5, cell.y + 1.0, cell.z + 0.5});
+	const glm::ivec3 flightBodyCell(cell.x, cell.y + 2, cell.z);
+	CHECK(sim.placeSelectedBlock(flightBodyCell) == sim::PlaceResult::Ok,
+		  "flight placement ignores body overlap (the #209 creative rule)");
+	CHECK(sim.inventory().stack(0).isEmpty(), "flight placement still consumes the item");
+	sim.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 18. The full walking loop: break -> drop -> pickup -> select -> place
+//     consumes, with the world edit verified at every stage.
+// ---------------------------------------------------------------------------
+void testWalkingLoopEndToEnd(ThreadPool &pool)
+{
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::dvec3 boot = sim.initialize(cfg, center);
+	sim.bootstrapTerrain(boot);
+	sim.finalizePlayerSpawn(boot);
+	CHECK(!sim.playerFlight(), "loop fixture player is walking");
+
+	const int bx = static_cast<int>(std::floor(sim.playerFeet().x)) + 1;
+	const int bz = static_cast<int>(std::floor(sim.playerFeet().z));
+	glm::ivec3 cell{};
+	TextureType type = AIR;
+	CHECK(findBreakableCell(*sim.world(), bx, bz, cell, type), "loop: breakable cell found");
+	const items::ItemStack drop = items::dropForBlock(type);
+
+	// Break: the registry drop spawns as an entity.
+	CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "loop: break accepted");
+	std::vector<sim::ItemEntitySnapshot> snaps;
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1 && snaps[0].stack == drop, "loop: drop entity spawned");
+
+	// Stand over the hole so the drop settles within pickup radius; the
+	// walking controller is reset at the safe feet (host reposition seam).
+	sim.setPlayerPosition({cell.x + 0.5, cell.y + 1.0, cell.z + 0.5});
+	for (int i = 0; i < 300 && sim.inventory().totalCount(drop.item) == 0; ++i)
+		sim.advanceItems(1.0 / 60.0, false);
+	CHECK(sim.inventory().totalCount(drop.item) == drop.count, "loop: drop auto-picked-up");
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.empty(), "loop: picked-up entity removed");
+
+	// Select the hotbar slot holding the drop and place it back into the
+	// broken cell (below the feet: no body overlap).
+	CHECK(sim.selectHotbarSlot(0) == ItemResult::Ok, "loop: select slot 0");
+	CHECK(sim.inventory().selectedStack().item == drop.item, "loop: drop is hotbar-first");
+	const uint16_t before = sim.inventory().selectedStack().count;
+	CHECK(sim.placeSelectedBlock(cell) == sim::PlaceResult::Ok, "loop: place accepted");
+	CHECK(sim.inventory().selectedStack().count == before - 1, "loop: place consumes exactly 1");
+	{
+		WorldCollisionView view(*sim.world());
+		TextureType placed = AIR;
+		view.sampleWithType(cell, &placed);
+		CHECK(placed == *items::placeableBlockOf(drop.item), "loop: world cell holds the placed block");
+	}
+	sim.shutdown();
+}
 } // namespace
 
 int main()
@@ -1250,6 +1521,9 @@ int main()
 	testItemDeterminism(pool);
 	testDropMatrixAndStreams();
 	testItemLifecycleResets(pool);
+	testRaycastParity(pool);
+	testPlaceSelectedBlockMatrix(pool);
+	testWalkingLoopEndToEnd(pool);
 	std::printf("%d checks, %d failures\n", g_checks, g_fails);
 	if (g_fails == 0)
 		std::printf("PASS\n");

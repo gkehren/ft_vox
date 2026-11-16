@@ -174,7 +174,7 @@ Engine::Engine(std::string resourcePackRoot)
 	std::cout << "SDL version: " << SDL_GetVersion() << "\n";
 	std::cout << "ft_vox: Vulkan — streaming procedural world\n";
 	std::cout << "  WASD move · Space jump/swim up · Shift sprint/swim down · V flight\n";
-	std::cout << "  Mouse look · LMB/RMB edit · T block · B borders\n";
+	std::cout << "  Mouse look · LMB/RMB break/place · 1-9 hotbar · Q drop · B borders\n";
 	std::cout << "  C free mouse · F1–F7 panels · F10 VSync · Esc quit\n";
 	std::cout << "  ThreadPool workers: " << hw << "\n";
 }
@@ -775,33 +775,20 @@ void Engine::tickStreaming(double dt)
 
 bool Engine::raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious)
 {
-	if (!renderBridge)
+	// Thin forward (issue #227, Epic #223 Phase D): the targeting RULE is
+	// sim::raycastVoxel — the historical march moved verbatim into the
+	// simulation. The host supplies camera origin/front + raycastDistance as
+	// plain values; the bridge guard keeps the historical no-projection
+	// behavior (e.g. mid-reload) exactly.
+	if (!renderBridge || !sim)
 		return false;
-
-	const glm::vec3 origin = camera.getPosition();
-	const glm::vec3 dir = glm::normalize(camera.getFront());
-	const float maxDist = static_cast<float>(renderSettings.raycastDistance);
-	const float step = 0.05f;
-
-	glm::vec3 prev = origin;
-	for (float t = 0.f; t <= maxDist; t += step)
-	{
-		const glm::vec3 p = origin + dir * t;
-		const glm::vec3 block(std::floor(p.x), std::floor(p.y), std::floor(p.z));
-
-		if (renderBridge->isVoxelActive(block))
-		{
-			outBlock = block;
-			outPrevious = glm::vec3(std::floor(prev.x), std::floor(prev.y), std::floor(prev.z));
-			if (outPrevious == outBlock)
-				outPrevious = block - glm::vec3(dir.x > 0 ? 1.f : (dir.x < 0 ? -1.f : 0.f),
-												dir.y > 0 ? 1.f : (dir.y < 0 ? -1.f : 0.f),
-												dir.z > 0 ? 1.f : (dir.z < 0 ? -1.f : 0.f));
-			return true;
-		}
-		prev = p;
-	}
-	return false;
+	const sim::RaycastHit hit = sim->raycastVoxel(camera.getPosition(), camera.getFront(),
+												  static_cast<float>(renderSettings.raycastDistance));
+	if (!hit.hit)
+		return false;
+	outBlock = hit.block;
+	outPrevious = hit.adjacent;
+	return true;
 }
 
 void Engine::updateHighlight()
@@ -912,10 +899,10 @@ void Engine::handleEvents()
 				if (gameUi->handleGameplayShortcut(static_cast<int>(key), dummy))
 					break;
 
-				// Engine-owned gameplay keys (C/B/T) fall through here:
-				// classified by the policy, executed by Engine because
-				// their host state (mouseCaptured, overlays) lives here;
-				// T cycles the simulation's authoritative block selection.
+				// Engine-owned gameplay keys (C/B/T/1-9/Q/E) fall through here:
+				// classified by the policy, executed by Engine because their
+				// host state (mouseCaptured, overlays, camera) lives here;
+				// the gameplay keys issue simulation commands (issue #227).
 			}
 
 			if (key == SDLK_C)
@@ -931,15 +918,41 @@ void Engine::handleEvents()
 					worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
 				break;
 			}
+			// Gameplay interaction keys (issue #227, Epic #223 Phase D): the
+			// host maps input to simulation commands — no gameplay rule here.
+			if (key >= SDLK_1 && key <= SDLK_9)
+			{
+				sim->selectHotbarSlot(static_cast<int>(key - SDLK_1));
+				break;
+			}
+			if (key == SDLK_Q && !paused)
+			{
+				// Drop one item from the selected hotbar slot along the camera
+				// front (host-supplied plain direction, the savePlayerState
+				// presentation-input pattern).
+				sim->dropFromSlot(sim->inventory().selectedSlot(), 1, glm::dvec3(camera.getFront()));
+				break;
+			}
+			if (key == SDLK_E)
+			{
+				// Inventory-panel UI flag; the panel itself lands in #229.
+				m_inventoryPanelOpen = !m_inventoryPanelOpen;
+				break;
+			}
 			if (key == SDLK_T)
 			{
-				int next = static_cast<int>(sim->selectedBlock()) + 1;
-				if (next >= static_cast<int>(COUNT))
-					next = 0;
-				// Skip AIR
-				if (static_cast<TextureType>(next) == AIR)
-					next = 1;
-				sim->selectedBlock() = static_cast<TextureType>(next);
+				// Legacy creative block cycle: FLIGHT/creative only (issue
+				// #227). Walking mode selects through the gameplay hotbar.
+				if (sim->playerFlight())
+				{
+					int next = static_cast<int>(sim->selectedBlock()) + 1;
+					if (next >= static_cast<int>(COUNT))
+						next = 0;
+					// Skip AIR
+					if (static_cast<TextureType>(next) == AIR)
+						next = 1;
+					sim->selectedBlock() = static_cast<TextureType>(next);
+				}
 				break;
 			}
 			break;
@@ -964,16 +977,43 @@ void Engine::handleEvents()
 				glm::vec3 block, prev;
 				if (!raycastVoxel(block, prev))
 					break;
+				// Interaction mapping (issue #227, Epic #223 Phase D): WALKING
+				// mode issues the simulation gameplay commands (break drops
+				// items, place consumes the hotbar); FLIGHT keeps the
+				// creative/editor path unchanged (infinite blocks). Accepted
+				// gameplay edits publish through the bridge exactly like
+				// creative edits (event drain + commit groups) — no second
+				// edit path.
 				if (event.button.button == SDL_BUTTON_LEFT)
-					renderBridge->deleteVoxel(block);
+				{
+					if (sim->playerFlight())
+					{
+						renderBridge->deleteVoxel(block);
+					}
+					else
+					{
+						WorldEditResult edit;
+						sim->breakBlock(glm::ivec3(block), &edit);
+						renderBridge->publishEditResult(edit);
+					}
+				}
 				else if (event.button.button == SDL_BUTTON_RIGHT)
 				{
-					// Player-aware placement validation is authoritative gameplay
-					// state (issue #209): the simulation owns the rule, the bridge
-					// publishes the accepted edit (event drain + commit groups).
-					const TextureType selected = sim->selectedBlock();
-					if (sim->canPlaceVoxel(prev, selected))
-						renderBridge->placeVoxel(prev, selected);
+					if (sim->playerFlight())
+					{
+						// Player-aware placement validation is authoritative gameplay
+						// state (issue #209): the simulation owns the rule, the bridge
+						// publishes the accepted edit (event drain + commit groups).
+						const TextureType selected = sim->selectedBlock();
+						if (sim->canPlaceVoxel(prev, selected))
+							renderBridge->placeVoxel(prev, selected);
+					}
+					else
+					{
+						WorldEditResult edit;
+						sim->placeSelectedBlock(glm::ivec3(prev), &edit);
+						renderBridge->publishEditResult(edit);
+					}
 				}
 			}
 			break;
@@ -982,6 +1022,20 @@ void Engine::handleEvents()
 				!(imgui && imgui->wantCaptureMouse()))
 			{
 				camera.addIsometricZoom(static_cast<float>(event.wheel.y) * 4.f);
+			}
+			else if (mouseCaptured && !(imgui && imgui->wantCaptureMouse()) &&
+					 !m_benchmark.locksInput() && event.wheel.y != 0)
+			{
+				// Hotbar cycle (issue #227): wheel up = previous slot, down =
+				// next, wrapping 0..8. Selection is inventory management, so
+				// it stays available while paused (world mutations are not).
+				const int delta = event.wheel.y > 0 ? -1 : 1;
+				int next = sim->inventory().selectedSlot() + delta;
+				if (next < 0)
+					next = items::kHotbarSize - 1;
+				else if (next >= items::kHotbarSize)
+					next = 0;
+				sim->selectHotbarSlot(next);
 			}
 			break;
 		default:
@@ -1068,6 +1122,18 @@ void Engine::tickMobs(double dt)
 		}
 	}
 	worldRenderer->setMobs(mobStates);
+}
+
+void Engine::tickItems(double dt)
+{
+	PROFILE_SCOPE("Items");
+	if (!renderBridge || !sim->isInitialized())
+		return;
+	// Dropped-item simulation (issue #227 completes the #226 loop in-game):
+	// the same host suspension policy as the player/mobs. No presentation
+	// consumer yet — #229 renders the id-sorted snapshots; the bounded event
+	// stream stays drainable (oldest-drop at the cap until then).
+	sim->advanceItems(dt, simulationSuspended());
 }
 
 void Engine::tickBenchmark(double dt)
@@ -1627,7 +1693,9 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 //                   draw/shadow lists, upload budget — NO GPU work here
 //   9. Mobs         sim->advanceMobs + snapshots + bridge entity light ->
 //                   WorldRenderer::setMobs
-//  10. Highlight    block raycast -> overlay
+//   9b. Items       sim->advanceItems (dropped items, issue #227; snapshots
+//                   get their renderer in #229)
+//  10. Highlight    sim raycast (thin forward) -> overlay
 //  11. Frame slots  retire/arena/staging beginFrame (fence already waited)
 //  12. ImGui        UI build from sim/render snapshots (CPU only)
 //  13. UBO          underwater sample + frame uniforms
@@ -1759,8 +1827,10 @@ void Engine::run()
 		}
 		// (8) Derived world projection: streaming, visibility, draw lists.
 		tickStreaming(deltaTime);
-		// (9) Mob simulation + derived presentation, (10) block highlight.
+		// (9) Mob simulation + derived presentation, (9b) dropped items,
+		// (10) block highlight.
 		tickMobs(deltaTime);
+		tickItems(deltaTime);
 		{
 			PROFILE_SCOPE("Highlight");
 			updateHighlight();

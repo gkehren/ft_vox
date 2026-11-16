@@ -256,6 +256,12 @@ public:
 
 	bool deleteVoxel(const glm::vec3 &worldPos);
 	bool placeVoxel(const glm::vec3 &worldPos, TextureType type);
+	/// Publish an edit ALREADY accepted through the simulation's gameplay
+	/// commands (issue #227, Epic #223 Phase D): the same event drain +
+	/// commit-group registration as placeVoxel/deleteVoxel, without issuing
+	/// a second world edit. The host passes the WorldEditResult the command
+	/// moved out; rejected edits only drain (a frame-cadence no-op).
+	void publishEditResult(const WorldEditResult &result);
 	bool isVoxelActive(const glm::vec3 &worldPos) const;
 	Chunk *getChunkAtWorldPos(const glm::vec3 &worldPos);
 	Chunk *getChunk(const glm::ivec3 &chunkPos);
