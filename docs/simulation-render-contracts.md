@@ -43,6 +43,13 @@ the visual golden comparisons hold (§10,
 `benchmarks/issue-208-phase-d.md`, `benchmarks/issue-209-phase-e.md`,
 `benchmarks/issue-210-phase-f.md`).
 
+Epic #223 (persistent gameplay loop) builds on these contracts. Its Phase A
+(issue #224) **extended the CPU core with the item domain** — `src/Items/`
+(`ItemId` / `ItemStack` / `ItemRegistry` / `Inventory` + pure stack math),
+again contracts-only with no behavior change: nothing consumes the module
+yet, exactly like Phase A of Epic #204 created the boundary before migrating
+behavior (§5, "Item domain").
+
 Related documents:
 
 - [`headless-runner.md`](headless-runner.md) — the Phase F standalone simulation runner (CLI, scripts, digest, CPU-only build)
@@ -244,6 +251,9 @@ src/Chunk/ChunkBorders.cpp        (Phase B: authoritative backing pool)
 src/Entities/MobSystem.cpp
 src/Entities/MobModel.cpp
 src/Sim/GameSimulation.cpp        (Phase D: authoritative simulation facade)
+src/Items/ItemRegistry.cpp        (Epic #223 Phase A: item catalog + block mappings)
+src/Items/ItemStack.cpp           (Epic #223 Phase A: pure stack math)
+src/Items/Inventory.cpp           (Epic #223 Phase A: 36-slot container)
 ```
 
 Phase B also **relocated** two CPU-only headers out of the forbidden `Engine/`
@@ -360,6 +370,16 @@ save/player restore (refused close keeps the old world alive), and the
 independent 120 Hz / 60 Hz update rates + bounded value snapshots. Registered
 as CTest `GameSimulation`.
 
+`tests/test_items.cpp` → `test_items` (Epic #223 Phase A, issue #224) also
+links **only** `ft_vox_core` and proves the item-domain acceptance list
+without a graphics runtime: registry invariants (unique ids/names,
+append-only ordinals, every placeable item maps back to its block, drop-table
+totality over breakable blocks, name-parsing round-trips), pure stack-math
+edges (overflow at maxStack, partial merge, odd split, empty stacks,
+`uint16_t` boundaries) and inventory edges (full-inventory partial add,
+hotbar-first ordering, selection bounds, the move/swap/split result matrix,
+4000-step deterministic repeated sequences). Registered as CTest `Items`.
+
 ---
 
 ## 5. Value contracts: `src/Core/SimContracts.hpp`
@@ -403,6 +423,38 @@ record; `publishMeshResult` validates against it. Phase C's bridge mesh
 publish continues to validate against `sim::ChunkIdentity` (no duplicate
 pair); `test_render_bridge` drives a stale-generation result and asserts it is
 discarded back to its pool.
+
+### Item domain: `src/Items/` (Epic #223 Phase A, issue #224)
+
+The gameplay loop (break → drop → pickup → inventory → place) needs an item
+vocabulary that is **stable for saves and future replication**, independent
+of the render-atlas `TextureType` enum (per-face variants, append-only for
+rendering reasons). The module is contracts-only in this phase — nothing
+consumes it yet (simulation integration #225, drops/pickup #226, persistence
+#228, UI #229, headless grammar #230):
+
+| Contract | Definition | Notes |
+|---|---|---|
+| Item identity | `items::ItemId : uint16_t` | append-only registry ordinals (1..`kItemCount`), `None = 0` sentinel; saves/wire reference `ItemId`, never `TextureType` |
+| Stack | `items::ItemStack{item,count}` | 4-byte plain value; empty = count 0; **canonical empty** `{None,0}` — every operation normalizes drained stacks to it (byte-equal determinism) |
+| Results | `items::ItemResult` | `Ok / Partial / Full / InvalidSlot / EmptyStack / InvalidItem / ItemMismatch / NotPlaceable` — the future command/rejection vocabulary |
+| Catalog | `items::ItemDefinition{id,name,maxStack,placeableBlock}` | one static table, one block item per breakable/placeable block (91 entries, `maxStack` 64); `static_assert`s pin ordinal/name/placeable alignment (the `biomeTypeString` / `kBlockLayers` discipline) |
+| Block mappings | `itemForBlock / dropForBlock / isBreakableBlock` | total over the atlas; face variants alias their canonical block; explicit drop table: `STONE→COBBLESTONE`, grass block→`DIRT`, leaves/ores→themselves, `BEDROCK` unbreakable, `WATER`/`LAVA` not breakable by hand |
+| Stack math | `mergeStacks / splitStack / splitHalf / transferStack / makeStack` | pure functions, explicit results, no heap; odd half-split takes the **larger** half (ceil); shared by the inventory and the future pickup/drop paths |
+| Container | `items::Inventory` | fixed 36 slots (hotbar 0..8), selected hotbar index, deterministic `addStack` (hotbar-first merge, then empty slots, partial remainder) / `removeCount` / `moveStack` / `swapStacks` / `splitStack` / `setSelectedSlot`; trivially copyable, no heap churn |
+| Grammar seam | `items::parseItemId` | the `textureTypeString` token discipline (case/space/hyphen-insensitive `UPPER_UNDERSCORE` or numeric ordinal), reused by the headless grammar in #230 |
+
+Dependency rule: `ItemTypes.hpp` is std-only; the rest of the module includes
+`utils.hpp` (the `TextureType` catalog) + std. The render-side face remapping
+(`Renderer/MinecraftTextures.hpp`) is deliberately **not** included — the
+registry owns its own variant→canonical mapping (`canonicalBlock`), pinned
+row by row by `test_items` (`kFaceVariants`). The two mappings cannot be
+cross-checked automatically (dependency rule), so a new per-face atlas
+variant must update **all three together**: `canonicalBlock`, the render
+`blockTopFace`/`blockBottomFace` remap, and the `kFaceVariants` pin table
+(the `AGENTS.md` item-registry convention and the terrain-generation
+block-addition procedure name them). The headers/TUs are guarded roots of
+`CoreIncludeGuard` (§6).
 
 ---
 
@@ -448,7 +500,9 @@ The guarded roots are the contracts header, the relocated Core headers
 `WorldPersistence`, `WorldChunk`, `VoxelWorld`, `WorldCollisionView`,
 `WorldMobView`, `TerrainGenerator`, `TerrainVegetation`, `VoxelPool`,
 `ChunkBorders`, `MobSystem`, `MobModel`, `VoxelCollision`, `PlayerController`,
-`BlockPhysics`, `MobTypes`, `LightSample`).
+`BlockPhysics`, `MobTypes`, `LightSample`) and the Epic #223 Phase A item
+domain (`Items/ItemTypes.hpp`, `Items/ItemRegistry.hpp/.cpp`,
+`Items/ItemStack.hpp/.cpp`, `Items/Inventory.hpp/.cpp`).
 
 ---
 

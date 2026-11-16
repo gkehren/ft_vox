@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Forbidden-include-chain guard for the CPU-only core (issues #205/#206/#208, Epic #204 A/B/D).
+"""Forbidden-include-chain guard for the CPU-only core (issues #205/#206/#208, Epic #204 A/B/D;
+issue #224, Epic #223 A adds the Items/ item domain).
 
 The authoritative simulation / persistence library `ft_vox_core` and its public
 contracts (src/Core/SimContracts.hpp) must stay render-independent: they may
@@ -53,6 +54,13 @@ ROOTS = [
     "Chunk/ChunkBorders.cpp",
     "Entities/MobSystem.cpp",
     "Entities/MobModel.cpp",
+    "Items/ItemTypes.hpp",
+    "Items/ItemRegistry.hpp",
+    "Items/ItemRegistry.cpp",
+    "Items/ItemStack.hpp",
+    "Items/ItemStack.cpp",
+    "Items/Inventory.hpp",
+    "Items/Inventory.cpp",
     "Physics/VoxelCollision.hpp",
     "Physics/PlayerController.hpp",
     "Physics/BlockPhysics.hpp",

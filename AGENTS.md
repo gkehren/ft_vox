@@ -35,6 +35,11 @@
   - **`WorldMobView`**: CPU-only mob seam (`entities::MobWorld`) — collision + biome/grass surface scan; replaced the removed `ChunkMobWorld` adapter (issue #208). Derived entity light sampling stays on the bridge, sampled by the host after the mob snapshot
   - `WorldSave` / `WorldPersistence`: seed+sparse-override saves (`saves/<name>/`), async crash-safe I/O (issue #180 contracts)
   - `Core/SimContracts.hpp`, `Core/ThreadPool.hpp`, `Core/WorkloadTelemetry.hpp`: render-independent contracts + CPU utilities
+- **Item domain (`src/Items/`, CPU-only `ft_vox_core`)** — issue #224 / Epic #223 Phase A (contracts-only; nothing consumes it yet):
+  - **`ItemTypes.hpp`**: `ItemId` (stable append-only `uint16_t` registry ordinal, independent of the render-atlas `TextureType`), `ItemStack` (4-byte plain value, canonical empty `{None,0}`), `ItemResult` explicit operation codes, `kHotbarSize = 9` / `kInventorySize = 36`
+  - **`ItemRegistry`**: one static append-only `ItemDefinition` table (one block item per breakable/placeable block), explicit block→drop table (`STONE`→`COBBLESTONE`, grass block→`DIRT`, leaves→themselves, `BEDROCK` unbreakable, fluids not breakable by hand), `itemForBlock`/`dropForBlock`/`parseItemId` lookups; `static_assert`s pin catalog alignment
+  - **`ItemStack` math**: pure merge/split/transfer functions with explicit results (odd half-split takes the larger half), shared by the future pickup/drop paths
+  - **`Inventory`**: fixed 36-slot container (hotbar = slots 0..8), selected hotbar index, deterministic hotbar-first `addStack`/`removeCount`/`moveStack`/`swapStacks`/`splitStack`; trivially copyable, no heap churn
 - **Chunk Management (`src/Chunk/`)**: 16×256×16 voxels, greedy meshing, VMA GPU upload, terrain gen
   - **`Chunk`**: render handle bound to a `WorldChunk` (forwards voxel reads/writes; keeps GPU ranges, draw caches, mesh payloads, light caches) — the bridge's per-chunk render record
   - **`ChunkPool`** + **`ThreadPool`**: preallocated render handles and work-stealing workers
@@ -157,6 +162,14 @@ cmake --build build-cpu -j && ctest --test-dir build-cpu --output-on-failure
 - **Biome/block enums**: `BiomeType` and `TextureType` are append-only; keep
   `biomeTypeString`, `GameUI::kBiomeColors`, `textureTypeString`, and
   `kBlockLayers` aligned with their enum ordinals
+- **Item registry**: `items::ItemId` ordinals are append-only and save/wire
+  stable (saves reference `ItemId`, never `TextureType`); keep the
+  `ItemDefinition` table, the block→item/block→drop tables and their
+  `static_assert`s aligned when adding blocks (issue #224, epic #223).
+  A new per-face atlas variant must update **all three pinned mappings
+  together**: `canonicalBlock` (`Items/ItemRegistry.cpp`), the render face
+  remap (`blockTopFace`/`blockBottomFace`, `Renderer/MinecraftTextures.hpp`),
+  and the `kFaceVariants` pin table in `tests/test_items.cpp`
 - **Resource-pack blocks**: bundled terrain textures live in
   `ressources/textures/` and may be sourced from the compliant
   `docs/default-resource-pack/assets/minecraft/textures/block/` fixture
