@@ -114,6 +114,9 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     // Fresh session = empty inventory (issue #225). The inventory.state
     // restore hook lands in #228 on the finalizePlayerSpawn seam.
     m_inventory.clear();
+    // Fresh session = no dropped items, id allocator restarted (issue #226).
+    // The items.state hook (population + id high-water) lands in #228.
+    m_items.reset();
     // Tear the old world down BEFORE replacing the generator it references
     // (~VoxelWorld's shutdown safety net can still generate stranded-edit
     // records through the generator).
@@ -204,6 +207,9 @@ bool GameSimulation::reload(int newSeed)
     // Successful reload = fresh inventory (issue #225). A REFUSED reload
     // returned above and keeps the old inventory authoritative.
     m_inventory.clear();
+    // Successful reload = fresh dropped-item session (issue #226): the
+    // population, events and id allocator reset with the world.
+    m_items.reset();
 
     // The bridge (if any) was destroyed by the host before this call; the
     // world references the generator, so tear it down first.
@@ -276,6 +282,17 @@ void GameSimulation::advanceMobs(double dt, glm::dvec3 observer, double availabl
     // The gameplay toggle is authoritative sim state: disabled mobs never
     // populate or step, regardless of the host's suspension flag.
     m_mobs.update(dt, world, observer, availableRadius, suspended || !m_mobsEnabled);
+}
+
+void GameSimulation::advanceItems(double dt, bool suspended)
+{
+    if (!m_world)
+        return;
+    // Main-thread scoped collision view (the advanceMobs pattern). The world
+    // is NOT pumped here: publication ordering stays with the bridge /
+    // pumpWorld (issue #114). Pickup proximity uses the authoritative feet.
+    WorldCollisionView world(*m_world);
+    m_items.update(dt, world, m_player.body.position, m_inventory, suspended);
 }
 
 void GameSimulation::pumpWorld()
@@ -518,6 +535,61 @@ items::AddResult GameSimulation::grantItems(items::ItemId item, uint16_t count)
         std::cout << ", applied " << applied;
     std::cout << "\n";
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// World interaction commands (issue #226, Epic #223 Phase C)
+// ---------------------------------------------------------------------------
+
+BreakResult GameSimulation::breakBlock(glm::ivec3 cell)
+{
+    if (!m_world)
+        return BreakResult::UnknownTerrain;
+    // Sample the EFFECTIVE voxel (storage + pending edits) through the CPU
+    // collision seam. The view's shared lock MUST be released before the
+    // exclusive edit lock below — scope it tightly.
+    TextureType type = AIR;
+    bool available = false;
+    {
+        WorldCollisionView view(*m_world);
+        const physics::Cell sampled = view.sampleWithType(cell, &type);
+        available = sampled.available;
+    }
+    if (!available)
+        return BreakResult::UnknownTerrain; // unloaded / unreadable: never inferred
+    if (type == AIR)
+        return BreakResult::WorldRejected; // nothing to break (incl. out-of-bounds cells)
+    if (!items::isBreakableBlock(type))
+        return BreakResult::Unbreakable; // BEDROCK / WATER / LAVA by hand in v1
+    // Existing world edit semantics (issue #114): the delete may defer with
+    // its mirror group; the drop spawns immediately at the cell center.
+    const glm::vec3 center(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
+    const WorldEditResult edit = m_world->deleteVoxel(center);
+    if (!edit.accepted)
+        return BreakResult::WorldRejected;
+    const items::ItemStack drop = items::dropForBlock(type);
+    if (!drop.isEmpty())
+        m_items.spawnBreakDrop(drop, glm::dvec3(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5), edit.editId);
+    return BreakResult::Ok;
+}
+
+items::ItemResult GameSimulation::dropFromSlot(int slot, uint16_t count, glm::dvec3 dir)
+{
+    const items::RemoveResult removed = m_inventory.removeCount(slot, count);
+    if (removed.result != items::ItemResult::Ok)
+        return removed.result; // InvalidSlot / EmptyStack
+    if (removed.removed.isEmpty())
+        return items::ItemResult::Ok; // count 0: no-op, no entity
+    // Host-supplied presentation direction (the savePlayerState(yaw,pitch)
+    // pattern): normalized here, degenerate input falls back to +Y. The
+    // launch speed is a deterministic plain setting — no RNG.
+    glm::dvec3 direction = dir;
+    const double length = glm::length(direction);
+    direction = length > 1e-6 ? direction / length : glm::dvec3(0.0, 1.0, 0.0);
+    const glm::dvec3 origin = m_player.eye() + direction * 0.3;
+    const glm::dvec3 velocity = direction * m_items.settings.dropSpeed + glm::dvec3(0.0, 1.0, 0.0);
+    m_items.spawnPlayerDrop(removed.removed, origin, velocity);
+    return items::ItemResult::Ok;
 }
 
 // ---------------------------------------------------------------------------

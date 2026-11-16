@@ -51,6 +51,10 @@ created the boundary before migrating behavior (§5, "Item domain"). Phase B
 (issue #225) **integrated it into the simulation**: `GameSimulation` owns the
 inventory and exposes the first gameplay commands + `InventorySnapshot`,
 still with no host behavior change (§10, "Phase B inventory contract").
+Phase C (issue #226) **closed the survival-lite loop inside the simulation**:
+`ItemEntitySystem` (dropped items, 60 Hz), `breakBlock`/`dropFromSlot`
+commands, deterministic auto-pickup, id-sorted snapshots + a spawn/remove
+event stream (§10, "Phase C item-entity contract").
 
 Related documents:
 
@@ -256,6 +260,7 @@ src/Sim/GameSimulation.cpp        (Phase D: authoritative simulation facade)
 src/Items/ItemRegistry.cpp        (Epic #223 Phase A: item catalog + block mappings)
 src/Items/ItemStack.cpp           (Epic #223 Phase A: pure stack math)
 src/Items/Inventory.cpp           (Epic #223 Phase A: 36-slot container)
+src/Items/ItemEntitySystem.cpp    (Epic #223 Phase C: dropped item entities)
 ```
 
 Phase B also **relocated** two CPU-only headers out of the forbidden `Engine/`
@@ -382,16 +387,24 @@ edges (overflow at maxStack, partial merge, odd split, empty stacks,
 hotbar-first ordering, selection bounds, the move/swap/split result matrix,
 4000-step deterministic repeated sequences). Registered as CTest `Items`.
 
-`tests/test_gameplay.cpp` → `test_gameplay` (Epic #223 Phase B, issue #225)
-also links **only** `ft_vox_core` and proves the facade integration without a
-graphics runtime: the command result matrix (invalid slots, empty stacks,
-full inventory, mismatches, partial moves/splits), the logged `grantItems`
-admin seam with partial semantics, 2000-step deterministic
+`tests/test_gameplay.cpp` → `test_gameplay` (Epic #223 Phases B/C, issues
+#225/#226) also links **only** `ft_vox_core` and proves the facade integration
+without a graphics runtime. Phase B: the command result matrix (invalid
+slots, empty stacks, full inventory, mismatches, partial moves/splits), the
+logged `grantItems` admin seam with partial semantics, 2000-step deterministic
 grant→move→split→swap sequences (step-identical across simulations + seeded
 replay), `InventorySnapshot` boundedness + in-place fill, `initialize`/
 `reload` resets (incl. the refused-reload contract and save/reopen with an
 empty inventory until #228), suspension without command replay, and the
-gameplay/creative selection duality. Registered as CTest `GameplayLoop`.
+gameplay/creative selection duality. Phase C: break→drop→pickup→inventory
+end-to-end, pickup-delay/partial-pickup/full-inventory rules, the `breakBlock`
+result matrix (bedrock/fluids/unknown/AIR/double-break), age despawn + the
+deterministic oldest-first cap overflow, monotonic never-reused ids with the
+exposed high-water, two fixed-seed runs with identical per-frame populations/
+trajectories/events, 60 Hz rate independence (bit-identical across host dt
+patterns, dropped-step cap, delta spikes), suspension freeze without replay,
+id-sorted bounded snapshots and the bounded spawn/remove event stream.
+Registered as CTest `GameplayLoop`.
 
 ---
 
@@ -514,9 +527,10 @@ The guarded roots are the contracts header, the relocated Core headers
 `WorldPersistence`, `WorldChunk`, `VoxelWorld`, `WorldCollisionView`,
 `WorldMobView`, `TerrainGenerator`, `TerrainVegetation`, `VoxelPool`,
 `ChunkBorders`, `MobSystem`, `MobModel`, `VoxelCollision`, `PlayerController`,
-`BlockPhysics`, `MobTypes`, `LightSample`) and the Epic #223 Phase A item
-domain (`Items/ItemTypes.hpp`, `Items/ItemRegistry.hpp/.cpp`,
-`Items/ItemStack.hpp/.cpp`, `Items/Inventory.hpp/.cpp`).
+`BlockPhysics`, `MobTypes`, `LightSample`) and the Epic #223 item domain
+(`Items/ItemTypes.hpp`, `Items/ItemRegistry.hpp/.cpp`,
+`Items/ItemStack.hpp/.cpp`, `Items/Inventory.hpp/.cpp`,
+`Items/ItemEntitySystem.hpp/.cpp`).
 
 ---
 
@@ -785,6 +799,57 @@ interaction yet — the loop closes in C/D (#226/#227).
   and issues no inventory commands yet; the full suite + visual goldens
   hold. Acceptance: `tests/test_gameplay.cpp` → CTest `GameplayLoop`
   (links only `ft_vox_core`).
+
+### The Epic #223 Phase C item-entity contract (issue #226)
+
+Phase C closed the **survival-lite loop inside the simulation**:
+break → drop → auto-pickup → inventory. Dropped items are the epic's first
+non-mob entity family, built on the `MobSystem` pattern (no ECS, epic §7)
+and designed for replication (§2/§6).
+
+- **`items::ItemEntitySystem`** (`src/Items/ItemEntitySystem.hpp/.cpp`, in
+  `ft_vox_core`, owned by `GameSimulation`): plain-value entities (id,
+  `ItemStack`, `physics::Body`, previous position, age/pickup-delay ticks),
+  fixed **60 Hz** step with its own accumulator + `maxSteps` catch-up cap +
+  dropped-step counter (the mob discipline), suspension freeze +
+  previous/current sync. Movement reuses `physics::move` through
+  `WorldCollisionView` — **no new solver**; unknown terrain holds the body.
+  Gravity + ground-friction settle; v1 has no fluid interaction rule (items
+  sink through fluids and settle on the bottom — documented simplification).
+- **Ids**: simulation-owned monotonic allocator (starts at 1, never reused
+  within a session; `reset()` is the session boundary called by
+  `initialize`/successful `reload`). `itemIdHighWater()` exposes the mark
+  for the #228 persistence hook. Spawn order = command/tick order.
+- **Deterministic rules**: pickup-delay countdown, then proximity pickup
+  (1.5 blocks to the authoritative feet) merging **hotbar-first** through
+  the Phase A stack math — partial pickup leaves the remainder in the world,
+  a full inventory leaves the entity untouched; age despawn (18000 ticks =
+  5 min); population cap 1024 with **oldest-first** overflow despawn (age
+  ties break on the smallest id). Spawn jitter derives only from the entity
+  id + edit revision (the splitmix64 finalizer) — no RNG state, no wall clock.
+- **Commands**: `breakBlock(cell)` validates loaded/breakable per the
+  registry (`BreakResult::Ok / Unbreakable / UnknownTerrain / WorldRejected`),
+  deletes through the existing world edit semantics (issue #114 ordering
+  preserved — the collision view's shared lock is released before the edit
+  lock) and spawns the registry drop at the cell center.
+  `dropFromSlot(slot, count, dir)` removes via `removeCount` semantics and
+  spawns one entity at the player eye with the host-supplied plain direction
+  (normalized; degenerate → +Y) and deterministic speed; manual drops carry
+  the longer 40-tick pickup delay.
+- **Derived outputs**: id-sorted bounded `sim::ItemEntitySnapshot`
+  (= `items::ItemEntitySnapshot`, the `MobSnapshot` alias pattern) with
+  previous/current + item/count/age, filled in place; mix with
+  `itemInterpolationAlpha()`. Bounded spawn/remove event stream
+  (`items::ItemEntityEvent`, the `WorldEvent` drain pattern with observable
+  cap drops): `Spawned` / `Removed{PickedUp, Aged, Overflow}`; partial
+  pickups are snapshot count changes, not events.
+- **Frame sequencing**: `advanceItems(dt, suspended)` is a separate facade
+  step the host calls next to `advanceMobs` (the #227 rewiring adds the call
+  site); the world is NOT pumped inside it. Until then only headless
+  hosts/tests drive it — **no host behavior change**, goldens hold.
+- **Out of scope**: place-from-hotbar/raycast/Engine rewiring (#227),
+  entity/allocator persistence (#228), rendering/UI (#229), runner
+  grammar/digest (#230).
 
 ### The Phase E graphical host contract (issue #209)
 

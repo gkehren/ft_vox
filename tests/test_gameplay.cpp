@@ -1,7 +1,8 @@
-// test_gameplay — CPU-only gameplay-command acceptance (issue #225, Epic
-// #223 Phase B). Links ONLY ft_vox_core: no SDL, no Vulkan device, no ImGui,
-// no camera. Proves the issue's acceptance list end-to-end:
+// test_gameplay — CPU-only gameplay acceptance (issues #225/#226, Epic #223
+// Phases B/C). Links ONLY ft_vox_core: no SDL, no Vulkan device, no ImGui,
+// no camera. Proves the issues' acceptance lists end-to-end:
 //
+// Phase B (#225):
 //   * command result matrix through the facade (invalid slots, empty
 //     stacks, full inventory, mismatches, partial moves/splits/grants);
 //   * grantItems test/admin seam: partial semantics + EXPLICIT logging;
@@ -15,12 +16,35 @@
 //   * selection duality: the gameplay hotbar selection and the creative
 //     selectedBlock() seam never synchronize; player.state is untouched.
 //
+// Phase C (#226):
+//   * break -> drop -> pickup -> inventory end-to-end; pickup delay honored;
+//     partial pickup with a nearly-full inventory; full inventory leaves
+//     entities untouched;
+//   * breakBlock result matrix (bedrock, fluids, unloaded/unknown, AIR,
+//     double-break, no-world); dropFromSlot matrix (bounds, clamping,
+//     degenerate direction, deterministic launch);
+//   * age despawn + bounded population cap with deterministic oldest-first
+//     overflow (age ties break on the smallest id); ids monotonic, never
+//     reused within a session, high-water exposed;
+//   * two fixed-seed facade runs produce identical per-frame populations /
+//     trajectories, event streams and inventory;
+//   * 60 Hz rate independent of host dt (bit-identical), dropped-step cap,
+//     delta spikes, suspension freeze without replay burst;
+//   * id-sorted bounded snapshots + in-place fill; bounded spawn/remove
+//     event stream with observable cap drops;
+//   * initialize/reload reset the population + id allocator; refused reload
+//     keeps them.
+//
 // Style mirrors test_game_simulation: a CHECK macro, plain main().
 
 #include <Sim/GameSimulation.hpp>
 #include <Core/ThreadPool.hpp>
+#include <Items/ItemEntitySystem.hpp>
+#include <Items/ItemRegistry.hpp>
+#include <World/WorldCollisionView.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
@@ -28,6 +52,7 @@
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 static int g_fails = 0;
 static int g_checks = 0;
@@ -60,6 +85,14 @@ static_assert(std::is_trivially_copyable_v<sim::InventorySnapshot>,
 			  "InventorySnapshot is a plain bounded value");
 static_assert(sizeof(sim::InventorySnapshot) == items::kInventorySize * 4 + 4,
 			  "InventorySnapshot is exactly 36 stacks + the selected slot");
+static_assert(std::is_trivially_copyable_v<sim::ItemEntitySnapshot>,
+			  "ItemEntitySnapshot is a plain bounded value");
+static_assert(std::is_trivially_copyable_v<items::ItemEntityEvent>,
+			  "ItemEntityEvent is a plain bounded value");
+static_assert(std::is_trivially_copyable_v<items::ItemEntity>,
+			  "ItemEntity is plain value state (no pointers)");
+static_assert(std::is_same_v<sim::ItemEntitySnapshot, items::ItemEntitySnapshot>,
+			  "sim::ItemEntitySnapshot re-exports the items system snapshot");
 
 sim::InventorySnapshot snap(const sim::GameSimulation &sim)
 {
@@ -566,6 +599,611 @@ void testSelectionDuality()
 		  "player.state capture unchanged (inventory persistence is #228)");
 	CHECK(sim.playerSnapshot().selectedBlock == DIRT, "creative seam stays authoritative for the host");
 }
+
+// ===========================================================================
+// Phase C (issue #226): dropped item entities + break/drop/pickup loop
+// ===========================================================================
+
+// Flat synthetic world for system-level fixtures (the test_core_contracts
+// pattern): solid below y = 64, air above. No terrain inference, no GPU.
+class FlatWorld : public physics::VoxelCollisionWorld
+{
+  public:
+	physics::Cell sample(glm::ivec3 p) const override
+	{
+		if (p.y < 64)
+			return {true, true, physics::Medium::Air};
+		return {true, false, physics::Medium::Air};
+	}
+};
+
+// Far outside any pickup radius: system fixtures never auto-pickup.
+constexpr glm::dvec3 kFarAway{1e9, 1e9, 1e9};
+
+// First breakable SOLID cell of a column, scanning from the sky down (skips
+// fluids/bedrock). Deterministic per seed; the view is scoped so its shared
+// lock never overlaps a later edit lock.
+bool findBreakableCell(const VoxelWorld &world, int x, int z, glm::ivec3 &out, TextureType &type)
+{
+	WorldCollisionView view(world);
+	for (int y = WORLD_HEIGHT - 1; y >= 1; --y)
+	{
+		TextureType t = AIR;
+		const physics::Cell c = view.sampleWithType({x, y, z}, &t);
+		if (!c.available)
+			return false;
+		if (c.solid && items::isBreakableBlock(t))
+		{
+			out = {x, y, z};
+			type = t;
+			return true;
+		}
+	}
+	return false;
+}
+
+// A breakable surface cell with four AIR cells of headroom (skips fluid
+// columns and overhangs): the placement fixtures need guaranteed-AIR targets.
+bool findLandCell(const VoxelWorld &world, int x0, int z0, glm::ivec3 &out, TextureType &type)
+{
+	for (int dx = 0; dx < 8; ++dx)
+		for (int dz = 0; dz < 8; ++dz)
+		{
+			glm::ivec3 candidate{};
+			TextureType t = AIR;
+			if (!findBreakableCell(world, x0 + dx, z0 + dz, candidate, t))
+				continue;
+			WorldCollisionView view(world);
+			bool airAbove = true;
+			for (int dy = 1; dy <= 4; ++dy)
+			{
+				TextureType above = AIR;
+				const physics::Cell c = view.sampleWithType({candidate.x, candidate.y + dy, candidate.z}, &above);
+				if (!c.available || above != AIR)
+				{
+					airAbove = false;
+					break;
+				}
+			}
+			if (airAbove)
+			{
+				out = candidate;
+				type = t;
+				return true;
+			}
+		}
+	return false;
+}
+
+// ---------------------------------------------------------------------------
+// 8. breakBlock result matrix: bedrock, fluids, unloaded/unknown, AIR,
+//    double-break, no-world; Ok spawns the registry drop.
+// ---------------------------------------------------------------------------
+void testBreakResultMatrix(ThreadPool &pool)
+{
+	{
+		sim::GameSimulation none(nullptr);
+		CHECK(none.breakBlock({0, 64, 0}) == sim::BreakResult::UnknownTerrain,
+			  "break without a world answers UnknownTerrain");
+	}
+
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::dvec3 boot = sim.initialize(cfg, center);
+	sim.bootstrapTerrain(boot);
+
+	CHECK(sim.breakBlock({1000, 100, 1000}) == sim::BreakResult::UnknownTerrain,
+		  "unloaded cell answers UnknownTerrain (never inferred)");
+
+	const int bx = static_cast<int>(std::floor(boot.x));
+	const int bz = static_cast<int>(std::floor(boot.z));
+	glm::ivec3 cell{};
+	TextureType type = AIR;
+	CHECK(findLandCell(*sim.world(), bx, bz, cell, type), "land cell with AIR headroom found");
+
+	CHECK(sim.breakBlock({cell.x, cell.y + 1, cell.z}) == sim::BreakResult::WorldRejected,
+		  "AIR cell answers WorldRejected (nothing to break)");
+	CHECK(sim.breakBlock({cell.x, WORLD_HEIGHT + 5, cell.z}) == sim::BreakResult::WorldRejected,
+		  "out-of-bounds cell answers WorldRejected");
+
+	// Bedrock / fluids via the creative seam (deterministic regardless of
+	// terrain): placed in AIR cells ABOVE the column's top solid, then
+	// refused by hand.
+	const int py = cell.y + 2;
+	CHECK(sim.placeVoxel({cell.x + 0.5f, py + 0.5f, cell.z + 0.5f}, BEDROCK).accepted, "bedrock placed");
+	CHECK(sim.breakBlock({cell.x, py, cell.z}) == sim::BreakResult::Unbreakable, "BEDROCK refused by hand");
+	CHECK(sim.placeVoxel({cell.x + 0.5f, py + 1.5f, cell.z + 0.5f}, WATER).accepted, "water placed");
+	CHECK(sim.breakBlock({cell.x, py + 1, cell.z}) == sim::BreakResult::Unbreakable, "WATER refused by hand");
+	CHECK(sim.placeVoxel({cell.x + 0.5f, py + 2.5f, cell.z + 0.5f}, LAVA).accepted, "lava placed");
+	CHECK(sim.breakBlock({cell.x, py + 2, cell.z}) == sim::BreakResult::Unbreakable, "LAVA refused by hand");
+
+	// Ok break: world edit + registry drop at the cell center.
+	CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "breakable surface block breaks");
+	std::vector<sim::ItemEntitySnapshot> snaps;
+	sim.itemSnapshots(snaps);
+	const items::ItemStack expectedDrop = items::dropForBlock(type);
+	CHECK(snaps.size() == 1 && snaps[0].stack == expectedDrop,
+		  "Ok break spawns exactly the registry drop");
+	CHECK(sim.breakBlock(cell) == sim::BreakResult::WorldRejected,
+		  "double break answers WorldRejected (already AIR)");
+	sim.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 9. End-to-end: break -> drop -> pickup delay -> hotbar-first inventory.
+// ---------------------------------------------------------------------------
+void testBreakDropPickupEndToEnd(ThreadPool &pool)
+{
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::dvec3 boot = sim.initialize(cfg, center);
+	sim.bootstrapTerrain(boot);
+	sim.finalizePlayerSpawn(boot);
+
+	const int bx = static_cast<int>(std::floor(sim.playerFeet().x)) + 2;
+	const int bz = static_cast<int>(std::floor(sim.playerFeet().z)) + 2;
+	glm::ivec3 cell{};
+	TextureType type = AIR;
+	CHECK(findBreakableCell(*sim.world(), bx, bz, cell, type), "target cell found");
+	const items::ItemStack expectedDrop = items::dropForBlock(type);
+
+	// Hover the authoritative body right above the target (flight is
+	// host-driven: a stable pickup fixture).
+	sim.setPlayerFlight(true, {cell.x + 0.5, cell.y + 1.0, cell.z + 0.5});
+	CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "break accepted");
+
+	std::vector<sim::ItemEntitySnapshot> snaps;
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1 && snaps[0].id == 1 && snaps[0].stack == expectedDrop,
+		  "drop entity spawned with id 1 and the registry drop");
+	std::vector<items::ItemEntityEvent> events;
+	sim.takeItemEvents(events);
+	CHECK(events.size() == 1 && events[0].kind == items::ItemEventKind::Spawned &&
+			  events[0].id == 1 && events[0].stack == expectedDrop,
+		  "Spawned event carries id + stack");
+
+	// Pickup delay honored: 5 ticks < the 10-tick default delay.
+	for (int i = 0; i < 5; ++i)
+		sim.advanceItems(1.0 / 60.0, false);
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1 && sim.inventory().totalCount(expectedDrop.item) == 0,
+		  "pickup delay honored: no pickup before the delay elapses");
+
+	// 5 more ticks: delay elapsed, proximity satisfied -> hotbar-first merge.
+	for (int i = 0; i < 5; ++i)
+		sim.advanceItems(1.0 / 60.0, false);
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.empty(), "fully picked-up entity removed");
+	CHECK(sim.inventory().totalCount(expectedDrop.item) == expectedDrop.count,
+		  "picked-up items land in the inventory");
+	CHECK(sim.inventory().stack(0) == expectedDrop, "pickup is hotbar-first (slot 0)");
+	events.clear(); // takeItemEvents APPENDS (buffer-reuse drain)
+	sim.takeItemEvents(events);
+	CHECK(events.size() == 1 && events[0].kind == items::ItemEventKind::Removed &&
+			  events[0].reason == items::ItemRemoveReason::PickedUp && events[0].stack.isEmpty(),
+		  "Removed{PickedUp} event with empty stack (items moved to the inventory)");
+	CHECK(sim.itemIdHighWater() == 1, "id high-water exposed for #228");
+	sim.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 10. Partial pickup (nearly-full inventory) + full inventory leaves entities.
+// ---------------------------------------------------------------------------
+void testPartialAndFullPickup(ThreadPool &pool)
+{
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::dvec3 boot = sim.initialize(cfg, center);
+	sim.bootstrapTerrain(boot);
+	sim.finalizePlayerSpawn(boot);
+
+	const int bx = static_cast<int>(std::floor(sim.playerFeet().x)) + 2;
+	const int bz = static_cast<int>(std::floor(sim.playerFeet().z)) + 2;
+	glm::ivec3 cell{};
+	TextureType type = AIR;
+	CHECK(findBreakableCell(*sim.world(), bx, bz, cell, type), "surface cell found");
+	sim.setPlayerFlight(true, {cell.x + 0.5, cell.y + 1.0, cell.z + 0.5});
+
+	CoutSilencer silence;
+	// 35 full Stone stacks + slot 35 {Dirt,64}; drop 60 Dirt (slot keeps 4),
+	// then the admin seam refills slot 35 to 60: exactly 4 room, no empty slot.
+	CHECK(sim.grantItems(ItemId::Stone, 35 * 64).result == ItemResult::Ok, "fill 35 slots");
+	CHECK(sim.grantItems(ItemId::Dirt, 64).result == ItemResult::Ok, "fill slot 35");
+	CHECK(sim.dropFromSlot(35, 60, {0.0, -1.0, 0.0}) == ItemResult::Ok, "drop 60 Dirt");
+	CHECK(sim.inventory().stack(35) == S(ItemId::Dirt, 4), "drop removed 60 from slot 35");
+	CHECK(sim.grantItems(ItemId::Dirt, 56).result == ItemResult::Ok, "refill slot 35 to 60 (admin seam)");
+
+	std::vector<sim::ItemEntitySnapshot> snaps;
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1 && snaps[0].stack == S(ItemId::Dirt, 60), "drop entity holds 60 Dirt");
+
+	// Manual drops carry the longer 40-tick delay.
+	for (int i = 0; i < 39; ++i)
+		sim.advanceItems(1.0 / 60.0, false);
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1 && snaps[0].stack == S(ItemId::Dirt, 60),
+		  "player-drop delay honored (39 < 40 ticks)");
+
+	sim.advanceItems(1.0 / 60.0, false); // tick 40: pickup with room for 4
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1 && snaps[0].stack == S(ItemId::Dirt, 56),
+		  "partial pickup leaves the remainder in the world");
+	CHECK(sim.inventory().stack(35) == S(ItemId::Dirt, 64), "the 4 fitting items merged hotbar-first");
+
+	// No room left: further ticks never touch the entity.
+	for (int i = 0; i < 60; ++i)
+		sim.advanceItems(1.0 / 60.0, false);
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1 && snaps[0].stack == S(ItemId::Dirt, 56),
+		  "full inventory leaves the entity untouched");
+	std::vector<items::ItemEntityEvent> events;
+	sim.takeItemEvents(events);
+	bool noRemoval = true;
+	for (const auto &e : events)
+		noRemoval = noRemoval && e.kind != items::ItemEventKind::Removed;
+	CHECK(noRemoval, "no removal events while the inventory is full");
+
+	// A fresh break drop also stays in the world against the full inventory.
+	CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "break with full inventory still drops");
+	for (int i = 0; i < 120; ++i)
+		sim.advanceItems(1.0 / 60.0, false);
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 2, "both entities survive against the full inventory");
+	sim.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 11. Age despawn + population cap overflow (system-level, bounded fixtures).
+// ---------------------------------------------------------------------------
+void testDespawnAndCap()
+{
+	FlatWorld world;
+	items::Inventory inv;
+
+	// Default pins (epic #223 §2).
+	const items::ItemEntitySettings defaults;
+	CHECK(defaults.fixedStep == 1.0 / sim::kItemTickHz, "item default step is the 60 Hz contract");
+	CHECK(defaults.despawnAgeTicks == 18000, "default despawn age is 5 min of sim time");
+	CHECK(defaults.pickupDelayTicks == 10 && defaults.playerDropDelayTicks == 40,
+		  "default pickup delays pinned");
+	CHECK(items::ItemEntitySettings::capacity == 1024, "population cap pinned at 1024");
+
+	// Age despawn (tuned for a bounded fixture).
+	{
+		items::ItemEntitySystem sys;
+		sys.settings.despawnAgeTicks = 120;
+		sys.spawn(S(ItemId::Stone, 1), {0.5, 100.0, 0.5}, {}, 100000);
+		for (int i = 0; i < 119; ++i)
+			sys.update(1.0 / 60.0, world, kFarAway, inv, false);
+		CHECK(sys.size() == 1, "entity alive before the despawn age");
+		sys.update(1.0 / 60.0, world, kFarAway, inv, false);
+		CHECK(sys.size() == 0, "age despawn at exactly despawnAgeTicks");
+		const auto events = sys.takeEvents();
+		bool aged = false;
+		for (const auto &e : events)
+			aged = aged || (e.kind == items::ItemEventKind::Removed &&
+							e.reason == items::ItemRemoveReason::Aged && e.stack == S(ItemId::Stone, 1));
+		CHECK(aged, "Removed{Aged} event carries the lost stack");
+	}
+
+	// Cap overflow: oldest-first, deterministic; ids never reused.
+	{
+		items::ItemEntitySystem sys;
+		sys.spawn(S(ItemId::Stone, 1), {0.5, 100.0, 0.5}, {}, 100000); // id 1
+		sys.update(1.0 / 60.0, world, kFarAway, inv, false);           // id 1 age 1
+		for (int i = 0; i < 1023; ++i)
+			sys.spawn(S(ItemId::Stone, 1), {i + 0.5, 100.0, 0.5}, {}, 100000);
+		CHECK(sys.size() == 1024 && sys.idHighWater() == 1024, "population capped at 1024");
+		sys.spawn(S(ItemId::Stone, 1), {0.5, 100.0, 0.5}, {}, 100000); // id 1025
+		CHECK(sys.size() == 1024 && sys.idHighWater() == 1025, "overflow keeps the cap, ids monotonic");
+		CHECK(sys.entities().front().id == 2, "oldest entity (id 1, age 1) despawned first");
+		bool overflow = false;
+		for (const auto &e : sys.takeEvents())
+			overflow = overflow || (e.kind == items::ItemEventKind::Removed &&
+									e.reason == items::ItemRemoveReason::Overflow && e.id == 1);
+		CHECK(overflow, "Removed{Overflow} event for the despawned oldest");
+		const auto next = sys.spawn(S(ItemId::Stone, 1), {0.5, 100.0, 0.5}, {}, 100000);
+		CHECK(next == 1026, "ids never reused after despawn");
+	}
+
+	// Age ties break on the smallest id (all spawned in the same tick).
+	{
+		items::ItemEntitySystem sys;
+		for (int i = 0; i < 1024; ++i)
+			sys.spawn(S(ItemId::Stone, 1), {i + 0.5, 100.0, 0.5}, {}, 100000);
+		sys.spawn(S(ItemId::Stone, 1), {0.5, 100.0, 0.5}, {}, 100000);
+		CHECK(sys.entities().front().id == 2, "age tie despawns the smallest id");
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 12. 60 Hz rate independence, dropped-step cap, delta spikes, suspension.
+// ---------------------------------------------------------------------------
+void testItemFixedRateAndSuspension()
+{
+	FlatWorld world;
+	items::Inventory inv;
+
+	// Same sim second under different host dt patterns -> bit-identical state.
+	auto runOneSecond = [&](double dt, int frames) {
+		items::ItemEntitySystem sys;
+		sys.spawn(S(ItemId::Stone, 1), {0.5, 100.5, 0.5}, {1.0, 0.0, 0.0}, 100000);
+		for (int i = 0; i < frames; ++i)
+			sys.update(dt, world, kFarAway, inv, false);
+		return sys.entities().front().body.position;
+	};
+	const glm::dvec3 a = runOneSecond(1.0 / 60.0, 60);
+	const glm::dvec3 b = runOneSecond(1.0 / 30.0, 30);
+	const glm::dvec3 c = runOneSecond(1.0 / 120.0, 120);
+	CHECK(a == b && b == c, "60 Hz stepping independent of host dt (bit-identical trajectories)");
+
+	// Delta spike: capped catch-up + dropped-step counter, no burst afterwards.
+	// The exact dropped count sits on an fmod boundary (the MobSystem
+	// pattern), so pin the contract — at most maxSteps, ~all excess counted,
+	// at most the residual + one new tick on the next frame — not FP digits.
+	{
+		items::ItemEntitySystem sys;
+		sys.spawn(S(ItemId::Stone, 1), {0.5, 100.5, 0.5}, {}, 100000);
+		sys.update(10.0, world, kFarAway, inv, false); // 600 ticks owed
+		CHECK(sys.entities().front().ageTicks == sys.settings.maxSteps,
+			  "delta spike steps at most maxSteps");
+		CHECK(sys.droppedSteps() >= 591 && sys.droppedSteps() <= 592,
+			  "excess ticks dropped and counted (600 owed - 8 stepped)");
+		sys.update(1.0 / 60.0, world, kFarAway, inv, false);
+		const uint32_t age = sys.entities().front().ageTicks;
+		CHECK(age == sys.settings.maxSteps + 1 || age == sys.settings.maxSteps + 2,
+			  "no catch-up burst after the spike (residual + one new tick at most)");
+	}
+
+	// Suspension: freeze + previous/current sync, accumulator cleared.
+	{
+		items::ItemEntitySystem sys;
+		sys.spawn(S(ItemId::Stone, 1), {0.5, 100.5, 0.5}, {1.0, 0.0, 0.0}, 100000);
+		sys.update(1.0 / 60.0, world, kFarAway, inv, false);
+		const uint32_t ageBefore = sys.entities().front().ageTicks;
+		sys.update(1.0, world, kFarAway, inv, true);
+		const auto &e = sys.entities().front();
+		CHECK(e.ageTicks == ageBefore, "suspension freezes the population");
+		CHECK(e.previous == e.body.position, "suspension syncs previous/current");
+		CHECK(sys.interpolationAlpha() == 0.0, "suspension clears the accumulator");
+		sys.update(10.0, world, kFarAway, inv, false);
+		CHECK(sys.entities().front().ageTicks == ageBefore + sys.settings.maxSteps,
+			  "resume after suspension never replays buffered time");
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 13. Fixed-seed determinism: two identical facade runs produce identical
+//     entity populations/trajectories, events and inventory.
+// ---------------------------------------------------------------------------
+struct ItemRunResult
+{
+	std::vector<std::vector<sim::ItemEntitySnapshot>> frames;
+	std::vector<items::ItemEntityEvent> events;
+	sim::InventorySnapshot finalInv{};
+	uint64_t highWater{0};
+};
+
+ItemRunResult itemRun(ThreadPool &pool)
+{
+	ItemRunResult result;
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::dvec3 boot = sim.initialize(cfg, center);
+	sim.bootstrapTerrain(boot);
+	sim.finalizePlayerSpawn(boot);
+	CoutSilencer silence;
+	sim.grantItems(ItemId::Stone, 128);
+
+	const int bx = static_cast<int>(std::floor(sim.playerFeet().x));
+	const int bz = static_cast<int>(std::floor(sim.playerFeet().z));
+	glm::ivec3 c1{}, c2{};
+	TextureType t1 = AIR, t2 = AIR;
+	CHECK(findBreakableCell(*sim.world(), bx + 2, bz + 2, c1, t1), "determinism run: first break cell found");
+	CHECK(findBreakableCell(*sim.world(), bx + 3, bz + 2, c2, t2), "determinism run: second break cell found");
+	sim.setPlayerFlight(true, {c1.x + 0.5, c1.y + 1.0, c1.z + 0.5});
+	sim.breakBlock(c1);
+	sim.breakBlock(c2);
+	sim.dropFromSlot(0, 10, {1.0, 0.0, 0.0});
+
+	std::vector<sim::ItemEntitySnapshot> snaps;
+	for (int f = 0; f < 180; ++f)
+	{
+		const double dt = (f % 7 == 0) ? 1.0 / 30.0 : ((f % 13 == 0) ? 0.2 : 1.0 / 60.0);
+		sim.advanceItems(dt, false);
+		sim.itemSnapshots(snaps);
+		result.frames.push_back(snaps);
+	}
+	sim.takeItemEvents(result.events);
+	sim.inventorySnapshot(result.finalInv);
+	result.highWater = sim.itemIdHighWater();
+	sim.shutdown();
+	return result;
+}
+
+void testItemDeterminism(ThreadPool &pool)
+{
+	const ItemRunResult a = itemRun(pool);
+	const ItemRunResult b = itemRun(pool);
+	CHECK(a.frames == b.frames, "two fixed-seed runs: identical per-frame entity populations/trajectories");
+	CHECK(a.events == b.events, "two fixed-seed runs: identical spawn/remove event streams");
+	CHECK(a.finalInv == b.finalInv, "two fixed-seed runs: identical final inventory");
+	CHECK(a.highWater == b.highWater && a.highWater >= 3, "two fixed-seed runs: identical id high-water");
+}
+
+// ---------------------------------------------------------------------------
+// 14. dropFromSlot matrix + snapshot/event stream contracts.
+// ---------------------------------------------------------------------------
+void testDropMatrixAndStreams()
+{
+	{
+		sim::GameSimulation sim(nullptr);
+		CoutSilencer silence;
+		CHECK(sim.dropFromSlot(-1, 1, {0, 1, 0}) == ItemResult::InvalidSlot, "drop from negative slot rejected");
+		CHECK(sim.dropFromSlot(items::kInventorySize, 1, {0, 1, 0}) == ItemResult::InvalidSlot,
+			  "drop from out-of-range slot rejected");
+		CHECK(sim.dropFromSlot(0, 1, {0, 1, 0}) == ItemResult::EmptyStack, "drop from empty slot is EmptyStack");
+		sim.grantItems(ItemId::Stone, 10);
+		CHECK(sim.dropFromSlot(0, 0, {0, 1, 0}) == ItemResult::Ok, "count 0 drop is an Ok no-op");
+		CHECK(sim.itemEntities().size() == 0, "count 0 spawns nothing");
+		CHECK(sim.dropFromSlot(0, 99, {0, 1, 0}) == ItemResult::Ok, "drop clamps to the available count");
+		CHECK(sim.inventory().stack(0) == kEmpty, "clamped drop drained the slot");
+		std::vector<sim::ItemEntitySnapshot> snaps;
+		sim.itemSnapshots(snaps);
+		CHECK(snaps.size() == 1 && snaps[0].stack == S(ItemId::Stone, 10), "drop entity holds the removed stack");
+		const auto &e0 = sim.itemEntities().entities()[0];
+		CHECK(e0.pickupDelay == sim.itemSettings().playerDropDelayTicks, "manual drop carries the longer delay");
+		CHECK(e0.body.velocity.y > 0.0, "degenerate direction falls back to +Y");
+		// Deterministic launch: an identical drop repeats the exact velocity.
+		const glm::dvec3 v0 = e0.body.velocity;
+		sim.grantItems(ItemId::Stone, 10);
+		sim.dropFromSlot(0, 10, {0, 1, 0});
+		CHECK(sim.itemEntities().entities()[1].body.velocity == v0,
+			  "identical drops launch with identical deterministic velocity");
+	}
+
+	// Snapshots: id-sorted, bounded, in-place fill; events: drain order + cap.
+	{
+		items::ItemEntitySystem sys;
+		sys.spawn(S(ItemId::Stone, 1), {0.5, 100.0, 0.5}, {}, 100000);
+		sys.spawn(S(ItemId::Dirt, 2), {1.5, 100.0, 0.5}, {}, 100000);
+		sys.spawn(S(ItemId::Glass, 3), {2.5, 100.0, 0.5}, {}, 100000);
+		std::vector<sim::ItemEntitySnapshot> snaps;
+		sys.snapshots(snaps);
+		CHECK(snaps.size() == 3 && snaps[0].id == 1 && snaps[1].id == 2 && snaps[2].id == 3,
+			  "snapshots are id-sorted");
+		const auto capacity = snaps.capacity();
+		sys.snapshots(snaps); // in-place refill keeps the buffer
+		CHECK(snaps.capacity() >= capacity && snaps.size() == 3, "in-place refill reuses the buffer");
+		auto events = sys.takeEvents();
+		CHECK(events.size() == 3 && events[0].id == 1 && events[2].id == 3,
+			  "events drain in spawn order");
+		CHECK(sys.takeEvents().empty(), "drain empties the stream");
+
+		// Bounded stream: a consumer that never drains drops the OLDEST,
+		// counted (the WorldEvent contract).
+		items::ItemEntitySystem flood;
+		for (int i = 0; i < 5000; ++i)
+			flood.spawn(S(ItemId::Stone, 1), {i + 0.5, 100.0, 0.5}, {}, 100000);
+		CHECK(flood.droppedEventCount() > 0, "event stream cap drops are observable");
+		std::vector<items::ItemEntityEvent> buffered;
+		flood.takeEvents(buffered);
+		CHECK(buffered.size() <= 4096, "event stream stays bounded");
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 15. Lifecycle: initialize/reload reset the population + id allocator; a
+//     refused reload keeps them; suspension at the facade level.
+// ---------------------------------------------------------------------------
+void testItemLifecycleResets(ThreadPool &pool)
+{
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+
+	{
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		sim.initialize(cfg, center);
+		CoutSilencer silence;
+		sim.grantItems(ItemId::Stone, 20);
+		sim.dropFromSlot(0, 5, {0, 1, 0});
+		CHECK(sim.itemEntities().size() == 1 && sim.itemIdHighWater() == 1, "population before re-initialize");
+		sim.initialize(cfg, center);
+		CHECK(sim.itemEntities().size() == 0 && sim.itemIdHighWater() == 0,
+			  "initialize resets the population and id allocator");
+		std::vector<items::ItemEntityEvent> cleared;
+		sim.takeItemEvents(cleared);
+		CHECK(cleared.empty(), "initialize clears the event stream");
+		sim.shutdown();
+	}
+
+	{
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		sim.initialize(cfg, center);
+		CoutSilencer silence;
+		sim.grantItems(ItemId::Stone, 20);
+		sim.dropFromSlot(0, 5, {0, 1, 0});
+		CHECK(sim.reload(43), "reload succeeds");
+		CHECK(sim.itemEntities().size() == 0 && sim.itemIdHighWater() == 0,
+			  "successful reload resets the dropped-item session");
+		sim.shutdown();
+	}
+
+	// Refused reload (stranded edits): population + ids stay authoritative.
+	{
+		TempRoot root("stranded-items");
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		cfg.worldName = "stranded-items";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		WorldChunk *c = sim.world()->getChunk({0, 0, 0});
+		CHECK(c != nullptr, "bootstrap record present");
+		c->reset(c->getPosition(), WorldChunk::ResetMode::ForGeneration);
+		CHECK(sim.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted, "stranded edit accepted");
+		{
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 20);
+		}
+		sim.dropFromSlot(0, 5, {0, 1, 0});
+		std::vector<sim::ItemEntitySnapshot> before;
+		sim.itemSnapshots(before);
+		CHECK(!sim.reload(44), "reload refused while edits are stranded");
+		std::vector<sim::ItemEntitySnapshot> after;
+		sim.itemSnapshots(after);
+		CHECK(before == after && sim.itemIdHighWater() == 1,
+			  "refused reload keeps the dropped-item population + ids");
+		CHECK(c->prepareVoxelStorageForGeneration(), "stranded prepare");
+		c->generateTerrain(*sim.terrainGenerator());
+		sim.pumpWorld();
+		CHECK(sim.reload(44), "reload succeeds after resolution");
+		CHECK(sim.itemEntities().size() == 0 && sim.itemIdHighWater() == 0,
+			  "resolved reload resets the dropped-item session");
+		sim.shutdown();
+	}
+
+	// Facade suspension: advanceItems(dt, true) freezes + syncs, no replay.
+	{
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		sim.finalizePlayerSpawn(boot);
+		sim.setPlayerFlight(true, sim.playerFeet());
+		{
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 20);
+		}
+		sim.dropFromSlot(0, 5, {0, 1, 0});
+		sim.advanceItems(1.0 / 60.0, false);
+		std::vector<sim::ItemEntitySnapshot> before;
+		sim.itemSnapshots(before);
+		sim.advanceItems(1.0, true);
+		std::vector<sim::ItemEntitySnapshot> frozen;
+		sim.itemSnapshots(frozen);
+		CHECK(frozen.size() == before.size(), "suspension keeps the population");
+		bool synced = true;
+		for (const auto &s : frozen)
+			synced = synced && s.previous == s.current;
+		CHECK(synced && sim.itemInterpolationAlpha() == 0.0,
+			  "suspension syncs previous/current and clears the accumulator");
+		sim.shutdown();
+	}
+}
 } // namespace
 
 int main()
@@ -579,6 +1217,14 @@ int main()
 	testLifecycleResets(pool);
 	testSuspensionNoReplay(pool);
 	testSelectionDuality();
+	testBreakResultMatrix(pool);
+	testBreakDropPickupEndToEnd(pool);
+	testPartialAndFullPickup(pool);
+	testDespawnAndCap();
+	testItemFixedRateAndSuspension();
+	testItemDeterminism(pool);
+	testDropMatrixAndStreams();
+	testItemLifecycleResets(pool);
 	std::printf("%d checks, %d failures\n", g_checks, g_fails);
 	if (g_fails == 0)
 		std::printf("PASS\n");

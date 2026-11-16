@@ -247,6 +247,7 @@ set(FT_VOX_ITEM_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemStack.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/Inventory.cpp
+    ${CMAKE_SOURCE_DIR}/src/Items/ItemEntitySystem.cpp
 )
 
 set(FT_VOX_SOURCES
