@@ -163,6 +163,7 @@ void GameUI::drawInventoryPanel(GameUIFrame &frame)
     if (ImGui::Begin("Inventory", &open, ImGuiWindowFlags_AlwaysAutoResize))
     {
         ImGui::TextDisabled("Left-click: move/swap · Right-click: split half · Esc/close: cancel drag");
+        ImGui::TextDisabled("A half-drop onto a nearly-full slot moves only what fits; the rest stays.");
         ImGui::Separator();
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -249,8 +250,13 @@ void GameUI::drawInventoryPanel(GameUIFrame &frame)
         ImGui::Dummy(ImVec2(inventoryui::panelWidth(slotSize, spacing), ui::scaled(1.0f, scale)));
         ImGui::Separator();
         const items::ItemStack selected = frame.inventory.slots[static_cast<size_t>(frame.inventory.selectedSlot)];
+        // Pause gate matches the Q key (Engine): drops are world mutations and
+        // stay inert while paused (the sim would freeze the entity anyway).
+        const bool dropPaused = frame.paused && *frame.paused;
+        ImGui::BeginDisabled(dropPaused);
         if (ImGui::Button("Drop selected stack") && !selected.isEmpty() && frame.dropFromSlot && frame.camera)
             frame.dropFromSlot(frame.inventory.selectedSlot, selected.count, glm::dvec3(frame.camera->getFront()));
+        ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::TextDisabled("Q drops one · 1-9 select");
     }

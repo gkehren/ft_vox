@@ -353,6 +353,12 @@ public:
 	const BiomeMapUpload &pendingBiomeMapUpload() const { return m_mapPresentation.pending; }
 	void recordPendingBiomeMapUpload(VkCommandBuffer cmd, StagingRing &stagingRing);
 
+	/// Drop the per-atlas-layer item icon views/descriptors (issue #229).
+	/// Called eagerly by Engine::applyResourcePack right after the atlas is
+	/// rebuilt (device idle), so no orphaned view of the destroyed image
+	/// lingers; also called lazily on atlasVersion mismatch and at shutdown.
+	void invalidateItemIcons();
+
 private:
 	struct BiomeMapJob
 	{
@@ -497,6 +503,5 @@ private:
 	uint64_t m_iconAtlasVersion{0};
 	std::array<VkDescriptorSet, size_t(COUNT)> m_iconDescs{};
 	std::array<VkImageView, size_t(COUNT)> m_iconViews{};
-	void invalidateItemIcons();
 	VkDescriptorSet itemIconDesc(GameUIFrame &frame, TextureType type);
 };

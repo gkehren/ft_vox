@@ -396,6 +396,10 @@ Engine::ResourcePackApplyResult Engine::applyResourcePack(const std::string &res
 		vkContext->waitIdle();
 		const TextureAtlasLoadReport report = worldRenderer->reloadResourcePack(path);
 		++m_atlasVersion; // UI icon descriptors revalidate against the new atlas
+		// Eagerly drop icon views of the destroyed atlas while the device is
+		// idle (issue #229 review): no orphaned view lingers until next draw.
+		if (gameUi)
+			gameUi->invalidateItemIcons();
 		out.atlasOk = true;
 		out.packHits = report.packHits;
 		out.packMisses = report.packMisses;
@@ -1489,6 +1493,9 @@ void Engine::drawUi()
 	// command callbacks (the setPlayerFlight pattern). The UI is snapshot-only
 	// for display data; every mutation goes through the simulation commands.
 	sim->inventorySnapshot(f.inventory);
+	// Future seam (issue #229): the HUD is read-only per the issue, so this
+	// callback has no consumer yet; it is wired for panel/hotbar click-to-select
+	// and any future UI that selects slots (the sim command is the only path).
 	f.selectHotbarSlot = [this](int slot) { sim->selectHotbarSlot(slot); };
 	f.moveStack = [this](int from, int to) { sim->moveStack(from, to); };
 	f.swapStacks = [this](int a, int b) { sim->swapStacks(a, b); };
