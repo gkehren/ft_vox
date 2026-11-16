@@ -19,38 +19,48 @@ main.cpp
         │     ├── TerrainGenerator + VoxelWorld (WorldChunk records,
         │     │     edits, generation, WorldPersistence)         [issue #206]
         │     ├── physics::PlayerController (120 Hz)
-        │     └── entities::MobSystem (60 Hz, passive mobs)
+        │     ├── entities::MobSystem (60 Hz, passive mobs)
+        │     ├── items::Inventory (36 slots, hotbar 0..8)       [Epic #223]
+        │     └── items::ItemEntitySystem (60 Hz, dropped items) [Epic #223]
         ├── RenderWorldBridge (derived render projection: mesh/light
         │     dispatch, GPU upload, visibility; references sim->world()) [issue #207]
         ├── StagingRing + GpuResourceRetire
         ├── Camera
-        └── ImGuiLayer + GameUI
+        └── ImGuiLayer + GameUI (hotbar HUD + inventory panel, Epic #223)
 ```
 
 | Area | Directory | Primary types |
 |------|-----------|---------------|
 | App / loop | `src/Engine/` | `Engine`, `EngineDefs`, `GameUI`, `ImGuiLayer`, `Profiler`, `Benchmark` |
-| Simulation facade (CPU-only) | `src/Sim/` | `GameSimulation` (owns world + player + mobs; commands, lifecycle, snapshots) |
-| Headless runner (CPU-only) | `src/Headless/` | `ft_vox_headless` host of `GameSimulation` — no SDL/Vulkan/ImGui (issue #210); see [`headless-runner.md`](headless-runner.md) |
+| Simulation facade (CPU-only) | `src/Sim/` | `GameSimulation` (owns world + player + mobs + inventory + item entities; commands, lifecycle, snapshots) |
+| Item domain (CPU-only) | `src/Items/` | `ItemRegistry`, `ItemStack`, `Inventory`, `ItemEntitySystem` (Epic #223); see [`gameplay-loop.md`](gameplay-loop.md) |
+| Headless runner (CPU-only) | `src/Headless/` | `ft_vox_headless` host of `GameSimulation` — no SDL/Vulkan/ImGui (issue #210); gameplay script grammar + digest coverage (issue #230); see [`headless-runner.md`](headless-runner.md) |
 | Authoritative world (CPU-only) | `src/World/`, `src/Core/` | `VoxelWorld`, `WorldChunk`, `WorldCollisionView`, `WorldMobView`, `WorldPersistence`, `WorldSave`, `SimContracts`, `ThreadPool`, `WorkloadTelemetry` |
 | Render chunk side | `src/Chunk/` | `Chunk` (render handle), `ChunkPool`, `TerrainGenerator`, `StreamHelpers` |
 | Entities | `src/Entities/` | `MobSystem`, `MobModel` (passive mobs) |
 | Camera | `src/Camera/` | `Camera` |
-| Rendering | `src/Renderer/` | `WorldRenderer`, `RenderWorldBridge` (derived world projection), passes, `PostStack`, … |
+| Rendering | `src/Renderer/` | `WorldRenderer`, `RenderWorldBridge` (derived world projection), passes, `PostStack`, `ItemEntityRenderer` (derived dropped items, Epic #223), … |
 | Vulkan glue | `src/Vulkan/` | Context, frames, staging, retire |
 | Shared constants | `src/utils.hpp` | Chunk size, voxels, biomes, textures, states |
 | Network (optional) | `src/Network/` | Client/Server — **not re-wired into Engine UI** |
 
-**Ownership boundary (Epic #204, issues #206 / #207 / #208 / #209):** the CPU-only
+**Ownership boundary (Epic #204, issues #206 / #207 / #208 / #209; Epic #223,
+issues #224–#230):** the CPU-only
 `sim::GameSimulation` facade (in `ft_vox_core`) is the single owner of
 authoritative gameplay state: the `VoxelWorld` + `WorldChunk` voxel world
 (chunk residency, logical edits, terrain publication, persistence), the
-120 Hz `PlayerController` and the 60 Hz `MobSystem`. The renderer-owned
+120 Hz `PlayerController`, the 60 Hz `MobSystem`, and the Epic #223 gameplay
+loop — `items::Inventory` (36 slots), `items::ItemEntitySystem` (60 Hz
+dropped items), the interaction commands (break/drop/place-from-hotbar,
+raycast query) and the gameplay persistence capture/restore
+(`inventory.state` + `items.state`). The renderer-owned
 `RenderWorldBridge` is a **derived projection** that references the sim's
 world (never owns it) and keeps only derived render work (mesh/light
 dispatch, GPU uploads, visibility); `Chunk` is a render handle bound to a
-`WorldChunk`. The `Engine` is the graphical host (issue #209): SDL/Vulkan/
-ImGui, camera, input→command mapping, the suspension policy and the
+`WorldChunk`; `ItemEntityRenderer` is a derived snapshot-fed presentation.
+The `Engine` is the graphical host (issue #209): SDL/Vulkan/
+ImGui, camera, input→command mapping (commands-only interactions since
+#227), the suspension policy and the
 world-epoch barrier — no authoritative gameplay state. The temporary
 `ChunkManager` adapter and `ChunkCollisionView` wrapper were removed in
 Phase C; the temporary `ChunkMobWorld` mob adapter was removed in Phase D
@@ -58,9 +68,12 @@ Phase C; the temporary `ChunkMobWorld` mob adapter was removed in Phase D
 `ft_vox_headless` (issue #210, `src/Headless/`) — a standalone process with
 no SDL/Vulkan/ImGui that proves the CPU simulation is reusable without the
 graphical runtime; `-DFT_VOX_GRAPHICS=OFF` builds it plus the CPU tests with
-the graphics stack not discovered at all. See
+the graphics stack not discovered at all. Issue #230 (Epic #223 Phase G)
+made the gameplay loop scriptable there and closed the epic's verification
+gate. See
 [`simulation-render-contracts.md`](simulation-render-contracts.md) for the full
-boundary, the world event stream and the adapter removal status, and
+boundary, the world event stream and the adapter removal status,
+[`gameplay-loop.md`](gameplay-loop.md) for the authoritative gameplay model, and
 [`headless-runner.md`](headless-runner.md) for the runner CLI, scripts and
 canonical digest.
 
@@ -71,6 +84,7 @@ canonical digest.
                  │  ft_vox_core  (CPU-only static library)       │
                  │  GameSimulation · VoxelWorld · WorldChunk ·   │
                  │  PlayerController(120Hz) · MobSystem(60Hz) ·  │
+                 │  Inventory · ItemEntitySystem(60Hz) ·         │
                  │  TerrainGenerator · WorldPersistence ·        │
                  │  WorldCollisionView · WorldMobView · pools    │
                  │  links ONLY: glm + FastNoise2 + Threads       │
@@ -148,6 +162,7 @@ the numbered steps). The numbering matches `Engine.cpp`'s own step list:
    - `updateVisibility` → `collectDrawList` / `collectShadowList`  
    - Computes `uploadBudgetThisFrame` (uploads are **not** done here)  
 9. **Mobs** — `tickMobs`: `sim->advanceMobs` (fixed-step AI/physics, spawn/retire over the CPU-only `WorldMobView`), then `sim->mobSnapshots(mobStates)` (filled in place) + per-mob entity light from `RenderWorldBridge::sampleSmoothedLight` → `WorldRenderer::setMobs`  
+9b. **Items** — `tickItems`: `sim->advanceItems` (dropped-item tick rule: gravity/pickup/despawn, issue #226), then the id-sorted `sim->itemSnapshots` + per-item bridge light → `WorldRenderer::setItemEntities` (derived `ItemEntityRenderer`, issue #229); the item lifecycle event stream is drained at frame cadence  
 10. **Highlight** — raycast block under cursor (`updateHighlight`)  
 11. **Frame slots** — `resourceRetire.beginFrame`, `arenas.beginFrame`, `stagingRing.beginFrame` (fence already waited)  
 12. **ImGui** — UI build: `imgui->beginFrame` / `drawUi` / `endFrame` (CPU only; draw later)  

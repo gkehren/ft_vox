@@ -1,6 +1,8 @@
 # Headless simulation runner (`ft_vox_headless`)
 
-Issue #210, Epic #204 **Phase F** — the standalone CPU simulation runner.
+Issue #210, Epic #204 **Phase F** — the standalone CPU simulation runner;
+issue #230, Epic #223 **Phase G** — the scriptable gameplay loop + canonical
+digest coverage.
 `ft_vox_headless` is a local, deterministic test/benchmark process that hosts
 the **same** [`sim::GameSimulation`](../src/Sim/GameSimulation.hpp) facade the
 graphical `Engine` hosts — with **no SDL3 window, Vulkan context, ImGui UI,
@@ -9,6 +11,7 @@ server (the Epic's non-goals apply: no transport, no client/server semantics).
 
 Related documents:
 
+- [`gameplay-loop.md`](gameplay-loop.md) — the authoritative item/gameplay model the script grammar drives (Epic #223)
 - [`simulation-render-contracts.md`](simulation-render-contracts.md) — the authoritative CPU/derived boundary (Phases A–F)
 - [`engine-architecture.md`](engine-architecture.md) — the graphical host's frame orchestration
 - [`building.md`](building.md) — full build requirements (the CPU-only path below needs none of the graphics stack)
@@ -37,6 +40,11 @@ ft_vox_core (CPU-only static lib: glm + FastNoise2 + Threads)
   contracts (open / edit / flush / refusable close / reload / player restore)
   and the player-aware placement rule shared with the graphical host
   (`canPlaceVoxel`, issue #209).
+- It scripts the **full gameplay loop** (issue #230, Epic #223 Phase G):
+  give / select / drop / break / placeSelected / inventory + item assertions,
+  with the canonical digest covering the inventory, the id-sorted item
+  population and the id allocator — the executable closure gate of the epic
+  (see [`gameplay-loop.md`](gameplay-loop.md)).
 
 ## 2. Building
 
@@ -148,7 +156,7 @@ Smoke commands (copy/paste):
 | 2 | usage error (unknown flag, bad value) |
 | 3 | script error (I/O, grammar, wait budget exceeds `--ticks`) |
 | 4 | world/save I/O failure (open refused, seed mismatch, flush/close failed) |
-| 5 | assertion mismatch (`expect voxel`, `expect digest`, `--expect-digest`) |
+| 5 | assertion mismatch (`expect voxel`, `expect inventory`, `expect items`, `expect digest`, `--expect-digest`) |
 | 6 | run timeout (bounded teardown; never stalls indefinitely) |
 
 Unlike the graphical host (which continues transient when a save cannot
@@ -157,19 +165,26 @@ open), the runner treats a requested-but-unopened world as an **error exit**
 
 ### Summary output
 
-One machine-readable line on stdout (the facade's own `[world] …` log lines
-may precede it; parse the line starting with `SUMMARY `):
+One machine-readable line on stdout (the facade's own `[world] …` /
+`[items] grant …` log lines may precede it; parse the line starting with
+`SUMMARY `, or — with `--json` — the line starting with `{`):
 
 ```text
-SUMMARY status=ok exit_code=0 seed=42 generator=1 ticks=600 workers=0 interest_radius=96 chunks=129 edits=4 refused=0 rejected=0 edit_revision=5 mobs=15 player=(8.301,63.001,1.301) area=(-16,0,-16)-(15,255,15) digest=3a068dd4be8ab57e save=none
+SUMMARY status=ok exit_code=0 seed=42 generator=1 ticks=600 workers=0 interest_radius=96 chunks=126 edits=6 refused=0 rejected=0 edit_revision=7 mobs=14 items=1 inventory=3 item_high_water=2 player=(8.5,221.5,8.5) area=(-16,0,-16)-(15,255,15) digest=9b5013db5e550fe2 save=none
 ```
+
+(The example is the shipped output of the canonical fixture run above:
+`--seed 42 --ticks 600 --script tests/fixtures/sim-actions.txt`.)
 
 `--json` emits the same fields as a single JSON object. Fields: world
 identity (`seed`, `generator`), executed `ticks`, `workers`,
-`interest_radius`, residency (`chunks`), `edits` (accepted place/delete),
-`refused` (player-aware `canPlaceVoxel` refusals), `rejected` (world-level
-edit rejections, e.g. an unloaded/in-transit target — also logged to stderr),
-`edit_revision` (next logical edit id), `mobs`, authoritative `player` feet
+`interest_radius`, residency (`chunks`), `edits` (accepted place/delete/
+break/placeSelected), `refused` (player-aware `canPlaceVoxel` refusals),
+`rejected` (world-level edit rejections and gameplay break/place refusals —
+also logged to stderr), `edit_revision` (next logical edit id), `mobs`,
+`items` (live dropped-item entities, issue #230), `inventory` (sum of all 36
+slot counts, issue #230), `item_high_water` (monotonic entity-id allocator
+high-water — ids are never reused, issue #230), authoritative `player` feet
 position, observed `area`, canonical `digest` (§5) and `save` status:
 
 - `none` — transient session (no `--world`), nothing to persist.
@@ -202,12 +217,19 @@ jump                              one-frame jump press (consumed by the next fra
 swim up|down|off
 flight on|off                     flight toggle at the current feet (refusals logged)
 teleport <x> <y> <z>              host-driven reposition (doubles)
-place <x> <y> <z> <block>         cell edit, gated by canPlaceVoxel (player-aware rule)
-delete <x> <y> <z>                cell edit
+place <x> <y> <z> <block>         CREATIVE cell edit, gated by canPlaceVoxel (player-aware rule)
+delete <x> <y> <z>                CREATIVE cell edit (infinite-block semantics)
+give <item> <count>               grantItems admin seam (logged; issue #230)
+select <slot>                     gameplay hotbar selection, slot 0..8 (issue #230)
+drop <count>                      drop from the SELECTED slot along fixed +Z (issue #230)
+break <x> <y> <z>                 GAMEPLAY breakBlock: registry drop spawned (issue #230)
+placeSelected <x> <y> <z>         GAMEPLAY place-from-hotbar: consumes 1 on success (issue #230)
 interest <x> <y> <z>              pin the headless interest probe
 interest follow                   interest follows the player again
 save                              durable player-state capture + flush (requires --world)
 expect voxel <x> <y> <z> <block|air|unknown>   immediate assertion (exit 5 on mismatch)
+expect inventory <slot> <item|empty> <count>   immediate assertion, slot 0..35 (issue #230)
+expect items <n>                  immediate live-entity-count assertion, 0..1024 (issue #230)
 expect digest <hex>               final-digest assertion (checked at end of run)
 ```
 
@@ -216,12 +238,51 @@ expect digest <hex>               final-digest assertion (checked at end of run)
 - `<block>` is a single token: a `TextureType` display name with underscores
   (case-insensitive, e.g. `Stone`, `OAK_LEAVES`, `oak_leaves`), a numeric
   ordinal, or `air`. Placing `AIR` clears the cell.
+- `<item>` is a single token: an `items::ItemId` registry name with the same
+  discipline (case-insensitive, spaces/hyphens normalize to underscores,
+  e.g. `Cobblestone`, `OAK_LOG`, `oak-log`), or a numeric registry ordinal
+  in `[1, kItemCount]`. The `None` sentinel (`0` / `none`) is never a valid
+  grant/expect token. `empty` is only valid in `expect inventory` and pins
+  count 0 (the canonical empty stack is `{None, 0}`).
+- Counts (`give`, `drop`, `expect inventory`) are bounded to `[0, 65535]`
+  (the `uint16_t` stack-count range) **at parse time**; out-of-range slots,
+  counts, item tokens and cell bounds are grammar errors (exit 3), never
+  silent runtime truncation.
 - `place` is gated by the **same** `GameSimulation::canPlaceVoxel` rule the
   graphical host uses (issue #209): a solid block overlapping the
   authoritative body is refused (counted in `refused`, logged to stderr),
   never silently placed.
 - `unknown` in `expect voxel` asserts the cell is **unavailable** (unloaded /
   not generated) — the simulation never infers solidity there.
+
+### Gameplay ops vs creative ops (issue #230)
+
+The creative `place`/`delete` seams are the infinite-block editor path; the
+gameplay ops drive the survival-lite loop through the **same commands the
+graphical host issues** (see [`gameplay-loop.md`](gameplay-loop.md)):
+
+- `give <item> <count>` — the logged `grantItems` test/admin seam (epic #223
+  §3). Hotbar-first merge, then empty slots; a remainder that did not fit is
+  logged to stderr. Not a gameplay rule — survival never grants.
+- `select <slot>` — `selectHotbarSlot`, the gameplay selection (distinct
+  from the creative `selectedBlock` seam, which the creative ops use).
+- `drop <count>` — `dropFromSlot` on the selected slot. The headless host
+  has no camera, so the direction is the fixed plain value **+Z** (manual
+  drops carry the longer pickup delay — no instant re-pickup).
+- `break <x> <y> <z>` — `breakBlock`: validates against the item registry
+  (BEDROCK/fluids refused), deletes through the world edit semantics and
+  spawns the registry drop (STONE → Cobblestone, grass block → Dirt, …).
+  An accepted break counts in `edits`; refusals count in `rejected` with a
+  stderr diagnostic carrying the `BreakResult` code.
+- `placeSelected <x> <y> <z>` — `placeSelectedBlock`: the selected stack
+  must hold a placeable item; gated by `canPlaceVoxel`; **consumes exactly 1
+  item on success only**. `PlayerOverlap` counts in `refused`, every other
+  refusal in `rejected` (stderr carries the `PlaceResult` code).
+- **Auto-pickup is a tick rule, not a command**: it is exercised through
+  `wait` (break → wait → proximity pickup into the inventory, hotbar-first).
+  The canonical fixture demonstrates the full loop: break → wait → pickup →
+  select → placeSelected, and ends with a manual drop still **in flight** so
+  the sync/async digest parity check covers item physics.
 
 The canonical fixture is [`tests/fixtures/sim-actions.txt`](../tests/fixtures/sim-actions.txt).
 
@@ -232,7 +293,7 @@ unordered iteration order, struct padding or derived/GPU state. Algorithm:
 **FNV-1a 64-bit** over this byte stream (integers little-endian fixed width;
 doubles the IEEE-754 binary64 bit pattern, little-endian):
 
-1. magic `FTVHDIG1` (8 bytes — digest format version);
+1. magic `FTVHDIG2` (8 bytes — digest format version);
 2. `seed` i32, `generatorVersion` u32, `ticks` u64, `frameDt` f64 (1/60);
 3. observed-area bounds `minX,minY,minZ,maxX,maxY,maxZ` (6 × i32, inclusive);
 4. area cells in **x-major → z → y** order: availability u8 + block type u8
@@ -244,9 +305,27 @@ doubles the IEEE-754 binary64 bit pattern, little-endian):
 7. mob count u64, then per mob **sorted by entity id ascending**: id u64,
    species u8, position 3×f64, velocity 3×f64, grounded u8,
    waitingForTerrain u8, yaw f64, targetYaw f64, timer f64, gait f64,
-   stride f64, age f64, walking u8, randomState u64.
+   stride f64, age f64, walking u8, randomState u64;
+8. **selected hotbar slot** i32, then the 36 inventory slots in **fixed slot
+   order 0..35**: item u16 (`ItemId` registry ordinal) + count u16
+   (issue #230);
+9. item-entity count u64, then per entity **sorted by entity id ascending**:
+   id u64, item u16, count u16, **quantized** position 3×i64, quantized
+   velocity 3×i64, ageTicks u32 (issue #230). Quantization is
+   `llround(value × 1024)` — a 1/1024-block grid that absorbs last-bit FP
+   noise while keeping any gameplay-visible difference distinct;
+10. entity-id allocator **high-water** u64 (ids are never reused across
+    sessions, issues #226/#228; issue #230).
 
 Implementation: [`src/Headless/SimDigest.cpp`](../src/Headless/SimDigest.cpp).
+
+**Format version bump (issue #230)**: `FTVHDIG1` → `FTVHDIG2`. The gameplay
+fields (8–10) were appended **deliberately** — digests recorded before the
+bump are not comparable with post-bump digests. No expected digest is
+hardcoded in `tests/test_headless_runner.py` or the fixtures (they are
+computed at runtime and compared across runs), so the bump required no
+fixture rewrite; the `--expect-digest` gate simply records the new-format
+digest at runtime.
 
 **Default observed area**: the 32×32 column block (chunks `cx-1..cx`,
 `cz-1..cz`) around the bootstrap chunk, full world height (`y 0..255`). On a
@@ -269,9 +348,9 @@ reload the bootstrap center is the *saved* player position, so pin
 ## 6. Headless frame orchestration
 
 Fixed host cadence `dt = 1/60`; the simulation's internal fixed steps
-(**120 Hz player / 60 Hz mobs**) are unchanged. Per frame, mirroring
-`Engine::run`'s simulation → streaming → mobs order minus every presentation
-step:
+(**120 Hz player / 60 Hz mobs / 60 Hz items**) are unchanged. Per frame,
+mirroring `Engine::run`'s simulation → streaming → mobs → items order minus
+every presentation step:
 
 1. `advancePlayer(dt, command, suspended=false)`
 2. interest update (player feet, or the pinned probe)
@@ -283,7 +362,9 @@ step:
    (`--workers 0`)
 6. `world.pump()` + event drain (the headless consumer discards the stream)
 7. `advanceMobs(dt, interest, radius, suspended=false)`
-8. `sim.pumpWorld()`
+8. `advanceItems(dt, suspended=false)` — the dropped-item tick rule
+   (issue #230); early-outs at zero cost when no items exist
+9. `sim.pumpWorld()`
 
 Lifecycle: `initialize` → `bootstrapTerrain` → `finalizePlayerSpawn` →
 frames → final quiesce → digest → optional `savePlayerState(0, 0)` +
@@ -295,7 +376,7 @@ are presentation; the runner pins them to 0 in the saved player state.
 | CTest | What it proves |
 |---|---|
 | `HeadlessSmoke` | plain fixed-seed run exits 0 with a canonical summary |
-| `HeadlessRunner` | full acceptance driver (`tests/test_headless_runner.py`): sync + async determinism, save→exit→reload→edit verification across 3 processes in an isolated temp dir, interest load/unload/reload residency assertions, every failure exit code (incl. NaN/malformed options + world-rejection diagnostics), timeout teardown, JSON summary |
+| `HeadlessRunner` | full acceptance driver (`tests/test_headless_runner.py`): sync + async determinism, save→exit→reload→edit verification across 3 processes in an isolated temp dir, interest load/unload/reload residency assertions, every failure exit code (incl. NaN/malformed options + world-rejection diagnostics), timeout teardown, JSON summary; **issue #230**: the gameplay-loop fixture (give/select/break/wait-pickup/placeSelected/drop) with a live item in flight at the digest boundary, sync/async parity with item physics, `items`/`inventory`/`item_high_water` summary fields (key=value + JSON), a 3-process gameplay round-trip restoring inventory + entities + id allocator (no reuse), and gameplay grammar/assertion exit codes |
 | `HeadlessDeps` | include closure + real link artifacts + no graphics discovery in CPU-only caches (`tests/check_headless_deps.py`); always-on |
 | `CpuOnlyBuild` | separate clean `FT_VOX_GRAPHICS=OFF` configure/build/test run (label `cpu-only`); **opt-in** via `-DFT_VOX_CPU_ONLY_BUILD_CHECK=ON`, recommended for CI |
 

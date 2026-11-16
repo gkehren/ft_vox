@@ -1,4 +1,5 @@
-# ft_vox_headless canonical scripted fixture (issue #210, Epic #204 Phase F).
+# ft_vox_headless canonical scripted fixture (issue #210, Epic #204 Phase F;
+# gameplay loop issue #230, Epic #223 Phase G).
 #
 # Deterministic by construction: fixed seed (--seed 42), fixed host dt
 # (1/60), fixed per-frame streaming budgets, synchronous generation by
@@ -6,9 +7,10 @@
 #
 #   ft_vox_headless --seed 42 --ticks 600 --script tests/fixtures/sim-actions.txt
 #
-# Edits target y=220: guaranteed air above any generated terrain, far from
-# the player body (the player-aware placement rule never refuses them).
-# Block names are single tokens (underscores, case-insensitive).
+# Edits target y=220: guaranteed air above any generated terrain. The
+# gameplay leg hovers the (flight-mode) player just above that plateau, so
+# the player-aware placement rule never refuses the scripted cells.
+# Block/item names are single tokens (underscores, case-insensitive).
 
 # --- locomotion legs (world-XZ movement, sprint, jump) ---------------------
 wait 30
@@ -41,5 +43,33 @@ expect voxel 8 220 8 Stone
 expect voxel 10 220 8 Glass
 expect voxel 9 220 8 air
 
-# Total scripted frames: 420. With --ticks 600 the runner idle-fills the
-# remaining 180 frames (deterministic end condition).
+# --- gameplay loop (issue #230): break -> wait -> pickup -> placeSelected ---
+# Flight is host-driven: the teleport position holds exactly (no drift), so
+# the break drop spawns within pickup radius of the hovering player feet.
+flight on
+move 0 0
+teleport 8.5 221.5 8.5
+wait 30
+give Stone 5
+expect inventory 0 Stone 5
+select 0
+break 8 220 8              # gameplay break: Stone -> Cobblestone drop
+expect items 1
+wait 90                    # pickup delay + proximity auto-pickup (tick rule)
+expect items 0
+expect inventory 1 Cobblestone 1   # hotbar-first: slot 0 holds the Stone
+select 1
+placeSelected 11 220 8     # gameplay place-from-hotbar: consumes exactly 1
+expect voxel 11 220 8 Cobblestone
+expect inventory 1 empty 0
+select 0
+drop 2                     # manual drop, fixed +Z direction; long pickup delay
+expect items 1
+expect inventory 0 Stone 3
+
+# Total scripted frames: 540. With --ticks 600 the runner idle-fills the
+# remaining 60 frames (deterministic end condition). The manual drop is still
+# IN FLIGHT at the digest boundary: item physics is digest-covered, and the
+# sync/async parity check runs with a live entity. Final state: edits=6
+# (3 places + 1 delete + 1 break + 1 placeSelected), items=1, inventory=3,
+# item_high_water=2 (break drop id 1 picked up, manual drop id 2 alive).

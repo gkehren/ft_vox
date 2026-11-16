@@ -2,16 +2,19 @@
 
 // =============================================================================
 // SimDigest — canonical authoritative-state digest of a headless simulation
-// run (issue #210, Epic #204 Phase F).
+// run (issue #210, Epic #204 Phase F; gameplay fields issue #230, Epic #223
+// Phase G).
 //
 // Hashes DOCUMENTED CANONICAL FIELDS ONLY: world identity, the observed-area
 // voxel occupancy, the authoritative player body, the authoritative mob
-// population (sorted by entity id) and the logical edit counters. Never raw
-// pointers, unordered iteration order, struct padding or derived/GPU state.
+// population (sorted by entity id), the logical edit counters, the gameplay
+// inventory + hotbar selection, the id-sorted dropped-item population and the
+// entity-id allocator high-water. Never raw pointers, unordered iteration
+// order, struct padding or derived/GPU state.
 //
 // Canonical byte stream (FNV-1a 64-bit; every integer little-endian fixed
 // width, every double the IEEE-754 binary64 bit pattern, little-endian):
-//   1. magic "FTVHDIG1"                       (8 bytes, format version)
+//   1. magic "FTVHDIG2"                       (8 bytes, format version)
 //   2. seed i32, generatorVersion u32, ticks u64, frameDt f64
 //   3. area bounds minX,minY,minZ,maxX,maxY,maxZ (6 x i32, inclusive)
 //   4. area cells, x-major then z then y: availability u8 + block type u8
@@ -23,6 +26,19 @@
 //      id u64, species u8, position 3xf64, velocity 3xf64, grounded u8,
 //      waitingForTerrain u8, yaw f64, targetYaw f64, timer f64, gait f64,
 //      stride f64, age f64, walking u8, randomState u64
+//   8. selected hotbar slot i32, then the 36 inventory slots in FIXED slot
+//      order 0..35: item u16 (ItemId registry ordinal) + count u16
+//   9. item-entity count u64, then per entity sorted by id ascending:
+//      id u64, item u16, count u16, quantized position 3xi64, quantized
+//      velocity 3xi64, ageTicks u32. Quantization: llround(value * 1024)
+//      (1/1024-block grid) — absorbs last-bit FP noise across compilers
+//      while keeping any gameplay-visible difference distinct.
+//  10. entity-id allocator high-water u64 (ids are never reused, #226/#228)
+//
+// FORMAT VERSION: "FTVHDIG1" -> "FTVHDIG2" (issue #230) — the gameplay fields
+// (8..10) were appended DELIBERATELY; digests recorded before the bump are
+// not comparable. No expected digest is hardcoded in tests/fixtures (they are
+// computed at runtime), so the bump needed no fixture rewrite.
 //
 // Determinism scope: identical on repeated runs of the SAME binary on the
 // same platform. Cross-platform / cross-compiler bit-identity is NOT promised
@@ -56,8 +72,10 @@ class CanonicalHash
 public:
 	void bytes(const void *data, size_t size);
 	void u8(uint8_t value);
+	void u16(uint16_t value);
 	void i32(int32_t value);
 	void u32(uint32_t value);
+	void i64(int64_t value);
 	void u64(uint64_t value);
 	void f64(double value);
 	void dvec3(const glm::dvec3 &value);

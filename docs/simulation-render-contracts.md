@@ -65,10 +65,17 @@ bridge publication path (§10, "Phase D interaction contract"). Phase E
 (§10, "Phase E gameplay-persistence contract"). Phase F (issue #229) added the
 **derived presentation**: hotbar HUD, inventory panel and the
 `ItemEntityRenderer` (snapshot-driven, command-only mutations, epoch-barrier
-reset; §10, "Phase F gameplay-presentation contract").
+reset; §10, "Phase F gameplay-presentation contract"). Phase G (issue #230)
+**closed the epic**: the headless script grammar drives the full gameplay
+loop, the canonical digest (`FTVHDIG2`) covers inventory + item population +
+id allocator, and the closure gate (full suite, CPU-only build, goldens,
+benchmark parity) is recorded in `benchmarks/issue-230-closure.md` (§10, "Phase G
+headless gameplay + closure contract"; [`gameplay-loop.md`](gameplay-loop.md)
+is the authoritative gameplay reference).
 
 Related documents:
 
+- [`gameplay-loop.md`](gameplay-loop.md) — the authoritative Epic #223 gameplay model (items, commands, entities, persistence, replication readiness)
 - [`headless-runner.md`](headless-runner.md) — the Phase F standalone simulation runner (CLI, scripts, digest, CPU-only build)
 - [`engine-architecture.md`](engine-architecture.md) — engine loop, chunks, streaming, terrain gen
 - [`vulkan-graphics.md`](vulkan-graphics.md) — Vulkan device path, pass graph, shaders
@@ -94,6 +101,9 @@ without changing the world.
 | Mob state: position, velocity, AI, species (`MobSystem`) | Frustum/visibility culling, draw & shadow lists |
 | Save identity: seed, generator version, world name, save revision (`WorldMeta`) | Camera, view/projection, render settings & timing |
 | Terrain generation inputs (seed, biome/height/cave noise) | Debug UI panels, biome-map tiles, overlay highlights |
+| Inventory: 36 slots + hotbar selection (`items::Inventory`, Epic #223) | Hotbar HUD / inventory panel presentation, UI-local drag cursor (`GameUI`) |
+| Dropped-item entities: id, stack, body, age, pickup delay + id allocator (`items::ItemEntitySystem`) | Item **render** snapshots (`ItemEntitySnapshot`), `ItemEntityRenderer` instances, atlas icon descriptors |
+| Gameplay persistence: `inventory.state` (FTVI) + `items.state` (FTVJ) incl. the allocator high-water (`WorldPersistence`) | |
 | | Mob **render** snapshots (`MobRenderState` = `sim::MobSnapshot`) |
 
 The mob **simulation** state is authoritative; the per-frame
@@ -105,7 +115,7 @@ explicit.
 
 ## 2. Dependency arrows
 
-### Current (Phase E, after the graphical-host integration)
+### Current (Epic #223 Phase G, after the gameplay loop landed)
 
 ```
                  SDL3 / ImGui / Vulkan (volk, VMA)
@@ -124,11 +134,12 @@ explicit.
         sim::GameSimulation ◄─ AUTHORITATIVE  RenderWorldBridge ─ DERIVED projection
         (CPU facade: owns TerrainGenerator,   │ references sim->world(),
          VoxelWorld, PlayerController 120 Hz, │ stamped with the sim's world
-         MobSystem 60 Hz; lifecycle, spawn/   │ epoch at attach; mesh/light
-         restore, flight, commands incl. the  │ dispatch, GPU upload,
-         player-aware placement rule,         │ visibility, commit groups,
-         value snapshots)                     │ deferred GPU retire, light
-              │                               │ caches, debug trace
+         MobSystem 60 Hz, Inventory +         │ epoch at attach; mesh/light
+         ItemEntitySystem 60 Hz; lifecycle,   │ dispatch, GPU upload,
+         spawn/restore, flight, commands      │ visibility, commit groups,
+         incl. the player-aware placement     │ deferred GPU retire, light
+         rule, value snapshots)               │ caches, debug trace
+              │                               │
               │ owns                          ▼
               ▼                         Chunk  (GPU ranges, draw caches, mesh
         VoxelWorld                             payloads, light caches, dirty sections,
@@ -149,11 +160,18 @@ explicit.
         │  GameSimulation, VoxelWorld, WorldChunk, WorldCollisionView, │
         │  WorldMobView, VoxelPool, BorderPool, TerrainGenerator,      │
         │  TerrainVegetation, MobSystem, MobModel, WorldSave,          │
-        │  WorldPersistence                                            │
+        │  WorldPersistence, Items (ItemRegistry, ItemStack,           │
+        │  Inventory, ItemEntitySystem)                                │
         │  + Core/SimContracts.hpp, Core/ThreadPool.hpp,               │
         │    Core/WorkloadTelemetry.hpp                                │
         └─────────────────────────────────────────────────────────────┘
 ```
+
+The derived item presentation hangs off the same arrow: the host fills
+`ItemEntityRenderer` from the id-sorted `sim::ItemEntitySnapshot`s (the mob
+snapshot pattern) and the hotbar HUD / inventory panel from
+`sim::InventorySnapshot` — both are rebuildable views, never authoritative
+(Epic #223 Phases F/G; [`gameplay-loop.md`](gameplay-loop.md) §7).
 
 `ft_vox_core` depends only on GLM, FastNoise2 and `Threads::Threads`. It has
 **no** dependency on SDL3, Vulkan, volk, VMA, ImGui or miniz, and never
@@ -214,16 +232,19 @@ graphics stack at all ([`headless-runner.md`](headless-runner.md)).
 | Component | Location | Side | Current coupling | Migrating phase |
 |---|---|---|---|---|
 | `Engine` | `src/Engine/Engine.cpp/.hpp` | Graphical host / adapter | Owns SDL window, Vulkan device/swapchain/frame, `WorldRenderer`, `GameUI`, `ImGuiLayer`, `Camera`, `RenderSettings`, `ThreadPool`, `ChunkPool`, **and** `sim::GameSimulation` + `RenderWorldBridge` (the bridge references the sim's world). Maps SDL input to commands, owns the single suspension policy (`simulationSuspended`), the day-cycle presentation parameter and the world-epoch barrier (`resetWorldProjection`); `run()` is the documented 16-step frame orchestration. No authoritative gameplay state lives here. | E (#209) — **landed** |
-| `GameSimulation` | `src/Sim/GameSimulation.hpp/.cpp` | **Authoritative (CPU-only)** | The Phase D facade: owns `TerrainGenerator`, `VoxelWorld`, `PlayerController` (120 Hz), `MobSystem` (60 Hz), flight mode, block selection, spawn/restore, reload counter. Explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown), per-frame advance with plain values (dt, commands, observer), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`). Phase E added the player-aware placement query (`canPlaceVoxel`; hosts gate edits with it, `placeVoxel` does not call it). Render-free; in `ft_vox_core`. | D (#208) — **landed**; E (#209) placement query |
+| `GameSimulation` | `src/Sim/GameSimulation.hpp/.cpp` | **Authoritative (CPU-only)** | The Phase D facade: owns `TerrainGenerator`, `VoxelWorld`, `PlayerController` (120 Hz), `MobSystem` (60 Hz), **`items::Inventory` + `items::ItemEntitySystem` (60 Hz, Epic #223)**, flight mode, block selection, spawn/restore, reload counter. Explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown — gameplay state captured/restored on the `player.state` seams), per-frame advance with plain values (dt, commands, observer), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`, `InventorySnapshot`, `ItemEntitySnapshot`). Phase E added the player-aware placement query (`canPlaceVoxel`; hosts gate edits with it, `placeVoxel` does not call it). Epic #223 added the gameplay commands (hotbar/inventory, `grantItems`, `breakBlock`, `dropFromSlot`, `placeSelectedBlock`, `raycastVoxel`) with explicit result vocabularies. Render-free; in `ft_vox_core`. | D (#208) — **landed**; E (#209) placement query; Epic #223 B–E (#225–#228) |
 | `VoxelWorld` | `src/World/VoxelWorld.hpp/.cpp` | **Authoritative (CPU-only)** | Single owner of chunk residency/streaming, the deferred/coalesced logical-edit queue with border mirrors, generation worker publication, `WorldPersistence`, and the voxel/border backing pools. Render-free public API (plain position/forward/settings values); publishes the `WorldEvent` change stream. In `ft_vox_core`; owned by `GameSimulation` since Phase D. | B (#206) — **landed** |
 | `WorldChunk` | `src/World/WorldChunk.hpp/.cpp` | **Authoritative (CPU-only)** | The chunk record: voxel backing, occupancy metadata, border shell, persistent-edit map, `sim::ChunkIdentity` (generation + revision — the single source of the pair), lifecycle state, in-transit flag, per-column generation outputs. In `ft_vox_core`. | B (#206) — **landed** |
 | `RenderWorldBridge` | `src/Renderer/RenderWorldBridge.hpp/.cpp` | Derived (renderer-owned projection) | **References** the simulation-owned `VoxelWorld` (`world()`), never owns sim. Keeps render handle map, mesh/light dispatch, GPU uploads, commit groups, visibility, light-cache intent + sampling, deferred GPU retirement, debug trace. Drains the world event stream and projects already-resident records on attach. Stamped with the host's world epoch (`worldGenerationId()`) at attach. Replaces the removed `ChunkManager` adapter. | C (#207) — **landed**; E (#209) epoch stamp + host attach |
 | `Chunk` | `src/Chunk/Chunk.hpp` | Derived (render handle) | GPU arena ranges, draw caches, pending mesh payloads, entity light caches, dirty sections, visibility. Binds to a `WorldChunk` (world-owned in game; privately owned for standalone tests/tools) and forwards every voxel read/write. The bridge's per-chunk render record. | C (#207) — **landed** (mesh/light payloads owned by the bridge) |
 | `WorldCollisionView` | `src/World/WorldCollisionView.hpp` | **Authoritative query seam (CPU-only)** | Implements `physics::VoxelCollisionWorld` over `VoxelWorld` with the exact historical collision semantics (scoped shared lock, 16-entry cache, boundary envelope, unknown cells, pending-edit overlay). In `ft_vox_core`. | B (#206) — **landed** |
 | `WorldMobView` | `src/World/WorldMobView.hpp` | **Authoritative mob seam (CPU-only)** | Implements `entities::MobWorld` over `WorldCollisionView` + `TerrainGenerator`; `surface()` keeps the exact biome + grass eligibility scan. Replaces the removed `ChunkMobWorld` adapter; derived entity light sampling is NOT here (the host samples the bridge after the mob snapshot). In `ft_vox_core`'s include closure. | D (#208) — **landed** |
-| `GameUI` | `src/Engine/GameUI.*` | Derived | ImGui panels; reads sim snapshots + render settings + `WorldPersistence::Status` via a plain frame struct (`GameUIFrame`). Biome-map requests/results are validated against the world generation + seed. Render/UI-only; unchanged by Phase E except the epoch barrier's biome-map invalidation. | E (#209) — **landed** |
-| `WorldPersistence` / `SaveService` | `src/World/WorldPersistence.*` | **Authoritative (CPU-only)** | Save facade + async I/O worker; **owned by `VoxelWorld`** (moved out of `ChunkManager` in Phase B — the key inversion the epic required). In `ft_vox_core`. | B (#206) — **landed** |
+| `GameUI` | `src/Engine/GameUI.*` | Derived | ImGui panels; reads sim snapshots + render settings + `WorldPersistence::Status` via a plain frame struct (`GameUIFrame`). Biome-map requests/results are validated against the world generation + seed. Epic #223 F (#229) added the gameplay surfaces (`GameUIInventory.cpp` + `InventoryUi.hpp`): always-on hotbar HUD + `E` inventory panel — snapshot-only displays issuing command callbacks; the drag cursor is UI-local presentation discarded on close; item icons are per-atlas-layer ImGui descriptors. Render/UI-only. | E (#209) — **landed**; Epic #223 F (#229) gameplay surfaces |
+| `WorldPersistence` / `SaveService` | `src/World/WorldPersistence.*` | **Authoritative (CPU-only)** | Save facade + async I/O worker; **owned by `VoxelWorld`** (moved out of `ChunkManager` in Phase B — the key inversion the epic required). Epic #223 Phase E (#228) added the gameplay state files `inventory.state` (FTVI) + `items.state` (FTVJ, incl. the entity-id allocator high-water) with the exact `WorldSave` discipline (atomic writes, strict validation, missing-fresh/corrupt-loud). In `ft_vox_core`. | B (#206) — **landed**; Epic #223 E (#228) gameplay files |
 | `MobSystem` | `src/Entities/MobSystem.*` | **Authoritative (CPU-only)** | Fixed-step 60 Hz passive mobs over `entities::MobWorld`. In `ft_vox_core`; owned by `GameSimulation` since Phase D. `MobRenderState` snapshots are derived. | D (#208) — **landed** |
+| `items::Inventory` | `src/Items/Inventory.*` | **Authoritative (CPU-only)** | Fixed 36-slot container (hotbar 0..8) + selected hotbar index; deterministic slot operations with `items::ItemResult` codes; trivially copyable, no heap churn. Owned by `GameSimulation` (Epic #223 B); mutations through commands only; `restore` is a lifecycle-only persistence seam. In `ft_vox_core`. | Epic #223 A/B (#224/#225) — **landed** |
+| `items::ItemEntitySystem` | `src/Items/ItemEntitySystem.*` | **Authoritative (CPU-only)** | Dropped-item entities on the `MobSystem` pattern: fixed 60 Hz step, gravity + `physics::move` through `WorldCollisionView`, pickup-delay + proximity auto-pickup (hotbar-first, partial remainder stays), age despawn + population cap (oldest-first), monotonic never-reused id allocator (high-water persisted), id-sorted bounded snapshots + bounded spawn/remove event stream. Owned by `GameSimulation` (Epic #223 C); `restore` is lifecycle-only. In `ft_vox_core`. | Epic #223 C/E (#226/#228) — **landed** |
+| `ItemEntityRenderer` | `src/Renderer/ItemEntityRenderer.*` | Derived (renderer-owned) | One shared atlas-textured unit cube, one instanced indexed draw for the frustum-culled visible population (bounded by the sim cap); host-side previous/current interpolation, per-instance atlas layer + bridge-sampled local light; receives directional shadows, casts none (v1); recorded in the opaque pass after mobs; holds no authoritative state (epoch-barrier reset). | Epic #223 F (#229) — **landed** |
 | `PlayerController` | `src/Physics/PlayerController.hpp` | **Authoritative (CPU-only)** | Fixed-step 120 Hz swept-collision player over `physics::VoxelCollisionWorld`. Header-only; in core's include closure; owned by `GameSimulation` since Phase D. | D (#208) — **landed** |
 | `TerrainGenerator` | `src/Chunk/TerrainGenerator.*` | **Authoritative (CPU-only)** | FastNoise2 biomes/height/caves/vegetation. In `ft_vox_core`. Referenced by `VoxelWorld` (seed + generator version = world identity); **owned by `GameSimulation`** since Phase D. | B (#206) — **landed** |
 
@@ -1042,6 +1063,60 @@ consume bounded snapshots and issue explicit commands through callbacks —
 - **Out of scope**: gameplay rules (already in the sim), command/snapshot
   semantics, persistence (#228), runner grammar (#230), new item textures.
 
+### The Epic #223 Phase G headless gameplay + closure contract (issue #230)
+
+Phase G made the loop **scriptable and digest-covered**, then closed the epic
+with the full verification gate (the #211 pattern). No new gameplay behavior
+— everything landed in A–F; this phase is runner integration + closure.
+
+- **Script grammar** (`src/Headless/SimScript`, same line-based discipline +
+  exit codes): `give <item> <count>` (the logged `grantItems` seam),
+  `select <slot>` (0..8), `drop <count>` (selected slot, fixed **+Z**
+  direction — the headless host has no camera), `break <x> <y> <z>`
+  (gameplay `breakBlock`, distinct from creative `delete`),
+  `placeSelected <x> <y> <z>` (gameplay place-from-hotbar, distinct from
+  creative `place`), `expect inventory <slot> <item|empty> <count>` (slot
+  0..35, `empty` pins count 0) and `expect items <n>` (0..capacity). Item
+  tokens use `items::parseItemId` (the registry token discipline); counts
+  are bounded to the `uint16_t` range and slots/cells to their domains **at
+  parse time** (exit 3). Auto-pickup is a tick rule exercised through `wait`.
+  Accepted gameplay edits count in `edits`; `PlayerOverlap` in `refused`;
+  every other gameplay refusal in `rejected` with a stderr diagnostic
+  carrying the `BreakResult`/`PlaceResult` code.
+- **Frame orchestration**: the runner advances `sim.advanceItems(kFrameDt,
+  false)` after `advanceMobs` (step 8 of 9) — the same tick rule the
+  graphical host runs; zero items early-out at zero cost.
+- **Canonical digest format bump**: `FTVHDIG1` → `FTVHDIG2` (deliberate, no
+  silent hash drift). Appended canonical fields: the selected hotbar slot +
+  the 36 inventory slots in fixed order (item u16 + count u16), the
+  **id-sorted** item population (id u64, item u16, count u16, quantized
+  position/velocity 3×i64 at a 1/1024-block grid, ageTicks u32) and the
+  entity-id allocator high-water u64. No expected digest is hardcoded in
+  tests/fixtures (computed at runtime), so the bump needed no fixture
+  rewrite. Reference: [`headless-runner.md`](headless-runner.md) §5.
+- **SUMMARY fields**: `items=<n>` (live entities), `inventory=<total count>`
+  and `item_high_water=<n>` (allocator), machine-readable in both key=value
+  and `--json` forms (the JSON object is the first `{` line — `grantItems`
+  logs may precede it).
+- **Runner tests** (`tests/test_headless_runner.py`, 72 checks): the
+  canonical fixture's gameplay leg end-to-end (break → wait → pickup →
+  select → placeSelected → drop, ending with a live item **in flight** at
+  the digest boundary); **sync vs async digest parity with item physics**;
+  a **3-process save/reload round-trip** restoring inventory + entities +
+  allocator (the second session's drop gets id 2 — no reuse); gameplay
+  grammar error exits and `expect inventory`/`expect items` mismatches
+  (exit 5).
+- **Guards**: `CoreIncludeGuard` + `HeadlessDeps` cover the final module set
+  (the `Items/` headers are core, already in both closures); the
+  configure-time link-closure assertion covers every CPU test target added
+  by the epic; the opt-in `CpuOnlyBuild` gate re-verified.
+- **Closure record**: `benchmarks/issue-230-closure.md` — full CTest suite, CPU-only
+  configure/build/test gate, visual goldens (existing + the F scene),
+  in-game benchmark parity vs the pre-epic baseline (the item step
+  early-outs at zero items), and the determinism report. The epic #223
+  definition-of-done checklist is fully ticked in
+  [`gameplay-loop.md`](gameplay-loop.md) §10.
+
 ### The Phase E graphical host contract (issue #209)
 
 Phase E completed the integration without changing any behavior: the Engine
@@ -1125,8 +1200,10 @@ simulation behavior changed:
   authoritative state: both modes produce the same canonical digest.
 - **Canonical digest.** `src/Headless/SimDigest.cpp` hashes documented
   canonical fields only (world identity, observed-area occupancy, player
-  body, id-sorted mob population, edit counters) — no pointers, unordered
-  iteration, padding or GPU state. Format and determinism scope:
+  body, id-sorted mob population, edit counters — extended by Epic #223
+  Phase G/#230 with the inventory, id-sorted item population and id
+  allocator, format `FTVHDIG2`) — no pointers, unordered iteration, padding
+  or GPU state. Format and determinism scope:
   [`headless-runner.md`](headless-runner.md) §5.
 - **Persistence contracts unchanged.** Open/create, sparse edits, flush,
   refusable close, reload and player restore all go through the same
@@ -1165,3 +1242,9 @@ acceptance driver (sync + async determinism, 3-process save/reload/edit
 round-trip, every failure exit code), the dependency guard, and the clean
 `FT_VOX_GRAPHICS=OFF` configure/build/test gate — on Windows/MSVC and on
 WSL2 Debian (GCC, no Vulkan SDK / SDL3 / shader toolchain discovered).
+Epic #223 Phase G closure (`benchmarks/issue-230-closure.md`): the extended headless
+acceptance driver (gameplay loop, sync/async parity with items in flight,
+3-process gameplay round-trip, grammar/assertion exits), the full graphical
+CTest suite, the CPU-only gate, the visual goldens (existing + the
+`item_entities` scene), in-game benchmark parity vs the pre-epic baseline
+and the determinism report.
