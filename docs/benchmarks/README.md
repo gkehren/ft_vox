@@ -39,6 +39,7 @@ into `benchmark-results/` (gitignored), not here.
 - [issue-210-phase-f.md](issue-210-phase-f.md) — Epic #204 Phase F headless runner verification (CPU-only + determinism)
 - [issue-211-phase-g.md](issue-211-phase-g.md) — Epic #204 Phase G closure gate (enforcement + parity protocol + cleanup)
 - [issue-211-parity.md](issue-211-parity.md) — Phase G interleaved in-game benchmark parity (5 trials, per-trial appendix)
+- [issue-219-event-boundary.md](issue-219-event-boundary.md) — event-boundary CPU streaming-scope cost reduction (halo-fill indirection + drain-buffer reuse)
 - [pr145/](pr145/validation/README.md) — VSync pacing
 - [pr157-water/](pr157-water/README.md) — water rendering
 - [worldgen-rework/](worldgen-rework/README.md) — terrain generator rework

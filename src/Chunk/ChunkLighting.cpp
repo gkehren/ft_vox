@@ -123,21 +123,51 @@ void fillLightHaloFromNeighbors(ChunkLightHalo &halo, const Chunk *center,
   auto copyRegion = [&](const Chunk *src, int hxFrom, int hzFrom, int cols, int rows,
                         uint32_t sxFrom, uint32_t szFrom)
   {
-    const bool readable = src && src->isVoxelBackingReadable();
+    // Resolve the neighbor's voxel backing ONCE per region (issue #219). The
+    // pre-split fill read Chunk::getVoxel() per ring cell; after the CPU/render
+    // split that forwards Chunk -> WorldChunk with a null check and a fresh
+    // y*256 + z*16 + x index on every call (~476K cells per dispatch). Hoisting
+    // the row base pointer removes that per-cell handle indirection and index
+    // recompute from the main-thread dispatch critical section while producing
+    // a byte-identical snapshot: a readable neighbor contributes its stored
+    // voxels, a missing/unreadable one (or one whose backing is not allocated)
+    // contributes AIR, exactly as the per-cell accessor did.
+    const WorldChunk *record = src ? src->worldChunk() : nullptr;
+    const VoxelStorage *storage =
+        (record && src->isVoxelBackingReadable()) ? record->voxelStorage() : nullptr;
+    const Voxel *data = storage ? storage->data() : nullptr;
+    if (!data)
+    {
+      // Whole region is AIR; no emissive sources can live in a missing neighbor.
+      for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
+      {
+        const size_t hy = static_cast<size_t>(y) * ChunkLightHalo::kExtent;
+        for (int rr = 0; rr < rows; ++rr)
+        {
+          const size_t h = static_cast<size_t>(hxFrom) + hy +
+                           static_cast<size_t>(CHUNK_HEIGHT * ChunkLightHalo::kExtent) *
+                               static_cast<size_t>(hzFrom + rr);
+          std::fill_n(halo.voxels.begin() + h, cols, static_cast<uint8_t>(AIR));
+        }
+      }
+      return;
+    }
     for (uint32_t y = 0; y < CHUNK_HEIGHT; ++y)
     {
       const size_t hy = static_cast<size_t>(y) * ChunkLightHalo::kExtent;
+      const size_t srcYBase = static_cast<size_t>(y) * CHUNK_SIZE * CHUNK_SIZE;
       for (int rr = 0; rr < rows; ++rr)
       {
         size_t h = static_cast<size_t>(hxFrom) + hy +
                    static_cast<size_t>(CHUNK_HEIGHT * ChunkLightHalo::kExtent) *
                        static_cast<size_t>(hzFrom + rr);
-        uint32_t sx = sxFrom;
-        for (int c = 0; c < cols; ++c, ++sx, ++h)
+        // One row base per (y, neighbor row): the inner loop walks contiguous
+        // source bytes and contiguous halo bytes (both x-contiguous).
+        const Voxel *row =
+            data + srcYBase + static_cast<size_t>(szFrom + rr) * CHUNK_SIZE + sxFrom;
+        for (int c = 0; c < cols; ++c, ++h)
         {
-          const uint8_t t = readable
-              ? src->getVoxel(sx, y, static_cast<uint32_t>(szFrom + rr)).type
-              : static_cast<uint8_t>(AIR);
+          const uint8_t t = row[c].type;
           halo.voxels[h] = t;
           if (lighting::kIsBlockLightSourceTable[t])
             halo.emissives.push_back(

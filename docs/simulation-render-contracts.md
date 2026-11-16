@@ -567,6 +567,15 @@ re-emit `Loaded` for already-resident records, the bridge's constructor also
 projects the current residency (`attachToWorld`), so it can attach to a live
 world — the seam Phase E uses to attach a bridge to a running `GameSimulation`.
 
+`takeEvents()` has two forms: the return-by-value drain, and a buffer-reuse
+overload `takeEvents(std::vector<WorldEvent>&)` that appends into a caller-owned
+vector (issue #219). The bridge keeps one persistent drain buffer and uses the
+overload so the several drains per frame stop allocating a fresh vector each
+time; the events and their order are identical either way. The per-call drain
+points are kept (they are ordering-critical, issue #114) — the cost reduction
+came from the buffer reuse and from hoisting the per-voxel handle indirection
+out of the mesh-dispatch halo fill, not from removing drains.
+
 ### Publication ordering (preserved exactly)
 
 `RenderWorldBridge::processFinishedJobs()` stages the pump so the issue #114
