@@ -27,6 +27,7 @@
 #include <Items/ItemTypes.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace items
@@ -43,7 +44,7 @@ class Inventory
     const ItemStack &stack(int slot) const;
 
     int selectedSlot() const { return m_selectedSlot; }
-    ItemStack selectedStack() const { return m_slots[static_cast<size_t>(m_selectedSlot)]; }
+    ItemStack selectedStack() const { return m_slots[static_cast<std::size_t>(m_selectedSlot)]; }
 
     /// Total count of `item` across all 36 slots (the future place-from-
     /// hotbar availability query; uint32_t so bulk grants cannot wrap).

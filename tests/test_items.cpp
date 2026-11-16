@@ -27,6 +27,7 @@
 #include <utils.hpp>
 
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -125,7 +126,7 @@ void testRegistryOrdinalsAndNames()
     bool aligned = true;
     bool named = true;
     bool stacked = true;
-    for (size_t i = 0; i < defs.size(); ++i)
+    for (std::size_t i = 0; i < defs.size(); ++i)
     {
         aligned = aligned && static_cast<uint16_t>(defs[i].id) == static_cast<uint16_t>(i + 1);
         named = named && defs[i].name != nullptr && defs[i].name[0] != '\0';
@@ -145,8 +146,8 @@ void testRegistryOrdinalsAndNames()
 
     bool uniqueNames = true;
     bool uniqueNormalized = true;
-    for (size_t i = 0; i < defs.size(); ++i)
-        for (size_t j = i + 1; j < defs.size(); ++j)
+    for (std::size_t i = 0; i < defs.size(); ++i)
+        for (std::size_t j = i + 1; j < defs.size(); ++j)
         {
             const std::string a = defs[i].name;
             const std::string b = defs[j].name;

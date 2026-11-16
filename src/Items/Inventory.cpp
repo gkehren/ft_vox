@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <utility>
 
 namespace items
@@ -17,7 +18,7 @@ namespace items
 const ItemStack &Inventory::stack(int slot) const
 {
     assert(slot >= 0 && slot < kInventorySize);
-    return m_slots[static_cast<size_t>(slot)];
+    return m_slots[static_cast<std::size_t>(slot)];
 }
 
 uint32_t Inventory::totalCount(ItemId item) const
@@ -78,7 +79,7 @@ RemoveResult Inventory::removeCount(int slot, uint16_t count)
 {
     if (slot < 0 || slot >= kInventorySize)
         return {ItemResult::InvalidSlot, {}};
-    ItemStack &held = m_slots[static_cast<size_t>(slot)];
+    ItemStack &held = m_slots[static_cast<std::size_t>(slot)];
     if (held.isEmpty())
         return {ItemResult::EmptyStack, {}};
     const uint16_t taken = count < held.count ? count : held.count;
@@ -94,12 +95,12 @@ ItemResult Inventory::moveStack(int from, int to)
     if (from == to)
         return ItemResult::Ok;
     const TransferResult transferred =
-        transferStack(m_slots[static_cast<size_t>(from)], m_slots[static_cast<size_t>(to)],
-                      m_slots[static_cast<size_t>(from)].count);
+        transferStack(m_slots[static_cast<std::size_t>(from)], m_slots[static_cast<std::size_t>(to)],
+                      m_slots[static_cast<std::size_t>(from)].count);
     if (transferred.result == ItemResult::Ok || transferred.result == ItemResult::Partial)
     {
-        m_slots[static_cast<size_t>(from)] = transferred.source;
-        m_slots[static_cast<size_t>(to)] = transferred.destination;
+        m_slots[static_cast<std::size_t>(from)] = transferred.source;
+        m_slots[static_cast<std::size_t>(to)] = transferred.destination;
     }
     return transferred.result;
 }
@@ -110,7 +111,7 @@ ItemResult Inventory::swapStacks(int a, int b)
         return ItemResult::InvalidSlot;
     if (a == b)
         return ItemResult::Ok;
-    std::swap(m_slots[static_cast<size_t>(a)], m_slots[static_cast<size_t>(b)]);
+    std::swap(m_slots[static_cast<std::size_t>(a)], m_slots[static_cast<std::size_t>(b)]);
     return ItemResult::Ok;
 }
 
@@ -120,16 +121,16 @@ ItemResult Inventory::splitStack(int from, int to)
         return ItemResult::InvalidSlot;
     if (from == to)
         return ItemResult::Ok;
-    const ItemStack &held = m_slots[static_cast<size_t>(from)];
+    const ItemStack &held = m_slots[static_cast<std::size_t>(from)];
     if (held.isEmpty())
         return ItemResult::EmptyStack;
     // Odd counts: the moved half is the larger (ceil), matching splitHalf.
     const uint16_t half = static_cast<uint16_t>((static_cast<uint32_t>(held.count) + 1u) / 2u);
-    const TransferResult transferred = transferStack(held, m_slots[static_cast<size_t>(to)], half);
+    const TransferResult transferred = transferStack(held, m_slots[static_cast<std::size_t>(to)], half);
     if (transferred.result == ItemResult::Ok || transferred.result == ItemResult::Partial)
     {
-        m_slots[static_cast<size_t>(from)] = transferred.source;
-        m_slots[static_cast<size_t>(to)] = transferred.destination;
+        m_slots[static_cast<std::size_t>(from)] = transferred.source;
+        m_slots[static_cast<std::size_t>(to)] = transferred.destination;
     }
     return transferred.result;
 }

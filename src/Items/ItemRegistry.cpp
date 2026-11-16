@@ -26,6 +26,7 @@
 #include <Items/ItemRegistry.hpp>
 
 #include <cctype>
+#include <cstddef>
 #include <cstdlib>
 #include <string>
 
@@ -188,15 +189,15 @@ constexpr std::array<ItemId, COUNT> kBlockItem = [] {
     for (const ItemDefinition &def : kDefinitions)
     {
         if (def.placeableBlock.has_value())
-            table[static_cast<size_t>(*def.placeableBlock)] = def.id;
+            table[static_cast<std::size_t>(*def.placeableBlock)] = def.id;
     }
     // Face variants alias their canonical voxel block's item.
-    for (size_t i = 0; i < static_cast<size_t>(COUNT); ++i)
+    for (std::size_t i = 0; i < static_cast<std::size_t>(COUNT); ++i)
     {
         const TextureType type = static_cast<TextureType>(i);
         const TextureType canonical = canonicalBlock(type);
         if (canonical != type)
-            table[i] = table[static_cast<size_t>(canonical)];
+            table[i] = table[static_cast<std::size_t>(canonical)];
     }
     return table;
 }();
@@ -307,7 +308,7 @@ static_assert(kDefinitions.size() == kItemCount, "one definition per registry or
 
 constexpr bool definitionsAligned()
 {
-    for (size_t i = 0; i < kDefinitions.size(); ++i)
+    for (std::size_t i = 0; i < kDefinitions.size(); ++i)
     {
         const ItemDefinition &def = kDefinitions[i];
         if (static_cast<uint16_t>(def.id) != static_cast<uint16_t>(i + 1))
@@ -323,7 +324,7 @@ constexpr bool definitionsAligned()
             return false;
         if (isFaceVariant(block) || isFluidBlock(block))
             return false; // placeableBlock is a canonical voxel type
-        if (kBlockItem[static_cast<size_t>(block)] != def.id)
+        if (kBlockItem[static_cast<std::size_t>(block)] != def.id)
             return false; // every placeable item maps back to its block
     }
     return true;
@@ -333,8 +334,8 @@ static_assert(definitionsAligned(),
 
 constexpr bool namesUnique()
 {
-    for (size_t i = 0; i < kDefinitions.size(); ++i)
-        for (size_t j = i + 1; j < kDefinitions.size(); ++j)
+    for (std::size_t i = 0; i < kDefinitions.size(); ++i)
+        for (std::size_t j = i + 1; j < kDefinitions.size(); ++j)
         {
             std::string_view a = kDefinitions[i].name;
             std::string_view b = kDefinitions[j].name;
@@ -347,14 +348,14 @@ static_assert(namesUnique(), "item names must be unique (name<->id parsing is bi
 
 constexpr bool blockCoverageTotal()
 {
-    for (size_t i = 0; i < static_cast<size_t>(COUNT); ++i)
+    for (std::size_t i = 0; i < static_cast<std::size_t>(COUNT); ++i)
     {
         const TextureType type = static_cast<TextureType>(i);
         if (isFaceVariant(type) || isFluidBlock(type))
             continue;
         if (kBlockItem[i] == ItemId::None)
             return false; // every canonical block (incl. BEDROCK) has an item
-        if (kBlockItem[i] != kBlockItem[static_cast<size_t>(canonicalBlock(type))])
+        if (kBlockItem[i] != kBlockItem[static_cast<std::size_t>(canonicalBlock(type))])
             return false; // variants alias their canonical block
     }
     return true;
@@ -364,7 +365,7 @@ static_assert(blockCoverageTotal(),
 
 constexpr bool dropTableTotal()
 {
-    for (size_t i = 0; i < static_cast<size_t>(COUNT); ++i)
+    for (std::size_t i = 0; i < static_cast<std::size_t>(COUNT); ++i)
     {
         const TextureType type = static_cast<TextureType>(i);
         if (isFaceVariant(type))
@@ -463,7 +464,7 @@ ItemId itemForBlock(TextureType block)
 {
     if (block < 0 || block >= COUNT)
         return ItemId::None;
-    return kBlockItem[static_cast<size_t>(block)];
+    return kBlockItem[static_cast<std::size_t>(block)];
 }
 
 bool isBreakableBlock(TextureType block)
@@ -478,7 +479,7 @@ ItemStack dropForBlock(TextureType block)
 {
     if (block < 0 || block >= COUNT)
         return {};
-    const ItemId drop = kBlockDrop[static_cast<size_t>(canonicalBlock(block))];
+    const ItemId drop = kBlockDrop[static_cast<std::size_t>(canonicalBlock(block))];
     if (drop == ItemId::None)
         return {};
     return {drop, 1}; // v1: breaking yields exactly one drop item
