@@ -18,6 +18,14 @@ namespace
 {
 static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559,
 			  "canonical digest requires IEEE-754 binary64 doubles");
+
+/// Item position/velocity quantization (issue #230): 1/1024-block grid,
+/// llround to a fixed-width i64. Absorbs last-bit FP noise while keeping any
+/// gameplay-visible difference distinct; never hashes raw f64 item motion.
+int64_t quantizeMotion(double value)
+{
+	return static_cast<int64_t>(std::llround(value * 1024.0));
+}
 } // namespace
 
 void CanonicalHash::bytes(const void *data, size_t size)
@@ -35,6 +43,14 @@ void CanonicalHash::u8(uint8_t value)
 	bytes(&value, 1);
 }
 
+void CanonicalHash::u16(uint16_t value)
+{
+	const uint8_t le[2] = {
+		static_cast<uint8_t>(value),
+		static_cast<uint8_t>(value >> 8)};
+	bytes(le, 2);
+}
+
 void CanonicalHash::i32(int32_t value)
 {
 	u32(static_cast<uint32_t>(value));
@@ -49,6 +65,11 @@ void CanonicalHash::u32(uint32_t value)
 		static_cast<uint8_t>(value >> 16),
 		static_cast<uint8_t>(value >> 24)};
 	bytes(le, 4);
+}
+
+void CanonicalHash::i64(int64_t value)
+{
+	u64(static_cast<uint64_t>(value));
 }
 
 void CanonicalHash::u64(uint64_t value)
@@ -92,7 +113,7 @@ CanonicalHash computeStateDigest(const sim::GameSimulation &sim, const DigestAre
 								 uint64_t ticks, uint64_t committedEdits)
 {
 	CanonicalHash hash;
-	hash.bytes("FTVHDIG1", 8);
+	hash.bytes("FTVHDIG2", 8);
 
 	const sim::WorldSnapshot world = sim.worldSnapshot();
 	hash.i32(world.seed);
@@ -160,6 +181,42 @@ CanonicalHash computeStateDigest(const sim::GameSimulation &sim, const DigestAre
 		hash.u8(mob.walking ? 1 : 0);
 		hash.u64(mob.randomState);
 	}
+
+	// Gameplay inventory (issue #230): the selected hotbar slot, then all 36
+	// slots in FIXED slot order (never a container iteration order). ItemIds
+	// are the stable append-only registry ordinals, never TextureType.
+	sim::InventorySnapshot inventory;
+	sim.inventorySnapshot(inventory);
+	hash.i32(inventory.selectedSlot);
+	for (const items::ItemStack &stack : inventory.slots)
+	{
+		hash.u16(static_cast<uint16_t>(stack.item));
+		hash.u16(stack.count);
+	}
+
+	// Authoritative dropped-item population, canonically sorted by entity id
+	// (the mob discipline). Quantized motion + age; the derived interpolation
+	// snapshots / render states are NEVER hashed.
+	std::vector<items::ItemEntity> itemEntities = sim.itemEntities().entities();
+	std::sort(itemEntities.begin(), itemEntities.end(),
+			  [](const items::ItemEntity &a, const items::ItemEntity &b) { return a.id < b.id; });
+	hash.u64(static_cast<uint64_t>(itemEntities.size()));
+	for (const items::ItemEntity &entity : itemEntities)
+	{
+		hash.u64(entity.id);
+		hash.u16(static_cast<uint16_t>(entity.stack.item));
+		hash.u16(entity.stack.count);
+		hash.i64(quantizeMotion(entity.body.position.x));
+		hash.i64(quantizeMotion(entity.body.position.y));
+		hash.i64(quantizeMotion(entity.body.position.z));
+		hash.i64(quantizeMotion(entity.body.velocity.x));
+		hash.i64(quantizeMotion(entity.body.velocity.y));
+		hash.i64(quantizeMotion(entity.body.velocity.z));
+		hash.u32(entity.ageTicks);
+	}
+
+	// Entity-id allocator high-water (ids are never reused across sessions).
+	hash.u64(sim.itemIdHighWater());
 	return hash;
 }
 

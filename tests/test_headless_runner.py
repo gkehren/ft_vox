@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Headless runner acceptance driver (issue #210, Epic #204 Phase F).
+"""Headless runner acceptance driver (issue #210, Epic #204 Phase F; gameplay
+loop + closure gate issue #230, Epic #223 Phase G).
 
 Exercises the ft_vox_headless executable end-to-end with NO GPU, window or
 shader asset. Every run is a separate process with a bounded wall-clock
@@ -15,6 +16,16 @@ Covers the issue #210 acceptance list:
   * --expect-digest gate (pass and fail);
   * run timeout -> exit 6 (teardown never stalls indefinitely).
 
+And the issue #230 gameplay additions:
+  * the canonical fixture's gameplay leg (give/select/break/wait-pickup/
+    placeSelected/drop) end-to-end, with a live item IN FLIGHT at the digest
+    boundary — sync vs async digest parity covers item physics;
+  * SUMMARY items= / inventory= / item_high_water= in key=value AND --json;
+  * multi-process save/reload round-trip restoring inventory + item entities
+    + the id allocator (no id reuse across sessions);
+  * gameplay grammar error exits (bad item token, slot/count bounds) and
+    expect inventory / expect items assertion mismatches (exit 5).
+
 Usage (registered as CTest HeadlessRunner):
     python3 tests/test_headless_runner.py --runner <path> --fixtures <dir>
 
@@ -24,6 +35,7 @@ Python 3 stdlib only.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -67,6 +79,15 @@ def summary(proc: subprocess.CompletedProcess) -> dict[str, str]:
     return {}
 
 
+def json_summary(proc: subprocess.CompletedProcess) -> dict:
+    # grantItems logs to stdout, so the JSON object is the first '{' line —
+    # not necessarily the first line of stdout (issue #230).
+    for line in proc.stdout.splitlines():
+        if line.startswith("{"):
+            return json.loads(line)
+    return {}
+
+
 def write_script(path: Path, text: str) -> str:
     path.write_text(text, encoding="utf-8")
     return str(path)
@@ -107,11 +128,19 @@ def main() -> int:
         fa, fb = summary(a), summary(b)
         check(bool(fa) and fa == fb, "scripted sync summaries identical across runs")
         check(bool(HEX16.match(fa.get("digest", ""))), "scripted sync digest is canonical hex")
-        check(fa.get("edits") == "4", "scripted fixture committed 4 edits (3 places + 1 delete)")
+        check(fa.get("edits") == "6",
+              "scripted fixture committed 6 edits (3 places + 1 delete + 1 break + 1 placeSelected)")
         check(fa.get("refused") == "0", "no placement refusals in the fixture")
+        # Gameplay leg end state (issue #230): the manual drop is still in
+        # flight at the digest boundary; the break drop was auto-picked up.
+        check(fa.get("items") == "1", "fixture ends with 1 live item entity (manual drop in flight)")
+        check(fa.get("inventory") == "3", "fixture ends with inventory total 3 (Stone 5 - drop 2)")
+        check(fa.get("item_high_water") == "2", "fixture id allocator high-water is 2 (no reuse)")
         sync_digest = fa.get("digest", "")
 
         # --- 3. Scripted determinism: async workers, twice, == sync ----------
+        # The fixture ends with a live item in flight, so this parity check
+        # covers item physics (issue #230), not just terrain/player/mobs.
         async_args = script_args + ["--workers", "2"]
         c = run_runner(runner, async_args, work)
         d = run_runner(runner, async_args, work)
@@ -119,7 +148,7 @@ def main() -> int:
         fc, fd = summary(c), summary(d)
         check(bool(fc) and fc == fd, "scripted async summaries identical across runs")
         check(fc.get("digest") == sync_digest,
-              "async-worker digest equals synchronous digest (same authoritative behavior)")
+              "async-worker digest equals synchronous digest (item physics included)")
 
         # --- 4. --expect-digest gate -----------------------------------------
         ok = run_runner(runner, script_args + ["--expect-digest", sync_digest], work)
@@ -240,6 +269,107 @@ def main() -> int:
         # Same cycle with async workers: pending gen jobs across the churn.
         p = run_runner(runner, ["--seed", "42", "--ticks", "300", "--script", churn, "--workers", "2"], work)
         check(p.returncode == 0, f"async interest churn asserts residency (got {p.returncode})")
+
+        # --- 10. Gameplay grammar error exits (issue #230) --------------------
+        # Bounds are validated at PARSE time (exit 3), never at run time:
+        # item tokens via the registry, slots/count/capacity ranges pinned.
+        bad_grammar = [
+            ("give NoSuchItem 1", "unknown item token"),
+            ("give 0 1", "None sentinel is not a grantable item"),
+            ("give Stone 65536", "count above uint16 range"),
+            ("give Stone -1", "negative count"),
+            ("select 9", "hotbar slot above 8"),
+            ("select -1", "negative hotbar slot"),
+            ("drop 65536", "drop count above uint16 range"),
+            ("break 8 256 8", "break cell y outside the world"),
+            ("placeSelected 8 -1 8", "placeSelected negative cell y"),
+            ("expect inventory 36 Stone 1", "inventory slot above 35"),
+            ("expect inventory 0 empty 1", "'empty' requires count 0"),
+            ("expect inventory 0 NoSuchItem 1", "unknown expected item token"),
+            ("expect items 1025", "expected count above the population cap"),
+            ("expect items -1", "negative expected item count"),
+        ]
+        for text, why in bad_grammar:
+            path = write_script(work / "grammar.txt", text + "\n")
+            p = run_runner(runner, ["--seed", "42", "--ticks", "30", "--script", path], work)
+            check(p.returncode == 3, f"grammar error exits 3: {why} ({text!r}, got {p.returncode})")
+
+        # --- 11. Gameplay assertion mismatches exit 5 (issue #230) ------------
+        mismatch = write_script(work / "inv-mismatch.txt", "expect inventory 0 Stone 99\n")
+        p = run_runner(runner, ["--seed", "42", "--ticks", "30", "--script", mismatch], work)
+        check(p.returncode == 5, f"expect-inventory mismatch exits 5 (got {p.returncode})")
+        mismatch = write_script(work / "items-mismatch.txt", "expect items 3\n")
+        p = run_runner(runner, ["--seed", "42", "--ticks", "30", "--script", mismatch], work)
+        check(p.returncode == 5, f"expect-items mismatch exits 5 (got {p.returncode})")
+
+        # --- 12. Gameplay save/reload round-trip (issue #230, 3 processes) ----
+        # Inventory + item entities + the id allocator must survive a process
+        # exit/reload; ids are NEVER reused (the high-water resumes).
+        gp_root = work / "saves-gameplay"
+        gp_args = ["--seed", "42", "--world", "items-rt", "--saves-root", str(gp_root)]
+        g1 = write_script(work / "g1.txt",
+                          "give Stone 5\n"
+                          "select 0\n"
+                          "drop 2\n"
+                          "expect items 1\n"
+                          "expect inventory 0 Stone 3\n"
+                          "flight on\n"
+                          "move 0 0\n"
+                          "teleport 8.5 120 -20.5\n"   # hover away: no re-pickup
+                          "wait 60\n"
+                          "expect items 1\n"
+                          "save\n")
+        p1 = run_runner(runner, gp_args + ["--ticks", "120", "--script", g1], work)
+        check(p1.returncode == 0, f"gameplay save run exits 0 (got {p1.returncode}: {p1.stderr.strip()})")
+        f1 = summary(p1)
+        check(f1.get("save") == "ok", "gameplay save run reports save=ok")
+        check(f1.get("items") == "1" and f1.get("inventory") == "3",
+              "gameplay save run ends with 1 live entity and inventory total 3")
+        check(f1.get("item_high_water") == "1", "first session allocator high-water is 1")
+        gp_dir = gp_root / "items-rt"
+        check((gp_dir / "inventory.state").is_file(), "inventory.state written")
+        check((gp_dir / "items.state").is_file(), "items.state written")
+
+        # Second PROCESS: reload restores inventory + entity; a NEW drop must
+        # get id 2 (high-water resumed), never reuse the restored entity's id 1.
+        g2 = write_script(work / "g2.txt",
+                          "expect inventory 0 Stone 3\n"
+                          "expect items 1\n"
+                          "select 0\n"
+                          "drop 1\n"
+                          "expect items 2\n"
+                          "expect inventory 0 Stone 2\n"
+                          "wait 30\n"
+                          "save\n")
+        p2 = run_runner(runner, gp_args + ["--ticks", "120", "--script", g2], work)
+        check(p2.returncode == 0, f"gameplay reload run exits 0 (got {p2.returncode}: {p2.stderr.strip()})")
+        f2 = summary(p2)
+        check(f2.get("items") == "2", "reload restored the entity AND spawned a second one")
+        check(f2.get("inventory") == "2", "reload restored the inventory (Stone 3 - drop 1)")
+        check(f2.get("item_high_water") == "2",
+              "allocator resumed at the persisted high-water (new id 2, no reuse)")
+
+        # Third PROCESS: both entities + the drained inventory are durable.
+        g3 = write_script(work / "g3.txt",
+                          "expect inventory 0 Stone 2\n"
+                          "expect items 2\n"
+                          "wait 30\n")
+        p3 = run_runner(runner, gp_args + ["--ticks", "60", "--script", g3], work)
+        check(p3.returncode == 0, f"gameplay second reload exits 0 (got {p3.returncode}: {p3.stderr.strip()})")
+        f3 = summary(p3)
+        check(f3.get("items") == "2" and f3.get("inventory") == "2" and f3.get("item_high_water") == "2",
+              "second reload restores inventory + both entities + allocator")
+
+        # --- 13. JSON summary carries the gameplay fields (issue #230) --------
+        # The fixture grants items (stdout log lines), so the JSON object is
+        # located by its '{' line, not by whole-stdout prefix.
+        p = run_runner(runner, script_args + ["--json"], work)
+        check(p.returncode == 0, f"gameplay --json run exits 0 (got {p.returncode})")
+        js = json_summary(p)
+        check(js.get("items") == 1 and js.get("inventory") == 3 and js.get("item_high_water") == 2,
+              "--json summary carries items/inventory/item_high_water")
+        check(js.get("edits") == 6 and js.get("digest") == sync_digest,
+              "--json summary agrees with the key=value gameplay run")
 
     print(f"\n{CHECKS} checks, {FAILS} failures")
     return 1 if FAILS else 0

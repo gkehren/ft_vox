@@ -159,6 +159,9 @@ void printSummary(const headless::RunOutcome &out, bool json)
 				  << ",\"rejected\":" << out.rejectedEdits
 				  << ",\"edit_revision\":" << out.editRevision
 				  << ",\"mobs\":" << out.mobCount
+				  << ",\"items\":" << out.itemCount
+				  << ",\"inventory\":" << out.inventoryTotal
+				  << ",\"item_high_water\":" << out.itemIdHighWater
 				  << ",\"player\":{\"x\":" << formatDouble(out.playerPos.x)
 				  << ",\"y\":" << formatDouble(out.playerPos.y)
 				  << ",\"z\":" << formatDouble(out.playerPos.z) << "}"
@@ -184,6 +187,9 @@ void printSummary(const headless::RunOutcome &out, bool json)
 			  << " rejected=" << out.rejectedEdits
 			  << " edit_revision=" << out.editRevision
 			  << " mobs=" << out.mobCount
+			  << " items=" << out.itemCount
+			  << " inventory=" << out.inventoryTotal
+			  << " item_high_water=" << out.itemIdHighWater
 			  << " player=" << formatVec3(out.playerPos)
 			  << " area=" << formatVec3(glm::dvec3(out.area.min)) << "-" << formatVec3(glm::dvec3(out.area.max))
 			  << " digest=" << (out.digest.empty() ? "-" : out.digest)

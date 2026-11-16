@@ -21,17 +21,28 @@
 //   teleport <x> <y> <z>              host-driven reposition (doubles)
 //   place <x> <y> <z> <block>         cell edit, gated by canPlaceVoxel
 //   delete <x> <y> <z>                cell edit (authorized local edit)
+//   give <item> <count>               grantItems admin seam (registry item token)
+//   select <slot>                     hotbar selection (0..8)
+//   drop <count>                      drop from selected slot, fixed +Z direction
+//   break <x> <y> <z>                 gameplay breakBlock (drops registry item)
+//   placeSelected <x> <y> <z>         gameplay place-from-hotbar (consumes 1)
 //   interest <x> <y> <z>              pin the headless interest probe
 //   interest follow                   interest follows the player again
 //   save                              durable player-state capture + flush
 //   expect voxel <x> <y> <z> <block|air|unknown>   immediate assertion
+//   expect inventory <slot> <item|empty> <count>   immediate assertion (slot 0..35)
+//   expect items <n>                  immediate live-entity-count assertion
 //   expect digest <hex>               final-digest assertion (checked at end)
 //
 // <block> is a SINGLE token: a TextureType name with underscores
 // (case-insensitive, e.g. Stone / OAK_LEAVES / oak_leaves), a numeric
 // ordinal, or "air". Spaces are not token separators inside a name, so use
 // the underscore form ("Oak Leaves" must be written OAK_LEAVES).
+// <item> is a SINGLE token: an items::ItemId registry name with underscores
+// (case-insensitive, e.g. Stone / COBBLESTONE / oak_log) or a numeric registry
+// ordinal (issue #230). "empty" is only valid in `expect inventory`.
 // Cell coordinates are integers; edits target the cell center.
+// Auto-pickup is a tick rule, exercised via `wait` (break -> wait -> pickup).
 // =============================================================================
 
 #include <cstdint>
@@ -41,6 +52,7 @@
 
 #include <glm/glm.hpp>
 
+#include <Items/ItemTypes.hpp>
 #include <utils.hpp>
 
 namespace headless
@@ -57,10 +69,17 @@ enum class ScriptOp
 	Teleport,
 	Place,
 	Delete,
+	Give,
+	Select,
+	Drop,
+	Break,
+	PlaceSelected,
 	Interest,
 	InterestFollow,
 	Save,
 	ExpectVoxel,
+	ExpectInventory,
+	ExpectItems,
 	ExpectDigest
 };
 
@@ -77,8 +96,13 @@ struct ScriptAction
 	bool enabled{false};	   // Sprint / Flight
 	int swimDirection{0};	   // Swim: -1 down, 0 off, +1 up
 	glm::dvec3 position{0.0};  // Teleport / Interest
-	glm::ivec3 cell{0};		   // Place / Delete / ExpectVoxel
+	glm::ivec3 cell{0};		   // Place / Delete / Break / PlaceSelected / ExpectVoxel
 	TextureType block{AIR};	   // Place
+	items::ItemId item{items::ItemId::None}; // Give / ExpectInventory
+	int count{0};			   // Give / Drop / ExpectInventory
+	int slot{0};			   // Select / ExpectInventory
+	bool expectEmpty{false};   // ExpectInventory: slot must be empty (count 0)
+	int expectedItems{0};	   // ExpectItems: live entity count
 	int expectedVoxel{0};	   // ExpectVoxel: ordinal or kExpectUnknown
 	std::string expectedDigest; // ExpectDigest: lowercase hex, no 0x
 	int line{0};			   // source line (diagnostics)

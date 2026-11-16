@@ -1747,8 +1747,8 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 //                   draw/shadow lists, upload budget — NO GPU work here
 //   9. Mobs         sim->advanceMobs + snapshots + bridge entity light ->
 //                   WorldRenderer::setMobs
-//   9b. Items       sim->advanceItems (dropped items, issue #227; snapshots
-//                   get their renderer in #229)
+//   9b. Items       sim->advanceItems + id-sorted snapshots + bridge light ->
+//                   WorldRenderer::setItemEntities (issues #226/#229)
 //  10. Highlight    sim raycast (thin forward) -> overlay
 //  11. Frame slots  retire/arena/staging beginFrame (fence already waited)
 //  12. ImGui        UI build from sim/render snapshots (CPU only)

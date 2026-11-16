@@ -1,12 +1,17 @@
 // SimScript — bounded deterministic action-script parser (issue #210, Epic
-// #204 Phase F). Pure parsing: no simulation state, fail-fast diagnostics.
+// #204 Phase F; gameplay grammar issue #230, Epic #223 Phase G). Pure parsing:
+// no simulation state, fail-fast diagnostics.
 #include "Headless/SimScript.hpp"
+
+#include <Items/ItemEntitySystem.hpp>
+#include <Items/ItemRegistry.hpp>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <sstream>
 
 namespace headless
@@ -149,6 +154,31 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 				error = failAt(lineNo, "'" + tokens[0] + "' expects " + std::to_string(n - 1) + " argument(s)");
 			return argc == n;
 		};
+		// Shared cell-coordinate parse (place/delete/break/placeSelected):
+		// integers, y inside the world column (issue #230).
+		const auto parseCell = [&](glm::ivec3 &cell) {
+			if (!parseInt(tokens[1], cell.x) || !parseInt(tokens[2], cell.y) ||
+				!parseInt(tokens[3], cell.z))
+			{
+				error = failAt(lineNo, op + " expects integer cell coordinates <x> <y> <z>");
+				return false;
+			}
+			if (cell.y < 0 || cell.y >= static_cast<int>(WORLD_HEIGHT))
+			{
+				error = failAt(lineNo, "cell y must be in [0, " + std::to_string(WORLD_HEIGHT - 1) + "]");
+				return false;
+			}
+			return true;
+		};
+		// ItemStack counts are uint16_t (issue #230): bound at parse time.
+		const auto parseCount = [&](const std::string &token, int &count) {
+			if (!parseInt(token, count) || count < 0 || count > 65535)
+			{
+				error = failAt(lineNo, "count must be an integer in [0, 65535]");
+				return false;
+			}
+			return true;
+		};
 
 		if (op == "WAIT")
 		{
@@ -236,23 +266,57 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 			const bool place = op == "PLACE";
 			if (!needArgs(place ? 5 : 4))
 				return false;
-			if (!parseInt(tokens[1], action.cell.x) || !parseInt(tokens[2], action.cell.y) ||
-				!parseInt(tokens[3], action.cell.z))
-			{
-				error = failAt(lineNo, op + " expects integer cell coordinates <x> <y> <z>");
+			if (!parseCell(action.cell))
 				return false;
-			}
-			if (action.cell.y < 0 || action.cell.y >= static_cast<int>(WORLD_HEIGHT))
-			{
-				error = failAt(lineNo, "cell y must be in [0, " + std::to_string(WORLD_HEIGHT - 1) + "]");
-				return false;
-			}
 			if (place && !parseBlockName(tokens[4], action.block))
 			{
 				error = failAt(lineNo, "unknown block '" + tokens[4] + "'");
 				return false;
 			}
 			action.op = place ? ScriptOp::Place : ScriptOp::Delete;
+		}
+		else if (op == "GIVE")
+		{
+			if (!needArgs(3))
+				return false;
+			const std::optional<items::ItemId> item = items::parseItemId(tokens[1]);
+			if (!item)
+			{
+				error = failAt(lineNo, "unknown item '" + tokens[1] + "'");
+				return false;
+			}
+			if (!parseCount(tokens[2], action.count))
+				return false;
+			action.item = *item;
+			action.op = ScriptOp::Give;
+		}
+		else if (op == "SELECT")
+		{
+			if (!needArgs(2))
+				return false;
+			if (!parseInt(tokens[1], action.slot) || action.slot < 0 || action.slot >= items::kHotbarSize)
+			{
+				error = failAt(lineNo, "select slot must be an integer in [0, " +
+										   std::to_string(items::kHotbarSize - 1) + "]");
+				return false;
+			}
+			action.op = ScriptOp::Select;
+		}
+		else if (op == "DROP")
+		{
+			if (!needArgs(2))
+				return false;
+			if (!parseCount(tokens[1], action.count))
+				return false;
+			action.op = ScriptOp::Drop;
+		}
+		else if (op == "BREAK" || op == "PLACESELECTED")
+		{
+			if (!needArgs(4))
+				return false;
+			if (!parseCell(action.cell))
+				return false;
+			action.op = op == "BREAK" ? ScriptOp::Break : ScriptOp::PlaceSelected;
 		}
 		else if (op == "INTEREST")
 		{
@@ -283,7 +347,7 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 		{
 			if (argc < 2)
 			{
-				error = failAt(lineNo, "expect expects 'voxel' or 'digest'");
+				error = failAt(lineNo, "expect expects 'voxel', 'inventory', 'items' or 'digest'");
 				return false;
 			}
 			const std::string what = upperUnderscore(tokens[1]);
@@ -317,6 +381,53 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 					action.expectedVoxel = static_cast<int>(block);
 				}
 				action.op = ScriptOp::ExpectVoxel;
+			}
+			else if (what == "INVENTORY")
+			{
+				if (!needArgs(5))
+					return false;
+				if (!parseInt(tokens[2], action.slot) || action.slot < 0 || action.slot >= items::kInventorySize)
+				{
+					error = failAt(lineNo, "expect inventory slot must be an integer in [0, " +
+											   std::to_string(items::kInventorySize - 1) + "]");
+					return false;
+				}
+				if (upperUnderscore(tokens[3]) == "EMPTY")
+				{
+					// The canonical empty is {None, 0}: 'empty' pins count 0.
+					action.expectEmpty = true;
+					if (!parseInt(tokens[4], action.count) || action.count != 0)
+					{
+						error = failAt(lineNo, "expect inventory 'empty' requires count 0");
+						return false;
+					}
+				}
+				else
+				{
+					const std::optional<items::ItemId> item = items::parseItemId(tokens[3]);
+					if (!item)
+					{
+						error = failAt(lineNo, "unknown item '" + tokens[3] + "'");
+						return false;
+					}
+					action.item = *item;
+					if (!parseCount(tokens[4], action.count))
+						return false;
+				}
+				action.op = ScriptOp::ExpectInventory;
+			}
+			else if (what == "ITEMS")
+			{
+				if (!needArgs(3))
+					return false;
+				if (!parseInt(tokens[2], action.expectedItems) || action.expectedItems < 0 ||
+					action.expectedItems > static_cast<int>(items::ItemEntitySettings::capacity))
+				{
+					error = failAt(lineNo, "expect items count must be an integer in [0, " +
+											   std::to_string(items::ItemEntitySettings::capacity) + "]");
+					return false;
+				}
+				action.op = ScriptOp::ExpectItems;
 			}
 			else if (what == "DIGEST")
 			{

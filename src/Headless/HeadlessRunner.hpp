@@ -18,7 +18,8 @@
 //      or deterministic synchronous generation (workers == 0)
 //   6. world.pump() + event drain (headless consumer discards the stream)
 //   7. advanceMobs(dt, interest, interestRadius, suspended=false)
-//   8. sim.pumpWorld()
+//   8. advanceItems(dt, suspended=false)   (issue #230: dropped-item tick rule)
+//   9. sim.pumpWorld()
 //
 // Residency is controlled by the EXPLICIT headless interest source (a plain
 // point + radius in blocks), never a Camera or GPU render distance. Budgets
@@ -91,6 +92,9 @@ struct RunOutcome
 	uint64_t rejectedEdits{0};	// world-level rejections (e.g. outside residency)
 	uint64_t editRevision{0};
 	size_t mobCount{0};
+	size_t itemCount{0};			// live dropped-item entities (issue #230)
+	uint64_t inventoryTotal{0};		// sum of all 36 slot counts (issue #230)
+	uint64_t itemIdHighWater{0};	// monotonic entity-id allocator (issue #230)
 	glm::dvec3 playerPos{0.0};
 	DigestArea area{};
 	std::string digest;

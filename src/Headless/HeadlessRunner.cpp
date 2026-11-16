@@ -7,6 +7,7 @@
 #include <Headless/SimScript.hpp>
 
 #include <Core/ThreadPool.hpp>
+#include <Items/ItemRegistry.hpp>
 #include <Sim/GameSimulation.hpp>
 #include <World/WorldCollisionView.hpp>
 
@@ -40,6 +41,40 @@ std::string blockName(TextureType type)
 	if (ordinal < 0 || ordinal >= static_cast<int>(COUNT))
 		return "Block(" + std::to_string(ordinal) + ")";
 	return std::string(textureTypeString[ordinal]);
+}
+
+/// Gameplay result vocabularies as diagnostic strings (issue #230).
+const char *breakResultName(sim::BreakResult result)
+{
+	switch (result)
+	{
+	case sim::BreakResult::Ok: return "Ok";
+	case sim::BreakResult::Unbreakable: return "Unbreakable";
+	case sim::BreakResult::UnknownTerrain: return "UnknownTerrain";
+	case sim::BreakResult::WorldRejected: return "WorldRejected";
+	}
+	return "?";
+}
+
+const char *placeResultName(sim::PlaceResult result)
+{
+	switch (result)
+	{
+	case sim::PlaceResult::Ok: return "Ok";
+	case sim::PlaceResult::EmptySlot: return "EmptySlot";
+	case sim::PlaceResult::NotPlaceable: return "NotPlaceable";
+	case sim::PlaceResult::PlayerOverlap: return "PlayerOverlap";
+	case sim::PlaceResult::UnknownTerrain: return "UnknownTerrain";
+	case sim::PlaceResult::WorldRejected: return "WorldRejected";
+	}
+	return "?";
+}
+
+std::string stackToString(const items::ItemStack &stack)
+{
+	if (stack.isEmpty())
+		return "empty";
+	return std::string(items::itemName(stack.item)) + " x" + std::to_string(stack.count);
 }
 
 } // namespace
@@ -182,6 +217,9 @@ RunOutcome runHeadless(const RunnerOptions &options)
 		// nothing derived is attached). Keeps droppedEventCount at zero.
 		world->takeEvents();
 		sim.advanceMobs(kFrameDt, interest, static_cast<double>(options.interestRadius), false);
+		// Dropped-item tick rule (issue #230): gravity/pickup/despawn advance
+		// at the same host cadence as mobs; zero items early-outs inside.
+		sim.advanceItems(kFrameDt, false);
 		sim.pumpWorld();
 		return true;
 	};
@@ -276,6 +314,70 @@ RunOutcome runHeadless(const RunnerOptions &options)
 			}
 			break;
 		}
+		case ScriptOp::Give:
+		{
+			// The logged grantItems admin seam (epic #223 §3): the sim itself
+			// logs every grant; a remainder that did not fit is diagnosed so
+			// a script author sees WHY an expect inventory later fails.
+			const items::AddResult result = sim.grantItems(action.item, static_cast<uint16_t>(action.count));
+			if (!result.remainder.isEmpty())
+				std::cerr << "[headless] line " << action.line << ": grant remainder "
+						  << stackToString(result.remainder) << " did not fit\n";
+			break;
+		}
+		case ScriptOp::Select:
+			if (sim.selectHotbarSlot(action.slot) != items::ItemResult::Ok)
+				std::cerr << "[headless] line " << action.line << ": hotbar selection refused (slot "
+						  << action.slot << ")\n";
+			break;
+		case ScriptOp::Drop:
+		{
+			// Fixed deterministic direction (+Z): the headless host has no
+			// camera, so the presentation input is a plain constant.
+			const items::ItemResult result =
+				sim.dropFromSlot(sim.inventory().selectedSlot(), static_cast<uint16_t>(action.count),
+								 glm::dvec3(0.0, 0.0, 1.0));
+			if (result != items::ItemResult::Ok)
+				std::cerr << "[headless] line " << action.line << ": drop refused (selected slot "
+						  << sim.inventory().selectedSlot() << ", count " << action.count << ")\n";
+			break;
+		}
+		case ScriptOp::Break:
+		{
+			// Gameplay breakBlock (issue #226), distinct from creative delete:
+			// an accepted break is a committed edit AND spawns the registry drop.
+			const sim::BreakResult result = sim.breakBlock(action.cell);
+			if (result == sim::BreakResult::Ok)
+				++out.committedEdits;
+			else
+			{
+				++out.rejectedEdits;
+				std::cerr << "[headless] line " << action.line << ": break refused at "
+						  << cellToString(action.cell) << " (" << breakResultName(result) << ")\n";
+			}
+			break;
+		}
+		case ScriptOp::PlaceSelected:
+		{
+			// Gameplay place-from-hotbar (issue #227), distinct from creative
+			// place: consumes exactly 1 item on success only.
+			const sim::PlaceResult result = sim.placeSelectedBlock(action.cell);
+			if (result == sim::PlaceResult::Ok)
+				++out.committedEdits;
+			else if (result == sim::PlaceResult::PlayerOverlap)
+			{
+				++out.refusedEdits;
+				std::cerr << "[headless] line " << action.line << ": placeSelected refused at "
+						  << cellToString(action.cell) << " (player-aware rule)\n";
+			}
+			else
+			{
+				++out.rejectedEdits;
+				std::cerr << "[headless] line " << action.line << ": placeSelected refused at "
+						  << cellToString(action.cell) << " (" << placeResultName(result) << ")\n";
+			}
+			break;
+		}
 		case ScriptOp::Interest:
 			interest = action.position;
 			interestPinned = true;
@@ -315,6 +417,36 @@ RunOutcome runHeadless(const RunnerOptions &options)
 			}
 			break;
 		}
+		case ScriptOp::ExpectInventory:
+		{
+			sim::InventorySnapshot inventory;
+			sim.inventorySnapshot(inventory);
+			const items::ItemStack &actual = inventory.slots[static_cast<size_t>(action.slot)];
+			const bool matches = action.expectEmpty
+									 ? actual.isEmpty()
+									 : actual.item == action.item && actual.count == action.count;
+			if (!matches)
+			{
+				const std::string expected = action.expectEmpty
+												 ? std::string("empty")
+												 : std::string(items::itemName(action.item)) + " x" +
+													   std::to_string(action.count);
+				fail(ExitCode::Assertion,
+					 "script line " + std::to_string(action.line) + ": expected inventory slot " +
+						 std::to_string(action.slot) + " = " + expected + ", got " + stackToString(actual));
+			}
+			break;
+		}
+		case ScriptOp::ExpectItems:
+		{
+			const size_t live = sim.itemEntities().entities().size();
+			if (live != static_cast<size_t>(action.expectedItems))
+				fail(ExitCode::Assertion,
+					 "script line " + std::to_string(action.line) + ": expected " +
+						 std::to_string(action.expectedItems) + " live item entities, got " +
+						 std::to_string(live));
+			break;
+		}
 		case ScriptOp::ExpectDigest:
 			expectedDigests.push_back(action.expectedDigest);
 			break;
@@ -336,6 +468,10 @@ RunOutcome runHeadless(const RunnerOptions &options)
 	out.chunkCount = worldSnapshot.chunkCount;
 	out.editRevision = worldSnapshot.editRevision;
 	out.mobCount = sim.mobs().mobs().size();
+	out.itemCount = sim.itemEntities().entities().size();
+	for (const items::ItemStack &stack : sim.inventory().slots())
+		out.inventoryTotal += stack.count;
+	out.itemIdHighWater = sim.itemIdHighWater();
 	out.playerPos = sim.playerFeet();
 	if (sim.isInitialized())
 		out.digest = computeStateDigest(sim, out.area, out.ticksRun, out.committedEdits).hex();
