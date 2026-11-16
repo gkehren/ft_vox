@@ -583,6 +583,12 @@ void GameSimulation::restoreGameplayState()
         std::cout << "[world] restored " << entities.size() << " dropped items (next entity id "
                   << m_savedItems->nextEntityId << ")\n";
     }
+    // Consume the payloads (PR #235 review): the restore seam is idempotent
+    // — a repeated finalizePlayerSpawn (future respawn flows, #230 runner
+    // round-trips) must never overwrite live gameplay state with the saved
+    // snapshot. The player restore keeps its historical re-restore behavior.
+    m_savedInventory.reset();
+    m_savedItems.reset();
 }
 
 // ---------------------------------------------------------------------------

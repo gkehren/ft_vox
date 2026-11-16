@@ -76,6 +76,13 @@
 //     sessions), known registry items, 1 <= count <= maxStack, finite
 //     positions AND velocities.
 //
+//     Deliberately NOT persisted: grounded / waitingForTerrain (solver
+//     transients) and `previous` (interpolation). Restore sets
+//     previous = position and grounded = false; physics::move re-derives
+//     the ground state on the FIRST tick (a resting item skips ground
+//     friction for exactly that one tick — a negligible, deterministic
+//     transient, not an omission).
+//
 //     Both files follow the player.state policy exactly: written/read by
 //     WorldPersistence::writeInventoryState/readInventoryState and
 //     writeItemsState/readItemsState; atomic tmp+rename; missing file means

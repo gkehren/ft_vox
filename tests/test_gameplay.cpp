@@ -1632,6 +1632,20 @@ void testGameplayPersistenceRoundTrip(ThreadPool &pool)
 		for (const auto &r : itemsBefore.entities)
 			noCollision = noCollision && ents.back().id > r.id;
 		CHECK(noCollision, "no id reuse across sessions");
+
+		// Idempotent seam (PR #235 review): the gameplay payloads are
+		// consumed after restore, so a repeated finalizePlayerSpawn never
+		// overwrites live gameplay state with the saved snapshot.
+		const std::size_t liveEntities = sim.itemEntities().size();
+		{
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Sand, 1);
+		}
+		sim.finalizePlayerSpawn(boot);
+		CHECK(sim.inventory().totalCount(ItemId::Sand) == 1,
+			  "repeated finalizePlayerSpawn keeps live inventory (payloads consumed)");
+		CHECK(sim.itemEntities().size() == liveEntities,
+			  "repeated finalizePlayerSpawn keeps live entities");
 		sim.shutdown();
 	}
 }

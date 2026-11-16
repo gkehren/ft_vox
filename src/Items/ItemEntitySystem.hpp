@@ -159,7 +159,10 @@ class ItemEntitySystem
     /// LIFECYCLE ONLY — the facade calls it on finalizePlayerSpawn. Events,
     /// accumulator and dropped counters reset (fresh presentation session);
     /// each entity's previous position is set to its position (no
-    /// interpolation jump on the first frame).
+    /// interpolation jump on the first frame). grounded/waitingForTerrain
+    /// are solver transients, not persisted: physics::move re-derives them
+    /// on the first tick (the items.state spec notes the one-tick friction
+    /// transient).
     void restore(uint64_t nextEntityId, const std::vector<ItemEntity> &entities);
 
     // --- Spawn seams (facade commands + deterministic fixtures) ---------------

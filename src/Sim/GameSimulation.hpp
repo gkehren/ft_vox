@@ -239,6 +239,8 @@ public:
     /// presentation — the outcome carries the saved yaw/pitch for the host.
     /// Also restores the saved inventory + dropped items + entity-id
     /// allocator high-water (issue #228), independent of the player outcome.
+    /// The gameplay restore is ONCE per session (the payloads are consumed):
+    /// repeated calls never overwrite live gameplay state (PR #235 review).
     SpawnOutcome finalizePlayerSpawn(glm::dvec3 fallbackAround);
 
     /// Close (refusable) and recreate the world for `newSeed` (<= 0 -> 42,
