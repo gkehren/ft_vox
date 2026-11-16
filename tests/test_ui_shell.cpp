@@ -169,7 +169,8 @@ static void checkShortcutMetadata()
 	CHECK(globalCount == 12, "F1-F12 documented");
 	for (int key : {SDLK_F1, SDLK_F2, SDLK_F3, SDLK_F4, SDLK_F5, SDLK_F6, SDLK_F7, SDLK_F8,
 					SDLK_F9, SDLK_F10, SDLK_F11, SDLK_F12,
-					SDLK_P, SDLK_C, SDLK_B, SDLK_T, SDLK_V, SDLK_X, SDLK_H})
+					SDLK_P, SDLK_C, SDLK_B, SDLK_T, SDLK_V, SDLK_X, SDLK_H,
+					SDLK_1, SDLK_Q, SDLK_E})
 	{
 		const ui::ShortcutRef *ref = ui::findShortcut(key);
 		CHECK(ref != nullptr, "documented binding present in metadata table");

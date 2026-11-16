@@ -37,10 +37,15 @@ inline constexpr ShortcutRef kShortcuts[] = {
 	{SDLK_P, "P", "Pause world tick", false},
 	{SDLK_C, "C", "Capture / free mouse", false},
 	{SDLK_B, "B", "Toggle chunk borders", false},
-	{SDLK_T, "T", "Cycle selected block", false},
+	{SDLK_T, "T", "Cycle creative block (flight)", false},
 	{SDLK_V, "V", "Toggle walk / debug flight", false},
 	{SDLK_X, "X", "Toggle flight speed boost", false},
 	{SDLK_H, "H", "Toggle layout tiles", false},
+	// Issue #227 (Epic #223 Phase D): gameplay interaction keys. The digit
+	// entry represents the 1-9 hotbar range (all classified GameplayShortcut).
+	{SDLK_1, "1-9", "Select hotbar slot", false},
+	{SDLK_Q, "Q", "Drop selected item", false},
+	{SDLK_E, "E", "Toggle inventory panel", false},
 };
 
 inline const ShortcutRef *findShortcut(int keycode)

@@ -148,6 +148,32 @@ enum class BreakResult : uint8_t
                     // refused the edit (no-op / invalid target)
 };
 
+/// Result of placeSelectedBlock (issue #227, Epic #223 Phase D): the
+/// place-from-hotbar rejection vocabulary.
+enum class PlaceResult : uint8_t
+{
+    Ok,             // placed through the world edit semantics; consumed 1 item
+    EmptySlot,      // selected hotbar stack is empty
+    NotPlaceable,   // selected item has no registry placeableBlock (future
+                    // non-block items; every v1 catalog item is placeable)
+    PlayerOverlap,  // canPlaceVoxel refused (walking body + solid block, #209)
+    UnknownTerrain, // target cell unloaded / not generated (gameplay refuses;
+                    // the creative seam may defer into registered records)
+    WorldRejected   // world refused the edit (occupied / out-of-bounds target)
+};
+
+/// Plain-value targeting result (issue #227): the simulation-owned raycast
+/// query answers the hit block plus the adjacent placement cell. `adjacent`
+/// is the last marched cell before the hit, with the historical fallback
+/// (hit cell minus the ray direction signs) when the ray starts inside a
+/// block. No render types — the highlight consumes this (presentation).
+struct RaycastHit
+{
+    bool hit{false};
+    glm::vec3 block{0.0f};
+    glm::vec3 adjacent{0.0f};
+};
+
 class GameSimulation
 {
 public:
@@ -388,10 +414,16 @@ public:
     /// slots. Not a gameplay rule — walking-mode survival never grants.
     items::AddResult grantItems(items::ItemId item, uint16_t count);
 
-    // --- World interaction commands (issue #226, Epic #223 Phase C) -----------
-    // The survival-lite break/drop half of the loop; place-from-hotbar and
-    // the sim raycast arrive in #227. The creative/editor placeVoxel /
-    // deleteVoxel seams above stay unchanged (infinite-block semantics).
+    // --- World interaction commands (issues #226/#227, Epic #223 Phase C/D) --
+    // The survival-lite break/drop/place loop; the sim raycast below is the
+    // targeting rule. The creative/editor placeVoxel / deleteVoxel seams
+    // above stay unchanged (infinite-block semantics).
+    //
+    // `outEdit` (optional): on an ACCEPTED edit the world's WorldEditResult
+    // (edit id + geometric members) is moved out so the graphical host can
+    // publish through RenderWorldBridge::publishEditResult — the SAME event
+    // drain + commit-group path the creative edits use, no second edit path
+    // (issue #227). Headless callers pass nullptr.
 
     /// Break a voxel by hand: validates the cell against the item registry
     /// (BEDROCK / fluids refused, unloaded cells never inferred), deletes
@@ -399,7 +431,25 @@ public:
     /// ordering preserved) and spawns the registry drop at the cell center
     /// with deterministic id/edit-revision jitter. BreakResult distinguishes
     /// Ok / Unbreakable / UnknownTerrain / WorldRejected.
-    BreakResult breakBlock(glm::ivec3 cell);
+    BreakResult breakBlock(glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
+
+    /// Place the selected hotbar block (issue #227): the selected stack must
+    /// hold a PLACEABLE item (registry placeableBlock); gates with the
+    /// existing player-aware canPlaceVoxel rule (#209); edits through the
+    /// existing world semantics; CONSUMES EXACTLY 1 ITEM ON SUCCESS ONLY.
+    /// PlaceResult distinguishes Ok / EmptySlot / NotPlaceable /
+    /// PlayerOverlap / UnknownTerrain / WorldRejected.
+    PlaceResult placeSelectedBlock(glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
+
+    /// Simulation-owned targeting query (issue #227): the historical
+    /// Engine::raycastVoxel march moved verbatim behind a render-free API —
+    /// 0.05 float step, first ACTIVE cell (VoxelWorld::isVoxelActive, the
+    /// exact seam the bridge forwarded to), adjacent-cell fallback when the
+    /// ray starts inside a block, unknown cells never hit. `dir` is
+    /// normalized here (the host passes the raw camera front as a plain
+    /// value); `maxDist` stays a host-supplied plain value
+    /// (renderSettings.raycastDistance). Pure query: never edits the world.
+    RaycastHit raycastVoxel(glm::vec3 origin, glm::vec3 dir, float maxDist) const;
 
     /// Drop items from an inventory slot: removes up to `count` (clamped,
     /// the removeCount semantics) and spawns one entity at the player eye

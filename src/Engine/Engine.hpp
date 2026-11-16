@@ -124,6 +124,11 @@ public:
 	/// Monotonically increasing world generation / reload version counter.
 	uint64_t worldGenerationId() const { return sim ? sim->worldGenerationId() : 0; }
 
+	/// Inventory-panel UI flag (issue #227): toggled by E, consumed by the
+	/// panel itself in #229. Presentation-local host state — the authoritative
+	/// inventory lives in the simulation.
+	bool inventoryPanelOpen() const { return m_inventoryPanelOpen; }
+
 	/// Result of applying a pack (atlas is still usable when pack is invalid — bundled used).
 	struct ResourcePackApplyResult
 	{
@@ -154,7 +159,15 @@ private:
 	/// WorldRenderer::setMobs. The authoritative step never sees the camera
 	/// beyond a plain observer point.
 	void tickMobs(double dt);
+	/// Dropped-item simulation step (issue #227, Epic #223 Phase D): the
+	/// facade's advanceItems next to the mob step, same host suspension
+	/// policy. No presentation consumer yet — #229 renders the snapshots.
+	void tickItems(double dt);
 	void updateHighlight();
+	/// Thin forward to sim::raycastVoxel (issue #227): the targeting RULE
+	/// lives in the simulation; the host supplies camera origin/front and
+	/// renderSettings.raycastDistance as plain values. Kept as the highlight
+	/// + mouse-handler seam (presentation consumers).
 	bool raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious);
 	void drawUi();
 	void tickBenchmark(double dt);
@@ -305,6 +318,8 @@ private:
 
 	OverlayHighlight highlight{};
 	std::vector<OverlayPlayer> demoPlayers;
+	/// E toggles this (issue #227); the inventory panel renders it in #229.
+	bool m_inventoryPanelOpen{false};
 
 	Benchmark m_benchmark{};
 	bool m_exitAfterBenchmark{false};

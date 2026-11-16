@@ -538,10 +538,10 @@ items::AddResult GameSimulation::grantItems(items::ItemId item, uint16_t count)
 }
 
 // ---------------------------------------------------------------------------
-// World interaction commands (issue #226, Epic #223 Phase C)
+// World interaction commands (issues #226/#227, Epic #223 Phase C/D)
 // ---------------------------------------------------------------------------
 
-BreakResult GameSimulation::breakBlock(glm::ivec3 cell)
+BreakResult GameSimulation::breakBlock(glm::ivec3 cell, WorldEditResult *outEdit)
 {
     if (!m_world)
         return BreakResult::UnknownTerrain;
@@ -564,13 +564,82 @@ BreakResult GameSimulation::breakBlock(glm::ivec3 cell)
     // Existing world edit semantics (issue #114): the delete may defer with
     // its mirror group; the drop spawns immediately at the cell center.
     const glm::vec3 center(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
-    const WorldEditResult edit = m_world->deleteVoxel(center);
+    WorldEditResult edit = m_world->deleteVoxel(center);
     if (!edit.accepted)
         return BreakResult::WorldRejected;
     const items::ItemStack drop = items::dropForBlock(type);
     if (!drop.isEmpty())
         m_items.spawnBreakDrop(drop, glm::dvec3(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5), edit.editId);
+    // The graphical host publishes the accepted edit through the bridge
+    // (event drain + commit groups) — no second edit path (issue #227).
+    if (outEdit)
+        *outEdit = std::move(edit);
     return BreakResult::Ok;
+}
+
+PlaceResult GameSimulation::placeSelectedBlock(glm::ivec3 cell, WorldEditResult *outEdit)
+{
+    const items::ItemStack selected = m_inventory.selectedStack();
+    if (selected.isEmpty())
+        return PlaceResult::EmptySlot;
+    const std::optional<TextureType> block = items::placeableBlockOf(selected.item);
+    if (!block.has_value())
+        return PlaceResult::NotPlaceable; // future non-block items (none in v1)
+    const glm::vec3 center(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
+    // Player-aware placement rule (#209): the SAME query the creative host
+    // gates with — walking bodies refuse solid overlap, flight never does.
+    if (!canPlaceVoxel(center, *block))
+        return PlaceResult::PlayerOverlap;
+    // Gameplay refuses unknown targets (the creative seam may defer edits
+    // into registered-but-unloaded records; survival placement needs terrain).
+    if (!m_world)
+        return PlaceResult::UnknownTerrain;
+    {
+        WorldCollisionView view(*m_world);
+        if (!view.sample(cell).available)
+            return PlaceResult::UnknownTerrain;
+    }
+    WorldEditResult edit = m_world->placeVoxel(center, *block);
+    if (!edit.accepted)
+        return PlaceResult::WorldRejected; // occupied / out-of-bounds target
+    // Consume exactly 1 item, ONLY on success (the survival contract).
+    m_inventory.removeCount(m_inventory.selectedSlot(), 1);
+    if (outEdit)
+        *outEdit = std::move(edit);
+    return PlaceResult::Ok;
+}
+
+RaycastHit GameSimulation::raycastVoxel(glm::vec3 origin, glm::vec3 dir, float maxDist) const
+{
+    // The historical Engine::raycastVoxel march, moved VERBATIM (issue #227):
+    // same float arithmetic, same 0.05 step, same first-active-cell rule and
+    // adjacent fallback. VoxelWorld::isVoxelActive is the exact seam the
+    // render bridge forwarded to, so parity holds by construction. Unknown
+    // cells answer inactive — the march passes through them, never hits.
+    RaycastHit result{};
+    if (!m_world)
+        return result;
+    dir = glm::normalize(dir);
+    const float step = 0.05f;
+    glm::vec3 prev = origin;
+    for (float t = 0.f; t <= maxDist; t += step)
+    {
+        const glm::vec3 p = origin + dir * t;
+        const glm::vec3 block(std::floor(p.x), std::floor(p.y), std::floor(p.z));
+        if (m_world->isVoxelActive(block))
+        {
+            result.hit = true;
+            result.block = block;
+            result.adjacent = glm::vec3(std::floor(prev.x), std::floor(prev.y), std::floor(prev.z));
+            if (result.adjacent == result.block)
+                result.adjacent = block - glm::vec3(dir.x > 0 ? 1.f : (dir.x < 0 ? -1.f : 0.f),
+                                                    dir.y > 0 ? 1.f : (dir.y < 0 ? -1.f : 0.f),
+                                                    dir.z > 0 ? 1.f : (dir.z < 0 ? -1.f : 0.f));
+            return result;
+        }
+        prev = p;
+    }
+    return result;
 }
 
 items::ItemResult GameSimulation::dropFromSlot(int slot, uint16_t count, glm::dvec3 dir)
