@@ -170,8 +170,11 @@ One machine-readable line on stdout (the facade's own `[world] …` /
 `SUMMARY `, or — with `--json` — the line starting with `{`):
 
 ```text
-SUMMARY status=ok exit_code=0 seed=42 generator=1 ticks=600 workers=0 interest_radius=96 chunks=129 edits=6 refused=0 rejected=0 edit_revision=7 mobs=15 items=1 inventory=3 item_high_water=2 player=(8.5,221.5,8.5) area=(-16,0,-16)-(15,255,15) digest=3a068dd4be8ab57e save=none
+SUMMARY status=ok exit_code=0 seed=42 generator=1 ticks=600 workers=0 interest_radius=96 chunks=126 edits=6 refused=0 rejected=0 edit_revision=7 mobs=14 items=1 inventory=3 item_high_water=2 player=(8.5,221.5,8.5) area=(-16,0,-16)-(15,255,15) digest=9b5013db5e550fe2 save=none
 ```
+
+(The example is the shipped output of the canonical fixture run above:
+`--seed 42 --ticks 600 --script tests/fixtures/sim-actions.txt`.)
 
 `--json` emits the same fields as a single JSON object. Fields: world
 identity (`seed`, `generator`), executed `ticks`, `workers`,

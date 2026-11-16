@@ -87,9 +87,9 @@ replays or reorders anything.
 | Command | Semantics | Result codes |
 |---|---|---|
 | `selectHotbarSlot(index)` | gameplay selection, 0..8 | `Ok` / `InvalidSlot` |
-| `moveStack(from, to)` | whole-stack move/merge | `Ok` / `Partial` / `Full` / `InvalidSlot` / `ItemMismatch` |
+| `moveStack(from, to)` | whole-stack move/merge | `Ok` / `Partial` / `Full` / `InvalidSlot` / `EmptyStack` / `ItemMismatch` |
 | `swapStacks(a, b)` | unconditional exchange (empty included) | `Ok` / `InvalidSlot` |
-| `splitStack(from, to)` | move the **larger half** (ceil; odd counts defined) with transfer semantics | `Ok` / `Partial` / `Full` / `InvalidSlot` / `ItemMismatch` |
+| `splitStack(from, to)` | move the **larger half** (ceil; odd counts defined) with transfer semantics | `Ok` / `Partial` / `Full` / `InvalidSlot` / `EmptyStack` / `ItemMismatch` |
 | `grantItems(item, count)` | **test/admin seam**, explicitly logged (`[items] grant …`); hotbar-first merge then empty slots; counts above maxStack distribute | `AddResult{result, remainder}` |
 | `dropFromSlot(slot, count, dir)` | remove up to `count` (clamped) + spawn one entity at the player eye along the host-supplied plain direction; degenerate/non-finite dir falls back to +Y; manual drops carry the longer pickup delay | `Ok` / `InvalidSlot` / `EmptyStack` |
 | `breakBlock(cell)` | registry validation + world delete + registry drop spawn (§5) | `BreakResult` (§4) |
@@ -223,8 +223,10 @@ durability barrier are unchanged and cover the new files.
   right-click half-split; the **drag cursor is UI-local presentation**,
   discarded on close (no duplication — authoritative moves happen only
   through commands). Item icons are per-atlas-layer ImGui descriptors over
-  the block atlas (no new assets), eagerly invalidated on resource-pack
-  reload. Pure layout/cursor/click logic lives in `InventoryUi.hpp`
+  the block atlas (no new assets), dropped eagerly on resource-pack apply
+  (device idle) and revalidated against the atlas version before next use
+  (the lazy version-mismatch check remains as a safety net). Pure
+  layout/cursor/click logic lives in `InventoryUi.hpp`
   (headless-testable, `test_ui_shell`).
 - **`ItemEntityRenderer`** (issue #229): one shared atlas-textured unit cube,
   one instanced indexed draw for the frustum-culled visible population
@@ -301,7 +303,7 @@ split. The experimental `src/Network/` module stays **test-only**.
       (#224/#226/#228).
 - [x] The CPU-only build (`FT_VOX_GRAPHICS=OFF`) builds and passes with the
       new modules; `CoreIncludeGuard` / `HeadlessDeps` / link-closure gates
-      green (#230 closure record: `benchmarks/issue-230.md`).
+      green (#230 closure record: `benchmarks/issue-230-closure.md`).
 - [x] Full CTest suite + visual goldens hold; docs updated
       (`docs/gameplay-loop.md`, simulation-render contracts, headless runner,
       engine architecture, `AGENTS.md`).

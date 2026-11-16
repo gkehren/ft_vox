@@ -69,7 +69,7 @@ reset; §10, "Phase F gameplay-presentation contract"). Phase G (issue #230)
 **closed the epic**: the headless script grammar drives the full gameplay
 loop, the canonical digest (`FTVHDIG2`) covers inventory + item population +
 id allocator, and the closure gate (full suite, CPU-only build, goldens,
-benchmark parity) is recorded in `benchmarks/issue-230.md` (§10, "Phase G
+benchmark parity) is recorded in `benchmarks/issue-230-closure.md` (§10, "Phase G
 headless gameplay + closure contract"; [`gameplay-loop.md`](gameplay-loop.md)
 is the authoritative gameplay reference).
 
@@ -1110,7 +1110,7 @@ with the full verification gate (the #211 pattern). No new gameplay behavior
   (the `Items/` headers are core, already in both closures); the
   configure-time link-closure assertion covers every CPU test target added
   by the epic; the opt-in `CpuOnlyBuild` gate re-verified.
-- **Closure record**: `benchmarks/issue-230.md` — full CTest suite, CPU-only
+- **Closure record**: `benchmarks/issue-230-closure.md` — full CTest suite, CPU-only
   configure/build/test gate, visual goldens (existing + the F scene),
   in-game benchmark parity vs the pre-epic baseline (the item step
   early-outs at zero items), and the determinism report. The epic #223
@@ -1242,7 +1242,7 @@ acceptance driver (sync + async determinism, 3-process save/reload/edit
 round-trip, every failure exit code), the dependency guard, and the clean
 `FT_VOX_GRAPHICS=OFF` configure/build/test gate — on Windows/MSVC and on
 WSL2 Debian (GCC, no Vulkan SDK / SDL3 / shader toolchain discovered).
-Epic #223 Phase G closure (`benchmarks/issue-230.md`): the extended headless
+Epic #223 Phase G closure (`benchmarks/issue-230-closure.md`): the extended headless
 acceptance driver (gameplay loop, sync/async parity with items in flight,
 3-process gameplay round-trip, grammar/assertion exits), the full graphical
 CTest suite, the CPU-only gate, the visual goldens (existing + the
