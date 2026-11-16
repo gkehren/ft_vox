@@ -903,7 +903,12 @@ break → drop → pickup → **place (consumes)**.
   the new keys classify as `GameplayShortcut` (inert while ImGui owns the
   keyboard — `test_input_routing`/`test_ui_shell` pin the policy/metadata).
   `Engine::tickItems` runs `advanceItems` next to `tickMobs` under the same
-  suspension policy (frame step 9b).
+  suspension policy (frame step 9b). Item snapshots get their renderer in
+  #229, which also drains the lifecycle stream: until then the bounded
+  event stream is undrained in real play — long walking sessions reach the
+  4096 cap and drop the OLDEST events, observable via
+  `itemEntities().droppedEventCount()` (the `WorldEvent` contract; no
+  functional loss once #229 drains at frame cadence).
 - **Host-contract checklist (no gameplay rule left in the host)**:
   targeting → `sim::raycastVoxel`; break/drop rules → `sim::breakBlock` +
   registry; consumption → `sim::placeSelectedBlock`; pickup →

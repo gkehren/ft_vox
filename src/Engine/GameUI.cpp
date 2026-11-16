@@ -853,7 +853,7 @@ void GameUI::drawHelp(GameUIFrame &frame)
 				ImGui::TableSetupColumn("Action");
 				ImGui::TableHeadersRow();
 				helpRow("LMB / RMB", "Break / place (walk: items; flight: creative)");
-			helpRow("Wheel", "Cycle hotbar selection");
+				helpRow("Wheel", "Cycle hotbar selection");
 				for (const ui::ShortcutRef &ref : ui::kShortcuts)
 					if (!ref.global)
 						helpRow(ref.key, ref.action);

@@ -1131,8 +1131,12 @@ void Engine::tickItems(double dt)
 		return;
 	// Dropped-item simulation (issue #227 completes the #226 loop in-game):
 	// the same host suspension policy as the player/mobs. No presentation
-	// consumer yet — #229 renders the id-sorted snapshots; the bounded event
-	// stream stays drainable (oldest-drop at the cap until then).
+	// consumer yet — #229 renders the id-sorted snapshots and drains the
+	// lifecycle stream. Until then the bounded event stream is undrained in
+	// real play: long walking sessions reach the 4096 cap and drop the OLDEST
+	// events (observable via itemEntities().droppedEventCount(), the
+	// WorldEvent contract — functional events are never lost at frame
+	// cadence once #229 drains).
 	sim->advanceItems(dt, simulationSuspended());
 }
 
