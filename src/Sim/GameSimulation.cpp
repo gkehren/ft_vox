@@ -496,7 +496,12 @@ items::ItemResult GameSimulation::splitStack(int from, int to)
 
 items::AddResult GameSimulation::grantItems(items::ItemId item, uint16_t count)
 {
-    const items::AddResult result = m_inventory.addStack(items::makeStack(item, count));
+    // Normalize FIRST so the audit line reflects what was actually applied
+    // (PR #232 review): a {None, N} sentinel input collapses to the canonical
+    // empty and grants nothing — the log must not overstate that as N items.
+    const items::ItemStack request = items::makeStack(item, count);
+    const items::AddResult result = m_inventory.addStack(request);
+    const uint32_t applied = static_cast<uint32_t>(request.count) - result.remainder.count;
     // Test/admin seam (epic #223 §3): EVERY grant is explicitly logged so
     // items entering the inventory without a break/pickup cause stay
     // auditable in headless runs and (later) authoritative server logs.
@@ -509,6 +514,8 @@ items::AddResult GameSimulation::grantItems(items::ItemId item, uint16_t count)
     std::cout << " (admin seam): " << itemResultName(result.result);
     if (!result.remainder.isEmpty())
         std::cout << ", remainder " << result.remainder.count;
+    if (applied != count)
+        std::cout << ", applied " << applied;
     std::cout << "\n";
     return result;
 }

@@ -115,10 +115,14 @@ struct WorldSnapshot
 /// in place like mobSnapshots (no per-frame allocation, no intermediate
 /// cache). Display names are resolved through the item registry on the UI
 /// side (#229): the snapshot carries stable ItemIds, never strings.
+/// Value equality is defaulted (the ItemStack pattern) so digest/replication
+/// comparisons (#228/#230, epic §6) compare whole snapshots directly.
 struct InventorySnapshot
 {
     std::array<items::ItemStack, items::kInventorySize> slots{};
     int selectedSlot{0};
+
+    constexpr friend bool operator==(const InventorySnapshot &, const InventorySnapshot &) = default;
 };
 
 class GameSimulation
@@ -311,6 +315,11 @@ public:
     // survives until initialize/reload resets it (the #228 restore hook lands
     // with persistence). Mutations go through these commands ONLY — the
     // inventory() accessor below is read-only.
+    //
+    // Deliberately NOT exposed here: items::Inventory::removeCount. The
+    // command set is exactly the epic §3 inventory-management commands plus
+    // the grant seam; item CONSUMPTION arrives with place-from-hotbar (#227),
+    // which removes from the selected slot only on a successful placement.
 
     /// Select the gameplay hotbar slot (0..kHotbarSize-1); out of range ->
     /// InvalidSlot, selection unchanged. This is the GAMEPLAY selection; the
@@ -333,6 +342,10 @@ public:
     /// TEST/ADMIN SEAM (epic #223 §3): grant items without a break/pickup
     /// cause. Every call is EXPLICITLY LOGGED ("[items] grant ...") so
     /// headless runs and future server audits can account for spawned items.
+    /// The log records the requested count and — when it differs — the
+    /// APPLIED amount: a {None, N} sentinel input collapses to the canonical
+    /// empty (an Ok no-op logged with "applied 0"), partial/full/rejected
+    /// grants log their remainder and applied count.
     /// Same partial semantics as the future pickup path: hotbar-first merge,
     /// then empty slots; AddResult.remainder is what did not fit (Full leaves
     /// the inventory untouched). Counts above maxStack distribute across

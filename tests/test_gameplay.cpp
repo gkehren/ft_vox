@@ -70,7 +70,7 @@ sim::InventorySnapshot snap(const sim::GameSimulation &sim)
 
 bool sameSnapshot(const sim::InventorySnapshot &a, const sim::InventorySnapshot &b)
 {
-	return a.slots == b.slots && a.selectedSlot == b.selectedSlot;
+	return a == b; // defaulted value equality (the ItemStack pattern)
 }
 
 bool emptyInventory(const sim::GameSimulation &sim)
@@ -247,6 +247,7 @@ void testGrantSeam()
 		const items::AddResult ok = sim.grantItems(ItemId::Stone, 10);
 		const items::AddResult partial = sim.grantItems(ItemId::Stone, 36 * 64);
 		const items::AddResult bad = sim.grantItems(static_cast<ItemId>(0xFFFF), 5);
+		const items::AddResult collapsed = sim.grantItems(ItemId::None, 5);
 		std::cout.rdbuf(old);
 		CHECK(ok.result == ItemResult::Ok, "logged grant applied");
 		const std::string log = capture.str();
@@ -256,8 +257,17 @@ void testGrantSeam()
 			  "partial grant log carries the remainder");
 		CHECK(log.find("item#65535") != std::string::npos && log.find("InvalidItem") != std::string::npos,
 			  "unknown-item grant log carries the ordinal and rejection code");
-		CHECK(partial.result == ItemResult::Partial && bad.result == ItemResult::InvalidItem,
-			  "logged grants keep the partial/rejection semantics");
+		CHECK(log.find("grant 5x item#0 (admin seam): Ok, applied 0") != std::string::npos,
+			  "None-sentinel grant log notes the collapse (applied 0, not the requested 5)");
+		CHECK(log.find("applied 2294") != std::string::npos,
+			  "partial grant log records the applied amount (2304 requested - 10 remainder)");
+		CHECK(partial.result == ItemResult::Partial && bad.result == ItemResult::InvalidItem &&
+				  collapsed.result == ItemResult::Ok,
+			  "logged grants keep the partial/rejection/collapse semantics");
+		bool allStoneFull = true;
+		for (const ItemStack &slot : snap(sim).slots)
+			allStoneFull = allStoneFull && slot == S(ItemId::Stone, 64);
+		CHECK(allStoneFull, "the collapsed None grant stored nothing (inventory unchanged by it)");
 	}
 }
 
@@ -372,6 +382,17 @@ void testSnapshotContract()
 	out.selectedSlot = 8;
 	CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 10) && sim.inventory().selectedSlot() == 3,
 		  "mutating the snapshot never touches the simulation");
+
+	// Defaulted value equality (future digest/replication comparisons, epic §6).
+	sim::InventorySnapshot x, y;
+	sim.inventorySnapshot(x);
+	sim.inventorySnapshot(y);
+	CHECK(x == y, "identical in-place fills compare equal");
+	y.selectedSlot = 0;
+	CHECK(!(x == y), "equality detects a selection difference");
+	y = x;
+	y.slots[5] = S(ItemId::Glass, 1);
+	CHECK(!(x == y), "equality detects a slot difference");
 }
 
 // ---------------------------------------------------------------------------
