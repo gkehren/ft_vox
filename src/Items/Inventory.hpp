@@ -90,6 +90,14 @@ class Inventory
     /// Reset to the fresh state: 36 canonical empty stacks, selection 0.
     void clear();
 
+    /// Persistence restore seam (issue #228, Epic #223 Phase E): replace
+    /// the whole container with save-layer-VALIDATED state (registry ids,
+    /// count bounds and selection range were checked by
+    /// worldsave::decodeInventoryState). LIFECYCLE ONLY — not a gameplay
+    /// command; the facade calls it on finalizePlayerSpawn. Well-formedness
+    /// is asserted in debug; the canonical-empty invariant is preserved.
+    void restore(const std::array<ItemStack, kInventorySize> &slots, int selectedSlot);
+
   private:
     std::array<ItemStack, kInventorySize> m_slots{};
     int m_selectedSlot{0};

@@ -57,6 +57,29 @@ void ItemEntitySystem::reset()
     m_queries = {};
 }
 
+void ItemEntitySystem::restore(uint64_t nextEntityId, const std::vector<ItemEntity> &entities)
+{
+    // The save layer validated ids/counts/transforms (decodeItemsState);
+    // debug-assert the invariants the tick rules rely on.
+    assert(nextEntityId >= 1);
+    assert(entities.size() <= ItemEntitySettings::capacity);
+    uint64_t prevId = 0;
+    for (const ItemEntity &e : entities)
+    {
+        assert(e.id > prevId && e.id < nextEntityId);
+        prevId = e.id;
+    }
+    m_entities = entities;
+    for (ItemEntity &e : m_entities)
+        e.previous = e.body.position; // no interpolation jump on frame one
+    m_nextId = nextEntityId;
+    m_events.clear();
+    m_dropped = 0;
+    m_droppedEvents = 0;
+    m_accumulator = 0;
+    m_queries = {};
+}
+
 // ---------------------------------------------------------------------------
 // Spawn seams
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
-// test_gameplay — CPU-only gameplay acceptance (issues #225/#226/#227, Epic
-// #223 Phases B/C/D). Links ONLY ft_vox_core: no SDL, no Vulkan device, no
-// ImGui, no camera. Proves the issues' acceptance lists end-to-end:
+// test_gameplay — CPU-only gameplay acceptance (issues #225/#226/#227/#228,
+// Epic #223 Phases B/C/D/E). Links ONLY ft_vox_core: no SDL, no Vulkan
+// device, no ImGui, no camera. Proves the issues' acceptance lists
+// end-to-end:
 //
 // Phase B (#225):
 //   * command result matrix through the facade (invalid slots, empty
@@ -45,12 +46,23 @@
 //   * the full walking loop: break -> drop -> pickup -> select -> place
 //     consumes, with the world edit verified at every stage.
 //
+// Phase E (#228):
+//   * save -> close -> reopen restores inventory (counts, selection), item
+//     entities (bit-exact positions/velocities, ages, delays) and the
+//     allocator high-water; tick counters continue; ids issued after reopen
+//     never collide with persisted ids;
+//   * corrupt/missing new files degrade to empty with a LOUD save-error log
+//     while the world still opens; old-format saves load unchanged (quiet);
+//   * refused close keeps the OLD gameplay state authoritative; the
+//     shutdown safety net captures gameplay state without savePlayerState.
+//
 // Style mirrors test_game_simulation: a CHECK macro, plain main().
 
 #include <Sim/GameSimulation.hpp>
 #include <Core/ThreadPool.hpp>
 #include <Items/ItemEntitySystem.hpp>
 #include <Items/ItemRegistry.hpp>
+#include <Items/ItemStack.hpp>
 #include <World/WorldCollisionView.hpp>
 
 #include <chrono>
@@ -58,6 +70,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -508,8 +521,9 @@ void testLifecycleResets(ThreadPool &pool)
 		sim.shutdown();
 	}
 
-	// Save/reopen: player.state restores, the inventory stays EMPTY until the
-	// #228 restore hook lands (old saves load unchanged, epic #223 §4).
+	// Save/reopen: player.state AND the gameplay state restore (issue #228):
+	// inventory counts + selection come back; old saves without the new
+	// files still load unchanged (covered by the fresh-world fixtures).
 	{
 		TempRoot root("reopen");
 		{
@@ -539,7 +553,9 @@ void testLifecycleResets(ThreadPool &pool)
 			const auto outcome = sim.finalizePlayerSpawn(boot);
 			CHECK(outcome.restored, "saved player restored on reopen");
 			CHECK(sim.selectedBlock() == DIRT, "creative selection persistence untouched");
-			CHECK(emptyInventory(sim), "reopen starts with an EMPTY inventory (restore hook is #228)");
+			CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 64),
+				  "reopen restores the inventory counts (issue #228)");
+			CHECK(sim.inventory().selectedSlot() == 2, "reopen restores the hotbar selection");
 			sim.shutdown();
 		}
 	}
@@ -1500,6 +1516,345 @@ void testWalkingLoopEndToEnd(ThreadPool &pool)
 	}
 	sim.shutdown();
 }
+
+// ===========================================================================
+// Phase E (issue #228): gameplay persistence — inventory.state + items.state
+// ===========================================================================
+
+bool writeRawFile(const std::filesystem::path &path, const std::vector<uint8_t> &bytes)
+{
+	std::ofstream out(path, std::ios::binary | std::ios::trunc);
+	if (!out)
+		return false;
+	if (!bytes.empty())
+		out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+	return out.good();
+}
+
+// Compare the live simulation against captured persist payloads (the restore
+// must populate the authoritative state, not just round-trip the structs).
+void checkRestoredInventory(const sim::GameSimulation &sim, const worldsave::InventoryPersistState &want)
+{
+	CHECK(sim.inventory().selectedSlot() == want.selectedSlot, "restore: hotbar selection");
+	bool slotsMatch = true;
+	for (std::size_t i = 0; i < want.slots.size(); ++i)
+		slotsMatch = slotsMatch &&
+					 sim.inventory().stack(static_cast<int>(i)) ==
+						 items::makeStack(static_cast<ItemId>(want.slots[i].itemId), want.slots[i].count);
+	CHECK(slotsMatch, "restore: all 36 stacks (ids + counts)");
+}
+
+void checkRestoredItems(const sim::GameSimulation &sim, const worldsave::ItemsPersistState &want)
+{
+	const auto &ents = sim.itemEntities().entities();
+	CHECK(ents.size() == want.entities.size(), "restore: entity population");
+	CHECK(sim.itemIdHighWater() + 1 == want.nextEntityId, "restore: allocator high-water");
+	bool recordsMatch = ents.size() == want.entities.size();
+	for (std::size_t i = 0; i < ents.size() && i < want.entities.size(); ++i)
+	{
+		const auto &e = ents[i];
+		const auto &r = want.entities[i];
+		recordsMatch = recordsMatch && e.id == r.id &&
+					   e.stack == items::makeStack(static_cast<ItemId>(r.itemId), r.count) &&
+					   e.body.position == glm::dvec3(r.px, r.py, r.pz) &&
+					   e.body.velocity == glm::dvec3(r.vx, r.vy, r.vz) &&
+					   e.ageTicks == r.ageTicks && e.pickupDelay == r.pickupDelayTicks;
+	}
+	CHECK(recordsMatch, "restore: entity records bit-exact (ids, stacks, transforms, ages, delays)");
+}
+
+// ---------------------------------------------------------------------------
+// 19. save -> close -> reopen: inventory + entities + allocator restore;
+//     ids issued after reopen never collide with persisted ids.
+// ---------------------------------------------------------------------------
+void testGameplayPersistenceRoundTrip(ThreadPool &pool)
+{
+	TempRoot root("gp-roundtrip");
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	worldsave::InventoryPersistState invBefore;
+	worldsave::ItemsPersistState itemsBefore;
+
+	{
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		cfg.worldName = "roundtrip";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		sim.finalizePlayerSpawn(boot);
+		CoutSilencer silence;
+		sim.grantItems(ItemId::Stone, 100); // slot 0: 64, slot 1: 36
+		sim.grantItems(ItemId::Dirt, 7);    // slot 2: 7
+		sim.selectHotbarSlot(2);
+		sim.dropFromSlot(0, 5, {1, 0, 0}); // entity 1 {Stone,5}, delay 40
+		sim.dropFromSlot(1, 3, {0, 1, 0}); // entity 2 {Stone,3}
+		for (int i = 0; i < 30; ++i)
+			sim.advanceItems(1.0 / 60.0, false); // non-trivial ages/positions, delay not elapsed
+		invBefore = sim.captureInventoryState();
+		itemsBefore = sim.captureItemsState();
+		CHECK(itemsBefore.entities.size() == 2 && itemsBefore.nextEntityId == 3,
+			  "capture: two entities, allocator at 3");
+		CHECK(sim.savePlayerState(10.f, -5.f), "full gameplay capture + flush barrier");
+		CHECK(std::filesystem::exists(root.path / "roundtrip" / "inventory.state"),
+			  "inventory.state written");
+		CHECK(std::filesystem::exists(root.path / "roundtrip" / "items.state"), "items.state written");
+		sim.shutdown();
+	}
+
+	{
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 0; // stored seed
+		cfg.worldName = "roundtrip";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		const auto outcome = sim.finalizePlayerSpawn(boot);
+		CHECK(outcome.restored, "player restored alongside the gameplay state");
+		checkRestoredInventory(sim, invBefore);
+		checkRestoredItems(sim, itemsBefore);
+
+		// Tick counters CONTINUE from the persisted values (no reset).
+		sim.advanceItems(1.0 / 60.0, false);
+		CHECK(sim.itemEntities().entities()[0].ageTicks == itemsBefore.entities[0].ageTicks + 1,
+			  "restored ages continue ticking");
+
+		// Ids never collide: the next spawn resumes at the persisted
+		// high-water, above every persisted id.
+		CoutSilencer silence;
+		sim.grantItems(ItemId::Glass, 1);
+		sim.dropFromSlot(3, 1, {0, 1, 0});
+		const auto &ents = sim.itemEntities().entities();
+		CHECK(ents.back().id == itemsBefore.nextEntityId,
+			  "new id resumes at the persisted allocator next-id");
+		bool noCollision = true;
+		for (const auto &r : itemsBefore.entities)
+			noCollision = noCollision && ents.back().id > r.id;
+		CHECK(noCollision, "no id reuse across sessions");
+
+		// Idempotent seam (PR #235 review): the gameplay payloads are
+		// consumed after restore, so a repeated finalizePlayerSpawn never
+		// overwrites live gameplay state with the saved snapshot.
+		const std::size_t liveEntities = sim.itemEntities().size();
+		{
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Sand, 1);
+		}
+		sim.finalizePlayerSpawn(boot);
+		CHECK(sim.inventory().totalCount(ItemId::Sand) == 1,
+			  "repeated finalizePlayerSpawn keeps live inventory (payloads consumed)");
+		CHECK(sim.itemEntities().size() == liveEntities,
+			  "repeated finalizePlayerSpawn keeps live entities");
+		sim.shutdown();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 20. Corrupt / missing new files degrade to empty with a LOUD log while the
+//     world still opens; old-format saves (no new files) load unchanged.
+// ---------------------------------------------------------------------------
+void testGameplayPersistenceDegradation(ThreadPool &pool)
+{
+	TempRoot root("gp-degrade");
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+
+	// Create a saved world with one stack + one entity (the fixture).
+	auto createFixture = [&](const char *name) {
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		cfg.worldName = name;
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		sim.finalizePlayerSpawn(boot);
+		CoutSilencer silence;
+		sim.grantItems(ItemId::Stone, 10);
+		sim.dropFromSlot(0, 2, {0, 1, 0});
+		sim.savePlayerState(0.f, 0.f);
+		sim.shutdown();
+	};
+
+	// Corrupt inventory.state: world opens, inventory empty + loud log,
+	// intact items.state still restores.
+	{
+		createFixture("corrupt-inv");
+		const auto dir = root.path / "corrupt-inv";
+		CHECK(writeRawFile(dir / "inventory.state", {1, 2, 3}), "corrupt inventory.state written");
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 0;
+		cfg.worldName = "corrupt-inv";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		CHECK(sim.isWorldOpen(), "corrupt inventory.state never refuses the world open");
+		sim.bootstrapTerrain(boot);
+		sim.finalizePlayerSpawn(boot);
+		CHECK(emptyInventory(sim), "corrupt inventory.state degrades to empty");
+		const std::string err = sim.worldPersistence()->status().lastError;
+		CHECK(err.find("inventory.state") != std::string::npos, "corrupt inventory.state is LOUD");
+		CHECK(sim.itemEntities().size() == 1, "intact items.state still restores");
+		sim.shutdown();
+	}
+
+	// Corrupt items.state (bad magic): entities empty + loud log, inventory
+	// intact, allocator back at 0.
+	{
+		createFixture("corrupt-items");
+		const auto dir = root.path / "corrupt-items";
+		worldsave::ItemsPersistState payload;
+		payload.nextEntityId = 2;
+		worldsave::ItemEntityPersistState record;
+		record.id = 1;
+		record.itemId = static_cast<uint16_t>(ItemId::Stone);
+		record.count = 2;
+		payload.entities.push_back(record);
+		auto bytes = worldsave::encodeItemsState(payload);
+		bytes[0] = 'X';
+		CHECK(writeRawFile(dir / "items.state", bytes), "corrupt items.state written");
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 0;
+		cfg.worldName = "corrupt-items";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		CHECK(sim.isWorldOpen(), "corrupt items.state never refuses the world open");
+		sim.bootstrapTerrain(boot);
+		sim.finalizePlayerSpawn(boot);
+		CHECK(sim.itemEntities().size() == 0 && sim.itemIdHighWater() == 0,
+			  "corrupt items.state degrades to empty population + allocator");
+		const std::string err = sim.worldPersistence()->status().lastError;
+		CHECK(err.find("items.state") != std::string::npos, "corrupt items.state is LOUD");
+		CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 8), "intact inventory.state still restores");
+		sim.shutdown();
+	}
+
+	// Unsupported inventory.state version: loud, empty, world opens.
+	{
+		createFixture("bad-version");
+		const auto dir = root.path / "bad-version";
+		worldsave::InventoryPersistState payload;
+		payload.selectedSlot = 1;
+		payload.slots[0] = {static_cast<uint16_t>(ItemId::Stone), 5};
+		auto bytes = worldsave::encodeInventoryState(payload);
+		bytes[4] = 9; // version 9
+		CHECK(writeRawFile(dir / "inventory.state", bytes), "unsupported-version file written");
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 0;
+		cfg.worldName = "bad-version";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		sim.finalizePlayerSpawn(boot);
+		CHECK(emptyInventory(sim), "unsupported version degrades to empty");
+		CHECK(sim.worldPersistence()->status().lastError.find("inventory.state") != std::string::npos,
+			  "unsupported version is LOUD");
+		sim.shutdown();
+	}
+
+	// Old-format save: player.state only, NO new files — loads unchanged,
+	// quiet (no error), inventory/items fresh.
+	{
+		createFixture("old-save");
+		const auto dir = root.path / "old-save";
+		std::error_code ec;
+		std::filesystem::remove(dir / "inventory.state", ec);
+		std::filesystem::remove(dir / "items.state", ec);
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 0;
+		cfg.worldName = "old-save";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		const auto outcome = sim.finalizePlayerSpawn(boot);
+		CHECK(outcome.restored, "old-format save still restores the player");
+		CHECK(emptyInventory(sim) && sim.itemEntities().size() == 0,
+			  "missing new files mean fresh inventory/items (old saves load unchanged)");
+		CHECK(sim.worldPersistence()->status().lastError.empty(), "missing new files are QUIET");
+		sim.shutdown();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 21. Refused close keeps the OLD gameplay state authoritative; the
+//     shutdown safety net captures gameplay state without savePlayerState.
+// ---------------------------------------------------------------------------
+void testGameplayPersistenceContracts(ThreadPool &pool)
+{
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+
+	// Refused reload (stranded edits): inventory + entities + ids stay.
+	{
+		TempRoot root("gp-refused");
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		cfg.worldName = "refused";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		WorldChunk *c = sim.world()->getChunk({0, 0, 0});
+		CHECK(c != nullptr, "bootstrap record present");
+		c->reset(c->getPosition(), WorldChunk::ResetMode::ForGeneration);
+		CHECK(sim.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted, "stranded edit accepted");
+		{
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 10);
+		}
+		sim.dropFromSlot(0, 2, {0, 1, 0});
+		const auto invBefore = sim.captureInventoryState();
+		const auto itemsBefore = sim.captureItemsState();
+		CHECK(!sim.reload(44), "reload refused while edits are stranded");
+		checkRestoredInventory(sim, invBefore); // live state unchanged
+		checkRestoredItems(sim, itemsBefore);
+		CHECK(c->prepareVoxelStorageForGeneration(), "stranded prepare");
+		c->generateTerrain(*sim.terrainGenerator());
+		sim.pumpWorld();
+		CHECK(sim.reload(44), "reload succeeds after resolution");
+		CHECK(emptyInventory(sim) && sim.itemEntities().size() == 0 && sim.itemIdHighWater() == 0,
+			  "resolved reload resets the gameplay state");
+		sim.shutdown();
+	}
+
+	// Shutdown safety net: the host never calls savePlayerState, yet the
+	// unconditional close captures inventory.state + items.state (fully
+	// authoritative). player.state still needs the host orientation.
+	{
+		TempRoot root("gp-safetynet");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "safetynet";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 10);
+			sim.dropFromSlot(0, 2, {0, 1, 0});
+			sim.shutdown(); // NO savePlayerState: the safety net must capture
+		}
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 0;
+			cfg.worldName = "safetynet";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			const auto outcome = sim.finalizePlayerSpawn(boot);
+			CHECK(!outcome.restored, "player.state absent without the explicit save (orientation is host input)");
+			CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 8),
+				  "shutdown safety net captured the inventory");
+			CHECK(sim.itemEntities().size() == 1 && sim.itemIdHighWater() == 1,
+				  "shutdown safety net captured the entities + allocator");
+			sim.shutdown();
+		}
+	}
+}
 } // namespace
 
 int main()
@@ -1524,6 +1879,9 @@ int main()
 	testRaycastParity(pool);
 	testPlaceSelectedBlockMatrix(pool);
 	testWalkingLoopEndToEnd(pool);
+	testGameplayPersistenceRoundTrip(pool);
+	testGameplayPersistenceDegradation(pool);
+	testGameplayPersistenceContracts(pool);
 	std::printf("%d checks, %d failures\n", g_checks, g_fails);
 	if (g_fails == 0)
 		std::printf("PASS\n");

@@ -1176,6 +1176,91 @@ bool WorldPersistence::readPlayerState(PlayerPersistState &out) const
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// Gameplay state (issue #228, Epic #223 Phase E) — <world>/inventory.state
+// (magic "FTVI") and <world>/items.state (magic "FTVJ"), formats in
+// WorldSave.hpp. Exact player.state policy: atomic tmp+rename, missing file
+// = fresh world (quiet), malformed = loud status().lastError entry.
+// ---------------------------------------------------------------------------
+
+bool WorldPersistence::writeInventoryState(const worldsave::InventoryPersistState &state) const
+{
+	if (!m_enabled || m_worldDir.empty())
+	{
+		recordError("inventory state write skipped: no world open");
+		return false;
+	}
+	if (!worldsave::writeFileAtomic(m_worldDir / "inventory.state", worldsave::encodeInventoryState(state)))
+	{
+		recordError("failed to write inventory.state (I/O error)");
+		return false;
+	}
+	return true;
+}
+
+bool WorldPersistence::readInventoryState(worldsave::InventoryPersistState &out) const
+{
+	out = worldsave::InventoryPersistState{};
+	if (!m_enabled || m_worldDir.empty())
+		return false; // no world open: quiet (nothing was ever saved)
+
+	std::vector<uint8_t> bytes;
+	const worldsave::SaveStatus read = worldsave::readFileInto(m_worldDir / "inventory.state", bytes);
+	if (read == worldsave::SaveStatus::NotFound)
+		return false; // fresh world / old save: normal, NOT an error
+	if (read != worldsave::SaveStatus::Ok)
+	{
+		recordError("inventory.state unreadable (" + statusName(read) + ")");
+		return false;
+	}
+	const worldsave::SaveStatus status = worldsave::decodeInventoryState(bytes.data(), bytes.size(), out);
+	if (status != worldsave::SaveStatus::Ok)
+	{
+		recordError("inventory.state rejected (" + statusName(status) + ")");
+		return false;
+	}
+	return true;
+}
+
+bool WorldPersistence::writeItemsState(const worldsave::ItemsPersistState &state) const
+{
+	if (!m_enabled || m_worldDir.empty())
+	{
+		recordError("items state write skipped: no world open");
+		return false;
+	}
+	if (!worldsave::writeFileAtomic(m_worldDir / "items.state", worldsave::encodeItemsState(state)))
+	{
+		recordError("failed to write items.state (I/O error)");
+		return false;
+	}
+	return true;
+}
+
+bool WorldPersistence::readItemsState(worldsave::ItemsPersistState &out) const
+{
+	out = worldsave::ItemsPersistState{};
+	if (!m_enabled || m_worldDir.empty())
+		return false; // no world open: quiet (nothing was ever saved)
+
+	std::vector<uint8_t> bytes;
+	const worldsave::SaveStatus read = worldsave::readFileInto(m_worldDir / "items.state", bytes);
+	if (read == worldsave::SaveStatus::NotFound)
+		return false; // fresh world / old save: normal, NOT an error
+	if (read != worldsave::SaveStatus::Ok)
+	{
+		recordError("items.state unreadable (" + statusName(read) + ")");
+		return false;
+	}
+	const worldsave::SaveStatus status = worldsave::decodeItemsState(bytes.data(), bytes.size(), out);
+	if (status != worldsave::SaveStatus::Ok)
+	{
+		recordError("items.state rejected (" + statusName(status) + ")");
+		return false;
+	}
+	return true;
+}
+
 void WorldPersistence::shutdown()
 {
 	if (!m_service)

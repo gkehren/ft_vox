@@ -5,9 +5,12 @@
 // CPU-only: no Vulkan and no Chunk/ChunkManager dependency (the format layer
 // is pure std code).
 #include <World/WorldSave.hpp>
+#include <Items/ItemEntitySystem.hpp>
+#include <Items/ItemRegistry.hpp>
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -624,6 +627,277 @@ static void testFormatExactness(const fs::path &dir)
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Gameplay state formats (issue #228, Epic #223 Phase E): inventory.state
+// (FTVI) + items.state (FTVJ) round trips, exact-size checks, the corruption
+// taxonomy and id-ordering validation. Same discipline as the sibling
+// formats: every rule is a loud SaveStatus, never a silent clamp.
+// ---------------------------------------------------------------------------
+
+static void patchU16(std::vector<uint8_t> &b, size_t off, uint16_t v)
+{
+	b[off] = static_cast<uint8_t>(v);
+	b[off + 1] = static_cast<uint8_t>(v >> 8);
+}
+static void patchU64(std::vector<uint8_t> &b, size_t off, uint64_t v)
+{
+	for (int i = 0; i < 8; ++i)
+		b[off + i] = static_cast<uint8_t>(v >> (8 * i));
+}
+static void patchF64(std::vector<uint8_t> &b, size_t off, double v)
+{
+	uint64_t bits = 0;
+	std::memcpy(&bits, &v, sizeof(bits));
+	patchU64(b, off, bits);
+}
+
+static worldsave::InventoryPersistState sampleInventory()
+{
+	worldsave::InventoryPersistState s;
+	s.selectedSlot = 3;
+	s.slots[0] = {static_cast<uint16_t>(items::ItemId::Stone), 64};
+	s.slots[1] = {static_cast<uint16_t>(items::ItemId::Dirt), 7};
+	s.slots[35] = {static_cast<uint16_t>(items::ItemId::LilyPad), 1};
+	return s;
+}
+
+static worldsave::ItemsPersistState sampleItems()
+{
+	worldsave::ItemsPersistState s;
+	s.nextEntityId = 100;
+	worldsave::ItemEntityPersistState a;
+	a.id = 5;
+	a.itemId = static_cast<uint16_t>(items::ItemId::Cobblestone);
+	a.count = 3;
+	a.px = 8.5;
+	a.py = 64.25;
+	a.pz = -3.125;
+	a.vx = 0.5;
+	a.vy = -1.25;
+	a.vz = 0.0;
+	a.ageTicks = 42;
+	a.pickupDelayTicks = 7;
+	worldsave::ItemEntityPersistState b;
+	b.id = 99;
+	b.itemId = static_cast<uint16_t>(items::ItemId::Dirt);
+	b.count = 64;
+	b.px = -100.0;
+	b.py = 200.0;
+	b.pz = 0.0;
+	b.vx = 0.0;
+	b.vy = 0.0;
+	b.vz = 0.0;
+	b.ageTicks = 17999;
+	b.pickupDelayTicks = 0;
+	s.entities = {a, b};
+	return s;
+}
+
+static bool sameInventory(const worldsave::InventoryPersistState &a, const worldsave::InventoryPersistState &b)
+{
+	if (a.selectedSlot != b.selectedSlot)
+		return false;
+	for (size_t i = 0; i < worldsave::kInventorySlotCount; ++i)
+		if (a.slots[i].itemId != b.slots[i].itemId || a.slots[i].count != b.slots[i].count)
+			return false;
+	return true;
+}
+
+static bool sameItemRecord(const worldsave::ItemEntityPersistState &a, const worldsave::ItemEntityPersistState &b)
+{
+	// Doubles compare bit-exact: the codec memcpy's the IEEE bits.
+	return a.id == b.id && a.itemId == b.itemId && a.count == b.count &&
+	       a.px == b.px && a.py == b.py && a.pz == b.pz &&
+	       a.vx == b.vx && a.vy == b.vy && a.vz == b.vz &&
+	       a.ageTicks == b.ageTicks && a.pickupDelayTicks == b.pickupDelayTicks;
+}
+
+static void testGameplayStateRoundTrips(const fs::path &dir)
+{
+	fs::create_directories(dir);
+
+	// inventory.state: round trip + exact size + valid empty payload.
+	const auto inv = sampleInventory();
+	const auto invBytes = worldsave::encodeInventoryState(inv);
+	CHECK(invBytes.size() == worldsave::kInventoryStateBytes, "inventory.state encodes to exactly 153 bytes");
+	worldsave::InventoryPersistState invOut;
+	CHECK(worldsave::decodeInventoryState(invBytes.data(), invBytes.size(), invOut) == SaveStatus::Ok,
+	      "inventory.state round trip Ok");
+	CHECK(sameInventory(inv, invOut), "inventory.state round trip preserves selection + all 36 stacks");
+
+	const worldsave::InventoryPersistState emptyInv;
+	const auto emptyBytes = worldsave::encodeInventoryState(emptyInv);
+	worldsave::InventoryPersistState emptyOut;
+	CHECK(worldsave::decodeInventoryState(emptyBytes.data(), emptyBytes.size(), emptyOut) == SaveStatus::Ok &&
+	          emptyOut.selectedSlot == 0,
+	      "all-zero inventory is a VALID empty payload");
+
+	// items.state: round trip (bit-exact transforms) + exact size + empty.
+	const auto its = sampleItems();
+	const auto itsBytes = worldsave::encodeItemsState(its);
+	CHECK(itsBytes.size() == worldsave::kItemsStateHeaderBytes + 2 * worldsave::kItemEntityRecordBytes,
+	      "items.state size = 20-byte header + 68 bytes per record");
+	worldsave::ItemsPersistState itsOut;
+	CHECK(worldsave::decodeItemsState(itsBytes.data(), itsBytes.size(), itsOut) == SaveStatus::Ok,
+	      "items.state round trip Ok");
+	CHECK(itsOut.nextEntityId == its.nextEntityId && itsOut.entities.size() == its.entities.size(),
+	      "items.state round trip preserves allocator + population");
+	CHECK(sameItemRecord(its.entities[0], itsOut.entities[0]) &&
+	          sameItemRecord(its.entities[1], itsOut.entities[1]),
+	      "items.state round trip is bit-exact (ids, stacks, transforms, tick counters)");
+
+	const worldsave::ItemsPersistState emptyIts;
+	const auto emptyItsBytes = worldsave::encodeItemsState(emptyIts);
+	CHECK(emptyItsBytes.size() == worldsave::kItemsStateHeaderBytes, "empty items.state is exactly the 20-byte header");
+	worldsave::ItemsPersistState emptyItsOut;
+	CHECK(worldsave::decodeItemsState(emptyItsBytes.data(), emptyItsBytes.size(), emptyItsOut) == SaveStatus::Ok &&
+	          emptyItsOut.entities.empty() && emptyItsOut.nextEntityId == 1,
+	      "empty population with allocator at 1 is valid");
+
+	// Atomic file writes: replace semantics + no .tmp leftover + file decode.
+	const fs::path invPath = dir / "inventory.state";
+	CHECK(worldsave::writeFileAtomic(invPath, invBytes), "inventory.state atomic write");
+	CHECK(worldsave::writeFileAtomic(invPath, emptyBytes), "inventory.state atomic replace");
+	const auto onDisk = readRawBytes(invPath);
+	worldsave::InventoryPersistState diskOut;
+	CHECK(worldsave::decodeInventoryState(onDisk.data(), onDisk.size(), diskOut) == SaveStatus::Ok &&
+	          diskOut.selectedSlot == 0,
+	      "replaced inventory.state decodes to the LATEST payload");
+	CHECK(!fs::exists(invPath.string() + ".tmp"), "no .tmp leftover after atomic writes");
+
+	const fs::path itsPath = dir / "items.state";
+	CHECK(worldsave::writeFileAtomic(itsPath, itsBytes), "items.state atomic write");
+	const auto itsDisk = readRawBytes(itsPath);
+	worldsave::ItemsPersistState itsDiskOut;
+	CHECK(worldsave::decodeItemsState(itsDisk.data(), itsDisk.size(), itsDiskOut) == SaveStatus::Ok &&
+	          itsDiskOut.entities.size() == 2,
+	      "items.state file round trip");
+	CHECK(!fs::exists(itsPath.string() + ".tmp"), "no .tmp leftover after items.state write");
+}
+
+static void testGameplayStateCorruption()
+{
+	worldsave::InventoryPersistState invOut;
+	const auto invBytes = worldsave::encodeInventoryState(sampleInventory());
+
+	auto bad = invBytes;
+	bad[0] = 'X';
+	CHECK(worldsave::decodeInventoryState(bad.data(), bad.size(), invOut) == SaveStatus::BadMagic,
+	      "inventory.state bad magic");
+	bad = invBytes;
+	patchU32(bad, 4, 2);
+	CHECK(worldsave::decodeInventoryState(bad.data(), bad.size(), invOut) == SaveStatus::UnsupportedVersion,
+	      "inventory.state unsupported version");
+	bad = invBytes;
+	bad.pop_back();
+	CHECK(worldsave::decodeInventoryState(bad.data(), bad.size(), invOut) == SaveStatus::Corrupt,
+	      "inventory.state truncated (exact-size)");
+	bad = invBytes;
+	bad.push_back(0);
+	CHECK(worldsave::decodeInventoryState(bad.data(), bad.size(), invOut) == SaveStatus::Corrupt,
+	      "inventory.state oversized (exact-size)");
+	bad = invBytes;
+	bad[8] = 9;
+	CHECK(worldsave::decodeInventoryState(bad.data(), bad.size(), invOut) == SaveStatus::Corrupt,
+	      "inventory.state selectedSlot out of range");
+	bad = invBytes;
+	patchU16(bad, 9, 0xFFFF);
+	CHECK(worldsave::decodeInventoryState(bad.data(), bad.size(), invOut) == SaveStatus::Corrupt,
+	      "inventory.state unknown ItemId");
+	bad = invBytes;
+	patchU16(bad, 11, 65);
+	CHECK(worldsave::decodeInventoryState(bad.data(), bad.size(), invOut) == SaveStatus::Corrupt,
+	      "inventory.state count > maxStack (never clamped)");
+	bad = invBytes;
+	patchU16(bad, 11, 0);
+	CHECK(worldsave::decodeInventoryState(bad.data(), bad.size(), invOut) == SaveStatus::Corrupt,
+	      "inventory.state count 0 with non-zero itemId (non-canonical empty)");
+	bad = invBytes;
+	patchU16(bad, 9, 0);
+	CHECK(worldsave::decodeInventoryState(bad.data(), bad.size(), invOut) == SaveStatus::Corrupt,
+	      "inventory.state None sentinel with a count");
+
+	worldsave::ItemsPersistState itsOut;
+	const auto itsBytes = worldsave::encodeItemsState(sampleItems());
+	constexpr size_t rec1 = 20 + worldsave::kItemEntityRecordBytes; // second record
+
+	bad = itsBytes;
+	bad[0] = 'X';
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::BadMagic,
+	      "items.state bad magic");
+	bad = itsBytes;
+	patchU32(bad, 4, 99);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::UnsupportedVersion,
+	      "items.state unsupported version");
+	bad = itsBytes;
+	bad.resize(19);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state truncated header");
+	bad = itsBytes;
+	bad.push_back(0);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state exact-size mismatch");
+	bad = itsBytes;
+	patchU64(bad, 8, 0);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state nextEntityId 0");
+	bad = itsBytes;
+	patchU32(bad, 16, 3);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state entityCount inconsistent with size");
+	bad = itsBytes;
+	patchU64(bad, rec1, 5);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state duplicate id");
+	bad = itsBytes;
+	patchU64(bad, rec1, 4);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state descending ids");
+	bad = itsBytes;
+	patchU64(bad, rec1, 100);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state id >= nextEntityId (allocator reuse)");
+	bad = itsBytes;
+	patchU64(bad, 20, 0);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state id 0");
+	bad = itsBytes;
+	patchU16(bad, 20 + 8, 0xFFFF);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state unknown ItemId");
+	bad = itsBytes;
+	patchU16(bad, 20 + 10, 0);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state count 0");
+	bad = itsBytes;
+	patchU16(bad, 20 + 10, 65);
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state count > maxStack");
+	bad = itsBytes;
+	patchF64(bad, 20 + 12, std::numeric_limits<double>::quiet_NaN());
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state NaN position");
+	bad = itsBytes;
+	patchF64(bad, 20 + 36, std::numeric_limits<double>::infinity());
+	CHECK(worldsave::decodeItemsState(bad.data(), bad.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state infinite velocity");
+
+	// Population cap: one record beyond the bound is Corrupt.
+	worldsave::ItemsPersistState overCap;
+	overCap.nextEntityId = items::ItemEntitySettings::capacity + 2;
+	for (size_t i = 0; i <= items::ItemEntitySettings::capacity; ++i)
+	{
+		worldsave::ItemEntityPersistState e;
+		e.id = i + 1;
+		e.itemId = static_cast<uint16_t>(items::ItemId::Stone);
+		e.count = 1;
+		overCap.entities.push_back(e);
+	}
+	const auto overBytes = worldsave::encodeItemsState(overCap);
+	CHECK(worldsave::decodeItemsState(overBytes.data(), overBytes.size(), itsOut) == SaveStatus::Corrupt,
+	      "items.state population beyond the cap");
+}
+
 int main()
 {
 	const fs::path root = fs::temp_directory_path() / "ft_vox_world_save_test";
@@ -646,6 +920,8 @@ int main()
 	testCorruptionDetection(root / "corrupt");
 	testAtomicReplaceAndTmpFiles(root / "atomic");
 	testFormatExactness(root / "exact");
+	testGameplayStateRoundTrips(root / "gameplay");
+	testGameplayStateCorruption();
 
 	if (g_fails != 0)
 	{

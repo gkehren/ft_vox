@@ -222,10 +222,10 @@ public:
     /// bootstrapTerrain(). Follow with finalizePlayerSpawn().
     /// Player flight mode, block selection and status carry over from a
     /// previous session until finalizePlayerSpawn (restore/spawn) sets them —
-    /// the historical Engine behavior. The inventory resets to EMPTY here
-    /// (issue #225; the inventory.state restore hook lands in #228) and the
-    /// dropped-item population + id allocator reset with the session
-    /// (issue #226; the items.state hook lands in #228).
+    /// the historical Engine behavior. The inventory and the dropped-item
+    /// population + id allocator reset to EMPTY here and are restored from
+    /// inventory.state / items.state by finalizePlayerSpawn (issue #228;
+    /// missing files = fresh, corrupt = empty with a loud save-error log).
     glm::dvec3 initialize(const Config &config, glm::dvec3 fallbackCenter);
 
     /// Headless synchronous voxel bootstrap: the world half of the bridge's
@@ -237,6 +237,10 @@ public:
     /// host passes its camera position — the historical scan anchor; a
     /// headless host passes the bootstrap center). Camera orientation is
     /// presentation — the outcome carries the saved yaw/pitch for the host.
+    /// Also restores the saved inventory + dropped items + entity-id
+    /// allocator high-water (issue #228), independent of the player outcome.
+    /// The gameplay restore is ONCE per session (the payloads are consumed):
+    /// repeated calls never overwrite live gameplay state (PR #235 review).
     SpawnOutcome finalizePlayerSpawn(glm::dvec3 fallbackAround);
 
     /// Close (refusable) and recreate the world for `newSeed` (<= 0 -> 42,
@@ -256,16 +260,25 @@ public:
     /// spawnPlayerOnSurface.
     bool reload(int newSeed);
 
-    /// Durable player-state capture + flush (no close). The host supplies the
+    /// Durable GAMEPLAY capture + flush (no close). The host supplies the
     /// presentation orientation (camera yaw/pitch); everything else is
-    /// authoritative sim state. Call while the render bridge is still alive,
-    /// before shutdown(). Returns false when nothing is open or I/O failed
-    /// (failures are logged, exactly like the historical Engine shutdown).
+    /// authoritative sim state. Since issue #228 (Epic #223 Phase E) this is
+    /// the FULL gameplay capture: player.state + inventory.state +
+    /// items.state (population + entity-id allocator high-water), all three
+    /// written BEFORE the flush durability barrier. The API name is kept
+    /// for host compatibility. Call while the render bridge is still alive,
+    /// before shutdown(). Returns false when nothing is open or any write /
+    /// the flush failed (failures are logged, exactly like the historical
+    /// Engine shutdown; a failed write stays retryable, never dropped).
     bool savePlayerState(float yaw, float pitch);
 
     /// Destructor-only close: resolve stranded edits, capture, flush and
     /// shut down UNCONDITIONALLY (no retry point at destruction). Idempotent;
     /// the graphical host calls it after destroying the render bridge.
+    /// Since issue #228 the safety net also captures inventory.state +
+    /// items.state (fully authoritative — no host presentation input needed,
+    /// unlike player.state's camera orientation, which only the explicit
+    /// savePlayerState path writes).
     void shutdown();
 
     // --- Per-frame advance (explicit elapsed time + plain values) -------------
@@ -341,6 +354,13 @@ public:
     /// Authoritative player state + host-supplied presentation orientation,
     /// in the persisted plain-value format (issue #180 Phase 5).
     PlayerPersistState capturePlayerState(float yaw, float pitch) const;
+
+    /// Authoritative gameplay state in the persisted plain-value formats
+    /// (issue #228): the inventory (selection + 36 stacks) and the dropped
+    /// item population + allocator next-id. Exposed for tests and the #230
+    /// runner round-trips; savePlayerState writes them through WorldPersistence.
+    worldsave::InventoryPersistState captureInventoryState() const;
+    worldsave::ItemsPersistState captureItemsState() const;
 
     // --- Voxel interaction commands (headless seam) ----------------------------
     // The graphical host issues edits through RenderWorldBridge (it drains
@@ -549,6 +569,18 @@ public:
     const WorldPersistence *worldPersistence() const { return m_world ? m_world->worldPersistence() : nullptr; }
 
 private:
+    /// Read the persisted gameplay state when a world is open (issue #228,
+    /// the readSavedPlayerState pattern): nullopt for a fresh world / old
+    /// save (quiet) or an unusable file (already reported through the
+    /// persistence error log). finalizePlayerSpawn restores what was read;
+    /// a corrupt file degrades to empty, never refuses the world open.
+    std::optional<worldsave::InventoryPersistState> readSavedInventoryState() const;
+    std::optional<worldsave::ItemsPersistState> readSavedItemsState() const;
+    /// Restore inventory + dropped items + allocator from the saved payloads
+    /// (validated by the save layer). Called by finalizePlayerSpawn after
+    /// the player restore/spawn, independent of its outcome.
+    void restoreGameplayState();
+
     ThreadPool *m_threadPool{nullptr};
 
     // Declaration order is destruction order reversed: the world (which
@@ -579,6 +611,10 @@ private:
     uint64_t m_worldGenerationId{1};
     std::string m_openWorldError;
     std::optional<PlayerPersistState> m_savedPlayer;
+    // Gameplay restore payloads (issue #228), read at initialize alongside
+    // m_savedPlayer and applied by finalizePlayerSpawn.
+    std::optional<worldsave::InventoryPersistState> m_savedInventory;
+    std::optional<worldsave::ItemsPersistState> m_savedItems;
 };
 
 } // namespace sim

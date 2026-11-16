@@ -1,13 +1,26 @@
 #include <World/WorldSave.hpp>
 
+#include <Items/ItemEntitySystem.hpp>
+#include <Items/ItemRegistry.hpp>
+
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <system_error>
 
 namespace worldsave
 {
+	// Format geometry pins (issue #228): the save-layer constants must stay
+	// aligned with the item domain (the biomeTypeString/kBlockLayers
+	// discipline). The registry include is CPU-only — the save layer stays
+	// sim/render-free (CoreIncludeGuard).
+	static_assert(kInventorySlotCount == static_cast<std::size_t>(items::kInventorySize),
+	              "inventory.state slot count must match items::kInventorySize");
+	static_assert(kInventoryStateBytes == 153, "inventory.state is exactly 153 bytes");
+	static_assert(kItemsStateHeaderBytes == 20, "items.state header is exactly 20 bytes");
+	static_assert(kItemEntityRecordBytes == 68, "items.state record is exactly 68 bytes");
 	namespace
 	{
 		bool parseI32Strict(std::string_view text, int32_t &out)
@@ -486,5 +499,149 @@ namespace worldsave
 		std::stable_sort(out.begin(), out.end(), [](const ChunkEdit &a, const ChunkEdit &b)
 		                 { return a.localIndex < b.localIndex; });
 		return out;
+	}
+
+	// ------------------------------------------------------------------
+	// Gameplay state codecs (issue #228, Epic #223 Phase E) — format spec
+	// in WorldSave.hpp. Encode trusts the caller (the facade captures
+	// well-formed authoritative state, the writePlayerState pattern);
+	// decode is STRICT: every rule is a loud SaveStatus, never a clamp.
+	// ------------------------------------------------------------------
+
+	std::vector<uint8_t> encodeInventoryState(const InventoryPersistState &state)
+	{
+		ByteWriter w;
+		w.raw(kInventoryStateMagic, sizeof(kInventoryStateMagic));
+		w.u32(kInventoryStateFormatVersion);
+		w.u8(state.selectedSlot);
+		for (const InventoryPersistState::Slot &slot : state.slots)
+		{
+			w.u16(slot.itemId);
+			w.u16(slot.count);
+		}
+		return w.take();
+	}
+
+	SaveStatus decodeInventoryState(const uint8_t *data, size_t size, InventoryPersistState &out)
+	{
+		out = InventoryPersistState{};
+		if (size != kInventoryStateBytes)
+			return SaveStatus::Corrupt; // exact-size format
+		ByteReader r(data, size);
+		char magic[sizeof(kInventoryStateMagic)];
+		r.raw(magic, sizeof(magic));
+		const uint32_t version = r.u32();
+		if (std::memcmp(magic, kInventoryStateMagic, sizeof(magic)) != 0)
+			return SaveStatus::BadMagic;
+		if (version != kInventoryStateFormatVersion)
+			return SaveStatus::UnsupportedVersion;
+		InventoryPersistState s;
+		s.selectedSlot = r.u8();
+		if (s.selectedSlot >= static_cast<uint8_t>(items::kHotbarSize))
+			return SaveStatus::Corrupt;
+		for (InventoryPersistState::Slot &slot : s.slots)
+		{
+			slot.itemId = r.u16();
+			slot.count = r.u16();
+			if (slot.count == 0)
+			{
+				if (slot.itemId != 0)
+					return SaveStatus::Corrupt; // canonical empty is 0/0
+				continue;
+			}
+			if (slot.itemId == 0)
+				return SaveStatus::Corrupt; // None sentinel with a count
+			const items::ItemId id = static_cast<items::ItemId>(slot.itemId);
+			if (items::definition(id) == nullptr)
+				return SaveStatus::Corrupt; // unknown registry ordinal
+			if (slot.count > items::maxStackOf(id))
+				return SaveStatus::Corrupt; // never silently clamped
+		}
+		if (r.failed())
+			return SaveStatus::Corrupt;
+		out = s;
+		return SaveStatus::Ok;
+	}
+
+	std::vector<uint8_t> encodeItemsState(const ItemsPersistState &state)
+	{
+		ByteWriter w;
+		w.raw(kItemsStateMagic, sizeof(kItemsStateMagic));
+		w.u32(kItemsStateFormatVersion);
+		w.u64(state.nextEntityId);
+		w.u32(static_cast<uint32_t>(state.entities.size()));
+		for (const ItemEntityPersistState &e : state.entities)
+		{
+			w.u64(e.id);
+			w.u16(e.itemId);
+			w.u16(e.count);
+			w.f64(e.px);
+			w.f64(e.py);
+			w.f64(e.pz);
+			w.f64(e.vx);
+			w.f64(e.vy);
+			w.f64(e.vz);
+			w.u32(e.ageTicks);
+			w.u32(e.pickupDelayTicks);
+		}
+		return w.take();
+	}
+
+	SaveStatus decodeItemsState(const uint8_t *data, size_t size, ItemsPersistState &out)
+	{
+		out = ItemsPersistState{};
+		if (size < kItemsStateHeaderBytes)
+			return SaveStatus::Corrupt;
+		ByteReader r(data, size);
+		char magic[sizeof(kItemsStateMagic)];
+		r.raw(magic, sizeof(magic));
+		const uint32_t version = r.u32();
+		if (std::memcmp(magic, kItemsStateMagic, sizeof(magic)) != 0)
+			return SaveStatus::BadMagic;
+		if (version != kItemsStateFormatVersion)
+			return SaveStatus::UnsupportedVersion;
+		ItemsPersistState s;
+		s.nextEntityId = r.u64();
+		const uint32_t count = r.u32();
+		if (s.nextEntityId < 1)
+			return SaveStatus::Corrupt; // allocator starts at 1
+		if (count > items::ItemEntitySettings::capacity)
+			return SaveStatus::Corrupt; // bounded by the population cap
+		if (size != kItemsStateHeaderBytes + static_cast<size_t>(count) * kItemEntityRecordBytes)
+			return SaveStatus::Corrupt; // exact-size format
+		uint64_t prevId = 0;
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			ItemEntityPersistState e;
+			e.id = r.u64();
+			e.itemId = r.u16();
+			e.count = r.u16();
+			e.px = r.f64();
+			e.py = r.f64();
+			e.pz = r.f64();
+			e.vx = r.f64();
+			e.vy = r.f64();
+			e.vz = r.f64();
+			e.ageTicks = r.u32();
+			e.pickupDelayTicks = r.u32();
+			// Strictly ascending unique ids, all below the allocator's next
+			// id: no reuse across sessions, id-sorted population invariant.
+			if (e.id <= prevId || e.id >= s.nextEntityId)
+				return SaveStatus::Corrupt;
+			prevId = e.id;
+			if (e.itemId == 0 || e.count == 0)
+				return SaveStatus::Corrupt; // entities always hold items
+			const items::ItemId id = static_cast<items::ItemId>(e.itemId);
+			if (items::definition(id) == nullptr || e.count > items::maxStackOf(id))
+				return SaveStatus::Corrupt;
+			if (!std::isfinite(e.px) || !std::isfinite(e.py) || !std::isfinite(e.pz) ||
+			    !std::isfinite(e.vx) || !std::isfinite(e.vy) || !std::isfinite(e.vz))
+				return SaveStatus::Corrupt; // never hand NaN to the solver
+			s.entities.push_back(e);
+		}
+		if (r.failed())
+			return SaveStatus::Corrupt;
+		out = std::move(s);
+		return SaveStatus::Ok;
 	}
 } // namespace worldsave

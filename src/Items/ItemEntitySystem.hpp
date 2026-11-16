@@ -152,6 +152,19 @@ class ItemEntitySystem
     /// #228 hook restores the persisted high-water mark across save/reload).
     void reset();
 
+    /// Persistence restore seam (issue #228, Epic #223 Phase E): replace
+    /// the population with save-layer-VALIDATED id-sorted entities and
+    /// resume the allocator at `nextEntityId` (the persisted high-water + 1)
+    /// so ids are NEVER reused across sessions (replication requirement).
+    /// LIFECYCLE ONLY — the facade calls it on finalizePlayerSpawn. Events,
+    /// accumulator and dropped counters reset (fresh presentation session);
+    /// each entity's previous position is set to its position (no
+    /// interpolation jump on the first frame). grounded/waitingForTerrain
+    /// are solver transients, not persisted: physics::move re-derives them
+    /// on the first tick (the items.state spec notes the one-tick friction
+    /// transient).
+    void restore(uint64_t nextEntityId, const std::vector<ItemEntity> &entities);
+
     // --- Spawn seams (facade commands + deterministic fixtures) ---------------
     // Ids are assigned at CALL order — command/tick order is the deterministic
     // spawn order. An empty stack spawns nothing and answers id 0.
