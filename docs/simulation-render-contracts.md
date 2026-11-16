@@ -58,7 +58,11 @@ event stream (§10, "Phase C item-entity contract"). Phase D (issue #227)
 **moved the last interaction rules into the simulation and rewired the
 host**: `sim::raycastVoxel` (the historical march, verbatim),
 `placeSelectedBlock` (consume-on-success), Engine input → commands, one
-bridge publication path (§10, "Phase D interaction contract").
+bridge publication path (§10, "Phase D interaction contract"). Phase E
+(issue #228) **persisted the loop**: `inventory.state` + `items.state`
+(the exact `WorldSave` discipline), full gameplay capture/restore on the
+`player.state` lifecycle seams, and entity-id allocator durability
+(§10, "Phase E gameplay-persistence contract").
 
 Related documents:
 
@@ -391,29 +395,37 @@ edges (overflow at maxStack, partial merge, odd split, empty stacks,
 hotbar-first ordering, selection bounds, the move/swap/split result matrix,
 4000-step deterministic repeated sequences). Registered as CTest `Items`.
 
-`tests/test_gameplay.cpp` → `test_gameplay` (Epic #223 Phases B/C/D, issues
-#225/#226/#227) also links **only** `ft_vox_core` and proves the facade
+`tests/test_gameplay.cpp` → `test_gameplay` (Epic #223 Phases B/C/D/E, issues
+#225/#226/#227/#228) also links **only** `ft_vox_core` and proves the facade
 integration without a graphics runtime. Phase B: the command result matrix
 (invalid slots, empty stacks, full inventory, mismatches, partial
 moves/splits), the logged `grantItems` admin seam with partial semantics,
 2000-step deterministic grant→move→split→swap sequences (step-identical
 across simulations + seeded replay), `InventorySnapshot` boundedness +
 in-place fill, `initialize`/`reload` resets (incl. the refused-reload
-contract and save/reopen with an empty inventory until #228), suspension
-without command replay, and the gameplay/creative selection duality.
-Phase C: break→drop→pickup→inventory end-to-end, pickup-delay/partial-
-pickup/full-inventory rules, the `breakBlock` result matrix (bedrock/fluids/
-unknown/AIR/double-break), age despawn + the deterministic oldest-first cap
-overflow, monotonic never-reused ids with the exposed high-water, two
-fixed-seed runs with identical per-frame populations/trajectories/events,
-60 Hz rate independence (bit-identical across host dt patterns, dropped-step
-cap, delta spikes), suspension freeze without replay, id-sorted bounded
-snapshots and the bounded spawn/remove event stream. Phase D: raycast
-parity fixtures against the verbatim historical Engine march (hit/miss/
-adjacent-fallback/unknown/max-distance), the `placeSelectedBlock` result
-matrix + consume-on-success-only + edit-result exposure, and the full
-walking loop (break→drop→pickup→select→place consumes) with the world edit
-verified at every stage. Registered as CTest `GameplayLoop`.
+contract), suspension without command replay, and the gameplay/creative
+selection duality. Phase C: break→drop→pickup→inventory end-to-end,
+pickup-delay/partial-pickup/full-inventory rules, the `breakBlock` result
+matrix (bedrock/fluids/unknown/AIR/double-break), age despawn + the
+deterministic oldest-first cap overflow, monotonic never-reused ids with the
+exposed high-water, two fixed-seed runs with identical per-frame populations/
+trajectories/events, 60 Hz rate independence (bit-identical across host dt
+patterns, dropped-step cap, delta spikes), suspension freeze without replay,
+id-sorted bounded snapshots and the bounded spawn/remove event stream.
+Phase D: raycast parity fixtures against the verbatim historical Engine
+march (hit/miss/adjacent-fallback/unknown/max-distance), the
+`placeSelectedBlock` result matrix + consume-on-success-only + edit-result
+exposure, and the full walking loop (break→drop→pickup→select→place
+consumes) with the world edit verified at every stage. Phase E:
+save→close→reopen restores inventory + entities (bit-exact) + allocator
+high-water, ids never collide across sessions, corrupt/missing new files
+degrade to empty with a loud log while the world opens, old-format saves
+load unchanged, refused close keeps the old state, and the shutdown safety
+net captures gameplay state. Registered as CTest `GameplayLoop`.
+`tests/test_world_save.cpp` → CTest `WorldSave` gained the matching
+format-layer coverage: inventory.state / items.state round trips,
+exact-size checks, the full corruption taxonomy (magic/version/payload/
+id-ordering/allocator/cap) and atomic-write hygiene.
 
 ---
 
@@ -466,8 +478,10 @@ vocabulary that is **stable for saves and future replication**, independent
 of the render-atlas `TextureType` enum (per-face variants, append-only for
 rendering reasons). Phase A was contracts-only; **Phase B (issue #225) made
 `sim::GameSimulation` the single owner of the inventory** and added the
-gameplay commands + `InventorySnapshot` (§10). Still ahead: drops/pickup
-#226, targeting/place #227, persistence #228, UI #229, headless grammar #230:
+gameplay commands + `InventorySnapshot` (§10); Phases C/D (#226/#227) closed
+the loop and wired the host; **Phase E (issue #228) persisted it**
+(inventory.state + items.state, §10). Still ahead: UI #229, headless
+grammar #230:
 
 | Contract | Definition | Notes |
 |---|---|---|
@@ -796,14 +810,16 @@ interaction yet — the loop closes in C/D (#226/#227).
   `inventory()` is a read-only seam — mutations go through commands only.
 - **Lifecycle.** `initialize` and a SUCCESSFUL `reload` reset the inventory
   to empty (selection 0); a REFUSED reload keeps the old world AND the old
-  inventory authoritative. The `inventory.state` restore hook lands in #228
-  on the `player.state` seams — until then, reopening a save restores the
-  player but starts with an empty inventory (old saves load unchanged).
+  inventory authoritative. The `inventory.state` restore hook landed in #228
+  on the `player.state` seams: `initialize` reads it, `finalizePlayerSpawn`
+  restores it (missing file = fresh/quiet, corrupt = empty + loud save-error
+  log; old saves load unchanged).
 - **Selection duality (deliberate, documented).** The hotbar selection is
   the GAMEPLAY selection; `selectedBlock()` stays the CREATIVE/EDITOR seam
-  (flight mode, benchmarks, the `T` cycle, headless place/delete scripts)
-  until #227 wires the host. The two never synchronize in this phase;
-  `player.state` `selectedBlock` persistence is untouched (#228 migrates).
+  (flight mode, benchmarks, the `T` cycle, headless place/delete scripts;
+  host-wired in #227). The two never synchronize; `player.state`
+  `selectedBlock` persistence is unchanged — the hotbar selection persists
+  in `inventory.state` since #228 (no `player.state` version bump).
 - **No behavior change.** The graphical host still uses `selectedBlock()`
   and issues no inventory commands yet; the full suite + visual goldens
   hold. Acceptance: `tests/test_gameplay.cpp` → CTest `GameplayLoop`
@@ -827,11 +843,13 @@ and designed for replication (§2/§6).
   sink through fluids and settle on the bottom — documented simplification).
 - **Ids**: simulation-owned monotonic allocator (starts at 1, never reused
   within a session; `reset()` is the session boundary called by
-  `initialize`/successful `reload`). `itemIdHighWater()` exposes the mark
-  for the #228 persistence hook. Spawn order = command/tick order.
+  `initialize`/successful `reload`). `itemIdHighWater()` exposes the mark;
+  #228 persists it (items.state `nextEntityId`) and restores it, so ids are
+  never reused across sessions. Spawn order = command/tick order.
   **Per-family namespace**: item ids and mob ids are separate allocators
   (both start at 1, the `MobSystem` pattern) — consumers pair an id with its
-  entity family; the #228 persistence format keeps the namespaces distinct.
+  entity family; the persistence format keeps the namespaces distinct
+  (mob ids are not persisted in v1).
 - **Deterministic rules**: pickup-delay countdown, then proximity pickup
   (1.5 blocks to the authoritative feet) merging **hotbar-first** through
   the Phase A stack math — partial pickup leaves the remainder in the world,
@@ -921,6 +939,54 @@ break → drop → pickup → **place (consumes)**.
   Visual goldens hold — reference scenes use the creative/bridge path.
   Persistence (#228), UI/HUD + item rendering (#229) and the runner grammar
   (#230) stay out of scope.
+
+### The Epic #223 Phase E gameplay-persistence contract (issue #228)
+
+Phase E made the loop **survive save / close / reopen**. Issue #180's
+contracts (atomic writes, magic/version guardrails, refusable close,
+identity rules) are the baseline and are UNCHANGED; `player.state` v1 stays
+byte-compatible; the new state lands in new sibling files, so old saves load
+unchanged (missing file = fresh, quiet; no migration machinery).
+
+- **Formats** (spec in `WorldSave.hpp`, codecs in `WorldSave.cpp`):
+  `inventory.state` — magic `FTVI`, version 1, exactly **153 bytes**
+  (`selectedSlot u8` + 36 × `itemId u16 | count u16`); empty inventory is a
+  valid all-zero payload. `items.state` — magic `FTVJ`, version 1,
+  **20 + 68×entityCount bytes** (`nextEntityId u64` = allocator high-water
+  + 1, `entityCount u32`, id-sorted records: id, stack, position/velocity
+  3×f64 each, ageTicks, pickupDelayTicks). Tightly packed little-endian via
+  `ByteWriter`/`ByteReader`; strict decode = loud `SaveStatus` (exact size,
+  magic/version, known registry items, count ≤ maxStack, selection range,
+  ascending unique ids < nextEntityId, finite transforms, population cap) —
+  **never silently clamped**. The codecs validate against the item registry
+  (CPU-only include; the save layer stays sim/render-free).
+- **`WorldPersistence`**: `writeInventoryState`/`readInventoryState`,
+  `writeItemsState`/`readItemsState` — the exact `player.state` policy:
+  atomic tmp+rename (`.tmp` never authoritative), missing = fresh/quiet,
+  malformed = loud `status().lastError` entry. Plain-value payloads
+  (`worldsave::InventoryPersistState`/`ItemsPersistState`, raw uint16 item
+  ordinals — the `PlayerPersistState` pattern, no sim types).
+- **Lifecycle**: `savePlayerState(yaw, pitch)` is now the FULL gameplay
+  capture (name kept for host compatibility): player.state +
+  inventory.state + items.state, all written BEFORE the flush durability
+  barrier; a failed write is reported and stays retryable. `initialize`
+  reads the new files alongside player.state; `finalizePlayerSpawn` restores
+  inventory + entities + allocator (validated; corrupt degrades to empty
+  with a loud log, never refuses the world open). `reload` (transient)
+  resets everything. `shutdown`'s unconditional safety net also captures
+  inventory + items (fully authoritative — no host input needed, unlike
+  player.state's camera orientation).
+- **Id durability**: the allocator resumes from the persisted
+  `nextEntityId` → **no id reuse across sessions** (replication requirement,
+  epic §2/§6). Per-family namespaces stay distinct (mob ids are not
+  persisted in v1).
+- **Restore seams**: `items::Inventory::restore` and
+  `items::ItemEntitySystem::restore` are LIFECYCLE-only seams (not gameplay
+  commands); the facade calls them with save-layer-validated state.
+  Restored entities get previous = position (no interpolation jump).
+- **Out of scope**: UI (#229), runner grammar / multi-process round-trips
+  (#230 — this phase proves round-trips at the facade level), no
+  `world.meta`/`player.state` version bump.
 
 ### The Phase E graphical host contract (issue #209)
 

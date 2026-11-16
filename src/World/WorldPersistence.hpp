@@ -424,6 +424,29 @@ public:
 	/// false and appends the reason to status().lastError.
 	bool readPlayerState(PlayerPersistState &out) const;
 
+	/// Atomically write `<world>/inventory.state` (tmp + rename, magic
+	/// "FTVI", format in WorldSave.hpp; issue #228). False when no world is
+	/// open or the write fails; failures are appended to status().lastError.
+	bool writeInventoryState(const worldsave::InventoryPersistState &state) const;
+
+	/// Read `<world>/inventory.state`. Missing file = fresh world (quiet
+	/// false, the player.state policy — old saves load unchanged). Anything
+	/// malformed (bad magic / version, exact-size, unknown item, count >
+	/// maxStack, selectedSlot out of range) returns false and appends the
+	/// reason to status().lastError — never silently clamped.
+	bool readInventoryState(worldsave::InventoryPersistState &out) const;
+
+	/// Atomically write `<world>/items.state` (tmp + rename, magic "FTVJ",
+	/// format in WorldSave.hpp; issue #228): the dropped-item population +
+	/// the entity-id allocator high-water. Same failure policy as above.
+	bool writeItemsState(const worldsave::ItemsPersistState &state) const;
+
+	/// Read `<world>/items.state`. Missing file = fresh world (quiet false).
+	/// Malformed payloads (id ordering / id >= nextEntityId, non-finite
+	/// transforms, unknown items, count bounds, population cap) return
+	/// false with a loud status().lastError entry.
+	bool readItemsState(worldsave::ItemsPersistState &out) const;
+
 	Status status() const;
 
 	/// Test seam passthrough to the owned SaveService (write failures and

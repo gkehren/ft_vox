@@ -43,6 +43,46 @@
 //     the exposed ByteWriter/ByteReader helpers below; missing file means
 //     "fresh world" (quiet false), anything malformed is a loud error.
 //
+//   inventory.state                             (153 bytes, issue #228)
+//     offset  0: magic "FTVI"                   4 bytes
+//     offset  4: formatVersion       u32        4 bytes
+//     offset  8: selectedSlot        u8         1 byte   (hotbar index 0..8)
+//     offset  9: 36 records, each 4 bytes (slot order = inventory order):
+//                  itemId u16 | count u16
+//                Empty stack = 0/0 (canonical); an all-zero payload is a
+//                VALID empty inventory. itemId is the stable items::ItemId
+//                registry ordinal (never a TextureType).
+//
+//     Strict read validation (loud Corrupt, never silently clamped): exact
+//     size, selectedSlot < 9, count == 0 <-> itemId == 0, known registry
+//     item, count <= the item's maxStack.
+//
+//   items.state                                 (20 + 68*entityCount bytes,
+//                                                issue #228)
+//     offset  0: magic "FTVJ"                   4 bytes
+//     offset  4: formatVersion       u32        4 bytes
+//     offset  8: nextEntityId        u64        8 bytes  (allocator NEXT id =
+//                                                         high-water + 1)
+//     offset 16: entityCount         u32        4 bytes
+//     offset 20: records, entityCount times 68 bytes, ID-SORTED ascending:
+//                  id u64 | itemId u16 | count u16 |
+//                  posX f64 | posY f64 | posZ f64 |
+//                  velX f64 | velY f64 | velZ f64 |
+//                  ageTicks u32 | pickupDelayTicks u32
+//
+//     Strict read validation: exact size, nextEntityId >= 1, entityCount
+//     <= the population cap (items::ItemEntitySettings::capacity), strictly
+//     ascending unique ids with id < nextEntityId (no id reuse across
+//     sessions), known registry items, 1 <= count <= maxStack, finite
+//     positions AND velocities.
+//
+//     Both files follow the player.state policy exactly: written/read by
+//     WorldPersistence::writeInventoryState/readInventoryState and
+//     writeItemsState/readItemsState; atomic tmp+rename; missing file means
+//     "fresh world" (quiet false); anything malformed is a loud error
+//     appended to status().lastError. Old saves without the new files load
+//     unchanged (no migration machinery in v1).
+//
 // Index convention: `localIndex` is the canonical chunk-local voxel index
 //   localIndex = y*256 + z*16 + x   (y-major; matches Chunk::getIndex)
 // and `ChunkEdit::blockType` is the FINAL authoritative TextureType value
@@ -70,6 +110,7 @@
 // means "all overrides reverted" and removes the chunk file instead of
 // writing an empty payload.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -93,8 +134,21 @@ namespace worldsave
 	inline constexpr char kWorldMetaMagic[4] = {'F', 'T', 'V', 'W'};
 	inline constexpr char kChunkFileMagic[4] = {'F', 'T', 'V', 'C'};
 	inline constexpr char kPlayerStateMagic[4] = {'F', 'T', 'V', 'P'};
+	inline constexpr char kInventoryStateMagic[4] = {'F', 'T', 'V', 'I'};
+	inline constexpr char kItemsStateMagic[4] = {'F', 'T', 'V', 'J'};
 	inline constexpr uint32_t kWorldSaveFormatVersion = 1;
 	inline constexpr uint32_t kPlayerStateFormatVersion = 1;
+	inline constexpr uint32_t kInventoryStateFormatVersion = 1;
+	inline constexpr uint32_t kItemsStateFormatVersion = 1;
+
+	// Gameplay-state format geometry (issue #228). The slot count mirrors
+	// items::kInventorySize (pinned by a static_assert in WorldSave.cpp);
+	// the raw uint16 item ordinals keep the save layer free of sim types,
+	// exactly like PlayerPersistState::selectedBlock.
+	inline constexpr std::size_t kInventorySlotCount = 36;
+	inline constexpr std::size_t kInventoryStateBytes = 8 + 1 + 4 * kInventorySlotCount; // 153
+	inline constexpr std::size_t kItemsStateHeaderBytes = 20;
+	inline constexpr std::size_t kItemEntityRecordBytes = 68;
 
 	struct WorldMeta
 	{
@@ -110,6 +164,51 @@ namespace worldsave
 	{
 		uint32_t localIndex{0};
 		uint8_t blockType{0};
+	};
+
+	// ------------------------------------------------------------------
+	// Gameplay persistence payloads (issue #228, Epic #223 Phase E).
+	// Plain values, no sim types — the PlayerPersistState pattern. itemId
+	// fields carry the stable items::ItemId registry ordinal as a raw
+	// uint16 (saves reference ItemId, never TextureType).
+	// ------------------------------------------------------------------
+
+	/// inventory.state payload: the selected hotbar slot + all 36 stacks in
+	/// inventory order. Empty stack = {0, 0} (canonical); an all-zero
+	/// payload is a valid empty inventory.
+	struct InventoryPersistState
+	{
+		struct Slot
+		{
+			uint16_t itemId{0};
+			uint16_t count{0};
+		};
+		uint8_t selectedSlot{0};
+		std::array<Slot, kInventorySlotCount> slots{};
+	};
+
+	/// One items.state record: a dropped item entity's full authoritative
+	/// state (double-precision transforms, tick counters). `previous` is
+	/// NOT persisted — restore sets previous = position (no interpolation
+	/// jump on the first frame).
+	struct ItemEntityPersistState
+	{
+		uint64_t id{0};
+		uint16_t itemId{0};
+		uint16_t count{0};
+		double px{0.0}, py{0.0}, pz{0.0};
+		double vx{0.0}, vy{0.0}, vz{0.0};
+		uint32_t ageTicks{0};
+		uint32_t pickupDelayTicks{0};
+	};
+
+	/// items.state payload: the allocator's NEXT entity id (persisted
+	/// high-water + 1 — ids are never reused across sessions) plus the
+	/// id-sorted population.
+	struct ItemsPersistState
+	{
+		uint64_t nextEntityId{1};
+		std::vector<ItemEntityPersistState> entities;
 	};
 
 	enum class SaveStatus
@@ -261,6 +360,21 @@ namespace worldsave
 	// On UnsupportedVersion the parsed outMeta.formatVersion is still
 	// recorded so callers can report the encountered number.
 	SaveStatus readWorldMeta(const std::filesystem::path &metaPath, WorldMeta &outMeta);
+
+	// ------------------------------------------------------------------
+	// Gameplay state codecs (issue #228): pure byte-level encode/decode,
+	// the same ByteWriter/ByteReader discipline as every sibling format.
+	// The decoders are STRICT (format spec above): exact size, magic /
+	// version, and full payload validation against the item registry
+	// (known ids, count <= maxStack) — a corrupt payload is a loud Corrupt,
+	// never silently clamped. File I/O + the missing/loud error policy live
+	// in WorldPersistence::writeInventoryState/readInventoryState and
+	// writeItemsState/readItemsState (the player.state pattern).
+	// ------------------------------------------------------------------
+	std::vector<uint8_t> encodeInventoryState(const InventoryPersistState &state);
+	SaveStatus decodeInventoryState(const uint8_t *data, size_t size, InventoryPersistState &out);
+	std::vector<uint8_t> encodeItemsState(const ItemsPersistState &state);
+	SaveStatus decodeItemsState(const uint8_t *data, size_t size, ItemsPersistState &out);
 
 	// "<x>_<z>.chunk" (decimal, negative coordinates fine) and its strict
 	// inverse - used when scanning a chunks directory; rejects anything that

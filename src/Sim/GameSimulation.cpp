@@ -110,6 +110,8 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     ++m_worldGenerationId;
     m_seed = seed;
     m_savedPlayer.reset();
+    m_savedInventory.reset();
+    m_savedItems.reset();
     m_mobs.reset(static_cast<uint64_t>(seed));
     // Fresh session = empty inventory (issue #225). The inventory.state
     // restore hook lands in #228 on the finalizePlayerSpawn seam.
@@ -147,6 +149,12 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     // not bootstrap around the default origin and wait for streaming to walk
     // the whole distance.
     m_savedPlayer = readSavedPlayerState();
+    // Gameplay restore payloads (issue #228): read BEFORE the terrain
+    // bootstrap, alongside the player state. Missing files (fresh world /
+    // old save) are quiet; corrupt files are already reported through the
+    // persistence error log and degrade to empty at restore.
+    m_savedInventory = readSavedInventoryState();
+    m_savedItems = readSavedItemsState();
     glm::dvec3 center = fallbackCenter;
     if (m_savedPlayer)
     {
@@ -177,6 +185,9 @@ GameSimulation::SpawnOutcome GameSimulation::finalizePlayerSpawn(glm::dvec3 fall
     {
         out.eye = spawnPlayerOnSurface(fallbackAround);
     }
+    // Gameplay restore (issue #228) is independent of the player outcome:
+    // a player fallback to the surface spawn still keeps the saved items.
+    restoreGameplayState();
     return out;
 }
 
@@ -204,6 +215,8 @@ bool GameSimulation::reload(int newSeed)
     m_seed = seed;
     m_openWorldError.clear();
     m_savedPlayer.reset();
+    m_savedInventory.reset();
+    m_savedItems.reset();
     // Successful reload = fresh inventory (issue #225). A REFUSED reload
     // returned above and keeps the old inventory authoritative.
     m_inventory.clear();
@@ -226,11 +239,25 @@ bool GameSimulation::savePlayerState(float yaw, float pitch)
     if (!m_world || !m_world->isWorldOpen())
         return false;
     const PlayerPersistState playerState = capturePlayerState(yaw, pitch);
-    const WorldPersistence *persistence = m_world->worldPersistence();
+    WorldPersistence *persistence = m_world->worldPersistence();
     bool ok = true;
     if (!persistence || !persistence->writePlayerState(playerState))
     {
         std::cout << "[world] player state save failed\n";
+        ok = false;
+    }
+    // Full gameplay capture (issue #228): inventory + dropped items +
+    // allocator high-water, written BEFORE the flush durability barrier.
+    // Each failure is reported and stays retryable (the next capture/flush
+    // rewrites it) — never silently dropped.
+    if (!persistence || !persistence->writeInventoryState(captureInventoryState()))
+    {
+        std::cout << "[world] inventory state save failed\n";
+        ok = false;
+    }
+    if (!persistence || !persistence->writeItemsState(captureItemsState()))
+    {
+        std::cout << "[world] items state save failed\n";
         ok = false;
     }
     if (!m_world->flushWorld())
@@ -247,6 +274,18 @@ void GameSimulation::shutdown()
 {
     if (m_world && m_world->isWorldOpen())
     {
+        // Gameplay safety net (issue #228): inventory + items are fully
+        // authoritative (no host presentation input), so the unconditional
+        // close captures them even when the host forgot savePlayerState.
+        // player.state still needs the camera orientation — only the
+        // explicit savePlayerState path writes it (unchanged).
+        if (WorldPersistence *persistence = m_world->worldPersistence())
+        {
+            if (!persistence->writeInventoryState(captureInventoryState()))
+                std::cerr << "[world] final shutdown: inventory state write failed" << std::endl;
+            if (!persistence->writeItemsState(captureItemsState()))
+                std::cerr << "[world] final shutdown: items state write failed" << std::endl;
+        }
         // Unconditional destructor-only close: resolve stranded edits,
         // capture, flush, shutdown. Destruction has no retry point; a partial
         // save must never be reported as success (issue #180 review round 4).
@@ -447,6 +486,103 @@ PlayerPersistState GameSimulation::capturePlayerState(float yaw, float pitch) co
     state.flight = m_playerFlight;
     state.selectedBlock = static_cast<int32_t>(m_selectedBlock);
     return state;
+}
+
+worldsave::InventoryPersistState GameSimulation::captureInventoryState() const
+{
+    worldsave::InventoryPersistState state;
+    state.selectedSlot = static_cast<uint8_t>(m_inventory.selectedSlot());
+    const std::array<items::ItemStack, items::kInventorySize> &slots = m_inventory.slots();
+    for (std::size_t i = 0; i < slots.size(); ++i)
+    {
+        state.slots[i].itemId = static_cast<uint16_t>(slots[i].item);
+        state.slots[i].count = slots[i].count;
+    }
+    return state;
+}
+
+worldsave::ItemsPersistState GameSimulation::captureItemsState() const
+{
+    worldsave::ItemsPersistState state;
+    // The allocator's NEXT id = persisted high-water + 1: restoring it
+    // guarantees no id reuse across sessions (epic #223 §2/§6).
+    state.nextEntityId = m_items.idHighWater() + 1;
+    const std::vector<items::ItemEntity> &entities = m_items.entities(); // id-sorted
+    state.entities.reserve(entities.size());
+    for (const items::ItemEntity &e : entities)
+    {
+        worldsave::ItemEntityPersistState r;
+        r.id = e.id;
+        r.itemId = static_cast<uint16_t>(e.stack.item);
+        r.count = e.stack.count;
+        r.px = e.body.position.x;
+        r.py = e.body.position.y;
+        r.pz = e.body.position.z;
+        r.vx = e.body.velocity.x;
+        r.vy = e.body.velocity.y;
+        r.vz = e.body.velocity.z;
+        r.ageTicks = e.ageTicks;
+        r.pickupDelayTicks = e.pickupDelay;
+        state.entities.push_back(r);
+    }
+    return state;
+}
+
+std::optional<worldsave::InventoryPersistState> GameSimulation::readSavedInventoryState() const
+{
+    if (!m_world || !m_world->isWorldOpen() || !m_world->worldPersistence())
+        return std::nullopt;
+    worldsave::InventoryPersistState state;
+    if (!m_world->worldPersistence()->readInventoryState(state))
+        return std::nullopt; // fresh world / old save, or already reported as corrupt
+    return state;
+}
+
+std::optional<worldsave::ItemsPersistState> GameSimulation::readSavedItemsState() const
+{
+    if (!m_world || !m_world->isWorldOpen() || !m_world->worldPersistence())
+        return std::nullopt;
+    worldsave::ItemsPersistState state;
+    if (!m_world->worldPersistence()->readItemsState(state))
+        return std::nullopt; // fresh world / old save, or already reported as corrupt
+    return state;
+}
+
+void GameSimulation::restoreGameplayState()
+{
+    if (m_savedInventory)
+    {
+        // The save layer validated ids/counts/selection (decodeInventoryState);
+        // makeStack re-canonicalizes the empty stacks.
+        std::array<items::ItemStack, items::kInventorySize> slots{};
+        for (std::size_t i = 0; i < slots.size(); ++i)
+            slots[i] = items::makeStack(static_cast<items::ItemId>(m_savedInventory->slots[i].itemId),
+                                        m_savedInventory->slots[i].count);
+        m_inventory.restore(slots, m_savedInventory->selectedSlot);
+        std::cout << "[world] restored inventory (selected slot "
+                  << static_cast<int>(m_savedInventory->selectedSlot) << ")\n";
+    }
+    if (m_savedItems)
+    {
+        std::vector<items::ItemEntity> entities;
+        entities.reserve(m_savedItems->entities.size());
+        for (const worldsave::ItemEntityPersistState &r : m_savedItems->entities)
+        {
+            items::ItemEntity e{};
+            e.id = r.id;
+            e.stack = items::makeStack(static_cast<items::ItemId>(r.itemId), r.count);
+            e.body.position = glm::dvec3(r.px, r.py, r.pz);
+            e.body.velocity = glm::dvec3(r.vx, r.vy, r.vz);
+            e.body.size = m_items.settings.bodySize;
+            e.previous = e.body.position;
+            e.ageTicks = r.ageTicks;
+            e.pickupDelay = r.pickupDelayTicks;
+            entities.push_back(e);
+        }
+        m_items.restore(m_savedItems->nextEntityId, entities);
+        std::cout << "[world] restored " << entities.size() << " dropped items (next entity id "
+                  << m_savedItems->nextEntityId << ")\n";
+    }
 }
 
 // ---------------------------------------------------------------------------

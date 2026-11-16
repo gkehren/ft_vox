@@ -8,6 +8,7 @@
 #include <Items/ItemStack.hpp>
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <utility>
 
@@ -147,6 +148,18 @@ void Inventory::clear()
 {
     m_slots = {};
     m_selectedSlot = 0;
+}
+
+void Inventory::restore(const std::array<ItemStack, kInventorySize> &slots, int selectedSlot)
+{
+    assert(selectedSlot >= 0 && selectedSlot < kHotbarSize);
+    for (const ItemStack &slot : slots)
+    {
+        assert(slot.isEmpty() ? slot == ItemStack{}
+                              : maxStackOf(slot.item) != 0 && slot.count <= maxStackOf(slot.item));
+    }
+    m_slots = slots;
+    m_selectedSlot = selectedSlot;
 }
 
 } // namespace items
