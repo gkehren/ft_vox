@@ -67,6 +67,18 @@ target_link_libraries(test_game_simulation PRIVATE ft_vox_core)
 add_test(NAME GameSimulation COMMAND test_game_simulation)
 
 # ---------------------------------------------------------------------------
+# CPU-only gameplay-command acceptance (issue #225, Epic #223 Phase B). Links
+# ONLY ft_vox_core: the facade's inventory ownership, hotbar/inventory command
+# result matrix, the logged grantItems admin seam, deterministic command
+# sequences, bounded in-place InventorySnapshot, lifecycle resets (incl. the
+# refused-reload contract) and suspension without command replay — no GPU,
+# window or camera.
+# ---------------------------------------------------------------------------
+add_executable(test_gameplay test_gameplay.cpp)
+target_link_libraries(test_gameplay PRIVATE ft_vox_core)
+add_test(NAME GameplayLoop COMMAND test_gameplay)
+
+# ---------------------------------------------------------------------------
 # CPU-only item domain acceptance (issue #224, Epic #223 Phase A). Links ONLY
 # ft_vox_core: registry invariants (unique ids/names, append-only ordinals,
 # placeable round-trips, drop-table totality, name parsing), pure stack math
@@ -1390,7 +1402,7 @@ endif()
 # ---------------------------------------------------------------------------
 foreach(_cpu_test IN ITEMS
     test_physics test_core_contracts test_voxel_world test_game_simulation
-    test_items
+    test_gameplay test_items
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs

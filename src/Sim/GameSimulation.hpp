@@ -12,6 +12,9 @@
 //   * passive mobs: entities::MobSystem at the fixed 60 Hz step over the
 //     CPU-only WorldMobView (spawn/retire/interest radii are plain values,
 //     independent of Camera / RenderSettings);
+//   * inventory: items::Inventory (36 slots, hotbar 0..8) with explicit
+//     gameplay commands + a bounded value snapshot (issue #225, Epic #223
+//     Phase B; the item domain contracts are issue #224 / src/Items/);
 //   * session identity: the world generation / reload counter.
 //
 // The facade is render-free (enforced by tests/check_core_includes.py): no
@@ -62,9 +65,12 @@
 #include <Core/SimContracts.hpp>
 #include <Core/ThreadPool.hpp>
 #include <Entities/MobSystem.hpp>
+#include <Items/Inventory.hpp>
 #include <Physics/PlayerController.hpp>
 #include <World/VoxelWorld.hpp>
 #include <World/WorldPersistence.hpp>
+
+#include <array>
 
 namespace sim
 {
@@ -102,6 +108,21 @@ struct WorldSnapshot
     bool hasPendingLogicalEdits{false};
     bool persistenceOpen{false};
     std::string worldName;
+};
+
+/// Read-only inventory snapshot (issue #225, Epic #223 Phase B): a BOUNDED
+/// plain value — the 36 fixed slots plus the selected hotbar index. Filled
+/// in place like mobSnapshots (no per-frame allocation, no intermediate
+/// cache). Display names are resolved through the item registry on the UI
+/// side (#229): the snapshot carries stable ItemIds, never strings.
+/// Value equality is defaulted (the ItemStack pattern) so digest/replication
+/// comparisons (#228/#230, epic §6) compare whole snapshots directly.
+struct InventorySnapshot
+{
+    std::array<items::ItemStack, items::kInventorySize> slots{};
+    int selectedSlot{0};
+
+    constexpr friend bool operator==(const InventorySnapshot &, const InventorySnapshot &) = default;
 };
 
 class GameSimulation
@@ -152,7 +173,8 @@ public:
     /// bootstrapTerrain(). Follow with finalizePlayerSpawn().
     /// Player flight mode, block selection and status carry over from a
     /// previous session until finalizePlayerSpawn (restore/spawn) sets them —
-    /// the historical Engine behavior.
+    /// the historical Engine behavior. The inventory resets to EMPTY here
+    /// (issue #225; the inventory.state restore hook lands in #228).
     glm::dvec3 initialize(const Config &config, glm::dvec3 fallbackCenter);
 
     /// Headless synchronous voxel bootstrap: the world half of the bridge's
@@ -174,6 +196,8 @@ public:
     /// destroys the bridge before calling this. Terrain bootstrap and player
     /// spawn are separate steps (the benchmark host uses its own placement).
     /// Reloaded worlds are transient: persistence stays off afterwards.
+    /// A SUCCESSFUL reload resets the inventory to empty (issue #225); a
+    /// REFUSED reload keeps the old world AND the old inventory authoritative.
     /// The player body is intentionally LEFT to the host's spawn step: a
     /// headless host that reloads without re-spawning keeps the previous body
     /// (possibly in an unloaded region) until it calls finalizePlayerSpawn /
@@ -277,6 +301,57 @@ public:
     /// Pure query: it never edits the world.
     bool canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) const;
 
+    // --- Inventory / hotbar gameplay commands (issue #225, Epic #223 Phase B) ---
+    // Plain-value arguments, explicit items::ItemResult codes — the future
+    // authoritative server's rejection vocabulary (epic #223 §3/§6).
+    //
+    // Ordering: commands apply IMMEDIATELY at the host frame boundary (the
+    // call itself), BEFORE the next advancePlayer/advanceMobs step. There is
+    // no command buffer and no fixed-step inventory work in this phase, so
+    // suspension never replays or reorders anything: a command issued while
+    // the host is suspended applies exactly once, at call time.
+    //
+    // World-independent: the inventory exists before initialize() and
+    // survives until initialize/reload resets it (the #228 restore hook lands
+    // with persistence). Mutations go through these commands ONLY — the
+    // inventory() accessor below is read-only.
+    //
+    // Deliberately NOT exposed here: items::Inventory::removeCount. The
+    // command set is exactly the epic §3 inventory-management commands plus
+    // the grant seam; item CONSUMPTION arrives with place-from-hotbar (#227),
+    // which removes from the selected slot only on a successful placement.
+
+    /// Select the gameplay hotbar slot (0..kHotbarSize-1); out of range ->
+    /// InvalidSlot, selection unchanged. This is the GAMEPLAY selection; the
+    /// creative/editor selectedBlock() seam below is deliberately separate
+    /// until #227 wires the host.
+    items::ItemResult selectHotbarSlot(int index);
+
+    /// Whole-stack move/merge between inventory slots (empty destination
+    /// receives, same item merges, different items -> ItemMismatch).
+    items::ItemResult moveStack(int from, int to);
+
+    /// Unconditional exchange of two slots (any items, empty included).
+    items::ItemResult swapStacks(int a, int b);
+
+    /// Move the larger half (ceil, odd counts defined) of `from` into `to`
+    /// with transfer semantics — the authoritative half-split the UI drag
+    /// cursor will drive (#229).
+    items::ItemResult splitStack(int from, int to);
+
+    /// TEST/ADMIN SEAM (epic #223 §3): grant items without a break/pickup
+    /// cause. Every call is EXPLICITLY LOGGED ("[items] grant ...") so
+    /// headless runs and future server audits can account for spawned items.
+    /// The log records the requested count and — when it differs — the
+    /// APPLIED amount: a {None, N} sentinel input collapses to the canonical
+    /// empty (an Ok no-op logged with "applied 0"), partial/full/rejected
+    /// grants log their remainder and applied count.
+    /// Same partial semantics as the future pickup path: hotbar-first merge,
+    /// then empty slots; AddResult.remainder is what did not fit (Full leaves
+    /// the inventory untouched). Counts above maxStack distribute across
+    /// slots. Not a gameplay rule — walking-mode survival never grants.
+    items::AddResult grantItems(items::ItemId item, uint16_t count);
+
     // --- Read-only bounded snapshots -------------------------------------------
 
     PlayerSnapshot playerSnapshot() const;
@@ -287,6 +362,11 @@ public:
     /// stays UNASSIGNED (< 0) — the graphical host samples the bridge light
     /// caches afterwards, headless consumers ignore it.
     void mobSnapshots(std::vector<MobSnapshot> &out) const { m_mobs.renderStates(out); }
+    /// Bounded inventory snapshot, filled IN PLACE (issue #225): the fixed
+    /// 36-slot array + selected hotbar index, copied from the authoritative
+    /// items::Inventory. No allocation, no registry strings — the UI resolves
+    /// ItemId display names itself.
+    void inventorySnapshot(InventorySnapshot &out) const;
     WorldSnapshot worldSnapshot() const;
 
     // --- Identity / accessors ----------------------------------------------------
@@ -309,8 +389,14 @@ public:
     glm::dvec3 playerRenderEye() const { return m_player.renderEye(); }
     const physics::PlayerSettings &playerSettings() const { return m_player.settings; }
     const char *playerStatus() const { return m_playerStatus; }
-    /// Block selection is authoritative gameplay state (persisted); the UI
-    /// mutates it through this reference, the simulation persists it.
+    /// CREATIVE/EDITOR block selection (flight mode, benchmarks, the `T`
+    /// cycle, headless place/delete scripts). Authoritative and persisted
+    /// (player.state); the UI mutates it through this reference. Deliberate
+    /// DUALITY with the gameplay hotbar selection (issue #225, epic #223
+    /// §3): selectHotbarSlot()/inventorySnapshot() are the survival-lite
+    /// selection, this reference stays the infinite-block creative seam
+    /// until #227 wires the host; #228 migrates the persistence. The two
+    /// selections never synchronize in this phase.
     TextureType &selectedBlock() { return m_selectedBlock; }
     const TextureType &selectedBlock() const { return m_selectedBlock; }
 
@@ -322,6 +408,9 @@ public:
     bool mobsEnabled() const { return m_mobsEnabled; }
     /// Diagnostics seam (dropped steps / query stats / population).
     const entities::MobSystem &mobs() const { return m_mobs; }
+    /// Read-only inventory seam (issue #225): queries/inspection only —
+    /// every mutation goes through the gameplay commands above.
+    const items::Inventory &inventory() const { return m_inventory; }
 
     // --- Persistence passthrough (issue #180 contracts; world-owned) -------------
 
@@ -340,6 +429,11 @@ private:
 
     physics::PlayerController m_player;
     entities::MobSystem m_mobs;
+    // Plain value (no references, no heap): destruction-order independent,
+    // declared with the other owned gameplay state. Reset to empty by
+    // initialize/reload; the #228 restore hook will refill it from
+    // inventory.state on the same lifecycle seams as player.state.
+    items::Inventory m_inventory;
 
     bool m_playerFlight{false};
     bool m_mobsEnabled{true};

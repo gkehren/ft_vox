@@ -6,6 +6,8 @@
 // ownership / policy boundaries and docs/simulation-render-contracts.md.
 #include "Sim/GameSimulation.hpp"
 
+#include <Items/ItemRegistry.hpp>
+#include <Items/ItemStack.hpp>
 #include <Physics/BlockPhysics.hpp>
 #include <World/WorldCollisionView.hpp>
 #include <World/WorldMobView.hpp>
@@ -17,6 +19,34 @@
 
 namespace sim
 {
+namespace
+{
+// Stable result names for the grant audit log (the items::ItemResult
+// vocabulary is the future server rejection code set, epic #223 §6).
+const char *itemResultName(items::ItemResult result)
+{
+    switch (result)
+    {
+    case items::ItemResult::Ok:
+        return "Ok";
+    case items::ItemResult::Partial:
+        return "Partial";
+    case items::ItemResult::Full:
+        return "Full";
+    case items::ItemResult::InvalidSlot:
+        return "InvalidSlot";
+    case items::ItemResult::EmptyStack:
+        return "EmptyStack";
+    case items::ItemResult::InvalidItem:
+        return "InvalidItem";
+    case items::ItemResult::ItemMismatch:
+        return "ItemMismatch";
+    case items::ItemResult::NotPlaceable:
+        return "NotPlaceable";
+    }
+    return "Unknown";
+}
+} // namespace
 
 GameSimulation::GameSimulation(ThreadPool *threadPool)
     : m_threadPool(threadPool)
@@ -81,6 +111,9 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     m_seed = seed;
     m_savedPlayer.reset();
     m_mobs.reset(static_cast<uint64_t>(seed));
+    // Fresh session = empty inventory (issue #225). The inventory.state
+    // restore hook lands in #228 on the finalizePlayerSpawn seam.
+    m_inventory.clear();
     // Tear the old world down BEFORE replacing the generator it references
     // (~VoxelWorld's shutdown safety net can still generate stranded-edit
     // records through the generator).
@@ -168,6 +201,9 @@ bool GameSimulation::reload(int newSeed)
     m_seed = seed;
     m_openWorldError.clear();
     m_savedPlayer.reset();
+    // Successful reload = fresh inventory (issue #225). A REFUSED reload
+    // returned above and keeps the old inventory authoritative.
+    m_inventory.clear();
 
     // The bridge (if any) was destroyed by the host before this call; the
     // world references the generator, so tear it down first.
@@ -432,6 +468,59 @@ bool GameSimulation::canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) 
 }
 
 // ---------------------------------------------------------------------------
+// Inventory / hotbar gameplay commands (issue #225, Epic #223 Phase B)
+// ---------------------------------------------------------------------------
+// Instantaneous command applications at the host frame boundary: no buffer,
+// no fixed-step work, world-independent. The deterministic rules live in
+// items::Inventory (issue #224); the facade is the ownership + logging seam.
+
+items::ItemResult GameSimulation::selectHotbarSlot(int index)
+{
+    return m_inventory.setSelectedSlot(index);
+}
+
+items::ItemResult GameSimulation::moveStack(int from, int to)
+{
+    return m_inventory.moveStack(from, to);
+}
+
+items::ItemResult GameSimulation::swapStacks(int a, int b)
+{
+    return m_inventory.swapStacks(a, b);
+}
+
+items::ItemResult GameSimulation::splitStack(int from, int to)
+{
+    return m_inventory.splitStack(from, to);
+}
+
+items::AddResult GameSimulation::grantItems(items::ItemId item, uint16_t count)
+{
+    // Normalize FIRST so the audit line reflects what was actually applied
+    // (PR #232 review): a {None, N} sentinel input collapses to the canonical
+    // empty and grants nothing — the log must not overstate that as N items.
+    const items::ItemStack request = items::makeStack(item, count);
+    const items::AddResult result = m_inventory.addStack(request);
+    const uint32_t applied = static_cast<uint32_t>(request.count) - result.remainder.count;
+    // Test/admin seam (epic #223 §3): EVERY grant is explicitly logged so
+    // items entering the inventory without a break/pickup cause stay
+    // auditable in headless runs and (later) authoritative server logs.
+    const std::string_view name = items::itemName(item);
+    std::cout << "[items] grant " << count << "x ";
+    if (name.empty())
+        std::cout << "item#" << static_cast<uint16_t>(item);
+    else
+        std::cout << name;
+    std::cout << " (admin seam): " << itemResultName(result.result);
+    if (!result.remainder.isEmpty())
+        std::cout << ", remainder " << result.remainder.count;
+    if (applied != count)
+        std::cout << ", applied " << applied;
+    std::cout << "\n";
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // Snapshots
 // ---------------------------------------------------------------------------
 
@@ -449,6 +538,14 @@ PlayerSnapshot GameSimulation::playerSnapshot() const
     s.selectedBlock = m_selectedBlock;
     s.status = m_playerStatus;
     return s;
+}
+
+void GameSimulation::inventorySnapshot(InventorySnapshot &out) const
+{
+    // In-place fill of the bounded plain value (the mobSnapshots pattern):
+    // one fixed-array copy + the selection, no allocation, no registry work.
+    out.slots = m_inventory.slots();
+    out.selectedSlot = m_inventory.selectedSlot();
 }
 
 WorldSnapshot GameSimulation::worldSnapshot() const
