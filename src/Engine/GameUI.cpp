@@ -932,7 +932,11 @@ void GameUI::drawOverlayHints(GameUIFrame &frame)
 {
 	const ImGuiIO &io = ImGui::GetIO();
 	const float scale = ui::effectiveScale(frame.uiScale);
-	ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - ui::scaled(36.f, scale)),
+	// Sit ABOVE the hotbar HUD (issue #229 review): the bar's top edge is
+	// kHotbarTopOffset from the bottom; add a small gap so the hint line never
+	// overlaps the slots.
+	const float hintsBottom = ui::scaled(inventoryui::kHotbarTopOffset + 8.f, scale);
+	ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - hintsBottom),
 							ImGuiCond_Always, ImVec2(0.5f, 1.f));
 	ImGui::SetNextWindowBgAlpha(0.35f);
 	ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |

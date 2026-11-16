@@ -35,6 +35,14 @@ inline constexpr int kColumns = 9;
 inline constexpr int kMainRows = 3; // 27 main slots above the hotbar row
 inline constexpr int kSlotCount = items::kInventorySize;
 
+// Hotbar HUD geometry (pixel space, pre-scale). Shared by the HUD and the
+// on-screen hints so the hints always sit ABOVE the bar (issue #229 review).
+inline constexpr float kHotbarSlotSize = 42.f;
+inline constexpr float kHotbarSpacing = 4.f;
+inline constexpr float kHotbarBottomMargin = 10.f;
+/// Distance from the screen bottom to the TOP edge of the hotbar bar.
+inline constexpr float kHotbarTopOffset = kHotbarBottomMargin + kHotbarSlotSize;
+
 using SlotArray = std::array<items::ItemStack, kSlotCount>;
 
 // --- Layout math (pixel space; the caller applies UI scale) ------------------

@@ -118,9 +118,9 @@ VkDescriptorSet GameUI::itemIconDesc(GameUIFrame &frame, TextureType type)
 void GameUI::drawHotbarHud(GameUIFrame &frame)
 {
     const float scale = frame.uiScale;
-    const float slotSize = ui::scaled(42.0f, scale);
-    const float spacing = ui::scaled(4.0f, scale);
-    const float margin = ui::scaled(10.0f, scale);
+    const float slotSize = ui::scaled(inventoryui::kHotbarSlotSize, scale);
+    const float spacing = ui::scaled(inventoryui::kHotbarSpacing, scale);
+    const float margin = ui::scaled(inventoryui::kHotbarBottomMargin, scale);
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     ImDrawList *dl = ImGui::GetForegroundDrawList();
 
