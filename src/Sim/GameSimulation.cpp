@@ -581,11 +581,15 @@ items::ItemResult GameSimulation::dropFromSlot(int slot, uint16_t count, glm::dv
     if (removed.removed.isEmpty())
         return items::ItemResult::Ok; // count 0: no-op, no entity
     // Host-supplied presentation direction (the savePlayerState(yaw,pitch)
-    // pattern): normalized here, degenerate input falls back to +Y. The
-    // launch speed is a deterministic plain setting — no RNG.
+    // pattern): normalized here; degenerate OR non-finite input falls back
+    // to +Y (an inf component would otherwise normalize to NaN and poison
+    // the spawn origin/velocity). The launch speed is a deterministic plain
+    // setting — no RNG.
     glm::dvec3 direction = dir;
+    const bool finite = std::isfinite(direction.x) && std::isfinite(direction.y) &&
+                        std::isfinite(direction.z);
     const double length = glm::length(direction);
-    direction = length > 1e-6 ? direction / length : glm::dvec3(0.0, 1.0, 0.0);
+    direction = (finite && length > 1e-6) ? direction / length : glm::dvec3(0.0, 1.0, 0.0);
     const glm::dvec3 origin = m_player.eye() + direction * 0.3;
     const glm::dvec3 velocity = direction * m_items.settings.dropSpeed + glm::dvec3(0.0, 1.0, 0.0);
     m_items.spawnPlayerDrop(removed.removed, origin, velocity);

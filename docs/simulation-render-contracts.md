@@ -820,6 +820,9 @@ and designed for replication (§2/§6).
   within a session; `reset()` is the session boundary called by
   `initialize`/successful `reload`). `itemIdHighWater()` exposes the mark
   for the #228 persistence hook. Spawn order = command/tick order.
+  **Per-family namespace**: item ids and mob ids are separate allocators
+  (both start at 1, the `MobSystem` pattern) — consumers pair an id with its
+  entity family; the #228 persistence format keeps the namespaces distinct.
 - **Deterministic rules**: pickup-delay countdown, then proximity pickup
   (1.5 blocks to the authoritative feet) merging **hotbar-first** through
   the Phase A stack math — partial pickup leaves the remainder in the world,

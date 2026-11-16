@@ -405,9 +405,9 @@ public:
     /// the removeCount semantics) and spawns one entity at the player eye
     /// with a host-supplied plain direction (presentation input, the
     /// savePlayerState(yaw, pitch) pattern) and deterministic speed. A
-    /// degenerate direction falls back to +Y. count 0 is an Ok no-op;
-    /// invalid slot / empty slot answer InvalidSlot / EmptyStack. Manual
-    /// drops carry the longer pickup delay (no instant re-pickup).
+    /// degenerate OR non-finite direction falls back to +Y. count 0 is an Ok
+    /// no-op; invalid slot / empty slot answer InvalidSlot / EmptyStack.
+    /// Manual drops carry the longer pickup delay (no instant re-pickup).
     items::ItemResult dropFromSlot(int slot, uint16_t count, glm::dvec3 dir);
 
     // --- Read-only bounded snapshots -------------------------------------------

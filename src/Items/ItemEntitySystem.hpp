@@ -28,6 +28,10 @@
 // Ids: simulation-owned monotonic allocator, starts at 1, NEVER reused
 // within a session (reset() is the session boundary; initialize/reload call
 // it). The high-water mark is exposed for the #228 persistence hook.
+// PER-FAMILY NAMESPACE: item ids and mob ids are separate allocators (both
+// start at 1, the established MobSystem pattern) — consumers must pair an id
+// with its entity family, and the #228 persistence format keeps the two
+// namespaces distinct.
 //
 // Dependency rule (tests/check_core_includes.py): Items + Entities/MobTypes
 // (the shared EntityId) + Physics/VoxelCollision + glm + std only. No
@@ -189,6 +193,9 @@ class ItemEntitySystem
     /// high-water mark. Monotonic within a session, never reused.
     uint64_t idHighWater() const { return m_nextId - 1; }
     uint64_t droppedSteps() const { return m_dropped; }
+    /// Collision-query diagnostics (the MobSystem::queryStats() pattern):
+    /// cells/iterations touched by the last update's swept moves.
+    const physics::QueryStats &queryStats() const { return m_queries; }
     /// Events dropped at the stream cap because a consumer fell behind
     /// (zero while draining at frame cadence — the WorldEvent contract).
     uint64_t droppedEventCount() const { return m_droppedEvents; }

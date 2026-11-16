@@ -49,6 +49,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -953,6 +954,7 @@ void testItemFixedRateAndSuspension()
 		sys.update(10.0, world, kFarAway, inv, false); // 600 ticks owed
 		CHECK(sys.entities().front().ageTicks == sys.settings.maxSteps,
 			  "delta spike steps at most maxSteps");
+		CHECK(sys.queryStats().cells > 0, "collision query diagnostics exposed (MobSystem pattern parity)");
 		CHECK(sys.droppedSteps() >= 591 && sys.droppedSteps() <= 592,
 			  "excess ticks dropped and counted (600 owed - 8 stepped)");
 		sys.update(1.0 / 60.0, world, kFarAway, inv, false);
@@ -1061,13 +1063,36 @@ void testDropMatrixAndStreams()
 		CHECK(snaps.size() == 1 && snaps[0].stack == S(ItemId::Stone, 10), "drop entity holds the removed stack");
 		const auto &e0 = sim.itemEntities().entities()[0];
 		CHECK(e0.pickupDelay == sim.itemSettings().playerDropDelayTicks, "manual drop carries the longer delay");
-		CHECK(e0.body.velocity.y > 0.0, "degenerate direction falls back to +Y");
+		CHECK(e0.body.velocity.y > 0.0, "manual drop launch carries the +Y bias");
 		// Deterministic launch: an identical drop repeats the exact velocity.
 		const glm::dvec3 v0 = e0.body.velocity;
 		sim.grantItems(ItemId::Stone, 10);
 		sim.dropFromSlot(0, 10, {0, 1, 0});
 		CHECK(sim.itemEntities().entities()[1].body.velocity == v0,
 			  "identical drops launch with identical deterministic velocity");
+
+		// Degenerate direction: the EXACT +Y fallback (velocity AND origin) —
+		// a {0,1,0} input cannot detect a missing guard, {0,0,0} can.
+		const glm::dvec3 fallbackVel(0.0, sim.itemSettings().dropSpeed + 1.0, 0.0);
+		const glm::dvec3 fallbackOrigin = sim.playerEye() + glm::dvec3(0.0, 0.3, 0.0);
+		sim.grantItems(ItemId::Stone, 3);
+		CHECK(sim.dropFromSlot(0, 3, {0.0, 0.0, 0.0}) == ItemResult::Ok, "zero-direction drop is Ok");
+		CHECK(sim.itemEntities().entities().back().body.velocity == fallbackVel,
+			  "zero direction falls back to the exact +Y launch velocity");
+		CHECK(sim.itemEntities().entities().back().body.position == fallbackOrigin,
+			  "zero direction spawns at eye + 0.3 along +Y");
+		// Non-finite presentation input (inf / NaN) takes the same guarded
+		// fallback instead of propagating NaN into origin/velocity.
+		const double inf = std::numeric_limits<double>::infinity();
+		const double nan = std::numeric_limits<double>::quiet_NaN();
+		sim.grantItems(ItemId::Stone, 3);
+		CHECK(sim.dropFromSlot(0, 3, {inf, 0.0, 0.0}) == ItemResult::Ok, "infinite-direction drop is Ok");
+		CHECK(sim.itemEntities().entities().back().body.velocity == fallbackVel,
+			  "infinite direction falls back to +Y (no NaN propagation)");
+		sim.grantItems(ItemId::Stone, 3);
+		CHECK(sim.dropFromSlot(0, 3, {nan, 0.0, 0.0}) == ItemResult::Ok, "NaN-direction drop is Ok");
+		CHECK(sim.itemEntities().entities().back().body.velocity == fallbackVel,
+			  "NaN direction falls back to +Y");
 	}
 
 	// Snapshots: id-sorted, bounded, in-place fill; events: drain order + cap.
