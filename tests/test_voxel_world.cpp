@@ -37,18 +37,7 @@
 #include <thread>
 #include <vector>
 
-static int g_fails = 0;
-static int g_checks = 0;
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		++g_checks;                                                            \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 // Friend probe declared in VoxelWorld.hpp: deterministic injection seams.
 struct VoxelWorldProbe
@@ -91,7 +80,7 @@ glm::vec3 chunkOrigin(int cx, int cz)
 
 // Synchronously create + generate one record at (cx, cz) through the public
 // bootstrap contract (no thread pool needed).
-WorldChunk *makeGeneratedChunk(VoxelWorld &world, TerrainGenerator &gen, int cx, int cz)
+WorldChunk *makeGeneratedChunk(VoxelWorld &world, [[maybe_unused]] TerrainGenerator &gen, int cx, int cz)
 {
 	const glm::ivec3 pos(cx, 0, cz);
 	if (WorldChunk *existing = world.getChunk(pos))
@@ -684,6 +673,50 @@ static void testUnloadCapture()
 	CHECK(verify.closeWorld(), "verify close");
 }
 
+// ---------------------------------------------------------------------------
+// 9. Regression C1 (review): an edit accepted against a record that NEVER
+// generated (UNLOADED) must survive that record's unload. Before the fix,
+// queueUnloadOutOfRange erased the deferred-edit queue BEFORE capturing
+// persistent edits, so the accepted edit vanished without a trace. The
+// deferred entries are now baked into the override set at unload.
+// ---------------------------------------------------------------------------
+static void testDeferredEditUnloadCapture()
+{
+	TempRoot root("deferred-unload");
+	const std::string savesRoot = (root.path / "saves").string();
+	TerrainGenerator gen(777);
+	VoxelWorld world(&gen, nullptr); // no pool: nothing auto-generates
+	std::string err;
+	CHECK(world.openWorld(savesRoot, "deferred", err), "open deferred world");
+	world.generateInitialAreaVoxels(glm::vec3(8.f, 100.f, 8.f), 0);
+	WorldChunk *c = world.getChunk({0, 0, 0});
+	CHECK(c != nullptr, "center record resident");
+	// Resident but UNLOADED: the edit defers (issue #115) and never lands
+	// before the unload — exactly the loss scenario.
+	c->reset(c->getPosition(), WorldChunk::ResetMode::ForGeneration);
+	CHECK(c->getState() == ChunkState::UNLOADED, "record reset to UNLOADED");
+	CHECK(world.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted, "edit accepted against UNLOADED");
+	CHECK(VoxelWorldProbe::pendingEdits(world) == 1, "edit deferred, not applied");
+
+	// Walk away: the record unloads while the edit is still deferred.
+	WorldStreamSettings settings;
+	settings.maxRenderDistance = 64;
+	settings.minRenderDistance = 32;
+	world.updateStreaming(glm::vec3(100000.f, 100.f, 100000.f), {0.f, 1.f}, settings);
+	CHECK(world.chunkCount() == 0, "record unloaded");
+	CHECK(!world.hasPendingLogicalEdits(), "deferred edit resolved at unload (baked, not dropped)");
+	CHECK(world.flushWorld(), "flush after deferred unload");
+	CHECK(world.closeWorld(), "close after deferred unload");
+
+	// Restart: generation + overrides must reproduce the accepted edit.
+	VoxelWorld verify(&gen, nullptr);
+	CHECK(verify.openWorld(savesRoot, "deferred", err), "reopen deferred world");
+	verify.generateInitialAreaVoxels(glm::vec3(8.f, 100.f, 8.f), 0);
+	CHECK(verify.getChunk({0, 0, 0})->getVoxel(8, 200, 8).type == static_cast<uint8_t>(STONE),
+		  "C1 regression: deferred edit survives unload + restart");
+	CHECK(verify.closeWorld(), "verify close");
+}
+
 int main()
 {
 	std::cout.setf(std::ios::unitbuf);
@@ -697,13 +730,16 @@ int main()
 	testCollisionSemantics();
 	testPersistenceLifecycle();
 	testUnloadCapture();
+	testDeferredEditUnloadCapture();
 
-	if (g_fails == 0)
+	if (testmain::fails == 0)
 	{
 		std::cout << "PASS: voxel world — headless lifecycle, determinism, edits, collision, "
-					 "persistence (" << g_checks << " checks)\n";
-		return 0;
+					 "persistence (" << testmain::checks << " checks)\n";
 	}
-	std::cerr << g_fails << " check(s) failed (" << g_checks << " total)\n";
-	return 1;
+	else
+	{
+		std::cerr << testmain::fails << " check(s) failed (" << testmain::checks << " total)\n";
+	}
+	return testmain::exitCode();
 }

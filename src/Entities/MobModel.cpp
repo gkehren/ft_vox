@@ -23,12 +23,15 @@ MobModels::MobModels()
         auto face = [&](std::array<glm::vec3, 4> points, glm::vec3 normal, glm::vec4 rect) {
             const std::array<glm::vec2, 4> tex{
                 {{rect.z, rect.y}, {rect.x, rect.y}, {rect.x, rect.w}, {rect.z, rect.w}}};
+            // Normalize once per face (review §4.9): the old loop recomputed
+            // it for every one of the 6 vertices.
+            normal = glm::normalize(normal);
+            const glm::vec2 atlasSize(kMobAtlasWidth, kMobAtlasHeight);
             for (int i : {0, 1, 2, 0, 2, 3})
             {
                 auto a = points[i];
                 a.y = -a.y;
-                normal = glm::normalize(normal);
-                vertices.push_back({a / 16.f, {normal.x, -normal.y, normal.z}, tex[i] / glm::vec2(64, 32)});
+                vertices.push_back({a / 16.f, {normal.x, -normal.y, normal.z}, tex[i] / atlasSize});
             }
         };
         face({glm::vec3{X, y, z}, {x, y, z}, {x, y, Z}, {X, y, Z}}, {0, -1, 0}, {u + d, v, u + d + w, v + d});
@@ -106,7 +109,7 @@ std::vector<MobFaceRect> mobTextureFaceRects(const MobModels &models, uint32_t t
                                              uint32_t imgH)
 {
     std::vector<MobFaceRect> rects;
-    const uint32_t scale = imgW / 64u;
+    const uint32_t scale = imgW / kMobAtlasWidth;
     for (const auto &species : models.models)
     {
         for (const auto &part : species.parts)
@@ -127,11 +130,14 @@ std::vector<MobFaceRect> mobTextureFaceRects(const MobModels &models, uint32_t t
                     u1 = std::max(u1, uv.x);
                     v1 = std::max(v1, uv.y);
                 }
-                // uv corners are exact multiples of 1/64, 1/32 (powers of two).
-                const uint32_t rx = uint32_t(std::lround(u0 * 64.0f)) * scale;
-                const uint32_t ry = uint32_t(std::lround(v0 * 32.0f)) * scale;
-                const uint32_t rw = (uint32_t(std::lround(u1 * 64.0f)) - uint32_t(std::lround(u0 * 64.0f))) * scale;
-                const uint32_t rh = (uint32_t(std::lround(v1 * 32.0f)) - uint32_t(std::lround(v0 * 32.0f))) * scale;
+                // uv corners are exact multiples of 1/kMobAtlasWidth,
+                // 1/kMobAtlasHeight (powers of two).
+                const float aw = static_cast<float>(kMobAtlasWidth);
+                const float ah = static_cast<float>(kMobAtlasHeight);
+                const uint32_t rx = uint32_t(std::lround(u0 * aw)) * scale;
+                const uint32_t ry = uint32_t(std::lround(v0 * ah)) * scale;
+                const uint32_t rw = (uint32_t(std::lround(u1 * aw)) - uint32_t(std::lround(u0 * aw))) * scale;
+                const uint32_t rh = (uint32_t(std::lround(v1 * ah)) - uint32_t(std::lround(v0 * ah))) * scale;
                 if (rw == 0 || rh == 0 || rx + rw > imgW || ry + rh > imgH)
                     continue; // defensive: never emit a rect outside the image
                 rects.push_back({rx, ry, rw, rh});

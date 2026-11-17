@@ -10,7 +10,14 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <type_traits>
 #include <vector>
+
+// FTVHDIG2 hashes item ordinals as u16 (review §4.10): pin the registry's
+// underlying type so a future change cannot silently truncate ordinals in
+// the canonical digest — it would require a digest VERSION bump instead.
+static_assert(std::is_same_v<std::underlying_type_t<items::ItemId>, uint16_t>,
+			  "FTVHDIG2 hashes ItemId as u16; a wider registry type requires a digest version bump");
 
 namespace headless
 {

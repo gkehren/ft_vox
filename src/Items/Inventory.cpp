@@ -153,7 +153,7 @@ void Inventory::clear()
 void Inventory::restore(const std::array<ItemStack, kInventorySize> &slots, int selectedSlot)
 {
     assert(selectedSlot >= 0 && selectedSlot < kHotbarSize);
-    for (const ItemStack &slot : slots)
+    for ([[maybe_unused]] const ItemStack &slot : slots)
     {
         assert(slot.isEmpty() ? slot == ItemStack{}
                               : maxStackOf(slot.item) != 0 && slot.count <= maxStackOf(slot.item));

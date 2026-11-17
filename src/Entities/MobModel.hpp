@@ -7,6 +7,12 @@
 
 namespace entities
 {
+// Minecraft mob skin atlas geometry in model pixels (review §4.9): the
+// single definition shared by the UV baker and mobTextureFaceRects, which
+// used to duplicate the 64x32 literals.
+inline constexpr uint32_t kMobAtlasWidth = 64;
+inline constexpr uint32_t kMobAtlasHeight = 32;
+
 struct MobVertex
 {
     glm::vec3 position, normal;

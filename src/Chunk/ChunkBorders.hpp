@@ -109,10 +109,10 @@ struct ChunkNeighborBorders
 		assert(x >= -1 && x <= static_cast<int>(CHUNK_SIZE));
 		assert(z >= -1 && z <= static_cast<int>(CHUNK_SIZE));
 
-		const bool onBorder =
-			x == -1 || x == static_cast<int>(CHUNK_SIZE) ||
-			z == -1 || z == static_cast<int>(CHUNK_SIZE);
-		assert(onBorder &&
+		// Expression lives inside the assert (review M21): a named local
+		// would be unused in Release (NDEBUG) and trip -Wunused.
+		assert((x == -1 || x == static_cast<int>(CHUNK_SIZE) ||
+				z == -1 || z == static_cast<int>(CHUNK_SIZE)) &&
 			   "ChunkNeighborBorders::mutableAt requires border coordinate");
 
 		const size_t yi = static_cast<size_t>(y);

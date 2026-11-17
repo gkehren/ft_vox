@@ -27,17 +27,8 @@
 #include <cstring>
 #include <iostream>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 // Friend probe declared in Chunk.hpp.
 struct ChunkStateProbe
@@ -2622,9 +2613,9 @@ int main()
 	retire.shutdown();
 	vk.shutdown();
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed\n";
+		std::cerr << testmain::fails << " check(s) failed\n";
 		return 1;
 	}
 	std::cout << "PASS: mesh upload lifecycle - arenas, defer, retry, atomicity\n";

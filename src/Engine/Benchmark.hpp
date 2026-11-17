@@ -189,6 +189,37 @@ inline void summarizePoolGrowSamples(const std::vector<float> &samples,
 	outP95 = percentileOfSorted(sorted, 0.95f);
 }
 
+/// One measured frame, named fields (review §4.8). Replaces the 23
+/// positional parameters of the old sampleFrame: adjacent floats could be
+/// swapped without any compiler diagnostic. Designated initializers at the
+/// call sites make each value's role explicit.
+struct BenchmarkFrameSample
+{
+	float frameMs{0.f};
+	float scopeStreaming{0.f};
+	float scopeAcquire{0.f};
+	float scopeRecord{0.f};
+	float scopeImGui{0.f};
+	float scopePresent{0.f};
+	float scopeVisibility{0.f};
+	float scopeMeshUpload{0.f};
+	float scopePoolGrow{0.f};
+	size_t chunks{0};
+	size_t drawCount{0};
+	size_t pendingLoad{0};
+	size_t pendingGen{0};
+	size_t pendingMesh{0};
+	size_t pendingLight{0};
+	uint64_t terrainJobs{0};
+	float terrainMs{0.f};
+	uint64_t meshJobs{0};
+	float meshMs{0.f};
+	uint64_t lodJobs{0};
+	float lodMs{0.f};
+	uint64_t lightCacheJobs{0};
+	float lightCacheMs{0.f};
+};
+
 /// Scripted orbit benchmark: reload world, fly path, aggregate metrics, score.
 class Benchmark
 {
@@ -222,13 +253,9 @@ public:
 	void tick(double dt, Camera &camera);
 
 	/// After profiler endFrame: record sample if in Running (post-warmup).
-	void sampleFrame(float frameMs, float scopeStreaming, float scopeAcquire, float scopeRecord,
-					 float scopeImGui, float scopePresent, float scopeVisibility, float scopeMeshUpload,
-					 float scopePoolGrow,
-					 size_t chunks, size_t drawCount, size_t pendingLoad, size_t pendingGen,
-					 size_t pendingMesh, size_t pendingLight, uint64_t terrainJobs, float terrainMs,
-					 uint64_t meshJobs, float meshMs, uint64_t lodJobs, float lodMs,
-					 uint64_t lightCacheJobs, float lightCacheMs);
+	/// Named fields (review §4.8): the old 23 positional parameters — mostly
+	/// adjacent floats — compiled silently when two were swapped.
+	void sampleFrame(const BenchmarkFrameSample &sample);
 
 	/// Queue waits and completed map latency from the frame's profiler snapshot.
 	void sampleBackgroundWork(const char *name, uint64_t count, double totalMs);

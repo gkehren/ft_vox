@@ -31,7 +31,7 @@ double random01(uint64_t &state)
     return double(state >> 11) * 0x1.0p-53;
 }
 // Only invariants the fixed-step loop and pickup arithmetic rely on.
-void validateSettings(const ItemEntitySettings &s)
+void validateSettings([[maybe_unused]] const ItemEntitySettings &s)
 {
     assert(std::isfinite(s.fixedStep) && s.fixedStep > 0.0);
     assert(s.maxSteps > 0);

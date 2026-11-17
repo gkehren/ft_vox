@@ -6,6 +6,15 @@
 // This header must stay free of any render-only metadata (shapes, atlas
 // layers, transparency): gameplay code may depend on it without pulling the
 // Renderer in.
+//
+// The sparse switches below keep a `default:` on purpose (most blocks are
+// NOT leaves / plantable / ore hosts), which silences -Wswitch. The catalog
+// pin compensates (review §4.9): appending a TextureType breaks this assert
+// and forces a deliberate review of every trait table here — the same
+// discipline as the kBlockLayers/ItemRegistry pins. Foliage semantics have
+// a SINGLE table: render-side blockIsFoliage delegates to blockIsLeaves.
+static_assert(COUNT == 107,
+			  "BlockTraits: block catalog grew — review the leaves/plantable/ore-host/cactus tables");
 
 inline bool blockIsLeaves(TextureType t)
 {

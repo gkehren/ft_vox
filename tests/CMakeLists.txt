@@ -1434,3 +1434,18 @@ if(TARGET test_network)
     ft_vox_assert_cpu_link_closure(test_network)
 endif()
 
+# ---------------------------------------------------------------------------
+# Warning/sanitizer hygiene (review M21): every test executable defined in
+# this directory gets the first-party warning flags + opt-in sanitizers.
+# Iterating BUILDSYSTEM_TARGETS keeps future tests covered automatically;
+# vendored sources compiled by a test (engine reload) are silenced per-file
+# inside ft_vox_target_hygiene.
+# ---------------------------------------------------------------------------
+get_property(_ft_vox_test_targets DIRECTORY . PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_t IN LISTS _ft_vox_test_targets)
+    get_target_property(_type ${_t} TYPE)
+    if(_type STREQUAL "EXECUTABLE")
+        ft_vox_target_hygiene(${_t})
+    endif()
+endforeach()
+

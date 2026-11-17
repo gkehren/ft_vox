@@ -4,12 +4,19 @@
 
 #include <cstdint>
 
-/// Host-visible ring buffer split into per-frame-in-flight slices so a frame
-/// never overwrites staging still in use by an earlier submit.
+/// Host-visible staging buffer split into FIXED per-frame-in-flight slices
+/// so a frame never overwrites staging still in use by an earlier submit.
+/// Semantics (review §4.7 — the "ring" name is historical): each FIF index
+/// owns one exclusive slice for the whole frame; alloc() is a bump cursor
+/// inside that slice and HARD-REJECTS when the slice is full (the caller
+/// defers the upload). There is no wrap-around within a slice. init()
+/// clamps the requested total up to kMinSliceBytes per frame and logs the
+/// clamp instead of silently substituting a different size.
 class StagingRing
 {
 public:
 	static constexpr VkDeviceSize kDefaultSize = 48ull * 1024ull * 1024ull; // 48 MiB
+	static constexpr VkDeviceSize kMinSliceBytes = 4ull * 1024ull * 1024ull; // 4 MiB / frame
 	static constexpr VkDeviceSize kAlignment = 256;
 
 	void init(VmaAllocator allocator, uint32_t framesInFlight, VkDeviceSize totalSize = kDefaultSize);

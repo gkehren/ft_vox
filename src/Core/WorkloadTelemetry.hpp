@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -119,6 +121,9 @@ public:
     void replace(Gauge g, uint64_t before, uint64_t after) {
         if (!enabled) return;
         std::lock_guard lock(mutex);
+        // A caller whose 'before' exceeds the tracked value would wrap the
+        // uint64 gauge and corrupt every later reading (review §4.2).
+        assert(data.current[g] >= before && "telemetry replace: gauge underflow");
         data.current[g] = data.current[g] - before + after;
         data.peak[g] = std::max(data.peak[g], data.current[g]);
         if (g >= GpuOpaqueVertex && g <= GpuWaterIndex) {
@@ -133,10 +138,23 @@ public:
         data.current[g] = value;
         data.peak[g] = std::max(data.peak[g], value);
     }
+    // Batch gauge publication (review §4.8): one mutex acquisition for a
+    // whole frame's worth of gauges instead of one per set() call — the
+    // main thread no longer contends with worker mesh-sample commits ~27
+    // times per frame. Same semantics as set() for each entry.
+    void setBatch(std::initializer_list<std::pair<Gauge, uint64_t>> values) {
+        if (!enabled) return;
+        std::lock_guard lock(mutex);
+        for (const auto &[g, v] : values) {
+            data.current[g] = v;
+            data.peak[g] = std::max(data.peak[g], v);
+        }
+    }
     template<size_t N> void replaceCpu(const std::array<uint64_t, N>& before, const std::array<uint64_t, N>& after) {
         if (!enabled) return;
         std::lock_guard lock(mutex);
         for (size_t i=0; i<N; ++i) {
+            assert(data.current[i] >= before[i] && "telemetry replaceCpu: gauge underflow");
             data.current[i] = data.current[i] - before[i] + after[i];
             data.peak[i] = std::max(data.peak[i], data.current[i]);
         }

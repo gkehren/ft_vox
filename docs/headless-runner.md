@@ -129,7 +129,12 @@ ft_vox_headless [options]
                         y inside [0,255]; volume capped at 8,000,000 cells (per-axis
                         span clamp + overflow-safe volume check; bad bounds exit 2).
   --expect-digest HEX   fail (exit 5) unless the final digest equals HEX
-  --timeout SEC         wall-clock budget, 1..3600 (default 120)
+                        (0x and 0X prefixes both accepted, 16 hex digits)
+  --timeout SEC         wall-clock budget, 1..3600 (default 120). Cooperative
+                        deadline: checked between frames and inside the quiesce
+                        loop, not preemptive — every reachable stall is bounded
+                        by construction (fixed budgets, capped catch-up); an
+                        external watchdog remains the tool for a wedged process.
   --json                emit the summary as JSON instead of key=value
   --help                usage text
 ```

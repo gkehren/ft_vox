@@ -333,6 +333,13 @@ public:
     /// accumulators) without changing the flight mode.
     void setPlayerPosition(glm::dvec3 feet);
 
+    /// Host LIFECYCLE restore (benchmark/inspection exit, review §4.8):
+    /// sets the flight mode and resets at `feet` WITHOUT the gameplay
+    /// clearance validation — a scripted camera can end embedded in
+    /// terrain, and the validated setPlayerFlight(false) would refuse,
+    /// leaving flight stuck on. Gameplay toggles keep setPlayerFlight.
+    void restorePlayerFlight(bool enabled, glm::dvec3 feet);
+
     /// Surface spawn scan around `around`: closest columns first, bounded by
     /// the bootstrapped region. Success: walking reset at the safe feet.
     /// Fallback: flight at y=100 with a status message. Returns the eye
@@ -530,21 +537,24 @@ public:
     const char *playerStatus() const { return m_playerStatus; }
     /// CREATIVE/EDITOR block selection (flight mode, benchmarks, the `T`
     /// cycle, headless place/delete scripts). Authoritative and persisted
-    /// (player.state); the UI mutates it through this reference. Deliberate
-    /// DUALITY with the gameplay hotbar selection (issue #225, epic #223
-    /// §3): selectHotbarSlot()/inventorySnapshot() are the survival-lite
-    /// selection, this reference stays the infinite-block creative seam
-    /// until #227 wires the host; #228 migrates the persistence. The two
-    /// selections never synchronize in this phase.
-    TextureType &selectedBlock() { return m_selectedBlock; }
+    /// (player.state). Deliberate DUALITY with the gameplay hotbar selection
+    /// (issue #225, epic #223 §3): selectHotbarSlot()/inventorySnapshot() are
+    /// the survival-lite selection, this stays the infinite-block creative
+    /// seam. The two selections never synchronize.
+    /// Commands-only mutation (review M6): the UI/host used to write through
+    /// a mutable reference, leaking authoritative state across the
+    /// sim/render boundary — every mutation now goes through a command, the
+    /// inventory discipline.
     const TextureType &selectedBlock() const { return m_selectedBlock; }
+    void setSelectedBlock(TextureType type) { m_selectedBlock = type; }
 
     /// Spawn/retire/interest settings — plain values, no Camera/RenderSettings.
     entities::MobSettings &mobSettings() { return m_mobs.settings; }
     const entities::MobSettings &mobSettings() const { return m_mobs.settings; }
     /// Gameplay toggle (authoritative): disabled mobs do not populate/step.
-    bool &mobsEnabled() { return m_mobsEnabled; }
+    /// Commands-only mutation (review M6, the selectedBlock pattern).
     bool mobsEnabled() const { return m_mobsEnabled; }
+    void setMobsEnabled(bool enabled) { m_mobsEnabled = enabled; }
     /// Diagnostics seam (dropped steps / query stats / population).
     const entities::MobSystem &mobs() const { return m_mobs; }
     /// Read-only inventory seam (issue #225): queries/inspection only —

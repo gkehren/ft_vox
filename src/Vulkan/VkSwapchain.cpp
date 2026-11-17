@@ -14,23 +14,31 @@ VkSwapchain::~VkSwapchain()
 
 SwapchainSupportDetails VkSwapchain::querySupport(VkPhysicalDevice device, VkSurfaceKHR surface)
 {
+	// Every query result is checked (review §4.7): a surface error must not
+	// be read as "zero formats/present modes" and surface later as an
+	// unrelated creation failure.
 	SwapchainSupportDetails details;
-	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+	if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities) != VK_SUCCESS)
+		throw std::runtime_error("Failed to query surface capabilities");
 
 	uint32_t formatCount = 0;
-	vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
+	if (vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr) != VK_SUCCESS)
+		throw std::runtime_error("Failed to query surface format count");
 	if (formatCount > 0)
 	{
 		details.formats.resize(formatCount);
-		vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
+		if (vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data()) != VK_SUCCESS)
+			throw std::runtime_error("Failed to query surface formats");
 	}
 
 	uint32_t presentModeCount = 0;
-	vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
+	if (vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr) != VK_SUCCESS)
+		throw std::runtime_error("Failed to query surface present mode count");
 	if (presentModeCount > 0)
 	{
 		details.presentModes.resize(presentModeCount);
-		vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
+		if (vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data()) != VK_SUCCESS)
+			throw std::runtime_error("Failed to query surface present modes");
 	}
 	return details;
 }
@@ -184,7 +192,14 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 	createInfo.imageColorSpace = surfaceFormat.colorSpace;
 	createInfo.imageExtent = extent;
 	createInfo.imageArrayLayers = 1;
-	createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	// Usage validated against the surface (review §4.7): COLOR_ATTACHMENT is
+	// the only usage the composite path needs; TRANSFER_DST is requested for
+	// capture-style paths but only when the surface actually supports it.
+	createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	if ((support.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0)
+		createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	if ((support.capabilities.supportedUsageFlags & createInfo.imageUsage) != createInfo.imageUsage)
+		throw std::runtime_error("Surface does not support the required swapchain image usage");
 
 	const uint32_t graphicsFamily = m_context->getGraphicsQueueFamily();
 	const uint32_t presentFamily = m_context->getPresentQueueFamily();
@@ -213,9 +228,11 @@ void VkSwapchain::createSwapchain(uint32_t width, uint32_t height)
 	if (vkCreateSwapchainKHR(m_context->getDevice(), &createInfo, nullptr, &m_swapchain) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create swapchain");
 
-	vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapchain, &imageCount, nullptr);
+	if (vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapchain, &imageCount, nullptr) != VK_SUCCESS)
+		throw std::runtime_error("Failed to query swapchain image count");
 	m_images.resize(imageCount);
-	vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapchain, &imageCount, m_images.data());
+	if (vkGetSwapchainImagesKHR(m_context->getDevice(), m_swapchain, &imageCount, m_images.data()) != VK_SUCCESS)
+		throw std::runtime_error("Failed to retrieve swapchain images");
 
 	m_imageFormat = surfaceFormat.format;
 	m_colorSpace = surfaceFormat.colorSpace;

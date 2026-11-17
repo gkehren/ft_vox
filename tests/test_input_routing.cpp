@@ -5,17 +5,8 @@
 
 #include <iostream>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 static void checkRoute(int key, KeyRoute expected, const char *name)
 {
@@ -84,9 +75,9 @@ int main()
 	CHECK(!escapeShouldQuit(true, true),
 		  "escape does not quit when UI captures and a modal is open");
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed\n";
+		std::cerr << testmain::fails << " check(s) failed\n";
 		return 1;
 	}
 	std::cout << "PASS: input routing policy - global F-keys, gated gameplay "

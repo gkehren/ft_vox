@@ -59,6 +59,9 @@ class ItemEntityRenderer
     /// and shadow resolution changes rebind items automatically.
     void init(VkContext &context, ImmediateCommands &imm, VkDescriptorSetLayout frameLayout,
               VkDescriptorSetLayout atlasLayout, VkFormat color, VkFormat depth);
+    /// Rebuild the pipeline for new attachment formats (review M17:
+    /// swapchain recreate). Caller must device-idle first.
+    void recreatePipelines(VkFormat color, VkFormat depth);
     void shutdown();
 
     /// Cull + build the frame slot's instance slice (allocation-free steady

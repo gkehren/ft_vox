@@ -366,7 +366,6 @@ private:
   int calculateHeight(float continental, float erosion, float peaksValleys,
                       float ridge, float riverVal, float weirdness) const;
   float calculateHeightFloat(float continental, float erosion, float peaksValleys, float ridge, float riverVal, float weirdness, float temperature = 0.f, float humidity = 0.f) const;
-  void applyErosion(float *heightMap, int size) const;
   void applyCanonicalErosion(float *heightMap, int width, int height, float *tempBuffer = nullptr) const;
 
   // Shared canonical column pipeline stages
@@ -421,7 +420,6 @@ private:
   void placeMangroveTree(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeBamboo(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeGiantMushroom(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
-  void placeCactus(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
   void placeIceSpike(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ);
 
   // Per-tree deterministic RNG from world position
@@ -442,8 +440,6 @@ private:
   // =============================================
   // UTILITY FUNCTIONS
   // =============================================
-  float smoothstep(float edge0, float edge1, float x) const;
-
   inline int getVoxelIndex(int x, int y, int z) const
   {
     return y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x;
@@ -462,7 +458,7 @@ private:
     const auto old = featureVoxel(data, x, y, z);
     if (blockIsLeaves(type) && old != AIR && !blockIsLeaves(old)) return false;
     if (x >= 0 && x < CHUNK_SIZE && z >= 0 && z < CHUNK_SIZE)
-      data.voxels[getVoxelIndex(x, y, z)].type = type;
+      data.voxels[getVoxelIndex(x, y, z)].type = static_cast<uint8_t>(type);
     else
       data.borders->mutableAt(x, y, z) = static_cast<uint8_t>(type);
     return true;

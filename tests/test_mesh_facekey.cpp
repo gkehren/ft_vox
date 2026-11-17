@@ -27,17 +27,8 @@
 #include <thread>
 #include <vector>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 static_assert(sizeof(Vertex) == 16, "Vertex must be padding-free for byte hashing");
 
@@ -986,7 +977,7 @@ static int runHashCorpus(int argc, char **argv)
 			if (!m || !lod)
 			{
 				std::cerr << "FAIL: corpus mesh missing\n";
-				++g_fails;
+				++testmain::fails;
 				continue;
 			}
 			// Publishing the LOD replaces the pending opaque result, so the
@@ -1024,7 +1015,7 @@ static int runHashCorpus(int argc, char **argv)
 					  << " water=" << resultWaterVerts(*m) << "/" << resultWaterIdx(*m)
 					  << " hash=0x" << std::hex << meshHash(*m) << std::dec << "\n";
 	}
-	return g_fails != 0 ? 1 : 0;
+	return testmain::exitCode();
 }
 
 static double percentile(std::vector<double> &v, double p)
@@ -1084,7 +1075,7 @@ static int runBenchCorpus(int argc, char **argv)
 	std::cout << "\nMESH overall median=" << percentile(meshMs, 0.5)
 			  << " ms p95=" << percentile(meshMs, 0.95) << " ms over " << meshMs.size()
 			  << " builds\n";
-	return g_fails != 0 ? 1 : 0;
+	return testmain::exitCode();
 }
 
 
@@ -1846,9 +1837,9 @@ int main(int argc, char **argv)
 	testNoisyEditedChunk();
 	testMultithreadedDeterminism();
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed\n";
+		std::cerr << testmain::fails << " check(s) failed\n";
 		return 1;
 	}
 	std::cout << "All face-key mesher checks passed\n";

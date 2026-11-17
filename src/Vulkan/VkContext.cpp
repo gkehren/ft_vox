@@ -116,9 +116,16 @@ void VkContext::init(SDL_Window *window)
 	auto getProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
 	if (!getProcAddr)
 		throw std::runtime_error("Failed to get vkGetInstanceProcAddr from SDL: " + std::string(SDL_GetError()));
+	// Boot guard (review M7): volkInitializeCustom returns void — it installs
+	// the handler and resolves the loader-level entry points through it. With
+	// a broken loader those stay null and every later vk* call would segfault
+	// instead of producing the intended boot-time error message, so verify
+	// the bootstrap actually resolved.
 	volkInitializeCustom(getProcAddr);
+	if (!vkCreateInstance || !vkEnumerateInstanceExtensionProperties)
+		throw std::runtime_error("Vulkan loader bootstrap failed: core instance entry points missing (broken loader?)");
 
-	createInstance(window);
+	createInstance();
 	volkLoadInstance(m_instance);
 	setupDebugMessenger();
 	createSurface(window);
@@ -209,7 +216,7 @@ void VkContext::shutdown()
 	m_presentQueue = VK_NULL_HANDLE;
 }
 
-void VkContext::createInstance(SDL_Window *window)
+void VkContext::createInstance()
 {
 	VkApplicationInfo appInfo{};
 	appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -557,10 +564,9 @@ void VkContext::createLogicalDevice()
 
 	m_portabilitySubset = hasExt("VK_KHR_portability_subset");
 
-	VkPhysicalDeviceFeatures deviceFeatures{};
-	deviceFeatures.samplerAnisotropy = VK_TRUE;
-	deviceFeatures.fillModeNonSolid = VK_TRUE; // wireframe-style polygon mode when available
-
+	// (review §4.7: the provisional deviceFeatures request that used to live
+	// here was dead — overwritten below and never read. enabledFeatures is
+	// the single request, built from the queried features2.)
 	VkPhysicalDeviceVulkan12Features features12{};
 	features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 	features12.timelineSemaphore = VK_TRUE;
@@ -608,9 +614,8 @@ void VkContext::createLogicalDevice()
 				"Selected Vulkan device exposes dynamic rendering but not its required feature");
 	}
 
-	// Only request features the device actually has
-	deviceFeatures = features2.features;
-	// Keep a conservative subset we rely on later
+	// Only request features the device actually has: a conservative subset
+	// of the queried features2, never the provisional request.
 	VkPhysicalDeviceFeatures enabledFeatures{};
 	enabledFeatures.samplerAnisotropy = features2.features.samplerAnisotropy;
 	enabledFeatures.fillModeNonSolid = features2.features.fillModeNonSolid;

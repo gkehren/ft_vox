@@ -109,10 +109,21 @@ const char *VkGpuProfiler::status() const
     return "GPU timestamp queries (delayed, graphics queue)";
 }
 
+// Optional instrumentation must never throw (review §4.7): .at() used to
+// abort the frame loop on an out-of-range slot index; a bad index now
+// simply skips the sample.
+VkGpuProfiler::Slot *VkGpuProfiler::slotAt(uint32_t index)
+{
+    if (index >= m_slots.size()) return nullptr;
+    return &m_slots[index];
+}
+
 void VkGpuProfiler::onSlotReady(uint32_t index)
 {
     if (!m_supported) return;
-    auto &slot = m_slots.at(index);
+    Slot *slotPtr = slotAt(index);
+    if (!slotPtr) return;
+    auto &slot = *slotPtr;
     if (!slot.pending) return;
     slot.pending = false;
     if (!m_enabled || slot.generation != m_generation) return;
@@ -129,6 +140,9 @@ void VkGpuProfiler::onSlotReady(uint32_t index)
     {
         const uint32_t bit = uint32_t{1} << i;
         if (!(slot.ended & bit)) continue;
+        // All-or-nothing by design (review §4.7): one unavailable pass
+        // drops the WHOLE sample rather than publishing a partial frame
+        // whose per-pass numbers would not sum to the frame total.
         if (!queries[i * 2].available || !queries[i * 2 + 1].available) return;
         sample.ms[i] = static_cast<float>(gpuTimestampMilliseconds(
             queries[i * 2].value, queries[i * 2 + 1].value, m_validBits, m_period));
@@ -146,7 +160,9 @@ void VkGpuProfiler::beginRecording(VkCommandBuffer cmd, uint32_t index, uint64_t
 {
     m_recording = nullptr;
     if (!m_supported) return;
-    auto &slot = m_slots.at(index);
+    Slot *slotPtr = slotAt(index);
+    if (!slotPtr) return;
+    auto &slot = *slotPtr;
     slot.recorded = false;
     if (!m_enabled) return;
     slot.started = slot.ended = 0;
@@ -189,8 +205,10 @@ void VkGpuProfiler::markSubmitted(uint32_t index)
 {
     if (m_supported)
     {
-        auto &slot = m_slots.at(index);
-        slot.pending = slot.recorded;
-        slot.recorded = false;
+        if (Slot *slotPtr = slotAt(index))
+        {
+            slotPtr->pending = slotPtr->recorded;
+            slotPtr->recorded = false;
+        }
     }
 }

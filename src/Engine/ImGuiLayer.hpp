@@ -13,7 +13,9 @@ public:
 	ImGuiLayer() = default;
 	~ImGuiLayer();
 
-	void init(SDL_Window *window, VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm);
+	// (review §4.8: the dead ImmediateCommands& parameter was removed —
+	// the backend never used it.)
+	void init(SDL_Window *window, VkContext &context, VkSwapchain &swapchain);
 	void shutdown();
 	/// Refresh renderer-backend state after Engine recreates the swapchain.
 	/// Returns true if backend-owned descriptors were invalidated by reinit.

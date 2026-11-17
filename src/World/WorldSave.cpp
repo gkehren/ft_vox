@@ -37,17 +37,24 @@ namespace worldsave
 			return true;
 		}
 
-		// Exact record region size of a chunk file: 5 bytes per edit.
-		constexpr size_t kChunkHeaderBytes = 4 + 4 + 4 + 4 + 4 + 8;
-		constexpr size_t kChunkRecordBytes = 4 + 1;
 	} // namespace
+	// Chunk-file geometry lives in the header (worldsave::kChunkHeaderBytes /
+	// kChunkRecordBytes) so the persistence accounting cannot drift from it.
+	static_assert(kChunkHeaderBytes == 28, "chunk file header is exactly 28 bytes");
+	static_assert(kChunkRecordBytes == 5, "chunk file record is exactly 5 bytes");
 
 	// Little-endian byte helpers (ByteWriter/ByteReader) live in the header:
 	// sibling formats such as player.state share them instead of duplicating
 	// the byte-order discipline.
 
 	// Writes `bytes` to finalPath.tmp, then renames over finalPath (atomic
-	// replace; see the header's atomic-write guarantee).
+	// replace; see the header's atomic-write guarantee). Durability scope
+	// (review §4.3): tmp+rename is atomic against a PROCESS crash — a reader
+	// sees either the old file or the new one, never a torn write. It is not
+	// a power-loss guarantee: neither the file data nor the directory entry
+	// is fsynced, so a machine power cut may lose the rename. Saves are
+	// re-derivable from seed + the desired/durable state machine, which
+	// retries failed coordinates on the next capture/flush.
 	bool writeFileAtomic(const std::filesystem::path &finalPath, const std::vector<uint8_t> &bytes)
 	{
 		std::error_code ec;

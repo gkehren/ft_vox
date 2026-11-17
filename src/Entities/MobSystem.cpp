@@ -39,7 +39,7 @@ bool dry(const physics::VoxelCollisionWorld &w, const physics::Body &b, physics:
 // Only invariants the fixed-step loop and populate() arithmetic actually rely
 // on (uint32 group-size subtraction, division by fixedStep, percentage draw).
 // Deliberately lenient about, e.g., retireDistance < spawnMax.
-void validateSettings(const MobSettings &s)
+void validateSettings([[maybe_unused]] const MobSettings &s)
 {
     assert(std::isfinite(s.spawnMin) && std::isfinite(s.spawnMax) && std::isfinite(s.retireDistance));
     assert(std::isfinite(s.spawnInterval) && std::isfinite(s.spawnChance) && std::isfinite(s.fixedStep));
@@ -169,6 +169,12 @@ void MobSystem::step(const MobWorld &world)
 void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
              std::span<const glm::dvec3> neighbors, physics::QueryStats &queries)
 {
+    // dt validation (review §4.9): tickMob is documented reusable, and the
+    // horizontal velocity below divides by dt — a zero/non-finite step must
+    // not poison the body with NaN in Release either.
+    assert(std::isfinite(dt) && dt > 0.0 && "tickMob requires a positive finite step");
+    if (!std::isfinite(dt) || dt <= 0.0)
+        return;
     m.previous = m.body.position;
     m.previousYaw = m.yaw;
     m.previousGait = m.gait;
@@ -260,7 +266,7 @@ void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
                 auto riser =
                     physics::sweep(world, m.body.bounds(), direction * std::max(0.08, speed * dt), queries);
                 if (riser.hit && !riser.unknown)
-                    m.body.velocity.y = 8.5;
+                    m.body.velocity.y = physics::constants::jumpSpeed;
             }
             else
             {
@@ -286,7 +292,8 @@ void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
         m.body.velocity.y += (12.0 * (immersion.water + immersion.lava) - 3.0 - m.body.velocity.y * 4) * dt;
     else
         m.body.velocity.y =
-            std::max(m.body.velocity.y - 24 * dt, m.species == MobSpecies::Chicken ? -3.0 : -30.0);
+            std::max(m.body.velocity.y - physics::constants::gravity * dt,
+                     m.species == MobSpecies::Chicken ? -3.0 : -30.0);
     physics::move(world, m.body, m.body.velocity * dt, queries);
     double travelled = std::sqrt(distance2(m.body.position, m.previous));
     m.gait += travelled * 7;
@@ -320,6 +327,12 @@ void MobSystem::update(double dt, const MobWorld &world, glm::dvec3 observer, do
     }
     const double retire = std::min(settings.retireDistance, std::max(0.0, availableRadius));
     std::erase_if(m_mobs, [&](auto &m) {
+        // Non-finite positions are retired BEFORE the floor() cast (review
+        // §4.9): floor(NaN) -> ivec3 is UB in Release; upstream guards make
+        // this unreachable, the corruption is contained if it ever happens.
+        if (!std::isfinite(m.body.position.x) || !std::isfinite(m.body.position.y) ||
+            !std::isfinite(m.body.position.z))
+            return true;
         return distance2(m.body.position, observer) > retire * retire ||
                !world.sample(glm::ivec3(glm::floor(m.body.position))).available;
     });

@@ -223,16 +223,14 @@ int main()
 			ok = fail("auto exposure must preserve separation between dark and daylight scenes");
 	}
 
-	// --- GLSL SSBO state layout ---
-	{
-		if (sizeof(autoexposure::ExposureGpuState) != 16)
-			ok = fail("ExposureGpuState must be 16 bytes (GLSL std430 mirror)");
-		if (offsetof(autoexposure::ExposureGpuState, adaptedExposure) != 0 ||
-			offsetof(autoexposure::ExposureGpuState, targetExposure) != 4 ||
-			offsetof(autoexposure::ExposureGpuState, meteredLogLum) != 8 ||
-			offsetof(autoexposure::ExposureGpuState, clampState) != 12)
-			ok = fail("ExposureGpuState member offsets must match the GLSL buffer declaration");
-	}
+	// --- GLSL SSBO state layout (compile-time pins, review M21) ---
+	static_assert(sizeof(autoexposure::ExposureGpuState) == 16,
+				  "ExposureGpuState must be 16 bytes (GLSL std430 mirror)");
+	static_assert(offsetof(autoexposure::ExposureGpuState, adaptedExposure) == 0 &&
+				  offsetof(autoexposure::ExposureGpuState, targetExposure) == 4 &&
+				  offsetof(autoexposure::ExposureGpuState, meteredLogLum) == 8 &&
+				  offsetof(autoexposure::ExposureGpuState, clampState) == 12,
+				  "ExposureGpuState member offsets must match the GLSL buffer declaration");
 
 	// --- CPU settings <-> math defaults stay in sync ---
 	{

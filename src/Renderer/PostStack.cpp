@@ -263,18 +263,27 @@ void PostStack::destroyTargets()
 // never rebuild pipelines against destroyed layout handles.
 void PostStack::createLayoutsAndDescriptors()
 {
+	// Every Vulkan result is checked (review §4.6): this function used to
+	// ignore all of them while the rest of the renderer checks religiously —
+	// a failed layout/pool silently became a null handle used later.
+	const auto check = [](VkResult r, const char *what) {
+		if (r != VK_SUCCESS)
+			throw std::runtime_error(std::string("PostStack: ") + what + " failed");
+	};
 	VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 	VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
 	li.bindingCount = 1;
 	li.pBindings = &b;
-	vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_postSetLayout);
+	check(vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_postSetLayout),
+		  "create post descriptor set layout");
 
 	std::array<VkDescriptorSetLayoutBinding, 2> gb{};
 	gb[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 	gb[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 	li.bindingCount = 2;
 	li.pBindings = gb.data();
-	vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_godSetLayout);
+	check(vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_godSetLayout),
+		  "create god-ray descriptor set layout");
 
 	// Composite resources live on set 1; set 0 is the frame set (FrameUBO)
 	// so the underwater medium transport can reconstruct world positions
@@ -287,7 +296,8 @@ void PostStack::createLayoutsAndDescriptors()
 	cb[6] = {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}; // auto-exposure history (issue #140)
 	li.bindingCount = 7;
 	li.pBindings = cb.data();
-	vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_compositeSetLayout);
+	check(vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_compositeSetLayout),
+		  "create composite descriptor set layout");
 
 	// Exposure adaptation (issue #140): 4x4 log-lum sampler + shared
 	// history SSBO + per-frame-in-flight snapshot SSBO (CPU readout).
@@ -298,7 +308,8 @@ void PostStack::createLayoutsAndDescriptors()
 		eb[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 		li.bindingCount = 3;
 		li.pBindings = eb.data();
-		vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_exposureSetLayout);
+		check(vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_exposureSetLayout),
+			  "create exposure descriptor set layout");
 	}
 
 	std::array<VkDescriptorSetLayoutBinding, 2> ub{};
@@ -306,7 +317,8 @@ void PostStack::createLayoutsAndDescriptors()
 	ub[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 	li.bindingCount = 2;
 	li.pBindings = ub.data();
-	vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_ssaoUpLayout);
+	check(vkCreateDescriptorSetLayout(m_context->getDevice(), &li, nullptr, &m_ssaoUpLayout),
+		  "create SSAO-up descriptor set layout");
 
 	std::array<VkDescriptorPoolSize, 2> ps{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32},
 											{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6}}};
@@ -314,14 +326,16 @@ void PostStack::createLayoutsAndDescriptors()
 	pi.poolSizeCount = 2;
 	pi.pPoolSizes = ps.data();
 	pi.maxSets = 20;
-	vkCreateDescriptorPool(m_context->getDevice(), &pi, nullptr, &m_postPool);
+	check(vkCreateDescriptorPool(m_context->getDevice(), &pi, nullptr, &m_postPool),
+		  "create post descriptor pool");
 
 	auto alloc = [&](VkDescriptorSetLayout lay, VkDescriptorSet &out) {
 		VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
 		ai.descriptorPool = m_postPool;
 		ai.descriptorSetCount = 1;
 		ai.pSetLayouts = &lay;
-		vkAllocateDescriptorSets(m_context->getDevice(), &ai, &out);
+		check(vkAllocateDescriptorSets(m_context->getDevice(), &ai, &out),
+			  "allocate post descriptor set");
 	};
 	alloc(m_postSetLayout, m_setExtract);
 	alloc(m_postSetLayout, m_setBlur[0]);
@@ -343,23 +357,29 @@ void PostStack::createLayoutsAndDescriptors()
 	pl.pSetLayouts = &m_postSetLayout;
 	pl.pushConstantRangeCount = 1;
 	pl.pPushConstantRanges = &pcr;
-	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_postLayout1);
-	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoLayout);
+	check(vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_postLayout1),
+		  "create post pipeline layout");
+	check(vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoLayout),
+		  "create SSAO pipeline layout");
 
 	pl.pSetLayouts = &m_godSetLayout;
-	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_godLayout);
+	check(vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_godLayout),
+		  "create god-ray pipeline layout");
 
 	pl.pSetLayouts = &m_ssaoUpLayout;
-	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoUpPipeLayout);
+	check(vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_ssaoUpPipeLayout),
+		  "create SSAO-up pipeline layout");
 
 	VkDescriptorSetLayout compositeSets[2] = {m_frameSetLayout, m_compositeSetLayout};
 	pl.pSetLayouts = compositeSets;
 	pl.setLayoutCount = 2;
-	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_compositeLayout);
+	check(vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_compositeLayout),
+		  "create composite pipeline layout");
 
 	pl.pSetLayouts = &m_exposureSetLayout;
 	pl.setLayoutCount = 1; // restore: the composite layout above needs two sets
-	vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_exposureLayout);
+	check(vkCreatePipelineLayout(m_context->getDevice(), &pl, nullptr, &m_exposureLayout),
+		  "create exposure pipeline layout");
 }
 
 void PostStack::destroyLayoutsAndDescriptors()
@@ -998,7 +1018,10 @@ void PostStack::fsDraw(VkCommandBuffer cmd, VkPipeline pipe, VkPipelineLayout la
 	VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
 	ca.imageView = outView;
 	ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	// DONT_CARE (review §4.6): every fullscreen pass writes every pixel of
+	// its render area, so the old CLEAR paid a redundant clear pass per
+	// post-pass (~10/frame).
+	ca.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	ca.clearValue.color = {{0, 0, 0, 0}};
 	VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -1070,10 +1093,13 @@ void PostStack::recordExposure(VkCommandBuffer cmd, uint32_t frameIndex,
 								  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	}
 
-	// The history buffer was last written by the previous submission of this
-	// queue; submissions execute in order, so this barrier (executed after
-	// that write) provides the memory dependency for the read below and for
-	// the read-modify-write the adapt pass performs.
+	// The history buffer was last written by the previous submission. Vulkan
+	// does NOT guarantee in-order execution of submissions on one queue
+	// (review M1): the cross-submission dependency is provided by the
+	// frame-chain semaphore in VkFrameContext (each submit waits on the
+	// previous one at TOP_OF_PIPE). Given that execution dependency, this
+	// barrier supplies the MEMORY dependency for the read below and for the
+	// read-modify-write the adapt pass performs.
 	VkBufferMemoryBarrier pre{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
 	pre.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 	pre.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;

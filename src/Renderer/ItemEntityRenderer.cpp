@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <stdexcept>
 
 static_assert(ItemEntityRenderer::kMaxItems == items::ItemEntitySettings::capacity,
@@ -109,6 +110,18 @@ void ItemEntityRenderer::init(VkContext &context, ImmediateCommands &imm,
                             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                                 VMA_ALLOCATION_CREATE_MAPPED_BIT);
 
+    recreatePipelines(color, depth);
+}
+
+void ItemEntityRenderer::recreatePipelines(VkFormat color, VkFormat depth)
+{
+    // Extracted from init (review M17, the MobRenderer pattern): the
+    // swapchain-recreate path rebuilds the item pipeline when the HDR/depth
+    // formats change; the caller waits the device first.
+    const auto device = m_context->getDevice();
+    if (m_pipeline)
+        vkDestroyPipeline(device, m_pipeline, nullptr);
+    m_pipeline = VK_NULL_HANDLE;
     const std::array<VkVertexInputBindingDescription, 2> vb{
         {{0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX},
          {1, sizeof(Instance), VK_VERTEX_INPUT_RATE_INSTANCE}}};
@@ -202,13 +215,26 @@ void ItemEntityRenderer::prepare(uint32_t frame, const FrameUBO &ubo,
                                  const std::vector<ItemRenderState> &items)
 {
     PROFILE_SCOPE("ItemPrepare");
+    // Clamp + one-shot log instead of a frame-aborting throw (review §4.6,
+    // the MobRenderer pattern): the sim's population cap makes this
+    // unreachable; presentation degrades gracefully instead.
     if (items.size() > kMaxItems)
-        throw std::runtime_error("Item count exceeds renderer capacity");
+    {
+        static bool warned = false;
+        if (!warned)
+        {
+            warned = true;
+            std::cerr << "[items] input count " << items.size() << " exceeds renderer capacity "
+                      << kMaxItems << " — clamped\n";
+        }
+    }
     m_viewProjection[frame] = ubo.projection * ubo.view;
     auto *instances = static_cast<Instance *>(m_instances[frame].info.pMappedData);
     uint32_t count = 0;
     for (const ItemRenderState &item : items)
     {
+        if (count >= kMaxItems)
+            break; // instance buffer bound (the clamp above)
         // Conservative sphere around the mini-cube center (feet + half body).
         const glm::vec3 center = item.position + glm::vec3(0.0f, 0.125f + item.bob, 0.0f);
         if (!visible(m_viewProjection[frame], center, 0.3f))

@@ -84,7 +84,7 @@ int main(int argc, char **argv)
             trackMeshBuffer(buffer, GpuOpaqueVertex);
             GpuResourceRetire retire;
             retire.init(context.getAllocator(), 2);
-            retire.retireBuffer(buffer);
+            retire.retireBuffer(std::move(buffer));
             buffer = {};
             auto pending = t.snapshot();
             retire.beginFrame(1);

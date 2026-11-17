@@ -330,6 +330,14 @@ private:
 
 	// --- Persistence internals (issue #180) -------------------------------------
 	void applyPersistentOverrides(WorldChunk *chunk);
+	/// Durability of deferred edits at unload (review C1): edits accepted
+	/// against a record that never became readable (UNLOADED) live only in
+	/// the deferred queue. Bake them into the persistent override set BEFORE
+	/// erasePendingEditsFor() drops them, so the next generation of the
+	/// coordinate re-applies them. Mirror (border-shell) entries carry no
+	/// independent durable content — they duplicate the owning chunk's
+	/// canonical edit and are rebuilt from neighbors on reload.
+	void bakeDeferredEditsForUnload(WorldChunk *chunk);
 	void captureChunkEditsForUnload(WorldChunk *chunk);
 	void captureAllChunkEdits();
 	bool anyChunkInTransitForPersistence() const;

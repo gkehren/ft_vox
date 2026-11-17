@@ -112,7 +112,9 @@ if(NOT _FT_VOX_SDL3_OK)
         FetchContent_Declare(
             SDL3
             GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-            GIT_TAG release-3.2.10
+            # Pinned commit (review §4.12): tag release-3.2.10 — mutable tags
+            # are not reproducible; bump deliberately.
+            GIT_TAG 877399b2b2cf21e67554ed9046410f268ce1d1b2
             GIT_SHALLOW TRUE
         )
         FetchContent_MakeAvailable(SDL3)
@@ -214,7 +216,8 @@ if(NOT _FT_VOX_VOLK_OK)
     FetchContent_Declare(
         volk
         GIT_REPOSITORY https://github.com/zeux/volk.git
-        GIT_TAG 1.3.295
+        # Pinned commit (review §4.12): tag 1.3.295.
+        GIT_TAG b465507a1720ea32d65163153a53ffa136ca835f
         GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(volk)
@@ -266,7 +269,8 @@ if(NOT _FT_VOX_VMA_OK)
     FetchContent_Declare(
         VulkanMemoryAllocator
         GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-        GIT_TAG v3.3.0
+        # Pinned commit (review §4.12): tag v3.3.0.
+        GIT_TAG 1d8f600fd424278486eade7ed3e877c99f0846b1
         GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(VulkanMemoryAllocator)
@@ -296,7 +300,8 @@ set(GLM_ENABLE_CXX_20 ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     glm
     GIT_REPOSITORY https://github.com/g-truc/glm.git
-    GIT_TAG 1.0.0
+    # Pinned commit (review §4.12): tag 1.0.0.
+    GIT_TAG 33b0eb9fa336ffd8551024b1d2690e418014553b
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(glm)
@@ -304,7 +309,9 @@ FetchContent_MakeAvailable(glm)
 FetchContent_Declare(
     FastNoise2
     GIT_REPOSITORY https://github.com/Auburn/FastNoise2.git
-    GIT_TAG v0.10.0-alpha
+    # Pinned commit (review §4.12): tag v0.10.0-alpha — an alpha is a
+    # deliberate choice; the pin makes it an EXPLICIT one.
+    GIT_TAG 9b75083b87d5e391d43dc0c721d8a9fa51db735a
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(FastNoise2)
@@ -325,7 +332,8 @@ if(NOT _FT_VOX_MINIZ_OK)
     FetchContent_Declare(
         miniz
         GIT_REPOSITORY https://github.com/richgel999/miniz.git
-        GIT_TAG 3.0.2
+        # Pinned commit (review §4.12): tag 3.0.2.
+        GIT_TAG 293d4db1b7d0ffee9756d035b9ac6f7431ef8492
         GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(miniz)

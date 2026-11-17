@@ -46,6 +46,9 @@ private:
         bool recorded{false}, pending{false};
     };
     void clear();
+    /// Bounds-checked slot access (review §4.7): optional instrumentation
+    /// skips bad indices instead of throwing through the frame loop.
+    Slot *slotAt(uint32_t index);
     VkDevice m_device{VK_NULL_HANDLE};
     std::vector<Slot> m_slots;
     Slot *m_recording{nullptr};

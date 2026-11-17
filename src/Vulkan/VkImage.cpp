@@ -211,7 +211,10 @@ void cmdTransitionImageLayout(VkCommandBuffer cmd,
 	}
 	else
 	{
-		// Conservative general path
+		// Conservative general path — MAXIMAL scopes (review §4.7): correct
+		// for any transition but serializes everything. Reserved for layout
+		// pairs not covered above; add an explicit case before relying on
+		// this in a hot pass.
 		barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
 		barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 	}
@@ -228,6 +231,28 @@ void uploadImage2D(VmaAllocator allocator,
 {
 	if (!pixels || dataSize == 0)
 		throw std::runtime_error("uploadImage2D: empty pixel data");
+
+	// dataSize validation (review §4.7): the mip-chain path already rejects
+	// a mismatch up front; this single-level path must do the same so a
+	// caller bug cannot abort mid-recording or copy out of bounds.
+	uint32_t texelBytes = 0;
+	switch (image.format)
+	{
+	case VK_FORMAT_R8G8B8A8_UNORM:
+	case VK_FORMAT_R8G8B8A8_SRGB:
+	case VK_FORMAT_B8G8R8A8_UNORM:
+	case VK_FORMAT_B8G8R8A8_SRGB:
+		texelBytes = 4;
+		break;
+	case VK_FORMAT_R8_UNORM:
+		texelBytes = 1;
+		break;
+	default:
+		throw std::runtime_error("uploadImage2D: format not covered by the packed-size contract");
+	}
+	const VkDeviceSize expectedSize = VkDeviceSize(image.width) * image.height * texelBytes;
+	if (dataSize != expectedSize)
+		throw std::runtime_error("uploadImage2D: dataSize does not match the image extent");
 
 	AllocatedBuffer staging = createBuffer(
 		allocator,

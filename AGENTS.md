@@ -123,6 +123,16 @@ cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
 cmake --build build --config Release
 ```
 
+### Build hygiene (review M21)
+
+First-party targets (core, headless, game, tests) build with `-Wall -Wextra
+-Wpedantic` (`/W4` MSVC); vendored ImGui/FileDialog sources are silenced
+per-file. Opt-in gates: `-DFT_VOX_WARNINGS_AS_ERRORS=ON`,
+`-DFT_VOX_SANITIZERS=ON` (ASan+UBSan), `-DFT_VOX_TSAN=ON` (GCC/Clang),
+`-DFT_VOX_LTO=ON`. CI (`.github/workflows/cpu-boundary.yml`) runs the CPU
+boundary gates, an ASan/UBSan job, a TSan job (network + headless + terrain)
+and a full graphical COMPILE job.
+
 ### Testing
 
 ```bash
@@ -161,7 +171,9 @@ cmake --build build-cpu -j && ctest --test-dir build-cpu --output-on-failure
 - **Sim/render boundary (Epic #204)**: authoritative state (voxels, edits, residency, persistence, player, mobs) lives in the CPU-only `ft_vox_core` (`GameSimulation` owns `VoxelWorld`/`WorldChunk` + `PlayerController` + `MobSystem`); render state (meshes, light caches, GPU, visibility) is derived. Core headers must never include `Renderer/`, `Vulkan/`, `Camera/`, `Engine/`, SDL3 or ImGui — enforced by `tests/check_core_includes.py` (CTest `CoreIncludeGuard`). `sim::ChunkIdentity` is the single source of the (generation, revision) pair
 - **Headless boundary (issue #210, hardened #211)**: `ft_vox_headless` (`src/Headless/`) links only `ft_vox_core` and must stay graphics-free. The CPU/GPU boundary is enforced by repeatable automated checks: the configure-time transitive link-closure assertion (`ft_vox_assert_cpu_link_closure`) covers `ft_vox_core`, `ft_vox_headless` and every CPU-only test (the authoritative link gate, incl. MSVC where a static lib has no link step); `CoreIncludeGuard` guards the **core** include closure; `tests/check_headless_deps.py` (CTest `HeadlessDeps`) guards the **runner** include closure plus the core/runner link artifacts (on MSVC the core static-lib scan reads `ProjectReference` entries) and CPU-only cache discovery. `FT_VOX_GRAPHICS=OFF` is the CPU-only configure path (graphics stack not discovered); keep new CPU tests outside the `if(FT_VOX_GRAPHICS)` guards in `tests/CMakeLists.txt`
 - **World Constants**: `src/utils.hpp` (`CHUNK_SIZE`, `WORLD_HEIGHT`)
-- **Resources**: `ressources/`; runtime expects `RES_PATH` next to the binary
+- **Resources**: `ressources/`; `resourceRootPath()` (utils.hpp) anchors on the
+  executable's directory when the full tree (witness: `default-resource-pack.zip`)
+  sits next to the binary, else falls back to the CWD-relative `./ressources/`
 - **Biome/block enums**: `BiomeType` and `TextureType` are append-only; keep
   `biomeTypeString`, `GameUI::kBiomeColors`, `textureTypeString`, and
   `kBlockLayers` aligned with their enum ordinals

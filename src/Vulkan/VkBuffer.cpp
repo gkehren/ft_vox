@@ -60,7 +60,9 @@ void unmapBuffer(VmaAllocator allocator, AllocatedBuffer &buf)
 void writeBuffer(VmaAllocator allocator, AllocatedBuffer &buf, const void *data, VkDeviceSize size,
 				 VkDeviceSize offset)
 {
-	if (offset + size > buf.size)
+	// Overflow-safe bound (review §4.7): offset + size could wrap on
+	// VkDeviceSize and pass the check for a hostile range.
+	if (offset > buf.size || size > buf.size - offset)
 		throw std::runtime_error("writeBuffer: range out of bounds");
 	void *mapped = mapBuffer(allocator, buf);
 	std::memcpy(static_cast<char *>(mapped) + offset, data, static_cast<size_t>(size));

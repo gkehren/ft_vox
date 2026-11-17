@@ -12,17 +12,8 @@
 #include <set>
 #include <unordered_set>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << "\n";                              \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 static void testLoadPriorityNearestFirst()
 {
@@ -279,7 +270,7 @@ static void testPoolCapacityEstimate()
 	// (one CHUNK_VOLUME-byte VoxelStorage per slot). At the shipped 1024-block
 	// maximum the estimate stays in the low GiB, not "a slider can ask for
 	// unbounded RAM".
-	CHECK(kChunkVoxelBackingBytes == size_t(CHUNK_VOLUME), "voxel backing per slot is CHUNK_VOLUME bytes");
+	static_assert(kChunkVoxelBackingBytes == size_t(CHUNK_VOLUME), "voxel backing per slot is CHUNK_VOLUME bytes");
 	CHECK(estimateChunkPoolVoxelBackingBytes(c1024) == c1024 * size_t(CHUNK_VOLUME),
 		  "voxel backing estimate is capacity × CHUNK_VOLUME");
 	CHECK(estimateChunkPoolVoxelBackingBytes(kMaxChunkPoolCapacity) <= size_t(5) << 30,
@@ -644,8 +635,8 @@ static void testFrontBiasFitsUnloadRadius()
 	const float reachFactor = 1.0f / std::sqrt(1.0f - normalizedStreamFrontBias(kSafeMaxStreamFrontBias));
 	CHECK(reachFactor <= kChunkUnloadDistanceFactor,
 		  "max stream bias stays inside unload radius");
-	CHECK(kSafeMaxStreamFrontBias < 1.0f - 1.0f / (kChunkUnloadDistanceFactor * kChunkUnloadDistanceFactor) + 1e-6f,
-		  "safe bias cap respects the closed-form bound");
+	static_assert(kSafeMaxStreamFrontBias < 1.0f - 1.0f / (kChunkUnloadDistanceFactor * kChunkUnloadDistanceFactor) + 1e-6f,
+				  "safe bias cap respects the closed-form bound");
 
 	const float rawBiases[] = {0.f, 0.30f, 0.55f, 0.6f, 0.9f, 0.99f};
 	for (float raw : rawBiases)
@@ -942,9 +933,9 @@ int main()
 	testComputeCameraFarPlane();
 	testFarPlaneCoversBeyondLegacyEstimate();
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed\n";
+		std::cerr << testmain::fails << " check(s) failed\n";
 		return 1;
 	}
 	std::cout << "PASS: stream optimization helpers + bounded terrain gen + ocean water + pool estimate/growth + ice spikes + incremental footprint vs brute force\n";

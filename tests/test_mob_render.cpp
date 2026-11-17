@@ -44,9 +44,9 @@ static std::vector<uint8_t> encodePng(int w, int h, const std::vector<uint8_t> &
         raw[size_t(y) * (w * 4 + 1)] = 0; // filter none
         memcpy(&raw[size_t(y) * (w * 4 + 1) + 1], &rgba[size_t(y) * w * 4], size_t(w) * 4);
     }
-    mz_ulong size = mz_compressBound(raw.size());
+    mz_ulong size = mz_compressBound(static_cast<mz_ulong>(raw.size()));
     std::vector<uint8_t> compressed(size);
-    if (mz_compress(compressed.data(), &size, raw.data(), raw.size()) != MZ_OK)
+    if (mz_compress(compressed.data(), &size, raw.data(), static_cast<mz_ulong>(raw.size())) != MZ_OK)
         throw std::runtime_error("png compress failed");
     compressed.resize(size);
     chunk("IDAT", compressed);
@@ -1166,27 +1166,21 @@ int main(int argc, char **argv)
             if (f.renderer.visibleCount() != 2)
                 throw std::runtime_error("visibleCount must count camera-visible mobs only");
 
-            // d. Capacity policy: populations past kMaxMobCount are
-            // contractually invalid and fail deterministically; the renderer
+            // d. Capacity policy (review §4.6): populations past kMaxMobCount
+            // are CLAMPED with a one-shot log instead of aborting the frame —
+            // the sim's population cap makes this unreachable in production,
+            // and a presentation surface degrades gracefully. The renderer
             // stays usable afterwards.
             {
                 std::vector<entities::MobRenderState> tooMany(entities::kMaxMobCount + 1,
                                                               entities::MobRenderState{
                                                                   entities::MobSpecies::Cow, {0, 0, 0}});
-                bool threw = false;
-                try
-                {
-                    f.renderer.prepare(0, sheepUbo, tooMany);
-                }
-                catch (const std::exception &)
-                {
-                    threw = true;
-                }
-                if (!threw)
-                    throw std::runtime_error("over-capacity population must fail deterministically");
+                f.renderer.prepare(0, sheepUbo, tooMany); // must not throw
+                if (f.renderer.visibleCount() > entities::kMaxMobCount)
+                    throw std::runtime_error("over-capacity population must clamp to capacity");
                 f.render(sheep, sheepUbo, 1);
                 if (f.renderer.visibleCount() != 48)
-                    throw std::runtime_error("renderer unusable after a rejected prepare");
+                    throw std::runtime_error("renderer unusable after a clamped prepare");
             }
 
             // e. One-mob sparse population, frame-slot isolation without

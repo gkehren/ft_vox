@@ -232,7 +232,7 @@ int main() {
         {
             Registry& g = registry();
             g.beginCapture();
-            const uint64_t epoch = g.captureEpoch();
+            const uint64_t liveEpoch = g.captureEpoch(); // distinct name: no shadowing
             g.replace(VoxelBytes, 0, 4096);
             g.set(ActiveChunks, 77);
             g.add(UploadChunks, 3);
@@ -243,7 +243,7 @@ int main() {
             auto live2 = g.sampleLive();
             require(live2.current[VoxelBytes] == 4096 && live2.events[UploadChunks] == 3,
                     "live reads are repeatable (non-destructive)");
-            require(g.captureEpoch() == epoch, "live read does not touch the capture epoch");
+            require(g.captureEpoch() == liveEpoch, "live read does not touch the capture epoch");
             auto afterLive = g.snapshot();
             require(afterLive.current[VoxelBytes] == 4096 &&
                         afterLive.current[ActiveChunks] == 77 && afterLive.events[UploadChunks] == 3,
@@ -251,13 +251,13 @@ int main() {
 
             g.beginCapture();
             const auto e2 = g.captureEpoch();
-            Snapshot work;
-            work.stageCalls[MeshFamily][Skylight] = 1;
-            work.stageNs[MeshFamily][Skylight] = 125;
+            Snapshot liveWork; // distinct name: no shadowing
+            liveWork.stageCalls[MeshFamily][Skylight] = 1;
+            liveWork.stageNs[MeshFamily][Skylight] = 125;
             std::thread liveReader([&] {
                 for (int i = 0; i < 2000; ++i) (void)g.sampleLive();
             });
-            for (int i = 0; i < 1000; ++i) g.worker(e2, work);
+            for (int i = 0; i < 1000; ++i) g.worker(e2, liveWork);
             liveReader.join();
             auto live3 = g.sampleLive();
             require(live3.stageCalls[MeshFamily][Skylight] == 1000 &&

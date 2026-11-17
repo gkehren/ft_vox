@@ -179,6 +179,36 @@ void MeshArena::retire(const Range &range)
 {
 	if (range.empty())
 		return;
+	// Double-retire detector (review §4.7): freeImmediate had one, this
+	// path did not. A duplicate would insert the same block twice when the
+	// delay expires and silently corrupt the free list in Release — refuse
+	// it in every build, loudly.
+	for (const auto &pending : m_pending)
+	{
+		if (pending.range.page == range.page && pending.range.offset == range.offset &&
+			pending.range.bytes == range.bytes)
+		{
+			std::cerr << "MeshArena double-retire refused: page=" << range.page
+			          << " offset=" << range.offset << " bytes=" << range.bytes << std::endl;
+			assert(false && "MeshArena::retire on an already-retired range");
+			return;
+		}
+	}
+#ifndef NDEBUG
+	// A range already fully covered by a free block is a double free too
+	// (same detector as freeImmediate).
+	const Page &p = m_pages[static_cast<size_t>(range.page)];
+	for (const auto &[off, bytes] : p.freeList)
+	{
+		if (range.offset >= off && range.offset + range.bytes <= off + bytes)
+		{
+			std::cerr << "MeshArena retire of an already-free range: page=" << range.page
+			          << " offset=" << range.offset << " bytes=" << range.bytes << std::endl;
+			assert(false && "MeshArena::retire on an already-free range");
+			return;
+		}
+	}
+#endif
 	m_pending.push_back({range, m_frame + m_retireDelay});
 }
 
@@ -249,7 +279,7 @@ void MeshArena::releasePage(Page &p)
 	// The retire queue delays the actual destruction past the frames that
 	// may still bind this page.
 	if (m_retire)
-		m_retire->retireBuffer(p.buf);
+		m_retire->retireBuffer(std::move(p.buf));
 	else
 		destroyBuffer(m_allocator, p.buf);
 	p.buf = {};
@@ -275,7 +305,6 @@ MeshArena::Metrics MeshArena::metrics() const
 		uint64_t free = 0;
 		for (const auto &[off, bytes] : p.freeList)
 			free += bytes;
-		const uint64_t live = static_cast<uint64_t>(p.buf.size) - free;
 		m.freeBytes += free;
 	}
 	m.highWaterBytes = m_highWater;

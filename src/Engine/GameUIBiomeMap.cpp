@@ -211,7 +211,7 @@ struct BiomeMapBuild : std::enable_shared_from_this<BiomeMapBuild>
 		remaining.fetch_add(1, std::memory_order_relaxed);
 		try
 		{
-			pool.enqueue(TaskPriority::Low, [build = shared_from_this(), &pool, index] {
+			pool.submit(TaskPriority::Low, [build = shared_from_this(), &pool, index] {
 				build->runTile(pool, build->plan[index]);
 			});
 		}
@@ -268,7 +268,7 @@ std::future<BiomeMapResult> submitBiomeMap(ThreadPool &pool, BiomeMapRequest req
 	auto future = build->promise.get_future();
 	try
 	{
-		pool.enqueue(TaskPriority::Low, [build, &pool] { build->run(pool); });
+		pool.submit(TaskPriority::Low, [build, &pool] { build->run(pool); });
 	}
 	catch (...)
 	{

@@ -1,5 +1,7 @@
 #include "Camera.hpp"
 
+#include <cmath>
+
 Camera::Camera(glm::vec3 position, glm::vec3 up, float yaw, float pitch, SDL_Window *window)
 	: window(window), position(position), worldUp(up), yaw(yaw), pitch(pitch), movementSpeed(2.5f), mouseSensitivity(0.1f)
 {
@@ -23,7 +25,7 @@ glm::mat4 Camera::getViewMatrix() const
 		isoFront = glm::normalize(isoFront);
 
 		// Place the eye far enough behind the focal point so nothing clips
-		glm::vec3 eye = position - isoFront * (isometricZoom * 4.0f);
+		glm::vec3 eye = position - isoFront * (isometricZoom * kIsometricEyeArmFactor);
 		return glm::lookAt(eye, position, glm::vec3(0.0f, 1.0f, 0.0f));
 	}
 	return glm::lookAt(position, position + front, up);
@@ -31,15 +33,21 @@ glm::mat4 Camera::getViewMatrix() const
 
 glm::mat4 Camera::getProjectionMatrix(float screenWidth, float screenHeight, float farPlane) const
 {
+	// Aspect guard (review §4.9): a zero height (minimized window) used to
+	// produce a NaN aspect and poison the projection.
+	const float aspect =
+		(std::isfinite(screenWidth) && std::isfinite(screenHeight) &&
+		 screenWidth > 0.0f && screenHeight > 0.0f)
+			? screenWidth / screenHeight
+			: 1.0f;
 	if (mode == CameraMode::ISOMETRIC)
 	{
-		float aspect = screenWidth / screenHeight;
 		float halfH = isometricZoom;
 		float halfW = isometricZoom * aspect;
 		// Near/far span the whole potential camera arm plus world depth
 		return glm::ortho(-halfW, halfW, -halfH, halfH, -farPlane, farPlane);
 	}
-	return glm::perspective(glm::radians(80.0f), screenWidth / screenHeight, 0.1f, farPlane);
+	return glm::perspective(glm::radians(80.0f), aspect, 0.1f, farPlane);
 }
 
 glm::vec3 Camera::getPosition() const
@@ -90,18 +98,23 @@ void Camera::processKeyboard(double deltaTime, const bool *keys)
 			position += isoRight * velocity;
 
 		position.x = std::clamp(position.x, static_cast<float>(SHRT_MIN), static_cast<float>(SHRT_MAX));
-		position.y = 100.0f;
+		position.y = kIsometricPlaneY;
 		position.z = std::clamp(position.z, static_cast<float>(SHRT_MIN), static_cast<float>(SHRT_MAX));
 		return;
 	}
 
+	// Horizontal movement derives from yaw alone (review §4.9): the old
+	// normalize(front.xz) produced NaN at pitch ±90° — reachable through
+	// processMouseMovement(constrainPitch=false). cos²+sin²=1, so this is
+	// already unit length and matches the clamped-pitch direction exactly.
+	const glm::vec3 horizontal(std::cos(glm::radians(yaw)), 0.0f, std::sin(glm::radians(yaw)));
 	if (keys[SDL_SCANCODE_W])
 	{
-		position += glm::normalize(glm::vec3(front.x, 0.0f, front.z)) * velocity;
+		position += horizontal * velocity;
 	}
 	if (keys[SDL_SCANCODE_S])
 	{
-		position -= glm::normalize(glm::vec3(front.x, 0.0f, front.z)) * velocity;
+		position -= horizontal * velocity;
 	}
 	if (keys[SDL_SCANCODE_A])
 	{
@@ -132,7 +145,14 @@ void Camera::updateCameraVectors()
 	front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
 	front = glm::normalize(front);
 
-	right = glm::normalize(glm::cross(front, worldUp));
+	// Degenerate-cross guard (review §4.9): at pitch ±90° front is parallel
+	// to worldUp and cross(front, worldUp) is zero — normalize(0) would
+	// poison right/up with NaN. Fall back to the yaw-derived horizontal
+	// right axis, which is exactly the limit of the regular formula.
+	glm::vec3 crossRight = glm::cross(front, worldUp);
+	if (glm::dot(crossRight, crossRight) < 1e-12f)
+		crossRight = glm::vec3(-std::sin(glm::radians(yaw)), 0.0f, std::cos(glm::radians(yaw)));
+	right = glm::normalize(crossRight);
 	up = glm::normalize(glm::cross(right, front));
 }
 

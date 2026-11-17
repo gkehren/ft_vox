@@ -60,6 +60,12 @@ struct RunnerOptions
 	bool hasDigestArea{false};
 	DigestArea digestArea{};
 	std::string expectedDigest; // --expect-digest (lowercase hex, empty = off)
+	// Cooperative deadline (review §4.10): checked between frames and inside
+	// the quiesce loop, NOT preemptive — a simulation that hangs inside a
+	// single step would not be interrupted. The runner's steps are bounded
+	// by construction (fixed budgets, capped catch-up), so the cooperative
+	// check covers every reachable stall; an external watchdog remains the
+	// tool for a truly wedged process.
 	double timeoutSec{120.0};
 	bool json{false};
 };

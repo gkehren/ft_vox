@@ -6,17 +6,8 @@
 #include <cmath>
 #include <iostream>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 static bool approx(double a, double b, double eps = 1e-9)
 {
@@ -87,9 +78,9 @@ int main()
 	CHECK(approx(frame_pacing::computePacedDeltaTime(33.6 / 1000.0, true, 60.0), 2.0 * r60),
 		  "60 Hz x2 snaps to 2/60");
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed\n";
+		std::cerr << testmain::fails << " check(s) failed\n";
 		return 1;
 	}
 	std::cout << "PASS: frame pacing - vsync snapping, multiples, fallbacks, clamps\n";

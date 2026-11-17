@@ -20,16 +20,7 @@
 #include <string>
 #include <vector>
 
-static int g_fails = 0;
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 // Friend probe (same pattern as test_chunk_lifecycle): test-only access to
 // the main-thread trace writer and chunk registration without streaming.
@@ -457,7 +448,7 @@ void testStreamingHealthSubset()
 	CHECK(state.health.meshBacklog.active(), "sustained mesh backlog raises via the streaming subset");
 
 	// A one-frame spike must stay neutral (issue #186 §6): ordinary bursts
-	// while moving fast are not failures.
+	// while moving fast are not testmain::fails.
 	debugui::UiState spike;
 	spike.streaming.pendingMesh = 128;
 	spike.health.updateStreaming(spike, 1.0f);
@@ -480,7 +471,7 @@ void testStreamingHealthSubset()
 		state.health.updateStreaming(state, 1.0f);
 	CHECK(state.health.meshBacklog.active(), "streaming monitors keep advancing");
 	CHECK(!state.health.stagingFailures.active(),
-		  "staging failures stay untouched by the streaming subset");
+		  "staging testmain::fails stay untouched by the streaming subset");
 	CHECK(!state.health.gpuMemoryGrowth.active() && !state.health.slowFrames.active() &&
 			  !state.health.retiredBacklog.active(),
 		  "memory/frame monitors stay untouched by the streaming subset");
@@ -521,9 +512,9 @@ int main()
 		std::cerr << "EXCEPTION: " << e.what() << '\n';
 		return 1;
 	}
-	if (g_fails)
+	if (testmain::fails)
 	{
-		std::cerr << g_fails << " failure(s)\n";
+		std::cerr << testmain::fails << " failure(s)\n";
 		return 1;
 	}
 	std::cout << "PASS: debug ui core (formatting, histories, health, chunk snapshot, trace)\n";

@@ -117,7 +117,7 @@ TextureType WorldChunk::setVoxel(int x, int y, int z, TextureType type)
 		const bool nowAir = (type == AIR);
 		if (wasAir != nowAir)
 		{
-			constexpr uint16_t kSectionVolume =
+			[[maybe_unused]] constexpr uint16_t kSectionVolume =
 				static_cast<uint16_t>(kOccupancySectionSize) * CHUNK_SIZE * CHUNK_SIZE;
 			const int section = y / kOccupancySectionSize;
 			uint16_t &count = m_sectionNonAir[section];
@@ -133,8 +133,12 @@ TextureType WorldChunk::setVoxel(int x, int y, int z, TextureType type)
 			}
 		}
 		// Content invalidation (issue #114 review): any in-flight mesh built
-		// from the previous content is rejected at publish time.
-		m_revision.fetch_add(1, std::memory_order_relaxed);
+		// from the previous content is rejected at publish time. A no-op
+		// rewrite (previousType == type) changes no content, so it must NOT
+		// bump the revision — otherwise placing an identical block would
+		// reject in-flight builds and force a pointless remesh (review M10).
+		if (previousType != type)
+			m_revision.fetch_add(1, std::memory_order_relaxed);
 		return previousType;
 	}
 	if (x >= -1 && x <= CHUNK_SIZE && z >= -1 && z <= CHUNK_SIZE &&
@@ -161,8 +165,10 @@ TextureType WorldChunk::setVoxel(int x, int y, int z, TextureType type)
 		m_borders->mutableAt(x, y, z) = static_cast<uint8_t>(type);
 		// Border content invalidation (issue #114 review): mirror writes from
 		// a neighbor's boundary edit invalidate in-flight meshes of THIS chunk
-		// just like in-chunk edits do.
-		m_revision.fetch_add(1, std::memory_order_relaxed);
+		// just like in-chunk edits do. No-op mirror rewrites skip the bump
+		// for the same reason as in-chunk writes (review M10).
+		if (previousType != type)
+			m_revision.fetch_add(1, std::memory_order_relaxed);
 		return previousType;
 	}
 	return AIR;
@@ -326,14 +332,15 @@ uint16_t WorldChunk::occupiedSectionMask() const
 void WorldChunk::validateOccupancyMetadata() const
 {
 	// A per-section count can never exceed the section's voxel count, and a
-	// storageless record must be empty (issue #115 review).
-	constexpr uint16_t kSectionVolume =
+	// storageless record must be empty (issue #115 review). The locals are
+	// assert-only: [[maybe_unused]] keeps Release builds warning-clean.
+	[[maybe_unused]] constexpr uint16_t kSectionVolume =
 		static_cast<uint16_t>(kOccupancySectionSize) * CHUNK_SIZE * CHUNK_SIZE;
-	for (const uint16_t count : m_sectionNonAir)
+	for ([[maybe_unused]] const uint16_t count : m_sectionNonAir)
 		assert(count <= kSectionVolume && "occupancy count above section volume");
 	if (!m_storage)
 	{
-		for (const uint16_t count : m_sectionNonAir)
+		for ([[maybe_unused]] const uint16_t count : m_sectionNonAir)
 			assert(count == 0 && "storageless chunk must have empty occupancy");
 	}
 }

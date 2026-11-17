@@ -208,22 +208,30 @@ void drawChunkInspector(UiState &s, GameUIFrame &frame)
 	}
 	else
 	{
-		const std::vector<ChunkDebugEvent> events = chunks.chunkDebugEvents();
+		// In-place ring iteration (review §4.8): the whole 256-event ring
+		// used to be copied by value every frame the panel is open.
+		const auto &ring = chunks.chunkDebugEventRing();
+		const size_t eventCount = chunks.chunkDebugEventCount();
+		const size_t eventWrite = chunks.chunkDebugEventWrite();
 		const double nowSec = std::chrono::duration<double>(
 			std::chrono::steady_clock::now().time_since_epoch()).count();
 		size_t matched = 0;
 		// Show only the most recent 32 events for this chunk (newest last).
 		constexpr size_t kMaxShown = 32;
 		std::vector<const ChunkDebugEvent *> shown;
-		for (auto it = events.rbegin(); it != events.rend(); ++it)
+		for (size_t i = 0; i < eventCount; ++i)
 		{
-			if (it->chunk.x != s.inspectCoord.x || it->chunk.z != s.inspectCoord.z)
+			// Newest first, same order as the old reverse chronological walk.
+			const ChunkDebugEvent &ev =
+				ring[(eventWrite + RenderWorldBridge::kChunkEventRingSize - 1 - i) %
+					 RenderWorldBridge::kChunkEventRingSize];
+			if (ev.chunk.x != s.inspectCoord.x || ev.chunk.z != s.inspectCoord.z)
 				continue;
 			++matched;
 			if (shown.size() < kMaxShown)
-				shown.push_back(&*it);
+				shown.push_back(&ev);
 		}
-		ImGui::Text("%zu events for this chunk (ring holds %zu total)", matched, events.size());
+		ImGui::Text("%zu events for this chunk (ring holds %zu total)", matched, eventCount);
 		for (auto it = shown.rbegin(); it != shown.rend(); ++it)
 		{
 			const ChunkDebugEvent *e = *it;

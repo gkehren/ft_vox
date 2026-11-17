@@ -40,6 +40,9 @@ class MobRenderer
     /// descriptor set (issue #137: shadow map resolution changes recreate
     /// both the image and the sampler). Caller must device-idle first.
     void refreshShadowBinding(VkImageView shadowView, VkSampler shadowSampler);
+    /// Rebuild the color + shadow pipelines for new attachment formats
+    /// (review M17: swapchain recreate). Caller must device-idle first.
+    void recreatePipelines(VkFormat color, VkFormat depth);
     void shutdown();
     std::unique_ptr<Textures> prepareTextures(ImmediateCommands &, const std::string &,
                                               SamplerPolicy policy = SamplerPolicy::Mipmapped);

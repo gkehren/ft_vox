@@ -348,6 +348,12 @@ void VoxelWorld::queueUnloadOutOfRange(const glm::vec3 &center, const WorldStrea
 			continue;
 
 		m_chunks.erase(it);
+		// Durability barrier (review C1): deferred edits targeting a record
+		// that never became readable must reach the persistent override set
+		// BEFORE the queue entries are erased — otherwise an accepted edit
+		// against an UNLOADED record would vanish without a trace when the
+		// player walks away before generation is dispatched.
+		bakeDeferredEditsForUnload(chunk);
 		erasePendingEditsFor(chunk);
 
 		// Capture recorded edits BEFORE recycling wipes the edit map
@@ -577,6 +583,13 @@ void VoxelWorld::generatePendingVoxels(const glm::vec3 &center, float lodThresho
 		float distSq;
 	};
 
+	// Bounded critical section (review §4.3): the exclusive lock covers
+	// selection, storage preparation and dispatch because inTransit must be
+	// armed atomically with the state check (an unlocked window would let
+	// an unload recycle a record between the two). The work under the lock
+	// is bounded by `budget` (per-frame gen rate) and the pool-backed
+	// allocations are O(1) amortized; main-thread-only entry points keep
+	// readers on the shared lock outside this window.
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
 	thread_local std::vector<Item> queue;
 	queue.clear();
@@ -622,7 +635,9 @@ void VoxelWorld::generatePendingVoxels(const glm::vec3 &center, float lodThresho
 		const uint64_t generation = chunk->generation();
 		const auto queuedAt = std::chrono::steady_clock::now();
 		WorldWorkerObserver *observer = m_workerObserver;
-		m_threadPool->enqueue(prio, [chunk, seed, generation, this, queuedAt, captureEpoch, observer]() {
+		// Fire-and-forget (review M4): the result flows through
+		// m_completedGenerationChunks, the future would be ignored.
+		m_threadPool->submit(prio, [chunk, seed, generation, this, queuedAt, captureEpoch, observer]() {
 			const auto t0 = std::chrono::steady_clock::now();
 			if (observer)
 				observer->addWorkerSample("TerrainQueue",
@@ -1054,6 +1069,11 @@ bool VoxelWorld::isVoxelActive(const glm::vec3 &worldPos) const
 
 WorldChunk *VoxelWorld::getChunk(const glm::ivec3 &chunkPos)
 {
+	// Lock-free by contract (review §4.3): every non-const caller is either
+	// on the main thread outside concurrent mutation windows or already
+	// holds m_mutex (the locked internal helpers). Taking a shared_lock
+	// here would deadlock those paths — std::shared_mutex is not recursive.
+	// Cross-thread readers must use the const overload, which locks.
 	auto it = m_chunks.find(chunkPos);
 	return it != m_chunks.end() ? it->second : nullptr;
 }
@@ -1118,7 +1138,16 @@ bool VoxelWorld::prepareAndGenerateChunk(WorldChunk *chunk, TerrainGenerator &ge
 			releaseRecord(chunk);
 		return false;
 	}
-	chunk->generateTerrain(generator);
+	if (!chunk->generateTerrain(generator))
+	{
+		// Generation refused (record not UNLOADED or backing missing): never
+		// apply overrides onto ungenerated backing, and never report success
+		// (review §4.3). Same recycle discipline as the allocation-failure
+		// path above; external test records are never recycled.
+		if (m_externalRecords.count(chunk) == 0)
+			releaseRecord(chunk);
+		return false;
+	}
 	// Bootstrap path (issue #180): same override contract as the async gen
 	// job — generation is deterministic, saved edits re-apply on top.
 	applyPersistentOverrides(chunk);
@@ -1225,19 +1254,36 @@ bool VoxelWorld::openWorld(const std::string &savesRoot, const std::string &worl
 
 bool VoxelWorld::drainAsyncJobsForPersistence()
 {
-	// Closing a persistent world is a durability barrier: deliberately NO
-	// timeout. The loop cannot spin forever on the JOB side (the close path
-	// does not feed the queues; workers always finish), but a PendingVoxelEdit
-	// whose target record never leaves UNLOADED can stay deferred forever,
-	// so that condition is CHECKED afterwards instead of waited on.
+	// Closing a persistent world is a durability barrier. The loop cannot
+	// spin forever on the JOB side (the close path does not feed the queues;
+	// workers always finish), but a PendingVoxelEdit whose target record
+	// never leaves UNLOADED can stay deferred forever, so that condition is
+	// CHECKED afterwards instead of waited on.
 	// NOTE: the graphical adapter quiesces its render jobs (which also hold
 	// record inTransit) around this call; standalone/headless worlds only
 	// have generation jobs, which pump() publishes.
+	// Bounded wait (review M9): asyncBusy() also counts render-transit
+	// records. If a host ever violated the quiesce-before-drain order, an
+	// unbounded loop would hang the process forever; instead we report the
+	// stall with per-category diagnostics and return false so closeWorld()
+	// stays retryable and the shutdown path proceeds loudly, never silently.
+	constexpr auto kDrainTimeout = std::chrono::seconds(30);
+	const auto deadline = std::chrono::steady_clock::now() + kDrainTimeout;
 	for (;;)
 	{
 		pump();
 		if (!asyncBusy())
 			break;
+		if (std::chrono::steady_clock::now() >= deadline)
+		{
+			std::cerr << "[world] persistence drain timed out after "
+					  << kDrainTimeout.count() << "s: gen jobs in flight="
+					  << pendingGenJobs()
+					  << ", records in transit=" << (anyChunkInTransitForPersistence() ? "yes" : "no")
+					  << " (render jobs must be quiesced before the durability barrier)"
+					  << std::endl;
+			return false;
+		}
 		std::this_thread::sleep_for(std::chrono::microseconds(500));
 	}
 	// One final publish pass so edits deferred until the very last job land.
@@ -1421,6 +1467,44 @@ void VoxelWorld::applyPersistentOverrides(WorldChunk *chunk)
 		const int y = static_cast<int>(edit.localIndex >> 8);
 		chunk->setVoxel(x, y, z, static_cast<TextureType>(edit.blockType));
 	}
+}
+
+void VoxelWorld::bakeDeferredEditsForUnload(WorldChunk *chunk)
+{
+	// Called with m_mutex held, main thread (the edit/pump contract). Only
+	// the canonical in-chunk entries carry durable content: mirror entries
+	// (borderNeighbor) duplicate the owning chunk's edit and the shell is
+	// rebuilt from resident neighbors when the coordinate loads again.
+	if (!m_persistence || !m_persistence->enabled() || !chunk)
+		return;
+	std::vector<worldsave::ChunkEdit> values;
+	for (const PendingVoxelEdit &edit : m_pendingEdits)
+	{
+		if (edit.chunk != chunk || edit.borderNeighbor)
+			continue;
+		// Same staleness rule as applyPendingEdits: a recycled incarnation
+		// never receives (or persists) a queued edit.
+		if (edit.chunk->generation() != edit.generation)
+			continue;
+		if (static_cast<uint32_t>(edit.x) >= static_cast<uint32_t>(CHUNK_SIZE) ||
+			static_cast<uint32_t>(edit.y) >= static_cast<uint32_t>(CHUNK_HEIGHT) ||
+			static_cast<uint32_t>(edit.z) >= static_cast<uint32_t>(CHUNK_SIZE))
+			continue;
+		// Canonical y-major localIndex (y*256 + z*16 + x), the save format's
+		// single index convention.
+		const uint32_t localIndex =
+			static_cast<uint32_t>(edit.y) * (CHUNK_SIZE * CHUNK_SIZE) +
+			static_cast<uint32_t>(edit.z) * CHUNK_SIZE + static_cast<uint32_t>(edit.x);
+		values.push_back({localIndex, static_cast<uint8_t>(edit.type)});
+	}
+	if (values.empty())
+		return;
+	// captureChunkEdits MERGES into the desired/durable state (delta merge),
+	// so previously recorded edits and the on-disk baseline are preserved.
+	// Reverts to the procedural base are dropped by the save worker's diff,
+	// exactly like recorded reverts.
+	const glm::ivec3 cc = chunk->coord();
+	m_persistence->captureChunkEdits(cc.x, cc.z, std::move(values));
 }
 
 void VoxelWorld::captureChunkEditsForUnload(WorldChunk *chunk)

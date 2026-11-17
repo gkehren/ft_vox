@@ -19,17 +19,8 @@
 #include <thread>
 #include <vector>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 static void fillJunk(MeshBuildResult &r)
 {
@@ -47,14 +38,8 @@ static void fillJunk(MeshBuildResult &r)
 	}
 }
 
-// Convenience: full builder lifecycle for the concurrency sections.
-static void buildAndRelease(MeshResultPool &pool, MeshBuildResult *r, uint64_t rev)
-{
-	r->beginBuild(nullptr, rev, rev);
-	r->opaqueIndices.push_back(uint32_t(rev));
-	pool.finishBuild(r);
-	pool.release(r);
-}
+// (review M21: the unused buildAndRelease helper was removed — /W4's
+// C4505 surfaced it as dead code.)
 
 int main()
 {
@@ -360,9 +345,9 @@ int main()
 		pool.release(reused);
 	}
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed\n";
+		std::cerr << testmain::fails << " check(s) failed\n";
 		return 1;
 	}
 	std::cout << "PASS: mesh result pool - reuse, retention, identity, "

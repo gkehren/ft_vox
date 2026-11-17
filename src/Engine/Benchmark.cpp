@@ -167,52 +167,47 @@ void Benchmark::tick(double dt, Camera &camera)
 	}
 }
 
-void Benchmark::sampleFrame(float frameMs, float scopeStreaming, float scopeAcquire, float scopeRecord,
-							float scopeImGui, float scopePresent, float scopeVisibility,
-							float scopeMeshUpload, float scopePoolGrow, size_t chunks, size_t drawCount,
-							size_t pendingLoad, size_t pendingGen, size_t pendingMesh, size_t pendingLight,
-							uint64_t terrainJobs, float terrainMs, uint64_t meshJobs, float meshMs,
-							uint64_t lodJobs, float lodMs, uint64_t lightCacheJobs, float lightCacheMs)
+void Benchmark::sampleFrame(const BenchmarkFrameSample &s)
 {
 	if (m_phase != BenchmarkPhase::Running)
 		return;
 
-	m_frameMs.push_back(frameMs);
-	m_recordMs.push_back(scopeRecord);
-	m_sumStreaming += scopeStreaming;
-	m_sumAcquire += scopeAcquire;
-	m_sumRecord += scopeRecord;
-	m_sumImGui += scopeImGui;
-	m_sumPresent += scopePresent;
-	m_sumVisibility += scopeVisibility;
-	m_sumMeshUpload += scopeMeshUpload;
+	m_frameMs.push_back(s.frameMs);
+	m_recordMs.push_back(s.scopeRecord);
+	m_sumStreaming += s.scopeStreaming;
+	m_sumAcquire += s.scopeAcquire;
+	m_sumRecord += s.scopeRecord;
+	m_sumImGui += s.scopeImGui;
+	m_sumPresent += s.scopePresent;
+	m_sumVisibility += s.scopeVisibility;
+	m_sumMeshUpload += s.scopeMeshUpload;
 	// PoolGrow: keep the raw sum for the per-frame contribution average, but
 	// only push ACTIVE steps (a frame with no growth contributes nothing) so
 	// avg/p95/max describe one real growth operation, not a sea of zeros
 	// masking an occasional hitch.
-	m_sumPoolGrow += scopePoolGrow;
-	if (scopePoolGrow > 0.0f)
-		m_poolGrowMs.push_back(scopePoolGrow);
+	m_sumPoolGrow += s.scopePoolGrow;
+	if (s.scopePoolGrow > 0.0f)
+		m_poolGrowMs.push_back(s.scopePoolGrow);
 
-	m_terrainJobs += terrainJobs;
-	m_terrainMs += terrainMs;
-	m_meshJobs += meshJobs;
-	m_meshMs += meshMs;
-	m_lodJobs += lodJobs;
-	m_lodMs += lodMs;
-	m_lightCacheJobs += lightCacheJobs;
-	m_lightCacheMs += lightCacheMs;
+	m_terrainJobs += s.terrainJobs;
+	m_terrainMs += s.terrainMs;
+	m_meshJobs += s.meshJobs;
+	m_meshMs += s.meshMs;
+	m_lodJobs += s.lodJobs;
+	m_lodMs += s.lodMs;
+	m_lightCacheJobs += s.lightCacheJobs;
+	m_lightCacheMs += s.lightCacheMs;
 
-	m_peakChunks = std::max(m_peakChunks, chunks);
-	m_peakDraw = std::max(m_peakDraw, drawCount);
-	m_peakLoad = std::max(m_peakLoad, pendingLoad);
-	m_peakGen = std::max(m_peakGen, pendingGen);
-	m_peakMesh = std::max(m_peakMesh, pendingMesh);
-	m_peakLight = std::max(m_peakLight, pendingLight);
+	m_peakChunks = std::max(m_peakChunks, s.chunks);
+	m_peakDraw = std::max(m_peakDraw, s.drawCount);
+	m_peakLoad = std::max(m_peakLoad, s.pendingLoad);
+	m_peakGen = std::max(m_peakGen, s.pendingGen);
+	m_peakMesh = std::max(m_peakMesh, s.pendingMesh);
+	m_peakLight = std::max(m_peakLight, s.pendingLight);
 
-	if (frameMs > 16.7f)
+	if (s.frameMs > 16.7f)
 		++m_over16;
-	if (frameMs > 33.3f)
+	if (s.frameMs > 33.3f)
 		++m_over33;
 }
 

@@ -49,7 +49,9 @@ constexpr const char *kUiSettingsTypeName = "FtVoxUi";
 void *uiSettingsReadOpen(ImGuiContext *, ImGuiSettingsHandler *, const char *name)
 {
 	return std::strcmp(name, "Scale") == 0 ? const_cast<char *>(name) : nullptr;
-}void uiSettingsReadLine(ImGuiContext *, ImGuiSettingsHandler *handler, void *, const char *line)
+}
+
+void uiSettingsReadLine(ImGuiContext *, ImGuiSettingsHandler *handler, void *, const char *line)
 {
 	float value = 0.f;
 	if (std::sscanf(line, "ui_scale=%f", &value) == 1 && handler->UserData)
@@ -70,7 +72,7 @@ ImGuiLayer::~ImGuiLayer()
 	shutdown();
 }
 
-void ImGuiLayer::init(SDL_Window *window, VkContext &context, VkSwapchain &swapchain, ImmediateCommands &imm)
+void ImGuiLayer::init(SDL_Window *window, VkContext &context, VkSwapchain &swapchain)
 {
 	if (m_initialized)
 		return;
@@ -112,7 +114,6 @@ void ImGuiLayer::init(SDL_Window *window, VkContext &context, VkSwapchain &swapc
 	if (!ImGui_ImplSDL3_InitForVulkan(window))
 		throw std::runtime_error("ImGui_ImplSDL3_InitForVulkan failed");
 	m_initialized = true;
-	(void)imm;
 	initVulkanBackend(context, swapchain);
 }
 

@@ -89,7 +89,7 @@ public:
 
 private:
 	void createAllocator();
-	void createInstance(SDL_Window *window);
+	void createInstance(); // SDL3 extension query needs no window (review M21)
 	void setupDebugMessenger();
 	void createSurface(SDL_Window *window);
 	void pickPhysicalDevice();

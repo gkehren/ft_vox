@@ -136,7 +136,7 @@ Engine::Engine(std::string resourcePackRoot)
 	worldRenderer->init(*vkContext, *swapchain, *immediate, resourceRetire, m_resourcePackRoot);
 
 	imgui = std::make_unique<ImGuiLayer>();
-	imgui->init(window, *vkContext, *swapchain, *immediate);
+	imgui->init(window, *vkContext, *swapchain);
 
 	gameUi = std::make_unique<GameUI>();
 	gameUi->init(*vkContext, *immediate);
@@ -191,7 +191,10 @@ Engine::~Engine()
 	// orientation (presentation). ~VoxelWorld holds a safety net for chunk
 	// edits, but only this path writes player.state, so the explicit flush
 	// stays.
-	if (sim->isWorldOpen())
+	// Partial-init guard (review M8): sim only exists once init() survived
+	// device creation; a constructor that threw earlier must not crash the
+	// destructor here.
+	if (sim && sim->isWorldOpen())
 		sim->savePlayerState(camera.getYaw(), camera.getPitch());
 
 	// Reset order matters (issue #109): chunk/world teardown returns arena
@@ -202,8 +205,11 @@ Engine::~Engine()
 	// authoritative simulation exactly once, here, before it tears down.
 	gameUi.reset();
 	renderBridge.reset();
-	sim->shutdown();
-	sim.reset();
+	if (sim)
+	{
+		sim->shutdown();
+		sim.reset();
+	}
 	chunkPool.reset();
 	threadPool.reset();
 
@@ -719,12 +725,11 @@ void Engine::tickStreaming(double dt)
 		renderBridge->updateStreaming(camera, renderSettings);
 	}
 
-	static double genAccum = 0.0, meshAccum = 0.0, uploadAccum = 0.0, lightCacheAccum = 0.0;
 	const int loadBudget = budgetFromRate(renderSettings.loadPerSec, frameDt, streamAccum);
-	const int genBudget = budgetFromRate(renderSettings.genPerSec, frameDt, genAccum);
-	const int meshBudget = budgetFromRate(renderSettings.meshPerSec, frameDt, meshAccum);
-	const int lightCacheBudget = budgetFromRate(renderSettings.lightCachePerSec, frameDt, lightCacheAccum);
-	uploadBudgetThisFrame = std::max(budgetFromRate(renderSettings.uploadPerSec, frameDt, uploadAccum), 1);
+	const int genBudget = budgetFromRate(renderSettings.genPerSec, frameDt, m_genAccum);
+	const int meshBudget = budgetFromRate(renderSettings.meshPerSec, frameDt, m_meshAccum);
+	const int lightCacheBudget = budgetFromRate(renderSettings.lightCachePerSec, frameDt, m_lightCacheAccum);
+	uploadBudgetThisFrame = std::max(budgetFromRate(renderSettings.uploadPerSec, frameDt, m_uploadAccum), 1);
 
 	// Count budgets capped by shared per-frame CPU time envelope.
 	const int loadN = remainingCountBudget(std::max(loadBudget, 1), streamElapsedMs(), maxStreamMs);
@@ -766,11 +771,9 @@ void Engine::tickStreaming(double dt)
 		renderBridge->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
 	}
 
-	static size_t lastLoggedChunks = 0;
-	static double lastLogTime = 0.0;
 	const double now = SDL_GetTicks() / 1000.0;
 	const size_t n = renderBridge->chunkCount();
-	if (n != lastLoggedChunks && now - lastLogTime > 1.0)
+	if (n != m_lastLoggedChunks && now - m_lastStreamLogTime > 1.0)
 	{
 		std::cout << "[stream] chunks=" << n
 				  << " draw=" << drawList.size()
@@ -780,8 +783,8 @@ void Engine::tickStreaming(double dt)
 				  << renderBridge->pendingGenJobs() << "/"
 				  << renderBridge->pendingMeshJobs() << "/"
 				  << renderBridge->pendingLightJobs() << "\n";
-		lastLoggedChunks = n;
-		lastLogTime = now;
+		m_lastLoggedChunks = n;
+		m_lastStreamLogTime = now;
 	}
 }
 
@@ -822,6 +825,14 @@ void Engine::updateHighlight()
 
 void Engine::handleEvents()
 {
+	// Shortcut-routing frame built ONCE per event batch (review §4.8): the
+	// ~45-field GameUIFrame with its std::function callbacks used to be
+	// reconstructed for every single key event.
+	GameUIFrame shortcutFrame{};
+	shortcutFrame.render = &renderSettings;
+	shortcutFrame.paused = &paused;
+	shortcutFrame.setVSync = [this](bool v) { setVSync(v); };
+
 	SDL_Event event;
 	while (SDL_PollEvent(&event))
 	{
@@ -843,8 +854,10 @@ void Engine::handleEvents()
 			jumpPressed = false;
 			sim->suspendPlayer();
 			break;
-		case SDL_EVENT_WINDOW_RESIZED:
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+			// Pixel semantics only (review §4.8): SDL_EVENT_WINDOW_RESIZED
+			// carries LOGICAL sizes and triggered a redundant swapchain
+			// recreate on DPI != 1 displays.
 			onResize(event.window.data1, event.window.data2);
 			break;
 		case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
@@ -858,6 +871,11 @@ void Engine::handleEvents()
 			break;
 		case SDL_EVENT_KEY_DOWN:
 		{
+			// OS key-repeat filter FIRST (review §4.8): it used to sit after
+			// the shortcut routing, so holding a key re-triggered F-key
+			// toggles on every repeat and spam-dropped items on Q.
+			if (event.key.repeat)
+				break;
 			const SDL_Keycode key = event.key.key;
 			const bool uiCapturesKeyboard = imgui && imgui->wantCaptureKeyboard();
 			const KeyRoute keyRoute = classifyKeyRoute(static_cast<int>(key));
@@ -867,14 +885,9 @@ void Engine::handleEvents()
 			// not fire while ImGui owns the keyboard, or typing 'p'/'c'/'b'
 			// in a text field would pause the world, steal the cursor, or
 			// toggle overlays.
-			GameUIFrame dummy{};
-			dummy.render = &renderSettings;
-			dummy.paused = &paused;
-			dummy.setVSync = [this](bool v) { setVSync(v); };
-
 			if (keyRoute == KeyRoute::GlobalShortcut)
 			{
-				if (gameUi && gameUi->handleGlobalShortcut(static_cast<int>(key), dummy))
+				if (gameUi && gameUi->handleGlobalShortcut(static_cast<int>(key), shortcutFrame))
 					break;
 			}
 
@@ -891,7 +904,7 @@ void Engine::handleEvents()
 
 			if (uiCapturesKeyboard)
 				break;
-			if (event.key.repeat || m_benchmark.isActive() || !windowFocused)
+			if (m_benchmark.isActive() || !windowFocused)
 				break;
 			if (key == SDLK_SPACE && !paused)
 				jumpPressed = true;
@@ -908,7 +921,7 @@ void Engine::handleEvents()
 
 			if (keyRoute == KeyRoute::GameplayShortcut)
 			{
-				if (gameUi->handleGameplayShortcut(static_cast<int>(key), dummy))
+				if (gameUi->handleGameplayShortcut(static_cast<int>(key), shortcutFrame))
 					break;
 
 				// Engine-owned gameplay keys (C/B/T/1-9/Q/E) fall through here:
@@ -963,7 +976,7 @@ void Engine::handleEvents()
 					// Skip AIR
 					if (static_cast<TextureType>(next) == AIR)
 						next = 1;
-					sim->selectedBlock() = static_cast<TextureType>(next);
+					sim->setSelectedBlock(static_cast<TextureType>(next));
 				}
 				break;
 			}
@@ -1253,10 +1266,18 @@ void Engine::tickBenchmark(double dt)
 	if (!m_benchmark.isActive() && benchmarkOwnedCamera)
 	{
 		benchmarkOwnedCamera = false;
-		sim->setPlayerFlight(true, glm::dvec3(camera.getPosition()) -
-		                           glm::dvec3(0, sim->playerSettings().eyeHeight, 0));
+		const glm::dvec3 feet = glm::dvec3(camera.getPosition()) -
+		                        glm::dvec3(0, sim->playerSettings().eyeHeight, 0);
+		sim->setPlayerFlight(true, feet);
 		jumpPressed = false;
-		setPlayerFlight(flightBeforeBenchmark);
+		// Lifecycle restore, not the gameplay toggle (review §4.8): the
+		// validated exit-flight path can REFUSE at the scripted camera
+		// position and leave flight stuck on; restore the exact
+		// pre-benchmark mode unconditionally. Same camera side effect as
+		// Engine::setPlayerFlight's walking path.
+		sim->restorePlayerFlight(flightBeforeBenchmark, feet);
+		if (!flightBeforeBenchmark)
+			camera.setMode(CameraMode::PERSPECTIVE);
 	}
 	if (!m_benchmark.isActive() && m_benchmark.needsVsyncRestore())
 	{
@@ -1279,8 +1300,13 @@ void Engine::publishFrameTelemetry()
 	if (!telemetry.enabled)
 		return;
 
-	telemetry.set(telemetry::ActiveChunks, renderBridge ? renderBridge->chunkCount() : 0);
-	telemetry.set(telemetry::DeferredChunks, renderBridge ? renderBridge->deferredReleaseCount() : 0);
+	// Batched publication (review §4.8): one mutex acquisition per group
+	// instead of ~27 per frame — the main thread no longer contends with
+	// worker mesh-sample commits on the registry mutex during bursts.
+	telemetry.setBatch({
+		{telemetry::ActiveChunks, renderBridge ? renderBridge->chunkCount() : 0},
+		{telemetry::DeferredChunks, renderBridge ? renderBridge->deferredReleaseCount() : 0},
+	});
 
 	if (!renderBridge)
 		return;
@@ -1295,18 +1321,19 @@ void Engine::publishFrameTelemetry()
 	// (issue #206 review).
 	const VoxelPool &voxelPool = sim->world()->voxelPool();
 	const size_t voxelCap = voxelPool.capacity();
-	telemetry.set(telemetry::VoxelPoolCapacity, voxelCap);
-	telemetry.set(telemetry::VoxelPoolActive, voxelPool.activeCount());
-	telemetry.set(telemetry::VoxelPoolFree, voxelPool.freeCount());
-	telemetry.set(telemetry::VoxelPoolCapacityBytes, voxelCap * sizeof(VoxelStorage));
-
 	// border.pool.*: retained neighbor-border blocks (issue #103/#113).
 	const BorderPool &borderPool = sim->world()->borderPool();
 	const size_t borderCap = borderPool.capacity();
-	telemetry.set(telemetry::BorderPoolCapacity, borderCap);
-	telemetry.set(telemetry::BorderPoolActive, borderPool.activeCount());
-	telemetry.set(telemetry::BorderPoolFree, borderPool.freeCount());
-	telemetry.set(telemetry::BorderPoolCapacityBytes, borderCap * sizeof(ChunkNeighborBorders));
+	telemetry.setBatch({
+		{telemetry::VoxelPoolCapacity, voxelCap},
+		{telemetry::VoxelPoolActive, voxelPool.activeCount()},
+		{telemetry::VoxelPoolFree, voxelPool.freeCount()},
+		{telemetry::VoxelPoolCapacityBytes, voxelCap * sizeof(VoxelStorage)},
+		{telemetry::BorderPoolCapacity, borderCap},
+		{telemetry::BorderPoolActive, borderPool.activeCount()},
+		{telemetry::BorderPoolFree, borderPool.freeCount()},
+		{telemetry::BorderPoolCapacityBytes, borderCap * sizeof(ChunkNeighborBorders)},
+	});
 
 	if (!renderBridge->getChunkPool())
 		return;
@@ -1317,26 +1344,27 @@ void Engine::publishFrameTelemetry()
 	// gauges describe the in-flight/pending payloads while capacityBytes
 	// reflects retained pool capacity (active + free list).
 	const auto meshStats = pool->meshResultPool().stats();
-	telemetry.set(telemetry::OpaqueVertexBytes, meshStats.opaqueVertexSize);
-	telemetry.set(telemetry::OpaqueVertexCapacity, meshStats.opaqueVertexCapacity);
-	telemetry.set(telemetry::OpaqueIndexBytes, meshStats.opaqueIndexSize);
-	telemetry.set(telemetry::OpaqueIndexCapacity, meshStats.opaqueIndexCapacity);
-	telemetry.set(telemetry::WaterVertexBytes, meshStats.waterVertexSize);
-	telemetry.set(telemetry::WaterVertexCapacity, meshStats.waterVertexCapacity);
-	telemetry.set(telemetry::WaterIndexBytes, meshStats.waterIndexSize);
-	telemetry.set(telemetry::WaterIndexCapacity, meshStats.waterIndexCapacity);
-	telemetry.set(telemetry::CpuMeshCapacity, meshStats.capacityBytes());
-	telemetry.set(telemetry::MeshPoolCapacity, meshStats.capacity);
-	telemetry.set(telemetry::MeshPoolActive, meshStats.active);
-	telemetry.set(telemetry::MeshPoolFree, meshStats.free);
-	telemetry.set(telemetry::MeshPoolCapacityBytes, meshStats.capacityBytes());
-
 	// light.pool.*: retained chunk light storage blocks (issue #128).
 	const size_t lightCap = pool->lightStorageCapacity();
-	telemetry.set(telemetry::LightPoolCapacity, lightCap);
-	telemetry.set(telemetry::LightPoolActive, pool->lightStorageActive());
-	telemetry.set(telemetry::LightPoolFree, pool->lightStorageFree());
-	telemetry.set(telemetry::LightPoolCapacityBytes, lightCap * sizeof(ChunkLightStorage));
+	telemetry.setBatch({
+		{telemetry::OpaqueVertexBytes, meshStats.opaqueVertexSize},
+		{telemetry::OpaqueVertexCapacity, meshStats.opaqueVertexCapacity},
+		{telemetry::OpaqueIndexBytes, meshStats.opaqueIndexSize},
+		{telemetry::OpaqueIndexCapacity, meshStats.opaqueIndexCapacity},
+		{telemetry::WaterVertexBytes, meshStats.waterVertexSize},
+		{telemetry::WaterVertexCapacity, meshStats.waterVertexCapacity},
+		{telemetry::WaterIndexBytes, meshStats.waterIndexSize},
+		{telemetry::WaterIndexCapacity, meshStats.waterIndexCapacity},
+		{telemetry::CpuMeshCapacity, meshStats.capacityBytes()},
+		{telemetry::MeshPoolCapacity, meshStats.capacity},
+		{telemetry::MeshPoolActive, meshStats.active},
+		{telemetry::MeshPoolFree, meshStats.free},
+		{telemetry::MeshPoolCapacityBytes, meshStats.capacityBytes()},
+		{telemetry::LightPoolCapacity, lightCap},
+		{telemetry::LightPoolActive, pool->lightStorageActive()},
+		{telemetry::LightPoolFree, pool->lightStorageFree()},
+		{telemetry::LightPoolCapacityBytes, lightCap * sizeof(ChunkLightStorage)},
+	});
 }
 
 void Engine::sampleBenchmarkFrame()
@@ -1381,17 +1409,33 @@ void Engine::sampleBenchmarkFrame()
 
 	// Main-thread memory/workload gauges are published every frame by
 	// publishFrameTelemetry() (issue #179); no per-sample work needed here.
-	m_benchmark.sampleFrame(
-		prof.lastFrameMs(), prof.lastScopeMs("Streaming"), prof.lastScopeMs("Acquire"),
-		prof.lastScopeMs("Record"), prof.lastScopeMs("ImGui"), prof.lastScopeMs("Present"),
-		prof.lastScopeMs("Visibility"), prof.lastScopeMs("MeshUpload"),
-		prof.lastScopeMs("PoolGrow"),
-		renderBridge ? renderBridge->chunkCount() : 0, drawList.size(),
-		renderBridge ? renderBridge->pendingLoadCount() : 0,
-		renderBridge ? renderBridge->pendingGenJobs() : 0,
-		renderBridge ? renderBridge->pendingMeshJobs() : 0,
-		renderBridge ? renderBridge->pendingLightJobs() : 0,
-		tJobs, tMs, mJobs, mMs, lJobs, lMs, lcJobs, lcMs);
+	// Named-field sample (review §4.8): designated initializers replace the
+	// 23 positional arguments — a swapped float pair can no longer compile.
+	m_benchmark.sampleFrame(BenchmarkFrameSample{
+		.frameMs = prof.lastFrameMs(),
+		.scopeStreaming = prof.lastScopeMs("Streaming"),
+		.scopeAcquire = prof.lastScopeMs("Acquire"),
+		.scopeRecord = prof.lastScopeMs("Record"),
+		.scopeImGui = prof.lastScopeMs("ImGui"),
+		.scopePresent = prof.lastScopeMs("Present"),
+		.scopeVisibility = prof.lastScopeMs("Visibility"),
+		.scopeMeshUpload = prof.lastScopeMs("MeshUpload"),
+		.scopePoolGrow = prof.lastScopeMs("PoolGrow"),
+		.chunks = renderBridge ? renderBridge->chunkCount() : 0,
+		.drawCount = drawList.size(),
+		.pendingLoad = renderBridge ? renderBridge->pendingLoadCount() : 0,
+		.pendingGen = renderBridge ? renderBridge->pendingGenJobs() : 0,
+		.pendingMesh = renderBridge ? renderBridge->pendingMeshJobs() : 0,
+		.pendingLight = renderBridge ? renderBridge->pendingLightJobs() : 0,
+		.terrainJobs = tJobs,
+		.terrainMs = tMs,
+		.meshJobs = mJobs,
+		.meshMs = mMs,
+		.lodJobs = lJobs,
+		.lodMs = lMs,
+		.lightCacheJobs = lcJobs,
+		.lightCacheMs = lcMs,
+	});
 	m_benchmark.sampleIndirectCommands(worldRenderer ? worldRenderer->lastIndirectCommandCount() : 0);
 	if (renderBridge)
 		m_benchmark.sampleStreamingStats(renderBridge->streamingMaintenanceStats());
@@ -1480,12 +1524,17 @@ void Engine::drawUi()
 	f.render = &renderSettings;
 	f.timing = &renderTiming;
 	f.staging = &stagingRing;
+	// Commands-only sim surface (review M6): read-only views + command
+	// callbacks, the inventory discipline — no mutable pointer into
+	// authoritative state crosses into the UI.
 	f.selectedTexture = &sim->selectedBlock();
+	f.setSelectedBlock = [this](TextureType type) { sim->setSelectedBlock(type); };
 	f.highlight = &highlight;
 	f.mouseCaptured = &mouseCaptured;
 	f.showChunkBorders = &showChunkBorders;
 	f.showDemoPlayers = &showDemoPlayers;
-	f.mobsEnabled = &sim->mobsEnabled();
+	f.mobsEnabled = sim->mobsEnabled();
+	f.setMobsEnabled = [this](bool enabled) { sim->setMobsEnabled(enabled); };
 	f.mobCount = mobStates.size();
 	f.mobVisible = worldRenderer->visibleMobs();
 	f.paused = &paused;
@@ -1579,7 +1628,7 @@ void Engine::drawUi()
 			auto promise = std::make_shared<std::promise<BiomeMapResult>>();
 			auto future = promise->get_future();
 			const auto start = std::chrono::steady_clock::now();
-			threadPool->enqueue(TaskPriority::Low, [promise, req, start] {
+			threadPool->submit(TaskPriority::Low, [promise, req, start] {
 				BiomeMapResult result;
 				try { result = generateBiomeMap(req); } catch (...) {}
 				result.elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -1690,10 +1739,15 @@ void Engine::recordFrame(uint32_t frameIndex, uint32_t imageIndex, int uploadBud
 			if (renderBridge && uploadBudget > 0 && !paused)
 			{
 				PROFILE_SCOPE("MeshUpload");
-				const int n = renderBridge->uploadPendingMeshes(
+				// Barrier keyed on COPIES RECORDED, not publications (review M2):
+				// commit-group members record copies across frames before their
+				// atomic publish, so a zero published count with recorded copies
+				// still needs the transfer->vertex dependency.
+				bool copiesRecorded = false;
+				renderBridge->uploadPendingMeshes(
 					vkContext->getAllocator(), stagingRing, cmd, resourceRetire,
-					worldRenderer->arenas(), camera, uploadBudget);
-				if (n > 0)
+					worldRenderer->arenas(), camera, uploadBudget, &copiesRecorded);
+				if (copiesRecorded)
 				{
 					// Make staged mesh data visible to vertex/index fetch in later passes.
 					VkMemoryBarrier barrier{};

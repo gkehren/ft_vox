@@ -112,22 +112,44 @@ void ChunkPool::release(Chunk *chunk)
 	if (!chunk)
 		return;
 
+	// Hard refusal for a still-bound handle (review M12): reset(Full) on a
+	// world-bound chunk touches the WORLD record, and the coordinate guard
+	// is assert-only — in Release that silently desynchronized
+	// VoxelWorld::m_chunks. The pool contract is "handles are unbound before
+	// release"; a violation is now refused loudly instead of corrupting the
+	// world (the double-release fatal-in-Debug/refused-in-Release pool
+	// discipline, extended to the binding invariant).
+	if (chunk->isWorldBound())
+	{
+		std::cerr << "ChunkPool: release refused — handle is still world-bound at ("
+		          << chunk->getPosition().x << ", " << chunk->getPosition().z << ")\n";
+		assert(false && "ChunkPool::release on a world-bound handle");
+		telemetry::registry().add(telemetry::PoolRejected);
+		return;
+	}
+
 	// Drop GPU / CPU mesh data while not holding the pool mutex (can be heavy).
 	chunk->reset(glm::vec3(0.0f));
 
-	std::lock_guard<std::mutex> lock(m_mutex);
-
-	if (std::binary_search(m_owned.begin(), m_owned.end(), chunk))
+	bool stray = false;
 	{
-		m_freeList.push_back(chunk);
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (std::binary_search(m_owned.begin(), m_owned.end(), chunk))
+		{
+			m_freeList.push_back(chunk);
+		}
+		else
+		{
+			stray = true;
+		}
+		const size_t acq = m_acquiredCount.load(std::memory_order_relaxed);
+		if (acq > 0)
+			m_acquiredCount.fetch_sub(1, std::memory_order_relaxed);
+		publishTelemetry();
 	}
-	else
-	{
-		// Stray pointer (legacy overflow or bug) — free to avoid leak.
+	// Stray pointer (legacy overflow or bug) — free to avoid leak, OUTSIDE
+	// the pool mutex (review M12: the delete used to run under the lock,
+	// contradicting the heavy-work-outside-the-lock contract above).
+	if (stray)
 		delete chunk;
-	}
-	const size_t acq = m_acquiredCount.load(std::memory_order_relaxed);
-	if (acq > 0)
-		m_acquiredCount.fetch_sub(1, std::memory_order_relaxed);
-	publishTelemetry();
 }

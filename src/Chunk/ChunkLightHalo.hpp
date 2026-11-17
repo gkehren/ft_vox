@@ -38,10 +38,12 @@ struct ChunkLightHalo
 		static_cast<size_t>(kExtent) * static_cast<size_t>(kExtent) * CHUNK_HEIGHT;
 
 	// IMPORTANT: unwritten cells must read as AIR; the zero value of uint8_t
-	// is BEDROCK (TextureType 0, opaque), so every borrower calls
-	// resetToAir() first and the fill then overwrites the whole ring.
-	// Center cells are never written (kept AIR - the consumer reads the
-	// center from the Chunk).
+	// is BEDROCK (TextureType 0, opaque). Contract (review M14): the ring is
+	// ALWAYS fully overwritten by fillLightHaloFromNeighbors (every ring cell
+	// written exactly once — neighbor bytes or AIR), so resetToAir() only
+	// clears the CENTER columns, which the fill never writes and the consumer
+	// reads from the Chunk. Clearing the full 529 KiB array was redundant
+	// main-thread dispatch cost.
 	std::array<uint8_t, kVolume> voxels;
 
 	// Emissive sources found in the ring while filling, so the worker's
@@ -55,7 +57,19 @@ struct ChunkLightHalo
 
 	void resetToAir()
 	{
-		voxels.fill(static_cast<uint8_t>(AIR));
+		// Center columns only (review M14): 16x16x256 = 64 KiB instead of the
+		// full 46x46x256 = 529 KiB. The ring needs no reset — the fill writes
+		// every ring cell exactly once. voxelAt() also answers AIR for center
+		// cells without reading the array; this keeps direct hidx consumers
+		// safe too.
+		for (int z = 0; z < CHUNK_SIZE; ++z)
+		{
+			for (int y = 0; y < CHUNK_HEIGHT; ++y)
+			{
+				const size_t base = hidx(0, y, z);
+				std::fill_n(voxels.begin() + base, CHUNK_SIZE, static_cast<uint8_t>(AIR));
+			}
+		}
 		emissives.clear();
 	}
 
@@ -132,8 +146,9 @@ public:
 			}
 		}
 		// Allocate indeterminate storage outside the mutex; borrowers must
-		// resetToAir() before exposing ring coordinates (zero would be
-		// BEDROCK, not AIR).
+		// resetToAir() (center columns) and fillLightHaloFromNeighbors (ring,
+		// fully overwritten) before exposing coordinates — zero would be
+		// BEDROCK, not AIR.
 		auto block = std::make_unique_for_overwrite<ChunkLightHalo>();
 		ChunkLightHalo *ptr = block.get();
 		std::lock_guard<std::mutex> lock(m_mutex);

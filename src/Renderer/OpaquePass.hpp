@@ -53,6 +53,10 @@ private:
 	};
 	VkContext *m_context{nullptr};
 	VkPipeline m_pipeline{VK_NULL_HANDLE};
+	// Debug env switches resolved ONCE at init (review §4.6): getenv used to
+	// run in the per-frame record hot path (2+ calls/frame).
+	bool m_drawDirect{false};
+	bool m_validateIndirect{false};
 	std::array<IndirectBatch, VkFrameContext::kMaxFramesInFlight> m_indirect{};
 	// Reused per-frame scratch: collecting ~15k commands must not
 	// reallocate every frame (issue #109).

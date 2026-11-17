@@ -28,8 +28,7 @@ void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void *p, std::size_t) noexcept { std::free(p); }
 
 using namespace physics;
-static int failures = 0;
-#define CHECK(expr) do { if (!(expr)) { std::cerr << "FAIL line " << __LINE__ << ": " #expr "\n"; ++failures; } } while (0)
+#include "TestMain.hpp"
 
 class World final : public VoxelCollisionWorld
 {
@@ -64,11 +63,11 @@ static void collisions()
     PlayerController p;
     p.reset({0.5, 60, 0.5});
     ticks(p, w, 500);
-    CHECK(std::abs(p.body.position.y - skin) < 1e-8);
-    CHECK(p.body.grounded);
+    CHECK_EXPR(std::abs(p.body.position.y - skin) < 1e-8);
+    CHECK_EXPR(p.body.grounded);
     const auto rest = p.body.position;
     ticks(p, w, 500);
-    CHECK(glm::length(p.body.position - rest) < 1e-8);
+    CHECK_EXPR(glm::length(p.body.position - rest) < 1e-8);
 
     // High-speed sweeps must hit a single voxel even when crossing many cells.
     Body body;
@@ -77,27 +76,27 @@ static void collisions()
     body.position = {-20, 1, 0.5};
     body.velocity = {500, 0, 0};
     move(w, body, {40, 0, 0}, stats);
-    CHECK(body.bounds().max.x <= 2.0);
-    CHECK(body.position.x > 1.69);
-    CHECK(body.velocity.x == 0);
+    CHECK_EXPR(body.bounds().max.x <= 2.0);
+    CHECK_EXPR(body.position.x > 1.69);
+    CHECK_EXPR(body.velocity.x == 0);
 
     // Slide against a wall across numerous coplanar seams in both directions.
     w.blockCount = 0; w.wallX = 2;
     p.reset({1.699, skin, -16.5});
     PlayerInput diagonal; diagonal.move = {1, 1};
     ticks(p, w, 600, diagonal);
-    CHECK(p.body.position.x <= 1.7);
-    CHECK(p.body.position.z > -2);
-    CHECK(p.body.grounded);
+    CHECK_EXPR(p.body.position.x <= 1.7);
+    CHECK_EXPR(p.body.position.z > -2);
+    CHECK_EXPR(p.body.grounded);
     diagonal.move = {1, -1}; ticks(p, w, 600, diagonal);
-    CHECK(p.body.position.z < -15);
+    CHECK_EXPR(p.body.position.z < -15);
 
     // Simultaneous corner normals stop both axes without order dependence.
     w.wallZ = 2;
     body.position = {0, 1, 0}; body.velocity = {10, 0, 10};
     move(w, body, {5, 0, 5}, stats);
-    CHECK(body.bounds().max.x <= 2 && body.bounds().max.z <= 2);
-    CHECK(body.velocity.x == 0 && body.velocity.z == 0);
+    CHECK_EXPR(body.bounds().max.x <= 2 && body.bounds().max.z <= 2);
+    CHECK_EXPR(body.velocity.x == 0 && body.velocity.z == 0);
 
     w = World{}; w.ceilingY = 3;
     p.reset({0.5, skin, 0.5}); ticks(p, w, 3);
@@ -108,13 +107,13 @@ static void collisions()
         ticks(p, w, 1, jump); jump.jumpPressed = false;
         top = std::max(top, p.body.bounds().max.y);
     }
-    CHECK(top <= 3);
-    CHECK(p.body.grounded);
+    CHECK_EXPR(top <= 3);
+    CHECK_EXPR(p.body.grounded);
     // Bodies of another size use the same solver (future mobs).
     body.size = {1.2, 2.5, 1.2}; body.position = {0, 10, 0};
     w.ceilingY = 1000;
     move(w, body, {0, -50, 0}, stats);
-    CHECK(body.grounded && body.position.y >= 0);
+    CHECK_EXPR(body.grounded && body.position.y >= 0);
 }
 static void movement()
 {
@@ -123,11 +122,11 @@ static void movement()
     p.reset({0, skin, 0});
     PlayerInput input; input.move = {1, 1};
     ticks(p, w, 120, input);
-    CHECK(std::abs(glm::length(p.body.velocity) - 4.5) < 1e-6);
+    CHECK_EXPR(std::abs(glm::length(p.body.velocity) - 4.5) < 1e-6);
     input.sprint = true; ticks(p, w, 120, input);
-    CHECK(std::abs(glm::length(p.body.velocity) - 7) < 1e-6);
+    CHECK_EXPR(std::abs(glm::length(p.body.velocity) - 7) < 1e-6);
     ticks(p, w, 20);
-    CHECK(glm::length(p.body.velocity) < 1e-9);
+    CHECK_EXPR(glm::length(p.body.velocity) < 1e-9);
 
     p.reset({0, skin, 0}); ticks(p, w, 2);
     input = {}; input.jumpPressed = input.swimUp = true;
@@ -137,29 +136,29 @@ static void movement()
         ticks(p, w, 1, input); input.jumpPressed = false;
         highest = std::max(highest, p.body.position.y);
     }
-    CHECK(highest > 1.4 && highest < 1.6);
-    CHECK(p.body.grounded); // holding Space did not repeat the jump
+    CHECK_EXPR(highest > 1.4 && highest < 1.6);
+    CHECK_EXPR(p.body.grounded); // holding Space did not repeat the jump
 
     // Coyote after deleting support, not after a genuine jump.
     w.floorY = 0; p.reset({0, skin, 0}); ticks(p, w, 2);
     w.floorY = -100; ticks(p, w, 6);
     input = {}; input.jumpPressed = true; ticks(p, w, 1, input);
-    CHECK(p.body.velocity.y > 8);
+    CHECK_EXPR(p.body.velocity.y > 8);
     ticks(p, w, 2, input);
-    CHECK(p.body.velocity.y < 8); // no second impulse
+    CHECK_EXPR(p.body.velocity.y < 8); // no second impulse
 
     // Buffered pre-landing press is consumed on the next supported tick.
     w.floorY = 0; p.reset({0, 0.12, 0}); p.body.velocity.y = -4;
     ticks(p, w, 10, input);
-    CHECK(p.body.position.y > 0.2 && p.body.velocity.y > 0);
+    CHECK_EXPR(p.body.position.y > 0.2 && p.body.velocity.y > 0);
 
     // A full block is an obstacle: no automatic step-up.
     w.blocks[0] = {1, 0, 0}; w.blockCount = 1;
     p.reset({0, skin, 0.5}); input = {}; input.move = {1, 0};
     ticks(p, w, 120, input);
-    CHECK(p.body.bounds().max.x <= 1);
+    CHECK_EXPR(p.body.bounds().max.x <= 1);
     input.jumpPressed = true; ticks(p, w, 80, input);
-    CHECK(p.body.position.x > 2);
+    CHECK_EXPR(p.body.position.x > 2);
 }
 static void streamingAndRecovery()
 {
@@ -167,30 +166,30 @@ static void streamingAndRecovery()
     PlayerController p; p.reset({0, skin, 0});
     PlayerInput input; input.move = {1, 0};
     ticks(p, w, 120, input);
-    CHECK(p.body.position.x <= 1.7 && p.body.waitingForTerrain);
+    CHECK_EXPR(p.body.position.x <= 1.7 && p.body.waitingForTerrain);
     w.unknownX = 1000; ticks(p, w, 120, input);
-    CHECK(p.body.position.x > 3);
+    CHECK_EXPR(p.body.position.x > 3);
     w.unknownX = -1000;
     const auto saved = p.body.position;
     ticks(p, w, 120, input);
-    CHECK(p.body.position == saved);
-    CHECK(!p.body.grounded && p.body.waitingForTerrain);
-    CHECK(glm::length(p.body.velocity) == 0);
+    CHECK_EXPR(p.body.position == saved);
+    CHECK_EXPR(!p.body.grounded && p.body.waitingForTerrain);
+    CHECK_EXPR(glm::length(p.body.velocity) == 0);
 
     // Unknown support is not a jumpable floor.
     class UnknownBelow final : public VoxelCollisionWorld
     { public: Cell sample(glm::ivec3 p) const override { return p.y < 0 ? Cell{} : Cell{true, false}; } } below;
     p.reset({0, skin, 0}); p.advance(0.05, {}, below);
-    CHECK(!p.body.grounded);
+    CHECK_EXPR(!p.body.grounded);
     input = {}; input.jumpPressed = true; p.advance(0.05, input, below);
-    CHECK(p.body.position.y < 0.01);
+    CHECK_EXPR(p.body.position.y < 0.01);
 
     // Small overlap recovery is bounded and never leaves a body embedded.
     w = World{}; p.reset({0, -0.1, 0}); ticks(p, w, 1);
     QueryStats stats;
-    CHECK(clear(w, p.body.bounds(), stats));
+    CHECK_EXPR(clear(w, p.body.bounds(), stats));
     p.reset({0, -20, 0}); const auto deep = p.body.position; ticks(p, w, 1);
-    CHECK(p.body.position == deep);
+    CHECK_EXPR(p.body.position == deep);
 
     // Recovery may not exceed its bound even when the final correction clears
     // a multi-block intersection. Test success/failure invariants on a corpus.
@@ -203,8 +202,8 @@ static void streamingAndRecovery()
         Body body; body.position = {0.35, 0.25, 0.65};
         const auto original = body.position;
         const bool resolved = recover(w, body, stats);
-        CHECK(glm::length(body.position - original) <= 1.0 + 1e-10);
-        CHECK(resolved ? clear(w, body.bounds(), stats) : body.position == original);
+        CHECK_EXPR(glm::length(body.position - original) <= 1.0 + 1e-10);
+        CHECK_EXPR(resolved ? clear(w, body.bounds(), stats) : body.position == original);
     }
 }
 static void water()
@@ -213,14 +212,14 @@ static void water()
     PlayerController p; p.reset({0, 1, 0});
     PlayerInput input; input.move = {1, 0}; input.swimUp = true;
     ticks(p, w, 120, input);
-    CHECK(p.body.position.y > 1.5);
-    CHECK(p.body.velocity.x <= 2.5 + 1e-6);
-    CHECK(p.submerged.water > 0);
+    CHECK_EXPR(p.body.position.y > 1.5);
+    CHECK_EXPR(p.body.velocity.x <= 2.5 + 1e-6);
+    CHECK_EXPR(p.submerged.water > 0);
     input.swimUp = false; input.swimDown = true; ticks(p, w, 120, input);
-    CHECK(p.body.position.y < 1.5);
+    CHECK_EXPR(p.body.position.y < 1.5);
     w.lava = true; p.reset({0, 1, 0}); input = {}; input.move = {1, 0};
     ticks(p, w, 80, input);
-    CHECK(p.submerged.lava > 0 && p.body.velocity.x <= 1.25 + 1e-6);
+    CHECK_EXPR(p.submerged.lava > 0 && p.body.velocity.x <= 1.25 + 1e-6);
 
     // A distinct press near the surface allows a manual jump onto the bank.
     w = World{}; w.waterY = 3; w.blocks[0] = {1, 2, 0}; w.blockCount = 1;
@@ -232,14 +231,14 @@ static void water()
         ticks(p, w, 1, input); input.jumpPressed = false;
         highest = std::max(highest, p.body.position.y);
     }
-    CHECK(highest > 3 && p.body.position.x > 1.5);
+    CHECK_EXPR(highest > 3 && p.body.position.x > 1.5);
 
     w = World{}; w.waterY = 5;
     p.reset({0, 1, 0}); input = {}; input.swimUp = true;
     ticks(p, w, 1200, input);
-    CHECK(p.submerged.water > 0.65 && p.submerged.water < 0.9);
+    CHECK_EXPR(p.submerged.water > 0.65 && p.submerged.water < 0.9);
     input.jumpPressed = true; ticks(p, w, 1, input);
-    CHECK(p.body.velocity.y > 8); // jump from naturally reached swim equilibrium
+    CHECK_EXPR(p.body.velocity.y > 8); // jump from naturally reached swim equilibrium
     input.jumpPressed = false;
     highest = p.body.position.y;
     for (int i = 0; i < 120; ++i)
@@ -247,7 +246,7 @@ static void water()
         ticks(p, w, 1, input);
         highest = std::max(highest, p.body.position.y);
     }
-    CHECK(highest > 5);
+    CHECK_EXPR(highest > 5);
 }
 static void cadence()
 {
@@ -259,22 +258,22 @@ static void cadence()
         PlayerInput input; input.move = {1, 0};
         for (int i = 0; i < fps * 2; ++i) p.advance(1.0 / fps, input, w);
         if (fps == 30) expected = p.body.position;
-        CHECK(glm::length(p.body.position - expected) < 1e-8);
-        CHECK(p.metrics.droppedSteps == 0);
+        CHECK_EXPR(glm::length(p.body.position - expected) < 1e-8);
+        CHECK_EXPR(p.metrics.droppedSteps == 0);
         const auto eye = p.renderEye();
-        CHECK(eye.x <= p.eye().x && p.eye().x - eye.x <= 4.5 / 120 + 1e-8);
+        CHECK_EXPR(eye.x <= p.eye().x && p.eye().x - eye.x <= 4.5 / 120 + 1e-8);
     }
     PlayerController p; p.reset({0, skin, 0});
     p.advance(0.503, {}, w);
-    CHECK(p.metrics.steps == 8 && p.metrics.droppedSteps == 52);
+    CHECK_EXPR(p.metrics.steps == 8 && p.metrics.droppedSteps == 52);
     p.suspend(); const auto pos = p.body.position;
     p.advance(0.001, {}, w);
-    CHECK(p.metrics.steps == 0 && p.body.position == pos);
+    CHECK_EXPR(p.metrics.steps == 0 && p.body.position == pos);
     PlayerInput jump; jump.jumpPressed = true;
     p.advance(0.001, jump, w); p.clearInput(); p.advance(0.02, {}, w);
-    CHECK(p.body.velocity.y <= 0);
+    CHECK_EXPR(p.body.velocity.y <= 0);
     p.reset({0, skin, 0}); p.advance(std::numeric_limits<double>::quiet_NaN(), {}, w);
-    CHECK(p.metrics.steps == 0);
+    CHECK_EXPR(p.metrics.steps == 0);
 
     // Identical timed jump commands under four render cadences.
     for (int fps : {30, 60, 144, 240})
@@ -287,7 +286,7 @@ static void cadence()
             p.advance(1.0 / fps, input, w);
         }
         if (fps == 30) expected = p.body.position;
-        CHECK(glm::length(p.body.position - expected) < 1e-8);
+        CHECK_EXPR(glm::length(p.body.position - expected) < 1e-8);
     }
 
     p.reset({0, 8, 0});
@@ -298,7 +297,7 @@ static void cadence()
         p.advance(PlayerController::fixedStep, input, w);
     }
     countAllocations = false;
-    CHECK(allocations == 0);
+    CHECK_EXPR(allocations == 0);
 }
 static void profile()
 {
@@ -326,75 +325,75 @@ static void profile()
 static void detailCollisionPolicy()
 {
     // 1. BlockMedium and blockContainedMedium trait queries
-    CHECK(blockContainedMedium(WATER) == BlockMedium::Water);
-    CHECK(blockContainedMedium(SEAGRASS) == BlockMedium::Water);
-    CHECK(blockContainedMedium(KELP) == BlockMedium::Water);
-    CHECK(blockContainedMedium(KELP_TOP) == BlockMedium::Water);
-    CHECK(blockContainedMedium(LAVA) == BlockMedium::Lava);
-    CHECK(blockContainedMedium(AIR) == BlockMedium::None);
-    CHECK(blockContainedMedium(STONE) == BlockMedium::None);
-    CHECK(blockContainedMedium(SHORT_GRASS) == BlockMedium::None);
-    CHECK(blockContainedMedium(LILY_PAD) == BlockMedium::None);
+    CHECK_EXPR(blockContainedMedium(WATER) == BlockMedium::Water);
+    CHECK_EXPR(blockContainedMedium(SEAGRASS) == BlockMedium::Water);
+    CHECK_EXPR(blockContainedMedium(KELP) == BlockMedium::Water);
+    CHECK_EXPR(blockContainedMedium(KELP_TOP) == BlockMedium::Water);
+    CHECK_EXPR(blockContainedMedium(LAVA) == BlockMedium::Lava);
+    CHECK_EXPR(blockContainedMedium(AIR) == BlockMedium::None);
+    CHECK_EXPR(blockContainedMedium(STONE) == BlockMedium::None);
+    CHECK_EXPR(blockContainedMedium(SHORT_GRASS) == BlockMedium::None);
+    CHECK_EXPR(blockContainedMedium(LILY_PAD) == BlockMedium::None);
 
-    CHECK(blockIsWater(WATER));
-    CHECK(blockIsWater(SEAGRASS));
-    CHECK(blockIsWater(KELP));
-    CHECK(blockIsWater(KELP_TOP));
-    CHECK(!blockIsWater(LAVA));
-    CHECK(!blockIsWater(AIR));
-    CHECK(!blockIsWater(STONE));
+    CHECK_EXPR(blockContainsWater(WATER));
+    CHECK_EXPR(blockContainsWater(SEAGRASS));
+    CHECK_EXPR(blockContainsWater(KELP));
+    CHECK_EXPR(blockContainsWater(KELP_TOP));
+    CHECK_EXPR(!blockContainsWater(LAVA));
+    CHECK_EXPR(!blockContainsWater(AIR));
+    CHECK_EXPR(!blockContainsWater(STONE));
 
-    CHECK(blockHasFluid(WATER));
-    CHECK(blockHasFluid(SEAGRASS));
-    CHECK(blockHasFluid(KELP));
-    CHECK(blockHasFluid(KELP_TOP));
-    CHECK(blockHasFluid(LAVA));
-    CHECK(!blockHasFluid(AIR));
-    CHECK(!blockHasFluid(STONE));
+    CHECK_EXPR(blockHasFluid(WATER));
+    CHECK_EXPR(blockHasFluid(SEAGRASS));
+    CHECK_EXPR(blockHasFluid(KELP));
+    CHECK_EXPR(blockHasFluid(KELP_TOP));
+    CHECK_EXPR(blockHasFluid(LAVA));
+    CHECK_EXPR(!blockHasFluid(AIR));
+    CHECK_EXPR(!blockHasFluid(STONE));
 
     // 2. Voxel struct helpers
     Voxel vSeagrass{static_cast<uint8_t>(SEAGRASS)};
-    CHECK(vSeagrass.containedMedium() == BlockMedium::Water);
-    CHECK(vSeagrass.isWater());
-    CHECK(vSeagrass.hasFluid());
-    CHECK(vSeagrass.getTextureType() == SEAGRASS);
+    CHECK_EXPR(vSeagrass.containedMedium() == BlockMedium::Water);
+    CHECK_EXPR(vSeagrass.isWater());
+    CHECK_EXPR(vSeagrass.hasFluid());
+    CHECK_EXPR(vSeagrass.getTextureType() == SEAGRASS);
 
     Voxel vGrass{static_cast<uint8_t>(SHORT_GRASS)};
-    CHECK(vGrass.containedMedium() == BlockMedium::None);
-    CHECK(!vGrass.isWater());
-    CHECK(!vGrass.hasFluid());
-    CHECK(vGrass.getTextureType() == SHORT_GRASS);
+    CHECK_EXPR(vGrass.containedMedium() == BlockMedium::None);
+    CHECK_EXPR(!vGrass.isWater());
+    CHECK_EXPR(!vGrass.hasFluid());
+    CHECK_EXPR(vGrass.getTextureType() == SHORT_GRASS);
 
     Voxel vWater{static_cast<uint8_t>(WATER)};
-    CHECK(vWater.containedMedium() == BlockMedium::Water);
-    CHECK(vWater.isWater());
-    CHECK(vWater.hasFluid());
+    CHECK_EXPR(vWater.containedMedium() == BlockMedium::Water);
+    CHECK_EXPR(vWater.isWater());
+    CHECK_EXPR(vWater.hasFluid());
 
     // 3. Physics medium and collision policy (independent of visual shape)
     for (auto type : {SHORT_GRASS, FERN, WILDFLOWER, DRY_SHRUB, LILY_PAD})
     {
         const auto cell = physics::blockCell(type);
-        CHECK(!cell.solid);
-        CHECK(cell.medium == Medium::Air);
+        CHECK_EXPR(!cell.solid);
+        CHECK_EXPR(cell.medium == Medium::Air);
     }
-    CHECK(!physics::blockCell(SEAGRASS).solid);
-    CHECK(physics::blockCell(SEAGRASS).medium == Medium::Water);
-    CHECK(!physics::blockCell(KELP).solid);
-    CHECK(physics::blockCell(KELP).medium == Medium::Water);
-    CHECK(!physics::blockCell(KELP_TOP).solid);
-    CHECK(physics::blockCell(KELP_TOP).medium == Medium::Water);
-    CHECK(!physics::blockCell(WATER).solid);
-    CHECK(physics::blockCell(WATER).medium == Medium::Water);
-    CHECK(!physics::blockCell(LAVA).solid);
-    CHECK(physics::blockCell(LAVA).medium == Medium::Lava);
-    CHECK(physics::blockCell(OAK_LOG).solid);
-    CHECK(physics::blockCell(OAK_LEAVES).solid);
+    CHECK_EXPR(!physics::blockCell(SEAGRASS).solid);
+    CHECK_EXPR(physics::blockCell(SEAGRASS).medium == Medium::Water);
+    CHECK_EXPR(!physics::blockCell(KELP).solid);
+    CHECK_EXPR(physics::blockCell(KELP).medium == Medium::Water);
+    CHECK_EXPR(!physics::blockCell(KELP_TOP).solid);
+    CHECK_EXPR(physics::blockCell(KELP_TOP).medium == Medium::Water);
+    CHECK_EXPR(!physics::blockCell(WATER).solid);
+    CHECK_EXPR(physics::blockCell(WATER).medium == Medium::Water);
+    CHECK_EXPR(!physics::blockCell(LAVA).solid);
+    CHECK_EXPR(physics::blockCell(LAVA).medium == Medium::Lava);
+    CHECK_EXPR(physics::blockCell(OAK_LOG).solid);
+    CHECK_EXPR(physics::blockCell(OAK_LEAVES).solid);
 }
 int main(int argc, char **argv)
 {
     detailCollisionPolicy();
     collisions(); movement(); streamingAndRecovery(); water(); cadence();
     if (argc > 1 && std::string_view(argv[1]) == "--profile") profile();
-    if (!failures) std::cout << "PASS: voxel physics and player controller\n";
-    return failures ? EXIT_FAILURE : EXIT_SUCCESS;
+    if (!testmain::fails) std::cout << "PASS: voxel physics and player controller\n";
+    return testmain::exitCode();
 }

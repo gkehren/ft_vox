@@ -14,7 +14,7 @@
 //     previous/current interpolation fields, reproducible per-seed
 //     decisions with controlled residency and clock;
 //   * world reload + save/player restore without camera or renderer;
-//     failures keep the old world alive;
+//     testmain::fails keep the old world alive;
 //   * independent 120 Hz player / 60 Hz mob update rates with no frame
 //     rendered; bounded read-only value snapshots.
 //
@@ -35,18 +35,7 @@
 #include <thread>
 #include <vector>
 
-static int g_fails = 0;
-static int g_checks = 0;
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		++g_checks;                                                            \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";          \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 namespace
 {
@@ -210,8 +199,8 @@ void testFixedRates(ThreadPool &pool)
 	sim.bootstrapTerrain(boot);
 	sim.finalizePlayerSpawn(boot);
 
-	CHECK(physics::PlayerController::fixedStep == 1.0 / sim::kPlayerTickHz,
-		  "player controller pinned to the 120 Hz contract");
+	static_assert(physics::PlayerController::fixedStep == 1.0 / sim::kPlayerTickHz,
+				  "player controller pinned to the 120 Hz contract");
 	CHECK(sim.mobSettings().fixedStep == 1.0 / sim::kMobTickHz,
 		  "mob settings default to the 60 Hz contract");
 
@@ -233,13 +222,13 @@ void testFixedRates(ThreadPool &pool)
 
 	// The gameplay toggle is sim-owned: disabled mobs freeze even when the
 	// host does not pass a suspension flag.
-	sim.mobsEnabled() = false;
+	sim.setMobsEnabled(false);
 	const size_t popBefore = sim.mobs().mobs().size();
 	const uint64_t droppedBeforeToggle = sim.mobs().droppedSteps();
 	sim.advanceMobs(1.0, sim.playerFeet(), 40.0, false);
 	CHECK(sim.mobs().mobs().size() == popBefore, "disabled mobs do not populate/retire");
 	CHECK(sim.mobs().droppedSteps() == droppedBeforeToggle, "disabled mobs do not step");
-	sim.mobsEnabled() = true;
+	sim.setMobsEnabled(true);
 	const uint64_t playerDroppedBefore = sim.playerSnapshot().metrics.droppedSteps;
 	sim.advancePlayer(10.0, cmd, false);
 	CHECK(sim.playerSnapshot().metrics.steps <= physics::PlayerController::maxSteps,
@@ -563,7 +552,7 @@ void testMobSimulation(ThreadPool &pool)
 }
 
 // ---------------------------------------------------------------------------
-// 5. World reload + save/player restore without camera or renderer; failures
+// 5. World reload + save/player restore without camera or renderer; testmain::fails
 //    keep the old world alive (issue #180 contracts through the facade).
 // ---------------------------------------------------------------------------
 void testReloadAndPersistence(ThreadPool &pool)
@@ -596,7 +585,7 @@ void testReloadAndPersistence(ThreadPool &pool)
 		CHECK(sim.worldSnapshot().worldName == "acceptance", "world snapshot carries the save name");
 
 		sim.setPlayerFlight(true, sim.playerFeet());
-		sim.selectedBlock() = DIRT;
+		sim.setSelectedBlock(DIRT);
 		savedFeet = sim.playerFeet();
 		CHECK(sim.savePlayerState(30.f, -10.f), "player state captured + flushed");
 		sim.shutdown();
@@ -759,8 +748,8 @@ int main()
 	testMobSimulation(pool);
 	testReloadAndPersistence(pool);
 	testSnapshotContract(pool);
-	std::printf("%d checks, %d failures\n", g_checks, g_fails);
-	if (g_fails == 0)
+	std::printf("%d checks, %d testmain::fails\n", testmain::checks, testmain::fails);
+	if (testmain::fails == 0)
 		std::printf("PASS\n");
-	return g_fails == 0 ? 0 : 1;
+	return testmain::exitCode();
 }

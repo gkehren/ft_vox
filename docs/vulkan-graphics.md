@@ -77,6 +77,19 @@ Supporting types:
 
 `WorldRenderer` does **not** own WSI sync. The `Engine` calls `VkFrameContext::beginFrame` / `submitAndPresent` and passes a reset command buffer into `WorldRenderer::recordFrame`.
 
+**Inter-submission dependency (review M1).** Vulkan does **not** guarantee
+that submissions on one queue execute in order. The render graph's global
+targets — HDR color, scene depth, god-ray source, shadow map, exposure and
+water history — are single copies shared by every frame slot, so
+`VkFrameContext` chains consecutive submissions with a binary semaphore
+(`m_prevFrameDone`): every submit signals it, the next submit waits on it at
+`TOP_OF_PIPE` before any of its GPU work (shadow writes included) can start.
+CPU recording still overlaps across the 2 frames in flight; GPU execution
+serializes — which is what desktop drivers effectively do already. The chain
+is recreated after the device-idle of a swapchain recreate. Per-slot target
+duplication remains the future optimization if overlapping GPU execution
+matters; the chain is the correctness floor.
+
 Resize, VSync, and out-of-date requests are deferred to the next pre-acquire
 frame boundary. `Engine` recreates the swapchain there, resets
 `VkFrameContext`'s per-image associations, refreshes `WorldRenderer` targets,
@@ -284,7 +297,7 @@ HDR RGBA16F (SHADER_READ)
      exact settle only when |target - adapted| < 1e-4 (arrival, never step size)
 ```
 
-- **State model:** ONE shared 16-byte history SSBO (host-visible, persistent across resize — the metering chain has fixed resolution) holds the temporal state, plus per-frame-in-flight CPU-visible snapshots written by the same pass. The history buffer is bound as composite `set 1, binding 6` and read by `resolveExposure()` when push constant `p5.x` (useAutoExposure) is set; the manual path uses the exact `exposure` push value. Cross-frame ordering relies on the same-queue in-order execution guarantee plus a `SHADER_WRITE -> SHADER_READ` buffer barrier before the adapt pass; the same-frame composite read is ordered by a barrier after it. The CPU debug readout copies the current slot's snapshot after that slot's fence was waited (no added synchronization).
+- **State model:** ONE shared 16-byte history SSBO (host-visible, persistent across resize — the metering chain has fixed resolution) holds the temporal state, plus per-frame-in-flight CPU-visible snapshots written by the same pass. The history buffer is bound as composite `set 1, binding 6` and read by `resolveExposure()` when push constant `p5.x` (useAutoExposure) is set; the manual path uses the exact `exposure` push value. Cross-frame ordering relies on the `VkFrameContext` inter-submission semaphore chain (review M1 — same-queue submissions are NOT guaranteed to execute in order) plus a `SHADER_WRITE -> SHADER_READ` buffer barrier before the adapt pass for the memory dependency; the same-frame composite read is ordered by a barrier after it. The CPU debug readout copies the current slot's snapshot after that slot's fence was waited (no added synchronization).
 - **Mode transitions:** manual mode skips all metering passes (deterministic output, suspended adaptation). Re-enabling auto re-seeds the history from the current manual exposure (rising-edge detection; also forced on first use), so there is no hidden jump. A swapchain resize keeps the adaptation running seamlessly.
 - **Settings** (all reset by `applyPreset`; CPU mirror + unit tests in `Renderer/AutoExposure.hpp` — the GLSL formulas must stay in sync):
 
@@ -495,8 +508,10 @@ Draws the passive mobs (cow / pig / sheep / chicken — simulation in [`engine-a
 - Water and shadow passes sample through the same sampler via set1 binding 0.
 - Path resolve (explicit pack root only — no getenv in texture code):
   1. `{pack_root}/assets/minecraft/textures/block/<name>.png` when pack is non-empty and file exists
-  2. Else `{RES_PATH}textures/<name>.png` when that file exists
-  3. Else `{RES_PATH}textures/<bundledFallback>.png` (always one of the shipped core textures)
+  2. Else `{resourceRoot}textures/<name>.png` when that file exists
+  3. Else `{resourceRoot}textures/<bundledFallback>.png` (always one of the shipped core textures)
+  - `{resourceRoot}` = `resourceRootPath()` (utils.hpp): the executable's
+    `ressources/` when the full tree sits next to the binary, else `./ressources/`.
   - Pack miss (step 1 fails while pack set) is reported; incomplete packs still load via 2/3.
 - Pack root resolved at process entry: CLI `--resource-pack` wins over env `FT_VOX_RESOURCE_PACK`, then passed into `Engine` / `WorldRenderer` / `TextureManager`.
 - **In-game:** Graphics panel → Resource pack (`GameUIResourcePack.*`) — path field, **Browse…** (ImGuiFileDialog), **Apply pack** / **Use bundled** → `Engine::applyResourcePack` (sole pack-path owner) → device idle → `WorldRenderer::reloadResourcePack` → failure-atomic `TextureManager::initialize` (build temps, then swap) + rewrite set1. Dialog: vendored `src/ImGuiFileDialog/`.

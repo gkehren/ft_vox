@@ -23,6 +23,9 @@ auto endR() { return vkCmdEndRendering ? vkCmdEndRendering : vkCmdEndRenderingKH
 void OpaquePass::init(VkContext &context)
 {
 	m_context = &context;
+	// Debug env switches resolved once (review §4.6), not per frame.
+	m_drawDirect = std::getenv("FT_VOX_DRAW_DIRECT") != nullptr;
+	m_validateIndirect = std::getenv("FT_VOX_VALIDATE_INDIRECT") != nullptr;
 	createIndirectBuffers();
 }
 
@@ -189,8 +192,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 	}
 	m_lastCommands = static_cast<uint32_t>(std::min<size_t>(demandedCount, UINT32_MAX));
 	const uint32_t baseInstance = voxel_draw::kOpaqueBase;
-	const bool directDraws = std::getenv("FT_VOX_DRAW_DIRECT") != nullptr;
-	if (directDraws)
+	if (m_drawDirect)
 	{
 		// Bisect mode: bind per section and draw directly (no indirect
 		// buffer). If the world renders correctly here, the arena data is
@@ -297,7 +299,7 @@ void OpaquePass::record(VkCommandBuffer cmd, VkExtent2D extent, VkDescriptorSet 
 		}
 		telemetry::registry().add(telemetry::OpaqueDraws, count);
 	}
-	if (std::getenv("FT_VOX_VALIDATE_INDIRECT"))
+	if (m_validateIndirect)
 		++m_debugFrames;
 	if (gpu) gpu->endPass(cmd, GpuPass::Opaque);
 	if (gpu) gpu->beginPass(cmd, GpuPass::Mobs);

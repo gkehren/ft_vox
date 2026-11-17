@@ -34,46 +34,86 @@ Chunk::Chunk(const glm::vec3 &position, ChunkState state, VoxelPool *voxelPool,
     recordForWrite()->setState(state);
 }
 
-Chunk::Chunk(Chunk &&other) noexcept
-    : m_ownedWorld(std::move(other.m_ownedWorld)),
-      m_world(other.m_world),
-      m_active(other.m_active),
-      m_position(other.m_position),
-      m_voxelPool(other.m_voxelPool),
-      m_borderPool(other.m_borderPool),
-      visible(other.visible),
-      m_allocator(other.m_allocator),
-      m_sectionGpu(other.m_sectionGpu),
-      m_sectionGpuWater(other.m_sectionGpuWater),
-      m_lodOpaqueVertices(other.m_lodOpaqueVertices),
-      m_lodOpaqueIndices(other.m_lodOpaqueIndices),
-      m_lodWaterVertices(other.m_lodWaterVertices),
-      m_lodWaterIndices(other.m_lodWaterIndices),
-      m_cachedOpaqueDrawCount(other.m_cachedOpaqueDrawCount),
-      m_cachedWaterDrawCount(other.m_cachedWaterDrawCount),
-      m_cachedOpaqueDraws(other.m_cachedOpaqueDraws),
-      m_cachedWaterDraws(other.m_cachedWaterDraws),
-      m_resultPool(other.m_resultPool),
-      m_lightStorage(other.m_lightStorage),
-      m_lightPool(other.m_lightPool),
-      m_arenas(other.m_arenas),
-      m_dirtySections(other.m_dirtySections.load(std::memory_order_relaxed)),
-      opaqueIndexCount(other.opaqueIndexCount), waterIndexCount(other.waterIndexCount),
-      meshNeedsUpdate(other.meshNeedsUpdate.load()),
-      m_isLODMesh(other.m_isLODMesh),
-      m_localLightCacheWanted(other.m_localLightCacheWanted.load(std::memory_order_relaxed))
+Chunk::Chunk(Chunk &&other) noexcept : Chunk()
 {
+  moveFrom(std::move(other));
+}
+
+Chunk &Chunk::operator=(Chunk &&other) noexcept
+{
+  if (this != &other)
+  {
+    // Release the destination's current render resources and authoritative
+    // record before the transfer (the owned record's destructor returns its
+    // voxel/border backing to the pools it was created with).
+    releaseGPU();
+    releaseLightStorage();
+    releasePendingMeshResult();
+    m_ownedWorld.reset();
+    moveFrom(std::move(other));
+  }
+  return *this;
+}
+
+void Chunk::moveFrom(Chunk &&other) noexcept
+{
+  // Single transfer implementation (review M11): the old move ctor/assign
+  // pair duplicated ~80 lines and had ALREADY diverged (m_activeIndex was
+  // dropped by both; the assign kept the destination's value where the ctor
+  // started from SIZE_MAX). Every field now travels exactly one way.
+  //
   // The authoritative record (voxel storage, borders, identity, persistent
   // edits, per-column generation state) travels with the handle: standalone
   // chunks move their owned record, a bound chunk moves its binding (bound
   // chunks are never moved in production — the pool holds stable pointers).
+  m_ownedWorld = std::move(other.m_ownedWorld);
+  m_world = other.m_world;
+  m_active = other.m_active;
+  m_position = other.m_position;
+  // Pool pointers survive the move (pre-split semantics): a moved-from
+  // handle recycled through the pool re-creates its record with them.
+  m_voxelPool = other.m_voxelPool;
+  m_borderPool = other.m_borderPool;
+  m_activeIndex = other.m_activeIndex;
+  visible = other.visible;
+  // A move transfers complete ownership (issue #112 review): the record
+  // and its pools travel together; no re-acquisition or voxel copy happens
+  // inside this noexcept move.
+  m_lightPool = other.m_lightPool;
+  m_lightStorage = other.m_lightStorage;
+  m_lightHalo = other.m_lightHalo;
+  m_resultPool = other.m_resultPool;
+  m_arenas = other.m_arenas;
+  m_allocator = other.m_allocator;
+  // Arena ranges travel with the chunk that describes them (issue #109).
+  m_lodOpaqueVertices = other.m_lodOpaqueVertices;
+  m_lodOpaqueIndices = other.m_lodOpaqueIndices;
+  m_lodWaterVertices = other.m_lodWaterVertices;
+  m_lodWaterIndices = other.m_lodWaterIndices;
+  m_cachedOpaqueDrawCount = other.m_cachedOpaqueDrawCount;
+  m_cachedWaterDrawCount = other.m_cachedWaterDrawCount;
+  m_cachedOpaqueDraws = other.m_cachedOpaqueDraws;
+  m_cachedWaterDraws = other.m_cachedWaterDraws;
+  m_sectionGpu = other.m_sectionGpu;
+  m_sectionGpuWater = other.m_sectionGpuWater;
+  m_dirtySections.store(other.m_dirtySections.load(std::memory_order_relaxed),
+                        std::memory_order_relaxed);
+  opaqueIndexCount = other.opaqueIndexCount;
+  waterIndexCount = other.waterIndexCount;
+  meshNeedsUpdate.store(other.meshNeedsUpdate.load());
+  m_isLODMesh = other.m_isLODMesh;
+  m_localLightCacheWanted.store(other.m_localLightCacheWanted.load(std::memory_order_relaxed),
+                                std::memory_order_relaxed);
+
+  // Invariant: the moved-from handle has no record; its render state is
+  // zeroed so a recycled chunk starts from a clean GPU state.
   other.m_world = nullptr;
   other.m_active = nullptr;
+  other.m_activeIndex = SIZE_MAX;
   other.m_lightStorage = nullptr;
+  other.m_lightHalo = nullptr;
   other.m_localLightCacheWanted.store(false, std::memory_order_relaxed);
   other.m_allocator = VK_NULL_HANDLE;
-  // Arena ranges and slot layouts travel with the chunk (issue #109); zero
-  // the moved-from side so a recycled chunk starts from a clean GPU state.
   other.m_lodOpaqueVertices = {};
   other.m_lodOpaqueIndices = {};
   other.m_lodWaterVertices = {};
@@ -94,85 +134,6 @@ Chunk::Chunk(Chunk &&other) noexcept
   // transfer above - a build still in flight for that same generation
   // remains publishable on the destination.
   other.releasePendingMeshResult();
-}
-Chunk &Chunk::operator=(Chunk &&other) noexcept
-{
-  if (this != &other)
-  {
-    releaseGPU();
-
-    // Release the destination's current render resources and authoritative
-    // record before the transfer (the owned record's destructor returns its
-    // voxel/border backing to the pools it was created with).
-    releaseLightStorage();
-    releasePendingMeshResult();
-    other.releasePendingMeshResult();
-    m_ownedWorld.reset();
-
-    m_ownedWorld = std::move(other.m_ownedWorld);
-    m_world = other.m_world;
-    m_active = other.m_active;
-    other.m_world = nullptr;
-    other.m_active = nullptr;
-    m_position = other.m_position;
-    // Pool pointers survive the move (pre-split semantics): a moved-from
-    // handle recycled through the pool re-creates its record with them.
-    m_voxelPool = other.m_voxelPool;
-    m_borderPool = other.m_borderPool;
-
-    visible = other.visible;
-
-    // A move transfers complete ownership (issue #112 review): the record
-    // and its pools travel together; no re-acquisition or voxel copy happens
-    // inside this noexcept move.
-    m_lightPool = other.m_lightPool;
-    m_lightStorage = other.m_lightStorage;
-    other.m_lightStorage = nullptr;
-
-    m_resultPool = other.m_resultPool;
-    m_arenas = other.m_arenas;
-
-    // Invariant: the moved-from handle has no record; its render state is
-    // zeroed below so a recycled chunk starts clean.
-    m_allocator = other.m_allocator;
-    // Arena ranges travel with the chunk that describes them (issue #109).
-    m_lodOpaqueVertices = other.m_lodOpaqueVertices;
-    m_lodOpaqueIndices = other.m_lodOpaqueIndices;
-    m_lodWaterVertices = other.m_lodWaterVertices;
-    m_lodWaterIndices = other.m_lodWaterIndices;
-    m_cachedOpaqueDrawCount = other.m_cachedOpaqueDrawCount;
-    m_cachedWaterDrawCount = other.m_cachedWaterDrawCount;
-    m_cachedOpaqueDraws = other.m_cachedOpaqueDraws;
-    m_cachedWaterDraws = other.m_cachedWaterDraws;
-    m_sectionGpu = other.m_sectionGpu;
-    m_sectionGpuWater = other.m_sectionGpuWater;
-    m_dirtySections.store(other.m_dirtySections.load(std::memory_order_relaxed),
-                          std::memory_order_relaxed);
-    opaqueIndexCount = other.opaqueIndexCount;
-    waterIndexCount = other.waterIndexCount;
-    meshNeedsUpdate.store(other.meshNeedsUpdate.load());
-    m_isLODMesh = other.m_isLODMesh;
-    m_localLightCacheWanted.store(other.m_localLightCacheWanted.load(std::memory_order_relaxed),
-                                  std::memory_order_relaxed);
-    other.m_localLightCacheWanted.store(false, std::memory_order_relaxed);
-
-    other.m_allocator = VK_NULL_HANDLE;
-    other.m_lodOpaqueVertices = {};
-    other.m_lodOpaqueIndices = {};
-    other.m_lodWaterVertices = {};
-    other.m_lodWaterIndices = {};
-    other.m_cachedOpaqueDrawCount = 0;
-    other.m_cachedWaterDrawCount = 0;
-    other.m_cachedOpaqueDraws.fill({});
-    other.m_cachedWaterDraws.fill({});
-    other.m_sectionGpu.fill({});
-    other.m_sectionGpuWater.fill({});
-    other.m_dirtySections.store(0, std::memory_order_relaxed);
-    other.opaqueIndexCount = 0;
-    other.waterIndexCount = 0;
-    other.m_arenas = nullptr;
-  }
-  return *this;
 }
 
 Chunk::~Chunk()

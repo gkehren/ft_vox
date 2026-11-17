@@ -3,11 +3,20 @@
 #include <Chunk/StreamHelpers.hpp>
 #include <Renderer/MinecraftTextures.hpp>
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
 #include <cmath>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <string_view>
+
+// Exit-status vocabulary harmonized with the headless runner (review §4.1,
+// docs/headless-runner.md): 2 = CLI usage error, 4 = runtime failure.
+// (The headless runner additionally distinguishes 3 = script, 5 = assertion,
+// 6 = timeout; the graphical host has no script/assertion/timeout paths.)
+static constexpr int kExitUsage = 2;
+static constexpr int kExitRuntime = 4;
 
 static void printUsage(const char *argv0)
 {
@@ -45,7 +54,7 @@ static std::string resolveResourcePackRoot(const std::string &cliPack)
 		return trimTrailingSlashes(cliPack);
 	if (const char *env = std::getenv("FT_VOX_RESOURCE_PACK"))
 		return trimTrailingSlashes(env);
-	return std::string(RES_PATH) + "default-resource-pack.zip";
+	return resourceRootPath() + "default-resource-pack.zip";
 }
 
 int main(int argc, char **argv)
@@ -72,20 +81,20 @@ int main(int argc, char **argv)
 			if (i + 1 >= argc)
 			{
 				std::cerr << "Error: --shadow-size requires a resolution (512, 1024, 2048 or 4096).\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			shadowMapSizeOverride = std::atoi(argv[++i]);
 			if (shadowMapSizeOverride != 512 && shadowMapSizeOverride != 1024 &&
 				shadowMapSizeOverride != 2048 && shadowMapSizeOverride != 4096)
 			{
 				std::cerr << "Error: --shadow-size must be 512, 1024, 2048 or 4096.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			continue;
 		}
         if (arg == "--view")
         {
-            if (i + 6 >= argc) { std::cerr << "--view requires x y z yaw pitch seconds\n"; return EXIT_FAILURE; }
+            if (i + 6 >= argc) { std::cerr << "--view requires x y z yaw pitch seconds\n"; return kExitUsage; }
             std::array<float, 6> values{};
             for (auto &value : values)
             {
@@ -93,12 +102,12 @@ int main(int argc, char **argv)
                 const char *start = argv[++i];
                 value = std::strtof(start, &end);
                 if (end == start || *end || !std::isfinite(value))
-                { std::cerr << "--view requires finite numbers\n"; return EXIT_FAILURE; }
+                { std::cerr << "--view requires finite numbers\n"; return kExitUsage; }
             }
             if (std::abs(values[0]) > 1000000.f || std::abs(values[2]) > 1000000.f ||
                 values[1] < 0.f || values[1] > 512.f || std::abs(values[3]) > 360.f ||
                 std::abs(values[4]) > 89.f || values[5] < 0.f || values[5] > 300.f)
-            { std::cerr << "--view coordinates or duration outside inspection bounds\n"; return EXIT_FAILURE; }
+            { std::cerr << "--view coordinates or duration outside inspection bounds\n"; return kExitUsage; }
             inspection = values;
             continue;
         }
@@ -113,17 +122,25 @@ int main(int argc, char **argv)
 			{
 				std::cerr << "Error: --seed requires a value.\n";
 				printUsage(argv[0]);
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
-			char *endptr = nullptr;
-			const long val = std::strtol(argv[++i], &endptr, 10);
-			if (*endptr != '\0' || endptr == argv[i])
+			// Same contract as the headless runner (review §4.1): strict
+			// from_chars parse, range [1, 2147483647]. The old strtol path
+			// silently truncated overflow (LONG_MAX) and wrapped negatives;
+			// --seed 0 was silently replaced by 42 in benchmark mode.
+			const std::string_view seedArg = argv[++i];
+			uint32_t parsedSeed = 0;
+			const auto [ptr, ec] = std::from_chars(
+				seedArg.data(), seedArg.data() + seedArg.size(), parsedSeed);
+			if (ec != std::errc{} || ptr != seedArg.data() + seedArg.size() ||
+				parsedSeed == 0 || parsedSeed > 2147483647u)
 			{
-				std::cerr << "Error: Seed value '" << argv[i] << "' is not a valid integer.\n";
+				std::cerr << "Error: --seed expects an integer in [1, 2147483647] (got '"
+						  << seedArg << "').\n";
 				printUsage(argv[0]);
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
-			seed_to_use = static_cast<unsigned int>(val);
+			seed_to_use = parsedSeed;
 			continue;
 		}
 		if (arg == "--world")
@@ -132,7 +149,7 @@ int main(int argc, char **argv)
 			{
 				std::cerr << "Error: --world requires a name.\n";
 				printUsage(argv[0]);
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			worldName = argv[++i];
 			// Validation lives in the persistence layer (issue #180 review):
@@ -142,7 +159,7 @@ int main(int argc, char **argv)
 				std::cerr << "Error: --world name must be non-empty and must not contain "
 				          << "any of / \\ : * ? \" < > | or \"..\".\n";
 				printUsage(argv[0]);
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			continue;
 		}
@@ -152,7 +169,7 @@ int main(int argc, char **argv)
 			{
 				std::cerr << "Error: --resource-pack requires a path.\n";
 				printUsage(argv[0]);
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			resourcePackCli = argv[++i];
 			continue;
@@ -167,7 +184,7 @@ int main(int argc, char **argv)
 			if (i + 1 >= argc)
 			{
 				std::cerr << "Error: --benchmark-map requires a zoom.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			char *end = nullptr;
 			benchmarkMapZoom = std::strtof(argv[++i], &end);
@@ -175,7 +192,7 @@ int main(int argc, char **argv)
 				benchmarkMapZoom < 0.1f || benchmarkMapZoom > 8.0f)
 			{
 				std::cerr << "Error: --benchmark-map zoom must be between 0.1 and 8.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			continue;
 		}
@@ -184,14 +201,14 @@ int main(int argc, char **argv)
 			if (i + 1 >= argc)
 			{
 				std::cerr << "Error: --benchmark-warmup requires seconds.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			char *end = nullptr;
 			const float seconds = std::strtof(argv[++i], &end);
 			if (end == argv[i] || *end || !std::isfinite(seconds) || seconds < 0.f || seconds > 300.f)
 			{
 				std::cerr << "Error: benchmark warmup must be between 0 and 300 seconds.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			benchmarkWarmup = seconds;
 			continue;
@@ -202,7 +219,7 @@ int main(int argc, char **argv)
 			{
 				std::cerr << "Error: --benchmark requires a duration in seconds.\n";
 				printUsage(argv[0]);
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			char *endptr = nullptr;
 			benchmarkDuration = std::strtof(argv[++i], &endptr);
@@ -210,7 +227,7 @@ int main(int argc, char **argv)
 				benchmarkDuration < 5.0f || benchmarkDuration > 300.0f)
 			{
 				std::cerr << "Error: benchmark duration must be between 5 and 300 seconds.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			continue;
 		}
@@ -219,14 +236,14 @@ int main(int argc, char **argv)
 			if (i + 1 >= argc)
 			{
 				std::cerr << "Error: --benchmark-view-switch requires a view distance in blocks.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			char *endptr = nullptr;
 			const long val = std::strtol(argv[++i], &endptr, 10);
 			if (*endptr != '\0' || endptr == argv[i] || val < 64 || val > 1024)
 			{
 				std::cerr << "Error: --benchmark-view-switch must be between 64 and 1024 blocks.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			benchmarkViewSwitch = static_cast<int>(val);
 			continue;
@@ -236,7 +253,7 @@ int main(int argc, char **argv)
 			if (i + 1 >= argc)
 			{
 				std::cerr << "Error: --front-bias requires a value.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			char *end = nullptr;
 			const float val = std::strtof(argv[++i], &end);
@@ -244,7 +261,7 @@ int main(int argc, char **argv)
 			{
 				std::cerr << "Error: --front-bias requires a number in [0, "
 						  << kSafeMaxStreamFrontBias << "] (values above are clamped).\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			frontBiasOverride = val;
 			continue;
@@ -254,7 +271,7 @@ int main(int argc, char **argv)
 			if (i + 1 >= argc)
 			{
 				std::cerr << "Error: --quality requires low|medium|high|cinematic (or 0-3).\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			const std::string value = argv[++i];
 			int preset = -1;
@@ -269,7 +286,7 @@ int main(int argc, char **argv)
 			if (preset < 0)
 			{
 				std::cerr << "Error: --quality accepts low|medium|high|cinematic (or 0-3).\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			qualityPreset = preset;
 			continue;
@@ -279,7 +296,7 @@ int main(int argc, char **argv)
 			if (i + 1 >= argc)
 			{
 				std::cerr << "Error: --vsync requires on or off.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			const std::string value = argv[++i];
 			if (value == "on")
@@ -289,32 +306,32 @@ int main(int argc, char **argv)
 			else
 			{
 				std::cerr << "Error: --vsync accepts only on or off.\n";
-				return EXIT_FAILURE;
+				return kExitUsage;
 			}
 			continue;
 		}
 		std::cerr << "Invalid argument: " << arg << "\n";
 		printUsage(argv[0]);
-		return EXIT_FAILURE;
+		return kExitUsage;
 	}
 
     if (inspection && benchmarkDuration > 0.f)
-    { std::cerr << "--view and --benchmark are separate camera modes\n"; return EXIT_FAILURE; }
+    { std::cerr << "--view and --benchmark are separate camera modes\n"; return kExitUsage; }
 	if (benchmarkWarmup && (benchmarkDuration == 0.f || *benchmarkWarmup > benchmarkDuration))
 	{
 		std::cerr << "Error: --benchmark-warmup requires --benchmark and cannot exceed its duration.\n";
-		return EXIT_FAILURE;
+		return kExitUsage;
 	}
 	if ((benchmarkMapZoom > 0.0f && benchmarkDuration == 0.0f) ||
 		(benchmarkMapSequential && benchmarkMapZoom == 0.0f))
 	{
 		std::cerr << "Error: map benchmark options require --benchmark and --benchmark-map.\n";
-		return EXIT_FAILURE;
+		return kExitUsage;
 	}
 	if (benchmarkViewSwitch > 0 && benchmarkDuration == 0.0f)
 	{
 		std::cerr << "Error: --benchmark-view-switch requires --benchmark.\n";
-		return EXIT_FAILURE;
+		return kExitUsage;
 	}
 	const std::string resourcePack = resolveResourcePackRoot(resourcePackCli);
 
@@ -324,7 +341,7 @@ int main(int argc, char **argv)
 		// never open a persistent save. Fail fast instead of silently
 		// ignoring one of the two flags.
 		std::cerr << "Error: --world and --benchmark cannot be combined." << std::endl;
-		return EXIT_FAILURE;
+		return kExitUsage;
 	}
 
 	try
@@ -368,12 +385,12 @@ int main(int argc, char **argv)
 	catch (const std::exception &e)
 	{
 		std::cerr << "Runtime error: " << e.what() << "\n";
-		return EXIT_FAILURE;
+		return kExitRuntime;
 	}
 	catch (...)
 	{
 		std::cerr << "Unknown exception occurred.\n";
-		return EXIT_FAILURE;
+		return kExitRuntime;
 	}
 
 	return EXIT_SUCCESS;

@@ -4,6 +4,11 @@
 #   .\build.ps1 -Config Debug
 #   .\build.ps1 -VcpkgRoot D:\vcpkg
 #   .\build.ps1 -Test
+#   .\build.ps1 -Run -RunArgs '--seed','42','--world','my save'
+#
+# -RunArgs is a string ARRAY (review §4.12): the old -Args string collided
+# with PowerShell's automatic $args variable (case-insensitive) and its
+# Split(' ') broke paths containing spaces.
 
 param(
     [string]$Config = "Release",
@@ -11,7 +16,7 @@ param(
     [string]$VcpkgRoot = "",
     [switch]$Test,
     [switch]$Run,
-    [string]$Args = ""
+    [string[]]$RunArgs = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -87,5 +92,5 @@ if ($Run) {
     if (-not (Test-Path $exe)) {
         Write-Error "Executable not found under $BuildDir"
     }
-    & $exe $Args.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+    & $exe @RunArgs
 }

@@ -20,7 +20,7 @@ public:
 	TextureManager &operator=(const TextureManager &) = delete;
 
 	/// Build (or rebuild) the atlas from pack root (.zip or directory).
-	/// Empty pack root → default pack `{RES_PATH}default-resource-pack.zip`.
+	/// Empty pack root → default pack `{resourceRootPath()}default-resource-pack.zip`.
 	/// On failure after a successful prior init, the previous image/sampler remain valid.
 	/// Returns pack hit/miss stats (atlas is still valid even if pack is invalid — default pack used).
 	TextureAtlasLoadReport initialize(VkContext &context, ImmediateCommands &imm,

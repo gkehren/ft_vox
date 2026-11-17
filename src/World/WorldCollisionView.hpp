@@ -46,7 +46,7 @@ public:
         // Preserve the engine's existing finite camera-coordinate envelope.
         if (p.x < SHRT_MIN || p.x >= SHRT_MAX || p.z < SHRT_MIN || p.z >= SHRT_MAX)
             return {true, true};
-        const int cx = floorChunk(p.x), cz = floorChunk(p.z);
+        const int cx = floorDivChunk(p.x), cz = floorDivChunk(p.z);
         const glm::ivec3 key(cx, 0, cz);
         const WorldChunk *chunk = nullptr;
         bool found = false;
@@ -65,10 +65,14 @@ public:
         TextureType type = static_cast<TextureType>(chunk->getVoxel(x, p.y, z).type);
         // Match the logical edit state; never resurrect an edit from a recycled
         // incarnation. Mirrors affect meshing only, not canonical occupancy.
-        for (const auto &edit : world.m_pendingEdits)
-            if (!edit.borderNeighbor && edit.chunk == chunk &&
-                edit.generation == chunk->generation() && edit.x == x && edit.y == p.y && edit.z == z)
-                type = edit.type;
+        // Early-out on the empty queue (review §4.3): the common steady-state
+        // case skips the O(P) scan entirely (mob spawn scans up to 256 cells
+        // per column). Index by chunk hash if P ever grows large.
+        if (!world.m_pendingEdits.empty())
+            for (const auto &edit : world.m_pendingEdits)
+                if (!edit.borderNeighbor && edit.chunk == chunk &&
+                    edit.generation == chunk->generation() && edit.x == x && edit.y == p.y && edit.z == z)
+                    type = edit.type;
         if (outType) *outType = type;
         return physics::blockCell(type);
     }
@@ -89,11 +93,6 @@ public:
     }
 
 private:
-    static int floorChunk(int n)
-    {
-        const int size = static_cast<int>(CHUNK_SIZE);
-        return n / size - (n % size < 0 ? 1 : 0);
-    }
     const VoxelWorld &world;
     std::shared_lock<std::shared_mutex> lock;
     struct Entry { glm::ivec3 key{}; const WorldChunk *chunk{nullptr}; };

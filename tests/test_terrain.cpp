@@ -24,17 +24,8 @@
 #include <thread>
 #include <vector>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -88,8 +79,9 @@ static bool isChunkLocalFeature(uint8_t raw)
 /// Sanity net for a config read from getBiomeConfig(): a torn or partially
 /// applied initialization would surface as out-of-range fields. It is NOT a
 /// proof of race-free initialization on its own — that guarantee comes from
-/// std::call_once plus a ThreadSanitizer run (Linux CI; TSan is unavailable
-/// under MSVC).
+/// std::call_once plus the ThreadSanitizer run in the cpu-boundary workflow's
+/// `tsan` job (review §4.12: the job now exists; TSan is unavailable under
+/// MSVC, hence Linux).
 static bool isValidBiomeConfig(const BiomeConfig &cfg)
 {
 	return cfg.subsurfaceDepth >= 0 && cfg.subsurfaceDepth <= 16 &&
@@ -324,7 +316,7 @@ static EdgeStats checkEdge(const ChunkData &owner, int shellLx, int shellLz,
 						  << " neighbor=" << static_cast<int>(actual) << "\n";
 				++reported;
 			}
-			++g_fails;
+			++testmain::fails;
 		}
 	}
 	return stats;
@@ -1613,7 +1605,7 @@ static int runGenPerf(int argc, char **argv)
 			  << (capacityStable ? "yes" : "NO") << "\n";
 
 	CHECK(capacityStable, "gen-perf reused-buffer capacity must stay stable");
-	return g_fails != 0 ? 1 : 0;
+	return testmain::exitCode();
 }
 
 static int runWorldStats(int argc, char **argv)
@@ -2777,9 +2769,9 @@ int main(int argc, char **argv)
 	testPhase4Underground();
 	testWorldInvariants();
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed\n";
+		std::cerr << testmain::fails << " check(s) failed\n";
 		return 1;
 	}
 	std::cout << "PASS: terrain determinism + border consistency + world invariants\n";

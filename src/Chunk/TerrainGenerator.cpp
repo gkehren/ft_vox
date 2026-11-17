@@ -539,16 +539,23 @@ void TerrainGenerator::setupOres()
 // Height clamping
 static constexpr int HEIGHT_CEILING_MARGIN = 16; // Reserved space above max terrain
 
-// Extended sampling window: core chunk sits at [6,21] inside a 28x28 grid.
-// The 6-wide halo serves two purposes:
-//  - thermal erosion is deterministic for cells [2,25] (their four neighbors
-//    [1,26] are all processed by the erosion loop, and give-decisions only
-//    read sampled values [0,27]) — covers core, border strips, and the
-//    vegetation candidate ring;
-//  - vegetation canopies reaching up to MAX_TREE_RADIUS=4 into this chunk
+// Extended sampling window (review §4.5 — the old comment described a
+// 28x28 grid with core [6,21] that no longer exists): the core chunk sits
+// at [EXT_CORE_OFFSET, EXT_CORE_OFFSET + CHUNK_SIZE - 1] inside an
+// EXT_SIZE x EXT_SIZE grid. With maxFeatureRadius = 8 that is offset 20,
+// a 56x56 window and core [20,35]. The halo serves two purposes:
+//  - thermal erosion is deterministic for cells [2, EXT_SIZE-3] (their four
+//    neighbors [1, EXT_SIZE-2] are all processed by the erosion loop, and
+//    give-decisions only read sampled values [0, EXT_SIZE-1]) — covers
+//    core, border strips, and the vegetation candidate ring;
+//  - vegetation canopies reaching up to maxFeatureRadius into this chunk
 //    from neighbor chunks can be evaluated from identical data.
+// The bounds are DERIVED from the constants so the comment cannot drift
+// again when the feature radius changes.
 static constexpr int EXT_CORE_OFFSET = 2 * worldgen::maxFeatureRadius + 4;
 static constexpr int EXT_SIZE = CHUNK_SIZE + 2 * EXT_CORE_OFFSET;
+static_assert(EXT_CORE_OFFSET == 20 && EXT_SIZE == 56,
+              "extended window geometry changed — re-verify the erosion/feature determinism bands");
 static constexpr int UNDERGROUND_NOISE_MAX_Y = 96;
 static constexpr int LARGE_CAVERN_MAX_Y = 48;
 static constexpr int UNDERGROUND_COARSE_STEP = 2;
@@ -565,7 +572,7 @@ static constexpr int UNDERGROUND_COARSE_VOLUME =
 
 struct GenBuffers
 {
-  // Base noise buffers (28x28 to support deterministic erosion over chunk boundaries)
+  // Base noise buffers (EXT_SIZE x EXT_SIZE to support deterministic erosion over chunk boundaries)
   std::array<float, EXT_SIZE * EXT_SIZE> continental;
   std::array<float, EXT_SIZE * EXT_SIZE> erosion;
   std::array<float, EXT_SIZE * EXT_SIZE> peaksValleys;
@@ -961,8 +968,8 @@ void TerrainGenerator::generateChunkBatch(const ChunkGenerationTarget &chunkData
                                           int chunkZ)
 {
   using Clock = std::chrono::steady_clock;
-  constexpr int totalPoints = CHUNK_SIZE * CHUNK_SIZE;
-  constexpr int totalVoxels = CHUNK_VOLUME;
+  // (review M21: the unused totalPoints/totalVoxels locals were removed —
+  // the warning flags now surface dead code like this.)
 
   // Use thread-local scratch buffers to avoid heap allocations
   float *continentalResults = s_genBuffers.continental.data();
@@ -1015,8 +1022,8 @@ void TerrainGenerator::generateChunkBatch(const ChunkGenerationTarget &chunkData
 
   const auto aquiferStart =
       m_activeProfile ? Clock::now() : Clock::time_point{};
-  m_aquiferNoise->GenUniformGrid2D(aquiferResults, extendedWorldXf,
-                                   extendedWorldZf, EXTENDED_SIZE,
+  m_aquiferNoise->GenUniformGrid2D(aquiferResults, static_cast<int>(extendedWorldXf),
+                                   static_cast<int>(extendedWorldZf), EXTENDED_SIZE,
                                    EXTENDED_SIZE, 1.0f, m_seed + 10000);
   if (m_activeProfile)
     m_activeProfile->aquiferNoiseMs +=
@@ -1037,9 +1044,8 @@ void TerrainGenerator::generateChunkBatch(const ChunkGenerationTarget &chunkData
     for (int extX = 0; extX < EXTENDED_SIZE; ++extX)
     {
       int extIndex = extZ * EXTENDED_SIZE + extX;
-
-      float weirdness = std::clamp(weirdnessResults[extIndex], -1.0f, 1.0f);
-      float erosion = std::clamp(erosionResults[extIndex], -1.0f, 1.0f);
+      // (review M21: unused weirdness/erosion locals removed; the biome
+      // evaluation reads the noise buffers itself.)
 
       BiomeType biome = evaluateBiomeAt(buffers, extIndex);
       int height = std::clamp(static_cast<int>(std::round(extHeightMap[extIndex])), 1, static_cast<int>(CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN));
@@ -1126,13 +1132,15 @@ void TerrainGenerator::generateChunkBatch(const ChunkGenerationTarget &chunkData
   const int yFillEnd = yBounds.yFillEnd;
   const auto base3DStart =
       m_activeProfile ? Clock::now() : Clock::time_point{};
-  m_caveNoise->GenUniformGrid3D(caveResults, worldXf, static_cast<float>(caveYMin), worldZf,
+  // FastNoise2 grid offsets are int (review M21): explicit casts make the
+  // historical float->int truncation visible instead of implicit (C4244).
+  m_caveNoise->GenUniformGrid3D(caveResults, static_cast<int>(worldXf), caveYMin, static_cast<int>(worldZf),
                                 CHUNK_SIZE, caveYSize, CHUNK_SIZE, 1.0f,
                                 m_seed + 4000);
-  m_ravineNoise->GenUniformGrid3D(ravineResults, worldXf, static_cast<float>(caveYMin), worldZf,
+  m_ravineNoise->GenUniformGrid3D(ravineResults, static_cast<int>(worldXf), caveYMin, static_cast<int>(worldZf),
                                   CHUNK_SIZE, caveYSize, CHUNK_SIZE, 1.0f,
                                   m_seed + 5000);
-  m_surface3DNoise->GenUniformGrid3D(surface3DResults, worldXf, static_cast<float>(caveYMin), worldZf,
+  m_surface3DNoise->GenUniformGrid3D(surface3DResults, static_cast<int>(worldXf), caveYMin, static_cast<int>(worldZf),
                                      CHUNK_SIZE, caveYSize, CHUNK_SIZE, 1.0f,
                                      m_seed + 6000);
   if (m_activeProfile)
@@ -1241,29 +1249,26 @@ void TerrainGenerator::generateChunkBatch(const ChunkGenerationTarget &chunkData
         }
 
         TextureType type;
-        if (density >= 0.0f) {
-            // Pass density so overhangs can have grass/dirt/stone correctly
-            type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, columnSlope, density, s_genBuffers.extSurfaceBiomes[extIndex]);
-
-            if (inNoiseBand && type != TextureType::BEDROCK && type != TextureType::WATER)
-            {
-              if (shouldCarveCave(y, terrainHeight, caveVal, ravineVal,
-                                  spaghettiAVal, spaghettiBVal, cavernVal,
-                                  hasUndergroundNoise))
-              {
-                type = caveFillAt(y, terrainHeight, biome,
-                                  aquiferResults[extIndex]);
-              }
-            }
-        } else {
-            type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, columnSlope, density, s_genBuffers.extSurfaceBiomes[extIndex]);
+        // Single call (review §4.5): both branches of the old density test
+        // invoked getVoxelTypeAt with identical arguments; only the cave
+        // carve below is density-gated.
+        type = getVoxelTypeAt(chunkX + localX, y, chunkZ + localZ, terrainHeight, biome, temperature, columnSlope, density, s_genBuffers.extSurfaceBiomes[extIndex]);
+        if (density >= 0.0f && inNoiseBand && type != TextureType::BEDROCK && type != TextureType::WATER)
+        {
+          if (shouldCarveCave(y, terrainHeight, caveVal, ravineVal,
+                              spaghettiAVal, spaghettiBVal, cavernVal,
+                              hasUndergroundNoise))
+          {
+            type = caveFillAt(y, terrainHeight, biome,
+                              aquiferResults[extIndex]);
+          }
         }
 
         if (type != TextureType::AIR && type != TextureType::WATER &&
             type != TextureType::LAVA) {
             actualMaxHeight = std::max(actualMaxHeight, y);
         }
-        chunkData.voxels[voxelIndex].type = type;
+        chunkData.voxels[voxelIndex].type = static_cast<uint8_t>(type);
       }
       chunkData.heightMap[colIndex] = actualMaxHeight;
     }
@@ -1329,10 +1334,10 @@ void TerrainGenerator::generateChunkBatch(const ChunkGenerationTarget &chunkData
               chunkData.biomes[getColumnIndex(x, z)];
           if (blockIsOreHost(host) &&
               (!ore.mountainOnly || isMountainBiome(targetBiome))) {
-            chunkData.voxels[voxelIndex].type =
+            chunkData.voxels[voxelIndex].type = static_cast<uint8_t>(
                 (host == DEEPSLATE || host == TUFF)
                     ? ore.deepType
-                    : ore.type;
+                    : ore.type);
           }
         }
         
@@ -2093,10 +2098,8 @@ int TerrainGenerator::calculateHeight(float continental, float erosion,
   return std::clamp(static_cast<int>(std::round(heightFloat)), 1, CHUNK_HEIGHT - HEIGHT_CEILING_MARGIN);
 }
 
-void TerrainGenerator::applyErosion(float *heightMap, int size) const
-{
-  applyCanonicalErosion(heightMap, size, size, nullptr);
-}
+// (review §4.5: the dead applyErosion wrapper was removed — every caller
+// uses applyCanonicalErosion directly.)
 
 void TerrainGenerator::applyCanonicalErosion(float *heightMap, int width, int height,
                                             float *tempBuffer) const
@@ -2275,8 +2278,8 @@ void TerrainGenerator::generateVegetation(const ChunkGenerationTarget &data, int
   auto &b = s_genBuffers;
   const float startX = static_cast<float>(chunkX - EXT_CORE_OFFSET) + NOISE_OFFSET;
   const float startZ = static_cast<float>(chunkZ - EXT_CORE_OFFSET) + NOISE_OFFSET;
-  m_treeNoise->GenUniformGrid2D(b.treeNoiseResults.data(), startX, startZ, EXT_SIZE, EXT_SIZE, 1.f, m_seed + 10000);
-  m_forestDensityNoise->GenUniformGrid2D(b.forestDensityResults.data(), startX, startZ, EXT_SIZE, EXT_SIZE, 1.f, m_seed + 11000);
+  m_treeNoise->GenUniformGrid2D(b.treeNoiseResults.data(), static_cast<int>(startX), static_cast<int>(startZ), EXT_SIZE, EXT_SIZE, 1.f, m_seed + 10000);
+  m_forestDensityNoise->GenUniformGrid2D(b.forestDensityResults.data(), static_cast<int>(startX), static_cast<int>(startZ), EXT_SIZE, EXT_SIZE, 1.f, m_seed + 11000);
 
   // Pure, cached support query. Never consult partially decorated neighbor
   // voxels to decide whether a candidate exists. Surface cave cover is <7,
@@ -2825,11 +2828,11 @@ void TerrainGenerator::generateChunkBorders(const ChunkGenerationTarget &chunkDa
     const int borderNoiseEnd = borderBounds.yNoiseEnd;
     const int borderFillEnd = borderBounds.yFillEnd;
 
-    m_caveNoise->GenUniformGrid3D(bCave, startX, static_cast<float>(borderYMin), startZ,
+    m_caveNoise->GenUniformGrid3D(bCave, static_cast<int>(startX), borderYMin, static_cast<int>(startZ),
                                   strip.xSize, borderYSize, strip.zSize, 1.0f, m_seed + 4000);
-    m_ravineNoise->GenUniformGrid3D(bRavine, startX, static_cast<float>(borderYMin), startZ,
+    m_ravineNoise->GenUniformGrid3D(bRavine, static_cast<int>(startX), borderYMin, static_cast<int>(startZ),
                                     strip.xSize, borderYSize, strip.zSize, 1.0f, m_seed + 5000);
-    m_surface3DNoise->GenUniformGrid3D(bSurface3D, startX, static_cast<float>(borderYMin), startZ,
+    m_surface3DNoise->GenUniformGrid3D(bSurface3D, static_cast<int>(startX), borderYMin, static_cast<int>(startZ),
                                        strip.xSize, borderYSize, strip.zSize, 1.0f, m_seed + 6000);
     const int borderUndergroundEnd =
         std::min(borderNoiseEnd, UNDERGROUND_NOISE_MAX_Y);
@@ -2903,8 +2906,5 @@ void TerrainGenerator::generateChunkBorders(const ChunkGenerationTarget &chunkDa
   }
 }
 
-float TerrainGenerator::smoothstep(float edge0, float edge1, float x) const
-{
-  float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
-  return t * t * (3.0f - 2.0f * t);
-}
+// (review §4.5: the dead TerrainGenerator::smoothstep member was removed —
+// every smoothstep call site uses glm::smoothstep.)

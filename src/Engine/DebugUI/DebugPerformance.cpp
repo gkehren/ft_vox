@@ -118,14 +118,13 @@ void drawPerformance(UiState &s, GameUIFrame &frame)
 			ImGui::TableHeadersRow();
 
 			// Sort a bounded index array per frame (<= kMaxScopeStats rows).
-			static std::array<int, kMaxScopeStats> order{};
-			static size_t orderSize = 0;
-			if (orderSize != s.scopeStatCount)
-			{
-				orderSize = s.scopeStatCount;
-				for (size_t i = 0; i < orderSize; ++i)
-					order[i] = int(i);
-			}
+			// Panel-local, not function-static (review §4.8): no process-
+			// global state in a UI surface; rebuilding <= 96 indices is
+			// negligible next to the sort itself.
+			std::array<int, kMaxScopeStats> order{};
+			const size_t orderSize = s.scopeStatCount;
+			for (size_t i = 0; i < orderSize; ++i)
+				order[i] = int(i);
 			if (ImGuiTableSortSpecs *sortSpecs = ImGui::TableGetSortSpecs())
 			{
 				if (sortSpecs->SpecsCount > 0)

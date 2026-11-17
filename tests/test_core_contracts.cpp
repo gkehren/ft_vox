@@ -34,19 +34,15 @@
 #include <type_traits>
 #include <vector>
 
+#include "TestMain.hpp"
+
 namespace
 {
-int g_failures = 0;
-int g_checks = 0;
-
+// Shared ledger (review §4.12): the local counter pair was replaced by the
+// homogeneous testmain harness; check() keeps its call sites.
 void check(bool ok, const char *msg)
 {
-    ++g_checks;
-    if (!ok)
-    {
-        ++g_failures;
-        std::printf("  FAIL: %s\n", msg);
-    }
+    ::testmain::record(ok, msg, __LINE__);
 }
 
 // --- Contract aliases are the existing plain values (single source of truth) -
@@ -283,8 +279,8 @@ int main()
     testTerrainDeterminism();
     testSaveSerialization();
     testPersistenceNameValidation();
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures == 0)
+    std::printf("%ld checks, %ld failures\n", testmain::checks, testmain::fails);
+    if (testmain::fails == 0)
         std::printf("PASS\n");
-    return g_failures == 0 ? 0 : 1;
+    return testmain::exitCode();
 }

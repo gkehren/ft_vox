@@ -37,6 +37,17 @@ foreach(_line IN LISTS _lines)
     endif()
     string(APPEND _glsl "    ${_ty} ${_nm};${_cmt}\n")
     math(EXPR _field_count "${_field_count} + 1")
+  elseif(_line MATCHES "^[ \t]*$" OR _line MATCHES "^[ \t]*//" OR _line MATCHES "^[ \t]*#" OR _line MATCHES "^[ \t]*\\{[ \t]*$")
+    # Blank lines, whole-line comments, preprocessor directives and the
+    # struct's opening brace are not fields — skip them.
+  else()
+    # Fail closed (review §4.12): the old parser silently ignored any member
+    # it did not recognize (e.g. a future `glm::vec4 x[4]`), producing a GLSL
+    # layout that diverges from the C++ struct with no error. An unrecognized
+    # member line must break the build, not the rendering.
+    message(FATAL_ERROR
+      "GenerateFrameUboGlsl: unrecognized FrameUBO member line — the GLSL layout would "
+      "silently diverge from the C++ contract: '${_line}'")
   endif()
 endforeach()
 

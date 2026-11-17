@@ -1,4 +1,5 @@
-# Epic #204 CPU/GPU boundary gate (issues #210 / #211).
+# Epic #204 CPU/GPU boundary gate (issues #210 / #211) + build hygiene
+# (review §4.12).
 #
 # The CPU-only boundary checks run WITHOUT a GPU, so they are exercised
 # automatically here on every push / PR — making the epic's enforcement durable
@@ -6,10 +7,18 @@
 # everyday runs (FT_VOX_CPU_ONLY_BUILD_CHECK=ON enables it; this workflow sets it).
 #
 # Jobs:
-#   cpu-linux   — FT_VOX_GRAPHICS=OFF configure/build/test on Ubuntu (GCC, Ninja).
-#   cpu-windows — FT_VOX_GRAPHICS=OFF configure/build/test on Windows (MSVC).
-# Both run the include/link guards (CoreIncludeGuard, HeadlessDeps), the headless
-# acceptance driver (HeadlessRunner) and the nested clean-configure gate
+#   cpu-linux        — FT_VOX_GRAPHICS=OFF configure/build/test on Ubuntu (GCC, Ninja).
+#   cpu-windows      — FT_VOX_GRAPHICS=OFF configure/build/test on Windows (MSVC).
+#   cpu-sanitizers   — ASan + UBSan over the CPU suite (review M21: the sanitizer
+#                      job the test_terrain comment referenced but never existed).
+#   tsan             — TSan over test_network + the headless runner (thread pool,
+#                      network io thread).
+#   graphics-linux   — COMPILE gate for the full graphical configuration (game +
+#                      Vulkan tests + visual harness). No GPU is available on the
+#                      runner, so device tests are not executed here — but the
+#                      renderer/Vulkan code is no longer CI-unbuilt.
+# Both CPU jobs run the include/link guards (CoreIncludeGuard, HeadlessDeps), the
+# headless acceptance driver (HeadlessRunner) and the nested clean-configure gate
 # (CpuOnlyBuild). No Vulkan SDK / SDL3 / shader toolchain is required or discovered.
 
 name: cpu-boundary
@@ -20,6 +29,11 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded runs on the same ref (review §4.12).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   cpu-linux:
     runs-on: ubuntu-latest
@@ -29,7 +43,14 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ ninja-build python3 git
+          sudo apt-get install -y cmake g++ ninja-build python3 git libboost-system-dev
+
+      # FetchContent sources (GLM / FastNoise2) keyed on the dependency recipe.
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build-cpu/_deps
+          key: deps-linux-${{ hashFiles('cmake/Dependencies.cmake') }}
 
       - name: Configure (CPU-only, graphics not discovered)
         run: >
@@ -50,6 +71,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build-cpu/_deps
+          key: deps-windows-${{ hashFiles('cmake/Dependencies.cmake') }}
+
       - name: Configure (CPU-only, no vcpkg toolchain)
         run: >
           cmake -S . -B build-cpu
@@ -62,3 +89,106 @@ jobs:
 
       - name: Test (CPU-only suite + clean-configure gate)
         run: ctest --test-dir build-cpu -C Release --output-on-failure --timeout 600
+
+  cpu-sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ ninja-build python3 git libboost-system-dev
+
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build-asan/_deps
+          key: deps-linux-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Configure (CPU-only, ASan + UBSan)
+        run: >
+          cmake -S . -B build-asan -G Ninja
+          -DFT_VOX_GRAPHICS=OFF
+          -DFT_VOX_DEP_MODE=system
+          -DFT_VOX_SANITIZERS=ON
+          -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build-asan -j
+
+      - name: Test (CPU suite under ASan + UBSan)
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build-asan --output-on-failure --timeout 600 -E "CpuOnlyBuild"
+
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ ninja-build python3 git libboost-system-dev
+
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build-tsan/_deps
+          key: deps-linux-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Configure (CPU-only, TSan)
+        run: >
+          cmake -S . -B build-tsan -G Ninja
+          -DFT_VOX_GRAPHICS=OFF
+          -DFT_VOX_DEP_MODE=system
+          -DFT_VOX_TSAN=ON
+          -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build-tsan -j
+
+      # The threaded surfaces: the UDP prototype (io thread vs caller), the
+      # work-stealing pool behind the headless runner, and the call_once biome
+      # config initialization (the run test_terrain.cpp's comment references).
+      - name: Test (network + headless + terrain under TSan)
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: >
+          ctest --test-dir build-tsan --output-on-failure --timeout 300
+          -R "NetworkIntegrationTest|HeadlessSmoke|HeadlessRunner|TerrainGeneration"
+
+  graphics-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ ninja-build python3 git \
+            libvulkan-dev glslang-tools libboost-system-dev
+
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build-g/_deps
+          key: deps-graphics-linux-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      # SDL3 is fetched from the pinned commit (no distro package on the LTS
+      # runner); the window-system backends are disabled — this is a COMPILE
+      # gate, the runner has no display server.
+      - name: Configure (full graphical build)
+        run: >
+          cmake -S . -B build-g -G Ninja
+          -DFT_VOX_GRAPHICS=ON
+          -DFT_VOX_DEP_MODE=system
+          -DFT_VOX_FETCH_SDL3=ON
+          -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF
+          -DSDL_OPENGL=OFF -DSDL_OPENGLES=OFF
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (game + Vulkan tests + visual harness)
+        run: cmake --build build-g -j

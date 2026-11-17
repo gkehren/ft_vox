@@ -30,19 +30,8 @@
 #include <thread>
 #include <vector>
 
-static int g_fails = 0;
-static int g_checks = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		++g_checks;                                                            \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 // Friend probe declared in RenderWorldBridge.hpp / VoxelWorld.hpp / Chunk.hpp:
 // exposes the commit-group set, the completed-job injection seam, the render
@@ -266,11 +255,11 @@ int main()
 			  "reattached remesh carries geometry (sectionsBuilt != 0)");
 	}
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed (" << g_checks << " run)\n";
+		std::cerr << testmain::fails << " check(s) failed (" << testmain::checks << " run)\n";
 		return 1;
 	}
-	std::cout << "PASS: render bridge boundary (" << g_checks << " checks)" << std::endl;
+	std::cout << "PASS: render bridge boundary (" << testmain::checks << " checks)" << std::endl;
 	return 0;
 }

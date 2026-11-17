@@ -30,17 +30,8 @@
 #include <thread>
 #include <vector>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2350,11 +2341,11 @@ int main()
 	std::cout << "== Player state ==\n";
 	testPlayerStatePersistence();
 
-	if (g_fails == 0)
+	if (testmain::fails == 0)
 	{
 		std::cout << "test_world_persistence: OK\n";
 		return 0;
 	}
-	std::cout << "test_world_persistence: FAILED (" << g_fails << ")\n";
+	std::cout << "test_world_persistence: FAILED (" << testmain::fails << ")\n";
 	return 1;
 }

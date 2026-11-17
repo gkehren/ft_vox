@@ -27,6 +27,7 @@
 
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <cstddef>
 #include <cstdlib>
 #include <string>
@@ -510,12 +511,14 @@ std::optional<ItemId> parseItemId(std::string_view token)
         return std::nullopt;
 
     // Numeric registry ordinal (append-only ids; 0 / None is not an item).
-    const std::string text(token);
-    char *end = nullptr;
-    const long ordinal = std::strtol(text.c_str(), &end, 10);
-    if (end != text.c_str() && *end == '\0')
+    // Strict grammar (review §4.9): from_chars rejects leading whitespace,
+    // a '+' sign and overflow — strtol silently accepted " 5" / "+5" outside
+    // the documented grammar. Non-numeric tokens fall through to names.
+    uint32_t ordinal = 0;
+    const auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), ordinal);
+    if (ec == std::errc{} && ptr == token.data() + token.size())
     {
-        if (ordinal >= 1 && ordinal <= static_cast<long>(kItemCount))
+        if (ordinal >= 1 && ordinal <= static_cast<uint32_t>(kItemCount))
             return static_cast<ItemId>(ordinal);
         return std::nullopt;
     }

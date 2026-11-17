@@ -2,6 +2,7 @@
 
 #include <glm/glm.hpp>
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -17,6 +18,16 @@ inline constexpr float kUnknownUnderwaterSurfaceY = 1e9f;
 namespace physics
 {
 constexpr double skin = 0.001;
+
+// Canonical world physics constants (review §4.9): gravity and jump speed
+// used to be re-coded in PlayerSettings, tickMob and ItemEntitySettings —
+// three sources of truth for one value. Tunable settings keep their fields
+// but default to these, and the mob AI references them directly.
+namespace constants
+{
+inline constexpr double gravity = 24.0;   // blocks/s^2
+inline constexpr double jumpSpeed = 8.5;  // blocks/s
+} // namespace constants
 enum class Medium : uint8_t { Air, Water, Lava };
 struct Cell
 {
@@ -94,6 +105,12 @@ inline Immersion immersion(const VoxelCollisionWorld &world, const Aabb &box, Qu
     Immersion result;
     const glm::dvec3 size = box.max - box.min;
     const double volume = size.x * size.y * size.z;
+    // Degenerate-box guard (review M15): a zero/negative volume would divide
+    // by zero and propagate NaN into swim/drag decisions. Probe bodies are
+    // hand-built in tickMob, so the invariant is defended here, not assumed.
+    assert(volume > 0.0 && "immersion() requires a positive-volume box");
+    if (!(volume > 0.0))
+        return result;
     visitCells(box, [&](glm::ivec3 p) {
         const Cell c = query(world, p, stats);
         if (!c.available || c.medium == Medium::Air) return;

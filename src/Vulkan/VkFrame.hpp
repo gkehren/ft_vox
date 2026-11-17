@@ -52,6 +52,7 @@ private:
 	};
 
 	void ensureSwapchainImageSync(uint32_t imageCount);
+	void resetFrameChain();
 
 	VkGpuProfiler m_gpuProfiler;
 	VkContext *m_context{nullptr};
@@ -61,5 +62,19 @@ private:
 	// frame slot. Indexing render-finished semaphores by image prevents reuse
 	// before the presentation engine has consumed the previous signal.
 	std::vector<VkSemaphore> m_renderFinishedByImage;
+	// Inter-submission dependency (review M1): the render graph's global
+	// targets — HDR color, scene depth, god-ray source, shadow map, exposure
+	// and water history — are SINGLE copies shared by every frame slot.
+	// Vulkan does NOT guarantee that submissions on one queue execute in
+	// order, so frame N+1's GPU work must not start before frame N's
+	// finished. This binary semaphore is signaled by every submit and waited
+	// by the next at TOP_OF_PIPE: the conservative chain the review allows
+	// in place of duplicating every target + descriptor per slot. CPU
+	// recording still overlaps (2 frames in flight); GPU execution
+	// serializes — what desktop drivers effectively do already. Per-slot
+	// targets remain the future perf optimization if overlapping drivers
+	// matter.
+	VkSemaphore m_prevFrameDone{VK_NULL_HANDLE};
+	bool m_hasSubmitted{false};
 	uint32_t m_currentFrame{0};
 };

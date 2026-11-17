@@ -263,7 +263,13 @@ void WorldRenderer::writeMaterialDescriptors()
 {
 	const auto table = materials::buildGpuTable();
 	if (m_materialMapped)
+	{
 		std::memcpy(m_materialMapped, &table, sizeof(table));
+		// Explicit flush (review M16, the FrameUBO pattern): correct on
+		// non-coherent memory too, not only the usual HOST_COHERENT pick.
+		vmaFlushAllocation(m_context->getAllocator(), m_materialUbo.allocation, 0,
+						   sizeof(materials::MaterialTableUBO));
+	}
 }
 
 void WorldRenderer::createPipelines()
@@ -370,6 +376,12 @@ void WorldRenderer::onSwapchainRecreate(VkSwapchain &swapchain)
 	destroyPipelines();
 	createPipelines();
 	m_overlays.recreatePipelines(m_post.hdrFormat(), m_post.depthFormat());
+	// Mobs and items follow the same recreate contract (review M17): they
+	// used to keep pipelines baked against the old HDR/depth formats —
+	// harmless while the formats are constant, a trap the day they become
+	// configurable.
+	m_mobs.recreatePipelines(m_post.hdrFormat(), m_post.depthFormat());
+	m_items.recreatePipelines(m_post.hdrFormat(), m_post.depthFormat());
 }
 
 void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, float aspectW, float aspectH,
@@ -448,6 +460,11 @@ void WorldRenderer::updateFrameUBO(uint32_t frameIndex, const Camera &camera, fl
 		waterTier == GraphicsQualityPreset::Low ? 0.f : 1.f);
 
 	std::memcpy(m_frameUbos[frameIndex].uboMapped, &ubo, sizeof(FrameUBO));
+	// Explicit flush (review M16): VMA usually picks HOST_COHERENT memory for
+	// CPU_TO_GPU, but on a non-coherent type the mapped write would be UB
+	// without this — symmetric with the mob/item/indirect buffers.
+	vmaFlushAllocation(m_context->getAllocator(), m_frameUbos[frameIndex].ubo.allocation, 0,
+					   sizeof(FrameUBO));
     m_mobs.prepare(frameIndex, ubo, m_mobStates);
 	m_items.prepare(frameIndex, ubo, m_itemStates);
 }
@@ -509,7 +526,10 @@ void WorldRenderer::recordSceneAndPost(VkCommandBuffer cmd, uint32_t frameIndex,
 			if (sunScreen.x < 0.f || sunScreen.x > 1.f || sunScreen.y < 0.f || sunScreen.y > 1.f)
 				sunVisibility = 0.f;
 		}
-		m_postSettings.underwater = ubo->lightingParams.w > 0.5f;
+		// Single owner (review §4.6): the Engine writes postSettings().underwater
+		// in the same frame step before updateFrameUBO; re-deriving it here from
+		// the UBO created a second source of truth that could drift. The UBO
+		// value remains the shader-side transport, not a CPU state owner.
 		if (gpu) gpu->beginPass(cmd, GpuPass::Post);
 		m_post.recordPost(cmd, targetImage, targetView, extent,
 						  frameIndex, set0, m_postSettings, sunScreen,

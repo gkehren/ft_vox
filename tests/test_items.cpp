@@ -33,19 +33,15 @@
 #include <string>
 #include <type_traits>
 
+#include "TestMain.hpp"
+
 namespace
 {
-int g_failures = 0;
-int g_checks = 0;
-
+// Shared ledger (review §4.12): the local counter pair was replaced by the
+// homogeneous testmain harness; check() keeps its call sites.
 void check(bool ok, const char *msg)
 {
-    ++g_checks;
-    if (!ok)
-    {
-        ++g_failures;
-        std::printf("  FAIL: %s\n", msg);
-    }
+    ::testmain::record(ok, msg, __LINE__);
 }
 
 // --- Plain-value contracts (epic #223 §1/§6: no hidden state, no heap) -------
@@ -707,14 +703,14 @@ void testSelectionBounds()
 {
     items::Inventory inv;
     for (int i = 0; i < items::kHotbarSize; ++i)
-        inv.addStack(S(static_cast<ItemId>(i + 1), i + 1));
+        inv.addStack(S(static_cast<ItemId>(i + 1), static_cast<uint16_t>(i + 1)));
 
     bool selectable = true;
     for (int i = 0; i < items::kHotbarSize; ++i)
     {
         selectable = selectable && inv.setSelectedSlot(i) == ItemResult::Ok;
         selectable = selectable && inv.selectedSlot() == i;
-        selectable = selectable && inv.selectedStack() == S(static_cast<ItemId>(i + 1), i + 1);
+        selectable = selectable && inv.selectedStack() == S(static_cast<ItemId>(i + 1), static_cast<uint16_t>(i + 1));
     }
     check(selectable, "every hotbar slot 0..8 is selectable and selectedStack follows");
 
@@ -911,8 +907,8 @@ int main()
     testSelectionBounds();
     testValueSemanticsAndTotals();
     testDeterministicSequences();
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures == 0)
+    std::printf("%ld checks, %ld failures\n", testmain::checks, testmain::fails);
+    if (testmain::fails == 0)
         std::printf("PASS\n");
-    return g_failures == 0 ? 0 : 1;
+    return testmain::exitCode();
 }

@@ -131,12 +131,34 @@ std::string formatVec3(const glm::dvec3 &v)
 
 std::string jsonEscape(const std::string &in)
 {
+	// Full JSON string escaping (review §4.10): control bytes (< 0x20)
+	// must be \u-escaped — an I/O error message containing a newline used
+	// to produce invalid JSON for strict parsers.
 	std::string out;
-	for (const char c : in)
+	for (const unsigned char c : in)
 	{
-		if (c == '"' || c == '\\')
-			out.push_back('\\');
-		out.push_back(c);
+		switch (c)
+		{
+		case '"': out += "\\\""; break;
+		case '\\': out += "\\\\"; break;
+		case '\n': out += "\\n"; break;
+		case '\r': out += "\\r"; break;
+		case '\t': out += "\\t"; break;
+		case '\b': out += "\\b"; break;
+		case '\f': out += "\\f"; break;
+		default:
+			if (c < 0x20)
+			{
+				constexpr char hex[] = "0123456789abcdef";
+				out += "\\u00";
+				out += hex[c >> 4];
+				out += hex[c & 0xF];
+			}
+			else
+			{
+				out.push_back(static_cast<char>(c));
+			}
+		}
 	}
 	return out;
 }
@@ -318,7 +340,9 @@ int main(int argc, char **argv)
 			if (!value)
 				break;
 			options.expectedDigest = value;
-			if (options.expectedDigest.rfind("0x", 0) == 0)
+			// Accept both 0x and 0X prefixes (review §4.10): SimScript's
+			// expect-digest grammar accepts both; the CLI must not diverge.
+			if (options.expectedDigest.rfind("0x", 0) == 0 || options.expectedDigest.rfind("0X", 0) == 0)
 				options.expectedDigest.erase(0, 2);
 			if (options.expectedDigest.size() != 16)
 			{

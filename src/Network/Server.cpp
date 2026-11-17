@@ -1,13 +1,25 @@
 #include "Server.hpp"
 #include "../Engine/Logger.hpp"
+#include <iostream>
+#include <stdexcept>
 
 Server::Server(unsigned short port, uint32_t worldSeed)
-	: socket(ioContext, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), port)),
-	  running(false),
+	: running(false),
+	  socket(ioContext),
 	  tickTimer(ioContext),
 	  worldSeed(worldSeed),
 	  nextPlayerId(1)
 {
+	// Bind in the constructor body (review §4.11): a failure surfaces as a
+	// clean exception instead of escaping an initializer list, and the
+	// bound port is cached so port() never touches a closed socket.
+	boost::system::error_code ec;
+	socket.open(boost::asio::ip::udp::v4(), ec);
+	if (!ec)
+		socket.bind(boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), port), ec);
+	if (ec)
+		throw std::runtime_error("Server bind failed: " + ec.message());
+	boundPort = socket.local_endpoint().port();
 }
 
 Server::~Server()
@@ -25,11 +37,17 @@ void Server::start()
 
 void Server::stop()
 {
-	if (!running)
+	if (!running.exchange(false))
 		return;
-	running = false;
-	socket.close();
-	ioContext.stop();
+	// Socket/timer lifetime belongs to the io thread (review M18): asio
+	// objects are not thread-safe, so the teardown is posted instead of
+	// closing the socket under in-flight async operations.
+	boost::asio::post(ioContext, [this]
+					  {
+		boost::system::error_code ec;
+		socket.close(ec);
+		tickTimer.cancel();
+		ioContext.stop(); });
 	if (serverThread.joinable())
 		serverThread.join();
 }
@@ -41,13 +59,13 @@ bool Server::isRunning() const
 
 unsigned short Server::port() const
 {
-	const boost::asio::ip::udp::endpoint bound = socket.local_endpoint();
-	return bound.port();
+	return boundPort;
 }
 
 size_t Server::getClientCount() const
 {
-	return playerPositions.size();
+	std::lock_guard<std::mutex> lock(playerMutex);
+	return playerEndpoints.size();
 }
 
 void Server::run()
@@ -71,7 +89,7 @@ void Server::receive()
 		});
 }
 
-void Server::handleReceive(const boost::asio::ip::udp::endpoint &senderEndpoint, const boost::system::error_code &error, std::size_t bytesTransferred)
+void Server::handleReceive(const boost::asio::ip::udp::endpoint &sender, const boost::system::error_code &error, std::size_t bytesTransferred)
 {
 	if (!error && bytesTransferred > 0)
 	{
@@ -79,21 +97,18 @@ void Server::handleReceive(const boost::asio::ip::udp::endpoint &senderEndpoint,
 		// of allocating once per receive.
 		thread_local std::vector<uint8_t> data;
 		data.assign(recvBuffer.begin(), recvBuffer.begin() + bytesTransferred);
-		handleMessage(senderEndpoint, data);
+		handleMessage(sender, data);
 	}
 }
 
-void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint, const std::vector<uint8_t> &data)
+// Parameter named 'sender' — the class member senderEndpoint is the async
+// receive scratch; shadowing it here invited reading the wrong endpoint
+// (review M21 C4458).
+void Server::handleMessage(const boost::asio::ip::udp::endpoint &sender, const std::vector<uint8_t> &data)
 {
-	ByteBuffer mainBuf(data);
-	if (!mainBuf.hasMore(sizeof(uint8_t) + sizeof(uint32_t)))
-		return;
-
 	Message message;
-	message.type = mainBuf.readUInt8();
-	message.sequenceNumber = mainBuf.readUInt32();
-
-	message.payload.insert(message.payload.end(), data.begin() + mainBuf.getReadOffset(), data.end());
+	if (!parseMessage(data, message))
+		return; // truncated or foreign protocol version
 
 	if (message.type == MessageType::REQUEST_SEED)
 	{
@@ -107,9 +122,33 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 		seedMessage.sequenceNumber = message.sequenceNumber;
 		seedMessage.payload = std::move(seedBuf.getBytes());
 
-		sendMessage(senderEndpoint, seedMessage);
+		sendMessage(sender, seedMessage);
 
-		uint32_t playerId = nextPlayerId++;
+		uint32_t playerId = 0;
+		{
+			std::lock_guard<std::mutex> lock(playerMutex);
+			// Endpoint dedup + cap (review M19): a re-handshake reuses the
+			// endpoint's id (no ghost player broadcast forever), and forged
+			// endpoints cannot grow the table past kMaxPlayers.
+			const auto known = endpointPlayers.find(sender);
+			if (known != endpointPlayers.end())
+			{
+				playerId = known->second;
+			}
+			else if (playerEndpoints.size() < kMaxPlayers)
+			{
+				playerId = nextPlayerId++;
+				playerEndpoints[playerId] = sender;
+				endpointPlayers[sender] = playerId;
+			}
+			else
+			{
+				Logger::getInstance().logServer("REQUEST_SEED refused: player cap reached", true);
+				return;
+			}
+			lastActivity[playerId] = std::chrono::steady_clock::now();
+		}
+
 		ByteBuffer authBuf;
 		authBuf.reserve(sizeof(uint32_t));
 		authBuf.writeUInt32(playerId);
@@ -119,12 +158,7 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 		authMessage.sequenceNumber = message.sequenceNumber;
 		authMessage.payload = std::move(authBuf.getBytes());
 
-		sendMessage(senderEndpoint, authMessage);
-
-		{
-			std::lock_guard<std::mutex> lock(playerMutex);
-			playerEndpoints[playerId] = senderEndpoint;
-		}
+		sendMessage(sender, authMessage);
 	}
 	else if (message.type == MessageType::PLAYER_POSITION)
 	{
@@ -141,13 +175,14 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 		{
 			std::lock_guard<std::mutex> lock(playerMutex);
 			auto it = playerEndpoints.find(position.playerId);
-			if (it == playerEndpoints.end() || it->second != senderEndpoint)
+			if (it == playerEndpoints.end() || it->second != sender)
 			{
-				std::cerr << "Suspicious/unauthorized PLAYER_POSITION packet from " << senderEndpoint 
+				std::cerr << "Suspicious/unauthorized PLAYER_POSITION packet from " << sender 
 						  << " claiming to be player " << position.playerId << "\n";
 				return;
 			}
 			playerPositions[position.playerId] = position;
+			lastActivity[position.playerId] = std::chrono::steady_clock::now();
 		}
 	}
 	else if (message.type == MessageType::ACK)
@@ -161,11 +196,12 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 		{
 			std::lock_guard<std::mutex> lock(playerMutex);
 			auto it = playerEndpoints.find(playerId);
-			if (it == playerEndpoints.end() || it->second != senderEndpoint)
+			if (it == playerEndpoints.end() || it->second != sender)
 			{
 				Logger::getInstance().logServer("Suspicious/unauthorized ACK packet claiming to be player " + std::to_string(playerId), true);
 				return;
 			}
+			lastActivity[playerId] = std::chrono::steady_clock::now();
 		}
 
 		Logger::getInstance().logServer("Player " + std::to_string(playerId) + " authenticated successfully.");
@@ -181,7 +217,7 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 		{
 			std::lock_guard<std::mutex> lock(playerMutex);
 			auto it = playerEndpoints.find(playerId);
-			if (it == playerEndpoints.end() || it->second != senderEndpoint)
+			if (it == playerEndpoints.end() || it->second != sender)
 			{
 				Logger::getInstance().logServer("Suspicious/unauthorized DISCONNECT packet claiming to be player " + std::to_string(playerId), true);
 				return;
@@ -191,6 +227,15 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 			playerEndpoints.erase(playerId);
 			playerPositions.erase(playerId);
 			playerSequenceNumbers.erase(playerId);
+			lastActivity.erase(playerId);
+			for (auto ep = endpointPlayers.begin(); ep != endpointPlayers.end(); ++ep)
+			{
+				if (ep->second == playerId)
+				{
+					endpointPlayers.erase(ep);
+					break;
+				}
+			}
 		}
 	}
 	else if (message.type == MessageType::VOXEL_EDIT)
@@ -204,11 +249,12 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 		{
 			std::lock_guard<std::mutex> lock(playerMutex);
 			auto it = playerEndpoints.find(playerId);
-			if (it == playerEndpoints.end() || it->second != senderEndpoint)
+			if (it == playerEndpoints.end() || it->second != sender)
 			{
 				Logger::getInstance().logServer("Suspicious/unauthorized VOXEL_EDIT packet claiming to be player " + std::to_string(playerId), true);
 				return;
 			}
+			lastActivity[playerId] = std::chrono::steady_clock::now();
 		}
 
 		Message broadcastMsg;
@@ -229,14 +275,7 @@ void Server::handleMessage(const boost::asio::ip::udp::endpoint &senderEndpoint,
 
 void Server::sendMessage(const boost::asio::ip::udp::endpoint &endpoint, const Message &message)
 {
-	auto data = std::make_shared<std::vector<uint8_t>>();
-	ByteBuffer buf;
-	buf.reserve(sizeof(uint8_t) + sizeof(uint32_t) + message.payload.size());
-	buf.writeUInt8(message.type);
-	buf.writeUInt32(message.sequenceNumber);
-	buf.getBytes().insert(buf.getBytes().end(), message.payload.begin(), message.payload.end());
-	*data = std::move(buf.getBytes());
-
+	auto data = std::make_shared<std::vector<uint8_t>>(serializeMessage(message));
 	socket.async_send_to(boost::asio::buffer(*data), endpoint,
 						 [data](const boost::system::error_code &error, std::size_t /*bytesTransferred*/)
 						 {
@@ -250,6 +289,7 @@ void Server::tick()
 	if (!running)
 		return;
 
+	purgeInactivePlayers();
 	broadcastWorldState();
 
 	tickTimer.expires_after(std::chrono::milliseconds(50));
@@ -258,6 +298,38 @@ void Server::tick()
 							 if (!error)
 								 tick();
 						 });
+}
+
+void Server::purgeInactivePlayers()
+{
+	// Inactivity purge (review M19): a client that vanished without a
+	// DISCONNECT (crash, NAT drop) stops being broadcast after the timeout.
+	const auto now = std::chrono::steady_clock::now();
+	std::lock_guard<std::mutex> lock(playerMutex);
+	for (auto it = lastActivity.begin(); it != lastActivity.end(); )
+	{
+		if (now - it->second > kInactivityTimeout)
+		{
+			const uint32_t id = it->first;
+			Logger::getInstance().logServer("Player " + std::to_string(id) + " timed out (inactive).");
+			playerEndpoints.erase(id);
+			playerPositions.erase(id);
+			playerSequenceNumbers.erase(id);
+			for (auto ep = endpointPlayers.begin(); ep != endpointPlayers.end(); ++ep)
+			{
+				if (ep->second == id)
+				{
+					endpointPlayers.erase(ep);
+					break;
+				}
+			}
+			it = lastActivity.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
 }
 
 void Server::broadcastWorldState()

@@ -1,10 +1,16 @@
 #pragma once
 
-#include <thread>
+#include <array>
 #include <atomic>
-#include <boost/asio.hpp>
+#include <chrono>
 #include <condition_variable>
-#include <iostream>
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+#include <boost/asio.hpp>
 
 #include "common.hpp"
 
@@ -17,10 +23,19 @@ struct VoxelEditEvent {
 class Client
 {
 public:
+	// Receive buffer sized for a full WORLD_STATE snapshot at the server's
+	// player cap (review §4.11): 1024 bytes silently truncated snapshots
+	// above ~60 players.
+	static constexpr std::size_t kRecvBufferBytes = 4096;
+
 	Client();
 	~Client();
 
-	void connect(const std::string &host, unsigned short port);
+	/// Resolves `host` (names like "localhost" work, not only numeric
+	/// addresses — review M18) and starts the io thread. On failure the
+	/// client stays disconnected and `outError` carries the reason; no
+	/// partially-connected state is left behind.
+	bool connect(const std::string &host, unsigned short port, std::string &outError);
 	void disconnect();
 	bool isConnected() const;
 
@@ -48,14 +63,21 @@ private:
 	boost::asio::ip::udp::endpoint serverEndpoint;
 
 	std::atomic<uint32_t> worldSeed;
-	std::mutex seedMutex;
-	std::condition_variable seedCondVar;
+
+	// Bounded handshake (review M20): runs on the io thread; the old
+	// condvar wait was dead code because it would have blocked the very
+	// thread that receives SEND_SEED.
+	boost::asio::steady_timer handshakeTimer;
 
 	std::atomic<uint32_t> sequenceNumber;
 
-	std::array<uint8_t, 1024> recvBuffer;
+	std::array<uint8_t, kRecvBufferBytes> recvBuffer;
 
-	uint32_t playerId;
+	// Written by the io thread (AUTHENTICATION handler), read by caller
+	// threads (getPlayerId, sendVoxelEdit, disconnect): atomic like
+	// worldSeed/sequenceNumber (review C2 — the plain uint32_t was a data
+	// race / UB).
+	std::atomic<uint32_t> playerId;
 
 public: // public temporarily for ImGui and testing
 	std::unordered_map<uint32_t, PlayerPosition> playerPositions;
@@ -68,5 +90,7 @@ private:
 	std::vector<VoxelEditEvent> pendingVoxelEdits;
 	std::mutex voxelEditMutex;
 
+	// Declared last: joined before the socket/ioContext members above are
+	// destroyed.
 	std::jthread clientThread;
 };

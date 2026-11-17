@@ -67,7 +67,7 @@ struct ItemEntitySettings
     double fixedStep = 1.0 / 60.0; // 60 Hz (epic invariant, kItemTickHz)
     uint32_t maxSteps = 8;         // catch-up cap per advance (mob discipline)
 
-    double gravity = 24.0;            // blocks/s^2 (the mob gravity)
+    double gravity = physics::constants::gravity; // blocks/s^2 (single definition)
     double terminalVelocity = 30.0;   // downward clamp
     double groundFriction = 0.5;      // per-tick horizontal decay when grounded
     glm::dvec3 bodySize{0.25, 0.25, 0.25};

@@ -157,6 +157,12 @@ namespace worldsave
 	inline constexpr std::size_t kItemsStateHeaderBytes = 20;
 	inline constexpr std::size_t kItemEntityRecordBytes = 68;
 
+	// Chunk-file record region geometry (review §4.3): exported so the
+	// persistence byte accounting shares the format's single definition
+	// instead of duplicating the 28 + 5*N magic numbers.
+	inline constexpr std::size_t kChunkHeaderBytes = 4 + 4 + 4 + 4 + 4 + 8; // 28
+	inline constexpr std::size_t kChunkRecordBytes = 4 + 1;					// 5
+
 	struct WorldMeta
 	{
 		uint32_t formatVersion{0};

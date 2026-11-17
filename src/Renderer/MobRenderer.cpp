@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
 
 MobRenderer::Textures::~Textures()
@@ -28,7 +29,7 @@ MobRenderer::Textures::~Textures()
 std::unique_ptr<MobRenderer::Textures> MobRenderer::prepareTextures(ImmediateCommands &imm,
                                                                     const std::string &pack, SamplerPolicy policy)
 {
-    const auto cpu = loadMobTextures(pack, std::string(RES_PATH) + "default-resource-pack.zip");
+    const auto cpu = loadMobTextures(pack, resourceRootPath() + "default-resource-pack.zip");
     auto result = std::make_unique<Textures>();
     result->context = m_context;
     result->report = cpu.report;
@@ -223,6 +224,20 @@ void MobRenderer::init(VkContext &context, ImmediateCommands &imm, VkDescriptorS
         for (uint32_t pass = 0; pass < kMobPassCount; ++pass)
             m_draws[i][pass].reserve(kMaxBatches);
     }
+    recreatePipelines(color, depth);
+}
+
+void MobRenderer::recreatePipelines(VkFormat color, VkFormat depth)
+{
+    // Extracted from init (review M17): the swapchain-recreate path must be
+    // able to rebuild the mob pipelines when the HDR/depth formats change,
+    // exactly like Sky/overlays — the caller waits the device first.
+    const auto device = m_context->getDevice();
+    if (m_color)
+        vkDestroyPipeline(device, m_color, nullptr);
+    if (m_shadow)
+        vkDestroyPipeline(device, m_shadow, nullptr);
+    m_color = m_shadow = VK_NULL_HANDLE;
     std::array<VkVertexInputBindingDescription, 2> vb{
         {{0, sizeof(entities::MobVertex), VK_VERTEX_INPUT_RATE_VERTEX},
          {1, sizeof(Instance), VK_VERTEX_INPUT_RATE_INSTANCE}}};
@@ -339,8 +354,23 @@ void MobRenderer::prepare(uint32_t frame, const FrameUBO &ubo,
                           const std::vector<entities::MobRenderState> &mobs)
 {
     PROFILE_SCOPE("MobPrepare");
-    if (mobs.size() > entities::kMaxMobCount)
-        throw std::runtime_error("Mob count exceeds renderer capacity");
+    // Clamp + one-shot log instead of a frame-aborting throw (review §4.6):
+    // the sim's population cap makes this unreachable, but a presentation
+    // surface must degrade gracefully, not kill the frame. With the count
+    // clamped, kMaxParts = kMaxPartsPerMob * kMaxMobCount also holds by
+    // construction (init validates parts-per-model).
+    size_t mobCount = mobs.size();
+    if (mobCount > entities::kMaxMobCount)
+    {
+        static bool warned = false;
+        if (!warned)
+        {
+            warned = true;
+            std::cerr << "[mobs] input count " << mobCount << " exceeds renderer capacity "
+                      << entities::kMaxMobCount << " — clamped\n";
+        }
+        mobCount = entities::kMaxMobCount;
+    }
     m_visible = 0;
     auto &matrices = m_matrices[frame];
     matrices = {ubo.projection * ubo.view, ubo.cascadeMatrix0, ubo.cascadeMatrix1, ubo.cascadeMatrix2};
@@ -352,7 +382,7 @@ void MobRenderer::prepare(uint32_t frame, const FrameUBO &ubo,
     // every static batch. Fixed scratch indexed by batchId: no allocation.
     for (auto &counts : m_counts)
         counts.fill(0);
-    for (size_t i = 0; i < mobs.size(); ++i)
+    for (size_t i = 0; i < mobCount; ++i)
     {
         const auto &mob = mobs[i];
         uint8_t mask = 0;
@@ -408,7 +438,7 @@ void MobRenderer::prepare(uint32_t frame, const FrameUBO &ubo,
     // Phase B — build each mob-part instance exactly once, then scatter copies
     // into every visible pass slice. Transforms/light/UV are computed once; the
     // per-pass copies trade a few mapped writes for far fewer draw commands.
-    for (size_t i = 0; i < mobs.size(); ++i)
+    for (size_t i = 0; i < mobCount; ++i)
     {
         const auto &mob = mobs[i];
         const uint8_t mask = m_masks[i];

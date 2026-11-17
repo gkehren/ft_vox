@@ -240,11 +240,11 @@ void Chunk::computeLightField(telemetry::MeshSample &meshSample)
             continue;
           }
           skyLight[idxOf(x, y, z)] = light;
-          // Full sky light continues down open air; solid roof zeros it above
-          if (light > 0 && y > 0 && !isAirLike(x, y - 1, z))
-            ; // keep full until blocked
-          else if (light > 0)
-            light = static_cast<uint8_t>(light > 0 ? light : 0);
+          // The vertical cast keeps FULL sky light down open air — no -1
+          // attenuation on this axis; the horizontal flood below does the
+          // Minecraft-style decay into caves/overhangs. (review §4.5: the
+          // old `light = light > 0 ? light : 0` no-op branch was dead code
+          // from an abandoned attenuation idea and has been removed.)
         }
       }
     }

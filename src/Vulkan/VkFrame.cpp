@@ -42,6 +42,29 @@ void VkFrameContext::init(VkContext &context)
 		if (vkCreateFence(device, &fenceInfo, nullptr, &m_frames[i].inFlight) != VK_SUCCESS)
 			throw std::runtime_error("Failed to create frame fence");
 	}
+
+	// Inter-submission chain (review M1), created unsignaled: the first
+	// submit only signals it, every later submit waits then re-signals.
+	VkSemaphoreCreateInfo chainInfo{};
+	chainInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	if (vkCreateSemaphore(device, &chainInfo, nullptr, &m_prevFrameDone) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create frame-chain semaphore");
+	m_hasSubmitted = false;
+}
+
+void VkFrameContext::resetFrameChain()
+{
+	// Called after a device idle (swapchain recreate): start a fresh chain
+	// so the next first-submit never waits on a stale signal state.
+	if (!m_context || m_context->getDevice() == VK_NULL_HANDLE)
+		return;
+	if (m_prevFrameDone != VK_NULL_HANDLE)
+		vkDestroySemaphore(m_context->getDevice(), m_prevFrameDone, nullptr);
+	VkSemaphoreCreateInfo chainInfo{};
+	chainInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	if (vkCreateSemaphore(m_context->getDevice(), &chainInfo, nullptr, &m_prevFrameDone) != VK_SUCCESS)
+		throw std::runtime_error("Failed to recreate frame-chain semaphore");
+	m_hasSubmitted = false;
 }
 
 void VkFrameContext::shutdown()
@@ -69,6 +92,10 @@ void VkFrameContext::shutdown()
 	for (VkSemaphore semaphore : m_renderFinishedByImage)
 		if (semaphore != VK_NULL_HANDLE)
 			vkDestroySemaphore(device, semaphore, nullptr);
+	if (m_prevFrameDone != VK_NULL_HANDLE)
+		vkDestroySemaphore(device, m_prevFrameDone, nullptr);
+	m_prevFrameDone = VK_NULL_HANDLE;
+	m_hasSubmitted = false;
 
 	m_imagesInFlight.clear();
 	m_renderFinishedByImage.clear();
@@ -107,6 +134,8 @@ void VkFrameContext::onSwapchainRecreate(uint32_t imageCount)
 	// valid, but their association with images from the old swapchain does not.
 	m_imagesInFlight.assign(imageCount, VK_NULL_HANDLE);
 	ensureSwapchainImageSync(imageCount);
+	// Fresh inter-submission chain after the idle (review M1).
+	resetFrameChain();
 }
 
 bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
@@ -114,7 +143,12 @@ bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
 	VkDevice device = m_context->getDevice();
 	FrameData &frame = m_frames[m_currentFrame];
 
-	vkWaitForFences(device, 1, &frame.inFlight, VK_TRUE, UINT64_MAX);
+	if (frame.inFlight == VK_NULL_HANDLE)
+		throw std::runtime_error("Frame fence unavailable (previous submit failure was not recoverable)");
+	// Checked (review §4.7): on VK_ERROR_DEVICE_LOST the fence is NOT
+	// signaled; treating it as ready would reset and reuse corrupt state.
+	if (vkWaitForFences(device, 1, &frame.inFlight, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+		throw std::runtime_error("Failed to wait for frame fence (device lost?)");
 	m_gpuProfiler.onSlotReady(m_currentFrame);
 
 	VkResult result = vkAcquireNextImageKHR(device, swapchain.getSwapchain(), UINT64_MAX, frame.imageAvailable,
@@ -129,8 +163,9 @@ bool VkFrameContext::beginFrame(VkSwapchain &swapchain, uint32_t &outImageIndex)
 		m_imagesInFlight.assign(swapchain.getImageCount(), VK_NULL_HANDLE);
 	ensureSwapchainImageSync(swapchain.getImageCount());
 
-	if (m_imagesInFlight[outImageIndex] != VK_NULL_HANDLE)
-		vkWaitForFences(device, 1, &m_imagesInFlight[outImageIndex], VK_TRUE, UINT64_MAX);
+	if (m_imagesInFlight[outImageIndex] != VK_NULL_HANDLE &&
+		vkWaitForFences(device, 1, &m_imagesInFlight[outImageIndex], VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+		throw std::runtime_error("Failed to wait for swapchain-image fence (device lost?)");
 	m_imagesInFlight[outImageIndex] = frame.inFlight;
 
 	vkResetFences(device, 1, &frame.inFlight);
@@ -143,19 +178,44 @@ bool VkFrameContext::submitAndPresent(VkSwapchain &swapchain, uint32_t imageInde
 	FrameData &frame = m_frames[m_currentFrame];
 	VkSemaphore renderFinished = m_renderFinishedByImage.at(imageIndex);
 
-	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	// Inter-submission chain (review M1): wait on the previous submit's
+	// completion at TOP_OF_PIPE so no GPU work of this frame (shadow map
+	// writes included) can overlap the previous frame's reads of the shared
+	// global targets. The acquire semaphore keeps its precise late stage.
+	const VkSemaphore waitSemaphores[2] = {frame.imageAvailable, m_prevFrameDone};
+	const VkPipelineStageFlags waitStages[2] = {
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
+	const VkSemaphore signalSemaphores[2] = {renderFinished, m_prevFrameDone};
 	VkSubmitInfo submit{};
 	submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submit.waitSemaphoreCount = 1;
-	submit.pWaitSemaphores = &frame.imageAvailable;
-	submit.pWaitDstStageMask = &waitStage;
+	submit.waitSemaphoreCount = m_hasSubmitted ? 2u : 1u;
+	submit.pWaitSemaphores = waitSemaphores;
+	submit.pWaitDstStageMask = waitStages;
 	submit.commandBufferCount = 1;
 	submit.pCommandBuffers = &frame.commandBuffer;
-	submit.signalSemaphoreCount = 1;
-	submit.pSignalSemaphores = &renderFinished;
+	submit.signalSemaphoreCount = 2;
+	submit.pSignalSemaphores = signalSemaphores;
 
-	if (vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submit, frame.inFlight) != VK_SUCCESS)
+	const VkResult submitResult = vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submit, frame.inFlight);
+	if (submitResult != VK_SUCCESS)
+	{
+		// A failed submit never signals the fence (review §4.7): a caller
+		// that recovers from the error would block UINT64_MAX in the next
+		// beginFrame on this slot. Recreate the fence SIGNALED and drop
+		// every stale image association with the old handle first.
+		for (VkFence &fence : m_imagesInFlight)
+			if (fence == frame.inFlight)
+				fence = VK_NULL_HANDLE;
+		vkDestroyFence(m_context->getDevice(), frame.inFlight, nullptr);
+		frame.inFlight = VK_NULL_HANDLE;
+		VkFenceCreateInfo fenceInfo{};
+		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+		if (vkCreateFence(m_context->getDevice(), &fenceInfo, nullptr, &frame.inFlight) != VK_SUCCESS)
+			frame.inFlight = VK_NULL_HANDLE; // device lost: nothing left to salvage
 		throw std::runtime_error("Failed to submit frame command buffer");
+	}
+	m_hasSubmitted = true;
 
 	m_gpuProfiler.markSubmitted(m_currentFrame);
 	VkPresentInfoKHR present{};

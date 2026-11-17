@@ -93,7 +93,11 @@ void ImmediateCommands::submitAndWait(const std::function<void(VkCommandBuffer)>
 		throw std::runtime_error("Immediate queue submit failed");
 	}
 
-	vkWaitForFences(m_device, 1, &fence, VK_TRUE, UINT64_MAX);
+	// Checked (review §4.7): a device-lost wait must not be treated as a
+	// completed upload.
+	const VkResult waitResult = vkWaitForFences(m_device, 1, &fence, VK_TRUE, UINT64_MAX);
 	vkDestroyFence(m_device, fence, nullptr);
 	vkFreeCommandBuffers(m_device, m_pool, 1, &cmd);
+	if (waitResult != VK_SUCCESS)
+		throw std::runtime_error("Immediate submit fence wait failed (device lost?)");
 }

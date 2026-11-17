@@ -1,6 +1,9 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <filesystem>
+#include <string>
 #include <string_view>
 #include <glm/glm.hpp>
 #include <cassert>
@@ -13,19 +16,80 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
-#define WORLD_HEIGHT 256
+/// Fixed vertical world height. Typed constant (review §4.1): the old
+/// WORLD_HEIGHT macro and CHUNK_HEIGHT were two unlinked names for 256;
+/// CHUNK_HEIGHT below now derives from this single definition.
+inline constexpr int WORLD_HEIGHT = 256;
 
-#define RES_PATH "./ressources/"
+/// Resource root resolution (review §4.1): prefer the directory of the
+/// running executable so resources are found regardless of the working
+/// directory; fall back to the historical CWD-relative layout when the
+/// executable directory holds no ressources/ folder. Replaces the old
+/// RES_PATH macro (CWD-relative only).
+inline const std::string &resourceRootPath()
+{
+	static const std::string root = []
+	{
+		std::filesystem::path exeDir;
+#ifdef _WIN32
+		wchar_t buf[MAX_PATH];
+		const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+		if (n > 0 && n < MAX_PATH)
+			exeDir = std::filesystem::path(buf).parent_path();
+#elif defined(__APPLE__)
+		uint32_t size = 0;
+		_NSGetExecutablePath(nullptr, &size);
+		std::string buf(size, '\0');
+		if (_NSGetExecutablePath(buf.data(), &size) == 0)
+			exeDir = std::filesystem::path(buf).parent_path();
+#else
+		std::error_code ec;
+		const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+		if (!ec)
+			exeDir = exe.parent_path();
+#endif
+		if (!exeDir.empty())
+		{
+			// Anchor on the COMPLETE resource tree (review §4.1): test
+			// executables get a shaders-only ressources/ copy next to them,
+			// which must not shadow the full CWD-relative tree the ctest
+			// working directory provides. The bundled default pack is the
+			// completeness witness.
+			std::error_code ec;
+			if (std::filesystem::is_regular_file(
+					exeDir / "ressources" / "default-resource-pack.zip", ec))
+				return (exeDir / "ressources").string() + "/";
+		}
+		return std::string("./ressources/");
+	}();
+	return root;
+}
+
+/// splitmix64 finalizer — shared by the grid-coordinate hash below.
+inline uint64_t splitmix64Mix(uint64_t x)
+{
+	x += 0x9e3779b97f4a7c15ull;
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+	x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+	return x ^ (x >> 31);
+}
 
 struct IVec3Hash
 {
 	std::size_t operator()(const glm::ivec3 &v) const
 	{
-		std::size_t h1 = std::hash<int>()(v.x);
-		std::size_t h2 = std::hash<int>()(v.y);
-		std::size_t h3 = std::hash<int>()(v.z);
-		return h1 ^ (h2 << 1) ^ (h3 << 2);
+		// Full 64-bit mix per axis (review §4.1): the old xor-shift combine
+		// of std::hash<int> results produced collision patterns on regular
+		// grid coordinates in the streaming unordered_maps.
+		const uint64_t hx = splitmix64Mix(static_cast<uint32_t>(v.x));
+		const uint64_t hy = splitmix64Mix(static_cast<uint32_t>(v.y) + 0x9e3779b97f4a7c15ull);
+		const uint64_t hz = splitmix64Mix(static_cast<uint32_t>(v.z) + 0x517cc1b727220a95ull);
+		return static_cast<std::size_t>(splitmix64Mix(hx ^ (hy * 0x9e3779b97f4a7c15ull) ^
+													  (hz * 0x517cc1b727220a95ull)));
 	}
 };
 
@@ -67,6 +131,15 @@ struct Vertex
 	static constexpr float kPositionScale = 16.0f;
 	static constexpr float kInvPositionScale = 1.0f / 16.0f;
 
+	/// Telemetry fallback counter (review §4.1): out-of-range coordinates
+	/// are clamped (never silently wrapped) and counted in Release too, so
+	/// a meshing bug is observable instead of producing mute artifacts.
+	static std::atomic<uint32_t> &packPositionClampCount()
+	{
+		static std::atomic<uint32_t> count{0};
+		return count;
+	}
+
 	static uint32_t packPosition(const glm::vec3 &localPos)
 	{
 		const long qx = std::lround(localPos.x * kPositionScale);
@@ -76,9 +149,18 @@ struct Vertex
 		assert(qy >= 0 && qy <= static_cast<long>(kYMax) && "chunk-local Y outside packed range");
 		assert(qz >= 0 && qz <= static_cast<long>(kZMax) && "chunk-local Z outside packed range");
 
-		const uint32_t px = static_cast<uint32_t>(qx) & kXMask;
-		const uint32_t py = static_cast<uint32_t>(qy) & kYMask;
-		const uint32_t pz = static_cast<uint32_t>(qz) & kZMask;
+		const auto clampQ = [](long q, uint32_t max) -> uint32_t
+		{
+			if (q < 0 || q > static_cast<long>(max))
+			{
+				packPositionClampCount().fetch_add(1, std::memory_order_relaxed);
+				return q < 0 ? 0u : max;
+			}
+			return static_cast<uint32_t>(q);
+		};
+		const uint32_t px = clampQ(qx, kXMax);
+		const uint32_t py = clampQ(qy, kYMax);
+		const uint32_t pz = clampQ(qz, kZMax);
 		return px | (py << kXBits) | (pz << (kXBits + kYBits));
 	}
 
@@ -137,8 +219,17 @@ struct VertexHasher
 };
 
 static constexpr int CHUNK_SIZE = 16;										// Size of a chunk in voxels
-static constexpr int CHUNK_HEIGHT = 256;									// Height of a chunk in voxels
+static constexpr int CHUNK_HEIGHT = WORLD_HEIGHT;							// Height of a chunk in voxels (single definition above)
 static constexpr int CHUNK_VOLUME = CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE; // Total number of voxels in a chunk
+
+/// Integer floor division by CHUNK_SIZE — the exact integer form of the
+/// world->chunk convention below (review §4.3: WorldCollisionView used to
+/// re-implement it privately). Correct for the full int range, no float
+/// round-trip.
+inline constexpr int floorDivChunk(int n)
+{
+	return n / CHUNK_SIZE - (n % CHUNK_SIZE < 0 ? 1 : 0);
+}
 
 /// Canonical world->chunk mapping (floor division; correct for negative
 /// coordinates). The SINGLE definition of this convention (issue #206
@@ -397,16 +488,12 @@ inline constexpr bool blockHasFluid(TextureType type)
 	return blockContainedMedium(type) != BlockMedium::None;
 }
 
-inline constexpr bool blockIsWater(TextureType type)
-{
-	return blockContainedMedium(type) == BlockMedium::Water;
-}
-
-/// Fluid-occupancy view for meshing (issue #120 review): the water renderer
-/// only ever emits the Water material, so the contained medium collapses to
-/// "does this cell hold renderable water". Independent of BlockShape — a
+/// Fluid-occupancy view (issue #120 review): the water renderer only ever
+/// emits the Water material, so the contained medium collapses to "does
+/// this cell hold renderable water". Independent of BlockShape — a
 /// cross-shaped KELP and a future waterlogged cube hold water exactly like
-/// a plain WATER cell.
+/// a plain WATER cell. Single name for this predicate (review §4.1): the
+/// former blockIsWater duplicate was removed so the two cannot diverge.
 inline constexpr bool blockContainsWater(TextureType type)
 {
 	return blockContainedMedium(type) == BlockMedium::Water;

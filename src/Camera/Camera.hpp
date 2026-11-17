@@ -58,6 +58,13 @@ private:
 	float movementSpeed;
 	float mouseSensitivity;
 
+	// Isometric presentation constants (review §4.9 — named instead of
+	// magic): the eye arm pulls the camera back by zoom * factor so the
+	// focal region never clips; the fixed plane Y keeps the debug overview
+	// above most terrain of the 256-block playable world.
+	static constexpr float kIsometricEyeArmFactor = 4.0f;
+	static constexpr float kIsometricPlaneY = 100.0f;
+
 	// Isometric state
 	CameraMode mode{CameraMode::PERSPECTIVE};
 	float isometricZoom{64.0f};		// half-extent in world units

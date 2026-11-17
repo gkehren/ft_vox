@@ -87,8 +87,11 @@ static void updateScopeFrameStats(UiState &state)
 	const ProfileEntry *entries = prof.lastEntries();
 
 	constexpr uint32_t kDepthUnknown = UINT32_MAX;
-	thread_local std::array<float, 128> frameTotals{};
-	thread_local std::array<uint32_t, 128> frameDepth{};
+	// Sized by the business bound (review §4.8): the old hardcoded 128
+	// would silently overflow if kMaxScopeStats ever grew past it. Slots
+	// are always < kMaxScopeStats by the bounded registration below.
+	thread_local std::array<float, kMaxScopeStats> frameTotals{};
+	thread_local std::array<uint32_t, kMaxScopeStats> frameDepth{};
 	frameTotals.fill(0.f);
 	frameDepth.fill(kDepthUnknown);
 

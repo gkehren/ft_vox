@@ -11,6 +11,7 @@
 #include <cassert>
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 
@@ -50,9 +51,11 @@ void WaterPass::shutdown()
 
 void WaterPass::createHistory(uint32_t w, uint32_t h, VkFormat depthFmt)
 {
+	// No COLOR_ATTACHMENT usage (review §4.6): the history is only ever a
+	// copy destination and a sampled source — never rendered into.
 	m_sceneHistory = createImage2D(
 		m_context->getAllocator(), m_context->getDevice(), w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
-		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 		VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
 	m_depthHistory = createImage2D(
 		m_context->getAllocator(), m_context->getDevice(), w, h, depthFmt,
@@ -269,13 +272,16 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 								1.f / static_cast<float>(std::max(1u, extent.height)), 0.f, 0.f};
 	vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(invScreen), invScreen);
 
-	// Water draws are still emitted back-to-front and must not be reordered
+	// Water draws are emitted coarse back-to-front and must not be reordered
 	// by page pair (unlike opaque / shadow): with depth write + no blending
-	// the depth test alone decides visibility, but keeping the historical
-	// order makes the depth results independent of sorting changes and lets a
-	// future transparency mode re-enable strict ordering. Only contiguous
+	// the depth test alone decides visibility, so exact ordering is visually
+	// irrelevant — but keeping the far->near intent lets a future
+	// transparency mode re-enable strict ordering. Distance bucketing
+	// (review §4.6) gives that order in O(n) instead of a full per-frame
+	// sort; within a bucket the residency order is kept. Only contiguous
 	// same-page-pair runs are split out for binding.
-	m_waterChunks.clear();
+	for (auto &bucket : m_waterBuckets)
+		bucket.clear();
 	const float camOffsetX = camPos.x - CHUNK_SIZE * 0.5f;
 	const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
 	const float camOffsetY = camPos.y;
@@ -285,11 +291,16 @@ void WaterPass::record(VkCommandBuffer cmd, uint32_t frameIndex, VkExtent2D exte
 		{
 			const glm::vec3 p = chunk->getPosition();
 			const glm::vec3 d(p.x - camOffsetX, p.y - camOffsetY, p.z - camOffsetZ);
-			m_waterChunks.push_back({chunk, glm::dot(d, d)});
+			const float dist2 = glm::dot(d, d);
+			uint32_t bucket = static_cast<uint32_t>(std::sqrt(dist2) / kWaterBucketWidth);
+			if (bucket >= kWaterBucketCount)
+				bucket = kWaterBucketCount - 1; // far tail shares the last bucket
+			m_waterBuckets[bucket].push_back({chunk, dist2});
 		}
 	}
-	std::sort(m_waterChunks.begin(), m_waterChunks.end(),
-			  [](const WaterEntry &a, const WaterEntry &b) { return a.dist2 > b.dist2; });
+	m_waterChunks.clear();
+	for (uint32_t b = kWaterBucketCount; b-- > 0;)
+		m_waterChunks.insert(m_waterChunks.end(), m_waterBuckets[b].begin(), m_waterBuckets[b].end());
 
 	if (m_scratch.size() < kMaxIndirectCommands)
 		m_scratch.resize(kMaxIndirectCommands);

@@ -94,9 +94,28 @@ RenderWorldBridge::~RenderWorldBridge()
 	// chunks still in workers. After the quiesce above the completion queues
 	// are normally empty; this only sweeps stragglers from a world that was
 	// never opened.
+	// Progress + bound (review §4.6): the old spin only watched counters —
+	// without publishing completions it could never make progress, and a
+	// pool stopped before the bridge (host order violation) would hang it
+	// forever. Publish inside the loop, and after a generous deadline report
+	// loudly and stop waiting: a destroyed ThreadPool has JOINED its workers,
+	// so no worker can still reference a handle past that point.
+	const auto drainDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
 	while (m_world->pendingGenJobs() > 0 || m_pendingMeshJobsCount.load() > 0 ||
 		   m_pendingLightJobsCount.load() > 0)
 	{
+		processFinishedJobs();
+		if (m_world->pendingGenJobs() == 0 && m_pendingMeshJobsCount.load() == 0 &&
+			m_pendingLightJobsCount.load() == 0)
+			break;
+		if (std::chrono::steady_clock::now() >= drainDeadline)
+		{
+			std::cerr << "[bridge] teardown drain timed out: gen=" << m_world->pendingGenJobs()
+					  << " mesh=" << m_pendingMeshJobsCount.load()
+					  << " light=" << m_pendingLightJobsCount.load()
+					  << " — workers must be quiesced before the bridge is destroyed" << std::endl;
+			break;
+		}
 		std::this_thread::yield();
 	}
 
@@ -309,6 +328,10 @@ void RenderWorldBridge::onWorldUnloaded(const WorldEvent &e)
 		m_chunks.erase(it);
 		return;
 	}
+	// Local witness of the world-side contract (review §4.6): the world
+	// never unloads an in-transit record; assert it here too so a future
+	// violation is caught at the boundary that would dereference it.
+	assert(!chunk->isInTransit() && "unload event for an in-transit render handle");
 	const size_t activeIdx = chunk->getActiveIndex();
 	if (activeIdx < m_activeChunks.size() && m_activeChunks[activeIdx] == chunk)
 	{
@@ -489,7 +512,9 @@ void RenderWorldBridge::meshPendingChunks(const Camera &camera, const RenderSett
 			// content newer than this capture is rejected at publish.
 			const uint64_t meshGeneration = chunk->meshGeneration();
 			const uint64_t meshRevision = chunk->meshRevision();
-			m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, this, queuedAt, captureEpoch]() {
+			// Fire-and-forget (review M4): results flow through
+			// m_completedMeshJobs, the future would be ignored.
+			m_threadPool->submit(prio, [chunk, meshGeneration, meshRevision, this, queuedAt, captureEpoch]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
@@ -572,7 +597,7 @@ void RenderWorldBridge::meshPendingChunks(const Camera &camera, const RenderSett
 			uint16_t sectionMask = chunk->takeDirtySections();
 			if (sectionMask == 0 || chunk->isLODMesh() || chunk->hasUnuploadedFullMesh())
 				sectionMask = kAllSectionMask;
-			m_threadPool->enqueue(prio, [chunk, meshGeneration, meshRevision, sectionMask, halo, this, queuedAt, captureEpoch]() {
+			m_threadPool->submit(prio, [chunk, meshGeneration, meshRevision, sectionMask, halo, this, queuedAt, captureEpoch]() {
 				const auto t0 = std::chrono::steady_clock::now();
 				GetProfiler().addWorkerSample("MeshQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
@@ -701,7 +726,7 @@ void RenderWorldBridge::updateEntityLightCaches(const Camera &camera, const Rend
 		const auto captureEpoch = GetProfiler().captureEpoch();
 		const auto queuedAt = std::chrono::steady_clock::now();
 		const sim::ChunkIdentity identity = chunk->chunkIdentity();
-		m_threadPool->enqueue(prio, [chunk, identity, halo, this, queuedAt, captureEpoch]() {
+		m_threadPool->submit(prio, [chunk, identity, halo, this, queuedAt, captureEpoch]() {
 			const auto t0 = std::chrono::steady_clock::now();
 			// Own queue bucket (issue #173 review): light-cache wait time is
 			// observable separately from real mesh jobs, so pool starvation
@@ -759,8 +784,13 @@ void RenderWorldBridge::updateEntityLightCaches(const Camera &camera, const Rend
 // ---------------------------------------------------------------------------
 
 int RenderWorldBridge::uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-                                      GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget)
+                                      GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget,
+                                      bool *outCopiesRecorded)
 {
+	// Copy tracking (review M2): set on EVERY recorded transfer, independent
+	// of publication — the host barrier keys on this flag.
+	if (outCopiesRecorded)
+		*outCopiesRecorded = false;
 	if (!allocator || budget <= 0 || cmd == VK_NULL_HANDLE || !staging.isValid())
 		return 0;
 
@@ -837,6 +867,8 @@ int RenderWorldBridge::uploadPendingMeshes(VmaAllocator allocator, StagingRing &
 				continue; // budget exhausted: remaining independents wait next frame
 			if (!chunk->uploadToGPUAsync(allocator, staging, cmd, retire, arenas))
 				break; // staging full — remaining wait next frame
+			if (outCopiesRecorded)
+				*outCopiesRecorded = true;
 			recordChunkEvent(chunk, "gpuCommit");
 			uploaded += 1;
 			--budgetUnits;
@@ -938,6 +970,8 @@ int RenderWorldBridge::uploadPendingMeshes(VmaAllocator allocator, StagingRing &
 					allRecorded = false; // no staging room for this member yet
 					continue;
 				}
+				if (outCopiesRecorded)
+					*outCopiesRecorded = true;
 				--budgetUnits;
 			}
 			if (allRecorded)
@@ -1283,6 +1317,11 @@ bool RenderWorldBridge::isVoxelActive(const glm::vec3 &worldPos) const
 
 Chunk *RenderWorldBridge::getChunk(const glm::ivec3 &chunkPos)
 {
+	// Lock-free by contract (review §4.6, the VoxelWorld pattern): non-const
+	// callers are main-thread paths that already hold m_mutex or run outside
+	// concurrent mutation windows; a shared_lock here would deadlock the
+	// locked helpers (std::shared_mutex is not recursive). Cross-thread
+	// readers use the const overload, which locks.
 	auto it = m_chunks.find(chunkPos);
 	return it != m_chunks.end() ? it->second : nullptr;
 }
@@ -1892,7 +1931,8 @@ void RenderWorldBridge::discardAllCommitGroups()
 		}
 	}
 	m_commitGroups.clear();
-	assert(m_commitGroups.empty());
+	// (review §4.6: the assert(m_commitGroups.empty()) that used to sit here
+	// was trivially true after clear() and documented nothing.)
 }
 
 // A member chunk is unloading: drop it from its group (discarding any

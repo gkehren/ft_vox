@@ -239,7 +239,7 @@ int runSession(bool persistence, double durationSec, double editsPerSec, int see
 		for (const Chunk *c : mgr.activeChunksSnapshot())
 			if (c && c->getState() >= ChunkState::GENERATED)
 				++generated;
-		std::printf("  session: chunks=%d generated=%d\n", mgr.chunkCount(), generated);
+		std::printf("  session: chunks=%d generated=%d\n", static_cast<int>(mgr.chunkCount()), generated);
 	}
 
 	// Steady-state snapshot FIRST, at the exact end of the measured window

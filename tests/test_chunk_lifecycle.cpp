@@ -30,17 +30,8 @@
 #include <thread>
 #include <set>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 struct VoxelView : std::span<const Voxel>
 {
@@ -341,7 +332,7 @@ static void checkOccupancyMetadataInSync(const Chunk &chunk, const char *label)
 }
 
 static void checkMatchesOwning(const Chunk &chunk, TerrainGenerator &gen,
-							   int chunkX, int chunkZ, const char *label)
+							   int chunkX, int chunkZ, [[maybe_unused]] const char *label)
 {
 	const ChunkData reference = gen.generateChunk(chunkX, chunkZ);
 	const ChunkNeighborBorders *borders = ChunkStateProbe::borders(chunk);
@@ -555,7 +546,7 @@ static int profileMobs()
     CHECK(distance>100, "animals actually move across generated terrain");
     CHECK(states.size() == 48, "48 mobs remain active during benchmark");
     CHECK(mobs.mobs().size()<=48, "real-world population bounded");
-    return g_fails?1:0;
+    return testmain::exitCode();
 }
 
 static int profilePlayerPhysics()
@@ -721,7 +712,7 @@ static void checkManagerDesiredMatchesBrute(const RenderWorldBridge &manager, co
 /// is marked enqueued and the enqueued set holds exactly the distinct live
 /// entries; nothing queued is already loaded; queued set == desired
 /// footprint minus loaded chunks.
-static void checkStreamingQueueInvariants(const RenderWorldBridge &manager, const char *what)
+static void checkStreamingQueueInvariants(const RenderWorldBridge &manager, [[maybe_unused]] const char *what)
 {
 	const auto &q = RenderBridgeStreamProbe::queue(manager);
 	const size_t head = RenderBridgeStreamProbe::queueHead(manager);
@@ -1489,13 +1480,13 @@ int main(int argc, char **argv)
 	{
 		TerrainGenerator dtorGen(9);
 		{
-			ChunkPool pool(8);
-			Chunk *c = pool.acquire(glm::vec3(0.0f));
-			CHECK(c != nullptr, "destructor-test acquisition succeeds");
-			if (c)
+			ChunkPool dtorPool(8); // distinct names: no outer-scope shadowing
+			Chunk *dtorChunk = dtorPool.acquire(glm::vec3(0.0f));
+			CHECK(dtorChunk != nullptr, "destructor-test acquisition succeeds");
+			if (dtorChunk)
 			{
-				CHECK(c->prepareVoxelStorageForGeneration(), "destructor-test prepare succeeds");
-				c->generateTerrain(dtorGen);
+				CHECK(dtorChunk->prepareVoxelStorageForGeneration(), "destructor-test prepare succeeds");
+				dtorChunk->generateTerrain(dtorGen);
 			}
 			// Intentionally no release: the ChunkPool destructor retires
 			// every chunk and returns voxel storage through the VoxelPool,
@@ -1547,17 +1538,17 @@ int main(int argc, char **argv)
 	// helper prepares storage on the calling thread, generates, and returns
 	// the chunk to the pool when preparation fails.
 	{
-		ChunkPool pool(4);
-		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &pool);
-		Chunk *chunk = pool.acquire(glm::vec3(0.0f));
+		ChunkPool bootPool(4); // distinct name: no outer-scope shadowing
+		VoxelWorld managerWorld(&gen, nullptr); RenderWorldBridge manager(&managerWorld, nullptr, &bootPool);
+		Chunk *chunk = bootPool.acquire(glm::vec3(0.0f));
 		CHECK(chunk != nullptr, "bootstrap acquisition succeeds");
 		CHECK(manager.prepareAndGenerateChunk(chunk, gen), "bootstrap prepare+generate succeeds");
 		CHECK(chunk->getState() == ChunkState::GENERATED, "bootstrap chunk generated");
 		CHECK(ChunkStateProbe::hasStorage(*chunk), "bootstrap chunk owns voxel storage");
-		CHECK(pool.voxelStorageActive() == 1, "bootstrap storage accounted active");
+		CHECK(bootPool.voxelStorageActive() == 1, "bootstrap storage accounted active");
 		CHECK(!manager.prepareAndGenerateChunk(nullptr, gen), "null chunk rejected");
-		pool.release(chunk);
-		CHECK(pool.voxelStorageActive() == 0, "bootstrap release returns storage");
+		bootPool.release(chunk);
+		CHECK(bootPool.voxelStorageActive() == 0, "bootstrap release returns storage");
 	}
 
 	// 10) Border sampling contract (issue #103): faces, corners, vertical
@@ -1761,9 +1752,9 @@ int main(int argc, char **argv)
 	// remesh replaces the pending block, and unload with a pending result
 	// returns it to the pool.
 	{
-		MeshResultPool pool;
+		MeshResultPool meshPool;
 		TerrainGenerator pgen(1234);
-		Chunk chunk(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
+		Chunk chunk(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &meshPool);
 		CHECK(chunk.prepareVoxelStorageForGeneration(), "publish-semantics prepare");
 		chunk.generateTerrain(pgen);
 		const uint64_t generationAfterGen = ChunkStateProbe::meshGeneration(chunk);
@@ -1771,14 +1762,14 @@ int main(int argc, char **argv)
 
 		// Stale publish: a result built for a different generation.
 		{
-			MeshBuildResult *stale = pool.acquire();
+			MeshBuildResult *stale = meshPool.acquire();
 			stale->beginBuild(&chunk, generationAfterGen + 999, revisionAfterGen);
 			stale->opaqueIndices.push_back(0);
-			const size_t freeBefore = pool.freeCount();
+			const size_t freeBefore = meshPool.freeCount();
 			CHECK(!chunk.publishMeshResult(stale),
 				  "superseded generation is rejected at publish");
-			CHECK(pool.freeCount() == freeBefore + 1,
-				  "rejected result is returned to its pool");
+			CHECK(meshPool.freeCount() == freeBefore + 1,
+				  "rejected result is returned to its meshPool");
 			CHECK(!chunk.hasPendingMeshResult(), "rejected result is not attached");
 			CHECK(chunk.getState() != ChunkState::MESHED,
 				  "rejected publish does not mark the chunk MESHED");
@@ -1787,28 +1778,28 @@ int main(int argc, char **argv)
 		// in-flight mesh built before an edit must not overwrite the newer
 		// content. This is deliberately distinct from the recycle case.
 		{
-			MeshBuildResult *old = pool.acquire();
+			MeshBuildResult *old = meshPool.acquire();
 			old->beginBuild(&chunk, generationAfterGen, revisionAfterGen - 1);
 			old->opaqueIndices.push_back(0);
-			const size_t freeBefore = pool.freeCount();
+			const size_t freeBefore = meshPool.freeCount();
 			CHECK(!chunk.publishMeshResult(old),
 				  "old-revision result (same generation) is rejected");
-			CHECK(pool.freeCount() == freeBefore + 1,
-				  "rejected old-revision result is returned to its pool");
+			CHECK(meshPool.freeCount() == freeBefore + 1,
+				  "rejected old-revision result is returned to its meshPool");
 			CHECK(chunk.getState() != ChunkState::MESHED,
 				  "old-revision publish leaves the state untouched");
 		}
 		// Wrong owner is rejected the same way.
 		{
-			Chunk other(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &pool);
-			MeshBuildResult *foreign = pool.acquire();
+			Chunk other(glm::vec3(0.0f), ChunkState::UNLOADED, nullptr, nullptr, &meshPool);
+			MeshBuildResult *foreign = meshPool.acquire();
 			foreign->beginBuild(&other, ChunkStateProbe::meshGeneration(chunk),
 								chunk.meshRevision());
-			const size_t freeBefore = pool.freeCount();
+			const size_t freeBefore = meshPool.freeCount();
 			CHECK(!chunk.publishMeshResult(foreign),
 				  "foreign-owner result is rejected");
-			CHECK(pool.freeCount() == freeBefore + 1,
-				  "rejected foreign result is returned to its pool");
+			CHECK(meshPool.freeCount() == freeBefore + 1,
+				  "rejected foreign result is returned to its meshPool");
 		}
 		// Edit invalidates the in-flight build (issue #114 review item 19):
 		// a result stamped pre-edit is rejected once the edit landed, the
@@ -1817,29 +1808,34 @@ int main(int argc, char **argv)
 		{
 			chunk.setState(ChunkState::GENERATED);
 			const uint64_t revBeforeEdit = chunk.meshRevision();
-			MeshBuildResult *inflight = pool.acquire();
+			MeshBuildResult *inflight = meshPool.acquire();
 			inflight->beginBuild(&chunk, generationAfterGen, revBeforeEdit);
 			// ... worker is meshing here ...
-			chunk.setVoxel(3, 40, 3, STONE); // the edit lands (bumps revision)
+			// A REAL content change (review M10): a same-type rewrite is a
+			// no-op that no longer bumps the revision, so the fixture picks
+			// a type different from whatever the terrain holds here.
+			const TextureType preEditType = static_cast<TextureType>(chunk.getVoxel(3, 40, 3).type);
+			const TextureType editedType = (preEditType == STONE) ? DIRT : STONE;
+			chunk.setVoxel(3, 40, 3, editedType); // the edit lands (bumps revision)
 			CHECK(chunk.meshRevision() == revBeforeEdit + 1,
 				  "edit bumps the mesh revision");
 			CHECK(chunk.getState() == ChunkState::GENERATED,
 				  "edit leaves the chunk GENERATED");
-			pool.finishBuild(inflight);
-			const size_t freeBeforeEdit = pool.freeCount();
+			meshPool.finishBuild(inflight);
+			const size_t freeBeforeEdit = meshPool.freeCount();
 			CHECK(!chunk.publishMeshResult(inflight),
 				  "pre-edit in-flight result is rejected after the edit");
-			CHECK(pool.freeCount() == freeBeforeEdit + 1,
-				  "rejected pre-edit result back in the pool");
+			CHECK(meshPool.freeCount() == freeBeforeEdit + 1,
+				  "rejected pre-edit result back in the meshPool");
 			CHECK(!chunk.hasPendingMeshResult(), "no pending result survives the edit");
 			CHECK(chunk.needsGPUUpload(), "edit keeps the remesh armed");
-			CHECK(chunk.getVoxel(3, 40, 3).type == static_cast<uint8_t>(STONE),
+			CHECK(chunk.getVoxel(3, 40, 3).type == static_cast<uint8_t>(editedType),
 				  "edit data present after the rejected publish");
 		}
 
 		// Matching identity publishes and is the only state commit point.
 		{
-			MeshBuildResult *good = pool.acquire();
+			MeshBuildResult *good = meshPool.acquire();
 			good->beginBuild(&chunk, generationAfterGen, chunk.meshRevision());
 			CHECK(chunk.publishMeshResult(good), "matching identity publishes");
 			CHECK(chunk.getState() == ChunkState::MESHED,
@@ -1850,28 +1846,28 @@ int main(int argc, char **argv)
 			// and the meshNeedsUpdate flag exactly as it found them.
 			chunk.setState(ChunkState::GENERATED);
 			const bool armedBefore = chunk.needsGPUUpload();
-			MeshBuildResult *pure = pool.acquire();
+			MeshBuildResult *pure = meshPool.acquire();
 			chunk.buildMesh(*pure, generationAfterGen, chunk.meshRevision());
 			CHECK(chunk.getState() == ChunkState::GENERATED,
 				  "buildMesh does not mutate chunk state");
 			CHECK(chunk.needsGPUUpload() == armedBefore,
 				  "buildMesh does not change meshNeedsUpdate");
-			pool.finishBuild(pure);
-			pool.release(pure);
+			meshPool.finishBuild(pure);
+			meshPool.release(pure);
 		}
 
 		// Valid publish then repeated remesh: newest result wins, previous
-		// one returns to the pool, no leak.
+		// one returns to the meshPool, no leak.
 		CHECK(chunk.generateMesh(), "first publish succeeds");
 		MeshBuildResult *firstPending = ChunkStateProbe::pendingResult(chunk);
 		CHECK(firstPending != nullptr, "first result attached");
-		CHECK(pool.activeCount() == 1, "one block active while attached");
+		CHECK(meshPool.activeCount() == 1, "one block active while attached");
 		CHECK(chunk.generateMesh(), "repeated remesh publishes");
 		MeshBuildResult *secondPending = ChunkStateProbe::pendingResult(chunk);
 		CHECK(secondPending != nullptr && secondPending != firstPending,
 			  "repeated remesh attaches a fresh block");
-		CHECK(pool.activeCount() == 1,
-			  "superseded attached result was returned to the pool");
+		CHECK(meshPool.activeCount() == 1,
+			  "superseded attached result was returned to the meshPool");
 
 		// Unload with a pending result: reset returns the block and bumps
 		// the generation, so the retired payload can never be re-attached.
@@ -1879,7 +1875,7 @@ int main(int argc, char **argv)
 		const uint64_t revBeforeReset = chunk.meshRevision();
 		chunk.reset(glm::vec3(16.0f, 0.0f, 0.0f));
 		CHECK(!chunk.hasPendingMeshResult(), "reset releases the pending result");
-		CHECK(pool.freeCount() == pool.capacity(), "pool balanced after reset");
+		CHECK(meshPool.freeCount() == meshPool.capacity(), "meshPool balanced after reset");
 		CHECK(ChunkStateProbe::meshGeneration(chunk) == genBeforeReset + 1,
 			  "reset bumps the mesh generation");
 		CHECK(chunk.meshRevision() > revBeforeReset,
@@ -1888,12 +1884,12 @@ int main(int argc, char **argv)
 		// A publish attempt for the retired incarnation lands nowhere, even
 		// if the revision value happened to match after recycling
 		// (issue #114 review item 21: both dimensions are checked).
-		MeshBuildResult *retired = pool.acquire();
+		MeshBuildResult *retired = meshPool.acquire();
 		retired->beginBuild(&chunk, genBeforeReset, chunk.meshRevision());
-		const size_t freeBefore = pool.freeCount();
+		const size_t freeBefore = meshPool.freeCount();
 		CHECK(!chunk.publishMeshResult(retired),
 			  "result of the retired generation is rejected after reset");
-		CHECK(pool.freeCount() == freeBefore + 1, "retired result returned to pool");
+		CHECK(meshPool.freeCount() == freeBefore + 1, "retired result returned to meshPool");
 	}
 
 	// 13c) Moves detach pending results (issue #104): neither side may keep
@@ -5907,9 +5903,9 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed\n";
+		std::cerr << testmain::fails << " check(s) failed\n";
 		return 1;
 	}
 	std::cout << "PASS: chunk lifecycle - moves carry full state, "

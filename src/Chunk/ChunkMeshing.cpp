@@ -16,6 +16,12 @@
 // Packed ABGR water tint colour shared by the full mesh and LOD mesh generators.
 static constexpr uint32_t WATER_COLOR = 0xFF'E6804D;
 
+// Sky-light value sampled OUTSIDE the chunk for a face's open neighbor cell
+// (review §4.5): both greedy passes use the same daylight fallback; the old
+// block pass initialized 15 then overwrote with 12, an inconsistency that
+// read like two different policies. One named constant, one policy.
+static constexpr uint8_t kSkyFallbackBorder = 12;
+
 // Issue #106: per-cell materialization of the greedy mesher's face inputs.
 // The classification pass (phase 1) samples the two voxels of a slice cell
 // exactly once and packs them with their biome owner colors; the greedy
@@ -237,6 +243,76 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
     if (blockIsSmallDetail(type))
       return AIR;
     return type;
+  };
+
+  // Shared greedy-quad emitter (review M13): the block pass and the fluid
+  // pass used to duplicate the whole "AO 4 corners -> pack vertex ->
+  // winding" sequence with micro-variations, so an AO/lighting fix had to
+  // be applied twice. The two are identical by construction: both face
+  // planes sit at the same slice coordinate and both AO rules sample the
+  // air-side layer (normal[d] > 0 ? plane : plane - 1). The passes differ
+  // only in their LIGHT policy and payload, which they supply per quad:
+  // packedDataBase (normal/texture/tint bits), packedColor, lightBits.
+  // countAo keeps the historical telemetry split (only the block pass
+  // reported aoVertices).
+  struct GreedyQuadTarget
+  {
+    std::vector<Vertex> &vertices;
+    std::vector<uint32_t> &indices;
+    uint32_t &indexCounter;
+  };
+  auto emitGreedyQuad = [&](GreedyQuadTarget target, const glm::vec3 quadVerts[4],
+                            const glm::vec2 tc[4], const glm::vec3 &normalDir, int d, int u,
+                            int v, uint32_t packedDataBase, uint32_t packedColor,
+                            uint32_t lightBits, bool countAo)
+  {
+    uint32_t vert_indices[4];
+    for (int i = 0; i < 4; ++i)
+    {
+      const glm::vec3 &localPos = quadVerts[i];
+      const int pd = static_cast<int>(std::round(localPos[d]));
+      const int pu = static_cast<int>(std::round(localPos[u]));
+      const int pv = static_cast<int>(std::round(localPos[v]));
+      const int layerD = (normalDir[d] > 0) ? pd : pd - 1;
+      auto isSolid = [&](int du, int dv)
+      {
+        return !TextureManager::isTransparent(getBlockGeometryForMeshing(
+            (d == 0 ? layerD : (u == 0 ? pu + du : pv + du)),
+            (d == 1 ? layerD : (u == 1 ? pu + du : pv + du)),
+            (d == 2 ? layerD : (u == 2 ? pu + du : pv + du))));
+      };
+      const bool q1 = isSolid(0, 0);
+      const bool q2 = isSolid(-1, 0);
+      const bool q3 = isSolid(-1, -1);
+      const bool q4 = isSolid(0, -1);
+      bool s1, s2, c;
+      if (i == 0) { s1 = q2; s2 = q4; c = q3; }
+      else if (i == 1) { s1 = q1; s2 = q3; c = q4; }
+      else if (i == 2) { s1 = q2; s2 = q4; c = q1; }
+      else { s1 = q1; s2 = q3; c = q2; }
+      const uint32_t ao = (s1 && s2) ? 0u : 3u - static_cast<uint32_t>(s1 + s2 + c);
+      if (countAo)
+        ++meshSample.data.aoVertices;
+
+      Vertex vert;
+      vert.packedPos = Vertex::packPosition(localPos);
+      vert.packedData = packedDataBase | (ao << 12) | lightBits;
+      vert.texCoordU = static_cast<uint16_t>(std::lround(tc[i].x));
+      vert.texCoordV = static_cast<uint16_t>(std::lround(tc[i].y));
+      vert.packedBiomeColor = packedColor;
+      // Direct push: greedy quads never share vertices.
+      target.vertices.push_back(vert);
+      vert_indices[i] = target.indexCounter++;
+    }
+    // Winding order based on the normal direction along the main axis 'd'.
+    if (normalDir[d] > 0)
+      target.indices.insert(target.indices.end(),
+                            {vert_indices[0], vert_indices[1], vert_indices[2],
+                             vert_indices[0], vert_indices[2], vert_indices[3]});
+    else
+      target.indices.insert(target.indices.end(),
+                            {vert_indices[0], vert_indices[2], vert_indices[1],
+                             vert_indices[0], vert_indices[3], vert_indices[2]});
   };
 
   const int dims[] = {CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE};
@@ -595,7 +671,6 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
           const TextureType faceTex = blockFaceTexture(quad_type, quad_normal_dir.y);
           const float texture_idx_val = static_cast<float>(faceTex);
 
-          uint32_t vert_indices[4];
           const glm::vec3 quad_vertices_local[4] = {
               v0_local, v1_local, v2_local, v3_local};
 
@@ -626,88 +701,21 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             packedColor = originColor;
           }
 
-          auto calculateAO = [&](const glm::vec3 &localPos, int cornerIdx) -> uint32_t
-          {
-            int pd = (int)std::round(localPos[d]);
-            int pu = (int)std::round(localPos[u]);
-            int pv = (int)std::round(localPos[v]);
-
-            int layerD = (quad_normal_dir[d] > 0) ? pd : pd - 1;
-
-            auto isSolid = [&](int du, int dv)
-            {
-              return !TextureManager::isTransparent(getBlockGeometryForMeshing(
-                  (d == 0 ? layerD : (u == 0 ? pu + du : pv + du)),
-                  (d == 1 ? layerD : (u == 1 ? pu + du : pv + du)),
-                  (d == 2 ? layerD : (u == 2 ? pu + du : pv + du))));
-            };
-
-            bool q1 = isSolid(0, 0);
-            bool q2 = isSolid(-1, 0);
-            bool q3 = isSolid(-1, -1);
-            bool q4 = isSolid(0, -1);
-
-            bool s1, s2, c;
-            if (cornerIdx == 0)
-            {
-              s1 = q2;
-              s2 = q4;
-              c = q3;
-            }
-            else if (cornerIdx == 1)
-            {
-              s1 = q1;
-              s2 = q3;
-              c = q4;
-            }
-            else if (cornerIdx == 2)
-            {
-              s1 = q2;
-              s2 = q4;
-              c = q1;
-            }
-            else
-            {
-              s1 = q1;
-              s2 = q3;
-              c = q2;
-            }
-
-            if (s1 && s2)
-              return 0;
-            return 3 - (s1 + s2 + c);
-          };
-
-          // Determine which mesh buffer this quad goes to. Water quads are
-          // classified and merged here (so the mask stays exact) but their
-          // emission is delegated to the dedicated fluid pass below, which
-          // owns the whole water volume from blockContainsWater (issue #120).
+          // Water quads are classified and merged here (so the mask stays
+          // exact) but their emission is delegated to the dedicated fluid
+          // pass below, which owns the whole water volume from
+          // blockContainsWater (issue #120).
           const bool isWater = (quad_type == WATER);
           if (!isWater)
           {
-          auto &targetVertices = vertices;
-          auto &targetIndices = indices;
-          auto &targetIndexCounter = indexCounter;
-
-          // Sample light from air cell in front of the face (Minecraft-style)
-          uint8_t faceSky = 15;
-          uint8_t faceR = 0, faceG = 0, faceB = 0;
-          {
-            glm::ivec3 solid = quad_origin_voxel_coord;
-            // Face sits between solid and air along normal
-            glm::ivec3 airCell = solid;
-            if (quad_normal_dir.x > 0)
-              airCell.x += 1;
-            else if (quad_normal_dir.x < 0)
-              ; // solid already on + side; air is solid
-            else if (quad_normal_dir.y > 0)
-              airCell.y += 1;
-            else if (quad_normal_dir.y < 0)
-              ;
-            else if (quad_normal_dir.z > 0)
-              airCell.z += 1;
-
-            // Prefer the open side of the face
+            // Block-pass light policy: sample the open side of the face
+            // (Minecraft-style), then let an emissive solid glow with its
+            // own RGB emission. (review §4.5/M13: the dead airCell block
+            // and the targetVertices aliases were removed; AO + packing +
+            // winding now live in the shared emitGreedyQuad.)
+            uint8_t faceSky = kSkyFallbackBorder;
+            uint8_t faceR = 0, faceG = 0, faceB = 0;
+            const glm::ivec3 solid = quad_origin_voxel_coord;
             glm::ivec3 sample = solid;
             sample.x += static_cast<int>(quad_normal_dir.x);
             sample.y += static_cast<int>(quad_normal_dir.y);
@@ -726,10 +734,6 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
               const size_t li = static_cast<size_t>(sample.x + CHUNK_SIZE * (sample.y + CHUNK_HEIGHT * sample.z));
               faceSky = skyLight[li];
             }
-            else
-            {
-              faceSky = 12;
-            }
             // Emissive solid itself glows (its own RGB emission)
             if (solid.x >= 0 && solid.x < CHUNK_SIZE && solid.y >= 0 && solid.y < CHUNK_HEIGHT &&
                 solid.z >= 0 && solid.z < CHUNK_SIZE)
@@ -741,46 +745,10 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
               faceG = std::max(faceG, emG);
               faceB = std::max(faceB, emB);
             }
-          }
-          const uint32_t lightBits = lighting::packLightBits(faceSky, faceR, faceG, faceB);
-
-          for (int i = 0; i < 4; ++i)
-          {
-            Vertex vert;
-            const glm::vec3 &localPos = quad_vertices_local[i];
-            uint32_t ao = calculateAO(localPos, i);
-            ++meshSample.data.aoVertices;
-
-            vert.packedPos = Vertex::packPosition(localPos);
-            vert.packedData = packedData | (ao << 12) | lightBits;
-            vert.texCoordU = static_cast<uint16_t>(std::lround(tc[i].x));
-            vert.texCoordV = static_cast<uint16_t>(std::lround(tc[i].y));
-            vert.packedBiomeColor = packedColor;
-
-            // I: Direct push for both water and opaque — greedy quads never share vertices
-            targetVertices.push_back(vert);
-            vert_indices[i] = targetIndexCounter++;
-          }
-
-          // Winding order based on normal direction along the main axis 'd'
-          if (quad_normal_dir[d] > 0)
-          {
-            targetIndices.push_back(vert_indices[0]);
-            targetIndices.push_back(vert_indices[1]);
-            targetIndices.push_back(vert_indices[2]);
-            targetIndices.push_back(vert_indices[0]);
-            targetIndices.push_back(vert_indices[2]);
-            targetIndices.push_back(vert_indices[3]);
-          }
-          else
-          {
-            targetIndices.push_back(vert_indices[0]);
-            targetIndices.push_back(vert_indices[2]);
-            targetIndices.push_back(vert_indices[1]);
-            targetIndices.push_back(vert_indices[0]);
-            targetIndices.push_back(vert_indices[3]);
-            targetIndices.push_back(vert_indices[2]);
-          }
+            const uint32_t lightBits = lighting::packLightBits(faceSky, faceR, faceG, faceB);
+            emitGreedyQuad({vertices, indices, indexCounter}, quad_vertices_local, tc,
+                           quad_normal_dir, d, u, v, packedData, packedColor, lightBits,
+                           /*countAo=*/true);
           } // !isWater: water quads are emitted by the dedicated fluid pass
 
           // Mark processed cells in the mask
@@ -1003,78 +971,34 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
                                             ((static_cast<uint32_t>(WATER) & 0xFF) << 3) |
                                             (1u << 11); // water takes its WATER_COLOR tint
 
-                // Ambient occlusion uses the geometric view: water and details
-                // never occlude a fluid corner.
-                uint32_t vert_indices[4];
-                for (int i = 0; i < 4; ++i)
+                // Fluid-pass light policy (review M13): the open neighbor
+                // cell is the SAME for all four corners (it depends only on
+                // the slice origin + dir), so the old per-corner sampling
+                // is hoisted per quad — byte-identical output. Block light
+                // reads the halo domain so the ±1 shell crosses borders;
+                // sky keeps the shared daylight fallback outside the chunk.
+                // AO uses the geometric view (water/details never occlude a
+                // fluid corner) via the shared emitGreedyQuad.
+                uint8_t faceSky = kSkyFallbackBorder;
+                uint8_t faceR = 0, faceG = 0, faceB = 0;
                 {
-                  const glm::vec3 &localPos = quad_vertices_local[i];
-                  int pd = static_cast<int>(std::round(localPos[d]));
-                  int pu = static_cast<int>(std::round(localPos[u]));
-                  int pv = static_cast<int>(std::round(localPos[v]));
-                  const int layerD = (dir > 0) ? planeD : planeD - 1;
-                  auto aoSolid = [&](int du, int dv)
+                  glm::ivec3 n{x[0], x[1], x[2]};
+                  n[d] += dir;
+                  const size_t hli = ChunkLightHalo::hidx(n.x, n.y, n.z);
+                  faceR = blockLightR[hli];
+                  faceG = blockLightG[hli];
+                  faceB = blockLightB[hli];
+                  if (n.x >= 0 && n.x < CHUNK_SIZE && n.y >= 0 && n.y < CHUNK_HEIGHT &&
+                      n.z >= 0 && n.z < CHUNK_SIZE)
                   {
-                    return !TextureManager::isTransparent(getBlockGeometryForMeshing(
-                        (d == 0 ? layerD : (u == 0 ? pu + du : pv + du)),
-                        (d == 1 ? layerD : (u == 1 ? pu + du : pv + du)),
-                        (d == 2 ? layerD : (u == 2 ? pu + du : pv + du))));
-                  };
-                  const bool q1 = aoSolid(0, 0);
-                  const bool q2 = aoSolid(-1, 0);
-                  const bool q3 = aoSolid(-1, -1);
-                  const bool q4 = aoSolid(0, -1);
-                  bool s1, s2, c;
-                  if (i == 0) { s1 = q2; s2 = q4; c = q3; }
-                  else if (i == 1) { s1 = q1; s2 = q3; c = q4; }
-                  else if (i == 2) { s1 = q2; s2 = q4; c = q1; }
-                  else { s1 = q1; s2 = q3; c = q2; }
-                  const uint32_t ao = (s1 && s2) ? 0u : 3u - static_cast<uint32_t>(s1 + s2 + c);
-
-                  // Light from the open neighbor cell (same policy as the
-                  // block pass); block light reads the halo domain so the
-                  // ±1 shell crosses borders, sky keeps the daylight
-                  // fallback outside the chunk (pre-existing scope).
-                  uint8_t faceSky = 12;
-                  uint8_t faceR = 0, faceG = 0, faceB = 0;
-                  {
-                    glm::ivec3 n{x[0], x[1], x[2]};
-                    n[d] += dir;
-                    const size_t hli = ChunkLightHalo::hidx(n.x, n.y, n.z);
-                    faceR = blockLightR[hli];
-                    faceG = blockLightG[hli];
-                    faceB = blockLightB[hli];
-                    if (n.x >= 0 && n.x < CHUNK_SIZE && n.y >= 0 && n.y < CHUNK_HEIGHT &&
-                        n.z >= 0 && n.z < CHUNK_SIZE)
-                    {
-                      const size_t li = static_cast<size_t>(n.x + CHUNK_SIZE * (n.y + CHUNK_HEIGHT * n.z));
-                      faceSky = skyLight[li];
-                    }
+                    const size_t li = static_cast<size_t>(n.x + CHUNK_SIZE * (n.y + CHUNK_HEIGHT * n.z));
+                    faceSky = skyLight[li];
                   }
-
-                  Vertex vert;
-                  vert.packedPos = Vertex::packPosition(localPos);
-                  vert.packedData = packedData | (ao << 12) |
-                                    lighting::packLightBits(faceSky, faceR, faceG, faceB);
-                  vert.texCoordU = static_cast<uint16_t>(std::lround(tc[i].x));
-                  vert.texCoordV = static_cast<uint16_t>(std::lround(tc[i].y));
-                  vert.packedBiomeColor = WATER_COLOR;
-                  waterVertices.push_back(vert);
-                  vert_indices[i] = waterIndexCounter++;
                 }
-
-                if (dir > 0)
-                {
-                  waterIndices.insert(waterIndices.end(),
-                                      {vert_indices[0], vert_indices[1], vert_indices[2],
-                                       vert_indices[0], vert_indices[2], vert_indices[3]});
-                }
-                else
-                {
-                  waterIndices.insert(waterIndices.end(),
-                                      {vert_indices[0], vert_indices[2], vert_indices[1],
-                                       vert_indices[0], vert_indices[3], vert_indices[2]});
-                }
+                const uint32_t lightBits = lighting::packLightBits(faceSky, faceR, faceG, faceB);
+                emitGreedyQuad({waterVertices, waterIndices, waterIndexCounter},
+                               quad_vertices_local, tc, normalDir, d, u, v, packedData,
+                               WATER_COLOR, lightBits, /*countAo=*/false);
               }
           }
         }
@@ -1104,6 +1028,11 @@ void Chunk::buildSectionGreedy(MeshBuildResult &out, int section, int ownerMinY,
             | (tint ? 1u << 11 : 0u)
             | (3u << 12) | lighting::packLightBits(skyLight[li], blockLightR[hli],
                                                    blockLightG[hli], blockLightB[hli]);
+        // Detail quads stay a separate emitter (review M13): unlike the two
+        // greedy passes they are double-sided (12-index winding), carry a
+        // fixed AO=3 and per-voxel light, and use unit UVs — folding them
+        // into emitGreedyQuad would add parameters for every difference
+        // instead of removing duplication.
         auto quad = [&](std::array<glm::vec3, 4> positions) {
           const uint32_t first = static_cast<uint32_t>(vertices.size());
           constexpr glm::vec2 uv[] = {{0.f, 1.f}, {1.f, 1.f}, {1.f, 0.f}, {0.f, 0.f}};

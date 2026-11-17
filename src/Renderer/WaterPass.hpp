@@ -65,5 +65,13 @@ private:
 		float dist2;
 	};
 	std::vector<WaterEntry> m_waterChunks{};
+	// Coarse far->near distance buckets (review §4.6): an O(n) counting
+	// order replaces the per-frame O(n log n) sort. With depth write + no
+	// blending the exact order is visually irrelevant; the buckets keep the
+	// historical back-to-front intent for a future transparency mode.
+	// Capacity is retained across frames (the scratch discipline).
+	static constexpr uint32_t kWaterBucketCount = 32;
+	static constexpr float kWaterBucketWidth = 64.f; // blocks per bucket
+	std::array<std::vector<WaterEntry>, kWaterBucketCount> m_waterBuckets{};
 	uint32_t m_lastCommands{0};
 };

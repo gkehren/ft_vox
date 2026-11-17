@@ -273,7 +273,17 @@ private:
 	uint64_t m_lastPerfCounter{0};
 	float m_displayRefreshRate{0.0f};
 
+	// Per-instance streaming budget accumulators (review M5): these used to
+	// be function-local statics — process-global state inherited by any
+	// second Engine instance (tests, tools). streamAccum was already a
+	// member; the whole family now lives on the instance.
 	double streamAccum{0.0};
+	double m_genAccum{0.0};
+	double m_meshAccum{0.0};
+	double m_uploadAccum{0.0};
+	double m_lightCacheAccum{0.0};
+	size_t m_lastLoggedChunks{0};
+	double m_lastStreamLogTime{0.0};
 
 	/// Requested world-save name (issue #180); empty = transient session.
 	/// Consumed by sim::GameSimulation::initialize (the seed, the world

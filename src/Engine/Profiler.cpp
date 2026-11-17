@@ -183,6 +183,7 @@ void Profiler::clearHistory()
 	m_historyCount = 0;
 	m_avgFrameMs = 0.f;
 	m_onePercentLowMs = 0.f;
+	m_p1Dirty = false;
 	m_avgAccumMs = 0.0;
 	m_avgSamples = 0;
 	m_spikeCount = 0;
@@ -255,23 +256,35 @@ void Profiler::updateAverages(float frameMs)
 	}
 	m_avgFrameMs = window > 0 ? sum / static_cast<float>(window) : frameMs;
 
-	// 1% low: 99th percentile of history (slow frames) — sort a temp copy of recent samples
-	if (m_historyCount > 0)
+	// 1% low: 99th percentile of history (slow frames). Recomputed LAZILY
+	// on read (review §4.8): the old full sort of 240 floats ran every
+	// frame even with every panel closed.
+	m_p1Dirty = true;
+}
+
+void Profiler::recomputeOnePercentLow() const
+{
+	m_p1Dirty = false;
+	if (m_historyCount <= 0)
 	{
-		std::array<float, kHistorySize> tmp{};
-		const int n = m_historyCount;
-		for (int i = 0; i < n; ++i)
-		{
-			int idx = m_historyWrite - 1 - i;
-			if (idx < 0)
-				idx += kHistorySize;
-			tmp[static_cast<size_t>(i)] = m_history[static_cast<size_t>(idx)];
-		}
-		std::sort(tmp.begin(), tmp.begin() + n);
-		// 1% low FPS ≈ high frame times: take the value at 99th percentile (slow end)
-		const int p99 = std::clamp(static_cast<int>(std::ceil(n * 0.99f)) - 1, 0, n - 1);
-		m_onePercentLowMs = tmp[static_cast<size_t>(p99)];
+		m_onePercentLowMs = 0.f;
+		return;
 	}
+	std::array<float, kHistorySize> tmp{};
+	const int n = m_historyCount;
+	for (int i = 0; i < n; ++i)
+	{
+		int idx = m_historyWrite - 1 - i;
+		if (idx < 0)
+			idx += kHistorySize;
+		tmp[static_cast<size_t>(i)] = m_history[static_cast<size_t>(idx)];
+	}
+	// 1% low FPS ≈ high frame times: the value at the 99th percentile (slow
+	// end). nth_element is O(n) average — only the p99 slot needs ordering,
+	// not the whole window.
+	const int p99 = std::clamp(static_cast<int>(std::ceil(n * 0.99f)) - 1, 0, n - 1);
+	std::nth_element(tmp.begin(), tmp.begin() + p99, tmp.begin() + n);
+	m_onePercentLowMs = tmp[static_cast<size_t>(p99)];
 }
 
 void Profiler::recordSpike(float frameMs)

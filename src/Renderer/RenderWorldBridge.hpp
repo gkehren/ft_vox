@@ -234,8 +234,14 @@ public:
 	/// consumes one upload-budget unit and may be recorded across frames.
 	/// Publication consumes no budget. Returns the number of chunks published
 	/// this call (a committed group contributes all its members).
+	/// `outCopiesRecorded` (review M2) reports whether ANY transfer copy was
+	/// recorded into cmd — the caller's transfer->vertex barrier must key on
+	/// this, NOT on the published count: a group can record copies for
+	/// several frames before its atomic publication, and copies recorded
+	/// with zero publications still need the barrier.
 	int uploadPendingMeshes(VmaAllocator allocator, StagingRing &staging, VkCommandBuffer cmd,
-							GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget);
+							GpuResourceRetire &retire, MeshArenas &arenas, const Camera &camera, int budget,
+							bool *outCopiesRecorded = nullptr);
 
 	/// After frames-in-flight delay, retire arena ranges and return chunks to the pool.
 	void processDeferredReleases();
@@ -304,6 +310,13 @@ public:
 	bool chunkEventTraceEnabled() const { return m_chunkTraceEnabled; }
 	/// Chronological copy of the recorded events (oldest first). Main thread.
 	std::vector<ChunkDebugEvent> chunkDebugEvents() const;
+	/// Raw ring view (review §4.8): per-frame consumers iterate in place
+	/// instead of copying the whole 256-entry ring. Newest entry is at
+	/// (chunkDebugEventWrite() + kChunkEventRingSize - 1) % kChunkEventRingSize;
+	/// valid entry count is chunkDebugEventCount(). Main thread only.
+	const std::array<ChunkDebugEvent, kChunkEventRingSize> &chunkDebugEventRing() const { return m_chunkEventRing; }
+	size_t chunkDebugEventCount() const { return m_chunkEventCount; }
+	size_t chunkDebugEventWrite() const { return m_chunkEventWrite; }
 
 	/// Synchronous bootstrap near spawn so the first frame has terrain.
 	void generateInitialArea(const glm::vec3 &center, int radiusChunks, VmaAllocator allocator,

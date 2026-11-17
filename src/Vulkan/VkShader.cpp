@@ -28,7 +28,9 @@ std::string resolveSpvPath(const char *fileName)
 	add("../ressources/shaders/spv");
 	add("./build-vk/ressources/shaders/spv");
 	add("build-vk/ressources/shaders/spv");
-	add("./ressources/shaders/spv"); // RES_PATH default
+	// Resolved resource root (review §4.1): exe-anchored when the full tree
+	// sits next to the binary, CWD-relative otherwise (the old RES_PATH).
+	add(resourceRootPath() + "shaders/spv");
 
 	// Directory containing the executable (where CMake copies ressources/).
 	// SDL3 caches this path — do not free it (unlike SDL2).

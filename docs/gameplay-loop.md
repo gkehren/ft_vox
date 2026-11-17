@@ -121,12 +121,21 @@ The two never synchronize; both are persisted in `player.state` /
   0.05 float step, first ACTIVE cell (`VoxelWorld::isVoxelActive`),
   adjacent-cell fallback when the ray starts inside a block, unknown cells
   never hit. `dir` is normalized inside; the host passes the raw camera
-  front as a plain value. Pure query — never edits the world. Returns a
+  front as a plain value. A degenerate or non-finite direction answers
+  "no hit" instead of normalizing to NaN (review §4.4, symmetric to
+  `dropFromSlot`'s guard). Pure query — never edits the world. Returns a
   plain `RaycastHit{hit, block, adjacent}`.
 - **`breakBlock(cell)`** → `BreakResult`:
   - `Ok` — block deleted through the existing world edit semantics (issue
     #114 deferred-edit ordering preserved) + the registry drop spawned at
     the cell center with deterministic id/edit-revision jitter.
+    **Ordering note (review §4.4):** the drop spawns immediately, even when
+    the delete itself defers (target record in transit / UNLOADED). This is
+    deterministic — the digest stays stable — but the item's trajectory is
+    computed against the pre-edit cell, not an atomically-applied edit.
+    Accepted deferred edits are durable across unload: the world bake them
+    into the persistent override set at unload (review C1), so a break
+    against a never-generated record is never silently lost.
   - `Unbreakable` — BEDROCK / fluids.
   - `UnknownTerrain` — cell unloaded / not generated (never inferred).
   - `WorldRejected` — nothing to break (AIR / out of bounds) or the world

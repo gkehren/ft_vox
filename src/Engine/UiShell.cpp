@@ -146,8 +146,11 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 
 	if (ImGui::BeginMenu("World"))
 	{
-		if (frame.paused)
-			ImGui::MenuItem("Pause world tick", shortcutKeyName(SDLK_P), frame.paused);
+		// Clickable toggle (review §4.8): the return value used to be
+		// ignored, so the item displayed state but clicking did nothing.
+		if (frame.paused &&
+			ImGui::MenuItem("Pause world tick", shortcutKeyName(SDLK_P), *frame.paused))
+			*frame.paused = !*frame.paused;
 		if (frame.mouseCaptured)
 		{
 			if (ImGui::MenuItem(*frame.mouseCaptured ? "Release mouse" : "Capture mouse",
@@ -183,7 +186,10 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		layoutTileMenuItem("Graphics", shortcutKeyName(SDLK_F2), toggles.graphics);
 		layoutTileMenuItem("Streaming", shortcutKeyName(SDLK_F3), toggles.streaming);
 		layoutTileMenuItem("World / biome map", shortcutKeyName(SDLK_F4), toggles.world);
-		ImGui::MenuItem("On-screen hints", shortcutKeyName(SDLK_F6), toggles.overlayHints);
+		// Clickable toggle (review §4.8, same ignored-return class).
+		if (toggles.overlayHints &&
+			ImGui::MenuItem("On-screen hints", shortcutKeyName(SDLK_F6), *toggles.overlayHints))
+			*toggles.overlayHints = !*toggles.overlayHints;
 		ImGui::Separator();
 		if (ImGui::BeginMenu("UI scale"))
 		{
@@ -238,8 +244,10 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		// bar; Developer is their coherent home now that Graphics lives in
 		// View as settings. VSync moved to the Graphics panel (issue #184);
 		// F10 stays its quick action.
-		if (frame.showChunkBorders)
-			ImGui::MenuItem("Chunk borders", shortcutKeyName(SDLK_B), frame.showChunkBorders);
+		// Clickable toggle (review §4.8, the Pause item pattern).
+		if (frame.showChunkBorders &&
+			ImGui::MenuItem("Chunk borders", shortcutKeyName(SDLK_B), *frame.showChunkBorders))
+			*frame.showChunkBorders = !*frame.showChunkBorders;
 		ImGui::EndMenu();
 	}
 

@@ -21,17 +21,8 @@
 #include <limits>
 #include <string>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 static void checkNear(float a, float b, float eps, const char *name)
 {
@@ -553,9 +544,9 @@ int main()
 	checkLayoutTileMenuPaths();
 	checkInventoryUi();
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " failure(s)\n";
+		std::cerr << testmain::fails << " failure(s)\n";
 		return 1;
 	}
 	std::cout << "test_ui_shell: all checks passed\n";

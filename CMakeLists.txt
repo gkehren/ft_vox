@@ -15,6 +15,76 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ---------------------------------------------------------------------------
+# First-party warning/sanitizer hygiene (review M21): 52k lines used to build
+# with ZERO warning flags. ft_vox_warnings is linked to every first-party
+# target (core, headless, game, tests); vendored sources (ImGui/FileDialog)
+# are silenced per-file so their noise never masks our own diagnostics.
+# Warnings-as-errors and sanitizers are OPT-IN so existing builds keep their
+# behavior; CI enables them explicitly.
+# ---------------------------------------------------------------------------
+option(FT_VOX_WARNINGS_AS_ERRORS "Treat first-party compiler warnings as errors" OFF)
+option(FT_VOX_SANITIZERS "ASan + UBSan on first-party targets (GCC/Clang/MSVC)" OFF)
+option(FT_VOX_TSAN "TSan on first-party targets (GCC/Clang only)" OFF)
+option(FT_VOX_LTO "Link-time optimization for Release configurations" OFF)
+
+if(FT_VOX_SANITIZERS AND FT_VOX_TSAN)
+    message(FATAL_ERROR "FT_VOX_SANITIZERS (ASan) and FT_VOX_TSAN are mutually exclusive")
+endif()
+
+add_library(ft_vox_warnings INTERFACE)
+target_compile_options(ft_vox_warnings INTERFACE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>)
+# MSVC's secure-CRT deprecation nag (getenv etc.) is noise for this
+# codebase's deliberate POSIX-style usage; the real diagnostics stay on.
+target_compile_definitions(ft_vox_warnings INTERFACE
+    $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
+if(FT_VOX_WARNINGS_AS_ERRORS)
+    target_compile_options(ft_vox_warnings INTERFACE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Werror>
+        $<$<CXX_COMPILER_ID:MSVC>:/WX>)
+endif()
+
+add_library(ft_vox_sanitizers INTERFACE)
+if(FT_VOX_SANITIZERS)
+    if(MSVC)
+        target_compile_options(ft_vox_sanitizers INTERFACE /fsanitize=address)
+    else()
+        target_compile_options(ft_vox_sanitizers INTERFACE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(ft_vox_sanitizers INTERFACE -fsanitize=address,undefined)
+    endif()
+endif()
+if(FT_VOX_TSAN)
+    if(MSVC)
+        message(FATAL_ERROR "FT_VOX_TSAN requires GCC or Clang")
+    endif()
+    target_compile_options(ft_vox_sanitizers INTERFACE -fsanitize=thread -fno-omit-frame-pointer)
+    target_link_options(ft_vox_sanitizers INTERFACE -fsanitize=thread)
+endif()
+
+if(FT_VOX_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT FT_VOX_IPO_OK OUTPUT FT_VOX_IPO_ERR)
+    if(FT_VOX_IPO_OK)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    else()
+        message(WARNING "FT_VOX_LTO requested but IPO is unsupported: ${FT_VOX_IPO_ERR}")
+    endif()
+endif()
+
+# Apply the hygiene pair to a first-party target and silence the vendored
+# translation units it may compile (source-file properties are directory
+# scoped, so this runs in the CALLER's directory — root or tests/).
+function(ft_vox_target_hygiene target)
+    target_link_libraries(${target} PRIVATE ft_vox_warnings ft_vox_sanitizers)
+    if(FT_VOX_IMGUI_SOURCES)
+        set_source_files_properties(${FT_VOX_IMGUI_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:MSVC>:/W0>;$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-w>")
+    endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
 # Build scope (issue #210, Epic #204 Phase F)
 #
 # FT_VOX_GRAPHICS=ON  (default): the full game + renderer + every test.
@@ -325,6 +395,7 @@ set(FT_VOX_CORE_SOURCES
 )
 
 add_library(ft_vox_core STATIC ${FT_VOX_CORE_SOURCES})
+ft_vox_target_hygiene(ft_vox_core)
 target_include_directories(ft_vox_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(ft_vox_core PUBLIC
     GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -371,6 +442,7 @@ set(FT_VOX_HEADLESS_SOURCES
 
 add_executable(ft_vox_headless ${FT_VOX_HEADLESS_SOURCES})
 target_link_libraries(ft_vox_headless PRIVATE ft_vox_core)
+ft_vox_target_hygiene(ft_vox_headless)
 if(MSVC)
     target_compile_options(ft_vox_headless PRIVATE $<$<CONFIG:Release>:/O2>)
     if(FT_VOX_PORTABLE_FP)
@@ -459,6 +531,7 @@ if(NOT FT_VOX_GAME_COUNT_AFTER EQUAL FT_VOX_GAME_COUNT_EXPECTED)
 endif()
 
 add_executable(${PROJECT_NAME} ${FT_VOX_GAME_SOURCES})
+ft_vox_target_hygiene(${PROJECT_NAME})
 add_dependencies(${PROJECT_NAME} ft_vox_shaders ft_vox_build_info)
 # Rebuild BuildInfo.cpp when the generated revision header changes.
 set_source_files_properties(

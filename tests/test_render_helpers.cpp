@@ -18,7 +18,14 @@
 #ifndef STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_IMPLEMENTATION
 #endif
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4244) // vendored stb internals
+#endif
 #include <stb_image/stb_image.h>
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 #include <Engine/EngineDefs.hpp>
 #include <fstream>
 #include <filesystem>
@@ -255,7 +262,7 @@ int main()
 		// is px = vpX + (ndc.x + 1) * vpW / 2, py = vpY + (ndc.y + 1) * vpH / 2,
 		// so the helper must agree with the negative-height transform exactly.
 		{
-			const float width = 640.f, height = 360.f;
+			const float height = 360.f; // width unused: the transform check is vertical
 			const float vpY = height, vpH = -height;
 			for (const float ndcY : {-1.f, -0.5f, 0.f, 0.5f, 1.f})
 			{

@@ -202,6 +202,10 @@ void MeshResultPool::release(MeshBuildResult *result)
 	if (!result)
 		return;
 
+	// LOCK ORDER (review §4.5): MeshResultPool::m_mutex -> ChunkLightPool
+	// mutex, via detach() -> lightPool->release() below. The reverse order
+	// exists nowhere (the light pool never calls back into the mesh pool);
+	// keep it that way when threading either pool.
 	std::lock_guard<std::mutex> lock(m_mutex);
 
 	// Two protection levels (same policy as VoxelPool/BorderPool):

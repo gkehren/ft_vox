@@ -381,6 +381,18 @@ void GameSimulation::setPlayerPosition(glm::dvec3 feet)
     m_player.reset(feet);
 }
 
+void GameSimulation::restorePlayerFlight(bool enabled, glm::dvec3 feet)
+{
+    // Host lifecycle restore (review §4.8): benchmark/inspection exit must
+    // recover the EXACT pre-benchmark mode even when the scripted camera
+    // ends embedded in terrain — the gameplay clearance validation of
+    // setPlayerFlight(false) would refuse and leave flight stuck on. This
+    // is a lifecycle seam (the restore pattern), not a gameplay command.
+    m_playerFlight = enabled;
+    m_playerStatus = "";
+    m_player.reset(feet);
+}
+
 glm::dvec3 GameSimulation::spawnPlayerOnSurface(glm::dvec3 around)
 {
     if (!m_world)
@@ -760,6 +772,12 @@ RaycastHit GameSimulation::raycastVoxel(glm::vec3 origin, glm::vec3 dir, float m
     // cells answer inactive — the march passes through them, never hits.
     RaycastHit result{};
     if (!m_world)
+        return result;
+    // Degenerate-direction guard (review §4.4), symmetric to dropFromSlot:
+    // normalize(0) or a non-finite component yields NaN, and floor(NaN) ->
+    // ivec3 cast is UB. A zero/invalid ray simply hits nothing.
+    if (!std::isfinite(dir.x) || !std::isfinite(dir.y) || !std::isfinite(dir.z) ||
+        glm::dot(dir, dir) < 1e-12f)
         return result;
     dir = glm::normalize(dir);
     const float step = 0.05f;

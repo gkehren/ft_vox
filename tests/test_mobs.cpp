@@ -39,16 +39,7 @@ void operator delete[](void *p, size_t) noexcept
     std::free(p);
 }
 using namespace entities;
-static int failures = 0;
-#define CHECK(x)                                                                                             \
-    do                                                                                                       \
-    {                                                                                                        \
-        if (!(x))                                                                                            \
-        {                                                                                                    \
-            std::cerr << "FAIL " << __LINE__ << ": " #x "\n";                                                \
-            ++failures;                                                                                      \
-        }                                                                                                    \
-    } while (0)
+#include "TestMain.hpp"
 class World : public MobWorld
 {
   public:
@@ -101,13 +92,13 @@ static void controller()
         World w;
         auto m = walker(MobSpecies(species));
         tick(m, w, 120);
-        CHECK(m.body.position.x > 1);
-        CHECK(std::abs(m.body.position.y) < 0.01);
-        CHECK(m.gait > 0);
-        CHECK(m.body.grounded);
+        CHECK_EXPR(m.body.position.x > 1);
+        CHECK_EXPR(std::abs(m.body.position.y) < 0.01);
+        CHECK_EXPR(m.gait > 0);
+        CHECK_EXPR(m.body.grounded);
         w.wall = 3;
         tick(m, w, 600);
-        CHECK(m.body.bounds().max.x <= 3.001);
+        CHECK_EXPR(m.body.bounds().max.x <= 3.001);
         w = World{};
         w.ledge = 2;
         w.step = 1;
@@ -118,40 +109,40 @@ static void controller()
             tick(m, w, 1);
             maxY = std::max(maxY, m.body.position.y);
         }
-        CHECK(maxY > 0.9);
-        CHECK(m.body.position.x > 2.0);
+        CHECK_EXPR(maxY > 0.9);
+        CHECK_EXPR(m.body.position.x > 2.0);
         w = World{};
         w.ledge = 2;
         w.hole = true;
         m = walker(MobSpecies(species));
         tick(m, w, 600);
-        CHECK(m.body.position.y > -0.01);
-        CHECK(m.body.position.x < 2);
+        CHECK_EXPR(m.body.position.y > -0.01);
+        CHECK_EXPR(m.body.position.x < 2);
         w = World{};
         w.unknown = 2;
         m = walker(MobSpecies(species));
         tick(m, w, 300);
-        CHECK(m.body.bounds().max.x <= 2.001);
+        CHECK_EXPR(m.body.bounds().max.x <= 2.001);
         w = World{};
         m = walker(MobSpecies(species));
         w.floor = -3;
         tick(m, w, 180);
-        CHECK(m.body.position.y < -2.9 && m.body.position.y > -3.01);
+        CHECK_EXPR(m.body.position.y < -2.9 && m.body.position.y > -3.01);
         w = World{};
         m = walker(MobSpecies(species));
         w.floor = -4;
         w.water = 0;
         tick(m, w, 480);
-        CHECK(m.body.position.y > -2.0);
-        CHECK(m.body.position.y < 0.1);
+        CHECK_EXPR(m.body.position.y > -2.0);
+        CHECK_EXPR(m.body.position.y < 0.1);
     }
     World w;
     auto m = walker();
     w.unknown = -1;
     const auto original = m.body.position;
     tick(m, w, 120);
-    CHECK(m.body.position == original);
-    CHECK(m.body.waitingForTerrain);
+    CHECK_EXPR(m.body.position == original);
+    CHECK_EXPR(m.body.waitingForTerrain);
     // Low ceiling forbids stepping; it must not teleport through the obstruction.
     w = World{};
     w.ledge = 2;
@@ -159,7 +150,7 @@ static void controller()
     w.ceiling = 2;
     m = walker();
     tick(m, w, 360);
-    CHECK(m.body.bounds().max.x < 2.001);
+    CHECK_EXPR(m.body.bounds().max.x < 2.001);
 }
 static void population()
 {
@@ -172,45 +163,45 @@ static void population()
         a.update(1.0 / 60, w, {0, 0, 0}, 112);
         b.update(1.0 / 60, w, {0, 0, 0}, 112);
     }
-    CHECK(!a.mobs().empty());
-    CHECK(a.mobs().size() <= 48);
-    CHECK(a.mobs().size() == b.mobs().size());
+    CHECK_EXPR(!a.mobs().empty());
+    CHECK_EXPR(a.mobs().size() <= 48);
+    CHECK_EXPR(a.mobs().size() == b.mobs().size());
     std::set<uint64_t> ids;
     for (size_t i = 0; i < a.mobs().size(); ++i)
     {
-        CHECK(ids.insert(a.mobs()[i].id).second);
-        CHECK(a.mobs()[i].body.position == b.mobs()[i].body.position);
+        CHECK_EXPR(ids.insert(a.mobs()[i].id).second);
+        CHECK_EXPR(a.mobs()[i].body.position == b.mobs()[i].body.position);
     }
     auto count = a.mobs().size();
     a.update(20, w, {0, 0, 0}, 112, true);
-    CHECK(a.mobs().size() == count);
-    CHECK(a.droppedSteps() == 0);
+    CHECK_EXPR(a.mobs().size() == count);
+    CHECK_EXPR(a.droppedSteps() == 0);
     a.update(1.0, w, {0, 0, 0}, 112);
-    CHECK(a.droppedSteps() > 0);
+    CHECK_EXPR(a.droppedSteps() > 0);
     a.update(0, w, {1000, 0, 1000}, 0);
-    CHECK(a.mobs().empty());
+    CHECK_EXPR(a.mobs().empty());
     a.reset(42);
-    CHECK(a.mobs().empty());
+    CHECK_EXPR(a.mobs().empty());
     w.unknown = -10000;
     for (int i = 0; i < 60; ++i)
         a.update(1.0 / 60, w, {0, 0, 0}, 112);
-    CHECK(a.mobs().empty());
+    CHECK_EXPR(a.mobs().empty());
     w.unknown = 10000;
     for (int i = 0; i < 120; ++i)
         a.update(1.0 / 60, w, {-80, 0, -80}, 112);
-    CHECK(!a.mobs().empty());
+    CHECK_EXPR(!a.mobs().empty());
     // No surface candidates means no forced spawn even in an empty loaded world.
     w.spawn = false;
     b.reset(42);
     for (int i = 0; i < 600; ++i)
         b.update(1.0 / 60, w, {0, 0, 0}, 112);
-    CHECK(b.mobs().empty());
+    CHECK_EXPR(b.mobs().empty());
     // Long traversal keeps ownership bounded, including group retirement.
     w.spawn = true;
     for (int i = 0; i < 10000; ++i)
     {
         a.update(1.0 / 30, w, {i * 0.3, 0, i * 0.13}, 112);
-        CHECK(a.mobs().size() <= 48);
+        CHECK_EXPR(a.mobs().size() <= 48);
     }
 }
 static void timing()
@@ -222,14 +213,14 @@ static void timing()
     {
         MobSystem s;
         s.reset(123);
-        CHECK(s.add(MobSpecies::Pig, {0, 0.001, 0}, 1, 1, w));
+        CHECK_EXPR(s.add(MobSpecies::Pig, {0, 0.001, 0}, 1, 1, w));
         for (int i = 0; i < fps * 20; ++i)
             s.update(1.0 / fps, w, {0, 0, 0}, 112);
         final.push_back(s.mobs()[0].body.position);
-        CHECK(s.droppedSteps() == 0);
+        CHECK_EXPR(s.droppedSteps() == 0);
     }
     for (auto p : final)
-        CHECK(glm::length(p - final[0]) < 1e-7);
+        CHECK_EXPR(glm::length(p - final[0]) < 1e-7);
 }
 static void contracts()
 {
@@ -237,26 +228,26 @@ static void contracts()
     MobSystem s;
     s.reset(42);
     // Out-of-range species is rejected before any state mutation.
-    CHECK(!s.add(static_cast<MobSpecies>(255), {0.5, 0.001, 0.5}, 1, 1, w));
-    CHECK(s.mobs().empty());
+    CHECK_EXPR(!s.add(static_cast<MobSpecies>(255), {0.5, 0.001, 0.5}, 1, 1, w));
+    CHECK_EXPR(s.mobs().empty());
     // Duplicate ids are rejected and leave the population unchanged.
-    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 42, 42, w));
-    CHECK(!s.add(MobSpecies::Pig, {8.5, 0.001, 0.5}, 42, 42, w));
-    CHECK(s.mobs().size() == 1);
+    CHECK_EXPR(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 42, 42, w));
+    CHECK_EXPR(!s.add(MobSpecies::Pig, {8.5, 0.001, 0.5}, 42, 42, w));
+    CHECK_EXPR(s.mobs().size() == 1);
     // Capacity is a hard ceiling.
     for (size_t i = s.mobs().size(); i < MobSettings::capacity; ++i)
-        CHECK(s.add(MobSpecies(i % kMobSpeciesCount), {8.0 + (i % 8) * 4.0, 0.001, 8.0 + (i / 8) * 4.0},
+        CHECK_EXPR(s.add(MobSpecies(i % kMobSpeciesCount), {8.0 + (i % 8) * 4.0, 0.001, 8.0 + (i / 8) * 4.0},
                     100 + i, 100 + i, w));
-    CHECK(s.mobs().size() == MobSettings::capacity);
-    CHECK(!s.add(MobSpecies::Chicken, {-4.5, 0.001, 0.5}, 999, 999, w));
-    CHECK(s.mobs().size() == MobSettings::capacity);
+    CHECK_EXPR(s.mobs().size() == MobSettings::capacity);
+    CHECK_EXPR(!s.add(MobSpecies::Chicken, {-4.5, 0.001, 0.5}, 999, 999, w));
+    CHECK_EXPR(s.mobs().size() == MobSettings::capacity);
     // Reset clears population and simulation bookkeeping; ids become reusable.
     s.update(1.0 / 60, w, {16, 0, 12}, 112);
     s.reset(7);
-    CHECK(s.mobs().empty());
-    CHECK(s.droppedSteps() == 0);
-    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 42, 42, w));
-    CHECK(s.mobs().size() == 1);
+    CHECK_EXPR(s.mobs().empty());
+    CHECK_EXPR(s.droppedSteps() == 0);
+    CHECK_EXPR(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 42, 42, w));
+    CHECK_EXPR(s.mobs().size() == 1);
     // Valid boundary settings stay bounded and NaN-free (solo groups, every
     // chunk-column eligible, single attempt per scan).
     MobSystem tight;
@@ -268,9 +259,9 @@ static void contracts()
     for (int i = 0; i < 600; ++i)
     {
         tight.update(1.0 / 60, w, {0, 0, 0}, 112);
-        CHECK(tight.mobs().size() <= MobSettings::capacity);
+        CHECK_EXPR(tight.mobs().size() <= MobSettings::capacity);
         for (auto &mob : tight.mobs())
-            CHECK(std::isfinite(mob.body.position.x) && std::isfinite(mob.body.position.z));
+            CHECK_EXPR(std::isfinite(mob.body.position.x) && std::isfinite(mob.body.position.z));
     }
 }
 static void finiteSteering()
@@ -288,29 +279,29 @@ static void finiteSteering()
     physics::QueryStats q;
     for (int i = 0; i < 120; ++i)
         tickMob(m, w, 1.0 / 60, neighbors, q);
-    CHECK(std::isfinite(m.body.position.x));
-    CHECK(std::isfinite(m.body.position.y));
-    CHECK(std::isfinite(m.body.position.z));
-    CHECK(std::isfinite(m.body.velocity.x));
-    CHECK(std::isfinite(m.body.velocity.y));
-    CHECK(std::isfinite(m.body.velocity.z));
-    CHECK(std::isfinite(m.yaw));
-    CHECK(std::isfinite(m.targetYaw));
+    CHECK_EXPR(std::isfinite(m.body.position.x));
+    CHECK_EXPR(std::isfinite(m.body.position.y));
+    CHECK_EXPR(std::isfinite(m.body.position.z));
+    CHECK_EXPR(std::isfinite(m.body.velocity.x));
+    CHECK_EXPR(std::isfinite(m.body.velocity.y));
+    CHECK_EXPR(std::isfinite(m.body.velocity.z));
+    CHECK_EXPR(std::isfinite(m.yaw));
+    CHECK_EXPR(std::isfinite(m.targetYaw));
     // 48 densely packed mobs stay finite over a long run.
     MobSystem s;
     s.reset(7);
     for (size_t i = 0; i < MobSettings::capacity; ++i)
-        CHECK(s.add(MobSpecies(i % kMobSpeciesCount), {(i % 8) * 1.5, 0.001, (i / 8) * 1.5}, i + 1, i + 1, w));
+        CHECK_EXPR(s.add(MobSpecies(i % kMobSpeciesCount), {(i % 8) * 1.5, 0.001, (i / 8) * 1.5}, i + 1, i + 1, w));
     for (int i = 0; i < 1000; ++i)
     {
         s.update(1.0 / 60, w, {5.0, 0, 4.0}, 112);
         for (auto &mob : s.mobs())
         {
-            CHECK(std::isfinite(mob.body.position.x));
-            CHECK(std::isfinite(mob.body.position.y));
-            CHECK(std::isfinite(mob.body.position.z));
-            CHECK(std::isfinite(mob.yaw));
-            CHECK(std::isfinite(mob.targetYaw));
+            CHECK_EXPR(std::isfinite(mob.body.position.x));
+            CHECK_EXPR(std::isfinite(mob.body.position.y));
+            CHECK_EXPR(std::isfinite(mob.body.position.z));
+            CHECK_EXPR(std::isfinite(mob.yaw));
+            CHECK_EXPR(std::isfinite(mob.targetYaw));
         }
     }
 }
@@ -318,12 +309,12 @@ static void models()
 {
     MobModels models;
     for (auto &model : models.models)
-        CHECK(model.parts.size() >= 6);
+        CHECK_EXPR(model.parts.size() >= 6);
     for (auto &v : models.vertices)
     {
-        CHECK(std::isfinite(v.position.x));
-        CHECK(std::abs(glm::length(v.normal) - 1) < 0.001);
-        CHECK(v.uv.x >= 0 && v.uv.x <= 1 && v.uv.y >= 0 && v.uv.y <= 1);
+        CHECK_EXPR(std::isfinite(v.position.x));
+        CHECK_EXPR(std::abs(glm::length(v.normal) - 1) < 0.001);
+        CHECK_EXPR(v.uv.x >= 0 && v.uv.x <= 1 && v.uv.y >= 0 && v.uv.y <= 1);
     }
     MobRenderState state{};
     state.position = {10, 20, 30};
@@ -331,8 +322,8 @@ static void models()
         for (auto &part : model.parts)
         {
             auto matrix = mobPartTransform(state, part);
-            CHECK(std::isfinite(matrix[3].y));
-            CHECK(part.firstVertex + part.vertexCount <= models.vertices.size());
+            CHECK_EXPR(std::isfinite(matrix[3].y));
+            CHECK_EXPR(part.firstVertex + part.vertexCount <= models.vertices.size());
         }
 }
 static void animationTimeline()
@@ -343,11 +334,11 @@ static void animationTimeline()
     auto m = walker();
     physics::QueryStats q;
     tickMob(m, w, 1.0 / 60, {}, q);
-    CHECK(m.previousAge == 0);
-    CHECK(std::abs(m.age - 1.0 / 60) < 1e-12);
+    CHECK_EXPR(m.previousAge == 0);
+    CHECK_EXPR(std::abs(m.age - 1.0 / 60) < 1e-12);
     tickMob(m, w, 1.0 / 60, {}, q);
-    CHECK(std::abs(m.previousAge - 1.0 / 60) < 1e-12);
-    CHECK(std::abs(m.age - 2.0 / 60) < 1e-12);
+    CHECK_EXPR(std::abs(m.previousAge - 1.0 / 60) < 1e-12);
+    CHECK_EXPR(std::abs(m.age - 2.0 / 60) < 1e-12);
 }
 static void subTickCosmetics()
 {
@@ -357,7 +348,7 @@ static void subTickCosmetics()
     w.spawn = false;
     MobSystem s;
     s.reset(7);
-    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+    CHECK_EXPR(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
     std::vector<MobRenderState> states;
     for (int i = 0; i < 8; ++i) // two completed fixed ticks
         s.update(1.0 / 240, w, {0, 0, 0}, 112);
@@ -367,15 +358,15 @@ static void subTickCosmetics()
     {
         s.update(1.0 / 240, w, {0, 0, 0}, 112);
         s.renderStates(states);
-        CHECK(states.size() == 1);
-        CHECK(std::isfinite(states[0].look));
-        CHECK(std::abs(states[0].look) <= 0.25f + 1e-6f);
+        CHECK_EXPR(states.size() == 1);
+        CHECK_EXPR(std::isfinite(states[0].look));
+        CHECK_EXPR(std::abs(states[0].look) <= 0.25f + 1e-6f);
         if (i && states[0].look != last)
             ++changes;
         last = states[0].look;
     }
     // Quantized sampling would repeat each tick's phase four times.
-    CHECK(changes >= 12);
+    CHECK_EXPR(changes >= 12);
 }
 static void chickenFlap()
 {
@@ -383,15 +374,15 @@ static void chickenFlap()
     w.spawn = false;
     MobSystem s;
     s.reset(7);
-    CHECK(s.add(MobSpecies::Chicken, {0.5, 0.001, 0.5}, 1, 1, w));
+    CHECK_EXPR(s.add(MobSpecies::Chicken, {0.5, 0.001, 0.5}, 1, 1, w));
     std::vector<MobRenderState> states;
     // Grounded chickens never flap, whatever the render phase.
     for (int i = 0; i < 12; ++i)
     {
         s.update(1.0 / 240, w, {0, 0, 0}, 112);
         s.renderStates(states);
-        CHECK(s.mobs()[0].body.grounded);
-        CHECK(states[0].flap == 0.0f);
+        CHECK_EXPR(s.mobs()[0].body.grounded);
+        CHECK_EXPR(states[0].flap == 0.0f);
     }
     // Remove every solid cell: the chicken falls and stays airborne, so the
     // wing-flap phase is exposed at sub-tick cadence.
@@ -405,14 +396,14 @@ static void chickenFlap()
     {
         s.update(1.0 / 240, w, {0, 0, 0}, 112);
         s.renderStates(states);
-        CHECK(!s.mobs()[0].body.grounded);
-        CHECK(std::isfinite(states[0].flap));
-        CHECK(states[0].flap > 0.099f && states[0].flap < 1.501f);
+        CHECK_EXPR(!s.mobs()[0].body.grounded);
+        CHECK_EXPR(std::isfinite(states[0].flap));
+        CHECK_EXPR(states[0].flap > 0.099f && states[0].flap < 1.501f);
         if (i && states[0].flap != last)
             ++changes;
         last = states[0].flap;
     }
-    CHECK(changes >= 12);
+    CHECK_EXPR(changes >= 12);
 }
 static void poseTimeAlignment()
 {
@@ -425,7 +416,7 @@ static void poseTimeAlignment()
     {
         MobSystem s;
         s.reset(7);
-        CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+        CHECK_EXPR(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
         for (int i = 0; i < 5; ++i) // complete fixed ticks leave alpha at 0
             s.update(s.settings.fixedStep, w, {0, 0, 0}, 112);
         s.update(alpha * s.settings.fixedStep, w, {0, 0, 0}, 112);
@@ -433,7 +424,7 @@ static void poseTimeAlignment()
         const auto &m = s.mobs()[0];
         const double renderAge = m.previousAge + (m.age - m.previousAge) * alpha;
         const float expected = float(std::sin(renderAge * 0.7 + double(m.id % 100)) * 0.25);
-        CHECK(std::abs(states[0].look - expected) < 1e-6);
+        CHECK_EXPR(std::abs(states[0].look - expected) < 1e-6);
     }
 }
 static void locomotionInterpolationNonRegression()
@@ -447,7 +438,7 @@ static void locomotionInterpolationNonRegression()
     {
         MobSystem s;
         s.reset(7);
-        CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+        CHECK_EXPR(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
         // Tick until a locomotion tick separates the channels from their
         // snapshots: the idle mob starts walking within its initial 2-6 s
         // timer, well inside the 600-tick bound.
@@ -456,21 +447,21 @@ static void locomotionInterpolationNonRegression()
              ++i)
             s.update(s.settings.fixedStep, w, {0, 0, 0}, 112);
         const auto &m = s.mobs()[0];
-        CHECK(m.previousGait != m.gait);
-        CHECK(m.previousStride != m.stride);
+        CHECK_EXPR(m.previousGait != m.gait);
+        CHECK_EXPR(m.previousStride != m.stride);
         s.update(alpha * s.settings.fixedStep, w, {0, 0, 0}, 112);
         s.renderStates(states);
         const float expectedGait = float(m.previousGait + (m.gait - m.previousGait) * alpha);
         const float expectedStride = float(m.previousStride + (m.stride - m.previousStride) * alpha);
-        CHECK(std::abs(states[0].gait - expectedGait) < 1e-6);
-        CHECK(std::abs(states[0].stride - expectedStride) < 1e-6);
+        CHECK_EXPR(std::abs(states[0].gait - expectedGait) < 1e-6);
+        CHECK_EXPR(std::abs(states[0].stride - expectedStride) < 1e-6);
         // Rendering must not touch the locomotion channels or their snapshots.
         const double gait = m.gait, stride = m.stride;
         const double previousGait = m.previousGait, previousStride = m.previousStride;
         s.renderStates(states);
         s.renderStates(states);
-        CHECK(m.gait == gait && m.stride == stride);
-        CHECK(m.previousGait == previousGait && m.previousStride == previousStride);
+        CHECK_EXPR(m.gait == gait && m.stride == stride);
+        CHECK_EXPR(m.previousGait == previousGait && m.previousStride == previousStride);
     }
 }
 static void renderCadenceInvariance()
@@ -486,16 +477,16 @@ static void renderCadenceInvariance()
     {
         MobSystem s;
         s.reset(123);
-        CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+        CHECK_EXPR(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
         for (int i = 0; i < fps * 12; ++i) // 12 s = 720 exact fixed ticks
             s.update(1.0 / fps, w, {0, 0, 0}, 112);
-        CHECK(s.droppedSteps() == 0);
+        CHECK_EXPR(s.droppedSteps() == 0);
         s.renderStates(states);
-        CHECK(std::abs(s.mobs()[0].age - 12.0) < 1e-9);
+        CHECK_EXPR(std::abs(s.mobs()[0].age - 12.0) < 1e-9);
         looks.push_back(states[0].look);
     }
     for (auto f : looks)
-        CHECK(std::abs(f - looks[0]) < 1e-6);
+        CHECK_EXPR(std::abs(f - looks[0]) < 1e-6);
 }
 static void suspensionResume()
 {
@@ -503,7 +494,7 @@ static void suspensionResume()
     w.spawn = false;
     MobSystem s;
     s.reset(7);
-    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+    CHECK_EXPR(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
     for (int i = 0; i < 30; ++i)
         s.update(s.settings.fixedStep, w, {0, 0, 0}, 112);
     s.update(1.0 / 240, w, {0, 0, 0}, 112, true); // collapse interpolation
@@ -515,16 +506,16 @@ static void suspensionResume()
     {
         s.update(1.0 / 240, w, {0, 0, 0}, 112, true);
         s.renderStates(states);
-        CHECK(states[0].look == frozenLook);
-        CHECK(states[0].flap == 0.0f);
-        CHECK(s.mobs()[0].age == frozenAge);
-        CHECK(s.mobs()[0].previousAge == frozenAge);
+        CHECK_EXPR(states[0].look == frozenLook);
+        CHECK_EXPR(states[0].flap == 0.0f);
+        CHECK_EXPR(s.mobs()[0].age == frozenAge);
+        CHECK_EXPR(s.mobs()[0].previousAge == frozenAge);
     }
     // Resume: the phase continues from the frozen timeline with no
     // wall-clock-sized jump.
     s.update(1.0 / 240, w, {0, 0, 0}, 112);
     s.renderStates(states);
-    CHECK(std::abs(states[0].look - frozenLook) < 1e-6);
+    CHECK_EXPR(std::abs(states[0].look - frozenLook) < 1e-6);
     float advanced = states[0].look;
     for (int i = 0; i < 8; ++i)
     {
@@ -532,7 +523,7 @@ static void suspensionResume()
         s.renderStates(states);
         advanced = states[0].look;
     }
-    CHECK(advanced != frozenLook);
+    CHECK_EXPR(advanced != frozenLook);
 }
 static void droppedStepPhase()
 {
@@ -542,24 +533,24 @@ static void droppedStepPhase()
     w.spawn = false;
     MobSystem s;
     s.reset(7);
-    CHECK(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
+    CHECK_EXPR(s.add(MobSpecies::Cow, {0.5, 0.001, 0.5}, 1, 1, w));
     s.update(0.2, w, {0, 0, 0}, 112); // requests 12 ticks, maxSteps=8
-    CHECK(s.droppedSteps() == 4);
+    CHECK_EXPR(s.droppedSteps() == 4);
     std::vector<MobRenderState> states;
     s.renderStates(states);
     const auto &m = s.mobs()[0];
-    CHECK(std::isfinite(states[0].look) && std::isfinite(states[0].flap));
+    CHECK_EXPR(std::isfinite(states[0].look) && std::isfinite(states[0].flap));
     // Only the eight retained ticks advanced; the dropped four never reach
     // the animation clock.
-    CHECK(std::abs(m.age - 8.0 / 60) < 1e-9);
+    CHECK_EXPR(std::abs(m.age - 8.0 / 60) < 1e-9);
     // The drained accumulator renders at alpha ~ 0, i.e. at previousAge.
     const float expected = float(std::sin(m.previousAge * 0.7 + double(m.id % 100)) * 0.25);
-    CHECK(std::abs(states[0].look - expected) < 1e-6);
+    CHECK_EXPR(std::abs(states[0].look - expected) < 1e-6);
     for (int i = 0; i < 8; ++i) // normal frames resume smooth interpolation
     {
         s.update(1.0 / 240, w, {0, 0, 0}, 112);
         s.renderStates(states);
-        CHECK(std::isfinite(states[0].look));
+        CHECK_EXPR(std::isfinite(states[0].look));
     }
 }
 static void renderHandoffReadOnly()
@@ -569,18 +560,18 @@ static void renderHandoffReadOnly()
     MobSystem s;
     s.reset(7);
     for (size_t i = 0; i < 4; ++i)
-        CHECK(s.add(MobSpecies(i), {0.5 + i * 2.0, 0.001, 0.5}, i + 1, i + 1, w));
+        CHECK_EXPR(s.add(MobSpecies(i), {0.5 + i * 2.0, 0.001, 0.5}, i + 1, i + 1, w));
     for (int i = 0; i < 30; ++i)
         s.update(1.0 / 60, w, {2, 0, 0}, 112);
     std::vector<MobRenderState> a, b;
     s.renderStates(a);
     s.renderStates(b);
-    CHECK(a.size() == b.size());
+    CHECK_EXPR(a.size() == b.size());
     for (size_t i = 0; i < a.size(); ++i)
     {
-        CHECK(a[i].look == b[i].look);
-        CHECK(a[i].flap == b[i].flap);
-        CHECK(a[i].position == b[i].position);
+        CHECK_EXPR(a[i].look == b[i].look);
+        CHECK_EXPR(a[i].flap == b[i].flap);
+        CHECK_EXPR(a[i].position == b[i].position);
     }
     // Rendering consumes simulation state without mutating it. randomState is
     // snapshotted as uint64_t: narrowing it through double keeps only 53 bits
@@ -600,24 +591,24 @@ static void renderHandoffReadOnly()
     for (auto &m : s.mobs())
         before.push_back({m.age, m.previousAge, m.randomState, m.body.position, m.yaw, m.gait, m.stride});
     s.renderStates(a);
-    CHECK(s.mobs().size() == before.size());
+    CHECK_EXPR(s.mobs().size() == before.size());
     for (size_t i = 0; i < before.size(); ++i)
     {
         const auto &m = s.mobs()[i];
-        CHECK(m.age == before[i].age);
-        CHECK(m.previousAge == before[i].previousAge);
-        CHECK(m.randomState == before[i].randomState);
-        CHECK(m.body.position == before[i].position);
-        CHECK(m.yaw == before[i].yaw);
-        CHECK(m.gait == before[i].gait);
-        CHECK(m.stride == before[i].stride);
+        CHECK_EXPR(m.age == before[i].age);
+        CHECK_EXPR(m.previousAge == before[i].previousAge);
+        CHECK_EXPR(m.randomState == before[i].randomState);
+        CHECK_EXPR(m.body.position == before[i].position);
+        CHECK_EXPR(m.yaw == before[i].yaw);
+        CHECK_EXPR(m.gait == before[i].gait);
+        CHECK_EXPR(m.stride == before[i].stride);
     }
     // Steady-state rendering does not allocate.
     counting = true;
     for (int i = 0; i < 100; ++i)
         s.renderStates(a);
     counting = false;
-    CHECK(allocations == 0);
+    CHECK_EXPR(allocations == 0);
 }
 static void longRunPrecision()
 {
@@ -627,17 +618,17 @@ static void longRunPrecision()
     MobSystem s;
     s.reset(7);
     s.settings.maxSteps = 1000000;
-    CHECK(s.add(MobSpecies::Chicken, {0.5, 0.001, 0.5}, 1, 1, w));
+    CHECK_EXPR(s.add(MobSpecies::Chicken, {0.5, 0.001, 0.5}, 1, 1, w));
     w.ledge = -10000; // fall forever: flap phase active the whole run
     w.hole = true;
     s.update(3600, w, {0, 0, 0}, 112);
     std::vector<MobRenderState> states;
     s.renderStates(states);
-    CHECK(std::isfinite(s.mobs()[0].age));
-    CHECK(std::isfinite(states[0].look));
-    CHECK(std::isfinite(states[0].flap));
-    CHECK(std::abs(states[0].look) <= 0.25f + 1e-6f);
-    CHECK(states[0].flap > 0.099f && states[0].flap < 1.501f);
+    CHECK_EXPR(std::isfinite(s.mobs()[0].age));
+    CHECK_EXPR(std::isfinite(states[0].look));
+    CHECK_EXPR(std::isfinite(states[0].flap));
+    CHECK_EXPR(std::abs(states[0].look) <= 0.25f + 1e-6f);
+    CHECK_EXPR(states[0].flap > 0.099f && states[0].flap < 1.501f);
 }
 static void profile()
 {
@@ -646,7 +637,7 @@ static void profile()
     MobSystem s;
     s.reset(42);
     for (int i = 0; i < 48; ++i)
-        CHECK(s.add(MobSpecies(i % kMobSpeciesCount), {(i % 8) * 4.0, 0.001, (i / 8) * 4.0}, i + 1, i + 1, w));
+        CHECK_EXPR(s.add(MobSpecies(i % kMobSpeciesCount), {(i % 8) * 4.0, 0.001, (i / 8) * 4.0}, i + 1, i + 1, w));
     for (int i = 0; i < 600; ++i)
         s.update(1.0 / 60, w, {16, 0, 12}, 112);
     std::vector<MobRenderState> states;
@@ -666,8 +657,8 @@ static void profile()
         times.push_back(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
     }
-    CHECK(allocations == 0);
-    CHECK(s.mobs().size() == 48);
+    CHECK_EXPR(allocations == 0);
+    CHECK_EXPR(s.mobs().size() == 48);
     double sum = 0;
     for (auto t : times)
         sum += t;
@@ -712,6 +703,6 @@ int main(int argc, char **argv)
     models();
     if (argc > 1 && std::string_view(argv[1]) == "--profile")
         profile();
-    std::cout << "Passive mobs: " << failures << " failures\n";
-    return failures ? 1 : 0;
+    std::cout << "Passive mobs: " << testmain::fails << " testmain::fails\n";
+    return testmain::exitCode();
 }

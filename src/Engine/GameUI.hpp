@@ -158,14 +158,22 @@ struct GameUIFrame
 	/// Frame staging ring (Engine-owned): live slice usage/capacity for the
 	/// memory panel. Never used by the UI for allocation.
 	StagingRing *staging{nullptr};
-	TextureType *selectedTexture{nullptr};
+	/// Creative selection: READ-ONLY view + command callback (review M6).
+	/// The UI used to write authoritative sim state through a mutable
+	/// pointer; it now issues setSelectedBlock exactly like the inventory
+	/// commands below.
+	const TextureType *selectedTexture{nullptr};
+	std::function<void(TextureType)> setSelectedBlock;
 	OverlayHighlight *highlight{nullptr};
 
 	bool *mouseCaptured{nullptr};
 	bool *showChunkBorders{nullptr};
 	bool *showDemoPlayers{nullptr};
-    bool *mobsEnabled{nullptr};
-    size_t mobCount{}, mobVisible{};
+	/// Passive-mob toggle: read-only value + command (review M6, the
+	/// selectedTexture pattern).
+	bool mobsEnabled{false};
+	std::function<void(bool)> setMobsEnabled;
+	size_t mobCount{}, mobVisible{};
 	bool *paused{nullptr};
 
 	/// Gameplay inventory presentation (issue #229, Epic #223 Phase F):

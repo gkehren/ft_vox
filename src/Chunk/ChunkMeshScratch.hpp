@@ -47,8 +47,12 @@ struct MeshWorkspace
     mask.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
     faceKeyLo.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
     faceKeyHi.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
-    skyQ.reserve(512);
-    blockQ.reserve(256);
+    // Sized for real usage (review §4.5): the sky flood queue holds tens of
+    // thousands of cells per chunk (30-45k measured); the old reserve(512)
+    // guaranteed a realloc + ~1 MiB copy on every worker's first job. One
+    // reservation per worker, like the other scratch buffers.
+    skyQ.reserve(32768);
+    blockQ.reserve(4096);
     waterGrid.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
     openGrid.reserve(CHUNK_HEIGHT * CHUNK_SIZE);
   }

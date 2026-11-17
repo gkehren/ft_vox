@@ -20,19 +20,8 @@
 #include <string>
 #include <thread>
 
-static int g_fails = 0;
-static int g_checks = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		++g_checks;                                                            \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 namespace
 {
@@ -263,11 +252,11 @@ int main()
 		}
 	}
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed (" << g_checks << " run)\n";
+		std::cerr << testmain::fails << " check(s) failed (" << testmain::checks << " run)\n";
 		return 1;
 	}
-	std::cout << "PASS: engine reload lifecycle (" << g_checks << " checks)" << std::endl;
+	std::cout << "PASS: engine reload lifecycle (" << testmain::checks << " checks)" << std::endl;
 	return 0;
 }

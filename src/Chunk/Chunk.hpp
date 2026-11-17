@@ -72,6 +72,21 @@ public:
 	Chunk &operator=(Chunk &&other) noexcept;
 	~Chunk();
 
+private:
+	/// Empty-state construction for the move constructor to delegate to
+	/// (review M11): every member carries a default initializer, so the
+	/// transfer lives in ONE place (moveFrom) instead of two diverging
+	/// ~80-line copies.
+	Chunk() noexcept = default;
+	/// Single move-transfer implementation (review M11): copies every field
+	/// — including m_activeIndex, which the old ctor/assign pair dropped —
+	/// then zeroes the moved-from render state. The caller releases the
+	/// destination's prior resources first (move assignment) or starts from
+	/// the empty default state (move construction).
+	void moveFrom(Chunk &&other) noexcept;
+
+public:
+
 	// --- Authoritative record binding (issue #206) ---------------------------
 	/// The record this chunk reads/writes voxels through: the bound world
 	/// record, or the privately owned one for standalone chunks. Null on a
@@ -497,7 +512,7 @@ public:
 	}
 
 	bool isVisible() const { return visible; }
-	void setVisible(bool visible) { this->visible = visible; }
+	void setVisible(bool v) { visible = v; } // param renamed: no member shadow (review M21)
 
 private:
 	// --- Authoritative record binding (issue #206) ---------------------------
@@ -556,7 +571,7 @@ private:
 			m_active->recountOccupancy();
 	}
 
-	bool visible;
+	bool visible{false};
 
 	VmaAllocator m_allocator{VK_NULL_HANDLE};
 
@@ -673,7 +688,7 @@ private:
 	uint32_t opaqueIndexCount{0};
 	uint32_t waterIndexCount{0};
 
-	std::atomic<bool> meshNeedsUpdate;
+	std::atomic<bool> meshNeedsUpdate{true};
 	bool m_isLODMesh{false};
 	std::atomic<bool> m_localLightCacheWanted{false};
 

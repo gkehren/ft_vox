@@ -5,6 +5,21 @@
 
 // Vegetation placers (trees, cactus, ice spikes) — split out of TerrainGenerator.cpp
 // so core noise/batch generation stays scannable.
+//
+// Feature seed-offset registry (review §4.5): every placer derives its RNG
+// from treeHash(worldX, worldZ, m_seed + OFFSET). Offsets are WORLDGEN
+// IDENTITY — changing one re-rolls every feature of that kind and breaks
+// save/digest/visual-reference parity, so they are append-only like the
+// block catalog. Known collision: placeIceSpike and placeBamboo both use
+// +600; harmless today because their biome gates are disjoint (frozen vs
+// jungle), but a NEW placer must pick a fresh offset from this table:
+//   +100 oak-type tree candidate   +150 birch-type    +200 mature tree
+//   +300 spruce/conifer            +400 jungle        +450 acacia/savanna
+//   +480 dark-oak                  +520/521 cherry    +540 redwood
+//   +560 palm                      +580 mangrove      +600 ice spike AND bamboo
+//   +620 giant mushroom
+// (Noise-domain offsets live in TerrainGenerator.cpp: +1000..+11000 surface,
+// +24000/+25000 ore, +26000..+35000 feature candidates.)
 
 void TerrainGenerator::placeMatureTree(const ChunkGenerationTarget &data, int x, int z,
                                        int base, BiomeType biome, uint32_t hash)
@@ -613,34 +628,10 @@ void TerrainGenerator::placeGiantMushroom(const ChunkGenerationTarget &chunkData
   setVoxelSafe(chunkData, localX, topY + 1, localZ, cap);
 }
 
-void TerrainGenerator::placeCactus(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
-{
-  uint32_t h = treeHash(worldX, worldZ, m_seed + 500);
-  int height = 1 + static_cast<int>(h & 3); // 1–4 blocks
-
-  for (int y = 0; y < height; ++y)
-  {
-    bool canPlace = true;
-    for (int dx = -1; dx <= 1 && canPlace; ++dx)
-    {
-      for (int dz = -1; dz <= 1 && canPlace; ++dz)
-      {
-        if (dx == 0 && dz == 0)
-          continue;
-        int nx = localX + dx, nz = localZ + dz;
-        if (nx >= 0 && nx < CHUNK_SIZE && nz >= 0 && nz < CHUNK_SIZE)
-        {
-          int checkIndex = getVoxelIndex(nx, baseY + y, nz);
-          auto nt = static_cast<TextureType>(chunkData.voxels[checkIndex].type);
-          if (nt != TextureType::AIR && nt != TextureType::SAND && nt != TextureType::RED_SAND)
-            canPlace = false;
-        }
-      }
-    }
-    if (canPlace)
-      setVoxelSafe(chunkData, localX, baseY + y, localZ, TextureType::CACTUS);
-  }
-}
+// (review §4.5: the dead placeCactus was removed — cacti are placed inline
+// by the desert feature path, and this uncalled copy indexed baseY + y
+// without the featureVoxel() bounds clamp the live placers use: a latent
+// OOB waiting for a future caller.)
 
 void TerrainGenerator::placeIceSpike(const ChunkGenerationTarget &chunkData, int localX, int localZ, int baseY, int worldX, int worldZ)
 {

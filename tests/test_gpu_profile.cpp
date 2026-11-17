@@ -96,9 +96,21 @@ int main()
         // must never inherit the first run's pending peaks, whichever way
         // the first run ended.
         auto sampleQueues = [&benchmark](size_t load, size_t gen, size_t mesh, size_t light) {
-            benchmark.sampleFrame(16.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 0.f,
-                                  100, 10, load, gen, mesh, light,
-                                  1, 1.f, 1, 1.f, 0, 0.f, 0, 0.f);
+            BenchmarkFrameSample s{};
+            s.frameMs = 16.f;
+            s.scopeStreaming = s.scopeAcquire = s.scopeRecord = s.scopeImGui = 1.f;
+            s.scopePresent = s.scopeVisibility = s.scopeMeshUpload = 1.f;
+            s.chunks = 100;
+            s.drawCount = 10;
+            s.pendingLoad = load;
+            s.pendingGen = gen;
+            s.pendingMesh = mesh;
+            s.pendingLight = light;
+            s.terrainJobs = 1;
+            s.terrainMs = 1.f;
+            s.meshJobs = 1;
+            s.meshMs = 1.f;
+            benchmark.sampleFrame(s);
         };
         auto runToCompletion = [&benchmark, &camera]() {
             benchmark.config().warmupSec = 0.f; // earlier sections raise it; warmup 0 = straight to Running
@@ -139,8 +151,14 @@ int main()
         // frame contribution averages over EVERY measured frame.
         {
             auto sampleGrow = [&benchmark](float poolGrow) {
-                benchmark.sampleFrame(16.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, poolGrow,
-                                      1, 1, 0, 0, 0, 0, 0, 0.f, 0, 0.f, 0, 0.f, 0, 0.f);
+                BenchmarkFrameSample s{};
+                s.frameMs = 16.f;
+                s.scopeStreaming = s.scopeAcquire = s.scopeRecord = s.scopeImGui = 1.f;
+                s.scopePresent = s.scopeVisibility = s.scopeMeshUpload = 1.f;
+                s.scopePoolGrow = poolGrow;
+                s.chunks = 1;
+                s.drawCount = 1;
+                benchmark.sampleFrame(s);
             };
             auto runBenchmark = [&benchmark, &camera]() {
                 benchmark.config().warmupSec = 0.f;

@@ -15,17 +15,8 @@
 #include <thread>
 #include <vector>
 
-static int g_fails = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 // World -> continuous map-pixel mapping used by the World-panel draw-list
 // overlays (issue #186): must agree with the grid parity contract and with
@@ -1464,7 +1455,7 @@ static int benchmark_maps()
 		std::cout << "zoom=" << zoom << " sequential_ms=" << sequential / 3
 				  << " scheduled_ms=" << parallel / 3 << '\n';
 	}
-	return g_fails ? 1 : 0;
+	return testmain::exitCode();
 }
 
 int main(int argc, char **argv)
@@ -1498,14 +1489,14 @@ int main(int argc, char **argv)
 	test_ready_result_with_interval_elapsed();
 	test_semantic_supersession_still_cancels_slow_job();
 
-	if (g_fails == 0)
+	if (testmain::fails == 0)
 	{
 		std::cout << "[test_biome_map] ALL TESTS PASSED\n";
 		return 0;
 	}
 	else
 	{
-		std::cerr << "[test_biome_map] " << g_fails << " TEST(S) FAILED\n";
+		std::cerr << "[test_biome_map] " << testmain::fails << " TEST(S) FAILED\n";
 		return 1;
 	}
 }

@@ -577,8 +577,10 @@ void SaveService::processJob(Job &job)
 			else
 			{
 				++m_completed;
-				// 28-byte header + 5 bytes per record (see WorldSave.hpp).
-				m_bytesWritten += 28u + 5u * static_cast<uint64_t>(overrides.size());
+				// Format geometry from the single definition in WorldSave.hpp
+				// (review §4.3: no duplicated magic numbers).
+				m_bytesWritten += worldsave::kChunkHeaderBytes +
+				                  worldsave::kChunkRecordBytes * static_cast<uint64_t>(overrides.size());
 			}
 			m_serializeTotalMs += serializeMs;
 			m_serializeMaxMs = std::max(m_serializeMaxMs, serializeMs);

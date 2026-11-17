@@ -38,19 +38,20 @@ void GpuResourceRetire::beginFrame(uint64_t frameNumber)
 	m_pending.resize(write);
 }
 
-void GpuResourceRetire::retireBuffer(AllocatedBuffer buffer)
+void GpuResourceRetire::retireBuffer(AllocatedBuffer &&buffer)
 {
 	if (buffer.buffer == VK_NULL_HANDLE)
 		return;
 	Entry e;
-	e.buffer = buffer;
+	e.buffer = std::move(buffer);
 	e.destroyAfterFrame = m_frame + m_delay;
-	m_pending.push_back(e);
-    if (buffer.meshKind >= 0) {
+	m_pending.push_back(std::move(e));
+    if (m_pending.back().buffer.meshKind >= 0) {
+        const AllocatedBuffer &retiredBuf = m_pending.back().buffer;
         m_pending.back().buffer.retired = true;
         auto& t = telemetry::registry();
-        t.replace(static_cast<telemetry::Gauge>(buffer.meshKind), buffer.size, 0);
-        t.replace(telemetry::RetiredBytes, 0, buffer.size);
+        t.replace(static_cast<telemetry::Gauge>(retiredBuf.meshKind), retiredBuf.size, 0);
+        t.replace(telemetry::RetiredBytes, 0, retiredBuf.size);
         t.replace(telemetry::RetiredBuffers, 0, 1);
     }
 }

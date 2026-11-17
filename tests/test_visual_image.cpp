@@ -7,7 +7,14 @@
 /// make every tolerance effectively bit-exact).
 
 #define STB_IMAGE_IMPLEMENTATION // this target has no other stb translation unit
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4244) // vendored stb internals
+#endif
 #include <stb_image/stb_image.h>
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 #include "VisualImage.hpp"
 

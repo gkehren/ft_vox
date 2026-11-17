@@ -24,6 +24,12 @@ bool Chunk::publishMeshResult(MeshBuildResult *result)
 {
   if (!result)
     return false;
+  // Prerequisite documented (review §4.5): publication runs on the main
+  // thread after processFinishedJobs cleared the worker lease, so the
+  // record binding is live. The "never two concurrent builds for one
+  // chunk" invariant is enforced upstream by inTransit (dispatch refuses a
+  // leased record); the identity check below is its publish-time witness.
+  assert(m_active && "publishMeshResult requires a bound/owned record");
   // Publish-time identity validation (issue #104/#114): a result built by
   // another chunk, for a retired incarnation (generation), or from older
   // voxel/border content (revision) must never land here. The block goes
@@ -667,10 +673,17 @@ void Chunk::uploadToGPU(VmaAllocator allocator, ImmediateCommands &imm, MeshAren
     const bool needWater = !result->waterVertices.empty() && !result->waterIndices.empty();
     auto rollbackLodRanges = [&]()
     {
-      arenas.opaqueVertex.freeImmediate(m_lodOpaqueVertices);
-      arenas.opaqueIndex.freeImmediate(m_lodOpaqueIndices);
-      arenas.waterVertex.freeImmediate(m_lodWaterVertices);
-      arenas.waterIndex.freeImmediate(m_lodWaterIndices);
+      // Explicit empty guards (review §4.5): the rollback must not depend
+      // on freeImmediate happening to no-op on an empty range — that is a
+      // detail of another module, not a contract this path should lean on.
+      if (!m_lodOpaqueVertices.empty())
+        arenas.opaqueVertex.freeImmediate(m_lodOpaqueVertices);
+      if (!m_lodOpaqueIndices.empty())
+        arenas.opaqueIndex.freeImmediate(m_lodOpaqueIndices);
+      if (!m_lodWaterVertices.empty())
+        arenas.waterVertex.freeImmediate(m_lodWaterVertices);
+      if (!m_lodWaterIndices.empty())
+        arenas.waterIndex.freeImmediate(m_lodWaterIndices);
       m_lodOpaqueVertices = {};
       m_lodOpaqueIndices = {};
       m_lodWaterVertices = {};
@@ -956,6 +969,7 @@ bool Chunk::prepareGPUUpload(MeshArenas &arenas, GpuReplacement &out)
     return true; // nothing pending: publish will just clear the draw counters
   out.valid = true;
 
+  assert(m_active && "prepareGPUUpload requires a bound/owned record");
   out.generation = m_active->generation();
   out.revision = m_active->revision();
   const bool prepared = out.result->isLOD

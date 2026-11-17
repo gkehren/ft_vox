@@ -3,8 +3,17 @@
 #include "ColorSpace.hpp"
 #include "Renderer/TextureMips.hpp"
 
+// Vendored stb: silence its internal conversion warnings (review M21 —
+// first-party code stays under /W4, third-party noise is contained here).
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4244)
+#endif
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image/stb_image.h>
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -54,7 +63,7 @@ CpuAtlasBuild buildCpuAtlas(const std::string &packRoot, std::vector<uint8_t> &a
 	built.report.packRequested = !packRoot.empty();
 
 	// Default pack: ressources/default-resource-pack.zip
-	const std::string defaultZipPath = std::string(RES_PATH) + "default-resource-pack.zip";
+	const std::string defaultZipPath = resourceRootPath() + "default-resource-pack.zip";
 	ResourcePackReader defaultPack(defaultZipPath);
 
 	ResourcePackReader customPack;
@@ -151,17 +160,35 @@ CpuAtlasBuild buildCpuAtlas(const std::string &packRoot, std::vector<uint8_t> &a
 	built.layerSize = layerSize;
 
 	const size_t layerBytes = static_cast<size_t>(layerSize) * layerSize * 4;
-	atlasOut.assign(layerBytes * layers, 255);
-
-	for (uint32_t i = 0; i < layers; ++i)
+	// Exception-safe pixel ownership (review §4.6): atlasOut.assign or
+	// nnScale can throw bad_alloc; the decoded stb pixels must not leak on
+	// that path (the MobTextures RAII discipline, applied at the scale step).
+	try
 	{
-		DecodedLayer &dl = decoded[i];
-		if (!dl.ok || !dl.pixels)
-			continue;
-		nnScale(dl.pixels, dl.frameW, dl.frameH, atlasOut.data() + static_cast<size_t>(i) * layerBytes,
-				layerSize, layerSize);
-		stbi_image_free(dl.pixels);
-		dl.pixels = nullptr;
+		atlasOut.assign(layerBytes * layers, 255);
+
+		for (uint32_t i = 0; i < layers; ++i)
+		{
+			DecodedLayer &dl = decoded[i];
+			if (!dl.ok || !dl.pixels)
+				continue;
+			nnScale(dl.pixels, dl.frameW, dl.frameH, atlasOut.data() + static_cast<size_t>(i) * layerBytes,
+					layerSize, layerSize);
+			stbi_image_free(dl.pixels);
+			dl.pixels = nullptr;
+		}
+	}
+	catch (...)
+	{
+		for (DecodedLayer &dl : decoded)
+		{
+			if (dl.pixels)
+			{
+				stbi_image_free(dl.pixels);
+				dl.pixels = nullptr;
+			}
+		}
+		throw;
 	}
 
 	return built;

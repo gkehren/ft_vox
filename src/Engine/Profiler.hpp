@@ -42,26 +42,12 @@ struct WorkerBucket
 	uint64_t totalUs{0}; // microseconds for sub-millisecond precision
 
 	WorkerBucket() = default;
-	WorkerBucket(const WorkerBucket &o)
-	{
-		std::lock_guard<std::mutex> lock(o.mutex);
-		name = o.name;
-		epoch = o.epoch;
-		count = o.count;
-		totalUs = o.totalUs;
-	}
-	WorkerBucket &operator=(const WorkerBucket &o)
-	{
-		if (this != &o)
-		{
-			std::scoped_lock lock(mutex, o.mutex);
-			name = o.name;
-			epoch = o.epoch;
-			count = o.count;
-			totalUs = o.totalUs;
-		}
-		return *this;
-	}
+	// Non-copyable (review §4.8): buckets live in a fixed std::array and
+	// are never copied. The old copy-ctor locked o.mutex but not this->mutex
+	// — misleading dead code that suggested a copy path that must not exist
+	// (a copied mutex is a different mutex).
+	WorkerBucket(const WorkerBucket &) = delete;
+	WorkerBucket &operator=(const WorkerBucket &) = delete;
 };
 
 struct WorkerSnapshot
@@ -133,7 +119,15 @@ public:
 	float lastFrameMs() const { return m_lastFrameMs; }
 	float avgFrameMs() const { return m_avgFrameMs; }
 	float fpsEstimate() const { return m_avgFrameMs > 1e-4f ? 1000.f / m_avgFrameMs : 0.f; }
-	float onePercentLowMs() const { return m_onePercentLowMs; }
+	/// Lazy 1% low (review §4.8): recomputed only when a consumer reads it
+	/// after new samples, not every frame. Main-thread reads, like the rest
+	/// of the last-frame surface.
+	float onePercentLowMs() const
+	{
+		if (m_p1Dirty)
+			recomputeOnePercentLow();
+		return m_onePercentLowMs;
+	}
 
 	const ProfileEntry *lastEntries() const { return m_lastEntries.data(); }
 	int lastEntryCount() const { return m_lastEntryCount; }
@@ -164,6 +158,7 @@ private:
 	void closeScope();
 	void finalizeFrame(float frameMs);
 	void updateAverages(float frameMs);
+	void recomputeOnePercentLow() const;
 	void recordSpike(float frameMs);
 
 	std::atomic<bool> m_enabled{true};
@@ -191,7 +186,10 @@ private:
 
 	// Rolling average (~1s EMA-ish via simple sum window)
 	float m_avgFrameMs{0.f};
-	float m_onePercentLowMs{0.f};
+	// Lazy 1% low cache (review §4.8): mutable because the const accessor
+	// recomputes on demand; main-thread only, like every last-frame read.
+	mutable float m_onePercentLowMs{0.f};
+	mutable bool m_p1Dirty{false};
 	double m_avgAccumMs{0.0};
 	int m_avgSamples{0};
 

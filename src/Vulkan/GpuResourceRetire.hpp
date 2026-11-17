@@ -17,7 +17,10 @@ public:
 	void beginFrame(uint64_t frameNumber);
 
 	/// Schedule buffer destruction after framesInFlight frames from now.
-	void retireBuffer(AllocatedBuffer buffer);
+	/// Takes ownership by rvalue reference (review §4.7): the caller's
+	/// handle is moved out, so "you lose ownership" is enforced by the
+	/// signature instead of relying on caller discipline.
+	void retireBuffer(AllocatedBuffer &&buffer);
 
 	/// Destroy everything immediately (caller must have waited on the device).
 	void flush();

@@ -201,6 +201,16 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 				error = failAt(lineNo, "move expects two numbers <x> <z>");
 				return false;
 			}
+			// Input contract enforced at parse (review §4.10): PlayerInput.move
+			// is a direction of length <= 1. MOVE 1e9 1e9 used to be accepted
+			// and silently clamped by the controller; the grammar now refuses
+			// it with a numbered diagnostic like every other invalid op.
+			const double len = std::sqrt(action.move.x * action.move.x + action.move.y * action.move.y);
+			if (!std::isfinite(len) || len > 1.0 + 1e-9)
+			{
+				error = failAt(lineNo, "move vector length must be <= 1");
+				return false;
+			}
 			action.op = ScriptOp::Move;
 		}
 		else if (op == "SPRINT")

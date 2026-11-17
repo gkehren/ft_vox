@@ -1,5 +1,6 @@
 #include "Vulkan/StagingRing.hpp"
 
+#include <iostream>
 #include <stdexcept>
 
 void StagingRing::init(VmaAllocator allocator, uint32_t framesInFlight, VkDeviceSize totalSize)
@@ -13,8 +14,15 @@ void StagingRing::init(VmaAllocator allocator, uint32_t framesInFlight, VkDevice
 	m_framesInFlight = framesInFlight > 0 ? framesInFlight : 2;
 	// Align total size down to a multiple of frames so slices are equal.
 	m_totalSize = (totalSize / m_framesInFlight) * m_framesInFlight;
-	if (m_totalSize < m_framesInFlight * 1024 * 1024)
-		m_totalSize = m_framesInFlight * 4ull * 1024ull * 1024ull; // at least 4 MiB / frame
+	if (m_totalSize < m_framesInFlight * kMinSliceBytes)
+	{
+		// Observable clamp (review §4.7): the requested size is never
+		// silently replaced — the minimum is documented in the header.
+		std::cout << "StagingRing: requested " << totalSize << " bytes raised to the "
+				  << kMinSliceBytes << " bytes/frame minimum ("
+				  << m_framesInFlight * kMinSliceBytes << " bytes total)\n";
+		m_totalSize = m_framesInFlight * kMinSliceBytes;
+	}
 	m_sliceSize = m_totalSize / m_framesInFlight;
 
 	m_buffer = createBuffer(

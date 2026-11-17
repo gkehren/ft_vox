@@ -450,8 +450,8 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 			for (const playerui::BlockPaletteEntry &entry : palette)
 			{
 				const bool selected = (entry.id == current);
-				if (ImGui::Selectable(entry.name.c_str(), selected))
-					*frame.selectedTexture = static_cast<TextureType>(entry.id);
+				if (ImGui::Selectable(entry.name.c_str(), selected) && frame.setSelectedBlock)
+					frame.setSelectedBlock(static_cast<TextureType>(entry.id));
 				if (selected)
 					ImGui::SetItemDefaultFocus();
 			}
@@ -479,8 +479,13 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 		ImGui::Checkbox("Chunk borders [B]", frame.showChunkBorders);
 	if (frame.showDemoPlayers)
 		ImGui::Checkbox("Demo players", frame.showDemoPlayers);
-	if (frame.mobsEnabled)
-		ImGui::Checkbox("Passive mobs", frame.mobsEnabled);
+	{
+		// Commands-only toggle (review M6): display the snapshot value,
+		// issue setMobsEnabled on change — no write into sim state.
+		bool mobs = frame.mobsEnabled;
+		if (ImGui::Checkbox("Passive mobs", &mobs) && frame.setMobsEnabled)
+			frame.setMobsEnabled(mobs);
+	}
 
 	ImGui::End();
 }

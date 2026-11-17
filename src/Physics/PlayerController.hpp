@@ -7,7 +7,7 @@ struct PlayerSettings
 {
     double walkSpeed{4.5}, sprintSpeed{7.0};
     double acceleration{45.0}, braking{60.0}, airAcceleration{12.0};
-    double gravity{24.0}, jumpSpeed{8.5}, terminalSpeed{50.0};
+    double gravity{constants::gravity}, jumpSpeed{constants::jumpSpeed}, terminalSpeed{50.0};
     double swimSpeed{2.5}, waterGravity{4.0}, waterDrag{4.0};
     double coyoteTime{0.1}, jumpBuffer{0.12}, eyeHeight{1.62};
 };

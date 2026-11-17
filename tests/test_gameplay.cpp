@@ -78,18 +78,7 @@
 #include <type_traits>
 #include <vector>
 
-static int g_fails = 0;
-static int g_checks = 0;
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		++g_checks;                                                            \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";          \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 namespace
 {
@@ -538,7 +527,7 @@ void testLifecycleResets(ThreadPool &pool)
 			CoutSilencer silence;
 			sim.grantItems(ItemId::Stone, 64);
 			sim.selectHotbarSlot(2);
-			sim.selectedBlock() = DIRT;
+			sim.setSelectedBlock(DIRT);
 			CHECK(sim.savePlayerState(15.f, -5.f), "player state saved with items present");
 			sim.shutdown();
 		}
@@ -619,7 +608,7 @@ void testSelectionDuality()
 	CHECK(sim.playerSnapshot().selectedBlock == STONE,
 		  "player snapshot still carries the creative selection");
 
-	sim.selectedBlock() = DIRT;
+	sim.setSelectedBlock(DIRT);
 	CHECK(snap(sim).selectedSlot == 5, "creative selection never touches the hotbar");
 	const auto state = sim.capturePlayerState(10.f, -5.f);
 	CHECK(state.selectedBlock == static_cast<int32_t>(DIRT),
@@ -899,7 +888,7 @@ void testDespawnAndCap()
 	CHECK(defaults.despawnAgeTicks == 18000, "default despawn age is 5 min of sim time");
 	CHECK(defaults.pickupDelayTicks == 10 && defaults.playerDropDelayTicks == 40,
 		  "default pickup delays pinned");
-	CHECK(items::ItemEntitySettings::capacity == 1024, "population cap pinned at 1024");
+	static_assert(items::ItemEntitySettings::capacity == 1024, "population cap pinned at 1024");
 
 	// Age despawn (tuned for a bounded fixture).
 	{
@@ -1638,7 +1627,7 @@ void testGameplayPersistenceRoundTrip(ThreadPool &pool)
 		// overwrites live gameplay state with the saved snapshot.
 		const std::size_t liveEntities = sim.itemEntities().size();
 		{
-			CoutSilencer silence;
+			CoutSilencer grantSilence; // distinct name: no shadowing (review M21)
 			sim.grantItems(ItemId::Sand, 1);
 		}
 		sim.finalizePlayerSpawn(boot);
@@ -1882,8 +1871,8 @@ int main()
 	testGameplayPersistenceRoundTrip(pool);
 	testGameplayPersistenceDegradation(pool);
 	testGameplayPersistenceContracts(pool);
-	std::printf("%d checks, %d failures\n", g_checks, g_fails);
-	if (g_fails == 0)
+	std::printf("%d checks, %d testmain::fails\n", testmain::checks, testmain::fails);
+	if (testmain::fails == 0)
 		std::printf("PASS\n");
-	return g_fails == 0 ? 0 : 1;
+	return testmain::exitCode();
 }

@@ -25,19 +25,8 @@ namespace fs = std::filesystem;
 using worldsave::ChunkEdit;
 using worldsave::SaveStatus;
 
-static int g_fails = 0;
-static int g_checks = 0;
 
-#define CHECK(cond, msg)                                                       \
-	do                                                                         \
-	{                                                                          \
-		++g_checks;                                                            \
-		if (!(cond))                                                           \
-		{                                                                      \
-			std::cerr << "FAIL: " << msg << " (" << __LINE__ << ")\n";         \
-			++g_fails;                                                         \
-		}                                                                      \
-	} while (0)
+#include "TestMain.hpp"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -923,11 +912,11 @@ int main()
 	testGameplayStateRoundTrips(root / "gameplay");
 	testGameplayStateCorruption();
 
-	if (g_fails != 0)
+	if (testmain::fails != 0)
 	{
-		std::cerr << g_fails << " check(s) failed (" << g_checks << " run)\n";
+		std::cerr << testmain::fails << " check(s) failed (" << testmain::checks << " run)\n";
 		return 1;
 	}
-	std::cout << "PASS: world save format layer (" << g_checks << " checks)\n";
+	std::cout << "PASS: world save format layer (" << testmain::checks << " checks)\n";
 	return 0;
 }
