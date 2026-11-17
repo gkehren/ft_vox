@@ -194,9 +194,13 @@ position, observed `area`, canonical `digest` (§5) and `save` status:
 
 - `none` — transient session (no `--world`), nothing to persist.
 - `ok` — explicit save-on-exit succeeded (player state captured + flushed +
-  closed).
-- `failed` — the explicit save-on-exit (capture / flush / refusable close)
-  failed; reported as exit 4.
+  closed). Since stabilization PR5 the save also commits a transactional
+  gameplay checkpoint (`checkpoints/manifest` in the world directory); `ok`
+  means the manifest committed, and a reopen recovers that exact generation
+  (see `docs/adr/gameplay-persistence-transactions.md`). The canonical digest
+  is unaffected — checkpoints change durability, not simulation state.
+- `failed` — the explicit save-on-exit (capture / flush / refusable close /
+  checkpoint commit) failed; reported as exit 4.
 - `skipped` — the run errored before save-on-exit, so the **explicit**
   `savePlayerState` + close was skipped. Note this does **not** mean nothing
   was written: the unconditional `shutdown()` safety net

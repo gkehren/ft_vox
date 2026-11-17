@@ -240,36 +240,43 @@ bool GameSimulation::savePlayerState(float yaw, float pitch)
 {
     if (!m_world || !m_world->isWorldOpen())
         return false;
-    const PlayerPersistState playerState = capturePlayerState(yaw, pitch);
     WorldPersistence *persistence = m_world->worldPersistence();
-    bool ok = true;
-    if (!persistence || !persistence->writePlayerState(playerState))
-    {
-        std::cout << "[world] player state save failed\n";
-        ok = false;
-    }
-    // Full gameplay capture (issue #228): inventory + dropped items +
-    // allocator high-water, written BEFORE the flush durability barrier.
-    // Each failure is reported and stays retryable (the next capture/flush
-    // rewrites it) — never silently dropped.
-    if (!persistence || !persistence->writeInventoryState(captureInventoryState()))
-    {
-        std::cout << "[world] inventory state save failed\n";
-        ok = false;
-    }
-    if (!persistence || !persistence->writeItemsState(captureItemsState()))
-    {
-        std::cout << "[world] items state save failed\n";
-        ok = false;
-    }
+    if (!persistence)
+        return false;
+    // Stabilization PR5b (Phase 3): the durability barrier runs FIRST, then
+    // the FULL gameplay capture (player + inventory + items + allocator
+    // high-water) is committed as ONE transactional checkpoint. The capture
+    // and the flushed chunk overrides belong to the same logical boundary —
+    // a crash recovers either the previous complete checkpoint or this one,
+    // never a mixture. Success is reported ONLY when the manifest committed.
     if (!m_world->flushWorld())
     {
-        const std::string error =
-            persistence ? persistence->status().lastError : std::string("(no status)");
-        std::cout << "[world] flush failed: " << error << "\n";
-        ok = false;
+        std::cout << "[world] flush failed: " << persistence->status().lastError << "\n";
+        return false;
     }
-    return ok;
+    const PlayerPersistState playerState = capturePlayerState(yaw, pitch);
+    worldsave::CheckpointPayloads payloads;
+    payloads.playerPresent = true;
+    payloads.player = worldsave::encodePlayerState(playerState);
+    payloads.inventory = worldsave::encodeInventoryState(captureInventoryState());
+    payloads.items = worldsave::encodeItemsState(captureItemsState());
+    payloads.worldEditRevision = m_world->nextEditId();
+    if (!persistence->commitCheckpoint(payloads))
+    {
+        std::cout << "[world] checkpoint commit failed: " << persistence->status().lastError << "\n";
+        return false;
+    }
+    // Legacy compatibility shims (rollback support, ADR §2.7): best-effort —
+    // the committed checkpoint is authoritative, so a shim write failure is
+    // logged but is NOT a save failure. Failures stay retryable (the next
+    // save rewrites them).
+    if (!persistence->writePlayerState(playerState))
+        std::cout << "[world] player state shim write failed\n";
+    if (!persistence->writeInventoryState(captureInventoryState()))
+        std::cout << "[world] inventory state shim write failed\n";
+    if (!persistence->writeItemsState(captureItemsState()))
+        std::cout << "[world] items state shim write failed\n";
+    return true;
 }
 
 void GameSimulation::shutdown()
@@ -280,18 +287,26 @@ void GameSimulation::shutdown()
         // authoritative (no host presentation input), so the unconditional
         // close captures them even when the host forgot savePlayerState.
         // player.state still needs the camera orientation — only the
-        // explicit savePlayerState path writes it (unchanged).
+        // explicit savePlayerState path captures it; the checkpoint CARRIES
+        // the previous player payload forward (stabilization PR5b).
         if (WorldPersistence *persistence = m_world->worldPersistence())
         {
+            // Legacy compatibility shims (best-effort, rollback support).
             if (!persistence->writeInventoryState(captureInventoryState()))
                 std::cerr << "[world] final shutdown: inventory state write failed" << std::endl;
             if (!persistence->writeItemsState(captureItemsState()))
                 std::cerr << "[world] final shutdown: items state write failed" << std::endl;
         }
         // Unconditional destructor-only close: resolve stranded edits,
-        // capture, flush, shutdown. Destruction has no retry point; a partial
+        // capture, flush, commit the checkpoint with the captured gameplay
+        // payloads, shutdown. Destruction has no retry point; a partial
         // save must never be reported as success (issue #180 review round 4).
-        if (!m_world->forceCloseWorldForShutdown())
+        worldsave::CheckpointPayloads payloads;
+        payloads.playerPresent = false; // carried forward by the store
+        payloads.inventory = worldsave::encodeInventoryState(captureInventoryState());
+        payloads.items = worldsave::encodeItemsState(captureItemsState());
+        payloads.worldEditRevision = m_world->nextEditId();
+        if (!m_world->forceCloseWorldForShutdown(&payloads))
             std::cerr << "[world] final shutdown did not persist all accepted edits" << std::endl;
     }
 }

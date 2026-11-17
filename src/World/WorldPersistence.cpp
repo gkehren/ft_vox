@@ -791,13 +791,40 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 		return info;
 	}
 
+	// Stabilization PR5b (Phase 3): checkpoint recovery selects the
+	// authoritative durable baseline BEFORE the live scan. Legacy mode (no
+	// checkpoints) keeps the historical behavior byte-for-byte. A recovered
+	// generation re-seeds the live working set so the next commit snapshots
+	// exactly the recovered state + this session's edits — never pre-crash
+	// uncommitted leftovers (ADR §2.4/§2.6). Unrecoverable corruption refuses
+	// the open explicitly; it is NEVER silently mixed with the live set.
+	m_checkpoints = std::make_unique<worldsave::CheckpointStore>(worldDir);
+	std::string checkpointNote;
+	const auto checkpointStatus = m_checkpoints->recover(checkpointNote);
+	if (checkpointStatus == worldsave::CheckpointStore::RecoveryStatus::Unrecoverable)
+	{
+		info.error = "world '" + name + "' " + checkpointNote;
+		return info;
+	}
+	const bool checkpointMode =
+		checkpointStatus == worldsave::CheckpointStore::RecoveryStatus::Recovered;
+	if (checkpointMode && !reseedLiveFromCheckpoint(worldDir, chunksDir, checkpointNote))
+	{
+		info.error = "world '" + name + "' checkpoint recovery failed: " + checkpointNote;
+		return info;
+	}
+
 	// Load every chunk file as the DURABLE baseline of the per-coordinate
 	// state machine. A file that fails to read is loudly reported and
 	// SKIPPED (procedural fallback for that chunk); a directory SCAN error
 	// (permission denied, path is a file, ...) refuses the open instead - an
-	// I/O error must never be misread as "no overrides saved".
+	// I/O error must never be misread as "no overrides saved". In checkpoint
+	// mode the baseline is the recovered generation's immutable chunk set
+	// (already whole-validated by recover(); the loud-skip stays as a net).
 	{
-		const worldsave::ScanResult scan = worldsave::scanChunkFiles(chunksDir);
+		const std::filesystem::path baselineDir =
+			checkpointMode ? m_checkpoints->activeDir() / "chunks" : chunksDir;
+		const worldsave::ScanResult scan = worldsave::scanChunkFiles(baselineDir);
 		if (scan.status != worldsave::SaveStatus::Ok)
 		{
 			info.error = "world '" + name + "' chunk directory is not readable (I/O error); "
@@ -836,6 +863,10 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 	m_chunksDir = chunksDir;
 	m_name = name;
 	m_seed = currentSeed;
+	// Recovery notes (manifest.prev fallback / best-effort shim warnings)
+	// are recorded AFTER the baseline scan cleared the error log.
+	if (!checkpointNote.empty())
+		recordError("checkpoint recovery: " + checkpointNote);
 	m_service = std::make_unique<SaveService>(chunksDir, currentSeed);
 	// Completion handling (issue #180 review): a completion only commits when
 	// its revision is still the coordinate's desired one. A job superseded
@@ -1085,6 +1116,186 @@ bool WorldPersistence::flush()
 }
 
 // ---------------------------------------------------------------------------
+// Gameplay checkpoints (stabilization PR5b, Phase 3) — the transactional
+// multi-file commit layer. See WorldCheckpoint.hpp and
+// docs/adr/gameplay-persistence-transactions.md.
+// ---------------------------------------------------------------------------
+
+bool WorldPersistence::checkpointMode() const
+{
+	return m_checkpoints && m_checkpoints->activeGeneration() != 0;
+}
+
+uint64_t WorldPersistence::checkpointGeneration() const
+{
+	return m_checkpoints ? m_checkpoints->activeGeneration() : 0;
+}
+
+std::filesystem::path WorldPersistence::gameplaySourceDir() const
+{
+	if (checkpointMode())
+		return m_checkpoints->activeDir();
+	return m_worldDir;
+}
+
+void WorldPersistence::setCheckpointFaultForTests(worldsave::CheckpointFaultPoint point)
+{
+	if (m_checkpoints)
+		m_checkpoints->setFaultForTests(point);
+}
+
+bool WorldPersistence::commitCheckpoint(const worldsave::CheckpointPayloads &payloads)
+{
+	if (!m_enabled || !m_checkpoints)
+	{
+		recordError("checkpoint commit skipped: no world open");
+		return false;
+	}
+	std::string error;
+	if (!m_checkpoints->commit(m_chunksDir, payloads, error))
+	{
+		recordError("checkpoint commit failed: " + error);
+		return false;
+	}
+	// A non-empty error on success is a cleanup note (the commit IS durable;
+	// cleanup is best-effort and retried at the next commit/open).
+	if (!error.empty())
+		recordError("checkpoint note: " + error);
+	return true;
+}
+
+bool WorldPersistence::commitCarryForwardCheckpoint(uint64_t worldEditRevision)
+{
+	if (!m_enabled || !m_checkpoints)
+	{
+		recordError("checkpoint carry-forward skipped: no world open");
+		return false;
+	}
+	const std::filesystem::path source = gameplaySourceDir();
+	worldsave::CheckpointPayloads payloads;
+	payloads.worldEditRevision = worldEditRevision;
+	payloads.playerPresent = false; // the store carries the player forward
+
+	// Inventory + items: missing = canonical fresh (the legacy missing-file
+	// policy); corrupt/unreadable = REFUSE (never silently erase state).
+	const auto load = [&](const char *name, std::vector<uint8_t> &out) {
+		const worldsave::SaveStatus st = worldsave::readFileInto(source / name, out);
+		if (st == worldsave::SaveStatus::NotFound)
+		{
+			out.clear();
+			return true;
+		}
+		if (st != worldsave::SaveStatus::Ok)
+		{
+			recordError(std::string("carry-forward ") + name + " unreadable");
+			return false;
+		}
+		return true;
+	};
+	std::vector<uint8_t> invBytes;
+	std::vector<uint8_t> itemBytes;
+	if (!load("inventory.state", invBytes) || !load("items.state", itemBytes))
+		return false;
+	if (invBytes.empty())
+		invBytes = worldsave::encodeInventoryState(worldsave::InventoryPersistState{});
+	else
+	{
+		worldsave::InventoryPersistState s;
+		if (worldsave::decodeInventoryState(invBytes.data(), invBytes.size(), s) != worldsave::SaveStatus::Ok)
+		{
+			recordError("carry-forward inventory.state is corrupt; refusing the commit");
+			return false;
+		}
+	}
+	if (itemBytes.empty())
+		itemBytes = worldsave::encodeItemsState(worldsave::ItemsPersistState{});
+	else
+	{
+		worldsave::ItemsPersistState s;
+		if (worldsave::decodeItemsState(itemBytes.data(), itemBytes.size(), s) != worldsave::SaveStatus::Ok)
+		{
+			recordError("carry-forward items.state is corrupt; refusing the commit");
+			return false;
+		}
+	}
+	payloads.inventory = std::move(invBytes);
+	payloads.items = std::move(itemBytes);
+	return commitCheckpoint(payloads);
+}
+
+bool WorldPersistence::reseedLiveFromCheckpoint(const std::filesystem::path &worldDir,
+												const std::filesystem::path &chunksDir,
+												std::string &outError)
+{
+	namespace fs = std::filesystem;
+	const fs::path genDir = m_checkpoints->activeDir();
+	const fs::path genChunks = genDir / "chunks";
+
+	// Copy the generation's immutable chunk set over the live working set.
+	const worldsave::ScanResult scan = worldsave::scanChunkFiles(genChunks);
+	if (scan.status != worldsave::SaveStatus::Ok)
+	{
+		outError = "generation chunk directory is not readable";
+		return false;
+	}
+	std::unordered_set<std::string> generationNames;
+	for (const fs::path &file : scan.files)
+	{
+		std::vector<uint8_t> bytes;
+		if (worldsave::readFileInto(file, bytes) != worldsave::SaveStatus::Ok ||
+			!worldsave::writeFileAtomic(chunksDir / file.filename(), bytes))
+		{
+			outError = "failed to re-seed live chunk " + file.filename().string();
+			return false;
+		}
+		generationNames.insert(file.filename().string());
+	}
+	// Remove live leftovers the generation does not reference (pre-crash
+	// uncommitted edits): the next checkpoint must never resurrect them.
+	const worldsave::ScanResult live = worldsave::scanChunkFiles(chunksDir);
+	if (live.status != worldsave::SaveStatus::Ok)
+	{
+		outError = "live chunk directory is not readable during recovery re-seed";
+		return false;
+	}
+	for (const fs::path &file : live.files)
+	{
+		if (generationNames.count(file.filename().string()) != 0)
+			continue;
+		std::error_code ec;
+		fs::remove(file, ec);
+		if (ec)
+		{
+			outError = "failed to remove uncommitted live chunk " + file.filename().string();
+			return false;
+		}
+	}
+
+	// Root state shims (rollback compatibility): best-effort, loud on
+	// failure — the committed generation stays authoritative regardless.
+	const auto reseedShim = [&](const char *name) {
+		std::vector<uint8_t> bytes;
+		if (worldsave::readFileInto(genDir / name, bytes) == worldsave::SaveStatus::Ok)
+		{
+			if (!worldsave::writeFileAtomic(worldDir / name, bytes))
+				outError += std::string("legacy shim re-seed failed for ") + name + "; ";
+		}
+	};
+	reseedShim("inventory.state");
+	reseedShim("items.state");
+	if (m_checkpoints->activePlayerPresent())
+		reseedShim("player.state");
+	else
+	{
+		// No player in the committed state: a stale root shim would restore
+		// an unrelated player on rollback — remove it (best-effort).
+		std::error_code ec;
+		fs::remove(worldDir / "player.state", ec);
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 // Player state (issue #180, Phase 5) — <world>/player.state, format in
 // WorldSave.hpp (magic "FTVP", version 1, 45 bytes, explicit little-endian).
 // ---------------------------------------------------------------------------
@@ -1111,7 +1322,10 @@ bool WorldPersistence::readPlayerState(PlayerPersistState &out) const
 		return false; // no world open: quiet (nothing was ever saved)
 
 	std::vector<uint8_t> bytes;
-	const worldsave::SaveStatus read = worldsave::readFileInto(m_worldDir / "player.state", bytes);
+	// Checkpoint mode reads the committed generation (the root file is a
+	// legacy shim); a generation without a player payload has no file here
+	// -> the quiet fresh-world NotFound path, exactly the legacy policy.
+	const worldsave::SaveStatus read = worldsave::readFileInto(gameplaySourceDir() / "player.state", bytes);
 	if (read == worldsave::SaveStatus::NotFound)
 		return false; // fresh world: normal, NOT an error
 	if (read != worldsave::SaveStatus::Ok)
@@ -1180,7 +1394,8 @@ bool WorldPersistence::readInventoryState(worldsave::InventoryPersistState &out)
 		return false; // no world open: quiet (nothing was ever saved)
 
 	std::vector<uint8_t> bytes;
-	const worldsave::SaveStatus read = worldsave::readFileInto(m_worldDir / "inventory.state", bytes);
+	const worldsave::SaveStatus read =
+		worldsave::readFileInto(gameplaySourceDir() / "inventory.state", bytes);
 	if (read == worldsave::SaveStatus::NotFound)
 		return false; // fresh world / old save: normal, NOT an error
 	if (read != worldsave::SaveStatus::Ok)
@@ -1219,7 +1434,8 @@ bool WorldPersistence::readItemsState(worldsave::ItemsPersistState &out) const
 		return false; // no world open: quiet (nothing was ever saved)
 
 	std::vector<uint8_t> bytes;
-	const worldsave::SaveStatus read = worldsave::readFileInto(m_worldDir / "items.state", bytes);
+	const worldsave::SaveStatus read =
+		worldsave::readFileInto(gameplaySourceDir() / "items.state", bytes);
 	if (read == worldsave::SaveStatus::NotFound)
 		return false; // fresh world / old save: normal, NOT an error
 	if (read != worldsave::SaveStatus::Ok)

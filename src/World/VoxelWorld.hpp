@@ -246,8 +246,14 @@ public:
 	WorldPersistence *worldPersistence() { return m_persistence.get(); }
 	const WorldPersistence *worldPersistence() const { return m_persistence.get(); }
 	/// Destructor-only close: resolve stranded edits, then capture/flush/
-	/// shutdown UNCONDITIONALLY. Returns the flush success.
-	bool forceCloseWorldForShutdown();
+	/// shutdown UNCONDITIONALLY. Returns the flush success. Since
+	/// stabilization PR5b a checkpoint is committed after the flush: the
+	/// caller's gameplay payloads when provided (the GameSimulation shutdown
+	/// safety net captures inventory + items; the player payload is carried
+	/// forward), else a carry-forward commit. A commit failure is REPORTED
+	/// (no retry point at destruction); the previous committed checkpoint
+	/// remains the recovery point.
+	bool forceCloseWorldForShutdown(const worldsave::CheckpointPayloads *gameplay = nullptr);
 	/// Quiesce world-side async work (gen jobs + transit) and verify every
 	/// accepted edit reached authoritative state. The graphical adapter
 	/// quiesces its render jobs around this (combined durability barrier).

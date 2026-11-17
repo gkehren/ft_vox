@@ -236,9 +236,10 @@ structs + owning system, **no ECS** (#132 stays deferred).
 
 Gameplay state is captured/restored on the **same lifecycle seams** as
 `player.state`: `savePlayerState` is the FULL gameplay capture (player +
-inventory + items, before the flush barrier); `finalizePlayerSpawn` restores
-inventory + entities + allocator high-water; `initialize`/`reload` reset
-them; the `shutdown` safety net captures them too.
+inventory + items, committed as one checkpoint AFTER the flush barrier —
+stabilization PR5); `finalizePlayerSpawn` restores inventory + entities +
+allocator high-water; `initialize`/`reload` reset them; the `shutdown`
+safety net captures them too.
 
 | File | Magic | Size | Content |
 |---|---|---|---|
@@ -262,6 +263,29 @@ ground state on the first tick (a negligible, deterministic transient).
 untouched; missing new files mean empty inventory / no items. No migration
 machinery in v1. Refusable close, stranded-edit semantics and the flush
 durability barrier are unchanged and cover the new files.
+
+**Transactional checkpoints (stabilization PR5, Phase 3)**: the multi-file
+gameplay state is committed as ONE generation-based checkpoint
+(`saves/<world>/checkpoints/generation-<N>/` + an atomic `manifest`), per
+[`docs/adr/gameplay-persistence-transactions.md`](adr/gameplay-persistence-transactions.md).
+`savePlayerState` runs the flush durability barrier FIRST, then commits the
+full capture (player + inventory + items + allocator) as one checkpoint —
+**success is reported only when the manifest committed**. The `shutdown`
+safety net commits inventory + items (the player payload is carried
+forward); `closeWorld`/`forceCloseWorldForShutdown` commit a carry-forward
+checkpoint after their flush. `flushWorld`/`WorldPersistence::flush` keep
+their historical meaning: an intermediate chunk-durability barrier that does
+NOT commit a gameplay checkpoint. On open, recovery selects the most recent
+fully valid generation (manifest → `manifest.prev` fallback), re-seeds the
+live working set from it (uncommitted pre-crash edits are discarded, never
+resurrected by a later commit), and routes gameplay reads to it. A corrupt
+generation falls back to the previous complete one; when none validates the
+open is refused with an explicit unrecoverable error — generations are never
+mixed. The root `player.state`/`inventory.state`/`items.state` files and the
+live `chunks/` set are maintained as **legacy compatibility shims** (old
+binaries and pre-migration saves keep working; migration is additive and
+non-destructive). Process-crash consistency is guaranteed by atomic renames;
+power-loss durability is best-effort (file/dir sync, see the ADR §2.9).
 
 **Deferred-edit durability (stabilization PR2)**: logical acceptance is the
 authoritative gameplay event boundary — `breakBlock` spawns its drop when

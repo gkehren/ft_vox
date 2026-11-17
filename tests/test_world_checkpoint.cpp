@@ -22,6 +22,7 @@
 // Style mirrors test_world_save: a CHECK macro, plain main().
 
 #include <World/WorldCheckpoint.hpp>
+#include <World/WorldPersistence.hpp>
 #include <World/WorldSave.hpp>
 #include <Items/ItemTypes.hpp>
 
@@ -680,6 +681,83 @@ void testChunkSetEvolution()
 		  "reverted chunk absent from the new generation (copy-on-write semantics)");
 }
 
+// ---------------------------------------------------------------------------
+// 9. Runtime integration (stabilization PR5b): WorldPersistence recovery
+//    re-seeds the LIVE working set from the committed generation, so a crash
+//    after an uncommitted flush never resurrects pre-crash edits through the
+//    next checkpoint. ~WorldPersistence does NOT commit (only the VoxelWorld/
+//    GameSimulation close seams do) — destroying it simulates the crash.
+// ---------------------------------------------------------------------------
+void testLiveReseedIsolation()
+{
+	TempRoot root("reseed");
+	const fs::path saves = root.path;
+	const uint32_t genVersion = 1;
+	const uint32_t idx1 = 8 + 64 * 256 + 8 * 16;
+	const uint32_t idx2 = 9 + 64 * 256 + 8 * 16;
+
+	{
+		WorldPersistence wp;
+		auto info = wp.openOrCreate(saves, "reseed", 42, genVersion);
+		CHECK(info.ok, "reseed fixture open");
+		// E1: captured, flushed, COMMITTED (generation 1).
+		wp.captureChunkEdits(0, 0, {{idx1, static_cast<uint8_t>(STONE)}});
+		CHECK(wp.flush(), "E1 flushed");
+		worldsave::CheckpointPayloads payloads;
+		payloads.inventory = worldsave::encodeInventoryState(worldsave::InventoryPersistState{});
+		payloads.items = worldsave::encodeItemsState(worldsave::ItemsPersistState{});
+		CHECK(wp.commitCheckpoint(payloads), "E1 committed as generation 1");
+		CHECK(wp.checkpointMode() && wp.checkpointGeneration() == 1, "checkpoint mode active");
+		// E2: captured + flushed (live advances) but NEVER committed.
+		wp.captureChunkEdits(0, 0, {{idx2, static_cast<uint8_t>(DIRT)}});
+		CHECK(wp.flush(), "E2 flushed to the live set");
+		std::vector<worldsave::ChunkEdit> live;
+		CHECK(worldsave::readChunkFile(saves / "reseed" / "chunks" / "0_0.chunk", 0, 0, live) ==
+				  SaveStatus::Ok,
+			  "live file holds E1+E2 before the crash");
+		CHECK(live.size() == 2, "live set advanced past the checkpoint");
+		// Simulated crash: the persistence is destroyed WITHOUT a close
+		// commit (~WorldPersistence only shuts the save service down).
+	}
+
+	// Recovery: generation 1 is authoritative; the live set is re-seeded to
+	// it — the uncommitted E2 must be GONE (the next commit never resurrects it).
+	WorldPersistence re;
+	auto info = re.openOrCreate(saves, "reseed", 42, genVersion);
+	CHECK(info.ok, "recovery open succeeds");
+	CHECK(re.checkpointMode() && re.checkpointGeneration() == 1, "recovered generation 1");
+	const auto snap = re.overridesSnapshot(0, 0);
+	bool hasE1 = false;
+	bool hasE2 = false;
+	for (const auto &e : snap)
+	{
+		if (e.localIndex == idx1 && e.blockType == static_cast<uint8_t>(STONE))
+			hasE1 = true;
+		if (e.localIndex == idx2)
+			hasE2 = true;
+	}
+	CHECK(hasE1 && !hasE2, "recovery re-seed discarded the uncommitted E2 (never mixed)");
+	std::vector<worldsave::ChunkEdit> live;
+	CHECK(worldsave::readChunkFile(saves / "reseed" / "chunks" / "0_0.chunk", 0, 0, live) ==
+			  SaveStatus::Ok,
+		  "live file re-seeded");
+	CHECK(live.size() == 1 && live[0].localIndex == idx1, "live set matches the committed generation");
+
+	// A new commit after recovery snapshots exactly the recovered state.
+	worldsave::CheckpointPayloads payloads;
+	payloads.inventory = worldsave::encodeInventoryState(worldsave::InventoryPersistState{});
+	payloads.items = worldsave::encodeItemsState(worldsave::ItemsPersistState{});
+	CHECK(re.commitCheckpoint(payloads), "post-recovery commit");
+	CHECK(re.checkpointGeneration() == 2, "generation advanced");
+	std::vector<worldsave::ChunkEdit> gen2;
+	CHECK(worldsave::readChunkFile(re.checkpointGeneration() == 2
+									   ? saves / "reseed" / "checkpoints" / "generation-2" / "chunks" / "0_0.chunk"
+									   : fs::path(),
+								   0, 0, gen2) == SaveStatus::Ok,
+		  "generation 2 chunk readable");
+	CHECK(gen2.size() == 1 && gen2[0].localIndex == idx1, "generation 2 carries only the recovered E1");
+}
+
 } // namespace
 
 int main()
@@ -693,6 +771,7 @@ int main()
 	testRecoveryValidation();
 	testCarryForwardAndValidation();
 	testChunkSetEvolution();
+	testLiveReseedIsolation();
 	std::printf("%ld checks, %ld testmain::fails\n", testmain::checks, testmain::fails);
 	if (testmain::fails == 0)
 		std::printf("PASS\n");
