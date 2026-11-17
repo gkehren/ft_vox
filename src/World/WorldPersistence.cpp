@@ -1096,17 +1096,7 @@ bool WorldPersistence::writePlayerState(const PlayerPersistState &state) const
 		recordError("player state write skipped: no world open");
 		return false;
 	}
-	worldsave::ByteWriter w;
-	w.raw(worldsave::kPlayerStateMagic, sizeof(worldsave::kPlayerStateMagic));
-	w.u32(worldsave::kPlayerStateFormatVersion);
-	w.f64(state.x);
-	w.f64(state.y);
-	w.f64(state.z);
-	w.f32(state.yaw);
-	w.f32(state.pitch);
-	w.u8(state.flight ? 1u : 0u);
-	w.i32(state.selectedBlock);
-	if (!worldsave::writeFileAtomic(m_worldDir / "player.state", w.take()))
+	if (!worldsave::writeFileAtomic(m_worldDir / "player.state", worldsave::encodePlayerState(state)))
 	{
 		recordError("failed to write player.state (I/O error)");
 		return false;
@@ -1130,47 +1120,30 @@ bool WorldPersistence::readPlayerState(PlayerPersistState &out) const
 		return false;
 	}
 
-	worldsave::ByteReader r(bytes.data(), bytes.size());
-	char magic[sizeof(worldsave::kPlayerStateMagic)];
-	r.raw(magic, sizeof(magic));
-	const uint32_t version = r.u32();
+	// Stabilization PR5: the codec (exact size, magic/version, finite
+	// position/orientation, y range) lives in worldsave::decodePlayerState so
+	// the checkpoint validator shares it; the file-level policy (missing =
+	// quiet fresh world, malformed = loud error) stays here, unchanged.
 	PlayerPersistState s;
-	s.x = r.f64();
-	s.y = r.f64();
-	s.z = r.f64();
-	s.yaw = r.f32();
-	s.pitch = r.f32();
-	s.flight = r.u8() != 0;
-	s.selectedBlock = r.i32();
-	if (r.failed())
-	{
-		recordError("player.state is truncated (expected 45 bytes, got " +
-		            std::to_string(bytes.size()) + ")");
-		return false;
-	}
-	if (std::memcmp(magic, worldsave::kPlayerStateMagic, sizeof(magic)) != 0)
+	const worldsave::SaveStatus status = worldsave::decodePlayerState(bytes.data(), bytes.size(), s);
+	if (status == worldsave::SaveStatus::BadMagic)
 	{
 		recordError("player.state has a bad magic");
 		return false;
 	}
-	if (version != worldsave::kPlayerStateFormatVersion)
+	if (status == worldsave::SaveStatus::UnsupportedVersion)
 	{
-		recordError("player.state uses unsupported version " + std::to_string(version) +
-		            " (this build supports up to " +
+		recordError("player.state uses an unsupported version (this build supports up to " +
 		            std::to_string(worldsave::kPlayerStateFormatVersion) + ")");
 		return false;
 	}
-
-	// Payload sanity: a corrupt file must never teleport the player or hand
-	// NaN into the physics solver. Y range covers the world plus margin for
-	// creative flight above the build limit.
-	const bool finite = std::isfinite(s.x) && std::isfinite(s.y) && std::isfinite(s.z) &&
-	                    std::isfinite(s.yaw) && std::isfinite(s.pitch);
-	constexpr double kMinY = -64.0;
-	constexpr double kMaxY = static_cast<double>(CHUNK_HEIGHT) + 64.0;
-	if (!finite || s.y < kMinY || s.y > kMaxY)
+	if (status != worldsave::SaveStatus::Ok)
 	{
-		recordError("player.state rejected: position/orientation out of range");
+		if (bytes.size() != 45)
+			recordError("player.state is truncated (expected 45 bytes, got " +
+			            std::to_string(bytes.size()) + ")");
+		else
+			recordError("player.state rejected: position/orientation out of range");
 		return false;
 	}
 

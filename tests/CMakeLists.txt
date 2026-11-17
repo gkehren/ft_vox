@@ -1254,6 +1254,16 @@ target_link_libraries(test_world_save PRIVATE
 add_test(NAME WorldSave COMMAND test_world_save)
 
 # ---------------------------------------------------------------------------
+# Gameplay persistence checkpoints (stabilization Phase 3, PR5a): manifest
+# codec, generation staging/commit/recovery, the deterministic fault-injection
+# matrix, retention/cleanup and legacy compatibility. CPU-only: links ONLY
+# ft_vox_core (the store is a pure filesystem/format component).
+# ---------------------------------------------------------------------------
+add_executable(test_world_checkpoint test_world_checkpoint.cpp)
+target_link_libraries(test_world_checkpoint PRIVATE ft_vox_core)
+add_test(NAME WorldCheckpoint COMMAND test_world_checkpoint)
+
+# ---------------------------------------------------------------------------
 # Engine-level lifecycle: persistent world x reloadWorld (issue #180 review
 # round 3, item 12). Compiles the full engine minus main.cpp; needs a
 # GPU/window so it skips (77) when the engine cannot be constructed.
@@ -1436,7 +1446,7 @@ foreach(_cpu_test IN ITEMS
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
-    test_frame_pacing test_world_save bench_gameplay_items)
+    test_frame_pacing test_world_save test_world_checkpoint bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR
             "CPU-only dependency guard lists '${_cpu_test}' but no such target exists "

@@ -181,10 +181,23 @@ namespace worldsave
 
 	// ------------------------------------------------------------------
 	// Gameplay persistence payloads (issue #228, Epic #223 Phase E).
-	// Plain values, no sim types — the PlayerPersistState pattern. itemId
-	// fields carry the stable items::ItemId registry ordinal as a raw
-	// uint16 (saves reference ItemId, never TextureType).
+	// Plain values, no sim types. itemId fields carry the stable
+	// items::ItemId registry ordinal as a raw uint16 (saves reference
+	// ItemId, never TextureType).
 	// ------------------------------------------------------------------
+
+	/// Feet position + view + movement mode + selection captured at shutdown
+	/// and restored on open (issue #180, Phase 5). Plain value: no engine
+	/// types, so the save layer stays Chunk/Engine-free. Moved into the
+	/// format layer by stabilization PR5 so the checkpoint validator shares
+	/// the EXACT player.state codec (WorldPersistence aliases it globally).
+	struct PlayerPersistState
+	{
+		double x{0.0}, y{0.0}, z{0.0}; // feet position, world coords
+		float yaw{0.f}, pitch{0.f};    // degrees, camera convention
+		bool flight{false};            // movement mode
+		int32_t selectedBlock{0};      // selected TextureType ordinal
+	};
 
 	/// inventory.state payload: the selected hotbar slot + all 36 stacks in
 	/// inventory order. Empty stack = {0, 0} (canonical); an all-zero
@@ -388,6 +401,15 @@ namespace worldsave
 	SaveStatus decodeInventoryState(const uint8_t *data, size_t size, InventoryPersistState &out);
 	std::vector<uint8_t> encodeItemsState(const ItemsPersistState &state);
 	SaveStatus decodeItemsState(const uint8_t *data, size_t size, ItemsPersistState &out);
+
+	/// player.state codec (stabilization PR5: extracted verbatim from
+	/// WorldPersistence so the checkpoint validator shares it). Strict read:
+	/// exact 45-byte size, magic/version, finite position/orientation, y in
+	/// [-64, CHUNK_HEIGHT + 64] — a corrupt payload never teleports the player
+	/// or hands NaN to the solver. File I/O + the missing/loud error policy
+	/// stay in WorldPersistence::writePlayerState/readPlayerState.
+	std::vector<uint8_t> encodePlayerState(const PlayerPersistState &state);
+	SaveStatus decodePlayerState(const uint8_t *data, size_t size, PlayerPersistState &out);
 
 	// "<x>_<z>.chunk" (decimal, negative coordinates fine) and its strict
 	// inverse - used when scanning a chunks directory; rejects anything that

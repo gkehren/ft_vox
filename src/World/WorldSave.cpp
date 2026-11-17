@@ -651,4 +651,63 @@ namespace worldsave
 		out = std::move(s);
 		return SaveStatus::Ok;
 	}
+
+	// ------------------------------------------------------------------
+	// player.state codec (stabilization PR5: extracted VERBATIM from
+	// WorldPersistence::writePlayerState/readPlayerState so the checkpoint
+	// validator shares the exact format + sanity rules; the file-level
+	// missing/loud policy stays with the persistence facade).
+	// ------------------------------------------------------------------
+
+	std::vector<uint8_t> encodePlayerState(const PlayerPersistState &state)
+	{
+		ByteWriter w;
+		w.raw(kPlayerStateMagic, sizeof(kPlayerStateMagic));
+		w.u32(kPlayerStateFormatVersion);
+		w.f64(state.x);
+		w.f64(state.y);
+		w.f64(state.z);
+		w.f32(state.yaw);
+		w.f32(state.pitch);
+		w.u8(state.flight ? 1u : 0u);
+		w.i32(state.selectedBlock);
+		return w.take();
+	}
+
+	SaveStatus decodePlayerState(const uint8_t *data, size_t size, PlayerPersistState &out)
+	{
+		out = PlayerPersistState{};
+		constexpr size_t kPlayerStateBytes = 4 + 4 + 8 + 8 + 8 + 4 + 4 + 1 + 4; // 45
+		if (size != kPlayerStateBytes)
+			return SaveStatus::Corrupt; // exact-size format (truncation included)
+		ByteReader r(data, size);
+		char magic[sizeof(kPlayerStateMagic)];
+		r.raw(magic, sizeof(magic));
+		const uint32_t version = r.u32();
+		PlayerPersistState s;
+		s.x = r.f64();
+		s.y = r.f64();
+		s.z = r.f64();
+		s.yaw = r.f32();
+		s.pitch = r.f32();
+		s.flight = r.u8() != 0;
+		s.selectedBlock = r.i32();
+		if (r.failed())
+			return SaveStatus::Corrupt;
+		if (std::memcmp(magic, kPlayerStateMagic, sizeof(magic)) != 0)
+			return SaveStatus::BadMagic;
+		if (version != kPlayerStateFormatVersion)
+			return SaveStatus::UnsupportedVersion;
+		// Payload sanity: a corrupt file must never teleport the player or
+		// hand NaN into the physics solver. Y range covers the world plus
+		// margin for creative flight above the build limit.
+		const bool finite = std::isfinite(s.x) && std::isfinite(s.y) && std::isfinite(s.z) &&
+							std::isfinite(s.yaw) && std::isfinite(s.pitch);
+		constexpr double kMinY = -64.0;
+		constexpr double kMaxY = static_cast<double>(CHUNK_HEIGHT) + 64.0;
+		if (!finite || s.y < kMinY || s.y > kMaxY)
+			return SaveStatus::Corrupt;
+		out = s;
+		return SaveStatus::Ok;
+	}
 } // namespace worldsave

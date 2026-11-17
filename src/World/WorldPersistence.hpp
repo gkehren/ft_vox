@@ -267,14 +267,11 @@ private:
 
 /// Feet position + view + movement mode + selection captured at shutdown and
 /// restored on open (issue #180, Phase 5). Plain value: no engine types, so
-/// the save layer stays Chunk/Engine-free.
-struct PlayerPersistState
-{
-	double x{0.0}, y{0.0}, z{0.0}; // feet position, world coords
-	float yaw{0.f}, pitch{0.f};    // degrees, camera convention
-	bool flight{false};            // movement mode
-	int32_t selectedBlock{0};      // selected TextureType ordinal
-};
+/// the save layer stays Chunk/Engine-free. Stabilization PR5 moved the value
+/// + codec into the format layer (worldsave::PlayerPersistState) so the
+/// checkpoint validator shares them; the global alias keeps every existing
+/// consumer source-compatible.
+using PlayerPersistState = worldsave::PlayerPersistState;
 
 /// World-save facade: world directory + identity (world.meta) + per-chunk
 /// desired/durable persistence state + the async SaveService. Chunk-free: no
