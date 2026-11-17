@@ -1,6 +1,7 @@
 #include "Vulkan/VkShader.hpp"
 
 #include <SDL3/SDL.h>
+#include <utils.hpp> // resourceRootPath()
 
 #include <fstream>
 #include <stdexcept>
