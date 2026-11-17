@@ -174,11 +174,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # glslc (shaderc) is required, not just glslang-tools: the shaders use
+      # Google-style #include directives, which glslc resolves natively (-I)
+      # but glslangValidator rejects without the include extension enabled.
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake g++ ninja-build python3 git \
-            libvulkan-dev glslang-tools libboost-system-dev
+            libvulkan-dev glslc glslang-tools libboost-system-dev
 
       - name: Cache FetchContent deps
         uses: actions/cache@v4
