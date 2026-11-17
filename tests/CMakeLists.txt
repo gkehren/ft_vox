@@ -320,9 +320,13 @@ target_compile_definitions(test_indirect_draw_emit PRIVATE
     GLM_ENABLE_EXPERIMENTAL
 )
 
+# SDL3 is a header-only dependency here: IndirectDrawEmit.hpp -> Chunk.hpp ->
+# Vulkan/VkContext.hpp includes SDL3/SDL.h. On Linux SDL3 headers are not
+# globally visible (unlike vcpkg on Windows), so the target must carry them.
 target_link_libraries(test_indirect_draw_emit PRIVATE
     glm
     FastNoise2
+    SDL3::SDL3
     volk::volk
     GPUOpen::VulkanMemoryAllocator
     Threads::Threads
