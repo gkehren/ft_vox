@@ -247,6 +247,20 @@ untouched; missing new files mean empty inventory / no items. No migration
 machinery in v1. Refusable close, stranded-edit semantics and the flush
 durability barrier are unchanged and cover the new files.
 
+**Deferred-edit durability (stabilization PR2)**: logical acceptance is the
+authoritative gameplay event boundary — `breakBlock` spawns its drop when
+the world ACCEPTS the deletion, and the effective-voxel overlay makes
+physics/targeting/re-break refusal observe it immediately (see §4).
+Accepted edits queued against in-transit / UNLOADED records are durable at
+every durability seam: `flushWorld()` bakes their canonical pending entries
+into the persistent override set (without disturbing the issue #114
+publication ordering — each edit still lands exactly once when its record
+becomes editable), unload bakes them (review C1), and close/shutdown
+resolve them before the final capture. A mid-transit flush therefore never
+persists a pre-edit chunk alongside post-edit gameplay state. Mirror
+(border-shell) entries carry no independent durable content — they are
+rebuilt from resident neighbors on reload.
+
 ## 7. Presentation boundary (derived only)
 
 - **Hotbar HUD + inventory panel** (`GameUIInventory.cpp`, issue #229):

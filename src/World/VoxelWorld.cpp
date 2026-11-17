@@ -1471,10 +1471,13 @@ void VoxelWorld::applyPersistentOverrides(WorldChunk *chunk)
 
 void VoxelWorld::bakeDeferredEditsForUnload(WorldChunk *chunk)
 {
-	// Called with m_mutex held, main thread (the edit/pump contract). Only
-	// the canonical in-chunk entries carry durable content: mirror entries
-	// (borderNeighbor) duplicate the owning chunk's edit and the shell is
-	// rebuilt from resident neighbors when the coordinate loads again.
+	// Main thread (the edit/pump contract): the unload caller holds m_mutex,
+	// the flush capture caller (stabilization PR2) does not — both are safe
+	// because m_pendingEdits and the record lifecycle are main-thread-only.
+	// Only the canonical in-chunk entries carry durable content: mirror
+	// entries (borderNeighbor) duplicate the owning chunk's edit and the
+	// shell is rebuilt from resident neighbors when the coordinate loads
+	// again.
 	if (!m_persistence || !m_persistence->enabled() || !chunk)
 		return;
 	std::vector<worldsave::ChunkEdit> values;
@@ -1528,18 +1531,41 @@ void VoxelWorld::captureAllChunkEdits()
 	if (!m_persistence || !m_persistence->enabled())
 		return;
 	// Main thread; edits only ever happen on the main thread, so the edit
-	// maps of non-transit records are stable. In-transit records are skipped:
-	// their gen job is mid-flight (the gen job itself re-applies the stored
-	// overrides after generation), and they are captured on their own
-	// unload or a later flush. Unloaded records were captured at unload.
+	// maps of non-transit records are stable. In-transit records are skipped
+	// for edit-map capture: their gen/mesh job is mid-flight (the job itself
+	// re-applies the stored overrides afterwards), and the map is captured on
+	// their own unload or a later flush. Unloaded records were captured at
+	// unload.
 	std::vector<WorldChunk *> capture;
+	std::vector<WorldChunk *> deferred;
 	{
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
 		capture.reserve(m_chunks.size());
 		for (auto &[pos, chunk] : m_chunks)
 			if (chunk && !chunk->isInTransit() && chunk->hasPersistentEdits())
 				capture.push_back(chunk);
+		// Stabilization PR2: accepted edits still queued against in-transit /
+		// UNLOADED records are authoritative gameplay state (a break already
+		// spawned its drop at acceptance). A flush that skipped them would
+		// persist the PRE-edit chunk alongside the post-edit gameplay state —
+		// a crash before the next flush resurrected the block while its drop
+		// survived (duplication on re-break). Collect the distinct records
+		// holding canonical pending entries so they are baked below.
+		for (const PendingVoxelEdit &edit : m_pendingEdits)
+			if (edit.chunk && !edit.borderNeighbor &&
+				std::find(deferred.begin(), deferred.end(), edit.chunk) == deferred.end())
+				deferred.push_back(edit.chunk);
 	}
 	for (WorldChunk *chunk : capture)
 		captureChunkEditsForUnload(chunk);
+	// Bake the canonical pending entries into the desired/durable state
+	// WITHOUT touching the backing or the queue: the issue #114 publication
+	// ordering stays with the bridge/pump, and each edit still lands exactly
+	// once when its record becomes editable (the later edit-map capture
+	// delta-merges the same values — idempotent). Mirror entries carry no
+	// independent durable content (rebuilt from neighbors on reload), the
+	// exact bakeDeferredEditsForUnload contract. Main thread: the pending
+	// queue is stable without the world lock here.
+	for (WorldChunk *chunk : deferred)
+		bakeDeferredEditsForUnload(chunk);
 }
