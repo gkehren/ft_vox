@@ -1,7 +1,6 @@
 #include "Vulkan/VkShader.hpp"
 
 #include <SDL3/SDL.h>
-#include <utils.hpp> // resourceRootPath()
 
 #include <fstream>
 #include <stdexcept>
@@ -29,11 +28,10 @@ std::string resolveSpvPath(const char *fileName)
 	add("../ressources/shaders/spv");
 	add("./build-vk/ressources/shaders/spv");
 	add("build-vk/ressources/shaders/spv");
-	// Resolved resource root (review §4.1): exe-anchored when the full tree
-	// sits next to the binary, CWD-relative otherwise (the old RES_PATH).
-	add(resourceRootPath() + "shaders/spv");
 
-	// Directory containing the executable (where CMake copies ressources/).
+	// Directory containing the executable (where CMake copies ressources/):
+	// the exe-anchored resource root (review §4.1). Kept self-contained here
+	// (no utils.hpp) so the Vulkan-only test targets need no glm dependency.
 	// SDL3 caches this path — do not free it (unlike SDL2).
 	if (const char *base = SDL_GetBasePath())
 		add(std::string(base) + "ressources/shaders/spv");
