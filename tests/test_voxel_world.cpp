@@ -93,7 +93,12 @@ WorldChunk *makeGeneratedChunk(VoxelWorld &world, [[maybe_unused]] TerrainGenera
 
 void pumpUntilIdle(VoxelWorld &world)
 {
-	for (int i = 0; i < 2000 && world.asyncBusy(); ++i)
+	// Wall-clock deadline instead of a fixed iteration count (CI sanitizer
+	// fix): the old 2000 x 1 ms cap was too short under ASan/TSan overhead,
+	// so generation jobs were still in flight when the test asserted idle.
+	// 60 s is generous for the bounded fixture yet far below the ctest timeout.
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+	while (world.asyncBusy() && std::chrono::steady_clock::now() < deadline)
 	{
 		world.pump();
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));

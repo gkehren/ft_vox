@@ -80,8 +80,10 @@ static bool isChunkLocalFeature(uint8_t raw)
 /// applied initialization would surface as out-of-range fields. It is NOT a
 /// proof of race-free initialization on its own — that guarantee comes from
 /// std::call_once plus the ThreadSanitizer run in the cpu-boundary workflow's
-/// `tsan` job (review §4.12: the job now exists; TSan is unavailable under
-/// MSVC, hence Linux).
+/// `tsan` job (review §4.12; TSan is unavailable under MSVC, hence Linux).
+/// The standalone TerrainGeneration fixture is excluded from that job (its
+/// TSan slowdown exceeds the test timeout — expected, not a race); the
+/// call_once path is exercised there via the multithreaded HeadlessRunner.
 static bool isValidBiomeConfig(const BiomeConfig &cfg)
 {
 	return cfg.subsurfaceDepth >= 0 && cfg.subsurfaceDepth <= 16 &&
@@ -357,7 +359,11 @@ struct TargetBuffers
 		borders.cornerSE.fill(static_cast<uint8_t>(0xFF));
 		borders.cornerNW.fill(static_cast<uint8_t>(0xFF));
 		borders.cornerNE.fill(static_cast<uint8_t>(0xFF));
-		biomes.fill(static_cast<BiomeType>(0x7F));
+		// Byte-level poison (CI UBSan fix): filling with static_cast<BiomeType>
+		// (0x7F) loads an out-of-range enum value, which -fsanitize=enum flags.
+		// memset writes the same distinctive 0x7F sentinel pattern without
+		// constructing an invalid BiomeType; generation must overwrite it all.
+		std::memset(biomes.data(), 0x7F, biomes.size() * sizeof(BiomeType));
 		heightMap.fill(-123456);
 		grass.fill(0xDEADBEEFu);
 		foliage.fill(0xDEADBEEFu);

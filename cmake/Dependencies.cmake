@@ -167,6 +167,17 @@ if(Boost_FOUND)
             INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
     endif()
 
+    # Boost.System is HEADER-ONLY since 1.69: Module-mode FindBoost reports no
+    # library and creates no Boost::system target, which silently disabled
+    # test_network on modern distros (CI fix). test_network only needs the
+    # headers, so provide a header-only interface target whenever Boost was
+    # found — making the network test's availability deterministic.
+    if(NOT TARGET Boost::system AND Boost_INCLUDE_DIRS)
+        add_library(Boost::system INTERFACE IMPORTED)
+        set_target_properties(Boost::system PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
+    endif()
+
     if(NOT TARGET Boost::boost AND NOT TARGET Boost::headers)
         if(Boost_INCLUDE_DIRS)
             add_library(Boost::headers INTERFACE IMPORTED)

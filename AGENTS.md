@@ -130,8 +130,8 @@ First-party targets (core, headless, game, tests) build with `-Wall -Wextra
 per-file. Opt-in gates: `-DFT_VOX_WARNINGS_AS_ERRORS=ON`,
 `-DFT_VOX_SANITIZERS=ON` (ASan+UBSan), `-DFT_VOX_TSAN=ON` (GCC/Clang),
 `-DFT_VOX_LTO=ON`. CI (`.github/workflows/cpu-boundary.yml`) runs the CPU
-boundary gates, an ASan/UBSan job, a TSan job (network + headless + terrain)
-and a full graphical COMPILE job.
+boundary gates, an ASan/UBSan job, a TSan job (network + headless) and a full
+graphical COMPILE job.
 
 ### Testing
 
