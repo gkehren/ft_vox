@@ -919,14 +919,24 @@ break → drop → pickup → **place (consumes)**.
 
 - **Sim-owned targeting**: `GameSimulation::raycastVoxel(origin, dir,
   maxDist)` is the historical `Engine::raycastVoxel` march moved VERBATIM
-  (0.05 float step, first active cell via `VoxelWorld::isVoxelActive` — the
-  exact seam the bridge forwarded to — adjacent-cell fallback when the ray
-  starts inside a block, unknown cells never hit). Returns the plain
-  `sim::RaycastHit{hit, block, adjacent}`. `Engine::raycastVoxel` is a thin
-  forward passing camera origin/front + `renderSettings.raycastDistance` as
-  plain values; the highlight keeps consuming the result (presentation).
-  CPU parity fixtures compare the query against the verbatim historical
-  march bit for bit.
+  (0.05 float step, first active cell — at #227 via
+  `VoxelWorld::isVoxelActive`, the exact seam the bridge forwarded to —
+  adjacent-cell fallback when the ray starts inside a block, unknown cells
+  never hit). Returns the plain `sim::RaycastHit{hit, block, adjacent}`.
+  `Engine::raycastVoxel` is a thin forward passing camera origin/front +
+  `renderSettings.raycastDistance` as plain values; the highlight keeps
+  consuming the result (presentation). CPU parity fixtures compare the
+  query against the verbatim historical march bit for bit.
+  **Stabilization PR1/PR2 update:** the cell query now samples the
+  EFFECTIVE authoritative state through a scoped `WorldCollisionView`
+  (stored backing + pending logical edits) — the same state the gameplay
+  commands and physics observe — instead of raw-backing `isVoxelActive`,
+  so deferred deletions/placements are targeting-consistent before
+  publication. Inputs are fully validated (non-finite origin/dir/distance,
+  degenerate directions, out-of-envelope origins answer no-hit) and the
+  march is clamped to `kMaxRaycastDistance` (64) + iteration-bounded. Valid
+  rays without pending edits keep bit-exact historical parity (the fixtures
+  still pass unchanged); see `docs/gameplay-loop.md` §4.
 - **`placeSelectedBlock(cell)`**: selected hotbar stack must hold a
   placeable item (registry `placeableBlock`); gates with the existing
   `canPlaceVoxel` player-aware rule (#209); edits through the existing world

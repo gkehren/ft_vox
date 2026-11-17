@@ -39,6 +39,10 @@
 // Phase D (#227):
 //   * raycast parity fixtures vs the verbatim historical Engine march:
 //     hit / miss / adjacent-fallback / unknown-terrain / max-distance;
+//   * stabilization PR1: raycast input validation (NaN/Inf origins and
+//     distances, degenerate/huge directions, out-of-envelope origins,
+//     distance clamping, negative coordinates) + effective-state targeting
+//     across deferred break/place publication (the PR2 query unification);
 //   * placeSelectedBlock result matrix (EmptySlot, PlayerOverlap,
 //     UnknownTerrain, WorldRejected, Ok; NotPlaceable is future vocabulary —
 //     every v1 item is placeable) + consume-on-success-only + edit-result
@@ -1365,6 +1369,249 @@ void testRaycastParity(ThreadPool &pool)
 }
 
 // ---------------------------------------------------------------------------
+// 16b. Raycast input validation (stabilization PR1): invalid floating-point
+//      inputs answer a safe no-hit, the march always terminates, and valid
+//      rays at positive AND negative world coordinates keep the historical
+//      semantics. Every fixture here would be UB / a non-terminating loop in
+//      the pre-hardening march (NaN floor -> int cast, +Inf distance).
+// ---------------------------------------------------------------------------
+void testRaycastInputValidation(ThreadPool &pool)
+{
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::dvec3 boot = sim.initialize(cfg, center);
+	sim.bootstrapTerrain(boot);
+	const VoxelWorld &world = *sim.world();
+
+	const int bx = static_cast<int>(std::floor(boot.x));
+	const int bz = static_cast<int>(std::floor(boot.z));
+	glm::ivec3 cell{};
+	TextureType type = AIR;
+	CHECK(findLandCell(world, bx, bz, cell, type), "validation fixture: land cell found");
+	const glm::vec3 above(cell.x + 0.5f, cell.y + 3.5f, cell.z + 0.5f);
+	const glm::vec3 down(0.f, -1.f, 0.f);
+	// Sanity: the unvalidated ray DOES hit — every rejection below is a
+	// behavior change relative to this baseline, not a vacuous miss.
+	CHECK(sim.raycastVoxel(above, down, 10.f).hit, "validation fixture: baseline ray hits");
+
+	const float nan = std::numeric_limits<float>::quiet_NaN();
+	const float inf = std::numeric_limits<float>::infinity();
+
+	// NaN / +-Inf in EACH origin component.
+	for (int comp = 0; comp < 3; ++comp)
+		for (float bad : {nan, inf, -inf})
+		{
+			glm::vec3 origin = above;
+			origin[comp] = bad;
+			CHECK(!sim.raycastVoxel(origin, down, 10.f).hit,
+				  "non-finite origin component answers a safe no-hit");
+		}
+
+	// NaN / +-Inf / negative maximum distances (the +Inf case never
+	// terminated before the hardening; NaN silently skipped the march).
+	for (float badDist : {nan, inf, -inf, -1.f, -0.04f})
+		CHECK(!sim.raycastVoxel(above, down, badDist).hit,
+			  "invalid maxDist answers a safe no-hit");
+
+	// Zero / degenerate directions.
+	CHECK(!sim.raycastVoxel(above, glm::vec3(0.f), 10.f).hit, "zero direction answers no-hit");
+	CHECK(!sim.raycastVoxel(above, {1e-20f, 0.f, 0.f}, 10.f).hit,
+		  "sub-threshold direction answers no-hit");
+	for (int comp = 0; comp < 3; ++comp)
+		for (float bad : {nan, inf, -inf})
+		{
+			glm::vec3 dir = down;
+			dir[comp] = bad;
+			CHECK(!sim.raycastVoxel(above, dir, 10.f).hit,
+				  "non-finite direction component answers a safe no-hit");
+		}
+
+	// Extremely large FINITE direction components: the float dot overflows
+	// to +Inf; the double-length gate + double normalize fallback must still
+	// produce a proper unit direction (not a zero/NaN march).
+	const glm::vec3 hugeAxis(0.f, -1e30f, 0.f);
+	const sim::RaycastHit viaAxis = sim.raycastVoxel(above, hugeAxis, 10.f);
+	CHECK(viaAxis.hit && viaAxis.block == glm::vec3(cell),
+		  "huge single-axis direction normalizes to the exact downward hit");
+	// Diagonal: the hit geometry stays clear of cell boundaries so the
+	// comparison is robust to last-ulp normalization differences.
+	const glm::vec3 huge(1e30f, -2e30f, 0.f);
+	const glm::vec3 hugeUnit = glm::vec3(glm::normalize(glm::dvec3(huge)));
+	const sim::RaycastHit viaHuge = sim.raycastVoxel(above, huge, 10.f);
+	const sim::RaycastHit viaUnit = sim.raycastVoxel(above, hugeUnit, 10.f);
+	CHECK(viaHuge.hit == viaUnit.hit && viaHuge.block == viaUnit.block &&
+			  viaHuge.adjacent == viaUnit.adjacent,
+		  "huge finite direction normalizes like its double-precision unit vector");
+
+	// Extremely large FINITE origins: outside the supported world envelope
+	// the query answers no-hit instead of converting out-of-range floats.
+	for (int comp = 0; comp < 3; ++comp)
+		for (float bad : {1e30f, -1e30f, 32701.f, -32701.f})
+		{
+			glm::vec3 origin = above;
+			origin[comp] = bad;
+			CHECK(!sim.raycastVoxel(origin, down, 10.f).hit,
+				  "out-of-envelope origin answers a safe no-hit");
+		}
+	// The envelope boundary itself is accepted (no terrain there: a miss,
+	// but the march runs and terminates).
+	CHECK(!sim.raycastVoxel({sim::GameSimulation::kRaycastOriginLimit, 100.f, 8.5f}, down, 10.f).hit,
+		  "origin at the envelope limit is accepted and marches safely");
+
+	// Distance clamping: a huge finite maxDist behaves exactly like the
+	// documented cap (and terminates — the float accumulator would stall
+	// long before 1e6).
+	const glm::vec3 farOrigin(bx + 200.5f, 100.f, bz + 0.5f);
+	CHECK(!sim.raycastVoxel(farOrigin, {1, 0, 0}, 1e30f).hit,
+		  "clamped march through unloaded terrain terminates with a miss");
+	const sim::RaycastHit clamped = sim.raycastVoxel(above, down, 1e6f);
+	const sim::RaycastHit capped = sim.raycastVoxel(above, down, sim::GameSimulation::kMaxRaycastDistance);
+	CHECK(clamped.hit == capped.hit && clamped.block == capped.block,
+		  "maxDist above the cap is clamped, not rejected");
+
+	// Origin inside a solid block: the historical adjacent fallback.
+	const glm::vec3 embedded(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
+	const sim::RaycastHit emb = sim.raycastVoxel(embedded, down, 10.f);
+	CHECK(emb.hit && emb.block == glm::vec3(cell) &&
+			  emb.adjacent == glm::vec3(cell.x, cell.y + 1, cell.z),
+		  "embedded origin keeps the adjacent-cell fallback");
+
+	// Ray starting outside loaded terrain: passes through, never hits.
+	CHECK(!sim.raycastVoxel(farOrigin, {1, 0, 0}, 10.f).hit,
+		  "ray outside loaded terrain misses");
+	sim.shutdown();
+
+	// Negative world coordinates: the same semantics on the -X/-Z side.
+	sim::GameSimulation neg(&pool);
+	cfg.seed = 42;
+	const glm::dvec3 negCenter(-24.0, 100.0, -24.0);
+	const glm::dvec3 negBoot = neg.initialize(cfg, negCenter);
+	neg.bootstrapTerrain(negBoot);
+	glm::ivec3 negCell{};
+	TextureType negType = AIR;
+	CHECK(findLandCell(*neg.world(), static_cast<int>(std::floor(negBoot.x)),
+					   static_cast<int>(std::floor(negBoot.z)), negCell, negType),
+		  "negative-coordinate fixture: land cell found");
+	CHECK(negCell.x < 0 && negCell.z < 0, "fixture cell really is at negative coordinates");
+	const glm::vec3 negAbove(negCell.x + 0.5f, negCell.y + 3.5f, negCell.z + 0.5f);
+	checkRaycastParity(neg, *neg.world(), negAbove, down, 10.f, "negative-coord downward parity");
+	const sim::RaycastHit negHit = neg.raycastVoxel(negAbove, down, 10.f);
+	CHECK(negHit.hit && negHit.block == glm::vec3(negCell) &&
+			  negHit.adjacent == glm::vec3(negCell.x, negCell.y + 1, negCell.z),
+		  "negative coordinates hit with the correct adjacent cell");
+	// Diagonal across the chunk boundary at negative coordinates.
+	checkRaycastParity(neg, *neg.world(), {negCell.x + 3.5f, negCell.y + 0.5f, negCell.z + 0.5f},
+					   {-1, 0, -0.3f}, 10.f, "negative-coord diagonal parity");
+	neg.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 16c. Targeting observes the authoritative EFFECTIVE state (stabilization
+//      PR1/PR2 query unification): a deferred deletion is already invisible
+//      to the raycast and a deferred placement already targetable, matching
+//      WorldCollisionView / breakBlock / placeSelectedBlock. The historical
+//      isVoxelActive seam reads raw backing and intentionally diverges while
+//      edits are pending — the raycast must NOT follow it.
+// ---------------------------------------------------------------------------
+void testRaycastPendingEditSemantics(ThreadPool &pool)
+{
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::dvec3 boot = sim.initialize(cfg, center);
+	sim.bootstrapTerrain(boot);
+	VoxelWorld &world = *sim.world();
+	WorldChunk *chunk = world.getChunk({0, 0, 0});
+	CHECK(chunk != nullptr, "pending-edit fixture: origin chunk resident");
+
+	glm::ivec3 cell{};
+	TextureType type = AIR;
+	CHECK(findLandCell(world, 8, 8, cell, type), "pending-edit fixture: land cell found");
+	const glm::vec3 above(cell.x + 0.5f, cell.y + 3.5f, cell.z + 0.5f);
+	const glm::vec3 down(0.f, -1.f, 0.f);
+	CHECK(sim.raycastVoxel(above, down, 10.f).block == glm::vec3(cell),
+		  "fixture: the surface cell is the raycast target");
+
+	// (a) Deferred DELETE: break while the record is in transit. The drop
+	// spawns at logical acceptance; targeting must already see AIR.
+	chunk->setInTransit(true);
+	CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "deferred break accepted");
+	CHECK(world.hasPendingLogicalEdits(), "the deletion is deferred");
+	CHECK(world.isVoxelActive(glm::vec3(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f)),
+		  "raw backing still holds the old block (the historical seam)");
+	{
+		WorldCollisionView view(world);
+		TextureType effective = STONE;
+		const physics::Cell c = view.sampleWithType(cell, &effective);
+		CHECK(c.available && effective == AIR, "collision sees the effective deletion");
+	}
+	const sim::RaycastHit afterBreak = sim.raycastVoxel(above, down, 10.f);
+	CHECK(!afterBreak.hit || afterBreak.block != glm::vec3(cell),
+		  "raycast passes through the pending deletion (effective-state targeting)");
+	if (afterBreak.hit)
+		CHECK(afterBreak.block.y < static_cast<float>(cell.y),
+			  "a deeper hit below the deleted cell is the only legal outcome");
+	// Repeated break before publication: rejected, no second drop.
+	CHECK(sim.breakBlock(cell) == sim::BreakResult::WorldRejected,
+		  "re-break of a pending deletion is a logical no-op");
+	std::vector<sim::ItemEntitySnapshot> snaps;
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1, "exactly one drop for the accepted break");
+
+	// (b) Deferred PLACE onto the same cell while the deletion is pending:
+	// accepted against the effective AIR, coalesced into one pending entry.
+	CoutSilencer silence;
+	CHECK(sim.grantItems(ItemId::Stone, 4).result == ItemResult::Ok, "grant placeable items");
+	CHECK(sim.placeSelectedBlock(cell) == sim::PlaceResult::Ok,
+		  "place onto a pending deletion is accepted");
+	CHECK(sim.inventory().stack(0).count == 3, "place consumed exactly one item");
+	const sim::RaycastHit afterPlace = sim.raycastVoxel(above, down, 10.f);
+	CHECK(afterPlace.hit && afterPlace.block == glm::vec3(cell),
+		  "raycast targets the pending placement (effective-state targeting)");
+	// The raw backing still holds the ORIGINAL pre-break block: both the
+	// deletion and the re-placement are pending, coalesced into one entry.
+	CHECK(chunk->getVoxel(cell.x, cell.y, cell.z).type == static_cast<uint8_t>(type),
+		  "raw backing untouched while break->place coalesces in the pending queue");
+
+	// (c) Publication lands the coalesced final state exactly once; the
+	// targeting outcome is unchanged across the boundary.
+	chunk->setInTransit(false);
+	sim.pumpWorld();
+	CHECK(!world.hasPendingLogicalEdits(), "pending queue drained");
+	CHECK(world.isVoxelActive(glm::vec3(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f)),
+		  "the coalesced placement landed in authoritative storage");
+	const sim::RaycastHit afterPublish = sim.raycastVoxel(above, down, 10.f);
+	CHECK(afterPublish.hit && afterPublish.block == glm::vec3(cell),
+		  "targeting is stable across deferred publication");
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1, "publication spawned no second gameplay event");
+
+	// (d) Deferred PLACE into fresh AIR, then break it before publication:
+	// place -> break coalesces back to AIR with one drop per accepted break.
+	const glm::ivec3 airCell(cell.x, cell.y + 2, cell.z);
+	chunk->setInTransit(true);
+	CHECK(sim.placeSelectedBlock(airCell) == sim::PlaceResult::Ok, "deferred place into AIR");
+	const glm::vec3 airAbove(airCell.x + 0.5f, airCell.y + 2.5f, airCell.z + 0.5f);
+	CHECK(sim.raycastVoxel(airAbove, down, 10.f).block == glm::vec3(airCell),
+		  "pending placement is targetable before it lands");
+	CHECK(sim.breakBlock(airCell) == sim::BreakResult::Ok, "break of a pending placement accepted");
+	CHECK(!sim.raycastVoxel(airAbove, down, 10.f).hit ||
+			  sim.raycastVoxel(airAbove, down, 10.f).block != glm::vec3(airCell),
+		  "place->break coalesces to AIR for targeting");
+	chunk->setInTransit(false);
+	sim.pumpWorld();
+	CHECK(!world.isVoxelActive(glm::vec3(airCell.x + 0.5f, airCell.y + 0.5f, airCell.z + 0.5f)),
+		  "place->break coalesced final state is AIR");
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 2, "two accepted breaks produced exactly two drops");
+	CHECK(sim.inventory().stack(0).count == 2, "two placements consumed exactly two items");
+	sim.shutdown();
+}
+
+// ---------------------------------------------------------------------------
 // 17. placeSelectedBlock result matrix + consume-on-success-only.
 // ---------------------------------------------------------------------------
 void testPlaceSelectedBlockMatrix(ThreadPool &pool)
@@ -1866,6 +2113,8 @@ int main()
 	testDropMatrixAndStreams();
 	testItemLifecycleResets(pool);
 	testRaycastParity(pool);
+	testRaycastInputValidation(pool);
+	testRaycastPendingEditSemantics(pool);
 	testPlaceSelectedBlockMatrix(pool);
 	testWalkingLoopEndToEnd(pool);
 	testGameplayPersistenceRoundTrip(pool);

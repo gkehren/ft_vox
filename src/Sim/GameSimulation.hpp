@@ -59,6 +59,7 @@
 // headless-only publication seam.
 // =============================================================================
 
+#include <climits>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -180,6 +181,27 @@ public:
     /// Bootstrap radius (chunks) shared by the terrain bootstrap and the
     /// surface-spawn scan (the historical Engine::kBootstrapRadius).
     static constexpr int kBootstrapRadiusChunks = 2;
+
+    /// Hard upper bound on the targeting march (stabilization PR1). The
+    /// graphical host exposes renderSettings.raycastDistance in [2, 32]
+    /// (default 8); 64 leaves 2x headroom over the widest supported
+    /// interaction range while keeping the float march accumulator far below
+    /// the precision wall where `t += 0.05f` stalls (a non-terminating loop
+    /// for unbounded distances). Larger requested distances are CLAMPED, not
+    /// rejected — a valid ray never marches farther than this.
+    static constexpr float kMaxRaycastDistance = 64.f;
+
+    /// Supported ray-origin envelope (stabilization PR1): every component
+    /// must satisfy |c| <= this limit. Chosen so the whole clamped march
+    /// stays inside the world's finite collision envelope
+    /// (WorldCollisionView's SHRT_MIN/SHRT_MAX walls), which keeps every
+    /// floor() -> int coordinate conversion in range. Origins outside the
+    /// supported world envelope answer a safe no-hit.
+    static constexpr float kRaycastOriginLimit = 32700.f;
+    static_assert(kRaycastOriginLimit + kMaxRaycastDistance < static_cast<float>(SHRT_MAX),
+                  "the clamped march must stay inside the +X/+Z collision envelope");
+    static_assert(-kRaycastOriginLimit - kMaxRaycastDistance > static_cast<float>(SHRT_MIN),
+                  "the clamped march must stay inside the -X/-Z collision envelope");
 
     /// World-open request (issue #180 identity rules apply): an existing save
     /// keeps its stored seed; an explicit seed that contradicts the save runs
@@ -469,13 +491,32 @@ public:
     PlaceResult placeSelectedBlock(glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
 
     /// Simulation-owned targeting query (issue #227): the historical
-    /// Engine::raycastVoxel march moved verbatim behind a render-free API —
-    /// 0.05 float step, first ACTIVE cell (VoxelWorld::isVoxelActive, the
-    /// exact seam the bridge forwarded to), adjacent-cell fallback when the
-    /// ray starts inside a block, unknown cells never hit. `dir` is
-    /// normalized here (the host passes the raw camera front as a plain
-    /// value); `maxDist` stays a host-supplied plain value
-    /// (renderSettings.raycastDistance). Pure query: never edits the world.
+    /// Engine::raycastVoxel march behind a render-free API — 0.05 float
+    /// step, first ACTIVE cell, adjacent-cell fallback when the ray starts
+    /// inside a block, unknown cells never hit. `dir` is normalized here
+    /// (the host passes the raw camera front as a plain value); `maxDist`
+    /// stays a host-supplied plain value (renderSettings.raycastDistance).
+    /// Pure query: never edits the world.
+    ///
+    /// Authoritative semantics (stabilization PR1/PR2): the march samples
+    /// the EFFECTIVE voxel state through a scoped WorldCollisionView —
+    /// stored backing overlaid with pending logical edits, the SAME state
+    /// breakBlock()/placeSelectedBlock() and physics collide with. A
+    /// deferred deletion is therefore already invisible to targeting, and a
+    /// deferred placement already targetable, before the edit physically
+    /// lands. Fluids and vegetation hit exactly as before (any non-AIR
+    /// effective type); the collision view's solid floor / open sky
+    /// boundaries are physics policy and do NOT create targeting hits
+    /// (below-world / above-sky cells pass through, the historical rule).
+    ///
+    /// Input validation (stabilization PR1): non-finite origin/direction
+    /// components, non-finite or negative maxDist, a degenerate direction
+    /// (squared length < 1e-12, evaluated in double so finite-but-huge
+    /// components cannot overflow the gate) and origins outside
+    /// kRaycastOriginLimit all answer a safe no-hit. maxDist is clamped to
+    /// kMaxRaycastDistance and the march is iteration-bounded, so the query
+    /// always terminates. Valid gameplay rays keep the historical float
+    /// arithmetic bit for bit.
     RaycastHit raycastVoxel(glm::vec3 origin, glm::vec3 dir, float maxDist) const;
 
     /// Drop items from an inventory slot: removes up to `count` (clamped,

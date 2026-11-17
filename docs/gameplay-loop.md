@@ -118,24 +118,47 @@ The two never synchronize; both are persisted in `player.state` /
 
 - **`raycastVoxel(origin, dir, maxDist)`** — the targeting rule, moved out of
   `Engine` into the simulation (issue #227) with the exact historical march:
-  0.05 float step, first ACTIVE cell (`VoxelWorld::isVoxelActive`),
-  adjacent-cell fallback when the ray starts inside a block, unknown cells
-  never hit. `dir` is normalized inside; the host passes the raw camera
-  front as a plain value. A degenerate or non-finite direction answers
-  "no hit" instead of normalizing to NaN (review §4.4, symmetric to
-  `dropFromSlot`'s guard). Pure query — never edits the world. Returns a
-  plain `RaycastHit{hit, block, adjacent}`.
+  0.05 float step, first ACTIVE cell, adjacent-cell fallback when the ray
+  starts inside a block, unknown cells never hit. `dir` is normalized
+  inside; the host passes the raw camera front as a plain value. Pure
+  query — never edits the world. Returns a plain
+  `RaycastHit{hit, block, adjacent}`.
+  - **Authoritative effective state (stabilization PR1/PR2):** the march
+    samples through a scoped `WorldCollisionView` — stored backing overlaid
+    with pending logical edits — the SAME state `breakBlock`,
+    `placeSelectedBlock` and physics collide with. A deferred deletion is
+    already invisible to targeting and a deferred placement already
+    targetable before the edit physically lands. (The creative
+    `VoxelWorld::isVoxelActive` seam reads raw backing and is intentionally
+    NOT the targeting rule.) Fluids/vegetation hit as before (any non-AIR
+    effective type); the collision view's solid floor / open sky boundaries
+    are physics policy and never create targeting hits.
+  - **Input validation (stabilization PR1):** non-finite origin/direction
+    components, non-finite or negative `maxDist`, degenerate directions
+    (squared length < 1e-12, evaluated in double so finite-but-huge
+    components cannot overflow the gate) and origins outside
+    `kRaycastOriginLimit` (±32700, the supported world-coordinate envelope)
+    answer a safe no-hit. `maxDist` is clamped to `kMaxRaycastDistance`
+    (64 — 2× the widest UI interaction range of 32) and the march is
+    iteration-bounded, so the query always terminates. Valid gameplay rays
+    keep the historical float arithmetic bit for bit (CPU parity fixtures).
 - **`breakBlock(cell)`** → `BreakResult`:
   - `Ok` — block deleted through the existing world edit semantics (issue
     #114 deferred-edit ordering preserved) + the registry drop spawned at
     the cell center with deterministic id/edit-revision jitter.
-    **Ordering note (review §4.4):** the drop spawns immediately, even when
-    the delete itself defers (target record in transit / UNLOADED). This is
-    deterministic — the digest stays stable — but the item's trajectory is
-    computed against the pre-edit cell, not an atomically-applied edit.
-    Accepted deferred edits are durable across unload: the world bake them
-    into the persistent override set at unload (review C1), so a break
-    against a never-generated record is never silently lost.
+    **Ordering note (review §4.4, corrected by stabilization PR2):** the
+    drop spawns immediately at LOGICAL ACCEPTANCE, even when the delete
+    itself defers (target record in transit / UNLOADED). Acceptance is the
+    authoritative gameplay event boundary: the effective-voxel overlay
+    (`WorldCollisionView` / `VoxelWorld::effectiveVoxelType`) already
+    reflects the accepted deletion, so the item's physics, subsequent
+    targeting and repeated-break refusal all observe the post-break state —
+    the drop does NOT collide with the old block, and a delayed mesh update
+    never creates a second gameplay event. Coalesced/superseded pending
+    edits collapse to one entry per coordinate (one drop per accepted
+    break). Accepted deferred edits are durable across unload: the world
+    bakes them into the persistent override set at unload (review C1), so a
+    break against a never-generated record is never silently lost.
   - `Unbreakable` — BEDROCK / fluids.
   - `UnknownTerrain` — cell unloaded / not generated (never inferred).
   - `WorldRejected` — nothing to break (AIR / out of bounds) or the world
