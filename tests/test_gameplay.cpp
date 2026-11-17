@@ -43,6 +43,10 @@
 //     distances, degenerate/huge directions, out-of-envelope origins,
 //     distance clamping, negative coordinates) + effective-state targeting
 //     across deferred break/place publication (the PR2 query unification);
+//   * stabilization PR2: deferred edit / drop consistency — one accepted
+//     break = one drop, physics falls through the pending deletion, flush
+//     durability of accepted pending edits (the captureAllChunkEdits fix),
+//     unload bake + regeneration re-application, border mirror transactions;
 //   * placeSelectedBlock result matrix (EmptySlot, PlayerOverlap,
 //     UnknownTerrain, WorldRejected, Ok; NotPlaceable is future vocabulary —
 //     every v1 item is placeable) + consume-on-success-only + edit-result
@@ -1612,6 +1616,232 @@ void testRaycastPendingEditSemantics(ThreadPool &pool)
 }
 
 // ---------------------------------------------------------------------------
+// 16d. Deferred edit / drop consistency (stabilization PR2, Phase 2). One
+//      accepted logical break is ONE gameplay event: exactly one drop, the
+//      effective world state reflects the deletion immediately (physics +
+//      targeting), publication never spawns a second event, and the accepted
+//      outcome is durable across flush / unload / save-reload. Includes the
+//      flush-durability fix: accepted edits queued against in-transit records
+//      are baked into the override set at flushWorld() (before the fix, a
+//      mid-transit flush persisted the PRE-edit chunk alongside the post-edit
+//      gameplay state — a crash resurrected the block while its drop survived).
+// ---------------------------------------------------------------------------
+void testDeferredEditDropConsistency(ThreadPool &pool)
+{
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	const glm::vec3 down(0.f, -1.f, 0.f);
+
+	// (a) Deferred break: the drop's physics falls THROUGH the deleted cell
+	// (the collision overlay already reflects the acceptance — the item never
+	// rests on the old block), and publication adds no second event.
+	{
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		VoxelWorld &world = *sim.world();
+		WorldChunk *chunk = world.getChunk({0, 0, 0});
+		glm::ivec3 cell{};
+		TextureType type = AIR;
+		CHECK(findLandCell(world, 8, 8, cell, type), "deferred-physics fixture: land cell");
+		// Park the authoritative body far away: no auto-pickup interferes.
+		sim.setPlayerFlight(true, {0.5, 200.0, 0.5});
+
+		chunk->setInTransit(true);
+		CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "deferred break accepted");
+		CHECK(world.hasPendingLogicalEdits(), "deletion deferred while in transit");
+		for (int i = 0; i < 180; ++i) // 3 s of item physics at 60 Hz
+			sim.advanceItems(1.0 / 60.0, false);
+		std::vector<sim::ItemEntitySnapshot> snaps;
+		sim.itemSnapshots(snaps);
+		CHECK(snaps.size() == 1, "one accepted break -> exactly one drop");
+		CHECK(snaps[0].current.y < cell.y + 0.75,
+			  "drop fell through the pending deletion (never rests on the old block)");
+		chunk->setInTransit(false);
+		sim.pumpWorld();
+		CHECK(!world.hasPendingLogicalEdits(), "publication drained the queue");
+		sim.itemSnapshots(snaps);
+		CHECK(snaps.size() == 1, "delayed publication spawned no second gameplay event");
+		CHECK(sim.breakBlock(cell) == sim::BreakResult::WorldRejected,
+			  "post-publication re-break is a logical no-op");
+		sim.shutdown();
+	}
+
+	// (b) Flush durability of accepted pending edits (the PR2 fix): a
+	// mid-transit flushWorld() must persist the deletion override, not the
+	// pre-edit chunk. Verified at the FILE level — the exact state a crash
+	// after this flush would recover.
+	{
+		TempRoot root("deferred-flush");
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		cfg.worldName = "deferred";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		VoxelWorld &world = *sim.world();
+		WorldChunk *chunk = world.getChunk({0, 0, 0});
+		glm::ivec3 cell{};
+		TextureType type = AIR;
+		CHECK(findLandCell(world, 8, 8, cell, type), "flush fixture: land cell");
+
+		chunk->setInTransit(true);
+		CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "break accepted during transit");
+		CHECK(sim.flushWorld(), "mid-transit flush succeeds");
+		// The chunk file must already carry the accepted deletion.
+		const auto chunkPath = root.path / "deferred" / "chunks" / "0_0.chunk";
+		std::vector<worldsave::ChunkEdit> edits;
+		CHECK(worldsave::readChunkFile(chunkPath, 0, 0, edits) == worldsave::SaveStatus::Ok,
+			  "mid-transit flush wrote the chunk override file");
+		const uint32_t localIndex =
+			static_cast<uint32_t>(cell.y) * (CHUNK_SIZE * CHUNK_SIZE) +
+			static_cast<uint32_t>(cell.z) * CHUNK_SIZE + static_cast<uint32_t>(cell.x);
+		bool foundDeletion = false;
+		for (const worldsave::ChunkEdit &e : edits)
+			if (e.localIndex == localIndex && e.blockType == static_cast<uint8_t>(AIR))
+				foundDeletion = true;
+		CHECK(foundDeletion, "accepted pending deletion is durable at the flush boundary");
+		CHECK(world.hasPendingLogicalEdits(), "flush did not disturb the publication queue");
+
+		// Normal completion: publication + explicit save + reopen preserves
+		// the accepted outcome with exactly one drop and no duplication.
+		chunk->setInTransit(false);
+		sim.pumpWorld();
+		CHECK(sim.savePlayerState(0.f, 0.f), "explicit gameplay save succeeds");
+		sim.shutdown();
+
+		sim::GameSimulation re(&pool);
+		const glm::dvec3 reBoot = re.initialize(cfg, center);
+		re.bootstrapTerrain(reBoot);
+		re.finalizePlayerSpawn(reBoot);
+		{
+			WorldCollisionView view(*re.world());
+			TextureType reopened = STONE;
+			const physics::Cell c = view.sampleWithType(cell, &reopened);
+			CHECK(c.available && reopened == AIR, "reopen preserves the accepted deletion");
+		}
+		const glm::vec3 above(cell.x + 0.5f, cell.y + 3.5f, cell.z + 0.5f);
+		const sim::RaycastHit hit = re.raycastVoxel(above, down, 10.f);
+		CHECK(!hit.hit || hit.block != glm::vec3(cell), "reopened targeting agrees");
+		std::vector<sim::ItemEntitySnapshot> snaps;
+		re.itemSnapshots(snaps);
+		CHECK(snaps.size() == 1, "reopen restored exactly the one accepted drop");
+		CHECK(re.breakBlock(cell) == sim::BreakResult::WorldRejected,
+			  "re-break after reopen cannot duplicate the drop");
+		re.shutdown();
+	}
+
+	// (c) Unload with accepted pending edits: the unload bake (review C1)
+	// persists the deletion; the regenerated incarnation re-applies it.
+	{
+		TempRoot root("deferred-unload");
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		cfg.worldName = "unload";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		VoxelWorld &world = *sim.world();
+		WorldChunk *chunk = world.getChunk({0, 0, 0});
+		glm::ivec3 cell{};
+		TextureType type = AIR;
+		CHECK(findLandCell(world, 8, 8, cell, type), "unload fixture: land cell");
+
+		chunk->setInTransit(true);
+		CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "break accepted before unload");
+		chunk->setInTransit(false); // editable again, but NOT pumped: still pending
+		CHECK(world.hasPendingLogicalEdits(), "edit still queued at unload time");
+		WorldStreamSettings settings;
+		settings.maxRenderDistance = 96;
+		settings.minRenderDistance = 48;
+		world.updateStreaming(glm::vec3(100000.f, 100.f, 100000.f), {0.f, 1.f}, settings);
+		CHECK(world.getChunk({0, 0, 0}) == nullptr, "record unloaded with the pending edit");
+		CHECK(sim.flushWorld(), "unload bake flushed");
+		const auto chunkPath = root.path / "unload" / "chunks" / "0_0.chunk";
+		std::vector<worldsave::ChunkEdit> edits;
+		CHECK(worldsave::readChunkFile(chunkPath, 0, 0, edits) == worldsave::SaveStatus::Ok,
+			  "unload bake wrote the override file");
+		const uint32_t localIndex =
+			static_cast<uint32_t>(cell.y) * (CHUNK_SIZE * CHUNK_SIZE) +
+			static_cast<uint32_t>(cell.z) * CHUNK_SIZE + static_cast<uint32_t>(cell.x);
+		bool foundDeletion = false;
+		for (const worldsave::ChunkEdit &e : edits)
+			if (e.localIndex == localIndex && e.blockType == static_cast<uint8_t>(AIR))
+				foundDeletion = true;
+		CHECK(foundDeletion, "unload bake persisted the accepted deletion");
+
+		// Stream back: the recycled incarnation regenerates + re-applies.
+		world.updateStreaming(glm::vec3(8.f, 100.f, 8.f), {0.f, 1.f}, settings);
+		world.processChunkLoading(64);
+		world.generatePendingVoxelsSync(glm::vec3(8.f, 100.f, 8.f), 64);
+		sim.pumpWorld();
+		WorldChunk *reloaded = world.getChunk({0, 0, 0});
+		CHECK(reloaded && reloaded->isVoxelBackingReadable(), "record regenerated");
+		CHECK(reloaded->getVoxel(cell.x, cell.y, cell.z).type == static_cast<uint8_t>(AIR),
+			  "regenerated incarnation re-applied the accepted deletion");
+		std::vector<sim::ItemEntitySnapshot> snaps;
+		sim.itemSnapshots(snaps);
+		CHECK(snaps.size() == 1, "unload/reload never duplicated the drop");
+		sim.shutdown();
+	}
+
+	// (d) Border edit deferral: the target AND its neighbor mirror defer as
+	// one transaction (issue #114 item 6), land together on publication, and
+	// produce exactly one drop.
+	{
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		VoxelWorld &world = *sim.world();
+		WorldChunk *chunk = world.getChunk({0, 0, 0});
+		WorldChunk *west = world.getChunk({-1, 0, 0});
+		CHECK(chunk && west, "border fixture: both chunks resident");
+		glm::ivec3 border{};
+		TextureType borderType = AIR;
+		CHECK(findBreakableCell(world, 0, 8, border, borderType),
+			  "border fixture: breakable cell at x=0");
+		CHECK(border.x == 0, "fixture cell really is on the chunk border");
+		// Headless bootstrap has no mesh dispatch: populate the west shell
+		// explicitly so the mirror's pre/post state is observable.
+		world.ensureShellPopulated(west);
+		CHECK(west->sampleForMeshing(CHUNK_SIZE, border.y, border.z) == borderType,
+			  "fixture: west shell mirrors the border column");
+
+		chunk->setInTransit(true);
+		west->setInTransit(true);
+		CHECK(sim.breakBlock(border) == sim::BreakResult::Ok, "border break accepted");
+		CHECK(world.hasPendingLogicalEdits(), "border group deferred");
+		{
+			WorldCollisionView view(world);
+			TextureType effective = STONE;
+			view.sampleWithType(border, &effective);
+			CHECK(effective == AIR, "target effective state is AIR while deferred");
+		}
+		CHECK(west->sampleForMeshing(CHUNK_SIZE, border.y, border.z) == borderType,
+			  "mirror shell untouched until publication");
+		chunk->setInTransit(false);
+		west->setInTransit(false);
+		sim.pumpWorld();
+		CHECK(!world.hasPendingLogicalEdits(), "border group published");
+		CHECK(chunk->getVoxel(0, border.y, border.z).type == static_cast<uint8_t>(AIR),
+			  "border target landed");
+		CHECK(west->sampleForMeshing(CHUNK_SIZE, border.y, border.z) == AIR,
+			  "neighbor mirror landed with the target");
+		std::vector<sim::ItemEntitySnapshot> snaps;
+		sim.itemSnapshots(snaps);
+		CHECK(snaps.size() == 1, "one border break -> one drop (mirror is not a second event)");
+		CHECK(sim.breakBlock(border) == sim::BreakResult::WorldRejected,
+			  "border re-break rejected");
+		sim.shutdown();
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 17. placeSelectedBlock result matrix + consume-on-success-only.
 // ---------------------------------------------------------------------------
 void testPlaceSelectedBlockMatrix(ThreadPool &pool)
@@ -2115,6 +2345,7 @@ int main()
 	testRaycastParity(pool);
 	testRaycastInputValidation(pool);
 	testRaycastPendingEditSemantics(pool);
+	testDeferredEditDropConsistency(pool);
 	testPlaceSelectedBlockMatrix(pool);
 	testWalkingLoopEndToEnd(pool);
 	testGameplayPersistenceRoundTrip(pool);
