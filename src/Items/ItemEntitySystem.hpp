@@ -49,6 +49,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <vector>
 
 namespace items
@@ -57,6 +58,19 @@ namespace items
 /// The shared entity id type (entities::EntityId, re-exported by
 /// sim::EntityId): uint64_t, plain value, save/wire stable.
 using EntityId = entities::EntityId;
+
+/// Id-exhaustion guards (stabilization PR3). Ids are monotonic uint64_t and
+/// the persistence format stores the allocator's NEXT id (high-water + 1)
+/// as uint64_t. The largest ASSIGNABLE id is therefore UINT64_MAX - 1: the
+/// allocator can then rest at next = UINT64_MAX, which stays representable
+/// and valid in items.state (decode requires next >= 1 and id < next).
+/// Allocation is REFUSED once the allocator reaches kMaxNextEntityId — it
+/// never wraps, never reuses an id, and never assigns the invalid id 0.
+/// A refused spawn consumes nothing: the facade commands pre-check
+/// idsExhausted() so inventory items and block drops are conserved.
+inline constexpr EntityId kMaxEntityId = std::numeric_limits<uint64_t>::max() - 1;
+inline constexpr uint64_t kMaxNextEntityId = std::numeric_limits<uint64_t>::max();
+static_assert(kMaxEntityId + 1 == kMaxNextEntityId, "the last id's next value must stay representable");
 
 /// Plain-value tunables (the MobSettings pattern). Defaults implement the
 /// epic #223 §2 rules; tests tune them for bounded fixtures.
@@ -165,9 +179,18 @@ class ItemEntitySystem
     /// transient).
     void restore(uint64_t nextEntityId, const std::vector<ItemEntity> &entities);
 
+    /// True when the allocator reached kMaxNextEntityId and can no longer
+    /// assign a fresh id (stabilization PR3). Facade commands pre-check this
+    /// BEFORE mutating inventory/world state so a refused spawn never
+    /// consumes items or silently discards a block drop. The population cap
+    /// is independent: overflow despawn still applies while ids remain.
+    bool idsExhausted() const { return m_nextId >= kMaxNextEntityId; }
+
     // --- Spawn seams (facade commands + deterministic fixtures) ---------------
     // Ids are assigned at CALL order — command/tick order is the deterministic
-    // spawn order. An empty stack spawns nothing and answers id 0.
+    // spawn order. An empty stack spawns nothing and answers id 0; an
+    // exhausted allocator also answers id 0 WITHOUT touching the population
+    // (no overflow despawn on a refused spawn — conservation).
 
     /// Generic spawn (fixture seam, the MobSystem::add pattern).
     EntityId spawn(ItemStack stack, glm::dvec3 position, glm::dvec3 velocity, uint32_t pickupDelayTicks);

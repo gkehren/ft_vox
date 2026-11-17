@@ -145,8 +145,12 @@ enum class BreakResult : uint8_t
     Ok,             // block deleted (world edit semantics) + registry drop spawned
     Unbreakable,    // BEDROCK / fluids — not breakable by hand in v1
     UnknownTerrain, // cell unloaded / not generated (never inferred)
-    WorldRejected   // nothing to break (AIR / out of bounds) or the world
+    WorldRejected,  // nothing to break (AIR / out of bounds) or the world
                     // refused the edit (no-op / invalid target)
+    IdExhausted     // the entity-id allocator reached its representable bound
+                    // (stabilization PR3): the break is refused BEFORE the
+                    // world edit so the registry drop is never silently lost
+                    // (conservation). Append-only vocabulary.
 };
 
 /// Result of placeSelectedBlock (issue #227, Epic #223 Phase D): the
@@ -479,7 +483,10 @@ public:
     /// through the EXISTING world edit semantics (issue #114 deferred-edit
     /// ordering preserved) and spawns the registry drop at the cell center
     /// with deterministic id/edit-revision jitter. BreakResult distinguishes
-    /// Ok / Unbreakable / UnknownTerrain / WorldRejected.
+    /// Ok / Unbreakable / UnknownTerrain / WorldRejected / IdExhausted
+    /// (stabilization PR3: a break whose drop needs a fresh entity id is
+    /// refused BEFORE the world edit when the allocator is exhausted — the
+    /// block stays, nothing is lost; empty-drop blocks stay breakable).
     BreakResult breakBlock(glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
 
     /// Place the selected hotbar block (issue #227): the selected stack must
@@ -526,6 +533,8 @@ public:
     /// degenerate OR non-finite direction falls back to +Y. count 0 is an Ok
     /// no-op; invalid slot / empty slot answer InvalidSlot / EmptyStack.
     /// Manual drops carry the longer pickup delay (no instant re-pickup).
+    /// An exhausted entity-id allocator answers IdExhausted WITHOUT touching
+    /// the inventory (stabilization PR3 conservation).
     items::ItemResult dropFromSlot(int slot, uint16_t count, glm::dvec3 dir);
 
     // --- Read-only bounded snapshots -------------------------------------------

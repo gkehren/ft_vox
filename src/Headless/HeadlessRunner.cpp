@@ -52,6 +52,7 @@ const char *breakResultName(sim::BreakResult result)
 	case sim::BreakResult::Unbreakable: return "Unbreakable";
 	case sim::BreakResult::UnknownTerrain: return "UnknownTerrain";
 	case sim::BreakResult::WorldRejected: return "WorldRejected";
+	case sim::BreakResult::IdExhausted: return "IdExhausted";
 	}
 	return "?";
 }

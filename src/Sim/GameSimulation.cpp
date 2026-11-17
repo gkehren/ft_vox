@@ -43,6 +43,8 @@ const char *itemResultName(items::ItemResult result)
         return "ItemMismatch";
     case items::ItemResult::NotPlaceable:
         return "NotPlaceable";
+    case items::ItemResult::IdExhausted:
+        return "IdExhausted";
     }
     return "Unknown";
 }
@@ -715,13 +717,19 @@ BreakResult GameSimulation::breakBlock(glm::ivec3 cell, WorldEditResult *outEdit
         return BreakResult::WorldRejected; // nothing to break (incl. out-of-bounds cells)
     if (!items::isBreakableBlock(type))
         return BreakResult::Unbreakable; // BEDROCK / WATER / LAVA by hand in v1
+    // Id-exhaustion guard (stabilization PR3): a break whose registry drop
+    // needs a fresh entity id is refused BEFORE the world edit, so the drop
+    // is never silently lost (conservation). Blocks with an empty drop table
+    // entry need no entity and stay breakable. The allocator never wraps.
+    const items::ItemStack drop = items::dropForBlock(type);
+    if (!drop.isEmpty() && m_items.idsExhausted())
+        return BreakResult::IdExhausted;
     // Existing world edit semantics (issue #114): the delete may defer with
     // its mirror group; the drop spawns immediately at the cell center.
     const glm::vec3 center(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
     WorldEditResult edit = m_world->deleteVoxel(center);
     if (!edit.accepted)
         return BreakResult::WorldRejected;
-    const items::ItemStack drop = items::dropForBlock(type);
     if (!drop.isEmpty())
         m_items.spawnBreakDrop(drop, glm::dvec3(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5), edit.editId);
     // The graphical host publishes the accepted edit through the bridge
@@ -862,6 +870,13 @@ RaycastHit GameSimulation::raycastVoxel(glm::vec3 origin, glm::vec3 dir, float m
 
 items::ItemResult GameSimulation::dropFromSlot(int slot, uint16_t count, glm::dvec3 dir)
 {
+    // Id-exhaustion guard (stabilization PR3): refuse BEFORE any inventory
+    // mutation so a failed drop never consumes items (conservation). Only
+    // checked when an entity would actually spawn: count 0 stays an Ok no-op
+    // and invalid/empty slots keep their historical result codes below.
+    if (count > 0 && slot >= 0 && slot < items::kInventorySize &&
+        !m_inventory.stack(slot).isEmpty() && m_items.idsExhausted())
+        return items::ItemResult::IdExhausted;
     const items::RemoveResult removed = m_inventory.removeCount(slot, count);
     if (removed.result != items::ItemResult::Ok)
         return removed.result; // InvalidSlot / EmptyStack

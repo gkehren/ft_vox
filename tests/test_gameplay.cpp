@@ -47,6 +47,10 @@
 //     break = one drop, physics falls through the pending deletion, flush
 //     durability of accepted pending edits (the captureAllChunkEdits fix),
 //     unload bake + regeneration re-application, border mirror transactions;
+//   * stabilization PR3: entity-id exhaustion — last permitted id, refused
+//     spawns (no wrap / no overflow despawn), facade conservation (break
+//     refused before the edit, drop refused before consumption), save/reload
+//     at the representable bound;
 //   * placeSelectedBlock result matrix (EmptySlot, PlayerOverlap,
 //     UnknownTerrain, WorldRejected, Ok; NotPlaceable is future vocabulary —
 //     every v1 item is placeable) + consume-on-success-only + edit-result
@@ -1842,6 +1846,165 @@ void testDeferredEditDropConsistency(ThreadPool &pool)
 }
 
 // ---------------------------------------------------------------------------
+// 16e. Entity-id exhaustion (stabilization PR3, Phase 4): the allocator never
+//      wraps, id 0 stays invalid, the persisted NEXT id stays representable,
+//      and refused spawns conserve items (no overflow despawn, no inventory
+//      consumption, no silently lost block drop).
+// ---------------------------------------------------------------------------
+void testEntityIdExhaustion()
+{
+	// One id below the bound: the LAST permitted spawn assigns kMaxEntityId.
+	items::ItemEntitySystem sys;
+	sys.restore(items::kMaxNextEntityId - 1, {});
+	CHECK(!sys.idsExhausted(), "one id below the bound is not exhausted");
+	const items::EntityId last = sys.spawn(S(ItemId::Stone, 1), {0, 64, 0}, {0, 0, 0}, 0);
+	CHECK(last == items::kMaxEntityId, "the last permitted entity gets kMaxEntityId");
+	CHECK(sys.idHighWater() == items::kMaxEntityId, "high-water is the last assigned id");
+	CHECK(sys.idsExhausted(), "allocator rests at the representable bound");
+
+	// Refused spawn: id 0, no wrap, NO population change (a spawn that cannot
+	// assign an id must not overflow-despawn an existing entity either).
+	const std::size_t before = sys.entities().size();
+	CHECK(sys.spawn(S(ItemId::Stone, 1), {0, 64, 0}, {0, 0, 0}, 0) == 0,
+		  "exhausted spawn answers the invalid id 0");
+	CHECK(sys.entities().size() == before, "refused spawn never despawns an existing entity");
+	CHECK(sys.idHighWater() == items::kMaxEntityId, "allocator never wraps");
+	CHECK(sys.spawnBreakDrop(S(ItemId::Dirt, 1), {0, 64, 0}, 7) == 0,
+		  "break drop refused at exhaustion");
+	CHECK(sys.spawnPlayerDrop(S(ItemId::Dirt, 1), {0, 64, 0}, {0, 1, 0}) == 0,
+		  "player drop refused at exhaustion");
+	std::vector<items::ItemEntityEvent> events;
+	sys.takeEvents(events);
+	CHECK(events.size() == 1 && events[0].kind == items::ItemEventKind::Spawned &&
+			  events[0].id == items::kMaxEntityId,
+		  "only the last successful spawn is streamed (no overflow event on refusal)");
+
+	// Restoring exactly AT the bound is the valid exhausted state: the
+	// items.state nextEntityId == UINT64_MAX round-trips (decode requires >= 1).
+	items::ItemEntitySystem at;
+	at.restore(items::kMaxNextEntityId, {});
+	CHECK(at.idsExhausted(), "restoring next == UINT64_MAX is the valid exhausted state");
+	CHECK(at.spawn(S(ItemId::Stone, 1), {0, 64, 0}, {0, 0, 0}, 0) == 0,
+		  "exhausted restore refuses spawns");
+	CHECK(at.idHighWater() == items::kMaxEntityId, "exhausted high-water never wraps");
+
+	// Near-max population: id-sorted restore preserves every id below next.
+	items::ItemEntitySystem pop;
+	std::vector<items::ItemEntity> ents(2);
+	ents[0].id = items::kMaxEntityId - 1;
+	ents[0].stack = S(ItemId::Stone, 1);
+	ents[0].body.position = {0, 64, 0};
+	ents[1].id = items::kMaxEntityId;
+	ents[1].stack = S(ItemId::Dirt, 1);
+	ents[1].body.position = {1, 64, 0};
+	pop.restore(items::kMaxNextEntityId, ents);
+	CHECK(pop.size() == 2 && pop.idHighWater() == items::kMaxEntityId,
+		  "near-max population restored id-sorted");
+	CHECK(pop.idsExhausted(), "population holding the last ids is exhausted");
+	CHECK(pop.spawn(S(ItemId::Stone, 1), {2, 64, 0}, {0, 0, 0}, 0) == 0,
+		  "no id reuse at the bound");
+}
+
+void testEntityIdExhaustionFacade(ThreadPool &pool)
+{
+	TempRoot root("id-limit");
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	namespace fs = std::filesystem;
+
+	// Pre-seed items.state ONE id below the bound (the world directory does
+	// not exist yet: openOrCreate creates a fresh meta, then the restore reads
+	// the pre-seeded allocator — the #228 lifecycle seam).
+	fs::create_directories(root.path / "limit");
+	worldsave::ItemsPersistState seedState;
+	seedState.nextEntityId = items::kMaxNextEntityId - 1;
+	CHECK(worldsave::writeFileAtomic(root.path / "limit" / "items.state",
+									 worldsave::encodeItemsState(seedState)),
+		  "pre-seed items.state one id below the bound");
+
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 42;
+	cfg.worldName = "limit";
+	cfg.savesRoot = root.path;
+	glm::ivec3 cell1{}, cell2{};
+	{
+		sim::GameSimulation sim(&pool);
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		sim.finalizePlayerSpawn(boot);
+		CHECK(sim.itemIdHighWater() == items::kMaxNextEntityId - 2,
+			  "allocator restored one id below the bound");
+		CHECK(!sim.itemEntities().idsExhausted(), "one id remains");
+		TextureType t1 = AIR, t2 = AIR;
+		CHECK(findLandCell(*sim.world(), 8, 8, cell1, t1), "id-limit fixture: first cell");
+		bool foundSecond = false;
+		for (int dx = 1; dx <= 4 && !foundSecond; ++dx)
+			foundSecond = findBreakableCell(*sim.world(), cell1.x + dx, cell1.z, cell2, t2);
+		CHECK(foundSecond && cell2 != cell1, "id-limit fixture: distinct second cell");
+
+		CoutSilencer silence;
+		CHECK(sim.grantItems(ItemId::Stone, 4).result == ItemResult::Ok, "grant for the drop test");
+
+		// The LAST permitted break drop consumes the final id.
+		CHECK(sim.breakBlock(cell1) == sim::BreakResult::Ok, "last-id break accepted");
+		CHECK(sim.itemIdHighWater() == items::kMaxEntityId, "last break assigned kMaxEntityId");
+		CHECK(sim.itemEntities().idsExhausted(), "allocator exhausted after the last spawn");
+
+		// Exhausted break: refused BEFORE the world edit — the block stays,
+		// the registry drop is never silently lost.
+		CHECK(sim.breakBlock(cell2) == sim::BreakResult::IdExhausted, "exhausted break refused");
+		{
+			WorldCollisionView view(*sim.world());
+			TextureType still = AIR;
+			view.sampleWithType(cell2, &still);
+			CHECK(still == t2, "refused break left the block intact (conservation)");
+		}
+		std::vector<sim::ItemEntitySnapshot> snaps;
+		sim.itemSnapshots(snaps);
+		CHECK(snaps.size() == 1 && snaps[0].id == items::kMaxEntityId,
+			  "exactly the one last-id drop exists");
+
+		// Exhausted manual drop: inventory untouched; count 0 stays a no-op.
+		const sim::InventorySnapshot invBefore = snap(sim);
+		CHECK(sim.dropFromSlot(0, 1, {0, 1, 0}) == ItemResult::IdExhausted,
+			  "exhausted manual drop refused");
+		CHECK(sameSnapshot(snap(sim), invBefore), "refused drop consumed nothing");
+		CHECK(sim.dropFromSlot(0, 0, {0, 1, 0}) == ItemResult::Ok,
+			  "count 0 no-op unchanged at exhaustion");
+		CHECK(sim.dropFromSlot(99, 1, {0, 1, 0}) == ItemResult::InvalidSlot,
+			  "invalid slot keeps its historical code at exhaustion");
+
+		// Save at the limit: the persisted NEXT id must be UINT64_MAX.
+		CHECK(sim.savePlayerState(0.f, 0.f), "save at the id limit succeeds");
+		CHECK(sim.captureItemsState().nextEntityId == items::kMaxNextEntityId,
+			  "persisted next id is the representable bound");
+		sim.shutdown();
+	}
+	{
+		// Reopen: the exhausted state survives save/reload; ids never reuse.
+		sim::GameSimulation re(&pool);
+		const glm::dvec3 boot = re.initialize(cfg, center);
+		re.bootstrapTerrain(boot);
+		re.finalizePlayerSpawn(boot);
+		CHECK(re.itemIdHighWater() == items::kMaxEntityId,
+			  "high-water survived save/reload at the limit");
+		CHECK(re.itemEntities().idsExhausted(), "exhausted state restored");
+		std::vector<sim::ItemEntitySnapshot> snaps;
+		re.itemSnapshots(snaps);
+		CHECK(snaps.size() == 1 && snaps[0].id == items::kMaxEntityId,
+			  "the last-id drop restored with its id (no reuse)");
+		CHECK(re.breakBlock(cell2) == sim::BreakResult::IdExhausted,
+			  "break still refused after reopen at the limit");
+		CoutSilencer silence;
+		CHECK(re.grantItems(ItemId::Stone, 2).result == ItemResult::Ok, "grant after reopen");
+		const sim::InventorySnapshot invBefore = snap(re);
+		CHECK(re.dropFromSlot(0, 1, {0, 1, 0}) == ItemResult::IdExhausted,
+			  "drop still refused after reopen");
+		CHECK(sameSnapshot(snap(re), invBefore), "refused drop consumed nothing after reopen");
+		re.shutdown();
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 17. placeSelectedBlock result matrix + consume-on-success-only.
 // ---------------------------------------------------------------------------
 void testPlaceSelectedBlockMatrix(ThreadPool &pool)
@@ -2346,6 +2509,8 @@ int main()
 	testRaycastInputValidation(pool);
 	testRaycastPendingEditSemantics(pool);
 	testDeferredEditDropConsistency(pool);
+	testEntityIdExhaustion();
+	testEntityIdExhaustionFacade(pool);
 	testPlaceSelectedBlockMatrix(pool);
 	testWalkingLoopEndToEnd(pool);
 	testGameplayPersistenceRoundTrip(pool);
