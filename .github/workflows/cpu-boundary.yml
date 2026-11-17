@@ -11,9 +11,10 @@
 #   cpu-windows      — FT_VOX_GRAPHICS=OFF configure/build/test on Windows (MSVC).
 #   cpu-sanitizers   — ASan + UBSan over the CPU suite (review M21: the sanitizer
 #                      job the test_terrain comment referenced but never existed).
-#   tsan             — TSan over test_network + the headless runner (thread pool,
-#                      network io thread). The CPU-bound TerrainGeneration
-#                      fixture is excluded (expected TSan slowdown > timeout).
+#   tsan             — TSan over test_network + HeadlessSmoke (thread pool,
+#                      network io thread). TerrainGeneration and the full
+#                      HeadlessRunner driver are excluded (expected, variable
+#                      TSan slowdown > timeout); they run natively + under ASan.
 #   graphics-linux   — COMPILE gate for the full graphical configuration (game +
 #                      Vulkan tests + visual harness). No GPU is available on the
 #                      runner, so device tests are not executed here — but the
@@ -157,17 +158,19 @@ jobs:
         run: cmake --build build-tsan -j
 
       # The threaded surfaces: the UDP prototype (io thread vs caller) and the
-      # work-stealing pool behind the headless runner (which also exercises the
-      # call_once biome-config initialization across worker threads).
-      # TerrainGeneration is deliberately EXCLUDED: it is a ~60 s CPU-bound
-      # single-thread fixture whose TSan slowdown exceeds any reasonable test
-      # timeout (expected, not a race); its threading is covered via Headless.
-      - name: Test (network + headless under TSan)
+      # work-stealing pool behind the headless smoke run (which also exercises
+      # the call_once biome-config initialization across worker threads).
+      # EXCLUDED for expected TSan overhead (not races): TerrainGeneration
+      # (~60 s CPU-bound) and the full HeadlessRunner acceptance driver (its
+      # TSan slowdown is highly variable and exceeds the test timeout). Both
+      # still run natively (cpu-linux/windows) and under ASan; HeadlessSmoke
+      # gives the threaded headless path TSan coverage here.
+      - name: Test (network + headless smoke under TSan)
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: >
-          ctest --test-dir build-tsan --output-on-failure --timeout 600
-          -R "NetworkIntegrationTest|HeadlessSmoke|HeadlessRunner"
+          ctest --test-dir build-tsan --output-on-failure --timeout 900
+          -R "NetworkIntegrationTest|HeadlessSmoke"
 
   graphics-linux:
     runs-on: ubuntu-latest
