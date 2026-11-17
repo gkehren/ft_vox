@@ -1354,6 +1354,18 @@ target_link_libraries(bench_persistence PRIVATE
 endif() # FT_VOX_GRAPHICS (engine reload + bench persistence)
 
 # ---------------------------------------------------------------------------
+# Dropped-item simulation benchmark (stabilization PR4, Phase 5). CPU-only:
+# links ONLY ft_vox_core (no GPU/window/camera). Manual benchmark —
+# deliberately NOT registered with ctest (each scenario runs reps x
+# (warmup+ticks) frames with real terrain bootstrap):
+#   bench_gameplay_items --reps 5 --json results.json --csv results.csv
+# The same source builds against the baseline commit (public facade APIs
+# only), so baseline-vs-current comparisons share the exact methodology.
+# ---------------------------------------------------------------------------
+add_executable(bench_gameplay_items bench_gameplay_items.cpp)
+target_link_libraries(bench_gameplay_items PRIVATE ft_vox_core)
+
+# ---------------------------------------------------------------------------
 # Headless simulation runner (issue #210, Epic #204 Phase F). CPU-only: the
 # runner links ONLY ft_vox_core, and every test below runs without a GPU,
 # window or shader asset. All integration tests have bounded wall-clock
@@ -1424,7 +1436,7 @@ foreach(_cpu_test IN ITEMS
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
-    test_frame_pacing test_world_save)
+    test_frame_pacing test_world_save bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR
             "CPU-only dependency guard lists '${_cpu_test}' but no such target exists "

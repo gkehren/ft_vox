@@ -1,0 +1,63 @@
+{
+  "benchmark": "gameplay-items",
+  "config": {"seed":42,"ticks":600,"warmup":240,"reps":5,"workers":0,"dt":0.0166667},
+  "scenarios": [
+    {"name":"baseline","items":0,"reps":5,
+     "frameMs":{"median":0.000100,"p50":0.000100,"p95":0.000200,"p99":0.000200,"min":0.000100,"max":0.000500},
+     "itemMs":{"median":0.000000,"p50":0.000000,"p95":0.000100,"p99":0.000100,"min":0.000000,"max":0.000100},
+     "snapshotMs":{"median":0.000000,"p50":0.000000,"p95":0.000100,"p99":0.000100,"min":0.000000,"max":0.000100},
+     "frameMedianAcrossReps":{"min":0.0001,"max":0.0002},
+     "queryCellsPerTick":0,"queryIterationsPerTick":0,"allocsPerTick":0,"peakRssKB":11284,
+     "events":{"spawned":0,"removed":0,"pickedUp":0},"finalPopulation":0
+    },
+    {"name":"light","items":100,"reps":5,
+     "frameMs":{"median":0.019700,"p50":0.019700,"p95":0.027100,"p99":0.043900,"min":0.018600,"max":0.204700},
+     "itemMs":{"median":0.019200,"p50":0.019200,"p95":0.026500,"p99":0.043500,"min":0.018100,"max":0.203700},
+     "snapshotMs":{"median":0.000400,"p50":0.000400,"p95":0.000500,"p99":0.000500,"min":0.000400,"max":0.020500},
+     "frameMedianAcrossReps":{"min":0.0188,"max":0.0222},
+     "queryCellsPerTick":765,"queryIterationsPerTick":100,"allocsPerTick":0,"peakRssKB":11444,
+     "events":{"spawned":500,"removed":0,"pickedUp":0},"finalPopulation":100
+    },
+    {"name":"medium","items":512,"reps":5,
+     "frameMs":{"median":0.097200,"p50":0.097200,"p95":0.126800,"p99":0.160900,"min":0.093100,"max":0.321800},
+     "itemMs":{"median":0.095000,"p50":0.095000,"p95":0.124200,"p99":0.157500,"min":0.091000,"max":0.319100},
+     "snapshotMs":{"median":0.002000,"p50":0.002000,"p95":0.002300,"p99":0.002700,"min":0.002000,"max":0.081400},
+     "frameMedianAcrossReps":{"min":0.0939,"max":0.1089},
+     "queryCellsPerTick":3826,"queryIterationsPerTick":512,"allocsPerTick":0,"peakRssKB":11616,
+     "events":{"spawned":2560,"removed":0,"pickedUp":0},"finalPopulation":512
+    },
+    {"name":"max","items":1024,"reps":5,
+     "frameMs":{"median":0.207800,"p50":0.207800,"p95":0.286100,"p99":0.368800,"min":0.186500,"max":1.178500},
+     "itemMs":{"median":0.203100,"p50":0.203100,"p95":0.280300,"p99":0.364000,"min":0.182400,"max":1.173500},
+     "snapshotMs":{"median":0.004100,"p50":0.004100,"p95":0.004800,"p99":0.005400,"min":0.004000,"max":0.069700},
+     "frameMedianAcrossReps":{"min":0.1907,"max":0.2225},
+     "queryCellsPerTick":7669,"queryIterationsPerTick":1024,"allocsPerTick":0,"peakRssKB":11852,
+     "events":{"spawned":5120,"removed":0,"pickedUp":0},"finalPopulation":1024
+    },
+    {"name":"pickup","items":1024,"reps":5,
+     "frameMs":{"median":0.000100,"p50":0.000100,"p95":0.000200,"p99":0.000300,"min":0.000100,"max":0.265800},
+     "itemMs":{"median":0.000000,"p50":0.000000,"p95":0.000100,"p99":0.000100,"min":0.000000,"max":0.246400},
+     "snapshotMs":{"median":0.000000,"p50":0.000000,"p95":0.000100,"p99":0.000100,"min":0.000000,"max":0.000100},
+     "frameMedianAcrossReps":{"min":0.0001,"max":0.0002},
+     "queryCellsPerTick":8.53333,"queryIterationsPerTick":1.70667,"allocsPerTick":1.72167,"peakRssKB":11872,
+     "events":{"spawned":5120,"removed":5120,"pickedUp":5120},"finalPopulation":0
+    },
+    {"name":"streaming","items":1024,"reps":5,
+     "frameMs":{"median":9.342300,"p50":9.342300,"p95":12.759500,"p99":15.485600,"min":5.617600,"max":56.377900},
+     "itemMs":{"median":0.031200,"p50":0.031200,"p95":0.073300,"p99":0.079600,"min":0.016100,"max":0.352700},
+     "snapshotMs":{"median":0.003000,"p50":0.003000,"p95":0.004600,"p99":0.006100,"min":0.001600,"max":0.021600},
+     "frameMedianAcrossReps":{"min":9.193,"max":9.8419},
+     "queryCellsPerTick":2425.4,"queryIterationsPerTick":3.5,"allocsPerTick":500.643,"peakRssKB":39720,
+     "events":{"spawned":4000,"removed":0,"pickedUp":0},"finalPopulation":800
+    },
+    {"name":"save","items":1024,"reps":5,
+     "frameMs":{"median":0.215300,"p50":0.215300,"p95":0.282000,"p99":0.302100,"min":0.186600,"max":0.511000},
+     "itemMs":{"median":0.211100,"p50":0.211100,"p95":0.276300,"p99":0.296100,"min":0.182500,"max":0.505700},
+     "snapshotMs":{"median":0.004100,"p50":0.004100,"p95":0.004900,"p99":0.005300,"min":0.004000,"max":0.027700},
+     "frameMedianAcrossReps":{"min":0.2137,"max":0.2227},
+     "queryCellsPerTick":7669,"queryIterationsPerTick":1024,"allocsPerTick":0,"peakRssKB":39720,
+     "events":{"spawned":5120,"removed":0,"pickedUp":0},"finalPopulation":1024,
+     "save":{"saveMs":4.24656,"closeMs":2.58696,"reopenMs":61.6105,"serializedBytes":69866,"verified":true}
+    }
+  ]
+}
