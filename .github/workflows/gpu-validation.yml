@@ -1,0 +1,123 @@
+# Optional GPU runtime validation (stabilization Phase 6).
+#
+# The CPU boundary gate (cpu-boundary.yml) COMPILES the graphical stack but
+# never executes Vulkan device tests — a compilation-only job is not proof of
+# successful runtime rendering. This workflow is the runtime proof:
+#
+#   * manual trigger (workflow_dispatch) — run it on a GPU-capable machine;
+#   * OR a self-hosted runner carrying the `gpu` label (push/PR opt-in via
+#     the `run-gpu` label on the PR).
+#
+# Normal CPU-only CI NEVER depends on this workflow or on a GPU. Without a
+# GPU runner the device tests are NOT EXECUTED — reported as such, never as
+# passed. See docs/gpu-validation.md for the canonical reference environment
+# and the strict golden policy.
+
+name: gpu-validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      visual_mode:
+        description: "Visual regression mode (smoke = relaxed cross-vendor tolerances; strict = canonical-GPU golden gate)"
+        required: false
+        default: "smoke"
+        type: choice
+        options: [smoke, strict]
+  pull_request:
+    branches: [main]
+    types: [labeled, synchronize]
+
+concurrency:
+  group: gpu-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-linux:
+    # Opt-in: only runs on a self-hosted GPU runner when the PR carries the
+    # `run-gpu` label (or on manual dispatch). GitHub-hosted runners have no
+    # GPU — this job is skipped there, never silently "passed".
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'run-gpu')
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Record GPU / driver environment
+        run: |
+          {
+            echo "## GPU environment"
+            echo '```'
+            vulkaninfo --summary 2>/dev/null | head -60 || echo "vulkaninfo unavailable"
+            lspci | grep -i vga || true
+            uname -a
+            g++ --version | head -1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ ninja-build python3 git \
+            libvulkan-dev glslc glslang-tools libboost-system-dev \
+            vulkan-validationlayers
+
+      - name: Configure (full graphical build)
+        run: >
+          cmake -S . -B build-g -G Ninja
+          -DFT_VOX_GRAPHICS=ON
+          -DFT_VOX_DEP_MODE=system
+          -DFT_VOX_FETCH_SDL3=ON
+          -DSDL_UNIX_CONSOLE_BUILD=ON
+          -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF
+          -DSDL_OPENGL=OFF -DSDL_OPENGLES=OFF
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (game + device tests + visual harness)
+        run: cmake --build build-g -j
+
+      - name: Vulkan device tests (validation enabled)
+        env:
+          FT_VOX_VALIDATION: "1"
+        run: >
+          ctest --test-dir build-g --output-on-failure --timeout 600
+          -R "VulkanResourceSmoke|VulkanValidationErrorReporting|MeshUploadLifecycle|MeshArena|MobVulkanRender|PostResizeFormats|WorldPersistence"
+
+      - name: Visual regression + gameplay item checks
+        env:
+          FT_VOX_VALIDATION: "1"
+          FT_VOX_VISUAL_SMOKE: ${{ github.event.inputs.visual_mode == 'strict' && '0' || '1' }}
+        run: >
+          ctest --test-dir build-g --output-on-failure --timeout 900
+          -R "VisualRegression|VisualImageMetrics"
+
+      - name: Publish artifacts (screenshots, diffs, metrics, logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-validation-artifacts
+          path: |
+            build-g/visual-qa/
+            build-g/mob-qa/
+            build-g/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Compilation-only fallback for forks / PRs without a GPU runner: proves the
+  # graphical stack still builds, explicitly NOT a runtime validation. The
+  # cpu-boundary workflow already covers this on every PR; this job exists so
+  # a manual dispatch on a GPU-less machine still produces a clear summary.
+  gpu-compile-only-note:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report execution scope
+        run: |
+          {
+            echo "## GPU validation scope"
+            echo "Device tests execute only on the self-hosted \`gpu\` runner."
+            echo "On GitHub-hosted runners they are **not executed** (no GPU),"
+            echo "never reported as passed. See docs/gpu-validation.md."
+          } >> "$GITHUB_STEP_SUMMARY"

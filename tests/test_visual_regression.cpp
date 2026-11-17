@@ -776,6 +776,144 @@ std::vector<SceneSpec> buildSceneTable()
 		return errors;
 	};
 
+	// --- item_population ----------------------------------------------------
+	// 128 dropped items (stabilization Phase 6): mixed atlas layers over a
+	// large grass pad, camera pulled back — the instanced draw at a
+	// normal-heavy population. The entity-free base proves the contribution;
+	// the hot-pixel floor is far above the 8-item item_entities scene.
+	scenes.push_back({});
+	SceneSpec &itemPop = scenes.back();
+	itemPop.name = "item_population";
+	itemPop.seed = 4217;
+	itemPop.dayTime = 0.33f;
+	itemPop.time = 5.0f;
+	itemPop.areaRadiusChunks = 4;
+	itemPop.mobDeltaBase = true;
+	itemPop.spot = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		const glm::ivec2 col = findLandColumn(h.terrain(), 70, 100, 8);
+		const float ground = float(h.terrain().getTerrainSample(col.x, col.y).postErosionHeight);
+		run.anchor = glm::vec3(float(col.x), ground, float(col.y));
+		h.camera().setPosition(glm::vec3(float(col.x - 6), ground + 5.f, float(col.y + 2)));
+		h.camera().setYawPitch(0.f, -15.f);
+		h.shader().fogStart = 60.f;
+		h.shader().fogEnd = 135.f;
+	};
+	itemPop.fixture = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		RenderWorldBridge &chunks = h.chunks();
+		const int sx = int(run.anchor.x), base = int(run.anchor.y), sz = int(run.anchor.z);
+		for (int x = sx - 4; x <= sx + 28; ++x)
+			for (int z = sz - 6; z <= sz + 10; ++z)
+			{
+				const int ground = groundHeightAt(chunks, x, z);
+				for (int y = base + 1; y <= ground; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), AIR);
+				for (int y = ground + 1; y < base; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), DIRT);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), AIR);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), GRASS_TOP);
+			}
+		run.worldEdited = true;
+		const TextureType blocks[8] = {STONE, COBBLESTONE, DIRT, OAK_LOG,
+									   SAND,  BRICKS,      GRAVEL, OAK_PLANKS};
+		// 16 x 8 grid, 1.5-block spacing: 128 items receding across the pad.
+		for (int k = 0; k < 128; ++k)
+		{
+			ItemRenderState st;
+			st.position = glm::vec3(float(sx) + 1.5f * float(k % 16) + 0.5f, float(base) + 1.0f,
+									float(sz) - 2.f + 1.5f * float(k / 16) + 0.5f);
+			st.atlasLayer = static_cast<uint32_t>(blocks[k % 8]);
+			st.rotation = 0.6f * float(k % 16);
+			st.bob = 0.0f;
+			st.localSkylight = -1.f;
+			run.items.push_back(st);
+		}
+		h.camera().setPosition(glm::vec3(float(sx) - 5.f, float(base) + 5.f, float(sz) + 2.f));
+		h.camera().setYawPitch(0.f, -15.f);
+	};
+	itemPop.invariants = [](const RgbaImage &actual, const RgbaImage &entityFree) {
+		std::vector<std::string> errors;
+		need(entityFree.valid(), errors, "entity-free base frame missing");
+		if (!entityFree.valid())
+			return errors;
+		const ImageMetrics delta = visual::compareImages(actual, entityFree, 20);
+		need(delta.comparable() && delta.hotPixels > 2000, errors,
+			 "128 items barely changed pixels (hot pixels " + std::to_string(delta.hotPixels) +
+				 ", want > 2000)");
+		return errors;
+	};
+
+	// --- item_max_population ------------------------------------------------
+	// 1024 dropped items (stabilization Phase 6) — the sim/renderer population
+	// cap: a 32 x 32 grid over a large pad, elevated camera. The single
+	// instanced draw must stay validation-clean at the cap; the hot-pixel
+	// floor proves the whole population contributes.
+	scenes.push_back({});
+	SceneSpec &itemMax = scenes.back();
+	itemMax.name = "item_max_population";
+	itemMax.seed = 4217;
+	itemMax.dayTime = 0.33f;
+	itemMax.time = 5.0f;
+	itemMax.areaRadiusChunks = 4;
+	itemMax.mobDeltaBase = true;
+	itemMax.spot = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		const glm::ivec2 col = findLandColumn(h.terrain(), 70, 100, 8);
+		const float ground = float(h.terrain().getTerrainSample(col.x, col.y).postErosionHeight);
+		run.anchor = glm::vec3(float(col.x), ground, float(col.y));
+		h.camera().setPosition(glm::vec3(float(col.x - 6), ground + 12.f, float(col.y + 0.5f)));
+		h.camera().setYawPitch(0.f, -25.f);
+		h.shader().fogStart = 80.f;
+		h.shader().fogEnd = 200.f;
+	};
+	itemMax.fixture = [](SceneRun &run) {
+		VisualHarness &h = run.harness;
+		RenderWorldBridge &chunks = h.chunks();
+		const int sx = int(run.anchor.x), base = int(run.anchor.y), sz = int(run.anchor.z);
+		for (int x = sx - 2; x <= sx + 34; ++x)
+			for (int z = sz - 16; z <= sz + 18; ++z)
+			{
+				const int ground = groundHeightAt(chunks, x, z);
+				for (int y = base + 1; y <= ground; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), AIR);
+				for (int y = ground + 1; y < base; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), DIRT);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), AIR);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), GRASS_TOP);
+			}
+		run.worldEdited = true;
+		const TextureType blocks[8] = {STONE, COBBLESTONE, DIRT, OAK_LOG,
+									   SAND,  BRICKS,      GRAVEL, OAK_PLANKS};
+		for (int k = 0; k < 1024; ++k)
+		{
+			ItemRenderState st;
+			st.position = glm::vec3(float(sx) + float(k % 32) + 0.5f, float(base) + 1.0f,
+									float(sz) - 15.f + float(k / 32) + 0.5f);
+			st.atlasLayer = static_cast<uint32_t>(blocks[k % 8]);
+			st.rotation = 0.6f * float(k % 32);
+			st.bob = 0.0f;
+			st.localSkylight = -1.f;
+			run.items.push_back(st);
+		}
+		h.camera().setPosition(glm::vec3(float(sx) - 6.f, float(base) + 12.f, float(sz) + 0.5f));
+		h.camera().setYawPitch(0.f, -25.f);
+	};
+	itemMax.invariants = [](const RgbaImage &actual, const RgbaImage &entityFree) {
+		std::vector<std::string> errors;
+		need(entityFree.valid(), errors, "entity-free base frame missing");
+		if (!entityFree.valid())
+			return errors;
+		const ImageMetrics delta = visual::compareImages(actual, entityFree, 20);
+		// Overview distance: far rows are a few pixels per 0.25-block cube.
+		// The floor is 20x the 8-item scene's (>150) — the whole population
+		// must contribute, calibrated on the canonical GPU (measured ~4k).
+		need(delta.comparable() && delta.hotPixels > 3000, errors,
+			 "1024 items barely changed pixels (hot pixels " + std::to_string(delta.hotPixels) +
+				 ", want > 3000)");
+		return errors;
+	};
+
 	// --- underwater ---------------------------------------------------------
 	// Submerged camera looking up toward the shore: absorption, surface
 	// from below and the underwater post tint.
@@ -1257,6 +1395,183 @@ void writeText(const fs::path &path, const std::string &text)
 // composited comparison alone cannot separate AO noise from the overall
 // darkening AO applies). Purely numeric — no reference images involved.
 // ---------------------------------------------------------------------------
+
+// Gameplay item rendering checks (stabilization Phase 6): semantic assertions
+// on the derived dropped-item path that a still golden cannot express —
+// interpolation moves pixels, frustum culling removes them entirely, the
+// world-reload epoch barrier leaves no stale instances, a resource-pack
+// reload rebinds the shared atlas without changing output, and the population
+// cap records cleanly. No golden files are read or updated. Runs with the
+// full suite or via --scene item_rendering_checks.
+int runItemRenderingChecks(VisualHarness &harness, const fs::path &outDir)
+{
+	int failures = 0;
+	const long validationBefore = harness.validationErrors();
+	std::vector<std::string> errors;
+
+	// A small lit pad with a 4x4 item cluster (the item_entities pattern).
+	harness.beginScene(4217);
+	harness.shader() = ShaderParameters{};
+	harness.renderSettings() = RenderSettings{};
+	harness.post() = PostProcessSettings{};
+	harness.post().autoExposureEnabled = false;
+	harness.shader().dayTime = 0.33f;
+	deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
+	const glm::ivec2 col = findLandColumn(harness.terrain(), 70, 100, 8);
+	const float ground = float(harness.terrain().getTerrainSample(col.x, col.y).postErosionHeight);
+	const int sx = col.x, base = int(ground), sz = col.y;
+	harness.camera().setPosition(glm::vec3(float(sx) - 4.f, ground + 3.f, float(sz) + 0.5f));
+	harness.camera().setYawPitch(0.f, -10.f);
+	harness.buildArea(harness.camera().getPosition(), 3);
+	{
+		RenderWorldBridge &chunks = harness.chunks();
+		for (int x = sx - 4; x <= sx + 10; ++x)
+			for (int z = sz - 4; z <= sz + 4; ++z)
+			{
+				const int g = groundHeightAt(chunks, x, z);
+				for (int y = base + 1; y <= g; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), AIR);
+				for (int y = g + 1; y < base; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), DIRT);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), AIR);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), GRASS_TOP);
+			}
+		harness.remeshEditedChunks();
+	}
+	const glm::vec3 camPos = harness.camera().getPosition();
+
+	std::vector<ItemRenderState> items;
+	const TextureType blocks[4] = {STONE, DIRT, SAND, BRICKS};
+	for (int k = 0; k < 16; ++k)
+	{
+		ItemRenderState st;
+		st.position = glm::vec3(float(sx) + float(k % 4) + 0.5f, float(base) + 1.0f,
+								float(sz) - 1.5f + float(k / 4) + 0.5f);
+		st.atlasLayer = static_cast<uint32_t>(blocks[k % 4]);
+		st.rotation = 0.6f * float(k);
+		st.localSkylight = -1.f;
+		items.push_back(st);
+	}
+	const auto renderWith = [&](const std::vector<ItemRenderState> &it) {
+		return harness.renderFrame(5.0f, {}, it);
+	};
+
+	const visual::RgbaImage baseFrame = renderWith({});
+	const visual::RgbaImage frameA = renderWith(items);
+	need(baseFrame.valid() && frameA.valid(), errors, "item check renders valid");
+	if (baseFrame.valid() && frameA.valid())
+	{
+		const ImageMetrics delta = visual::compareImages(frameA, baseFrame, 20);
+		need(delta.comparable() && delta.hotPixels > 100, errors,
+			 "items contribute pixels (hot " + std::to_string(delta.hotPixels) + ")");
+
+		// 1. Interpolation: previous -> current positions (+ spin) must move
+		// pixels; a renderer ignoring the interpolated state renders identical.
+		std::vector<ItemRenderState> itemsB = items;
+		for (ItemRenderState &st : itemsB)
+		{
+			st.position.y += 0.5f;
+			st.rotation += 0.7f;
+		}
+		const visual::RgbaImage frameB = renderWith(itemsB);
+		const ImageMetrics interp = visual::compareImages(frameA, frameB, 20);
+		need(frameB.valid() && interp.comparable() && interp.hotPixels > 100, errors,
+			 "interpolation changes pixels (hot " + std::to_string(interp.hotPixels) + ")");
+
+		// 2. Frustum culling: the whole population behind the camera must
+		// contribute ZERO pixels and report zero visible instances.
+		std::vector<ItemRenderState> behind = items;
+		for (size_t k = 0; k < behind.size(); ++k)
+			behind[k].position = glm::vec3(camPos.x - 10.f - float(k) * 0.5f, camPos.y, camPos.z);
+		const visual::RgbaImage culled = renderWith(behind);
+		need(culled.valid() && culled.pixels == baseFrame.pixels, errors,
+			 "culled items render bit-identical to the entity-free base");
+		need(harness.renderer().visibleItems() == 0, errors,
+			 "visibleItems() == 0 when the population is behind the camera");
+
+		// 3. Atlas / resource-pack reload: the production failure-atomic
+		// reload rebinds set 1 (items sample the shared atlas descriptors);
+		// the same item state must render bit-identical, validation-clean.
+		const visual::RgbaImage beforeReload = renderWith(items);
+		harness.renderer().reloadResourcePack("");
+		const visual::RgbaImage afterReload = renderWith(items);
+		need(beforeReload.valid() && afterReload.valid() &&
+				 beforeReload.pixels == afterReload.pixels,
+			 errors, "resource-pack reload keeps item output bit-identical");
+
+		// 4. Population cap: 1024 instances prepare/record cleanly and the
+		// visible count never exceeds the cap.
+		std::vector<ItemRenderState> maxItems;
+		maxItems.reserve(1024);
+		for (int k = 0; k < 1024; ++k)
+		{
+			ItemRenderState st;
+			st.position = glm::vec3(float(sx) + float(k % 32) + 0.5f, float(base) + 1.0f,
+									float(sz) - 15.f + float(k / 32) + 0.5f);
+			st.atlasLayer = static_cast<uint32_t>(blocks[k % 4]);
+			st.rotation = 0.6f * float(k % 32);
+			st.localSkylight = -1.f;
+			maxItems.push_back(st);
+		}
+		const visual::RgbaImage maxFrame = renderWith(maxItems);
+		need(maxFrame.valid(), errors, "1024-item frame renders");
+		need(harness.renderer().visibleItems() <= 1024, errors,
+			 "visibleItems() respects the population cap");
+	}
+
+	// 5. Epoch reset / world reload: after beginScene (the reload-world
+	// ordering) an empty item list must render bit-identical to a FRESH empty
+	// frame — no stale instance slice survives the world transition.
+	harness.beginScene(4217);
+	harness.shader() = ShaderParameters{};
+	harness.renderSettings() = RenderSettings{};
+	harness.post() = PostProcessSettings{};
+	harness.post().autoExposureEnabled = false;
+	harness.shader().dayTime = 0.33f;
+	deriveSceneAtmosphere(harness.shader(), harness.renderSettings().maxRenderDistance);
+	harness.camera().setPosition(camPos);
+	harness.camera().setYawPitch(0.f, -10.f);
+	harness.buildArea(camPos, 3);
+	{
+		RenderWorldBridge &chunks = harness.chunks();
+		for (int x = sx - 4; x <= sx + 10; ++x)
+			for (int z = sz - 4; z <= sz + 4; ++z)
+			{
+				const int g = groundHeightAt(chunks, x, z);
+				for (int y = base + 1; y <= g; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), AIR);
+				for (int y = g + 1; y < base; ++y)
+					chunks.placeVoxel(glm::vec3(float(x), float(y), float(z)), DIRT);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), AIR);
+				chunks.placeVoxel(glm::vec3(float(x), float(base), float(z)), GRASS_TOP);
+			}
+		harness.remeshEditedChunks();
+	}
+	const visual::RgbaImage afterReset = renderWith({});
+	need(afterReset.valid() && baseFrame.valid() && afterReset.pixels == baseFrame.pixels, errors,
+		 "epoch reset: no stale item instances survive the world transition");
+
+	need(harness.lastNonFiniteSamples() == 0, errors, "non-finite HDR samples in item frames");
+	need(harness.validationErrors() - validationBefore == 0, errors,
+		 "validation errors during item rendering checks: " +
+			 std::to_string(harness.validationErrors() - validationBefore));
+
+	if (!errors.empty())
+	{
+		++failures;
+		std::cerr << "  FAIL item-rendering-checks:\n";
+		for (const std::string &e : errors)
+			std::cerr << "    - " << e << "\n";
+		fs::create_directories(outDir / "item_rendering_checks");
+		std::string report;
+		for (const auto &e : errors)
+			report += e + "\n";
+		writeText(outDir / "item_rendering_checks" / "errors.txt", report);
+	}
+	else
+		std::cout << "  PASS item-rendering-checks (interpolation, culling, atlas reload, cap, epoch reset)\n";
+	return failures;
+}
 
 int runAoMotionCheck(VisualHarness &harness, const std::vector<SceneSpec> &scenes,
 					 const fs::path &outDir)
@@ -3083,9 +3398,11 @@ int main(int argc, char **argv)
 		std::find(onlyScenes.begin(), onlyScenes.end(), "water_surface_terms") != onlyScenes.end();
 	const bool godrayAlignmentRequested =
 		std::find(onlyScenes.begin(), onlyScenes.end(), "godray_alignment") != onlyScenes.end();
+	const bool itemChecksRequested =
+		std::find(onlyScenes.begin(), onlyScenes.end(), "item_rendering_checks") != onlyScenes.end();
 	if (ranScenes == 0 && !onlyScenes.empty() && !resizeRequested && !adaptationRequested &&
 		!meterRequested && !underwaterOpticsRequested && !underwaterExposureRequested &&
-		!waterSurfaceTermsRequested && !godrayAlignmentRequested)
+		!waterSurfaceTermsRequested && !godrayAlignmentRequested && !itemChecksRequested)
 	{
 		std::cerr << "FAIL: --scene";
 		for (const std::string &name : onlyScenes)
@@ -3097,7 +3414,8 @@ int main(int argc, char **argv)
 					 " water_surface_terms, godray_alignment, water_shallow_top, water_shallow_grazing,"
 					 " water_deep_horizon, water_reflect_edge, water_cave_pool, water_cave_lava,"
 					 " aa_silhouette, aa_silhouette_off, aa_closeup, aa_closeup_off,"
-					 " resize_check)\n";
+					 " item_entities, item_population, item_max_population,"
+					 " item_rendering_checks, resize_check)\n";
 		++failures;
 	}
 
@@ -3169,6 +3487,24 @@ int main(int argc, char **argv)
 			++failures;
 		}
 	}
+	// Gameplay item rendering checks (stabilization Phase 6): semantic
+	// assertions on interpolation, culling, atlas reload, the population cap
+	// and the world-reload epoch barrier. Runs with the full suite or via
+	// --scene item_rendering_checks; no goldens involved.
+	if (onlyScenes.empty() || itemChecksRequested)
+	{
+		std::cout << "[item-rendering-checks] interpolation / culling / atlas reload / cap / epoch reset\n";
+		try
+		{
+			failures += runItemRenderingChecks(harness, outDir);
+		}
+		catch (const std::exception &e)
+		{
+			std::cerr << "  FAIL item-rendering-checks: exception: " << e.what() << "\n";
+			++failures;
+		}
+	}
+
 	// AO camera-motion stability (issue #138): cheap deterministic numeric
 	// check on the noon_terrain setup — runs in both smoke and strict modes,
 	// and honors a --scene filter only when it excludes noon_terrain.
