@@ -147,4 +147,4 @@ whole directory plus the ctest logs and the `vulkaninfo --summary` capture.
 
 | Date | Environment | Scope | Result |
 |---|---|---|---|
-| 2026-11-18 | canonical (RTX 4070 Ti, driver 32.0.16.2124, Vulkan 1.4.357, MSVC Release) | stabilization Phase 6: device tests + visual regression (smoke + strict) + gameplay item checks | see PR #243 description / `benchmarks/results/gpu-validation-2026-11-18.md` |
+| 2026-11-18 | canonical (RTX 4070 Ti, driver 32.0.16.2124, Vulkan 1.4.357, MSVC Release) | stabilization Phase 6: device tests + visual regression (smoke + strict) + gameplay item checks | **PASSED** — PR #244 / `benchmarks/results/gpu-validation-2026-11-18.md` |
