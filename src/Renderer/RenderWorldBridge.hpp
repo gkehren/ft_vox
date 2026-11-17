@@ -59,6 +59,7 @@
 #include <cstddef>
 
 #include <glm/glm.hpp>
+#include <Camera/Camera.hpp> // concrete Camera use by bridge consumers (CI fix)
 #include <Chunk/Chunk.hpp>
 #include <Chunk/ChunkLightHalo.hpp>
 #include <Chunk/ChunkPool.hpp>

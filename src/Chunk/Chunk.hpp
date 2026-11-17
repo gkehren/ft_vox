@@ -27,7 +27,10 @@
 #include <Chunk/ChunkMeshResult.hpp>
 #include <Vulkan/VkBuffer.hpp>
 #include <Vulkan/MeshArena.hpp>
-#include <Camera/Camera.hpp>
+// (CI fix: the Camera/Camera.hpp include here was dead — Chunk never uses
+// Camera — and dragged SDL3 into every header-only consumer of Chunk.hpp,
+// breaking the Vulkan-only test targets on Linux where SDL3 headers are not
+// globally visible. Consumers that need Camera include it themselves.)
 #include <utils.hpp>
 #include <Engine/EngineDefs.hpp>
 #include <Core/WorkloadTelemetry.hpp>
