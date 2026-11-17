@@ -765,39 +765,97 @@ PlaceResult GameSimulation::placeSelectedBlock(glm::ivec3 cell, WorldEditResult 
 
 RaycastHit GameSimulation::raycastVoxel(glm::vec3 origin, glm::vec3 dir, float maxDist) const
 {
-    // The historical Engine::raycastVoxel march, moved VERBATIM (issue #227):
-    // same float arithmetic, same 0.05 step, same first-active-cell rule and
-    // adjacent fallback. VoxelWorld::isVoxelActive is the exact seam the
-    // render bridge forwarded to, so parity holds by construction. Unknown
-    // cells answer inactive — the march passes through them, never hits.
+    // The historical Engine::raycastVoxel march (issue #227): same float
+    // arithmetic, same 0.05 step, same first-active-cell rule and adjacent
+    // fallback. Stabilization PR1 hardened the inputs and bounded the loop;
+    // PR2 unified the cell query with the authoritative EFFECTIVE state
+    // (WorldCollisionView: stored backing + pending logical edits) that
+    // breakBlock/placeSelectedBlock and physics already observe. Unknown
+    // cells answer unavailable — the march passes through them, never hits.
     RaycastHit result{};
     if (!m_world)
         return result;
-    // Degenerate-direction guard (review §4.4), symmetric to dropFromSlot:
-    // normalize(0) or a non-finite component yields NaN, and floor(NaN) ->
-    // ivec3 cast is UB. A zero/invalid ray simply hits nothing.
-    if (!std::isfinite(dir.x) || !std::isfinite(dir.y) || !std::isfinite(dir.z) ||
-        glm::dot(dir, dir) < 1e-12f)
+    // Non-finite inputs would poison floor() -> int conversion (UB) or the
+    // loop control: NaN comparisons silently skip the march, +Inf distances
+    // never terminate. An invalid ray simply hits nothing.
+    if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z))
         return result;
-    dir = glm::normalize(dir);
+    if (!std::isfinite(maxDist) || maxDist < 0.f)
+        return result;
+    if (!std::isfinite(dir.x) || !std::isfinite(dir.y) || !std::isfinite(dir.z))
+        return result;
+    // Origin envelope: with the clamped distance below, every marched cell
+    // stays inside the supported world-coordinate envelope, so all float ->
+    // int coordinate conversions are in range (no UB at extreme positions).
+    if (std::fabs(origin.x) > kRaycastOriginLimit ||
+        std::fabs(origin.y) > kRaycastOriginLimit ||
+        std::fabs(origin.z) > kRaycastOriginLimit)
+        return result;
+    // Degenerate-direction guard (review §4.4), symmetric to dropFromSlot.
+    // The squared length is evaluated in DOUBLE: finite-but-huge float
+    // components (e.g. 1e30) overflow a float dot to +Inf, which would slip
+    // past a float-only gate and normalize to a zero direction.
+    const double dx = dir.x, dy = dir.y, dz = dir.z;
+    const double len2 = dx * dx + dy * dy + dz * dz;
+    if (len2 < 1e-12)
+        return result;
+    // Normalize: the float path keeps the historical bit-exact arithmetic
+    // for every ray a float dot can represent; the double fallback only
+    // engages when the float dot overflows to infinity.
+    const float dotF = glm::dot(dir, dir);
+    if (std::isfinite(dotF))
+        dir = glm::normalize(dir);
+    else
+        dir = glm::vec3(glm::normalize(glm::dvec3(dir)));
     const float step = 0.05f;
+    const float dist = std::min(maxDist, kMaxRaycastDistance);
+    // Bounded march: an integer iteration cap derived from the clamped
+    // distance. The float accumulator is unchanged (historical semantics),
+    // but t can never stall at the float precision wall: dist <= 64 keeps
+    // every increment representable, and the cap terminates the loop even
+    // if that invariant ever broke.
+    const int maxSteps = static_cast<int>(std::ceil(dist / step)) + 1;
+    // ONE scoped view for the whole march: the shared lock is taken once
+    // (cheaper than the historical per-cell lock), chunk lookups are cached,
+    // and the pending-edit overlay matches the authoritative effective state
+    // the gameplay commands and collision observe (stabilization PR2).
+    WorldCollisionView view(*m_world);
     glm::vec3 prev = origin;
-    for (float t = 0.f; t <= maxDist; t += step)
+    float t = 0.f;
+    for (int i = 0; i < maxSteps && t <= dist; ++i)
     {
         const glm::vec3 p = origin + dir * t;
         const glm::vec3 block(std::floor(p.x), std::floor(p.y), std::floor(p.z));
-        if (m_world->isVoxelActive(block))
+        // Historical vertical pass-through: below-world / above-sky cells
+        // never hit (isVoxelActive answered false there). The collision
+        // view's solid floor / open sky are PHYSICS boundaries, not targets;
+        // the horizontal envelope check is belt-and-braces for the origin
+        // limit above. Cells outside it cannot hold resident chunks.
+        if (block.y >= 0.f && block.y < static_cast<float>(WORLD_HEIGHT) &&
+            block.x >= static_cast<float>(SHRT_MIN) && block.x < static_cast<float>(SHRT_MAX) &&
+            block.z >= static_cast<float>(SHRT_MIN) && block.z < static_cast<float>(SHRT_MAX))
         {
-            result.hit = true;
-            result.block = block;
-            result.adjacent = glm::vec3(std::floor(prev.x), std::floor(prev.y), std::floor(prev.z));
-            if (result.adjacent == result.block)
-                result.adjacent = block - glm::vec3(dir.x > 0 ? 1.f : (dir.x < 0 ? -1.f : 0.f),
-                                                    dir.y > 0 ? 1.f : (dir.y < 0 ? -1.f : 0.f),
-                                                    dir.z > 0 ? 1.f : (dir.z < 0 ? -1.f : 0.f));
-            return result;
+            TextureType type = AIR;
+            const physics::Cell cell = view.sampleWithType(
+                glm::ivec3(static_cast<int>(block.x), static_cast<int>(block.y),
+                           static_cast<int>(block.z)),
+                &type);
+            // Any non-AIR effective type hits — solids AND fluids/vegetation,
+            // exactly the historical isVoxelActive rule, now pending-aware.
+            if (cell.available && type != AIR)
+            {
+                result.hit = true;
+                result.block = block;
+                result.adjacent = glm::vec3(std::floor(prev.x), std::floor(prev.y), std::floor(prev.z));
+                if (result.adjacent == result.block)
+                    result.adjacent = block - glm::vec3(dir.x > 0 ? 1.f : (dir.x < 0 ? -1.f : 0.f),
+                                                        dir.y > 0 ? 1.f : (dir.y < 0 ? -1.f : 0.f),
+                                                        dir.z > 0 ? 1.f : (dir.z < 0 ? -1.f : 0.f));
+                return result;
+            }
         }
         prev = p;
+        t += step;
     }
     return result;
 }
