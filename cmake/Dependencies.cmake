@@ -22,6 +22,14 @@
 include(FetchContent)
 include(CMakeFindDependencyMacro OPTIONAL)
 
+# CMake 4 removed compatibility with projects declaring cmake_minimum_required
+# VERSION < 3.5 (e.g. the pinned miniz 3.0.2). Allow the FetchContent deps to
+# configure under CMake 4+ without bumping every upstream tag (CI fix: the
+# ubuntu-latest runner now ships CMake 4).
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+
 # ---------------------------------------------------------------------------
 # Detect dependency mode
 # ---------------------------------------------------------------------------
