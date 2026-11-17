@@ -358,6 +358,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
     ${CMAKE_SOURCE_DIR}/src/Sim/GameSimulation.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${FT_VOX_WORLD_SOURCES}
     ${FT_VOX_ITEM_SOURCES}
@@ -382,6 +383,7 @@ set(FT_VOX_SOURCES
 # ---------------------------------------------------------------------------
 set(FT_VOX_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
