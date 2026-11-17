@@ -192,6 +192,10 @@ enum class ItemResult : uint8_t
     ItemMismatch, // merge/transfer/move between two different items
     NotPlaceable, // item has no placeableBlock (the future place-from-hotbar
                   // rejection code; no v1 inventory operation returns it)
+    IdExhausted,  // the entity-id allocator reached its representable bound
+                  // (stabilization PR3): a drop that needs a fresh entity id
+                  // is refused WITHOUT consuming inventory items. Append-only
+                  // vocabulary: existing codes never move (save/wire stable).
 };
 
 // --- Plain-value stacks ---------------------------------------------------------

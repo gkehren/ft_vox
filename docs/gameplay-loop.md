@@ -91,16 +91,19 @@ replays or reorders anything.
 | `swapStacks(a, b)` | unconditional exchange (empty included) | `Ok` / `InvalidSlot` |
 | `splitStack(from, to)` | move the **larger half** (ceil; odd counts defined) with transfer semantics | `Ok` / `Partial` / `Full` / `InvalidSlot` / `EmptyStack` / `ItemMismatch` |
 | `grantItems(item, count)` | **test/admin seam**, explicitly logged (`[items] grant …`); hotbar-first merge then empty slots; counts above maxStack distribute | `AddResult{result, remainder}` |
-| `dropFromSlot(slot, count, dir)` | remove up to `count` (clamped) + spawn one entity at the player eye along the host-supplied plain direction; degenerate/non-finite dir falls back to +Y; manual drops carry the longer pickup delay | `Ok` / `InvalidSlot` / `EmptyStack` |
+| `dropFromSlot(slot, count, dir)` | remove up to `count` (clamped) + spawn one entity at the player eye along the host-supplied plain direction; degenerate/non-finite dir falls back to +Y; manual drops carry the longer pickup delay | `Ok` / `InvalidSlot` / `EmptyStack` / `IdExhausted` |
 | `breakBlock(cell)` | registry validation + world delete + registry drop spawn (§5) | `BreakResult` (§4) |
 | `placeSelectedBlock(cell)` | hotbar availability + `canPlaceVoxel` gate + world edit + **consume exactly 1 on success only** | `PlaceResult` (§4) |
 
 `items::ItemResult` is the shared vocabulary: `Ok`, `Partial` (remainder
 returned/stays in the world), `Full` (nothing applied), `InvalidSlot`,
-`EmptyStack`, `InvalidItem`, `ItemMismatch`, `NotPlaceable`. A clamped
+`EmptyStack`, `InvalidItem`, `ItemMismatch`, `NotPlaceable`, `IdExhausted`
+(stabilization PR3: the entity-id allocator reached its representable bound;
+the operation is refused **without consuming anything**). A clamped
 take/transfer of all available items is still `Ok` — availability is not an
-error. **The future authoritative server reuses these exact codes as its
-rejection vocabulary.**
+error. The vocabulary is **append-only**: existing codes never move
+(save/wire stable). **The future authoritative server reuses these exact
+codes as its rejection vocabulary.**
 
 Stack math (`mergeStacks`/`splitStack`/`transferStack`) is pure functions
 over plain values with explicit results — shared by the inventory commands
@@ -163,6 +166,10 @@ The two never synchronize; both are persisted in `player.state` /
   - `UnknownTerrain` — cell unloaded / not generated (never inferred).
   - `WorldRejected` — nothing to break (AIR / out of bounds) or the world
     refused the edit.
+  - `IdExhausted` (stabilization PR3) — the entity-id allocator reached its
+    representable bound: the break is refused **before** the world edit so
+    the registry drop is never silently lost (the block stays). Blocks with
+    an empty drop-table entry need no entity and stay breakable.
 - **`placeSelectedBlock(cell)`** → `PlaceResult`:
   - `Ok` — placed; **consumed exactly 1 item**.
   - `EmptySlot` / `NotPlaceable` — selected stack empty / item has no
@@ -207,6 +214,15 @@ structs + owning system, **no ECS** (#132 stays deferred).
 - **Id allocator**: simulation-owned, monotonic, starts at 1, **never
   reuses ids within a session**; the **high-water mark is persisted**
   (`items.state`) so ids are never reused **across sessions** either.
+  **Exhaustion guard (stabilization PR3):** id 0 is permanently invalid;
+  the largest assignable id is `kMaxEntityId = UINT64_MAX - 1`, so the
+  persisted NEXT id (`high-water + 1`) stays representable and valid at
+  `UINT64_MAX`. The allocator **never wraps**: once it rests at
+  `kMaxNextEntityId`, spawns answer id 0 without touching the population
+  (no overflow despawn on a refused spawn), `breakBlock` answers
+  `IdExhausted` before editing the world, and `dropFromSlot` answers
+  `IdExhausted` before consuming inventory. Restoring the same world never
+  resets the allocator; the exhausted state survives save/reload.
 - **Snapshots**: bounded, **id-sorted** `ItemEntitySnapshot` (previous /
   current positions for interpolation, item + count, ageTicks), filled in
   place like `mobSnapshots`. Interpolate with `itemInterpolationAlpha()`.

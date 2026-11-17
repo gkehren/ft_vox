@@ -60,8 +60,10 @@ void ItemEntitySystem::reset()
 void ItemEntitySystem::restore(uint64_t nextEntityId, const std::vector<ItemEntity> &entities)
 {
     // The save layer validated ids/counts/transforms (decodeItemsState);
-    // debug-assert the invariants the tick rules rely on.
-    assert(nextEntityId >= 1);
+    // debug-assert the invariants the tick rules rely on. nextEntityId ==
+    // kMaxNextEntityId is the VALID exhausted state (stabilization PR3): the
+    // allocator resumes refused, never wrapping; every uint64 >= 1 is <= it.
+    assert(nextEntityId >= 1 && nextEntityId <= kMaxNextEntityId);
     assert(entities.size() <= ItemEntitySettings::capacity);
     uint64_t prevId = 0;
     for (const ItemEntity &e : entities)
@@ -88,6 +90,12 @@ EntityId ItemEntitySystem::spawn(ItemStack stack, glm::dvec3 position, glm::dvec
                                  uint32_t pickupDelayTicks)
 {
     if (stack.isEmpty())
+        return 0;
+    // Id-exhaustion guard (stabilization PR3): refuse BEFORE the overflow
+    // despawn — a spawn that cannot assign an id must not destroy an existing
+    // entity either. The allocator never wraps (kMaxNextEntityId bound) and
+    // id 0 stays permanently invalid.
+    if (idsExhausted())
         return 0;
     // Bounded population: deterministic oldest-first overflow despawn BEFORE
     // the new entity takes the slot (the Removed event precedes the Spawned).
