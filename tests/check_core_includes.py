@@ -40,6 +40,7 @@ ROOTS = [
     "Core/WorkloadTelemetry.hpp",
     "Sim/GameSimulation.hpp",
     "Sim/GameSimulation.cpp",
+    "Sim/PlayerId.hpp",
     "World/WorldSave.cpp",
     "World/WorldPersistence.cpp",
     "World/WorldChunk.cpp",

@@ -2,24 +2,41 @@
 
 // =============================================================================
 // GameSimulation — the CPU-owned simulation facade (issue #208, Epic #204
-// Phase D). SINGLE owner of the authoritative gameplay state:
+// Phase D; issue #246, Epic #245 Phase A splits shared world authority from
+// per-player gameplay state). SINGLE owner of the authoritative gameplay
+// state, in two ownership layers:
 //
+// SHARED WORLD AUTHORITY (one instance per simulation, world-epoch scoped):
 //   * world identity: the TerrainGenerator (seed + kGeneratorVersion) and the
 //     VoxelWorld (chunk residency/streaming, logical edits, generation
 //     publication, WorldPersistence — the issue #206 contracts);
-//   * player: physics::PlayerController at the fixed 120 Hz step, flight/walk
-//     mode, spawn/restore, selected block, transition status;
 //   * passive mobs: entities::MobSystem at the fixed 60 Hz step over the
 //     CPU-only WorldMobView (spawn/retire/interest radii are plain values,
 //     independent of Camera / RenderSettings);
-//   * inventory: items::Inventory (36 slots, hotbar 0..8) with explicit
-//     gameplay commands + a bounded value snapshot (issue #225, Epic #223
-//     Phase B; the item domain contracts are issue #224 / src/Items/);
 //   * dropped items: items::ItemEntitySystem at the fixed 60 Hz step
 //     (issue #226, Epic #223 Phase C) — break/drop commands, deterministic
-//     auto-pickup into the inventory, id-sorted bounded snapshots + a
-//     spawn/remove event stream;
+//     auto-pickup, id-sorted bounded snapshots + a spawn/remove event stream;
 //   * session identity: the world generation / reload counter.
+//
+// PER-PLAYER SESSIONS (one PlayerState per PlayerId, indexed id-sorted):
+//   * physics::PlayerController at the fixed 120 Hz step, flight/walk mode,
+//     spawn/restore, creative block selection, transition status;
+//   * items::Inventory (36 slots, hotbar 0..8) with explicit gameplay
+//     commands + a bounded value snapshot (issue #225, Epic #223 Phase B;
+//     the item domain contracts are issue #224 / src/Items/).
+//   Sessions are created/removed explicitly (createPlayer/removePlayer);
+//   PlayerId allocation is monotonic and never reused (Sim/PlayerId.hpp).
+//   The LOCAL player (localPlayerId()) is the solo-compatibility anchor: it
+//   exists from construction, is always the first session and cannot be
+//   removed. Every legacy single-player API below is a THIN FORWARD to it —
+//   one source of truth, no parallel solo state.
+//
+// A1 SCOPE BOUNDARY (issue #246): world interactions (break/place/drop),
+// auto-pickup and the player-aware placement rule still act for the LOCAL
+// player only — actor-aware commands are #247 (A2), multi-observer residency
+// is #248 (A3), multi-player persistence is #259 (E1). The shared systems'
+// contracts are unchanged. Design note: docs/simulation-render-contracts.md
+// §11.
 //
 // The facade is render-free (enforced by tests/check_core_includes.py): no
 // Camera, RenderSettings, SDL, Vulkan or ImGui types, and no engine singleton
@@ -27,16 +44,17 @@
 // commands, an observer/interest point — and consumes read-only, bounded
 // VALUE snapshots (player, mob transforms/animation, world identity + edit
 // revision). Fixed stepping stays internal to the controllers; the maxSteps
-// catch-up cap is unchanged (Epic #204 invariant).
+// catch-up cap is unchanged (Epic #204 invariant). All mutation stays on the
+// single simulation thread (the host's frame boundary), exactly as before.
 //
 // State / policy boundaries (issue #208):
 //   * SDL key/mouse -> normalized commands is HOST responsibility; camera
 //     orientation and render interpolation are presentation. The simulation
 //     owns the authoritative feet position, flight mode and block selection.
 //   * Pause/focus/benchmark POLICY stays with the host: it decides WHEN to
-//     suspend (advancePlayer/advanceMobs take an explicit flag). The
-//     simulation implements the suspension semantics: accumulators cleared,
-//     previous/current synced, NO catch-up burst after suspension.
+//     suspend (advancePlayer/advanceMobs take an explicit flag, per player or
+//     bulk). The simulation implements the suspension semantics: accumulators
+//     cleared, previous/current synced, NO catch-up burst after suspension.
 //   * The observer/interest point is a plain value (camera position for the
 //     graphical host, a scripted probe for headless tests), so debug flight
 //     and headless streaming work without a Camera.
@@ -73,6 +91,7 @@
 #include <Items/Inventory.hpp>
 #include <Items/ItemEntitySystem.hpp>
 #include <Physics/PlayerController.hpp>
+#include <Sim/PlayerId.hpp>
 #include <World/VoxelWorld.hpp>
 #include <World/WorldPersistence.hpp>
 
@@ -85,6 +104,8 @@ namespace sim
 /// types. `renderEye` is the interpolated eye the presentation camera follows
 /// (previous -> current at the accumulator fraction); `position` is the
 /// authoritative feet position. `status` points at static literals only.
+/// One snapshot per player session (playerSnapshot(id, out)); the legacy
+/// by-value playerSnapshot() answers the local player's.
 struct PlayerSnapshot
 {
     glm::dvec3 position{0.0};
@@ -207,6 +228,13 @@ public:
     static_assert(-kRaycastOriginLimit - kMaxRaycastDistance > static_cast<float>(SHRT_MIN),
                   "the clamped march must stay inside the -X/-Z collision envelope");
 
+    /// Simultaneous player-session ceiling (issue #246, Epic #245 Phase A):
+    /// a generous bounded population, NOT a two-player architecture — the
+    /// future session layer (Phase B) imposes its own policy limit below it.
+    /// createPlayer() refuses with kInvalidPlayerId at the cap; removal
+    /// frees a slot (the retired id is never reused).
+    static constexpr std::size_t kMaxPlayers = 256;
+
     /// World-open request (issue #180 identity rules apply): an existing save
     /// keeps its stored seed; an explicit seed that contradicts the save runs
     /// the session transient (openWorldError() reports why).
@@ -227,7 +255,9 @@ public:
     };
 
     /// The worker pool is referenced, not owned (host lifetime; may be null
-    /// for fully synchronous headless fixtures, like VoxelWorld).
+    /// for fully synchronous headless fixtures, like VoxelWorld). The local
+    /// player session exists from construction (the solo-compatibility
+    /// anchor): the legacy APIs are total before initialize().
     explicit GameSimulation(ThreadPool *threadPool);
     /// Final safety net: force-closes an still-open persistence (the host's
     /// explicit shutdown() is the durable path that also writes player.state).
@@ -236,37 +266,75 @@ public:
     GameSimulation(const GameSimulation &) = delete;
     GameSimulation &operator=(const GameSimulation &) = delete;
 
+    // --- Player sessions (issue #246, Epic #245 Phase A) -----------------------
+    // One shared world, N independent player sessions. Mutation stays on the
+    // single simulation thread; every per-player API below answers a safe
+    // refusal/no-op for an invalid, retired or never-allocated PlayerId — a
+    // stale handle can never address another player's state (ids are never
+    // reused, Sim/PlayerId.hpp). Sessions survive initialize()/reload() (the
+    // world-epoch boundaries reset every inventory, not the sessions); the
+    // allocator never rewinds. Deterministic iteration: playerIds() and the
+    // bulk APIs traverse sessions in ascending id order.
+
+    /// Create a fresh session: default controller at the origin, empty
+    /// inventory, walking mode, STONE creative selection. The host places the
+    /// body afterwards (setPlayerPosition / spawnPlayerOnSurface /
+    /// restorePlayerState). Returns kInvalidPlayerId at the population cap or
+    /// id exhaustion (nothing is created).
+    PlayerId createPlayer();
+
+    /// Remove a session. REFUSES (returns false, nothing changes) for an
+    /// invalid/unknown id and for the LOCAL player — the solo-compatibility
+    /// anchor must stay total for the legacy APIs. Removing a session never
+    /// touches the shared world, mobs, dropped items or the other sessions;
+    /// items the player already dropped stay in the shared world population.
+    bool removePlayer(PlayerId id);
+
+    bool hasPlayer(PlayerId id) const;
+    std::size_t playerCount() const { return m_players.size(); }
+    /// The solo-compatibility anchor: created at construction, always the
+    /// first session, never removable. Every legacy single-player API
+    /// forwards to it.
+    PlayerId localPlayerId() const { return m_players.front().id; }
+    /// Ascending-id session list, filled IN PLACE (the snapshot pattern):
+    /// clear + reserve keeps the caller's capacity across frames.
+    void playerIds(std::vector<PlayerId> &out) const;
+
     // --- Lifecycle (explicit reset/open/close/reload) -------------------------
 
     /// Resolve the seed, create the authoritative world, open persistence
     /// when requested and read the saved player state. Returns the bootstrap
-    /// center: the SAVED player position when one exists (issue #180 review
-    /// round 6 — the initial area must generate around it), else
+    /// center: the SAVED local-player position when one exists (issue #180
+    /// review round 6 — the initial area must generate around it), else
     /// `fallbackCenter`. Terrain is NOT generated here: the graphical host
     /// bootstraps through RenderWorldBridge::generateInitialArea (voxels +
     /// render binding/meshing/upload in one step), a headless host calls
     /// bootstrapTerrain(). Follow with finalizePlayerSpawn().
     /// Player flight mode, block selection and status carry over from a
     /// previous session until finalizePlayerSpawn (restore/spawn) sets them —
-    /// the historical Engine behavior. The inventory and the dropped-item
-    /// population + id allocator reset to EMPTY here and are restored from
-    /// inventory.state / items.state by finalizePlayerSpawn (issue #228;
+    /// the historical Engine behavior, per session. EVERY session's inventory
+    /// and the shared dropped-item population + id allocator reset to EMPTY
+    /// here; the local player's inventory and the item population are restored
+    /// from inventory.state / items.state by finalizePlayerSpawn (issue #228;
     /// missing files = fresh, corrupt = empty with a loud save-error log).
+    /// Player sessions themselves survive the epoch boundary (issue #246).
     glm::dvec3 initialize(const Config &config, glm::dvec3 fallbackCenter);
 
     /// Headless synchronous voxel bootstrap: the world half of the bridge's
     /// generateInitialArea, with no render handles involved.
     void bootstrapTerrain(glm::dvec3 center);
 
-    /// After the terrain bootstrap: restore the validated saved player, or
-    /// fall back to the surface spawn around `fallbackAround` (the graphical
-    /// host passes its camera position — the historical scan anchor; a
-    /// headless host passes the bootstrap center). Camera orientation is
-    /// presentation — the outcome carries the saved yaw/pitch for the host.
-    /// Also restores the saved inventory + dropped items + entity-id
-    /// allocator high-water (issue #228), independent of the player outcome.
-    /// The gameplay restore is ONCE per session (the payloads are consumed):
-    /// repeated calls never overwrite live gameplay state (PR #235 review).
+    /// After the terrain bootstrap: restore the validated saved LOCAL player,
+    /// or fall back to the surface spawn around `fallbackAround` (the
+    /// graphical host passes its camera position — the historical scan
+    /// anchor; a headless host passes the bootstrap center). Camera
+    /// orientation is presentation — the outcome carries the saved yaw/pitch
+    /// for the host. Also restores the saved inventory + dropped items +
+    /// entity-id allocator high-water (issue #228), independent of the player
+    /// outcome. The gameplay restore is ONCE per session (the payloads are
+    /// consumed): repeated calls never overwrite live gameplay state
+    /// (PR #235 review). Non-local sessions are spawned/restored explicitly
+    /// by the host (issue #246; multi-player persistence is #259).
     SpawnOutcome finalizePlayerSpawn(glm::dvec3 fallbackAround);
 
     /// Close (refusable) and recreate the world for `newSeed` (<= 0 -> 42,
@@ -277,13 +345,14 @@ public:
     /// destroys the bridge before calling this. Terrain bootstrap and player
     /// spawn are separate steps (the benchmark host uses its own placement).
     /// Reloaded worlds are transient: persistence stays off afterwards.
-    /// A SUCCESSFUL reload resets the inventory to empty (issue #225) and
-    /// the dropped-item population + id allocator (issue #226); a REFUSED
-    /// reload keeps the old world, inventory AND items authoritative.
-    /// The player body is intentionally LEFT to the host's spawn step: a
-    /// headless host that reloads without re-spawning keeps the previous body
-    /// (possibly in an unloaded region) until it calls finalizePlayerSpawn /
-    /// spawnPlayerOnSurface.
+    /// A SUCCESSFUL reload resets EVERY session's inventory to empty
+    /// (issue #225 generalized by #246) and the shared dropped-item population
+    /// + id allocator (issue #226); a REFUSED reload keeps the old world,
+    /// inventories AND items authoritative. Player bodies are intentionally
+    /// LEFT to the host's spawn step: a headless host that reloads without
+    /// re-spawning keeps the previous bodies (possibly in an unloaded region)
+    /// until it calls finalizePlayerSpawn / spawnPlayerOnSurface. Sessions
+    /// and their ids survive the reload (issue #246).
     bool reload(int newSeed);
 
     /// Durable GAMEPLAY capture + flush (no close). The host supplies the
@@ -296,6 +365,8 @@ public:
     /// before shutdown(). Returns false when nothing is open or any write /
     /// the flush failed (failures are logged, exactly like the historical
     /// Engine shutdown; a failed write stays retryable, never dropped).
+    /// A1 scope (issue #246): the capture covers the LOCAL player's state —
+    /// the solo save format is unchanged; multi-player checkpoints are #259.
     bool savePlayerState(float yaw, float pitch);
 
     /// Destructor-only close: resolve stranded edits, capture, flush and
@@ -304,17 +375,31 @@ public:
     /// Since issue #228 the safety net also captures inventory.state +
     /// items.state (fully authoritative — no host presentation input needed,
     /// unlike player.state's camera orientation, which only the explicit
-    /// savePlayerState path writes).
+    /// savePlayerState path writes). A1 scope: local-player inventory, the
+    /// shared item population (issue #246).
     void shutdown();
 
     // --- Per-frame advance (explicit elapsed time + plain values) -------------
 
-    /// One host frame of player physics (fixed 120 Hz internally).
-    /// `suspended` implements the host's pause/focus/benchmark policy: no
-    /// stepping, accumulators cleared, no catch-up burst afterwards. In
-    /// flight mode the body is host-driven (setPlayerPosition each frame);
-    /// only the walking controller steps here.
+    /// One host frame of the LOCAL player's physics (fixed 120 Hz
+    /// internally) — the solo-compatibility forward to
+    /// advancePlayer(localPlayerId(), ...). `suspended` implements the host's
+    /// pause/focus/benchmark policy: no stepping, accumulators cleared, no
+    /// catch-up burst afterwards. In flight mode the body is host-driven
+    /// (setPlayerPosition each frame); only the walking controller steps here.
     void advancePlayer(double dt, const PlayerCommand &command, bool suspended);
+
+    /// One host frame of ONE player's physics (fixed 120 Hz internally,
+    /// issue #246). Returns false for an invalid/unknown id (no-op). Same
+    /// suspension/flight semantics as the legacy forward.
+    bool advancePlayer(PlayerId id, double dt, const PlayerCommand &command, bool suspended);
+
+    /// One host frame of EVERY player's physics, in ascending id order
+    /// (issue #246), with a neutral (zero) command — the bulk idle/fixture
+    /// step. Hosts with per-player input loop playerIds() + advancePlayer(id,
+    /// ...) instead. One scoped collision view serves the whole batch;
+    /// suspension/flight semantics are identical per player.
+    void advancePlayers(double dt, bool suspended);
 
     /// One host frame of passive mobs (fixed 60 Hz internally). `observer` is
     /// the interest point (camera position or a headless probe),
@@ -327,11 +412,12 @@ public:
     /// One host frame of dropped item entities (fixed 60 Hz internally,
     /// issue #226). The host calls it NEXT TO advanceMobs (the #227 rewiring
     /// adds the call site; until then only headless hosts/tests drive it).
-    /// Pickup proximity uses the authoritative player feet; pickups merge
-    /// into the owned inventory hotbar-first. Suspension freezes the
-    /// population and syncs previous/current (no catch-up burst). The world
-    /// is NOT pumped here — the issue #114 publication ordering stays with
-    /// the bridge / pumpWorld().
+    /// A1 scope (issue #246): pickup proximity uses the LOCAL player's
+    /// authoritative feet and merges into the LOCAL inventory hotbar-first —
+    /// deterministic shared multi-player pickup is #247 (A2). Suspension
+    /// freezes the population and syncs previous/current (no catch-up burst).
+    /// The world is NOT pumped here — the issue #114 publication ordering
+    /// stays with the bridge / pumpWorld().
     void advanceItems(double dt, bool suspended);
 
     /// Headless world publication: publish finished generation jobs + apply
@@ -341,23 +427,32 @@ public:
     void pumpWorld();
 
     // --- Player commands / queries --------------------------------------------
+    // Every command exists in two forms: the legacy single-player form (a
+    // thin forward to the LOCAL player) and the per-player form taking a
+    // PlayerId first (issue #246). Per-player forms answer a safe refusal /
+    // no-op for invalid/unknown ids — never another player's state.
 
     /// Pause/focus transition: clear accumulators + buffered input so no
     /// accumulated time or input is ever replayed (historical semantics).
     void suspendPlayer();
+    void suspendPlayer(PlayerId id);
     /// Drop buffered jump input (host UI captured the keyboard).
     void clearPlayerInput();
+    void clearPlayerInput(PlayerId id);
 
     /// Flight/walk toggle at `feet` (graphical host: camera eye - eyeHeight).
     /// Disabling flight validates body clearance at `feet` and REFUSES when
     /// the body overlaps solid or unloaded terrain (status message set,
-    /// returns false). On success the controller resets at `feet`.
+    /// returns false). On success the controller resets at `feet`. The
+    /// per-player form also returns false for an invalid/unknown id.
     bool setPlayerFlight(bool enabled, glm::dvec3 feet);
+    bool setPlayerFlight(PlayerId id, bool enabled, glm::dvec3 feet);
 
     /// Host-driven reposition (flight follow, benchmark/inspection reset):
     /// resets the controller at `feet` (zero velocity, suspended
     /// accumulators) without changing the flight mode.
     void setPlayerPosition(glm::dvec3 feet);
+    void setPlayerPosition(PlayerId id, glm::dvec3 feet);
 
     /// Host LIFECYCLE restore (benchmark/inspection exit, review §4.8):
     /// sets the flight mode and resets at `feet` WITHOUT the gameplay
@@ -365,12 +460,15 @@ public:
     /// terrain, and the validated setPlayerFlight(false) would refuse,
     /// leaving flight stuck on. Gameplay toggles keep setPlayerFlight.
     void restorePlayerFlight(bool enabled, glm::dvec3 feet);
+    void restorePlayerFlight(PlayerId id, bool enabled, glm::dvec3 feet);
 
     /// Surface spawn scan around `around`: closest columns first, bounded by
     /// the bootstrapped region. Success: walking reset at the safe feet.
     /// Fallback: flight at y=100 with a status message. Returns the eye
-    /// position the host camera should take.
+    /// position the host camera should take. The per-player form answers
+    /// `around` unchanged for an invalid/unknown id (the no-world fallback).
     glm::dvec3 spawnPlayerOnSurface(glm::dvec3 around);
+    glm::dvec3 spawnPlayerOnSurface(PlayerId id, glm::dvec3 around);
 
     /// Saved-state restore (issue #180 review round 6): exact position when
     /// usable, physics::recover() fixes embedding up to one block, a
@@ -378,20 +476,27 @@ public:
     /// the terrain streams in), a clearly-invalid position returns false so
     /// the caller falls back to the surface spawn. Also restores flight mode
     /// and the selected block. Camera orientation stays with the host.
+    /// The per-player form also returns false for an invalid/unknown id.
     bool restorePlayerState(const PlayerPersistState &saved);
+    bool restorePlayerState(PlayerId id, const PlayerPersistState &saved);
 
     /// Read <world>/player.state when a world is open; nullopt for a fresh
     /// world or an unusable save (already reported through the error log).
+    /// A1 scope: the solo save format carries the LOCAL player (issue #246).
     std::optional<PlayerPersistState> readSavedPlayerState() const;
 
     /// Authoritative player state + host-supplied presentation orientation,
-    /// in the persisted plain-value format (issue #180 Phase 5).
+    /// in the persisted plain-value format (issue #180 Phase 5). The
+    /// per-player form answers a default-constructed state for an
+    /// invalid/unknown id.
     PlayerPersistState capturePlayerState(float yaw, float pitch) const;
+    PlayerPersistState capturePlayerState(PlayerId id, float yaw, float pitch) const;
 
     /// Authoritative gameplay state in the persisted plain-value formats
-    /// (issue #228): the inventory (selection + 36 stacks) and the dropped
-    /// item population + allocator next-id. Exposed for tests and the #230
-    /// runner round-trips; savePlayerState writes them through WorldPersistence.
+    /// (issue #228): the LOCAL inventory (selection + 36 stacks) and the
+    /// shared dropped item population + allocator next-id. Exposed for tests
+    /// and the #230 runner round-trips; savePlayerState writes them through
+    /// WorldPersistence. A1 scope (issue #246): solo format unchanged.
     worldsave::InventoryPersistState captureInventoryState() const;
     worldsave::ItemsPersistState captureItemsState() const;
 
@@ -413,7 +518,8 @@ public:
     /// canPlaceVoxel() first (the graphical host does; headless hosts/tests may
     /// deliberately place inside the body by calling placeVoxel() directly).
     /// It lives here so the rule is defined once and shared, not copied.
-    /// Pure query: it never edits the world.
+    /// Pure query: it never edits the world. A1 scope (issue #246): the rule
+    /// consults the LOCAL player's body/flight — actor-aware placement is #247.
     bool canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) const;
 
     // --- Inventory / hotbar gameplay commands (issue #225, Epic #223 Phase B) ---
@@ -426,10 +532,15 @@ public:
     // suspension never replays or reorders anything: a command issued while
     // the host is suspended applies exactly once, at call time.
     //
-    // World-independent: the inventory exists before initialize() and
-    // survives until initialize/reload resets it (the #228 restore hook lands
-    // with persistence). Mutations go through these commands ONLY — the
-    // inventory() accessor below is read-only.
+    // World-independent: inventories exist before initialize() and survive
+    // until initialize/reload resets them (the #228 restore hook lands with
+    // persistence). Mutations go through these commands ONLY — the
+    // inventory() accessors below are read-only.
+    //
+    // Per-player forms (issue #246): an invalid/unknown PlayerId answers
+    // items::ItemResult::InvalidPlayer WITHOUT touching any inventory (the
+    // grant form echoes the canonicalized request in the remainder, the
+    // rejected-input discipline). Legacy forms forward to the local player.
     //
     // Deliberately NOT exposed here: items::Inventory::removeCount. The
     // command set is exactly the epic §3 inventory-management commands plus
@@ -441,18 +552,22 @@ public:
     /// creative/editor selectedBlock() seam below is deliberately separate
     /// until #227 wires the host.
     items::ItemResult selectHotbarSlot(int index);
+    items::ItemResult selectHotbarSlot(PlayerId id, int index);
 
     /// Whole-stack move/merge between inventory slots (empty destination
     /// receives, same item merges, different items -> ItemMismatch).
     items::ItemResult moveStack(int from, int to);
+    items::ItemResult moveStack(PlayerId id, int from, int to);
 
     /// Unconditional exchange of two slots (any items, empty included).
     items::ItemResult swapStacks(int a, int b);
+    items::ItemResult swapStacks(PlayerId id, int a, int b);
 
     /// Move the larger half (ceil, odd counts defined) of `from` into `to`
     /// with transfer semantics — the authoritative half-split the UI drag
     /// cursor will drive (#229).
     items::ItemResult splitStack(int from, int to);
+    items::ItemResult splitStack(PlayerId id, int from, int to);
 
     /// TEST/ADMIN SEAM (epic #223 §3): grant items without a break/pickup
     /// cause. Every call is EXPLICITLY LOGGED ("[items] grant ...") so
@@ -460,22 +575,27 @@ public:
     /// The log records the requested count and — when it differs — the
     /// APPLIED amount: a {None, N} sentinel input collapses to the canonical
     /// empty (an Ok no-op logged with "applied 0"), partial/full/rejected
-    /// grants log their remainder and applied count.
+    /// grants log their remainder and applied count. Non-local grants carry
+    /// the player id in the log line (issue #246); the local line keeps the
+    /// historical format.
     /// Same partial semantics as the future pickup path: hotbar-first merge,
     /// then empty slots; AddResult.remainder is what did not fit (Full leaves
     /// the inventory untouched). Counts above maxStack distribute across
     /// slots. Not a gameplay rule — walking-mode survival never grants.
     items::AddResult grantItems(items::ItemId item, uint16_t count);
+    items::AddResult grantItems(PlayerId id, items::ItemId item, uint16_t count);
 
     // --- World interaction commands (issues #226/#227, Epic #223 Phase C/D) --
     // The survival-lite break/drop/place loop; the sim raycast below is the
     // targeting rule. The creative/editor placeVoxel / deleteVoxel seams
     // above stay unchanged (infinite-block semantics).
     //
-    // `outEdit` (optional): on an ACCEPTED edit the world's WorldEditResult
-    // (edit id + geometric members) is moved out so the graphical host can
-    // publish through RenderWorldBridge::publishEditResult — the SAME event
-    // drain + commit-group path the creative edits use, no second edit path
+    // A1 scope (issue #246): these commands act for the LOCAL player (the
+    // actor-aware migration is #247). `outEdit` (optional): on an ACCEPTED
+    // edit the world's WorldEditResult (edit id + geometric members) is moved
+    // out so the graphical host can publish through
+    // RenderWorldBridge::publishEditResult — the SAME event drain +
+    // commit-group path the creative edits use, no second edit path
     // (issue #227). Headless callers pass nullptr.
 
     /// Break a voxel by hand: validates the cell against the item registry
@@ -534,12 +654,17 @@ public:
     /// no-op; invalid slot / empty slot answer InvalidSlot / EmptyStack.
     /// Manual drops carry the longer pickup delay (no instant re-pickup).
     /// An exhausted entity-id allocator answers IdExhausted WITHOUT touching
-    /// the inventory (stabilization PR3 conservation).
+    /// the inventory (stabilization PR3 conservation). A1 scope: the LOCAL
+    /// player's inventory/eye (issue #246; actor-aware drops are #247).
     items::ItemResult dropFromSlot(int slot, uint16_t count, glm::dvec3 dir);
 
     // --- Read-only bounded snapshots -------------------------------------------
 
+    /// The LOCAL player's snapshot (solo-compatibility forward).
     PlayerSnapshot playerSnapshot() const;
+    /// One player's snapshot, filled IN PLACE (issue #246). Returns false for
+    /// an invalid/unknown id, leaving `out` UNTOUCHED.
+    bool playerSnapshot(PlayerId id, PlayerSnapshot &out) const;
     /// Derived mob presentation snapshots (bounded by entities::kMaxMobCount),
     /// filled IN PLACE like MobSystem::renderStates — no intermediate cache or
     /// per-frame vector copy. previous/current interpolation and the #129
@@ -547,11 +672,14 @@ public:
     /// stays UNASSIGNED (< 0) — the graphical host samples the bridge light
     /// caches afterwards, headless consumers ignore it.
     void mobSnapshots(std::vector<MobSnapshot> &out) const { m_mobs.renderStates(out); }
-    /// Bounded inventory snapshot, filled IN PLACE (issue #225): the fixed
-    /// 36-slot array + selected hotbar index, copied from the authoritative
-    /// items::Inventory. No allocation, no registry strings — the UI resolves
-    /// ItemId display names itself.
+    /// Bounded LOCAL inventory snapshot, filled IN PLACE (issue #225): the
+    /// fixed 36-slot array + selected hotbar index, copied from the
+    /// authoritative items::Inventory. No allocation, no registry strings —
+    /// the UI resolves ItemId display names itself.
     void inventorySnapshot(InventorySnapshot &out) const;
+    /// One player's inventory snapshot, filled IN PLACE (issue #246). Returns
+    /// false for an invalid/unknown id, leaving `out` UNTOUCHED.
+    bool inventorySnapshot(PlayerId id, InventorySnapshot &out) const;
     /// Id-sorted bounded dropped-item snapshots, filled IN PLACE (issue
     /// #226, the mobSnapshots pattern). Interpolate previous -> current with
     /// itemInterpolationAlpha(); counts/ages are authoritative tick values.
@@ -579,12 +707,23 @@ public:
     /// failure); empty otherwise. Surfaced by the host's World UI panel.
     const std::string &openWorldError() const { return m_openWorldError; }
 
-    bool playerFlight() const { return m_playerFlight; }
-    glm::dvec3 playerFeet() const { return m_player.body.position; }
-    glm::dvec3 playerEye() const { return m_player.eye(); }
-    glm::dvec3 playerRenderEye() const { return m_player.renderEye(); }
-    const physics::PlayerSettings &playerSettings() const { return m_player.settings; }
-    const char *playerStatus() const { return m_playerStatus; }
+    // Legacy single-player accessors: thin forwards to the LOCAL player
+    // session (issue #246 — one source of truth). Per-player queries use
+    // playerSnapshot(id, out) / playerFeet(id) / playerFlight(id).
+    // Reference-returning accessors point into session storage: valid until
+    // the next createPlayer() (the vector may reallocate); the bounded
+    // snapshots are the stable read seam across session lifecycle changes.
+    bool playerFlight() const { return localState().flight; }
+    glm::dvec3 playerFeet() const { return localState().controller.body.position; }
+    glm::dvec3 playerEye() const { return localState().controller.eye(); }
+    glm::dvec3 playerRenderEye() const { return localState().controller.renderEye(); }
+    const physics::PlayerSettings &playerSettings() const { return localState().controller.settings; }
+    const char *playerStatus() const { return localState().status; }
+    /// Per-player feet position (issue #246); the zero vector for an
+    /// invalid/unknown id (never another player's position).
+    glm::dvec3 playerFeet(PlayerId id) const;
+    /// Per-player flight mode (issue #246); false for an invalid/unknown id.
+    bool playerFlight(PlayerId id) const;
     /// CREATIVE/EDITOR block selection (flight mode, benchmarks, the `T`
     /// cycle, headless place/delete scripts). Authoritative and persisted
     /// (player.state). Deliberate DUALITY with the gameplay hotbar selection
@@ -594,9 +733,10 @@ public:
     /// Commands-only mutation (review M6): the UI/host used to write through
     /// a mutable reference, leaking authoritative state across the
     /// sim/render boundary — every mutation now goes through a command, the
-    /// inventory discipline.
-    const TextureType &selectedBlock() const { return m_selectedBlock; }
-    void setSelectedBlock(TextureType type) { m_selectedBlock = type; }
+    /// inventory discipline. Per-player state since issue #246.
+    const TextureType &selectedBlock() const { return localState().selectedBlock; }
+    void setSelectedBlock(TextureType type) { localState().selectedBlock = type; }
+    void setSelectedBlock(PlayerId id, TextureType type);
 
     /// Spawn/retire/interest settings — plain values, no Camera/RenderSettings.
     entities::MobSettings &mobSettings() { return m_mobs.settings; }
@@ -607,9 +747,12 @@ public:
     void setMobsEnabled(bool enabled) { m_mobsEnabled = enabled; }
     /// Diagnostics seam (dropped steps / query stats / population).
     const entities::MobSystem &mobs() const { return m_mobs; }
-    /// Read-only inventory seam (issue #225): queries/inspection only —
+    /// Read-only LOCAL inventory seam (issue #225): queries/inspection only —
     /// every mutation goes through the gameplay commands above.
-    const items::Inventory &inventory() const { return m_inventory; }
+    const items::Inventory &inventory() const { return localState().inventory; }
+    /// Read-only per-player inventory seam (issue #246); nullptr for an
+    /// invalid/unknown id. Same commands-only mutation discipline.
+    const items::Inventory *inventory(PlayerId id) const;
     /// Read-only dropped-item diagnostics seam (issue #226, the mobs()
     /// pattern): population, dropped steps/events, id-sorted entities.
     const items::ItemEntitySystem &itemEntities() const { return m_items; }
@@ -629,6 +772,38 @@ public:
     const WorldPersistence *worldPersistence() const { return m_world ? m_world->worldPersistence() : nullptr; }
 
 private:
+    /// One player session's authoritative gameplay state (issue #246): the
+    /// 120 Hz controller, the 36-slot inventory, flight/walk mode, the
+    /// creative block selection and the transition status (static literals
+    /// only). Plain values + the controller's own fixed-step accumulators —
+    /// no references, no heap churn per frame. The shared world/mobs/items
+    /// live OUTSIDE this record: removing a session never touches them.
+    struct PlayerState
+    {
+        physics::PlayerController controller;
+        items::Inventory inventory;
+        bool flight{false};
+        TextureType selectedBlock{STONE};
+        const char *status{""}; // static literals only
+    };
+    struct PlayerEntry
+    {
+        PlayerId id;
+        PlayerState state;
+    };
+
+    /// The local player is always the FIRST entry (created at construction,
+    /// never removable, ids monotonic) — O(1) access for the legacy forwards.
+    PlayerState &localState() { return m_players.front().state; }
+    const PlayerState &localState() const { return m_players.front().state; }
+    /// Id-sorted binary search; nullptr for invalid/unknown ids. A retired id
+    /// is never reassigned, so a stale handle can never alias another session.
+    PlayerState *findPlayer(PlayerId id);
+    const PlayerState *findPlayer(PlayerId id) const;
+    /// Build the bounded snapshot value from a session (shared by the legacy
+    /// by-value form and the per-player in-place form — one source of truth).
+    static PlayerSnapshot snapshotOf(const PlayerState &state);
+
     /// Read the persisted gameplay state when a world is open (issue #228,
     /// the readSavedPlayerState pattern): nullopt for a fresh world / old
     /// save (quiet) or an unusable file (already reported through the
@@ -636,9 +811,10 @@ private:
     /// a corrupt file degrades to empty, never refuses the world open.
     std::optional<worldsave::InventoryPersistState> readSavedInventoryState() const;
     std::optional<worldsave::ItemsPersistState> readSavedItemsState() const;
-    /// Restore inventory + dropped items + allocator from the saved payloads
-    /// (validated by the save layer). Called by finalizePlayerSpawn after
-    /// the player restore/spawn, independent of its outcome.
+    /// Restore the LOCAL inventory + the shared dropped items + allocator
+    /// from the saved payloads (validated by the save layer). Called by
+    /// finalizePlayerSpawn after the player restore/spawn, independent of its
+    /// outcome.
     void restoreGameplayState();
 
     ThreadPool *m_threadPool{nullptr};
@@ -648,31 +824,30 @@ private:
     std::unique_ptr<TerrainGenerator> m_terrainGenerator;
     std::unique_ptr<VoxelWorld> m_world;
 
-    physics::PlayerController m_player;
+    // Player sessions (issue #246): ID-SORTED by construction (monotonic
+    // allocation + order-preserving removal); the local player is entry 0.
+    // Sessions survive initialize/reload (world-epoch boundaries reset every
+    // inventory, not the sessions); the allocator never rewinds, so retired
+    // ids are never reused. Bounded by kMaxPlayers.
+    std::vector<PlayerEntry> m_players;
+    uint32_t m_nextPlayerId{1};
+
     entities::MobSystem m_mobs;
-    // Plain value (no references, no heap): destruction-order independent,
-    // declared with the other owned gameplay state. Reset to empty by
-    // initialize/reload; the #228 restore hook will refill it from
-    // inventory.state on the same lifecycle seams as player.state.
-    items::Inventory m_inventory;
     // Dropped item entities (issue #226): owns the monotonic id allocator,
     // the fixed-step accumulator and the bounded event stream. Plain values
     // + owning containers, no references — destruction-order independent.
     // initialize/reload reset it (session boundary); #228 persists the
-    // id high-water mark and the population.
+    // id high-water mark and the population. SHARED across player sessions.
     items::ItemEntitySystem m_items;
 
-    bool m_playerFlight{false};
     bool m_mobsEnabled{true};
-    TextureType m_selectedBlock{STONE};
-    const char *m_playerStatus{""}; // static literals only
 
     int m_seed{0};
     uint64_t m_worldGenerationId{1};
     std::string m_openWorldError;
     std::optional<PlayerPersistState> m_savedPlayer;
     // Gameplay restore payloads (issue #228), read at initialize alongside
-    // m_savedPlayer and applied by finalizePlayerSpawn.
+    // m_savedPlayer and applied to the LOCAL player by finalizePlayerSpawn.
     std::optional<worldsave::InventoryPersistState> m_savedInventory;
     std::optional<worldsave::ItemsPersistState> m_savedItems;
 };

@@ -232,7 +232,7 @@ graphics stack at all ([`headless-runner.md`](headless-runner.md)).
 | Component | Location | Side | Current coupling | Migrating phase |
 |---|---|---|---|---|
 | `Engine` | `src/Engine/Engine.cpp/.hpp` | Graphical host / adapter | Owns SDL window, Vulkan device/swapchain/frame, `WorldRenderer`, `GameUI`, `ImGuiLayer`, `Camera`, `RenderSettings`, `ThreadPool`, `ChunkPool`, **and** `sim::GameSimulation` + `RenderWorldBridge` (the bridge references the sim's world). Maps SDL input to commands, owns the single suspension policy (`simulationSuspended`), the day-cycle presentation parameter and the world-epoch barrier (`resetWorldProjection`); `run()` is the documented 16-step frame orchestration. No authoritative gameplay state lives here. | E (#209) — **landed** |
-| `GameSimulation` | `src/Sim/GameSimulation.hpp/.cpp` | **Authoritative (CPU-only)** | The Phase D facade: owns `TerrainGenerator`, `VoxelWorld`, `PlayerController` (120 Hz), `MobSystem` (60 Hz), **`items::Inventory` + `items::ItemEntitySystem` (60 Hz, Epic #223)**, flight mode, block selection, spawn/restore, reload counter. Explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown — gameplay state captured/restored on the `player.state` seams), per-frame advance with plain values (dt, commands, observer), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`, `InventorySnapshot`, `ItemEntitySnapshot`). Phase E added the player-aware placement query (`canPlaceVoxel`; hosts gate edits with it, `placeVoxel` does not call it). Epic #223 added the gameplay commands (hotbar/inventory, `grantItems`, `breakBlock`, `dropFromSlot`, `placeSelectedBlock`, `raycastVoxel`) with explicit result vocabularies. Render-free; in `ft_vox_core`. | D (#208) — **landed**; E (#209) placement query; Epic #223 B–E (#225–#228) |
+| `GameSimulation` | `src/Sim/GameSimulation.hpp/.cpp` | **Authoritative (CPU-only)** | The Phase D facade: owns the shared world authority (`TerrainGenerator`, `VoxelWorld`, `MobSystem` 60 Hz, **`items::ItemEntitySystem` 60 Hz, Epic #223**) plus per-player sessions (`PlayerController` 120 Hz + **`items::Inventory`**, flight mode, block selection, spawn/restore) indexed by `sim::PlayerId` — the Epic #245 Phase A split (#246, §11); the local player anchors the legacy solo APIs as thin forwards. Reload counter, explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown — gameplay state captured/restored on the `player.state` seams), per-frame advance with plain values (dt, commands, observer), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`, `InventorySnapshot`, `ItemEntitySnapshot`). Phase E added the player-aware placement query (`canPlaceVoxel`; hosts gate edits with it, `placeVoxel` does not call it). Epic #223 added the gameplay commands (hotbar/inventory, `grantItems`, `breakBlock`, `dropFromSlot`, `placeSelectedBlock`, `raycastVoxel`) with explicit result vocabularies. Render-free; in `ft_vox_core`. | D (#208) — **landed**; E (#209) placement query; Epic #223 B–E (#225–#228); Epic #245 A1 (#246) player sessions |
 | `VoxelWorld` | `src/World/VoxelWorld.hpp/.cpp` | **Authoritative (CPU-only)** | Single owner of chunk residency/streaming, the deferred/coalesced logical-edit queue with border mirrors, generation worker publication, `WorldPersistence`, and the voxel/border backing pools. Render-free public API (plain position/forward/settings values); publishes the `WorldEvent` change stream. In `ft_vox_core`; owned by `GameSimulation` since Phase D. | B (#206) — **landed** |
 | `WorldChunk` | `src/World/WorldChunk.hpp/.cpp` | **Authoritative (CPU-only)** | The chunk record: voxel backing, occupancy metadata, border shell, persistent-edit map, `sim::ChunkIdentity` (generation + revision — the single source of the pair), lifecycle state, in-transit flag, per-column generation outputs. In `ft_vox_core`. | B (#206) — **landed** |
 | `RenderWorldBridge` | `src/Renderer/RenderWorldBridge.hpp/.cpp` | Derived (renderer-owned projection) | **References** the simulation-owned `VoxelWorld` (`world()`), never owns sim. Keeps render handle map, mesh/light dispatch, GPU uploads, commit groups, visibility, light-cache intent + sampling, deferred GPU retirement, debug trace. Drains the world event stream and projects already-resident records on attach. Stamped with the host's world epoch (`worldGenerationId()`) at attach. Replaces the removed `ChunkManager` adapter. | C (#207) — **landed**; E (#209) epoch stamp + host attach |
@@ -1276,3 +1276,118 @@ acceptance driver (gameplay loop, sync/async parity with items in flight,
 CTest suite, the CPU-only gate, the visual goldens (existing + the
 `item_entities` scene), in-game benchmark parity vs the pre-epic baseline
 and the determinism report.
+
+## 11. Multi-player simulation ownership (issue #246, Epic #245 Phase A)
+
+Design note for the **A1** ownership split: one shared authoritative world
+hosting N independently simulated players, with **no networking** and **no
+change to the solo experience**. This is the foundation the later Phase A
+issues build on (actor-aware commands #247, multi-observer residency #248,
+two-player headless proof #249). Names are deliberately lightweight; the
+dependency direction and the single-writer rule are the invariants.
+
+### Two ownership layers
+
+`GameSimulation` remains the single CPU owner of all authoritative gameplay
+state, but that state now falls into two layers with different lifetimes:
+
+| Shared world authority (one instance, world-epoch scoped) | Per-player session (one `PlayerState` per `PlayerId`) |
+|---|---|
+| `TerrainGenerator` (seed + `kGeneratorVersion`) | `physics::PlayerController` (fixed 120 Hz) |
+| `VoxelWorld` (residency/streaming, logical edits, publication, `WorldPersistence`) | flight/walk mode + transition status |
+| `entities::MobSystem` (fixed 60 Hz, shared population) | spawn/restore body state |
+| `items::ItemEntitySystem` (fixed 60 Hz, shared population + id allocator) | creative `selectedBlock` |
+| world generation / reload counter, seed, open-world error | `items::Inventory` (36 slots) + hotbar selection |
+
+The shared systems' public contracts are **unchanged** by A1: the world edit
+semantics, the mob/item fixed-step discipline, the entity-id allocator and its
+high-water, the `RenderWorldBridge` attach seam and the persistence passthrough
+all behave exactly as before. Only the *player* half of the facade was split.
+
+### `PlayerId` (src/Sim/PlayerId.hpp)
+
+A strong 4-byte plain value (`uint32_t` ordinal), distinct from the item/mob
+`EntityId` (`uint64_t`, a separate per-family allocator) and from `ItemId`
+registry ordinals. Semantics mirror the established item-id discipline:
+
+- **Invalid:** `0` (`kInvalidPlayerId`) is never assigned; default-constructed
+  handles are invalid and every per-player API answers a safe refusal/no-op.
+- **Allocation:** monotonic from 1, assigned at `createPlayer()` call order.
+  **Never reused** for the lifetime of the `GameSimulation` instance —
+  `removePlayer()` retires an id permanently.
+- **Epoch/reload:** `initialize()`/`reload()` are world-epoch boundaries. They
+  reset the shared populations and **every session's inventory**, but player
+  **sessions survive** (bodies carry over until the host respawns them — the
+  historical solo contract) and the id allocator **never rewinds**. A handle
+  therefore addresses the same session across epochs, and a retired or
+  never-allocated handle can never alias another player's state. Cross-session
+  identity persistence (reconnect) is Phase E (#259), not this contract.
+- **Exhaustion:** largest assignable id is `kMaxPlayerId`; the allocator rests
+  at `kMaxNextPlayerId` and `createPlayer()` refuses with `kInvalidPlayerId`
+  instead of wrapping. Population is bounded by `kMaxPlayers` (256) — a
+  generous ceiling, **not** a two-player architecture.
+- **Iteration:** sessions are kept **id-sorted** (monotonic allocation +
+  order-preserving removal), so `playerIds()` and every bulk step/snapshot
+  traverse a deterministic ascending order — never a hash order.
+
+### The local player (solo compatibility, one source of truth)
+
+The **local player** (`localPlayerId()`) is the solo-compatibility anchor:
+created at construction (so legacy APIs are total before `initialize()`),
+always the first session, and **not removable**. Every legacy single-player
+API is a *thin forward* to it — there is no parallel solo state and no second
+source of truth. The graphical Engine and the headless runner keep calling the
+unchanged legacy surface; the per-player overloads (a `PlayerId` first
+argument) are additive.
+
+Per-player forms answer a safe refusal for invalid/unknown ids: queries return
+`false` and leave out-params untouched (or a zero/default value), void commands
+are no-ops, and inventory commands return the new append-only
+`items::ItemResult::InvalidPlayer` without touching any inventory.
+
+### API shape (additive)
+
+- Sessions: `createPlayer`, `removePlayer`, `hasPlayer`, `playerCount`,
+  `localPlayerId`, `playerIds(out)`.
+- Advance: `advancePlayer(id, dt, cmd, suspended)` (one),
+  `advancePlayers(dt, suspended)` (all, neutral command, one scoped collision
+  view for the batch). Legacy `advancePlayer(dt, cmd, suspended)` forwards.
+- Per-player physics/mode/spawn/restore/capture and inventory commands mirror
+  the legacy set with a leading `PlayerId`.
+- Snapshots: `playerSnapshot(id, out)`, `inventorySnapshot(id, out)` (bounded,
+  in-place). Legacy by-value/local forms forward.
+
+All mutation stays on the **single simulation thread** at the host frame
+boundary — A1 introduces no concurrency and no command buffer. Suspension
+semantics are per-player and unchanged (accumulators cleared, previous/current
+synced, no catch-up burst).
+
+### A1 scope boundary (what is deliberately NOT migrated yet)
+
+To keep the PR reviewable and solo bit-identical, these still act for the
+**local player only** and are pinned by tests as the baseline for follow-ups:
+
+- World interaction commands (`breakBlock`, `placeSelectedBlock`,
+  `dropFromSlot`), the player-aware `canPlaceVoxel` rule, and item **auto
+  pickup** (`advanceItems`) use the local body/inventory → actor-aware
+  migration is **#247 (A2)**.
+- Chunk residency/streaming still follows a single observer point →
+  multi-observer interest is **#248 (A3)**.
+- The solo save format (`player.state` / `inventory.state`) captures the local
+  player only; the shared item population + allocator high-water persist as
+  before → multi-player checkpoints/reconnect are **#259 (E1)**.
+
+No sockets, no ECS, no renderer refactor and no save-format migration are part
+of A1. `ft_vox_core` pulls in no network types.
+
+### Verification
+
+`tests/test_player_sessions.cpp` (CTest `PlayerSessions`, CPU-only, links only
+`ft_vox_core`) proves the acceptance list: two players with distinct
+positions/velocities/flight/inventories coexist and cannot overwrite one
+another; removal leaves the shared world/mobs/items and the other player
+untouched; invalid/stale handles never reach another player's state;
+deterministic id-sorted iteration; world-epoch continuity; and bit-identical
+legacy-vs-local solo behavior. Solo CPU digests and the headless canonical
+digest are unchanged (the local forwards reproduce the historical code path
+exactly).

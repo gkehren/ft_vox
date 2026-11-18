@@ -196,6 +196,11 @@ enum class ItemResult : uint8_t
                   // (stabilization PR3): a drop that needs a fresh entity id
                   // is refused WITHOUT consuming inventory items. Append-only
                   // vocabulary: existing codes never move (save/wire stable).
+    InvalidPlayer, // unknown / retired player session handle (issue #246,
+                  // Epic #245 Phase A): a per-player inventory command is
+                  // refused WITHOUT touching any inventory. The actor-identity
+                  // rejection the future authoritative server validates first
+                  // (epic #245 §1). Append-only vocabulary.
 };
 
 // --- Plain-value stacks ---------------------------------------------------------
