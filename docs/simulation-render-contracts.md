@@ -1329,6 +1329,15 @@ registry ordinals. Semantics mirror the established item-id discipline:
 - **Iteration:** sessions are kept **id-sorted** (monotonic allocation +
   order-preserving removal), so `playerIds()` and every bulk step/snapshot
   traverse a deterministic ascending order — never a hash order.
+- **Storage / reference lifetime (PR #261 review):** sessions are heap-backed
+  entries (`std::vector<std::unique_ptr<PlayerEntry>>`): vector growth/erase
+  moves only the pointers, so a session's address — and every accessor
+  reference/pointer into it (`inventory(id)`, `inventory()`, `selectedBlock()`,
+  `playerSettings()`) — is **stable across creation/removal of other sessions
+  and across world epochs**. References are invalidated only when the
+  referenced session itself is removed (or the simulation is destroyed).
+  Entries are allocated at `createPlayer()` only; the per-frame physics paths
+  never allocate.
 
 ### The local player (solo compatibility, one source of truth)
 

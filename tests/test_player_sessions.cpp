@@ -8,6 +8,10 @@
 //   * PlayerId semantics: monotonic allocation, never reused, invalid id 0,
 //     local-anchor removal refusal, population cap, deterministic id-sorted
 //     iteration, reproducible across runs;
+//   * reference stability (PR #261 review): heap-backed session storage keeps
+//     accessor pointers/references valid across other sessions' creation and
+//     removal (forced vector reallocation) and across world epochs; only
+//     removing the referenced session itself invalidates them (ASan-guarded);
 //   * removing one player never unloads/resets/destroys the shared world,
 //     mobs, dropped items or the other players;
 //   * invalid/stale handles cannot access another player's state — every
@@ -129,10 +133,11 @@ bool sameItems(const std::vector<items::ItemEntity> &a, const std::vector<items:
 }
 
 // Highest occupied cell of a column: solid terrain OR fluid (the
-// test_game_simulation fixture helper).
-int topOccupiedY(const VoxelWorld &world, int x, int z)
+// test_game_simulation fixture rule). Takes the caller's scoped view — the
+// caller owns the single shared-lock acquisition (PR #261 review: no nested
+// WorldCollisionView construction on the same world mutex).
+int topOccupiedY(const WorldCollisionView &view, int x, int z)
 {
-	WorldCollisionView view(world);
 	for (int y = WORLD_HEIGHT - 1; y >= 0; --y)
 	{
 		const auto cell = view.sample({x, y, z});
@@ -143,7 +148,8 @@ int topOccupiedY(const VoxelWorld &world, int x, int z)
 }
 
 // Deterministic solid-surface column search near (x, z): the pickup fixture
-// needs a SOLID top (a fluid top would let the drop sink out of reach).
+// needs a SOLID top (a fluid top would let the drop sink out of reach). ONE
+// scoped view serves the whole search, including the column scans.
 glm::ivec3 findSolidTopColumn(const VoxelWorld &world, int x, int z)
 {
 	WorldCollisionView view(world);
@@ -154,7 +160,7 @@ glm::ivec3 findSolidTopColumn(const VoxelWorld &world, int x, int z)
 				if (std::max(std::abs(dx), std::abs(dz)) != radius)
 					continue;
 				const int cx = x + dx, cz = z + dz;
-				const int top = topOccupiedY(world, cx, cz);
+				const int top = topOccupiedY(view, cx, cz);
 				if (top < 0)
 					continue;
 				TextureType type = AIR;
@@ -271,6 +277,80 @@ void testSessionIdentity()
 }
 
 // ---------------------------------------------------------------------------
+// 1b. Reference stability (PR #261 review): session storage is heap-backed,
+//     so accessor pointers/references survive creation/removal of OTHER
+//     sessions (vector growth/erase moves only the pointers) and world
+//     epochs; only removing the referenced session itself invalidates them.
+//     Under ASan, a regression to inline vector storage would surface as a
+//     heap-use-after-free on the held pointers below.
+// ---------------------------------------------------------------------------
+void testSessionReferenceStability()
+{
+	CoutSilencer silence;
+	sim::GameSimulation sim(nullptr);
+	const sim::PlayerId local = sim.localPlayerId();
+	const sim::PlayerId a = sim.createPlayer();
+	const sim::PlayerId b = sim.createPlayer();
+	sim.grantItems(ItemId::Stone, 7);       // local: distinctive contents
+	sim.grantItems(b, ItemId::Dirt, 20);    // B: distinctive contents
+	sim.setSelectedBlock(GLASS);
+
+	// Hold long-lived references/pointers into the session storage.
+	const items::Inventory *invB = sim.inventory(b);
+	const items::Inventory &invLocal = sim.inventory();
+	const TextureType &selLocal = sim.selectedBlock();
+	const physics::PlayerSettings &settings = sim.playerSettings();
+	CHECK(invB != nullptr && invB->totalCount(ItemId::Dirt) == 20, "B's inventory pointer acquired");
+	CHECK(invLocal.totalCount(ItemId::Stone) == 7, "local inventory reference acquired");
+
+	// Force repeated pointer-vector reallocation while holding the references.
+	std::vector<sim::PlayerId> extras;
+	for (int i = 0; i < 64; ++i)
+		extras.push_back(sim.createPlayer());
+	CHECK(invB->totalCount(ItemId::Dirt) == 20, "B's pointer survives vector reallocation");
+	CHECK(invLocal.totalCount(ItemId::Stone) == 7, "local reference survives vector reallocation");
+	CHECK(selLocal == GLASS, "creative-selection reference survives reallocation");
+	CHECK(settings.walkSpeed == 4.5, "player-settings reference survives reallocation");
+
+	// Remove A and unrelated sessions: B's references must stay valid AND
+	// keep tracking live state (mutations go through commands, reads through
+	// the held pointer — the commands-only discipline).
+	CHECK(sim.removePlayer(a), "unrelated session A removed");
+	for (size_t i = 0; i < extras.size(); i += 2)
+		CHECK(sim.removePlayer(extras[i]), "unrelated extra session removed");
+	CHECK(invB->totalCount(ItemId::Dirt) == 20, "B's pointer survives unrelated removals");
+	sim.grantItems(b, ItemId::Dirt, 5);
+	CHECK(invB->totalCount(ItemId::Dirt) == 25, "B's pointer tracks live state after removals");
+	CHECK(invLocal.totalCount(ItemId::Stone) == 7, "local reference survives unrelated removals");
+
+	// World epoch: initialize resets every inventory but keeps the sessions —
+	// the SAME pointers must stay valid and observe the reset contents.
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 1337;
+	sim.initialize(cfg, glm::dvec3(8.0, 100.0, 8.0));
+	CHECK(sim.hasPlayer(b), "B survives the world epoch");
+	CHECK(invB->totalCount(ItemId::Dirt) == 0, "B's pointer survives initialize and observes the reset");
+	CHECK(invLocal.totalCount(ItemId::Stone) == 0, "local reference survives initialize");
+	CHECK(selLocal == GLASS, "creative selection carries over the epoch through the reference");
+
+	// Removing B invalidates ONLY B's references: the local references and
+	// the remaining sessions' pointers stay usable. invB is dangling by
+	// contract from here on — deliberately NEVER dereferenced again (ASan
+	// would flag any accidental use-after-free).
+	const sim::PlayerId c = extras[1]; // an extra session still alive
+	const items::Inventory *invC = sim.inventory(c);
+	CHECK(invC != nullptr, "remaining session C pointer acquired");
+	CHECK(sim.removePlayer(b), "B removed");
+	CHECK(sim.inventory(b) == nullptr, "B's handle is dead after removal");
+	CHECK(invLocal.totalCount(ItemId::Stone) == 0, "local reference unaffected by B's removal");
+	CHECK(selLocal == GLASS, "selection reference unaffected by B's removal");
+	CHECK(invC->totalCount(ItemId::Dirt) == 0, "C's pointer unaffected by B's removal");
+	sim.grantItems(c, ItemId::Glass, 3);
+	CHECK(invC->totalCount(ItemId::Glass) == 3, "C's pointer tracks live state after B's removal");
+	CHECK(sim.localPlayerId() == local, "the local anchor stayed first throughout");
+}
+
+// ---------------------------------------------------------------------------
 // 2. Two players coexist: distinct positions/velocities/flight/inventories,
 //    independent stepping, no cross-overwrite (the core acceptance).
 // ---------------------------------------------------------------------------
@@ -287,7 +367,11 @@ void testTwoPlayerIndependence(ThreadPool &pool)
 	const glm::dvec3 spawn = sim.playerFeet();
 	const int px = static_cast<int>(std::floor(spawn.x));
 	const int pz = static_cast<int>(std::floor(spawn.z));
-	const int py = topOccupiedY(*sim.world(), px, pz) + 4; // guaranteed air gap
+	int py;
+	{
+		WorldCollisionView view(*sim.world());
+		py = topOccupiedY(view, px, pz) + 4; // guaranteed air gap
+	}
 	CHECK(py > 0 && py < WORLD_HEIGHT - 4, "platform fixture height valid");
 	for (int dx = -4; dx <= 4; ++dx)
 		for (int dz = -1; dz <= 1; ++dz)
@@ -827,6 +911,7 @@ int main()
 	std::printf("test_player_sessions: CPU-only multi-player sessions (no GPU, no SDL, no camera)\n");
 	ThreadPool pool(2);
 	testSessionIdentity();
+	testSessionReferenceStability();
 	testTwoPlayerIndependence(pool);
 	testRemovalIsolation(pool);
 	testStaleHandlesAndEpochs(pool);

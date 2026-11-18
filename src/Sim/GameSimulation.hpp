@@ -295,7 +295,7 @@ public:
     /// The solo-compatibility anchor: created at construction, always the
     /// first session, never removable. Every legacy single-player API
     /// forwards to it.
-    PlayerId localPlayerId() const { return m_players.front().id; }
+    PlayerId localPlayerId() const { return m_players.front()->id; }
     /// Ascending-id session list, filled IN PLACE (the snapshot pattern):
     /// clear + reserve keeps the caller's capacity across frames.
     void playerIds(std::vector<PlayerId> &out) const;
@@ -710,9 +710,12 @@ public:
     // Legacy single-player accessors: thin forwards to the LOCAL player
     // session (issue #246 — one source of truth). Per-player queries use
     // playerSnapshot(id, out) / playerFeet(id) / playerFlight(id).
-    // Reference-returning accessors point into session storage: valid until
-    // the next createPlayer() (the vector may reallocate); the bounded
-    // snapshots are the stable read seam across session lifecycle changes.
+    // Reference/pointer LIFETIME: session storage is heap-backed and
+    // pointer-stable — references survive createPlayer()/removePlayer() of
+    // OTHER sessions and world epochs (initialize/reload); they are
+    // invalidated only when the referenced session itself is removed (or the
+    // simulation is destroyed). The bounded snapshots remain the copy-out
+    // read seam for consumers that must outlive a session.
     bool playerFlight() const { return localState().flight; }
     glm::dvec3 playerFeet() const { return localState().controller.body.position; }
     glm::dvec3 playerEye() const { return localState().controller.eye(); }
@@ -751,7 +754,9 @@ public:
     /// every mutation goes through the gameplay commands above.
     const items::Inventory &inventory() const { return localState().inventory; }
     /// Read-only per-player inventory seam (issue #246); nullptr for an
-    /// invalid/unknown id. Same commands-only mutation discipline.
+    /// invalid/unknown id. The pointed-to inventory is pointer-stable until
+    /// THAT session is removed (heap-backed storage). Same commands-only
+    /// mutation discipline.
     const items::Inventory *inventory(PlayerId id) const;
     /// Read-only dropped-item diagnostics seam (issue #226, the mobs()
     /// pattern): population, dropped steps/events, id-sorted entities.
@@ -794,8 +799,8 @@ private:
 
     /// The local player is always the FIRST entry (created at construction,
     /// never removable, ids monotonic) — O(1) access for the legacy forwards.
-    PlayerState &localState() { return m_players.front().state; }
-    const PlayerState &localState() const { return m_players.front().state; }
+    PlayerState &localState() { return m_players.front()->state; }
+    const PlayerState &localState() const { return m_players.front()->state; }
     /// Id-sorted binary search; nullptr for invalid/unknown ids. A retired id
     /// is never reassigned, so a stale handle can never alias another session.
     PlayerState *findPlayer(PlayerId id);
@@ -826,10 +831,16 @@ private:
 
     // Player sessions (issue #246): ID-SORTED by construction (monotonic
     // allocation + order-preserving removal); the local player is entry 0.
-    // Sessions survive initialize/reload (world-epoch boundaries reset every
-    // inventory, not the sessions); the allocator never rewinds, so retired
-    // ids are never reused. Bounded by kMaxPlayers.
-    std::vector<PlayerEntry> m_players;
+    // HEAP-BACKED entries (unique_ptr, PR #261 review): vector growth/erase
+    // moves only the pointers, so a PlayerState address is stable for the
+    // session's lifetime — accessor references survive creation/removal of
+    // OTHER sessions and are invalidated only by removal of the referenced
+    // session itself. Entries are allocated at createPlayer() ONLY — the
+    // per-frame physics paths never allocate. Sessions survive
+    // initialize/reload (world-epoch boundaries reset every inventory, not
+    // the sessions); the allocator never rewinds, so retired ids are never
+    // reused. Bounded by kMaxPlayers.
+    std::vector<std::unique_ptr<PlayerEntry>> m_players;
     uint32_t m_nextPlayerId{1};
 
     entities::MobSystem m_mobs;

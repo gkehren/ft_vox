@@ -81,10 +81,11 @@ add_test(NAME GameplayLoop COMMAND test_gameplay)
 # ---------------------------------------------------------------------------
 # CPU-only multi-player session acceptance (issue #246, Epic #245 Phase A).
 # Links ONLY ft_vox_core: one shared world hosting N independent player
-# sessions — id allocation/retirement semantics, per-player physics/inventory
-# isolation, deterministic id-sorted iteration, stale-handle safety, removal
-# isolation (world/mobs/items/other players untouched), world-epoch lifecycle
-# and the solo-compatibility forwards (legacy APIs == local-player APIs).
+# sessions — id allocation/retirement semantics, pointer-stable session
+# references (PR #261 review), per-player physics/inventory isolation,
+# deterministic id-sorted iteration, stale-handle safety, removal isolation
+# (world/mobs/items/other players untouched), world-epoch lifecycle and the
+# solo-compatibility forwards (legacy APIs == local-player APIs).
 # No GPU, window or camera.
 # ---------------------------------------------------------------------------
 add_executable(test_player_sessions test_player_sessions.cpp)

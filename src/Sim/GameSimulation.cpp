@@ -61,8 +61,9 @@ GameSimulation::GameSimulation(ThreadPool *threadPool)
 {
     // The local player is the solo-compatibility anchor (issue #246): created
     // at construction so every legacy API is total before initialize(), always
-    // the first session (ids are monotonic) and never removable.
-    m_players.push_back(PlayerEntry{PlayerId{m_nextPlayerId++}, PlayerState{}});
+    // the first session (ids are monotonic) and never removable. Heap-backed
+    // entry: its address stays stable for the simulation's lifetime.
+    m_players.push_back(std::make_unique<PlayerEntry>(PlayerEntry{PlayerId{m_nextPlayerId++}, PlayerState{}}));
 }
 
 GameSimulation::~GameSimulation()
@@ -85,7 +86,9 @@ PlayerId GameSimulation::createPlayer()
     const PlayerId id{m_nextPlayerId++};
     // Monotonic ids + append = id-sorted order by construction (the
     // ItemEntitySystem pattern); no re-sort on the session lifecycle path.
-    m_players.push_back(PlayerEntry{id, PlayerState{}});
+    // The heap-backed entry keeps its address across later vector growth —
+    // accessor references to THIS session stay valid (PR #261 review).
+    m_players.push_back(std::make_unique<PlayerEntry>(PlayerEntry{id, PlayerState{}}));
     return id;
 }
 
@@ -97,13 +100,14 @@ bool GameSimulation::removePlayer(PlayerId id)
     if (!id.valid() || id == localPlayerId())
         return false;
     const auto it = std::lower_bound(m_players.begin(), m_players.end(), id,
-                                     [](const PlayerEntry &entry, PlayerId wanted)
-                                     { return entry.id < wanted; });
-    if (it == m_players.end() || !(it->id == id))
+                                     [](const std::unique_ptr<PlayerEntry> &entry, PlayerId wanted)
+                                     { return entry->id < wanted; });
+    if (it == m_players.end() || !((*it)->id == id))
         return false;
     // Order-preserving erase: the shared world/mobs/items and every other
-    // session are untouched. Items this player dropped stay in the shared
-    // population (they belong to the world, not the session).
+    // session are untouched (their heap entries do not move — only this
+    // session's references are invalidated). Items this player dropped stay
+    // in the shared population (they belong to the world, not the session).
     m_players.erase(it);
     return true;
 }
@@ -118,8 +122,8 @@ void GameSimulation::playerIds(std::vector<PlayerId> &out) const
     // In-place fill (the snapshot pattern): ascending id order, deterministic.
     out.clear();
     out.reserve(m_players.size());
-    for (const PlayerEntry &entry : m_players)
-        out.push_back(entry.id);
+    for (const std::unique_ptr<PlayerEntry> &entry : m_players)
+        out.push_back(entry->id);
 }
 
 const GameSimulation::PlayerState *GameSimulation::findPlayer(PlayerId id) const
@@ -127,11 +131,11 @@ const GameSimulation::PlayerState *GameSimulation::findPlayer(PlayerId id) const
     if (!id.valid())
         return nullptr;
     const auto it = std::lower_bound(m_players.begin(), m_players.end(), id,
-                                     [](const PlayerEntry &entry, PlayerId wanted)
-                                     { return entry.id < wanted; });
-    if (it == m_players.end() || !(it->id == id))
+                                     [](const std::unique_ptr<PlayerEntry> &entry, PlayerId wanted)
+                                     { return entry->id < wanted; });
+    if (it == m_players.end() || !((*it)->id == id))
         return nullptr;
-    return &it->state;
+    return &(*it)->state;
 }
 
 GameSimulation::PlayerState *GameSimulation::findPlayer(PlayerId id)
@@ -198,8 +202,8 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     // generalized by #246). The local inventory.state restore hook lands in
     // #228 on the finalizePlayerSpawn seam. Sessions themselves survive the
     // epoch boundary; the player-id allocator never rewinds.
-    for (PlayerEntry &entry : m_players)
-        entry.state.inventory.clear();
+    for (std::unique_ptr<PlayerEntry> &entry : m_players)
+        entry->state.inventory.clear();
     // Fresh session = no dropped items, id allocator restarted (issue #226).
     // The items.state hook (population + id high-water) lands in #228.
     m_items.reset();
@@ -304,8 +308,8 @@ bool GameSimulation::reload(int newSeed)
     // Successful reload = fresh inventories for EVERY session (issue #225
     // generalized by #246). A REFUSED reload returned above and keeps the old
     // inventories authoritative. Sessions + player ids survive the reload.
-    for (PlayerEntry &entry : m_players)
-        entry.state.inventory.clear();
+    for (std::unique_ptr<PlayerEntry> &entry : m_players)
+        entry->state.inventory.clear();
     // Successful reload = fresh dropped-item session (issue #226): the
     // population, events and id allocator reset with the world.
     m_items.reset();
@@ -433,8 +437,8 @@ void GameSimulation::advancePlayers(double dt, bool suspended)
     // once per frame, not once per player).
     if (suspended)
     {
-        for (PlayerEntry &entry : m_players)
-            entry.state.controller.suspend();
+        for (std::unique_ptr<PlayerEntry> &entry : m_players)
+            entry->state.controller.suspend();
         return;
     }
     if (!m_world)
@@ -442,8 +446,8 @@ void GameSimulation::advancePlayers(double dt, bool suspended)
     // Skip the shared lock entirely when nobody walks (all-flight frames):
     // the pre-scan is N bool reads, the view acquisition is not free.
     bool anyWalking = false;
-    for (const PlayerEntry &entry : m_players)
-        if (!entry.state.flight)
+    for (const std::unique_ptr<PlayerEntry> &entry : m_players)
+        if (!entry->state.flight)
         {
             anyWalking = true;
             break;
@@ -452,10 +456,10 @@ void GameSimulation::advancePlayers(double dt, bool suspended)
         return;
     WorldCollisionView world(*m_world);
     const PlayerCommand idle{};
-    for (PlayerEntry &entry : m_players)
+    for (std::unique_ptr<PlayerEntry> &entry : m_players)
     {
-        if (!entry.state.flight)
-            entry.state.controller.advance(dt, idle, world);
+        if (!entry->state.flight)
+            entry->state.controller.advance(dt, idle, world);
     }
 }
 
