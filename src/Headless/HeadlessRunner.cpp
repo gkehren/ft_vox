@@ -53,6 +53,7 @@ const char *breakResultName(sim::BreakResult result)
 	case sim::BreakResult::UnknownTerrain: return "UnknownTerrain";
 	case sim::BreakResult::WorldRejected: return "WorldRejected";
 	case sim::BreakResult::IdExhausted: return "IdExhausted";
+	case sim::BreakResult::InvalidPlayer: return "InvalidPlayer";
 	}
 	return "?";
 }
@@ -67,6 +68,7 @@ const char *placeResultName(sim::PlaceResult result)
 	case sim::PlaceResult::PlayerOverlap: return "PlayerOverlap";
 	case sim::PlaceResult::UnknownTerrain: return "UnknownTerrain";
 	case sim::PlaceResult::WorldRejected: return "WorldRejected";
+	case sim::PlaceResult::InvalidPlayer: return "InvalidPlayer";
 	}
 	return "?";
 }

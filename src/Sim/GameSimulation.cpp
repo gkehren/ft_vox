@@ -64,6 +64,14 @@ GameSimulation::GameSimulation(ThreadPool *threadPool)
     // the first session (ids are monotonic) and never removable. Heap-backed
     // entry: its address stays stable for the simulation's lifetime.
     m_players.push_back(std::make_unique<PlayerEntry>(PlayerEntry{PlayerId{m_nextPlayerId++}, PlayerState{}}));
+    // The local anchor participates in spatial gameplay from construction (the
+    // historical solo lifecycle — its body is authoritative before initialize).
+    // Non-local sessions start UNPOSITIONED and join pickup / placement checks
+    // only once the host places them (issue #247 review).
+    m_players.front()->state.positioned = true;
+    // Pickup-candidate buffer (issue #247): reserve the session ceiling once so
+    // the per-frame advanceItems refill never allocates (the snapshot pattern).
+    m_pickupCandidates.reserve(kMaxPlayers);
 }
 
 GameSimulation::~GameSimulation()
@@ -479,12 +487,24 @@ void GameSimulation::advanceItems(double dt, bool suspended)
         return;
     // Main-thread scoped collision view (the advanceMobs pattern). The world
     // is NOT pumped here: publication ordering stays with the bridge /
-    // pumpWorld (issue #114). A1 scope (issue #246): pickup proximity uses the
-    // LOCAL player's authoritative feet and merges into the LOCAL inventory —
-    // deterministic shared multi-player pickup is #247 (A2).
+    // pumpWorld (issue #114).
     WorldCollisionView world(*m_world);
-    PlayerState &local = localState();
-    m_items.update(dt, world, local.controller.body.position, local.inventory, suspended);
+    // Actor-aware pickup (issue #247): every POSITIONED live session is an
+    // eligible receiver, in ascending-PlayerId order (m_players is id-sorted by
+    // construction) — the deterministic pickup priority. Unpositioned sessions
+    // (created but not yet spawned/placed) are excluded so a default-origin
+    // body never vacuum-collects shared drops (issue #247 review). The buffer
+    // is reserved once and refilled in place (no per-frame allocation). A
+    // suspended frame skips the refill (the system ignores candidates and
+    // only syncs previous/current).
+    m_pickupCandidates.clear();
+    if (!suspended)
+    {
+        for (const std::unique_ptr<PlayerEntry> &entry : m_players)
+            if (entry->state.positioned)
+                m_pickupCandidates.push_back({entry->state.controller.body.position, &entry->state.inventory});
+    }
+    m_items.update(dt, world, m_pickupCandidates, suspended);
 }
 
 void GameSimulation::pumpWorld()
@@ -546,6 +566,7 @@ bool GameSimulation::setPlayerFlight(PlayerId id, bool enabled, glm::dvec3 feet)
     player->flight = enabled;
     player->status = "";
     player->controller.reset(feet);
+    player->positioned = true; // a successful toggle places the body (issue #247 review)
     return true;
 }
 
@@ -557,7 +578,10 @@ void GameSimulation::setPlayerPosition(glm::dvec3 feet)
 void GameSimulation::setPlayerPosition(PlayerId id, glm::dvec3 feet)
 {
     if (PlayerState *player = findPlayer(id))
+    {
         player->controller.reset(feet);
+        player->positioned = true; // host reposition activates the session (issue #247 review)
+    }
 }
 
 void GameSimulation::restorePlayerFlight(bool enabled, glm::dvec3 feet)
@@ -577,6 +601,7 @@ void GameSimulation::restorePlayerFlight(PlayerId id, bool enabled, glm::dvec3 f
         player->flight = enabled;
         player->status = "";
         player->controller.reset(feet);
+        player->positioned = true; // lifecycle restore places the body (issue #247 review)
     }
 }
 
@@ -612,6 +637,7 @@ glm::dvec3 GameSimulation::spawnPlayerOnSurface(PlayerId id, glm::dvec3 around)
                 player->controller.reset(candidate.position);
                 player->flight = false;
                 player->status = "";
+                player->positioned = true; // surface spawn places the body (issue #247 review)
                 return player->controller.eye();
             }
         }
@@ -620,6 +646,7 @@ glm::dvec3 GameSimulation::spawnPlayerOnSurface(PlayerId id, glm::dvec3 around)
     player->controller.reset(fallbackEye - glm::dvec3(0, player->controller.settings.eyeHeight, 0));
     player->flight = true;
     player->status = "No safe spawn in loaded terrain: fly to an open area.";
+    player->positioned = true; // the fallback still places the body (issue #247 review)
     return fallbackEye;
 }
 
@@ -668,6 +695,7 @@ bool GameSimulation::restorePlayerState(PlayerId id, const PlayerPersistState &s
     if (waitingForTerrain)
         player->controller.body.waitingForTerrain = true;
     player->flight = saved.flight;
+    player->positioned = true; // a usable restore places the body (issue #247 review)
     if (saved.selectedBlock >= 0 && saved.selectedBlock < static_cast<int32_t>(COUNT))
         player->selectedBlock = static_cast<TextureType>(saved.selectedBlock);
     // The local line keeps the historical format (issue #246 solo
@@ -835,23 +863,68 @@ bool GameSimulation::isVoxelActive(const glm::vec3 &worldPos) const
     return m_world && m_world->isVoxelActive(worldPos);
 }
 
+bool GameSimulation::cellInWorldEnvelope(glm::ivec3 cell)
+{
+    // The supported editable-world envelope (issue #247 review): the finite
+    // SHRT_MIN/SHRT_MAX horizontal camera envelope of WorldCollisionView plus
+    // the fixed vertical world [0, WORLD_HEIGHT). Pure integer comparisons —
+    // no float conversion, so extreme cells (near the INT32 bounds) are
+    // rejected safely before any float position / AABB is constructed.
+    return cell.x >= SHRT_MIN && cell.x < SHRT_MAX &&
+           cell.z >= SHRT_MIN && cell.z < SHRT_MAX &&
+           cell.y >= 0 && cell.y < WORLD_HEIGHT;
+}
+
 bool GameSimulation::canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) const
 {
-    // Historical Engine placement rule, moved verbatim behind the facade
-    // (issue #209): flying players and non-solid blocks never collide with
-    // the body; a solid block is refused when it overlaps the authoritative
-    // player body, so the body cannot be entombed by its own edit. Logical
+    // Historical Engine placement rule (issue #209), generalized to EVERY
+    // session by issue #247: flying players and non-solid blocks never
+    // collide with a body; a solid block is refused when it overlaps ANY
+    // authoritative WALKING player body, so no player can be entombed by
+    // their own or another's edit. Bodies are checked in ascending-PlayerId
+    // order (m_players is id-sorted) — deterministic validation. Logical
     // pending solids immediately participate in subsequent collision
-    // queries, so the body cannot enter before publication either.
-    // A1 scope (issue #246): the LOCAL player's body/flight — actor-aware
-    // placement is #247 (A2).
-    const PlayerState &local = localState();
-    if (local.flight || !physics::blockCell(type).solid)
+    // queries, so a body cannot enter before publication either. Solo (one
+    // session) reproduces the historical local-body rule bit for bit.
+    if (!physics::blockCell(type).solid)
         return true;
-    physics::Body playerBody;
-    playerBody.position = local.controller.body.position;
-    return !physics::overlaps(playerBody.bounds(),
-                              physics::voxelBounds(glm::ivec3(glm::floor(worldPos))));
+    // Coordinate validation BEFORE floor->int (issue #247 review): a non-finite
+    // or out-of-envelope position would make glm::floor -> int conversion UB
+    // (e.g. a cell near INT32_MAX rounds up to 2^31 as float). Non-finite input
+    // and positions outside the supported world envelope answer a safe refusal.
+    // The bounds are exactly representable floats, so a position passing this
+    // gate floors to an in-range int cell.
+    if (!std::isfinite(worldPos.x) || !std::isfinite(worldPos.y) || !std::isfinite(worldPos.z))
+        return false;
+    if (worldPos.x < static_cast<float>(SHRT_MIN) || worldPos.x >= static_cast<float>(SHRT_MAX) ||
+        worldPos.z < static_cast<float>(SHRT_MIN) || worldPos.z >= static_cast<float>(SHRT_MAX) ||
+        worldPos.y < 0.f || worldPos.y >= static_cast<float>(WORLD_HEIGHT))
+        return false;
+    const physics::Aabb cell = physics::voxelBounds(glm::ivec3(glm::floor(worldPos)));
+    for (const std::unique_ptr<PlayerEntry> &entry : m_players)
+    {
+        const PlayerState &player = entry->state;
+        // Unpositioned sessions (default-origin bodies) do not block placement
+        // until the host places them (issue #247 review); flying bodies are
+        // exempt (the creative rule).
+        if (!player.positioned || player.flight)
+            continue;
+        physics::Body playerBody;
+        playerBody.position = player.controller.body.position;
+        if (physics::overlaps(playerBody.bounds(), cell))
+            return false;
+    }
+    return true;
+}
+
+bool GameSimulation::canPlaceVoxel(PlayerId id, const glm::vec3 &worldPos, TextureType type) const
+{
+    // Actor-aware form (issue #247): an unknown/retired session may not even
+    // probe placement. The rule itself is actor-independent — every walking
+    // body is protected regardless of who asks.
+    if (!findPlayer(id))
+        return false;
+    return canPlaceVoxel(worldPos, type);
 }
 
 // ---------------------------------------------------------------------------
@@ -949,16 +1022,37 @@ items::AddResult GameSimulation::grantItems(PlayerId id, items::ItemId item, uin
 }
 
 // ---------------------------------------------------------------------------
-// World interaction commands (issues #226/#227, Epic #223 Phase C/D)
+// World interaction commands (issues #226/#227, Epic #223 Phase C/D;
+// actor-aware since issue #247, Epic #245 Phase A2)
 // ---------------------------------------------------------------------------
-// A1 scope (issue #246): these commands act for the LOCAL player — the
-// actor-aware migration (per-player break/place/drop + shared pickup) is
-// #247 (A2). The world edit semantics are unchanged.
+// Each command has a legacy single-player form (a thin forward to the LOCAL
+// player) and an actor-aware form taking a PlayerId first. The actor-aware
+// form validates the handle (InvalidPlayer for an unknown/retired session,
+// WITHOUT side effects) and derives the interaction context from that
+// session. Solo behavior is bit-identical through both paths — one source of
+// truth. The world edit semantics are unchanged.
 
 BreakResult GameSimulation::breakBlock(glm::ivec3 cell, WorldEditResult *outEdit)
 {
+    return breakBlock(localPlayerId(), cell, outEdit);
+}
+
+BreakResult GameSimulation::breakBlock(PlayerId id, glm::ivec3 cell, WorldEditResult *outEdit)
+{
+    // Actor identity first (issue #247): an unknown/retired session refuses
+    // without touching the world or the item population. The break EFFECT is
+    // world-shared (the drop belongs to the shared population), so no actor
+    // body/inventory is consumed here — the handle is validated for authority.
+    if (!findPlayer(id))
+        return BreakResult::InvalidPlayer;
     if (!m_world)
         return BreakResult::UnknownTerrain;
+    // Out-of-envelope cells are boundary walls, not editable terrain (issue
+    // #247 review): reject them with integer comparisons before any float
+    // position is built. (The int-first effective sample below already answers
+    // AIR for them; this guard makes the coordinate invariant explicit.)
+    if (!cellInWorldEnvelope(cell))
+        return BreakResult::WorldRejected;
     // Sample the EFFECTIVE voxel (storage + pending edits) through the CPU
     // collision seam. The view's shared lock MUST be released before the
     // exclusive edit lock below — scope it tightly.
@@ -999,16 +1093,35 @@ BreakResult GameSimulation::breakBlock(glm::ivec3 cell, WorldEditResult *outEdit
 
 PlaceResult GameSimulation::placeSelectedBlock(glm::ivec3 cell, WorldEditResult *outEdit)
 {
-    items::Inventory &inventory = localState().inventory;
+    return placeSelectedBlock(localPlayerId(), cell, outEdit);
+}
+
+PlaceResult GameSimulation::placeSelectedBlock(PlayerId id, glm::ivec3 cell, WorldEditResult *outEdit)
+{
+    // Actor identity first (issue #247): refuse without consuming inventory
+    // or editing the world for an unknown/retired session.
+    PlayerState *player = findPlayer(id);
+    if (!player)
+        return PlaceResult::InvalidPlayer;
+    items::Inventory &inventory = player->inventory;
     const items::ItemStack selected = inventory.selectedStack();
     if (selected.isEmpty())
         return PlaceResult::EmptySlot;
     const std::optional<TextureType> block = items::placeableBlockOf(selected.item);
     if (!block.has_value())
         return PlaceResult::NotPlaceable; // future non-block items (none in v1)
+    // Coordinate validation BEFORE any float conversion (issue #247 review):
+    // an extreme cell (near the INT32 bounds) would overflow the float->int
+    // floor in canPlaceVoxel / the world edit (UB). Reject out-of-envelope
+    // cells with integer comparisons; the world refuses them anyway as
+    // out-of-bounds targets. Valid gameplay cells are unaffected.
+    if (!cellInWorldEnvelope(cell))
+        return PlaceResult::WorldRejected;
     const glm::vec3 center(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
-    // Player-aware placement rule (#209): the SAME query the creative host
-    // gates with — walking bodies refuse solid overlap, flight never does.
+    // Player-aware placement rule (#209 / #247): the SAME query the creative
+    // host gates with — now protecting EVERY walking body, not just the
+    // actor's. Flight never collides; a solid overlapping any walking player
+    // is refused.
     if (!canPlaceVoxel(center, *block))
         return PlaceResult::PlayerOverlap;
     // Gameplay refuses unknown targets (the creative seam may defer edits
@@ -1031,6 +1144,28 @@ PlaceResult GameSimulation::placeSelectedBlock(glm::ivec3 cell, WorldEditResult 
 }
 
 RaycastHit GameSimulation::raycastVoxel(glm::vec3 origin, glm::vec3 dir, float maxDist) const
+{
+    // Privileged raw-origin host seam (issue #247): the trusted local host /
+    // creative editor supplies the camera origin + distance. The march itself
+    // is shared with the actor-aware form (one implementation).
+    return raycastMarch(origin, dir, maxDist);
+}
+
+RaycastHit GameSimulation::raycastVoxel(PlayerId id, glm::vec3 dir, float maxDist) const
+{
+    // Actor-aware targeting (issue #247): the origin is the actor's
+    // authoritative eye — NEVER client-supplied — and the distance is clamped
+    // to the server-owned gameplay reach. An unknown/retired actor hits
+    // nothing. std::min propagates a NaN maxDist into the march's non-finite
+    // gate (safe no-hit); a negative request stays negative (also rejected).
+    const PlayerState *player = findPlayer(id);
+    if (!player)
+        return RaycastHit{};
+    const glm::vec3 origin(player->controller.eye());
+    return raycastMarch(origin, dir, std::min(maxDist, kInteractionReach));
+}
+
+RaycastHit GameSimulation::raycastMarch(glm::vec3 origin, glm::vec3 dir, float maxDist) const
 {
     // The historical Engine::raycastVoxel march (issue #227): same float
     // arithmetic, same 0.05 step, same first-active-cell rule and adjacent
@@ -1129,7 +1264,17 @@ RaycastHit GameSimulation::raycastVoxel(glm::vec3 origin, glm::vec3 dir, float m
 
 items::ItemResult GameSimulation::dropFromSlot(int slot, uint16_t count, glm::dvec3 dir)
 {
-    items::Inventory &inventory = localState().inventory;
+    return dropFromSlot(localPlayerId(), slot, count, dir);
+}
+
+items::ItemResult GameSimulation::dropFromSlot(PlayerId id, int slot, uint16_t count, glm::dvec3 dir)
+{
+    // Actor identity first (issue #247): refuse without consuming inventory
+    // or spawning an entity for an unknown/retired session.
+    PlayerState *player = findPlayer(id);
+    if (!player)
+        return items::ItemResult::InvalidPlayer;
+    items::Inventory &inventory = player->inventory;
     // Id-exhaustion guard (stabilization PR3): refuse BEFORE any inventory
     // mutation so a failed drop never consumes items (conservation). Only
     // checked when an entity would actually spawn: count 0 stays an Ok no-op
@@ -1146,13 +1291,13 @@ items::ItemResult GameSimulation::dropFromSlot(int slot, uint16_t count, glm::dv
     // pattern): normalized here; degenerate OR non-finite input falls back
     // to +Y (an inf component would otherwise normalize to NaN and poison
     // the spawn origin/velocity). The launch speed is a deterministic plain
-    // setting — no RNG.
+    // setting — no RNG. The spawn origin is the ACTOR's authoritative eye.
     glm::dvec3 direction = dir;
     const bool finite = std::isfinite(direction.x) && std::isfinite(direction.y) &&
                         std::isfinite(direction.z);
     const double length = glm::length(direction);
     direction = (finite && length > 1e-6) ? direction / length : glm::dvec3(0.0, 1.0, 0.0);
-    const glm::dvec3 origin = localState().controller.eye() + direction * 0.3;
+    const glm::dvec3 origin = player->controller.eye() + direction * 0.3;
     const glm::dvec3 velocity = direction * m_items.settings.dropSpeed + glm::dvec3(0.0, 1.0, 0.0);
     m_items.spawnPlayerDrop(removed.removed, origin, velocity);
     return items::ItemResult::Ok;
@@ -1213,6 +1358,18 @@ glm::dvec3 GameSimulation::playerFeet(PlayerId id) const
 {
     const PlayerState *player = findPlayer(id);
     return player ? player->controller.body.position : glm::dvec3(0.0);
+}
+
+glm::dvec3 GameSimulation::playerEye(PlayerId id) const
+{
+    const PlayerState *player = findPlayer(id);
+    return player ? player->controller.eye() : glm::dvec3(0.0);
+}
+
+bool GameSimulation::playerPositioned(PlayerId id) const
+{
+    const PlayerState *player = findPlayer(id);
+    return player ? player->positioned : false;
 }
 
 bool GameSimulation::playerFlight(PlayerId id) const

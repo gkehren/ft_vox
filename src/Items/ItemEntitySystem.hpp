@@ -18,7 +18,14 @@
 //     solidity is never inferred); ground friction settles horizontal motion;
 //   * pickup-delay countdown, then proximity pickup into the inventory
 //     HOTBAR-FIRST via the Phase A stack math: partial pickup leaves the
-//     remainder in the world, a full inventory leaves the entity untouched;
+//     remainder in the world, a full inventory leaves the entity untouched.
+//     Since issue #247 (Epic #245 Phase A2) pickup evaluates MULTIPLE eligible
+//     players per entity in a caller-supplied deterministic priority order
+//     (the facade passes ascending sim::PlayerId): the first in-range player
+//     merges hotbar-first, a partial remainder is offered to the next eligible
+//     player in the SAME tick, and the aggregate count is conserved (no
+//     duplication). The single-player update() is a thin forward to the
+//     one-candidate case, so solo behavior is bit-identical;
 //   * age-based despawn (default 18000 ticks = 5 min sim time) and a bounded
 //     population cap (default 1024) with deterministic OLDEST-FIRST overflow
 //     despawn (ties break on the smallest id);
@@ -36,7 +43,9 @@
 // Dependency rule (tests/check_core_includes.py): Items + Entities/MobTypes
 // (the shared EntityId) + Physics/VoxelCollision + glm + std only. No
 // world/sim/render header is included; the facade supplies the collision
-// view and the inventory reference per advance.
+// view and the pickup candidates (feet + inventory pointers, priority order)
+// per advance. The candidate ORDER encodes player priority — this module
+// never knows about sim::PlayerId and never reorders the candidates.
 // =============================================================================
 
 #include <Entities/MobTypes.hpp>
@@ -50,6 +59,8 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <span>
+#include <type_traits>
 #include <vector>
 
 namespace items
@@ -156,6 +167,24 @@ struct ItemEntitySnapshot
     constexpr friend bool operator==(const ItemEntitySnapshot &, const ItemEntitySnapshot &) = default;
 };
 
+/// One eligible pickup receiver (issue #247, Epic #245 Phase A2): the
+/// authoritative feet position used for the proximity test and the inventory
+/// merged into hotbar-first. A plain non-owning value — the facade keeps the
+/// sessions alive for the whole advance. Candidates are supplied in
+/// DETERMINISTIC PRIORITY ORDER (the facade passes ascending sim::PlayerId);
+/// the system evaluates them in the given order and never sorts or reorders
+/// them, so the winner/tie-break is reproducible. A null inventory is skipped
+/// defensively (the facade only passes live sessions). This module knows
+/// nothing about player identity — the ORDER is the contract.
+struct PickupCandidate
+{
+    glm::dvec3 feet{};
+    Inventory *inventory{nullptr};
+};
+
+static_assert(std::is_trivially_copyable_v<PickupCandidate>,
+              "PickupCandidate must stay a plain non-owning value");
+
 class ItemEntitySystem
 {
   public:
@@ -205,10 +234,19 @@ class ItemEntitySystem
 
     // --- Fixed-step advance ----------------------------------------------------
 
-    /// One host frame. `playerFeet` is the authoritative pickup point; the
-    /// inventory is merged into hotbar-first on pickup. Suspension clears the
-    /// accumulator and syncs previous/current (no catch-up burst afterwards).
-    /// The caller owns the collision view's lifetime (main-thread only).
+    /// One host frame with MULTIPLE pickup receivers (issue #247). `candidates`
+    /// are the eligible players in deterministic priority order (the facade
+    /// passes ascending sim::PlayerId); each entity offers its stack to the
+    /// in-range candidates in that order, hotbar-first, a partial remainder
+    /// going to the next eligible candidate in the same tick. The aggregate
+    /// count is conserved. Suspension clears the accumulator and syncs
+    /// previous/current (no catch-up burst afterwards). The caller owns the
+    /// collision view's lifetime (main-thread only).
+    void update(double dt, const physics::VoxelCollisionWorld &world,
+                std::span<const PickupCandidate> candidates, bool suspended);
+
+    /// Legacy single-player forward (kept for system-level fixtures): a
+    /// one-candidate batch, bit-identical to the historical pickup rule.
     void update(double dt, const physics::VoxelCollisionWorld &world, glm::dvec3 playerFeet,
                 Inventory &inventory, bool suspended);
 
@@ -245,7 +283,7 @@ class ItemEntitySystem
     ItemEntitySettings settings;
 
   private:
-    void step(const physics::VoxelCollisionWorld &world, glm::dvec3 playerFeet, Inventory &inventory);
+    void step(const physics::VoxelCollisionWorld &world, std::span<const PickupCandidate> candidates);
     void despawnOldest(); // population-cap overflow policy
     void emit(const ItemEntityEvent &event);
 
