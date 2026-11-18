@@ -31,12 +31,20 @@
 //   removed. Every legacy single-player API below is a THIN FORWARD to it —
 //   one source of truth, no parallel solo state.
 //
-// A1 SCOPE BOUNDARY (issue #246): world interactions (break/place/drop),
-// auto-pickup and the player-aware placement rule still act for the LOCAL
-// player only — actor-aware commands are #247 (A2), multi-observer residency
-// is #248 (A3), multi-player persistence is #259 (E1). The shared systems'
-// contracts are unchanged. Design note: docs/simulation-render-contracts.md
-// §11.
+// A2 SCOPE (issue #247, Epic #245 Phase A): world interactions (break/place/
+// drop), the player-aware placement rule and auto-pickup are ACTOR-AWARE.
+// Every gameplay command/query has a per-player form taking a PlayerId first;
+// the legacy single-player forms are thin forwards to the LOCAL player, so
+// solo behavior stays bit-identical (one source of truth). The placement rule
+// protects EVERY walking player body (deterministic ascending-id validation),
+// and shared pickup evaluates eligible players in ascending-PlayerId order
+// with conserved partial merges. Actor-aware targeting derives the ray origin
+// from the actor's authoritative eye and clamps reach to kInteractionReach —
+// never a client-supplied origin. A1 (#246) split the ownership; A2 makes the
+// interactions actor-aware. Still pending: multi-observer residency is #248
+// (A3), multi-player persistence is #259 (E1), and server-side reach/rate
+// gating of break/place CELLS is #255 (C3). The shared systems' contracts are
+// unchanged. Design note: docs/simulation-render-contracts.md §11–§12.
 //
 // The facade is render-free (enforced by tests/check_core_includes.py): no
 // Camera, RenderSettings, SDL, Vulkan or ImGui types, and no engine singleton
@@ -168,10 +176,15 @@ enum class BreakResult : uint8_t
     UnknownTerrain, // cell unloaded / not generated (never inferred)
     WorldRejected,  // nothing to break (AIR / out of bounds) or the world
                     // refused the edit (no-op / invalid target)
-    IdExhausted     // the entity-id allocator reached its representable bound
+    IdExhausted,    // the entity-id allocator reached its representable bound
                     // (stabilization PR3): the break is refused BEFORE the
                     // world edit so the registry drop is never silently lost
                     // (conservation). Append-only vocabulary.
+    InvalidPlayer   // unknown / retired actor handle (issue #247, Epic #245
+                    // Phase A2): the per-player break is refused WITHOUT
+                    // touching the world or the item population. The actor-
+                    // identity rejection the authoritative server validates
+                    // first (epic #245 §1). Append-only vocabulary.
 };
 
 /// Result of placeSelectedBlock (issue #227, Epic #223 Phase D): the
@@ -185,7 +198,11 @@ enum class PlaceResult : uint8_t
     PlayerOverlap,  // canPlaceVoxel refused (walking body + solid block, #209)
     UnknownTerrain, // target cell unloaded / not generated (gameplay refuses;
                     // the creative seam may defer into registered records)
-    WorldRejected   // world refused the edit (occupied / out-of-bounds target)
+    WorldRejected,  // world refused the edit (occupied / out-of-bounds target)
+    InvalidPlayer   // unknown / retired actor handle (issue #247, Epic #245
+                    // Phase A2): the per-player place is refused WITHOUT
+                    // consuming inventory or editing the world. Append-only
+                    // vocabulary.
 };
 
 /// Plain-value targeting result (issue #227): the simulation-owned raycast
@@ -227,6 +244,21 @@ public:
                   "the clamped march must stay inside the +X/+Z collision envelope");
     static_assert(-kRaycastOriginLimit - kMaxRaycastDistance > static_cast<float>(SHRT_MIN),
                   "the clamped march must stay inside the -X/-Z collision envelope");
+
+    /// Authoritative gameplay interaction reach (issue #247, Epic #245 Phase
+    /// A2): the maximum distance an ACTOR-AWARE targeting query
+    /// (raycastVoxel(id, dir, maxDist)) may march, measured from the actor's
+    /// authoritative eye. The server owns this value — a client can request a
+    /// SHORTER distance but never target beyond it, and can never supply the
+    /// ray origin (it is derived from the actor). Matches the historical
+    /// default interaction range (renderSettings.raycastDistance default 8).
+    /// The legacy raw-origin raycastVoxel(origin, dir, maxDist) is the
+    /// privileged creative/editor host seam and keeps the host-supplied
+    /// distance (clamped only by kMaxRaycastDistance); it is NOT the
+    /// network-facing gameplay query.
+    static constexpr float kInteractionReach = 8.f;
+    static_assert(kInteractionReach > 0.f && kInteractionReach <= kMaxRaycastDistance,
+                  "the gameplay reach must be positive and within the march safety cap");
 
     /// Simultaneous player-session ceiling (issue #246, Epic #245 Phase A):
     /// a generous bounded population, NOT a two-player architecture — the
@@ -412,12 +444,15 @@ public:
     /// One host frame of dropped item entities (fixed 60 Hz internally,
     /// issue #226). The host calls it NEXT TO advanceMobs (the #227 rewiring
     /// adds the call site; until then only headless hosts/tests drive it).
-    /// A1 scope (issue #246): pickup proximity uses the LOCAL player's
-    /// authoritative feet and merges into the LOCAL inventory hotbar-first —
-    /// deterministic shared multi-player pickup is #247 (A2). Suspension
-    /// freezes the population and syncs previous/current (no catch-up burst).
-    /// The world is NOT pumped here — the issue #114 publication ordering
-    /// stays with the bridge / pumpWorld().
+    /// Actor-aware pickup (issue #247, Epic #245 Phase A2): every live session
+    /// is an eligible receiver, evaluated in ascending-PlayerId order (the
+    /// deterministic priority); each drop merges hotbar-first into the first
+    /// in-range player, a partial remainder is offered to the next eligible
+    /// player in the same tick, and the aggregate count is conserved. Solo
+    /// (one session) is bit-identical to the historical local-only rule.
+    /// Suspension freezes the population and syncs previous/current (no
+    /// catch-up burst). The world is NOT pumped here — the issue #114
+    /// publication ordering stays with the bridge / pumpWorld().
     void advanceItems(double dt, bool suspended);
 
     /// Headless world publication: publish finished generation jobs + apply
@@ -510,17 +545,25 @@ public:
     WorldEditResult deleteVoxel(const glm::vec3 &worldPos);
     bool isVoxelActive(const glm::vec3 &worldPos) const;
 
-    /// Player-aware placement rule (issue #209, Epic #204 Phase E): a SOLID
-    /// block may not be placed where it would overlap the authoritative
-    /// player body — unless the player is flying or the block is non-solid.
-    /// This is a PURE QUERY, not enforcement: placeVoxel() below does NOT call
-    /// it, so a host that wants player-aware placement MUST gate its edit with
-    /// canPlaceVoxel() first (the graphical host does; headless hosts/tests may
-    /// deliberately place inside the body by calling placeVoxel() directly).
+    /// Player-aware placement rule (issue #209, Epic #204 Phase E; generalized
+    /// to every session by issue #247, Epic #245 Phase A2): a SOLID block may
+    /// not be placed where it would overlap ANY authoritative walking player
+    /// body — a flying player is exempt (the creative rule), and non-solid
+    /// blocks never collide. Bodies are validated in deterministic ascending-
+    /// PlayerId order, so overlapping players are considered reproducibly and
+    /// no player can be entombed by another's edit. This is a PURE QUERY, not
+    /// enforcement: placeVoxel() below does NOT call it, so a host that wants
+    /// player-aware placement MUST gate its edit with canPlaceVoxel() first
+    /// (the graphical host does; placeSelectedBlock gates with it internally).
     /// It lives here so the rule is defined once and shared, not copied.
-    /// Pure query: it never edits the world. A1 scope (issue #246): the rule
-    /// consults the LOCAL player's body/flight — actor-aware placement is #247.
+    /// Pure query: it never edits the world. Solo (one session) is bit-
+    /// identical to the historical local-body rule.
     bool canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) const;
+    /// Actor-aware form (issue #247): validates the actor handle (an unknown /
+    /// retired session answers false — it may not even probe placement), then
+    /// applies the SAME all-body rule. The rule itself is actor-independent:
+    /// every walking body is protected regardless of who asks.
+    bool canPlaceVoxel(PlayerId id, const glm::vec3 &worldPos, TextureType type) const;
 
     // --- Inventory / hotbar gameplay commands (issue #225, Epic #223 Phase B) ---
     // Plain-value arguments, explicit items::ItemResult codes — the future
@@ -585,17 +628,31 @@ public:
     items::AddResult grantItems(items::ItemId item, uint16_t count);
     items::AddResult grantItems(PlayerId id, items::ItemId item, uint16_t count);
 
-    // --- World interaction commands (issues #226/#227, Epic #223 Phase C/D) --
+    // --- World interaction commands (issues #226/#227, Epic #223 Phase C/D;
+    //     actor-aware since issue #247, Epic #245 Phase A2) -------------------
     // The survival-lite break/drop/place loop; the sim raycast below is the
     // targeting rule. The creative/editor placeVoxel / deleteVoxel seams
     // above stay unchanged (infinite-block semantics).
     //
-    // A1 scope (issue #246): these commands act for the LOCAL player (the
-    // actor-aware migration is #247). `outEdit` (optional): on an ACCEPTED
-    // edit the world's WorldEditResult (edit id + geometric members) is moved
-    // out so the graphical host can publish through
-    // RenderWorldBridge::publishEditResult — the SAME event drain +
-    // commit-group path the creative edits use, no second edit path
+    // Actor-aware forms (issue #247): each command takes a PlayerId first and
+    // derives the interaction context (inventory, eye/feet, occupancy) from
+    // that server-owned session. An unknown / retired handle answers
+    // InvalidPlayer WITHOUT any side effect (no world edit, no inventory
+    // consumption, no item spawn). The legacy single-player forms are thin
+    // forwards to the LOCAL player — solo behavior is bit-identical.
+    //
+    // Ordering (single simulation thread, host frame boundary): simultaneous
+    // attempts resolve in COMMAND CALL ORDER. Two breaks of one block: the
+    // first accepted break deletes it (effective state immediately AIR), the
+    // second sees AIR -> WorldRejected, exactly one drop. Two places of one
+    // cell: first Ok, second WorldRejected (occupied). Shared-drop claims
+    // resolve in ascending-PlayerId pickup order (advanceItems). Per-player
+    // inventories never contend across sessions.
+    //
+    // `outEdit` (optional): on an ACCEPTED edit the world's WorldEditResult
+    // (edit id + geometric members) is moved out so the graphical host can
+    // publish through RenderWorldBridge::publishEditResult — the SAME event
+    // drain + commit-group path the creative edits use, no second edit path
     // (issue #227). Headless callers pass nullptr.
 
     /// Break a voxel by hand: validates the cell against the item registry
@@ -607,15 +664,22 @@ public:
     /// (stabilization PR3: a break whose drop needs a fresh entity id is
     /// refused BEFORE the world edit when the allocator is exhausted — the
     /// block stays, nothing is lost; empty-drop blocks stay breakable).
+    /// The break EFFECT is world-shared (the drop belongs to the shared item
+    /// population, not the actor); the actor handle is validated for authority
+    /// (InvalidPlayer for an unknown session). The legacy form forwards to the
+    /// local player.
     BreakResult breakBlock(glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
+    BreakResult breakBlock(PlayerId id, glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
 
-    /// Place the selected hotbar block (issue #227): the selected stack must
-    /// hold a PLACEABLE item (registry placeableBlock); gates with the
-    /// existing player-aware canPlaceVoxel rule (#209); edits through the
-    /// existing world semantics; CONSUMES EXACTLY 1 ITEM ON SUCCESS ONLY.
-    /// PlaceResult distinguishes Ok / EmptySlot / NotPlaceable /
-    /// PlayerOverlap / UnknownTerrain / WorldRejected.
+    /// Place the selected hotbar block (issue #227): the ACTOR's selected stack
+    /// must hold a PLACEABLE item (registry placeableBlock); gates with the
+    /// all-body player-aware canPlaceVoxel rule (#209 / #247); edits through
+    /// the existing world semantics; CONSUMES EXACTLY 1 ITEM ON SUCCESS ONLY
+    /// from the actor's inventory. PlaceResult distinguishes Ok / EmptySlot /
+    /// NotPlaceable / PlayerOverlap / UnknownTerrain / WorldRejected /
+    /// InvalidPlayer. The legacy form forwards to the local player.
     PlaceResult placeSelectedBlock(glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
+    PlaceResult placeSelectedBlock(PlayerId id, glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
 
     /// Simulation-owned targeting query (issue #227): the historical
     /// Engine::raycastVoxel march behind a render-free API — 0.05 float
@@ -644,19 +708,41 @@ public:
     /// kMaxRaycastDistance and the march is iteration-bounded, so the query
     /// always terminates. Valid gameplay rays keep the historical float
     /// arithmetic bit for bit.
+    ///
+    /// PRIVILEGED HOST SEAM (issue #247): this raw-origin form accepts a
+    /// host-supplied origin + distance (the graphical host passes its camera).
+    /// It is the creative/editor targeting path for the trusted local host and
+    /// benchmarks — NOT the network-facing gameplay query. An unprivileged
+    /// session must use the actor-aware form below, which derives the origin
+    /// from the server-owned actor and clamps reach.
     RaycastHit raycastVoxel(glm::vec3 origin, glm::vec3 dir, float maxDist) const;
 
+    /// Actor-aware targeting query (issue #247, Epic #245 Phase A2): the ray
+    /// ORIGIN is derived from the actor's authoritative eye (never client-
+    /// supplied) and maxDist is clamped to the server-owned kInteractionReach
+    /// (a client may request a shorter distance, never a longer one). The
+    /// march itself is the SAME historical effective-state rule as the legacy
+    /// form (input validation, 0.05 step, first-active-cell, adjacent
+    /// fallback). An unknown / retired actor answers a safe no-hit. Pure
+    /// query: never edits the world. For the local actor with origin == eye
+    /// and maxDist <= kInteractionReach this is bit-identical to the legacy
+    /// raw-origin form (one march implementation).
+    RaycastHit raycastVoxel(PlayerId id, glm::vec3 dir, float maxDist) const;
+
     /// Drop items from an inventory slot: removes up to `count` (clamped,
-    /// the removeCount semantics) and spawns one entity at the player eye
+    /// the removeCount semantics) and spawns one entity at the ACTOR's eye
     /// with a host-supplied plain direction (presentation input, the
     /// savePlayerState(yaw, pitch) pattern) and deterministic speed. A
     /// degenerate OR non-finite direction falls back to +Y. count 0 is an Ok
     /// no-op; invalid slot / empty slot answer InvalidSlot / EmptyStack.
     /// Manual drops carry the longer pickup delay (no instant re-pickup).
     /// An exhausted entity-id allocator answers IdExhausted WITHOUT touching
-    /// the inventory (stabilization PR3 conservation). A1 scope: the LOCAL
-    /// player's inventory/eye (issue #246; actor-aware drops are #247).
+    /// the inventory (stabilization PR3 conservation). Actor-aware since
+    /// issue #247: the per-player form uses the actor's inventory/eye and
+    /// answers InvalidPlayer for an unknown session; the legacy form forwards
+    /// to the local player.
     items::ItemResult dropFromSlot(int slot, uint16_t count, glm::dvec3 dir);
+    items::ItemResult dropFromSlot(PlayerId id, int slot, uint16_t count, glm::dvec3 dir);
 
     // --- Read-only bounded snapshots -------------------------------------------
 
@@ -725,6 +811,10 @@ public:
     /// Per-player feet position (issue #246); the zero vector for an
     /// invalid/unknown id (never another player's position).
     glm::dvec3 playerFeet(PlayerId id) const;
+    /// Per-player authoritative eye position (issue #247): feet + eyeHeight.
+    /// The actor-aware targeting query derives its ray origin from this; the
+    /// zero vector for an invalid/unknown id.
+    glm::dvec3 playerEye(PlayerId id) const;
     /// Per-player flight mode (issue #246); false for an invalid/unknown id.
     bool playerFlight(PlayerId id) const;
     /// CREATIVE/EDITOR block selection (flight mode, benchmarks, the `T`
@@ -809,6 +899,12 @@ private:
     /// by-value form and the per-player in-place form — one source of truth).
     static PlayerSnapshot snapshotOf(const PlayerState &state);
 
+    /// The shared targeting march (issue #247): input validation + the
+    /// historical 0.05 float effective-state march. Both the legacy raw-origin
+    /// raycastVoxel and the actor-aware form call this — one march
+    /// implementation, no duplicated targeting rule.
+    RaycastHit raycastMarch(glm::vec3 origin, glm::vec3 dir, float maxDist) const;
+
     /// Read the persisted gameplay state when a world is open (issue #228,
     /// the readSavedPlayerState pattern): nullopt for a fresh world / old
     /// save (quiet) or an unusable file (already reported through the
@@ -842,6 +938,13 @@ private:
     // reused. Bounded by kMaxPlayers.
     std::vector<std::unique_ptr<PlayerEntry>> m_players;
     uint32_t m_nextPlayerId{1};
+
+    // Reusable pickup-candidate buffer (issue #247): rebuilt in ascending
+    // PlayerId order each advanceItems (the deterministic pickup priority).
+    // clear() + refill keeps the reserved capacity — NO per-frame allocation
+    // after the first frame (the snapshot buffer-reuse pattern). The pointers
+    // reference the heap-backed sessions, valid for the whole advance.
+    std::vector<items::PickupCandidate> m_pickupCandidates;
 
     entities::MobSystem m_mobs;
     // Dropped item entities (issue #226): owns the monotonic id allocator,

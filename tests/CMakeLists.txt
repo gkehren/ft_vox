@@ -93,6 +93,19 @@ target_link_libraries(test_player_sessions PRIVATE ft_vox_core)
 add_test(NAME PlayerSessions COMMAND test_player_sessions)
 
 # ---------------------------------------------------------------------------
+# CPU-only actor-aware gameplay acceptance (issue #247, Epic #245 Phase A2).
+# Links ONLY ft_vox_core: actor-aware break/place/drop/targeting, the all-body
+# placement rule, deterministic shared pickup (ascending-PlayerId priority,
+# conserved partial merges), invalid-actor / overlap / unknown-terrain /
+# out-of-range rejections without side effects, per-player id-exhaustion
+# conservation, deferred edits and the solo-compatibility forwards
+# (legacy == actor-aware(local) bit for bit). No GPU, window or camera.
+# ---------------------------------------------------------------------------
+add_executable(test_actor_interactions test_actor_interactions.cpp)
+target_link_libraries(test_actor_interactions PRIVATE ft_vox_core)
+add_test(NAME ActorInteractions COMMAND test_actor_interactions)
+
+# ---------------------------------------------------------------------------
 # CPU-only item domain acceptance (issue #224, Epic #223 Phase A). Links ONLY
 # ft_vox_core: registry invariants (unique ids/names, append-only ordinals,
 # placeable round-trips, drop-table totality, name parsing), pure stack math
@@ -1475,7 +1488,7 @@ endif()
 # ---------------------------------------------------------------------------
 foreach(_cpu_test IN ITEMS
     test_physics test_core_contracts test_voxel_world test_game_simulation
-    test_gameplay test_player_sessions test_items
+    test_gameplay test_player_sessions test_actor_interactions test_items
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs

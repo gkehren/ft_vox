@@ -84,6 +84,14 @@ All commands apply **immediately at the call** (the host frame boundary),
 before the next fixed step. There is no command buffer: suspension never
 replays or reorders anything.
 
+**Actor-aware forms (issue #247, Epic #245 Phase A2):** every gameplay command
+also has a per-player form taking a `sim::PlayerId` first (e.g.
+`breakBlock(id, cell)`, `placeSelectedBlock(id, cell)`, `dropFromSlot(id, slot,
+count, dir)`); the legacy forms below are thin forwards to the **local**
+player, so solo behavior is bit-identical. An unknown / retired actor answers
+`InvalidPlayer` **without side effects**. See
+[`simulation-render-contracts.md` §12](simulation-render-contracts.md).
+
 | Command | Semantics | Result codes |
 |---|---|---|
 | `selectHotbarSlot(index)` | gameplay selection, 0..8 | `Ok` / `InvalidSlot` |
@@ -99,7 +107,9 @@ replays or reorders anything.
 returned/stays in the world), `Full` (nothing applied), `InvalidSlot`,
 `EmptyStack`, `InvalidItem`, `ItemMismatch`, `NotPlaceable`, `IdExhausted`
 (stabilization PR3: the entity-id allocator reached its representable bound;
-the operation is refused **without consuming anything**). A clamped
+the operation is refused **without consuming anything**), `InvalidPlayer`
+(issue #247: an unknown / retired actor handle; the per-player command is
+refused **without touching any inventory**). A clamped
 take/transfer of all available items is still `Ok` — availability is not an
 error. The vocabulary is **append-only**: existing codes never move
 (save/wire stable). **The future authoritative server reuses these exact
@@ -145,6 +155,12 @@ The two never synchronize; both are persisted in `player.state` /
     (64 — 2× the widest UI interaction range of 32) and the march is
     iteration-bounded, so the query always terminates. Valid gameplay rays
     keep the historical float arithmetic bit for bit (CPU parity fixtures).
+  - **Actor-aware form (issue #247):** `raycastVoxel(id, dir, maxDist)`
+    derives the origin from the actor's authoritative eye (never
+    client-supplied) and clamps `maxDist` to `kInteractionReach` (8). The
+    raw-origin form above is the **privileged creative/editor host seam**;
+    the actor-aware form is the network-facing gameplay query. Both share one
+    march implementation; an unknown actor answers a no-hit.
 - **`breakBlock(cell)`** → `BreakResult`:
   - `Ok` — block deleted through the existing world edit semantics (issue
     #114 deferred-edit ordering preserved) + the registry drop spawned at
@@ -170,13 +186,18 @@ The two never synchronize; both are persisted in `player.state` /
     representable bound: the break is refused **before** the world edit so
     the registry drop is never silently lost (the block stays). Blocks with
     an empty drop-table entry need no entity and stay breakable.
+  - `InvalidPlayer` (issue #247) — the actor-aware form's handle is unknown /
+    retired; refused **without** editing the world or spawning a drop.
 - **`placeSelectedBlock(cell)`** → `PlaceResult`:
-  - `Ok` — placed; **consumed exactly 1 item**.
+  - `Ok` — placed; **consumed exactly 1 item** (from the actor's inventory).
   - `EmptySlot` / `NotPlaceable` — selected stack empty / item has no
     registry `placeableBlock` (every v1 catalog item is placeable).
-  - `PlayerOverlap` — `canPlaceVoxel` refused (walking body + solid block,
-    issue #209).
+  - `PlayerOverlap` — `canPlaceVoxel` refused: a solid block overlapping
+    **any walking player body** (issue #209, generalized to all sessions by
+    #247; flying players exempt).
   - `UnknownTerrain` / `WorldRejected` — target unloaded / world refused.
+  - `InvalidPlayer` (issue #247) — unknown / retired actor; refused without
+    consuming inventory or editing the world.
 - **Edit publication**: accepted gameplay edits move out a `WorldEditResult`
   (`outEdit` parameter) so the graphical host publishes through
   `RenderWorldBridge::publishEditResult` — the **same** event drain +
@@ -204,10 +225,16 @@ structs + owning system, **no ECS** (#132 stays deferred).
   - manual drops (`dropFromSlot`): player eye, host direction × speed 3.0,
     pickup delay **40 ticks** (no instant re-pickup).
 - **Auto-pickup is a deterministic tick rule**: after the delay countdown,
-  any entity within **1.5 blocks** (3D distance to the player feet) merges
+  any entity within **1.5 blocks** (3D distance to a player feet) merges
   into the inventory **hotbar-first** (existing same-item stacks, then empty
   slots). **Partial pickup** leaves the remainder in the world. Not a
   command — headless scripts exercise it through `wait`.
+  - **Multi-player (issue #247):** every live session is an eligible receiver,
+    evaluated in **ascending-`PlayerId` order** (the deterministic priority).
+    The first in-range player merges; a **partial remainder is offered to the
+    next eligible player in the same tick**; a full inventory skips to the
+    next. The **aggregate count is conserved** (no duplication, no loss).
+    Solo (one session) is bit-identical to the historical local-only rule.
 - **Despawn**: age-based, **18000 ticks** (5 minutes of sim time).
 - **Population cap**: **1024** entities; overflow despawns **oldest-first**
   (id tie-break) — deterministic.

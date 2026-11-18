@@ -153,6 +153,15 @@ void ItemEntitySystem::despawnOldest()
 void ItemEntitySystem::update(double dt, const physics::VoxelCollisionWorld &world,
                               glm::dvec3 playerFeet, Inventory &inventory, bool suspended)
 {
+    // Legacy single-player forward (issue #247): a one-candidate batch. The
+    // candidate lives on the stack — no heap churn for the solo path.
+    const PickupCandidate candidate{playerFeet, &inventory};
+    update(dt, world, std::span<const PickupCandidate>(&candidate, 1), suspended);
+}
+
+void ItemEntitySystem::update(double dt, const physics::VoxelCollisionWorld &world,
+                              std::span<const PickupCandidate> candidates, bool suspended)
+{
     validateSettings(settings);
     m_queries = {};
     if (suspended)
@@ -167,7 +176,7 @@ void ItemEntitySystem::update(double dt, const physics::VoxelCollisionWorld &wor
     uint32_t steps = 0;
     while (m_accumulator + 1e-12 >= settings.fixedStep && steps < settings.maxSteps)
     {
-        step(world, playerFeet, inventory);
+        step(world, candidates);
         m_accumulator -= settings.fixedStep;
         ++steps;
     }
@@ -179,12 +188,12 @@ void ItemEntitySystem::update(double dt, const physics::VoxelCollisionWorld &wor
     }
 }
 
-void ItemEntitySystem::step(const physics::VoxelCollisionWorld &world, glm::dvec3 playerFeet,
-                            Inventory &inventory)
+void ItemEntitySystem::step(const physics::VoxelCollisionWorld &world,
+                            std::span<const PickupCandidate> candidates)
 {
     const double dt = settings.fixedStep;
     // Id order (the vector is id-sorted by construction): pickup merges into
-    // the inventory in a deterministic order when several items qualify.
+    // the inventories in a deterministic order when several items qualify.
     for (ItemEntity &e : m_entities)
     {
         e.previous = e.body.position;
@@ -201,15 +210,30 @@ void ItemEntitySystem::step(const physics::VoxelCollisionWorld &world, glm::dvec
             e.body.velocity.z *= settings.groundFriction;
         }
         physics::move(world, e.body, e.body.velocity * dt, m_queries);
-        // Auto-pickup: elapsed delay + proximity to the authoritative feet,
-        // hotbar-first merge through the Phase A stack math. Partial pickup
-        // leaves the remainder in the world; Full leaves the entity untouched.
-        if (e.pickupDelay == 0 && !e.stack.isEmpty() &&
-            glm::distance(e.body.position, playerFeet) <= settings.pickupRadius)
+        // Auto-pickup (issue #247 multi-player): elapsed delay + proximity to
+        // an eligible player's authoritative feet, hotbar-first merge through
+        // the Phase A stack math. Candidates are evaluated in the caller's
+        // deterministic priority order (ascending PlayerId from the facade);
+        // the first in-range player merges, a PARTIAL remainder is offered to
+        // the next eligible candidate in the SAME tick, and a FULL inventory
+        // skips to the next candidate. The aggregate count is conserved — an
+        // item is never duplicated nor silently lost. With one candidate this
+        // is bit-identical to the historical single-player rule.
+        if (e.pickupDelay == 0 && !e.stack.isEmpty())
         {
-            const AddResult added = inventory.addStack(e.stack);
-            if (added.result == ItemResult::Ok || added.result == ItemResult::Partial)
-                e.stack = added.remainder; // Ok -> canonical empty
+            for (const PickupCandidate &candidate : candidates)
+            {
+                if (e.stack.isEmpty())
+                    break; // fully claimed by an earlier (higher-priority) player
+                if (candidate.inventory == nullptr)
+                    continue;
+                if (glm::distance(e.body.position, candidate.feet) <= settings.pickupRadius)
+                {
+                    const AddResult added = candidate.inventory->addStack(e.stack);
+                    if (added.result == ItemResult::Ok || added.result == ItemResult::Partial)
+                        e.stack = added.remainder; // Ok -> canonical empty
+                }
+            }
         }
         // Any future rule producing NaN must trip here in Debug, not leak
         // into AABB voxel queries (the tickMob guard).

@@ -22,10 +22,10 @@
 //     the local player — a scripted run through legacy calls and one through
 //     explicit local-player calls stay bit-identical (no two sources of
 //     truth);
-//   * A1 scope boundaries pinned for the follow-up issues: auto-pickup still
-//     serves the LOCAL player only (#247 makes it actor-aware), and the solo
-//     save format still captures the LOCAL player only (#259 adds
-//     multi-player checkpoints);
+//   * A2 actor-aware pickup (issue #247 supersedes the A1 local-only pin):
+//     a non-local player standing on a drop picks it up into ITS OWN
+//     inventory, and the solo save format still captures the LOCAL player
+//     only (#259 adds multi-player checkpoints);
 //   * per-player fixed 120 Hz stepping, suspension without catch-up burst,
 //     bounded catch-up — independently per session.
 //
@@ -780,10 +780,12 @@ void testSoloCompatibility(ThreadPool &pool)
 }
 
 // ---------------------------------------------------------------------------
-// 6. A1 pickup boundary (pinned for #247): advanceItems serves the LOCAL
-//    player only — a non-local player standing on a drop does not pick it up.
+// 6. Actor-aware shared pickup (issue #247 supersedes the A1 local-only pin):
+//    a non-local player standing on a drop picks it up into ITS OWN inventory
+//    (ascending-PlayerId priority), and the local player is served too. The
+//    aggregate count is conserved — no duplication, no cross-player leak.
 // ---------------------------------------------------------------------------
-void testPickupBoundaryA1(ThreadPool &pool)
+void testPickupActorAware(ThreadPool &pool)
 {
 	CoutSilencer silence;
 	sim::GameSimulation sim(&pool);
@@ -793,37 +795,47 @@ void testPickupBoundaryA1(ThreadPool &pool)
 	sim.bootstrapTerrain(boot);
 	sim.finalizePlayerSpawn(boot);
 
+	const sim::PlayerId local = sim.localPlayerId();
 	const sim::PlayerId b = sim.createPlayer();
 	const glm::dvec3 spawn = sim.playerFeet();
 	const glm::ivec3 column = findSolidTopColumn(*sim.world(), static_cast<int>(std::floor(spawn.x)) + 3,
 												 static_cast<int>(std::floor(spawn.z)) + 3);
 	CHECK(column.y >= 0, "solid fixture column found");
 	const glm::ivec3 cell(column.x, column.y + 2, column.z);
-	sim.placeVoxel({cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f}, STONE);
-	sim.pumpWorld();
+	const glm::dvec3 dropSpot(cell.x + 0.5, column.y + 1.0, cell.z + 0.5);
+	const glm::dvec3 farAway = spawn + glm::dvec3(20.0, 10.0, 20.0);
 
 	// B stands where the drop will land; the local player hovers far away.
-	const glm::dvec3 dropSpot(cell.x + 0.5, column.y + 1.0, cell.z + 0.5);
 	sim.setPlayerPosition(b, dropSpot);
-	sim.setPlayerFlight(true, spawn + glm::dvec3(20.0, 10.0, 20.0));
+	sim.setPlayerFlight(true, farAway);
+	sim.placeVoxel({cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f}, STONE);
+	sim.pumpWorld();
 	CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "fixture break accepted");
 	CHECK(sim.itemEntities().size() == 1, "one live drop");
 
 	for (int i = 0; i < 90; ++i)
 		sim.advanceItems(1.0 / 60.0, false);
-	CHECK(sim.itemEntities().size() == 1, "A1: a non-local player on the drop does NOT pick it up");
-	CHECK(emptyInventory(inventoryOf(sim, sim.localPlayerId())), "local inventory stays empty");
-	CHECK(emptyInventory(inventoryOf(sim, b)), "B's inventory stays empty (pickup is local-only in A1)");
+	// A2: the non-local player ON the drop picks it up (the A1 local-only
+	// boundary is gone). The far-away local player gets nothing.
+	CHECK(sim.itemEntities().size() == 0, "A2: the non-local player on the drop picks it up");
+	CHECK(inventoryOf(sim, b).slots[0] == S(ItemId::Cobblestone, 1),
+		  "pickup lands in B's OWN inventory (Stone -> Cobblestone)");
+	CHECK(emptyInventory(inventoryOf(sim, local)), "the far-away local inventory stays empty");
 
-	// Bring the LOCAL player to the drop: pickup merges into the local
-	// inventory hotbar-first (the unchanged #226 contract).
+	// Now the LOCAL player stands on a fresh drop and B hovers far away: the
+	// local player is served too (both sessions are eligible receivers).
+	sim.setPlayerFlight(b, true, farAway);
 	sim.setPlayerPosition(dropSpot);
+	sim.placeVoxel({cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f}, STONE);
+	sim.pumpWorld();
+	CHECK(sim.breakBlock(cell) == sim::BreakResult::Ok, "second fixture break accepted");
 	for (int i = 0; i < 90; ++i)
 		sim.advanceItems(1.0 / 60.0, false);
-	CHECK(sim.itemEntities().size() == 0, "the local player picks the drop up");
-	const sim::InventorySnapshot inv = inventoryOf(sim, sim.localPlayerId());
-	CHECK(inv.slots[0] == S(ItemId::Cobblestone, 1), "pickup lands in the LOCAL inventory (Stone -> Cobblestone)");
-	CHECK(emptyInventory(inventoryOf(sim, b)), "B's inventory untouched by the local pickup");
+	CHECK(sim.itemEntities().size() == 0, "the local player picks the second drop up");
+	CHECK(inventoryOf(sim, local).slots[0] == S(ItemId::Cobblestone, 1),
+		  "pickup lands in the LOCAL inventory");
+	CHECK(inventoryOf(sim, b).slots[0] == S(ItemId::Cobblestone, 1),
+		  "B's earlier pickup is untouched by the local pickup (no cross-leak)");
 }
 
 // ---------------------------------------------------------------------------
@@ -916,7 +928,7 @@ int main()
 	testRemovalIsolation(pool);
 	testStaleHandlesAndEpochs(pool);
 	testSoloCompatibility(pool);
-	testPickupBoundaryA1(pool);
+	testPickupActorAware(pool);
 	testPerPlayerRates(pool);
 	testPersistenceBoundaryA1(pool);
 	std::printf("%ld checks, %ld testmain::fails\n", testmain::checks, testmain::fails);

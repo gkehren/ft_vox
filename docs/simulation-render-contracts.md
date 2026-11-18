@@ -232,7 +232,7 @@ graphics stack at all ([`headless-runner.md`](headless-runner.md)).
 | Component | Location | Side | Current coupling | Migrating phase |
 |---|---|---|---|---|
 | `Engine` | `src/Engine/Engine.cpp/.hpp` | Graphical host / adapter | Owns SDL window, Vulkan device/swapchain/frame, `WorldRenderer`, `GameUI`, `ImGuiLayer`, `Camera`, `RenderSettings`, `ThreadPool`, `ChunkPool`, **and** `sim::GameSimulation` + `RenderWorldBridge` (the bridge references the sim's world). Maps SDL input to commands, owns the single suspension policy (`simulationSuspended`), the day-cycle presentation parameter and the world-epoch barrier (`resetWorldProjection`); `run()` is the documented 16-step frame orchestration. No authoritative gameplay state lives here. | E (#209) — **landed** |
-| `GameSimulation` | `src/Sim/GameSimulation.hpp/.cpp` | **Authoritative (CPU-only)** | The Phase D facade: owns the shared world authority (`TerrainGenerator`, `VoxelWorld`, `MobSystem` 60 Hz, **`items::ItemEntitySystem` 60 Hz, Epic #223**) plus per-player sessions (`PlayerController` 120 Hz + **`items::Inventory`**, flight mode, block selection, spawn/restore) indexed by `sim::PlayerId` — the Epic #245 Phase A split (#246, §11); the local player anchors the legacy solo APIs as thin forwards. Reload counter, explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown — gameplay state captured/restored on the `player.state` seams), per-frame advance with plain values (dt, commands, observer), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`, `InventorySnapshot`, `ItemEntitySnapshot`). Phase E added the player-aware placement query (`canPlaceVoxel`; hosts gate edits with it, `placeVoxel` does not call it). Epic #223 added the gameplay commands (hotbar/inventory, `grantItems`, `breakBlock`, `dropFromSlot`, `placeSelectedBlock`, `raycastVoxel`) with explicit result vocabularies. Render-free; in `ft_vox_core`. | D (#208) — **landed**; E (#209) placement query; Epic #223 B–E (#225–#228); Epic #245 A1 (#246) player sessions |
+| `GameSimulation` | `src/Sim/GameSimulation.hpp/.cpp` | **Authoritative (CPU-only)** | The Phase D facade: owns the shared world authority (`TerrainGenerator`, `VoxelWorld`, `MobSystem` 60 Hz, **`items::ItemEntitySystem` 60 Hz, Epic #223**) plus per-player sessions (`PlayerController` 120 Hz + **`items::Inventory`**, flight mode, block selection, spawn/restore) indexed by `sim::PlayerId` — the Epic #245 Phase A split (#246, §11); the local player anchors the legacy solo APIs as thin forwards. Reload counter, explicit lifecycle (initialize/bootstrap/finalize/reload/save/shutdown — gameplay state captured/restored on the `player.state` seams), per-frame advance with plain values (dt, commands, observer), read-only bounded snapshots (`PlayerSnapshot`, `MobSnapshot`, `WorldSnapshot`, `InventorySnapshot`, `ItemEntitySnapshot`). Phase E added the player-aware placement query (`canPlaceVoxel`; hosts gate edits with it, `placeVoxel` does not call it). Epic #223 added the gameplay commands (hotbar/inventory, `grantItems`, `breakBlock`, `dropFromSlot`, `placeSelectedBlock`, `raycastVoxel`) with explicit result vocabularies. Epic #245 A2 (#247, §12) made the interactions **actor-aware** (per-player break/place/drop/targeting, all-body placement rule, deterministic ascending-`PlayerId` shared pickup, `kInteractionReach` targeting); legacy solo forms remain thin forwards. Render-free; in `ft_vox_core`. | D (#208) — **landed**; E (#209) placement query; Epic #223 B–E (#225–#228); Epic #245 A1 (#246) player sessions, A2 (#247) actor-aware interactions |
 | `VoxelWorld` | `src/World/VoxelWorld.hpp/.cpp` | **Authoritative (CPU-only)** | Single owner of chunk residency/streaming, the deferred/coalesced logical-edit queue with border mirrors, generation worker publication, `WorldPersistence`, and the voxel/border backing pools. Render-free public API (plain position/forward/settings values); publishes the `WorldEvent` change stream. In `ft_vox_core`; owned by `GameSimulation` since Phase D. | B (#206) — **landed** |
 | `WorldChunk` | `src/World/WorldChunk.hpp/.cpp` | **Authoritative (CPU-only)** | The chunk record: voxel backing, occupancy metadata, border shell, persistent-edit map, `sim::ChunkIdentity` (generation + revision — the single source of the pair), lifecycle state, in-transit flag, per-column generation outputs. In `ft_vox_core`. | B (#206) — **landed** |
 | `RenderWorldBridge` | `src/Renderer/RenderWorldBridge.hpp/.cpp` | Derived (renderer-owned projection) | **References** the simulation-owned `VoxelWorld` (`world()`), never owns sim. Keeps render handle map, mesh/light dispatch, GPU uploads, commit groups, visibility, light-cache intent + sampling, deferred GPU retirement, debug trace. Drains the world event stream and projects already-resident records on attach. Stamped with the host's world epoch (`worldGenerationId()`) at attach. Replaces the removed `ChunkManager` adapter. | C (#207) — **landed**; E (#209) epoch stamp + host attach |
@@ -1378,8 +1378,8 @@ To keep the PR reviewable and solo bit-identical, these still act for the
 
 - World interaction commands (`breakBlock`, `placeSelectedBlock`,
   `dropFromSlot`), the player-aware `canPlaceVoxel` rule, and item **auto
-  pickup** (`advanceItems`) use the local body/inventory → actor-aware
-  migration is **#247 (A2)**.
+  pickup** (`advanceItems`) used the local body/inventory in A1 → **migrated
+  to actor-aware by #247 (A2), see §12**.
 - Chunk residency/streaming still follows a single observer point →
   multi-observer interest is **#248 (A3)**.
 - The solo save format (`player.state` / `inventory.state`) captures the local
@@ -1400,3 +1400,127 @@ deterministic id-sorted iteration; world-epoch continuity; and bit-identical
 legacy-vs-local solo behavior. Solo CPU digests and the headless canonical
 digest are unchanged (the local forwards reproduce the historical code path
 exactly).
+
+## 12. Actor-aware interactions (issue #247, Epic #245 Phase A2)
+
+Design note for **A2**: every gameplay command/query executes in a well-defined
+player context so a future server can validate and arbitrate shared-world
+actions. A2 builds directly on the A1 ownership split (§11) and changes **no
+shared-system contract** (world edits, mob/item fixed step, id allocator,
+bridge attach, persistence). Solo behavior stays **bit-identical**.
+
+### Actor-aware command surface (additive)
+
+Each gameplay command keeps its legacy single-player form (a **thin forward to
+the local player**) and gains a per-player form taking a `PlayerId` first:
+
+| Command | Legacy form | Actor-aware form |
+|---|---|---|
+| break | `breakBlock(cell, outEdit)` | `breakBlock(id, cell, outEdit)` |
+| place-from-hotbar | `placeSelectedBlock(cell, outEdit)` | `placeSelectedBlock(id, cell, outEdit)` |
+| drop | `dropFromSlot(slot, count, dir)` | `dropFromSlot(id, slot, count, dir)` |
+| placement query | `canPlaceVoxel(pos, type)` | `canPlaceVoxel(id, pos, type)` |
+| targeting | `raycastVoxel(origin, dir, maxDist)` *(privileged host seam)* | `raycastVoxel(id, dir, maxDist)` |
+
+Hotbar selection / move / swap / split / grant were already per-player in A1.
+An unknown / retired / invalid handle answers a safe refusal **without side
+effects**: `BreakResult::InvalidPlayer`, `PlaceResult::InvalidPlayer`,
+`items::ItemResult::InvalidPlayer` (append-only vocabulary), `false` for the
+placement query, a no-hit for targeting. The break *effect* is world-shared
+(the drop belongs to the shared item population); the actor handle is
+validated for authority. Place/drop derive the inventory and eye from the
+actor session.
+
+### Server-owned interaction context
+
+The actor-aware forms derive the interaction context from the **server-owned
+actor**, never from client-supplied values:
+
+- **Targeting origin + reach.** `raycastVoxel(id, dir, maxDist)` uses the
+  actor's authoritative eye (`playerEye(id)`) as the ray origin and clamps
+  `maxDist` to `GameSimulation::kInteractionReach` (8 — the historical default
+  interaction range). A client may request a *shorter* distance, never a longer
+  one, and can never supply the origin. The legacy raw-origin
+  `raycastVoxel(origin, dir, maxDist)` remains the **privileged creative/editor
+  host seam** (the graphical host passes its camera; clamped only by
+  `kMaxRaycastDistance`). Both forms share **one march implementation**
+  (`raycastMarch`); for the local actor with `origin == eye` and
+  `maxDist <= kInteractionReach` they are bit-identical.
+- **Collision occupancy.** The placement rule protects **every** walking
+  player body, not just the actor's (below).
+- **Inventory.** Place consumes from the actor's inventory; drop removes from
+  the actor's inventory and spawns at the actor's eye.
+
+### All-body placement rule
+
+`canPlaceVoxel` generalizes the issue #209 rule: a **solid** block is refused
+when it overlaps **any** authoritative **walking** player body; flying players
+are exempt (the creative rule) and non-solid blocks never collide. Bodies are
+validated in deterministic **ascending-`PlayerId`** order, so overlapping
+players are considered reproducibly and no player can be entombed by another's
+edit. `placeSelectedBlock` gates with this rule internally; the creative
+`placeVoxel` seam still does not (hosts gate explicitly). Solo (one session)
+reproduces the historical local-body rule bit for bit. The actor-aware
+`canPlaceVoxel(id, …)` validates the handle (an unknown session may not even
+probe placement) then applies the same actor-independent all-body rule.
+
+### Deterministic shared pickup
+
+`items::ItemEntitySystem::update` gains a multi-candidate overload taking
+`std::span<const items::PickupCandidate>` (`{feet, Inventory*}` — a plain
+non-owning value; the Items module knows nothing about `PlayerId`). The facade
+(`advanceItems`) supplies **every live session in ascending-`PlayerId` order**
+(the deterministic priority) via a reserved, refilled-in-place buffer (no
+per-frame allocation). Per entity, after the pickup-delay countdown:
+
+- candidates are evaluated **in the supplied order** (the system never
+  reorders); the first **in-range** candidate (3D distance to feet ≤
+  `pickupRadius`) merges **hotbar-first**;
+- a **partial** remainder is offered to the **next eligible** candidate in the
+  **same tick**; a **full** inventory skips to the next candidate;
+- the **aggregate count is conserved** — an item is never duplicated nor
+  silently lost. With one candidate this is bit-identical to the historical
+  single-player rule (the legacy `update(dt, world, feet, inventory, suspended)`
+  is a one-candidate forward).
+
+### Ordering of simultaneous attempts
+
+All mutation stays on the **single simulation thread** at the host frame
+boundary, so contention resolves in **command call order**:
+
+- two breaks of one block → first `Ok` (effective state immediately AIR), second
+  `WorldRejected`, **exactly one drop**;
+- two places of one cell → first `Ok` (consumes 1), second `WorldRejected`
+  (consumes nothing);
+- shared-drop claims → ascending-`PlayerId` pickup order (above), reproducible
+  winner / tie-break;
+- per-player inventories never contend across sessions; within a session,
+  command order applies.
+
+### A2 scope boundary (deliberately NOT migrated yet)
+
+- **Reach/rate gating of break/place *cells*** (rejecting a far cell at the
+  command itself) is server validation owned by **#255 (C3)**; A2 enforces
+  reach at the actor-aware *targeting* query and validates actor identity,
+  effective voxel state, all-body occupancy, breakability/placeability, id
+  exhaustion and inventory. Out-of-bounds cells answer `WorldRejected`,
+  out-of-range slots `InvalidSlot`.
+- Chunk residency/streaming still follows a single observer → **#248 (A3)**.
+- The solo save format captures the local player only → **#259 (E1)**.
+
+No sockets, no ECS, no renderer refactor and no save-format migration are part
+of A2. `ft_vox_core` pulls in no network types.
+
+### Verification
+
+`tests/test_actor_interactions.cpp` (CTest `ActorInteractions`, CPU-only, links
+only `ft_vox_core`) proves the acceptance list: break/place contention (one
+accepted edit, one drop, no double consume); shared pickup priority / partial
+merge / full skip / conservation (system-level explicit candidates **and**
+facade-level real sessions, reproducible across runs); invalid-actor /
+overlapping-player / unknown-terrain / out-of-range rejections without side
+effects; actor-aware targeting (eye origin + reach clamp + legacy parity);
+per-player id-exhaustion conservation; actor-aware deferred edits; and
+bit-identical legacy-vs-actor-aware(local) solo behavior. `PlayerSessions`
+pickup boundary updated to the actor-aware rule. The solo CPU digests and the
+headless canonical digest are unchanged; ASan/UBSan clean.
