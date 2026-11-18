@@ -323,7 +323,7 @@ void testSharedPickupSystem()
 	FlatWorld world;
 	const glm::dvec3 spot(0.5, 64.125, 0.5); // resting on the y=64 ground
 	const glm::dvec3 feet(0.5, 64.0, 0.5);	 // within pickup radius (1.5)
-	const glm::dvec3 far(100.0, 64.0, 100.0);
+	const glm::dvec3 farFeet(100.0, 64.0, 100.0); // NB: not "far" — a Windows macro
 
 	const auto run = [&](const std::vector<items::PickupCandidate> &candidates,
 						 const ItemStack &drop) {
@@ -400,7 +400,7 @@ void testSharedPickupSystem()
 	{
 		items::Inventory invA;
 		std::vector<items::PickupCandidate> candidates;
-		candidates.push_back(pickupCandidate(far, &invA));
+		candidates.push_back(pickupCandidate(farFeet, &invA));
 		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invA.totalCount(ItemId::Stone) == 0, "out-of-range candidate picks nothing");
 		CHECK(sys.entities().size() == 1, "entity stays");
