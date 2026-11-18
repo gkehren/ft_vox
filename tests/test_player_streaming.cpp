@@ -11,6 +11,15 @@
 
 #include "TestMain.hpp"
 
+struct VoxelWorldProbe
+{
+	static void injectCompletion(VoxelWorld &world, WorldChunk *chunk, uint64_t generation)
+	{
+		std::lock_guard lock(world.m_completedJobsMutex);
+		world.m_completedGenerationChunks.push_back({chunk, generation, true});
+	}
+};
+
 namespace
 {
 using sim::GameSimulation;
@@ -20,6 +29,8 @@ constexpr glm::ivec3 origin{0, 0, 0};
 constexpr glm::ivec3 neighbor{1, 0, 0};
 constexpr glm::ivec3 farAway{80, 0, -90};
 constexpr glm::vec3 borderVoxel{15.5f, 250.5f, 8.5f};
+constexpr glm::ivec3 solidCell{8, 0, 8};
+constexpr glm::ivec3 editCell{8, 250, 8};
 
 glm::dvec3 feetAt(glm::ivec3 chunk)
 {
@@ -34,8 +45,161 @@ void observe(GameSimulation &sim, PlayerId id, glm::ivec3 chunk, int radius = 1)
 
 bool readable(const VoxelWorld &world, glm::ivec3 coord)
 {
-	const auto *chunk = world.getChunk(coord);
-	return chunk && chunk->isVoxelBackingReadable();
+	return WorldCollisionView(world).sample(
+		{coord.x * CHUNK_SIZE + solidCell.x, solidCell.y, coord.z * CHUNK_SIZE + solidCell.z}).available;
+}
+
+glm::vec3 cellCenter(glm::ivec3 cell)
+{
+	return glm::vec3(cell) + 0.5f;
+}
+
+void checkTerrain(const VoxelWorld &world, glm::ivec3 cell, TextureType expected)
+{
+	TextureType type = AIR;
+	{
+		WorldCollisionView view(world);
+		const auto sampled = view.sample(cell);
+		const auto typed = view.sampleWithType(cell, &type);
+		const auto expectedCell = physics::blockCell(expected);
+		CHECK_EXPR(sampled.available && typed.available);
+		CHECK_EXPR(sampled.solid == expectedCell.solid && typed.solid == expectedCell.solid);
+		CHECK_EXPR(sampled.medium == expectedCell.medium && typed.medium == expectedCell.medium);
+		CHECK_EXPR(type == expected);
+	}
+	CHECK_EXPR(world.isVoxelActive(cellCenter(cell)) == (expected != AIR));
+}
+
+void checkUnknown(const VoxelWorld &world, glm::ivec3 cell)
+{
+	{
+		WorldCollisionView view(world);
+		CHECK_EXPR(!view.sample(cell).available);
+		CHECK_EXPR(!view.sampleWithType(cell, nullptr).available);
+	}
+	CHECK_EXPR(!world.isVoxelActive(cellCenter(cell)));
+}
+
+void asyncTerrainPublicationAndRecycling()
+{
+	ThreadPool pool(1);
+	GameSimulation sim(&pool);
+	sim.initialize({.seed = 42, .worldName = {}}, {});
+	const auto local = sim.localPlayerId();
+	auto &world = *sim.world();
+	observe(sim, local, origin);
+	CHECK_EXPR(sim.advancePlayerStreaming({1, 0, 0}));
+	auto *record = world.getChunk(origin);
+	CHECK_EXPR(record != nullptr);
+	if (!record)
+		return;
+	const auto originalGeneration = record->generation();
+	checkUnknown(world, solidCell);
+
+	std::promise<void> unblockFirst;
+	auto firstReady = unblockFirst.get_future();
+	auto firstBlocker = pool.enqueue(TaskPriority::High, [&] { firstReady.wait(); });
+	CHECK_EXPR(sim.advancePlayerStreaming({0, 1, 0}));
+	CHECK_EXPR(record->isInTransit());
+	checkUnknown(world, solidCell);
+	unblockFirst.set_value();
+	firstBlocker.get();
+	pool.enqueue(TaskPriority::Low, [] {}).get();
+	CHECK_EXPR(record->isVoxelBackingReadable() && record->isInTransit());
+	checkUnknown(world, solidCell);
+	sim.pumpWorld();
+	CHECK_EXPR(!record->isInTransit());
+	checkTerrain(world, solidCell, BEDROCK);
+	world.takeEvents();
+
+	observe(sim, local, farAway);
+	CHECK_EXPR(sim.advancePlayerStreaming({1, 0, 1}));
+	CHECK_EXPR(!world.getChunk(origin));
+	auto *recycled = world.getChunk(farAway);
+	CHECK_EXPR(recycled == record && recycled->generation() != originalGeneration);
+	if (recycled != record)
+		return;
+	const glm::ivec3 recycledCell = solidCell + glm::ivec3(farAway.x * CHUNK_SIZE, 0, farAway.z * CHUNK_SIZE);
+	checkUnknown(world, solidCell);
+	checkUnknown(world, recycledCell);
+
+	std::promise<void> unblockSecond;
+	auto secondReady = unblockSecond.get_future();
+	auto secondBlocker = pool.enqueue(TaskPriority::High, [&] { secondReady.wait(); });
+	CHECK_EXPR(sim.advancePlayerStreaming({0, 1, 0}));
+	VoxelWorldProbe::injectCompletion(world, recycled, originalGeneration);
+	world.publishFinishedGeneration();
+	CHECK_EXPR(recycled->isInTransit());
+	checkUnknown(world, recycledCell);
+	CHECK_EXPR(std::ranges::none_of(world.takeEvents(), [](const WorldEvent &event) {
+		return event.kind == WorldEventKind::Generated;
+	}));
+	unblockSecond.set_value();
+	secondBlocker.get();
+	pool.enqueue(TaskPriority::Low, [] {}).get();
+	checkUnknown(world, recycledCell);
+	sim.pumpWorld();
+	checkTerrain(world, recycledCell, BEDROCK);
+}
+
+void publishedTerrainDuringWorkerLease()
+{
+	GameSimulation sim(nullptr);
+	sim.initialize({.seed = 42, .worldName = {}}, {});
+	const auto local = sim.localPlayerId();
+	auto &world = *sim.world();
+	CHECK_EXPR(world.generateInitialAreaVoxels(glm::vec3(feetAt(origin)), 0).size() == 1);
+	observe(sim, local, origin);
+	CHECK_EXPR(sim.advancePlayerStreaming({0, 0, 0}));
+	auto *record = world.getChunk(origin);
+	CHECK_EXPR(record != nullptr);
+	if (!record)
+		return;
+	checkTerrain(world, solidCell, BEDROCK);
+	checkTerrain(world, editCell, AIR);
+	world.takeEvents();
+
+	record->setInTransit(true); // Mesh/light can hold a lease on already published terrain.
+	checkTerrain(world, solidCell, BEDROCK);
+	checkTerrain(world, editCell, AIR);
+	CHECK_EXPR(!world.placeVoxel(cellCenter(solidCell), STONE).accepted);
+	CHECK_EXPR(world.placeVoxel(cellCenter(editCell), STONE).accepted);
+	CHECK_EXPR(!world.placeVoxel(cellCenter(editCell), STONE).accepted);
+	CHECK_EXPR(world.hasPendingLogicalEdits());
+	checkTerrain(world, editCell, STONE);
+	CHECK_EXPR(record->getVoxel(editCell.x, editCell.y, editCell.z).type == AIR);
+	CHECK_EXPR(world.takeEvents().empty());
+	CHECK_EXPR(world.playerStreamingStats().transientOverrideVoxels == 0);
+
+	CHECK_EXPR(sim.setPlayerInterestRadius(local, 0));
+	CHECK_EXPR(sim.advancePlayerStreaming({0, 0, 1}));
+	CHECK_EXPR(world.getChunk(origin) == record);
+	CHECK_EXPR(world.hasPendingLogicalEdits());
+	checkTerrain(world, editCell, STONE);
+
+	record->setInTransit(false);
+	sim.pumpWorld();
+	sim.pumpWorld();
+	CHECK_EXPR(!world.hasPendingLogicalEdits());
+	checkTerrain(world, solidCell, BEDROCK);
+	checkTerrain(world, editCell, STONE);
+	CHECK_EXPR(record->getVoxel(editCell.x, editCell.y, editCell.z).type == STONE);
+	const auto events = world.takeEvents();
+	CHECK_EXPR(events.size() == 1);
+	CHECK_EXPR(events.size() == 1 && events[0].kind == WorldEventKind::EditApplied &&
+			   !events[0].borderNeighbor && events[0].coord == origin);
+	CHECK_EXPR(world.playerStreamingStats().transientOverrideChunks == 1);
+	CHECK_EXPR(world.playerStreamingStats().transientOverrideVoxels == 1);
+
+	CHECK_EXPR(world.deleteVoxel(cellCenter(editCell)).accepted);
+	CHECK_EXPR(world.playerStreamingStats().transientOverrideVoxels == 1);
+	CHECK_EXPR(sim.advancePlayerStreaming({0, 0, 1}));
+	CHECK_EXPR(!world.getChunk(origin));
+	CHECK_EXPR(world.playerStreamingStats().transientOverrideChunks == 1);
+	CHECK_EXPR(world.playerStreamingStats().transientOverrideVoxels == 1);
+	CHECK_EXPR(sim.reload(43));
+	CHECK_EXPR(sim.world()->playerStreamingStats().transientOverrideChunks == 0);
+	CHECK_EXPR(sim.world()->playerStreamingStats().transientOverrideVoxels == 0);
 }
 
 void distantRegionsAndValidation()
@@ -263,6 +427,8 @@ void outstandingGenerationBackpressure()
 
 int main()
 {
+	asyncTerrainPublicationAndRecycling();
+	publishedTerrainDuringWorkerLease();
 	distantRegionsAndValidation();
 	const auto baseline = crossingSequence(nullptr);
 	CHECK_EXPR(crossingSequence(nullptr) == baseline);

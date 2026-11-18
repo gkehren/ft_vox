@@ -90,6 +90,8 @@ struct PlayerStreamingStats
 	size_t outsideInterest{0};
 	size_t pinnedEdits{0}; // out-of-interest chunks protected during this tick's eviction pass
 	size_t outstandingGenerations{0};
+	size_t transientOverrideChunks{0};
+	size_t transientOverrideVoxels{0};
 	size_t loaded{0}, generationStarts{0}, evicted{0}; // this tick
 };
 
@@ -255,7 +257,9 @@ public:
 	bool asyncBusy() const;
 	std::vector<WorldChunk *> activeChunksSnapshot() const;
 	StreamingMaintenanceStats streamingMaintenanceStats() const { return m_streamStats; }
-	PlayerStreamingStats playerStreamingStats() const { return m_playerStreamingStats; }
+	/// Owner-thread snapshot. Override counts include evicted coordinates and
+	/// reflect edits applied since the last streaming tick.
+	PlayerStreamingStats playerStreamingStats() const;
 
 	/// Rebuild a record's neighbor border shell from resident neighbors
 	/// (main thread; locks internally). The render adapter calls this at
@@ -356,6 +360,7 @@ private:
 	sim::PlayerId m_lastPlayerGeneration;
 	PlayerStreamingStats m_playerStreamingStats;
 	std::unordered_map<glm::ivec3, WorldChunk::ChunkEditMap, IVec3Hash> m_transientPlayerEdits;
+	size_t m_transientPlayerOverrideCount{0};
 
 	std::vector<glm::ivec3> loadChunkRecords(std::span<const glm::ivec3> coords);
 	size_t retireChunks(std::span<const glm::ivec3> coords);
@@ -367,11 +372,11 @@ private:
 	size_t dispatchGeneration(std::span<const GenerationCandidate> queue, std::optional<float> lodThresholdSq);
 	size_t outstandingGenerationCount() const;
 	int generateSynchronously(std::span<const GenerationCandidate> queue);
+	void publishTerrainBacking(WorldChunk *chunk);
 	void finishGeneration(WorldChunk *chunk);
 	bool canReadVoxels(const WorldChunk &chunk) const
 	{
-		// Player residency exposes a job's backing only after publication.
-		return (!m_playerStreaming || !chunk.isInTransit()) && chunk.isVoxelBackingReadable();
+		return chunk.isVoxelBackingReadable() && (!m_playerStreaming || chunk.m_terrainPublished);
 	}
 
 	// --- Streaming internals (ported from ChunkManager, issue #108) -----------
@@ -467,6 +472,7 @@ private:
 	{
 		WorldChunk *chunk{nullptr};
 		uint64_t generation{0};
+		bool succeeded{true};
 	};
 	std::vector<CompletedGenJob> m_completedGenerationChunks;
 	std::atomic<size_t> m_pendingGenJobsCount{0};

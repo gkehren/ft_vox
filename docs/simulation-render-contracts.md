@@ -1590,7 +1590,11 @@ Budget values can be lowered to zero. The pool grows incrementally and its
 global capacity still applies. Unregistered demand waits when slots run
 out, and selection checks the latest union before each admission. A tick
 publishes completed generation and applies pending edits before eviction.
-Terrain stays unknown to gameplay queries until the terrain job publishes.
+Terrain stays unknown to gameplay queries until the owner publishes the
+completed backing and its overrides. Publication is scoped to the record
+incarnation. Mesh and light worker leases preserve read access to published
+terrain while deferring writes and retirement. Queries see pending logical
+edits on published chunks even while backing writes are deferred.
 Records outside the union retire in registration order when their worker
 leases and canonical deferred edits have cleared. A round-robin turn for
 stranded canonical edits shares the same generation budget with players so
@@ -1601,7 +1605,11 @@ the current canonical neighbors. Dirty evictions use the existing bounded
 async save queue and retry path.
 Streaming never invokes a durability barrier. A transient multiplayer
 world keeps sparse applied overrides for its epoch and reapplies them before
-publishing regenerated voxels.
+publishing regenerated voxels. The map retains one value per edited voxel,
+including values in evicted chunks, so memory can grow with the number of
+distinct edited cells until the epoch ends. The owner-thread streaming
+snapshot exposes `transientOverrideChunks` and `transientOverrideVoxels`
+as live counts, including overrides held outside residency.
 
 `VoxelWorld::playerStreamingStats()` reports combined demand, registered
 records, load and generation backlogs, out-of-interest records, records

@@ -661,12 +661,13 @@ size_t VoxelWorld::dispatchGeneration(std::span<const GenerationCandidate> queue
 				observer->addWorkerSample("TerrainQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
 			TerrainGenerator &localGen = TerrainGenerator::getThreadLocal(seed);
-			chunk->generateTerrain(localGen);
+			const bool succeeded = chunk->generateTerrain(localGen);
 			// Saved overrides re-apply deterministically right after
 			// generation (issue #180): the job owns the record (in transit,
 			// unpublished) and the first mesh after generation covers every
 			// touched section, so this is race-free and meshes correctly.
-			applyPersistentOverrides(chunk);
+			if (succeeded)
+				applyPersistentOverrides(chunk);
 			if (observer)
 			{
 				const float ms = std::chrono::duration<float, std::milli>(
@@ -677,7 +678,7 @@ size_t VoxelWorld::dispatchGeneration(std::span<const GenerationCandidate> queue
 
 			{
 				std::lock_guard<std::mutex> lk(m_completedJobsMutex);
-				m_completedGenerationChunks.push_back({chunk, generation});
+				m_completedGenerationChunks.push_back({chunk, generation, succeeded});
 				m_pendingGenJobsCount.fetch_sub(1);
 			}
 		});
@@ -749,10 +750,16 @@ int VoxelWorld::generateSynchronously(std::span<const GenerationCandidate> queue
 	return generated;
 }
 
-void VoxelWorld::finishGeneration(WorldChunk *chunk)
+void VoxelWorld::publishTerrainBacking(WorldChunk *chunk)
 {
 	if (m_playerStreaming)
 		applyTransientPlayerEdits(chunk);
+	chunk->m_terrainPublished = true;
+}
+
+void VoxelWorld::finishGeneration(WorldChunk *chunk)
+{
+	publishTerrainBacking(chunk);
 	WorldEvent event;
 	event.kind = WorldEventKind::Generated;
 	event.coord = chunk->coord();
@@ -781,10 +788,12 @@ void VoxelWorld::publishFinishedGeneration()
 		// published into (unload requires !inTransit, so this is a safety
 		// net for out-of-order completion, issue #206 acceptance).
 		const auto it = m_chunks.find(chunk->coord());
-		if (it == m_chunks.end() || it->second != chunk || chunk->generation() != job.generation)
+		if (it == m_chunks.end() || it->second != chunk || chunk->generation() != job.generation ||
+			chunk->m_terrainPublished)
 			continue;
 		chunk->setInTransit(false);
-		finishGeneration(chunk);
+		if (job.succeeded)
+			finishGeneration(chunk);
 	}
 }
 
@@ -871,7 +880,7 @@ TextureType VoxelWorld::effectiveVoxelType(const WorldChunk *chunk, int x, int y
 												 .type);
 	for (const PendingVoxelEdit &edit : m_pendingEdits)
 	{
-		if (edit.chunk == chunk && !edit.borderNeighbor &&
+		if (edit.chunk == chunk && edit.generation == chunk->generation() && !edit.borderNeighbor &&
 			edit.x == x && edit.y == y && edit.z == z)
 			effective = edit.type; // last pending write wins
 	}
@@ -883,7 +892,7 @@ bool VoxelWorld::mustDeferVoxelEdit(const WorldChunk *chunk) const
 	// UNLOADED defers regardless of transit state: the backing is stale
 	// pool bytes until terrain generation initializes it (issue #115).
 	return !chunk ||
-		   chunk->getState() == ChunkState::UNLOADED ||
+		   !canReadVoxels(*chunk) ||
 		   chunk->isInTransit();
 }
 
@@ -909,8 +918,9 @@ void VoxelWorld::queueOrApplyEdit(WorldChunk *chunk, const glm::ivec3 &chunkPos,
 	const TextureType previousType = chunk->setVoxel(x, y, z, type);
 	if (m_playerStreaming && !isWorldOpen() && !borderNeighbor && previousType != type)
 	{
-		const uint32_t index = (y * CHUNK_SIZE + z) * CHUNK_SIZE + x;
-		m_transientPlayerEdits[chunkPos][index] = static_cast<uint8_t>(type);
+		const auto index = static_cast<uint32_t>(WorldChunk::index(x, y, z));
+		if (m_transientPlayerEdits[chunkPos].insert_or_assign(index, static_cast<uint8_t>(type)).second)
+			++m_transientPlayerOverrideCount;
 	}
 	emitEditApplied(chunk, x, y, z, type, previousType, borderNeighbor);
 }
@@ -1102,6 +1112,8 @@ bool VoxelWorld::isVoxelActive(const glm::vec3 &worldPos) const
 	const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
 	const int localY = static_cast<int>(std::floor(worldPos.y));
 	const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
+	if (m_playerStreaming)
+		return effectiveVoxelType(it->second, localX, localY, localZ) != AIR;
 	return it->second->getVoxel(localX, localY, localZ).type != AIR;
 }
 
@@ -1165,6 +1177,7 @@ bool VoxelWorld::prepareAndGenerateChunk(WorldChunk *chunk, TerrainGenerator &ge
 {
 	if (!chunk)
 		return false;
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
 	// Shared synchronous bootstrap contract (issue #112): voxel storage is
 	// prepared on the calling thread immediately before generation; workers
 	// never acquire or release voxel backing. On allocation failure the
@@ -1189,8 +1202,7 @@ bool VoxelWorld::prepareAndGenerateChunk(WorldChunk *chunk, TerrainGenerator &ge
 	// Bootstrap path (issue #180): same override contract as the async gen
 	// job — generation is deterministic, saved edits re-apply on top.
 	applyPersistentOverrides(chunk);
-	if (m_playerStreaming)
-		applyTransientPlayerEdits(chunk);
+	publishTerrainBacking(chunk);
 	return true;
 }
 
@@ -1372,13 +1384,9 @@ void VoxelWorld::resolvePendingEditsForPersistenceShutdown()
 
 	for (const glm::ivec3 &coord : coords)
 	{
-		WorldChunk *chunk = nullptr;
-		{
-			std::lock_guard<std::shared_mutex> lock(m_mutex);
-			const auto it = m_chunks.find(coord);
-			chunk = it != m_chunks.end() ? it->second : nullptr;
-		}
-		if (!chunk || chunk->isInTransit() || chunk->getState() != ChunkState::UNLOADED)
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		WorldChunk *chunk = getChunk(coord);
+		if (!m_terrainGenerator || !chunk || chunk->isInTransit() || chunk->getState() != ChunkState::UNLOADED)
 			continue;
 
 		// Deliberately NOT prepareAndGenerateChunk(): its allocation-failure
@@ -1392,9 +1400,10 @@ void VoxelWorld::resolvePendingEditsForPersistenceShutdown()
 					  << std::endl;
 			continue;
 		}
-		if (m_terrainGenerator)
-			chunk->generateTerrain(*m_terrainGenerator);
+		if (!chunk->generateTerrain(*m_terrainGenerator))
+			continue;
 		applyPersistentOverrides(chunk);
+		publishTerrainBacking(chunk);
 	}
 
 	// Land every edit whose record is now readable.

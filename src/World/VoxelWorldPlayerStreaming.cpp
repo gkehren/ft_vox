@@ -229,6 +229,14 @@ size_t VoxelWorld::outstandingGenerationCount() const
 	return m_pendingGenJobsCount.load() + m_completedGenerationChunks.size();
 }
 
+PlayerStreamingStats VoxelWorld::playerStreamingStats() const
+{
+	auto stats = m_playerStreamingStats;
+	stats.transientOverrideChunks = m_transientPlayerEdits.size();
+	stats.transientOverrideVoxels = m_transientPlayerOverrideCount;
+	return stats;
+}
+
 void VoxelWorld::applyTransientPlayerEdits(WorldChunk *chunk)
 {
 	const auto it = m_transientPlayerEdits.find(chunk->coord());
