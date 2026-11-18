@@ -758,6 +758,97 @@ void testLiveReseedIsolation()
 	CHECK(gen2.size() == 1 && gen2[0].localIndex == idx1, "generation 2 carries only the recovered E1");
 }
 
+// ---------------------------------------------------------------------------
+// 10. First-migration failure boundary (PR #243 review, finding 2): the
+//     transactional recovery guarantee begins at the FIRST SUCCESSFUL
+//     checkpoint commit. A legacy world whose first publication fails has no
+//     committed checkpoint: recovery uses the legacy per-file policy (durable
+//     files preserved, never destroyed) and makes NO transactional claim.
+//     Once a commit succeeds, recovery is transactional and a corrupt
+//     generation is never silently downgraded to the live set.
+// ---------------------------------------------------------------------------
+void testFirstMigrationFailureBoundary()
+{
+	TempRoot root("first-migration");
+	const fs::path saves = root.path;
+	const uint32_t genVersion = 1;
+	const uint32_t idx1 = 8 + 64 * 256 + 8 * 16;
+	const uint32_t idx2 = 9 + 64 * 256 + 8 * 16;
+	worldsave::CheckpointPayloads payloads;
+	payloads.inventory = worldsave::encodeInventoryState(worldsave::InventoryPersistState{});
+	payloads.items = worldsave::encodeItemsState(worldsave::ItemsPersistState{});
+
+	// (a) Legacy edits flushed, first publication faulted, crash: reopen is
+	// LEGACY (no committed checkpoint), durable edits intact, nothing destroyed.
+	{
+		WorldPersistence wp;
+		CHECK(wp.openOrCreate(saves, "legacy", 42, genVersion).ok, "legacy open");
+		CHECK(!wp.checkpointMode(), "a fresh world starts in legacy mode");
+		wp.captureChunkEdits(0, 0, {{idx1, static_cast<uint8_t>(STONE)}});
+		wp.captureChunkEdits(1, 0, {{idx2, static_cast<uint8_t>(DIRT)}});
+		CHECK(wp.flush(), "legacy working set flushed");
+		wp.setCheckpointFaultForTests(worldsave::CheckpointFaultPoint::DuringManifestPublish);
+		CHECK(!wp.commitCheckpoint(payloads), "first publication fails before the manifest rename");
+		// Simulated crash: ~WorldPersistence does not commit.
+	}
+	{
+		WorldPersistence re;
+		CHECK(re.openOrCreate(saves, "legacy", 42, genVersion).ok, "reopen after failed first migration");
+		CHECK(!re.checkpointMode(), "no committed checkpoint -> legacy recovery (guarantee boundary)");
+		CHECK(!fs::exists(saves / "legacy" / "checkpoints" / "manifest"), "no manifest published");
+		const auto snap0 = re.overridesSnapshot(0, 0);
+		const auto snap1 = re.overridesSnapshot(1, 0);
+		CHECK(snap0.size() == 1 && snap0[0].localIndex == idx1, "durable legacy edit (0,0) preserved");
+		CHECK(snap1.size() == 1 && snap1[0].localIndex == idx2, "durable legacy edit (1,0) preserved");
+		// The first SUCCESSFUL commit establishes the transactional baseline.
+		// With no manifest, recovery numbers PAST the orphaned staging (the
+		// orphan is cleaned by retention), so the first committed generation
+		// is 2 here — the number is an internal monotonic counter.
+		CHECK(re.commitCheckpoint(payloads), "first successful commit");
+		CHECK(re.checkpointMode() && re.checkpointGeneration() == 2,
+			  "transactional guarantees begin here");
+		CHECK(countGenerationDirs(saves / "legacy") == 1, "orphaned staging cleaned by retention");
+	}
+	// From now on recovery is transactional: a corrupt sole generation is
+	// UNRECOVERABLE (never a silent downgrade to the live working set).
+	{
+		const fs::path gen = saves / "legacy" / "checkpoints" / "generation-2";
+		corruptByte(gen / "inventory.state", 0);
+		WorldPersistence re;
+		const auto info = re.openOrCreate(saves, "legacy", 42, genVersion);
+		CHECK(!info.ok, "migrated world with a corrupt generation refuses the open");
+		CHECK(info.error.find("unrecoverable") != std::string::npos, "explicit unrecoverable error");
+	}
+
+	// (b) Partial legacy flush (one coordinate's write fails) + crash BEFORE
+	// any commit: legacy recovery exposes exactly the per-file durable state
+	// — the documented pre-migration policy, not a transactional snapshot.
+	{
+		WorldPersistence wp;
+		CHECK(wp.openOrCreate(saves, "partial", 42, genVersion).ok, "partial-flush world open");
+		wp.captureChunkEdits(0, 0, {{idx1, static_cast<uint8_t>(STONE)}});
+		wp.captureChunkEdits(1, 0, {{idx2, static_cast<uint8_t>(DIRT)}});
+		wp.setWriteTmpFnForTests([](const fs::path &dir, int32_t x, int32_t z,
+									const std::vector<worldsave::ChunkEdit> &ov, fs::path &out) {
+			if (x == 1)
+				return SaveStatus::IoError; // coordinate (1,0) never becomes durable
+			return worldsave::writeChunkFileTmp(dir, x, z, ov, out);
+		});
+		CHECK(!wp.flush(), "partial flush reports failure");
+		// The runtime seams never commit after a failed flush (finding 1);
+		// the crash leaves the legacy per-file state.
+	}
+	{
+		WorldPersistence re;
+		CHECK(re.openOrCreate(saves, "partial", 42, genVersion).ok, "partial-flush reopen");
+		CHECK(!re.checkpointMode(), "still legacy: no checkpoint was ever committed");
+		const auto snap0 = re.overridesSnapshot(0, 0);
+		const auto snap1 = re.overridesSnapshot(1, 0);
+		CHECK(snap0.size() == 1 && snap0[0].localIndex == idx1, "durable coordinate recovered");
+		CHECK(snap1.empty(), "never-durable coordinate absent (per-file legacy policy)");
+	}
+}
+
 } // namespace
 
 int main()
@@ -772,6 +863,7 @@ int main()
 	testCarryForwardAndValidation();
 	testChunkSetEvolution();
 	testLiveReseedIsolation();
+	testFirstMigrationFailureBoundary();
 	std::printf("%ld checks, %ld testmain::fails\n", testmain::checks, testmain::fails);
 	if (testmain::fails == 0)
 		std::printf("PASS\n");

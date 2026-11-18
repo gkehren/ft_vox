@@ -246,12 +246,15 @@ public:
 	WorldPersistence *worldPersistence() { return m_persistence.get(); }
 	const WorldPersistence *worldPersistence() const { return m_persistence.get(); }
 	/// Destructor-only close: resolve stranded edits, then capture/flush/
-	/// shutdown UNCONDITIONALLY. Returns the flush success. Since
-	/// stabilization PR5b a checkpoint is committed after the flush: the
-	/// caller's gameplay payloads when provided (the GameSimulation shutdown
-	/// safety net captures inventory + items; the player payload is carried
-	/// forward), else a carry-forward commit. A commit failure is REPORTED
-	/// (no retry point at destruction); the previous committed checkpoint
+	/// shutdown UNCONDITIONALLY. Returns false when the drain, the flush or
+	/// the checkpoint commit failed. Since stabilization PR5b a checkpoint
+	/// is committed ONLY after a COMPLETE durability barrier (drain AND
+	/// flush both succeeded — review correction): the caller's gameplay
+	/// payloads when provided (the GameSimulation shutdown safety net
+	/// captures inventory + items; the player payload is carried forward),
+	/// else a carry-forward commit. Any failure is REPORTED with a distinct
+	/// diagnostic (no retry point at destruction); the service is still
+	/// released unconditionally and the previous committed checkpoint
 	/// remains the recovery point.
 	bool forceCloseWorldForShutdown(const worldsave::CheckpointPayloads *gameplay = nullptr);
 	/// Quiesce world-side async work (gen jobs + transit) and verify every

@@ -1033,8 +1033,12 @@ unchanged (missing file = fresh, quiet; no migration machinery).
   (`worldsave::CheckpointStore`, `docs/adr/gameplay-persistence-transactions.md`).
   `savePlayerState` runs the flush barrier FIRST and reports success only
   when the manifest committed; `shutdown`/close commit carry-forward
-  checkpoints; `flushWorld` keeps its intermediate-barrier meaning (no
-  gameplay commit). Recovery selects the most recent fully valid generation,
+  checkpoints ONLY after a complete drain+flush barrier (PR #243 review:
+  a failed drain/flush skips the commit, distinct diagnostics, previous
+  generation stays authoritative); `flushWorld` keeps its
+  intermediate-barrier meaning (no gameplay commit). Transactional
+  guarantees begin at the first successful commit — a failed first
+  migration recovers via the legacy per-file policy (ADR §2.7, tested). Recovery selects the most recent fully valid generation,
   re-seeds the live working set from it and routes gameplay reads to it;
   corrupt generations fall back whole, never mixed; unrecoverable corruption
   refuses the open explicitly. The root state files + live `chunks/` remain

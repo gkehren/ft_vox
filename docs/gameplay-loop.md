@@ -273,9 +273,15 @@ full capture (player + inventory + items + allocator) as one checkpoint —
 **success is reported only when the manifest committed**. The `shutdown`
 safety net commits inventory + items (the player payload is carried
 forward); `closeWorld`/`forceCloseWorldForShutdown` commit a carry-forward
-checkpoint after their flush. `flushWorld`/`WorldPersistence::flush` keep
-their historical meaning: an intermediate chunk-durability barrier that does
-NOT commit a gameplay checkpoint. On open, recovery selects the most recent
+checkpoint only after a COMPLETE barrier — the async drain AND the chunk
+flush both succeeded (a failed drain/flush skips the commit with a distinct
+diagnostic; the previous committed generation stays authoritative).
+`flushWorld`/`WorldPersistence::flush` keep their historical meaning: an
+intermediate chunk-durability barrier that does NOT commit a gameplay
+checkpoint. **Guarantee boundary**: transactional recovery begins at the
+first successful checkpoint commit; a legacy world whose first publication
+fails recovers through the legacy per-file policy (additive, non-destructive,
+but NOT a transactional snapshot — see the ADR §2.7). On open, recovery selects the most recent
 fully valid generation (manifest → `manifest.prev` fallback), re-seeds the
 live working set from it (uncommitted pre-crash edits are discarded, never
 resurrected by a later commit), and routes gameplay reads to it. A corrupt

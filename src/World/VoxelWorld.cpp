@@ -1380,17 +1380,32 @@ bool VoxelWorld::forceCloseWorldForShutdown(const worldsave::CheckpointPayloads 
 
 	captureAllChunkEdits();
 	const bool flushed = m_persistence->flush();
-	// Stabilization PR5b: commit the checkpoint AFTER the flush barrier so
-	// the generation snapshots exactly the durable working set. Destruction
-	// has no retry point: a commit failure is reported and the previous
-	// committed checkpoint remains the recovery point (never a mixture).
-	const bool checkpointed =
-		gameplay ? m_persistence->commitCheckpoint(*gameplay)
-				 : m_persistence->commitCarryForwardCheckpoint(nextEditId());
-	if (!checkpointed)
-		std::cerr << "[world] final shutdown: checkpoint commit failed; the previous committed "
-					 "checkpoint remains the recovery point"
+	if (!flushed)
+		std::cerr << "[world] final shutdown: chunk flush failed" << std::endl;
+	// Stabilization PR5b (review correction): the checkpoint precondition is
+	// a COMPLETE durability barrier — commit ONLY when the async drain AND
+	// the chunk flush both succeeded, so a manifest can never reference an
+	// incomplete chunk state. Destruction has no retry point: on any failure
+	// the shutdown still releases the service unconditionally, the failure is
+	// reported with a distinct diagnostic, and the previous committed
+	// checkpoint remains the authoritative recovery point (never a mixture).
+	bool checkpointed = false;
+	if (drained && flushed)
+	{
+		checkpointed =
+			gameplay ? m_persistence->commitCheckpoint(*gameplay)
+					 : m_persistence->commitCarryForwardCheckpoint(nextEditId());
+		if (!checkpointed)
+			std::cerr << "[world] final shutdown: checkpoint commit failed; the previous committed "
+						 "checkpoint remains the recovery point"
+					  << std::endl;
+	}
+	else
+	{
+		std::cerr << "[world] final shutdown: checkpoint skipped (drain or flush failed); the "
+					 "previous committed checkpoint remains the recovery point"
 				  << std::endl;
+	}
 	m_persistence->shutdown();
 	// Disarm tracking on the loaded set: after close the world behaves
 	// exactly like a never-opened one.

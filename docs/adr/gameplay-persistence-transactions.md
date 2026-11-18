@@ -99,11 +99,16 @@ never combine a valid payload from one generation with a chunk from another.
 
 ### 2.3 Commit protocol (main thread, at a durability boundary)
 
-Precondition: the caller has established the snapshot boundary and flushed
-the working set (`SaveService::flush()` barrier returned true — every
-desired revision is durable, no worker is mid-write). All steps run on the
-main thread; the world simulation lock is **not** held during filesystem
-work (the boundary capture already happened under it).
+Precondition: the caller has established the snapshot boundary and
+completed the FULL durability barrier — the async drain AND
+`SaveService::flush()` both succeeded (every accepted edit authoritative,
+every desired revision durable, no worker mid-write). The runtime seams
+enforce this: `savePlayerState` returns before committing when
+`flushWorld()` fails; `closeWorld` refuses on drain or flush failure;
+`forceCloseWorldForShutdown` skips the commit (with a distinct diagnostic)
+unless drain AND flush succeeded (PR #243 review correction). All steps run
+on the main thread; the world simulation lock is **not** held during
+filesystem work (the boundary capture already happened under it).
 
 1. **Capture** the gameplay payloads as plain values (player when the host
    supplies orientation; inventory; items + allocator high-water). This is
@@ -207,6 +212,22 @@ by the worker. Therefore:
 - **Migration is additive and non-destructive**: the first commit creates
   `checkpoints/` alongside the untouched legacy files. A failed migration
   (staging/commit failure) destroys nothing — the legacy files remain.
+- **Guarantee boundary (PR #243 review clarification)**: transactional
+  recovery begins at the **first successful checkpoint commit**, not at
+  open. A legacy world whose first publication fails has no committed
+  checkpoint: a crash before that commit recovers through the **legacy
+  per-file policy** (each file individually atomic; the durable live set is
+  preserved, but a partially flushed working set may reflect per-file — not
+  whole-state — consistency). This is the historical pre-migration behavior,
+  explicitly NOT a transactional guarantee; no complete pre-migration
+  snapshot is promised or created. The runtime seams never attempt a commit
+  after a failed drain/flush (§2.3 precondition), so a failed first commit
+  cannot publish a partial generation. Once a commit succeeds, recovery is
+  transactional: a corrupt generation falls back whole or refuses the open —
+  it is never silently downgraded to the live working set. Deterministic
+  coverage: `testFirstMigrationFailureBoundary` (failed first publication →
+  legacy recovery; partial flush → per-file durable state; first success →
+  transactional mode; corrupt sole generation → explicit refusal).
 - **Rollback**: an older binary ignores `checkpoints/` and keeps reading the
   live `chunks/` + root state files, which the new code **continues to
   maintain** as a compatibility shim. At most the last uncommitted
