@@ -79,6 +79,20 @@ target_link_libraries(test_gameplay PRIVATE ft_vox_core)
 add_test(NAME GameplayLoop COMMAND test_gameplay)
 
 # ---------------------------------------------------------------------------
+# CPU-only multi-player session acceptance (issue #246, Epic #245 Phase A).
+# Links ONLY ft_vox_core: one shared world hosting N independent player
+# sessions — id allocation/retirement semantics, pointer-stable session
+# references (PR #261 review), per-player physics/inventory isolation,
+# deterministic id-sorted iteration, stale-handle safety, removal isolation
+# (world/mobs/items/other players untouched), world-epoch lifecycle and the
+# solo-compatibility forwards (legacy APIs == local-player APIs).
+# No GPU, window or camera.
+# ---------------------------------------------------------------------------
+add_executable(test_player_sessions test_player_sessions.cpp)
+target_link_libraries(test_player_sessions PRIVATE ft_vox_core)
+add_test(NAME PlayerSessions COMMAND test_player_sessions)
+
+# ---------------------------------------------------------------------------
 # CPU-only item domain acceptance (issue #224, Epic #223 Phase A). Links ONLY
 # ft_vox_core: registry invariants (unique ids/names, append-only ordinals,
 # placeable round-trips, drop-table totality, name parsing), pure stack math
@@ -1461,7 +1475,7 @@ endif()
 # ---------------------------------------------------------------------------
 foreach(_cpu_test IN ITEMS
     test_physics test_core_contracts test_voxel_world test_game_simulation
-    test_gameplay test_items
+    test_gameplay test_player_sessions test_items
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs

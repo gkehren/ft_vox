@@ -1,9 +1,12 @@
-// GameSimulation — CPU-owned simulation facade (issue #208, Epic #204 Phase D).
+// GameSimulation — CPU-owned simulation facade (issue #208, Epic #204 Phase D;
+// issue #246, Epic #245 Phase A: shared world authority + per-player sessions).
 // The player/mob/world rules implemented here are the historical Engine rules
 // moved verbatim behind a render-free API: fixed-step rates, pause/focus
 // suspension semantics, spawn/restore validation, reload refusal and the
-// issue #180 persistence contracts are unchanged. See the header for the
-// ownership / policy boundaries and docs/simulation-render-contracts.md.
+// issue #180 persistence contracts are unchanged. The legacy single-player
+// APIs are thin forwards to the LOCAL player session — one source of truth.
+// See the header for the ownership / policy boundaries and
+// docs/simulation-render-contracts.md (§11 for the multiplayer split).
 #include "Sim/GameSimulation.hpp"
 
 #include <Items/ItemRegistry.hpp>
@@ -16,6 +19,7 @@
 #include <cmath>
 #include <iostream>
 #include <random>
+#include <utility>
 
 namespace sim
 {
@@ -45,6 +49,8 @@ const char *itemResultName(items::ItemResult result)
         return "NotPlaceable";
     case items::ItemResult::IdExhausted:
         return "IdExhausted";
+    case items::ItemResult::InvalidPlayer:
+        return "InvalidPlayer";
     }
     return "Unknown";
 }
@@ -53,6 +59,11 @@ const char *itemResultName(items::ItemResult result)
 GameSimulation::GameSimulation(ThreadPool *threadPool)
     : m_threadPool(threadPool)
 {
+    // The local player is the solo-compatibility anchor (issue #246): created
+    // at construction so every legacy API is total before initialize(), always
+    // the first session (ids are monotonic) and never removable. Heap-backed
+    // entry: its address stays stable for the simulation's lifetime.
+    m_players.push_back(std::make_unique<PlayerEntry>(PlayerEntry{PlayerId{m_nextPlayerId++}, PlayerState{}}));
 }
 
 GameSimulation::~GameSimulation()
@@ -60,6 +71,78 @@ GameSimulation::~GameSimulation()
     // Final safety net (mirrors ~VoxelWorld): a host that forgot the explicit
     // shutdown still persists accepted edits. After shutdown() this is a no-op.
     shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Player sessions (issue #246, Epic #245 Phase A)
+// ---------------------------------------------------------------------------
+
+PlayerId GameSimulation::createPlayer()
+{
+    // Population cap + id-exhaustion guard (the items spawn discipline): a
+    // refused creation allocates NOTHING — the id counter does not advance.
+    if (m_players.size() >= kMaxPlayers || m_nextPlayerId >= kMaxNextPlayerId)
+        return kInvalidPlayerId;
+    const PlayerId id{m_nextPlayerId++};
+    // Monotonic ids + append = id-sorted order by construction (the
+    // ItemEntitySystem pattern); no re-sort on the session lifecycle path.
+    // The heap-backed entry keeps its address across later vector growth —
+    // accessor references to THIS session stay valid (PR #261 review).
+    m_players.push_back(std::make_unique<PlayerEntry>(PlayerEntry{id, PlayerState{}}));
+    return id;
+}
+
+bool GameSimulation::removePlayer(PlayerId id)
+{
+    // The local player is the legacy-API anchor: removing it would leave the
+    // solo forwards dangling, so it is refused. Invalid/unknown ids (including
+    // retired ones — ids are never reused) are refused without any change.
+    if (!id.valid() || id == localPlayerId())
+        return false;
+    const auto it = std::lower_bound(m_players.begin(), m_players.end(), id,
+                                     [](const std::unique_ptr<PlayerEntry> &entry, PlayerId wanted)
+                                     { return entry->id < wanted; });
+    if (it == m_players.end() || !((*it)->id == id))
+        return false;
+    // Order-preserving erase: the shared world/mobs/items and every other
+    // session are untouched (their heap entries do not move — only this
+    // session's references are invalidated). Items this player dropped stay
+    // in the shared population (they belong to the world, not the session).
+    m_players.erase(it);
+    return true;
+}
+
+bool GameSimulation::hasPlayer(PlayerId id) const
+{
+    return findPlayer(id) != nullptr;
+}
+
+void GameSimulation::playerIds(std::vector<PlayerId> &out) const
+{
+    // In-place fill (the snapshot pattern): ascending id order, deterministic.
+    out.clear();
+    out.reserve(m_players.size());
+    for (const std::unique_ptr<PlayerEntry> &entry : m_players)
+        out.push_back(entry->id);
+}
+
+const GameSimulation::PlayerState *GameSimulation::findPlayer(PlayerId id) const
+{
+    if (!id.valid())
+        return nullptr;
+    const auto it = std::lower_bound(m_players.begin(), m_players.end(), id,
+                                     [](const std::unique_ptr<PlayerEntry> &entry, PlayerId wanted)
+                                     { return entry->id < wanted; });
+    if (it == m_players.end() || !((*it)->id == id))
+        return nullptr;
+    return &(*it)->state;
+}
+
+GameSimulation::PlayerState *GameSimulation::findPlayer(PlayerId id)
+{
+    // Single lookup implementation (the const overload); the cast is safe —
+    // the non-const caller holds a non-const simulation.
+    return const_cast<PlayerState *>(std::as_const(*this).findPlayer(id));
 }
 
 // ---------------------------------------------------------------------------
@@ -115,9 +198,12 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     m_savedInventory.reset();
     m_savedItems.reset();
     m_mobs.reset(static_cast<uint64_t>(seed));
-    // Fresh session = empty inventory (issue #225). The inventory.state
-    // restore hook lands in #228 on the finalizePlayerSpawn seam.
-    m_inventory.clear();
+    // Fresh world epoch = empty inventories for EVERY session (issue #225
+    // generalized by #246). The local inventory.state restore hook lands in
+    // #228 on the finalizePlayerSpawn seam. Sessions themselves survive the
+    // epoch boundary; the player-id allocator never rewinds.
+    for (std::unique_ptr<PlayerEntry> &entry : m_players)
+        entry->state.inventory.clear();
     // Fresh session = no dropped items, id allocator restarted (issue #226).
     // The items.state hook (population + id high-water) lands in #228.
     m_items.reset();
@@ -161,7 +247,7 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     if (m_savedPlayer)
     {
         center = glm::dvec3(m_savedPlayer->x,
-                            m_savedPlayer->y + m_player.settings.eyeHeight,
+                            m_savedPlayer->y + localState().controller.settings.eyeHeight,
                             m_savedPlayer->z);
     }
     return center;
@@ -181,7 +267,7 @@ GameSimulation::SpawnOutcome GameSimulation::finalizePlayerSpawn(glm::dvec3 fall
         out.restored = true;
         out.yaw = m_savedPlayer->yaw;
         out.pitch = m_savedPlayer->pitch;
-        out.eye = m_player.renderEye();
+        out.eye = localState().controller.renderEye();
     }
     else
     {
@@ -219,9 +305,11 @@ bool GameSimulation::reload(int newSeed)
     m_savedPlayer.reset();
     m_savedInventory.reset();
     m_savedItems.reset();
-    // Successful reload = fresh inventory (issue #225). A REFUSED reload
-    // returned above and keeps the old inventory authoritative.
-    m_inventory.clear();
+    // Successful reload = fresh inventories for EVERY session (issue #225
+    // generalized by #246). A REFUSED reload returned above and keeps the old
+    // inventories authoritative. Sessions + player ids survive the reload.
+    for (std::unique_ptr<PlayerEntry> &entry : m_players)
+        entry->state.inventory.clear();
     // Successful reload = fresh dropped-item session (issue #226): the
     // population, events and id allocator reset with the world.
     m_items.reset();
@@ -317,17 +405,62 @@ void GameSimulation::shutdown()
 
 void GameSimulation::advancePlayer(double dt, const PlayerCommand &command, bool suspended)
 {
+    // Solo-compatibility forward (issue #246): the local player session.
+    advancePlayer(localPlayerId(), dt, command, suspended);
+}
+
+bool GameSimulation::advancePlayer(PlayerId id, double dt, const PlayerCommand &command, bool suspended)
+{
+    PlayerState *player = findPlayer(id);
+    if (!player)
+        return false;
     if (suspended)
     {
-        m_player.suspend();
-        return;
+        player->controller.suspend();
+        return true;
     }
     // Flight is host-driven (the observer moves the body via
     // setPlayerPosition); only the walking controller steps here.
-    if (m_playerFlight || !m_world)
+    if (player->flight || !m_world)
+        return true;
+    WorldCollisionView world(*m_world);
+    player->controller.advance(dt, command, world);
+    return true;
+}
+
+void GameSimulation::advancePlayers(double dt, bool suspended)
+{
+    // Bulk idle step (issue #246): every session in ascending id order with a
+    // neutral command. Per-player semantics are identical to advancePlayer —
+    // suspension first (even without a world), flight bodies never step. ONE
+    // scoped collision view serves the whole batch (the shared lock is taken
+    // once per frame, not once per player).
+    if (suspended)
+    {
+        for (std::unique_ptr<PlayerEntry> &entry : m_players)
+            entry->state.controller.suspend();
+        return;
+    }
+    if (!m_world)
+        return;
+    // Skip the shared lock entirely when nobody walks (all-flight frames):
+    // the pre-scan is N bool reads, the view acquisition is not free.
+    bool anyWalking = false;
+    for (const std::unique_ptr<PlayerEntry> &entry : m_players)
+        if (!entry->state.flight)
+        {
+            anyWalking = true;
+            break;
+        }
+    if (!anyWalking)
         return;
     WorldCollisionView world(*m_world);
-    m_player.advance(dt, command, world);
+    const PlayerCommand idle{};
+    for (std::unique_ptr<PlayerEntry> &entry : m_players)
+    {
+        if (!entry->state.flight)
+            entry->state.controller.advance(dt, idle, world);
+    }
 }
 
 void GameSimulation::advanceMobs(double dt, glm::dvec3 observer, double availableRadius, bool suspended)
@@ -346,9 +479,12 @@ void GameSimulation::advanceItems(double dt, bool suspended)
         return;
     // Main-thread scoped collision view (the advanceMobs pattern). The world
     // is NOT pumped here: publication ordering stays with the bridge /
-    // pumpWorld (issue #114). Pickup proximity uses the authoritative feet.
+    // pumpWorld (issue #114). A1 scope (issue #246): pickup proximity uses the
+    // LOCAL player's authoritative feet and merges into the LOCAL inventory —
+    // deterministic shared multi-player pickup is #247 (A2).
     WorldCollisionView world(*m_world);
-    m_items.update(dt, world, m_player.body.position, m_inventory, suspended);
+    PlayerState &local = localState();
+    m_items.update(dt, world, local.controller.body.position, local.inventory, suspended);
 }
 
 void GameSimulation::pumpWorld()
@@ -358,61 +494,101 @@ void GameSimulation::pumpWorld()
 }
 
 // ---------------------------------------------------------------------------
-// Player commands / queries
+// Player commands / queries (legacy forwards + per-player forms, issue #246)
 // ---------------------------------------------------------------------------
 
 void GameSimulation::suspendPlayer()
 {
-    m_player.suspend();
+    suspendPlayer(localPlayerId());
+}
+
+void GameSimulation::suspendPlayer(PlayerId id)
+{
+    if (PlayerState *player = findPlayer(id))
+        player->controller.suspend();
 }
 
 void GameSimulation::clearPlayerInput()
 {
-    m_player.clearInput();
+    clearPlayerInput(localPlayerId());
+}
+
+void GameSimulation::clearPlayerInput(PlayerId id)
+{
+    if (PlayerState *player = findPlayer(id))
+        player->controller.clearInput();
 }
 
 bool GameSimulation::setPlayerFlight(bool enabled, glm::dvec3 feet)
 {
+    return setPlayerFlight(localPlayerId(), enabled, feet);
+}
+
+bool GameSimulation::setPlayerFlight(PlayerId id, bool enabled, glm::dvec3 feet)
+{
+    PlayerState *player = findPlayer(id);
+    if (!player)
+        return false;
     if (!enabled)
     {
         if (!m_world)
             return false;
         WorldCollisionView world(*m_world);
-        physics::Body candidate = m_player.body;
+        physics::Body candidate = player->controller.body;
         candidate.position = feet;
         physics::QueryStats queries;
         if (!physics::clear(world, candidate.bounds(), queries))
         {
-            m_playerStatus = "Walk unavailable: body overlaps solid or unloaded terrain.";
+            player->status = "Walk unavailable: body overlaps solid or unloaded terrain.";
             return false;
         }
     }
-    m_playerFlight = enabled;
-    m_playerStatus = "";
-    m_player.reset(feet);
+    player->flight = enabled;
+    player->status = "";
+    player->controller.reset(feet);
     return true;
 }
 
 void GameSimulation::setPlayerPosition(glm::dvec3 feet)
 {
-    m_player.reset(feet);
+    setPlayerPosition(localPlayerId(), feet);
+}
+
+void GameSimulation::setPlayerPosition(PlayerId id, glm::dvec3 feet)
+{
+    if (PlayerState *player = findPlayer(id))
+        player->controller.reset(feet);
 }
 
 void GameSimulation::restorePlayerFlight(bool enabled, glm::dvec3 feet)
+{
+    restorePlayerFlight(localPlayerId(), enabled, feet);
+}
+
+void GameSimulation::restorePlayerFlight(PlayerId id, bool enabled, glm::dvec3 feet)
 {
     // Host lifecycle restore (review §4.8): benchmark/inspection exit must
     // recover the EXACT pre-benchmark mode even when the scripted camera
     // ends embedded in terrain — the gameplay clearance validation of
     // setPlayerFlight(false) would refuse and leave flight stuck on. This
     // is a lifecycle seam (the restore pattern), not a gameplay command.
-    m_playerFlight = enabled;
-    m_playerStatus = "";
-    m_player.reset(feet);
+    if (PlayerState *player = findPlayer(id))
+    {
+        player->flight = enabled;
+        player->status = "";
+        player->controller.reset(feet);
+    }
 }
 
 glm::dvec3 GameSimulation::spawnPlayerOnSurface(glm::dvec3 around)
 {
-    if (!m_world)
+    return spawnPlayerOnSurface(localPlayerId(), around);
+}
+
+glm::dvec3 GameSimulation::spawnPlayerOnSurface(PlayerId id, glm::dvec3 around)
+{
+    PlayerState *player = findPlayer(id);
+    if (!player || !m_world)
         return around;
     WorldCollisionView world(*m_world);
     physics::QueryStats queries;
@@ -433,23 +609,29 @@ glm::dvec3 GameSimulation::spawnPlayerOnSurface(glm::dvec3 around)
             candidate.position = {x + 0.5, y + 1.0 + physics::skin, z + 0.5};
             if (physics::clear(world, candidate.bounds(), queries))
             {
-                m_player.reset(candidate.position);
-                m_playerFlight = false;
-                m_playerStatus = "";
-                return m_player.eye();
+                player->controller.reset(candidate.position);
+                player->flight = false;
+                player->status = "";
+                return player->controller.eye();
             }
         }
     }
     const glm::dvec3 fallbackEye(around.x, 100.0, around.z);
-    m_player.reset(fallbackEye - glm::dvec3(0, m_player.settings.eyeHeight, 0));
-    m_playerFlight = true;
-    m_playerStatus = "No safe spawn in loaded terrain: fly to an open area.";
+    player->controller.reset(fallbackEye - glm::dvec3(0, player->controller.settings.eyeHeight, 0));
+    player->flight = true;
+    player->status = "No safe spawn in loaded terrain: fly to an open area.";
     return fallbackEye;
 }
 
 bool GameSimulation::restorePlayerState(const PlayerPersistState &saved)
 {
-    if (!m_world)
+    return restorePlayerState(localPlayerId(), saved);
+}
+
+bool GameSimulation::restorePlayerState(PlayerId id, const PlayerPersistState &saved)
+{
+    PlayerState *player = findPlayer(id);
+    if (!player || !m_world)
         return false;
     // Terrain validation (issue #180 review round 6): the saved file is
     // structurally valid, but the position itself must be usable against the
@@ -482,13 +664,18 @@ bool GameSimulation::restorePlayerState(const PlayerPersistState &saved)
         return false;
     }
 
-    m_player.reset(restoredFeet);
+    player->controller.reset(restoredFeet);
     if (waitingForTerrain)
-        m_player.body.waitingForTerrain = true;
-    m_playerFlight = saved.flight;
+        player->controller.body.waitingForTerrain = true;
+    player->flight = saved.flight;
     if (saved.selectedBlock >= 0 && saved.selectedBlock < static_cast<int32_t>(COUNT))
-        m_selectedBlock = static_cast<TextureType>(saved.selectedBlock);
-    std::cout << "[world] restored player at (" << restoredFeet.x << ", " << restoredFeet.y
+        player->selectedBlock = static_cast<TextureType>(saved.selectedBlock);
+    // The local line keeps the historical format (issue #246 solo
+    // compatibility); non-local restores carry the session id.
+    const std::string who = (id == localPlayerId())
+                                ? std::string("player")
+                                : "player#" + std::to_string(id.value);
+    std::cout << "[world] restored " << who << " at (" << restoredFeet.x << ", " << restoredFeet.y
               << ", " << restoredFeet.z << ")" << (waitingForTerrain ? " (waiting for terrain)" : "")
               << "\n";
     return true;
@@ -506,22 +693,31 @@ std::optional<PlayerPersistState> GameSimulation::readSavedPlayerState() const
 
 PlayerPersistState GameSimulation::capturePlayerState(float yaw, float pitch) const
 {
+    return capturePlayerState(localPlayerId(), yaw, pitch);
+}
+
+PlayerPersistState GameSimulation::capturePlayerState(PlayerId id, float yaw, float pitch) const
+{
+    const PlayerState *player = findPlayer(id);
+    if (!player)
+        return PlayerPersistState{}; // invalid/unknown id: no state to capture
     PlayerPersistState state;
-    state.x = m_player.body.position.x;
-    state.y = m_player.body.position.y;
-    state.z = m_player.body.position.z;
+    state.x = player->controller.body.position.x;
+    state.y = player->controller.body.position.y;
+    state.z = player->controller.body.position.z;
     state.yaw = yaw;
     state.pitch = pitch;
-    state.flight = m_playerFlight;
-    state.selectedBlock = static_cast<int32_t>(m_selectedBlock);
+    state.flight = player->flight;
+    state.selectedBlock = static_cast<int32_t>(player->selectedBlock);
     return state;
 }
 
 worldsave::InventoryPersistState GameSimulation::captureInventoryState() const
 {
     worldsave::InventoryPersistState state;
-    state.selectedSlot = static_cast<uint8_t>(m_inventory.selectedSlot());
-    const std::array<items::ItemStack, items::kInventorySize> &slots = m_inventory.slots();
+    const items::Inventory &inventory = localState().inventory;
+    state.selectedSlot = static_cast<uint8_t>(inventory.selectedSlot());
+    const std::array<items::ItemStack, items::kInventorySize> &slots = inventory.slots();
     for (std::size_t i = 0; i < slots.size(); ++i)
     {
         state.slots[i].itemId = static_cast<uint16_t>(slots[i].item);
@@ -587,7 +783,7 @@ void GameSimulation::restoreGameplayState()
         for (std::size_t i = 0; i < slots.size(); ++i)
             slots[i] = items::makeStack(static_cast<items::ItemId>(m_savedInventory->slots[i].itemId),
                                         m_savedInventory->slots[i].count);
-        m_inventory.restore(slots, m_savedInventory->selectedSlot);
+        localState().inventory.restore(slots, m_savedInventory->selectedSlot);
         std::cout << "[world] restored inventory (selected slot "
                   << static_cast<int>(m_savedInventory->selectedSlot) << ")\n";
     }
@@ -647,10 +843,13 @@ bool GameSimulation::canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) 
     // player body, so the body cannot be entombed by its own edit. Logical
     // pending solids immediately participate in subsequent collision
     // queries, so the body cannot enter before publication either.
-    if (m_playerFlight || !physics::blockCell(type).solid)
+    // A1 scope (issue #246): the LOCAL player's body/flight — actor-aware
+    // placement is #247 (A2).
+    const PlayerState &local = localState();
+    if (local.flight || !physics::blockCell(type).solid)
         return true;
     physics::Body playerBody;
-    playerBody.position = m_player.body.position;
+    playerBody.position = local.controller.body.position;
     return !physics::overlaps(playerBody.bounds(),
                               physics::voxelBounds(glm::ivec3(glm::floor(worldPos))));
 }
@@ -661,40 +860,81 @@ bool GameSimulation::canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) 
 // Instantaneous command applications at the host frame boundary: no buffer,
 // no fixed-step work, world-independent. The deterministic rules live in
 // items::Inventory (issue #224); the facade is the ownership + logging seam.
+// Legacy forms forward to the local player; per-player forms (issue #246)
+// refuse invalid/unknown ids with items::ItemResult::InvalidPlayer.
 
 items::ItemResult GameSimulation::selectHotbarSlot(int index)
 {
-    return m_inventory.setSelectedSlot(index);
+    return selectHotbarSlot(localPlayerId(), index);
+}
+
+items::ItemResult GameSimulation::selectHotbarSlot(PlayerId id, int index)
+{
+    PlayerState *player = findPlayer(id);
+    return player ? player->inventory.setSelectedSlot(index) : items::ItemResult::InvalidPlayer;
 }
 
 items::ItemResult GameSimulation::moveStack(int from, int to)
 {
-    return m_inventory.moveStack(from, to);
+    return moveStack(localPlayerId(), from, to);
+}
+
+items::ItemResult GameSimulation::moveStack(PlayerId id, int from, int to)
+{
+    PlayerState *player = findPlayer(id);
+    return player ? player->inventory.moveStack(from, to) : items::ItemResult::InvalidPlayer;
 }
 
 items::ItemResult GameSimulation::swapStacks(int a, int b)
 {
-    return m_inventory.swapStacks(a, b);
+    return swapStacks(localPlayerId(), a, b);
+}
+
+items::ItemResult GameSimulation::swapStacks(PlayerId id, int a, int b)
+{
+    PlayerState *player = findPlayer(id);
+    return player ? player->inventory.swapStacks(a, b) : items::ItemResult::InvalidPlayer;
 }
 
 items::ItemResult GameSimulation::splitStack(int from, int to)
 {
-    return m_inventory.splitStack(from, to);
+    return splitStack(localPlayerId(), from, to);
+}
+
+items::ItemResult GameSimulation::splitStack(PlayerId id, int from, int to)
+{
+    PlayerState *player = findPlayer(id);
+    return player ? player->inventory.splitStack(from, to) : items::ItemResult::InvalidPlayer;
 }
 
 items::AddResult GameSimulation::grantItems(items::ItemId item, uint16_t count)
+{
+    return grantItems(localPlayerId(), item, count);
+}
+
+items::AddResult GameSimulation::grantItems(PlayerId id, items::ItemId item, uint16_t count)
 {
     // Normalize FIRST so the audit line reflects what was actually applied
     // (PR #232 review): a {None, N} sentinel input collapses to the canonical
     // empty and grants nothing — the log must not overstate that as N items.
     const items::ItemStack request = items::makeStack(item, count);
-    const items::AddResult result = m_inventory.addStack(request);
+    PlayerState *player = findPlayer(id);
+    // Invalid/unknown session: refuse WITHOUT touching any inventory; the
+    // canonicalized request is echoed in the remainder (the rejected-input
+    // discipline, issue #246).
+    const items::AddResult result = player ? player->inventory.addStack(request)
+                                           : items::AddResult{items::ItemResult::InvalidPlayer, request};
     const uint32_t applied = static_cast<uint32_t>(request.count) - result.remainder.count;
     // Test/admin seam (epic #223 §3): EVERY grant is explicitly logged so
     // items entering the inventory without a break/pickup cause stay
     // auditable in headless runs and (later) authoritative server logs.
+    // Non-local grants carry the session id (issue #246); the local line
+    // keeps the historical format byte for byte.
     const std::string_view name = items::itemName(item);
-    std::cout << "[items] grant " << count << "x ";
+    std::cout << "[items] grant ";
+    if (!(id == localPlayerId()))
+        std::cout << "player#" << id.value << " ";
+    std::cout << count << "x ";
     if (name.empty())
         std::cout << "item#" << static_cast<uint16_t>(item);
     else
@@ -711,6 +951,9 @@ items::AddResult GameSimulation::grantItems(items::ItemId item, uint16_t count)
 // ---------------------------------------------------------------------------
 // World interaction commands (issues #226/#227, Epic #223 Phase C/D)
 // ---------------------------------------------------------------------------
+// A1 scope (issue #246): these commands act for the LOCAL player — the
+// actor-aware migration (per-player break/place/drop + shared pickup) is
+// #247 (A2). The world edit semantics are unchanged.
 
 BreakResult GameSimulation::breakBlock(glm::ivec3 cell, WorldEditResult *outEdit)
 {
@@ -756,7 +999,8 @@ BreakResult GameSimulation::breakBlock(glm::ivec3 cell, WorldEditResult *outEdit
 
 PlaceResult GameSimulation::placeSelectedBlock(glm::ivec3 cell, WorldEditResult *outEdit)
 {
-    const items::ItemStack selected = m_inventory.selectedStack();
+    items::Inventory &inventory = localState().inventory;
+    const items::ItemStack selected = inventory.selectedStack();
     if (selected.isEmpty())
         return PlaceResult::EmptySlot;
     const std::optional<TextureType> block = items::placeableBlockOf(selected.item);
@@ -780,7 +1024,7 @@ PlaceResult GameSimulation::placeSelectedBlock(glm::ivec3 cell, WorldEditResult 
     if (!edit.accepted)
         return PlaceResult::WorldRejected; // occupied / out-of-bounds target
     // Consume exactly 1 item, ONLY on success (the survival contract).
-    m_inventory.removeCount(m_inventory.selectedSlot(), 1);
+    inventory.removeCount(inventory.selectedSlot(), 1);
     if (outEdit)
         *outEdit = std::move(edit);
     return PlaceResult::Ok;
@@ -885,14 +1129,15 @@ RaycastHit GameSimulation::raycastVoxel(glm::vec3 origin, glm::vec3 dir, float m
 
 items::ItemResult GameSimulation::dropFromSlot(int slot, uint16_t count, glm::dvec3 dir)
 {
+    items::Inventory &inventory = localState().inventory;
     // Id-exhaustion guard (stabilization PR3): refuse BEFORE any inventory
     // mutation so a failed drop never consumes items (conservation). Only
     // checked when an entity would actually spawn: count 0 stays an Ok no-op
     // and invalid/empty slots keep their historical result codes below.
     if (count > 0 && slot >= 0 && slot < items::kInventorySize &&
-        !m_inventory.stack(slot).isEmpty() && m_items.idsExhausted())
+        !inventory.stack(slot).isEmpty() && m_items.idsExhausted())
         return items::ItemResult::IdExhausted;
-    const items::RemoveResult removed = m_inventory.removeCount(slot, count);
+    const items::RemoveResult removed = inventory.removeCount(slot, count);
     if (removed.result != items::ItemResult::Ok)
         return removed.result; // InvalidSlot / EmptyStack
     if (removed.removed.isEmpty())
@@ -907,7 +1152,7 @@ items::ItemResult GameSimulation::dropFromSlot(int slot, uint16_t count, glm::dv
                         std::isfinite(direction.z);
     const double length = glm::length(direction);
     direction = (finite && length > 1e-6) ? direction / length : glm::dvec3(0.0, 1.0, 0.0);
-    const glm::dvec3 origin = m_player.eye() + direction * 0.3;
+    const glm::dvec3 origin = localState().controller.eye() + direction * 0.3;
     const glm::dvec3 velocity = direction * m_items.settings.dropSpeed + glm::dvec3(0.0, 1.0, 0.0);
     m_items.spawnPlayerDrop(removed.removed, origin, velocity);
     return items::ItemResult::Ok;
@@ -917,28 +1162,75 @@ items::ItemResult GameSimulation::dropFromSlot(int slot, uint16_t count, glm::dv
 // Snapshots
 // ---------------------------------------------------------------------------
 
-PlayerSnapshot GameSimulation::playerSnapshot() const
+PlayerSnapshot GameSimulation::snapshotOf(const PlayerState &state)
 {
     PlayerSnapshot s;
-    s.position = m_player.body.position;
-    s.velocity = m_player.body.velocity;
-    s.renderEye = m_player.renderEye();
-    s.grounded = m_player.body.grounded;
-    s.waitingForTerrain = m_player.body.waitingForTerrain;
-    s.flight = m_playerFlight;
-    s.submerged = m_player.submerged;
-    s.metrics = m_player.metrics;
-    s.selectedBlock = m_selectedBlock;
-    s.status = m_playerStatus;
+    s.position = state.controller.body.position;
+    s.velocity = state.controller.body.velocity;
+    s.renderEye = state.controller.renderEye();
+    s.grounded = state.controller.body.grounded;
+    s.waitingForTerrain = state.controller.body.waitingForTerrain;
+    s.flight = state.flight;
+    s.submerged = state.controller.submerged;
+    s.metrics = state.controller.metrics;
+    s.selectedBlock = state.selectedBlock;
+    s.status = state.status;
     return s;
+}
+
+PlayerSnapshot GameSimulation::playerSnapshot() const
+{
+    return snapshotOf(localState());
+}
+
+bool GameSimulation::playerSnapshot(PlayerId id, PlayerSnapshot &out) const
+{
+    const PlayerState *player = findPlayer(id);
+    if (!player)
+        return false; // invalid/unknown id: `out` stays untouched
+    out = snapshotOf(*player);
+    return true;
 }
 
 void GameSimulation::inventorySnapshot(InventorySnapshot &out) const
 {
+    inventorySnapshot(localPlayerId(), out);
+}
+
+bool GameSimulation::inventorySnapshot(PlayerId id, InventorySnapshot &out) const
+{
+    const PlayerState *player = findPlayer(id);
+    if (!player)
+        return false; // invalid/unknown id: `out` stays untouched
     // In-place fill of the bounded plain value (the mobSnapshots pattern):
     // one fixed-array copy + the selection, no allocation, no registry work.
-    out.slots = m_inventory.slots();
-    out.selectedSlot = m_inventory.selectedSlot();
+    out.slots = player->inventory.slots();
+    out.selectedSlot = player->inventory.selectedSlot();
+    return true;
+}
+
+glm::dvec3 GameSimulation::playerFeet(PlayerId id) const
+{
+    const PlayerState *player = findPlayer(id);
+    return player ? player->controller.body.position : glm::dvec3(0.0);
+}
+
+bool GameSimulation::playerFlight(PlayerId id) const
+{
+    const PlayerState *player = findPlayer(id);
+    return player ? player->flight : false;
+}
+
+void GameSimulation::setSelectedBlock(PlayerId id, TextureType type)
+{
+    if (PlayerState *player = findPlayer(id))
+        player->selectedBlock = type;
+}
+
+const items::Inventory *GameSimulation::inventory(PlayerId id) const
+{
+    const PlayerState *player = findPlayer(id);
+    return player ? &player->inventory : nullptr;
 }
 
 WorldSnapshot GameSimulation::worldSnapshot() const
