@@ -309,10 +309,12 @@ public:
     // bulk APIs traverse sessions in ascending id order.
 
     /// Create a fresh session: default controller at the origin, empty
-    /// inventory, walking mode, STONE creative selection. The host places the
-    /// body afterwards (setPlayerPosition / spawnPlayerOnSurface /
-    /// restorePlayerState). Returns kInvalidPlayerId at the population cap or
-    /// id exhaustion (nothing is created).
+    /// inventory, walking mode, STONE creative selection. The session starts
+    /// UNPOSITIONED — it does not join shared pickup or player-body placement
+    /// checks until the host places it (setPlayerPosition / spawnPlayerOnSurface
+    /// / restorePlayerState / setPlayerFlight). The host places the body
+    /// afterwards. Returns kInvalidPlayerId at the population cap or id
+    /// exhaustion (nothing is created).
     PlayerId createPlayer();
 
     /// Remove a session. REFUSES (returns false, nothing changes) for an
@@ -444,12 +446,14 @@ public:
     /// One host frame of dropped item entities (fixed 60 Hz internally,
     /// issue #226). The host calls it NEXT TO advanceMobs (the #227 rewiring
     /// adds the call site; until then only headless hosts/tests drive it).
-    /// Actor-aware pickup (issue #247, Epic #245 Phase A2): every live session
-    /// is an eligible receiver, evaluated in ascending-PlayerId order (the
-    /// deterministic priority); each drop merges hotbar-first into the first
-    /// in-range player, a partial remainder is offered to the next eligible
-    /// player in the same tick, and the aggregate count is conserved. Solo
-    /// (one session) is bit-identical to the historical local-only rule.
+    /// Actor-aware pickup (issue #247, Epic #245 Phase A2): every POSITIONED
+    /// live session is an eligible receiver, evaluated in ascending-PlayerId
+    /// order (the deterministic priority); each drop merges hotbar-first into
+    /// the first in-range player, a partial remainder is offered to the next
+    /// eligible player in the same tick, and the aggregate count is conserved.
+    /// Unpositioned sessions (created but not yet spawned/placed) are excluded
+    /// so a default-origin body never vacuum-collects shared drops. Solo (one
+    /// positioned session) is bit-identical to the historical local-only rule.
     /// Suspension freezes the population and syncs previous/current (no
     /// catch-up burst). The world is NOT pumped here — the issue #114
     /// publication ordering stays with the bridge / pumpWorld().
@@ -549,15 +553,18 @@ public:
     /// to every session by issue #247, Epic #245 Phase A2): a SOLID block may
     /// not be placed where it would overlap ANY authoritative walking player
     /// body — a flying player is exempt (the creative rule), and non-solid
-    /// blocks never collide. Bodies are validated in deterministic ascending-
-    /// PlayerId order, so overlapping players are considered reproducibly and
-    /// no player can be entombed by another's edit. This is a PURE QUERY, not
-    /// enforcement: placeVoxel() below does NOT call it, so a host that wants
-    /// player-aware placement MUST gate its edit with canPlaceVoxel() first
-    /// (the graphical host does; placeSelectedBlock gates with it internally).
-    /// It lives here so the rule is defined once and shared, not copied.
-    /// Pure query: it never edits the world. Solo (one session) is bit-
-    /// identical to the historical local-body rule.
+    /// blocks never collide. Only POSITIONED sessions participate (an
+    /// unpositioned default-origin body never blocks placement). Bodies are
+    /// validated in deterministic ascending-PlayerId order, so overlapping
+    /// players are considered reproducibly and no player can be entombed by
+    /// another's edit. This is a PURE QUERY, not enforcement: placeVoxel()
+    /// below does NOT call it, so a host that wants player-aware placement
+    /// MUST gate its edit with canPlaceVoxel() first (the graphical host does;
+    /// placeSelectedBlock gates with it internally). It lives here so the rule
+    /// is defined once and shared, not copied. Pure query: it never edits the
+    /// world. Non-finite or out-of-envelope positions answer false BEFORE any
+    /// float->int conversion (issue #247 review). Solo (one positioned session)
+    /// is bit-identical to the historical local-body rule.
     bool canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) const;
     /// Actor-aware form (issue #247): validates the actor handle (an unknown /
     /// retired session answers false — it may not even probe placement), then
@@ -815,6 +822,12 @@ public:
     /// The actor-aware targeting query derives its ray origin from this; the
     /// zero vector for an invalid/unknown id.
     glm::dvec3 playerEye(PlayerId id) const;
+    /// Whether a session has been positioned and thus participates in spatial
+    /// gameplay (shared pickup + player-body placement checks). The local
+    /// anchor is always positioned; non-local sessions become positioned on
+    /// the first successful setPlayerPosition / setPlayerFlight / spawn /
+    /// restore. False for an invalid/unknown id (issue #247 review).
+    bool playerPositioned(PlayerId id) const;
     /// Per-player flight mode (issue #246); false for an invalid/unknown id.
     bool playerFlight(PlayerId id) const;
     /// CREATIVE/EDITOR block selection (flight mode, benchmarks, the `T`
@@ -878,6 +891,15 @@ private:
         physics::PlayerController controller;
         items::Inventory inventory;
         bool flight{false};
+        // Spatial-participation gate (issue #247 review): a session joins
+        // shared pickup and player-body placement checks only once the host
+        // has placed it (setPlayerPosition / setPlayerFlight / spawn / restore).
+        // The local anchor is positioned from construction (solo lifecycle);
+        // non-local sessions start false so a default-origin body never
+        // vacuum-collects drops or blocks placement before it is spawned.
+        // Persists across world epochs like the body itself (initialize/reload
+        // carry bodies over); not persisted in the solo save format.
+        bool positioned{false};
         TextureType selectedBlock{STONE};
         const char *status{""}; // static literals only
     };
@@ -904,6 +926,13 @@ private:
     /// raycastVoxel and the actor-aware form call this — one march
     /// implementation, no duplicated targeting rule.
     RaycastHit raycastMarch(glm::vec3 origin, glm::vec3 dir, float maxDist) const;
+
+    /// Integer-only test for the supported editable-world envelope (issue
+    /// #247 review): X/Z in [SHRT_MIN, SHRT_MAX), Y in [0, WORLD_HEIGHT).
+    /// Gameplay placement/break validate cells with this BEFORE constructing
+    /// any float position, so extreme coordinates never reach a float->int
+    /// floor conversion (which would be UB outside the int range).
+    static bool cellInWorldEnvelope(glm::ivec3 cell);
 
     /// Read the persisted gameplay state when a world is open (issue #228,
     /// the readSavedPlayerState pattern): nullopt for a fresh world / old

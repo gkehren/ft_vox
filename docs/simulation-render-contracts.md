@@ -1455,22 +1455,33 @@ actor**, never from client-supplied values:
 
 `canPlaceVoxel` generalizes the issue #209 rule: a **solid** block is refused
 when it overlaps **any** authoritative **walking** player body; flying players
-are exempt (the creative rule) and non-solid blocks never collide. Bodies are
-validated in deterministic **ascending-`PlayerId`** order, so overlapping
-players are considered reproducibly and no player can be entombed by another's
-edit. `placeSelectedBlock` gates with this rule internally; the creative
-`placeVoxel` seam still does not (hosts gate explicitly). Solo (one session)
+are exempt (the creative rule) and non-solid blocks never collide. Only
+**positioned** sessions participate (see below). Bodies are validated in
+deterministic **ascending-`PlayerId`** order, so overlapping players are
+considered reproducibly and no player can be entombed by another's edit.
+`placeSelectedBlock` gates with this rule internally; the creative `placeVoxel`
+seam still does not (hosts gate explicitly). Solo (one positioned session)
 reproduces the historical local-body rule bit for bit. The actor-aware
 `canPlaceVoxel(id, …)` validates the handle (an unknown session may not even
 probe placement) then applies the same actor-independent all-body rule.
+
+**Coordinate validation (review hardening).** Gameplay placement/break validate
+the target cell against the supported world envelope — X/Z in
+`[SHRT_MIN, SHRT_MAX)`, Y in `[0, WORLD_HEIGHT)` — using **integer** comparisons
+(`cellInWorldEnvelope`) **before** any float position or AABB is constructed, so
+extreme cells (near the `INT32` bounds) never reach a float→int `floor`
+conversion (which would be UB). `placeSelectedBlock`/`breakBlock` answer
+`WorldRejected` for out-of-envelope cells; `canPlaceVoxel` additionally rejects
+**non-finite** float inputs (and out-of-envelope positions) before `glm::floor`.
+Valid gameplay coordinates are unaffected; rejected requests mutate nothing.
 
 ### Deterministic shared pickup
 
 `items::ItemEntitySystem::update` gains a multi-candidate overload taking
 `std::span<const items::PickupCandidate>` (`{feet, Inventory*}` — a plain
 non-owning value; the Items module knows nothing about `PlayerId`). The facade
-(`advanceItems`) supplies **every live session in ascending-`PlayerId` order**
-(the deterministic priority) via a reserved, refilled-in-place buffer (no
+(`advanceItems`) supplies **every positioned live session in ascending-`PlayerId`
+order** (the deterministic priority) via a reserved, refilled-in-place buffer (no
 per-frame allocation). Per entity, after the pickup-delay countdown:
 
 - candidates are evaluated **in the supplied order** (the system never
@@ -1482,6 +1493,21 @@ per-frame allocation). Per entity, after the pickup-delay countdown:
   silently lost. With one candidate this is bit-identical to the historical
   single-player rule (the legacy `update(dt, world, feet, inventory, suspended)`
   is a one-candidate forward).
+
+### Session positioning gate (review hardening)
+
+A session participates in spatial gameplay (shared pickup **and** player-body
+placement checks) only once it is **positioned**. `PlayerState::positioned`
+starts **false** for newly created non-local sessions — a default-origin body
+never vacuum-collects shared drops or blocks another player's placement before
+the host spawns it. The **local anchor is positioned from construction** (the
+historical solo lifecycle, bit-identical). A session becomes positioned on the
+first successful `setPlayerPosition` / `setPlayerFlight` / `spawnPlayerOnSurface`
+/ `restorePlayerState` / `restorePlayerFlight`. The flag persists across world
+epochs like the body itself (`initialize`/`reload` carry bodies over); it is not
+part of the solo save format. `removePlayer` drops the session entirely (no
+stale candidate). `playerPositioned(id)` exposes the gate read-only. Activation
+is independent of networking / session authentication.
 
 ### Ordering of simultaneous attempts
 
@@ -1521,6 +1547,10 @@ facade-level real sessions, reproducible across runs); invalid-actor /
 overlapping-player / unknown-terrain / out-of-range rejections without side
 effects; actor-aware targeting (eye origin + reach clamp + legacy parity);
 per-player id-exhaustion conservation; actor-aware deferred edits; and
-bit-identical legacy-vs-actor-aware(local) solo behavior. `PlayerSessions`
-pickup boundary updated to the actor-aware rule. The solo CPU digests and the
-headless canonical digest are unchanged; ASan/UBSan clean.
+bit-identical legacy-vs-actor-aware(local) solo behavior. Review-hardening
+regression: extreme `INT32`/boundary cells and NaN/±Inf placement queries are
+rejected without UB or side effects, and unpositioned sessions are excluded
+from pickup/placement until activated (activation persists across epochs,
+removal leaves no stale candidate). `PlayerSessions` pickup boundary updated to
+the actor-aware rule. The solo CPU digests and the headless canonical digest are
+unchanged; ASan/UBSan and TSan clean.

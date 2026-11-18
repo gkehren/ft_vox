@@ -34,10 +34,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -322,7 +324,9 @@ void testSharedPickupSystem()
 	// (a) Priority: the FIRST in-range candidate wins the whole stack.
 	{
 		items::Inventory invA, invB;
-		const auto sys = run({{feet, &invA}, {feet, &invB}}, S(ItemId::Stone, 10));
+		const std::vector<items::PickupCandidate> candidates{
+			items::PickupCandidate{feet, &invA}, items::PickupCandidate{feet, &invB}};
+		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invA.totalCount(ItemId::Stone) == 10, "first candidate (A) wins the whole stack");
 		CHECK(invB.totalCount(ItemId::Stone) == 0, "second candidate (B) gets nothing");
 		CHECK(sys.entities().empty(), "fully claimed entity removed");
@@ -330,7 +334,9 @@ void testSharedPickupSystem()
 	// (b) Reversed order reverses the winner — order IS the priority.
 	{
 		items::Inventory invA, invB;
-		const auto sys = run({{feet, &invB}, {feet, &invA}}, S(ItemId::Stone, 10));
+		const std::vector<items::PickupCandidate> candidates{
+			items::PickupCandidate{feet, &invB}, items::PickupCandidate{feet, &invA}};
+		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invB.totalCount(ItemId::Stone) == 10, "reversed order: B wins");
 		CHECK(invA.totalCount(ItemId::Stone) == 0, "reversed order: A gets nothing");
 		CHECK(sys.entities().empty(), "entity removed");
@@ -339,7 +345,9 @@ void testSharedPickupSystem()
 	{
 		items::Inventory invA, invB;
 		fillAllButRoom(invA, ItemId::Stone, 4);
-		const auto sys = run({{feet, &invA}, {feet, &invB}}, S(ItemId::Stone, 10));
+		const std::vector<items::PickupCandidate> candidates{
+			items::PickupCandidate{feet, &invA}, items::PickupCandidate{feet, &invB}};
+		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invA.totalCount(ItemId::Stone) == items::maxStackOf(ItemId::Stone),
 			  "A topped up to a full stack (took 4)");
 		CHECK(invB.totalCount(ItemId::Stone) == 6, "partial remainder offered to B in the same tick");
@@ -352,7 +360,9 @@ void testSharedPickupSystem()
 	{
 		items::Inventory invA, invB;
 		fillAllButRoom(invA, ItemId::Stone, 0); // no room for Stone
-		const auto sys = run({{feet, &invA}, {feet, &invB}}, S(ItemId::Stone, 10));
+		const std::vector<items::PickupCandidate> candidates{
+			items::PickupCandidate{feet, &invA}, items::PickupCandidate{feet, &invB}};
+		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invA.totalCount(ItemId::Stone) == items::maxStackOf(ItemId::Stone),
 			  "full A took nothing");
 		CHECK(invB.totalCount(ItemId::Stone) == 10, "full A skipped: B takes the whole stack");
@@ -363,21 +373,26 @@ void testSharedPickupSystem()
 		items::Inventory invA, invB;
 		fillAllButRoom(invA, ItemId::Stone, 0);
 		fillAllButRoom(invB, ItemId::Stone, 0);
-		const auto sys = run({{feet, &invA}, {feet, &invB}}, S(ItemId::Stone, 10));
+		const std::vector<items::PickupCandidate> candidates{
+			items::PickupCandidate{feet, &invA}, items::PickupCandidate{feet, &invB}};
+		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(sys.entities().size() == 1 && sys.entities()[0].stack == S(ItemId::Stone, 10),
 			  "both full: entity stays with its full stack");
 	}
 	// (f) Out of range: a far candidate never picks up.
 	{
 		items::Inventory invA;
-		const auto sys = run({{far, &invA}}, S(ItemId::Stone, 10));
+		const std::vector<items::PickupCandidate> candidates{items::PickupCandidate{far, &invA}};
+		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invA.totalCount(ItemId::Stone) == 0, "out-of-range candidate picks nothing");
 		CHECK(sys.entities().size() == 1, "entity stays");
 	}
 	// (g) Null inventory candidate is skipped defensively.
 	{
 		items::Inventory invB;
-		const auto sys = run({{feet, nullptr}, {feet, &invB}}, S(ItemId::Stone, 10));
+		const std::vector<items::PickupCandidate> candidates{
+			items::PickupCandidate{feet, nullptr}, items::PickupCandidate{feet, &invB}};
+		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invB.totalCount(ItemId::Stone) == 10, "null candidate skipped; B takes the stack");
 		CHECK(sys.entities().empty(), "entity removed");
 	}
@@ -389,7 +404,8 @@ void testSharedPickupSystem()
 		legacy.update(1.0 / 60.0, world, feet, invLegacy, false);
 		items::ItemEntitySystem batch;
 		batch.spawn(S(ItemId::Stone, 7), spot, glm::dvec3(0.0), 0);
-		batch.update(1.0 / 60.0, world, std::vector<items::PickupCandidate>{{feet, &invBatch}}, false);
+		const std::vector<items::PickupCandidate> batchCandidates{items::PickupCandidate{feet, &invBatch}};
+		batch.update(1.0 / 60.0, world, batchCandidates, false);
 		CHECK(invLegacy.slots() == invBatch.slots(), "legacy single-player pickup == one-candidate batch");
 		CHECK(legacy.entities().size() == batch.entities().size(), "same population outcome");
 	}
@@ -817,6 +833,184 @@ void testIdExhaustionPerPlayer(ThreadPool &pool)
 	sim.shutdown();
 }
 
+// ---------------------------------------------------------------------------
+// 12. Coordinate validation (issue #247 review P2): extreme integer cells and
+//     non-finite float queries are rejected BEFORE any float->int conversion
+//     (no UB), with existing result codes and no side effects.
+// ---------------------------------------------------------------------------
+void testCoordinateValidation(ThreadPool &pool)
+{
+	CoutSilencer silence;
+	sim::GameSimulation sim(&pool);
+	const glm::ivec3 p = setupPlatform(sim, 1337);
+	const sim::PlayerId a = sim.localPlayerId();
+	sim.setPlayerPosition(a, platformFeet(p, 0, 0));
+	CHECK(sim.grantItems(a, ItemId::Stone, 10).result == ItemResult::Ok, "grant placeable items");
+	sim.selectHotbarSlot(a, 0);
+	const sim::InventorySnapshot inv0 = inventoryOf(sim, a);
+	const sim::WorldSnapshot w0 = sim.worldSnapshot();
+	const size_t items0 = sim.itemEntities().size();
+
+	// Extreme integer cells (near the INT32 bounds): rejected with integer
+	// comparisons before a float position / AABB is ever constructed.
+	const glm::ivec3 extremeCells[] = {
+		{INT32_MAX, 64, 0}, {INT32_MIN, 64, 0},
+		{0, 64, INT32_MAX}, {0, 64, INT32_MIN},
+		{INT32_MAX, INT32_MAX, INT32_MAX}, {INT32_MIN, INT32_MIN, INT32_MIN},
+		{0, INT32_MAX, 0}, {0, INT32_MIN, 0},
+	};
+	for (const glm::ivec3 &c : extremeCells)
+	{
+		CHECK(sim.placeSelectedBlock(a, c) == sim::PlaceResult::WorldRejected,
+			  "extreme cell place refused without float conversion");
+		CHECK(sim.breakBlock(a, c) == sim::BreakResult::WorldRejected,
+			  "extreme cell break refused without float conversion");
+	}
+
+	// World boundary coordinates: in-envelope edges are unloaded (defined
+	// UnknownTerrain); out-of-envelope Y is WorldRejected. No UB either way.
+	CHECK(sim.placeSelectedBlock(a, {SHRT_MAX - 1, 64, 0}) == sim::PlaceResult::UnknownTerrain,
+		  "x upper boundary (in envelope) unloaded");
+	CHECK(sim.breakBlock(a, {SHRT_MIN, 64, 0}) == sim::BreakResult::UnknownTerrain,
+		  "x lower boundary (in envelope) unloaded");
+	CHECK(sim.placeSelectedBlock(a, {p.x, WORLD_HEIGHT, p.z}) == sim::PlaceResult::WorldRejected,
+		  "y at WORLD_HEIGHT refused");
+	CHECK(sim.placeSelectedBlock(a, {p.x, -1, p.z}) == sim::PlaceResult::WorldRejected,
+		  "negative y refused");
+	CHECK(sim.breakBlock(a, {p.x, WORLD_HEIGHT, p.z}) == sim::BreakResult::WorldRejected,
+		  "break above the world refused");
+	CHECK(sim.breakBlock(a, {p.x, 0, p.z}) != sim::BreakResult::Ok,
+		  "y=0 boundary break is a defined refusal (bedrock)");
+
+	// Non-finite float placement queries: safe refusal for solid blocks.
+	const float nan = std::numeric_limits<float>::quiet_NaN();
+	const float inf = std::numeric_limits<float>::infinity();
+	CHECK(!sim.canPlaceVoxel({nan, 64.f, 0.f}, STONE), "NaN x refused");
+	CHECK(!sim.canPlaceVoxel({0.f, nan, 0.f}, STONE), "NaN y refused");
+	CHECK(!sim.canPlaceVoxel({0.f, 64.f, nan}, STONE), "NaN z refused");
+	CHECK(!sim.canPlaceVoxel({inf, 64.f, 0.f}, STONE), "+Inf x refused");
+	CHECK(!sim.canPlaceVoxel({-inf, 64.f, 0.f}, STONE), "-Inf x refused");
+	CHECK(!sim.canPlaceVoxel({0.f, inf, 0.f}, STONE), "+Inf y refused");
+	CHECK(!sim.canPlaceVoxel({0.f, -inf, 0.f}, STONE), "-Inf y refused");
+	CHECK(!sim.canPlaceVoxel({1e9f, 64.f, 0.f}, STONE), "out-of-envelope float refused");
+	CHECK(!sim.canPlaceVoxel({0.f, -1.f, 0.f}, STONE), "negative y float refused");
+	CHECK(!sim.canPlaceVoxel({0.f, static_cast<float>(WORLD_HEIGHT), 0.f}, STONE),
+		  "y at WORLD_HEIGHT float refused");
+	// Non-solid blocks short-circuit before any coordinate work (historical).
+	CHECK(sim.canPlaceVoxel({nan, nan, nan}, WATER), "non-solid ignores coordinates");
+
+	// Invalid actor combined with invalid coordinates: identity checked first.
+	const sim::PlayerId bad{999};
+	CHECK(sim.placeSelectedBlock(bad, {INT32_MAX, 64, 0}) == sim::PlaceResult::InvalidPlayer,
+		  "invalid actor + extreme cell place");
+	CHECK(sim.breakBlock(bad, {INT32_MIN, 64, 0}) == sim::BreakResult::InvalidPlayer,
+		  "invalid actor + extreme cell break");
+	CHECK(!sim.canPlaceVoxel(bad, {nan, 64.f, 0.f}, STONE), "invalid actor + NaN query");
+
+	// NOTHING changed: no consumption, no world edit, no item spawn.
+	CHECK(inventoryOf(sim, a) == inv0, "coordinate rejections consumed nothing");
+	CHECK(sim.worldSnapshot().editRevision == w0.editRevision, "coordinate rejections never edited the world");
+	CHECK(sim.itemEntities().size() == items0, "coordinate rejections spawned nothing");
+	sim.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 13. Unpositioned sessions (issue #247 review P2): a created-but-not-placed
+//     session (default-origin body) is excluded from shared pickup and
+//     player-body placement checks until activated; activation persists across
+//     world epochs; removal leaves no stale candidate; solo is unchanged.
+// ---------------------------------------------------------------------------
+void testUnpositionedSessions(ThreadPool &pool)
+{
+	CoutSilencer silence;
+	sim::GameSimulation sim(&pool);
+	sim::GameSimulation::Config cfg;
+	cfg.seed = 1337;
+	const glm::dvec3 boot = sim.initialize(cfg, glm::dvec3(8.0, 100.0, 8.0));
+	sim.bootstrapTerrain(boot);
+	sim.finalizePlayerSpawn(boot);
+	const sim::PlayerId local = sim.localPlayerId();
+	CHECK(sim.playerPositioned(local), "the local anchor is positioned from construction (solo)");
+	CHECK(sim.grantItems(local, ItemId::Stone, 10).result == ItemResult::Ok, "grant local items");
+	sim.selectHotbarSlot(local, 0);
+
+	// Create B WITHOUT positioning it: default body at the origin, inactive.
+	const sim::PlayerId b = sim.createPlayer();
+	CHECK(!sim.playerPositioned(b), "a new non-local session starts unpositioned");
+	CHECK(sim.playerFeet(b) == glm::dvec3(0.0), "unpositioned B body sits at the origin");
+	sim.setPlayerFlight(local, true, glm::dvec3(8.0, 200.0, 8.0)); // local far from origin
+
+	// Build a breakable block in an air pocket AT the origin cell so the drop
+	// lands within pickup radius of B's default body.
+	const auto makeOriginDrop = [&]() {
+		sim.deleteVoxel({0.5f, 0.5f, 0.5f}); // clear bedrock at (0,0,0)
+		sim.placeVoxel({0.5f, 0.5f, 0.5f}, STONE);
+		sim.pumpWorld();
+		CHECK(sim.breakBlock(local, glm::ivec3(0, 0, 0)) == sim::BreakResult::Ok, "origin drop fixture break");
+		for (int i = 0; i < 60; ++i) // settle + pickup delay elapses
+			sim.advanceItems(1.0 / 60.0, false);
+	};
+
+	// Phase 1: inactive B must NOT vacuum-collect the origin drop.
+	makeOriginDrop();
+	std::vector<sim::ItemEntitySnapshot> snaps;
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1, "one origin drop before activation");
+	CHECK(glm::distance(snaps[0].current, glm::dvec3(0.0)) <= sim.itemSettings().pickupRadius,
+		  "fixture: the drop is within B's default pickup radius");
+	CHECK(emptyInventory(inventoryOf(sim, b)), "unpositioned B collects nothing");
+
+	// Phase 2: inactive B must NOT block placement at the origin cell.
+	CHECK(sim.canPlaceVoxel({0.5f, 0.5f, 0.5f}, STONE), "inactive B does not block placement");
+	CHECK(sim.placeSelectedBlock(local, glm::ivec3(0, 0, 0)) == sim::PlaceResult::Ok,
+		  "placement into the origin cell succeeds despite inactive B");
+	CHECK(inventoryOf(sim, local).slots[0] == S(ItemId::Stone, 9), "the place consumed 1 from local");
+
+	// Phase 3: position B at the origin -> activated.
+	sim.setPlayerPosition(b, glm::dvec3(0.5, 0.0, 0.5));
+	CHECK(sim.playerPositioned(b), "setPlayerPosition activates the session");
+
+	// Phase 4: active walking B now blocks placement into its body cell.
+	sim.deleteVoxel({0.5f, 0.5f, 0.5f}); // clear the placed block
+	sim.pumpWorld();
+	CHECK(!sim.canPlaceVoxel({0.5f, 0.5f, 0.5f}, STONE), "active B blocks placement into its body");
+	CHECK(sim.placeSelectedBlock(local, glm::ivec3(0, 0, 0)) == sim::PlaceResult::PlayerOverlap,
+		  "placement into active B's body is refused");
+	CHECK(inventoryOf(sim, local).slots[0] == S(ItemId::Stone, 9), "refused overlap consumed nothing");
+
+	// Phase 5: active B picks the lingering origin drop up normally (the same
+	// drop B ignored while unpositioned in Phase 1 — no second drop created).
+	for (int i = 0; i < 30; ++i)
+		sim.advanceItems(1.0 / 60.0, false);
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.empty(), "activated B collects the origin drop");
+	CHECK(inventoryOf(sim, b).slots[0] == S(ItemId::Cobblestone, 1), "pickup lands in B's inventory");
+
+	// Phase 6: removing B leaves no stale pickup candidate.
+	CHECK(sim.removePlayer(b), "B removed");
+	CHECK(!sim.playerPositioned(b), "a removed session is not positioned");
+	makeOriginDrop();
+	sim.itemSnapshots(snaps);
+	CHECK(snaps.size() == 1, "no stale candidate collects after removal (local is far)");
+
+	// Phase 7: activation semantics persist across world epochs.
+	const sim::PlayerId c = sim.createPlayer();
+	CHECK(!sim.playerPositioned(c), "C starts unpositioned");
+	sim.setPlayerPosition(c, glm::dvec3(8.5, 100.0, 8.5));
+	CHECK(sim.playerPositioned(c), "C positioned");
+	CHECK(sim.reload(44), "transient reload");
+	CHECK(sim.playerPositioned(local), "local stays positioned across reload");
+	CHECK(sim.playerPositioned(c), "a positioned session stays positioned across reload (body carries over)");
+	const sim::PlayerId d = sim.createPlayer();
+	CHECK(!sim.playerPositioned(d), "a fresh session after reload is unpositioned");
+	sim::GameSimulation::Config cfg2;
+	cfg2.seed = 45;
+	sim.initialize(cfg2, glm::dvec3(8.0, 100.0, 8.0));
+	CHECK(sim.playerPositioned(local) && sim.playerPositioned(c), "positioned survives initialize");
+	CHECK(!sim.playerPositioned(d), "unpositioned survives initialize");
+	sim.shutdown();
+}
+
 } // namespace
 
 int main()
@@ -834,6 +1028,8 @@ int main()
 	testSoloParity(pool);
 	testActorDeferredEdit(pool);
 	testIdExhaustionPerPlayer(pool);
+	testCoordinateValidation(pool);
+	testUnpositionedSessions(pool);
 	std::printf("%ld checks, %ld testmain::fails\n", testmain::checks, testmain::fails);
 	if (testmain::fails == 0)
 		std::printf("PASS\n");

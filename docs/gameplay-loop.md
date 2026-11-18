@@ -229,12 +229,15 @@ structs + owning system, **no ECS** (#132 stays deferred).
   into the inventory **hotbar-first** (existing same-item stacks, then empty
   slots). **Partial pickup** leaves the remainder in the world. Not a
   command — headless scripts exercise it through `wait`.
-  - **Multi-player (issue #247):** every live session is an eligible receiver,
-    evaluated in **ascending-`PlayerId` order** (the deterministic priority).
-    The first in-range player merges; a **partial remainder is offered to the
-    next eligible player in the same tick**; a full inventory skips to the
-    next. The **aggregate count is conserved** (no duplication, no loss).
-    Solo (one session) is bit-identical to the historical local-only rule.
+  - **Multi-player (issue #247):** every **positioned** live session is an
+    eligible receiver, evaluated in **ascending-`PlayerId` order** (the
+    deterministic priority). The first in-range player merges; a **partial
+    remainder is offered to the next eligible player in the same tick**; a full
+    inventory skips to the next. The **aggregate count is conserved** (no
+    duplication, no loss). Unpositioned sessions (created but not yet
+    spawned/placed) are excluded, so a default-origin body never vacuum-collects
+    drops. Solo (one positioned session) is bit-identical to the historical
+    local-only rule.
 - **Despawn**: age-based, **18000 ticks** (5 minutes of sim time).
 - **Population cap**: **1024** entities; overflow despawns **oldest-first**
   (id tie-break) — deterministic.

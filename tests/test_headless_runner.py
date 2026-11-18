@@ -231,9 +231,13 @@ def main() -> int:
                                 "--digest-area", "-2147483647,0,-2147483647,2147483647,255,2147483647"], work)
         check(p.returncode == 2, f"extreme --digest-area span exits 2, no overflow stall (got {p.returncode})")
 
-        # World-level edit rejection (target outside residency) is counted and
-        # diagnosed, not silent (issue #210 review).
-        reject = write_script(work / "reject.txt", "place 50000 220 50000 Stone\nwait 10\n")
+        # World-level edit rejection (target outside residency, but WITHIN the
+        # supported world envelope) is counted and diagnosed, not silent (issue
+        # #210 review). 5000 is far beyond the streamed radius yet inside the
+        # SHRT_MIN/SHRT_MAX coordinate envelope, so the placement query passes
+        # and the WORLD rejects the unloaded target (issue #247 review: the
+        # envelope guard refuses out-of-world cells earlier, at the query).
+        reject = write_script(work / "reject.txt", "place 5000 220 5000 Stone\nwait 10\n")
         p = run_runner(runner, ["--seed", "42", "--ticks", "30", "--script", reject], work)
         rf = summary(p)
         check(p.returncode == 0 and rf.get("rejected") == "1" and rf.get("edits") == "0",

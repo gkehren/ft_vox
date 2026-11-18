@@ -64,6 +64,11 @@ GameSimulation::GameSimulation(ThreadPool *threadPool)
     // the first session (ids are monotonic) and never removable. Heap-backed
     // entry: its address stays stable for the simulation's lifetime.
     m_players.push_back(std::make_unique<PlayerEntry>(PlayerEntry{PlayerId{m_nextPlayerId++}, PlayerState{}}));
+    // The local anchor participates in spatial gameplay from construction (the
+    // historical solo lifecycle — its body is authoritative before initialize).
+    // Non-local sessions start UNPOSITIONED and join pickup / placement checks
+    // only once the host places them (issue #247 review).
+    m_players.front()->state.positioned = true;
     // Pickup-candidate buffer (issue #247): reserve the session ceiling once so
     // the per-frame advanceItems refill never allocates (the snapshot pattern).
     m_pickupCandidates.reserve(kMaxPlayers);
@@ -484,17 +489,20 @@ void GameSimulation::advanceItems(double dt, bool suspended)
     // is NOT pumped here: publication ordering stays with the bridge /
     // pumpWorld (issue #114).
     WorldCollisionView world(*m_world);
-    // Actor-aware pickup (issue #247): every live session is an eligible
-    // receiver, in ascending-PlayerId order (m_players is id-sorted by
-    // construction) — the deterministic pickup priority. The buffer is
-    // reserved once and refilled in place (no per-frame allocation). A
+    // Actor-aware pickup (issue #247): every POSITIONED live session is an
+    // eligible receiver, in ascending-PlayerId order (m_players is id-sorted by
+    // construction) — the deterministic pickup priority. Unpositioned sessions
+    // (created but not yet spawned/placed) are excluded so a default-origin
+    // body never vacuum-collects shared drops (issue #247 review). The buffer
+    // is reserved once and refilled in place (no per-frame allocation). A
     // suspended frame skips the refill (the system ignores candidates and
     // only syncs previous/current).
     m_pickupCandidates.clear();
     if (!suspended)
     {
         for (const std::unique_ptr<PlayerEntry> &entry : m_players)
-            m_pickupCandidates.push_back({entry->state.controller.body.position, &entry->state.inventory});
+            if (entry->state.positioned)
+                m_pickupCandidates.push_back({entry->state.controller.body.position, &entry->state.inventory});
     }
     m_items.update(dt, world, m_pickupCandidates, suspended);
 }
@@ -558,6 +566,7 @@ bool GameSimulation::setPlayerFlight(PlayerId id, bool enabled, glm::dvec3 feet)
     player->flight = enabled;
     player->status = "";
     player->controller.reset(feet);
+    player->positioned = true; // a successful toggle places the body (issue #247 review)
     return true;
 }
 
@@ -569,7 +578,10 @@ void GameSimulation::setPlayerPosition(glm::dvec3 feet)
 void GameSimulation::setPlayerPosition(PlayerId id, glm::dvec3 feet)
 {
     if (PlayerState *player = findPlayer(id))
+    {
         player->controller.reset(feet);
+        player->positioned = true; // host reposition activates the session (issue #247 review)
+    }
 }
 
 void GameSimulation::restorePlayerFlight(bool enabled, glm::dvec3 feet)
@@ -589,6 +601,7 @@ void GameSimulation::restorePlayerFlight(PlayerId id, bool enabled, glm::dvec3 f
         player->flight = enabled;
         player->status = "";
         player->controller.reset(feet);
+        player->positioned = true; // lifecycle restore places the body (issue #247 review)
     }
 }
 
@@ -624,6 +637,7 @@ glm::dvec3 GameSimulation::spawnPlayerOnSurface(PlayerId id, glm::dvec3 around)
                 player->controller.reset(candidate.position);
                 player->flight = false;
                 player->status = "";
+                player->positioned = true; // surface spawn places the body (issue #247 review)
                 return player->controller.eye();
             }
         }
@@ -632,6 +646,7 @@ glm::dvec3 GameSimulation::spawnPlayerOnSurface(PlayerId id, glm::dvec3 around)
     player->controller.reset(fallbackEye - glm::dvec3(0, player->controller.settings.eyeHeight, 0));
     player->flight = true;
     player->status = "No safe spawn in loaded terrain: fly to an open area.";
+    player->positioned = true; // the fallback still places the body (issue #247 review)
     return fallbackEye;
 }
 
@@ -680,6 +695,7 @@ bool GameSimulation::restorePlayerState(PlayerId id, const PlayerPersistState &s
     if (waitingForTerrain)
         player->controller.body.waitingForTerrain = true;
     player->flight = saved.flight;
+    player->positioned = true; // a usable restore places the body (issue #247 review)
     if (saved.selectedBlock >= 0 && saved.selectedBlock < static_cast<int32_t>(COUNT))
         player->selectedBlock = static_cast<TextureType>(saved.selectedBlock);
     // The local line keeps the historical format (issue #246 solo
@@ -847,6 +863,18 @@ bool GameSimulation::isVoxelActive(const glm::vec3 &worldPos) const
     return m_world && m_world->isVoxelActive(worldPos);
 }
 
+bool GameSimulation::cellInWorldEnvelope(glm::ivec3 cell)
+{
+    // The supported editable-world envelope (issue #247 review): the finite
+    // SHRT_MIN/SHRT_MAX horizontal camera envelope of WorldCollisionView plus
+    // the fixed vertical world [0, WORLD_HEIGHT). Pure integer comparisons —
+    // no float conversion, so extreme cells (near the INT32 bounds) are
+    // rejected safely before any float position / AABB is constructed.
+    return cell.x >= SHRT_MIN && cell.x < SHRT_MAX &&
+           cell.z >= SHRT_MIN && cell.z < SHRT_MAX &&
+           cell.y >= 0 && cell.y < WORLD_HEIGHT;
+}
+
 bool GameSimulation::canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) const
 {
     // Historical Engine placement rule (issue #209), generalized to EVERY
@@ -860,12 +888,27 @@ bool GameSimulation::canPlaceVoxel(const glm::vec3 &worldPos, TextureType type) 
     // session) reproduces the historical local-body rule bit for bit.
     if (!physics::blockCell(type).solid)
         return true;
+    // Coordinate validation BEFORE floor->int (issue #247 review): a non-finite
+    // or out-of-envelope position would make glm::floor -> int conversion UB
+    // (e.g. a cell near INT32_MAX rounds up to 2^31 as float). Non-finite input
+    // and positions outside the supported world envelope answer a safe refusal.
+    // The bounds are exactly representable floats, so a position passing this
+    // gate floors to an in-range int cell.
+    if (!std::isfinite(worldPos.x) || !std::isfinite(worldPos.y) || !std::isfinite(worldPos.z))
+        return false;
+    if (worldPos.x < static_cast<float>(SHRT_MIN) || worldPos.x >= static_cast<float>(SHRT_MAX) ||
+        worldPos.z < static_cast<float>(SHRT_MIN) || worldPos.z >= static_cast<float>(SHRT_MAX) ||
+        worldPos.y < 0.f || worldPos.y >= static_cast<float>(WORLD_HEIGHT))
+        return false;
     const physics::Aabb cell = physics::voxelBounds(glm::ivec3(glm::floor(worldPos)));
     for (const std::unique_ptr<PlayerEntry> &entry : m_players)
     {
         const PlayerState &player = entry->state;
-        if (player.flight)
-            continue; // flying bodies are exempt (the creative rule)
+        // Unpositioned sessions (default-origin bodies) do not block placement
+        // until the host places them (issue #247 review); flying bodies are
+        // exempt (the creative rule).
+        if (!player.positioned || player.flight)
+            continue;
         physics::Body playerBody;
         playerBody.position = player.controller.body.position;
         if (physics::overlaps(playerBody.bounds(), cell))
@@ -1004,6 +1047,12 @@ BreakResult GameSimulation::breakBlock(PlayerId id, glm::ivec3 cell, WorldEditRe
         return BreakResult::InvalidPlayer;
     if (!m_world)
         return BreakResult::UnknownTerrain;
+    // Out-of-envelope cells are boundary walls, not editable terrain (issue
+    // #247 review): reject them with integer comparisons before any float
+    // position is built. (The int-first effective sample below already answers
+    // AIR for them; this guard makes the coordinate invariant explicit.)
+    if (!cellInWorldEnvelope(cell))
+        return BreakResult::WorldRejected;
     // Sample the EFFECTIVE voxel (storage + pending edits) through the CPU
     // collision seam. The view's shared lock MUST be released before the
     // exclusive edit lock below — scope it tightly.
@@ -1061,6 +1110,13 @@ PlaceResult GameSimulation::placeSelectedBlock(PlayerId id, glm::ivec3 cell, Wor
     const std::optional<TextureType> block = items::placeableBlockOf(selected.item);
     if (!block.has_value())
         return PlaceResult::NotPlaceable; // future non-block items (none in v1)
+    // Coordinate validation BEFORE any float conversion (issue #247 review):
+    // an extreme cell (near the INT32 bounds) would overflow the float->int
+    // floor in canPlaceVoxel / the world edit (UB). Reject out-of-envelope
+    // cells with integer comparisons; the world refuses them anyway as
+    // out-of-bounds targets. Valid gameplay cells are unaffected.
+    if (!cellInWorldEnvelope(cell))
+        return PlaceResult::WorldRejected;
     const glm::vec3 center(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
     // Player-aware placement rule (#209 / #247): the SAME query the creative
     // host gates with — now protecting EVERY walking body, not just the
@@ -1308,6 +1364,12 @@ glm::dvec3 GameSimulation::playerEye(PlayerId id) const
 {
     const PlayerState *player = findPlayer(id);
     return player ? player->controller.eye() : glm::dvec3(0.0);
+}
+
+bool GameSimulation::playerPositioned(PlayerId id) const
+{
+    const PlayerState *player = findPlayer(id);
+    return player ? player->positioned : false;
 }
 
 bool GameSimulation::playerFlight(PlayerId id) const
