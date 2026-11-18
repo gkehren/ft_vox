@@ -74,6 +74,8 @@ toggle described in §4.)
 | `midnight` | Moon/stars, night exposure |
 | `mob_lighting` | Entity vs terrain lighting consistency |
 | `item_entities` | Dropped-item mini-cubes (issue #229): per-instance block-atlas layers, derived local light, presentation spin on a flattened grass pad; an entity-free base frame proves the items contribute pixels |
+| `item_population` | 128 dropped items (stabilization Phase 6): mixed atlas layers on a 16×8 grid over a large pad, camera pulled back — the instanced draw at a normal-heavy population; hot-pixel floor far above `item_entities` |
+| `item_max_population` | 1024 dropped items (stabilization Phase 6) — the sim/renderer population cap: 32×32 grid, elevated camera; the single instanced draw stays validation-clean at the cap |
 | `underwater` | Fully submerged camera |
 | `underwater_deep` | Distance-based extinction falloff and world-anchored caustics at noon (submerged camera looking horizontally across open water) |
 | `water_shallow_top` | Vertical view over the audit-lake shelf ladder (104/102/98): floor readable at the shallow end, absorption monotone with depth (water surface rework) |
@@ -129,6 +131,28 @@ including a uniform −6 EV frame: the default 0.18 key must respect the +1 EV
 bright target. Golden auto scenes sample a seeded transition, so their image
 comparison alone is not a check of fully adapted brightness; the target and
 temporal checks cover that state without regenerating references.
+
+**Gameplay item rendering checks (`item_rendering_checks`).** A standalone
+GPU-exercised semantic check — always part of the suite, also selectable via
+`--scene item_rendering_checks` (stabilization Phase 6; see
+`docs/gpu-validation.md`). No goldens are read or updated. On a lit pad with
+a 16-item cluster it asserts:
+
+- **Interpolation**: rendering the population at previous vs current
+  snapshot positions (plus a spin delta) must change pixels — a renderer
+  ignoring the interpolated state would render identical frames.
+- **Frustum culling**: the whole population placed behind the camera renders
+  **bit-identical** to the entity-free base and reports `visibleItems() == 0`.
+- **Atlas / resource-pack reload**: the production failure-atomic
+  `WorldRenderer::reloadResourcePack` (set-1 rebind) keeps the same item state
+  bit-identical — items sample the shared atlas descriptors.
+- **Population cap**: 1024 instances prepare/record cleanly; `visibleItems()`
+  never exceeds the cap.
+- **Epoch reset / world reload**: after `beginScene` (the reload-world
+  ordering) an empty item list renders bit-identical to a fresh empty frame —
+  no stale instance slice survives the world transition.
+- Zero new Vulkan validation errors and zero non-finite HDR samples across
+  all of the above.
 
 **Temporal adaptation check (`auto-exposure-adaptation`).** A standalone
 GPU-exercised run — always part of the suite, also selectable via
@@ -252,11 +276,18 @@ legitimately exceed the strict thresholds through FP rounding alone. Therefore:
   forces strict mode from the CLI (overriding the environment), and setting
   `FT_VOX_VISUAL_SMOKE=0` in the environment enables strict ctest runs on the
   canonical machine.
-- A software rasterizer (`lavapipe`) can run the harness in CI once a build/
-  test CI exists (issue #131). **Today no CI workflow runs ctest** (CodeQL
-  only), so references are validated on developer machines.
-- When test CI lands, the recommended split is: strict mode on the canonical
-  stack, smoke mode elsewhere.
+- CI split (stabilization Phase 6, PR #244 trust correction):
+  `cpu-boundary.yml` runs the CPU suite on every push/PR and COMPILES the
+  graphical stack (no GPU, no device tests). `gpu-validation.yml` is the
+  **optional** runtime gate — **manual dispatch on the protected `main`
+  branch only**, on the self-hosted `gpu` runner; no PR trigger (untrusted
+  PR code never reaches the persistent runner). PR GPU validation is manual
+  on the canonical machine before merge. Without a suitable runner the
+  device tests are **not executed**, never reported as passed. The trust
+  contract is CI-enforced (`GpuWorkflowTrustGuard`); the canonical reference
+  environment and commands: `docs/gpu-validation.md`.
+- A software rasterizer (`lavapipe`) can run the harness in smoke mode on a
+  GPU-less runner; strict goldens remain canonical-GPU-only.
 
 ## 8. Failure artifacts
 

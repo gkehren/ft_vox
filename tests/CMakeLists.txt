@@ -99,6 +99,16 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME CoreIncludeGuard
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/check_core_includes.py)
 
+# GPU workflow trust-policy guard (PR #244 review): the optional GPU workflow
+# must stay dispatch-only on the protected main ref, with minimal permissions,
+# no persisted checkout credentials, no privileged installation and no secret
+# exposure — untrusted PR code can never reach the persistent GPU runner.
+# Stdlib-only structural checks; cpu-boundary.yml's per-PR gate is asserted
+# intact. Registered here so every CPU CI run enforces the security contract.
+add_test(NAME GpuWorkflowTrustGuard
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/check_gpu_workflow.py
+        --repo-root ${CMAKE_SOURCE_DIR})
+
 # ---------------------------------------------------------------------------
 # Vulkan resource smoke (PR2) — real device path via shipped helpers
 # GRAPHICAL (FT_VOX_GRAPHICS): needs SDL3 + volk + VMA + SPIR-V.
