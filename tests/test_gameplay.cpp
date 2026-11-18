@@ -77,6 +77,7 @@
 #include <Items/ItemStack.hpp>
 #include <World/WorldCollisionView.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -88,6 +89,7 @@
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "TestMain.hpp"
@@ -170,6 +172,16 @@ struct CoutSilencer
 	std::streambuf *old;
 	CoutSilencer() : old(std::cout.rdbuf(sink.rdbuf())) {}
 	~CoutSilencer() { std::cout.rdbuf(old); }
+};
+
+// Capture stderr (the world's failure diagnostics) — RAII, always restores.
+struct CerrSilencer
+{
+	std::ostringstream sink;
+	std::streambuf *old;
+	CerrSilencer() : old(std::cerr.rdbuf(sink.rdbuf())) {}
+	~CerrSilencer() { std::cerr.rdbuf(old); }
+	std::string str() const { return sink.str(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -2282,13 +2294,19 @@ void testGameplayPersistenceRoundTrip(ThreadPool &pool)
 // ---------------------------------------------------------------------------
 // 20. Corrupt / missing new files degrade to empty with a LOUD log while the
 //     world still opens; old-format saves (no new files) load unchanged.
+//     Stabilization PR5b: these cases exercise the LEGACY file policy — the
+//     fixtures remove checkpoints/ to simulate a pre-migration save (the
+//     compatibility mode old binaries and old saves use). Checkpoint-mode
+//     corruption semantics (whole-generation fallback / explicit refusal)
+//     are covered by testCheckpointRecoveryIntegration below.
 // ---------------------------------------------------------------------------
 void testGameplayPersistenceDegradation(ThreadPool &pool)
 {
 	TempRoot root("gp-degrade");
 	const glm::dvec3 center(8.0, 100.0, 8.0);
 
-	// Create a saved world with one stack + one entity (the fixture).
+	// Create a saved world with one stack + one entity (the fixture), then
+	// drop the checkpoint layer so the root files are authoritative (legacy).
 	auto createFixture = [&](const char *name) {
 		sim::GameSimulation sim(&pool);
 		sim::GameSimulation::Config cfg;
@@ -2303,6 +2321,8 @@ void testGameplayPersistenceDegradation(ThreadPool &pool)
 		sim.dropFromSlot(0, 2, {0, 1, 0});
 		sim.savePlayerState(0.f, 0.f);
 		sim.shutdown();
+		std::error_code ec;
+		std::filesystem::remove_all(root.path / name / "checkpoints", ec);
 	};
 
 	// Corrupt inventory.state: world opens, inventory empty + loud log,
@@ -2484,6 +2504,500 @@ void testGameplayPersistenceContracts(ThreadPool &pool)
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 22. Checkpoint-mode recovery integration (stabilization PR5b, Phase 3):
+//     whole-generation fallback, explicit unrecoverable refusal, the async
+//     chunk-I/O fault (ADR point 6) with retry, close carry-forward, and
+//     refused-close committing nothing. The legacy file policy is covered by
+//     testGameplayPersistenceDegradation (pre-migration fixtures).
+// ---------------------------------------------------------------------------
+void testCheckpointRecoveryIntegration(ThreadPool &pool)
+{
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	namespace fs = std::filesystem;
+
+	// Generation directories sorted ascending (the retention pair + orphans).
+	auto generationDirs = [](const fs::path &world) {
+		std::vector<std::pair<uint64_t, fs::path>> gens;
+		std::error_code ec;
+		for (fs::directory_iterator it(world / "checkpoints", ec), end; it != end; it.increment(ec))
+		{
+			const std::string name = it->path().filename().string();
+			if (name.rfind("generation-", 0) != 0)
+				continue;
+			gens.emplace_back(std::stoull(name.substr(11)), it->path());
+		}
+		std::sort(gens.begin(), gens.end(),
+				  [](const auto &a, const auto &b) { return a.first < b.first; });
+		return gens;
+	};
+	auto corruptFile = [](const fs::path &p) {
+		std::ifstream in(p, std::ios::binary);
+		std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		in.close();
+		if (bytes.empty())
+			return false;
+		bytes[0] ^= 0xFF; // magic corruption: fails the codec, not just a checksum
+		std::ofstream out(p, std::ios::binary | std::ios::trunc);
+		out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+		return true;
+	};
+
+	// (a) Checkpoint-mode round-trip: the generation is authoritative, the
+	// root state files remain as legacy compatibility shims.
+	{
+		TempRoot root("cp-mode");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "mode";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			sim.finalizePlayerSpawn(boot);
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 10);
+			sim.dropFromSlot(0, 2, {0, 1, 0});
+			CHECK(sim.savePlayerState(10.f, -5.f), "checkpoint save succeeds");
+			CHECK(sim.worldPersistence()->checkpointMode(), "save commits a checkpoint");
+			CHECK(sim.worldPersistence()->checkpointGeneration() >= 1, "generation numbered");
+			sim.shutdown();
+			CHECK(fs::exists(root.path / "mode" / "checkpoints" / "manifest"), "manifest published");
+			CHECK(fs::exists(root.path / "mode" / "player.state"), "legacy player shim written");
+			CHECK(fs::exists(root.path / "mode" / "inventory.state"), "legacy inventory shim written");
+			CHECK(fs::exists(root.path / "mode" / "items.state"), "legacy items shim written");
+		}
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 0;
+			cfg.worldName = "mode";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			CHECK(sim.worldPersistence()->checkpointMode(), "reopen selects checkpoint mode");
+			sim.bootstrapTerrain(boot);
+			const auto outcome = sim.finalizePlayerSpawn(boot);
+			CHECK(outcome.restored && outcome.yaw == 10.f, "player restored from the generation");
+			CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 8), "inventory restored from the generation");
+			CHECK(sim.itemEntities().size() == 1 && sim.itemIdHighWater() == 1,
+				  "items + allocator restored from the generation");
+			sim.shutdown();
+		}
+	}
+
+	// (b) Corrupt the LATEST generation's inventory -> recovery falls back to
+	// the previous complete generation (observable: Stone 10, not 20).
+	// Retention keeps only current + previous, so the shutdown safety-net
+	// commit is faulted (BeforeStaging) to keep the Stone-10 generation alive
+	// — this also exercises the reported, non-fatal shutdown commit failure.
+	{
+		TempRoot root("cp-fallback");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "fallback";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			sim.finalizePlayerSpawn(boot);
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 10);
+			CHECK(sim.savePlayerState(0.f, 0.f), "gen with Stone 10");
+			sim.grantItems(ItemId::Stone, 10);
+			CHECK(sim.savePlayerState(0.f, 0.f), "gen with Stone 20");
+			sim.worldPersistence()->setCheckpointFaultForTests(
+				worldsave::CheckpointFaultPoint::BeforeStaging);
+			sim.shutdown(); // safety-net commit refused: retention keeps {1, 2}
+		}
+		const auto gens = generationDirs(root.path / "fallback");
+		CHECK(gens.size() == 2, "retention kept the two generations");
+		CHECK(corruptFile(gens[gens.size() - 1].second / "inventory.state"), "latest inventory corrupted");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 0;
+			cfg.worldName = "fallback";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			CHECK(sim.isWorldOpen(), "a valid previous generation keeps the open alive");
+			if (sim.isWorldOpen())
+			{
+				sim.bootstrapTerrain(boot);
+				sim.finalizePlayerSpawn(boot);
+				CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 10),
+					  "fallback restores the older COMPLETE generation (never a mixture)");
+				CHECK(sim.worldPersistence()->status().lastError.find("checkpoint") != std::string::npos,
+					  "fallback is reported");
+				sim.shutdown();
+			}
+		}
+	}
+
+	// (c) Corrupt EVERY generation's inventory -> the open is REFUSED with an
+	// explicit unrecoverable error (never silently mixed with the live set).
+	{
+		TempRoot root("cp-unrecoverable");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "unrec";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 5);
+			sim.savePlayerState(0.f, 0.f);
+			sim.shutdown();
+		}
+		for (const auto &gen : generationDirs(root.path / "unrec"))
+			CHECK(corruptFile(gen.second / "inventory.state"), "generation inventory corrupted");
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 0;
+		cfg.worldName = "unrec";
+		cfg.savesRoot = root.path;
+		sim.initialize(cfg, center);
+		CHECK(!sim.isWorldOpen(), "unrecoverable checkpoint corruption refuses the open");
+		CHECK(sim.openWorldError().find("unrecoverable") != std::string::npos,
+			  "unrecoverable corruption is explicit");
+	}
+
+	// (d) Async chunk-I/O fault (ADR point 6): a failing save worker makes
+	// the flush barrier fail -> savePlayerState false -> NO checkpoint
+	// committed; clearing the fault and retrying succeeds and is durable.
+	{
+		TempRoot root("cp-iofault");
+		uint64_t genBefore = 0;
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "iofault";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			sim.finalizePlayerSpawn(boot);
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 5);
+			CHECK(sim.savePlayerState(0.f, 0.f), "baseline save commits");
+			genBefore = sim.worldPersistence()->checkpointGeneration();
+			CHECK(sim.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted, "edit for the faulted save");
+			sim.grantItems(ItemId::Stone, 5);
+			sim.worldPersistence()->setWriteTmpFnForTests(
+				[](const fs::path &, int32_t, int32_t, const std::vector<worldsave::ChunkEdit> &,
+				   fs::path &) { return worldsave::SaveStatus::IoError; });
+			CHECK(!sim.savePlayerState(0.f, 0.f), "save fails when the chunk write fails");
+			CHECK(sim.worldPersistence()->checkpointGeneration() == genBefore,
+				  "no checkpoint committed on flush failure");
+			sim.worldPersistence()->setWriteTmpFnForTests(nullptr);
+			CHECK(sim.savePlayerState(0.f, 0.f), "retry after the I/O fault succeeds");
+			CHECK(sim.worldPersistence()->checkpointGeneration() > genBefore, "retry committed");
+			sim.shutdown();
+		}
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 0;
+			cfg.worldName = "iofault";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			sim.finalizePlayerSpawn(boot);
+			CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 10), "retry save is durable");
+			CHECK(sim.isVoxelActive({8.5f, 200.5f, 8.5f}), "faulted-then-retried edit is durable");
+			sim.shutdown();
+		}
+	}
+
+	// (e) Close carry-forward: an edit accepted AFTER the last savePlayerState
+	// is committed by the shutdown close (no second explicit save).
+	{
+		TempRoot root("cp-carry");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "carry";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			CHECK(sim.savePlayerState(0.f, 0.f), "baseline save");
+			CHECK(sim.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted, "post-save edit");
+			sim.shutdown(); // carry-forward close commits the edit
+		}
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 0;
+			cfg.worldName = "carry";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			CHECK(sim.isVoxelActive({8.5f, 200.5f, 8.5f}),
+				  "close carry-forward committed the post-save edit");
+			sim.shutdown();
+		}
+	}
+
+	// (f) Refused close commits NOTHING: the checkpoint generation is
+	// unchanged while edits are stranded.
+	{
+		TempRoot root("cp-refused");
+		sim::GameSimulation sim(&pool);
+		sim::GameSimulation::Config cfg;
+		cfg.seed = 42;
+		cfg.worldName = "refusedcp";
+		cfg.savesRoot = root.path;
+		const glm::dvec3 boot = sim.initialize(cfg, center);
+		sim.bootstrapTerrain(boot);
+		CHECK(sim.savePlayerState(0.f, 0.f), "baseline save");
+		const uint64_t gen = sim.worldPersistence()->checkpointGeneration();
+		WorldChunk *c = sim.world()->getChunk({0, 0, 0});
+		c->reset(c->getPosition(), WorldChunk::ResetMode::ForGeneration);
+		CHECK(sim.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted, "stranded edit");
+		CHECK(!sim.reload(44), "reload refused while edits are stranded");
+		CHECK(sim.worldPersistence()->checkpointGeneration() == gen,
+			  "refused close committed no checkpoint");
+		CHECK(c->prepareVoxelStorageForGeneration(), "stranded prepare");
+		c->generateTerrain(*sim.terrainGenerator());
+		sim.pumpWorld();
+		CHECK(sim.reload(44), "reload succeeds after resolution");
+		sim.shutdown();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 23. Checkpoint durability barrier (PR #243 review correction): a checkpoint
+//     is published ONLY after a COMPLETE barrier — async drain AND chunk
+//     flush both succeeded. A failed drain/flush/commit leaves the previous
+//     committed generation authoritative, releases the service unconditionally
+//     and reports a distinct diagnostic. Covers the forced-shutdown flush
+//     failure (A), the drain failure with a succeeding flush (B), the
+//     successful full-state shutdown (C) and the retryable close (D).
+// ---------------------------------------------------------------------------
+void testCheckpointDurabilityBarrier(ThreadPool &pool)
+{
+	const glm::dvec3 center(8.0, 100.0, 8.0);
+	namespace fs = std::filesystem;
+
+	const auto failChunkWrites = [](const fs::path &, int32_t, int32_t,
+									const std::vector<worldsave::ChunkEdit> &, fs::path &) {
+		return worldsave::SaveStatus::IoError;
+	};
+	auto manifestBytes = [](const fs::path &world) {
+		std::ifstream in(world / "checkpoints" / "manifest", std::ios::binary);
+		return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)),
+									std::istreambuf_iterator<char>());
+	};
+	auto genCount = [](const fs::path &world) {
+		size_t n = 0;
+		std::error_code ec;
+		for (fs::directory_iterator it(world / "checkpoints", ec), end; it != end; it.increment(ec))
+			if (it->is_directory(ec) && it->path().filename().string().rfind("generation-", 0) == 0)
+				++n;
+		return n;
+	};
+
+	// (A) Flush failure during forced shutdown: NO generation N+1, manifest
+	// unchanged, a new process recovers generation N with no partial state.
+	{
+		TempRoot root("cp-barrier-flush");
+		const fs::path world = root.path / "barrier";
+		std::vector<uint8_t> manifestBefore;
+		size_t gensBefore = 0;
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "barrier";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			sim.finalizePlayerSpawn(boot);
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 5);
+			CHECK(sim.savePlayerState(0.f, 0.f), "generation N committed");
+			manifestBefore = manifestBytes(world);
+			gensBefore = genCount(world);
+			CHECK(!manifestBefore.empty(), "manifest published for generation N");
+			// Modify chunk + gameplay state, then permanently fail chunk writes.
+			CHECK(sim.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted, "post-save edit");
+			sim.grantItems(ItemId::Stone, 5);
+			sim.worldPersistence()->setWriteTmpFnForTests(failChunkWrites);
+			CerrSilencer cerr;
+			sim.shutdown(); // forced close: drain ok, flush FAILS
+			CHECK(cerr.str().find("chunk flush failed") != std::string::npos,
+				  "distinct flush-failure diagnostic");
+			CHECK(cerr.str().find("checkpoint skipped") != std::string::npos,
+				  "distinct checkpoint-skipped diagnostic");
+			CHECK(cerr.str().find("did not persist all accepted edits") != std::string::npos,
+				  "shutdown reports failure");
+		}
+		CHECK(manifestBytes(world) == manifestBefore, "manifest unchanged after failed flush");
+		CHECK(genCount(world) == gensBefore, "no generation N+1 committed");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 0;
+			cfg.worldName = "barrier";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			CHECK(sim.worldPersistence()->checkpointMode(), "recovery stays in checkpoint mode");
+			sim.bootstrapTerrain(boot);
+			sim.finalizePlayerSpawn(boot);
+			CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 5),
+				  "generation N gameplay recovered (not the faulted capture)");
+			CHECK(!sim.isVoxelActive({8.5f, 200.5f, 8.5f}),
+				  "faulted edit not exposed (recovery re-seed discarded it)");
+			sim.shutdown();
+		}
+	}
+
+	// (B) Drain failure: an in-transit record that never resolves makes the
+	// drain time out (the bounded 30 s persistence drain — this case costs
+	// ~30 s by design). The flush SUCCEEDS (the pending edit is baked into the
+	// override set), yet NO checkpoint may be published: the barrier is
+	// drain AND flush, not flush alone.
+	{
+		TempRoot root("cp-barrier-drain");
+		const fs::path world = root.path / "drain";
+		std::vector<uint8_t> manifestBefore;
+		size_t gensBefore = 0;
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "drain";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 5);
+			CHECK(sim.savePlayerState(0.f, 0.f), "generation N committed");
+			manifestBefore = manifestBytes(world);
+			gensBefore = genCount(world);
+			WorldChunk *c = sim.world()->getChunk({0, 0, 0});
+			CHECK(c != nullptr, "drain fixture record present");
+			c->setInTransit(true); // never cleared: the drain cannot complete
+			CHECK(sim.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted,
+				  "edit deferred against the in-transit record");
+			CerrSilencer cerr;
+			sim.shutdown(); // resolve skips in-transit; drain times out; flush ok
+			CHECK(cerr.str().find("could not be made authoritative") != std::string::npos,
+				  "distinct drain-failure diagnostic");
+			CHECK(cerr.str().find("checkpoint skipped") != std::string::npos,
+				  "checkpoint skipped despite the succeeding flush");
+		}
+		CHECK(manifestBytes(world) == manifestBefore, "drain failure leaves the manifest unchanged");
+		CHECK(genCount(world) == gensBefore, "drain failure commits no generation");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 0;
+			cfg.worldName = "drain";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			sim.finalizePlayerSpawn(boot);
+			CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 5), "generation N recovered");
+			CHECK(!sim.isVoxelActive({8.5f, 200.5f, 8.5f}), "stranded edit not exposed");
+			sim.shutdown();
+		}
+	}
+
+	// (C) Successful forced shutdown commits the LATEST complete state:
+	// accepted voxel edits + inventory + dropped items + allocator high-water.
+	{
+		TempRoot root("cp-barrier-ok");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "ok";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			sim.finalizePlayerSpawn(boot);
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 10);
+			sim.dropFromSlot(0, 2, {0, 1, 0});
+			CHECK(sim.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted, "accepted edit");
+			sim.shutdown(); // safety net: no explicit savePlayerState
+		}
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 0;
+			cfg.worldName = "ok";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			CHECK(sim.worldPersistence()->checkpointMode(), "successful shutdown committed");
+			sim.bootstrapTerrain(boot);
+			sim.finalizePlayerSpawn(boot);
+			CHECK(sim.inventory().stack(0) == S(ItemId::Stone, 8), "inventory committed");
+			CHECK(sim.itemEntities().size() == 1 && sim.itemIdHighWater() == 1,
+				  "items + allocator high-water committed");
+			CHECK(sim.isVoxelActive({8.5f, 200.5f, 8.5f}), "accepted voxel edit committed");
+			sim.shutdown();
+		}
+	}
+
+	// (D) Retryable close: a failed flush refuses closeWorld (persistence
+	// stays open, no commit); the retry succeeds and EXACTLY ONE complete
+	// generation becomes authoritative.
+	{
+		TempRoot root("cp-barrier-retry");
+		const fs::path world = root.path / "retry";
+		uint64_t genN = 0;
+		size_t gensBefore = 0;
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 42;
+			cfg.worldName = "retry";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			CoutSilencer silence;
+			sim.grantItems(ItemId::Stone, 5);
+			CHECK(sim.savePlayerState(0.f, 0.f), "generation N committed");
+			genN = sim.worldPersistence()->checkpointGeneration();
+			gensBefore = genCount(world);
+			CHECK(sim.placeVoxel({8.5f, 200.5f, 8.5f}, STONE).accepted, "post-save edit");
+			sim.worldPersistence()->setWriteTmpFnForTests(failChunkWrites);
+			{
+				CerrSilencer cerr;
+				CHECK(!sim.reload(44), "close refused on flush failure");
+				CHECK(cerr.str().find("close deferred") != std::string::npos,
+					  "retryable-close diagnostic");
+			}
+			CHECK(sim.isWorldOpen(), "persistence stays open and usable");
+			CHECK(sim.worldPersistence()->checkpointGeneration() == genN,
+				  "failed close committed nothing");
+			sim.worldPersistence()->setWriteTmpFnForTests(nullptr);
+			CHECK(sim.reload(44), "retry close succeeds");
+			sim.shutdown(); // reloaded world is transient: no-op
+		}
+		CHECK(genCount(world) == gensBefore + 1, "exactly one new generation after the retry");
+		{
+			sim::GameSimulation sim(&pool);
+			sim::GameSimulation::Config cfg;
+			cfg.seed = 0;
+			cfg.worldName = "retry";
+			cfg.savesRoot = root.path;
+			const glm::dvec3 boot = sim.initialize(cfg, center);
+			sim.bootstrapTerrain(boot);
+			CHECK(sim.worldPersistence()->checkpointGeneration() == genN + 1,
+				  "one complete generation advanced");
+			CHECK(sim.isVoxelActive({8.5f, 200.5f, 8.5f}), "retry close committed the edit");
+			sim.shutdown();
+		}
+	}
+}
 } // namespace
 
 int main()
@@ -2516,6 +3030,8 @@ int main()
 	testGameplayPersistenceRoundTrip(pool);
 	testGameplayPersistenceDegradation(pool);
 	testGameplayPersistenceContracts(pool);
+	testCheckpointRecoveryIntegration(pool);
+	testCheckpointDurabilityBarrier(pool);
 	std::printf("%d checks, %d testmain::fails\n", testmain::checks, testmain::fails);
 	if (testmain::fails == 0)
 		std::printf("PASS\n");

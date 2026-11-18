@@ -60,6 +60,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <World/WorldCheckpoint.hpp>
 #include <World/WorldSave.hpp>
 
 // One queued save unit. `currentValues` holds the CURRENT value of each
@@ -409,9 +410,42 @@ public:
 	/// captureChunkEdits() is a no-op that reports through the error log.
 	void shutdown();
 
+	// --- Gameplay checkpoints (stabilization PR5b, Phase 3) ----------------
+	// The transactional multi-file commit layer (ADR:
+	// docs/adr/gameplay-persistence-transactions.md). The live working set
+	// (chunks/ + root state files) and the SaveService are UNCHANGED; a
+	// checkpoint snapshots them at a durability boundary and publishes an
+	// atomic manifest. Recovery at open selects the most recent fully valid
+	// generation and re-seeds the live set from it (never mixes generations).
+
+	/// True when a committed checkpoint is the authoritative recovery source
+	/// (gameplay reads route to it; the root state files are legacy shims).
+	bool checkpointMode() const;
+	uint64_t checkpointGeneration() const;
+
+	/// Commit a checkpoint from the captured payloads. PRECONDITION: the
+	/// caller flushed the live working set (the durability barrier). Returns
+	/// false when no world is open or the commit failed before publication
+	/// (retryable; the previous checkpoint stays authoritative). A success
+	/// means the manifest IS committed — never report save success otherwise.
+	bool commitCheckpoint(const worldsave::CheckpointPayloads &payloads);
+
+	/// Carry-forward commit (close/shutdown seams without a fresh gameplay
+	/// capture): re-stage the payload bytes currently authoritative for
+	/// recovery (active generation, else legacy root files; missing = canonical
+	/// fresh, corrupt = refuse). Same precondition/return contract as above.
+	bool commitCarryForwardCheckpoint(uint64_t worldEditRevision = 0);
+
+	/// Test seam passthrough to the checkpoint store (deterministic fault
+	/// injection, ADR §3). No-op when no world is open.
+	void setCheckpointFaultForTests(worldsave::CheckpointFaultPoint point);
+
 	/// Atomically write `<world>/player.state` (tmp + rename, magic "FTVP",
 	/// format in WorldSave.hpp). False when no world is open or the write
 	/// fails; failures are appended to status().lastError.
+	/// NOTE (stabilization PR5b): in checkpoint mode this root file is a
+	/// LEGACY COMPATIBILITY SHIM (rollback support); the authoritative
+	/// recovery source is the committed generation.
 	bool writePlayerState(const PlayerPersistState &state) const;
 
 	/// Read `<world>/player.state`. A missing file is the normal fresh-world
@@ -487,6 +521,17 @@ private:
 	void recordErrorLocked(const std::string &error) const; // m_indexMutex held
 	/// The content a fresh generation must re-apply. Caller holds m_indexMutex.
 	const std::vector<worldsave::ChunkEdit> &applicableLocked(const ChunkPersistenceState &state) const;
+	/// The directory gameplay reads resolve against: the active committed
+	/// generation in checkpoint mode, else the world root (legacy shims).
+	std::filesystem::path gameplaySourceDir() const;
+	/// Re-seed the LIVE working set (chunks/ + root state shims) from the
+	/// recovered generation so the next checkpoint snapshots exactly the
+	/// recovered state + this session's edits — never pre-crash uncommitted
+	/// leftovers (ADR §2.4/§2.6). Chunk re-seed failure refuses the open;
+	/// root-shim re-seed is best-effort (loud), the generation stays
+	/// authoritative.
+	bool reseedLiveFromCheckpoint(const std::filesystem::path &worldDir,
+								  const std::filesystem::path &chunksDir, std::string &outError);
 
 	mutable std::mutex m_indexMutex;
 	StateMap m_states;              // guarded by m_indexMutex
@@ -498,4 +543,7 @@ private:
 	int m_seed{0};
 	bool m_enabled{false};
 	std::unique_ptr<SaveService> m_service;
+	// Gameplay checkpoint store (stabilization PR5b): created at open; the
+	// active generation (when any) is the authoritative recovery source.
+	std::unique_ptr<worldsave::CheckpointStore> m_checkpoints;
 };

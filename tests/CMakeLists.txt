@@ -473,6 +473,7 @@ add_executable(test_chunk_lifecycle
     ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
@@ -542,6 +543,7 @@ add_executable(test_render_bridge
     ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
@@ -619,6 +621,7 @@ add_executable(test_world_persistence
     ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${FT_VOX_VULKAN_SOURCES}
 )
@@ -680,6 +683,7 @@ add_executable(test_mesh_facekey
     ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
@@ -747,6 +751,7 @@ add_executable(test_mesh_upload
     ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
@@ -934,6 +939,7 @@ add_executable(test_debug_ui
     ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
@@ -1095,6 +1101,7 @@ add_executable(ft_vox_visual_tests
     ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
@@ -1162,6 +1169,7 @@ add_executable(test_post_resize
     ${CMAKE_SOURCE_DIR}/src/Renderer/RenderWorldBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/ChunkPool.cpp
     ${CMAKE_SOURCE_DIR}/src/Chunk/VoxelPool.cpp
@@ -1330,6 +1338,7 @@ add_executable(bench_persistence
     ${CMAKE_SOURCE_DIR}/src/Chunk/TerrainVegetation.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldSave.cpp
     ${CMAKE_SOURCE_DIR}/src/Items/ItemRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/World/WorldCheckpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldPersistence.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Profiler.cpp
     ${CMAKE_SOURCE_DIR}/src/Camera/Camera.cpp

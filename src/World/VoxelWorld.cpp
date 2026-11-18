@@ -1361,7 +1361,7 @@ void VoxelWorld::resolvePendingEditsForPersistenceShutdown()
 	pump();
 }
 
-bool VoxelWorld::forceCloseWorldForShutdown()
+bool VoxelWorld::forceCloseWorldForShutdown(const worldsave::CheckpointPayloads *gameplay)
 {
 	if (!m_persistence)
 		return true;
@@ -1380,6 +1380,32 @@ bool VoxelWorld::forceCloseWorldForShutdown()
 
 	captureAllChunkEdits();
 	const bool flushed = m_persistence->flush();
+	if (!flushed)
+		std::cerr << "[world] final shutdown: chunk flush failed" << std::endl;
+	// Stabilization PR5b (review correction): the checkpoint precondition is
+	// a COMPLETE durability barrier — commit ONLY when the async drain AND
+	// the chunk flush both succeeded, so a manifest can never reference an
+	// incomplete chunk state. Destruction has no retry point: on any failure
+	// the shutdown still releases the service unconditionally, the failure is
+	// reported with a distinct diagnostic, and the previous committed
+	// checkpoint remains the authoritative recovery point (never a mixture).
+	bool checkpointed = false;
+	if (drained && flushed)
+	{
+		checkpointed =
+			gameplay ? m_persistence->commitCheckpoint(*gameplay)
+					 : m_persistence->commitCarryForwardCheckpoint(nextEditId());
+		if (!checkpointed)
+			std::cerr << "[world] final shutdown: checkpoint commit failed; the previous committed "
+						 "checkpoint remains the recovery point"
+					  << std::endl;
+	}
+	else
+	{
+		std::cerr << "[world] final shutdown: checkpoint skipped (drain or flush failed); the "
+					 "previous committed checkpoint remains the recovery point"
+				  << std::endl;
+	}
 	m_persistence->shutdown();
 	// Disarm tracking on the loaded set: after close the world behaves
 	// exactly like a never-opened one.
@@ -1390,7 +1416,7 @@ bool VoxelWorld::forceCloseWorldForShutdown()
 				chunk->setTrackPersistentEdits(false);
 	}
 	m_persistence.reset();
-	return drained && flushed;
+	return drained && flushed && checkpointed;
 }
 
 bool VoxelWorld::closeWorld()
@@ -1420,6 +1446,16 @@ bool VoxelWorld::closeWorld()
 	if (!m_persistence->flush())
 	{
 		std::cerr << "[world] close deferred: persistence flush failed" << std::endl;
+		return false;
+	}
+
+	// Stabilization PR5b: carry-forward checkpoint commit so chunk edits
+	// accepted after the last gameplay save are durable at close. A commit
+	// failure keeps the persistence OPEN and retryable (same invariant);
+	// the previous committed checkpoint stays the recovery point.
+	if (!m_persistence->commitCarryForwardCheckpoint(nextEditId()))
+	{
+		std::cerr << "[world] close deferred: checkpoint commit failed" << std::endl;
 		return false;
 	}
 

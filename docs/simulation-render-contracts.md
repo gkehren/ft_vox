@@ -1027,6 +1027,24 @@ unchanged (missing file = fresh, quiet; no migration machinery).
 - **Out of scope**: UI (#229), runner grammar / multi-process round-trips
   (#230 — this phase proves round-trips at the facade level), no
   `world.meta`/`player.state` version bump.
+- **Stabilization PR5 update (Phase 3 checkpoints)**: the per-file atomic
+  writes above remain, but the COLLECTION is now committed transactionally
+  as a generation-based checkpoint with an atomic manifest
+  (`worldsave::CheckpointStore`, `docs/adr/gameplay-persistence-transactions.md`).
+  `savePlayerState` runs the flush barrier FIRST and reports success only
+  when the manifest committed; `shutdown`/close commit carry-forward
+  checkpoints ONLY after a complete drain+flush barrier (PR #243 review:
+  a failed drain/flush skips the commit, distinct diagnostics, previous
+  generation stays authoritative); `flushWorld` keeps its
+  intermediate-barrier meaning (no gameplay commit). Transactional
+  guarantees begin at the first successful commit — a failed first
+  migration recovers via the legacy per-file policy (ADR §2.7, tested). Recovery selects the most recent fully valid generation,
+  re-seeds the live working set from it and routes gameplay reads to it;
+  corrupt generations fall back whole, never mixed; unrecoverable corruption
+  refuses the open explicitly. The root state files + live `chunks/` remain
+  as legacy compatibility shims (additive, non-destructive migration;
+  rollback-safe). `PlayerPersistState` + its codec moved into `worldsave`
+  (global alias kept) so the checkpoint validator shares the exact rules.
 
 ### The Epic #223 Phase F gameplay-presentation contract (issue #229)
 
