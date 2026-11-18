@@ -45,6 +45,7 @@ ROOTS = [
     "World/WorldPersistence.cpp",
     "World/WorldChunk.cpp",
     "World/VoxelWorld.cpp",
+    "World/VoxelWorldPlayerStreaming.cpp",
     "World/WorldChunk.hpp",
     "World/VoxelWorld.hpp",
     "World/WorldCollisionView.hpp",

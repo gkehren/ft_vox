@@ -60,7 +60,7 @@ public:
             next = (next + 1) % cache.size();
             count = std::min<unsigned>(count + 1, static_cast<unsigned>(cache.size()));
         }
-        if (!chunk || !chunk->isVoxelBackingReadable() || !chunk->hasVoxelStorage()) return {};
+        if (!chunk || !world.canReadVoxels(*chunk) || !chunk->hasVoxelStorage()) return {};
         const int x = p.x - cx * int(CHUNK_SIZE), z = p.z - cz * int(CHUNK_SIZE);
         TextureType type = static_cast<TextureType>(chunk->getVoxel(x, p.y, z).type);
         // Match the logical edit state; never resurrect an edit from a recycled

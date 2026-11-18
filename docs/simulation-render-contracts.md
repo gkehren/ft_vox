@@ -1380,8 +1380,8 @@ To keep the PR reviewable and solo bit-identical, these still act for the
   `dropFromSlot`), the player-aware `canPlaceVoxel` rule, and item **auto
   pickup** (`advanceItems`) used the local body/inventory in A1 → **migrated
   to actor-aware by #247 (A2), see §12**.
-- Chunk residency/streaming still follows a single observer point →
-  multi-observer interest is **#248 (A3)**.
+- Chunk residency follows a single observer in A1. A3 adds multi-observer
+  interest in §13.
 - The solo save format (`player.state` / `inventory.state`) captures the local
   player only; the shared item population + allocator high-water persist as
   before → multi-player checkpoints/reconnect are **#259 (E1)**.
@@ -1531,7 +1531,7 @@ boundary, so contention resolves in **command call order**:
   effective voxel state, all-body occupancy, breakability/placeability, id
   exhaustion and inventory. Out-of-bounds cells answer `WorldRejected`,
   out-of-range slots `InvalidSlot`.
-- Chunk residency/streaming still follows a single observer → **#248 (A3)**.
+- A3 adds multi-observer chunk residency in §13.
 - The solo save format captures the local player only → **#259 (E1)**.
 
 No sockets, no ECS, no renderer refactor and no save-format migration are part
@@ -1554,3 +1554,68 @@ from pickup/placement until activated (activation persists across epochs,
 removal leaves no stale candidate). `PlayerSessions` pickup boundary updated to
 the actor-aware rule. The solo CPU digests and the headless canonical digest are
 unchanged; ASan/UBSan and TSan clean.
+
+## 13. Player-driven chunk residency (Epic #245 A3, issue #248)
+
+A CPU host opts into authoritative residency with
+`GameSimulation::advancePlayerStreaming` once per streaming tick. Use
+`setPlayerInterestRadius(PlayerId, radiusChunks)` to configure a live
+session. Zero disables it. The accepted range is 0–8 chunks. Each center
+comes from the positioned player's current controller body. Invalid positions
+are ignored until valid again. XZ follows the collision world's finite
+envelope and Y only needs to be finite. The footprint is a disk of chunk
+offsets around the player's current chunk, clipped to the world envelope.
+Session removal takes effect on the next tick. Radii default to disabled and
+survive world reload with the sessions. A fresh world starts with empty
+residency and scheduling state.
+
+`VoxelWorld` caches the union when the roster, center chunks, or radii
+change. A coordinate has one record regardless of how many footprints
+cover it. Registration and generation each keep a separate round-robin
+cursor across ticks. The cursor resumes after the last served `PlayerId`
+even if that player left. Within each turn the nearest eligible chunk
+wins, with X then Z as the distance tie-break. Overlap can satisfy several
+interests with one admission. Dispatch is deterministic given the same
+readiness at each tick. Hosts that need reproducible async replay can
+quiesce workers between ticks. Worker completion order is asynchronous.
+
+| Work | Default per tick | Hard ceiling |
+| --- | ---: | ---: |
+| Record registration | 32 | 128 |
+| Terrain starts with sync or async generation | 8 | 64 |
+| Evictions and their save captures | 16 | 64 |
+| Outstanding async terrain jobs, including unpublished completions | | 64 |
+
+Budget values can be lowered to zero. The pool grows incrementally and its
+global capacity still applies. Unregistered demand waits when slots run
+out, and selection checks the latest union before each admission. A tick
+publishes completed generation and applies pending edits before eviction.
+Terrain stays unknown to gameplay queries until the terrain job publishes.
+Records outside the union retire in registration order when their worker
+leases and canonical deferred edits have cleared. A round-robin turn for
+stranded canonical edits shares the same generation budget with players so
+those edits drain even after the last observer leaves. Deferred canonical
+edits resolve their mirrors against the neighbors present when they apply,
+including neighbors reloaded while the edit waited. Shell rebuilds sample
+the current canonical neighbors. Dirty evictions use the existing bounded
+async save queue and retry path.
+Streaming never invokes a durability barrier. A transient multiplayer
+world keeps sparse applied overrides for its epoch and reapplies them before
+publishing regenerated voxels.
+
+`VoxelWorld::playerStreamingStats()` reports combined demand, registered
+records, load and generation backlogs, out-of-interest records, records
+pinned during eviction, outstanding jobs, and work started in the last tick.
+The authority's residency is independent of future per-client subscription
+windows. Render visibility remains owned by `RenderWorldBridge`, and world
+events retain their existing incarnation and revision checks.
+
+The first player-streaming tick selects this mode for the current world.
+Call it before editing a transient world. Activation requires pending solo
+jobs and edits to clear and refuses a transient solo world with prior logical edits
+because that path cannot recover previously unloaded edits. Existing solo
+hosts use their legacy streaming entry points. Persistent saves and checkpoints use the existing
+format, so rollback requires no save conversion. The CPU-only
+`PlayerStreaming` CTest drives the facade with distant, overlapping, crossing,
+teleporting, and disconnected players. It checks dispatch replay, bounded
+work, retained worker leases, border edits, and checkpoint reopen.
