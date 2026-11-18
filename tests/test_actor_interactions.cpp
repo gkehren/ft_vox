@@ -228,6 +228,18 @@ void fillAllButRoom(items::Inventory &inv, ItemId item, uint16_t room)
 	inv.restore(slots, 0);
 }
 
+// MSVC-proof PickupCandidate construction: member assignment, NO aggregate
+// braces. MSVC misparses a braced-init-list of aggregates used to initialize a
+// std::vector (even with explicit element types), so candidates are built with
+// this maker and pushed into a default-constructed vector (issue #247 review).
+items::PickupCandidate pickupCandidate(glm::dvec3 feet, items::Inventory *inventory)
+{
+	items::PickupCandidate c;
+	c.feet = feet;
+	c.inventory = inventory;
+	return c;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Break contention: two players break one block — at most one accepted
 //    break, exactly one drop, no duplicated item generation.
@@ -324,8 +336,9 @@ void testSharedPickupSystem()
 	// (a) Priority: the FIRST in-range candidate wins the whole stack.
 	{
 		items::Inventory invA, invB;
-		const std::vector<items::PickupCandidate> candidates{
-			items::PickupCandidate{feet, &invA}, items::PickupCandidate{feet, &invB}};
+		std::vector<items::PickupCandidate> candidates;
+		candidates.push_back(pickupCandidate(feet, &invA));
+		candidates.push_back(pickupCandidate(feet, &invB));
 		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invA.totalCount(ItemId::Stone) == 10, "first candidate (A) wins the whole stack");
 		CHECK(invB.totalCount(ItemId::Stone) == 0, "second candidate (B) gets nothing");
@@ -334,8 +347,9 @@ void testSharedPickupSystem()
 	// (b) Reversed order reverses the winner — order IS the priority.
 	{
 		items::Inventory invA, invB;
-		const std::vector<items::PickupCandidate> candidates{
-			items::PickupCandidate{feet, &invB}, items::PickupCandidate{feet, &invA}};
+		std::vector<items::PickupCandidate> candidates;
+		candidates.push_back(pickupCandidate(feet, &invB));
+		candidates.push_back(pickupCandidate(feet, &invA));
 		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invB.totalCount(ItemId::Stone) == 10, "reversed order: B wins");
 		CHECK(invA.totalCount(ItemId::Stone) == 0, "reversed order: A gets nothing");
@@ -345,8 +359,9 @@ void testSharedPickupSystem()
 	{
 		items::Inventory invA, invB;
 		fillAllButRoom(invA, ItemId::Stone, 4);
-		const std::vector<items::PickupCandidate> candidates{
-			items::PickupCandidate{feet, &invA}, items::PickupCandidate{feet, &invB}};
+		std::vector<items::PickupCandidate> candidates;
+		candidates.push_back(pickupCandidate(feet, &invA));
+		candidates.push_back(pickupCandidate(feet, &invB));
 		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invA.totalCount(ItemId::Stone) == items::maxStackOf(ItemId::Stone),
 			  "A topped up to a full stack (took 4)");
@@ -360,8 +375,9 @@ void testSharedPickupSystem()
 	{
 		items::Inventory invA, invB;
 		fillAllButRoom(invA, ItemId::Stone, 0); // no room for Stone
-		const std::vector<items::PickupCandidate> candidates{
-			items::PickupCandidate{feet, &invA}, items::PickupCandidate{feet, &invB}};
+		std::vector<items::PickupCandidate> candidates;
+		candidates.push_back(pickupCandidate(feet, &invA));
+		candidates.push_back(pickupCandidate(feet, &invB));
 		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invA.totalCount(ItemId::Stone) == items::maxStackOf(ItemId::Stone),
 			  "full A took nothing");
@@ -373,8 +389,9 @@ void testSharedPickupSystem()
 		items::Inventory invA, invB;
 		fillAllButRoom(invA, ItemId::Stone, 0);
 		fillAllButRoom(invB, ItemId::Stone, 0);
-		const std::vector<items::PickupCandidate> candidates{
-			items::PickupCandidate{feet, &invA}, items::PickupCandidate{feet, &invB}};
+		std::vector<items::PickupCandidate> candidates;
+		candidates.push_back(pickupCandidate(feet, &invA));
+		candidates.push_back(pickupCandidate(feet, &invB));
 		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(sys.entities().size() == 1 && sys.entities()[0].stack == S(ItemId::Stone, 10),
 			  "both full: entity stays with its full stack");
@@ -382,7 +399,8 @@ void testSharedPickupSystem()
 	// (f) Out of range: a far candidate never picks up.
 	{
 		items::Inventory invA;
-		const std::vector<items::PickupCandidate> candidates{items::PickupCandidate{far, &invA}};
+		std::vector<items::PickupCandidate> candidates;
+		candidates.push_back(pickupCandidate(far, &invA));
 		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invA.totalCount(ItemId::Stone) == 0, "out-of-range candidate picks nothing");
 		CHECK(sys.entities().size() == 1, "entity stays");
@@ -390,8 +408,9 @@ void testSharedPickupSystem()
 	// (g) Null inventory candidate is skipped defensively.
 	{
 		items::Inventory invB;
-		const std::vector<items::PickupCandidate> candidates{
-			items::PickupCandidate{feet, nullptr}, items::PickupCandidate{feet, &invB}};
+		std::vector<items::PickupCandidate> candidates;
+		candidates.push_back(pickupCandidate(feet, nullptr));
+		candidates.push_back(pickupCandidate(feet, &invB));
 		const auto sys = run(candidates, S(ItemId::Stone, 10));
 		CHECK(invB.totalCount(ItemId::Stone) == 10, "null candidate skipped; B takes the stack");
 		CHECK(sys.entities().empty(), "entity removed");
@@ -404,7 +423,8 @@ void testSharedPickupSystem()
 		legacy.update(1.0 / 60.0, world, feet, invLegacy, false);
 		items::ItemEntitySystem batch;
 		batch.spawn(S(ItemId::Stone, 7), spot, glm::dvec3(0.0), 0);
-		const std::vector<items::PickupCandidate> batchCandidates{items::PickupCandidate{feet, &invBatch}};
+		std::vector<items::PickupCandidate> batchCandidates;
+		batchCandidates.push_back(pickupCandidate(feet, &invBatch));
 		batch.update(1.0 / 60.0, world, batchCandidates, false);
 		CHECK(invLegacy.slots() == invBatch.slots(), "legacy single-player pickup == one-candidate batch");
 		CHECK(legacy.entities().size() == batch.entities().size(), "same population outcome");
