@@ -276,13 +276,16 @@ legitimately exceed the strict thresholds through FP rounding alone. Therefore:
   forces strict mode from the CLI (overriding the environment), and setting
   `FT_VOX_VISUAL_SMOKE=0` in the environment enables strict ctest runs on the
   canonical machine.
-- CI split (stabilization Phase 6): `cpu-boundary.yml` runs the CPU suite on
-  every push/PR and COMPILES the graphical stack (no GPU, no device tests).
-  `gpu-validation.yml` is the **optional** runtime gate — manual dispatch or
-  a self-hosted `gpu` runner (PR label `run-gpu`); it executes the device
-  tests + this harness and publishes the failure artifacts. Without a GPU
-  runner the device tests are **not executed**, never reported as passed.
-  The canonical reference environment and commands: `docs/gpu-validation.md`.
+- CI split (stabilization Phase 6, PR #244 trust correction):
+  `cpu-boundary.yml` runs the CPU suite on every push/PR and COMPILES the
+  graphical stack (no GPU, no device tests). `gpu-validation.yml` is the
+  **optional** runtime gate — **manual dispatch on the protected `main`
+  branch only**, on the self-hosted `gpu` runner; no PR trigger (untrusted
+  PR code never reaches the persistent runner). PR GPU validation is manual
+  on the canonical machine before merge. Without a suitable runner the
+  device tests are **not executed**, never reported as passed. The trust
+  contract is CI-enforced (`GpuWorkflowTrustGuard`); the canonical reference
+  environment and commands: `docs/gpu-validation.md`.
 - A software rasterizer (`lavapipe`) can run the harness in smoke mode on a
   GPU-less runner; strict goldens remain canonical-GPU-only.
 

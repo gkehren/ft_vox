@@ -147,7 +147,31 @@ ticks; baseline = `345dfa12` worktree with the identical benchmark source.
    measured (digest parity is covered by `HeadlessRunner`). Follow-up: an
    async timing scenario if worker scheduling becomes a performance question.
 
-## 6. Definition of Done
+## 6. Review corrections (post-review pass on #243 / #244)
+
+- **#243 — durability barrier (P1)**: `forceCloseWorldForShutdown` now
+  commits a checkpoint ONLY when the async drain AND the chunk flush both
+  succeeded; otherwise the commit is skipped with a distinct diagnostic, the
+  service is still released unconditionally, and the previous committed
+  generation stays authoritative. `closeWorld` / `savePlayerState` were
+  audited (already guarded) and are now covered by tests A–D
+  (`testCheckpointDurabilityBarrier`, incl. the drain-failure-with-succeeding-
+  flush case). Commit `ba83382`.
+- **#243 — migration contract (P2)**: transactional guarantees explicitly
+  begin at the first successful checkpoint commit; a failed first migration
+  recovers via the legacy per-file policy (non-destructive, not a
+  transactional snapshot). ADR §2.3/§2.7 + gameplay docs corrected;
+  `testFirstMigrationFailureBoundary` covers the boundary deterministically.
+- **#244 — GPU workflow trust (P2)**: Option A strict model —
+  `workflow_dispatch` honored only on `refs/heads/main`, no PR trigger
+  (untrusted/fork code never reaches the persistent runner), minimal
+  `contents: read` permissions, `persist-credentials: false`, no secrets, no
+  privileged installation (runner prerequisites verified, not installed),
+  explicit not-executed reporting. Enforced on every CPU CI run by the new
+  `GpuWorkflowTrustGuard` CTest; docs updated. Visual references and the
+  Vulkan/visual test steps unchanged.
+
+## 7. Definition of Done
 
 - [x] Invalid raycast inputs are safe (no-hit, bounded, no UB).
 - [x] Deferred voxel interactions cannot duplicate or lose resources.

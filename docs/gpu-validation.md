@@ -123,18 +123,40 @@ device-init overlay baseline). The suites specifically exercise:
 **Zero validation errors** from `WorldRenderer::init` onward is the gate;
 any error fails the run (the harness counts them per stage).
 
-## 6. CI strategy
+## 6. CI strategy and trust model (PR #244 review correction)
 
-- Normal CPU CI (`cpu-boundary.yml`) never depends on a GPU — unchanged.
-- `.github/workflows/gpu-validation.yml` is the **optional** runtime gate:
-  `workflow_dispatch` (manual) or a self-hosted GPU runner label. It builds
-  the graphical stack, runs the device tests + visual regression, and
-  publishes artifacts (test logs, `visual-qa/` screenshots/diffs/metrics,
-  validation output, GPU/driver summary). Without a GPU runner it is simply
-  not triggered — CPU CI stays green and the GPU tests are reported as
-  **not executed**, never as passed.
+- Normal CPU CI (`cpu-boundary.yml`) never depends on a GPU — unchanged, and
+  it remains the per-PR gate.
+- `.github/workflows/gpu-validation.yml` is the **optional** runtime gate
+  under a **strict trust model (Option A)**:
+  - **`workflow_dispatch` only, honored only on the protected `main` branch**
+    (`github.ref == 'refs/heads/main'`). A dispatch selecting any other ref
+    skips the GPU job; the scope job reports the tests as **not executed**.
+  - **No `pull_request` trigger.** Unmerged / fork PR code never executes on
+    the persistent self-hosted GPU runner — a label is an opt-in convenience,
+    not a security boundary, so label-based PR execution was removed.
+  - **PR GPU validation is manual**: run this profile on the developer's
+    canonical machine before merge and record the result (see §8). An
+    unmerged PR has **not** undergone GPU CI validation merely because `main`
+    passed.
+  - Minimal permissions (`contents: read`), `persist-credentials: false` on
+    checkout, **no secrets** referenced or exposed to the build, and **no
+    privileged package installation**: the dedicated runner is provisioned
+    with the dependencies and the job verifies them (failing loudly when
+    absent) instead of granting build code passwordless escalation.
+  - The `gpu-execution-scope` job always reports the actual execution scope:
+    skipped (untrusted ref / no runner) or failed is **never** reported as
+    passed.
+- The trust contract is enforced on every CPU CI run by the
+  `GpuWorkflowTrustGuard` CTest (`tests/check_gpu_workflow.py`, stdlib-only):
+  dispatch-only trigger, main-ref job condition, minimal permissions, no
+  persisted credentials, no privileged installation, no secrets, and the
+  CPU gate intact.
 - A software rasterizer (lavapipe) can run the harness on a GPU-less runner
   in smoke mode once available; strict goldens remain canonical-GPU-only.
+  If GPU validation of unmerged PRs ever becomes essential, it must use
+  disposable isolated runners with explicit approval (Option B in the review
+  plan) — never the persistent runner.
 
 ## 7. Failure artifacts
 

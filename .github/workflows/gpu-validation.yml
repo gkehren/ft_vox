@@ -1,17 +1,23 @@
-# Optional GPU runtime validation (stabilization Phase 6).
+# Optional GPU runtime validation (stabilization Phase 6; PR #244 review).
 #
-# The CPU boundary gate (cpu-boundary.yml) COMPILES the graphical stack but
-# never executes Vulkan device tests — a compilation-only job is not proof of
-# successful runtime rendering. This workflow is the runtime proof:
+# TRUST MODEL (Option A — strict, simple):
+#   * workflow_dispatch ONLY, honored ONLY on the protected `main` branch.
+#   * NO pull_request trigger: unmerged / fork PR code NEVER executes on the
+#     persistent self-hosted GPU runner. A label is an opt-in convenience,
+#     not a security boundary, so label-based PR execution was removed.
+#   * GPU validation of an unmerged PR is performed MANUALLY on the
+#     developer's canonical machine before merge (docs/gpu-validation.md).
+#     An unmerged PR has NOT undergone GPU CI validation merely because
+#     `main` passed.
+#   * Minimal permissions (contents: read); checkout credentials are not
+#     persisted; no secrets are referenced or exposed to the build.
+#   * No privileged package installation: the dedicated runner is
+#     provisioned with the dependencies; the job verifies them and fails
+#     loudly when absent (build code never gets privileged escalation).
 #
-#   * manual trigger (workflow_dispatch) — run it on a GPU-capable machine;
-#   * OR a self-hosted runner carrying the `gpu` label (push/PR opt-in via
-#     the `run-gpu` label on the PR).
-#
-# Normal CPU-only CI NEVER depends on this workflow or on a GPU. Without a
-# GPU runner the device tests are NOT EXECUTED — reported as such, never as
-# passed. See docs/gpu-validation.md for the canonical reference environment
-# and the strict golden policy.
+# Without a suitable GPU runner the device tests are NOT EXECUTED — the
+# note job reports that explicitly, never as "passed". Normal CPU CI
+# (cpu-boundary.yml) remains the per-PR gate and is unaffected.
 
 name: gpu-validation
 
@@ -24,9 +30,9 @@ on:
         default: "smoke"
         type: choice
         options: [smoke, strict]
-  pull_request:
-    branches: [main]
-    types: [labeled, synchronize]
+
+permissions:
+  contents: read
 
 concurrency:
   group: gpu-validation-${{ github.ref }}
@@ -34,16 +40,17 @@ concurrency:
 
 jobs:
   gpu-linux:
-    # Opt-in: only runs on a self-hosted GPU runner when the PR carries the
-    # `run-gpu` label (or on manual dispatch). GitHub-hosted runners have no
-    # GPU — this job is skipped there, never silently "passed".
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'run-gpu')
+    # Strict ref trust: a manual dispatch is honored ONLY on refs/heads/main
+    # (the protected branch). Selecting any other ref skips this job — the
+    # note job below reports the tests as not executed. Fork/PR code can
+    # never reach this persistent runner through this workflow.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, linux, gpu]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Record GPU / driver environment
         run: |
@@ -57,12 +64,21 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Install build dependencies
+      - name: Verify runner prerequisites (no privileged installation)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake g++ ninja-build python3 git \
-            libvulkan-dev glslc glslang-tools libboost-system-dev \
-            vulkan-validationlayers
+          missing=0
+          for tool in cmake g++ ninja python3 git vulkaninfo glslc; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "MISSING: $tool"; missing=1; }
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "The dedicated GPU runner must be provisioned with these tools." >&2
+            echo "This workflow intentionally performs no privileged package installation." >&2
+            exit 1
+          fi
+          if [ -z "${VK_LAYER_PATH:-}" ] && [ ! -d /usr/share/vulkan/explicit_layer.d ]; then
+            echo "MISSING: Vulkan validation layers (VK_LAYER_PATH or /usr/share/vulkan/explicit_layer.d)" >&2
+            exit 1
+          fi
 
       - name: Configure (full graphical build)
         run: >
@@ -105,19 +121,30 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # Compilation-only fallback for forks / PRs without a GPU runner: proves the
-  # graphical stack still builds, explicitly NOT a runtime validation. The
-  # cpu-boundary workflow already covers this on every PR; this job exists so
-  # a manual dispatch on a GPU-less machine still produces a clear summary.
-  gpu-compile-only-note:
-    if: github.event_name == 'workflow_dispatch'
+  gpu-execution-scope:
+    # Always reports the ACTUAL execution scope on dispatch. When the trust
+    # condition skips the GPU job, or no suitable runner exists, the device
+    # tests are NOT EXECUTED — this job states that explicitly so a skipped
+    # run can never be read as "passed".
+    if: always() && github.event_name == 'workflow_dispatch'
+    needs: [gpu-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Report execution scope
         run: |
           {
             echo "## GPU validation scope"
-            echo "Device tests execute only on the self-hosted \`gpu\` runner."
-            echo "On GitHub-hosted runners they are **not executed** (no GPU),"
-            echo "never reported as passed. See docs/gpu-validation.md."
+            if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+              echo "Dispatch ref \`${{ github.ref }}\` is not the protected \`main\` branch:"
+              echo "the GPU job was SKIPPED by the trust policy. Device tests **NOT EXECUTED**."
+            elif [ "${{ needs.gpu-linux.result }}" = "success" ]; then
+              echo "GPU job executed on the self-hosted runner — see its summary and artifacts."
+            else
+              echo "GPU job result: \`${{ needs.gpu-linux.result }}\` (no suitable runner, or failure)."
+              echo "Device tests **NOT EXECUTED** or **FAILED** — never reported as passed."
+            fi
+            echo ""
+            echo "Unmerged PRs are NOT GPU-validated by this workflow. Run the canonical"
+            echo "profile manually before merge (docs/gpu-validation.md). CPU CI"
+            echo "(cpu-boundary.yml) remains the per-PR gate."
           } >> "$GITHUB_STEP_SUMMARY"
