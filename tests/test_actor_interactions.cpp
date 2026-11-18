@@ -505,7 +505,8 @@ void testInvalidActorRejections(ThreadPool &pool)
 	const sim::InventorySnapshot inv0 = inventoryOf(sim, local);
 	const size_t items0 = sim.itemEntities().size();
 
-	for (const sim::PlayerId bad : {ghost, retired, sim::kInvalidPlayerId})
+	const sim::PlayerId badIds[] = {ghost, retired, sim::kInvalidPlayerId};
+	for (const sim::PlayerId bad : badIds)
 	{
 		CHECK(sim.breakBlock(bad, cell) == sim::BreakResult::InvalidPlayer, "invalid-actor break refused");
 		CHECK(sim.placeSelectedBlock(bad, cell) == sim::PlaceResult::InvalidPlayer, "invalid-actor place refused");
@@ -874,10 +875,10 @@ void testCoordinateValidation(ThreadPool &pool)
 	// Extreme integer cells (near the INT32 bounds): rejected with integer
 	// comparisons before a float position / AABB is ever constructed.
 	const glm::ivec3 extremeCells[] = {
-		{INT32_MAX, 64, 0}, {INT32_MIN, 64, 0},
-		{0, 64, INT32_MAX}, {0, 64, INT32_MIN},
-		{INT32_MAX, INT32_MAX, INT32_MAX}, {INT32_MIN, INT32_MIN, INT32_MIN},
-		{0, INT32_MAX, 0}, {0, INT32_MIN, 0},
+		glm::ivec3(INT32_MAX, 64, 0), glm::ivec3(INT32_MIN, 64, 0),
+		glm::ivec3(0, 64, INT32_MAX), glm::ivec3(0, 64, INT32_MIN),
+		glm::ivec3(INT32_MAX, INT32_MAX, INT32_MAX), glm::ivec3(INT32_MIN, INT32_MIN, INT32_MIN),
+		glm::ivec3(0, INT32_MAX, 0), glm::ivec3(0, INT32_MIN, 0),
 	};
 	for (const glm::ivec3 &c : extremeCells)
 	{
