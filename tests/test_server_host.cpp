@@ -146,6 +146,88 @@ void testHost(const fs::path &root)
 	CHECK(recovered.stop(error), error);
 }
 
+void testAnchorParticipation(const fs::path &root)
+{
+	server::HostConfig config;
+	config.world = {.seed = 4, .worldName = "anchor_participation", .savesRoot = root};
+	config.workers = 0;
+	config.interestRadiusChunks = 2;
+	server::ServerHost host(config);
+	std::string error;
+	if (!host.start(error))
+	{
+		CHECK(false, error);
+		return;
+	}
+	auto &sim = server::ServerHostProbe::simulation(host);
+	auto &items = const_cast<items::ItemEntitySystem &>(sim.itemEntities());
+	auto &mobs = const_cast<entities::MobSystem &>(sim.mobs());
+	const auto step = [&] { CHECK(host.step(server::TerrainTiming::QuiescePerTick, error), error); };
+	const auto anchorFeet = sim.playerFeet();
+	CHECK_EXPR(sim.playerPositioned(sim.localPlayerId()));
+	sim::InventorySnapshot anchorBefore;
+	sim.inventorySnapshot(anchorBefore);
+	const auto dropId = items.spawn({items::ItemId::Dirt, 3}, anchorFeet, {}, 3);
+	CHECK_EXPR(dropId != 0);
+
+	// Seed 4 has a forest chunk just north of spawn. A grass pad covers
+	// every candidate column in its group so the default-policy control
+	// can witness a scan with a guaranteed spawn chance.
+	for (int z = -13; z <= -4; ++z)
+		for (int x = 3; x <= 12; ++x)
+			CHECK_EXPR(sim.placeVoxel({x + 0.5f, 244.5f, z + 0.5f}, GRASS_TOP).accepted);
+	mobs.settings.spawnMin = 10;
+	mobs.settings.spawnMax = 24;
+	mobs.settings.spawnChance = 1;
+	mobs.settings.spawnInterval = 60;
+	const glm::dvec3 anchorMobFeet{anchorFeet.x, 245.001, anchorFeet.z};
+	const auto support = [&](glm::dvec3 feet) {
+		return sim.placeVoxel(glm::vec3(feet) - glm::vec3(0, 0.5f, 0), STONE).accepted;
+	};
+	const auto addMob = [&](glm::dvec3 feet, entities::EntityId id) {
+		return mobs.add(entities::MobSpecies::Sheep, feet, id, id, WorldCollisionView(*sim.world()));
+	};
+	CHECK_EXPR(support(anchorMobFeet) && addMob(anchorMobFeet, 1));
+	step();
+	CHECK_EXPR(mobs.mobs().empty());
+	const auto remote = host.joinRemote().player;
+	CHECK_EXPR(remote.valid() && !sim.playerPositioned(remote));
+	for (int i = 0; i < 5; ++i)
+		step();
+	CHECK_EXPR(mobs.mobs().empty());
+	CHECK_EXPR(items.size() == 1);
+	if (!items.entities().empty())
+	{
+		const auto &drop = items.entities().front();
+		CHECK_EXPR(drop.id == dropId && drop.stack.count == 3 && drop.pickupDelay == 0 &&
+			drop.ageTicks == host.ticks());
+		CHECK_EXPR(glm::distance(drop.body.position, sim.playerFeet()) <= items.settings.pickupRadius);
+	}
+	sim::InventorySnapshot anchorAfter;
+	sim.inventorySnapshot(anchorAfter);
+	CHECK_EXPR(anchorAfter == anchorBefore);
+
+	// With the same terrain and no positioned remote, the simulation's
+	// default policy scans immediately using the local player's position.
+	sim.advancePlayerMobs(server::kTickDt, config.interestRadiusChunks * CHUNK_SIZE, false);
+	CHECK_EXPR(!mobs.mobs().empty());
+
+	// Use explicit placement to test retention with observers far apart.
+	mobs.settings.spawnChance = 0;
+	CHECK_EXPR(host.activateRemote(remote));
+	const auto remoteFeet = anchorMobFeet + glm::dvec3(128, 0, 0);
+	sim.setPlayerPosition(remote, remoteFeet);
+	step(); // Publish the far player's chunk before adding a mob there.
+	CHECK_EXPR(addMob(anchorMobFeet, 2));
+	CHECK_EXPR(support(remoteFeet) && addMob(remoteFeet, 3));
+	step();
+	CHECK_EXPR(mobs.mobs().size() == 1 && mobs.mobs().front().id == 3);
+	host.leaveRemote(remote);
+	step();
+	CHECK_EXPR(mobs.mobs().empty());
+	CHECK(host.stop(error), error);
+}
+
 void testMovement(const fs::path &root)
 {
 	namespace udp = net::udp;
@@ -347,6 +429,7 @@ int main()
 	const auto temp = fs::temp_directory_path() /
 		("ft_vox_server_host_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 	testHost(temp);
+	testAnchorParticipation(temp);
 	testMovement(temp);
 	std::error_code error;
 	fs::remove_all(temp, error);

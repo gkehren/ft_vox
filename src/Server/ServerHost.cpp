@@ -541,8 +541,9 @@ bool ServerHost::step(TerrainTiming terrainTiming, std::string &error)
 		return false;
 
 	const double radiusBlocks = m_config.interestRadiusChunks * static_cast<double>(CHUNK_SIZE);
-	m_sim->advancePlayerMobs(kTickDt, radiusBlocks, false);
-	m_sim->advanceItems(kTickDt, false);
+	constexpr auto anchorPolicy = sim::GameSimulation::LocalAnchorPolicy::Exclude;
+	m_sim->advancePlayerMobs(kTickDt, radiusBlocks, false, anchorPolicy);
+	m_sim->advanceItems(kTickDt, false, anchorPolicy);
 	m_sim->pumpWorld();
 
 	distributeWorldEdits();

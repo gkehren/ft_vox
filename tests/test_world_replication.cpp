@@ -1,3 +1,4 @@
+#include <Items/ItemRegistry.hpp>
 #include <Network/ClientTransport.hpp>
 #include <Server/ServerHost.hpp>
 #include <World/WorldCollisionView.hpp>
@@ -760,6 +761,93 @@ void testIncompatibleGenerator()
 		!client.scope() && client.chunks().empty(), "incompatible generator installed a scope");
 }
 
+void testAnchorPickup(const fs::path &root)
+{
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "anchor_pickup", .savesRoot = root};
+	config.workers = 0;
+	config.interestRadiusChunks = 1;
+	server::ServerHost host(config);
+	std::string error;
+	require(host.start(error), error);
+	auto &sim = server::ServerHostProbe::simulation(host);
+	auto &items = const_cast<items::ItemEntitySystem &>(sim.itemEntities());
+	udp::ServerTransport transport(loopback, 2, host.sessionWorld());
+	udp::ClientTransport first(transport.address()), second(transport.address());
+	const std::array clients{&first, &second};
+	Time now{};
+	const auto until = [&](auto ready, const char *failure) {
+		for (int i = 0; i < 120; ++i)
+		{
+			if (ready())
+				return;
+			for (auto *client : clients)
+				client->poll(now);
+			transport.poll(now);
+			transport.serviceOwner(host, host.ticks());
+			transport.poll(now);
+			for (auto *client : clients)
+				client->poll(now);
+			require(host.step(server::TerrainTiming::QuiescePerTick, error), error);
+			now += 17ms;
+		}
+		require(ready(), failure);
+	};
+
+	first.connect(now);
+	until([&] { return first.inventory().has_value(); }, "first pickup contender failed to join");
+	second.connect(now);
+	until([&] { return second.inventory().has_value(); }, "second pickup contender failed to join");
+	const auto firstId = first.welcome()->player;
+	const auto secondId = second.welcome()->player;
+	require(sim.localPlayerId() < firstId && firstId < secondId, "pickup fixture did not order the anchor first");
+	sim::InventorySnapshot anchorBefore;
+	sim.inventorySnapshot(anchorBefore);
+	constexpr auto dirt = items::ItemId::Dirt;
+	const auto count = [](const auto &slots) {
+		unsigned total = 0;
+		for (const auto stack : slots)
+			if (stack.item == items::ItemId::Dirt)
+				total += stack.count;
+		return total;
+	};
+	const auto verifyPickup = [&](uint16_t dropCount, unsigned firstTotal, unsigned secondTotal) {
+		const auto anchorFeet = sim.playerFeet();
+		sim.setPlayerPosition(firstId, anchorFeet);
+		sim.setPlayerPosition(secondId, anchorFeet);
+		const auto id = items.spawn({dirt, dropCount}, anchorFeet, {}, 18);
+		require(id != 0, "seed contested drop");
+		const auto seesDrop = [id](const udp::ClientTransport &client) {
+			const auto &snapshot = client.itemSnapshots().current;
+			return snapshot && snapshot->count == 1 && snapshot->items.front().id == id;
+		};
+		until([&] { return seesDrop(first) && seesDrop(second); }, "pickup contenders did not see the drop");
+		require(items.size() == 1 && items.entities().front().pickupDelay > 0,
+			"pickup fixture missed the live drop");
+		for (const auto idInRange : {sim.localPlayerId(), firstId, secondId})
+			require(glm::distance(sim.playerFeet(idInRange), items.entities().front().body.position) <=
+				items.settings.pickupRadius, "pickup contender is out of range");
+		const auto converged = [&] {
+			return first.itemSnapshots().current->count == 0 && second.itemSnapshots().current->count == 0 &&
+				count(first.inventory()->slots) == firstTotal && count(second.inventory()->slots) == secondTotal;
+		};
+		until(converged, "remote pickup did not converge or the anchor stole the drop");
+		const auto removalTick = first.itemSnapshots().current->tick;
+		until([&] { return first.itemSnapshots().current->tick > removalTick; }, "missing post-pickup snapshot");
+		sim::InventorySnapshot anchorAfter;
+		sim.inventorySnapshot(anchorAfter);
+		require(converged() && anchorAfter == anchorBefore && items.size() == 0 &&
+			sim.itemIdHighWater() == id && count(sim.inventory(firstId)->slots()) == firstTotal &&
+			count(sim.inventory(secondId)->slots()) == secondTotal, "pickup was duplicated or changed the anchor inventory");
+	};
+	verifyPickup(3, 3, 0);
+	const auto capacity = static_cast<uint16_t>(items::kInventorySize * items::maxStackOf(dirt));
+	require(sim.grantItems(firstId, dirt, capacity - 4).remainder.isEmpty(), "fill the first contender's inventory");
+	verifyPickup(4, capacity, 3);
+	transport.stop(host);
+	require(host.stop(error), error);
+}
+
 void testEntityReplication(const fs::path &root)
 {
 	using Kind = wire::ActionKind;
@@ -849,7 +937,6 @@ void testEntityReplication(const fs::path &root)
 	const auto firstId = first.welcome()->player;
 	const auto secondId = second.welcome()->player;
 	constexpr glm::dvec3 firstFeet{8.5, 245, 4.5}, secondFeet{8.5, 245, 13.5};
-	sim.setPlayerPosition(farFeet);
 	sim.setPlayerPosition(firstId, firstFeet);
 	sim.setPlayerPosition(secondId, secondFeet);
 	require(firstId < secondId && first.inventory()->revision == 1 && second.inventory()->revision == 1,
@@ -1054,7 +1141,10 @@ int main(int argc, char **argv)
 		if (argc == 2 && std::string_view(argv[1]) == "--actions")
 			testVoxelActions(root);
 		else if (argc == 2 && std::string_view(argv[1]) == "--entities")
+		{
+			testAnchorPickup(root);
 			testEntityReplication(root);
+		}
 		else
 		{
 			testIncompatibleGenerator();

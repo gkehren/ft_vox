@@ -51,7 +51,7 @@ prevents startup.
 The main thread opens the save, synchronously bootstraps terrain, restores
 the local compatibility player and shared item state, then activates
 player-driven residency. The local anchor provides the initial streaming
-and mob observer. At the start of each 60 Hz server tick the owner drains the
+observer. At the start of each 60 Hz server tick the owner drains the
 connection inboxes and resolves admitted voxel actions in ascending
 `PlayerId` order using the last completed poses. It then advances each
 walking player in the same order. Each player runs two 120 Hz steps through
@@ -190,18 +190,20 @@ changes arrive separately through the ordered world stream.
 
 ## Inventory and entity replication
 
-Every positioned actor, including the local anchor, participates in shared item pickup. The simulation
-steps the item population once at 60 Hz and offers each eligible drop in
-ascending PlayerId order. Inventory capacity can leave a remainder for
-the next eligible actor on the same tick. The server alone resolves pickup,
-slot changes and drops. Each client receives its own 36 slots and hotbar
+Only positioned remote players participate in dedicated-server item pickup.
+The simulation steps the item population once at 60 Hz and offers each
+eligible drop in ascending PlayerId order. Inventory capacity can leave a
+remainder for the next eligible player on the same tick. The server alone
+resolves pickup, slot changes and drops. Each client receives its own 36 slots and hotbar
 selection through `ClientTransport::inventory()`. Remote inventories start
 empty for each session. A slot command's reliable result arrives after the
 client has received the corresponding inventory revision or a newer one.
 
 Passive mobs share one 60 Hz simulation and one population cap. The
-server rotates spawn scans across positioned actors within the existing
+server rotates spawn scans across positioned remote players within the existing
 global spawn budget and retires mobs outside every observer's range.
+With no positioned remotes, there are no mob spawn scans and existing mobs
+retire. The local compatibility anchor serves the server's world lifecycle.
 `ClientTransport::itemSnapshots()` and `mobSnapshots()` expose the previous
 and current samples. Use their server ticks (60 Hz) and stable IDs for
 interpolation. The current sample defines which entities are visible.
@@ -217,6 +219,9 @@ family has a process-wide cap of 256 frames/s. The host uses fixed-size
 selection buffers, and the client holds two fixed-size samples per
 family. Fresh updates replace unsent ones. The wire format and delivery
 rules are described in the [protocol ADR](adr/authoritative-wire-protocol.md#nearby-entities).
+
+A future CPU-only load benchmark can measure per-client snapshot rate and
+age, server tick latency and client progress at 16, 32 and 64 clients.
 
 Malformed requests, old or skipped IDs, and wrong scopes are discarded
 before consuming an action slot. Reliable receipt ACKs are independent of
@@ -346,4 +351,6 @@ after departure, and checkpoint recovery in a fresh epoch.
 pickup count changes, private inventory and action delivery, packet loss
 and replay, interest boundaries and caps, expiry, and item allocator
 recovery after reconnect and restart.
+`ServerHost` and `EntityReplication` also cover pickup and mob observation
+with the compatibility anchor at spawn, including an empty remote set.
 CTest returns nonzero on failure.
