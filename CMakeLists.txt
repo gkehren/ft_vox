@@ -308,6 +308,7 @@ set(FT_VOX_IMGUI_SOURCES
 )
 
 set(FT_VOX_WORLD_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/World/VoxelWorldPlayerStreaming.cpp
     ${CMAKE_SOURCE_DIR}/src/World/WorldChunk.cpp
     ${CMAKE_SOURCE_DIR}/src/World/VoxelWorld.cpp
 )

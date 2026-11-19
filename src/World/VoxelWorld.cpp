@@ -180,6 +180,9 @@ void VoxelWorld::takeEvents(std::vector<WorldEvent> &out)
 StreamingUpdateKind VoxelWorld::updateStreaming(const glm::vec3 &center, const glm::vec2 &forwardXZ,
 												const WorldStreamSettings &settings)
 {
+	if (m_playerStreaming)
+		return StreamingUpdateKind::None;
+
 	// Grow the record pool toward the view-distance estimate (incremental,
 	// same per-call cap as the render ChunkPool). The world owns its own
 	// residency capacity so a headless consumer needs no external growth.
@@ -209,7 +212,7 @@ StreamingUpdateKind VoxelWorld::updateStreaming(const glm::vec3 &center, const g
 
 void VoxelWorld::processChunkLoading(int budget)
 {
-	if (budget <= 0)
+	if (m_playerStreaming || budget <= 0)
 		return;
 
 	// Back-pressure: never pull more candidates than free record slots.
@@ -249,9 +252,24 @@ void VoxelWorld::processChunkLoading(int budget)
 			m_loadQueueHead = 0;
 		}
 	}
-	if (toLoad.empty())
-		return;
+	const auto rejected = loadChunkRecords(toLoad);
+	if (!rejected.empty())
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		for (const glm::ivec3 &pos : rejected)
+		{
+			if (m_chunks.contains(pos) || !m_enqueuedLoads.insert(pos).second)
+				continue;
+			m_loadQueue.push_back({pos, 0.f});
+			m_queueNeedsSort = true;
+		}
+	}
+}
 
+std::vector<glm::ivec3> VoxelWorld::loadChunkRecords(std::span<const glm::ivec3> toLoad)
+{
+	if (toLoad.empty())
+		return {};
 	std::vector<std::pair<glm::ivec3, WorldChunk *>> acquired;
 	std::vector<glm::ivec3> rejected;
 	acquired.reserve(toLoad.size());
@@ -291,17 +309,7 @@ void VoxelWorld::processChunkLoading(int budget)
 		}
 	}
 
-	// Put rejected loads back (nearest-first will re-sort next tick).
-	for (const glm::ivec3 &pos : rejected)
-	{
-		if (m_chunks.find(pos) != m_chunks.end())
-			continue;
-		if (m_enqueuedLoads.count(pos) != 0)
-			continue;
-		m_loadQueue.push_back({pos, 0.f});
-		m_enqueuedLoads.insert(pos);
-		m_queueNeedsSort = true;
-	}
+	return rejected;
 }
 
 void VoxelWorld::queueUnloadOutOfRange(const glm::vec3 &center, const WorldStreamSettings &settings)
@@ -330,9 +338,13 @@ void VoxelWorld::queueUnloadOutOfRange(const glm::vec3 &center, const WorldStrea
 		}
 	}
 
-	if (toUnload.empty())
-		return;
+	retireChunks(toUnload);
+}
 
+size_t VoxelWorld::retireChunks(std::span<const glm::ivec3> toUnload)
+{
+	if (toUnload.empty())
+		return 0;
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
 	// Collect the retire set first, then compact the active list in one
 	// pass (no per-record linear search; the pre-split manager used the
@@ -353,7 +365,8 @@ void VoxelWorld::queueUnloadOutOfRange(const glm::vec3 &center, const WorldStrea
 		// BEFORE the queue entries are erased — otherwise an accepted edit
 		// against an UNLOADED record would vanish without a trace when the
 		// player walks away before generation is dispatched.
-		bakeDeferredEditsForUnload(chunk);
+		if (!m_playerStreaming)
+			bakeDeferredEditsForUnload(chunk);
 		erasePendingEditsFor(chunk);
 
 		// Capture recorded edits BEFORE recycling wipes the edit map
@@ -385,6 +398,7 @@ void VoxelWorld::queueUnloadOutOfRange(const glm::vec3 &center, const WorldStrea
 						   [&retiring](WorldChunk *c) { return retiring.count(c) != 0; }),
 			m_activeChunks.end());
 	}
+	return retiring.size();
 }
 
 StreamingUpdateKind VoxelWorld::rebuildStreamingQueueFull(const glm::ivec3 &centerChunk, const glm::vec3 &center,
@@ -574,14 +588,8 @@ TaskPriority VoxelWorld::calculateTaskPriority(float distanceSq, float lodThresh
 
 void VoxelWorld::generatePendingVoxels(const glm::vec3 &center, float lodThresholdSq, int budget)
 {
-	if (!m_terrainGenerator || !m_threadPool || budget <= 0)
+	if (m_playerStreaming || !m_terrainGenerator || !m_threadPool || budget <= 0)
 		return;
-
-	struct Item
-	{
-		WorldChunk *chunk;
-		float distSq;
-	};
 
 	// Bounded critical section (review §4.3): the exclusive lock covers
 	// selection, storage preparation and dispatch because inTransit must be
@@ -591,7 +599,7 @@ void VoxelWorld::generatePendingVoxels(const glm::vec3 &center, float lodThresho
 	// allocations are O(1) amortized; main-thread-only entry points keep
 	// readers on the shared lock outside this window.
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	thread_local std::vector<Item> queue;
+	thread_local std::vector<GenerationCandidate> queue;
 	queue.clear();
 	queue.reserve(m_activeChunks.size());
 	const float camOffsetX = center.x - CHUNK_SIZE * 0.5f;
@@ -613,16 +621,25 @@ void VoxelWorld::generatePendingVoxels(const glm::vec3 &center, float lodThresho
 		return;
 
 	std::partial_sort(queue.begin(), queue.begin() + n, queue.end(),
-					  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
+					  [](const auto &a, const auto &b) { return a.distanceSq < b.distanceSq; });
 
+	dispatchGeneration(std::span(queue).first(static_cast<size_t>(n)), lodThresholdSq);
+}
+
+// Callers hold m_mutex exclusively from selection through dispatch.
+size_t VoxelWorld::dispatchGeneration(std::span<const GenerationCandidate> queue,
+									 std::optional<float> lodThresholdSq)
+{
 	const int seed = m_terrainGenerator->getSeed();
+	size_t started = 0;
 
-	for (int i = 0; i < n; ++i)
+	for (const auto &candidate : queue)
 	{
-		WorldChunk *chunk = queue[i].chunk;
+		WorldChunk *chunk = candidate.chunk;
 		if (!chunk->prepareVoxelStorageForGeneration())
 			continue; // Allocation failed (e.g. OOM), retry next tick
-		const TaskPriority prio = calculateTaskPriority(queue[i].distSq, lodThresholdSq);
+		const TaskPriority prio = lodThresholdSq ? calculateTaskPriority(candidate.distanceSq, *lodThresholdSq)
+												 : TaskPriority::Normal;
 		chunk->setInTransit(true);
 		WorldEvent queued;
 		queued.kind = WorldEventKind::GenQueued;
@@ -631,6 +648,7 @@ void VoxelWorld::generatePendingVoxels(const glm::vec3 &center, float lodThresho
 		queued.revision = chunk->revision();
 		emitEvent(queued);
 		m_pendingGenJobsCount.fetch_add(1);
+		++started;
 		const uint64_t captureEpoch = m_workerObserver ? m_workerObserver->workerCaptureEpoch() : 0;
 		const uint64_t generation = chunk->generation();
 		const auto queuedAt = std::chrono::steady_clock::now();
@@ -643,12 +661,13 @@ void VoxelWorld::generatePendingVoxels(const glm::vec3 &center, float lodThresho
 				observer->addWorkerSample("TerrainQueue",
 					std::chrono::duration<float, std::milli>(t0 - queuedAt).count(), captureEpoch);
 			TerrainGenerator &localGen = TerrainGenerator::getThreadLocal(seed);
-			chunk->generateTerrain(localGen);
+			const bool succeeded = chunk->generateTerrain(localGen);
 			// Saved overrides re-apply deterministically right after
 			// generation (issue #180): the job owns the record (in transit,
 			// unpublished) and the first mesh after generation covers every
 			// touched section, so this is race-free and meshes correctly.
-			applyPersistentOverrides(chunk);
+			if (succeeded)
+				applyPersistentOverrides(chunk);
 			if (observer)
 			{
 				const float ms = std::chrono::duration<float, std::milli>(
@@ -659,29 +678,24 @@ void VoxelWorld::generatePendingVoxels(const glm::vec3 &center, float lodThresho
 
 			{
 				std::lock_guard<std::mutex> lk(m_completedJobsMutex);
-				m_completedGenerationChunks.push_back({chunk, generation});
+				m_completedGenerationChunks.push_back({chunk, generation, succeeded});
+				m_pendingGenJobsCount.fetch_sub(1);
 			}
-			m_pendingGenJobsCount.fetch_sub(1);
 		});
 	}
+	return started;
 }
 
 int VoxelWorld::generatePendingVoxelsSync(const glm::vec3 &center, int budget)
 {
-	if (!m_terrainGenerator || budget <= 0)
+	if (m_playerStreaming || !m_terrainGenerator || budget <= 0)
 		return 0;
-
-	struct Item
-	{
-		WorldChunk *chunk;
-		float distSq;
-	};
 
 	// Main-thread-only, like every lifecycle entry point: the exclusive lock
 	// covers selection AND generation (no worker ever sees these records —
 	// inTransit stays false, so asyncBusy() remains the async-path signal).
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
-	thread_local std::vector<Item> queue;
+	thread_local std::vector<GenerationCandidate> queue;
 	queue.clear();
 	queue.reserve(m_activeChunks.size());
 	const float camOffsetX = center.x - CHUNK_SIZE * 0.5f;
@@ -703,12 +717,17 @@ int VoxelWorld::generatePendingVoxelsSync(const glm::vec3 &center, int budget)
 		return 0;
 
 	std::partial_sort(queue.begin(), queue.begin() + n, queue.end(),
-					  [](const Item &a, const Item &b) { return a.distSq < b.distSq; });
+					  [](const auto &a, const auto &b) { return a.distanceSq < b.distanceSq; });
 
+	return generateSynchronously(std::span(queue).first(static_cast<size_t>(n)));
+}
+
+int VoxelWorld::generateSynchronously(std::span<const GenerationCandidate> queue)
+{
 	int generated = 0;
-	for (int i = 0; i < n; ++i)
+	for (const auto &candidate : queue)
 	{
-		WorldChunk *chunk = queue[i].chunk;
+		WorldChunk *chunk = candidate.chunk;
 		// Unlike the pre-registration bootstrap path, these records are
 		// already resident: on allocation failure keep the slot UNLOADED and
 		// retry on a later tick instead of recycling a registered record.
@@ -725,15 +744,28 @@ int VoxelWorld::generatePendingVoxelsSync(const glm::vec3 &center, int budget)
 		// Same override contract as the async gen job and the bootstrap:
 		// generation is deterministic, saved edits re-apply on top.
 		applyPersistentOverrides(chunk);
-		WorldEvent done;
-		done.kind = WorldEventKind::Generated;
-		done.coord = chunk->coord();
-		done.generation = chunk->generation();
-		done.revision = chunk->revision();
-		emitEvent(done);
+		finishGeneration(chunk);
 		++generated;
 	}
 	return generated;
+}
+
+void VoxelWorld::publishTerrainBacking(WorldChunk *chunk)
+{
+	if (m_playerStreaming)
+		applyTransientPlayerEdits(chunk);
+	chunk->m_terrainPublished = true;
+}
+
+void VoxelWorld::finishGeneration(WorldChunk *chunk)
+{
+	publishTerrainBacking(chunk);
+	WorldEvent event;
+	event.kind = WorldEventKind::Generated;
+	event.coord = chunk->coord();
+	event.generation = chunk->generation();
+	event.revision = chunk->revision();
+	emitEvent(event);
 }
 
 void VoxelWorld::publishFinishedGeneration()
@@ -756,15 +788,12 @@ void VoxelWorld::publishFinishedGeneration()
 		// published into (unload requires !inTransit, so this is a safety
 		// net for out-of-order completion, issue #206 acceptance).
 		const auto it = m_chunks.find(chunk->coord());
-		if (it == m_chunks.end() || it->second != chunk || chunk->generation() != job.generation)
+		if (it == m_chunks.end() || it->second != chunk || chunk->generation() != job.generation ||
+			chunk->m_terrainPublished)
 			continue;
 		chunk->setInTransit(false);
-		WorldEvent e;
-		e.kind = WorldEventKind::Generated;
-		e.coord = chunk->coord();
-		e.generation = chunk->generation();
-		e.revision = chunk->revision();
-		emitEvent(e);
+		if (job.succeeded)
+			finishGeneration(chunk);
 	}
 }
 
@@ -844,14 +873,14 @@ TextureType VoxelWorld::effectiveVoxelType(const WorldChunk *chunk, int x, int y
 	// prepared-for-generation — its backing holds stale pool bytes and is
 	// logically empty. The pending-edit overlay still applies.
 	TextureType effective = AIR;
-	if (chunk->isVoxelBackingReadable())
+	if (canReadVoxels(*chunk))
 		effective = static_cast<TextureType>(chunk->getVoxel(static_cast<uint32_t>(x),
 															 static_cast<uint32_t>(y),
 															 static_cast<uint32_t>(z))
 												 .type);
 	for (const PendingVoxelEdit &edit : m_pendingEdits)
 	{
-		if (edit.chunk == chunk && !edit.borderNeighbor &&
+		if (edit.chunk == chunk && edit.generation == chunk->generation() && !edit.borderNeighbor &&
 			edit.x == x && edit.y == y && edit.z == z)
 			effective = edit.type; // last pending write wins
 	}
@@ -863,7 +892,7 @@ bool VoxelWorld::mustDeferVoxelEdit(const WorldChunk *chunk) const
 	// UNLOADED defers regardless of transit state: the backing is stale
 	// pool bytes until terrain generation initializes it (issue #115).
 	return !chunk ||
-		   chunk->getState() == ChunkState::UNLOADED ||
+		   !canReadVoxels(*chunk) ||
 		   chunk->isInTransit();
 }
 
@@ -887,6 +916,12 @@ void VoxelWorld::queueOrApplyEdit(WorldChunk *chunk, const glm::ivec3 &chunkPos,
 	// Authoritative write; the render adapter consumes the EditApplied
 	// event for section/light invalidation and the GENERATED re-arm.
 	const TextureType previousType = chunk->setVoxel(x, y, z, type);
+	if (m_playerStreaming && !isWorldOpen() && !borderNeighbor && previousType != type)
+	{
+		const auto index = static_cast<uint32_t>(WorldChunk::index(x, y, z));
+		if (m_transientPlayerEdits[chunkPos].insert_or_assign(index, static_cast<uint8_t>(type)).second)
+			++m_transientPlayerOverrideCount;
+	}
 	emitEditApplied(chunk, x, y, z, type, previousType, borderNeighbor);
 }
 
@@ -921,6 +956,11 @@ void VoxelWorld::enqueueOrApplyMirrorEdits(const glm::ivec3 &chunkPos, int x, in
 			return;
 		if (geometricMembers)
 			geometricMembers->push_back(neighborPos);
+		// Player residency can recycle this neighbor before an unreadable
+		// target applies. Resolve mirrors against the current neighbors when
+		// the canonical edit lands, rather than binding them to this record.
+		if (forceDefer && m_playerStreaming)
+			return;
 		queueOrApplyEdit(neighbor, neighborPos, nx, y, nz, type, true, forceDefer, editId);
 	};
 	if (x == 0)
@@ -982,6 +1022,7 @@ void VoxelWorld::applyPendingEdits()
 		return;
 
 	std::vector<PendingVoxelEdit> remaining;
+	std::vector<PendingVoxelEdit> appliedTargets;
 	{
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
 		// Two passes for a deterministic order: target voxel edits first,
@@ -1017,10 +1058,16 @@ void VoxelWorld::applyPendingEdits()
 				queueOrApplyEdit(edit.chunk, edit.chunkPos, edit.x, edit.y,
 								 edit.z, edit.type, edit.borderNeighbor,
 								 /*forceDefer=*/false, edit.editId);
+				if (m_playerStreaming && !mirrorPass &&
+					(edit.x == 0 || edit.x == CHUNK_SIZE - 1 || edit.z == 0 || edit.z == CHUNK_SIZE - 1))
+					appliedTargets.push_back(edit);
 			}
 		}
+		m_pendingEdits.swap(remaining);
+		for (const PendingVoxelEdit &edit : appliedTargets)
+			enqueueOrApplyMirrorEdits(edit.chunkPos, edit.x, edit.y, edit.z, edit.type,
+									 /*forceDefer=*/false, edit.editId, nullptr);
 	}
-	m_pendingEdits.swap(remaining);
 }
 
 void VoxelWorld::ensureShellPopulated(WorldChunk *chunk)
@@ -1036,11 +1083,12 @@ void VoxelWorld::ensureShellPopulatedLocked(WorldChunk *chunk)
 	if (!chunk || !chunk->isShellEmpty())
 		return;
 	const glm::ivec3 chunkIdx = chunk->coord();
+	const auto neighbor = [this, chunkIdx](glm::ivec3 offset) -> const WorldChunk * {
+		const auto *record = getChunk(chunkIdx + offset);
+		return record && (!m_playerStreaming || canReadVoxels(*record)) ? record : nullptr;
+	};
 	chunk->rebuildBordersFromNeighbors(
-		getChunk(chunkIdx + glm::ivec3(-1, 0, 0)),
-		getChunk(chunkIdx + glm::ivec3(+1, 0, 0)),
-		getChunk(chunkIdx + glm::ivec3(0, 0, -1)),
-		getChunk(chunkIdx + glm::ivec3(0, 0, +1)));
+		neighbor({-1, 0, 0}), neighbor({1, 0, 0}), neighbor({0, 0, -1}), neighbor({0, 0, 1}));
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,7 +1104,7 @@ bool VoxelWorld::isVoxelActive(const glm::vec3 &worldPos) const
 
 	std::shared_lock<std::shared_mutex> lock(m_mutex);
 	auto it = m_chunks.find(chunkPos);
-	if (it == m_chunks.end() || it->second->getState() < ChunkState::GENERATED)
+	if (it == m_chunks.end() || !canReadVoxels(*it->second))
 		return false;
 
 	const int chunkX = chunkPos.x;
@@ -1064,6 +1112,8 @@ bool VoxelWorld::isVoxelActive(const glm::vec3 &worldPos) const
 	const int localX = static_cast<int>(std::floor(worldPos.x)) - chunkX * CHUNK_SIZE;
 	const int localY = static_cast<int>(std::floor(worldPos.y));
 	const int localZ = static_cast<int>(std::floor(worldPos.z)) - chunkZ * CHUNK_SIZE;
+	if (m_playerStreaming)
+		return effectiveVoxelType(it->second, localX, localY, localZ) != AIR;
 	return it->second->getVoxel(localX, localY, localZ).type != AIR;
 }
 
@@ -1127,6 +1177,7 @@ bool VoxelWorld::prepareAndGenerateChunk(WorldChunk *chunk, TerrainGenerator &ge
 {
 	if (!chunk)
 		return false;
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
 	// Shared synchronous bootstrap contract (issue #112): voxel storage is
 	// prepared on the calling thread immediately before generation; workers
 	// never acquire or release voxel backing. On allocation failure the
@@ -1151,6 +1202,7 @@ bool VoxelWorld::prepareAndGenerateChunk(WorldChunk *chunk, TerrainGenerator &ge
 	// Bootstrap path (issue #180): same override contract as the async gen
 	// job — generation is deterministic, saved edits re-apply on top.
 	applyPersistentOverrides(chunk);
+	publishTerrainBacking(chunk);
 	return true;
 }
 
@@ -1332,13 +1384,9 @@ void VoxelWorld::resolvePendingEditsForPersistenceShutdown()
 
 	for (const glm::ivec3 &coord : coords)
 	{
-		WorldChunk *chunk = nullptr;
-		{
-			std::lock_guard<std::shared_mutex> lock(m_mutex);
-			const auto it = m_chunks.find(coord);
-			chunk = it != m_chunks.end() ? it->second : nullptr;
-		}
-		if (!chunk || chunk->isInTransit() || chunk->getState() != ChunkState::UNLOADED)
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		WorldChunk *chunk = getChunk(coord);
+		if (!m_terrainGenerator || !chunk || chunk->isInTransit() || chunk->getState() != ChunkState::UNLOADED)
 			continue;
 
 		// Deliberately NOT prepareAndGenerateChunk(): its allocation-failure
@@ -1352,9 +1400,10 @@ void VoxelWorld::resolvePendingEditsForPersistenceShutdown()
 					  << std::endl;
 			continue;
 		}
-		if (m_terrainGenerator)
-			chunk->generateTerrain(*m_terrainGenerator);
+		if (!chunk->generateTerrain(*m_terrainGenerator))
+			continue;
 		applyPersistentOverrides(chunk);
+		publishTerrainBacking(chunk);
 	}
 
 	// Land every edit whose record is now readable.

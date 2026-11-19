@@ -16,6 +16,7 @@
 #include <World/WorldMobView.hpp>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <iostream>
 #include <random>
@@ -72,6 +73,7 @@ GameSimulation::GameSimulation(ThreadPool *threadPool)
     // Pickup-candidate buffer (issue #247): reserve the session ceiling once so
     // the per-frame advanceItems refill never allocates (the snapshot pattern).
     m_pickupCandidates.reserve(kMaxPlayers);
+    m_streamingInterests.reserve(kMaxPlayers);
 }
 
 GameSimulation::~GameSimulation()
@@ -469,6 +471,36 @@ void GameSimulation::advancePlayers(double dt, bool suspended)
         if (!entry->state.flight)
             entry->state.controller.advance(dt, idle, world);
     }
+}
+
+bool GameSimulation::setPlayerInterestRadius(PlayerId id, int radiusChunks)
+{
+    PlayerState *player = findPlayer(id);
+    if (!player || radiusChunks < 0 || radiusChunks > kMaxPlayerInterestRadiusChunks)
+        return false;
+    player->interestRadiusChunks = radiusChunks;
+    return true;
+}
+
+bool GameSimulation::advancePlayerStreaming(PlayerStreamingBudget budget)
+{
+    if (!m_world)
+        return false;
+    m_streamingInterests.clear();
+    for (const auto &entry : m_players)
+    {
+        const PlayerState &state = entry->state;
+        if (!state.positioned || state.interestRadiusChunks == 0)
+            continue;
+        const glm::dvec3 &feet = state.controller.body.position;
+        if (!(feet.x >= SHRT_MIN && feet.x < SHRT_MAX &&
+              feet.z >= SHRT_MIN && feet.z < SHRT_MAX && std::isfinite(feet.y)))
+            continue;
+        const glm::ivec3 center{floorDivChunk(static_cast<int>(std::floor(feet.x))), 0,
+                               floorDivChunk(static_cast<int>(std::floor(feet.z)))};
+        m_streamingInterests.push_back({entry->id, center, state.interestRadiusChunks});
+    }
+    return m_world->advancePlayerStreaming(m_streamingInterests, budget);
 }
 
 void GameSimulation::advanceMobs(double dt, glm::dvec3 observer, double availableRadius, bool suspended)

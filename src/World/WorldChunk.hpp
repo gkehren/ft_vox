@@ -11,8 +11,8 @@
 //     and revision (logical content, bumped on every content change), exposed
 //     as the sim::ChunkIdentity value contract — the SINGLE source of the pair
 //     (the MeshBuildResult copy was removed in this phase),
-//   * the lifecycle state (UNLOADED / GENERATED / MESHED) and the worker
-//     in-transit ownership flag,
+//   * the lifecycle state (UNLOADED / GENERATED / MESHED), terrain publication
+//     state and worker in-transit ownership flag,
 //   * the per-column generation outputs (biomes, height map, tint colors).
 //
 // The render-side `Chunk` (Chunk/Chunk.hpp) binds to a WorldChunk and keeps
@@ -224,12 +224,16 @@ public:
 	}
 
 private:
+	friend class VoxelWorld;
 	void ensureVoxelStorageForEdit();
 	void publishCpuTelemetry();
 
 	glm::vec3 position;
 	std::atomic<ChunkState> state{ChunkState::UNLOADED};
 	std::atomic<bool> m_inTransit{false};
+	// Owner-published after terrain and overrides are complete. World-resident
+	// reads and writes are protected by the world mutex. Workers never set it.
+	bool m_terrainPublished{false};
 
 	VoxelPool *m_voxelPool{nullptr};
 	VoxelStorage *m_storage{nullptr};

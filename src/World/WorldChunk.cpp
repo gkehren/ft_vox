@@ -32,6 +32,7 @@ glm::ivec3 WorldChunk::coord() const
 
 bool WorldChunk::prepareVoxelStorageForGeneration()
 {
+	m_terrainPublished = false;
 	// Borders are borrowed on the same main-thread step (issue #103): workers
 	// stay allocation-free and generation writes into the record's border
 	// block. Ownership ONLY (issue #115): a freshly acquired voxel block keeps
@@ -65,6 +66,7 @@ bool WorldChunk::prepareVoxelStorageForGeneration()
 
 void WorldChunk::releaseVoxelStorageOnRetire()
 {
+	m_terrainPublished = false;
 	if (!m_storage)
 		return;
 	VoxelStorage *st = m_storage;
@@ -392,6 +394,7 @@ void WorldChunk::reset(const glm::vec3 &newPosition, ResetMode mode)
 	position = newPosition;
 	state.store(ChunkState::UNLOADED);
 	m_inTransit.store(false);
+	m_terrainPublished = false;
 
 	// A recycled record is a new identity (issue #104/#114): in-flight results
 	// for the old incarnation are rejected at publish time via both counters.

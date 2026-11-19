@@ -92,6 +92,10 @@ add_executable(test_player_sessions test_player_sessions.cpp)
 target_link_libraries(test_player_sessions PRIVATE ft_vox_core)
 add_test(NAME PlayerSessions COMMAND test_player_sessions)
 
+add_executable(test_player_streaming test_player_streaming.cpp)
+target_link_libraries(test_player_streaming PRIVATE ft_vox_core)
+add_test(NAME PlayerStreaming COMMAND test_player_streaming)
+
 # ---------------------------------------------------------------------------
 # CPU-only actor-aware gameplay acceptance (issue #247, Epic #245 Phase A2).
 # Links ONLY ft_vox_core: actor-aware break/place/drop/targeting, the all-body
@@ -1440,7 +1444,13 @@ add_test(NAME HeadlessRunner
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_headless_runner.py
         --runner $<TARGET_FILE:ft_vox_headless>
         --fixtures ${CMAKE_SOURCE_DIR}/tests/fixtures)
-set_tests_properties(HeadlessRunner PROPERTIES TIMEOUT 600)
+# This driver runs many headless processes sequentially. CTest's per-test
+# TIMEOUT takes precedence over the workflow's default timeout.
+if(FT_VOX_SANITIZERS)
+    set_tests_properties(HeadlessRunner PROPERTIES TIMEOUT 1800)
+else()
+    set_tests_properties(HeadlessRunner PROPERTIES TIMEOUT 600)
+endif()
 
 # Dependency guard: the runner's include closure must stay render-free, its
 # actual link artifacts must contain no graphical library, and a
@@ -1488,7 +1498,7 @@ endif()
 # ---------------------------------------------------------------------------
 foreach(_cpu_test IN ITEMS
     test_physics test_core_contracts test_voxel_world test_game_simulation
-    test_gameplay test_player_sessions test_actor_interactions test_items
+    test_gameplay test_player_sessions test_player_streaming test_actor_interactions test_items
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs

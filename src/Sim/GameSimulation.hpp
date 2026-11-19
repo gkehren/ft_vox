@@ -41,10 +41,10 @@
 // with conserved partial merges. Actor-aware targeting derives the ray origin
 // from the actor's authoritative eye and clamps reach to kInteractionReach —
 // never a client-supplied origin. A1 (#246) split the ownership; A2 makes the
-// interactions actor-aware. Still pending: multi-observer residency is #248
-// (A3), multi-player persistence is #259 (E1), and server-side reach/rate
+// interactions actor-aware. A3 (#248) adds shared player-driven residency.
+// Multi-player persistence is #259 (E1), and server-side reach/rate
 // gating of break/place CELLS is #255 (C3). The shared systems' contracts are
-// unchanged. Design note: docs/simulation-render-contracts.md §11–§12.
+// unchanged. Design note: docs/simulation-render-contracts.md §11–§13.
 //
 // The facade is render-free (enforced by tests/check_core_includes.py): no
 // Camera, RenderSettings, SDL, Vulkan or ImGui types, and no engine singleton
@@ -434,6 +434,15 @@ public:
     /// ...) instead. One scoped collision view serves the whole batch;
     /// suspension/flight semantics are identical per player.
     void advancePlayers(double dt, bool suspended);
+
+    /// Host-owned radius in chunks. Zero disables interest. The center is
+    /// sampled from the positioned session's authoritative body each tick.
+    bool setPlayerInterestRadius(PlayerId id, int radiusChunks);
+    /// One CPU-only host tick for the entire interest union. Pumps world
+    /// publication and edits before eviction. The first call selects this
+    /// streaming mode for the world epoch. Returns false before initialize
+    /// while solo terrain jobs or edits are pending, or after transient solo edits.
+    bool advancePlayerStreaming(PlayerStreamingBudget budget = {});
 
     /// One host frame of passive mobs (fixed 60 Hz internally). `observer` is
     /// the interest point (camera position or a headless probe),
@@ -900,6 +909,7 @@ private:
         // Persists across world epochs like the body itself (initialize/reload
         // carry bodies over); not persisted in the solo save format.
         bool positioned{false};
+        int interestRadiusChunks{0};
         TextureType selectedBlock{STONE};
         const char *status{""}; // static literals only
     };
@@ -974,6 +984,7 @@ private:
     // after the first frame (the snapshot buffer-reuse pattern). The pointers
     // reference the heap-backed sessions, valid for the whole advance.
     std::vector<items::PickupCandidate> m_pickupCandidates;
+    std::vector<VoxelWorld::PlayerInterest> m_streamingInterests;
 
     entities::MobSystem m_mobs;
     // Dropped item entities (issue #226): owns the monotonic id allocator,

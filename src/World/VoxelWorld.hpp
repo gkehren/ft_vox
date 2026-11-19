@@ -41,7 +41,9 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -53,11 +55,45 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Core/SimContracts.hpp>
 #include <Core/ThreadPool.hpp>
+#include <Sim/PlayerId.hpp>
 #include <World/WorldChunk.hpp>
 #include <World/WorldPersistence.hpp>
 #include <utils.hpp>
 
 class WorldCollisionView;
+namespace sim
+{
+class GameSimulation;
+inline constexpr int kMaxPlayerInterestRadiusChunks = 8;
+}
+
+/// Shared limits for one authoritative residency tick. A caller can lower
+/// any budget, including to zero to pause that stage.
+struct PlayerStreamingBudget
+{
+	static constexpr unsigned kMaxLoads = 128;
+	static constexpr unsigned kMaxGenerations = 64;
+	static constexpr unsigned kMaxEvictions = 64;
+	static constexpr unsigned kMaxOutstandingGenerations = 64;
+	unsigned loads{32};
+	unsigned generations{8};
+	unsigned evictions{16};
+};
+
+struct PlayerStreamingStats
+{
+	size_t observers{0};
+	size_t desiredChunks{0};
+	size_t residentChunks{0}; // includes registered unknowns and retiring backlog
+	size_t waitingForRecord{0};
+	size_t waitingForGeneration{0}; // desired, registered, and no job dispatched
+	size_t outsideInterest{0};
+	size_t pinnedEdits{0}; // out-of-interest chunks protected during this tick's eviction pass
+	size_t outstandingGenerations{0};
+	size_t transientOverrideChunks{0};
+	size_t transientOverrideVoxels{0};
+	size_t loaded{0}, generationStarts{0}, evicted{0}; // this tick
+};
 
 /// Render-free streaming settings: the simulation-relevant subset of the
 /// graphical RenderSettings (the Phase A contracts doc records this split).
@@ -144,6 +180,8 @@ public:
 	VoxelWorld &operator=(const VoxelWorld &) = delete;
 
 	// --- Streaming / residency (plain values, no camera) ---------------------
+	// The solo streaming entry points yield to advancePlayerStreaming once
+	// the simulation selects player residency for this world epoch.
 	/// Enqueue loads / mark far chunks for unload around `center`.
 	/// `forwardXZ` is the normalized XZ view direction (fallback +Z).
 	StreamingUpdateKind updateStreaming(const glm::vec3 &center, const glm::vec2 &forwardXZ,
@@ -219,6 +257,9 @@ public:
 	bool asyncBusy() const;
 	std::vector<WorldChunk *> activeChunksSnapshot() const;
 	StreamingMaintenanceStats streamingMaintenanceStats() const { return m_streamStats; }
+	/// Owner-thread snapshot. Override counts include evicted coordinates and
+	/// reflect edits applied since the last streaming tick.
+	PlayerStreamingStats playerStreamingStats() const;
 
 	/// Rebuild a record's neighbor border shell from resident neighbors
 	/// (main thread; locks internally). The render adapter calls this at
@@ -299,6 +340,45 @@ public:
 	};
 
 private:
+	friend class sim::GameSimulation;
+	struct PlayerInterest
+	{
+		sim::PlayerId id;
+		glm::ivec3 center;
+		int radiusChunks;
+		bool operator==(const PlayerInterest &) const = default;
+	};
+	bool advancePlayerStreaming(std::span<const PlayerInterest> interests, PlayerStreamingBudget budget);
+	template <typename Eligible>
+	std::vector<glm::ivec3> selectPlayerChunks(size_t budget, sim::PlayerId &lastServed,
+											 std::span<const glm::ivec3> stranded, Eligible eligible) const;
+	void applyTransientPlayerEdits(WorldChunk *chunk);
+	bool m_playerStreaming{false};
+	std::vector<PlayerInterest> m_playerInterests;
+	std::unordered_set<glm::ivec3, IVec3Hash> m_playerDesired;
+	sim::PlayerId m_lastPlayerLoad;
+	sim::PlayerId m_lastPlayerGeneration;
+	PlayerStreamingStats m_playerStreamingStats;
+	std::unordered_map<glm::ivec3, WorldChunk::ChunkEditMap, IVec3Hash> m_transientPlayerEdits;
+	size_t m_transientPlayerOverrideCount{0};
+
+	std::vector<glm::ivec3> loadChunkRecords(std::span<const glm::ivec3> coords);
+	size_t retireChunks(std::span<const glm::ivec3> coords);
+	struct GenerationCandidate
+	{
+		WorldChunk *chunk;
+		float distanceSq{0.f};
+	};
+	size_t dispatchGeneration(std::span<const GenerationCandidate> queue, std::optional<float> lodThresholdSq);
+	size_t outstandingGenerationCount() const;
+	int generateSynchronously(std::span<const GenerationCandidate> queue);
+	void publishTerrainBacking(WorldChunk *chunk);
+	void finishGeneration(WorldChunk *chunk);
+	bool canReadVoxels(const WorldChunk &chunk) const
+	{
+		return chunk.isVoxelBackingReadable() && (!m_playerStreaming || chunk.m_terrainPublished);
+	}
+
 	// --- Streaming internals (ported from ChunkManager, issue #108) -----------
 	void queueUnloadOutOfRange(const glm::vec3 &center, const WorldStreamSettings &settings);
 	StreamingUpdateKind loadChunksAroundPlayer(const glm::ivec3 &centerChunk, const glm::vec3 &center,
@@ -392,6 +472,7 @@ private:
 	{
 		WorldChunk *chunk{nullptr};
 		uint64_t generation{0};
+		bool succeeded{true};
 	};
 	std::vector<CompletedGenJob> m_completedGenerationChunks;
 	std::atomic<size_t> m_pendingGenJobsCount{0};
