@@ -11,9 +11,12 @@
 #include <Sim/GameSimulation.hpp>
 #include <World/WorldCollisionView.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <string_view>
 #include <thread>
 
 namespace headless
@@ -73,6 +76,41 @@ const char *placeResultName(sim::PlaceResult result)
 	return "?";
 }
 
+const char *itemResultName(items::ItemResult result)
+{
+	switch (result)
+	{
+	case items::ItemResult::Ok: return "Ok";
+	case items::ItemResult::Partial: return "Partial";
+	case items::ItemResult::Full: return "Full";
+	case items::ItemResult::InvalidSlot: return "InvalidSlot";
+	case items::ItemResult::EmptyStack: return "EmptyStack";
+	case items::ItemResult::InvalidItem: return "InvalidItem";
+	case items::ItemResult::ItemMismatch: return "ItemMismatch";
+	case items::ItemResult::NotPlaceable: return "NotPlaceable";
+	case items::ItemResult::IdExhausted: return "IdExhausted";
+	case items::ItemResult::InvalidPlayer: return "InvalidPlayer";
+	}
+	return "?";
+}
+
+uint64_t inventoryTotal(const items::Inventory &inventory)
+{
+	uint64_t total = 0;
+	for (const items::ItemStack &stack : inventory.slots())
+		total += stack.count;
+	return total;
+}
+
+std::vector<uint64_t> itemIds(const sim::GameSimulation &sim)
+{
+	std::vector<uint64_t> ids;
+	for (const auto &entity : sim.itemEntities().entities())
+		ids.push_back(entity.id);
+	std::sort(ids.begin(), ids.end());
+	return ids;
+}
+
 std::string stackToString(const items::ItemStack &stack)
 {
 	if (stack.isEmpty())
@@ -111,6 +149,13 @@ RunOutcome runHeadless(const RunnerOptions &options)
 						  " frames but --ticks is " + std::to_string(options.ticks);
 			return out;
 		}
+	}
+	out.multiplayer = script.multiplayer;
+	if (out.multiplayer && options.fixedInterest)
+	{
+		out.code = ExitCode::Usage;
+		out.message = "--interest is for solo scripts; multiplayer uses body-centered 'interest radius'";
+		return out;
 	}
 
 	// --- Simulation host ownership: pool (optional) outlives the facade -----
@@ -193,27 +238,55 @@ RunOutcome runHeadless(const RunnerOptions &options)
 	};
 
 	// --- Frame loop -----------------------------------------------------------
-	sim::PlayerCommand cmd{};
+	const sim::PlayerId local = sim.localPlayerId();
+	sim::PlayerId actor = local;
+	std::map<sim::PlayerId, sim::PlayerCommand> commands{{local, {}}};
+	const int defaultRadius = std::min(sim::kMaxPlayerInterestRadiusChunks,
+		(options.interestRadius + static_cast<int>(CHUNK_SIZE) - 1) / static_cast<int>(CHUNK_SIZE));
+	if (out.multiplayer)
+	{
+		sim.setPlayerInterestRadius(local, defaultRadius);
+		// Enter union mode before any script edit, even if the first player
+		// command comes later. No work is charged before the first host frame.
+		if (!sim.advancePlayerStreaming({0, 0, 0}))
+			fail(ExitCode::WorldIo, "could not initialize player streaming");
+	}
 	uint64_t framesRemaining = options.ticks;
 
 	const auto stepOneFrame = [&]() {
 		// Mirrors Engine::run's simulation -> streaming -> mobs order, minus
 		// every presentation step (no camera, day cycle, meshing or GPU).
-		sim.advancePlayer(kFrameDt, cmd, false);
+		for (auto &[id, command] : commands)
+		{
+			if (sim.playerPositioned(id))
+				sim.advancePlayer(id, kFrameDt, command, false);
+			command.jumpPressed = false;
+		}
 		if (!interestPinned)
 			interest = sim.playerFeet();
-		const glm::vec3 center(interest);
-		world->updateStreaming(center, glm::vec2(0.f, 1.f), streamSettings);
-		world->processChunkLoading(kLoadPerFrame);
-		if (pool)
+		if (out.multiplayer)
 		{
-			world->generatePendingVoxels(center, lodThresholdSq, kGenPerFrame);
+			if (!sim.advancePlayerStreaming())
+			{
+				fail(ExitCode::WorldIo, "player streaming failed at frame " + std::to_string(out.ticksRun));
+				return false;
+			}
 			if (!quiesce())
 				return false;
 		}
 		else
 		{
-			world->generatePendingVoxelsSync(center, kGenPerFrame);
+			const glm::vec3 center(interest);
+			world->updateStreaming(center, glm::vec2(0.f, 1.f), streamSettings);
+			world->processChunkLoading(kLoadPerFrame);
+			if (pool)
+			{
+				world->generatePendingVoxels(center, lodThresholdSq, kGenPerFrame);
+				if (!quiesce())
+					return false;
+			}
+			else
+				world->generatePendingVoxelsSync(center, kGenPerFrame);
 		}
 		world->pump();
 		// Headless consumer: drain and discard the change stream (bounded;
@@ -234,7 +307,6 @@ RunOutcome runHeadless(const RunnerOptions &options)
 				return false;
 			if (!stepOneFrame())
 				return false;
-			cmd.jumpPressed = false; // one-frame press, consumed
 			++out.ticksRun;
 			--framesRemaining;
 		}
@@ -247,35 +319,89 @@ RunOutcome runHeadless(const RunnerOptions &options)
 	};
 
 	std::vector<std::string> expectedDigests;
+	std::string_view lastResult;
 	for (const ScriptAction &action : script.actions)
 	{
 		if (failed)
 			break;
+		sim::PlayerId actionPlayer = actor;
+		std::string_view resultName;
+		uint64_t editId = 0;
+		const auto context = [&] {
+			std::string location = "script line " + std::to_string(action.line);
+			if (out.multiplayer || options.trace)
+				location += " at frame " + std::to_string(out.ticksRun) + " for PlayerId " +
+					std::to_string(actionPlayer.value);
+			return location + ": ";
+		};
 		switch (action.op)
 		{
 		case ScriptOp::Wait:
 			runFrames(static_cast<uint64_t>(action.frames));
 			break;
 		case ScriptOp::Move:
-			cmd.move = action.move;
+			commands.at(actor).move = action.move;
 			break;
 		case ScriptOp::Sprint:
-			cmd.sprint = action.enabled;
+			commands.at(actor).sprint = action.enabled;
 			break;
 		case ScriptOp::Jump:
-			cmd.jumpPressed = true;
+			commands.at(actor).jumpPressed = true;
 			break;
 		case ScriptOp::Swim:
-			cmd.swimUp = action.swimDirection > 0;
-			cmd.swimDown = action.swimDirection < 0;
+			commands.at(actor).swimUp = action.swimDirection > 0;
+			commands.at(actor).swimDown = action.swimDirection < 0;
 			break;
 		case ScriptOp::Flight:
-			if (!sim.setPlayerFlight(action.enabled, sim.playerFeet()))
+			if (sim.setPlayerFlight(actor, action.enabled, sim.playerFeet(actor)))
+				resultName = "Ok";
+			else
+			{
+				resultName = "Refused";
+				sim::PlayerSnapshot player;
+				sim.playerSnapshot(actor, player);
 				std::cerr << "[headless] line " << action.line << ": flight toggle refused ("
-						  << sim.playerStatus() << ")\n";
+						  << player.status << ")\n";
+			}
 			break;
 		case ScriptOp::Teleport:
-			sim.setPlayerPosition(action.position);
+			sim.setPlayerPosition(actor, action.position);
+			break;
+		case ScriptOp::CreatePlayer:
+		{
+			actionPlayer = sim.createPlayer();
+			if (!actionPlayer.valid())
+			{
+				fail(ExitCode::Script, context() + "player creation refused (session limit or ID exhaustion)");
+				break;
+			}
+			actor = actionPlayer;
+			commands.emplace(actor, sim::PlayerCommand{});
+			sim.setPlayerInterestRadius(actor, defaultRadius);
+			resultName = "Ok";
+			break;
+		}
+		case ScriptOp::SelectPlayer:
+			actionPlayer = action.player;
+			if (commands.contains(actionPlayer))
+			{
+				actor = actionPlayer;
+				resultName = "Ok";
+			}
+			else
+				fail(ExitCode::Script, context() + "cannot select a missing or retired player");
+			break;
+		case ScriptOp::RemovePlayer:
+			actionPlayer = action.player;
+			if (sim.removePlayer(actionPlayer))
+			{
+				commands.erase(actionPlayer);
+				if (actor == actionPlayer)
+					actor = local;
+				resultName = "Ok";
+			}
+			else
+				fail(ExitCode::Script, context() + "cannot remove the local, missing or retired player");
 			break;
 		case ScriptOp::Place:
 		{
@@ -283,14 +409,17 @@ RunOutcome runHeadless(const RunnerOptions &options)
 			// rule the graphical host uses (issue #209): a refusal is counted
 			// and logged, never a silent world write inside the body.
 			const glm::vec3 pos = editCenter(action.cell);
-			if (!sim.canPlaceVoxel(pos, action.block))
+			if (!sim.canPlaceVoxel(actor, pos, action.block))
 			{
 				++out.refusedEdits;
+				resultName = "PlayerOverlap";
 				std::cerr << "[headless] line " << action.line << ": placement refused at "
 						  << cellToString(action.cell) << " (player-aware rule)\n";
 				break;
 			}
 			const WorldEditResult result = sim.placeVoxel(pos, action.block);
+			editId = result.editId;
+			resultName = result.accepted ? "Ok" : "WorldRejected";
 			if (result.accepted)
 				++out.committedEdits;
 			else
@@ -307,6 +436,8 @@ RunOutcome runHeadless(const RunnerOptions &options)
 		case ScriptOp::Delete:
 		{
 			const WorldEditResult result = sim.deleteVoxel(editCenter(action.cell));
+			editId = result.editId;
+			resultName = result.accepted ? "Ok" : "WorldRejected";
 			if (result.accepted)
 				++out.committedEdits;
 			else
@@ -322,34 +453,43 @@ RunOutcome runHeadless(const RunnerOptions &options)
 			// The logged grantItems admin seam (epic #223 §3): the sim itself
 			// logs every grant; a remainder that did not fit is diagnosed so
 			// a script author sees WHY an expect inventory later fails.
-			const items::AddResult result = sim.grantItems(action.item, static_cast<uint16_t>(action.count));
+			const items::AddResult result = sim.grantItems(actor, action.item, static_cast<uint16_t>(action.count));
+			resultName = itemResultName(result.result);
 			if (!result.remainder.isEmpty())
 				std::cerr << "[headless] line " << action.line << ": grant remainder "
 						  << stackToString(result.remainder) << " did not fit\n";
 			break;
 		}
 		case ScriptOp::Select:
-			if (sim.selectHotbarSlot(action.slot) != items::ItemResult::Ok)
+		{
+			const auto result = sim.selectHotbarSlot(actor, action.slot);
+			resultName = itemResultName(result);
+			if (result != items::ItemResult::Ok)
 				std::cerr << "[headless] line " << action.line << ": hotbar selection refused (slot "
 						  << action.slot << ")\n";
 			break;
+		}
 		case ScriptOp::Drop:
 		{
 			// Fixed deterministic direction (+Z): the headless host has no
 			// camera, so the presentation input is a plain constant.
-			const items::ItemResult result =
-				sim.dropFromSlot(sim.inventory().selectedSlot(), static_cast<uint16_t>(action.count),
-								 glm::dvec3(0.0, 0.0, 1.0));
+			const int slot = sim.inventory(actor)->selectedSlot();
+			const items::ItemResult result = sim.dropFromSlot(actor, slot,
+				static_cast<uint16_t>(action.count), glm::dvec3(0.0, 0.0, 1.0));
+			resultName = itemResultName(result);
 			if (result != items::ItemResult::Ok)
 				std::cerr << "[headless] line " << action.line << ": drop refused (selected slot "
-						  << sim.inventory().selectedSlot() << ", count " << action.count << ")\n";
+						  << slot << ", count " << action.count << ")\n";
 			break;
 		}
 		case ScriptOp::Break:
 		{
 			// Gameplay breakBlock (issue #226), distinct from creative delete:
 			// an accepted break is a committed edit AND spawns the registry drop.
-			const sim::BreakResult result = sim.breakBlock(action.cell);
+			WorldEditResult edit;
+			const sim::BreakResult result = sim.breakBlock(actor, action.cell, &edit);
+			editId = edit.editId;
+			resultName = breakResultName(result);
 			if (result == sim::BreakResult::Ok)
 				++out.committedEdits;
 			else
@@ -364,7 +504,10 @@ RunOutcome runHeadless(const RunnerOptions &options)
 		{
 			// Gameplay place-from-hotbar (issue #227), distinct from creative
 			// place: consumes exactly 1 item on success only.
-			const sim::PlaceResult result = sim.placeSelectedBlock(action.cell);
+			WorldEditResult edit;
+			const sim::PlaceResult result = sim.placeSelectedBlock(actor, action.cell, &edit);
+			editId = edit.editId;
+			resultName = placeResultName(result);
 			if (result == sim::PlaceResult::Ok)
 				++out.committedEdits;
 			else if (result == sim::PlaceResult::PlayerOverlap)
@@ -388,16 +531,19 @@ RunOutcome runHeadless(const RunnerOptions &options)
 		case ScriptOp::InterestFollow:
 			interestPinned = false;
 			break;
+		case ScriptOp::InterestRadius:
+			sim.setPlayerInterestRadius(actor, action.radiusChunks);
+			break;
 		case ScriptOp::Save:
 			if (!sim.isWorldOpen())
 			{
-				fail(ExitCode::WorldIo,
-					 "script line " + std::to_string(action.line) + ": save requires --world");
+				fail(ExitCode::WorldIo, context() + "save requires --world");
 				break;
 			}
-			if (!sim.savePlayerState(0.f, 0.f))
-				fail(ExitCode::WorldIo,
-					 "script line " + std::to_string(action.line) + ": player-state save/flush failed");
+			if (sim.savePlayerState(0.f, 0.f))
+				resultName = "Ok";
+			else
+				fail(ExitCode::WorldIo, context() + "player-state save/flush failed");
 			break;
 		case ScriptOp::ExpectVoxel:
 		{
@@ -415,7 +561,7 @@ RunOutcome runHeadless(const RunnerOptions &options)
 												 ? std::string("unknown")
 												 : blockName(static_cast<TextureType>(action.expectedVoxel));
 				fail(ExitCode::Assertion,
-					 "script line " + std::to_string(action.line) + ": expected voxel " +
+					 context() + "expected voxel " +
 						 cellToString(action.cell) + " = " + expected + ", got " + actual);
 			}
 			break;
@@ -423,7 +569,7 @@ RunOutcome runHeadless(const RunnerOptions &options)
 		case ScriptOp::ExpectInventory:
 		{
 			sim::InventorySnapshot inventory;
-			sim.inventorySnapshot(inventory);
+			sim.inventorySnapshot(actor, inventory);
 			const items::ItemStack &actual = inventory.slots[static_cast<size_t>(action.slot)];
 			const bool matches = action.expectEmpty
 									 ? actual.isEmpty()
@@ -435,7 +581,7 @@ RunOutcome runHeadless(const RunnerOptions &options)
 												 : std::string(items::itemName(action.item)) + " x" +
 													   std::to_string(action.count);
 				fail(ExitCode::Assertion,
-					 "script line " + std::to_string(action.line) + ": expected inventory slot " +
+					 context() + "expected inventory slot " +
 						 std::to_string(action.slot) + " = " + expected + ", got " + stackToString(actual));
 			}
 			break;
@@ -445,14 +591,69 @@ RunOutcome runHeadless(const RunnerOptions &options)
 			const size_t live = sim.itemEntities().entities().size();
 			if (live != static_cast<size_t>(action.expectedItems))
 				fail(ExitCode::Assertion,
-					 "script line " + std::to_string(action.line) + ": expected " +
+					 context() + "expected " +
 						 std::to_string(action.expectedItems) + " live item entities, got " +
 						 std::to_string(live));
+			break;
+		}
+		case ScriptOp::ExpectItem:
+		{
+			const auto &entities = sim.itemEntities().entities();
+			const auto entity = std::ranges::find(entities, action.expectedNumber, &items::ItemEntity::id);
+			const items::ItemStack expected{action.item, static_cast<uint16_t>(action.count)};
+			if (entity == entities.end() || entity->stack != expected)
+			{
+				const std::string actual = entity == entities.end() ? "missing" : stackToString(entity->stack);
+				fail(ExitCode::Assertion, context() + "expected item entity " +
+					 std::to_string(action.expectedNumber) + " = " + stackToString(expected) + ", got " + actual);
+			}
+			break;
+		}
+		case ScriptOp::ExpectResult:
+			if (lastResult != action.expectedResult)
+				fail(ExitCode::Assertion, context() + "expected result " + action.expectedResult +
+					 ", got " + (lastResult.empty() ? "no command result" : std::string(lastResult)));
+			break;
+		case ScriptOp::ExpectRevision:
+		{
+			const uint64_t actual = sim.worldSnapshot().editRevision;
+			if (actual != action.expectedNumber)
+				fail(ExitCode::Assertion, context() + "expected next edit revision " +
+					 std::to_string(action.expectedNumber) + ", got " + std::to_string(actual));
+			break;
+		}
+		case ScriptOp::ExpectPending:
+		{
+			const bool actual = world->hasPendingLogicalEdits();
+			if (actual != action.enabled)
+				fail(ExitCode::Assertion, context() + "expected pending edits " +
+					 (action.enabled ? "on, got off" : "off, got on"));
 			break;
 		}
 		case ScriptOp::ExpectDigest:
 			expectedDigests.push_back(action.expectedDigest);
 			break;
+		}
+		if (!resultName.empty())
+			lastResult = resultName;
+		if (options.trace)
+		{
+			std::cerr << "TRACE frame=" << out.ticksRun << " line=" << action.line
+					  << " player=" << actionPlayer.value << " op=" << action.name
+					  << " result=" << (failed ? "Error" : resultName.empty() ? "-" : resultName)
+					  << " edit_id=" << editId << " edit_revision=" << sim.worldSnapshot().editRevision
+					  << " item_high_water=" << sim.itemIdHighWater() << " inventory=";
+			if (const items::Inventory *inventory = sim.inventory(actionPlayer))
+				std::cerr << inventoryTotal(*inventory);
+			else
+				std::cerr << '-';
+			std::cerr << " item_ids=";
+			const auto ids = itemIds(sim);
+			if (ids.empty())
+				std::cerr << '-';
+			for (size_t i = 0; i < ids.size(); ++i)
+				std::cerr << (i == 0 ? "" : ",") << ids[i];
+			std::cerr << '\n';
 		}
 	}
 
@@ -472,12 +673,19 @@ RunOutcome runHeadless(const RunnerOptions &options)
 	out.editRevision = worldSnapshot.editRevision;
 	out.mobCount = sim.mobs().mobs().size();
 	out.itemCount = sim.itemEntities().entities().size();
-	for (const items::ItemStack &stack : sim.inventory().slots())
-		out.inventoryTotal += stack.count;
+	out.inventoryTotal = inventoryTotal(sim.inventory());
 	out.itemIdHighWater = sim.itemIdHighWater();
 	out.playerPos = sim.playerFeet();
 	if (sim.isInitialized())
-		out.digest = computeStateDigest(sim, out.area, out.ticksRun, out.committedEdits).hex();
+		out.digest = computeStateDigest(sim, out.area, out.ticksRun, out.committedEdits, out.multiplayer).hex();
+	if (out.multiplayer)
+	{
+		std::vector<sim::PlayerId> players;
+		sim.playerIds(players);
+		for (const sim::PlayerId id : players)
+			out.players.push_back({id.value, inventoryTotal(*sim.inventory(id)), sim.playerFeet(id)});
+		out.itemIds = itemIds(sim);
+	}
 
 	if (!failed)
 	{

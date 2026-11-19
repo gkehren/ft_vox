@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -32,6 +33,26 @@ static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559,
 int64_t quantizeMotion(double value)
 {
 	return static_cast<int64_t>(std::llround(value * 1024.0));
+}
+
+void hashPlayer(CanonicalHash &hash, const sim::PlayerSnapshot &player)
+{
+	hash.dvec3(player.position);
+	hash.dvec3(player.velocity);
+	hash.u8(player.grounded ? 1 : 0);
+	hash.u8(player.waitingForTerrain ? 1 : 0);
+	hash.u8(player.flight ? 1 : 0);
+	hash.i32(static_cast<int32_t>(player.selectedBlock));
+}
+
+void hashInventory(CanonicalHash &hash, const sim::InventorySnapshot &inventory)
+{
+	hash.i32(inventory.selectedSlot);
+	for (const items::ItemStack &stack : inventory.slots)
+	{
+		hash.u16(static_cast<uint16_t>(stack.item));
+		hash.u16(stack.count);
+	}
 }
 } // namespace
 
@@ -117,10 +138,10 @@ std::string CanonicalHash::hex() const
 }
 
 CanonicalHash computeStateDigest(const sim::GameSimulation &sim, const DigestArea &area,
-								 uint64_t ticks, uint64_t committedEdits)
+								 uint64_t ticks, uint64_t committedEdits, bool multiplayer)
 {
 	CanonicalHash hash;
-	hash.bytes("FTVHDIG2", 8);
+	hash.bytes(multiplayer ? "FTVHDIG3" : "FTVHDIG2", 8);
 
 	const sim::WorldSnapshot world = sim.worldSnapshot();
 	hash.i32(world.seed);
@@ -152,14 +173,25 @@ CanonicalHash computeStateDigest(const sim::GameSimulation &sim, const DigestAre
 				}
 	}
 
-	// Authoritative player body + mode + selection.
-	const sim::PlayerSnapshot player = sim.playerSnapshot();
-	hash.dvec3(player.position);
-	hash.dvec3(player.velocity);
-	hash.u8(player.grounded ? 1 : 0);
-	hash.u8(player.waitingForTerrain ? 1 : 0);
-	hash.u8(player.flight ? 1 : 0);
-	hash.i32(static_cast<int32_t>(player.selectedBlock));
+	if (multiplayer)
+	{
+		std::vector<sim::PlayerId> players;
+		sim.playerIds(players);
+		hash.u64(players.size());
+		for (const sim::PlayerId id : players)
+		{
+			sim::PlayerSnapshot player;
+			sim::InventorySnapshot inventory;
+			sim.playerSnapshot(id, player);
+			sim.inventorySnapshot(id, inventory);
+			hash.u32(id.value);
+			hash.u8(sim.playerPositioned(id) ? 1 : 0);
+			hashPlayer(hash, player);
+			hashInventory(hash, inventory);
+		}
+	}
+	else
+		hashPlayer(hash, sim.playerSnapshot());
 
 	// Logical edit progression.
 	hash.u64(world.editRevision);
@@ -192,13 +224,11 @@ CanonicalHash computeStateDigest(const sim::GameSimulation &sim, const DigestAre
 	// Gameplay inventory (issue #230): the selected hotbar slot, then all 36
 	// slots in FIXED slot order (never a container iteration order). ItemIds
 	// are the stable append-only registry ordinals, never TextureType.
-	sim::InventorySnapshot inventory;
-	sim.inventorySnapshot(inventory);
-	hash.i32(inventory.selectedSlot);
-	for (const items::ItemStack &stack : inventory.slots)
+	if (!multiplayer)
 	{
-		hash.u16(static_cast<uint16_t>(stack.item));
-		hash.u16(stack.count);
+		sim::InventorySnapshot inventory;
+		sim.inventorySnapshot(inventory);
+		hashInventory(hash, inventory);
 	}
 
 	// Authoritative dropped-item population, canonically sorted by entity id
@@ -224,6 +254,22 @@ CanonicalHash computeStateDigest(const sim::GameSimulation &sim, const DigestAre
 
 	// Entity-id allocator high-water (ids are never reused across sessions).
 	hash.u64(sim.itemIdHighWater());
+	if (multiplayer)
+	{
+		auto chunks = sim.world()->activeChunksSnapshot();
+		std::sort(chunks.begin(), chunks.end(), [](const WorldChunk *a, const WorldChunk *b) {
+			const glm::ivec3 left = a->coord();
+			const glm::ivec3 right = b->coord();
+			return std::tie(left.x, left.z) < std::tie(right.x, right.z);
+		});
+		hash.u64(chunks.size());
+		for (const WorldChunk *chunk : chunks)
+		{
+			hash.i32(chunk->coord().x);
+			hash.i32(chunk->coord().z);
+			hash.u8(chunk->isVoxelBackingReadable() ? 1 : 0);
+		}
+	}
 	return hash;
 }
 

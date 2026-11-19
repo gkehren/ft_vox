@@ -1627,3 +1627,9 @@ format, so rollback requires no save conversion. The CPU-only
 `PlayerStreaming` CTest drives the facade with distant, overlapping, crossing,
 teleporting, and disconnected players. It checks dispatch replay, bounded
 work, retained worker leases, border edits, and checkpoint reopen.
+
+The CPU-only `HeadlessMultiplayer` CTest (issue #249) exercises this union
+through `ft_vox_headless` with scripted actor commands and fixed frame
+boundaries. It checks command and digest parity across worker counts and
+recovers a checkpoint captured with a deferred edit.
+[Headless runner guide](headless-runner.md#multiplayer-scripts-issue-249)

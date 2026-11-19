@@ -48,6 +48,7 @@ void printUsage(std::ostream &os)
 		"  --expect-digest HEX   fail (exit 5) unless the final digest equals HEX (16 hex digits)\n"
 		"  --timeout SEC         wall-clock budget for the run, 1..3600 (default 120)\n"
 		"  --json                emit the summary as a JSON object instead of key=value\n"
+		"  --trace               emit one deterministic TRACE record per script action to stderr\n"
 		"  --help                this text\n"
 		"\n"
 		"Exit codes: 0 ok, 2 usage, 3 script, 4 world/save I/O, 5 assertion, 6 timeout.\n";
@@ -191,6 +192,22 @@ void printSummary(const headless::RunOutcome &out, bool json)
 				  << "],\"max\":[" << out.area.max.x << "," << out.area.max.y << "," << out.area.max.z << "]}"
 				  << ",\"digest\":\"" << out.digest << "\""
 				  << ",\"save\":\"" << out.saveStatus << "\"";
+		if (out.multiplayer)
+		{
+			std::cout << ",\"digest_version\":\"FTVHDIG3\",\"players\":[";
+			for (size_t i = 0; i < out.players.size(); ++i)
+			{
+				const auto &player = out.players[i];
+				std::cout << (i == 0 ? "" : ",") << "{\"id\":" << player.id
+						  << ",\"inventory\":" << player.inventoryTotal
+						  << ",\"position\":[" << formatDouble(player.position.x) << ","
+						  << formatDouble(player.position.y) << "," << formatDouble(player.position.z) << "]}";
+			}
+			std::cout << "],\"item_ids\":[";
+			for (size_t i = 0; i < out.itemIds.size(); ++i)
+				std::cout << (i == 0 ? "" : ",") << out.itemIds[i];
+			std::cout << "]";
+		}
 		if (!ok)
 			std::cout << ",\"error\":\"" << jsonEscape(out.message) << "\"";
 		std::cout << "}\n";
@@ -215,8 +232,21 @@ void printSummary(const headless::RunOutcome &out, bool json)
 			  << " player=" << formatVec3(out.playerPos)
 			  << " area=" << formatVec3(glm::dvec3(out.area.min)) << "-" << formatVec3(glm::dvec3(out.area.max))
 			  << " digest=" << (out.digest.empty() ? "-" : out.digest)
-			  << " save=" << out.saveStatus
-			  << "\n";
+			  << " save=" << out.saveStatus;
+	if (out.multiplayer)
+	{
+		std::cout << " digest_version=FTVHDIG3 players=" << out.players.size() << " player_inventories=";
+		if (out.players.empty())
+			std::cout << '-';
+		for (size_t i = 0; i < out.players.size(); ++i)
+			std::cout << (i == 0 ? "" : ",") << out.players[i].id << ':' << out.players[i].inventoryTotal;
+		std::cout << " item_ids=";
+		if (out.itemIds.empty())
+			std::cout << '-';
+		for (size_t i = 0; i < out.itemIds.size(); ++i)
+			std::cout << (i == 0 ? "" : ",") << out.itemIds[i];
+	}
+	std::cout << "\n";
 }
 
 } // namespace
@@ -377,6 +407,10 @@ int main(int argc, char **argv)
 		else if (arg == "--json")
 		{
 			options.json = true;
+		}
+		else if (arg == "--trace")
+		{
+			options.trace = true;
 		}
 		else
 		{

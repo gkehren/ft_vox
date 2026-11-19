@@ -1,0 +1,19 @@
+# Even when the in-script save was issued with ID 2 selected, the durable
+# inventory is ID 1's. A new peer has fresh private state.
+interest radius 1
+expect inventory 0 Glass 3
+expect items 1
+expect item 1 Dirt 2
+player create
+expect inventory 0 empty 0
+interest radius 2
+flight on
+teleport 520.5 225 8.5
+wait 3
+expect voxel 8 220 8 air
+expect voxel 528 250 16 Glass
+expect item 1 Dirt 2
+give Dirt 1
+drop 1
+expect items 2
+expect item 2 Dirt 1

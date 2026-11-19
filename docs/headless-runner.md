@@ -2,7 +2,8 @@
 
 Issue #210, Epic #204 **Phase F** — the standalone CPU simulation runner;
 issue #230, Epic #223 **Phase G** — the scriptable gameplay loop + canonical
-digest coverage.
+digest coverage. Issue #249 adds the Epic #245 Phase A multiplayer regression
+gate for several local simulation sessions in one process.
 `ft_vox_headless` is a local, deterministic test/benchmark process that hosts
 the **same** [`sim::GameSimulation`](../src/Sim/GameSimulation.hpp) facade the
 graphical `Engine` hosts — with **no SDL3 window, Vulkan context, ImGui UI,
@@ -136,6 +137,7 @@ ft_vox_headless [options]
                         by construction (fixed budgets, capped catch-up); an
                         external watchdog remains the tool for a wedged process.
   --json                emit the summary as JSON instead of key=value
+  --trace               emit one deterministic TRACE record per script action to stderr
   --help                usage text
 ```
 
@@ -161,7 +163,7 @@ Smoke commands (copy/paste):
 | 2 | usage error (unknown flag, bad value) |
 | 3 | script error (I/O, grammar, wait budget exceeds `--ticks`) |
 | 4 | world/save I/O failure (open refused, seed mismatch, flush/close failed) |
-| 5 | assertion mismatch (`expect voxel`, `expect inventory`, `expect items`, `expect digest`, `--expect-digest`) |
+| 5 | script assertion or `--expect-digest` mismatch |
 | 6 | run timeout (bounded teardown; never stalls indefinitely) |
 
 Unlike the graphical host (which continues transient when a save cannot
@@ -295,6 +297,76 @@ graphical host issues** (see [`gameplay-loop.md`](gameplay-loop.md)):
 
 The canonical fixture is [`tests/fixtures/sim-actions.txt`](../tests/fixtures/sim-actions.txt).
 
+### Multiplayer scripts (issue #249)
+
+Run the race fixture and its CPU-only regression gate from the repository root.
+
+```bash
+./build-cpu/ft_vox_headless --seed 42 --ticks 49 --workers 2 --trace --json --script tests/fixtures/sim-multiplayer-races.txt
+ctest --test-dir build-cpu -R HeadlessMultiplayer --output-on-failure
+```
+
+On Windows use `build-cpu\Release\ft_vox_headless.exe` and add `-C Release`
+to the CTest command.
+
+```text
+player create                     create a session and select its new PlayerId
+player select <id>                direct subsequent player actions to this session
+player remove <id>                retire a session and its private state
+interest radius <chunks>          set the selected player's radius in chunks (0..8)
+expect item <id> <item> <count>    check a live shared entity's exact stack
+expect result <name>              check the last command result (case-sensitive)
+expect revision <next-edit-id>    check the world's next logical edit ID
+expect pending on|off             check whether any logical edits are still deferred
+```
+
+The local player starts selected with ID 1. New sessions start empty with
+neutral input, receive increasing IDs, and join spatial gameplay after
+`teleport` or a successful `flight` command. Multiplayer teleport coordinates
+must be in `[-32768, 32767)`. Removing the local player or referencing a
+missing or retired ID produces a script error. Removing the selected player
+selects ID 1 again. Shared blocks and item entities survive the removal.
+
+A `player` command or `interest radius` anywhere in the script enables
+player-driven streaming before the first action. Each positioned player's
+radius defaults to `--interest-radius` rounded up to chunks and capped at
+eight. A zero radius disables that player's interest. Each frame advances
+positioned players in ascending ID order with their own latched movement,
+sprint and swim inputs. Jump presses clear after one frame. The remaining tick
+budget after the script uses the same latched commands. Streaming applies
+the simulation's shared load, generation and eviction budgets to the union of
+body-centered areas. The solo `--interest`, `interest <x> <y> <z>` and
+`interest follow` forms are incompatible with this mode. Mob interest
+continues to follow the local player.
+
+Inventory, hotbar, flight, movement and gameplay commands target the selected
+session. Within a frame the script's action order decides competing edits.
+During a tick eligible players attempt shared pickup in ascending ID order.
+The result assertion reads the most recent result from a player lifecycle
+command, `flight`, `place`, `delete`, `give`, `select`, `drop`, `break`,
+`placeSelected` or `save`. Results include `Ok`, `WorldRejected`,
+`PlayerOverlap` and `EmptyStack`. Assertions and waits leave that result
+available for later checks. The four new assertions and `--trace` also work
+with solo scripts.
+
+Every `TRACE` record includes the script line, completed frame count,
+acting or referenced player ID, operation and result, accepted edit ID
+(`0` when absent), next edit revision, that player's inventory total,
+item allocator high-water and sorted live item IDs. Multiplayer script
+assertion errors include line, frame and player ID. The multiplayer summary
+includes `digest_version=FTVHDIG3`, player totals keyed by ID and sorted live
+item IDs. JSON adds each player's authoritative feet position. The existing
+`inventory` and `player` fields continue to report the local player.
+
+`save` commits the local player and inventory together with shared overrides,
+dropped items and their ID allocator. The standard checkpoint captures
+accepted deferred edits, and later frames publish them to the resident
+terrain. Allow those frames before exit so the existing close barrier can
+complete. Remote sessions and their inventories live for the current
+process. Reopening uses the same solo-compatible save format and starts
+with the local player followed by any new sessions the script creates.
+No save conversion is needed to return to a build that predates this harness.
+
 ## 5. The canonical state digest
 
 The digest hashes **documented canonical fields only** — never raw pointers,
@@ -336,6 +408,16 @@ computed at runtime and compared across runs), so the bump required no
 fixture rewrite; the `--expect-digest` gate simply records the new-format
 digest at runtime.
 
+**Multiplayer format (issue #249)** uses the `FTVHDIG3` magic. In place of
+field 5, write the player count u64, then each active player in ascending
+PlayerId order. Each entry contains id u32, positioned u8, the body fields
+from field 5 and the hotbar and slots from field 8. Omit field 8 from its old
+position. After the item allocator high-water, append the resident chunk
+count u64 and each chunk's x i32, z i32 and backing readability u8, sorted by
+`(x, z)`. The shared voxel contents are covered within the chosen
+`--digest-area`. Select an area covering the cell edits you want to compare.
+Legacy scripts keep the exact `FTVHDIG2` byte stream.
+
 **Default observed area**: the 32×32 column block (chunks `cx-1..cx`,
 `cz-1..cz`) around the bootstrap chunk, full world height (`y 0..255`). On a
 reload the bootstrap center is the *saved* player position, so pin
@@ -359,7 +441,7 @@ reload the bootstrap center is the *saved* player position, so pin
 Fixed host cadence `dt = 1/60`; the simulation's internal fixed steps
 (**120 Hz player / 60 Hz mobs / 60 Hz items**) are unchanged. Per frame,
 mirroring `Engine::run`'s simulation → streaming → mobs → items order minus
-every presentation step:
+every presentation step. The solo frame runs these steps.
 
 1. `advancePlayer(dt, command, suspended=false)`
 2. interest update (player feet, or the pinned probe)
@@ -375,6 +457,10 @@ every presentation step:
    (issue #230); early-outs at zero cost when no items exist
 9. `sim.pumpWorld()`
 
+Multiplayer replaces steps 1–5 with an ID-ordered player advance and
+`GameSimulation::advancePlayerStreaming`. Async runs publish all dispatched
+generation before the next simulation step. Steps 6–9 are shared.
+
 Lifecycle: `initialize` → `bootstrapTerrain` → `finalizePlayerSpawn` →
 frames → final quiesce → digest → optional `savePlayerState(0, 0)` +
 **refusable** `closeWorld` → `shutdown` (destructor safety net). Yaw/pitch
@@ -386,6 +472,7 @@ are presentation; the runner pins them to 0 in the saved player state.
 |---|---|
 | `HeadlessSmoke` | plain fixed-seed run exits 0 with a canonical summary |
 | `HeadlessRunner` | full acceptance driver (`tests/test_headless_runner.py`): sync + async determinism, save→exit→reload→edit verification across 3 processes in an isolated temp dir, interest load/unload/reload residency assertions, every failure exit code (incl. NaN/malformed options + world-rejection diagnostics), timeout teardown, JSON summary; **issue #230**: the gameplay-loop fixture (give/select/break/wait-pickup/placeSelected/drop) with a live item in flight at the digest boundary, sync/async parity with item physics, `items`/`inventory`/`item_high_water` summary fields (key=value + JSON), a 3-process gameplay round-trip restoring inventory + entities + id allocator (no reuse), and gameplay grammar/assertion exit codes |
+| `HeadlessMultiplayer` | repeated race digests and traces with 0, 1, 2 and 4 workers, item/block conservation, disconnect and fresh rejoin, transient eviction and regeneration, persistent save/reopen, and recovery of the explicit checkpoint taken with a deferred border edit |
 | `HeadlessDeps` | include closure + real link artifacts + no graphics discovery in CPU-only caches (`tests/check_headless_deps.py`); always-on |
 | `CpuOnlyBuild` | separate clean `FT_VOX_GRAPHICS=OFF` configure/build/test run (label `cpu-only`); **opt-in** via `-DFT_VOX_CPU_ONLY_BUILD_CHECK=ON`, recommended for CI |
 
