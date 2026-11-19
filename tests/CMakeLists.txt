@@ -1444,7 +1444,13 @@ add_test(NAME HeadlessRunner
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_headless_runner.py
         --runner $<TARGET_FILE:ft_vox_headless>
         --fixtures ${CMAKE_SOURCE_DIR}/tests/fixtures)
-set_tests_properties(HeadlessRunner PROPERTIES TIMEOUT 600)
+# This driver runs many headless processes sequentially. CTest's per-test
+# TIMEOUT takes precedence over the workflow's default timeout.
+if(FT_VOX_SANITIZERS)
+    set_tests_properties(HeadlessRunner PROPERTIES TIMEOUT 1800)
+else()
+    set_tests_properties(HeadlessRunner PROPERTIES TIMEOUT 600)
+endif()
 
 # Dependency guard: the runner's include closure must stay render-free, its
 # actual link artifacts must contain no graphical library, and a

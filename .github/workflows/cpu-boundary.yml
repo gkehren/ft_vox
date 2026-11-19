@@ -123,7 +123,7 @@ jobs:
       # whose ASan+UBSan slowdown exceeds the per-test timeout (expected, not
       # a bug). It still runs natively in cpu-linux/cpu-windows, and the terrain
       # code is exercised under sanitizers by BiomeMapGeneration/HeadlessRunner.
-      # 900 s gives HeadlessRunner headroom (it runs ~590 s under ASan).
+      # HeadlessRunner sets its sanitizer timeout in tests/CMakeLists.txt.
       - name: Test (CPU suite under ASan + UBSan)
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
