@@ -7,6 +7,7 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
 
@@ -68,8 +69,8 @@ void printUsage()
 		"Usage: ft_vox_server --world NAME [options]\n"
 		"  --saves-root PATH         save root (default saves)\n"
 		"  --seed N                  positive seed (default stored seed or 42 for a new world)\n"
-		"  --listen-address ADDRESS  reserved transport address (default 127.0.0.1)\n"
-		"  --port N                  reserved transport port, 1..65535 (default 7777)\n"
+		"  --listen-address ADDRESS  live UDP bind IPv4 address (default 127.0.0.1)\n"
+		"  --port N                  live UDP bind port, 0..65535, 0 is ephemeral (default 7777)\n"
 		"  --player-cap N            session limit, 1..256 including local anchor (default 16)\n"
 		"  --ticks N                 run exactly N ticks, 1..1000000, without wall-clock pacing\n"
 		"  --max-catch-up N          live ticks per scheduling batch, 1..8 (default 4)\n"
@@ -121,7 +122,7 @@ bool parseOptions(int argc, char **argv, Options &options, std::string &error)
 				options.listenAddress = value;
 		}
 		else if (option == "--port")
-			number(options.port, 1u, 65535u);
+			number(options.port, 0u, 65535u);
 		else if (option == "--player-cap")
 			number(options.playerCap, 1u, static_cast<unsigned>(sim::GameSimulation::kMaxPlayers));
 		else if (option == "--ticks")
@@ -164,7 +165,8 @@ void printMetrics(const server::HostMetrics &metrics, uint64_t droppedTicks)
 			  << " checkpoint_generation=" << metrics.checkpointGeneration << std::endl;
 }
 
-const char *runTicks(server::ServerHost &host, const Options &options, uint64_t &droppedTicks, std::string &error)
+const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transport,
+                     const Options &options, uint64_t &droppedTicks, std::string &error)
 {
 	const bool deterministic = options.ticks > 0;
 	using server::TickSchedule;
@@ -203,6 +205,11 @@ const char *runTicks(server::ServerHost &host, const Options &options, uint64_t 
 			}
 			--batchRemaining;
 		}
+		if (transport)
+		{
+			transport->rethrowIoError();
+			transport->serviceOwner(host);
+		}
 		if (!host.step(timing, error))
 			return "runtime_error";
 		if (options.metricsEvery && host.ticks() % options.metricsEvery == 0)
@@ -215,6 +222,19 @@ const char *runTicks(server::ServerHost &host, const Options &options, uint64_t 
 
 ExitCode runServer(const Options &options)
 {
+	std::optional<net::udp::Address> listen;
+	if (!options.ticks)
+	{
+		try
+		{
+			listen = net::udp::parseAddress(options.listenAddress, static_cast<uint16_t>(options.port));
+		}
+		catch (const std::invalid_argument &ex)
+		{
+			std::cerr << "SERVER error=usage detail=" << ex.what() << '\n';
+			return ExitCode::Usage;
+		}
+	}
 	if (!installStopHandlers())
 	{
 		std::cerr << "SERVER error=runtime detail=failed to install stop handlers\n";
@@ -228,21 +248,43 @@ ExitCode runServer(const Options &options)
 		return ExitCode::WorldOpen;
 	}
 
-	std::cout << "SERVER status=ready mode=" << (options.ticks ? "deterministic" : "live")
-			  << " transport=disabled listen_address=" << options.listenAddress << " port=" << options.port
-			  << " player_cap=" << options.playerCap << " workers=" << options.host.workers
-			  << " restored=" << host.restoredPlayer();
-	printMetrics(host.metrics(), 0);
-
 	uint64_t droppedTicks = 0;
 	const char *reason = "runtime_error";
+	std::unique_ptr<net::udp::ServerTransport> transport;
 	try
 	{
-		reason = runTicks(host, options, droppedTicks, error);
+		if (listen)
+		{
+			transport = std::make_unique<net::udp::ServerTransport>(*listen, options.playerCap - 1, host.sessionWorld());
+			transport->start();
+		}
+		std::cout << "SERVER status=ready mode=" << (options.ticks ? "deterministic" : "live")
+				  << " transport=" << (transport ? "udp" : "disabled")
+				  << " listen_address=" << options.listenAddress
+				  << " port=" << (transport ? transport->address().port : options.port)
+				  << " player_cap=" << options.playerCap << " workers=" << options.host.workers
+				  << " restored=" << host.restoredPlayer();
+		printMetrics(host.metrics(), 0);
+		reason = runTicks(host, transport.get(), options, droppedTicks, error);
 	}
 	catch (const std::exception &ex)
 	{
 		error = ex.what();
+	}
+	if (transport)
+	{
+		try
+		{
+			transport->stop(host);
+			transport->rethrowIoError();
+		}
+		catch (const std::exception &ex)
+		{
+			if (error.empty())
+				error = ex.what();
+			reason = "runtime_error";
+		}
+		transport.reset();
 	}
 	if (!error.empty())
 		std::cerr << "SERVER error=runtime detail=" << error << '\n';

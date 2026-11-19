@@ -1480,6 +1480,11 @@ add_test(NAME ServerLifecycle
         --server $<TARGET_FILE:ft_vox_server>)
 set_tests_properties(ServerHost ServerLifecycle PROPERTIES TIMEOUT 300)
 
+add_executable(test_udp_transport test_udp_transport.cpp)
+target_link_libraries(test_udp_transport PRIVATE ft_vox_udp ft_vox_core)
+add_test(NAME UdpTransport COMMAND test_udp_transport)
+set_tests_properties(UdpTransport PROPERTIES TIMEOUT 30)
+
 # Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh
 # CMake configure + build with FT_VOX_GRAPHICS=OFF, no vcpkg toolchain and no
 # graphics discovery, producing the runner + CPU tests and running them.
@@ -1521,7 +1526,8 @@ foreach(_cpu_test IN ITEMS
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
-    test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol bench_gameplay_items)
+    test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol test_udp_transport
+    bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR
             "CPU-only dependency guard lists '${_cpu_test}' but no such target exists "

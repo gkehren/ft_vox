@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Sim/GameSimulation.hpp>
+#include <Network/ServerTransport.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -42,7 +43,7 @@ struct HostMetrics
 /// One world, driven exclusively by its caller thread. Workers compute terrain
 /// and write persistence payloads; the owner publishes results and mutates
 /// gameplay state. The executable runs this host on its main thread.
-class ServerHost
+class ServerHost : public net::udp::SessionOwner
 {
 public:
 	explicit ServerHost(HostConfig config);
@@ -53,6 +54,11 @@ public:
 	HostMetrics metrics() const;
 	uint64_t ticks() const { return m_ticks; }
 	bool restoredPlayer() const { return m_restoredPlayer; }
+	net::udp::SessionWorld sessionWorld() const;
+	net::udp::SessionAdmission joinRemote() override;
+	void leaveRemote(sim::PlayerId player) override;
+	std::optional<net::wire::ActionResult> receiveRemote(
+		sim::PlayerId player, const net::udp::SessionIntents &intents) override;
 
 private:
 	friend struct ServerHostProbe;

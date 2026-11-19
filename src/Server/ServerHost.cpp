@@ -11,6 +11,33 @@ namespace server
 
 ServerHost::ServerHost(HostConfig config) : m_config(std::move(config)) {}
 
+net::udp::SessionWorld ServerHost::sessionWorld() const
+{
+	const auto world = m_sim->worldSnapshot();
+	return {static_cast<uint32_t>(world.seed), world.generatorVersion};
+}
+
+net::udp::SessionAdmission ServerHost::joinRemote()
+{
+	// Until movement authority lands, remote sessions have no positioned
+	// body, so joining cannot affect pickup, placement or streaming.
+	return {m_sim->createPlayer(), m_ticks, m_sim->world()->nextEditId()};
+}
+
+void ServerHost::leaveRemote(sim::PlayerId player)
+{
+	m_sim->removePlayer(player);
+}
+
+std::optional<net::wire::ActionResult> ServerHost::receiveRemote(
+	sim::PlayerId player, const net::udp::SessionIntents &intents)
+{
+	if (!intents.action || !m_sim->hasPlayer(player))
+		return std::nullopt;
+	return net::wire::ActionResult{intents.action->actionId, m_ticks, m_sim->world()->nextEditId(),
+		0, intents.action->operation, net::wire::ActionCode::Unavailable};
+}
+
 bool ServerHost::start(std::string &error)
 {
 	if (m_sim)
