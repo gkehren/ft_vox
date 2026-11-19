@@ -263,19 +263,26 @@ most 32 ticks beyond a snapshot. A frame sends at most three scheduled
 inputs. A 250 ms snapshot or input gap discards speculation and waits for
 the next snapshot. A teleport, terrain availability change, correction of
 0.75 blocks or more, or session retirement drops the old prediction and
-visual offset. The client watches verified revisions in the nine chunks
-around the authoritative player and drops prediction when a known revision
-changes or disappears. Physics treats a chunk as unknown while its
-published replica and verified wire versions differ.
+visual offset. The client tracks up to 16 chunks actually sampled during
+body validation, movement, replay and camera correction. A sampled chunk
+changing revision, losing its backing or becoming readable retires the
+old prediction. If the footprint overflows, the client also discards
+prediction and rebuilds the footprint from the next snapshot. Physics
+treats a chunk as unknown while its published replica and verified wire
+versions differ.
 
 Small corrections may retain up to 0.25 blocks of visual offset, fading
 over 100 ms. The body must fit and sweep clear through available terrain
 for the whole offset. A blocked sweep snaps to the corrected pose.
-When the local pose is unusable, the camera uses a clear pose or waits
-above the world until local collision can place the body. Predicted
-positions are for the camera only. Voxel targeting uses the authoritative
-eye, and the server continues to validate actions against its own world
-and inventory.
+While a replica update is pending, the camera holds the last validated
+pose for the same continuous motion. The hold supplies no input to
+physics. Prediction resumes from a fresh authoritative snapshot after
+the required backing is available and the body passes collision
+validation. If new backing puts a solid block in the held pose, or a
+teleport or session transition retires that pose, the client shows the
+terrain-waiting view until it has a usable body. Predicted positions are
+for the camera only. Voxel targeting uses the authoritative eye, and the
+server validates actions against its own world and inventory.
 
 Remote avatars use eight snapshots and a nominal six-tick (100 ms)
 playback delay, capped at twelve ticks (200 ms). Playback interpolates
@@ -416,8 +423,17 @@ retries in the outbound direction.
 The fixed-size baseline favors predictable verification and memory use.
 Round-trip time and loss reduce throughput with the one-frame reliable send
 window. The assembler restarts a transfer through resync after five seconds
-without progress or twenty seconds total. The measurements show the effect of prioritizing the spawn
-chunk and the cost of larger neighborhoods with full baselines.
+without progress or twenty seconds total. The measurements show the
+effect of prioritizing the spawn chunk and the cost of larger neighborhoods
+with full baselines.
+
+At 150 ms RTT, the cold-join fixture takes about 9.4 seconds to install
+the spawn chunk and receive private inventory. Future transport work could
+evaluate a sliding reliable window with bounded in-flight fragment
+tracking, cumulative or selective acknowledgments, baseline compression,
+and fairness across simultaneous clients. CPU-only benchmarks at 30, 80
+and 150 ms RTT should measure time to the first playable chunk, transfer
+throughput, retry cost, and per-client memory under contention.
 
 ## Shutdown and recovery
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PlayerInput.hpp"
+#include "ClientWorld.hpp"
 
 namespace net::udp
 {
@@ -25,11 +26,15 @@ public:
 
 	void observe(const wire::PlayerSnapshot &snapshot, const wire::PlayerState &local,
 		Clock::time_point receivedAt, const physics::VoxelCollisionWorld &world);
+	void observe(const wire::PlayerSnapshot &snapshot, const wire::PlayerState &local,
+		Clock::time_point receivedAt, const ClientWorld::CollisionView &world);
 	void record(uint64_t sequence, const wire::Input &input, Clock::time_point now,
 		const physics::VoxelCollisionWorld &world);
+	void checkTerrain(const ClientWorld::CollisionView &world);
 	void invalidateTerrain();
 	void expire(Clock::time_point now);
 	std::optional<glm::dvec3> present(Clock::time_point now, const physics::VoxelCollisionWorld &world);
+	bool waitingForTerrain() const { return m_waitForTerrain; }
 	glm::dvec3 feet() const { return m_controller.body.position; }
 	size_t backlog() const { return m_count; }
 	const PredictionStats &stats() const { return m_stats; }
@@ -53,7 +58,11 @@ private:
 
 	void restore();
 	void discard();
+	void observe(const wire::PlayerSnapshot &snapshot, const wire::PlayerState &local,
+		Clock::time_point receivedAt, const physics::VoxelCollisionWorld &world,
+		const ClientWorld::CollisionView *replica);
 	void stepTo(const wire::Input &input, const physics::VoxelCollisionWorld &world);
+	void smoothFrom(glm::dvec3 displayed, Clock::time_point now);
 	glm::dvec3 offset(Clock::time_point now) const;
 
 	std::optional<Anchor> m_anchor;
@@ -61,10 +70,11 @@ private:
 	uint64_t m_tick{}, m_lastSequence{};
 	std::array<Pending, kMaxTicks> m_pending{};
 	size_t m_head{}, m_count{};
-	bool m_waitForSnapshot{};
+	bool m_waitForSnapshot{}, m_waitForTerrain{};
 	glm::dvec3 m_offset{};
 	Clock::time_point m_smoothedAt{};
-	std::optional<glm::dvec3> m_safeFeet;
+	// A hold is purely visual. Reconciliation and replay only use m_anchor.
+	struct Presentation { std::optional<glm::dvec3> lastSafeFeet; } m_presentation;
 	PredictionStats m_stats;
 };
 

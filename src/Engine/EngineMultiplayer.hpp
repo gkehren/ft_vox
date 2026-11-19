@@ -45,7 +45,8 @@ struct Engine::RemoteSession
 	net::udp::ClientTickScheduler inputTiming;
 	net::udp::ClientPrediction prediction;
 	net::udp::RemotePlayers remotePlayers;
-	std::optional<net::udp::ClientWorld::TerrainFootprint> terrain;
+	net::udp::ClientWorld::TerrainDependencies terrain;
+	bool hasCameraPose{};
 	net::udp::ClientTraffic lastTraffic;
 	Clock::time_point trafficAt{}, firstPlayerAt{};
 	double receiveKiB{}, sendKiB{};

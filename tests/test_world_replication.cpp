@@ -1743,6 +1743,265 @@ void testRenderBacking()
 		"re-entry did not install the latest baseline");
 }
 
+// Exercise the same verified collision view and snapshot/input order as the
+// graphical host. Stage edits independently of replica publication.
+struct ReplicaPrediction
+{
+	udp::ClientWorld world;
+	udp::ChunkProjection verified;
+	udp::ClientWorld::TerrainDependencies terrain;
+	udp::ClientPrediction prediction;
+	wire::PlayerSnapshot sample{.tick = 97, .count = 1};
+	Time now{1s};
+	uint64_t sequence{}, intendedTick{};
+
+	udp::ClientWorld::CollisionView collision()
+	{
+		return {world, verified, &terrain};
+	}
+
+	void stageFloor(wire::ChunkCoord coord)
+	{
+		auto &image = verified[coord];
+		image.version = {1, 0};
+		image.materials.fill(wire::kAirMaterial);
+		std::fill_n(image.materials.begin(), CHUNK_SIZE * CHUNK_SIZE, uint8_t(STONE));
+	}
+
+	void edit(glm::ivec3 cell, uint8_t material)
+	{
+		const wire::ChunkCoord coord{floorDivChunk(cell.x), floorDivChunk(cell.z)};
+		auto &image = verified.at(coord);
+		image.materials[WorldChunk::index(cell.x - coord.x * CHUNK_SIZE, cell.y,
+			cell.z - coord.z * CHUNK_SIZE)] = material;
+		++image.version.revision;
+	}
+
+	void publish()
+	{
+		world.reconcile(verified, glm::vec3(udp::playerFeet(sample.players[0])));
+	}
+
+	void snapshot(glm::dvec3 feet, uint32_t motionReset = 1)
+	{
+		now += 50ms;
+		sample.tick += wire::kPlayerSnapshotIntervalTicks;
+		intendedTick = std::max(intendedTick, sample.tick);
+		auto &local = sample.players[0];
+		local = {{2}, {feet.x, feet.y, feet.z}, {}, wire::PlayerState::grounded, motionReset};
+		prediction.observe(sample, local, now, collision());
+	}
+
+	void input(float moveX, unsigned ticks = 1)
+	{
+		const auto view = collision();
+		for (unsigned i = 0; i < ticks; ++i)
+			prediction.record(++sequence, {++intendedTick, moveX}, now, view);
+	}
+
+	std::optional<glm::dvec3> camera()
+	{
+		const auto view = collision();
+		prediction.checkTerrain(view);
+		return prediction.present(now, view);
+	}
+};
+
+void testReplicaCameraHold(bool leased)
+{
+	ReplicaPrediction client;
+	constexpr glm::dvec3 anchor{8.5, 1.001, 8.5};
+	client.stageFloor({0, 0});
+	client.publish();
+	client.snapshot(anchor);
+	client.input(1.f, 3);
+	const auto displayed = client.camera();
+	require(displayed && displayed->x > anchor.x && client.prediction.backlog() == 3,
+		"camera fixture did not establish a predicted pose");
+
+	auto *record = client.world.world().getChunk({0, 0, 0});
+	require(record != nullptr, "missing standing chunk");
+	record->setInTransit(leased);
+	client.edit({10, 1, 8}, STONE);
+	for (int frame = 0; frame < 3; ++frame)
+	{
+		if (leased)
+			client.publish();
+		if (frame == 1)
+			client.edit({10, 2, 8}, STONE);
+		client.snapshot(anchor);
+		client.input(-1.f);
+		require(!client.collision().sample({8, 0, 8}).available &&
+			client.prediction.waitingForTerrain() && client.prediction.backlog() == 0 &&
+			client.prediction.feet() == anchor && client.camera() == displayed &&
+			client.prediction.stats().hardResets == 1, "revision gap moved the camera or reset prediction twice");
+	}
+	record->setInTransit(false);
+	client.publish();
+	client.input(-1.f);
+	require(client.collision().sample({8, 0, 8}).solid && client.camera() == displayed &&
+		client.prediction.backlog() == 0, "publication resumed prediction without a fresh snapshot");
+	client.snapshot(anchor);
+	client.input(1.f);
+	const auto resumed = client.camera();
+	require(resumed && std::abs(resumed->y - displayed->y) < 0.01 && resumed->x > anchor.x &&
+		!client.prediction.waitingForTerrain() && client.prediction.backlog() == 1 &&
+		client.prediction.stats().hardResets == 1, "fresh anchor failed to resume after publication");
+}
+
+void testReplicaTerrainChanges()
+{
+	ReplicaPrediction client;
+	constexpr glm::dvec3 anchor{8.5, 1.001, 8.5};
+	client.stageFloor({0, 0});
+	client.stageFloor({1, 0});
+	client.publish();
+	client.snapshot(anchor);
+	client.input(1.f, 3);
+	const auto nextAnchor = client.prediction.feet();
+	client.input(1.f);
+	const auto before = client.camera();
+	client.edit({24, 1, 8}, STONE);
+	require(!client.collision().terrainChanges().invalidated, "unqueried neighbor invalidated prediction");
+	client.publish();
+	client.input(1.f);
+	const auto after = client.camera();
+	require(before && after && after->x > before->x && client.prediction.backlog() == 5 &&
+		client.prediction.stats().hardResets == 0, "unrelated edit interrupted movement");
+	client.snapshot(nextAnchor);
+	const auto reconciled = client.camera();
+	require(reconciled && client.prediction.backlog() == 2 && client.prediction.stats().hardResets == 0,
+		"unrelated edit discarded the pending replay tail");
+
+	client.edit({8, 0, 8}, wire::kAirMaterial);
+	require(client.camera() == reconciled && client.prediction.backlog() == 0 &&
+		!client.collision().sample({8, 0, 8}).available, "support edit used stale physics or moved the camera");
+	client.publish();
+	client.snapshot(anchor);
+	client.input(0.f, 6);
+	const auto falling = client.camera();
+	require(falling && falling->y < 0.95 && falling->y > 0.0, "prediction did not fall through removed support");
+
+	client.edit({8, 0, 8}, STONE);
+	require(client.camera() == falling, "unpublished support placement moved the camera");
+	client.publish();
+	require(!client.camera(), "held pose remained visible inside newly published solid terrain");
+	client.snapshot(anchor);
+	require(client.camera() == anchor, "camera did not follow authoritative recovery");
+}
+
+void testReplicaTerrainBoundaries()
+{
+	for (const int edge : {16, 0, -16})
+	{
+		ReplicaPrediction client;
+		const glm::dvec3 anchor{edge - 0.55, 1.001, 8.5};
+		client.stageFloor({floorDivChunk(edge - 1), 0});
+		client.stageFloor({floorDivChunk(edge), 0});
+		client.publish();
+		client.snapshot(anchor);
+		client.input(1.f, 18);
+		const auto crossed = client.camera();
+		require(crossed && crossed->x > edge, "prediction fixture did not cross the seam");
+		client.edit({edge, 1, 8}, STONE);
+		require(client.collision().terrainChanges().invalidated && client.camera() == crossed &&
+			client.prediction.backlog() == 0, "destination chunk was absent from the swept footprint");
+		client.publish();
+		require(!client.camera(), "camera projected the held body through a published obstacle");
+		client.snapshot(anchor);
+		client.input(1.f, 18);
+		const auto stopped = client.camera();
+		require(stopped && stopped->x < edge - 0.299 && client.prediction.stats().hardResets == 1,
+			"re-anchored movement ignored the obstacle at the seam");
+	}
+
+	ReplicaPrediction client;
+	constexpr glm::dvec3 anchor{15.45, 1.001, 8.5};
+	client.stageFloor({0, 0});
+	client.publish();
+	client.snapshot(anchor);
+	client.input(1.f, 18);
+	const auto blocked = client.camera();
+	require(blocked && blocked->x < 15.701, "prediction traversed unknown terrain");
+	client.stageFloor({1, 0});
+	require(!client.collision().terrainChanges().invalidated, "verified baseline counted as readable before publication");
+	client.publish();
+	require(client.collision().terrainChanges().invalidated && client.camera() == blocked &&
+		client.prediction.backlog() == 0, "publication did not retire the history blocked by unknown terrain");
+	client.snapshot(anchor);
+	client.input(1.f, 12);
+	const auto crossed = client.camera();
+	require(crossed && crossed->x > 16.0, "prediction could not enter the verified neighbor");
+}
+
+void testReplicaTerrainDiscontinuities()
+{
+	ReplicaPrediction client;
+	constexpr glm::dvec3 origin{8.5, 1.001, 8.5}, destination{88.5, 1.001, 8.5};
+	client.stageFloor({0, 0});
+	client.publish();
+	client.snapshot(origin);
+	require(client.camera() == origin, "initial replica pose missing");
+	auto *oldBacking = client.world.world().getChunk({0, 0, 0});
+	require(oldBacking != nullptr, "missing teleport origin backing");
+	oldBacking->setInTransit(true);
+	client.edit({8, 0, 8}, wire::kAirMaterial);
+	require(client.camera() == origin && client.prediction.waitingForTerrain(), "teleport fixture was not holding a pose");
+	client.snapshot(destination, 2);
+	require(!client.camera() && client.prediction.waitingForTerrain(),
+		"teleport reused the old visual hold at an unavailable destination");
+	client.stageFloor({5, 0});
+	client.publish();
+	require(!client.camera(), "teleport drew a pose before its destination was re-anchored");
+	client.snapshot(destination, 2);
+	require(client.camera() == destination, "teleport failed to establish a new safe pose");
+	oldBacking->setInTransit(false);
+	client.input(1.f, 2);
+	const auto newPose = client.camera();
+	client.edit({88, 0, 8}, wire::kAirMaterial);
+	require(newPose && client.camera() == newPose && client.prediction.waitingForTerrain(), "epoch fixture did not hold");
+	client.terrain = {};
+	client.prediction = {};
+	client.sequence = client.intendedTick = 0;
+	require(!client.camera() && !client.prediction.waitingForTerrain() &&
+		!client.collision().terrainChanges().invalidated && client.prediction.backlog() == 0,
+		"retiring the session left its presentation or prediction live");
+	client.sample.tick = 0;
+	constexpr glm::dvec3 newEpochFeet{-80.5, 1.001, 8.5};
+	client.snapshot(newEpochFeet);
+	require(!client.camera(), "new epoch used an old pose during cold join");
+	client.stageFloor({floorDivChunk(-81), 0});
+	client.publish();
+	client.snapshot(newEpochFeet);
+	require(client.camera() == newEpochFeet, "new epoch inherited the old camera offset");
+	client.input(1.f);
+	require(client.prediction.backlog() == 1, "new epoch inherited the old input sequence");
+}
+
+void testReplicaTerrainCapacity()
+{
+	ReplicaPrediction client;
+	client.stageFloor({0, 0});
+	client.publish();
+	client.snapshot({8.5, 1.001, 8.5});
+	client.input(1.f);
+	{
+		const auto view = client.collision();
+		for (size_t i = 1; i < udp::ClientWorld::TerrainDependencies::kCapacity; ++i)
+			require(!view.sample({int(i * CHUNK_SIZE), 1, 8}).available, "synthetic dependency should be unknown");
+		require(!view.terrainChanges().invalidated, "dependency footprint overflowed early");
+		const int beyond = int(udp::ClientWorld::TerrainDependencies::kCapacity * CHUNK_SIZE);
+		require(!view.sample({beyond, 1, 8}).available && view.terrainChanges().invalidated,
+			"dependency overflow failed to demand conservative invalidation");
+		client.prediction.checkTerrain(view);
+	}
+	require(client.prediction.waitingForTerrain() && client.prediction.backlog() == 0 &&
+		client.prediction.stats().hardResets == 1, "overflow retained untracked prediction");
+	client.snapshot({8.5, 1.001, 8.5});
+	require(client.camera() && !client.prediction.waitingForTerrain() && !client.collision().terrainChanges().invalidated,
+		"a fresh bounded footprint did not recover after overflow");
+}
+
 void testThreadedDelivery(const fs::path &root)
 {
 	server::HostConfig config;
@@ -1811,6 +2070,9 @@ int main(int argc, char **argv)
 			testClientTickMath();
 			testClientTimingSamples();
 			testPredictionResets();
+			testReplicaCameraHold(false);
+			testReplicaCameraHold(true);
+			testReplicaTerrainDiscontinuities();
 			testRemoteInterpolation();
 			testDelayedJoin(root);
 			for (const auto delay : {0ms, 15ms, 40ms, 75ms})
@@ -1820,6 +2082,9 @@ int main(int argc, char **argv)
 		else
 		{
 			testRenderBacking();
+			testReplicaTerrainChanges();
+			testReplicaTerrainBoundaries();
+			testReplicaTerrainCapacity();
 			testIncompatibleGenerator();
 			testReplication(root);
 			testThreadedDelivery(root);

@@ -94,7 +94,8 @@ const wire::PlayerState *Engine::RemoteSession::localPlayer() const
 bool Engine::RemoteSession::ready() const
 {
 	const auto *player = localPlayer();
-	return projection && player && players.fresh(Clock::now()) && transport.inventory() &&
+	return projection && player && hasCameraPose && !prediction.waitingForTerrain() &&
+		players.fresh(Clock::now()) && transport.inventory() &&
 		projection->observedVersion(glm::ivec3(glm::floor(playerFeet(*player)))).has_value();
 }
 
@@ -107,6 +108,8 @@ const char *Engine::RemoteSession::connectionStatus() const
 	case ClientStatus::Disconnected: return "Disconnected";
 	case ClientStatus::Connecting: return "Joining server";
 	case ClientStatus::Connected:
+		if (prediction.waitingForTerrain() || (localPlayer() && !hasCameraPose))
+			return "Waiting for synchronized player terrain";
 		if (!ready())
 			return "Waiting for server terrain and inventory";
 		if (const auto now = Clock::now(); !inputTiming.hasFreshClock(now) || transport.inputAcknowledgmentStalled(now))
@@ -221,7 +224,8 @@ void Engine::pollRemote()
 		remote.inputTiming.reset();
 		remote.prediction = {};
 		remote.remotePlayers = {};
-		remote.terrain.reset();
+		remote.terrain = {};
+		remote.hasCameraPose = false;
 		remote.lastTraffic = transport.traffic();
 		remote.trafficAt = now;
 		remote.firstPlayerAt = {};
@@ -245,10 +249,7 @@ void Engine::pollRemote()
 			remote.inputTiming.observeRoundTrip(*sample);
 		if (const auto *player = remote.localPlayer())
 		{
-			const auto &chunks = transport.chunks();
-			if (remote.terrain && remote.terrain->invalidatedBy(chunks))
-				remote.prediction.invalidateTerrain();
-			remote.terrain = net::udp::ClientWorld::terrainAround(chunks, playerFeet(*player));
+			const net::udp::ClientWorld::CollisionView collision(*remote.projection, transport.chunks(), &remote.terrain);
 			if (remote.players.arrived == Clock::time_point{} || history.current->tick != remote.players.tick)
 			{
 				const auto receivedAt = *transport.playerSnapshotReceivedAt();
@@ -256,10 +257,11 @@ void Engine::pollRemote()
 				remote.players.observe(history, receivedAt);
 				if (remote.firstPlayerAt == Clock::time_point{})
 					remote.firstPlayerAt = receivedAt;
-				const net::udp::ClientWorld::CollisionView collision(*remote.projection, chunks);
 				remote.prediction.observe(*history.current, *player, receivedAt, collision);
 				remote.remotePlayers.observe(*history.current, receivedAt);
 			}
+			else
+				remote.prediction.checkTerrain(collision);
 			remote.prediction.expire(now);
 		}
 		if (now - remote.trafficAt >= 1s)
@@ -294,36 +296,37 @@ void Engine::pollRemote()
 void Engine::sendRemoteInput(const physics::PlayerInput &input)
 {
 	auto &remote = *m_remote;
-	const auto *local = remote.localPlayer();
-	if (!remote.projection || !local)
+	if (!remote.ready())
 		return;
 	const auto now = RemoteSession::Clock::now();
-	const net::udp::ClientWorld::CollisionView collision(*remote.projection, remote.transport.chunks());
-	if (remote.ready())
-	{
-		if (input.jumpPressed && now - remote.jumpQueuedAt >= 200ms)
-			jumpPressed = false;
-		wire::Input sample;
-		const auto move = input.move * (0.999999 / std::max(glm::length(input.move), 1.0));
-		sample.moveX = float(move.x);
-		sample.moveZ = float(move.y);
-		sample.flags = (input.sprint ? wire::Input::sprint : 0) |
-			(input.swimUp ? wire::Input::swimUp : 0) | (input.swimDown ? wire::Input::swimDown : 0) |
-			(input.jumpPressed && jumpPressed ? wire::Input::jump : 0);
-		if (remote.inputTiming.send(now, sample, [&](const wire::Input &inputSample) {
-			const auto sequence = remote.transport.sendInput(inputSample, now);
-			if (sequence)
-				remote.prediction.record(sequence, inputSample, now, collision);
-			return sequence != 0;
-		}))
-			jumpPressed = false;
-	}
-	// While the authority is outside locally usable terrain, keep the
-	// waiting camera in open sky at its column until a body pose is safe.
-	const auto authority = playerFeet(*local);
-	const auto body = remote.prediction.present(now, collision).value_or(
-		glm::dvec3(authority.x, WORLD_HEIGHT, authority.z));
-	camera.setPosition(glm::vec3(body + kEyeOffset));
+	const net::udp::ClientWorld::CollisionView collision(*remote.projection, remote.transport.chunks(), &remote.terrain);
+	if (input.jumpPressed && now - remote.jumpQueuedAt >= 200ms)
+		jumpPressed = false;
+	wire::Input sample;
+	const auto move = input.move * (0.999999 / std::max(glm::length(input.move), 1.0));
+	sample.moveX = float(move.x);
+	sample.moveZ = float(move.y);
+	sample.flags = (input.sprint ? wire::Input::sprint : 0) |
+		(input.swimUp ? wire::Input::swimUp : 0) | (input.swimDown ? wire::Input::swimDown : 0) |
+		(input.jumpPressed && jumpPressed ? wire::Input::jump : 0);
+	if (remote.inputTiming.send(now, sample, [&](const wire::Input &inputSample) {
+		const auto sequence = remote.transport.sendInput(inputSample, now);
+		if (sequence)
+			remote.prediction.record(sequence, inputSample, now, collision);
+		return sequence != 0;
+	}))
+		jumpPressed = false;
+}
+
+void Engine::updateRemoteCamera()
+{
+	auto &remote = *m_remote;
+	const net::udp::ClientWorld::CollisionView collision(*remote.projection, remote.transport.chunks(), &remote.terrain);
+	remote.prediction.checkTerrain(collision);
+	const auto body = remote.prediction.present(Clock::now(), collision);
+	remote.hasCameraPose = body.has_value();
+	if (body)
+		camera.setPosition(glm::vec3(*body + kEyeOffset));
 }
 
 void Engine::updateRemoteEntities()
@@ -334,7 +337,7 @@ void Engine::updateRemoteEntities()
 	std::vector<OverlayPlayer> avatars;
 	const auto now = RemoteSession::Clock::now();
 	const auto &players = remote.transport.playerSnapshots();
-	if (remote.projection && players.current && remote.players.fresh(now))
+	if (remote.hasCameraPose && remote.projection && players.current && remote.players.fresh(now))
 	{
 		for (const auto &actor : std::span(players.current->players).first(players.current->count))
 		{
@@ -356,7 +359,7 @@ void Engine::updateRemoteEntities()
 	}
 
 	const auto present = [now, &remote](const auto &history, const auto &clock, auto member, auto draw) {
-		if (!remote.projection || !history.current || !clock.fresh(now))
+		if (!remote.hasCameraPose || !remote.projection || !history.current || !clock.fresh(now))
 			return;
 		const auto &current = *history.current;
 		const float alpha = history.previous ? float(clock.alpha(history.previous->tick, now)) : 1.f;

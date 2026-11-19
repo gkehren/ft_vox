@@ -13,7 +13,7 @@ constexpr physics::PlayerSettings kSettings;
 bool canPredict(const physics::Body &body)
 {
 	// Wire velocity bounds are deliberately wider than walking physics.
-	// Keep speculative sweeps within the nearby terrain footprint.
+	// Keep speculative sweeps within normal walking distances.
 	return glm::length(glm::dvec2(body.velocity.x, body.velocity.z)) <= kSettings.sprintSpeed + 0.01 &&
 		body.velocity.y >= -kSettings.terminalSpeed && body.velocity.y <= kSettings.jumpSpeed + 0.01;
 }
@@ -47,17 +47,23 @@ void ClientPrediction::discard()
 {
 	m_head = m_count = 0;
 	m_offset = {};
-	m_safeFeet.reset();
 	restore();
+}
+
+void ClientPrediction::checkTerrain(const ClientWorld::CollisionView &world)
+{
+	if (world.terrainChanges().invalidated)
+		invalidateTerrain();
 }
 
 void ClientPrediction::invalidateTerrain()
 {
-	if (!m_anchor)
+	if (!m_anchor || m_waitForTerrain)
 		return;
+	if (!m_waitForSnapshot)
+		++m_stats.hardResets;
 	discard();
-	m_waitForSnapshot = true;
-	++m_stats.hardResets;
+	m_waitForSnapshot = m_waitForTerrain = true;
 }
 
 void ClientPrediction::expire(Clock::time_point now)
@@ -66,7 +72,11 @@ void ClientPrediction::expire(Clock::time_point now)
 		return;
 	if (elapsed(now, m_anchor->arrived) > kMaxAge ||
 	    (m_count && elapsed(now, m_pending[m_head].sentAt) > kMaxAge))
-		invalidateTerrain();
+	{
+		discard();
+		m_waitForSnapshot = true;
+		++m_stats.hardResets;
+	}
 }
 
 void ClientPrediction::stepTo(const wire::Input &input, const physics::VoxelCollisionWorld &world)
@@ -81,8 +91,28 @@ glm::dvec3 ClientPrediction::offset(Clock::time_point now) const
 	return m_offset * (1.0 - std::clamp(elapsed(now, m_smoothedAt) / kSmoothTime, 0.0, 1.0));
 }
 
+void ClientPrediction::smoothFrom(glm::dvec3 displayed, Clock::time_point now)
+{
+	const auto delta = displayed - m_controller.body.position;
+	m_offset = delta * (kSmoothDistance / std::max(glm::length(delta), kSmoothDistance));
+	m_smoothedAt = now;
+}
+
 void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire::PlayerState &local,
 	Clock::time_point receivedAt, const physics::VoxelCollisionWorld &world)
+{
+	observe(snapshot, local, receivedAt, world, nullptr);
+}
+
+void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire::PlayerState &local,
+	Clock::time_point receivedAt, const ClientWorld::CollisionView &world)
+{
+	observe(snapshot, local, receivedAt, world, &world);
+}
+
+void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire::PlayerState &local,
+	Clock::time_point receivedAt, const physics::VoxelCollisionWorld &world,
+	const ClientWorld::CollisionView *replica)
 {
 	const auto tick = snapshot.tick;
 	const auto ack = snapshot.lastProcessedInput;
@@ -90,10 +120,28 @@ void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire:
 	    (tick <= m_anchor->tick || ack < m_anchor->ack || receivedAt < m_anchor->arrived)))
 		return;
 
+	const bool hadAnchor = m_anchor.has_value();
+	const bool teleport = m_anchor && m_anchor->motionReset != local.motionReset;
+	if (teleport)
+		m_presentation = {};
+	bool awaitingPublication = false;
+	if (replica)
+	{
+		const auto changes = teleport ? ClientWorld::TerrainChanges{} : replica->terrainChanges();
+		if (changes.invalidated)
+			invalidateTerrain();
+		awaitingPublication = changes.awaitingPublication;
+		// Keep the old dependencies until their in-flight updates publish.
+		// Otherwise the new anchor and replay build a fresh footprint.
+		if (!awaitingPublication)
+			replica->resetDependencies();
+	}
+	const bool wasSuspended = m_waitForSnapshot;
+	const bool resumingTerrain = m_waitForTerrain;
 	const auto before = m_controller.body.position;
 	const auto displayed = before + offset(receivedAt);
 	const auto beforeTick = m_tick;
-	const bool discontinuity = m_anchor && (m_anchor->motionReset != local.motionReset ||
+	const bool discontinuity = m_anchor && (teleport ||
 		((m_anchor->flags ^ local.flags) & kBlocked) ||
 		elapsed(receivedAt, m_anchor->arrived) > kMaxAge);
 	physics::Body body;
@@ -104,14 +152,31 @@ void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire:
 	const auto &timers = snapshot.localTimers;
 	m_anchor = Anchor{tick, ack, local.motionReset, local.flags, receivedAt, body,
 		{timers[0], timers[1], timers[2]}};
-	m_waitForSnapshot = false;
 	restore();
+	physics::QueryStats queries;
+	if (awaitingPublication || body.waitingForTerrain || !physics::clear(world, body.bounds(), queries))
+	{
+		if (hadAnchor && !wasSuspended)
+			++m_stats.hardResets;
+		discard();
+		m_waitForSnapshot = m_waitForTerrain = true;
+		return;
+	}
+	m_waitForSnapshot = m_waitForTerrain = false;
 	if (discontinuity || (local.flags & kBlocked) || !canPredict(body))
 	{
-		if (discontinuity)
+		if (discontinuity && !wasSuspended)
 			++m_stats.hardResets;
 		discard();
 		return;
+	}
+	if (resumingTerrain && m_presentation.lastSafeFeet)
+	{
+		const auto held = *m_presentation.lastSafeFeet;
+		if (glm::length(held - body.position) < kHardCorrection)
+			smoothFrom(held, receivedAt);
+		else
+			m_presentation = {};
 	}
 
 	while (m_count)
@@ -140,11 +205,10 @@ void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire:
 	{
 		++m_stats.hardResets;
 		discard();
+		m_presentation = {};
 		return;
 	}
-	const auto delta = displayed - m_controller.body.position;
-	m_offset = delta * (kSmoothDistance / std::max(glm::length(delta), kSmoothDistance));
-	m_smoothedAt = receivedAt;
+	smoothFrom(displayed, receivedAt);
 }
 
 void ClientPrediction::record(uint64_t sequence, const wire::Input &input, Clock::time_point now,
@@ -169,7 +233,7 @@ std::optional<glm::dvec3> ClientPrediction::present(Clock::time_point now,
 		return std::nullopt;
 	physics::QueryStats queries;
 	auto pose = m_controller.body;
-	if (physics::clear(world, pose.bounds(), queries))
+	if (!m_waitForTerrain && physics::clear(world, pose.bounds(), queries))
 	{
 		const auto delta = offset(now);
 		// Check the full body along the correction, even when both endpoints
@@ -178,16 +242,24 @@ std::optional<glm::dvec3> ClientPrediction::present(Clock::time_point now,
 			m_offset = {};
 		else
 			pose.position += delta;
-		return m_safeFeet = pose.position;
+		return m_presentation.lastSafeFeet = pose.position;
 	}
 	m_offset = {};
-	if (physics::recover(world, pose, queries))
-		return m_safeFeet = pose.position;
-	if (m_safeFeet)
+	if (!m_waitForTerrain && physics::recover(world, pose, queries))
+		return m_presentation.lastSafeFeet = pose.position;
+	if (m_presentation.lastSafeFeet)
 	{
-		pose.position = *m_safeFeet;
-		if (physics::clear(world, pose.bounds(), queries))
-			return m_safeFeet;
+		pose.position = *m_presentation.lastSafeFeet;
+		// A frozen pose may straddle unavailable terrain. If publication
+		// establishes a solid overlap, show the waiting view instead.
+		bool obstructed = false;
+		physics::visitCells(pose.bounds(), [&](glm::ivec3 cell) {
+			const auto voxel = world.sample(cell);
+			obstructed |= voxel.available && voxel.solid;
+		});
+		if (!obstructed)
+			return m_presentation.lastSafeFeet;
+		m_presentation = {};
 	}
 	return std::nullopt;
 }
