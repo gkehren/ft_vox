@@ -1,5 +1,53 @@
 # Graphical multiplayer smoke for #257
 
+## Input timing correction
+
+Commit `5d4cb02aa3f2d9cd5c74f8298a2d14436f692294` was built with MSVC
+in Release mode with `FT_VOX_GRAPHICS=ON`. The uninstrumented binaries
+ran on Windows 10.0.26300 with an NVIDIA GeForce RTX 4070 Ti,
+driver 621.24 and Vulkan 1.4.357. The seed-42 smoke save included the
+same small dry stone platform as the earlier run.
+
+The server and both clients used separate working directories under
+`build/issue272-sdl`. These were the launch arguments.
+
+```powershell
+ft_vox_server.exe --world multiplayer-smoke --saves-root server-saves --seed 42 --port 7777 --stop-file stop --metrics-every 180
+$env:FT_VOX_VALIDATION = '1'
+ft_vox.exe --connect 127.0.0.1:7777 --seed 42
+ft_vox.exe --connect 127.0.0.1:7777
+```
+
+Both uninstrumented clients reported **Connected** with different player
+IDs in the same server epoch. Each reached 29 loaded chunks and a
+nonempty draw list. The logs reported the known swapchain validation
+warnings `VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
+`VUID-VkImageViewCreateInfo-usage-02275`. See the
+[Vulkan validation guide](vulkan-validation.md).
+
+The native desktop input helper could not connect. Physical keyboard,
+mouse, inventory, focus changes, both players' interaction scenarios,
+and the Multiplayer menu still need a manual pass. The image below
+belongs to the earlier diagnostic run.
+
+`WorldReplicationClientTick` exercised unmodified server admission and
+player physics over a controlled IPv4 relay. The stable-window counts
+track which sent sequences appeared as processed at the authority.
+
+| Nominal RTT | Stable window processed | Result |
+| --- | --- | --- |
+| Loopback | 48/48 | Movement, neutral stop and one jump |
+| 40 ms | 47/47 | Sustained movement |
+| 80 ms | 48/48 | Sustained movement |
+| 120 ms | 48/48 | Sustained movement |
+| 40–100 ms with jitter | 30/48 | Movement resumed after loss, reordering, a snapshot gap and a 500 ms frame stall |
+
+The relay leaves chunk transfer out of the timing fixture. The existing
+stop-and-wait baseline can hit its five-second assembly deadline before
+a cold join is playable at higher RTTs.
+
+## Earlier diagnostic run
+
 The Windows Release client ran on an NVIDIA GeForce RTX 4070 Ti with two
 game processes and one IPv4 loopback server. The world used seed 42 and a
 small stone platform prepared with the headless runner, so the camera
