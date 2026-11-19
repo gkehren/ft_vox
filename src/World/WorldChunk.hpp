@@ -83,7 +83,11 @@ public:
 	/// Occupancy lifecycle gate (issue #115): the voxel backing holds stale
 	/// pool bytes until terrain generation initializes it. True only once
 	/// generated — the gate every direct voxel read/write must pass.
-	bool isVoxelBackingReadable() const { return getState() != ChunkState::UNLOADED; }
+	bool isVoxelBackingReadable() const
+	{
+		return getState() != ChunkState::UNLOADED && !isReplicaRetiring();
+	}
+	bool isReplicaRetiring() const { return m_replicaRetiring.load(std::memory_order_relaxed); }
 	bool isInTransit() const { return m_inTransit.load(std::memory_order_relaxed); }
 	void setInTransit(bool val) { m_inTransit.store(val, std::memory_order_relaxed); }
 
@@ -248,6 +252,7 @@ private:
 	// observe it around worker tasks.
 	uint64_t m_generation{0};
 	std::atomic<uint64_t> m_revision{0};
+	std::atomic<bool> m_replicaRetiring{false};
 	// Owner-only voxel identity. Unlike the render revision, this counts
 	// logical target edits, including ones waiting on backing publication.
 	uint64_t m_contentGeneration{0}, m_contentRevision{0};

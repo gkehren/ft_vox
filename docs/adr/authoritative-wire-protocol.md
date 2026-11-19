@@ -12,6 +12,10 @@ private inventories and fresh item and mob snapshots. Existing v2 layouts
 are retained and the new tags use only the fresh lane. The Boost UDP prototype remains isolated in
 `test_network` and uses its original v1 framing.
 
+Phase D1 (#257) consumes these snapshots and verified terrain in the
+[graphical client](../dedicated-server.md#connect-two-graphical-clients).
+The graphical host uses the same v2 framing and delivery rules.
+
 ## Framing
 
 Each UDP datagram carries one frame of at most **1,200 bytes**, including

@@ -327,6 +327,7 @@ set(FT_VOX_ITEM_SOURCES
 set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/main.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/Engine.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/EngineMultiplayer.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/ImGuiLayer.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUI.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/GameUIInventory.cpp
@@ -475,6 +476,7 @@ ft_vox_target_hygiene(ft_vox_wire)
 add_library(ft_vox_udp STATIC
     src/Network/UdpSocket.cpp
     src/Network/ServerTransport.cpp
+    src/Network/ClientWorld.cpp
     src/Network/ClientTransport.cpp)
 target_link_libraries(ft_vox_udp PUBLIC ft_vox_wire PRIVATE ft_vox_core Threads::Threads)
 if(WIN32)
@@ -606,7 +608,7 @@ set(FT_VOX_COMMON_LIBS
 # linkers (GNU ld) the library must appear AFTER the objects — listing it first
 # among the libraries achieves that. CMake appends its transitive
 # glm/FastNoise2/Threads after it automatically.
-target_link_libraries(${PROJECT_NAME} PRIVATE ft_vox_core ${FT_VOX_COMMON_LIBS})
+target_link_libraries(${PROJECT_NAME} PRIVATE ft_vox_udp ft_vox_core ${FT_VOX_COMMON_LIBS})
 
 # Linux: libdl for dynamic loader helpers; Vulkan loader when not using pure volk bootstrap
 if(UNIX AND NOT APPLE)

@@ -19,6 +19,8 @@ namespace net::wire
 // The authoritative protocol, separate from the test-only UDP v1 prototype.
 // See docs/adr/authoritative-wire-protocol.md for byte layouts and delivery.
 inline constexpr uint16_t kVersion = 2;
+inline constexpr int kTickRate = 60;
+inline constexpr uint64_t kInputLeadTicks = 6;
 inline constexpr uint16_t kItemSchema = 1;
 inline constexpr size_t kDatagramBytes = 1200;
 inline constexpr size_t kHeaderBytes = 36;
@@ -200,6 +202,7 @@ struct Action
 };
 
 bool validAction(const Action &action) noexcept;
+std::array<double, 3> aimDirection(float yawTurns, float pitchTurns) noexcept;
 
 enum class ActionCode : uint8_t
 {

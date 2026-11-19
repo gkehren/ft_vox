@@ -54,10 +54,11 @@ void OverlayRenderer::createGeometry(ImmediateCommands &imm)
 		4, 5, 5, 6, 6, 7, 7, 4,
 		0, 4, 1, 5, 2, 6, 3, 7,
 	};
-	// Centered unit cube for players (-0.5..0.5), slightly taller
+	// Feet-anchored player box.
+	constexpr float w = OverlayPlayer::kHalfWidth, h = OverlayPlayer::kHeight;
 	const float playerVerts[] = {
-		-0.4f, 0.0f, -0.4f, 0.4f, 0.0f, -0.4f, 0.4f, 1.8f, -0.4f, -0.4f, 1.8f, -0.4f,
-		-0.4f, 0.0f, 0.4f, 0.4f, 0.0f, 0.4f, 0.4f, 1.8f, 0.4f, -0.4f, 1.8f, 0.4f,
+		-w, 0.f, -w, w, 0.f, -w, w, h, -w, -w, h, -w,
+		-w, 0.f, w, w, 0.f, w, w, h, w, -w, h, w,
 	};
 	const uint16_t playerIdx[] = {
 		0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
@@ -177,6 +178,11 @@ void OverlayRenderer::createPipelines(VkFormat colorFormat, VkFormat depthFormat
 
 	make(iaLines, m_linePipeline);
 	make(iaTris, m_solidPipeline);
+	// Remote players participate in scene depth so water and sky composite
+	// against their whole silhouette, including pixels above the terrain.
+	ds.depthWriteEnable = VK_TRUE;
+	ba.blendEnable = VK_FALSE;
+	make(iaTris, m_opaquePlayerPipeline);
 
 	destroyShaderModule(m_context->getDevice(), vert);
 	destroyShaderModule(m_context->getDevice(), frag);
@@ -190,9 +196,11 @@ void OverlayRenderer::destroyPipelines()
 		vkDestroyPipeline(m_context->getDevice(), m_linePipeline, nullptr);
 	if (m_solidPipeline)
 		vkDestroyPipeline(m_context->getDevice(), m_solidPipeline, nullptr);
+	if (m_opaquePlayerPipeline)
+		vkDestroyPipeline(m_context->getDevice(), m_opaquePlayerPipeline, nullptr);
 	if (m_layout)
 		vkDestroyPipelineLayout(m_context->getDevice(), m_layout, nullptr);
-	m_linePipeline = m_solidPipeline = VK_NULL_HANDLE;
+	m_linePipeline = m_solidPipeline = m_opaquePlayerPipeline = VK_NULL_HANDLE;
 	m_layout = VK_NULL_HANDLE;
 }
 
@@ -286,13 +294,14 @@ void OverlayRenderer::record(VkCommandBuffer cmd, VkDescriptorSet frameSet0,
 
 	if (!m_players.empty())
 	{
-		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_solidPipeline);
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+			m_opaquePlayers ? m_opaquePlayerPipeline : m_solidPipeline);
 		for (const auto &p : m_players)
 		{
 			glm::mat4 model(1.f);
 			model = glm::translate(model, p.position);
 			const glm::vec3 c = colorFromPlayerId(p.id);
-			drawPlayerCube(cmd, model, glm::vec4(c, 0.95f));
+			drawPlayerCube(cmd, model, glm::vec4(c, m_opaquePlayers ? 1.f : 0.95f));
 		}
 	}
 }

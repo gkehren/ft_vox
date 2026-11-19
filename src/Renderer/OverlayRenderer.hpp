@@ -20,6 +20,8 @@ struct OverlayHighlight
 
 struct OverlayPlayer
 {
+	static constexpr float kHalfWidth = 0.4f;
+	static constexpr float kHeight = 1.8f;
 	glm::vec3 position{0.f};
 	uint32_t id{0};
 };
@@ -40,7 +42,11 @@ public:
 	bool showChunkBorders() const { return m_showChunkBorders; }
 
 	void setHighlight(const OverlayHighlight &h) { m_highlight = h; }
-	void setPlayers(std::vector<OverlayPlayer> players) { m_players = std::move(players); }
+	void setPlayers(std::vector<OverlayPlayer> players, bool opaque = false)
+	{
+		m_players = std::move(players);
+		m_opaquePlayers = opaque;
+	}
 
 	void record(VkCommandBuffer cmd, VkDescriptorSet frameSet0,
 				const std::vector<Chunk *> &chunks);
@@ -66,8 +72,10 @@ private:
 	VkPipelineLayout m_layout{VK_NULL_HANDLE};
 	VkPipeline m_linePipeline{VK_NULL_HANDLE};
 	VkPipeline m_solidPipeline{VK_NULL_HANDLE};
+	VkPipeline m_opaquePlayerPipeline{VK_NULL_HANDLE};
 
 	bool m_showChunkBorders{false};
+	bool m_opaquePlayers{false};
 	OverlayHighlight m_highlight{};
 	std::vector<OverlayPlayer> m_players;
 };

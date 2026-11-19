@@ -142,6 +142,7 @@ public:
 	}
 	bool isVoxelBackingReadable() const { return m_active && m_active->isVoxelBackingReadable(); }
 	bool isInTransit() const { return m_active && m_active->isInTransit(); }
+	bool isReplicaRetiring() const { return m_active && m_active->isReplicaRetiring(); }
 	void setInTransit(bool val)
 	{
 		recordForWrite()->setInTransit(val);

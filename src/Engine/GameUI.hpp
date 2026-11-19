@@ -175,6 +175,10 @@ struct GameUIFrame
 	std::function<void(bool)> setMobsEnabled;
 	size_t mobCount{}, mobVisible{};
 	bool *paused{nullptr};
+	const char *multiplayerStatus{nullptr};
+	const char *multiplayerAction{nullptr};
+	std::function<void()> joinServer;
+	std::function<void()> leaveServer;
 
 	/// Gameplay inventory presentation (issue #229, Epic #223 Phase F):
 	/// read-only bounded snapshot filled by Engine::drawUi + explicit command
@@ -182,6 +186,7 @@ struct GameUIFrame
 	/// simulation is the only truth. Display names resolve through the item
 	/// registry on this side — the snapshot carries stable ItemIds only.
 	sim::InventorySnapshot inventory{};
+	bool inventoryInputEnabled{true};
 	std::function<void(int)> selectHotbarSlot;
 	std::function<void(int, int)> moveStack;
 	std::function<void(int, int)> swapStacks;
@@ -266,6 +271,7 @@ public:
 
 	/// Draw all panels. Call between ImGui beginFrame / endFrame.
 	void draw(GameUIFrame &frame);
+	void resetInventoryInteraction() { m_drag = {}; }
 
 	/// Keyboard shortcut handling, split by input-routing policy (issue #76):
 	/// - handleGlobalShortcut: intentional global non-text shortcuts

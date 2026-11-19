@@ -13,7 +13,7 @@
 namespace server
 {
 
-inline constexpr int kTickRate = 60;
+inline constexpr int kTickRate = net::wire::kTickRate;
 inline constexpr double kTickDt = 1.0 / kTickRate;
 
 struct HostConfig

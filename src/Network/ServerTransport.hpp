@@ -18,7 +18,7 @@ struct SessionAdmission
 	uint64_t tick, nextEditId;
 };
 
-inline constexpr uint64_t kInputLeadTicks = 6;
+inline constexpr uint64_t kInputLeadTicks = wire::kInputLeadTicks;
 inline constexpr uint64_t kSnapshotIntervalTicks = 3;
 inline constexpr uint64_t kEntitySnapshotIntervalTicks = 6;
 inline constexpr size_t kMaxConcurrentChunkTransfers = 16;
