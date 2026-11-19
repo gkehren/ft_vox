@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -23,6 +24,7 @@ inline constexpr size_t kDatagramBytes = 1200;
 inline constexpr size_t kHeaderBytes = 36;
 inline constexpr size_t kMaxPlayersPerSnapshot = 24;
 inline constexpr size_t kChunkBytes = 65536;
+inline constexpr size_t kMaxReplicatedChunks = 197; // radius-eight disk
 inline constexpr size_t kFragmentBytes = 1100;
 inline constexpr size_t kFragmentsPerChunk = (kChunkBytes + kFragmentBytes - 1) / kFragmentBytes;
 inline constexpr int32_t kHorizontalLimit = 1 << 23;
@@ -164,7 +166,7 @@ struct Cell
 struct ChunkCoord
 {
     int32_t x{}, z{};
-    bool operator==(const ChunkCoord &) const = default;
+    auto operator<=>(const ChunkCoord &) const = default;
 };
 
 struct ChunkVersion

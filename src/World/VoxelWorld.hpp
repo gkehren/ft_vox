@@ -156,6 +156,19 @@ struct WorldEditResult
 	std::vector<glm::ivec3> geometricMembers;
 };
 
+struct ChunkContentVersion
+{
+	uint64_t generation{}, revision{};
+};
+
+struct LogicalVoxelEdit
+{
+	uint64_t id{};
+	glm::ivec3 cell{};
+	ChunkContentVersion base;
+	TextureType type{AIR};
+};
+
 /// Narrow worker-profiling seam: the graphical adapter forwards to the
 /// engine Profiler; headless worlds run without one. Two calls per generation
 /// job — never per voxel (epic invariant: no per-voxel virtual dispatch).
@@ -242,6 +255,16 @@ public:
 	uint64_t nextEditId() const { return m_nextEditId; }
 	bool hasPendingEditsFor(const WorldChunk *chunk) const;
 
+	// Owner-only observation. Record logical edits at acceptance, before
+	// deferred/coalesced writes can affect their publication order.
+	void observeLogicalEdits() { m_observeLogicalEdits = true; }
+	bool drainLogicalEdits(std::vector<LogicalVoxelEdit> &out);
+	std::optional<ChunkContentVersion> chunkContentVersion(glm::ivec3 coord) const;
+	// Copy the published backing and its canonical pending overlay at one
+	// owner boundary. Returns the next-edit watermark, or zero if unavailable.
+	uint64_t captureChunkContent(glm::ivec3 coord, std::span<uint8_t, CHUNK_VOLUME> out,
+		ChunkContentVersion &version) const;
+
 	// --- Queries ---------------------------------------------------------------
 	WorldChunk *getChunk(const glm::ivec3 &chunkPos);
 	const WorldChunk *getChunk(const glm::ivec3 &chunkPos) const;
@@ -260,6 +283,8 @@ public:
 	/// Owner-thread snapshot. Override counts include evicted coordinates and
 	/// reflect edits applied since the last streaming tick.
 	PlayerStreamingStats playerStreamingStats() const;
+	// Nearest-first disk offsets shared by residency and network interest.
+	static std::span<const glm::ivec3> playerInterestOffsets(int radiusChunks);
 
 	/// Rebuild a record's neighbor border shell from resident neighbors
 	/// (main thread; locks internally). The render adapter calls this at
@@ -455,6 +480,9 @@ private:
 	};
 	std::vector<PendingVoxelEdit> m_pendingEdits;
 	uint64_t m_nextEditId{1};
+	uint64_t m_nextContentGeneration{1};
+	bool m_observeLogicalEdits{false}, m_logicalEditGap{false};
+	std::vector<LogicalVoxelEdit> m_logicalEdits;
 
 	// --- Streaming state -----------------------------------------------------------
 	std::vector<LoadCandidate> m_loadQueue;

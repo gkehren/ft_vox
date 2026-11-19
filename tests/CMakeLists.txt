@@ -1485,6 +1485,12 @@ target_link_libraries(test_udp_transport PRIVATE ft_vox_udp ft_vox_core)
 add_test(NAME UdpTransport COMMAND test_udp_transport)
 set_tests_properties(UdpTransport PROPERTIES TIMEOUT 30)
 
+add_executable(test_world_replication test_world_replication.cpp ${FT_VOX_SERVER_HOST_SOURCE})
+target_link_libraries(test_world_replication PRIVATE ft_vox_core ft_vox_udp)
+ft_vox_target_hygiene(test_world_replication)
+add_test(NAME WorldReplication COMMAND test_world_replication)
+set_tests_properties(WorldReplication PROPERTIES TIMEOUT 180)
+
 # Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh
 # CMake configure + build with FT_VOX_GRAPHICS=OFF, no vcpkg toolchain and no
 # graphics discovery, producing the runner + CPU tests and running them.
@@ -1527,6 +1533,7 @@ foreach(_cpu_test IN ITEMS
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
     test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol test_udp_transport
+    test_world_replication
     bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR

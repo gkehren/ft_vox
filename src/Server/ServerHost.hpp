@@ -4,6 +4,7 @@
 #include <Network/ServerTransport.hpp>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <string>
@@ -62,6 +63,7 @@ public:
 	std::optional<net::wire::ActionResult> receiveRemote(
 		sim::PlayerId player, const net::udp::SessionIntents &intents) override;
 	net::wire::PlayerSnapshot snapshotRemote(sim::PlayerId player) const override;
+	std::optional<net::udp::WorldUpdate> nextWorldUpdate(sim::PlayerId player, bool allowBaseline) override;
 	void suspendPlayerInput();
 
 private:
@@ -70,11 +72,16 @@ private:
 	bool quiesce(std::string &error);
 	bool save(std::string &error);
 	void advancePlayers();
+	void distributeWorldEdits();
 
 	struct RemotePlayer
 	{
 		net::udp::InputQueue inputs{};
 		uint64_t lastQueuedSequence{}, lastQueuedTick{}, lastProcessedInput{};
+		std::map<net::wire::ChunkCoord, net::wire::ChunkVersion> chunks;
+		std::deque<net::wire::WorldEdit> edits;
+		uint64_t nextTransferId{1};
+		bool worldGap{};
 	};
 
 	HostConfig m_config;
@@ -84,6 +91,7 @@ private:
 	std::map<sim::PlayerId, RemotePlayer> m_remotePlayers;
 	glm::dvec3 m_spawnCenter{};
 	std::vector<WorldEvent> m_worldEvents;
+	std::vector<LogicalVoxelEdit> m_logicalEdits;
 	std::vector<items::ItemEntityEvent> m_itemEvents;
 	HostMetrics m_finalMetrics;
 	uint64_t m_ticks{0};

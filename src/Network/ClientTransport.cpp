@@ -23,6 +23,108 @@ struct ClientTransport::Impl
 		link.reset();
 		welcome.reset();
 		playerSnapshot.reset();
+		clearProjection();
+	}
+
+	void clearProjection()
+	{
+		chunks.clear();
+		assembler.reset();
+		assemblyOpen = false;
+		lastTransferId = lastEditId = 0;
+	}
+
+	void connect(Time now)
+	{
+		finish(ClientStatus::Connecting);
+		nonce = randomId();
+		rejection.reset();
+		heartbeats = 0;
+		deadline = now + kJoinTimeout;
+		nextHello = now;
+	}
+
+	void resync(wire::ResyncReason reason, Time now)
+	{
+		if (status != ClientStatus::Connected)
+			return;
+		clearProjection();
+		playerSnapshot.reset();
+		link->queue(wire::Endpoint::Client, wire::Resync{reason}, now);
+		status = ClientStatus::Resyncing;
+	}
+
+	void fragment(const wire::ChunkFragment &part, Time now)
+	{
+		const auto &baseline = part.baseline;
+		if (baseline.transferId <= lastTransferId)
+			return;
+		const auto result = assembler.accept(part, now);
+		assemblyOpen = result == wire::AssemblyStatus::InProgress;
+		if (assemblyOpen)
+			return;
+		if (result != wire::AssemblyStatus::Complete)
+		{
+			const auto reason = result == wire::AssemblyStatus::BadChecksum ? wire::ResyncReason::Checksum :
+				result == wire::AssemblyStatus::Expired ? wire::ResyncReason::Timeout : wire::ResyncReason::Baseline;
+			return resync(reason, now);
+		}
+		lastTransferId = baseline.transferId;
+		const auto found = chunks.find(baseline.coord);
+		if (found != chunks.end())
+		{
+			const auto &version = found->second.version;
+			if (baseline.version.generation < version.generation ||
+			    (baseline.version.generation == version.generation && baseline.version.revision < version.revision))
+				return;
+			if (baseline.nextEditId < found->second.nextEditId)
+				return resync(wire::ResyncReason::Baseline, now);
+		}
+		else if (chunks.size() == wire::kMaxReplicatedChunks)
+			return resync(wire::ResyncReason::Baseline, now);
+		if (baseline.nextEditId < welcome->nextEditId)
+			return resync(wire::ResyncReason::Baseline, now);
+		auto &chunk = chunks.try_emplace(baseline.coord).first->second;
+		chunk.version = baseline.version;
+		chunk.nextEditId = baseline.nextEditId;
+		std::ranges::copy(assembler.bytes(), chunk.materials.begin());
+	}
+
+	void edit(const wire::WorldEdit &update, Time now)
+	{
+		const auto &cell = update.cell;
+		const wire::ChunkCoord coord{floorDivChunk(cell.x), floorDivChunk(cell.z)};
+		const auto found = chunks.find(coord);
+		if (found == chunks.end())
+			return resync(wire::ResyncReason::Baseline, now);
+		auto &chunk = found->second;
+		if (update.base.generation < chunk.version.generation)
+			return;
+		if (update.base.generation == chunk.version.generation && update.editId < chunk.nextEditId &&
+		    update.base.revision < chunk.version.revision)
+			return; // already represented in the installed baseline or delta history
+		if (update.base != chunk.version || update.editId < chunk.nextEditId || update.editId <= lastEditId)
+			return resync(wire::ResyncReason::Baseline, now);
+		const auto x = cell.x - coord.x * CHUNK_SIZE;
+		const auto z = cell.z - coord.z * CHUNK_SIZE;
+		chunk.materials[(cell.y * CHUNK_SIZE + z) * CHUNK_SIZE + x] = update.material;
+		++chunk.version.revision;
+		chunk.nextEditId = update.editId + 1;
+		lastEditId = update.editId;
+	}
+
+	void project(const wire::Packet &packet, Time now)
+	{
+		if (const auto *part = std::get_if<wire::ChunkFragment>(&packet.payload))
+			return fragment(*part, now);
+		if (assemblyOpen)
+			return resync(wire::ResyncReason::Baseline, now);
+		if (const auto *delta = std::get_if<wire::WorldEdit>(&packet.payload))
+			return edit(*delta, now);
+		const auto &remove = std::get<wire::ChunkRemove>(packet.payload);
+		const auto found = chunks.find(remove.coord);
+		if (found != chunks.end() && found->second.version.generation == remove.generation)
+			chunks.erase(found);
 	}
 
 	Sender sender()
@@ -40,10 +142,14 @@ struct ClientTransport::Impl
 			return;
 		if (status == ClientStatus::Connecting)
 		{
-			if (const auto *reply = std::get_if<wire::Welcome>(&packet.payload);
-			    reply && reply->nonce == nonce && reply->content == wire::localCompatibility() &&
-			    reply->generatorVersion == TerrainGenerator::kGeneratorVersion)
+			if (const auto *reply = std::get_if<wire::Welcome>(&packet.payload); reply && reply->nonce == nonce)
 			{
+				if (reply->content != wire::localCompatibility() ||
+				    reply->generatorVersion != TerrainGenerator::kGeneratorVersion)
+				{
+					rejection = wire::RejectReason::Content;
+					return finish(ClientStatus::Rejected);
+				}
 				link.emplace(packet.scope, now);
 				welcome = *reply;
 				status = ClientStatus::Connected;
@@ -60,8 +166,12 @@ struct ClientTransport::Impl
 			return;
 		if (const auto *ack = std::get_if<wire::Ack>(&packet.payload))
 		{
-			if (status == ClientStatus::Leaving && link->acknowledge(ack->through))
+			if (!link->acknowledge(ack->through))
+				return;
+			if (status == ClientStatus::Leaving)
 				finish(ClientStatus::Disconnected);
+			else if (status == ClientStatus::Resyncing)
+				connect(now);
 			return;
 		}
 		const auto kind = kindOf(packet);
@@ -70,27 +180,42 @@ struct ClientTransport::Impl
 		                std::ranges::none_of(std::span(players->players).first(players->count),
 		                     [this](const auto &player) { return player.player == welcome->player; })))
 			return;
-		if (!players && kind != wire::Kind::Heartbeat && kind != wire::Kind::Disconnect && kind != wire::Kind::Resync)
+		const auto lane = wire::policy(kind)->lane;
+		if (!players && kind != wire::Kind::Heartbeat && lane != wire::Lane::Reliable)
 			return;
-		if (link->incoming.admit(packet) != wire::ReceiveStatus::Accepted)
+		const auto admitted = link->incoming.admit(packet);
+		if (lane == wire::Lane::Reliable)
+			link->ack = true; // includes replay/gap, so a lost ACK cannot deadlock the sender
+		if (admitted != wire::ReceiveStatus::Accepted)
 			return;
 		link->lastReceived = now;
-		if (players)
+		if (players && status == ClientStatus::Connected)
 			playerSnapshot = *players;
 		else if (kind == wire::Kind::Heartbeat)
 			++heartbeats;
-		else
+		else if (kind == wire::Kind::Disconnect)
 		{
-			link->ack = true;
 			link->flushAck(sender(), now);
-			finish(ClientStatus::Disconnected);
+			if (status == ClientStatus::Resyncing)
+				connect(now);
+			else
+				finish(ClientStatus::Disconnected);
 		}
+		else if (const auto *request = std::get_if<wire::Resync>(&packet.payload))
+			resync(request->reason, now);
+		else if (status == ClientStatus::Connected && (kind == wire::Kind::ChunkFragment ||
+		         kind == wire::Kind::WorldEdit || kind == wire::Kind::ChunkRemove))
+			project(packet, now);
 	}
 
 	void poll(Time now)
 	{
-		if ((status == ClientStatus::Connecting && now >= deadline) || (link && link->expired(now)))
+		if (status == ClientStatus::Resyncing && link->expired(now))
+			connect(now);
+		else if ((status == ClientStatus::Connecting && now >= deadline) || (link && link->expired(now)))
 			finish(ClientStatus::TimedOut);
+		if (status == ClientStatus::Connected && assembler.expire(now))
+			resync(wire::ResyncReason::Timeout, now);
 		if (status == ClientStatus::Connecting && now >= nextHello &&
 		    sender().send(now, {{}, 0, wire::Hello{nonce, wire::kVersion, wire::kVersion, wire::localCompatibility()}}))
 			nextHello = now + kHelloInterval;
@@ -108,6 +233,10 @@ struct ClientTransport::Impl
 	std::optional<wire::Welcome> welcome;
 	std::optional<wire::PlayerSnapshot> playerSnapshot;
 	std::optional<wire::RejectReason> rejection;
+	ChunkProjection chunks;
+	wire::ChunkAssembler assembler;
+	uint64_t lastTransferId{}, lastEditId{};
+	bool assemblyOpen{};
 	Rate inbound, outbound;
 	Traffic globalOut;
 	Time deadline{}, nextHello{};
@@ -121,15 +250,12 @@ void ClientTransport::connect(Clock::time_point now)
 {
 	if (m_impl->status == ClientStatus::Connecting || m_impl->link)
 		throw std::logic_error("UDP client must finish the current session before joining");
-	m_impl->nonce = randomId();
-	m_impl->rejection.reset();
-	m_impl->heartbeats = 0;
-	m_impl->deadline = now + kJoinTimeout;
-	m_impl->nextHello = now;
-	m_impl->status = ClientStatus::Connecting;
+	m_impl->connect(now);
 }
 
 void ClientTransport::poll(Clock::time_point now) { m_impl->poll(now); }
+
+void ClientTransport::requestWorldResync(Clock::time_point now) { m_impl->resync(wire::ResyncReason::Baseline, now); }
 
 void ClientTransport::disconnect(Clock::time_point now)
 {
@@ -140,6 +266,8 @@ void ClientTransport::disconnect(Clock::time_point now)
 		m_impl->link->queue(wire::Endpoint::Client, wire::Disconnect{wire::DisconnectReason::Leaving}, now);
 		m_impl->status = ClientStatus::Leaving;
 	}
+	else if (m_impl->status == ClientStatus::Resyncing)
+		m_impl->status = ClientStatus::Leaving; // the queued Resync already retires the old lease
 }
 
 ClientStatus ClientTransport::status() const { return m_impl->status; }
@@ -155,6 +283,7 @@ std::optional<wire::SessionScope> ClientTransport::scope() const
 	return m_impl->link ? std::optional{m_impl->link->scope} : std::nullopt;
 }
 std::optional<wire::PlayerSnapshot> ClientTransport::latestPlayerSnapshot() const { return m_impl->playerSnapshot; }
+const ChunkProjection &ClientTransport::chunks() const { return m_impl->chunks; }
 std::optional<wire::RejectReason> ClientTransport::rejection() const { return m_impl->rejection; }
 uint64_t ClientTransport::heartbeatsReceived() const { return m_impl->heartbeats; }
 

@@ -20,6 +20,7 @@ struct SessionAdmission
 
 inline constexpr uint64_t kInputLeadTicks = 6;
 inline constexpr uint64_t kSnapshotIntervalTicks = 3;
+inline constexpr size_t kMaxConcurrentChunkTransfers = 16;
 
 constexpr bool withinInputWindow(uint64_t intended, uint64_t completed)
 {
@@ -41,6 +42,19 @@ struct SessionIntents
 	std::optional<wire::Action> action;
 };
 
+struct ChunkTransfer
+{
+	wire::ChunkBaseline baseline;
+	std::array<uint8_t, wire::kChunkBytes> materials;
+};
+
+using WorldUpdate = std::variant<std::unique_ptr<ChunkTransfer>, wire::WorldEdit, wire::ChunkRemove, wire::Resync>;
+
+struct WorldTraffic
+{
+	uint64_t bytes{}, frames{}, retransmits{}, resyncs{};
+};
+
 class SessionOwner
 {
 public:
@@ -51,6 +65,8 @@ public:
 	// Every admitted action gets a result. Inputs are acknowledged via snapshots.
 	virtual std::optional<wire::ActionResult> receiveRemote(sim::PlayerId player, const SessionIntents &intents) = 0;
 	virtual wire::PlayerSnapshot snapshotRemote(sim::PlayerId player) const = 0;
+	// Called only when the peer's single world send slot is available.
+	virtual std::optional<WorldUpdate> nextWorldUpdate(sim::PlayerId, bool /*allowBaseline*/) { return std::nullopt; }
 };
 
 class ServerTransport
@@ -60,6 +76,8 @@ public:
 	ServerTransport(Address bind, size_t remoteCap, SessionWorld world);
 	~ServerTransport();
 	Address address() const;
+	WorldTraffic worldTraffic() const;
+	std::optional<WorldTraffic> worldTraffic(sim::PlayerId player) const;
 
 	// Production runs poll on its own worker. Tests may pump the same IO
 	// implementation with an injected monotonic clock instead of starting it.

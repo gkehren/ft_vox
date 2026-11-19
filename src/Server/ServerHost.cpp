@@ -26,6 +26,18 @@ glm::ivec2 chunkAt(glm::dvec3 feet)
 	return {floorDivChunk(static_cast<int>(std::floor(feet.x))),
 		floorDivChunk(static_cast<int>(std::floor(feet.z)))};
 }
+
+bool inInterest(wire::ChunkCoord coord, glm::ivec2 center, int radius)
+{
+	const int64_t x = static_cast<int64_t>(coord.x) - center.x;
+	const int64_t z = static_cast<int64_t>(coord.z) - center.y;
+	return x * x + z * z <= radius * radius;
+}
+
+uint8_t wireMaterial(uint8_t material)
+{
+	return material == AIR ? wire::kAirMaterial : material;
+}
 } // namespace
 
 ServerHost::ServerHost(HostConfig config) : m_config(std::move(config)) {}
@@ -98,8 +110,8 @@ wire::PlayerSnapshot ServerHost::snapshotRemote(sim::PlayerId player) const
 		{
 			if (others == wire::kMaxPlayersPerSnapshot - 1)
 				continue;
-			const auto offset = chunkAt(m_sim->playerFeet(id)) - center;
-			if (offset.x * offset.x + offset.y * offset.y > radius * radius)
+			const auto coord = chunkAt(m_sim->playerFeet(id));
+			if (!inInterest({coord.x, coord.y}, center, radius))
 				continue;
 			++others;
 		}
@@ -115,6 +127,90 @@ wire::PlayerSnapshot ServerHost::snapshotRemote(sim::PlayerId player) const
 			(state.flight ? wire::PlayerState::flight : 0u);
 	}
 	return snapshot;
+}
+
+void ServerHost::distributeWorldEdits()
+{
+	const bool complete = m_sim->world()->drainLogicalEdits(m_logicalEdits);
+	if (m_logicalEdits.empty() && complete)
+		return;
+	for (auto &[id, remote] : m_remotePlayers)
+	{
+		if (remote.chunks.empty() || remote.worldGap)
+			continue;
+		if (!complete)
+		{
+			remote.worldGap = true;
+			remote.edits.clear();
+			continue;
+		}
+		// Track the installed or scheduled projection until its removal is
+		// ordered. The actor may leave and re-enter while a transfer is busy.
+		for (const auto &edit : m_logicalEdits)
+		{
+			const wire::ChunkCoord coord{floorDivChunk(edit.cell.x), floorDivChunk(edit.cell.z)};
+			const auto found = remote.chunks.find(coord);
+			if (found == remote.chunks.end() ||
+			    found->second.generation != edit.base.generation || found->second.revision > edit.base.revision)
+				continue;
+			if (found->second.revision != edit.base.revision || remote.edits.size() == wire::kReliableWindow)
+			{
+				remote.worldGap = true;
+				remote.edits.clear();
+				break;
+			}
+			remote.edits.push_back({edit.id, {edit.cell.x, edit.cell.z, static_cast<uint8_t>(edit.cell.y)},
+				{edit.base.generation, edit.base.revision}, wireMaterial(static_cast<uint8_t>(edit.type))});
+			++found->second.revision;
+		}
+	}
+}
+
+std::optional<udp::WorldUpdate> ServerHost::nextWorldUpdate(sim::PlayerId player, bool allowBaseline)
+{
+	const auto radius = m_config.interestRadiusChunks;
+	if (radius == 0)
+		return std::nullopt;
+	auto &remote = m_remotePlayers.at(player);
+	if (remote.worldGap || remote.nextTransferId > wire::kMaxSequence)
+		return wire::Resync{wire::ResyncReason::Baseline};
+	const auto center = chunkAt(m_sim->playerFeet(player));
+	const auto &world = *m_sim->world();
+	for (auto it = remote.chunks.begin(); it != remote.chunks.end(); ++it)
+	{
+		const auto coord = it->first;
+		const auto version = world.chunkContentVersion({coord.x, 0, coord.z});
+		if (inInterest(coord, center, radius) && version && version->generation == it->second.generation)
+			continue;
+		const wire::ChunkRemove remove{coord, it->second.generation};
+		std::erase_if(remote.edits, [&](const auto &edit) { return edit.base.generation == remove.generation; });
+		remote.chunks.erase(it);
+		return remove;
+	}
+	if (!remote.edits.empty())
+	{
+		const auto edit = remote.edits.front();
+		remote.edits.pop_front();
+		return edit;
+	}
+	if (!allowBaseline)
+		return std::nullopt;
+	for (const auto offset : VoxelWorld::playerInterestOffsets(radius))
+	{
+		const wire::ChunkCoord coord{center.x + offset.x, center.y + offset.z};
+		const glm::ivec3 coreCoord{coord.x, 0, coord.z};
+		if (remote.chunks.contains(coord) || !world.chunkContentVersion(coreCoord))
+			continue;
+		auto transfer = std::make_unique<udp::ChunkTransfer>();
+		ChunkContentVersion version;
+		const auto watermark = world.captureChunkContent(coreCoord, transfer->materials, version);
+		std::ranges::transform(transfer->materials, transfer->materials.begin(), wireMaterial);
+		transfer->baseline = {remote.nextTransferId++, coord, {version.generation, version.revision},
+			watermark, wire::chunkChecksum(transfer->materials)};
+		remote.chunks.emplace(coord, transfer->baseline.version);
+		return udp::WorldUpdate{std::move(transfer)};
+	}
+	return std::nullopt;
 }
 
 void ServerHost::suspendPlayerInput()
@@ -184,6 +280,7 @@ bool ServerHost::start(std::string &error)
 	m_restoredPlayer = spawn.restored;
 	m_ticks = 0;
 	m_spawnCenter = center;
+	simulation->world()->observeLogicalEdits();
 	m_sim = std::move(simulation);
 	return true;
 }
@@ -228,8 +325,8 @@ bool ServerHost::step(TerrainTiming terrainTiming, std::string &error)
 	m_sim->advanceItems(kTickDt, false, sim::GameSimulation::ItemPickup::LocalOnly);
 	m_sim->pumpWorld();
 
-	// The host owns publication. Phase B1 drains streams with no consumers
-	// attached and reuses the storage at each tick boundary.
+	distributeWorldEdits();
+	// The render and item event streams have no consumers in this host.
 	m_sim->world()->takeEvents(m_worldEvents);
 	m_sim->takeItemEvents(m_itemEvents);
 	m_worldEvents.clear();

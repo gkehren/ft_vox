@@ -140,10 +140,11 @@ struct Link
 		return true;
 	}
 
-	void flush(Sender sender, Time now)
+	bool flush(Sender sender, Time now)
 	{
 		flushAck(sender, now);
-		if (pending && now >= pending->retry && sender.send(now, pending->kind, pending->datagram))
+		const bool sent = pending && now >= pending->retry && sender.send(now, pending->kind, pending->datagram);
+		if (sent)
 		{
 			pending->sent = true;
 			pending->retry = now + kReliableRetry;
@@ -151,6 +152,7 @@ struct Link
 		}
 		if (now >= nextHeartbeat)
 			sendFresh(sender, now, wire::Heartbeat{});
+		return sent;
 	}
 
 	bool expired(Time now) const

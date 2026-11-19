@@ -2,12 +2,23 @@
 
 #include "UdpSocket.hpp"
 
+#include <map>
 #include <memory>
 
 namespace net::udp
 {
 
-enum class ClientStatus { Disconnected, Connecting, Connected, Leaving, TimedOut, Rejected };
+enum class ClientStatus { Disconnected, Connecting, Connected, Leaving, Resyncing, TimedOut, Rejected };
+
+struct ReplicatedChunk
+{
+	wire::ChunkVersion version;
+	uint64_t nextEditId{};
+	// Canonical y/z/x order using wire material ordinals and wire AIR (255).
+	std::array<uint8_t, wire::kChunkBytes> materials;
+};
+
+using ChunkProjection = std::map<wire::ChunkCoord, ReplicatedChunk>;
 
 // Minimal v2 client IO adapter. A single caller owns the nonblocking pump
 // and its connection state. A future client host can run it on its IO thread.
@@ -20,6 +31,8 @@ public:
 	void connect(Clock::time_point now);
 	void poll(Clock::time_point now);
 	void disconnect(Clock::time_point now);
+	// Retires the current projection and rejoins with a fresh session.
+	void requestWorldResync(Clock::time_point now);
 	// Sends one fresh input sample while connected. False means no datagram
 	// was sent (invalid payload, rate limit, or socket backpressure).
 	bool sendInput(const wire::Input &input, Clock::time_point now);
@@ -29,6 +42,8 @@ public:
 	std::optional<wire::SessionScope> scope() const;
 	// Latest authoritative state for the current scope. Cleared on departure.
 	std::optional<wire::PlayerSnapshot> latestPlayerSnapshot() const;
+	// Only verified, fully installed chunks. Read on the pump owner thread.
+	const ChunkProjection &chunks() const;
 	std::optional<wire::RejectReason> rejection() const;
 	uint64_t heartbeatsReceived() const;
 

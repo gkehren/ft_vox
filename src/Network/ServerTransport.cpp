@@ -21,6 +21,9 @@ struct Mailbox
 	std::optional<wire::ActionResult> result;
 	std::optional<wire::PlayerSnapshot> snapshot;
 	std::optional<uint64_t> lastSnapshotTick;
+	std::optional<WorldUpdate> worldUpdate;
+	bool worldBusy{}, baselineBusy{};
+	WorldTraffic worldTraffic;
 };
 
 struct Peer
@@ -33,6 +36,10 @@ struct Peer
 	std::optional<wire::Welcome> welcome;
 	Rate inbound, outbound;
 	uint64_t nextAction{1}, lastInputTick{};
+	std::unique_ptr<ChunkTransfer> transfer;
+	uint8_t nextFragment{};
+	bool worldInFlight{};
+	std::optional<Time> resyncDeadline;
 	bool confirmed{}, closing{}, waitingForResult{};
 };
 
@@ -59,12 +66,21 @@ struct ServerTransport::Impl
 		return {socket, peer.address, wire::Endpoint::Server, peer.outbound, globalOut};
 	}
 
-	static void markClosing(Peer &peer, Mailbox &box)
+	void releaseBaseline(Mailbox &box)
+	{
+		if (std::exchange(box.baselineBusy, false))
+			--activeBaselines;
+	}
+
+	void markClosing(Peer &peer, Mailbox &box)
 	{
 		peer.closing = box.closing = true;
 		box.intents = {};
 		box.result.reset();
 		box.snapshot.reset();
+		box.worldUpdate.reset();
+		peer.transfer.reset();
+		releaseBaseline(box);
 	}
 
 	void close(size_t slot)
@@ -160,7 +176,8 @@ struct ServerTransport::Impl
 		}
 		const auto *action = std::get_if<wire::Action>(&packet.payload);
 		const bool departing = kind == wire::Kind::Disconnect || kind == wire::Kind::Resync;
-		if (action && (peer.waitingForResult || link.pending || action->actionId != peer.nextAction))
+		if (action && (peer.waitingForResult || action->actionId != peer.nextAction ||
+		              (link.pending && link.pending->kind == wire::Kind::ActionResult)))
 		{
 			// Capacity/content refusal cannot advance the receive cursor. An
 			// earlier admission can still be acknowledged if its ACK was lost.
@@ -182,7 +199,14 @@ struct ServerTransport::Impl
 				return;
 			link.lastReceived = now;
 			if (departing)
+			{
+			if (kind == wire::Kind::Resync && !peer.resyncDeadline)
+				{
+					++worldTraffic.resyncs;
+					++box.worldTraffic.resyncs;
+				}
 				markClosing(peer, box);
+			}
 			else
 				peer.confirmed = box.confirmed = true;
 
@@ -216,16 +240,15 @@ struct ServerTransport::Impl
 				peer = {};
 			return;
 		}
-		if ((!peer.confirmed && now >= peer.joinDeadline) || peer.link->expired(now))
+		if ((!peer.confirmed && now >= peer.joinDeadline) || peer.link->expired(now) ||
+		    (peer.resyncDeadline && now >= *peer.resyncDeadline))
 			return close(slot);
 
 		std::optional<SessionAdmission> admission;
-		std::optional<wire::ActionResult> result;
 		bool spawnFailed;
 		{
 			std::lock_guard lock(mutex);
 			admission = mailboxes[slot].admission;
-			result = std::exchange(mailboxes[slot].result, std::nullopt);
 			spawnFailed = mailboxes[slot].spawnFailed;
 		}
 		if (spawnFailed)
@@ -246,10 +269,83 @@ struct ServerTransport::Impl
 				world.generatorVersion, compatibility, admission->tick, admission->nextEditId};
 			sendWelcome(peer, now);
 		}
+	}
+
+	void queueReliable(size_t slot, Time now)
+	{
+		auto &peer = peers[slot];
+		auto &link = *peer.link;
+		if (link.pending || peer.resyncDeadline)
+			return;
+		std::optional<wire::ActionResult> result;
+		std::optional<WorldUpdate> update;
+		{
+			std::lock_guard lock(mutex);
+			auto &box = mailboxes[slot];
+			if (peer.worldInFlight && (!peer.transfer || peer.nextFragment == wire::kFragmentsPerChunk))
+			{
+				peer.transfer.reset();
+				releaseBaseline(box);
+				peer.worldInFlight = box.worldBusy = false;
+			}
+			result = std::exchange(box.result, std::nullopt);
+			if (!result && !peer.worldInFlight)
+				update = std::exchange(box.worldUpdate, std::nullopt);
+		}
 		if (result)
 		{
-			peer.link->queue(wire::Endpoint::Server, *result, now);
+			link.queue(wire::Endpoint::Server, *result, now);
 			peer.waitingForResult = false;
+			return;
+		}
+		if (update)
+		{
+			peer.worldInFlight = true;
+			std::visit([&](auto &value) {
+				if constexpr (std::is_same_v<std::decay_t<decltype(value)>, std::unique_ptr<ChunkTransfer>>)
+				{
+					peer.transfer = std::move(value);
+					peer.nextFragment = 0;
+				}
+				else
+				{
+				if constexpr (std::is_same_v<std::decay_t<decltype(value)>, wire::Resync>)
+				{
+					std::lock_guard lock(mutex);
+					++worldTraffic.resyncs;
+					++mailboxes[slot].worldTraffic.resyncs;
+					peer.resyncDeadline = now + kReliableTimeout;
+				}
+					link.queue(wire::Endpoint::Server, value, now);
+				}
+			}, *update);
+		}
+		if (peer.transfer)
+		{
+			wire::ChunkFragment fragment;
+			fragment.baseline = peer.transfer->baseline;
+			fragment.index = peer.nextFragment++;
+			std::copy_n(peer.transfer->materials.begin() + fragment.index * wire::kFragmentBytes,
+				wire::fragmentSize(fragment.index), fragment.materials.begin());
+			link.queue(wire::Endpoint::Server, fragment, now);
+		}
+	}
+
+	void flushReliable(size_t slot, Time now)
+	{
+		queueReliable(slot, now);
+		auto &peer = peers[slot];
+		auto &link = *peer.link;
+		const bool retransmit = link.pending && link.pending->sent;
+		if (link.flush(sender(peer), now) && link.pending->kind != wire::Kind::ActionResult)
+		{
+			std::lock_guard lock(mutex);
+			for (auto *traffic : {&worldTraffic, &mailboxes[slot].worldTraffic})
+			{
+				++traffic->frames;
+				traffic->bytes += link.pending->datagram.view().size();
+				traffic->retransmits += retransmit;
+			}
 		}
 	}
 
@@ -265,7 +361,10 @@ struct ServerTransport::Impl
 		}
 		if (snapshot)
 		{
-			peer.link->sendFresh(sender(peer), now, *snapshot);
+			// Preserve aggregate headroom for ordered world data and controls
+			// when more peers are active than can sustain 20 snapshots/s.
+			if (snapshotCapacity.take(now, 1, 768, 64))
+				peer.link->sendFresh(sender(peer), now, *snapshot);
 			peer.nextSnapshot = now + 50ms;
 		}
 	}
@@ -282,10 +381,13 @@ struct ServerTransport::Impl
 			const auto slot = (firstPeer + i) % peers.size();
 			auto &peer = peers[slot];
 			if (peer.confirmed && !peer.closing)
-			{
-				peer.link->flush(sender(peer), now);
+				flushReliable(slot, now);
+		}
+		for (size_t i = 0; i < peers.size(); ++i)
+		{
+			const auto slot = (firstPeer + i) % peers.size();
+			if (peers[slot].confirmed && !peers[slot].closing)
 				flushSnapshot(slot, now);
-			}
 		}
 		if (!peers.empty())
 			firstPeer = (firstPeer + 1) % peers.size();
@@ -374,25 +476,50 @@ struct ServerTransport::Impl
 				}
 			}
 		}
-		if (completedTick % kSnapshotIntervalTicks != 0)
-			return;
 		// Capture after all activations and retirements at this boundary.
 		// The IO worker cannot reuse a slot before the owner retires it.
-		for (auto &box : mailboxes)
+		const auto start = firstWorldPeer;
+		for (size_t i = 0; i < mailboxes.size(); ++i)
 		{
+			const auto slot = (start + i) % mailboxes.size();
+			auto &box = mailboxes[slot];
 			sim::PlayerId player;
+			bool snapshotDue, worldReady, allowBaseline;
 			{
 				std::lock_guard lock(mutex);
-				if (!box.active || box.closing || box.lastSnapshotTick == completedTick)
+				if (!box.active || box.closing)
 					continue;
 				player = box.admission->player;
+				snapshotDue = completedTick % kSnapshotIntervalTicks == 0 && box.lastSnapshotTick != completedTick;
+				worldReady = !box.worldBusy;
+				allowBaseline = activeBaselines < kMaxConcurrentChunkTransfers;
 			}
-			auto snapshot = owner.snapshotRemote(player);
+			std::optional<wire::PlayerSnapshot> snapshot;
+			if (snapshotDue)
+				snapshot = owner.snapshotRemote(player);
+			auto worldUpdate = worldReady ? owner.nextWorldUpdate(player, allowBaseline) : std::nullopt;
+			if (!snapshot && !worldUpdate)
+				continue;
 			std::lock_guard lock(mutex);
-			if (!box.closing)
+			if (box.closing)
+				continue;
+			if (snapshot)
 			{
 				box.snapshot = std::move(snapshot);
 				box.lastSnapshotTick = completedTick;
+			}
+			if (worldUpdate)
+			{
+				box.worldBusy = true;
+				if (std::holds_alternative<std::unique_ptr<ChunkTransfer>>(*worldUpdate))
+				{
+					if (!allowBaseline)
+						throw std::logic_error("chunk baseline produced without a transfer slot");
+					box.baselineBusy = true;
+					++activeBaselines;
+					firstWorldPeer = (slot + 1) % mailboxes.size();
+				}
+				box.worldUpdate = std::move(worldUpdate);
 			}
 		}
 	}
@@ -405,10 +532,13 @@ struct ServerTransport::Impl
 	std::vector<Mailbox> mailboxes;
 	std::array<Discovery, 256> discoveryRates;
 	Traffic globalIn, globalOut;
+	Bucket snapshotCapacity;
 	uint64_t generation{};
 	uint64_t ownerTick{}; // published and read under mutex
-	size_t firstPeer{};
+	size_t firstPeer{}, firstWorldPeer{};
+	size_t activeBaselines{}; // shared under mutex
 	std::mutex mutex;
+	WorldTraffic worldTraffic; // lifetime totals, shared under mutex
 	std::exception_ptr error;
 	std::jthread worker; // joins before releasing any socket/IO state
 };
@@ -419,6 +549,21 @@ ServerTransport::ServerTransport(Address bind, size_t remoteCap, SessionWorld wo
 ServerTransport::~ServerTransport() = default;
 
 Address ServerTransport::address() const { return m_impl->socket.address(); }
+
+WorldTraffic ServerTransport::worldTraffic() const
+{
+	std::lock_guard lock(m_impl->mutex);
+	return m_impl->worldTraffic;
+}
+
+std::optional<WorldTraffic> ServerTransport::worldTraffic(sim::PlayerId player) const
+{
+	std::lock_guard lock(m_impl->mutex);
+	const auto found = std::ranges::find_if(m_impl->mailboxes, [player](const Mailbox &box) {
+		return box.active && !box.closing && box.admission->player == player;
+	});
+	return found == m_impl->mailboxes.end() ? std::nullopt : std::optional{found->worldTraffic};
+}
 
 void ServerTransport::start()
 {
