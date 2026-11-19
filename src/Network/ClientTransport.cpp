@@ -36,7 +36,6 @@ struct ClientTransport::Impl
 		status = next;
 		link.reset();
 		welcome.reset();
-		playerSnapshot.reset();
 		clearAction();
 		nextActionId = 1;
 		clearProjection();
@@ -52,6 +51,7 @@ struct ClientTransport::Impl
 	{
 		chunks.clear();
 		inventory.reset();
+		playerHistory = {};
 		itemHistory = {};
 		mobHistory = {};
 		assembler.reset();
@@ -74,7 +74,6 @@ struct ClientTransport::Impl
 		if (status != ClientStatus::Connected)
 			return;
 		clearProjection();
-		playerSnapshot.reset();
 		clearAction();
 		resyncReason = reason;
 		status = ClientStatus::Resyncing;
@@ -233,7 +232,7 @@ struct ClientTransport::Impl
 		const auto *players = std::get_if<wire::PlayerSnapshot>(&packet.payload);
 		const auto *items = std::get_if<wire::ItemSnapshot>(&packet.payload);
 		const auto *mobs = std::get_if<wire::MobSnapshot>(&packet.payload);
-		if (players && (players->tick < welcome->tick || (playerSnapshot && players->tick <= playerSnapshot->tick) ||
+		if (players && (!newerSnapshot(*players, playerHistory, welcome->tick) ||
 		                std::ranges::none_of(std::span(players->players).first(players->count),
 		                     [this](const auto &player) { return player.player == welcome->player; })))
 			return;
@@ -252,7 +251,7 @@ struct ClientTransport::Impl
 			return;
 		link->lastReceived = now;
 		if (players && status == ClientStatus::Connected)
-			playerSnapshot = *players;
+			installSnapshot(playerHistory, *players);
 		else if (items && status == ClientStatus::Connected)
 			installSnapshot(itemHistory, *items);
 		else if (mobs && status == ClientStatus::Connected)
@@ -316,7 +315,7 @@ struct ClientTransport::Impl
 	ClientStatus status{ClientStatus::Disconnected};
 	std::optional<Link> link;
 	std::optional<wire::Welcome> welcome;
-	std::optional<wire::PlayerSnapshot> playerSnapshot;
+	SnapshotHistory<wire::PlayerSnapshot> playerHistory;
 	std::optional<wire::Inventory> inventory;
 	SnapshotHistory<wire::ItemSnapshot> itemHistory;
 	SnapshotHistory<wire::MobSnapshot> mobHistory;
@@ -386,7 +385,8 @@ std::optional<wire::SessionScope> ClientTransport::scope() const
 {
 	return m_impl->link ? std::optional{m_impl->link->scope} : std::nullopt;
 }
-std::optional<wire::PlayerSnapshot> ClientTransport::latestPlayerSnapshot() const { return m_impl->playerSnapshot; }
+std::optional<wire::PlayerSnapshot> ClientTransport::latestPlayerSnapshot() const { return m_impl->playerHistory.current; }
+const SnapshotHistory<wire::PlayerSnapshot> &ClientTransport::playerSnapshots() const { return m_impl->playerHistory; }
 std::optional<wire::Inventory> ClientTransport::inventory() const { return m_impl->inventory; }
 const SnapshotHistory<wire::ItemSnapshot> &ClientTransport::itemSnapshots() const { return m_impl->itemHistory; }
 const SnapshotHistory<wire::MobSnapshot> &ClientTransport::mobSnapshots() const { return m_impl->mobHistory; }

@@ -1,5 +1,6 @@
 #include "Engine/Engine.hpp"
 #include "Engine/FramePacing.hpp"
+#include "Engine/EngineMultiplayer.hpp"
 
 #include <SDL3/SDL_vulkan.h>
 #include <Vulkan/VkLoadLibrary.hpp>
@@ -144,17 +145,11 @@ Engine::Engine(std::string resourcePackRoot)
 	const unsigned hw = std::max(2u, std::thread::hardware_concurrency());
 	threadPool = std::make_unique<ThreadPool>(hw);
 
-	// CPU simulation facade (issue #208): owns the authoritative world,
-	// player and mobs. The render bridge attaches to sim->world() later, in
-	// initializeNoiseGenerator / reloadWorld.
-	sim = std::make_unique<sim::GameSimulation>(threadPool.get());
 	mobStates.reserve(entities::MobSettings::capacity);
 
 	renderSettings.minRenderDistance = 192;
 	renderSettings.maxRenderDistance = 512;
 	renderSettings.streamFrontBias = 0.30f; // may be overridden by setStreamFrontBias before run()
-	// Pool sized for unload disk (kChunkUnloadDistanceFactor × view) + headroom.
-	chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
 
 	renderSettings.loadPerSec = 640;
 	renderSettings.genPerSec = 480;
@@ -182,6 +177,8 @@ Engine::Engine(std::string resourcePackRoot)
 
 Engine::~Engine()
 {
+	if (m_remote)
+		m_remote->disconnect();
 	if (vkContext)
 		vkContext->waitIdle();
 
@@ -205,6 +202,7 @@ Engine::~Engine()
 	// authoritative simulation exactly once, here, before it tears down.
 	gameUi.reset();
 	renderBridge.reset();
+	m_remote.reset();
 	if (sim)
 	{
 		sim->shutdown();
@@ -259,6 +257,8 @@ void Engine::resetWorldProjection()
 		// presentation survives a world transition.
 		worldRenderer->setItemEntities(m_itemStates);
 		worldRenderer->overlays().setHighlight(OverlayHighlight{});
+		if (m_remote)
+			worldRenderer->overlays().setPlayers({});
 	}
 	highlight = OverlayHighlight{};
 	uploadBudgetThisFrame = 0;
@@ -269,7 +269,15 @@ void Engine::resetWorldProjection()
 	m_uiBiomeWorldGen = 0;
 	m_uiBiome = -1;
 	if (gameUi)
+	{
 		gameUi->invalidateBiomeMap();
+		gameUi->resetInventoryInteraction();
+	}
+	if (m_remote)
+	{
+		m_inventoryPanelOpen = false;
+		jumpPressed = false;
+	}
 }
 
 void Engine::stepDerivedProjectionForTests(double dt)
@@ -298,12 +306,18 @@ void Engine::stepDerivedProjectionForTests(double dt)
 
 void Engine::initializeNoiseGenerator(int seed_val)
 {
+	if (m_remote)
+		throw std::logic_error("solo initialization requires a solo host");
 	// Epoch barrier BEFORE detaching the old projection (issue #209): a
 	// re-initialize must never leave stale derived state — or a bridge
 	// referencing a destroyed world — behind. The bridge destructor quiesces
 	// against the still-live old world.
 	resetWorldProjection();
 	renderBridge.reset();
+	if (!chunkPool)
+		chunkPool = std::make_unique<ChunkPool>(estimateChunkPoolCapacity(renderSettings.maxRenderDistance));
+	if (!sim)
+		sim = std::make_unique<sim::GameSimulation>(threadPool.get());
 
 	// The simulation owns the authoritative transition (issue #208): seed
 	// resolution (stored identity wins), world creation, persistence open and
@@ -506,7 +520,7 @@ void Engine::resetPlayerAtCamera()
 
 void Engine::setPlayerFlight(bool enabled)
 {
-	if (m_benchmark.isActive()) return;
+	if (!sim || m_benchmark.isActive()) return;
 	const glm::dvec3 feet = glm::dvec3(camera.getPosition()) -
 							glm::dvec3(0, sim->playerSettings().eyeHeight, 0);
 	// Disabling flight validates clearance at the camera feet and refuses
@@ -520,7 +534,7 @@ void Engine::setPlayerFlight(bool enabled)
 
 bool Engine::reloadWorld(int newSeed)
 {
-	if (!vkContext || !threadPool || !chunkPool || !immediate)
+	if (!sim || !vkContext || !threadPool || !chunkPool || !immediate)
 		return false;
 
 	// Deliberate (issue #180): benchmark / reload worlds are transient —
@@ -705,11 +719,14 @@ void Engine::tickStreaming(double dt)
 	// only while capacity is actually below target — below it every call is
 	// guaranteed to grow — so the benchmark's PoolGrow samples are real
 	// growth steps, never no-op scope timings.
-	const size_t poolTarget = estimateChunkPoolCapacity(renderSettings.maxRenderDistance);
-	if (chunkPool && chunkPool->capacity() < poolTarget)
+	if (!m_remote && chunkPool)
 	{
-		PROFILE_SCOPE("PoolGrow");
-		chunkPool->ensureCapacity(poolTarget, kChunkPoolMaxGrowPerCall);
+		const size_t poolTarget = estimateChunkPoolCapacity(renderSettings.maxRenderDistance);
+		if (chunkPool->capacity() < poolTarget)
+		{
+			PROFILE_SCOPE("PoolGrow");
+			chunkPool->ensureCapacity(poolTarget, kChunkPoolMaxGrowPerCall);
+		}
 	}
 
 	{
@@ -720,9 +737,16 @@ void Engine::tickStreaming(double dt)
 		PROFILE_SCOPE("DeferredRelease");
 		renderBridge->processDeferredReleases();
 	}
+	if (!m_remote)
 	{
 		PROFILE_SCOPE("UpdateStreaming");
 		renderBridge->updateStreaming(camera, renderSettings);
+	}
+	else
+	{
+		PROFILE_SCOPE("ReplicaPublication");
+		m_remote->projection->reconcile(m_remote->transport.chunks(), camera.getPosition());
+		renderBridge->publishReplicaChanges();
 	}
 
 	const int loadBudget = budgetFromRate(renderSettings.loadPerSec, frameDt, streamAccum);
@@ -733,18 +757,20 @@ void Engine::tickStreaming(double dt)
 
 	// Count budgets capped by shared per-frame CPU time envelope.
 	const int loadN = remainingCountBudget(std::max(loadBudget, 1), streamElapsedMs(), maxStreamMs);
-	if (loadN > 0)
+	if (!m_remote && loadN > 0)
 	{
 		PROFILE_SCOPE("Load");
 		renderBridge->processChunkLoading(loadN);
 	}
 	const int genN = remainingCountBudget(std::max(genBudget, 1), streamElapsedMs(), maxStreamMs);
-	if (genN > 0)
+	if (!m_remote && genN > 0)
 	{
 		PROFILE_SCOPE("GenDispatch");
 		renderBridge->generatePendingVoxels(camera, renderSettings, genN);
 	}
-	const int meshN = remainingCountBudget(std::max(meshBudget, 1), streamElapsedMs(), maxStreamMs);
+	int meshN = remainingCountBudget(std::max(meshBudget, 1), streamElapsedMs(), maxStreamMs);
+	if (m_remote)
+		meshN = std::clamp(16 - static_cast<int>(renderBridge->pendingMeshJobs()), 0, std::min(meshN, 4));
 	if (meshN > 0)
 	{
 		PROFILE_SCOPE("MeshDispatch");
@@ -754,7 +780,9 @@ void Engine::tickStreaming(double dt)
 	// cache acquisition neither competes with nor degenerates into render
 	// mesh rebuilds. Unlike meshN, no forced minimum — lightCachePerSec = 0
 	// disables the dedicated path.
-	const int lightCacheN = remainingCountBudget(lightCacheBudget, streamElapsedMs(), maxStreamMs);
+	int lightCacheN = remainingCountBudget(lightCacheBudget, streamElapsedMs(), maxStreamMs);
+	if (m_remote)
+		lightCacheN = std::clamp(8 - static_cast<int>(renderBridge->pendingLightJobs()), 0, lightCacheN);
 	if (lightCacheN > 0)
 	{
 		PROFILE_SCOPE("LightCacheDispatch");
@@ -790,6 +818,13 @@ void Engine::tickStreaming(double dt)
 
 bool Engine::raycastVoxel(glm::vec3 &outBlock, glm::vec3 &outPrevious)
 {
+	if (m_remote)
+	{
+		const auto hit = remoteTarget();
+		outBlock = glm::vec3(hit.block);
+		outPrevious = glm::vec3(hit.adjacent);
+		return hit.hit;
+	}
 	// Thin forward (issue #227, Epic #223 Phase D): the targeting RULE is
 	// sim::raycastVoxel — the historical march moved verbatim into the
 	// simulation. The host supplies camera origin/front + raycastDistance as
@@ -830,7 +865,7 @@ void Engine::handleEvents()
 	// reconstructed for every single key event.
 	GameUIFrame shortcutFrame{};
 	shortcutFrame.render = &renderSettings;
-	shortcutFrame.paused = &paused;
+	shortcutFrame.paused = m_remote ? nullptr : &paused;
 	shortcutFrame.setVSync = [this](bool v) { setVSync(v); };
 
 	SDL_Event event;
@@ -847,12 +882,14 @@ void Engine::handleEvents()
 		case SDL_EVENT_WINDOW_FOCUS_LOST:
 			windowFocused = false;
 			jumpPressed = false;
-			sim->suspendPlayer();
+			if (sim)
+				sim->suspendPlayer();
 			break;
 		case SDL_EVENT_WINDOW_FOCUS_GAINED:
 			windowFocused = true;
 			jumpPressed = false;
-			sim->suspendPlayer();
+			if (sim)
+				sim->suspendPlayer();
 			break;
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 			// Pixel semantics only (review §4.8): SDL_EVENT_WINDOW_RESIZED
@@ -908,12 +945,12 @@ void Engine::handleEvents()
 				break;
 			if (key == SDLK_SPACE && !paused)
 				jumpPressed = true;
-			if (key == SDLK_V && !paused)
+			if (key == SDLK_V && sim && !paused)
 			{
 				setPlayerFlight(!sim->playerFlight());
 				break;
 			}
-			if (key == SDLK_X && sim->playerFlight() && !paused)
+			if (key == SDLK_X && sim && sim->playerFlight() && !paused)
 			{
 				camera.setMovementSpeed(camera.getMovementSpeed() < 100.f ? 125.f : 20.f);
 				break;
@@ -947,7 +984,7 @@ void Engine::handleEvents()
 			// host maps input to simulation commands — no gameplay rule here.
 			if (key >= SDLK_1 && key <= SDLK_9)
 			{
-				sim->selectHotbarSlot(static_cast<int>(key - SDLK_1));
+				selectHotbarSlot(static_cast<int>(key - SDLK_1));
 				break;
 			}
 			if (key == SDLK_Q && !paused)
@@ -955,20 +992,25 @@ void Engine::handleEvents()
 				// Drop one item from the selected hotbar slot along the camera
 				// front (host-supplied plain direction, the savePlayerState
 				// presentation-input pattern).
-				sim->dropFromSlot(sim->inventory().selectedSlot(), 1, glm::dvec3(camera.getFront()));
+				dropSelectedItem();
 				break;
 			}
 			if (key == SDLK_E)
 			{
 				// Inventory-panel UI flag; the panel itself lands in #229.
 				m_inventoryPanelOpen = !m_inventoryPanelOpen;
+				if (m_remote)
+				{
+					mouseCaptured = !m_inventoryPanelOpen;
+					SDL_SetWindowRelativeMouseMode(window, mouseCaptured);
+				}
 				break;
 			}
 			if (key == SDLK_T)
 			{
 				// Legacy creative block cycle: FLIGHT/creative only (issue
 				// #227). Walking mode selects through the gameplay hotbar.
-				if (sim->playerFlight())
+				if (sim && sim->playerFlight())
 				{
 					int next = static_cast<int>(sim->selectedBlock()) + 1;
 					if (next >= static_cast<int>(COUNT))
@@ -998,6 +1040,13 @@ void Engine::handleEvents()
 				break;
 			if (!mouseCaptured || !renderBridge || paused)
 				break;
+			if (m_remote)
+			{
+				if (windowFocused && !m_inventoryPanelOpen &&
+					(event.button.button == SDL_BUTTON_LEFT || event.button.button == SDL_BUTTON_RIGHT))
+					sendRemoteVoxelAction(event.button.button == SDL_BUTTON_RIGHT);
+				break;
+			}
 			{
 				glm::vec3 block, prev;
 				if (!raycastVoxel(block, prev))
@@ -1055,12 +1104,12 @@ void Engine::handleEvents()
 				// next, wrapping 0..8. Selection is inventory management, so
 				// it stays available while paused (world mutations are not).
 				const int delta = event.wheel.y > 0 ? -1 : 1;
-				int next = sim->inventory().selectedSlot() + delta;
+				int next = selectedHotbarSlot() + delta;
 				if (next < 0)
 					next = items::kHotbarSize - 1;
 				else if (next >= items::kHotbarSize)
 					next = 0;
-				sim->selectHotbarSlot(next);
+				selectHotbarSlot(next);
 			}
 			break;
 		default:
@@ -1075,18 +1124,19 @@ void Engine::processInput(double dt)
 	// Host suspension policy (issue #209): pause/focus/benchmark freeze the
 	// authoritative player; the simulation clears accumulators + buffered
 	// input so nothing accumulated is replayed on resume.
-	if (simulationSuspended())
+	if (!m_remote && simulationSuspended())
 	{
 		sim->suspendPlayer();
 		jumpPressed = false;
 		return;
 	}
 	// Isometric is an inspection mode; it must never move a physical body.
-	if (camera.getMode() == CameraMode::ISOMETRIC && !sim->playerFlight())
+	if (sim && camera.getMode() == CameraMode::ISOMETRIC && !sim->playerFlight())
 		setPlayerFlight(true);
-	const bool captured = imgui && imgui->wantCaptureKeyboard();
+	const bool captured = (imgui && imgui->wantCaptureKeyboard()) ||
+		(m_remote && (!windowFocused || !mouseCaptured || m_inventoryPanelOpen));
 	const bool *keys = SDL_GetKeyboardState(nullptr);
-	if (sim->playerFlight())
+	if (sim && sim->playerFlight())
 	{
 		if (!captured) camera.processKeyboard(std::min(dt, 0.05), keys);
 		resetPlayerAtCamera();
@@ -1105,7 +1155,15 @@ void Engine::processInput(double dt)
 		input.swimUp = keys[SDL_SCANCODE_SPACE];
 		input.swimDown = keys[SDL_SCANCODE_LSHIFT];
 	}
-	else sim->clearPlayerInput();
+	if (m_remote)
+	{
+		if (captured || !m_remote->ready())
+			jumpPressed = false;
+		sendRemoteInput(input);
+		return;
+	}
+	if (captured)
+		sim->clearPlayerInput();
 	jumpPressed = false;
 	{
 		PROFILE_SCOPE("Physics");
@@ -1319,10 +1377,10 @@ void Engine::publishFrameTelemetry()
 	// describe the live backing. These depend only on the world, not the
 	// render pool, so they are published before the ChunkPool guard below
 	// (issue #206 review).
-	const VoxelPool &voxelPool = sim->world()->voxelPool();
+	const VoxelPool &voxelPool = viewWorld()->voxelPool();
 	const size_t voxelCap = voxelPool.capacity();
 	// border.pool.*: retained neighbor-border blocks (issue #103/#113).
-	const BorderPool &borderPool = sim->world()->borderPool();
+	const BorderPool &borderPool = viewWorld()->borderPool();
 	const size_t borderCap = borderPool.capacity();
 	telemetry.setBatch({
 		{telemetry::VoxelPoolCapacity, voxelCap},
@@ -1454,7 +1512,7 @@ void Engine::drawUi()
 	// here via the canonical queries so panels never touch the generator or
 	// the simulation's player controller directly. The kinematic/diagnostic
 	// fields come from the simulation's value snapshot (issue #208).
-	const sim::PlayerSnapshot playerView = sim->playerSnapshot();
+	const sim::PlayerSnapshot playerView = sim ? sim->playerSnapshot() : sim::PlayerSnapshot{};
 	f.player.position = camera.getPosition();
 	f.player.yaw = camera.getYaw();
 	f.player.pitch = camera.getPitch();
@@ -1469,7 +1527,7 @@ void Engine::drawUi()
 	// when the voxel column or the world generation changed (the player can
 	// spend many frames inside one column).
 	f.player.biome = -1;
-	if (sim->terrainGenerator() && gameUi->needsPlayerBiome())
+	if (sim && sim->terrainGenerator() && gameUi->needsPlayerBiome())
 	{
 		const glm::ivec2 column =
 			worldToVoxelColumn(glm::vec2(f.player.position.x, f.player.position.z));
@@ -1503,18 +1561,21 @@ void Engine::drawUi()
 	f.player.cameraMovementSpeed = camera.getMovementSpeed();
 	f.player.mouseSensitivity = camera.getMouseSensitivity();
 	f.player.isometricZoom = camera.getIsometricZoom();
-	f.setPlayerFlight = [this](bool enabled) { setPlayerFlight(enabled); };
-	f.setCameraMode = [this](CameraMode mode) {
-		if (m_benchmark.isActive()) return;
-		if (mode == CameraMode::ISOMETRIC && !sim->playerFlight()) setPlayerFlight(true);
-		camera.setMode(mode);
-	};
+	if (sim)
+	{
+		f.setPlayerFlight = [this](bool enabled) { setPlayerFlight(enabled); };
+		f.setCameraMode = [this](CameraMode mode) {
+			if (m_benchmark.isActive()) return;
+			if (mode == CameraMode::ISOMETRIC && !sim->playerFlight()) setPlayerFlight(true);
+			camera.setMode(mode);
+		};
+	}
 	f.setCameraMovementSpeed = [this](float value) { camera.setMovementSpeed(value); };
 	f.setMouseSensitivity = [this](float value) { camera.setMouseSensitivity(value); };
 	f.setIsometricZoom = [this](float value) { camera.setIsometricZoom(value); };
 	f.chunks = renderBridge.get();
 	f.pool = chunkPool.get();
-	f.generator = sim->terrainGenerator();
+	f.generator = sim ? sim->terrainGenerator() : nullptr;
 	f.worldRenderer = worldRenderer.get();
 	f.vk = vkContext.get();
 	f.gpu = &frameCtx->gpuProfiler();
@@ -1527,33 +1588,32 @@ void Engine::drawUi()
 	// Commands-only sim surface (review M6): read-only views + command
 	// callbacks, the inventory discipline — no mutable pointer into
 	// authoritative state crosses into the UI.
-	f.selectedTexture = &sim->selectedBlock();
-	f.setSelectedBlock = [this](TextureType type) { sim->setSelectedBlock(type); };
 	f.highlight = &highlight;
 	f.mouseCaptured = &mouseCaptured;
 	f.showChunkBorders = &showChunkBorders;
-	f.showDemoPlayers = &showDemoPlayers;
-	f.mobsEnabled = sim->mobsEnabled();
-	f.setMobsEnabled = [this](bool enabled) { sim->setMobsEnabled(enabled); };
 	f.mobCount = mobStates.size();
 	f.mobVisible = worldRenderer->visibleMobs();
-	f.paused = &paused;
-	// Gameplay inventory (issue #229): bounded read-only snapshot + explicit
-	// command callbacks (the setPlayerFlight pattern). The UI is snapshot-only
-	// for display data; every mutation goes through the simulation commands.
-	sim->inventorySnapshot(f.inventory);
-	// Future seam (issue #229): the HUD is read-only per the issue, so this
-	// callback has no consumer yet; it is wired for panel/hotbar click-to-select
-	// and any future UI that selects slots (the sim command is the only path).
-	f.selectHotbarSlot = [this](int slot) { sim->selectHotbarSlot(slot); };
-	f.moveStack = [this](int from, int to) { sim->moveStack(from, to); };
-	f.swapStacks = [this](int a, int b) { sim->swapStacks(a, b); };
-	f.splitStack = [this](int from, int to) { sim->splitStack(from, to); };
-	f.dropFromSlot = [this](int slot, uint16_t count, glm::dvec3 dir) { sim->dropFromSlot(slot, count, dir); };
+	if (m_remote)
+		populateRemoteUi(f);
+	else
+	{
+		f.selectedTexture = &sim->selectedBlock();
+		f.setSelectedBlock = [this](TextureType type) { sim->setSelectedBlock(type); };
+		f.showDemoPlayers = &showDemoPlayers;
+		f.mobsEnabled = sim->mobsEnabled();
+		f.setMobsEnabled = [this](bool enabled) { sim->setMobsEnabled(enabled); };
+		f.paused = &paused;
+		sim->inventorySnapshot(f.inventory);
+		f.selectHotbarSlot = [this](int slot) { selectHotbarSlot(slot); };
+		f.moveStack = [this](int from, int to) { sim->moveStack(from, to); };
+		f.swapStacks = [this](int a, int b) { sim->swapStacks(a, b); };
+		f.splitStack = [this](int from, int to) { sim->splitStack(from, to); };
+		f.dropFromSlot = [this](int slot, uint16_t count, glm::dvec3 dir) { sim->dropFromSlot(slot, count, dir); };
+	}
 	f.inventoryPanelOpen = &m_inventoryPanelOpen;
 	f.atlasVersion = m_atlasVersion;
-	f.seed = sim->seed();
-	f.worldGenerationId = sim->worldGenerationId();
+	f.seed = worldSeed();
+	f.worldGenerationId = worldGenerationId();
 	// World-save snapshot (issue #180, Phase 5): a plain-copy of the
 	// persistence status — the UI frame never holds WorldPersistence types.
 	f.worldSave.active = renderBridge && renderBridge->isWorldOpen();
@@ -1580,7 +1640,7 @@ void Engine::drawUi()
 		f.worldSave.bytesWritten = st.bytesWritten;
 		f.worldSave.lastError = st.lastError;
 	}
-	else if (!sim->openWorldError().empty())
+	else if (sim && !sim->openWorldError().empty())
 	{
 		// A world was requested but this session runs transient: surface why.
 		f.worldSave.lastError = sim->openWorldError();
@@ -1594,7 +1654,7 @@ void Engine::drawUi()
 	f.drawCount = drawList.size();
 	f.windowW = windowWidth;
 	f.windowH = windowHeight;
-	f.benchmark = &m_benchmark;
+	f.benchmark = m_remote ? nullptr : &m_benchmark;
 	if (swapchain)
 		f.presentModeName =
 			VkSwapchain::presentModeName(swapchain->getPresentMode());
@@ -1619,7 +1679,7 @@ void Engine::drawUi()
 		const ResourcePackApplyResult r = applyResourcePack(path);
 		return {r.atlasOk, r.isError, r.isWarning, r.message};
 	};
-	if (threadPool)
+	if (threadPool && !m_remote)
 	{
 		f.submitBiomeMap = [this](BiomeMapRequest req) -> std::future<BiomeMapResult> {
 			if (!m_benchmark.config().biomeMapSequential)
@@ -1645,7 +1705,7 @@ void Engine::drawUi()
 	if (worldRenderer)
 		worldRenderer->overlays().setShowChunkBorders(showChunkBorders);
 
-	if (worldRenderer)
+	if (worldRenderer && !m_remote)
 		worldRenderer->overlays().setPlayers(showDemoPlayers ? demoPlayers : std::vector<OverlayPlayer>{});
 }
 
@@ -1698,7 +1758,7 @@ void Engine::updateWindowTitle(double currentFrame)
 				  "ft_vox — %.0f FPS | chunks %zu | draw %zu | seed %d%s%s",
 				  fps,
 				  renderBridge ? renderBridge->chunkCount() : 0,
-				  drawList.size(), sim->seed(),
+				  drawList.size(), worldSeed(),
 				  paused ? " [PAUSED]" : "", benchTag);
 	SDL_SetWindowTitle(window, title);
 }
@@ -1717,7 +1777,7 @@ void Engine::updateFrameUniforms(uint32_t frameIndex, int pixelW, int pixelH, do
 	float underwaterSurfaceY = kUnknownUnderwaterSurfaceY;
 	if (renderBridge)
 	{
-		WorldCollisionView world(*sim->world());
+		WorldCollisionView world(*viewWorld());
 		const glm::ivec3 eye = glm::ivec3(glm::floor(camera.getPosition()));
 		underwater = world.sample(eye).medium == physics::Medium::Water;
 		underwaterSurfaceY = world.waterSurfaceAbove(eye);
@@ -1845,6 +1905,9 @@ void Engine::run()
 	while (running)
 	{
 		GetProfiler().beginFrame();
+		// Keep pumping even without a drawable swapchain or local focus.
+		if (m_remote)
+			pollRemote();
 
 		// (1) Events: SDL -> UI routing + simulation commands.
 		{
@@ -1862,7 +1925,7 @@ void Engine::run()
 		// next gameplay timestep (restore = rawDt of a normal frame).
 		int pixelW = 0, pixelH = 0;
 		SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
-		if (pixelW == 0 || pixelH == 0)
+		if (pixelW == 0 || pixelH == 0 || (m_remote && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)))
 		{
 			GetProfiler().endFrame();
 			SDL_Delay(16);
@@ -1923,7 +1986,8 @@ void Engine::run()
 		// presentation day cycle.
 		{
 			PROFILE_SCOPE("Benchmark");
-			tickBenchmark(deltaTime);
+			if (!m_remote)
+				tickBenchmark(deltaTime);
 		}
 		{
 			PROFILE_SCOPE("Input");
@@ -1937,8 +2001,13 @@ void Engine::run()
 		tickStreaming(deltaTime);
 		// (9) Mob simulation + derived presentation, (9b) dropped items,
 		// (10) block highlight.
-		tickMobs(deltaTime);
-		tickItems(deltaTime);
+		if (m_remote)
+			updateRemoteEntities();
+		else
+		{
+			tickMobs(deltaTime);
+			tickItems(deltaTime);
+		}
 		{
 			PROFILE_SCOPE("Highlight");
 			updateHighlight();

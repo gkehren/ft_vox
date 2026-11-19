@@ -128,7 +128,8 @@ enum class WorldEventKind : uint8_t
 	Unloaded,	 // record retired at coord (unbind; external = test-owned record)
 	GenQueued,	 // terrain generation dispatched for coord
 	Generated,	 // terrain generation published: backing readable at coord
-	EditApplied	 // one logical edit piece landed in authoritative storage
+	EditApplied, // one logical edit piece landed in authoritative storage
+	ReplicaChanged // verified replica content arrived, changed, or left
 };
 
 struct WorldEvent
@@ -187,6 +188,9 @@ public:
 	/// identity derived from it (seed + generator version) and every
 	/// authoritative chunk/edit/persistence decision.
 	VoxelWorld(TerrainGenerator *terrainGenerator, ThreadPool *threadPool);
+	/// Empty, read-only terrain projection. Only the replica publication
+	/// entry points supply voxel content in this mode.
+	VoxelWorld();
 	~VoxelWorld();
 
 	VoxelWorld(const VoxelWorld &) = delete;
@@ -264,6 +268,12 @@ public:
 	// owner boundary. Returns the next-edit watermark, or zero if unavailable.
 	uint64_t captureChunkContent(glm::ivec3 coord, std::span<uint8_t, CHUNK_VOLUME> out,
 		ChunkContentVersion &version) const;
+
+	/// Publish a complete, verified image in native material ordinals.
+	/// Busy records keep their mesh/light lease until the bridge pumps it.
+	bool publishReplicaChunk(glm::ivec3 coord, std::span<const uint8_t, CHUNK_VOLUME> materials);
+	/// Hide immediately, and return true once the backing can be recycled.
+	bool retireReplicaChunk(glm::ivec3 coord);
 
 	// --- Queries ---------------------------------------------------------------
 	WorldChunk *getChunk(const glm::ivec3 &chunkPos);
@@ -378,6 +388,7 @@ private:
 	std::vector<glm::ivec3> selectPlayerChunks(size_t budget, sim::PlayerId &lastServed,
 											 std::span<const glm::ivec3> stranded, Eligible eligible) const;
 	void applyTransientPlayerEdits(WorldChunk *chunk);
+	bool m_replica{false};
 	bool m_playerStreaming{false};
 	std::vector<PlayerInterest> m_playerInterests;
 	std::unordered_set<glm::ivec3, IVec3Hash> m_playerDesired;
@@ -439,6 +450,7 @@ private:
 	void erasePendingEditsFor(const WorldChunk *chunk);
 	/// Shell rebuild with m_mutex ALREADY held (edit apply path).
 	void ensureShellPopulatedLocked(WorldChunk *chunk);
+	void invalidateReplicaNeighborhood(glm::ivec3 coord);
 	void emitEditApplied(WorldChunk *chunk, int x, int y, int z, TextureType type,
 						 TextureType previousType, bool borderNeighbor);
 

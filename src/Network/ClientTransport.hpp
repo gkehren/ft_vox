@@ -27,8 +27,8 @@ struct SnapshotHistory
 	std::optional<Snapshot> current;
 };
 
-// Minimal v2 client IO adapter. A single caller owns the nonblocking pump
-// and its connection state. A future client host can run it on its IO thread.
+// v2 client IO adapter. The graphical host owns the bounded nonblocking pump
+// and its connection state on the frame thread.
 class ClientTransport
 {
 public:
@@ -56,6 +56,7 @@ public:
 	std::optional<wire::SessionScope> scope() const;
 	// Latest authoritative state for the current scope. Cleared on departure.
 	std::optional<wire::PlayerSnapshot> latestPlayerSnapshot() const;
+	const SnapshotHistory<wire::PlayerSnapshot> &playerSnapshots() const;
 	std::optional<wire::Inventory> inventory() const;
 	// Current defines the active set. Interpolate only IDs also in previous.
 	// Read on the pump owner thread. Both histories clear on scope retirement.

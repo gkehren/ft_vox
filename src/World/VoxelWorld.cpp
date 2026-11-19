@@ -22,6 +22,11 @@ VoxelWorld::VoxelWorld(TerrainGenerator *terrainGenerator, ThreadPool *threadPoo
 {
 }
 
+VoxelWorld::VoxelWorld() : VoxelWorld(nullptr, nullptr)
+{
+	m_replica = true;
+}
+
 VoxelWorld::~VoxelWorld()
 {
 	// Persistent-world durability comes FIRST (issue #180 review round 3):
@@ -139,6 +144,71 @@ void VoxelWorld::registerExternalChunk(const glm::ivec3 &pos, WorldChunk *record
 	record->m_contentRevision = 0;
 }
 
+bool VoxelWorld::publishReplicaChunk(glm::ivec3 coord, std::span<const uint8_t, CHUNK_VOLUME> materials)
+{
+	assert(m_replica);
+	std::lock_guard<std::shared_mutex> lock(m_mutex);
+	WorldChunk *record = getChunk(coord);
+	if (record && (record->isInTransit() || record->isReplicaRetiring()))
+		return false;
+	if (!record)
+	{
+		if (m_recordFreeList.empty())
+			growRecords(1);
+		record = acquireRecord(glm::vec3(coord.x * CHUNK_SIZE, 0, coord.z * CHUNK_SIZE));
+		if (!record)
+			return false;
+		if (!record->prepareVoxelStorageForGeneration())
+		{
+			releaseRecord(record);
+			return false;
+		}
+		// The wire image carries materials only. Use a fixed biome tint for
+		// mesh presentation without generating or guessing any voxel content.
+		const auto &tint = TerrainGenerator::getBiomeConfig(BIOME_PLAINS);
+		record->biomeGrassColors.fill(TerrainGenerator::packColor(tint.grassColor));
+		record->biomeFoliageColors.fill(TerrainGenerator::packColor(tint.foliageColor));
+		record->biomeTypes.fill(BIOME_PLAINS);
+		m_chunks.emplace(coord, record);
+		m_activeChunks.push_back(record);
+		emitEvent({WorldEventKind::Loaded, coord, record->generation(), record->revision()});
+	}
+	std::ranges::transform(materials, record->voxelStorage()->voxels.begin(),
+		[](uint8_t material) { return Voxel{material}; });
+	record->recountOccupancy();
+	record->setState(ChunkState::GENERATED);
+	invalidateReplicaNeighborhood(coord);
+	return true;
+}
+
+bool VoxelWorld::retireReplicaChunk(glm::ivec3 coord)
+{
+	assert(m_replica);
+	{
+		std::lock_guard<std::shared_mutex> lock(m_mutex);
+		WorldChunk *record = getChunk(coord);
+		if (!record)
+			return true;
+		if (!record->m_replicaRetiring.exchange(true, std::memory_order_relaxed))
+			invalidateReplicaNeighborhood(coord);
+		if (record->isInTransit())
+			return false;
+	}
+	return retireChunks(std::span{&coord, 1}) == 1;
+}
+
+void VoxelWorld::invalidateReplicaNeighborhood(glm::ivec3 coord)
+{
+	// Each mesh/light job captured a neighbor shell or halo before dispatch.
+	// In-flight and upload-ready results built from that old image must fail
+	// the normal render revision check, even if the job owns a neighbor.
+	for (int dz = -1; dz <= 1; ++dz)
+		for (int dx = -1; dx <= 1; ++dx)
+			if (auto *record = getChunk(coord + glm::ivec3(dx, 0, dz)))
+				record->m_revision.fetch_add(1, std::memory_order_relaxed);
+	emitEvent({WorldEventKind::ReplicaChanged, coord});
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -185,7 +255,7 @@ void VoxelWorld::takeEvents(std::vector<WorldEvent> &out)
 StreamingUpdateKind VoxelWorld::updateStreaming(const glm::vec3 &center, const glm::vec2 &forwardXZ,
 												const WorldStreamSettings &settings)
 {
-	if (m_playerStreaming)
+	if (m_replica || m_playerStreaming)
 		return StreamingUpdateKind::None;
 
 	// Grow the record pool toward the view-distance estimate (incremental,
@@ -217,7 +287,7 @@ StreamingUpdateKind VoxelWorld::updateStreaming(const glm::vec3 &center, const g
 
 void VoxelWorld::processChunkLoading(int budget)
 {
-	if (m_playerStreaming || budget <= 0)
+	if (m_replica || m_playerStreaming || budget <= 0)
 		return;
 
 	// Back-pressure: never pull more candidates than free record slots.
@@ -814,6 +884,8 @@ void VoxelWorld::pump()
 
 WorldEditResult VoxelWorld::placeVoxel(const glm::vec3 &worldPos, TextureType type)
 {
+	if (m_replica)
+		return {};
 	const int chunkX = static_cast<int>(std::floor(worldPos.x / CHUNK_SIZE));
 	const int chunkZ = static_cast<int>(std::floor(worldPos.z / CHUNK_SIZE));
 	const glm::ivec3 chunkPos(chunkX, 0, chunkZ);
@@ -1120,7 +1192,7 @@ void VoxelWorld::applyPendingEdits()
 
 void VoxelWorld::ensureShellPopulated(WorldChunk *chunk)
 {
-	if (!chunk || !chunk->isShellEmpty())
+	if (!chunk || (!m_replica && !chunk->isShellEmpty()))
 		return;
 	std::lock_guard<std::shared_mutex> lock(m_mutex);
 	ensureShellPopulatedLocked(chunk);
@@ -1128,12 +1200,12 @@ void VoxelWorld::ensureShellPopulated(WorldChunk *chunk)
 
 void VoxelWorld::ensureShellPopulatedLocked(WorldChunk *chunk)
 {
-	if (!chunk || !chunk->isShellEmpty())
+	if (!chunk || (!m_replica && !chunk->isShellEmpty()))
 		return;
 	const glm::ivec3 chunkIdx = chunk->coord();
 	const auto neighbor = [this, chunkIdx](glm::ivec3 offset) -> const WorldChunk * {
 		const auto *record = getChunk(chunkIdx + offset);
-		return record && (!m_playerStreaming || canReadVoxels(*record)) ? record : nullptr;
+		return record && (!(m_replica || m_playerStreaming) || canReadVoxels(*record)) ? record : nullptr;
 	};
 	chunk->rebuildBordersFromNeighbors(
 		neighbor({-1, 0, 0}), neighbor({1, 0, 0}), neighbor({0, 0, -1}), neighbor({0, 0, 1}));

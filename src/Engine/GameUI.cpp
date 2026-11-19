@@ -297,6 +297,29 @@ void GameUI::draw(GameUIFrame &frame)
 	// panel follows the host-owned E flag. Closing the panel discards the
 	// UI-local drag cursor — authoritative state is untouched.
 	const bool benchmarkActive = frame.benchmark && frame.benchmark->isActive();
+	if (frame.multiplayerStatus)
+	{
+		const auto display = ImGui::GetIO().DisplaySize;
+		ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, ImGui::GetFrameHeight() + 8.f),
+			ImGuiCond_Always, ImVec2(0.5f, 0.f));
+		ImGui::SetNextWindowBgAlpha(0.65f);
+		if (ImGui::Begin("##MultiplayerStatus", nullptr, ImGuiWindowFlags_NoDecoration |
+			ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
+			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize))
+		{
+			ImGui::TextUnformatted(frame.multiplayerStatus);
+			if (frame.multiplayerAction)
+				ImGui::TextUnformatted(frame.multiplayerAction);
+		}
+		ImGui::End();
+		if (frame.mouseCaptured && *frame.mouseCaptured)
+		{
+			auto *draw = ImGui::GetForegroundDrawList();
+			const ImVec2 center(display.x * 0.5f, display.y * 0.5f);
+			draw->AddCircleFilled(center, 3.f, IM_COL32(0, 0, 0, 192));
+			draw->AddCircleFilled(center, 1.5f, IM_COL32(255, 255, 255, 224));
+		}
+	}
 	if (!benchmarkActive)
 	{
 		drawHotbarHud(frame);
@@ -344,7 +367,10 @@ void GameUI::drawStatusOverlay(GameUIFrame &frame)
 	{
 		const playerui::PlayerSnapshot &p = frame.player;
 		ImGui::Text("XYZ %.1f / %.1f / %.1f", p.position.x, p.position.y, p.position.z);
-		ImGui::Text("Chunk %d / %d · %s", p.chunkX, p.chunkZ,
+		if (frame.multiplayerStatus)
+			ImGui::Text("Chunk %d / %d", p.chunkX, p.chunkZ);
+		else
+			ImGui::Text("Chunk %d / %d · %s", p.chunkX, p.chunkZ,
 					playerui::biomeDisplayName(p.biome));
 		if (frame.selectedTexture)
 			ImGui::Text("Selected: %s", textureName(*frame.selectedTexture));
@@ -403,7 +429,7 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 	// Raw physics counters live in the developer console's Player
 	// Diagnostics window now.
 	ui::sectionHeader("Movement");
-	ImGui::BeginDisabled(benchmarkActive);
+	ImGui::BeginDisabled(benchmarkActive || !frame.setPlayerFlight);
 	bool flight = p.flight;
 	if (ImGui::Checkbox("Debug flight [V]", &flight) && frame.setPlayerFlight)
 		frame.setPlayerFlight(flight);
@@ -424,7 +450,7 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 	ui::sectionHeader("Camera");
 	const char *modes[] = {"Perspective", "Isometric"};
 	int mode = p.cameraViewMode == playerui::CameraViewMode::Isometric ? 1 : 0;
-	if (ImGui::Combo("Camera mode", &mode, modes, 2) && frame.setCameraMode)
+	if (frame.setCameraMode && ImGui::Combo("Camera mode", &mode, modes, 2))
 		frame.setCameraMode(mode == 1 ? CameraMode::ISOMETRIC : CameraMode::PERSPECTIVE);
 	if (p.cameraViewMode == playerui::CameraViewMode::Isometric)
 	{
@@ -458,7 +484,7 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 			ImGui::EndCombo();
 		}
 	}
-	if (frame.render)
+	if (frame.render && !frame.multiplayerStatus)
 		ImGui::SliderInt("Raycast distance", &frame.render->raycastDistance, 2, 32);
 	if (frame.highlight)
 	{
@@ -479,11 +505,12 @@ void GameUI::drawPlayerPanel(GameUIFrame &frame)
 		ImGui::Checkbox("Chunk borders [B]", frame.showChunkBorders);
 	if (frame.showDemoPlayers)
 		ImGui::Checkbox("Demo players", frame.showDemoPlayers);
+	if (frame.setMobsEnabled)
 	{
 		// Commands-only toggle (review M6): display the snapshot value,
 		// issue setMobsEnabled on change — no write into sim state.
 		bool mobs = frame.mobsEnabled;
-		if (ImGui::Checkbox("Passive mobs", &mobs) && frame.setMobsEnabled)
+		if (ImGui::Checkbox("Passive mobs", &mobs))
 			frame.setMobsEnabled(mobs);
 	}
 
@@ -505,7 +532,8 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	// overlays reflect this frame's state. The tick only consumes accepted
 	// results and (re)dispatches superseded requests — no synchronous
 	// generation or GPU work here (issue #186 §12).
-	tickBiomeMap(frame);
+	if (!frame.multiplayerStatus)
+		tickBiomeMap(frame);
 
 	const glm::vec2 playerXZ(frame.player.position.x, frame.player.position.z);
 
@@ -536,6 +564,11 @@ void GameUI::drawWorld(GameUIFrame &frame)
 	if (presentation.showProminentError)
 		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
 						   frame.worldSave.lastError.c_str());
+	if (frame.multiplayerStatus)
+	{
+		ImGui::End();
+		return;
+	}
 
 	ImGui::Spacing();
 	bool prevFollow = m_mapFollow;
@@ -950,8 +983,13 @@ void GameUI::drawOverlayHints(GameUIFrame &frame)
 							 ImGuiWindowFlags_NoDocking;
 	if (ImGui::Begin("##hints", nullptr, flags))
 	{
-		const char *block = frame.selectedTexture ? textureName(*frame.selectedTexture) : "?";
-		ImGui::Text("C free mouse · F1–F9/F11/F12 panels · T block (%s) · LMB/RMB edit · B borders", block);
+		if (frame.multiplayerStatus)
+			ImGui::TextUnformatted("C free mouse · E inventory · LMB/RMB break/place · Q drop");
+		else
+		{
+			const char *block = frame.selectedTexture ? textureName(*frame.selectedTexture) : "?";
+			ImGui::Text("C free mouse · F1–F9/F11/F12 panels · T block (%s) · LMB/RMB edit · B borders", block);
+		}
 	}
 	ImGui::End();
 }

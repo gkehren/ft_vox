@@ -220,6 +220,12 @@ struct RaycastHit
     glm::vec3 adjacent{0.0f};
 };
 
+struct VoxelTargetTrace
+{
+    glm::ivec3 block{}, adjacent{};
+    bool hit{}, hasPlaceFace{}, terrainUnavailable{};
+};
+
 class GameSimulation
 {
 public:
@@ -754,6 +760,8 @@ public:
     /// session must use the actor-aware form below, which derives the origin
     /// from the server-owned actor and clamps reach.
     RaycastHit raycastVoxel(glm::vec3 origin, glm::vec3 dir, float maxDist) const;
+    /// Grid-plane targeting shared by server validation and client aiming.
+    static VoxelTargetTrace traceVoxelTarget(const WorldCollisionView &view, glm::dvec3 eye, glm::dvec3 direction);
 
     /// Actor-aware targeting query (issue #247, Epic #245 Phase A2): the ray
     /// ORIGIN is derived from the actor's authoritative eye (never client-
@@ -955,10 +963,6 @@ private:
     /// by-value form and the per-player in-place form — one source of truth).
     static PlayerSnapshot snapshotOf(const PlayerState &state);
 
-    /// The shared targeting march (issue #247): input validation + the
-    /// historical 0.05 float effective-state march. Both the legacy raw-origin
-    /// raycastVoxel and the actor-aware form call this — one march
-    /// implementation, no duplicated targeting rule.
     RaycastHit raycastMarch(glm::vec3 origin, glm::vec3 dir, float maxDist) const;
 
     /// Integer-only test for the supported editable-world envelope (issue

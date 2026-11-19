@@ -4,7 +4,6 @@
 
 #include <chrono>
 #include <cmath>
-#include <numbers>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -265,10 +264,8 @@ wire::ActionResult ServerHost::applyAction(sim::PlayerId player, const wire::Act
 	const bool placing = action.operation == Kind::Place;
 	const auto operation = placing ? sim::VoxelInteraction::Place : sim::VoxelInteraction::Break;
 	const glm::ivec3 target{action.target.x, action.target.y, action.target.z};
-	constexpr double radiansPerTurn = 2.0 * std::numbers::pi;
-	const double yaw = action.yawTurns * radiansPerTurn;
-	const double pitch = action.pitchTurns * radiansPerTurn;
-	const glm::dvec3 direction{std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	const auto aim = wire::aimDirection(action.yawTurns, action.pitchTurns);
+	const glm::dvec3 direction{aim[0], aim[1], aim[2]};
 	result.code = actionCode(m_sim->validateVoxelTarget(player, operation, target,
 		{action.expected.generation, action.expected.revision}, direction));
 	if (result.code != Code::Accepted)

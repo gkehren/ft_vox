@@ -33,6 +33,8 @@
 #include <Entities/MobSystem.hpp>
 #include <utils.hpp>
 
+namespace net::udp { struct Address; }
+
 /// Vulkan engine: streaming procedural world, post, overlays, ImGui.
 class Engine
 {
@@ -44,6 +46,7 @@ public:
 
 	void run();
 	void initializeNoiseGenerator(int seed);
+	void connectRemote(net::udp::Address address, std::optional<uint32_t> expectedSeed);
 
 	/// Request a persistent world save (issue #180): `<cwd>/saves/<name>/` is
 	/// opened (or created) inside initializeNoiseGenerator, edits stream to
@@ -55,7 +58,7 @@ public:
 	void setVSync(bool enabled);
 	/// The seed of the currently generated world (tests/tools; the World
 	/// panel shows the same value through the UI frame).
-	int worldSeed() const { return sim ? sim->seed() : 0; }
+	int worldSeed() const;
 	/// Override the persistent-save root (tests/tools). Must be called
 	/// BEFORE requestOpenWorld/initializeNoiseGenerator; the runtime default
 	/// stays "<cwd>/saves" (issue #180 review round 4).
@@ -127,7 +130,7 @@ public:
 	bool reloadWorld(int newSeed);
 
 	/// Monotonically increasing world generation / reload version counter.
-	uint64_t worldGenerationId() const { return sim ? sim->worldGenerationId() : 0; }
+	uint64_t worldGenerationId() const;
 
 	/// Inventory-panel UI flag (issue #227): toggled by E, consumed by the
 	/// panel itself in #229. Presentation-local host state — the authoritative
@@ -152,6 +155,17 @@ public:
 	const std::string &resourcePackRoot() const { return m_resourcePackRoot; }
 
 private:
+	struct RemoteSession;
+	void pollRemote();
+	void sendRemoteInput(const physics::PlayerInput &input);
+	void updateRemoteEntities();
+	void populateRemoteUi(GameUIFrame &frame);
+	sim::VoxelTargetTrace remoteTarget() const;
+	VoxelWorld *viewWorld() const;
+	void selectHotbarSlot(int slot);
+	int selectedHotbarSlot() const;
+	void dropSelectedItem();
+	void sendRemoteVoxelAction(bool placing);
 	void handleEvents();
 	void onResize(int width, int height);
 	void requestSwapchainRecreate();
@@ -328,6 +342,7 @@ private:
 	// focus / benchmark policy and the epoch barrier — no authoritative
 	// gameplay state lives here.
 	std::unique_ptr<sim::GameSimulation> sim;
+	std::unique_ptr<RemoteSession> m_remote;
 	std::unique_ptr<RenderWorldBridge> renderBridge;
 
 	StagingRing stagingRing;

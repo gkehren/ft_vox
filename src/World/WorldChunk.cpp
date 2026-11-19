@@ -394,6 +394,7 @@ void WorldChunk::reset(const glm::vec3 &newPosition, ResetMode mode)
 	position = newPosition;
 	state.store(ChunkState::UNLOADED);
 	m_inTransit.store(false);
+	m_replicaRetiring.store(false, std::memory_order_relaxed);
 	m_terrainPublished = false;
 
 	// A recycled record is a new identity (issue #104/#114): in-flight results

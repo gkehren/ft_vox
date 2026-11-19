@@ -250,6 +250,8 @@ public:
 	/// Join finished worker jobs and clear in-transit flags (world generation
 	/// + render mesh/light), then apply deferred authoritative edits.
 	void processFinishedJobs();
+	/// Consume verified replica publication/retirement before render dispatch.
+	void publishReplicaChanges();
 
 	/// Pure frustum visibility (used by collectDrawList).
 	void updateVisibility(const Camera &camera, int windowWidth, int windowHeight,
@@ -383,6 +385,7 @@ private:
 	void onWorldUnloaded(const WorldEvent &e);
 	void onWorldGenerated(const WorldEvent &e);
 	void onWorldEditApplied(const WorldEvent &e);
+	void onReplicaChanged(const glm::ivec3 &coord);
 	void retryPendingBinds();
 	/// Single bind contract shared by every handle-registration path (attach,
 	/// Loaded event, bind retry, bootstrap): acquire a render handle, bind it

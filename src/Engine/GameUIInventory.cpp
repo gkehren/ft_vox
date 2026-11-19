@@ -165,6 +165,9 @@ void GameUI::drawInventoryPanel(GameUIFrame &frame)
         ImGui::TextDisabled("Left-click: move/swap · Right-click: split half · Esc/close: cancel drag");
         ImGui::TextDisabled("A half-drop onto a nearly-full slot moves only what fits; the rest stays.");
         ImGui::Separator();
+        if (!frame.inventoryInputEnabled)
+            m_drag = {};
+        ImGui::BeginDisabled(!frame.inventoryInputEnabled);
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         ImDrawList *dl = ImGui::GetWindowDrawList();
 
@@ -259,6 +262,7 @@ void GameUI::drawInventoryPanel(GameUIFrame &frame)
         ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::TextDisabled("Q drops one · 1-9 select");
+        ImGui::EndDisabled();
     }
     ImGui::End();
     *frame.inventoryPanelOpen = open;

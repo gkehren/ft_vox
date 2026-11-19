@@ -277,8 +277,31 @@ void RenderWorldBridge::drainWorldEvents()
 		case WorldEventKind::EditApplied:
 			onWorldEditApplied(e);
 			break;
+		case WorldEventKind::ReplicaChanged:
+			onReplicaChanged(e.coord);
+			break;
 		}
 	}
+}
+
+void RenderWorldBridge::publishReplicaChanges()
+{
+	drainWorldEvents();
+	retryPendingBinds();
+}
+
+void RenderWorldBridge::onReplicaChanged(const glm::ivec3 &coord)
+{
+	for (int dz = -1; dz <= 1; ++dz)
+		for (int dx = -1; dx <= 1; ++dx)
+		{
+			Chunk *chunk = getChunk(coord + glm::ivec3(dx, 0, dz));
+			if (!chunk || !chunk->isVoxelBackingReadable())
+				continue;
+			chunk->notifyTerrainGenerated();
+			if (!chunk->isInTransit())
+				chunk->setState(ChunkState::GENERATED);
+		}
 }
 
 void RenderWorldBridge::onWorldLoaded(const WorldEvent &e)
@@ -474,7 +497,7 @@ void RenderWorldBridge::meshPendingChunks(const Camera &camera, const RenderSett
 
 	for (Chunk *chunk : m_activeChunks)
 	{
-		if (chunk->getState() == ChunkState::GENERATED && !chunk->isInTransit())
+		if (chunk->getState() == ChunkState::GENERATED && !chunk->isInTransit() && !chunk->isReplicaRetiring())
 		{
 			const glm::vec3 p = chunk->getPosition();
 			const float dx = p.x - camOffsetX;
@@ -677,7 +700,7 @@ void RenderWorldBridge::updateEntityLightCaches(const Camera &camera, const Rend
 	for (Chunk *chunk : m_activeChunks)
 	{
 		if (chunk->getState() == ChunkState::MESHED && !chunk->isInTransit() &&
-			chunk->localLightCacheWanted() && !chunk->hasLightStorage())
+			!chunk->isReplicaRetiring() && chunk->localLightCacheWanted() && !chunk->hasLightStorage())
 		{
 			const glm::vec3 p = chunk->getPosition();
 			const float dx = p.x - camOffsetX;
@@ -809,7 +832,7 @@ int RenderWorldBridge::uploadPendingMeshes(VmaAllocator allocator, StagingRing &
 		const float camOffsetZ = camPos.z - CHUNK_SIZE * 0.5f;
 		for (Chunk *chunk : m_activeChunks)
 		{
-			if (!chunk)
+			if (!chunk || chunk->isReplicaRetiring())
 				continue;
 			if (chunk->getState() == ChunkState::MESHED && chunk->needsGPUUpload() && !chunk->isInTransit())
 			{
@@ -1234,7 +1257,7 @@ void RenderWorldBridge::collectDrawList(std::vector<Chunk *> &out) const
 	out.reserve(m_activeChunks.size());
 	for (Chunk *chunk : m_activeChunks)
 	{
-		if (!chunk)
+		if (!chunk || chunk->isReplicaRetiring())
 			continue;
 		// Keep drawing the last GPU mesh while a remesh/upload is pending so
 		// break/place doesn't make the chunk pop out of existence.
@@ -1258,7 +1281,7 @@ void RenderWorldBridge::collectShadowList(std::vector<Chunk *> &out, const Camer
 	out.reserve(m_activeChunks.size() / 2 + 8);
 	for (Chunk *chunk : m_activeChunks)
 	{
-		if (!chunk)
+		if (!chunk || chunk->isReplicaRetiring())
 			continue;
 		if (chunk->getOpaqueIndexCount() == 0)
 			continue;

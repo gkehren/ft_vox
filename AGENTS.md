@@ -52,8 +52,8 @@
   - **`ItemEntityRenderer`** (issue #229 / Epic #223 Phase F): derived dropped-item presentation — one shared atlas-textured unit cube, one instanced indexed draw for the frustum-culled visible population (bounded by the sim cap), previous/current interpolation done host-side, per-instance atlas layer + derived local light; receives directional shadows, casts none; recorded in the opaque pass after mobs; holds no authoritative state (epoch-barrier reset)
 
 ### Networking (`src/Network/`) — dedicated server
-- **`ft_vox_wire` and `ft_vox_udp`**: v2 framing and bounded IPv4 UDP sessions for `ft_vox_server` (Epic #245, #251–#254). The IO worker validates scoped inputs. The tick owner spawns remote players, advances their 120 Hz walking physics and exports authoritative player snapshots and revisioned terrain within each player's bounded interest. `ClientTransport` assembles verified baselines and applies ordered voxel deltas to a CPU-only chunk projection. See [dedicated server](docs/dedicated-server.md) and the [wire ADR](docs/adr/authoritative-wire-protocol.md).
-- **Legacy `Client`/`Server`**: Boost.Asio v1 UDP prototype, compiled only into `test_network`. The graphical game uses neither transport.
+- **`ft_vox_wire` and `ft_vox_udp`**: v2 framing and bounded IPv4 UDP sessions for `ft_vox_server` (Epic #245, #251–#257). The IO worker validates scoped inputs. The tick owner advances remote players, validates actions and exports authoritative players, private inventory, nearby entities and revisioned terrain. `ClientTransport` verifies baselines and ordered deltas and `ClientWorld` publishes the resulting materials to read-only render backing. Engine's `--connect` mode attaches `RenderWorldBridge` to that backing and presents the server snapshots. The default launch hosts the solo `GameSimulation`. See [dedicated server](docs/dedicated-server.md) and the [wire ADR](docs/adr/authoritative-wire-protocol.md).
+- **Legacy `Client`/`Server`**: Boost.Asio v1 UDP prototype, compiled only into `test_network`.
 
 ## Technologies & Dependencies
 - **Language**: C++20

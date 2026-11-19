@@ -29,6 +29,74 @@ Use one process per save directory. A new world defaults to seed 42. Omit
 invalid world name, or a save that the existing persistence layer cannot open
 prevents startup.
 
+## Connect two graphical clients
+
+Build with `FT_VOX_GRAPHICS=ON`, then run the server and two clients in
+separate terminals. With a single-config build in `build-vk`:
+
+```sh
+cmake --build build-vk --target ft_vox ft_vox_server
+./build-vk/ft_vox_server --world multiplayer-smoke --saves-root ./server-saves --seed 42 --port 7777
+./build-vk/ft_vox --connect 127.0.0.1:7777 --seed 42
+./build-vk/ft_vox --connect 127.0.0.1:7777
+```
+
+On Windows, build with `--config Release` and use
+`build/Release/ft_vox_server.exe` and `build/Release/ft_vox.exe` with the same
+arguments. Launching `ft_vox` without `--connect` starts solo play.
+`--connect` takes a numeric IPv4 address and port. With it, `--seed` is an
+optional server identity check. `--world`, `--benchmark`, and `--view` are solo
+options. Remote play uses the normal graphics and resource-pack options.
+
+Wait for **Connected**, then move one player away from the shared spawn.
+Players in range appear as color-coded upright boxes. Use **WASD**, **Space**
+and **Shift** for walking, jumping and sprinting. Move to dry ground, then aim ahead
+and use **LMB** to break a block where both clients can see the edit. Walk
+over the drop and check that the collecting client's hotbar changes. Use
+**1–9** or the wheel to select an item, **RMB** to place it, **Q** to drop one
+item and **E** to inspect or rearrange the inventory. The status HUD shows
+pending and accepted or rejected actions. Chunk and inventory displays
+follow the server's updates.
+
+Release the cursor with **C**, then use **Multiplayer → Disconnect** and
+**Multiplayer → Reconnect**. The other client should lose the departing
+avatar, then see the new player enter. The reconnecting client gets a
+fresh remote player and inventory. Walk far enough to leave and re-enter
+the server's interest radius and check that terrain and entities return
+after their updates arrive. Try joining with `--seed 43` or with the server
+stopped to exercise the refusal and retry states. The graphical client
+stays open and offers reconnect to the configured endpoint.
+
+### Graphical projection limits
+
+The renderer meshes verified server chunks through the normal async
+mesh and upload path. It keeps up to 197 live chunk records, publishes up
+to four changed chunk images per frame, and caps outstanding mesh and
+light jobs at 16 and 8 respectively. The server's interest radius limits
+the terrain available to render. Desired chunks appear as each complete
+baseline arrives. Replica terrain uses a fixed plains tint for grass and
+foliage because the wire images carry voxel materials. The local biome
+map, creative flight, isometric inspection and world pause are solo
+features.
+
+The camera follows interpolated server positions, with local mouse look.
+Interpolation also covers up to 23 other players, 38 dropped items, and 42
+mobs. Avatars use a solid box and receive scene occlusion. Current snapshots
+define which entities are present. Movement and
+actions may feel delayed across a high-latency connection. The client
+allows one reliable action at a time and waits for the server before
+changing terrain or inventory. Packet loss can briefly delay streaming
+or pose updates. The transport retries reliable messages and rejoins on
+a bad checksum or a revision gap. The graphical host clears its world,
+avatar, inventory, and item projections when that session retires. A join
+timeout, compatibility refusal, or explicit disconnect leaves the client
+at the connection screen until it is restarted or reconnected.
+
+See [Manual verification for #257](multiplayer-client-smoke.md) for
+the physical GPU run and complementary automated coverage.
+
+## Server options
+
 | Option | Default and behavior |
 |---|---|
 | `--world NAME` | Required. Opens or creates the named world. |

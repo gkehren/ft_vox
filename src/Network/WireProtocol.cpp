@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <numbers>
 #include <cmath>
 #include <limits>
 #include <string_view>
@@ -461,6 +462,14 @@ bool validAction(const Action &p) noexcept
     if (p.operation == ActionKind::DropOne || p.operation == ActionKind::DropStack)
         return p.slot < items::kInventorySize && p.otherSlot == 0;
     return p.slot < items::kInventorySize && p.otherSlot < items::kInventorySize && p.slot != p.otherSlot;
+}
+
+std::array<double, 3> aimDirection(float yawTurns, float pitchTurns) noexcept
+{
+    constexpr double radiansPerTurn = 2.0 * std::numbers::pi;
+    const double yaw = yawTurns * radiansPerTurn;
+    const double pitch = pitchTurns * radiansPerTurn;
+    return {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 }
 
 bool validInput(const Input &input) noexcept

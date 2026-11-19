@@ -1,5 +1,6 @@
 #include <Items/ItemRegistry.hpp>
 #include <Network/ClientTransport.hpp>
+#include <Network/ClientWorld.hpp>
 #include <Server/ServerHost.hpp>
 #include <World/WorldCollisionView.hpp>
 
@@ -1082,6 +1083,72 @@ void testEntityReplication(const fs::path &root)
 	require(restarted.stop(error), error);
 }
 
+void testRenderBacking()
+{
+	udp::ClientWorld view;
+	auto &world = view.world();
+	udp::ChunkProjection images;
+	constexpr wire::ChunkVersion firstVersion{7, 0};
+	constexpr glm::ivec3 west{-1, 0, 0};
+	constexpr glm::ivec3 east{0, 0, 0};
+	constexpr glm::ivec3 westBorder{-1, 42, 2};
+	const size_t index = WorldChunk::index(CHUNK_SIZE - 1, westBorder.y, westBorder.z);
+	for (int x = -1; x <= 3; ++x)
+	{
+		auto &image = images[{x, 0}];
+		image.version = firstVersion;
+		image.materials.fill(wire::kAirMaterial);
+	}
+	auto &image = images.at({-1, 0});
+	image.materials[index] = STONE;
+	view.reconcile(images, {-8.f, 42.f, 8.f});
+	require(world.chunkCount() == udp::ClientWorld::kPublicationsPerFrame && !world.getChunk({3, 0, 0}),
+		"replica did not prioritize nearby chunks within its budget");
+	auto *westRecord = world.getChunk(west);
+	auto *eastRecord = world.getChunk(east);
+	require(westRecord && eastRecord && westRecord->occupiedSectionMask() == (1 << 2) &&
+		view.observedVersion(westBorder) == firstVersion, "baseline did not publish native voxels and wire version");
+	world.ensureShellPopulated(eastRecord);
+	require(eastRecord->sampleForMeshing(-1, 42, 2) == STONE, "replica seam lost the baseline border");
+	const auto eastBeforeEdit = eastRecord->revision();
+	require(!world.deleteVoxel(glm::vec3(westBorder)).accepted, "replica accepted a local edit");
+
+	westRecord->setInTransit(true);
+	image.version.revision++;
+	image.materials[index] = wire::kAirMaterial;
+	view.reconcile(images, {-8.f, 42.f, 8.f});
+	require(view.observedVersion(westBorder) == firstVersion && world.isVoxelActive(glm::vec3(westBorder)),
+		"replica overwrote a record leased by a worker");
+	westRecord->setInTransit(false);
+	view.reconcile(images, {-8.f, 42.f, 8.f});
+	require(view.observedVersion(westBorder) == image.version && westRecord->occupiedSectionMask() == 0 &&
+		eastRecord->revision() > eastBeforeEdit, "delta did not invalidate occupancy and neighboring work");
+	world.ensureShellPopulated(eastRecord);
+	require(eastRecord->sampleForMeshing(-1, 42, 2) == AIR, "replica seam retained the previous border");
+
+	const auto beforeRetire = westRecord->identity();
+	westRecord->setInTransit(true);
+	images.erase({-1, 0});
+	view.reconcile(images, {-8.f, 42.f, 8.f});
+	{
+		const WorldCollisionView collision(world);
+		require(!collision.sample(westBorder).available && westRecord->isReplicaRetiring() &&
+			!view.observedVersion(westBorder) && westRecord->revision() > beforeRetire.revision,
+			"unloaded chunk remained queryable or valid for an old mesh publication");
+	}
+	auto &replacement = images[{-1, 0}];
+	replacement.version = {8, 0};
+	replacement.materials.fill(wire::kAirMaterial);
+	replacement.materials[index] = DIRT;
+	view.reconcile(images, {-8.f, 42.f, 8.f});
+	require(!view.observedVersion(westBorder), "a re-entry revived a retired worker lease");
+	westRecord->setInTransit(false);
+	view.reconcile(images, {-8.f, 42.f, 8.f});
+	require(view.observedVersion(westBorder) == replacement.version &&
+		world.getChunk(west)->getVoxel(CHUNK_SIZE - 1, 42, 2).type == DIRT,
+		"re-entry did not install the latest baseline");
+}
+
 void testThreadedDelivery(const fs::path &root)
 {
 	server::HostConfig config;
@@ -1147,6 +1214,7 @@ int main(int argc, char **argv)
 		}
 		else
 		{
+			testRenderBacking();
 			testIncompatibleGenerator();
 			testReplication(root);
 			testThreadedDelivery(root);

@@ -160,6 +160,17 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		ImGui::EndMenu();
 	}
 
+	if (frame.multiplayerStatus && ImGui::BeginMenu("Multiplayer"))
+	{
+		ImGui::TextUnformatted(frame.multiplayerStatus);
+		ImGui::Separator();
+		if (frame.joinServer && ImGui::MenuItem("Reconnect"))
+			frame.joinServer();
+		if (frame.leaveServer && ImGui::MenuItem("Disconnect"))
+			frame.leaveServer();
+		ImGui::EndMenu();
+	}
+
 	if (ImGui::BeginMenu("View"))
 	{
 		if (ImGui::BeginMenu("Status overlay"))
@@ -185,7 +196,8 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		layoutTileMenuItem("Player / Gameplay", nullptr, toggles.playerPanel);
 		layoutTileMenuItem("Graphics", shortcutKeyName(SDLK_F2), toggles.graphics);
 		layoutTileMenuItem("Streaming", shortcutKeyName(SDLK_F3), toggles.streaming);
-		layoutTileMenuItem("World / biome map", shortcutKeyName(SDLK_F4), toggles.world);
+		layoutTileMenuItem(frame.multiplayerStatus ? "World" : "World / biome map",
+			shortcutKeyName(SDLK_F4), toggles.world);
 		// Clickable toggle (review §4.8, same ignored-return class).
 		if (toggles.overlayHints &&
 			ImGui::MenuItem("On-screen hints", shortcutKeyName(SDLK_F6), *toggles.overlayHints))
@@ -238,7 +250,8 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		layoutTileMenuItem("Memory", shortcutKeyName(SDLK_F11), toggles.memory);
 		layoutTileMenuItem("Chunk inspector", shortcutKeyName(SDLK_F9), toggles.chunkInspector);
 		layoutTileMenuItem("Render debug", shortcutKeyName(SDLK_F12), toggles.renderDebug);
-		layoutTileMenuItem("Benchmark", nullptr, toggles.benchmark);
+		if (frame.benchmark)
+			layoutTileMenuItem("Benchmark", nullptr, toggles.benchmark);
 		ImGui::Separator();
 		// Runtime/debug toggles previously reachable from the pre-shell menu
 		// bar; Developer is their coherent home now that Graphics lives in

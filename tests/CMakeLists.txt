@@ -1355,6 +1355,7 @@ elseif(WIN32)
 endif()
 
 target_link_libraries(test_engine_reload PRIVATE
+    ft_vox_udp
     ${FT_VOX_COMMON_LIBS}
 )
 

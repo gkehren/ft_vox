@@ -1,4 +1,5 @@
 #include <Engine/Engine.hpp>
+#include <Network/UdpSocket.hpp>
 #include <World/WorldPersistence.hpp>
 #include <Chunk/StreamHelpers.hpp>
 #include <Renderer/MinecraftTextures.hpp>
@@ -21,10 +22,11 @@ static constexpr int kExitRuntime = 4;
 static void printUsage(const char *argv0)
 {
 	std::cout << "Usage: " << argv0 << " [--seed <value>] [--world <name>] [--resource-pack <path.zip>]"
-			  << " [--vsync <on|off>] [--benchmark <seconds>]\n"
+			  << " [--connect <IPv4:port>] [--vsync <on|off>] [--benchmark <seconds>]\n"
 			  << "\n"
 			  << "Options:\n"
-			  << "  --seed <value>              World seed (integer)\n"
+			  << "  --seed <value>              Solo world seed or expected server seed (integer)\n"
+			  << "  --connect <IPv4:port>       Join an authoritative ft_vox_server via UDP\n"
 			  << "  --world <name>              Open (or create) the persistent save saves/<name>\n"
 			  << "                              (player state + block edits survive restarts)\n"
 			  << "  --resource-pack <path>      Minecraft resource pack archive (.zip) or folder\n"
@@ -60,6 +62,7 @@ static std::string resolveResourcePackRoot(const std::string &cliPack)
 int main(int argc, char **argv)
 {
 	unsigned int seed_to_use = 0;
+	std::optional<net::udp::Address> server;
 	std::string worldName;
 	std::string resourcePackCli;
 	std::optional<bool> vsyncOverride;
@@ -115,6 +118,38 @@ int main(int argc, char **argv)
 		{
 			printUsage(argv[0]);
 			return EXIT_SUCCESS;
+		}
+		if (arg == "--connect")
+		{
+			if (i + 1 >= argc || server)
+			{
+				std::cerr << "Error: specify one --connect <IPv4:port> endpoint.\n";
+				return kExitUsage;
+			}
+			const std::string_view endpoint = argv[++i];
+			const auto split = endpoint.find(':');
+			if (split != std::string_view::npos)
+			{
+				const auto port = endpoint.substr(split + 1);
+				uint16_t parsedPort{};
+				const auto [end, error] = std::from_chars(port.data(), port.data() + port.size(), parsedPort);
+				if (error == std::errc{} && end == port.data() + port.size() && parsedPort > 0)
+				{
+					try
+					{
+						const auto address = net::udp::parseAddress(endpoint.substr(0, split), parsedPort);
+						if (address.ipv4 != 0)
+							server = address;
+					}
+					catch (const std::invalid_argument &) {}
+				}
+			}
+			if (!server)
+			{
+				std::cerr << "Error: --connect expects a numeric IPv4 address and port 1–65535.\n";
+				return kExitUsage;
+			}
+			continue;
 		}
 		if (arg == "--seed")
 		{
@@ -335,6 +370,11 @@ int main(int argc, char **argv)
 	}
 	const std::string resourcePack = resolveResourcePackRoot(resourcePackCli);
 
+	if (server && (!worldName.empty() || benchmarkDuration > 0.f || inspection))
+	{
+		std::cerr << "Error: --connect cannot be combined with --world, --benchmark or --view.\n";
+		return kExitUsage;
+	}
 	if (!worldName.empty() && benchmarkDuration > 0.0f)
 	{
 		// Benchmark worlds are transient by contract (issue #180): they must
@@ -347,9 +387,14 @@ int main(int argc, char **argv)
 	try
 	{
 		Engine engine(resourcePack);
-		if (!worldName.empty())
-			engine.requestOpenWorld(worldName);
-		engine.initializeNoiseGenerator(static_cast<int>(seed_to_use));
+		if (server)
+			engine.connectRemote(*server, seed_to_use ? std::optional<uint32_t>(seed_to_use) : std::nullopt);
+		else
+		{
+			if (!worldName.empty())
+				engine.requestOpenWorld(worldName);
+			engine.initializeNoiseGenerator(static_cast<int>(seed_to_use));
+		}
         if (inspection)
         {
             const auto &v = *inspection;

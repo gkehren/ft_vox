@@ -1233,6 +1233,24 @@ VoxelTargetResult GameSimulation::validateVoxelTarget(PlayerId id, VoxelInteract
     if (placing && targetType != AIR)
         return Result::Occupied;
 
+    const auto hit = traceVoxelTarget(view, eye, direction);
+    if (hit.terrainUnavailable)
+        return Result::TerrainUnavailable;
+    const bool matches = placing ? hit.hasPlaceFace && hit.adjacent == target : hit.block == target;
+    return hit.hit && matches ? Result::Valid : Result::InvalidTarget;
+}
+
+VoxelTargetTrace GameSimulation::traceVoxelTarget(const WorldCollisionView &view,
+                                                  glm::dvec3 eye, glm::dvec3 direction)
+{
+    const double length = glm::length(direction);
+    // Keep integer grid-plane conversions and the bounded march well
+    // inside the representable range, including at the world boundary.
+    constexpr double originLimit = double(INT32_MAX) / 2.0;
+    if (!(length > 0.0) || !std::isfinite(length) ||
+        !(std::abs(eye.x) <= originLimit && std::abs(eye.y) <= originLimit &&
+          std::abs(eye.z) <= originLimit))
+        return {};
     // Step at grid planes so even a short passage through an intervening
     // voxel can occlude the target. A tied crossing enters the diagonal
     // cell without crossing a single face suitable for placement.
@@ -1260,18 +1278,15 @@ VoxelTargetResult GameSimulation::validateVoxelTarget(PlayerId id, VoxelInteract
         TextureType material = AIR;
         const auto sample = view.sampleWithType(cell, &material);
         if (!sample.available)
-            return Result::TerrainUnavailable;
+            return {.terrainUnavailable = true};
         if (material != AIR)
-        {
-            const bool matches = placing ? crossed == 1 && previous == target : cell == target;
-            return matches ? Result::Valid : Result::InvalidTarget;
-        }
+            return {cell, previous, true, crossed == 1, false};
         if (sample.solid)
-            return Result::InvalidTarget; // virtual world boundary
+            return {}; // virtual world boundary
 
         const double distance = std::min({next.x, next.y, next.z});
         if (distance > kInteractionReach)
-            return Result::InvalidTarget;
+            return {};
         previous = cell;
         crossed = 0;
         for (int axis = 0; axis < 3; ++axis)
