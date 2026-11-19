@@ -89,12 +89,12 @@ endfunction()
 #
 # FT_VOX_GRAPHICS=ON  (default): the full game + renderer + every test.
 # FT_VOX_GRAPHICS=OFF: CPU-only configuration — ft_vox_core, the
-#   ft_vox_headless simulation runner and the CPU-only tests. The graphical
+#   ft_vox_headless, ft_vox_server and the CPU-only tests. The graphical
 #   dependency stack (SDL3, Vulkan, volk, VMA, miniz, SPIR-V compilers) is
 #   NOT discovered at all, so this configures on a machine with no Vulkan
 #   SDK / SDL3 / shader toolchain. See docs/headless-runner.md.
 # ---------------------------------------------------------------------------
-option(FT_VOX_GRAPHICS "Build the graphical game (SDL3/Vulkan/ImGui); OFF = CPU-only core + headless runner" ON)
+option(FT_VOX_GRAPHICS "Build the graphical game (SDL3/Vulkan/ImGui); OFF = CPU-only core and hosts" ON)
 
 # Canonical floating-point codegen for the CPU simulation (issue #210):
 # OFF keeps the historical game codegen (-march=native on non-Apple, FMA
@@ -432,8 +432,7 @@ endif()
 # ft_vox_headless — standalone CPU simulation runner (issue #210, Epic #204
 # Phase F). The graphical-free host of sim::GameSimulation: links ONLY
 # ft_vox_core (transitively glm + FastNoise2 + Threads). Built in BOTH
-# configurations; with FT_VOX_GRAPHICS=OFF it is the only executable besides
-# the CPU tests. No SDL3/Vulkan/ImGui/shader/resource dependency is reachable
+# configurations. No SDL3/Vulkan/ImGui/shader/resource dependency is reachable
 # (configure-time link-closure guard below + tests/check_headless_deps.py).
 # ---------------------------------------------------------------------------
 set(FT_VOX_HEADLESS_SOURCES
@@ -459,6 +458,13 @@ else()
         target_compile_options(ft_vox_headless PRIVATE $<$<CONFIG:Release>:-march=native>)
     endif()
 endif()
+
+# Dedicated authority host (issue #250). The test-only UDP prototype and
+# the graphical game remain independent of the server executable.
+set(FT_VOX_SERVER_HOST_SOURCE ${CMAKE_SOURCE_DIR}/src/Server/ServerHost.cpp)
+add_executable(ft_vox_server src/Server/ServerMain.cpp ${FT_VOX_SERVER_HOST_SOURCE})
+target_link_libraries(ft_vox_server PRIVATE ft_vox_core)
+ft_vox_target_hygiene(ft_vox_server)
 
 # Configure-time dependency-direction guard (issue #210 criterion 1, hardened
 # in issue #211 / Epic #204 Phase G): walk the TRANSITIVE link closure of a
@@ -496,6 +502,7 @@ function(ft_vox_assert_cpu_link_closure target)
 endfunction()
 ft_vox_assert_cpu_link_closure(ft_vox_core)
 ft_vox_assert_cpu_link_closure(ft_vox_headless)
+ft_vox_assert_cpu_link_closure(ft_vox_server)
 
 # CPU-only configuration: the graphical stack must not even have been
 # DISCOVERED (no targets created by Dependencies.cmake).

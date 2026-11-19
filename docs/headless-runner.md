@@ -16,6 +16,7 @@ Related documents:
 - [`simulation-render-contracts.md`](simulation-render-contracts.md) — the authoritative CPU/derived boundary (Phases A–F)
 - [`engine-architecture.md`](engine-architecture.md) — the graphical host's frame orchestration
 - [`building.md`](building.md) — full build requirements (the CPU-only path below needs none of the graphics stack)
+- [`dedicated-server.md`](dedicated-server.md) — the standalone persistent authority host and live tick scheduler
 
 ---
 
@@ -61,7 +62,7 @@ cmake --build build --config Release --target ft_vox_headless   # Windows
 ### CPU-only configuration (no graphics stack at all)
 
 `-DFT_VOX_GRAPHICS=OFF` selects the CPU-only slice: `ft_vox_core`,
-`ft_vox_headless` and the CPU-only tests. The graphical dependencies —
+`ft_vox_headless`, `ft_vox_server` and the CPU-only tests. The graphical dependencies —
 SDL3, Vulkan loader/headers, volk, VMA, miniz and the SPIR-V compilers — are
 **not discovered at all** (no `find_package`/FetchContent call runs for
 them), so this configures and builds on a machine with **no Vulkan SDK, no

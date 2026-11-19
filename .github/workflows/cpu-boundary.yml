@@ -11,7 +11,7 @@
 #   cpu-windows      — FT_VOX_GRAPHICS=OFF configure/build/test on Windows (MSVC).
 #   cpu-sanitizers   — ASan + UBSan over the CPU suite (review M21: the sanitizer
 #                      job the test_terrain comment referenced but never existed).
-#   tsan             — TSan over network, HeadlessSmoke and PlayerStreaming
+#   tsan             — TSan over network, HeadlessSmoke, PlayerStreaming and ServerHost
 #                      (terrain publication and record recycling). TerrainGeneration and the full
 #                      HeadlessRunner driver are excluded (expected, variable
 #                      TSan slowdown > timeout); they run natively + under ASan.
@@ -165,12 +165,12 @@ jobs:
       # TSan slowdown is highly variable and exceeds the test timeout). Both
       # still run natively (cpu-linux/windows) and under ASan; HeadlessSmoke
       # gives the threaded headless path TSan coverage here.
-      - name: Test (network, headless smoke and player streaming under TSan)
+      - name: Test (network, headless smoke, player streaming and server host under TSan)
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: >
           ctest --test-dir build-tsan --output-on-failure --timeout 900
-          -R "NetworkIntegrationTest|HeadlessSmoke|PlayerStreaming"
+          -R "NetworkIntegrationTest|HeadlessSmoke|PlayerStreaming|ServerHost"
 
   graphics-linux:
     runs-on: ubuntu-latest

@@ -117,6 +117,7 @@ Detailed technical documentation lives under [`docs/`](docs/):
 - [Engine architecture](docs/engine-architecture.md)
 - [Simulation / render contracts](docs/simulation-render-contracts.md)
 - [Headless simulation runner](docs/headless-runner.md)
+- [Dedicated server](docs/dedicated-server.md)
 - [Vulkan renderer](docs/vulkan-graphics.md)
 - [Terrain generation](docs/terrain-generation.md)
 - [Player physics](docs/player-physics.md)

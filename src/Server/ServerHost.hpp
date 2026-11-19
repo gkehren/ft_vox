@@ -1,0 +1,76 @@
+#pragma once
+
+#include <Sim/GameSimulation.hpp>
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace server
+{
+
+inline constexpr int kTickRate = 60;
+inline constexpr double kTickDt = 1.0 / kTickRate;
+
+struct HostConfig
+{
+	sim::GameSimulation::Config world;
+	unsigned workers{2}; // zero uses synchronous generation
+	int interestRadiusChunks{3};
+	PlayerStreamingBudget streaming;
+};
+
+enum class TerrainTiming { Background, QuiescePerTick };
+
+struct HostMetrics
+{
+	uint64_t ticks{0};
+	uint64_t worldEpoch{0};
+	uint64_t nextEditId{0};
+	uint64_t checkpointGeneration{0};
+	size_t chunks{0};
+	size_t players{0};
+	size_t mobs{0};
+	size_t items{0};
+	size_t pendingGeneration{0};
+	size_t waitingForRecord{0};
+	size_t waitingForGeneration{0};
+	int seed{0};
+};
+
+/// One world, driven exclusively by its caller thread. Workers compute terrain
+/// and write persistence payloads; the owner publishes results and mutates
+/// gameplay state. The executable runs this host on its main thread.
+class ServerHost
+{
+public:
+	explicit ServerHost(HostConfig config);
+
+	[[nodiscard]] bool start(std::string &error);
+	[[nodiscard]] bool step(TerrainTiming terrainTiming, std::string &error);
+	[[nodiscard]] bool stop(std::string &error);
+	HostMetrics metrics() const;
+	uint64_t ticks() const { return m_ticks; }
+	bool restoredPlayer() const { return m_restoredPlayer; }
+
+private:
+	friend struct ServerHostProbe;
+
+	bool quiesce(std::string &error);
+	bool save(std::string &error);
+
+	HostConfig m_config;
+	// Destruction is reversed: drain and destroy the world before its pool.
+	std::unique_ptr<ThreadPool> m_workers;
+	std::unique_ptr<sim::GameSimulation> m_sim;
+	std::vector<WorldEvent> m_worldEvents;
+	std::vector<items::ItemEntityEvent> m_itemEvents;
+	HostMetrics m_finalMetrics;
+	uint64_t m_ticks{0};
+	float m_yaw{0.f};
+	float m_pitch{0.f};
+	bool m_restoredPlayer{false};
+};
+
+} // namespace server

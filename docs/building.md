@@ -86,7 +86,7 @@ cmake --build build --config Release
 ## CPU-only configuration (headless runner)
 
 Issue #210 (Epic #204 Phase F): `-DFT_VOX_GRAPHICS=OFF` builds **only** the
-CPU simulation library (`ft_vox_core`), the standalone `ft_vox_headless`
+CPU simulation library (`ft_vox_core`), the dedicated `ft_vox_server`, the standalone `ft_vox_headless`
 simulation runner and the CPU-only tests. SDL3, the Vulkan SDK/loader, volk,
 VMA, miniz and the SPIR-V compilers are **not discovered at all** — no
 GPU, window, shader toolchain or vcpkg toolchain is required.
@@ -112,7 +112,7 @@ or reuse an existing build's `_deps` sources via `FETCHCONTENT_SOURCE_DIR_*`).
 The opt-in `CpuOnlyBuild` CTest (`-DFT_VOX_CPU_ONLY_BUILD_CHECK=ON`, label
 `cpu-only`) automates a clean CPU-only configure/build/test run as the
 acceptance gate; the always-on `HeadlessDeps` guard is the default dependency
-check. Full reference: [`headless-runner.md`](headless-runner.md).
+check. See the [headless runner](headless-runner.md) and [dedicated server](dedicated-server.md) guides.
 
 ## Dependencies
 

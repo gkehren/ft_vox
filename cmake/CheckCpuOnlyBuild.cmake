@@ -17,7 +17,7 @@
 # GLM/FastNoise2 come from FetchContent; when the parent build already
 # downloaded them, their sources are reused via FETCHCONTENT_SOURCE_DIR_*
 # overrides so the gate works offline. Then it builds EVERY target of the
-# CPU-only configuration (ft_vox_core + ft_vox_headless + CPU tests) and runs
+# CPU-only configuration (core + headless runner + server + CPU tests) and runs
 # the nested CTest suite. Registered as CTest `CpuOnlyBuild` (label cpu-only).
 # =============================================================================
 
