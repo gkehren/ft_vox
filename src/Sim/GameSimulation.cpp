@@ -19,6 +19,7 @@
 #include <climits>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <utility>
 
@@ -1184,6 +1185,89 @@ PlaceResult GameSimulation::placeSelectedBlock(PlayerId id, glm::ivec3 cell, Wor
     if (outEdit)
         *outEdit = std::move(edit);
     return PlaceResult::Ok;
+}
+
+VoxelTargetResult GameSimulation::validateVoxelTarget(PlayerId id, VoxelInteraction operation, glm::ivec3 target,
+                                                       ChunkContentVersion expected, glm::dvec3 direction) const
+{
+    using Result = VoxelTargetResult;
+    const double length = glm::length(direction);
+    if (!playerPositioned(id) || !cellInWorldEnvelope(target) || !(length > 0.0) || !std::isfinite(length))
+        return Result::InvalidTarget;
+    const glm::dvec3 eye = playerEye(id);
+    if (!std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z))
+        return Result::InvalidTarget;
+    const glm::dvec3 corner(target);
+    const auto offset = eye - glm::clamp(eye, corner, corner + 1.0);
+    if (glm::dot(offset, offset) > kInteractionReach * kInteractionReach)
+        return Result::OutOfReach;
+
+    if (!m_world)
+        return Result::TerrainUnavailable;
+    const auto version = m_world->chunkContentVersion({floorDivChunk(target.x), 0, floorDivChunk(target.z)});
+    if (!version)
+        return Result::TerrainUnavailable;
+    if (version->generation != expected.generation || version->revision != expected.revision)
+        return Result::StaleRevision;
+
+    WorldCollisionView view(*m_world);
+    TextureType targetType = AIR;
+    if (!view.sampleWithType(target, &targetType).available)
+        return Result::TerrainUnavailable;
+    const bool placing = operation == VoxelInteraction::Place;
+    if (placing && targetType != AIR)
+        return Result::Occupied;
+
+    // Step at grid planes so even a short passage through an intervening
+    // voxel can occlude the target. A tied crossing enters the diagonal
+    // cell without crossing a single face suitable for placement.
+    direction /= length;
+    glm::ivec3 cell = glm::floor(eye);
+    glm::ivec3 step(0);
+    const double infinity = std::numeric_limits<double>::infinity();
+    glm::dvec3 next(infinity), stride(infinity);
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const double component = direction[axis];
+        if (std::abs(component) <= std::numeric_limits<double>::epsilon())
+            continue;
+        step[axis] = component > 0.0 ? 1 : -1;
+        if (step[axis] < 0 && eye[axis] == cell[axis])
+            --cell[axis];
+        const int plane = cell[axis] + (step[axis] > 0 ? 1 : 0);
+        next[axis] = (plane - eye[axis]) / component;
+        stride[axis] = std::abs(1.0 / component);
+    }
+    glm::ivec3 previous = cell;
+    int crossed = 0;
+    for (;;)
+    {
+        TextureType material = AIR;
+        const auto sample = view.sampleWithType(cell, &material);
+        if (!sample.available)
+            return Result::TerrainUnavailable;
+        if (material != AIR)
+        {
+            const bool matches = placing ? crossed == 1 && previous == target : cell == target;
+            return matches ? Result::Valid : Result::InvalidTarget;
+        }
+        if (sample.solid)
+            return Result::InvalidTarget; // virtual world boundary
+
+        const double distance = std::min({next.x, next.y, next.z});
+        if (distance > kInteractionReach)
+            return Result::InvalidTarget;
+        previous = cell;
+        crossed = 0;
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            if (next[axis] != distance)
+                continue;
+            cell[axis] += step[axis];
+            next[axis] += stride[axis];
+            ++crossed;
+        }
+    }
 }
 
 RaycastHit GameSimulation::raycastVoxel(glm::vec3 origin, glm::vec3 dir, float maxDist) const

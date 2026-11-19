@@ -73,11 +73,13 @@ private:
 	bool save(std::string &error);
 	void advancePlayers();
 	void distributeWorldEdits();
+	net::wire::ActionResult applyAction(sim::PlayerId player, const net::wire::Action &action);
 
 	struct RemotePlayer
 	{
 		net::udp::InputQueue inputs{};
 		uint64_t lastQueuedSequence{}, lastQueuedTick{}, lastProcessedInput{};
+		uint64_t nextActionId{1};
 		std::map<net::wire::ChunkCoord, net::wire::ChunkVersion> chunks;
 		std::deque<net::wire::WorldEdit> edits;
 		uint64_t nextTransferId{1};

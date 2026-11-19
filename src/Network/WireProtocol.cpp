@@ -268,23 +268,8 @@ bool encodeFields(IO &io, T &p)
     }
     else if constexpr (std::is_same_v<P, Action>)
     {
-        if (!io.fields(p.actionId, p.operation, p.slot, p.otherSlot, p.target.x, p.target.z, p.target.y,
-                       p.expected.generation, p.expected.revision, p.yawTurns, p.pitchTurns) ||
-            !validSequence(p.actionId) || !validActionKind(p.operation))
-            return false;
-        if (voxelAction(p.operation))
-        {
-            return p.slot == 0 && p.otherSlot == 0 && validCell(p.target) && p.expected.generation != 0 &&
-                   p.yawTurns >= 0.f && p.yawTurns < 1.f && std::abs(p.pitchTurns) <= 0.25f;
-        }
-        if (p.target != Cell{} || p.expected != ChunkVersion{} ||
-            std::bit_cast<uint32_t>(p.yawTurns) != 0 || std::bit_cast<uint32_t>(p.pitchTurns) != 0)
-            return false;
-        if (p.operation == ActionKind::Select)
-            return p.slot < items::kHotbarSize && p.otherSlot == 0;
-        if (p.operation == ActionKind::DropOne || p.operation == ActionKind::DropStack)
-            return p.slot < items::kInventorySize && p.otherSlot == 0;
-        return p.slot < items::kInventorySize && p.otherSlot < items::kInventorySize && p.slot != p.otherSlot;
+        return io.fields(p.actionId, p.operation, p.slot, p.otherSlot, p.target.x, p.target.z, p.target.y,
+                         p.expected.generation, p.expected.revision, p.yawTurns, p.pitchTurns) && validAction(p);
     }
     else if constexpr (std::is_same_v<P, ActionResult>)
     {
@@ -411,6 +396,25 @@ Compatibility localCompatibility() noexcept
         return Compatibility{kItemSchema, catalog.value(), generator.value()};
     }();
     return result;
+}
+
+bool validAction(const Action &p) noexcept
+{
+    if (!validSequence(p.actionId) || !validActionKind(p.operation))
+        return false;
+    if (voxelAction(p.operation))
+    {
+        return p.slot == 0 && p.otherSlot == 0 && validCell(p.target) && p.expected.generation != 0 &&
+               p.yawTurns >= 0.f && p.yawTurns < 1.f && std::abs(p.pitchTurns) <= 0.25f;
+    }
+    if (p.target != Cell{} || p.expected != ChunkVersion{} ||
+        std::bit_cast<uint32_t>(p.yawTurns) != 0 || std::bit_cast<uint32_t>(p.pitchTurns) != 0)
+        return false;
+    if (p.operation == ActionKind::Select)
+        return p.slot < items::kHotbarSize && p.otherSlot == 0;
+    if (p.operation == ActionKind::DropOne || p.operation == ActionKind::DropStack)
+        return p.slot < items::kInventorySize && p.otherSlot == 0;
+    return p.slot < items::kInventorySize && p.otherSlot < items::kInventorySize && p.slot != p.otherSlot;
 }
 
 bool validInput(const Input &input) noexcept

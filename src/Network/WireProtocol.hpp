@@ -195,6 +195,8 @@ struct Action
     bool operator==(const Action &) const = default;
 };
 
+bool validAction(const Action &action) noexcept;
+
 enum class ActionCode : uint8_t
 {
     Accepted = 0, Partial = 1, InvalidTarget = 2, OutOfReach = 3,

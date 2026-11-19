@@ -43,6 +43,14 @@ struct Peer
 	bool confirmed{}, closing{}, waitingForResult{};
 };
 
+struct OwnerInbox
+{
+	size_t slot{};
+	std::optional<SessionAdmission> admission;
+	SessionIntents intents;
+	bool closing{}, confirmed{}, active{}, spawnFailed{};
+};
+
 struct Discovery
 {
 	Rate inbound, outbound;
@@ -59,7 +67,10 @@ size_t checkedCap(size_t cap)
 struct ServerTransport::Impl
 {
 	Impl(Address bind, size_t cap, SessionWorld world)
-		: socket(bind), world(world), peers(checkedCap(cap)), mailboxes(peers.size()) {}
+		: socket(bind), world(world), peers(checkedCap(cap)), mailboxes(peers.size())
+	{
+		ownerInbox.reserve(peers.size());
+	}
 
 	Sender sender(Peer &peer)
 	{
@@ -407,31 +418,27 @@ struct ServerTransport::Impl
 
 	void serviceOwner(SessionOwner &owner, uint64_t completedTick, bool discardInputs)
 	{
+		ownerInbox.clear();
 		{
 			std::lock_guard lock(mutex);
 			ownerTick = completedTick;
-			if (discardInputs)
-				for (auto &box : mailboxes)
-					box.intents.inputs = {};
-		}
-		for (auto &box : mailboxes)
-		{
-			SessionIntents intents;
-			std::optional<SessionAdmission> admission;
-			bool closing, confirmed, active, spawnFailed;
+			for (size_t slot = 0; slot < mailboxes.size(); ++slot)
 			{
-				std::lock_guard lock(mutex);
+				auto &box = mailboxes[slot];
 				if (!box.generation)
 					continue;
-				admission = box.admission;
-				closing = box.closing;
-				confirmed = box.confirmed;
-				active = box.active;
-				spawnFailed = box.spawnFailed;
-				intents = std::exchange(box.intents, {});
-				// Intake for the tick about to run has closed for this slot.
+				if (discardInputs)
+					box.intents.inputs = {};
+				ownerInbox.push_back({slot, box.admission, std::exchange(box.intents, {}),
+					box.closing, box.confirmed, box.active, box.spawnFailed});
 				box.inputClosedThrough = completedTick + 1;
 			}
+		}
+		// Freeze one tick's inbox before resolving joins, departures and
+		// actions. Slot reuse must not decide which actor wins a conflict.
+		for (auto &[slot, admission, intents, closing, confirmed, active, spawnFailed] : ownerInbox)
+		{
+			auto &box = mailboxes[slot];
 			if (closing)
 			{
 				if (admission && admission->player.valid())
@@ -465,15 +472,20 @@ struct ServerTransport::Impl
 				box.active = active;
 				box.spawnFailed = !active;
 			}
-			if (active && (intents.action || std::ranges::any_of(intents.inputs, &InputSample::sequence)))
+		}
+		std::erase_if(ownerInbox, [](const auto &work) {
+			return work.closing || !work.active ||
+				(!work.intents.action && std::ranges::none_of(work.intents.inputs, &InputSample::sequence));
+		});
+		std::ranges::sort(ownerInbox, {}, [](const auto &work) { return work.admission->player.value; });
+		for (const auto &work : ownerInbox)
+		{
+			if (const auto result = owner.receiveRemote(work.admission->player, work.intents))
 			{
-				const auto result = owner.receiveRemote(player, intents);
-				if (result)
-				{
-					std::lock_guard lock(mutex);
-					if (!box.closing)
-						box.result = result;
-				}
+				std::lock_guard lock(mutex);
+				auto &box = mailboxes[work.slot];
+				if (!box.closing)
+					box.result = result;
 			}
 		}
 		// Capture after all activations and retirements at this boundary.
@@ -530,6 +542,7 @@ struct ServerTransport::Impl
 	const wire::Compatibility compatibility{wire::localCompatibility()};
 	std::vector<Peer> peers;
 	std::vector<Mailbox> mailboxes;
+	std::vector<OwnerInbox> ownerInbox;
 	std::array<Discovery, 256> discoveryRates;
 	Traffic globalIn, globalOut;
 	Bucket snapshotCapacity;

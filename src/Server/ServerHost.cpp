@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <numbers>
 #include <thread>
 #include <utility>
 
@@ -37,6 +38,55 @@ bool inInterest(wire::ChunkCoord coord, glm::ivec2 center, int radius)
 uint8_t wireMaterial(uint8_t material)
 {
 	return material == AIR ? wire::kAirMaterial : material;
+}
+
+wire::ActionCode actionCode(sim::VoxelTargetResult result)
+{
+	using Target = sim::VoxelTargetResult;
+	using Code = wire::ActionCode;
+	switch (result)
+	{
+	case Target::Valid: return Code::Accepted;
+	case Target::InvalidTarget: return Code::InvalidTarget;
+	case Target::OutOfReach: return Code::OutOfReach;
+	case Target::TerrainUnavailable: return Code::TerrainUnavailable;
+	case Target::StaleRevision: return Code::StaleRevision;
+	case Target::Occupied: return Code::Occupied;
+	}
+	return Code::Unavailable;
+}
+
+wire::ActionCode actionCode(sim::BreakResult result)
+{
+	using Break = sim::BreakResult;
+	using Code = wire::ActionCode;
+	switch (result)
+	{
+	case Break::Ok: return Code::Accepted;
+	case Break::Unbreakable: return Code::Forbidden;
+	case Break::UnknownTerrain: return Code::TerrainUnavailable;
+	case Break::WorldRejected: return Code::InvalidTarget;
+	case Break::IdExhausted: return Code::Unavailable;
+	case Break::InvalidPlayer: return Code::Forbidden;
+	}
+	return Code::Unavailable;
+}
+
+wire::ActionCode actionCode(sim::PlaceResult result)
+{
+	using Place = sim::PlaceResult;
+	using Code = wire::ActionCode;
+	switch (result)
+	{
+	case Place::Ok: return Code::Accepted;
+	case Place::EmptySlot:
+	case Place::NotPlaceable: return Code::InventoryRejected;
+	case Place::PlayerOverlap:
+	case Place::WorldRejected: return Code::Occupied;
+	case Place::UnknownTerrain: return Code::TerrainUnavailable;
+	case Place::InvalidPlayer: return Code::Forbidden;
+	}
+	return Code::Unavailable;
 }
 } // namespace
 
@@ -88,10 +138,42 @@ std::optional<net::wire::ActionResult> ServerHost::receiveRemote(
 		remote.lastQueuedSequence = sample.sequence;
 		remote.lastQueuedTick = tick;
 	}
-	if (!intents.action)
+	if (!intents.action || intents.action->actionId != remote.nextActionId || !wire::validAction(*intents.action))
 		return std::nullopt;
-	return net::wire::ActionResult{intents.action->actionId, m_ticks, m_sim->world()->nextEditId(),
-		0, intents.action->operation, net::wire::ActionCode::Unavailable};
+	++remote.nextActionId;
+	return applyAction(player, *intents.action);
+}
+
+wire::ActionResult ServerHost::applyAction(sim::PlayerId player, const wire::Action &action)
+{
+	using Kind = wire::ActionKind;
+	using Code = wire::ActionCode;
+	wire::ActionResult result{action.actionId, m_ticks, m_sim->world()->nextEditId(),
+		0, action.operation, Code::Unavailable};
+	if (action.operation != Kind::Break && action.operation != Kind::Place)
+		return result;
+
+	const bool placing = action.operation == Kind::Place;
+	const auto operation = placing ? sim::VoxelInteraction::Place : sim::VoxelInteraction::Break;
+	const glm::ivec3 target{action.target.x, action.target.y, action.target.z};
+	constexpr double radiansPerTurn = 2.0 * std::numbers::pi;
+	const double yaw = action.yawTurns * radiansPerTurn;
+	const double pitch = action.pitchTurns * radiansPerTurn;
+	const glm::dvec3 direction{std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	result.code = actionCode(m_sim->validateVoxelTarget(player, operation, target,
+		{action.expected.generation, action.expected.revision}, direction));
+	if (result.code != Code::Accepted)
+		return result;
+
+	WorldEditResult edit;
+	result.code = placing ? actionCode(m_sim->placeSelectedBlock(player, target, &edit))
+	                      : actionCode(m_sim->breakBlock(player, target, &edit));
+	if (result.code == Code::Accepted)
+	{
+		result.editId = edit.editId;
+		result.nextEditId = m_sim->world()->nextEditId();
+	}
+	return result;
 }
 
 wire::PlayerSnapshot ServerHost::snapshotRemote(sim::PlayerId player) const
