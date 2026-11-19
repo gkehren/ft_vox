@@ -1,5 +1,53 @@
 # Graphical multiplayer smoke
 
+## Terrain and camera correction for #273
+
+Tested client commit `676f9380b1831a45f710b67679eddd0067b976b6`
+on Windows 11 Pro 10.0.26300, with an NVIDIA GeForce RTX 4070 Ti,
+driver 621.24, and Vulkan 1.4.357. The uninstrumented client was built
+with MSVC in Release mode with `FT_VOX_GRAPHICS=ON`. The matching wire-v3
+dedicated server used the Windows MSVC CPU-only Release build. Each
+process used an isolated working directory, and the clients ran with
+`FT_VOX_VALIDATION=1`.
+
+```powershell
+ft_vox_server.exe --world multiplayer-smoke --saves-root server-saves --seed 42 --port 0 --stop-file stop-initial --metrics-every 180
+# Start two clients with the port printed in the server's ready record.
+ft_vox.exe --connect 127.0.0.1:<port> --seed 42
+# Standalone solo run.
+ft_vox.exe --seed 42 --benchmark 5
+```
+
+- Both clients showed the synchronized-terrain waiting state, connected
+  as distinct players in the same epoch, and reached 29 loaded chunks
+  with 16 and 14 draw entries. Both reported `Disconnected` when the
+  server saved and stopped.
+- The restarted server reopened the save and a newly launched client
+  joined a different world epoch. It reached 29 chunks and 14 draw
+  entries, then disconnected when the server stopped. In a separate
+  attempt that stopped the server while baselines were still streaming,
+  the client entered resync before the harness ended.
+- The five-second solo benchmark wrote its report. `EngineReload` and
+  `VisualRegression` passed on the same GPU.
+- Validation reported the known swapchain warnings
+  `VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
+  `VUID-VkImageViewCreateInfo-usage-02275`.
+
+Interactive SDL gameplay remains **unverified**. The Windows input
+helper could not connect to its native pipe after retries and a reset.
+The run covers real Vulkan startup, terrain rendering, server shutdown,
+and fresh-process join after restart. Keyboard movement and yaw, jump and
+sprint, mouse edits during movement, inventory drag/drop, focus and
+capture transitions, boundary walking, menu reconnect, and interactive
+solo play still need a manual pass.
+
+The CPU regressions exercise deferred publication with and without a
+worker lease, support removal and restoration, teleport and epoch reset,
+unrelated edits, sampled obstacles, positive and negative chunk seams,
+unavailable-to-readable backing, and dependency overflow. The existing
+movement profiles still converge to zero position error, and a cold join
+at 150 ms RTT still reaches spawn terrain and inventory in 9.386 seconds.
+
 ## Movement prediction and interpolation for #258
 
 `WorldReplicationClientTick` runs the production UDP client and server
