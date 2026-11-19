@@ -1,3 +1,4 @@
+#include <Network/ClientTransport.hpp>
 #include <Server/ServerHost.hpp>
 #include <Server/TickSchedule.hpp>
 #include <World/WorldCollisionView.hpp>
@@ -144,6 +145,201 @@ void testHost(const fs::path &root)
 	CHECK_EXPR(sample(*server::ServerHostProbe::simulation(recovered).world(), dirty) == AIR);
 	CHECK(recovered.stop(error), error);
 }
+
+void testMovement(const fs::path &root)
+{
+	namespace udp = net::udp;
+	namespace wire = net::wire;
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "movement", .savesRoot = root};
+	config.workers = 0;
+	config.interestRadiusChunks = 2;
+	config.streaming.generations = 0; // preserve an unreadable chunk for the collision check
+	server::ServerHost host(config);
+	std::string error;
+	if (!host.start(error))
+	{
+		CHECK(false, error);
+		return;
+	}
+	auto &sim = server::ServerHostProbe::simulation(host);
+
+	// A flat walking surface and a two-block wall inside the bootstrapped chunk.
+	for (int x = 0; x < 16; ++x)
+		for (int z = 6; z <= 10; ++z)
+			CHECK_EXPR(sim.placeVoxel({x + 0.5f, 230.5f, z + 0.5f}, STONE).accepted);
+	for (float y : {231.5f, 232.5f})
+		CHECK_EXPR(sim.placeVoxel({10.5f, y, 8.5f}, STONE).accepted);
+
+	udp::ServerTransport transport(udp::parseAddress("127.0.0.1", 0), 2, host.sessionWorld());
+	udp::ClientTransport first(transport.address()), second(transport.address());
+	const std::array clients{&first, &second};
+	auto now = udp::ServerTransport::Clock::time_point{};
+	const auto boundary = [&](bool discardInputs = false) {
+		transport.poll(now);
+		transport.serviceOwner(host, host.ticks(), discardInputs);
+		transport.poll(now);
+		for (auto *client : clients)
+			client->poll(now);
+	};
+	for (auto *client : clients)
+	{
+		client->connect(now);
+		client->poll(now);
+	}
+	boundary(); // Welcome, then the clients send confirmation heartbeats.
+	if (!first.welcome() || !second.welcome())
+	{
+		CHECK(false, "movement clients did not join");
+		return;
+	}
+	const std::array players{first.welcome()->player, second.welcome()->player};
+	for (const auto id : players)
+		CHECK_EXPR(!sim.playerPositioned(id));
+	boundary(); // The tick owner now spawns both walking bodies.
+	CHECK_EXPR(first.latestPlayerSnapshot() && first.latestPlayerSnapshot()->count == 2);
+	const auto originalScope = *first.scope();
+
+	std::array<physics::PlayerController, 2> reference;
+	for (size_t i = 0; i < players.size(); ++i)
+	{
+		CHECK_EXPR(sim.playerPositioned(players[i]) && !sim.playerFlight(players[i]));
+		reference[i].reset(sim.playerFeet(players[i]));
+		CHECK_EXPR(reference[i].body.position.x == 8.5 && reference[i].body.position.y > 231.0);
+	}
+
+	const auto sampleFor = [](size_t index, uint64_t tick) -> std::optional<wire::Input> {
+		// Model two consecutive lost samples. No retransmission or held input.
+		if (tick < 3 || tick > 40 || tick == 14 || tick == 15)
+			return std::nullopt;
+		const uint8_t flags = index == 0 ? wire::Input::sprint : (tick == 33 ? wire::Input::jump : 0);
+		return wire::Input{tick, index == 0 ? 1.f : -1.f, 0, flags};
+	};
+	std::array<uint64_t, 2> expectedAck{};
+	bool observedJump = false;
+	const auto stepAgainst = [&](const std::array<physics::PlayerInput, 2> &commands) {
+		{
+			WorldCollisionView world(*sim.world());
+			for (size_t i = 0; i < players.size(); ++i)
+				reference[i].advance(server::kTickDt, commands[i], world);
+		}
+		CHECK(host.step(server::TerrainTiming::QuiescePerTick, error), error);
+		now += 17ms;
+		for (size_t i = 0; i < players.size(); ++i)
+		{
+			sim::PlayerSnapshot actual;
+			CHECK_EXPR(sim.playerSnapshot(players[i], actual));
+			CHECK_EXPR(actual.position == reference[i].body.position && actual.velocity == reference[i].body.velocity);
+			CHECK_EXPR(actual.grounded == reference[i].body.grounded &&
+				actual.waitingForTerrain == reference[i].body.waitingForTerrain);
+			CHECK_EXPR(!actual.flight && actual.metrics.steps == 2 && actual.metrics.droppedSteps == 0);
+			CHECK_EXPR(host.snapshotRemote(players[i]).lastProcessedInput == expectedAck[i]);
+			if (i == 1 && actual.velocity.y > 0)
+				observedJump = true;
+		}
+	};
+	for (uint64_t tick = 1; tick <= 45; ++tick)
+	{
+		std::array<physics::PlayerInput, 2> commands{};
+		for (size_t i = 0; i < players.size(); ++i)
+		{
+			if (const auto future = sampleFor(i, tick + 2))
+				CHECK_EXPR(clients[i]->sendInput(*future, now));
+			if (const auto current = sampleFor(i, tick))
+			{
+				commands[i].move = {current->moveX, 0};
+				commands[i].sprint = i == 0;
+				commands[i].jumpPressed = i == 1 && tick == 33;
+				expectedAck[i] = expectedAck[i] == 0 ? 2 : expectedAck[i] + 1; // heartbeat is sequence 1
+			}
+		}
+		boundary();
+		stepAgainst(commands);
+	}
+	boundary();
+	CHECK_EXPR(observedJump);
+	CHECK_EXPR(sim.playerFeet(players[0]).x > 9.5 && sim.playerFeet(players[0]).x < 10.0);
+	CHECK_EXPR(sim.playerFeet(players[1]).x < 7.5);
+	CHECK_EXPR(first.scope() == originalScope && first.latestPlayerSnapshot() == host.snapshotRemote(players[0]));
+	CHECK_EXPR(second.latestPlayerSnapshot() == host.snapshotRemote(players[1]));
+	if (const auto latest = first.latestPlayerSnapshot())
+	{
+		CHECK_EXPR(latest->players[0].player == players[0] && latest->players[1].player == players[1]);
+		CHECK_EXPR((latest->players[0].flags & wire::PlayerState::grounded) != 0);
+		CHECK_EXPR((latest->players[0].flags & wire::PlayerState::flight) == 0);
+	}
+
+	// Queue a future jump in the host and another in the IO mailbox. The
+	// scheduler's stall reset discards both and resumes with two idle steps.
+	CHECK_EXPR(first.sendInput({host.ticks() + 3, -1, 0, wire::Input::jump}, now));
+	boundary();
+	CHECK_EXPR(first.sendInput({host.ticks() + 4, -1, 0, wire::Input::jump}, now));
+	transport.poll(now);
+	now += 500ms;
+	host.suspendPlayerInput();
+	for (auto &controller : reference)
+		controller.suspend();
+	boundary(true);
+	for (uint64_t i = 0; i < udp::kInputLeadTicks; ++i)
+	{
+		stepAgainst({});
+		boundary();
+	}
+
+	CHECK_EXPR(first.sendInput({host.ticks() + 3, -1, 0, wire::Input::jump}, now));
+	boundary();
+	first.disconnect(now);
+	first.poll(now);
+	boundary();
+	CHECK_EXPR(!sim.hasPlayer(players[0]) && !first.latestPlayerSnapshot());
+	first.connect(now);
+	first.poll(now);
+	boundary();
+	boundary();
+	CHECK_EXPR(first.welcome() && first.welcome()->player != players[0]);
+	CHECK_EXPR(first.scope() && first.scope()->epoch == originalScope.epoch && *first.scope() != originalScope);
+	CHECK_EXPR(first.latestPlayerSnapshot() && first.latestPlayerSnapshot()->lastProcessedInput == 0);
+
+	// An active player in an unloaded chunk stays put and publishes the
+	// existing unknown-terrain state. The spawn-area peer cannot see them.
+	const glm::dvec3 unknownFeet{100.5, 231.0, 8.5};
+	sim.setPlayerPosition(players[1], unknownFeet);
+	CHECK(host.step(server::TerrainTiming::QuiescePerTick, error), error);
+	const auto waiting = host.snapshotRemote(players[1]);
+	CHECK_EXPR(waiting.count == 1 && waiting.players[0].player == players[1]);
+	CHECK_EXPR((waiting.players[0].flags & wire::PlayerState::waitingForTerrain) != 0);
+	CHECK_EXPR(sim.playerFeet(players[1]) == unknownFeet);
+
+	transport.stop(host);
+	CHECK_EXPR(sim.playerCount() == 1);
+
+	// A crowded snapshot reserves room for its owner even when their ID
+	// sorts after every other eligible player.
+	std::array<sim::PlayerId, wire::kMaxPlayersPerSnapshot + 2> crowd;
+	for (auto &id : crowd)
+	{
+		id = host.joinRemote().player;
+		CHECK_EXPR(id.valid() && host.activateRemote(id));
+	}
+	const auto capped = host.snapshotRemote(crowd.back());
+	CHECK_EXPR(capped.count == wire::kMaxPlayersPerSnapshot);
+	CHECK_EXPR(capped.players[wire::kMaxPlayersPerSnapshot - 1].player == crowd.back());
+	for (size_t i = 0; i + 1 < capped.count; ++i)
+		CHECK_EXPR(capped.players[i].player == crowd[i]);
+
+	CHECK_EXPR(sim.placeVoxel({8.5f, 232.5f, 8.5f}, STONE).accepted);
+	CHECK_EXPR(sim.breakBlock(crowd.front(), {8, 232, 8}) == sim::BreakResult::Ok);
+	for (int i = 0; i < 40; ++i)
+		CHECK(host.step(server::TerrainTiming::QuiescePerTick, error), error);
+	const auto &items = sim.itemEntities().entities();
+	CHECK_EXPR(items.size() == 1);
+	if (!items.empty())
+		CHECK_EXPR(items.front().pickupDelay == 0 &&
+			glm::length(items.front().body.position - sim.playerFeet(crowd.front())) < 1.5);
+	for (const auto id : crowd)
+		host.leaveRemote(id);
+	CHECK(host.stop(error), error);
+}
 } // namespace
 
 int main()
@@ -152,6 +348,7 @@ int main()
 	const auto temp = fs::temp_directory_path() /
 		("ft_vox_server_host_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 	testHost(temp);
+	testMovement(temp);
 	std::error_code error;
 	fs::remove_all(temp, error);
 	CHECK_EXPR(!error);

@@ -5,8 +5,8 @@ The `ft_vox_wire` library implements framing, payload validation, receive
 sequencing and chunk assembly. The dedicated server uses it through the
 bounded v2 UDP transport added in #252. The
 [dedicated server guide](../dedicated-server.md#udp-sessions) describes the
-active queues and session lifetimes. Replication producers and consumers
-follow in Phase C. The Boost UDP prototype remains isolated in
+active queues and session lifetimes. Phase C1 (#253) implements Input and
+PlayerSnapshot on this framing. The Boost UDP prototype remains isolated in
 `test_network` and uses its original v1 framing.
 
 ## Framing
@@ -185,7 +185,8 @@ either counter.
 
 Bound the reliable retransmission queue at 64 encoded datagrams per direction
 (`76,800` frame bytes). Keep at most 64 received reliable frames awaiting the
-owner per peer and at most one pending fresh sample per peer. When admission
+owner per peer. The active server uses one reliable stop-and-wait slot, one
+latest outbound snapshot, and six uniquely timed inbound input slots per peer. When admission
 fails due to capacity, leave the reliable ACK unchanged. Throttle baseline
 production and bound the per-peer delta backlog at 64 pending messages. If
 it overflows or cannot make progress, abandon the projection and resync
@@ -196,8 +197,14 @@ instead of dropping an edit from an apparently complete ordered stream.
 **Input** carries `intendedTick:u64, moveX:f32, moveZ:f32, flags:u8`.
 Movement is in world X/Z with squared length at most 1 as calculated in
 binary64. Flags bits 0–3 are sprint, jump edge, swim up and swim down.
-The session layer owns input age and lead limits. The sim owner validates
-and maps input into fixed steps and never applies the same jump edge twice.
+The scope selects the server-assigned player, so the payload carries no
+actor ID. If the last completed host tick is `t`, admissible intended ticks
+are `t+1` through `t+6` until their inbox closes at the owner drain.
+The transport rejects regressions in intended tick before advancing the
+fresh cursor. A newer sequence for the same pending tick replaces the old
+sample. Each intended tick receives one sample or neutral controls, and the
+owner passes each consumed jump edge to the controller once. Rate excess,
+late packets and packets beyond the lead window are dropped.
 
 **PlayerSnapshot** carries `tick:u64, lastProcessedInput:u64, count:u8`
 followed by 1–24 records. Each record is `playerId:u32, feetX:f64, feetY:f64,
@@ -207,7 +214,11 @@ up to 23 interested remote players. Feet lie in `[-2^23,2^23)` and each
 velocity component lies in `[-1024,1024]`. Flag bits 0–2 are grounded,
 waiting for terrain and flight. `lastProcessedInput` is the owner's fresh
 Input sequence consumed by the simulation, with zero meaning none. It is
-independent of reliable ACKs and heartbeat sequences.
+independent of reliable ACKs. Heartbeats share the fresh lane but do not
+count as processed inputs. Snapshots carry the wire epoch in the header
+and are produced every three completed ticks. The owner is always included,
+and eligible neighbors are selected in ascending ID order from the remote
+players within the configured chunk-radius disk.
 
 **Action** carries `actionId:u64, operation:u8, slot:u8, otherSlot:u8,
 cell, generation:u64, revision:u64, yawTurns:f32, pitchTurns:f32`.

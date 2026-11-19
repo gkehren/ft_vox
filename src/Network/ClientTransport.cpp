@@ -22,6 +22,7 @@ struct ClientTransport::Impl
 		status = next;
 		link.reset();
 		welcome.reset();
+		playerSnapshot.reset();
 	}
 
 	Sender sender()
@@ -64,12 +65,19 @@ struct ClientTransport::Impl
 			return;
 		}
 		const auto kind = kindOf(packet);
-		if (kind != wire::Kind::Heartbeat && kind != wire::Kind::Disconnect && kind != wire::Kind::Resync)
+		const auto *players = std::get_if<wire::PlayerSnapshot>(&packet.payload);
+		if (players && (players->tick < welcome->tick || (playerSnapshot && players->tick <= playerSnapshot->tick) ||
+		                std::ranges::none_of(std::span(players->players).first(players->count),
+		                     [this](const auto &player) { return player.player == welcome->player; })))
+			return;
+		if (!players && kind != wire::Kind::Heartbeat && kind != wire::Kind::Disconnect && kind != wire::Kind::Resync)
 			return;
 		if (link->incoming.admit(packet) != wire::ReceiveStatus::Accepted)
 			return;
 		link->lastReceived = now;
-		if (kind == wire::Kind::Heartbeat)
+		if (players)
+			playerSnapshot = *players;
+		else if (kind == wire::Kind::Heartbeat)
 			++heartbeats;
 		else
 		{
@@ -98,6 +106,7 @@ struct ClientTransport::Impl
 	ClientStatus status{ClientStatus::Disconnected};
 	std::optional<Link> link;
 	std::optional<wire::Welcome> welcome;
+	std::optional<wire::PlayerSnapshot> playerSnapshot;
 	std::optional<wire::RejectReason> rejection;
 	Rate inbound, outbound;
 	Traffic globalOut;
@@ -134,11 +143,18 @@ void ClientTransport::disconnect(Clock::time_point now)
 }
 
 ClientStatus ClientTransport::status() const { return m_impl->status; }
+bool ClientTransport::sendInput(const wire::Input &input, Clock::time_point now)
+{
+	return m_impl->status == ClientStatus::Connected && wire::validInput(input) &&
+		m_impl->link->sendFresh(m_impl->sender(), now, input);
+}
+
 std::optional<wire::Welcome> ClientTransport::welcome() const { return m_impl->welcome; }
 std::optional<wire::SessionScope> ClientTransport::scope() const
 {
 	return m_impl->link ? std::optional{m_impl->link->scope} : std::nullopt;
 }
+std::optional<wire::PlayerSnapshot> ClientTransport::latestPlayerSnapshot() const { return m_impl->playerSnapshot; }
 std::optional<wire::RejectReason> ClientTransport::rejection() const { return m_impl->rejection; }
 uint64_t ClientTransport::heartbeatsReceived() const { return m_impl->heartbeats; }
 

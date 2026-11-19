@@ -4,6 +4,7 @@
 #include <Network/ServerTransport.hpp>
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -56,20 +57,32 @@ public:
 	bool restoredPlayer() const { return m_restoredPlayer; }
 	net::udp::SessionWorld sessionWorld() const;
 	net::udp::SessionAdmission joinRemote() override;
+	bool activateRemote(sim::PlayerId player) override;
 	void leaveRemote(sim::PlayerId player) override;
 	std::optional<net::wire::ActionResult> receiveRemote(
 		sim::PlayerId player, const net::udp::SessionIntents &intents) override;
+	net::wire::PlayerSnapshot snapshotRemote(sim::PlayerId player) const override;
+	void suspendPlayerInput();
 
 private:
 	friend struct ServerHostProbe;
 
 	bool quiesce(std::string &error);
 	bool save(std::string &error);
+	void advancePlayers();
+
+	struct RemotePlayer
+	{
+		net::udp::InputQueue inputs{};
+		uint64_t lastQueuedSequence{}, lastQueuedTick{}, lastProcessedInput{};
+	};
 
 	HostConfig m_config;
 	// Destruction is reversed: drain and destroy the world before its pool.
 	std::unique_ptr<ThreadPool> m_workers;
 	std::unique_ptr<sim::GameSimulation> m_sim;
+	std::map<sim::PlayerId, RemotePlayer> m_remotePlayers;
+	glm::dvec3 m_spawnCenter{};
 	std::vector<WorldEvent> m_worldEvents;
 	std::vector<items::ItemEntityEvent> m_itemEvents;
 	HostMetrics m_finalMetrics;

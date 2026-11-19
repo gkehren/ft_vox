@@ -131,6 +131,15 @@ struct Link
 			ack = false;
 	}
 
+	bool sendFresh(Sender sender, Time now, wire::Payload payload)
+	{
+		if (freshSent == wire::kMaxSequence || !sender.send(now, {scope, freshSent + 1, std::move(payload)}))
+			return false;
+		++freshSent;
+		nextHeartbeat = now + kHeartbeatInterval;
+		return true;
+	}
+
 	void flush(Sender sender, Time now)
 	{
 		flushAck(sender, now);
@@ -140,12 +149,8 @@ struct Link
 			pending->retry = now + kReliableRetry;
 			nextHeartbeat = now + kHeartbeatInterval;
 		}
-		if (now >= nextHeartbeat && freshSent < wire::kMaxSequence &&
-		    sender.send(now, {scope, freshSent + 1, wire::Heartbeat{}}))
-		{
-			++freshSent;
-			nextHeartbeat = now + kHeartbeatInterval;
-		}
+		if (now >= nextHeartbeat)
+			sendFresh(sender, now, wire::Heartbeat{});
 	}
 
 	bool expired(Time now) const

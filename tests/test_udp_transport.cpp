@@ -36,11 +36,21 @@ struct Owner : udp::SessionOwner
 		require(players.erase(player) == 1, "removed wrong player");
 	}
 
+	bool activateRemote(sim::PlayerId player) override { return players.contains(player); }
+
+	wire::PlayerSnapshot snapshotRemote(sim::PlayerId player) const override
+	{
+		wire::PlayerSnapshot snapshot{.tick = ticks, .count = 1};
+		snapshot.players[0].player = player;
+		return snapshot;
+	}
+
 	std::optional<wire::ActionResult> receiveRemote(sim::PlayerId player, const udp::SessionIntents &work) override
 	{
 		auto &count = players.at(player);
-		if (work.input)
-			inputTick = work.input->intendedTick;
+		lastInputs = work.inputs;
+		for (const auto &sample : work.inputs)
+			inputSequence = std::max(inputSequence, sample.sequence);
 		if (!work.action)
 			return std::nullopt;
 		++count;
@@ -49,8 +59,9 @@ struct Owner : udp::SessionOwner
 	}
 
 	std::map<sim::PlayerId, unsigned> players;
+	udp::InputQueue lastInputs{};
 	uint32_t nextPlayer{2};
-	uint64_t inputTick{}, ticks{};
+	uint64_t inputSequence{}, ticks{};
 };
 
 struct Loop
@@ -62,7 +73,7 @@ struct Loop
 		now += elapsed;
 		server.poll(now);
 		owner.ticks++;
-		server.serviceOwner(owner);
+		server.serviceOwner(owner, owner.ticks);
 		server.poll(now);
 	}
 
@@ -198,15 +209,16 @@ void testAdmission()
 	require(client.send(address, oversized), "send oversized frame");
 	require(client.send(address, valid.view().first(valid.view().size() - 1)), "send truncated frame");
 	loop.step();
-	require(loop.owner.players.at(player) == 0 && loop.owner.inputTick == 0, "invalid frame reached simulation owner");
+	require(loop.owner.players.at(player) == 0 && loop.owner.inputSequence == 0,
+		"invalid frame reached simulation owner");
 
 	send(client, address, {scope, 1, wire::Heartbeat{}});
 	for (uint64_t sequence = 2; sequence < 102; ++sequence)
-		send(client, address, {scope, sequence, wire::Input{sequence, 0, 0, 0}});
+		send(client, address, {scope, sequence, wire::Input{loop.owner.ticks + 2, 0, 0, 0}});
 	loop.step();
-	require(loop.owner.inputTick == 9, "input burst exceeded per-family budget or failed to coalesce");
+	require(loop.owner.inputSequence == 9, "input burst exceeded per-family budget or failed to coalesce");
 	loop.step(1s);
-	send(client, address, {scope, 4, wire::Input{99, 0, 0, 0}});
+	send(client, address, {scope, 4, wire::Input{loop.owner.ticks + 2, 0, 0, 0}});
 	send(client, address, {scope, 1, action});
 	send(client, address, {scope, 1, action});
 	auto secondAction = action;
@@ -216,7 +228,7 @@ void testAdmission()
 	const auto result = receive(client, wire::Kind::ActionResult);
 	require(result && result->sequence == 1 && result->scope == scope &&
 		std::get<wire::ActionResult>(result->payload).code == wire::ActionCode::Unavailable &&
-		loop.owner.players.at(player) == 1 && loop.owner.inputTick == 9, "replay, gap or backpressure failure");
+		loop.owner.players.at(player) == 1 && loop.owner.inputSequence == 9, "replay, gap or backpressure failure");
 	loop.step(200ms);
 	require(receive(client, wire::Kind::ActionResult) == result, "unacknowledged result must retry unchanged");
 	send(client, address, {scope, 0, wire::Ack{2}}); // acknowledges unsent data
@@ -272,20 +284,100 @@ void testThreadedShutdown()
 	auto now = Clock::now();
 	client.connect(now);
 	const auto deadline = now + 3s;
-	while (!client.heartbeatsReceived() && now < deadline)
+	bool sentInput = false;
+	while ((!client.latestPlayerSnapshot() || !owner.inputSequence) && now < deadline)
 	{
 		server.rethrowIoError();
-		server.serviceOwner(owner);
+		server.serviceOwner(owner, owner.ticks);
 		client.poll(now);
+		if (!sentInput && client.status() == udp::ClientStatus::Connected)
+			sentInput = client.sendInput({owner.ticks + 3, 1, 0, 0}, now);
 		std::this_thread::sleep_for(1ms);
 		now = Clock::now();
 	}
-	require(client.heartbeatsReceived() && owner.players.size() == 1, "threaded join/heartbeat timed out");
+	require(client.latestPlayerSnapshot() && owner.inputSequence != 0 && owner.players.size() == 1,
+		"threaded input/snapshot handoff timed out");
 	server.stop(owner);
 	server.rethrowIoError();
 	client.poll(Clock::now());
 	require(owner.players.empty() && client.status() == udp::ClientStatus::Disconnected,
 		"threaded shutdown failed to send final control or retire players");
+}
+
+void testMovementAdmission()
+{
+	Loop loop(1);
+	const auto address = loop.server.address();
+	udp::Socket client(loopback);
+	const auto hello = [](uint64_t nonce) {
+		return wire::Packet{{}, 0, wire::Hello{nonce, wire::kVersion, wire::kVersion, wire::localCompatibility()}};
+	};
+	send(client, address, hello(11));
+	loop.step();
+	const auto joined = receive(client, wire::Kind::Welcome);
+	require(joined.has_value(), "movement test welcome missing");
+	const auto scope = joined->scope;
+	const uint64_t tick = loop.owner.ticks + 2;
+
+	wire::Datagram valid;
+	require(wire::encode(wire::Endpoint::Client, {scope, 900, wire::Input{tick, 0, 0, 0}}, valid) ==
+		wire::CodecStatus::Ok, "could not encode malformed-input fixture");
+	std::array<uint8_t, 53> invalid;
+	std::ranges::copy(valid.view(), invalid.begin());
+	invalid.back() = 0x10; // No flight or admin flag.
+	require(client.send(address, invalid), "send invalid flag");
+	invalid.back() = 0;
+	invalid[wire::kHeaderBytes + 8] = 0x7f;
+	invalid[wire::kHeaderBytes + 9] = 0x80; // +Inf
+	require(client.send(address, invalid), "send infinity");
+	invalid[wire::kHeaderBytes + 9] = 0xc0; // NaN
+	require(client.send(address, invalid), "send NaN");
+	invalid[wire::kHeaderBytes + 8] = 0x40; // 2.0
+	invalid[wire::kHeaderBytes + 9] = 0;
+	require(client.send(address, invalid), "send unbounded axis");
+	std::array<uint8_t, 65> coordinates{};
+	std::ranges::copy(valid.view(), coordinates.begin());
+	coordinates[9] += 12; // Extra client-supplied coordinates have no wire field.
+	require(client.send(address, coordinates), "send appended position");
+	std::ranges::copy(valid.view(), invalid.begin());
+	invalid[6] = static_cast<uint8_t>(wire::Kind::PlayerSnapshot);
+	require(client.send(address, invalid), "send client-authored snapshot");
+
+	send(client, address, {{scope.sessionId, scope.epoch == 1 ? 2u : 1u}, 900, wire::Input{tick, 1, 0, 0}});
+	send(client, address, {scope, 900, wire::Input{loop.owner.ticks, 1, 0, 0}});
+	send(client, address, {scope, 900, wire::Input{loop.owner.ticks + 1, 1, 0, 0}}); // inbox closed
+	send(client, address, {scope, 900, wire::Input{UINT64_MAX, 1, 0, 0}});
+	loop.step();
+	require(loop.owner.inputSequence == 0, "invalid motion reached the owner");
+
+	const uint64_t next = loop.owner.ticks + 2;
+	loop.now += 200ms; // Refill the input bucket after the timing refusals.
+	send(client, address, {scope, 1, wire::Input{next, 1, 0, 0}});
+	send(client, address, {scope, 3, wire::Input{next + 1, 0, 1, 0}});
+	send(client, address, {scope, 2, wire::Input{next + 1, -1, 0, 0}}); // reordered
+	send(client, address, {scope, 999, wire::Input{next, -1, 0, 0}}); // regresses intended tick
+	send(client, address, {scope, 3, wire::Input{next + 1, -1, 0, 0}}); // duplicate
+	loop.step();
+	const auto &early = loop.owner.lastInputs[next % udp::kInputLeadTicks];
+	const auto &late = loop.owner.lastInputs[(next + 1) % udp::kInputLeadTicks];
+	require(early.sequence == 1 && early.input.moveX == 1 &&
+		late.sequence == 3 && late.input.moveZ == 1 && loop.owner.inputSequence == 3,
+		"distinct input ticks or replay ordering were lost");
+
+	send(client, address, {scope, 1, wire::Disconnect{wire::DisconnectReason::Leaving}});
+	loop.step(600ms);
+	send(client, address, hello(12));
+	loop.step();
+	const auto rejoined = receive(client, wire::Kind::Welcome);
+	require(rejoined && rejoined->scope != scope, "movement rejoin missing");
+	const uint64_t target = loop.owner.ticks + 2;
+	send(client, address, {scope, 999, wire::Input{target, 1, 0, 0}}); // old capability
+	send(client, address, {rejoined->scope, 1, wire::Input{target, -1, 0, 0}});
+	loop.step();
+	const auto &fresh = loop.owner.lastInputs[target % udp::kInputLeadTicks];
+	require(fresh.sequence == 1 && fresh.input.moveX == -1 && loop.owner.inputSequence == 3,
+		"old generation drove the replacement session");
+	loop.server.stop(loop.owner);
 }
 } // namespace
 
@@ -295,6 +387,7 @@ int main()
 	{
 		testLifecycle();
 		testAdmission();
+		testMovementAdmission();
 		testThreadedShutdown();
 	}
 	catch (const std::exception &error)

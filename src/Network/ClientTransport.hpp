@@ -20,10 +20,15 @@ public:
 	void connect(Clock::time_point now);
 	void poll(Clock::time_point now);
 	void disconnect(Clock::time_point now);
+	// Sends one fresh input sample while connected. False means no datagram
+	// was sent (invalid payload, rate limit, or socket backpressure).
+	bool sendInput(const wire::Input &input, Clock::time_point now);
 
 	ClientStatus status() const;
 	std::optional<wire::Welcome> welcome() const;
 	std::optional<wire::SessionScope> scope() const;
+	// Latest authoritative state for the current scope. Cleared on departure.
+	std::optional<wire::PlayerSnapshot> latestPlayerSnapshot() const;
 	std::optional<wire::RejectReason> rejection() const;
 	uint64_t heartbeatsReceived() const;
 

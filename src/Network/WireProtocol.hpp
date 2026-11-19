@@ -115,19 +115,21 @@ struct Reject
 // Negotiation on a syntactically valid Hello. An empty result selects v2.
 std::optional<RejectReason> rejectHello(const Hello &hello, Compatibility local) noexcept;
 
-// Input flags: sprint, jump edge, swim up, swim down (bits 0..3).
 struct Input
 {
     static constexpr Kind kind = Kind::Input;
+    static constexpr uint8_t sprint = 1, jump = 2, swimUp = 4, swimDown = 8;
     uint64_t intendedTick{};
     float moveX{}, moveZ{};
     uint8_t flags{};
     bool operator==(const Input &) const = default;
 };
 
-// Player flags: grounded, waiting for terrain, flight (bits 0..2).
+bool validInput(const Input &input) noexcept;
+
 struct PlayerState
 {
+    static constexpr uint8_t grounded = 1, waitingForTerrain = 2, flight = 4;
     sim::PlayerId player;
     std::array<double, 3> feet{};
     std::array<float, 3> velocity{};
