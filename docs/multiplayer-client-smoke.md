@@ -20,7 +20,9 @@ ft_vox.exe --connect 127.0.0.1:7777
 
 Both uninstrumented clients reported **Connected** with different player
 IDs in the same server epoch. Each reached 29 loaded chunks and a
-nonempty draw list. The logs reported the known swapchain validation
+nonempty draw list. A separate normal solo launch with `ft_vox.exe --seed 42`
+also rendered terrain, and `EngineReload` and `VisualRegression` passed
+on this build. The two networked windows reported the known swapchain validation
 warnings `VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
 `VUID-VkImageViewCreateInfo-usage-02275`. See the
 [Vulkan validation guide](vulkan-validation.md).
