@@ -28,10 +28,16 @@
 //   placeSelected <x> <y> <z>         gameplay place-from-hotbar (consumes 1)
 //   interest <x> <y> <z>              pin the headless interest probe
 //   interest follow                   interest follows the player again
+//   interest radius <chunks>          set the selected player's radius
+//   player create|select <id>|remove <id>   control the multiplayer sessions
 //   save                              durable player-state capture + flush
 //   expect voxel <x> <y> <z> <block|air|unknown>   immediate assertion
 //   expect inventory <slot> <item|empty> <count>   immediate assertion (slot 0..35)
 //   expect items <n>                  immediate live-entity-count assertion
+//   expect item <id> <item> <count>    immediate shared item assertion
+//   expect result <name>              check the last command result
+//   expect revision <next-edit-id>    check the next logical edit id
+//   expect pending on|off             check for deferred logical edits
 //   expect digest <hex>               final-digest assertion (checked at end)
 //
 // <block> is a SINGLE token: a TextureType name with underscores
@@ -53,6 +59,7 @@
 #include <glm/glm.hpp>
 
 #include <Items/ItemTypes.hpp>
+#include <Sim/PlayerId.hpp>
 #include <utils.hpp>
 
 namespace headless
@@ -76,10 +83,18 @@ enum class ScriptOp
 	PlaceSelected,
 	Interest,
 	InterestFollow,
+	InterestRadius,
+	CreatePlayer,
+	SelectPlayer,
+	RemovePlayer,
 	Save,
 	ExpectVoxel,
 	ExpectInventory,
 	ExpectItems,
+	ExpectItem,
+	ExpectResult,
+	ExpectRevision,
+	ExpectPending,
 	ExpectDigest
 };
 
@@ -91,6 +106,7 @@ inline constexpr int kExpectUnknown = -2;
 struct ScriptAction
 {
 	ScriptOp op{ScriptOp::Wait};
+	std::string name;		   // normalized action name for traces
 	int frames{0};			   // Wait
 	glm::dvec2 move{0.0};	   // Move
 	bool enabled{false};	   // Sprint / Flight
@@ -104,6 +120,10 @@ struct ScriptAction
 	bool expectEmpty{false};   // ExpectInventory: slot must be empty (count 0)
 	int expectedItems{0};	   // ExpectItems: live entity count
 	int expectedVoxel{0};	   // ExpectVoxel: ordinal or kExpectUnknown
+	sim::PlayerId player;	   // SelectPlayer / RemovePlayer
+	int radiusChunks{0};	   // InterestRadius
+	uint64_t expectedNumber{0}; // ExpectItem id / ExpectRevision
+	std::string expectedResult;
 	std::string expectedDigest; // ExpectDigest: lowercase hex, no 0x
 	int line{0};			   // source line (diagnostics)
 };
@@ -111,6 +131,7 @@ struct ScriptAction
 struct SimScript
 {
 	std::vector<ScriptAction> actions;
+	bool multiplayer{false};
 	// 64-bit: each `wait` is capped at kMaxWaitFrames, but a long script's
 	// SUM must not overflow before the runner's > --ticks check (issue #210
 	// review).

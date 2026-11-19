@@ -12,7 +12,7 @@
 // entity-id allocator high-water. Never raw pointers, unordered iteration
 // order, struct padding or derived/GPU state.
 //
-// Canonical byte stream (FNV-1a 64-bit; every integer little-endian fixed
+// Solo canonical byte stream (FNV-1a 64-bit; every integer little-endian fixed
 // width, every double the IEEE-754 binary64 bit pattern, little-endian):
 //   1. magic "FTVHDIG2"                       (8 bytes, format version)
 //   2. seed i32, generatorVersion u32, ticks u64, frameDt f64
@@ -35,10 +35,12 @@
 //      while keeping any gameplay-visible difference distinct.
 //  10. entity-id allocator high-water u64 (ids are never reused, #226/#228)
 //
-// FORMAT VERSION: "FTVHDIG1" -> "FTVHDIG2" (issue #230) — the gameplay fields
-// (8..10) were appended DELIBERATELY; digests recorded before the bump are
-// not comparable. No expected digest is hardcoded in tests/fixtures (they are
-// computed at runtime), so the bump needed no fixture rewrite.
+// Multiplayer FTVHDIG3 (issue #249) uses the same shared fields in order.
+// Section 5 becomes a u64 player count, then each active player in ascending
+// PlayerId order: id u32, positioned u8, the section 5 body and section 8
+// inventory. Section 8 is omitted from its old position. After section 10
+// comes a u64 resident chunk count, then x i32, z i32, readable u8 per chunk
+// sorted by (x,z). Solo runs retain the exact FTVHDIG2 byte stream.
 //
 // Determinism scope: identical on repeated runs of the SAME binary on the
 // same platform. Cross-platform / cross-compiler bit-identity is NOT promised
@@ -92,7 +94,7 @@ private:
 /// occupancy is the durable authoritative content. `ticks` and
 /// `committedEdits` are the runner's plain counters.
 CanonicalHash computeStateDigest(const sim::GameSimulation &sim, const DigestArea &area,
-								 uint64_t ticks, uint64_t committedEdits);
+								 uint64_t ticks, uint64_t committedEdits, bool multiplayer);
 
 /// Default observed area: the 32x32 column block (chunks cx-1..cx, cz-1..cz)
 /// around the bootstrap chunk, full world height.

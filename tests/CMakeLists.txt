@@ -1444,12 +1444,16 @@ add_test(NAME HeadlessRunner
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_headless_runner.py
         --runner $<TARGET_FILE:ft_vox_headless>
         --fixtures ${CMAKE_SOURCE_DIR}/tests/fixtures)
+add_test(NAME HeadlessMultiplayer
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_headless_multiplayer.py
+        --runner $<TARGET_FILE:ft_vox_headless>
+        --fixtures ${CMAKE_SOURCE_DIR}/tests/fixtures)
 # This driver runs many headless processes sequentially. CTest's per-test
 # TIMEOUT takes precedence over the workflow's default timeout.
 if(FT_VOX_SANITIZERS)
-    set_tests_properties(HeadlessRunner PROPERTIES TIMEOUT 1800)
+    set_tests_properties(HeadlessRunner HeadlessMultiplayer PROPERTIES TIMEOUT 1800)
 else()
-    set_tests_properties(HeadlessRunner PROPERTIES TIMEOUT 600)
+    set_tests_properties(HeadlessRunner HeadlessMultiplayer PROPERTIES TIMEOUT 600)
 endif()
 
 # Dependency guard: the runner's include closure must stay render-free, its

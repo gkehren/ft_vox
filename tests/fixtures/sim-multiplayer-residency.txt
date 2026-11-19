@@ -1,0 +1,47 @@
+# Local and remote disks are disjoint. ID 1's disk settles first.
+interest radius 1
+flight on
+teleport 8.5 221.5 8.5
+give Glass 3
+wait 1
+player create
+interest radius 2
+flight on
+teleport 520.5 225 8.5
+give Dirt 4
+wait 1
+expect voxel 8 220 8 air
+expect voxel 520 250 8 air
+
+# The ninth remote chunk is registered and awaits generation. Its edge
+# edit is accepted and must be captured by save while it is still deferred.
+expect voxel 528 250 16 unknown
+place 528 250 16 Glass
+expect result Ok
+expect revision 2
+expect pending on
+drop 2
+expect item 1 Dirt 2
+save
+expect result Ok
+expect pending on
+wait 1
+expect pending off
+expect voxel 528 250 16 Glass
+
+# Disconnect drops remote residency, while the shared edit and item survive.
+player remove 2
+wait 2
+expect voxel 528 250 16 unknown
+expect voxel 8 220 8 air
+expect inventory 0 Glass 3
+expect item 1 Dirt 2
+
+player create
+interest radius 2
+flight on
+teleport 520.5 225 8.5
+wait 2
+expect voxel 528 250 16 Glass
+expect inventory 0 empty 0
+expect item 1 Dirt 2

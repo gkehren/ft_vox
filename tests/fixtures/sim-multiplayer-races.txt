@@ -1,0 +1,73 @@
+# Two live actors, deterministic action order within a frame.
+interest radius 1
+flight on
+teleport 8.5 221.5 8.5
+give Cobblestone 3
+player create
+interest radius 1
+flight on
+teleport 8.5 221.5 8.5
+give Cobblestone 3
+wait 4
+
+# ID 2 wins the placement. The losing actor keeps all three items.
+placeSelected 8 220 8
+expect result Ok
+expect revision 2
+expect inventory 0 Cobblestone 2
+player select 1
+placeSelected 8 220 8
+expect result WorldRejected
+expect revision 2
+expect inventory 0 Cobblestone 3
+expect voxel 8 220 8 Cobblestone
+
+# ID 2 also wins the break, but both actors can pick up the drop.
+# Ascending PlayerId gives the shared drop to ID 1.
+player select 2
+break 8 220 8
+expect result Ok
+expect item 1 Cobblestone 1
+player select 1
+break 8 220 8
+expect result WorldRejected
+expect revision 3
+expect voxel 8 220 8 air
+expect items 1
+wait 40
+expect items 0
+expect inventory 0 Cobblestone 4
+
+# Two drops from the same slot create just one entity. Six cobblestone
+# are still accounted for: four in inventories and two in the world.
+player select 2
+expect inventory 0 Cobblestone 2
+drop 2
+expect result Ok
+drop 2
+expect result EmptyStack
+expect inventory 0 empty 0
+expect items 1
+expect item 2 Cobblestone 2
+
+# Retiring ID 2 discards its private inventory, selection and commands.
+# ID 3 joins fresh. Only ID 1 gets horizontal walking input after rejoin.
+give Dirt 1
+select 5
+move -1 0
+jump
+player remove 2
+expect inventory 0 Cobblestone 4
+teleport 8.5 225 8.5
+flight off
+expect result Ok
+move 1 0
+sprint on
+player create
+expect inventory 0 empty 0
+expect inventory 5 empty 0
+interest radius 1
+teleport 12.5 225 8.5
+wait 5
+expect items 1
+expect item 2 Cobblestone 2

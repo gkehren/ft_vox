@@ -21,10 +21,10 @@
 //   8. advanceItems(dt, suspended=false)   (issue #230: dropped-item tick rule)
 //   9. sim.pumpWorld()
 //
-// Residency is controlled by the EXPLICIT headless interest source (a plain
-// point + radius in blocks), never a Camera or GPU render distance. Budgets
-// are fixed per-frame counts — never wall-clock derived — so the workload is
-// reproducible. With workers > 0 every dispatched generation job is
+// Solo residency uses a plain point and radius in blocks. Multiplayer
+// replaces steps 1–5 with ID-ordered actor inputs and the simulation's shared
+// budget for its body-centered interest union. Budgets are fixed per-frame
+// counts in both modes. With workers > 0 every dispatched generation job is
 // published before the next simulation step (bounded by the run timeout),
 // which keeps the authoritative state at frame boundaries deterministic
 // while still exercising the real async worker/publication path.
@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -68,6 +69,7 @@ struct RunnerOptions
 	// tool for a truly wedged process.
 	double timeoutSec{120.0};
 	bool json{false};
+	bool trace{false};
 };
 
 /// Distinct process exit statuses (documented in docs/headless-runner.md).
@@ -83,6 +85,13 @@ enum class ExitCode : int
 
 struct RunOutcome
 {
+	struct PlayerSummary
+	{
+		uint32_t id;
+		uint64_t inventoryTotal;
+		glm::dvec3 position;
+	};
+
 	ExitCode code{ExitCode::Ok};
 	std::string message; // error detail when code != Ok
 
@@ -104,6 +113,9 @@ struct RunOutcome
 	glm::dvec3 playerPos{0.0};
 	DigestArea area{};
 	std::string digest;
+	bool multiplayer{false};
+	std::vector<PlayerSummary> players;
+	std::vector<uint64_t> itemIds;
 	std::string saveStatus{"none"}; // none | ok | failed | skipped
 };
 

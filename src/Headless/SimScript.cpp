@@ -5,8 +5,10 @@
 
 #include <Items/ItemEntitySystem.hpp>
 #include <Items/ItemRegistry.hpp>
+#include <World/VoxelWorld.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -57,6 +59,13 @@ bool parseDouble(const std::string &token, double &out)
 		return false;
 	out = value;
 	return true;
+}
+
+bool parseUnsigned(const std::string &token, uint64_t &out)
+{
+	const char *end = token.data() + token.size();
+	const auto result = std::from_chars(token.data(), end, out);
+	return result.ec == std::errc{} && result.ptr == end;
 }
 
 bool parseOnOff(const std::string &token, bool &out)
@@ -148,6 +157,7 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 		ScriptAction action;
 		action.line = lineNo;
 		const std::string op = upperUnderscore(tokens[0]);
+		action.name = op;
 		const size_t argc = tokens.size();
 		const auto needArgs = [&](size_t n) {
 			if (argc != n)
@@ -328,9 +338,43 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 				return false;
 			action.op = op == "BREAK" ? ScriptOp::Break : ScriptOp::PlaceSelected;
 		}
+		else if (op == "PLAYER")
+		{
+			const std::string verb = argc >= 2 ? upperUnderscore(tokens[1]) : "";
+			if (argc == 2 && verb == "CREATE")
+				action.op = ScriptOp::CreatePlayer;
+			else
+			{
+				uint64_t id = 0;
+				if (argc != 3 || (verb != "SELECT" && verb != "REMOVE") ||
+					!parseUnsigned(tokens[2], id) || id == 0 || id > sim::kMaxPlayerId)
+				{
+					error = failAt(lineNo, "player expects create, select <id> or remove <id> (positive PlayerId)");
+					return false;
+				}
+				action.player = sim::PlayerId{static_cast<uint32_t>(id)};
+				action.op = verb == "SELECT" ? ScriptOp::SelectPlayer : ScriptOp::RemovePlayer;
+			}
+			action.name += "." + verb;
+			out.multiplayer = true;
+		}
 		else if (op == "INTEREST")
 		{
-			if (argc == 2 && upperUnderscore(tokens[1]) == "FOLLOW")
+			if (argc >= 2 && upperUnderscore(tokens[1]) == "RADIUS")
+			{
+				if (!needArgs(3))
+					return false;
+				if (!parseInt(tokens[2], action.radiusChunks) || action.radiusChunks < 0 ||
+					action.radiusChunks > sim::kMaxPlayerInterestRadiusChunks)
+				{
+					error = failAt(lineNo, "interest radius expects chunks in [0, " +
+										   std::to_string(sim::kMaxPlayerInterestRadiusChunks) + "]");
+					return false;
+				}
+				action.op = ScriptOp::InterestRadius;
+				out.multiplayer = true;
+			}
+			else if (argc == 2 && upperUnderscore(tokens[1]) == "FOLLOW")
 			{
 				action.op = ScriptOp::InterestFollow;
 			}
@@ -357,10 +401,11 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 		{
 			if (argc < 2)
 			{
-				error = failAt(lineNo, "expect expects 'voxel', 'inventory', 'items' or 'digest'");
+				error = failAt(lineNo, "expect requires an assertion name");
 				return false;
 			}
 			const std::string what = upperUnderscore(tokens[1]);
+			action.name += "." + what;
 			if (what == "VOXEL")
 			{
 				if (!needArgs(6))
@@ -439,6 +484,55 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 				}
 				action.op = ScriptOp::ExpectItems;
 			}
+			else if (what == "ITEM")
+			{
+				if (!needArgs(5))
+					return false;
+				const auto item = items::parseItemId(tokens[3]);
+				if (!parseUnsigned(tokens[2], action.expectedNumber) || action.expectedNumber == 0 || !item)
+				{
+					error = failAt(lineNo, "expect item requires a positive entity id and a registry item");
+					return false;
+				}
+				if (!parseCount(tokens[4], action.count))
+					return false;
+				if (action.count == 0)
+				{
+					error = failAt(lineNo, "expect item requires a positive count");
+					return false;
+				}
+				action.item = *item;
+				action.op = ScriptOp::ExpectItem;
+			}
+			else if (what == "RESULT")
+			{
+				if (!needArgs(3))
+					return false;
+				action.expectedResult = tokens[2];
+				action.op = ScriptOp::ExpectResult;
+			}
+			else if (what == "REVISION")
+			{
+				if (!needArgs(3))
+					return false;
+				if (!parseUnsigned(tokens[2], action.expectedNumber))
+				{
+					error = failAt(lineNo, "expect revision requires an unsigned integer");
+					return false;
+				}
+				action.op = ScriptOp::ExpectRevision;
+			}
+			else if (what == "PENDING")
+			{
+				if (!needArgs(3))
+					return false;
+				if (!parseOnOff(tokens[2], action.enabled))
+				{
+					error = failAt(lineNo, "expect pending requires on|off");
+					return false;
+				}
+				action.op = ScriptOp::ExpectPending;
+			}
 			else if (what == "DIGEST")
 			{
 				if (!needArgs(3))
@@ -472,6 +566,22 @@ bool parseSimScript(const std::filesystem::path &path, SimScript &out, std::stri
 		}
 		out.actions.push_back(std::move(action));
 	}
+	if (out.multiplayer)
+		for (const ScriptAction &action : out.actions)
+		{
+			if (action.op == ScriptOp::Interest || action.op == ScriptOp::InterestFollow)
+			{
+				error = failAt(action.line, "multiplayer uses body-centered 'interest radius'");
+				return false;
+			}
+			if (action.op == ScriptOp::Teleport &&
+				(glm::any(glm::lessThan(action.position, glm::dvec3(-32768.0))) ||
+				 glm::any(glm::greaterThanEqual(action.position, glm::dvec3(32767.0)))))
+			{
+				error = failAt(action.line, "multiplayer teleport coordinates must be in [-32768, 32767)");
+				return false;
+			}
+		}
 	return true;
 }
 
