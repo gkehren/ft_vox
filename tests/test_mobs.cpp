@@ -630,6 +630,32 @@ static void longRunPrecision()
     CHECK_EXPR(std::abs(states[0].look) <= 0.25f + 1e-6f);
     CHECK_EXPR(states[0].flap > 0.099f && states[0].flap < 1.501f);
 }
+static void playerObservers()
+{
+    World w;
+    MobSystem system;
+    system.reset(42);
+    system.settings.spawnChance = 1.0;
+    constexpr std::array<glm::dvec3, 2> observers{{{0, 0, 0}, {1000, 0, 0}}};
+    for (int i = 0; i < 120; ++i)
+        system.update(1.0 / 60, w, observers, 80);
+    const auto nearbyFirst = [](const Mob &mob) { return mob.body.position.x < 500; };
+    const auto nearbySecond = [](const Mob &mob) { return mob.body.position.x > 500; };
+    CHECK_EXPR(std::ranges::any_of(system.mobs(), nearbyFirst));
+    CHECK_EXPR(std::ranges::any_of(system.mobs(), nearbySecond));
+    system.update(1.0 / 60, w, std::span(observers).last(1), 80);
+    CHECK_EXPR(!system.mobs().empty() && std::ranges::all_of(system.mobs(), nearbySecond));
+
+    // A procedural spawn key can be used again after retirement, while the
+    // wire ID must distinguish the new incarnation from the old one.
+    w.spawn = false;
+    CHECK_EXPR(system.add(MobSpecies::Sheep, {0, 0.001, 0}, 123, 1, w));
+    const auto retiredId = system.mobs().back().replicationId;
+    system.update(1.0 / 60, w, std::span(observers).last(1), 80);
+    CHECK_EXPR(system.add(MobSpecies::Sheep, {0, 0.001, 0}, 123, 1, w));
+    CHECK_EXPR(system.mobs().back().replicationId > retiredId);
+}
+
 static void profile()
 {
     World w;
@@ -699,6 +725,7 @@ int main(int argc, char **argv)
     longRunPrecision();
     finiteSteering();
     population();
+    playerObservers();
     timing();
     models();
     if (argc > 1 && std::string_view(argv[1]) == "--profile")

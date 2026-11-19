@@ -1490,7 +1490,8 @@ target_link_libraries(test_world_replication PRIVATE ft_vox_core ft_vox_udp)
 ft_vox_target_hygiene(test_world_replication)
 add_test(NAME WorldReplication COMMAND test_world_replication)
 add_test(NAME VoxelActions COMMAND test_world_replication --actions)
-set_tests_properties(WorldReplication VoxelActions PROPERTIES TIMEOUT 180)
+add_test(NAME EntityReplication COMMAND test_world_replication --entities)
+set_tests_properties(WorldReplication VoxelActions EntityReplication PROPERTIES TIMEOUT 180)
 
 # Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh
 # CMake configure + build with FT_VOX_GRAPHICS=OFF, no vcpkg toolchain and no

@@ -1,6 +1,7 @@
 #include "WireProtocol.hpp"
 
 #include <Chunk/TerrainGenerator.hpp>
+#include <Entities/MobTypes.hpp>
 #include <Items/ItemRegistry.hpp>
 
 #include <algorithm>
@@ -155,9 +156,10 @@ constexpr std::array kPolicies{
     Policy{Direction::Both, Lane::Ack, 8, 60, 16},                  // Ack
     Policy{Direction::Both, Lane::Fresh, 0, 2, 2},                 // Heartbeat
     Policy{Direction::Both, Lane::Reliable, 1, 1, 1},               // Disconnect
+    Policy{Direction::ServerToClient, Lane::Fresh, 17 + 30 * kMaxItemsPerSnapshot, 10, 3},
+    Policy{Direction::ServerToClient, Lane::Fresh, 9 + 27 * kMaxMobsPerSnapshot, 10, 3},
 };
 static_assert(kPolicies.size() == std::variant_size_v<Payload>);
-static_assert(kPolicies.size() == static_cast<uint8_t>(Kind::Disconnect));
 static_assert(std::all_of(kPolicies.begin(), kPolicies.end(), [](const Policy &rules) {
     return kHeaderBytes + rules.maxPayload <= kDatagramBytes;
 }));
@@ -173,6 +175,23 @@ constexpr bool validSequence(uint64_t value) { return value != 0 && value <= kMa
 constexpr bool validPlayer(sim::PlayerId value) { return value.valid() && value.value <= sim::kMaxPlayerId; }
 constexpr bool validVersions(uint16_t min, uint16_t max) { return min != 0 && min <= max; }
 constexpr bool validMaterial(uint8_t material) { return material < COUNT || material == kAirMaterial; }
+bool validStack(items::ItemStack stack)
+{
+    return stack.isEmpty() ? stack.item == items::ItemId::None : stack.count <= items::maxStackOf(stack.item);
+}
+
+template<class IO, class Motion>
+bool entityMotion(IO &io, Motion &motion)
+{
+    constexpr int32_t limit = kHorizontalLimit * kEntityPositionScale;
+    for (auto &coordinate : motion.position)
+        if (!io.field(coordinate) || coordinate < -limit || coordinate >= limit)
+            return false;
+    for (auto &velocity : motion.velocity)
+        if (!io.field(velocity))
+            return false;
+    return true;
+}
 constexpr bool validCell(const Cell &cell)
 {
     return cell.x >= -kHorizontalLimit && cell.x < kHorizontalLimit &&
@@ -289,9 +308,7 @@ bool encodeFields(IO &io, T &p)
             return false;
         for (auto &stack : p.slots)
         {
-            if (!io.fields(stack.item, stack.count))
-                return false;
-            if (stack.count == 0 ? stack.item != items::ItemId::None : stack.count > items::maxStackOf(stack.item))
+            if (!io.fields(stack.item, stack.count) || !validStack(stack))
                 return false;
         }
         return true;
@@ -330,6 +347,35 @@ bool encodeFields(IO &io, T &p)
     else if constexpr (std::is_same_v<P, Disconnect>)
     {
         return io.field(p.reason) && inRange(p.reason, DisconnectReason::Leaving, DisconnectReason::Resync);
+    }
+    else if constexpr (std::is_same_v<P, ItemSnapshot>)
+    {
+        if (!io.fields(p.tick, p.idHighWater, p.count) || p.idHighWater > kMaxSequence || p.count > p.items.size())
+            return false;
+        uint64_t previousId = 0;
+        for (auto &state : std::span(p.items).first(p.count))
+        {
+            if (!io.field(state.id) || state.id <= previousId || state.id > p.idHighWater ||
+                !entityMotion(io, state.motion) || !io.fields(state.stack.item, state.stack.count) ||
+                state.stack.isEmpty() || !validStack(state.stack))
+                return false;
+            previousId = state.id;
+        }
+        return true;
+    }
+    else if constexpr (std::is_same_v<P, MobSnapshot>)
+    {
+        if (!io.fields(p.tick, p.count) || p.count > p.mobs.size())
+            return false;
+        uint64_t previousId = 0;
+        for (auto &state : std::span(p.mobs).first(p.count))
+        {
+            if (!io.field(state.id) || state.id <= previousId || state.id > kMaxSequence ||
+                !entityMotion(io, state.motion) || !io.field(state.species) || state.species >= entities::kMobSpeciesCount)
+                return false;
+            previousId = state.id;
+        }
+        return true;
     }
 }
 
@@ -504,7 +550,8 @@ CodecStatus decode(Endpoint sender, std::span<const uint8_t> bytes, Packet &out)
 
 ReceiveStatus ReceiveWindow::admit(const Packet &packet) noexcept
 {
-    const auto *rules = policy(kindOf(packet));
+    const auto kind = kindOf(packet);
+    const auto *rules = policy(kind);
     if (!rules || (rules->lane != Lane::Reliable && rules->lane != Lane::Fresh))
         return ReceiveStatus::Unsequenced;
     if (packet.scope.sessionId == 0 || packet.scope.sessionId != scope_.sessionId)
@@ -514,7 +561,9 @@ ReceiveStatus ReceiveWindow::admit(const Packet &packet) noexcept
     if (!validSequence(packet.sequence))
         return ReceiveStatus::InvalidSequence;
 
-    auto &through = rules->lane == Lane::Reliable ? reliableThrough_ : freshest_;
+    auto &through = rules->lane == Lane::Reliable ? reliableThrough_ :
+                    kind == Kind::ItemSnapshot ? freshestItems_ :
+                    kind == Kind::MobSnapshot ? freshestMobs_ : freshest_;
     if (packet.sequence <= through)
         return ReceiveStatus::Replay;
     if (rules->lane == Lane::Reliable && packet.sequence != through + 1)

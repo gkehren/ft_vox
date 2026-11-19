@@ -20,6 +20,7 @@ struct SessionAdmission
 
 inline constexpr uint64_t kInputLeadTicks = 6;
 inline constexpr uint64_t kSnapshotIntervalTicks = 3;
+inline constexpr uint64_t kEntitySnapshotIntervalTicks = 6;
 inline constexpr size_t kMaxConcurrentChunkTransfers = 16;
 
 constexpr bool withinInputWindow(uint64_t intended, uint64_t completed)
@@ -55,6 +56,12 @@ struct WorldTraffic
 	uint64_t bytes{}, frames{}, retransmits{}, resyncs{};
 };
 
+struct EntitySnapshots
+{
+	wire::ItemSnapshot items;
+	wire::MobSnapshot mobs;
+};
+
 class SessionOwner
 {
 public:
@@ -65,6 +72,8 @@ public:
 	// Every admitted action gets a result. Inputs are acknowledged via snapshots.
 	virtual std::optional<wire::ActionResult> receiveRemote(sim::PlayerId player, const SessionIntents &intents) = 0;
 	virtual wire::PlayerSnapshot snapshotRemote(sim::PlayerId player) const = 0;
+	virtual std::optional<wire::Inventory> inventoryRemote(sim::PlayerId) { return std::nullopt; }
+	virtual std::optional<EntitySnapshots> entitySnapshotsRemote(sim::PlayerId) const { return std::nullopt; }
 	// Called only when the peer's single world send slot is available.
 	virtual std::optional<WorldUpdate> nextWorldUpdate(sim::PlayerId, bool /*allowBaseline*/) { return std::nullopt; }
 };

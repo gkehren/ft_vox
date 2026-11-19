@@ -8,6 +8,20 @@
 
 namespace net::udp
 {
+namespace
+{
+template<class Snapshot>
+bool newerSnapshot(const Snapshot &sample, const SnapshotHistory<Snapshot> &history, uint64_t joinedTick)
+{
+	return sample.tick >= joinedTick && (!history.current || sample.tick > history.current->tick);
+}
+
+template<class Snapshot>
+void installSnapshot(SnapshotHistory<Snapshot> &history, const Snapshot &sample)
+{
+	history.previous = std::exchange(history.current, sample);
+}
+}
 
 struct ClientTransport::Impl
 {
@@ -37,6 +51,9 @@ struct ClientTransport::Impl
 	void clearProjection()
 	{
 		chunks.clear();
+		inventory.reset();
+		itemHistory = {};
+		mobHistory = {};
 		assembler.reset();
 		assemblyOpen = false;
 		lastTransferId = lastEditId = 0;
@@ -214,12 +231,19 @@ struct ClientTransport::Impl
 		}
 		const auto kind = kindOf(packet);
 		const auto *players = std::get_if<wire::PlayerSnapshot>(&packet.payload);
+		const auto *items = std::get_if<wire::ItemSnapshot>(&packet.payload);
+		const auto *mobs = std::get_if<wire::MobSnapshot>(&packet.payload);
 		if (players && (players->tick < welcome->tick || (playerSnapshot && players->tick <= playerSnapshot->tick) ||
 		                std::ranges::none_of(std::span(players->players).first(players->count),
 		                     [this](const auto &player) { return player.player == welcome->player; })))
 			return;
+		if (items && (!newerSnapshot(*items, itemHistory, welcome->tick) ||
+		              (itemHistory.current && items->idHighWater < itemHistory.current->idHighWater)))
+			return;
+		if (mobs && !newerSnapshot(*mobs, mobHistory, welcome->tick))
+			return;
 		const auto lane = wire::policy(kind)->lane;
-		if (!players && kind != wire::Kind::Heartbeat && lane != wire::Lane::Reliable)
+		if (!players && !items && !mobs && kind != wire::Kind::Heartbeat && lane != wire::Lane::Reliable)
 			return;
 		const auto admitted = link->incoming.admit(packet);
 		if (lane == wire::Lane::Reliable)
@@ -229,6 +253,10 @@ struct ClientTransport::Impl
 		link->lastReceived = now;
 		if (players && status == ClientStatus::Connected)
 			playerSnapshot = *players;
+		else if (items && status == ClientStatus::Connected)
+			installSnapshot(itemHistory, *items);
+		else if (mobs && status == ClientStatus::Connected)
+			installSnapshot(mobHistory, *mobs);
 		else if (kind == wire::Kind::Heartbeat)
 			++heartbeats;
 		else if (kind == wire::Kind::Disconnect)
@@ -241,6 +269,12 @@ struct ClientTransport::Impl
 		}
 		else if (const auto *request = std::get_if<wire::Resync>(&packet.payload))
 			resync(request->reason, now);
+		else if (const auto *state = std::get_if<wire::Inventory>(&packet.payload))
+		{
+			if (status == ClientStatus::Connected && state->tick >= welcome->tick &&
+			    (!inventory || (state->revision > inventory->revision && state->tick >= inventory->tick)))
+				inventory = *state;
+		}
 		else if (const auto *result = std::get_if<wire::ActionResult>(&packet.payload))
 		{
 			if (pendingAction && result->actionId == pendingAction->actionId &&
@@ -283,6 +317,9 @@ struct ClientTransport::Impl
 	std::optional<Link> link;
 	std::optional<wire::Welcome> welcome;
 	std::optional<wire::PlayerSnapshot> playerSnapshot;
+	std::optional<wire::Inventory> inventory;
+	SnapshotHistory<wire::ItemSnapshot> itemHistory;
+	SnapshotHistory<wire::MobSnapshot> mobHistory;
 	std::optional<wire::RejectReason> rejection;
 	std::optional<wire::Action> pendingAction;
 	std::optional<wire::ActionResult> actionResult;
@@ -350,6 +387,9 @@ std::optional<wire::SessionScope> ClientTransport::scope() const
 	return m_impl->link ? std::optional{m_impl->link->scope} : std::nullopt;
 }
 std::optional<wire::PlayerSnapshot> ClientTransport::latestPlayerSnapshot() const { return m_impl->playerSnapshot; }
+std::optional<wire::Inventory> ClientTransport::inventory() const { return m_impl->inventory; }
+const SnapshotHistory<wire::ItemSnapshot> &ClientTransport::itemSnapshots() const { return m_impl->itemHistory; }
+const SnapshotHistory<wire::MobSnapshot> &ClientTransport::mobSnapshots() const { return m_impl->mobHistory; }
 const ChunkProjection &ClientTransport::chunks() const { return m_impl->chunks; }
 std::optional<wire::RejectReason> ClientTransport::rejection() const { return m_impl->rejection; }
 uint64_t ClientTransport::heartbeatsReceived() const { return m_impl->heartbeats; }

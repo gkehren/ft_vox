@@ -1,5 +1,7 @@
+#include <Items/ItemRegistry.hpp>
 #include <Network/ClientTransport.hpp>
 #include <Server/ServerHost.hpp>
+#include <World/WorldCollisionView.hpp>
 
 #include <filesystem>
 #include <future>
@@ -50,10 +52,10 @@ struct Relay
 		require(socket.send(client, encoded.view()), "inject relay packet");
 	}
 
-	void sendToServer(const wire::Packet &packet)
+	void sendToServer(const wire::Packet &packet, wire::Endpoint encodedAs = wire::Endpoint::Client)
 	{
 		wire::Datagram encoded;
-		require(wire::encode(wire::Endpoint::Client, packet, encoded) == wire::CodecStatus::Ok, "encode client replay");
+		require(wire::encode(encodedAs, packet, encoded) == wire::CodecStatus::Ok, "encode client replay");
 		require(socket.send(server, encoded.view()), "inject client replay");
 	}
 
@@ -82,6 +84,30 @@ struct Relay
 					continue;
 				}
 				lastActionResult = packet;
+			}
+			if (std::holds_alternative<wire::Inventory>(packet.payload))
+			{
+				if (std::exchange(dropInventory, false))
+				{
+					droppedInventory = packet;
+					continue;
+				}
+				lastInventory = packet;
+			}
+			if (const auto *snapshot = std::get_if<wire::ItemSnapshot>(&packet.payload))
+			{
+				itemBytes = std::max(itemBytes, frame.size);
+				if (snapshot->count == 0 && std::exchange(dropItemSnapshot, false))
+				{
+					droppedItemSnapshot = packet;
+					continue;
+				}
+				lastItemSnapshot = packet;
+			}
+			if (std::holds_alternative<wire::MobSnapshot>(packet.payload))
+			{
+				mobBytes = std::max(mobBytes, frame.size);
+				lastMobSnapshot = packet;
 			}
 			if (const auto *ack = std::get_if<wire::Ack>(&packet.payload);
 			    fromServer && ack && lastAction && packet.scope == lastAction->scope &&
@@ -138,10 +164,13 @@ struct Relay
 	std::chrono::milliseconds delay;
 	bool dropFragment{}, duplicateFragment{}, corruptFragment{}, dropEdit{}, duplicateEdit{};
 	bool dropActionResult{}, dropAllActionResults{}, dropActionAck{};
+	bool dropInventory{}, dropItemSnapshot{};
 	std::optional<wire::ChunkBaseline> lastBegin;
 	std::optional<wire::ResyncReason> lastResync;
 	std::optional<wire::Packet> oldEdit;
 	std::optional<wire::Packet> lastAction, lastActionResult, droppedActionResult;
+	std::optional<wire::Packet> lastInventory, droppedInventory, lastItemSnapshot, droppedItemSnapshot, lastMobSnapshot;
+	size_t itemBytes{}, mobBytes{};
 	udp::WorldTraffic traffic;
 	std::set<std::pair<uint64_t, uint64_t>> sequences;
 	std::multimap<Time, std::pair<udp::Address, udp::Received>> pending;
@@ -442,6 +471,9 @@ void testVoxelActions(const fs::path &root)
 	require(host.start(error), error);
 	const auto simulation = [&]() -> sim::GameSimulation & { return server::ServerHostProbe::simulation(host); };
 	const auto world = [&]() -> VoxelWorld & { return *simulation().world(); };
+	// Keep the voxel-action fixture's drops around through the checkpoint
+	// assertions. EntityReplication exercises the live pickup timing.
+	const_cast<items::ItemEntitySystem &>(simulation().itemEntities()).settings.pickupDelayTicks = 10000;
 	const auto seedBlock = [&](int x, int y, int z, TextureType type) {
 		require(simulation().placeVoxel({x + 0.5f, y + 0.5f, z + 0.5f}, type).accepted, "seed action fixture");
 	};
@@ -589,7 +621,7 @@ void testVoxelActions(const fs::path &root)
 	invalid.yawTurns = 0.f;
 	invalid.expected.revision = dig.expected.revision;
 	reject(first, invalid, Code::StaleRevision);
-	reject(first, wire::Action{.operation = Kind::DropStack}, Code::Unavailable);
+	reject(first, wire::Action{.operation = Kind::DropStack, .slot = 1}, Code::InventoryRejected);
 	require(world().nextEditId() == beforeRejections, "replayed break advanced the edit watermark");
 
 	wire::Action place{.operation = Kind::Place, .target = target, .expected = version()};
@@ -729,6 +761,327 @@ void testIncompatibleGenerator()
 		!client.scope() && client.chunks().empty(), "incompatible generator installed a scope");
 }
 
+void testAnchorPickup(const fs::path &root)
+{
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "anchor_pickup", .savesRoot = root};
+	config.workers = 0;
+	config.interestRadiusChunks = 1;
+	server::ServerHost host(config);
+	std::string error;
+	require(host.start(error), error);
+	auto &sim = server::ServerHostProbe::simulation(host);
+	auto &items = const_cast<items::ItemEntitySystem &>(sim.itemEntities());
+	udp::ServerTransport transport(loopback, 2, host.sessionWorld());
+	udp::ClientTransport first(transport.address()), second(transport.address());
+	const std::array clients{&first, &second};
+	Time now{};
+	const auto until = [&](auto ready, const char *failure) {
+		for (int i = 0; i < 120; ++i)
+		{
+			if (ready())
+				return;
+			for (auto *client : clients)
+				client->poll(now);
+			transport.poll(now);
+			transport.serviceOwner(host, host.ticks());
+			transport.poll(now);
+			for (auto *client : clients)
+				client->poll(now);
+			require(host.step(server::TerrainTiming::QuiescePerTick, error), error);
+			now += 17ms;
+		}
+		require(ready(), failure);
+	};
+
+	first.connect(now);
+	until([&] { return first.inventory().has_value(); }, "first pickup contender failed to join");
+	second.connect(now);
+	until([&] { return second.inventory().has_value(); }, "second pickup contender failed to join");
+	const auto firstId = first.welcome()->player;
+	const auto secondId = second.welcome()->player;
+	require(sim.localPlayerId() < firstId && firstId < secondId, "pickup fixture did not order the anchor first");
+	sim::InventorySnapshot anchorBefore;
+	sim.inventorySnapshot(anchorBefore);
+	constexpr auto dirt = items::ItemId::Dirt;
+	const auto count = [](const auto &slots) {
+		unsigned total = 0;
+		for (const auto stack : slots)
+			if (stack.item == items::ItemId::Dirt)
+				total += stack.count;
+		return total;
+	};
+	const auto verifyPickup = [&](uint16_t dropCount, unsigned firstTotal, unsigned secondTotal) {
+		const auto anchorFeet = sim.playerFeet();
+		sim.setPlayerPosition(firstId, anchorFeet);
+		sim.setPlayerPosition(secondId, anchorFeet);
+		const auto id = items.spawn({dirt, dropCount}, anchorFeet, {}, 18);
+		require(id != 0, "seed contested drop");
+		const auto seesDrop = [id](const udp::ClientTransport &client) {
+			const auto &snapshot = client.itemSnapshots().current;
+			return snapshot && snapshot->count == 1 && snapshot->items.front().id == id;
+		};
+		until([&] { return seesDrop(first) && seesDrop(second); }, "pickup contenders did not see the drop");
+		require(items.size() == 1 && items.entities().front().pickupDelay > 0,
+			"pickup fixture missed the live drop");
+		for (const auto idInRange : {sim.localPlayerId(), firstId, secondId})
+			require(glm::distance(sim.playerFeet(idInRange), items.entities().front().body.position) <=
+				items.settings.pickupRadius, "pickup contender is out of range");
+		const auto converged = [&] {
+			return first.itemSnapshots().current->count == 0 && second.itemSnapshots().current->count == 0 &&
+				count(first.inventory()->slots) == firstTotal && count(second.inventory()->slots) == secondTotal;
+		};
+		until(converged, "remote pickup did not converge or the anchor stole the drop");
+		const auto removalTick = first.itemSnapshots().current->tick;
+		until([&] { return first.itemSnapshots().current->tick > removalTick; }, "missing post-pickup snapshot");
+		sim::InventorySnapshot anchorAfter;
+		sim.inventorySnapshot(anchorAfter);
+		require(converged() && anchorAfter == anchorBefore && items.size() == 0 &&
+			sim.itemIdHighWater() == id && count(sim.inventory(firstId)->slots()) == firstTotal &&
+			count(sim.inventory(secondId)->slots()) == secondTotal, "pickup was duplicated or changed the anchor inventory");
+	};
+	verifyPickup(3, 3, 0);
+	const auto capacity = static_cast<uint16_t>(items::kInventorySize * items::maxStackOf(dirt));
+	require(sim.grantItems(firstId, dirt, capacity - 4).remainder.isEmpty(), "fill the first contender's inventory");
+	verifyPickup(4, capacity, 3);
+	transport.stop(host);
+	require(host.stop(error), error);
+}
+
+void testEntityReplication(const fs::path &root)
+{
+	using Kind = wire::ActionKind;
+	using Code = wire::ActionCode;
+	using Item = items::ItemId;
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "entities", .savesRoot = root};
+	config.workers = 0;
+	config.interestRadiusChunks = 1;
+	server::ServerHost host(config);
+	std::string error;
+	require(host.start(error), error);
+	auto &sim = server::ServerHostProbe::simulation(host);
+	auto &items = const_cast<items::ItemEntitySystem &>(sim.itemEntities());
+	auto &mobs = const_cast<entities::MobSystem &>(sim.mobs());
+	mobs.settings.spawnChance = 0.0;
+	for (int z = 3; z <= 14; ++z)
+		for (int x = 6; x <= 13; ++x)
+			require(sim.placeVoxel({x + 0.5f, 244.5f, z + 0.5f}, STONE).accepted, "seed entity fixture platform");
+	udp::ServerTransport transport(loopback, 2, host.sessionWorld());
+	Relay clean(transport.address(), 0ms), impaired(transport.address(), 15ms);
+	udp::ClientTransport first(clean.socket.address()), second(impaired.socket.address());
+	Time now{}, nextTick{};
+	const auto pump = [&] {
+		clean.pump(now);
+		impaired.pump(now);
+		transport.poll(now);
+		if (now >= nextTick)
+		{
+			transport.serviceOwner(host, host.ticks());
+			require(host.step(server::TerrainTiming::QuiescePerTick, error), error);
+			nextTick += 16667us;
+		}
+		transport.poll(now);
+		clean.pump(now);
+		impaired.pump(now);
+		first.poll(now);
+		second.poll(now);
+		now += 5ms;
+	};
+	const auto until = [&](auto predicate, const char *failure) {
+		const auto deadline = now + 8s;
+		do
+		{
+			if (predicate())
+				return;
+			pump();
+		}
+		while (now < deadline);
+		throw std::runtime_error(failure);
+	};
+	const auto itemRecord = [](const udp::ClientTransport &client, uint64_t id) -> const wire::ItemState * {
+		const auto &current = client.itemSnapshots().current;
+		if (!current)
+			return nullptr;
+		const auto active = std::span(current->items).first(current->count);
+		const auto found = std::ranges::find(active, id, &wire::ItemState::id);
+		return found == active.end() ? nullptr : &*found;
+	};
+	const auto seesMob = [](const udp::ClientTransport &client, uint64_t id) {
+		const auto &current = client.mobSnapshots().current;
+		return current && std::ranges::any_of(std::span(current->mobs).first(current->count),
+			[id](const auto &mob) { return mob.id == id; });
+	};
+	const auto action = [&](udp::ClientTransport &client, Kind operation, uint8_t slot, uint8_t other = 0) {
+		std::optional<uint64_t> id;
+		until([&] { id = client.sendAction({.operation = operation, .slot = slot, .otherSlot = other}, now);
+			return id.has_value(); }, "inventory action slot failed to open");
+		std::optional<wire::ActionResult> result;
+		until([&] { result = client.takeActionResult(); return result.has_value(); }, "missing inventory result");
+		require(result->actionId == *id && result->operation == operation && result->code == Code::Accepted &&
+			result->editId == 0, "unexpected inventory result");
+	};
+	const auto count = [](const udp::ClientTransport &client, Item item) {
+		const auto inventory = client.inventory();
+		require(inventory.has_value(), "missing client inventory");
+		unsigned total = 0;
+		for (const auto stack : inventory->slots)
+			if (stack.item == item)
+				total += stack.count;
+		return total;
+	};
+	first.connect(now);
+	until([&] { return first.inventory().has_value(); }, "missing initial inventory");
+	second.connect(now);
+	until([&] { return second.inventory().has_value(); }, "missing second initial inventory");
+	const auto firstId = first.welcome()->player;
+	const auto secondId = second.welcome()->player;
+	constexpr glm::dvec3 firstFeet{8.5, 245, 4.5}, secondFeet{8.5, 245, 13.5};
+	sim.setPlayerPosition(firstId, firstFeet);
+	sim.setPlayerPosition(secondId, secondFeet);
+	require(firstId < secondId && first.inventory()->revision == 1 && second.inventory()->revision == 1,
+		"initial per-owner revisions or pickup order differ");
+	require(sim.grantItems(firstId, Item::Dirt, 5).remainder.isEmpty() &&
+		sim.grantItems(secondId, Item::Glass, 1).remainder.isEmpty(), "seed private inventories");
+	until([&] { return count(first, Item::Dirt) == 5 && count(second, Item::Glass) == 1; }, "owner inventories diverged");
+	require(count(first, Item::Glass) == 0 && count(second, Item::Dirt) == 0, "owner inventory leaked");
+	const auto oldInventory = *clean.lastInventory;
+	const auto secondStarting = *second.inventory();
+
+	// Valid server-only payloads sent in the wrong direction, and a valid
+	// intent carrying another peer's scope, cannot consume the next action.
+	wire::Inventory forged{host.ticks(), 100, 0, {}};
+	forged.slots[0] = {Item::Glass, 64};
+	clean.sendToServer({*first.scope(), 1, forged}, wire::Endpoint::Server);
+	clean.sendToServer({*second.scope(), 1, wire::Action{1, Kind::DropStack}});
+	clean.dropInventory = true;
+	action(first, Kind::Select, 2);
+	require(first.inventory()->selected == 2 && clean.droppedInventory == clean.lastInventory &&
+		clean.lastActionResult->sequence > clean.lastInventory->sequence, "result overtook lost inventory");
+	require(*second.inventory() == secondStarting && count(first, Item::Glass) == 0 &&
+		sim.itemIdHighWater() == 0, "forged inventory intent mutated authority");
+	action(first, Kind::SplitHalf, 0, 1);
+	require(first.inventory()->slots[0].count == 2 && first.inventory()->slots[1].count == 3, "split did not converge");
+	action(first, Kind::Move, 1, 2);
+	action(first, Kind::Swap, 0, 2);
+	require(first.inventory()->slots[0].count == 3 && first.inventory()->slots[2].count == 2, "move or swap diverged");
+	action(first, Kind::DropOne, 0);
+	require(first.inventory()->slots[0].count == 2 && sim.itemIdHighWater() == 1, "drop one did not settle");
+	action(first, Kind::DropStack, 2);
+	const uint64_t contested = sim.itemIdHighWater();
+	require(contested == 2 && first.inventory()->slots[2].isEmpty(), "drop stack did not settle");
+
+	// Let the drops settle before moving both players into pickup range
+	// in the same server tick.
+	sim.setPlayerPosition(firstId, {12.5, 245, 4.5});
+	until([&] { return itemRecord(first, contested) && itemRecord(second, contested) &&
+		items.entities().back().pickupDelay == 0; }, "drop failed to replicate within interest");
+	const auto spawnPacket = *clean.lastItemSnapshot;
+	const auto contestedFeet = items.entities().back().body.position;
+	sim.setPlayerPosition(firstId, contestedFeet);
+	sim.setPlayerPosition(secondId, contestedFeet);
+	clean.dropItemSnapshot = true;
+	until([&] { return items.entities().empty() && count(first, Item::Dirt) == 5; },
+		"same-tick contenders duplicated or lost dirt");
+	until([&] { return !itemRecord(first, contested) && !itemRecord(second, contested); }, "pickup did not remove drop");
+	require(clean.droppedItemSnapshot && count(second, Item::Dirt) == 0 && *second.inventory() == secondStarting,
+		"higher PlayerId received a contested item");
+	const auto removalPacket = *clean.lastItemSnapshot;
+	clean.send(removalPacket);
+	clean.send(spawnPacket);
+	clean.send(spawnPacket);
+	clean.send(oldInventory);
+	first.poll(now);
+	require(!itemRecord(first, contested) && count(first, Item::Dirt) == 5 &&
+		first.inventory()->selected == 2, "reordered or duplicate packets rolled back the projection");
+
+	// Exhaust the first inventory's room for dirt during pickup, so the
+	// same live entity has a new stack count on both observers.
+	const auto maxDirt = static_cast<uint16_t>(items::kInventorySize * 64 - 2);
+	require(sim.grantItems(firstId, Item::Dirt, maxDirt - 5).remainder.isEmpty(), "fill pickup fixture");
+	sim.setPlayerPosition(firstId, firstFeet);
+	sim.setPlayerPosition(secondId, secondFeet);
+	const auto remainderId = items.spawn({Item::Dirt, 6}, firstFeet, {}, 12);
+	until([&] { const auto *item = itemRecord(first, remainderId); return item && item->stack.count == 6; },
+		"spawn count was missing");
+	const auto fullPacket = *clean.lastItemSnapshot;
+	until([&] {
+		const auto *a = itemRecord(first, remainderId);
+		const auto *b = itemRecord(second, remainderId);
+		return a && b && a->stack.count == 4 && b->stack.count == 4 && count(first, Item::Dirt) == maxDirt + 2;
+	}, "partial pickup failed to converge");
+	const auto updatePacket = *clean.lastItemSnapshot;
+	clean.send(fullPacket);
+	first.poll(now);
+	require(itemRecord(first, remainderId) && itemRecord(first, remainderId)->stack.count == 4, "old count overwrote partial pickup");
+	sim.setPlayerPosition(secondId, firstFeet);
+	until([&] { return count(second, Item::Dirt) == 4 && !itemRecord(first, remainderId) && !itemRecord(second, remainderId); },
+		"second pickup did not settle the remainder");
+	clean.send(updatePacket);
+	first.poll(now);
+	require(!itemRecord(first, remainderId), "stale count resurrected a picked-up item");
+
+	const glm::dvec3 mobFeet{12.5, 245, 9.5};
+	require(mobs.add(entities::MobSpecies::Sheep, mobFeet, 301, 1, WorldCollisionView(*sim.world())), "seed passive mob");
+	const auto mobId = mobs.mobs().front().replicationId;
+	const auto nearItem = items.spawn({Item::Dirt, 1}, mobFeet, {}, 10000);
+	constexpr auto extra = wire::kMaxItemsPerSnapshot + 4;
+	for (size_t i = 0; i < extra; ++i)
+		require(items.spawn({Item::Stone, 1}, {12.5, 245, 13.5}, {}, 10000) > nearItem, "seed item overflow");
+	until([&] { return seesMob(first, mobId) && seesMob(second, mobId) && itemRecord(second, nearItem) &&
+		second.itemSnapshots().current->count == wire::kMaxItemsPerSnapshot; }, "nearby bounded projection missing");
+	require(impaired.itemBytes == 1193 && impaired.mobBytes == 72, "unexpected measured snapshot size");
+	const auto priorEntityTick = first.itemSnapshots().current->tick;
+	clean.sendToServer({*first.scope(), 1, wire::ItemSnapshot{host.ticks()}}, wire::Endpoint::Server);
+	clean.sendToServer({*first.scope(), 1, wire::MobSnapshot{host.ticks()}}, wire::Endpoint::Server);
+	until([&] { return first.itemSnapshots().current->tick > priorEntityTick; }, "missing subsequent authority snapshot");
+	require(itemRecord(first, nearItem) && seesMob(first, mobId), "client forged an entity removal");
+	const auto oldMob = *impaired.lastMobSnapshot;
+	sim.setPlayerPosition(secondId, farFeet);
+	until([&] { return second.itemSnapshots().current->count == 0 && !seesMob(second, mobId); }, "interest did not remove entities");
+	impaired.send(oldMob);
+	second.poll(now);
+	require(seesMob(first, mobId) && !seesMob(second, mobId), "old interest resurrected a mob");
+	sim.setPlayerPosition(secondId, firstFeet);
+	until([&] { return seesMob(second, mobId) && itemRecord(second, nearItem); }, "interest re-entry changed entity identities");
+	require(second.mobSnapshots().previous &&
+		second.mobSnapshots().previous->tick < second.mobSnapshots().current->tick, "interpolation history missing");
+
+	const auto beforeExpiry = *clean.lastItemSnapshot;
+	items.settings.despawnAgeTicks = 1;
+	until([&] { return first.itemSnapshots().current->count == 0; }, "age expiry did not remove projected items");
+	clean.send(beforeExpiry);
+	first.poll(now);
+	require(first.itemSnapshots().current->count == 0, "pre-expiry snapshot resurrected a despawned item");
+	items.settings.despawnAgeTicks = 18000;
+	const auto highWater = items.spawn({Item::Glass, 1}, mobFeet, {}, 10000);
+	const auto priorScope = *first.scope();
+	first.disconnect(now);
+	until([&] { return first.status() == udp::ClientStatus::Disconnected; }, "disconnect did not settle");
+	require(!first.inventory() && !first.itemSnapshots().current && !first.mobSnapshots().current,
+		"retired epoch left stale UI state");
+	first.connect(now);
+	until([&] { return first.inventory() && itemRecord(first, highWater); }, "reconnect did not converge");
+	clean.send(oldInventory);
+	clean.send(beforeExpiry);
+	first.poll(now);
+	require(first.scope() != priorScope && first.inventory()->revision == 1 && count(first, Item::Dirt) == 0 &&
+		first.itemSnapshots().current->idHighWater == highWater, "old scope rolled back reconnect");
+	std::cout << "EntityReplication loopback: max item datagram " << impaired.itemBytes
+		<< " bytes, one-mob datagram " << impaired.mobBytes << " bytes\n";
+	transport.stop(host);
+	require(host.stop(error), error);
+	server::ServerHost restarted(config);
+	require(restarted.start(error), error);
+	auto &restored = server::ServerHostProbe::simulation(restarted);
+	require(restored.itemIdHighWater() == highWater && restored.itemEntities().size() == 1 &&
+		restored.itemEntities().entities().front().id == highWater, "checkpoint lost shared item IDs after expiry and reconnect");
+	require(restored.grantItems(Item::Stone, 1).remainder.isEmpty() &&
+		restored.dropFromSlot(0, 1, {0, 1, 0}) == items::ItemResult::Ok &&
+		restored.itemIdHighWater() == highWater + 1, "checkpoint reused an item ID");
+	require(restarted.stop(error), error);
+}
+
 void testThreadedDelivery(const fs::path &root)
 {
 	server::HostConfig config;
@@ -787,6 +1140,11 @@ int main(int argc, char **argv)
 	{
 		if (argc == 2 && std::string_view(argv[1]) == "--actions")
 			testVoxelActions(root);
+		else if (argc == 2 && std::string_view(argv[1]) == "--entities")
+		{
+			testAnchorPickup(root);
+			testEntityReplication(root);
+		}
 		else
 		{
 			testIncompatibleGenerator();

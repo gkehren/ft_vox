@@ -23,6 +23,10 @@ inline constexpr uint16_t kItemSchema = 1;
 inline constexpr size_t kDatagramBytes = 1200;
 inline constexpr size_t kHeaderBytes = 36;
 inline constexpr size_t kMaxPlayersPerSnapshot = 24;
+inline constexpr size_t kMaxItemsPerSnapshot = 38;
+inline constexpr size_t kMaxMobsPerSnapshot = 42;
+inline constexpr int kEntityPositionScale = 64;
+inline constexpr int kEntityVelocityScale = 64;
 inline constexpr size_t kChunkBytes = 65536;
 inline constexpr size_t kMaxReplicatedChunks = 197; // radius-eight disk
 inline constexpr size_t kFragmentBytes = 1100;
@@ -47,7 +51,7 @@ enum class Kind : uint8_t
     Hello = 1, Welcome = 2, Reject = 3, Input = 4, PlayerSnapshot = 5,
     Action = 6, ActionResult = 7, Inventory = 8, WorldEdit = 9,
     ChunkFragment = 10, ChunkRemove = 11, Resync = 12, Ack = 13,
-    Heartbeat = 14, Disconnect = 15
+    Heartbeat = 14, Disconnect = 15, ItemSnapshot = 16, MobSnapshot = 17
 };
 enum class Endpoint : uint8_t { Client, Server };
 enum class Direction : uint8_t { ClientToServer, ServerToClient, Both };
@@ -221,6 +225,55 @@ struct Inventory
     bool operator==(const Inventory &) const = default;
 };
 
+struct EntityMotion
+{
+    std::array<int32_t, 3> position{};
+    std::array<int16_t, 3> velocity{};
+    bool operator==(const EntityMotion &) const = default;
+};
+
+struct ItemState
+{
+    uint64_t id{};
+    EntityMotion motion;
+    items::ItemStack stack;
+    bool operator==(const ItemState &) const = default;
+};
+
+struct ItemSnapshot
+{
+    static constexpr Kind kind = Kind::ItemSnapshot;
+    uint64_t tick{}, idHighWater{};
+    uint8_t count{};
+    std::array<ItemState, kMaxItemsPerSnapshot> items{};
+    bool operator==(const ItemSnapshot &other) const noexcept
+    {
+        return tick == other.tick && idHighWater == other.idHighWater && count == other.count &&
+               std::equal(items.begin(), items.begin() + std::min<size_t>(count, items.size()), other.items.begin());
+    }
+};
+
+struct MobState
+{
+    uint64_t id{};
+    EntityMotion motion;
+    uint8_t species{};
+    bool operator==(const MobState &) const = default;
+};
+
+struct MobSnapshot
+{
+    static constexpr Kind kind = Kind::MobSnapshot;
+    uint64_t tick{};
+    uint8_t count{};
+    std::array<MobState, kMaxMobsPerSnapshot> mobs{};
+    bool operator==(const MobSnapshot &other) const noexcept
+    {
+        return tick == other.tick && count == other.count &&
+               std::equal(mobs.begin(), mobs.begin() + std::min<size_t>(count, mobs.size()), other.mobs.begin());
+    }
+};
+
 struct WorldEdit
 {
     static constexpr Kind kind = Kind::WorldEdit;
@@ -296,7 +349,7 @@ struct Disconnect
 
 using Payload = std::variant<Hello, Welcome, Reject, Input, PlayerSnapshot, Action,
                              ActionResult, Inventory, WorldEdit, ChunkFragment,
-                             ChunkRemove, Resync, Ack, Heartbeat, Disconnect>;
+                             ChunkRemove, Resync, Ack, Heartbeat, Disconnect, ItemSnapshot, MobSnapshot>;
 
 struct Packet
 {
@@ -345,6 +398,7 @@ private:
     SessionScope scope_;
     uint64_t reliableThrough_{};
     uint64_t freshest_{};
+    uint64_t freshestItems_{}, freshestMobs_{};
 };
 
 enum class AssemblyStatus : uint8_t { InProgress, Complete, InvalidFragment, Gap, Expired, BadChecksum };

@@ -19,11 +19,24 @@ struct Mailbox
 	std::optional<SessionAdmission> admission;
 	SessionIntents intents;
 	std::optional<wire::ActionResult> result;
+	std::optional<wire::Inventory> inventory;
+	uint64_t stagedInventoryRevision{}, queuedInventoryRevision{}, resultInventoryRevision{};
 	std::optional<wire::PlayerSnapshot> snapshot;
 	std::optional<uint64_t> lastSnapshotTick;
+	std::optional<EntitySnapshots> entities;
+	std::optional<uint64_t> lastEntityTick;
 	std::optional<WorldUpdate> worldUpdate;
 	bool worldBusy{}, baselineBusy{};
 	WorldTraffic worldTraffic;
+
+	void stageInventory(const std::optional<wire::Inventory> &update)
+	{
+		if (update && update->revision > stagedInventoryRevision)
+		{
+			inventory = update;
+			stagedInventoryRevision = update->revision;
+		}
+	}
 };
 
 struct Peer
@@ -32,6 +45,7 @@ struct Peer
 	uint64_t nonce{};
 	Time joinDeadline{};
 	Time nextSnapshot{};
+	Time nextEntitySnapshot{}, nextInventory{};
 	std::optional<Link> link;
 	std::optional<wire::Welcome> welcome;
 	Rate inbound, outbound;
@@ -88,7 +102,9 @@ struct ServerTransport::Impl
 		peer.closing = box.closing = true;
 		box.intents = {};
 		box.result.reset();
+		box.inventory.reset();
 		box.snapshot.reset();
+		box.entities.reset();
 		box.worldUpdate.reset();
 		peer.transfer.reset();
 		releaseBaseline(box);
@@ -289,6 +305,7 @@ struct ServerTransport::Impl
 		if (link.pending || peer.resyncDeadline)
 			return;
 		std::optional<wire::ActionResult> result;
+		std::optional<wire::Inventory> inventory;
 		std::optional<WorldUpdate> update;
 		{
 			std::lock_guard lock(mutex);
@@ -299,14 +316,28 @@ struct ServerTransport::Impl
 				releaseBaseline(box);
 				peer.worldInFlight = box.worldBusy = false;
 			}
-			result = std::exchange(box.result, std::nullopt);
-			if (!result && !peer.worldInFlight)
+			// The reliable ACK for the required inventory precedes the action
+			// result. Unrelated inventory changes cannot starve that result.
+			if (box.result && box.resultInventoryRevision <= box.queuedInventoryRevision)
+				result = std::exchange(box.result, std::nullopt);
+			else if (box.inventory && now >= peer.nextInventory)
+			{
+				inventory = std::exchange(box.inventory, std::nullopt);
+				box.queuedInventoryRevision = inventory->revision;
+			}
+			if (!result && !inventory && !peer.worldInFlight)
 				update = std::exchange(box.worldUpdate, std::nullopt);
 		}
 		if (result)
 		{
 			link.queue(wire::Endpoint::Server, *result, now);
 			peer.waitingForResult = false;
+			return;
+		}
+		if (inventory)
+		{
+			link.queue(wire::Endpoint::Server, *inventory, now);
+			peer.nextInventory = now + 100ms;
 			return;
 		}
 		if (update)
@@ -348,7 +379,9 @@ struct ServerTransport::Impl
 		auto &peer = peers[slot];
 		auto &link = *peer.link;
 		const bool retransmit = link.pending && link.pending->sent;
-		if (link.flush(sender(peer), now) && link.pending->kind != wire::Kind::ActionResult)
+		if (link.flush(sender(peer), now) &&
+		    (link.pending->kind == wire::Kind::ChunkFragment || link.pending->kind == wire::Kind::ChunkRemove ||
+		     link.pending->kind == wire::Kind::WorldEdit || link.pending->kind == wire::Kind::Resync))
 		{
 			std::lock_guard lock(mutex);
 			for (auto *traffic : {&worldTraffic, &mailboxes[slot].worldTraffic})
@@ -358,6 +391,27 @@ struct ServerTransport::Impl
 				traffic->retransmits += retransmit;
 			}
 		}
+	}
+
+	void flushEntities(size_t slot, Time now)
+	{
+		auto &peer = peers[slot];
+		if (now < peer.nextEntitySnapshot)
+			return;
+		std::optional<EntitySnapshots> entities;
+		{
+			std::lock_guard lock(mutex);
+			entities = std::exchange(mailboxes[slot].entities, std::nullopt);
+		}
+		if (!entities)
+			return;
+		// Each family has its own budget, leaving global headroom for
+		// player snapshots, terrain and reliable controls under load.
+		if (itemCapacity.take(now, 1, 256, 24))
+			peer.link->sendFresh(sender(peer), now, entities->items);
+		if (mobCapacity.take(now, 1, 256, 24))
+			peer.link->sendFresh(sender(peer), now, entities->mobs);
+		peer.nextEntitySnapshot = now + 100ms;
 	}
 
 	void flushSnapshot(size_t slot, Time now)
@@ -399,6 +453,12 @@ struct ServerTransport::Impl
 			const auto slot = (firstPeer + i) % peers.size();
 			if (peers[slot].confirmed && !peers[slot].closing)
 				flushSnapshot(slot, now);
+		}
+		for (size_t i = 0; i < peers.size(); ++i)
+		{
+			const auto slot = (firstPeer + i) % peers.size();
+			if (peers[slot].confirmed && !peers[slot].closing)
+				flushEntities(slot, now);
 		}
 		if (!peers.empty())
 			firstPeer = (firstPeer + 1) % peers.size();
@@ -482,10 +542,15 @@ struct ServerTransport::Impl
 		{
 			if (const auto result = owner.receiveRemote(work.admission->player, work.intents))
 			{
+				const auto inventory = owner.inventoryRemote(work.admission->player);
 				std::lock_guard lock(mutex);
 				auto &box = mailboxes[work.slot];
 				if (!box.closing)
+				{
 					box.result = result;
+					box.stageInventory(inventory);
+					box.resultInventoryRevision = inventory ? inventory->revision : 0;
+				}
 			}
 		}
 		// Capture after all activations and retirements at this boundary.
@@ -496,25 +561,34 @@ struct ServerTransport::Impl
 			const auto slot = (start + i) % mailboxes.size();
 			auto &box = mailboxes[slot];
 			sim::PlayerId player;
-			bool snapshotDue, worldReady, allowBaseline;
+			bool snapshotDue, entitiesDue, worldReady, allowBaseline;
 			{
 				std::lock_guard lock(mutex);
 				if (!box.active || box.closing)
 					continue;
 				player = box.admission->player;
 				snapshotDue = completedTick % kSnapshotIntervalTicks == 0 && box.lastSnapshotTick != completedTick;
+				entitiesDue = completedTick % kEntitySnapshotIntervalTicks == 0 && box.lastEntityTick != completedTick;
 				worldReady = !box.worldBusy;
 				allowBaseline = activeBaselines < kMaxConcurrentChunkTransfers;
 			}
 			std::optional<wire::PlayerSnapshot> snapshot;
 			if (snapshotDue)
 				snapshot = owner.snapshotRemote(player);
+			const auto inventory = owner.inventoryRemote(player);
+			auto entities = entitiesDue ? owner.entitySnapshotsRemote(player) : std::nullopt;
 			auto worldUpdate = worldReady ? owner.nextWorldUpdate(player, allowBaseline) : std::nullopt;
-			if (!snapshot && !worldUpdate)
+			if (!snapshot && !inventory && !entities && !worldUpdate)
 				continue;
 			std::lock_guard lock(mutex);
 			if (box.closing)
 				continue;
+			box.stageInventory(inventory);
+			if (entities)
+			{
+				box.entities = std::move(entities);
+				box.lastEntityTick = completedTick;
+			}
 			if (snapshot)
 			{
 				box.snapshot = std::move(snapshot);
@@ -545,7 +619,7 @@ struct ServerTransport::Impl
 	std::vector<OwnerInbox> ownerInbox;
 	std::array<Discovery, 256> discoveryRates;
 	Traffic globalIn, globalOut;
-	Bucket snapshotCapacity;
+	Bucket snapshotCapacity, itemCapacity, mobCapacity;
 	uint64_t generation{};
 	uint64_t ownerTick{}; // published and read under mutex
 	size_t firstPeer{}, firstWorldPeer{};

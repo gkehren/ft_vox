@@ -20,6 +20,13 @@ struct ReplicatedChunk
 
 using ChunkProjection = std::map<wire::ChunkCoord, ReplicatedChunk>;
 
+template<class Snapshot>
+struct SnapshotHistory
+{
+	std::optional<Snapshot> previous;
+	std::optional<Snapshot> current;
+};
+
 // Minimal v2 client IO adapter. A single caller owns the nonblocking pump
 // and its connection state. A future client host can run it on its IO thread.
 class ClientTransport
@@ -49,6 +56,11 @@ public:
 	std::optional<wire::SessionScope> scope() const;
 	// Latest authoritative state for the current scope. Cleared on departure.
 	std::optional<wire::PlayerSnapshot> latestPlayerSnapshot() const;
+	std::optional<wire::Inventory> inventory() const;
+	// Current defines the active set. Interpolate only IDs also in previous.
+	// Read on the pump owner thread. Both histories clear on scope retirement.
+	const SnapshotHistory<wire::ItemSnapshot> &itemSnapshots() const;
+	const SnapshotHistory<wire::MobSnapshot> &mobSnapshots() const;
 	// Only verified, fully installed chunks. Read on the pump owner thread.
 	const ChunkProjection &chunks() const;
 	std::optional<wire::RejectReason> rejection() const;

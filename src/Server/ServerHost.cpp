@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <numbers>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -38,6 +39,74 @@ bool inInterest(wire::ChunkCoord coord, glm::ivec2 center, int radius)
 uint8_t wireMaterial(uint8_t material)
 {
 	return material == AIR ? wire::kAirMaterial : material;
+}
+
+wire::EntityMotion entityMotion(const physics::Body &body)
+{
+	wire::EntityMotion motion;
+	constexpr int32_t limit = wire::kHorizontalLimit * wire::kEntityPositionScale;
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		motion.position[axis] = static_cast<int32_t>(std::clamp(
+			std::round(body.position[axis] * wire::kEntityPositionScale), double(-limit), double(limit - 1)));
+		const double velocity = body.velocity[axis];
+		motion.velocity[axis] = std::isfinite(velocity) ? static_cast<int16_t>(std::clamp(
+			std::round(velocity * wire::kEntityVelocityScale), double(INT16_MIN), double(INT16_MAX))) : 0;
+	}
+	return motion;
+}
+
+template<class Record, size_t N, class Entity, class Decorate>
+uint8_t captureEntities(std::array<Record, N> &records, const std::vector<Entity> &population,
+	glm::dvec3 feet, int radius, uint64_t Entity::*id, Decorate decorate)
+{
+	struct Candidate
+	{
+		const Entity *entity;
+		double distanceSquared;
+	};
+	std::array<Candidate, N> nearest;
+	size_t count = 0;
+	const auto center = chunkAt(feet);
+	const auto closer = [id](const Candidate &a, const Candidate &b) {
+		if (a.distanceSquared != b.distanceSquared)
+			return a.distanceSquared < b.distanceSquared;
+		return a.entity->*id < b.entity->*id;
+	};
+	for (const auto &entity : population)
+	{
+		const auto position = entity.body.position;
+		const auto representable = [](double coordinate) {
+			return coordinate >= -wire::kHorizontalLimit && coordinate < wire::kHorizontalLimit;
+		};
+		if (!representable(position.x) || !representable(position.y) || !representable(position.z))
+			continue;
+		const auto coord = chunkAt(position);
+		if (!inInterest({coord.x, coord.y}, center, radius))
+			continue;
+		const auto offset = position - feet;
+		const Candidate candidate{&entity, offset.x * offset.x + offset.z * offset.z};
+		if (count == N)
+		{
+			if (!closer(candidate, nearest.front()))
+				continue;
+			std::pop_heap(nearest.begin(), nearest.end(), closer);
+			--count;
+		}
+		nearest[count++] = candidate;
+		std::push_heap(nearest.begin(), nearest.begin() + count, closer);
+	}
+	std::sort(nearest.begin(), nearest.begin() + count, [id](const Candidate &a, const Candidate &b) {
+		return a.entity->*id < b.entity->*id;
+	});
+	for (size_t i = 0; i < count; ++i)
+	{
+		const auto &entity = *nearest[i].entity;
+		records[i].id = entity.*id;
+		records[i].motion = entityMotion(entity.body);
+		decorate(records[i], entity);
+	}
+	return static_cast<uint8_t>(count);
 }
 
 wire::ActionCode actionCode(sim::VoxelTargetResult result)
@@ -87,6 +156,20 @@ wire::ActionCode actionCode(sim::PlaceResult result)
 	case Place::InvalidPlayer: return Code::Forbidden;
 	}
 	return Code::Unavailable;
+}
+
+wire::ActionCode actionCode(items::ItemResult result)
+{
+	using Result = items::ItemResult;
+	using Code = wire::ActionCode;
+	switch (result)
+	{
+	case Result::Ok: return Code::Accepted;
+	case Result::Partial: return Code::Partial;
+	case Result::IdExhausted: return Code::Unavailable;
+	case Result::InvalidPlayer: return Code::Forbidden;
+	default: return Code::InventoryRejected;
+	}
 }
 } // namespace
 
@@ -150,8 +233,34 @@ wire::ActionResult ServerHost::applyAction(sim::PlayerId player, const wire::Act
 	using Code = wire::ActionCode;
 	wire::ActionResult result{action.actionId, m_ticks, m_sim->world()->nextEditId(),
 		0, action.operation, Code::Unavailable};
-	if (action.operation != Kind::Break && action.operation != Kind::Place)
+	switch (action.operation)
+	{
+	case Kind::Select:
+		result.code = actionCode(m_sim->selectHotbarSlot(player, action.slot));
 		return result;
+	case Kind::DropOne:
+	case Kind::DropStack:
+	{
+		const auto count = action.operation == Kind::DropOne ? uint16_t{1}
+			: m_sim->inventory(player)->stack(action.slot).count;
+		// Slot intents carry no aim. Use a fixed server-owned toss direction.
+		result.code = count == 0 ? Code::InventoryRejected
+			: actionCode(m_sim->dropFromSlot(player, action.slot, count, {0, 0, 1}));
+		return result;
+	}
+	case Kind::Move:
+		result.code = actionCode(m_sim->moveStack(player, action.slot, action.otherSlot));
+		return result;
+	case Kind::Swap:
+		result.code = actionCode(m_sim->swapStacks(player, action.slot, action.otherSlot));
+		return result;
+	case Kind::SplitHalf:
+		result.code = actionCode(m_sim->splitStack(player, action.slot, action.otherSlot));
+		return result;
+	case Kind::Break:
+	case Kind::Place:
+		break;
+	}
 
 	const bool placing = action.operation == Kind::Place;
 	const auto operation = placing ? sim::VoxelInteraction::Place : sim::VoxelInteraction::Break;
@@ -208,6 +317,37 @@ wire::PlayerSnapshot ServerHost::snapshotRemote(sim::PlayerId player) const
 			(state.waitingForTerrain ? wire::PlayerState::waitingForTerrain : 0u) |
 			(state.flight ? wire::PlayerState::flight : 0u);
 	}
+	return snapshot;
+}
+
+std::optional<wire::Inventory> ServerHost::inventoryRemote(sim::PlayerId player)
+{
+	auto &last = m_remotePlayers.at(player).inventory;
+	sim::InventorySnapshot state;
+	if (!m_sim->inventorySnapshot(player, state))
+		return std::nullopt;
+	if (last.revision == 0 || last.slots != state.slots || last.selected != state.selectedSlot)
+	{
+		if (last.revision == UINT64_MAX)
+			throw std::overflow_error("inventory revision exhausted");
+		last = {m_ticks, last.revision + 1, static_cast<uint8_t>(state.selectedSlot), state.slots};
+	}
+	return last;
+}
+
+std::optional<udp::EntitySnapshots> ServerHost::entitySnapshotsRemote(sim::PlayerId player) const
+{
+	udp::EntitySnapshots snapshot;
+	snapshot.items.tick = snapshot.mobs.tick = m_ticks;
+	snapshot.items.idHighWater = m_sim->itemIdHighWater();
+	const auto feet = m_sim->playerFeet(player);
+	const auto radius = m_config.interestRadiusChunks;
+	snapshot.items.count = captureEntities(snapshot.items.items, m_sim->itemEntities().entities(), feet,
+		radius, &items::ItemEntity::id, [](auto &record, const auto &entity) { record.stack = entity.stack; });
+	snapshot.mobs.count = captureEntities(snapshot.mobs.mobs, m_sim->mobs().mobs(), feet,
+		radius, &entities::Mob::replicationId, [](auto &record, const auto &entity) {
+			record.species = static_cast<uint8_t>(entity.species);
+		});
 	return snapshot;
 }
 
@@ -401,10 +541,9 @@ bool ServerHost::step(TerrainTiming terrainTiming, std::string &error)
 		return false;
 
 	const double radiusBlocks = m_config.interestRadiusChunks * static_cast<double>(CHUNK_SIZE);
-	m_sim->advanceMobs(kTickDt, m_sim->playerFeet(), radiusBlocks, false);
-	// Only the compatibility anchor's inventory is checkpointed. Keep
-	// shared items out of temporary remote inventories until pickup lands.
-	m_sim->advanceItems(kTickDt, false, sim::GameSimulation::ItemPickup::LocalOnly);
+	constexpr auto anchorPolicy = sim::GameSimulation::LocalAnchorPolicy::Exclude;
+	m_sim->advancePlayerMobs(kTickDt, radiusBlocks, false, anchorPolicy);
+	m_sim->advanceItems(kTickDt, false, anchorPolicy);
 	m_sim->pumpWorld();
 
 	distributeWorldEdits();

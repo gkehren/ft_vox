@@ -64,11 +64,14 @@ void MobSystem::reset(uint64_t seed)
     m_groups.clear();
     m_accumulator = m_spawnTimer = 0;
     m_dropped = 0;
+    m_nextReplicationId = 1;
+    m_nextObserver = 0;
 }
 bool MobSystem::add(MobSpecies species, glm::dvec3 feet, uint64_t id, uint64_t origin,
                     const physics::VoxelCollisionWorld &world)
 {
-    if (m_mobs.size() >= MobSettings::capacity || size_t(species) >= kMobSpeciesCount)
+    if (m_mobs.size() >= MobSettings::capacity || size_t(species) >= kMobSpeciesCount ||
+        m_nextReplicationId == UINT64_MAX)
         return false;
     for (auto &m : m_mobs)
         if (m.id == id)
@@ -92,6 +95,7 @@ bool MobSystem::add(MobSpecies species, glm::dvec3 feet, uint64_t id, uint64_t o
     m.previous = feet;
     m.yaw = m.previousYaw = m.targetYaw = random(m.randomState) * 6.283185307;
     m.timer = 2 + 4 * random(m.randomState);
+    m.replicationId = m_nextReplicationId++;
     assert(size_t(m.species) < kMobSpeciesCount);
     m_mobs.push_back(m);
     return true;
@@ -310,6 +314,12 @@ void tickMob(Mob &m, const physics::VoxelCollisionWorld &world, double dt,
 void MobSystem::update(double dt, const MobWorld &world, glm::dvec3 observer, double availableRadius,
                        bool suspended)
 {
+    update(dt, world, std::span(&observer, 1), availableRadius, suspended);
+}
+
+void MobSystem::update(double dt, const MobWorld &world, std::span<const glm::dvec3> observers,
+                       double availableRadius, bool suspended)
+{
     validateSettings(settings);
     m_queries = {};
     if (suspended)
@@ -326,6 +336,11 @@ void MobSystem::update(double dt, const MobWorld &world, glm::dvec3 observer, do
         return;
     }
     const double retire = std::min(settings.retireDistance, std::max(0.0, availableRadius));
+    const auto outsideAll = [&](glm::dvec3 position) {
+        return std::ranges::none_of(observers, [&](glm::dvec3 observer) {
+            return distance2(position, observer) <= retire * retire;
+        });
+    };
     std::erase_if(m_mobs, [&](auto &m) {
         // Non-finite positions are retired BEFORE the floor() cast (review
         // §4.9): floor(NaN) -> ivec3 is UB in Release; upstream guards make
@@ -333,18 +348,19 @@ void MobSystem::update(double dt, const MobWorld &world, glm::dvec3 observer, do
         if (!std::isfinite(m.body.position.x) || !std::isfinite(m.body.position.y) ||
             !std::isfinite(m.body.position.z))
             return true;
-        return distance2(m.body.position, observer) > retire * retire ||
+        return outsideAll(m.body.position) ||
                !world.sample(glm::ivec3(glm::floor(m.body.position))).available;
     });
     std::erase_if(m_groups, [&](auto &g) {
-        auto d = g.center - glm::dvec2(observer.x, observer.z);
-        return glm::dot(d, d) > retire * retire;
+        return outsideAll({g.center.x, 0.0, g.center.y});
     });
     dt = std::isfinite(dt) ? std::max(dt, 0.0) : 0.0;
     m_spawnTimer -= dt;
-    if (m_spawnTimer <= 0)
+    if (m_spawnTimer <= 0 && !observers.empty())
     {
-        populate(world, observer, std::min(settings.spawnMax, retire));
+        // Keep the existing global scan budget, cycling through owner-sorted observers.
+        m_nextObserver %= observers.size();
+        populate(world, observers[m_nextObserver++], std::min(settings.spawnMax, retire));
         m_spawnTimer = settings.spawnInterval;
     }
     m_accumulator += dt;

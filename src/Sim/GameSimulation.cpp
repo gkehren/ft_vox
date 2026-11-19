@@ -514,7 +514,25 @@ void GameSimulation::advanceMobs(double dt, glm::dvec3 observer, double availabl
     m_mobs.update(dt, world, observer, availableRadius, suspended || !m_mobsEnabled);
 }
 
-void GameSimulation::advanceItems(double dt, bool suspended, ItemPickup pickup)
+bool GameSimulation::isGameplayParticipant(const PlayerEntry &entry, LocalAnchorPolicy anchorPolicy) const
+{
+    return entry.state.positioned && (anchorPolicy == LocalAnchorPolicy::Include || entry.id != localPlayerId());
+}
+
+void GameSimulation::advancePlayerMobs(double dt, double availableRadius, bool suspended, LocalAnchorPolicy anchorPolicy)
+{
+    if (!m_world || !m_terrainGenerator)
+        return;
+    std::array<glm::dvec3, kMaxPlayers> observers;
+    size_t count = 0;
+    for (const auto &entry : m_players)
+        if (isGameplayParticipant(*entry, anchorPolicy))
+            observers[count++] = entry->state.controller.body.position;
+    WorldMobView world(*m_world, *m_terrainGenerator);
+    m_mobs.update(dt, world, std::span(observers).first(count), availableRadius, suspended || !m_mobsEnabled);
+}
+
+void GameSimulation::advanceItems(double dt, bool suspended, LocalAnchorPolicy anchorPolicy)
 {
     if (!m_world)
         return;
@@ -522,11 +540,8 @@ void GameSimulation::advanceItems(double dt, bool suspended, ItemPickup pickup)
     // is NOT pumped here: publication ordering stays with the bridge /
     // pumpWorld (issue #114).
     WorldCollisionView world(*m_world);
-    // Actor-aware pickup (issue #247): every POSITIONED live session is an
-    // eligible receiver, in ascending-PlayerId order (m_players is id-sorted by
-    // construction) — the deterministic pickup priority. Unpositioned sessions
-    // (created but not yet spawned/placed) are excluded so a default-origin
-    // body never vacuum-collects shared drops (issue #247 review). The buffer
+    // Actor-aware pickup (issue #247): m_players is id-sorted, so the
+    // participant filter preserves deterministic pickup priority. The buffer
     // is reserved once and refilled in place (no per-frame allocation). A
     // suspended frame skips the refill (the system ignores candidates and
     // only syncs previous/current).
@@ -534,7 +549,7 @@ void GameSimulation::advanceItems(double dt, bool suspended, ItemPickup pickup)
     if (!suspended)
     {
         for (const std::unique_ptr<PlayerEntry> &entry : m_players)
-            if (entry->state.positioned && (pickup == ItemPickup::AllPositioned || entry->id == localPlayerId()))
+            if (isGameplayParticipant(*entry, anchorPolicy))
                 m_pickupCandidates.push_back({entry->state.controller.body.position, &entry->state.inventory});
     }
     m_items.update(dt, world, m_pickupCandidates, suspended);

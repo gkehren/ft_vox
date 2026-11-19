@@ -51,7 +51,7 @@ prevents startup.
 The main thread opens the save, synchronously bootstraps terrain, restores
 the local compatibility player and shared item state, then activates
 player-driven residency. The local anchor provides the initial streaming
-and mob observer. At the start of each 60 Hz server tick the owner drains the
+observer. At the start of each 60 Hz server tick the owner drains the
 connection inboxes and resolves admitted voxel actions in ascending
 `PlayerId` order using the last completed poses. It then advances each
 walking player in the same order. Each player runs two 120 Hz steps through
@@ -111,8 +111,8 @@ tampering or network saturation. Keep the default loopback bind for local use.
   are recreated on join.
 - The IO worker validates framing, endpoint, capability, epoch, rate, timing
   and sequence before handing typed input to the simulation owner. Each slot
-  has six input slots, a latest snapshot slot, one pending action or result,
-  and one world send slot. A full
+  has six input slots, one latest snapshot slot per fresh family, one pending
+  inventory, one pending action or result, and one world send slot. A full
   reliable slot leaves its receive cursor unchanged. The adapter uses a
   one-frame reliable send window, retries after 150 ms subject to the rate
   budget, and closes after 5 seconds without progress. The maximum remote
@@ -174,10 +174,8 @@ name that voxel. Place must name the empty cell across the face the ray
 entered. The simulation then applies the shared gameplay rules for
 breakability, walking body overlap, and the actor's selected hotbar stack.
 An accepted break creates at most one drop and an accepted placement spends
-one item. A rejection applies no edit or item effect. Inventory commands
-return `Unavailable` in this phase. Remote inventories start empty. The
-placement fixture provisions the selected stack via the trusted simulation
-grant API. Remote pickup and inventory replication are tracked in #256.
+one item. A rejection applies no edit or item effect. The trusted simulation
+grant API can provision a fixture's selected stack.
 
 Use the target chunk's `version` from `ClientTransport::chunks()` when
 calling `sendAction(action, now)`. It assigns consecutive IDs beginning
@@ -189,6 +187,41 @@ watermark, accepted edit ID or zero, and the result code. A valid request
 with a stale version is settled as `StaleRevision`. For a new attempt, use
 the current projection version. The result settles the command. Terrain
 changes arrive separately through the ordered world stream.
+
+## Inventory and entity replication
+
+Only positioned remote players participate in dedicated-server item pickup.
+The simulation steps the item population once at 60 Hz and offers each
+eligible drop in ascending PlayerId order. Inventory capacity can leave a
+remainder for the next eligible player on the same tick. The server alone
+resolves pickup, slot changes and drops. Each client receives its own 36 slots and hotbar
+selection through `ClientTransport::inventory()`. Remote inventories start
+empty for each session. A slot command's reliable result arrives after the
+client has received the corresponding inventory revision or a newer one.
+
+Passive mobs share one 60 Hz simulation and one population cap. The
+server rotates spawn scans across positioned remote players within the existing
+global spawn budget and retires mobs outside every observer's range.
+With no positioned remotes, there are no mob spawn scans and existing mobs
+retire. The local compatibility anchor serves the server's world lifecycle.
+`ClientTransport::itemSnapshots()` and `mobSnapshots()` expose the previous
+and current samples. Use their server ticks (60 Hz) and stable IDs for
+interpolation. The current sample defines which entities are visible.
+An ID can return after interest re-entry. The client clears these views
+and its inventory when the session retires or resyncs.
+
+Each peer receives up to 10 full snapshots/s per entity family. A full
+38-item datagram is 1,193 bytes and a full 42-mob datagram is 1,179 bytes.
+Together they add at most 23,720 wire bytes/s per peer before UDP/IP
+headers. A one-mob snapshot measures 72 bytes on loopback. The server
+selects the nearest in-interest entities when a packet is full, and each
+family has a process-wide cap of 256 frames/s. The host uses fixed-size
+selection buffers, and the client holds two fixed-size samples per
+family. Fresh updates replace unsent ones. The wire format and delivery
+rules are described in the [protocol ADR](adr/authoritative-wire-protocol.md#nearby-entities).
+
+A future CPU-only load benchmark can measure per-client snapshot rate and
+age, server tick latency and client progress at 16, 32 and 64 clients.
 
 Malformed requests, old or skipped IDs, and wrong scopes are discarded
 before consuming an action slot. Reliable receipt ACKs are independent of
@@ -275,7 +308,9 @@ Other clients recover through their timeout.
 
 The checkpoint schema is shared with existing solo saves. The active
 checkpoint carries the local actor's state and inventory, shared voxel
-overrides, and dropped items with their allocator high-water. The server
+overrides, and dropped items with their allocator high-water. Remote
+inventories are session-scoped and are discarded on departure. Durable
+remote inventory and reconnect identity are tracked in #259. The server
 preserves the restored local orientation. Existing checkpoint recovery and
 refusal rules apply on restart. Rolling back to a solo build uses the same
 save directory directly.
@@ -295,7 +330,7 @@ checkpoint generation. The stopped record shows the last snapshot taken
 before final close, with the stop reason, `saved` flag and exit code.
 Errors are emitted to stderr with a phase and diagnostic.
 
-Run the dedicated tests with `ctest --test-dir build-cpu -R 'ServerHost|ServerLifecycle|UdpTransport|WireProtocol|WorldReplication|VoxelActions' --output-on-failure`
+Run the dedicated tests with `ctest --test-dir build-cpu -R 'ServerHost|ServerLifecycle|UdpTransport|WireProtocol|WorldReplication|VoxelActions|EntityReplication' --output-on-failure`
 (add `-C Release` for Visual Studio). They cover clock stalls and cadence,
 sync/async fixed steps, deferred edits at shutdown, saved-world restart,
 write/commit failures, signal/admin termination, port 0, occupied ports,
@@ -312,4 +347,10 @@ mismatch, queue limits, server restart, and delivery on the IO worker.
 ordered differently from transport slots, conservation, stale and invalid
 requests, lost ACKs/results/deltas, deferred backing writes, chunk refetch
 after departure, and checkpoint recovery in a fresh epoch.
+`EntityReplication` covers two simultaneous pickup contenders, partial
+pickup count changes, private inventory and action delivery, packet loss
+and replay, interest boundaries and caps, expiry, and item allocator
+recovery after reconnect and restart.
+`ServerHost` and `EntityReplication` also cover pickup and mob observation
+with the compatibility anchor at spawn, including an empty remote set.
 CTest returns nonzero on failure.

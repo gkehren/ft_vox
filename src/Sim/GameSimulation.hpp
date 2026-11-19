@@ -455,23 +455,28 @@ public:
     /// sim-owned mobsEnabled() toggle suspends it as well.
     void advanceMobs(double dt, glm::dvec3 observer, double availableRadius, bool suspended);
 
+    // Dedicated hosts keep a local compatibility player for the world lifecycle.
+    enum class LocalAnchorPolicy { Include, Exclude };
+
+    /// One shared step with positioned participants as population/retirement observers.
+    void advancePlayerMobs(double dt, double availableRadius, bool suspended,
+                           LocalAnchorPolicy anchorPolicy = LocalAnchorPolicy::Include);
+
     /// One host frame of dropped item entities (fixed 60 Hz internally,
     /// issue #226). The host calls it NEXT TO advanceMobs (the #227 rewiring
     /// adds the call site; until then only headless hosts/tests drive it).
-    /// Actor-aware pickup (issue #247, Epic #245 Phase A2): every POSITIONED
-    /// live session is eligible by default, evaluated in ascending-PlayerId
+    /// Actor-aware pickup (issue #247, Epic #245 Phase A2): positioned
+    /// participants are evaluated in ascending-PlayerId
     /// order (the deterministic priority); each drop merges hotbar-first into
     /// the first in-range player, a partial remainder is offered to the next
     /// eligible player in the same tick, and the aggregate count is conserved.
     /// Unpositioned sessions (created but not yet spawned/placed) are excluded
     /// so a default-origin body never vacuum-collects shared drops. Solo (one
     /// positioned session) is bit-identical to the historical local-only rule.
-    /// The dedicated server can restrict pickup to the checkpointed local actor.
     /// Suspension freezes the population and syncs previous/current (no
     /// catch-up burst). The world is NOT pumped here — the issue #114
     /// publication ordering stays with the bridge / pumpWorld().
-    enum class ItemPickup { AllPositioned, LocalOnly };
-    void advanceItems(double dt, bool suspended, ItemPickup pickup = ItemPickup::AllPositioned);
+    void advanceItems(double dt, bool suspended, LocalAnchorPolicy anchorPolicy = LocalAnchorPolicy::Include);
 
     /// Headless world publication: publish finished generation jobs + apply
     /// deferred logical edits. The graphical host does NOT call this — the
@@ -935,6 +940,8 @@ private:
         PlayerId id;
         PlayerState state;
     };
+
+    bool isGameplayParticipant(const PlayerEntry &entry, LocalAnchorPolicy anchorPolicy) const;
 
     /// The local player is always the FIRST entry (created at construction,
     /// never removable, ids monotonic) — O(1) access for the legacy forwards.
