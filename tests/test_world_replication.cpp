@@ -1760,6 +1760,9 @@ struct ReplicaPrediction
 		return {world, verified, &terrain};
 	}
 
+	physics::Cell cell(glm::ivec3 position) { return collision().sample(position); }
+	udp::ClientWorld::TerrainChanges terrainChanges() { return collision().terrainChanges(); }
+
 	void stageFloor(wire::ChunkCoord coord)
 	{
 		auto &image = verified[coord];
@@ -1831,7 +1834,7 @@ void testReplicaCameraHold(bool leased)
 			client.edit({10, 2, 8}, STONE);
 		client.snapshot(anchor);
 		client.input(-1.f);
-		require(!client.collision().sample({8, 0, 8}).available &&
+		require(!client.cell({8, 0, 8}).available &&
 			client.prediction.waitingForTerrain() && client.prediction.backlog() == 0 &&
 			client.prediction.feet() == anchor && client.camera() == displayed &&
 			client.prediction.stats().hardResets == 1, "revision gap moved the camera or reset prediction twice");
@@ -1839,7 +1842,7 @@ void testReplicaCameraHold(bool leased)
 	record->setInTransit(false);
 	client.publish();
 	client.input(-1.f);
-	require(client.collision().sample({8, 0, 8}).solid && client.camera() == displayed &&
+	require(client.cell({8, 0, 8}).solid && client.camera() == displayed &&
 		client.prediction.backlog() == 0, "publication resumed prediction without a fresh snapshot");
 	client.snapshot(anchor);
 	client.input(1.f);
@@ -1862,7 +1865,7 @@ void testReplicaTerrainChanges()
 	client.input(1.f);
 	const auto before = client.camera();
 	client.edit({24, 1, 8}, STONE);
-	require(!client.collision().terrainChanges().invalidated, "unqueried neighbor invalidated prediction");
+	require(!client.terrainChanges().invalidated, "unqueried neighbor invalidated prediction");
 	client.publish();
 	client.input(1.f);
 	const auto after = client.camera();
@@ -1875,7 +1878,7 @@ void testReplicaTerrainChanges()
 
 	client.edit({8, 0, 8}, wire::kAirMaterial);
 	require(client.camera() == reconciled && client.prediction.backlog() == 0 &&
-		!client.collision().sample({8, 0, 8}).available, "support edit used stale physics or moved the camera");
+		!client.cell({8, 0, 8}).available, "support edit used stale physics or moved the camera");
 	client.publish();
 	client.snapshot(anchor);
 	client.input(0.f, 6);
@@ -1904,7 +1907,7 @@ void testReplicaTerrainBoundaries()
 		const auto crossed = client.camera();
 		require(crossed && crossed->x > edge, "prediction fixture did not cross the seam");
 		client.edit({edge, 1, 8}, STONE);
-		require(client.collision().terrainChanges().invalidated && client.camera() == crossed &&
+		require(client.terrainChanges().invalidated && client.camera() == crossed &&
 			client.prediction.backlog() == 0, "destination chunk was absent from the swept footprint");
 		client.publish();
 		require(!client.camera(), "camera projected the held body through a published obstacle");
@@ -1924,9 +1927,9 @@ void testReplicaTerrainBoundaries()
 	const auto blocked = client.camera();
 	require(blocked && blocked->x < 15.701, "prediction traversed unknown terrain");
 	client.stageFloor({1, 0});
-	require(!client.collision().terrainChanges().invalidated, "verified baseline counted as readable before publication");
+	require(!client.terrainChanges().invalidated, "verified baseline counted as readable before publication");
 	client.publish();
-	require(client.collision().terrainChanges().invalidated && client.camera() == blocked &&
+	require(client.terrainChanges().invalidated && client.camera() == blocked &&
 		client.prediction.backlog() == 0, "publication did not retire the history blocked by unknown terrain");
 	client.snapshot(anchor);
 	client.input(1.f, 12);
@@ -1964,7 +1967,7 @@ void testReplicaTerrainDiscontinuities()
 	client.prediction = {};
 	client.sequence = client.intendedTick = 0;
 	require(!client.camera() && !client.prediction.waitingForTerrain() &&
-		!client.collision().terrainChanges().invalidated && client.prediction.backlog() == 0,
+		!client.terrainChanges().invalidated && client.prediction.backlog() == 0,
 		"retiring the session left its presentation or prediction live");
 	client.sample.tick = 0;
 	constexpr glm::dvec3 newEpochFeet{-80.5, 1.001, 8.5};
@@ -1998,7 +2001,7 @@ void testReplicaTerrainCapacity()
 	require(client.prediction.waitingForTerrain() && client.prediction.backlog() == 0 &&
 		client.prediction.stats().hardResets == 1, "overflow retained untracked prediction");
 	client.snapshot({8.5, 1.001, 8.5});
-	require(client.camera() && !client.prediction.waitingForTerrain() && !client.collision().terrainChanges().invalidated,
+	require(client.camera() && !client.prediction.waitingForTerrain() && !client.terrainChanges().invalidated,
 		"a fresh bounded footprint did not recover after overflow");
 }
 
