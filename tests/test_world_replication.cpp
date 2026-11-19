@@ -1,13 +1,16 @@
 #include <Items/ItemRegistry.hpp>
 #include <Network/ClientTransport.hpp>
+#include <Network/ClientTickScheduler.hpp>
 #include <Network/ClientWorld.hpp>
 #include <Server/ServerHost.hpp>
 #include <World/WorldCollisionView.hpp>
 
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <string_view>
@@ -150,7 +153,9 @@ struct Relay
 				if (std::exchange(duplicateEdit, false))
 					pending.emplace(now + delay + 150ms, std::pair{to, frame});
 			}
-			pending.emplace(now + delay, std::pair{to, frame});
+			const auto transit = profile ? profile(packet, fromServer, now) : std::optional{delay};
+			if (transit)
+				pending.emplace(now + *transit, std::pair{to, frame});
 		}
 		while (!pending.empty() && pending.begin()->first <= now)
 		{
@@ -163,6 +168,7 @@ struct Relay
 	udp::Socket socket{loopback};
 	udp::Address server, client{};
 	std::chrono::milliseconds delay;
+	std::function<std::optional<std::chrono::milliseconds>(const wire::Packet &, bool, Time)> profile;
 	bool dropFragment{}, duplicateFragment{}, corruptFragment{}, dropEdit{}, duplicateEdit{};
 	bool dropActionResult{}, dropAllActionResults{}, dropActionAck{};
 	bool dropInventory{}, dropItemSnapshot{};
@@ -1083,6 +1089,334 @@ void testEntityReplication(const fs::path &root)
 	require(restarted.stop(error), error);
 }
 
+void testClientTickMath()
+{
+	using Scheduler = udp::ClientTickScheduler;
+	Scheduler scheduler;
+	const Time now{};
+	require(scheduler.schedule(now).count == 0, "scheduled without a snapshot");
+	scheduler.observeSnapshot(100, now);
+	const auto fallback = scheduler.schedule(now);
+	require(!scheduler.roundTripEstimate() && fallback.firstTick >= 102 &&
+		udp::withinInputWindow(fallback.firstTick + fallback.count - 1, 100), "unmeasured fallback");
+	scheduler.observeRoundTrip(-1ms);
+	scheduler.observeRoundTrip(Scheduler::Seconds{std::numeric_limits<double>::infinity()});
+	scheduler.observeRoundTrip(24h);
+	require(!scheduler.roundTripEstimate(), "invalid RTT accepted");
+	scheduler.observeRoundTrip(120ms);
+	const auto delayed = scheduler.schedule(now);
+	require(delayed.firstTick == 108 && delayed.count == 2 &&
+		!udp::withinInputWindow(delayed.firstTick, 100) && udp::withinInputWindow(delayed.firstTick, 107),
+		"used the snapshot tick instead of the expected arrival window");
+
+	std::vector<wire::Input> sent;
+	const auto emit = [&](const wire::Input &sample) { sent.push_back(sample); return true; };
+	const wire::Input controls{.moveX = 1.f, .flags = wire::Input::sprint | wire::Input::jump};
+	// First write succeeds and the jump write hits backpressure.
+	require(!scheduler.send(now, controls, [&](auto sample) {
+		return (sample.flags & wire::Input::jump) == 0 && emit(sample);
+	}), "reported an unsent jump");
+	require(scheduler.send(now, controls, emit) && sent.size() == 2 &&
+		sent[0].intendedTick < sent[1].intendedTick && sent[0].flags == wire::Input::sprint &&
+		sent[1].flags == (wire::Input::sprint | wire::Input::jump), "jump edge duplicated or lost in batch");
+	require(scheduler.schedule(now).count == 0, "reused a sent tick");
+	require(scheduler.schedule(now + 500ms).count == 0, "stale snapshot extrapolated through a frame stall");
+	scheduler.observeSnapshot(130, now + 500ms);
+	require(scheduler.schedule(now + 500ms).firstTick > 130 &&
+		scheduler.schedule(now + 500ms).count <= Scheduler::kMaxBatch, "replayed backlog on frame resume");
+
+	scheduler.reset();
+	scheduler.observeRoundTrip(20ms);
+	scheduler.observeRoundTrip(400ms);
+	require(*scheduler.roundTripEstimate() < 40ms, "a single RTT outlier jumped the clock");
+	for (int i = 0; i < 12; ++i)
+		scheduler.observeRoundTrip(120ms);
+	require(*scheduler.roundTripEstimate() > 110ms, "repeated measurements did not adapt");
+	scheduler.observeSnapshot(40, now);
+	scheduler.send(now + 100ms, {}, emit);
+	scheduler.observeSnapshot(41, now + 100ms);
+	require(scheduler.schedule(now + 100ms).count == 0, "backward correction reused sent ticks");
+	scheduler.observeSnapshot(50, now + 150ms);
+	require(scheduler.schedule(now + 150ms).firstTick > sent.back().intendedTick,
+		"clock correction jammed the sent tick cursor");
+
+	scheduler.reset();
+	require(!scheduler.roundTripEstimate() && scheduler.schedule(now).count == 0, "session timing survived reset");
+	scheduler.observeSnapshot(UINT64_MAX - 2, Time::min());
+	require(scheduler.schedule(Time::max()).count == 0, "extreme clock endpoints overflowed");
+	require(scheduler.schedule(Time::min()).count == 0, "tick overflow wrapped");
+	scheduler.observeRoundTrip(0ms);
+	scheduler.send(Time::min(), {}, emit);
+	require(sent.back().intendedTick == UINT64_MAX && scheduler.schedule(Time::min()).count == 0,
+		"last representable tick wrapped the send cursor");
+	scheduler.reset();
+	scheduler.observeSnapshot(0, now);
+	require(scheduler.schedule(now).firstTick < 10, "new epoch could not start from tick zero");
+}
+
+void testClientTimingSamples()
+{
+	udp::Socket server(loopback);
+	udp::ClientTransport client(server.address());
+	const Time start{};
+	client.connect(start);
+	client.poll(start);
+	udp::Received frame;
+	require(server.receive(frame), "first Hello missing");
+	wire::Packet hello;
+	require(wire::decode(wire::Endpoint::Client, std::span(frame.bytes).first(frame.size), hello) ==
+		wire::CodecStatus::Ok, "read first Hello");
+	const auto peer = frame.from;
+	const auto nonce = std::get<wire::Hello>(hello.payload).nonce;
+	const auto reply = [&](wire::Packet packet) {
+		wire::Datagram datagram;
+		require(wire::encode(wire::Endpoint::Server, packet, datagram) == wire::CodecStatus::Ok &&
+			server.send(peer, datagram.view()), "write timing reply");
+	};
+	const wire::SessionScope scope{13, 17};
+	const sim::PlayerId player{2};
+	const wire::Welcome welcome{nonce, 3, player, 42, TerrainGenerator::kGeneratorVersion,
+		wire::localCompatibility(), 0, 1};
+	client.poll(start + 500ms); // Same nonce as the first attempt.
+	require(server.receive(frame), "Hello retry missing");
+	reply({scope, 0, welcome});
+	client.poll(start + 520ms);
+	require(client.status() == udp::ClientStatus::Connected && !client.takeRoundTripSample(),
+		"ambiguous Hello provided an RTT sample");
+
+	const wire::Action select{.operation = wire::ActionKind::Select, .slot = 1};
+	require(client.sendAction(select, start + 530ms) == 1, "queue first action");
+	client.poll(start + 550ms);
+	reply({scope, 0, wire::Ack{1}});
+	reply({scope, 1, wire::ActionResult{1, 0, 1, 0, wire::ActionKind::Select, wire::ActionCode::Accepted}});
+	client.poll(start + 630ms);
+	require(client.takeRoundTripSample() == 80ms && !client.takeRoundTripSample() && client.takeActionResult(),
+		"action RTT did not use actual first send and matched ACK");
+	require(client.sendAction(select, start + 640ms) == 2, "queue second action");
+	client.poll(start + 650ms);
+	client.poll(start + 800ms); // Successfully retransmitted before ACK.
+	reply({scope, 0, wire::Ack{2}});
+	client.poll(start + 810ms);
+	require(!client.takeRoundTripSample(), "retransmitted action provided an RTT sample");
+
+	wire::PlayerSnapshot snapshot{.tick = 50, .count = 1};
+	snapshot.players[0].player = player;
+	reply({scope, 1, snapshot});
+	client.poll(start + 830ms);
+	require(client.playerSnapshotReceivedAt() == start + 830ms, "snapshot receipt timestamp");
+	require(client.sendInput({53}, start + 830ms) && client.sendInput({100}, start + 1600ms) &&
+		client.inputAcknowledgmentStalled(start + 1600ms), "missing input acknowledgment diagnostic");
+	snapshot.tick = 100;
+	snapshot.lastProcessedInput = 3; // Heartbeat then two inputs.
+	reply({scope, 2, snapshot});
+	client.poll(start + 1610ms);
+	require(!client.inputAcknowledgmentStalled(start + 1610ms), "input acknowledgment did not recover");
+
+	client.disconnect(start + 1620ms);
+	client.poll(start + 1620ms);
+	reply({scope, 0, wire::Ack{3}});
+	client.poll(start + 1630ms);
+	require(client.status() == udp::ClientStatus::Disconnected && !client.playerSnapshotReceivedAt() &&
+		!client.takeRoundTripSample(), "timing state survived departure");
+	while (server.receive(frame)) {}
+	client.connect(start + 1640ms);
+	client.poll(start + 1640ms);
+	require(server.receive(frame) && wire::decode(wire::Endpoint::Client,
+		std::span(frame.bytes).first(frame.size), hello) == wire::CodecStatus::Ok, "read new Hello");
+	auto restarted = welcome;
+	restarted.nonce = std::get<wire::Hello>(hello.payload).nonce;
+	restarted.worldId++;
+	const wire::SessionScope newScope{21, 22};
+	reply({newScope, 0, restarted});
+	reply({scope, 3, snapshot}); // Delayed old-epoch snapshot.
+	snapshot.tick = 0;
+	snapshot.lastProcessedInput = 0;
+	reply({newScope, 1, snapshot});
+	client.poll(start + 1660ms);
+	require(client.scope() == newScope && client.takeRoundTripSample() == 20ms &&
+		client.latestPlayerSnapshot() && client.latestPlayerSnapshot()->tick == 0 &&
+		client.playerSnapshotReceivedAt() == start + 1660ms,
+		"new session and epoch inherited the old timing stream");
+}
+
+// Keep the real server's admission and physics while isolating the movement
+// stream from the unrelated stop-and-wait chunk assembly deadline.
+struct MovementOwner : udp::SessionOwner
+{
+	explicit MovementOwner(server::ServerHost &host) : host(host) {}
+	udp::SessionAdmission joinRemote() override { return host.joinRemote(); }
+	bool activateRemote(sim::PlayerId player) override { return host.activateRemote(player); }
+	void leaveRemote(sim::PlayerId player) override { host.leaveRemote(player); }
+	std::optional<wire::ActionResult> receiveRemote(sim::PlayerId player, const udp::SessionIntents &intents) override
+	{
+		return host.receiveRemote(player, intents);
+	}
+	wire::PlayerSnapshot snapshotRemote(sim::PlayerId player) const override { return host.snapshotRemote(player); }
+
+	server::ServerHost &host;
+};
+
+void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, bool impaired)
+{
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "timing-" + std::to_string(delay.count()) +
+		(impaired ? "-impaired" : ""), .savesRoot = root};
+	config.workers = 0;
+	config.interestRadiusChunks = 2;
+	config.streaming.generations = 0;
+	server::ServerHost host(config);
+	MovementOwner owner(host);
+	std::string error;
+	require(host.start(error), error);
+	auto &sim = server::ServerHostProbe::simulation(host);
+	for (int x = 0; x < 16; ++x)
+		for (int z = 6; z <= 10; ++z)
+			require(sim.placeVoxel({x + 0.5f, 230.5f, z + 0.5f}, STONE).accepted, "prepare walking surface");
+
+	udp::ServerTransport transport(loopback, 1, host.sessionWorld());
+	Relay relay(transport.address(), delay);
+	udp::ClientTransport client(relay.socket.address());
+	udp::ClientTickScheduler scheduler;
+	std::optional<Time> movementStart;
+	uint64_t sentTick = 0, sentSequence = 0;
+	unsigned emitted = 0, delivered = 0, jumps = 0, processed = 0, stableProcessed = 0;
+	std::set<uint64_t> stableSequences;
+	unsigned recovered = 0;
+	bool reordered = false, droppedSnapshot = false, droppedInput = false;
+	Time latestDelivery{};
+	relay.profile = [&](const wire::Packet &packet, bool fromServer, Time now) -> std::optional<std::chrono::milliseconds> {
+		const auto age = movementStart ? now - *movementStart : 0ms;
+		const auto *input = std::get_if<wire::Input>(&packet.payload);
+		if (input && !fromServer)
+		{
+			require(input->intendedTick > sentTick && packet.sequence > sentSequence, "nonmonotonic input or Fresh sequence");
+			sentTick = input->intendedTick;
+			sentSequence = packet.sequence;
+			++emitted;
+			if ((input->flags & wire::Input::jump) != 0)
+				++jumps;
+			if (age >= 400ms && age < 1200ms)
+				stableSequences.insert(packet.sequence);
+			if (age >= 1450ms && age < 1990ms)
+				require(input->moveX == 0 && input->flags == 0, "neutral controls queued a held command");
+		}
+		if (!impaired || !movementStart ||
+		    (!input && !std::holds_alternative<wire::PlayerSnapshot>(packet.payload)))
+			return delay;
+		if (input && emitted % 13 == 0)
+		{
+			droppedInput = true;
+			return std::nullopt;
+		}
+		if (!input && ((age >= 2090ms && age < 2480ms) || packet.sequence % 11 == 0))
+		{
+			droppedSnapshot = true;
+			return std::nullopt;
+		}
+		const auto transit = std::chrono::milliseconds{20 + int(packet.sequence % 3) * 15};
+		if (input)
+		{
+			reordered |= now + transit < latestDelivery;
+			latestDelivery = now + transit;
+			++delivered;
+		}
+		return transit;
+	};
+
+	const Time start{};
+	client.connect(start);
+	uint64_t lastProcessed = 0;
+	auto nextServer = start;
+	auto nextFrame = start;
+	using Tick = std::chrono::duration<int64_t, std::ratio<1, wire::kTickRate>>;
+	int64_t frameNumber = 0;
+	double beginX = 0, turnX = 0, endX = 0;
+	bool jump = false, jumpStarted = false, airborne = false, neutralStopped = false;
+	for (Time now = start; now < start + 6s; now += 1ms)
+	{
+		const auto age = movementStart ? now - *movementStart : 0ms;
+		relay.pump(now);
+		transport.poll(now);
+		if (now >= nextServer)
+		{
+			transport.serviceOwner(owner, host.ticks());
+			require(host.step(server::TerrainTiming::QuiescePerTick, error), error);
+			nextServer = start + std::chrono::ceil<Time::duration>(Tick{static_cast<int64_t>(host.ticks())});
+			if (movementStart)
+			{
+				const auto welcome = client.welcome();
+				require(welcome && sim.hasPlayer(welcome->player), "timing fixture lost its live session");
+				const auto player = welcome->player;
+				const auto state = host.snapshotRemote(player);
+				require(state.lastProcessedInput >= lastProcessed, "authoritative input acknowledgment ran backward");
+				if (state.lastProcessedInput > lastProcessed)
+				{
+					++processed;
+					stableProcessed += stableSequences.contains(state.lastProcessedInput);
+					recovered += age > 3000ms;
+					lastProcessed = state.lastProcessedInput;
+				}
+				sim::PlayerSnapshot local;
+				require(sim.playerSnapshot(player, local), "lost authoritative player during test");
+				airborne |= local.velocity.y > 0.5;
+				if (age >= 1850ms && age < 2000ms)
+				{
+					turnX = local.position.x;
+					neutralStopped |= std::abs(local.velocity.x) < 0.01;
+				}
+				if (age >= 3500ms)
+					endX = local.position.x;
+			}
+		}
+		transport.poll(now);
+		relay.pump(now);
+		if (now >= nextFrame)
+		{
+			nextFrame = start + std::chrono::ceil<Time::duration>(Tick{++frameNumber});
+			if (impaired && age >= 2380ms && age < 2880ms)
+				continue;
+			client.poll(now);
+			if (const auto rtt = client.takeRoundTripSample())
+				scheduler.observeRoundTrip(*rtt);
+			if (const auto stamp = client.playerSnapshotReceivedAt())
+				scheduler.observeSnapshot(client.latestPlayerSnapshot()->tick, *stamp);
+			if (!movementStart && client.latestPlayerSnapshot())
+			{
+				movementStart = now;
+				beginX = sim.playerFeet(client.welcome()->player).x;
+			}
+			if (movementStart)
+			{
+				if (!impaired && !jumpStarted && age >= 650ms)
+					jump = jumpStarted = true;
+				const float move = age < 1300ms ? 1.f : age >= 2000ms && age < 3600ms ? -1.f : 0.f;
+				unsigned batch = 0;
+				if (scheduler.send(now, {.moveX = move, .flags = jump ? wire::Input::jump : uint8_t{0}}, [&](auto input) {
+					++batch;
+					return client.sendInput(input, now);
+				}))
+					jump = false;
+				require(batch <= udp::ClientTickScheduler::kMaxBatch, "unbounded frame catch-up");
+			}
+		}
+	}
+	require(movementStart && scheduler.roundTripEstimate() &&
+		*scheduler.roundTripEstimate() >= delay * 2, "unambiguous handshake timing missing");
+	require(turnX > beginX + 1.5 && endX < turnX - 1.25 && neutralStopped && recovered > 20,
+		"authoritative movement or neutral/recovery failed at " + config.world.worldName);
+	if (impaired)
+		require(reordered && droppedInput && droppedSnapshot && delivered > 50, "did not exercise relay impairments");
+	else
+		require(stableSequences.size() > 35 && stableProcessed * 4 >= stableSequences.size() * 3 &&
+			jumps == 1 && airborne, "stable admission or single jump failed at " + config.world.worldName);
+	std::cout << "ClientTickScheduling " << config.world.worldName << " RTT=" <<
+		std::chrono::duration_cast<std::chrono::milliseconds>(*scheduler.roundTripEstimate()).count()
+		<< "ms processed=" << processed << '/' << emitted << " stable=" << stableProcessed << '/' << stableSequences.size()
+		<< " neutralX=" << turnX << " finalX=" << endX << '\n';
+	transport.stop(owner);
+	require(host.stop(error), error);
+}
+
 void testRenderBacking()
 {
 	udp::ClientWorld view;
@@ -1211,6 +1545,14 @@ int main(int argc, char **argv)
 		{
 			testAnchorPickup(root);
 			testEntityReplication(root);
+		}
+		else if (argc == 2 && std::string_view(argv[1]) == "--input-timing")
+		{
+			testClientTickMath();
+			testClientTimingSamples();
+			for (const auto delay : {0ms, 20ms, 40ms, 60ms})
+				testDelayedInput(root, delay, false);
+			testDelayedInput(root, 40ms, true);
 		}
 		else
 		{

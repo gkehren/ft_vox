@@ -1,7 +1,6 @@
 #include "EngineMultiplayer.hpp"
 
 #include <Items/ItemRegistry.hpp>
-#include <Network/ServerTransport.hpp>
 #include <World/WorldCollisionView.hpp>
 
 #include <cmath>
@@ -111,7 +110,12 @@ const char *Engine::RemoteSession::connectionStatus() const
 	{
 	case ClientStatus::Disconnected: return "Disconnected";
 	case ClientStatus::Connecting: return "Joining server";
-	case ClientStatus::Connected: return ready() ? "Connected" : "Waiting for server terrain and inventory";
+	case ClientStatus::Connected:
+		if (!ready())
+			return "Waiting for server terrain and inventory";
+		if (const auto now = Clock::now(); !inputTiming.hasFreshClock(now) || transport.inputAcknowledgmentStalled(now))
+			return "Connected · input timing degraded";
+		return "Connected";
 	case ClientStatus::Leaving: return "Disconnecting";
 	case ClientStatus::Resyncing: return "Resynchronizing world";
 	case ClientStatus::TimedOut: return "Server unavailable or connection timed out";
@@ -218,7 +222,8 @@ void Engine::pollRemote()
 		remote.scope = next;
 		remote.welcome = next ? welcome : std::nullopt;
 		remote.players = remote.items = remote.mobs = {};
-		remote.lastInputTick = 0;
+		remote.inputTiming.reset();
+		remote.jumpQueuedAt = {};
 		remote.actionPending = false;
 		remote.feedback = nullptr;
 		if (next)
@@ -229,6 +234,16 @@ void Engine::pollRemote()
 			std::cout << "[multiplayer] Joined player=" << welcome->player.value
 				<< " seed=" << welcome->seed << " world=" << welcome->worldId
 				<< " epoch=" << next->epoch << " projection=" << remote.renderEpoch << std::endl;
+		}
+	}
+	if (next)
+	{
+		if (const auto sample = transport.takeRoundTripSample())
+			remote.inputTiming.observeRoundTrip(*sample);
+		if (const auto receivedAt = transport.playerSnapshotReceivedAt())
+		{
+			remote.inputTiming.observeSnapshot(history.current->tick, *receivedAt);
+			remote.players.observe(history, *receivedAt);
 		}
 	}
 	const char *status = remote.connectionStatus();
@@ -246,7 +261,6 @@ void Engine::pollRemote()
 		remote.feedbackUntil = now + 3s;
 	}
 
-	remote.players.observe(history, now);
 	remote.items.observe(transport.itemSnapshots(), now);
 	remote.mobs.observe(transport.mobSnapshots(), now);
 	if (const auto *player = remote.localPlayer())
@@ -262,34 +276,22 @@ void Engine::pollRemote()
 void Engine::sendRemoteInput(const physics::PlayerInput &input)
 {
 	auto &remote = *m_remote;
-	if (!remote.ready() || remote.players.tick > UINT64_MAX - 128)
+	if (!remote.ready())
 		return;
 	const auto now = RemoteSession::Clock::now();
-	const auto elapsedTicks = uint64_t(std::chrono::duration<double>(now - remote.players.arrived).count() *
-		wire::kTickRate);
-	const uint64_t completed = remote.players.tick + elapsedTicks;
-	constexpr uint64_t lead = net::udp::kInputLeadTicks - 2;
-	const uint64_t target = completed + lead;
-	// Keep a short lead on the 60 Hz owner clock. A slow render frame can
-	// fill at most four future inputs and never replays past ticks.
+	if (input.jumpPressed && now - remote.jumpQueuedAt >= 200ms)
+		jumpPressed = false;
 	wire::Input sample;
 	const auto move = input.move * (0.999999 / std::max(glm::length(input.move), 1.0));
 	sample.moveX = float(move.x);
 	sample.moveZ = float(move.y);
-	const uint8_t held = (input.sprint ? wire::Input::sprint : 0) |
-		(input.swimUp ? wire::Input::swimUp : 0) | (input.swimDown ? wire::Input::swimDown : 0);
-	bool jump = input.jumpPressed;
-	for (uint64_t tick = std::max(remote.lastInputTick + 1, completed + 1); tick <= target; ++tick)
-	{
-		sample.intendedTick = tick;
-		sample.flags = held | (jump ? wire::Input::jump : 0);
-		if (!remote.transport.sendInput(sample, now))
-			break;
-		remote.lastInputTick = tick;
-		if (jump)
-			jumpPressed = false;
-		jump = false;
-	}
+	sample.flags = (input.sprint ? wire::Input::sprint : 0) |
+		(input.swimUp ? wire::Input::swimUp : 0) | (input.swimDown ? wire::Input::swimDown : 0) |
+		(input.jumpPressed && jumpPressed ? wire::Input::jump : 0);
+	if (remote.inputTiming.send(now, sample, [&](const wire::Input &inputSample) {
+		return remote.transport.sendInput(inputSample, now);
+	}))
+		jumpPressed = false;
 }
 
 void Engine::updateRemoteEntities()

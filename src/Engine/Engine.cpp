@@ -944,7 +944,11 @@ void Engine::handleEvents()
 			if (m_benchmark.isActive() || !windowFocused)
 				break;
 			if (key == SDLK_SPACE && !paused)
+			{
 				jumpPressed = true;
+				if (m_remote)
+					m_remote->jumpQueuedAt = RemoteSession::Clock::now();
+			}
 			if (key == SDLK_V && sim && !paused)
 			{
 				setPlayerFlight(!sim->playerFlight());

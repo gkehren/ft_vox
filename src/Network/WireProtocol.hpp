@@ -20,6 +20,7 @@ namespace net::wire
 // See docs/adr/authoritative-wire-protocol.md for byte layouts and delivery.
 inline constexpr uint16_t kVersion = 2;
 inline constexpr int kTickRate = 60;
+inline constexpr uint64_t kInputLeadTicks = 6;
 inline constexpr uint16_t kItemSchema = 1;
 inline constexpr size_t kDatagramBytes = 1200;
 inline constexpr size_t kHeaderBytes = 36;

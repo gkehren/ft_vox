@@ -79,11 +79,14 @@ foliage because the wire images carry voxel materials. The local biome
 map, creative flight, isometric inspection and world pause are solo
 features.
 
-The camera follows interpolated server positions, with local mouse look.
+The camera follows interpolated server positions, with immediate local
+mouse look. Movement uses server snapshots without local prediction or
+reconciliation, so visible motion includes both directions of network travel
+and a short interpolation delay. Prediction is tracked in
+[#258](https://github.com/gkehren/ft_vox/issues/258).
 Interpolation also covers up to 23 other players, 38 dropped items, and 42
 mobs. Avatars use a solid box and receive scene occlusion. Current snapshots
-define which entities are present. Movement and
-actions may feel delayed across a high-latency connection. The client
+define which entities are present. The client
 allows one reliable action at a time and waits for the server before
 changing terrain or inventory. Packet loss can briefly delay streaming
 or pose updates. The transport retries reliable messages and rejoins on
@@ -91,6 +94,21 @@ a bad checksum or a revision gap. The graphical host clears its world,
 avatar, inventory, and item projections when that session retires. A join
 timeout, compatibility refusal, or explicit disconnect leaves the client
 at the connection screen until it is restarted or reconnected.
+
+The input scheduler estimates when each command will reach the server.
+It starts with a matching single-attempt Hello/Welcome round trip and
+updates from Action acknowledgments when the action was sent once.
+The estimate includes pump and server scheduling time. It assumes
+roughly symmetric paths and uses a 50 ms fallback RTT until a usable
+measurement arrives. The client targets two ticks beyond estimated
+arrival, emits at most three fresh inputs per frame, and waits for a new
+snapshot after a prolonged gap. The server still admits only the next
+six ticks at its receive boundary. The HUD reports degraded input timing
+if snapshots become too old or processed input stops advancing while
+the client is sending. A large path change between RTT observations can
+still interrupt movement. The existing stop-and-wait chunk baseline
+transfer can also exceed its five-second assembly deadline on slower
+links. The delayed-UDP movement tests isolate that terrain transfer.
 
 See [Manual verification for #257](multiplayer-client-smoke.md) for
 the physical GPU run and complementary automated coverage.

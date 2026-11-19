@@ -1492,6 +1492,7 @@ ft_vox_target_hygiene(test_world_replication)
 add_test(NAME WorldReplication COMMAND test_world_replication)
 add_test(NAME VoxelActions COMMAND test_world_replication --actions)
 add_test(NAME EntityReplication COMMAND test_world_replication --entities)
+add_test(NAME WorldReplicationClientTick COMMAND test_world_replication --input-timing)
 set_tests_properties(WorldReplication VoxelActions EntityReplication PROPERTIES TIMEOUT 180)
 
 # Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh

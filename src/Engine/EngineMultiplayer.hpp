@@ -3,6 +3,7 @@
 #include "Engine.hpp"
 
 #include <Network/ClientWorld.hpp>
+#include <Network/ClientTickScheduler.hpp>
 
 struct Engine::RemoteSession
 {
@@ -40,7 +41,8 @@ struct Engine::RemoteSession
 	std::unique_ptr<net::udp::ClientWorld> projection;
 	uint64_t renderEpoch{};
 	SnapshotClock players, items, mobs;
-	uint64_t lastInputTick{};
+	net::udp::ClientTickScheduler inputTiming;
+	Clock::time_point jumpQueuedAt{};
 	bool joinRequested{}, leaveRequested{}, seedMismatch{};
 	bool actionPending{};
 	const char *lastConnectionStatus{};

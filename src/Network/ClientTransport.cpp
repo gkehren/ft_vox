@@ -36,6 +36,8 @@ struct ClientTransport::Impl
 		status = next;
 		link.reset();
 		welcome.reset();
+		helloSentAt.reset();
+		helloRetransmitted = false;
 		clearAction();
 		nextActionId = 1;
 		clearProjection();
@@ -45,6 +47,7 @@ struct ClientTransport::Impl
 	{
 		pendingAction.reset();
 		actionResult.reset();
+		actionSentAt.reset();
 	}
 
 	void clearProjection()
@@ -52,6 +55,11 @@ struct ClientTransport::Impl
 		chunks.clear();
 		inventory.reset();
 		playerHistory = {};
+		playerReceivedAt.reset();
+		roundTrip.reset();
+		inputUnacknowledgedSince.reset();
+		latestInputSequence = 0;
+		latestInputSentAt = {};
 		itemHistory = {};
 		mobHistory = {};
 		assembler.reset();
@@ -201,6 +209,8 @@ struct ClientTransport::Impl
 					return finish(ClientStatus::Rejected);
 				}
 				link.emplace(packet.scope, now);
+				if (helloSentAt && !helloRetransmitted && now >= *helloSentAt)
+					roundTrip = now - *helloSentAt;
 				welcome = *reply;
 				status = ClientStatus::Connected;
 			}
@@ -221,6 +231,10 @@ struct ClientTransport::Impl
 			const auto kind = link->pending->kind;
 			if (!link->acknowledge(ack->through))
 				return;
+			if (status == ClientStatus::Connected && kind == wire::Kind::Action && actionSentAt &&
+			    now >= *actionSentAt)
+				roundTrip = now - *actionSentAt;
+			actionSentAt.reset();
 			link->lastReceived = now;
 			if (status == ClientStatus::Leaving && (kind == wire::Kind::Disconnect || kind == wire::Kind::Resync))
 				finish(ClientStatus::Disconnected);
@@ -251,7 +265,15 @@ struct ClientTransport::Impl
 			return;
 		link->lastReceived = now;
 		if (players && status == ClientStatus::Connected)
+		{
+			const uint64_t previouslyProcessed = playerHistory.current ? playerHistory.current->lastProcessedInput : 0;
+			if (players->lastProcessedInput > previouslyProcessed &&
+			    players->lastProcessedInput <= latestInputSequence)
+				inputUnacknowledgedSince = players->lastProcessedInput == latestInputSequence ?
+					std::nullopt : std::optional{now};
 			installSnapshot(playerHistory, *players);
+			playerReceivedAt = now;
+		}
 		else if (items && status == ClientStatus::Connected)
 			installSnapshot(itemHistory, *items);
 		else if (mobs && status == ClientStatus::Connected)
@@ -299,15 +321,37 @@ struct ClientTransport::Impl
 			resync(wire::ResyncReason::Timeout, now);
 		if (status == ClientStatus::Connecting && now >= nextHello &&
 		    sender().send(now, {{}, 0, wire::Hello{nonce, wire::kVersion, wire::kVersion, wire::localCompatibility()}}))
+		{
+			// Retries share the nonce. Neither attempt's send time can
+			// identify which datagram produced the matching Welcome.
+			helloRetransmitted = helloSentAt.has_value();
+			if (!helloRetransmitted)
+				helloSentAt = now;
 			nextHello = now + kHelloInterval;
+		}
 		Received frame;
 		for (unsigned i = 0; i < kReadBatch && socket.receive(frame); ++i)
 			receive(frame, now);
 		if (link)
 		{
 			queueDeparture(now);
-			link->flush(sender(), now);
+			const bool action = link->pending && link->pending->kind == wire::Kind::Action;
+			const bool retransmit = action && link->pending->sent;
+			if (link->flush(sender(), now) && action)
+				actionSentAt = retransmit ? std::nullopt : std::optional{now};
 		}
+	}
+
+	bool sendInput(const wire::Input &input, Time now)
+	{
+		if (status != ClientStatus::Connected || !wire::validInput(input) ||
+		    !link->sendFresh(sender(), now, input))
+			return false;
+		latestInputSequence = link->freshSent;
+		latestInputSentAt = now;
+		if (!inputUnacknowledgedSince)
+			inputUnacknowledgedSince = now;
+		return true;
 	}
 
 	Socket socket{{0, 0}};
@@ -316,6 +360,11 @@ struct ClientTransport::Impl
 	std::optional<Link> link;
 	std::optional<wire::Welcome> welcome;
 	SnapshotHistory<wire::PlayerSnapshot> playerHistory;
+	std::optional<Time> playerReceivedAt, helloSentAt, actionSentAt, inputUnacknowledgedSince;
+	std::optional<Clock::duration> roundTrip;
+	Time latestInputSentAt{};
+	uint64_t latestInputSequence{};
+	bool helloRetransmitted{};
 	std::optional<wire::Inventory> inventory;
 	SnapshotHistory<wire::ItemSnapshot> itemHistory;
 	SnapshotHistory<wire::MobSnapshot> mobHistory;
@@ -366,8 +415,7 @@ void ClientTransport::disconnect(Clock::time_point now)
 ClientStatus ClientTransport::status() const { return m_impl->status; }
 bool ClientTransport::sendInput(const wire::Input &input, Clock::time_point now)
 {
-	return m_impl->status == ClientStatus::Connected && wire::validInput(input) &&
-		m_impl->link->sendFresh(m_impl->sender(), now, input);
+	return m_impl->sendInput(input, now);
 }
 
 std::optional<uint64_t> ClientTransport::sendAction(wire::Action action, Clock::time_point now)
@@ -387,6 +435,19 @@ std::optional<wire::SessionScope> ClientTransport::scope() const
 }
 std::optional<wire::PlayerSnapshot> ClientTransport::latestPlayerSnapshot() const { return m_impl->playerHistory.current; }
 const SnapshotHistory<wire::PlayerSnapshot> &ClientTransport::playerSnapshots() const { return m_impl->playerHistory; }
+std::optional<ClientTransport::Clock::time_point> ClientTransport::playerSnapshotReceivedAt() const
+{
+	return m_impl->playerReceivedAt;
+}
+std::optional<ClientTransport::Clock::duration> ClientTransport::takeRoundTripSample()
+{
+	return m_impl->status == ClientStatus::Connected ? std::exchange(m_impl->roundTrip, std::nullopt) : std::nullopt;
+}
+bool ClientTransport::inputAcknowledgmentStalled(Clock::time_point now) const
+{
+	return m_impl->status == ClientStatus::Connected && m_impl->inputUnacknowledgedSince &&
+		now - m_impl->latestInputSentAt < 250ms && now - *m_impl->inputUnacknowledgedSince >= 750ms;
+}
 std::optional<wire::Inventory> ClientTransport::inventory() const { return m_impl->inventory; }
 const SnapshotHistory<wire::ItemSnapshot> &ClientTransport::itemSnapshots() const { return m_impl->itemHistory; }
 const SnapshotHistory<wire::MobSnapshot> &ClientTransport::mobSnapshots() const { return m_impl->mobHistory; }

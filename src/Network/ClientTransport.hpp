@@ -57,6 +57,11 @@ public:
 	// Latest authoritative state for the current scope. Cleared on departure.
 	std::optional<wire::PlayerSnapshot> latestPlayerSnapshot() const;
 	const SnapshotHistory<wire::PlayerSnapshot> &playerSnapshots() const;
+	std::optional<Clock::time_point> playerSnapshotReceivedAt() const;
+	// One-shot observation from an unambiguous Hello/Welcome or Action/ACK.
+	// Both timestamps are local pump times in the current session.
+	std::optional<Clock::duration> takeRoundTripSample();
+	bool inputAcknowledgmentStalled(Clock::time_point now) const;
 	std::optional<wire::Inventory> inventory() const;
 	// Current defines the active set. Interpolate only IDs also in previous.
 	// Read on the pump owner thread. Both histories clear on scope retirement.
