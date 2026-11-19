@@ -331,11 +331,10 @@ void testMovement(const fs::path &root)
 	CHECK_EXPR(sim.breakBlock(crowd.front(), {8, 232, 8}) == sim::BreakResult::Ok);
 	for (int i = 0; i < 40; ++i)
 		CHECK(host.step(server::TerrainTiming::QuiescePerTick, error), error);
-	const auto &items = sim.itemEntities().entities();
-	CHECK_EXPR(items.size() == 1);
-	if (!items.empty())
-		CHECK_EXPR(items.front().pickupDelay == 0 &&
-			glm::length(items.front().body.position - sim.playerFeet(crowd.front())) < 1.5);
+	CHECK_EXPR(sim.itemEntities().entities().empty());
+	CHECK_EXPR((sim.inventory(crowd.front())->slots()[0] == items::ItemStack{items::ItemId::Cobblestone, 1}));
+	for (const auto id : std::span(crowd).subspan(1))
+		CHECK_EXPR(sim.inventory(id)->slots()[0].isEmpty());
 	for (const auto id : crowd)
 		host.leaveRemote(id);
 	CHECK(host.stop(error), error);

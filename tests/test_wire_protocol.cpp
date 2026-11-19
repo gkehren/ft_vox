@@ -69,7 +69,7 @@ constexpr auto kNoScope = "0000000000000000 0000000000000000 0000000000000000";
 constexpr auto kScopedZero = "0102030405060708 1112131415161718 0000000000000000";
 constexpr auto kScopedTwo = "0102030405060708 1112131415161718 0000000000000002";
 
-std::array<Fixture, 15> fixtures()
+std::array<Fixture, 17> fixtures()
 {
     constexpr auto client = Endpoint::Client;
     constexpr auto server = Endpoint::Server;
@@ -79,6 +79,10 @@ std::array<Fixture, 15> fixtures()
     inventory.slots[0] = {items::ItemId::Dirt, 64};
     ChunkFragment fragment{{18, {-3, 4}, {1, 2}, 32, 0x2122232425262728}, 59, {}};
     fragment.materials[0] = kAirMaterial;
+    ItemSnapshot items{13, 9, 1, {}};
+    items.items[0] = {9, {{-32, 64, 0}, {16, -8, 0}}, {items::ItemId::Glass, 3}};
+    MobSnapshot mobs{13, 1, {}};
+    mobs.mobs[0] = {5, {{-32, 64, 0}, {16, -8, 0}}, 2};
 
     return {{
         {client, {{}, 0, Hello{1, 2, 3, kContent}}, "0100 001e", kNoScope,
@@ -111,10 +115,14 @@ std::array<Fixture, 15> fixtures()
         {client, {kScope, 0, Ack{2}}, "0d00 0008", kScopedZero, "0000000000000002"},
         {server, {kScope, 2, Heartbeat{}}, "0e00 0000", kScopedTwo, ""},
         {client, {kScope, 2, Disconnect{DisconnectReason::Leaving}}, "0f00 0001", kScopedTwo, "01"},
+        {server, {kScope, 2, items}, "1000 002f", kScopedTwo,
+         "000000000000000d 0000000000000009 01 0000000000000009 ffffffe0 00000040 00000000 0010 fff8 0000 0005 0003"},
+        {server, {kScope, 2, mobs}, "1100 0024", kScopedTwo,
+         "000000000000000d 01 0000000000000005 ffffffe0 00000040 00000000 0010 fff8 0000 02"},
     }};
 }
 
-void testGoldens(const std::array<Fixture, 15> &cases)
+void testGoldens(const std::array<Fixture, 17> &cases)
 {
     for (const auto &fixture : cases)
     {
@@ -149,7 +157,7 @@ void testGoldens(const std::array<Fixture, 15> &cases)
     CHECK_EXPR(chunkChecksum(helloBytes) == UINT64_C(0xa430d84680aabd0b));
 }
 
-void testMalformed(const std::array<Fixture, 15> &cases)
+void testMalformed(const std::array<Fixture, 17> &cases)
 {
     constexpr auto client = Endpoint::Client;
     constexpr auto server = Endpoint::Server;
@@ -211,6 +219,13 @@ void testMalformed(const std::array<Fixture, 15> &cases)
     mutate(11, 36, "ff", S::InvalidPayload);
     mutate(12, 43, "00", S::InvalidPayload);
     mutate(14, 36, "ff", S::InvalidPayload);
+    checkMalformed(client, encoded(server, cases[15].packet), S::WrongDirection);
+    checkMalformed(client, encoded(server, cases[16].packet), S::WrongDirection);
+    mutate(15, 51, "08", S::InvalidPayload); // id past allocator
+    mutate(15, 52, "ff", S::InvalidPayload); // excessive count
+    mutate(15, 61, "20000000", S::InvalidPayload); // position outside quantized bounds
+    mutate(15, 81, "0000", S::InvalidPayload); // empty live item
+    mutate(16, 71, "04", S::InvalidPayload); // invalid species
 
     // A legal envelope length can still contain extra bytes for a short variant.
     auto snapshot = encoded(server, cases[4].packet);
@@ -257,6 +272,11 @@ void testSequence()
     CHECK_EXPR(inbound.admit({kScope, 4, Input{}}) == R::Accepted);
     CHECK_EXPR(inbound.admit({kScope, 3, Input{}}) == R::Replay);
     CHECK_EXPR(inbound.admit({kScope, 4, Heartbeat{}}) == R::Replay);
+    CHECK_EXPR(inbound.admit({kScope, 6, MobSnapshot{}}) == R::Accepted);
+    CHECK_EXPR(inbound.admit({kScope, 5, ItemSnapshot{}}) == R::Accepted);
+    CHECK_EXPR(inbound.admit({kScope, 4, ItemSnapshot{}}) == R::Replay);
+    CHECK_EXPR(inbound.admit({kScope, 4, MobSnapshot{}}) == R::Replay);
+    CHECK_EXPR(inbound.admit({kScope, 5, Input{}}) == R::Accepted);
     CHECK_EXPR(inbound.admit({kScope, 0, Input{}}) == R::InvalidSequence);
     CHECK_EXPR(inbound.admit({kScope, kMaxSequence, Input{}}) == R::Accepted);
     CHECK_EXPR(inbound.admit({kScope, UINT64_MAX, Input{}}) == R::InvalidSequence);
@@ -266,7 +286,7 @@ void testSequence()
     CHECK_EXPR(reconnected.reliableThrough() == 0);
 }
 
-void testInactiveStorage(const std::array<Fixture, 15> &cases)
+void testInactiveStorage(const std::array<Fixture, 17> &cases)
 {
     constexpr auto server = Endpoint::Server;
     const auto &snapshot = cases[4].packet;
@@ -354,7 +374,7 @@ void testAssembly()
     }
 }
 
-void testProperties(const std::array<Fixture, 15> &cases)
+void testProperties(const std::array<Fixture, 17> &cases)
 {
     std::mt19937 rng(0x251245);
     auto canonical = [](Endpoint sender, std::span<const uint8_t> bytes) {
@@ -399,6 +419,25 @@ void testProperties(const std::array<Fixture, 15> &cases)
     auto unsorted = bytes;
     unsorted[97] = 1; // second player ID duplicates the first
     checkMalformed(Endpoint::Server, unsorted, S::InvalidPayload);
+
+    ItemSnapshot fullItems{42, kMaxItemsPerSnapshot, kMaxItemsPerSnapshot, {}};
+    for (size_t i = 0; i < fullItems.count; ++i)
+        fullItems.items[i] = {i + 1, {}, {items::ItemId::Stone, 1}};
+    packet.payload = fullItems;
+    const auto itemBytes = encoded(Endpoint::Server, packet);
+    CHECK_EXPR(itemBytes.size() == 1193);
+    CHECK_EXPR(decode(Endpoint::Server, itemBytes, decoded) == S::Ok && decoded == packet);
+    fullItems.items.back().id = fullItems.items[fullItems.count - 2].id;
+    Datagram frame;
+    CHECK_EXPR(encode(Endpoint::Server, {kScope, 2, fullItems}, frame) == S::InvalidPayload);
+
+    MobSnapshot fullMobs{42, kMaxMobsPerSnapshot, {}};
+    for (size_t i = 0; i < fullMobs.count; ++i)
+        fullMobs.mobs[i].id = i + 1;
+    packet.payload = fullMobs;
+    const auto mobBytes = encoded(Endpoint::Server, packet);
+    CHECK_EXPR(mobBytes.size() == 1179);
+    CHECK_EXPR(decode(Endpoint::Server, mobBytes, decoded) == S::Ok && decoded == packet);
 }
 } // namespace
 

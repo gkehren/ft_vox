@@ -63,6 +63,8 @@ public:
 	std::optional<net::wire::ActionResult> receiveRemote(
 		sim::PlayerId player, const net::udp::SessionIntents &intents) override;
 	net::wire::PlayerSnapshot snapshotRemote(sim::PlayerId player) const override;
+	std::optional<net::wire::Inventory> inventoryRemote(sim::PlayerId player) override;
+	std::optional<net::udp::EntitySnapshots> entitySnapshotsRemote(sim::PlayerId player) const override;
 	std::optional<net::udp::WorldUpdate> nextWorldUpdate(sim::PlayerId player, bool allowBaseline) override;
 	void suspendPlayerInput();
 
@@ -80,6 +82,7 @@ private:
 		net::udp::InputQueue inputs{};
 		uint64_t lastQueuedSequence{}, lastQueuedTick{}, lastProcessedInput{};
 		uint64_t nextActionId{1};
+		net::wire::Inventory inventory;
 		std::map<net::wire::ChunkCoord, net::wire::ChunkVersion> chunks;
 		std::deque<net::wire::WorldEdit> edits;
 		uint64_t nextTransferId{1};

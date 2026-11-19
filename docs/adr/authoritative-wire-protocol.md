@@ -7,7 +7,9 @@ bounded v2 UDP transport added in #252. The
 [dedicated server guide](../dedicated-server.md#udp-sessions) describes the
 active queues and session lifetimes. Phase C1 (#253) implements Input and
 PlayerSnapshot on this framing. Phase C2 (#254) uses ChunkFragment, WorldEdit,
-ChunkRemove and Resync for the client voxel projection. The Boost UDP prototype remains isolated in
+ChunkRemove and Resync for the client voxel projection. Phase C4 (#256) adds
+private inventories and fresh item and mob snapshots. Existing v2 layouts
+are retained and the new tags use only the fresh lane. The Boost UDP prototype remains isolated in
 `test_network` and uses its original v1 framing.
 
 ## Framing
@@ -31,7 +33,7 @@ dependency and no generic message fragmentation.
 | 28 | u64 | Sequence, lane rules below |
 
 Fields are packed in the listed order. Integers are big-endian. Signed
-`i32` uses two's complement. `f32` and `f64` carry big-endian IEEE 754 binary32
+`i16` and `i32` use two's complement. `f32` and `f64` carry big-endian IEEE 754 binary32
 and binary64 bits, with finite values only. Flags and enum values outside
 their assigned ranges fail validation. There is no structure padding, host
 endianness, implicit alignment or serialization of native C++ layouts.
@@ -58,6 +60,8 @@ direction to the corresponding family. The byte maximum includes the header.
 | 13 | Ack | C or S | Ack | 44 | 60 | 16 |
 | 14 | Heartbeat | C or S | Fresh | 36 | 2 | 2 |
 | 15 | Disconnect | C or S | Reliable | 37 | 1 | 1 |
+| 16 | ItemSnapshot | S | Fresh | 1,193 | 10 | 3 |
+| 17 | MobSnapshot | S | Fresh | 1,179 | 10 | 3 |
 
 Use token buckets with these family bounds and an aggregate per-peer limit
 of 128 frames/s and 128 KiB/s, with bursts of 64 frames and 64 KiB. Application
@@ -161,11 +165,15 @@ Reconnect before exhaustion. Authenticate the scope and check direction
 before admitting queued messages. A wrong session or epoch cannot advance
 either counter.
 
-- **Fresh** accepts only a sequence higher than the previous admitted fresh
-  packet. Loss, duplication and reordering can skip values. Heartbeat has
+- **Fresh** accepts only a sequence higher than the previous admitted
+  sequence for that stream. ItemSnapshot and MobSnapshot each have their
+  own receive cursor within the same outgoing fresh counter. Input,
+  PlayerSnapshot and Heartbeat retain their shared cursor. Loss, duplication
+  and reordering can skip values. Heartbeat has
   an empty payload and is sent only when the direction is otherwise idle.
   Player snapshots are complete for their advertised set. They supersede
-  earlier player snapshots and are never retransmitted.
+  earlier player snapshots and are never retransmitted. Items and mobs use
+  the same complete replacement rule independently.
 - **Reliable** uses cumulative ACKs and go-back-N retransmission with at most
   64 unacknowledged frames per direction. The receiver admits the exact next
   sequence after reserving queue capacity. A higher sequence is dropped and
@@ -184,11 +192,13 @@ either counter.
 Bound the reliable retransmission queue at 64 encoded datagrams per direction
 (`76,800` frame bytes). Keep at most 64 received reliable frames awaiting the
 owner per peer. The active server uses one reliable stop-and-wait slot, one
-latest outbound snapshot, six uniquely timed inbound input slots and one
-outbound world update per peer. It reserves up to 16 concurrent baseline
+latest outbound snapshot per fresh family, one latest pending inventory,
+six uniquely timed inbound input slots and one outbound world update per
+peer. It reserves up to 16 concurrent baseline
 buffers and rotates admission among peers. It schedules reliable sends before
-fresh player snapshots and caps fresh snapshots at 768 frames/s process-wide
-with a 64-frame burst. When admission
+fresh snapshots. The process caps player snapshots at 768 frames/s with a
+64-frame burst and each entity family at 256 frames/s with a 24-frame burst.
+When admission
 fails due to capacity, leave the reliable ACK unchanged. Throttle baseline
 production and bound the per-peer delta backlog at 64 pending messages. If
 it overflows or cannot make progress, abandon the projection and resync
@@ -264,16 +274,55 @@ operation:u8, code:u8`. Codes are 0 accepted, 1 partial (Move or SplitHalf),
 result settles the action. `tick` is the last completed simulation tick
 when the owner handled it and `nextEditId` is the global edit watermark
 after handling it. The world projection applies WorldEdit/baselines.
-Break and Place are active in #255. The other action kinds currently
-return `Unavailable`.
+Select, Move, Swap, SplitHalf, DropOne and DropStack run on the authenticated
+owner's inventory. Drop uses a fixed server-selected +Z direction and
+computes the count from the slot operation.
 
 **Inventory** carries `tick:u64, revision:u64, selected:u8` followed by
 36 pairs of `itemId:u16, count:u16` in slot order. Revision starts at 1 and
 increases for newer inventory states within the session. Each pair is
 either `{0,0}` or a registry item with a count between 1 and its stack
 limit. Selected is a hotbar slot. The server sends this full snapshot only
-to the inventory owner. Nearby dropped item and mob state will require
-additional negotiated schemas in #256.
+to its session owner, initially and after changes. Unsent states may
+coalesce. The client installs only newer revisions with nondecreasing
+ticks. The ordered lane delivers the action's inventory revision, or a newer
+one, before its ActionResult. This also covers actions that consume a
+selected stack and autonomous pickups between actions.
+
+## Nearby entities
+
+**ItemSnapshot** carries `tick:u64, idHighWater:u64, count:u8` followed by up
+to 38 records of `id:u64, motion, itemId:u16, count:u16`. Live stacks have
+nonzero counts within the registry limit. IDs are nonzero, strictly
+ascending and at most the world's allocator high-water. The high-water
+survives checkpoint recovery even when all prior items are gone.
+
+**MobSnapshot** carries `tick:u64, count:u8` followed by up to 42 records of
+`id:u64, motion, species:u8`. Species are cow (0), pig (1), sheep (2)
+and chicken (3). Nonzero IDs are strictly ascending and identify live
+incarnations during the world epoch. A procedural group that spawns again
+gets new mob IDs. Mob and item IDs have separate namespaces.
+
+Both use `motion` in X/Y/Z order with three `i32` positions in 1/64 blocks
+and three `i16` velocities in 1/64 blocks/s. Positions use the existing
+signed world coordinate bounds and velocities saturate at their encoded
+limits. The host samples once every six completed 60 Hz ticks. Interest
+is the horizontal chunk disk centered on the authenticated player's
+authoritative feet. If the eligible population exceeds a packet cap, the
+server keeps the nearest records by horizontal distance, breaking ties
+by ID, then serializes the selected records in ID order.
+
+Each snapshot replaces the family's entire visible set. A new ID spawns
+in the projection, a retained ID updates, and an absent ID leaves the
+projection. This covers pickup, expiry, interest transitions and culling.
+Empty snapshots explicitly clear the visible set. The client accepts
+strictly increasing ticks and rejects a regressing item high-water. A
+later complete snapshot repairs a lost spawn, update or removal. Older
+packets and frames from a retired session or epoch cannot roll back a
+projection. The client retains the previous and current samples and their
+server ticks. Interpolate only IDs in both samples with tick differences
+divided by 60 for elapsed seconds. Initialize new IDs at their current
+position and remove absent IDs when the new set is installed.
 
 ## World baseline, edits and resync
 

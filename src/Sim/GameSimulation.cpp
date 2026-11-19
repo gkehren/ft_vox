@@ -514,7 +514,20 @@ void GameSimulation::advanceMobs(double dt, glm::dvec3 observer, double availabl
     m_mobs.update(dt, world, observer, availableRadius, suspended || !m_mobsEnabled);
 }
 
-void GameSimulation::advanceItems(double dt, bool suspended, ItemPickup pickup)
+void GameSimulation::advancePlayerMobs(double dt, double availableRadius, bool suspended)
+{
+    if (!m_world || !m_terrainGenerator)
+        return;
+    std::array<glm::dvec3, kMaxPlayers> observers;
+    size_t count = 0;
+    for (const auto &entry : m_players)
+        if (entry->state.positioned)
+            observers[count++] = entry->state.controller.body.position;
+    WorldMobView world(*m_world, *m_terrainGenerator);
+    m_mobs.update(dt, world, std::span(observers).first(count), availableRadius, suspended || !m_mobsEnabled);
+}
+
+void GameSimulation::advanceItems(double dt, bool suspended)
 {
     if (!m_world)
         return;
@@ -534,7 +547,7 @@ void GameSimulation::advanceItems(double dt, bool suspended, ItemPickup pickup)
     if (!suspended)
     {
         for (const std::unique_ptr<PlayerEntry> &entry : m_players)
-            if (entry->state.positioned && (pickup == ItemPickup::AllPositioned || entry->id == localPlayerId()))
+            if (entry->state.positioned)
                 m_pickupCandidates.push_back({entry->state.controller.body.position, &entry->state.inventory});
     }
     m_items.update(dt, world, m_pickupCandidates, suspended);

@@ -55,6 +55,8 @@ struct Mob
     double yaw{}, previousYaw{}, targetYaw{}, timer{}, gait{}, previousGait{}, age{}, previousAge{};
     double stride{}, previousStride{}, shoreTimer{};
     bool walking{};
+    // A new incarnation gets a new ID even if the same procedural group respawns.
+    EntityId replicationId{};
 };
 // One fixed-step controller, reusable with synthetic voxel worlds and no engine.
 void tickMob(Mob &, const physics::VoxelCollisionWorld &, double dt, std::span<const glm::dvec3> neighbors,
@@ -66,6 +68,8 @@ class MobSystem
     void reset(uint64_t seed);
     void update(double dt, const MobWorld &world, glm::dvec3 observer, double availableRadius,
                 bool suspended = false);
+    void update(double dt, const MobWorld &world, std::span<const glm::dvec3> observers,
+                double availableRadius, bool suspended = false);
     void renderStates(std::vector<MobRenderState> &out) const;
     const std::vector<Mob> &mobs() const { return m_mobs; }
     uint64_t droppedSteps() const { return m_dropped; }
@@ -86,6 +90,8 @@ class MobSystem
     std::vector<Mob> m_mobs;
     std::vector<Group> m_groups;
     uint64_t m_seed{}, m_dropped{};
+    EntityId m_nextReplicationId{1};
+    size_t m_nextObserver{};
     double m_accumulator{}, m_spawnTimer{};
     physics::QueryStats m_queries{};
 };

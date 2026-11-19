@@ -73,7 +73,7 @@ struct Rate
 	}
 
 	Traffic traffic;
-	std::array<Bucket, static_cast<size_t>(wire::Kind::Disconnect)> families;
+	std::array<Bucket, std::variant_size_v<wire::Payload>> families;
 };
 
 struct Sender
