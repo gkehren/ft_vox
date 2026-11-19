@@ -472,6 +472,17 @@ target_include_directories(ft_vox_wire PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ft_vox_wire PRIVATE ft_vox_core)
 ft_vox_target_hygiene(ft_vox_wire)
 
+add_library(ft_vox_udp STATIC
+    src/Network/UdpSocket.cpp
+    src/Network/ServerTransport.cpp
+    src/Network/ClientTransport.cpp)
+target_link_libraries(ft_vox_udp PUBLIC ft_vox_wire PRIVATE ft_vox_core Threads::Threads)
+if(WIN32)
+    target_link_libraries(ft_vox_udp PRIVATE ws2_32 bcrypt)
+endif()
+ft_vox_target_hygiene(ft_vox_udp)
+target_link_libraries(ft_vox_server PRIVATE ft_vox_udp)
+
 # Configure-time dependency-direction guard (issue #210 criterion 1, hardened
 # in issue #211 / Epic #204 Phase G): walk the TRANSITIVE link closure of a
 # CPU-only target and fail on any graphical library, in either configuration.
@@ -510,6 +521,7 @@ ft_vox_assert_cpu_link_closure(ft_vox_core)
 ft_vox_assert_cpu_link_closure(ft_vox_headless)
 ft_vox_assert_cpu_link_closure(ft_vox_server)
 ft_vox_assert_cpu_link_closure(ft_vox_wire)
+ft_vox_assert_cpu_link_closure(ft_vox_udp)
 
 # CPU-only configuration: the graphical stack must not even have been
 # DISCOVERED (no targets created by Dependencies.cmake).

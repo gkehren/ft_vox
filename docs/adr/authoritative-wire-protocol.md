@@ -2,10 +2,12 @@
 
 Accepted for Epic #245 Phase B2 ([#251](https://github.com/gkehren/ft_vox/issues/251)).
 The `ft_vox_wire` library implements framing, payload validation, receive
-sequencing and chunk assembly. The dedicated server starts using the protocol
-when #252 adds the transport. Replication producers and consumers follow in
-Phase C. The Boost UDP prototype remains isolated in `test_network` and uses
-its original v1 framing.
+sequencing and chunk assembly. The dedicated server uses it through the
+bounded v2 UDP transport added in #252. The
+[dedicated server guide](../dedicated-server.md#udp-sessions) describes the
+active queues and session lifetimes. Replication producers and consumers
+follow in Phase C. The Boost UDP prototype remains isolated in
+`test_network` and uses its original v1 framing.
 
 ## Framing
 
@@ -79,8 +81,9 @@ to baseline data.
 | 8 | 197 | ~197 s |
 
 The estimates exclude the initial burst, competing traffic and retransmits.
-Measure sustained delivery under #252, then measure time from Welcome to
-the first installed spawn chunk and to a playable spawn neighborhood under
+The #252 loopback harness exercises rate limits and retries with controlled
+time. Measure sustained baseline delivery, time from Welcome to the first
+installed spawn chunk, and time to a playable spawn neighborhood under
 #254. Record transferred bytes and retransmissions on loopback and with
 simulated delay and loss. Use those results to evaluate spawn-area priority,
 compression and any baseline format change.

@@ -6,13 +6,14 @@ graphics-free:
 
   1. INCLUDE closure: every src/Headless and src/Server source/header is walked
      with the same rules as the core include guard (check_core_includes.py):
-     no Renderer/, Vulkan/, Camera/, Engine/, ImGui*/, Network/, no SDL /
+     no Renderer/, Vulkan/, Camera/, Engine/, ImGui*/, no SDL /
      vulkan / volk / VMA / imgui / boost / miniz external headers, and the
-     Chunk/ allowlist stays fail-closed.
+     Chunk/ allowlist stays fail-closed. The dedicated server may include
+     the explicitly listed v2 codec and UDP files under Network/.
 
   2. LINK artifacts: the actual generated link inputs for ft_vox_headless,
-     ft_vox_server and ft_vox_core in the build tree (Ninja link edge, Makefile
-     link.txt, or MSVC .vcxproj link fields) must contain no graphical library.
+     ft_vox_server, ft_vox_core, ft_vox_wire and ft_vox_udp must contain no
+     graphical library (Ninja link edge, Makefile link.txt, or MSVC link fields).
      A Ninja static-library edge carries no LINK_LIBRARIES variable (deps are on
      the build statement line), so the whole edge is scanned. On MSVC a static
      library has no link step, so the ft_vox_core scan reads only its
@@ -41,7 +42,12 @@ import check_core_includes as core_guard
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
-HOST_DIRS = (SRC / "Headless", SRC / "Server")
+SERVER_NETWORK_FILES = {
+    SRC / "Network" / name for name in (
+        "WireProtocol.cpp", "WireProtocol.hpp", "UdpSocket.cpp", "UdpSocket.hpp", "UdpLink.hpp",
+        "ServerTransport.cpp", "ServerTransport.hpp", "ClientTransport.cpp", "ClientTransport.hpp",
+    )
+}
 
 # Library / package names that must never appear in the runner's link inputs.
 FORBIDDEN_LINK_TOKENS = [
@@ -59,19 +65,20 @@ FORBIDDEN_CACHE_PREFIXES = (
 def check_includes(verbose: bool) -> list[str]:
     """Walk both CPU host include closures with the core guard's rules."""
     violations: list[str] = []
-    visited: set[Path] = set()
+    visited: set[tuple[Path, bool]] = set()
 
     roots = []
-    for directory in HOST_DIRS:
+    for directory in (SRC / "Headless", SRC / "Server"):
         sources = sorted(directory.rglob("*.cpp"))
         if not sources:
             violations.append(f"no CPU host sources found under {directory}")
-        roots.extend(sources + sorted(directory.rglob("*.hpp")))
+        roots.extend((path, directory.name == "Server") for path in sources + sorted(directory.rglob("*.hpp")))
+    roots.extend((path, True) for path in sorted(SERVER_NETWORK_FILES))
 
-    def visit(path: Path, chain: list[Path]) -> None:
-        if path in visited:
+    def visit(path: Path, chain: list[Path], allow_udp: bool) -> None:
+        if (path, allow_udp) in visited:
             return
-        visited.add(path)
+        visited.add((path, allow_udp))
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
@@ -87,18 +94,19 @@ def check_includes(verbose: bool) -> list[str]:
             if resolved is None:
                 continue
             reason = core_guard.project_violation(resolved)
-            if reason is not None:
+            if reason is not None and not (allow_udp and resolved in SERVER_NETWORK_FILES):
                 violations.append(core_guard.format_chain(
                     new_chain, str(resolved.relative_to(SRC)), reason))
                 continue
-            visit(resolved, new_chain)
+            visit(resolved, new_chain, allow_udp)
 
-    for root in roots:
-        visit(root.resolve(), [])
+    for root, allow_udp in roots:
+        visit(root.resolve(), [], allow_udp)
 
     if verbose:
-        print(f"CPU host include closure: {len(visited)} project files visited")
-        for path in sorted(visited):
+        files = {path for path, _ in visited}
+        print(f"CPU host include closure: {len(files)} project files visited")
+        for path in sorted(files):
             print(f"  src/{path.relative_to(SRC).as_posix()}")
     return violations
 
@@ -106,7 +114,7 @@ def check_includes(verbose: bool) -> list[str]:
 def find_link_inputs(build_dir: Path, target: str) -> list[tuple[str, str]]:
     """Return (kind, text) pairs describing a target's real link inputs.
 
-    Covers executables (ft_vox_headless, ft_vox_server) and ft_vox_core:
+    Covers ft_vox_headless, ft_vox_server and their CPU libraries:
     the dependency-direction guard applies to the whole CPU slice (issue #211).
     """
     found: list[tuple[str, str]] = []
@@ -150,7 +158,7 @@ def find_link_inputs(build_dir: Path, target: str) -> list[tuple[str, str]]:
 def check_link_artifacts(build_dir: Path) -> list[str]:
     violations: list[str] = []
     configured = (build_dir / "CMakeCache.txt").is_file()
-    for target in ("ft_vox_headless", "ft_vox_server", "ft_vox_core"):
+    for target in ("ft_vox_headless", "ft_vox_server", "ft_vox_core", "ft_vox_wire", "ft_vox_udp"):
         inputs = find_link_inputs(build_dir, target)
         if not inputs:
             # Fail-CLOSED on a configured tree: the target should have build

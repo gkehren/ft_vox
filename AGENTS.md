@@ -51,8 +51,9 @@
   - **`RenderWorldBridge`** (issue #207 / Epic #204 Phase C): renderer-owned **derived projection** of `VoxelWorld` — mesh/light dispatch, GPU upload, visibility, commit groups, deferred GPU retirement, light-cache sampling; references (never owns) the host-owned world. `publishEditResult` (issue #227) publishes edits accepted through the sim gameplay commands with the same event drain + commit-group registration as the creative `placeVoxel`/`deleteVoxel` (one publication path). Replaced the removed `ChunkManager` adapter / `ChunkCollisionView` wrapper (see `docs/simulation-render-contracts.md` §10)
   - **`ItemEntityRenderer`** (issue #229 / Epic #223 Phase F): derived dropped-item presentation — one shared atlas-textured unit cube, one instanced indexed draw for the frustum-culled visible population (bounded by the sim cap), previous/current interpolation done host-side, per-instance atlas layer + derived local light; receives directional shadows, casts none; recorded in the opaque pass after mobs; holds no authoritative state (epoch-barrier reset)
 
-### Networking (`src/Network/`) — experimental, test-only
-- **Client/Server**: Boost.Asio UDP for player position and world state. Not a shipped feature: the module is compiled into `test_network` only and is **not linked into the game binary**. Do not add new runtime dependencies on it without re-arming the build wiring first.
+### Networking (`src/Network/`) — dedicated server
+- **`ft_vox_wire` and `ft_vox_udp`**: v2 framing and bounded IPv4 UDP sessions for `ft_vox_server` (Epic #245, #251–#252). The IO worker validates scoped requests and the tick owner creates and removes remote players. See [dedicated server](docs/dedicated-server.md) and the [wire ADR](docs/adr/authoritative-wire-protocol.md).
+- **Legacy `Client`/`Server`**: Boost.Asio v1 UDP prototype, compiled only into `test_network`. The graphical game uses neither transport.
 
 ## Technologies & Dependencies
 - **Language**: C++20
@@ -61,7 +62,7 @@
 - **Shaders**: GLSL → SPIR-V offline (`glslc` / `glslangValidator`) under `ressources/shaders/vulkan/`
 - **Mathematics**: GLM (`GLM_FORCE_DEPTH_ZERO_TO_ONE`)
 - **Terrain Generation**: FastNoise2
-- **Networking**: Boost.Asio (test-only prototype; see `src/Network/` note above)
+- **Networking**: native IPv4 UDP for the dedicated server, Boost.Asio for the test-only prototype
 - **UI**: ImGui (vendored SDL3 + Vulkan backends; dynamic rendering)
 - **Build System**: CMake (3.16+) with platform-aware deps (`cmake/Dependencies.cmake`)
   - **Linux:** distro packages (apt/dnf/pacman) by default; vcpkg optional (`USE_VCPKG=1`)
@@ -77,7 +78,7 @@
 | Linux apt (example) | `libsdl3-dev`, `libboost-system-dev`, `libvulkan-dev`, `glslang-tools` |
 | macOS brew | `sdl3`, `boost`, `molten-vk`, `vulkan-loader`, `glslang` |
 
-**Removed (cleanup):** OpenGL stack (GLAD, legacy GLSL, `Renderer`/`Shader`/`UIManager`/`TextRenderer`/`PostProcessing`), unused ImGui extras (OpenGL/SDLGPU backends, demo, stdlib helper), unused `InputSystem`/`EventBus`, FreeType vcpkg dep. Note: **`ImGuiFileDialog` is NOT removed** — it is vendored under `src/ImGuiFileDialog/` and used by the resource-pack browser. The Network module stays for `test_network` only (compiled into the test; **Boost is not linked into the game binary**).
+**Removed (cleanup):** OpenGL stack (GLAD, legacy GLSL, `Renderer`/`Shader`/`UIManager`/`TextRenderer`/`PostProcessing`), unused ImGui extras (OpenGL/SDLGPU backends, demo, stdlib helper), unused `InputSystem`/`EventBus`, FreeType vcpkg dep. `ImGuiFileDialog` remains vendored under `src/ImGuiFileDialog/` for the resource-pack browser.
 
 ### macOS (MoltenVK)
 ```bash

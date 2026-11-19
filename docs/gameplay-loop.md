@@ -405,8 +405,9 @@ server/client split inherits:
 7. **One edit publication path** — gameplay and creative edits share the
    world edit semantics + event drain + commit groups (issue #114 ordering).
 
-Out of scope (unchanged): transport, prediction/reconciliation, client/server
-split. The experimental `src/Network/` module stays **test-only**.
+Epic #245 owns transport, prediction/reconciliation and the client/server
+split. Its CPU-only host and UDP session layer are documented in the
+[dedicated server guide](dedicated-server.md).
 
 ## 10. Epic #223 definition of done (closed by #230)
 
