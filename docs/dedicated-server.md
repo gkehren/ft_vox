@@ -4,6 +4,8 @@ Issue #250 adds the standalone, CPU-only authority host for Epic #245 Phase B1.
 The process owns one `GameSimulation` and one persistent world. The listening
 address, port and player cap are configuration for the future session layer.
 The startup record reports `transport=disabled` until that layer is attached.
+The [authoritative wire protocol ADR](adr/authoritative-wire-protocol.md)
+defines the codec and delivery contract for that integration.
 
 ## Build and run
 

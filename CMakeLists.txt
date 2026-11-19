@@ -466,6 +466,12 @@ add_executable(ft_vox_server src/Server/ServerMain.cpp ${FT_VOX_SERVER_HOST_SOUR
 target_link_libraries(ft_vox_server PRIVATE ft_vox_core)
 ft_vox_target_hygiene(ft_vox_server)
 
+# Authoritative wire codec (issue #251). Transport hosts opt in to this target.
+add_library(ft_vox_wire STATIC src/Network/WireProtocol.cpp)
+target_include_directories(ft_vox_wire PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ft_vox_wire PRIVATE ft_vox_core)
+ft_vox_target_hygiene(ft_vox_wire)
+
 # Configure-time dependency-direction guard (issue #210 criterion 1, hardened
 # in issue #211 / Epic #204 Phase G): walk the TRANSITIVE link closure of a
 # CPU-only target and fail on any graphical library, in either configuration.
@@ -503,6 +509,7 @@ endfunction()
 ft_vox_assert_cpu_link_closure(ft_vox_core)
 ft_vox_assert_cpu_link_closure(ft_vox_headless)
 ft_vox_assert_cpu_link_closure(ft_vox_server)
+ft_vox_assert_cpu_link_closure(ft_vox_wire)
 
 # CPU-only configuration: the graphical stack must not even have been
 # DISCOVERED (no targets created by Dependencies.cmake).
