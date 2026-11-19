@@ -22,6 +22,7 @@
 #include <Sim/GameSimulation.hpp>
 
 #include <future>
+#include <optional>
 #include <atomic>
 #include <array>
 #include <vector>
@@ -177,6 +178,15 @@ struct GameUIFrame
 	bool *paused{nullptr};
 	const char *multiplayerStatus{nullptr};
 	const char *multiplayerAction{nullptr};
+	struct NetworkStats
+	{
+		std::optional<double> rttMs;
+		double snapshotAgeMs{}, snapshotLoss{}, correctionsPerSecond{};
+		double lastCorrection{}, maxCorrection{}, receiveKiB{}, sendKiB{};
+		size_t pendingInputs{};
+		uint64_t hardResets{};
+	};
+	std::optional<NetworkStats> networkStats;
 	std::function<void()> joinServer;
 	std::function<void()> leaveServer;
 

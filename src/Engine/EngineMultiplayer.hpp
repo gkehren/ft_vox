@@ -4,6 +4,7 @@
 
 #include <Network/ClientWorld.hpp>
 #include <Network/ClientTickScheduler.hpp>
+#include <Network/ClientMovement.hpp>
 
 struct Engine::RemoteSession
 {
@@ -42,6 +43,13 @@ struct Engine::RemoteSession
 	uint64_t renderEpoch{};
 	SnapshotClock players, items, mobs;
 	net::udp::ClientTickScheduler inputTiming;
+	net::udp::ClientPrediction prediction;
+	net::udp::RemotePlayers remotePlayers;
+	net::udp::ClientWorld::TerrainDependencies terrain;
+	bool hasCameraPose{};
+	net::udp::ClientTraffic lastTraffic;
+	Clock::time_point trafficAt{}, firstPlayerAt{};
+	double receiveKiB{}, sendKiB{};
 	Clock::time_point jumpQueuedAt{};
 	bool joinRequested{}, leaveRequested{}, seedMismatch{};
 	bool actionPending{};

@@ -74,7 +74,8 @@ std::array<Fixture, 17> fixtures()
     constexpr auto client = Endpoint::Client;
     constexpr auto server = Endpoint::Server;
     PlayerSnapshot players{12, 7, 1, {}};
-    players.players[0] = {{3}, {-1.5, 2.0, 0.0}, {0.5f, -0.25f, 1.0f}, 3};
+    players.players[0] = {{3}, {-1.5, 2.0, 0.0}, {0.5f, -0.25f, 1.0f}, 3, 6};
+    players.localTimers[2] = 0.25;
     Inventory inventory{13, 2, 8, {}};
     inventory.slots[0] = {items::ItemId::Dirt, 64};
     ChunkFragment fragment{{18, {-3, 4}, {1, 2}, 32, 0x2122232425262728}, 59, {}};
@@ -90,13 +91,14 @@ std::array<Fixture, 17> fixtures()
         {server, {kScope, 0, Welcome{1, 9, {3}, 42, 1, kContent, 4, 5}}, "0200 003e", kScopedZero,
          "0000000000000001 0000000000000009 00000003 0000002a 00000001 0001"
          " 3132333435363738 4142434445464748 0000000000000004 0000000000000005"},
-        {server, {{}, 0, Reject{1, RejectReason::Version, 2, 2}}, "0300 000d", kNoScope,
-         "0000000000000001 01 0002 0002"},
+        {server, {{}, 0, Reject{1, RejectReason::Version, 3, 3}}, "0300 000d", kNoScope,
+         "0000000000000001 01 0003 0003"},
         {client, {kScope, 2, Input{5, 0.5f, -0.25f, 9}}, "0400 0011", kScopedTwo,
          "0000000000000005 3f000000 be800000 09"},
-        {server, {kScope, 2, players}, "0500 003a", kScopedTwo,
+        {server, {kScope, 2, players}, "0500 0056", kScopedTwo,
          "000000000000000c 0000000000000007 01 00000003 bff8000000000000 4000000000000000"
-         " 0000000000000000 3f000000 be800000 3f800000 03"},
+         " 0000000000000000 3f000000 be800000 3f800000 03 00000006"
+         " 0000000000000000 0000000000000000 3fd0000000000000"},
         {client, {kScope, 2, Action{9, ActionKind::Place, 0, 0, {-2, 0x010203, 255}, {1, 2}, 0.25f, -0.125f}},
          "0600 002c", kScopedTwo,
          "0000000000000009 02 00 00 fffffffe 00010203 ff 0000000000000001 0000000000000002 3e800000 be000000"},
@@ -126,7 +128,7 @@ void testGoldens(const std::array<Fixture, 17> &cases)
 {
     for (const auto &fixture : cases)
     {
-        auto golden = bytesOf("4654564e 0002");
+        auto golden = bytesOf("4654564e 0003");
         for (auto part : {fixture.tagLength, std::string_view("0000"), fixture.scopeAndSequence, fixture.payload})
         {
             const auto bytes = bytesOf(part);
@@ -146,7 +148,7 @@ void testGoldens(const std::array<Fixture, 17> &cases)
     auto incompatible = hello;
     incompatible.maxVersion = incompatible.minVersion = 1;
     CHECK_EXPR(rejectHello(incompatible, kContent) == RejectReason::Version);
-    incompatible.maxVersion = incompatible.minVersion = 3;
+    incompatible.maxVersion = incompatible.minVersion = 4;
     CHECK_EXPR(rejectHello(incompatible, kContent) == RejectReason::Version);
     CHECK_EXPR(rejectHello(hello, {2, kContent.catalog, kContent.generator}) == RejectReason::Content);
     CHECK_EXPR(rejectHello(hello, {1, 0, kContent.generator}) == RejectReason::Content);
@@ -180,6 +182,7 @@ void testMalformed(const std::array<Fixture, 17> &cases)
     checkMalformed(client, encoded(server, cases[7].packet), S::WrongDirection);
     mutate(3, 0, "01", S::BadMagic);
     mutate(3, 4, "0001", S::VersionMismatch);
+    mutate(3, 4, "0002", S::VersionMismatch);
     mutate(3, 4, "ffff", S::VersionMismatch);
     mutate(3, 6, "00", S::UnknownKind);
     mutate(3, 6, "ff", S::UnknownKind);
@@ -203,6 +206,9 @@ void testMalformed(const std::array<Fixture, 17> &cases)
     mutate(4, 53, "ffffffff", S::InvalidPayload);
     mutate(4, 57, "7ff8000000000000", S::InvalidPayload);
     mutate(4, 81, "7f800000", S::InvalidPayload);
+    mutate(4, 98, "7ff8000000000000", S::InvalidPayload);
+    mutate(4, 106, "bff0000000000000", S::InvalidPayload);
+    mutate(4, 114, "3fe0000000000000", S::InvalidPayload);
     mutate(5, 44, "ff", S::InvalidPayload);
     mutate(5, 47, "80000000", S::InvalidPayload);
     mutate(5, 72, "7fc00000", S::InvalidPayload);
@@ -343,8 +349,12 @@ void testAssembly()
     CHECK_EXPR(assembler.accept(fragment(0), now) == A::InProgress);
     CHECK_EXPR(assembler.accept(fragment(0), now) == A::Gap);
     CHECK_EXPR(assembler.accept(fragment(0), now) == A::InProgress);
-    CHECK_EXPR(!assembler.expire(now + kChunkTimeout - std::chrono::milliseconds(1)));
-    CHECK_EXPR(assembler.accept(fragment(1), now + kChunkTimeout) == A::Expired);
+    CHECK_EXPR(!assembler.expire(now + kChunkIdleTimeout - std::chrono::milliseconds(1)));
+    CHECK_EXPR(assembler.accept(fragment(1), now + kChunkIdleTimeout) == A::Expired);
+    CHECK_EXPR(assembler.accept(fragment(0), now) == A::InProgress);
+    for (uint8_t i = 1; i < 5; ++i)
+        CHECK_EXPR(assembler.accept(fragment(i), now + std::chrono::seconds(i * 4)) == A::InProgress);
+    CHECK_EXPR(assembler.accept(fragment(5), now + kChunkTransferTimeout) == A::Expired);
     CHECK_EXPR(assembler.bytes().empty());
     auto invalid = fragment(0);
     invalid.materials[0] = 254;
@@ -412,12 +422,12 @@ void testProperties(const std::array<Fixture, 17> &cases)
         full.players[i].player.value = i + 1;
     Packet packet{kScope, 2, full};
     const auto bytes = encoded(Endpoint::Server, packet);
-    CHECK_EXPR(bytes.size() == 1037);
+    CHECK_EXPR(bytes.size() == 1157);
     Packet decoded;
     CHECK_EXPR(decode(Endpoint::Server, bytes, decoded) == S::Ok);
     CHECK_EXPR(decoded == packet);
     auto unsorted = bytes;
-    unsorted[97] = 1; // second player ID duplicates the first
+    unsorted[101] = 1; // second player ID duplicates the first
     checkMalformed(Endpoint::Server, unsorted, S::InvalidPayload);
 
     ItemSnapshot fullItems{42, kMaxItemsPerSnapshot, kMaxItemsPerSnapshot, {}};

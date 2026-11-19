@@ -1,7 +1,7 @@
 # Dedicated server (`ft_vox_server`)
 
 The standalone CPU-only authority host (#250) owns one `GameSimulation` and
-one persistent world. Live mode listens for v2 UDP sessions (#252),
+one persistent world. Live mode listens for authoritative UDP sessions (#252),
 simulates remote movement from player inputs (#253), replicates each
 player's terrain interest (#254), and resolves remote break and place
 intents on the simulation owner (#255).
@@ -19,7 +19,7 @@ cmake --build build-cpu --config Release --target ft_vox_server
 
 On Windows with a Visual Studio generator use
 `.\build-cpu\Release\ft_vox_server.exe`. The executable is also built when
-`FT_VOX_GRAPHICS=ON`. It links to `ft_vox_core` and the v2 UDP adapter.
+`FT_VOX_GRAPHICS=ON`. It links to `ft_vox_core` and the UDP adapter.
 The adapter uses Winsock and BCrypt on Windows and POSIX sockets and OS
 entropy on Unix. The legacy Boost prototype remains a separate test target.
 The server's dependency checks cover its include closure and generated link inputs.
@@ -47,6 +47,7 @@ arguments. Launching `ft_vox` without `--connect` starts solo play.
 `--connect` takes a numeric IPv4 address and port. With it, `--seed` is an
 optional server identity check. `--world`, `--benchmark`, and `--view` are solo
 options. Remote play uses the normal graphics and resource-pack options.
+Use matching client and server builds. Multiplayer movement uses wire v3.
 
 Wait for **Connected**, then move one player away from the shared spawn.
 Players in range appear as color-coded upright boxes. Use **WASD**, **Space**
@@ -79,13 +80,10 @@ foliage because the wire images carry voxel materials. The local biome
 map, creative flight, isometric inspection and world pause are solo
 features.
 
-The camera follows interpolated server positions, with immediate local
-mouse look. Movement uses server snapshots without local prediction or
-reconciliation, so visible motion includes both directions of network travel
-and a short interpolation delay. Prediction is tracked in
-[#258](https://github.com/gkehren/ft_vox/issues/258).
-Interpolation also covers up to 23 other players, 38 dropped items, and 42
-mobs. Avatars use a solid box and receive scene occlusion. Current snapshots
+The camera follows locally predicted movement with immediate mouse look.
+Up to 23 other players use delayed interpolation. Dropped items and mobs
+still use their own snapshot streams, with up to 38 items and 42 mobs.
+Avatars use a solid box and receive scene occlusion. Current snapshots
 define which entities are present. The client
 allows one reliable action at a time and waits for the server before
 changing terrain or inventory. Packet loss can briefly delay streaming
@@ -106,12 +104,13 @@ snapshot after a prolonged gap. The server still admits only the next
 six ticks at its receive boundary. The HUD reports degraded input timing
 if snapshots become too old or processed input stops advancing while
 the client is sending. A large path change between RTT observations can
-still interrupt movement. The existing stop-and-wait chunk baseline
-transfer can also exceed its five-second assembly deadline on slower
-links. The delayed-UDP movement tests isolate that terrain transfer.
+still interrupt movement. The stop-and-wait chunk baseline takes at least
+one round trip per fragment, so the first playable chunk can take several
+seconds at higher RTT. The delayed-UDP tests measure the first playable
+chunk separately from steady movement.
 
-See [Manual verification for #257](multiplayer-client-smoke.md) for
-the physical GPU run and complementary automated coverage.
+See [Multiplayer smoke](multiplayer-client-smoke.md) for the physical GPU
+run and the deterministic movement measurements.
 
 ## Server options
 
@@ -204,7 +203,7 @@ tampering or network saturation. Keep the default loopback bind for local use.
   budget, and closes after 5 seconds without progress. The maximum remote
   allocation is the player cap minus the local anchor. The IO worker reads
   up to 128 datagrams per pump and drops datagrams over 1,200 bytes. It applies
-  v2 token buckets by family, peer and process, plus a fixed 256-bucket IPv4
+  token buckets by family, peer and process, plus a fixed 256-bucket IPv4
   discovery table. Addresses that hash to the same discovery bucket share
   that budget.
 
@@ -246,8 +245,59 @@ budgets. New captures replace unsent snapshots, and loss is recovered by
 the next complete snapshot.
 
 The CPU-only `ClientTransport::sendInput` sends an input for the current
-session. `latestPlayerSnapshot()` and `scope()` expose the latest accepted
+session and returns the sequence of the datagram sent. `latestPlayerSnapshot()`
+and `scope()` expose the latest accepted
 state and its epoch. The adapter clears the snapshot on departure.
+
+### Client movement and presentation
+
+The graphical client advances its local view as soon as it sends movement.
+It runs the shared walking controller for two 120 Hz substeps per input
+tick. On a snapshot it restores the server body and the owner's jump
+timers. It drops inputs acknowledged by the server or whose intended tick
+has already completed. It replays the remaining commands in intended tick
+order and uses neutral controls for gaps, as the server does.
+
+The client retains at most 32 timestamped input records and simulates at
+most 32 ticks beyond a snapshot. A frame sends at most three scheduled
+inputs. A 250 ms snapshot or input gap discards speculation and waits for
+the next snapshot. A teleport, terrain availability change, correction of
+0.75 blocks or more, or session retirement drops the old prediction and
+visual offset. The client tracks up to 16 chunks actually sampled during
+body validation, movement, replay and camera correction. A sampled chunk
+changing revision, losing its backing or becoming readable retires the
+old prediction. If the footprint overflows, the client also discards
+prediction and rebuilds the footprint from the next snapshot. Physics
+treats a chunk as unknown while its published replica and verified wire
+versions differ.
+
+Small corrections may retain up to 0.25 blocks of visual offset, fading
+over 100 ms. The body must fit and sweep clear through available terrain
+for the whole offset. A blocked sweep snaps to the corrected pose.
+While a replica update is pending, the camera holds the last validated
+pose for the same continuous motion. The hold supplies no input to
+physics. Prediction resumes from a fresh authoritative snapshot after
+the required backing is available and the body passes collision
+validation. If new backing puts a solid block in the held pose, or a
+teleport or session transition retires that pose, the client shows the
+terrain-waiting view until it has a usable body. Predicted positions are
+for the camera only. Voxel targeting uses the authoritative eye, and the
+server validates actions against its own world and inventory.
+
+Remote avatars use eight snapshots and a nominal six-tick (100 ms)
+playback delay, capped at twelve ticks (200 ms). Playback interpolates
+between ticks for actors present in the latest snapshot and in the
+interpolation history. An absent actor disappears immediately and
+teleports start a fresh path. Playback holds the last pose under loss
+with zero extrapolation and hides the avatar after 300 ms without a fresh
+snapshot.
+
+Release the mouse with **C** to open the **Multiplayer** menu. It shows RTT
+from unambiguous Hello/Welcome or Action/ACK exchanges, snapshot age since
+receipt, and an estimate of missing snapshots from gaps in the observed
+20 Hz stream. That estimate includes skipped server captures and client
+frame coalescing. The menu also shows pending inputs, hard resets, local
+correction magnitude and rate, and UDP payload throughput in each direction.
 
 ## Voxel actions
 
@@ -354,7 +404,7 @@ logical edit journal. A gap or overflow requests resync. The transport allows
 one baseline buffer per peer and at most 16 across the server, for 1 MiB of
 baseline bytes. On the client, the radius-eight disk caps installed material
 storage at 197 chunks (about 12.3 MiB), plus one 64 KiB assembly buffer. The
-existing per-peer and process-wide v2 bandwidth buckets apply to retries as
+existing per-peer and process-wide bandwidth buckets apply to retries as
 well as first sends. `world_tx_bytes`, `world_tx_frames`, `world_retransmits`
 and `world_resyncs` in `SERVER` records report replication traffic and resync
 requests. `ServerTransport::worldTraffic(playerId)` exposes the same counters
@@ -372,9 +422,18 @@ retries in the outbound direction.
 
 The fixed-size baseline favors predictable verification and memory use.
 Round-trip time and loss reduce throughput with the one-frame reliable send
-window, and the assembler restarts a transfer through resync if its five-second
-deadline expires. The measurements show the effect of prioritizing the spawn
-chunk and the cost of larger neighborhoods with full baselines.
+window. The assembler restarts a transfer through resync after five seconds
+without progress or twenty seconds total. The measurements show the
+effect of prioritizing the spawn chunk and the cost of larger neighborhoods
+with full baselines.
+
+At 150 ms RTT, the cold-join fixture takes about 9.4 seconds to install
+the spawn chunk and receive private inventory. Future transport work could
+evaluate a sliding reliable window with bounded in-flight fragment
+tracking, cumulative or selective acknowledgments, baseline compression,
+and fairness across simultaneous clients. CPU-only benchmarks at 30, 80
+and 150 ms RTT should measure time to the first playable chunk, transfer
+throughput, retry cost, and per-client memory under contention.
 
 ## Shutdown and recovery
 

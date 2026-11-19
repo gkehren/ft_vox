@@ -158,6 +158,7 @@ private:
 	struct RemoteSession;
 	void pollRemote();
 	void sendRemoteInput(const physics::PlayerInput &input);
+	void updateRemoteCamera();
 	void updateRemoteEntities();
 	void populateRemoteUi(GameUIFrame &frame);
 	sim::VoxelTargetTrace remoteTarget() const;

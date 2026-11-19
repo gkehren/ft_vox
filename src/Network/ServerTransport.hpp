@@ -19,7 +19,7 @@ struct SessionAdmission
 };
 
 inline constexpr uint64_t kInputLeadTicks = wire::kInputLeadTicks;
-inline constexpr uint64_t kSnapshotIntervalTicks = 3;
+inline constexpr uint64_t kSnapshotIntervalTicks = wire::kPlayerSnapshotIntervalTicks;
 inline constexpr uint64_t kEntitySnapshotIntervalTicks = 6;
 inline constexpr size_t kMaxConcurrentChunkTransfers = 16;
 

@@ -9,7 +9,7 @@ graphics-free:
      no Renderer/, Vulkan/, Camera/, Engine/, ImGui*/, no SDL /
      vulkan / volk / VMA / imgui / boost / miniz external headers, and the
      Chunk/ allowlist stays fail-closed. The dedicated server may include
-     the explicitly listed v2 codec and UDP files under Network/.
+     the explicitly listed codec and UDP files under Network/.
 
   2. LINK artifacts: the actual generated link inputs for ft_vox_headless,
      ft_vox_server, ft_vox_core, ft_vox_wire and ft_vox_udp must contain no
@@ -46,6 +46,7 @@ SERVER_NETWORK_FILES = {
     SRC / "Network" / name for name in (
         "WireProtocol.cpp", "WireProtocol.hpp", "UdpSocket.cpp", "UdpSocket.hpp", "UdpLink.hpp",
         "ServerTransport.cpp", "ServerTransport.hpp", "ClientTransport.cpp", "ClientTransport.hpp",
+        "PlayerInput.hpp",
     )
 }
 

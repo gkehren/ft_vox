@@ -613,7 +613,7 @@ bool GameSimulation::setPlayerFlight(PlayerId id, bool enabled, glm::dvec3 feet)
     }
     player->flight = enabled;
     player->status = "";
-    player->controller.reset(feet);
+    player->resetMotion(feet);
     player->positioned = true; // a successful toggle places the body (issue #247 review)
     return true;
 }
@@ -627,7 +627,7 @@ void GameSimulation::setPlayerPosition(PlayerId id, glm::dvec3 feet)
 {
     if (PlayerState *player = findPlayer(id))
     {
-        player->controller.reset(feet);
+        player->resetMotion(feet);
         player->positioned = true; // host reposition activates the session (issue #247 review)
     }
 }
@@ -648,7 +648,7 @@ void GameSimulation::restorePlayerFlight(PlayerId id, bool enabled, glm::dvec3 f
     {
         player->flight = enabled;
         player->status = "";
-        player->controller.reset(feet);
+        player->resetMotion(feet);
         player->positioned = true; // lifecycle restore places the body (issue #247 review)
     }
 }
@@ -666,7 +666,7 @@ glm::dvec3 GameSimulation::spawnPlayerOnSurface(PlayerId id, glm::dvec3 around)
     if (trySpawnWalkingPlayerOnSurface(id, around))
         return player->controller.eye();
     const glm::dvec3 fallbackEye(around.x, 100.0, around.z);
-    player->controller.reset(fallbackEye - glm::dvec3(0, player->controller.settings.eyeHeight, 0));
+    player->resetMotion(fallbackEye - glm::dvec3(0, player->controller.settings.eyeHeight, 0));
     player->flight = true;
     player->status = "No safe spawn in loaded terrain: fly to an open area.";
     player->positioned = true;
@@ -698,7 +698,7 @@ bool GameSimulation::trySpawnWalkingPlayerOnSurface(PlayerId id, glm::dvec3 arou
             candidate.position = {x + 0.5, y + 1.0 + physics::skin, z + 0.5};
             if (physics::clear(world, candidate.bounds(), queries))
             {
-                player->controller.reset(candidate.position);
+                player->resetMotion(candidate.position);
                 player->flight = false;
                 player->status = "";
                 player->positioned = true; // surface spawn places the body (issue #247 review)
@@ -750,7 +750,7 @@ bool GameSimulation::restorePlayerState(PlayerId id, const PlayerPersistState &s
         return false;
     }
 
-    player->controller.reset(restoredFeet);
+    player->resetMotion(restoredFeet);
     if (waitingForTerrain)
         player->controller.body.waitingForTerrain = true;
     player->flight = saved.flight;
@@ -1475,6 +1475,8 @@ PlayerSnapshot GameSimulation::snapshotOf(const PlayerState &state)
     s.flight = state.flight;
     s.submerged = state.controller.submerged;
     s.metrics = state.controller.metrics;
+    s.movementTimers = state.controller.timers();
+    s.motionReset = state.motionReset;
     s.selectedBlock = state.selectedBlock;
     s.status = state.status;
     return s;

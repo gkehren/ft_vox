@@ -1,4 +1,4 @@
-# Authoritative wire protocol v2
+# Authoritative wire protocol v3
 
 Accepted for Epic #245 Phase B2 ([#251](https://github.com/gkehren/ft_vox/issues/251)).
 The `ft_vox_wire` library implements framing, payload validation, receive
@@ -14,7 +14,10 @@ are retained and the new tags use only the fresh lane. The Boost UDP prototype r
 
 Phase D1 (#257) consumes these snapshots and verified terrain in the
 [graphical client](../dedicated-server.md#connect-two-graphical-clients).
-The graphical host uses the same v2 framing and delivery rules.
+Phase D2 (#258) changes the envelope version to **3** and extends
+PlayerSnapshot with the owner's movement timers and each player's motion
+reset serial. Upgrade the server and graphical clients together. The
+other payload layouts and delivery rules carry forward from v2.
 
 ## Framing
 
@@ -27,7 +30,7 @@ dependency and no generic message fragmentation.
 | Offset | Type | Field |
 | --- | --- | --- |
 | 0 | 4 bytes | ASCII `FTVN` (`46 54 56 4e`) |
-| 4 | u16 | Envelope version, 2 |
+| 4 | u16 | Envelope version, 3 |
 | 6 | u8 | Message tag |
 | 7 | u8 | Flags, zero |
 | 8 | u16 | Payload length, 0–1,164, exactly the remaining bytes |
@@ -53,7 +56,7 @@ direction to the corresponding family. The byte maximum includes the header.
 | 2 | Welcome | S | Handshake | 98 | 2 | 2 |
 | 3 | Reject | S | Handshake | 49 | 2 | 2 |
 | 4 | Input | C | Fresh | 53 | 60 | 8 |
-| 5 | PlayerSnapshot | S | Fresh | 1,037 | 20 | 4 |
+| 5 | PlayerSnapshot | S | Fresh | 1,157 | 20 | 4 |
 | 6 | Action | C | Reliable | 80 | 16 | 8 |
 | 7 | ActionResult | S | Reliable | 70 | 16 | 8 |
 | 8 | Inventory | S | Reliable | 197 | 10 | 4 |
@@ -99,10 +102,10 @@ loopback and impaired delivery measurements from `WorldReplication`.
 - **Hello** carries `nonce:u64, minVersion:u16, maxVersion:u16, compatibility`.
   The client picks a nonzero fresh nonce per attempt and reuses it only to
   retransmit that attempt. The inclusive version range must be nonzero and
-  ordered. Hello, Welcome and Reject use the v2 envelope for discovery.
+  ordered. Hello, Welcome and Reject use the v3 envelope for discovery.
 - **Welcome** carries `nonce:u64, worldId:u64, playerId:u32, seed:u32,
   generatorVersion:u32, compatibility, tick:u64, nextEditId:u64`. The server
-  echoes the nonce, selects v2, and assigns the authorized PlayerId. The seed
+  echoes the nonce, selects v3, and assigns the authorized PlayerId. The seed
   is 1–2,147,483,647. The generator version is nonzero and must match the
   negotiated generator fingerprint. `compatibility` is `itemSchema:u16,
   catalogFingerprint:u64, generatorFingerprint:u64`. The server compares
@@ -112,7 +115,7 @@ loopback and impaired delivery measurements from `WorldReplication`.
 - **Reject** carries `nonce:u64, reason:u8, minVersion:u16, maxVersion:u16`.
   Reasons are 1 version, 2 content, 3 full and 4 unavailable. With valid
   discovery framing but no common version, reply with reason 1 and range
-  `[2,2]`. A foreign magic or envelope version is dropped. It cannot be
+  `[3,3]`. A foreign magic or envelope version is dropped. It cannot be
   interpreted as discovery or as a gameplay packet.
 - Header SessionId, epoch and sequence are zero on Hello and Reject. Welcome
   has a nonzero SessionId and epoch and zero sequence. Repeated Hello
@@ -140,7 +143,7 @@ loopback and impaired delivery measurements from `WorldReplication`.
 
 Layout, tag, framing or wire semantic breaks require an explicit new protocol
 version. Readers reject unknown tags and fields for the selected version.
-Future envelopes can preserve v2 discovery or require an explicit client
+Future envelopes can preserve v3 discovery or require an explicit client
 upgrade. Item schema 1 carries the append-only u16 `ItemId` registry with zero
 reserved for empty. The material catalog uses the append-only voxel ordinals
 `[0, COUNT)` and wire AIR 255. The current core AIR sentinel is mapped at
@@ -224,14 +227,21 @@ late packets and packets beyond the lead window are dropped.
 
 **PlayerSnapshot** carries `tick:u64, lastProcessedInput:u64, count:u8`
 followed by 1–24 records. Each record is `playerId:u32, feetX:f64, feetY:f64,
-feetZ:f64, velocityX:f32, velocityY:f32, velocityZ:f32, flags:u8`.
+feetZ:f64, velocityX:f32, velocityY:f32, velocityZ:f32, flags:u8,
+motionReset:u32`. Three `f64` seconds values follow the records, starting
+with the owner's buffered jump (0–0.12), then coyote time (0–0.10) and
+swim-jump lockout (0–0.25). The motion reset serial changes when the host
+resets a player's controller, including a spawn, teleport or mode change.
 IDs are strictly ascending. The server includes the owner and selects
 up to 23 interested remote players. Feet lie in `[-2^23,2^23)` and each
 velocity component lies in `[-1024,1024]`. Flag bits 0–2 are grounded,
 waiting for terrain and flight. `lastProcessedInput` is the owner's fresh
 Input sequence consumed by the simulation, with zero meaning none. It is
 independent of reliable ACKs. Heartbeats share the fresh lane but do not
-count as processed inputs. Snapshots carry the wire epoch in the header
+count as processed inputs. The client rejects regressive acknowledgments,
+sequences ahead of the last sent input, and acknowledgments inside its
+64-entry ledger whose sequence or intended tick cannot have been processed.
+Snapshots carry the wire epoch in the header
 and are produced every three completed ticks. The owner is always included,
 and eligible neighbors are selected in ascending ID order from the remote
 players within the configured chunk-radius disk.
@@ -353,8 +363,9 @@ bytes. Offset is `index * 1100` and is never supplied by the peer.
 
 Allow one in-flight transfer per client and one fixed 65,536-byte assembly
 buffer. Delivery to the assembler is ordered after reliable admission.
-There is no allocation from an advertised size or fragment count. Start
-the 5-second steady-clock deadline on the first fragment. A gap, expiry,
+There is no allocation from an advertised size or fragment count. Start a
+20-second total deadline on the first fragment. Expire after 5 seconds with
+no new fragment or at the total deadline. A gap, expiry,
 changed metadata, invalid material or checksum failure discards the
 assembly. Install the chunk only after index 59 and full checksum
 verification. An assembled baseline is associated with its scope, chunk

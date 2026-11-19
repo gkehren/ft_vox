@@ -59,6 +59,8 @@ struct ClientTransport::Impl
 		roundTrip.reset();
 		inputUnacknowledgedSince.reset();
 		latestInputSequence = 0;
+		sentInputs = {};
+		nextSentInput = 0;
 		latestInputSentAt = {};
 		itemHistory = {};
 		mobHistory = {};
@@ -187,12 +189,32 @@ struct ClientTransport::Impl
 
 	Sender sender()
 	{
-		return {socket, server, wire::Endpoint::Client, outbound, globalOut};
+		return {socket, server, wire::Endpoint::Client, outbound, globalOut, &traffic.sentBytes};
+	}
+
+	bool validInputAck(const wire::PlayerSnapshot &snapshot) const
+	{
+		const uint64_t previous = playerHistory.current ? playerHistory.current->lastProcessedInput : 0;
+		const uint64_t ack = snapshot.lastProcessedInput;
+		if (ack == previous)
+			return true;
+		if (ack < previous || ack > latestInputSequence)
+			return false;
+		const auto found = std::ranges::find(sentInputs, ack, &SentInput::sequence);
+		if (found != sentInputs.end())
+			return found->tick <= snapshot.tick;
+		// An ACK older than the ledger can only retire already expired
+		// prediction. Holes inside the ledger (e.g. Heartbeats) are invalid.
+		const auto oldest = sentInputs[nextSentInput].sequence;
+		return oldest != 0 && ack < oldest;
 	}
 
 	void receive(const Received &frame, Time now)
 	{
-		if (frame.from != server || !inbound.traffic.take(now, frame.size) || frame.size > wire::kDatagramBytes)
+		if (frame.from != server)
+			return;
+		traffic.receivedBytes += frame.size;
+		if (!inbound.traffic.take(now, frame.size) || frame.size > wire::kDatagramBytes)
 			return;
 		wire::Packet packet;
 		if (wire::decode(wire::Endpoint::Server, {frame.bytes.data(), frame.size}, packet) != wire::CodecStatus::Ok ||
@@ -246,7 +268,7 @@ struct ClientTransport::Impl
 		const auto *players = std::get_if<wire::PlayerSnapshot>(&packet.payload);
 		const auto *items = std::get_if<wire::ItemSnapshot>(&packet.payload);
 		const auto *mobs = std::get_if<wire::MobSnapshot>(&packet.payload);
-		if (players && (!newerSnapshot(*players, playerHistory, welcome->tick) ||
+		if (players && (!newerSnapshot(*players, playerHistory, welcome->tick) || !validInputAck(*players) ||
 		                std::ranges::none_of(std::span(players->players).first(players->count),
 		                     [this](const auto &player) { return player.player == welcome->player; })))
 			return;
@@ -342,16 +364,18 @@ struct ClientTransport::Impl
 		}
 	}
 
-	bool sendInput(const wire::Input &input, Time now)
+	uint64_t sendInput(const wire::Input &input, Time now)
 	{
 		if (status != ClientStatus::Connected || !wire::validInput(input) ||
 		    !link->sendFresh(sender(), now, input))
-			return false;
+			return 0;
 		latestInputSequence = link->freshSent;
+		sentInputs[nextSentInput] = {latestInputSequence, input.intendedTick};
+		nextSentInput = (nextSentInput + 1) % sentInputs.size();
 		latestInputSentAt = now;
 		if (!inputUnacknowledgedSince)
 			inputUnacknowledgedSince = now;
-		return true;
+		return latestInputSequence;
 	}
 
 	Socket socket{{0, 0}};
@@ -364,6 +388,10 @@ struct ClientTransport::Impl
 	std::optional<Clock::duration> roundTrip;
 	Time latestInputSentAt{};
 	uint64_t latestInputSequence{};
+	struct SentInput { uint64_t sequence{}, tick{}; };
+	std::array<SentInput, 64> sentInputs{};
+	size_t nextSentInput{};
+	ClientTraffic traffic{};
 	bool helloRetransmitted{};
 	std::optional<wire::Inventory> inventory;
 	SnapshotHistory<wire::ItemSnapshot> itemHistory;
@@ -413,10 +441,12 @@ void ClientTransport::disconnect(Clock::time_point now)
 }
 
 ClientStatus ClientTransport::status() const { return m_impl->status; }
-bool ClientTransport::sendInput(const wire::Input &input, Clock::time_point now)
+uint64_t ClientTransport::sendInput(const wire::Input &input, Clock::time_point now)
 {
 	return m_impl->sendInput(input, now);
 }
+
+ClientTraffic ClientTransport::traffic() const { return m_impl->traffic; }
 
 std::optional<uint64_t> ClientTransport::sendAction(wire::Action action, Clock::time_point now)
 {

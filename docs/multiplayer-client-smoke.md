@@ -1,6 +1,92 @@
-# Graphical multiplayer smoke for #257
+# Graphical multiplayer smoke
 
-## Input timing correction
+## Terrain and camera correction for #273
+
+Tested client commit `676f9380b1831a45f710b67679eddd0067b976b6`
+on Windows 11 Pro 10.0.26300, with an NVIDIA GeForce RTX 4070 Ti,
+driver 621.24, and Vulkan 1.4.357. The uninstrumented client was built
+with MSVC in Release mode with `FT_VOX_GRAPHICS=ON`. The matching wire-v3
+dedicated server used the Windows MSVC CPU-only Release build. Each
+process used an isolated working directory, and the clients ran with
+`FT_VOX_VALIDATION=1`.
+
+```powershell
+ft_vox_server.exe --world multiplayer-smoke --saves-root server-saves --seed 42 --port 0 --stop-file stop-initial --metrics-every 180
+# Start two clients with the port printed in the server's ready record.
+ft_vox.exe --connect 127.0.0.1:<port> --seed 42
+# Standalone solo run.
+ft_vox.exe --seed 42 --benchmark 5
+```
+
+- Both clients showed the synchronized-terrain waiting state, connected
+  as distinct players in the same epoch, and reached 29 loaded chunks
+  with 16 and 14 draw entries. Both reported `Disconnected` when the
+  server saved and stopped.
+- The restarted server reopened the save and a newly launched client
+  joined a different world epoch. It reached 29 chunks and 14 draw
+  entries, then disconnected when the server stopped. In a separate
+  attempt that stopped the server while baselines were still streaming,
+  the client entered resync before the harness ended.
+- The five-second solo benchmark wrote its report. `EngineReload` and
+  `VisualRegression` passed on the same GPU.
+- Validation reported the known swapchain warnings
+  `VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
+  `VUID-VkImageViewCreateInfo-usage-02275`.
+
+Interactive SDL gameplay remains **unverified**. The Windows input
+helper could not connect to its native pipe after retries and a reset.
+The run covers real Vulkan startup, terrain rendering, server shutdown,
+and fresh-process join after restart. Keyboard movement and yaw, jump and
+sprint, mouse edits during movement, inventory drag/drop, focus and
+capture transitions, boundary walking, menu reconnect, and interactive
+solo play still need a manual pass.
+
+The CPU regressions exercise deferred publication with and without a
+worker lease, support removal and restoration, teleport and epoch reset,
+unrelated edits, sampled obstacles, positive and negative chunk seams,
+unavailable-to-readable backing, and dependency overflow. The existing
+movement profiles still converge to zero position error, and a cold join
+at 150 ms RTT still reaches spawn terrain and inventory in 9.386 seconds.
+
+## Movement prediction and interpolation for #258
+
+`WorldReplicationClientTick` runs the production UDP client and server
+transport through a virtual-time IPv4 relay. The movement fixture uses a
+flat walking surface and compares the first 0.01-block displacement with
+a direct, no-network step of the shared controller. The RTT column shows
+the configured path delay. The measured handshake RTT also includes
+server tick and pump time.
+
+| Nominal RTT | Onset in ms, direct / predicted / authority | Peak pending inputs | Corrections / peak blocks | Snapshot gaps | Final prediction error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Loopback | 17 / 0 / 34 | 5 | 0 / 0 | 0% | 0 blocks |
+| 30 ms | 17 / 0 / 33 | 6 | 0 / 0 | 0% | 0 blocks |
+| 80 ms | 17 / 0 / 67 | 10 | 0 / 0 | 0% | 0 blocks |
+| 150 ms | 16 / 0 / 100 | 14 | 0 / 0 | 0% | 0 blocks |
+| 80 ms join, 40–100 ms movement RTT with faults | 17 / 0 / 84 | 16 | 37 / 0.321 | 20.7% | 0 blocks |
+
+The fault run injects jitter, loss, delayed duplicates, reordering, a
+snapshot gap and a 500 ms frame stall. The movement-only run uses
+approximately 12–15 KiB received and 16–19 KiB sent over six virtual
+seconds. The direct controller baseline uses zero network bytes. A
+separate 150 ms cold join published the spawn chunk and private
+inventory in 9,386 ms without a resync.
+
+Two Windows Release graphical clients ran against the seed-42 dedicated
+server on an NVIDIA GeForce RTX 4070 Ti with driver 621.24 and Vulkan
+validation enabled. Both joined the same epoch with distinct player IDs,
+reached 29 loaded chunks and nonempty draw lists, and reported
+`Disconnected` after an orderly server stop. `EngineReload` and
+`VisualRegression` passed on that GPU. The live clients reported the
+documented swapchain validation warnings
+`VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
+`VUID-VkImageViewCreateInfo-usage-02275`. The Windows input helper could
+not connect to its native pipe, so interactive keyboard and menu
+verification remains pending.
+
+## Phase D1 for #257
+
+### Input timing correction
 
 Commit `5d4cb02aa3f2d9cd5c74f8298a2d14436f692294` was built with MSVC
 in Release mode with `FT_VOX_GRAPHICS=ON`. The uninstrumented binaries
@@ -48,7 +134,7 @@ The relay leaves chunk transfer out of the timing fixture. The existing
 stop-and-wait baseline can hit its five-second assembly deadline before
 a cold join is playable at higher RTTs.
 
-## Earlier diagnostic run
+### Earlier diagnostic run
 
 The Windows Release client ran on an NVIDIA GeForce RTX 4070 Ti with two
 game processes and one IPv4 loopback server. The world used seed 42 and a

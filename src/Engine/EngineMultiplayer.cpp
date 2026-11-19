@@ -14,11 +14,7 @@ namespace wire = net::wire;
 using net::udp::ClientStatus;
 using Clock = net::udp::ClientTransport::Clock;
 using namespace std::chrono_literals;
-
-glm::dvec3 feet(const wire::PlayerState &player)
-{
-	return {player.feet[0], player.feet[1], player.feet[2]};
-}
+using net::udp::playerFeet;
 
 constexpr glm::dvec3 kEyeOffset(0.0, physics::PlayerSettings{}.eyeHeight, 0.0);
 
@@ -98,8 +94,9 @@ const wire::PlayerState *Engine::RemoteSession::localPlayer() const
 bool Engine::RemoteSession::ready() const
 {
 	const auto *player = localPlayer();
-	return projection && player && players.fresh(Clock::now()) && transport.inventory() &&
-		projection->observedVersion(glm::ivec3(glm::floor(feet(*player)))).has_value();
+	return projection && player && hasCameraPose && !prediction.waitingForTerrain() &&
+		players.fresh(Clock::now()) && transport.inventory() &&
+		projection->observedVersion(glm::ivec3(glm::floor(playerFeet(*player)))).has_value();
 }
 
 const char *Engine::RemoteSession::connectionStatus() const
@@ -111,6 +108,8 @@ const char *Engine::RemoteSession::connectionStatus() const
 	case ClientStatus::Disconnected: return "Disconnected";
 	case ClientStatus::Connecting: return "Joining server";
 	case ClientStatus::Connected:
+		if (prediction.waitingForTerrain() || (localPlayer() && !hasCameraPose))
+			return "Waiting for synchronized player terrain";
 		if (!ready())
 			return "Waiting for server terrain and inventory";
 		if (const auto now = Clock::now(); !inputTiming.hasFreshClock(now) || transport.inputAcknowledgmentStalled(now))
@@ -223,6 +222,14 @@ void Engine::pollRemote()
 		remote.welcome = next ? welcome : std::nullopt;
 		remote.players = remote.items = remote.mobs = {};
 		remote.inputTiming.reset();
+		remote.prediction = {};
+		remote.remotePlayers = {};
+		remote.terrain = {};
+		remote.hasCameraPose = false;
+		remote.lastTraffic = transport.traffic();
+		remote.trafficAt = now;
+		remote.firstPlayerAt = {};
+		remote.receiveKiB = remote.sendKiB = 0.0;
 		remote.jumpQueuedAt = {};
 		remote.actionPending = false;
 		remote.feedback = nullptr;
@@ -240,10 +247,31 @@ void Engine::pollRemote()
 	{
 		if (const auto sample = transport.takeRoundTripSample())
 			remote.inputTiming.observeRoundTrip(*sample);
-		if (const auto receivedAt = transport.playerSnapshotReceivedAt())
+		if (const auto *player = remote.localPlayer())
 		{
-			remote.inputTiming.observeSnapshot(history.current->tick, *receivedAt);
-			remote.players.observe(history, *receivedAt);
+			const net::udp::ClientWorld::CollisionView collision(*remote.projection, transport.chunks(), &remote.terrain);
+			if (remote.players.arrived == Clock::time_point{} || history.current->tick != remote.players.tick)
+			{
+				const auto receivedAt = *transport.playerSnapshotReceivedAt();
+				remote.inputTiming.observeSnapshot(history.current->tick, receivedAt);
+				remote.players.observe(history, receivedAt);
+				if (remote.firstPlayerAt == Clock::time_point{})
+					remote.firstPlayerAt = receivedAt;
+				remote.prediction.observe(*history.current, *player, receivedAt, collision);
+				remote.remotePlayers.observe(*history.current, receivedAt);
+			}
+			else
+				remote.prediction.checkTerrain(collision);
+			remote.prediction.expire(now);
+		}
+		if (now - remote.trafficAt >= 1s)
+		{
+			const auto traffic = transport.traffic();
+			const double elapsed = std::chrono::duration<double>(now - remote.trafficAt).count();
+			remote.receiveKiB = double(traffic.receivedBytes - remote.lastTraffic.receivedBytes) / (1024.0 * elapsed);
+			remote.sendKiB = double(traffic.sentBytes - remote.lastTraffic.sentBytes) / (1024.0 * elapsed);
+			remote.lastTraffic = traffic;
+			remote.trafficAt = now;
 		}
 	}
 	const char *status = remote.connectionStatus();
@@ -263,14 +291,6 @@ void Engine::pollRemote()
 
 	remote.items.observe(transport.itemSnapshots(), now);
 	remote.mobs.observe(transport.mobSnapshots(), now);
-	if (const auto *player = remote.localPlayer())
-	{
-		auto eye = feet(*player) + kEyeOffset;
-		if (history.previous)
-			if (const auto *previous = findState(history.previous->players, history.previous->count, player->player))
-				eye = glm::mix(feet(*previous) + kEyeOffset, eye, remote.players.alpha(history.previous->tick, now));
-		camera.setPosition(glm::vec3(eye));
-	}
 }
 
 void Engine::sendRemoteInput(const physics::PlayerInput &input)
@@ -279,6 +299,7 @@ void Engine::sendRemoteInput(const physics::PlayerInput &input)
 	if (!remote.ready())
 		return;
 	const auto now = RemoteSession::Clock::now();
+	const net::udp::ClientWorld::CollisionView collision(*remote.projection, remote.transport.chunks(), &remote.terrain);
 	if (input.jumpPressed && now - remote.jumpQueuedAt >= 200ms)
 		jumpPressed = false;
 	wire::Input sample;
@@ -289,9 +310,23 @@ void Engine::sendRemoteInput(const physics::PlayerInput &input)
 		(input.swimUp ? wire::Input::swimUp : 0) | (input.swimDown ? wire::Input::swimDown : 0) |
 		(input.jumpPressed && jumpPressed ? wire::Input::jump : 0);
 	if (remote.inputTiming.send(now, sample, [&](const wire::Input &inputSample) {
-		return remote.transport.sendInput(inputSample, now);
+		const auto sequence = remote.transport.sendInput(inputSample, now);
+		if (sequence)
+			remote.prediction.record(sequence, inputSample, now, collision);
+		return sequence != 0;
 	}))
 		jumpPressed = false;
+}
+
+void Engine::updateRemoteCamera()
+{
+	auto &remote = *m_remote;
+	const net::udp::ClientWorld::CollisionView collision(*remote.projection, remote.transport.chunks(), &remote.terrain);
+	remote.prediction.checkTerrain(collision);
+	const auto body = remote.prediction.present(Clock::now(), collision);
+	remote.hasCameraPose = body.has_value();
+	if (body)
+		camera.setPosition(glm::vec3(*body + kEyeOffset));
 }
 
 void Engine::updateRemoteEntities()
@@ -302,30 +337,29 @@ void Engine::updateRemoteEntities()
 	std::vector<OverlayPlayer> avatars;
 	const auto now = RemoteSession::Clock::now();
 	const auto &players = remote.transport.playerSnapshots();
-	if (remote.projection && players.current && remote.players.fresh(now))
+	if (remote.hasCameraPose && remote.projection && players.current && remote.players.fresh(now))
 	{
 		for (const auto &actor : std::span(players.current->players).first(players.current->count))
 		{
 			if (actor.player == remote.welcome->player)
 				continue;
-			glm::dvec3 body = feet(actor);
-			if (players.previous)
-				if (const auto *previous = findState(players.previous->players, players.previous->count, actor.player))
-					body = glm::mix(feet(*previous), body, remote.players.alpha(players.previous->tick, now));
+			const auto body = remote.remotePlayers.present(actor.player, now);
+			if (!body)
+				continue;
 			// The server may spawn two players in the same cell. Keep the
 			// camera clear until it is outside the other player's box.
-			const glm::vec3 relative = camera.getPosition() - glm::vec3(body);
+			const glm::vec3 relative = camera.getPosition() - glm::vec3(*body);
 			if (std::abs(relative.x) < OverlayPlayer::kHalfWidth &&
 				std::abs(relative.z) < OverlayPlayer::kHalfWidth &&
 				relative.y >= 0.f && relative.y < OverlayPlayer::kHeight)
 				continue;
-			if (remote.projection->observedVersion(glm::ivec3(glm::floor(body))))
-				avatars.push_back({glm::vec3(body), actor.player.value});
+			if (remote.projection->observedVersion(glm::ivec3(glm::floor(*body))))
+				avatars.push_back({glm::vec3(*body), actor.player.value});
 		}
 	}
 
 	const auto present = [now, &remote](const auto &history, const auto &clock, auto member, auto draw) {
-		if (!remote.projection || !history.current || !clock.fresh(now))
+		if (!remote.hasCameraPose || !remote.projection || !history.current || !clock.fresh(now))
 			return;
 		const auto &current = *history.current;
 		const float alpha = history.previous ? float(clock.alpha(history.previous->tick, now)) : 1.f;
@@ -375,7 +409,7 @@ sim::VoxelTargetTrace Engine::remoteTarget() const
 	const auto aim = cameraAim(camera);
 	const auto direction = wire::aimDirection(aim[0], aim[1]);
 	const WorldCollisionView world(*viewWorld());
-	return sim::GameSimulation::traceVoxelTarget(world, feet(*m_remote->localPlayer()) + kEyeOffset,
+	return sim::GameSimulation::traceVoxelTarget(world, playerFeet(*m_remote->localPlayer()) + kEyeOffset,
 		{direction[0], direction[1], direction[2]});
 }
 
@@ -438,6 +472,21 @@ void Engine::populateRemoteUi(GameUIFrame &frame)
 	frame.multiplayerAction = remote.actionPending ? "Action pending" :
 		RemoteSession::Clock::now() < remote.feedbackUntil ? remote.feedback : nullptr;
 	const auto status = remote.transport.status();
+	if (remote.firstPlayerAt != Clock::time_point{})
+	{
+		const auto now = Clock::now();
+		const double seconds = std::chrono::duration<double>(now - remote.firstPlayerAt).count();
+		const auto rtt = remote.inputTiming.roundTripEstimate();
+		const auto &stats = remote.prediction.stats();
+		frame.networkStats = GameUIFrame::NetworkStats{
+			.rttMs = rtt ? std::optional{1000.0 * rtt->count()} : std::nullopt,
+			.snapshotAgeMs = std::chrono::duration<double, std::milli>(now - remote.players.arrived).count(),
+			.snapshotLoss = remote.remotePlayers.missingFraction(),
+			.correctionsPerSecond = double(stats.corrections) / std::max(seconds, 1.0),
+			.lastCorrection = stats.lastCorrection, .maxCorrection = stats.maxCorrection,
+			.receiveKiB = remote.receiveKiB, .sendKiB = remote.sendKiB,
+			.pendingInputs = remote.prediction.backlog(), .hardResets = stats.hardResets};
+	}
 	if (status == ClientStatus::Disconnected || status == ClientStatus::TimedOut || status == ClientStatus::Rejected)
 		frame.joinServer = [&remote] { remote.joinRequested = true; };
 	else if (status != ClientStatus::Leaving)

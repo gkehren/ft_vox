@@ -27,6 +27,11 @@ class PlayerController
 public:
     static constexpr double fixedStep = 1.0 / 120.0;
     static constexpr unsigned maxSteps = 8;
+    static constexpr double swimJumpDuration = 0.25;
+    struct Timers
+    {
+        double bufferedJump{}, coyote{}, swimJump{};
+    };
     Body body{};
     PlayerSettings settings{};
     PhysicsMetrics metrics{};
@@ -39,6 +44,15 @@ public:
         body.grounded = body.waitingForTerrain = false;
         suspend();
         submerged = {};
+    }
+    Timers timers() const { return {bufferedJump, coyote, swimJump}; }
+    void restoreTick(const Body &state, Timers timers)
+    {
+        reset(state.position);
+        body = state;
+        bufferedJump = timers.bufferedJump;
+        coyote = timers.coyote;
+        swimJump = timers.swimJump;
     }
     // Pause/focus transitions must never replay accumulated time or input.
     void suspend()
@@ -124,7 +138,7 @@ private:
             body.velocity.y = settings.jumpSpeed;
             body.grounded = false;
             coyote = bufferedJump = 0;
-            if (surfaceJump) swimJump = 0.25;
+            if (surfaceJump) swimJump = swimJumpDuration;
         }
         else bufferedJump = std::max(0.0, bufferedJump - fixedStep);
         body.velocity.y -= glm::mix(settings.gravity, settings.waterGravity, wet) * fixedStep;

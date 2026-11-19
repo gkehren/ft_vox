@@ -20,7 +20,7 @@ else()
     message(STATUS "test_network disabled: Boost not found")
 endif()
 
-# Authoritative protocol v2 is independent of Boost and the socket prototype.
+# The authoritative protocol is independent of Boost and the socket prototype.
 add_executable(test_wire_protocol test_wire_protocol.cpp)
 target_link_libraries(test_wire_protocol PRIVATE ft_vox_wire)
 add_test(NAME WireProtocol COMMAND test_wire_protocol)

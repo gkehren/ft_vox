@@ -745,8 +745,11 @@ void Engine::tickStreaming(double dt)
 	else
 	{
 		PROFILE_SCOPE("ReplicaPublication");
-		m_remote->projection->reconcile(m_remote->transport.chunks(), camera.getPosition());
+		const auto *player = m_remote->localPlayer();
+		const auto observer = player ? glm::vec3(net::udp::playerFeet(*player)) : camera.getPosition();
+		m_remote->projection->reconcile(m_remote->transport.chunks(), observer);
 		renderBridge->publishReplicaChanges();
+		updateRemoteCamera();
 	}
 
 	const int loadBudget = budgetFromRate(renderSettings.loadPerSec, frameDt, streamAccum);
@@ -789,11 +792,17 @@ void Engine::tickStreaming(double dt)
 		renderBridge->updateEntityLightCaches(camera, renderSettings, lightCacheN);
 	}
 	// GPU uploads are recorded inside recordFrame (after acquire) — no waitIdle.
+	if (m_remote && !m_remote->hasCameraPose)
 	{
-		PROFILE_SCOPE("Visibility");
-		renderBridge->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
+		drawList.clear();
+		shadowList.clear();
 	}
+	else
 	{
+		{
+			PROFILE_SCOPE("Visibility");
+			renderBridge->updateVisibility(camera, windowWidth, windowHeight, renderSettings);
+		}
 		PROFILE_SCOPE("CollectLists");
 		renderBridge->collectDrawList(drawList);
 		renderBridge->collectShadowList(shadowList, camera, renderSettings.shadowDistance);
@@ -1779,7 +1788,7 @@ void Engine::updateFrameUniforms(uint32_t frameIndex, int pixelW, int pixelH, do
 	// Visual immersion follows the eye, including water occupied by kelp.
 	bool underwater = false;
 	float underwaterSurfaceY = kUnknownUnderwaterSurfaceY;
-	if (renderBridge)
+	if (renderBridge && (!m_remote || m_remote->hasCameraPose))
 	{
 		WorldCollisionView world(*viewWorld());
 		const glm::ivec3 eye = glm::ivec3(glm::floor(camera.getPosition()));
