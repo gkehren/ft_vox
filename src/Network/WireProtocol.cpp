@@ -3,6 +3,7 @@
 #include <Chunk/TerrainGenerator.hpp>
 #include <Entities/MobTypes.hpp>
 #include <Items/ItemRegistry.hpp>
+#include <Physics/PlayerController.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -146,7 +147,7 @@ constexpr std::array kPolicies{
     Policy{Direction::ServerToClient, Lane::Handshake, 62, 2, 2},   // Welcome
     Policy{Direction::ServerToClient, Lane::Handshake, 13, 2, 2},   // Reject
     Policy{Direction::ClientToServer, Lane::Fresh, 17, 60, 8},      // Input
-    Policy{Direction::ServerToClient, Lane::Fresh, 17 + 41 * kMaxPlayersPerSnapshot, 20, 4},
+    Policy{Direction::ServerToClient, Lane::Fresh, 41 + 45 * kMaxPlayersPerSnapshot, 20, 4},
     Policy{Direction::ClientToServer, Lane::Reliable, 44, 16, 8},   // Action
     Policy{Direction::ServerToClient, Lane::Reliable, 34, 16, 8},   // ActionResult
     Policy{Direction::ServerToClient, Lane::Reliable, 17 + 4 * items::kInventorySize, 10, 4},
@@ -273,7 +274,7 @@ bool encodeFields(IO &io, T &p)
         for (auto &state : std::span(p.players).first(p.count))
         {
             if (!io.fields(state.player.value, state.feet[0], state.feet[1], state.feet[2],
-                           state.velocity[0], state.velocity[1], state.velocity[2], state.flags) ||
+                           state.velocity[0], state.velocity[1], state.velocity[2], state.flags, state.motionReset) ||
                 !validPlayer(state.player) || state.player.value <= previousId || state.flags > 0x07)
                 return false;
             for (double coordinate : state.feet)
@@ -284,7 +285,12 @@ bool encodeFields(IO &io, T &p)
                     return false;
             previousId = state.player.value;
         }
-        return true;
+        auto &timers = p.localTimers;
+        constexpr physics::PlayerSettings settings;
+        return io.fields(timers[0], timers[1], timers[2]) &&
+            timers[0] >= 0 && timers[0] <= settings.jumpBuffer &&
+            timers[1] >= 0 && timers[1] <= settings.coyoteTime &&
+            timers[2] >= 0 && timers[2] <= physics::PlayerController::swimJumpDuration;
     }
     else if constexpr (std::is_same_v<P, Action>)
     {
@@ -604,6 +610,7 @@ AssemblyStatus ChunkAssembler::accept(const ChunkFragment &fragment, Clock::time
     }
     std::copy_n(fragment.materials.begin(), fragmentSize(fragment.index),
                 bytes_.begin() + fragment.index * kFragmentBytes);
+    progressed_ = now;
     ++nextIndex_;
     if (nextIndex_ != kFragmentsPerChunk)
         return AssemblyStatus::InProgress;
@@ -615,7 +622,8 @@ AssemblyStatus ChunkAssembler::accept(const ChunkFragment &fragment, Clock::time
 
 bool ChunkAssembler::expire(Clock::time_point now) noexcept
 {
-    if (nextIndex_ == 0 || nextIndex_ == kFragmentsPerChunk || now - started_ < kChunkTimeout)
+    if (nextIndex_ == 0 || nextIndex_ == kFragmentsPerChunk ||
+        (now - progressed_ < kChunkIdleTimeout && now - started_ < kChunkTransferTimeout))
         return false;
     reset();
     return true;

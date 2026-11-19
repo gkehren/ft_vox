@@ -163,6 +163,17 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 	if (frame.multiplayerStatus && ImGui::BeginMenu("Multiplayer"))
 	{
 		ImGui::TextUnformatted(frame.multiplayerStatus);
+		if (const auto &stats = frame.networkStats)
+		{
+			if (stats->rttMs)
+				ImGui::Text("RTT %.0f ms", *stats->rttMs);
+			ImGui::Text("Snapshot age %.0f ms   Missing %.1f%%", stats->snapshotAgeMs, 100.0 * stats->snapshotLoss);
+			ImGui::Text("Pending inputs %zu   Resets %llu", stats->pendingInputs,
+				static_cast<unsigned long long>(stats->hardResets));
+			ImGui::Text("Corrections %.1f/s   Last %.3f m   Max %.3f m", stats->correctionsPerSecond,
+				stats->lastCorrection, stats->maxCorrection);
+			ImGui::Text("Receive %.1f KiB/s   Send %.1f KiB/s", stats->receiveKiB, stats->sendKiB);
+		}
 		ImGui::Separator();
 		if (frame.joinServer && ImGui::MenuItem("Reconnect"))
 			frame.joinServer();

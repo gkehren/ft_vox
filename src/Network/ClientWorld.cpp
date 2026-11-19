@@ -8,6 +8,51 @@ glm::ivec3 worldCoord(wire::ChunkCoord coord)
 {
 	return {coord.x, 0, coord.z};
 }
+
+std::optional<wire::ChunkVersion> versionAt(const ChunkProjection &chunks, wire::ChunkCoord coord)
+{
+	const auto found = chunks.find(coord);
+	return found == chunks.end() ? std::nullopt : std::optional{found->second.version};
+}
+}
+
+physics::Cell ClientWorld::CollisionView::sample(glm::ivec3 cell) const
+{
+	if (const auto boundary = WorldCollisionView::boundaryCell(cell))
+		return *boundary;
+	const wire::ChunkCoord coord{floorDivChunk(cell.x), floorDivChunk(cell.z)};
+	const auto active = std::span(m_cache).first(m_cached);
+	const auto cached = std::ranges::find(active, coord, &Entry::coord);
+	if (cached != active.end())
+		return cached->matches ? m_world.sample(cell) : physics::Cell{};
+	const auto published = m_client.m_installed.find(coord);
+	const bool matches = published != m_client.m_installed.end() &&
+		versionAt(m_verified, coord) == published->second;
+	m_cache[m_next] = {coord, matches};
+	m_next = (m_next + 1) % m_cache.size();
+	m_cached = std::min(m_cached + 1, m_cache.size());
+	return matches ? m_world.sample(cell) : physics::Cell{};
+}
+
+ClientWorld::TerrainFootprint ClientWorld::terrainAround(const ChunkProjection &verified, glm::dvec3 feet)
+{
+	const glm::ivec3 cell(glm::floor(feet));
+	TerrainFootprint footprint{{floorDivChunk(cell.x), floorDivChunk(cell.z)}};
+	for (int dz = -1; dz <= 1; ++dz)
+		for (int dx = -1; dx <= 1; ++dx)
+			footprint.versions[(dz + 1) * 3 + dx + 1] = versionAt(verified,
+				{footprint.center.x + dx, footprint.center.z + dz});
+	return footprint;
+}
+
+bool ClientWorld::TerrainFootprint::invalidatedBy(const ChunkProjection &verified) const
+{
+	for (int dz = -1; dz <= 1; ++dz)
+		for (int dx = -1; dx <= 1; ++dx)
+			if (const auto &version = versions[(dz + 1) * 3 + dx + 1]; version &&
+			    version != versionAt(verified, {center.x + dx, center.z + dz}))
+				return true;
+	return false;
 }
 
 void ClientWorld::reconcile(const ChunkProjection &chunks, glm::vec3 observer)

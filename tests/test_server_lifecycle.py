@@ -128,13 +128,13 @@ def main() -> None:
             require(record_wait["mode"] == "live" and record_wait["transport"] == "udp" and port > 0, record_wait)
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
                 probe.settimeout(5)
-                hello = struct.pack(">4sHBBHHQQQQHHHQQ", b"FTVN", 2, 1, 0, 30, 0,
+                hello = struct.pack(">4sHBBHHQQQQHHHQQ", b"FTVN", 3, 1, 0, 30, 0,
                                     0, 0, 0, 17, 1, 1, 1, 0, 0)
                 probe.sendto(hello, ("127.0.0.1", port))
                 reply, sender = probe.recvfrom(1200)
                 require(sender == ("127.0.0.1", port) and
-                        reply == struct.pack(">4sHBBHHQQQQBHH", b"FTVN", 2, 3, 0, 13, 0,
-                                             0, 0, 0, 17, 1, 2, 2), "wire version negotiation failed")
+                        reply == struct.pack(">4sHBBHHQQQQBHH", b"FTVN", 3, 3, 0, 13, 0,
+                                             0, 0, 0, 17, 1, 3, 3), "wire version negotiation failed")
             conflict = run("conflict", 4, "--port", str(port))
             require("bind UDP socket" in conflict and "status=ready" not in conflict, conflict)
             wait_for_record(process, log, "metrics")

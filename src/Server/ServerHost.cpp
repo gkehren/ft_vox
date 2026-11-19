@@ -1,5 +1,6 @@
 #include "ServerHost.hpp"
 
+#include <Network/PlayerInput.hpp>
 #include <World/WorldPersistence.hpp>
 
 #include <chrono>
@@ -14,13 +15,6 @@ namespace
 {
 namespace udp = net::udp;
 namespace wire = net::wire;
-
-sim::PlayerCommand commandFor(const wire::Input &input)
-{
-	return {{input.moveX, input.moveZ},
-		(input.flags & wire::Input::sprint) != 0, (input.flags & wire::Input::jump) != 0,
-		(input.flags & wire::Input::swimUp) != 0, (input.flags & wire::Input::swimDown) != 0};
-}
 
 glm::ivec2 chunkAt(glm::dvec3 feet)
 {
@@ -313,6 +307,10 @@ wire::PlayerSnapshot ServerHost::snapshotRemote(sim::PlayerId player) const
 		record.flags = (state.grounded ? wire::PlayerState::grounded : 0u) |
 			(state.waitingForTerrain ? wire::PlayerState::waitingForTerrain : 0u) |
 			(state.flight ? wire::PlayerState::flight : 0u);
+		record.motionReset = state.motionReset;
+		if (id == player)
+			snapshot.localTimers = {state.movementTimers.bufferedJump, state.movementTimers.coyote,
+				state.movementTimers.swimJump};
 	}
 	return snapshot;
 }
@@ -451,7 +449,7 @@ void ServerHost::advancePlayers()
 		sim::PlayerCommand command{};
 		if (slot.sequence != 0 && slot.input.intendedTick == tick)
 		{
-			command = commandFor(slot.input);
+			command = net::playerInput(slot.input);
 			remote.lastProcessedInput = slot.sequence;
 			slot = {};
 		}

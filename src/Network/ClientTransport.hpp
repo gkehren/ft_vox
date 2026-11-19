@@ -27,7 +27,12 @@ struct SnapshotHistory
 	std::optional<Snapshot> current;
 };
 
-// v2 client IO adapter. The graphical host owns the bounded nonblocking pump
+struct ClientTraffic
+{
+	uint64_t receivedBytes{}, sentBytes{};
+};
+
+// Authoritative UDP client adapter. The graphical host owns the bounded nonblocking pump
 // and its connection state on the frame thread.
 class ClientTransport
 {
@@ -40,9 +45,10 @@ public:
 	void disconnect(Clock::time_point now);
 	// Retires the current projection and rejoins with a fresh session.
 	void requestWorldResync(Clock::time_point now);
-	// Sends one fresh input sample while connected. False means no datagram
+	// Sends one fresh input sample while connected and returns its sequence. Zero means no datagram
 	// was sent (invalid payload, rate limit, or socket backpressure).
-	bool sendInput(const wire::Input &input, Clock::time_point now);
+	uint64_t sendInput(const wire::Input &input, Clock::time_point now);
+	ClientTraffic traffic() const;
 	// Queues one reliable action using the next ID in this session. The
 	// caller supplies the observed chunk version for a voxel action.
 	// Empty means busy, disconnected or invalid. Retried by poll().

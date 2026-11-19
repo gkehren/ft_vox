@@ -83,12 +83,17 @@ struct Sender
 	wire::Endpoint endpoint;
 	Rate &peer;
 	Traffic &global;
+	uint64_t *sentBytes{};
 
 	bool send(Time now, wire::Kind kind, const wire::Datagram &frame)
 	{
 		const auto bytes = frame.view();
-		return peer.takeKind(now, kind) && peer.traffic.take(now, bytes.size()) &&
-			global.take(now, bytes.size(), true) && socket.send(target, bytes);
+		if (!peer.takeKind(now, kind) || !peer.traffic.take(now, bytes.size()) ||
+		    !global.take(now, bytes.size(), true) || !socket.send(target, bytes))
+			return false;
+		if (sentBytes)
+			*sentBytes += bytes.size();
+		return true;
 	}
 
 	bool send(Time now, const wire::Packet &packet)
@@ -100,7 +105,7 @@ struct Sender
 	}
 };
 
-// B3 uses stop-and-wait, a one-frame subset of the v2 reliable window.
+// B3 uses stop-and-wait, a one-frame subset of the reliable window.
 struct Link
 {
 	Link(wire::SessionScope scope, Time now)

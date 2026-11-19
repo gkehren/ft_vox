@@ -18,8 +18,9 @@ namespace net::wire
 
 // The authoritative protocol, separate from the test-only UDP v1 prototype.
 // See docs/adr/authoritative-wire-protocol.md for byte layouts and delivery.
-inline constexpr uint16_t kVersion = 2;
+inline constexpr uint16_t kVersion = 3;
 inline constexpr int kTickRate = 60;
+inline constexpr uint64_t kPlayerSnapshotIntervalTicks = 3;
 inline constexpr uint64_t kInputLeadTicks = 6;
 inline constexpr uint16_t kItemSchema = 1;
 inline constexpr size_t kDatagramBytes = 1200;
@@ -37,7 +38,8 @@ inline constexpr int32_t kHorizontalLimit = 1 << 23;
 inline constexpr uint8_t kAirMaterial = 255;
 inline constexpr uint64_t kMaxSequence = UINT64_MAX - 1;
 inline constexpr size_t kReliableWindow = 64;
-inline constexpr auto kChunkTimeout = std::chrono::seconds(5);
+inline constexpr auto kChunkIdleTimeout = std::chrono::seconds(5);
+inline constexpr auto kChunkTransferTimeout = std::chrono::seconds(20);
 
 constexpr size_t fragmentSize(uint8_t index)
 {
@@ -120,7 +122,7 @@ struct Reject
     bool operator==(const Reject &) const = default;
 };
 
-// Negotiation on a syntactically valid Hello. An empty result selects v2.
+// Negotiation on a syntactically valid Hello. An empty result selects kVersion.
 std::optional<RejectReason> rejectHello(const Hello &hello, Compatibility local) noexcept;
 
 struct Input
@@ -142,6 +144,7 @@ struct PlayerState
     std::array<double, 3> feet{};
     std::array<float, 3> velocity{};
     uint8_t flags{};
+    uint32_t motionReset{};
     bool operator==(const PlayerState &) const = default;
 };
 
@@ -151,13 +154,14 @@ struct PlayerSnapshot
     uint64_t tick{}, lastProcessedInput{};
     uint8_t count{};
     std::array<PlayerState, kMaxPlayersPerSnapshot> players{};
+    std::array<double, 3> localTimers{}; // buffered jump, coyote, swim jump
 
     // Only the active prefix represents player state on the wire.
     constexpr bool operator==(const PlayerSnapshot &other) const noexcept
     {
         const auto active = std::min<size_t>(count, players.size());
         return tick == other.tick && lastProcessedInput == other.lastProcessedInput &&
-               count == other.count &&
+               count == other.count && localTimers == other.localTimers &&
                std::equal(players.begin(), players.begin() + active, other.players.begin());
     }
 };
@@ -421,7 +425,7 @@ public:
 private:
     std::array<uint8_t, kChunkBytes> bytes_{};
     ChunkBaseline baseline_;
-    Clock::time_point started_{};
+    Clock::time_point started_{}, progressed_{};
     size_t nextIndex_{};
 };
 

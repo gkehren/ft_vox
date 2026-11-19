@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <optional>
 #include <shared_mutex>
 
 #include <Physics/BlockPhysics.hpp>
@@ -38,14 +39,20 @@ public:
 
     physics::Cell sample(glm::ivec3 p) const override { return sampleWithType(p, nullptr); }
 
-    physics::Cell sampleWithType(glm::ivec3 p, TextureType *outType) const
+    static std::optional<physics::Cell> boundaryCell(glm::ivec3 p)
     {
         // Fixed vertical world, with a solid lower boundary and open sky.
-        if (p.y < 0) return {true, true};
-        if (p.y >= WORLD_HEIGHT) return {true, false};
+        if (p.y < 0) return physics::Cell{true, true};
+        if (p.y >= WORLD_HEIGHT) return physics::Cell{true, false};
         // Preserve the engine's existing finite camera-coordinate envelope.
         if (p.x < SHRT_MIN || p.x >= SHRT_MAX || p.z < SHRT_MIN || p.z >= SHRT_MAX)
-            return {true, true};
+            return physics::Cell{true, true};
+        return std::nullopt;
+    }
+
+    physics::Cell sampleWithType(glm::ivec3 p, TextureType *outType) const
+    {
+        if (const auto boundary = boundaryCell(p)) return *boundary;
         const int cx = floorDivChunk(p.x), cz = floorDivChunk(p.z);
         const glm::ivec3 key(cx, 0, cz);
         const WorldChunk *chunk = nullptr;

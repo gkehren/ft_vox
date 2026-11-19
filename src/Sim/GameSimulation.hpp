@@ -124,6 +124,8 @@ struct PlayerSnapshot
     bool flight{false};
     physics::Immersion submerged{};
     physics::PhysicsMetrics metrics{};
+    physics::PlayerController::Timers movementTimers{};
+    uint32_t motionReset{};
     TextureType selectedBlock{STONE};
     const char *status{""};
 };
@@ -928,6 +930,12 @@ private:
     struct PlayerState
     {
         physics::PlayerController controller;
+        uint32_t motionReset{};
+        void resetMotion(glm::dvec3 feet)
+        {
+            controller.reset(feet);
+            ++motionReset;
+        }
         items::Inventory inventory;
         bool flight{false};
         // Spatial-participation gate (issue #247 review): a session joins

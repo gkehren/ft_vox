@@ -476,6 +476,7 @@ ft_vox_target_hygiene(ft_vox_wire)
 add_library(ft_vox_udp STATIC
     src/Network/UdpSocket.cpp
     src/Network/ServerTransport.cpp
+    src/Network/ClientMovement.cpp
     src/Network/ClientWorld.cpp
     src/Network/ClientTransport.cpp)
 target_link_libraries(ft_vox_udp PUBLIC ft_vox_wire PRIVATE ft_vox_core Threads::Threads)

@@ -1,5 +1,6 @@
 #include <Items/ItemRegistry.hpp>
 #include <Network/ClientTransport.hpp>
+#include <Network/ClientMovement.hpp>
 #include <Network/ClientTickScheduler.hpp>
 #include <Network/ClientWorld.hpp>
 #include <Server/ServerHost.hpp>
@@ -155,7 +156,16 @@ struct Relay
 			}
 			const auto transit = profile ? profile(packet, fromServer, now) : std::optional{delay};
 			if (transit)
+			{
 				pending.emplace(now + *transit, std::pair{to, frame});
+				if (duplicateMovement && packet.sequence % 17 == 0 &&
+				    (std::holds_alternative<wire::Input>(packet.payload) ||
+				     std::holds_alternative<wire::PlayerSnapshot>(packet.payload)))
+				{
+					pending.emplace(now + *transit + 20ms, std::pair{to, frame});
+					++movementDuplicates;
+				}
+			}
 		}
 		while (!pending.empty() && pending.begin()->first <= now)
 		{
@@ -172,6 +182,8 @@ struct Relay
 	bool dropFragment{}, duplicateFragment{}, corruptFragment{}, dropEdit{}, duplicateEdit{};
 	bool dropActionResult{}, dropAllActionResults{}, dropActionAck{};
 	bool dropInventory{}, dropItemSnapshot{};
+	bool duplicateMovement{};
+	unsigned movementDuplicates{};
 	std::optional<wire::ChunkBaseline> lastBegin;
 	std::optional<wire::ResyncReason> lastResync;
 	std::optional<wire::Packet> oldEdit;
@@ -1206,11 +1218,23 @@ void testClientTimingSamples()
 	require(client.playerSnapshotReceivedAt() == start + 830ms, "snapshot receipt timestamp");
 	require(client.sendInput({53}, start + 830ms) && client.sendInput({100}, start + 1600ms) &&
 		client.inputAcknowledgmentStalled(start + 1600ms), "missing input acknowledgment diagnostic");
+	auto impossible = snapshot;
+	impossible.tick = 99;
+	impossible.lastProcessedInput = 3; // Input 3 is due at tick 100.
+	reply({scope, 99, impossible});
+	impossible.lastProcessedInput = wire::kMaxSequence;
+	reply({scope, 100, impossible});
 	snapshot.tick = 100;
 	snapshot.lastProcessedInput = 3; // Heartbeat then two inputs.
 	reply({scope, 2, snapshot});
 	client.poll(start + 1610ms);
 	require(!client.inputAcknowledgmentStalled(start + 1610ms), "input acknowledgment did not recover");
+	require(client.latestPlayerSnapshot() == snapshot, "impossible acknowledgment poisoned the fresh sequence");
+	impossible.tick = 101;
+	impossible.lastProcessedInput = 2;
+	reply({scope, 101, impossible});
+	client.poll(start + 1615ms);
+	require(client.latestPlayerSnapshot() == snapshot, "regressive acknowledgment replaced authoritative movement");
 
 	client.disconnect(start + 1620ms);
 	client.poll(start + 1620ms);
@@ -1219,8 +1243,8 @@ void testClientTimingSamples()
 	require(client.status() == udp::ClientStatus::Disconnected && !client.playerSnapshotReceivedAt() &&
 		!client.takeRoundTripSample(), "timing state survived departure");
 	while (server.receive(frame)) {}
-	client.connect(start + 1640ms);
-	client.poll(start + 1640ms);
+	client.connect(start + 1840ms);
+	client.poll(start + 1840ms);
 	require(server.receive(frame) && wire::decode(wire::Endpoint::Client,
 		std::span(frame.bytes).first(frame.size), hello) == wire::CodecStatus::Ok, "read new Hello");
 	auto restarted = welcome;
@@ -1232,15 +1256,15 @@ void testClientTimingSamples()
 	snapshot.tick = 0;
 	snapshot.lastProcessedInput = 0;
 	reply({newScope, 1, snapshot});
-	client.poll(start + 1660ms);
+	client.poll(start + 1860ms);
 	require(client.scope() == newScope && client.takeRoundTripSample() == 20ms &&
 		client.latestPlayerSnapshot() && client.latestPlayerSnapshot()->tick == 0 &&
-		client.playerSnapshotReceivedAt() == start + 1660ms,
+		client.playerSnapshotReceivedAt() == start + 1860ms,
 		"new session and epoch inherited the old timing stream");
 }
 
-// Keep the real server's admission and physics while isolating the movement
-// stream from the unrelated stop-and-wait chunk assembly deadline.
+// Keep the real server's admission and physics while measuring movement
+// separately from the cost of streaming world images.
 struct MovementOwner : udp::SessionOwner
 {
 	explicit MovementOwner(server::ServerHost &host) : host(host) {}
@@ -1255,6 +1279,188 @@ struct MovementOwner : udp::SessionOwner
 
 	server::ServerHost &host;
 };
+
+struct FlatCollision : physics::VoxelCollisionWorld
+{
+	physics::Cell sample(glm::ivec3 p) const override
+	{
+		if (unknown && p.x >= 4)
+			return {};
+		return {true, p.y <= floor || (wall && p.x == 4)};
+	}
+
+	int floor = 0;
+	bool wall{}, unknown{};
+};
+
+void testDelayedJoin(const fs::path &root)
+{
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "timing-cold-join", .savesRoot = root};
+	config.workers = 0;
+	config.interestRadiusChunks = 1;
+	server::ServerHost host(config);
+	std::string error;
+	require(host.start(error), error);
+	udp::ServerTransport transport(loopback, 1, host.sessionWorld());
+	Relay relay(transport.address(), 75ms);
+	udp::ClientTransport client(relay.socket.address());
+	const Time start{};
+	client.connect(start);
+	auto nextTick = start;
+	for (auto now = start; now < start + wire::kChunkTransferTimeout; now += 1ms)
+	{
+		relay.pump(now);
+		transport.poll(now);
+		if (now >= nextTick)
+		{
+			transport.serviceOwner(host, host.ticks());
+			require(host.step(server::TerrainTiming::QuiescePerTick, error), error);
+			nextTick += 16667us;
+		}
+		transport.poll(now);
+		relay.pump(now);
+		client.poll(now);
+		if (client.chunks().contains(spawn) && client.inventory() && client.playerSnapshots().current)
+		{
+			require(now - start > wire::kChunkIdleTimeout && !relay.lastResync,
+				"cold join did not exercise a long, steadily progressing baseline");
+			std::cout << "150 ms cold join ready in " << (now - start) / 1ms << " ms\n";
+			transport.stop(host);
+			require(host.stop(error), error);
+			return;
+		}
+	}
+	require(false, "150 ms cold join did not publish spawn terrain, inventory and player");
+}
+
+void testPredictionResets()
+{
+	FlatCollision world;
+	udp::ClientPrediction prediction;
+	wire::PlayerSnapshot sample{.tick = 100, .count = 1};
+	auto &local = sample.players[0];
+	local = {{2}, {3.6, 1.001, 0.5}, {}, wire::PlayerState::grounded, 1};
+	const Time start{1s};
+	prediction.observe(sample, local, start, world);
+	for (uint64_t i = 1; i <= prediction.kMaxTicks; ++i)
+		prediction.record(i, {100 + i, 1.f}, start, world);
+	const auto predicted = prediction.feet();
+	require(predicted.x > 5.0 && prediction.backlog() == prediction.kMaxTicks, "prediction did not fill its bounded history");
+	prediction.record(33, {UINT64_MAX, 1.f}, start, world);
+	prediction.record(wire::kMaxSequence + 1, {133, 1.f}, start, world);
+	prediction.record(1, {101, -1.f}, start, world);
+	require(prediction.feet() == predicted, "invalid or stale input advanced prediction");
+
+	// The authority rejected every moving input and the local terrain
+	// changed. No smoothing or replay may preserve the old speculative pose.
+	world.wall = true;
+	sample.tick = 132;
+	prediction.observe(sample, local, start + 80ms, world);
+	require(prediction.backlog() == 0 && prediction.present(start + 80ms, world) == udp::playerFeet(local) &&
+		prediction.stats().hardResets == 1, "large correction retained a rejected pose");
+	prediction.observe({.tick = 131, .lastProcessedInput = 32}, local, start + 81ms, world);
+	require(prediction.feet() == udp::playerFeet(local), "outdated server tick replaced the anchor");
+	for (unsigned i = 1; i <= 10; ++i)
+		prediction.record(32 + i, {132 + i, 1.f}, start + 82ms, world);
+	const auto atWall = prediction.present(start + 90ms, world);
+	require(atWall && atWall->x < 3.701, "local prediction crossed a wall");
+
+	// Teleport by less than the smoothing threshold, with an unprocessed tail.
+	++sample.tick;
+	++local.motionReset;
+	local.feet[0] -= 0.1;
+	prediction.observe(sample, local, start + 100ms, world);
+	require(prediction.backlog() == 0 && prediction.present(start + 100ms, world) == udp::playerFeet(local) &&
+		prediction.stats().hardResets == 2, "small teleport was smoothed or replayed");
+	prediction.record(50, {140, -1.f}, start + 110ms, world);
+	prediction.invalidateTerrain();
+	prediction.record(51, {141, -1.f}, start + 111ms, world);
+	require(prediction.backlog() == 0 && prediction.feet() == udp::playerFeet(local), "terrain reset reused pre-edit inputs");
+	world.unknown = true;
+	local.feet[0] = 4.5;
+	++sample.tick;
+	++local.motionReset;
+	prediction.observe(sample, local, start + 120ms, world);
+	require(!prediction.present(start + 120ms, world), "teleport presented a body inside unknown terrain");
+
+	prediction = {}; // Scope/epoch transition clears timers, input and correction state.
+	world.wall = world.unknown = false;
+	sample.tick = 0;
+	local = {{2}, {0.5, 1.001, 0.5}, {}, wire::PlayerState::grounded, 1};
+	prediction.observe(sample, local, start + 1s, world);
+	prediction.record(1, {1, 0.f, 0.f, wire::Input::jump}, start + 1s, world);
+	require(prediction.feet().y > 1.1, "fresh epoch did not predict its first jump");
+	prediction.expire(start + 1500ms);
+	require(prediction.backlog() == 0 && prediction.feet() == udp::playerFeet(local),
+		"500 ms frame stall retained speculative movement");
+
+	prediction = {};
+	sample.tick = 200;
+	local.feet[0] = 3.6;
+	prediction.observe(sample, local, start, world);
+	for (uint64_t i = 1; i <= 7; ++i)
+		prediction.record(i, {200 + i, 1.f}, start, world);
+	sample.tick += 7;
+	prediction.observe(sample, local, start + 50ms, world);
+	const auto smoothed = prediction.present(start + 50ms, world);
+	require(smoothed && smoothed->x > 3.7, "minor correction did not smooth in clear terrain");
+	world.wall = true;
+	require(prediction.present(start + 51ms, world) == udp::playerFeet(local),
+		"minor correction offset crossed newly solid terrain");
+
+	prediction = {};
+	sample.tick = 300;
+	sample.localTimers[0] = 0.1;
+	local.feet = {0.5, 1.06, 0.5};
+	local.velocity = {0.0f, -1.0f, 0.0f};
+	local.flags = 0;
+	prediction.observe(sample, local, start, world);
+	prediction.record(1, {305}, start, world);
+	require(prediction.feet().y > 1.1, "prediction lost an acknowledged buffered jump");
+}
+
+void testRemoteInterpolation()
+{
+	udp::RemotePlayers players;
+	const Time start{1s};
+	wire::PlayerSnapshot sample{.tick = 6, .count = 2};
+	sample.players[0].player = {2};
+	auto &remote = sample.players[1];
+	remote = {{3}, {0.0, 2.0, 0.0}};
+	players.observe(sample, start);
+	for (unsigned i = 1; i <= 4; ++i)
+	{
+		sample.tick += 3;
+		remote.feet[0] = double(i);
+		players.observe(sample, start + i * 50ms);
+	}
+	const auto between = players.present(remote.player, start + 225ms);
+	require(between && std::abs(between->x - 2.5) < 1e-8,
+		"remote position was not interpolated on the delayed tick clock");
+	require(players.present(remote.player, start + 400ms) == udp::playerFeet(remote),
+		"loss extrapolated remote movement");
+	require(!players.present(remote.player, start + 500ms), "stale remote player was not hidden");
+	auto stale = sample;
+	sample.tick += 6;
+	sample.count = 1;
+	players.observe(sample, start + 300ms);
+	players.observe(stale, start + 310ms);
+	require(!players.present(remote.player, start + 310ms) && players.missingFraction() > 0.0,
+		"late packet revived a departed player or hid a missing snapshot");
+	sample.tick += 3;
+	sample.count = 2;
+	remote.feet[0] = 10.0;
+	players.observe(sample, start + 350ms);
+	require(players.present(remote.player, start + 350ms) == udp::playerFeet(remote),
+		"interest re-entry interpolated across an absence");
+	sample.tick += 3;
+	remote.feet[0] = 10.1;
+	++remote.motionReset;
+	players.observe(sample, start + 400ms);
+	require(players.present(remote.player, start + 400ms) == udp::playerFeet(remote),
+		"remote teleport interpolated across a discontinuity");
+}
 
 void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, bool impaired)
 {
@@ -1275,8 +1481,16 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 
 	udp::ServerTransport transport(loopback, 1, host.sessionWorld());
 	Relay relay(transport.address(), delay);
+	relay.duplicateMovement = impaired;
 	udp::ClientTransport client(relay.socket.address());
 	udp::ClientTickScheduler scheduler;
+	udp::ClientPrediction prediction;
+	udp::RemotePlayers remotePlayers;
+	FlatCollision collision;
+	collision.floor = 230;
+	physics::PlayerController offline;
+	std::optional<Time> offlineOnset, predictedOnset, authorityOnset;
+	size_t peakBacklog = 0;
 	std::optional<Time> movementStart;
 	uint64_t sentTick = 0, sentSequence = 0;
 	unsigned emitted = 0, delivered = 0, jumps = 0, processed = 0, stableProcessed = 0;
@@ -1358,6 +1572,8 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 				}
 				sim::PlayerSnapshot local;
 				require(sim.playerSnapshot(player, local), "lost authoritative player during test");
+				if (!authorityOnset && local.position.x > beginX + 0.01)
+					authorityOnset = now;
 				airborne |= local.velocity.y > 0.5;
 				if (age >= 1850ms && age < 2000ms)
 				{
@@ -1378,12 +1594,20 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 			client.poll(now);
 			if (const auto rtt = client.takeRoundTripSample())
 				scheduler.observeRoundTrip(*rtt);
-			if (const auto stamp = client.playerSnapshotReceivedAt())
-				scheduler.observeSnapshot(client.latestPlayerSnapshot()->tick, *stamp);
-			if (!movementStart && client.latestPlayerSnapshot())
+			if (const auto &sample = client.playerSnapshots().current)
 			{
-				movementStart = now;
-				beginX = sim.playerFeet(client.welcome()->player).x;
+				const auto stamp = *client.playerSnapshotReceivedAt();
+				const auto &local = sample->players[0];
+				require(local.player == client.welcome()->player, "timing fixture received an unexpected actor");
+				scheduler.observeSnapshot(sample->tick, stamp);
+				prediction.observe(*sample, local, stamp, collision);
+				remotePlayers.observe(*sample, stamp);
+				if (!movementStart)
+				{
+					movementStart = now;
+					beginX = local.feet[0];
+					offline.reset(udp::playerFeet(local));
+				}
 			}
 			if (movementStart)
 			{
@@ -1393,9 +1617,21 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 				unsigned batch = 0;
 				if (scheduler.send(now, {.moveX = move, .flags = jump ? wire::Input::jump : uint8_t{0}}, [&](auto input) {
 					++batch;
-					return client.sendInput(input, now);
+					const auto sequence = client.sendInput(input, now);
+					if (sequence)
+						prediction.record(sequence, input, now, collision);
+					return sequence != 0;
 				}))
 					jump = false;
+				prediction.expire(now);
+				peakBacklog = std::max(peakBacklog, prediction.backlog());
+				offline.advance(1.0 / wire::kTickRate, {{move, 0.0}}, collision);
+				if (!offlineOnset && offline.body.position.x > beginX + 0.01)
+					offlineOnset = now;
+				const auto pose = prediction.present(now, collision);
+				require(pose.has_value(), "predicted view lost its safe body");
+				if (!predictedOnset && pose->x > beginX + 0.01)
+					predictedOnset = now;
 				require(batch <= udp::ClientTickScheduler::kMaxBatch, "unbounded frame catch-up");
 			}
 		}
@@ -1405,14 +1641,29 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 	require(turnX > beginX + 1.5 && endX < turnX - 1.25 && neutralStopped && recovered > 20,
 		"authoritative movement or neutral/recovery failed at " + config.world.worldName);
 	if (impaired)
-		require(reordered && droppedInput && droppedSnapshot && delivered > 50, "did not exercise relay impairments");
+		require(reordered && droppedInput && droppedSnapshot && delivered > 50 && relay.movementDuplicates &&
+			remotePlayers.missingFraction() > 0.0, "did not exercise relay impairments");
 	else
 		require(stableSequences.size() > 35 && stableProcessed * 4 >= stableSequences.size() * 3 &&
 			jumps == 1 && airborne, "stable admission or single jump failed at " + config.world.worldName);
+	const auto final = sim.playerFeet(client.welcome()->player);
+	require(predictedOnset && authorityOnset && offlineOnset && *predictedOnset < *authorityOnset &&
+		*predictedOnset <= *offlineOnset + 17ms && glm::length(final - prediction.feet()) < 0.01,
+		"prediction lost responsiveness or failed to converge at " + config.world.worldName);
+	const auto milliseconds = [start = *movementStart](Time now) { return (now - start) / 1ms; };
+	const auto &stats = prediction.stats();
+	const auto traffic = client.traffic();
 	std::cout << "ClientTickScheduling " << config.world.worldName << " RTT=" <<
 		std::chrono::duration_cast<std::chrono::milliseconds>(*scheduler.roundTripEstimate()).count()
 		<< "ms processed=" << processed << '/' << emitted << " stable=" << stableProcessed << '/' << stableSequences.size()
-		<< " neutralX=" << turnX << " finalX=" << endX << '\n';
+		<< " neutralX=" << turnX << " finalX=" << endX
+		<< " onset_ms(offline/predicted/server)=" << milliseconds(*offlineOnset) << '/' <<
+		milliseconds(*predictedOnset) << '/' << milliseconds(*authorityOnset)
+		<< " corrections=" << stats.corrections << " max_m=" << stats.maxCorrection
+		<< " resets=" << stats.hardResets << " max_pending=" << peakBacklog
+		<< " snapshot_missing=" << remotePlayers.missingFraction()
+		<< " final_error_m=" << glm::length(final - prediction.feet())
+		<< " udp_bytes(rx/tx)=" << traffic.receivedBytes << '/' << traffic.sentBytes << '\n';
 	transport.stop(owner);
 	require(host.stop(error), error);
 }
@@ -1450,11 +1701,20 @@ void testRenderBacking()
 	westRecord->setInTransit(true);
 	image.version.revision++;
 	image.materials[index] = wire::kAirMaterial;
+	{
+		const udp::ClientWorld::CollisionView collision(view, images);
+		require(!collision.sample(westBorder).available, "prediction sampled stale terrain behind a render lease");
+	}
 	view.reconcile(images, {-8.f, 42.f, 8.f});
 	require(view.observedVersion(westBorder) == firstVersion && world.isVoxelActive(glm::vec3(westBorder)),
 		"replica overwrote a record leased by a worker");
 	westRecord->setInTransit(false);
 	view.reconcile(images, {-8.f, 42.f, 8.f});
+	{
+		const udp::ClientWorld::CollisionView collision(view, images);
+		require(collision.sample(westBorder).available && !collision.sample(westBorder).solid,
+			"prediction did not resume on the matching publication");
+	}
 	require(view.observedVersion(westBorder) == image.version && westRecord->occupiedSectionMask() == 0 &&
 		eastRecord->revision() > eastBeforeEdit, "delta did not invalidate occupancy and neighboring work");
 	world.ensureShellPopulated(eastRecord);
@@ -1550,7 +1810,10 @@ int main(int argc, char **argv)
 		{
 			testClientTickMath();
 			testClientTimingSamples();
-			for (const auto delay : {0ms, 20ms, 40ms, 60ms})
+			testPredictionResets();
+			testRemoteInterpolation();
+			testDelayedJoin(root);
+			for (const auto delay : {0ms, 15ms, 40ms, 75ms})
 				testDelayedInput(root, delay, false);
 			testDelayedInput(root, 40ms, true);
 		}

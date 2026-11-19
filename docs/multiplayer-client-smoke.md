@@ -1,6 +1,44 @@
-# Graphical multiplayer smoke for #257
+# Graphical multiplayer smoke
 
-## Input timing correction
+## Movement prediction and interpolation for #258
+
+`WorldReplicationClientTick` runs the production UDP client and server
+transport through a virtual-time IPv4 relay. The movement fixture uses a
+flat walking surface and compares the first 0.01-block displacement with
+a direct, no-network step of the shared controller. The RTT column shows
+the configured path delay. The measured handshake RTT also includes
+server tick and pump time.
+
+| Nominal RTT | Onset in ms, direct / predicted / authority | Peak pending inputs | Corrections / peak blocks | Snapshot gaps | Final prediction error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Loopback | 17 / 0 / 34 | 5 | 0 / 0 | 0% | 0 blocks |
+| 30 ms | 17 / 0 / 33 | 6 | 0 / 0 | 0% | 0 blocks |
+| 80 ms | 17 / 0 / 67 | 10 | 0 / 0 | 0% | 0 blocks |
+| 150 ms | 16 / 0 / 100 | 14 | 0 / 0 | 0% | 0 blocks |
+| 80 ms join, 40–100 ms movement RTT with faults | 17 / 0 / 84 | 16 | 37 / 0.321 | 20.7% | 0 blocks |
+
+The fault run injects jitter, loss, delayed duplicates, reordering, a
+snapshot gap and a 500 ms frame stall. The movement-only run uses
+approximately 12–15 KiB received and 16–19 KiB sent over six virtual
+seconds. The direct controller baseline uses zero network bytes. A
+separate 150 ms cold join published the spawn chunk and private
+inventory in 9,386 ms without a resync.
+
+Two Windows Release graphical clients ran against the seed-42 dedicated
+server on an NVIDIA GeForce RTX 4070 Ti with driver 621.24 and Vulkan
+validation enabled. Both joined the same epoch with distinct player IDs,
+reached 29 loaded chunks and nonempty draw lists, and reported
+`Disconnected` after an orderly server stop. `EngineReload` and
+`VisualRegression` passed on that GPU. The live clients reported the
+documented swapchain validation warnings
+`VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
+`VUID-VkImageViewCreateInfo-usage-02275`. The Windows input helper could
+not connect to its native pipe, so interactive keyboard and menu
+verification remains pending.
+
+## Phase D1 for #257
+
+### Input timing correction
 
 Commit `5d4cb02aa3f2d9cd5c74f8298a2d14436f692294` was built with MSVC
 in Release mode with `FT_VOX_GRAPHICS=ON`. The uninstrumented binaries
@@ -48,7 +86,7 @@ The relay leaves chunk transfer out of the timing fixture. The existing
 stop-and-wait baseline can hit its five-second assembly deadline before
 a cold join is playable at higher RTTs.
 
-## Earlier diagnostic run
+### Earlier diagnostic run
 
 The Windows Release client ran on an NVIDIA GeForce RTX 4070 Ti with two
 game processes and one IPv4 loopback server. The world used seed 42 and a

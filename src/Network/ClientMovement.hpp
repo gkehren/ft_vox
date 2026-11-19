@@ -1,0 +1,93 @@
+#pragma once
+
+#include "PlayerInput.hpp"
+
+namespace net::udp
+{
+
+glm::dvec3 playerFeet(const wire::PlayerState &player);
+
+struct PredictionStats
+{
+	uint64_t corrections{}, hardResets{};
+	double lastCorrection{}, maxCorrection{};
+};
+
+// Presentation-only controller. All times are supplied by the frame owner.
+class ClientPrediction
+{
+public:
+	using Clock = std::chrono::steady_clock;
+	static constexpr auto kMaxAge = std::chrono::milliseconds(250);
+	static constexpr size_t kMaxTicks = 32;
+	static constexpr double kSmoothDistance = 0.25, kHardCorrection = 0.75;
+	static constexpr auto kSmoothTime = std::chrono::milliseconds(100);
+
+	void observe(const wire::PlayerSnapshot &snapshot, const wire::PlayerState &local,
+		Clock::time_point receivedAt, const physics::VoxelCollisionWorld &world);
+	void record(uint64_t sequence, const wire::Input &input, Clock::time_point now,
+		const physics::VoxelCollisionWorld &world);
+	void invalidateTerrain();
+	void expire(Clock::time_point now);
+	std::optional<glm::dvec3> present(Clock::time_point now, const physics::VoxelCollisionWorld &world);
+	glm::dvec3 feet() const { return m_controller.body.position; }
+	size_t backlog() const { return m_count; }
+	const PredictionStats &stats() const { return m_stats; }
+
+private:
+	struct Pending
+	{
+		uint64_t sequence{};
+		wire::Input input;
+		Clock::time_point sentAt;
+	};
+	struct Anchor
+	{
+		uint64_t tick, ack;
+		uint32_t motionReset;
+		uint8_t flags;
+		Clock::time_point arrived;
+		physics::Body body;
+		physics::PlayerController::Timers timers;
+	};
+
+	void restore();
+	void discard();
+	void stepTo(const wire::Input &input, const physics::VoxelCollisionWorld &world);
+	glm::dvec3 offset(Clock::time_point now) const;
+
+	std::optional<Anchor> m_anchor;
+	physics::PlayerController m_controller;
+	uint64_t m_tick{}, m_lastSequence{};
+	std::array<Pending, kMaxTicks> m_pending{};
+	size_t m_head{}, m_count{};
+	bool m_waitForSnapshot{};
+	glm::dvec3 m_offset{};
+	Clock::time_point m_smoothedAt{};
+	std::optional<glm::dvec3> m_safeFeet;
+	PredictionStats m_stats;
+};
+
+// The latest accepted snapshot always determines membership. The older
+// samples may only describe the path of players still in that active set.
+class RemotePlayers
+{
+public:
+	using Clock = ClientPrediction::Clock;
+	static constexpr size_t kHistory = 8;
+	static constexpr uint64_t kDelayTicks = 6, kMaxDelayTicks = 12;
+	static constexpr auto kTimeout = std::chrono::milliseconds(300);
+
+	void observe(const wire::PlayerSnapshot &snapshot, Clock::time_point receivedAt);
+	std::optional<glm::dvec3> present(sim::PlayerId player, Clock::time_point now) const;
+	double missingFraction() const;
+
+private:
+	std::array<wire::PlayerSnapshot, kHistory> m_samples{};
+	size_t m_latest{}, m_count{};
+	Clock::time_point m_arrived{};
+	double m_lag{};
+	uint64_t m_received{}, m_missing{};
+};
+
+} // namespace net::udp
