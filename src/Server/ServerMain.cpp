@@ -153,7 +153,7 @@ bool parseOptions(int argc, char **argv, Options &options, std::string &error)
 	return error.empty();
 }
 
-void printMetrics(const server::HostMetrics &metrics, uint64_t droppedTicks)
+void printMetrics(const server::HostMetrics &metrics, uint64_t droppedTicks, net::udp::WorldTraffic traffic = {})
 {
 	std::cout << " seed=" << metrics.seed << " ticks=" << metrics.ticks
 			  << " dropped_ticks=" << droppedTicks << " world_epoch=" << metrics.worldEpoch
@@ -162,7 +162,9 @@ void printMetrics(const server::HostMetrics &metrics, uint64_t droppedTicks)
 			  << " generation_in_flight=" << metrics.pendingGeneration
 			  << " waiting_for_record=" << metrics.waitingForRecord
 			  << " waiting_for_generation=" << metrics.waitingForGeneration
-			  << " checkpoint_generation=" << metrics.checkpointGeneration << std::endl;
+			  << " checkpoint_generation=" << metrics.checkpointGeneration
+			  << " world_tx_bytes=" << traffic.bytes << " world_tx_frames=" << traffic.frames
+			  << " world_retransmits=" << traffic.retransmits << " world_resyncs=" << traffic.resyncs << std::endl;
 }
 
 const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transport,
@@ -219,7 +221,7 @@ const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transp
 		if (options.metricsEvery && host.ticks() % options.metricsEvery == 0)
 		{
 			std::cout << "SERVER status=metrics";
-			printMetrics(host.metrics(), droppedTicks);
+			printMetrics(host.metrics(), droppedTicks, transport ? transport->worldTraffic() : net::udp::WorldTraffic{});
 		}
 	}
 }
@@ -255,6 +257,7 @@ ExitCode runServer(const Options &options)
 	uint64_t droppedTicks = 0;
 	const char *reason = "runtime_error";
 	std::unique_ptr<net::udp::ServerTransport> transport;
+	net::udp::WorldTraffic worldTraffic;
 	try
 	{
 		if (listen)
@@ -288,6 +291,7 @@ ExitCode runServer(const Options &options)
 				error = ex.what();
 			reason = "runtime_error";
 		}
+		worldTraffic = transport->worldTraffic();
 		transport.reset();
 	}
 	if (!error.empty())
@@ -309,7 +313,7 @@ ExitCode runServer(const Options &options)
 	const auto result = saved ? (error.empty() ? ExitCode::Ok : ExitCode::Run) : ExitCode::Save;
 	std::cout << "SERVER status=stopped reason=" << reason << " saved=" << saved
 			  << " exit_code=" << static_cast<int>(result);
-	printMetrics(host.metrics(), droppedTicks);
+	printMetrics(host.metrics(), droppedTicks, worldTraffic);
 	return result;
 }
 

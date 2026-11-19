@@ -38,6 +38,16 @@ bool insideWorld(glm::ivec3 coord)
 }
 }
 
+std::span<const glm::ivec3> VoxelWorld::playerInterestOffsets(int radiusChunks)
+{
+	if (radiusChunks <= 0)
+		return {};
+	radiusChunks = std::min(radiusChunks, kMaxRadius);
+	const auto &offsets = nearestOffsets();
+	const auto end = std::ranges::upper_bound(offsets, radiusChunks * radiusChunks, {}, squaredDistance);
+	return std::span(offsets).first(static_cast<size_t>(end - offsets.begin()));
+}
+
 // Each source gets one coordinate per turn. Drop exhausted sources for this
 // pass and resume after the last served id on the next tick, even if it left.
 // The optional source at invalid id 0 drains canonical edits left outside
@@ -121,11 +131,8 @@ bool VoxelWorld::advancePlayerStreaming(std::span<const PlayerInterest> interest
 		m_playerDesired.clear();
 		for (const auto &interest : interests)
 		{
-			const int radiusSq = interest.radiusChunks * interest.radiusChunks;
-			for (glm::ivec3 offset : nearestOffsets())
+			for (glm::ivec3 offset : playerInterestOffsets(interest.radiusChunks))
 			{
-				if (squaredDistance(offset) > radiusSq)
-					break;
 				const glm::ivec3 coord = interest.center + offset;
 				if (insideWorld(coord))
 					m_playerDesired.insert(coord);

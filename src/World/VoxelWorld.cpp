@@ -15,6 +15,7 @@
 #include <cmath>
 #include <iostream>
 #include <thread>
+#include <utility>
 
 VoxelWorld::VoxelWorld(TerrainGenerator *terrainGenerator, ThreadPool *threadPool)
 	: m_terrainGenerator(terrainGenerator), m_threadPool(threadPool)
@@ -100,6 +101,8 @@ WorldChunk *VoxelWorld::acquireRecord(const glm::vec3 &origin)
 	WorldChunk *record = m_recordFreeList.back();
 	m_recordFreeList.pop_back();
 	record->reset(origin, WorldChunk::ResetMode::ForGeneration);
+	record->m_contentGeneration = m_nextContentGeneration++;
+	record->m_contentRevision = 0;
 	return record;
 }
 
@@ -132,6 +135,8 @@ void VoxelWorld::registerExternalChunk(const glm::ivec3 &pos, WorldChunk *record
 	m_chunks[pos] = record;
 	m_activeChunks.push_back(record);
 	m_externalRecords.insert(record);
+	record->m_contentGeneration = m_nextContentGeneration++;
+	record->m_contentRevision = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -859,7 +864,50 @@ bool VoxelWorld::scheduleLogicalEdit(const glm::ivec3 &chunkPos, int x, int y, i
 	out.geometricMembers.push_back(chunkPos);
 	queueOrApplyEdit(target, chunkPos, x, y, z, type, false, deferAll, editId);
 	enqueueOrApplyMirrorEdits(chunkPos, x, y, z, type, deferAll, editId, &out.geometricMembers);
+	const ChunkContentVersion base{target->m_contentGeneration, target->m_contentRevision++};
+	if (m_observeLogicalEdits)
+	{
+		constexpr size_t kMaxLogicalEdits = 4096;
+		if (m_logicalEdits.size() == kMaxLogicalEdits)
+			m_logicalEditGap = true;
+		else
+			m_logicalEdits.push_back({editId, {chunkPos.x * CHUNK_SIZE + x, y, chunkPos.z * CHUNK_SIZE + z},
+				base, type});
+	}
 	return true;
+}
+
+bool VoxelWorld::drainLogicalEdits(std::vector<LogicalVoxelEdit> &out)
+{
+	out.clear();
+	out.swap(m_logicalEdits);
+	return !std::exchange(m_logicalEditGap, false);
+}
+
+std::optional<ChunkContentVersion> VoxelWorld::chunkContentVersion(glm::ivec3 coord) const
+{
+	const auto *chunk = getChunk(coord);
+	if (!chunk || !chunk->m_terrainPublished || !chunk->isVoxelBackingReadable())
+		return std::nullopt;
+	return ChunkContentVersion{chunk->m_contentGeneration, chunk->m_contentRevision};
+}
+
+uint64_t VoxelWorld::captureChunkContent(glm::ivec3 coord, std::span<uint8_t, CHUNK_VOLUME> out,
+	ChunkContentVersion &version) const
+{
+	const auto current = chunkContentVersion(coord);
+	if (!current)
+		return 0;
+	const auto *chunk = getChunk(coord);
+	if (const auto *storage = chunk->voxelStorage())
+		std::ranges::transform(storage->voxels, out.begin(), [](const Voxel &voxel) { return voxel.type; });
+	else
+		std::ranges::fill(out, static_cast<uint8_t>(AIR));
+	for (const auto &edit : m_pendingEdits)
+		if (edit.chunk == chunk && !edit.borderNeighbor && edit.generation == chunk->generation())
+			out[WorldChunk::index(edit.x, edit.y, edit.z)] = static_cast<uint8_t>(edit.type);
+	version = *current;
+	return nextEditId();
 }
 
 TextureType VoxelWorld::effectiveVoxelType(const WorldChunk *chunk, int x, int y, int z) const

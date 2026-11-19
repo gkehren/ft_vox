@@ -6,7 +6,8 @@ sequencing and chunk assembly. The dedicated server uses it through the
 bounded v2 UDP transport added in #252. The
 [dedicated server guide](../dedicated-server.md#udp-sessions) describes the
 active queues and session lifetimes. Phase C1 (#253) implements Input and
-PlayerSnapshot on this framing. The Boost UDP prototype remains isolated in
+PlayerSnapshot on this framing. Phase C2 (#254) uses ChunkFragment, WorldEdit,
+ChunkRemove and Resync for the client voxel projection. The Boost UDP prototype remains isolated in
 `test_network` and uses its original v1 framing.
 
 ## Framing
@@ -81,12 +82,9 @@ to baseline data.
 | 8 | 197 | ~197 s |
 
 The estimates exclude the initial burst, competing traffic and retransmits.
-The #252 loopback harness exercises rate limits and retries with controlled
-time. Measure sustained baseline delivery, time from Welcome to the first
-installed spawn chunk, and time to a playable spawn neighborhood under
-#254. Record transferred bytes and retransmissions on loopback and with
-simulated delay and loss. Use those results to evaluate spawn-area priority,
-compression and any baseline format change.
+With the one-frame send window, round-trip time can also limit delivery.
+The [dedicated server guide](../dedicated-server.md#world-replication) records
+loopback and impaired delivery measurements from `WorldReplication`.
 
 ## Join, identity and versioning
 
@@ -186,7 +184,11 @@ either counter.
 Bound the reliable retransmission queue at 64 encoded datagrams per direction
 (`76,800` frame bytes). Keep at most 64 received reliable frames awaiting the
 owner per peer. The active server uses one reliable stop-and-wait slot, one
-latest outbound snapshot, and six uniquely timed inbound input slots per peer. When admission
+latest outbound snapshot, six uniquely timed inbound input slots and one
+outbound world update per peer. It reserves up to 16 concurrent baseline
+buffers and rotates admission among peers. It schedules reliable sends before
+fresh player snapshots and caps fresh snapshots at 768 frames/s process-wide
+with a 64-frame burst. When admission
 fails due to capacity, leave the reliable ACK unchanged. Throttle baseline
 production and bound the per-peer delta backlog at 64 pending messages. If
 it overflows or cannot make progress, abandon the projection and resync
@@ -263,9 +265,11 @@ Chunk coordinates are `x:i32, z:i32` in `[-524288,524288)`. Resolve a cell's
 chunk by floor division by 16. A generation is nonzero and identifies one
 server-owned chunk incarnation in this epoch. The host never reuses a
 generation at the same coordinate within an epoch. Replication revision starts
-at zero per incarnation and advances for each authored voxel edit in
-that chunk. It is a wire counter. The server maps from authoritative edits
-and chunk lifetimes without exposing render-border invalidations as voxel edits.
+at zero per incarnation and advances for each accepted logical target edit in
+that chunk. The owner records it at acceptance, including edits waiting for
+terrain backing and writes that storage later coalesces. Persisted overrides
+come through the baseline. Render-border invalidations use the separate
+render event stream.
 
 **ChunkFragment** carries `transferId:u64, chunkCoord, generation:u64,
 revision:u64, nextEditId:u64, checksum:u64, index:u8, materials:bytes`.
@@ -311,7 +315,9 @@ generation it no longer holds.
 
 **Resync** carries `reason:u8`. Codes are 1 missing baseline or revision
 gap, 2 checksum failure, 3 timeout and 4 epoch change. Send it in the old
-scope to request a fresh join. **Disconnect** carries
+scope to request a fresh join. On a server-initiated resync, the server
+waits for the client's scoped Resync response with a five-second deadline.
+**Disconnect** carries
 `reason:u8` with codes 1 leaving, 2 shutdown and 3 resync. On resync,
 disconnect, timeout or a new Welcome, discard old receive windows,
 partially assembled chunks, pending action retries and state for that

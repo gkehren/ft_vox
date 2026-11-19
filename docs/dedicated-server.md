@@ -1,8 +1,9 @@
 # Dedicated server (`ft_vox_server`)
 
 The standalone CPU-only authority host (#250) owns one `GameSimulation` and
-one persistent world. Live mode listens for v2 UDP sessions (#252) and
-simulates remote movement from player inputs (#253).
+one persistent world. Live mode listens for v2 UDP sessions (#252),
+simulates remote movement from player inputs (#253), and replicates each
+player's terrain interest over the same connection (#254).
 The [authoritative wire protocol ADR](adr/authoritative-wire-protocol.md)
 defines framing, negotiation and delivery.
 
@@ -107,7 +108,8 @@ tampering or network saturation. Keep the default loopback bind for local use.
   are recreated on join.
 - The IO worker validates framing, endpoint, capability, epoch, rate, timing
   and sequence before handing typed input to the simulation owner. Each slot
-  has six input slots, a latest snapshot slot and one pending action or result. A full
+  has six input slots, a latest snapshot slot, one pending action or result,
+  and one world send slot. A full
   reliable slot leaves its receive cursor unchanged. The adapter uses a
   one-frame reliable send window, retries after 150 ms subject to the rate
   budget, and closes after 5 seconds without progress. The maximum remote
@@ -160,6 +162,64 @@ The CPU-only `ClientTransport::sendInput` sends an input for the current
 session. `latestPlayerSnapshot()` and `scope()` expose the latest accepted
 state and its epoch. The adapter clears the snapshot on departure.
 
+## World replication
+
+The owner derives each peer's circular chunk interest from its authoritative
+feet position and `--interest-radius`. It uses the same disk as terrain
+residency. Zero disables chunk replication. It selects the nearest published
+chunks first, including the spawn chunk when available. The full authoritative
+baseline uses 65,536 material bytes, 60 fragments, and an FNV-1a checksum. The
+client uses the negotiated seed and generator/catalog compatibility as world
+metadata and installs the bytes sent by the authority. The baseline carries
+one coherent incarnation, logical revision and next-edit watermark, including
+persistent overrides and any accepted pending edit overlay.
+
+The owner journals each accepted target edit at the same boundary as the
+simulation, independent of when terrain workers or deferred publication write
+the backing. A client's outgoing deltas follow its baseline in reliable order.
+Each move out of interest or replacement of a resident incarnation schedules
+a matching removal before any new baseline. A transfer already underway can
+finish after a teleport. Its removal takes priority at the next send boundary,
+and subsequent subscriptions follow the player's new position.
+
+`ClientTransport::chunks()` exposes the current, checksum-verified material
+arrays, chunk versions and edit watermarks to the CPU pump owner. Pair the
+view with `welcome()` and `scope()` to key derived state by world and epoch.
+Arrays use y/z/x indexing with wire material bytes and AIR 255. A future
+graphical multiplayer host can derive meshes and lighting locally from those
+arrays. Revision gaps, checksum failures and assembly timeouts clear the
+projection and trigger a fresh join. `requestWorldResync(now)` takes that same
+path. A fresh join creates a new remote actor and uses the normal spawn path.
+After a server restart or an idle timeout, the caller can `connect(now)` again.
+The fresh capability and epoch keep old packets out of the new receive window.
+
+The host keeps up to 64 pending deltas per peer and a 4,096-entry per-tick
+logical edit journal. A gap or overflow requests resync. The transport allows
+one baseline buffer per peer and at most 16 across the server, for 1 MiB of
+baseline bytes. On the client, the radius-eight disk caps installed material
+storage at 197 chunks (about 12.3 MiB), plus one 64 KiB assembly buffer. The
+existing per-peer and process-wide v2 bandwidth buckets apply to retries as
+well as first sends. `world_tx_bytes`, `world_tx_frames`, `world_retransmits`
+and `world_resyncs` in `SERVER` records report replication traffic and resync
+requests. `ServerTransport::worldTraffic(playerId)` exposes the same counters
+for active peers.
+
+`WorldReplication` reports Welcome-to-install timing with a controlled clock
+and real IPv4 sockets. A playable neighborhood in this fixture is the five
+chunks of radius one. The table includes baseline and delta datagrams and
+retries in the outbound direction.
+
+| Loopback condition | First spawn chunk | Five-chunk neighborhood | World bytes | Retransmits |
+| --- | ---: | ---: | ---: | ---: |
+| No injected faults | 750 ms | 4,790 ms | 354,505 | 1 |
+| 10 ms each way, one dropped fragment, one dropped edit and reordered duplicates | 1,660 ms | 7,875 ms | 354,575 | 2 |
+
+The fixed-size baseline favors predictable verification and memory use.
+Round-trip time and loss reduce throughput with the one-frame reliable send
+window, and the assembler restarts a transfer through resync if its five-second
+deadline expires. The measurements show the effect of prioritizing the spawn
+chunk and the cost of larger neighborhoods with full baselines.
+
 ## Shutdown and recovery
 
 On Linux and other POSIX systems, SIGINT and SIGTERM request a graceful stop.
@@ -198,7 +258,7 @@ checkpoint generation. The stopped record shows the last snapshot taken
 before final close, with the stop reason, `saved` flag and exit code.
 Errors are emitted to stderr with a phase and diagnostic.
 
-Run the dedicated tests with `ctest --test-dir build-cpu -R 'ServerHost|ServerLifecycle|UdpTransport|WireProtocol' --output-on-failure`
+Run the dedicated tests with `ctest --test-dir build-cpu -R 'ServerHost|ServerLifecycle|UdpTransport|WireProtocol|WorldReplication' --output-on-failure`
 (add `-C Release` for Visual Studio). They cover clock stalls and cadence,
 sync/async fixed steps, deferred edits at shutdown, saved-world restart,
 write/commit failures, signal/admin termination, port 0, occupied ports,
@@ -207,4 +267,8 @@ limits, and replay. The movement fixture compares two IPv4 loopback players
 against local controller scripts at every tick with a wall, a jump, lost
 samples, a simulated host stall and reconnect. `UdpTransport` also uses an
 injected steady clock for timeout and retransmit decisions. Its threaded
-smoke test exercises worker shutdown. CTest returns nonzero on failure.
+smoke test exercises worker shutdown. `WorldReplication` checks two-client
+voxel digests across shared and disjoint interest, deferred generation and
+edits, fast teleports, unload/re-entry, faults and revision gaps, generator
+mismatch, queue limits, server restart, and delivery on the IO worker.
+CTest returns nonzero on failure.

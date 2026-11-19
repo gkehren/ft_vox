@@ -248,6 +248,9 @@ private:
 	// observe it around worker tasks.
 	uint64_t m_generation{0};
 	std::atomic<uint64_t> m_revision{0};
+	// Owner-only voxel identity. Unlike the render revision, this counts
+	// logical target edits, including ones waiting on backing publication.
+	uint64_t m_contentGeneration{0}, m_contentRevision{0};
 
 	ChunkEditMap m_persistentEdits;
 	bool m_trackPersistentEdits{false};

@@ -170,7 +170,7 @@ jobs:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: >
           ctest --test-dir build-tsan --output-on-failure --timeout 900
-          -R "NetworkIntegrationTest|HeadlessSmoke|PlayerStreaming|ServerHost|UdpTransport"
+          -R "NetworkIntegrationTest|HeadlessSmoke|PlayerStreaming|ServerHost|UdpTransport|WorldReplication"
 
   graphics-linux:
     runs-on: ubuntu-latest
