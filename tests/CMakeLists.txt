@@ -20,6 +20,11 @@ else()
     message(STATUS "test_network disabled: Boost not found")
 endif()
 
+# Authoritative protocol v2 is independent of Boost and the socket prototype.
+add_executable(test_wire_protocol test_wire_protocol.cpp)
+target_link_libraries(test_wire_protocol PRIVATE ft_vox_wire)
+add_test(NAME WireProtocol COMMAND test_wire_protocol)
+
 # CPU-only physics: no SDL, Vulkan device, meshes or terrain generation.
 add_executable(test_physics test_physics.cpp)
 target_include_directories(test_physics PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -1516,7 +1521,7 @@ foreach(_cpu_test IN ITEMS
     test_visual_look test_auto_exposure test_graphics_settings test_stream_opt
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
-    test_frame_pacing test_world_save test_world_checkpoint test_server_host bench_gameplay_items)
+    test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR
             "CPU-only dependency guard lists '${_cpu_test}' but no such target exists "
