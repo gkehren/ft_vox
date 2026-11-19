@@ -14,7 +14,7 @@
 # -DFT_VOX_GRAPHICS=OFF the graphical stack (SDL3, Vulkan loader/headers,
 # volk, VMA, miniz, SPIR-V compilers) is NOT DISCOVERED AT ALL — no
 # find_package / FetchContent call runs for it — so ft_vox_core,
-# ft_vox_headless and the CPU-only tests configure and build on a machine
+# ft_vox_headless, ft_vox_server and the CPU-only tests build on a machine
 # with no Vulkan SDK, SDL3 or shader toolchain. Only Threads, the optional
 # Boost probe (test_network) and GLM/FastNoise2 remain.
 # =============================================================================
@@ -404,5 +404,5 @@ endif() # FT_VOX_GRAPHICS (SPIR-V compilers)
 if(NOT FT_VOX_GRAPHICS)
     message(STATUS "ft_vox: CPU-only configuration (FT_VOX_GRAPHICS=OFF) — "
                    "SDL3/Vulkan/volk/VMA/miniz/shader compilers NOT discovered; "
-                   "building ft_vox_core + ft_vox_headless + CPU tests only (issue #210)")
+                   "building ft_vox_core, ft_vox_headless, ft_vox_server and CPU tests")
 endif()

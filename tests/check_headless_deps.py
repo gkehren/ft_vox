@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Headless dependency guard (issue #210, Epic #204 Phase F, acceptance 1).
 
-Three scripted checks that the standalone simulation runner is genuinely
+Three scripted checks that the standalone simulation runner and server are
 graphics-free:
 
-  1. INCLUDE closure: every src/Headless translation unit / header is walked
+  1. INCLUDE closure: every src/Headless and src/Server source/header is walked
      with the same rules as the core include guard (check_core_includes.py):
      no Renderer/, Vulkan/, Camera/, Engine/, ImGui*/, Network/, no SDL /
      vulkan / volk / VMA / imgui / boost / miniz external headers, and the
      Chunk/ allowlist stays fail-closed.
 
-  2. LINK artifacts: the actual generated link inputs for ft_vox_headless AND
-     ft_vox_core in the build tree (Ninja build.ninja link edge, Makefile
+  2. LINK artifacts: the actual generated link inputs for ft_vox_headless,
+     ft_vox_server and ft_vox_core in the build tree (Ninja link edge, Makefile
      link.txt, or MSVC .vcxproj link fields) must contain no graphical library.
      A Ninja static-library edge carries no LINK_LIBRARIES variable (deps are on
      the build statement line), so the whole edge is scanned. On MSVC a static
@@ -41,7 +41,7 @@ import check_core_includes as core_guard
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
-HEADLESS_DIR = SRC / "Headless"
+HOST_DIRS = (SRC / "Headless", SRC / "Server")
 
 # Library / package names that must never appear in the runner's link inputs.
 FORBIDDEN_LINK_TOKENS = [
@@ -57,13 +57,16 @@ FORBIDDEN_CACHE_PREFIXES = (
 
 
 def check_includes(verbose: bool) -> list[str]:
-    """Walk the Headless include closure with the core guard's rules."""
+    """Walk both CPU host include closures with the core guard's rules."""
     violations: list[str] = []
     visited: set[Path] = set()
 
-    roots = sorted(HEADLESS_DIR.glob("*.cpp")) + sorted(HEADLESS_DIR.glob("*.hpp"))
-    if not roots:
-        return [f"no headless sources found under {HEADLESS_DIR}"]
+    roots = []
+    for directory in HOST_DIRS:
+        sources = sorted(directory.rglob("*.cpp"))
+        if not sources:
+            violations.append(f"no CPU host sources found under {directory}")
+        roots.extend(sources + sorted(directory.rglob("*.hpp")))
 
     def visit(path: Path, chain: list[Path]) -> None:
         if path in visited:
@@ -94,7 +97,7 @@ def check_includes(verbose: bool) -> list[str]:
         visit(root.resolve(), [])
 
     if verbose:
-        print(f"Headless include closure: {len(visited)} project files visited")
+        print(f"CPU host include closure: {len(visited)} project files visited")
         for path in sorted(visited):
             print(f"  src/{path.relative_to(SRC).as_posix()}")
     return violations
@@ -103,7 +106,7 @@ def check_includes(verbose: bool) -> list[str]:
 def find_link_inputs(build_dir: Path, target: str) -> list[tuple[str, str]]:
     """Return (kind, text) pairs describing a target's real link inputs.
 
-    Covers executables (ft_vox_headless) and static libraries (ft_vox_core):
+    Covers executables (ft_vox_headless, ft_vox_server) and ft_vox_core:
     the dependency-direction guard applies to the whole CPU slice (issue #211).
     """
     found: list[tuple[str, str]] = []
@@ -147,9 +150,7 @@ def find_link_inputs(build_dir: Path, target: str) -> list[tuple[str, str]]:
 def check_link_artifacts(build_dir: Path) -> list[str]:
     violations: list[str] = []
     configured = (build_dir / "CMakeCache.txt").is_file()
-    # The whole CPU slice must stay graphics-free: the runner executable AND
-    # the simulation static library (issue #211 dependency-direction gate).
-    for target in ("ft_vox_headless", "ft_vox_core"):
+    for target in ("ft_vox_headless", "ft_vox_server", "ft_vox_core"):
         inputs = find_link_inputs(build_dir, target)
         if not inputs:
             # Fail-CLOSED on a configured tree: the target should have build
@@ -212,10 +213,10 @@ def main() -> int:
         for violation in violations:
             print(violation)
             print()
-        print("ft_vox_headless must stay graphics-free (issue #210, Epic #204 Phase F).")
-        print("See docs/headless-runner.md and docs/simulation-render-contracts.md.")
+        print("ft_vox_headless and ft_vox_server must stay graphics-free.")
+        print("See docs/headless-runner.md and docs/dedicated-server.md.")
         return 1
-    print("OK: ft_vox_headless include closure, link inputs and discovery are graphics-free.")
+    print("OK: CPU host include closures, link inputs and discovery are graphics-free.")
     return 0
 
 
