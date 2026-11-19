@@ -205,6 +205,9 @@ enum class PlaceResult : uint8_t
                     // vocabulary.
 };
 
+enum class VoxelInteraction { Break, Place };
+enum class VoxelTargetResult { Valid, InvalidTarget, OutOfReach, TerrainUnavailable, StaleRevision, Occupied };
+
 /// Plain-value targeting result (issue #227): the simulation-owned raycast
 /// query answers the hit block plus the adjacent placement cell. `adjacent`
 /// is the last marched cell before the hit, with the historical fallback
@@ -702,6 +705,14 @@ public:
     /// InvalidPlayer. The legacy form forwards to the local player.
     PlaceResult placeSelectedBlock(glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
     PlaceResult placeSelectedBlock(PlayerId id, glm::ivec3 cell, WorldEditResult *outEdit = nullptr);
+
+    /// Owner-thread preflight for a versioned interaction intent. Walks from
+    /// the actor's eye through effective voxels within kInteractionReach.
+    /// A placement needs an empty cell on the entry face of the first hit.
+    /// Apply an accepted intent through the corresponding gameplay command
+    /// in the same owner turn so its preconditions still hold.
+    VoxelTargetResult validateVoxelTarget(PlayerId id, VoxelInteraction operation, glm::ivec3 target,
+                                          ChunkContentVersion expected, glm::dvec3 direction) const;
 
     /// Simulation-owned targeting query (issue #227): the historical
     /// Engine::raycastVoxel march behind a render-free API — 0.05 float

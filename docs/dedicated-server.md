@@ -2,8 +2,9 @@
 
 The standalone CPU-only authority host (#250) owns one `GameSimulation` and
 one persistent world. Live mode listens for v2 UDP sessions (#252),
-simulates remote movement from player inputs (#253), and replicates each
-player's terrain interest over the same connection (#254).
+simulates remote movement from player inputs (#253), replicates each
+player's terrain interest (#254), and resolves remote break and place
+intents on the simulation owner (#255).
 The [authoritative wire protocol ADR](adr/authoritative-wire-protocol.md)
 defines framing, negotiation and delivery.
 
@@ -50,9 +51,11 @@ prevents startup.
 The main thread opens the save, synchronously bootstraps terrain, restores
 the local compatibility player and shared item state, then activates
 player-driven residency. The local anchor provides the initial streaming
-and mob observer. Each 60 Hz server tick advances walking players in ascending
-`PlayerId` order. Each player runs two 120 Hz steps through the shared
-`WorldCollisionView`, including the usual collision and unknown-terrain
+and mob observer. At the start of each 60 Hz server tick the owner drains the
+connection inboxes and resolves admitted voxel actions in ascending
+`PlayerId` order using the last completed poses. It then advances each
+walking player in the same order. Each player runs two 120 Hz steps through
+the shared `WorldCollisionView`, including the usual collision and unknown-terrain
 behavior. The host then advances the shared streaming union, steps mobs and
 items once each at 60 Hz, and publishes terrain and deferred edits.
 Only the owner calls mutable simulation APIs. Terrain workers prepare
@@ -125,9 +128,7 @@ An Input contains a bounded world X/Z vector and sprint, jump-edge and swim
 flags. The endpoint and session capability select the actor. The UDP gameplay
 surface accepts only these controls for movement. Spawn and other
 administrative mutations are server-owned, and the stop file is a separate
-local control. The server currently returns `Unavailable` for scoped actions.
-Shared drops continue stepping at 60 Hz. Pickup stays with the checkpointed
-local anchor until remote pickup and inventory replication land in #256.
+local control.
 
 The host accepts inputs for the six ticks after the latest published
 completed tick. The inbox for a given tick closes when the owner drains it
@@ -161,6 +162,42 @@ the next complete snapshot.
 The CPU-only `ClientTransport::sendInput` sends an input for the current
 session. `latestPlayerSnapshot()` and `scope()` expose the latest accepted
 state and its epoch. The adapter clears the snapshot on departure.
+
+## Voxel actions
+
+Send Break or Place with the target cell, its observed chunk generation and
+revision, and aim expressed in turns. The server checks the exact chunk
+version and traces from the actor's authoritative eye up to eight blocks.
+It stops on unknown terrain and tests the first effective non-air voxel,
+including accepted edits whose backing writes are still pending. Break must
+name that voxel. Place must name the empty cell across the face the ray
+entered. The simulation then applies the shared gameplay rules for
+breakability, walking body overlap, and the actor's selected hotbar stack.
+An accepted break creates at most one drop and an accepted placement spends
+one item. A rejection applies no edit or item effect. Inventory commands
+return `Unavailable` in this phase. Remote inventories start empty. The
+placement fixture provisions the selected stack via the trusted simulation
+grant API. Remote pickup and inventory replication are tracked in #256.
+
+Use the target chunk's `version` from `ClientTransport::chunks()` when
+calling `sendAction(action, now)`. It assigns consecutive IDs beginning
+at one and queues a reliable request. An empty return means the action
+was invalid, the connection was unavailable, or the session still had an
+outstanding action or unread result. The client pump retries automatically.
+`takeActionResult()` returns the action ID, completed tick, global next-edit
+watermark, accepted edit ID or zero, and the result code. A valid request
+with a stale version is settled as `StaleRevision`. For a new attempt, use
+the current projection version. The result settles the command. Terrain
+changes arrive separately through the ordered world stream.
+
+Malformed requests, old or skipped IDs, and wrong scopes are discarded
+before consuming an action slot. Reliable receipt ACKs are independent of
+gameplay results. The server retries the same result until it is acknowledged.
+A departure can discard undrained requests and unread results. An edit
+already applied by the owner stays in the world, even if its sender never
+sees the result. Rejoin uses a fresh scope and baseline, starting at action
+ID one. The client clears the previous action state and never automatically
+resubmits it in the new scope.
 
 ## World replication
 
@@ -258,7 +295,7 @@ checkpoint generation. The stopped record shows the last snapshot taken
 before final close, with the stop reason, `saved` flag and exit code.
 Errors are emitted to stderr with a phase and diagnostic.
 
-Run the dedicated tests with `ctest --test-dir build-cpu -R 'ServerHost|ServerLifecycle|UdpTransport|WireProtocol|WorldReplication' --output-on-failure`
+Run the dedicated tests with `ctest --test-dir build-cpu -R 'ServerHost|ServerLifecycle|UdpTransport|WireProtocol|WorldReplication|VoxelActions' --output-on-failure`
 (add `-C Release` for Visual Studio). They cover clock stalls and cadence,
 sync/async fixed steps, deferred edits at shutdown, saved-world restart,
 write/commit failures, signal/admin termination, port 0, occupied ports,
@@ -271,4 +308,8 @@ smoke test exercises worker shutdown. `WorldReplication` checks two-client
 voxel digests across shared and disjoint interest, deferred generation and
 edits, fast teleports, unload/re-entry, faults and revision gaps, generator
 mismatch, queue limits, server restart, and delivery on the IO worker.
+`VoxelActions` verifies simultaneous break and place with actor IDs
+ordered differently from transport slots, conservation, stale and invalid
+requests, lost ACKs/results/deltas, deferred backing writes, chunk refetch
+after departure, and checkpoint recovery in a fresh epoch.
 CTest returns nonzero on failure.

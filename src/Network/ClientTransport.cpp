@@ -23,7 +23,15 @@ struct ClientTransport::Impl
 		link.reset();
 		welcome.reset();
 		playerSnapshot.reset();
+		clearAction();
+		nextActionId = 1;
 		clearProjection();
+	}
+
+	void clearAction()
+	{
+		pendingAction.reset();
+		actionResult.reset();
 	}
 
 	void clearProjection()
@@ -50,8 +58,34 @@ struct ClientTransport::Impl
 			return;
 		clearProjection();
 		playerSnapshot.reset();
-		link->queue(wire::Endpoint::Client, wire::Resync{reason}, now);
+		clearAction();
+		resyncReason = reason;
 		status = ClientStatus::Resyncing;
+		queueDeparture(now);
+	}
+
+	void queueDeparture(Time now)
+	{
+		if (link->pending || link->reliableSent == wire::kMaxSequence)
+			return;
+		if (status == ClientStatus::Resyncing)
+			link->queue(wire::Endpoint::Client, wire::Resync{resyncReason}, now);
+		else if (status == ClientStatus::Leaving)
+			link->queue(wire::Endpoint::Client, wire::Disconnect{wire::DisconnectReason::Leaving}, now);
+	}
+
+	std::optional<uint64_t> sendAction(wire::Action action, Time now)
+	{
+		if (status != ClientStatus::Connected || link->pending || pendingAction || actionResult ||
+		    link->reliableSent == wire::kMaxSequence)
+			return std::nullopt;
+		action.actionId = nextActionId;
+		if (!wire::validAction(action))
+			return std::nullopt;
+		link->queue(wire::Endpoint::Client, action, now);
+		pendingAction = action;
+		actionDeadline = now + 2 * kReliableTimeout;
+		return nextActionId++;
 	}
 
 	void fragment(const wire::ChunkFragment &part, Time now)
@@ -166,11 +200,15 @@ struct ClientTransport::Impl
 			return;
 		if (const auto *ack = std::get_if<wire::Ack>(&packet.payload))
 		{
+			if (!link->pending)
+				return;
+			const auto kind = link->pending->kind;
 			if (!link->acknowledge(ack->through))
 				return;
-			if (status == ClientStatus::Leaving)
+			link->lastReceived = now;
+			if (status == ClientStatus::Leaving && (kind == wire::Kind::Disconnect || kind == wire::Kind::Resync))
 				finish(ClientStatus::Disconnected);
-			else if (status == ClientStatus::Resyncing)
+			else if (status == ClientStatus::Resyncing && kind == wire::Kind::Resync)
 				connect(now);
 			return;
 		}
@@ -203,6 +241,15 @@ struct ClientTransport::Impl
 		}
 		else if (const auto *request = std::get_if<wire::Resync>(&packet.payload))
 			resync(request->reason, now);
+		else if (const auto *result = std::get_if<wire::ActionResult>(&packet.payload))
+		{
+			if (pendingAction && result->actionId == pendingAction->actionId &&
+			    result->operation == pendingAction->operation)
+			{
+				actionResult = *result;
+				pendingAction.reset();
+			}
+		}
 		else if (status == ClientStatus::Connected && (kind == wire::Kind::ChunkFragment ||
 		         kind == wire::Kind::WorldEdit || kind == wire::Kind::ChunkRemove))
 			project(packet, now);
@@ -212,7 +259,8 @@ struct ClientTransport::Impl
 	{
 		if (status == ClientStatus::Resyncing && link->expired(now))
 			connect(now);
-		else if ((status == ClientStatus::Connecting && now >= deadline) || (link && link->expired(now)))
+		else if ((status == ClientStatus::Connecting && now >= deadline) || (link && link->expired(now)) ||
+		         (pendingAction && now >= actionDeadline))
 			finish(ClientStatus::TimedOut);
 		if (status == ClientStatus::Connected && assembler.expire(now))
 			resync(wire::ResyncReason::Timeout, now);
@@ -223,7 +271,10 @@ struct ClientTransport::Impl
 		for (unsigned i = 0; i < kReadBatch && socket.receive(frame); ++i)
 			receive(frame, now);
 		if (link)
+		{
+			queueDeparture(now);
 			link->flush(sender(), now);
+		}
 	}
 
 	Socket socket{{0, 0}};
@@ -233,6 +284,11 @@ struct ClientTransport::Impl
 	std::optional<wire::Welcome> welcome;
 	std::optional<wire::PlayerSnapshot> playerSnapshot;
 	std::optional<wire::RejectReason> rejection;
+	std::optional<wire::Action> pendingAction;
+	std::optional<wire::ActionResult> actionResult;
+	uint64_t nextActionId{1};
+	Time actionDeadline{};
+	wire::ResyncReason resyncReason{};
 	ChunkProjection chunks;
 	wire::ChunkAssembler assembler;
 	uint64_t lastTransferId{}, lastEditId{};
@@ -263,11 +319,12 @@ void ClientTransport::disconnect(Clock::time_point now)
 		m_impl->finish(ClientStatus::Disconnected);
 	if (m_impl->status == ClientStatus::Connected)
 	{
-		m_impl->link->queue(wire::Endpoint::Client, wire::Disconnect{wire::DisconnectReason::Leaving}, now);
+		m_impl->clearAction();
 		m_impl->status = ClientStatus::Leaving;
+		m_impl->queueDeparture(now);
 	}
 	else if (m_impl->status == ClientStatus::Resyncing)
-		m_impl->status = ClientStatus::Leaving; // the queued Resync already retires the old lease
+		m_impl->status = ClientStatus::Leaving; // a queued Resync can complete the departure
 }
 
 ClientStatus ClientTransport::status() const { return m_impl->status; }
@@ -275,6 +332,16 @@ bool ClientTransport::sendInput(const wire::Input &input, Clock::time_point now)
 {
 	return m_impl->status == ClientStatus::Connected && wire::validInput(input) &&
 		m_impl->link->sendFresh(m_impl->sender(), now, input);
+}
+
+std::optional<uint64_t> ClientTransport::sendAction(wire::Action action, Clock::time_point now)
+{
+	return m_impl->sendAction(action, now);
+}
+
+std::optional<wire::ActionResult> ClientTransport::takeActionResult()
+{
+	return std::exchange(m_impl->actionResult, std::nullopt);
 }
 
 std::optional<wire::Welcome> ClientTransport::welcome() const { return m_impl->welcome; }

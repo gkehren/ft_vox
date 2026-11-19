@@ -86,8 +86,9 @@ public:
 	void rethrowIoError();
 	void stop(SessionOwner &owner);
 
-	// Call before stepping the next simulation tick. Publish snapshots of the
-	// completed state and optionally discard mailbox input after a host stall.
+	// Call before stepping the next simulation tick. Drain one batch of
+	// intents in PlayerId order and publish snapshots of the completed state.
+	// A host stall may discard buffered movement without discarding actions.
 	void serviceOwner(SessionOwner &owner, uint64_t completedTick, bool discardInputs = false);
 
 private:

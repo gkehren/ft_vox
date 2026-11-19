@@ -36,6 +36,13 @@ public:
 	// Sends one fresh input sample while connected. False means no datagram
 	// was sent (invalid payload, rate limit, or socket backpressure).
 	bool sendInput(const wire::Input &input, Clock::time_point now);
+	// Queues one reliable action using the next ID in this session. The
+	// caller supplies the observed chunk version for a voxel action.
+	// Empty means busy, disconnected or invalid. Retried by poll().
+	std::optional<uint64_t> sendAction(wire::Action action, Clock::time_point now);
+	// Consume the result to free the action slot. The projection is updated
+	// independently by the authoritative world stream.
+	std::optional<wire::ActionResult> takeActionResult();
 
 	ClientStatus status() const;
 	std::optional<wire::Welcome> welcome() const;

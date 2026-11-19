@@ -7,8 +7,10 @@
 #include <iterator>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace server
 {
@@ -48,6 +50,13 @@ struct Relay
 		require(socket.send(client, encoded.view()), "inject relay packet");
 	}
 
+	void sendToServer(const wire::Packet &packet)
+	{
+		wire::Datagram encoded;
+		require(wire::encode(wire::Endpoint::Client, packet, encoded) == wire::CodecStatus::Ok, "encode client replay");
+		require(socket.send(server, encoded.view()), "inject client replay");
+	}
+
 	void pump(Time now)
 	{
 		udp::Received frame;
@@ -63,6 +72,21 @@ struct Relay
 				wire::CodecStatus::Ok, "relay saw malformed datagram");
 			if (const auto *resync = std::get_if<wire::Resync>(&packet.payload); resync && !fromServer)
 				lastResync = resync->reason;
+			if (std::holds_alternative<wire::Action>(packet.payload))
+				lastAction = packet;
+			if (std::holds_alternative<wire::ActionResult>(packet.payload))
+			{
+				if (dropAllActionResults || std::exchange(dropActionResult, false))
+				{
+					droppedActionResult = packet;
+					continue;
+				}
+				lastActionResult = packet;
+			}
+			if (const auto *ack = std::get_if<wire::Ack>(&packet.payload);
+			    fromServer && ack && lastAction && packet.scope == lastAction->scope &&
+			    ack->through == lastAction->sequence && std::exchange(dropActionAck, false))
+				continue;
 			if (fromServer && (std::holds_alternative<wire::ChunkFragment>(packet.payload) ||
 			    std::holds_alternative<wire::WorldEdit>(packet.payload) ||
 			    std::holds_alternative<wire::ChunkRemove>(packet.payload)))
@@ -113,9 +137,11 @@ struct Relay
 	udp::Address server, client{};
 	std::chrono::milliseconds delay;
 	bool dropFragment{}, duplicateFragment{}, corruptFragment{}, dropEdit{}, duplicateEdit{};
+	bool dropActionResult{}, dropAllActionResults{}, dropActionAck{};
 	std::optional<wire::ChunkBaseline> lastBegin;
 	std::optional<wire::ResyncReason> lastResync;
 	std::optional<wire::Packet> oldEdit;
+	std::optional<wire::Packet> lastAction, lastActionResult, droppedActionResult;
 	udp::WorldTraffic traffic;
 	std::set<std::pair<uint64_t, uint64_t>> sequences;
 	std::multimap<Time, std::pair<udp::Address, udp::Received>> pending;
@@ -403,6 +429,283 @@ void testReplication(const fs::path &root)
 	require(host.stop(error), error);
 }
 
+void testVoxelActions(const fs::path &root)
+{
+	using Code = wire::ActionCode;
+	using Kind = wire::ActionKind;
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "voxel_actions", .savesRoot = root};
+	config.workers = 0;
+	config.interestRadiusChunks = 1;
+	server::ServerHost host(config);
+	std::string error;
+	require(host.start(error), error);
+	const auto simulation = [&]() -> sim::GameSimulation & { return server::ServerHostProbe::simulation(host); };
+	const auto world = [&]() -> VoxelWorld & { return *simulation().world(); };
+	const auto seedBlock = [&](int x, int y, int z, TextureType type) {
+		require(simulation().placeVoxel({x + 0.5f, y + 0.5f, z + 0.5f}, type).accepted, "seed action fixture");
+	};
+	for (int z = 5; z <= 10; ++z)
+		seedBlock(8, 244, z, STONE);
+	seedBlock(8, 246, 9, STONE);
+	seedBlock(8, 246, 10, BEDROCK);
+
+	auto server = std::make_unique<udp::ServerTransport>(loopback, 2, host.sessionWorld());
+	Relay clean(server->address(), 0ms), impaired(server->address(), 0ms);
+	udp::ClientTransport first(clean.socket.address()), second(impaired.socket.address());
+	Time now{}, nextTick{};
+	const auto pump = [&] {
+		clean.pump(now);
+		impaired.pump(now);
+		server->poll(now);
+		if (now >= nextTick)
+		{
+			server->serviceOwner(host, host.ticks());
+			require(host.step(server::TerrainTiming::Background, error), error);
+			nextTick += 16667us;
+		}
+		server->poll(now);
+		clean.pump(now);
+		impaired.pump(now);
+		first.poll(now);
+		second.poll(now);
+		now += 5ms;
+	};
+	const auto until = [&](auto predicate, const char *failure, std::chrono::seconds timeout = 8s) {
+		const auto deadline = now + timeout;
+		do
+		{
+			if (predicate())
+				return;
+			pump();
+		}
+		while (now < deadline);
+		throw std::runtime_error(failure);
+	};
+	const auto ready = [&](const udp::ClientTransport &client) {
+		return client.welcome() && simulation().playerPositioned(client.welcome()->player);
+	};
+	const auto settle = [&](udp::ClientTransport &client) {
+		std::optional<wire::ActionResult> result;
+		until([&] { return (result = client.takeActionResult()).has_value(); }, "missing action result");
+		return *result;
+	};
+	const auto submit = [&](udp::ClientTransport &client, wire::Action action) {
+		std::optional<uint64_t> id;
+		until([&] { return (id = client.sendAction(action, now)).has_value(); }, "action slot failed to open");
+		const auto result = settle(client);
+		require(result.actionId == *id && result.operation == action.operation, "action result did not match request");
+		return result;
+	};
+	const auto inventory = [&](sim::PlayerId player) {
+		sim::InventorySnapshot result;
+		require(simulation().inventorySnapshot(player, result), "missing actor inventory");
+		return result;
+	};
+
+	first.connect(now);
+	until([&] { return ready(first); }, "first actor could not join");
+	second.connect(now);
+	until([&] { return ready(second); }, "second actor could not join");
+	const auto secondId = second.welcome()->player;
+	const auto oldFirst = first.welcome()->player;
+	first.disconnect(now);
+	until([&] { return first.status() == udp::ClientStatus::Disconnected; }, "first actor could not leave");
+	first.connect(now);
+	until([&] { return ready(first); }, "first actor could not reuse its slot");
+	const auto firstId = first.welcome()->player;
+	require(secondId < firstId && !simulation().hasPlayer(oldFirst), "fixture did not reverse actor and slot order");
+	constexpr glm::dvec3 firstFeet{8.5, 245.0, 5.5}, secondFeet{8.5, 245.0, 6.5};
+	simulation().setPlayerPosition(firstId, firstFeet);
+	simulation().setPlayerPosition(secondId, secondFeet);
+	for (const auto player : {firstId, secondId})
+		require(simulation().grantItems(player, items::ItemId::Glass, 1).result == items::ItemResult::Ok,
+			"grant action fixture glass");
+	const auto startingInventory = inventory(firstId);
+	until([&] { return matches(first, world(), spawn) && matches(second, world(), spawn); }, "spawn projections diverged");
+
+	constexpr wire::Cell target{8, 9, 246}, support{8, 10, 246};
+	const auto version = [&] { return first.chunks().at(spawn).version; };
+	wire::Action dig{.actionId = 1, .operation = Kind::Break, .target = target, .expected = version()};
+	const auto initialRevision = world().nextEditId();
+	const auto initialItemId = simulation().itemIdHighWater();
+	// An invalid ID or a reliable gap must leave the exact next slot free.
+	wire::Datagram malformed;
+	require(wire::encode(wire::Endpoint::Client, {*first.scope(), 1, dig}, malformed) == wire::CodecStatus::Ok,
+		"could not encode action prefix");
+	std::vector<uint8_t> bytes(malformed.view().begin(), malformed.view().end());
+	for (const auto byte : {uint8_t{0}, uint8_t{255}})
+	{
+		std::fill_n(bytes.begin() + wire::kHeaderBytes, sizeof(uint64_t), byte);
+		require(clean.socket.send(server->address(), bytes), "inject malformed action ID");
+	}
+	auto gap = dig;
+	gap.actionId = 2;
+	clean.sendToServer({*first.scope(), 1, gap});
+	clean.sendToServer({*first.scope(), 2, dig});
+	for (int i = 0; i < 5; ++i)
+		pump();
+	require(world().nextEditId() == initialRevision && simulation().itemIdHighWater() == initialItemId,
+		"malformed or reordered action mutated gameplay");
+
+	impaired.dropActionResult = true;
+	clean.dropEdit = true;
+	require(first.sendAction(dig, now) == 1 && second.sendAction(dig, now) == 1 && !second.sendAction(dig, now),
+		"clients did not reserve exactly one action each");
+	const auto lostBreak = settle(first);
+	const auto wonBreak = settle(second);
+	require(wonBreak.code == Code::Accepted && wonBreak.editId == initialRevision && wonBreak.nextEditId == initialRevision + 1 &&
+		lostBreak.code == Code::StaleRevision && lostBreak.editId == 0 && lostBreak.nextEditId == wonBreak.nextEditId &&
+		lostBreak.tick == wonBreak.tick, "simultaneous break failed to resolve by actor ID and version");
+	require(impaired.droppedActionResult && impaired.lastActionResult == impaired.droppedActionResult && clean.oldEdit,
+		"lost result or edit did not exercise the retry path");
+	until([&] { return matches(first, world(), spawn) && matches(second, world(), spawn); }, "digests diverged after break loss");
+	require(simulation().itemIdHighWater() == initialItemId + 1 && host.metrics().items == 1 &&
+		simulation().itemEntities().entities().front().stack == items::ItemStack{items::ItemId::Cobblestone, 1},
+		"competing breaks did not create exactly one registry drop");
+
+	// Replay with both the original sequence and the next sequence.
+	const auto oldDig = *impaired.lastAction;
+	impaired.sendToServer(oldDig);
+	impaired.sendToServer({oldDig.scope, oldDig.sequence + 1, std::get<wire::Action>(oldDig.payload)});
+	const auto beforeRejections = world().nextEditId();
+	const auto reject = [&](udp::ClientTransport &client, wire::Action action, Code code) {
+		const auto revision = world().nextEditId();
+		const auto itemId = simulation().itemIdHighWater();
+		const auto before = inventory(client.welcome()->player);
+		const auto result = submit(client, action);
+		require(result.code == code && result.editId == 0 && result.nextEditId == revision &&
+			world().nextEditId() == revision && simulation().itemIdHighWater() == itemId &&
+			inventory(client.welcome()->player) == before, "rejection changed gameplay or returned the wrong reason");
+	};
+	auto invalid = dig;
+	invalid.expected = version();
+	invalid.target.x = 400;
+	reject(second, invalid, Code::OutOfReach);
+	invalid.target = support;
+	reject(first, invalid, Code::Forbidden);
+	invalid.yawTurns = 0.5f;
+	reject(first, invalid, Code::InvalidTarget);
+	invalid.yawTurns = 0.f;
+	invalid.expected.revision = dig.expected.revision;
+	reject(first, invalid, Code::StaleRevision);
+	reject(first, wire::Action{.operation = Kind::DropStack}, Code::Unavailable);
+	require(world().nextEditId() == beforeRejections, "replayed break advanced the edit watermark");
+
+	wire::Action place{.operation = Kind::Place, .target = target, .expected = version()};
+	simulation().setPlayerPosition(firstId, {8.5, 245.0, 9.5});
+	reject(second, place, Code::Occupied);
+	simulation().setPlayerPosition(firstId, firstFeet);
+
+	// An accepted edit in transit changes the effective version and client
+	// projection before the backing store can be written.
+	{
+		struct Transit
+		{
+			WorldChunk &chunk;
+			explicit Transit(WorldChunk &chunk) : chunk(chunk) { chunk.setInTransit(true); }
+			~Transit() { chunk.setInTransit(false); }
+		} transit(*world().getChunk({0, 0, 0}));
+		require(first.sendAction(place, now) && second.sendAction(place, now), "could not queue simultaneous placement");
+		const auto lostPlace = settle(first);
+		const auto wonPlace = settle(second);
+		require(wonPlace.code == Code::Accepted && wonPlace.editId == beforeRejections && wonPlace.nextEditId == beforeRejections + 1 &&
+			lostPlace.code == Code::StaleRevision && lostPlace.tick == wonPlace.tick && lostPlace.editId == 0,
+			"simultaneous placement failed to resolve by actor ID and version");
+		until([&] { return first.chunks().at(spawn).version.revision == place.expected.revision + 1 &&
+			second.chunks().at(spawn).version.revision == place.expected.revision + 1; }, "deferred placement delta not delivered");
+		require(world().hasPendingLogicalEdits() && transit.chunk.getVoxel(8, 246, 9).type == AIR &&
+			first.chunks().at(spawn).materials[WorldChunk::index(8, 246, 9)] == GLASS &&
+			inventory(firstId) == startingInventory && inventory(secondId).slots[0].isEmpty() && host.metrics().items == 1,
+			"deferred placement duplicated a resource or missed the logical overlay");
+		invalid = dig;
+		invalid.target = support;
+		invalid.expected = version();
+		reject(first, invalid, Code::InvalidTarget); // pending glass occludes the bedrock
+	}
+	until([&] { return matches(first, world(), spawn) && matches(second, world(), spawn); }, "published placement diverged");
+	place.expected = version();
+	reject(second, place, Code::Occupied);
+	place.target = {8, 8, 246};
+	reject(second, place, Code::InventoryRejected);
+
+	// An unpublished chunk first rejects the intent, then allows a new one
+	// once the authority has generated and replicated its contents.
+	server::ServerHostProbe::generationBudget(host, 0);
+	simulation().setPlayerPosition(secondId, farFeet);
+	constexpr wire::Cell distantBlock{-312, 10, 246};
+	until([&] { return world().getChunk({distant.x, 0, distant.z}); }, "missing unpublished chunk fixture");
+	auto farDig = dig;
+	farDig.target = distantBlock;
+	reject(second, farDig, Code::TerrainUnavailable);
+	server::ServerHostProbe::generationBudget(host, 8);
+	until([&] { return world().chunkContentVersion({distant.x, 0, distant.z}).has_value(); }, "distant terrain did not generate");
+	seedBlock(-312, 244, 8, STONE);
+	seedBlock(-312, 246, 10, STONE);
+	seedBlock(-312, 246, 11, BEDROCK);
+	simulation().setPlayerPosition(secondId, farFeet);
+	until([&] { return matches(second, world(), distant); }, "distant preparation did not replicate");
+	farDig.expected = second.chunks().at(distant).version;
+	const auto beforeLeave = world().nextEditId();
+	const auto oldScope = *second.scope();
+	impaired.dropAllActionResults = impaired.dropActionAck = true;
+	require(second.sendAction(farDig, now).has_value(), "could not queue action before leaving");
+	until([&] { return world().nextEditId() == beforeLeave + 1; }, "action before leaving never committed");
+	require(!impaired.dropActionAck && !second.takeActionResult(), "fixture did not lose action admission ACK and result");
+	const auto oldFarDig = *impaired.lastAction;
+	second.disconnect(now);
+	until([&] { return second.status() == udp::ClientStatus::Disconnected && !world().getChunk({distant.x, 0, distant.z}); },
+		"disconnect behind an unacknowledged action did not retire actor and unload terrain");
+	impaired.dropAllActionResults = false;
+	second.connect(now);
+	until([&] { return ready(second); }, "actor did not reconnect");
+	require(second.scope() != oldScope && !second.takeActionResult() && !simulation().hasPlayer(secondId),
+		"reconnect retained the old actor or its result");
+	simulation().setPlayerPosition(second.welcome()->player, farFeet);
+	until([&] { return matches(second, world(), distant); }, "unload and reconnect did not converge");
+	const auto &reloaded = second.chunks().at(distant);
+	require(reloaded.version.generation > farDig.expected.generation &&
+		reloaded.materials[WorldChunk::index(8, 246, 10)] == wire::kAirMaterial &&
+		host.metrics().items == 2 && simulation().itemIdHighWater() == initialItemId + 2,
+		"refetch lost the committed action or duplicated its drop");
+	impaired.sendToServer(oldFarDig);
+	farDig.expected = reloaded.version;
+	farDig.target.z = 11;
+	const auto current = submit(second, farDig);
+	require(current.actionId == 1 && current.code == Code::Forbidden && world().nextEditId() == beforeLeave + 1,
+		"departed session replay perturbed new action scope");
+
+	const auto address = server->address();
+	server->stop(host);
+	server.reset();
+	require(host.stop(error), error);
+	require(host.start(error), error);
+	server = std::make_unique<udp::ServerTransport>(address, 2, host.sessionWorld());
+	until([&] { return first.status() == udp::ClientStatus::TimedOut && second.status() == udp::ClientStatus::TimedOut; },
+		"old actions survived server restart", 12s);
+	first.connect(now);
+	second.connect(now);
+	until([&] { return ready(first) && ready(second); }, "clients did not join new epoch");
+	impaired.sendToServer(oldFarDig);
+	auto wrongEpoch = oldFarDig;
+	wrongEpoch.scope.sessionId = second.scope()->sessionId;
+	wrongEpoch.sequence = 1;
+	wrongEpoch.payload = farDig;
+	impaired.sendToServer(wrongEpoch);
+	simulation().setPlayerPosition(second.welcome()->player, farFeet);
+	until([&] { return matches(first, world(), spawn) && matches(second, world(), distant); },
+		"post-checkpoint projections diverged");
+	farDig.expected = second.chunks().at(distant).version;
+	const auto newEpoch = submit(second, farDig);
+	require(second.scope()->epoch != oldScope.epoch && newEpoch.actionId == 1 && newEpoch.code == Code::Forbidden &&
+		simulation().itemIdHighWater() == initialItemId + 2 && host.metrics().items == 2 &&
+		first.chunks().at(spawn).materials[WorldChunk::index(8, 246, 9)] == GLASS &&
+		second.chunks().at(distant).materials[WorldChunk::index(8, 246, 10)] == wire::kAirMaterial,
+		"restart lost committed voxel/item effects or accepted an old epoch");
+	server->stop(host);
+	require(host.stop(error), error);
+}
+
 void testIncompatibleGenerator()
 {
 	udp::Socket server(loopback);
@@ -448,23 +751,48 @@ void testThreadedDelivery(const fs::path &root)
 		require(host.step(server::TerrainTiming::Background, error), error);
 		std::this_thread::sleep_for(5ms);
 	}
+	std::optional<wire::ActionResult> result;
+	if (client.chunks().contains(spawn))
+	{
+		const auto actionStart = udp::ServerTransport::Clock::now();
+		const wire::Action action{.operation = wire::ActionKind::Break, .target = {400, 8, 80},
+			.expected = client.chunks().at(spawn).version};
+		if (client.sendAction(action, actionStart))
+		{
+			while (!(result = client.takeActionResult()) && udp::ServerTransport::Clock::now() - actionStart < 4s)
+			{
+				client.poll(udp::ServerTransport::Clock::now());
+				server.rethrowIoError();
+				server.serviceOwner(host, host.ticks());
+				require(host.step(server::TerrainTiming::Background, error), error);
+				std::this_thread::sleep_for(5ms);
+			}
+		}
+	}
 	server.stop(host);
 	server.rethrowIoError();
 	require(client.chunks().contains(spawn) && server.worldTraffic().frames >= wire::kFragmentsPerChunk,
 		"worker did not deliver a complete baseline from the owner mailbox");
+	require(result && result->actionId == 1 && result->code == wire::ActionCode::OutOfReach && result->editId == 0,
+		"worker did not deliver the owner's action result");
 	require(host.stop(error), error);
 }
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
 	const auto root = fs::temp_directory_path() / ("ft_vox_replication_" + std::to_string(udp::randomId()));
 	int result = 0;
 	try
 	{
-		testIncompatibleGenerator();
-		testReplication(root);
-		testThreadedDelivery(root);
+		if (argc == 2 && std::string_view(argv[1]) == "--actions")
+			testVoxelActions(root);
+		else
+		{
+			testIncompatibleGenerator();
+			testReplication(root);
+			testThreadedDelivery(root);
+		}
 	}
 	catch (const std::exception &error)
 	{

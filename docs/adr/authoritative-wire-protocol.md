@@ -238,10 +238,22 @@ including the bit representation of unused angles.
 | 6 Move, 7 Swap, 8 SplitHalf | Two distinct slots 0–35. Move attempts the whole source, swap exchanges stacks and split attempts to transfer the larger half into the destination. The server computes all resulting counts. |
 
 For voxel actions yaw is in `[0,1)` turns, with zero along +Z and a quarter
-turn along +X. Pitch is in `[-0.25,0.25]` turns, positive up. The expected
-version is a precondition and the cell and aim are targeting intent. The
-owner validates the actor, authorizes the operation and deduplicates by
-action ID in that session before mutating the simulation.
+turn along +X. Pitch is in `[-0.25,0.25]` turns, positive up. For a
+versioned voxel action, the owner checks the expected generation and
+revision of the target chunk. It traces up to eight blocks from the
+actor's last completed eye position, stopping at unknown terrain or the
+first effective non-air voxel. A place target must share the entry face
+of that hit. The owner then applies the ordinary break or selected-stack
+placement rules. Each tick's admitted intents resolve in ascending
+`PlayerId` order. Gameplay rejection consumes the admitted action ID.
+
+The active UDP transport admits one action per peer until its result is
+acknowledged. Old and skipped action IDs leave the reliable cursor at its
+previous value. Packet rates apply to both first sends and retries. Every
+reliable retry preserves the admitted message bytes, including its ID.
+A fresh session starts its own action IDs at one and clears any old
+pending action. A departure after owner execution can lose the result
+while the edit remains committed.
 
 **ActionResult** carries `actionId:u64, tick:u64, nextEditId:u64, editId:u64,
 operation:u8, code:u8`. Codes are 0 accepted, 1 partial (Move or SplitHalf),
@@ -249,7 +261,11 @@ operation:u8, code:u8`. Codes are 0 accepted, 1 partial (Move or SplitHalf),
 6 inventory rejected, 7 occupied, 8 rate limited, 9 forbidden and
 10 unavailable. A successful Break or Place carries the resulting nonzero
 `editId < nextEditId`. Every other result carries edit ID zero. The
-result settles the action. The world projection applies WorldEdit/baselines.
+result settles the action. `tick` is the last completed simulation tick
+when the owner handled it and `nextEditId` is the global edit watermark
+after handling it. The world projection applies WorldEdit/baselines.
+Break and Place are active in #255. The other action kinds currently
+return `Unavailable`.
 
 **Inventory** carries `tick:u64, revision:u64, selected:u8` followed by
 36 pairs of `itemId:u16, count:u16` in slot order. Revision starts at 1 and
