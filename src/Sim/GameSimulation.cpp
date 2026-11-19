@@ -513,7 +513,7 @@ void GameSimulation::advanceMobs(double dt, glm::dvec3 observer, double availabl
     m_mobs.update(dt, world, observer, availableRadius, suspended || !m_mobsEnabled);
 }
 
-void GameSimulation::advanceItems(double dt, bool suspended)
+void GameSimulation::advanceItems(double dt, bool suspended, ItemPickup pickup)
 {
     if (!m_world)
         return;
@@ -533,7 +533,7 @@ void GameSimulation::advanceItems(double dt, bool suspended)
     if (!suspended)
     {
         for (const std::unique_ptr<PlayerEntry> &entry : m_players)
-            if (entry->state.positioned)
+            if (entry->state.positioned && (pickup == ItemPickup::AllPositioned || entry->id == localPlayerId()))
                 m_pickupCandidates.push_back({entry->state.controller.body.position, &entry->state.inventory});
     }
     m_items.update(dt, world, m_pickupCandidates, suspended);
@@ -647,6 +647,21 @@ glm::dvec3 GameSimulation::spawnPlayerOnSurface(PlayerId id, glm::dvec3 around)
     PlayerState *player = findPlayer(id);
     if (!player || !m_world)
         return around;
+    if (trySpawnWalkingPlayerOnSurface(id, around))
+        return player->controller.eye();
+    const glm::dvec3 fallbackEye(around.x, 100.0, around.z);
+    player->controller.reset(fallbackEye - glm::dvec3(0, player->controller.settings.eyeHeight, 0));
+    player->flight = true;
+    player->status = "No safe spawn in loaded terrain: fly to an open area.";
+    player->positioned = true;
+    return fallbackEye;
+}
+
+bool GameSimulation::trySpawnWalkingPlayerOnSurface(PlayerId id, glm::dvec3 around)
+{
+    PlayerState *player = findPlayer(id);
+    if (!player || !m_world)
+        return false;
     WorldCollisionView world(*m_world);
     physics::QueryStats queries;
     // Closest columns first, bounded by the already bootstrapped region.
@@ -657,6 +672,7 @@ glm::dvec3 GameSimulation::spawnPlayerOnSurface(PlayerId id, glm::dvec3 around)
         if (std::max(std::abs(dx), std::abs(dz)) != radius) continue;
         const int x = static_cast<int>(std::floor(around.x)) + dx;
         const int z = static_cast<int>(std::floor(around.z)) + dz;
+        if (x < SHRT_MIN || x >= SHRT_MAX || z < SHRT_MIN || z >= SHRT_MAX) continue;
         for (int y = CHUNK_HEIGHT - 1; y >= 0; --y)
         {
             const auto cell = world.sample({x, y, z});
@@ -670,16 +686,11 @@ glm::dvec3 GameSimulation::spawnPlayerOnSurface(PlayerId id, glm::dvec3 around)
                 player->flight = false;
                 player->status = "";
                 player->positioned = true; // surface spawn places the body (issue #247 review)
-                return player->controller.eye();
+                return true;
             }
         }
     }
-    const glm::dvec3 fallbackEye(around.x, 100.0, around.z);
-    player->controller.reset(fallbackEye - glm::dvec3(0, player->controller.settings.eyeHeight, 0));
-    player->flight = true;
-    player->status = "No safe spawn in loaded terrain: fly to an open area.";
-    player->positioned = true; // the fallback still places the body (issue #247 review)
-    return fallbackEye;
+    return false;
 }
 
 bool GameSimulation::restorePlayerState(const PlayerPersistState &saved)

@@ -242,8 +242,7 @@ bool encodeFields(IO &io, T &p)
     }
     else if constexpr (std::is_same_v<P, Input>)
     {
-        return io.fields(p.intendedTick, p.moveX, p.moveZ, p.flags) && p.flags <= 0x0f &&
-               double(p.moveX) * p.moveX + double(p.moveZ) * p.moveZ <= 1.0;
+        return io.fields(p.intendedTick, p.moveX, p.moveZ, p.flags) && validInput(p);
     }
     else if constexpr (std::is_same_v<P, PlayerSnapshot>)
     {
@@ -412,6 +411,12 @@ Compatibility localCompatibility() noexcept
         return Compatibility{kItemSchema, catalog.value(), generator.value()};
     }();
     return result;
+}
+
+bool validInput(const Input &input) noexcept
+{
+    return input.flags <= (Input::sprint | Input::jump | Input::swimUp | Input::swimDown) &&
+           double(input.moveX) * input.moveX + double(input.moveZ) * input.moveZ <= 1.0;
 }
 
 std::optional<RejectReason> rejectHello(const Hello &hello, Compatibility local) noexcept

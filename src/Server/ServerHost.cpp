@@ -3,11 +3,30 @@
 #include <World/WorldPersistence.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include <utility>
 
 namespace server
 {
+namespace
+{
+namespace udp = net::udp;
+namespace wire = net::wire;
+
+sim::PlayerCommand commandFor(const wire::Input &input)
+{
+	return {{input.moveX, input.moveZ},
+		(input.flags & wire::Input::sprint) != 0, (input.flags & wire::Input::jump) != 0,
+		(input.flags & wire::Input::swimUp) != 0, (input.flags & wire::Input::swimDown) != 0};
+}
+
+glm::ivec2 chunkAt(glm::dvec3 feet)
+{
+	return {floorDivChunk(static_cast<int>(std::floor(feet.x))),
+		floorDivChunk(static_cast<int>(std::floor(feet.z)))};
+}
+} // namespace
 
 ServerHost::ServerHost(HostConfig config) : m_config(std::move(config)) {}
 
@@ -19,23 +38,110 @@ net::udp::SessionWorld ServerHost::sessionWorld() const
 
 net::udp::SessionAdmission ServerHost::joinRemote()
 {
-	// Until movement authority lands, remote sessions have no positioned
-	// body, so joining cannot affect pickup, placement or streaming.
-	return {m_sim->createPlayer(), m_ticks, m_sim->world()->nextEditId()};
+	const auto player = m_sim->createPlayer();
+	if (player.valid())
+		m_remotePlayers.try_emplace(player);
+	return {player, m_ticks, m_sim->world()->nextEditId()};
+}
+
+bool ServerHost::activateRemote(sim::PlayerId player)
+{
+	return m_remotePlayers.contains(player) &&
+		m_sim->setPlayerInterestRadius(player, m_config.interestRadiusChunks) &&
+		m_sim->trySpawnWalkingPlayerOnSurface(player, m_spawnCenter);
 }
 
 void ServerHost::leaveRemote(sim::PlayerId player)
 {
-	m_sim->removePlayer(player);
+	if (m_remotePlayers.erase(player))
+		m_sim->removePlayer(player);
 }
 
 std::optional<net::wire::ActionResult> ServerHost::receiveRemote(
 	sim::PlayerId player, const net::udp::SessionIntents &intents)
 {
-	if (!intents.action || !m_sim->hasPlayer(player))
+	const auto found = m_remotePlayers.find(player);
+	if (found == m_remotePlayers.end() || !m_sim->playerPositioned(player))
+		return std::nullopt;
+	auto &remote = found->second;
+	for (uint64_t lead = 1; lead <= udp::kInputLeadTicks; ++lead)
+	{
+		const auto &sample = intents.inputs[(m_ticks + lead) % udp::kInputLeadTicks];
+		const auto tick = sample.input.intendedTick;
+		if (!udp::withinInputWindow(tick, m_ticks) || tick < remote.lastQueuedTick ||
+		    sample.sequence <= remote.lastQueuedSequence || sample.sequence > wire::kMaxSequence ||
+		    !wire::validInput(sample.input))
+			continue;
+		remote.inputs[tick % udp::kInputLeadTicks] = sample;
+		remote.lastQueuedSequence = sample.sequence;
+		remote.lastQueuedTick = tick;
+	}
+	if (!intents.action)
 		return std::nullopt;
 	return net::wire::ActionResult{intents.action->actionId, m_ticks, m_sim->world()->nextEditId(),
 		0, intents.action->operation, net::wire::ActionCode::Unavailable};
+}
+
+wire::PlayerSnapshot ServerHost::snapshotRemote(sim::PlayerId player) const
+{
+	wire::PlayerSnapshot snapshot;
+	snapshot.tick = m_ticks;
+	snapshot.lastProcessedInput = m_remotePlayers.at(player).lastProcessedInput;
+	const auto center = chunkAt(m_sim->playerFeet(player));
+	const int radius = m_config.interestRadiusChunks;
+	unsigned others = 0;
+	for (const auto &[id, remote] : m_remotePlayers)
+	{
+		if (!m_sim->playerPositioned(id))
+			continue;
+		if (id != player)
+		{
+			if (others == wire::kMaxPlayersPerSnapshot - 1)
+				continue;
+			const auto offset = chunkAt(m_sim->playerFeet(id)) - center;
+			if (offset.x * offset.x + offset.y * offset.y > radius * radius)
+				continue;
+			++others;
+		}
+		sim::PlayerSnapshot state;
+		m_sim->playerSnapshot(id, state);
+		auto &record = snapshot.players[snapshot.count++];
+		record.player = id;
+		record.feet = {state.position.x, state.position.y, state.position.z};
+		record.velocity = {static_cast<float>(state.velocity.x), static_cast<float>(state.velocity.y),
+			static_cast<float>(state.velocity.z)};
+		record.flags = (state.grounded ? wire::PlayerState::grounded : 0u) |
+			(state.waitingForTerrain ? wire::PlayerState::waitingForTerrain : 0u) |
+			(state.flight ? wire::PlayerState::flight : 0u);
+	}
+	return snapshot;
+}
+
+void ServerHost::suspendPlayerInput()
+{
+	for (auto &[id, remote] : m_remotePlayers)
+		remote.inputs = {};
+	m_sim->advancePlayers(0, true);
+}
+
+void ServerHost::advancePlayers()
+{
+	m_sim->advancePlayer(kTickDt, {}, false);
+	const auto tick = m_ticks + 1;
+	for (auto &[id, remote] : m_remotePlayers)
+	{
+		if (!m_sim->playerPositioned(id))
+			continue;
+		auto &slot = remote.inputs[tick % udp::kInputLeadTicks];
+		sim::PlayerCommand command{};
+		if (slot.sequence != 0 && slot.input.intendedTick == tick)
+		{
+			command = commandFor(slot.input);
+			remote.lastProcessedInput = slot.sequence;
+			slot = {};
+		}
+		m_sim->advancePlayer(id, kTickDt, command, false);
+	}
 }
 
 bool ServerHost::start(std::string &error)
@@ -77,6 +183,7 @@ bool ServerHost::start(std::string &error)
 	m_pitch = spawn.pitch;
 	m_restoredPlayer = spawn.restored;
 	m_ticks = 0;
+	m_spawnCenter = center;
 	m_sim = std::move(simulation);
 	return true;
 }
@@ -105,7 +212,7 @@ bool ServerHost::step(TerrainTiming terrainTiming, std::string &error)
 		error = "server is not started";
 		return false;
 	}
-	m_sim->advancePlayers(kTickDt, false);
+	advancePlayers();
 	if (!m_sim->advancePlayerStreaming(m_config.streaming))
 	{
 		error = "player streaming tick refused";
@@ -116,7 +223,9 @@ bool ServerHost::step(TerrainTiming terrainTiming, std::string &error)
 
 	const double radiusBlocks = m_config.interestRadiusChunks * static_cast<double>(CHUNK_SIZE);
 	m_sim->advanceMobs(kTickDt, m_sim->playerFeet(), radiusBlocks, false);
-	m_sim->advanceItems(kTickDt, false);
+	// Only the compatibility anchor's inventory is checkpointed. Keep
+	// shared items out of temporary remote inventories until pickup lands.
+	m_sim->advanceItems(kTickDt, false, sim::GameSimulation::ItemPickup::LocalOnly);
 	m_sim->pumpWorld();
 
 	// The host owns publication. Phase B1 drains streams with no consumers
@@ -165,6 +274,7 @@ bool ServerHost::stop(std::string &error)
 	// Use the existing unconditional recovery path for a refused close. The
 	// caller still receives the explicit failure even if that retry succeeds.
 	m_sim->shutdown();
+	m_remotePlayers.clear();
 	m_sim.reset();
 	m_workers.reset();
 	return closed;

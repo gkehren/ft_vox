@@ -75,7 +75,7 @@ void printUsage()
 		"  --ticks N                 run exactly N ticks, 1..1000000, without wall-clock pacing\n"
 		"  --max-catch-up N          live ticks per scheduling batch, 1..8 (default 4)\n"
 		"  --workers N               terrain workers, 0..64 (default 2; 0 is synchronous)\n"
-		"  --interest-radius N       local anchor radius in chunks, 0..8 (default 3)\n"
+		"  --interest-radius N       per-player radius in chunks, 0..8 (default 3)\n"
 		"  --load-budget N           chunk records per tick, 0..128 (default 32)\n"
 		"  --generation-budget N     terrain starts per tick, 0..64 (default 8)\n"
 		"  --eviction-budget N       chunk evictions per tick, 0..64 (default 16)\n"
@@ -175,6 +175,7 @@ const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transp
 	const auto timing = deterministic ? server::TerrainTiming::QuiescePerTick : server::TerrainTiming::Background;
 	for (;;)
 	{
+		bool discardInput = false;
 		if (stopRequested.load(std::memory_order_relaxed))
 			return "signal";
 		if (!options.stopFile.empty())
@@ -196,6 +197,7 @@ const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transp
 			{
 				const auto batch = schedule.takeDue(TickSchedule::Clock::now());
 				droppedTicks += batch.dropped;
+				discardInput = batch.dropped != 0;
 				batchRemaining = batch.run;
 				if (batchRemaining == 0)
 				{
@@ -208,7 +210,9 @@ const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transp
 		if (transport)
 		{
 			transport->rethrowIoError();
-			transport->serviceOwner(host);
+			if (discardInput)
+				host.suspendPlayerInput();
+			transport->serviceOwner(host, host.ticks(), discardInput);
 		}
 		if (!host.step(timing, error))
 			return "runtime_error";

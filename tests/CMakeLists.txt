@@ -1472,7 +1472,7 @@ set_tests_properties(HeadlessDeps PROPERTIES TIMEOUT 120)
 
 # Server tests use its real host and executable, both CPU-only (issue #250).
 add_executable(test_server_host test_server_host.cpp ${FT_VOX_SERVER_HOST_SOURCE})
-target_link_libraries(test_server_host PRIVATE ft_vox_core)
+target_link_libraries(test_server_host PRIVATE ft_vox_core ft_vox_udp)
 ft_vox_target_hygiene(test_server_host)
 add_test(NAME ServerHost COMMAND test_server_host)
 add_test(NAME ServerLifecycle

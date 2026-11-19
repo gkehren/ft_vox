@@ -1,7 +1,8 @@
 # Dedicated server (`ft_vox_server`)
 
 The standalone CPU-only authority host (#250) owns one `GameSimulation` and
-one persistent world. Live mode listens for v2 UDP sessions (#252).
+one persistent world. Live mode listens for v2 UDP sessions (#252) and
+simulates remote movement from player inputs (#253).
 The [authoritative wire protocol ADR](adr/authoritative-wire-protocol.md)
 defines framing, negotiation and delivery.
 
@@ -36,7 +37,7 @@ prevents startup.
 | `--ticks N` | Omit for live UDP mode. Supply 1–1,000,000 for an unpaced, deterministic run with sockets disabled. |
 | `--max-catch-up N` | 4 ticks per live scheduling batch, range 1–8. |
 | `--workers N` | 2 terrain workers, range 0–64. Zero generates synchronously. |
-| `--interest-radius N` | 3 chunks around the local anchor, range 0–8. Zero disables its interest. |
+| `--interest-radius N` | 3 chunks around each positioned player, range 0–8. Zero disables player-driven residency. |
 | `--load-budget N` | 32 records per tick, range 0–128. |
 | `--generation-budget N` | 8 starts per tick, range 0–64. |
 | `--eviction-budget N` | 16 evictions per tick, range 0–64. |
@@ -48,9 +49,11 @@ prevents startup.
 The main thread opens the save, synchronously bootstraps terrain, restores
 the local compatibility player and shared item state, then activates
 player-driven residency. The local anchor provides the initial streaming
-and mob observer. Each 60 Hz server tick runs two 120 Hz player physics
-steps for walking players, advances the shared streaming union, advances mobs
-and items once each at 60 Hz, and publishes terrain and deferred edits.
+and mob observer. Each 60 Hz server tick advances walking players in ascending
+`PlayerId` order. Each player runs two 120 Hz steps through the shared
+`WorldCollisionView`, including the usual collision and unknown-terrain
+behavior. The host then advances the shared streaming union, steps mobs and
+items once each at 60 Hz, and publishes terrain and deferred edits.
 Only the owner calls mutable simulation APIs. Terrain workers prepare
 results for owner publication. The save worker serializes immutable write
 requests.
@@ -58,9 +61,12 @@ requests.
 Live mode uses steady-clock deadlines measured from the start of the loop.
 After a stall, the scheduler runs up to `--max-catch-up` due ticks and records
 the excess as `dropped_ticks`. Every executed tick keeps the same simulation
-delta. A process suspension can therefore slow simulated time relative to
-wall time without replaying an unbounded backlog. Core streaming budgets and
-the 64-job outstanding generation cap provide terrain backpressure.
+delta. When the scheduler drops elapsed ticks, the host clears pending
+movement in both the owner queues and the UDP mailboxes and suspends the
+controllers to clear buffered jump and elapsed time. The next executed tick
+resumes at the normal fixed delta. Scope and sequence watermarks stay in
+force. Core streaming budgets and the 64-job outstanding generation cap
+provide terrain backpressure.
 
 An unpaced `--ticks N` run calls the same fixed step N times and publishes all
 dispatched terrain before advancing mobs and items in that tick. This makes
@@ -83,8 +89,12 @@ tampering or network saturation. Keep the default loopback bind for local use.
   seed, generator compatibility, tick and edit watermark. Repeating the
   same Hello returns the original Welcome. The process generates a new
   world ID and epoch at startup.
-- A valid scoped packet confirms the join. A provisional slot expires after
-  5 seconds without confirmation. Established peers send a heartbeat after
+- A valid scoped packet confirms the join. The tick owner then finds a safe
+  walking spawn around the bootstrapped center using current terrain, even
+  when the saved local player was flying. If no safe loaded column exists,
+  the server retires the session and attempts a scoped disconnect. A
+  provisional slot has no body in the world and expires after 5 seconds
+  without confirmation. Established peers send a heartbeat after
   1 second of outbound inactivity and expire after 10 seconds without newly
   admitted inbound traffic or a progressing ACK. Brief loss uses the same
   session. A replay cannot extend it.
@@ -95,9 +105,9 @@ tampering or network saturation. Keep the default loopback bind for local use.
   replace an active session at the same endpoint. Rejoin after leaving or
   waiting out the old lease. Remote player identities are process-local and
   are recreated on join.
-- The IO worker validates framing, endpoint, capability, epoch, rate and
-  sequence before handing typed input to the simulation owner. Each slot
-  has one coalesced input sample and one pending action or result. A full
+- The IO worker validates framing, endpoint, capability, epoch, rate, timing
+  and sequence before handing typed input to the simulation owner. Each slot
+  has six input slots, a latest snapshot slot and one pending action or result. A full
   reliable slot leaves its receive cursor unchanged. The adapter uses a
   one-frame reliable send window, retries after 150 ms subject to the rate
   budget, and closes after 5 seconds without progress. The maximum remote
@@ -106,10 +116,49 @@ tampering or network saturation. Keep the default loopback bind for local use.
   v2 token buckets by family, peer and process, plus a fixed 256-bucket IPv4
   discovery table. Addresses that hash to the same discovery bucket share
   that budget.
-- B3 transfers lifecycle and heartbeats. The owner drains input without
-  moving the player and returns `Unavailable` for actions. Remote sessions
-  are unpositioned until movement authority lands. The native client adapter
-  is exercised by the headless loopback test and owns no graphical state.
+
+## Movement and snapshots
+
+An Input contains a bounded world X/Z vector and sprint, jump-edge and swim
+flags. The endpoint and session capability select the actor. The UDP gameplay
+surface accepts only these controls for movement. Spawn and other
+administrative mutations are server-owned, and the stop file is a separate
+local control. The server currently returns `Unavailable` for scoped actions.
+Shared drops continue stepping at 60 Hz. Pickup stays with the checkpointed
+local anchor until remote pickup and inventory replication land in #256.
+
+The host accepts inputs for the six ticks after the latest published
+completed tick. The inbox for a given tick closes when the owner drains it
+before stepping. Send a fresh sample each tick and aim about three ticks
+ahead of the estimated server tick. Inputs use nondecreasing intended ticks.
+The fresh sequence cursor rejects duplicates and reordered frames, and the
+highest admitted sequence replaces earlier samples for the same pending
+tick. The IO and owner each keep a fixed six-slot ring per player. Rate
+limits drop excess packets before queuing, and late or far-future packets
+cannot advance the fresh receive cursor.
+
+The owner consumes one sample at its intended tick and feeds its command
+to the walking controller for that tick. Missing samples use neutral
+controls, so normal gravity, braking, and collision still apply. Jump
+edges enter the controller once and use its normal jump buffer. A dropped
+sample costs one tick of input, and the next available sample uses its own
+scheduled tick. Disconnect, timeout and reconnect discard input and
+controller state with the old actor.
+
+Every third completed tick, the host publishes a snapshot per active peer.
+The snapshot includes its owner and up to 23 other confirmed remote
+players within the configured chunk-radius disk. Selection and records are
+in ascending `PlayerId` order. Records carry feet, velocity and grounded,
+waiting-for-terrain and flight flags. The header carries the session scope
+and wire world epoch. The payload carries the completed tick and the
+owner's last consumed input sequence, which starts at zero on join. The IO
+worker sends fresh snapshots at up to 20 Hz per peer within existing
+budgets. New captures replace unsent snapshots, and loss is recovered by
+the next complete snapshot.
+
+The CPU-only `ClientTransport::sendInput` sends an input for the current
+session. `latestPlayerSnapshot()` and `scope()` expose the latest accepted
+state and its epoch. The adapter clears the snapshot on departure.
 
 ## Shutdown and recovery
 
@@ -154,6 +203,8 @@ Run the dedicated tests with `ctest --test-dir build-cpu -R 'ServerHost|ServerLi
 sync/async fixed steps, deferred edits at shutdown, saved-world restart,
 write/commit failures, signal/admin termination, port 0, occupied ports,
 two-client join and rejoin, malformed and oversized packets, rate and queue
-limits, and replay. `UdpTransport` uses real IPv4 loopback sockets with an
+limits, and replay. The movement fixture compares two IPv4 loopback players
+against local controller scripts at every tick with a wall, a jump, lost
+samples, a simulated host stall and reconnect. `UdpTransport` also uses an
 injected steady clock for timeout and retransmit decisions. Its threaded
 smoke test exercises worker shutdown. CTest returns nonzero on failure.

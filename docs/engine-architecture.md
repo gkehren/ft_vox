@@ -884,9 +884,10 @@ Tests: `tests/test_world_save.cpp` (format layer), `tests/test_world_persistence
 
 `ft_vox_server` uses the v2 IPv4 UDP adapters in `src/Network/`. The IO
 worker validates packets and manages scoped sessions. The main thread owns
-the simulation and creates and removes remote players at tick boundaries.
-Epic #245 Phase B3 exercises joins, heartbeats and disconnects with a
-headless client. See the [dedicated server guide](dedicated-server.md).
+the simulation and creates, spawns and removes remote players at tick
+boundaries. Phase C1 (#253) applies bounded input through the 120 Hz
+walking controller and publishes fresh authoritative player snapshots to
+the CPU-only client adapter. See the [dedicated server guide](dedicated-server.md).
 
 The older Boost.Asio UDP prototype builds only into `test_network`. The
 graphical `Engine` has no network client.

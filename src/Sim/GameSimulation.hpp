@@ -456,17 +456,19 @@ public:
     /// issue #226). The host calls it NEXT TO advanceMobs (the #227 rewiring
     /// adds the call site; until then only headless hosts/tests drive it).
     /// Actor-aware pickup (issue #247, Epic #245 Phase A2): every POSITIONED
-    /// live session is an eligible receiver, evaluated in ascending-PlayerId
+    /// live session is eligible by default, evaluated in ascending-PlayerId
     /// order (the deterministic priority); each drop merges hotbar-first into
     /// the first in-range player, a partial remainder is offered to the next
     /// eligible player in the same tick, and the aggregate count is conserved.
     /// Unpositioned sessions (created but not yet spawned/placed) are excluded
     /// so a default-origin body never vacuum-collects shared drops. Solo (one
     /// positioned session) is bit-identical to the historical local-only rule.
+    /// The dedicated server can restrict pickup to the checkpointed local actor.
     /// Suspension freezes the population and syncs previous/current (no
     /// catch-up burst). The world is NOT pumped here — the issue #114
     /// publication ordering stays with the bridge / pumpWorld().
-    void advanceItems(double dt, bool suspended);
+    enum class ItemPickup { AllPositioned, LocalOnly };
+    void advanceItems(double dt, bool suspended, ItemPickup pickup = ItemPickup::AllPositioned);
 
     /// Headless world publication: publish finished generation jobs + apply
     /// deferred logical edits. The graphical host does NOT call this — the
@@ -517,6 +519,10 @@ public:
     /// `around` unchanged for an invalid/unknown id (the no-world fallback).
     glm::dvec3 spawnPlayerOnSurface(glm::dvec3 around);
     glm::dvec3 spawnPlayerOnSurface(PlayerId id, glm::dvec3 around);
+
+    /// Walking-only surface spawn for server admissions. Failure leaves the
+    /// session untouched, including whether it participates in spatial gameplay.
+    bool trySpawnWalkingPlayerOnSurface(PlayerId id, glm::dvec3 around);
 
     /// Saved-state restore (issue #180 review round 6): exact position when
     /// usable, physics::recover() fixes embedding up to one block, a
