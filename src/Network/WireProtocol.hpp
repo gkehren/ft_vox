@@ -3,6 +3,7 @@
 #include <Items/ItemTypes.hpp>
 #include <Sim/PlayerId.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -140,7 +141,15 @@ struct PlayerSnapshot
     uint64_t tick{}, lastProcessedInput{};
     uint8_t count{};
     std::array<PlayerState, kMaxPlayersPerSnapshot> players{};
-    bool operator==(const PlayerSnapshot &) const = default;
+
+    // Only the active prefix represents player state on the wire.
+    constexpr bool operator==(const PlayerSnapshot &other) const noexcept
+    {
+        const auto active = std::min<size_t>(count, players.size());
+        return tick == other.tick && lastProcessedInput == other.lastProcessedInput &&
+               count == other.count &&
+               std::equal(players.begin(), players.begin() + active, other.players.begin());
+    }
 };
 
 struct Cell
@@ -231,7 +240,15 @@ struct ChunkFragment
     ChunkBaseline baseline;
     uint8_t index{};
     std::array<uint8_t, kFragmentBytes> materials{};
-    bool operator==(const ChunkFragment &) const = default;
+
+    // The final fragment uses only the prefix defined by its index.
+    constexpr bool operator==(const ChunkFragment &other) const noexcept
+    {
+        const auto size = fragmentSize(index);
+        const auto active = size == 0 ? materials.size() : size;
+        return baseline == other.baseline && index == other.index &&
+               std::equal(materials.begin(), materials.begin() + active, other.materials.begin());
+    }
 };
 
 struct ChunkRemove

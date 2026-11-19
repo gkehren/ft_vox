@@ -67,6 +67,24 @@ budget. These are ceilings. Hosts can use lower rates, reserve scheduling
 capacity for controls/ACKs, and throttle baseline sends under load. B3 owns
 the clocks, bucket enforcement, shared queues and fair scheduling.
 
+At the sustained limit of 60 fragments/s, a full 60-fragment baseline uses
+about one second of a client's fragment budget. These estimates assume a
+circular interest area on the chunk grid and that every fragment slot goes
+to baseline data.
+
+| Interest radius (chunks) | Chunks in the disk | Time at the sustained rate |
+| ---: | ---: | ---: |
+| 1 | 5 | ~5 s |
+| 3 | 29 | ~29 s |
+| 8 | 197 | ~197 s |
+
+The estimates exclude the initial burst, competing traffic and retransmits.
+Measure sustained delivery under #252, then measure time from Welcome to
+the first installed spawn chunk and to a playable spawn neighborhood under
+#254. Record transferred bytes and retransmissions on loopback and with
+simulated delay and loss. Use those results to evaluate spawn-area priority,
+compression and any baseline format change.
+
 ## Join, identity and versioning
 
 - **Hello** carries `nonce:u64, minVersion:u16, maxVersion:u16, compatibility`.
@@ -300,6 +318,8 @@ trailing bytes. `InvalidPayload` covers missing or invalid required fields.
 Receive-window statuses distinguish replay, gap, wrong scope and invalid
 sequence. Malformed payloads never reach the owner queue. The codec and
 assembler use fixed storage and return status values without throwing.
+Player snapshot and chunk fragment equality covers metadata and the active
+array prefix, so callers can reuse storage between packets.
 
 ```sh
 cmake -S . -B build-cpu -DFT_VOX_GRAPHICS=OFF -DCMAKE_BUILD_TYPE=Release

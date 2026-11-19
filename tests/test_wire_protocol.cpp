@@ -266,6 +266,40 @@ void testSequence()
     CHECK_EXPR(reconnected.reliableThrough() == 0);
 }
 
+void testInactiveStorage(const std::array<Fixture, 15> &cases)
+{
+    constexpr auto server = Endpoint::Server;
+    const auto &snapshot = cases[4].packet;
+    auto reusedSnapshot = snapshot;
+    auto &players = std::get<PlayerSnapshot>(reusedSnapshot.payload);
+    players.players[players.count] = players.players[0];
+    players.players.back().player = {27};
+
+    auto bytes = encoded(server, reusedSnapshot);
+    CHECK_EXPR(bytes == encoded(server, snapshot));
+    Packet decoded;
+    CHECK_EXPR(decode(server, bytes, decoded) == S::Ok);
+    CHECK_EXPR(decoded == reusedSnapshot);
+    CHECK_EXPR(std::get<PlayerSnapshot>(decoded.payload).players[players.count] == PlayerState{});
+    ++players.players[0].flags;
+    CHECK_EXPR(decoded != reusedSnapshot);
+
+    const auto &fragment = cases[9].packet;
+    auto reusedFragment = fragment;
+    auto &materials = std::get<ChunkFragment>(reusedFragment.payload).materials;
+    const auto active = fragmentSize(std::get<ChunkFragment>(reusedFragment.payload).index);
+    materials[active] = 254;
+    materials.back() = kAirMaterial;
+
+    bytes = encoded(server, reusedFragment);
+    CHECK_EXPR(bytes == encoded(server, fragment));
+    CHECK_EXPR(decode(server, bytes, decoded) == S::Ok);
+    CHECK_EXPR(decoded == reusedFragment);
+    CHECK_EXPR(std::get<ChunkFragment>(decoded.payload).materials[active] == 0);
+    materials[active - 1] = kAirMaterial;
+    CHECK_EXPR(decoded != reusedFragment);
+}
+
 void testAssembly()
 {
     using A = AssemblyStatus;
@@ -374,6 +408,7 @@ int main()
     testGoldens(cases);
     testMalformed(cases);
     testSequence();
+    testInactiveStorage(cases);
     testAssembly();
     testProperties(cases);
     std::cout << "WireProtocol: " << testmain::checks << " checks, " << testmain::fails << " failures\n";
