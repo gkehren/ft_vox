@@ -44,6 +44,10 @@ There is currently no key recovery, rotation or account administration.
   gameplay state. A restored position waits for terrain where needed. If
   a loaded location is embedded beyond solver recovery, the server uses
   a safe spawn and retains the actor's inventory and settings.
+- The manifest's world edit revision records the capture boundary for
+  diagnostics. Replication compares edit IDs and chunk revisions within
+  a transport epoch. A restarted server advertises the new epoch's
+  edit watermark and sends fresh baselines from the committed overrides.
 - The independent `FTVA` **v1** registry, `server-identities.state`, holds
   only world identity, confirmed profile bindings and exclusive ID
   reservation limits. The owner reserves 256 player IDs or 1,048,576 item

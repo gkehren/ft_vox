@@ -204,7 +204,7 @@ struct Clients
 		until([&] { return first.inventory().has_value(); }, "first profile did not connect");
 		second.connect(udp::ClientTransport::Clock::now());
 		until([&] {
-			return second.inventory() && alice.chunks().contains(kChunk) &&
+			return second.inventory() && alice.chunks().contains(kChunk) && bob.chunks().contains(kChunk) &&
 				alice.latestPlayerSnapshot() && bob.latestPlayerSnapshot() &&
 				alice.itemSnapshots().current && bob.itemSnapshots().current;
 		}, "player, inventory, chunks and item snapshots did not arrive");
@@ -231,9 +231,12 @@ struct Clients
 				"action rejected with code " + std::to_string(static_cast<unsigned>(result->code)));
 	}
 
-	uint8_t material() const
+	bool bothSee(uint8_t material) const
 	{
-		return alice.chunks().at(kChunk).materials[(kTarget.y * 16 + kTarget.z) * 16 + kTarget.x];
+		const auto &a = alice.chunks().at(kChunk);
+		const auto &b = bob.chunks().at(kChunk);
+		return a.materials[WorldChunk::index(kTarget.x, kTarget.y, kTarget.z)] == material &&
+			a.version == b.version && a.materials == b.materials;
 	}
 
 	void checkInventory(uint16_t aliceCount, uint16_t bobCount, int bobSelected) const
@@ -273,12 +276,12 @@ void network(std::string_view mode, uint16_t port)
 	if (mode == "update")
 	{
 		clients.checkInventory(5, 6, 0);
-		require(clients.material() == wire::kAirMaterial, "fixture target was occupied");
+		require(clients.bothSee(wire::kAirMaterial), "fixture target was occupied or clients disagreed");
 		clients.action(alice, {.operation = wire::ActionKind::Place, .target = kTarget,
 			.expected = alice.chunks().at(kChunk).version, .pitchTurns = -0.25f});
 		clients.action(bob, {.operation = wire::ActionKind::Select, .slot = 7});
 		clients.action(bob, {.operation = wire::ActionKind::DropOne});
-		clients.until([&] { return (drop = clients.glassDrop()) && clients.material() == DIRT; },
+		clients.until([&] { return (drop = clients.glassDrop()) && clients.bothSee(DIRT); },
 			"committable block edit or drop not visible");
 		clients.checkInventory(4, 5, 7);
 		bob.disconnect(udp::ClientTransport::Clock::now());
@@ -290,7 +293,7 @@ void network(std::string_view mode, uint16_t port)
 	else
 	{
 		clients.checkInventory(4, 5, 7);
-		require(clients.material() == DIRT && (drop = clients.glassDrop()), "committed block or drop disappeared");
+		require(clients.bothSee(DIRT) && (drop = clients.glassDrop()), "committed block or drop disappeared");
 		udp::ClientTransport newProfile(clients.address, kUncheckpointed);
 		newProfile.connect(udp::ClientTransport::Clock::now());
 		clients.until([&] { return newProfile.inventory().has_value(); }, "uncheckpointed profile did not connect",
@@ -303,7 +306,7 @@ void network(std::string_view mode, uint16_t port)
 			clients.action(alice, {.operation = wire::ActionKind::Break, .target = kTarget,
 				.expected = alice.chunks().at(kChunk).version, .pitchTurns = -0.25f});
 			clients.action(bob, {.operation = wire::ActionKind::Select, .slot = 2});
-			clients.until([&] { return clients.material() == wire::kAirMaterial &&
+			clients.until([&] { return clients.bothSee(wire::kAirMaterial) &&
 				alice.itemSnapshots().current->idHighWater > drop; }, "uncommitted edit and item ID were not observed");
 		}
 		else
@@ -324,6 +327,7 @@ void network(std::string_view mode, uint16_t port)
 	}
 	std::cout << "RESTART world=" << alice.welcome()->worldId << " epoch=" << alice.scope()->epoch
 			  << " drop=" << drop << " high_water=" << alice.itemSnapshots().current->idHighWater
+			  << " chunk_hash=" << wire::chunkChecksum(alice.chunks().at(kChunk).materials)
 			  << " uncheckpointed=" << uncheckpointed << " new_actor=" << newActor << '\n';
 }
 }

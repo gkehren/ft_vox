@@ -445,3 +445,11 @@ transactional failure, direction, replay and gaps, chunk assembly and
 fixed-seed random and mutated datagrams. CTest returns nonzero on
 failure. The isolated `NetworkIntegrationTest` also runs when Boost is
 available.
+
+`MultiplayerClosure` exercises this codec with two production UDP
+clients, an injected-clock IPv4 relay, lost and reordered traffic,
+checksum recovery and a replay from a retired session. The
+[closure report](../multiplayer-closure.md) records the loopback results
+and the supported private-network scope. Wire v4 profile keys and
+session capabilities travel in cleartext. Public-network readiness is
+tracked separately in [#276](https://github.com/gkehren/ft_vox/issues/276).

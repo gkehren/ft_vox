@@ -12,6 +12,7 @@
 - [`docs/headless-runner.md`](docs/headless-runner.md) — `ft_vox_headless` standalone CPU simulation runner: CLI, scripts, canonical digest, CPU-only build (issue #210)
 - [`docs/gameplay-loop.md`](docs/gameplay-loop.md) — authoritative Epic #223 gameplay model: item registry, commands/results, entity rules, persistence, replication readiness (closed by issue #230)
 - [`docs/visual-regression.md`](docs/visual-regression.md) — Visual-regression harness: scenes, references, tolerances
+- [`docs/multiplayer-closure.md`](docs/multiplayer-closure.md) — Epic #245 acceptance gates, loopback and restart evidence, resource budgets and GPU follow-ups
 
 ## Architecture Overview
 
@@ -165,6 +166,9 @@ ctest -R Headless --output-on-failure   # from the build dir (always-on guards)
 cmake -B build-cpu -DFT_VOX_GRAPHICS=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build-cpu -j && ctest --test-dir build-cpu --output-on-failure
 # Details: docs/headless-runner.md
+
+# Multiplayer closure, fault recovery and resource soak (CPU-only, issue #260)
+ctest --test-dir build-cpu -C Release -L multiplayer -V
 ```
 
 ### Key Conventions

@@ -117,6 +117,8 @@ chunk separately from steady movement.
 
 See [Multiplayer smoke](multiplayer-client-smoke.md) for the physical GPU
 run and the deterministic movement measurements.
+The [multiplayer closure report](multiplayer-closure.md) records the
+resource baseline, ownership audit, prerequisites and remaining work.
 
 ## Server options
 
@@ -506,4 +508,9 @@ with the compatibility anchor at spawn, including an empty remote set.
 It checks an offline inventory, a placed block and a dropped item across a
 graceful save, then verifies whole-generation rollback after killing the
 next process. It reports the committed size and stop-to-exit duration.
+`MultiplayerClosure` combines two-client gameplay and fault recovery
+in one repeatable script. `MultiplayerSoak` logs queue occupancy,
+terrain and baseline allocations, process usage and checkpoint costs.
+Run the closure group with
+`ctest --test-dir build-cpu -C Release -L multiplayer -V`.
 CTest returns nonzero on failure.
