@@ -10,12 +10,14 @@ namespace net::udp
 struct SessionWorld
 {
 	uint32_t seed, generatorVersion;
+	uint64_t id{};
 };
 
 struct SessionAdmission
 {
 	sim::PlayerId player;
 	uint64_t tick, nextEditId;
+	wire::RejectReason refusal{wire::RejectReason::Unavailable};
 };
 
 inline constexpr uint64_t kInputLeadTicks = wire::kInputLeadTicks;
@@ -66,7 +68,7 @@ class SessionOwner
 {
 public:
 	virtual ~SessionOwner() = default;
-	virtual SessionAdmission joinRemote() = 0;
+	virtual SessionAdmission joinRemote(const wire::PlayerKey &key) = 0;
 	virtual bool activateRemote(sim::PlayerId player) = 0;
 	virtual void leaveRemote(sim::PlayerId player) = 0;
 	// Every admitted action gets a result. Inputs are acknowledged via snapshots.

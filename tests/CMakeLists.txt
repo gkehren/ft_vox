@@ -1481,6 +1481,18 @@ add_test(NAME ServerLifecycle
         --server $<TARGET_FILE:ft_vox_server>)
 set_tests_properties(ServerHost ServerLifecycle PROPERTIES TIMEOUT 300)
 
+add_executable(test_server_restart_client test_server_restart_client.cpp ${FT_VOX_SERVER_HOST_SOURCE})
+target_link_libraries(test_server_restart_client PRIVATE ft_vox_core ft_vox_udp)
+ft_vox_target_hygiene(test_server_restart_client)
+add_test(NAME ServerRestart
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_server_restart.py
+        --server $<TARGET_FILE:ft_vox_server> --client $<TARGET_FILE:test_server_restart_client>)
+set_tests_properties(ServerRestart PROPERTIES TIMEOUT 300)
+add_test(NAME ServerMigration
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_server_migration.py
+        --server $<TARGET_FILE:ft_vox_server> --client $<TARGET_FILE:test_server_restart_client>)
+set_tests_properties(ServerMigration PROPERTIES TIMEOUT 300)
+
 add_executable(test_udp_transport test_udp_transport.cpp)
 target_link_libraries(test_udp_transport PRIVATE ft_vox_udp ft_vox_core)
 add_test(NAME UdpTransport COMMAND test_udp_transport)
@@ -1537,7 +1549,7 @@ foreach(_cpu_test IN ITEMS
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
     test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol test_udp_transport
-    test_world_replication
+    test_world_replication test_server_restart_client
     bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR

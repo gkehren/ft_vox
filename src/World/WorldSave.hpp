@@ -153,6 +153,7 @@ namespace worldsave
 	// the raw uint16 item ordinals keep the save layer free of sim types,
 	// exactly like PlayerPersistState::selectedBlock.
 	inline constexpr std::size_t kInventorySlotCount = 36;
+	inline constexpr std::size_t kPlayerStateBytes = 45;
 	inline constexpr std::size_t kInventoryStateBytes = 8 + 1 + 4 * kInventorySlotCount; // 153
 	inline constexpr std::size_t kItemsStateHeaderBytes = 20;
 	inline constexpr std::size_t kItemEntityRecordBytes = 68;
@@ -379,7 +380,8 @@ namespace worldsave
 
 	// Reads a whole regular file. NotFound classifies the absent path (the
 	// common "no save data yet" case); everything else is Ok or IoError.
-	SaveStatus readFileInto(const std::filesystem::path &path, std::vector<uint8_t> &out);
+	SaveStatus readFileInto(const std::filesystem::path &path, std::vector<uint8_t> &out,
+							size_t maxBytes = SIZE_MAX);
 
 
 	SaveStatus writeWorldMeta(const std::filesystem::path &metaPath, const WorldMeta &meta);

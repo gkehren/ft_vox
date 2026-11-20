@@ -31,6 +31,7 @@
 #include <Camera/Camera.hpp>
 #include <World/WorldPersistence.hpp>
 #include <Entities/MobSystem.hpp>
+#include <Network/WireProtocol.hpp>
 #include <utils.hpp>
 
 namespace net::udp { struct Address; }
@@ -46,7 +47,8 @@ public:
 
 	void run();
 	void initializeNoiseGenerator(int seed);
-	void connectRemote(net::udp::Address address, std::optional<uint32_t> expectedSeed);
+	void connectRemote(net::udp::Address address, std::optional<uint32_t> expectedSeed,
+					   const net::wire::PlayerKey &key);
 
 	/// Request a persistent world save (issue #180): `<cwd>/saves/<name>/` is
 	/// opened (or created) inside initializeNoiseGenerator, edits stream to

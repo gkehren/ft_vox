@@ -462,7 +462,10 @@ endif()
 
 # Dedicated authority host (issue #250). The test-only UDP prototype and
 # the graphical game remain independent of the server executable.
-set(FT_VOX_SERVER_HOST_SOURCE ${CMAKE_SOURCE_DIR}/src/Server/ServerHost.cpp)
+set(FT_VOX_SERVER_HOST_SOURCE
+    ${CMAKE_SOURCE_DIR}/src/Server/ServerHost.cpp
+    ${CMAKE_SOURCE_DIR}/src/Server/WorldIdentities.cpp
+)
 add_executable(ft_vox_server src/Server/ServerMain.cpp ${FT_VOX_SERVER_HOST_SOURCE})
 target_link_libraries(ft_vox_server PRIVATE ft_vox_core)
 ft_vox_target_hygiene(ft_vox_server)

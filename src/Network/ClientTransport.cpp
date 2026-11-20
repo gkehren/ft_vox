@@ -25,10 +25,10 @@ void installSnapshot(SnapshotHistory<Snapshot> &history, const Snapshot &sample)
 
 struct ClientTransport::Impl
 {
-	explicit Impl(Address server) : server(server)
+	Impl(Address server, wire::PlayerKey key) : server(server), playerKey(key)
 	{
-		if (server.port == 0 || server.ipv4 == 0)
-			throw std::invalid_argument("expected a concrete server endpoint");
+		if (server.port == 0 || server.ipv4 == 0 || key == wire::PlayerKey{})
+			throw std::invalid_argument("expected a concrete server endpoint and a player key");
 	}
 
 	void finish(ClientStatus next)
@@ -342,7 +342,8 @@ struct ClientTransport::Impl
 		if (status == ClientStatus::Connected && assembler.expire(now))
 			resync(wire::ResyncReason::Timeout, now);
 		if (status == ClientStatus::Connecting && now >= nextHello &&
-		    sender().send(now, {{}, 0, wire::Hello{nonce, wire::kVersion, wire::kVersion, wire::localCompatibility()}}))
+		    sender().send(now, {{}, 0, wire::Hello{nonce, wire::kVersion, wire::kVersion,
+				wire::localCompatibility(), playerKey}}))
 		{
 			// Retries share the nonce. Neither attempt's send time can
 			// identify which datagram produced the matching Welcome.
@@ -380,6 +381,7 @@ struct ClientTransport::Impl
 
 	Socket socket{{0, 0}};
 	Address server;
+	const wire::PlayerKey playerKey;
 	ClientStatus status{ClientStatus::Disconnected};
 	std::optional<Link> link;
 	std::optional<wire::Welcome> welcome;
@@ -412,7 +414,7 @@ struct ClientTransport::Impl
 	uint64_t nonce{}, heartbeats{};
 };
 
-ClientTransport::ClientTransport(Address server) : m_impl(std::make_unique<Impl>(server)) {}
+ClientTransport::ClientTransport(Address server, wire::PlayerKey key) : m_impl(std::make_unique<Impl>(server, key)) {}
 ClientTransport::~ClientTransport() = default;
 
 void ClientTransport::connect(Clock::time_point now)

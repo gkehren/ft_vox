@@ -102,8 +102,13 @@ def main() -> None:
 
         require(deterministic_run("sync", 0) == deterministic_run("async", 2),
                 "deterministic server snapshots differed by worker count")
+        def committed(world: str) -> Path:
+            manifest = (root / world / "checkpoints" / "manifest").read_bytes()
+            generation, = struct.unpack_from("<Q", manifest, 8)
+            return root / world / "checkpoints" / f"generation-{generation}"
+
         for payload in ("player.state", "inventory.state", "items.state"):
-            require((root / "sync" / payload).read_bytes() == (root / "async" / payload).read_bytes(),
+            require((committed("sync") / payload).read_bytes() == (committed("async") / payload).read_bytes(),
                     f"deterministic gameplay payload {payload} differed by worker count")
         restart = run("async", 0, "--ticks", "3")
         require(record(restart, "ready")["restored"] == "1" and
@@ -119,6 +124,20 @@ def main() -> None:
         invalid = run("invalid", 2, "--player-cap", "257")
         require("error=usage detail=--player-cap" in invalid, invalid)
 
+        legacy = root / "legacy"
+        legacy.mkdir()
+        inventory = b"FTVI" + struct.pack("<IB", 1, 6) + bytes(36 * 4)
+        (legacy / "inventory.state").write_bytes(inventory)
+        run("legacy", 0, "--ticks", "1")
+        require((committed("legacy") / "inventory.state").read_bytes() == inventory,
+                "legacy inventory did not migrate to the local anchor")
+        corrupt = root / "legacy-corrupt"
+        corrupt.mkdir()
+        (corrupt / "items.state").write_bytes(b"invalid")
+        failure = run("legacy-corrupt", 3, "--ticks", "1")
+        require("corrupt or unreadable legacy items.state" in failure and
+                not (corrupt / "checkpoints" / "manifest").exists(), failure)
+
         stop_file = root / "stop"
         log = root / "admin.log"
         with live_server([*args("admin"), "--stop-file", str(stop_file), "--metrics-every", "2",
@@ -128,13 +147,13 @@ def main() -> None:
             require(record_wait["mode"] == "live" and record_wait["transport"] == "udp" and port > 0, record_wait)
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
                 probe.settimeout(5)
-                hello = struct.pack(">4sHBBHHQQQQHHHQQ", b"FTVN", 3, 1, 0, 30, 0,
-                                    0, 0, 0, 17, 1, 1, 1, 0, 0)
+                hello = struct.pack(">4sHBBHHQQQQHHHQQ32s", b"FTVN", 4, 1, 0, 62, 0,
+                                    0, 0, 0, 17, 1, 1, 1, 0, 0, b"x" * 32)
                 probe.sendto(hello, ("127.0.0.1", port))
                 reply, sender = probe.recvfrom(1200)
                 require(sender == ("127.0.0.1", port) and
-                        reply == struct.pack(">4sHBBHHQQQQBHH", b"FTVN", 3, 3, 0, 13, 0,
-                                             0, 0, 0, 17, 1, 3, 3), "wire version negotiation failed")
+                        reply == struct.pack(">4sHBBHHQQQQBHH", b"FTVN", 4, 3, 0, 13, 0,
+                                             0, 0, 0, 17, 1, 4, 4), "wire version negotiation failed")
             conflict = run("conflict", 4, "--port", str(port))
             require("bind UDP socket" in conflict and "status=ready" not in conflict, conflict)
             wait_for_record(process, log, "metrics")
@@ -146,13 +165,14 @@ def main() -> None:
         log = root / "failure.log"
         with live_server([*args("failure"), "--stop-file", str(stop_file), "--port", "0"], log) as process:
             wait_for_record(process, log, "ready")
-            # A directory at the manifest path makes atomic publication fail
-            # even on an elevated account. This world belongs to the test.
+            # Block the staging-file write, leaving the prior manifest intact.
             checkpoint = root / "failure" / "checkpoints" / "manifest"
-            checkpoint.mkdir(parents=True)
+            before = checkpoint.read_bytes()
+            checkpoint.with_suffix(".tmp").mkdir()
             stop_file.touch()
             check_exit(process, log, 5, "admin")
             require("error=persistence" in log.read_text(encoding="utf-8"), "missing save failure diagnostic")
+            require(checkpoint.read_bytes() == before, "failed publication changed the committed checkpoint")
 
         if os.name == "nt":
             # Console events target a child process group in the same console.

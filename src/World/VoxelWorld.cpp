@@ -1388,7 +1388,7 @@ std::vector<glm::ivec3> VoxelWorld::generateInitialAreaVoxels(const glm::vec3 &c
 // ---------------------------------------------------------------------------
 
 bool VoxelWorld::openWorld(const std::string &savesRoot, const std::string &worldName,
-						   std::string &outError)
+						   std::string &outError, bool dedicatedServer)
 {
 	outError.clear();
 	if (!m_terrainGenerator)
@@ -1404,13 +1404,15 @@ bool VoxelWorld::openWorld(const std::string &savesRoot, const std::string &worl
 
 	auto persistence = std::make_unique<WorldPersistence>();
 	const WorldPersistence::OpenInfo info = persistence->openOrCreate(
-		savesRoot, worldName, m_terrainGenerator->getSeed(), TerrainGenerator::kGeneratorVersion);
+		savesRoot, worldName, m_terrainGenerator->getSeed(), TerrainGenerator::kGeneratorVersion,
+		dedicatedServer);
 	if (!info.ok)
 	{
 		outError = info.error;
 		return false;
 	}
 	m_persistence = std::move(persistence);
+	m_dedicatedPersistence = dedicatedServer;
 
 	// Arm tracking on every already-loaded record so edits from this point
 	// on are recorded (records acquired later arm in processChunkLoading and
@@ -1535,6 +1537,17 @@ bool VoxelWorld::forceCloseWorldForShutdown(const worldsave::CheckpointPayloads 
 	if (!m_persistence)
 		return true;
 
+	// Only the dedicated host can capture the complete online/offline roster.
+	// Wait for terrain readers before releasing persistence. The already
+	// published manifest remains the recovery point, including on save failure.
+	if (m_dedicatedPersistence)
+	{
+		while (m_pendingGenJobsCount.load() > 0)
+			std::this_thread::yield();
+		releasePersistence();
+		return true;
+	}
+
 	resolvePendingEditsForPersistenceShutdown();
 
 	const bool drained = drainAsyncJobsForPersistence();
@@ -1575,16 +1588,7 @@ bool VoxelWorld::forceCloseWorldForShutdown(const worldsave::CheckpointPayloads 
 					 "previous committed checkpoint remains the recovery point"
 				  << std::endl;
 	}
-	m_persistence->shutdown();
-	// Disarm tracking on the loaded set: after close the world behaves
-	// exactly like a never-opened one.
-	{
-		std::lock_guard<std::shared_mutex> lock(m_mutex);
-		for (auto &[pos, chunk] : m_chunks)
-			if (chunk)
-				chunk->setTrackPersistentEdits(false);
-	}
-	m_persistence.reset();
+	releasePersistence();
 	return drained && flushed && checkpointed;
 }
 
@@ -1592,6 +1596,8 @@ bool VoxelWorld::closeWorld()
 {
 	if (!m_persistence)
 		return true;
+	if (m_dedicatedPersistence)
+		return false; // the owner must use its explicit roster checkpoint
 
 	// Quiesce BEFORE the final capture (issue #180 review): the capture must
 	// see every authoritative edit and no worker may touch m_persistence
@@ -1628,6 +1634,12 @@ bool VoxelWorld::closeWorld()
 		return false;
 	}
 
+	releasePersistence();
+	return true;
+}
+
+void VoxelWorld::releasePersistence()
+{
 	m_persistence->shutdown();
 	{
 		std::lock_guard<std::shared_mutex> lock(m_mutex);
@@ -1636,7 +1648,7 @@ bool VoxelWorld::closeWorld()
 				chunk->setTrackPersistentEdits(false);
 	}
 	m_persistence.reset();
-	return true;
+	m_dedicatedPersistence = false;
 }
 
 bool VoxelWorld::flushWorld()

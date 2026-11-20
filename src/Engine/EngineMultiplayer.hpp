@@ -27,7 +27,7 @@ struct Engine::RemoteSession
 		bool fresh(Clock::time_point now) const;
 	};
 
-	RemoteSession(net::udp::Address address, std::optional<uint32_t> expected);
+	RemoteSession(net::udp::Address address, std::optional<uint32_t> expected, const net::wire::PlayerKey &key);
 	const net::wire::PlayerState *localPlayer() const;
 	bool ready() const;
 	void submit(net::wire::Action action);

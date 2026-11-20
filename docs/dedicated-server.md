@@ -27,7 +27,8 @@ The server's dependency checks cover its include closure and generated link inpu
 Use one process per save directory. A new world defaults to seed 42. Omit
 `--seed` on restart to use the stored seed. An explicit seed mismatch, an
 invalid world name, or a save that the existing persistence layer cannot open
-prevents startup.
+prevents startup. Starting the server on an older save migrates it to the
+dedicated format. Keep a copy for use with the solo editor or an older build.
 
 ## Connect two graphical clients
 
@@ -37,8 +38,8 @@ separate terminals. With a single-config build in `build-vk`:
 ```sh
 cmake --build build-vk --target ft_vox ft_vox_server
 ./build-vk/ft_vox_server --world multiplayer-smoke --saves-root ./server-saves --seed 42 --port 7777
-./build-vk/ft_vox --connect 127.0.0.1:7777 --seed 42
-./build-vk/ft_vox --connect 127.0.0.1:7777
+./build-vk/ft_vox --connect 127.0.0.1:7777 --seed 42 --player-profile ./saves/profiles/alice
+./build-vk/ft_vox --connect 127.0.0.1:7777 --player-profile ./saves/profiles/bob
 ```
 
 On Windows, build with `--config Release` and use
@@ -47,7 +48,12 @@ arguments. Launching `ft_vox` without `--connect` starts solo play.
 `--connect` takes a numeric IPv4 address and port. With it, `--seed` is an
 optional server identity check. `--world`, `--benchmark`, and `--view` are solo
 options. Remote play uses the normal graphics and resource-pack options.
-Use matching client and server builds. Multiplayer movement uses wire v3.
+Use matching client and server builds for wire v4. The client creates a
+profile on first launch and reuses its key across launches. Without
+`--player-profile`, it uses `saves/.client-profiles/<IPv4>-<port>` relative
+to its working directory. Use distinct profiles for two clients on the
+same machine, and keep using the same explicit profile if the server
+endpoint changes.
 
 Wait for **Connected**, then move one player away from the shared spawn.
 Players in range appear as color-coded upright boxes. Use **WASD**, **Space**
@@ -61,8 +67,8 @@ follow the server's updates.
 
 Release the cursor with **C**, then use **Multiplayer → Disconnect** and
 **Multiplayer → Reconnect**. The other client should lose the departing
-avatar, then see the new player enter. The reconnecting client gets a
-fresh remote player and inventory. Walk far enough to leave and re-enter
+avatar, then see the same player return. The reconnecting client's
+position and inventory resume after the new session synchronizes. Walk far enough to leave and re-enter
 the server's interest radius and check that terrain and entities return
 after their updates arrive. Try joining with `--seed 43` or with the server
 stopped to exercise the refusal and retry states. The graphical client
@@ -166,21 +172,20 @@ before handling a stop.
 ## UDP sessions
 
 The live readiness record reports `transport=udp`, the bind address and the
-actual port. Use numeric IPv4 on a local machine or a trusted LAN. The wire
-capability is a 64-bit OS-generated bearer token sent in cleartext and bound
-to the endpoint that joined. Anyone who can observe traffic can learn it.
-There is no user identity, encryption, or protection against on-path
-tampering or network saturation. Keep the default loopback bind for local use.
+actual port. Use numeric IPv4 on loopback or a trusted private network.
+Anyone who can observe the cleartext traffic can capture both the player key
+and the session capability. Keep the default loopback bind for local use
+and use a protected tunnel such as a VPN for remote play.
 
-- A compatible Hello reserves one remote slot. The tick owner creates a
-  player and hands back the Welcome metadata. Welcome echoes the join nonce
+- A compatible Hello reserves one remote slot. The tick owner looks up the
+  player key and offers the existing actor ID or reserves a new one. Welcome echoes the join nonce
   and carries the protocol version, player ID, capability, world ID, epoch,
   seed, generator compatibility, tick and edit watermark. Repeating the
-  same Hello returns the original Welcome. The process generates a new
-  world ID and epoch at startup.
-- A valid scoped packet confirms the join. The tick owner then finds a safe
-  walking spawn around the bootstrapped center using current terrain, even
-  when the saved local player was flying. If no safe loaded column exists,
+  same Hello returns the original Welcome. The world ID is durable, and
+  the process generates a new epoch at startup.
+- A valid scoped packet confirms the join. The tick owner restores the
+  actor or finds a safe walking spawn around the bootstrapped center.
+  Confirmation of a new profile records its key before gameplay. If no safe loaded column exists,
   the server retires the session and attempts a scoped disconnect. A
   provisional slot has no body in the world and expires after 5 seconds
   without confirmation. Established peers send a heartbeat after
@@ -190,10 +195,10 @@ tampering or network saturation. Keep the default loopback bind for local use.
 - An ordered Disconnect or Resync retires the slot at a tick boundary.
   If the final control or ACK is lost, the departure falls back to the
   reliable or idle timeout. A later Hello uses a new nonce and gets a new
-  capability, generation, and player ID. A differently-nonced Hello cannot
+  capability and session generation. The same key resumes the same player
+  ID. A differently-nonced Hello cannot
   replace an active session at the same endpoint. Rejoin after leaving or
-  waiting out the old lease. Remote player identities are process-local and
-  are recreated on join.
+  waiting out the old lease. A duplicate active profile is refused.
 - The IO worker validates framing, endpoint, capability, epoch, rate, timing
   and sequence before handing typed input to the simulation owner. Each slot
   has six input slots, one latest snapshot slot per fresh family, one pending
@@ -230,8 +235,8 @@ to the walking controller for that tick. Missing samples use neutral
 controls, so normal gravity, braking, and collision still apply. Jump
 edges enter the controller once and use its normal jump buffer. A dropped
 sample costs one tick of input, and the next available sample uses its own
-scheduled tick. Disconnect, timeout and reconnect discard input and
-controller state with the old actor.
+scheduled tick. Disconnect and timeout discard the old input queues and
+controller timers. The offline record retains the pose and velocity.
 
 Every third completed tick, the host publishes a snapshot per active peer.
 The snapshot includes its owner and up to 23 other confirmed remote
@@ -443,22 +448,21 @@ file. The handler only sets a flag. The owner stops ticking, joins the IO
 worker, retires remote sessions, then drains
 outstanding generation with a 30-second cooperative deadline, resolves
 accepted edits still deferred on unloaded records, and runs the existing
-flush, gameplay checkpoint commit and refusable close. If the explicit path
-fails, teardown runs the core's existing safety net and the process still
-reports the failure. Terrain jobs complete before teardown releases their
+flush and gameplay checkpoint commit. If the barrier or publication fails,
+the previous manifest remains the recovery point and the process reports
+the failure. Terrain jobs complete before teardown releases their
 world state, and the owner then joins the pool. Filesystem calls and worker
 joins rely on the OS to return. The UDP worker attempts a final scoped
 Disconnect for confirmed sessions where the reliable send window has room.
 Other clients recover through their timeout.
 
-The checkpoint schema is shared with existing solo saves. The active
-checkpoint carries the local actor's state and inventory, shared voxel
-overrides, and dropped items with their allocator high-water. Remote
-inventories are session-scoped and are discarded on departure. Durable
-remote inventory and reconnect identity are tracked in #259. The server
-preserves the restored local orientation. Existing checkpoint recovery and
-refusal rules apply on restart. Rolling back to a solo build uses the same
-save directory directly.
+The active server checkpoint carries online and offline player records,
+the local compatibility anchor, shared voxel overrides and dropped items.
+A disconnect captures the actor in memory. Graceful stop publishes all
+gameplay state together. Up to 4,096 profiles are retained without
+expiration. Restore a pre-migration backup to return to a solo or older
+build. See the format, migration and recovery rules in the
+[multiplayer checkpoint ADR](adr/multiplayer-checkpoints.md).
 
 | Exit | Meaning |
 |---|---|
@@ -475,7 +479,7 @@ checkpoint generation. The stopped record shows the last snapshot taken
 before final close, with the stop reason, `saved` flag and exit code.
 Errors are emitted to stderr with a phase and diagnostic.
 
-Run the dedicated tests with `ctest --test-dir build-cpu -R 'ServerHost|ServerLifecycle|UdpTransport|WireProtocol|WorldReplication|VoxelActions|EntityReplication' --output-on-failure`
+Run the dedicated tests with `ctest --test-dir build-cpu -R 'ServerHost|ServerLifecycle|ServerRestart|WorldCheckpoint|UdpTransport|WireProtocol|WorldReplication|VoxelActions|EntityReplication' --output-on-failure`
 (add `-C Release` for Visual Studio). They cover clock stalls and cadence,
 sync/async fixed steps, deferred edits at shutdown, saved-world restart,
 write/commit failures, signal/admin termination, port 0, occupied ports,
@@ -498,4 +502,8 @@ and replay, interest boundaries and caps, expiry, and item allocator
 recovery after reconnect and restart.
 `ServerHost` and `EntityReplication` also cover pickup and mob observation
 with the compatibility anchor at spawn, including an empty remote set.
+`ServerRestart` drives two profiles against separate live server processes.
+It checks an offline inventory, a placed block and a dropped item across a
+graceful save, then verifies whole-generation rollback after killing the
+next process. It reports the committed size and stop-to-exit duration.
 CTest returns nonzero on failure.

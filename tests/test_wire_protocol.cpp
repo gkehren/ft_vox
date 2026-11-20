@@ -86,8 +86,8 @@ std::array<Fixture, 17> fixtures()
     mobs.mobs[0] = {5, {{-32, 64, 0}, {16, -8, 0}}, 2};
 
     return {{
-        {client, {{}, 0, Hello{1, 2, 3, kContent}}, "0100 001e", kNoScope,
-         "0000000000000001 0002 0003 0001 3132333435363738 4142434445464748"},
+        {client, {{}, 0, Hello{1, 2, 4, kContent, {1}}}, "0100 003e", kNoScope,
+         "0000000000000001 0002 0004 0001 3132333435363738 4142434445464748 01", 31},
         {server, {kScope, 0, Welcome{1, 9, {3}, 42, 1, kContent, 4, 5}}, "0200 003e", kScopedZero,
          "0000000000000001 0000000000000009 00000003 0000002a 00000001 0001"
          " 3132333435363738 4142434445464748 0000000000000004 0000000000000005"},
@@ -128,7 +128,7 @@ void testGoldens(const std::array<Fixture, 17> &cases)
 {
     for (const auto &fixture : cases)
     {
-        auto golden = bytesOf("4654564e 0003");
+        auto golden = bytesOf("4654564e 0004");
         for (auto part : {fixture.tagLength, std::string_view("0000"), fixture.scopeAndSequence, fixture.payload})
         {
             const auto bytes = bytesOf(part);
@@ -145,10 +145,16 @@ void testGoldens(const std::array<Fixture, 17> &cases)
     }
     const auto hello = std::get<Hello>(cases[0].packet.payload);
     CHECK_EXPR(!rejectHello(hello, kContent));
+    const Packet noKey{{}, 0, Hello{1, kVersion, kVersion, kContent, {}}};
+    Datagram invalid;
+    CHECK_EXPR(encode(Endpoint::Client, noKey, invalid) == S::InvalidPayload);
+    auto zeroKeyBytes = encoded(Endpoint::Client, cases[0].packet);
+    std::ranges::fill(std::span(zeroKeyBytes).last(PlayerKey{}.size()), uint8_t{0});
+    checkMalformed(Endpoint::Client, zeroKeyBytes, S::InvalidPayload);
     auto incompatible = hello;
     incompatible.maxVersion = incompatible.minVersion = 1;
     CHECK_EXPR(rejectHello(incompatible, kContent) == RejectReason::Version);
-    incompatible.maxVersion = incompatible.minVersion = 4;
+    incompatible.maxVersion = incompatible.minVersion = 5;
     CHECK_EXPR(rejectHello(incompatible, kContent) == RejectReason::Version);
     CHECK_EXPR(rejectHello(hello, {2, kContent.catalog, kContent.generator}) == RejectReason::Content);
     CHECK_EXPR(rejectHello(hello, {1, 0, kContent.generator}) == RejectReason::Content);

@@ -92,7 +92,7 @@ namespace worldsave
 		return true;
 	}
 
-	SaveStatus readFileInto(const std::filesystem::path &path, std::vector<uint8_t> &out)
+	SaveStatus readFileInto(const std::filesystem::path &path, std::vector<uint8_t> &out, size_t maxBytes)
 	{
 		// Classify by the status TYPE, not by the error_code: MSVC's EC
 		// overloads also report the not-found condition through `ec`,
@@ -112,6 +112,8 @@ namespace worldsave
 		const std::streampos end = in.tellg();
 		if (end < 0)
 			return SaveStatus::IoError;
+		if (static_cast<uintmax_t>(static_cast<std::streamoff>(end)) > maxBytes)
+			return SaveStatus::Corrupt;
 		in.seekg(0, std::ios::beg);
 		out.resize(static_cast<size_t>(end));
 		if (!out.empty())
@@ -677,7 +679,6 @@ namespace worldsave
 	SaveStatus decodePlayerState(const uint8_t *data, size_t size, PlayerPersistState &out)
 	{
 		out = PlayerPersistState{};
-		constexpr size_t kPlayerStateBytes = 4 + 4 + 8 + 8 + 8 + 4 + 4 + 1 + 4; // 45
 		if (size != kPlayerStateBytes)
 			return SaveStatus::Corrupt; // exact-size format (truncation included)
 		ByteReader r(data, size);
@@ -690,7 +691,8 @@ namespace worldsave
 		s.z = r.f64();
 		s.yaw = r.f32();
 		s.pitch = r.f32();
-		s.flight = r.u8() != 0;
+		const auto flight = r.u8();
+		s.flight = flight != 0;
 		s.selectedBlock = r.i32();
 		if (r.failed())
 			return SaveStatus::Corrupt;
@@ -705,7 +707,7 @@ namespace worldsave
 							std::isfinite(s.yaw) && std::isfinite(s.pitch);
 		constexpr double kMinY = -64.0;
 		constexpr double kMaxY = static_cast<double>(CHUNK_HEIGHT) + 64.0;
-		if (!finite || s.y < kMinY || s.y > kMaxY)
+		if (!finite || flight > 1 || s.y < kMinY || s.y > kMaxY)
 			return SaveStatus::Corrupt;
 		out = s;
 		return SaveStatus::Ok;

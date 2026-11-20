@@ -421,10 +421,12 @@ void testReplication(const fs::path &root)
 	}
 	until([&] { return first.scope() && first.scope() != congested && matches(first, world, spawn); }, 12s,
 		"server resync after delta backlog did not converge");
-	require(clean.lastResync == wire::ResyncReason::Baseline && !sim.hasPlayer(firstId), "old actor survived resync");
+	require(clean.lastResync == wire::ResyncReason::Baseline && first.welcome()->player == firstId,
+		"resync did not retain the persistent actor under a fresh scope");
 
 	const auto corruptScope = *second.scope();
 	impaired.corruptFragment = true;
+	sim.setPlayerPosition(secondId, spawnFeet);
 	second.requestWorldResync(now);
 	require(second.chunks().empty(), "explicit resync retained stale chunks");
 	until([&] { return impaired.lastResync == wire::ResyncReason::Checksum && second.scope() &&
@@ -501,9 +503,15 @@ void testVoxelActions(const fs::path &root)
 	seedBlock(8, 246, 9, STONE);
 	seedBlock(8, 246, 10, BEDROCK);
 
+	// Reserve the second actor before opening any transport slots to make
+	// actor ID order differ from slot order.
+	const auto secondKey = udp::randomPlayerKey();
+	const auto enrolled = host.joinRemote(secondKey).player;
+	require(enrolled.valid() && host.activateRemote(enrolled), "could not enroll the offline fixture actor");
+	host.leaveRemote(enrolled);
 	auto server = std::make_unique<udp::ServerTransport>(loopback, 2, host.sessionWorld());
 	Relay clean(server->address(), 0ms), impaired(server->address(), 0ms);
-	udp::ClientTransport first(clean.socket.address()), second(impaired.socket.address());
+	udp::ClientTransport first(clean.socket.address()), second(impaired.socket.address(), secondKey);
 	Time now{}, nextTick{};
 	const auto pump = [&] {
 		clean.pump(now);
@@ -559,13 +567,8 @@ void testVoxelActions(const fs::path &root)
 	second.connect(now);
 	until([&] { return ready(second); }, "second actor could not join");
 	const auto secondId = second.welcome()->player;
-	const auto oldFirst = first.welcome()->player;
-	first.disconnect(now);
-	until([&] { return first.status() == udp::ClientStatus::Disconnected; }, "first actor could not leave");
-	first.connect(now);
-	until([&] { return ready(first); }, "first actor could not reuse its slot");
 	const auto firstId = first.welcome()->player;
-	require(secondId < firstId && !simulation().hasPlayer(oldFirst), "fixture did not reverse actor and slot order");
+	require(secondId == enrolled && secondId < firstId, "fixture did not reverse actor and slot order");
 	constexpr glm::dvec3 firstFeet{8.5, 245.0, 5.5}, secondFeet{8.5, 245.0, 6.5};
 	simulation().setPlayerPosition(firstId, firstFeet);
 	simulation().setPlayerPosition(secondId, secondFeet);
@@ -710,8 +713,8 @@ void testVoxelActions(const fs::path &root)
 	impaired.dropAllActionResults = false;
 	second.connect(now);
 	until([&] { return ready(second); }, "actor did not reconnect");
-	require(second.scope() != oldScope && !second.takeActionResult() && !simulation().hasPlayer(secondId),
-		"reconnect retained the old actor or its result");
+	require(second.scope() != oldScope && !second.takeActionResult() && second.welcome()->player == secondId,
+		"reconnect did not clear the old scope or preserve the actor");
 	simulation().setPlayerPosition(second.welcome()->player, farFeet);
 	until([&] { return matches(second, world(), distant); }, "unload and reconnect did not converge");
 	const auto &reloaded = second.chunks().at(distant);
@@ -749,7 +752,7 @@ void testVoxelActions(const fs::path &root)
 	farDig.expected = second.chunks().at(distant).version;
 	const auto newEpoch = submit(second, farDig);
 	require(second.scope()->epoch != oldScope.epoch && newEpoch.actionId == 1 && newEpoch.code == Code::Forbidden &&
-		simulation().itemIdHighWater() == initialItemId + 2 && host.metrics().items == 2 &&
+		simulation().itemIdHighWater() > initialItemId + 2 && host.metrics().items == 2 &&
 		first.chunks().at(spawn).materials[WorldChunk::index(8, 246, 9)] == GLASS &&
 		second.chunks().at(distant).materials[WorldChunk::index(8, 246, 10)] == wire::kAirMaterial,
 		"restart lost committed voxel/item effects or accepted an old epoch");
@@ -1075,6 +1078,7 @@ void testEntityReplication(const fs::path &root)
 	items.settings.despawnAgeTicks = 18000;
 	const auto highWater = items.spawn({Item::Glass, 1}, mobFeet, {}, 10000);
 	const auto priorScope = *first.scope();
+	const auto savedInventory = *first.inventory();
 	first.disconnect(now);
 	until([&] { return first.status() == udp::ClientStatus::Disconnected; }, "disconnect did not settle");
 	require(!first.inventory() && !first.itemSnapshots().current && !first.mobSnapshots().current,
@@ -1084,7 +1088,9 @@ void testEntityReplication(const fs::path &root)
 	clean.send(oldInventory);
 	clean.send(beforeExpiry);
 	first.poll(now);
-	require(first.scope() != priorScope && first.inventory()->revision == 1 && count(first, Item::Dirt) == 0 &&
+	require(first.scope() != priorScope && first.welcome()->player == firstId &&
+		first.inventory()->revision == 1 && first.inventory()->slots == savedInventory.slots &&
+		first.inventory()->selected == savedInventory.selected &&
 		first.itemSnapshots().current->idHighWater == highWater, "old scope rolled back reconnect");
 	std::cout << "EntityReplication loopback: max item datagram " << impaired.itemBytes
 		<< " bytes, one-mob datagram " << impaired.mobBytes << " bytes\n";
@@ -1093,11 +1099,12 @@ void testEntityReplication(const fs::path &root)
 	server::ServerHost restarted(config);
 	require(restarted.start(error), error);
 	auto &restored = server::ServerHostProbe::simulation(restarted);
-	require(restored.itemIdHighWater() == highWater && restored.itemEntities().size() == 1 &&
+	const auto reservedThrough = restored.itemIdHighWater();
+	require(reservedThrough > highWater && restored.itemEntities().size() == 1 &&
 		restored.itemEntities().entities().front().id == highWater, "checkpoint lost shared item IDs after expiry and reconnect");
 	require(restored.grantItems(Item::Stone, 1).remainder.isEmpty() &&
 		restored.dropFromSlot(0, 1, {0, 1, 0}) == items::ItemResult::Ok &&
-		restored.itemIdHighWater() == highWater + 1, "checkpoint reused an item ID");
+		restored.itemIdHighWater() == reservedThrough + 1, "checkpoint reused an item ID");
 	require(restarted.stop(error), error);
 }
 
@@ -1268,7 +1275,7 @@ void testClientTimingSamples()
 struct MovementOwner : udp::SessionOwner
 {
 	explicit MovementOwner(server::ServerHost &host) : host(host) {}
-	udp::SessionAdmission joinRemote() override { return host.joinRemote(); }
+	udp::SessionAdmission joinRemote(const wire::PlayerKey &key) override { return host.joinRemote(key); }
 	bool activateRemote(sim::PlayerId player) override { return host.activateRemote(player); }
 	void leaveRemote(sim::PlayerId player) override { host.leaveRemote(player); }
 	std::optional<wire::ActionResult> receiveRemote(sim::PlayerId player, const udp::SessionIntents &intents) override

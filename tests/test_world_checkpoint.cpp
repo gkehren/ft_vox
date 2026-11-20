@@ -849,6 +849,77 @@ void testFirstMigrationFailureBoundary()
 	}
 }
 
+void testMultiplayerGeneration()
+{
+	TempRoot temp("roster");
+	const auto live = temp.path / "chunks";
+	makeLiveChunks(temp.path);
+	constexpr uint64_t worldId = 51;
+	worldsave::PlayerRoster roster{worldId, {
+		{{2}, samplePlayer(), sampleInventory(2), {1.5, -2, 0}},
+		{{4}, samplePlayer(90), sampleInventory(7), {0, 0, 0}}
+	}};
+	const auto priorRoster = worldsave::encodePlayerRoster(roster);
+	worldsave::PlayerRoster decoded;
+	CHECK_EXPR(worldsave::decodePlayerRoster(priorRoster.data(), priorRoster.size(), decoded) == SaveStatus::Ok);
+	CHECK_EXPR(decoded.worldId == worldId && decoded.players.size() == 2);
+	if (decoded.players.size() != 2)
+		return;
+	CHECK_EXPR(decoded.players[0].id.value == 2 && decoded.players[0].velocity[1] == -2);
+	CHECK_EXPR(decoded.players[1].id.value == 4 && decoded.players[1].inventory.selectedSlot == 7);
+	CHECK_EXPR(worldsave::decodePlayerRoster(priorRoster.data(), priorRoster.size() - 1, decoded) == SaveStatus::Corrupt);
+	auto duplicate = roster;
+	duplicate.players[1].id = duplicate.players[0].id;
+	const auto bad = worldsave::encodePlayerRoster(duplicate);
+	CHECK_EXPR(worldsave::decodePlayerRoster(bad.data(), bad.size(), decoded) == SaveStatus::Corrupt);
+
+	std::string error;
+	auto prior = makePayloads(true);
+	prior.roster = priorRoster;
+	CheckpointStore store(temp.path);
+	CHECK(store.commit(live, prior, error), error);
+	const auto priorDir = store.activeDir();
+	const auto originalChunk = readBytes(priorDir / "chunks" / "0_0.chunk");
+
+	// Simulate a pickup into one actor, a selection change on the other,
+	// and a chunk edit at the same capture boundary.
+	roster.players[0].inventory.slots[1] = {static_cast<uint16_t>(items::ItemId::Cobblestone), 1};
+	roster.players[1].inventory.selectedSlot = 8;
+	auto update = prior;
+	update.roster = worldsave::encodePlayerRoster(roster);
+	update.items = worldsave::encodeItemsState({3, {}});
+	CHECK_EXPR(worldsave::writeChunkFile(live, 0, 0, {{314, static_cast<uint8_t>(GLASS)}}) == SaveStatus::Ok);
+	const auto verifyPrior = [&] {
+		CheckpointStore recovered(temp.path);
+		CHECK(recovered.recover(error) == CheckpointStore::RecoveryStatus::Recovered, error);
+		CHECK_EXPR(recovered.activeWorldId() == worldId && recovered.activeDir() == priorDir);
+		CHECK_EXPR(readBytes(recovered.activeDir() / worldsave::kRosterFile) == priorRoster);
+		CHECK_EXPR(readBytes(recovered.activeDir() / "items.state") == prior.items);
+		CHECK_EXPR(readBytes(recovered.activeDir() / "chunks" / "0_0.chunk") == originalChunk);
+	};
+	for (const auto fault : {CheckpointFaultPoint::AfterItemsStaged, CheckpointFaultPoint::AfterRosterStaged,
+							 CheckpointFaultPoint::DuringChunkCopy, CheckpointFaultPoint::DuringManifestPublish})
+	{
+		store.setFaultForTests(fault);
+		CHECK_EXPR(!store.commit(live, update, error));
+		verifyPrior();
+	}
+	store.setFaultForTests(CheckpointFaultPoint::AfterManifestPublish);
+	CHECK(store.commit(live, update, error), error);
+	CheckpointStore recovered(temp.path);
+	CHECK(recovered.recover(error) == CheckpointStore::RecoveryStatus::Recovered, error);
+	CHECK_EXPR(readBytes(recovered.activeDir() / worldsave::kRosterFile) == update.roster);
+	CHECK_EXPR(readBytes(recovered.activeDir() / "items.state") == update.items);
+	CHECK_EXPR(readBytes(recovered.activeDir() / "chunks" / "0_0.chunk") != originalChunk);
+
+	corruptByte(recovered.activeDir() / worldsave::kRosterFile, 25);
+	verifyPrior();
+	CHECK(recovered.recover(error) == CheckpointStore::RecoveryStatus::Recovered, error);
+	recovered.setFaultForTests(CheckpointFaultPoint::DuringManifestPublish);
+	CHECK_EXPR(!recovered.commit(live, update, error));
+	verifyPrior();
+}
+
 } // namespace
 
 int main()
@@ -864,6 +935,7 @@ int main()
 	testChunkSetEvolution();
 	testLiveReseedIsolation();
 	testFirstMigrationFailureBoundary();
+	testMultiplayerGeneration();
 	std::printf("%ld checks, %ld testmain::fails\n", testmain::checks, testmain::fails);
 	if (testmain::fails == 0)
 		std::printf("PASS\n");

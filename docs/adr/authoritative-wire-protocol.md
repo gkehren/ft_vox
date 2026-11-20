@@ -1,4 +1,4 @@
-# Authoritative wire protocol v3
+# Authoritative wire protocol v4
 
 Accepted for Epic #245 Phase B2 ([#251](https://github.com/gkehren/ft_vox/issues/251)).
 The `ft_vox_wire` library implements framing, payload validation, receive
@@ -18,6 +18,9 @@ Phase D2 (#258) changes the envelope version to **3** and extends
 PlayerSnapshot with the owner's movement timers and each player's motion
 reset serial. Upgrade the server and graphical clients together. The
 other payload layouts and delivery rules carry forward from v2.
+Phase E1 (#259) moves the envelope to **4**, adds the player key to Hello
+and persists the world and player IDs. See the
+[multiplayer checkpoint ADR](multiplayer-checkpoints.md).
 
 ## Framing
 
@@ -30,7 +33,7 @@ dependency and no generic message fragmentation.
 | Offset | Type | Field |
 | --- | --- | --- |
 | 0 | 4 bytes | ASCII `FTVN` (`46 54 56 4e`) |
-| 4 | u16 | Envelope version, 3 |
+| 4 | u16 | Envelope version, 4 |
 | 6 | u8 | Message tag |
 | 7 | u8 | Flags, zero |
 | 8 | u16 | Payload length, 0–1,164, exactly the remaining bytes |
@@ -52,7 +55,7 @@ direction to the corresponding family. The byte maximum includes the header.
 
 | Tag | Name | Sender | Lane | Max bytes | Frames/s | Burst |
 | --- | --- | --- | --- | ---: | ---: | ---: |
-| 1 | Hello | C | Handshake | 66 | 2 | 2 |
+| 1 | Hello | C | Handshake | 98 | 2 | 2 |
 | 2 | Welcome | S | Handshake | 98 | 2 | 2 |
 | 3 | Reject | S | Handshake | 49 | 2 | 2 |
 | 4 | Input | C | Fresh | 53 | 60 | 8 |
@@ -99,13 +102,15 @@ loopback and impaired delivery measurements from `WorldReplication`.
 
 ## Join, identity and versioning
 
-- **Hello** carries `nonce:u64, minVersion:u16, maxVersion:u16, compatibility`.
+- **Hello** carries `nonce:u64, minVersion:u16, maxVersion:u16, compatibility,
+  playerKey:32 bytes`.
   The client picks a nonzero fresh nonce per attempt and reuses it only to
   retransmit that attempt. The inclusive version range must be nonzero and
-  ordered. Hello, Welcome and Reject use the v3 envelope for discovery.
+  ordered. The bearer key has at least one nonzero byte. Hello, Welcome and
+  Reject use the v4 envelope for discovery.
 - **Welcome** carries `nonce:u64, worldId:u64, playerId:u32, seed:u32,
   generatorVersion:u32, compatibility, tick:u64, nextEditId:u64`. The server
-  echoes the nonce, selects v3, and assigns the authorized PlayerId. The seed
+  echoes the nonce, selects v4, and supplies the authorized persistent PlayerId. The seed
   is 1–2,147,483,647. The generator version is nonzero and must match the
   negotiated generator fingerprint. `compatibility` is `itemSchema:u16,
   catalogFingerprint:u64, generatorFingerprint:u64`. The server compares
@@ -113,9 +118,10 @@ loopback and impaired delivery measurements from `WorldReplication`.
   the echoed nonce, selected version, generator version and compatibility
   before installing the new session.
 - **Reject** carries `nonce:u64, reason:u8, minVersion:u16, maxVersion:u16`.
-  Reasons are 1 version, 2 content, 3 full and 4 unavailable. With valid
+  Reasons are 1 version, 2 content, 3 full, 4 unavailable, 5 identity in use
+  and 6 saved profile limit. With valid
   discovery framing but no common version, reply with reason 1 and range
-  `[3,3]`. A foreign magic or envelope version is dropped. It cannot be
+  `[4,4]`. A foreign magic or envelope version is dropped. It cannot be
   interpreted as discovery or as a gameplay packet.
 - Header SessionId, epoch and sequence are zero on Hello and Reject. Welcome
   has a nonzero SessionId and epoch and zero sequence. Repeated Hello
@@ -126,14 +132,13 @@ loopback and impaired delivery measurements from `WorldReplication`.
 - SessionId is a nonzero, unpredictable, server-issued 64-bit capability,
   renewed on every successful join. B3 binds the issuing endpoint and
   SessionId to the server-owned PlayerId. Incoming packets carry the
-  capability and epoch. PlayerId is allocated by the running simulation
-  and is scoped to that authority instance. Zero and `UINT32_MAX` are
-  invalid. The server resolves the actor from the bound session on a fresh
-  join. Persistent reconnect identity belongs to #259.
+  capability and epoch. PlayerId is allocated by the world owner. Zero
+  and `UINT32_MAX` are invalid. On reconnect, the key resumes the same
+  player under a fresh session. Gameplay packets use only the new session.
 - WorldId is the server's opaque nonzero identifier for the opened world in
   Welcome. The host uses the same ID for joins to that world and assigns a
-  new one on world replacement. A restarted host can recover the ID or
-  choose a fresh one. Clients key the projection by WorldId and epoch. The
+  new one on world replacement. A restarted host recovers the saved ID.
+  Clients key the projection by WorldId and epoch. The
   epoch is nonzero and changes whenever a world is replaced, reloaded or
   reopened by a restarted authority. The host must distinguish epochs across
   process starts, beyond a single simulation's reload counter. Within an epoch, the server tick
@@ -143,7 +148,7 @@ loopback and impaired delivery measurements from `WorldReplication`.
 
 Layout, tag, framing or wire semantic breaks require an explicit new protocol
 version. Readers reject unknown tags and fields for the selected version.
-Future envelopes can preserve v3 discovery or require an explicit client
+Future envelopes can preserve v4 discovery or require an explicit client
 upgrade. Item schema 1 carries the append-only u16 `ItemId` registry with zero
 reserved for empty. The material catalog uses the append-only voxel ordinals
 `[0, COUNT)` and wire AIR 255. The current core AIR sentinel is mapped at

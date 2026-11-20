@@ -1,6 +1,7 @@
 #include <World/WorldPersistence.hpp>
 
 #include <Chunk/TerrainGenerator.hpp>
+#include <Items/ItemEntitySystem.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +20,20 @@
 namespace
 {
 using Clock = std::chrono::steady_clock;
+
+bool identityRegistryAllowsSolo(const std::filesystem::path &registry, const worldsave::WorldMeta &meta)
+{
+	std::vector<uint8_t> bytes;
+	const auto status = worldsave::readFileInto(registry, bytes, worldsave::kEmptyIdentityRegistryBytes);
+	if (status == worldsave::SaveStatus::NotFound)
+		return true;
+	if (status != worldsave::SaveStatus::Ok)
+		return false;
+	worldsave::ByteReader reader(bytes.data(), bytes.size());
+	worldsave::IdentityRegistryHeader header;
+	return worldsave::readIdentityRegistryHeader(bytes, reader, header) &&
+		!header.checkpointRequired && header.seed == meta.seed && header.generatorVersion == meta.generatorVersion;
+}
 
 double elapsedMs(Clock::time_point from)
 {
@@ -706,7 +721,8 @@ bool WorldPersistence::peekStoredSeed(const std::filesystem::path &savesRoot,
 WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem::path &savesRoot,
                                                           const std::string &name,
                                                           int currentSeed,
-                                                          uint32_t currentGeneratorVersion)
+                                                          uint32_t currentGeneratorVersion,
+                                                          bool dedicatedServer)
 {
 	// A prior open keeps its service alive until shutdown; reopening on top
 	// would leak a running worker.
@@ -783,14 +799,6 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 		return info;
 	}
 
-	// Interrupted atomic writes are never authoritative. A failure to clean
-	// them is a writable-directory problem: refuse rather than save into it.
-	if (worldsave::cleanTempFiles(chunksDir) != worldsave::SaveStatus::Ok)
-	{
-		info.error = "world '" + name + "' chunk directory could not be cleaned (I/O error)";
-		return info;
-	}
-
 	// Stabilization PR5b (Phase 3): checkpoint recovery selects the
 	// authoritative durable baseline BEFORE the live scan. Legacy mode (no
 	// checkpoints) keeps the historical behavior byte-for-byte. A recovered
@@ -808,6 +816,43 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 	}
 	const bool checkpointMode =
 		checkpointStatus == worldsave::CheckpointStore::RecoveryStatus::Recovered;
+	if (!dedicatedServer && (m_checkpoints->publishedMultiplayerWorldId() ||
+							 !identityRegistryAllowsSolo(worldDir / worldsave::kIdentityFile, meta)))
+	{
+		info.error = "world '" + name + "' requires the dedicated server persistence path";
+		return info;
+	}
+	// Clean the live working set only after checking persistence mode.
+	if (worldsave::cleanTempFiles(chunksDir) != worldsave::SaveStatus::Ok)
+	{
+		info.error = "world '" + name + "' chunk directory could not be cleaned (I/O error)";
+		return info;
+	}
+	if (dedicatedServer && !checkpointMode)
+	{
+		// Migration may start from missing legacy files, but a corrupt legacy
+		// file must never become an authoritative empty server checkpoint.
+		const auto validLegacy = [&]<class State>(const char *file, auto decode, State &state, size_t maxBytes) {
+			std::vector<uint8_t> bytes;
+			const auto status = worldsave::readFileInto(worldDir / file, bytes, maxBytes);
+			if (status == worldsave::SaveStatus::NotFound ||
+				(status == worldsave::SaveStatus::Ok &&
+				 decode(bytes.data(), bytes.size(), state) == worldsave::SaveStatus::Ok))
+				return true;
+			info.error = "world '" + name + "' corrupt or unreadable legacy " + file;
+			return false;
+		};
+		worldsave::PlayerPersistState player;
+		worldsave::InventoryPersistState inventory;
+		worldsave::ItemsPersistState items;
+		if (!validLegacy("player.state", worldsave::decodePlayerState, player, worldsave::kPlayerStateBytes) ||
+			!validLegacy("inventory.state", worldsave::decodeInventoryState, inventory,
+						 worldsave::kInventoryStateBytes) ||
+			!validLegacy("items.state", worldsave::decodeItemsState, items,
+						 worldsave::kItemsStateHeaderBytes +
+							items::ItemEntitySettings::capacity * worldsave::kItemEntityRecordBytes))
+			return info;
+	}
 	if (checkpointMode && !reseedLiveFromCheckpoint(worldDir, chunksDir, checkpointNote))
 	{
 		info.error = "world '" + name + "' checkpoint recovery failed: " + checkpointNote;
@@ -851,6 +896,12 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 			}
 			else
 			{
+				if (dedicatedServer)
+				{
+					info.error = "world '" + name + "' chunk file " + path.filename().string() +
+								 " failed validation (" + statusName(st) + ")";
+					return info;
+				}
 				const std::string message = "chunk file " + path.filename().string() +
 				                            " failed to load (" + statusName(st) +
 				                            "); using procedural fallback for that chunk";
@@ -1131,6 +1182,22 @@ uint64_t WorldPersistence::checkpointGeneration() const
 	return m_checkpoints ? m_checkpoints->activeGeneration() : 0;
 }
 
+uint64_t WorldPersistence::checkpointWorldId() const
+{
+	return m_checkpoints ? m_checkpoints->activeWorldId() : 0;
+}
+
+std::optional<uint64_t> WorldPersistence::publishedMultiplayerWorldId() const
+{
+	return m_checkpoints ? m_checkpoints->publishedMultiplayerWorldId() : std::nullopt;
+}
+
+worldsave::SaveStatus WorldPersistence::readPlayerRoster(worldsave::PlayerRoster &out) const
+{
+	return checkpointWorldId() ? worldsave::readPlayerRoster(gameplaySourceDir() / worldsave::kRosterFile, out)
+							   : worldsave::SaveStatus::NotFound;
+}
+
 std::filesystem::path WorldPersistence::gameplaySourceDir() const
 {
 	if (checkpointMode())
@@ -1270,6 +1337,9 @@ bool WorldPersistence::reseedLiveFromCheckpoint(const std::filesystem::path &wor
 			return false;
 		}
 	}
+
+	if (m_checkpoints->activeWorldId())
+		return true;
 
 	// Root state shims (rollback compatibility): best-effort, loud on
 	// failure — the committed generation stays authoritative regardless.

@@ -27,6 +27,7 @@ static void printUsage(const char *argv0)
 			  << "Options:\n"
 			  << "  --seed <value>              Solo world seed or expected server seed (integer)\n"
 			  << "  --connect <IPv4:port>       Join an authoritative ft_vox_server via UDP\n"
+			  << "  --player-profile <dir>     Reuse a multiplayer key across launches or endpoint changes\n"
 			  << "  --world <name>              Open (or create) the persistent save saves/<name>\n"
 			  << "                              (player state + block edits survive restarts)\n"
 			  << "  --resource-pack <path>      Minecraft resource pack archive (.zip) or folder\n"
@@ -59,10 +60,40 @@ static std::string resolveResourcePackRoot(const std::string &cliPack)
 	return resourceRootPath() + "default-resource-pack.zip";
 }
 
+static net::wire::PlayerKey loadPlayerKey(const std::filesystem::path &profile)
+{
+	const auto path = profile / "player.key";
+	std::vector<uint8_t> bytes;
+	auto status = worldsave::readFileInto(path, bytes, net::wire::PlayerKey{}.size());
+	if (status == worldsave::SaveStatus::NotFound)
+	{
+		if (!profile.parent_path().empty())
+			std::filesystem::create_directories(profile.parent_path());
+		// An existing profile with a missing key is an error. Never silently
+		// replace a credential that may still own inventory on a server.
+		if (std::filesystem::create_directory(profile))
+		{
+			const auto key = net::udp::randomPlayerKey();
+			if (!worldsave::writeCheckpointFileAtomic(path, {key.begin(), key.end()}, true))
+				throw std::runtime_error("could not save the multiplayer key in " + profile.string());
+			return key;
+		}
+		status = worldsave::readFileInto(path, bytes, net::wire::PlayerKey{}.size());
+	}
+	net::wire::PlayerKey key{};
+	if (status == worldsave::SaveStatus::Ok && bytes.size() == key.size())
+		std::ranges::copy(bytes, key.begin());
+	if (key == net::wire::PlayerKey{})
+		throw std::runtime_error("missing, corrupt or unreadable multiplayer key in " + profile.string());
+	return key;
+}
+
 int main(int argc, char **argv)
 {
 	unsigned int seed_to_use = 0;
 	std::optional<net::udp::Address> server;
+	std::string serverEndpoint;
+	std::filesystem::path playerProfile;
 	std::string worldName;
 	std::string resourcePackCli;
 	std::optional<bool> vsyncOverride;
@@ -149,6 +180,19 @@ int main(int argc, char **argv)
 				std::cerr << "Error: --connect expects a numeric IPv4 address and port 1–65535.\n";
 				return kExitUsage;
 			}
+			serverEndpoint = endpoint;
+			serverEndpoint[split] = '-';
+			continue;
+		}
+		if (arg == "--player-profile")
+		{
+			if (i + 1 >= argc || !playerProfile.empty() || std::string_view(argv[i + 1]).starts_with("--") ||
+				std::string_view(argv[i + 1]).empty())
+			{
+				std::cerr << "Error: specify one --player-profile <directory>.\n";
+				return kExitUsage;
+			}
+			playerProfile = argv[++i];
 			continue;
 		}
 		if (arg == "--seed")
@@ -375,6 +419,11 @@ int main(int argc, char **argv)
 		std::cerr << "Error: --connect cannot be combined with --world, --benchmark or --view.\n";
 		return kExitUsage;
 	}
+	if (!server && !playerProfile.empty())
+	{
+		std::cerr << "Error: --player-profile requires --connect.\n";
+		return kExitUsage;
+	}
 	if (!worldName.empty() && benchmarkDuration > 0.0f)
 	{
 		// Benchmark worlds are transient by contract (issue #180): they must
@@ -386,9 +435,16 @@ int main(int argc, char **argv)
 
 	try
 	{
+		std::optional<net::wire::PlayerKey> playerKey;
+		if (server)
+		{
+			if (playerProfile.empty())
+				playerProfile = std::filesystem::path("saves") / ".client-profiles" / serverEndpoint;
+			playerKey = loadPlayerKey(playerProfile);
+		}
 		Engine engine(resourcePack);
 		if (server)
-			engine.connectRemote(*server, seed_to_use ? std::optional<uint32_t>(seed_to_use) : std::nullopt);
+			engine.connectRemote(*server, seed_to_use ? std::optional<uint32_t>(seed_to_use) : std::nullopt, *playerKey);
 		else
 		{
 			if (!worldName.empty())

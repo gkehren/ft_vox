@@ -68,8 +68,9 @@ const char *actionFeedback(wire::ActionCode code)
 }
 }
 
-Engine::RemoteSession::RemoteSession(net::udp::Address address, std::optional<uint32_t> expected)
-	: transport(address), expectedSeed(expected)
+Engine::RemoteSession::RemoteSession(net::udp::Address address, std::optional<uint32_t> expected,
+									 const net::wire::PlayerKey &key)
+	: transport(address, key), expectedSeed(expected)
 {
 	transport.connect(Clock::now());
 }
@@ -125,6 +126,8 @@ const char *Engine::RemoteSession::connectionStatus() const
 		case wire::RejectReason::Content: return "World generator or content mismatch";
 		case wire::RejectReason::Full: return "Server is full";
 		case wire::RejectReason::Unavailable: return "Server refused the connection";
+		case wire::RejectReason::IdentityInUse: return "Player profile is already connected";
+		case wire::RejectReason::ProfileLimit: return "Server has reached its saved player limit";
 		}
 	}
 	return "Disconnected";
@@ -166,13 +169,14 @@ void Engine::RemoteSession::submitSlots(wire::ActionKind operation, int slot, in
 		submit({.operation = operation, .slot = uint8_t(slot), .otherSlot = uint8_t(other)});
 }
 
-void Engine::connectRemote(net::udp::Address address, std::optional<uint32_t> expectedSeed)
+void Engine::connectRemote(net::udp::Address address, std::optional<uint32_t> expectedSeed,
+						   const net::wire::PlayerKey &key)
 {
 	if (sim || m_remote)
 		throw std::logic_error("remote initialization requires a fresh host");
 	// Headroom for render handles parked during deferred GPU retirement.
 	chunkPool = std::make_unique<ChunkPool>(2 * wire::kMaxReplicatedChunks);
-	m_remote = std::make_unique<RemoteSession>(address, expectedSeed);
+	m_remote = std::make_unique<RemoteSession>(address, expectedSeed, key);
 	camera.setMode(CameraMode::PERSPECTIVE);
 }
 

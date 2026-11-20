@@ -103,11 +103,26 @@ PlayerId GameSimulation::createPlayer()
     return id;
 }
 
+bool GameSimulation::attachPersistentPlayer(PlayerId id)
+{
+    if (!m_world || !m_world->dedicatedPersistence() || id.value <= localPlayerId().value ||
+        id.value > kMaxPlayerId || m_players.size() >= kMaxPlayers)
+        return false;
+    const auto it = std::lower_bound(m_players.begin(), m_players.end(), id,
+                                     [](const std::unique_ptr<PlayerEntry> &entry, PlayerId wanted)
+                                     { return entry->id < wanted; });
+    if (it != m_players.end() && (*it)->id == id)
+        return false;
+    m_players.insert(it, std::make_unique<PlayerEntry>(PlayerEntry{id, PlayerState{}}));
+    m_nextPlayerId = std::max(m_nextPlayerId, id.value + 1);
+    return true;
+}
+
 bool GameSimulation::removePlayer(PlayerId id)
 {
     // The local player is the legacy-API anchor: removing it would leave the
-    // solo forwards dangling, so it is refused. Invalid/unknown ids (including
-    // retired ones — ids are never reused) are refused without any change.
+    // solo forwards dangling, so it is refused. Invalid/unknown ids are
+    // refused without any change.
     if (!id.valid() || id == localPlayerId())
         return false;
     const auto it = std::lower_bound(m_players.begin(), m_players.end(), id,
@@ -231,7 +246,7 @@ glm::dvec3 GameSimulation::initialize(const Config &config, glm::dvec3 fallbackC
     if (wantPersistence)
     {
         std::string error;
-        if (m_world->openWorld(config.savesRoot.string(), config.worldName, error))
+        if (m_world->openWorld(config.savesRoot.string(), config.worldName, error, config.dedicatedServer))
         {
             std::cout << "[world] opened '" << config.worldName << "' (seed " << seed << ")\n";
         }
@@ -335,9 +350,9 @@ bool GameSimulation::reload(int newSeed)
     return true;
 }
 
-bool GameSimulation::savePlayerState(float yaw, float pitch)
+bool GameSimulation::savePlayerState(float yaw, float pitch, const worldsave::PlayerRoster *roster)
 {
-    if (!m_world || !m_world->isWorldOpen())
+    if (!m_world || !m_world->isWorldOpen() || m_world->dedicatedPersistence() != (roster != nullptr))
         return false;
     WorldPersistence *persistence = m_world->worldPersistence();
     if (!persistence)
@@ -360,11 +375,15 @@ bool GameSimulation::savePlayerState(float yaw, float pitch)
     payloads.inventory = worldsave::encodeInventoryState(captureInventoryState());
     payloads.items = worldsave::encodeItemsState(captureItemsState());
     payloads.worldEditRevision = m_world->nextEditId();
+    if (roster)
+        payloads.roster = worldsave::encodePlayerRoster(*roster);
     if (!persistence->commitCheckpoint(payloads))
     {
         std::cout << "[world] checkpoint commit failed: " << persistence->status().lastError << "\n";
         return false;
     }
+    if (roster)
+        return true;
     // Legacy compatibility shims (rollback support, ADR §2.7): best-effort —
     // the committed checkpoint is authoritative, so a shim write failure is
     // logged but is NOT a save failure. Failures stay retryable (the next
@@ -382,6 +401,11 @@ void GameSimulation::shutdown()
 {
     if (m_world && m_world->isWorldOpen())
     {
+        if (m_world->dedicatedPersistence())
+        {
+            m_world->forceCloseWorldForShutdown();
+            return;
+        }
         // Gameplay safety net (issue #228): inventory + items are fully
         // authoritative (no host presentation input), so the unconditional
         // close captures them even when the host forgot savePlayerState.
@@ -801,8 +825,13 @@ PlayerPersistState GameSimulation::capturePlayerState(PlayerId id, float yaw, fl
 
 worldsave::InventoryPersistState GameSimulation::captureInventoryState() const
 {
+    return captureInventoryState(localPlayerId());
+}
+
+worldsave::InventoryPersistState GameSimulation::captureInventoryState(PlayerId id) const
+{
     worldsave::InventoryPersistState state;
-    const items::Inventory &inventory = localState().inventory;
+    const auto &inventory = findPlayer(id)->inventory;
     state.selectedSlot = static_cast<uint8_t>(inventory.selectedSlot());
     const std::array<items::ItemStack, items::kInventorySize> &slots = inventory.slots();
     for (std::size_t i = 0; i < slots.size(); ++i)
@@ -811,6 +840,42 @@ worldsave::InventoryPersistState GameSimulation::captureInventoryState() const
         state.slots[i].count = slots[i].count;
     }
     return state;
+}
+
+void GameSimulation::restoreInventoryState(PlayerId id, const worldsave::InventoryPersistState &saved)
+{
+    std::array<items::ItemStack, items::kInventorySize> slots{};
+    for (std::size_t i = 0; i < slots.size(); ++i)
+        slots[i] = items::makeStack(static_cast<items::ItemId>(saved.slots[i].itemId), saved.slots[i].count);
+    findPlayer(id)->inventory.restore(slots, saved.selectedSlot);
+}
+
+worldsave::RemotePlayerState GameSimulation::captureRemotePlayerState(PlayerId id) const
+{
+    const auto velocity = findPlayer(id)->controller.body.velocity;
+    return {id, capturePlayerState(id, 0, 0), captureInventoryState(id),
+            {velocity.x, velocity.y, velocity.z}};
+}
+
+bool GameSimulation::restoreRemotePlayerState(const worldsave::RemotePlayerState &saved, glm::dvec3 spawnCenter)
+{
+    auto *player = findPlayer(saved.id);
+    if (!player || player->positioned)
+        return false;
+    if (restorePlayerState(saved.id, saved.pose))
+    {
+        if (player->controller.body.position == glm::dvec3(saved.pose.x, saved.pose.y, saved.pose.z))
+            player->controller.body.velocity = {saved.velocity[0], saved.velocity[1], saved.velocity[2]};
+    }
+    else
+    {
+        if (!trySpawnWalkingPlayerOnSurface(saved.id, spawnCenter))
+            return false;
+        player->flight = saved.pose.flight;
+        player->selectedBlock = static_cast<TextureType>(saved.pose.selectedBlock);
+    }
+    restoreInventoryState(saved.id, saved.inventory);
+    return true;
 }
 
 worldsave::ItemsPersistState GameSimulation::captureItemsState() const
@@ -864,13 +929,7 @@ void GameSimulation::restoreGameplayState()
 {
     if (m_savedInventory)
     {
-        // The save layer validated ids/counts/selection (decodeInventoryState);
-        // makeStack re-canonicalizes the empty stacks.
-        std::array<items::ItemStack, items::kInventorySize> slots{};
-        for (std::size_t i = 0; i < slots.size(); ++i)
-            slots[i] = items::makeStack(static_cast<items::ItemId>(m_savedInventory->slots[i].itemId),
-                                        m_savedInventory->slots[i].count);
-        localState().inventory.restore(slots, m_savedInventory->selectedSlot);
+        restoreInventoryState(localPlayerId(), *m_savedInventory);
         std::cout << "[world] restored inventory (selected slot "
                   << static_cast<int>(m_savedInventory->selectedSlot) << ")\n";
     }

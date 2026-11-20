@@ -8,8 +8,11 @@
 // is never mutated by this layer (recovery re-seeding is the facade's job).
 
 #include <World/WorldCheckpoint.hpp>
+#include <World/MultiplayerSave.hpp>
+#include <Items/ItemEntitySystem.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <system_error>
@@ -18,6 +21,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -28,6 +32,12 @@ namespace
 	namespace fs = std::filesystem;
 
 	constexpr uint64_t kMaxManifestChunks = 1u << 20; // bounded decode
+	constexpr size_t kMaxManifestBytes = 77 + 16 * kMaxManifestChunks;
+	constexpr char kIdentityMagic[4] = {'F', 'T', 'V', 'A'};
+	constexpr uint32_t kIdentityVersion = 1;
+	constexpr char kRosterMagic[4] = {'F', 'T', 'V', 'R'};
+	constexpr size_t kRosterHeaderBytes = 20;
+	constexpr size_t kRosterRecordBytes = 4 + kPlayerStateBytes + kInventoryStateBytes + 24;
 
 	fs::path generationDirName(uint64_t generation)
 	{
@@ -45,10 +55,10 @@ namespace
 			const char c = name[i];
 			if (c < '0' || c > '9')
 				return false;
-			const uint64_t next = value * 10 + static_cast<uint64_t>(c - '0');
-			if (next < value) // overflow
+			const auto digit = static_cast<uint64_t>(c - '0');
+			if (value > (UINT64_MAX - digit) / 10)
 				return false;
-			value = next;
+			value = value * 10 + digit;
 		}
 		if (value == 0)
 			return false;
@@ -85,7 +95,7 @@ std::vector<uint8_t> encodeCheckpointManifest(const CheckpointManifest &manifest
 {
 	ByteWriter w;
 	w.raw(kCheckpointManifestMagic, sizeof(kCheckpointManifestMagic));
-	w.u32(kCheckpointManifestVersion);
+	w.u32(manifest.worldId ? kCheckpointManifestVersion : 1);
 	w.u64(manifest.committedGeneration);
 	w.u64(manifest.fallbackGeneration);
 	w.u64(manifest.worldEditRevision);
@@ -99,6 +109,11 @@ std::vector<uint8_t> encodeCheckpointManifest(const CheckpointManifest &manifest
 		w.i32(ref.chunkX);
 		w.i32(ref.chunkZ);
 		w.u64(ref.checksum);
+	}
+	if (manifest.worldId)
+	{
+		w.u64(manifest.worldId);
+		w.u64(manifest.rosterChecksum);
 	}
 	return w.take();
 }
@@ -115,21 +130,23 @@ SaveStatus decodeCheckpointManifest(const uint8_t *data, size_t size, Checkpoint
 	const uint32_t version = r.u32();
 	if (std::memcmp(magic, kCheckpointManifestMagic, sizeof(magic)) != 0)
 		return SaveStatus::BadMagic;
-	if (version != kCheckpointManifestVersion)
+	if (version != 1 && version != kCheckpointManifestVersion)
 		return SaveStatus::UnsupportedVersion;
 	CheckpointManifest m;
 	m.committedGeneration = r.u64();
 	m.fallbackGeneration = r.u64();
 	m.worldEditRevision = r.u64();
-	m.playerPresent = r.u8() != 0;
+	const uint8_t playerPresent = r.u8();
+	m.playerPresent = playerPresent != 0;
 	m.playerChecksum = r.u64();
 	m.inventoryChecksum = r.u64();
 	m.itemsChecksum = r.u64();
 	const uint32_t count = r.u32();
-	if (m.committedGeneration == 0 || count > kMaxManifestChunks)
+	if (m.committedGeneration == 0 || m.committedGeneration == UINT64_MAX ||
+		m.fallbackGeneration >= m.committedGeneration || count > kMaxManifestChunks || playerPresent > 1)
 		return SaveStatus::Corrupt;
 	// Each chunk ref is i32 x + i32 z + u64 checksum = 16 bytes.
-	if (size != kHeaderBytes + static_cast<size_t>(count) * 16)
+	if (size != kHeaderBytes + static_cast<size_t>(count) * 16 + (version == 1 ? 0 : 16))
 		return SaveStatus::Corrupt; // exact-size format
 	m.chunks.reserve(count);
 	for (uint32_t i = 0; i < count; ++i)
@@ -140,11 +157,137 @@ SaveStatus decodeCheckpointManifest(const uint8_t *data, size_t size, Checkpoint
 		ref.checksum = r.u64();
 		m.chunks.push_back(ref);
 	}
+	if (version == kCheckpointManifestVersion)
+	{
+		m.worldId = r.u64();
+		m.rosterChecksum = r.u64();
+		if (!m.worldId)
+			return SaveStatus::Corrupt;
+	}
 	if (r.failed())
 		return SaveStatus::Corrupt;
 	std::sort(m.chunks.begin(), m.chunks.end(), chunkRefLess);
 	out = std::move(m);
 	return SaveStatus::Ok;
+}
+
+bool readIdentityRegistryHeader(const std::vector<uint8_t> &bytes, ByteReader &reader, IdentityRegistryHeader &out)
+{
+	if (bytes.size() < kEmptyIdentityRegistryBytes)
+		return false;
+	char magic[sizeof(kIdentityMagic)];
+	reader.raw(magic, sizeof(magic));
+	if (std::memcmp(magic, kIdentityMagic, sizeof(magic)) != 0 || reader.u32() != kIdentityVersion)
+		return false;
+	IdentityRegistryHeader header;
+	header.worldId = reader.u64();
+	header.seed = reader.i32();
+	header.generatorVersion = reader.u32();
+	const auto required = reader.u8();
+	header.checkpointRequired = required != 0;
+	header.actorLimit = reader.u32();
+	header.itemLimit = reader.u64();
+	header.profileCount = reader.u32();
+	if (!header.worldId || header.seed <= 0 || !header.generatorVersion || required > 1 ||
+		header.actorLimit < kFirstRemotePlayerId || !header.itemLimit || header.profileCount > kMaxPersistentPlayers ||
+		(!header.checkpointRequired && (header.actorLimit != kFirstRemotePlayerId || header.profileCount != 0)) ||
+		bytes.size() != kEmptyIdentityRegistryBytes + kIdentityProfileBytes * header.profileCount)
+		return false;
+	const auto payloadSize = bytes.size() - kIdentityChecksumBytes;
+	ByteReader checksum(bytes.data() + payloadSize, kIdentityChecksumBytes);
+	if (checksum.u64() != fnv1a64(bytes.data(), payloadSize) || reader.failed())
+		return false;
+	out = header;
+	return true;
+}
+
+void writeIdentityRegistryHeader(ByteWriter &writer, const IdentityRegistryHeader &header)
+{
+	writer.raw(kIdentityMagic, sizeof(kIdentityMagic));
+	writer.u32(kIdentityVersion);
+	writer.u64(header.worldId);
+	writer.i32(header.seed);
+	writer.u32(header.generatorVersion);
+	writer.u8(header.checkpointRequired ? 1 : 0);
+	writer.u32(header.actorLimit);
+	writer.u64(header.itemLimit);
+	writer.u32(header.profileCount);
+}
+
+std::vector<uint8_t> encodePlayerRoster(const PlayerRoster &roster)
+{
+	ByteWriter w;
+	w.raw(kRosterMagic, sizeof(kRosterMagic));
+	w.u32(1);
+	w.u64(roster.worldId);
+	w.u32(static_cast<uint32_t>(roster.players.size()));
+	for (const auto &player : roster.players)
+	{
+		w.u32(player.id.value);
+		const auto pose = encodePlayerState(player.pose);
+		w.raw(pose.data(), pose.size());
+		const auto inventory = encodeInventoryState(player.inventory);
+		w.raw(inventory.data(), inventory.size());
+		for (double axis : player.velocity)
+			w.f64(axis);
+	}
+	return w.take();
+}
+
+SaveStatus decodePlayerRoster(const uint8_t *data, size_t size, PlayerRoster &out)
+{
+	if (size < kRosterHeaderBytes)
+		return SaveStatus::Corrupt;
+	ByteReader r(data, size);
+	char magic[sizeof(kRosterMagic)];
+	r.raw(magic, sizeof(magic));
+	if (std::memcmp(magic, kRosterMagic, sizeof(magic)) != 0)
+		return SaveStatus::BadMagic;
+	if (r.u32() != 1)
+		return SaveStatus::UnsupportedVersion;
+	PlayerRoster roster;
+	roster.worldId = r.u64();
+	const auto count = r.u32();
+	if (!roster.worldId || count > kMaxPersistentPlayers ||
+		size != kRosterHeaderBytes + count * kRosterRecordBytes)
+		return SaveStatus::Corrupt;
+	roster.players.reserve(count);
+	uint32_t previous = 1; // ID 1 belongs to the local/legacy anchor
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		RemotePlayerState player;
+		player.id.value = r.u32();
+		std::array<uint8_t, kPlayerStateBytes> pose;
+		std::array<uint8_t, kInventoryStateBytes> inventory;
+		r.raw(pose.data(), pose.size());
+		r.raw(inventory.data(), inventory.size());
+		for (double &axis : player.velocity)
+			axis = r.f64();
+		if (player.id.value <= previous || player.id.value > sim::kMaxPlayerId ||
+			decodePlayerState(pose.data(), pose.size(), player.pose) != SaveStatus::Ok ||
+			decodeInventoryState(inventory.data(), inventory.size(), player.inventory) != SaveStatus::Ok ||
+			!std::ranges::all_of(player.velocity, [](double axis) { return std::abs(axis) <= 128; }))
+			return SaveStatus::Corrupt;
+		constexpr double limit = 1 << 23; // dedicated wire coordinate envelope
+		if (player.pose.x < -limit || player.pose.x >= limit || player.pose.z < -limit ||
+			player.pose.z >= limit || player.pose.selectedBlock < 0 || player.pose.selectedBlock >= COUNT)
+			return SaveStatus::Corrupt;
+		previous = player.id.value;
+		roster.players.push_back(player);
+	}
+	out = std::move(roster);
+	return SaveStatus::Ok;
+}
+
+SaveStatus readPlayerRoster(const fs::path &path, PlayerRoster &out, uint64_t *checksum)
+{
+	std::vector<uint8_t> bytes;
+	const auto status = readFileInto(path, bytes, kRosterHeaderBytes + kMaxPersistentPlayers * kRosterRecordBytes);
+	if (status != SaveStatus::Ok)
+		return status;
+	if (checksum)
+		*checksum = fnv1a64(bytes.data(), bytes.size());
+	return decodePlayerRoster(bytes.data(), bytes.size(), out);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +346,35 @@ bool syncDirForCheckpoint(const fs::path &path)
 #endif
 }
 
+bool writeCheckpointFileAtomic(const fs::path &path, const std::vector<uint8_t> &bytes, bool privateFile)
+{
+	fs::path tmp = path;
+	tmp += ".tmp";
+#ifndef _WIN32
+	if (privateFile)
+	{
+		const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_NOFOLLOW, 0600);
+		if (fd < 0)
+			return false;
+		const bool secured = ::fchmod(fd, 0600) == 0;
+		::close(fd);
+		if (!secured)
+			return false;
+	}
+#else
+	(void)privateFile; // inherits the ACL of the world/profile directory
+#endif
+	if (!writeBytesExact(tmp, bytes) || !syncFileForCheckpoint(tmp))
+		return false;
+	std::error_code ec;
+	fs::rename(tmp, path, ec);
+	if (ec)
+		return false;
+	// The rename is the commit point. Directory sync is best effort.
+	syncDirForCheckpoint(path.parent_path());
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // CheckpointStore
 // ---------------------------------------------------------------------------
@@ -238,16 +410,16 @@ bool CheckpointStore::validateGeneration(uint64_t generation, const CheckpointMa
 	// Gameplay payloads: strict codec + manifest checksum. A missing or
 	// corrupt referenced payload invalidates the WHOLE generation (never
 	// combined with another generation's data).
-	const auto checkPayload = [&](const char *name, uint64_t wantChecksum, auto decode) {
+	const auto checkPayload = [&](const char *name, uint64_t wantChecksum, size_t maxBytes, auto decode) {
 		std::vector<uint8_t> bytes;
-		const SaveStatus read = readFileInto(dir / name, bytes);
+		const SaveStatus read = readFileInto(dir / name, bytes, maxBytes);
 		if (read != SaveStatus::Ok)
 			return false;
 		if (fnv1a64(bytes.data(), bytes.size()) != wantChecksum)
 			return false;
 		return decode(bytes);
 	};
-	if (!checkPayload("inventory.state", manifest.inventoryChecksum, [](const std::vector<uint8_t> &b) {
+	if (!checkPayload("inventory.state", manifest.inventoryChecksum, kInventoryStateBytes, [](const std::vector<uint8_t> &b) {
 			InventoryPersistState s;
 			return decodeInventoryState(b.data(), b.size(), s) == SaveStatus::Ok;
 		}))
@@ -255,7 +427,9 @@ bool CheckpointStore::validateGeneration(uint64_t generation, const CheckpointMa
 		outError = "inventory.state missing/corrupt/checksum-mismatch";
 		return false;
 	}
-	if (!checkPayload("items.state", manifest.itemsChecksum, [](const std::vector<uint8_t> &b) {
+	if (!checkPayload("items.state", manifest.itemsChecksum,
+			kItemsStateHeaderBytes + items::ItemEntitySettings::capacity * kItemEntityRecordBytes,
+			[](const std::vector<uint8_t> &b) {
 			ItemsPersistState s;
 			return decodeItemsState(b.data(), b.size(), s) == SaveStatus::Ok;
 		}))
@@ -264,13 +438,24 @@ bool CheckpointStore::validateGeneration(uint64_t generation, const CheckpointMa
 		return false;
 	}
 	if (manifest.playerPresent &&
-		!checkPayload("player.state", manifest.playerChecksum, [](const std::vector<uint8_t> &b) {
+		!checkPayload("player.state", manifest.playerChecksum, kPlayerStateBytes, [](const std::vector<uint8_t> &b) {
 			PlayerPersistState s;
 			return decodePlayerState(b.data(), b.size(), s) == SaveStatus::Ok;
 		}))
 	{
 		outError = "player.state missing/corrupt/checksum-mismatch";
 		return false;
+	}
+	if (manifest.worldId)
+	{
+		PlayerRoster roster;
+		uint64_t checksum{};
+		if (readPlayerRoster(dir / kRosterFile, roster, &checksum) != SaveStatus::Ok ||
+			checksum != manifest.rosterChecksum || roster.worldId != manifest.worldId)
+		{
+			outError = "players.state missing/corrupt/world or checksum mismatch";
+			return false;
+		}
 	}
 
 	// Chunk set: EXACTLY the referenced files (no unreferenced leftovers —
@@ -326,33 +511,60 @@ bool CheckpointStore::validateGeneration(uint64_t generation, const CheckpointMa
 	return true;
 }
 
-bool CheckpointStore::tryRecoverManifest(const fs::path &manifestPath, uint64_t &outGeneration,
-										 std::string &outError)
+SaveStatus CheckpointStore::readPublishedManifest(const fs::path &path, CheckpointManifest &manifest,
+												 std::vector<uint8_t> &bytes)
+{
+	const auto status = readFileInto(path, bytes, kMaxManifestBytes);
+	if (status != SaveStatus::Ok)
+		return status;
+
+	// Only inspect publication paths. A staged v2 manifest or generation
+	// cannot restrict access to the prior solo save.
+	ByteReader header(bytes.data(), bytes.size());
+	char magic[sizeof(kCheckpointManifestMagic)];
+	header.raw(magic, sizeof(magic));
+	const auto version = header.u32();
+	if (!header.failed() && std::memcmp(magic, kCheckpointManifestMagic, sizeof(magic)) == 0 &&
+		version == kCheckpointManifestVersion && !m_publishedMultiplayerWorldId)
+		m_publishedMultiplayerWorldId = 0;
+
+	const auto decoded = decodeCheckpointManifest(bytes.data(), bytes.size(), manifest);
+	if (decoded == SaveStatus::Ok && manifest.worldId)
+		m_publishedMultiplayerWorldId = manifest.worldId;
+	return decoded;
+}
+
+SaveStatus CheckpointStore::tryRecoverManifest(const fs::path &manifestPath, uint64_t &namedGeneration,
+											   std::string &outError)
 {
 	std::vector<uint8_t> bytes;
-	if (readFileInto(manifestPath, bytes) != SaveStatus::Ok)
+	CheckpointManifest manifest;
+	const auto decoded = readPublishedManifest(manifestPath, manifest, bytes);
+	if (decoded == SaveStatus::NotFound || decoded == SaveStatus::IoError)
 	{
 		outError = "manifest unreadable";
-		return false;
+		return decoded;
 	}
-	CheckpointManifest manifest;
-	if (decodeCheckpointManifest(bytes.data(), bytes.size(), manifest) != SaveStatus::Ok)
+	if (decoded != SaveStatus::Ok)
 	{
-		outError = "manifest corrupt";
-		return false;
+		outError = decoded == SaveStatus::UnsupportedVersion ? "unsupported checkpoint manifest version"
+															: "manifest corrupt";
+		return decoded;
 	}
+	namedGeneration = manifest.committedGeneration;
 	std::string validationError;
 	if (!validateGeneration(manifest.committedGeneration, manifest, validationError))
 	{
 		outError = "committed generation invalid: " + validationError;
-		return false;
+		return SaveStatus::Corrupt;
 	}
 	m_activeGeneration = manifest.committedGeneration;
 	m_fallbackGeneration = manifest.fallbackGeneration;
 	m_activePlayerPresent = manifest.playerPresent;
+	m_activeWorldId = manifest.worldId;
+	m_activeManifest = std::move(bytes);
 	m_nextGeneration = manifest.committedGeneration + 1;
-	outGeneration = m_activeGeneration;
-	return true;
+	return SaveStatus::Ok;
 }
 
 CheckpointStore::RecoveryStatus CheckpointStore::recover(std::string &outError)
@@ -361,6 +573,9 @@ CheckpointStore::RecoveryStatus CheckpointStore::recover(std::string &outError)
 	m_activeGeneration = 0;
 	m_fallbackGeneration = 0;
 	m_activePlayerPresent = false;
+	m_activeWorldId = 0;
+	m_publishedMultiplayerWorldId.reset();
+	m_activeManifest.clear();
 
 	const fs::path cpDir = checkpointsDir(m_worldDir);
 	std::error_code ec;
@@ -383,7 +598,7 @@ CheckpointStore::RecoveryStatus CheckpointStore::recover(std::string &outError)
 			maxGeneration = std::max(maxGeneration, gen);
 		}
 	}
-	m_nextGeneration = maxGeneration + 1;
+	m_nextGeneration = maxGeneration == UINT64_MAX ? UINT64_MAX : maxGeneration + 1;
 
 	const bool manifestExists = fs::exists(checkpointManifestPath(m_worldDir), ec);
 	const bool prevExists = fs::exists(checkpointManifestPrevPath(m_worldDir), ec);
@@ -405,8 +620,8 @@ CheckpointStore::RecoveryStatus CheckpointStore::recover(std::string &outError)
 		{
 			std::vector<uint8_t> bytes;
 			CheckpointManifest m;
-			if (readFileInto(p, bytes) == SaveStatus::Ok &&
-				decodeCheckpointManifest(bytes.data(), bytes.size(), m) == SaveStatus::Ok)
+			const auto decoded = readPublishedManifest(p, m, bytes);
+			if (decoded == SaveStatus::Ok || decoded == SaveStatus::UnsupportedVersion || m_publishedMultiplayerWorldId)
 			{
 				outError = "unrecoverable checkpoint corruption: committed generation directories are missing";
 				return RecoveryStatus::Unrecoverable;
@@ -415,16 +630,28 @@ CheckpointStore::RecoveryStatus CheckpointStore::recover(std::string &outError)
 		return RecoveryStatus::Legacy;
 	}
 
-	uint64_t generation = 0;
+	uint64_t currentGeneration = 0;
 	std::string firstError;
-	if (tryRecoverManifest(checkpointManifestPath(m_worldDir), generation, firstError))
+	const auto current = tryRecoverManifest(checkpointManifestPath(m_worldDir), currentGeneration, firstError);
+	if (current == SaveStatus::Ok)
 		return RecoveryStatus::Recovered;
+	if (current == SaveStatus::UnsupportedVersion)
+	{
+		outError = firstError;
+		return RecoveryStatus::Unrecoverable;
+	}
 	// Manifest-level fault tolerance: the rotated previous manifest names
 	// the prior committed generation with its OWN checksums (a crash during
 	// rotation/publication never loses both copies).
 	std::string prevError;
-	if (tryRecoverManifest(checkpointManifestPrevPath(m_worldDir), generation, prevError))
+	uint64_t previousGeneration = 0;
+	const auto unusedGeneration = m_nextGeneration;
+	if (tryRecoverManifest(checkpointManifestPrevPath(m_worldDir), previousGeneration, prevError) == SaveStatus::Ok)
 	{
+		// The current manifest may still point at a corrupt or missing
+		// generation. Restaging that ID could accidentally validate it
+		// before publication. Skip both the named ID and any existing dirs.
+		m_nextGeneration = std::max({m_nextGeneration, unusedGeneration, currentGeneration + 1});
 		outError = "recovered via manifest.prev (" + firstError + ")";
 		return RecoveryStatus::Recovered;
 	}
@@ -448,12 +675,11 @@ bool CheckpointStore::stagePayload(const fs::path &finalPath, const std::vector<
 	return true;
 }
 
-bool CheckpointStore::publishManifest(const CheckpointManifest &manifest, std::string &outError)
+bool CheckpointStore::publishManifest(const std::vector<uint8_t> &bytes, std::string &outError)
 {
 	const fs::path cpDir = checkpointsDir(m_worldDir);
 	const fs::path finalPath = checkpointManifestPath(m_worldDir);
 	const fs::path tmpPath = finalPath.string() + ".tmp";
-	const std::vector<uint8_t> bytes = encodeCheckpointManifest(manifest);
 	if (!writeBytesExact(tmpPath, bytes))
 	{
 		outError = "failed to write manifest.tmp";
@@ -491,6 +717,19 @@ bool CheckpointStore::commit(const fs::path &liveChunksDir, const CheckpointPayl
 	outError.clear();
 	if (failAt(CheckpointFaultPoint::BeforeStaging, outError))
 		return false;
+	if (m_nextGeneration == UINT64_MAX)
+	{
+		outError = "checkpoint generation IDs exhausted";
+		return false;
+	}
+	PlayerRoster roster;
+	if ((!payloads.roster.empty() &&
+		 decodePlayerRoster(payloads.roster.data(), payloads.roster.size(), roster) != SaveStatus::Ok) ||
+		(m_activeWorldId && roster.worldId != m_activeWorldId))
+	{
+		outError = "checkpoint player roster failed validation or belongs to another world";
+		return false;
+	}
 
 	// Pre-validate the captured payloads BEFORE touching the filesystem: a
 	// malformed capture must never produce a staging directory.
@@ -578,6 +817,9 @@ bool CheckpointStore::commit(const fs::path &liveChunksDir, const CheckpointPayl
 		return false;
 	if (failAt(CheckpointFaultPoint::AfterItemsStaged, outError))
 		return false;
+	if (roster.worldId && (!stagePayload(genDir / kRosterFile, payloads.roster, outError) ||
+						   failAt(CheckpointFaultPoint::AfterRosterStaged, outError)))
+		return false;
 
 	// Copy-on-write chunk snapshot: byte copies of the LIVE override files
 	// (small sparse files — no terrain regeneration, no full-world
@@ -591,11 +833,19 @@ bool CheckpointStore::commit(const fs::path &liveChunksDir, const CheckpointPayl
 	manifest.playerChecksum = playerPresent ? fnv1a64(playerBytes.data(), playerBytes.size()) : 0;
 	manifest.inventoryChecksum = fnv1a64(payloads.inventory.data(), payloads.inventory.size());
 	manifest.itemsChecksum = fnv1a64(payloads.items.data(), payloads.items.size());
+	manifest.worldId = roster.worldId;
+	if (manifest.worldId)
+		manifest.rosterChecksum = fnv1a64(payloads.roster.data(), payloads.roster.size());
 
 	const ScanResult live = scanChunkFiles(liveChunksDir);
 	if (live.status != SaveStatus::Ok)
 	{
 		outError = "live chunk scan failed";
+		return false;
+	}
+	if (live.files.size() > kMaxManifestChunks)
+	{
+		outError = "live chunk count exceeds the checkpoint format limit";
 		return false;
 	}
 	bool firstChunk = true;
@@ -638,24 +888,30 @@ bool CheckpointStore::commit(const fs::path &liveChunksDir, const CheckpointPayl
 		outError = "staged generation failed validation: " + validationError;
 		return false;
 	}
+	if (!syncDirForCheckpoint(genDir / "chunks") || !syncDirForCheckpoint(genDir) ||
+		!syncDirForCheckpoint(checkpointsDir(m_worldDir)))
+	{
+		outError = "staged checkpoint directory sync failed";
+		return false;
+	}
 	if (failAt(CheckpointFaultPoint::AfterStagingBeforePublish, outError))
 		return false;
 
+	auto manifestBytes = encodeCheckpointManifest(manifest);
 	// Rotate the previous manifest (fault tolerance). The old committed
 	// manifest stays valid until the new one is published.
-	const fs::path manifestPath = checkpointManifestPath(m_worldDir);
-	if (fs::exists(manifestPath, ec))
+	// Rotate the validated active manifest. After recovery from manifest.prev,
+	// copying a corrupt manifest over it would destroy the only recovery point.
+	if (!m_activeManifest.empty())
 	{
-		std::vector<uint8_t> old;
-		if (readFileInto(manifestPath, old) != SaveStatus::Ok ||
-			!writeFileAtomic(checkpointManifestPrevPath(m_worldDir), old))
+		if (!writeCheckpointFileAtomic(checkpointManifestPrevPath(m_worldDir), m_activeManifest))
 		{
 			outError = "manifest rotation failed";
 			return false;
 		}
 	}
 
-	if (!publishManifest(manifest, outError))
+	if (!publishManifest(manifestBytes, outError))
 		return false;
 
 	// PUBLISHED: the new generation is the authoritative recovery point.
@@ -663,6 +919,10 @@ bool CheckpointStore::commit(const fs::path &liveChunksDir, const CheckpointPayl
 	m_activeGeneration = generation;
 	m_fallbackGeneration = previousActive;
 	m_activePlayerPresent = playerPresent;
+	m_activeWorldId = manifest.worldId;
+	if (manifest.worldId)
+		m_publishedMultiplayerWorldId = manifest.worldId;
+	m_activeManifest = std::move(manifestBytes);
 	m_nextGeneration = generation + 1;
 
 	// Fault point 9: a crash immediately after publication — the commit is

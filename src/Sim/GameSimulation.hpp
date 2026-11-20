@@ -286,6 +286,7 @@ public:
         int seed{0};               // <= 0: stored seed, else a random roll
         std::string worldName;     // empty: transient session (no persistence)
         std::filesystem::path savesRoot{"saves"};
+        bool dedicatedServer{false};
     };
 
     /// Result of finalizePlayerSpawn(): where the host camera should look
@@ -327,6 +328,9 @@ public:
     /// afterwards. Returns kInvalidPlayerId at the population cap or id
     /// exhaustion (nothing is created).
     PlayerId createPlayer();
+    /// Dedicated host lifecycle. Reattach an authenticated persistent actor
+    /// after its old transport scope and simulation state have been retired.
+    bool attachPersistentPlayer(PlayerId id);
 
     /// Remove a session. REFUSES (returns false, nothing changes) for an
     /// invalid/unknown id and for the LOCAL player — the solo-compatibility
@@ -411,8 +415,8 @@ public:
     /// the flush failed (failures are logged, exactly like the historical
     /// Engine shutdown; a failed write stays retryable, never dropped).
     /// A1 scope (issue #246): the capture covers the LOCAL player's state —
-    /// the solo save format is unchanged; multi-player checkpoints are #259.
-    bool savePlayerState(float yaw, float pitch);
+    /// Dedicated checkpoints include the caller's complete remote roster.
+    bool savePlayerState(float yaw, float pitch, const worldsave::PlayerRoster *roster = nullptr);
 
     /// Destructor-only close: resolve stranded edits, capture, flush and
     /// shut down UNCONDITIONALLY (no retry point at destruction). Idempotent;
@@ -568,7 +572,10 @@ public:
     /// and the #230 runner round-trips; savePlayerState writes them through
     /// WorldPersistence. A1 scope (issue #246): solo format unchanged.
     worldsave::InventoryPersistState captureInventoryState() const;
+    worldsave::RemotePlayerState captureRemotePlayerState(PlayerId id) const;
+    bool restoreRemotePlayerState(const worldsave::RemotePlayerState &saved, glm::dvec3 spawnCenter);
     worldsave::ItemsPersistState captureItemsState() const;
+    void reserveItemIds(uint64_t next, uint64_t limit) { m_items.reserveIds(next, limit); }
 
     // --- Voxel interaction commands (headless seam) ----------------------------
     // The graphical host issues edits through RenderWorldBridge (it drains
@@ -958,13 +965,15 @@ private:
     };
 
     bool isGameplayParticipant(const PlayerEntry &entry, LocalAnchorPolicy anchorPolicy) const;
+    worldsave::InventoryPersistState captureInventoryState(PlayerId id) const;
+    void restoreInventoryState(PlayerId id, const worldsave::InventoryPersistState &saved);
 
     /// The local player is always the FIRST entry (created at construction,
     /// never removable, ids monotonic) — O(1) access for the legacy forwards.
     PlayerState &localState() { return m_players.front()->state; }
     const PlayerState &localState() const { return m_players.front()->state; }
-    /// Id-sorted binary search; nullptr for invalid/unknown ids. A retired id
-    /// is never reassigned, so a stale handle can never alias another session.
+    /// Id-sorted binary search; nullptr for invalid/unknown IDs. A persistent
+    /// actor can reattach only from the dedicated host.
     PlayerState *findPlayer(PlayerId id);
     const PlayerState *findPlayer(PlayerId id) const;
     /// Build the bounded snapshot value from a session (shared by the legacy

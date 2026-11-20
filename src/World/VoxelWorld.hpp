@@ -312,13 +312,15 @@ public:
 	bool prepareAndGenerateChunk(WorldChunk *chunk, TerrainGenerator &generator);
 
 	// --- Persistent world lifecycle (issue #180 contracts, unchanged) -----------
-	bool openWorld(const std::string &savesRoot, const std::string &worldName, std::string &outError);
+	bool openWorld(const std::string &savesRoot, const std::string &worldName, std::string &outError,
+				   bool dedicatedServer = false);
 	/// Retryable close: quiesce, capture, flush, shutdown. False keeps the
 	/// persistence OPEN and usable (failed flush / stranded edits).
 	bool closeWorld();
 	/// Capture all dirty loaded records + flush (no close). False on I/O failure.
 	bool flushWorld();
 	bool isWorldOpen() const { return m_persistence != nullptr; }
+	bool dedicatedPersistence() const { return m_dedicatedPersistence; }
 	WorldPersistence *worldPersistence() { return m_persistence.get(); }
 	const WorldPersistence *worldPersistence() const { return m_persistence.get(); }
 	/// Destructor-only close: resolve stranded edits, then capture/flush/
@@ -524,6 +526,8 @@ private:
 
 	// --- Persistence ---------------------------------------------------------------------
 	std::unique_ptr<WorldPersistence> m_persistence;
+	bool m_dedicatedPersistence{false};
+	void releasePersistence();
 
 	// --- Backing pools + record pool ------------------------------------------------------
 	// Declared before the record storage so they outlive every WorldChunk

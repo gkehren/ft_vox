@@ -24,7 +24,7 @@ void require(bool condition, const char *message)
 
 struct Owner : udp::SessionOwner
 {
-	udp::SessionAdmission joinRemote() override
+	udp::SessionAdmission joinRemote(const wire::PlayerKey &) override
 	{
 		const sim::PlayerId player{nextPlayer++};
 		players.emplace(player, 0);
@@ -176,7 +176,7 @@ void testAdmission()
 	Loop loop(2);
 	const auto address = loop.server.address();
 	udp::Socket client(loopback), foreign(loopback);
-	const wire::Packet hello{{}, 0, wire::Hello{1, wire::kVersion, wire::kVersion, wire::localCompatibility()}};
+	const wire::Packet hello{{}, 0, wire::Hello{1, wire::kVersion, wire::kVersion, wire::localCompatibility(), {1}}};
 	send(client, address, hello);
 	loop.step();
 	const auto joined = receive(client, wire::Kind::Welcome);
@@ -261,7 +261,7 @@ void testAdmission()
 
 	// Reuse the same UDP endpoint, then try an authenticated message from
 	// the former generation. It must leave the new player untouched.
-	send(client, address, {{}, 0, wire::Hello{2, wire::kVersion, wire::kVersion, wire::localCompatibility()}});
+	send(client, address, {{}, 0, wire::Hello{2, wire::kVersion, wire::kVersion, wire::localCompatibility(), {2}}});
 	loop.step();
 	const auto rejoined = receive(client, wire::Kind::Welcome);
 	require(rejoined && rejoined->scope.sessionId != scope.sessionId, "same-endpoint rejoin failed");
@@ -310,7 +310,7 @@ void testMovementAdmission()
 	const auto address = loop.server.address();
 	udp::Socket client(loopback);
 	const auto hello = [](uint64_t nonce) {
-		return wire::Packet{{}, 0, wire::Hello{nonce, wire::kVersion, wire::kVersion, wire::localCompatibility()}};
+		return wire::Packet{{}, 0, wire::Hello{nonce, wire::kVersion, wire::kVersion, wire::localCompatibility(), {1}}};
 	};
 	send(client, address, hello(11));
 	loop.step();

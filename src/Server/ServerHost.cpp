@@ -3,8 +3,10 @@
 #include <Network/PlayerInput.hpp>
 #include <World/WorldPersistence.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -171,28 +173,68 @@ ServerHost::ServerHost(HostConfig config) : m_config(std::move(config)) {}
 net::udp::SessionWorld ServerHost::sessionWorld() const
 {
 	const auto world = m_sim->worldSnapshot();
-	return {static_cast<uint32_t>(world.seed), world.generatorVersion};
+	return {static_cast<uint32_t>(world.seed), world.generatorVersion, m_identities->worldId()};
 }
 
-net::udp::SessionAdmission ServerHost::joinRemote()
+net::udp::SessionAdmission ServerHost::joinRemote(const wire::PlayerKey &key)
 {
-	const auto player = m_sim->createPlayer();
-	if (player.valid())
-		m_remotePlayers.try_emplace(player);
-	return {player, m_ticks, m_sim->world()->nextEditId()};
+	udp::SessionAdmission admission{{}, m_ticks, m_sim->world()->nextEditId()};
+	if (key == wire::PlayerKey{})
+		return admission;
+	const auto registered = m_identities->find(key);
+	if (m_remotePlayers.contains(registered) || std::ranges::any_of(m_remotePlayers, [&](const auto &entry) {
+			return entry.second.pendingKey == key;
+		}))
+	{
+		admission.refusal = wire::RejectReason::IdentityInUse;
+		return admission;
+	}
+	if (!registered.valid() && m_identities->size() + std::ranges::count_if(m_remotePlayers, [](const auto &entry) {
+			return entry.second.pendingKey.has_value();
+		}) >= worldsave::kMaxPersistentPlayers)
+	{
+		admission.refusal = wire::RejectReason::ProfileLimit;
+		return admission;
+	}
+	const auto player = registered.valid() ? registered : m_identities->allocatePlayer();
+	if (!m_sim->attachPersistentPlayer(player))
+		return admission;
+	auto &remote = m_remotePlayers.try_emplace(player).first->second;
+	if (!registered.valid())
+		remote.pendingKey = key;
+	admission.player = player;
+	return admission;
 }
 
 bool ServerHost::activateRemote(sim::PlayerId player)
 {
-	return m_remotePlayers.contains(player) &&
-		m_sim->setPlayerInterestRadius(player, m_config.interestRadiusChunks) &&
-		m_sim->trySpawnWalkingPlayerOnSurface(player, m_spawnCenter);
+	const auto remote = m_remotePlayers.find(player);
+	if (remote == m_remotePlayers.end() || !m_sim->setPlayerInterestRadius(player, m_config.interestRadiusChunks))
+		return false;
+	const auto saved = m_savedPlayers.find(player);
+	const bool spawned = saved == m_savedPlayers.end()
+		? m_sim->trySpawnWalkingPlayerOnSurface(player, m_spawnCenter)
+		: m_sim->restoreRemotePlayerState(saved->second, m_spawnCenter);
+	if (!spawned)
+		return false;
+	auto &key = remote->second.pendingKey;
+	if (key && !m_identities->enroll(player, *key))
+	{
+		std::cerr << "[server] could not enroll a player profile\n";
+		m_sim->removePlayer(player);
+		return false;
+	}
+	key.reset();
+	return true;
 }
 
 void ServerHost::leaveRemote(sim::PlayerId player)
 {
-	if (m_remotePlayers.erase(player))
-		m_sim->removePlayer(player);
+	if (!m_remotePlayers.erase(player))
+		return;
+	if (m_identities->contains(player) && m_sim->playerPositioned(player))
+		m_savedPlayers.insert_or_assign(player, m_sim->captureRemotePlayerState(player));
+	m_sim->removePlayer(player);
 }
 
 std::optional<net::wire::ActionResult> ServerHost::receiveRemote(
@@ -459,6 +501,11 @@ void ServerHost::advancePlayers()
 
 bool ServerHost::start(std::string &error)
 {
+	return start(error, nullptr);
+}
+
+bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTests)())
+{
 	if (m_sim)
 	{
 		error = "server is already started";
@@ -472,6 +519,10 @@ bool ServerHost::start(std::string &error)
 	}
 	if (worldConfig.seed == 0 && !WorldPersistence::worldExists(worldConfig.savesRoot, worldConfig.worldName))
 		worldConfig.seed = 42; // reproducible default for new worlds
+	worldConfig.dedicatedServer = true;
+	auto identities = std::make_unique<WorldIdentities>();
+	if (!identities->lock(worldConfig.savesRoot / worldConfig.worldName, error))
+		return false;
 
 	if (m_config.workers > 0)
 		m_workers = std::make_unique<ThreadPool>(m_config.workers);
@@ -480,6 +531,20 @@ bool ServerHost::start(std::string &error)
 	if (!simulation->isWorldOpen())
 	{
 		error = simulation->openWorldError();
+		return false;
+	}
+	auto &persistence = *simulation->worldPersistence();
+	const auto world = simulation->worldSnapshot();
+	const auto checkpointWorldId = persistence.checkpointWorldId();
+	if (!identities->load(world.seed, world.generatorVersion, persistence.publishedMultiplayerWorldId(),
+						  persistence.checkpointMode(), error))
+		return false;
+	worldsave::PlayerRoster roster{identities->worldId(), {}};
+	if (checkpointWorldId && (persistence.readPlayerRoster(roster) != worldsave::SaveStatus::Ok ||
+		roster.worldId != identities->worldId() ||
+		!std::ranges::all_of(roster.players, [&](const auto &player) { return identities->contains(player.id); })))
+	{
+		error = "checkpoint player roster has a missing or mismatched identity";
 		return false;
 	}
 
@@ -491,6 +556,38 @@ bool ServerHost::start(std::string &error)
 		error = "could not initialize player streaming";
 		return false;
 	}
+	uint64_t nextItem;
+	const auto checkpointItemNext = simulation->itemIdHighWater() + 1;
+	if (checkpointWorldId && !identities->includesItemWatermark(checkpointItemNext))
+	{
+		error = "server identity registry predates the checkpoint's item ID watermark";
+		return false;
+	}
+	if (!identities->reserveItems(checkpointItemNext, nextItem, m_itemIdLimit))
+	{
+		error = "could not reserve shared item IDs";
+		return false;
+	}
+	simulation->reserveItemIds(nextItem, m_itemIdLimit);
+	// Seal a baseline before accepting actions. A first crash must recover a
+	// whole generation even when the world came from legacy loose files.
+	if (!checkpointWorldId)
+	{
+		if (beforeInitialCheckpointForTests)
+			beforeInitialCheckpointForTests();
+		if (!simulation->savePlayerState(spawn.yaw, spawn.pitch, &roster))
+		{
+			error = "could not establish the dedicated checkpoint baseline";
+			return false;
+		}
+	}
+	if (!identities->markCheckpointRequired())
+	{
+		error = "could not establish the dedicated checkpoint baseline";
+		return false;
+	}
+	for (auto &player : roster.players)
+		m_savedPlayers.emplace(player.id, std::move(player));
 
 	m_yaw = spawn.yaw;
 	m_pitch = spawn.pitch;
@@ -498,6 +595,7 @@ bool ServerHost::start(std::string &error)
 	m_ticks = 0;
 	m_spawnCenter = center;
 	simulation->world()->observeLogicalEdits();
+	m_identities = std::move(identities);
 	m_sim = std::move(simulation);
 	return true;
 }
@@ -526,6 +624,9 @@ bool ServerHost::step(TerrainTiming terrainTiming, std::string &error)
 		error = "server is not started";
 		return false;
 	}
+	if (m_itemIdLimit != UINT64_MAX && m_sim->itemIdHighWater() + 1 == m_itemIdLimit &&
+		!reserveItemIds(error))
+		return false;
 	advancePlayers();
 	if (!m_sim->advancePlayerStreaming(m_config.streaming))
 	{
@@ -551,6 +652,19 @@ bool ServerHost::step(TerrainTiming terrainTiming, std::string &error)
 	return true;
 }
 
+bool ServerHost::reserveItemIds(std::string &error)
+{
+	uint64_t next, limit;
+	if (!m_identities->reserveItems(m_sim->itemIdHighWater() + 1, next, limit))
+	{
+		error = "could not reserve shared item IDs";
+		return false;
+	}
+	m_itemIdLimit = limit;
+	m_sim->reserveItemIds(next, limit);
+	return true;
+}
+
 bool ServerHost::save(std::string &error)
 {
 	if (!quiesce(error))
@@ -567,9 +681,16 @@ bool ServerHost::save(std::string &error)
 			return false;
 		}
 	}
-	if (!m_sim->savePlayerState(m_yaw, m_pitch))
+	for (const auto &[id, remote] : m_remotePlayers)
+		if (!remote.pendingKey && m_sim->playerPositioned(id))
+			m_savedPlayers.insert_or_assign(id, m_sim->captureRemotePlayerState(id));
+	worldsave::PlayerRoster roster{m_identities->worldId(), {}};
+	roster.players.reserve(m_savedPlayers.size());
+	for (const auto &[id, player] : m_savedPlayers)
+		roster.players.push_back(player);
+	if (!m_sim->savePlayerState(m_yaw, m_pitch, &roster))
 	{
-		error = "save barrier or checkpoint commit failed";
+		error = "save barrier or checkpoint commit failed: " + m_sim->worldPersistence()->status().lastError;
 		return false;
 	}
 	return true;
@@ -581,16 +702,14 @@ bool ServerHost::stop(std::string &error)
 		return true;
 	const bool committed = save(error);
 	m_finalMetrics = metrics();
-	const bool closed = committed && m_sim->world()->closeWorld();
-	if (committed && !closed)
-		error = "persistent world refused close";
-	// Use the existing unconditional recovery path for a refused close. The
-	// caller still receives the explicit failure even if that retry succeeds.
+	// Dedicated teardown cannot publish an implicit solo checkpoint.
 	m_sim->shutdown();
 	m_remotePlayers.clear();
+	m_savedPlayers.clear();
 	m_sim.reset();
 	m_workers.reset();
-	return closed;
+	m_identities.reset();
+	return committed;
 }
 
 HostMetrics ServerHost::metrics() const

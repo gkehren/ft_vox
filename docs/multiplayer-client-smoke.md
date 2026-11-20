@@ -1,5 +1,23 @@
 # Graphical multiplayer smoke
 
+## Wire v4 profile restart
+
+Two Windows Release clients created distinct profiles with
+`--player-profile` and joined a seed-42 dedicated server on loopback.
+The server streamed 111 terrain frames by the first sampled metric
+of the run. After a graceful stop, it bound a different UDP port and
+both fresh graphical processes reused their original profile directories.
+The server logged restoration of actors 2 and 3, streamed 127 terrain
+frames by the corresponding sample and committed generation 3 on stop.
+
+Both clients initialized Vulkan 1.4.357 on an NVIDIA GeForce RTX 4070 Ti.
+With validation enabled, logs showed the existing swapchain and image-view
+messages `VUID-VkSwapchainCreateInfoKHR-imageFormat-01778` and
+`VUID-VkImageViewCreateInfo-usage-02275` recorded in earlier runs below.
+The window-capture helper was unavailable. Server and client logs supplied
+the evidence for this run. The CPU `ServerRestart` fixture verifies the
+resumed pose, hotbar, inventory and world state in greater detail.
+
 ## Terrain and camera correction for #273
 
 Tested client commit `676f9380b1831a45f710b67679eddd0067b976b6`
