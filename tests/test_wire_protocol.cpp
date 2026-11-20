@@ -145,10 +145,12 @@ void testGoldens(const std::array<Fixture, 17> &cases)
     }
     const auto hello = std::get<Hello>(cases[0].packet.payload);
     CHECK_EXPR(!rejectHello(hello, kContent));
-    auto noKey = hello;
-    noKey.playerKey = {};
+    const Packet noKey{{}, 0, Hello{1, kVersion, kVersion, kContent, {}}};
     Datagram invalid;
-    CHECK_EXPR(encode(Endpoint::Client, {{}, 0, noKey}, invalid) == S::InvalidPayload);
+    CHECK_EXPR(encode(Endpoint::Client, noKey, invalid) == S::InvalidPayload);
+    auto zeroKeyBytes = encoded(Endpoint::Client, cases[0].packet);
+    std::ranges::fill(std::span(zeroKeyBytes).last(PlayerKey{}.size()), uint8_t{0});
+    checkMalformed(Endpoint::Client, zeroKeyBytes, S::InvalidPayload);
     auto incompatible = hello;
     incompatible.maxVersion = incompatible.minVersion = 1;
     CHECK_EXPR(rejectHello(incompatible, kContent) == RejectReason::Version);

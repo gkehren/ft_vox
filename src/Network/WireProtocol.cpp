@@ -243,10 +243,11 @@ bool encodeFields(IO &io, T &p)
     using P = std::remove_cv_t<T>;
     if constexpr (std::is_same_v<P, Hello>)
     {
-        return io.fields(p.nonce, p.minVersion, p.maxVersion, p.content.itemSchema,
-                         p.content.catalog, p.content.generator) && io.raw(p.playerKey) &&
-               std::ranges::any_of(p.playerKey, [](uint8_t byte) { return byte != 0; }) &&
-               p.nonce != 0 && validVersions(p.minVersion, p.maxVersion) && p.content.itemSchema != 0;
+        if (!io.fields(p.nonce, p.minVersion, p.maxVersion, p.content.itemSchema,
+                       p.content.catalog, p.content.generator) || !io.raw(p.playerKey))
+            return false;
+        return p.nonce != 0 && validVersions(p.minVersion, p.maxVersion) &&
+               p.content.itemSchema != 0 && p.playerKey != PlayerKey{};
     }
     else if constexpr (std::is_same_v<P, Welcome>)
     {
