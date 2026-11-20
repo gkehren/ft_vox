@@ -2093,6 +2093,65 @@ struct ClosureState
 	bool operator==(const ClosureState &) const = default;
 };
 
+void verifyClosureReopen(const server::HostConfig &config, const ClosureState &saved,
+	const std::array<wire::PlayerKey, 2> &profiles, uint64_t worldId, uint64_t epoch, uint64_t generation)
+{
+	server::ServerHost host(config);
+	std::string error;
+	require(host.start(error), error);
+	require(host.restoredPlayer() && host.metrics().checkpointGeneration == generation,
+		"closure restart did not open the committed generation");
+	ClosureLoop loop(host, profiles.size());
+	Relay firstRelay(loop.transport.address(), 0ms), secondRelay(loop.transport.address(), 0ms);
+	udp::ClientTransport first(firstRelay.socket.address(), profiles[0]), second(secondRelay.socket.address(), profiles[1]);
+	loop.peers = {{&firstRelay, &first}, {&secondRelay, &second}};
+	// Rejoin in reverse order to exercise persistent actor identity.
+	second.connect(loop.now);
+	loop.until([&] { return second.inventory().has_value(); }, "second profile could not resume");
+	first.connect(loop.now);
+	loop.until([&] {
+		for (const auto *client : {&first, &second})
+		{
+			const auto &players = client->playerSnapshots().current;
+			if (!client->inventory() || !players || players->count != saved.players.size() ||
+				!client->itemSnapshots().current || client->chunks().size() != saved.chunks.size())
+				return false;
+		}
+		return true;
+	}, "restarted clients did not receive all committed state");
+	const std::array clients{&first, &second};
+	const auto editWatermark = host.metrics().nextEditId;
+	require(editWatermark > 0, "restart did not initialize an edit watermark for the new epoch");
+	for (size_t i = 0; i < clients.size(); ++i)
+	{
+		const auto &client = *clients[i];
+		require(client.welcome()->worldId == worldId && client.scope()->epoch != epoch &&
+			client.scope()->epoch == first.scope()->epoch && client.welcome()->player == saved.players[i].player,
+			"closure restart reused the epoch or changed the world or actor");
+		require(client.welcome()->nextEditId == editWatermark, "restart advertised an inconsistent edit watermark");
+		for (const auto &[coord, savedGeneration, revision, hash] : saved.chunks)
+		{
+			const auto chunk = client.chunks().find(coord);
+			require(chunk != client.chunks().end() && wire::chunkChecksum(chunk->second.materials) == hash,
+				"closure restart changed committed chunk materials");
+		}
+		require(client.inventory()->slots == saved.inventories[i] && client.inventory()->selected == saved.selected[i],
+			"closure restart changed a private inventory");
+		const auto &players = *client.playerSnapshots().current;
+		for (size_t p = 0; p < saved.players.size(); ++p)
+			require(players.players[p].player == saved.players[p].player &&
+				players.players[p].feet == saved.players[p].feet, "closure restart changed a settled player pose");
+		const auto &drops = *client.itemSnapshots().current;
+		require(drops.count == saved.drops.size() && drops.idHighWater >= saved.itemHighWater,
+			"closure restart changed item population or allocator watermark");
+		for (size_t item = 0; item < saved.drops.size(); ++item)
+			require(drops.items[item].id == saved.drops[item].id && drops.items[item].stack == saved.drops[item].stack,
+				"closure restart changed a committed drop");
+	}
+	loop.transport.stop(host);
+	require(host.stop(error), error);
+}
+
 ClosureState testClosure(const fs::path &root, unsigned workers)
 {
 	using Kind = wire::ActionKind;
@@ -2120,7 +2179,7 @@ ClosureState testClosure(const fs::path &root, unsigned workers)
 	block(target.x, target.y, target.z, STONE);
 	block(8, 246, 10, BEDROCK);
 
-	constexpr wire::PlayerKey firstKey{1}, secondKey{2};
+	constexpr std::array profiles{wire::PlayerKey{1}, wire::PlayerKey{2}};
 	const auto prepare = [&](wire::PlayerKey key, Item item, uint16_t count) {
 		const auto player = host.joinRemote(key).player;
 		require(player.valid() && host.activateRemote(player), "enroll closure profile");
@@ -2129,11 +2188,11 @@ ClosureState testClosure(const fs::path &root, unsigned workers)
 		host.leaveRemote(player);
 		return player;
 	};
-	const auto a = prepare(firstKey, Item::Glass, 1);
-	const auto b = prepare(secondKey, Item::Dirt, 3);
+	const auto a = prepare(profiles[0], Item::Glass, 1);
+	const auto b = prepare(profiles[1], Item::Dirt, 3);
 	ClosureLoop loop(host, 2);
 	Relay firstRelay(loop.transport.address(), 0ms), secondRelay(loop.transport.address(), 0ms);
-	udp::ClientTransport first(firstRelay.socket.address(), firstKey), second(secondRelay.socket.address(), secondKey);
+	udp::ClientTransport first(firstRelay.socket.address(), profiles[0]), second(secondRelay.socket.address(), profiles[1]);
 	loop.peers = {{&firstRelay, &first}, {&secondRelay, &second}};
 	const auto currentTerrain = [&](const udp::ClientTransport &client) {
 		const auto offsets = VoxelWorld::playerInterestOffsets(1);
@@ -2303,9 +2362,9 @@ ClosureState testClosure(const fs::path &root, unsigned workers)
 	const auto authoritativeItems = host.entitySnapshotsRemote(a)->items;
 	for (const auto &[client, player] : {std::pair{&first, a}, std::pair{&second, b}})
 	{
-		const auto &snapshot = *client->itemSnapshots().current;
-		require(snapshot.count == authoritativeItems.count && snapshot.idHighWater == authoritativeItems.idHighWater &&
-			std::equal(snapshot.items.begin(), snapshot.items.begin() + snapshot.count, authoritativeItems.items.begin()),
+		const auto &snapshot = client->itemSnapshots().current;
+		require(snapshot && snapshot->count == authoritativeItems.count && snapshot->idHighWater == authoritativeItems.idHighWater &&
+			std::equal(snapshot->items.begin(), snapshot->items.begin() + snapshot->count, authoritativeItems.items.begin()),
 			"settled drops disagree with the authority");
 		const auto index = player == a ? 0 : 1;
 		const auto inventory = *client->inventory();
@@ -2326,12 +2385,15 @@ ClosureState testClosure(const fs::path &root, unsigned workers)
 		"placed glass, mined stone, or contested dirt failed conservation accounting");
 	state.nextEdit = world.nextEditId();
 	state.itemHighWater = sim.itemIdHighWater();
+	const auto worldId = first.welcome()->worldId;
+	const auto epoch = first.scope()->epoch;
 	second.disconnect(loop.now);
 	loop.until([&] { return second.status() == udp::ClientStatus::Disconnected &&
-		first.latestPlayerSnapshot()->count == 1; }, "departed actor remained visible");
+		first.playerSnapshots().current && first.playerSnapshots().current->count == 1; }, "departed actor remained visible");
 	require(second.chunks().empty() && !second.inventory(), "departed client retained a projection");
 	loop.transport.stop(host);
 	require(host.stop(error), error);
+	verifyClosureReopen(config, state, profiles, worldId, epoch, host.metrics().checkpointGeneration);
 	return state;
 }
 

@@ -23,7 +23,7 @@ graphical compilation. Run physical-GPU tests separately using the
 | Gate | Assertion |
 | --- | --- |
 | `HeadlessMultiplayer` | Existing canonical headless scripts compare state digests across worker counts, player races, residency and checkpoint reopen. |
-| `MultiplayerClosure` | Two independent UDP clients join one production host. Their loaded images match the owner by generation, revision and material hash. They mine and replace a voxel, drop an item, walk into the same pickup range, and collide with an authoritative wall. Inventory comparisons cover the full owner-only snapshot. The conservation ledger accounts for one stone becoming one cobblestone, one glass moving from inventory into the world, and three dirt units remaining across the two inventories after exactly one contested pickup. |
+| `MultiplayerClosure` | Two independent UDP clients join one production host. Their loaded images match the owner by generation, revision and material hash. They mine and replace a voxel, drop an item, walk into the same pickup range, and collide with an authoritative wall. The conservation ledger accounts for one stone becoming one cobblestone, one glass moving from inventory into the world, and three dirt units remaining across the two inventories after exactly one contested pickup. A fresh host of the same checkpoint resumes both actors in reverse join order and verifies their committed poses, owner-only inventories, terrain images and live drop. |
 | `MultiplayerClosure` faults | The relay delays, drops, duplicates and reorders movement traffic. It loses a reliable edit and action result, replays an older edit and item snapshot, corrupts a baseline checksum, and verifies a fresh scope for the same actor. A bounded burst of truncated frames and a retired DropOne leave gameplay unchanged. A valid private action still completes. |
 | `ServerRestart`, `ServerMigration`, `WorldCheckpoint` | Live server processes commit and restart distinct profiles. Both clients agree on the committed chunk image and observe a different uncommitted image before a process kill. Recovery restores the committed bytes and gameplay state with a new epoch and monotonic identity reservations. Migration and checkpoint fixtures also cover manifest publication failure and legacy data. |
 | `MultiplayerSoak` | Eight clients run three join/move/leave waves, settle three disjoint radius-one interests per wave and leave while baselines are busy. Checks cover fair progress, reusable voxel storage, send slots, bounded allocation and checkpoint reopen. |
@@ -34,8 +34,9 @@ slots and full inventories, sorted chunk versions and hashes, live item
 records and allocator/edit watermarks. It also compares each client to
 the same run's authority. Ports, random session credentials, epochs,
 delivery timestamps, local camera prediction, presentation interpolation
-and GPU pixels are outside that equality. A restart can reconstruct the
-same terrain bytes under different chunk revisions in a new epoch.
+and GPU pixels are outside that equality. A restart reconstructs the
+committed terrain under a fresh epoch with its own chunk revisions and
+edit watermark. Profile and item IDs have durable reservations.
 The comparison is within each toolchain. Release runs reported the same
 five chunks, next edit ID 82 and item high-water 2. The central chunk
 hash was `7650601372971455612` on GCC and `13127139472443455587` on MSVC
