@@ -33,6 +33,8 @@ namespace
 
 	constexpr uint64_t kMaxManifestChunks = 1u << 20; // bounded decode
 	constexpr size_t kMaxManifestBytes = 77 + 16 * kMaxManifestChunks;
+	constexpr char kIdentityMagic[4] = {'F', 'T', 'V', 'A'};
+	constexpr uint32_t kIdentityVersion = 1;
 	constexpr char kRosterMagic[4] = {'F', 'T', 'V', 'R'};
 	constexpr size_t kRosterHeaderBytes = 20;
 	constexpr size_t kRosterRecordBytes = 4 + kPlayerStateBytes + kInventoryStateBytes + 24;
@@ -167,6 +169,49 @@ SaveStatus decodeCheckpointManifest(const uint8_t *data, size_t size, Checkpoint
 	std::sort(m.chunks.begin(), m.chunks.end(), chunkRefLess);
 	out = std::move(m);
 	return SaveStatus::Ok;
+}
+
+bool readIdentityRegistryHeader(const std::vector<uint8_t> &bytes, ByteReader &reader, IdentityRegistryHeader &out)
+{
+	if (bytes.size() < kEmptyIdentityRegistryBytes)
+		return false;
+	char magic[sizeof(kIdentityMagic)];
+	reader.raw(magic, sizeof(magic));
+	if (std::memcmp(magic, kIdentityMagic, sizeof(magic)) != 0 || reader.u32() != kIdentityVersion)
+		return false;
+	IdentityRegistryHeader header;
+	header.worldId = reader.u64();
+	header.seed = reader.i32();
+	header.generatorVersion = reader.u32();
+	const auto required = reader.u8();
+	header.checkpointRequired = required != 0;
+	header.actorLimit = reader.u32();
+	header.itemLimit = reader.u64();
+	header.profileCount = reader.u32();
+	if (!header.worldId || header.seed <= 0 || !header.generatorVersion || required > 1 ||
+		header.actorLimit < kFirstRemotePlayerId || !header.itemLimit || header.profileCount > kMaxPersistentPlayers ||
+		(!header.checkpointRequired && (header.actorLimit != kFirstRemotePlayerId || header.profileCount != 0)) ||
+		bytes.size() != kEmptyIdentityRegistryBytes + kIdentityProfileBytes * header.profileCount)
+		return false;
+	const auto payloadSize = bytes.size() - kIdentityChecksumBytes;
+	ByteReader checksum(bytes.data() + payloadSize, kIdentityChecksumBytes);
+	if (checksum.u64() != fnv1a64(bytes.data(), payloadSize) || reader.failed())
+		return false;
+	out = header;
+	return true;
+}
+
+void writeIdentityRegistryHeader(ByteWriter &writer, const IdentityRegistryHeader &header)
+{
+	writer.raw(kIdentityMagic, sizeof(kIdentityMagic));
+	writer.u32(kIdentityVersion);
+	writer.u64(header.worldId);
+	writer.i32(header.seed);
+	writer.u32(header.generatorVersion);
+	writer.u8(header.checkpointRequired ? 1 : 0);
+	writer.u32(header.actorLimit);
+	writer.u64(header.itemLimit);
+	writer.u32(header.profileCount);
 }
 
 std::vector<uint8_t> encodePlayerRoster(const PlayerRoster &roster)
@@ -466,18 +511,40 @@ bool CheckpointStore::validateGeneration(uint64_t generation, const CheckpointMa
 	return true;
 }
 
+SaveStatus CheckpointStore::readPublishedManifest(const fs::path &path, CheckpointManifest &manifest,
+												 std::vector<uint8_t> &bytes)
+{
+	const auto status = readFileInto(path, bytes, kMaxManifestBytes);
+	if (status != SaveStatus::Ok)
+		return status;
+
+	// Only inspect publication paths. A staged v2 manifest or generation
+	// cannot restrict access to the prior solo save.
+	ByteReader header(bytes.data(), bytes.size());
+	char magic[sizeof(kCheckpointManifestMagic)];
+	header.raw(magic, sizeof(magic));
+	const auto version = header.u32();
+	if (!header.failed() && std::memcmp(magic, kCheckpointManifestMagic, sizeof(magic)) == 0 &&
+		version == kCheckpointManifestVersion && !m_publishedMultiplayerWorldId)
+		m_publishedMultiplayerWorldId = 0;
+
+	const auto decoded = decodeCheckpointManifest(bytes.data(), bytes.size(), manifest);
+	if (decoded == SaveStatus::Ok && manifest.worldId)
+		m_publishedMultiplayerWorldId = manifest.worldId;
+	return decoded;
+}
+
 SaveStatus CheckpointStore::tryRecoverManifest(const fs::path &manifestPath, uint64_t &namedGeneration,
 											   std::string &outError)
 {
 	std::vector<uint8_t> bytes;
-	const auto status = readFileInto(manifestPath, bytes, kMaxManifestBytes);
-	if (status != SaveStatus::Ok)
+	CheckpointManifest manifest;
+	const auto decoded = readPublishedManifest(manifestPath, manifest, bytes);
+	if (decoded == SaveStatus::NotFound || decoded == SaveStatus::IoError)
 	{
 		outError = "manifest unreadable";
-		return status;
+		return decoded;
 	}
-	CheckpointManifest manifest;
-	const auto decoded = decodeCheckpointManifest(bytes.data(), bytes.size(), manifest);
 	if (decoded != SaveStatus::Ok)
 	{
 		outError = decoded == SaveStatus::UnsupportedVersion ? "unsupported checkpoint manifest version"
@@ -507,6 +574,7 @@ CheckpointStore::RecoveryStatus CheckpointStore::recover(std::string &outError)
 	m_fallbackGeneration = 0;
 	m_activePlayerPresent = false;
 	m_activeWorldId = 0;
+	m_publishedMultiplayerWorldId.reset();
 	m_activeManifest.clear();
 
 	const fs::path cpDir = checkpointsDir(m_worldDir);
@@ -552,10 +620,8 @@ CheckpointStore::RecoveryStatus CheckpointStore::recover(std::string &outError)
 		{
 			std::vector<uint8_t> bytes;
 			CheckpointManifest m;
-			const auto status = readFileInto(p, bytes, kMaxManifestBytes);
-			const auto decoded = status == SaveStatus::Ok
-				? decodeCheckpointManifest(bytes.data(), bytes.size(), m) : status;
-			if (decoded == SaveStatus::Ok || decoded == SaveStatus::UnsupportedVersion)
+			const auto decoded = readPublishedManifest(p, m, bytes);
+			if (decoded == SaveStatus::Ok || decoded == SaveStatus::UnsupportedVersion || m_publishedMultiplayerWorldId)
 			{
 				outError = "unrecoverable checkpoint corruption: committed generation directories are missing";
 				return RecoveryStatus::Unrecoverable;
@@ -854,6 +920,8 @@ bool CheckpointStore::commit(const fs::path &liveChunksDir, const CheckpointPayl
 	m_fallbackGeneration = previousActive;
 	m_activePlayerPresent = playerPresent;
 	m_activeWorldId = manifest.worldId;
+	if (manifest.worldId)
+		m_publishedMultiplayerWorldId = manifest.worldId;
 	m_activeManifest = std::move(manifestBytes);
 	m_nextGeneration = generation + 1;
 

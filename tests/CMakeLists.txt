@@ -1488,6 +1488,10 @@ add_test(NAME ServerRestart
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_server_restart.py
         --server $<TARGET_FILE:ft_vox_server> --client $<TARGET_FILE:test_server_restart_client>)
 set_tests_properties(ServerRestart PROPERTIES TIMEOUT 300)
+add_test(NAME ServerMigration
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_server_migration.py
+        --server $<TARGET_FILE:ft_vox_server> --client $<TARGET_FILE:test_server_restart_client>)
+set_tests_properties(ServerMigration PROPERTIES TIMEOUT 300)
 
 add_executable(test_udp_transport test_udp_transport.cpp)
 target_link_libraries(test_udp_transport PRIVATE ft_vox_udp ft_vox_core)

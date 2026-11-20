@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
@@ -13,6 +14,10 @@ namespace server
 struct ServerHostProbe
 {
 	static sim::GameSimulation &simulation(ServerHost &host) { return *host.m_sim; }
+	static bool startWithInitialCheckpointHook(ServerHost &host, std::string &error, void (*hook)())
+	{
+		return host.start(error, hook);
+	}
 };
 }
 
@@ -32,6 +37,103 @@ void require(bool condition, std::string_view error)
 {
 	if (!condition)
 		throw std::runtime_error(std::string(error));
+}
+
+server::HostConfig migrationConfig(const std::filesystem::path &root)
+{
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "migration", .savesRoot = root};
+	config.workers = 0;
+	return config;
+}
+
+constexpr glm::dvec3 kMigrationFeet{8.5, 230, 8.5};
+const auto kMigrationEditIndex = WorldChunk::index(8, 228, 8);
+
+void seedMigration(const std::filesystem::path &root)
+{
+	const auto config = migrationConfig(root);
+	sim::GameSimulation solo(nullptr);
+	const auto center = solo.initialize(config.world, kMigrationFeet);
+	require(solo.isWorldOpen(), solo.openWorldError());
+	solo.bootstrapTerrain(center);
+	solo.finalizePlayerSpawn(center);
+	solo.restorePlayerFlight(true, kMigrationFeet);
+	solo.setSelectedBlock(GLASS);
+	require(solo.grantItems(Item::Stone, 4).remainder.isEmpty(), "grant migration fixture stone");
+	require(solo.selectHotbarSlot(5) == items::ItemResult::Ok, "select migration fixture hotbar");
+	require(solo.dropFromSlot(0, 1, {0, 0, 1}) == items::ItemResult::Ok, "drop migration fixture item");
+	require(solo.placeVoxel({8.5f, 228.5f, 8.5f}, GLASS).accepted, "edit migration fixture chunk");
+	require(solo.savePlayerState(15, 5), "commit v1 migration fixture");
+}
+
+void checkMigrationSave(const WorldPersistence &persistence, bool extraItem)
+{
+	PlayerPersistState player;
+	worldsave::InventoryPersistState inventory;
+	worldsave::ItemsPersistState items;
+	require(persistence.readPlayerState(player) && player.x == kMigrationFeet.x && player.y == kMigrationFeet.y &&
+		player.z == kMigrationFeet.z && player.yaw == 15 && player.pitch == 5 &&
+		player.flight && player.selectedBlock == GLASS, "migration changed the solo player state");
+	require(persistence.readInventoryState(inventory) && inventory.selectedSlot == 5 &&
+		inventory.slots[0].itemId == static_cast<uint16_t>(Item::Stone) && inventory.slots[0].count == 3,
+		"migration changed the solo inventory");
+	require(persistence.readItemsState(items) && items.entities.size() == (extraItem ? 2u : 1u) &&
+		items.entities.front().id == 1 && items.entities.front().itemId == static_cast<uint16_t>(Item::Stone) &&
+		items.entities.front().count == 1, "migration lost or duplicated the original drop");
+	const auto edits = persistence.overridesSnapshot(0, 0);
+	require(edits.size() == 1 && edits.front().localIndex == kMigrationEditIndex &&
+		edits.front().blockType == GLASS, "migration lost or changed the solo chunk edit");
+}
+
+void openSoloMigration(const std::filesystem::path &root, bool shouldOpen)
+{
+	const auto config = migrationConfig(root);
+	WorldPersistence persistence;
+	const auto result = persistence.openOrCreate(root, config.world.worldName, config.world.seed,
+		TerrainGenerator::kGeneratorVersion);
+	if (shouldOpen)
+	{
+		require(result.ok, result.error);
+		require(!persistence.checkpointWorldId(), "solo read a multiplayer checkpoint");
+		checkMigrationSave(persistence, false);
+	}
+	else
+		require(!result.ok && result.error.find("requires the dedicated server") != std::string::npos,
+			"unexpected solo open result: " + result.error);
+}
+
+void completeMigration(const std::filesystem::path &root, std::string_view mode)
+{
+	const bool reconnect = mode == "reconnect-migration";
+	server::ServerHost host(migrationConfig(root));
+	std::string error;
+	if (!host.start(error))
+		throw std::runtime_error(error);
+	auto &sim = server::ServerHostProbe::simulation(host);
+	checkMigrationSave(*sim.worldPersistence(), reconnect);
+	if (mode == "publish-migration")
+		return; // retain the v1 fallback directly behind the first v2 generation
+	const auto player = host.joinRemote(kAlice).player;
+	require(player == kAliceId && host.activateRemote(player), "migration did not retain Alice's actor ID");
+	const auto *inventory = sim.inventory(player);
+	if (reconnect)
+	{
+		require(inventory->slots()[0] == items::ItemStack{Item::Dirt, 2}, "reconnect changed Alice's inventory");
+		require(host.joinRemote(kBob).player.value > player.value, "reconnect reused a reserved actor ID");
+		require(sim.itemIdHighWater() > sim.itemEntities().entities().back().id, "restart reused a reserved item ID");
+	}
+	else
+	{
+		require(inventory->slots()[0].isEmpty(), "remote profile inherited legacy solo inventory");
+		require(sim.grantItems(player, Item::Dirt, 3).remainder.isEmpty() &&
+			sim.dropFromSlot(player, 0, 1, {0, 0, 1}) == items::ItemResult::Ok, "create Alice's durable drop");
+	}
+	const auto &drop = sim.itemEntities().entities().back();
+	require(drop.stack == items::ItemStack{Item::Dirt, 1}, "migration changed Alice's durable drop");
+	std::cout << "MIGRATION world=" << host.sessionWorld().id << " item=" << drop.id << '\n';
+	if (!host.stop(error))
+		throw std::runtime_error(error);
 }
 
 void seed(const std::filesystem::path &root)
@@ -234,6 +336,21 @@ int main(int argc, char **argv)
 		const std::string_view mode = argv[1];
 		if (mode == "seed")
 			seed(argv[2]);
+		else if (mode == "seed-migration")
+			seedMigration(argv[2]);
+		else if (mode == "open-solo" || mode == "refuse-solo")
+			openSoloMigration(argv[2], mode == "open-solo");
+		else if (mode == "crash-migration")
+		{
+			server::ServerHost host(migrationConfig(argv[2]));
+			std::string error;
+			const auto reached = server::ServerHostProbe::startWithInitialCheckpointHook(host, error, [] {
+				std::_Exit(77);
+			});
+			throw std::runtime_error(reached ? "initial migration did not reach the crash seam" : error);
+		}
+		else if (mode == "publish-migration" || mode == "complete-migration" || mode == "reconnect-migration")
+			completeMigration(argv[2], mode);
 		else
 			network(mode, static_cast<uint16_t>(std::stoi(argv[2])));
 		return 0;

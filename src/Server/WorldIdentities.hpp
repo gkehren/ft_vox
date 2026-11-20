@@ -1,9 +1,11 @@
 #pragma once
 
 #include <Network/WireProtocol.hpp>
+#include <World/MultiplayerSave.hpp>
 
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 
 namespace server
@@ -20,7 +22,7 @@ public:
 	WorldIdentities &operator=(const WorldIdentities &) = delete;
 
 	bool lock(const std::filesystem::path &worldDir, std::string &error);
-	bool load(int seed, uint32_t generator, uint64_t checkpointWorldId, bool hasCheckpoint,
+	bool load(int seed, uint32_t generator, std::optional<uint64_t> publishedWorldId, bool hasCheckpoint,
 			  std::string &error);
 	bool markCheckpointRequired();
 	uint64_t worldId() const { return m_worldId; }
@@ -43,8 +45,8 @@ private:
 	int m_seed{};
 	uint32_t m_generator{};
 	bool m_checkpointRequired{};
-	uint32_t m_actorLimit{2};
-	uint32_t m_nextActor{2};
+	uint32_t m_actorLimit{worldsave::kFirstRemotePlayerId};
+	uint32_t m_nextActor{worldsave::kFirstRemotePlayerId};
 	uint64_t m_itemLimit{1};
 	std::map<sim::PlayerId, net::wire::PlayerKey> m_profiles;
 };

@@ -501,6 +501,11 @@ void ServerHost::advancePlayers()
 
 bool ServerHost::start(std::string &error)
 {
+	return start(error, nullptr);
+}
+
+bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTests)())
+{
 	if (m_sim)
 	{
 		error = "server is already started";
@@ -531,7 +536,7 @@ bool ServerHost::start(std::string &error)
 	auto &persistence = *simulation->worldPersistence();
 	const auto world = simulation->worldSnapshot();
 	const auto checkpointWorldId = persistence.checkpointWorldId();
-	if (!identities->load(world.seed, world.generatorVersion, checkpointWorldId,
+	if (!identities->load(world.seed, world.generatorVersion, persistence.publishedMultiplayerWorldId(),
 						  persistence.checkpointMode(), error))
 		return false;
 	worldsave::PlayerRoster roster{identities->worldId(), {}};
@@ -566,8 +571,17 @@ bool ServerHost::start(std::string &error)
 	simulation->reserveItemIds(nextItem, m_itemIdLimit);
 	// Seal a baseline before accepting actions. A first crash must recover a
 	// whole generation even when the world came from legacy loose files.
-	if ((!checkpointWorldId && !simulation->savePlayerState(spawn.yaw, spawn.pitch, &roster)) ||
-		!identities->markCheckpointRequired())
+	if (!checkpointWorldId)
+	{
+		if (beforeInitialCheckpointForTests)
+			beforeInitialCheckpointForTests();
+		if (!simulation->savePlayerState(spawn.yaw, spawn.pitch, &roster))
+		{
+			error = "could not establish the dedicated checkpoint baseline";
+			return false;
+		}
+	}
+	if (!identities->markCheckpointRequired())
 	{
 		error = "could not establish the dedicated checkpoint baseline";
 		return false;

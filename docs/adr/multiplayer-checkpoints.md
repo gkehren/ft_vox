@@ -68,14 +68,34 @@ defaults. Corrupt or unreadable legacy payloads prevent server migration.
 The existing solo reader retains its legacy behavior on solo saves.
 
 The server publishes an initial v2 generation before admitting gameplay.
+The registry is written first to reserve IDs. At this point it is unsealed
+and has no actor allocations or profile bindings. If startup fails or the
+process exits before publishing the v2 manifest, solo can still open the
+prior v1 checkpoint or loose save with this validated provisional registry
+present. The provisional registry must match the save's seed and generator.
+It remains on disk so a dedicated retry can keep the same world ID and
+skip the already reserved item range.
+
+The atomic rename to `checkpoints/manifest` commits the migration. A
+temporary manifest and unreferenced generation directories are staging
+data. Once v2 is published, solo refuses the save even if the registry is
+still unsealed. The server seals the registry before accepting gameplay.
+The seal keeps a save dedicated if checkpoint recovery selects its v1
+fallback. A recognizable v2 manifest also requires the existing registry
+even if its payloads fail validation and recovery selects v1. If the
+manifest's world ID can be read, the registry must match it. An unreadable
+registry cannot authorize solo access. A missing or corrupt registry for
+a published v2 save prevents dedicated startup. The server also refuses
+an unsealed registry if the published v2 manifest has lost its world ID.
+
 Graceful stop retires transport and drains terrain, resolves accepted
 deferred edits, flushes chunk overrides and publishes one generation from
 the owner thread. A failed barrier or prepublication write leaves the
 prior manifest authoritative. The shutdown path releases resources
 without an implicit gameplay commit. Recovery validates the current
 generation as a unit and can fall back to the previous valid generation.
-It rejects a missing or corrupt registry for a v2 world, a mismatched
-world or generator, or roster IDs absent from the registry. Unknown
+The server verifies the generator and requires every roster ID to exist
+in the registry. Unknown
 manifest versions refuse the open. Codecs reject unknown fields and
 trailing bytes in the selected version. A roster format change requires
 a manifest version bump. `world.meta` still identifies the seed and
@@ -88,5 +108,6 @@ override checkpoint path. The transaction protects against process failure.
 Power-loss durability follows the existing file and directory sync
 contract. Back up the complete save directory, including the registry,
 while the server is stopped. Use a pre-migration backup to return to an
-older binary or the solo editor. Dedicated v2 commits do not update legacy
-root gameplay files.
+older binary or the solo editor after publishing v2. Recovery assumes one
+writer and at least one surviving record of a completed migration.
+Dedicated v2 commits leave legacy root gameplay files at their prior state.

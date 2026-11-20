@@ -21,6 +21,20 @@ namespace
 {
 using Clock = std::chrono::steady_clock;
 
+bool identityRegistryAllowsSolo(const std::filesystem::path &registry, const worldsave::WorldMeta &meta)
+{
+	std::vector<uint8_t> bytes;
+	const auto status = worldsave::readFileInto(registry, bytes, worldsave::kEmptyIdentityRegistryBytes);
+	if (status == worldsave::SaveStatus::NotFound)
+		return true;
+	if (status != worldsave::SaveStatus::Ok)
+		return false;
+	worldsave::ByteReader reader(bytes.data(), bytes.size());
+	worldsave::IdentityRegistryHeader header;
+	return worldsave::readIdentityRegistryHeader(bytes, reader, header) &&
+		!header.checkpointRequired && header.seed == meta.seed && header.generatorVersion == meta.generatorVersion;
+}
+
 double elapsedMs(Clock::time_point from)
 {
 	return std::chrono::duration<double, std::milli>(Clock::now() - from).count();
@@ -785,14 +799,6 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 		return info;
 	}
 
-	// Interrupted atomic writes are never authoritative. A failure to clean
-	// them is a writable-directory problem: refuse rather than save into it.
-	if (worldsave::cleanTempFiles(chunksDir) != worldsave::SaveStatus::Ok)
-	{
-		info.error = "world '" + name + "' chunk directory could not be cleaned (I/O error)";
-		return info;
-	}
-
 	// Stabilization PR5b (Phase 3): checkpoint recovery selects the
 	// authoritative durable baseline BEFORE the live scan. Legacy mode (no
 	// checkpoints) keeps the historical behavior byte-for-byte. A recovered
@@ -810,12 +816,16 @@ WorldPersistence::OpenInfo WorldPersistence::openOrCreate(const std::filesystem:
 	}
 	const bool checkpointMode =
 		checkpointStatus == worldsave::CheckpointStore::RecoveryStatus::Recovered;
-	std::error_code identityError;
-	const auto identity = std::filesystem::status(worldDir / worldsave::kIdentityFile, identityError);
-	if (!dedicatedServer && (m_checkpoints->activeWorldId() ||
-							 identity.type() != std::filesystem::file_type::not_found))
+	if (!dedicatedServer && (m_checkpoints->publishedMultiplayerWorldId() ||
+							 !identityRegistryAllowsSolo(worldDir / worldsave::kIdentityFile, meta)))
 	{
 		info.error = "world '" + name + "' requires the dedicated server persistence path";
+		return info;
+	}
+	// Clean the live working set only after checking persistence mode.
+	if (worldsave::cleanTempFiles(chunksDir) != worldsave::SaveStatus::Ok)
+	{
+		info.error = "world '" + name + "' chunk directory could not be cleaned (I/O error)";
 		return info;
 	}
 	if (dedicatedServer && !checkpointMode)
@@ -1175,6 +1185,11 @@ uint64_t WorldPersistence::checkpointGeneration() const
 uint64_t WorldPersistence::checkpointWorldId() const
 {
 	return m_checkpoints ? m_checkpoints->activeWorldId() : 0;
+}
+
+std::optional<uint64_t> WorldPersistence::publishedMultiplayerWorldId() const
+{
+	return m_checkpoints ? m_checkpoints->publishedMultiplayerWorldId() : std::nullopt;
 }
 
 worldsave::SaveStatus WorldPersistence::readPlayerRoster(worldsave::PlayerRoster &out) const

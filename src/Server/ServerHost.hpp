@@ -72,6 +72,7 @@ public:
 private:
 	friend struct ServerHostProbe;
 
+	bool start(std::string &error, void (*beforeInitialCheckpointForTests)());
 	bool quiesce(std::string &error);
 	bool save(std::string &error);
 	bool reserveItemIds(std::string &error);

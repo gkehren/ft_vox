@@ -43,6 +43,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -150,6 +151,9 @@ namespace worldsave
 		uint64_t activeGeneration() const { return m_activeGeneration; }
 		bool activePlayerPresent() const { return m_activePlayerPresent; }
 		uint64_t activeWorldId() const { return m_activeWorldId; }
+		/// The published v2 manifest can still require the registry when recovery
+		/// selects a v1 fallback. A present zero means its identity is unreadable.
+		std::optional<uint64_t> publishedMultiplayerWorldId() const { return m_publishedMultiplayerWorldId; }
 		/// The winning generation directory (empty when legacy/inactive).
 		std::filesystem::path activeDir() const;
 		const std::filesystem::path &worldDir() const { return m_worldDir; }
@@ -162,6 +166,8 @@ namespace worldsave
 								std::string &outError) const;
 		SaveStatus tryRecoverManifest(const std::filesystem::path &manifestPath, uint64_t &namedGeneration,
 									  std::string &outError);
+		SaveStatus readPublishedManifest(const std::filesystem::path &path, CheckpointManifest &manifest,
+										 std::vector<uint8_t> &bytes);
 		bool stagePayload(const std::filesystem::path &finalPath, const std::vector<uint8_t> &bytes,
 						  std::string &outError) const;
 		bool publishManifest(const std::vector<uint8_t> &bytes, std::string &outError);
@@ -172,6 +178,7 @@ namespace worldsave
 		uint64_t m_fallbackGeneration{0};
 		bool m_activePlayerPresent{false};
 		uint64_t m_activeWorldId{0};
+		std::optional<uint64_t> m_publishedMultiplayerWorldId;
 		std::vector<uint8_t> m_activeManifest;
 		uint64_t m_nextGeneration{1};
 		CheckpointFaultPoint m_fault{CheckpointFaultPoint::None};

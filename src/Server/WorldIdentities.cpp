@@ -1,11 +1,9 @@
 #include "WorldIdentities.hpp"
 
 #include <Network/UdpSocket.hpp>
-#include <World/MultiplayerSave.hpp>
 #include <World/WorldCheckpoint.hpp>
 
 #include <algorithm>
-#include <cstring>
 #include <set>
 
 #ifdef _WIN32
@@ -23,11 +21,7 @@ namespace
 {
 namespace fs = std::filesystem;
 namespace wire = net::wire;
-constexpr char kMagic[4] = {'F', 'T', 'V', 'A'};
-constexpr uint32_t kVersion = 1;
-constexpr size_t kHeaderBytes = 41;
-constexpr size_t kRecordBytes = 4 + wire::PlayerKey{}.size();
-constexpr size_t kChecksumBytes = 8;
+static_assert(worldsave::kIdentityProfileBytes == 4 + wire::PlayerKey{}.size());
 constexpr uint32_t kActorReservation = 256;
 constexpr uint64_t kItemReservation = 1u << 20;
 }
@@ -77,13 +71,13 @@ bool WorldIdentities::lock(const fs::path &worldDir, std::string &error)
 	return true;
 }
 
-bool WorldIdentities::load(int seed, uint32_t generator, uint64_t checkpointWorldId, bool hasCheckpoint,
+bool WorldIdentities::load(int seed, uint32_t generator, std::optional<uint64_t> publishedWorldId, bool hasCheckpoint,
 						   std::string &error)
 {
 	std::vector<uint8_t> bytes;
 	const auto status = worldsave::readFileInto(m_path, bytes,
-		kHeaderBytes + kRecordBytes * worldsave::kMaxPersistentPlayers + kChecksumBytes);
-	if (status == worldsave::SaveStatus::NotFound && !checkpointWorldId)
+		worldsave::kEmptyIdentityRegistryBytes + worldsave::kIdentityProfileBytes * worldsave::kMaxPersistentPlayers);
+	if (status == worldsave::SaveStatus::NotFound && !publishedWorldId)
 	{
 		m_worldId = net::udp::randomId();
 		m_seed = seed;
@@ -96,9 +90,15 @@ bool WorldIdentities::load(int seed, uint32_t generator, uint64_t checkpointWorl
 		error = "server identity registry missing, corrupt or unsupported";
 		return false;
 	}
+	const auto checkpointWorldId = publishedWorldId.value_or(0);
 	if (m_seed != seed || m_generator != generator || (checkpointWorldId && m_worldId != checkpointWorldId))
 	{
 		error = "server identity registry belongs to another world or generator";
+		return false;
+	}
+	if (publishedWorldId && !checkpointWorldId && !m_checkpointRequired)
+	{
+		error = "unsealed server identity registry cannot be matched to the published multiplayer checkpoint";
 		return false;
 	}
 	if (m_checkpointRequired && !hasCheckpoint)
@@ -112,53 +112,38 @@ bool WorldIdentities::load(int seed, uint32_t generator, uint64_t checkpointWorl
 
 bool WorldIdentities::decode(const std::vector<uint8_t> &bytes)
 {
-	if (bytes.size() < kHeaderBytes + kChecksumBytes)
-		return false;
 	worldsave::ByteReader r(bytes.data(), bytes.size());
-	char magic[sizeof(kMagic)];
-	r.raw(magic, sizeof(magic));
-	if (std::memcmp(magic, kMagic, sizeof(magic)) != 0 || r.u32() != kVersion)
+	worldsave::IdentityRegistryHeader header;
+	if (!worldsave::readIdentityRegistryHeader(bytes, r, header))
 		return false;
-	m_worldId = r.u64();
-	m_seed = r.i32();
-	m_generator = r.u32();
-	const auto required = r.u8();
-	m_checkpointRequired = required != 0;
-	m_actorLimit = r.u32();
-	m_itemLimit = r.u64();
-	const auto count = r.u32();
-	if (!m_worldId || required > 1 || m_actorLimit < 2 || !m_itemLimit ||
-		count > worldsave::kMaxPersistentPlayers ||
-		bytes.size() != kHeaderBytes + kRecordBytes * count + kChecksumBytes)
-		return false;
-	uint32_t previous = 1;
+
+	uint32_t previous = worldsave::kFirstRemotePlayerId - 1;
 	std::set<wire::PlayerKey> keys;
-	for (uint32_t i = 0; i < count; ++i)
+	for (uint32_t i = 0; i < header.profileCount; ++i)
 	{
 		const sim::PlayerId id{r.u32()};
 		wire::PlayerKey key;
 		r.raw(key.data(), key.size());
-		if (id.value <= previous || id.value >= m_actorLimit || key == wire::PlayerKey{} ||
+		if (id.value <= previous || id.value >= header.actorLimit || key == wire::PlayerKey{} ||
 			!keys.insert(key).second)
 			return false;
 		m_profiles.emplace(id, key);
 		previous = id.value;
 	}
-	return r.u64() == worldsave::fnv1a64(bytes.data(), bytes.size() - kChecksumBytes) && !r.failed();
+	m_worldId = header.worldId;
+	m_seed = header.seed;
+	m_generator = header.generatorVersion;
+	m_checkpointRequired = header.checkpointRequired;
+	m_actorLimit = header.actorLimit;
+	m_itemLimit = header.itemLimit;
+	return !r.failed();
 }
 
 bool WorldIdentities::save() const
 {
 	worldsave::ByteWriter w;
-	w.raw(kMagic, sizeof(kMagic));
-	w.u32(kVersion);
-	w.u64(m_worldId);
-	w.i32(m_seed);
-	w.u32(m_generator);
-	w.u8(m_checkpointRequired ? 1 : 0);
-	w.u32(m_actorLimit);
-	w.u64(m_itemLimit);
-	w.u32(static_cast<uint32_t>(m_profiles.size()));
+	worldsave::writeIdentityRegistryHeader(w, {m_worldId, m_seed, m_generator, m_checkpointRequired,
+		m_actorLimit, m_itemLimit, static_cast<uint32_t>(m_profiles.size())});
 	for (const auto &[id, key] : m_profiles)
 	{
 		w.u32(id.value);

@@ -52,6 +52,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <unordered_set>
 #include <stop_token>
@@ -425,6 +426,7 @@ public:
 	bool checkpointMode() const;
 	uint64_t checkpointGeneration() const;
 	uint64_t checkpointWorldId() const;
+	std::optional<uint64_t> publishedMultiplayerWorldId() const;
 	worldsave::SaveStatus readPlayerRoster(worldsave::PlayerRoster &out) const;
 
 	/// Commit a checkpoint from the captured payloads. PRECONDITION: the
