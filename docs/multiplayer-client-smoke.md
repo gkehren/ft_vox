@@ -1,5 +1,10 @@
 # Graphical multiplayer smoke
 
+The [issue #260 closure report](multiplayer-closure.md#physical-gpu-and-remaining-work)
+records the latest physical-GPU dual-client startup, restart and strict
+visual results. Manual keyboard and mouse coverage is tracked in
+[#277](https://github.com/gkehren/ft_vox/issues/277).
+
 ## Wire v4 profile restart
 
 Two Windows Release clients created distinct profiles with

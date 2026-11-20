@@ -70,15 +70,20 @@ def main() -> None:
         require(manifest.read_bytes() == baseline, "uncommitted edits reached the manifest")
 
         log = root / "recover.log"
+        started = time.perf_counter()
         with live_server(command, log) as process:
             ready = wait_for_record(process, log, "ready")
+            recovery_ms = (time.perf_counter() - started) * 1000
             recovered = read_client(client, "recover", ready["port"])
             stop.touch()
             check_exit(process, log, 0, "admin")
+        print(f"Two-player crash recovery: {recovery_ms:.1f} ms from launch to ready", flush=True)
         require(committed["world"] == crashed["world"] == recovered["world"], "world identity changed")
         require(len({committed["epoch"], crashed["epoch"], recovered["epoch"]}) == 3,
                 "transport epoch reused across process restarts")
         require(committed["drop"] == crashed["drop"] == recovered["drop"], "committed drop ID changed")
+        require(committed["chunk_hash"] == recovered["chunk_hash"] != crashed["chunk_hash"],
+                "the recovered terrain image does not match the committed two-client image")
         require(committed["high_water"] < crashed["high_water"] < recovered["high_water"],
                 "item high-water regressed across restart or crash")
         uncheckpointed = crashed["uncheckpointed"]

@@ -1505,6 +1505,10 @@ add_test(NAME WorldReplication COMMAND test_world_replication)
 add_test(NAME VoxelActions COMMAND test_world_replication --actions)
 add_test(NAME EntityReplication COMMAND test_world_replication --entities)
 add_test(NAME WorldReplicationClientTick COMMAND test_world_replication --input-timing)
+add_test(NAME MultiplayerClosure COMMAND test_world_replication --closure)
+add_test(NAME MultiplayerSoak COMMAND test_world_replication --soak)
+set_tests_properties(MultiplayerClosure MultiplayerSoak PROPERTIES TIMEOUT 180 LABELS "multiplayer")
+set_tests_properties(HeadlessMultiplayer ServerRestart ServerMigration WorldCheckpoint PROPERTIES LABELS "multiplayer")
 set_tests_properties(WorldReplication VoxelActions EntityReplication PROPERTIES TIMEOUT 180)
 
 # Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh

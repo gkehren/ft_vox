@@ -1637,3 +1637,31 @@ through `ft_vox_headless` with scripted actor commands and fixed frame
 boundaries. It checks command and digest parity across worker counts and
 recovers a checkpoint captured with a deferred edit.
 [Headless runner guide](headless-runner.md#multiplayer-scripts-issue-249)
+
+## 14. Dedicated authority and client projection (Epic #245)
+
+`ServerHost` owns one simulation and checkpoint store. One tick thread
+consumes scoped player intents in `PlayerId` order. Each 60 Hz tick runs
+two 120 Hz physics substeps per player and one 60 Hz step each for mobs
+and items. World workers publish generation-tagged results through the
+owner. The UDP worker reads and writes bounded transport state and hands
+validated intent to that owner.
+
+In remote mode the Engine derives backing from checked baselines and
+ordered edits. Each baseline is scoped to the transport epoch and chunk
+incarnation. A missing continuation or checksum failure retires the
+projection and rejoins with a new scope. Engine clears the old mesh,
+pose, item and inventory projections at its epoch barrier. Walking
+prediction uses readable replica terrain and server snapshots. Camera
+correction and remote interpolation are presentation state. The server
+applies gameplay changes using its authoritative eye, collision queries,
+chunk revision and the acting player's inventory.
+
+An offline profile retains its actor ID. A server restart restores the
+world, roster and shared drops from a complete generation and issues
+fresh transport credentials. The closure gate repeats the gameplay and
+fault script across generation worker counts, compares authoritative
+records with each client and checks process restart separately. See the
+[server guide](dedicated-server.md), [wire ADR](adr/authoritative-wire-protocol.md),
+[checkpoint ADR](adr/multiplayer-checkpoints.md) and
+[closure evidence](multiplayer-closure.md).

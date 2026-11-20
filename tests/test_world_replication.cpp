@@ -6,6 +6,16 @@
 #include <Server/ServerHost.hpp>
 #include <World/WorldCollisionView.hpp>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
+#else
+#include <sys/resource.h>
+#endif
+
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -16,6 +26,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -2012,6 +2023,492 @@ void testReplicaTerrainCapacity()
 		"a fresh bounded footprint did not recover after overflow");
 }
 
+struct ClosureLoop
+{
+	ClosureLoop(server::ServerHost &host, size_t cap) : host(host), transport(loopback, cap, host.sessionWorld()) {}
+
+	server::ServerHost &host;
+	udp::ServerTransport transport;
+	Time now{}, nextTick{};
+	std::vector<std::pair<Relay *, udp::ClientTransport *>> peers;
+
+	void pump()
+	{
+		for (const auto &[relay, client] : peers)
+			relay->pump(now);
+		transport.poll(now);
+		if (now >= nextTick)
+		{
+			std::string error;
+			transport.serviceOwner(host, host.ticks());
+			require(host.step(server::TerrainTiming::QuiescePerTick, error), error);
+			nextTick += std::chrono::ceil<Time::duration>(std::chrono::duration<double>{server::kTickDt});
+		}
+		transport.poll(now);
+		for (const auto &[relay, client] : peers)
+		{
+			relay->pump(now);
+			client->poll(now);
+		}
+		now += 5ms;
+	}
+
+	template<class Predicate>
+	void until(Predicate ready, const char *error, std::chrono::milliseconds timeout = 12s)
+	{
+		const auto deadline = now + timeout;
+		while (!ready())
+		{
+			require(now < deadline, error);
+			pump();
+		}
+	}
+
+	void advance(std::chrono::milliseconds duration)
+	{
+		const auto deadline = now + duration;
+		until([&] { return now >= deadline; }, "could not advance clock", duration);
+	}
+
+	wire::ActionResult action(udp::ClientTransport &client, wire::Action value)
+	{
+		const auto id = client.sendAction(value, now);
+		require(id.has_value(), "could not queue closure action");
+		std::optional<wire::ActionResult> result;
+		until([&] { return (result = client.takeActionResult()).has_value(); }, "closure action timed out");
+		require(result->actionId == *id && result->operation == value.operation &&
+			result->code == wire::ActionCode::Accepted, "closure action did not apply");
+		return *result;
+	}
+};
+
+struct ClosureState
+{
+	std::vector<std::tuple<Coord, uint64_t, uint64_t, uint64_t>> chunks;
+	std::array<wire::PlayerState, 2> players;
+	std::array<std::array<items::ItemStack, items::kInventorySize>, 2> inventories;
+	std::array<int, 2> selected{};
+	std::vector<wire::ItemState> drops;
+	uint64_t nextEdit{}, itemHighWater{};
+	bool operator==(const ClosureState &) const = default;
+};
+
+ClosureState testClosure(const fs::path &root, unsigned workers)
+{
+	using Kind = wire::ActionKind;
+	using Item = items::ItemId;
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "closure-" + std::to_string(workers), .savesRoot = root};
+	config.workers = workers;
+	config.interestRadiusChunks = 1;
+	server::ServerHost host(config);
+	std::string error;
+	require(host.start(error), error);
+	auto &sim = server::ServerHostProbe::simulation(host);
+	auto &world = *sim.world();
+	const auto block = [&](int x, int y, int z, TextureType material) {
+		require(sim.placeVoxel({x + 0.5f, y + 0.5f, z + 0.5f}, material).accepted, "seed closure arena");
+	};
+	for (int z = 4; z <= 14; ++z)
+	{
+		for (int x = 7; x <= 11; ++x)
+			block(x, 244, z, STONE);
+		block(11, 245, z, STONE);
+		block(11, 246, z, STONE);
+	}
+	constexpr wire::Cell target{8, 9, 246};
+	block(target.x, target.y, target.z, STONE);
+	block(8, 246, 10, BEDROCK);
+
+	constexpr wire::PlayerKey firstKey{1}, secondKey{2};
+	const auto prepare = [&](wire::PlayerKey key, Item item, uint16_t count) {
+		const auto player = host.joinRemote(key).player;
+		require(player.valid() && host.activateRemote(player), "enroll closure profile");
+		sim.setPlayerPosition(player, {8.5, 245, 5.5});
+		require(sim.grantItems(player, item, count).remainder.isEmpty(), "seed private closure inventory");
+		host.leaveRemote(player);
+		return player;
+	};
+	const auto a = prepare(firstKey, Item::Glass, 1);
+	const auto b = prepare(secondKey, Item::Dirt, 3);
+	ClosureLoop loop(host, 2);
+	Relay firstRelay(loop.transport.address(), 0ms), secondRelay(loop.transport.address(), 0ms);
+	udp::ClientTransport first(firstRelay.socket.address(), firstKey), second(secondRelay.socket.address(), secondKey);
+	loop.peers = {{&firstRelay, &first}, {&secondRelay, &second}};
+	const auto currentTerrain = [&](const udp::ClientTransport &client) {
+		const auto offsets = VoxelWorld::playerInterestOffsets(1);
+		return client.chunks().size() == offsets.size() && std::ranges::all_of(offsets, [&](const auto offset) {
+			const auto chunk = client.chunks().find({spawn.x + offset.x, spawn.z + offset.z});
+			const auto version = world.chunkContentVersion({spawn.x + offset.x, 0, spawn.z + offset.z});
+			return chunk != client.chunks().end() && version &&
+				chunk->second.version == wire::ChunkVersion{version->generation, version->revision};
+		});
+	};
+	const auto joined = [&] {
+		const auto &aSnapshot = first.playerSnapshots().current;
+		const auto &bSnapshot = second.playerSnapshots().current;
+		return first.inventory() && second.inventory() && aSnapshot && bSnapshot && aSnapshot->count == 2 &&
+			bSnapshot->count == 2 && currentTerrain(first) && currentTerrain(second);
+	};
+	const auto verifyTerrain = [&] {
+		require(matches(first, world, spawn) && matches(second, world, spawn),
+			"client chunk material hashes disagree with the authority");
+	};
+	first.connect(loop.now);
+	second.connect(loop.now);
+	loop.until(joined, "two clients did not receive shared terrain and private state");
+	verifyTerrain();
+	require(first.welcome()->player == a && second.welcome()->player == b && a < b &&
+		first.scope()->epoch == second.scope()->epoch && first.scope()->sessionId != second.scope()->sessionId,
+		"unexpected two-client identity or scope");
+	require(first.inventory()->slots[0] == items::ItemStack{Item::Glass, 1} &&
+		second.inventory()->slots[0] == items::ItemStack{Item::Dirt, 3}, "private inventory crossed peers");
+	const auto initialEdit = world.nextEditId();
+	const auto initialItem = sim.itemIdHighWater();
+	const auto voxel = [&](Kind operation) {
+		return wire::Action{.operation = operation, .target = target, .expected = first.chunks().at(spawn).version};
+	};
+	firstRelay.dropEdit = true;
+	secondRelay.duplicateEdit = true;
+	firstRelay.dropActionResult = true;
+	require(loop.action(first, voxel(Kind::Break)).editId == initialEdit, "break assigned an unexpected edit ID");
+	loop.until(joined, "break did not converge after edit loss");
+	verifyTerrain();
+	require(firstRelay.oldEdit && firstRelay.droppedActionResult && !secondRelay.duplicateEdit &&
+		sim.itemIdHighWater() == initialItem + 1, "break fault did not exercise exactly-once delivery");
+	require(loop.action(first, voxel(Kind::Place)).editId == initialEdit + 1, "placement assigned an unexpected edit ID");
+	loop.until(joined, "placement did not converge");
+	verifyTerrain();
+	firstRelay.send(*firstRelay.oldEdit);
+	loop.advance(25ms);
+	const auto material = [&](const udp::ClientTransport &c) {
+		return c.chunks().at(spawn).materials[WorldChunk::index(target.x, target.y, target.z)];
+	};
+	require(material(first) == GLASS && material(second) == GLASS && world.nextEditId() == initialEdit + 2,
+		"late break overwrote placement or repeated a mutation");
+
+	const auto amount = [](const auto &slots, Item item) {
+		unsigned count = 0;
+		for (const auto &slot : slots)
+			if (slot.item == item)
+				count += slot.count;
+		return count;
+	};
+	const auto hasDirtDrop = [](const udp::ClientTransport &c) {
+		const auto &snapshot = c.itemSnapshots().current;
+		return snapshot && std::ranges::any_of(std::span(snapshot->items).first(snapshot->count),
+			[](const auto &item) { return item.stack.item == Item::Dirt; });
+	};
+	loop.action(second, {.operation = Kind::DropOne});
+	loop.until([&] { return hasDirtDrop(first) && hasDirtDrop(second); }, "drop is missing from one observer");
+	const auto inFlight = *firstRelay.lastItemSnapshot;
+	// Both actors start together and send the same walking intent in the same
+	// tick. Their bodies can overlap. The shared pickup order is by PlayerId.
+	bool contested = false;
+	for (int i = 0; i < 80 && !contested; ++i)
+	{
+		const wire::Input walk{.intendedTick = host.ticks() + 3, .moveZ = 1.f};
+		require(first.sendInput(walk, loop.now) && second.sendInput(walk, loop.now), "send contested movement");
+		loop.advance(25ms);
+		require(sim.playerFeet(a) == sim.playerFeet(b), "pickup contenders did not share the same trajectory");
+		contested = amount(sim.inventory(a)->slots(), Item::Dirt) == 1;
+	}
+	require(contested && sim.itemIdHighWater() == initialItem + 2, "contested drop was lost or duplicated");
+	loop.until([&] { return !hasDirtDrop(first) && !hasDirtDrop(second); }, "pickup removal did not converge");
+	firstRelay.send(inFlight);
+	firstRelay.send(inFlight);
+	loop.advance(25ms);
+	require(!hasDirtDrop(first), "an out-of-order item snapshot resurrected the drop");
+
+	unsigned inputs{}, snapshots{}, lostInputs{}, lostSnapshots{}, reordered{};
+	Time lastInputDelivery{};
+	firstRelay.duplicateMovement = true;
+	firstRelay.profile = [&](const wire::Packet &packet, bool fromServer, Time at) -> std::optional<std::chrono::milliseconds> {
+		if (!fromServer && std::holds_alternative<wire::Input>(packet.payload))
+		{
+			if (++inputs % 9 == 0)
+			{
+				++lostInputs;
+				return std::nullopt;
+			}
+			const auto delay = inputs % 2 ? 60ms : 5ms;
+			reordered += at + delay < lastInputDelivery;
+			lastInputDelivery = at + delay;
+			return delay;
+		}
+		if (fromServer && std::holds_alternative<wire::PlayerSnapshot>(packet.payload))
+		{
+			++snapshots;
+			if (snapshots % 7 == 0)
+			{
+				++lostSnapshots;
+				return std::nullopt;
+			}
+			// A 75 ms sample arrives after the next 50 ms snapshot.
+			return snapshots % 3 == 0 ? 75ms : 0ms;
+		}
+		return 0ms;
+	};
+	const auto beforeWall = sim.playerFeet(a);
+	double nearWallX{};
+	for (int i = 0; i < 480; ++i)
+	{
+		require(first.sendInput({.intendedTick = host.ticks() + udp::kInputLeadTicks - 1, .moveX = 1.f}, loop.now),
+			"send impaired movement");
+		loop.advance(25ms);
+		if (i == 399)
+			nearWallX = sim.playerFeet(a).x;
+	}
+	firstRelay.profile = {};
+	firstRelay.duplicateMovement = false;
+	loop.advance(500ms);
+	const auto feet = sim.playerFeet(a);
+	require(lostInputs && lostSnapshots && reordered && firstRelay.movementDuplicates,
+		"movement fault profile failed to inject every fault");
+	require(feet.x > beforeWall.x + 2.0 && feet.x > 10.5 && feet.x < 11.0 && feet.y >= 244.99 &&
+		feet.y <= 245.01 && std::abs(feet.x - nearWallX) < 1e-6,
+		"faulted movement did not reach and stop at the authoritative wall, x=" + std::to_string(feet.x) +
+		" y=" + std::to_string(feet.y) + " z=" + std::to_string(feet.z) + " near=" + std::to_string(nearWallX));
+
+	// One bad baseline exercises the full resync path. Replay a retired
+	// DropOne through the same endpoint after the new session is active.
+	const auto retiredScope = *second.scope();
+	const auto retiredAction = *secondRelay.lastAction;
+	secondRelay.corruptFragment = true;
+	second.requestWorldResync(loop.now);
+	loop.until([&] { return joined() && *second.scope() != retiredScope && secondRelay.lastResync ==
+		wire::ResyncReason::Checksum; }, "checksum failure did not recover through a fresh session", 20s);
+	require(second.welcome()->player == b && !secondRelay.corruptFragment, "resync changed the actor or skipped corruption");
+	for (unsigned i = 0; i < 256; ++i)
+	{
+		const std::array<uint8_t, 3> truncated{0, 0, 0};
+		require(secondRelay.socket.send(loop.transport.address(), truncated), "send bounded malformed burst");
+	}
+	secondRelay.sendToServer(retiredAction);
+	loop.advance(500ms);
+	require(sim.itemIdHighWater() == initialItem + 2 && world.nextEditId() == initialEdit + 2,
+		"malformed burst or retired credential mutated the world");
+	loop.action(second, {.operation = Kind::Select, .slot = 1});
+	require(second.inventory()->selected == 1 && first.inventory()->selected == 0,
+		"valid traffic failed after the burst or selection crossed peers");
+	verifyTerrain();
+
+	ClosureState state{};
+	for (const auto &[coord, chunk] : first.chunks())
+		state.chunks.emplace_back(coord, chunk.version.generation, chunk.version.revision, wire::chunkChecksum(chunk.materials));
+	const auto authority = host.snapshotRemote(a);
+	require(authority.count == 2 && first.latestPlayerSnapshot()->players == authority.players &&
+		second.latestPlayerSnapshot()->players == authority.players, "settled wire poses disagree with the authority");
+	std::copy_n(authority.players.begin(), state.players.size(), state.players.begin());
+	const auto authoritativeItems = host.entitySnapshotsRemote(a)->items;
+	for (const auto &[client, player] : {std::pair{&first, a}, std::pair{&second, b}})
+	{
+		const auto &snapshot = *client->itemSnapshots().current;
+		require(snapshot.count == authoritativeItems.count && snapshot.idHighWater == authoritativeItems.idHighWater &&
+			std::equal(snapshot.items.begin(), snapshot.items.begin() + snapshot.count, authoritativeItems.items.begin()),
+			"settled drops disagree with the authority");
+		const auto index = player == a ? 0 : 1;
+		const auto inventory = *client->inventory();
+		state.inventories[index] = inventory.slots;
+		state.selected[index] = inventory.selected;
+		require(inventory == host.inventoryRemote(player), "private replica disagrees with its owner");
+	}
+	state.drops.assign(authoritativeItems.items.begin(), authoritativeItems.items.begin() + authoritativeItems.count);
+	const auto total = [&](Item item) {
+		unsigned count = amount(state.inventories[0], item) + amount(state.inventories[1], item);
+		for (const auto &drop : sim.itemEntities().entities())
+			if (drop.stack.item == item)
+				count += drop.stack.count;
+		return count;
+	};
+	require(total(Item::Dirt) == 3 && amount(state.inventories[0], Item::Dirt) == 1 &&
+		amount(state.inventories[1], Item::Dirt) == 2 && total(Item::Glass) == 0 && total(Item::Cobblestone) == 1,
+		"placed glass, mined stone, or contested dirt failed conservation accounting");
+	state.nextEdit = world.nextEditId();
+	state.itemHighWater = sim.itemIdHighWater();
+	second.disconnect(loop.now);
+	loop.until([&] { return second.status() == udp::ClientStatus::Disconnected &&
+		first.latestPlayerSnapshot()->count == 1; }, "departed actor remained visible");
+	require(second.chunks().empty() && !second.inventory(), "departed client retained a projection");
+	loop.transport.stop(host);
+	require(host.stop(error), error);
+	return state;
+}
+
+struct ProcessUsage
+{
+	double cpuMs{};
+	uint64_t peakRssKiB{};
+};
+
+ProcessUsage processUsage()
+{
+#ifdef _WIN32
+	const auto process = GetCurrentProcess();
+	PROCESS_MEMORY_COUNTERS memory{};
+	FILETIME creation{}, exit{}, kernel{}, user{};
+	require(K32GetProcessMemoryInfo(process, &memory, sizeof(memory)) &&
+		GetProcessTimes(process, &creation, &exit, &kernel, &user), "read process usage");
+	const auto ticks = [](FILETIME time) { return (uint64_t{time.dwHighDateTime} << 32) | time.dwLowDateTime; };
+	return {static_cast<double>(ticks(kernel) + ticks(user)) / 10000, memory.PeakWorkingSetSize / 1024};
+#else
+	rusage usage{};
+	require(getrusage(RUSAGE_SELF, &usage) == 0, "read process usage");
+	const auto ms = [](timeval time) { return static_cast<double>(time.tv_sec) * 1000 + time.tv_usec / 1000.0; };
+	auto rss = static_cast<uint64_t>(usage.ru_maxrss);
+#ifdef __APPLE__
+	rss /= 1024;
+#endif
+	return {ms(usage.ru_utime) + ms(usage.ru_stime), rss};
+#endif
+}
+
+void testMultiplayerSoak(const fs::path &root)
+{
+	constexpr size_t clientCount = 8;
+	constexpr unsigned waves = 3;
+	constexpr unsigned shifts = 3;
+	const size_t interest = VoxelWorld::playerInterestOffsets(1).size();
+	const auto started = udp::ServerTransport::Clock::now();
+	const auto cpuStart = processUsage().cpuMs;
+	server::HostConfig config;
+	config.world = {.seed = 19, .worldName = "soak", .savesRoot = root};
+	config.interestRadiusChunks = 1;
+	config.workers = 2;
+	uint64_t checkpointGeneration{};
+	udp::WorldTraffic traffic;
+	uint64_t baselineAllocations{}, ticks{};
+	size_t peakChunks{}, peakVoxelBlocks{}, peakQueue{}, peakTransfers{}, warmVoxelBlocks{};
+	{
+		server::ServerHost host(config);
+		std::string error;
+		require(host.start(error), error);
+		auto &sim = server::ServerHostProbe::simulation(host);
+		ClosureLoop loop(host, clientCount);
+		std::array<sim::PlayerId, clientCount> actors{};
+		const auto sample = [&] {
+			const auto queue = loop.transport.worldSendQueue();
+			peakQueue = std::max(peakQueue, queue.pending);
+			peakTransfers = std::max(peakTransfers, queue.baselines);
+			peakChunks = std::max(peakChunks, host.metrics().chunks);
+			peakVoxelBlocks = std::max(peakVoxelBlocks, sim.world()->voxelPool().capacity());
+		};
+		const auto until = [&](auto ready, const char *message) {
+			loop.until([&] { sample(); return ready(); }, message, 15s);
+		};
+		for (unsigned wave = 0; wave < waves; ++wave)
+		{
+			std::vector<std::unique_ptr<Relay>> relays;
+			std::vector<std::unique_ptr<udp::ClientTransport>> clients;
+			for (size_t i = 0; i < clientCount; ++i)
+			{
+				auto relay = std::make_unique<Relay>(loop.transport.address(), 0ms);
+				relays.push_back(std::move(relay));
+				wire::PlayerKey key{};
+				key[0] = static_cast<uint8_t>(i + 1);
+				clients.push_back(std::make_unique<udp::ClientTransport>(relays.back()->socket.address(), key));
+				loop.peers.emplace_back(relays.back().get(), clients.back().get());
+				clients.back()->connect(loop.now);
+			}
+			until([&] { return std::ranges::all_of(clients, [](const auto &c) { return c->inventory().has_value(); }); },
+				"soak join did not publish all private inventories");
+			for (size_t i = 0; i < clientCount; ++i)
+			{
+				const auto player = clients[i]->welcome()->player;
+				if (wave == 0)
+					actors[i] = player;
+				require(player == actors[i] && std::ranges::all_of(clients[i]->inventory()->slots, &items::ItemStack::isEmpty),
+					"soak reconnect changed identity or inventory");
+			}
+			for (unsigned shift = 0; shift < shifts; ++shift)
+			{
+				// Move authority-owned observers far enough to force disjoint
+				// interests quickly. Closure covers user-driven walking.
+				std::array<Coord, clientCount> centers{};
+				for (size_t i = 0; i < clientCount; ++i)
+				{
+					const auto x = 4 * static_cast<int>(i) + 4;
+					const auto z = 4 * static_cast<int>(shift + 1);
+					centers[i] = {x, z};
+					sim.restorePlayerFlight(actors[i], true, {x * 16.0 + 8.5, 245, z * 16.0 + 8.5});
+				}
+				until([&] {
+					for (size_t i = 0; i < clientCount; ++i)
+					{
+						const auto &chunks = clients[i]->chunks();
+						if (chunks.size() != interest || !chunks.contains(centers[i]) ||
+						    !std::ranges::all_of(VoxelWorld::playerInterestOffsets(1), [&](const auto offset) {
+								return chunks.contains({centers[i].x + offset.x, centers[i].z + offset.z});
+						    }))
+							return false;
+					}
+					return true;
+				}, "soak client retained old chunks or starved waiting for new interest");
+			}
+			// Start another interest change, then leave with sends still busy.
+			for (size_t i = 0; i < clientCount; ++i)
+				sim.restorePlayerFlight(actors[i], true, {i * 64.0 + 8.5, 245, -55.5});
+			until([&] { return loop.transport.worldSendQueue().baselines > 0; }, "soak did not stage a baseline");
+			for (const auto &client : clients)
+				client->disconnect(loop.now);
+			until([&] {
+				return host.metrics().players == 1 && host.metrics().chunks <= interest &&
+					loop.transport.worldSendQueue().pending == 0 &&
+					std::ranges::all_of(clients, [](const auto &c) {
+						return c->status() == udp::ClientStatus::Disconnected && c->chunks().empty();
+					});
+			}, "soak leave did not drain sends, players and chunk residency");
+			loop.peers.clear();
+			if (wave == 0)
+				warmVoxelBlocks = peakVoxelBlocks;
+		}
+		const auto queue = loop.transport.worldSendQueue();
+		baselineAllocations = queue.baselinesQueued;
+		const auto residentBudget = (clientCount + 1) * interest + config.streaming.loads;
+		require(peakChunks <= residentBudget && peakVoxelBlocks <= residentBudget &&
+			peakVoxelBlocks <= warmVoxelBlocks + config.streaming.generations,
+			"soak residency or voxel allocation exceeded the fixture budget");
+		require(peakQueue > 0 && peakQueue <= clientCount && peakTransfers > 0 &&
+			peakTransfers <= udp::kMaxConcurrentChunkTransfers && queue.baselines == 0,
+			"soak world send queue violated its bounds");
+		const auto expectedBaselines = clientCount * shifts * interest * waves;
+		require(baselineAllocations >= expectedBaselines &&
+			baselineAllocations <= expectedBaselines + clientCount * interest * 2 * waves,
+			"soak baseline allocations exceeded the warmup and early-disconnect allowance");
+		ticks = host.ticks();
+		traffic = loop.transport.worldTraffic();
+		loop.transport.stop(host);
+		require(host.stop(error), error);
+		checkpointGeneration = host.metrics().checkpointGeneration;
+	}
+	const auto checkpoint = root / "soak" / "checkpoints";
+	const auto generation = checkpoint / ("generation-" + std::to_string(checkpointGeneration));
+	uintmax_t checkpointBytes = fs::file_size(checkpoint / "manifest");
+	for (const auto &entry : fs::recursive_directory_iterator(generation))
+		if (entry.is_regular_file())
+			checkpointBytes += entry.file_size();
+	require(checkpointBytes > 0 && checkpointBytes < 1024 * 1024, "soak empty-world checkpoint grew beyond 1 MiB");
+	server::ServerHost reopened(config);
+	std::string error;
+	const auto restartStarted = udp::ServerTransport::Clock::now();
+	require(reopened.start(error), error);
+	const auto restarted = udp::ServerTransport::Clock::now();
+	require(reopened.restoredPlayer() && reopened.metrics().checkpointGeneration == checkpointGeneration,
+		"soak restart did not load the committed generation");
+	require(reopened.stop(error), error);
+	const auto finished = udp::ServerTransport::Clock::now();
+	const auto usage = processUsage();
+	std::cout << "SOAK clients=" << clientCount << " waves=" << waves << " ticks=" << ticks
+		<< " peak_chunks=" << peakChunks << " voxel_blocks=" << peakVoxelBlocks
+		<< " voxel_bytes=" << peakVoxelBlocks * sizeof(VoxelStorage) << " peak_world_sends=" << peakQueue
+		<< " peak_baselines=" << peakTransfers << " baseline_allocations=" << baselineAllocations
+		<< " world_tx_bytes=" << traffic.bytes << " retransmits=" << traffic.retransmits
+		<< " checkpoint_bytes=" << checkpointBytes
+		<< " restart_ms=" << std::chrono::duration<double, std::milli>(restarted - restartStarted).count()
+		<< " wall_ms=" << std::chrono::duration<double, std::milli>(finished - started).count()
+		<< " cpu_ms=" << usage.cpuMs - cpuStart << " peak_rss_kib=" << usage.peakRssKiB << '\n';
+}
+
 void testThreadedDelivery(const fs::path &root)
 {
 	server::HostConfig config;
@@ -2089,6 +2586,17 @@ int main(int argc, char **argv)
 				testDelayedInput(root, delay, false);
 			testDelayedInput(root, 40ms, true);
 		}
+		else if (argc == 2 && std::string_view(argv[1]) == "--closure")
+		{
+			const auto sync = testClosure(root, 0);
+			const auto async = testClosure(root, 2);
+			require(sync == async, "repeated closure runs differed in authoritative state");
+			std::cout << "CLOSURE chunks=" << sync.chunks.size() << " center_hash=" << std::get<3>(sync.chunks[2])
+				<< " next_edit=" << sync.nextEdit << " items=" << sync.drops.size()
+				<< " item_high_water=" << sync.itemHighWater << '\n';
+		}
+		else if (argc == 2 && std::string_view(argv[1]) == "--soak")
+			testMultiplayerSoak(root);
 		else
 		{
 			testRenderBacking();

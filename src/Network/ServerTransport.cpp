@@ -611,6 +611,7 @@ struct ServerTransport::Impl
 						throw std::logic_error("chunk baseline produced without a transfer slot");
 					box.baselineBusy = true;
 					++activeBaselines;
+					++baselinesQueued;
 					firstWorldPeer = (slot + 1) % mailboxes.size();
 				}
 				box.worldUpdate = std::move(worldUpdate);
@@ -632,6 +633,7 @@ struct ServerTransport::Impl
 	uint64_t ownerTick{}; // published and read under mutex
 	size_t firstPeer{}, firstWorldPeer{};
 	size_t activeBaselines{}; // shared under mutex
+	uint64_t baselinesQueued{}; // shared under mutex
 	std::mutex mutex;
 	WorldTraffic worldTraffic; // lifetime totals, shared under mutex
 	std::exception_ptr error;
@@ -658,6 +660,15 @@ std::optional<WorldTraffic> ServerTransport::worldTraffic(sim::PlayerId player) 
 		return box.active && !box.closing && box.admission->player == player;
 	});
 	return found == m_impl->mailboxes.end() ? std::nullopt : std::optional{found->worldTraffic};
+}
+
+WorldSendQueue ServerTransport::worldSendQueue() const
+{
+	std::lock_guard lock(m_impl->mutex);
+	const auto pending = std::ranges::count_if(m_impl->mailboxes, [](const Mailbox &box) {
+		return !box.closing && box.worldBusy;
+	});
+	return {static_cast<size_t>(pending), m_impl->activeBaselines, m_impl->baselinesQueued};
 }
 
 void ServerTransport::start()

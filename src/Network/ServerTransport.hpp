@@ -58,6 +58,12 @@ struct WorldTraffic
 	uint64_t bytes{}, frames{}, retransmits{}, resyncs{};
 };
 
+struct WorldSendQueue
+{
+	size_t pending{}, baselines{};
+	uint64_t baselinesQueued{};
+};
+
 struct EntitySnapshots
 {
 	wire::ItemSnapshot items;
@@ -89,6 +95,8 @@ public:
 	Address address() const;
 	WorldTraffic worldTraffic() const;
 	std::optional<WorldTraffic> worldTraffic(sim::PlayerId player) const;
+	// Logical world sends staged or in flight, excluding kernel socket buffers.
+	WorldSendQueue worldSendQueue() const;
 
 	// Production runs poll on its own worker. Tests may pump the same IO
 	// implementation with an injected monotonic clock instead of starting it.
