@@ -51,6 +51,7 @@ void ItemEntitySystem::reset()
     m_entities.clear();
     m_events.clear();
     m_nextId = 1;
+    m_idLimit = kMaxNextEntityId;
     m_dropped = 0;
     m_droppedEvents = 0;
     m_accumulator = 0;
@@ -75,11 +76,19 @@ void ItemEntitySystem::restore(uint64_t nextEntityId, const std::vector<ItemEnti
     for (ItemEntity &e : m_entities)
         e.previous = e.body.position; // no interpolation jump on frame one
     m_nextId = nextEntityId;
+    m_idLimit = kMaxNextEntityId;
     m_events.clear();
     m_dropped = 0;
     m_droppedEvents = 0;
     m_accumulator = 0;
     m_queries = {};
+}
+
+void ItemEntitySystem::reserveIds(uint64_t next, uint64_t limit)
+{
+    assert(m_nextId <= next && next <= limit);
+    m_nextId = next;
+    m_idLimit = limit;
 }
 
 // ---------------------------------------------------------------------------

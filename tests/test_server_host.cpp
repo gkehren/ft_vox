@@ -117,7 +117,8 @@ void testHost(const fs::path &root)
 	CHECK_EXPR(reopened.restoredPlayer() && reopened.metrics().seed == 19);
 	auto &restored = server::ServerHostProbe::simulation(reopened);
 	CHECK_EXPR(restored.inventory().slots()[0].count == 2);
-	CHECK_EXPR(restored.itemIdHighWater() == 1);
+	CHECK_EXPR(restored.itemIdHighWater() > 1 && restored.itemEntities().size() == 1 &&
+			   restored.itemEntities().entities().front().id == 1);
 	for (int i = 0; i < 4; ++i)
 		CHECK(reopened.step(step, error), error);
 	CHECK_EXPR(sample(*restored.world(), remote) == GLASS);
@@ -132,7 +133,7 @@ void testHost(const fs::path &root)
 	restored.worldPersistence()->setWriteTmpFnForTests(
 		[](const auto &, int32_t, int32_t, const auto &, auto &) { return worldsave::SaveStatus::IoError; });
 	CHECK_EXPR(!reopened.stop(error));
-	CHECK_EXPR(error == "save barrier or checkpoint commit failed");
+	CHECK_EXPR(error.starts_with("save barrier or checkpoint commit failed"));
 	CHECK_EXPR(readBytes(manifest) == before);
 
 	server::ServerHost recovered(config);
@@ -378,7 +379,7 @@ void testMovement(const fs::path &root)
 	first.poll(now);
 	boundary();
 	boundary();
-	CHECK_EXPR(first.welcome() && first.welcome()->player != players[0]);
+	CHECK_EXPR(first.welcome() && first.welcome()->player == players[0]);
 	CHECK_EXPR(first.scope() && first.scope()->epoch == originalScope.epoch && *first.scope() != originalScope);
 	CHECK_EXPR(first.latestPlayerSnapshot() && first.latestPlayerSnapshot()->lastProcessedInput == 0);
 

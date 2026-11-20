@@ -213,7 +213,11 @@ class ItemEntitySystem
     /// BEFORE mutating inventory/world state so a refused spawn never
     /// consumes items or silently discards a block drop. The population cap
     /// is independent: overflow despawn still applies while ids remain.
-    bool idsExhausted() const { return m_nextId >= kMaxNextEntityId; }
+    bool idsExhausted() const { return m_nextId >= m_idLimit; }
+
+    // The server reserves ranges durably before exposing IDs to clients.
+    // Advancing the allocator leaves existing entities and events intact.
+    void reserveIds(uint64_t next, uint64_t limit);
 
     // --- Spawn seams (facade commands + deterministic fixtures) ---------------
     // Ids are assigned at CALL order — command/tick order is the deterministic
@@ -290,6 +294,7 @@ class ItemEntitySystem
     std::vector<ItemEntity> m_entities; // id-sorted by construction
     std::deque<ItemEntityEvent> m_events;
     uint64_t m_nextId{1};
+    uint64_t m_idLimit{kMaxNextEntityId};
     uint64_t m_dropped{0};
     uint64_t m_droppedEvents{0};
     double m_accumulator{0};

@@ -2,6 +2,7 @@
 
 #include <Sim/GameSimulation.hpp>
 #include <Network/ServerTransport.hpp>
+#include <Server/WorldIdentities.hpp>
 
 #include <cstdint>
 #include <deque>
@@ -57,7 +58,7 @@ public:
 	uint64_t ticks() const { return m_ticks; }
 	bool restoredPlayer() const { return m_restoredPlayer; }
 	net::udp::SessionWorld sessionWorld() const;
-	net::udp::SessionAdmission joinRemote() override;
+	net::udp::SessionAdmission joinRemote(const net::wire::PlayerKey &key = net::udp::randomPlayerKey()) override;
 	bool activateRemote(sim::PlayerId player) override;
 	void leaveRemote(sim::PlayerId player) override;
 	std::optional<net::wire::ActionResult> receiveRemote(
@@ -73,6 +74,7 @@ private:
 
 	bool quiesce(std::string &error);
 	bool save(std::string &error);
+	bool reserveItemIds(std::string &error);
 	void advancePlayers();
 	void distributeWorldEdits();
 	net::wire::ActionResult applyAction(sim::PlayerId player, const net::wire::Action &action);
@@ -87,13 +89,17 @@ private:
 		std::deque<net::wire::WorldEdit> edits;
 		uint64_t nextTransferId{1};
 		bool worldGap{};
+		std::optional<net::wire::PlayerKey> pendingKey;
 	};
 
 	HostConfig m_config;
+	std::unique_ptr<WorldIdentities> m_identities;
 	// Destruction is reversed: drain and destroy the world before its pool.
 	std::unique_ptr<ThreadPool> m_workers;
 	std::unique_ptr<sim::GameSimulation> m_sim;
 	std::map<sim::PlayerId, RemotePlayer> m_remotePlayers;
+	std::map<sim::PlayerId, worldsave::RemotePlayerState> m_savedPlayers;
+	uint64_t m_itemIdLimit{1};
 	glm::dvec3 m_spawnCenter{};
 	std::vector<WorldEvent> m_worldEvents;
 	std::vector<LogicalVoxelEdit> m_logicalEdits;

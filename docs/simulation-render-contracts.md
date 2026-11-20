@@ -1313,15 +1313,17 @@ registry ordinals. Semantics mirror the established item-id discipline:
 - **Invalid:** `0` (`kInvalidPlayerId`) is never assigned; default-constructed
   handles are invalid and every per-player API answers a safe refusal/no-op.
 - **Allocation:** monotonic from 1, assigned at `createPlayer()` call order.
-  **Never reused** for the lifetime of the `GameSimulation` instance —
-  `removePlayer()` retires an id permanently.
+  The generic allocator never reuses an ID. The dedicated host can
+  reattach a persistent ID to its original player after authenticating
+  a reconnect and retiring the previous session.
 - **Epoch/reload:** `initialize()`/`reload()` are world-epoch boundaries. They
   reset the shared populations and **every session's inventory**, but player
   **sessions survive** (bodies carry over until the host respawns them — the
   historical solo contract) and the id allocator **never rewinds**. A handle
   therefore addresses the same session across epochs, and a retired or
-  never-allocated handle can never alias another player's state. Cross-session
-  identity persistence (reconnect) is Phase E (#259), not this contract.
+  never-allocated handle can never alias another player's state. See the
+  [multiplayer checkpoint ADR](adr/multiplayer-checkpoints.md) for cross-session
+  identity.
 - **Exhaustion:** largest assignable id is `kMaxPlayerId`; the allocator rests
   at `kMaxNextPlayerId` and `createPlayer()` refuses with `kInvalidPlayerId`
   instead of wrapping. Population is bounded by `kMaxPlayers` (256) — a
@@ -1384,7 +1386,8 @@ To keep the PR reviewable and solo bit-identical, these still act for the
   interest in §13.
 - The solo save format (`player.state` / `inventory.state`) captures the local
   player only; the shared item population + allocator high-water persist as
-  before → multi-player checkpoints/reconnect are **#259 (E1)**.
+  before. The [dedicated checkpoint](adr/multiplayer-checkpoints.md) carries a
+  separate roster for remote players.
 
 No sockets, no ECS, no renderer refactor and no save-format migration are part
 of A1. `ft_vox_core` pulls in no network types.
@@ -1532,7 +1535,8 @@ boundary, so contention resolves in **command call order**:
   exhaustion and inventory. Out-of-bounds cells answer `WorldRejected`,
   out-of-range slots `InvalidSlot`.
 - A3 adds multi-observer chunk residency in §13.
-- The solo save format captures the local player only → **#259 (E1)**.
+- The solo save format captures the local player. Dedicated saves use the
+  [multiplayer checkpoint format](adr/multiplayer-checkpoints.md).
 
 No sockets, no ECS, no renderer refactor and no save-format migration are part
 of A2. `ft_vox_core` pulls in no network types.

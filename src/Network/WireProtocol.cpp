@@ -143,7 +143,7 @@ private:
 };
 
 constexpr std::array kPolicies{
-    Policy{Direction::ClientToServer, Lane::Handshake, 30, 2, 2},   // Hello
+    Policy{Direction::ClientToServer, Lane::Handshake, 62, 2, 2},   // Hello
     Policy{Direction::ServerToClient, Lane::Handshake, 62, 2, 2},   // Welcome
     Policy{Direction::ServerToClient, Lane::Handshake, 13, 2, 2},   // Reject
     Policy{Direction::ClientToServer, Lane::Fresh, 17, 60, 8},      // Input
@@ -244,7 +244,8 @@ bool encodeFields(IO &io, T &p)
     if constexpr (std::is_same_v<P, Hello>)
     {
         return io.fields(p.nonce, p.minVersion, p.maxVersion, p.content.itemSchema,
-                         p.content.catalog, p.content.generator) &&
+                         p.content.catalog, p.content.generator) && io.raw(p.playerKey) &&
+               std::ranges::any_of(p.playerKey, [](uint8_t byte) { return byte != 0; }) &&
                p.nonce != 0 && validVersions(p.minVersion, p.maxVersion) && p.content.itemSchema != 0;
     }
     else if constexpr (std::is_same_v<P, Welcome>)
@@ -258,7 +259,7 @@ bool encodeFields(IO &io, T &p)
     else if constexpr (std::is_same_v<P, Reject>)
     {
         return io.fields(p.nonce, p.reason, p.minVersion, p.maxVersion) && p.nonce != 0 &&
-               inRange(p.reason, RejectReason::Version, RejectReason::Unavailable) &&
+               inRange(p.reason, RejectReason::Version, RejectReason::ProfileLimit) &&
                validVersions(p.minVersion, p.maxVersion);
     }
     else if constexpr (std::is_same_v<P, Input>)

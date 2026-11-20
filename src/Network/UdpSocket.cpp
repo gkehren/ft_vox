@@ -93,27 +93,46 @@ Address parseAddress(std::string_view ipv4, uint16_t port)
 	return {ntohl(address.s_addr), port};
 }
 
+namespace
+{
+void randomBytes(std::span<uint8_t> bytes)
+{
+#ifdef _WIN32
+	if (BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+	                    BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+		throw std::runtime_error("BCryptGenRandom failed");
+#else
+	auto *source = std::fopen("/dev/urandom", "rb");
+	if (!source)
+		fail(errno, "open /dev/urandom");
+	const auto count = std::fread(bytes.data(), 1, bytes.size(), source);
+	std::fclose(source);
+	if (count != bytes.size())
+		throw std::runtime_error("short read from /dev/urandom");
+#endif
+}
+}
+
 uint64_t randomId()
 {
 	uint64_t value{};
 	do
 	{
-#ifdef _WIN32
-		if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&value), sizeof(value),
-		                    BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
-			throw std::runtime_error("BCryptGenRandom failed");
-#else
-		auto *source = std::fopen("/dev/urandom", "rb");
-		if (!source)
-			fail(errno, "open /dev/urandom");
-		const auto count = std::fread(&value, sizeof(value), 1, source);
-		std::fclose(source);
-		if (count != 1)
-			throw std::runtime_error("short read from /dev/urandom");
-#endif
+		randomBytes({reinterpret_cast<uint8_t *>(&value), sizeof(value)});
 	}
 	while (value == 0);
 	return value;
+}
+
+wire::PlayerKey randomPlayerKey()
+{
+	wire::PlayerKey key;
+	do
+	{
+		randomBytes(key);
+	}
+	while (key == wire::PlayerKey{});
+	return key;
 }
 
 Socket::Socket(Address bindAddress)

@@ -17,6 +17,7 @@ struct Mailbox
 	bool closing{}, confirmed{}, active{}, spawnFailed{};
 	uint64_t inputClosedThrough{};
 	std::optional<SessionAdmission> admission;
+	wire::PlayerKey playerKey{};
 	SessionIntents intents;
 	std::optional<wire::ActionResult> result;
 	std::optional<wire::Inventory> inventory;
@@ -61,6 +62,7 @@ struct OwnerInbox
 {
 	size_t slot{};
 	std::optional<SessionAdmission> admission;
+	wire::PlayerKey playerKey{};
 	SessionIntents intents;
 	bool closing{}, confirmed{}, active{}, spawnFailed{};
 };
@@ -81,7 +83,8 @@ size_t checkedCap(size_t cap)
 struct ServerTransport::Impl
 {
 	Impl(Address bind, size_t cap, SessionWorld world)
-		: socket(bind), world(world), peers(checkedCap(cap)), mailboxes(peers.size())
+		: socket(bind), world(world), worldId(world.id ? world.id : randomId()),
+		  peers(checkedCap(cap)), mailboxes(peers.size())
 	{
 		ownerInbox.reserve(peers.size());
 	}
@@ -169,6 +172,7 @@ struct ServerTransport::Impl
 		const auto slot = static_cast<size_t>(available - peers.begin());
 		std::lock_guard lock(mutex);
 		mailboxes[slot].generation = ++generation;
+		mailboxes[slot].playerKey = msg.playerKey;
 	}
 
 	void receive(const Received &frame, Time now)
@@ -289,7 +293,7 @@ struct ServerTransport::Impl
 			if (!admission->player.valid())
 			{
 				sender(peer).send(now, {{}, 0, wire::Reject{
-					peer.nonce, wire::RejectReason::Unavailable, wire::kVersion, wire::kVersion}});
+					peer.nonce, admission->refusal, wire::kVersion, wire::kVersion}});
 				return close(slot);
 			}
 			peer.welcome = wire::Welcome{peer.nonce, worldId, admission->player, world.seed,
@@ -489,27 +493,31 @@ struct ServerTransport::Impl
 					continue;
 				if (discardInputs)
 					box.intents.inputs = {};
-				ownerInbox.push_back({slot, box.admission, std::exchange(box.intents, {}),
+				ownerInbox.push_back({slot, box.admission, std::exchange(box.playerKey, {}),
+					std::exchange(box.intents, {}),
 					box.closing, box.confirmed, box.active, box.spawnFailed});
 				box.inputClosedThrough = completedTick + 1;
 			}
 		}
 		// Freeze one tick's inbox before resolving joins, departures and
 		// actions. Slot reuse must not decide which actor wins a conflict.
-		for (auto &[slot, admission, intents, closing, confirmed, active, spawnFailed] : ownerInbox)
+		for (const auto &work : ownerInbox)
 		{
-			auto &box = mailboxes[slot];
-			if (closing)
-			{
-				if (admission && admission->player.valid())
-					owner.leaveRemote(admission->player);
-				std::lock_guard lock(mutex);
-				box = {};
+			if (!work.closing)
 				continue;
-			}
+			if (work.admission && work.admission->player.valid())
+				owner.leaveRemote(work.admission->player);
+			std::lock_guard lock(mutex);
+			mailboxes[work.slot] = {};
+		}
+		for (auto &[slot, admission, playerKey, intents, closing, confirmed, active, spawnFailed] : ownerInbox)
+		{
+			if (closing)
+				continue;
+			auto &box = mailboxes[slot];
 			if (!admission)
 			{
-				const auto joined = owner.joinRemote();
+				const auto joined = owner.joinRemote(playerKey);
 				{
 					std::lock_guard lock(mutex);
 					if (!box.closing)
@@ -612,7 +620,7 @@ struct ServerTransport::Impl
 
 	Socket socket;
 	SessionWorld world;
-	const uint64_t worldId{randomId()}, epoch{randomId()};
+	const uint64_t worldId, epoch{randomId()};
 	const wire::Compatibility compatibility{wire::localCompatibility()};
 	std::vector<Peer> peers;
 	std::vector<Mailbox> mailboxes;

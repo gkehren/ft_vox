@@ -7,6 +7,10 @@
   the desired/durable save-revision state machine stay in force. This ADR
   adds a *multi-file transactional layer* on top of them.
 
+This ADR describes the solo v1 transaction. The dedicated server extends
+the same publication and recovery protocol with a v2 player roster and
+identity registry. See the [multiplayer checkpoint ADR](multiplayer-checkpoints.md).
+
 ## 1. Problem
 
 A persistent world today is a collection of independently committed files:

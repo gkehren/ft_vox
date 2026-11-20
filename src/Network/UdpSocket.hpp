@@ -16,6 +16,7 @@ struct Address
 
 Address parseAddress(std::string_view ipv4, uint16_t port);
 uint64_t randomId();
+wire::PlayerKey randomPlayerKey();
 
 struct Received
 {

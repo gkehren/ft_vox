@@ -18,6 +18,7 @@
 //     player.state      (optional — presence flagged in the manifest)
 //     inventory.state
 //     items.state
+//     players.state     (v2 dedicated roster)
 //     chunks/<cx>_<cz>.chunk
 //
 // Contract:
@@ -50,7 +51,7 @@
 namespace worldsave
 {
 	inline constexpr char kCheckpointManifestMagic[4] = {'F', 'T', 'V', 'M'};
-	inline constexpr uint32_t kCheckpointManifestVersion = 1;
+	inline constexpr uint32_t kCheckpointManifestVersion = 2;
 
 	/// One referenced chunk override file: coordinate + FNV-1a 64 of the
 	/// whole file bytes (the chunk codec additionally validates magic,
@@ -73,6 +74,8 @@ namespace worldsave
 		uint64_t inventoryChecksum{0};
 		uint64_t itemsChecksum{0};
 		std::vector<CheckpointChunkRef> chunks; // sorted by (x, z)
+		uint64_t worldId{0}; // v2 only; v1 (solo) has no roster
+		uint64_t rosterChecksum{0};
 	};
 
 	std::vector<uint8_t> encodeCheckpointManifest(const CheckpointManifest &manifest);
@@ -90,6 +93,7 @@ namespace worldsave
 		std::vector<uint8_t> inventory; // encoded inventory.state (required)
 		std::vector<uint8_t> items;     // encoded items.state (required)
 		uint64_t worldEditRevision{0};
+		std::vector<uint8_t> roster; // encoded players.state (dedicated server only)
 	};
 
 	/// Deterministic fault-injection points (the SaveService test-seam
@@ -107,7 +111,8 @@ namespace worldsave
 		AfterStagingBeforePublish,// 7 (6 is the SaveService write seam)
 		DuringManifestPublish,    // 8 (tmp written, rename not done)
 		AfterManifestPublish,     // 9 (commit succeeded)
-		DuringCleanup             // 10 (commit succeeded)
+		DuringCleanup,            // 10 (commit succeeded)
+		AfterRosterStaged
 	};
 
 	class CheckpointStore
@@ -144,6 +149,7 @@ namespace worldsave
 
 		uint64_t activeGeneration() const { return m_activeGeneration; }
 		bool activePlayerPresent() const { return m_activePlayerPresent; }
+		uint64_t activeWorldId() const { return m_activeWorldId; }
 		/// The winning generation directory (empty when legacy/inactive).
 		std::filesystem::path activeDir() const;
 		const std::filesystem::path &worldDir() const { return m_worldDir; }
@@ -154,17 +160,19 @@ namespace worldsave
 	private:
 		bool validateGeneration(uint64_t generation, const CheckpointManifest &manifest,
 								std::string &outError) const;
-		bool tryRecoverManifest(const std::filesystem::path &manifestPath, uint64_t &outGeneration,
-								std::string &outError);
+		SaveStatus tryRecoverManifest(const std::filesystem::path &manifestPath, uint64_t &namedGeneration,
+									  std::string &outError);
 		bool stagePayload(const std::filesystem::path &finalPath, const std::vector<uint8_t> &bytes,
 						  std::string &outError) const;
-		bool publishManifest(const CheckpointManifest &manifest, std::string &outError);
+		bool publishManifest(const std::vector<uint8_t> &bytes, std::string &outError);
 		bool failAt(CheckpointFaultPoint point, std::string &outError) const;
 
 		std::filesystem::path m_worldDir;
 		uint64_t m_activeGeneration{0};
 		uint64_t m_fallbackGeneration{0};
 		bool m_activePlayerPresent{false};
+		uint64_t m_activeWorldId{0};
+		std::vector<uint8_t> m_activeManifest;
 		uint64_t m_nextGeneration{1};
 		CheckpointFaultPoint m_fault{CheckpointFaultPoint::None};
 	};
@@ -183,4 +191,6 @@ namespace worldsave
 	/// (the file sync already ran).
 	bool syncFileForCheckpoint(const std::filesystem::path &path);
 	bool syncDirForCheckpoint(const std::filesystem::path &path);
+	bool writeCheckpointFileAtomic(const std::filesystem::path &path, const std::vector<uint8_t> &bytes,
+								   bool privateFile = false);
 } // namespace worldsave

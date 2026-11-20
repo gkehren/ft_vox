@@ -38,7 +38,7 @@ class ClientTransport
 {
 public:
 	using Clock = std::chrono::steady_clock;
-	explicit ClientTransport(Address server);
+	explicit ClientTransport(Address server, wire::PlayerKey key = randomPlayerKey());
 	~ClientTransport();
 	void connect(Clock::time_point now);
 	void poll(Clock::time_point now);

@@ -17,18 +17,16 @@
 //   * INVALID: value 0 (kInvalidPlayerId) is never assigned. Default-
 //     constructed handles are invalid; every per-player API answers a safe
 //     refusal/no-op for them.
-//   * ALLOCATION: monotonic, starts at 1, assigned at createPlayer() call
-//     order (command order is the deterministic allocation order — the item
-//     spawn discipline). Ids are NEVER REUSED for the lifetime of the
-//     GameSimulation instance: removePlayer() retires an id permanently.
+//   * ALLOCATION: createPlayer() assigns monotonic IDs starting at 1.
+//     The dedicated host can reattach an authenticated persistent actor
+//     with the original ID. The transport scopes its old and new sessions.
 //   * EPOCH / RELOAD: initialize() and reload() are world-epoch boundaries.
 //     They reset the shared populations and every session's inventory, but
 //     player SESSIONS survive (bodies carry over until the host respawns them
 //     — the historical solo contract) and the id allocator NEVER rewinds.
 //     A handle therefore addresses the same session across world epochs, and
 //     a retired/never-allocated handle can never alias another player's
-//     state. Cross-session identity persistence (reconnect) is Epic #245
-//     Phase E (#259), not this contract.
+//     state. See docs/adr/multiplayer-checkpoints.md for persistent identity.
 //   * EXHAUSTION: the largest ASSIGNABLE id is kMaxPlayerId; the allocator
 //     rests at kMaxNextPlayerId (representable, never assigned) and
 //     createPlayer() refuses with kInvalidPlayerId instead of wrapping.

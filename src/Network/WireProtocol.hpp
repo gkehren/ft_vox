@@ -18,7 +18,7 @@ namespace net::wire
 
 // The authoritative protocol, separate from the test-only UDP v1 prototype.
 // See docs/adr/authoritative-wire-protocol.md for byte layouts and delivery.
-inline constexpr uint16_t kVersion = 3;
+inline constexpr uint16_t kVersion = 4;
 inline constexpr int kTickRate = 60;
 inline constexpr uint64_t kPlayerSnapshotIntervalTicks = 3;
 inline constexpr uint64_t kInputLeadTicks = 6;
@@ -92,12 +92,15 @@ struct Compatibility
 Compatibility localCompatibility() noexcept;
 uint64_t chunkChecksum(std::span<const uint8_t> bytes) noexcept;
 
+using PlayerKey = std::array<uint8_t, 32>;
+
 struct Hello
 {
     static constexpr Kind kind = Kind::Hello;
     uint64_t nonce{};
     uint16_t minVersion{}, maxVersion{};
     Compatibility content;
+    PlayerKey playerKey{};
     bool operator==(const Hello &) const = default;
 };
 
@@ -112,7 +115,9 @@ struct Welcome
     bool operator==(const Welcome &) const = default;
 };
 
-enum class RejectReason : uint8_t { Version = 1, Content = 2, Full = 3, Unavailable = 4 };
+enum class RejectReason : uint8_t {
+    Version = 1, Content = 2, Full = 3, Unavailable = 4, IdentityInUse = 5, ProfileLimit = 6
+};
 struct Reject
 {
     static constexpr Kind kind = Kind::Reject;

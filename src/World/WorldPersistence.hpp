@@ -61,6 +61,7 @@
 #include <vector>
 
 #include <World/WorldCheckpoint.hpp>
+#include <World/MultiplayerSave.hpp>
 #include <World/WorldSave.hpp>
 
 // One queued save unit. `currentValues` holds the CURRENT value of each
@@ -362,7 +363,8 @@ public:
 	/// file, ...) REFUSES the open instead: an I/O error must never be
 	/// misread as "no overrides saved".
 	OpenInfo openOrCreate(const std::filesystem::path &savesRoot, const std::string &name,
-	                      int currentSeed, uint32_t currentGeneratorVersion);
+						  int currentSeed, uint32_t currentGeneratorVersion,
+						  bool dedicatedServer = false);
 
 	bool enabled() const { return m_enabled; }
 	int seed() const { return m_seed; }
@@ -422,6 +424,8 @@ public:
 	/// (gameplay reads route to it; the root state files are legacy shims).
 	bool checkpointMode() const;
 	uint64_t checkpointGeneration() const;
+	uint64_t checkpointWorldId() const;
+	worldsave::SaveStatus readPlayerRoster(worldsave::PlayerRoster &out) const;
 
 	/// Commit a checkpoint from the captured payloads. PRECONDITION: the
 	/// caller flushed the live working set (the durability barrier). Returns
