@@ -470,8 +470,9 @@ endif()
 set(FT_VOX_SERVER_HOST_SOURCE
     ${CMAKE_SOURCE_DIR}/src/Server/ServerHost.cpp
     ${CMAKE_SOURCE_DIR}/src/Server/WorldIdentities.cpp
+    ${CMAKE_SOURCE_DIR}/src/Server/WorldRoles.cpp
 )
-add_executable(ft_vox_server src/Server/ServerMain.cpp ${FT_VOX_SERVER_HOST_SOURCE})
+add_executable(ft_vox_server src/Server/ServerMain.cpp src/Server/RolesCommand.cpp ${FT_VOX_SERVER_HOST_SOURCE})
 target_link_libraries(ft_vox_server PRIVATE ft_vox_core)
 ft_vox_target_hygiene(ft_vox_server)
 
@@ -492,11 +493,18 @@ if(WIN32)
     target_link_libraries(ft_vox_udp PRIVATE ws2_32 bcrypt)
 endif()
 ft_vox_target_hygiene(ft_vox_udp)
-target_link_libraries(ft_vox_server PRIVATE ft_vox_udp)
+
+add_library(ft_vox_local_control STATIC src/Hosting/RoleCredentials.cpp)
+target_link_libraries(ft_vox_local_control PRIVATE ft_vox_core ft_vox_udp)
+if(WIN32)
+    target_link_libraries(ft_vox_local_control PRIVATE advapi32)
+endif()
+ft_vox_target_hygiene(ft_vox_local_control)
+target_link_libraries(ft_vox_server PRIVATE ft_vox_udp ft_vox_local_control)
 
 add_library(ft_vox_hosting STATIC src/Hosting/ChildProcess.cpp src/Hosting/ServerSupervisor.cpp)
 target_include_directories(ft_vox_hosting PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(ft_vox_hosting PRIVATE ft_vox_udp ft_vox_core Threads::Threads)
+target_link_libraries(ft_vox_hosting PRIVATE ft_vox_local_control ft_vox_udp ft_vox_core Threads::Threads)
 ft_vox_target_hygiene(ft_vox_hosting)
 
 # Configure-time dependency-direction guard (issue #210 criterion 1, hardened
@@ -539,6 +547,7 @@ ft_vox_assert_cpu_link_closure(ft_vox_server)
 ft_vox_assert_cpu_link_closure(ft_vox_wire)
 ft_vox_assert_cpu_link_closure(ft_vox_udp)
 ft_vox_assert_cpu_link_closure(ft_vox_hosting)
+ft_vox_assert_cpu_link_closure(ft_vox_local_control)
 
 # CPU-only configuration: the graphical stack must not even have been
 # DISCOVERED (no targets created by Dependencies.cmake).

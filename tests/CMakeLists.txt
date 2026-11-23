@@ -1475,7 +1475,7 @@ set_tests_properties(HeadlessDeps PROPERTIES TIMEOUT 120)
 
 # Server tests use its real host and executable, both CPU-only (issue #250).
 add_executable(test_server_host test_server_host.cpp ${FT_VOX_SERVER_HOST_SOURCE})
-target_link_libraries(test_server_host PRIVATE ft_vox_core ft_vox_udp)
+target_link_libraries(test_server_host PRIVATE ft_vox_core ft_vox_udp ft_vox_local_control)
 ft_vox_target_hygiene(test_server_host)
 add_test(NAME ServerHost COMMAND test_server_host)
 add_test(NAME ServerLifecycle
@@ -1484,7 +1484,7 @@ add_test(NAME ServerLifecycle
 set_tests_properties(ServerHost ServerLifecycle PROPERTIES TIMEOUT 300)
 
 add_executable(test_server_restart_client test_server_restart_client.cpp ${FT_VOX_SERVER_HOST_SOURCE})
-target_link_libraries(test_server_restart_client PRIVATE ft_vox_core ft_vox_udp)
+target_link_libraries(test_server_restart_client PRIVATE ft_vox_core ft_vox_udp ft_vox_local_control)
 ft_vox_target_hygiene(test_server_restart_client)
 add_test(NAME ServerRestart
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_server_restart.py
@@ -1501,7 +1501,7 @@ add_test(NAME UdpTransport COMMAND test_udp_transport)
 set_tests_properties(UdpTransport PROPERTIES TIMEOUT 30)
 
 add_executable(test_world_replication test_world_replication.cpp ${FT_VOX_SERVER_HOST_SOURCE})
-target_link_libraries(test_world_replication PRIVATE ft_vox_core ft_vox_udp)
+target_link_libraries(test_world_replication PRIVATE ft_vox_core ft_vox_udp ft_vox_local_control)
 ft_vox_target_hygiene(test_world_replication)
 add_test(NAME WorldReplication COMMAND test_world_replication)
 add_test(NAME VoxelActions COMMAND test_world_replication --actions)
@@ -1529,6 +1529,13 @@ target_link_libraries(test_server_supervisor PRIVATE ft_vox_hosting ft_vox_udp f
 add_dependencies(test_server_supervisor ft_vox_server)
 add_test(NAME ServerSupervisor COMMAND test_server_supervisor $<TARGET_FILE:ft_vox_server>)
 set_tests_properties(ServerSupervisor PROPERTIES TIMEOUT 120)
+
+add_executable(test_server_roles test_server_roles.cpp ${FT_VOX_SERVER_HOST_SOURCE})
+target_link_libraries(test_server_roles PRIVATE ft_vox_hosting ft_vox_udp ft_vox_core)
+ft_vox_target_hygiene(test_server_roles)
+add_dependencies(test_server_roles ft_vox_server)
+add_test(NAME ServerRoles COMMAND test_server_roles $<TARGET_FILE:ft_vox_server>)
+set_tests_properties(ServerRoles PROPERTIES TIMEOUT 120 LABELS "multiplayer")
 
 # Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh
 # CMake configure + build with FT_VOX_GRAPHICS=OFF, no vcpkg toolchain and no
@@ -1572,7 +1579,7 @@ foreach(_cpu_test IN ITEMS
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
     test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol test_udp_transport
-    test_world_replication test_server_restart_client test_multiplayer_ui test_multiplayer_join test_server_supervisor
+    test_world_replication test_server_restart_client test_multiplayer_ui test_multiplayer_join test_server_supervisor test_server_roles
     bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR

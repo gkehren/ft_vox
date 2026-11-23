@@ -29,16 +29,12 @@ void Engine::populateHostingUi(GameUIFrame &frame)
 	frame.exitAfterHostedStop = m_exitAfterHostedStop;
 	frame.startHostedServer = [this](hosting::Options options, bool autoJoin, std::string_view name) {
 		m_hostError.clear();
-		std::optional<std::string> autoProfile;
-		if (autoJoin)
-		{
-			auto profile = loadNamedProfile(name, m_hostError);
-			if (!profile)
-				return;
-			autoProfile = std::move(profile->name);
-		}
-		if (m_hostServer.start(std::move(options), m_hostExecutable, m_hostSavesRoot))
-			m_hostAutoProfile = std::move(autoProfile);
+		auto profile = loadNamedProfile(name, m_hostError);
+		if (!profile)
+			return;
+		if (m_hostServer.start(std::move(options), m_hostExecutable, m_hostSavesRoot,
+				hosting::OwnerProfile{profile->key, m_savesRoot / ".client-profiles" / "named" / profile->name / "owner-control.key"}))
+			m_hostAutoProfile = autoJoin ? std::optional{std::move(profile->name)} : std::nullopt;
 	};
 	frame.stopHostedServer = [this] {
 		m_hostAutoProfile.reset();

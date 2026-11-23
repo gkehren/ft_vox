@@ -32,7 +32,8 @@ bool identityRegistryAllowsSolo(const std::filesystem::path &registry, const wor
 	worldsave::ByteReader reader(bytes.data(), bytes.size());
 	worldsave::IdentityRegistryHeader header;
 	return worldsave::readIdentityRegistryHeader(bytes, reader, header) &&
-		!header.checkpointRequired && header.seed == meta.seed && header.generatorVersion == meta.generatorVersion;
+		!header.checkpointRequired && !header.roleRevision &&
+		header.seed == meta.seed && header.generatorVersion == meta.generatorVersion;
 }
 
 double elapsedMs(Clock::time_point from)

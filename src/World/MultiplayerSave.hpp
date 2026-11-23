@@ -11,6 +11,7 @@ namespace worldsave
 	inline constexpr size_t kIdentityProfileBytes = 4 + 32; // actor ID + key
 	inline constexpr size_t kIdentityChecksumBytes = 8;
 	inline constexpr size_t kEmptyIdentityRegistryBytes = 41 + kIdentityChecksumBytes;
+	inline constexpr size_t kIdentityRoleRevisionBytes = 8;
 	inline constexpr uint32_t kFirstRemotePlayerId = 2;
 
 	struct IdentityRegistryHeader
@@ -22,6 +23,7 @@ namespace worldsave
 		uint32_t actorLimit{kFirstRemotePlayerId};
 		uint64_t itemLimit{1};
 		uint32_t profileCount{};
+		uint64_t roleRevision{};
 	};
 
 	// Validate the header, exact file size and checksum. On success the reader

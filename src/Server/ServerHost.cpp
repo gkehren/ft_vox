@@ -521,9 +521,28 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 	if (worldConfig.seed == 0 && !WorldPersistence::worldExists(worldConfig.savesRoot, worldConfig.worldName))
 		worldConfig.seed = 42; // reproducible default for new worlds
 	worldConfig.dedicatedServer = true;
+	const auto worldDir = worldConfig.savesRoot / worldConfig.worldName;
 	auto identities = std::make_unique<WorldIdentities>();
-	if (!identities->lock(worldConfig.savesRoot / worldConfig.worldName, error))
+	if (!identities->lock(worldDir, error))
 		return false;
+	bool fresh = false;
+	if (m_config.ownerBootstrap)
+	{
+		std::error_code ec;
+		fresh = true;
+		for (std::filesystem::directory_iterator entry(worldDir, ec), end; !ec && entry != end; entry.increment(ec))
+		{
+			if (entry->path().filename() == "server.lock")
+				continue;
+			fresh = false;
+			break;
+		}
+		if (ec)
+		{
+			error = "could not inspect the world before owner bootstrap";
+			return false;
+		}
+	}
 
 	if (m_config.workers > 0)
 		m_workers = std::make_unique<ThreadPool>(m_config.workers);
@@ -569,6 +588,9 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 		error = "could not reserve shared item IDs";
 		return false;
 	}
+	auto roles = std::make_unique<WorldRoles>(worldDir, *identities);
+	if (!roles->prepareStart(fresh, m_config.ownerBootstrap, error))
+		return false;
 	simulation->reserveItemIds(nextItem, m_itemIdLimit);
 	// Seal a baseline before accepting actions. A first crash must recover a
 	// whole generation even when the world came from legacy loose files.
@@ -587,6 +609,8 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 		error = "could not establish the dedicated checkpoint baseline";
 		return false;
 	}
+	if (!roles->finishStart(error))
+		return false;
 	for (auto &player : roster.players)
 		m_savedPlayers.emplace(player.id, std::move(player));
 
@@ -597,6 +621,7 @@ bool ServerHost::start(std::string &error, void (*beforeInitialCheckpointForTest
 	m_spawnCenter = center;
 	simulation->world()->observeLogicalEdits();
 	m_identities = std::move(identities);
+	m_roles = std::move(roles);
 	m_sim = std::move(simulation);
 	return true;
 }
@@ -709,6 +734,7 @@ bool ServerHost::stop(std::string &error)
 	m_savedPlayers.clear();
 	m_sim.reset();
 	m_workers.reset();
+	m_roles.reset();
 	m_identities.reset();
 	return committed;
 }

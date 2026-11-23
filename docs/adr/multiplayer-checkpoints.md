@@ -27,7 +27,8 @@ profile. UDP sends it in cleartext. Use loopback or a trusted private
 network with protected transport, such as a VPN between hosts. Keep the
 profile and server registry private. POSIX writes use mode 0600. Windows
 uses the directory ACL. Losing a key makes that profile inaccessible.
-There is currently no key recovery, rotation or account administration.
+Player-key recovery and rotation remain separate from the local owner
+credential and role procedures below.
 
 ## Durable formats and ownership
 
@@ -115,3 +116,78 @@ while the server is stopped. Use a pre-migration backup to return to an
 older binary or the solo editor after publishing v2. Recovery assumes one
 writer and at least one surviving record of a completed migration.
 Dedicated v2 commits leave legacy root gameplay files at their prior state.
+
+## World role authority
+
+Issue #286 adds a local role authority bound to the persistent world ID
+and to the registry's player ID and profile-key pairs. One registered
+player is the primary owner. Delegated admins are distinct registered
+players. The server treats every other actor as a player. The role lookup
+does not authenticate a command or modify wire v5.
+
+### Bootstrap and command boundaries
+
+- The launcher writes one fixed 72-byte record to the private inherited
+  stdin pipe. It contains `FTLB`, little-endian u32 version 1, the
+  32-byte player key and a distinct 32-byte owner control key. The server
+  reads it within five seconds before opening a world. Extra bytes are
+  rejected and closing the writer requests graceful shutdown after startup.
+  Key bytes are absent from command arguments, environment, preferences,
+  readiness output and the audit. `--launcher-control stdin` remains the
+  EOF-only mode for ordinary supervisors.
+- The local control key file is `FTVK`, little-endian u32 version 1, then a
+  nonzero OS-generated 32-byte value. New files use mode 0600 on POSIX and a
+  protected DACL for the current user and SYSTEM on Windows. The authority
+  file uses the same private write path. The writer verifies privacy
+  before putting any key bytes on disk. Keep the enclosing directories
+  under the trusted operator's control.
+- Only a fresh world directory may use an incoming GUI bootstrap. Existing
+  worlds without a role record remain unowned. Routine offline owner
+  commands require the independent owner control key plus the current
+  world ID and revision. Provision and recovery require local operator
+  access and the world lock. They have explicit CLI verbs and audit
+  entries. Recovery rotates control and clears delegations. The CLI and
+  launcher are local process entry points. Hello, session capabilities and
+  claimed actor IDs grant no access to them.
+
+### Atomic records and restore
+
+- `FTVA` **v2** adds flag bit 1 requiring role authority and a u64 role
+  revision after the existing header fields. Bit 0 retains the checkpoint
+  seal. Unowned registries remain v1. Missing or invalid identities
+  prevent role-aware startup. The roster and the current role bindings
+  are validated against the registry.
+- `<saves-root>/.ft_vox..server-roles/<world-name>` stores
+  `FTRL` **v1**, independent of gameplay checkpoint generations. The
+  little-endian record contains magic, u32 version, u64 world ID and role
+  revision, u32 owner ID, owner profile and control keys, and u32 admin
+  and audit counts. Each sorted admin is a u32 ID and a 32-byte profile
+  binding. The most recent 64 audit entries contain a u64 revision, u8
+  operation, and u32 previous-owner and target IDs. A final u64 FNV-1a
+  checksum covers the preceding bytes to detect corruption. The server
+  flushes a private `.pending..<world-name>` record, atomically advances
+  the revision in the identity registry, then promotes the staged record
+  with an atomic rename. Opening the world completes a matching staged
+  record if interrupted. Admin revocation and its audit entry share that
+  commit. A role file older than the registry revision cannot become active.
+- Before the first gameplay checkpoint, the server publishes its registry
+  and a pending authority record with the trusted keys and owner ID zero.
+  After publishing and sealing the first dedicated checkpoint it enrolls
+  the reserved profile through the existing ID allocator and finishes the
+  role record. Both steps finish before UDP readiness. A crash after the
+  pending write retries the original profile. A crash after enrollment
+  reuses that registered ID. If the world was created but no pending record
+  survived, a repeat launch leaves it unowned for explicit provisioning.
+- Gameplay rollback and world-directory restores leave the latest role
+  file in the separate authority directory. Keep the current
+  `server-identities.state` with it to preserve role bindings and
+  ID reservations. An authority associated with a different world ID,
+  missing marked authority, stale revision, or mismatching role binding
+  fails closed.
+  Never reactivate an old authority snapshot as part of gameplay restore.
+  If the only security backup predates a role change, use the local
+  recovery procedure to rotate the control credential and clear all
+  delegations before serving the restored world. An operator who rolls
+  back every trusted file can erase the evidence of later changes. This
+  local store assumes the operator preserves the authority separately or
+  explicitly recovers it.

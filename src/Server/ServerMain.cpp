@@ -1,6 +1,7 @@
 #include <Server/ServerHost.hpp>
 #include <Server/TickSchedule.hpp>
 #include <Server/LauncherControl.hpp>
+#include <Server/RolesCommand.hpp>
 
 #include <atomic>
 #include <charconv>
@@ -28,6 +29,7 @@ struct Options
 	unsigned metricsEvery{600};
 	std::filesystem::path stopFile;
 	bool launcherControl{};
+	bool launcherBootstrap{};
 };
 
 static_assert(std::atomic<bool>::is_always_lock_free);
@@ -82,8 +84,9 @@ void printUsage()
 		"  --eviction-budget N       chunk evictions per tick, 0..64 (default 16)\n"
 		"  --metrics-every N         completed ticks between log records, 0..1000000 (default 600; 0 disables)\n"
 		"  --stop-file PATH          save and stop when PATH exists\n"
-		"  --launcher-control stdin  live child mode, save and stop on inherited pipe EOF\n"
+		"  --launcher-control MODE   inherited stdin: stdin for EOF only, bootstrap for owner startup\n"
 		"  --help                    show this help\n";
+	server::printRolesUsage();
 }
 
 bool parseOptions(int argc, char **argv, Options &options, std::string &error)
@@ -145,8 +148,11 @@ bool parseOptions(int argc, char **argv, Options &options, std::string &error)
 			number(options.metricsEvery, 0u, 1000000u);
 		else if (option == "--stop-file")
 			options.stopFile = value;
-		else if (option == "--launcher-control" && value == "stdin")
+		else if (option == "--launcher-control" && (value == "stdin" || value == "bootstrap"))
+		{
 			options.launcherControl = true;
+			options.launcherBootstrap = value == "bootstrap";
+		}
 		else
 			error = "unknown option " + std::string(option);
 		if (!error.empty())
@@ -268,7 +274,17 @@ ExitCode runServer(const Options &options)
 		std::cerr << "SERVER error=runtime detail=failed to install stop handlers\n";
 		return ExitCode::Run;
 	}
-	server::ServerHost host(options.host);
+	auto config = options.host;
+	if (options.launcherBootstrap)
+	{
+		config.ownerBootstrap = server::readLauncherBootstrap();
+		if (!config.ownerBootstrap)
+		{
+			std::cerr << "SERVER error=usage detail=missing or invalid local owner bootstrap\n";
+			return ExitCode::Usage;
+		}
+	}
+	server::ServerHost host(std::move(config));
 	std::string error;
 	if (!host.start(error))
 	{
@@ -282,19 +298,27 @@ ExitCode runServer(const Options &options)
 	net::udp::WorldTraffic worldTraffic;
 	try
 	{
-		if (listen)
+		const auto control = options.launcherControl ? server::pollLauncherPipe() : server::LauncherInput::Open;
+		if (control == server::LauncherInput::Closed)
+			reason = "launcher";
+		else if (control == server::LauncherInput::Invalid)
+			error = "unexpected input on the private launcher control pipe";
+		else
 		{
-			transport = std::make_unique<net::udp::ServerTransport>(*listen, options.playerCap - 1, host.sessionWorld());
-			transport->start();
+			if (listen)
+			{
+				transport = std::make_unique<net::udp::ServerTransport>(*listen, options.playerCap - 1, host.sessionWorld());
+				transport->start();
+			}
+			std::cout << "SERVER status=ready mode=" << (options.ticks ? "deterministic" : "live")
+					  << " transport=" << (transport ? "udp" : "disabled")
+					  << " listen_address=" << options.listenAddress
+					  << " port=" << (transport ? transport->address().port : options.port)
+					  << " player_cap=" << options.playerCap << " workers=" << options.host.workers
+					  << " restored=" << host.restoredPlayer();
+			printMetrics(host.metrics(), 0);
+			reason = runTicks(host, transport.get(), options, droppedTicks, error);
 		}
-		std::cout << "SERVER status=ready mode=" << (options.ticks ? "deterministic" : "live")
-				  << " transport=" << (transport ? "udp" : "disabled")
-				  << " listen_address=" << options.listenAddress
-				  << " port=" << (transport ? transport->address().port : options.port)
-				  << " player_cap=" << options.playerCap << " workers=" << options.host.workers
-				  << " restored=" << host.restoredPlayer();
-		printMetrics(host.metrics(), 0);
-		reason = runTicks(host, transport.get(), options, droppedTicks, error);
 	}
 	catch (const std::exception &ex)
 	{
@@ -343,6 +367,18 @@ ExitCode runServer(const Options &options)
 
 int main(int argc, char **argv)
 {
+	if (argc >= 2 && std::string_view(argv[1]) == "roles")
+	{
+		try
+		{
+			return server::runRolesCommand(argc, argv);
+		}
+		catch (const std::exception &)
+		{
+			std::cerr << "ROLES error=local role procedure failed\n";
+			return static_cast<int>(ExitCode::Run);
+		}
+	}
 	if (argc == 2 && std::string_view(argv[1]) == "--help")
 	{
 		printUsage();

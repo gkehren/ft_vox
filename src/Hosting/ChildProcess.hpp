@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
@@ -9,8 +10,8 @@
 
 namespace hosting
 {
-// Owns only the process it spawned. The parent writes no control bytes in
-// this protocol version. Closing its private writer requests a checkpoint.
+// Owns only the process it spawned. Closing its private writer requests a
+// checkpoint after the optional startup record.
 class ChildProcess
 {
 public:
@@ -20,6 +21,7 @@ public:
 	ChildProcess &operator=(const ChildProcess &) = delete;
 
 	size_t readOutput(std::span<char> buffer);
+	bool writeControl(std::span<const uint8_t> buffer);
 	std::optional<int> pollExit();
 	void closeControl();
 	bool forceStop();

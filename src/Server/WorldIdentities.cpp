@@ -76,7 +76,8 @@ bool WorldIdentities::load(int seed, uint32_t generator, std::optional<uint64_t>
 {
 	std::vector<uint8_t> bytes;
 	const auto status = worldsave::readFileInto(m_path, bytes,
-		worldsave::kEmptyIdentityRegistryBytes + worldsave::kIdentityProfileBytes * worldsave::kMaxPersistentPlayers);
+		worldsave::kEmptyIdentityRegistryBytes + worldsave::kIdentityRoleRevisionBytes +
+			worldsave::kIdentityProfileBytes * worldsave::kMaxPersistentPlayers);
 	if (status == worldsave::SaveStatus::NotFound && !publishedWorldId)
 	{
 		m_worldId = net::udp::randomId();
@@ -134,6 +135,7 @@ bool WorldIdentities::decode(const std::vector<uint8_t> &bytes)
 	m_seed = header.seed;
 	m_generator = header.generatorVersion;
 	m_checkpointRequired = header.checkpointRequired;
+	m_roleRevision = header.roleRevision;
 	m_actorLimit = header.actorLimit;
 	m_itemLimit = header.itemLimit;
 	return !r.failed();
@@ -143,7 +145,7 @@ bool WorldIdentities::save() const
 {
 	worldsave::ByteWriter w;
 	worldsave::writeIdentityRegistryHeader(w, {m_worldId, m_seed, m_generator, m_checkpointRequired,
-		m_actorLimit, m_itemLimit, static_cast<uint32_t>(m_profiles.size())});
+		m_actorLimit, m_itemLimit, static_cast<uint32_t>(m_profiles.size()), m_roleRevision});
 	for (const auto &[id, key] : m_profiles)
 	{
 		w.u32(id.value);
@@ -166,6 +168,24 @@ bool WorldIdentities::markCheckpointRequired()
 		return true;
 	m_checkpointRequired = false;
 	return false;
+}
+
+bool WorldIdentities::advanceRoleRevision(uint64_t revision)
+{
+	if (revision <= m_roleRevision)
+		return revision == m_roleRevision;
+	const auto previous = m_roleRevision;
+	m_roleRevision = revision;
+	if (save())
+		return true;
+	m_roleRevision = previous;
+	return false;
+}
+
+const wire::PlayerKey *WorldIdentities::keyFor(sim::PlayerId id) const
+{
+	const auto it = m_profiles.find(id);
+	return it == m_profiles.end() ? nullptr : &it->second;
 }
 
 sim::PlayerId WorldIdentities::find(const wire::PlayerKey &key) const
@@ -193,7 +213,9 @@ sim::PlayerId WorldIdentities::allocatePlayer()
 
 bool WorldIdentities::enroll(sim::PlayerId id, const wire::PlayerKey &key)
 {
-	if (size() >= worldsave::kMaxPersistentPlayers || !m_profiles.emplace(id, key).second)
+	if (id.value < worldsave::kFirstRemotePlayerId || id.value >= m_nextActor ||
+		key == wire::PlayerKey{} || find(key).valid() || size() >= worldsave::kMaxPersistentPlayers ||
+		!m_profiles.emplace(id, key).second)
 		return false;
 	if (save())
 		return true;
