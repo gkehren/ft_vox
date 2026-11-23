@@ -24,6 +24,7 @@
 #include "TestMain.hpp"
 
 int runEngineJoinSmoke(Engine &engine, const char *first, const char *second);
+int runEngineHostingSmoke(Engine &engine, const std::filesystem::path &server);
 
 namespace
 {
@@ -68,6 +69,11 @@ int main(int argc, char **argv)
 		{
 			engine->setSavesRootForTests(argv[4]);
 			return runEngineJoinSmoke(*engine, argv[2], argv[3]);
+		}
+		if (argc == 4 && std::string_view(argv[1]) == "--hosting-smoke")
+		{
+			engine->setSavesRootForTests(argv[3]);
+			return runEngineHostingSmoke(*engine, argv[2]);
 		}
 
 		// Unique temp saves root (issue #180 review round 4, item 5): the

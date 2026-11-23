@@ -24,6 +24,7 @@ struct EngineJoinProbe
 
 	void pump()
 	{
+		engine.tickHosting();
 		engine.applySessionRequests();
 		if (engine.m_remote)
 		{
@@ -38,6 +39,59 @@ struct EngineJoinProbe
 			if (engine.m_remote->motionTrace)
 				engine.traceRemoteMotion(1.0 / 120.0);
 		}
+	}
+
+	void runHosting(const std::filesystem::path &server)
+	{
+		engine.m_hostExecutable = server;
+		engine.m_hostSavesRoot = engine.m_savesRoot / "dedicated";
+		engine.initializeNoiseGenerator(13);
+		frame().createJoinProfile("host-choice");
+		frame().createJoinProfile("join-draft");
+		frame().createJoinProfile("saved-choice");
+		frame().selectJoinProfile("saved-choice");
+		client::JoinDraft joinDraft;
+		joinDraft.setProfile("join-draft");
+		hosting::Options options;
+		options.world = "Hosted test";
+		options.port = 0;
+		options.playerSlots = 1;
+		options.interestRadius = 1;
+		frame().startHostedServer(options, true, "missing-profile");
+		CHECK(!engine.m_hostServer.snapshot().active() && !engine.m_hostError.empty(),
+			"auto-join refuses a missing Host profile before launching a child");
+		CHECK(engine.m_joinPreferences.selectedProfile == "saved-choice" && joinDraft.request().profile == "join-draft",
+			"the Join draft differs from the saved selection");
+		frame().startHostedServer(options, true, "HOST-CHOICE");
+		frame().selectJoinProfile(joinDraft.profile.data());
+		until([&] {
+			return engine.m_hostSnapshot.state == hosting::State::Ready &&
+				engine.m_remote && engine.m_remote->ready();
+		}, "hosted server did not auto-join");
+		auto state = engine.m_hostSnapshot;
+		CHECK(state.address == "127.0.0.1" && state.port > 0 &&
+			engine.m_remote->endpoint == state.address + ":" + std::to_string(state.port),
+			"auto-join uses the ready loopback endpoint and assigned port");
+		CHECK(engine.m_remote->namedProfile == "host-choice" && engine.m_suspendedSolo,
+			"auto-join uses the canonical Host choice captured at Start and suspends solo play");
+		frame().joinHostedServer("saved-choice");
+		CHECK(engine.m_joinRequest && engine.m_joinRequest->profile == "saved-choice",
+			"manual Join hosted server uses its explicit Host choice");
+		engine.m_joinRequest.reset();
+
+		engine.running = true;
+		SDL_Event close{};
+		close.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+		close.window.windowID = SDL_GetWindowID(engine.window);
+		if (!SDL_PushEvent(&close))
+			throw std::runtime_error(SDL_GetError());
+		engine.handleEvents();
+		CHECK(engine.running && engine.m_exitAfterHostedStop, "game exit waits for its hosted server");
+		until([&] { return !engine.running || engine.m_hostSnapshot.state == hosting::State::Failed; },
+			"game did not reach a terminal hosted shutdown");
+		CHECK(!engine.running && engine.m_hostSnapshot.state == hosting::State::Stopped &&
+			engine.m_hostSnapshot.checkpoint > state.checkpoint,
+			"game exits after the final hosted checkpoint was committed");
 	}
 
 	void until(const auto &done, const char *description)
@@ -171,5 +225,12 @@ int runEngineJoinSmoke(Engine &engine, const char *first, const char *second)
 {
 	EngineJoinProbe{engine}.run(first, second);
 	std::cout << "Native multiplayer join smoke: " << testmain::checks << " checks\n";
+	return testmain::exitCode();
+}
+
+int runEngineHostingSmoke(Engine &engine, const std::filesystem::path &server)
+{
+	EngineJoinProbe{engine}.runHosting(server);
+	std::cout << "Native hosting smoke: " << testmain::checks << " checks\n";
 	return testmain::exitCode();
 }

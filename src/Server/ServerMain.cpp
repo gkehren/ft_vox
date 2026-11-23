@@ -1,5 +1,6 @@
 #include <Server/ServerHost.hpp>
 #include <Server/TickSchedule.hpp>
+#include <Server/LauncherControl.hpp>
 
 #include <atomic>
 #include <charconv>
@@ -10,11 +11,6 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 
 namespace
 {
@@ -31,6 +27,7 @@ struct Options
 	unsigned maxCatchUp{4};
 	unsigned metricsEvery{600};
 	std::filesystem::path stopFile;
+	bool launcherControl{};
 };
 
 static_assert(std::atomic<bool>::is_always_lock_free);
@@ -53,12 +50,16 @@ BOOL WINAPI consoleStop(DWORD type)
 }
 #endif
 
-bool installStopHandlers()
+bool installStopHandlers(bool launched)
 {
 #ifdef _WIN32
-	return SetConsoleCtrlHandler(consoleStop, TRUE) != FALSE &&
+	return (launched || SetConsoleCtrlHandler(consoleStop, TRUE) != FALSE) &&
 		std::signal(SIGTERM, requestStop) != SIG_ERR;
 #else
+	// On unexpected launcher exit the log reader can disappear before
+	// the server observes control EOF and commits the final checkpoint.
+	if (launched && std::signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+		return false;
 	return std::signal(SIGINT, requestStop) != SIG_ERR && std::signal(SIGTERM, requestStop) != SIG_ERR;
 #endif
 }
@@ -81,6 +82,7 @@ void printUsage()
 		"  --eviction-budget N       chunk evictions per tick, 0..64 (default 16)\n"
 		"  --metrics-every N         completed ticks between log records, 0..1000000 (default 600; 0 disables)\n"
 		"  --stop-file PATH          save and stop when PATH exists\n"
+		"  --launcher-control stdin  live child mode, save and stop on inherited pipe EOF\n"
 		"  --help                    show this help\n";
 }
 
@@ -143,6 +145,8 @@ bool parseOptions(int argc, char **argv, Options &options, std::string &error)
 			number(options.metricsEvery, 0u, 1000000u);
 		else if (option == "--stop-file")
 			options.stopFile = value;
+		else if (option == "--launcher-control" && value == "stdin")
+			options.launcherControl = true;
 		else
 			error = "unknown option " + std::string(option);
 		if (!error.empty())
@@ -150,6 +154,8 @@ bool parseOptions(int argc, char **argv, Options &options, std::string &error)
 	}
 	if (options.host.world.worldName.empty())
 		error = "--world is required";
+	else if (options.launcherControl && options.ticks)
+		error = "--launcher-control requires live mode";
 	return error.empty();
 }
 
@@ -180,6 +186,17 @@ const char *runTicks(server::ServerHost &host, net::udp::ServerTransport *transp
 		bool discardInput = false;
 		if (stopRequested.load(std::memory_order_relaxed))
 			return "signal";
+		if (options.launcherControl)
+		{
+			switch (server::pollLauncherPipe())
+			{
+			case server::LauncherInput::Open: break;
+			case server::LauncherInput::Closed: return "launcher";
+			case server::LauncherInput::Invalid:
+				error = "unexpected input on the private launcher control pipe";
+				return "runtime_error";
+			}
+		}
 		if (!options.stopFile.empty())
 		{
 			std::error_code statusError;
@@ -241,7 +258,12 @@ ExitCode runServer(const Options &options)
 			return ExitCode::Usage;
 		}
 	}
-	if (!installStopHandlers())
+	if (options.launcherControl && !server::hasLauncherPipe())
+	{
+		std::cerr << "SERVER error=usage detail=launcher control requires an inherited stdin pipe\n";
+		return ExitCode::Usage;
+	}
+	if (!installStopHandlers(options.launcherControl))
 	{
 		std::cerr << "SERVER error=runtime detail=failed to install stop handlers\n";
 		return ExitCode::Run;

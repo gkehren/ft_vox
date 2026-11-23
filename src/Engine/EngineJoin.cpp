@@ -39,7 +39,8 @@ void Engine::populateJoinUi(GameUIFrame &frame)
 		return;
 
 	frame.joinPreferences = &m_joinPreferences;
-	frame.joinProfiles = m_joinProfiles;
+	populateHostingUi(frame);
+	frame.joinProfiles = &m_joinProfiles;
 	frame.joinError = m_joinError;
 	frame.joinPreferencesError = m_joinPreferencesError;
 	frame.switchingSession = switchingSession();
@@ -100,32 +101,39 @@ void Engine::populateJoinUi(GameUIFrame &frame)
 	};
 }
 
+std::optional<Engine::NamedProfile> Engine::loadNamedProfile(std::string_view name, std::string &error) const
+{
+	auto canonical = client::profileName(name);
+	if (!canonical)
+	{
+		error = "Select or create a valid named profile before connecting.";
+		return std::nullopt;
+	}
+	try
+	{
+		const auto profile = m_savesRoot / ".client-profiles" / "named" / *canonical;
+		auto key = client::playerKey(profile, client::ProfileAccess::Load);
+		return NamedProfile{std::move(*canonical), key};
+	}
+	catch (const std::exception &)
+	{
+		error = "Could not read that profile's key. Select an existing profile, restore its key, or create a new profile.";
+		return std::nullopt;
+	}
+}
+
 void Engine::prepareRemoteJoin(const client::JoinRequest &request)
 {
 	m_joinError.clear();
 	const auto target = client::validateJoin(request.endpoint, request.expectedSeed, m_joinError);
 	if (!target)
 		return;
-	const auto name = client::profileName(request.profile);
-	if (!name)
-	{
-		m_joinError = "Select or create a named profile before connecting.";
+	const auto profile = loadNamedProfile(request.profile, m_joinError);
+	if (!profile)
 		return;
-	}
-	const auto profile = m_savesRoot / ".client-profiles" / "named" / *name;
-	net::wire::PlayerKey key;
-	try
-	{
-		key = client::playerKey(profile, client::ProfileAccess::Load);
-	}
-	catch (const std::exception &)
-	{
-		m_joinError = "Could not read that profile's key. Select an existing profile, restore its key, or create a new profile.";
-		return;
-	}
 	// Construct the new transport before disturbing the current world. It
 	// has no handshake in flight until startRemote and the next poll.
-	m_nextRemote = std::make_unique<RemoteSession>(target->address, target->expectedSeed, key, *name);
+	m_nextRemote = std::make_unique<RemoteSession>(target->address, target->expectedSeed, profile->key, profile->name);
 }
 
 void Engine::applySessionRequests()
