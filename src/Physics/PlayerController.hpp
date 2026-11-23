@@ -64,6 +64,7 @@ public:
     }
     void clearInput() { bufferedJump = 0; }
     glm::dvec3 eye() const { return body.position + glm::dvec3(0, settings.eyeHeight, 0); }
+    glm::dvec3 previousFeet() const { return previous; }
     glm::dvec3 renderEye() const
     {
         return glm::mix(previous, body.position, accumulator / fixedStep) +

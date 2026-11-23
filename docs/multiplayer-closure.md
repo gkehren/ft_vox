@@ -107,8 +107,9 @@ See the [GPU report](multiplayer-client-smoke.md) and
 [#99](https://github.com/gkehren/ft_vox/issues/99).
 
 - [#277](https://github.com/gkehren/ft_vox/issues/277) tracks manual
-  keyboard, mouse, inventory, avatar and menu verification. The Windows
-  native input pipe was unavailable on this run.
+  keyboard, mouse, inventory, avatar and menu verification. The
+  [camera cadence report](multiplayer-client-smoke.md#local-camera-cadence-for-277)
+  records the local movement fix and the current verification results.
 - [#275](https://github.com/gkehren/ft_vox/issues/275) adds bounded baseline
   compression. The [cold chunk benchmark](benchmarks/275-cold-chunk-delivery.md)
   measures spawn and sustained delivery across RTT, loss and client counts.

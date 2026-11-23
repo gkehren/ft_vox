@@ -5,6 +5,43 @@ records the latest physical-GPU dual-client startup, restart and strict
 visual results. Manual keyboard and mouse coverage is tracked in
 [#277](https://github.com/gkehren/ft_vox/issues/277).
 
+## Local camera cadence for #277
+
+The maintainer reported seeing the other player, walking, breaking and
+placing blocks, and dropping items on wire v5 with a dedicated server and
+two separate PowerShell clients. The same session showed visible stutter
+in local walking. That check preceded the camera fix.
+
+The local camera previously drew the final body position of each 60 Hz
+network prediction tick. It now advances through the same 120 Hz physics
+steps on the presentation clock. The `WorldReplicationClientTick`
+regression samples the camera every 7 ms while walking at 4.5 blocks/s.
+Before the fix, its per-frame speed ranged from 0 to 10.714 blocks/s.
+After the fix, it measures 4.5 blocks/s throughout the steady walking
+window. The UDP relay also measures 4.5 blocks/s at simulated render
+rates of 60 and 144 FPS with 0 and 150 ms nominal RTT on clean links.
+The packet-loss fixture checks reconciliation and convergence after a
+frame stall.
+
+```sh
+ctest --test-dir build-cpu -C Release -V -R '^WorldReplicationClientTick$'
+```
+
+The wire-v5 Release smoke ran on Windows with MSVC, an RTX 4070 Ti,
+driver 621.24, Vulkan 1.4.357 and `FT_VOX_VALIDATION=1`. Two graphical
+processes connected to a seed-42 loopback server with isolated profiles.
+The authority streamed terrain and reported zero dropped ticks on both
+runs. It committed generations 2 and 3 on graceful stops. Both clients
+timed out after the server stopped. Fresh client processes reused the
+profiles, joined a fresh wire epoch and resumed the same actor IDs.
+The physical-GPU `VisualRegression` and `EngineReload` tests passed.
+The strict visual run passed all 24 scenes.
+Validation reported the two known overlay-related swapchain VUIDs below.
+
+The Computer Use plugin could not connect to the native Windows pipe.
+The corrected build still needs the interactive comparison with solo
+and the remaining keyboard, mouse and menu checks in #277.
+
 ## Wire v4 profile restart
 
 Two Windows Release clients created distinct profiles with

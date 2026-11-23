@@ -279,9 +279,13 @@ prediction and rebuilds the footprint from the next snapshot. Physics
 treats a chunk as unknown while its published replica and verified wire
 versions differ.
 
-Small corrections may retain up to 0.25 blocks of visual offset, fading
-over 100 ms. The body must fit and sweep clear through available terrain
-for the whole offset. A blocked sweep snaps to the corrected pose.
+The local camera advances on a render-frame clock through the predicted
+120 Hz substeps. It keeps five recent tick poses and interpolates up to
+three ticks behind the latest prediction to absorb uneven input batches.
+It holds the latest pose when the buffer runs out. Small corrections may
+retain up to 0.25 blocks of visual offset, fading over 100 ms. The body
+must sweep clear through available terrain to the interpolated and
+corrected pose. A blocked sweep uses the current predicted pose.
 While a replica update is pending, the camera holds the last validated
 pose for the same continuous motion. The hold supplies no input to
 physics. Prediction resumes from a fresh authoritative snapshot after

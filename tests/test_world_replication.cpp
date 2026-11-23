@@ -1435,6 +1435,54 @@ void testPredictionResets()
 	require(prediction.feet().y > 1.1, "prediction lost an acknowledged buffered jump");
 }
 
+void testLocalPresentationCadence()
+{
+	FlatCollision world;
+	udp::ClientPrediction prediction;
+	constexpr auto kWalkSpeed = physics::PlayerSettings{}.walkSpeed;
+	constexpr auto kTick = std::chrono::duration<double>{1.0 / wire::kTickRate};
+	constexpr auto kFrame = 7ms;
+	const Time start{1s};
+	wire::PlayerSnapshot snapshot{.tick = 100, .count = 1};
+	auto &player = snapshot.players[0];
+	player = {{2}, {8.0, 1.001, 8.0}, {float(kWalkSpeed), 0.f, 0.f}, wire::PlayerState::grounded, 1};
+	prediction.observe(snapshot, player, start, world);
+	uint64_t sent = 0, acknowledged = 0;
+	double leastSpeed = kWalkSpeed, mostSpeed = kWalkSpeed;
+	auto previous = prediction.present(start, world);
+	for (auto age = kFrame; age <= 1200ms; age += kFrame)
+	{
+		const auto tick = static_cast<uint64_t>(age / kTick);
+		const auto now = start + age;
+		if ((tick / 3) * 3 > acknowledged)
+		{
+			acknowledged = (tick / 3) * 3;
+			snapshot.tick = 100 + acknowledged;
+			snapshot.lastProcessedInput = acknowledged;
+			player.feet[0] = 8.0 + double(acknowledged) * kTick.count() * kWalkSpeed;
+			prediction.observe(snapshot, player, now, world);
+		}
+		while (sent < tick + 2)
+		{
+			++sent;
+			prediction.record(sent, {100 + sent, 1.f}, now, world);
+		}
+		const auto pose = prediction.present(now, world);
+		require(previous && pose, "steady local walking lost its camera pose");
+		if (age >= 200ms)
+		{
+			const double speed = (pose->x - previous->x) / std::chrono::duration<double>(kFrame).count();
+			leastSpeed = std::min(leastSpeed, speed);
+			mostSpeed = std::max(mostSpeed, speed);
+		}
+		previous = pose;
+	}
+	std::cout << "LocalCamera 7ms walk expected=" << kWalkSpeed << " min=" << leastSpeed
+		<< " max=" << mostSpeed << " blocks/s\n";
+	require(leastSpeed >= kWalkSpeed * 0.95 && mostSpeed <= kWalkSpeed * 1.05,
+		"local camera stalled or jumped between movement ticks");
+}
+
 void testRemoteInterpolation()
 {
 	udp::RemotePlayers players;
@@ -1477,11 +1525,11 @@ void testRemoteInterpolation()
 		"remote teleport interpolated across a discontinuity");
 }
 
-void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, bool impaired)
+void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, bool impaired, unsigned frameRate = 60)
 {
 	server::HostConfig config;
 	config.world = {.seed = 19, .worldName = "timing-" + std::to_string(delay.count()) +
-		(impaired ? "-impaired" : ""), .savesRoot = root};
+		(impaired ? "-impaired-" : "-") + std::to_string(frameRate), .savesRoot = root};
 	config.workers = 0;
 	config.interestRadiusChunks = 2;
 	config.streaming.generations = 0;
@@ -1560,6 +1608,10 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 	using Tick = std::chrono::duration<int64_t, std::ratio<1, wire::kTickRate>>;
 	int64_t frameNumber = 0;
 	double beginX = 0, turnX = 0, endX = 0;
+	double leastViewSpeed = physics::PlayerSettings{}.walkSpeed, mostViewSpeed = leastViewSpeed;
+	unsigned walkingFrames = 0;
+	std::optional<glm::dvec3> previousView;
+	std::optional<Time> previousFrame;
 	bool jump = false, jumpStarted = false, airborne = false, neutralStopped = false;
 	for (Time now = start; now < start + 6s; now += 1ms)
 	{
@@ -1603,7 +1655,8 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 		relay.pump(now);
 		if (now >= nextFrame)
 		{
-			nextFrame = start + std::chrono::ceil<Time::duration>(Tick{++frameNumber});
+			nextFrame = start + std::chrono::ceil<Time::duration>(std::chrono::duration<double>{
+				double(++frameNumber) / frameRate});
 			if (impaired && age >= 2380ms && age < 2880ms)
 				continue;
 			client.poll(now);
@@ -1640,11 +1693,22 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 					jump = false;
 				prediction.expire(now);
 				peakBacklog = std::max(peakBacklog, prediction.backlog());
-				offline.advance(1.0 / wire::kTickRate, {{move, 0.0}}, collision);
+				const double frameDt = previousFrame ? std::chrono::duration<double>(now - *previousFrame).count() :
+					1.0 / frameRate;
+				offline.advance(frameDt, {{move, 0.0}}, collision);
 				if (!offlineOnset && offline.body.position.x > beginX + 0.01)
 					offlineOnset = now;
 				const auto pose = prediction.present(now, collision);
 				require(pose.has_value(), "predicted view lost its safe body");
+				if (previousView && age >= 400ms && age < 600ms)
+				{
+					++walkingFrames;
+					const auto speed = (pose->x - previousView->x) / frameDt;
+					leastViewSpeed = std::min(leastViewSpeed, speed);
+					mostViewSpeed = std::max(mostViewSpeed, speed);
+				}
+				previousView = pose;
+				previousFrame = now;
 				if (!predictedOnset && pose->x > beginX + 0.01)
 					predictedOnset = now;
 				require(batch <= udp::ClientTickScheduler::kMaxBatch, "unbounded frame catch-up");
@@ -1659,8 +1723,13 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 		require(reordered && droppedInput && droppedSnapshot && delivered > 50 && relay.movementDuplicates &&
 			remotePlayers.missingFraction() > 0.0, "did not exercise relay impairments");
 	else
+	{
 		require(stableSequences.size() > 35 && stableProcessed * 4 >= stableSequences.size() * 3 &&
 			jumps == 1 && airborne, "stable admission or single jump failed at " + config.world.worldName);
+		constexpr auto kWalkSpeed = physics::PlayerSettings{}.walkSpeed;
+		require(walkingFrames >= 10 && leastViewSpeed >= kWalkSpeed * 0.95 && mostViewSpeed <= kWalkSpeed * 1.05,
+			"steady camera motion failed at " + config.world.worldName);
+	}
 	const auto final = sim.playerFeet(client.welcome()->player);
 	require(predictedOnset && authorityOnset && offlineOnset && *predictedOnset < *authorityOnset &&
 		*predictedOnset <= *offlineOnset + 17ms && glm::length(final - prediction.feet()) < 0.01,
@@ -1677,6 +1746,7 @@ void testDelayedInput(const fs::path &root, std::chrono::milliseconds delay, boo
 		<< " corrections=" << stats.corrections << " max_m=" << stats.maxCorrection
 		<< " resets=" << stats.hardResets << " max_pending=" << peakBacklog
 		<< " snapshot_missing=" << remotePlayers.missingFraction()
+		<< " walking_view_mps(min/max)=" << leastViewSpeed << '/' << mostViewSpeed
 		<< " final_error_m=" << glm::length(final - prediction.feet())
 		<< " udp_bytes(rx/tx)=" << traffic.receivedBytes << '/' << traffic.sentBytes << '\n';
 	transport.stop(owner);
@@ -1882,6 +1952,7 @@ void testReplicaTerrainChanges()
 	client.edit({24, 1, 8}, STONE);
 	require(!client.terrainChanges().invalidated, "unqueried neighbor invalidated prediction");
 	client.publish();
+	client.now += 17ms;
 	client.input(1.f);
 	const auto after = client.camera();
 	require(before && after && after->x > before->x && client.prediction.backlog() == 5 &&
@@ -2745,6 +2816,7 @@ int main(int argc, char **argv)
 			testClientTickMath();
 			testClientTimingSamples();
 			testPredictionResets();
+			testLocalPresentationCadence();
 			testReplicaCameraHold(false);
 			testReplicaCameraHold(true);
 			testReplicaTerrainDiscontinuities();
@@ -2753,6 +2825,8 @@ int main(int argc, char **argv)
 			for (const auto delay : {0ms, 15ms, 40ms, 75ms})
 				testDelayedInput(root, delay, false);
 			testDelayedInput(root, 40ms, true);
+			testDelayedInput(root, 0ms, false, 144);
+			testDelayedInput(root, 75ms, false, 144);
 		}
 		else if (argc == 2 && std::string_view(argv[1]) == "--measure-chunks")
 		{
