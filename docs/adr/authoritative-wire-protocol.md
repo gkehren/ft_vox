@@ -1,4 +1,4 @@
-# Authoritative wire protocol v4
+# Authoritative wire protocol v5
 
 Accepted for Epic #245 Phase B2 ([#251](https://github.com/gkehren/ft_vox/issues/251)).
 The `ft_vox_wire` library implements framing, payload validation, receive
@@ -21,6 +21,8 @@ other payload layouts and delivery rules carry forward from v2.
 Phase E1 (#259) moves the envelope to **4**, adds the player key to Hello
 and persists the world and player IDs. See the
 [multiplayer checkpoint ADR](multiplayer-checkpoints.md).
+Issue #275 moves the envelope to **5** and adds bounded run-length encoding
+to chunk baselines. Upgrade the server and graphical clients together.
 
 ## Framing
 
@@ -33,7 +35,7 @@ dependency and no generic message fragmentation.
 | Offset | Type | Field |
 | --- | --- | --- |
 | 0 | 4 bytes | ASCII `FTVN` (`46 54 56 4e`) |
-| 4 | u16 | Envelope version, 4 |
+| 4 | u16 | Envelope version, 5 |
 | 6 | u8 | Message tag |
 | 7 | u8 | Flags, zero |
 | 8 | u16 | Payload length, 0–1,164, exactly the remaining bytes |
@@ -64,7 +66,7 @@ direction to the corresponding family. The byte maximum includes the header.
 | 7 | ActionResult | S | Reliable | 70 | 16 | 8 |
 | 8 | Inventory | S | Reliable | 197 | 10 | 4 |
 | 9 | WorldEdit | S | Reliable | 70 | 32 | 16 |
-| 10 | ChunkFragment | S | Reliable | 1,185 | 60 | 16 |
+| 10 | ChunkFragment | S | Reliable | 1,187 | 60 | 16 |
 | 11 | ChunkRemove | S | Reliable | 52 | 16 | 8 |
 | 12 | Resync | C or S | Reliable | 37 | 1 | 1 |
 | 13 | Ack | C or S | Ack | 44 | 60 | 16 |
@@ -84,8 +86,8 @@ budget. These are ceilings. Hosts can use lower rates, reserve scheduling
 capacity for controls/ACKs, and throttle baseline sends under load. B3 owns
 the clocks, bucket enforcement, shared queues and fair scheduling.
 
-At the sustained limit of 60 fragments/s, a full 60-fragment baseline uses
-about one second of a client's fragment budget. These estimates assume a
+At the sustained limit of 60 fragments/s, a raw 60-fragment baseline uses
+about one second of a client's fragment budget. These worst-case fragment counts assume a
 circular interest area on the chunk grid and that every fragment slot goes
 to baseline data.
 
@@ -97,8 +99,8 @@ to baseline data.
 
 The estimates exclude the initial burst, competing traffic and retransmits.
 With the one-frame send window, round-trip time can also limit delivery.
-The [dedicated server guide](../dedicated-server.md#world-replication) records
-loopback and impaired delivery measurements from `WorldReplication`.
+The [cold chunk benchmark](../benchmarks/275-cold-chunk-delivery.md) records
+loopback and impaired delivery measurements.
 
 ## Join, identity and versioning
 
@@ -107,10 +109,10 @@ loopback and impaired delivery measurements from `WorldReplication`.
   The client picks a nonzero fresh nonce per attempt and reuses it only to
   retransmit that attempt. The inclusive version range must be nonzero and
   ordered. The bearer key has at least one nonzero byte. Hello, Welcome and
-  Reject use the v4 envelope for discovery.
+  Reject use the v5 envelope for discovery.
 - **Welcome** carries `nonce:u64, worldId:u64, playerId:u32, seed:u32,
   generatorVersion:u32, compatibility, tick:u64, nextEditId:u64`. The server
-  echoes the nonce, selects v4, and supplies the authorized persistent PlayerId. The seed
+  echoes the nonce, selects v5, and supplies the authorized persistent PlayerId. The seed
   is 1–2,147,483,647. The generator version is nonzero and must match the
   negotiated generator fingerprint. `compatibility` is `itemSchema:u16,
   catalogFingerprint:u64, generatorFingerprint:u64`. The server compares
@@ -121,7 +123,7 @@ loopback and impaired delivery measurements from `WorldReplication`.
   Reasons are 1 version, 2 content, 3 full, 4 unavailable, 5 identity in use
   and 6 saved profile limit. With valid
   discovery framing but no common version, reply with reason 1 and range
-  `[4,4]`. A foreign magic or envelope version is dropped. It cannot be
+  `[5,5]`. A foreign magic or envelope version is dropped. It cannot be
   interpreted as discovery or as a gameplay packet.
 - Header SessionId, epoch and sequence are zero on Hello and Reject. Welcome
   has a nonzero SessionId and epoch and zero sequence. Repeated Hello
@@ -148,7 +150,7 @@ loopback and impaired delivery measurements from `WorldReplication`.
 
 Layout, tag, framing or wire semantic breaks require an explicit new protocol
 version. Readers reject unknown tags and fields for the selected version.
-Future envelopes can preserve v4 discovery or require an explicit client
+Future envelopes can preserve v5 discovery or require an explicit client
 upgrade. Item schema 1 carries the append-only u16 `ItemId` registry with zero
 reserved for empty. The material catalog uses the append-only voxel ordinals
 `[0, COUNT)` and wire AIR 255. The current core AIR sentinel is mapped at
@@ -356,25 +358,34 @@ come through the baseline. Render-border invalidations use the separate
 render event stream.
 
 **ChunkFragment** carries `transferId:u64, chunkCoord, generation:u64,
-revision:u64, nextEditId:u64, checksum:u64, index:u8, materials:bytes`.
-This is one full 65,536-byte chunk in row-major X then Z then Y order
-(`y * 256 + z * 16 + x`), with one material byte per voxel and no compression.
-The checksum is FNV-1a-64 over those raw material bytes for corruption
-detection. The header's scope and
-all transfer metadata other than index must match across fragments. The
-server assigns ascending nonzero transfer IDs within the scope. The index
-is 0–59. Indices 0–58 carry exactly 1,100 bytes, and index 59 carries 636
-bytes. Offset is `index * 1100` and is never supplied by the peer.
+revision:u64, nextEditId:u64, checksum:u64, encodedSize:u16, index:u8, data:bytes`.
+The full image contains 65,536 material bytes in X, Z, Y order
+(`y * 256 + z * 16 + x`). FNV-1a-64 covers those bytes after decoding.
+`encodedSize == 0` denotes the full raw image. A nonzero value gives the
+exact byte length of the run-length encoded image. Each run starts with a
+control byte. The low seven bits give the run length minus one. A set high
+bit means one material byte follows and repeats for the run length. A clear
+high bit means that many literal material bytes follow. A run may cross a
+fragment boundary. The encoder uses the raw image when encoding would
+equal or exceed its size.
 
-Allow one in-flight transfer per client and one fixed 65,536-byte assembly
-buffer. Delivery to the assembler is ordered after reliable admission.
-There is no allocation from an advertised size or fragment count. Start a
-20-second total deadline on the first fragment. Expire after 5 seconds with
-no new fragment or at the total deadline. A gap, expiry,
-changed metadata, invalid material or checksum failure discards the
-assembly. Install the chunk only after index 59 and full checksum
-verification. An assembled baseline is associated with its scope, chunk
-generation, revision and next-edit watermark.
+The header scope and all transfer metadata except index must match across
+fragments. The server assigns ascending nonzero transfer IDs within the
+scope. With payload size `n`, fragment count is `ceil(n / 1100)` and
+each zero-based index carries `min(1100, n - index * 1100)` bytes. Raw
+images use 60 fragments, with 636 bytes in the last fragment.
+
+Keep one in-flight transfer per client, one fixed 65,536-byte assembly
+buffer and one 65,536-byte temporary decode buffer used on completion.
+Delivery to the assembler is ordered after reliable admission. Decode
+requires each run to fit both the remaining input and the output and
+requires exactly 65,536 valid material bytes. There is no allocation from
+the advertised size. Start a 20-second total deadline on the first fragment
+and expire after five seconds without progress. A gap, expiry, changed
+metadata, invalid encoding, invalid material or checksum failure discards
+the assembly. Install only after the final fragment and checksum
+verification. The installed image carries the scope, chunk generation,
+revision and next-edit watermark.
 
 **WorldEdit** carries `editId:u64, cell, generation:u64, baseRevision:u64,
 material:u8`. It replaces one authoritative voxel at that cell. Compare
@@ -450,6 +461,6 @@ available.
 clients, an injected-clock IPv4 relay, lost and reordered traffic,
 checksum recovery and a replay from a retired session. The
 [closure report](../multiplayer-closure.md) records the loopback results
-and the supported private-network scope. Wire v4 profile keys and
+and the supported private-network scope. Wire v5 profile keys and
 session capabilities travel in cleartext. Public-network readiness is
 tracked separately in [#276](https://github.com/gkehren/ft_vox/issues/276).

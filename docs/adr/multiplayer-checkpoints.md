@@ -2,7 +2,7 @@
 
 Accepted for Epic #245 Phase E1, issue #259. This extends the
 [gameplay checkpoint transaction](gameplay-persistence-transactions.md)
-and uses [wire v4](authoritative-wire-protocol.md).
+and uses the [authoritative wire protocol](authoritative-wire-protocol.md).
 
 ## Identity and authorization
 

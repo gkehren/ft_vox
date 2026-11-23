@@ -79,15 +79,15 @@ std::array<Fixture, 17> fixtures()
     Inventory inventory{13, 2, 8, {}};
     inventory.slots[0] = {items::ItemId::Dirt, 64};
     ChunkFragment fragment{{18, {-3, 4}, {1, 2}, 32, 0x2122232425262728}, 59, {}};
-    fragment.materials[0] = kAirMaterial;
+    fragment.data[0] = kAirMaterial;
     ItemSnapshot items{13, 9, 1, {}};
     items.items[0] = {9, {{-32, 64, 0}, {16, -8, 0}}, {items::ItemId::Glass, 3}};
     MobSnapshot mobs{13, 1, {}};
     mobs.mobs[0] = {5, {{-32, 64, 0}, {16, -8, 0}}, 2};
 
     return {{
-        {client, {{}, 0, Hello{1, 2, 4, kContent, {1}}}, "0100 003e", kNoScope,
-         "0000000000000001 0002 0004 0001 3132333435363738 4142434445464748 01", 31},
+        {client, {{}, 0, Hello{1, 2, 5, kContent, {1}}}, "0100 003e", kNoScope,
+         "0000000000000001 0002 0005 0001 3132333435363738 4142434445464748 01", 31},
         {server, {kScope, 0, Welcome{1, 9, {3}, 42, 1, kContent, 4, 5}}, "0200 003e", kScopedZero,
          "0000000000000001 0000000000000009 00000003 0000002a 00000001 0001"
          " 3132333435363738 4142434445464748 0000000000000004 0000000000000005"},
@@ -108,9 +108,9 @@ std::array<Fixture, 17> fixtures()
          "000000000000000d 0000000000000002 08 0004 0040", 140},
         {server, {kScope, 2, WorldEdit{4, {-2, 0x010203, 255}, {1, 2}, kAirMaterial}},
          "0900 0022", kScopedTwo, "0000000000000004 fffffffe 00010203 ff 0000000000000001 0000000000000002 ff"},
-        {server, {kScope, 2, fragment}, "0a00 02ad", kScopedTwo,
+        {server, {kScope, 2, fragment}, "0a00 02af", kScopedTwo,
          "0000000000000012 fffffffd 00000004 0000000000000001 0000000000000002"
-         " 0000000000000020 2122232425262728 3b ff", 635},
+         " 0000000000000020 2122232425262728 0000 3b ff", 635},
         {server, {kScope, 2, ChunkRemove{{-3, 4}, 1}}, "0b00 0010", kScopedTwo,
          "fffffffd 00000004 0000000000000001"},
         {client, {kScope, 2, Resync{ResyncReason::Checksum}}, "0c00 0001", kScopedTwo, "02"},
@@ -128,7 +128,7 @@ void testGoldens(const std::array<Fixture, 17> &cases)
 {
     for (const auto &fixture : cases)
     {
-        auto golden = bytesOf("4654564e 0004");
+        auto golden = bytesOf("4654564e 0005");
         for (auto part : {fixture.tagLength, std::string_view("0000"), fixture.scopeAndSequence, fixture.payload})
         {
             const auto bytes = bytesOf(part);
@@ -154,7 +154,7 @@ void testGoldens(const std::array<Fixture, 17> &cases)
     auto incompatible = hello;
     incompatible.maxVersion = incompatible.minVersion = 1;
     CHECK_EXPR(rejectHello(incompatible, kContent) == RejectReason::Version);
-    incompatible.maxVersion = incompatible.minVersion = 5;
+    incompatible.maxVersion = incompatible.minVersion = 6;
     CHECK_EXPR(rejectHello(incompatible, kContent) == RejectReason::Version);
     CHECK_EXPR(rejectHello(hello, {2, kContent.catalog, kContent.generator}) == RejectReason::Content);
     CHECK_EXPR(rejectHello(hello, {1, 0, kContent.generator}) == RejectReason::Content);
@@ -189,6 +189,7 @@ void testMalformed(const std::array<Fixture, 17> &cases)
     mutate(3, 0, "01", S::BadMagic);
     mutate(3, 4, "0001", S::VersionMismatch);
     mutate(3, 4, "0002", S::VersionMismatch);
+    mutate(3, 4, "0004", S::VersionMismatch);
     mutate(3, 4, "ffff", S::VersionMismatch);
     mutate(3, 6, "00", S::UnknownKind);
     mutate(3, 6, "ff", S::UnknownKind);
@@ -224,9 +225,10 @@ void testMalformed(const std::array<Fixture, 17> &cases)
     mutate(7, 55, "0000", S::InvalidPayload);
     mutate(8, 61, "ffffffffffffffff", S::InvalidPayload);
     mutate(8, 69, "fe", S::InvalidPayload);
-    mutate(9, 84, "ff", S::InvalidPayload);
-    mutate(9, 84, "00", S::InvalidPayload); // non-final fragment with final fragment's length
-    mutate(9, 85, "fe", S::InvalidPayload);
+    mutate(9, 84, "0001", S::InvalidPayload); // index exceeds the encoded payload
+    mutate(9, 86, "ff", S::InvalidPayload);
+    mutate(9, 86, "00", S::InvalidPayload); // non-final fragment with final fragment's length
+    mutate(9, 87, "fe", S::InvalidPayload);
     mutate(10, 36, "7fffffff", S::InvalidPayload);
     mutate(11, 36, "ff", S::InvalidPayload);
     mutate(12, 43, "00", S::InvalidPayload);
@@ -318,17 +320,17 @@ void testInactiveStorage(const std::array<Fixture, 17> &cases)
 
     const auto &fragment = cases[9].packet;
     auto reusedFragment = fragment;
-    auto &materials = std::get<ChunkFragment>(reusedFragment.payload).materials;
-    const auto active = fragmentSize(std::get<ChunkFragment>(reusedFragment.payload).index);
-    materials[active] = 254;
-    materials.back() = kAirMaterial;
+    auto &part = std::get<ChunkFragment>(reusedFragment.payload);
+    const auto active = fragmentSize(part.index, part.baseline.encodedSize);
+    part.data[active] = 254;
+    part.data.back() = kAirMaterial;
 
     bytes = encoded(server, reusedFragment);
     CHECK_EXPR(bytes == encoded(server, fragment));
     CHECK_EXPR(decode(server, bytes, decoded) == S::Ok);
     CHECK_EXPR(decoded == reusedFragment);
-    CHECK_EXPR(std::get<ChunkFragment>(decoded.payload).materials[active] == 0);
-    materials[active - 1] = kAirMaterial;
+    CHECK_EXPR(std::get<ChunkFragment>(decoded.payload).data[active] == 0);
+    part.data[active - 1] = kAirMaterial;
     CHECK_EXPR(decoded != reusedFragment);
 }
 
@@ -341,7 +343,7 @@ void testAssembly()
     const ChunkBaseline baseline{1, {-5, 7}, {1, 0}, 42, chunkChecksum(chunk)};
     auto fragment = [&chunk, &baseline](uint8_t index) {
         ChunkFragment result{baseline, index, {}};
-        std::copy_n(chunk.begin() + index * kFragmentBytes, fragmentSize(index), result.materials.begin());
+        std::copy_n(chunk.begin() + index * kFragmentBytes, fragmentSize(index, 0), result.data.begin());
         return result;
     };
     ChunkAssembler assembler;
@@ -363,19 +365,19 @@ void testAssembly()
     CHECK_EXPR(assembler.accept(fragment(5), now + kChunkTransferTimeout) == A::Expired);
     CHECK_EXPR(assembler.bytes().empty());
     auto invalid = fragment(0);
-    invalid.materials[0] = 254;
+    invalid.data[0] = 254;
     CHECK_EXPR(assembler.accept(invalid, now) == A::InvalidFragment);
 
     for (bool corrupt : {false, true})
     {
-        for (uint8_t index = 0; index < kFragmentsPerChunk; ++index)
+        for (uint8_t index = 0; index < kMaxFragmentsPerChunk; ++index)
         {
             auto message = fragment(index);
             if (corrupt && index == 0)
-                message.materials[0] = 1;
+                message.data[0] = 1;
             constexpr auto server = Endpoint::Server;
             const auto bytes = encoded(server, {kScope, uint64_t{index} + 1, message});
-            CHECK_EXPR(bytes.size() == (index == 59 ? 721u : 1185u));
+            CHECK_EXPR(bytes.size() == (index == 59 ? 723u : 1187u));
             Packet decoded;
             CHECK_EXPR(decode(server, bytes, decoded) == S::Ok);
             const auto status = assembler.accept(std::get<ChunkFragment>(decoded.payload), now);
@@ -388,6 +390,77 @@ void testAssembly()
         assembler.reset();
         CHECK_EXPR(assembler.bytes().empty());
     }
+}
+
+void testCompressedAssembly()
+{
+    using A = AssemblyStatus;
+    std::array<uint8_t, kChunkBytes> chunk, payload;
+    for (size_t i = 0; i < chunk.size(); ++i)
+        chunk[i] = static_cast<uint8_t>(i % 32);
+    CHECK_EXPR(packChunk(chunk, payload) == 0 && chunk == payload);
+
+    ChunkAssembler assembler;
+    const ChunkAssembler::Clock::time_point now{};
+    chunk.fill(kAirMaterial);
+    for (bool mixed : {false, true})
+    {
+        if (mixed)
+            for (size_t i = 111; i < 3000; ++i)
+                chunk[i] = static_cast<uint8_t>(i % 32);
+        const ChunkBaseline baseline{1, {-5, 7}, {1, 0}, 42, chunkChecksum(chunk), packChunk(chunk, payload)};
+        CHECK_EXPR(mixed ? fragmentCount(baseline.encodedSize) > 1 : baseline.encodedSize == 1024);
+        for (uint8_t index = 0; index < fragmentCount(baseline.encodedSize); ++index)
+        {
+            ChunkFragment part{baseline, index, {}};
+            const auto size = fragmentSize(index, baseline.encodedSize);
+            std::copy_n(payload.begin() + index * kFragmentBytes, size, part.data.begin());
+            const auto bytes = encoded(Endpoint::Server, {kScope, uint64_t{index} + 1, part});
+            if (!mixed)
+            {
+                const auto prefix = bytesOf("0400 00 ffff");
+                CHECK_EXPR(std::ranges::equal(std::span(bytes).subspan(84, prefix.size()), prefix));
+            }
+            Packet decoded;
+            CHECK_EXPR(decode(Endpoint::Server, bytes, decoded) == S::Ok);
+            if (index == 1)
+            {
+                auto mismatch = part;
+                ++mismatch.baseline.encodedSize;
+                CHECK_EXPR(assembler.accept(mismatch, now) == A::Gap && assembler.bytes().empty());
+                ChunkFragment first{baseline, 0, {}};
+                std::copy_n(payload.begin(), kFragmentBytes, first.data.begin());
+                CHECK_EXPR(assembler.accept(first, now) == A::InProgress);
+            }
+            const bool complete = index + 1u == fragmentCount(baseline.encodedSize);
+            CHECK_EXPR(assembler.accept(std::get<ChunkFragment>(decoded.payload), now) ==
+                       (complete ? A::Complete : A::InProgress));
+            CHECK_EXPR(complete ? std::ranges::equal(assembler.bytes(), chunk) : assembler.bytes().empty());
+        }
+    }
+
+    ChunkFragment uniform{{2, {-5, 7}, {1, 0}, 42, 0, 1024}, 0, {}};
+    uniform.data.fill(0xff);
+    const auto expect = [&](const ChunkFragment &part, A result) {
+        CHECK_EXPR(assembler.accept(part, now) == result && assembler.bytes().empty());
+    };
+    expect(uniform, A::BadChecksum);
+    auto invalid = uniform;
+    --invalid.baseline.encodedSize; // missing repeated material
+    expect(invalid, A::InvalidFragment);
+    invalid.data[1022] = 0x02; // missing literal materials
+    expect(invalid, A::InvalidFragment);
+    invalid = uniform;
+    invalid.baseline.encodedSize -= 2; // too little decoded output
+    expect(invalid, A::InvalidFragment);
+    invalid = uniform;
+    invalid.baseline.encodedSize += 2; // run after output is full
+    expect(invalid, A::InvalidFragment);
+    invalid = uniform;
+    invalid.data[1] = 254; // reserved material byte in a repeat
+    expect(invalid, A::InvalidFragment);
+    invalid.data[0] = 0; // reserved material byte in a literal
+    expect(invalid, A::InvalidFragment);
 }
 
 void testProperties(const std::array<Fixture, 17> &cases)
@@ -465,6 +538,7 @@ int main()
     testSequence();
     testInactiveStorage(cases);
     testAssembly();
+    testCompressedAssembly();
     testProperties(cases);
     std::cout << "WireProtocol: " << testmain::checks << " checks, " << testmain::fails << " failures\n";
     return testmain::exitCode();

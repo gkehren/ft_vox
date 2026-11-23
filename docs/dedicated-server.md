@@ -48,7 +48,7 @@ arguments. Launching `ft_vox` without `--connect` starts solo play.
 `--connect` takes a numeric IPv4 address and port. With it, `--seed` is an
 optional server identity check. `--world`, `--benchmark`, and `--view` are solo
 options. Remote play uses the normal graphics and resource-pack options.
-Use matching client and server builds for wire v4. The client creates a
+Use matching client and server builds for wire v5. The client creates a
 profile on first launch and reuses its key across launches. Without
 `--player-profile`, it uses `saves/.client-profiles/<IPv4>-<port>` relative
 to its working directory. Use distinct profiles for two clients on the
@@ -110,9 +110,9 @@ snapshot after a prolonged gap. The server still admits only the next
 six ticks at its receive boundary. The HUD reports degraded input timing
 if snapshots become too old or processed input stops advancing while
 the client is sending. A large path change between RTT observations can
-still interrupt movement. The stop-and-wait chunk baseline takes at least
-one round trip per fragment, so the first playable chunk can take several
-seconds at higher RTT. The delayed-UDP tests measure the first playable
+still interrupt movement. The reliable sender waits for an ACK before the
+next chunk fragment. Baseline compression reduces the number of round
+trips needed to join. The delayed-UDP tests measure the first playable
 chunk separately from steady movement.
 
 See [Multiplayer smoke](multiplayer-client-smoke.md) for the physical GPU
@@ -380,9 +380,12 @@ resubmits it in the new scope.
 The owner derives each peer's circular chunk interest from its authoritative
 feet position and `--interest-radius`. It uses the same disk as terrain
 residency. Zero disables chunk replication. It selects the nearest published
-chunks first, including the spawn chunk when available. The full authoritative
-baseline uses 65,536 material bytes, 60 fragments, and an FNV-1a checksum. The
-client uses the negotiated seed and generator/catalog compatibility as world
+chunks first, including the spawn chunk when available. Each baseline
+contains a full 65,536-byte material image. The owner applies bounded
+run-length encoding and sends the raw image if encoding cannot shrink it.
+The 60-fragment maximum covers raw images. The checksum covers the
+decoded material bytes. The client uses the negotiated seed and
+generator/catalog compatibility as world
 metadata and installs the bytes sent by the authority. The baseline carries
 one coherent incarnation, logical revision and next-edit watermark, including
 persistent overrides and any accepted pending edit overlay.
@@ -398,49 +401,35 @@ and subsequent subscriptions follow the player's new position.
 `ClientTransport::chunks()` exposes the current, checksum-verified material
 arrays, chunk versions and edit watermarks to the CPU pump owner. Pair the
 view with `welcome()` and `scope()` to key derived state by world and epoch.
-Arrays use y/z/x indexing with wire material bytes and AIR 255. A future
-graphical multiplayer host can derive meshes and lighting locally from those
-arrays. Revision gaps, checksum failures and assembly timeouts clear the
+Arrays use y/z/x indexing with wire material bytes and AIR 255. The
+graphical client derives meshes and lighting locally from those arrays.
+Revision gaps, malformed baselines, checksum failures and assembly timeouts clear the
 projection and trigger a fresh join. `requestWorldResync(now)` takes that same
-path. A fresh join creates a new remote actor and uses the normal spawn path.
+path. A fresh scope restores the rostered actor using the same profile key.
 After a server restart or an idle timeout, the caller can `connect(now)` again.
 The fresh capability and epoch keep old packets out of the new receive window.
 
 The host keeps up to 64 pending deltas per peer and a 4,096-entry per-tick
 logical edit journal. A gap or overflow requests resync. The transport allows
-one baseline buffer per peer and at most 16 across the server, for 1 MiB of
-baseline bytes. On the client, the radius-eight disk caps installed material
-storage at 197 chunks (about 12.3 MiB), plus one 64 KiB assembly buffer. The
-existing per-peer and process-wide bandwidth buckets apply to retries as
+one 64 KiB baseline payload buffer per peer and at most 16 across the server,
+for 1 MiB of payload buffers. The single tick owner uses one additional
+64 KiB capture buffer while packing a baseline. On the client, the
+radius-eight disk caps installed material storage at 197 chunks (about
+12.3 MiB), plus a 64 KiB assembly buffer and 64 KiB of temporary decode
+storage. The per-peer and process-wide bandwidth buckets apply to retries as
 well as first sends. `world_tx_bytes`, `world_tx_frames`, `world_retransmits`
 and `world_resyncs` in `SERVER` records report replication traffic and resync
 requests. `ServerTransport::worldTraffic(playerId)` exposes the same counters
 for active peers.
 
-`WorldReplication` reports Welcome-to-install timing with a controlled clock
-and real IPv4 sockets. A playable neighborhood in this fixture is the five
-chunks of radius one. The table includes baseline and delta datagrams and
-retries in the outbound direction.
-
-| Loopback condition | First spawn chunk | Five-chunk neighborhood | World bytes | Retransmits |
-| --- | ---: | ---: | ---: | ---: |
-| No injected faults | 750 ms | 4,790 ms | 354,505 | 1 |
-| 10 ms each way, one dropped fragment, one dropped edit and reordered duplicates | 1,660 ms | 7,875 ms | 354,575 | 2 |
-
-The fixed-size baseline favors predictable verification and memory use.
-Round-trip time and loss reduce throughput with the one-frame reliable send
-window. The assembler restarts a transfer through resync after five seconds
-without progress or twenty seconds total. The measurements show the
-effect of prioritizing the spawn chunk and the cost of larger neighborhoods
-with full baselines.
-
-At 150 ms RTT, the cold-join fixture takes about 9.4 seconds to install
-the spawn chunk and receive private inventory. Future transport work could
-evaluate a sliding reliable window with bounded in-flight fragment
-tracking, cumulative or selective acknowledgments, baseline compression,
-and fairness across simultaneous clients. CPU-only benchmarks at 30, 80
-and 150 ms RTT should measure time to the first playable chunk, transfer
-throughput, retry cost, and per-client memory under contention.
+At 150 ms RTT, the eight-client benchmark reaches the first playable chunk
+for every client in 1.57 s on a clean link and 2.02 s with injected loss.
+The steady-state test then streams a second neighborhood. See
+[cold chunk delivery](benchmarks/275-cold-chunk-delivery.md) for the
+comparison with raw v4, traffic and retry counts, and the CTest for
+contended transfer slots. Stop-and-wait still costs one round trip per
+fragment. The assembler triggers resync after five seconds without progress
+or twenty seconds total.
 
 ## Shutdown and recovery
 

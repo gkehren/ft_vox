@@ -461,11 +461,12 @@ std::optional<udp::WorldUpdate> ServerHost::nextWorldUpdate(sim::PlayerId player
 		if (remote.chunks.contains(coord) || !world.chunkContentVersion(coreCoord))
 			continue;
 		auto transfer = std::make_unique<udp::ChunkTransfer>();
+		std::array<uint8_t, wire::kChunkBytes> materials;
 		ChunkContentVersion version;
-		const auto watermark = world.captureChunkContent(coreCoord, transfer->materials, version);
-		std::ranges::transform(transfer->materials, transfer->materials.begin(), wireMaterial);
+		const auto watermark = world.captureChunkContent(coreCoord, materials, version);
+		std::ranges::transform(materials, materials.begin(), wireMaterial);
 		transfer->baseline = {remote.nextTransferId++, coord, {version.generation, version.revision},
-			watermark, wire::chunkChecksum(transfer->materials)};
+			watermark, wire::chunkChecksum(materials), wire::packChunk(materials, transfer->payload)};
 		remote.chunks.emplace(coord, transfer->baseline.version);
 		return udp::WorldUpdate{std::move(transfer)};
 	}

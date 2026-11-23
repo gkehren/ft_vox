@@ -142,13 +142,16 @@ struct Relay
 			{
 				if (chunk->index == 0)
 					lastBegin = chunk->baseline;
-				if (chunk->index == 2 && std::exchange(dropFragment, false))
+				if (chunk->index == 0 && std::exchange(dropFragment, false))
 					continue;
-				if (chunk->index == 3 && std::exchange(duplicateFragment, false))
+				if (chunk->index == 0 && std::exchange(duplicateFragment, false))
 					pending.emplace(now + delay + 150ms, std::pair{to, frame});
-				if (chunk->index + 1u == wire::kFragmentsPerChunk && std::exchange(corruptFragment, false))
+				const auto encodedSize = chunk->baseline.encodedSize;
+				if (chunk->index + 1u == wire::fragmentCount(encodedSize) && std::exchange(corruptFragment, false))
 				{
-					chunk->materials[0] = chunk->materials[0] == wire::kAirMaterial ? static_cast<uint8_t>(STONE) : wire::kAirMaterial;
+					// The last byte is a material for either encoding.
+					auto &material = chunk->data[wire::fragmentSize(chunk->index, encodedSize) - 1];
+					material = material == wire::kAirMaterial ? static_cast<uint8_t>(STONE) : wire::kAirMaterial;
 					wire::Datagram corrupted;
 					require(wire::encode(wire::Endpoint::Server, packet, corrupted) == wire::CodecStatus::Ok,
 						"expected checksum-only corruption");
@@ -352,11 +355,6 @@ void testReplication(const fs::path &root)
 	}
 	cleanTime.report("loopback");
 	impairedTime.report("loopback 10ms each way with loss and reordered duplicates");
-	const auto &fragmentBudget = *wire::policy(wire::Kind::ChunkFragment);
-	const auto minimumInstallTime = 1000000us * static_cast<int>(wire::kFragmentsPerChunk - fragmentBudget.burst) /
-		fragmentBudget.messagesPerSecond;
-	require(*cleanTime.first - *cleanTime.welcome >= std::chrono::ceil<std::chrono::milliseconds>(minimumInstallTime),
-		"initial baseline bypassed fragment pacing");
 	require(editedAt && returned && impaired.oldEdit && impairedTime.traffic.retransmits >= 2,
 		"faults and teleport did not hit in-flight world updates");
 	require(matches(first, world, spawn) && matches(second, world, spawn), "overlapping spawn digests differ");
@@ -1341,8 +1339,7 @@ void testDelayedJoin(const fs::path &root)
 		client.poll(now);
 		if (client.chunks().contains(spawn) && client.inventory() && client.playerSnapshots().current)
 		{
-			require(now - start > wire::kChunkIdleTimeout && !relay.lastResync,
-				"cold join did not exercise a long, steadily progressing baseline");
+			require(now - start <= 2s && !relay.lastResync, "150 ms cold join missed its 2 s budget");
 			std::cout << "150 ms cold join ready in " << (now - start) / 1ms << " ms\n";
 			transport.stop(host);
 			require(host.stop(error), error);
@@ -2082,7 +2079,8 @@ struct ClosureLoop
 	}
 };
 
-void measureChunkDelivery(const fs::path &root, std::chrono::milliseconds rtt, size_t clientCount, bool loss)
+void measureChunkDelivery(const fs::path &root, std::chrono::milliseconds rtt, size_t clientCount, bool loss,
+	bool enforceBudget = false)
 {
 	server::HostConfig config;
 	config.world = {.seed = 19, .worldName = "chunks-" + std::to_string(rtt.count()) + "-" +
@@ -2154,6 +2152,8 @@ void measureChunkDelivery(const fs::path &root, std::chrono::milliseconds rtt, s
 	}, "clients did not settle the spawn neighborhood", 90s);
 	const auto coldMs = (loop.now - start - 5ms) / 1ms;
 	const auto cold = loop.transport.worldTraffic();
+	require(std::ranges::all_of(peers, [&](const auto &peer) { return matches(peer->client, world, spawn); }),
+		"spawn neighborhood differs from the authority");
 	constexpr Coord shifted{4, 0};
 	for (const auto &peer : peers)
 		sim.restorePlayerFlight(peer->client.welcome()->player, true, {72.5, 245, 8.5});
@@ -2176,6 +2176,14 @@ void measureChunkDelivery(const fs::path &root, std::chrono::milliseconds rtt, s
 		<< " neighborhood_ms=" << coldMs << " cold_bytes=" << cold.bytes << " cold_retries=" << cold.retransmits
 		<< " shift_ms=" << shiftMs << " shift_bytes=" << total.bytes - cold.bytes
 		<< " shift_retries=" << total.retransmits - cold.retransmits << " peak_transfers=" << peakTransfers << '\n';
+	if (enforceBudget)
+	{
+		require(peakTransfers == udp::kMaxConcurrentChunkTransfers, "did not saturate the global transfer limit");
+		require(firstMax <= 4s && coldMs <= 12'000 && shiftMs <= 14'000,
+			"contended chunk delivery missed its timing budget");
+		require(cold.bytes <= clientCount * 128 * 1024 && total.bytes - cold.bytes <= clientCount * 128 * 1024,
+			"contended chunk delivery missed its traffic budget");
+	}
 	loop.transport.stop(host);
 	require(host.stop(error), error);
 }
@@ -2711,7 +2719,7 @@ void testThreadedDelivery(const fs::path &root)
 	}
 	server.stop(host);
 	server.rethrowIoError();
-	require(client.chunks().contains(spawn) && server.worldTraffic().frames >= wire::kFragmentsPerChunk,
+	require(client.chunks().contains(spawn) && server.worldTraffic().frames > 0,
 		"worker did not deliver a complete baseline from the owner mailbox");
 	require(result && result->actionId == 1 && result->code == wire::ActionCode::OutOfReach && result->editId == 0,
 		"worker did not deliver the owner's action result");
@@ -2753,6 +2761,8 @@ int main(int argc, char **argv)
 					for (const bool loss : {false, true})
 						measureChunkDelivery(root, rtt, clients, loss);
 		}
+		else if (argc == 2 && std::string_view(argv[1]) == "--cold-chunks")
+			measureChunkDelivery(root, 150ms, udp::kMaxConcurrentChunkTransfers + 2, true, true);
 		else if (argc == 2 && std::string_view(argv[1]) == "--closure")
 		{
 			const auto sync = testClosure(root, 0);

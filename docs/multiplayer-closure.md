@@ -56,9 +56,10 @@ and datagrams are capped at 1,200 bytes. The per-peer budget is 128 frames
 and 128 KiB per second. The process budget is 2,048 frames and 2 MiB per
 second. Family limits are narrower where appropriate. Each peer has a
 six-tick input window, one reliable frame in flight, one world send slot,
-and at most 64 buffered edits before resync. One baseline is 64 KiB in
-60 fragments, with at most 16 concurrent baseline allocations for the
-server. Wire v4 carries profile keys and session capabilities in cleartext.
+and at most 64 buffered edits before resync. A baseline uses up to 60
+fragments and one 64 KiB payload buffer, with at most 16 concurrent
+baseline allocations for the server. Wire v5 carries profile keys and
+session capabilities in cleartext.
 Public-network validation remains open ([#276](https://github.com/gkehren/ft_vox/issues/276)).
 
 ## Soak baseline and alert thresholds
@@ -109,9 +110,9 @@ See the [GPU report](multiplayer-client-smoke.md) and
   native input pipe was unavailable on this run.
 - [#276](https://github.com/gkehren/ft_vox/issues/276) tracks the threat
   model and deployment review for public networking.
-- [#275](https://github.com/gkehren/ft_vox/issues/275) tracks cold chunk
-  delivery. At 150 ms RTT the earlier fixture needed about 9.4 s for
-  playable spawn terrain and inventory.
+- [#275](https://github.com/gkehren/ft_vox/issues/275) adds bounded baseline
+  compression. The [cold chunk benchmark](benchmarks/275-cold-chunk-delivery.md)
+  measures spawn and sustained delivery across RTT, loss and client counts.
 
 ## Merged implementation tracker
 
