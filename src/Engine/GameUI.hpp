@@ -190,7 +190,7 @@ struct GameUIFrame
 	std::function<void()> leaveServer;
 	std::function<void()> returnToSolo;
 	const client::JoinPreferences *joinPreferences{};
-	std::span<const std::string> joinProfiles;
+	const std::vector<std::string> *joinProfiles{};
 	std::string joinError, joinPreferencesError;
 	std::function<void(client::JoinRequest)> connectServer;
 	std::function<void(std::string_view)> selectJoinProfile, createJoinProfile, toggleFavorite;
@@ -199,8 +199,9 @@ struct GameUIFrame
 	std::span<const std::string> hostWorlds;
 	std::string hostError;
 	bool exitAfterHostedStop{};
-	std::function<void(hosting::Options, bool)> startHostedServer;
-	std::function<void()> stopHostedServer, forceStopHostedServer, joinHostedServer;
+	std::function<void(hosting::Options, bool, std::string_view)> startHostedServer;
+	std::function<void()> stopHostedServer, forceStopHostedServer;
+	std::function<void(std::string_view)> joinHostedServer;
 
 	/// Gameplay inventory presentation (issue #229, Epic #223 Phase F):
 	/// read-only bounded snapshot filled by Engine::drawUi + explicit command
@@ -430,6 +431,7 @@ private:
 	void drawMultiplayerPanel(const GameUIFrame &frame);
 	void drawJoinPanel(const GameUIFrame &frame);
 	void drawHostPanel(const GameUIFrame &frame);
+	void drawHostProfile(const GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
 	void drawOverlayHints(GameUIFrame &frame);
@@ -477,7 +479,8 @@ private:
 	bool m_joinDraftInitialized{};
 	hosting::Options m_hostOptions;
 	std::array<char, 64> m_hostWorld{}, m_hostAddress{};
-	bool m_hostAutoJoin{true}, m_focusHostPanel{};
+	std::array<char, 128> m_hostProfile{};
+	bool m_hostAutoJoin{true}, m_focusHostPanel{}, m_hostProfileInitialized{};
 
 	/// One-shot: Help window opens with the requested tab selected.
 	ui::HelpTabRequest m_helpTabRequest{ui::HelpTabRequest::None};

@@ -184,7 +184,7 @@ std::string validate(const Options &options)
 				return {};
 		}
 		catch (const std::exception &) {}
-		return "Enter a private IPv4 address assigned to a LAN or VPN interface.";
+		return "Enter a numeric IPv4 address in a private LAN or VPN range.";
 	}
 	return {};
 }
@@ -235,25 +235,27 @@ bool ServerSupervisor::start(Options options, fs::path executable, fs::path save
 	{
 		m_snapshot.state = State::Failed;
 		m_snapshot.message = std::move(error);
-		return false;
 	}
-	m_command.store(Command::None);
-	m_snapshot.state = State::Starting;
-	m_snapshot.message = "Starting the dedicated server.";
-	try
+	else
 	{
-		m_worker = std::jthread([this, options = std::move(options), executable = std::move(executable),
-			savesRoot = std::move(savesRoot)](std::stop_token lifetime) {
-			run(lifetime, options, executable, savesRoot);
-		});
+		m_command.store(Command::None);
+		m_snapshot.state = State::Starting;
+		m_snapshot.message = "Starting the dedicated server.";
+		try
+		{
+			m_worker = std::jthread([this, options = std::move(options), executable = std::move(executable),
+				savesRoot = std::move(savesRoot)](std::stop_token lifetime) {
+				run(lifetime, options, executable, savesRoot);
+			});
+		}
+		catch (const std::exception &error)
+		{
+			m_snapshot.state = State::Failed;
+			m_snapshot.message = error.what();
+		}
 	}
-	catch (const std::exception &error)
-	{
-		m_snapshot.state = State::Failed;
-		m_snapshot.message = error.what();
-		return false;
-	}
-	return true;
+	m_revision.fetch_add(1, std::memory_order_release);
+	return m_snapshot.state == State::Starting;
 }
 
 void ServerSupervisor::stop()
@@ -277,10 +279,21 @@ Snapshot ServerSupervisor::snapshot() const
 	return m_snapshot;
 }
 
+std::optional<Snapshot> ServerSupervisor::snapshotIfChanged(uint64_t &revision) const
+{
+	if (m_revision.load(std::memory_order_acquire) == revision)
+		return std::nullopt;
+	std::lock_guard lock(m_mutex);
+	Snapshot next = m_snapshot;
+	revision = m_revision.load(std::memory_order_relaxed);
+	return next;
+}
+
 void ServerSupervisor::publish(const Snapshot &next)
 {
 	std::lock_guard lock(m_mutex);
 	m_snapshot = next;
+	m_revision.fetch_add(1, std::memory_order_release);
 }
 
 void ServerSupervisor::run(std::stop_token lifetime, const Options &options, const fs::path &executable,

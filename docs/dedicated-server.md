@@ -40,15 +40,20 @@ uses the same world storage and lock.
 
 Choose a port, player limit, interest radius, terrain workers, and streaming
 preset. Port **0** requests a free port from the OS. The player limit counts
-network seats, including the local graphical client when it joins. Select or
-create a profile under **Join** to use **Join automatically when ready**.
-When the child reports readiness, **Host** shows the bound address and
-assigned port and offers **Join hosted server** for a manual join or retry.
+network seats, including the local graphical client when it joins. Create
+profiles under **Join**, then choose or type the existing profile to use in
+**Host**. The **Host** field starts with the saved selection and can be
+edited independently. Auto-join uses the profile shown when you click
+**Start server**. When the child reports readiness, **Host** shows the
+bound address and assigned port. The profile field also controls **Join
+hosted server** for a manual join or retry.
 
 Loopback is the default. **Allow LAN / VPN connections** requires an IPv4
 address assigned to an interface on this machine in an RFC 1918 range or
-`100.64.0.0/10`. The server binds that interface and the graphical client
-joins through its local address. Anyone who can reach the address may join
+`100.64.0.0/10`. The form checks the range. The server's UDP bind checks
+whether the address and port can be used on this machine. Check the Host
+log if binding fails. The graphical client joins through the bound
+address. Anyone who can reach the address may join
 under the existing [private-network rules](multiplayer-public-network-readiness.md).
 
 The game starts the sibling `ft_vox_server` executable as a separate

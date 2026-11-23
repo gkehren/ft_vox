@@ -67,7 +67,7 @@ void checkValidation()
 	for (const char *address : {"10.0.0.2", "172.31.1.2", "192.168.0.2", "100.75.0.2"})
 	{
 		settings.address = address;
-		CHECK(hosting::validate(settings).empty(), "private interface can be selected");
+		CHECK(hosting::validate(settings).empty(), "private address syntax passes before the UDP bind");
 	}
 	for (const char *address : {"0.0.0.0", "127.0.0.1", "203.0.113.2", "8.8.8.8", "172.32.0.1",
 		"localhost", "10.0.0.2 --port 1"})
@@ -166,7 +166,7 @@ void checkRealServer(const fs::path &exe, const fs::path &root)
 	CHECK(finished(supervisor).state == State::Stopped, "supervisor recovers after startup failures");
 }
 
-int fixture(std::string_view world)
+int fixture(std::string_view world, const fs::path &root)
 {
 	if (!server::hasLauncherPipe())
 		return 8;
@@ -181,6 +181,12 @@ int fixture(std::string_view world)
 	}
 	std::cout << "SERVER status=ready mode=live transport=udp listen_address=127.0.0.1 port=62001 checkpoint_generation=1"
 		<< std::endl;
+	if (world == "log updates")
+	{
+		while (server::pollLauncherPipe() == server::LauncherInput::Open && !fs::is_regular_file(root / "emit-log"))
+			std::this_thread::sleep_for(10ms);
+		std::cout << "fixture log while ready" << std::endl;
+	}
 	if (world == "crash")
 	{
 		std::this_thread::sleep_for(150ms);
@@ -197,6 +203,37 @@ int fixture(std::string_view world)
 	}
 	std::cout << "SERVER status=stopped reason=launcher saved=1 exit_code=0 checkpoint_generation=2" << std::endl;
 	return 0;
+}
+
+void checkSnapshotRevisions(const fs::path &fixturePath, const fs::path &root)
+{
+	ServerSupervisor supervisor;
+	uint64_t revision{};
+	CHECK(!supervisor.snapshotIfChanged(revision), "idle frames have no snapshot to copy");
+	CHECK(!supervisor.start(options("../invalid"), fixturePath, root), "invalid configuration fails before launch");
+	const auto failure = supervisor.snapshotIfChanged(revision);
+	CHECK(failure && failure->state == State::Failed, "validation errors publish a snapshot");
+
+	supervisor.start(options("log updates"), fixturePath, root);
+	ready(supervisor);
+	const auto running = supervisor.snapshotIfChanged(revision);
+	CHECK(running && running->state == State::Ready && !running->logs.empty(), "readiness publishes logs and state");
+	bool stable = true;
+	for (int i = 0; i < 300; ++i)
+		stable = stable && !supervisor.snapshotIfChanged(revision);
+	CHECK(stable, "stable frames receive no snapshot or log copy");
+
+	std::ofstream(root / "emit-log").put('\n');
+	await(supervisor, [](const Snapshot &s) { return !s.logs.empty() && s.logs.back() == "fixture log while ready"; });
+	const auto logged = supervisor.snapshotIfChanged(revision);
+	CHECK(logged && logged->state == State::Ready && logged->logs.back() == "fixture log while ready",
+		"new logs publish a revision even without a state transition");
+	CHECK(!supervisor.snapshotIfChanged(revision), "a revision is consumed once");
+	supervisor.stop();
+	finished(supervisor);
+	const auto stopped = supervisor.snapshotIfChanged(revision);
+	CHECK(stopped && stopped->state == State::Stopped && stopped->checkpoint == 2,
+		"stopping publishes the final checkpoint");
 }
 
 void checkSupervision(const fs::path &fixturePath, const fs::path &root)
@@ -272,8 +309,8 @@ void checkLauncherLoss(const fs::path &fixturePath, const fs::path &exe, const f
 
 int main(int argc, char **argv)
 {
-	if (argc >= 3 && std::string_view(argv[1]) == "--world")
-		return fixture(argv[2]);
+	if (argc >= 5 && std::string_view(argv[1]) == "--world" && std::string_view(argv[3]) == "--saves-root")
+		return fixture(argv[2], argv[4]);
 	if (argc == 4 && std::string_view(argv[1]) == "--abandon")
 	{
 		ServerSupervisor supervisor;
@@ -288,6 +325,7 @@ int main(int argc, char **argv)
 	{
 		checkValidation();
 		checkRealServer(fs::path(argv[1]), root);
+		checkSnapshotRevisions(fs::path(argv[0]), root);
 		checkSupervision(fs::path(argv[0]), root);
 		checkLauncherLoss(fs::path(argv[0]), fs::path(argv[1]), root);
 	}

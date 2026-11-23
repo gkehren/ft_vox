@@ -13,12 +13,13 @@ Build `ft_vox` with graphics enabled. The build also places
 manual smoke so that profiles and worlds are isolated.
 
 1. Launch the client normally, release the cursor with **C**, and open
-   **Multiplayer → Show panel**. In **Join**, create a profile for the
-   smoke. In **Host**, enter a new world name and set port **0**.
+   **Multiplayer → Show panel**. In **Join**, create two profiles for the
+   smoke. Leave one selected in **Join**. In **Host**, choose the other
+   profile, enter a new world name, and set port **0**.
 2. Leave loopback and auto-join selected, then click **Start server**.
    Check that the Join button appears with the assigned port after
-   readiness and that the client enters the world with the selected
-   profile. Change the selected hotbar slot.
+   readiness and that the client enters the world with the profile shown
+   in **Host**. Change the selected hotbar slot.
 3. Click **Stop server** and wait for the checkpoint confirmation. Select
    the saved world, change a worker or streaming preset, and restart.
    Verify the same profile restores its selected slot. Close the game
@@ -27,9 +28,12 @@ manual smoke so that profiles and worlds are isolated.
    world from the game. Repeat with a different world on the occupied
    port. Confirm the Host log explains each failure and that the CLI
    server stays up.
-5. When using a trusted LAN or VPN, select its private interface address.
-   Confirm the panel warns about exposure and reports that exact
-   address. Test a public or wildcard address to check form validation.
+5. When using a trusted LAN or VPN, enter its private interface address.
+   Confirm the panel warns about exposure and reports that exact address.
+   Try joining from a second device on that network if one is available.
+   Test a public or wildcard address to check form validation. Then enter
+   a private address that is absent from the host and check the bind error
+   in the Host log.
 
 `ServerSupervisor` runs on CPU-only builds. It exercises real child
 processes, loopback readiness and join, checkpointed stop and restart,

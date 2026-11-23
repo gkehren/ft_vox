@@ -6,6 +6,7 @@
 #include <deque>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -61,6 +62,7 @@ public:
 	void stop();
 	bool forceStop();
 	Snapshot snapshot() const;
+	std::optional<Snapshot> snapshotIfChanged(uint64_t &revision) const;
 
 private:
 	enum class Command { None, Stop, Force };
@@ -71,6 +73,7 @@ private:
 	const std::chrono::milliseconds m_notice;
 	mutable std::mutex m_mutex;
 	Snapshot m_snapshot;
+	std::atomic<uint64_t> m_revision{};
 	std::atomic<Command> m_command{Command::None};
 	std::jthread m_worker;
 };

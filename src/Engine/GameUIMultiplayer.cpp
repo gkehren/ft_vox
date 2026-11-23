@@ -44,6 +44,22 @@ bool endpointChoices(const char *label, const std::vector<net::udp::Address> &en
 	ImGui::PopID();
 	return changed;
 }
+
+const std::string *profileChoice(const char *id, std::span<const std::string> profiles, std::string_view current)
+{
+	if (profiles.empty())
+		return nullptr;
+	const std::string *choice = nullptr;
+	ImGui::SetNextItemWidth(-1.f);
+	if (ImGui::BeginCombo(id, "Saved profiles", ImGuiComboFlags_HeightSmall))
+	{
+		for (const auto &profile : profiles)
+			if (ImGui::Selectable(profile.c_str(), profile == current))
+				choice = &profile;
+		ImGui::EndCombo();
+	}
+	return choice;
+}
 }
 
 void ui::drawMultiplayerNetworkStats(const NetworkStats &stats)
@@ -123,6 +139,20 @@ void GameUI::showHostPanel()
 	m_focusHostPanel = true;
 }
 
+void GameUI::drawHostProfile(const GameUIFrame &frame)
+{
+	if (!m_hostProfileInitialized)
+	{
+		std::snprintf(m_hostProfile.data(), m_hostProfile.size(), "%s", frame.joinPreferences->selectedProfile.c_str());
+		m_hostProfileInitialized = true;
+	}
+	ImGui::TextUnformatted("Local profile for hosted server");
+	if (const auto *profile = profileChoice("##host-profiles", *frame.joinProfiles, m_hostProfile.data()))
+		std::snprintf(m_hostProfile.data(), m_hostProfile.size(), "%s", profile->c_str());
+	ImGui::SetNextItemWidth(-1.f);
+	ImGui::InputTextWithHint("##host-profile", "Existing profile name", m_hostProfile.data(), m_hostProfile.size());
+}
+
 void GameUI::drawHostPanel(const GameUIFrame &frame)
 {
 	using hosting::State;
@@ -140,8 +170,9 @@ void GameUI::drawHostPanel(const GameUIFrame &frame)
 	{
 		ImGui::TextWrapped("Address: %s:%u", server.address.c_str(), static_cast<unsigned>(server.port));
 		ImGui::BeginDisabled(frame.switchingSession);
+		drawHostProfile(frame);
 		if (ImGui::Button("Join hosted server"))
-			frame.joinHostedServer();
+			frame.joinHostedServer(m_hostProfile.data());
 		ImGui::EndDisabled();
 	}
 	if (server.state == State::Starting || server.state == State::Ready)
@@ -192,6 +223,7 @@ void GameUI::drawHostPanel(const GameUIFrame &frame)
 		if (m_hostOptions.lan)
 		{
 			ImGui::TextWrapped("Players who can reach this address can join. Use a trusted private LAN or VPN.");
+			ImGui::TextWrapped("Use an IPv4 address assigned to this machine. The server checks it when binding.");
 			ImGui::SetNextItemWidth(-1.f);
 			ImGui::InputTextWithHint("##host-address", "Private IPv4 address on this machine",
 				m_hostAddress.data(), m_hostAddress.size());
@@ -226,18 +258,12 @@ void GameUI::drawHostPanel(const GameUIFrame &frame)
 			m_hostOptions.streaming = static_cast<hosting::StreamingPreset>(streaming);
 		ImGui::Checkbox("Join automatically when ready", &m_hostAutoJoin);
 		if (m_hostAutoJoin)
-		{
-			const auto &profile = frame.joinPreferences->selectedProfile;
-			if (profile.empty())
-				ImGui::TextWrapped("Select or create a local profile under Join.");
-			else
-				ImGui::TextWrapped("Join profile: %s", profile.c_str());
-		}
+			drawHostProfile(frame);
 		if (ImGui::Button("Start server"))
 		{
 			m_hostOptions.world = m_hostWorld.data();
 			m_hostOptions.address = m_hostAddress.data();
-			frame.startHostedServer(m_hostOptions, m_hostAutoJoin);
+			frame.startHostedServer(m_hostOptions, m_hostAutoJoin, m_hostProfile.data());
 		}
 	}
 	if (server.checkpoint > 0)
@@ -304,21 +330,10 @@ void GameUI::drawJoinPanel(const GameUIFrame &frame)
 	ImGui::SetNextItemWidth(-1.f);
 	ImGui::InputText("##seed", m_joinDraft.expectedSeed.data(), m_joinDraft.expectedSeed.size());
 
-	if (!frame.joinProfiles.empty())
+	if (const auto *profile = profileChoice("##profiles", *frame.joinProfiles, m_joinDraft.profile.data()))
 	{
-		ImGui::SetNextItemWidth(-1.f);
-		if (ImGui::BeginCombo("##profiles", "Saved profiles", ImGuiComboFlags_HeightSmall))
-		{
-			for (const std::string &profile : frame.joinProfiles)
-			{
-				if (ImGui::Selectable(profile.c_str(), profile == m_joinDraft.profile.data()))
-				{
-					m_joinDraft.setProfile(profile);
-					frame.selectJoinProfile(profile);
-				}
-			}
-			ImGui::EndCombo();
-		}
+		m_joinDraft.setProfile(*profile);
+		frame.selectJoinProfile(*profile);
 	}
 	ImGui::TextUnformatted("Local profile name");
 	ImGui::SetNextItemWidth(-1.f);

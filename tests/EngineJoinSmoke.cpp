@@ -46,13 +46,24 @@ struct EngineJoinProbe
 		engine.m_hostExecutable = server;
 		engine.m_hostSavesRoot = engine.m_savesRoot / "dedicated";
 		engine.initializeNoiseGenerator(13);
-		frame().createJoinProfile("local-host");
+		frame().createJoinProfile("host-choice");
+		frame().createJoinProfile("join-draft");
+		frame().createJoinProfile("saved-choice");
+		frame().selectJoinProfile("saved-choice");
+		client::JoinDraft joinDraft;
+		joinDraft.setProfile("join-draft");
 		hosting::Options options;
 		options.world = "Hosted test";
 		options.port = 0;
 		options.playerSlots = 1;
 		options.interestRadius = 1;
-		frame().startHostedServer(options, true);
+		frame().startHostedServer(options, true, "missing-profile");
+		CHECK(!engine.m_hostServer.snapshot().active() && !engine.m_hostError.empty(),
+			"auto-join refuses a missing Host profile before launching a child");
+		CHECK(engine.m_joinPreferences.selectedProfile == "saved-choice" && joinDraft.request().profile == "join-draft",
+			"the Join draft differs from the saved selection");
+		frame().startHostedServer(options, true, "HOST-CHOICE");
+		frame().selectJoinProfile(joinDraft.profile.data());
 		until([&] {
 			return engine.m_hostSnapshot.state == hosting::State::Ready &&
 				engine.m_remote && engine.m_remote->ready();
@@ -61,8 +72,12 @@ struct EngineJoinProbe
 		CHECK(state.address == "127.0.0.1" && state.port > 0 &&
 			engine.m_remote->endpoint == state.address + ":" + std::to_string(state.port),
 			"auto-join uses the ready loopback endpoint and assigned port");
-		CHECK(engine.m_remote->namedProfile == "local-host" && engine.m_suspendedSolo,
-			"hosting reuses the selected profile and the solo suspension path");
+		CHECK(engine.m_remote->namedProfile == "host-choice" && engine.m_suspendedSolo,
+			"auto-join uses the canonical Host choice captured at Start and suspends solo play");
+		frame().joinHostedServer("saved-choice");
+		CHECK(engine.m_joinRequest && engine.m_joinRequest->profile == "saved-choice",
+			"manual Join hosted server uses its explicit Host choice");
+		engine.m_joinRequest.reset();
 
 		engine.running = true;
 		SDL_Event close{};

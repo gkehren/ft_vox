@@ -27,32 +27,31 @@ void Engine::populateHostingUi(GameUIFrame &frame)
 	frame.hostWorlds = m_hostWorlds;
 	frame.hostError = m_hostError;
 	frame.exitAfterHostedStop = m_exitAfterHostedStop;
-	frame.startHostedServer = [this](hosting::Options options, bool autoJoin) {
+	frame.startHostedServer = [this](hosting::Options options, bool autoJoin, std::string_view name) {
 		m_hostError.clear();
-		const auto &profile = m_joinPreferences.selectedProfile;
-		if (autoJoin && profile.empty())
+		std::optional<std::string> autoProfile;
+		if (autoJoin)
 		{
-			m_hostError = "Select or create a profile under Join before starting with auto-join.";
-			return;
+			auto profile = loadNamedProfile(name, m_hostError);
+			if (!profile)
+				return;
+			autoProfile = std::move(profile->name);
 		}
 		if (m_hostServer.start(std::move(options), m_hostExecutable, m_hostSavesRoot))
-			m_hostAutoProfile = autoJoin ? std::optional{profile} : std::nullopt;
+			m_hostAutoProfile = std::move(autoProfile);
 	};
 	frame.stopHostedServer = [this] {
 		m_hostAutoProfile.reset();
 		m_hostServer.stop();
 	};
 	frame.forceStopHostedServer = [this] { m_hostServer.forceStop(); };
-	frame.joinHostedServer = [this] {
+	frame.joinHostedServer = [this](std::string_view name) {
 		m_hostError.clear();
-		if (m_joinPreferences.selectedProfile.empty())
-		{
-			m_hostError = "Select or create a profile under Join, then join the hosted server.";
-			return;
-		}
 		const auto server = m_hostServer.snapshot();
-		if (server.state == hosting::State::Ready && !switchingSession())
-			queueHostedJoin(server, m_joinPreferences.selectedProfile);
+		if (server.state != hosting::State::Ready || switchingSession())
+			return;
+		if (auto profile = loadNamedProfile(name, m_hostError))
+			queueHostedJoin(server, profile->name);
 	};
 }
 
@@ -65,18 +64,20 @@ void Engine::queueHostedJoin(const hosting::Snapshot &server, const std::string 
 
 void Engine::tickHosting()
 {
-	auto next = m_hostServer.snapshot();
-	if (next.state == hosting::State::Ready && m_hostSnapshot.state != hosting::State::Ready)
+	if (auto next = m_hostServer.snapshotIfChanged(m_hostRevision))
 	{
-		const auto position = std::ranges::lower_bound(m_hostWorlds, next.world);
-		if (position == m_hostWorlds.end() || *position != next.world)
+		if (next->state == hosting::State::Ready && m_hostSnapshot.state != hosting::State::Ready)
 		{
-			m_hostWorlds.insert(position, next.world);
-			if (m_hostWorlds.size() > 64)
-				m_hostWorlds.pop_back();
+			const auto position = std::ranges::lower_bound(m_hostWorlds, next->world);
+			if (position == m_hostWorlds.end() || *position != next->world)
+			{
+				m_hostWorlds.insert(position, next->world);
+				if (m_hostWorlds.size() > 64)
+					m_hostWorlds.pop_back();
+			}
 		}
+		m_hostSnapshot = std::move(*next);
 	}
-	m_hostSnapshot = std::move(next);
 	if (m_hostSnapshot.state == hosting::State::Ready && m_hostAutoProfile &&
 		!m_joinRequest && !switchingSession() && !m_exitAfterHostedStop)
 	{

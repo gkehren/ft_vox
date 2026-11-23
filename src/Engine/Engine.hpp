@@ -169,6 +169,12 @@ private:
 	void populateJoinUi(GameUIFrame &frame);
 	void applySessionRequests();
 	void prepareRemoteJoin(const client::JoinRequest &request);
+	struct NamedProfile
+	{
+		std::string name;
+		net::wire::PlayerKey key;
+	};
+	std::optional<NamedProfile> loadNamedProfile(std::string_view name, std::string &error) const;
 	void startRemote(std::unique_ptr<RemoteSession> remote);
 	void resumeSolo();
 	void retireWorldProjection();
@@ -380,6 +386,7 @@ private:
 	std::string m_joinError, m_joinPreferencesError;
 	hosting::ServerSupervisor m_hostServer;
 	hosting::Snapshot m_hostSnapshot;
+	uint64_t m_hostRevision{};
 	std::filesystem::path m_hostExecutable, m_hostSavesRoot{"server-saves"};
 	std::vector<std::string> m_hostWorlds;
 	std::string m_hostError;
