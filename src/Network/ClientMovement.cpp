@@ -67,7 +67,10 @@ void ClientPrediction::invalidateTerrain()
 	if (!m_anchor || m_waitForTerrain)
 		return;
 	if (!m_waitForSnapshot)
+	{
 		++m_stats.hardResets;
+		m_stats.lastResetReason = "terrain_changed";
+	}
 	discard();
 	m_waitForSnapshot = m_waitForTerrain = true;
 }
@@ -82,6 +85,7 @@ void ClientPrediction::expire(Clock::time_point now)
 		discard();
 		m_waitForSnapshot = true;
 		++m_stats.hardResets;
+		m_stats.lastResetReason = "prediction_expired";
 	}
 }
 
@@ -211,7 +215,10 @@ void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire:
 	if (awaitingPublication || body.waitingForTerrain || !physics::clear(world, body.bounds(), queries))
 	{
 		if (hadAnchor && !wasSuspended)
+		{
 			++m_stats.hardResets;
+			m_stats.lastResetReason = "anchor_terrain_unavailable";
+		}
 		discard();
 		m_waitForSnapshot = m_waitForTerrain = true;
 		return;
@@ -220,7 +227,10 @@ void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire:
 	if (discontinuity || (local.flags & kBlocked) || !canPredict(body))
 	{
 		if (discontinuity && !wasSuspended)
+		{
 			++m_stats.hardResets;
+			m_stats.lastResetReason = teleport ? "motion_reset" : "snapshot_discontinuity";
+		}
 		discard();
 		return;
 	}
@@ -258,6 +268,7 @@ void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire:
 	if (correction >= kHardCorrection)
 	{
 		++m_stats.hardResets;
+		m_stats.lastResetReason = "large_correction";
 		discard();
 		m_presentation = {};
 		return;
@@ -295,6 +306,7 @@ std::optional<glm::dvec3> ClientPrediction::present(Clock::time_point now,
 		// cancels interpolation and the correction offset for this frame.
 		if (delta != glm::dvec3{} && physics::sweep(world, pose.bounds(), delta, queries).hit)
 		{
+			++m_stats.blockedCameraSweeps;
 			m_offset = {};
 			m_playback.reset();
 		}

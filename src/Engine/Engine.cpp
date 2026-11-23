@@ -2081,6 +2081,8 @@ void Engine::run()
 		++frameNumber;
 
 		GetProfiler().endFrame();
+		if (m_remote && m_remote->motionTrace)
+			traceRemoteMotion(rawDt);
 
 		// Sync legacy RenderTiming from the frame we just closed (Streaming panel).
 		renderTiming.frustumCulling = GetProfiler().lastScopeMs("Visibility");

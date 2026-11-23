@@ -12,6 +12,8 @@ struct PredictionStats
 {
 	uint64_t corrections{}, hardResets{};
 	double lastCorrection{}, maxCorrection{};
+	uint64_t blockedCameraSweeps{};
+	const char *lastResetReason{"none"};
 };
 
 // Presentation-only controller. All times are supplied by the frame owner.

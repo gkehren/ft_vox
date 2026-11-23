@@ -1,10 +1,14 @@
 #include "EngineMultiplayer.hpp"
 
+#include <Engine/Profiler.hpp>
 #include <Items/ItemRegistry.hpp>
 #include <World/WorldCollisionView.hpp>
 
 #include <cmath>
+#include <cstdlib>
+#include <iomanip>
 #include <iostream>
+#include <locale>
 #include <stdexcept>
 #include <type_traits>
 
@@ -73,6 +77,27 @@ Engine::RemoteSession::RemoteSession(net::udp::Address address, std::optional<ui
 	: transport(address, key), expectedSeed(expected)
 {
 	transport.connect(Clock::now());
+	if (const char *path = std::getenv("FT_VOX_MOTION_TRACE"); path && *path)
+	{
+		auto &trace = motionTrace.emplace();
+		trace.file.open(path);
+		if (!trace.file)
+		{
+			std::cerr << "[multiplayer] Could not open motion trace: " << path << '\n';
+			motionTrace.reset();
+			return;
+		}
+		trace.start = trace.lastFlush = Clock::now();
+		trace.file.imbue(std::locale::classic());
+		trace.file << std::fixed << std::setprecision(6)
+			<< "time_ms,frame_ms,acquire_ms,present_ms,projection,focused,mouse_captured,ready,vsync,"
+			   "move_x,move_z,input_flags,inputs_sent,inputs_failed,first_input_tick,last_input_tick,last_input_seq,"
+			   "snapshot_tick,ack_seq,rtt_ms,snapshot_age_ms,backlog,corrections,last_correction,"
+			   "hard_resets,reset_reason,blocked_camera_sweeps,waiting_terrain,player_flags,motion_reset,"
+			   "server_x,server_y,server_z,server_vx,server_vy,server_vz,predicted_x,predicted_y,predicted_z,"
+			   "camera_valid,camera_time_ms,camera_x,camera_y,camera_z,yaw,pitch\n";
+		std::cout << "[multiplayer] Motion trace: " << path << '\n';
+	}
 }
 
 double Engine::RemoteSession::SnapshotClock::alpha(uint64_t previousTick, Clock::time_point now) const
@@ -313,8 +338,23 @@ void Engine::sendRemoteInput(const physics::PlayerInput &input)
 	sample.flags = (input.sprint ? wire::Input::sprint : 0) |
 		(input.swimUp ? wire::Input::swimUp : 0) | (input.swimDown ? wire::Input::swimDown : 0) |
 		(input.jumpPressed && jumpPressed ? wire::Input::jump : 0);
+	if (remote.motionTrace)
+		remote.motionTrace->controls = sample;
 	if (remote.inputTiming.send(now, sample, [&](const wire::Input &inputSample) {
 		const auto sequence = remote.transport.sendInput(inputSample, now);
+		if (remote.motionTrace)
+		{
+			auto &trace = *remote.motionTrace;
+			if (sequence)
+			{
+				if (trace.sent++ == 0)
+					trace.firstInputTick = inputSample.intendedTick;
+				trace.lastInputTick = inputSample.intendedTick;
+				trace.lastInputSequence = sequence;
+			}
+			else
+				++trace.failed;
+		}
 		if (sequence)
 			remote.prediction.record(sequence, inputSample, now, collision);
 		return sequence != 0;
@@ -327,10 +367,71 @@ void Engine::updateRemoteCamera()
 	auto &remote = *m_remote;
 	const net::udp::ClientWorld::CollisionView collision(*remote.projection, remote.transport.chunks(), &remote.terrain);
 	remote.prediction.checkTerrain(collision);
-	const auto body = remote.prediction.present(Clock::now(), collision);
+	const auto now = Clock::now();
+	const auto body = remote.prediction.present(now, collision);
+	if (remote.motionTrace)
+		remote.motionTrace->cameraAt = now;
 	remote.hasCameraPose = body.has_value();
 	if (body)
 		camera.setPosition(glm::vec3(*body + kEyeOffset));
+}
+
+void Engine::traceRemoteMotion(double frameDt)
+{
+	auto &remote = *m_remote;
+	auto &trace = *remote.motionTrace;
+	const auto now = Clock::now();
+	if (!trace.file)
+	{
+		std::cerr << "[multiplayer] Could not write motion trace\n";
+		remote.motionTrace.reset();
+		return;
+	}
+	if (trace.frames == 12000 || now - trace.start >= 60s)
+	{
+		std::cout << "[multiplayer] Motion trace finished after " << trace.frames << " frames\n";
+		remote.motionTrace.reset();
+		return;
+	}
+	using Milliseconds = std::chrono::duration<double, std::milli>;
+	const auto &snapshot = remote.transport.playerSnapshots().current;
+	const auto *player = remote.localPlayer();
+	const auto feet = player ? playerFeet(*player) : glm::dvec3{};
+	const auto velocity = player ? player->velocity : wire::PlayerState{}.velocity;
+	const auto predicted = remote.prediction.feet();
+	const auto eye = camera.getPosition();
+	const auto &stats = remote.prediction.stats();
+	const auto &controls = trace.controls;
+	trace.file << Milliseconds(now - trace.start).count() << ',' << frameDt * 1000.0 << ','
+		<< GetProfiler().lastScopeMs("Acquire") << ',' << GetProfiler().lastScopeMs("Present") << ','
+		<< remote.renderEpoch << ',' << windowFocused << ',' << mouseCaptured << ',' << remote.ready() << ','
+		<< swapchain->isVSync() << ',' << controls.moveX << ',' << controls.moveZ << ','
+		<< unsigned(controls.flags) << ',' << trace.sent << ',' << trace.failed << ','
+		<< trace.firstInputTick << ',' << trace.lastInputTick << ',' << trace.lastInputSequence << ','
+		<< (snapshot ? snapshot->tick : 0) << ',' << (snapshot ? snapshot->lastProcessedInput : 0) << ','
+		<< Milliseconds(remote.inputTiming.roundTripEstimate().value_or(-1ms)).count() << ','
+		<< (snapshot ? Milliseconds(now - remote.players.arrived).count() : -1.0) << ','
+		<< remote.prediction.backlog() << ',' << stats.corrections << ',' << stats.lastCorrection << ','
+		<< stats.hardResets << ',' << stats.lastResetReason << ',' << stats.blockedCameraSweeps << ','
+		<< remote.prediction.waitingForTerrain() << ',' << (player ? unsigned(player->flags) : 0) << ','
+		<< (player ? player->motionReset : 0) << ','
+		<< feet.x << ',' << feet.y << ',' << feet.z << ','
+		<< velocity[0] << ',' << velocity[1] << ',' << velocity[2] << ','
+		<< predicted.x << ',' << predicted.y << ',' << predicted.z << ','
+		<< remote.hasCameraPose << ','
+		<< (trace.cameraAt == Clock::time_point{} ? -1.0 : Milliseconds(trace.cameraAt - trace.start).count()) << ','
+		<< eye.x << ',' << eye.y << ',' << eye.z << ','
+		<< camera.getYaw() << ',' << camera.getPitch() << '\n';
+	++trace.frames;
+	trace.cameraAt = {};
+	trace.controls = {};
+	trace.firstInputTick = trace.lastInputTick = trace.lastInputSequence = 0;
+	trace.sent = trace.failed = 0;
+	if (now - trace.lastFlush >= 1s)
+	{
+		trace.file.flush();
+		trace.lastFlush = now;
+	}
 }
 
 void Engine::updateRemoteEntities()

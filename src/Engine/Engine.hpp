@@ -161,6 +161,7 @@ private:
 	void pollRemote();
 	void sendRemoteInput(const physics::PlayerInput &input);
 	void updateRemoteCamera();
+	void traceRemoteMotion(double frameDt);
 	void updateRemoteEntities();
 	void populateRemoteUi(GameUIFrame &frame);
 	sim::VoxelTargetTrace remoteTarget() const;

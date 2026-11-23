@@ -315,6 +315,22 @@ receipt, and an estimate of missing snapshots from gaps in the observed
 frame coalescing. The menu also shows pending inputs, hard resets, local
 correction magnitude and rate, and UDP payload throughput in each direction.
 
+For recurring movement stutter, set `FT_VOX_MOTION_TRACE` to a fresh CSV
+path before launching the graphical client. The server uses its normal
+command. In PowerShell, for example:
+
+```powershell
+$env:FT_VOX_MOTION_TRACE = Join-Path $PWD ("motion-alice-{0:yyyyMMdd-HHmmss}.csv" -f (Get-Date))
+.\build\Release\ft_vox.exe --connect 127.0.0.1:7777 --player-profile .\saves\profiles\alice
+```
+
+After connecting, stand still briefly, then walk where the problem occurs
+and quit normally. The client records at most 60 seconds or 12,000 frames.
+The CSV links frame timings and camera positions to input ticks, server
+acknowledgments, predicted poses, terrain waits and correction counters.
+It contains gameplay telemetry and omits profile keys and session
+capabilities. Unset the variable to turn off tracing.
+
 ## Voxel actions
 
 Send Break or Place with the target cell, its observed chunk generation and
