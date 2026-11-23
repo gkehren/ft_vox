@@ -462,5 +462,6 @@ clients, an injected-clock IPv4 relay, lost and reordered traffic,
 checksum recovery and a replay from a retired session. The
 [closure report](../multiplayer-closure.md) records the loopback results
 and the supported private-network scope. Wire v5 profile keys and
-session capabilities travel in cleartext. Public-network readiness is
-tracked separately in [#276](https://github.com/gkehren/ft_vox/issues/276).
+session capabilities travel in cleartext. See the
+[public-network readiness review](../multiplayer-public-network-readiness.md)
+for the threat model and requirements for a public deployment.

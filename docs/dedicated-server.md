@@ -175,9 +175,10 @@ before handling a stop.
 
 The live readiness record reports `transport=udp`, the bind address and the
 actual port. Use numeric IPv4 on loopback or a trusted private network.
-Anyone who can observe the cleartext traffic can capture both the player key
-and the session capability. Keep the default loopback bind for local use
-and use a protected tunnel such as a VPN for remote play.
+Wire v5 sends player keys and session capabilities in cleartext. Keep the
+default loopback bind for local use. For remote private play, restrict access
+to intended peers on a trusted LAN or authenticated VPN. See
+[deployment guidance and public network release gates](multiplayer-public-network-readiness.md).
 
 - A compatible Hello reserves one remote slot. The tick owner looks up the
   player key and offers the existing actor ID or reserves a new one. Welcome echoes the join nonce

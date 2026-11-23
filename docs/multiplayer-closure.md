@@ -60,7 +60,8 @@ and at most 64 buffered edits before resync. A baseline uses up to 60
 fragments and one 64 KiB payload buffer, with at most 16 concurrent
 baseline allocations for the server. Wire v5 carries profile keys and
 session capabilities in cleartext.
-Public-network validation remains open ([#276](https://github.com/gkehren/ft_vox/issues/276)).
+The [public-network readiness review](multiplayer-public-network-readiness.md)
+defines the deployment boundary and the additional public validation gates.
 
 ## Soak baseline and alert thresholds
 
@@ -108,8 +109,6 @@ See the [GPU report](multiplayer-client-smoke.md) and
 - [#277](https://github.com/gkehren/ft_vox/issues/277) tracks manual
   keyboard, mouse, inventory, avatar and menu verification. The Windows
   native input pipe was unavailable on this run.
-- [#276](https://github.com/gkehren/ft_vox/issues/276) tracks the threat
-  model and deployment review for public networking.
 - [#275](https://github.com/gkehren/ft_vox/issues/275) adds bounded baseline
   compression. The [cold chunk benchmark](benchmarks/275-cold-chunk-delivery.md)
   measures spawn and sustained delivery across RTT, loss and client counts.
