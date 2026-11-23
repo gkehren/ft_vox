@@ -39,8 +39,8 @@ The strict visual run passed all 24 scenes.
 Validation reported the two known overlay-related swapchain VUIDs below.
 
 The Computer Use plugin could not connect to the native Windows pipe.
-The corrected build still needs the interactive comparison with solo
-and the remaining keyboard, mouse and menu checks in #277.
+The maintainer's interactive movement retest is recorded below. The
+remaining keyboard, mouse and menu checks are tracked in #277.
 
 ### Rollbacks on live Windows loopback
 
@@ -91,6 +91,19 @@ In a separate two-client Windows run, repeated hotbar-select actions
 produced an RTT estimate of 8.7–14.9 ms during steady walking. The
 walking client recorded zero prediction corrections, zero hard resets
 and no frame-to-frame reversal.
+
+### Interactive movement retest
+
+The maintainer retested the Windows Release client on loopback at commit
+`111af3f` and confirmed that movement was smooth and the reported
+rollbacks were gone. Their earlier interactive test also confirmed
+remote-player visibility, shared break/place and item drops.
+
+The remaining #277 checklist includes jump and sprint, contested pickup,
+inventory rearrangement, cursor capture and focus transitions, walking
+out of and back into interest, menu reconnect and an interactive solo
+comparison. The startup and graceful server restart evidence above
+covers separate Release client processes.
 
 ## Wire v4 profile restart
 

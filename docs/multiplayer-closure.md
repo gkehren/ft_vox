@@ -106,10 +106,10 @@ within tolerance. The existing swapchain diagnostics
 See the [GPU report](multiplayer-client-smoke.md) and
 [#99](https://github.com/gkehren/ft_vox/issues/99).
 
-- [#277](https://github.com/gkehren/ft_vox/issues/277) tracks manual
-  keyboard, mouse, inventory, avatar and menu verification. The
-  [camera cadence report](multiplayer-client-smoke.md#local-camera-cadence-for-277)
-  records the local movement fix and the current verification results.
+- The maintainer confirmed smooth movement on the corrected Windows
+  Release client. The [multiplayer smoke report](multiplayer-client-smoke.md#interactive-movement-retest)
+  records that retest and the remaining interactive checks for
+  [#277](https://github.com/gkehren/ft_vox/issues/277).
 - [#275](https://github.com/gkehren/ft_vox/issues/275) adds bounded baseline
   compression. The [cold chunk benchmark](benchmarks/275-cold-chunk-delivery.md)
   measures spawn and sustained delivery across RTT, loss and client counts.
