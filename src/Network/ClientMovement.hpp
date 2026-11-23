@@ -12,6 +12,8 @@ struct PredictionStats
 {
 	uint64_t corrections{}, hardResets{};
 	double lastCorrection{}, maxCorrection{};
+	uint64_t blockedCameraSweeps{};
+	const char *lastResetReason{"none"};
 };
 
 // Presentation-only controller. All times are supplied by the frame owner.
@@ -55,6 +57,17 @@ private:
 		physics::Body body;
 		physics::PlayerController::Timers timers;
 	};
+	struct Pose
+	{
+		uint64_t tick;
+		glm::dvec3 midpoint, end;
+	};
+	struct Playback
+	{
+		Clock::time_point frame;
+		uint64_t tick;
+		double lag;
+	};
 
 	void restore();
 	void discard();
@@ -62,6 +75,9 @@ private:
 		Clock::time_point receivedAt, const physics::VoxelCollisionWorld &world,
 		const ClientWorld::CollisionView *replica);
 	void stepTo(const wire::Input &input, const physics::VoxelCollisionWorld &world);
+	void step(const physics::PlayerInput &input, const physics::VoxelCollisionWorld &world);
+	const Pose *poseAt(uint64_t tick) const;
+	glm::dvec3 interpolatedFeet(Clock::time_point now);
 	void smoothFrom(glm::dvec3 displayed, Clock::time_point now);
 	glm::dvec3 offset(Clock::time_point now) const;
 
@@ -73,6 +89,9 @@ private:
 	bool m_waitForSnapshot{}, m_waitForTerrain{};
 	glm::dvec3 m_offset{};
 	Clock::time_point m_smoothedAt{};
+	static constexpr size_t kPoseHistory = 5;
+	std::array<std::optional<Pose>, kPoseHistory> m_poses;
+	std::optional<Playback> m_playback;
 	// A hold is purely visual. Reconciliation and replay only use m_anchor.
 	struct Presentation { std::optional<glm::dvec3> lastSafeFeet; } m_presentation;
 	PredictionStats m_stats;

@@ -6,6 +6,8 @@
 #include <Network/ClientTickScheduler.hpp>
 #include <Network/ClientMovement.hpp>
 
+#include <fstream>
+
 struct Engine::RemoteSession
 {
 	using Clock = net::udp::ClientTransport::Clock;
@@ -46,6 +48,15 @@ struct Engine::RemoteSession
 	net::udp::ClientPrediction prediction;
 	net::udp::RemotePlayers remotePlayers;
 	net::udp::ClientWorld::TerrainDependencies terrain;
+	struct MotionTrace
+	{
+		std::ofstream file;
+		Clock::time_point start, lastFlush, cameraAt{};
+		net::wire::Input controls{};
+		uint64_t firstInputTick{}, lastInputTick{}, lastInputSequence{};
+		unsigned sent{}, failed{}, frames{};
+	};
+	std::optional<MotionTrace> motionTrace;
 	bool hasCameraPose{};
 	net::udp::ClientTraffic lastTraffic;
 	Clock::time_point trafficAt{}, firstPlayerAt{};

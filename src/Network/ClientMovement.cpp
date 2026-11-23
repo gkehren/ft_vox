@@ -41,12 +41,18 @@ void ClientPrediction::restore()
 {
 	m_controller.restoreTick(m_anchor->body, m_anchor->timers);
 	m_tick = m_anchor->tick;
+	auto &pose = m_poses[m_tick % m_poses.size()];
+	const auto feet = m_controller.body.position;
+	if (!pose || pose->tick != m_tick || pose->end != feet)
+		pose = Pose{m_tick, feet, feet};
 }
 
 void ClientPrediction::discard()
 {
 	m_head = m_count = 0;
 	m_offset = {};
+	m_poses = {};
+	m_playback.reset();
 	restore();
 }
 
@@ -61,7 +67,10 @@ void ClientPrediction::invalidateTerrain()
 	if (!m_anchor || m_waitForTerrain)
 		return;
 	if (!m_waitForSnapshot)
+	{
 		++m_stats.hardResets;
+		m_stats.lastResetReason = "terrain_changed";
+	}
 	discard();
 	m_waitForSnapshot = m_waitForTerrain = true;
 }
@@ -76,14 +85,63 @@ void ClientPrediction::expire(Clock::time_point now)
 		discard();
 		m_waitForSnapshot = true;
 		++m_stats.hardResets;
+		m_stats.lastResetReason = "prediction_expired";
 	}
 }
 
 void ClientPrediction::stepTo(const wire::Input &input, const physics::VoxelCollisionWorld &world)
 {
-	while (++m_tick < input.intendedTick)
-		m_controller.advance(kTickSeconds, {}, world);
-	m_controller.advance(kTickSeconds, net::playerInput(input), world);
+	while (m_tick + 1 < input.intendedTick)
+		step({}, world);
+	step(net::playerInput(input), world);
+}
+
+void ClientPrediction::step(const physics::PlayerInput &input, const physics::VoxelCollisionWorld &world)
+{
+	m_controller.advance(kTickSeconds, input, world);
+	++m_tick;
+	m_poses[m_tick % m_poses.size()] = Pose{m_tick, m_controller.previousFeet(), m_controller.body.position};
+}
+
+const ClientPrediction::Pose *ClientPrediction::poseAt(uint64_t tick) const
+{
+	const auto &pose = m_poses[tick % m_poses.size()];
+	return pose && pose->tick == tick ? &*pose : nullptr;
+}
+
+glm::dvec3 ClientPrediction::interpolatedFeet(Clock::time_point now)
+{
+	constexpr double kMaxLag = kPoseHistory - 2;
+	if (!m_playback || m_tick < m_playback->tick || now < m_playback->frame ||
+	    elapsed(now, m_playback->frame) >= kMaxAge)
+		m_playback = Playback{now, m_tick, m_tick && poseAt(m_tick - 1) ? 1.0 : 0.0};
+	else
+	{
+		// Render time advances every frame, even when the network sender has
+		// no new tick or submits two at once. Ease the phase near the ends
+		// of the small buffer without rewinding through previously drawn ticks.
+		const double passed = elapsed(now, m_playback->frame).count() * wire::kTickRate;
+		const double maxPhaseAdjustment = passed * 0.1;
+		double lag = m_playback->lag + double(m_tick - m_playback->tick) - passed;
+		if (lag < 0.35)
+			lag += std::min(0.35 - lag, maxPhaseAdjustment);
+		else if (lag > kMaxLag - 0.5)
+			lag -= std::min(lag - (kMaxLag - 0.5), maxPhaseAdjustment);
+		m_playback = Playback{now, m_tick, std::clamp(lag, 0.0, kMaxLag)};
+	}
+	const double lag = m_playback->lag;
+	const auto behind = static_cast<uint64_t>(lag);
+	if (behind > m_tick)
+		return m_controller.body.position;
+	const uint64_t tick = m_tick - behind;
+	const auto *pose = poseAt(tick);
+	if (!pose)
+		return m_controller.body.position;
+	const double alpha = 1.0 - (lag - double(behind));
+	if (alpha >= 0.5)
+		return glm::mix(pose->midpoint, pose->end, 2.0 * alpha - 1.0);
+	const auto *previous = tick ? poseAt(tick - 1) : nullptr;
+	return previous ? glm::mix(previous->end, pose->midpoint, 2.0 * alpha) : pose->midpoint;
 }
 
 glm::dvec3 ClientPrediction::offset(Clock::time_point now) const
@@ -157,7 +215,10 @@ void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire:
 	if (awaitingPublication || body.waitingForTerrain || !physics::clear(world, body.bounds(), queries))
 	{
 		if (hadAnchor && !wasSuspended)
+		{
 			++m_stats.hardResets;
+			m_stats.lastResetReason = "anchor_terrain_unavailable";
+		}
 		discard();
 		m_waitForSnapshot = m_waitForTerrain = true;
 		return;
@@ -166,7 +227,10 @@ void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire:
 	if (discontinuity || (local.flags & kBlocked) || !canPredict(body))
 	{
 		if (discontinuity && !wasSuspended)
+		{
 			++m_stats.hardResets;
+			m_stats.lastResetReason = teleport ? "motion_reset" : "snapshot_discontinuity";
+		}
 		discard();
 		return;
 	}
@@ -204,6 +268,7 @@ void ClientPrediction::observe(const wire::PlayerSnapshot &snapshot, const wire:
 	if (correction >= kHardCorrection)
 	{
 		++m_stats.hardResets;
+		m_stats.lastResetReason = "large_correction";
 		discard();
 		m_presentation = {};
 		return;
@@ -235,16 +300,22 @@ std::optional<glm::dvec3> ClientPrediction::present(Clock::time_point now,
 	auto pose = m_controller.body;
 	if (!m_waitForTerrain && physics::clear(world, pose.bounds(), queries))
 	{
-		const auto delta = offset(now);
-		// Check the full body along the correction, even when both endpoints
-		// are clear. A wall or unknown voxel cancels the visual offset.
+		const auto feet = interpolatedFeet(now);
+		const auto delta = feet + offset(now) - pose.position;
+		// Sweep the full body to the presented pose. A wall or unknown voxel
+		// cancels interpolation and the correction offset for this frame.
 		if (delta != glm::dvec3{} && physics::sweep(world, pose.bounds(), delta, queries).hit)
+		{
+			++m_stats.blockedCameraSweeps;
 			m_offset = {};
+			m_playback.reset();
+		}
 		else
 			pose.position += delta;
 		return m_presentation.lastSafeFeet = pose.position;
 	}
 	m_offset = {};
+	m_playback.reset();
 	if (!m_waitForTerrain && physics::recover(world, pose, queries))
 		return m_presentation.lastSafeFeet = pose.position;
 	if (m_presentation.lastSafeFeet)

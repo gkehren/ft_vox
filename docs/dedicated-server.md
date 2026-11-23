@@ -104,10 +104,15 @@ It starts with a matching single-attempt Hello/Welcome round trip and
 updates from Action acknowledgments when the action was sent once.
 The estimate includes pump and server scheduling time. It assumes
 roughly symmetric paths and uses a 50 ms fallback RTT until a usable
-measurement arrives. The client targets two ticks beyond estimated
-arrival, emits at most three fresh inputs per frame, and waits for a new
-snapshot after a prolonged gap. The server still admits only the next
-six ticks at its receive boundary. The HUD reports degraded input timing
+measurement arrives. The client targets three ticks beyond estimated
+arrival and polls snapshots after swapchain acquisition, close to the
+input send. Its server clock uses the least delayed snapshot observation
+from the last two seconds. A prolonged gap or a five-tick phase jump
+starts a fresh timing window. When a frame falls behind by up to three
+input ticks, the client sends those consecutive ticks so the server can admit any that
+are still open. A larger gap starts a new batch near the estimated
+arrival. The server still admits only the next six ticks at its receive
+boundary. The HUD reports degraded input timing
 if snapshots become too old or processed input stops advancing while
 the client is sending. A large path change between RTT observations can
 still interrupt movement. The reliable sender waits for an ACK before the
@@ -279,9 +284,13 @@ prediction and rebuilds the footprint from the next snapshot. Physics
 treats a chunk as unknown while its published replica and verified wire
 versions differ.
 
-Small corrections may retain up to 0.25 blocks of visual offset, fading
-over 100 ms. The body must fit and sweep clear through available terrain
-for the whole offset. A blocked sweep snaps to the corrected pose.
+The local camera advances on a render-frame clock through the predicted
+120 Hz substeps. It keeps five recent tick poses and interpolates up to
+three ticks behind the latest prediction to absorb uneven input batches.
+It holds the latest pose when the buffer runs out. Small corrections may
+retain up to 0.25 blocks of visual offset, fading over 100 ms. The body
+must sweep clear through available terrain to the interpolated and
+corrected pose. A blocked sweep uses the current predicted pose.
 While a replica update is pending, the camera holds the last validated
 pose for the same continuous motion. The hold supplies no input to
 physics. Prediction resumes from a fresh authoritative snapshot after
@@ -306,6 +315,22 @@ receipt, and an estimate of missing snapshots from gaps in the observed
 20 Hz stream. That estimate includes skipped server captures and client
 frame coalescing. The menu also shows pending inputs, hard resets, local
 correction magnitude and rate, and UDP payload throughput in each direction.
+
+For recurring movement stutter, set `FT_VOX_MOTION_TRACE` to a fresh CSV
+path before launching the graphical client. The server uses its normal
+command. In PowerShell, for example:
+
+```powershell
+$env:FT_VOX_MOTION_TRACE = Join-Path $PWD ("motion-alice-{0:yyyyMMdd-HHmmss}.csv" -f (Get-Date))
+.\build\Release\ft_vox.exe --connect 127.0.0.1:7777 --player-profile .\saves\profiles\alice
+```
+
+After connecting, stand still briefly, then walk where the problem occurs
+and quit normally. The client records at most 60 seconds or 12,000 frames.
+The CSV links frame timings and camera positions to input ticks, server
+acknowledgments, predicted poses, terrain waits and correction counters.
+It contains gameplay telemetry and omits profile keys and session
+capabilities. Unset the variable to turn off tracing.
 
 ## Voxel actions
 

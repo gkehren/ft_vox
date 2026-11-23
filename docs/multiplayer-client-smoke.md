@@ -2,8 +2,121 @@
 
 The [issue #260 closure report](multiplayer-closure.md#physical-gpu-and-remaining-work)
 records the latest physical-GPU dual-client startup, restart and strict
-visual results. Manual keyboard and mouse coverage is tracked in
+visual results. The [interactive retest below](#interactive-movement-retest)
+records the maintainer's keyboard and mouse validation for
 [#277](https://github.com/gkehren/ft_vox/issues/277).
+
+## Local camera cadence for #277
+
+The maintainer reported seeing the other player, walking, breaking and
+placing blocks, and dropping items on wire v5 with a dedicated server and
+two separate PowerShell clients. The same session showed visible stutter
+in local walking. That check preceded the camera fix.
+
+The local camera previously drew the final body position of each 60 Hz
+network prediction tick. It now advances through the same 120 Hz physics
+steps on the presentation clock. The `WorldReplicationClientTick`
+regression samples the camera every 7 ms while walking at 4.5 blocks/s.
+Before the fix, its per-frame speed ranged from 0 to 10.714 blocks/s.
+After the fix, it measures 4.5 blocks/s throughout the steady walking
+window. The UDP relay also measures 4.5 blocks/s at simulated render
+rates of 60 and 144 FPS with 0 and 150 ms nominal RTT on clean links.
+The packet-loss fixture checks reconciliation and convergence after a
+frame stall.
+
+```sh
+ctest --test-dir build-cpu -C Release -V -R '^WorldReplicationClientTick$'
+```
+
+The wire-v5 Release smoke ran on Windows with MSVC, an RTX 4070 Ti,
+driver 621.24, Vulkan 1.4.357 and `FT_VOX_VALIDATION=1`. Two graphical
+processes connected to a seed-42 loopback server with isolated profiles.
+The authority streamed terrain and reported zero dropped ticks on both
+runs. It committed generations 2 and 3 on graceful stops. Both clients
+timed out after the server stopped. Fresh client processes reused the
+profiles, joined a fresh wire epoch and resumed the same actor IDs.
+The physical-GPU `VisualRegression` and `EngineReload` tests passed.
+The strict visual run passed all 24 scenes.
+Validation reported the two known overlay-related swapchain VUIDs below.
+
+The Computer Use plugin could not connect to the native Windows pipe.
+The maintainer completed the interactive checks and reported the results
+recorded below.
+
+### Rollbacks on live Windows loopback
+
+The maintainer still felt frequent rollback after camera interpolation
+was added. A temporary Release diagnostic drove held walk input on a
+flat strip with two graphical clients and a separate dedicated server.
+It recorded scheduled inputs, authoritative snapshots, prediction
+corrections and per-frame camera positions during the steady section of
+the walk. This exercised the normal swapchain and UDP threads.
+
+The frame loop polled snapshots before the swapchain wait. The scheduler
+then estimated input arrival from an older observation and skipped ticks
+that could still have been accepted. Each missing tick applied neutral
+controls at the authority. A delayed snapshot also shifted the estimate
+abruptly. The client now polls immediately before gameplay input after
+the swapchain wait, adjusts the running clock gradually, and fills short
+gaps with consecutive commands. Large gaps retain the bounded resume path.
+
+| Windows loopback, steady walk | Camera interpolation alone | With input scheduling fix |
+| --- | ---: | ---: |
+| Skipped target ticks | 29 of 442 | 0 of 424 |
+| Prediction corrections | 12 | 0 |
+| Per-frame camera speed | 0–12.21 blocks/s | 4.04–4.52 blocks/s |
+
+The ideal walking speed is 4.5 blocks/s. The deterministic scheduler
+regression covers late snapshot polling and a single delayed render
+frame. The temporary diagnostic input and logs are outside the shipped
+client.
+
+### Late movement inputs after short action RTT samples
+
+A trace from the reported playthrough showed regular frame times around
+6 ms during the severe rollbacks. From roughly 45 seconds onward, server
+snapshots kept arriving while the processed-input acknowledgment advanced
+only in bursts. Earlier action acknowledgments had moved the RTT
+estimate from roughly 35 ms toward 9–12 ms. Command ticks were still
+being sent. The running server clock was following delayed snapshots
+and the reduced RTT left insufficient lead for those commands to reach
+the open input slots.
+
+The scheduler now keeps the least delayed observation in a two-second
+snapshot window and targets three ticks beyond estimated arrival. The
+server keeps its six-tick admission policy. The regression combines
+short action RTT samples with 6–56 ms snapshot delivery variation and
+models the server closing the next tick's inbox. It recorded 227 late
+inputs out of 240 before the fix and zero out of 241 after it.
+In a separate two-client Windows run, repeated hotbar-select actions
+produced an RTT estimate of 8.7–14.9 ms during steady walking. The
+walking client recorded zero prediction corrections, zero hard resets
+and no frame-to-frame reversal.
+
+### Interactive movement retest
+
+The maintainer retested the Windows Release client on loopback at commit
+`111af3f` and confirmed that movement was smooth and the reported
+rollbacks were gone. They also confirmed sprint, jump, inventory use,
+and resuming at the same position after relaunching the client with the
+same profile. Their earlier interactive test confirmed remote-player
+visibility, shared break/place and item drops.
+
+The maintainer also confirmed **Multiplayer → Disconnect** followed by
+**Multiplayer → Reconnect** in the same running client window.
+
+The maintainer also confirmed the rest of the interactive checklist
+on the corrected build:
+
+- Remote avatar movement and collision while walking against obstacles.
+- Both players contending for the same dropped item and rearranging
+  stacks in both inventories.
+- Cursor capture and release, focus changes between windows, and
+  leaving and re-entering the other player's interest area.
+- A solo spot check of the same controls.
+
+The physical-GPU startup and graceful restart run above verifies
+profile recovery with separate Release client processes.
 
 ## Wire v4 profile restart
 
