@@ -30,6 +30,48 @@ invalid world name, or a save that the existing persistence layer cannot open
 prevents startup. Starting the server on an older save migrates it to the
 dedicated format. Keep a copy for use with the solo editor or an older build.
 
+## Host from the game
+
+Open **Multiplayer → Show panel → Host**. Select a saved server world or
+type a new name. Hosted worlds use `server-saves/` relative to the game's
+working directory. Names can contain up to 48 ASCII letters, digits,
+spaces, dashes, or underscores. A CLI server with `--saves-root ./server-saves`
+uses the same world storage and lock.
+
+Choose a port, player limit, interest radius, terrain workers, and streaming
+preset. Port **0** requests a free port from the OS. The player limit counts
+network seats, including the local graphical client when it joins. Select or
+create a profile under **Join** to use **Join automatically when ready**.
+When the child reports readiness, **Host** shows the bound address and
+assigned port and offers **Join hosted server** for a manual join or retry.
+
+Loopback is the default. **Allow LAN / VPN connections** requires an IPv4
+address assigned to an interface on this machine in an RFC 1918 range or
+`100.64.0.0/10`. The server binds that interface and the graphical client
+joins through its local address. Anyone who can reach the address may join
+under the existing [private-network rules](multiplayer-public-network-readiness.md).
+
+The game starts the sibling `ft_vox_server` executable as a separate
+process and keeps a bounded log in **Host**. It reads readiness and
+checkpoint status from the child's inherited output pipe. The separate
+inherited stdin pipe is the private launcher control channel. In this
+version its EOF requests graceful shutdown. The server validates the pipe
+before opening a world. The local client joins with its ordinary profile.
+
+**Stop server** closes the control pipe and waits for the process to exit
+and report a committed checkpoint. Closing the game follows the same
+sequence. A save or process failure leaves the game open with the error.
+If stopping is delayed, **Force stop** becomes available with a
+confirmation and a warning about losing recent changes. Escalation
+targets the child owned by this launcher.
+
+If the game is terminated abruptly, the OS closes the control pipe and
+the child attempts its normal checkpoint and exit. A stalled child can
+retain its world lock until it finishes or its operator intervenes.
+Use the Host log to diagnose a busy port, a held world lock, startup
+delay, migration failure, or a failed checkpoint. CLI servers still
+support `--stop-file` and the existing stop signals.
+
 ## Connect two graphical clients
 
 Build with `FT_VOX_GRAPHICS=ON`, then run the server and two clients in
@@ -356,7 +398,7 @@ The dockable window is available from solo play and CLI connections.
 same Disconnect/Reconnect actions as the menu. **Network** shows this
 client's ping estimate and sample age, snapshot age and estimated loss,
 receive/send throughput, pending predicted inputs, corrections, and hard
-resets. Hover a metric for its definition. Host, Players, and Administration
+resets. Hover a metric for its definition. Players and Administration
 are placeholders for future server features.
 
 Ping comes from unambiguous Hello/Welcome or Action/ACK exchanges. A hotbar

@@ -177,6 +177,7 @@ Engine::Engine(std::string resourcePackRoot)
 
 Engine::~Engine()
 {
+	m_hostServer.stop();
 	if (m_remote)
 		m_remote->disconnect();
 	if (vkContext)
@@ -892,7 +893,11 @@ void Engine::handleEvents()
 		switch (event.type)
 		{
 		case SDL_EVENT_QUIT:
-			running = false;
+			requestExit();
+			break;
+		case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+			if (event.window.windowID == SDL_GetWindowID(window))
+				requestExit();
 			break;
 		case SDL_EVENT_WINDOW_FOCUS_LOST:
 			windowFocused = false;
@@ -950,7 +955,7 @@ void Engine::handleEvents()
 				// decides whether Escape may quit.
 				if (escapeShouldQuit(uiCapturesKeyboard,
 									 gameUi && gameUi->isFileDialogOpen()))
-					running = false;
+					requestExit();
 				break;
 			}
 
@@ -1674,7 +1679,7 @@ void Engine::drawUi()
 	f.drawCount = drawList.size();
 	f.windowW = windowWidth;
 	f.windowH = windowHeight;
-	f.benchmark = m_remote ? nullptr : &m_benchmark;
+	f.benchmark = m_remote || m_hostSnapshot.active() ? nullptr : &m_benchmark;
 	if (swapchain)
 		f.presentModeName =
 			VkSwapchain::presentModeName(swapchain->getPresentMode());
@@ -1693,7 +1698,7 @@ void Engine::drawUi()
 		f.uiScale = imgui->uiScale();
 		f.setUiScale = [this](float scale) { imgui->requestUiScale(scale); };
 	}
-	f.requestExit = [this]() { running = false; };
+	f.requestExit = [this]() { requestExit(); };
 	f.resourcePackRoot = &m_resourcePackRoot;
 	f.applyResourcePack = [this](const std::string &path) -> GameUIFrame::ResourcePackUiResult {
 		const ResourcePackApplyResult r = applyResourcePack(path);
@@ -1913,7 +1918,10 @@ void Engine::run()
 	lastTime = lastFrame;
 	const double inspectionStart = lastFrame;
 	if (!m_inspectionView && !m_exitAfterBenchmark)
+	{
 		loadJoinPreferences();
+		loadHosting();
+	}
 
 	// First run on this machine (no imgui.ini yet): start with the default
 	// developer layout instead of an empty workspace. Benchmark runs keep the
@@ -1933,6 +1941,8 @@ void Engine::run()
 			PROFILE_SCOPE("Events");
 			handleEvents();
 		}
+		if (running)
+			tickHosting();
 		if (!running)
 		{
 			GetProfiler().endFrame();

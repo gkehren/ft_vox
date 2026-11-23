@@ -24,6 +24,7 @@ struct EngineJoinProbe
 
 	void pump()
 	{
+		engine.tickHosting();
 		engine.applySessionRequests();
 		if (engine.m_remote)
 		{
@@ -38,6 +39,44 @@ struct EngineJoinProbe
 			if (engine.m_remote->motionTrace)
 				engine.traceRemoteMotion(1.0 / 120.0);
 		}
+	}
+
+	void runHosting(const std::filesystem::path &server)
+	{
+		engine.m_hostExecutable = server;
+		engine.m_hostSavesRoot = engine.m_savesRoot / "dedicated";
+		engine.initializeNoiseGenerator(13);
+		frame().createJoinProfile("local-host");
+		hosting::Options options;
+		options.world = "Hosted test";
+		options.port = 0;
+		options.playerSlots = 1;
+		options.interestRadius = 1;
+		frame().startHostedServer(options, true);
+		until([&] {
+			return engine.m_hostSnapshot.state == hosting::State::Ready &&
+				engine.m_remote && engine.m_remote->ready();
+		}, "hosted server did not auto-join");
+		auto state = engine.m_hostSnapshot;
+		CHECK(state.address == "127.0.0.1" && state.port > 0 &&
+			engine.m_remote->endpoint == state.address + ":" + std::to_string(state.port),
+			"auto-join uses the ready loopback endpoint and assigned port");
+		CHECK(engine.m_remote->namedProfile == "local-host" && engine.m_suspendedSolo,
+			"hosting reuses the selected profile and the solo suspension path");
+
+		engine.running = true;
+		SDL_Event close{};
+		close.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+		close.window.windowID = SDL_GetWindowID(engine.window);
+		if (!SDL_PushEvent(&close))
+			throw std::runtime_error(SDL_GetError());
+		engine.handleEvents();
+		CHECK(engine.running && engine.m_exitAfterHostedStop, "game exit waits for its hosted server");
+		until([&] { return !engine.running || engine.m_hostSnapshot.state == hosting::State::Failed; },
+			"game did not reach a terminal hosted shutdown");
+		CHECK(!engine.running && engine.m_hostSnapshot.state == hosting::State::Stopped &&
+			engine.m_hostSnapshot.checkpoint > state.checkpoint,
+			"game exits after the final hosted checkpoint was committed");
 	}
 
 	void until(const auto &done, const char *description)
@@ -171,5 +210,12 @@ int runEngineJoinSmoke(Engine &engine, const char *first, const char *second)
 {
 	EngineJoinProbe{engine}.run(first, second);
 	std::cout << "Native multiplayer join smoke: " << testmain::checks << " checks\n";
+	return testmain::exitCode();
+}
+
+int runEngineHostingSmoke(Engine &engine, const std::filesystem::path &server)
+{
+	EngineJoinProbe{engine}.runHosting(server);
+	std::cout << "Native hosting smoke: " << testmain::checks << " checks\n";
 	return testmain::exitCode();
 }

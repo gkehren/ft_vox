@@ -21,6 +21,7 @@
 #include <Engine/InventoryUi.hpp>
 #include <Engine/MultiplayerUi.hpp>
 #include <Engine/MultiplayerJoin.hpp>
+#include <Hosting/ServerSupervisor.hpp>
 #include <Sim/GameSimulation.hpp>
 
 #include <future>
@@ -194,6 +195,12 @@ struct GameUIFrame
 	std::function<void(client::JoinRequest)> connectServer;
 	std::function<void(std::string_view)> selectJoinProfile, createJoinProfile, toggleFavorite;
 	bool switchingSession{};
+	const hosting::Snapshot *hostedServer{};
+	std::span<const std::string> hostWorlds;
+	std::string hostError;
+	bool exitAfterHostedStop{};
+	std::function<void(hosting::Options, bool)> startHostedServer;
+	std::function<void()> stopHostedServer, forceStopHostedServer, joinHostedServer;
 
 	/// Gameplay inventory presentation (issue #229, Epic #223 Phase F):
 	/// read-only bounded snapshot filled by Engine::drawUi + explicit command
@@ -370,6 +377,7 @@ public:
 	/// re-capturing. The saved snapshot is abandoned and the panel opens on
 	/// the current visible state.
 	void leaveLayoutTilesHidden() { m_layoutTilesHidden = false; }
+	void showHostPanel();
 
 	/// Invalidate any active or in-flight biome map task and clear current texture.
 	/// Supersedes existing request ID and marks backing texture as inactive.
@@ -421,6 +429,7 @@ private:
 	void drawPlayerPanel(GameUIFrame &frame);
 	void drawMultiplayerPanel(const GameUIFrame &frame);
 	void drawJoinPanel(const GameUIFrame &frame);
+	void drawHostPanel(const GameUIFrame &frame);
 	void drawWorld(GameUIFrame &frame);
 	void drawHelp(GameUIFrame &frame);
 	void drawOverlayHints(GameUIFrame &frame);
@@ -466,6 +475,9 @@ private:
 	ui::LayoutTilesSnapshot m_savedTilesState{};
 	client::JoinDraft m_joinDraft;
 	bool m_joinDraftInitialized{};
+	hosting::Options m_hostOptions;
+	std::array<char, 64> m_hostWorld{}, m_hostAddress{};
+	bool m_hostAutoJoin{true}, m_focusHostPanel{};
 
 	/// One-shot: Help window opens with the requested tab selected.
 	ui::HelpTabRequest m_helpTabRequest{ui::HelpTabRequest::None};

@@ -6,6 +6,56 @@ visual results. The [interactive retest below](#interactive-movement-retest)
 records the maintainer's keyboard and mouse validation for
 [#277](https://github.com/gkehren/ft_vox/issues/277).
 
+## In-game hosting (#285)
+
+Build `ft_vox` with graphics enabled. The build also places
+`ft_vox_server` alongside it. Run from a fresh working directory for the
+manual smoke so that profiles and worlds are isolated.
+
+1. Launch the client normally, release the cursor with **C**, and open
+   **Multiplayer → Show panel**. In **Join**, create a profile for the
+   smoke. In **Host**, enter a new world name and set port **0**.
+2. Leave loopback and auto-join selected, then click **Start server**.
+   Check that the Join button appears with the assigned port after
+   readiness and that the client enters the world with the selected
+   profile. Change the selected hotbar slot.
+3. Click **Stop server** and wait for the checkpoint confirmation. Select
+   the saved world, change a worker or streaming preset, and restart.
+   Verify the same profile restores its selected slot. Close the game
+   while hosting and confirm that it exits after the checkpoint.
+4. Hold a world open in a separate CLI server and try to host that same
+   world from the game. Repeat with a different world on the occupied
+   port. Confirm the Host log explains each failure and that the CLI
+   server stays up.
+5. When using a trusted LAN or VPN, select its private interface address.
+   Confirm the panel warns about exposure and reports that exact
+   address. Test a public or wildcard address to check form validation.
+
+`ServerSupervisor` runs on CPU-only builds. It exercises real child
+processes, loopback readiness and join, checkpointed stop and restart,
+port and save locks, corrupt saves, and abrupt launcher loss. Fixtures
+cover bounded logs, slow startup, crashes, save failure, and explicit
+force stop while an independently supervised child stays alive.
+
+```sh
+ctest --test-dir build-cpu -C Release -R '^(ServerSupervisor|ServerLifecycle|ServerRestart|ServerMigration)$' --output-on-failure
+```
+
+The opt-in Vulkan smoke drives the game host's Start callback, auto-join,
+and a window-close event against a real child. It checks the assigned
+port, profile, suspended solo state, and final checkpoint. Pass a fresh
+temporary directory for the smoke's saves.
+
+```powershell
+$smokeRoot = Join-Path $env:TEMP ("ft-vox-host-" + [guid]::NewGuid())
+Push-Location .\build\Release
+try {
+    & ..\tests\Release\test_engine_reload.exe --hosting-smoke "$PWD\ft_vox_server.exe" $smokeRoot
+} finally {
+    Pop-Location
+}
+```
+
 ## In-game join (#284)
 
 Start two loopback servers with separate world saves and ports. Launch

@@ -39,6 +39,7 @@ void Engine::populateJoinUi(GameUIFrame &frame)
 		return;
 
 	frame.joinPreferences = &m_joinPreferences;
+	populateHostingUi(frame);
 	frame.joinProfiles = m_joinProfiles;
 	frame.joinError = m_joinError;
 	frame.joinPreferencesError = m_joinPreferencesError;

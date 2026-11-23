@@ -88,6 +88,8 @@ void GameUI::drawMultiplayerPanel(const GameUIFrame &frame)
 	ImGui::SetNextWindowSize(ImVec2(std::min(ui::scaled(390.f, scale), work.x * 0.9f),
 								   std::min(ui::scaled(540.f, scale), work.y * 0.9f)),
 							ImGuiCond_FirstUseEver);
+	if (m_focusHostPanel)
+		ImGui::SetNextWindowFocus();
 	if (!ImGui::Begin(ui::windows::kMultiplayer, &m_debug.panels.multiplayer))
 	{
 		ImGui::End();
@@ -96,15 +98,158 @@ void GameUI::drawMultiplayerPanel(const GameUIFrame &frame)
 
 	if (ImGui::CollapsingHeader("Join", ImGuiTreeNodeFlags_DefaultOpen))
 		drawJoinPanel(frame);
+	if (m_focusHostPanel)
+		ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+	if (ImGui::CollapsingHeader("Host") && frame.hostedServer)
+	{
+		if (m_focusHostPanel)
+			ImGui::SetScrollHereY(0.f);
+		m_focusHostPanel = false;
+		drawHostPanel(frame);
+	}
 	if (ImGui::CollapsingHeader("Network", ImGuiTreeNodeFlags_DefaultOpen))
 		ui::drawMultiplayerNetworkStats(frame.networkStats);
-	if (ImGui::CollapsingHeader("Host"))
-		ImGui::TextWrapped("In-game hosting is unavailable.");
 	if (ImGui::CollapsingHeader("Players"))
 		ImGui::TextWrapped("The server roster is unavailable.");
 	if (ImGui::CollapsingHeader("Administration"))
 		ImGui::TextWrapped("Server controls are unavailable.");
 	ImGui::End();
+}
+
+void GameUI::showHostPanel()
+{
+	leaveLayoutTilesHidden();
+	m_debug.panels.multiplayer = true;
+	m_focusHostPanel = true;
+}
+
+void GameUI::drawHostPanel(const GameUIFrame &frame)
+{
+	using hosting::State;
+	const auto &server = *frame.hostedServer;
+	if (!server.message.empty())
+		ImGui::TextWrapped("%s", server.message.c_str());
+	if (!frame.hostError.empty())
+		ImGui::TextWrapped("%s", frame.hostError.c_str());
+	if (frame.exitAfterHostedStop)
+		ImGui::TextWrapped("The game will exit after the server confirms its checkpoint.");
+
+	if (server.active())
+		ImGui::TextWrapped("World: %s", server.world.c_str());
+	if (server.state == State::Ready)
+	{
+		ImGui::TextWrapped("Address: %s:%u", server.address.c_str(), static_cast<unsigned>(server.port));
+		ImGui::BeginDisabled(frame.switchingSession);
+		if (ImGui::Button("Join hosted server"))
+			frame.joinHostedServer();
+		ImGui::EndDisabled();
+	}
+	if (server.state == State::Starting || server.state == State::Ready)
+	{
+		if (ImGui::Button("Stop server"))
+			frame.stopHostedServer();
+	}
+	if (server.state == State::Stopping && server.delayed && ImGui::Button("Force stop…"))
+		ImGui::OpenPopup("Force stop hosted server?");
+	if (ImGui::BeginPopupModal("Force stop hosted server?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.f);
+		ImGui::TextUnformatted("Force stopping can lose changes made since the last committed checkpoint.");
+		ImGui::PopTextWrapPos();
+		if (ImGui::Button("Keep waiting"))
+			ImGui::CloseCurrentPopup();
+		ImGui::SameLine();
+		ImGui::BeginDisabled(server.state != State::Stopping || !server.delayed);
+		if (ImGui::Button("Force stop"))
+		{
+			frame.forceStopHostedServer();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndDisabled();
+		ImGui::EndPopup();
+	}
+
+	if (!server.active())
+	{
+		if (!frame.hostWorlds.empty())
+		{
+			ImGui::SetNextItemWidth(-1.f);
+			if (ImGui::BeginCombo("##host-worlds", "Saved server worlds", ImGuiComboFlags_HeightSmall))
+			{
+				for (const auto &world : frame.hostWorlds)
+					if (ImGui::Selectable(world.c_str(), world == m_hostWorld.data()))
+						std::snprintf(m_hostWorld.data(), m_hostWorld.size(), "%s", world.c_str());
+				ImGui::EndCombo();
+			}
+		}
+		ImGui::TextUnformatted("Server world");
+		ImGui::SetNextItemWidth(-1.f);
+		ImGui::InputTextWithHint("##host-world", "New or existing world name", m_hostWorld.data(), m_hostWorld.size());
+		ImGui::TextUnformatted("Port (0 assigns a free port)");
+		ImGui::SetNextItemWidth(-1.f);
+		ImGui::InputInt("##host-port", &m_hostOptions.port);
+		ImGui::Checkbox("Allow LAN / VPN connections", &m_hostOptions.lan);
+		if (m_hostOptions.lan)
+		{
+			ImGui::TextWrapped("Players who can reach this address can join. Use a trusted private LAN or VPN.");
+			ImGui::SetNextItemWidth(-1.f);
+			ImGui::InputTextWithHint("##host-address", "Private IPv4 address on this machine",
+				m_hostAddress.data(), m_hostAddress.size());
+		}
+		else
+			ImGui::TextUnformatted("Loopback only (127.0.0.1)");
+
+		ImGui::TextUnformatted("Maximum players");
+		ImGui::SetNextItemWidth(-1.f);
+		ImGui::SliderInt("##host-players", &m_hostOptions.playerSlots, 1, hosting::kMaxPlayerSlots, "%d",
+			ImGuiSliderFlags_AlwaysClamp);
+		ImGui::TextUnformatted("Interest radius (chunks)");
+		ImGui::SetNextItemWidth(-1.f);
+		ImGui::SliderInt("##host-radius", &m_hostOptions.interestRadius, 0, hosting::kMaxInterestRadius, "%d",
+			ImGuiSliderFlags_AlwaysClamp);
+		static constexpr std::array workers{0, 2, 4, 8};
+		static constexpr std::array workerLabels{"Synchronous (0)", "2 workers", "4 workers", "8 workers"};
+		const auto workerIndex = std::ranges::find(workers, m_hostOptions.workers) - workers.begin();
+		ImGui::TextUnformatted("Terrain workers");
+		ImGui::SetNextItemWidth(-1.f);
+		if (ImGui::BeginCombo("##host-workers", workerLabels[static_cast<size_t>(workerIndex)]))
+		{
+			for (size_t i = 0; i < workers.size(); ++i)
+				if (ImGui::Selectable(workerLabels[i], m_hostOptions.workers == workers[i]))
+					m_hostOptions.workers = workers[i];
+			ImGui::EndCombo();
+		}
+		int streaming = static_cast<int>(m_hostOptions.streaming);
+		ImGui::TextUnformatted("Streaming budget");
+		ImGui::SetNextItemWidth(-1.f);
+		if (ImGui::Combo("##host-streaming", &streaming, "Low\0Balanced\0High\0"))
+			m_hostOptions.streaming = static_cast<hosting::StreamingPreset>(streaming);
+		ImGui::Checkbox("Join automatically when ready", &m_hostAutoJoin);
+		if (m_hostAutoJoin)
+		{
+			const auto &profile = frame.joinPreferences->selectedProfile;
+			if (profile.empty())
+				ImGui::TextWrapped("Select or create a local profile under Join.");
+			else
+				ImGui::TextWrapped("Join profile: %s", profile.c_str());
+		}
+		if (ImGui::Button("Start server"))
+		{
+			m_hostOptions.world = m_hostWorld.data();
+			m_hostOptions.address = m_hostAddress.data();
+			frame.startHostedServer(m_hostOptions, m_hostAutoJoin);
+		}
+	}
+	if (server.checkpoint > 0)
+		ImGui::Text("Checkpoint generation: %llu", static_cast<unsigned long long>(server.checkpoint));
+	if (!server.logs.empty() && ImGui::TreeNode("Server log"))
+	{
+		ImGui::BeginChild("##host-log", ImVec2(0.f, ImGui::GetTextLineHeightWithSpacing() * 9.f));
+		for (const auto &line : server.logs)
+			ImGui::TextWrapped("%s", line.c_str());
+		ImGui::EndChild();
+		ImGui::TreePop();
+	}
 }
 
 void GameUI::drawJoinPanel(const GameUIFrame &frame)

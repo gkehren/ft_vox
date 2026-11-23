@@ -1,0 +1,301 @@
+#include <Hosting/ChildProcess.hpp>
+#include <Hosting/ServerSupervisor.hpp>
+#include <Network/ClientTransport.hpp>
+#include <Server/LauncherControl.hpp>
+#include <World/WorldCheckpoint.hpp>
+
+#include "TestMain.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <fstream>
+#include <stdexcept>
+
+namespace
+{
+namespace fs = std::filesystem;
+using namespace std::chrono_literals;
+using hosting::Options;
+using hosting::ServerSupervisor;
+using hosting::Snapshot;
+using hosting::State;
+
+Snapshot await(const ServerSupervisor &supervisor, const auto &done)
+{
+	const auto deadline = std::chrono::steady_clock::now() + 15s;
+	Snapshot state;
+	do
+	{
+		state = supervisor.snapshot();
+		if (done(state))
+			return state;
+		std::this_thread::sleep_for(10ms);
+	} while (std::chrono::steady_clock::now() < deadline);
+	throw std::runtime_error("server did not reach expected state: " + state.message);
+}
+
+Snapshot ready(const ServerSupervisor &supervisor)
+{
+	const auto state = await(supervisor, [](const Snapshot &s) { return s.state == State::Ready || !s.active(); });
+	if (state.state != State::Ready)
+		throw std::runtime_error(state.message);
+	return state;
+}
+
+Snapshot finished(const ServerSupervisor &supervisor)
+{
+	return await(supervisor, [](const Snapshot &s) { return !s.active(); });
+}
+
+Options options(std::string world)
+{
+	Options result;
+	result.world = std::move(world);
+	result.port = 0;
+	result.playerSlots = 1;
+	result.interestRadius = 1;
+	result.workers = 0;
+	return result;
+}
+
+void checkValidation()
+{
+	auto settings = options("World one");
+	CHECK(hosting::validate(settings).empty(), "ephemeral loopback defaults to a valid launch");
+	settings.lan = true;
+	for (const char *address : {"10.0.0.2", "172.31.1.2", "192.168.0.2", "100.75.0.2"})
+	{
+		settings.address = address;
+		CHECK(hosting::validate(settings).empty(), "private interface can be selected");
+	}
+	for (const char *address : {"0.0.0.0", "127.0.0.1", "203.0.113.2", "8.8.8.8", "172.32.0.1",
+		"localhost", "10.0.0.2 --port 1"})
+	{
+		settings.address = address;
+		CHECK(!hosting::validate(settings).empty(), "LAN bind requires a concrete private numeric address");
+	}
+	settings.lan = false;
+	for (const char *world : {"../world", "C:/world", "--world", "CON", "trailing ", "world & other"})
+	{
+		settings.world = world;
+		CHECK(!hosting::validate(settings).empty(), "unsafe world names are refused");
+	}
+	settings = options("Options");
+	settings.port = 65536;
+	CHECK(!hosting::validate(settings).empty(), "invalid port is refused");
+	settings.port = 0;
+	settings.playerSlots = 256;
+	CHECK(!hosting::validate(settings).empty(), "player slots fit the server cap");
+	settings.playerSlots = 1;
+	settings.interestRadius = 9;
+	CHECK(!hosting::validate(settings).empty(), "interest radius stays bounded");
+}
+
+void checkRealServer(const fs::path &exe, const fs::path &root)
+{
+	ServerSupervisor supervisor;
+	auto settings = options("World with spaces");
+	CHECK(supervisor.start(settings, exe, root), "launch accepted");
+	const auto initial = ready(supervisor);
+	CHECK(initial.address == "127.0.0.1" && initial.port > 0 && initial.checkpoint > 0,
+		"ready publishes the bound port and initial checkpoint");
+	CHECK(fs::is_regular_file(root / settings.world / "world.meta"), "world and save root arguments stay intact");
+	const auto worlds = hosting::listWorlds(root);
+	CHECK(std::ranges::find(worlds, settings.world) != worlds.end(), "hosted world can be selected again");
+	CHECK(!supervisor.start(options("Another"), exe, root), "one supervisor owns at most one child");
+	CHECK(!supervisor.forceStop(), "ready server cannot be force stopped directly");
+
+	net::udp::ClientTransport client(net::udp::parseAddress(initial.address, initial.port));
+	using Clock = net::udp::ClientTransport::Clock;
+	client.connect(Clock::now());
+	const auto deadline = Clock::now() + 5s;
+	while (client.status() == net::udp::ClientStatus::Connecting && Clock::now() < deadline)
+	{
+		client.poll(Clock::now());
+		std::this_thread::sleep_for(10ms);
+	}
+	CHECK(client.status() == net::udp::ClientStatus::Connected, "real client joins the published UDP endpoint");
+
+	ServerSupervisor duplicate;
+	CHECK(duplicate.start(settings, exe, root), "duplicate world request launches a separate process");
+	auto failure = finished(duplicate);
+	CHECK(failure.state == State::Failed && failure.message.find("lock") != std::string::npos &&
+		supervisor.snapshot().state == State::Ready, "existing save lock is visible and the first server stays ready");
+
+	supervisor.stop();
+	auto stop = finished(supervisor);
+	CHECK(stop.state == State::Stopped && stop.checkpoint > initial.checkpoint &&
+		std::ranges::any_of(stop.logs, [](const auto &line) { return line.find("reason=launcher saved=1") != std::string::npos; }),
+		"EOF is graceful and a committed checkpoint is required for completion");
+	settings.workers = 2;
+	settings.streaming = hosting::StreamingPreset::Low;
+	CHECK(supervisor.start(settings, exe, root), "reopen the world with new settings");
+	CHECK(ready(supervisor).checkpoint >= stop.checkpoint, "restart observes the committed checkpoint");
+	supervisor.stop();
+	CHECK(finished(supervisor).state == State::Stopped, "reopened server commits");
+
+	net::udp::Socket occupied(net::udp::parseAddress("127.0.0.1", 0));
+	auto busy = options("Occupied port");
+	busy.port = occupied.address().port;
+	supervisor.start(busy, exe, root);
+	failure = finished(supervisor);
+	CHECK(failure.state == State::Failed && failure.port == 0 && failure.message.find("bind") != std::string::npos,
+		"an occupied port never becomes joinable and the bind error is visible");
+
+	fs::create_directories(root / "Invalid save");
+	std::ofstream(root / "Invalid save" / "world.meta") << "invalid metadata";
+	supervisor.start(options("Invalid save"), exe, root);
+	failure = finished(supervisor);
+	CHECK(failure.state == State::Failed && failure.message.find("world_open") != std::string::npos,
+		"invalid saved world produces an actionable startup error");
+	supervisor.start(options("Missing binary"), root / "missing-server", root);
+	failure = finished(supervisor);
+	CHECK(failure.state == State::Failed && failure.message.find("executable is missing") != std::string::npos,
+		"missing executable is reported");
+
+	uint64_t beforeExit{};
+	{
+		ServerSupervisor owner;
+		owner.start(settings, exe, root);
+		beforeExit = ready(owner).checkpoint;
+	}
+	supervisor.start(settings, exe, root);
+	CHECK(ready(supervisor).checkpoint > beforeExit, "teardown requests a save and releases the world lock");
+	supervisor.stop();
+	CHECK(finished(supervisor).state == State::Stopped, "supervisor recovers after startup failures");
+}
+
+int fixture(std::string_view world)
+{
+	if (!server::hasLauncherPipe())
+		return 8;
+	if (world == "slow")
+	{
+		std::cout << "SERVER status=ready mode=live transport=udp listen_address=127.0.0.1 port=62000 "
+			<< std::string(16000, 'z') << '\n';
+		for (int i = 0; i < 200; ++i)
+			std::cout << "test log line " << i << '\n';
+		std::cout << std::flush;
+		std::this_thread::sleep_for(600ms);
+	}
+	std::cout << "SERVER status=ready mode=live transport=udp listen_address=127.0.0.1 port=62001 checkpoint_generation=1"
+		<< std::endl;
+	if (world == "crash")
+	{
+		std::this_thread::sleep_for(150ms);
+		std::_Exit(42);
+	}
+	while (world == "hang" || server::pollLauncherPipe() == server::LauncherInput::Open)
+		std::this_thread::sleep_for(10ms);
+	std::cout << "SERVER status=stopping reason=launcher" << std::endl;
+	if (world == "save failure")
+	{
+		std::cerr << "SERVER error=persistence detail=injected checkpoint failure\n";
+		std::cout << "SERVER status=stopped reason=launcher saved=0 exit_code=5 checkpoint_generation=1" << std::endl;
+		return 5;
+	}
+	std::cout << "SERVER status=stopped reason=launcher saved=1 exit_code=0 checkpoint_generation=2" << std::endl;
+	return 0;
+}
+
+void checkSupervision(const fs::path &fixturePath, const fs::path &root)
+{
+	ServerSupervisor supervisor(100ms);
+	supervisor.start(options("slow"), fixturePath, root);
+	const auto slow = await(supervisor, [](const Snapshot &s) { return s.state == State::Starting && s.delayed; });
+	CHECK(slow.port == 0 && slow.logs.size() <= hosting::kMaxLogLines, "slow or truncated readiness never offers a join");
+	CHECK(ready(supervisor).port == 62001, "a subsequent valid readiness record is accepted");
+	supervisor.stop();
+	CHECK(finished(supervisor).state == State::Stopped, "slow launch still supports graceful stop");
+
+	supervisor.start(options("crash"), fixturePath, root);
+	auto state = finished(supervisor);
+	CHECK(state.state == State::Failed && state.message.find("exit 42") != std::string::npos,
+		"process exit without a terminal checkpoint is reported as failure");
+
+	supervisor.start(options("save failure"), fixturePath, root);
+	ready(supervisor);
+	supervisor.stop();
+	state = finished(supervisor);
+	CHECK(state.state == State::Failed && state.message.find("injected checkpoint failure") != std::string::npos,
+		"a failed checkpoint stays visible");
+
+	supervisor.start(options("hang"), fixturePath, root);
+	ready(supervisor);
+	ServerSupervisor neighbor;
+	neighbor.start(options("neighbor"), fixturePath, root);
+	ready(neighbor);
+	supervisor.stop();
+	await(supervisor, [](const Snapshot &s) { return s.state == State::Stopping && s.delayed; });
+	CHECK(supervisor.forceStop(), "unresponsive stop allows explicit escalation");
+	state = finished(supervisor);
+	CHECK(state.state == State::Failed && state.message.find("force stopped") != std::string::npos,
+		"forced termination is distinguished from a committed checkpoint");
+	CHECK(neighbor.snapshot().state == State::Ready, "escalation affects only the owned child");
+	neighbor.stop();
+	CHECK(finished(neighbor).state == State::Stopped, "unrelated child remains independently stoppable");
+}
+
+void checkLauncherLoss(const fs::path &fixturePath, const fs::path &exe, const fs::path &root)
+{
+	hosting::ChildProcess launcher(fs::absolute(fixturePath), {"--abandon", exe, root});
+	const auto deadline = std::chrono::steady_clock::now() + 15s;
+	auto exit = launcher.pollExit();
+	while (!exit && std::chrono::steady_clock::now() < deadline)
+	{
+		std::this_thread::sleep_for(10ms);
+		exit = launcher.pollExit();
+	}
+	if (exit != 0)
+		throw std::runtime_error("launcher exit fixture failed");
+	std::array<char, 128> buffer{};
+	const auto size = launcher.readOutput(buffer);
+	const uint64_t initial = std::stoull(std::string(buffer.data(), size));
+	const auto path = worldsave::checkpointManifestPath(root / "Abandoned launcher");
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		std::vector<uint8_t> bytes;
+		worldsave::CheckpointManifest manifest;
+		if (worldsave::readFileInto(path, bytes) == worldsave::SaveStatus::Ok &&
+			worldsave::decodeCheckpointManifest(bytes.data(), bytes.size(), manifest) == worldsave::SaveStatus::Ok &&
+			manifest.committedGeneration > initial)
+		{
+			CHECK(initial > 0, "launcher loss commits a new checkpoint even with the log reader gone");
+			return;
+		}
+		std::this_thread::sleep_for(10ms);
+	}
+	CHECK(false, "server did not commit after abrupt launcher exit");
+}
+}
+
+int main(int argc, char **argv)
+{
+	if (argc >= 3 && std::string_view(argv[1]) == "--world")
+		return fixture(argv[2]);
+	if (argc == 4 && std::string_view(argv[1]) == "--abandon")
+	{
+		ServerSupervisor supervisor;
+		supervisor.start(options("Abandoned launcher"), argv[2], argv[3]);
+		std::cout << ready(supervisor).checkpoint << std::endl;
+		std::_Exit(0); // Bypass supervisor teardown and lose both pipe ends.
+	}
+	if (argc != 2)
+		return 2;
+	const auto root = fs::temp_directory_path() / ("ft vox server & supervisor " + std::to_string(net::udp::randomId()));
+	try
+	{
+		checkValidation();
+		checkRealServer(fs::path(argv[1]), root);
+		checkSupervision(fs::path(argv[0]), root);
+		checkLauncherLoss(fs::path(argv[0]), fs::path(argv[1]), root);
+	}
+	catch (const std::exception &error)
+	{
+		CHECK(false, error.what());
+	}
+	std::error_code ignored;
+	fs::remove_all(root, ignored);
+	return testmain::exitCode();
+}

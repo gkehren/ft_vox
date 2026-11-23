@@ -1356,6 +1356,7 @@ elseif(WIN32)
 endif()
 
 target_link_libraries(test_engine_reload PRIVATE
+    ft_vox_hosting
     ft_vox_udp
     ${FT_VOX_COMMON_LIBS}
 )
@@ -1523,6 +1524,12 @@ add_executable(test_multiplayer_join test_multiplayer_join.cpp
 target_link_libraries(test_multiplayer_join PRIVATE ft_vox_udp ft_vox_core)
 add_test(NAME MultiplayerJoin COMMAND test_multiplayer_join)
 
+add_executable(test_server_supervisor test_server_supervisor.cpp)
+target_link_libraries(test_server_supervisor PRIVATE ft_vox_hosting ft_vox_udp ft_vox_core)
+add_dependencies(test_server_supervisor ft_vox_server)
+add_test(NAME ServerSupervisor COMMAND test_server_supervisor $<TARGET_FILE:ft_vox_server>)
+set_tests_properties(ServerSupervisor PROPERTIES TIMEOUT 120)
+
 # Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh
 # CMake configure + build with FT_VOX_GRAPHICS=OFF, no vcpkg toolchain and no
 # graphics discovery, producing the runner + CPU tests and running them.
@@ -1565,7 +1572,7 @@ foreach(_cpu_test IN ITEMS
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
     test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol test_udp_transport
-    test_world_replication test_server_restart_client test_multiplayer_ui test_multiplayer_join
+    test_world_replication test_server_restart_client test_multiplayer_ui test_multiplayer_join test_server_supervisor
     bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR

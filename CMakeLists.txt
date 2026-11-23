@@ -329,6 +329,7 @@ set(FT_VOX_SOURCES
     ${CMAKE_SOURCE_DIR}/src/Engine/Engine.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/EngineMultiplayer.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/EngineJoin.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/EngineHosting.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/ClientProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/MultiplayerJoin.cpp
     ${CMAKE_SOURCE_DIR}/src/Engine/ImGuiLayer.cpp
@@ -493,6 +494,11 @@ endif()
 ft_vox_target_hygiene(ft_vox_udp)
 target_link_libraries(ft_vox_server PRIVATE ft_vox_udp)
 
+add_library(ft_vox_hosting STATIC src/Hosting/ChildProcess.cpp src/Hosting/ServerSupervisor.cpp)
+target_include_directories(ft_vox_hosting PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ft_vox_hosting PRIVATE ft_vox_udp ft_vox_core Threads::Threads)
+ft_vox_target_hygiene(ft_vox_hosting)
+
 # Configure-time dependency-direction guard (issue #210 criterion 1, hardened
 # in issue #211 / Epic #204 Phase G): walk the TRANSITIVE link closure of a
 # CPU-only target and fail on any graphical library, in either configuration.
@@ -532,6 +538,7 @@ ft_vox_assert_cpu_link_closure(ft_vox_headless)
 ft_vox_assert_cpu_link_closure(ft_vox_server)
 ft_vox_assert_cpu_link_closure(ft_vox_wire)
 ft_vox_assert_cpu_link_closure(ft_vox_udp)
+ft_vox_assert_cpu_link_closure(ft_vox_hosting)
 
 # CPU-only configuration: the graphical stack must not even have been
 # DISCOVERED (no targets created by Dependencies.cmake).
@@ -571,7 +578,7 @@ endif()
 
 add_executable(${PROJECT_NAME} ${FT_VOX_GAME_SOURCES})
 ft_vox_target_hygiene(${PROJECT_NAME})
-add_dependencies(${PROJECT_NAME} ft_vox_shaders ft_vox_build_info)
+add_dependencies(${PROJECT_NAME} ft_vox_shaders ft_vox_build_info ft_vox_server)
 # Rebuild BuildInfo.cpp when the generated revision header changes.
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/Engine/BuildInfo.cpp
@@ -616,7 +623,7 @@ set(FT_VOX_COMMON_LIBS
 # linkers (GNU ld) the library must appear AFTER the objects — listing it first
 # among the libraries achieves that. CMake appends its transitive
 # glm/FastNoise2/Threads after it automatically.
-target_link_libraries(${PROJECT_NAME} PRIVATE ft_vox_udp ft_vox_core ${FT_VOX_COMMON_LIBS})
+target_link_libraries(${PROJECT_NAME} PRIVATE ft_vox_hosting ft_vox_udp ft_vox_core ${FT_VOX_COMMON_LIBS})
 
 # Linux: libdl for dynamic loader helpers; Vulkan loader when not using pure volk bootstrap
 if(UNIX AND NOT APPLE)
