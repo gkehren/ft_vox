@@ -157,7 +157,17 @@ public:
 	const std::string &resourcePackRoot() const { return m_resourcePackRoot; }
 
 private:
+	friend struct EngineJoinProbe;
 	struct RemoteSession;
+	void loadJoinPreferences();
+	void persistJoinPreferences();
+	void populateJoinUi(GameUIFrame &frame);
+	void applySessionRequests();
+	void prepareRemoteJoin(const client::JoinRequest &request);
+	void startRemote(std::unique_ptr<RemoteSession> remote);
+	void resumeSolo();
+	void retireWorldProjection();
+	bool switchingSession() const { return m_nextRemote || m_returnToSolo; }
 	void pollRemote();
 	void sendRemoteInput(const physics::PlayerInput &input);
 	void updateRemoteCamera();
@@ -346,7 +356,23 @@ private:
 	// focus / benchmark policy and the epoch barrier — no authoritative
 	// gameplay state lives here.
 	std::unique_ptr<sim::GameSimulation> sim;
+	struct SuspendedSolo
+	{
+		std::unique_ptr<sim::GameSimulation> simulation;
+		Camera camera;
+		bool paused;
+		float dayTime;
+	};
+	std::optional<SuspendedSolo> m_suspendedSolo;
 	std::unique_ptr<RemoteSession> m_remote;
+	std::unique_ptr<RemoteSession> m_nextRemote;
+	uint64_t m_remoteRenderEpoch{};
+	uint64_t m_nextMotionTraceFile{1};
+	bool m_returnToSolo{};
+	std::optional<client::JoinRequest> m_joinRequest;
+	client::JoinPreferences m_joinPreferences;
+	std::vector<std::string> m_joinProfiles;
+	std::string m_joinError, m_joinPreferencesError;
 	std::unique_ptr<RenderWorldBridge> renderBridge;
 
 	StagingRing stagingRing;

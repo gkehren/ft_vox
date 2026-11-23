@@ -1329,6 +1329,7 @@ list(REMOVE_ITEM FT_VOX_ENGINE_TEST_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 
 add_executable(test_engine_reload
     test_engine_reload.cpp
+    EngineJoinSmoke.cpp
     ${FT_VOX_ENGINE_TEST_SOURCES}
 )
 
@@ -1516,6 +1517,12 @@ add_executable(test_multiplayer_ui test_multiplayer_ui.cpp)
 target_include_directories(test_multiplayer_ui PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME MultiplayerUi COMMAND test_multiplayer_ui)
 
+add_executable(test_multiplayer_join test_multiplayer_join.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/ClientProfile.cpp
+    ${CMAKE_SOURCE_DIR}/src/Engine/MultiplayerJoin.cpp)
+target_link_libraries(test_multiplayer_join PRIVATE ft_vox_udp ft_vox_core)
+add_test(NAME MultiplayerJoin COMMAND test_multiplayer_join)
+
 # Clean-configure gate (issue #210 acceptance criterion 1): a SEPARATE fresh
 # CMake configure + build with FT_VOX_GRAPHICS=OFF, no vcpkg toolchain and no
 # graphics discovery, producing the runner + CPU tests and running them.
@@ -1558,7 +1565,7 @@ foreach(_cpu_test IN ITEMS
     test_terrain test_biome_map test_voxel_pool test_border_pool
     test_mesh_result_pool test_profiler test_workload_telemetry test_mobs
     test_frame_pacing test_world_save test_world_checkpoint test_server_host test_wire_protocol test_udp_transport
-    test_world_replication test_server_restart_client test_multiplayer_ui
+    test_world_replication test_server_restart_client test_multiplayer_ui test_multiplayer_join
     bench_gameplay_items)
     if(NOT TARGET ${_cpu_test})
         message(FATAL_ERROR

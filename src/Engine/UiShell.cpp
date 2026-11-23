@@ -161,7 +161,7 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 		ImGui::EndMenu();
 	}
 
-	if (frame.multiplayerStatus && ImGui::BeginMenu("Multiplayer"))
+	if (frame.joinPreferences && ImGui::BeginMenu("Multiplayer"))
 	{
 		layoutTileMenuItem("Show panel", nullptr, toggles.multiplayer);
 		ImGui::Separator();
@@ -169,12 +169,15 @@ void UiShell::drawMainMenuBar(GameUIFrame &frame, const ShellToggles &toggles)
 			frame.joinServer();
 		if (frame.leaveServer && ImGui::MenuItem("Disconnect"))
 			frame.leaveServer();
-		ImGui::Separator();
-		ImGui::TextUnformatted(frame.multiplayerStatus->label);
-		if (frame.multiplayerStatus->detail)
-			ImGui::TextWrapped("%s", frame.multiplayerStatus->detail);
-		if (hasLiveNetworkStats(frame.multiplayerStatus->state))
-			drawMultiplayerNetworkStats(frame.networkStats);
+		if (frame.multiplayerStatus)
+		{
+			ImGui::Separator();
+			ImGui::TextUnformatted(frame.multiplayerStatus->label);
+			if (frame.multiplayerStatus->detail)
+				ImGui::TextWrapped("%s", frame.multiplayerStatus->detail);
+			if (hasLiveNetworkStats(frame.multiplayerStatus->state))
+				drawMultiplayerNetworkStats(frame.networkStats);
+		}
 		ImGui::EndMenu();
 	}
 

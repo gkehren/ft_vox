@@ -208,6 +208,11 @@ Engine::~Engine()
 		sim->shutdown();
 		sim.reset();
 	}
+	if (m_suspendedSolo)
+	{
+		m_suspendedSolo->simulation->shutdown();
+		m_suspendedSolo.reset();
+	}
 	chunkPool.reset();
 	threadPool.reset();
 
@@ -248,6 +253,7 @@ void Engine::resetWorldProjection()
 	mobStates.clear();
 	m_itemSnapshots.clear();
 	m_itemStates.clear();
+	m_itemEventsScratch.clear();
 	if (worldRenderer)
 	{
 		// Drop the renderer's mob presentation too: setMobs is otherwise
@@ -1606,6 +1612,7 @@ void Engine::drawUi()
 	f.showChunkBorders = &showChunkBorders;
 	f.mobCount = mobStates.size();
 	f.mobVisible = worldRenderer->visibleMobs();
+	populateJoinUi(f);
 	if (m_remote)
 		populateRemoteUi(f);
 	else
@@ -1905,6 +1912,8 @@ void Engine::run()
 	lastFrame = static_cast<double>(m_lastPerfCounter) / static_cast<double>(m_perfFrequency);
 	lastTime = lastFrame;
 	const double inspectionStart = lastFrame;
+	if (!m_inspectionView && !m_exitAfterBenchmark)
+		loadJoinPreferences();
 
 	// First run on this machine (no imgui.ini yet): start with the default
 	// developer layout instead of an empty workspace. Benchmark runs keep the
@@ -1929,6 +1938,7 @@ void Engine::run()
 			GetProfiler().endFrame();
 			break;
 		}
+		applySessionRequests();
 
 		// (2) Viewport: a minimized/hidden window skips the whole frame; the
 		// clock resync AFTER the sleep keeps the skipped stretch out of the

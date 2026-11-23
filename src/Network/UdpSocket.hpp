@@ -34,6 +34,7 @@ public:
 	~Socket();
 	Socket(const Socket &) = delete;
 	Socket &operator=(const Socket &) = delete;
+	void swap(Socket &other) noexcept;
 
 	Address address() const { return m_address; }
 	bool receive(Received &out);

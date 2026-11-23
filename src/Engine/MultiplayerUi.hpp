@@ -51,12 +51,12 @@ inline MultiplayerStatus multiplayerStatus(net::udp::ClientStatus status,
 			return {State::SyncingTerrain, "Joining / syncing terrain", "Waiting for synchronized player terrain and inventory."};
 		return {State::Connected, "Connected"};
 	case Resyncing: return {State::Resyncing, "Resyncing", "Rejoining to refresh the world replica."};
-	case TimedOut: return {State::TimedOut, "Timed out", "The server stopped responding."};
+	case TimedOut: return {State::TimedOut, "Timed out", "The server did not respond in time. Check the endpoint or try Reconnect."};
 	case Rejected:
 		using enum net::wire::RejectReason;
 		switch (rejection.value_or(Unavailable))
 		{
-		case Version: return {State::Rejected, "Rejected", "Protocol version mismatch"};
+		case Version: return {State::Rejected, "Rejected", "Protocol version mismatch. Use matching client and server builds."};
 		case Content: return {State::Rejected, "Rejected", "World generator or content mismatch"};
 		case Full: return {State::Rejected, "Rejected", "Server is full"};
 		case Unavailable: return {State::Rejected, "Rejected", "Server refused the connection"};

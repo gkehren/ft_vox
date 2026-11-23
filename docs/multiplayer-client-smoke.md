@@ -6,6 +6,60 @@ visual results. The [interactive retest below](#interactive-movement-retest)
 records the maintainer's keyboard and mouse validation for
 [#277](https://github.com/gkehren/ft_vox/issues/277).
 
+## In-game join (#284)
+
+Start two loopback servers with separate world saves and ports. Launch
+`ft_vox` normally and open **Multiplayer → Show panel → Join**.
+
+1. Create a named profile, enter the first server's address and connect.
+   Walk and change the selected hotbar slot. Disconnect and reconnect
+   through the panel. Confirm your position and selected slot persist.
+2. Create a second profile and switch to the second server. The panel
+   shows the departure before connecting. Observe the new terrain and
+   inventory. Switch back to the first server and profile, then use
+   **Return to solo** to check the original world.
+3. Favorite an endpoint and restart the game. Check the saved profile
+   selection, favorite and recent endpoints. Use **Copy endpoint** on an
+   active connection and check that the clipboard contains just the
+   numeric address and port.
+4. Try an invalid address, an unused port, and an incorrect expected
+   seed. Check that the form remains editable. Start an additional
+   instance with the same profile to check the duplicate identity
+   message. Fill a low-capacity server to check the full message.
+   Try a server using an incompatible protocol version to check the
+   version message. Stop and restart the original server and reconnect
+   with the same profile.
+
+The CPU-only `MultiplayerJoin` test covers endpoint and profile
+validation, the credential store, and preference round-trips and limits.
+The opt-in native test drives the same frame callbacks in a Vulkan host
+against two dedicated server processes. It checks the departure barrier,
+pool and worker cleanup, profile restoration, reconnect, seed rejection,
+timeout, and returning to a paused solo world.
+
+```powershell
+cmake --build build --config Release --target ft_vox_server test_engine_reload
+python tests/test_multiplayer_join_native.py --server build/Release/ft_vox_server.exe --client build/tests/Release/test_engine_reload.exe
+```
+
+On Linux, pass `build-vk/ft_vox_server` and
+`build-vk/tests/test_engine_reload` from a graphical build. The native
+test uses isolated saves and ephemeral loopback ports.
+
+The Windows Release run passed all 19 native checks on an RTX 4070 Ti,
+including a profile switch on a server with a single remote seat. The
+maintainer also verified the Join panel in-game. The manual checks covered
+profile creation and selection, solo-to-server join, disconnect and
+reconnect, server and profile switching, restored solo inventory, camera
+and terrain, editing after a failed connection, recent and favorite
+endpoint persistence after restart, and keyboard and mouse capture
+while editing the form.
+
+The opt-in native smoke also checks separate motion traces across
+session switches and process restarts. It verifies that existing trace
+files survive filename collisions, tracing stays off when disabled, and
+the client continues joining when the configured trace cannot be opened.
+
 ## Multiplayer panel (#283)
 
 Use the [two-client setup](dedicated-server.md#connect-two-graphical-clients)

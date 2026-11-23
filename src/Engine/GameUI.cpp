@@ -269,7 +269,7 @@ void GameUI::draw(GameUIFrame &frame)
 		drawStatusOverlay(frame);
 	if (m_debug.panels.playerPanel)
 		drawPlayerPanel(frame);
-	if (m_debug.panels.multiplayer && frame.multiplayerStatus)
+	if (m_debug.panels.multiplayer && frame.joinPreferences)
 		drawMultiplayerPanel(frame);
 	debugui::drawOverview(m_debug, frame);
 	debugui::drawRendering(m_debug, frame);

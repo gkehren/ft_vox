@@ -74,6 +74,47 @@ after their updates arrive. Try joining with `--seed 43` or with the server
 stopped to exercise the refusal and retry states. The graphical client
 stays open and offers reconnect to the configured endpoint.
 
+### Join from the game
+
+Start `ft_vox` normally, release the cursor with **C**, and choose
+**Multiplayer → Show panel → Join**.
+
+1. Enter the server's numeric IPv4 address and port, such as
+   `127.0.0.1:7777`. An optional expected seed checks that you reached
+   the intended world configuration. Choosing a different endpoint from
+   Favorites or Recents clears the expected seed.
+2. Choose a **Saved profile**, type an existing name, or enter a new name
+   and click **Create profile**. Names are case-insensitive and use up to
+   32 ASCII letters, digits, dashes, or underscores, starting with a
+   letter or digit. **Saved profiles** shows the first 32 names in
+   alphabetical order. You can type a name to select any other profile.
+3. Select **Connect**. Once terrain is synchronized, release text focus
+   and use **C** to capture the cursor for gameplay.
+4. Use **Disconnect** and **Reconnect** for the current endpoint and
+   profile. To change either, edit the form and choose **Switch server or
+   profile**. The game finishes the previous session before joining the
+   next one. **Return to solo** resumes the parked solo world, or starts a
+   new solo world when the game was launched directly with `--connect`.
+
+**Recent servers** contains the last eight attempted endpoints. **Toggle
+favorite** adds or removes the entered endpoint from a separate list of
+eight favorites. The oldest entry drops off when its list fills.
+Preferences in `saves/.client-profiles/join-settings.txt` contain addresses
+and the selected profile name. Named keys use
+`saves/.client-profiles/named/<name>/player.key`, the same key format used
+by the CLI. To resume a named profile from the CLI, pass its directory to
+`--player-profile`. Keep the key to retain your actor, inventory and
+position on a server. Loading a profile with a missing or damaged key
+fails until the key is restored. The **Copy endpoint** button copies the current numeric
+address and port.
+
+A persistent solo world is checkpointed before switching away. A save
+failure leaves the solo world active. The game parks the solo simulation
+and drains its render jobs. On return, it rebuilds the projection from the
+same world and restores the camera, inventory, and pause state. The
+[private-network boundary](multiplayer-public-network-readiness.md) applies
+to in-game joins and CLI connections alike.
+
 ### Graphical projection limits
 
 The renderer meshes verified server chunks through the normal async
@@ -310,8 +351,8 @@ with zero extrapolation and hides the avatar after 300 ms without a fresh
 snapshot.
 
 Release the mouse with **C**, then choose **Multiplayer → Show panel**.
-The dockable window is available on every client launched with `--connect`.
-**Join** shows the configured server endpoint, connection state, and the
+The dockable window is available from solo play and CLI connections.
+**Join** shows the current server endpoint, connection state, and the
 same Disconnect/Reconnect actions as the menu. **Network** shows this
 client's ping estimate and sample age, snapshot age and estimated loss,
 receive/send throughput, pending predicted inputs, corrections, and hard
@@ -328,7 +369,7 @@ and one complete traffic window for throughput. Missing measurements read
 measurements. See the [panel smoke steps](multiplayer-client-smoke.md#multiplayer-panel-283)
 for layout checks and a repeatable impaired-network fixture.
 
-For recurring movement stutter, set `FT_VOX_MOTION_TRACE` to a fresh CSV
+For recurring movement stutter, set `FT_VOX_MOTION_TRACE` to a CSV
 path before launching the graphical client. The server uses its normal
 command. In PowerShell, for example:
 
@@ -338,7 +379,12 @@ $env:FT_VOX_MOTION_TRACE = Join-Path $PWD ("motion-alice-{0:yyyyMMdd-HHmmss}.csv
 ```
 
 After connecting, stand still briefly, then walk where the problem occurs
-and quit normally. The client records at most 60 seconds or 12,000 frames.
+and quit normally. The first connection uses the configured filename if
+it is free. A new join or a server or profile switch creates a separate
+file, such as `motion.session-2.csv`. The client skips names already on
+disk, including trace files from earlier runs. The fast Reconnect action
+and automatic resync keep the same file while tracing is active. Each file records at
+most 60 seconds or 12,000 frames.
 The CSV links frame timings and camera positions to input ticks, server
 acknowledgments, predicted poses, terrain waits and correction counters.
 It contains gameplay telemetry and omits profile keys and session

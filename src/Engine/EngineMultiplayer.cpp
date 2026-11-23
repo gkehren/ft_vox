@@ -1,5 +1,6 @@
 #include "EngineMultiplayer.hpp"
 
+#include <Engine/ExclusiveFile.hpp>
 #include <Engine/Profiler.hpp>
 #include <Items/ItemRegistry.hpp>
 #include <World/WorldCollisionView.hpp>
@@ -70,41 +71,62 @@ const char *actionFeedback(wire::ActionCode code)
 	}
 	return "Action unavailable";
 }
-std::string endpointLabel(net::udp::Address address)
-{
-	return std::to_string(address.ipv4 >> 24) + "." +
-		std::to_string((address.ipv4 >> 16) & 255) + "." +
-		std::to_string((address.ipv4 >> 8) & 255) + "." +
-		std::to_string(address.ipv4 & 255) + ":" + std::to_string(address.port);
-}
 }
 
-Engine::RemoteSession::RemoteSession(net::udp::Address address, std::optional<uint32_t> expected,
-									 const net::wire::PlayerKey &key)
-	: transport(address, key), endpoint(endpointLabel(address)), expectedSeed(expected)
+Engine::RemoteSession::RemoteSession(net::udp::Address server, std::optional<uint32_t> expected,
+	const net::wire::PlayerKey &key, std::string profile)
+	: transport(server, key), address(server), endpoint(client::formatEndpoint(server)),
+	  namedProfile(std::move(profile)), expectedSeed(expected)
 {
-	transport.connect(Clock::now());
-	if (const char *path = std::getenv("FT_VOX_MOTION_TRACE"); path && *path)
+}
+
+void Engine::RemoteSession::startMotionTrace(uint64_t &nextFile) noexcept
+{
+	const char *configured = std::getenv("FT_VOX_MOTION_TRACE");
+	if (!configured || !*configured)
+		return;
+
+	try
 	{
-		auto &trace = motionTrace.emplace();
-		trace.file.open(path);
-		if (!trace.file)
+		const std::filesystem::path base(configured);
+		while (nextFile != 0)
 		{
-			std::cerr << "[multiplayer] Could not open motion trace: " << path << '\n';
-			motionTrace.reset();
+			auto path = base;
+			if (nextFile > 1)
+			{
+				path = base.parent_path() / base.stem();
+				path += ".session-" + std::to_string(nextFile);
+				path += base.extension();
+			}
+			const auto result = client::reserveFile(path);
+			if (result == client::FileReservation::Failed)
+				break;
+			++nextFile;
+			if (result == client::FileReservation::Exists)
+				continue;
+
+			auto &trace = motionTrace.emplace();
+			trace.file.open(path, std::ios::app);
+			if (!trace.file)
+				break;
+			trace.start = trace.lastFlush = Clock::now();
+			trace.file.imbue(std::locale::classic());
+			trace.file << std::fixed << std::setprecision(6)
+				<< "time_ms,frame_ms,acquire_ms,present_ms,projection,focused,mouse_captured,ready,vsync,"
+				   "move_x,move_z,input_flags,inputs_sent,inputs_failed,first_input_tick,last_input_tick,last_input_seq,"
+				   "snapshot_tick,ack_seq,rtt_ms,snapshot_age_ms,backlog,corrections,last_correction,"
+				   "hard_resets,reset_reason,blocked_camera_sweeps,waiting_terrain,player_flags,motion_reset,"
+				   "server_x,server_y,server_z,server_vx,server_vy,server_vz,predicted_x,predicted_y,predicted_z,"
+				   "camera_valid,camera_time_ms,camera_x,camera_y,camera_z,yaw,pitch\n";
+			if (!trace.file)
+				break;
+			std::cout << "[multiplayer] Motion trace: " << path.string() << '\n';
 			return;
 		}
-		trace.start = trace.lastFlush = Clock::now();
-		trace.file.imbue(std::locale::classic());
-		trace.file << std::fixed << std::setprecision(6)
-			<< "time_ms,frame_ms,acquire_ms,present_ms,projection,focused,mouse_captured,ready,vsync,"
-			   "move_x,move_z,input_flags,inputs_sent,inputs_failed,first_input_tick,last_input_tick,last_input_seq,"
-			   "snapshot_tick,ack_seq,rtt_ms,snapshot_age_ms,backlog,corrections,last_correction,"
-			   "hard_resets,reset_reason,blocked_camera_sweeps,waiting_terrain,player_flags,motion_reset,"
-			   "server_x,server_y,server_z,server_vx,server_vy,server_vz,predicted_x,predicted_y,predicted_z,"
-			   "camera_valid,camera_time_ms,camera_x,camera_y,camera_z,yaw,pitch\n";
-		std::cout << "[multiplayer] Motion trace: " << path << '\n';
 	}
+	catch (const std::exception &) {}
+	motionTrace.reset();
+	std::cerr << "[multiplayer] Could not open motion trace: " << configured << '\n';
 }
 
 double Engine::RemoteSession::SnapshotClock::alpha(uint64_t previousTick, Clock::time_point now) const
@@ -132,14 +154,24 @@ bool Engine::RemoteSession::ready() const
 		projection->observedVersion(glm::ivec3(glm::floor(playerFeet(*player)))).has_value();
 }
 
+bool Engine::RemoteSession::canReconnect() const
+{
+	const auto status = transport.status();
+	return status == ClientStatus::Disconnected || status == ClientStatus::Rejected ||
+		status == ClientStatus::TimedOut;
+}
+
 ui::MultiplayerStatus Engine::RemoteSession::connectionStatus(Clock::time_point now) const
 {
 	const auto status = transport.status();
 	const bool connected = status == ClientStatus::Connected;
 	const bool timingDegraded = connected && firstPlayerAt != Clock::time_point{} &&
 		(!inputTiming.hasFreshClock(now) || transport.inputAcknowledgmentStalled(now));
-	return ui::multiplayerStatus(status, transport.rejection(), seedMismatch,
+	auto result = ui::multiplayerStatus(status, transport.rejection(), seedMismatch,
 		connected && ready(), timingDegraded);
+	if (result.state == ui::MultiplayerState::Disconnected && transport.serverShutDown())
+		result.detail = "The server shut down. Reconnect when it is running again.";
+	return result;
 }
 
 void Engine::RemoteSession::disconnect() noexcept
@@ -183,10 +215,7 @@ void Engine::connectRemote(net::udp::Address address, std::optional<uint32_t> ex
 {
 	if (sim || m_remote)
 		throw std::logic_error("remote initialization requires a fresh host");
-	// Headroom for render handles parked during deferred GPU retirement.
-	chunkPool = std::make_unique<ChunkPool>(2 * wire::kMaxReplicatedChunks);
-	m_remote = std::make_unique<RemoteSession>(address, expectedSeed, key);
-	camera.setMode(CameraMode::PERSPECTIVE);
+	startRemote(std::make_unique<RemoteSession>(address, expectedSeed, key));
 }
 
 void Engine::pollRemote()
@@ -195,16 +224,20 @@ void Engine::pollRemote()
 	auto &transport = remote.transport;
 	const auto now = Clock::now();
 	const auto before = transport.status();
-	if (remote.leaveRequested)
+	const bool switching = switchingSession();
+	if (remote.leaveRequested || (switching && before != ClientStatus::Connecting))
 		transport.disconnect(now);
-	if (remote.joinRequested && (before == ClientStatus::Disconnected ||
-		before == ClientStatus::TimedOut || before == ClientStatus::Rejected))
+	if (!switching && remote.joinRequested && remote.canReconnect())
 	{
 		remote.seedMismatch = false;
 		transport.connect(now);
 	}
 	remote.leaveRequested = remote.joinRequested = false;
 	transport.poll(now);
+	// A switch during Hello/Welcome waits for the scope (or join timeout).
+	// This lets us release a profile reservation before trying it again.
+	if (switching && transport.status() == ClientStatus::Connected)
+		transport.disconnect(now);
 
 	auto next = transport.status() == ClientStatus::Connected ? transport.scope() : std::nullopt;
 	const auto welcome = next ? transport.welcome() : std::nullopt;
@@ -228,8 +261,7 @@ void Engine::pollRemote()
 	}
 	if (next != remote.scope)
 	{
-		resetWorldProjection();
-		renderBridge.reset();
+		retireWorldProjection();
 		remote.projection.reset();
 		remote.scope = next;
 		remote.welcome = next ? welcome : std::nullopt;
@@ -239,6 +271,7 @@ void Engine::pollRemote()
 		remote.remotePlayers = {};
 		remote.terrain = {};
 		remote.hasCameraPose = false;
+		camera.setPosition({0.f, 100.f, 0.f});
 		remote.lastTraffic = transport.traffic();
 		remote.trafficAt = now;
 		remote.firstPlayerAt = {};
@@ -251,10 +284,9 @@ void Engine::pollRemote()
 		{
 			remote.projection = std::make_unique<net::udp::ClientWorld>();
 			renderBridge = std::make_unique<RenderWorldBridge>(&remote.projection->world(),
-				threadPool.get(), chunkPool.get(), ++remote.renderEpoch);
+				threadPool.get(), chunkPool.get(), ++m_remoteRenderEpoch);
 			std::cout << "[multiplayer] Joined player=" << welcome->player.value
-				<< " seed=" << welcome->seed << " world=" << welcome->worldId
-				<< " epoch=" << next->epoch << " projection=" << remote.renderEpoch << std::endl;
+				<< " seed=" << welcome->seed << " projection=" << m_remoteRenderEpoch << std::endl;
 		}
 	}
 	if (next)
@@ -394,7 +426,7 @@ void Engine::traceRemoteMotion(double frameDt)
 	const auto &controls = trace.controls;
 	trace.file << Milliseconds(now - trace.start).count() << ',' << frameDt * 1000.0 << ','
 		<< GetProfiler().lastScopeMs("Acquire") << ',' << GetProfiler().lastScopeMs("Present") << ','
-		<< remote.renderEpoch << ',' << windowFocused << ',' << mouseCaptured << ',' << remote.ready() << ','
+		<< m_remoteRenderEpoch << ',' << windowFocused << ',' << mouseCaptured << ',' << remote.ready() << ','
 		<< swapchain->isVSync() << ',' << controls.moveX << ',' << controls.moveZ << ','
 		<< unsigned(controls.flags) << ',' << trace.sent << ',' << trace.failed << ','
 		<< trace.firstInputTick << ',' << trace.lastInputTick << ',' << trace.lastInputSequence << ','
@@ -566,6 +598,8 @@ void Engine::populateRemoteUi(GameUIFrame &frame)
 	const auto now = Clock::now();
 	frame.multiplayerStatus = remote.connectionStatus(now);
 	frame.multiplayerEndpoint = remote.endpoint;
+	frame.multiplayerProfile = remote.namedProfile.empty() ?
+		std::string_view{"Startup profile"} : std::string_view{remote.namedProfile};
 	frame.multiplayerAction = remote.actionPending ? "Action pending" :
 		now < remote.feedbackUntil ? remote.feedback : nullptr;
 	const auto status = remote.transport.status();
@@ -585,9 +619,9 @@ void Engine::populateRemoteUi(GameUIFrame &frame)
 				remote.prediction.backlog(), stats.corrections, stats.hardResets, stats.lastCorrection, stats.maxCorrection};
 		}
 	}
-	if (status == ClientStatus::Disconnected || status == ClientStatus::TimedOut || status == ClientStatus::Rejected)
+	if (!frame.switchingSession && remote.canReconnect())
 		frame.joinServer = [&remote] { remote.joinRequested = true; };
-	else if (status != ClientStatus::Leaving)
+	else if (!frame.switchingSession && status != ClientStatus::Leaving)
 		frame.leaveServer = [&remote] { remote.leaveRequested = true; };
 	if (const auto *player = remote.localPlayer())
 	{
@@ -617,7 +651,7 @@ int Engine::worldSeed() const
 uint64_t Engine::worldGenerationId() const
 {
 	if (m_remote)
-		return m_remote->renderEpoch;
+		return m_remoteRenderEpoch;
 	return sim ? sim->worldGenerationId() : 0;
 }
 

@@ -40,6 +40,10 @@ public:
 	using Clock = std::chrono::steady_clock;
 	explicit ClientTransport(Address server, wire::PlayerKey key = randomPlayerKey());
 	~ClientTransport();
+	// A fresh client targeting the same server can reuse the departed source
+	// port. The server will wait for its closing peer slot before admitting
+	// the new Hello, including on a server with only one remote seat.
+	void reuseDepartedSocket(ClientTransport &departed);
 	void connect(Clock::time_point now);
 	void poll(Clock::time_point now);
 	void disconnect(Clock::time_point now);
@@ -76,6 +80,7 @@ public:
 	// Only verified, fully installed chunks. Read on the pump owner thread.
 	const ChunkProjection &chunks() const;
 	std::optional<wire::RejectReason> rejection() const;
+	bool serverShutDown() const;
 	uint64_t heartbeatsReceived() const;
 
 private:

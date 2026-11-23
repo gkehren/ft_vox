@@ -1,4 +1,6 @@
 #include <Engine/Engine.hpp>
+#include <Engine/ClientProfile.hpp>
+#include <Engine/MultiplayerJoin.hpp>
 #include <Network/UdpSocket.hpp>
 #include <World/WorldPersistence.hpp>
 #include <Chunk/StreamHelpers.hpp>
@@ -58,34 +60,6 @@ static std::string resolveResourcePackRoot(const std::string &cliPack)
 	if (const char *env = std::getenv("FT_VOX_RESOURCE_PACK"))
 		return trimTrailingSlashes(env);
 	return resourceRootPath() + "default-resource-pack.zip";
-}
-
-static net::wire::PlayerKey loadPlayerKey(const std::filesystem::path &profile)
-{
-	const auto path = profile / "player.key";
-	std::vector<uint8_t> bytes;
-	auto status = worldsave::readFileInto(path, bytes, net::wire::PlayerKey{}.size());
-	if (status == worldsave::SaveStatus::NotFound)
-	{
-		if (!profile.parent_path().empty())
-			std::filesystem::create_directories(profile.parent_path());
-		// An existing profile with a missing key is an error. Never silently
-		// replace a credential that may still own inventory on a server.
-		if (std::filesystem::create_directory(profile))
-		{
-			const auto key = net::udp::randomPlayerKey();
-			if (!worldsave::writeCheckpointFileAtomic(path, {key.begin(), key.end()}, true))
-				throw std::runtime_error("could not save the multiplayer key in " + profile.string());
-			return key;
-		}
-		status = worldsave::readFileInto(path, bytes, net::wire::PlayerKey{}.size());
-	}
-	net::wire::PlayerKey key{};
-	if (status == worldsave::SaveStatus::Ok && bytes.size() == key.size())
-		std::ranges::copy(bytes, key.begin());
-	if (key == net::wire::PlayerKey{})
-		throw std::runtime_error("missing, corrupt or unreadable multiplayer key in " + profile.string());
-	return key;
 }
 
 int main(int argc, char **argv)
@@ -159,22 +133,7 @@ int main(int argc, char **argv)
 			}
 			const std::string_view endpoint = argv[++i];
 			const auto split = endpoint.find(':');
-			if (split != std::string_view::npos)
-			{
-				const auto port = endpoint.substr(split + 1);
-				uint16_t parsedPort{};
-				const auto [end, error] = std::from_chars(port.data(), port.data() + port.size(), parsedPort);
-				if (error == std::errc{} && end == port.data() + port.size() && parsedPort > 0)
-				{
-					try
-					{
-						const auto address = net::udp::parseAddress(endpoint.substr(0, split), parsedPort);
-						if (address.ipv4 != 0)
-							server = address;
-					}
-					catch (const std::invalid_argument &) {}
-				}
-			}
+			server = client::parseEndpoint(endpoint);
 			if (!server)
 			{
 				std::cerr << "Error: --connect expects a numeric IPv4 address and port 1–65535.\n";
@@ -440,7 +399,7 @@ int main(int argc, char **argv)
 		{
 			if (playerProfile.empty())
 				playerProfile = std::filesystem::path("saves") / ".client-profiles" / serverEndpoint;
-			playerKey = loadPlayerKey(playerProfile);
+			playerKey = client::playerKey(playerProfile, client::ProfileAccess::LoadOrCreate);
 		}
 		Engine engine(resourcePack);
 		if (server)

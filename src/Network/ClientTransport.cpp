@@ -74,6 +74,7 @@ struct ClientTransport::Impl
 		finish(ClientStatus::Connecting);
 		nonce = randomId();
 		rejection.reset();
+		serverShutDown = false;
 		heartbeats = 0;
 		deadline = now + kJoinTimeout;
 		nextHello = now;
@@ -302,13 +303,16 @@ struct ClientTransport::Impl
 			installSnapshot(mobHistory, *mobs);
 		else if (kind == wire::Kind::Heartbeat)
 			++heartbeats;
-		else if (kind == wire::Kind::Disconnect)
+		else if (const auto *departure = std::get_if<wire::Disconnect>(&packet.payload))
 		{
 			link->flushAck(sender(), now);
 			if (status == ClientStatus::Resyncing)
 				connect(now);
 			else
+			{
+				serverShutDown = departure->reason == wire::DisconnectReason::Shutdown;
 				finish(ClientStatus::Disconnected);
+			}
 		}
 		else if (const auto *request = std::get_if<wire::Resync>(&packet.payload))
 			resync(request->reason, now);
@@ -399,6 +403,7 @@ struct ClientTransport::Impl
 	SnapshotHistory<wire::ItemSnapshot> itemHistory;
 	SnapshotHistory<wire::MobSnapshot> mobHistory;
 	std::optional<wire::RejectReason> rejection;
+	bool serverShutDown{};
 	std::optional<wire::Action> pendingAction;
 	std::optional<wire::ActionResult> actionResult;
 	uint64_t nextActionId{1};
@@ -416,6 +421,14 @@ struct ClientTransport::Impl
 
 ClientTransport::ClientTransport(Address server, wire::PlayerKey key) : m_impl(std::make_unique<Impl>(server, key)) {}
 ClientTransport::~ClientTransport() = default;
+
+void ClientTransport::reuseDepartedSocket(ClientTransport &departed)
+{
+	if (m_impl->server != departed.m_impl->server || m_impl->status != ClientStatus::Disconnected ||
+		departed.m_impl->status == ClientStatus::Connecting || departed.m_impl->link)
+		throw std::logic_error("UDP socket reuse requires a departed client on the same endpoint");
+	m_impl->socket.swap(departed.m_impl->socket);
+}
 
 void ClientTransport::connect(Clock::time_point now)
 {
@@ -435,6 +448,7 @@ void ClientTransport::disconnect(Clock::time_point now)
 	if (m_impl->status == ClientStatus::Connected)
 	{
 		m_impl->clearAction();
+		m_impl->clearProjection();
 		m_impl->status = ClientStatus::Leaving;
 		m_impl->queueDeparture(now);
 	}
@@ -485,6 +499,7 @@ const SnapshotHistory<wire::ItemSnapshot> &ClientTransport::itemSnapshots() cons
 const SnapshotHistory<wire::MobSnapshot> &ClientTransport::mobSnapshots() const { return m_impl->mobHistory; }
 const ChunkProjection &ClientTransport::chunks() const { return m_impl->chunks; }
 std::optional<wire::RejectReason> ClientTransport::rejection() const { return m_impl->rejection; }
+bool ClientTransport::serverShutDown() const { return m_impl->serverShutDown; }
 uint64_t ClientTransport::heartbeatsReceived() const { return m_impl->heartbeats; }
 
 } // namespace net::udp
