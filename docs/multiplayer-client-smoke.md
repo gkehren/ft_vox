@@ -96,13 +96,17 @@ and no frame-to-frame reversal.
 
 The maintainer retested the Windows Release client on loopback at commit
 `111af3f` and confirmed that movement was smooth and the reported
-rollbacks were gone. Their earlier interactive test also confirmed
-remote-player visibility, shared break/place and item drops.
+rollbacks were gone. They also confirmed sprint, jump, inventory use,
+and resuming at the same position after relaunching the client with the
+same profile. Their earlier interactive test confirmed remote-player
+visibility, shared break/place and item drops.
 
-The remaining #277 checklist includes jump and sprint, contested pickup,
-inventory rearrangement, cursor capture and focus transitions, walking
-out of and back into interest, menu reconnect and an interactive solo
-comparison. The startup and graceful server restart evidence above
+The remaining #277 checks include contested pickup, rearranging stacks
+in both inventories, cursor capture and focus transitions, walking out
+of and back into interest, and an interactive solo comparison. The menu
+reconnect check uses **C** to release the cursor, then **Multiplayer →
+Disconnect** followed by **Multiplayer → Reconnect** in the same running
+client window. The startup and graceful server restart evidence above
 covers separate Release client processes.
 
 ## Wire v4 profile restart
