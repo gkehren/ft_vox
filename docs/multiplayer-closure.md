@@ -106,9 +106,10 @@ within tolerance. The existing swapchain diagnostics
 See the [GPU report](multiplayer-client-smoke.md) and
 [#99](https://github.com/gkehren/ft_vox/issues/99).
 
-- The maintainer confirmed smooth movement on the corrected Windows
-  Release client. The [multiplayer smoke report](multiplayer-client-smoke.md#interactive-movement-retest)
-  records that retest and the remaining interactive checks for
+- The maintainer confirmed smooth movement and completed the
+  interactive checklist on the corrected Windows Release client. The
+  [multiplayer smoke report](multiplayer-client-smoke.md#interactive-movement-retest)
+  records the results for
   [#277](https://github.com/gkehren/ft_vox/issues/277).
 - [#275](https://github.com/gkehren/ft_vox/issues/275) adds bounded baseline
   compression. The [cold chunk benchmark](benchmarks/275-cold-chunk-delivery.md)

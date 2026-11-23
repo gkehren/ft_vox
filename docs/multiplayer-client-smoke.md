@@ -2,7 +2,8 @@
 
 The [issue #260 closure report](multiplayer-closure.md#physical-gpu-and-remaining-work)
 records the latest physical-GPU dual-client startup, restart and strict
-visual results. Manual keyboard and mouse coverage is tracked in
+visual results. The [interactive retest below](#interactive-movement-retest)
+records the maintainer's keyboard and mouse validation for
 [#277](https://github.com/gkehren/ft_vox/issues/277).
 
 ## Local camera cadence for #277
@@ -39,8 +40,8 @@ The strict visual run passed all 24 scenes.
 Validation reported the two known overlay-related swapchain VUIDs below.
 
 The Computer Use plugin could not connect to the native Windows pipe.
-The maintainer's interactive movement retest is recorded below. The
-remaining keyboard, mouse and menu checks are tracked in #277.
+The maintainer completed the interactive checks and reported the results
+recorded below.
 
 ### Rollbacks on live Windows loopback
 
@@ -104,11 +105,18 @@ visibility, shared break/place and item drops.
 The maintainer also confirmed **Multiplayer → Disconnect** followed by
 **Multiplayer → Reconnect** in the same running client window.
 
-The remaining interactive #277 checks cover remote avatar motion and
-walking collision, contested pickup, rearranging stacks in both
-inventories, cursor capture and focus transitions, walking out of and
-back into interest, and a solo comparison. The startup and graceful
-server restart evidence above covers separate Release client processes.
+The maintainer also confirmed the rest of the interactive checklist
+on the corrected build:
+
+- Remote avatar movement and collision while walking against obstacles.
+- Both players contending for the same dropped item and rearranging
+  stacks in both inventories.
+- Cursor capture and release, focus changes between windows, and
+  leaving and re-entering the other player's interest area.
+- A solo spot check of the same controls.
+
+The physical-GPU startup and graceful restart run above verifies
+profile recovery with separate Release client processes.
 
 ## Wire v4 profile restart
 
